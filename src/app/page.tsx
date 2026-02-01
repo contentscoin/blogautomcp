@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import SessionStatus from "@/components/SessionStatus";
 import PublishProgress from "@/components/PublishProgress";
+import { ThemeToggle } from "@/components/ThemeProvider";
 
 type ContentMode = "product" | "topic" | "review";
 type ReviewCategory = "place" | "food" | "travel" | "parenting" | "product";
@@ -237,6 +238,7 @@ export default function Dashboard() {
               >
                 🔄
               </button>
+              <ThemeToggle />
             </div>
           </div>
         </div>
