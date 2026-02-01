@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import Link from "next/link";
 import SessionStatus from "@/components/SessionStatus";
 import PublishProgress from "@/components/PublishProgress";
 
@@ -216,13 +217,21 @@ export default function Dashboard() {
               </h1>
               <p className="text-sm text-slate-500">브랜드커넥트 링크 관리 &amp; 발행</p>
             </div>
-            <button
-              onClick={() => fetchLinks()}
-              className="p-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
-              title="새로고침"
-            >
-              🔄
-            </button>
+            <div className="flex items-center gap-2">
+              <Link
+                href="/history"
+                className="px-4 py-2 text-sm bg-slate-100 text-slate-600 rounded-lg hover:bg-slate-200 transition-colors"
+              >
+                📊 히스토리
+              </Link>
+              <button
+                onClick={() => fetchLinks()}
+                className="p-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+                title="새로고침"
+              >
+                🔄
+              </button>
+            </div>
           </div>
         </div>
       </header>
