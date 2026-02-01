@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import SessionStatus from "@/components/SessionStatus";
+import PublishProgress from "@/components/PublishProgress";
 
 type ContentMode = "product" | "topic" | "review";
 type ReviewCategory = "place" | "food" | "travel" | "parenting" | "product";
@@ -112,47 +113,23 @@ export default function Dashboard() {
       console.error("삭제 실패:", error);
     }
   };
-
-  // 발행하기
+  // 발행하기 - SSE 방식
   const handlePublish = async (id: string) => {
     if (!confirm("이 상품으로 블로그 글을 발행하시겠습니까?")) return;
+    setPublishingId(id);
+  };
 
-    try {
-      setPublishingId(id);
-      const res = await fetch(`/api/brandlinks/${id}/publish`, {
-        method: "POST",
-      });
+  // 발행 완료 핸들러
+  const handlePublishComplete = (url?: string) => {
+    fetchLinks();
+    setPublishingId(null);
+  };
 
-      const data = await res.json();
-
-      if (data.success) {
-        alert("발행이 시작되었습니다. 브라우저가 열립니다.");
-        // 상태 폴링
-        const pollStatus = setInterval(async () => {
-          const statusRes = await fetch(`/api/brandlinks/${id}`);
-          const statusData = await statusRes.json();
-
-          if (statusData.data.status !== "PUBLISHING") {
-            clearInterval(pollStatus);
-            fetchLinks();
-            setPublishingId(null);
-
-            if (statusData.data.status === "PUBLISHED") {
-              alert("✅ 발행 완료!");
-            } else if (statusData.data.status === "FAILED") {
-              alert(`❌ 발행 실패: ${statusData.data.errorMessage}`);
-            }
-          }
-        }, 3000);
-      } else {
-        alert(`오류: ${data.error}`);
-        setPublishingId(null);
-      }
-    } catch (error) {
-      console.error("발행 실패:", error);
-      alert("발행 중 오류가 발생했습니다.");
-      setPublishingId(null);
-    }
+  // 발행 에러 핸들러
+  const handlePublishError = (error: string) => {
+    alert(`❌ 발행 실패: ${error}`);
+    fetchLinks();
+    setPublishingId(null);
   };
 
   // 통계 계산
@@ -601,6 +578,26 @@ export default function Dashboard() {
                               🗑️
                             </button>
                           </div>
+                          {/* 발행 진행률 */}
+                          {publishingId === link.id && (
+                            <PublishProgress
+                              linkId={link.id}
+                              isPublishing={publishingId === link.id}
+                              onComplete={handlePublishComplete}
+                              onError={handlePublishError}
+                            />
+                          )}
+                          {/* 발행된 글 URL */}
+                          {link.status === "PUBLISHED" && link.postUrl && (
+                            <a
+                              href={link.postUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="mt-2 block text-xs text-blue-600 hover:underline"
+                            >
+                              📎 발행된 글 보기
+                            </a>
+                          )}
                         </td>
                       </tr>
                     ))
