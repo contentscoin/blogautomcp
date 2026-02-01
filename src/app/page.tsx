@@ -219,6 +219,12 @@ export default function Dashboard() {
             </div>
             <div className="flex items-center gap-2">
               <Link
+                href="/keywords"
+                className="px-4 py-2 text-sm bg-purple-100 text-purple-600 rounded-lg hover:bg-purple-200 transition-colors"
+              >
+                🔍 키워드
+              </Link>
+              <Link
                 href="/history"
                 className="px-4 py-2 text-sm bg-slate-100 text-slate-600 rounded-lg hover:bg-slate-200 transition-colors"
               >
