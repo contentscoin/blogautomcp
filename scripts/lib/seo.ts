@@ -135,4 +135,4 @@ export function generateHashtags(keywords: KeywordSuggestion[]): string[] {
         .filter((tag, i, arr) => arr.indexOf(tag) === i);
 }
 
-export { KeywordSuggestion };
+export type { KeywordSuggestion };
