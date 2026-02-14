@@ -7,6 +7,7 @@ import "dotenv/config";
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { PrismaClient } from "@prisma/client";
+import type { BrowserContextOptions } from "playwright";
 import * as path from "path";
 import * as fs from "fs";
 
@@ -16,18 +17,88 @@ chromium.use(StealthPlugin());
 const prisma = new PrismaClient();
 const SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "naver-session.json");
 
-async function scrapeProductInfo(url: string) {
-    console.log(`\n🔍 스크래핑 시작: ${url}`);
+function normalizeText(text: string): string {
+    return text.replace(/\s+/g, " ").trim();
+}
+
+function isSecurityVerificationPage(text: string): boolean {
+    const normalized = normalizeText(text).toLowerCase();
+    return (
+        normalized.includes("security verification") ||
+        normalized.includes("please complete the security verification") ||
+        normalized.includes("보안 인증") ||
+        normalized.includes("실제 사용자인지 확인") ||
+        normalized.includes("자동입력 방지")
+    );
+}
+
+function isInvalidProductName(name: string): boolean {
+    const normalized = normalizeText(name).toLowerCase();
+    return (
+        !normalized ||
+        normalized === "naver" ||
+        normalized === "네이버" ||
+        normalized.includes("네이버 브랜드 커넥트") ||
+        normalized.includes("security verification") ||
+        normalized.includes("보안 인증")
+    );
+}
+
+function containsBadImageKeyword(url: string): boolean {
+    return /icon|logo|banner|sprite|thumb|thumbnail|coupon|benefit|guide|notice|delivery|event|ads?/i.test(url);
+}
+
+function normalizeCandidateImageUrl(rawUrl: string): string {
+    return rawUrl.trim().replace(/\?type=.*/i, "?type=w860");
+}
+
+function isCandidateProductImageUrl(rawUrl: string): boolean {
+    const url = rawUrl.toLowerCase();
+    if (!url) return false;
+
+    const isImageDomain =
+        url.includes("shop-phinf.pstatic.net") ||
+        url.includes("shopping-phinf.pstatic.net") ||
+        url.includes("phinf.pstatic.net") ||
+        url.includes("sitem.ssgcdn.com") ||
+        url.includes("cdn.011st.com");
+
+    if (!isImageDomain) return false;
+    if (containsBadImageKeyword(url)) return false;
+    if (url.includes("1x1")) return false;
+    return true;
+}
+
+function prioritizeImageUrls(urls: string[]): string[] {
+    const scored = urls.map((url, index) => {
+        const lower = url.toLowerCase();
+        let score = 0;
+
+        if (index === 0) score += 800; // og:image를 첫 후보로 넣기 때문에 우선
+        if (/\.(jpe?g)(\?|$)/i.test(lower)) score += 200;
+        if (/\.png(\?|$)/i.test(lower)) score -= 120;
+        if (containsBadImageKeyword(lower)) score -= 300;
+        score += Math.max(0, 80 - index);
+
+        return { url, score, index };
+    });
+
+    scored.sort((a, b) => b.score - a.score || a.index - b.index);
+    return scored.map((item) => item.url);
+}
+
+async function scrapeProductInfo(url: string, headless: boolean) {
+    console.log(`\n🔍 스크래핑 시작: ${url} (headless=${headless})`);
 
     const browser = await chromium.launch({
-        headless: true,  // 백그라운드 실행
+        headless,
         args: [
             '--disable-blink-features=AutomationControlled',
             '--no-sandbox',
         ],
     });
 
-    const contextOptions: any = {
+    const contextOptions: BrowserContextOptions = {
         viewport: { width: 1280, height: 900 },
         locale: "ko-KR",
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -54,6 +125,11 @@ async function scrapeProductInfo(url: string) {
         // 최종 URL (리다이렉트 후)
         const finalUrl = page.url();
         console.log(`   📎 최종 URL: ${finalUrl}`);
+
+        const bodyText = await page.textContent("body");
+        if (bodyText && isSecurityVerificationPage(bodyText)) {
+            throw new Error("네이버 보안 인증 페이지가 표시되어 상품 정보를 가져올 수 없습니다. 브라우저에서 인증 후 다시 시도하세요.");
+        }
 
         // 상품명 추출
         let productName = "";
@@ -90,6 +166,10 @@ async function scrapeProductInfo(url: string) {
 
         if (!productName) {
             productName = (await page.title()).split(':')[0].split('-')[0].split('|')[0].trim();
+        }
+
+        if (isInvalidProductName(productName)) {
+            throw new Error(`상품명 추출 실패: "${productName || "빈 값"}". 보안 인증 또는 페이지 로딩 문제일 수 있습니다.`);
         }
         console.log(`   📦 상품명: ${productName}`);
 
@@ -135,30 +215,24 @@ async function scrapeProductInfo(url: string) {
         }
         console.log(`   💰 가격: ${productPrice}`);
 
-        // 이미지 URL 추출
-        const imageUrls: string[] = [];
-        const images = await page.$$('img');
+        // 이미지 URL 추출 (대표 이미지 품질 개선)
+        const candidateUrls: string[] = [];
 
-        for (const img of images) {
-            let src = await img.getAttribute('src');
-            const dataSrc = await img.getAttribute('data-src');
-            src = dataSrc || src;
-
-            if (src &&
-                (src.includes('shop-phinf.pstatic.net') ||
-                    src.includes('shopping-phinf.pstatic.net') ||
-                    src.includes('sitem.ssgcdn.com') ||
-                    src.includes('cdn.011st.com')) &&
-                !src.includes('icon') &&
-                !src.includes('logo') &&
-                !src.includes('1x1')) {
-                const highRes = src.replace(/\?type=.*/, '?type=w860');
-                if (!imageUrls.includes(highRes)) {
-                    imageUrls.push(highRes);
-                }
-            }
-            if (imageUrls.length >= 10) break;
+        const ogImage = await page.getAttribute('meta[property="og:image"]', "content").catch(() => null);
+        if (ogImage && isCandidateProductImageUrl(ogImage)) {
+            candidateUrls.push(normalizeCandidateImageUrl(ogImage));
         }
+
+        const images = await page.$$("img");
+        for (const img of images) {
+            const src = (await img.getAttribute("data-src")) || (await img.getAttribute("src")) || "";
+            if (!isCandidateProductImageUrl(src)) continue;
+            candidateUrls.push(normalizeCandidateImageUrl(src));
+            if (candidateUrls.length >= 40) break;
+        }
+
+        const dedupedUrls = Array.from(new Set(candidateUrls));
+        const imageUrls = prioritizeImageUrls(dedupedUrls).slice(0, 10);
         console.log(`   🖼️ 이미지: ${imageUrls.length}개`);
 
         await browser.close();
@@ -193,7 +267,18 @@ async function main() {
     }
 
     try {
-        const result = await scrapeProductInfo(link.url);
+        let result;
+        try {
+            result = await scrapeProductInfo(link.url, true);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : "";
+            if (!message.includes("보안 인증")) {
+                throw error;
+            }
+
+            console.log("⚠️ headless 스크래핑이 보안 인증으로 차단되어 headful 모드로 재시도합니다.");
+            result = await scrapeProductInfo(link.url, false);
+        }
 
         // DB 업데이트
         await prisma.brandLink.update({
@@ -204,6 +289,7 @@ async function main() {
                 productPrice: result.productPrice || undefined,
                 finalUrl: result.finalUrl || undefined,
                 imageUrls: result.imageUrls.length > 0 ? JSON.stringify(result.imageUrls) : undefined,
+                errorMessage: null,
             },
         });
 

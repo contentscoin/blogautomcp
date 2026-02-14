@@ -7,10 +7,12 @@ import "dotenv/config";
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { Page } from "playwright";
+import type { BrowserContextOptions } from "playwright";
 import { PrismaClient } from "@prisma/client";
+import type { IncomingMessage } from "http";
+import { spawnSync } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
-import OpenAI from "openai";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 // Stealth 플러그인 적용 (봇 감지 우회)
@@ -21,21 +23,554 @@ const prisma = new PrismaClient();
 // AI Provider 설정 (openai 또는 gemini)
 const AI_PROVIDER = (process.env.AI_PROVIDER || "openai").toLowerCase();
 
-// OpenAI 초기화
-const openai = AI_PROVIDER === "openai" 
-  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) 
-  : null;
-
 // Gemini 초기화
 const gemini = AI_PROVIDER === "gemini" 
   ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "")
   : null;
 
 const SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "naver-session.json");
+const CHATGPT_SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "chatgpt-session.json");
 const TEMP_PATH = path.join(process.cwd(), "temp_images");
 const NAVER_BLOG_ID = process.env.NAVER_BLOG_ID || "";
+const BROWSER_GPT_MODE = (process.env.BROWSER_GPT_MODE || "false").toLowerCase() === "true";
+const CHATGPT_DRAFT_GPT_URL =
+  process.env.CHATGPT_GPT_URL_DRAFT ||
+  process.env.CHATGPT_GPT_URL ||
+  "https://chatgpt.com/";
+const CHATGPT_POLISH_GPT_URL =
+  process.env.CHATGPT_GPT_URL_POLISH ||
+  process.env.CHATGPT_GPT_URL_DRAFT ||
+  process.env.CHATGPT_GPT_URL ||
+  "https://chatgpt.com/";
+const CHATGPT_TIMEOUT_MS = Number(process.env.CHATGPT_TIMEOUT_MS || "180000");
+const CHATGPT_HEADLESS = (process.env.CHATGPT_HEADLESS || "false").toLowerCase() === "true";
 
 if (!fs.existsSync(TEMP_PATH)) fs.mkdirSync(TEMP_PATH, { recursive: true });
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "알 수 없는 오류";
+}
+
+function normalizeText(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function isSecurityVerificationPage(text: string): boolean {
+  const normalized = normalizeText(text).toLowerCase();
+  return (
+    normalized.includes("security verification") ||
+    normalized.includes("please complete the security verification") ||
+    normalized.includes("보안 인증") ||
+    normalized.includes("실제 사용자인지 확인") ||
+    normalized.includes("자동입력 방지")
+  );
+}
+
+function isInvalidProductName(name: string): boolean {
+  const normalized = normalizeText(name).toLowerCase();
+  return (
+    !normalized ||
+    normalized === "naver" ||
+    normalized === "네이버" ||
+    normalized.includes("네이버 브랜드 커넥트") ||
+    normalized.includes("security verification") ||
+    normalized.includes("보안 인증")
+  );
+}
+
+interface OpenCodeJsonEvent {
+  type?: string;
+  part?: {
+    text?: string;
+  };
+}
+
+const DEFAULT_SECTION_TITLES = [
+  "🛒 구매하게 된 계기",
+  "📦 택배 도착 & 개봉기",
+  "✨ 첫인상 / 디자인",
+  "📐 크기 & 스펙 정보",
+  "⭐ 주요 기능 ①",
+  "⭐ 주요 기능 ②",
+  "💡 실제 사용 후기",
+  "✅ 장점 정리",
+  "⚠️ 아쉬운 점",
+  "🎯 이런 분께 추천해요",
+];
+
+const DEFAULT_HASHTAGS = [
+  "추천",
+  "후기",
+  "리뷰",
+  "비교",
+  "순위",
+  "가격",
+  "장단점",
+  "일상",
+  "가성비",
+  "생활용품",
+];
+
+function containsBadImageKeyword(url: string): boolean {
+  return /icon|logo|banner|sprite|thumb|thumbnail|coupon|benefit|guide|notice|delivery|event|ads?/i.test(url);
+}
+
+function normalizeCandidateImageUrl(rawUrl: string): string {
+  return rawUrl.trim().replace(/\?type=.*/i, "?type=w860");
+}
+
+function isCandidateProductImageUrl(rawUrl: string): boolean {
+  const url = rawUrl.toLowerCase();
+  if (!url) return false;
+  const isImageDomain =
+    url.includes("shop-phinf.pstatic.net") ||
+    url.includes("shopping-phinf.pstatic.net") ||
+    url.includes("phinf.pstatic.net");
+
+  if (!isImageDomain) return false;
+  if (containsBadImageKeyword(url)) return false;
+  if (url.includes("1x1")) return false;
+  return true;
+}
+
+function prioritizeImageUrls(urls: string[]): string[] {
+  const scored = urls.map((url, index) => {
+    const lower = url.toLowerCase();
+    let score = 0;
+
+    if (index === 0) score += 800; // og:image를 첫 후보로 넣기 때문에 대표 이미지 우선
+    if (/\.(jpe?g)(\?|$)/i.test(lower)) score += 200;
+    if (/\.png(\?|$)/i.test(lower)) score -= 120;
+    if (containsBadImageKeyword(lower)) score -= 300;
+    score += Math.max(0, 80 - index); // 상단 노출 이미지를 우선
+
+    return { url, score, index };
+  });
+
+  scored.sort((a, b) => b.score - a.score || a.index - b.index);
+  return scored.map((item) => item.url);
+}
+
+function stripEmoji(text: string): string {
+  return text.replace(/[\p{Extended_Pictographic}\uFE0F]/gu, "");
+}
+
+function sanitizeTitle(rawTitle: string, fallback: string): string {
+  const cleaned = stripEmoji(rawTitle).replace(/\s+/g, " ").trim();
+  if (cleaned.length > 0) return cleaned.slice(0, 80);
+  return stripEmoji(fallback).replace(/\s+/g, " ").trim().slice(0, 80);
+}
+
+function runOpenCode(prompt: string): string {
+  const model = process.env.OPENCODE_MODEL || "openai/gpt-5.2-codex";
+  const variant = process.env.OPENCODE_VARIANT || "medium";
+
+  const result = spawnSync(
+    "opencode",
+    [
+      "run",
+      prompt,
+      "--format=json",
+      "--model",
+      model,
+      "--variant",
+      variant,
+    ],
+    {
+      cwd: process.cwd(),
+      encoding: "utf-8",
+      maxBuffer: 10 * 1024 * 1024,
+    }
+  );
+
+  if (result.error) {
+    throw new Error(`opencode 실행 실패: ${result.error.message}`);
+  }
+
+  if (result.status !== 0) {
+    const message = (result.stderr || result.stdout || "").trim();
+    throw new Error(`opencode run 실패: ${message || `exit code ${result.status}`}`);
+  }
+
+  const textChunks: string[] = [];
+  const lines = result.stdout.split(/\r?\n/).filter((line) => line.trim().length > 0);
+
+  for (const line of lines) {
+    try {
+      const event = JSON.parse(line) as OpenCodeJsonEvent;
+      if (event.type === "text" && typeof event.part?.text === "string") {
+        textChunks.push(event.part.text);
+      }
+    } catch {
+      // ignore non-JSON lines
+    }
+  }
+
+  const output = textChunks.join("\n").trim();
+  if (!output) {
+    throw new Error("opencode 응답에서 텍스트를 찾지 못했습니다.");
+  }
+
+  return output;
+}
+
+const CHATGPT_COMPOSER_SELECTORS = [
+  "textarea#prompt-textarea",
+  'textarea[data-testid="prompt-textarea"]',
+  'textarea[placeholder*="Message"]',
+  'textarea[placeholder*="메시지"]',
+  'div#prompt-textarea[contenteditable="true"]',
+  'div[contenteditable="true"][data-testid="composer-input"]',
+];
+
+const CHATGPT_SEND_BUTTON_SELECTORS = [
+  'button[data-testid="send-button"]',
+  'button[aria-label*="Send"]',
+  'button[aria-label*="보내기"]',
+];
+
+const CHATGPT_STOP_BUTTON_SELECTORS = [
+  'button[data-testid="stop-button"]',
+  'button[aria-label*="Stop"]',
+  'button[aria-label*="중지"]',
+];
+
+async function findVisibleSelector(page: Page, selectors: string[]): Promise<string | null> {
+  for (const selector of selectors) {
+    const isVisible = await page.locator(selector).first().isVisible().catch(() => false);
+    if (isVisible) return selector;
+  }
+  return null;
+}
+
+async function isChatGPTLoginRequired(page: Page): Promise<boolean> {
+  const loginButtons = [
+    page.getByRole("button", { name: /log in/i }).first(),
+    page.getByRole("button", { name: /로그인/i }).first(),
+    page.getByRole("link", { name: /log in/i }).first(),
+    page.getByRole("link", { name: /로그인/i }).first(),
+  ];
+
+  for (const button of loginButtons) {
+    const visible = await button.isVisible().catch(() => false);
+    if (visible) return true;
+  }
+
+  return false;
+}
+
+async function waitForChatGPTComposer(page: Page, timeoutMs: number): Promise<string> {
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    const selector = await findVisibleSelector(page, CHATGPT_COMPOSER_SELECTORS);
+    if (selector) return selector;
+
+    if (await isChatGPTLoginRequired(page)) {
+      throw new Error("ChatGPT 로그인이 필요합니다. `npm run login:chatgpt` 실행 후 다시 시도하세요.");
+    }
+
+    await page.waitForTimeout(1000);
+  }
+
+  throw new Error("ChatGPT 입력창을 찾지 못했습니다. 로그인 상태 또는 페이지 로딩을 확인하세요.");
+}
+
+async function readAssistantMessages(page: Page): Promise<string[]> {
+  const selectors = [
+    '[data-message-author-role="assistant"]',
+    'article[data-testid^="conversation-turn-"] [data-message-author-role="assistant"]',
+    'article[data-testid^="conversation-turn-"] .markdown',
+  ];
+
+  for (const selector of selectors) {
+    const locator = page.locator(selector);
+    const count = await locator.count().catch(() => 0);
+    if (count === 0) continue;
+
+    const texts = await locator.allInnerTexts().catch(() => []);
+    const cleaned = texts
+      .map((text) => normalizeText(text))
+      .filter((text) => text.length > 0);
+
+    if (cleaned.length > 0) {
+      return cleaned;
+    }
+  }
+
+  return [];
+}
+
+async function isChatGPTGenerating(page: Page): Promise<boolean> {
+  for (const selector of CHATGPT_STOP_BUTTON_SELECTORS) {
+    const visible = await page.locator(selector).first().isVisible().catch(() => false);
+    if (visible) return true;
+  }
+  return false;
+}
+
+async function waitForChatGPTAssistantReply(
+  page: Page,
+  previousCount: number,
+  timeoutMs: number
+): Promise<string> {
+  const start = Date.now();
+  let lastText = "";
+  let stableRounds = 0;
+
+  while (Date.now() - start < timeoutMs) {
+    const messages = await readAssistantMessages(page);
+    if (messages.length > previousCount) {
+      const candidate = messages[messages.length - 1];
+
+      if (candidate === lastText) {
+        stableRounds += 1;
+      } else {
+        lastText = candidate;
+        stableRounds = 0;
+      }
+
+      const generating = await isChatGPTGenerating(page);
+      if (!generating && stableRounds >= 1 && candidate.length > 0) {
+        return candidate;
+      }
+    }
+
+    await page.waitForTimeout(1200);
+  }
+
+  throw new Error("ChatGPT 응답 대기 시간이 초과되었습니다.");
+}
+
+async function sendPromptToChatGPT(page: Page, prompt: string): Promise<string> {
+  const previousMessages = await readAssistantMessages(page);
+  const composerSelector = await waitForChatGPTComposer(page, CHATGPT_TIMEOUT_MS);
+  const composer = page.locator(composerSelector).first();
+
+  await composer.click();
+
+  if (composerSelector.startsWith("textarea")) {
+    await composer.fill(prompt);
+  } else {
+    await page.keyboard.press("Meta+A").catch(() => {});
+    await page.keyboard.press("Control+A").catch(() => {});
+    await page.keyboard.type(prompt, { delay: 1 });
+  }
+
+  const sendButtonSelector = await findVisibleSelector(page, CHATGPT_SEND_BUTTON_SELECTORS);
+
+  if (sendButtonSelector) {
+    await page.locator(sendButtonSelector).first().click();
+  } else {
+    await composer.press("Enter");
+  }
+
+  return waitForChatGPTAssistantReply(page, previousMessages.length, CHATGPT_TIMEOUT_MS);
+}
+
+async function runChatGPTBrowserTwoPass(systemPrompt: string, userPrompt: string): Promise<string> {
+  if (!fs.existsSync(CHATGPT_SESSION_FILE)) {
+    throw new Error("ChatGPT 세션 파일이 없습니다. `npm run login:chatgpt` 실행 후 다시 시도하세요.");
+  }
+
+  const browser = await chromium.launch({
+    headless: CHATGPT_HEADLESS,
+    slowMo: CHATGPT_HEADLESS ? 0 : 30,
+    args: ["--disable-blink-features=AutomationControlled"],
+  });
+
+  try {
+    const contextOptions: BrowserContextOptions = {
+      viewport: { width: 1440, height: 960 },
+      locale: "ko-KR",
+      storageState: CHATGPT_SESSION_FILE,
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    };
+
+    const context = await browser.newContext(contextOptions);
+    const page = await context.newPage();
+
+    await page.goto(CHATGPT_DRAFT_GPT_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.waitForTimeout(2500);
+
+    if (await isChatGPTLoginRequired(page)) {
+      throw new Error("ChatGPT 로그인 세션이 만료되었습니다. `npm run login:chatgpt` 실행 후 다시 시도하세요.");
+    }
+
+    const firstPrompt = [
+      "아래 지시를 수행하고 최종 결과를 JSON만 출력해.",
+      "",
+      "[시스템 지시사항]",
+      systemPrompt,
+      "",
+      "[사용자 요청]",
+      userPrompt,
+      "",
+      "반드시 JSON만 반환하고 설명 문장은 쓰지 마.",
+    ].join("\n");
+
+    const firstDraft = await sendPromptToChatGPT(page, firstPrompt);
+
+    // 2차 다듬기는 별도 GPT(또는 동일 GPT)로 수행
+    if (CHATGPT_POLISH_GPT_URL !== CHATGPT_DRAFT_GPT_URL) {
+      await page.goto(CHATGPT_POLISH_GPT_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+      await page.waitForTimeout(2500);
+
+      if (await isChatGPTLoginRequired(page)) {
+        throw new Error("ChatGPT 로그인 세션이 만료되었습니다. `npm run login:chatgpt` 실행 후 다시 시도하세요.");
+      }
+    }
+
+    const secondPrompt = [
+      "아래 초안을 최종본으로 다듬어.",
+      "- 출력은 JSON만",
+      "- title에 이모지 절대 금지",
+      "- sections는 각 항목이 '이모지 소제목 + 빈 줄 + 본문 4~6문장' 구조를 유지",
+      "- 불필요한 설명/마크다운 금지",
+      "",
+      "[초안]",
+      firstDraft,
+    ].join("\n");
+
+    const polished = await sendPromptToChatGPT(page, secondPrompt);
+    await context.storageState({ path: CHATGPT_SESSION_FILE });
+    await context.close();
+
+    return polished;
+  } finally {
+    if (browser.isConnected()) {
+      await browser.close();
+    }
+  }
+}
+
+function parseJsonObjectFromText(text: string): Record<string, unknown> {
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) return {};
+  try {
+    return JSON.parse(match[0]) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function splitSectionCandidates(text: string): string[] {
+  const normalized = text.replace(/\r/g, "").trim();
+  if (!normalized) return [];
+
+  const parts = normalized
+    .split(/\n(?=[🛒📦✨📐⭐💡✅⚠️🎯][^\n]*)/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+
+  return parts.length > 0 ? parts : [normalized];
+}
+
+function buildFallbackSection(title: string, product: ProductInfo): string {
+  const plainTitle = title.replace(/[🛒📦✨📐⭐💡✅⚠️🎯]/g, "").trim() || "사용 후기";
+  const priceText = product.price || "가격 정보";
+
+  return [
+    title,
+    "",
+    `${product.name} 기준으로 ${plainTitle} 포인트를 중심으로 정리해봤어요.`,
+    `실제로 확인해보니 핵심 장점이 분명해서 비교가 쉬웠어요.`,
+    `${priceText} 기준으로 봤을 때 구성 대비 만족도가 괜찮았어요.`,
+    `과장 없이 실사용 관점에서 추천할 수 있는 제품이었어요.`,
+    "",
+  ].join("\n");
+}
+
+function normalizeSectionText(raw: string, fallbackTitle: string, product: ProductInfo): string {
+  const normalized = raw.replace(/\r/g, "").trim();
+
+  if (!normalized) {
+    return buildFallbackSection(fallbackTitle, product);
+  }
+
+  const allLines = normalized
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  let title = allLines[0] || fallbackTitle;
+  const hasEmojiPrefix = /^[🛒📦✨📐⭐💡✅⚠️🎯]/.test(title);
+  if (!hasEmojiPrefix || title.length > 60) {
+    title = fallbackTitle;
+  }
+
+  let bodyLines = allLines.slice(1);
+
+  if (bodyLines.length === 0) {
+    const sentenceParts = normalized
+      .replace(title, "")
+      .split(/(?<=[.!?])\s+|\n+/)
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0);
+    bodyLines = sentenceParts;
+  }
+
+  if (bodyLines.length < 4) {
+    const fallback = buildFallbackSection(title, product)
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .slice(1);
+    bodyLines = [...bodyLines, ...fallback].slice(0, 4);
+  }
+
+  if (bodyLines.length > 6) {
+    bodyLines = bodyLines.slice(0, 6);
+  }
+
+  return `${title}\n\n${bodyLines.join("\n")}\n`;
+}
+
+function normalizeSections(rawSections: unknown, targetCount: number, product: ProductInfo): string[] {
+  const rawList = Array.isArray(rawSections)
+    ? rawSections.filter((item): item is string => typeof item === "string")
+    : [];
+
+  const expanded: string[] = [];
+  for (const section of rawList) {
+    expanded.push(...splitSectionCandidates(section));
+  }
+
+  const normalized = expanded.map((section, index) =>
+    normalizeSectionText(section, DEFAULT_SECTION_TITLES[index % DEFAULT_SECTION_TITLES.length], product)
+  );
+
+  while (normalized.length < targetCount) {
+    const index = normalized.length;
+    normalized.push(
+      buildFallbackSection(DEFAULT_SECTION_TITLES[index % DEFAULT_SECTION_TITLES.length], product)
+    );
+  }
+
+  return normalized.slice(0, targetCount);
+}
+
+function normalizeHashtags(rawHashtags: unknown, product: ProductInfo): string[] {
+  const fromModel = Array.isArray(rawHashtags)
+    ? rawHashtags.filter((item): item is string => typeof item === "string")
+    : [];
+
+  const normalized = fromModel
+    .map((tag) => tag.replace(/^#/, "").replace(/\s+/g, "").trim())
+    .filter((tag) => tag.length > 0);
+
+  const productSeed = product.name
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2)
+    .slice(0, 4);
+
+  const merged = [...normalized, ...productSeed, ...DEFAULT_HASHTAGS];
+  const deduped = Array.from(new Set(merged)).slice(0, 20);
+  return deduped;
+}
 
 // ============================================
 // STEP 1: 상품 페이지에서 상품 정보 + 이미지 추출
@@ -59,6 +594,11 @@ async function step1_getProductInfo(page: Page, url: string): Promise<ProductInf
   
   await page.goto(url, { timeout: 30000 });
   await page.waitForTimeout(5000);
+
+  const bodyText = await page.textContent("body");
+  if (bodyText && isSecurityVerificationPage(bodyText)) {
+    throw new Error("네이버 보안 인증 페이지가 표시되어 상품 정보를 가져올 수 없습니다. 브라우저에서 인증 후 다시 시도하세요.");
+  }
   
   // 1. 상품명 추출 (여러 방법 시도)
   let productName = "";
@@ -92,6 +632,10 @@ async function step1_getProductInfo(page: Page, url: string): Promise<ProductInf
   
   if (!productName) {
     productName = (await page.title()).split(':')[0].split('-')[0].trim();
+  }
+
+  if (isInvalidProductName(productName)) {
+    throw new Error(`상품명 추출 실패: "${productName || "빈 값"}". 보안 인증 또는 페이지 로딩 문제일 수 있습니다.`);
   }
   console.log(`   📌 상품명: ${productName}`);
   
@@ -252,41 +796,59 @@ async function step1_getProductInfo(page: Page, url: string): Promise<ProductInf
   
   // 5. 상품 이미지 URL 추출
   console.log("   🖼️ 이미지 URL 추출 중...");
-  const imageUrls: string[] = [];
-  
-  const images = await page.$$('img');
-  for (const img of images) {
-    let src = await img.getAttribute('src');
-    const dataSrc = await img.getAttribute('data-src');
-    src = dataSrc || src;
-    
-    if (src && 
-        (src.includes('shop-phinf.pstatic.net') || src.includes('shopping-phinf.pstatic.net')) &&
-        !src.includes('icon') && !src.includes('logo') && !src.includes('1x1')) {
-      const highRes = src.replace(/\?type=.*/, '?type=w860');
-      if (!imageUrls.includes(highRes)) {
-        imageUrls.push(highRes);
-      }
-    }
-    if (imageUrls.length >= 15) break;  // 더 많이 수집
+  const candidateUrls: string[] = [];
+
+  // 대표 이미지는 og:image를 우선 후보로 사용
+  const ogImage = await page.getAttribute('meta[property="og:image"]', "content").catch(() => null);
+  if (ogImage && isCandidateProductImageUrl(ogImage)) {
+    candidateUrls.push(normalizeCandidateImageUrl(ogImage));
   }
-  
+
+  const images = await page.$$("img");
+  for (const img of images) {
+    const src = (await img.getAttribute("data-src")) || (await img.getAttribute("src")) || "";
+    if (!isCandidateProductImageUrl(src)) continue;
+    candidateUrls.push(normalizeCandidateImageUrl(src));
+    if (candidateUrls.length >= 40) break;
+  }
+
+  const dedupedUrls = Array.from(new Set(candidateUrls));
+  const imageUrls = prioritizeImageUrls(dedupedUrls).slice(0, 15);
   console.log(`   🖼️ ${imageUrls.length}개 이미지 발견`);
   
   // 이미지 다운로드 (최대 10개로 확대)
-  const imagePaths: string[] = [];
+  const downloaded: { path: string; url: string; size: number }[] = [];
   const downloadCount = Math.min(10, imageUrls.length);
   
   for (let i = 0; i < downloadCount; i++) {
     try {
       const imgPath = path.join(TEMP_PATH, `product_${Date.now()}_${i}.jpg`);
       await downloadImage(imageUrls[i], imgPath);
-      imagePaths.push(imgPath);
+      const stats = fs.statSync(imgPath);
+
+      // 너무 작은 이미지는 대표/본문용으로 부적합해서 제외
+      if (stats.size < 20_000) {
+        try { fs.unlinkSync(imgPath); } catch {}
+        console.log(`   ⚠️ 이미지 제외(너무 작음) ${i + 1}`);
+        continue;
+      }
+
+      downloaded.push({ path: imgPath, url: imageUrls[i], size: stats.size });
       console.log(`   ✅ 이미지 ${i + 1}/${downloadCount} 다운로드`);
-    } catch (e) {
+    } catch {
       console.log(`   ⚠️ 다운로드 실패 ${i + 1}`);
     }
   }
+
+  downloaded.sort((a, b) => {
+    const aPenalty = containsBadImageKeyword(a.url) ? -150_000 : 0;
+    const bPenalty = containsBadImageKeyword(b.url) ? -150_000 : 0;
+    const aScore = a.size + aPenalty;
+    const bScore = b.size + bPenalty;
+    return bScore - aScore;
+  });
+
+  const imagePaths = downloaded.map((item) => item.path);
   
   return {
     name: productName,
@@ -312,7 +874,7 @@ async function downloadImage(url: string, filePath: string): Promise<void> {
     const protocol = url.startsWith('https') ? https : http;
     const file = fs.createWriteStream(filePath);
     
-    protocol.get(url, (response: any) => {
+    protocol.get(url, (response: IncomingMessage) => {
       if (response.statusCode === 301 || response.statusCode === 302) {
         const redirectUrl = response.headers.location;
         if (redirectUrl) {
@@ -322,7 +884,7 @@ async function downloadImage(url: string, filePath: string): Promise<void> {
       }
       response.pipe(file);
       file.on('finish', () => { file.close(); resolve(); });
-    }).on('error', (err: any) => {
+    }).on('error', (err: Error) => {
       fs.unlink(filePath, () => {});
       reject(err);
     });
@@ -333,6 +895,10 @@ async function downloadImage(url: string, filePath: string): Promise<void> {
 // AI 공통 호출 함수 (OpenAI / Gemini)
 // ============================================
 async function generateWithAI(systemPrompt: string, userPrompt: string): Promise<string> {
+  if (BROWSER_GPT_MODE) {
+    return runChatGPTBrowserTwoPass(systemPrompt, userPrompt);
+  }
+
   if (AI_PROVIDER === "gemini" && gemini) {
     // Gemini 사용
     const model = gemini.getGenerativeModel({ 
@@ -348,18 +914,10 @@ async function generateWithAI(systemPrompt: string, userPrompt: string): Promise
     const result = await model.generateContent(combinedPrompt);
     return result.response.text();
     
-  } else if (openai) {
-    // OpenAI 사용
-    const response = await openai.chat.completions.create({
-      model: "gpt-5.2",  // GPT-5.2 모델 사용
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt }
-      ],
-      temperature: 0.75,
-      max_completion_tokens: 4000,
-    });
-    return response.choices[0]?.message?.content || "";
+  } else if (AI_PROVIDER === "openai") {
+    // OpenAI는 opencode 인증 세션을 통해 호출 (API 키 불필요)
+    const combinedPrompt = `[시스템 지시사항]\n${systemPrompt}\n\n[사용자 요청]\n${userPrompt}`;
+    return runOpenCode(combinedPrompt);
     
   } else {
     throw new Error("AI Provider가 설정되지 않았습니다. .env 파일을 확인하세요.");
@@ -372,8 +930,13 @@ async function generateWithAI(systemPrompt: string, userPrompt: string): Promise
 async function step2_generatePost(product: ProductInfo, brandLink: string): Promise<{ title: string; sections: string[]; hashtags: string[] }> {
   console.log("\n📝 STEP 2: SEO 최적화 블로그 글 생성 (확장판)");
   console.log(`   🤖 AI Provider: ${AI_PROVIDER.toUpperCase()}`);
+  if (BROWSER_GPT_MODE) {
+    console.log(`   🌐 Browser GPT Mode: ON`);
+    console.log(`      - Draft GPT: ${CHATGPT_DRAFT_GPT_URL}`);
+    console.log(`      - Polish GPT: ${CHATGPT_POLISH_GPT_URL}`);
+  }
   
-  const imageCount = Math.max(product.imagePaths.length, 8);  // 최소 8섹션
+  const bodySectionCount = Math.max(Math.min(product.imagePaths.length, 10), 8);
   
   // 인트로 변화를 위한 랜덤 요소
   const intros = [
@@ -419,9 +982,10 @@ ${product.rating ? `- 평점: ${product.rating}점` : ''}
 
 ## 작성 규칙
 1. 제목: 상품 카테고리 + 상품명 키워드 포함, 25-35자
+   - 제목에는 이모지를 절대 넣지 마세요.
    예: "아기비데 추천 | 해피달링 시그니처 워터탭 솔직 후기"
 
-2. 본문을 ${imageCount}개 섹션으로 작성 (총 2000자 이상)
+2. 본문을 정확히 ${bodySectionCount}개 섹션으로 작성 (총 2000자 이상)
 
 3. 각 섹션 구조:
    - 이모지 + 소제목 (한 줄)
@@ -429,7 +993,7 @@ ${product.rating ? `- 평점: ${product.rating}점` : ''}
    - 본문 4-6문장 (각 문장 끝에 줄바꿈, 각 문장 30-50자)
    - 빈 줄
 
-4. 섹션 구성 (${imageCount}개):
+4. 섹션 구성 (${bodySectionCount}개):
    - 🛒 구매하게 된 계기
    - 📦 택배 도착 & 개봉기
    - ✨ 첫인상 / 디자인
@@ -471,7 +1035,7 @@ ${product.rating ? `- 평점: ${product.rating}점` : ''}
 }`;
   
   const text = await generateWithAI(systemPrompt, userPrompt);
-  const json = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || "{}");
+  const json = parseJsonObjectFromText(text);
   
   // 마지막에 필수 문구와 구매링크 추가 (링크 프리뷰가 문장을 끊지 않도록 순서 변경)
   const lastSection = `
@@ -480,19 +1044,26 @@ ${product.rating ? `- 평점: ${product.rating}점` : ''}
 
 👉 구매링크: ${brandLink}`;
   
-  const sections = json.sections || [""];
+  const bodySections = normalizeSections(json.sections, bodySectionCount, product);
+  const sections = [...bodySections];
   sections.push(lastSection);
+  const hashtags = normalizeHashtags(json.hashtags, product);
   
+  const normalizedTitle = sanitizeTitle(
+    typeof json.title === "string" ? json.title : product.name,
+    product.name
+  );
+
   const totalLength = sections.reduce((sum: number, s: string) => sum + s.length, 0);
-  console.log(`   📌 제목: ${json.title}`);
+  console.log(`   📌 제목: ${normalizedTitle}`);
   console.log(`   📝 섹션: ${sections.length}개, 총 ${totalLength}자`);
-  console.log(`   🏷️ 해시태그: ${(json.hashtags || []).length}개`);
-  console.log(`      ${(json.hashtags || []).slice(0, 8).join(', ')}...`);
+  console.log(`   🏷️ 해시태그: ${hashtags.length}개`);
+  console.log(`      ${hashtags.slice(0, 8).join(', ')}...`);
   
   return {
-    title: json.title || product.name,
+    title: normalizedTitle,
     sections: sections,
-    hashtags: json.hashtags || []
+    hashtags
   };
 }
 
@@ -597,7 +1168,9 @@ async function step5and6_uploadAndWrite(page: Page, imagePaths: string[], sectio
   await page.keyboard.press('Tab');
   await page.waitForTimeout(500);
   
-  const maxLoop = Math.max(imagePaths.length, sections.length);
+  const mainSections = sections.length > 1 ? sections.slice(0, -1) : sections;
+  const tailSection = sections.length > 1 ? sections[sections.length - 1] : "";
+  const maxLoop = mainSections.length;
   let uploadedCount = 0;
   
   for (let i = 0; i < maxLoop; i++) {
@@ -609,11 +1182,17 @@ async function step5and6_uploadAndWrite(page: Page, imagePaths: string[], sectio
     }
     
     // 텍스트 섹션 입력 (있으면)
-    if (i < sections.length) {
-      console.log(`   [${i + 1}] ✏️ 텍스트 입력 (${sections[i].length}자)`);
-      await inputTextSection(page, sections[i]);
+    if (i < mainSections.length) {
+      console.log(`   [${i + 1}] ✏️ 텍스트 입력 (${mainSections[i].length}자)`);
+      await inputTextSection(page, mainSections[i]);
       await page.waitForTimeout(300);
     }
+  }
+
+  if (tailSection) {
+    console.log(`   [마무리] ✏️ 텍스트 입력 (${tailSection.length}자)`);
+    await inputTextSection(page, tailSection);
+    await page.waitForTimeout(300);
   }
   
   // 해시태그 (맨 마지막) - 스페이스 제거하여 태그 깨짐 방지
@@ -835,6 +1414,7 @@ async function main() {
         data: {
           status: "PUBLISHED",
           productName: product.name,
+          errorMessage: null,
           publishedAt: new Date(),
           postUrl: currentUrl,
         }
@@ -848,21 +1428,27 @@ async function main() {
       try { fs.unlinkSync(imgPath); } catch {}
     }
     
-    // 브라우저 유지 (확인용)
-    console.log("\n브라우저를 닫으면 종료됩니다.");
-    await new Promise<void>(resolve => browser.on("disconnected", () => resolve()));
+    // 자동 종료 (백그라운드 실행에서도 프로세스가 남지 않도록)
+    await browser.close();
     
-  } catch (error: any) {
-    console.error("\n❌ 오류:", error.message);
+  } catch (error: unknown) {
+    const message = getErrorMessage(error);
+    console.error("\n❌ 오류:", message);
     
     await prisma.brandLink.update({
       where: { id: linkId },
-      data: { status: "FAILED", errorMessage: error.message }
+      data: { status: "FAILED", errorMessage: message }
     });
   } finally {
+    try {
+      if (browser.isConnected()) {
+        await browser.close();
+      }
+    } catch {
+      // no-op
+    }
     await prisma.$disconnect();
   }
 }
 
 main();
-

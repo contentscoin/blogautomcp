@@ -21,34 +21,28 @@ export function useTheme() {
 }
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-    const [theme, setThemeState] = useState<Theme>("system");
-    const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">("light");
+    const [theme, setThemeState] = useState<Theme>(() => {
+        if (typeof window === "undefined") return "system";
+        const saved = localStorage.getItem("theme");
+        return saved === "light" || saved === "dark" || saved === "system" ? saved : "system";
+    });
 
-    useEffect(() => {
-        // 저장된 테마 불러오기
-        const saved = localStorage.getItem("theme") as Theme | null;
-        if (saved) {
-            setThemeState(saved);
-        }
-    }, []);
+    const [systemTheme, setSystemTheme] = useState<"light" | "dark">(() => {
+        if (typeof window === "undefined") return "light";
+        return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    });
+
+    const resolvedTheme: "light" | "dark" = theme === "system" ? systemTheme : theme;
 
     useEffect(() => {
         // 시스템 테마 감지
         const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
-
-        const updateResolvedTheme = () => {
-            if (theme === "system") {
-                setResolvedTheme(mediaQuery.matches ? "dark" : "light");
-            } else {
-                setResolvedTheme(theme);
-            }
+        const handleSystemThemeChange = (event: MediaQueryListEvent) => {
+            setSystemTheme(event.matches ? "dark" : "light");
         };
-
-        updateResolvedTheme();
-        mediaQuery.addEventListener("change", updateResolvedTheme);
-
-        return () => mediaQuery.removeEventListener("change", updateResolvedTheme);
-    }, [theme]);
+        mediaQuery.addEventListener("change", handleSystemThemeChange);
+        return () => mediaQuery.removeEventListener("change", handleSystemThemeChange);
+    }, []);
 
     useEffect(() => {
         // 다크모드 클래스 적용

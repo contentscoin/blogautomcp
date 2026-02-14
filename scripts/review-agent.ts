@@ -12,6 +12,7 @@ import * as path from "path";
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import type { Page } from "playwright";
 import {
     ReviewInput,
     ReviewOutput,
@@ -25,11 +26,20 @@ const log = createTaskLogger("ReviewAgent");
 chromium.use(StealthPlugin());
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
-const SESSION_FILE = path.join(process.cwd(), "session/naver-session.json");
+const SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "naver-session.json");
 const BLOG_ID = process.env.NAVER_BLOG_ID || "";
 
+interface StyleProfile {
+    tone: string;
+    sentenceStyle: string;
+    emojiUsage: string;
+    ctaStyle: string;
+    closingStyle: string;
+    sampleSentences?: string[];
+}
+
 // 스타일 프로필 로드
-function loadStyleProfile(styleName?: string): any {
+function loadStyleProfile(styleName?: string): StyleProfile | null {
     if (!styleName) return null;
 
     const stylesDir = path.join(process.cwd(), "styles");
@@ -37,7 +47,7 @@ function loadStyleProfile(styleName?: string): any {
 
     if (fs.existsSync(stylePath)) {
         log.info(`스타일 로드: ${styleName}`);
-        return JSON.parse(fs.readFileSync(stylePath, "utf-8"));
+        return JSON.parse(fs.readFileSync(stylePath, "utf-8")) as StyleProfile;
     }
 
     // 최신 스타일 파일 찾기
@@ -46,7 +56,7 @@ function loadStyleProfile(styleName?: string): any {
         if (files.length > 0) {
             const latestStyle = files.sort().pop()!;
             log.info(`최신 스타일 사용: ${latestStyle}`);
-            return JSON.parse(fs.readFileSync(path.join(stylesDir, latestStyle), "utf-8"));
+            return JSON.parse(fs.readFileSync(path.join(stylesDir, latestStyle), "utf-8")) as StyleProfile;
         }
     }
 
@@ -54,7 +64,7 @@ function loadStyleProfile(styleName?: string): any {
 }
 
 // 스타일 가이드 생성
-function buildStyleGuide(style: any): string {
+function buildStyleGuide(style: StyleProfile | null): string {
     if (!style) return "";
 
     return `
@@ -126,10 +136,10 @@ async function generateReviewContent(
     const text = response.response.text();
 
     try {
-        const json = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || "{}");
+        const json = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || "{}") as Partial<ReviewOutput>;
 
         // 해시태그 보강
-        if (!json.hashtags || json.hashtags.length < 15) {
+        if (!Array.isArray(json.hashtags) || json.hashtags.length < 15) {
             json.hashtags = generateReviewHashtags(input);
         }
 
@@ -186,14 +196,14 @@ ${content.infoBox.parking ? `<p>🚗 주차: ${content.infoBox.parking}</p>` : '
 }
 
 // 에디터 열기
-async function openEditor(page: any) {
+async function openEditor(page: Page) {
     log.info("에디터 열기");
     await page.goto(`https://blog.naver.com/${BLOG_ID}?Redirect=Write`);
     await page.waitForTimeout(3000);
 }
 
 // 제목 입력
-async function inputTitle(page: any, title: string) {
+async function inputTitle(page: Page, title: string) {
     log.info(`제목 입력: ${title}`);
     await page.click('.se-documentTitle-editView');
     await page.waitForTimeout(500);
@@ -201,7 +211,7 @@ async function inputTitle(page: any, title: string) {
 }
 
 // 본문 입력
-async function inputContent(page: any, html: string) {
+async function inputContent(page: Page, html: string) {
     log.info("본문 입력");
 
     await page.click('.se-component-content');
@@ -214,7 +224,7 @@ async function inputContent(page: any, html: string) {
 }
 
 // 발행
-async function publish(page: any, category?: string) {
+async function publish(page: Page, category?: string) {
     log.info("발행 시작");
 
     // ESC로 팝업 닫기
@@ -233,7 +243,7 @@ async function publish(page: any, category?: string) {
         try {
             await page.click(`text=${category}`);
             await page.waitForTimeout(500);
-        } catch (e) {
+        } catch {
             log.warn("카테고리 선택 실패");
         }
     }

@@ -24,6 +24,38 @@ interface BrandLink {
   createdAt: string;
 }
 
+interface PlaceSearchResult {
+  title: string;
+  roadAddress?: string;
+  address?: string;
+}
+
+interface PlaceSearchResponse {
+  success?: boolean;
+  data?: {
+    places?: PlaceSearchResult[];
+  };
+}
+
+interface ReviewResult {
+  title?: string;
+  published?: boolean;
+}
+
+function getFirstImageUrl(imageUrls: string | null): string | null {
+  if (!imageUrls) return null;
+
+  try {
+    const parsed = JSON.parse(imageUrls);
+    if (!Array.isArray(parsed)) return null;
+
+    const first = parsed.find((value): value is string => typeof value === "string" && value.trim().length > 0);
+    return first ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export default function Dashboard() {
   const [links, setLinks] = useState<BrandLink[]>([]);
   const [loading, setLoading] = useState(true);
@@ -42,15 +74,15 @@ export default function Dashboard() {
   const [reviewKeywords, setReviewKeywords] = useState("");
   const [reviewCategory, setReviewCategory] = useState<ReviewCategory>("place");
   const [reviewTips, setReviewTips] = useState("");
-  const [placeSearchResults, setPlaceSearchResults] = useState<any[]>([]);
+  const [placeSearchResults, setPlaceSearchResults] = useState<PlaceSearchResult[]>([]);
   const [searchingPlace, setSearchingPlace] = useState(false);
   const [reviewLoading, setReviewLoading] = useState(false);
-  const [reviewResult, setReviewResult] = useState<any>(null);
+  const [reviewResult, setReviewResult] = useState<ReviewResult | null>(null);
 
   const fetchLinks = useCallback(async () => {
     try {
       setLoading(true);
-      const res = await fetch("/api/brandlinks");
+      const res = await fetch("/api/brandlinks", { cache: "no-store" });
       const data = await res.json();
       if (data.success) {
         setLinks(data.data);
@@ -122,7 +154,7 @@ export default function Dashboard() {
   };
 
   // 발행 완료 핸들러
-  const handlePublishComplete = (url?: string) => {
+  const handlePublishComplete = () => {
     fetchLinks();
     setPublishingId(null);
   };
@@ -311,9 +343,11 @@ export default function Dashboard() {
                         setSearchingPlace(true);
                         try {
                           const res = await fetch(`/api/place?q=${encodeURIComponent(reviewPlaceName)}`);
-                          const data = await res.json();
-                          if (data.success && data.data.places?.length > 0) {
-                            setPlaceSearchResults(data.data.places);
+                          const data: PlaceSearchResponse = await res.json();
+                          const places = data.data?.places;
+
+                          if (data.success && Array.isArray(places) && places.length > 0) {
+                            setPlaceSearchResults(places);
                           } else {
                             setPlaceSearchResults([]);
                           }
@@ -336,7 +370,7 @@ export default function Dashboard() {
                           key={idx}
                           onClick={() => {
                             setReviewPlaceName(place.title);
-                            setReviewAddress(place.roadAddress || place.address);
+                            setReviewAddress(place.roadAddress || place.address || "");
                             setPlaceSearchResults([]);
                           }}
                           className="w-full px-3 py-2 text-left text-sm hover:bg-emerald-50 border-b last:border-b-0"
@@ -505,119 +539,124 @@ export default function Dashboard() {
                       </td>
                     </tr>
                   ) : (
-                    links.map((link) => (
-                      <tr key={link.id} className="hover:bg-slate-50">
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-3">
-                            {/* 이미지 썸네일 */}
-                            {link.imageUrls && JSON.parse(link.imageUrls)[0] && (
-                              <img
-                                src={JSON.parse(link.imageUrls)[0]}
-                                alt=""
-                                className="w-12 h-12 object-cover rounded-lg"
+                    links.map((link) => {
+                      const thumbnailUrl = getFirstImageUrl(link.imageUrls);
+
+                      return (
+                        <tr key={link.id} className="hover:bg-slate-50">
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-3">
+                              {/* 이미지 썸네일 */}
+                              {thumbnailUrl && (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img
+                                  src={thumbnailUrl}
+                                  alt=""
+                                  className="w-12 h-12 object-cover rounded-lg"
+                                />
+                              )}
+                              <div>
+                                <div className="font-medium text-slate-800">
+                                  {link.productName || "(상품 정보 없음)"}
+                                </div>
+                                {link.productPrice && (
+                                  <div className="text-sm text-slate-500">{link.productPrice}</div>
+                                )}
+                              </div>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3">
+                            <a
+                              href={link.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-blue-600 hover:underline text-sm"
+                            >
+                              {link.url.length > 40 ? link.url.substring(0, 40) + "..." : link.url}
+                            </a>
+                            {link.postUrl && (
+                              <div className="mt-1">
+                                <a
+                                  href={link.postUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-green-600 hover:underline text-xs"
+                                >
+                                  📄 발행된 글 보기
+                                </a>
+                              </div>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-center">
+                            <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(link.status)}`}>
+                              {getStatusText(link.status)}
+                            </span>
+                            {link.errorMessage && (
+                              <div className="text-xs text-red-500 mt-1" title={link.errorMessage}>
+                                ⚠️
+                              </div>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-center text-sm text-slate-500">
+                            {link.memo || "-"}
+                          </td>
+                          <td className="px-4 py-3 text-center">
+                            <div className="flex items-center justify-center gap-2">
+                              {/* 발행하기 버튼 */}
+                              {link.status === "READY" && (
+                                <button
+                                  onClick={() => handlePublish(link.id)}
+                                  disabled={publishingId === link.id}
+                                  className="px-3 py-1 text-sm bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50 transition-colors"
+                                >
+                                  {publishingId === link.id ? "⏳" : "🚀 발행"}
+                                </button>
+                              )}
+
+                              {/* 재발행 */}
+                              {link.status === "FAILED" && (
+                                <button
+                                  onClick={() => handlePublish(link.id)}
+                                  disabled={publishingId === link.id}
+                                  className="px-3 py-1 text-sm bg-amber-500 text-white rounded hover:bg-amber-600 disabled:opacity-50 transition-colors"
+                                >
+                                  🔄 재시도
+                                </button>
+                              )}
+
+                              {/* 삭제 */}
+                              <button
+                                onClick={() => handleDeleteLink(link.id)}
+                                className="px-3 py-1 text-sm bg-red-100 text-red-600 rounded hover:bg-red-200 transition-colors"
+                                title="삭제"
+                              >
+                                🗑️
+                              </button>
+                            </div>
+                            {/* 발행 진행률 */}
+                            {publishingId === link.id && (
+                              <PublishProgress
+                                linkId={link.id}
+                                isPublishing={publishingId === link.id}
+                                onComplete={handlePublishComplete}
+                                onError={handlePublishError}
                               />
                             )}
-                            <div>
-                              <div className="font-medium text-slate-800">
-                                {link.productName || "(상품 정보 없음)"}
-                              </div>
-                              {link.productPrice && (
-                                <div className="text-sm text-slate-500">{link.productPrice}</div>
-                              )}
-                            </div>
-                          </div>
-                        </td>
-                        <td className="px-4 py-3">
-                          <a
-                            href={link.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-blue-600 hover:underline text-sm"
-                          >
-                            {link.url.length > 40 ? link.url.substring(0, 40) + "..." : link.url}
-                          </a>
-                          {link.postUrl && (
-                            <div className="mt-1">
+                            {/* 발행된 글 URL */}
+                            {link.status === "PUBLISHED" && link.postUrl && (
                               <a
                                 href={link.postUrl}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="text-green-600 hover:underline text-xs"
+                                className="mt-2 block text-xs text-blue-600 hover:underline"
                               >
-                                📄 발행된 글 보기
+                                📎 발행된 글 보기
                               </a>
-                            </div>
-                          )}
-                        </td>
-                        <td className="px-4 py-3 text-center">
-                          <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(link.status)}`}>
-                            {getStatusText(link.status)}
-                          </span>
-                          {link.errorMessage && (
-                            <div className="text-xs text-red-500 mt-1" title={link.errorMessage}>
-                              ⚠️
-                            </div>
-                          )}
-                        </td>
-                        <td className="px-4 py-3 text-center text-sm text-slate-500">
-                          {link.memo || "-"}
-                        </td>
-                        <td className="px-4 py-3 text-center">
-                          <div className="flex items-center justify-center gap-2">
-                            {/* 발행하기 버튼 */}
-                            {link.status === "READY" && (
-                              <button
-                                onClick={() => handlePublish(link.id)}
-                                disabled={publishingId === link.id}
-                                className="px-3 py-1 text-sm bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50 transition-colors"
-                              >
-                                {publishingId === link.id ? "⏳" : "🚀 발행"}
-                              </button>
                             )}
-
-                            {/* 재발행 */}
-                            {link.status === "FAILED" && (
-                              <button
-                                onClick={() => handlePublish(link.id)}
-                                disabled={publishingId === link.id}
-                                className="px-3 py-1 text-sm bg-amber-500 text-white rounded hover:bg-amber-600 disabled:opacity-50 transition-colors"
-                              >
-                                🔄 재시도
-                              </button>
-                            )}
-
-                            {/* 삭제 */}
-                            <button
-                              onClick={() => handleDeleteLink(link.id)}
-                              className="px-3 py-1 text-sm bg-red-100 text-red-600 rounded hover:bg-red-200 transition-colors"
-                              title="삭제"
-                            >
-                              🗑️
-                            </button>
-                          </div>
-                          {/* 발행 진행률 */}
-                          {publishingId === link.id && (
-                            <PublishProgress
-                              linkId={link.id}
-                              isPublishing={publishingId === link.id}
-                              onComplete={handlePublishComplete}
-                              onError={handlePublishError}
-                            />
-                          )}
-                          {/* 발행된 글 URL */}
-                          {link.status === "PUBLISHED" && link.postUrl && (
-                            <a
-                              href={link.postUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="mt-2 block text-xs text-blue-600 hover:underline"
-                            >
-                              📎 발행된 글 보기
-                            </a>
-                          )}
-                        </td>
-                      </tr>
-                    ))
+                          </td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>

@@ -21,47 +21,6 @@ if (!fs.existsSync(STORAGE_PATH)) {
   fs.mkdirSync(STORAGE_PATH, { recursive: true });
 }
 
-async function main() {
-  console.log("=".repeat(50));
-  console.log("네이버 블로그 자동화 - 로그인 설정");
-  console.log("=".repeat(50));
-  console.log("");
-  console.log("📌 사용 방법:");
-  console.log("   1. 열리는 브라우저에서 네이버 로그인");
-  console.log("   2. 로그인 완료 후 브라우저 창을 닫기 (X 버튼)");
-  console.log("   3. 자동으로 세션이 저장됩니다!");
-  console.log("");
-
-  const browser = await chromium.launch({
-    headless: false,
-    slowMo: 50,
-  });
-
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 800 },
-    locale: "ko-KR",
-  });
-
-  const page = await context.newPage();
-  
-  // 네이버 로그인 페이지로 이동
-  await page.goto("https://nid.naver.com/nidlogin.login");
-
-  console.log("✅ 브라우저가 열렸습니다.");
-  console.log("📝 로그인 후 브라우저 창을 닫아주세요...");
-  console.log("");
-
-  // 브라우저가 닫힐 때까지 대기
-  await new Promise<void>((resolve) => {
-    browser.on("disconnected", () => {
-      resolve();
-    });
-  });
-
-  // 세션 저장 (브라우저가 닫히기 전에 저장해야 함)
-  // 위 방식은 동작하지 않으므로 다른 방식 사용
-}
-
 // 다른 접근 방식: 페이지 이벤트 감지
 async function mainV2() {
   console.log("=".repeat(50));
@@ -149,7 +108,7 @@ async function mainV2() {
       console.log("");
       console.log("🎉 이제 자동화가 이 세션을 사용합니다.");
       console.log("   세션은 보통 7~30일간 유지됩니다.");
-    } catch (error) {
+    } catch {
       console.log("⚠️ 페이지 이동 중 오류, 현재 상태로 세션 저장...");
       await context.storageState({ path: SESSION_FILE });
       console.log("✅ 세션이 저장되었습니다!");

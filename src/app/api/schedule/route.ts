@@ -1,5 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { prisma } from "@/lib/db";
+
+function getErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : "알 수 없는 오류";
+}
+
+interface ScheduleRequestBody {
+    type?: "travel" | "golf" | "knowledge";
+    topic?: string;
+    keywords?: string;
+    style?: string;
+    category?: string;
+    scheduledAt?: string;
+    images?: string;
+}
 
 // GET: 예약된 발행 목록 조회
 export async function GET(req: NextRequest) {
@@ -29,10 +43,10 @@ export async function GET(req: NextRequest) {
 
         return NextResponse.json({ success: true, data: posts });
 
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("예약 목록 조회 실패:", error);
         return NextResponse.json(
-            { success: false, error: error.message },
+            { success: false, error: getErrorMessage(error) },
             { status: 500 }
         );
     }
@@ -41,7 +55,7 @@ export async function GET(req: NextRequest) {
 // POST: 새 예약 발행 생성
 export async function POST(req: NextRequest) {
     try {
-        const body = await req.json();
+        const body = (await req.json()) as ScheduleRequestBody;
 
         const {
             type,
@@ -79,7 +93,7 @@ export async function POST(req: NextRequest) {
                 topicSeed: JSON.stringify({
                     type: type || "knowledge",
                     topic,
-                    keywords: keywords?.split(",").map((k: string) => k.trim()) || [],
+                    keywords: keywords?.split(",").map((k) => k.trim()) || [],
                     style,
                     images,
                 }),
@@ -96,10 +110,10 @@ export async function POST(req: NextRequest) {
             },
         });
 
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("예약 생성 실패:", error);
         return NextResponse.json(
-            { success: false, error: error.message },
+            { success: false, error: getErrorMessage(error) },
             { status: 500 }
         );
     }
@@ -142,10 +156,10 @@ export async function DELETE(req: NextRequest) {
 
         return NextResponse.json({ success: true });
 
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("예약 취소 실패:", error);
         return NextResponse.json(
-            { success: false, error: error.message },
+            { success: false, error: getErrorMessage(error) },
             { status: 500 }
         );
     }

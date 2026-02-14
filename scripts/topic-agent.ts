@@ -18,7 +18,6 @@ import {
     PostCategory,
     getTemplate,
     generatePrompt,
-    getTypeFromArgs,
     categoryNames
 } from "./lib/templates";
 import { loadImages, generateContentFromImages } from "./lib/image-content";
@@ -193,7 +192,7 @@ async function generateContent(
         const json = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || "{}");
         console.log(`   ✅ 생성 완료: "${json.title}"`);
         return json;
-    } catch (e) {
+    } catch {
         console.error("   ❌ JSON 파싱 실패");
         throw new Error("콘텐츠 생성 실패");
     }

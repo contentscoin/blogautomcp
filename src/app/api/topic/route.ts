@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { exec } from "child_process";
 import { promisify } from "util";
-import * as path from "path";
 
 const execAsync = promisify(exec);
 
@@ -12,6 +11,19 @@ interface TopicGenerateRequest {
     style?: string;
     category?: string;
     publish?: boolean;
+}
+
+function getErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : "콘텐츠 생성에 실패했습니다";
+}
+
+function getErrorStderr(error: unknown): string | undefined {
+    if (typeof error !== "object" || error === null || !("stderr" in error)) {
+        return undefined;
+    }
+
+    const stderr = (error as { stderr?: unknown }).stderr;
+    return typeof stderr === "string" ? stderr.slice(-1000) : undefined;
 }
 
 export async function POST(req: NextRequest) {
@@ -84,13 +96,13 @@ export async function POST(req: NextRequest) {
             }
         });
 
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("❌ 오류:", error);
 
         return NextResponse.json({
             success: false,
-            error: error.message || "콘텐츠 생성에 실패했습니다",
-            stderr: error.stderr?.slice(-1000),
+            error: getErrorMessage(error),
+            stderr: getErrorStderr(error),
         }, { status: 500 });
     }
 }

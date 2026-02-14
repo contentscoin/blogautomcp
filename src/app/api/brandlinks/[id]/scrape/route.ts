@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
-import { spawn } from "child_process";
+import { execSync } from "child_process";
 import path from "path";
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "알 수 없는 오류";
+}
 
 // POST: 상품 정보 스크래핑
 export async function POST(
@@ -24,10 +28,7 @@ export async function POST(
 
     // 스크래핑 스크립트 실행
     const scriptPath = path.join(process.cwd(), "scripts", "scrape-link.ts");
-    
-    // 동기적으로 실행하고 결과 대기
-    const { execSync } = require("child_process");
-    
+
     try {
       execSync(`npx ts-node --project tsconfig.scripts.json "${scriptPath}" ${id}`, {
         cwd: process.cwd(),
@@ -44,19 +45,18 @@ export async function POST(
         success: true, 
         data: updatedLink,
       });
-    } catch (execError: any) {
+    } catch (execError: unknown) {
       console.error("스크래핑 스크립트 실행 실패:", execError);
       return NextResponse.json(
         { success: false, error: "상품 정보를 가져오는데 실패했습니다." },
         { status: 500 }
       );
     }
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("스크래핑 실패:", error);
     return NextResponse.json(
-      { success: false, error: error.message },
+      { success: false, error: getErrorMessage(error) },
       { status: 500 }
     );
   }
 }
-

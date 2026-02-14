@@ -4,13 +4,30 @@ import { promisify } from "util";
 
 const execAsync = promisify(exec);
 
+interface ReviewRequestBody {
+    placeName?: string;
+    address?: string;
+    rawNotes?: string;
+    keywords?: string;
+    tips?: string;
+    category?: string;
+    phone?: string;
+    parking?: string;
+    style?: string;
+    publish?: boolean;
+}
+
+function getErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : "알 수 없는 오류";
+}
+
 /**
  * 리뷰 글 생성 API
  * V5 Phase 11: GPTs 패턴 기반 장소/제품 리뷰
  */
 export async function POST(req: NextRequest) {
     try {
-        const body = await req.json();
+        const body = (await req.json()) as ReviewRequestBody;
 
         const {
             placeName,
@@ -53,7 +70,7 @@ export async function POST(req: NextRequest) {
         console.log("실행 명령:", command);
 
         // 실행 (5분 타임아웃)
-        const { stdout, stderr } = await execAsync(command, {
+        const { stdout } = await execAsync(command, {
             cwd: process.cwd(),
             timeout: 300000,
         });
@@ -66,7 +83,7 @@ export async function POST(req: NextRequest) {
         if (jsonMatch) {
             try {
                 content = JSON.parse(jsonMatch[1]);
-            } catch (e) {
+            } catch {
                 // JSON 파싱 실패시 무시
             }
         }
@@ -80,10 +97,10 @@ export async function POST(req: NextRequest) {
             },
         });
 
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("리뷰 생성 실패:", error);
         return NextResponse.json(
-            { success: false, error: error.message },
+            { success: false, error: getErrorMessage(error) },
             { status: 500 }
         );
     }

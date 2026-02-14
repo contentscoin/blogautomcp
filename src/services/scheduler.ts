@@ -3,7 +3,7 @@
  * V4 Phase 10: 예약된 작업 실행
  */
 
-import { prisma } from "@/lib/prisma";
+import { prisma } from "@/lib/db";
 import { exec } from "child_process";
 import { promisify } from "util";
 import { createTaskLogger } from "../../scripts/lib/logger";
@@ -17,6 +17,10 @@ interface TopicSeed {
     keywords: string[];
     style?: string;
     images?: string;
+}
+
+function getErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : "알 수 없는 오류";
 }
 
 /**
@@ -80,7 +84,7 @@ export async function executeScheduledPost(postId: string): Promise<boolean> {
         log.info(`실행 명령: ${command}`);
 
         // 실행 (5분 타임아웃)
-        const { stdout, stderr } = await execAsync(command, {
+        const { stdout } = await execAsync(command, {
             cwd: process.cwd(),
             timeout: 300000,
         });
@@ -104,8 +108,8 @@ export async function executeScheduledPost(postId: string): Promise<boolean> {
         log.info(`발행 성공: ${title}`);
         return true;
 
-    } catch (error: any) {
-        log.error(`발행 실패: ${postId}`, error);
+    } catch (error: unknown) {
+        log.error(`발행 실패: ${postId}`, error instanceof Error ? error : undefined);
 
         // 재시도 횟수 확인
         const post = await prisma.post.findUnique({ where: { id: postId } });
@@ -117,7 +121,7 @@ export async function executeScheduledPost(postId: string): Promise<boolean> {
                 where: { id: postId },
                 data: {
                     status: "FAIL",
-                    errorMessage: error.message,
+                    errorMessage: getErrorMessage(error),
                     retryCount,
                 },
             });
@@ -127,7 +131,7 @@ export async function executeScheduledPost(postId: string): Promise<boolean> {
                 where: { id: postId },
                 data: {
                     status: "PENDING",
-                    errorMessage: error.message,
+                    errorMessage: getErrorMessage(error),
                     retryCount,
                 },
             });

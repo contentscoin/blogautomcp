@@ -67,7 +67,6 @@ export default function PublishProgress({
 
     useEffect(() => {
         if (!isPublishing) {
-            setCurrentEvent(null);
             return;
         }
 

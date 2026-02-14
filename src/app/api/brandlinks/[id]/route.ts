@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "알 수 없는 오류";
+}
+
 // GET: 단일 링크 조회
 export async function GET(
   request: NextRequest,
@@ -21,10 +25,10 @@ export async function GET(
     }
 
     return NextResponse.json({ success: true, data: link });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("링크 조회 실패:", error);
     return NextResponse.json(
-      { success: false, error: error.message },
+      { success: false, error: getErrorMessage(error) },
       { status: 500 }
     );
   }
@@ -43,10 +47,10 @@ export async function DELETE(
     });
 
     return NextResponse.json({ success: true });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("링크 삭제 실패:", error);
     return NextResponse.json(
-      { success: false, error: error.message },
+      { success: false, error: getErrorMessage(error) },
       { status: 500 }
     );
   }
@@ -59,7 +63,7 @@ export async function PATCH(
 ) {
   try {
     const { id } = await params;
-    const body = await request.json();
+    const body = (await request.json()) as Record<string, unknown>;
 
     const link = await prisma.brandLink.update({
       where: { id },
@@ -67,12 +71,11 @@ export async function PATCH(
     });
 
     return NextResponse.json({ success: true, data: link });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("링크 수정 실패:", error);
     return NextResponse.json(
-      { success: false, error: error.message },
+      { success: false, error: getErrorMessage(error) },
       { status: 500 }
     );
   }
 }
-

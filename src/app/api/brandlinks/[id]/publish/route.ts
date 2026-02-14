@@ -3,6 +3,10 @@ import { prisma } from "@/lib/db";
 import { spawn } from "child_process";
 import path from "path";
 
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "알 수 없는 오류";
+}
+
 // POST: 발행 시작
 export async function POST(
   request: NextRequest,
@@ -47,12 +51,11 @@ export async function POST(
       success: true, 
       message: "발행이 시작되었습니다.",
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("발행 시작 실패:", error);
     return NextResponse.json(
-      { success: false, error: error.message },
+      { success: false, error: getErrorMessage(error) },
       { status: 500 }
     );
   }
 }
-

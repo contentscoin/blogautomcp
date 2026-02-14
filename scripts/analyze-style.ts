@@ -154,7 +154,7 @@ JSON만 반환하세요.`;
             analyzedAt: new Date().toISOString(),
             sourceUrl,
         };
-    } catch (e) {
+    } catch {
         console.error("분석 결과 파싱 실패:", text.substring(0, 200));
         throw new Error("스타일 분석 실패");
     }

@@ -100,6 +100,8 @@ export default function KeywordsPage() {
 
     useEffect(() => {
         fetchKeywords();
+        // category 변경 시 자동 재조회, 나머지는 수동 분석 버튼으로 실행
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [category]);
 
     const copyToClipboard = (text: string) => {

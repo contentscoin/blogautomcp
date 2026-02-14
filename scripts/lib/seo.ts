@@ -4,7 +4,7 @@
  */
 
 import { createTaskLogger } from "./logger";
-import { retry, safeExecute } from "./retry";
+import { safeExecute } from "./retry";
 
 const log = createTaskLogger("SEO");
 

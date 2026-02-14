@@ -35,6 +35,17 @@ interface ImageBasedContent {
     hashtags: string[];
 }
 
+interface GeneratedSection {
+    imageIndex?: number;
+    text?: string;
+}
+
+interface GeneratedContentResponse {
+    title?: string;
+    sections?: GeneratedSection[];
+    hashtags?: string[];
+}
+
 /**
  * 이미지 파일 로드 및 Base64 변환
  */
@@ -166,16 +177,16 @@ JSON 형식으로 반환:
     const text = response.response.text();
 
     try {
-        const json = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || "{}");
+        const json = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || "{}") as GeneratedContentResponse;
 
         // 이미지 경로 매핑
         const content: ImageBasedContent = {
-            title: json.title,
-            sections: json.sections.map((s: any, i: number) => ({
-                imagePath: images[s.imageIndex || i]?.path || "",
-                text: s.text,
+            title: json.title || topic,
+            sections: (json.sections || []).map((section, i) => ({
+                imagePath: images[section.imageIndex ?? i]?.path || "",
+                text: section.text || "",
             })),
-            hashtags: json.hashtags || [],
+            hashtags: (json.hashtags || []).filter((tag): tag is string => typeof tag === "string"),
         };
 
         log.info(`콘텐츠 생성 완료: "${content.title}"`);
