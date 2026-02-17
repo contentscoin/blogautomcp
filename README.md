@@ -127,6 +127,9 @@ AI_PROVIDER=openai
 # OpenAI 사용 시 (AI_PROVIDER=openai)
 OPENAI_API_KEY=sk-여기에_발급받은_키_붙여넣기
 
+# Browser GPT 모드 사용 시 (OpenAI API 키 없이 ChatGPT 웹 로그인 세션 사용)
+# BROWSER_GPT_MODE=true
+
 # Gemini 사용 시 (AI_PROVIDER=gemini) - 무료!
 GEMINI_API_KEY=AIza여기에_발급받은_키_붙여넣기
 
@@ -134,10 +137,34 @@ GEMINI_API_KEY=AIza여기에_발급받은_키_붙여넣기
 NAVER_BLOG_ID=내_블로그_아이디
 
 # 데이터베이스 (수정 불필요)
-DATABASE_URL="file:./prisma/dev.db"
+DATABASE_URL="file:./dev.db"
 ```
 
 > 💡 **Gemini 무료 사용 팁**: `AI_PROVIDER=gemini`로 설정하면 무료로 사용 가능!
+
+### 3. 운영 보안 설정 (권장)
+
+관리자 키를 설정하면 쓰기 API(발행/수정/삭제/리뷰생성/스케줄)가 보호됩니다.
+
+```env
+ADMIN_API_KEY="랜덤한_긴_문자열"
+CRON_SECRET="랜덤한_긴_문자열"
+```
+
+- `ADMIN_API_KEY`: 대시보드 외부에서 API 호출할 때 `x-admin-api-key` 헤더 필요
+- `CRON_SECRET`: `/api/schedule/cron` 호출 시 `x-cron-secret` 또는 `Authorization: Bearer ...` 필요
+- 대시보드(동일 오리진)에서 발생하는 브라우저 요청은 정상 동작하도록 허용됨
+
+예시:
+```bash
+curl -X POST http://localhost:3001/api/review \
+  -H "x-admin-api-key: <ADMIN_API_KEY>" \
+  -H "content-type: application/json" \
+  -d '{"placeName":"테스트","rawNotes":"테스트"}'
+
+curl http://localhost:3001/api/schedule/cron \
+  -H "x-cron-secret: <CRON_SECRET>"
+```
 
 ---
 
@@ -155,6 +182,26 @@ npm run login
 
 > 💡 세션은 보통 7~30일간 유지됩니다. 발행 실패 시 다시 로그인하세요.
 
+### Step 1-2: ChatGPT 로그인 (Browser GPT 모드일 때만)
+
+`BROWSER_GPT_MODE=true`로 사용하는 경우에만 필요합니다.
+
+```bash
+npm run login:chatgpt
+```
+
+- 브라우저에서 ChatGPT 로그인 후 `Enter`를 누르면 세션이 저장됩니다.
+- 스크립트가 Draft/Polish Custom GPT URL 접근까지 검증합니다.
+- 계정이 다르면 `This GPT is inaccessible or not found` 오류로 실패합니다.
+- 발행 시 Custom GPT는 기본적으로 persistent 프로필 + 새 대화로 시작합니다 (`CHATGPT_RUN_ISOLATED_CONTEXT=false`, `CHATGPT_FORCE_NEW_CHAT=true`).
+- temporary chat 모드가 필요하면 `CHATGPT_USE_TEMPORARY_CHAT=true`를 설정하세요.
+- GPT 가이드 상호작용 모드(`CHATGPT_GUIDED_MODE=true`)에서는 GPT가 질문하면 자동으로 답변하고, 최종 구조화 응답이 올 때까지 대화를 이어갑니다.
+- Draft GPT는 1~6단계 질문 흐름(제품정보→SEO키워드→버전→소제목개수→콘텐츠→말투)에 맞춰 응답하며, 기본값은 모바일(2번) + 소제목 5개 + 말투 4번(경험공유형)입니다.
+- Draft/Polish GPT에 상품 이미지를 함께 첨부해 문맥을 강화합니다 (`CHATGPT_IMAGE_CONTEXT_MAX`, `CHATGPT_ATTACH_IMAGES_TO_DRAFT`, `CHATGPT_ATTACH_IMAGES_TO_POLISH`).
+- 필요할 때만 기본 ChatGPT로 폴백하세요 (`CHATGPT_FALLBACK_TO_BASE=true`, 기본값 false).
+- GPT 응답 대기는 고정 시간이 아니라 진행 신호(생성중/텍스트 증가) 기반으로 유지됩니다.
+  필요 시 `.env`의 `CHATGPT_RESPONSE_IDLE_TIMEOUT_MS`, `CHATGPT_RESPONSE_MAX_TIMEOUT_MS`로 조정하세요.
+
 ### Step 2: 웹 대시보드 실행
 
 ```bash
@@ -167,6 +214,8 @@ npm run dev
 
 1. 브랜드커넥트에서 받은 링크 복사 (https://naver.me/xxx 형태)
 2. 웹 대시보드에서 URL 입력 후 "추가" 클릭
+   - 필요 시 게시판 번호(categoryNo) 지정
+   - 필요 시 소제목 스타일 적용 ON/OFF 설정
 3. 🔍 버튼으로 상품 정보 가져오기
 4. 🚀 **발행** 버튼 클릭!
 
@@ -184,9 +233,16 @@ npm run dev
 | 명령어 | 설명 |
 |--------|------|
 | `npm run login` | 네이버 로그인 (세션 저장) |
+| `npm run login:chatgpt` | ChatGPT 로그인 (Browser GPT 모드용 세션 저장) |
 | `npm run dev` | 웹 대시보드 실행 (localhost:3000) |
 | `npm run build` | 프로덕션 빌드 |
 | `npm run db:studio` | 데이터베이스 관리 UI |
+
+생성 결과만 확인하고 싶을 때(발행 없이):
+```bash
+DRY_RUN_GENERATE_ONLY=true DEBUG_SAVE_GENERATED_POST=true npm run publish -- <linkId>
+```
+결과 파일은 `logs/generated/*.json`에 저장됩니다.
 
 ---
 
@@ -204,6 +260,15 @@ npx playwright install chromium --force
 npm run login
 ```
 다시 로그인 후 발행해보세요.
+
+### Q: "ChatGPT 로그인했는데도 Custom GPT 접근 오류가 나요"
+**A:** 현재 로그인 계정이 GPT 링크 소유/공유 계정과 다를 때 발생합니다.
+
+```bash
+npm run login:chatgpt
+```
+
+실행 후 같은 계정으로 로그인했는지 확인하세요. 필요하면 `.env`의 `CHATGPT_GPT_URL_DRAFT`, `CHATGPT_GPT_URL_POLISH` 링크 권한도 점검하세요.
 
 ### Q: "OpenAI API 오류가 나요"
 **A:** 

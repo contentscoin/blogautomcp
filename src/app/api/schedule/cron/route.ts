@@ -1,5 +1,6 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { runScheduler } from "@/services/scheduler";
+import { requireCronSecret } from "@/lib/api-auth";
 
 function getErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : "알 수 없는 오류";
@@ -12,8 +13,13 @@ function getErrorMessage(error: unknown): string {
  * 설정 예시 (vercel.json):
  * "crons": [{ "path": "/api/schedule/cron", "schedule": "0 * * * *" }]
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
     try {
+        const authError = requireCronSecret(request);
+        if (authError) {
+            return authError;
+        }
+
         await runScheduler();
 
         return NextResponse.json({

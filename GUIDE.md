@@ -283,7 +283,7 @@ GEMINI_API_KEY=AIza여기에아까복사한키붙여넣기
 NAVER_BLOG_ID=내블로그아이디
 
 # 데이터베이스 (이건 그대로 두세요!)
-DATABASE_URL="file:./prisma/dev.db"
+DATABASE_URL="file:./dev.db"
 ```
 
 **🅱️ OpenAI 사용 시 (유료):**
@@ -298,7 +298,7 @@ OPENAI_API_KEY=sk-여기에아까복사한키붙여넣기
 NAVER_BLOG_ID=내블로그아이디
 
 # 데이터베이스 (이건 그대로 두세요!)
-DATABASE_URL="file:./prisma/dev.db"
+DATABASE_URL="file:./dev.db"
 ```
 
 **Gemini 예시:**
@@ -306,7 +306,7 @@ DATABASE_URL="file:./prisma/dev.db"
 AI_PROVIDER=gemini
 GEMINI_API_KEY=AIzaSyABC123abc123ABC123abc123
 NAVER_BLOG_ID=happyblogger123
-DATABASE_URL="file:./prisma/dev.db"
+DATABASE_URL="file:./dev.db"
 ```
 
 5. **Ctrl + S** 눌러서 저장하고 메모장 닫기

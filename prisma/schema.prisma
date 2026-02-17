@@ -98,13 +98,16 @@ model BrandLink {
   imageUrls   String?  // 스크래핑된 이미지 URL들
   
   // 발행 상태
-  status      String   @default("READY") // READY, PUBLISHING, PUBLISHED, FAILED
+  status      String   @default("READY") // READY, PUBLISHING, SCHEDULED, PUBLISHED, FAILED
   publishedAt DateTime?
+  scheduledPublishAt DateTime? // 예약 발행일시(네이버 예약 설정 값)
   postUrl     String?  // 발행된 블로그 글 URL
   errorMessage String?
   
   // 메모
   memo        String?
+  categoryNo  String?  // 네이버 블로그 게시판(카테고리) 번호
+  useSectionHeading Boolean @default(true) // 본문 소제목을 제목 스타일로 적용할지 여부
   
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

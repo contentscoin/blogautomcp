@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
+import { requireAdminApiKey } from "@/lib/api-auth";
 
 function getErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : "알 수 없는 오류";
@@ -20,7 +21,10 @@ export async function GET(req: NextRequest) {
     try {
         const { searchParams } = new URL(req.url);
         const status = searchParams.get("status");
-        const limit = parseInt(searchParams.get("limit") || "20");
+        const rawLimit = Number.parseInt(searchParams.get("limit") || "20", 10);
+        const limit = Number.isFinite(rawLimit)
+            ? Math.min(Math.max(rawLimit, 1), 100)
+            : 20;
 
         const where = status ? { status } : {};
 
@@ -55,6 +59,11 @@ export async function GET(req: NextRequest) {
 // POST: 새 예약 발행 생성
 export async function POST(req: NextRequest) {
     try {
+        const authError = requireAdminApiKey(req);
+        if (authError) {
+            return authError;
+        }
+
         const body = (await req.json()) as ScheduleRequestBody;
 
         const {
@@ -75,8 +84,22 @@ export async function POST(req: NextRequest) {
             );
         }
 
+        if (type && !["travel", "golf", "knowledge"].includes(type)) {
+            return NextResponse.json(
+                { success: false, error: "type은 travel|golf|knowledge 중 하나여야 합니다" },
+                { status: 400 }
+            );
+        }
+
         // 예약 시간 검증 (현재 시간 이후여야 함)
         const scheduleDate = new Date(scheduledAt);
+        if (Number.isNaN(scheduleDate.getTime())) {
+            return NextResponse.json(
+                { success: false, error: "scheduledAt 형식이 올바르지 않습니다" },
+                { status: 400 }
+            );
+        }
+
         if (scheduleDate < new Date()) {
             return NextResponse.json(
                 { success: false, error: "예약 시간은 현재 시간 이후여야 합니다" },
@@ -92,8 +115,8 @@ export async function POST(req: NextRequest) {
                 status: "PENDING",
                 topicSeed: JSON.stringify({
                     type: type || "knowledge",
-                    topic,
-                    keywords: keywords?.split(",").map((k) => k.trim()) || [],
+                    topic: topic.trim(),
+                    keywords: keywords?.split(",").map((k) => k.trim()).filter(Boolean) || [],
                     style,
                     images,
                 }),
@@ -122,6 +145,11 @@ export async function POST(req: NextRequest) {
 // DELETE: 예약 취소
 export async function DELETE(req: NextRequest) {
     try {
+        const authError = requireAdminApiKey(req);
+        if (authError) {
+            return authError;
+        }
+
         const { searchParams } = new URL(req.url);
         const id = searchParams.get("id");
 

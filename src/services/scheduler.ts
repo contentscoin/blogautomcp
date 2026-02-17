@@ -4,11 +4,9 @@
  */
 
 import { prisma } from "@/lib/db";
-import { exec } from "child_process";
-import { promisify } from "util";
 import { createTaskLogger } from "../../scripts/lib/logger";
+import { runTsNodeScript } from "@/lib/run-script";
 
-const execAsync = promisify(exec);
 const log = createTaskLogger("Scheduler");
 
 interface TopicSeed {
@@ -61,35 +59,32 @@ export async function executeScheduledPost(postId: string): Promise<boolean> {
         const seed: TopicSeed = JSON.parse(post.topicSeed);
 
         // 명령어 구성
-        const args = [
-            `--type=${seed.type}`,
-            `--topic="${seed.topic}"`,
-            "--publish",
-        ];
+        const args = [`--type=${seed.type}`, `--topic=${seed.topic}`, "--publish"];
 
         if (seed.keywords.length > 0) {
-            args.push(`--keywords="${seed.keywords.join(",")}"`);
+            args.push(`--keywords=${seed.keywords.join(",")}`);
         }
         if (seed.style) {
             args.push(`--style=${seed.style}`);
         }
         if (seed.images) {
-            args.push(`--images="${seed.images}"`);
+            args.push(`--images=${seed.images}`);
         }
         if (post.category) {
-            args.push(`--category="${post.category}"`);
+            args.push(`--category=${post.category}`);
         }
 
-        const command = `npx ts-node --project tsconfig.scripts.json scripts/topic-agent.ts ${args.join(" ")}`;
-        log.info(`실행 명령: ${command}`);
+        log.info(`실행 명령`, { script: "scripts/topic-agent.ts", args });
 
         // 실행 (5분 타임아웃)
-        const { stdout } = await execAsync(command, {
-            cwd: process.cwd(),
-            timeout: 300000,
+        const { stdout, stderr } = await runTsNodeScript("scripts/topic-agent.ts", args, {
+            timeoutMs: 300000,
         });
 
-        log.info(`실행 완료`, { stdout: stdout.slice(-500) });
+        log.info(`실행 완료`, {
+            stdout: stdout.slice(-500),
+            stderr: stderr.slice(-300),
+        });
 
         // 결과에서 제목 파싱
         const titleMatch = stdout.match(/제목: (.+)/);

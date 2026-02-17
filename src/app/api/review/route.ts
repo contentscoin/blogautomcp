@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { exec } from "child_process";
-import { promisify } from "util";
-
-const execAsync = promisify(exec);
+import { requireAdminApiKey } from "@/lib/api-auth";
+import { runTsNodeScript, ScriptExecutionError } from "@/lib/run-script";
 
 interface ReviewRequestBody {
     placeName?: string;
@@ -21,12 +19,30 @@ function getErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : "알 수 없는 오류";
 }
 
+function getErrorStderr(error: unknown): string | undefined {
+    if (error instanceof ScriptExecutionError) {
+        return error.stderr.slice(-1000) || undefined;
+    }
+
+    if (typeof error !== "object" || error === null || !("stderr" in error)) {
+        return undefined;
+    }
+
+    const stderr = (error as { stderr?: unknown }).stderr;
+    return typeof stderr === "string" ? stderr.slice(-1000) : undefined;
+}
+
 /**
  * 리뷰 글 생성 API
  * V5 Phase 11: GPTs 패턴 기반 장소/제품 리뷰
  */
 export async function POST(req: NextRequest) {
     try {
+        const authError = requireAdminApiKey(req);
+        if (authError) {
+            return authError;
+        }
+
         const body = (await req.json()) as ReviewRequestBody;
 
         const {
@@ -43,36 +59,40 @@ export async function POST(req: NextRequest) {
         } = body;
 
         // 필수값 검증
-        if (!placeName || !rawNotes) {
+        const normalizedPlaceName = placeName?.trim();
+        const normalizedRawNotes = rawNotes?.trim();
+
+        if (!normalizedPlaceName || !normalizedRawNotes) {
             return NextResponse.json(
                 { success: false, error: "placeName과 rawNotes는 필수입니다" },
                 { status: 400 }
             );
         }
 
-        // 명령어 구성
+        if (normalizedRawNotes.length > 5000) {
+            return NextResponse.json(
+                { success: false, error: "rawNotes가 너무 깁니다. 5000자 이하로 입력하세요." },
+                { status: 400 }
+            );
+        }
+
+        // 안전한 인자 배열로 스크립트 실행 (쉘 문자열 결합 금지)
         const args = [
-            `--name="${placeName}"`,
-            `--notes="${rawNotes.replace(/"/g, '\\"')}"`,
+            `--name=${normalizedPlaceName}`,
+            `--notes=${normalizedRawNotes}`,
         ];
 
-        if (address) args.push(`--address="${address}"`);
-        if (keywords) args.push(`--keywords="${keywords}"`);
-        if (tips) args.push(`--tips="${tips}"`);
+        if (address?.trim()) args.push(`--address=${address.trim()}`);
+        if (keywords?.trim()) args.push(`--keywords=${keywords.trim()}`);
+        if (tips?.trim()) args.push(`--tips=${tips.trim()}`);
         if (category) args.push(`--category=${category}`);
-        if (phone) args.push(`--phone="${phone}"`);
-        if (parking) args.push(`--parking="${parking}"`);
+        if (phone?.trim()) args.push(`--phone=${phone.trim()}`);
+        if (parking?.trim()) args.push(`--parking=${parking.trim()}`);
         if (style) args.push(`--style=${style}`);
         if (publish) args.push("--publish");
 
-        const command = `npx ts-node --project tsconfig.scripts.json scripts/review-agent.ts ${args.join(" ")}`;
-
-        console.log("실행 명령:", command);
-
-        // 실행 (5분 타임아웃)
-        const { stdout } = await execAsync(command, {
-            cwd: process.cwd(),
-            timeout: 300000,
+        const { stdout } = await runTsNodeScript("scripts/review-agent.ts", args, {
+            timeoutMs: 300000,
         });
 
         // 결과 파싱
@@ -91,7 +111,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({
             success: true,
             data: {
-                title: titleMatch?.[1] || placeName,
+                title: titleMatch?.[1] || normalizedPlaceName,
                 content,
                 published: publish || false,
             },
@@ -100,7 +120,11 @@ export async function POST(req: NextRequest) {
     } catch (error: unknown) {
         console.error("리뷰 생성 실패:", error);
         return NextResponse.json(
-            { success: false, error: getErrorMessage(error) },
+            {
+                success: false,
+                error: getErrorMessage(error),
+                stderr: getErrorStderr(error),
+            },
             { status: 500 }
         );
     }

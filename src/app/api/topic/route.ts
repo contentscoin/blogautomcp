@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { exec } from "child_process";
-import { promisify } from "util";
-
-const execAsync = promisify(exec);
+import { requireAdminApiKey } from "@/lib/api-auth";
+import { runTsNodeScript, ScriptExecutionError } from "@/lib/run-script";
 
 interface TopicGenerateRequest {
     type: "travel" | "golf" | "knowledge";
@@ -18,6 +16,10 @@ function getErrorMessage(error: unknown): string {
 }
 
 function getErrorStderr(error: unknown): string | undefined {
+    if (error instanceof ScriptExecutionError) {
+        return error.stderr.slice(-1000) || undefined;
+    }
+
     if (typeof error !== "object" || error === null || !("stderr" in error)) {
         return undefined;
     }
@@ -28,6 +30,11 @@ function getErrorStderr(error: unknown): string | undefined {
 
 export async function POST(req: NextRequest) {
     try {
+        const authError = requireAdminApiKey(req);
+        if (authError) {
+            return authError;
+        }
+
         const body: TopicGenerateRequest = await req.json();
 
         // 필수 값 검증
@@ -39,32 +46,31 @@ export async function POST(req: NextRequest) {
         }
 
         // 명령어 구성
-        const args = [
-            `--type=${body.type}`,
-            `--topic="${body.topic}"`,
-        ];
-
-        if (body.keywords) {
-            args.push(`--keywords="${body.keywords}"`);
+        const topic = body.topic.trim();
+        if (!topic) {
+            return NextResponse.json(
+                { success: false, error: "topic은 비워둘 수 없습니다" },
+                { status: 400 }
+            );
         }
-        if (body.style) {
+
+        const args = [`--type=${body.type}`, `--topic=${topic}`];
+
+        if (body.keywords?.trim()) {
+            args.push(`--keywords=${body.keywords.trim()}`);
+        }
+        if (body.style?.trim()) {
             args.push(`--style=${body.style}`);
         }
-        if (body.category) {
-            args.push(`--category="${body.category}"`);
+        if (body.category?.trim()) {
+            args.push(`--category=${body.category.trim()}`);
         }
         if (body.publish) {
             args.push("--publish");
         }
 
-        const command = `npx ts-node --project tsconfig.scripts.json scripts/topic-agent.ts ${args.join(" ")}`;
-
-        console.log(`🚀 실행: ${command}`);
-
-        // 최대 5분 타임아웃
-        const { stdout, stderr } = await execAsync(command, {
-            cwd: process.cwd(),
-            timeout: 300000,
+        const { stdout, stderr } = await runTsNodeScript("scripts/topic-agent.ts", args, {
+            timeoutMs: 300000,
             env: { ...process.env },
         });
 

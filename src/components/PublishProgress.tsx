@@ -7,6 +7,7 @@ interface PublishEvent {
     progress: number;
     message: string;
     url?: string;
+    scheduledDate?: string;
     error?: string;
 }
 
@@ -38,6 +39,7 @@ export default function PublishProgress({
 
     const startSSE = useCallback(() => {
         const eventSource = new EventSource(`/api/brandlinks/${linkId}/progress`);
+        let finished = false;
 
         eventSource.onmessage = (event) => {
             try {
@@ -45,10 +47,12 @@ export default function PublishProgress({
                 setCurrentEvent(data);
 
                 if (data.step === "complete") {
+                    finished = true;
                     setCompletedUrl(data.url || null);
                     onComplete(data.url);
                     eventSource.close();
                 } else if (data.step === "error") {
+                    finished = true;
                     onError(data.error || "알 수 없는 오류");
                     eventSource.close();
                 }
@@ -58,6 +62,7 @@ export default function PublishProgress({
         };
 
         eventSource.onerror = () => {
+            if (finished) return;
             onError("연결이 끊어졌습니다");
             eventSource.close();
         };
