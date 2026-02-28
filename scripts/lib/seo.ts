@@ -21,18 +21,24 @@ export async function getNaverAutocomplete(query: string): Promise<string[]> {
     return safeExecute(
         async () => {
             const url = `https://ac.search.naver.com/nx/ac?q=${encodeURIComponent(query)}&con=1&frm=nv&ans=2&r_format=json&r_enc=UTF-8&r_unicode=0&t_koreng=1&run=2&rev=4&q_enc=UTF-8`;
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 5000);
 
-            const response = await fetch(url, {
-                headers: {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                },
-            });
+            try {
+                const response = await fetch(url, {
+                    headers: {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    },
+                    signal: controller.signal,
+                });
+                const data: any = await response.json();
+                const suggestions = data.items?.[0] || [];
 
-            const data = await response.json();
-            const suggestions = data.items?.[0] || [];
-
-            log.info(`자동완성 ${suggestions.length}개 수집`, { query });
-            return suggestions.map((item: string[]) => item[0]);
+                log.info(`자동완성 ${suggestions.length}개 수집`, { query });
+                return suggestions.map((item: string[]) => item[0]);
+            } finally {
+                clearTimeout(timeout);
+            }
         },
         [],
         (error) => log.warn(`자동완성 실패`, { error: error.message })

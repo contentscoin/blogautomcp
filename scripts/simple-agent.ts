@@ -1349,21 +1349,33 @@ async function sendPromptToChatGPT(
 
   await dismissTemporaryChatOnboarding(page);
   await waitForChatGPTGenerationIdle(page, 60_000, label);
+  
+  // 프롬프트 입력 전에 약간 대기 (UI 반응형)
+  await page.waitForTimeout(1000);
+  
   const previousMessages = await readAssistantMessages(page);
   const composerSelector = await waitForChatGPTComposer(page, CHATGPT_TIMEOUT_MS);
   const composer = page.locator(composerSelector).first();
 
   await composer.click();
+  await page.waitForTimeout(500);
 
   if (composerSelector.startsWith("textarea")) {
     await composer.fill(prompt);
   } else {
     await page.keyboard.press("Meta+A").catch(() => {});
     await page.keyboard.press("Control+A").catch(() => {});
-    await page.keyboard.type(prompt, { delay: 1 });
+    await page.keyboard.type(prompt, { delay: 5 }); // delay 증가
   }
 
+  // 입력 완료 후 잠시 대기
+  await page.waitForTimeout(1000);
+
   await waitForChatGPTSendReady(page, sendReadyTimeoutMs);
+  
+  // 전송 버튼 누르기 전 대기
+  await page.waitForTimeout(500);
+  
   const sendButtonSelector = await findVisibleSelector(page, CHATGPT_SEND_BUTTON_SELECTORS);
 
   if (sendButtonSelector) {
@@ -1372,7 +1384,10 @@ async function sendPromptToChatGPT(
     await composer.press("Enter").catch(() => {});
   }
 
-  let submission = await waitForPromptSubmission(page, previousMessages, 10_000);
+  // 전송 직후 기다림 증가
+  await page.waitForTimeout(2000);
+
+  let submission = await waitForPromptSubmission(page, previousMessages, 15_000);
   if (submission) {
     console.log(`      - ${label} 전송 확인(${submission})`);
   }
@@ -1387,7 +1402,9 @@ async function sendPromptToChatGPT(
       } else {
         await composer.press("Enter").catch(() => {});
       }
-      submission = await waitForPromptSubmission(page, previousMessages, 10_000);
+      
+      await page.waitForTimeout(2000);
+      submission = await waitForPromptSubmission(page, previousMessages, 15_000);
       if (submission) {
         console.log(`      - ${label} 전송 확인(${submission})`);
       }
@@ -4588,6 +4605,8 @@ async function step7_publish(
 
   // 2. 상단 헤더 발행 버튼
   console.log("   1차 발행 버튼 클릭...");
+  await page.waitForTimeout(1000); // 팝업 닫힌 후 잠깐 대기
+  
   const headerPublishBtn = await page.$('button[class*="publish_btn"], header button[class*="publish"]');
   if (headerPublishBtn) {
     await headerPublishBtn.click({ force: true }).catch(() => {});
@@ -4597,7 +4616,7 @@ async function step7_publish(
     console.log("   ✅ 좌표로 발행 버튼 클릭");
   }
 
-  await page.waitForTimeout(2000);
+  await page.waitForTimeout(3500); // 패널 애니메이션 대기 시간 증가
 
   if (mode === "schedule") {
     if (!options.scheduledDate) {
@@ -4838,7 +4857,7 @@ async function main() {
   );
   if (runtimePublishOptions.adjustedFromPast && runtimePublishOptions.scheduledDateInput) {
     console.log(
-      `   ⚠️ 과거 또는 당일 날짜가 입력되어 예약일을 ${runtimePublishOptions.scheduledDateInput}로 자동 조정했습니다.`
+      `   ⚠️ 과거 또는 당일 날짜가 입력되어 예약발행일을 ${runtimePublishOptions.scheduledDateInput}로 자동 조정했습니다.`
     );
   }
   
@@ -5003,13 +5022,13 @@ async function main() {
         scheduledDateInput !== runtimePublishOptions.scheduledDateInput
       ) {
         console.log(
-          `   ⚠️ 예약 시간이 현재 시간보다 과거여서 예약일을 ${runtimePublishOptions.scheduledDateInput} → ${scheduledDateInput}로 조정했습니다.`
+          `   ⚠️ 예약 시간이 현재 시간보다 과거여서 예약발행일을 ${runtimePublishOptions.scheduledDateInput} → ${scheduledDateInput}로 조정했습니다.`
         );
       }
 
       console.log("\n" + "=".repeat(50));
       console.log("🗓️ 예약 발행 등록 완료!");
-      console.log(`📅 예약일: ${scheduledDateInput} 09:00`);
+      console.log(`📅 예약발행일: ${scheduledDateInput} 09:00`);
       console.log(`📦 상품: ${product.name}`);
       console.log(`🖼️ 이미지: ${product.imagePaths.length}개`);
       console.log(`📝 섹션: ${post.sections.length}개`);

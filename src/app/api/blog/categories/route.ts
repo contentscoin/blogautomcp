@@ -184,7 +184,18 @@ export async function GET() {
     }
 
     const text = await response.text();
-    const parsed = JSON.parse(text) as FormManagerOptionsResponse;
+    let parsed: FormManagerOptionsResponse;
+    try {
+      parsed = JSON.parse(text) as FormManagerOptionsResponse;
+    } catch (parseError) {
+      // HTML이 반환되는 경우(로그인 만료 등으로 리다이렉트된 경우)
+      if (text.includes("<!DOCTYPE") || text.includes("<html") || text.includes("<script")) {
+         throw new Error("네이버 로그인 세션이 만료되었거나 권한이 없습니다. 터미널에서 `npm run login`을 다시 실행해주세요.");
+      }
+      console.error("JSON 파싱 에러. 원본 응답:", text.substring(0, 500));
+      throw new Error("네이버 카테고리 응답을 분석할 수 없습니다.");
+    }
+    
     if (!parsed.isSuccess) {
       throw new Error("네이버 카테고리 응답이 비정상입니다.");
     }
