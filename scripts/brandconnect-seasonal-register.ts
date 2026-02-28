@@ -784,7 +784,7 @@ async function main() {
   const ranked = rankSeasonalProducts(productsFromApi);
   const selected = selectUniqueCandidates(
     ranked,
-    options.count,
+    ranked.length,
     existingStrictKeys,
     existingRelaxedKeys
   );
@@ -794,29 +794,37 @@ async function main() {
     );
   }
 
-  const planned: PlannedProduct[] = selected.map((item, index) => {
+  const getScheduledDate = (successIndex: number) =>
+    addDaysToYmd(startDate, successIndex * options.intervalDays);
+
+  console.log("\n📋 선별 결과");
+  selected.slice(0, options.count).forEach((item, index) => {
     const boardName = inferBoardName(item.productName);
     const categoryNo = categoryMap.get(boardName) ?? CATEGORY_NAME_FALLBACK[boardName] ?? null;
-    const scheduledDate = addDaysToYmd(startDate, index * options.intervalDays);
+    console.log(
+      `${String(index + 1).padStart(2, "0")}. [${boardName}/${categoryNo ?? "-"}] ${getScheduledDate(index)} | score=${item.score.toFixed(1)} | 수수료 ${item.commissionRate}% | ${item.productName}`
+    );
+  });
 
-    return {
+  const results: RegisterResult[] = [];
+  const createdUrls = new Set<string>();
+  let successfulRegisterCount = 0;
+
+  for (const item of selected) {
+    if (successfulRegisterCount >= options.count) {
+      break;
+    }
+
+    const boardName = inferBoardName(item.productName);
+    const categoryNo = categoryMap.get(boardName) ?? CATEGORY_NAME_FALLBACK[boardName] ?? null;
+    const scheduledDate = getScheduledDate(successfulRegisterCount);
+    const plannedItem: PlannedProduct = {
       ...item,
       boardName,
       categoryNo,
       scheduledDate,
     };
-  });
 
-  console.log("\n📋 선별 결과");
-  planned.forEach((item, index) => {
-    console.log(
-      `${String(index + 1).padStart(2, "0")}. [${item.boardName}/${item.categoryNo ?? "-"}] ${item.scheduledDate} | score=${item.score.toFixed(1)} | 수수료 ${item.commissionRate}% | ${item.productName}`
-    );
-  });
-
-  const results: RegisterResult[] = [];
-
-  for (const item of planned) {
     console.log(`\n🔗 링크 발급 중: ${item.productName}`);
     const shortUrl = await issueAffiliateShortUrl(
       page,
@@ -832,15 +840,31 @@ async function main() {
         productId: item.id,
         productName: item.productName,
         shortUrl: null,
-        categoryNo: item.categoryNo,
-        boardName: item.boardName,
-        scheduledDate: item.scheduledDate,
+        categoryNo: plannedItem.categoryNo,
+        boardName: plannedItem.boardName,
+        scheduledDate: plannedItem.scheduledDate,
         reason: "링크 발급 실패",
       });
       continue;
     }
 
     console.log(`   ✅ ${shortUrl}`);
+
+    const normalizedShortUrl = shortUrl.toLowerCase();
+    if (createdUrls.has(normalizedShortUrl)) {
+      console.log(`   ↪️ 배치 내에서 중복 단축링크로 건너뜀 (${shortUrl})`);
+      results.push({
+        action: "duplicate",
+        productId: item.id,
+        productName: item.productName,
+        shortUrl,
+        categoryNo: plannedItem.categoryNo,
+        boardName: plannedItem.boardName,
+        scheduledDate: plannedItem.scheduledDate,
+        reason: "이전 항목과 단축URL 중복",
+      });
+      continue;
+    }
 
     const existing = await prisma.brandLink.findFirst({ where: { url: shortUrl } });
     if (existing) {
@@ -851,8 +875,8 @@ async function main() {
         productName: item.productName,
         shortUrl,
         categoryNo: existing.categoryNo,
-        boardName: item.boardName,
-        scheduledDate: item.scheduledDate,
+        boardName: plannedItem.boardName,
+        scheduledDate: plannedItem.scheduledDate,
         reason: `기존 상태 ${existing.status}`,
         linkId: existing.id,
       });
@@ -865,21 +889,22 @@ async function main() {
         productId: item.id,
         productName: item.productName,
         shortUrl,
-        categoryNo: item.categoryNo,
-        boardName: item.boardName,
-        scheduledDate: item.scheduledDate,
+        categoryNo: plannedItem.categoryNo,
+        boardName: plannedItem.boardName,
+        scheduledDate: plannedItem.scheduledDate,
         reason: "dry-run",
       });
+      successfulRegisterCount += 1;
       continue;
     }
 
-    const scheduledPublishAt = new Date(`${item.scheduledDate}T00:00:00.000Z`);
+    const scheduledPublishAt = new Date(`${plannedItem.scheduledDate}T00:00:00.000Z`);
 
     const created = await prisma.brandLink.create({
       data: {
         url: shortUrl,
-        memo: buildMemo(item),
-        categoryNo: item.categoryNo,
+        memo: buildMemo(plannedItem),
+        categoryNo: plannedItem.categoryNo,
         useSectionHeading: true,
         status: "READY",
         productName: item.productName,
@@ -895,11 +920,13 @@ async function main() {
       productName: item.productName,
       shortUrl,
       categoryNo: created.categoryNo,
-      boardName: item.boardName,
-      scheduledDate: item.scheduledDate,
+      boardName: plannedItem.boardName,
+      scheduledDate: plannedItem.scheduledDate,
       linkId: created.id,
     });
     console.log(`   ✅ 링크 등록 완료 (${created.id})`);
+    createdUrls.add(normalizedShortUrl);
+    successfulRegisterCount += 1;
   }
 
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -913,7 +940,7 @@ async function main() {
       {
         options,
         startDate,
-        selectedCount: planned.length,
+        selectedCount: selected.length,
         results,
       },
       null,

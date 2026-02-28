@@ -60,7 +60,7 @@ function formatLogStamp(date: Date): string {
 function normalizeScheduledDate(raw: string): ScheduledDateNormalizationResult {
   const trimmed = raw.trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-    throw new Error("예약일은 YYYY-MM-DD 형식으로 입력하세요.");
+    throw new Error("예약발행일은 YYYY-MM-DD 형식으로 입력하세요.");
   }
 
   const [yearText, monthText, dayText] = trimmed.split("-");
@@ -69,7 +69,7 @@ function normalizeScheduledDate(raw: string): ScheduledDateNormalizationResult {
   const day = Number.parseInt(dayText, 10);
 
   if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
-    throw new Error("예약일 형식이 올바르지 않습니다.");
+    throw new Error("예약발행일 형식이 올바르지 않습니다.");
   }
 
   const requestedDate = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
@@ -95,7 +95,7 @@ function normalizeScheduledDate(raw: string): ScheduledDateNormalizationResult {
 
   const effectiveDate = new Date(`${effectiveDateInput}T00:00:00.000Z`);
   if (Number.isNaN(effectiveDate.getTime())) {
-    throw new Error("예약일 계산 중 오류가 발생했습니다.");
+    throw new Error("예약발행일 계산 중 오류가 발생했습니다.");
   }
 
   return {

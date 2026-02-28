@@ -101,7 +101,7 @@ async function main() {
     });
 
     if (pending.length === 0) {
-      console.log("예약일이 설정된 READY 링크가 없어 종료합니다.");
+      console.log("예약발행일이 설정된 READY 링크가 없어 종료합니다.");
       return;
     }
 

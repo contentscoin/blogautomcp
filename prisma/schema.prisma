@@ -46,6 +46,69 @@ model Post {
   @@index([scheduledAt])
 }
 
+model TopicCampaign {
+  id             String          @id @default(uuid())
+  rootTopic      String
+  intent         String?
+  audience       String?
+  style          String?
+  sourceUrls     String          // JSON array
+  researchPackJson String
+  status         String          @default("RESEARCHING")
+  type           String          @default("knowledge")
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  drafts         TopicDraft[]
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+model TopicDraft {
+  id              String          @id @default(uuid())
+  campaignId      String
+  subTopic        String
+  reason          String?
+  priority        Int             @default(1)
+  titleCandidates String?         // JSON array
+  contentJson     String?
+  citations       String?
+  status          String          @default("SUBTOPIC_READY")
+  thumbnailImageJson String?
+  sourceImagesJson String?
+  topicSeedJson   String?
+  scheduledAt     DateTime?
+  postId          String?
+  errorMessage    String?
+
+  campaign        TopicCampaign   @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  images          TopicDraftImage[]
+
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@index([campaignId])
+  @@index([status])
+}
+
+model TopicDraftImage {
+  id         String   @id @default(uuid())
+  draftId    String
+  sourceUrl  String
+  localPath  String?
+  creditName String?
+  creditUrl  String?
+  role       String
+
+  draft      TopicDraft @relation(fields: [draftId], references: [id], onDelete: Cascade)
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([draftId])
+}
+
 // 실행 로그
 model Log {
   id            String   @id @default(uuid())

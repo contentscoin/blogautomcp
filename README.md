@@ -210,6 +210,32 @@ npm run dev
 
 브라우저에서 **http://localhost:3000** 접속
 
+### Step 2-2: 데스크톱 앱(권장, macOS/Windows 용)
+
+```bash
+npm run desktop
+```
+
+- 앱 실행 시 Next.js 서버를 자동으로 시작(또는 3000 포트 사용 중이면 기존 서버 재사용)
+- macOS: `BrandConnect Automation.app` 실행
+- Windows: 설치 후 `.exe` 실행
+
+또는 더블클릭 실행:
+
+- macOS: `scripts/desktop.command`
+- Windows: `scripts/desktop.bat`
+
+#### 데스크톱 앱 빌드
+
+```bash
+npm run desktop:pack:mac   # macOS dmg 생성 (mac)
+npm run desktop:pack:win   # Windows 인스톨러 생성 (Windows)
+npm run desktop:pack       # 현재 OS 패키지 모두 생성
+```
+
+※ `desktop:pack:mac`/`desktop:pack:win`은 각각 macOS/Windows 환경에서 실행할 때만 빌드됩니다.
+※ 패키지 생성 전 `npm run build`가 먼저 실행되어야 하며, 빌드된 `.next`를 기반으로 동작합니다.
+
 ### Step 3: 링크 추가 & 발행
 
 1. 브랜드커넥트에서 받은 링크 복사 (https://naver.me/xxx 형태)
@@ -235,6 +261,11 @@ npm run dev
 | `npm run login` | 네이버 로그인 (세션 저장) |
 | `npm run login:chatgpt` | ChatGPT 로그인 (Browser GPT 모드용 세션 저장) |
 | `npm run dev` | 웹 대시보드 실행 (localhost:3000) |
+| `npm run desktop` | 데스크톱 앱 실행 (macOS/Windows) |
+| `./scripts/desktop.command` | macOS 데스크톱 앱 실행기 |
+| `./scripts/desktop.bat` | Windows 데스크톱 앱 실행기 |
+| `npm run desktop:pack:mac` | macOS 설치본 생성 |
+| `npm run desktop:pack:win` | Windows 설치본 생성 |
 | `npm run build` | 프로덕션 빌드 |
 | `npm run db:studio` | 데이터베이스 관리 UI |
 

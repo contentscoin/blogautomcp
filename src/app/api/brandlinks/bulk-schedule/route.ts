@@ -74,7 +74,7 @@ export async function POST(request: NextRequest) {
     if (pendingCount === 0) {
       return NextResponse.json({
         success: true,
-        message: "예약일이 설정된 READY 링크가 없습니다.",
+        message: "예약발행일이 설정된 READY 링크가 없습니다.",
         data: {
           targetCount: 0,
         },
