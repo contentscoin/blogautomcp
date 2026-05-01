@@ -57,6 +57,7 @@ interface TopicTaskPanelProps<TTask extends TopicTaskPanelTask> {
   newTopicType: string;
   onAddTopicTask: () => void;
   onDeleteTopicTask: (id: string) => void;
+  onBulkSchedulePublish: () => void | Promise<void>;
   onPrepareTopicTask: (id: string) => void;
   onTopicPublish: (id: string) => void;
   onTopicSchedulePublish: (task: TTask) => void | Promise<void>;
@@ -75,6 +76,8 @@ interface TopicTaskPanelProps<TTask extends TopicTaskPanelTask> {
   setNewTopicScheduledDate: (value: string) => void;
   setNewTopicType: (value: string) => void;
   tasks: TTask[];
+  readyScheduledTopicCount: number;
+  topicBulkScheduleRunning: boolean;
   topicLoading: boolean;
   topicPreparingId: string | null;
   topicPublishingId: string | null;
@@ -713,6 +716,7 @@ export default function TopicTaskPanel<TTask extends TopicTaskPanelTask>({
   newTopicType,
   onAddTopicTask,
   onDeleteTopicTask,
+  onBulkSchedulePublish,
   onPrepareTopicTask,
   onTopicPublish,
   onTopicSchedulePublish,
@@ -725,6 +729,8 @@ export default function TopicTaskPanel<TTask extends TopicTaskPanelTask>({
   setNewTopicScheduledDate,
   setNewTopicType,
   tasks,
+  readyScheduledTopicCount,
+  topicBulkScheduleRunning,
   topicLoading,
   topicPreparingId,
   topicPublishingId,
@@ -835,6 +841,23 @@ export default function TopicTaskPanel<TTask extends TopicTaskPanelTask>({
       </div>
 
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden mt-6">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-800">주제글 작성 목록</h3>
+            <p className="mt-0.5 text-xs text-slate-500">
+              예약일이 있는 준비완료 글을 최대 10개씩 예약 포스팅합니다.
+            </p>
+          </div>
+          <button
+            onClick={() => onBulkSchedulePublish()}
+            disabled={topicBulkScheduleRunning || readyScheduledTopicCount === 0}
+            className="px-4 py-2 text-sm font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            {topicBulkScheduleRunning
+              ? "예약배포 실행 중..."
+              : `예약배포 일괄 실행 (${Math.min(10, readyScheduledTopicCount)}건)`}
+          </button>
+        </div>
         <table className="w-full">
           <thead className="bg-slate-50 border-b border-slate-200">
             <tr>
@@ -1064,7 +1087,7 @@ export default function TopicTaskPanel<TTask extends TopicTaskPanelTask>({
                               disabled={isPublishing || isPreparing}
                               className="px-3 py-1 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50 transition-colors"
                             >
-                              📅 예약
+                              📅 예약배포
                             </button>
                           </>
                         )}

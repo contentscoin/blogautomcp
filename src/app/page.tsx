@@ -6,6 +6,8 @@ import SessionStatus from "@/components/SessionStatus";
 import PublishProgress from "@/components/PublishProgress";
 import TopicTaskPanel from "@/components/TopicTaskPanel";
 import { ThemeToggle } from "@/components/ThemeProvider";
+import { getTopicTaskContentReadiness } from "@/lib/topic-task-content-readiness";
+import { getTopicTaskPublishReadiness } from "@/lib/topic-task-publish-readiness";
 
 type ContentMode = "product" | "topic" | "review";
 type ReviewCategory = "place" | "food" | "travel" | "parenting" | "product";
@@ -151,6 +153,29 @@ function formatDateDisplay(raw: string | null): string {
   return date.toISOString().slice(0, 10);
 }
 
+function canBulkScheduleTopicTask(task: TopicPostTask): boolean {
+  if (task.status !== "PREPARED" && task.status !== "FAILED") return false;
+  if (formatDateDisplay(task.scheduledPublishAt) === "-") return false;
+
+  const publishReadiness = getTopicTaskPublishReadiness({
+    status: task.status,
+    selectedDraftId: task.selectedDraftId,
+    preparedContentJson: task.preparedContentJson,
+    preparedImages: task.preparedImages,
+  });
+  if (!publishReadiness.canPublish) return false;
+
+  const contentReadiness = getTopicTaskContentReadiness({
+    topic: task.topic,
+    keywords: task.keywords,
+    type: task.type,
+    topicCraftCategory: task.topicCraftCategory,
+    preparedContentJson: task.preparedContentJson,
+  });
+
+  return contentReadiness.canPublish;
+}
+
 export default function Dashboard() {
   const [links, setLinks] = useState<BrandLink[]>([]);
   const [loading, setLoading] = useState(true);
@@ -196,6 +221,7 @@ export default function Dashboard() {
   const [addingTopic, setAddingTopic] = useState(false);
   const [topicPreparingId, setTopicPreparingId] = useState<string | null>(null);
   const [topicPublishingId, setTopicPublishingId] = useState<string | null>(null);
+  const [topicBulkScheduleRunning, setTopicBulkScheduleRunning] = useState(false);
 
   const [dashboardNotice, setDashboardNotice] = useState<{
     tone: "info" | "success" | "error";
@@ -204,10 +230,12 @@ export default function Dashboard() {
 
   const getBusyMessage = useCallback((): string | null => {
     if (publishingId) return "현재 발행 작업이 진행 중입니다. 완료 후 다시 시도하세요.";
+    if (topicPublishingId) return "현재 주제글 발행 작업이 진행 중입니다. 완료 후 다시 시도하세요.";
     if (bulkSeasonalRunning) return "시즌 추천 등록 작업이 이미 실행 중입니다.";
     if (bulkScheduleRunning) return "예약발행 일괄 실행 작업이 이미 실행 중입니다.";
+    if (topicBulkScheduleRunning) return "주제글 예약배포 일괄 실행 작업이 이미 실행 중입니다.";
     return null;
-  }, [publishingId, bulkSeasonalRunning, bulkScheduleRunning]);
+  }, [publishingId, topicPublishingId, bulkSeasonalRunning, bulkScheduleRunning, topicBulkScheduleRunning]);
 
   const fetchLinks = useCallback(async () => {
     try {
@@ -763,6 +791,7 @@ export default function Dashboard() {
   const readyScheduledCount = links.filter(
     (link) => link.status === "READY" && formatDateDisplay(link.scheduledPublishAt) !== "-"
   ).length;
+  const readyTopicScheduledCount = topicTasks.filter(canBulkScheduleTopicTask).length;
   const busyMessageForUi = getBusyMessage();
 
   // V5: 리뷰 생성
@@ -1013,6 +1042,81 @@ export default function Dashboard() {
       publishMode: "schedule",
       scheduledDate,
     });
+  };
+
+  const handleTopicBulkSchedulePublish = async () => {
+    const busyMessage = getBusyMessage();
+    if (busyMessage) {
+      setDashboardNotice({
+        tone: "info",
+        text: busyMessage,
+      });
+      return;
+    }
+
+    const targetableCount = topicTasks.filter(canBulkScheduleTopicTask).length;
+
+    if (targetableCount === 0) {
+      setDashboardNotice({
+        tone: "info",
+        text: "예약일이 지정된 준비완료 주제글이 없습니다.",
+      });
+      return;
+    }
+
+    const limit = Math.min(10, targetableCount);
+
+    try {
+      setTopicBulkScheduleRunning(true);
+      setDashboardNotice({
+        tone: "info",
+        text: `주제글 예약배포 일괄 실행 요청 시작 (${limit}건)...`,
+      });
+
+      const res = await fetch("/api/topic-tasks/bulk-schedule", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          limit,
+          delayMs: 1500,
+        }),
+      });
+      const data = (await res.json()) as BulkActionResponse;
+
+      if (!res.ok || !data.success) {
+        setDashboardNotice({
+          tone: "error",
+          text: `주제글 예약배포 일괄 실행 실패: ${data.error || "알 수 없는 오류"}`,
+        });
+        return;
+      }
+
+      if ((data.data?.targetCount ?? 0) === 0) {
+        setDashboardNotice({
+          tone: "info",
+          text: data.message || "실행할 주제글 예약배포 대상이 없습니다.",
+        });
+        return;
+      }
+
+      setDashboardNotice({
+        tone: "success",
+        text: `주제글 예약배포 일괄 실행 시작: ${data.data?.targetCount ?? limit}건${
+          data.data?.logFile ? ` / 로그: ${data.data.logFile}` : ""
+        }`,
+      });
+      setTimeout(() => {
+        void fetchTopicTasks();
+      }, 1500);
+    } catch (error) {
+      console.error("주제글 예약배포 일괄 실행 실패:", error);
+      setDashboardNotice({
+        tone: "error",
+        text: "주제글 예약배포 일괄 실행 중 오류가 발생했습니다.",
+      });
+    } finally {
+      setTopicBulkScheduleRunning(false);
+    }
   };
 
   return (
@@ -1314,6 +1418,7 @@ export default function Dashboard() {
               newTopicType={newTopicType}
               onAddTopicTask={handleAddTopicTask}
               onDeleteTopicTask={handleDeleteTopicTask}
+              onBulkSchedulePublish={handleTopicBulkSchedulePublish}
               onPrepareTopicTask={handlePrepareTopicTask}
               onTopicPublish={handleTopicPublish}
               onTopicSchedulePublish={handleTopicSchedulePublish}
@@ -1326,6 +1431,8 @@ export default function Dashboard() {
               setNewTopicScheduledDate={setNewTopicScheduledDate}
               setNewTopicType={setNewTopicType}
               tasks={topicTasks}
+              readyScheduledTopicCount={readyTopicScheduledCount}
+              topicBulkScheduleRunning={topicBulkScheduleRunning}
               topicLoading={topicLoading}
               topicPreparingId={topicPreparingId}
               topicPublishingId={topicPublishingId}
@@ -1419,7 +1526,7 @@ export default function Dashboard() {
               <div className="flex flex-wrap items-center gap-3">
                 <button
                   onClick={handleBulkSeasonalRegister}
-                  disabled={bulkSeasonalRunning || bulkScheduleRunning || Boolean(publishingId)}
+                  disabled={bulkSeasonalRunning || bulkScheduleRunning || topicBulkScheduleRunning || Boolean(publishingId)}
                   className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   {bulkSeasonalRunning
@@ -1431,6 +1538,7 @@ export default function Dashboard() {
                   disabled={
                     bulkSeasonalRunning ||
                     bulkScheduleRunning ||
+                    topicBulkScheduleRunning ||
                     Boolean(publishingId) ||
                     readyScheduledCount === 0
                   }
