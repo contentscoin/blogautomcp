@@ -107,7 +107,7 @@ export async function executeScheduledPost(
 
         // 게시물 정보 조회
         const post = await prisma.post.findUnique({ where: { id: postId } });
-        if (!post || !post.topicSeed) {
+        if (!post || !post.topicSeed || !post.contentHtml) {
             throw new Error("게시물을 찾을 수 없습니다");
         }
 
@@ -134,27 +134,14 @@ export async function executeScheduledPost(
             return false;
         }
 
-        // 명령어 구성
-        const args = [`--type=${seed.type}`, `--topic=${seed.topic}`];
+        // 명령어 구성: 저장된 Post/Draft 콘텐츠를 그대로 사용
+        const args = [`--post-id=${postId}`];
 
         if (seed.publishMode === "schedule") {
             args.push("--publish-mode=schedule");
             args.push(`--scheduled-date=${scheduledDate ? formatDateYmd(scheduledDate) : formatDateYmd(now)}`);
         } else {
             args.push("--publish-mode=now");
-        }
-
-        if (seed.keywords.length > 0) {
-            args.push(`--keywords=${seed.keywords.join(",")}`);
-        }
-        if (seed.style) {
-            args.push(`--style=${seed.style}`);
-        }
-        if (seed.images) {
-            args.push(`--images=${seed.images}`);
-        }
-        if (post.category) {
-            args.push(`--category=${post.category}`);
         }
 
         log.info(`실행 명령`, { script: "scripts/topic-agent.ts", args });
@@ -169,21 +156,23 @@ export async function executeScheduledPost(
             stderr: stderr.slice(-300),
         });
 
-        // 결과에서 제목 파싱
-        const titleMatch = stdout.match(/제목: (.+)/);
-        const title = titleMatch?.[1] || seed.topic;
-
-        // 성공 처리
-        await prisma.post.update({
+        const refreshedPost = await prisma.post.findUnique({
             where: { id: postId },
-            data: {
-                status: "SUCCESS",
-                title,
-                publishedAt: new Date(),
-            },
+            select: { status: true, title: true, finalUrl: true },
         });
 
-        log.info(`발행 성공: ${title}`);
+        if (refreshedPost?.status === "RUNNING") {
+            await prisma.post.update({
+                where: { id: postId },
+                data: {
+                    status: "SUCCESS",
+                },
+            });
+        }
+
+        log.info(`발행 성공: ${refreshedPost?.title || post.title || seed.topic}`, {
+            finalUrl: refreshedPost?.finalUrl,
+        });
         return true;
 
     } catch (error: unknown) {

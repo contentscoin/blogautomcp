@@ -1,7 +1,7 @@
 /**
  * 주제 기반 콘텐츠 생성 에이전트
  * URL 없이 주제만으로 블로그 글을 생성합니다.
- * 
+ *
  * 사용법:
  *   npm run topic -- --type=travel --topic="클락 골프여행" --keywords="클락,골프투어,필리핀"
  *   npm run topic -- --type=golf --topic="파인밸리CC" --style=style-xxx
@@ -13,29 +13,33 @@ import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { Locator, Page, Response } from "playwright";
 import { IncomingMessage } from "http";
 import { spawnSync } from "child_process";
+import { PrismaClient } from "@prisma/client";
 import * as path from "path";
 import * as fs from "fs";
 import * as http from "http";
 import * as https from "https";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import {
     PostCategory,
     getTemplate,
     generatePrompt,
     categoryNames
 } from "./lib/templates";
-import { loadImages, generateContentFromImages } from "./lib/image-content";
+import { loadImages } from "./lib/image-content";
 import { createTaskLogger } from "./lib/logger";
+import {
+    parsePreparedTopicContent,
+    preparedSectionsToPublishBlocks,
+    parseTopicVisualPlan,
+    parseStoredTopicPayload,
+    type PreparedTopicSection,
+    type TopicVisualPlan,
+} from "../src/lib/topic-task-contract";
 
 const log = createTaskLogger("TopicAgent");
 
 // Stealth 플러그인 적용
 chromium.use(StealthPlugin());
 
-const AI_PROVIDER = (process.env.AI_PROVIDER || "openai").toLowerCase();
-const genAI =
-  AI_PROVIDER === "gemini" ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "") : null;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const OPENCODE_MODEL = process.env.OPENCODE_MODEL || "openai/gpt-5.2-codex";
 const OPENCODE_VARIANT = process.env.OPENCODE_VARIANT || "large";
 
@@ -43,8 +47,22 @@ const SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "naver-se
 const STYLES_DIR = path.join(process.cwd(), "styles");
 const NAVER_BLOG_ID = process.env.NAVER_BLOG_ID || "";
 const IMAGE_WORK_DIR = path.join(process.cwd(), "temp_images", "topic-agent");
+const TOPIC_DAEDAL_IMAGE_ENABLED =
+    process.env.TOPIC_PIPELINE_DAEDAL_ENABLED?.toLowerCase() === "true";
+const HAS_OPENAI_API_KEY = /^sk-[A-Za-z0-9_-]+/.test(process.env.OPENAI_API_KEY?.trim() || "");
+const TOPIC_DAEDAL_BIN =
+    process.env.TOPIC_PIPELINE_DAEDAL_BIN?.trim() ||
+    process.env.DAEDAL_BIN?.trim() ||
+    (process.env.HOME && fs.existsSync(path.join(process.env.HOME, ".cargo", "bin", "daedal"))
+        ? path.join(process.env.HOME, ".cargo", "bin", "daedal")
+        : "daedal");
+const TOPIC_DAEDAL_PRESET = process.env.TOPIC_PIPELINE_DAEDAL_PRESET?.trim() || "slide";
+const TOPIC_DAEDAL_SIZE = process.env.TOPIC_PIPELINE_DAEDAL_SIZE?.trim() || "";
+const TOPIC_DAEDAL_QUALITY = process.env.TOPIC_PIPELINE_DAEDAL_QUALITY?.trim() || "";
+const TOPIC_DAEDAL_MODEL = process.env.TOPIC_PIPELINE_DAEDAL_MODEL?.trim() || "";
+const TOPIC_DAEDAL_IMAGE_TIMEOUT_MS = Number(process.env.TOPIC_PIPELINE_DAEDAL_IMAGE_TIMEOUT_MS || 180000);
 
-type PublishMode = "now" | "schedule";
+type PublishMode = "draft" | "now" | "schedule";
 
 interface PublishExecutionOptions {
   mode: PublishMode;
@@ -71,7 +89,7 @@ interface TopicArgs {
 
 interface TopicAgentOutput {
     title: string;
-    sections: string[];
+    sections: Array<string | PreparedTopicSection>;
     hashtags: string[];
 }
 
@@ -79,6 +97,29 @@ interface TopicOutputBlock {
     sectionTitle?: unknown;
     heading?: unknown;
     body?: unknown;
+}
+
+interface StoredPublishPayload {
+  title: string;
+  lead?: string;
+  highlights?: string[];
+  sections: Array<string | PreparedTopicSection>;
+  hashtags: string[];
+}
+
+interface DraftImageRecord {
+  role?: string | null;
+  localPath?: string | null;
+  createdAt?: Date | string | null;
+}
+
+interface LoadedPublishContext {
+  taskId: string | null;
+  postId: string | null;
+  args: TopicArgs;
+  preparedContent: StoredPublishPayload | null;
+  imagePaths: string[];
+  imagePlan: TopicVisualPlan | null;
 }
 
 interface RuntimePublishOptions {
@@ -89,7 +130,142 @@ interface RuntimePublishOptions {
 
 interface SectionBlock {
   heading: string;
+  summary?: string;
   body: string;
+  bullets?: string[];
+  kind?: PreparedTopicSection["kind"];
+}
+
+function sanitizeTopicSectionText(section: string): string {
+    let cleaned = section;
+
+    cleaned = cleaned.replace(/~/g, "-");
+    cleaned = cleaned.replace(/\[사진.*?\]/g, "");
+    cleaned = cleaned.replace(/\[이미지.*?\]/g, "");
+    cleaned = cleaned.replace(/\[사진 자리.*?\]/g, "");
+    cleaned = cleaned.replace(/\*\*.*?\*\*/g, (match) => match.replace(/\*\*/g, ""));
+    cleaned = cleaned.replace(/<\/?[a-zA-Z][^>]*>/g, "");
+    cleaned = cleaned.replace(/```(?:json)?/gi, "");
+    cleaned = cleaned.replace(/\[\s*(?:도입|본론|결론)\s*\]\s*\{?/g, "");
+    cleaned = cleaned.replace(/\{?\s*"title"\s*:\s*"[^"]*"\s*,?/g, "");
+    cleaned = cleaned.replace(/"storyline"\s*:\s*"[^"]*"\s*,?/g, "");
+    cleaned = cleaned.replace(/"subtopics"\s*:\s*\[[\s\S]*?\]\s*\}?/g, "");
+    cleaned = cleaned.replace(/AI 활용 설정\s*사진 설명을 입력하세요\./g, "");
+    cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
+
+    return cleaned.trim();
+}
+
+function parseTopicSectionBlock(section: string | PreparedTopicSection): SectionBlock {
+    if (typeof section !== "string") {
+        return {
+            heading: normalizeText(section.heading || ""),
+            summary: normalizeText(section.summary || ""),
+            body: sanitizeTopicSectionText(section.body || ""),
+            bullets: Array.isArray(section.bullets)
+                ? section.bullets.map((item) => normalizeText(item)).filter(Boolean)
+                : [],
+            kind: section.kind,
+        };
+    }
+
+    const cleaned = sanitizeTopicSectionText(section);
+    if (!cleaned) {
+        return { heading: "", body: "" };
+    }
+
+    const rawLines = cleaned.split("\n");
+    const nonEmptyLines = rawLines
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+    if (nonEmptyLines.length < 2) {
+        return { heading: "", body: cleaned };
+    }
+
+    const firstNonEmptyIndex = rawLines.findIndex((line) => line.trim().length > 0);
+    if (firstNonEmptyIndex < 0) {
+        return { heading: "", body: "" };
+    }
+
+    const firstLine = rawLines[firstNonEmptyIndex].trim();
+    const remaining = rawLines
+        .slice(firstNonEmptyIndex + 1)
+        .join("\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+    const looksLikeHeading =
+        firstLine.length > 0 &&
+        firstLine.length <= 60 &&
+        !/[.!?]$/.test(firstLine);
+
+    if (!looksLikeHeading) {
+        return { heading: "", body: cleaned };
+    }
+
+    return {
+        heading: firstLine,
+        body: remaining.trim(),
+    };
+}
+
+async function inputTopicSectionBlock(page: Page, section: string | PreparedTopicSection): Promise<void> {
+    const block = parseTopicSectionBlock(section);
+    if (!block.heading && !block.body) {
+        await page.keyboard.press("Enter");
+        return;
+    }
+
+    if (block.heading) {
+        const headingApplied = await setNaverTextFormat(page, "sectionTitle");
+        if (!headingApplied) {
+            console.log("   ⚠️ 소제목 스타일 적용 실패, 본문 스타일로 대체");
+        }
+
+        await page.keyboard.type(block.heading, { delay: 10 });
+        await page.keyboard.press("Enter");
+        await page.waitForTimeout(120);
+
+        const dividerInserted = await insertNaverHorizontalDivider(page);
+        if (!dividerInserted) {
+            console.log("   ⚠️ 구분선 삽입 실패, 본문 입력은 계속 진행합니다.");
+        } else {
+            await page.keyboard.press("Enter").catch(() => {});
+            await page.waitForTimeout(120);
+        }
+
+        await setNaverTextFormat(page, "text");
+    } else {
+        await setNaverTextFormat(page, "text");
+    }
+
+    if (block.summary) {
+        await page.keyboard.type(block.summary, { delay: 10 });
+        await page.keyboard.press("Enter");
+        await page.waitForTimeout(60);
+    }
+
+    const bodyLines = (block.body || "")
+        .split("\n")
+        .map((line) => line.trim());
+
+    for (const line of bodyLines) {
+        if (!line) {
+            await page.keyboard.press("Enter");
+        } else {
+            await page.keyboard.type(line, { delay: 10 });
+            await page.keyboard.press("Enter");
+        }
+        await page.waitForTimeout(45);
+    }
+
+    for (const bullet of block.bullets || []) {
+        await page.keyboard.type(`- ${bullet}`, { delay: 10 });
+        await page.keyboard.press("Enter");
+        await page.waitForTimeout(45);
+    }
+
+    await page.keyboard.press("Enter");
 }
 
 interface ScheduleSubmissionTracker {
@@ -99,8 +275,118 @@ interface ScheduleSubmissionTracker {
   getRecentEvents: () => string[];
 }
 
+interface LayerNodeRef {
+  className?: string | { toString?: () => string };
+  getAttribute?: (name: string) => string | null;
+  parentElement?: LayerNodeRef | null;
+}
+
 function normalizeText(value: string): string {
     return value.replace(/\s+/g, " ").trim();
+}
+
+function addDaedalOption(args: string[], flag: string, value: string) {
+    const normalized = normalizeText(value || "");
+    if (!normalized || normalized.toLowerCase() === "none") return;
+    args.push(flag, normalized);
+}
+
+function stringifyTopicSectionForImage(section: string | PreparedTopicSection): string {
+    if (typeof section === "string") return section;
+    return [
+        section.heading,
+        section.summary || "",
+        section.body,
+        ...(section.bullets || []),
+    ]
+        .map((value) => normalizeText(value))
+        .filter(Boolean)
+        .join("\n");
+}
+
+function generateDaedalTopicImages(sections: Array<string | PreparedTopicSection>, outDir: string): string[] {
+    if (!TOPIC_DAEDAL_IMAGE_ENABLED || !HAS_OPENAI_API_KEY) return [];
+
+    const prompt = [
+        "다음 블로그 글 내용을 바탕으로 관련 있고 세련된 고품질 블로그 이미지를 3장 생성해줘.",
+        "글자, 캡션, 로고, 워터마크, 브랜드 UI, 콜라주 느낌은 금지.",
+        "모바일에서 한눈에 들어오는 자연스러운 에디토리얼 이미지로 만들어줘.",
+        "",
+        sections.map((section) => stringifyTopicSectionForImage(section)).join("\n\n").slice(0, 1500),
+    ].join("\n");
+    const outPath = path.join(outDir, "daedal.png");
+    const args = [prompt, "--quiet", "-o", outPath, "-n", "3"];
+    addDaedalOption(args, "--preset", TOPIC_DAEDAL_PRESET);
+    addDaedalOption(args, "--size", TOPIC_DAEDAL_SIZE);
+    addDaedalOption(args, "--quality", TOPIC_DAEDAL_QUALITY);
+    addDaedalOption(args, "--model", TOPIC_DAEDAL_MODEL);
+
+    const result = spawnSync(TOPIC_DAEDAL_BIN, args, {
+        encoding: "utf8",
+        env: process.env,
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: TOPIC_DAEDAL_IMAGE_TIMEOUT_MS,
+    });
+    if (result.status !== 0) {
+        const message = normalizeText(result.stderr || result.error?.message || "unknown error");
+        console.warn(`   ⚠️ Daedal 이미지 생성 실패: ${message}`);
+        return [];
+    }
+
+    return (result.stdout || "")
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line && fs.existsSync(line));
+}
+
+function sectionTextForQuality(section: string | PreparedTopicSection): string {
+    if (typeof section === "string") return normalizeText(section);
+    return normalizeText(
+        [
+            section.heading,
+            section.summary || "",
+            section.body,
+            ...(section.bullets || []),
+        ].join(" ")
+    );
+}
+
+function assertPublishableContent(content: StoredPublishPayload) {
+    const title = normalizeText(content.title || "");
+    const sectionTexts = content.sections.map((section) => sectionTextForQuality(section)).filter(Boolean);
+    const bodyLength = sectionTexts.join(" ").length;
+    const hashtags = content.hashtags.map((tag) => normalizeText(tag)).filter(Boolean);
+    const joined = sectionTexts.join("\n");
+    const failures: string[] = [];
+
+    if (!title || /추천 정보$/i.test(title)) {
+        failures.push("제목이 비어 있거나 더미 제목입니다");
+    }
+    if (sectionTexts.length < 3) {
+        failures.push(`섹션 수가 부족합니다(${sectionTexts.length}/3)`);
+    }
+    if (bodyLength < 800) {
+        failures.push(`본문 분량이 부족합니다(${bodyLength}/800자)`);
+    }
+    if (hashtags.length < 3) {
+        failures.push(`해시태그가 부족합니다(${hashtags.length}/3)`);
+    }
+    if (/이미지\s*\d+\s*에 대한 설명입니다|관련 내용입니다|스타일이 적용되었습니다/i.test(joined)) {
+        failures.push("더미/플레이스홀더 문장이 포함되어 있습니다");
+    }
+
+    if (failures.length > 0) {
+        throw new Error(`발행 품질 기준 미달: ${failures.join(", ")}`);
+    }
+}
+
+function compactUiText(value: string): string {
+    return value.replace(/\s+/g, "").trim();
+}
+
+function isReservedPostsListText(value: string): boolean {
+    const compact = compactUiText(value);
+    return /예약발행\d+건/.test(compact) || /예약발행글/.test(compact) || /(목록|내역|리스트|관리)/.test(compact);
 }
 
 function extractJsonObjectBlocks(raw: string): string[] {
@@ -154,7 +440,7 @@ function extractJsonObjectBlocks(raw: string): string[] {
 
 function parseDateInputForPublishMode(raw: string): Date | null {
     const trimmed = normalizeText(raw);
-    
+
     // ISO format or simple date parsing
     const parsed = new Date(trimmed);
     if (!Number.isNaN(parsed.getTime())) {
@@ -166,17 +452,17 @@ function parseDateInputForPublishMode(raw: string): Date | null {
         return parsed; // Returns the exact time the user provided
     }
 
-    return null;
+        return null;
 }
 
 function parseRuntimePublishOptions(args: string[]): RuntimePublishOptions {
-    let mode: PublishMode = "now";
+    let mode: PublishMode = args.includes("--publish") ? "now" : "draft";
     let scheduledDateInput: string | null = null;
 
     for (const arg of args) {
         if (arg.startsWith("--publish-mode=") || arg.startsWith("--publishMode=")) {
             const next = arg.split("=")[1]?.trim().toLowerCase();
-            mode = next === "schedule" ? "schedule" : "now";
+            mode = next === "schedule" ? "schedule" : next === "now" ? "now" : "draft";
             continue;
         }
 
@@ -185,7 +471,7 @@ function parseRuntimePublishOptions(args: string[]): RuntimePublishOptions {
         }
     }
 
-    if (mode === "now") {
+    if (mode !== "schedule") {
         return { mode, scheduledDate: null, scheduledDateInput: null };
     }
 
@@ -226,6 +512,78 @@ async function clickFirstVisible(page: Page, selectors: string[]): Promise<boole
         }
     }
     return false;
+}
+
+async function setNaverTextFormat(
+    page: Page,
+    format: "text" | "sectionTitle"
+): Promise<boolean> {
+    const openMenu = async () =>
+        clickFirstVisible(page, [
+            'button[data-name="text-format"]',
+            'button:has-text("문단 서식 변경")',
+            'button:has-text("본문")',
+            'button:has-text("소제목")',
+        ]);
+
+    const optionSelectors =
+        format === "sectionTitle"
+            ? [
+                'button[data-name="text-format"][data-value="sectionTitle"]',
+                "button.se-toolbar-option-text-format-sectionTitle-button",
+                '.se-toolbar-option-text-format button[data-value="sectionTitle"]',
+                'button:has-text("소제목")',
+            ]
+            : [
+                'button[data-name="text-format"][data-value="text"]',
+                "button.se-toolbar-option-text-format-text-button",
+                '.se-toolbar-option-text-format button[data-value="text"]',
+                'button:has-text("본문")',
+            ];
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+        await openMenu();
+        const picked = await clickFirstVisible(page, optionSelectors);
+        if (!picked) {
+            await page.keyboard.press("Escape").catch(() => {});
+            await page.waitForTimeout(120);
+            continue;
+        }
+
+        await page.waitForTimeout(160);
+
+        const toolbarLabel = (
+            (await page
+                .locator('button[data-name="text-format"]')
+                .first()
+                .innerText()
+                .catch(() => "")) || ""
+        )
+            .replace(/\s+/g, " ")
+            .trim();
+
+        if (format === "sectionTitle" && toolbarLabel.includes("소제목")) {
+            return true;
+        }
+        if (format === "text" && toolbarLabel.includes("본문")) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+async function insertNaverHorizontalDivider(page: Page): Promise<boolean> {
+    const clicked = await clickFirstVisible(page, [
+        'button[data-name="horizontal-line"][data-value="default"]',
+        'button[data-name="horizontal-line"]',
+        'button[aria-label*="구분선"]',
+        'button:has-text("구분선")',
+    ]);
+
+    if (!clicked) return false;
+    await page.waitForTimeout(180);
+    return true;
 }
 
 function formatDateYmdInTimeZone(date: Date, timeZone: string): string {
@@ -496,17 +854,124 @@ async function setInputValueWithNativeEvents(input: Locator, value: string): Pro
     return current || byNativeSetter || "";
 }
 
+function parseDatepickerYearMonth(titleText: string): { year: number; month: number } | null {
+    const normalized = titleText.replace(/\s+/g, " ").trim();
+    const match = normalized.match(/(\d{4})\s*년\s*(\d{1,2})\s*월/);
+    if (!match) return null;
+    const year = Number.parseInt(match[1], 10);
+    const month = Number.parseInt(match[2], 10);
+    if (!Number.isFinite(year) || !Number.isFinite(month)) return null;
+    return { year, month };
+}
+
+function compareYearMonth(
+    left: { year: number; month: number },
+    right: { year: number; month: number }
+): number {
+    if (left.year !== right.year) return left.year - right.year;
+    return left.month - right.month;
+}
+
+async function trySetScheduleDateViaDatepicker(page: Page, scheduledDate: Date): Promise<boolean> {
+    const ymd = formatDateYmd(scheduledDate);
+    const targetYearMonth = {
+        year: scheduledDate.getFullYear(),
+        month: scheduledDate.getMonth() + 1,
+    };
+    const targetDay = String(scheduledDate.getDate());
+    const panel = await getSchedulePanelLocator(page);
+    const dateInput = panel
+        .locator('div[class*="time_setting" i] input.input_date__QmA0s, div[class*="date" i] input.input_date__QmA0s, input.input_date__QmA0s')
+        .first();
+
+    if (!(await dateInput.isVisible().catch(() => false))) {
+        return false;
+    }
+
+    await dateInput.click({ timeout: 1500 }).catch(() => {});
+    await page.waitForTimeout(250);
+    const datepicker = page.locator(".ui-datepicker:visible").first();
+    if (!(await datepicker.isVisible().catch(() => false))) {
+        return false;
+    }
+
+    console.log("      - 예약 날짜 입력 시도: datepicker");
+
+    let reachedTargetMonth = false;
+    for (let step = 0; step < 24; step += 1) {
+        const titleText = ((await datepicker.locator(".ui-datepicker-title").first().textContent().catch(() => "")) || "")
+            .replace(/\s+/g, " ")
+            .trim();
+        const currentYearMonth = parseDatepickerYearMonth(titleText);
+        if (!currentYearMonth) {
+            break;
+        }
+
+        const delta = compareYearMonth(currentYearMonth, targetYearMonth);
+        if (delta === 0) {
+            reachedTargetMonth = true;
+            break;
+        }
+
+        if (delta > 0) {
+            const prevButton = datepicker
+                .locator(".ui-datepicker-prev:not(.ui-state-disabled), .ui-datepicker-month-nav.ui-datepicker-prev:not(.ui-state-disabled)")
+                .first();
+            if (!(await prevButton.isVisible().catch(() => false))) break;
+            await prevButton.click({ timeout: 1200 }).catch(() => {});
+        } else {
+            const nextButton = datepicker
+                .locator(".ui-datepicker-next:not(.ui-state-disabled), .ui-datepicker-month-nav.ui-datepicker-next:not(.ui-state-disabled)")
+                .first();
+            if (!(await nextButton.isVisible().catch(() => false))) break;
+            await nextButton.click({ timeout: 1200 }).catch(() => {});
+        }
+        await page.waitForTimeout(160);
+    }
+
+    if (!reachedTargetMonth) {
+        return false;
+    }
+
+    const dayCandidates = [
+        `table td:not(.ui-state-disabled) button.ui-state-default:text-is("${targetDay}")`,
+        `table td:not(.ui-state-disabled) a.ui-state-default:text-is("${targetDay}")`,
+        `button.ui-state-default:text-is("${targetDay}")`,
+        `a.ui-state-default:text-is("${targetDay}")`,
+    ];
+
+    for (const selector of dayCandidates) {
+        const dayButton = datepicker.locator(selector).first();
+        if (!(await dayButton.isVisible().catch(() => false))) continue;
+        await dayButton.click({ timeout: 1200 }).catch(() => {});
+        await page.waitForTimeout(220);
+        const applied = await dateInput.inputValue().catch(() => "");
+        if (isScheduleDateMatch(applied, ymd)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 async function hasVisibleScheduleDateInput(page: Page): Promise<boolean> {
     const selectors = [
         'div[class*="layer_publish" i] input.input_date__QmA0s',
         'div[class*="layer_content_set_publish" i] input.input_date__QmA0s',
-        'input.input_date__QmA0s',
-        'input[type="date"]',
-        'input[title*="예약"]',
-        'input[placeholder*="날짜"]',
-        'input[class*="date" i]',
+        'div[class*="layer_publish" i] input[class*="date" i]',
+        'div[class*="layer_content_set_publish" i] input[class*="date" i]',
+        '.publish_layer input[type="date"]',
+        '[role="dialog"] input[type="date"]',
+        '.publish_layer input[class*="date" i]',
+        '[role="dialog"] input[class*="date" i]',
+        '.publish_layer input[placeholder*="날짜"]',
+        '[role="dialog"] input[placeholder*="날짜"]',
+        '.publish_layer input[name*="date" i]',
+        '[role="dialog"] input[name*="date" i]',
         'div[class*="layer_publish" i] select',
         'div[class*="layer_content_set_publish" i] select',
+        '.publish_layer select',
+        '[role="dialog"] select',
     ];
 
     for (const selector of selectors) {
@@ -525,111 +990,185 @@ async function trySetScheduleDateInputs(page: Page, scheduledDate: Date): Promis
     const dottedSpacedNoPad = `${scheduledDate.getFullYear()}. ${scheduledDate.getMonth() + 1}. ${scheduledDate.getDate()}`;
     const dottedNoPad = `${scheduledDate.getFullYear()}.${scheduledDate.getMonth() + 1}.${scheduledDate.getDate()}`;
     const slash = `${yyyy}/${mm}/${dd}`;
-    
-    console.log(`   [디버그] trySetScheduleDateInputs 시작`);
+    const panel = await getSchedulePanelLocator(page);
+    const candidateValues = [dottedSpaced, dottedSpacedNoPad, dotted, dottedNoPad, ymd, slash];
+    const panelInputSelectors = [
+        'div[class*="time_setting" i] input.input_date__QmA0s',
+        'div[class*="date" i] input.input_date__QmA0s',
+        "input.input_date__QmA0s",
+        'input[title*="예약"]',
+        'input[placeholder*="날짜"]',
+        'input[type="date"]',
+        'input[class*="date" i]',
+    ];
+    const fallbackInputSelectors = [
+        'div[class*="layer_publish" i] input.input_date__QmA0s',
+        'div[class*="layer_content_set_publish" i] input.input_date__QmA0s',
+        '.publish_layer input.input_date__QmA0s',
+        '[role="dialog"] input.input_date__QmA0s',
+        'div[class*="layer_publish" i] input[class*="date" i]',
+        'div[class*="layer_content_set_publish" i] input[class*="date" i]',
+    ];
 
-    try {
-        // 날짜 (input_date__QmA0s 클래스를 가진 텍스트 인풋)
-        console.log(`   [디버그] 날짜 전체 설정 시도...`);
-        try {
-            // YYYY-MM-DD 형식으로 포맷팅
-            const dateStr = `${scheduledDate.getFullYear()}-${String(scheduledDate.getMonth() + 1).padStart(2, "0")}-${String(scheduledDate.getDate()).padStart(2, "0")}`;
-            
-            await page.evaluate(`
-                (() => {
-                    const dStr = "${dateStr}";
-                    const els = document.querySelectorAll('input.input_date__QmA0s, input[type="text"]');
-                    els.forEach(el => {
-                        el.value = dStr; 
-                        el.dispatchEvent(new Event('input', { bubbles: true })); 
-                        el.dispatchEvent(new Event('change', { bubbles: true }));
-                    });
-                })()
-            `);
-        } catch(e) {}
+    const contexts: Array<{ name: string; root: Pick<Page, "locator"> | Pick<Locator, "locator">; selectors: string[] }> = [
+        { name: "panel", root: panel, selectors: panelInputSelectors },
+        { name: "global", root: page, selectors: fallbackInputSelectors },
+    ];
 
-        // 시간 (select 사용)
-        console.log(`   [디버그] 시간 설정 시도...`);
-        try {
-            const hStr = String(scheduledDate.getHours()).padStart(2, "0");
-            await page.evaluate(`
-                (() => {
-                    const h = "${hStr}";
-                    const selects = Array.from(document.querySelectorAll('select'));
-                    const hSelect = selects.find(s => s.className.includes('hour') || (s.options.length > 20));
-                    if (hSelect) {
-                        hSelect.value = h;
-                        hSelect.dispatchEvent(new Event('change', { bubbles: true }));
-                    }
-                })()
-            `);
-        } catch(e) {}
-
-        try {
-            const mStr = String(scheduledDate.getMinutes()).padStart(2, "0");
-            await page.evaluate(`
-                (() => {
-                    const m = "${mStr}";
-                    const selects = Array.from(document.querySelectorAll('select'));
-                    const mSelect = selects.find(s => s.className.includes('minute') || (s.options.length <= 12 && s.options[0].value === "00"));
-                    if (mSelect) {
-                        mSelect.value = m;
-                        mSelect.dispatchEvent(new Event('change', { bubbles: true }));
-                    }
-                })()
-            `);
-        } catch(e) {}
-        
-        // click body to trigger any blur handlers
-        await page.evaluate(`
-            (() => {
-                document.body.click(); 
-            })()
-        `);
-        await page.waitForTimeout(500);
-
-        console.log(`   [디버그] trySetScheduleDateInputs 완료`);
+    const datepickerAppliedFirst = await trySetScheduleDateViaDatepicker(page, scheduledDate);
+    if (datepickerAppliedFirst) {
         return true;
-    } catch (e) {
-        console.log(`   [디버그] trySetScheduleDateInputs 중 에러 발생: ${e}`);
-        return false;
     }
+
+    for (const { name, root, selectors } of contexts) {
+        for (const selector of selectors) {
+            const locators = root.locator(selector);
+            const count = Math.min(await locators.count().catch(() => 0), 6);
+            for (let i = 0; i < count; i += 1) {
+                const locator = locators.nth(i);
+                const visible = await locator.isVisible().catch(() => false);
+                if (!visible) continue;
+
+                const type = ((await locator.getAttribute("type").catch(() => "")) || "").toLowerCase();
+                const values = type === "date" ? [ymd] : candidateValues;
+                console.log(`      - 예약 날짜 입력 시도: ${name}:${selector}${count > 1 ? `#${i + 1}` : ""}`);
+
+                for (const value of values) {
+                    const finalValue = await setInputValueWithNativeEvents(locator, value);
+                    await page.waitForTimeout(180);
+                    if (isScheduleDateMatch(finalValue, ymd)) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    const datepickerAppliedLast = await trySetScheduleDateViaDatepicker(page, scheduledDate);
+    if (datepickerAppliedLast) {
+        return true;
+    }
+
+    const year = String(scheduledDate.getFullYear());
+    const month = String(scheduledDate.getMonth() + 1);
+    const day = String(scheduledDate.getDate());
+
+    const yearSelect = page.locator('select[name*="year" i], select[id*="year" i], select[class*="year" i]').first();
+    const monthSelect = page.locator('select[name*="month" i], select[id*="month" i], select[class*="month" i]').first();
+    const daySelect = page.locator('select[name*="day" i], select[id*="day" i], select[class*="day" i]').first();
+
+    const hasYearSelect = await yearSelect.isVisible().catch(() => false);
+    const hasMonthSelect = await monthSelect.isVisible().catch(() => false);
+    const hasDaySelect = await daySelect.isVisible().catch(() => false);
+
+    if (hasYearSelect && hasMonthSelect && hasDaySelect) {
+        console.log("      - 예약 날짜 입력 시도: year/month/day select");
+        await yearSelect.selectOption([{ value: year }, { label: year }], { timeout: 1200 }).catch(() => {});
+        await monthSelect
+            .selectOption([{ value: month }, { value: month.padStart(2, "0") }, { label: month }], {
+                timeout: 1200,
+            })
+            .catch(() => {});
+        await daySelect
+            .selectOption([{ value: day }, { value: day.padStart(2, "0") }, { label: day }], {
+                timeout: 1200,
+            })
+            .catch(() => {});
+        await page.waitForTimeout(250);
+        const selectedYear = await yearSelect.inputValue().catch(() => "");
+        const selectedMonth = await monthSelect.inputValue().catch(() => "");
+        const selectedDay = await daySelect.inputValue().catch(() => "");
+        const selectedNormalized = normalizeDateCandidate(
+            `${selectedYear}-${selectedMonth}-${selectedDay}`
+        );
+        if (selectedNormalized === ymd) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 async function trySetScheduleDateInputsFallback(page: Page, scheduledDate: Date): Promise<boolean> {
-    return false; // we handled everything in trySetScheduleDateInputs
+    const ymd = formatDateYmd(scheduledDate);
+    const dotted = ymd.replace(/-/g, ".");
+    const [yyyy, mm, dd] = ymd.split("-");
+    const dottedSpaced = `${yyyy}. ${mm}. ${dd}`;
+    const dottedSpacedNoPad = `${scheduledDate.getFullYear()}. ${scheduledDate.getMonth() + 1}. ${scheduledDate.getDate()}`;
+    const dottedNoPad = `${scheduledDate.getFullYear()}.${scheduledDate.getMonth() + 1}.${scheduledDate.getDate()}`;
+    const slash = `${yyyy}/${mm}/${dd}`;
+    const panel = await getSchedulePanelLocator(page);
+    const dialogInputs = panel.locator(
+        'div[class*="time_setting" i] input, div[class*="date" i] input, input.input_date__QmA0s, input[type="date"], input[class*="date" i], input[placeholder*="날짜"], input[name*="date" i], input[id*="date" i]'
+    );
+    const inputCount = Math.min(await dialogInputs.count().catch(() => 0), 30);
+
+    for (let i = 0; i < inputCount; i += 1) {
+        const input = dialogInputs.nth(i);
+        const visible = await input.isVisible().catch(() => false);
+        if (!visible) continue;
+
+        const type = ((await input.getAttribute("type").catch(() => "")) || "").toLowerCase();
+        if (["hidden", "checkbox", "radio", "time", "file"].includes(type)) continue;
+        const className = ((await input.getAttribute("class").catch(() => "")) || "").toLowerCase();
+        const placeholder = ((await input.getAttribute("placeholder").catch(() => "")) || "").toLowerCase();
+        const name = ((await input.getAttribute("name").catch(() => "")) || "").toLowerCase();
+        const id = ((await input.getAttribute("id").catch(() => "")) || "").toLowerCase();
+        const dateSignal = `${className} ${placeholder} ${name} ${id}`;
+        if (!/date|day|year|month|날짜|예약/.test(dateSignal)) {
+            continue;
+        }
+
+        const candidateValues =
+            type === "date" ? [ymd] : [dottedSpaced, dottedSpacedNoPad, dotted, dottedNoPad, ymd, slash];
+        for (const value of candidateValues) {
+            const finalValue = await setInputValueWithNativeEvents(input, value);
+            await page.waitForTimeout(180);
+            if (isScheduleDateMatch(finalValue, ymd)) {
+                console.log(`      - 예약 날짜 fallback 입력 성공(input #${i + 1})`);
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 async function verifyScheduleDateApplied(page: Page, scheduledDate: Date): Promise<boolean> {
     const ymd = formatDateYmd(scheduledDate);
-    
-    // check inner text instead of value
-    try {
-        const matched = await page.evaluate(`
-            (() => {
-                const ymdStr = "${ymd}";
-                const els = Array.from(document.querySelectorAll('.input_date__QmA0s, input, select, div, span'));
-                for (const el of els) {
-                    if (el.value === ymdStr) return true;
-                    if (el.textContent && el.textContent.includes(ymdStr)) return true;
-                    
-                    // fallback for 2026. 03. 05 formatting
-                    const parts = ymdStr.split('-');
-                    if (parts.length === 3) {
-                        const formatted = parts[0] + '. ' + Number(parts[1]) + '. ' + Number(parts[2]);
-                        const formatted2 = parts[0] + '.' + Number(parts[1]) + '.' + Number(parts[2]);
-                        if (el.value === formatted || el.value === formatted2) return true;
-                        if (el.textContent && (el.textContent.includes(formatted) || el.textContent.includes(formatted2))) return true;
-                    }
-                }
-                return false;
-            })()
-        `);
-        
-        return true; // Just assume it worked if our evaluate ran successfully to avoid blocking publish
-    } catch(e) {
-        return true;
+    const panel = await getSchedulePanelLocator(page);
+    const inputs = panel.locator('div[class*="time_setting" i] input.input_date__QmA0s, input.input_date__QmA0s, input[type="date"]');
+    const count = Math.min(await inputs.count().catch(() => 0), 20);
+    let hasVisibleDateInput = false;
+
+    for (let i = 0; i < count; i += 1) {
+        const input = inputs.nth(i);
+        const visible = await input.isVisible().catch(() => false);
+        if (!visible) continue;
+        hasVisibleDateInput = true;
+        const value = await input.inputValue().catch(() => "");
+        if (isScheduleDateMatch(value, ymd)) {
+            return true;
+        }
     }
+
+    if (hasVisibleDateInput) {
+        return false;
+    }
+
+    const visibleNodes = panel.locator("*");
+    const nodeCount = Math.min(await visibleNodes.count().catch(() => 0), 200);
+    for (let i = 0; i < nodeCount; i += 1) {
+        const node = visibleNodes.nth(i);
+        const visible = await node.isVisible().catch(() => false);
+        if (!visible) continue;
+        const text = (((await node.textContent().catch(() => "")) || "").replace(/\s+/g, " ")).trim();
+        if (isScheduleDateMatch(text, ymd)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 async function readAppliedScheduleDateYmd(page: Page): Promise<string | null> {
@@ -680,34 +1219,30 @@ async function readAppliedScheduleTimeLabel(page: Page): Promise<string | null> 
 
 async function trySetScheduleTimeInputs(page: Page, scheduledDate: Date): Promise<string | null> {
     console.log(`   [디버그] trySetScheduleTimeInputs 시작`);
-    
+
     try {
         const hStr = String(scheduledDate.getHours()).padStart(2, "0");
         const mStr = String(scheduledDate.getMinutes()).padStart(2, "0");
 
-        await page.evaluate(`
-            (() => {
-                const h = "${hStr}";
-                const m = "${mStr}";
-                const selects = Array.from(document.querySelectorAll('select'));
-                const hSelect = selects.find(s => s.className.includes('hour') || (s.options.length > 20));
-                const mSelect = selects.find(s => s.className.includes('minute') || (s.options.length <= 12 && s.options[0].value === "00"));
-                
-                if (hSelect) {
-                    hSelect.value = h;
-                    hSelect.dispatchEvent(new Event('change', { bubbles: true }));
-                }
-                if (mSelect) {
-                    mSelect.value = m;
-                    mSelect.dispatchEvent(new Event('change', { bubbles: true }));
-                }
-            })()
-        `);
-        
+        await page.evaluate(({ h, m }: { h: string; m: string }) => {
+            const selects = Array.from(document.querySelectorAll('select'));
+            const hSelect = selects.find(s => s.className.includes('hour') || (s.options.length > 20));
+            const mSelect = selects.find(s => s.className.includes('minute') || (s.options.length <= 12 && s.options[0].value === "00"));
+
+            if (hSelect) {
+                hSelect.value = h;
+                hSelect.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            if (mSelect) {
+                mSelect.value = m;
+                mSelect.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+        }, { h: hStr, m: mStr });
+
         await page.waitForTimeout(500);
         return `${hStr}:${mStr}`;
     } catch(e) {
-        return null;
+    return null;
     }
 }
 
@@ -720,11 +1255,6 @@ async function ensureScheduleReserveRadioSelected(page: Page): Promise<boolean> 
         .locator('input[data-testid="nowTimeRadioBtn"], input[name="radio_time"][value="now"], input#radio_time1')
         .first();
     if (!(await reserveRadio.isVisible().catch(() => false))) {
-        // 라디오 버튼이 보이지 않으면 새로운 UI (버튼)일 수 있습니다.
-        const reserveBtn = panel.locator('button.reserve_btn__Km5Xh, button:has-text("예약 발행"), button[data-click-area*="schedule"]').first();
-        if (await reserveBtn.isVisible().catch(() => false)) {
-            return true;
-        }
         return false;
     }
 
@@ -785,7 +1315,7 @@ async function ensureScheduleReserveRadioSelected(page: Page): Promise<boolean> 
         if (state.reserve && !state.now) return true;
 
         const reserveLabel = panel
-            .locator('label[for="radio_time2"], label:has-text("예약")')
+            .locator('label[for="radio_time2"], label:has-text("예약"), .radio_label__mB6ia:has-text("예약")')
             .first();
         await reserveLabel.click({ timeout: 1000 }).catch(() => {});
         await page.waitForTimeout(120);
@@ -796,6 +1326,99 @@ async function ensureScheduleReserveRadioSelected(page: Page): Promise<boolean> 
         await page.waitForTimeout(120);
         const stateAfterJs = await readState();
         if (stateAfterJs.reserve && !stateAfterJs.now) return true;
+    }
+
+    return false;
+}
+
+async function selectScheduleMode(page: Page): Promise<boolean> {
+    const panel = await getSchedulePanelLocator(page);
+    const reserveRadio = panel
+        .locator(
+            'input[data-testid="preTimeRadioBtn"], input[name="radio_time"][value="pre"], input#radio_time2, input[type="radio"][value*="reserve" i], input[type="radio"][id*="reserve" i], input[type="radio"][name*="reserve" i]'
+        )
+        .first();
+
+    if (await reserveRadio.isVisible().catch(() => false)) {
+        await reserveRadio.check({ force: true }).catch(async () => {
+            await reserveRadio.click({ force: true }).catch(() => {});
+        });
+        await page.waitForTimeout(180);
+        if (await ensureScheduleReserveRadioSelected(page)) {
+            return true;
+        }
+    }
+
+    const exactSelectors = [
+        'div[class*="layer_publish" i] label:text-is("예약")',
+        'div[class*="layer_content_set_publish" i] label:text-is("예약")',
+        '.publish_layer label:text-is("예약")',
+        '[role="dialog"] label:text-is("예약")',
+        'div[class*="layer_publish" i] [role="radio"]:text-is("예약")',
+        'div[class*="layer_content_set_publish" i] [role="radio"]:text-is("예약")',
+        '.publish_layer [role="radio"]:text-is("예약")',
+        '[role="dialog"] [role="radio"]:text-is("예약")',
+        'div[class*="layer_publish" i] [role="tab"]:text-is("예약")',
+        'div[class*="layer_content_set_publish" i] [role="tab"]:text-is("예약")',
+        '.publish_layer [role="tab"]:text-is("예약")',
+        '[role="dialog"] [role="tab"]:text-is("예약")',
+    ];
+
+    if (await clickFirstVisible(page, exactSelectors)) {
+        await page.waitForTimeout(240);
+        if ((await ensureScheduleReserveRadioSelected(page)) || (await hasVisibleScheduleDateInput(page))) {
+            return true;
+        }
+    }
+
+    const clickables = panel.locator('label, button, [role="radio"], [role="tab"], [role="button"]');
+    const rankedCandidates: Array<{
+        locator: Locator;
+        score: number;
+        text: string;
+        className: string;
+    }> = [];
+    const count = Math.min(await clickables.count().catch(() => 0), 80);
+
+    for (let i = 0; i < count; i += 1) {
+        const candidate = clickables.nth(i);
+        const visible = await candidate.isVisible().catch(() => false);
+        if (!visible) continue;
+
+        const rawText = (await candidate.textContent().catch(() => "")) || "";
+        const text = compactUiText(rawText);
+        if (!text.includes("예약")) continue;
+        if (isReservedPostsListText(text)) continue;
+
+        const className = (await candidate.getAttribute("class").catch(() => "")) || "";
+        const role = ((await candidate.getAttribute("role").catch(() => "")) || "").toLowerCase();
+        const forAttr = ((await candidate.getAttribute("for").catch(() => "")) || "").toLowerCase();
+        const dataTestId = ((await candidate.getAttribute("data-testid").catch(() => "")) || "").toLowerCase();
+
+        if (/(reserve_btn__|save_btn__|save_count_btn__|publish_btn__m9KHH|publish_fold_btn__)/i.test(className)) {
+            continue;
+        }
+
+        let score = 0;
+        if (text === "예약") score += 160;
+        if (/radio|tab/.test(role)) score += 70;
+        if (forAttr.includes("radio_time2")) score += 90;
+        if (dataTestId.includes("pretime")) score += 90;
+        if (text.includes("예약") && !text.includes("발행")) score += 40;
+        if (/label|radio|tab/.test(className)) score += 25;
+        if (text.length <= 4) score += 15;
+
+        rankedCandidates.push({ locator: candidate, score, text, className });
+    }
+
+    rankedCandidates.sort((left, right) => right.score - left.score);
+    for (const candidate of rankedCandidates.slice(0, 8)) {
+        await candidate.locator.click({ force: true }).catch(() => {});
+        await page.waitForTimeout(220);
+        if ((await ensureScheduleReserveRadioSelected(page)) || (await hasVisibleScheduleDateInput(page))) {
+            console.log(`   ✅ 예약 옵션 선택 성공: text="${candidate.text}" class="${candidate.className}"`);
+            return true;
+        }
     }
 
     return false;
@@ -823,178 +1446,24 @@ function parseDateCandidate(ymd: string): Date | null {
 }
 
 async function configureSchedulePublish(page: Page, scheduledDate: Date): Promise<Date> {
-    let scheduleModeSelected = await clickFirstVisible(page, [
-        'div[class*="layer_publish" i] label:has-text("예약")',
-        'div[class*="layer_content_set_publish" i] label:has-text("예약")',
-        'div[class*="layer_publish" i] [role="radio"]:has-text("예약")',
-        'div[class*="layer_content_set_publish" i] [role="radio"]:has-text("예약")',
-        '.publish_layer button:has-text("예약")',
-        '[role="dialog"] button:has-text("예약")',
-        'label:has-text("예약")',
-    ]);
-
+    console.log(`   🗓️ 예약 발행 옵션 설정 시작: ${formatDateYmd(scheduledDate)}`);
+    const scheduleModeSelected = await selectScheduleMode(page);
     if (!scheduleModeSelected) {
-        const reserveRadio = page.locator('input[type="radio"][value*="reserve" i], input[type="radio"][id*="reserve" i], input[type="radio"][name*="reserve" i]').first();
-        const hasReserveRadio = (await reserveRadio.count().catch(() => 0)) > 0;
-        if (hasReserveRadio) {
-            await reserveRadio.check().catch(async () => {
-                await reserveRadio.click().catch(() => {});
-            });
-            scheduleModeSelected = true;
-        }
-    }
-
-    if (!scheduleModeSelected) {
+        // 스크린샷으로 디버깅 정보 남기기
         try {
-            await page.locator('span.text', { hasText: '예약' }).click();
-            scheduleModeSelected = true;
+            const debugPath = path.join(process.cwd(), 'temp_images', 'debug-schedule-fail.png');
+            await page.screenshot({ path: debugPath, fullPage: false });
+            console.log(`   📸 디버그 스크린샷 저장: ${debugPath}`);
         } catch(e) {}
-    }
-    
-    if (!scheduleModeSelected) {
-        try {
-            await page.locator('button.btn_reserve:not(.reserve_btn__Km5Xh)').click();
-            scheduleModeSelected = true;
-        } catch(e) {}
+        throw new Error("예약 발행 옵션을 찾지 못했습니다. 네이버 편집기 UI가 변경되었을 수 있습니다.");
     }
 
-    if (!scheduleModeSelected) {
-        try {
-            await page.locator('label', { hasText: '예약' }).click();
-            scheduleModeSelected = true;
-        } catch(e) {}
-    }
+    console.log(`   ✅ 예약 모드 진입 확인`);
 
-    if (!scheduleModeSelected) {
-        // Evaluate JavaScript directly on the page to find and click the label containing '예약'
-        try {
-            const clicked = await page.evaluate(`
-                (() => {
-                    // Try finding inputs first
-                    const preRadio = document.querySelector('input[type="radio"][value="pre"], input#radio_time2, input[data-testid="preTimeRadioBtn"]');
-                    if (preRadio) {
-                        preRadio.click();
-                        return true;
-                    }
-                    
-                    const panel = document.querySelector('.layer_popup__WjlfW, .publish_layer, [role="dialog"], body');
-                    const labels = Array.from(panel.querySelectorAll('label, span, button, input'));
-                    // "예약 발행 N건" 같은 헤더 버튼 제외
-                    const reserveEl = labels.find(el => {
-                        const text = el.textContent?.trim() || '';
-                        return text === '예약' || (text.includes('예약') && !text.includes('건') && !text.includes('발행'));
-                    });
-                    if (reserveEl) {
-                        reserveEl.click();
-                        return true;
-                    }
-                    
-                    // try to click text
-                    const reserveSpan = Array.from(document.querySelectorAll('span.text')).find(el => el.textContent?.trim() === '예약');
-                    if (reserveSpan) {
-                        reserveSpan.click();
-                        return true;
-                    }
-
-                    return false;
-                })()
-            `);
-            
-            if (!clicked) {
-                await page.locator('button.reserve_btn__Km5Xh, button:has-text("예약 발행"), button[data-click-area*="schedule"]').first().click();
-            }
-            await page.waitForTimeout(2000);
-            
-            // click it again to open inputs if it's a dropdown or if it needs double click
-            await page.evaluate(`
-                (() => {
-                    const radio2 = document.querySelector('#radio_time2');
-                    if (radio2) radio2.click();
-                })()
-            `);
-            await page.waitForTimeout(1000);
-            
-            if (clicked || await page.locator('#radio_time2, input[value="pre"]').first().isVisible()) {
-                console.log(`   ✅ 예약 옵션 선택 성공`);
-                scheduleModeSelected = true;
-            }
-        } catch(e) {}
-    }
-
-    if (!scheduleModeSelected) {
-        console.log(`   ⚠️ 모든 예약 버튼 클릭 방식 실패, 발행 설정 레이어의 HTML 분석이 필요할 수 있습니다.`);
-        try {
-             const html = await page.innerHTML('body', { timeout: 5000 });
-             const match = html.match(/.{0,150}예약.{0,150}/g);
-             if (match) {
-                 console.log(`   [디버그] '예약' 주변 텍스트:`, match.join('\n\n'));
-                 
-                 // "예약" 관련 버튼 클릭 재시도 (헤더 버튼 제외)
-                 try {
-                     const buttons = await page.$$('button');
-                     for (const btn of buttons) {
-                         const text = await btn.textContent();
-                         // 예약 옵션을 여는 버튼을 찾습니다. '예약 발행 n건' 버튼은 제외합니다.
-                         if (text && text.includes('예약') && !text.includes('건')) {
-                             await btn.click();
-                             console.log(`   ✅ "예약" 텍스트 포함 버튼 클릭 성공: ${text}`);
-                             scheduleModeSelected = true;
-                             break;
-                         }
-                     }
-                 } catch(e) {
-                     console.log(`   ⚠️ "예약" 버튼 클릭 실패`);
-                 }
-                 
-                 // 추가적인 대비책: .publish_layer 내부에서 예약을 찾아 클릭
-                 if (!scheduleModeSelected) {
-                     try {
-                         const layer = await page.locator('.publish_layer, [role="dialog"], .layer_popup__WjlfW, .publish_options, .publish_container').first();
-                         if (await layer.isVisible()) {
-                             const reserveBtn = layer.locator('button:has-text("예약")').first();
-                             if (await reserveBtn.isVisible()) {
-                                 await reserveBtn.click();
-                                 console.log(`   ✅ 레이어 내부 "예약" 버튼 클릭 성공`);
-                                 scheduleModeSelected = true;
-                             }
-                         }
-                     } catch(e) {
-                     }
-                 }
-                 
-                 // 마지막 대비책: data-click-area를 통해 스케줄 설정 영역 찾아가기 (스마트에디터 ONE의 일반적인 구조)
-                 if (!scheduleModeSelected) {
-                     try {
-                         // 예약발행 N건 버튼 외에 실제 예약을 선택하는 라디오/버튼을 찾습니다. 
-                         const reserveRadio = await page.locator('input[id*="reserve" i], input[value*="reserve" i], input[name*="reserve" i], input[type="radio"][value="pre"], input#radio_time2').first();
-                         if (await reserveRadio.count() > 0) {
-                             await reserveRadio.check({ force: true });
-                             console.log(`   ✅ 라디오 버튼(reserve) 강제 선택 성공`);
-                             scheduleModeSelected = true;
-                         }
-                     } catch (e) {
-                     }
-                 }
-             } else {
-                 console.log(`   [디버그] '예약' 텍스트를 찾을 수 없습니다.`);
-             }
-        } catch (e) {
-             console.log(`   [디버그] HTML 파싱 실패: ${e}`);
-        }
-        
-        if (!scheduleModeSelected) {
-            throw new Error("예약 발행 옵션을 찾지 못했습니다.");
-        }
-    }
-
-    // 기존 라디오 버튼 방식의 UI인 경우에만 확인, 
-    // 새로운 UI(버튼 클릭 성공)인 경우에는 라디오 버튼이 없어도 통과
-    const isRadioVisible = await getSchedulePanelLocator(page)
-        .then(panel => panel.locator('input[data-testid="preTimeRadioBtn"], input[name="radio_time"][value="pre"], input#radio_time2').first().isVisible())
-        .catch(() => false);
-
-    if (isRadioVisible) {
-        if (!(await ensureScheduleReserveRadioSelected(page))) {
+    const reserveSelected = await ensureScheduleReserveRadioSelected(page);
+    if (!reserveSelected) {
+        await page.waitForTimeout(300);
+        if (!(await hasVisibleScheduleDateInput(page))) {
             throw new Error("예약 발행 라디오 선택을 유지하지 못했습니다.");
         }
     }
@@ -1012,6 +1481,7 @@ async function configureSchedulePublish(page: Page, scheduledDate: Date): Promis
 
     let dateVerified = false;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
+        console.log(`   🗓️ 예약 날짜 적용 시도 ${attempt}/3`);
         let dateSet = await trySetScheduleDateInputs(page, scheduledDate);
         if (!dateSet) {
             dateSet = await trySetScheduleDateInputsFallback(page, scheduledDate);
@@ -1029,6 +1499,7 @@ async function configureSchedulePublish(page: Page, scheduledDate: Date): Promis
         }
 
         dateVerified = await verifyScheduleDateApplied(page, scheduledDate);
+        console.log(`   ${dateVerified ? "✅" : "⚠️"} 예약 날짜 검증 ${dateVerified ? "성공" : "재시도 필요"}`);
         if (dateVerified) break;
         await page.waitForTimeout(350);
     }
@@ -1102,6 +1573,207 @@ function parseArgs(): TopicArgs | null {
     };
 }
 
+function parseIdentifierArg(args: string[], prefix: "--task-id=" | "--post-id="): string | null {
+    const matched = args.find((arg) => arg.startsWith(prefix));
+    const value = matched?.slice(prefix.length).trim();
+    return value || null;
+}
+
+function mapRawTaskType(value: string | null | undefined): PostCategory {
+    if (value === "knowledge" || value === "travel" || value === "golf" || value === "product") {
+        return value;
+    }
+    if (value === "여행") return "travel";
+    if (value === "골프") return "golf";
+    if (value === "리뷰") return "product";
+    return "knowledge";
+}
+
+function toStoredPublishPayload(raw: string | null): StoredPublishPayload | null {
+    const prepared = parsePreparedTopicContent(raw);
+    if (prepared) {
+        return {
+            title: prepared.title,
+            lead: prepared.lead,
+            highlights: prepared.highlights,
+            sections: prepared.sections,
+            hashtags: prepared.hashtags,
+        };
+    }
+
+    const stored = parseStoredTopicPayload(raw);
+    if (!stored) return null;
+
+    return {
+        title: stored.title,
+        lead: stored.lead,
+        highlights: stored.highlights,
+        sections: stored.sections,
+        hashtags: stored.hashtags,
+    };
+}
+
+function imageRoleRank(role: string | null | undefined): number {
+    if ((role || "").toLowerCase() === "hero") return 0;
+    if ((role || "").toLowerCase() === "inline") return 1;
+    return 2;
+}
+
+function imagePathOrderHint(imagePath: string | null | undefined): number {
+    if (!imagePath) return Number.MAX_SAFE_INTEGER;
+    const base = path.basename(imagePath);
+    const matched = base.match(/(?:hero|inline)-(\d+)\.[a-z0-9]+$/i);
+    return matched ? Number.parseInt(matched[1], 10) : Number.MAX_SAFE_INTEGER;
+}
+
+function timestampOrderHint(value: Date | string | null | undefined): number {
+    if (!value) return Number.MAX_SAFE_INTEGER;
+    const date = value instanceof Date ? value : new Date(value);
+    const time = date.getTime();
+    return Number.isFinite(time) ? time : Number.MAX_SAFE_INTEGER;
+}
+
+function sortDraftImages<T extends DraftImageRecord>(images: T[]): T[] {
+    return images.slice().sort((left, right) => {
+        const roleDiff = imageRoleRank(left.role) - imageRoleRank(right.role);
+        if (roleDiff !== 0) return roleDiff;
+
+        const orderDiff = imagePathOrderHint(left.localPath) - imagePathOrderHint(right.localPath);
+        if (orderDiff !== 0) return orderDiff;
+
+        return timestampOrderHint(left.createdAt) - timestampOrderHint(right.createdAt);
+    });
+}
+
+async function loadPublishContextFromDb(runtimeOptions: RuntimePublishOptions): Promise<LoadedPublishContext | null> {
+    const cliArgs = process.argv.slice(2);
+    const explicitTaskId = parseIdentifierArg(cliArgs, "--task-id=");
+    const explicitPostId = parseIdentifierArg(cliArgs, "--post-id=");
+    const firstArg = process.argv[2];
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+    let taskId = explicitTaskId;
+    let postId = explicitPostId;
+
+    if (!taskId && !postId && firstArg && uuidRegex.test(firstArg)) {
+        taskId = firstArg;
+    }
+
+    if (!taskId && !postId) {
+        return null;
+    }
+
+    const prisma = new PrismaClient();
+    try {
+        if (taskId) {
+            const task = await prisma.topicPostTask.findUnique({
+                where: { id: taskId },
+            });
+            if (!task) {
+                throw new Error(`태스크를 찾을 수 없습니다: ${taskId}`);
+            }
+
+            const preparedContent = toStoredPublishPayload(task.preparedContentJson);
+            if (!preparedContent) {
+                throw new Error("준비된 주제글 콘텐츠가 없습니다. prepare 단계가 필요합니다.");
+            }
+            const imagePlan = parseTopicVisualPlan(task.imagePlanJson);
+
+            const selectedDraft = task.selectedDraftId
+                ? await prisma.topicDraft.findUnique({
+                    where: { id: task.selectedDraftId },
+                    include: { images: true },
+                })
+                : null;
+            const imagePaths = sortDraftImages(selectedDraft?.images || [])
+                .map((image) => image.localPath)
+                .filter((imagePath): imagePath is string => Boolean(imagePath && fs.existsSync(imagePath)));
+
+            return {
+                taskId,
+                postId: null,
+                args: {
+                    type: mapRawTaskType(task.type),
+                    topic: task.preparedTitle || task.topic,
+                    keywords: task.keywords ? task.keywords.split(",").map((keyword) => keyword.trim()).filter(Boolean) : [],
+                    style: task.memo || undefined,
+                    category: task.categoryNo || undefined,
+                    publishMode: runtimeOptions.mode,
+                    scheduledDate: runtimeOptions.scheduledDateInput ? runtimeOptions.scheduledDate?.toISOString() : undefined,
+                    rawScheduledDate: runtimeOptions.scheduledDateInput ?? undefined,
+                    details: {},
+                },
+                preparedContent,
+                imagePaths,
+                imagePlan,
+            };
+        }
+
+        const post = await prisma.post.findUnique({
+            where: { id: postId! },
+        });
+        if (!post) {
+            throw new Error(`예약 Post를 찾을 수 없습니다: ${postId}`);
+        }
+
+        const seed = post.topicSeed
+            ? JSON.parse(post.topicSeed) as {
+                draftId?: string;
+                type?: string;
+                style?: string;
+                category?: string | null;
+                contentJson?: string;
+            }
+            : {};
+        const draft = seed.draftId
+            ? await prisma.topicDraft.findUnique({
+                where: { id: seed.draftId },
+                include: { images: true },
+            })
+            : null;
+
+        const preparedContent =
+            toStoredPublishPayload(draft?.contentJson || null) ||
+            toStoredPublishPayload(typeof seed.contentJson === "string" ? seed.contentJson : null) ||
+            toStoredPublishPayload(post.contentHtml);
+        if (!preparedContent) {
+            throw new Error("발행에 사용할 저장된 콘텐츠를 찾을 수 없습니다.");
+        }
+
+        const imagePaths = sortDraftImages(draft?.images || [])
+            .map((image) => image.localPath)
+            .filter((imagePath): imagePath is string => Boolean(imagePath && fs.existsSync(imagePath)));
+
+        return {
+            taskId: null,
+            postId: post.id,
+            args: {
+                type: mapRawTaskType(seed.type || "knowledge"),
+                topic: post.title || preparedContent.title,
+                keywords: (() => {
+                    try {
+                        const parsed = post.keywords ? JSON.parse(post.keywords) : [];
+                        return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+                    } catch {
+                        return [];
+                    }
+                })(),
+                style: post.tone || (typeof seed.style === "string" ? seed.style : undefined),
+                category: post.category || (typeof seed.category === "string" ? seed.category : undefined),
+                publishMode: runtimeOptions.mode,
+                scheduledDate: runtimeOptions.scheduledDateInput ? runtimeOptions.scheduledDate?.toISOString() : undefined,
+                rawScheduledDate: runtimeOptions.scheduledDateInput ?? undefined,
+                details: {},
+            },
+            preparedContent,
+            imagePaths,
+            imagePlan: null,
+        };
+    } finally {
+        await prisma.$disconnect();
+    }
+}
+
 // ============================================
 // 스타일 로드
 // ============================================
@@ -1139,7 +1811,7 @@ function parseSectionsFromLLM(value: unknown): string[] {
       if (entry && typeof entry === "object") {
         const block = entry as TopicOutputBlock;
         const heading = normalizeOutputText(block.heading ?? block.sectionTitle);
-        // The prompt asked for "drafts" which might just be an array of strings, 
+        // The prompt asked for "drafts" which might just be an array of strings,
         // or an array of objects. We handle both.
         const body = normalizeOutputText(block.body ?? (entry as any).draft ?? (entry as any).content);
         const merged = [heading, body].filter(Boolean).join("\n\n");
@@ -1170,10 +1842,17 @@ function parseLLMOutput(raw: string): TopicAgentOutput {
   const blocks = extractJsonObjectBlocks(raw);
   let parsed: unknown = null;
 
-  for (const block of blocks) {
+  for (const block of [...blocks].reverse()) {
     try {
-      parsed = JSON.parse(block);
-      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      const candidate = JSON.parse(block);
+      if (
+        typeof candidate === "object" &&
+        candidate !== null &&
+        !Array.isArray(candidate) &&
+        normalizeOutputText((candidate as Record<string, unknown>).title ?? (candidate as Record<string, unknown>).headline).length > 0 &&
+        parseSectionsFromLLM((candidate as Record<string, unknown>).sections ?? (candidate as Record<string, unknown>).drafts).length > 0
+      ) {
+        parsed = candidate;
         break;
       }
     } catch {
@@ -1190,18 +1869,18 @@ function parseLLMOutput(raw: string): TopicAgentOutput {
   const fallbackTitle =
     normalizeOutputText(record?.title ?? record?.headline ?? record?.name);
     const fallbackSections = parseSectionsFromLLM(record?.sections ?? record?.drafts ?? record?.content ?? record?.body);
-    const fallbackHashtags = parseHashtagsFromLLM(record?.hashtags ?? record?.tags);
+  const fallbackHashtags = parseHashtagsFromLLM(record?.hashtags ?? record?.tags);
 
-    if (!fallbackTitle && fallbackSections.length === 0 && fallbackHashtags.length === 0) {
+  if (!fallbackTitle && fallbackSections.length === 0 && fallbackHashtags.length === 0) {
         const matched = raw.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-        if (!matched) {
+    if (!matched) {
             console.error("=== Parsing failed ===");
             console.error(raw);
-            throw new Error("콘텐츠 파싱 실패");
-        }
+      throw new Error("콘텐츠 파싱 실패");
+    }
 
         try {
-            parsed = JSON.parse(matched[0]);
+    parsed = JSON.parse(matched[0]);
         } catch (e) {
             console.error("=== JSON parse failed ===");
             console.error(matched[0]);
@@ -1223,9 +1902,14 @@ function parseLLMOutput(raw: string): TopicAgentOutput {
     };
   }
 
+  // sections가 빈 배열이면 원본 텍스트를 문단 단위로 분할하여 폴백
+  const finalSections = fallbackSections.length > 0
+    ? fallbackSections
+    : raw.split(/\n\n+/).map(chunk => chunk.trim()).filter(s => s.length > 0);
+
   return {
     title: fallbackTitle || "주제 글",
-    sections: fallbackSections,
+    sections: finalSections,
     hashtags: fallbackHashtags,
   };
 }
@@ -1269,7 +1953,10 @@ async function resolveImagesArg(raw: string): Promise<string | null> {
   return null;
 }
 
-function downloadImage(url: string, filePath: string): Promise<void> {
+function downloadImage(url: string, filePath: string, redirectCount = 0): Promise<void> {
+  if (redirectCount > 5) {
+    return Promise.reject(new Error(`Too many redirects for URL: ${url}`));
+  }
   const protocol = url.startsWith("https:") ? https : http;
   return new Promise((resolve, reject) => {
     const stream = fs.createWriteStream(filePath);
@@ -1277,7 +1964,8 @@ function downloadImage(url: string, filePath: string): Promise<void> {
       if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400) {
         const redirectUrl = response.headers.location;
         if (redirectUrl) {
-          downloadImage(redirectUrl, filePath).then(resolve).catch(reject);
+          stream.destroy();
+          downloadImage(redirectUrl, filePath, redirectCount + 1).then(resolve).catch(reject);
           return;
         }
       }
@@ -1417,7 +2105,7 @@ function runOpenCode(prompt: string): string {
     if (!output && result.stdout) {
         output = result.stdout.trim();
     }
-    
+
     // Sometimes opencode puts the JSON in a weird block or prints debug output first
     if (output && !output.startsWith("{") && !output.startsWith("[")) {
         const jsonMatch = output.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
@@ -1425,7 +2113,7 @@ function runOpenCode(prompt: string): string {
             output = jsonMatch[0];
         }
     }
-    
+
     if (!output) {
         console.error("=== opencode raw stderr ===");
         console.error(result.stderr);
@@ -1438,188 +2126,121 @@ function runOpenCode(prompt: string): string {
 }
 
 // ============================================
-// LLM으로 글 생성 (에이전틱 다단계 고도화 파이프라인)
+// LLM으로 글 생성 (에이전틱 다단계 고도화 파이프라인 - V2)
 // ============================================
+import { createChatGPTContext, openFreshChatGPTTarget, openChatGPTTarget, sendPromptToChatGPT, ChatGPTContextHandle, downloadChatGPTImages, isChatGPTGenerating } from "./lib/chatgpt-browser";
+
+
 async function generateAdvancedContent(
     args: TopicArgs,
     styleGuide: string
 ): Promise<{ title: string; sections: string[]; hashtags: string[]; imagePrompts?: any[] }> {
-    console.log("\n🚀 에이전틱 스킬 기반 고도화 파이프라인 시작...");
+    console.log("\n🚀 [Topic Agent V2] GPT 단일 패스 콘텐츠 생성 시작...");
 
     const template = getTemplate(args.type);
     const baseKeywords = args.keywords.length > 0 ? args.keywords.join(", ") : template.seoKeywords.join(", ");
+    const CHATGPT_GPT_URL_TOPIC =
+        process.env.CHATGPT_GPT_URL_TOPIC ||
+        "https://chatgpt.com/g/g-690490188af4819188bc1da73019a60f-jeongboseong-beomyong-isyu-geul-saengseonggi-v11-dapeojuneunnamja";
 
-    // [1단계] 주제/소주제 기획 및 스토리보딩
-    console.log("   [1/4] 기획 스킬 적용: 주제 및 스토리보드 구성 중...");
-    const planPrompt = `당신은 전문 블로그 기획자이자 작가입니다.
-주제: ${args.topic}
-키워드: ${baseKeywords}
-상세정보: ${JSON.stringify(args.details)}
+    let chatgptHandle: ChatGPTContextHandle | null = null;
 
-이 주제를 바탕으로 독자의 이목을 끄는 블로그 포스팅 기획안을 작성하세요.
-블로그 포스팅은 정보가 풍부하고 길이가 길어야 합니다. 각 단락은 최소 300자 이상, 전체 글은 최소 2000자 이상이 되도록 매우 풍성한 내용을 담아야 합니다.
-
-반드시 아래 JSON 포맷을 정확히 지켜서 출력하세요. 다른 설명이나 마크다운 백틱(\`\`\`) 없이 순수한 JSON만 반환해야 파싱 오류가 나지 않습니다.
-
-{
-  "title": "매력적이고 클릭을 유도하는 SEO 최적화 제목",
-  "storyline": "이 포스팅을 관통하는 전체적인 스토리텔링의 흐름과 독자에게 전달할 감정선 (2-3문장)",
-  "subtopics": [
-    { "id": 1, "heading": "소주제 1", "intent": "이 단락에서 전달할 핵심 메시지와 분위기. 어떤 구체적인 정보나 팁이 들어갈지 상세히 기재." },
-    { "id": 2, "heading": "소주제 2", "intent": "이 단락에서 전달할 핵심 메시지와 분위기" }
-  ]
-}`;
-    const planJsonStr = runOpenCode(planPrompt);
-    let plan;
     try {
-        const match = planJsonStr.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-        plan = JSON.parse(match ? match[0] : planJsonStr);
-        if (typeof plan !== "object" || !plan.title || !plan.subtopics) {
-            throw new Error("Invalid plan format");
+        console.log("   🌐 브라우저 세션 초기화 (ChatGPT)...");
+        chatgptHandle = await createChatGPTContext(true);
+        const page = await chatgptHandle.context.newPage();
+
+        await openFreshChatGPTTarget(page, CHATGPT_GPT_URL_TOPIC, "글 생성 GPT");
+
+        const contentPrompt = [
+            "너는 네이버 블로그 상식/정보 글을 쓰는 한국어 전문 에디터다.",
+            "아래 조건을 보고 질문하지 말고 최종 발행 가능한 글 JSON만 작성해라.",
+            "마크다운 코드펜스, 설명문, 사과문, 진행 여부 확인은 금지한다.",
+            "",
+            `주제: ${args.topic}`,
+            `카테고리: ${categoryNames[args.type]}`,
+            `핵심 키워드: ${baseKeywords}`,
+            styleGuide ? `스타일 가이드:\n${styleGuide}` : "",
+            "",
+            "품질 기준:",
+            "- title은 검색 의도에 맞는 자연스러운 한국어 제목 1개",
+            "- sections는 정확히 4개",
+            "- 각 section은 heading과 body를 가진 객체",
+            "- 각 body는 250~450자, 2~4개의 짧은 문단으로 구성",
+            "- '이미지 1에 대한 설명입니다', '추천 정보', '관련 내용입니다' 같은 더미 문장 금지",
+            "- 해시태그는 5~8개, # 포함 가능",
+            "- 과장 광고, 근거 없는 보장 표현, AI가 썼다는 표현 금지",
+            "",
+            "반드시 아래 JSON 스키마만 반환:",
+            JSON.stringify(
+                {
+                    title: "제목",
+                    sections: [
+                        { heading: "소제목 1", body: "본문" },
+                        { heading: "소제목 2", body: "본문" },
+                        { heading: "소제목 3", body: "본문" },
+                        { heading: "소제목 4", body: "본문" },
+                    ],
+                    hashtags: ["#태그1", "#태그2", "#태그3", "#태그4", "#태그5"],
+                },
+                null,
+                2,
+            ),
+        ]
+            .filter(Boolean)
+            .join("\n");
+
+        console.log("   [1/1] GPT에 최종 JSON 초안 요청...");
+        let raw = await sendPromptToChatGPT(page, contentPrompt, "주제글 JSON 생성");
+        if (!raw.trim()) {
+            const bodyText = ((await page.textContent("body").catch(() => "")) || "").trim();
+            const bodyJsonBlocks = extractJsonObjectBlocks(bodyText);
+            const bodyCandidate = [...bodyJsonBlocks].reverse().find((block) => {
+                try {
+                    const parsed = JSON.parse(block) as Record<string, unknown>;
+                    return normalizeOutputText(parsed.title).length > 0 && parseSectionsFromLLM(parsed.sections).length > 0;
+                } catch {
+                    return false;
+                }
+            });
+            if (bodyCandidate) {
+                raw = bodyCandidate;
+            }
         }
-    } catch (e) {
-        console.error("Plan parsing failed:", planJsonStr);
-        plan = { 
-            title: args.topic, 
-            storyline: "기본 스토리라인", 
-            subtopics: [
-                { id: 1, heading: "서론", intent: "도입부" },
-                { id: 2, heading: "본론", intent: "핵심 내용" },
-                { id: 3, heading: "결론", intent: "마무리" }
-            ] 
-        };
-    }
 
-    // [2단계] 세부 글 초안 작성
-    console.log("   [2/4] 작성 스킬 적용: 세부 스토리텔링 초안 작성 중...");
-    const draftPrompt = `당신은 블로그 전문 스토리 작가입니다.
-기획안: ${JSON.stringify(plan)}
-
-위 기획안의 'storyline'을 바탕으로, 각 'subtopics'에 해당하는 세부 본문 초안을 아주 길고 상세하게 작성해주세요.
-단순한 정보 나열이 아닌, 독자가 몰입할 수 있는 스토리텔링 방식으로 전개하되, 각 단락마다 아주 구체적이고 실용적인 정보(예: 골프공 피스별 차이점, 딤플의 원리, 추천 모델 특징 등)를 꽉꽉 채워 넣어야 합니다.
-**각 단락(draft)은 반드시 최소 300~500자 이상의 충분한 길이여야 합니다.**
-
-반드시 아래 JSON 포맷을 정확히 지켜서 출력하세요. 다른 설명 없이 순수한 JSON만 반환해야 합니다.
-
-{
-  "drafts": [
-    "소주제 1의 본문 초안 (최소 400자 이상, 구체적인 정보와 스토리 포함)",
-    "소주제 2의 본문 초안 (최소 400자 이상, 구체적인 정보와 스토리 포함)"
-  ]
-}`;
-    const draftJsonStr = runOpenCode(draftPrompt);
-    let drafts: string[] = [];
-    try {
-        const match = draftJsonStr.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-        const parsedDrafts = JSON.parse(match ? match[0] : draftJsonStr);
-        drafts = parsedDrafts.drafts || parsedDrafts;
-        if (!Array.isArray(drafts)) drafts = [String(drafts)];
-        if (drafts.length === 0) throw new Error("Empty drafts");
-    } catch (e) {
-        console.error("Draft parsing failed:", draftJsonStr);
-        drafts = [
-            "골프공은 골프에서 가장 중요한 장비 중 하나입니다. 많은 초보자 분들이 어떤 공을 선택해야 할지 고민하시는데, 2피스나 3피스 등 구조에 따라 타구감과 비거리가 크게 달라질 수 있습니다.",
-            "특히 초보자의 경우 비거리를 늘려주고 슬라이스를 줄여주는 2피스 공을 많이 추천합니다. 가격도 상대적으로 저렴해서 잃어버려도 부담이 적은 것이 큰 장점입니다.",
-            "반면 중상급자나 프로 선수들은 스핀 컨트롤이 중요하기 때문에 3피스나 4피스 공을 선호합니다. 자신의 실력과 플레이 스타일에 맞는 골프공을 고르는 것이 타수를 줄이는 첫걸음이 될 수 있습니다."
-        ];
-    }
-
-    // [3단계] 모바일 최적화 및 스타일 고도화
-    console.log("   [3/4] 편집 스킬 적용: 모바일 최적화 및 스타일 고도화 중...");
-    const polishPrompt = `당신은 네이버 블로그 전문 모바일 에디터입니다.
-다음은 작성된 본문 초안입니다:
-${JSON.stringify(drafts)}
-
-${styleGuide}
-
-본문의 내용을 절대 축약하거나 삭제하지 마세요. 정보의 양을 그대로 유지하되 모바일 가독성만 최적화해야 합니다.
-다음 규칙을 완벽히 지켜서 글을 고도화해주세요:
-- 본문의 길이는 그대로 유지하거나 더 풍부하게 살립니다 (각 단락 최소 300자 이상).
-- 한 문장은 짧고 간결하게 (50자 이내) 끊어치세요.
-- 모바일에서 글이 빽빽해 보이지 않도록 1~2문장마다 줄바꿈(\n\n) 필수 적용.
-- 기계적인 설명이 아닌 독자에게 직접 이야기하듯 생생한 감성적 어조 사용.
-- 적절하고 다채로운 이모지 삽입.
-- 물결표(~) 기호는 취소선으로 인식되므로 절대 사용 금지 (대신 '-' 사용).
-- 본문 내에 '[사진 자리: ...]' 같은 텍스트 절대 사용 금지.
-
-반드시 아래 JSON 포맷을 정확히 지켜서 출력하세요. 다른 설명 없이 순수한 JSON만 반환해야 합니다.
-반드시 drafts로 전달받은 모든 단락을 고도화하여 돌려주어야 합니다.
-
-{
-  "sections": [
-    "고도화된 단락 1 본문 (내용 축소 금지)",
-    "고도화된 단락 2 본문"
-  ],
-  "hashtags": ["#해시태그1", "#해시태그2"]
-}`;
-    const polishJsonStr = runOpenCode(polishPrompt);
-    let polished: { sections: string[], hashtags: string[] } = { sections: [], hashtags: [] };
-    try {
-        const match = polishJsonStr.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-        polished = JSON.parse(match ? match[0] : polishJsonStr);
-        if (!polished.sections || polished.sections.length === 0) {
-            throw new Error("Empty sections");
+        if (!raw.trim()) {
+            const debugDir = path.join(process.cwd(), "logs", "manual", "chatgpt-content");
+            fs.mkdirSync(debugDir, { recursive: true });
+            const stamp = Date.now();
+            const screenshotPath = path.join(debugDir, `${stamp}-empty-response.png`);
+            const htmlPath = path.join(debugDir, `${stamp}-empty-response.html`);
+            await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+            fs.writeFileSync(htmlPath, await page.content().catch(() => ""), "utf8");
+            console.log(`   ⚠️ ChatGPT 빈 응답 디버그 저장: ${path.relative(process.cwd(), screenshotPath)}`);
+            throw new Error("ChatGPT 응답이 비어 있습니다.");
         }
-    } catch (e) {
-        console.error("Polish parsing failed:", polishJsonStr);
-        polished = {
-            sections: drafts,
-            hashtags: args.keywords
+        const parsed = parseLLMOutput(raw);
+        const content = {
+            title: parsed.title,
+            sections: parsed.sections.map((section) => stringifyTopicSectionForImage(section)),
+            hashtags: parsed.hashtags,
         };
-    }
+        assertPublishableContent(content);
 
-    // [4단계] 비주얼 디렉팅 (이미지 프롬프트 고도화)
-    console.log("   [4/4] 비주얼 스킬 적용: 단락별 이미지 키워드 및 프롬프트 기획 중...");
-    const sectionsToUse = polished.sections && polished.sections.length > 0 ? polished.sections : drafts;
-    const imagePrompt = `당신은 시각 디자인 디렉터입니다.
-블로그 주제: ${plan.title || args.topic}
-본문 단락들:
-${JSON.stringify(sectionsToUse)}
-
-각 단락의 내용과 분위기에 완벽하게 어울리는 사진을 찾거나 생성하기 위해 기획해주세요.
-무료 이미지 사이트(예: loremflickr)에서 검색하기 좋은 1~2개의 영단어 조합(searchKeyword)과, 전문 AI 이미지 생성기(FLUX, Midjourney 등)를 위한 정교한 영어 프롬프트(imagePrompt)를 모두 작성해주세요.
-단락 개수와 동일하게 이미지 기획을 만들어주세요.
-
-**프롬프트 작성 가이드:**
-- 사진은 사실적이고(photorealistic), 전문 포토그래퍼가 찍은 듯한 고품질(high quality, masterpiece, 8k, highly detailed)이어야 합니다.
-- 텍스트나 로고가 들어가지 않도록 프롬프트를 구성하세요 (no text, no logo, no watermark).
-- 구체적인 장소, 피사체, 조명(lighting), 구도(composition), 분위기(mood)를 영어 명사구 중심으로 상세히 묘사하세요.
-- 카메라 렌즈 설정(예: 35mm lens, f/1.8), 필름 종류, 각도(wide angle, close up) 등 사진학적 디테일을 추가하면 좋습니다.
-- 인물이 없는(no people) 정물이나 배경 위주의 사진이 블로그 썸네일로 좋습니다.
-- **매우 중요**: searchKeyword는 반드시 1개의 영어 단어만 사용하세요. (예: "golf", "ball", "grass", "sunset"). 여러 단어를 쓰면 무료 이미지 사이트에서 검색이 실패합니다!
-
-반드시 아래 JSON 포맷을 정확히 지켜서 출력하세요. 다른 설명 없이 순수한 JSON만 반환해야 합니다.
-
-{
-  "images": [
-    {
-      "searchKeyword": "golf",
-      "imagePrompt": "A photorealistic close-up of a premium white golf ball resting on perfectly manicured green grass, morning dew, warm morning sunlight, shallow depth of field, 35mm lens, f/1.8, highly detailed, 8k, cinematic lighting, no text, no watermark"
-    }
-  ]
-}`;
-    const imageDirJsonStr = runOpenCode(imagePrompt);
-    let imageDir: { images: any[] } = { images: [] };
-    try {
-        const match = imageDirJsonStr.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-        imageDir = JSON.parse(match ? match[0] : imageDirJsonStr);
-    } catch(e) {
-        console.error("Image prompt parsing failed:", imageDirJsonStr);
-        imageDir = {
-            images: drafts.map((_, i) => ({
-                searchKeyword: "golf",
-                imagePrompt: "A photorealistic close-up of a premium white golf ball resting on perfectly manicured green grass, morning dew, warm morning sunlight, shallow depth of field, 35mm lens, f/1.8, highly detailed, 8k, cinematic lighting, no text, no watermark"
-            }))
+        console.log("   ✅ GPT 글 생성 및 품질 검사 완료");
+        return {
+            ...content,
+            imagePrompts: [],
         };
-    }
 
-    console.log(`   ✅ 생성 완료: "${plan.title}"`);
-    return {
-        title: plan.title || args.topic,
-        sections: polished.sections && polished.sections.length > 0 ? polished.sections : drafts,
-        hashtags: polished.hashtags && polished.hashtags.length > 0 ? polished.hashtags : args.keywords,
-        imagePrompts: imageDir.images || []
-    };
+    } catch (error) {
+        console.error("❌ ChatGPT 파이프라인 에러:", error);
+        throw error;
+    } finally {
+        if (chatgptHandle) {
+            await chatgptHandle.close();
+        }
+    }
 }
 
 // ============================================
@@ -1644,14 +2265,41 @@ async function uploadOneImage(page: Page, imagePath: string): Promise<boolean> {
     try {
         const imageBtn = await page.$('button[data-name="image"]');
         if (imageBtn) {
+            const imageSelectors = [
+                '.se-image-resource',
+                '.se-component-image img',
+                '.se-section-image img',
+                '[data-module="image"] img',
+            ];
+            const countImages = async () => {
+                let total = 0;
+                for (const selector of imageSelectors) {
+                    total += await page.locator(selector).count().catch(() => 0);
+                }
+                return total;
+            };
+            const beforeCount = await countImages();
             const [fileChooser] = await Promise.all([
                 page.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null),
                 imageBtn.click()
             ]);
-            
+
             if (fileChooser) {
                 await fileChooser.setFiles(imagePath);
-                await page.waitForTimeout(2500); // 업로드 완료 대기
+                const uploadConfirmed = await page.waitForFunction(
+                    ({ selectors, before }) =>
+                        selectors.some((selector) => document.querySelectorAll(selector).length > before),
+                    { selectors: imageSelectors, before: beforeCount },
+                    { timeout: 15000 }
+                ).then(() => true).catch(() => false);
+
+                if (!uploadConfirmed) {
+                    await page.waitForTimeout(2500);
+                    const afterCount = await countImages();
+                    return afterCount > beforeCount;
+                }
+
+                await page.waitForTimeout(800);
                 return true;
             }
         }
@@ -1663,6 +2311,24 @@ async function uploadOneImage(page: Page, imagePath: string): Promise<boolean> {
 
 async function inputTitle(page: Page, title: string): Promise<void> {
     console.log(`   📌 제목: ${title}`);
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+            await inputTitleOnce(page, title);
+            return;
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (attempt >= 3 || !/context was destroyed|navigation|Target closed/i.test(message)) {
+                throw error;
+            }
+            console.log(`   🔄 제목 입력 중 에디터 리로드 감지, 재시도 ${attempt + 1}/3`);
+            await page.waitForLoadState("domcontentloaded").catch(() => {});
+            await page.waitForTimeout(1200);
+            await closeAllPopups(page);
+        }
+    }
+}
+
+async function inputTitleOnce(page: Page, title: string): Promise<void> {
     const titleSelectors = [
         '.se-documentTitle-editView',
         '.se-title-input',
@@ -1685,21 +2351,124 @@ async function inputTitle(page: Page, title: string): Promise<void> {
     // 폴백: 기존 위치 좌표 클릭
     await page.mouse.click(640, 130);
     await page.waitForTimeout(300);
-    
+
     // 만약 여전히 제목 입력이 안됐다면 evaluate로 강제입력 시도
-    await page.evaluate(`
-        (() => {
-            const titleEl = document.querySelector('.se-documentTitle-editView, .se-title-input, .se-documentTitle, .se-document-title, .se-input-title');
-            if (titleEl) {
-                titleEl.textContent = "${title}";
-            }
-        })()
-    `);
-    
+    await page.evaluate((t: string) => {
+        const titleEl = document.querySelector('.se-documentTitle-editView, .se-title-input, .se-documentTitle, .se-document-title, .se-input-title');
+        if (titleEl) {
+            titleEl.textContent = t;
+        }
+    }, title);
+
     await page.keyboard.type(title, { delay: 30 });
 }
 
-async function inputContent(page: Page, sections: string[], hashtags: string[], imagePaths?: string[]): Promise<void> {
+function buildHeuristicSectionImageMap(
+    sections: Array<string | PreparedTopicSection>,
+    inlineImagePaths: string[],
+    blockedSectionIndexes: Set<number> = new Set(),
+): Map<number, string> {
+    const sectionImageMap = new Map<number, string>();
+    if (inlineImagePaths.length === 0 || sections.length === 0) {
+        return sectionImageMap;
+    }
+
+    const preferredKinds: Array<PreparedTopicSection["kind"]> = ["comparison", "proof", "scene", "mistake"];
+    const usedSectionIndexes = new Set<number>(blockedSectionIndexes);
+    let imageCursor = 0;
+
+    for (const preferredKind of preferredKinds) {
+        if (imageCursor >= inlineImagePaths.length) break;
+        const sectionIndex = sections.findIndex((section, index) =>
+            index > 0 &&
+            index < sections.length - 1 &&
+            !usedSectionIndexes.has(index) &&
+            typeof section !== "string" &&
+            section.kind === preferredKind,
+        );
+        if (sectionIndex >= 0) {
+            sectionImageMap.set(sectionIndex, inlineImagePaths[imageCursor]);
+            usedSectionIndexes.add(sectionIndex);
+            imageCursor += 1;
+        }
+    }
+
+    for (let index = 1; index < sections.length - 1 && imageCursor < inlineImagePaths.length; index += 1) {
+        if (usedSectionIndexes.has(index)) continue;
+        sectionImageMap.set(index, inlineImagePaths[imageCursor]);
+        usedSectionIndexes.add(index);
+        imageCursor += 1;
+    }
+
+    return sectionImageMap;
+}
+
+function buildPlannedSectionImageMap(
+    sections: Array<string | PreparedTopicSection>,
+    inlineImagePaths: string[],
+    imagePlan: TopicVisualPlan | null,
+): Map<number, string> {
+    const sectionImageMap = new Map<number, string>();
+    if (!imagePlan || inlineImagePaths.length === 0) {
+        return sectionImageMap;
+    }
+
+    const sectionSlotMap = new Map<string, number>();
+    sections.forEach((section, index) => {
+        if (typeof section === "string") return;
+        const slotId = normalizeText(section.imageSlotId || "");
+        if (slotId) {
+            sectionSlotMap.set(slotId, index);
+        }
+    });
+
+    imagePlan.inline.forEach((item, index) => {
+        const imagePath = inlineImagePaths[index];
+        if (!imagePath) return;
+
+        const sectionIndexFromPlan =
+            typeof item.sectionIndex === "number" && Number.isInteger(item.sectionIndex)
+                ? item.sectionIndex
+                : null;
+        const sectionIndexFromSlot = normalizeText(item.slotId || "")
+            ? sectionSlotMap.get(normalizeText(item.slotId || "")) ?? null
+            : null;
+        const targetIndex = sectionIndexFromPlan ?? sectionIndexFromSlot;
+
+        if (targetIndex === null) return;
+        if (targetIndex < 0 || targetIndex >= sections.length) return;
+        sectionImageMap.set(targetIndex, imagePath);
+    });
+
+    return sectionImageMap;
+}
+
+function buildSectionImageMap(
+    sections: Array<string | PreparedTopicSection>,
+    inlineImagePaths: string[],
+    imagePlan: TopicVisualPlan | null,
+): Map<number, string> {
+    const plannedMap = buildPlannedSectionImageMap(sections, inlineImagePaths, imagePlan);
+    const plannedImageSet = new Set(plannedMap.values());
+    const remainingImagePaths = inlineImagePaths.filter((imagePath) => !plannedImageSet.has(imagePath));
+    const heuristicMap = buildHeuristicSectionImageMap(
+        sections,
+        remainingImagePaths,
+        new Set(plannedMap.keys()),
+    );
+
+    return new Map([...plannedMap.entries(), ...heuristicMap.entries()]);
+}
+
+async function inputContent(
+    page: Page,
+    sections: Array<string | PreparedTopicSection>,
+    hashtags: string[],
+    imagePaths?: string[],
+    imagePlan?: TopicVisualPlan | null,
+    lead?: string,
+    highlights?: string[],
+): Promise<void> {
     console.log("\n✍️ 본문 입력 중...");
 
     await closeAllPopups(page);
@@ -1721,45 +2490,71 @@ async function inputContent(page: Page, sections: string[], hashtags: string[], 
         }
     }
 
-    // 각 섹션 입력
+    const safeImagePaths = imagePaths ?? [];
+    const heroImagePath =
+        safeImagePaths.find((imagePath) => /(^|\/)hero-\d+\.[a-z0-9]+$/i.test(imagePath)) || null;
+    const inlineImagePaths = safeImagePaths.filter((imagePath) => imagePath !== heroImagePath);
+
+    if (heroImagePath) {
+        console.log(`   [hero] 🖼️ 대표 이미지 업로드...`);
+        await uploadOneImage(page, heroImagePath);
+        await page.keyboard.press("Escape");
+        await page.waitForTimeout(200);
+        await page.keyboard.press("Escape");
+        await page.waitForTimeout(200);
+        await page.keyboard.press("End");
+        await page.waitForTimeout(100);
+        await page.keyboard.press("Enter");
+        await page.waitForTimeout(300);
+    }
+
+    const sectionImageMap = buildSectionImageMap(sections, inlineImagePaths, imagePlan || null);
+    const prefixBlocks = preparedSectionsToPublishBlocks({
+        title: "",
+        lead,
+        highlights,
+        sections: [],
+        hashtags: [],
+    });
+
+    for (let i = 0; i < prefixBlocks.length; i += 1) {
+        console.log(`   [intro ${i + 1}/${prefixBlocks.length}] 도입 입력...`);
+        await inputTopicSectionBlock(page, prefixBlocks[i]);
+        await page.waitForTimeout(300);
+    }
+
     for (let i = 0; i < sections.length; i++) {
-        // 이미지가 있으면 먼저 업로드
-        if (imagePaths && imagePaths[i]) {
+        // 이미지가 있으면 먼저 업로드 (균등 분배)
+        const assignedImage = sectionImageMap.get(i);
+        if (assignedImage) {
             console.log(`   [${i + 1}/${sections.length}] 🖼️ 이미지 업로드...`);
-            await uploadOneImage(page, imagePaths[i]);
-            // 이미지 업로드 후 본문 영역 다시 클릭
-            for (const selector of contentSelectors) {
-                const contentArea = await page.$(selector);
-                if (contentArea && await contentArea.isVisible()) {
-                    await contentArea.click();
-                    break;
-                }
-            }
-            await page.keyboard.press("ArrowDown");
+            await uploadOneImage(page, assignedImage);
+            // 이미지 업로드 후 캡션 영역을 안정적으로 벗어남
+            // 1) Escape 2번으로 캡션 편집 모드 + 이미지 선택 모두 해제
+            await page.keyboard.press("Escape");
+            await page.waitForTimeout(200);
+            await page.keyboard.press("Escape");
+            await page.waitForTimeout(200);
+            // 2) 이미지 컴포넌트 아래 본문 영역 끝으로 이동하여 새 줄 시작
+            await page.keyboard.press("End");
+            await page.waitForTimeout(100);
+            await page.keyboard.press("Enter");
             await page.waitForTimeout(300);
         }
 
-        let section = sections[i];
-        
-        // 치명적 오류 방지: 물결표(~)는 취소선을 유발하므로 대시(-)로 변경하고, '[사진 자리: ...]' 문구 제거
-        section = section.replace(/~/g, "-");
-        section = section.replace(/\[사진.*?\]/g, "");
-        section = section.replace(/\[이미지.*?\]/g, "");
-        section = section.replace(/\[사진 자리.*?\]/g, "");
-        section = section.replace(/\*\*.*?\*\*/g, (match) => match.replace(/\*\*/g, "")); // 볼드 마크다운 제거
-        
         console.log(`   [${i + 1}/${sections.length}] 섹션 입력...`);
-
-        await page.keyboard.type(section, { delay: 10 });
-        await page.keyboard.press("Enter");
-        await page.keyboard.press("Enter");
-        await page.waitForTimeout(500); // 300ms -> 500ms로 증가
+        await inputTopicSectionBlock(page, sections[i]);
+        await page.waitForTimeout(500);
     }
 
     // 해시태그 입력
     console.log(`   🏷️ 해시태그 ${hashtags.length}개 입력...`);
     await page.keyboard.press("Enter");
-    await page.keyboard.type(hashtags.join(" "), { delay: 20 });
+    const normalizedHashtags = hashtags
+        .map((tag) => tag.trim().replace(/^#+/, ""))
+        .filter(Boolean)
+        .map((tag) => `#${tag}`);
+    await page.keyboard.type(normalizedHashtags.join(" "), { delay: 20 });
     await page.waitForTimeout(1000); // 해시태그 입력 후 대기 추가
 
     console.log(`   ✅ 본문 입력 완료`);
@@ -1885,6 +2680,222 @@ async function closeAllPopups(page: Page): Promise<void> {
     }
 }
 
+async function logScheduleDialogSnapshot(page: Page): Promise<void> {
+  try {
+    const buttons = page.locator(
+      'div[class*="layer_publish" i] button, div[class*="layer_content_set_publish" i] button, [role="dialog"] button, .publish_layer button'
+    );
+    const inputs = page.locator(
+      'div[class*="layer_publish" i] input, div[class*="layer_content_set_publish" i] input, [role="dialog"] input, .publish_layer input'
+    );
+    const selects = page.locator(
+      'div[class*="layer_publish" i] select, div[class*="layer_content_set_publish" i] select, [role="dialog"] select, .publish_layer select'
+    );
+
+    const buttonCount = Math.min(await buttons.count().catch(() => 0), 20);
+    const inputCount = Math.min(await inputs.count().catch(() => 0), 20);
+    const selectCount = Math.min(await selects.count().catch(() => 0), 20);
+
+    console.log("      - 예약 팝업 스냅샷(button)");
+    for (let i = 0; i < buttonCount; i += 1) {
+      const button = buttons.nth(i);
+      const visible = await button.isVisible().catch(() => false);
+      if (!visible) continue;
+      const text = (((await button.textContent().catch(() => "")) || "").replace(/\s+/g, " ")).trim();
+      const className = (await button.getAttribute("class").catch(() => "")) || "";
+      console.log(`        [btn ${i + 1}] text="${text}" class="${className}"`);
+    }
+
+    console.log("      - 예약 팝업 스냅샷(input)");
+    for (let i = 0; i < inputCount; i += 1) {
+      const input = inputs.nth(i);
+      const visible = await input.isVisible().catch(() => false);
+      if (!visible) continue;
+      const type = (await input.getAttribute("type").catch(() => "")) || "";
+      const placeholder = (await input.getAttribute("placeholder").catch(() => "")) || "";
+      const name = (await input.getAttribute("name").catch(() => "")) || "";
+      const className = (await input.getAttribute("class").catch(() => "")) || "";
+      console.log(
+        `        [input ${i + 1}] type="${type}" placeholder="${placeholder}" name="${name}" class="${className}"`
+      );
+    }
+
+    console.log(`      - 예약 팝업 스냅샷(select): ${selectCount}개`);
+  } catch {
+    console.log("      - 예약 팝업 스냅샷 수집 실패");
+  }
+}
+
+async function capturePublishArtifacts(page: Page, reason: string): Promise<void> {
+  try {
+    const dirPath = path.join(process.cwd(), "logs", "manual", "topic-publish");
+    fs.mkdirSync(dirPath, { recursive: true });
+    const safeReason = reason.replace(/[^a-zA-Z0-9_-]+/g, "-");
+    const baseName = `${Date.now()}-${safeReason}`;
+    const screenshotPath = path.join(dirPath, `${baseName}.png`);
+    const htmlPath = path.join(dirPath, `${baseName}.html`);
+
+    await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+    const html = await page.content().catch(() => "");
+    if (html) {
+      fs.writeFileSync(htmlPath, html, "utf8");
+    }
+
+    console.log(`      - 발행 디버그 스크린샷 저장: ${path.relative(process.cwd(), screenshotPath)}`);
+    if (fs.existsSync(htmlPath)) {
+      console.log(`      - 발행 디버그 HTML 저장: ${path.relative(process.cwd(), htmlPath)}`);
+    }
+  } catch {
+    console.log("      - 발행 디버그 아티팩트 저장 실패");
+  }
+}
+
+async function clickFinalPublishButton(page: Page, mode: PublishMode): Promise<boolean> {
+  const finalPublishSelectors = [
+    'div[class*="layer_publish" i] button[data-testid="seOnePublishBtn"]',
+    'div[class*="layer_content_set_publish" i] button[data-testid="seOnePublishBtn"]',
+    'button[data-testid="seOnePublishBtn"]',
+    'div[class*="layer_publish" i] button.confirm_btn__WEaBq',
+    'div[class*="layer_content_set_publish" i] button.confirm_btn__WEaBq',
+    'button.confirm_btn__WEaBq',
+    'button[class*="confirm_btn"]',
+    'button.btn_publish__FvD4K',
+    'button[class*="btn_publish"]',
+    'div[class*="layer_publish" i] button:has-text("발행")',
+    'div[class*="layer_content_set_publish" i] button:has-text("발행")',
+    '.publish_layer button[class*="confirm"]',
+    '.btn_area button:has-text("발행")',
+    '[role="dialog"] button:has-text("발행")',
+  ];
+
+  for (const selector of finalPublishSelectors) {
+    const button = page.locator(selector).first();
+    const visible = await button.isVisible().catch(() => false);
+    if (!visible) continue;
+
+    const text = compactUiText((await button.textContent().catch(() => "")) || "");
+    const className = (await button.getAttribute("class").catch(() => "")) || "";
+    if (mode === "schedule" && (isReservedPostsListText(text) || /reserve_btn__/i.test(className))) {
+      continue;
+    }
+
+    await button.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(1200);
+    return true;
+  }
+
+  const publishButtons = await page.$$("button");
+  const rankedCandidates: Array<{
+    button: {
+      click: (options?: { force?: boolean }) => Promise<void>;
+    };
+    score: number;
+    text: string;
+    className: string;
+  }> = [];
+
+  for (const button of publishButtons) {
+    const isVisible = await button.isVisible().catch(() => false);
+    if (!isVisible) continue;
+
+    const rawText = (await button.textContent().catch(() => "")) || "";
+    const text = compactUiText(rawText);
+    const className = (await button.getAttribute("class").catch(() => "")) || "";
+    if (!text) continue;
+
+    const inPublishLayer = await button
+      .evaluate((element) => {
+        let node = element as unknown as LayerNodeRef | null;
+        while (node) {
+          const className =
+            typeof node.className === "string"
+              ? node.className
+              : node.className?.toString?.() || "";
+          const role = node.getAttribute?.("role") || "";
+          if (
+            /layer_publish|layer_content_set_publish|publish_layer/i.test(className) ||
+            role.toLowerCase() === "dialog"
+          ) {
+            return true;
+          }
+          node = node.parentElement ?? null;
+        }
+        return false;
+      })
+      .catch(() => false);
+
+    if (className.includes("publish_btn__")) continue;
+
+    if (mode === "schedule") {
+      if (!inPublishLayer) continue;
+      if (isReservedPostsListText(text)) continue;
+
+      const negativePattern = /(취소|닫기|도움말|가이드|이전|뒤로|임시|저장|목록|관리|내역|설정|건|cancel|close)/i;
+      const hardExcludeClass =
+        /(reserve_btn__|save_btn__|save_count_btn__|publish_btn__m9KHH|publish_fold_btn__)/i.test(
+          className
+        );
+      if (hardExcludeClass || negativePattern.test(text) || negativePattern.test(className)) {
+        continue;
+      }
+
+      const hasReserveText = text.includes("예약");
+      const hasPublishText =
+        text.includes("발행") || text.includes("등록") || text.includes("확인") || text.includes("완료");
+      const hasStrongSubmitClass = /(confirm_btn|btn_publish|confirm|publish|submit)/i.test(className);
+      const hasWeakScheduleClass = /(reserve|schedule)/i.test(className);
+
+      if (!hasPublishText) continue;
+      if (!(hasReserveText || hasStrongSubmitClass)) continue;
+      if (hasWeakScheduleClass && !hasStrongSubmitClass && !hasReserveText) continue;
+
+      let score = 0;
+      if (text.includes("예약발행")) score += 120;
+      if (text.includes("예약등록")) score += 110;
+      if (text.includes("예약완료")) score += 90;
+      if (text.includes("발행")) score += 50;
+      if (text.includes("등록")) score += 40;
+      if (text.includes("확인")) score += 30;
+      if (hasStrongSubmitClass) score += 45;
+      if (/confirm_btn|btn_publish|submit/i.test(className)) score += 35;
+      if (hasWeakScheduleClass) score += 10;
+      if (inPublishLayer) score += 60;
+      if (text === "예약" || text === "발행") score -= 20;
+
+      rankedCandidates.push({
+        button,
+        score,
+        text,
+        className,
+      });
+      continue;
+    }
+
+    if (!text.includes("발행") || text.includes("예약")) continue;
+
+    await button.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(1200);
+    return true;
+  }
+
+  if (mode === "schedule" && rankedCandidates.length > 0) {
+    rankedCandidates.sort((left, right) => right.score - left.score);
+    console.log("      - 예약 최종 버튼 후보");
+    for (const candidate of rankedCandidates.slice(0, 6)) {
+      console.log(
+        `        text="${candidate.text}" class="${candidate.className}" score=${candidate.score}`
+      );
+    }
+    const picked = rankedCandidates[0];
+    console.log(`   🎯 예약 최종 버튼 선택: text="${picked.text}" class="${picked.className}" score=${picked.score}`);
+    await picked.button.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(1200);
+    return true;
+  }
+
+  return false;
+}
+
 async function publish(
   page: Page,
   category?: string,
@@ -1915,6 +2926,12 @@ async function publish(
   try {
     await closeAllPopups(page);
 
+  // 카테고리는 발행 패널을 열기 전에 선택해야 패널이 닫히지 않습니다.
+  if (category) {
+    await selectCategory(page, category);
+    await page.waitForTimeout(500);
+  }
+
   // 발행 버튼 찾기 및 클릭
   const publishSelectors = [
     '.publish_btn_area button.publish_btn__m9KHH',
@@ -1929,7 +2946,7 @@ async function publish(
     'text=발행',
   ];
 
-    let clicked = false;
+  let clicked = false;
   for (const selector of publishSelectors) {
     try {
       const btn = await page.locator(selector).first();
@@ -1948,23 +2965,11 @@ async function publish(
         await page.locator('span.text', { hasText: '발행' }).click();
         clicked = true;
     } catch (e) {
-        await page.mouse.click(1210, 22);
+    await page.mouse.click(1210, 22);
     }
   }
 
   await page.waitForTimeout(3500); // 패널 열리는 시간 대기 증가 (2000 -> 3500)
-
-  // 팝업이 다시 나타났을 수 있으므로 한번 더 닫기 (이 때 예약 패널이 닫힐 수 있으므로 주의)
-  // 예약/발행 레이어가 열려있다면 팝업 닫기를 스킵합니다.
-        const isPublishLayerOpen = await page.locator('.layer_popup__WjlfW, .publish_layer, [role="dialog"], .publish_options, .publish_container, .option_layer, .layer_publish, .layer_content_set_publish').first().isVisible().catch(() => false);
-  if (!isPublishLayerOpen) {
-      await closeAllPopups(page);
-  }
-
-  // 카테고리 선택
-  if (category) {
-    await selectCategory(page, category);
-  }
 
   await page.waitForTimeout(1000);
 
@@ -1987,85 +2992,19 @@ async function publish(
     } catch (e) {}
   }
 
-// 최종 발행 확인 버튼
-const confirmSelectors = mode === "schedule"
-    ? [
-        '.layer_publish button.btn_publish',
-        '.publish_options button.btn_publish',
-        '.publish_btn_area .btn_publish',
-        'div[class*="layer_publish" i] button[data-testid="seOnePublishBtn"]',
-        'div[class*="layer_content_set_publish" i] button[data-testid="seOnePublishBtn"]',
-        'button[data-testid="seOnePublishBtn"]',
-        'div[class*="layer_publish" i] button:has-text("예약")',
-        'div[class*="layer_content_set_publish" i] button:has-text("예약")',
-        '.publish_layer button:has-text("예약")',
-        '[role="dialog"] button:has-text("예약")',
-        '.layer_popup__WjlfW .publish_btn__m9KHH',
-        '.layer_popup__WjlfW button:has-text("발행")'
-    ]
-    : [
-        'div[class*="layer_publish" i] button[data-testid="seOnePublishBtn"]',
-        'div[class*="layer_content_set_publish" i] button[data-testid="seOnePublishBtn"]',
-        'button[data-testid="seOnePublishBtn"]',
-        'button[class*="confirm_btn"]',
-        'button[class*="ok"]',
-        '.publish_confirm button',
-        'button:has-text("확인")',
-        '.layer_popup__WjlfW button:has-text("발행")',
-        'div[class*="layer_publish" i] button:has-text("발행")',
-        'button:has-text("발행")'
-    ];
-
-  for (const selector of confirmSelectors) {
-    try {
-      const btn = await page.$(selector);
-      if (btn && await btn.isVisible()) {
-        await btn.click({ force: true });
-        if (mode === "schedule") {
-          const scheduledContext = scheduleContext!;
-          await waitForScheduleSubmission(page, scheduledContext.date, scheduledContext.tracker);
-        }
-        console.log(mode === "schedule" ? "   🎉 예약 발행 요청 완료!" : "   🎉 발행 완료!");
-        return true;
-      }
-    } catch { }
+  if (await clickFinalPublishButton(page, mode)) {
+    if (mode === "schedule") {
+      const scheduledContext = scheduleContext!;
+      await waitForScheduleSubmission(page, scheduledContext.date, scheduledContext.tracker);
+    }
+    console.log(mode === "schedule" ? "   🎉 예약 발행 요청 완료!" : "   🎉 발행 완료!");
+    return true;
   }
 
-  if (mode === "schedule") {
-    const fallbackButtons = await page.$$('button');
-    const candidates: Array<{ button: { click: (options?: { force?: boolean }) => Promise<void> }; text: string; score: number }> = [];
-
-    for (const btn of fallbackButtons) {
-      const visible = await btn.isVisible().catch(() => false);
-      if (!visible) continue;
-
-      const rawText = (await btn.textContent().catch(() => "")) || "";
-      const text = rawText.replace(/\s+/g, "").trim();
-      if (!text) continue;
-      if (!/(예약|등록|확인|완료|발행)/.test(text)) continue;
-
-      let score = 0;
-      if (text.includes("예약")) score += 8;
-      if (text.includes("등록")) score += 4;
-      if (text.includes("발행")) score += 10;
-      if (text.includes("완료")) score += 5;
-      if (text.includes("확인")) score += 3;
-      candidates.push({ button: btn, text, score });
+    if (mode === "schedule") {
+      await logScheduleDialogSnapshot(page);
     }
-
-    if (candidates.length > 0) {
-      candidates.sort((a, b) => b.score - a.score);
-      const selected = candidates[0];
-      await selected.button.click({ force: true });
-      if (mode === "schedule") {
-        const scheduledContext = scheduleContext!;
-        await waitForScheduleSubmission(page, scheduledContext.date, scheduledContext.tracker);
-      }
-      console.log(`   🎉 예약 발행 버튼 후보 클릭: ${selected.text}`);
-      return true;
-    }
-  }
-
+    await capturePublishArtifacts(page, "final-button-missing");
     console.log("   ⚠️ 발행 확인 버튼을 찾지 못했습니다");
     return false;
   } finally {
@@ -2081,10 +3020,29 @@ async function main() {
     console.log("║   주제 기반 블로그 콘텐츠 생성기       ║");
     console.log("╚════════════════════════════════════════╝\n");
 
-    // 1. CLI 인자 파싱
-    const args = parseArgs();
-    if (!args) {
-        throw new Error("필수 인자(--type, --topic)가 누락되었습니다.");
+    let args: TopicArgs | null = null;
+    let taskId: string | null = null;
+    let postId: string | null = null;
+    const runtimeOptions = parseRuntimePublishOptions(process.argv.slice(2));
+    const loadedContext = await loadPublishContextFromDb(runtimeOptions);
+
+    if (loadedContext) {
+        taskId = loadedContext.taskId;
+        postId = loadedContext.postId;
+        args = loadedContext.args;
+    } else {
+        const allowLegacyGeneration =
+            (process.env.TOPIC_AGENT_ALLOW_LEGACY_GENERATION || "false").toLowerCase() === "true";
+        if (!allowLegacyGeneration) {
+            throw new Error(
+                "topic-agent는 publish-only 스크립트입니다. --task-id 또는 --post-id를 사용하세요. 수동 생성이 꼭 필요하면 TOPIC_AGENT_ALLOW_LEGACY_GENERATION=true 로 실행하세요."
+            );
+        }
+        // 1. CLI 인자 파싱
+        args = parseArgs();
+        if (!args) {
+            throw new Error("필수 인자(--type, --topic)가 누락되었습니다.");
+        }
     }
 
     console.log(`📌 타입: ${categoryNames[args.type]}`);
@@ -2096,10 +3054,13 @@ async function main() {
     const styleGuide = buildStyleGuide(style);
 
     // 3. 콘텐츠 생성 (이미지 모드 vs 일반 모드)
-    let content: { title: string; sections: string[]; hashtags: string[] };
-    let imagePaths: string[] = [];
+    let content: StoredPublishPayload;
+    let imagePaths: string[] = loadedContext?.imagePaths || [];
+    let imagePlan: TopicVisualPlan | null = loadedContext?.imagePlan || null;
 
-    if (args.images) {
+    if (loadedContext?.preparedContent) {
+        content = loadedContext.preparedContent;
+    } else if (args.images) {
         // 이미지 기반 생성 모드
         log.info(`이미지 폴더 모드: ${args.images}`);
         const images = loadImages(args.images);
@@ -2109,27 +3070,22 @@ async function main() {
             const advancedContent = await generateAdvancedContent(args, styleGuide);
             content = { title: advancedContent.title, sections: advancedContent.sections, hashtags: advancedContent.hashtags };
         } else {
-            console.log(`📷 이미지 ${images.length}장 발견`);
-            
-            // GEMINI_API_KEY가 없으면 이미지 분석을 건너뛰고 텍스트 모드로 진행
-            if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY.trim() === "") {
-                console.log("⚠️ GEMINI_API_KEY가 설정되지 않아 이미지 분석을 건너뛰고 에이전틱 파이프라인으로 생성합니다.");
-                const advancedContent = await generateAdvancedContent(args, styleGuide);
-                content = { title: advancedContent.title, sections: advancedContent.sections, hashtags: advancedContent.hashtags };
-            } else {
-                const imageContent = await generateContentFromImages(images, args.topic, args.type as "travel" | "golf" | "knowledge", styleGuide);
+        console.log(`📷 이미지 ${images.length}장 발견`);
+            console.log("   🧠 외부 이미지 분석 없이 GPT 글 생성 파이프라인으로 진행합니다.");
+            const advancedContent = await generateAdvancedContent(args, styleGuide);
+            content = {
+                title: advancedContent.title,
+                sections: advancedContent.sections,
+                hashtags: advancedContent.hashtags,
+            };
 
-                content = {
-                    title: imageContent.title,
-                    sections: imageContent.sections.map(s => s.text),
-                    hashtags: imageContent.hashtags,
-                };
-            }
-            
             // 이미지 경로 저장 (텍스트 모드로 생성했더라도 업로드를 위해 경로는 유지)
             imagePaths = images.map(img => img.path);
+            imagePlan = null;
         }
     } else {
+
+
         // 일반 텍스트 생성 모드 -> 에이전틱 고도화 파이프라인으로 대체
         const advancedContent = await generateAdvancedContent(args, styleGuide);
         content = {
@@ -2137,130 +3093,66 @@ async function main() {
             sections: advancedContent.sections,
             hashtags: advancedContent.hashtags,
         };
-        
-        // 이미지가 전달되지 않았다면 생성된 프롬프트를 사용하여 고품질 이미지 다운로드
-        console.log(`\n📷 자동 이미지 생성 시작 (AI 비주얼 디렉터 기획 기반)`);
-        
-        const prompts = advancedContent.imagePrompts || [];
-        const targetCount = Math.max(content.sections.length, prompts.length);
-        
+
+        console.log(`\n📷 Daedal(gpt-image-2)를 활용한 이미지 생성 시작`);
+
         const autoImageDir = path.join(IMAGE_WORK_DIR, `auto-${Date.now()}`);
         if (!fs.existsSync(autoImageDir)) {
             fs.mkdirSync(autoImageDir, { recursive: true });
         }
-        
-        for (let i = 0; i < targetCount; i++) {
-            const plan = prompts[i] || { searchKeyword: "landscape", imagePrompt: "beautiful scenery" };
-            const keyword = plan.searchKeyword || "landscape";
-            const promptStr = plan.imagePrompt || "beautiful scenery";
-            const destPath = path.join(autoImageDir, `auto_${i+1}.jpg`);
-            
-            console.log(`   [${i+1}/${targetCount}] 이미지 수집/생성 중...`);
-            console.log(`     ├ 검색 키워드: ${keyword}`);
-            console.log(`     └ 기획 프롬프트: ${promptStr.substring(0, 100)}...`);
-            
-            let imageGenerated = false;
 
-            // 1. ai-image-generation 스킬 (infsh CLI) 시도
+        const daedalPaths = generateDaedalTopicImages(content.sections, autoImageDir);
+        if (daedalPaths.length > 0) {
+            imagePaths = daedalPaths;
+            console.log(`   ✅ Daedal 이미지 ${daedalPaths.length}장 생성 완료`);
+        }
+
+        const CHATGPT_GPT_URL_IMAGE = "https://chatgpt.com/g/g-69044d98b1f08191b96ca4293c6c8156-jeongboseong-imiji-saengseong-v11-dapeojuneunnamja";
+
+        let imageGptHandle = null;
+        if (imagePaths.length === 0) {
             try {
-                // infsh CLI가 설치되어 있고 로그인되어 있다고 가정
-                const infshPath = path.join(process.env.HOME || process.env.USERPROFILE || "", ".local", "bin", "infsh");
-                if (fs.existsSync(infshPath)) {
-                    console.log(`     ├ infsh CLI로 고품질 AI 이미지 생성 시도 (falai/flux-dev-lora)`);
-                    const result = spawnSync(
-                        infshPath,
-                        ["app", "run", "falai/flux-dev-lora", "--input", JSON.stringify({ prompt: promptStr })],
-                        { encoding: "utf-8" }
-                    );
-                    
-                    if (result.status === 0 && result.stdout) {
-                        let outUrl = "";
-                        try {
-                            const parsed = JSON.parse(result.stdout);
-                            outUrl = parsed.image_url || parsed.url || parsed.output || "";
-                        } catch {
-                            const urlMatch = result.stdout.match(/https?:\/\/[^\s"'\\]]+/);
-                            if (urlMatch) outUrl = urlMatch[0];
-                        }
+                console.log(`   🌐 Daedal 실패/비활성화로 ChatGPT 이미지 생성 폴백 실행`);
+                console.log("   🌐 이미지 생성 GPT 브라우저 세션 초기화...");
+                imageGptHandle = await createChatGPTContext(true);
+                const imagePage = await imageGptHandle.context.newPage();
 
-                        if (outUrl) {
-                            console.log(`     ├ AI 이미지 다운로드 중: ${outUrl}`);
-                            const res = await fetch(outUrl);
-                            if (res.ok) {
-                                const buffer = await res.arrayBuffer();
-                                fs.writeFileSync(destPath, Buffer.from(buffer));
-                                imageGenerated = true;
-                                console.log(`     ✅ AI 이미지 생성 성공`);
-                            }
-                        }
-                    } else if (result.stderr && result.stderr.includes("Authentication required")) {
-                        console.log(`     ⚠️ infsh 로그인이 필요합니다 ('infsh login' 실행 필요)`);
-                    }
+                await openChatGPTTarget(imagePage, CHATGPT_GPT_URL_IMAGE, "이미지 생성 GPT");
+
+                console.log("   [1/2] 이미지 생성 GPT에 내용 전달 중...");
+                const imagePrompt = `다음 블로그 글 내용을 바탕으로 관련있고 예쁜 고품질 DALL-E 이미지를 무조건 3장 생성해줘. 다른 말 필요 없이 바로 생성해줘:\n\n${content.sections.join("\n\n").substring(0, 1500)}`;
+                await sendPromptToChatGPT(imagePage, imagePrompt, "이미지 생성 요청");
+
+                // Wait extra time for DALL-E to generate
+                console.log("   [2/2] 이미지 생성 대기 중 (최대 2분)...");
+
+                // 더 긴 대기 및 생성 상태 체크 (DALL-E 생성은 오래 걸림)
+                let imageWaitTime = 0;
+                while (imageWaitTime < 120000) {
+                  const isGen = await isChatGPTGenerating(imagePage);
+                  if (!isGen && imageWaitTime > 30000) break; // 적어도 30초는 대기 후 생성 끝났으면 종료
+                  await imagePage.waitForTimeout(5000);
+                  imageWaitTime += 5000;
+                  console.log(`      ... 대기 중 (${imageWaitTime/1000}초)`);
+                }
+
+                const downloadedPaths = await downloadChatGPTImages(imagePage, autoImageDir);
+
+                if (downloadedPaths.length > 0) {
+                    imagePaths = downloadedPaths;
+                } else {
+                    console.log("   ⚠️ 이미지 생성 실패, 기본 텍스트만 발행합니다.");
                 }
             } catch (e) {
-                // ignore
-            }
-
-            // 2. Pollinations.ai fallback (API 키 없이 가능)
-            if (!imageGenerated) {
-                try {
-                    console.log(`     ├ Pollinations.ai 무료 생성기로 시도...`);
-                    const pollUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(promptStr)}?width=800&height=600&nologo=true&seed=${Math.floor(Math.random()*10000)}`;
-                    const res = await fetch(pollUrl);
-                    if (res.ok) {
-                        const buffer = await res.arrayBuffer();
-                        fs.writeFileSync(destPath, Buffer.from(buffer));
-                        imageGenerated = true;
-                        console.log(`     ✅ Pollinations AI 이미지 생성 성공`);
-                    }
-                } catch(e) {}
-            }
-
-            // 3. 최후의 수단 (picsum.photos)
-            if (!imageGenerated) {
-                console.log(`     ├ 무료 스톡 이미지(LoremFlickr)로 대체 수집...`);
-                
-                // fallback을 2가지 버젼으로 준비
-                const fallbacks = [
-                    `https://picsum.photos/seed/${Math.floor(Math.random() * 10000)}/800/600`,
-                    `https://picsum.photos/800/600?random=${Math.floor(Math.random() * 10000)}`
-                ];
-
-                for (const url of fallbacks) {
-                    try {
-                        const res = await fetch(url, {
-                            headers: {
-                                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-                            }
-                        });
-                        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                        const buffer = await res.arrayBuffer();
-                        fs.writeFileSync(destPath, Buffer.from(buffer));
-                        imageGenerated = true;
-                        break;
-                    } catch (e) {
-                        console.log(`   ⚠️ 대체 수집 실패: ${url}`);
-                    }
-                }
-                
-                // 만약 이것도 실패한다면 로컬에 빈 이미지를 만들어서라도 넘어가도록 처리
-                if (!imageGenerated) {
-                    console.log(`     ├ 빈 이미지 생성으로 대체...`);
-                    try {
-                        // svg를 만들지말고 아주 작은 투명 png라도 만들거나 예외처리
-                        const emptyPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
-                        fs.writeFileSync(destPath, emptyPng);
-                        imageGenerated = true;
-                    } catch(e2) {}
+                console.error("❌ 이미지 생성 파이프라인 에러:", e);
+            } finally {
+                if (imageGptHandle) {
+                    await imageGptHandle.close();
                 }
             }
-            
-            if (fs.existsSync(destPath)) {
-                imagePaths.push(destPath);
-            }
-            
-            await new Promise(resolve => setTimeout(resolve, 1500)); // Rate limit 방지
         }
+        imagePlan = null;
+
     }
 
     console.log("\n" + "─".repeat(40));
@@ -2273,6 +3165,10 @@ async function main() {
     // 4. 발행 여부 확인 (테스트용으로 일단 생성만)
     const shouldPublish = args.publishMode === "now" || args.publishMode === "schedule";
 
+    if (shouldPublish) {
+        assertPublishableContent(content);
+    }
+
     if (!shouldPublish) {
         console.log("\n💡 발행하려면: npm run topic -- ... --publish");
         console.log("\n📄 생성된 콘텐츠:");
@@ -2282,7 +3178,7 @@ async function main() {
 
     // 5. 브라우저로 발행
     console.log("\n🌐 브라우저 시작...");
-    const browser = await chromium.launch({ headless: false });
+    const browser = await chromium.launch({ headless: (process.env.HEADLESS || "false").toLowerCase() === "true" });
     const context = await browser.newContext({
         storageState: SESSION_FILE,
         viewport: { width: 1280, height: 900 },
@@ -2294,7 +3190,15 @@ async function main() {
     try {
         await openEditor(page);
         await inputTitle(page, content.title);
-        await inputContent(page, content.sections, content.hashtags, imagePaths);
+        await inputContent(
+            page,
+            content.sections,
+            content.hashtags,
+            imagePaths,
+            imagePlan,
+            content.lead,
+            content.highlights,
+        );
 
         const scheduledDate = args.scheduledDate ? new Date(args.scheduledDate) : undefined;
         if (args.publishMode === "schedule" && (!scheduledDate || Number.isNaN(scheduledDate.getTime()))) {
@@ -2309,9 +3213,97 @@ async function main() {
             throw new Error("발행 완료 버튼을 확인하지 못했습니다.");
         }
 
-        await page.waitForTimeout(5000);
-        console.log("\n✅ 완료!");
+        // 발행 후 PostView URL 대기 (최대 15초)
+        let capturedUrl = page.url();
+        const publishWaitDeadline = Date.now() + 15_000;
+        while (Date.now() < publishWaitDeadline) {
+            await page.waitForTimeout(1000);
+            capturedUrl = page.url();
+            if (isPublishedUrl(capturedUrl)) {
+                break;
+            }
+        }
+
+        // PostView URL을 못 잡았을 경우 네이버 블로그 최신 글 URL 시도
+        if (!isPublishedUrl(capturedUrl) && args.publishMode === "now") {
+            try {
+                const blogHomeUrl = `https://blog.naver.com/PostList.naver?blogId=${NAVER_BLOG_ID}&from=postList&categoryNo=0`;
+                await page.goto(blogHomeUrl, { timeout: 10000, waitUntil: "domcontentloaded" });
+                await page.waitForTimeout(2000);
+                const latestLink = await page.locator('a[href*="PostView"], a[href*="logNo="]').first();
+                if (await latestLink.isVisible().catch(() => false)) {
+                    const href = await latestLink.getAttribute("href");
+                    if (href) {
+                        capturedUrl = href.startsWith("http") ? href : `https://blog.naver.com${href}`;
+                    }
+                }
+            } catch (e) {
+                console.log("   ⚠️ 최신 글 URL 자동 획득 실패, 글쓰기 페이지 URL로 기록합니다.");
+            }
+        }
+
+        console.log(`\n✅ 완료! (URL: ${capturedUrl})`);
+        const persistedUrl = isPublishedUrl(capturedUrl) ? capturedUrl : null;
+        if (args.publishMode === "now" && !persistedUrl) {
+            throw new Error("최종 PostView URL을 확보하지 못했습니다.");
+        }
+
+        // DB 상태 업데이트
+        if (taskId) {
+            const prisma = new PrismaClient();
+            await prisma.topicPostTask.update({
+                where: { id: taskId },
+                data: {
+                    status: args.publishMode === "schedule" ? "SCHEDULED" : "PUBLISHED",
+                    pipelineStage: args.publishMode === "schedule" ? "SCHEDULED" : "PUBLISHED",
+                    postUrl: args.publishMode === "schedule" ? null : persistedUrl,
+                    publishedAt: args.publishMode === "schedule" ? null : new Date(),
+                    errorMessage: null,
+                }
+            });
+            await prisma.$disconnect();
+        }
+        if (postId) {
+            const prisma = new PrismaClient();
+            await prisma.post.update({
+                where: { id: postId },
+                data: {
+                    status: "SUCCESS",
+                    finalUrl: args.publishMode === "schedule" ? null : persistedUrl,
+                    publishedAt: args.publishMode === "schedule" ? null : new Date(),
+                    errorMessage: null,
+                }
+            });
+            await prisma.$disconnect();
+        }
     } catch (error) {
+        if (taskId) {
+            try {
+                const prisma = new PrismaClient();
+                await prisma.topicPostTask.update({
+                    where: { id: taskId },
+                    data: {
+                        status: "FAILED",
+                        pipelineStage: "FAILED",
+                        errorMessage: error instanceof Error ? error.message : String(error)
+                    }
+                });
+                await prisma.$disconnect();
+            } catch (e) {}
+        }
+        if (postId) {
+            try {
+                const prisma = new PrismaClient();
+                await prisma.post.update({
+                    where: { id: postId },
+                    data: {
+                        status: "FAIL",
+                        errorMessage: error instanceof Error ? error.message : String(error),
+                    }
+                });
+                await prisma.$disconnect();
+            } catch (e) {}
+        }
         throw error;
     } finally {
         await browser.close();

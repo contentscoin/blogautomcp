@@ -154,7 +154,7 @@ export async function generateContentFromImages(
     log.info(`이미지 기반 콘텐츠 생성 시작: ${images.length}장`);
 
     if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY.trim() === "") {
-        console.warn("⚠️ GEMINI_API_KEY가 설정되지 않아 이미지 분석을 건너뛰고 기본 모드로 진행합니다.");
+        throw new Error("GEMINI_API_KEY가 없어 이미지 기반 콘텐츠를 생성할 수 없습니다.");
     }
 
     // 1. 각 이미지 분석
@@ -165,21 +165,13 @@ export async function generateContentFromImages(
         log.debug(`분석 완료: ${image.filename}`, { tags: analysis.tags });
     }
 
+    if (analyses.every((analysis) => analysis.description === "이미지 분석 실패")) {
+        throw new Error("모든 이미지 분석에 실패했습니다.");
+    }
+
     // 2. 전체 스토리 생성
     let text = "";
-    if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY.trim() === "") {
-        // GEMINI_API_KEY가 없으면 더미 응답 생성
-        const dummySections = images.map((_, i) => ({
-            imageIndex: i,
-            text: `이미지 ${i + 1}에 대한 설명입니다. ${topic} 관련 내용입니다. ${styleGuide ? '스타일이 적용되었습니다.' : ''}`
-        }));
-        
-        text = JSON.stringify({
-            title: `${topic} - 추천 정보`,
-            sections: dummySections,
-            hashtags: ["#추천", "#정보"]
-        });
-    } else {
+    {
         const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
         const imageDescriptions = analyses.map((a, i) =>
@@ -222,15 +214,7 @@ JSON 형식으로 반환:
             text = response.response.text();
         } catch (e: any) {
             log.error("제미나이 전체 스토리 생성 실패", e);
-            const dummySections = images.map((_, i) => ({
-                imageIndex: i,
-                text: `이미지 ${i + 1}에 대한 설명입니다. ${topic} 관련 내용입니다.`
-            }));
-            text = JSON.stringify({
-                title: `${topic} - 추천 정보`,
-                sections: dummySections,
-                hashtags: ["#추천", "#정보"]
-            });
+            throw new Error("이미지 기반 스토리 생성 실패");
         }
     }
 

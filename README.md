@@ -15,6 +15,7 @@
 - 📊 **실시간 발행 진행률** - SSE로 발행 단계별 실시간 상태 표시
 - 📋 **발행 히스토리** - 발행 완료/실패 기록 조회 (`/history`)
 - 🔍 **키워드 분석** - 트렌드 키워드, 조합 생성, 콘텐츠 품질 체크 (`/keywords`)
+- 🧠 **주제글 자동 리서치** - 명시 출처가 없어도 주제/키워드로 참고 소스를 자동 탐색하고 SEO 키워드 반영을 발행 전 점검
 - 🌙 **다크모드** - 시스템 설정 연동 또는 수동 전환
 - 📝 **장소/제품 리뷰** - 장소명 검색 → 맛집/여행/육아 등 카테고리별 리뷰 생성
 
@@ -45,19 +46,16 @@ node --version
 # v18.x.x 이상이 나오면 성공!
 ```
 
-### 2. AI API 키 발급 (OpenAI 또는 Gemini 중 택1)
+### 2. AI 설정
 
-**🅰️ OpenAI 사용 시 (유료)**
+**OpenAI API 사용 시**
 1. [OpenAI Platform](https://platform.openai.com/api-keys) 접속
 2. 구글/마이크로소프트 계정으로 로그인
 3. **"Create new secret key"** 클릭
 4. 생성된 키 복사 (sk-xxx... 형태)
 
-**🅱️ Gemini 사용 시 (무료! ⭐)**
-1. [Google AI Studio](https://aistudio.google.com/app/apikey) 접속
-2. 구글 계정으로 로그인
-3. **"API 키 만들기"** 클릭
-4. 생성된 키 복사 (AIza... 형태)
+**ChatGPT 구독/로그인 세션 사용 시**
+`BROWSER_GPT_MODE=true`로 설정하고 `npm run login:chatgpt`로 ChatGPT 로그인을 저장합니다.
 
 > ⚠️ API 키는 한 번만 보여주므로 반드시 복사해서 안전한 곳에 저장하세요!
 
@@ -121,17 +119,14 @@ cp .env.example .env
 메모장 또는 VS Code로 `.env` 파일을 열고 아래 내용을 입력:
 
 ```env
-# AI 선택 (openai 또는 gemini)
+# AI 선택
 AI_PROVIDER=openai
 
 # OpenAI 사용 시 (AI_PROVIDER=openai)
 OPENAI_API_KEY=sk-여기에_발급받은_키_붙여넣기
 
 # Browser GPT 모드 사용 시 (OpenAI API 키 없이 ChatGPT 웹 로그인 세션 사용)
-# BROWSER_GPT_MODE=true
-
-# Gemini 사용 시 (AI_PROVIDER=gemini) - 무료!
-GEMINI_API_KEY=AIza여기에_발급받은_키_붙여넣기
+BROWSER_GPT_MODE=true
 
 # 네이버 블로그 ID
 NAVER_BLOG_ID=내_블로그_아이디
@@ -140,7 +135,7 @@ NAVER_BLOG_ID=내_블로그_아이디
 DATABASE_URL="file:./dev.db"
 ```
 
-> 💡 **Gemini 무료 사용 팁**: `AI_PROVIDER=gemini`로 설정하면 무료로 사용 가능!
+> 💡 주제글/이미지 발행 파이프라인은 GPT만 사용합니다.
 
 ### 3. 운영 보안 설정 (권장)
 
@@ -198,6 +193,9 @@ npm run login:chatgpt
 - GPT 가이드 상호작용 모드(`CHATGPT_GUIDED_MODE=true`)에서는 GPT가 질문하면 자동으로 답변하고, 최종 구조화 응답이 올 때까지 대화를 이어갑니다.
 - Draft GPT는 1~6단계 질문 흐름(제품정보→SEO키워드→버전→소제목개수→콘텐츠→말투)에 맞춰 응답하며, 기본값은 모바일(2번) + 소제목 5개 + 말투 4번(경험공유형)입니다.
 - Draft/Polish GPT에 상품 이미지를 함께 첨부해 문맥을 강화합니다 (`CHATGPT_IMAGE_CONTEXT_MAX`, `CHATGPT_ATTACH_IMAGES_TO_DRAFT`, `CHATGPT_ATTACH_IMAGES_TO_POLISH`).
+- 주제글 AI 이미지 생성은 기본적으로 ChatGPT 로그인/구독 세션을 사용합니다. API 방식이 필요할 때만 `TOPIC_PIPELINE_DAEDAL_ENABLED=true`와 `OPENAI_API_KEY`를 설정하면 `daedal` CLI(`gpt-image-2`)를 먼저 사용하고 실패 시 기존 ChatGPT/TopicCraft 경로로 폴백합니다.
+- 주제글 prepare 단계는 `TOPIC_AUTO_RESEARCH_ENABLED=true`일 때 입력 주제/키워드로 참고 URL을 자동 탐색합니다. `NAVER_SEARCH_CLIENT_ID`/`NAVER_SEARCH_CLIENT_SECRET`이 있으면 네이버 검색 OpenAPI를 먼저 쓰고, 없으면 DuckDuckGo HTML 검색을 best-effort로 사용합니다.
+- 준비된 주제글은 발행 전에 도입부, 하이라이트, 섹션 구조, 본문 자연스러움, 이미지 확보 상태와 함께 SEO 키워드 커버리지를 검사합니다. 명시 키워드가 본문/제목/태그에 거의 반영되지 않으면 재준비가 필요합니다.
 - 필요할 때만 기본 ChatGPT로 폴백하세요 (`CHATGPT_FALLBACK_TO_BASE=true`, 기본값 false).
 - GPT 응답 대기는 고정 시간이 아니라 진행 신호(생성중/텍스트 증가) 기반으로 유지됩니다.
   필요 시 `.env`의 `CHATGPT_RESPONSE_IDLE_TIMEOUT_MS`, `CHATGPT_RESPONSE_MAX_TIMEOUT_MS`로 조정하세요.

@@ -2313,6 +2313,157 @@ interface ProductInfo {
   rating: string;             // 평점
   representativeImagePath: string | null; // 대표 이미지(og:image 우선)
   imagePaths: string[];
+  sourceImageUrls: string[];
+  finalUrl?: string | null;
+  storeName?: string | null;
+}
+
+interface StoredBrandLinkSeed {
+  url: string;
+  finalUrl?: string | null;
+  productName?: string | null;
+  productPrice?: string | null;
+  storeName?: string | null;
+  imageUrls?: string | null;
+}
+
+function parseStoredBrandLinkImageUrls(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return prioritizeImageUrls(
+      Array.from(
+        new Set(
+          parsed
+            .filter((item): item is string => typeof item === "string")
+            .map((item) => item.trim())
+            .filter((item) => isCandidateProductImageUrl(item))
+            .map((item) => normalizeCandidateImageUrl(item))
+        )
+      )
+    );
+  } catch {
+    return [];
+  }
+}
+
+async function materializeProductImages(
+  imageUrls: string[],
+  filePrefix: string
+): Promise<{ representativeImagePath: string | null; imagePaths: string[] }> {
+  const prioritizedUrls = prioritizeImageUrls(Array.from(new Set(imageUrls))).slice(0, 15);
+  const representativeImageUrl = prioritizedUrls[0] || null;
+  const downloaded: { path: string; url: string; size: number }[] = [];
+  const downloadCount = Math.min(10, prioritizedUrls.length);
+  let representativeImagePath: string | null = null;
+  let firstValidImagePath: string | null = null;
+
+  for (let i = 0; i < downloadCount; i++) {
+    try {
+      const imgPath = path.join(TEMP_PATH, `${filePrefix}_${Date.now()}_${i}.jpg`);
+      await downloadImage(prioritizedUrls[i], imgPath);
+      const stats = fs.statSync(imgPath);
+
+      if (stats.size < 20_000) {
+        try { fs.unlinkSync(imgPath); } catch {}
+        console.log(`   ⚠️ 이미지 제외(너무 작음) ${i + 1}`);
+        continue;
+      }
+
+      downloaded.push({ path: imgPath, url: prioritizedUrls[i], size: stats.size });
+      if (!firstValidImagePath) {
+        firstValidImagePath = imgPath;
+      }
+      if (!representativeImagePath && representativeImageUrl && prioritizedUrls[i] === representativeImageUrl) {
+        representativeImagePath = imgPath;
+      }
+      console.log(`   ✅ 이미지 ${i + 1}/${downloadCount} 다운로드`);
+    } catch {
+      console.log(`   ⚠️ 다운로드 실패 ${i + 1}`);
+    }
+  }
+
+  if (!representativeImagePath) {
+    representativeImagePath = firstValidImagePath;
+  }
+
+  downloaded.sort((a, b) => {
+    const aPenalty = containsBadImageKeyword(a.url) ? -150_000 : 0;
+    const bPenalty = containsBadImageKeyword(b.url) ? -150_000 : 0;
+    const aScore = a.size + aPenalty;
+    const bScore = b.size + bPenalty;
+    return bScore - aScore;
+  });
+
+  const sortedPaths = downloaded.map((item) => item.path);
+  const imagePaths = Array.from(
+    new Set([
+      ...(representativeImagePath ? [representativeImagePath] : []),
+      ...sortedPaths,
+    ])
+  );
+
+  return {
+    representativeImagePath,
+    imagePaths,
+  };
+}
+
+async function buildProductInfoFromStoredBrandLink(link: StoredBrandLinkSeed): Promise<ProductInfo | null> {
+  const name = sanitizeText(link.productName || "");
+  const price = sanitizeText(link.productPrice || "");
+  const imageUrls = parseStoredBrandLinkImageUrls(link.imageUrls);
+
+  if (!name && imageUrls.length === 0 && !price) {
+    return null;
+  }
+
+  const materializedImages =
+    imageUrls.length > 0
+      ? await materializeProductImages(imageUrls, "stored_product")
+      : { representativeImagePath: null, imagePaths: [] };
+
+  return {
+    name: name || sanitizeText(link.storeName || "") || "상품",
+    description: sanitizeText(link.storeName || ""),
+    features: [],
+    price,
+    originalPrice: "",
+    discountRate: "",
+    couponInfo: "",
+    deliveryInfo: "",
+    reviewCount: "",
+    rating: "",
+    representativeImagePath: materializedImages.representativeImagePath,
+    imagePaths: materializedImages.imagePaths,
+    sourceImageUrls: imageUrls,
+    finalUrl: link.finalUrl || link.url,
+    storeName: sanitizeText(link.storeName || ""),
+  };
+}
+
+function mergeProductInfo(base: ProductInfo | null, live: ProductInfo): ProductInfo {
+  if (!base) return live;
+
+  return {
+    name: live.name || base.name,
+    description: live.description || base.description,
+    features: live.features.length > 0 ? live.features : base.features,
+    price: live.price || base.price,
+    originalPrice: live.originalPrice || base.originalPrice,
+    discountRate: live.discountRate || base.discountRate,
+    couponInfo: live.couponInfo || base.couponInfo,
+    deliveryInfo: live.deliveryInfo || base.deliveryInfo,
+    reviewCount: live.reviewCount || base.reviewCount,
+    rating: live.rating || base.rating,
+    representativeImagePath: live.representativeImagePath || base.representativeImagePath,
+    imagePaths: Array.from(new Set([...(base.imagePaths || []), ...(live.imagePaths || [])])),
+    sourceImageUrls: Array.from(new Set([...(base.sourceImageUrls || []), ...(live.sourceImageUrls || [])])),
+    finalUrl: live.finalUrl || base.finalUrl || null,
+    storeName: live.storeName || base.storeName || null,
+  };
 }
 
 async function step1_getProductInfo(page: Page, url: string): Promise<ProductInfo> {
@@ -2320,6 +2471,7 @@ async function step1_getProductInfo(page: Page, url: string): Promise<ProductInf
   
   await page.goto(url, { timeout: 30000 });
   await page.waitForTimeout(5000);
+  const finalUrl = page.url();
 
   const bodyText = await page.textContent("body");
   if (bodyText && isSecurityVerificationPage(bodyText)) {
@@ -2390,6 +2542,20 @@ async function step1_getProductInfo(page: Page, url: string): Promise<ProductInf
     }
   }
   console.log(`   📝 설명: ${description.substring(0, 50)}...`);
+
+  let storeName = "";
+  const ogSiteName = await page.$('meta[property="og:site_name"]');
+  if (ogSiteName) {
+    const content = await ogSiteName.getAttribute("content");
+    if (content) storeName = content.trim();
+  }
+  if (!storeName) {
+    try {
+      storeName = new URL(finalUrl).hostname.replace(/^www\./, "");
+    } catch {
+      storeName = "";
+    }
+  }
   
   // 3. 상품 특징/키워드 추출
   const features: string[] = [];
@@ -2541,59 +2707,7 @@ async function step1_getProductInfo(page: Page, url: string): Promise<ProductInf
   const dedupedUrls = Array.from(new Set(candidateUrls));
   const imageUrls = prioritizeImageUrls(dedupedUrls).slice(0, 15);
   console.log(`   🖼️ ${imageUrls.length}개 이미지 발견`);
-  const representativeImageUrl = imageUrls[0] || null;
-  
-  // 이미지 다운로드 (최대 10개로 확대)
-  const downloaded: { path: string; url: string; size: number }[] = [];
-  const downloadCount = Math.min(10, imageUrls.length);
-  let representativeImagePath: string | null = null;
-  let firstValidImagePath: string | null = null;
-  
-  for (let i = 0; i < downloadCount; i++) {
-    try {
-      const imgPath = path.join(TEMP_PATH, `product_${Date.now()}_${i}.jpg`);
-      await downloadImage(imageUrls[i], imgPath);
-      const stats = fs.statSync(imgPath);
-
-      // 너무 작은 이미지는 대표/본문용으로 부적합해서 제외
-      if (stats.size < 20_000) {
-        try { fs.unlinkSync(imgPath); } catch {}
-        console.log(`   ⚠️ 이미지 제외(너무 작음) ${i + 1}`);
-        continue;
-      }
-
-      downloaded.push({ path: imgPath, url: imageUrls[i], size: stats.size });
-      if (!firstValidImagePath) {
-        firstValidImagePath = imgPath;
-      }
-      if (!representativeImagePath && representativeImageUrl && imageUrls[i] === representativeImageUrl) {
-        representativeImagePath = imgPath;
-      }
-      console.log(`   ✅ 이미지 ${i + 1}/${downloadCount} 다운로드`);
-    } catch {
-      console.log(`   ⚠️ 다운로드 실패 ${i + 1}`);
-    }
-  }
-
-  if (!representativeImagePath) {
-    representativeImagePath = firstValidImagePath;
-  }
-
-  downloaded.sort((a, b) => {
-    const aPenalty = containsBadImageKeyword(a.url) ? -150_000 : 0;
-    const bPenalty = containsBadImageKeyword(b.url) ? -150_000 : 0;
-    const aScore = a.size + aPenalty;
-    const bScore = b.size + bPenalty;
-    return bScore - aScore;
-  });
-
-  const sortedPaths = downloaded.map((item) => item.path);
-  const imagePaths = Array.from(
-    new Set([
-      ...(representativeImagePath ? [representativeImagePath] : []),
-      ...sortedPaths,
-    ])
-  );
+  const { representativeImagePath, imagePaths } = await materializeProductImages(imageUrls, "product");
   
   return {
     name: productName,
@@ -2608,6 +2722,9 @@ async function step1_getProductInfo(page: Page, url: string): Promise<ProductInf
     rating,
     representativeImagePath,
     imagePaths,
+    sourceImageUrls: imageUrls,
+    finalUrl,
+    storeName,
   };
 }
 
@@ -4924,8 +5041,53 @@ async function main() {
     let page = await context.newPage();
 
     setStage("STEP1 상품 정보/이미지 수집");
-    // STEP 1: 상품 정보 + 이미지 수집
-    const product = await step1_getProductInfo(page, link.url);
+    // STEP 1: DB에 저장된 스크랩 결과를 우선 사용하고, 부족할 때만 보강 스크랩
+    let product = await buildProductInfoFromStoredBrandLink({
+      url: link.url,
+      finalUrl: link.finalUrl,
+      productName: link.productName,
+      productPrice: link.productPrice,
+      storeName: link.storeName,
+      imageUrls: link.imageUrls,
+    });
+
+    if (product) {
+      console.log("\n📦 STEP 1: 저장된 스크랩 결과 재사용");
+      console.log(`   📌 상품명: ${product.name}`);
+      console.log(`   💰 가격: ${product.price || "(없음)"}`);
+      console.log(`   🖼️ 이미지: ${product.imagePaths.length}개`);
+    }
+
+    const needsLiveRefresh =
+      !product ||
+      !sanitizeText(product.name || "") ||
+      product.imagePaths.length === 0;
+
+    if (needsLiveRefresh) {
+      const sourceUrl = link.finalUrl || link.url;
+      if (product) {
+        console.log("   ⚠️ 저장된 스크랩 정보가 부족해서 상품 페이지를 다시 확인합니다.");
+      }
+      const liveProduct = await step1_getProductInfo(page, sourceUrl);
+      product = mergeProductInfo(product, liveProduct);
+    }
+
+    if (!product) {
+      throw new Error("발행에 사용할 상품 정보를 확보하지 못했습니다.");
+    }
+
+    await prisma.brandLink.update({
+      where: { id: linkId },
+      data: {
+        productName: product.name || undefined,
+        productPrice: product.price || undefined,
+        storeName: product.storeName || undefined,
+        finalUrl: product.finalUrl || link.finalUrl || undefined,
+        imageUrls:
+          product.sourceImageUrls.length > 0 ? JSON.stringify(product.sourceImageUrls) : link.imageUrls,
+        errorMessage: null,
+      },
+    });
     
     console.log("\n" + "-".repeat(40));
     console.log(`📦 상품: ${product.name}`);
