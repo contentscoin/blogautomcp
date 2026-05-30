@@ -27,6 +27,7 @@ import {
 import { loadImages } from "./lib/image-content";
 import { createTaskLogger } from "./lib/logger";
 import { HUMANIZE_RULES } from "./lib/humanize-korean";
+import { getNaverSessionFile } from "./lib/app-paths";
 import {
     parsePreparedTopicContent,
     preparedSectionsToPublishBlocks,
@@ -44,7 +45,7 @@ chromium.use(StealthPlugin());
 const OPENCODE_MODEL = process.env.OPENCODE_MODEL || "openai/gpt-5.2-codex";
 const OPENCODE_VARIANT = process.env.OPENCODE_VARIANT || "large";
 
-const SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "naver-session.json");
+const SESSION_FILE = getNaverSessionFile();
 const STYLES_DIR = path.join(process.cwd(), "styles");
 const NAVER_BLOG_ID = process.env.NAVER_BLOG_ID || "";
 const IMAGE_WORK_DIR = path.join(process.cwd(), "temp_images", "topic-agent");

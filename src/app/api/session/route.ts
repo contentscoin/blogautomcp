@@ -5,11 +5,16 @@
 import { NextResponse } from "next/server";
 import * as fs from "fs";
 import * as path from "path";
+import {
+  getNaverSessionFile,
+  getChatgptSessionFile,
+  getSessionStorageDir,
+} from "../../../../scripts/lib/app-paths";
 
-const NAVER_SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "naver-session.json");
-const CHATGPT_SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "chatgpt-session.json");
+const NAVER_SESSION_FILE = getNaverSessionFile();
+const CHATGPT_SESSION_FILE = getChatgptSessionFile();
 const CHATGPT_PROFILE_DIR =
-  process.env.CHATGPT_USER_DATA_DIR || path.join(process.cwd(), "playwright", "profile");
+  process.env.CHATGPT_USER_DATA_DIR || path.join(getSessionStorageDir(), "..", "profile");
 
 interface SessionSummary {
   hasSession: boolean;

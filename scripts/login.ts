@@ -9,12 +9,13 @@ import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import * as fs from "fs";
 import * as path from "path";
+import { getSessionStorageDir, getNaverSessionFile } from "./lib/app-paths";
 
 // Stealth 플러그인 적용 (봇 감지 우회)
 chromium.use(StealthPlugin());
 
-const STORAGE_PATH = path.join(process.cwd(), "playwright", "storage");
-const SESSION_FILE = path.join(STORAGE_PATH, "naver-session.json");
+const STORAGE_PATH = getSessionStorageDir();
+const SESSION_FILE = getNaverSessionFile();
 
 // 폴더가 없으면 생성
 if (!fs.existsSync(STORAGE_PATH)) {

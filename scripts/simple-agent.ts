@@ -20,6 +20,7 @@ import * as fs from "fs";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { isLoginRedirect } from "./lib/naver-editor-selectors";
 import { HUMANIZE_RULES } from "./lib/humanize-korean";
+import { getNaverSessionFile, getChatgptSessionFile } from "./lib/app-paths";
 
 // Stealth 플러그인 적용 (봇 감지 우회)
 chromium.use(StealthPlugin());
@@ -34,8 +35,8 @@ const gemini = AI_PROVIDER === "gemini"
   ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "")
   : null;
 
-const SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "naver-session.json");
-const CHATGPT_SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "chatgpt-session.json");
+const SESSION_FILE = getNaverSessionFile();
+const CHATGPT_SESSION_FILE = getChatgptSessionFile();
 const TEMP_PATH = path.join(process.cwd(), "temp_images");
 const NAVER_BLOG_ID = process.env.NAVER_BLOG_ID || "";
 const NAVER_SCHEDULE_TIMEZONE = process.env.NAVER_SCHEDULE_TIMEZONE || "Asia/Seoul";

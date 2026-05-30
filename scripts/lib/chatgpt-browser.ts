@@ -2,9 +2,10 @@ import fs from "fs";
 import path from "path";
 import { chromium } from "playwright";
 import { Page, BrowserContextOptions } from "playwright";
+import { getChatgptSessionFile, getSessionStorageDir } from "./app-paths";
 
-const CHATGPT_SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "chatgpt-session.json");
-const CHATGPT_USER_DATA_DIR = process.env.CHATGPT_USER_DATA_DIR || path.join(process.cwd(), "playwright", "profile");
+const CHATGPT_SESSION_FILE = getChatgptSessionFile();
+const CHATGPT_USER_DATA_DIR = process.env.CHATGPT_USER_DATA_DIR || path.join(getSessionStorageDir(), "..", "profile");
 const CHATGPT_HEADLESS = (process.env.CHATGPT_HEADLESS || "false").toLowerCase() === "true";
 const CHATGPT_USE_PERSISTENT_CONTEXT =
   (process.env.CHATGPT_USE_PERSISTENT_CONTEXT || process.env.CHATGPT_USE_PERSISTENT_PROFILE || "true").toLowerCase() !==

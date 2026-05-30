@@ -1150,6 +1150,12 @@ export default function Dashboard() {
               >
                 📊 히스토리
               </Link>
+              <Link
+                href="/settings"
+                className="px-4 py-2 text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 transition-colors"
+              >
+                ⚙️ 설정
+              </Link>
               <button
                 onClick={() => fetchLinks()}
                 className="p-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"

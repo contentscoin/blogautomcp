@@ -182,6 +182,12 @@ app.whenReady().then(() => {
     if (!process.env.BROWSER_CHANNEL) {
       process.env.BROWSER_CHANNEL = "chrome";
     }
+    // 쓰기 가능한 userData를 서버/스크립트에 노출(설정·세션 저장 경로용).
+    const userData = app.getPath("userData");
+    process.env.DESKTOP_USER_DATA = userData;
+    if (!process.env.SESSION_STORAGE_DIR) {
+      process.env.SESSION_STORAGE_DIR = path.join(userData, "playwright", "storage");
+    }
   }
   loadUserConfig();
   prepareDatabase();
