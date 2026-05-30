@@ -1,4 +1,5 @@
 import { parsePreparedTopicContent } from "@/lib/topic-task-contract";
+import { scanAiTells } from "../../scripts/lib/humanize-korean";
 
 const STRONG_META_WRITING_PATTERNS = [
   /요청 맥락 기반 확장/i,
@@ -452,7 +453,18 @@ export function getTopicTaskContentReadiness(
   const cadenceScore = mobileCadenceOk ? 15 : averageBodyLength <= 320 ? 9 : 4;
   const headingScore = genericHeadingCount === 0 && duplicateHeadingCount === 0 ? 15 : 8;
   const cleanlinessScore = metaWritingDetected ? 0 : 25;
-  const score = Math.min(100, 25 + highlightScore + structureScore + cadenceScore + headingScore + cleanlinessScore - 25);
+
+  // AI 티(번역투·상투구·기계적 구조 등) 스캔 — 발행은 막지 않고(비차단) 자연스러움을
+  // 점수에 소폭 반영하고 신호로 노출한다. (참고: im-not-ai taxonomy)
+  const aiTell = scanAiTells(sections.map((section) => section.body).join("\n"));
+  const aiTellPenalty = Math.min(12, Math.floor(aiTell.score / 6));
+  const aiTellStatus: "pass" | "warn" = aiTell.score >= 20 ? "warn" : "pass";
+
+  const score = Math.max(
+    0,
+    Math.min(100, 25 + highlightScore + structureScore + cadenceScore + headingScore + cleanlinessScore - 25) -
+      aiTellPenalty
+  );
 
   return buildReadinessBase({
     code: "ok",
@@ -478,6 +490,7 @@ export function getTopicTaskContentReadiness(
       },
       { key: "mobile", label: "모바일 호흡", status: mobileCadenceOk ? "pass" : "warn" },
       { key: "meta", label: "메타 오염", status: "pass" },
+      { key: "aiTell", label: "AI 티(자연스러움)", status: aiTellStatus },
     ],
   });
 }

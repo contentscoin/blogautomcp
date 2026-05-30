@@ -18,6 +18,8 @@ import { spawnSync } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { isLoginRedirect } from "./lib/naver-editor-selectors";
+import { HUMANIZE_RULES } from "./lib/humanize-korean";
 
 // Stealth 플러그인 적용 (봇 감지 우회)
 chromium.use(StealthPlugin());
@@ -1433,6 +1435,7 @@ async function createChatGPTContext(hasSessionFile: boolean): Promise<ChatGPTCon
   const commonLaunchOptions = {
     headless: CHATGPT_HEADLESS,
     slowMo: CHATGPT_HEADLESS ? 0 : 30,
+    channel: process.env.BROWSER_CHANNEL || undefined, // 패키징 시 시스템 Chrome 사용
     args: ["--disable-blink-features=AutomationControlled"],
   };
 
@@ -2835,12 +2838,14 @@ async function step2_generatePost(product: ProductInfo, brandLink: string): Prom
   ];
   const randomEnding = endings[Math.floor(Math.random() * endings.length)];
 
-  const systemPrompt = `당신은 인기 네이버 블로거입니다. 
+  const systemPrompt = `당신은 인기 네이버 블로거입니다.
 - 친근하고 솔직한 ~요체 사용 (했어요, 같아요, 더라고요, 거든요)
 - 상품을 정확히 이해하고 실제 사용한 것처럼 생생하게 작성
 - SEO를 위해 상품명, 관련 키워드를 자연스럽게 본문에 포함
 - 매번 조금씩 다른 표현 사용 (똑같은 문구 반복 금지)
-- 과장 없이 신뢰감 있게 작성`;
+- 과장 없이 신뢰감 있게 작성
+
+${HUMANIZE_RULES}`;
 
   const userPrompt = `다음 상품의 상세 블로그 리뷰를 작성해주세요.
 
@@ -3021,6 +3026,13 @@ async function step3_openEditor(
     }
   }
   
+  // 세션 만료 가드: 로그인 페이지로 리다이렉트됐으면 모호한 깊은 실패 대신 즉시 명확히 중단.
+  if (isLoginRedirect(targetPage.url())) {
+    throw new Error(
+      "네이버 세션이 만료되었습니다(로그인 페이지로 리다이렉트됨). 'npm run login'으로 재로그인 후 다시 시도하세요."
+    );
+  }
+
   // 팝업 닫기 (작성 중인 글 있습니다)
   try {
     const cancelBtn = await targetPage.$('.se-popup-button-cancel');
@@ -3030,7 +3042,7 @@ async function step3_openEditor(
       await targetPage.waitForTimeout(1000);
     }
   } catch {}
-  
+
   console.log("   ✅ 에디터 준비 완료");
   return targetPage;
 }
@@ -5017,12 +5029,13 @@ async function main() {
     browser = await chromium.launch({
       headless: false,
       slowMo: 80,  // 더 자연스러운 속도
+      channel: process.env.BROWSER_CHANNEL || undefined, // 패키징 시 시스템 Chrome 사용
       args: [
         '--disable-blink-features=AutomationControlled',
         '--disable-features=IsolateOrigins,site-per-process',
       ],
     });
-    
+
     const context = await browser.newContext({
       storageState: SESSION_FILE,
       viewport: { width: 1280, height: 900 },

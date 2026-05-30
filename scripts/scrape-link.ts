@@ -92,6 +92,7 @@ async function scrapeProductInfo(url: string, headless: boolean) {
 
     const browser = await chromium.launch({
         headless,
+        channel: process.env.BROWSER_CHANNEL || undefined, // 패키징 시 시스템 Chrome 사용
         args: [
             '--disable-blink-features=AutomationControlled',
             '--no-sandbox',

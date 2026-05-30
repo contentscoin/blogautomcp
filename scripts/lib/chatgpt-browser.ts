@@ -228,6 +228,7 @@ export async function createChatGPTContext(hasSessionFile: boolean): Promise<Cha
   const commonLaunchOptions = {
     headless: CHATGPT_HEADLESS,
     slowMo: CHATGPT_HEADLESS ? 0 : 30,
+    channel: process.env.BROWSER_CHANNEL || undefined, // 패키징 시 시스템 Chrome 사용
     args: ["--disable-blink-features=AutomationControlled"],
   };
 

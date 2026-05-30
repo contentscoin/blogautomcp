@@ -2,6 +2,7 @@ import "server-only";
 
 import fs from "fs";
 import path from "path";
+import { HUMANIZE_RULES } from "../../scripts/lib/humanize-korean";
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import { prisma } from "@/lib/db";
@@ -2632,8 +2633,9 @@ async function runBrowserStructured<T>(prompt: string): Promise<T> {
   }
 }
 
-const CODEX_BIN =
-  process.env.CODEX_BIN || "/Users/jakeshin/.nvm/versions/node/v20.19.5/bin/codex";
+// 머신 종속 절대경로 대신 PATH 기반 'codex'를 기본값으로 사용해 이식성 확보.
+// (특정 환경에서 PATH에 없으면 CODEX_BIN 환경변수로 절대경로 지정)
+const CODEX_BIN = process.env.CODEX_BIN || "codex";
 
 async function runCodexStructured<T>(prompt: string): Promise<T | null> {
   const { readFile, unlink } = await import("fs/promises");
@@ -2965,6 +2967,8 @@ function buildPolishPrompt(params: {
       ? "주제가 글쓰기/콘텐츠 자체이면 글쓰기 장면과 독자 반응을 다뤄도 된다."
       : "주제가 글쓰기 자체가 아니라면 '글, 문장, 읽히다, 심심하다, 사람 말처럼' 같은 메타 표현을 섞지 않는다.",
     "sections[].sourceRefIds에는 위 sourceRefId 라벨 숫자 문자열만 넣는다. 소스가 없으면 빈 배열이다.",
+    "",
+    HUMANIZE_RULES,
     "",
     `루트 주제: ${params.rootTopic}`,
     `타깃 키워드: ${params.keywords.join(", ") || "(없음)"}`,

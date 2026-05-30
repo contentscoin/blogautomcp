@@ -1,0 +1,54 @@
+name: Desktop Build
+
+# 설치형 앱(Windows nsis / macOS dmg) 빌드.
+# - 수동 실행(workflow_dispatch) 또는 v* 태그 푸시 시 동작
+# - 코드서명은 시크릿(CSC_LINK/CSC_KEY_PASSWORD)이 있을 때만. 없으면 미서명 산출물.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            pack: desktop:pack:win
+            artifact: windows-installer
+            glob: "out/*.exe"
+          - os: macos-latest
+            pack: desktop:pack:mac
+            artifact: macos-dmg
+            glob: "out/*.dmg"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # prisma generate는 build 스크립트에 포함되어 OS별 엔진(binaryTargets)을 받는다.
+      - name: Build installer
+        run: npm run ${{ matrix.pack }}
+        env:
+          # CI에서는 서명 자동탐색을 끔(인증서 시크릿이 있으면 electron-builder가 사용).
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+          # 공증/서명 시크릿이 설정돼 있으면 자동 사용됨(없으면 미서명).
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.glob }}
+          if-no-files-found: error

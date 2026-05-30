@@ -26,6 +26,7 @@ import {
 } from "./lib/templates";
 import { loadImages } from "./lib/image-content";
 import { createTaskLogger } from "./lib/logger";
+import { HUMANIZE_RULES } from "./lib/humanize-korean";
 import {
     parsePreparedTopicContent,
     preparedSectionsToPublishBlocks,
@@ -2171,6 +2172,8 @@ async function generateAdvancedContent(
             "- 해시태그는 5~8개, # 포함 가능",
             "- 과장 광고, 근거 없는 보장 표현, AI가 썼다는 표현 금지",
             "",
+            HUMANIZE_RULES,
+            "",
             "반드시 아래 JSON 스키마만 반환:",
             JSON.stringify(
                 {
@@ -3107,7 +3110,10 @@ async function main() {
             console.log(`   ✅ Daedal 이미지 ${daedalPaths.length}장 생성 완료`);
         }
 
-        const CHATGPT_GPT_URL_IMAGE = "https://chatgpt.com/g/g-69044d98b1f08191b96ca4293c6c8156-jeongboseong-imiji-saengseong-v11-dapeojuneunnamja";
+        // env(CHATGPT_GPT_URL_IMAGE) 우선 — login/healthcheck 스크립트와 동일 변수 사용. 미설정 시 기본 GPT.
+        const CHATGPT_GPT_URL_IMAGE =
+            process.env.CHATGPT_GPT_URL_IMAGE ||
+            "https://chatgpt.com/g/g-69044d98b1f08191b96ca4293c6c8156-jeongboseong-imiji-saengseong-v11-dapeojuneunnamja";
 
         let imageGptHandle = null;
         if (imagePaths.length === 0) {
@@ -3178,7 +3184,7 @@ async function main() {
 
     // 5. 브라우저로 발행
     console.log("\n🌐 브라우저 시작...");
-    const browser = await chromium.launch({ headless: (process.env.HEADLESS || "false").toLowerCase() === "true" });
+    const browser = await chromium.launch({ headless: (process.env.HEADLESS || "false").toLowerCase() === "true", channel: process.env.BROWSER_CHANNEL || undefined });
     const context = await browser.newContext({
         storageState: SESSION_FILE,
         viewport: { width: 1280, height: 900 },

@@ -4,6 +4,7 @@ import { spawn, type ChildProcess } from "child_process";
 import path from "path";
 import fs from "fs";
 import { requireAdminApiKey } from "@/lib/api-auth";
+import { buildTsScriptSpawn } from "@/lib/run-script";
 
 const NAVER_SCHEDULE_TIMEZONE = process.env.NAVER_SCHEDULE_TIMEZONE || "Asia/Seoul";
 
@@ -190,7 +191,8 @@ export async function POST(
     statusUpdated = true;
 
     // 발행 스크립트 실행 (백그라운드) - 단순 에이전트 사용
-    const scriptPath = path.join(process.cwd(), "scripts", "simple-agent.ts");
+    const projectRoot = process.env.DESKTOP_PROJECT_ROOT ?? process.cwd();
+    const scriptPath = path.join(projectRoot, "scripts", "simple-agent.ts");
     const scriptArgs = [id];
     if (publishMode === "schedule" && scheduleInfo) {
       scriptArgs.push("--publish-mode=schedule", `--scheduled-date=${scheduleInfo.effectiveDateInput}`);
@@ -211,11 +213,13 @@ export async function POST(
 
     let child: ChildProcess;
     try {
-      child = spawn("npx", ["ts-node", "--project", "tsconfig.scripts.json", scriptPath, ...scriptArgs], {
-        cwd: process.cwd(),
+      const { command, commandArgs, extraEnv } = buildTsScriptSpawn(scriptPath, scriptArgs, projectRoot);
+      child = spawn(command, commandArgs, {
+        cwd: projectRoot,
         detached: true,
         stdio: ["ignore", logFd, logFd],
         shell: false,
+        env: { ...process.env, ...extraEnv },
       });
     } finally {
       fs.closeSync(logFd);
