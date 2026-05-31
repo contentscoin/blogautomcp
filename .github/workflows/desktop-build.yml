@@ -57,11 +57,10 @@ jobs:
           ulimit -n 65536 2>/dev/null || true
           npm run ${{ matrix.pack }}
         env:
-          # CI에서는 서명 자동탐색을 끔(인증서 시크릿이 있으면 electron-builder가 사용).
+          # CI에는 코드서명 인증서가 없으므로 서명을 건너뛴다(미서명 산출물).
+          # 빈 CSC_LINK("")를 넘기면 electron-builder가 빈 인증서로 서명을 시도해
+          # macOS에서 'not a file'로 실패하므로, CSC_* 환경변수는 넘기지 않는다.
           CSC_IDENTITY_AUTO_DISCOVERY: false
-          # 공증/서명 시크릿이 설정돼 있으면 자동 사용됨(없으면 미서명).
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
 
       - name: Upload installer (artifact)
         uses: actions/upload-artifact@v4
