@@ -37,8 +37,12 @@ jobs:
         run: npm ci
 
       # prisma generate는 build 스크립트에 포함되어 OS별 엔진(binaryTargets)을 받는다.
+      # asar:false로 node_modules를 통째 복사하므로 파일 디스크립터 한계를 올린다(macOS EMFILE 방지).
       - name: Build installer
-        run: npm run ${{ matrix.pack }}
+        shell: bash
+        run: |
+          ulimit -n 65536 2>/dev/null || true
+          npm run ${{ matrix.pack }}
         env:
           # CI에서는 서명 자동탐색을 끔(인증서 시크릿이 있으면 electron-builder가 사용).
           CSC_IDENTITY_AUTO_DISCOVERY: false

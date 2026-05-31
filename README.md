@@ -10,7 +10,14 @@
 - 📝 **해시태그 자동 생성** - 검색 노출을 위한 해시태그 자동 추가
 - 🌐 **웹 대시보드** - 편리한 웹 UI로 링크 관리 및 발행
 
-### 🆕 V6 신규 기능
+### 🆕 V7 신규 기능
+
+- 🖥️ **PC 설치형 앱 (macOS/Windows)** - 개발 환경 설치 없이 설치 파일로 바로 실행. 앱 안에서 설정·네이버 로그인까지 완결 → [다운로드](#-다운로드-설치형-앱)
+- ✍️ **글쓰기 자연스러움 고도화** - "AI 티"(번역투, "결론적으로/시사하는 바가 크다" 류 상투구, 첫째·둘째 기계적 구조, 문장 리듬 평탄화)를 자동으로 줄여 사람이 쓴 듯한 문장 생성 + 발행 전 자연스러움 점검
+- ⚙️ **앱 내 설정/로그인 UI** (`/settings`) - API키·블로그 ID·AI 공급자 입력과 네이버 로그인을 앱 화면에서 처리 (`.env` 수동 편집 불필요)
+- 🔒 **보안·신뢰성 개선** - 인증 fail-closed, 발행 동시성/중복 방지(원자적 클레임·reaper), KST 타임존 일원화, 세션 만료 즉시 감지
+
+### V6 기능
 
 - 📊 **실시간 발행 진행률** - SSE로 발행 단계별 실시간 상태 표시
 - 📋 **발행 히스토리** - 발행 완료/실패 기록 조회 (`/history`)
@@ -21,14 +28,36 @@
 
 ---
 
+## 📥 다운로드 (설치형 앱)
+
+개발 환경 설치 없이 바로 쓰려면 설치 파일을 받으세요. (최신 릴리스: **[Releases 페이지](https://github.com/contentscoin/naver-bc-automation/releases/latest)**)
+
+| OS | 파일 | 상태 |
+|----|------|------|
+| **macOS (Apple Silicon)** | `BrandConnect Automation-1.0.0-arm64.dmg` | ✅ [v1.0.0 다운로드](https://github.com/contentscoin/naver-bc-automation/releases/tag/v1.0.0) |
+| **Windows (x64)** | `*.exe` (NSIS) | ⏳ 준비 중 (아래 참고) |
+
+**사전 준비물**: [Google Chrome](https://www.google.com/chrome/) 설치 — 자동화는 시스템 Chrome을 사용합니다.
+
+**설치 & 첫 실행**
+1. **macOS**: dmg 열기 → `Applications`로 드래그. 최초 실행 시 **우클릭 → 열기**(미공증이라 Gatekeeper 허용 1회)
+2. 앱 우측 상단 **⚙️ 설정**에서 `OpenAI/Gemini API 키`, `네이버 블로그 ID`, `AI 공급자` 입력
+3. 같은 화면의 **네이버 로그인** 버튼으로 세션 저장
+4. 데이터(`app.db`)·설정(`.env`)·로그인 세션은 사용자 폴더(userData)에 자동 저장됩니다
+
+> ⏳ **Windows 설치본은 아직 제공되지 않습니다.** 직접 빌드하려면 **Windows 환경**에서 `npm run desktop:pack:win`을 실행하세요. (자동 빌드 CI는 `.github/workflows/desktop-build.yml`에 구성돼 있으나 현재 빌드 환경 이슈로 보완 중) 빌드 상세는 [DESKTOP.md](DESKTOP.md) 참고.
+
+---
+
 ## 💡 왜 이 도구인가?
 
 | 기존 문제 | 이 도구의 해결책 |
 |----------|----------------|
 | 네이버 봇 감지로 차단됨 | ✅ Stealth Plugin으로 우회 |
-| 글이 뻔하고 기계적임 | ✅ GPT가 매번 다른 자연스러운 글 생성 |
+| 글이 뻔하고 기계적임("AI 티") | ✅ AI-tell 룰셋으로 번역투·상투구·리듬 평탄화 자동 제거 |
 | 할인/쿠폰 정보 누락 | ✅ 할인율, 리뷰 수, 평점까지 자동 수집 |
 | 한 번 로그인하면 끝 | ✅ 세션 저장으로 7~30일간 유지 |
+| 개발 환경 설치가 번거로움 | ✅ PC 설치형 앱(dmg/exe)으로 바로 실행 |
 
 ---
 
@@ -69,9 +98,11 @@ node --version
 
 ### 1단계: 프로젝트 다운로드
 
+> 💡 코드 수정/개발이 아니라 **그냥 쓰고 싶다면** 위 [📥 다운로드](#-다운로드-설치형-앱)에서 설치 파일을 받는 게 가장 쉽습니다. 아래는 개발/직접 빌드용입니다.
+
 **방법 A: Git 사용 (권장)**
 ```bash
-git clone https://github.com/Daewooki/naver-bc-automation.git
+git clone https://github.com/contentscoin/naver-bc-automation.git
 cd naver-bc-automation
 ```
 
@@ -226,13 +257,14 @@ npm run desktop
 #### 데스크톱 앱 빌드
 
 ```bash
-npm run desktop:pack:mac   # macOS dmg 생성 (mac)
-npm run desktop:pack:win   # Windows 인스톨러 생성 (Windows)
-npm run desktop:pack       # 현재 OS 패키지 모두 생성
+npm run desktop:pack:mac   # macOS dmg 생성 (macOS에서 실행)
+npm run desktop:pack:win   # Windows 인스톨러 생성 (Windows에서 실행)
 ```
 
-※ `desktop:pack:mac`/`desktop:pack:win`은 각각 macOS/Windows 환경에서 실행할 때만 빌드됩니다.
-※ 패키지 생성 전 `npm run build`가 먼저 실행되어야 하며, 빌드된 `.next`를 기반으로 동작합니다.
+- 각 OS 설치본은 **해당 OS에서** 빌드해야 합니다(prisma 엔진·서명 등). `desktop:pack:*`은 내부적으로 `db:template`(빈 스키마 DB) → `npm run build`(Next webpack 빌드) → `electron-builder` 순으로 동작합니다.
+- 자동화 브라우저는 **시스템 Chrome**(`BROWSER_CHANNEL=chrome`)을 사용합니다(Chromium 미번들).
+- 설치된 앱은 DB·설정(`.env`)·로그인 세션을 **사용자 폴더(userData)** 에 저장하며, 앱 내 **⚙️ 설정** 화면에서 설정·네이버 로그인을 처리합니다.
+- macOS 빌드/서명·런타임은 검증 완료. Windows 자동 빌드(CI)는 `.github/workflows/desktop-build.yml`에 구성돼 있습니다. 상세는 [DESKTOP.md](DESKTOP.md).
 
 ### Step 3: 링크 추가 & 발행
 
