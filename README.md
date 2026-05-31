@@ -35,17 +35,20 @@
 | OS | 파일 | 상태 |
 |----|------|------|
 | **macOS (Apple Silicon)** | `BrandConnect Automation-1.0.0-arm64.dmg` | ✅ [v1.0.0 다운로드](https://github.com/contentscoin/naver-bc-automation/releases/tag/v1.0.0) |
-| **Windows (x64)** | `*.exe` (NSIS) | ⏳ 준비 중 (아래 참고) |
+| **Windows (x64)** | `BrandConnect.Automation.Setup.1.0.0.exe` | ✅ [v1.0.0 다운로드](https://github.com/contentscoin/naver-bc-automation/releases/tag/v1.0.0) |
 
 **사전 준비물**: [Google Chrome](https://www.google.com/chrome/) 설치 — 자동화는 시스템 Chrome을 사용합니다.
 
 **설치 & 첫 실행**
-1. **macOS**: dmg 열기 → `Applications`로 드래그. 최초 실행 시 **우클릭 → 열기**(미공증이라 Gatekeeper 허용 1회)
+1. 설치
+   - **macOS**: dmg 열기 → `Applications`로 드래그. 최초 실행 시 **우클릭 → 열기**(미공증이라 Gatekeeper 허용 1회)
+   - **Windows**: `BrandConnect.Automation.Setup.1.0.0.exe` 실행 → 설치. SmartScreen 경고 시 **추가 정보 → 실행**(미서명)
 2. 앱 우측 상단 **⚙️ 설정**에서 `OpenAI/Gemini API 키`, `네이버 블로그 ID`, `AI 공급자` 입력
 3. 같은 화면의 **네이버 로그인** 버튼으로 세션 저장
 4. 데이터(`app.db`)·설정(`.env`)·로그인 세션은 사용자 폴더(userData)에 자동 저장됩니다
 
-> ⏳ **Windows 설치본은 아직 제공되지 않습니다.** 직접 빌드하려면 **Windows 환경**에서 `npm run desktop:pack:win`을 실행하세요. (자동 빌드 CI는 `.github/workflows/desktop-build.yml`에 구성돼 있으나 현재 빌드 환경 이슈로 보완 중) 빌드 상세는 [DESKTOP.md](DESKTOP.md) 참고.
+> 💡 설치본은 미공증/미서명이라 OS 보안 경고가 한 번 뜰 수 있습니다(정상). macOS는 우클릭→열기, Windows는 추가 정보→실행으로 허용하세요.
+> 🔄 새 버전은 `v*` 태그를 푸시하면 GitHub Actions가 macOS/Windows 설치본을 빌드해 릴리스에 자동 첨부합니다 (`.github/workflows/desktop-build.yml`).
 
 ---
 
