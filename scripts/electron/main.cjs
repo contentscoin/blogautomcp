@@ -94,8 +94,10 @@ function isPortOpen(port) {
 }
 
 async function ensureServerReady() {
-  const portInUse = await isPortOpen(APP_PORT);
-  if (portInUse) {
+  // 개발 모드에서만 이미 떠 있는 dev 서버(npm run dev)를 재사용한다.
+  // 패키징 앱은 다른 서비스가 점유한 포트를 재사용하면 엉뚱한/빈 페이지를 로드하므로
+  // 절대 재사용하지 않고 항상 자체 Next 서버를 빈 포트에 띄운다.
+  if (!app.isPackaged && (await isPortOpen(APP_PORT))) {
     return APP_BASE_URL;
   }
 
@@ -113,17 +115,22 @@ async function ensureServerReady() {
     requestHandler(req, res);
   });
 
-  await new Promise((resolve, reject) => {
+  // 선호 포트(APP_PORT)가 비어 있으면 사용하고, 점유돼 있으면 0으로 OS가 빈 포트를 할당.
+  const preferredBusy = await isPortOpen(APP_PORT);
+  const desiredPort = preferredBusy ? 0 : APP_PORT;
+
+  const boundPort = await new Promise((resolve, reject) => {
     const onError = (error) => reject(new Error(`웹 서버 시작 실패: ${error.message}`));
 
     nextServer.once("error", onError);
-    nextServer.listen(APP_PORT, APP_HOST, () => {
+    nextServer.listen(desiredPort, APP_HOST, () => {
       nextServer.off("error", onError);
-      resolve();
+      const addr = nextServer.address();
+      resolve(addr && typeof addr === "object" ? addr.port : APP_PORT);
     });
   });
 
-  return APP_BASE_URL;
+  return `http://${APP_HOST}:${boundPort}`;
 }
 
 async function createWindow() {
