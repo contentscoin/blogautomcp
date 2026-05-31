@@ -5,12 +5,19 @@ name: Desktop Build
 # - 코드서명은 시크릿(CSC_LINK/CSC_KEY_PASSWORD)이 있을 때만. 없으면 미서명 산출물.
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "설치파일을 업로드할 기존 릴리스 태그 (비우면 업로드 안 함)"
+        required: false
+        default: ""
   push:
     tags:
       - "v*"
 
 jobs:
   build:
+    permissions:
+      contents: write   # 태그 빌드 시 릴리스에 설치파일 업로드
     strategy:
       fail-fast: false
       matrix:
@@ -56,9 +63,18 @@ jobs:
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
 
-      - name: Upload installer
+      - name: Upload installer (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.glob }}
           if-no-files-found: error
+
+      # 태그(v*) 트리거 시 또는 수동 실행 시 release_tag 입력이 있으면 릴리스에 자동 첨부.
+      - name: Attach installer to release
+        if: github.ref_type == 'tag' || inputs.release_tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REL_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
+        run: gh release upload "$REL_TAG" ${{ matrix.glob }} --repo "${{ github.repository }}" --clobber
