@@ -17,10 +17,42 @@ import type { IncomingMessage } from "http";
 import { spawnSync } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
+import sharp from "sharp";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { isLoginRedirect } from "./lib/naver-editor-selectors";
-import { HUMANIZE_RULES } from "./lib/humanize-korean";
-import { getNaverSessionFile, getChatgptSessionFile } from "./lib/app-paths";
+import {
+  buildHumanMobileStyleGuide,
+  HUMAN_MOBILE_STYLE_GUIDE,
+  HUMAN_REVIEW_SAFETY_RULES,
+  MOBILE_BODY_RULES,
+} from "./lib/blog-writing-style";
+import { buildAppUrl, notifyAndLogCompletion } from "./lib/chatbot-notifier";
+import {
+  isCandidateProductImageUrl,
+  isPreferredThumbnailImageUrl,
+  isRepresentativeProductImageDimension,
+  isReviewImageUrl,
+  isSalesPageProductImageUrl,
+  isUsableBlogProductImageDimension,
+  normalizeCandidateImageUrl,
+  prioritizeImageCandidates,
+  prioritizeImageUrls,
+  scoreProductImageCandidate,
+  scoreProductImageDimensions,
+  type ProductImageCandidate,
+} from "./lib/product-image-selection";
+import {
+  buildProductThumbnailGenerationPrompt,
+  generateProductThumbnail,
+} from "./lib/product-thumbnail";
+import {
+  buildOpenCrabSeoBrief,
+  formatOpenCrabSeoBriefForPrompt,
+  type OpenCrabSeoBrief,
+} from "./lib/opencrab-seo-brief";
+import {
+  getBrandLinkContentReadiness,
+  type BrandLinkContentReadiness,
+} from "./lib/brandlink-content-readiness";
 
 // Stealth 플러그인 적용 (봇 감지 우회)
 chromium.use(StealthPlugin());
@@ -28,19 +60,54 @@ chromium.use(StealthPlugin());
 const prisma = new PrismaClient();
 
 // AI Provider 설정 (openai 또는 gemini)
-const AI_PROVIDER = (process.env.AI_PROVIDER || "openai").toLowerCase();
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim() || "";
+const GEMINI_API_KEY = (
+  process.env.GEMINI_API_KEY ||
+  process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
+  ""
+).trim();
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || "120000");
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const REQUESTED_AI_PROVIDER = (process.env.AI_PROVIDER || "openai").toLowerCase();
+const AI_PROVIDER = REQUESTED_AI_PROVIDER;
 
 // Gemini 초기화
 const gemini = AI_PROVIDER === "gemini" 
-  ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "")
+  ? new GoogleGenerativeAI(GEMINI_API_KEY)
   : null;
 
-const SESSION_FILE = getNaverSessionFile();
-const CHATGPT_SESSION_FILE = getChatgptSessionFile();
+const SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "naver-session.json");
+const CHATGPT_SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "chatgpt-session.json");
 const TEMP_PATH = path.join(process.cwd(), "temp_images");
 const NAVER_BLOG_ID = process.env.NAVER_BLOG_ID || "";
 const NAVER_SCHEDULE_TIMEZONE = process.env.NAVER_SCHEDULE_TIMEZONE || "Asia/Seoul";
-const BROWSER_GPT_MODE = (process.env.BROWSER_GPT_MODE || "false").toLowerCase() === "true";
+const NAVER_DEFAULT_SCHEDULE_HOUR = parseBoundedInteger(
+  process.env.NAVER_DEFAULT_SCHEDULE_HOUR,
+  9,
+  0,
+  23
+);
+const NAVER_DEFAULT_SCHEDULE_MINUTE = parseBoundedInteger(
+  process.env.NAVER_DEFAULT_SCHEDULE_MINUTE,
+  0,
+  0,
+  59
+);
+const NAVER_DEFAULT_SCHEDULE_TIME_LABEL = `${String(NAVER_DEFAULT_SCHEDULE_HOUR).padStart(
+  2,
+  "0"
+)}:${String(NAVER_DEFAULT_SCHEDULE_MINUTE).padStart(2, "0")}`;
+const NAVER_SCHEDULE_MIN_LEAD_MINUTES = parseBoundedInteger(
+  process.env.NAVER_SCHEDULE_MIN_LEAD_MINUTES,
+  120,
+  0,
+  1440
+);
+const REQUESTED_BROWSER_GPT_MODE = (process.env.BROWSER_GPT_MODE || "false").toLowerCase() === "true";
+const ALLOW_CHATGPT_BROWSER_MODE =
+  (process.env.ALLOW_CHATGPT_BROWSER_MODE || "false").toLowerCase() === "true";
+const BROWSER_GPT_MODE = REQUESTED_BROWSER_GPT_MODE && ALLOW_CHATGPT_BROWSER_MODE;
 const DEFAULT_CHATGPT_DRAFT_GPT_URL =
   "https://chatgpt.com/g/g-69044e83643481918a83e45a0bfec330-jepum-ribyu-jagseong-v11-dapeojuneunnamja";
 const DEFAULT_CHATGPT_POLISH_GPT_URL =
@@ -54,7 +121,9 @@ const CHATGPT_POLISH_GPT_URL =
   process.env.CHATGPT_GPT_URL_DRAFT ||
   process.env.CHATGPT_GPT_URL ||
   DEFAULT_CHATGPT_POLISH_GPT_URL;
-const CHATGPT_BASE_URL = process.env.CHATGPT_GPT_URL || "https://chatgpt.com/";
+const CHATGPT_USE_CUSTOM_GPTS =
+  (process.env.CHATGPT_USE_CUSTOM_GPTS || "false").toLowerCase() === "true";
+const CHATGPT_BASE_URL = process.env.CHATGPT_BASE_URL || "https://chatgpt.com/";
 const CHATGPT_TIMEOUT_MS = Number(process.env.CHATGPT_TIMEOUT_MS || "420000");
 const CHATGPT_RESPONSE_IDLE_TIMEOUT_MS = Number(
   process.env.CHATGPT_RESPONSE_IDLE_TIMEOUT_MS || String(Math.max(CHATGPT_TIMEOUT_MS, 300000))
@@ -63,6 +132,8 @@ const CHATGPT_RESPONSE_MAX_TIMEOUT_MS = Number(
   process.env.CHATGPT_RESPONSE_MAX_TIMEOUT_MS ||
     String(Math.max(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS * 4, 1800000))
 );
+const CHATGPT_DRAFT_STEP_IDLE_TIMEOUT_MS = Number(process.env.CHATGPT_DRAFT_STEP_IDLE_TIMEOUT_MS || "90000");
+const CHATGPT_DRAFT_STEP_MAX_TIMEOUT_MS = Number(process.env.CHATGPT_DRAFT_STEP_MAX_TIMEOUT_MS || "240000");
 const CHATGPT_HEADLESS = (process.env.CHATGPT_HEADLESS || "false").toLowerCase() === "true";
 const CHATGPT_USE_PERSISTENT_PROFILE =
   (process.env.CHATGPT_USE_PERSISTENT_PROFILE || "true").toLowerCase() === "true";
@@ -72,18 +143,31 @@ const CHATGPT_FALLBACK_TO_BASE =
   (process.env.CHATGPT_FALLBACK_TO_BASE || "false").toLowerCase() === "true";
 const CHATGPT_FORCE_NEW_CHAT =
   (process.env.CHATGPT_FORCE_NEW_CHAT || "true").toLowerCase() === "true";
+const CHATGPT_DIRECT_ONLY =
+  !CHATGPT_USE_CUSTOM_GPTS ||
+  (process.env.CHATGPT_DIRECT_ONLY || "true").toLowerCase() === "true";
+const CHATGPT_SKIP_POLISH =
+  !CHATGPT_USE_CUSTOM_GPTS ||
+  (process.env.CHATGPT_SKIP_POLISH || "true").toLowerCase() === "true";
 const CHATGPT_USE_TEMPORARY_CHAT =
   (process.env.CHATGPT_USE_TEMPORARY_CHAT || "false").toLowerCase() === "true";
 const CHATGPT_GUIDED_MODE =
   (process.env.CHATGPT_GUIDED_MODE || "true").toLowerCase() === "true";
 const CHATGPT_GUIDED_MAX_TURNS = Number(process.env.CHATGPT_GUIDED_MAX_TURNS || "6");
 const CHATGPT_IMAGE_CONTEXT_MAX = Number(process.env.CHATGPT_IMAGE_CONTEXT_MAX || "4");
+const CHATGPT_IMAGE_ATTACH_TIMEOUT_MS = Number(
+  process.env.CHATGPT_IMAGE_ATTACH_TIMEOUT_MS || process.env.CHATGPT_IMAGE_WAIT_MS || "30000"
+);
 const CHATGPT_ATTACH_IMAGES_TO_DRAFT =
   (process.env.CHATGPT_ATTACH_IMAGES_TO_DRAFT || "true").toLowerCase() === "true";
 const CHATGPT_ATTACH_IMAGES_TO_POLISH =
   (process.env.CHATGPT_ATTACH_IMAGES_TO_POLISH || "true").toLowerCase() === "true";
 const CHATGPT_FORCE_MOBILE_VERSION =
   (process.env.CHATGPT_FORCE_MOBILE_VERSION || "true").toLowerCase() === "true";
+const BLOG_HUMANIZE_MOBILE_STYLE =
+  (process.env.BLOG_HUMANIZE_MOBILE_STYLE || "true").toLowerCase() === "true";
+const HUMAN_MOBILE_POLISH_ENABLED =
+  (process.env.HUMAN_MOBILE_POLISH_ENABLED || "true").toLowerCase() === "true";
 const CHATGPT_DEFAULT_SUBTITLE_COUNT = Math.max(
   4,
   Math.min(8, Number(process.env.CHATGPT_DEFAULT_SUBTITLE_COUNT || "5"))
@@ -91,6 +175,17 @@ const CHATGPT_DEFAULT_SUBTITLE_COUNT = Math.max(
 const CHATGPT_USER_DATA_DIR =
   process.env.CHATGPT_USER_DATA_DIR ||
   path.join(process.cwd(), "playwright", "storage", "chatgpt-profile");
+
+function parseBoundedInteger(
+  value: string | undefined,
+  fallback: number,
+  min: number,
+  max: number
+): number {
+  const parsed = Number.parseInt(value || "", 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
 const DRY_RUN_GENERATE_ONLY =
   (process.env.DRY_RUN_GENERATE_ONLY || "false").toLowerCase() === "true";
 const DEBUG_SAVE_GENERATED_POST =
@@ -99,6 +194,48 @@ const GENERATED_OUTPUT_DIR = path.join(process.cwd(), "logs", "generated");
 const THUMBNAIL_AUTOGEN_ENABLED =
   (process.env.THUMBNAIL_AUTOGEN_ENABLED || "true").toLowerCase() === "true";
 const THUMBNAIL_SCRIPT_PATH = path.join(process.cwd(), "scripts", "generate-thumbnail.py");
+const PRODUCT_THUMBNAIL_LOCAL_SCRIPT_ENABLED =
+  (process.env.PRODUCT_THUMBNAIL_LOCAL_SCRIPT_ENABLED || "true").toLowerCase() !== "false";
+const PRODUCT_THUMBNAIL_CHATGPT_ENABLED =
+  (process.env.PRODUCT_THUMBNAIL_CHATGPT_ENABLED || "false").toLowerCase() === "true";
+const PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE =
+  (
+    process.env.PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE ||
+    process.env.ALLOW_CHATGPT_BROWSER_MODE ||
+    "false"
+  ).toLowerCase() === "true";
+const PRODUCT_THUMBNAIL_COMPOSITE_FALLBACK_ENABLED =
+  (process.env.PRODUCT_THUMBNAIL_COMPOSITE_FALLBACK_ENABLED || "false").toLowerCase() === "true";
+const PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_FALLBACK_ENABLED =
+  (process.env.PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_FALLBACK_ENABLED || "true").toLowerCase() !== "false";
+const PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_PATH =
+  process.env.PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_PATH?.trim() || "";
+const PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_REQUEST_DIR =
+  process.env.PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_REQUEST_DIR ||
+  path.join(process.cwd(), "logs", "codex-imagegen-requests");
+const PRODUCT_THUMBNAIL_CHATGPT_BASE_FALLBACK_ENABLED =
+  (process.env.PRODUCT_THUMBNAIL_CHATGPT_BASE_FALLBACK_ENABLED || "false").toLowerCase() === "true";
+const DEFAULT_CHATGPT_IMAGE_GPT_URL =
+  "https://chatgpt.com/g/g-69044d98b1f08191b96ca4293c6c8156-jeongboseong-imiji-saengseong-v11-dapeojuneunnamja";
+const PRODUCT_THUMBNAIL_IMAGE_GPT_URL =
+  process.env.CHATGPT_GPT_URL_PRODUCT_THUMBNAIL ||
+  process.env.CHATGPT_GPT_URL_IMAGE ||
+  DEFAULT_CHATGPT_IMAGE_GPT_URL;
+const PRODUCT_THUMBNAIL_IMAGE_WAIT_MS = Number(
+  process.env.PRODUCT_THUMBNAIL_IMAGE_WAIT_MS || process.env.CHATGPT_IMAGE_WAIT_MS || "60000"
+);
+const BRANDLINK_CONTENT_READINESS_ENABLED =
+  (process.env.BRANDLINK_CONTENT_READINESS_ENABLED || "true").toLowerCase() !== "false";
+const BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE =
+  (process.env.BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE || "true").toLowerCase() !== "false";
+const PRODUCT_POST_LOCAL_FALLBACK_ENABLED =
+  (process.env.PRODUCT_POST_LOCAL_FALLBACK_ENABLED || "true").toLowerCase() !== "false";
+const BLOG_BODY_IMAGE_MAX = parseBoundedInteger(
+  process.env.BLOG_BODY_IMAGE_MAX,
+  4,
+  1,
+  12
+);
 const AGENT_MAX_RUNTIME_MS = Math.max(
   5 * 60 * 1000,
   Number(process.env.AGENT_MAX_RUNTIME_MS || "1500000")
@@ -139,31 +276,12 @@ function isInvalidProductName(name: string): boolean {
   );
 }
 
-interface OpenCodeJsonEvent {
-  type?: string;
-  part?: {
-    text?: string;
-  };
-}
-
-interface ThumbnailScriptResult {
-  ok?: boolean;
-  output?: string;
-  used_cutout?: boolean;
-  cutout_source?: string | null;
-  error?: string;
-}
-
-interface ThumbnailCopy {
-  headline: string;
-  subline: string;
-}
-
 interface GeneratedPostPreview {
   title: string;
   sections: string[];
   hashtags: string[];
   rawResponse?: string;
+  openCrabSeoBrief?: OpenCrabSeoBrief | null;
 }
 
 interface ChatGPTGuidanceContext {
@@ -179,19 +297,20 @@ interface ChatGPTGuidanceContext {
   rating: string;
   brandLink: string;
   targetSectionCount: number;
+  openCrabSeoBrief?: OpenCrabSeoBrief | null;
 }
 
 const DEFAULT_SECTION_TITLES = [
-  "구매하게 된 계기",
-  "택배 도착 & 개봉기",
+  "구매 전 확인 포인트",
+  "구성 및 패키지 확인",
   "첫인상 / 디자인",
   "크기 & 스펙 정보",
   "주요 기능 ①",
   "주요 기능 ②",
-  "실제 사용 후기",
-  "장점 정리",
-  "아쉬운 점",
-  "이런 분께 추천해요",
+  "사용 장면별 체크",
+  "장점으로 보이는 부분",
+  "확인하면 좋을 아쉬운 점",
+  "이런 분께 잘 맞아요",
 ];
 
 const DEFAULT_HASHTAGS = [
@@ -205,47 +324,17 @@ const DEFAULT_HASHTAGS = [
   "일상",
   "가성비",
   "생활용품",
+  "쇼핑",
+  "쇼핑추천",
+  "구매전확인",
+  "상품정보",
+  "옵션확인",
+  "구성확인",
+  "가격비교",
+  "할인정보",
+  "실속쇼핑",
+  "네이버쇼핑",
 ];
-
-function containsBadImageKeyword(url: string): boolean {
-  return /icon|logo|banner|sprite|thumb|thumbnail|coupon|benefit|guide|notice|delivery|event|ads?/i.test(url);
-}
-
-function normalizeCandidateImageUrl(rawUrl: string): string {
-  return rawUrl.trim().replace(/\?type=.*/i, "?type=w860");
-}
-
-function isCandidateProductImageUrl(rawUrl: string): boolean {
-  const url = rawUrl.toLowerCase();
-  if (!url) return false;
-  const isImageDomain =
-    url.includes("shop-phinf.pstatic.net") ||
-    url.includes("shopping-phinf.pstatic.net") ||
-    url.includes("phinf.pstatic.net");
-
-  if (!isImageDomain) return false;
-  if (containsBadImageKeyword(url)) return false;
-  if (url.includes("1x1")) return false;
-  return true;
-}
-
-function prioritizeImageUrls(urls: string[]): string[] {
-  const scored = urls.map((url, index) => {
-    const lower = url.toLowerCase();
-    let score = 0;
-
-    if (index === 0) score += 800; // og:image를 첫 후보로 넣기 때문에 대표 이미지 우선
-    if (/\.(jpe?g)(\?|$)/i.test(lower)) score += 200;
-    if (/\.png(\?|$)/i.test(lower)) score -= 120;
-    if (containsBadImageKeyword(lower)) score -= 300;
-    score += Math.max(0, 80 - index); // 상단 노출 이미지를 우선
-
-    return { url, score, index };
-  });
-
-  scored.sort((a, b) => b.score - a.score || a.index - b.index);
-  return scored.map((item) => item.url);
-}
 
 function stripEmoji(text: string): string {
   return text.replace(/[\p{Extended_Pictographic}\uFE0F]/gu, "");
@@ -255,7 +344,7 @@ function sanitizeText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
-const SECTION_TITLE_MATCHER = /^(?:구매하게 된 계기|택배 도착\s*&\s*개봉기|첫인상\s*\/\s*디자인|크기\s*&\s*스펙 정보|주요 기능\s*[①1]|주요 기능\s*[②2]|실제 사용 후기|장점 정리|아쉬운 점|이런 분께 추천해요)\s*$/i;
+const SECTION_TITLE_MATCHER = /^(?:구매하게 된 계기|구매 전 확인 포인트|택배 도착\s*&\s*개봉기|구성 및 패키지 확인|첫인상\s*\/\s*디자인|크기\s*&\s*스펙 정보|주요 기능\s*[①1]|주요 기능\s*[②2]|실제 사용 후기|사용 장면별 체크|장점 정리|장점으로 보이는 부분|아쉬운 점|확인하면 좋을 아쉬운 점|이런 분께 추천해요|이런 분께 잘 맞아요)\s*$/i;
 
 function stripSectionPrefix(text: string): string {
   return stripEmoji(text)
@@ -275,104 +364,65 @@ function sanitizeTitle(rawTitle: string, fallback: string): string {
   return stripEmoji(fallback).replace(/\s+/g, " ").trim().slice(0, 80);
 }
 
-function sanitizeFileNamePart(value: string): string {
-  const sanitized = value
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 48);
-  return sanitized || "thumbnail";
-}
+function collapseRepeatedLeadingTitleTokens(title: string): string {
+  let tokens = stripEmoji(title).replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+  let changed = true;
 
-type HookTheme = {
-  keywords: RegExp[];
-  headlines: string[];
-  sublines: string[];
-};
-
-const THUMBNAIL_HOOK_THEMES: HookTheme[] = [
-  {
-    keywords: [/청소기|진공|무선 청소|스팀|세척/],
-    headlines: ["놓치면 손해 보는 청소 성능 포인트", "바로 알 수 있는 체감 차이 한눈에"],
-    sublines: ["클릭 전 2줄로 확인하는 핵심 정리", "지금 결정을 도와주는 체크포인트"],
-  },
-  {
-    keywords: [/면도기|면도|구강|칫솔|치아|청소/],
-    headlines: ["실사용 후 바로 알게 된 진짜 차이", "살기 전에 꼭 확인할 결정 포인트"],
-    sublines: ["클릭 한 번에 핵심만 보여주는 사용 후기", "비교했을 때 드러나는 숨은 결함까지"],
-  },
-  {
-    keywords: [/가습기|공기|온열|히터|에어프라이|전자|TV|노트북|헤어|드라이/],
-    headlines: ["지금 눌러야 아는 필수 사용 포인트", "직접 확인한 바로 그 차이"],
-    sublines: ["클릭 전에 꼭 보고 갈아탈지 판단", "가격·기능·편의성 핵심만 빠르게 정리"],
-  },
-  {
-    keywords: [/음식|식품|영양|오메가|단백/],
-    headlines: ["구매 전 이거만 알면 실패 없음", "한 번 확인하면 고르는 기준이 보인다"],
-    sublines: ["클릭 직전 꼭 체크할 효능/가격 포인트", "실사용 기준으로 바로 판단 가능한 후기"],
-  },
-  {
-    keywords: [/커피|커피머신|에그|에어|전기포트|조리|식기/],
-    headlines: ["지금 보지 않으면 놓치는 효율 포인트", "사용감으로 가르는 선택 기준"],
-    sublines: ["클릭 후 바로 판단되는 사용성 핵심", "디자인보다 중요한 실제 사용 감각"],
-  },
-];
-
-const DEFAULT_HOOKS: ThumbnailCopy = {
-  headline: "놓치기 전 꼭 눌러야 할 이유",
-  subline: "실사용 기준으로 판단하는 핵심 후기 포인트",
-};
-
-function normalizeForHook(value: string): string {
-  return sanitizeText(value)
-    .replace(/\|/g, " ")
-    .replace(/\(.*?\)|\[.*?\]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function extractHookTheme(text: string): HookTheme {
-  const target = normalizeForHook(text).toLowerCase();
-  return (
-    THUMBNAIL_HOOK_THEMES.find((theme) =>
-      theme.keywords.some((keyword) => keyword.test(target))
-    ) ?? {
-      keywords: [],
-      headlines: [DEFAULT_HOOKS.headline],
-      sublines: [DEFAULT_HOOKS.subline],
+  while (changed) {
+    changed = false;
+    for (let size = Math.min(5, Math.floor(tokens.length / 2)); size >= 1; size -= 1) {
+      const first = tokens.slice(0, size).join(" ").toLowerCase();
+      const second = tokens.slice(size, size * 2).join(" ").toLowerCase();
+      if (first && first === second) {
+        tokens = [...tokens.slice(0, size), ...tokens.slice(size * 2)];
+        changed = true;
+        break;
+      }
     }
-  );
+  }
+
+  return tokens.join(" ");
 }
 
-function pickBySeed(values: string[], seed: string): string {
-  if (values.length === 0) return "";
-  const index = Math.abs(seed.split("").reduce((acc, ch) => acc + ch.charCodeAt(0), 0)) % values.length;
-  return values[index];
+function compactProductNameForTitle(productName: string): string {
+  const tokens = stripEmoji(productName)
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean);
+
+  const compact = tokens.slice(0, Math.min(tokens.length, 7)).join(" ");
+  return compact || "상품";
 }
 
-function trimToSafeLength(text: string, maxLength: number): string {
-  const normalized = sanitizeText(text);
-  if (normalized.length <= maxLength) return normalized;
-  return `${normalized.slice(0, maxLength - 1).trim()}…`;
+function buildLocalProductTitle(
+  product: ProductInfo,
+  openCrabSeoBrief?: OpenCrabSeoBrief | null
+): string {
+  const reliableOpenCrabTitle =
+    openCrabSeoBrief &&
+    openCrabSeoBrief.confidence >= 0.55 &&
+    openCrabSeoBrief.matchType !== "category" &&
+    openCrabSeoBrief.titleCandidates[0];
+
+  const rawTitle = reliableOpenCrabTitle || `${compactProductNameForTitle(product.name)} 구매 전 체크`;
+  return sanitizeTitle(collapseRepeatedLeadingTitleTokens(rawTitle), product.name);
 }
 
-function buildThumbnailCopy(postTitle: string, productName: string): ThumbnailCopy {
-  const title = normalizeForHook(postTitle);
-  const product = normalizeForHook(productName);
-  const core = product || title || "후기";
-  const theme = extractHookTheme(`${title} ${product}`);
+type ProductThumbnailSource = "chatgpt" | "codex-imagegen" | "local-script" | "composite";
 
-  const seed = `${title}${product}`;
-  const headlinePrefix = pickBySeed(theme.headlines, seed);
-  const sublineSeed = pickBySeed(theme.sublines, `${seed}sub`);
+interface GeneratedProductThumbnail {
+  path: string;
+  source: ProductThumbnailSource;
+}
 
-  const headline = trimToSafeLength(`${headlinePrefix} - ${core}`, 46);
-  const subline = trimToSafeLength(sublineSeed, 54);
-
-  return {
-    headline,
-    subline,
-  };
+interface ThumbnailScriptResult {
+  ok?: boolean;
+  output?: string;
+  used_cutout?: boolean;
+  cutout_source?: string | null;
+  error?: string;
 }
 
 function parseThumbnailScriptResult(stdout: string): ThumbnailScriptResult | null {
@@ -381,8 +431,8 @@ function parseThumbnailScriptResult(stdout: string): ThumbnailScriptResult | nul
     .map((line) => line.trim())
     .filter(Boolean);
 
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i];
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
     if (!line.startsWith("{") || !line.endsWith("}")) continue;
     try {
       return JSON.parse(line) as ThumbnailScriptResult;
@@ -394,133 +444,1262 @@ function parseThumbnailScriptResult(stdout: string): ThumbnailScriptResult | nul
   return null;
 }
 
-function generateTopTextCutoutThumbnail(
-  imagePaths: string[],
-  postTitle: string,
-  productName: string
-): string | null {
-  if (!THUMBNAIL_AUTOGEN_ENABLED) return null;
-  if (imagePaths.length === 0) return null;
+function escapeSvgText(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
 
+function splitThumbnailTextLines(text: string, maxChars: number, maxLines: number): string[] {
+  const normalized = sanitizeText(text);
+  if (!normalized) return [];
+
+  const words = normalized.split(" ");
+  const lines: string[] = [];
+  let current = "";
+
+  for (const word of words) {
+    const next = current ? `${current} ${word}` : word;
+    if (current && next.length > maxChars) {
+      lines.push(current);
+      current = word;
+    } else if (!current && word.length > maxChars) {
+      lines.push(word.slice(0, maxChars));
+      current = word.slice(maxChars);
+    } else {
+      current = next;
+    }
+
+    while (current.length > maxChars && lines.length < maxLines) {
+      lines.push(current.slice(0, maxChars));
+      current = current.slice(maxChars);
+    }
+
+    if (lines.length >= maxLines) break;
+  }
+
+  if (current && lines.length < maxLines) lines.push(current);
+  return lines.slice(0, maxLines);
+}
+
+function renderThumbnailSvgText(
+  lines: string[],
+  x: number,
+  y: number,
+  fontSize: number,
+  lineHeight: number,
+  extraAttributes = ""
+): string {
+  return lines
+    .map((line, index) => {
+      const currentY = y + index * lineHeight;
+      return `<text x="${x}" y="${currentY}" ${extraAttributes} font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans CJK KR, Arial, sans-serif" font-size="${fontSize}" font-weight="900" fill="#ffffff" stroke="#0f172a" stroke-width="3" paint-order="stroke">${escapeSvgText(line)}</text>`;
+    })
+    .join("\n");
+}
+
+function buildCompactThumbnailOverlaySvg(promptInfo: ReturnType<typeof buildProductThumbnailGenerationPrompt>): string {
+  const productLines = splitThumbnailTextLines(promptInfo.productNameLabel, 12, 2);
+  const headlineLines = splitThumbnailTextLines(promptInfo.headline || "구매 전 확인", 8, 1);
+  const sublineLines = splitThumbnailTextLines(promptInfo.subline || "장단점 체크", 15, 1);
+  const productFontSize = productLines.length >= 2 ? 30 : 34;
+  const productLineHeight = productLines.length >= 2 ? 35 : 40;
+  const blockWidth = 438;
+  const blockHeight = productLines.length >= 2 ? 206 : 184;
+  const headlineY = productLines.length >= 2 ? 178 : 162;
+  const sublineY = productLines.length >= 2 ? 202 : 186;
+
+  return `
+<svg width="1080" height="1080" viewBox="0 0 1080 1080" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#0f172a" flood-opacity="0.26"/>
+    </filter>
+  </defs>
+  <rect x="34" y="34" width="${blockWidth}" height="${blockHeight}" rx="22" fill="#0f172a" opacity="0.68" filter="url(#softShadow)"/>
+  <rect x="60" y="60" width="118" height="34" rx="17" fill="#ffffff" opacity="0.94"/>
+  <text x="119" y="83" text-anchor="middle" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans CJK KR, Arial, sans-serif" font-size="17" font-weight="900" fill="#0f172a">구매 체크</text>
+  ${renderThumbnailSvgText(productLines, 60, 124, productFontSize, productLineHeight)}
+  <text x="60" y="${headlineY}" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans CJK KR, Arial, sans-serif" font-size="20" font-weight="850" fill="#dbeafe">${escapeSvgText(
+    headlineLines[0] || "구매 전 확인"
+  )}</text>
+  <text x="60" y="${sublineY}" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans CJK KR, Arial, sans-serif" font-size="18" font-weight="750" fill="#f8fafc" opacity="0.9">${escapeSvgText(
+    sublineLines[0] || "장단점 체크"
+  )}</text>
+</svg>`;
+}
+
+async function generateProductThumbnailWithSharpLocal(
+  product: ProductInfo,
+  promptInfo: ReturnType<typeof buildProductThumbnailGenerationPrompt>
+): Promise<string | null> {
+  if (!PRODUCT_THUMBNAIL_LOCAL_SCRIPT_ENABLED) return null;
+
+  const candidatePaths = Array.from(
+    new Set(
+      [product.representativeImagePath, ...product.imagePaths].filter(
+        (imagePath): imagePath is string => typeof imagePath === "string" && fs.existsSync(imagePath)
+      )
+    )
+  );
+  const sourcePath = await selectBestLocalThumbnailSourcePath(candidatePaths);
+  if (!sourcePath) return null;
+
+  const outputPath = path.join(
+    TEMP_PATH,
+    `product_thumbnail_local_${Date.now()}_${sanitizeFileNameForPath(promptInfo.productNameLabel)}.jpg`
+  );
+  const overlaySvg = buildCompactThumbnailOverlaySvg(promptInfo);
+
+  try {
+    await sharp(sourcePath)
+      .rotate()
+      .resize(1080, 1080, {
+        fit: "contain",
+        background: { r: 248, g: 250, b: 252, alpha: 1 },
+      })
+      .composite([{ input: Buffer.from(overlaySvg), left: 0, top: 0 }])
+      .jpeg({ quality: 95, mozjpeg: true })
+      .toFile(outputPath);
+
+    console.log(`   🖼️ 로컬 Sharp 대표 썸네일 생성 완료: ${path.basename(outputPath)}`);
+    console.log(`   🖼️ 썸네일 원본: ${path.basename(sourcePath)}`);
+    console.log(`   📝 썸네일 문구: ${promptInfo.productNameLabel} / ${promptInfo.headline} / ${promptInfo.subline}`);
+    return outputPath;
+  } catch (error) {
+    console.log(`   ⚠️ 로컬 Sharp 썸네일 생성 실패: ${getErrorMessage(error)}`);
+    return null;
+  }
+}
+
+async function selectBestLocalThumbnailSourcePath(imagePaths: string[]): Promise<string | null> {
+  const scored = (
+    await Promise.all(
+      imagePaths.map(async (imagePath, index) => {
+        try {
+          const metadata = await sharp(imagePath).metadata();
+          const width = metadata.width ?? 0;
+          const height = metadata.height ?? 0;
+          if (width < 360 || height < 360) return null;
+          const ratio = width / height;
+          const basename = path.basename(imagePath);
+          const lowerBasename = basename.toLowerCase();
+          const stats = fs.statSync(imagePath);
+          let score = 0;
+          if (isRepresentativeProductImageDimension(width, height)) score += 320;
+          if (isUsableBlogProductImageDimension(width, height)) score += 140;
+          if (lowerBasename.includes("_detail_crop_")) score -= 1600;
+          if (/^stored_product_/i.test(basename)) score += 90;
+          if (/shipping|delivery|review|banner|event|coupon|benefit|notice|guide|detail|desc|option|spec|size/i.test(lowerBasename)) {
+            score -= 360;
+          }
+          score += Math.min(110, stats.size / 1200);
+          score += Math.min(180, (width * height) / 5000);
+          score += Math.max(0, 30 - index * 3);
+          if (ratio < 0.65 || ratio > 1.6) score -= 320;
+          return { imagePath, score };
+        } catch {
+          return null;
+        }
+      })
+    )
+  ).filter((item): item is { imagePath: string; score: number } => Boolean(item));
+
+  return scored.sort((a, b) => b.score - a.score)[0]?.imagePath || null;
+}
+
+async function isUsableBodyUploadImage(imagePath: string): Promise<boolean> {
+  if (!fs.existsSync(imagePath)) return false;
+
+  const basename = path.basename(imagePath).toLowerCase();
+  if (basename.includes("_detail_crop_")) return false;
+  if (/banner|event|coupon|benefit|delivery|shipping|review|notice|guide/.test(basename)) {
+    return false;
+  }
+
+  try {
+    const metadata = await sharp(imagePath).metadata();
+    const width = metadata.width ?? 0;
+    const height = metadata.height ?? 0;
+    if (width < 500 || height < 500) return false;
+    const ratio = width / height;
+    if (ratio < 0.72 || ratio > 1.55) return false;
+    if (!isUsableBlogProductImageDimension(width, height)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function buildBlogUploadImagePaths(input: {
+  imagePaths: string[];
+  generatedThumbnailPath: string | null;
+  representativeImagePath: string | null;
+}): Promise<string[]> {
+  const output: string[] = [];
+  const seen = new Set<string>();
+  const addPath = (imagePath: string | null | undefined) => {
+    if (!imagePath || !fs.existsSync(imagePath)) return;
+    const resolved = path.resolve(imagePath);
+    if (seen.has(resolved)) return;
+    seen.add(resolved);
+    output.push(imagePath);
+  };
+
+  addPath(input.generatedThumbnailPath);
+
+  const bodyCandidates: string[] = [];
+  for (const imagePath of input.imagePaths) {
+    if (!imagePath) continue;
+    if (
+      input.generatedThumbnailPath &&
+      path.resolve(imagePath) === path.resolve(input.generatedThumbnailPath)
+    ) {
+      continue;
+    }
+    if (!(await isUsableBodyUploadImage(imagePath))) continue;
+    const resolved = path.resolve(imagePath);
+    if (bodyCandidates.some((candidate) => path.resolve(candidate) === resolved)) continue;
+    bodyCandidates.push(imagePath);
+  }
+
+  const preferredBody: string[] = [];
+  if (
+    input.representativeImagePath &&
+    (await isUsableBodyUploadImage(input.representativeImagePath))
+  ) {
+    preferredBody.push(input.representativeImagePath);
+  }
+  for (const imagePath of bodyCandidates) {
+    if (preferredBody.length >= BLOG_BODY_IMAGE_MAX) break;
+    if (preferredBody.some((candidate) => path.resolve(candidate) === path.resolve(imagePath))) {
+      continue;
+    }
+    preferredBody.push(imagePath);
+  }
+
+  for (const imagePath of preferredBody.slice(0, BLOG_BODY_IMAGE_MAX)) {
+    addPath(imagePath);
+  }
+
+  return output;
+}
+
+function generateProductThumbnailWithLocalScript(
+  product: ProductInfo,
+  promptInfo: ReturnType<typeof buildProductThumbnailGenerationPrompt>
+): string | null {
+  if (!PRODUCT_THUMBNAIL_LOCAL_SCRIPT_ENABLED) return null;
   if (!fs.existsSync(THUMBNAIL_SCRIPT_PATH)) {
-    console.log(`   ⚠️ 썸네일 스크립트가 없어 건너뜁니다: ${THUMBNAIL_SCRIPT_PATH}`);
+    console.log(`   ⚠️ 로컬 썸네일 스크립트가 없어 건너뜁니다: ${THUMBNAIL_SCRIPT_PATH}`);
     return null;
   }
 
-  const timestamp = Date.now();
-  const outputPath = path.join(
-    TEMP_PATH,
-    `thumb_${timestamp}_${sanitizeFileNamePart(productName)}.jpg`
+  const imagePaths = Array.from(
+    new Set(
+      [product.representativeImagePath, ...product.imagePaths].filter(
+        (imagePath): imagePath is string => typeof imagePath === "string" && fs.existsSync(imagePath)
+      )
+    )
   );
 
-  const { headline, subline } = buildThumbnailCopy(postTitle, productName);
-  const args = [
+  if (imagePaths.length === 0) return null;
+
+  const outputPath = path.join(
+    TEMP_PATH,
+    `product_thumbnail_local_${Date.now()}_${sanitizeFileNameForPath(promptInfo.productNameLabel)}.jpg`
+  );
+  const scriptArgs = [
     THUMBNAIL_SCRIPT_PATH,
     "--background",
     imagePaths[0],
     "--headline",
-    headline,
+    promptInfo.headline,
     "--subline",
-    subline,
+    promptInfo.subline,
     "--output",
     outputPath,
   ];
 
   for (const imagePath of imagePaths.slice(0, 8)) {
-    args.push("--image", imagePath);
+    scriptArgs.push("--image", imagePath);
   }
 
-  const result = spawnSync("python3", args, {
-    cwd: process.cwd(),
-    encoding: "utf-8",
-    maxBuffer: 20 * 1024 * 1024,
-  });
+  const candidates =
+    process.platform === "win32"
+      ? [
+          { command: "python", args: scriptArgs },
+          { command: "py", args: ["-3", ...scriptArgs] },
+          { command: "python3", args: scriptArgs },
+        ]
+      : [
+          { command: "python3", args: scriptArgs },
+          { command: "python", args: scriptArgs },
+        ];
 
-  if (result.error) {
-    console.log(`   ⚠️ 썸네일 생성 실패: ${result.error.message}`);
-    return null;
+  let lastError = "";
+  for (const candidate of candidates) {
+    const result = spawnSync(candidate.command, candidate.args, {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      maxBuffer: 20 * 1024 * 1024,
+    });
+
+    if (result.error) {
+      lastError = result.error.message;
+      continue;
+    }
+
+    if (result.status !== 0) {
+      lastError = (result.stderr || result.stdout || `exit code ${result.status}`).trim();
+      continue;
+    }
+
+    const parsed = parseThumbnailScriptResult(result.stdout);
+    if (parsed && parsed.ok === false) {
+      lastError = parsed.error || "로컬 썸네일 스크립트 오류";
+      continue;
+    }
+
+    const resolvedOutputPath = parsed?.output && fs.existsSync(parsed.output) ? parsed.output : outputPath;
+    if (!fs.existsSync(resolvedOutputPath)) {
+      lastError = "로컬 썸네일 결과 파일을 찾지 못했습니다.";
+      continue;
+    }
+
+    const cutoutLabel =
+      parsed?.used_cutout && parsed.cutout_source ? ` / 소스: ${path.basename(parsed.cutout_source)}` : "";
+    console.log(
+      `   🖼️ 로컬 대표 썸네일 생성 완료: ${path.basename(resolvedOutputPath)}${cutoutLabel}`
+    );
+    console.log(`   📝 썸네일 문구: ${promptInfo.headline} / ${promptInfo.subline}`);
+    return resolvedOutputPath;
   }
 
-  if (result.status !== 0) {
-    const errorMessage = (result.stderr || result.stdout || "").trim();
-    console.log(`   ⚠️ 썸네일 생성 실패(code=${result.status}): ${errorMessage}`);
-    return null;
-  }
-
-  const parsed = parseThumbnailScriptResult(result.stdout);
-  if (parsed && parsed.ok === false) {
-    console.log(`   ⚠️ 썸네일 생성 실패: ${parsed.error || "알 수 없는 오류"}`);
-    return null;
-  }
-
-  const resolvedOutputPath = parsed?.output && fs.existsSync(parsed.output) ? parsed.output : outputPath;
-  if (!fs.existsSync(resolvedOutputPath)) {
-    console.log("   ⚠️ 썸네일 생성 결과 파일을 찾지 못했습니다.");
-    return null;
-  }
-
-  const usedCutout = parsed?.used_cutout === true;
-  if (usedCutout) {
-    const cutoutSourceLabel = parsed?.cutout_source ? ` / 소스: ${path.basename(parsed.cutout_source)}` : "";
-    console.log(`   🖼️ 대표 썸네일 생성 완료 (텍스트형 + 누끼컷${cutoutSourceLabel})`);
-  } else {
-    console.log("   🖼️ 대표 썸네일 생성 완료 (텍스트형 / 이미지 삽입 미사용)");
-  }
-
-  return resolvedOutputPath;
+  console.log(`   ⚠️ 로컬 썸네일 생성 실패: ${lastError || "실행 가능한 Python을 찾지 못했습니다."}`);
+  return null;
 }
 
-function runOpenCode(prompt: string): string {
-  const model = process.env.OPENCODE_MODEL || "openai/gpt-5.2-codex";
-  const variant = process.env.OPENCODE_VARIANT || "medium";
+async function generateTopTextCutoutThumbnail(
+  product: ProductInfo,
+  postTitle: string
+): Promise<GeneratedProductThumbnail | null> {
+  if (!THUMBNAIL_AUTOGEN_ENABLED) return null;
+  if (!product.representativeImagePath || !fs.existsSync(product.representativeImagePath)) {
+    console.log("   ⚠️ 판매페이지 대표 이미지가 없어 썸네일 생성을 건너뜁니다.");
+    return null;
+  }
 
-  const result = spawnSync(
-    "opencode",
-    [
-      "run",
-      prompt,
-      "--format=json",
-      "--model",
-      model,
-      "--variant",
-      variant,
-    ],
-    {
-      cwd: process.cwd(),
-      encoding: "utf-8",
-      maxBuffer: 10 * 1024 * 1024,
+  const promptInfo = buildProductThumbnailGenerationPrompt({
+    postTitle,
+    productName: product.name,
+    categoryName: inferCategoryKeyword(product.name),
+    description: product.description,
+    features: product.features,
+    price: product.price,
+  });
+
+  const localSharpPath = await generateProductThumbnailWithSharpLocal(product, promptInfo);
+  if (localSharpPath) {
+    return { path: localSharpPath, source: "local-script" };
+  }
+
+  const localScriptPath = generateProductThumbnailWithLocalScript(product, promptInfo);
+  if (localScriptPath) {
+    return { path: localScriptPath, source: "local-script" };
+  }
+
+  if (PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_PATH) {
+    const codexImagegenPath = generateProductThumbnailWithCodexImagegenFallback(
+      promptInfo.prompt,
+      product.representativeImagePath,
+      promptInfo.productNameLabel
+    );
+    if (codexImagegenPath) {
+      console.log(`   ✅ Codex imagegen 썸네일 사용: ${path.basename(codexImagegenPath)}`);
+      return { path: codexImagegenPath, source: "codex-imagegen" };
     }
+  }
+
+  const generatedPath = await generateProductThumbnailWithChatGPT(
+    promptInfo.prompt,
+    product.representativeImagePath,
+    promptInfo.productNameLabel
   );
 
-  if (result.error) {
-    throw new Error(`opencode 실행 실패: ${result.error.message}`);
+  if (generatedPath) {
+    console.log(
+      `   🖼️ MD 기반 생성형 썸네일 완료 (제품명 라벨: ${promptInfo.productNameLabel})`
+    );
+    console.log(`   🖼️ 제품 레퍼런스: ${path.basename(product.representativeImagePath)}`);
+    console.log(`   📝 썸네일 문구: ${promptInfo.headline} / ${promptInfo.subline} / ${promptInfo.cta}`);
+    return { path: generatedPath, source: "chatgpt" };
   }
 
-  if (result.status !== 0) {
-    const message = (result.stderr || result.stdout || "").trim();
-    throw new Error(`opencode run 실패: ${message || `exit code ${result.status}`}`);
+  const codexImagegenPath = generateProductThumbnailWithCodexImagegenFallback(
+    promptInfo.prompt,
+    product.representativeImagePath,
+    promptInfo.productNameLabel
+  );
+  if (codexImagegenPath) {
+    console.log(`   OK Codex imagegen thumbnail selected: ${path.basename(codexImagegenPath)}`);
+    return { path: codexImagegenPath, source: "codex-imagegen" };
   }
 
-  const textChunks: string[] = [];
-  const lines = result.stdout.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  if (!PRODUCT_THUMBNAIL_COMPOSITE_FALLBACK_ENABLED) {
+    console.log("   ⚠️ 생성형 썸네일 실패. MD 지침상 후합성 fallback은 기본 비활성화되어 건너뜁니다.");
+    return null;
+  }
 
-  for (const line of lines) {
-    try {
-      const event = JSON.parse(line) as OpenCodeJsonEvent;
-      if (event.type === "text" && typeof event.part?.text === "string") {
-        textChunks.push(event.part.text);
+  console.log("   ⚠️ 생성형 썸네일 실패. 명시적 fallback 설정에 따라 후합성 썸네일을 생성합니다.");
+  const compositePath = await generateCompositeThumbnailFallback(product, postTitle);
+  return compositePath ? { path: compositePath, source: "composite" } : null;
+}
+
+async function generateCompositeThumbnailFallback(
+  product: ProductInfo,
+  postTitle: string
+): Promise<string | null> {
+  if (!product.representativeImagePath || !fs.existsSync(product.representativeImagePath)) return null;
+  const thumbnailSourcePaths = Array.from(
+    new Set(
+      [product.representativeImagePath, ...product.imagePaths].filter(
+        (imagePath): imagePath is string => Boolean(imagePath) && fs.existsSync(imagePath)
+      )
+    )
+  );
+
+  try {
+    const result = await generateProductThumbnail({
+      imagePaths: thumbnailSourcePaths,
+      postTitle,
+      productName: product.name,
+      outputDir: TEMP_PATH,
+      enabled: true,
+    });
+
+    if (!result || !fs.existsSync(result.outputPath)) return null;
+    console.log(`   🖼️ 후합성 fallback 썸네일: ${path.basename(result.outputPath)}`);
+    return result.outputPath;
+  } catch (error) {
+    console.log(`   ⚠️ 후합성 fallback 실패: ${getErrorMessage(error)}`);
+    return null;
+  }
+}
+
+function generateProductThumbnailWithCodexImagegenFallback(
+  prompt: string,
+  referenceImagePath: string,
+  productNameLabel: string
+): string | null {
+  if (!PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_FALLBACK_ENABLED) return null;
+
+  if (PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_PATH) {
+    const resolved = path.resolve(PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_PATH);
+    if (!fs.existsSync(resolved)) {
+      console.log(`   Warning: Codex imagegen thumbnail path not found: ${resolved}`);
+      return null;
+    }
+
+    const ext = path.extname(resolved) || ".png";
+    const finalPath = path.join(
+      TEMP_PATH,
+      `product_thumbnail_codex_imagegen_${Date.now()}_${sanitizeFileNameForPath(productNameLabel)}${ext}`
+    );
+    fs.copyFileSync(resolved, finalPath);
+    return finalPath;
+  }
+
+  fs.mkdirSync(PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_REQUEST_DIR, { recursive: true });
+  const requestedOutputPath = path.join(
+    TEMP_PATH,
+    `product_thumbnail_codex_imagegen_${Date.now()}_${sanitizeFileNameForPath(productNameLabel)}.png`
+  );
+  const requestPath = path.join(
+    PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_REQUEST_DIR,
+    `product_thumbnail_codex_imagegen_request_${Date.now()}_${sanitizeFileNameForPath(productNameLabel)}.md`
+  );
+
+  const requestBody = [
+    "# Codex Imagegen Product Thumbnail Request",
+    "",
+    `Product name: ${productNameLabel}`,
+    `Reference image: ${referenceImagePath}`,
+    `Desired output path: ${requestedOutputPath}`,
+    "",
+    "Use Codex built-in imagegen. Use the reference product image as the strict product reference.",
+    "After generation, copy the selected image to the desired output path and rerun with:",
+    "",
+    "```powershell",
+    `$env:PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_PATH="${requestedOutputPath}"`,
+    "```",
+    "",
+    "Prompt:",
+    "",
+    "```text",
+    prompt,
+    "```",
+    "",
+  ].join("\n");
+
+  fs.writeFileSync(requestPath, requestBody, "utf8");
+  console.log(`   Codex imagegen request saved: ${requestPath}`);
+  return null;
+}
+
+async function generateProductThumbnailWithChatGPT(
+  prompt: string,
+  referenceImagePath: string,
+  productNameLabel: string
+): Promise<string | null> {
+  if (!PRODUCT_THUMBNAIL_CHATGPT_ENABLED || !PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE) {
+    console.log("   ⚠️ 생성형 썸네일: ChatGPT 이미지 생성이 비활성화되어 있습니다.");
+    return null;
+  }
+
+  const hasSessionFile = fs.existsSync(CHATGPT_SESSION_FILE);
+  const hasPersistentProfile =
+    fs.existsSync(CHATGPT_USER_DATA_DIR) &&
+    fs.readdirSync(CHATGPT_USER_DATA_DIR).length > 0;
+
+  if (!hasSessionFile && !hasPersistentProfile) {
+    console.log("   ⚠️ 생성형 썸네일: ChatGPT 세션이 없어 건너뜁니다. `npm run login:chatgpt` 후 사용하세요.");
+    return null;
+  }
+
+  let contextHandle: ChatGPTContextHandle | null = null;
+  try {
+    contextHandle = await createChatGPTContext(hasSessionFile);
+    const page = await contextHandle.context.newPage();
+
+    const targetUrls = [PRODUCT_THUMBNAIL_IMAGE_GPT_URL];
+    if (
+      PRODUCT_THUMBNAIL_CHATGPT_BASE_FALLBACK_ENABLED &&
+      isCustomGptUrl(PRODUCT_THUMBNAIL_IMAGE_GPT_URL) &&
+      !targetUrls.includes(CHATGPT_BASE_URL)
+    ) {
+      targetUrls.push(CHATGPT_BASE_URL);
+    }
+
+    for (let index = 0; index < targetUrls.length; index += 1) {
+      const targetUrl = targetUrls[index];
+      const label = index === 0 ? "Product Thumbnail" : "Product Thumbnail Base Fallback";
+      const generatedPath = await attemptProductThumbnailChatGPTGeneration(
+        page,
+        prompt,
+        referenceImagePath,
+        productNameLabel,
+        targetUrl,
+        label
+      );
+      if (generatedPath) return generatedPath;
+      if (index < targetUrls.length - 1) {
+        console.log("   Warning: Product Thumbnail custom GPT failed; retrying with base ChatGPT.");
+      } else if (
+        isCustomGptUrl(PRODUCT_THUMBNAIL_IMAGE_GPT_URL) &&
+        !PRODUCT_THUMBNAIL_CHATGPT_BASE_FALLBACK_ENABLED
+      ) {
+        console.log("   Warning: Product Thumbnail base ChatGPT fallback disabled; skipping browser retry.");
       }
-    } catch {
-      // ignore non-JSON lines
+    }
+
+    return null;
+
+    await openChatGPTTarget(page, PRODUCT_THUMBNAIL_IMAGE_GPT_URL, "Product Thumbnail");
+    await continueChatGPTAccountPicker(page, "Product Thumbnail");
+    if (!isCustomGptUrl(PRODUCT_THUMBNAIL_IMAGE_GPT_URL)) {
+      await startNewChatIfAvailable(page);
+      await ensureChatGPTReady(page, Math.min(CHATGPT_TIMEOUT_MS, 120000));
+    }
+
+    await continueChatGPTAccountPicker(page, "Product Thumbnail");
+    const attached = await attachImagesToChatGPT(page, [referenceImagePath], "Thumbnail reference");
+    if (attached === 0) {
+      console.log("   ⚠️ 생성형 썸네일: 제품 레퍼런스 이미지 첨부 실패");
+      await saveProductThumbnailDebugScreenshot(page, "attach-failed");
+      return null;
+    }
+
+    await page.waitForTimeout(3000);
+    const beforeSources = await collectRenderableChatGPTImageSources(page);
+    console.log(`      - 생성 전 이미지 기준점: ${beforeSources.size}개`);
+    await submitProductThumbnailImagePrompt(page, prompt);
+    await maybeConfirmProductThumbnailGeneration(page, beforeSources);
+    const imageCount = await waitForProductThumbnailImageArtifacts(
+      page,
+      beforeSources,
+      PRODUCT_THUMBNAIL_IMAGE_WAIT_MS
+    );
+
+    if (imageCount === 0) {
+      const latestAssistantMessage = normalizeText((await readAssistantMessages(page)).at(-1) || "");
+      if (latestAssistantMessage) {
+        console.log(`   ⚠️ 생성형 썸네일 마지막 응답: ${latestAssistantMessage.slice(0, 240)}`);
+      }
+      console.log("   ⚠️ 생성형 썸네일: 새 이미지 산출물을 찾지 못했습니다.");
+      await saveProductThumbnailDebugScreenshot(page, "no-image-artifact");
+      return null;
+    }
+
+    const outDir = path.join(TEMP_PATH, `product-thumbnail-${Date.now()}`);
+    const downloadedPaths = await downloadProductThumbnailImages(page, outDir, beforeSources);
+    const firstImagePath = downloadedPaths.find((value) => value && fs.existsSync(value)) || "";
+    if (!firstImagePath) {
+      console.log("   ⚠️ 생성형 썸네일: 생성 이미지 다운로드 실패");
+      await saveProductThumbnailDebugScreenshot(page, "download-failed");
+      return null;
+    }
+
+    const finalPath = path.join(
+      TEMP_PATH,
+      `product_thumbnail_generated_${Date.now()}_${sanitizeFileNameForPath(productNameLabel)}${path.extname(firstImagePath) || ".png"}`
+    );
+    fs.copyFileSync(firstImagePath, finalPath);
+    return finalPath;
+  } catch (error) {
+    console.log(`   ⚠️ 생성형 썸네일 실패: ${getErrorMessage(error)}`);
+    return null;
+  } finally {
+    if (contextHandle) {
+      await contextHandle.close().catch(() => {});
+    }
+  }
+}
+
+async function attemptProductThumbnailChatGPTGeneration(
+  page: Page,
+  prompt: string,
+  referenceImagePath: string,
+  productNameLabel: string,
+  targetUrl: string,
+  label: string
+): Promise<string | null> {
+  await openChatGPTTarget(page, targetUrl, label);
+  await continueChatGPTAccountPicker(page, label);
+  if (!isCustomGptUrl(targetUrl)) {
+    await startNewChatIfAvailable(page);
+    await ensureChatGPTReady(page, Math.min(CHATGPT_TIMEOUT_MS, 120000));
+  }
+
+  await continueChatGPTAccountPicker(page, label);
+  const attached = await attachImagesToChatGPT(page, [referenceImagePath], `${label} reference`);
+  if (attached === 0) {
+    console.log(`   Warning: ${label} reference image attach failed.`);
+    await saveProductThumbnailDebugScreenshot(page, `${label}-attach-failed`);
+    return null;
+  }
+
+  await page.waitForTimeout(3000);
+  const beforeSources = await collectRenderableChatGPTImageSources(page);
+  console.log(`      - ${label} pre-existing image baseline: ${beforeSources.size}`);
+  await submitProductThumbnailImagePrompt(page, prompt);
+  await maybeConfirmProductThumbnailGeneration(page, beforeSources);
+  const imageCount = await waitForProductThumbnailImageArtifacts(
+    page,
+    beforeSources,
+    PRODUCT_THUMBNAIL_IMAGE_WAIT_MS
+  );
+
+  if (imageCount === 0) {
+    const latestAssistantMessage = normalizeText((await readAssistantMessages(page)).at(-1) || "");
+    if (latestAssistantMessage) {
+      console.log(`   Warning: ${label} latest response: ${latestAssistantMessage.slice(0, 240)}`);
+    }
+    console.log(`   Warning: ${label} did not produce a new image artifact.`);
+    await saveProductThumbnailDebugScreenshot(page, `${label}-no-image-artifact`);
+    return null;
+  }
+
+  const outDir = path.join(TEMP_PATH, `product-thumbnail-${Date.now()}`);
+  const downloadedPaths = await downloadProductThumbnailImages(page, outDir, beforeSources);
+  const firstImagePath = downloadedPaths.find((value) => value && fs.existsSync(value)) || "";
+  if (!firstImagePath) {
+    console.log(`   Warning: ${label} image download failed.`);
+    await saveProductThumbnailDebugScreenshot(page, `${label}-download-failed`);
+    return null;
+  }
+
+  const finalPath = path.join(
+    TEMP_PATH,
+    `product_thumbnail_generated_${Date.now()}_${sanitizeFileNameForPath(productNameLabel)}${path.extname(firstImagePath) || ".png"}`
+  );
+  fs.copyFileSync(firstImagePath, finalPath);
+  return finalPath;
+}
+
+function sanitizeFileNameForPath(value: string): string {
+  return (
+    value
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 48) || "thumbnail"
+  );
+}
+
+async function collectRenderableChatGPTImageSources(page: Page): Promise<Set<string>> {
+  const sources = await page
+    .evaluate(() =>
+      Array.from(document.querySelectorAll("img"))
+        .map((img) => {
+          const rect = img.getBoundingClientRect();
+          const style = window.getComputedStyle(img);
+          const src = img.currentSrc || img.src || "";
+          return {
+            src,
+            width: rect.width,
+            height: rect.height,
+            visible: style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0,
+          };
+        })
+        .filter(
+          (item) =>
+            item.src &&
+            item.visible &&
+            (item.src.startsWith("http") || item.src.startsWith("data:image/")) &&
+            item.width >= 180 &&
+            item.height >= 180
+        )
+        .map((item) => item.src)
+    )
+    .catch(() => [] as string[]);
+
+  return new Set(sources);
+}
+
+async function countNewRenderableChatGPTImages(page: Page, beforeSources: Set<string>): Promise<number> {
+  const currentSources = await collectRenderableChatGPTImageSources(page);
+  return Array.from(currentSources).filter((src) => !beforeSources.has(src)).length;
+}
+
+async function saveProductThumbnailDebugScreenshot(page: Page, reason: string): Promise<void> {
+  try {
+    const logsDir = path.join(process.cwd(), "logs");
+    fs.mkdirSync(logsDir, { recursive: true });
+    const filePath = path.join(
+      logsDir,
+      `debug_product_thumbnail_${sanitizeFileNameForPath(reason)}_${Date.now()}.png`
+    );
+    await page.screenshot({ path: filePath, fullPage: true });
+    console.log(`      - Product Thumbnail debug screenshot: ${filePath}`);
+  } catch {
+    // Debug capture is best-effort only.
+  }
+}
+
+function buildChatGPTPromptProbe(prompt: string): string {
+  return normalizeText(prompt).replace(/\s+/g, " ").trim().slice(0, 120);
+}
+
+async function readChatGPTComposerText(
+  page: Page,
+  composerSelector: string,
+  composerLocator?: Locator
+): Promise<string> {
+  const composer = composerLocator ?? page.locator(composerSelector).first();
+  if (composerSelector.startsWith("textarea")) {
+    return composer.inputValue().catch(() => "");
+  }
+
+  return composer.evaluate((element) => element.textContent || "").catch(() => "");
+}
+
+async function chatGPTComposerContainsPrompt(
+  page: Page,
+  composerSelector: string,
+  prompt: string,
+  composerLocator?: Locator
+): Promise<boolean> {
+  const probe = buildChatGPTPromptProbe(prompt);
+  if (!probe) return false;
+
+  const composerText = normalizeText(await readChatGPTComposerText(page, composerSelector, composerLocator))
+    .replace(/\s+/g, " ")
+    .trim();
+  return composerText.includes(probe.slice(0, Math.min(80, probe.length)));
+}
+
+async function countChatGPTConversationTurns(page: Page): Promise<number> {
+  return page.locator('article[data-testid^="conversation-turn-"]').count().catch(() => 0);
+}
+
+async function clickChatGPTSendControl(page: Page, composer: Locator): Promise<void> {
+  const sendButtonSelector = await findVisibleSelector(page, CHATGPT_SEND_BUTTON_SELECTORS);
+  if (sendButtonSelector) {
+    const sendButton = page.locator(sendButtonSelector).first();
+    const disabled = await sendButton.isDisabled().catch(() => false);
+    if (!disabled) {
+      await sendButton.click({ force: true, timeout: 5000 });
+      return;
     }
   }
 
-  const output = textChunks.join("\n").trim();
-  if (!output) {
-    throw new Error("opencode 응답에서 텍스트를 찾지 못했습니다.");
+  const clicked = await page
+    .evaluate(() => {
+      const visible = (element: Element): boolean => {
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+      };
+
+      const buttons = Array.from(document.querySelectorAll("button"));
+      const target = buttons.find((button) => {
+        if (!visible(button) || button.disabled) return false;
+        const evidence = [
+          button.getAttribute("aria-label") || "",
+          button.getAttribute("data-testid") || "",
+          button.textContent || "",
+        ]
+          .join(" ")
+          .toLowerCase();
+
+        return (
+          evidence.includes("send") ||
+          evidence.includes("submit") ||
+          evidence.includes("composer-send") ||
+          evidence.includes("\ubcf4\ub0b4\uae30") ||
+          evidence.includes("\uc804\uc1a1")
+        );
+      });
+
+      if (!target) return false;
+      target.click();
+      return true;
+    })
+    .catch(() => false);
+
+  if (!clicked) {
+    await composer.press("Enter").catch(() => {});
+  }
+}
+
+async function clickChatGPTRetryIfVisible(page: Page, label = "ChatGPT"): Promise<boolean> {
+  const retryButtons = [
+    page.getByRole("button", { name: /try again|retry/i }).first(),
+    page.getByRole("button", { name: /\ub2e4\uc2dc \uc2dc\ub3c4/i }).first(),
+    page.locator('button:has-text("Try again")').first(),
+    page.locator('button:has-text("Retry")').first(),
+    page.locator('button:has-text("\ub2e4\uc2dc \uc2dc\ub3c4")').first(),
+  ];
+
+  for (const button of retryButtons) {
+    const visible = await button.isVisible().catch(() => false);
+    if (!visible) continue;
+    console.log(`      - [${label}] ChatGPT retry button detected; clicking.`);
+    await button.click({ timeout: 3000 }).catch(() => {});
+    await page.waitForTimeout(2500);
+    return true;
   }
 
-  return output;
+  return false;
+}
+
+async function waitForProductThumbnailPromptSubmission(
+  page: Page,
+  previousMessages: string[],
+  composerSelector: string,
+  composerLocator: Locator,
+  prompt: string,
+  previousTurnCount: number,
+  timeoutMs: number
+): Promise<"generating" | "new-turn" | "composer-cleared" | "new-message" | null> {
+  const previousCount = previousMessages.length;
+  const baselineLastText = previousMessages[previousMessages.length - 1] ?? "";
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    await assertNoChatGPTProtection(page);
+    if (await continueChatGPTAccountPicker(page, "Product Thumbnail prompt submission")) {
+      continue;
+    }
+
+    if (await isChatGPTGenerating(page)) {
+      return "generating";
+    }
+
+    if ((await countChatGPTConversationTurns(page)) > previousTurnCount) {
+      return "new-turn";
+    }
+
+    const composerText = (await readChatGPTComposerText(page, composerSelector, composerLocator)).trim();
+    if (!composerText) {
+      return "composer-cleared";
+    }
+
+    const messages = await readAssistantMessages(page);
+    const latestText = messages[messages.length - 1] ?? "";
+    const hasAdvancedReply =
+      messages.length > previousCount ||
+      (messages.length > 0 && latestText.length > 0 && latestText !== baselineLastText);
+    if (hasAdvancedReply && !(await chatGPTComposerContainsPrompt(page, composerSelector, prompt, composerLocator))) {
+      return "new-message";
+    }
+
+    await page.waitForTimeout(300);
+  }
+
+  return null;
+}
+
+async function waitForVisibleChatGPTComposer(
+  page: Page,
+  timeoutMs: number
+): Promise<{ selector: string; locator: Locator }> {
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    await assertNoChatGPTProtection(page);
+    await dismissTemporaryChatOnboarding(page);
+    if (await continueChatGPTAccountPicker(page, "ChatGPT composer")) {
+      continue;
+    }
+
+    for (const selector of CHATGPT_COMPOSER_SELECTORS) {
+      const locators = page.locator(selector);
+      const count = Math.min(await locators.count().catch(() => 0), 20);
+      for (let index = 0; index < count; index += 1) {
+        const locator = locators.nth(index);
+        const visible = await locator.isVisible().catch(() => false);
+        if (visible) {
+          return { selector, locator };
+        }
+      }
+    }
+
+    if (await isChatGPTLoginRequired(page)) {
+      throw new Error("ChatGPT login is required. Run npm run login:chatgpt and try again.");
+    }
+
+    await page.waitForTimeout(1000);
+  }
+
+  throw new Error("ChatGPT composer was not found.");
+}
+
+async function submitProductThumbnailImagePrompt(page: Page, prompt: string): Promise<void> {
+  const label = "Product Thumbnail 이미지 생성";
+  await assertNoChatGPTProtection(page, label);
+  await dismissTemporaryChatOnboarding(page);
+  await continueChatGPTAccountPicker(page, label);
+  await waitForChatGPTGenerationIdle(page, 60_000, label);
+
+  const previousMessages = await readAssistantMessages(page);
+  const previousTurnCount = await countChatGPTConversationTurns(page);
+  const composerTarget = await waitForVisibleChatGPTComposer(page, CHATGPT_TIMEOUT_MS);
+  const composerSelector = composerTarget.selector;
+  const composer = composerTarget.locator;
+
+  await closeBlockingChatGPTModals(page);
+  await composer.click();
+  await page.waitForTimeout(400);
+  await pasteChatGPTPrompt(page, composer, composerSelector, prompt);
+  if (!(await chatGPTComposerContainsPrompt(page, composerSelector, prompt, composer))) {
+    await pasteChatGPTPrompt(page, composer, composerSelector, prompt);
+  }
+  if (!(await chatGPTComposerContainsPrompt(page, composerSelector, prompt, composer))) {
+    await saveProductThumbnailDebugScreenshot(page, "prompt-paste-failed");
+    throw new Error("Product Thumbnail prompt paste failed.");
+  }
+  await page.waitForTimeout(800);
+  await waitForChatGPTSendReady(page, 90_000);
+
+  await clickChatGPTSendControl(page, composer);
+
+  await page.waitForTimeout(2000);
+  let submitted = await waitForProductThumbnailPromptSubmission(
+    page,
+    previousMessages,
+    composerSelector,
+    composer,
+    prompt,
+    previousTurnCount,
+    20_000
+  );
+  if (!submitted) {
+    await clickChatGPTSendControl(page, composer);
+    await page.waitForTimeout(2000);
+    submitted = await waitForProductThumbnailPromptSubmission(
+      page,
+      previousMessages,
+      composerSelector,
+      composer,
+      prompt,
+      previousTurnCount,
+      20_000
+    );
+  }
+  if (!submitted) {
+    await saveProductThumbnailDebugScreenshot(page, "prompt-send-failed");
+    throw new Error("Product Thumbnail 이미지 생성 요청 전송을 확인하지 못했습니다.");
+  }
+}
+
+async function maybeConfirmProductThumbnailGeneration(
+  page: Page,
+  beforeSources: Set<string>
+): Promise<void> {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    if ((await countNewRenderableChatGPTImages(page, beforeSources)) > 0) return;
+
+    const latestAssistantMessage = ((await readAssistantMessages(page)).at(-1) || "").replace(/\s+/g, "");
+    const pageBodyText = ((await page.textContent("body").catch(() => "")) || "").replace(/\s+/g, "");
+    const confirmationText = latestAssistantMessage || pageBodyText;
+
+    if (/생성계획|미리보기|진행할까요|생성할까요|시작할까요|원하시면|만들까요/i.test(confirmationText)) {
+      await submitProductThumbnailImagePrompt(
+        page,
+        "네. 첨부한 제품 이미지를 기준으로 ProductThumbnail.md 지침 그대로, 후합성 없이 완성형 썸네일 이미지를 바로 생성해줘."
+      );
+      return;
+    }
+
+    await page.waitForTimeout(1500);
+  }
+}
+
+async function waitForProductThumbnailImageArtifacts(
+  page: Page,
+  beforeSources: Set<string>,
+  timeoutMs: number
+): Promise<number> {
+  let waitedMs = 0;
+  let previousImageCount = 0;
+  let stableCycles = 0;
+  let interactionRecoveryAttempts = 0;
+  const maxInteractionRecoveryAttempts = 3;
+
+  while (waitedMs < timeoutMs) {
+    await assertNoChatGPTProtection(page, "Product Thumbnail 이미지 생성");
+    const continuedAccount = await continueChatGPTAccountPicker(page, "Product Thumbnail image wait");
+    const retried = await clickChatGPTRetryIfVisible(page, "Product Thumbnail image wait");
+    if (continuedAccount || retried) {
+      interactionRecoveryAttempts += 1;
+      if (interactionRecoveryAttempts > maxInteractionRecoveryAttempts) {
+        console.log("      - Product Thumbnail interaction recovery limit reached.");
+        break;
+      }
+      previousImageCount = 0;
+      stableCycles = 0;
+      await page.waitForTimeout(3000);
+      waitedMs += 3000;
+      continue;
+    }
+    const imageCount = await countNewRenderableChatGPTImages(page, beforeSources);
+    const generating = await isChatGPTGenerating(page);
+
+    if (!generating && imageCount > 0) {
+      if (imageCount === previousImageCount) {
+        stableCycles += 1;
+      } else {
+        previousImageCount = imageCount;
+        stableCycles = 1;
+      }
+
+      if (waitedMs >= 12000 && stableCycles >= 2) {
+        return imageCount;
+      }
+    } else {
+      previousImageCount = imageCount;
+      stableCycles = 0;
+    }
+
+    if (waitedMs > 0 && waitedMs % 15000 === 0) {
+      console.log(`      - 생성형 썸네일 대기 중... (${Math.round(waitedMs / 1000)}초)`);
+    }
+
+    await page.waitForTimeout(3000);
+    waitedMs += 3000;
+  }
+
+  return Math.max(previousImageCount, 0);
+}
+
+async function downloadProductThumbnailImages(
+  page: Page,
+  downloadDir: string,
+  beforeSources: Set<string>
+): Promise<string[]> {
+  const beforeSourceList = Array.from(beforeSources);
+  const imagesData = await page
+    .evaluate(async (before) => {
+      const beforeSet = new Set(before);
+      const allImages = Array.from(document.querySelectorAll("img"));
+      const candidates = allImages
+        .map((img) => {
+          const rect = img.getBoundingClientRect();
+          const src = img.currentSrc || img.src || "";
+          return {
+            src,
+            width: Math.max(rect.width, img.naturalWidth || 0),
+            height: Math.max(rect.height, img.naturalHeight || 0),
+            visible: rect.width >= 180 && rect.height >= 180,
+          };
+        })
+        .filter(
+          (item) =>
+            item.visible &&
+            item.src &&
+            !beforeSet.has(item.src) &&
+            (item.src.startsWith("http") || item.src.startsWith("data:image/")) &&
+            item.width >= 300 &&
+            item.height >= 300
+        )
+        .sort((a, b) => b.width * b.height - a.width * a.height);
+
+      const unique = [];
+      const seen = new Set();
+      for (const item of candidates) {
+        if (seen.has(item.src)) continue;
+        seen.add(item.src);
+        unique.push(item);
+      }
+
+      const results = [];
+      for (const item of unique) {
+        const src = item.src;
+        if (src.startsWith("data:image/")) {
+          results.push(src);
+          continue;
+        }
+        try {
+          const response = await fetch(src);
+          const blob = await response.blob();
+          const base64data = await new Promise<string>((resolve) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(String(reader.result || ""));
+            reader.readAsDataURL(blob);
+          });
+          if (base64data.startsWith("data:image/")) {
+            results.push(base64data);
+          }
+        } catch {
+          // Ignore individual download failures inside the browser context.
+        }
+      }
+      return results;
+    }, beforeSourceList)
+    .catch(() => [] as string[]);
+
+  console.log(`      - 생성 이미지 base64 다운로드 후보: ${imagesData.length}개`);
+  fs.mkdirSync(downloadDir, { recursive: true });
+
+  const savedPaths: string[] = [];
+  for (let i = 0; i < imagesData.length; i += 1) {
+    const [meta, base64] = imagesData[i].split(",");
+    if (!base64) continue;
+    const ext = /image\/jpe?g/i.test(meta) ? "jpg" : /image\/webp/i.test(meta) ? "webp" : "png";
+    const filePath = path.join(downloadDir, `product_thumbnail_${Date.now()}_${i}.${ext}`);
+    fs.writeFileSync(filePath, Buffer.from(base64, "base64"));
+    savedPaths.push(filePath);
+  }
+
+  if (savedPaths.length > 0) return savedPaths;
+
+  return screenshotProductThumbnailImages(page, downloadDir, beforeSources);
+}
+
+async function screenshotProductThumbnailImages(
+  page: Page,
+  downloadDir: string,
+  beforeSources: Set<string>
+): Promise<string[]> {
+  fs.mkdirSync(downloadDir, { recursive: true });
+  const imageLocators = page.locator("img");
+  const count = await imageLocators.count().catch(() => 0);
+  const candidates: Array<{ index: number; area: number }> = [];
+
+  for (let index = 0; index < count; index += 1) {
+    const img = imageLocators.nth(index);
+    const info = await img
+      .evaluate((element) => {
+        const image = element as HTMLImageElement;
+        const rect = image.getBoundingClientRect();
+        const src = image.currentSrc || image.src || "";
+        const style = window.getComputedStyle(image);
+        return {
+          src,
+          width: Math.max(rect.width, image.naturalWidth || 0),
+          height: Math.max(rect.height, image.naturalHeight || 0),
+          visible:
+            rect.width >= 180 &&
+            rect.height >= 180 &&
+            style.display !== "none" &&
+            style.visibility !== "hidden",
+        };
+      })
+      .catch(() => null);
+
+    if (!info?.visible || !info.src || beforeSources.has(info.src)) continue;
+    candidates.push({ index, area: info.width * info.height });
+  }
+
+  candidates.sort((a, b) => b.area - a.area);
+  console.log(`      - 생성 이미지 스크린샷 후보: ${candidates.length}개`);
+  const savedPaths: string[] = [];
+  for (const candidate of candidates.slice(0, 3)) {
+    const img = imageLocators.nth(candidate.index);
+    const filePath = path.join(downloadDir, `product_thumbnail_screenshot_${Date.now()}_${candidate.index}.png`);
+    try {
+      await img.screenshot({ path: filePath });
+      if (fs.existsSync(filePath)) {
+        savedPaths.push(filePath);
+      }
+    } catch {
+      // Try the next candidate.
+    }
+  }
+
+  return savedPaths;
+}
+
+async function runOpenAiApi(systemPrompt: string, userPrompt: string): Promise<string> {
+  if (!OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY가 비어 있어 OpenAI API로 글을 생성할 수 없습니다.");
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        temperature: 0.75,
+        response_format: { type: "json_object" },
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      throw new Error(`OpenAI API 호출 실패 (${response.status}): ${detail.slice(0, 400)}`);
+    }
+
+    const payload = (await response.json()) as {
+      choices?: Array<{
+        message?: { content?: string | null };
+      }>;
+    };
+    const output = payload.choices?.[0]?.message?.content?.trim();
+    if (!output) {
+      throw new Error("OpenAI API 응답에서 본문을 찾지 못했습니다.");
+    }
+
+    return output;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 const CHATGPT_COMPOSER_SELECTORS = [
@@ -534,7 +1713,12 @@ const CHATGPT_COMPOSER_SELECTORS = [
 
 const CHATGPT_SEND_BUTTON_SELECTORS = [
   'button[data-testid="send-button"]',
+  'button[data-testid="composer-send-button"]',
+  'button[aria-label*="Send prompt"]',
   'button[aria-label*="Send"]',
+  'button[aria-label*="Submit"]',
+  'button[aria-label*="\ubcf4\ub0b4\uae30"]',
+  'button[aria-label*="\uc804\uc1a1"]',
   'button[aria-label*="보내기"]',
 ];
 
@@ -570,6 +1754,43 @@ const CHATGPT_STARTER_BUTTON_SELECTORS = [
   'button:has-text("안녕하세요")',
   'button:has-text("Hello")',
   'button:has-text("시작")',
+];
+
+const CHATGPT_MANUAL_VERIFICATION_MESSAGE =
+  "ChatGPT manual verification required. A human-verification or security-check page is visible. Complete it in the browser, then run the job again.";
+
+const CHATGPT_PROTECTION_TEXT_PATTERNS = [
+  "checking your browser",
+  "checking if the site connection is secure",
+  "please stand by",
+  "verify you are human",
+  "needs to review the security of your connection",
+  "cf-challenge",
+  "cloudflare",
+  "turnstile",
+  "unusual activity",
+  "access denied",
+  "\uc0ac\ub78c\uc778\uc9c0 \ud655\uc778",
+  "\uc2e4\uc81c \uc0ac\uc6a9\uc790\uc778\uc9c0 \ud655\uc778",
+  "\uc0ac\uc6a9\uc790\uac00 \uc0ac\ub78c\uc778\uc9c0 \ud655\uc778",
+  "\uc0ac\ub78c\uc784\uc744 \ud655\uc778",
+  "\ub85c\ubd07\uc774 \uc544\ub2d8",
+  "\ubcf4\uc548 \ud655\uc778",
+  "\ubcf4\uc548 \uac80\uc99d",
+  "\ube0c\ub77c\uc6b0\uc800\ub97c \ud655\uc778",
+  "\uc811\uadfc\uc774 \ucc28\ub2e8",
+  "\ube44\uc815\uc0c1\uc801\uc778 \ud65c\ub3d9",
+];
+
+const CHATGPT_PROTECTION_FRAME_PATTERNS = [
+  "cdn-cgi/challenge-platform",
+  "challenge",
+  "captcha",
+  "turnstile",
+  "cloudflare",
+  "cf-chl",
+  "hcaptcha",
+  "recaptcha",
 ];
 
 function isCustomGptUrl(url: string): boolean {
@@ -614,11 +1835,48 @@ function selectChatGPTImageContextPaths(imagePaths: string[]): string[] {
 }
 
 async function countChatGPTAttachedImages(page: Page): Promise<number> {
-  const removeButtons = page.getByLabel(/파일 제거|remove file/i);
-  return removeButtons.count().catch(() => 0);
+  const removeButtonCount = await page.getByLabel(/파일 제거|remove file|remove attachment/i).count().catch(() => 0);
+  const previewCount = await page
+    .evaluate(() => {
+      const selectors = [
+        '[data-testid*="attachment" i]',
+        '[data-testid*="file-preview" i]',
+        '[data-testid*="upload-preview" i]',
+        '[class*="attachment" i]',
+        '[class*="file-preview" i]',
+        'img[src^="blob:"]',
+        'img[alt*="uploaded" i]',
+        'img[alt*="첨부" i]',
+        'img[alt*="업로드" i]',
+      ];
+      const nodes = new Set<Element>();
+      for (const selector of selectors) {
+        try {
+          document.querySelectorAll(selector).forEach((node) => nodes.add(node));
+        } catch {
+          // Ignore selectors unsupported by the current browser.
+        }
+      }
+
+      return Array.from(nodes).filter((node) => {
+        const rect = node.getBoundingClientRect();
+        const style = window.getComputedStyle(node);
+        return (
+          rect.width >= 24 &&
+          rect.height >= 24 &&
+          style.visibility !== "hidden" &&
+          style.display !== "none"
+        );
+      }).length;
+    })
+    .catch(() => 0);
+
+  return Math.max(removeButtonCount, previewCount);
 }
 
 async function waitForChatGPTSendReady(page: Page, timeoutMs = 120000): Promise<void> {
+  await assertNoChatGPTProtection(page);
+  await continueChatGPTAccountPicker(page, "ChatGPT send ready");
   const sendSelector =
     (await findVisibleSelector(page, CHATGPT_SEND_BUTTON_SELECTORS)) ||
     (await findExistingSelector(page, CHATGPT_SEND_BUTTON_SELECTORS));
@@ -629,6 +1887,8 @@ async function waitForChatGPTSendReady(page: Page, timeoutMs = 120000): Promise<
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < timeoutMs) {
+    await assertNoChatGPTProtection(page);
+    await continueChatGPTAccountPicker(page, "ChatGPT send ready");
     const disabled = await sendButton.isDisabled().catch(() => false);
     if (!disabled) return;
     await page.waitForTimeout(300);
@@ -645,6 +1905,7 @@ async function attachImagesToChatGPT(
 
   try {
     await dismissTemporaryChatOnboarding(page);
+    await continueChatGPTAccountPicker(page, label);
 
     const beforeCount = await countChatGPTAttachedImages(page);
 
@@ -668,7 +1929,7 @@ async function attachImagesToChatGPT(
     const expectedCount = beforeCount + selectedPaths.length;
     const startedAt = Date.now();
 
-    while (Date.now() - startedAt < 180000) {
+    while (Date.now() - startedAt < CHATGPT_IMAGE_ATTACH_TIMEOUT_MS) {
       const currentCount = await countChatGPTAttachedImages(page);
       if (currentCount >= expectedCount) break;
       await page.waitForTimeout(300);
@@ -681,7 +1942,8 @@ async function attachImagesToChatGPT(
     if (attached > 0) {
       console.log(`      - ${label} 이미지 컨텍스트 첨부: ${attached}개`);
     } else {
-      console.log(`      - ${label} 이미지 첨부가 확인되지 않았습니다.`);
+      console.log(`      - ${label} 이미지 첨부 확인 UI 미검출, setInputFiles 성공 기준으로 진행합니다.`);
+      return selectedPaths.length;
     }
 
     return attached;
@@ -719,6 +1981,94 @@ async function hasVisibleChatGPTLoginCta(page: Page): Promise<boolean> {
   }
 
   return false;
+}
+
+async function continueChatGPTAccountPicker(page: Page, label = "ChatGPT"): Promise<boolean> {
+  const target = await page
+    .evaluate(() => {
+      const bodyText = (document.body?.innerText || "").replace(/\s+/g, " ");
+      const hasAccountPicker =
+        /welcome back|choose an account|select an account/i.test(bodyText) ||
+        bodyText.includes("\ub2e4\uc2dc \uc624\uc2e0 \uac78 \ud658\uc601\ud569\ub2c8\ub2e4") ||
+        bodyText.includes("\uacc4\uc815\uc744 \uc120\ud0dd\ud574 \uacc4\uc18d\ud558\uc138\uc694");
+
+      if (!hasAccountPicker) return null;
+
+      const visible = (element: Element): boolean => {
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+      };
+
+      const elements = Array.from(document.querySelectorAll("button, [role='button'], a, div, span, p"));
+      const candidates: Array<{
+        x: number;
+        y: number;
+        left: number;
+        width: number;
+        text: string;
+        area: number;
+        top: number;
+      }> = [];
+      const seen = new Set<string>();
+
+      for (const element of elements) {
+        const text = (element.textContent || "").replace(/\s+/g, " ").trim();
+        if (!/@/.test(text) || !visible(element)) continue;
+
+        let clickable = element.closest("button, [role='button'], a");
+        if (!clickable) {
+          let parent: Element | null = element;
+          while (parent && parent !== document.body) {
+            const parentText = (parent.textContent || "").replace(/\s+/g, " ").trim();
+            const parentRect = parent.getBoundingClientRect();
+            if (
+              /@/.test(parentText) &&
+              visible(parent) &&
+              parentRect.width >= 180 &&
+              parentRect.height >= 44 &&
+              parentRect.width <= 560 &&
+              parentRect.height <= 180
+            ) {
+              clickable = parent;
+              break;
+            }
+            parent = parent.parentElement;
+          }
+        }
+        clickable ||= element;
+        if (!visible(clickable)) continue;
+
+        const rect = clickable.getBoundingClientRect();
+        const key = `${Math.round(rect.left)}:${Math.round(rect.top)}:${Math.round(rect.width)}:${Math.round(rect.height)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        candidates.push({
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+          left: rect.left,
+          width: rect.width,
+          text,
+          area: rect.width * rect.height,
+          top: rect.top,
+        });
+      }
+
+      candidates.sort((a, b) => a.top - b.top || b.area - a.area);
+      return candidates[0] || null;
+    })
+    .catch(() => null);
+
+  if (!target) return false;
+
+  console.log(`      - [${label}] ChatGPT account picker detected; selecting saved account.`);
+  await page.mouse.click(target.left + Math.min(74, target.width * 0.24), target.y).catch(() => {});
+  await page.waitForTimeout(700);
+  await page.mouse.click(target.x, target.y).catch(() => {});
+  await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {});
+  await page.waitForTimeout(2500);
+  return true;
 }
 
 function withTemporaryChatParam(url: string): string {
@@ -901,6 +2251,11 @@ function buildDirectSeoTitle(context: ChatGPTGuidanceContext): string {
 
 function inferCategoryKeyword(productName: string): string {
   const name = normalizePromptForStepMatch(productName);
+  if (/꼬리뼈|치질|자세교정|방석|쿠션|의자/.test(name)) return "자세교정 방석";
+  if (/보냉백|쿨러백|아이스박스|소프트쿨러/.test(name)) return "보냉백";
+  if (/드라이기|헤어드라이어/.test(name)) return "헤어 드라이기";
+  if (/선풍기|서큘레이터/.test(name)) return "선풍기";
+  if (/키보드|마우스|트랙패드|이어팟|아이폰|아이패드|맥북/.test(name)) return "디지털 기기";
   if (name.includes("음식물") && name.includes("처리기")) return "음식물처리기";
   if (name.includes("청소기")) return "무선청소기";
   if (name.includes("공기청정")) return "공기청정기";
@@ -944,14 +2299,21 @@ function buildDraftChapterTopics(
   context: ChatGPTGuidanceContext,
   sectionCount: number
 ): string[] {
+  if (context.openCrabSeoBrief?.recommendedSectionTitles.length) {
+    return context.openCrabSeoBrief.recommendedSectionTitles.slice(
+      0,
+      Math.max(4, Math.min(10, sectionCount))
+    );
+  }
+
   const baseTopics = [
-    `${context.productName}를 고른 이유와 구매 배경`,
-    "개봉 직후 첫인상, 디자인, 크기 체크",
-    "핵심 기능 사용 과정과 실제 체감 포인트",
-    "일상 사용 기준 장점과 아쉬운 점 정리",
-    "추천 대상과 구매 팁, 재구매 의사",
-    "가격 대비 만족도와 할인/쿠폰 체감",
-    "사용 중 유지관리와 관리 팁",
+    `${context.productName} 구매 전 확인할 기준`,
+    "상품 이미지 기준 첫인상, 디자인, 크기 체크",
+    "핵심 기능과 사용 장면별 확인 포인트",
+    "상세 정보 기준 장점과 아쉬운 점 정리",
+    "추천 대상과 구매 전 체크 팁",
+    "가격대와 할인/쿠폰 확인 포인트",
+    "유지관리와 관리 팁",
     "비슷한 제품과 비교했을 때 차이점",
   ];
 
@@ -963,6 +2325,7 @@ function buildDraftContentPayload(
   sectionCount: number
 ): string {
   const topics = buildDraftChapterTopics(context, sectionCount);
+  const openCrabBriefText = formatOpenCrabSeoBriefForPrompt(context.openCrabSeoBrief ?? null);
 
   const topicLines = topics.map((topic, index) => `${index + 1}. ${topic}`).join("\n");
 
@@ -977,7 +2340,7 @@ function buildDraftContentPayload(
     "",
     "[추가 제품 정보]",
     `- 상품명: ${context.productName}`,
-    `- 구매페이지: ${context.brandLink}`,
+    `- 쇼핑커넥트 삽입용 링크(본문 URL 직접 기재 금지): ${context.brandLink}`,
     `- 상품 설명: ${context.description || "(설명 없음)"}`,
     `- 핵심 특징: ${context.features.length > 0 ? context.features.join(", ") : "(특징 없음)"}`,
     `- 가격: ${context.price || "(가격 미확인)"}`,
@@ -987,6 +2350,7 @@ function buildDraftContentPayload(
     `- 배송: ${context.deliveryInfo || "(정보 없음)"}`,
     `- 리뷰수: ${context.reviewCount || "(미확인)"}`,
     `- 평점: ${context.rating || "(미확인)"}`,
+    openCrabBriefText ? "\n[내부 SEO 참고자료]\n" + openCrabBriefText : "",
     "",
     `선택된 소제목 개수(${sectionCount}개)와 모바일 버전 규칙을 유지해주세요.`,
   ].join("\n");
@@ -1046,6 +2410,86 @@ async function detectChatGPTProtectionIssue(page: Page): Promise<string | null> 
   return null;
 }
 
+async function detectChatGPTManualVerification(page: Page): Promise<string | null> {
+  const urlEvidence = page.url().toLowerCase();
+  if (CHATGPT_PROTECTION_FRAME_PATTERNS.some((pattern) => urlEvidence.includes(pattern))) {
+    return CHATGPT_MANUAL_VERIFICATION_MESSAGE;
+  }
+
+  const frameEvidence = page.frames().some((frame) => {
+    const evidence = `${frame.url()} ${frame.name()}`.toLowerCase();
+    return CHATGPT_PROTECTION_FRAME_PATTERNS.some((pattern) => evidence.includes(pattern));
+  });
+  if (frameEvidence) {
+    return CHATGPT_MANUAL_VERIFICATION_MESSAGE;
+  }
+
+  const bodyText = (await page.textContent("body").catch(() => "")) || "";
+  const normalized = bodyText.replace(/\s+/g, " ").toLowerCase();
+  if (CHATGPT_PROTECTION_TEXT_PATTERNS.some((pattern) => normalized.includes(pattern))) {
+    return CHATGPT_MANUAL_VERIFICATION_MESSAGE;
+  }
+
+  const domEvidence = await page
+    .evaluate(() => {
+      const visible = (element: Element): boolean => {
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+      };
+
+      const challengeSelectors = [
+        'iframe[src*="challenge"]',
+        'iframe[src*="captcha"]',
+        'iframe[src*="turnstile"]',
+        'iframe[src*="cloudflare"]',
+        '[id*="challenge"]',
+        '[class*="challenge"]',
+        '[id*="captcha"]',
+        '[class*="captcha"]',
+        '[id*="turnstile"]',
+        '[class*="turnstile"]',
+        "[data-sitekey]",
+      ];
+      const hasChallengeElement = challengeSelectors.some((selector) =>
+        Array.from(document.querySelectorAll(selector)).some(visible)
+      );
+
+      const humanTextPattern =
+        /verify|human|robot|captcha|cloudflare|turnstile|\uc0ac\ub78c|\ub85c\ubd07|\ubcf4\uc548|\uc778\uc99d/i;
+      const hasHumanCheckbox = Array.from(
+        document.querySelectorAll('input[type="checkbox"], [role="checkbox"]')
+      ).some((element) => {
+        if (!visible(element)) return false;
+        const nearby =
+          element.closest("label, form, section, main, div")?.textContent ||
+          element.getAttribute("aria-label") ||
+          element.getAttribute("title") ||
+          document.body?.innerText ||
+          "";
+        return humanTextPattern.test(nearby);
+      });
+
+      return { hasChallengeElement, hasHumanCheckbox };
+    })
+    .catch(() => ({ hasChallengeElement: false, hasHumanCheckbox: false }));
+
+  if (domEvidence.hasChallengeElement || domEvidence.hasHumanCheckbox) {
+    return CHATGPT_MANUAL_VERIFICATION_MESSAGE;
+  }
+
+  return null;
+}
+
+async function assertNoChatGPTProtection(page: Page, label = "ChatGPT"): Promise<void> {
+  const protectionIssue =
+    (await detectChatGPTManualVerification(page)) ??
+    (await detectChatGPTProtectionIssue(page));
+  if (!protectionIssue) return;
+
+  throw new Error(`${label}: ${protectionIssue} Current URL: ${page.url()}`);
+}
+
 async function isChatGPTLoginRequired(page: Page): Promise<boolean> {
   if (await hasAuthenticatedChatGPTUI(page)) {
     return false;
@@ -1069,7 +2513,13 @@ async function ensureChatGPTReady(page: Page, timeoutMs: number): Promise<void> 
       return;
     }
 
-    const protectionIssue = await detectChatGPTProtectionIssue(page);
+    await assertNoChatGPTProtection(page);
+    if (await continueChatGPTAccountPicker(page, "ChatGPT ready")) {
+      loginSeenRounds = 0;
+      continue;
+    }
+
+    const protectionIssue = await detectChatGPTManualVerification(page);
     if (protectionIssue) {
       throw new Error(
         `${protectionIssue} 브라우저에서 인증을 완료한 뒤 다시 시도하세요. (현재 URL: ${page.url()})`
@@ -1122,6 +2572,7 @@ async function openChatGPTTarget(page: Page, requestedUrl: string, label: string
   const targetUrl = withTemporaryChatParam(requestedUrl);
 
   await navigateWithRetry(page, targetUrl, `${label} GPT`);
+  await continueChatGPTAccountPicker(page, label);
   await ensureChatGPTReady(page, Math.min(CHATGPT_TIMEOUT_MS, 120000));
   await dismissTemporaryChatOnboarding(page);
 
@@ -1158,7 +2609,11 @@ async function waitForChatGPTComposer(page: Page, timeoutMs: number): Promise<st
   const start = Date.now();
 
   while (Date.now() - start < timeoutMs) {
+    await assertNoChatGPTProtection(page);
     await dismissTemporaryChatOnboarding(page);
+    if (await continueChatGPTAccountPicker(page, "ChatGPT composer")) {
+      continue;
+    }
     const selector = await findVisibleSelector(page, CHATGPT_COMPOSER_SELECTORS);
     if (selector) return selector;
 
@@ -1222,6 +2677,11 @@ async function waitForChatGPTAssistantReply(
   let lastProgressLogAt = start;
 
   while (Date.now() - start < maxTimeoutMs) {
+    await assertNoChatGPTProtection(page, label);
+    if (await continueChatGPTAccountPicker(page, label)) {
+      continue;
+    }
+
     if (await isChatGPTLoginRequired(page)) {
       throw new Error("ChatGPT 세션이 중간에 해제되었습니다. `npm run login:chatgpt` 후 다시 시도하세요.");
     }
@@ -1295,6 +2755,12 @@ async function waitForChatGPTGenerationIdle(
   let idleRounds = 0;
 
   while (Date.now() - startedAt < timeoutMs) {
+    await assertNoChatGPTProtection(page, label);
+    if (await continueChatGPTAccountPicker(page, label)) {
+      idleRounds = 0;
+      continue;
+    }
+
     const generating = await isChatGPTGenerating(page);
     if (!generating) {
       idleRounds += 1;
@@ -1321,6 +2787,11 @@ async function waitForPromptSubmission(
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < timeoutMs) {
+    await assertNoChatGPTProtection(page);
+    if (await continueChatGPTAccountPicker(page, "ChatGPT prompt submission")) {
+      continue;
+    }
+
     if (await isChatGPTGenerating(page)) {
       return "generating";
     }
@@ -1350,7 +2821,9 @@ async function sendPromptToChatGPT(
   const sendReadyTimeoutMs = options.sendReadyTimeoutMs ?? 90_000;
   const label = options.label ?? "ChatGPT";
 
+  await assertNoChatGPTProtection(page, label);
   await dismissTemporaryChatOnboarding(page);
+  await continueChatGPTAccountPicker(page, label);
   await waitForChatGPTGenerationIdle(page, 60_000, label);
   
   // 프롬프트 입력 전에 약간 대기 (UI 반응형)
@@ -1360,21 +2833,17 @@ async function sendPromptToChatGPT(
   const composerSelector = await waitForChatGPTComposer(page, CHATGPT_TIMEOUT_MS);
   const composer = page.locator(composerSelector).first();
 
+  await assertNoChatGPTProtection(page, label);
+  await closeBlockingChatGPTModals(page);
   await composer.click();
   await page.waitForTimeout(500);
-
-  if (composerSelector.startsWith("textarea")) {
-    await composer.fill(prompt);
-  } else {
-    await page.keyboard.press("Meta+A").catch(() => {});
-    await page.keyboard.press("Control+A").catch(() => {});
-    await page.keyboard.type(prompt, { delay: 5 }); // delay 증가
-  }
+  await pasteChatGPTPrompt(page, composer, composerSelector, prompt);
 
   // 입력 완료 후 잠시 대기
   await page.waitForTimeout(1000);
 
   await waitForChatGPTSendReady(page, sendReadyTimeoutMs);
+  await assertNoChatGPTProtection(page, label);
   
   // 전송 버튼 누르기 전 대기
   await page.waitForTimeout(500);
@@ -1436,7 +2905,6 @@ async function createChatGPTContext(hasSessionFile: boolean): Promise<ChatGPTCon
   const commonLaunchOptions = {
     headless: CHATGPT_HEADLESS,
     slowMo: CHATGPT_HEADLESS ? 0 : 30,
-    channel: process.env.BROWSER_CHANNEL || undefined, // 패키징 시 시스템 Chrome 사용
     args: ["--disable-blink-features=AutomationControlled"],
   };
 
@@ -1497,11 +2965,81 @@ function buildGuidanceSummary(context: ChatGPTGuidanceContext): string {
     `배송: ${context.deliveryInfo || "(배송 정보 없음)"}`,
     `리뷰수: ${context.reviewCount || "(리뷰수 미확인)"}`,
     `평점: ${context.rating || "(평점 미확인)"}`,
-    `구매링크: ${context.brandLink}`,
+    `쇼핑커넥트 삽입용 링크(본문 URL 직접 기재 금지): ${context.brandLink}`,
     `희망 섹션 수: ${context.targetSectionCount}`,
   ];
+  const openCrabBriefText = formatOpenCrabSeoBriefForPrompt(context.openCrabSeoBrief ?? null);
+  if (openCrabBriefText) {
+    details.push("", openCrabBriefText);
+  }
 
   return details.join("\n");
+}
+
+function buildDirectBrowserGptPrompt(
+  systemPrompt: string,
+  userPrompt: string,
+  context: ChatGPTGuidanceContext,
+  minSections: number
+): string {
+  const sectionCount = Math.max(minSections, Math.min(8, context.targetSectionCount));
+
+  return [
+    "아래 정보를 바탕으로 네이버 블로그 발행용 최종 글을 바로 작성해주세요.",
+    "중요: 추가 질문, 확인 질문, 설명 문장 없이 JSON만 출력하세요.",
+    "- 출력 키: title, sections, hashtags",
+    `- sections는 최소 ${sectionCount}개`,
+    "- sections 각 항목은 '소제목\\n\\n본문' 형태",
+    "- 제목과 소제목에는 이모지 금지",
+    "- 모바일 가독성을 위해 짧은 문장과 자연스러운 줄바꿈 사용",
+    "- 과장/허위 체험 표현 금지",
+    "- 구매 URL은 sections에 직접 쓰지 말고, 시스템이 쇼핑커넥트 컴포넌트로 별도 삽입합니다.",
+    BLOG_HUMANIZE_MOBILE_STYLE ? buildHumanMobileStyleGuide() : "",
+    "- 코드블록 금지",
+    "",
+    "[상품/발행 정보]",
+    buildGuidanceSummary(context),
+    "",
+    "[시스템 지시사항]",
+    systemPrompt,
+    "",
+    "[사용자 요청]",
+    userPrompt,
+  ].join("\n");
+}
+
+async function runDirectChatGPTGeneration(
+  page: Page,
+  systemPrompt: string,
+  userPrompt: string,
+  context: ChatGPTGuidanceContext,
+  minSections: number,
+  label = "Direct"
+): Promise<string> {
+  const prompt = buildDirectBrowserGptPrompt(systemPrompt, userPrompt, context, minSections);
+  let reply = await sendPromptToChatGPT(page, prompt, {
+    label: `${label} 최종`,
+    idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, 180_000),
+    maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, 420_000),
+  });
+
+  if (getStructuredSectionCount(parseJsonObjectFromText(reply)) >= minSections) {
+    return reply;
+  }
+
+  console.log(`      - ${label} 구조화 섹션 부족, 1회 보완 요청을 진행합니다.`);
+  reply = await sendPromptToChatGPT(page, [
+    "방금 답변을 유지하되 JSON만 다시 출력해주세요.",
+    "- 키: title, sections, hashtags",
+    `- sections는 최소 ${minSections}개`,
+    "- 코드블록 금지",
+  ].join("\n"), {
+    label: `${label} 보완`,
+    idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, 120_000),
+    maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, 300_000),
+  });
+
+  return reply;
 }
 
 function buildClarificationReply(assistantReply: string, context: ChatGPTGuidanceContext): string {
@@ -1523,7 +3061,8 @@ function buildClarificationReply(assistantReply: string, context: ChatGPTGuidanc
     lines.push(`- 핵심 키워드: ${fallbackKeywords.join(", ")}`);
   }
   if (/톤|말투|문체/.test(text)) {
-    lines.push("- 톤/말투: 친근한 ~요체, 실사용 중심, 과장 금지");
+    lines.push("- 톤/말투: 부드러운 ~요체, 모바일 블로그처럼 짧고 자연스럽게");
+    lines.push("- AI 티가 나는 반복 표현, 과한 광고 문장, 허위 체험 단정 금지");
   }
   if (/분량|섹션|구성|길이|글자/.test(text)) {
     lines.push(`- 구성: 본문 ${context.targetSectionCount}개 섹션`);
@@ -1542,7 +3081,7 @@ function buildClarificationReply(assistantReply: string, context: ChatGPTGuidanc
     lines.push(`- 평점: ${context.rating || "(평점 미확인)"}`);
   }
   if (/링크|url/.test(text)) {
-    lines.push(`- 구매 링크: ${context.brandLink}`);
+    lines.push(`- 쇼핑커넥트 삽입용 링크(본문 URL 직접 기재 금지): ${context.brandLink}`);
   }
 
   if (lines.length === 1) {
@@ -1636,8 +3175,8 @@ async function waitForDraftStepPrompt(
       `${step.label} 단계 질문을 이어서 진행해주세요. 질문 확인 후 답변하겠습니다.`,
       {
         label: `Draft ${step.label} 질문`,
-        idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, 90_000),
-        maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, 240_000),
+        idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, CHATGPT_DRAFT_STEP_IDLE_TIMEOUT_MS),
+        maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, CHATGPT_DRAFT_STEP_MAX_TIMEOUT_MS),
       }
     );
   }
@@ -1656,7 +3195,8 @@ async function runDraftGptConversation(
   const sectionCount = Math.max(4, Math.min(8, guidanceContext.targetSectionCount));
   const seoKeywordInput = buildSeoKeywordInput(guidanceContext);
   const versionChoice = CHATGPT_FORCE_MOBILE_VERSION ? "2" : "1";
-  const toneResponse = "4번 경험 공유 말투로 진행해주세요.";
+  const toneResponse =
+    "4번 경험 공유 말투로 진행하되, 휴대폰으로 직접 쓰는 블로그처럼 문장을 짧고 부드럽게 다듬어주세요. AI 티가 나는 반복 표현과 과한 광고 문장은 빼주세요.";
   const directSeoTitle = buildDirectSeoTitle(guidanceContext);
 
   const beforeStarterMessages = await readAssistantMessages(page);
@@ -1689,7 +3229,7 @@ async function runDraftGptConversation(
       response: () =>
         [
           `제품명: ${guidanceContext.productName}`,
-          `구매페이지: ${guidanceContext.brandLink}`,
+          `쇼핑커넥트 삽입용 링크(본문 URL 직접 기재 금지): ${guidanceContext.brandLink}`,
         ].join("\n"),
     },
     {
@@ -1760,8 +3300,8 @@ async function runDraftGptConversation(
     console.log(`      - Draft ${step.label} 응답 전송`);
     latestReply = await sendPromptToChatGPT(page, step.response(latestReply), {
       label: `Draft ${step.label}`,
-      idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, 180_000),
-      maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, 420_000),
+      idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, CHATGPT_DRAFT_STEP_IDLE_TIMEOUT_MS),
+      maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, CHATGPT_DRAFT_STEP_MAX_TIMEOUT_MS),
     });
   }
 
@@ -1775,7 +3315,9 @@ async function runDraftGptConversation(
     "- 키: title, sections, hashtags",
     `- sections는 ${sectionCount}개 구성 유지`,
     "- 모바일 버전 규칙 유지",
-    "- 말투는 4번 경험공유형 유지",
+    "- 말투는 부드러운 경험공유형 유지",
+    "- 문장은 25-45자 안팎으로 짧게 끊고 1-2문장마다 줄바꿈",
+    "- AI가 쓴 글처럼 보이는 표현, 반복 어미, 과장 광고 문장 제거",
     "- sections는 소제목 + 본문 구조 유지",
     "- 제목/소제목에 이모지 금지",
     "- 코드블록 금지",
@@ -1841,15 +3383,54 @@ async function runChatGPTBrowserTwoPass(
     const context = contextHandle.context;
     const page = await context.newPage();
 
-    await openChatGPTTarget(page, CHATGPT_DRAFT_GPT_URL, "Draft");
-    const firstDraft = await runDraftGptConversation(
-      page,
-      systemPrompt,
-      userPrompt,
-      guidanceContext,
-      imagePaths,
-      Math.min(6, Math.max(3, guidanceContext.targetSectionCount - 2))
-    );
+    const draftMinSections = Math.min(6, Math.max(3, guidanceContext.targetSectionCount - 2));
+    let firstDraft: string;
+
+    if (CHATGPT_DIRECT_ONLY) {
+      console.log("      - Direct only 모드: 기본 ChatGPT 단일 프롬프트로 생성합니다.");
+      await openChatGPTTarget(page, CHATGPT_BASE_URL, "Direct");
+      await startNewChatIfAvailable(page);
+      await ensureChatGPTReady(page, Math.min(CHATGPT_TIMEOUT_MS, 120000));
+      firstDraft = await runDirectChatGPTGeneration(
+        page,
+        systemPrompt,
+        userPrompt,
+        guidanceContext,
+        draftMinSections,
+        "Direct"
+      );
+    } else {
+      try {
+      await openChatGPTTarget(page, CHATGPT_DRAFT_GPT_URL, "Draft");
+      firstDraft = await runDraftGptConversation(
+        page,
+        systemPrompt,
+        userPrompt,
+        guidanceContext,
+        imagePaths,
+        draftMinSections
+      );
+      } catch (error) {
+        console.log(`      - Draft GPT 다단계 흐름 실패: ${getErrorMessage(error)}`);
+        console.log("      - 기본 ChatGPT 단일 프롬프트 폴백을 시도합니다.");
+        await openChatGPTTarget(page, CHATGPT_BASE_URL, "Direct fallback");
+        await startNewChatIfAvailable(page);
+        await ensureChatGPTReady(page, Math.min(CHATGPT_TIMEOUT_MS, 120000));
+        firstDraft = await runDirectChatGPTGeneration(
+          page,
+          systemPrompt,
+          userPrompt,
+          guidanceContext,
+          draftMinSections,
+          "Direct fallback"
+        );
+      }
+    }
+
+    if (CHATGPT_SKIP_POLISH) {
+      console.log("      - Polish 생략 모드: 초안 결과로 바로 진행합니다.");
+      return firstDraft;
+    }
 
     // 2차 다듬기는 별도 GPT(또는 동일 GPT)로 수행
     if (CHATGPT_POLISH_GPT_URL !== CHATGPT_DRAFT_GPT_URL) {
@@ -1862,7 +3443,9 @@ async function runChatGPTBrowserTwoPass(
       "- sections 소제목에는 이모지 금지",
       "- sections는 소제목 + 본문 구조 유지",
       "- 모바일 버전 가독성(짧은 문장, 잦은 줄바꿈) 유지",
-      "- 말투는 4번 경험공유형 그대로 유지",
+      "- 말투는 부드러운 경험공유형 그대로 유지",
+      "- AI 티가 나는 표현과 과한 광고 문장을 자연스럽게 덜어내기",
+      "- 직접 겪었다는 근거 없는 단정 표현은 상황형 표현으로 바꾸기",
       "- 첨부된 상품 이미지도 참고해 설명을 더 구체화",
       "- JSON(title, sections, hashtags)으로 출력",
       "- 코드블록 금지",
@@ -1908,6 +3491,8 @@ async function runChatGPTBrowserTwoPass(
         "- JSON만 출력",
         "- 키: title, sections, hashtags",
         "- sections는 최소 8개",
+        "- 휴대폰으로 읽기 좋은 짧은 문장과 자연스러운 줄바꿈 유지",
+        "- AI처럼 보이는 표현, 같은 어미 반복, 과장 문장 제거",
         "",
         "[시스템 지시사항]",
         systemPrompt,
@@ -2168,18 +3753,341 @@ function splitSectionCandidates(text: string): string[] {
 }
 
 function buildFallbackSection(title: string, product: ProductInfo): string {
-  const plainTitle = stripSectionPrefix(title) || "사용 후기";
+  const plainTitle = stripSectionPrefix(title) || "구매 전 확인 포인트";
   const priceText = product.price || "가격 정보";
 
   return [
     title,
     "",
-    `${product.name} 기준으로 ${plainTitle} 포인트를 중심으로 정리해봤어요.`,
-    `실제로 확인해보니 핵심 장점이 분명해서 비교가 쉬웠어요.`,
-    `${priceText} 기준으로 봤을 때 구성 대비 만족도가 괜찮았어요.`,
-    `과장 없이 실사용 관점에서 추천할 수 있는 제품이었어요.`,
+    `${product.name} 기준으로 ${plainTitle}를 먼저 정리해봤어요.`,
+    `판매페이지 정보와 상품 이미지를 함께 보면 선택 기준이 더 분명해져요.`,
+    `${priceText} 기준으로 옵션과 구성을 같이 비교해보면 좋아요.`,
+    `구매 전에는 배송, 쿠폰, 후기 조건까지 한 번 더 확인하는 편이 안전해요.`,
     "",
   ].join("\n");
+}
+
+function uniqueLocalProductLines(lines: string[]): string[] {
+  const seen = new Set<string>();
+  return lines
+    .map((line) => normalizeText(line))
+    .filter((line) => {
+      if (!line) return false;
+      const key = line.replace(/[^\p{L}\p{N}]+/gu, "").toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function buildLocalProductSection(title: string, product: ProductInfo, extraLines: string[] = []): string {
+  const categoryKeyword = inferCategoryKeyword(product.name);
+  const sectionLines = buildLocalProductLinesForTitle(title, product, categoryKeyword);
+  const lines = uniqueLocalProductLines(
+    sectionLines.length >= 4 ? sectionLines : [...extraLines, ...sectionLines]
+  ).slice(0, 4);
+  return `${title}\n\n${lines.join("\n")}\n`;
+}
+
+function normalizeSectionTitleKey(title: string): string {
+  return stripSectionPrefix(title)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function isPublishableSectionTitle(title: string): boolean {
+  const normalized = normalizeText(stripSectionPrefix(title));
+  if (!normalized || normalized.length > 45) return false;
+  return !/(?:작성\s*(?:규칙|지침|가이드|프로세스)|프롬프트|출력\s*형식|json|브리프|리서치\s*팩|워크플로우|opencrab|오픈크랩|해시태그)/iu.test(
+    normalized
+  );
+}
+
+function buildLocalProductLinesForTitle(
+  title: string,
+  product: ProductInfo,
+  categoryKeyword: string
+): string[] {
+  const normalized = normalizeSectionTitleKey(title);
+  const productNameForMatch = normalizePromptForStepMatch(product.name);
+  const isSeatCushion = /꼬리뼈|치질|자세교정|방석|쿠션|의자/.test(productNameForMatch);
+  const isCoolerBag = /보냉백|쿨러백|아이스박스|소프트쿨러|캠핑|피크닉/.test(productNameForMatch);
+  const isPortableCare = /드라이기|선풍기|휴대|여행|외출|캠핑|피크닉/.test(productNameForMatch);
+  const featureText = product.features.slice(0, 2).join(", ");
+  const priceText = product.price || "판매가";
+  const deliveryText = product.deliveryInfo || "배송 조건";
+  const couponText = product.couponInfo || "쿠폰/혜택";
+  const reviewText = product.reviewCount || product.rating
+    ? [product.reviewCount ? `리뷰 ${product.reviewCount}` : "", product.rating ? `평점 ${product.rating}` : ""]
+        .filter(Boolean)
+        .join(", ")
+    : "";
+  const categoryLabel =
+    categoryKeyword && categoryKeyword !== "제품리뷰" ? `${categoryKeyword} 제품` : "비슷한 상품";
+
+  if (/사용|장면|활용|공간/.test(normalized)) {
+    if (isSeatCushion) {
+      return [
+        `${product.name}은 오래 앉아 있는 책상, 사무실 의자, 차량 시트처럼 실제 앉는 자리에 맞는지 보는 게 중요해요.`,
+        "방석류는 좌판 크기, 두께, 커버 소재, 미끄럼 방지 여부가 체감에 영향을 줄 수 있어요.",
+        "의자 위에 올렸을 때 높이가 너무 올라가지는 않는지, 허벅지와 등받이 위치가 어색하지 않은지도 확인해보세요.",
+        deliveryText ? `${deliveryText}도 사용하려는 날짜와 맞물려 확인해두면 좋아요.` : "사용하려는 날짜가 정해져 있다면 배송 일정까지 함께 확인해두면 좋아요.",
+      ];
+    }
+
+    if (isCoolerBag) {
+      return [
+        `${product.name}은 캠핑, 피크닉, 장보기처럼 어떤 상황에 들고 갈지에 따라 보는 포인트가 달라져요.`,
+        "보냉백류는 용량, 손잡이, 어깨끈, 접었을 때 보관 방식이 실제 사용감에 영향을 줘요.",
+        "음료나 식재료를 어느 정도 넣을지 미리 정해두면 크기 선택이 쉬워져요.",
+        deliveryText ? `${deliveryText}도 사용 예정일과 맞는지 같이 확인해두면 좋아요.` : "야외 일정이 있다면 배송 가능일을 먼저 확인하는 편이 좋아요.",
+      ];
+    }
+
+    if (!isPortableCare) {
+      return [
+        `${product.name}은 실제로 놓고 쓸 자리와 사용 빈도를 먼저 정해두면 비교가 쉬워져요.`,
+        `${categoryLabel}은 크기, 소재, 관리 방식이 생활 공간과 맞는지 확인하는 게 좋아요.`,
+        deliveryText ? `${deliveryText}도 사용하려는 날짜와 맞물려 확인해두면 좋아요.` : "사용 일정이 정해져 있다면 배송 일정까지 함께 확인해두면 좋아요.",
+        "제품 사진에서는 실제 배치했을 때의 크기감과 주변 공간을 중심으로 살펴보면 좋아요.",
+      ];
+    }
+
+    return [
+      `${product.name}은 집에서 두고 쓸지, 여행이나 외출 때 챙길지에 따라 보는 포인트가 달라져요.`,
+      `${categoryLabel}은 크기와 보관 방식이 생활 동선에 맞는지 먼저 보면 좋아요.`,
+      deliveryText ? `${deliveryText}도 사용 예정일과 맞물려 확인해두면 선택이 더 편해요.` : "당장 필요한 제품이라면 배송 일정까지 같이 확인해두는 편이 좋아요.",
+      "제품 사진의 사용 장면을 보면 실제로 어느 정도 공간을 차지할지 감이 잡혀요.",
+    ];
+  }
+
+  if (/구성|패키지|옵션|세트/.test(normalized)) {
+    return [
+      "옵션마다 구성품이나 색상, 수량이 달라질 수 있어서 구매 전 확인이 필요해요.",
+      "대표 이미지와 상세 설명의 구성 안내가 서로 맞는지도 같이 보면 좋아요.",
+      couponText ? `${couponText} 조건이 붙어 있다면 같은 옵션도 최종 금액이 달라질 수 있어요.` : "옵션명이 비슷해도 포함 구성은 다를 수 있어서 마지막 화면까지 보는 게 안전해요.",
+      `${priceText} 기준으로 구성 차이를 같이 보면 단순 가격 비교보다 판단이 쉬워져요.`,
+    ];
+  }
+
+  if (/디자인|첫인상|외관|색상/.test(normalized)) {
+    return [
+      "디자인은 상품 이미지에서 보이는 색상과 형태를 기준으로 차분히 보는 게 좋아요.",
+      "책상, 거실, 차량처럼 놓을 공간과 어울리는지도 함께 확인하면 선택이 쉬워져요.",
+      `${product.name}은 제품 사진에서 보이는 비율과 마감 느낌을 먼저 살펴보면 좋아요.`,
+      "색상은 화면 환경에 따라 조금 달라 보일 수 있으니 옵션명도 같이 확인해두세요.",
+    ];
+  }
+
+  if (/크기|스펙|무게|사이즈|용량/.test(normalized)) {
+    if (isSeatCushion) {
+      return [
+        "방석은 의자 좌판보다 너무 크거나 작으면 앉았을 때 안정감이 떨어질 수 있어요.",
+        "두께가 있는 제품은 착석 높이가 달라질 수 있어서 책상 높이와도 같이 보는 게 좋아요.",
+        `${product.name}은 커버 소재와 관리 방식도 실제 사용 만족도에 영향을 줄 수 있어요.`,
+        "사무실 의자, 식탁 의자, 차량 시트 중 어디에 둘지 먼저 정하면 사이즈 판단이 쉬워져요.",
+      ];
+    }
+
+    return [
+      "스펙은 숫자만 보기보다 실제 놓을 공간과 사용 장면에 맞춰 보는 게 좋아요.",
+      "무게, 길이, 용량처럼 체감에 영향을 주는 항목은 상세페이지에서 다시 확인해두면 좋아요.",
+      isPortableCare
+        ? `${product.name}을 자주 옮겨 쓸 예정이라면 크기와 무게가 특히 중요해져요.`
+        : `${product.name}은 설치하거나 둘 공간의 여유까지 함께 보는 게 좋아요.`,
+      "보관 공간이 정해져 있다면 제품 치수와 함께 충전기나 부속품 공간도 같이 생각해보면 좋아요.",
+    ];
+  }
+
+  if (/기능|성능|효과|바람|냉각|전력/.test(normalized)) {
+    return [
+      featureText ? `${featureText}처럼 표시된 기능은 필요한 사용 목적과 맞는지 비교해보면 좋아요.` : `${product.name}의 기능 설명은 실제로 자주 쓸 항목부터 확인하는 게 좋아요.`,
+      "필요한 기능이 옵션별로 다른지 확인하면 불필요한 선택 실수를 줄일 수 있어요.",
+      "성능 표현은 과장 문구보다 작동 방식, 단계 조절, 전원 방식처럼 확인 가능한 항목 위주로 보는 게 안전해요.",
+      `${priceText}대에서 기대하는 기능 범위를 정해두면 비슷한 상품과 비교하기 쉬워요.`,
+    ];
+  }
+
+  if (/장점/.test(normalized) && /아쉬/.test(normalized)) {
+    return [
+      `${product.name}의 장점은 가격, 구성, 사용 목적이 맞을 때 더 분명하게 보이는 편이에요.`,
+      `반대로 ${deliveryText}, 옵션 차이, 구성품 누락 여부는 구매 전에 한 번 더 확인할 부분이에요.`,
+      reviewText ? `${reviewText}가 확인된다면 반복해서 언급되는 내용 위주로 참고하면 좋아요.` : "후기 정보는 한두 문장보다 반복되는 의견을 중심으로 보는 편이 좋아요.",
+      `${couponText} 조건이 있다면 최종 결제 단계에서 실제 적용 여부를 확인해두세요.`,
+    ];
+  }
+
+  if (/장점|좋은|강점/.test(normalized)) {
+    return [
+      `${product.name}은 상품 정보 기준으로 비교 포인트가 비교적 분명한 편이에요.`,
+      `${priceText}, 구성, 후기 조건을 같이 보면 장점이 더 잘 보일 수 있어요.`,
+      featureText ? `${featureText} 항목이 필요했던 기능과 맞는지도 함께 보면 좋아요.` : "필요한 기능이 뚜렷한 분일수록 장점과 불필요한 기능이 쉽게 구분돼요.",
+      "같은 가격대 상품과 비교할 때는 구성과 배송 조건을 같이 놓고 보는 편이 현실적이에요.",
+    ];
+  }
+
+  if (/아쉬|주의|단점|확인/.test(normalized)) {
+    return [
+      `구매 전에는 ${deliveryText}, ${couponText}, 옵션 조건처럼 달라질 수 있는 부분을 확인하는 게 좋아요.`,
+      "상세 조건은 바뀔 수 있으니 최종 결제 화면에서 한 번 더 보는 편이 안전해요.",
+      `${product.name}은 상품명은 같아 보여도 색상이나 구성 옵션이 나뉠 수 있어요.`,
+      "가격만 보고 고르기보다 필요한 구성인지, 교환/반품 조건은 어떤지도 함께 보면 좋아요.",
+    ];
+  }
+
+  if (/추천|맞아|대상|누구/.test(normalized)) {
+    if (isSeatCushion) {
+      return [
+        `오래 앉아 일하거나 좌석 쿠션감을 보완하고 싶은 분이라면 ${product.name}을 후보로 볼 만해요.`,
+        "사무실 의자, 공부방 의자, 차량 시트처럼 앉는 시간이 긴 자리에서 쓸 제품을 찾는 분께 잘 맞아요.",
+        "다만 체형과 의자 높이에 따라 체감이 달라질 수 있어 사이즈와 두께는 꼭 확인하는 게 좋아요.",
+        "커버 세탁이나 관리 방식까지 같이 보면 매일 쓰기 편한지 판단하기 쉬워요.",
+      ];
+    }
+
+    return [
+      `${categoryLabel}을 비교 중인 분이라면 ${product.name}을 후보로 살펴볼 만해요.`,
+      "가격, 구성, 후기 기준을 한 번에 정리하고 싶은 분께 참고용으로 보기 좋아요.",
+      "사용 일정이 정해져 있는 경우에는 배송 가능일을 먼저 보는 편이 좋아요.",
+      "이미 필요한 기능이 정해진 분이라면 옵션 차이만 좁혀서 확인해도 충분해요.",
+    ];
+  }
+
+  return [
+    `${product.name}을 볼 때는 상품명, 옵션, 가격대를 함께 확인하는 게 먼저예요.`,
+    "상세페이지에 적힌 정보와 대표 이미지를 같이 보면 제품 성격이 더 잘 보여요.",
+    `${priceText} 기준으로 필요한 구성인지 확인하면 비교 기준이 더 분명해져요.`,
+    couponText ? `${couponText}까지 반영하면 실제 구매 조건이 달라질 수 있어요.` : "할인이나 배송 조건은 시점에 따라 바뀔 수 있어 마지막에 다시 확인해보세요.",
+  ];
+}
+
+function buildLocalProductPostJson(
+  product: ProductInfo,
+  targetSectionCount: number,
+  openCrabSeoBrief?: OpenCrabSeoBrief | null
+): string {
+  const categoryKeyword = inferCategoryKeyword(product.name);
+  const categoryLabel =
+    categoryKeyword && categoryKeyword !== "제품리뷰" ? `${categoryKeyword} 제품` : "비슷한 상품";
+  const title = buildLocalProductTitle(product, openCrabSeoBrief);
+  const sectionSeeds = [
+    {
+      title: "구매 전 확인 포인트",
+      lines: [
+        `${product.name}을 볼 때는 상품명, 옵션, 가격대를 함께 확인하는 게 먼저예요.`,
+        "상세페이지에 적힌 정보와 대표 이미지를 같이 보면 제품 성격이 더 잘 보여요.",
+        `${product.price || "판매가"} 기준으로 필요한 구성인지 확인하면 비교 기준이 더 분명해져요.`,
+        "배송과 할인 조건은 시점에 따라 달라질 수 있어 마지막 화면에서 다시 보는 편이 좋아요.",
+      ],
+    },
+    {
+      title: "구성 및 패키지 확인",
+      lines: [
+        "구성품은 옵션에 따라 달라질 수 있어서 구매 전 확인이 필요해요.",
+        "대표 이미지와 상세 설명의 구성 안내가 서로 맞는지도 보면 좋아요.",
+        "옵션명이 비슷해도 포함 수량이나 색상 구성이 다를 수 있어요.",
+        `${product.price || "판매가"} 기준으로 구성 차이를 같이 보면 단순 가격 비교보다 판단이 쉬워져요.`,
+      ],
+    },
+    {
+      title: "첫인상 / 디자인",
+      lines: [
+        "디자인은 상품 이미지에서 보이는 색상과 형태를 중심으로 보는 게 안전해요.",
+        "사용 공간에 어울리는 크기인지도 함께 확인하면 좋아요.",
+        `${product.name}은 제품 사진에서 보이는 비율과 마감 느낌을 먼저 살펴보면 좋아요.`,
+        "색상은 화면 환경에 따라 조금 달라 보일 수 있으니 옵션명도 같이 확인해두세요.",
+      ],
+    },
+    {
+      title: "크기 & 스펙 정보",
+      lines: [
+        "스펙은 숫자만 보기보다 실제 놓을 공간과 사용 장면에 맞춰 보는 게 좋아요.",
+        "무게, 길이, 용량처럼 체감에 영향을 주는 항목은 다시 확인해두면 좋아요.",
+        `${product.name}을 자주 옮겨 쓸 예정이라면 크기와 무게가 특히 중요해져요.`,
+        "보관 공간이 정해져 있다면 부속품까지 같이 둘 수 있는지도 생각해보면 좋아요.",
+      ],
+    },
+    {
+      title: "주요 기능 ①",
+      lines: [
+        "주요 기능은 상세페이지에 표시된 설명을 기준으로 정리하는 게 좋아요.",
+        "필요한 기능이 옵션별로 다른지 확인하면 선택 실수를 줄일 수 있어요.",
+        "성능 표현은 작동 방식, 단계 조절, 전원 방식처럼 확인 가능한 항목 위주로 보는 게 안전해요.",
+        `${product.price || "판매가"}대에서 기대하는 기능 범위를 정해두면 비슷한 상품과 비교하기 쉬워요.`,
+      ],
+    },
+    {
+      title: "주요 기능 ②",
+      lines: [
+        "부가 기능은 실제로 자주 쓸 기능인지 따져보는 게 좋아요.",
+        "가격 차이가 있다면 꼭 필요한 기능인지 비교해보면 판단이 쉬워져요.",
+        "기능이 많아도 자주 쓰는 항목이 아니라면 체감 만족도는 낮을 수 있어요.",
+        "옵션별 기능 차이가 있다면 상세 이미지와 옵션명을 같이 맞춰보는 편이 좋아요.",
+      ],
+    },
+    {
+      title: "장점으로 보이는 부분",
+      lines: [
+        `${product.name}은 상품 정보 기준으로 비교 포인트가 비교적 분명한 편이에요.`,
+        "가격, 구성, 후기 조건을 같이 보면 장점이 더 잘 보일 수 있어요.",
+        "필요한 기능이 뚜렷한 분일수록 장점과 불필요한 기능이 쉽게 구분돼요.",
+        "같은 가격대 상품과 비교할 때는 구성과 배송 조건을 같이 놓고 보는 편이 현실적이에요.",
+      ],
+    },
+    {
+      title: "확인하면 좋을 아쉬운 점",
+      lines: [
+        "아쉬운 점은 옵션, 배송, 쿠폰 조건처럼 구매 전에 달라질 수 있는 부분이에요.",
+        "상세 조건이 바뀔 수 있으니 최종 화면에서 한 번 더 확인하는 게 좋아요.",
+        `${product.name}은 상품명은 같아 보여도 색상이나 구성 옵션이 나뉠 수 있어요.`,
+        "가격만 보고 고르기보다 교환/반품 조건도 함께 보면 좋아요.",
+      ],
+    },
+    {
+      title: "이런 분께 잘 맞아요",
+      lines: [
+        `${categoryLabel}을 비교 중인 분이라면 ${product.name}을 후보로 살펴볼 만해요.`,
+        "구매 전 기준을 정리하고 싶은 분께 참고용으로 보기 좋아요.",
+        "사용 일정이 정해져 있는 경우에는 배송 가능일을 먼저 보는 편이 좋아요.",
+        "이미 필요한 기능이 정해진 분이라면 옵션 차이만 좁혀서 확인해도 충분해요.",
+      ],
+    },
+  ];
+
+  const seedByKey = new Map(sectionSeeds.map((seed) => [normalizeSectionTitleKey(seed.title), seed]));
+  const selectedSeeds = (openCrabSeoBrief?.recommendedSectionTitles || [])
+    .map((sectionTitle) => stripSectionPrefix(sectionTitle))
+    .filter(isPublishableSectionTitle)
+    .map((sectionTitle) => {
+      const existingSeed = seedByKey.get(normalizeSectionTitleKey(sectionTitle));
+      return {
+        title: sectionTitle,
+        lines:
+          existingSeed?.lines ||
+          buildLocalProductLinesForTitle(sectionTitle, product, categoryKeyword),
+      };
+    });
+
+  for (const seed of sectionSeeds) {
+    if (selectedSeeds.length >= targetSectionCount) break;
+    const alreadySelected = selectedSeeds.some(
+      (selectedSeed) => normalizeSectionTitleKey(selectedSeed.title) === normalizeSectionTitleKey(seed.title)
+    );
+    if (!alreadySelected) selectedSeeds.push(seed);
+  }
+
+  const safeSelectedSeeds = selectedSeeds.length > 0 ? selectedSeeds : sectionSeeds;
+  const sections = safeSelectedSeeds
+    .slice(0, Math.max(4, Math.min(safeSelectedSeeds.length, targetSectionCount)))
+    .map((seed) => buildLocalProductSection(seed.title, product, seed.lines));
+  const hashtags = normalizeHashtags([], product, openCrabSeoBrief);
+
+  return JSON.stringify({
+    title,
+    sections,
+    hashtags,
+    openCrabSeoBrief,
+  });
 }
 
 function normalizeSectionText(raw: string, fallbackTitle: string, product: ProductInfo): string {
@@ -2199,14 +4107,15 @@ function normalizeSectionText(raw: string, fallbackTitle: string, product: Produ
     title = fallbackTitle;
   }
 
-  let bodyLines = allLines.slice(1);
+  let bodyLines = allLines.slice(1).filter((line) => !isInstructionLeakLine(line));
 
   if (bodyLines.length === 0) {
     const sentenceParts = normalized
       .replace(title, "")
       .split(/(?<=[.!?])\s+|\n+/)
       .map((part) => part.trim())
-      .filter((part) => part.length > 0);
+      .filter((part) => part.length > 0)
+      .filter((part) => !isInstructionLeakLine(part));
     bodyLines = sentenceParts;
   }
 
@@ -2250,7 +4159,11 @@ function normalizeSections(rawSections: unknown, targetCount: number, product: P
   return normalized.slice(0, targetCount);
 }
 
-function normalizeHashtags(rawHashtags: unknown, product: ProductInfo): string[] {
+function normalizeHashtags(
+  rawHashtags: unknown,
+  product: ProductInfo,
+  openCrabSeoBrief?: OpenCrabSeoBrief | null
+): string[] {
   const fromModel = Array.isArray(rawHashtags)
     ? rawHashtags.filter((item): item is string => typeof item === "string")
     : [];
@@ -2266,15 +4179,129 @@ function normalizeHashtags(rawHashtags: unknown, product: ProductInfo): string[]
     .filter((token) => token.length >= 2)
     .slice(0, 4);
 
-  const merged = [...normalized, ...productSeed, ...DEFAULT_HASHTAGS];
+  const openCrabTags = openCrabSeoBrief?.hashtags || [];
+  const merged = [...normalized, ...openCrabTags, ...productSeed, ...DEFAULT_HASHTAGS];
   const deduped = Array.from(new Set(merged)).slice(0, 20);
   return deduped;
+}
+
+function removeLocalPolishMeta(text: string): string {
+  return text
+    .replace(/(?:이번|이)\s*글(?:에서는|은|을)?[^.!?\n]*(?:구성|정리|소개|다루|담아)[^.!?\n]*[.!?]?/gi, "")
+    .replace(/(?:아래|다음)\s*(?:내용|초안|글)[^.!?\n]*(?:재구성|정리|윤문|배치)[^.!?\n]*[.!?]?/gi, "")
+    .replace(/(?:SEO|블로그)\s*(?:최적화|용도)[^.!?\n]*(?:작성|구성|정리)[^.!?\n]*[.!?]?/gi, "")
+    .replace(/(?:제가|저도|직접)\s*(?:써|사용해|받아|구매해|비교해)\s*보니/gi, "정보를 기준으로 보면")
+    .replace(/(?:제가|저도)\s*여러\s*정보를\s*비교해\s*보니[^.!?\n]*[.!?]?/gi, "여러 정보를 비교해 보면 선택 기준을 세우기 좋겠어요.")
+    .replace(/(?:써|사용해|받아|구매해)\s*봤(?:더니|는데|어요|습니다)/gi, "정보를 확인해 보면")
+    .replace(/구조화(?:했|하였)습니다\.?/gi, "")
+    .replace(/재구성(?:했|하였)습니다\.?/gi, "")
+    .replace(/작성(?:했|하였)습니다\.?/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isInstructionLeakLine(line: string): boolean {
+  const normalized = normalizeText(stripEmoji(line));
+  return /(?:opencrab|오픈크랩|상위\s*(?:노출|리서치)|리서치\s*팩|브리프|워크플로우|프롬프트|출력\s*형식|내부\s*SEO|내부\s*참고|작성\s*(?:규칙|지침))/iu.test(
+    normalized
+  );
+}
+
+function splitMobileSentences(text: string): string[] {
+  const normalized = removeLocalPolishMeta(text)
+    .replace(/\s*([.!?])\s+/g, "$1\n")
+    .replace(/\s*(。|！|？)\s*/g, "$1\n")
+    .trim();
+
+  if (!normalized) return [];
+
+  return normalized
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => !isInstructionLeakLine(line));
+}
+
+function splitLongMobileLine(line: string): string[] {
+  if (line.length <= 58) return [line];
+
+  const chunks = line
+    .split(/(?<=[,，])\s+|\s+(?=그리고|그래서|다만|특히|또|가격|구성|제품|사용|배송|리뷰)/g)
+    .map((chunk) => chunk.trim())
+    .filter((chunk) => chunk.length > 0);
+
+  if (chunks.length <= 1) return [line];
+
+  const lines: string[] = [];
+  let current = "";
+  for (const chunk of chunks) {
+    const next = current ? `${current} ${chunk}` : chunk;
+    if (next.length > 58 && current) {
+      lines.push(current);
+      current = chunk;
+    } else {
+      current = next;
+    }
+  }
+  if (current) lines.push(current);
+
+  return lines;
+}
+
+function dedupeAdjacentLines(lines: string[]): string[] {
+  const result: string[] = [];
+  for (const line of lines) {
+    const normalized = line.replace(/\s+/g, " ").trim();
+    if (!normalized) continue;
+    if (result[result.length - 1] === normalized) continue;
+    result.push(normalized);
+  }
+  return result;
+}
+
+function buildMobilePolishLines(text: string): string[] {
+  const sentenceLines = splitMobileSentences(text);
+  const mobileLines = sentenceLines.flatMap(splitLongMobileLine);
+  return dedupeAdjacentLines(mobileLines);
+}
+
+function applyHumanMobilePolishToSection(section: string, index: number, product: ProductInfo): string {
+  const lines = section
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  let title = stripSectionPrefix(lines[0] || DEFAULT_SECTION_TITLES[index % DEFAULT_SECTION_TITLES.length]);
+  if (!title || title.length > 60) {
+    title = DEFAULT_SECTION_TITLES[index % DEFAULT_SECTION_TITLES.length];
+  }
+
+  const sourceBodyLines = lines.slice(1);
+  let polishedBodyLines = buildMobilePolishLines(sourceBodyLines.join(" "));
+
+  if (polishedBodyLines.length < 4) {
+    const fallbackLines = buildFallbackSection(title, product)
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .slice(1);
+    polishedBodyLines = dedupeAdjacentLines([...polishedBodyLines, ...fallbackLines]);
+  }
+
+  return `${title}\n\n${polishedBodyLines.slice(0, 6).join("\n")}\n`;
+}
+
+function applyHumanMobilePolishToDisclosure(section: string): string {
+  const polishedLines = buildMobilePolishLines(section).slice(0, 4);
+  return `\n${polishedLines.join("\n")}\n`;
 }
 
 function saveGeneratedPostPreview(
   linkId: string,
   post: GeneratedPostPreview,
-  product: ProductInfo
+  product: ProductInfo,
+  readiness?: BrandLinkContentReadiness | null
 ): string {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const filename = `${timestamp}-${linkId}.json`;
@@ -2285,13 +4312,22 @@ function saveGeneratedPostPreview(
     linkId,
     aiProvider: AI_PROVIDER,
     browserGptMode: BROWSER_GPT_MODE,
-    chatgptDraftUrl: CHATGPT_DRAFT_GPT_URL,
-    chatgptPolishUrl: CHATGPT_POLISH_GPT_URL,
+    chatgptUseCustomGpts: CHATGPT_USE_CUSTOM_GPTS,
+    chatgptDirectOnly: CHATGPT_DIRECT_ONLY,
+    chatgptBaseUrl: CHATGPT_BASE_URL,
+    chatgptDraftUrl: CHATGPT_USE_CUSTOM_GPTS ? CHATGPT_DRAFT_GPT_URL : undefined,
+    chatgptPolishUrl: CHATGPT_USE_CUSTOM_GPTS ? CHATGPT_POLISH_GPT_URL : undefined,
+    humanMobilePolishEnabled: HUMAN_MOBILE_POLISH_ENABLED,
     productName: product.name,
     productPrice: product.price,
+    representativeImagePath: product.representativeImagePath,
+    firstImagePath: product.imagePaths[0] || null,
+    imagePaths: product.imagePaths,
     title: post.title,
     sectionCount: post.sections.length,
     hashtagCount: post.hashtags.length,
+    openCrabSeoBrief: post.openCrabSeoBrief ?? null,
+    contentReadiness: readiness ?? null,
     sections: post.sections,
     hashtags: post.hashtags,
     rawResponse: post.rawResponse ?? "",
@@ -2315,7 +4351,7 @@ interface ProductInfo {
   deliveryInfo: string;       // 배송 정보 (무료배송 등)
   reviewCount: string;        // 리뷰 수
   rating: string;             // 평점
-  representativeImagePath: string | null; // 대표 이미지(og:image 우선)
+  representativeImagePath: string | null; // 썸네일용 판매페이지 대표 이미지
   imagePaths: string[];
   sourceImageUrls: string[];
   finalUrl?: string | null;
@@ -2353,16 +4389,138 @@ function parseStoredBrandLinkImageUrls(raw: string | null | undefined): string[]
   }
 }
 
+async function collectProductImageUrlsFromPage(page: Page): Promise<string[]> {
+  const candidates: ProductImageCandidate[] = [];
+
+  const ogImage = await page.getAttribute('meta[property="og:image"]', "content").catch(() => null);
+  if (ogImage && isCandidateProductImageUrl(ogImage)) {
+    candidates.push({
+      url: ogImage,
+      source: "og",
+      index: 0,
+    });
+  }
+
+  const domCandidates = await page
+    .evaluate(() => {
+      const toText = (value: unknown): string =>
+        typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+      const urlsFromSrcset = (srcset: string | null): string[] => {
+        if (!srcset) return [];
+        return srcset
+          .split(",")
+          .map((part) => part.trim().split(/\s+/)[0])
+          .filter(Boolean);
+      };
+
+      return Array.from(document.images).flatMap((img, index) => {
+        const rect = img.getBoundingClientRect();
+        const parent = img.closest(
+          '[class*="image" i], [class*="thumb" i], [class*="gallery" i], [class*="viewer" i], [class*="product" i], [class*="detail" i], [class*="review" i]'
+        ) as HTMLElement | null;
+        const rawUrls = [
+          img.currentSrc,
+          img.getAttribute("data-src"),
+          img.getAttribute("data-original"),
+          img.getAttribute("data-lazy-src"),
+          img.getAttribute("src"),
+          ...urlsFromSrcset(img.getAttribute("srcset")),
+        ].filter((url): url is string => Boolean(url));
+
+        return Array.from(new Set(rawUrls)).map((url) => ({
+          url,
+          index,
+          width: Math.max(img.naturalWidth || 0, Math.round(rect.width || 0)),
+          height: Math.max(img.naturalHeight || 0, Math.round(rect.height || 0)),
+          top: Math.round(rect.top + window.scrollY),
+          alt: toText(img.getAttribute("alt")),
+          className: toText(img.className),
+          parentClassName: toText(parent?.className),
+        }));
+      });
+    })
+    .catch(() => [] as ProductImageCandidate[]);
+
+  for (const candidate of domCandidates) {
+    if (!isCandidateProductImageUrl(candidate.url)) continue;
+    const isGalleryLike =
+      isSalesPageProductImageUrl(candidate.url) &&
+      !isReviewImageUrl(candidate.url) &&
+      /image|thumb|gallery|viewer|product|상품|prd/i.test(
+        `${candidate.className || ""} ${candidate.parentClassName || ""} ${candidate.alt || ""}`
+      );
+    candidates.push({
+      ...candidate,
+      source: isGalleryLike ? "gallery" : "dom",
+    });
+  }
+
+  return prioritizeImageCandidates(candidates);
+}
+
+function isTallDetailImageDimension(width: number, height: number): boolean {
+  if (width < 600 || height < 900) return false;
+  const ratio = height / width;
+  return ratio >= 1.35 && ratio <= 6.5;
+}
+
+async function createDetailImageCrop(
+  imagePath: string,
+  filePrefix: string,
+  index: number,
+  width: number,
+  height: number
+): Promise<{ path: string; width: number; height: number; size: number } | null> {
+  if (!isTallDetailImageDimension(width, height)) return null;
+
+  const cropSize = Math.min(width, height);
+  const cropTop = Math.min(
+    height - cropSize,
+    Math.max(0, Math.round((height - cropSize) * 0.56))
+  );
+  const cropPath = path.join(TEMP_PATH, `${filePrefix}_detail_crop_${Date.now()}_${index}.jpg`);
+
+  try {
+    await sharp(imagePath)
+      .rotate()
+      .extract({ left: 0, top: cropTop, width: cropSize, height: cropSize })
+      .resize(1080, 1080, {
+        fit: "cover",
+        position: "centre",
+      })
+      .jpeg({ quality: 95, mozjpeg: true })
+      .toFile(cropPath);
+
+    const metadata = await sharp(cropPath).metadata();
+    const stats = fs.statSync(cropPath);
+    return {
+      path: cropPath,
+      width: metadata.width ?? 1080,
+      height: metadata.height ?? 1080,
+      size: stats.size,
+    };
+  } catch {
+    try { fs.unlinkSync(cropPath); } catch {}
+    return null;
+  }
+}
+
 async function materializeProductImages(
   imageUrls: string[],
   filePrefix: string
 ): Promise<{ representativeImagePath: string | null; imagePaths: string[] }> {
   const prioritizedUrls = prioritizeImageUrls(Array.from(new Set(imageUrls))).slice(0, 15);
-  const representativeImageUrl = prioritizedUrls[0] || null;
-  const downloaded: { path: string; url: string; size: number }[] = [];
+  const downloaded: {
+    path: string;
+    url: string;
+    size: number;
+    index: number;
+    width: number;
+    height: number;
+    detailCrop?: boolean;
+  }[] = [];
   const downloadCount = Math.min(10, prioritizedUrls.length);
   let representativeImagePath: string | null = null;
-  let firstValidImagePath: string | null = null;
 
   for (let i = 0; i < downloadCount; i++) {
     try {
@@ -2376,11 +4534,36 @@ async function materializeProductImages(
         continue;
       }
 
-      downloaded.push({ path: imgPath, url: prioritizedUrls[i], size: stats.size });
-      if (!firstValidImagePath) {
-        firstValidImagePath = imgPath;
+      const metadata = await sharp(imgPath).metadata();
+      const width = metadata.width ?? 0;
+      const height = metadata.height ?? 0;
+      if (!isUsableBlogProductImageDimension(width, height)) {
+        const detailCrop = await createDetailImageCrop(imgPath, filePrefix, i, width, height);
+        if (detailCrop) {
+          downloaded.push({
+            path: detailCrop.path,
+            url: prioritizedUrls[i],
+            size: detailCrop.size,
+            index: i,
+            width: detailCrop.width,
+            height: detailCrop.height,
+            detailCrop: true,
+          });
+          try { fs.unlinkSync(imgPath); } catch {}
+          console.log(`   ✅ 이미지 ${i + 1}/${downloadCount} 상세 크롭 생성`);
+          continue;
+        }
+        try { fs.unlinkSync(imgPath); } catch {}
+        console.log(`   ⚠️ 이미지 제외(상세/배너 비율 ${width}x${height}) ${i + 1}`);
+        continue;
       }
-      if (!representativeImagePath && representativeImageUrl && prioritizedUrls[i] === representativeImageUrl) {
+
+      downloaded.push({ path: imgPath, url: prioritizedUrls[i], size: stats.size, index: i, width, height });
+      if (
+        !representativeImagePath &&
+        isPreferredThumbnailImageUrl(prioritizedUrls[i]) &&
+        isRepresentativeProductImageDimension(width, height)
+      ) {
         representativeImagePath = imgPath;
       }
       console.log(`   ✅ 이미지 ${i + 1}/${downloadCount} 다운로드`);
@@ -2389,17 +4572,27 @@ async function materializeProductImages(
     }
   }
 
-  if (!representativeImagePath) {
-    representativeImagePath = firstValidImagePath;
-  }
-
   downloaded.sort((a, b) => {
-    const aPenalty = containsBadImageKeyword(a.url) ? -150_000 : 0;
-    const bPenalty = containsBadImageKeyword(b.url) ? -150_000 : 0;
-    const aScore = a.size + aPenalty;
-    const bScore = b.size + bPenalty;
+    const aScore =
+      scoreProductImageCandidate({ url: a.url, source: "stored", index: a.index }) +
+      Math.min(80, a.size / 40_000) +
+      scoreProductImageDimensions(a.width, a.height) +
+      (a.detailCrop ? 360 : 0);
+    const bScore =
+      scoreProductImageCandidate({ url: b.url, source: "stored", index: b.index }) +
+      Math.min(80, b.size / 40_000) +
+      scoreProductImageDimensions(b.width, b.height) +
+      (b.detailCrop ? 360 : 0);
     return bScore - aScore;
   });
+
+  representativeImagePath =
+    downloaded.find((item) => isRepresentativeProductImageDimension(item.width, item.height))?.path ||
+    representativeImagePath;
+
+  if (!representativeImagePath) {
+    console.log("   ⚠️ 판매페이지 대표 상품 이미지를 확정하지 못해 썸네일용 대표 이미지는 비워둡니다.");
+  }
 
   const sortedPaths = downloaded.map((item) => item.path);
   const imagePaths = Array.from(
@@ -2450,6 +4643,14 @@ async function buildProductInfoFromStoredBrandLink(link: StoredBrandLinkSeed): P
 
 function mergeProductInfo(base: ProductInfo | null, live: ProductInfo): ProductInfo {
   if (!base) return live;
+  const representativeImagePath = live.representativeImagePath || base.representativeImagePath;
+  const imagePaths = Array.from(
+    new Set([
+      ...(representativeImagePath ? [representativeImagePath] : []),
+      ...(base.imagePaths || []),
+      ...(live.imagePaths || []),
+    ])
+  );
 
   return {
     name: live.name || base.name,
@@ -2462,8 +4663,8 @@ function mergeProductInfo(base: ProductInfo | null, live: ProductInfo): ProductI
     deliveryInfo: live.deliveryInfo || base.deliveryInfo,
     reviewCount: live.reviewCount || base.reviewCount,
     rating: live.rating || base.rating,
-    representativeImagePath: live.representativeImagePath || base.representativeImagePath,
-    imagePaths: Array.from(new Set([...(base.imagePaths || []), ...(live.imagePaths || [])])),
+    representativeImagePath,
+    imagePaths,
     sourceImageUrls: Array.from(new Set([...(base.sourceImageUrls || []), ...(live.sourceImageUrls || [])])),
     finalUrl: live.finalUrl || base.finalUrl || null,
     storeName: live.storeName || base.storeName || null,
@@ -2692,25 +4893,16 @@ async function step1_getProductInfo(page: Page, url: string): Promise<ProductInf
   
   // 5. 상품 이미지 URL 추출
   console.log("   🖼️ 이미지 URL 추출 중...");
-  const candidateUrls: string[] = [];
-
-  // 대표 이미지는 og:image를 우선 후보로 사용
-  const ogImage = await page.getAttribute('meta[property="og:image"]', "content").catch(() => null);
-  if (ogImage && isCandidateProductImageUrl(ogImage)) {
-    candidateUrls.push(normalizeCandidateImageUrl(ogImage));
+  const imageUrls = (await collectProductImageUrlsFromPage(page)).slice(0, 15);
+  const salesPageImageCount = imageUrls.filter((url) => isSalesPageProductImageUrl(url)).length;
+  const reviewImageCount = imageUrls.filter((url) => isReviewImageUrl(url)).length;
+  console.log(
+    `   🖼️ ${imageUrls.length}개 이미지 발견 (판매페이지 ${salesPageImageCount}개 / 후기 ${reviewImageCount}개)`
+  );
+  if (imageUrls[0]) {
+    console.log(`   🖼️ 대표 이미지 후보: ${imageUrls[0]}`);
+    console.log(`   🖼️ 썸네일 원본 적합: ${isPreferredThumbnailImageUrl(imageUrls[0]) ? "예" : "아니오"}`);
   }
-
-  const images = await page.$$("img");
-  for (const img of images) {
-    const src = (await img.getAttribute("data-src")) || (await img.getAttribute("src")) || "";
-    if (!isCandidateProductImageUrl(src)) continue;
-    candidateUrls.push(normalizeCandidateImageUrl(src));
-    if (candidateUrls.length >= 40) break;
-  }
-
-  const dedupedUrls = Array.from(new Set(candidateUrls));
-  const imageUrls = prioritizeImageUrls(dedupedUrls).slice(0, 15);
-  console.log(`   🖼️ ${imageUrls.length}개 이미지 발견`);
   const { representativeImagePath, imagePaths } = await materializeProductImages(imageUrls, "product");
   
   return {
@@ -2736,21 +4928,40 @@ async function step1_getProductInfo(page: Page, url: string): Promise<ProductInf
 async function downloadImage(url: string, filePath: string): Promise<void> {
   const https = await import('https');
   const http = await import('http');
-  
+
   return new Promise((resolve, reject) => {
     const protocol = url.startsWith('https') ? https : http;
-    const file = fs.createWriteStream(filePath);
-    
+
     protocol.get(url, (response: IncomingMessage) => {
-      if (response.statusCode === 301 || response.statusCode === 302) {
-        const redirectUrl = response.headers.location;
-        if (redirectUrl) {
-          downloadImage(redirectUrl, filePath).then(resolve).catch(reject);
+      const status = response.statusCode ?? 0;
+
+      // 리다이렉트 처리
+      if ((status === 301 || status === 302) && response.headers.location) {
+        response.resume();
+        downloadImage(response.headers.location, filePath).then(resolve).catch(reject);
+        return;
+      }
+
+      // 에러 응답: 본문을 파일로 저장하지 않는다.
+      // 네이버 상세/리뷰 이미지(checkout.phinf 등)는 ?type= 리사이즈를 지원하지 않아
+      // ?type=w860을 붙이면 404가 난다. 이 경우 쿼리를 제거하고 1회 재시도한다.
+      if (status >= 400) {
+        response.resume();
+        if (status === 404 && /\?type=/i.test(url)) {
+          downloadImage(url.replace(/\?type=.*/i, ""), filePath).then(resolve).catch(reject);
           return;
         }
+        reject(new Error(`HTTP ${status}`));
+        return;
       }
+
+      const file = fs.createWriteStream(filePath);
       response.pipe(file);
       file.on('finish', () => { file.close(); resolve(); });
+      file.on('error', (err: Error) => {
+        fs.unlink(filePath, () => {});
+        reject(err);
+      });
     }).on('error', (err: Error) => {
       fs.unlink(filePath, () => {});
       reject(err);
@@ -2771,23 +4982,25 @@ async function generateWithAI(
 
   if (BROWSER_GPT_MODE) {
     if (!chatgptContext) {
-      throw new Error("Browser GPT 모드에 필요한 가이드 컨텍스트가 없습니다.");
+      throw new Error("Browser ChatGPT 모드에 필요한 가이드 컨텍스트가 없습니다.");
     }
 
     try {
-      return runChatGPTBrowserTwoPass(systemPrompt, userPrompt, chatgptContext, chatgptImagePaths);
+      return await runChatGPTBrowserTwoPass(systemPrompt, userPrompt, chatgptContext, chatgptImagePaths);
     } catch (error) {
       const reason = getErrorMessage(error);
-      console.log(`   ⚠️ Browser GPT 실패: ${reason}`);
-      console.log("   ↪️ OpenAI(OpenCode) 폴백으로 계속 진행합니다.");
-      return runOpenCode(combinedPrompt);
+      throw new Error(`Browser ChatGPT 실패: ${reason}`);
     }
   }
 
   if (AI_PROVIDER === "gemini" && gemini) {
+    if (!GEMINI_API_KEY) {
+      throw new Error("GEMINI_API_KEY 또는 GOOGLE_GENERATIVE_AI_API_KEY가 비어 있어 Gemini API로 글을 생성할 수 없습니다.");
+    }
+
     // Gemini 사용
     const model = gemini.getGenerativeModel({ 
-      model: "gemini-2.5-flash",
+      model: GEMINI_MODEL,
       generationConfig: {
         temperature: 0.75,
         maxOutputTokens: 4000,
@@ -2799,8 +5012,7 @@ async function generateWithAI(
     return result.response.text();
     
   } else if (AI_PROVIDER === "openai") {
-    // OpenAI는 opencode 인증 세션을 통해 호출 (API 키 불필요)
-    return runOpenCode(combinedPrompt);
+    return runOpenAiApi(systemPrompt, userPrompt);
     
   } else {
     throw new Error("AI Provider가 설정되지 않았습니다. .env 파일을 확인하세요.");
@@ -2810,43 +5022,81 @@ async function generateWithAI(
 // ============================================
 // STEP 2: LLM으로 SEO 최적화 글 생성 (긴 버전)
 // ============================================
-async function step2_generatePost(product: ProductInfo, brandLink: string): Promise<{ title: string; sections: string[]; hashtags: string[]; rawResponse: string }> {
+async function step2_generatePost(
+  product: ProductInfo,
+  brandLink: string,
+  productId?: string | null
+): Promise<GeneratedPostPreview> {
   console.log("\n📝 STEP 2: SEO 최적화 블로그 글 생성 (확장판)");
   console.log(`   🤖 AI Provider: ${AI_PROVIDER.toUpperCase()}`);
+  if (REQUESTED_AI_PROVIDER !== AI_PROVIDER) {
+    console.log(`      - 요청 Provider ${REQUESTED_AI_PROVIDER.toUpperCase()} 대신 ${AI_PROVIDER.toUpperCase()} API로 진행합니다.`);
+  }
+  if (REQUESTED_BROWSER_GPT_MODE && !ALLOW_CHATGPT_BROWSER_MODE) {
+    console.log("   🌐 Browser ChatGPT Mode: OFF (ChatGPT/opencode 미사용 설정)");
+  }
   if (BROWSER_GPT_MODE) {
-    console.log(`   🌐 Browser GPT Mode: ON`);
-    console.log(`      - Draft GPT: ${CHATGPT_DRAFT_GPT_URL}`);
-    console.log(`      - Polish GPT: ${CHATGPT_POLISH_GPT_URL}`);
+    console.log(`   🌐 Browser ChatGPT Mode: ON`);
+    if (CHATGPT_USE_CUSTOM_GPTS) {
+      console.log(`      - Draft GPT: ${CHATGPT_DRAFT_GPT_URL}`);
+      console.log(`      - Polish GPT: ${CHATGPT_POLISH_GPT_URL}`);
+    } else {
+      console.log(`      - Custom GPTs: OFF`);
+      console.log(`      - Direct URL: ${CHATGPT_BASE_URL}`);
+    }
   }
   
   const bodySectionCount = BROWSER_GPT_MODE
     ? CHATGPT_DEFAULT_SUBTITLE_COUNT
     : Math.max(Math.min(product.imagePaths.length, 10), 8);
+  const openCrabSeoBrief = buildOpenCrabSeoBrief({
+    productId,
+    productName: product.name,
+    storeName: product.storeName,
+    description: product.description,
+    features: product.features,
+    targetSectionCount: bodySectionCount,
+  });
+  const openCrabPromptBlock = formatOpenCrabSeoBriefForPrompt(openCrabSeoBrief);
+  if (openCrabSeoBrief) {
+    console.log(
+      `   OpenCrab SEO: ${openCrabSeoBrief.matchType} match, confidence=${openCrabSeoBrief.confidence}, images=${openCrabSeoBrief.mediaTargetImageCount}`
+    );
+    if (openCrabSeoBrief.matchedProductName) {
+      console.log(`      - matched: ${openCrabSeoBrief.matchedProductName}`);
+    }
+    if (openCrabSeoBrief.sourcePath) {
+      console.log(`      - source: ${path.relative(process.cwd(), openCrabSeoBrief.sourcePath)}`);
+    }
+  } else {
+    console.log("   OpenCrab SEO: local brief unavailable or disabled");
+  }
   
-  // 인트로 변화를 위한 랜덤 요소
+  // 인트로 변화를 위한 랜덤 요소. 직접 구매/사용을 단정하지 않는 관찰형 힌트만 사용한다.
   const intros = [
-    "요즘 고민하다가 드디어 질렀어요",
-    "궁금해서 바로 주문해봤어요", 
-    "많이들 추천하셔서 저도 써봤어요",
-    "오랫동안 찾던 제품을 드디어 발견했어요",
-    "친구 추천으로 구매하게 됐어요"
+    "상세 정보를 보면서 구매 전 기준을 정리해봤어요",
+    "후기와 스펙을 같이 확인해봤어요",
+    "옵션을 고르기 전에 체크할 점이 보였어요",
+    "가격과 구성을 기준으로 살펴봤어요",
+    "상품 이미지를 보면서 포인트를 정리했어요"
   ];
   const randomIntro = intros[Math.floor(Math.random() * intros.length)];
-  
+
   const endings = [
-    "강력 추천드려요", "만족스러워요", "재구매 의사 있어요",
-    "가성비 좋아요", "후회 없는 선택이에요"
+    "구매 전 비교 기준으로 보기 좋아요", "옵션 확인 후 고르면 좋겠어요",
+    "필요한 분께 참고가 될 만해요", "가격과 구성을 함께 보면 좋아요",
+    "상세 조건은 한 번 더 확인해보세요"
   ];
   const randomEnding = endings[Math.floor(Math.random() * endings.length)];
 
   const systemPrompt = `당신은 인기 네이버 블로거입니다.
-- 친근하고 솔직한 ~요체 사용 (했어요, 같아요, 더라고요, 거든요)
-- 상품을 정확히 이해하고 실제 사용한 것처럼 생생하게 작성
+${BLOG_HUMANIZE_MOBILE_STYLE ? buildHumanMobileStyleGuide() : "- 친근하고 솔직한 ~요체 사용"}
+- 상품 정보, 가격, 이미지에서 확인되는 요소를 정확히 이해하고 자연스럽게 작성
+- 실제 사용 여부가 제공되지 않은 내용은 단정하지 말고 상황형 표현으로 풀어쓰기
 - SEO를 위해 상품명, 관련 키워드를 자연스럽게 본문에 포함
 - 매번 조금씩 다른 표현 사용 (똑같은 문구 반복 금지)
 - 과장 없이 신뢰감 있게 작성
-
-${HUMANIZE_RULES}`;
+${openCrabPromptBlock ? `\n${openCrabPromptBlock}` : ""}`;
 
   const userPrompt = `다음 상품의 상세 블로그 리뷰를 작성해주세요.
 
@@ -2866,6 +5116,8 @@ ${product.rating ? `- 평점: ${product.rating}점` : ''}
 - 인트로 힌트: "${randomIntro}"
 - 마무리 힌트: "${randomEnding}"
 - 이 힌트를 참고해서 자연스럽게 변형해서 사용
+- 휴대폰으로 블로그 앱에서 쓰는 글처럼 짧고 부드럽게 작성
+- 광고 문구보다 실제 구매를 고민하는 사람의 말투로 작성
 ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일 버전 고정" : ""}
 
 ## 작성 규칙
@@ -2878,39 +5130,46 @@ ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일
 3. 각 섹션 구조:
    - 소제목 (한 줄, 이모지 금지)
    - 빈 줄
-   - 본문 4-6문장 (각 문장 끝에 줄바꿈, 각 문장 30-50자)
+   - 본문 4-6문장 (각 문장 끝에 줄바꿈, 각 문장 25-45자)
+   - 한 문장에 정보 하나만 담고, 어색하면 더 짧게 나누기
    - 빈 줄
 
 4. 섹션 구성 (${bodySectionCount}개):
-   - 구매하게 된 계기
-   - 택배 도착 & 개봉기
+   - 구매 전 확인 포인트
+   - 구성 및 패키지 확인
    - 첫인상 / 디자인
    - 크기 & 스펙 정보
    - 주요 기능 ①
    - 주요 기능 ②
-   - 실제 사용 후기
-   - 장점 정리
-   - 아쉬운 점 (솔직하게)
-   - 이런 분께 추천해요
+   - 사용 장면별 체크
+   - 장점으로 보이는 부분
+   - 확인하면 좋을 아쉬운 점
+   - 이런 분께 잘 맞아요
+
+   실제 구매/택배 수령/직접 사용 경험이 제공되지 않았으므로
+   "주문했다", "받아봤다", "써봤다", "재구매 의사"처럼 체험을 단정하지 마세요.
 
 5. SEO 키워드 삽입:
    - 제목에 메인 키워드
    - 첫 문장에 상품명 포함
    - 본문 중간중간 관련 키워드 자연스럽게 배치
+   - 같은 키워드를 연속 반복하지 않기
 
 6. 할인/특가 정보 활용 (있는 경우만):
-   - 할인율이 있으면 "🔥 지금 XX% 할인 중!", "특가 진행 중" 등 강조
-   - 쿠폰 정보가 있으면 "쿠폰까지 챙기면 더 싸게!", "추가 할인 가능" 언급
-   - 무료배송이면 "무료배송이라 부담 없어요" 등 언급
-   - 리뷰 수가 많으면 "리뷰가 XXXX개나 되더라고요, 믿고 샀어요" 등 신뢰도 강조
-   - 평점이 높으면 "평점 X.X점으로 검증된 제품" 등 언급
-   - 이런 정보는 구매 유도 섹션이나 마무리 부분에서 자연스럽게 활용
+   - 할인율이 있으면 담백하게 "현재 할인가 기준으로는 부담이 줄어드는 편이에요"처럼 표현
+   - 쿠폰 정보가 있으면 "구매 전 쿠폰 적용 여부도 확인해보면 좋아요" 정도로 언급
+   - 무료배송이면 "배송비까지 보면 체감 가격이 달라질 수 있어요"처럼 자연스럽게 언급
+   - 리뷰 수/평점은 확인된 경우에만 참고 포인트로 언급
+   - 구매 유도보다 가격 판단 기준을 알려주는 방식으로 작성
 
 7. 해시태그 20개:
    - 상품명 관련 (3개)
    - 카테고리 관련 (5개)  
    - 검색용 키워드 (7개): 추천, 후기, 리뷰, 비교, 순위, 가격, 장단점
    - 일반 태그 (5개): 일상, 육아템, 생활용품, 가성비 등
+
+8. AI 티가 나는 문장 금지:
+${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES}\n${HUMAN_REVIEW_SAFETY_RULES}` : "   - 반복적인 문장 구조와 과장 표현 금지"}
 
 ## 출력 (JSON만, 줄바꿈은 \\n)
 {
@@ -2935,14 +5194,24 @@ ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일
     rating: product.rating,
     brandLink,
     targetSectionCount: bodySectionCount,
+    openCrabSeoBrief,
   };
 
-  const text = await generateWithAI(
-    systemPrompt,
-    userPrompt,
-    chatgptContext,
-    product.imagePaths
-  );
+  let text: string;
+  try {
+    text = await generateWithAI(
+      systemPrompt,
+      userPrompt,
+      chatgptContext,
+      product.imagePaths
+    );
+  } catch (error) {
+    if (!PRODUCT_POST_LOCAL_FALLBACK_ENABLED) {
+      throw error;
+    }
+    console.log(`   ⚠️ AI 글 생성 실패, 로컬 상품글 초안으로 대체합니다: ${getErrorMessage(error)}`);
+    text = buildLocalProductPostJson(product, bodySectionCount, openCrabSeoBrief);
+  }
   const json = parseJsonObjectFromText(text);
   const minimumSections = Math.min(8, Math.max(4, bodySectionCount - 1));
   const structuredSectionCount = getStructuredSectionCount(json);
@@ -2952,17 +5221,24 @@ ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일
     );
   }
   
-  // 마지막에 필수 문구와 구매링크 추가 (링크 프리뷰가 문장을 끊지 않도록 순서 변경)
+  // 마지막에 필수 고지 문구만 추가하고, 링크는 에디터의 쇼핑커넥트 컴포넌트로 별도 삽입한다.
   const lastSection = `
 
 이 포스팅은 네이버 쇼핑 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받습니다.
 
-👉 구매링크: ${brandLink}`;
-  
-  const bodySections = normalizeSections(json.sections, bodySectionCount, product);
+자세한 상품 정보는 아래 쇼핑커넥트에서 확인해보세요.`;
+
+  let bodySections = normalizeSections(json.sections, bodySectionCount, product);
+  if (HUMAN_MOBILE_POLISH_ENABLED) {
+    console.log("   🧽 로컬 사람형 모바일 윤문/배치 적용");
+    bodySections = bodySections.map((section, index) =>
+      applyHumanMobilePolishToSection(section, index, product)
+    );
+  }
+
   const sections = [...bodySections];
-  sections.push(lastSection);
-  const hashtags = normalizeHashtags(json.hashtags, product);
+  sections.push(HUMAN_MOBILE_POLISH_ENABLED ? applyHumanMobilePolishToDisclosure(lastSection) : lastSection);
+  const hashtags = normalizeHashtags(json.hashtags, product, openCrabSeoBrief);
   
   const normalizedTitle = sanitizeTitle(
     typeof json.title === "string" ? json.title : product.name,
@@ -2980,12 +5256,418 @@ ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일
     sections: sections,
     hashtags,
     rawResponse: text,
+    openCrabSeoBrief,
   };
 }
 
 // ============================================
 // STEP 3: 블로그 에디터 열기
 // ============================================
+function isExistingPostEditUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    const params = parsed.searchParams;
+    const haystack = `${parsed.pathname} ${parsed.search}`.toLowerCase();
+    return (
+      params.has("logNo") ||
+      params.has("postId") ||
+      params.has("postIdNo") ||
+      /postview|modify|update|edit|redirect=update|redirect=modify/i.test(haystack)
+    );
+  } catch {
+    return /postview|logno=|postid=|modify|update|edit|redirect=update|redirect=modify/i.test(rawUrl);
+  }
+}
+
+function normalizeEditorContentText(value: string): string {
+  return value
+    .replace(/[\u200b-\u200d\ufeff]/g, "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isPlaceholderEditorText(value: string): boolean {
+  const text = normalizeEditorContentText(value);
+  if (!text) return true;
+  if (
+    /^(제목|제목을 입력.*|본문.*입력.*|내용.*입력.*|여기에.*입력.*|글감과 함께 나의 일상을 기록해보세요!?)$/i.test(
+      text
+    )
+  ) {
+    return true;
+  }
+  // 네이버 회전형 '글감' 본문 플레이스홀더 백업 감지 (예: "...#모두의회고")
+  // 실제 발행 본문은 #해시태그로 시작/끝나는 단문 한 줄이 아니므로 안전하다.
+  if (/#모두의회고|#오늘일기|#글감/.test(text)) return true;
+  return false;
+}
+
+async function pasteChatGPTPrompt(page: Page, composer: Locator, composerSelector: string, prompt: string): Promise<void> {
+  await composer.click({ force: true }).catch(() => {});
+  await page.keyboard.press("Control+A").catch(() => {});
+  await page.keyboard.press("Backspace").catch(() => {});
+  await page.waitForTimeout(100);
+
+  if (composerSelector.startsWith("textarea")) {
+    await composer.fill(prompt);
+    return;
+  }
+
+  await composer.evaluate(
+    (element, value) => {
+      const target = element as HTMLElement;
+      target.focus();
+      const selection = window.getSelection();
+      if (selection) {
+        selection.removeAllRanges();
+        const range = document.createRange();
+        range.selectNodeContents(target);
+        selection.addRange(range);
+      }
+
+      document.execCommand("delete");
+      const dataTransfer = new DataTransfer();
+      dataTransfer.setData("text/plain", value);
+      const pasteEvent = new ClipboardEvent("paste", {
+        clipboardData: dataTransfer,
+        bubbles: true,
+        cancelable: true,
+      });
+      target.dispatchEvent(pasteEvent);
+
+      if (!target.innerText.trim()) {
+        document.execCommand("insertText", false, value);
+      }
+
+      target.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+    },
+    prompt
+  );
+
+  await page.waitForTimeout(300);
+  const currentText = await readChatGPTComposerText(page, composerSelector, composer);
+  const probe = buildChatGPTPromptProbe(prompt);
+  const normalizedCurrent = normalizeText(currentText).replace(/\s+/g, " ").trim();
+  if (!normalizedCurrent.includes(probe.slice(0, Math.min(80, probe.length)))) {
+    await composer.click({ force: true }).catch(() => {});
+    await page.keyboard.press("Control+A").catch(() => {});
+    await page.keyboard.press("Backspace").catch(() => {});
+    await page.keyboard.insertText(prompt);
+  }
+}
+
+async function closeBlockingChatGPTModals(page: Page): Promise<void> {
+  const selectors = [
+    'button:has-text("나중에")',
+    'button:has-text("건너뛰기")',
+    'button:has-text("닫기")',
+    'button:has-text("확인")',
+    'button[aria-label*="Close"]',
+    'button[aria-label*="닫기"]',
+  ];
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let acted = false;
+    for (const selector of selectors) {
+      const target = page.locator(selector).first();
+      if (!(await target.isVisible().catch(() => false))) continue;
+      await target.click({ force: true, timeout: 1000 }).catch(() => {});
+      acted = true;
+      await page.waitForTimeout(300);
+      break;
+    }
+    if (!acted) {
+      await page.keyboard.press("Escape").catch(() => {});
+      await page.waitForTimeout(200);
+      break;
+    }
+  }
+}
+
+async function readFirstMeaningfulEditorText(page: Page, selectors: string[]): Promise<string | null> {
+  for (const selector of selectors) {
+    const locators = page.locator(selector);
+    const count = Math.min(await locators.count().catch(() => 0), 20);
+    for (let index = 0; index < count; index += 1) {
+      const locator = locators.nth(index);
+      const visible = await locator.isVisible().catch(() => false);
+      if (!visible) continue;
+      // 네이버 에디터의 글감/제목 플레이스홀더(.se-placeholder)는 회전형 문구라
+      // 텍스트만 보면 실제 본문과 구분되지 않는다. DOM에서 플레이스홀더 요소를 제거한
+      // 순수 입력 텍스트만 읽어 오인 차단을 방지한다.
+      const rawText = await locator
+        .evaluate((el) => {
+          if (el instanceof HTMLElement && el.closest(".se-placeholder, .__se_placeholder")) {
+            return "";
+          }
+          const clone = el.cloneNode(true) as HTMLElement;
+          // 플레이스홀더 + 에디터 UI(툴바/버튼/유틸 아이콘) 텍스트는 실제 내용이 아니므로 제거
+          clone
+            .querySelectorAll(
+              ".se-placeholder, .__se_placeholder, button, [role='button'], svg, " +
+                "[class*='toolbar'], [class*='util'], [class*='tooltip'], [class*='help'], [class*='-button']"
+            )
+            .forEach((node) => node.remove());
+          return clone.textContent || "";
+        })
+        .catch(() => "");
+      const text = normalizeEditorContentText(rawText);
+      if (!isPlaceholderEditorText(text)) {
+        return text;
+      }
+    }
+  }
+  return null;
+}
+
+async function closeEditorPopupsForFreshPost(page: Page): Promise<void> {
+  const newPostSelectors = [
+    'button:has-text("새 글 쓰기")',
+    'button:has-text("새 글")',
+    'button:has-text("새로 쓰기")',
+    'button:has-text("작성 취소")',
+    'button:has-text("취소")',
+    'a:has-text("새 글 쓰기")',
+    'a:has-text("새 글")',
+    'a:has-text("취소")',
+    ".se-popup-button-cancel",
+  ];
+  const closeOnlySelectors = [
+    ".se-help-close",
+    ".se-popup-close",
+    'button[aria-label="닫기"]',
+    'button[aria-label*="닫기"]',
+    'button:has-text("닫기")',
+  ];
+  const alertConfirmSelectors = [
+    ".se-popup-button-confirm",
+    ".se-popup-button-confirm input",
+    '[data-group="popupLayer"] button[class*="confirm"]',
+    '[data-name*="se-popup-alert"] button[class*="confirm"]',
+    '[data-group="popupLayer"] input[value="확인"]',
+    'button:has-text("확인")',
+    'a:has-text("확인")',
+    'input[value="확인"]',
+  ];
+
+  const isBlockingPopupVisible = async (): Promise<boolean> =>
+    page
+      .locator(
+        [
+          ".se-popup-dim",
+          '[data-group="popupLayer"] .se-popup-alert-confirm',
+          '[data-name*="se-popup-alert-confirm"]',
+          ".blog-se-alert",
+        ].join(", ")
+      )
+      .first()
+      .isVisible()
+      .catch(() => false);
+
+  const clickPopupButtonByDom = async (preferNewPost: boolean): Promise<boolean> =>
+    page
+      .evaluate((preferNew) => {
+        const isVisible = (element: Element): boolean => {
+          const htmlElement = element as HTMLElement;
+          const style = window.getComputedStyle(htmlElement);
+          const rect = htmlElement.getBoundingClientRect();
+          return (
+            style.visibility !== "hidden" &&
+            style.display !== "none" &&
+            rect.width > 0 &&
+            rect.height > 0
+          );
+        };
+        const getText = (element: Element): string => {
+          const input = element as HTMLInputElement;
+          return `${element.textContent || ""} ${input.value || ""} ${element.getAttribute("aria-label") || ""} ${
+            element.getAttribute("title") || ""
+          } ${element.getAttribute("class") || ""}`.replace(/\s+/g, " ").trim();
+        };
+        const roots = Array.from(
+          document.querySelectorAll(
+            [
+              '[data-group="popupLayer"]',
+              '[data-name*="se-popup"]',
+              ".se-popup",
+              ".blog-se-alert",
+            ].join(", ")
+          )
+        ).filter(isVisible);
+
+        const clickedLabels: string[] = [];
+        const preferredPattern = preferNew
+          ? /(새\s*글|새로\s*쓰기|작성\s*취소|취소|닫기|cancel|close)/i
+          : /(확인|닫기|취소|ok|confirm|close|cancel)/i;
+        const fallbackPattern = preferNew
+          ? /(확인|ok|confirm)/i
+          : /(새\s*글|새로\s*쓰기|작성\s*취소|취소|닫기|cancel|close)/i;
+
+        for (const root of roots) {
+          const controls = Array.from(
+            root.querySelectorAll('button, a, input[type="button"], input[type="submit"], [role="button"]')
+          ).filter(isVisible);
+          const preferred = controls.find((control) => preferredPattern.test(getText(control)));
+          const fallback = controls.find((control) => fallbackPattern.test(getText(control)));
+          const target = preferred || fallback || controls[0];
+          if (!target) continue;
+
+          clickedLabels.push(getText(target).slice(0, 120));
+          (target as HTMLElement).click();
+          return { clicked: true, labels: clickedLabels };
+        }
+
+        return { clicked: false, labels: clickedLabels };
+      }, preferNewPost)
+      .then((result) => {
+        if (result.clicked) {
+          console.log(`   🧹 에디터 팝업 DOM 버튼 클릭: ${result.labels[0] || "unknown"}`);
+        }
+        return result.clicked;
+      })
+      .catch(() => false);
+
+  const removeBlockingAlertLayers = async (): Promise<boolean> =>
+    page
+      .evaluate(() => {
+        const selectors = [
+          ".se-popup-dim",
+          '[data-group="popupLayer"] .se-popup-alert-confirm',
+          '[data-name*="se-popup-alert-confirm"]',
+          ".blog-se-alert",
+        ];
+        let removed = 0;
+        for (const selector of selectors) {
+          for (const element of Array.from(document.querySelectorAll(selector))) {
+            element.remove();
+            removed += 1;
+          }
+        }
+        document.body.style.overflow = "";
+        return removed;
+      })
+      .then((removed) => {
+        if (removed > 0) {
+          console.log(`   🧹 에디터 alert 레이어 제거: ${removed}개`);
+        }
+        return removed > 0;
+      })
+      .catch(() => false);
+
+  const clickFirstVisible = async (selectors: string[]): Promise<boolean> => {
+    for (const selector of selectors) {
+      const target = page.locator(selector).first();
+      if (!(await target.isVisible().catch(() => false))) continue;
+      const clicked = await target
+        .click({ force: true, timeout: 1200 })
+        .then(() => true)
+        .catch(() => false);
+      if (!clicked) continue;
+      await page.waitForTimeout(400);
+      if (!(await isBlockingPopupVisible())) {
+        return true;
+      }
+    }
+
+    return false;
+  };
+
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    let acted = false;
+    const bodyText = normalizeEditorContentText(await page.locator("body").innerText().catch(() => ""));
+    const hasExistingDraftPrompt = /작성\s*중인\s*글|임시\s*저장|임시저장|이전\s*작성/.test(bodyText);
+    const hasBlockingEditorPopup = await page
+      .locator(
+        [
+          ".se-popup-dim",
+          '[data-group="popupLayer"] .se-popup-alert-confirm',
+          '[data-name*="se-popup-alert-confirm"]',
+          ".blog-se-alert",
+        ].join(", ")
+      )
+      .first()
+      .isVisible()
+      .catch(() => false);
+
+    const selectors = hasExistingDraftPrompt
+      ? [...newPostSelectors, ...closeOnlySelectors]
+      : hasBlockingEditorPopup
+        ? [...closeOnlySelectors, ...alertConfirmSelectors]
+        : closeOnlySelectors;
+
+    acted = await clickFirstVisible(selectors);
+    if (!acted && hasBlockingEditorPopup) {
+      acted = await clickPopupButtonByDom(hasExistingDraftPrompt);
+      if (acted) {
+        await page.waitForTimeout(500);
+        acted = !(await isBlockingPopupVisible());
+      }
+    }
+    if (!acted && hasBlockingEditorPopup) {
+      await page.keyboard.press("Escape").catch(() => {});
+      await page.waitForTimeout(300);
+      acted = !(await isBlockingPopupVisible());
+    }
+    if (!acted && hasBlockingEditorPopup && !hasExistingDraftPrompt && attempt >= 3) {
+      acted = await removeBlockingAlertLayers();
+      if (acted) {
+        await page.waitForTimeout(300);
+        acted = !(await isBlockingPopupVisible());
+      }
+    }
+
+    if (!acted) break;
+  }
+}
+
+function isPopupBlockingClickError(error: unknown): boolean {
+  return /se-popup|popupLayer|blog-se-alert|intercepts pointer events|Element is not attached to the DOM|Timeout/i.test(
+    getErrorMessage(error)
+  );
+}
+
+async function clickEditorTitleArea(page: Page): Promise<void> {
+  const titleArea = page.locator(".se-documentTitle .se-text-paragraph").first();
+  if (await titleArea.isVisible().catch(() => false)) {
+    await titleArea.click({ timeout: 5000 });
+  } else {
+    await page.mouse.click(640, 130);
+  }
+}
+
+async function assertFreshPostEditor(page: Page): Promise<void> {
+  const currentUrl = page.url();
+  if (isExistingPostEditUrl(currentUrl)) {
+    throw new Error(`기존 글 수정 화면으로 감지되어 중단합니다. url=${currentUrl}`);
+  }
+
+  await page
+    .locator(".se-documentTitle .se-text-paragraph, textarea[placeholder*='제목'], input[placeholder*='제목']")
+    .first()
+    .waitFor({ state: "visible", timeout: 15000 })
+    .catch(() => {});
+
+  const titleText = await readFirstMeaningfulEditorText(page, [
+    ".se-documentTitle .se-text-paragraph",
+    "textarea[placeholder*='제목']",
+    "input[placeholder*='제목']",
+  ]);
+  const bodyText = await readFirstMeaningfulEditorText(page, [
+    ".se-main-container .se-component:not(.se-documentTitle) .se-text-paragraph",
+    ".se-component-content .se-text-paragraph",
+    ".se-section-text .se-text-paragraph",
+  ]);
+
+  if (titleText || bodyText) {
+    throw new Error(
+      `새 글쓰기 화면이 비어있지 않아 기존 글/임시글 수정 위험으로 중단합니다. title="${(
+        titleText ?? ""
+      ).slice(0, 60)}" body="${(bodyText ?? "").slice(0, 60)}"`
+    );
+  }
+}
+
 async function step3_openEditor(
   context: BrowserContext,
   page: Page,
@@ -3014,36 +5696,21 @@ async function step3_openEditor(
       break;
     } catch (error) {
       const message = getErrorMessage(error);
-      const canRetry = /ERR_ABORTED|Target page, context or browser has been closed/i.test(message);
+      const canRetry = /ERR_ABORTED|Page crashed|Target page, context or browser has been closed/i.test(message);
       if (!canRetry || attempt === 1) {
         throw error;
       }
       console.log(`   ⚠️ 에디터 진입 재시도(${attempt + 1}/2): ${message}`);
 
-      if (targetPage.isClosed()) {
-        targetPage = await context.newPage();
-      }
+      await targetPage.close().catch(() => {});
+      targetPage = await context.newPage();
       await targetPage.waitForTimeout(1500);
     }
   }
   
-  // 세션 만료 가드: 로그인 페이지로 리다이렉트됐으면 모호한 깊은 실패 대신 즉시 명확히 중단.
-  if (isLoginRedirect(targetPage.url())) {
-    throw new Error(
-      "네이버 세션이 만료되었습니다(로그인 페이지로 리다이렉트됨). 'npm run login'으로 재로그인 후 다시 시도하세요."
-    );
-  }
-
-  // 팝업 닫기 (작성 중인 글 있습니다)
-  try {
-    const cancelBtn = await targetPage.$('.se-popup-button-cancel');
-    if (cancelBtn) {
-      await cancelBtn.click();
-      console.log("   팝업 닫음");
-      await targetPage.waitForTimeout(1000);
-    }
-  } catch {}
-
+  await closeEditorPopupsForFreshPost(targetPage);
+  await assertFreshPostEditor(targetPage);
+  
   console.log("   ✅ 에디터 준비 완료");
   return targetPage;
 }
@@ -3053,16 +5720,30 @@ async function step3_openEditor(
 // ============================================
 async function step4_inputTitle(page: Page, title: string): Promise<void> {
   console.log("\n✏️ STEP 4: 제목 입력");
-  
-  // 제목 영역 클릭
-  const titleArea = await page.$('.se-documentTitle .se-text-paragraph');
-  if (titleArea) {
-    await titleArea.click();
-    await page.waitForTimeout(300);
-  } else {
-    // 좌표로 클릭 (제목 위치)
-    await page.mouse.click(640, 130);
-    await page.waitForTimeout(300);
+
+  await closeEditorPopupsForFreshPost(page);
+  await page.waitForTimeout(300);
+  await assertFreshPostEditor(page);
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      // 제목 영역 클릭
+      await clickEditorTitleArea(page);
+      await page.waitForTimeout(300);
+      await page.keyboard.press("Control+A").catch(() => {});
+      await page.keyboard.press("Backspace").catch(() => {});
+      await page.waitForTimeout(100);
+      break;
+    } catch (error) {
+      if (!isPopupBlockingClickError(error) || attempt === 2) {
+        throw error;
+      }
+
+      console.log(`   ⚠️ 제목 입력 전 팝업 감지, 닫고 재시도합니다. (${attempt + 1}/3)`);
+      await closeEditorPopupsForFreshPost(page);
+      await page.waitForTimeout(500);
+      await assertFreshPostEditor(page);
+    }
   }
   
   await page.keyboard.type(title, { delay: 30 });
@@ -3074,7 +5755,32 @@ async function step4_inputTitle(page: Page, title: string): Promise<void> {
 // ============================================
 async function uploadOneImage(page: Page, imagePath: string): Promise<boolean> {
   try {
-    const imageBtn = await page.$('button[data-name="image"]');
+    if (!fs.existsSync(imagePath)) {
+      console.log(`   ⚠️ 업로드 파일 없음: ${imagePath}`);
+      return false;
+    }
+
+    const imageSelectors = [
+      ".se-image-resource",
+      ".se-component-image img",
+      ".se-section-image img",
+      '[data-module="image"] img',
+    ];
+    const countImages = async () => {
+      let total = 0;
+      for (const selector of imageSelectors) {
+        total += await page.locator(selector).count().catch(() => 0);
+      }
+      return total;
+    };
+
+    const beforeCount = await countImages();
+    const imageBtn = await findFirstVisibleLocator(page, [
+      'button[data-name="image"]',
+      "button.se-toolbar-button-image",
+      'button[aria-label*="사진"]',
+      'button[aria-label*="이미지"]',
+    ]);
     if (imageBtn) {
       const [fileChooser] = await Promise.all([
         page.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null),
@@ -3083,7 +5789,26 @@ async function uploadOneImage(page: Page, imagePath: string): Promise<boolean> {
       
       if (fileChooser) {
         await fileChooser.setFiles(imagePath);
-        await page.waitForTimeout(2500); // 업로드 완료 대기
+        const uploadConfirmed = await page
+          .waitForFunction(
+            ({ selectors, before }) =>
+              selectors.some((selector) => document.querySelectorAll(selector).length > before),
+            { selectors: imageSelectors, before: beforeCount },
+            { timeout: 15000 }
+          )
+          .then(() => true)
+          .catch(() => false);
+
+        if (!uploadConfirmed) {
+          await page.waitForTimeout(3000);
+          const afterCount = await countImages();
+          if (afterCount <= beforeCount) {
+            console.log(`   ⚠️ 이미지 업로드 확인 실패: ${path.basename(imagePath)}`);
+            return false;
+          }
+        }
+
+        await page.waitForTimeout(800);
         return true;
       }
     }
@@ -3165,6 +5890,758 @@ async function setNaverTextFormat(
   return false;
 }
 
+interface LocatorRoot {
+  locator(selector: string): Locator;
+}
+
+async function findFirstVisibleLocator(
+  root: LocatorRoot,
+  selectors: string[]
+): Promise<Locator | null> {
+  for (const selector of selectors) {
+    const matches = root.locator(selector);
+    const count = Math.min(await matches.count().catch(() => 0), 80);
+    for (let index = 0; index < count; index += 1) {
+      const candidate = matches.nth(index);
+      const visible = await candidate.isVisible().catch(() => false);
+      if (visible) return candidate;
+    }
+  }
+
+  return null;
+}
+
+async function clickFirstVisibleLocator(
+  root: LocatorRoot,
+  selectors: string[],
+  timeout = 2000
+): Promise<boolean> {
+  for (const selector of selectors) {
+    const matches = root.locator(selector);
+    const count = Math.min(await matches.count().catch(() => 0), 80);
+    for (let index = 0; index < count; index += 1) {
+      const candidate = matches.nth(index);
+      const visible = await candidate.isVisible().catch(() => false);
+      if (!visible) continue;
+
+      const enabled = await candidate.isEnabled().catch(() => true);
+      if (!enabled) continue;
+
+      try {
+        await candidate.click({ timeout });
+        await candidate.page().waitForTimeout(160);
+        return true;
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  return false;
+}
+
+const SHOPPING_CONNECT_TOOL_LABEL = "쇼핑커넥트";
+
+const SHOPPING_CONNECT_TOOL_SELECTORS = [
+  'button[data-name="shoppingConnect"]',
+  'button[data-name="shopping-connect"]',
+  'button[data-name*="shopping" i]',
+  'button[aria-label*="쇼핑커넥트"]',
+  'button[title*="쇼핑커넥트"]',
+  '[role="menuitem"]:has-text("쇼핑커넥트")',
+  'button:has-text("쇼핑커넥트")',
+  'a:has-text("쇼핑커넥트")',
+  'li:has-text("쇼핑커넥트") button',
+  'li:has-text("쇼핑커넥트")',
+];
+
+const EDITOR_INSERT_MENU_SELECTORS = [
+  'button[data-name="insert"]',
+  'button[data-name="more"]',
+  'button[data-name="more-menu"]',
+  'button[data-name="plus"]',
+  'button[aria-label*="추가"]',
+  'button[aria-label*="메뉴"]',
+  'button[aria-label*="더보기"]',
+  'button[title*="추가"]',
+  'button[title*="메뉴"]',
+  'button[title*="더보기"]',
+  'button:has-text("더보기")',
+  'button:has-text("추가")',
+];
+
+const MENU_SEARCH_INPUT_SELECTORS = [
+  'input[placeholder*="검색"]',
+  'input[placeholder*="메뉴"]',
+  'input[aria-label*="검색"]',
+  '[role="searchbox"]',
+  '[role="dialog"] input',
+  '[class*="layer" i] input',
+  '[class*="menu" i] input',
+];
+
+const SHOPPING_CONNECT_PANEL_SELECTORS = [
+  '.se-popup-shopping-connect[data-name="se-popup-shopping-connect"]',
+  '.se-popup-shopping-connect',
+  '[data-name="se-popup-shopping-connect"]',
+  'div[class*="popup" i]:has(input.se-popup-search-input)',
+  'div[class*="popup" i]:has(.se-shopping-connect-search-area)',
+  '[role="dialog"]:has(input.se-popup-search-input)',
+  '[role="dialog"]:has-text("쇼핑커넥트")',
+  'div[class*="shopping" i]:has-text("쇼핑커넥트")',
+  'div[class*="commerce" i]:has-text("쇼핑커넥트")',
+  'div[class*="layer" i]:has-text("쇼핑커넥트")',
+  'div[class*="popup" i]:has-text("쇼핑커넥트")',
+  'div[class*="modal" i]:has-text("쇼핑커넥트")',
+  'section:has-text("쇼핑커넥트")',
+];
+
+const SHOPPING_CONNECT_SEARCH_INPUT_SELECTORS = [
+  '.se-popup-shopping-connect input.se-popup-search-input',
+  '[data-name="se-popup-shopping-connect"] input.se-popup-search-input',
+  '.se-popup-shopping-connect .se-popup-search input[type="text"]',
+  '.se-popup-search input.se-popup-search-input',
+  'input.se-popup-search-input',
+  'input[placeholder*="쇼핑 커넥트"]',
+  'input[aria-label*="쇼핑 커넥트"]',
+  'input[placeholder*="쇼핑커넥트"]',
+  'input[aria-label*="쇼핑커넥트"]',
+  'input[placeholder*="URL" i]',
+  'input[aria-label*="URL" i]',
+  'textarea[placeholder*="URL" i]',
+  'textarea[aria-label*="URL" i]',
+  'input[placeholder*="링크"]',
+  'input[aria-label*="링크"]',
+  'textarea[placeholder*="링크"]',
+  'textarea[aria-label*="링크"]',
+  'input[placeholder*="주소"]',
+  'input[aria-label*="주소"]',
+  'input[placeholder*="상품"]',
+  'input[aria-label*="상품"]',
+  'input[placeholder*="검색"]',
+  'input[aria-label*="검색"]',
+  'textarea',
+  'input[type="url"]',
+  'input[type="text"]',
+  '[contenteditable="true"][role="textbox"]',
+  '[contenteditable="true"][data-placeholder*="URL" i]',
+  '[contenteditable="true"][data-placeholder*="링크"]',
+  '[contenteditable="true"][data-placeholder*="주소"]',
+  '[contenteditable="true"][data-placeholder*="검색"]',
+];
+
+const SHOPPING_CONNECT_SEARCH_BUTTON_SELECTORS = [
+  'button:has-text("검색")',
+  'button[aria-label*="검색"]',
+  'button[title*="검색"]',
+  'button:has-text("확인")',
+];
+
+const SHOPPING_CONNECT_RESULT_SELECTORS = [
+  '[role="option"]',
+  '[class*="result" i] button',
+  '[class*="result" i] li',
+  '[class*="product" i] button',
+  '[class*="product" i] li',
+  'li:has-text("naver.me")',
+  'li:has-text("상품")',
+  'a[href*="naver.me"]',
+  'a[href*="shopping.naver.com"]',
+];
+
+const SHOPPING_CONNECT_INSERT_BUTTON_SELECTORS = [
+  'button:has-text("선택")',
+  'button:has-text("추가")',
+  'button:has-text("삽입")',
+  'button:has-text("적용")',
+  'button:has-text("등록")',
+  'button:has-text("확인")',
+  'button[class*="confirm" i]',
+  'button[class*="submit" i]',
+];
+
+async function getShoppingConnectPanel(page: Page): Promise<Locator | null> {
+  return findFirstVisibleLocator(page, SHOPPING_CONNECT_PANEL_SELECTORS);
+}
+
+async function waitForShoppingConnectPanel(page: Page, timeout = 8000): Promise<Locator | null> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeout) {
+    const panel = await getShoppingConnectPanel(page);
+    if (panel) return panel;
+    await page.waitForTimeout(250);
+  }
+
+  return null;
+}
+
+async function selectShoppingConnectToolFromMenu(page: Page): Promise<boolean> {
+  if (await clickFirstVisibleLocator(page, SHOPPING_CONNECT_TOOL_SELECTORS, 1200)) {
+    return (await waitForShoppingConnectPanel(page, 3000)) !== null;
+  }
+
+  const searchInput = await findFirstVisibleLocator(page, MENU_SEARCH_INPUT_SELECTORS);
+  if (!searchInput) return false;
+
+  await searchInput.click({ timeout: 1200 }).catch(() => {});
+  await searchInput.fill(SHOPPING_CONNECT_TOOL_LABEL, { timeout: 1500 }).catch(async () => {
+    await searchInput.press("Control+A").catch(() => {});
+    await searchInput.type(SHOPPING_CONNECT_TOOL_LABEL, { delay: 20 }).catch(() => {});
+  });
+  await page.waitForTimeout(350);
+
+  if (await clickFirstVisibleLocator(page, SHOPPING_CONNECT_TOOL_SELECTORS, 1600)) {
+    return (await waitForShoppingConnectPanel(page, 3000)) !== null;
+  }
+
+  await searchInput.press("Enter").catch(() => {});
+  await page.waitForTimeout(500);
+  return (await getShoppingConnectPanel(page)) !== null;
+}
+
+async function openShoppingConnectTool(page: Page): Promise<boolean> {
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    if (await selectShoppingConnectToolFromMenu(page)) {
+      return true;
+    }
+
+    await clickFirstVisibleLocator(page, EDITOR_INSERT_MENU_SELECTORS, 1200);
+    await page.waitForTimeout(350);
+
+    if (await selectShoppingConnectToolFromMenu(page)) {
+      return true;
+    }
+
+    await page.keyboard.press("Escape").catch(() => {});
+    await page.waitForTimeout(200);
+  }
+
+  return false;
+}
+
+async function countEditorShoppingConnectArtifacts(page: Page, brandLink: string): Promise<number> {
+  return page
+    .evaluate((targetUrl) => {
+      const editor =
+        document.querySelector(".se-main-container") ||
+        document.querySelector(".se-content") ||
+        document.body;
+      const selectors = [
+        '[class*="shopping" i]',
+        '[class*="commerce" i]',
+        '[data-name*="shopping" i]',
+        '[data-module*="shopping" i]',
+        'a[href*="naver.me"]',
+        'a[href*="shopping.naver.com"]',
+      ];
+      const elements = new Set<Element>();
+      for (const selector of selectors) {
+        for (const element of Array.from(editor.querySelectorAll(selector))) {
+          elements.add(element);
+        }
+      }
+
+      const html = editor.innerHTML || "";
+      if (targetUrl && html.includes(targetUrl)) {
+        return elements.size + 1;
+      }
+
+      return elements.size;
+    }, brandLink)
+    .catch(() => 0);
+}
+
+async function waitForShoppingConnectInserted(
+  page: Page,
+  brandLink: string,
+  previousArtifactCount: number,
+  timeout = 12000
+): Promise<boolean> {
+  const startedAt = Date.now();
+  let panelWasClosed = false;
+
+  while (Date.now() - startedAt < timeout) {
+    const artifactCount = await countEditorShoppingConnectArtifacts(page, brandLink);
+    if (artifactCount > previousArtifactCount) return true;
+
+    const panel = await getShoppingConnectPanel(page);
+    if (!panel) {
+      panelWasClosed = true;
+    }
+
+    await page.waitForTimeout(400);
+  }
+
+  return panelWasClosed;
+}
+
+async function confirmShoppingConnectAddition(
+  page: Page,
+  brandLink: string,
+  previousArtifactCount: number,
+  timeout = 12000
+): Promise<boolean> {
+  const startedAt = Date.now();
+  let clickedConfirm = false;
+
+  while (Date.now() - startedAt < timeout) {
+    const confirmButton = page
+      .locator(".se-popup-shopping-connect-add-component-layer button.se-popup-button-confirm")
+      .first();
+
+    if (await confirmButton.isVisible().catch(() => false)) {
+      clickedConfirm = true;
+      console.log("   shopping-connect add confirmation...");
+      await confirmButton.click({ timeout: 2000 }).catch(() => {});
+      await page.waitForTimeout(500);
+    }
+
+    const remainingTime = Math.max(800, timeout - (Date.now() - startedAt));
+    if (await waitForShoppingConnectInserted(page, brandLink, previousArtifactCount, Math.min(remainingTime, 2500))) {
+      return true;
+    }
+
+    await page.waitForTimeout(clickedConfirm ? 500 : 250);
+  }
+
+  return waitForShoppingConnectInserted(page, brandLink, previousArtifactCount, 3000);
+}
+
+async function captureShoppingConnectArtifacts(page: Page, reason: string): Promise<void> {
+  try {
+    const dirPath = path.join(process.cwd(), "logs", "manual", "shopping-connect");
+    fs.mkdirSync(dirPath, { recursive: true });
+    const baseName = `${createTimestampLabel()}-${reason}`;
+    const screenshotPath = path.join(dirPath, `${baseName}.png`);
+    const htmlPath = path.join(dirPath, `${baseName}.html`);
+    const jsonPath = path.join(dirPath, `${baseName}.json`);
+
+    await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+
+    const snapshot = await page
+      .evaluate(() => {
+        const visible = (element: Element): boolean => {
+          const rect = element.getBoundingClientRect();
+          const style = window.getComputedStyle(element);
+          return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+        };
+        const describe = (element: Element) => {
+          const rect = element.getBoundingClientRect();
+          return {
+            tag: element.tagName.toLowerCase(),
+            text: (element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 300),
+            type: element.getAttribute("type"),
+            role: element.getAttribute("role"),
+            ariaLabel: element.getAttribute("aria-label"),
+            title: element.getAttribute("title"),
+            placeholder: element.getAttribute("placeholder"),
+            dataName: element.getAttribute("data-name"),
+            className:
+              typeof (element as HTMLElement).className === "string"
+                ? (element as HTMLElement).className
+                : "",
+            rect: {
+              x: Math.round(rect.x),
+              y: Math.round(rect.y),
+              width: Math.round(rect.width),
+              height: Math.round(rect.height),
+            },
+          };
+        };
+
+        const interestingSelectors = [
+          '[role="dialog"]',
+          '[class*="shopping" i]',
+          '[class*="commerce" i]',
+          '[class*="layer" i]',
+          '[class*="popup" i]',
+          '[class*="modal" i]',
+          "input",
+          "textarea",
+          '[contenteditable="true"]',
+          "button",
+          "a",
+          '[role="option"]',
+          '[role="menuitem"]',
+        ];
+        const elements = new Set<Element>();
+        for (const selector of interestingSelectors) {
+          for (const element of Array.from(document.querySelectorAll(selector))) {
+            if (visible(element)) elements.add(element);
+          }
+        }
+
+        return {
+          url: location.href,
+          bodyText: (document.body?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 5000),
+          elements: Array.from(elements).slice(0, 250).map(describe),
+          html: document.documentElement.outerHTML,
+        };
+      })
+      .catch((error) => ({
+        url: page.url(),
+        bodyText: "",
+        elements: [],
+        html: "",
+        error: getErrorMessage(error),
+      }));
+
+    fs.writeFileSync(htmlPath, snapshot.html || "", "utf8");
+    fs.writeFileSync(
+      jsonPath,
+      JSON.stringify({ ...snapshot, html: undefined }, null, 2),
+      "utf8"
+    );
+    console.log(
+      `   쇼핑커넥트 진단 저장: ${path.relative(process.cwd(), screenshotPath)}, ${path.relative(
+        process.cwd(),
+        jsonPath
+      )}`
+    );
+  } catch {
+    console.log("   쇼핑커넥트 진단 저장 실패");
+  }
+}
+
+function buildShoppingConnectSearchTerms(
+  productName: string | null | undefined,
+  productFinalUrl: string | null | undefined,
+  brandLink: string
+): string[] {
+  const terms = [
+    productName,
+    extractSmartStoreProductId(productFinalUrl),
+    productFinalUrl,
+    brandLink,
+  ]
+    .map((term) => (term || "").replace(/\s+/g, " ").trim())
+    .filter((term): term is string => term.length > 0)
+    .map((term) => term.slice(0, 190));
+
+  return Array.from(new Set(terms));
+}
+
+async function fillShoppingConnectSearch(page: Page, searchTerm: string): Promise<boolean> {
+  const panel = (await waitForShoppingConnectPanel(page, 8000)) ?? page;
+  const input =
+    (await findFirstVisibleLocator(page, SHOPPING_CONNECT_SEARCH_INPUT_SELECTORS)) ??
+    (await findFirstVisibleLocator(panel, SHOPPING_CONNECT_SEARCH_INPUT_SELECTORS));
+  if (!input) {
+    await captureShoppingConnectArtifacts(page, "input-missing");
+    return false;
+  }
+
+  console.log(`   쇼핑커넥트 검색어 입력: ${searchTerm.slice(0, 80)}`);
+  await input.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => {});
+  await input.click({ timeout: 1500 }).catch(() => {});
+  const isContentEditable = await input
+    .evaluate((element) => element.getAttribute("contenteditable") === "true")
+    .catch(() => false);
+  if (isContentEditable) {
+    await input.press("Control+A").catch(() => {});
+    await input.press("Meta+A").catch(() => {});
+    await input.type(searchTerm, { delay: 10 }).catch(() => {});
+    await input.press("Enter").catch(() => {});
+    await clickFirstVisibleLocator(panel, SHOPPING_CONNECT_SEARCH_BUTTON_SELECTORS, 1200);
+    await page.waitForTimeout(1800);
+    return true;
+  }
+
+  const filled = await input
+    .fill(searchTerm, { timeout: 2000 })
+    .then(() => true)
+    .catch(async () => {
+      await input.press("Control+A").catch(() => {});
+      await input.type(searchTerm, { delay: 10 }).catch(() => {});
+      return true;
+    });
+  if (!filled) return false;
+
+  await input.press("Enter").catch(() => {});
+  await clickFirstVisibleLocator(panel, SHOPPING_CONNECT_SEARCH_BUTTON_SELECTORS, 1200);
+  await page.waitForTimeout(1800);
+  return true;
+}
+
+async function chooseShoppingConnectResult(
+  page: Page,
+  brandLink: string,
+  productName: string | null | undefined,
+  productFinalUrl: string | null | undefined,
+  previousArtifactCount: number,
+  options: { allowGenericSelection?: boolean } = {}
+): Promise<boolean> {
+  if (productName?.trim() || productFinalUrl?.trim()) {
+    const pickedByName = await clickShoppingConnectItemByProductName(
+      page,
+      productName,
+      productFinalUrl,
+      previousArtifactCount,
+      brandLink
+    );
+    if (pickedByName) return true;
+  }
+
+  if ((productName?.trim() || productFinalUrl?.trim()) && !options.allowGenericSelection) {
+    return false;
+  }
+
+  for (let attempt = 1; attempt <= 10; attempt += 1) {
+    const panel = (await getShoppingConnectPanel(page)) ?? page;
+
+    if (await clickFirstVisibleLocator(panel, SHOPPING_CONNECT_INSERT_BUTTON_SELECTORS, 1200)) {
+      if (await confirmShoppingConnectAddition(page, brandLink, previousArtifactCount, 5000)) {
+        return true;
+      }
+    }
+
+    if (await clickFirstVisibleLocator(panel, SHOPPING_CONNECT_RESULT_SELECTORS, 1200)) {
+      await page.waitForTimeout(500);
+      if (await confirmShoppingConnectAddition(page, brandLink, previousArtifactCount, 5000)) {
+        return true;
+      }
+      const latestPanel = (await getShoppingConnectPanel(page)) ?? page;
+      await clickFirstVisibleLocator(latestPanel, SHOPPING_CONNECT_INSERT_BUTTON_SELECTORS, 1200);
+      if (await confirmShoppingConnectAddition(page, brandLink, previousArtifactCount, 5000)) {
+        return true;
+      }
+    }
+
+    await page.waitForTimeout(500);
+  }
+
+  return waitForShoppingConnectInserted(page, brandLink, previousArtifactCount, 5000);
+}
+
+function tokenizeForShoppingConnectMatch(value: string): string[] {
+  return Array.from(
+    new Set(
+      value
+        .replace(/[^\p{L}\p{N}.]+/gu, " ")
+        .split(/\s+/)
+        .map((token) => token.trim().toLowerCase())
+        .filter((token) => token.length >= 2)
+    )
+  ).slice(0, 12);
+}
+
+function extractSmartStoreProductId(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const match = value.match(/\/products\/(\d+)/i);
+  return match?.[1] ?? null;
+}
+
+async function clickShoppingConnectItemByProductName(
+  page: Page,
+  productName: string | null | undefined,
+  productFinalUrl: string | null | undefined,
+  previousArtifactCount: number,
+  brandLink: string
+): Promise<boolean> {
+  const panel = (await getShoppingConnectPanel(page)) ?? page;
+  const globalItems = page.locator("li.se-shopping-connect-item");
+  const panelItems = panel.locator("li.se-shopping-connect-item");
+  const globalCount = await globalItems.count().catch(() => 0);
+  const panelCount = await panelItems.count().catch(() => 0);
+  const items = globalCount > 0 ? globalItems : panelItems;
+  const count = Math.min(globalCount > 0 ? globalCount : panelCount, 80);
+  const targetProductId = extractSmartStoreProductId(productFinalUrl);
+
+  if (targetProductId) {
+    for (let index = 0; index < count; index += 1) {
+      const item = items.nth(index);
+      const href = await item
+        .locator("a.se-shopping-connect-search-list-item-link")
+        .first()
+        .getAttribute("href")
+        .catch(() => null);
+      if (!href || !href.includes(`/products/${targetProductId}`)) continue;
+
+      const itemName = ((await item.locator(".se-shopping-connect-item-name").first().textContent().catch(() => "")) || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      console.log(
+        `   쇼핑커넥트 상품 선택: ${itemName || `상품번호 ${targetProductId}`} (smartstoreProductId=${targetProductId})`
+      );
+
+      const addButton = item.locator("button.se-shopping-connect-item-add-button").first();
+      if (await addButton.isVisible().catch(() => false)) {
+        await addButton.click({ timeout: 2000 }).catch(() => {});
+      } else {
+        await item.click({ timeout: 2000 }).catch(() => {});
+      }
+
+      return confirmShoppingConnectAddition(page, brandLink, previousArtifactCount, 12000);
+    }
+
+    const clickedByDom: { clicked: boolean; itemCount: number; text?: string; href?: string } = await page
+      .evaluate(
+        (smartstoreProductId): { clicked: boolean; itemCount: number; text?: string; href?: string } => {
+          const isVisible = (element: Element): boolean => {
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+          };
+          const itemElements = Array.from(document.querySelectorAll("li.se-shopping-connect-item"));
+
+          for (const itemElement of itemElements) {
+            if (!isVisible(itemElement)) continue;
+
+            const linkElement = itemElement.querySelector("a.se-shopping-connect-search-list-item-link");
+            const href = linkElement?.getAttribute("href") || "";
+            if (!href.includes(`/products/${smartstoreProductId}`)) continue;
+
+            const addButton = itemElement.querySelector("button.se-shopping-connect-item-add-button") as HTMLElement | null;
+            const fallbackButton = itemElement.querySelector("button") as HTMLElement | null;
+            const clickTarget = addButton || fallbackButton || (itemElement as HTMLElement);
+            clickTarget.scrollIntoView({ block: "center", inline: "center" });
+            clickTarget.click();
+
+            return {
+              clicked: true,
+              itemCount: itemElements.length,
+              text: (itemElement.textContent || "").replace(/\s+/g, " ").trim().slice(0, 160),
+              href,
+            };
+          }
+
+          return { clicked: false, itemCount: itemElements.length };
+        },
+        targetProductId
+      )
+      .catch(() => ({ clicked: false, itemCount: 0 }));
+
+    if (clickedByDom.clicked) {
+      console.log(
+        `   shopping-connect product selected by DOM: ${clickedByDom.text || clickedByDom.href || targetProductId}`
+      );
+      return confirmShoppingConnectAddition(page, brandLink, previousArtifactCount, 12000);
+    }
+
+    console.log(`   쇼핑커넥트 상품번호 매칭 실패: smartstoreProductId=${targetProductId}`);
+  }
+
+  const tokens = tokenizeForShoppingConnectMatch(productName || "");
+  if (tokens.length === 0) return false;
+
+  let bestIndex = -1;
+  let bestScore = 0;
+
+  for (let index = 0; index < count; index += 1) {
+    const item = items.nth(index);
+    const text = ((await item.innerText().catch(() => "")) || "").toLowerCase();
+    if (!text) continue;
+
+    let score = 0;
+    for (const token of tokens) {
+      if (text.includes(token)) score += token.length >= 4 ? 2 : 1;
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = index;
+    }
+  }
+
+  const minimumScore = Math.min(4, Math.max(2, Math.ceil(tokens.length / 3)));
+  if (bestIndex < 0 || bestScore < minimumScore) {
+    console.log(
+      `   쇼핑커넥트 상품명 매칭 실패: score=${bestScore}, 기준=${minimumScore}, tokens=${tokens.join(", ")}`
+    );
+    return false;
+  }
+
+  const item = items.nth(bestIndex);
+  const itemName = ((await item.locator(".se-shopping-connect-item-name").first().innerText().catch(() => "")) || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  console.log(`   쇼핑커넥트 상품 선택: ${itemName || `목록 ${bestIndex + 1}번째`} (score=${bestScore})`);
+
+  const addButton = item.locator("button.se-shopping-connect-item-add-button").first();
+  if (await addButton.isVisible().catch(() => false)) {
+    await addButton.click({ timeout: 2000 }).catch(() => {});
+  } else {
+    await item.click({ timeout: 2000 }).catch(() => {});
+  }
+
+  return confirmShoppingConnectAddition(page, brandLink, previousArtifactCount, 12000);
+}
+
+async function insertShoppingConnectLink(
+  page: Page,
+  brandLink: string,
+  productName?: string | null,
+  productFinalUrl?: string | null
+): Promise<void> {
+  console.log("   쇼핑커넥트 링크 삽입...");
+  await setNaverTextFormat(page, "text");
+  await page.keyboard.press("Enter").catch(() => {});
+  await page.waitForTimeout(250);
+
+  const previousArtifactCount = await countEditorShoppingConnectArtifacts(page, brandLink);
+
+  if (!(await openShoppingConnectTool(page))) {
+    throw new Error("쇼핑커넥트 메뉴를 열지 못했습니다.");
+  }
+
+  if (productName?.trim() || productFinalUrl?.trim()) {
+    const pickedByName = await clickShoppingConnectItemByProductName(
+      page,
+      productName,
+      productFinalUrl,
+      previousArtifactCount,
+      brandLink
+    );
+    if (pickedByName) {
+      await page.waitForTimeout(500);
+      await page.keyboard.press("Enter").catch(() => {});
+      console.log("   쇼핑커넥트 링크 삽입 완료");
+      return;
+    }
+  }
+
+  const searchTerms = buildShoppingConnectSearchTerms(productName, productFinalUrl, brandLink);
+  let searched = false;
+
+  for (const searchTerm of searchTerms) {
+    const searchEntered = await fillShoppingConnectSearch(page, searchTerm);
+    if (!searchEntered) {
+      console.log("   쇼핑커넥트 검색창 없음, 표시된 상품 목록에서 선택을 시도합니다.");
+      break;
+    }
+
+    searched = true;
+    if (await chooseShoppingConnectResult(page, brandLink, productName, productFinalUrl, previousArtifactCount)) {
+      await page.waitForTimeout(500);
+      await page.keyboard.press("Enter").catch(() => {});
+      console.log("   쇼핑커넥트 링크 삽입 완료");
+      return;
+    }
+  }
+
+  if (!searched && !(productName?.trim() || productFinalUrl?.trim())) {
+    if (
+      await chooseShoppingConnectResult(page, brandLink, productName, productFinalUrl, previousArtifactCount, {
+        allowGenericSelection: true,
+      })
+    ) {
+      await page.waitForTimeout(500);
+      await page.keyboard.press("Enter").catch(() => {});
+      console.log("   쇼핑커넥트 링크 삽입 완료");
+      return;
+    }
+  }
+
+  await captureShoppingConnectArtifacts(page, "selection-failed");
+  if (!(await waitForShoppingConnectInserted(page, brandLink, previousArtifactCount, 1500))) {
+    throw new Error("쇼핑커넥트 검색 결과를 선택/삽입하지 못했습니다.");
+  }
+
+  await page.waitForTimeout(500);
+  await page.keyboard.press("Enter").catch(() => {});
+  console.log("   쇼핑커넥트 링크 삽입 완료");
+}
+
 async function insertNaverHorizontalDivider(page: Page): Promise<boolean> {
   const clicked = await clickFirstVisible(page, [
     'button[data-name="horizontal-line"][data-value="default"]',
@@ -3243,7 +6720,14 @@ async function step5and6_uploadAndWrite(
   imagePaths: string[],
   sections: string[],
   hashtags: string[],
-  options?: { useSectionHeading?: boolean }
+  options?: {
+    useSectionHeading?: boolean;
+    shoppingConnectUrl?: string;
+    shoppingConnectProductName?: string | null;
+    shoppingConnectProductFinalUrl?: string | null;
+    requiredFirstImagePath?: string | null;
+    connectKind?: "SHOPPING" | "TRAVEL";
+  }
 ): Promise<void> {
   console.log("\n📝 STEP 5+6: 이미지 + 본문 번갈아 입력");
   const useSectionHeading = options?.useSectionHeading ?? true;
@@ -3265,9 +6749,17 @@ async function step5and6_uploadAndWrite(
     if (i < imagePaths.length) {
       console.log(`   [${i + 1}] 🖼️ 이미지 업로드...`);
       const success = await uploadOneImage(page, imagePaths[i]);
-      if (success) uploadedCount++;
+      if (success) {
+        uploadedCount++;
+      } else if (
+        i === 0 &&
+        options?.requiredFirstImagePath &&
+        path.resolve(imagePaths[i]) === path.resolve(options.requiredFirstImagePath)
+      ) {
+        throw new Error(`썸네일 첫 이미지 업로드 확인 실패: ${path.basename(imagePaths[i])}`);
+      }
     }
-    
+
     // 텍스트 섹션 입력 (있으면)
     if (i < mainSections.length) {
       console.log(`   [${i + 1}] ✏️ 텍스트 입력 (${mainSections[i].length}자)`);
@@ -3280,6 +6772,20 @@ async function step5and6_uploadAndWrite(
     console.log(`   [마무리] ✏️ 텍스트 입력 (${tailSection.length}자)`);
     await inputTextSection(page, tailSection, { useSectionHeading: false });
     await page.waitForTimeout(300);
+  }
+
+  if (options?.shoppingConnectUrl) {
+    if (options.connectKind === "TRAVEL") {
+      throw new Error(
+        "여행커넥트 에디터 삽입 계약이 아직 확인되지 않았습니다. 잘못된 링크 삽입을 막기 위해 발행을 중단합니다."
+      );
+    }
+    await insertShoppingConnectLink(
+      page,
+      options.shoppingConnectUrl,
+      options.shoppingConnectProductName,
+      options.shoppingConnectProductFinalUrl
+    );
   }
   
   // 해시태그 (맨 마지막) - 스페이스 제거하여 태그 깨짐 방지
@@ -3298,6 +6804,12 @@ type PublishMode = "now" | "schedule";
 interface PublishExecutionOptions {
   mode: PublishMode;
   scheduledDate?: Date | null;
+  scheduledTimeLabel?: string | null;
+}
+
+interface AppliedScheduleSettings {
+  date: Date;
+  timeLabel: string | null;
 }
 
 function formatDateYmd(date: Date): string {
@@ -3341,8 +6853,16 @@ function formatDateYmdInTimeZone(date: Date, timeZone: string): string {
   ).padStart(2, "0")}`;
 }
 
-function formatDateLog(date: Date): string {
-  return `${formatDateYmd(date)} 09:00`;
+function formatDateLog(date: Date, timeLabel = NAVER_DEFAULT_SCHEDULE_TIME_LABEL): string {
+  return `${formatDateYmd(date)} ${timeLabel}`;
+}
+
+function getDefaultScheduleTime(): { hour: string; minute: string; label: string } {
+  return {
+    hour: String(NAVER_DEFAULT_SCHEDULE_HOUR).padStart(2, "0"),
+    minute: String(NAVER_DEFAULT_SCHEDULE_MINUTE).padStart(2, "0"),
+    label: NAVER_DEFAULT_SCHEDULE_TIME_LABEL,
+  };
 }
 
 function toScheduleTimeLabel(hour: string, minute: string): string | null {
@@ -3356,8 +6876,29 @@ function toScheduleTimeLabel(hour: string, minute: string): string | null {
   return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
 }
 
+function parseScheduleTimeLabel(timeLabel: string | null | undefined): { hour: number; minute: number } | null {
+  if (!timeLabel) return null;
+  const match = timeLabel.match(/(\d{1,2})[:시](\d{1,2})/);
+  if (!match) return null;
+  const normalized = toScheduleTimeLabel(match[1], match[2]);
+  if (!normalized) return null;
+  const [hourText, minuteText] = normalized.split(":");
+  return {
+    hour: Number.parseInt(hourText, 10),
+    minute: Number.parseInt(minuteText, 10),
+  };
+}
+
 function toNextDayAtNine(date: Date): Date {
-  const next = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 9, 0, 0, 0);
+  const next = new Date(
+    date.getFullYear(),
+    date.getMonth(),
+    date.getDate(),
+    NAVER_DEFAULT_SCHEDULE_HOUR,
+    NAVER_DEFAULT_SCHEDULE_MINUTE,
+    0,
+    0
+  );
   next.setDate(next.getDate() + 1);
   return next;
 }
@@ -3378,7 +6919,15 @@ function parseYmdToLocalDate(ymd: string): Date | null {
   const year = Number.parseInt(match[1], 10);
   const month = Number.parseInt(match[2], 10);
   const day = Number.parseInt(match[3], 10);
-  const parsed = new Date(year, month - 1, day, 9, 0, 0, 0);
+  const parsed = new Date(
+    year,
+    month - 1,
+    day,
+    NAVER_DEFAULT_SCHEDULE_HOUR,
+    NAVER_DEFAULT_SCHEDULE_MINUTE,
+    0,
+    0
+  );
   if (
     parsed.getFullYear() !== year ||
     parsed.getMonth() !== month - 1 ||
@@ -3387,6 +6936,24 @@ function parseYmdToLocalDate(ymd: string): Date | null {
     return null;
   }
   return parsed;
+}
+
+function createScheduledPublishDate(ymd: string, timeLabel: string | null | undefined): Date | null {
+  const date = parseYmdToLocalDate(ymd);
+  if (!date) return null;
+  const parsedTime = parseScheduleTimeLabel(timeLabel) ?? {
+    hour: NAVER_DEFAULT_SCHEDULE_HOUR,
+    minute: NAVER_DEFAULT_SCHEDULE_MINUTE,
+  };
+  return new Date(
+    date.getFullYear(),
+    date.getMonth(),
+    date.getDate(),
+    parsedTime.hour,
+    parsedTime.minute,
+    0,
+    0
+  );
 }
 
 function normalizeDateCandidate(value: string): string {
@@ -3427,6 +6994,57 @@ function isScheduleDateTimeFuture(
   const nowMinutes = nowParts.hour * 60 + nowParts.minute;
   const targetMinutes = targetHour * 60 + targetMinute;
   return targetMinutes > nowMinutes;
+}
+
+function isScheduleDateTimeSchedulable(
+  targetYmd: string,
+  targetTimeLabel: string,
+  timeZone: string,
+  minLeadMinutes: number
+): boolean {
+  const timeMatch = targetTimeLabel.match(/^(\d{1,2}):(\d{1,2})$/);
+  if (!timeMatch) return false;
+
+  const targetHour = Number.parseInt(timeMatch[1], 10);
+  const targetMinute = Number.parseInt(timeMatch[2], 10);
+  if (!Number.isFinite(targetHour) || !Number.isFinite(targetMinute)) return false;
+
+  const now = new Date();
+  const nowYmd = formatDateYmdInTimeZone(now, timeZone);
+  if (targetYmd > nowYmd) return true;
+  if (targetYmd < nowYmd) return false;
+
+  const nowParts = getDatePartsInTimeZone(now, timeZone);
+  const nowMinutes = nowParts.hour * 60 + nowParts.minute;
+  const targetMinutes = targetHour * 60 + targetMinute;
+  return targetMinutes - nowMinutes >= minLeadMinutes;
+}
+
+function nextSchedulableDateAtDefaultTime(): Date {
+  const candidate = new Date();
+  candidate.setHours(
+    NAVER_DEFAULT_SCHEDULE_HOUR,
+    NAVER_DEFAULT_SCHEDULE_MINUTE,
+    0,
+    0
+  );
+
+  for (let attempt = 0; attempt < 370; attempt += 1) {
+    const ymd = formatDateYmd(candidate);
+    if (
+      isScheduleDateTimeSchedulable(
+        ymd,
+        NAVER_DEFAULT_SCHEDULE_TIME_LABEL,
+        NAVER_SCHEDULE_TIMEZONE,
+        NAVER_SCHEDULE_MIN_LEAD_MINUTES
+      )
+    ) {
+      return candidate;
+    }
+    candidate.setDate(candidate.getDate() + 1);
+  }
+
+  return toNextDayAtNine(new Date());
 }
 
 async function getSchedulePanelLocator(page: Page): Promise<Locator> {
@@ -4056,33 +7674,8 @@ async function captureStep7Artifacts(page: Page, reason: string): Promise<void> 
   }
 }
 
-function resolveScheduleTimeForDate(
-  scheduledDate: Date,
-  futureBufferMinutes = 120
-): { hour: string; minute: string; label: string } {
-  const now = new Date();
-  const scheduledYmd = formatDateYmd(scheduledDate);
-  const nowYmdInTimezone = formatDateYmdInTimeZone(now, NAVER_SCHEDULE_TIMEZONE);
-  const isSameDay = scheduledYmd === nowYmdInTimezone;
-
-  if (!isSameDay) {
-    return { hour: "09", minute: "00", label: "09:00" };
-  }
-
-  const nowParts = getDatePartsInTimeZone(now, NAVER_SCHEDULE_TIMEZONE);
-  let totalMinutes = nowParts.hour * 60 + nowParts.minute + futureBufferMinutes;
-  totalMinutes = Math.ceil(totalMinutes / 10) * 10;
-  if (totalMinutes > 23 * 60 + 50) {
-    totalMinutes = 23 * 60 + 50;
-  }
-  const hour = String(Math.floor(totalMinutes / 60)).padStart(2, "0");
-  const minute = String(totalMinutes % 60).padStart(2, "0");
-
-  return {
-    hour,
-    minute,
-    label: `${hour}:${minute}`,
-  };
+function resolveScheduleTimeForDate(): { hour: string; minute: string; label: string } {
+  return getDefaultScheduleTime();
 }
 
 function isScheduleTimeFutureForDate(scheduledDate: Date, timeLabel: string): boolean {
@@ -4106,71 +7699,70 @@ function isScheduleTimeFutureForDate(scheduledDate: Date, timeLabel: string): bo
 }
 
 async function trySetScheduleTimeInputs(page: Page, scheduledDate: Date): Promise<string | null> {
-  const bufferCandidates = [120, 180, 240];
-  for (const bufferMinutes of bufferCandidates) {
-    const targetTime = resolveScheduleTimeForDate(scheduledDate, bufferMinutes);
+  const targetTime = resolveScheduleTimeForDate();
 
-    const timeInput = page.locator('input[type="time"]').first();
-    const hasTimeInput = await timeInput.isVisible().catch(() => false);
-    if (hasTimeInput) {
-      await timeInput.fill(targetTime.label, { timeout: 1200 }).catch(() => {});
-      await timeInput.dispatchEvent("input").catch(() => {});
-      await timeInput.dispatchEvent("change").catch(() => {});
-      await timeInput.evaluate((element) => (element as { blur?: () => void }).blur?.()).catch(() => {});
-      await page.waitForTimeout(200);
-      const appliedValue = await timeInput.inputValue().catch(() => targetTime.label);
-      if (isScheduleTimeFutureForDate(scheduledDate, appliedValue)) {
-        return appliedValue;
-      }
-      continue;
+  const timeInput = page.locator('input[type="time"]').first();
+  const hasTimeInput = await timeInput.isVisible().catch(() => false);
+  if (hasTimeInput) {
+    await timeInput.fill(targetTime.label, { timeout: 1200 }).catch(() => {});
+    await timeInput.dispatchEvent("input").catch(() => {});
+    await timeInput.dispatchEvent("change").catch(() => {});
+    await timeInput.evaluate((element) => (element as { blur?: () => void }).blur?.()).catch(() => {});
+    await page.waitForTimeout(200);
+    const appliedValue = await timeInput.inputValue().catch(() => targetTime.label);
+    const appliedTime = parseScheduleTimeLabel(appliedValue);
+    const appliedLabel = appliedTime
+      ? `${String(appliedTime.hour).padStart(2, "0")}:${String(appliedTime.minute).padStart(2, "0")}`
+      : targetTime.label;
+    if (isScheduleTimeFutureForDate(scheduledDate, appliedLabel)) {
+      return appliedLabel;
     }
+    return null;
+  }
 
-    const hourSelect = page
-      .locator('select[name*="hour" i], select[id*="hour" i], select[class*="hour" i]')
-      .first();
-    const minuteSelect = page
-      .locator('select[name*="minute" i], select[id*="minute" i], select[class*="minute" i]')
-      .first();
-    const hasHour = await hourSelect.isVisible().catch(() => false);
-    const hasMinute = await minuteSelect.isVisible().catch(() => false);
+  const hourSelect = page
+    .locator('select[name*="hour" i], select[id*="hour" i], select[class*="hour" i]')
+    .first();
+  const minuteSelect = page
+    .locator('select[name*="minute" i], select[id*="minute" i], select[class*="minute" i]')
+    .first();
+  const hasHour = await hourSelect.isVisible().catch(() => false);
+  const hasMinute = await minuteSelect.isVisible().catch(() => false);
 
-    if (hasHour && hasMinute) {
-      await hourSelect
-        .selectOption(
-          [
-            { value: targetTime.hour },
-            { value: String(Number(targetTime.hour)) },
-            { label: targetTime.hour },
-            { label: String(Number(targetTime.hour)) },
-          ],
-          {
-            timeout: 1200,
-          }
-        )
-        .catch(() => {});
-      await minuteSelect
-        .selectOption(
-          [
-            { value: targetTime.minute },
-            { value: String(Number(targetTime.minute)) },
-            { label: targetTime.minute },
-            { label: String(Number(targetTime.minute)) },
-          ],
-          {
-            timeout: 1200,
-          }
-        )
-        .catch(() => {});
-      await page.waitForTimeout(200);
-      const appliedHour = await hourSelect.inputValue().catch(() => targetTime.hour);
-      const appliedMinute = await minuteSelect.inputValue().catch(() => targetTime.minute);
-      const appliedLabel = `${appliedHour.padStart(2, "0")}:${appliedMinute.padStart(2, "0")}`;
-      if (isScheduleTimeFutureForDate(scheduledDate, appliedLabel)) {
-        return appliedLabel;
-      }
-      continue;
+  if (hasHour && hasMinute) {
+    await hourSelect
+      .selectOption(
+        [
+          { value: targetTime.hour },
+          { value: String(Number(targetTime.hour)) },
+          { label: targetTime.hour },
+          { label: String(Number(targetTime.hour)) },
+        ],
+        {
+          timeout: 1200,
+        }
+      )
+      .catch(() => {});
+    await minuteSelect
+      .selectOption(
+        [
+          { value: targetTime.minute },
+          { value: String(Number(targetTime.minute)) },
+          { label: targetTime.minute },
+          { label: String(Number(targetTime.minute)) },
+        ],
+        {
+          timeout: 1200,
+        }
+      )
+      .catch(() => {});
+    await page.waitForTimeout(200);
+    const appliedHour = await hourSelect.inputValue().catch(() => targetTime.hour);
+    const appliedMinute = await minuteSelect.inputValue().catch(() => targetTime.minute);
+    const appliedLabel = toScheduleTimeLabel(appliedHour, appliedMinute) ?? targetTime.label;
+    if (isScheduleTimeFutureForDate(scheduledDate, appliedLabel)) {
+      return appliedLabel;
     }
-
     return null;
   }
 
@@ -4432,7 +8024,7 @@ async function ensureScheduleDateTimeFuture(
   };
 }
 
-async function configureSchedulePublish(page: Page, scheduledDate: Date): Promise<Date> {
+async function configureSchedulePublish(page: Page, scheduledDate: Date): Promise<AppliedScheduleSettings> {
   console.log(`   📅 예약 발행 설정: ${formatDateLog(scheduledDate)}`);
 
   let scheduleModeSelected = await clickFirstVisible(page, [
@@ -4537,7 +8129,10 @@ async function configureSchedulePublish(page: Page, scheduledDate: Date): Promis
   }
 
   // 날짜 입력 이후 ESC를 누르면 예약 레이어 자체가 닫힐 수 있으므로 사용하지 않는다.
-  return ensured.effectiveDate;
+  return {
+    date: ensured.effectiveDate,
+    timeLabel: ensured.appliedTimeLabel,
+  };
 }
 
 interface LayerNodeRef {
@@ -4753,8 +8348,9 @@ async function step7_publish(
       throw new Error("예약 발행 날짜가 지정되지 않았습니다.");
     }
     try {
-      const effectiveScheduleDate = await configureSchedulePublish(page, options.scheduledDate);
-      options.scheduledDate = effectiveScheduleDate;
+      const appliedSchedule = await configureSchedulePublish(page, options.scheduledDate);
+      options.scheduledDate = appliedSchedule.date;
+      options.scheduledTimeLabel = appliedSchedule.timeLabel;
     } catch (error) {
       await captureStep7Artifacts(page, "configure-failed");
       throw error;
@@ -4858,7 +8454,15 @@ function parseScheduledDateInput(value: string): Date | null {
   const month = Number.parseInt(monthText, 10);
   const day = Number.parseInt(dayText, 10);
 
-  const date = new Date(year, month - 1, day, 9, 0, 0, 0);
+  const date = new Date(
+    year,
+    month - 1,
+    day,
+    NAVER_DEFAULT_SCHEDULE_HOUR,
+    NAVER_DEFAULT_SCHEDULE_MINUTE,
+    0,
+    0
+  );
   if (
     date.getFullYear() !== year ||
     date.getMonth() !== month - 1 ||
@@ -4872,25 +8476,18 @@ function parseScheduledDateInput(value: string): Date | null {
 
 function normalizePastScheduledDate(date: Date): { date: Date; adjustedFromPast: boolean } {
   const requestedYmd = formatDateYmd(date);
-  const todayYmd = formatDateYmdInTimeZone(new Date(), NAVER_SCHEDULE_TIMEZONE);
-  if (requestedYmd > todayYmd) {
+  if (
+    isScheduleDateTimeSchedulable(
+      requestedYmd,
+      NAVER_DEFAULT_SCHEDULE_TIME_LABEL,
+      NAVER_SCHEDULE_TIMEZONE,
+      NAVER_SCHEDULE_MIN_LEAD_MINUTES
+    )
+  ) {
     return { date, adjustedFromPast: false };
   }
 
-  const nowParts = getDatePartsInTimeZone(new Date(), NAVER_SCHEDULE_TIMEZONE);
-  const midnightUtc = Date.UTC(nowParts.year, nowParts.month - 1, nowParts.day, 0, 0, 0, 0);
-  const tomorrowUtc = new Date(midnightUtc + 24 * 60 * 60 * 1000);
-  const tomorrow = new Date(
-    tomorrowUtc.getUTCFullYear(),
-    tomorrowUtc.getUTCMonth(),
-    tomorrowUtc.getUTCDate(),
-    9,
-    0,
-    0,
-    0
-  );
-  tomorrow.setHours(9, 0, 0, 0);
-  return { date: tomorrow, adjustedFromPast: true };
+  return { date: nextSchedulableDateAtDefaultTime(), adjustedFromPast: true };
 }
 
 function parseRuntimePublishOptions(argv: string[]): RuntimePublishOptions {
@@ -4974,6 +8571,12 @@ async function main() {
     console.error("❌ 링크를 찾을 수 없습니다.");
     process.exit(1);
   }
+  if (link.connectKind === "TRAVEL") {
+    console.error(
+      "❌ 여행커넥트 에디터 삽입 계약이 아직 확인되지 않았습니다. 잘못된 초안 생성을 막기 위해 브라우저 실행 전에 중단합니다."
+    );
+    process.exit(1);
+  }
   
   console.log(`\n📎 URL: ${link.url}`);
   console.log(`📂 게시판 번호: ${link.categoryNo || "기본"}`);
@@ -4987,7 +8590,7 @@ async function main() {
   );
   if (runtimePublishOptions.adjustedFromPast && runtimePublishOptions.scheduledDateInput) {
     console.log(
-      `   ⚠️ 과거 또는 당일 날짜가 입력되어 예약발행일을 ${runtimePublishOptions.scheduledDateInput}로 자동 조정했습니다.`
+      `   ⚠️ 예약 가능한 ${NAVER_DEFAULT_SCHEDULE_TIME_LABEL} 시각이 지나 예약발행일을 ${runtimePublishOptions.scheduledDateInput}로 자동 조정했습니다.`
     );
   }
   
@@ -5030,13 +8633,13 @@ async function main() {
     browser = await chromium.launch({
       headless: false,
       slowMo: 80,  // 더 자연스러운 속도
-      channel: process.env.BROWSER_CHANNEL || undefined, // 패키징 시 시스템 Chrome 사용
       args: [
         '--disable-blink-features=AutomationControlled',
         '--disable-features=IsolateOrigins,site-per-process',
+        '--disable-dev-shm-usage',
       ],
     });
-
+    
     const context = await browser.newContext({
       storageState: SESSION_FILE,
       viewport: { width: 1280, height: 900 },
@@ -5111,34 +8714,72 @@ async function main() {
     
     setStage("STEP2 SEO 글 생성");
     // STEP 2: SEO 최적화 글 생성
-    const post = await step2_generatePost(product, link.url);
+    const post = await step2_generatePost(product, link.url, link.id);
 
     setStage("STEP2.5 대표 썸네일 생성");
-    const generatedThumbnailPath = generateTopTextCutoutThumbnail(
-      product.imagePaths,
-      post.title,
-      product.name
+    const generatedThumbnail = await generateTopTextCutoutThumbnail(
+      product,
+      post.title
     );
-    product.imagePaths = Array.from(
+    const generatedThumbnailPath = generatedThumbnail?.path || null;
+    const collectedImagePaths = Array.from(
       new Set([
         ...(generatedThumbnailPath ? [generatedThumbnailPath] : []),
         ...(product.representativeImagePath ? [product.representativeImagePath] : []),
         ...product.imagePaths,
       ])
     );
+    const uploadImagePaths = await buildBlogUploadImagePaths({
+      imagePaths: collectedImagePaths,
+      generatedThumbnailPath,
+      representativeImagePath: product.representativeImagePath,
+    });
+    product.imagePaths = uploadImagePaths;
     if (generatedThumbnailPath) {
       console.log(
-        `   ✅ 이미지 우선순위: [썸네일, 대표이미지, 본문이미지...] (${product.imagePaths.length}개)`
+        `   ✅ 이미지 우선순위: [썸네일(${generatedThumbnail?.source}), 대표이미지, 본문이미지...] (${product.imagePaths.length}개)`
       );
     } else {
       console.log(
         `   ✅ 이미지 우선순위: [대표이미지, 본문이미지...] (${product.imagePaths.length}개)`
       );
     }
+    const skippedUploadImageCount = Math.max(0, collectedImagePaths.length - uploadImagePaths.length);
+    if (skippedUploadImageCount > 0) {
+      console.log(
+        `   🧹 본문 이미지 필터: 상세페이지 조각/설명판 후보 ${skippedUploadImageCount}개 제외, 업로드 ${uploadImagePaths.length}개`
+      );
+    }
+
+    let contentReadiness: BrandLinkContentReadiness | null = null;
+    if (BRANDLINK_CONTENT_READINESS_ENABLED) {
+      contentReadiness = getBrandLinkContentReadiness({
+        productName: product.name,
+        title: post.title,
+        sections: post.sections,
+        hashtags: post.hashtags,
+        brandLink: link.url,
+        hasRepresentativeImage: Boolean(product.representativeImagePath),
+        requireRepresentativeImage: BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE,
+        thumbnailGenerated:
+          Boolean(generatedThumbnailPath) && generatedThumbnail?.source !== "composite",
+      });
+
+      console.log(`   🧪 상품글 발행 게이트: ${contentReadiness.summary}`);
+      for (const signal of contentReadiness.signals) {
+        const mark =
+          signal.status === "pass" ? "PASS" : signal.status === "warn" ? "WARN" : "FAIL";
+        console.log(`      - ${mark} ${signal.label}`);
+      }
+
+      if (!contentReadiness.canPublish) {
+        throw new Error(contentReadiness.reason || contentReadiness.summary);
+      }
+    }
 
     let previewPath: string | null = null;
     if (DEBUG_SAVE_GENERATED_POST || DRY_RUN_GENERATE_ONLY) {
-      previewPath = saveGeneratedPostPreview(linkId, post, product);
+      previewPath = saveGeneratedPostPreview(linkId, post, product, contentReadiness);
       console.log(`   🧾 생성 결과 저장: ${previewPath}`);
     }
 
@@ -5168,6 +8809,11 @@ async function main() {
     // STEP 5+6: 이미지와 본문 번갈아 입력
     await step5and6_uploadAndWrite(page, product.imagePaths, post.sections, post.hashtags, {
       useSectionHeading: link.useSectionHeading,
+      shoppingConnectUrl: link.url,
+      shoppingConnectProductName: product.name,
+      shoppingConnectProductFinalUrl: product.finalUrl || link.finalUrl,
+      requiredFirstImagePath: generatedThumbnailPath,
+      connectKind: link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
     });
     
     setStage(runtimePublishOptions.mode === "schedule" ? "STEP7 예약 발행" : "STEP7 즉시 발행");
@@ -5185,11 +8831,18 @@ async function main() {
       setStage("예약 발행 완료 처리");
       const scheduledDate = publishOptions.scheduledDate;
       const scheduledDateInput = scheduledDate ? formatDateYmd(scheduledDate) : runtimePublishOptions.scheduledDateInput;
+      const scheduledTimeLabel =
+        publishOptions.scheduledTimeLabel ??
+        toScheduleTimeLabel(
+          String(scheduledDate?.getHours() ?? NAVER_DEFAULT_SCHEDULE_HOUR),
+          String(scheduledDate?.getMinutes() ?? NAVER_DEFAULT_SCHEDULE_MINUTE)
+        ) ??
+        NAVER_DEFAULT_SCHEDULE_TIME_LABEL;
       if (!scheduledDate || !scheduledDateInput) {
         throw new Error("예약 발행 날짜가 누락되었습니다.");
       }
-      const scheduledDateForDb = new Date(`${scheduledDateInput}T00:00:00.000Z`);
-      if (Number.isNaN(scheduledDateForDb.getTime())) {
+      const scheduledDateForDb = createScheduledPublishDate(scheduledDateInput, scheduledTimeLabel);
+      if (!scheduledDateForDb || Number.isNaN(scheduledDateForDb.getTime())) {
         throw new Error("예약 발행 날짜 저장 형식이 올바르지 않습니다.");
       }
 
@@ -5201,10 +8854,15 @@ async function main() {
           `   ⚠️ 예약 시간이 현재 시간보다 과거여서 예약발행일을 ${runtimePublishOptions.scheduledDateInput} → ${scheduledDateInput}로 조정했습니다.`
         );
       }
+      if (scheduledTimeLabel !== NAVER_DEFAULT_SCHEDULE_TIME_LABEL) {
+        console.log(
+          `   ⚠️ 예약 시간이 ${NAVER_DEFAULT_SCHEDULE_TIME_LABEL} → ${scheduledTimeLabel}로 적용되었습니다.`
+        );
+      }
 
       console.log("\n" + "=".repeat(50));
       console.log("🗓️ 예약 발행 등록 완료!");
-      console.log(`📅 예약발행일: ${scheduledDateInput} 09:00`);
+      console.log(`📅 예약발행일: ${scheduledDateInput} ${scheduledTimeLabel}`);
       console.log(`📦 상품: ${product.name}`);
       console.log(`🖼️ 이미지: ${product.imagePaths.length}개`);
       console.log(`📝 섹션: ${post.sections.length}개`);
@@ -5221,6 +8879,30 @@ async function main() {
           scheduledPublishAt: scheduledDateForDb,
         },
       });
+
+      if ((process.env.CHATBOT_NOTIFY_SINGLE || "").toLowerCase() === "true") {
+        await notifyAndLogCompletion({
+          taskType: "brandconnect.publish.schedule",
+          title: "예약 발행 등록 완료",
+          summary: `${product.name} 예약발행 등록 완료 (${scheduledDateInput} ${scheduledTimeLabel})`,
+          successCount: 1,
+          failedCount: 0,
+          links: [
+            {
+              label: product.name,
+              url: buildAppUrl(`/?brandLinkId=${linkId}`),
+              scheduledDate: scheduledDateInput,
+              status: "SCHEDULED",
+              description: "예약발행 확인",
+            },
+          ],
+          extra: {
+            linkId,
+            scheduledDate: scheduledDateInput,
+            scheduledTime: scheduledTimeLabel,
+          },
+        });
+      }
     } else {
       setStage("즉시 발행 URL 확인");
       const publishedUrl = await waitForPublishedUrl(page, 25000);
@@ -5247,6 +8929,27 @@ async function main() {
           scheduledPublishAt: null,
         },
       });
+
+      if ((process.env.CHATBOT_NOTIFY_SINGLE || "").toLowerCase() === "true") {
+        await notifyAndLogCompletion({
+          taskType: "brandconnect.publish.now",
+          title: "바로 발행 완료",
+          summary: `${product.name} 발행 완료`,
+          successCount: 1,
+          failedCount: 0,
+          links: [
+            {
+              label: product.name,
+              url: publishedUrl,
+              status: "PUBLISHED",
+              description: "발행글",
+            },
+          ],
+          extra: {
+            linkId,
+          },
+        });
+      }
     }
     
     // 임시 파일 정리

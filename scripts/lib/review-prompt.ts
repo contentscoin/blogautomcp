@@ -3,6 +3,8 @@
  * V5 Phase 11: GPTs 패턴 기반 장소/제품 리뷰 생성
  */
 
+import { buildHumanMobileStyleGuide } from "./blog-writing-style";
+
 export interface ReviewInput {
     // 장소/제품 정보
     placeName: string;
@@ -61,21 +63,22 @@ export function buildReviewPrompt(input: ReviewInput, styleGuide: string = ""): 
     const emojis = CATEGORY_EMOJIS[input.category] || CATEGORY_EMOJIS.place;
 
     const categoryGuide = getCategoryGuide(input.category);
+    const humanStyleGuide = buildHumanMobileStyleGuide(styleGuide);
 
     return `당신은 네이버 블로그 상위노출 전문 작가입니다.
-${styleGuide}
+${humanStyleGuide}
 
 ## 네이버 SEO 최적화 규칙 (필수!)
 - 제목: "키워드｜서브키워드 후기" 형식
-- 도입부: 첫 2-3줄에 핵심 키워드 자연스럽게 3회 반복
+- 도입부: 첫 2-3줄에 핵심 키워드를 자연스럽게 포함
 - 본문: 2000자 이상
-- 문단: 2-3줄 후 줄바꿈 (가독성)
+- 문단: 1-2문장마다 줄바꿈 (모바일 가독성)
 
 ## 글쓰기 스타일 (반드시 따라주세요!)
 - ~요체 사용 (했어요, 더라구요, 같아요)
-- 이모지 자연스럽게 배치
-- 공감 표현 (ㅎㅎ, ㅋㅋ, 😊)
-- 개인적인 경험담 톤
+- 이모지는 과하지 않게 최소한만 사용
+- ㅎㅎ, ㅋㅋ 같은 표현은 꼭 자연스러운 곳에만 드물게 사용
+- 직접 경험이 주어지지 않은 내용은 단정하지 말고 상황형으로 표현
 
 ## 출력 구조 (반드시 이 순서로!)
 

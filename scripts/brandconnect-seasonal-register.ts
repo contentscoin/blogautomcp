@@ -5,6 +5,8 @@ import { chromium } from "playwright-extra";
 import type { APIResponse, Page } from "playwright";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { PrismaClient } from "@prisma/client";
+import { buildAppUrl, notifyAndLogCompletion } from "./lib/chatbot-notifier";
+import { buildCaptureRequiredPayload, parseConnectKind, resolveConnectContract, toStoredConnectKind, type ConnectKind } from "../src/lib/brandconnect-kind";
 
 chromium.use(StealthPlugin());
 
@@ -19,6 +21,27 @@ const DEFAULT_STORAGE_STATE_PATH = path.join(
 const KST_TIMEZONE = "Asia/Seoul";
 const BRANDCONNECT_MINIMIZE_WINDOW =
   (process.env.BRANDCONNECT_MINIMIZE_WINDOW || "true").toLowerCase() === "true";
+const DEFAULT_SELECTION_PROFILE = (
+  process.env.BRANDCONNECT_SELECTION_PROFILE || "seasonal-hit-popular"
+).toLowerCase();
+const BRANDCONNECT_PRODUCT_LIST_LIMIT = parsePositiveIntegerEnv(
+  "BRANDCONNECT_PRODUCT_LIST_LIMIT",
+  100,
+  50,
+  100
+);
+const BRANDCONNECT_CATEGORY_SCAN_LIMIT = parsePositiveIntegerEnv(
+  "BRANDCONNECT_CATEGORY_SCAN_LIMIT",
+  36,
+  1,
+  80
+);
+const DEFAULT_DUPLICATE_WINDOW_DAYS = parsePositiveIntegerEnv(
+  "BRANDCONNECT_DUPLICATE_WINDOW_DAYS",
+  30,
+  0,
+  3650
+);
 
 const CATEGORY_NAME_FALLBACK: Record<string, string> = {
   "오늘의 오빠": "17",
@@ -32,23 +55,42 @@ const CATEGORY_NAME_FALLBACK: Record<string, string> = {
 };
 
 interface CliOptions {
+  connectKind: ConnectKind;
   categoryUrl: string;
   count: number;
   startDate: string | null;
   intervalDays: number;
+  dailyQuota: number;
   dryRun: boolean;
   headless: boolean;
   storageStatePath: string;
+  selectionProfile: string;
+  promotionFilter: string[];
+  categoryFilter: string[];
+  duplicateWindowDays: number;
 }
 
 interface ProductApiItem {
   id: number;
   productName: string;
   storeName: string;
-  commissionRate: number;
   discountedRate: number;
   salePrice: number;
   discountedSalePrice: number;
+  salesCount: number;
+  orderCount: number;
+  purchaseCount: number;
+  reviewCount: number;
+  popularityScore: number;
+  rank: number;
+  badgeTexts: string[];
+  sourceCategoryIds: string[];
+  sourceCategoryNames: string[];
+}
+
+interface DisplayCategory {
+  id: string;
+  name: string;
 }
 
 interface CandidateProduct extends ProductApiItem {
@@ -63,7 +105,7 @@ interface PlannedProduct extends CandidateProduct {
 }
 
 interface RegisterResult {
-  action: "created" | "updated" | "skipped" | "duplicate" | "failed";
+  action: "created" | "skipped" | "duplicate" | "failed";
   productId: number;
   productName: string;
   shortUrl: string | null;
@@ -83,16 +125,26 @@ interface StoredCookie {
 
 function parseArgs(argv: string[]): CliOptions {
   const options: CliOptions = {
+    connectKind: "shopping",
     categoryUrl: DEFAULT_CATEGORY_URL,
     count: 10,
     startDate: null,
     intervalDays: 1,
+    dailyQuota: 1,
     dryRun: false,
     headless: false,
     storageStatePath: DEFAULT_STORAGE_STATE_PATH,
+    selectionProfile: DEFAULT_SELECTION_PROFILE,
+    promotionFilter: parseCommaSeparatedList(process.env.BRANDCONNECT_PROMOTION_FILTER || ""),
+    categoryFilter: parseCommaSeparatedList(process.env.BRANDCONNECT_CATEGORY_FILTER || ""),
+    duplicateWindowDays: DEFAULT_DUPLICATE_WINDOW_DAYS,
   };
 
   for (const arg of argv) {
+    if (arg.startsWith("--connect-kind=")) {
+      options.connectKind = parseConnectKind(arg.split("=")[1]);
+      continue;
+    }
     if (arg === "--dry-run") {
       options.dryRun = true;
       continue;
@@ -111,7 +163,7 @@ function parseArgs(argv: string[]): CliOptions {
     }
     if (arg.startsWith("--count=")) {
       const value = Number.parseInt(arg.split("=")[1] || "", 10);
-      if (Number.isFinite(value) && value > 0 && value <= 30) {
+      if (Number.isFinite(value) && value > 0 && value <= 200) {
         options.count = value;
       }
       continue;
@@ -130,12 +182,41 @@ function parseArgs(argv: string[]): CliOptions {
       }
       continue;
     }
+    if (arg.startsWith("--daily-quota=")) {
+      const value = Number.parseInt(arg.split("=")[1] || "", 10);
+      if (Number.isFinite(value) && value >= 1 && value <= 200) {
+        options.dailyQuota = value;
+      }
+      continue;
+    }
     if (arg.startsWith("--storage-state=")) {
       const value = arg.split("=")[1]?.trim() || "";
       if (value) {
         options.storageStatePath = path.isAbsolute(value)
           ? value
           : path.join(process.cwd(), value);
+      }
+      continue;
+    }
+    if (arg.startsWith("--selection-profile=")) {
+      const value = arg.split("=")[1]?.trim().toLowerCase() || "";
+      if (value) {
+        options.selectionProfile = value;
+      }
+      continue;
+    }
+    if (arg.startsWith("--promotion-filter=")) {
+      options.promotionFilter = parseCommaSeparatedList(arg.split("=")[1] || "");
+      continue;
+    }
+    if (arg.startsWith("--category-filter=")) {
+      options.categoryFilter = parseCommaSeparatedList(arg.split("=")[1] || "");
+      continue;
+    }
+    if (arg.startsWith("--duplicate-window-days=")) {
+      const value = Number.parseInt(arg.split("=")[1] || "", 10);
+      if (Number.isFinite(value) && value >= 0 && value <= 3650) {
+        options.duplicateWindowDays = value;
       }
     }
   }
@@ -148,6 +229,17 @@ function parseArgs(argv: string[]): CliOptions {
   }
 
   return options;
+}
+
+function parseCommaSeparatedList(value: string): string[] {
+  return Array.from(
+    new Set(
+      value
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+    )
+  );
 }
 
 function formatKstYmd(date: Date): string {
@@ -187,6 +279,140 @@ function parseNumber(value: unknown): number {
   return 0;
 }
 
+function parsePositiveIntegerEnv(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name];
+  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function parseNumberFromKeys(obj: Record<string, unknown>, keys: string[]): number {
+  for (const key of keys) {
+    if (key in obj) {
+      const value = parseNumber(obj[key]);
+      if (value > 0) return value;
+    }
+  }
+  return 0;
+}
+
+function normalizeFilterText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}.%]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function matchesAnyTerm(haystack: string, terms: string[]): boolean {
+  if (terms.length === 0) return true;
+  const normalizedHaystack = normalizeFilterText(haystack);
+  return terms.some((term) => normalizedHaystack.includes(normalizeFilterText(term)));
+}
+
+const PROMOTION_TEXT_PATTERN =
+  /(오늘출발|무료배송|쿠폰|할인|특가|핫딜|타임딜|이벤트|기획전|프로모션|혜택|베스트|인기|추천|시즌|MD\s*추천|MD추천|적립|도착보장|N배송|단독|한정|사은품|행사|선착순|증정|마감|쇼핑라이브|라이브)/i;
+const STRONG_PROMOTION_TEXT_PATTERN =
+  /(오늘출발|무료배송|쿠폰|할인|특가|핫딜|타임딜|이벤트|기획전|프로모션|혜택|MD\s*추천|MD추천|적립|도착보장|N배송|단독|한정|사은품|행사|선착순|증정|마감|쇼핑라이브|라이브)/i;
+
+function normalizePromotionText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function isPromotionLikeText(value: string): boolean {
+  const normalized = normalizePromotionText(value);
+  if (!normalized || normalized.length > 36) return false;
+  if (/https?:|brandconnect|naver\.com|상품명|productName|로그인|회원가입|고객센터/i.test(normalized)) {
+    return false;
+  }
+  if (/^\[[^\]]+\]\s+/.test(normalized) && normalized.length > 18) return false;
+  if (
+    normalized.length > 18 &&
+    /\d+(?:\.\d+)?\s*(?:ml|l|g|kg|cm|mm|개|매|팩|세트|입|봉|병|p|pa|mah|w|원)/i.test(normalized)
+  ) {
+    return false;
+  }
+  if (normalized.length > 16 && !STRONG_PROMOTION_TEXT_PATTERN.test(normalized)) return false;
+  return PROMOTION_TEXT_PATTERN.test(normalized);
+}
+
+function collectBadgeTexts(value: unknown, depth = 0): string[] {
+  if (depth > 3 || value === null || value === undefined) return [];
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed ? [trimmed] : [];
+  }
+  if (typeof value === "number" || typeof value === "boolean") return [];
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => collectBadgeTexts(entry, depth + 1));
+  }
+  if (typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    const directKeys = [
+      "text",
+      "name",
+      "label",
+      "title",
+      "badgeDescription",
+      "badgeName",
+      "tagName",
+      "displayName",
+      "typeName",
+    ];
+    const direct = directKeys.flatMap((key) => collectBadgeTexts(obj[key], depth + 1));
+    if (direct.length > 0) return direct;
+    return Object.values(obj).flatMap((entry) => collectBadgeTexts(entry, depth + 1));
+  }
+  return [];
+}
+
+function collectPromotionLikeTexts(value: unknown, depth = 0): string[] {
+  if (depth > 4 || value === null || value === undefined) return [];
+  if (typeof value === "string") {
+    const normalized = normalizePromotionText(value);
+    return isPromotionLikeText(normalized) ? [normalized] : [];
+  }
+  if (typeof value === "number" || typeof value === "boolean") return [];
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => collectPromotionLikeTexts(entry, depth + 1));
+  }
+  if (typeof value === "object") {
+    return Object.values(value as Record<string, unknown>).flatMap((entry) =>
+      collectPromotionLikeTexts(entry, depth + 1)
+    );
+  }
+  return [];
+}
+
+function parseBadgeTexts(obj: Record<string, unknown>): string[] {
+  const badgeKeys = [
+    "badges",
+    "badgeList",
+    "badgeTexts",
+    "tags",
+    "tagList",
+    "labels",
+    "benefits",
+    "benefitList",
+    "promotion",
+    "promotionList",
+    "productBadges",
+    "displayBadges",
+    "promotionBadges",
+    "marketingTags",
+    "event",
+    "eventList",
+    "eventBadges",
+    "benefitBadges",
+  ];
+
+  const texts = [
+    ...badgeKeys.flatMap((key) => collectBadgeTexts(obj[key])),
+    ...badgeKeys.flatMap((key) => collectPromotionLikeTexts(obj[key])),
+  ];
+  return Array.from(new Set(texts.map((text) => text.trim()).filter(Boolean))).slice(0, 20);
+}
+
 function parseProductApiItems(payload: unknown): ProductApiItem[] {
   if (
     typeof payload !== "object" ||
@@ -212,17 +438,370 @@ function parseProductApiItems(payload: unknown): ProductApiItem[] {
       id,
       productName,
       storeName: typeof obj.storeName === "string" ? obj.storeName.trim() : "",
-      commissionRate: parseNumber(obj.commissionRate),
       discountedRate: parseNumber(obj.discountedRate),
       salePrice: parseNumber(obj.salePrice),
       discountedSalePrice: parseNumber(obj.discountedSalePrice),
+      salesCount: parseNumberFromKeys(obj, [
+        "salesCount",
+        "saleCount",
+        "soldCount",
+        "sellCount",
+        "totalSalesCount",
+        "recentSalesCount",
+        "monthlySalesCount",
+        "weeklySalesCount",
+        "salesVolume",
+        "saleVolume",
+      ]),
+      orderCount: parseNumberFromKeys(obj, [
+        "orderCount",
+        "ordersCount",
+        "totalOrderCount",
+        "recentOrderCount",
+        "monthlyOrderCount",
+        "purchaseOrderCount",
+      ]),
+      purchaseCount: parseNumberFromKeys(obj, [
+        "purchaseCount",
+        "buyCount",
+        "buyerCount",
+        "paymentCount",
+        "conversionCount",
+      ]),
+      reviewCount: parseNumberFromKeys(obj, [
+        "reviewCount",
+        "reviewsCount",
+        "totalReviewCount",
+        "reviewCnt",
+        "productReviewCount",
+      ]),
+      popularityScore: parseNumberFromKeys(obj, [
+        "popularityScore",
+        "popularScore",
+        "rankingScore",
+        "score",
+        "recommendScore",
+        "displayScore",
+        "hitScore",
+      ]),
+      rank: parseNumberFromKeys(obj, [
+        "rank",
+        "ranking",
+        "displayRank",
+        "popularRank",
+        "sortRank",
+        "recommendRank",
+      ]),
+      badgeTexts: parseBadgeTexts(obj),
+      sourceCategoryIds: [],
+      sourceCategoryNames: [],
     });
   }
 
   return parsed;
 }
 
-function rankSeasonalProducts(items: ProductApiItem[]): CandidateProduct[] {
+function parseDisplayCategories(payload: unknown): DisplayCategory[] {
+  const rows = Array.isArray(payload)
+    ? payload
+    : typeof payload === "object" &&
+        payload !== null &&
+        Array.isArray((payload as { categories?: unknown[] }).categories)
+      ? (payload as { categories: unknown[] }).categories
+      : [];
+
+  const parsed: DisplayCategory[] = [];
+  for (const row of rows) {
+    if (typeof row !== "object" || row === null) continue;
+    const obj = row as Record<string, unknown>;
+    const id = typeof obj.id === "string" ? obj.id.trim() : String(parseNumber(obj.id) || "");
+    const name = typeof obj.name === "string" ? obj.name.trim() : "";
+    if (!id || !name) continue;
+    parsed.push({ id, name });
+  }
+  return parsed;
+}
+
+function getDisplayCategoryIdFromUrl(categoryUrl: string): string | null {
+  const match = categoryUrl.match(/\/category\/(\d+)/);
+  return match?.[1] ?? null;
+}
+
+function appendUniqueProduct(
+  map: Map<number, ProductApiItem>,
+  products: ProductApiItem[],
+  category?: DisplayCategory
+): void {
+  for (const product of products) {
+    const sourceCategoryIds = new Set(product.sourceCategoryIds);
+    const sourceCategoryNames = new Set(product.sourceCategoryNames);
+
+    if (category) {
+      sourceCategoryIds.add(category.id);
+      sourceCategoryNames.add(category.name);
+    }
+
+    const existing = map.get(product.id);
+    if (!existing) {
+      map.set(product.id, {
+        ...product,
+        sourceCategoryIds: Array.from(sourceCategoryIds),
+        sourceCategoryNames: Array.from(sourceCategoryNames),
+      });
+      continue;
+    }
+
+    for (const id of sourceCategoryIds) {
+      if (!existing.sourceCategoryIds.includes(id)) existing.sourceCategoryIds.push(id);
+    }
+    for (const name of sourceCategoryNames) {
+      if (!existing.sourceCategoryNames.includes(name)) existing.sourceCategoryNames.push(name);
+    }
+  }
+}
+
+async function fetchBrandConnectJson(
+  page: Page,
+  url: string,
+  spaceId: string
+): Promise<unknown | null> {
+  const fromPage = await page
+    .evaluate(
+      async ({ requestUrl, sid }: { requestUrl: string; sid: string }) => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000);
+        try {
+          const res = await fetch(requestUrl, {
+            credentials: "include",
+            headers: {
+              accept: "application/json, text/plain, */*",
+              "x-space-id": sid,
+            },
+            signal: controller.signal,
+          });
+          if (!res.ok) return null;
+          return (await res.json()) as unknown;
+        } catch {
+          return null;
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      },
+      { requestUrl: url, sid: spaceId }
+    )
+    .catch(() => null);
+
+  if (fromPage) return fromPage;
+
+  const response = await page.context().request
+    .get(url, {
+      headers: {
+        accept: "application/json, text/plain, */*",
+        "x-space-id": spaceId,
+        referer: page.url(),
+        origin: "https://brandconnect.naver.com",
+      },
+      timeout: 8000,
+    })
+    .catch(() => null as APIResponse | null);
+
+  if (response?.ok()) {
+    return response.json().catch(() => null);
+  }
+  return null;
+}
+
+async function fetchProductsForDisplayCategory(
+  page: Page,
+  categoryId: string,
+  spaceId: string
+): Promise<ProductApiItem[]> {
+  const url = new URL(
+    "https://gw-brandconnect.naver.com/affiliate/query/affiliate-products/search-by-display-category"
+  );
+  url.searchParams.set("displayCategoryId", categoryId);
+  url.searchParams.set("limit", String(BRANDCONNECT_PRODUCT_LIST_LIMIT));
+
+  const payload = await fetchBrandConnectJson(page, url.toString(), spaceId);
+  return parseProductApiItems(payload);
+}
+
+async function fetchDisplayCategories(
+  page: Page,
+  categoryId: string,
+  spaceId: string
+): Promise<DisplayCategory[]> {
+  const url = new URL("https://gw-brandconnect.naver.com/affiliate/query/display-categories");
+  url.searchParams.set("displayCategoryId", categoryId);
+
+  const payload = await fetchBrandConnectJson(page, url.toString(), spaceId);
+  return parseDisplayCategories(payload);
+}
+
+async function fetchBaseDisplayCategories(page: Page, spaceId: string): Promise<DisplayCategory[]> {
+  const payload = await fetchBrandConnectJson(
+    page,
+    "https://gw-brandconnect.naver.com/affiliate/query/base-display-categories",
+    spaceId
+  );
+  return parseDisplayCategories(payload);
+}
+
+function categoryPriority(category: DisplayCategory, rootCategoryId: string): number {
+  if (category.id === rootCategoryId) return 0;
+
+  const name = category.name;
+  if (/계절|가전|디지털|컴퓨터|생활|건강/.test(name)) return 1;
+  if (/여행|스포츠|레저|화장품|미용|식품|출산|육아/.test(name)) return 2;
+  return 3;
+}
+
+function shouldIncludeCategory(category: DisplayCategory, categoryFilter: string[]): boolean {
+  if (categoryFilter.length === 0) return true;
+  return matchesAnyTerm(`${category.id} ${category.name}`, categoryFilter);
+}
+
+function shouldIncludeProductByPromotion(product: ProductApiItem, promotionFilter: string[]): boolean {
+  if (promotionFilter.length === 0) return true;
+  const haystack = product.badgeTexts.join(" ");
+  return matchesAnyTerm(haystack, promotionFilter);
+}
+
+function shouldIncludeProductByCategory(product: ProductApiItem, categoryFilter: string[]): boolean {
+  if (categoryFilter.length === 0) return true;
+  return matchesAnyTerm(
+    `${product.sourceCategoryIds.join(" ")} ${product.sourceCategoryNames.join(" ")}`,
+    categoryFilter
+  );
+}
+
+async function collectProductPool(
+  page: Page,
+  rootCategoryId: string,
+  spaceId: string,
+  initialProducts: ProductApiItem[],
+  options: Pick<CliOptions, "promotionFilter" | "categoryFilter">
+): Promise<{ products: ProductApiItem[]; scannedCategoryCount: number }> {
+  const productsById = new Map<number, ProductApiItem>();
+  const rootCategory: DisplayCategory = { id: rootCategoryId, name: "현재 카테고리" };
+  if (shouldIncludeCategory(rootCategory, options.categoryFilter)) {
+    appendUniqueProduct(productsById, initialProducts, rootCategory);
+  }
+
+  const categoriesById = new Map<string, DisplayCategory>();
+  const addCategory = (category: DisplayCategory) => {
+    if (!categoriesById.has(category.id)) {
+      categoriesById.set(category.id, category);
+    }
+  };
+
+  addCategory(rootCategory);
+
+  const [baseCategories, rootChildren] = await Promise.all([
+    fetchBaseDisplayCategories(page, spaceId),
+    fetchDisplayCategories(page, rootCategoryId, spaceId),
+  ]);
+
+  for (const category of rootChildren) addCategory(category);
+  for (const category of baseCategories) addCategory(category);
+
+  const prioritizedBase = baseCategories
+    .filter((category) => category.id !== rootCategoryId)
+    .sort((a, b) => categoryPriority(a, rootCategoryId) - categoryPriority(b, rootCategoryId));
+
+  for (const category of prioritizedBase.slice(0, 12)) {
+    const children = await fetchDisplayCategories(page, category.id, spaceId);
+    for (const child of children) addCategory(child);
+    if (categoriesById.size >= BRANDCONNECT_CATEGORY_SCAN_LIMIT) break;
+  }
+
+  const categories = Array.from(categoriesById.values())
+    .filter((category) => shouldIncludeCategory(category, options.categoryFilter))
+    .sort((a, b) => categoryPriority(a, rootCategoryId) - categoryPriority(b, rootCategoryId))
+    .slice(0, BRANDCONNECT_CATEGORY_SCAN_LIMIT);
+
+  if (options.categoryFilter.length > 0 && categories.length === 0) {
+    console.log(`   category filter matched no categories: ${options.categoryFilter.join(", ")}`);
+  }
+
+  let scannedCategoryCount = 0;
+  for (const category of categories) {
+    const products = await fetchProductsForDisplayCategory(page, category.id, spaceId);
+    if (products.length === 0) continue;
+    appendUniqueProduct(productsById, products, category);
+    scannedCategoryCount += 1;
+    console.log(
+      `   후보 수집: ${category.name}(${category.id}) ${products.length}개 / 누적 ${productsById.size}개`
+    );
+  }
+
+  const products = Array.from(productsById.values()).filter(
+    (product) =>
+      shouldIncludeProductByPromotion(product, options.promotionFilter) &&
+      shouldIncludeProductByCategory(product, options.categoryFilter)
+  );
+
+  return {
+    products,
+    scannedCategoryCount,
+  };
+}
+
+function addLogScore(
+  score: number,
+  reasons: string[],
+  value: number,
+  weight: number,
+  label: string
+): number {
+  if (!Number.isFinite(value) || value <= 0) return score;
+  const bonus = Math.min(45, Math.log10(value + 1) * weight);
+  if (bonus <= 0) return score;
+  reasons.push(`${label} 신호(${Math.round(value).toLocaleString("ko-KR")})`);
+  return score + bonus;
+}
+
+function getSeasonName(month: number): "spring" | "summer" | "fall" | "winter" {
+  if (month >= 3 && month <= 5) return "spring";
+  if (month >= 6 && month <= 8) return "summer";
+  if (month >= 9 && month <= 11) return "fall";
+  return "winter";
+}
+
+function getSeasonalPatterns(month: number): Array<{ pattern: RegExp; score: number; reason: string }> {
+  const season = getSeasonName(month);
+  const common = [
+    { pattern: /선풍기|냉각|쿨링|제습|건조|휴대용|무선|여행|캠핑|텀블러/i, score: 22, reason: "현재 계절/외출 수요" },
+    { pattern: /신학기|입학|졸업|선물|집들이|육아|반려|생활용품/i, score: 12, reason: "상시 선물/생활 수요" },
+  ];
+
+  const bySeason: Record<ReturnType<typeof getSeasonName>, Array<{ pattern: RegExp; score: number; reason: string }>> = {
+    spring: [
+      { pattern: /청소|살균|스팀|보풀|먼지|세척|정리|음식물/i, score: 45, reason: "봄맞이 청소/정리 수요" },
+      { pattern: /드라이|면도|제모|고데기|미용|뷰티|피부|헤어|구강/i, score: 38, reason: "봄철 개인관리/뷰티 수요" },
+      { pattern: /피크닉|나들이|등산|자전거|운동|골프/i, score: 28, reason: "봄 나들이/운동 수요" },
+    ],
+    summer: [
+      { pattern: /선풍기|서큘레이터|냉풍|쿨링|냉각|아이스|제습|쿨매트|양산|썬크림|자외선/i, score: 52, reason: "여름 냉방/쿨링 수요" },
+      { pattern: /제모|바디|샤워|탈취|데오|모기|벌레|캠핑|여행|휴대용/i, score: 36, reason: "여름 외출/위생 수요" },
+      { pattern: /물놀이|수영|비치|우산|장마|레인/i, score: 30, reason: "장마/휴가 시즌 수요" },
+    ],
+    fall: [
+      { pattern: /가을|캠핑|등산|트레킹|골프|보온|텀블러|자켓|니트/i, score: 40, reason: "가을 야외활동 수요" },
+      { pattern: /추석|선물|건강|영양제|홍삼|과일|한우|굴비/i, score: 36, reason: "명절/선물 수요" },
+      { pattern: /보습|수분|크림|가습|건조/i, score: 28, reason: "환절기 보습/건조 수요" },
+    ],
+    winter: [
+      { pattern: /온열|전기매트|히터|난방|보온|장갑|목도리|핫팩|가습기/i, score: 52, reason: "겨울 난방/보온 수요" },
+      { pattern: /크리스마스|연말|선물|홈파티|트리|조명/i, score: 34, reason: "연말 선물/홈파티 수요" },
+      { pattern: /감기|면역|비타민|영양제|건강/i, score: 28, reason: "겨울 건강관리 수요" },
+    ],
+  };
+
+  return [...bySeason[season], ...common];
+}
+
+function rankSeasonalProducts(items: ProductApiItem[], selectionProfile = DEFAULT_SELECTION_PROFILE): CandidateProduct[] {
   const monthInKst = Number(
     new Intl.DateTimeFormat("en-US", {
       timeZone: KST_TIMEZONE,
@@ -233,42 +812,75 @@ function rankSeasonalProducts(items: ProductApiItem[]): CandidateProduct[] {
   return items
     .map((item) => {
       const title = item.productName.toLowerCase();
+      const badgeText = item.badgeTexts.join(" ").toLowerCase();
+      const haystack = `${title} ${item.storeName.toLowerCase()} ${badgeText}`;
       let score = 0;
       const reasons: string[] = [];
 
-      const isSpring = monthInKst >= 2 && monthInKst <= 4;
+      const seasonalWeight =
+        selectionProfile === "popular" || selectionProfile === "hit" ? 0.65 : 1;
+      const popularityWeight = selectionProfile === "seasonal" ? 0.75 : 1;
 
-      if (/청소|살균|스팀|보풀|먼지|세척|정리|음식물/.test(title)) {
-        score += isSpring ? 45 : 30;
-        reasons.push("봄맞이 청소/정리 수요");
+      for (const entry of getSeasonalPatterns(monthInKst)) {
+        if (entry.pattern.test(haystack)) {
+          score += entry.score * seasonalWeight;
+          reasons.push(entry.reason);
+        }
       }
 
-      if (/드라이|면도|제모|고데기|미용|뷰티|칫솔|구강/.test(title)) {
-        score += isSpring ? 38 : 26;
-        reasons.push("개인관리/미용 수요");
+      if (/시즌|추천|recommended|recommend|season/i.test(haystack)) {
+        score += 34 * seasonalWeight;
+        reasons.push("브랜드커넥트 추천/시즌 표시");
       }
 
-      if (/가습기|계절가전|온열|매트/.test(title)) {
-        score += monthInKst <= 3 ? 16 : 6;
-        reasons.push("계절가전 수요");
+      if (/히트|hit|핫딜|hot|베스트|best|랭킹|ranking|인기|popular|md추천|md\s*pick/i.test(haystack)) {
+        score += 42 * popularityWeight;
+        reasons.push("히트/인기 상품 표시");
       }
 
-      if (/주방|에어프라이|오븐|찜기|그릴|포트/.test(title)) {
+      if (/판매|주문|구매|누적|완판|품절임박|재구매|리뷰많/i.test(haystack)) {
+        score += 34 * popularityWeight;
+        reasons.push("판매/구매 반응 표시");
+      }
+
+      if (/드라이|면도|제모|고데기|미용|뷰티|칫솔|구강|피부|헤어/.test(title)) {
         score += 18;
-        reasons.push("주방 소형가전 지속 수요");
+        reasons.push("개인관리/뷰티 지속 수요");
       }
 
-      if (/이어폰|마이크|무선|노트북|tv|전자/.test(title)) {
-        score += 14;
-        reasons.push("디지털/전자 관심도");
+      if (/주방|에어프라이|오븐|찜기|그릴|포트|청소|가전|전자|무선|노트북|이어폰|마이크|tv/.test(title)) {
+        score += 16;
+        reasons.push("생활가전/디지털 관심도");
       }
 
-      score += Math.min(item.commissionRate, 30) * 2.1;
-      score += Math.min(item.discountedRate, 70) * 0.45;
+      score = addLogScore(score, reasons, item.salesCount, 16 * popularityWeight, "판매량");
+      score = addLogScore(score, reasons, item.orderCount, 15 * popularityWeight, "주문수");
+      score = addLogScore(score, reasons, item.purchaseCount, 14 * popularityWeight, "구매수");
+      score = addLogScore(score, reasons, item.reviewCount, 10 * popularityWeight, "리뷰수");
+
+      if (item.popularityScore > 0) {
+        score += Math.min(item.popularityScore, 100) * 0.45 * popularityWeight;
+        reasons.push(`인기도 점수(${item.popularityScore})`);
+      }
+
+      if (item.rank > 0) {
+        score += Math.max(0, 35 - Math.min(item.rank, 100) * 0.35) * popularityWeight;
+        reasons.push(`상위 노출 순위(${item.rank})`);
+      }
+
+      const discountBonus = Math.min(item.discountedRate, 70) * 0.5;
+      if (discountBonus > 0) {
+        score += discountBonus;
+        reasons.push(`할인율 ${item.discountedRate}%`);
+      }
 
       const effectivePrice = item.discountedSalePrice || item.salePrice;
-      if (effectivePrice >= 100000) {
+      if (effectivePrice >= 15000 && effectivePrice <= 250000) {
+        score += 8;
+        reasons.push("리뷰 전환에 적당한 가격대");
+      } else if (effectivePrice > 250000) {
         score += 4;
+        reasons.push("고단가 상품");
       }
 
       return {
@@ -328,6 +940,40 @@ function buildProductIdentityKeys(
     strictKeys: Array.from(strictKeySet),
     relaxedKeys: Array.from(relaxedKeySet),
   };
+}
+
+interface ExistingBrandLinkForDuplicate {
+  id: string;
+  productName: string | null;
+  storeName: string | null;
+  status: string;
+  createdAt: Date;
+  updatedAt: Date;
+  publishedAt: Date | null;
+  scheduledPublishAt: Date | null;
+}
+
+const DUPLICATE_BLOCKING_STATUSES = new Set([
+  "READY",
+  "PUBLISHING",
+  "SCHEDULED",
+  "PUBLISHED",
+]);
+
+function getDuplicateReferenceDate(row: ExistingBrandLinkForDuplicate): Date {
+  return row.publishedAt || row.scheduledPublishAt || row.updatedAt || row.createdAt;
+}
+
+function shouldBlockDuplicateBrandLink(
+  row: ExistingBrandLinkForDuplicate,
+  now: Date,
+  duplicateWindowDays: number
+): boolean {
+  if (!DUPLICATE_BLOCKING_STATUSES.has(row.status)) return false;
+  if (duplicateWindowDays <= 0) return false;
+
+  const cutoffTime = now.getTime() - duplicateWindowDays * 24 * 60 * 60 * 1000;
+  return getDuplicateReferenceDate(row).getTime() >= cutoffTime;
 }
 
 function selectUniqueCandidates(
@@ -611,17 +1257,20 @@ function formatPrice(value: number): string | null {
 }
 
 function buildMemo(item: PlannedProduct): string {
-  const reasonText = item.reasons.slice(0, 2).join(", ");
+  const reasonText = item.reasons.slice(0, 4).join(", ");
   return [
-    `[시즌선별 자동등록] score=${item.score.toFixed(1)}`,
-    `수수료 ${item.commissionRate}%`,
+    `[시즌·히트·인기 자동등록] score=${item.score.toFixed(1)}`,
     `할인율 ${item.discountedRate}%`,
-    `근거: ${reasonText || "수수료/할인 기반"}`,
+    `근거: ${reasonText || "계절/인기/할인 기반"}`,
   ].join(" | ");
 }
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+  const connectContract = resolveConnectContract(options.connectKind, options.categoryUrl);
+  if (connectContract.captureRequired) {
+    throw new Error(JSON.stringify(buildCaptureRequiredPayload(connectContract)));
+  }
   const prisma = new PrismaClient();
 
   const blogId = process.env.NAVER_BLOG_ID?.trim();
@@ -632,16 +1281,25 @@ async function main() {
   if (!spaceId) {
     throw new Error("category-url에서 spaceId를 추출하지 못했습니다.");
   }
+  const rootCategoryId = getDisplayCategoryIdFromUrl(options.categoryUrl);
+  if (!rootCategoryId) {
+    throw new Error("category-url에서 displayCategoryId를 추출하지 못했습니다.");
+  }
 
   const startDate =
     options.startDate ?? addDaysToYmd(formatKstYmd(new Date()), 1);
 
   console.log("=".repeat(70));
-  console.log("📦 BrandConnect 시즌성 상품 자동 등록 시작");
+  console.log("📦 BrandConnect 시즌·히트·인기 상품 자동 등록 시작");
   console.log(`- categoryUrl: ${options.categoryUrl}`);
   console.log(`- count: ${options.count}`);
   console.log(`- startDate: ${startDate}`);
   console.log(`- intervalDays: ${options.intervalDays}`);
+  console.log(`- dailyQuota: ${options.dailyQuota}`);
+  console.log(`- selectionProfile: ${options.selectionProfile}`);
+  console.log(`- promotionFilter: ${options.promotionFilter.join(", ") || "-"}`);
+  console.log(`- categoryFilter: ${options.categoryFilter.join(", ") || "-"}`);
+  console.log(`- duplicateWindowDays: ${options.duplicateWindowDays}`);
   console.log(`- dryRun: ${options.dryRun ? "YES" : "NO"}`);
   console.log("=".repeat(70));
 
@@ -752,23 +1410,33 @@ async function main() {
     throw new Error("상품 목록 API 응답을 확보하지 못했습니다.");
   }
 
-  console.log(`✅ 카테고리 상품 수집: ${productsFromApi.length}개`);
+  console.log(`✅ 카테고리 첫 상품 수집: ${productsFromApi.length}개`);
 
-  const existingActiveLinks = await prisma.brandLink.findMany({
-    where: {
-      status: {
-        in: ["READY", "PUBLISHING", "SCHEDULED", "PUBLISHED"],
-      },
-    },
+  const productPool = await collectProductPool(page, rootCategoryId, spaceId, productsFromApi, options);
+  console.log(
+    `✅ 확장 후보 수집: ${productPool.products.length}개 / 스캔 카테고리 ${productPool.scannedCategoryCount}개`
+  );
+
+  const existingBrandLinks = await prisma.brandLink.findMany({
     select: {
+      id: true,
       productName: true,
       storeName: true,
+      status: true,
+      createdAt: true,
+      updatedAt: true,
+      publishedAt: true,
+      scheduledPublishAt: true,
     },
   });
+  const duplicateReferenceNow = new Date();
   const existingStrictKeys = new Set<string>();
   const existingRelaxedKeys = new Set<string>();
-  for (const row of existingActiveLinks) {
+  for (const row of existingBrandLinks) {
     if (!row.productName) continue;
+    if (!shouldBlockDuplicateBrandLink(row, duplicateReferenceNow, options.duplicateWindowDays)) {
+      continue;
+    }
     const { strictKeys, relaxedKeys } = buildProductIdentityKeys(
       row.productName,
       row.storeName
@@ -780,8 +1448,11 @@ async function main() {
       existingRelaxedKeys.add(key);
     }
   }
+  console.log(
+    `✅ 최근 ${options.duplicateWindowDays}일 중복 제외 키: strict=${existingStrictKeys.size}, relaxed=${existingRelaxedKeys.size}`
+  );
 
-  const ranked = rankSeasonalProducts(productsFromApi);
+  const ranked = rankSeasonalProducts(productPool.products, options.selectionProfile);
   const selected = selectUniqueCandidates(
     ranked,
     ranked.length,
@@ -795,14 +1466,17 @@ async function main() {
   }
 
   const getScheduledDate = (successIndex: number) =>
-    addDaysToYmd(startDate, successIndex * options.intervalDays);
+    addDaysToYmd(
+      startDate,
+      Math.floor(successIndex / options.dailyQuota) * options.intervalDays
+    );
 
   console.log("\n📋 선별 결과");
   selected.slice(0, options.count).forEach((item, index) => {
     const boardName = inferBoardName(item.productName);
     const categoryNo = categoryMap.get(boardName) ?? CATEGORY_NAME_FALLBACK[boardName] ?? null;
     console.log(
-      `${String(index + 1).padStart(2, "0")}. [${boardName}/${categoryNo ?? "-"}] ${getScheduledDate(index)} | score=${item.score.toFixed(1)} | 수수료 ${item.commissionRate}% | ${item.productName}`
+      `${String(index + 1).padStart(2, "0")}. [${boardName}/${categoryNo ?? "-"}] ${getScheduledDate(index)} | score=${item.score.toFixed(1)} | ${item.reasons.slice(0, 2).join(", ") || "계절/인기/할인 기반"} | ${item.productName}`
     );
   });
 
@@ -867,7 +1541,10 @@ async function main() {
     }
 
     const existing = await prisma.brandLink.findFirst({ where: { url: shortUrl } });
-    if (existing) {
+    if (
+      existing &&
+      shouldBlockDuplicateBrandLink(existing, duplicateReferenceNow, options.duplicateWindowDays)
+    ) {
       console.log(`   ↪️ 기존 링크 존재로 중복 건너뜀 (${existing.status})`);
       results.push({
         action: "duplicate",
@@ -877,10 +1554,21 @@ async function main() {
         categoryNo: existing.categoryNo,
         boardName: plannedItem.boardName,
         scheduledDate: plannedItem.scheduledDate,
-        reason: `기존 상태 ${existing.status}`,
+        reason:
+          existing.status === "READY"
+            ? "이미 등록된 READY 링크라 새 상품 후보에서 제외"
+            : existing.status === "SCHEDULED"
+                ? "이미 예약완료 상태라 예약대상에서 제외"
+                : existing.status === "PUBLISHED"
+                  ? "이미 발행완료 상태라 예약대상에서 제외"
+                  : `기존 상태 ${existing.status}`,
         linkId: existing.id,
       });
       continue;
+    } else if (existing) {
+      console.log(
+        `   ↪️ 기존 링크는 ${existing.status}/${getDuplicateReferenceDate(existing).toISOString().slice(0, 10)} 기록이라 중복 판단에서 무시`
+      );
     }
 
     if (options.dryRun) {
@@ -903,6 +1591,9 @@ async function main() {
     const created = await prisma.brandLink.create({
       data: {
         url: shortUrl,
+        connectKind: toStoredConnectKind(options.connectKind),
+        externalItemId: String(item.id),
+        sourceUrl: options.categoryUrl,
         memo: buildMemo(plannedItem),
         categoryNo: plannedItem.categoryNo,
         useSectionHeading: true,
@@ -941,6 +1632,23 @@ async function main() {
         options,
         startDate,
         selectedCount: selected.length,
+        collectedProductCount: productPool.products.length,
+        scannedCategoryCount: productPool.scannedCategoryCount,
+        rankingPreview: selected.slice(0, options.count).map((item) => ({
+          productId: item.id,
+          productName: item.productName,
+          score: Number(item.score.toFixed(1)),
+          reasons: item.reasons,
+          salesCount: item.salesCount,
+          orderCount: item.orderCount,
+          purchaseCount: item.purchaseCount,
+          reviewCount: item.reviewCount,
+          popularityScore: item.popularityScore,
+          rank: item.rank,
+          badges: item.badgeTexts,
+          sourceCategoryIds: item.sourceCategoryIds,
+          sourceCategoryNames: item.sourceCategoryNames,
+        })),
         results,
       },
       null,
@@ -950,15 +1658,13 @@ async function main() {
   );
 
   const createdCount = results.filter((item) => item.action === "created").length;
-  const updatedCount = results.filter((item) => item.action === "updated").length;
   const skippedCount = results.filter((item) => item.action === "skipped").length;
   const duplicateCount = results.filter((item) => item.action === "duplicate").length;
   const failedCount = results.filter((item) => item.action === "failed").length;
 
   console.log("\n" + "=".repeat(70));
-  console.log("✅ 시즌성 링크 등록 작업 완료");
+  console.log("✅ 시즌·히트·인기 링크 등록 작업 완료");
   console.log(`- 생성: ${createdCount}`);
-  console.log(`- 업데이트: ${updatedCount}`);
   console.log(`- 스킵: ${skippedCount}`);
   if (duplicateCount > 0) {
     console.log(`- 중복: ${duplicateCount}`);
@@ -966,6 +1672,33 @@ async function main() {
   console.log(`- 실패: ${failedCount}`);
   console.log(`- 리포트: ${path.relative(process.cwd(), reportPath)}`);
   console.log("=".repeat(70));
+
+  if (!options.dryRun) {
+    await notifyAndLogCompletion({
+      taskType: "brandconnect.seasonal.register",
+      title: "시즌·히트·인기 상품 등록 완료",
+      summary: `신규 ${createdCount}건, 중복 건너뜀 ${duplicateCount}건, 실패 ${failedCount}건`,
+      successCount: createdCount,
+      failedCount,
+      links: results.map((item) => ({
+        label: item.productName,
+        url: item.shortUrl || (item.linkId ? buildAppUrl(`/?brandLinkId=${item.linkId}`) : buildAppUrl("/")),
+        scheduledDate: item.scheduledDate,
+        status: item.action.toUpperCase(),
+        description: item.reason || `${item.boardName}${item.categoryNo ? ` / ${item.categoryNo}` : ""}`,
+      })),
+      extra: {
+        createdCount,
+        skippedCount,
+        duplicateCount,
+        failedCount,
+        reportPath: path.relative(process.cwd(), reportPath),
+        selectionProfile: options.selectionProfile,
+        collectedProductCount: productPool.products.length,
+        scannedCategoryCount: productPool.scannedCategoryCount,
+      },
+    });
+  }
 
   await context.close();
   await browser.close();
@@ -975,5 +1708,23 @@ async function main() {
 main().catch(async (error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
   console.error("❌ 실행 실패:", message);
+  await notifyAndLogCompletion({
+    taskType: "brandconnect.seasonal.register.fatal-error",
+    title: "시즌·히트·인기 상품 등록 오류",
+    summary: message,
+    successCount: 0,
+    failedCount: 1,
+    links: [
+      {
+        label: "대시보드 확인",
+        url: buildAppUrl("/"),
+        status: "FAILED",
+        description: message,
+      },
+    ],
+    extra: {
+      fatal: true,
+    },
+  });
   process.exit(1);
 });

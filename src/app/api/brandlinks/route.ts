@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { unstable_noStore as noStore } from "next/cache";
 import { requireAdminApiKey } from "@/lib/api-auth";
+import { parseConnectKind, toStoredConnectKind } from "@/lib/brandconnect-kind";
 
 export const dynamic = "force-dynamic";
 
@@ -14,6 +15,7 @@ interface CreateBrandLinkRequest {
   memo?: string;
   categoryNo?: string | null;
   useSectionHeading?: boolean;
+  connectKind?: "shopping" | "travel";
 }
 
 const ALLOWED_HOSTS = [
@@ -83,6 +85,7 @@ export async function POST(request: NextRequest) {
 
     const body = (await request.json()) as CreateBrandLinkRequest;
     const { url, memo, categoryNo: rawCategoryNo, useSectionHeading } = body;
+    const connectKind = parseConnectKind(body.connectKind);
 
     if (!url?.trim()) {
       return NextResponse.json(
@@ -139,6 +142,8 @@ export async function POST(request: NextRequest) {
         categoryNo: categoryNo ?? null,
         useSectionHeading:
           typeof useSectionHeading === "boolean" ? useSectionHeading : true,
+        connectKind: toStoredConnectKind(connectKind),
+        sourceUrl: normalizedUrl,
         status: "READY",
       },
     });

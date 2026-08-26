@@ -8,7 +8,11 @@ import { requireAdminApiKey } from "@/lib/api-auth";
 interface BulkScheduleBody {
   limit?: number;
   delayMs?: number;
+  startDate?: string;
+  intervalDays?: number;
 }
+
+const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "알 수 없는 오류";
@@ -34,6 +38,16 @@ function toSafePositiveInt(value: unknown, defaultValue: number, max = 100): num
   return Math.min(parsed, max);
 }
 
+function addDaysToYmd(ymd: string, offsetDays: number): string {
+  const [yearText, monthText, dayText] = ymd.split("-");
+  const year = Number.parseInt(yearText, 10);
+  const month = Number.parseInt(monthText, 10);
+  const day = Number.parseInt(dayText, 10);
+
+  const utcDate = new Date(Date.UTC(year, month - 1, day + offsetDays, 0, 0, 0, 0));
+  return utcDate.toISOString().slice(0, 10);
+}
+
 export async function POST(request: NextRequest) {
   try {
     const authError = requireAdminApiKey(request);
@@ -48,8 +62,13 @@ export async function POST(request: NextRequest) {
       // no-op (default values)
     }
 
-    const requestedLimit = toSafePositiveInt(body.limit, 10, 100);
+    const requestedLimit = toSafePositiveInt(body.limit, 10, 200);
     const delayMs = toSafePositiveInt(body.delayMs, 1500, 60000);
+    const intervalDays = toSafePositiveInt(body.intervalDays, 1, 30);
+    const startDate =
+      typeof body.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.startDate.trim())
+        ? body.startDate.trim()
+        : null;
 
     const activePublishing = await prisma.brandLink.count({
       where: { status: "PUBLISHING" },
@@ -82,9 +101,17 @@ export async function POST(request: NextRequest) {
     }
 
     const targetCount = Math.min(requestedLimit, pendingCount);
+    const endDate = startDate ? addDaysToYmd(startDate, (targetCount - 1) * intervalDays) : null;
 
     const scriptPath = path.join(process.cwd(), "scripts", "bulk-schedule-publish.ts");
-    const scriptArgs = [`--limit=${targetCount}`, `--delay-ms=${delayMs}`];
+    const scriptArgs = [
+      `--limit=${targetCount}`,
+      `--delay-ms=${delayMs}`,
+      `--interval-days=${intervalDays}`,
+    ];
+    if (startDate) {
+      scriptArgs.push(`--start-date=${startDate}`);
+    }
 
     const logDir = path.join(process.cwd(), "logs", "publish-bulk");
     fs.mkdirSync(logDir, { recursive: true });
@@ -95,14 +122,16 @@ export async function POST(request: NextRequest) {
 
     fs.writeSync(
       logFd,
-      `[${new Date().toISOString()}] bulk schedule start targetCount=${targetCount} delayMs=${delayMs}\n`
+      `[${new Date().toISOString()}] bulk schedule start targetCount=${targetCount} delayMs=${delayMs} ${
+        startDate ? `startDate=${startDate}` : "scheduleMode=preserve-existing-dates"
+      } intervalDays=${intervalDays}\n`
     );
 
     let child: ChildProcess;
     try {
       child = spawn(
-        "npx",
-        ["ts-node", "--project", "tsconfig.scripts.json", scriptPath, ...scriptArgs],
+        process.execPath,
+        [TS_NODE_BIN, "--project", "tsconfig.scripts.json", scriptPath, ...scriptArgs],
         {
           cwd: process.cwd(),
           detached: true,
@@ -126,6 +155,10 @@ export async function POST(request: NextRequest) {
       data: {
         targetCount,
         delayMs,
+        startDate: startDate ?? undefined,
+        endDate: endDate ?? undefined,
+        scheduleMode: startDate ? "reassign-from-start-date" : "preserve-existing-dates",
+        intervalDays,
         logFile: logFileRelativePath,
       },
     });

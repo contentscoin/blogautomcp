@@ -4,9 +4,9 @@ import { spawn, type ChildProcess } from "child_process";
 import path from "path";
 import fs from "fs";
 import { requireAdminApiKey } from "@/lib/api-auth";
-import { buildTsScriptSpawn } from "@/lib/run-script";
 
 const NAVER_SCHEDULE_TIMEZONE = process.env.NAVER_SCHEDULE_TIMEZONE || "Asia/Seoul";
+const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "알 수 없는 오류";
@@ -191,8 +191,7 @@ export async function POST(
     statusUpdated = true;
 
     // 발행 스크립트 실행 (백그라운드) - 단순 에이전트 사용
-    const projectRoot = process.env.DESKTOP_PROJECT_ROOT ?? process.cwd();
-    const scriptPath = path.join(projectRoot, "scripts", "simple-agent.ts");
+    const scriptPath = path.join(process.cwd(), "scripts", "simple-agent.ts");
     const scriptArgs = [id];
     if (publishMode === "schedule" && scheduleInfo) {
       scriptArgs.push("--publish-mode=schedule", `--scheduled-date=${scheduleInfo.effectiveDateInput}`);
@@ -212,14 +211,33 @@ export async function POST(
     );
 
     let child: ChildProcess;
+    const agentAiProvider = process.env.AI_PROVIDER || "openai";
     try {
-      const { command, commandArgs, extraEnv } = buildTsScriptSpawn(scriptPath, scriptArgs, projectRoot);
-      child = spawn(command, commandArgs, {
-        cwd: projectRoot,
+      child = spawn(process.execPath, [TS_NODE_BIN, "--project", "tsconfig.scripts.json", scriptPath, ...scriptArgs], {
+        cwd: process.cwd(),
         detached: true,
         stdio: ["ignore", logFd, logFd],
         shell: false,
-        env: { ...process.env, ...extraEnv },
+        env: {
+          ...process.env,
+          AI_PROVIDER: agentAiProvider,
+          BROWSER_GPT_MODE: "false",
+          ALLOW_CHATGPT_BROWSER_MODE: "false",
+          CHATGPT_USE_CUSTOM_GPTS: "false",
+          CHATGPT_DIRECT_ONLY: "true",
+          CHATGPT_SKIP_POLISH: "true",
+          HUMAN_MOBILE_POLISH_ENABLED: "true",
+          PRODUCT_POST_LOCAL_FALLBACK_ENABLED: "true",
+          PRODUCT_THUMBNAIL_CHATGPT_ENABLED: process.env.PRODUCT_THUMBNAIL_CHATGPT_ENABLED || "false",
+          PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE:
+            process.env.PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE || "false",
+          PRODUCT_THUMBNAIL_CHATGPT_BASE_FALLBACK_ENABLED:
+            process.env.PRODUCT_THUMBNAIL_CHATGPT_BASE_FALLBACK_ENABLED || "false",
+          PRODUCT_THUMBNAIL_IMAGE_WAIT_MS:
+            process.env.PRODUCT_THUMBNAIL_IMAGE_WAIT_MS || "60000",
+          PRODUCT_THUMBNAIL_COMPOSITE_FALLBACK_ENABLED:
+            process.env.PRODUCT_THUMBNAIL_COMPOSITE_FALLBACK_ENABLED || "false",
+        },
       });
     } finally {
       fs.closeSync(logFd);

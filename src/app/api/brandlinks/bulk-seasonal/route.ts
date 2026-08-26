@@ -4,11 +4,51 @@ import { spawn, type ChildProcess } from "child_process";
 import fs from "fs";
 import path from "path";
 import { requireAdminApiKey } from "@/lib/api-auth";
+import { buildCaptureRequiredPayload, parseConnectKind, resolveConnectContract } from "@/lib/brandconnect-kind";
 
 interface BulkSeasonalBody {
+  connectKind?: string;
   count?: number;
   intervalDays?: number;
+  dailyQuota?: number;
+  startDate?: string;
   categoryUrl?: string;
+  selectionProfile?: string;
+  promotionFilter?: string;
+  categoryFilter?: string;
+  duplicateWindowDays?: number;
+}
+
+const NAVER_SCHEDULE_TIMEZONE = process.env.NAVER_SCHEDULE_TIMEZONE || "Asia/Seoul";
+const NAVER_DEFAULT_SCHEDULE_HOUR = parseBoundedInteger(
+  process.env.NAVER_DEFAULT_SCHEDULE_HOUR,
+  9,
+  0,
+  23
+);
+const NAVER_DEFAULT_SCHEDULE_MINUTE = parseBoundedInteger(
+  process.env.NAVER_DEFAULT_SCHEDULE_MINUTE,
+  0,
+  0,
+  59
+);
+const NAVER_SCHEDULE_MIN_LEAD_MINUTES = parseBoundedInteger(
+  process.env.NAVER_SCHEDULE_MIN_LEAD_MINUTES,
+  120,
+  0,
+  1440
+);
+const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
+
+function parseBoundedInteger(
+  value: string | undefined,
+  fallback: number,
+  min: number,
+  max: number
+): number {
+  const parsed = Number.parseInt(value || "", 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
 }
 
 function getErrorMessage(error: unknown): string {
@@ -42,7 +82,55 @@ function addDaysToYmd(ymd: string, offsetDays: number): string {
   return formatDateInputUtc(utcDate);
 }
 
-function toSafePositiveInt(value: unknown, defaultValue: number, max = 30): number {
+function formatYmdInTimeZone(date: Date, timeZone: string): string {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const parts = formatter.formatToParts(date);
+  const map = new Map(parts.map((part) => [part.type, part.value]));
+  return `${map.get("year") || "0000"}-${map.get("month") || "00"}-${map.get("day") || "00"}`;
+}
+
+function getDatePartsInTimeZone(date: Date, timeZone: string): { hour: number; minute: number } {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const parts = formatter.formatToParts(date);
+  const map = new Map(parts.map((part) => [part.type, part.value]));
+  return {
+    hour: Number.parseInt(map.get("hour") || "0", 10),
+    minute: Number.parseInt(map.get("minute") || "0", 10),
+  };
+}
+
+function isScheduleDateTimeSchedulable(ymd: string): boolean {
+  const now = new Date();
+  const nowYmd = formatYmdInTimeZone(now, NAVER_SCHEDULE_TIMEZONE);
+  if (ymd > nowYmd) return true;
+  if (ymd < nowYmd) return false;
+
+  const nowParts = getDatePartsInTimeZone(now, NAVER_SCHEDULE_TIMEZONE);
+  const nowMinutes = nowParts.hour * 60 + nowParts.minute;
+  const targetMinutes = NAVER_DEFAULT_SCHEDULE_HOUR * 60 + NAVER_DEFAULT_SCHEDULE_MINUTE;
+  return targetMinutes - nowMinutes >= NAVER_SCHEDULE_MIN_LEAD_MINUTES;
+}
+
+function normalizeStartDate(startDate: string): string {
+  let candidate = startDate;
+  for (let attempt = 0; attempt < 370; attempt += 1) {
+    if (isScheduleDateTimeSchedulable(candidate)) return candidate;
+    candidate = addDaysToYmd(candidate, 1);
+  }
+  return startDate;
+}
+
+function toSafePositiveInt(value: unknown, defaultValue: number, max = 50): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return defaultValue;
   }
@@ -50,6 +138,29 @@ function toSafePositiveInt(value: unknown, defaultValue: number, max = 30): numb
   const parsed = Math.floor(value);
   if (parsed < 1) return defaultValue;
   return Math.min(parsed, max);
+}
+
+function toSafeNonNegativeInt(value: unknown, defaultValue: number, max = 3650): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return defaultValue;
+  }
+
+  const parsed = Math.floor(value);
+  if (parsed < 0) return defaultValue;
+  return Math.min(parsed, max);
+}
+
+function normalizeCsvFilter(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = Array.from(
+    new Set(
+      value
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+    )
+  ).join(",");
+  return normalized || null;
 }
 
 function resolveStorageStatePath(): string {
@@ -76,12 +187,29 @@ export async function POST(request: NextRequest) {
       // no-op (default values)
     }
 
-    const count = toSafePositiveInt(body.count, 10, 30);
+    const count = toSafePositiveInt(body.count, 10, 200);
+    const connectKind = parseConnectKind(body.connectKind);
     const intervalDays = toSafePositiveInt(body.intervalDays, 1, 30);
+    const dailyQuota = toSafePositiveInt(body.dailyQuota, 1, 200);
     const categoryUrl =
       typeof body.categoryUrl === "string" && body.categoryUrl.trim().length > 0
         ? body.categoryUrl.trim()
         : null;
+    const contract = resolveConnectContract(connectKind, categoryUrl);
+    if (contract.captureRequired) {
+      return NextResponse.json({ success: false, error: buildCaptureRequiredPayload(contract) }, { status: 501 });
+    }
+    const selectionProfile =
+      typeof body.selectionProfile === "string" && body.selectionProfile.trim().length > 0
+        ? body.selectionProfile.trim().toLowerCase()
+        : process.env.BRANDCONNECT_SELECTION_PROFILE || "seasonal-hit-popular";
+    const promotionFilter = normalizeCsvFilter(body.promotionFilter);
+    const categoryFilter = normalizeCsvFilter(body.categoryFilter);
+    const duplicateWindowDays = toSafeNonNegativeInt(
+      body.duplicateWindowDays,
+      parseBoundedInteger(process.env.BRANDCONNECT_DUPLICATE_WINDOW_DAYS, 30, 0, 3650),
+      3650
+    );
 
     const activePublishing = await prisma.brandLink.count({
       where: { status: "PUBLISHING" },
@@ -97,31 +225,23 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const latestScheduled = await prisma.brandLink.findFirst({
-      where: { scheduledPublishAt: { not: null } },
-      orderBy: [{ scheduledPublishAt: "desc" }, { createdAt: "desc" }],
-      select: { scheduledPublishAt: true },
-    });
+    const requestedStartDate =
+      typeof body.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.startDate.trim())
+        ? body.startDate.trim()
+        : formatYmdInTimeZone(new Date(), NAVER_SCHEDULE_TIMEZONE);
+    const startDate = normalizeStartDate(requestedStartDate);
 
-    let startDate: string;
-    if (latestScheduled?.scheduledPublishAt) {
-      const nextDate = new Date(latestScheduled.scheduledPublishAt);
-      nextDate.setUTCDate(nextDate.getUTCDate() + 1);
-      startDate = formatDateInputUtc(nextDate);
-    } else {
-      const tomorrow = new Date();
-      tomorrow.setDate(tomorrow.getDate() + 1);
-      startDate = tomorrow.toISOString().slice(0, 10);
-    }
-
-    const endDate = addDaysToYmd(startDate, (count - 1) * intervalDays);
+    const endDate = addDaysToYmd(
+      startDate,
+      Math.floor((count - 1) / dailyQuota) * intervalDays
+    );
 
     const scriptPath = path.join(process.cwd(), "scripts", "brandconnect-seasonal-register.ts");
     if (!fs.existsSync(scriptPath)) {
       return NextResponse.json(
         {
           success: false,
-          error: `시즌성 등록 스크립트를 찾을 수 없습니다: ${scriptPath}`,
+          error: `시즌·히트·인기 등록 스크립트를 찾을 수 없습니다: ${scriptPath}`,
         },
         { status: 500 }
       );
@@ -144,12 +264,22 @@ export async function POST(request: NextRequest) {
       `--count=${count}`,
       `--start-date=${startDate}`,
       `--interval-days=${intervalDays}`,
+      `--daily-quota=${dailyQuota}`,
       `--storage-state=${storageStatePath}`,
+      `--selection-profile=${selectionProfile}`,
+      `--connect-kind=${connectKind}`,
     ];
 
     if (categoryUrl) {
       scriptArgs.push(`--category-url=${categoryUrl}`);
     }
+    if (promotionFilter) {
+      scriptArgs.push(`--promotion-filter=${promotionFilter}`);
+    }
+    if (categoryFilter) {
+      scriptArgs.push(`--category-filter=${categoryFilter}`);
+    }
+    scriptArgs.push(`--duplicate-window-days=${duplicateWindowDays}`);
 
     const logDir = path.join(process.cwd(), "logs", "seasonal");
     fs.mkdirSync(logDir, { recursive: true });
@@ -162,14 +292,14 @@ export async function POST(request: NextRequest) {
       logFd,
       `[${new Date().toISOString()}] bulk seasonal start count=${count} intervalDays=${intervalDays} startDate=${startDate}${
         categoryUrl ? ` categoryUrl=${categoryUrl}` : ""
-      }\n`
+      } dailyQuota=${dailyQuota} selectionProfile=${selectionProfile} promotionFilter=${promotionFilter || "-"} categoryFilter=${categoryFilter || "-"} duplicateWindowDays=${duplicateWindowDays}\n`
     );
 
     let child: ChildProcess;
     try {
       child = spawn(
-        "npx",
-        ["ts-node", "--project", "tsconfig.scripts.json", scriptPath, ...scriptArgs],
+        process.execPath,
+        [TS_NODE_BIN, "--project", "tsconfig.scripts.json", scriptPath, ...scriptArgs],
         {
           cwd: process.cwd(),
           detached: true,
@@ -182,24 +312,30 @@ export async function POST(request: NextRequest) {
     }
 
     if (!child.pid) {
-      throw new Error("시즌성 등록 프로세스를 시작하지 못했습니다.");
+      throw new Error("시즌·히트·인기 등록 프로세스를 시작하지 못했습니다.");
     }
 
     child.unref();
 
     return NextResponse.json({
       success: true,
-      message: "시즌성 상품 자동 등록을 시작했습니다.",
+      message: "시즌·히트·인기 상품 자동 등록을 시작했습니다.",
       data: {
         count,
+        connectKind,
         intervalDays,
+        dailyQuota,
         startDate,
         endDate,
+        selectionProfile,
+        promotionFilter,
+        categoryFilter,
+        duplicateWindowDays,
         logFile: logFileRelativePath,
       },
     });
   } catch (error: unknown) {
-    console.error("시즌성 일괄 등록 시작 실패:", error);
+    console.error("시즌·히트·인기 일괄 등록 시작 실패:", error);
     return NextResponse.json(
       { success: false, error: getErrorMessage(error) },
       { status: 500 }

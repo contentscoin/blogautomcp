@@ -24,10 +24,9 @@ import {
     generatePrompt,
     categoryNames
 } from "./lib/templates";
+import { buildHumanMobileStyleGuide } from "./lib/blog-writing-style";
 import { loadImages } from "./lib/image-content";
 import { createTaskLogger } from "./lib/logger";
-import { HUMANIZE_RULES } from "./lib/humanize-korean";
-import { getNaverSessionFile } from "./lib/app-paths";
 import {
     parsePreparedTopicContent,
     preparedSectionsToPublishBlocks,
@@ -42,13 +41,12 @@ const log = createTaskLogger("TopicAgent");
 // Stealth 플러그인 적용
 chromium.use(StealthPlugin());
 
-const OPENCODE_MODEL = process.env.OPENCODE_MODEL || "openai/gpt-5.2-codex";
-const OPENCODE_VARIANT = process.env.OPENCODE_VARIANT || "large";
-
-const SESSION_FILE = getNaverSessionFile();
+const SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "naver-session.json");
 const STYLES_DIR = path.join(process.cwd(), "styles");
 const NAVER_BLOG_ID = process.env.NAVER_BLOG_ID || "";
 const IMAGE_WORK_DIR = path.join(process.cwd(), "temp_images", "topic-agent");
+const ALLOW_CHATGPT_BROWSER_MODE =
+    (process.env.ALLOW_CHATGPT_BROWSER_MODE || "false").toLowerCase() === "true";
 const TOPIC_DAEDAL_IMAGE_ENABLED =
     process.env.TOPIC_PIPELINE_DAEDAL_ENABLED?.toLowerCase() === "true";
 const HAS_OPENAI_API_KEY = /^sk-[A-Za-z0-9_-]+/.test(process.env.OPENAI_API_KEY?.trim() || "");
@@ -2021,17 +2019,16 @@ function loadStyleProfile(styleName?: string): StyleProfile | null {
 }
 
 function buildStyleGuide(style: StyleProfile | null): string {
+    const baseStyleGuide = buildHumanMobileStyleGuide();
+
     if (!style) {
-        return `
-## 글쓰기 스타일
-- 친근하고 솔직한 ~요체 사용 (했어요, 같아요, 더라고요, 거든요)
-- 매번 조금씩 다른 표현 사용
-- 과장 없이 신뢰감 있게 작성
-`;
+        return baseStyleGuide;
     }
 
     return `
-## 🎨 글쓰기 스타일 가이드 (이 스타일을 반드시 따라주세요!)
+${baseStyleGuide}
+
+## 글쓰기 스타일 가이드 (이 스타일을 반드시 따라주세요!)
 
 ### 기본 스타일
 - 말투: ${style.tone}
@@ -2050,81 +2047,8 @@ ${style.transitionWords?.length ? `- 자주 쓰는 연결어: ${style.transition
 ### 참고할 문장 예시:
 ${style.sampleSentences.map((s, i) => `${i + 1}. "${s}"`).join('\n')}
 
-위 스타일을 정확히 모방하여 작성해주세요.
+위 스타일을 참고하되, 모바일에서 읽기 좋은 자연스러운 블로그 문체를 우선하세요.
 `;
-}
-
-function runOpenCode(prompt: string): string {
-    const result = spawnSync(
-        "opencode",
-        [
-            "run",
-            prompt,
-            "--format=json",
-            "--model",
-            OPENCODE_MODEL,
-            "--variant",
-            OPENCODE_VARIANT,
-        ],
-        {
-            cwd: process.cwd(),
-            encoding: "utf-8",
-            maxBuffer: 10 * 1024 * 1024,
-        },
-    );
-
-    if (result.error) {
-        throw new Error(`opencode 실행 실패: ${result.error.message}`);
-    }
-
-    if (result.status !== 0) {
-        const message = (result.stderr || result.stdout || "").trim();
-        throw new Error(`opencode run 실패: ${message || `exit code ${result.status}`}`);
-    }
-
-    const textChunks: string[] = [];
-    const lines = result.stdout.split(/\r?\n/).filter((line) => line.trim().length > 0);
-
-    for (const line of lines) {
-        try {
-            const event = JSON.parse(line);
-            if (event?.type === "text" && typeof event?.part?.text === "string") {
-                textChunks.push(event.part.text);
-            } else if (event?.text) {
-                // Handle different JSON formats from opencode
-                textChunks.push(event.text);
-            }
-        } catch {
-            // non-json lines might be the actual response if it's not strictly JSON streaming
-            if (line.includes("{") || line.includes("[")) {
-                textChunks.push(line);
-            }
-        }
-    }
-
-    // If we couldn't parse the streaming format, maybe the whole output is just the response
-    let output = textChunks.join("\n").trim();
-    if (!output && result.stdout) {
-        output = result.stdout.trim();
-    }
-
-    // Sometimes opencode puts the JSON in a weird block or prints debug output first
-    if (output && !output.startsWith("{") && !output.startsWith("[")) {
-        const jsonMatch = output.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-        if (jsonMatch) {
-            output = jsonMatch[0];
-        }
-    }
-
-    if (!output) {
-        console.error("=== opencode raw stderr ===");
-        console.error(result.stderr);
-        console.error("=== opencode raw stdout ===");
-        console.error(result.stdout);
-        throw new Error("opencode 응답에서 텍스트를 찾지 못했습니다.");
-    }
-
-    return output;
 }
 
 // ============================================
@@ -2137,6 +2061,10 @@ async function generateAdvancedContent(
     args: TopicArgs,
     styleGuide: string
 ): Promise<{ title: string; sections: string[]; hashtags: string[]; imagePrompts?: any[] }> {
+    if (!ALLOW_CHATGPT_BROWSER_MODE) {
+        throw new Error("ChatGPT 브라우저 생성은 비활성화되어 있습니다. 준비된 주제글만 발행하거나 API 파이프라인을 사용하세요.");
+    }
+
     console.log("\n🚀 [Topic Agent V2] GPT 단일 패스 콘텐츠 생성 시작...");
 
     const template = getTemplate(args.type);
@@ -2168,12 +2096,14 @@ async function generateAdvancedContent(
             "- title은 검색 의도에 맞는 자연스러운 한국어 제목 1개",
             "- sections는 정확히 4개",
             "- 각 section은 heading과 body를 가진 객체",
-            "- 각 body는 250~450자, 2~4개의 짧은 문단으로 구성",
+            "- 각 body는 250-450자, 2-4개의 짧은 문단으로 구성",
+            "- 문장은 25-45자 안팎으로 짧게 끊고 1-2문장마다 줄바꿈",
+            "- 모바일 블로그 앱에서 직접 쓴 글처럼 부드럽고 자연스럽게 작성",
+            "- 같은 어미와 같은 문장 구조를 반복하지 않기",
             "- '이미지 1에 대한 설명입니다', '추천 정보', '관련 내용입니다' 같은 더미 문장 금지",
             "- 해시태그는 5~8개, # 포함 가능",
             "- 과장 광고, 근거 없는 보장 표현, AI가 썼다는 표현 금지",
-            "",
-            HUMANIZE_RULES,
+            "- '결론적으로', '종합적으로', '본 포스팅에서는' 같은 기계적인 표현 금지",
             "",
             "반드시 아래 JSON 스키마만 반환:",
             JSON.stringify(
@@ -3111,13 +3041,10 @@ async function main() {
             console.log(`   ✅ Daedal 이미지 ${daedalPaths.length}장 생성 완료`);
         }
 
-        // env(CHATGPT_GPT_URL_IMAGE) 우선 — login/healthcheck 스크립트와 동일 변수 사용. 미설정 시 기본 GPT.
-        const CHATGPT_GPT_URL_IMAGE =
-            process.env.CHATGPT_GPT_URL_IMAGE ||
-            "https://chatgpt.com/g/g-69044d98b1f08191b96ca4293c6c8156-jeongboseong-imiji-saengseong-v11-dapeojuneunnamja";
+        const CHATGPT_GPT_URL_IMAGE = "https://chatgpt.com/g/g-69044d98b1f08191b96ca4293c6c8156-jeongboseong-imiji-saengseong-v11-dapeojuneunnamja";
 
         let imageGptHandle = null;
-        if (imagePaths.length === 0) {
+        if (imagePaths.length === 0 && ALLOW_CHATGPT_BROWSER_MODE) {
             try {
                 console.log(`   🌐 Daedal 실패/비활성화로 ChatGPT 이미지 생성 폴백 실행`);
                 console.log("   🌐 이미지 생성 GPT 브라우저 세션 초기화...");
@@ -3157,6 +3084,8 @@ async function main() {
                     await imageGptHandle.close();
                 }
             }
+        } else if (imagePaths.length === 0) {
+            console.log("   ⚠️ ChatGPT 이미지 생성 폴백 비활성화, 기본 텍스트만 발행합니다.");
         }
         imagePlan = null;
 
@@ -3185,7 +3114,7 @@ async function main() {
 
     // 5. 브라우저로 발행
     console.log("\n🌐 브라우저 시작...");
-    const browser = await chromium.launch({ headless: (process.env.HEADLESS || "false").toLowerCase() === "true", channel: process.env.BROWSER_CHANNEL || undefined });
+    const browser = await chromium.launch({ headless: (process.env.HEADLESS || "false").toLowerCase() === "true" });
     const context = await browser.newContext({
         storageState: SESSION_FILE,
         viewport: { width: 1280, height: 900 },

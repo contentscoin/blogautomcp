@@ -55,6 +55,7 @@ function getErrorMessage(error: unknown): string {
 }
 
 const GENERIC_IMAGE_PROVIDERS = new Set(["loremflickr", "picsum", "dummyimage", "stock-generic"]);
+const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
 
 function normalizeProvider(provider: string | null | undefined): string {
   const normalized = typeof provider === "string" ? provider.trim().toLowerCase() : "";
@@ -104,9 +105,9 @@ function runTopicAgent(
 
   return new Promise((resolve, reject) => {
     const child = spawn(
-      "npx",
+      process.execPath,
       [
-        "ts-node",
+        TS_NODE_BIN,
         "--project",
         "tsconfig.scripts.json",
         scriptPath,

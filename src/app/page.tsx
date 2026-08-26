@@ -27,6 +27,7 @@ interface BrandLink {
   useSectionHeading: boolean;
   scheduledPublishAt: string | null;
   createdAt: string;
+  connectKind?: "SHOPPING" | "TRAVEL";
 }
 
 export interface TopicPostTask {
@@ -113,10 +114,59 @@ interface BulkActionResponse {
     startDate?: string;
     endDate?: string;
     targetCount?: number;
+    targetDate?: string;
     delayMs?: number;
+    scheduleMode?: string;
+    collectCount?: number;
+    todayCount?: number;
+    scheduledCount?: number;
+    dailyQuota?: number;
+    promotionFilter?: string | null;
+    categoryFilter?: string | null;
+    duplicateWindowDays?: number;
     logFile?: string;
   };
 }
+
+interface BrandConnectCategoryOption {
+  id: string;
+  name: string;
+  parentId: string | null;
+  depth: number;
+  productCount: number;
+}
+
+interface BrandConnectPromotionOption {
+  value: string;
+  label: string;
+  count: number;
+}
+
+interface BrandConnectSelectionOptionsResponse {
+  success?: boolean;
+  error?: string | { message?: string; code?: string; captureRequired?: boolean };
+  data?: {
+    categoryUrl?: string;
+    categories?: BrandConnectCategoryOption[];
+    promotions?: BrandConnectPromotionOption[];
+  };
+}
+
+type BrandConnectKind = "shopping" | "travel";
+
+function getBrandConnectErrorMessage(
+  error: BrandConnectSelectionOptionsResponse["error"]
+): string {
+  if (typeof error === "string") return error;
+  return error?.message || "BrandConnect 옵션을 불러오지 못했습니다.";
+}
+
+const SEASONAL_REGISTER_COUNT_10 = 10;
+const SEASONAL_REGISTER_COUNT_50 = 50;
+const SUPER_PUBLISH_COLLECT_COUNT = 200;
+const SUPER_PUBLISH_DAILY_QUOTA = 50;
+const MAX_BULK_SCHEDULE_LIMIT = 200;
+const MAX_TODAY_PUBLISH_LIMIT = 100;
 
 function getFirstImageUrl(imageUrls: string | null): string | null {
   if (!imageUrls) return null;
@@ -176,6 +226,12 @@ function canBulkScheduleTopicTask(task: TopicPostTask): boolean {
   return contentReadiness.canPublish;
 }
 
+function toggleStringSelection(current: string[], value: string): string[] {
+  return current.includes(value)
+    ? current.filter((item) => item !== value)
+    : [...current, value];
+}
+
 export default function Dashboard() {
   const [links, setLinks] = useState<BrandLink[]>([]);
   const [loading, setLoading] = useState(true);
@@ -190,8 +246,21 @@ export default function Dashboard() {
   const [newUseSectionHeading, setNewUseSectionHeading] = useState(true);
   const [adding, setAdding] = useState(false);
   const [publishingId, setPublishingId] = useState<string | null>(null);
+  const [stoppingPosting, setStoppingPosting] = useState(false);
   const [bulkSeasonalRunning, setBulkSeasonalRunning] = useState(false);
   const [bulkScheduleRunning, setBulkScheduleRunning] = useState(false);
+  const [bulkTodayRunning, setBulkTodayRunning] = useState(false);
+  const [superPublishingRunning, setSuperPublishingRunning] = useState(false);
+  const [brandConnectCategoryUrl, setBrandConnectCategoryUrl] = useState("");
+  const [brandConnectKind, setBrandConnectKind] = useState<BrandConnectKind>("shopping");
+  const [brandConnectDuplicateWindowDays, setBrandConnectDuplicateWindowDays] = useState("30");
+  const [brandConnectCategoryOptions, setBrandConnectCategoryOptions] = useState<BrandConnectCategoryOption[]>([]);
+  const [brandConnectPromotionOptions, setBrandConnectPromotionOptions] = useState<BrandConnectPromotionOption[]>([]);
+  const [selectedBrandConnectCategoryIds, setSelectedBrandConnectCategoryIds] = useState<string[]>([]);
+  const [selectedBrandConnectPromotions, setSelectedBrandConnectPromotions] = useState<string[]>([]);
+  const [brandConnectOptionsLoading, setBrandConnectOptionsLoading] = useState(false);
+  const [brandConnectOptionsLoaded, setBrandConnectOptionsLoaded] = useState(false);
+  const [brandConnectOptionsError, setBrandConnectOptionsError] = useState<string | null>(null);
 
   // V5: 콘텐츠 모드
   const [contentMode, setContentMode] = useState<ContentMode>("product");
@@ -231,11 +300,44 @@ export default function Dashboard() {
   const getBusyMessage = useCallback((): string | null => {
     if (publishingId) return "현재 발행 작업이 진행 중입니다. 완료 후 다시 시도하세요.";
     if (topicPublishingId) return "현재 주제글 발행 작업이 진행 중입니다. 완료 후 다시 시도하세요.";
-    if (bulkSeasonalRunning) return "시즌 추천 등록 작업이 이미 실행 중입니다.";
+    if (bulkSeasonalRunning) return "시즌·히트·인기 상품 등록 작업이 이미 실행 중입니다.";
     if (bulkScheduleRunning) return "예약발행 일괄 실행 작업이 이미 실행 중입니다.";
+    if (bulkTodayRunning) return "바로 일괄발행 작업이 이미 실행 중입니다.";
+    if (superPublishingRunning) return "수퍼 퍼블리싱 작업이 이미 실행 중입니다.";
     if (topicBulkScheduleRunning) return "주제글 예약배포 일괄 실행 작업이 이미 실행 중입니다.";
     return null;
-  }, [publishingId, topicPublishingId, bulkSeasonalRunning, bulkScheduleRunning, topicBulkScheduleRunning]);
+  }, [
+    publishingId,
+    topicPublishingId,
+    bulkSeasonalRunning,
+    bulkScheduleRunning,
+    bulkTodayRunning,
+    superPublishingRunning,
+    topicBulkScheduleRunning,
+  ]);
+
+  const getBrandConnectSelectionPayload = useCallback(() => {
+    const duplicateWindowDays = Number.parseInt(brandConnectDuplicateWindowDays, 10);
+    const promotionFilter = selectedBrandConnectPromotions.join(",");
+    const categoryFilter = selectedBrandConnectCategoryIds.join(",");
+    return {
+      connectKind: brandConnectKind,
+      ...(promotionFilter ? { promotionFilter } : {}),
+      ...(categoryFilter ? { categoryFilter } : {}),
+      ...(brandConnectCategoryUrl.trim()
+        ? { categoryUrl: brandConnectCategoryUrl.trim() }
+        : {}),
+      duplicateWindowDays: Number.isFinite(duplicateWindowDays)
+        ? Math.min(3650, Math.max(0, duplicateWindowDays))
+        : 30,
+    };
+  }, [
+    selectedBrandConnectPromotions,
+    selectedBrandConnectCategoryIds,
+    brandConnectKind,
+    brandConnectCategoryUrl,
+    brandConnectDuplicateWindowDays,
+  ]);
 
   const fetchLinks = useCallback(async () => {
     try {
@@ -297,6 +399,57 @@ export default function Dashboard() {
     }
   }, []);
 
+  const loadBrandConnectSelectionOptions = useCallback(async () => {
+    try {
+      setBrandConnectOptionsLoading(true);
+      setBrandConnectOptionsError(null);
+
+      const params = new URLSearchParams();
+      params.set("connectKind", brandConnectKind);
+      if (brandConnectCategoryUrl.trim()) {
+        params.set("categoryUrl", brandConnectCategoryUrl.trim());
+      }
+
+      const query = params.toString();
+      const res = await fetch(`/api/brandlinks/selection-options${query ? `?${query}` : ""}`, {
+        cache: "no-store",
+      });
+      const data = (await res.json()) as BrandConnectSelectionOptionsResponse;
+
+      if (!res.ok || !data.success) {
+        setBrandConnectCategoryOptions([]);
+        setBrandConnectPromotionOptions([]);
+        setBrandConnectOptionsError(getBrandConnectErrorMessage(data.error));
+        return;
+      }
+
+      const categories = Array.isArray(data.data?.categories) ? data.data.categories : [];
+      const promotions = Array.isArray(data.data?.promotions) ? data.data.promotions : [];
+      const categoryIds = new Set(categories.map((category) => category.id));
+      const promotionValues = new Set(promotions.map((promotion) => promotion.value));
+
+      setBrandConnectCategoryOptions(categories);
+      setBrandConnectPromotionOptions(promotions);
+      setSelectedBrandConnectCategoryIds((current) =>
+        current.filter((value) => categoryIds.has(value))
+      );
+      setSelectedBrandConnectPromotions((current) =>
+        current.filter((value) => promotionValues.has(value))
+      );
+      if (data.data?.categoryUrl) {
+        setBrandConnectCategoryUrl(data.data.categoryUrl);
+      }
+    } catch (error) {
+      console.error("BrandConnect 옵션 로드 실패:", error);
+      setBrandConnectCategoryOptions([]);
+      setBrandConnectPromotionOptions([]);
+      setBrandConnectOptionsError("BrandConnect 옵션 로드 중 오류가 발생했습니다.");
+    } finally {
+      setBrandConnectOptionsLoaded(true);
+      setBrandConnectOptionsLoading(false);
+    }
+  }, [brandConnectCategoryUrl, brandConnectKind]);
+
   useEffect(() => {
     fetchLinks();
     fetchTopicTasks();
@@ -305,6 +458,15 @@ export default function Dashboard() {
   useEffect(() => {
     fetchCategories();
   }, [fetchCategories]);
+
+  useEffect(() => {
+    if (brandConnectOptionsLoaded || brandConnectOptionsLoading) return;
+    void loadBrandConnectSelectionOptions();
+  }, [
+    brandConnectOptionsLoaded,
+    brandConnectOptionsLoading,
+    loadBrandConnectSelectionOptions,
+  ]);
 
   useEffect(() => {
     if (!publishingId) return;
@@ -361,6 +523,7 @@ export default function Dashboard() {
           memo: newMemo.trim(),
           categoryNo: newCategoryNo.trim() || null,
           useSectionHeading: newUseSectionHeading,
+          connectKind: brandConnectKind,
         }),
       });
 
@@ -548,6 +711,32 @@ export default function Dashboard() {
     await startPublish(id, { publishMode: "now" });
   };
 
+  // 모든 포스팅 정지 — 실행 중 발행 프로세스 종료 + 대기열(PUBLISHING) 복구
+  const handleStopPosting = async () => {
+    if (!confirm("진행 중인 모든 포스팅을 정지할까요?\n실행 중인 발행이 중단되고, 자동화 브라우저가 닫힙니다.")) {
+      return;
+    }
+    try {
+      setStoppingPosting(true);
+      const res = await fetch("/api/posting/stop", { method: "POST" });
+      const data = await res.json();
+      if (data.success) {
+        setDashboardNotice({ tone: "info", text: data.message || "포스팅을 정지했습니다." });
+        setPublishingId(null);
+        setTopicPublishingId(null);
+        fetchLinks();
+        fetchTopicTasks();
+      } else {
+        setDashboardNotice({ tone: "error", text: data.error || "포스팅 정지에 실패했습니다." });
+      }
+    } catch (error) {
+      console.error("포스팅 정지 실패:", error);
+      setDashboardNotice({ tone: "error", text: "포스팅 정지 중 오류가 발생했습니다." });
+    } finally {
+      setStoppingPosting(false);
+    }
+  };
+
   const handleSchedulePublish = async (link: BrandLink) => {
     const busyMessage = getBusyMessage();
     if (busyMessage) {
@@ -592,7 +781,7 @@ export default function Dashboard() {
     });
   };
 
-  const handleBulkSeasonalRegister = async () => {
+  const handleBulkSeasonalRegister = async (count: number) => {
     const busyMessage = getBusyMessage();
     if (busyMessage) {
       setDashboardNotice({
@@ -606,15 +795,16 @@ export default function Dashboard() {
       setBulkSeasonalRunning(true);
       setDashboardNotice({
         tone: "info",
-        text: "시즌 추천 10개 등록 요청을 시작했습니다...",
+        text: `시즌·히트·인기 상품 ${count}개 등록 요청을 시작했습니다...`,
       });
 
       const res = await fetch("/api/brandlinks/bulk-seasonal", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          count: 10,
+          count,
           intervalDays: 1,
+          ...getBrandConnectSelectionPayload(),
         }),
       });
       const data = (await res.json()) as BulkActionResponse;
@@ -622,14 +812,14 @@ export default function Dashboard() {
       if (!res.ok || !data.success) {
         setDashboardNotice({
           tone: "error",
-          text: `시즌성 자동등록 시작 실패: ${data.error || "알 수 없는 오류"}`,
+          text: `시즌·히트·인기 자동등록 시작 실패: ${data.error || "알 수 없는 오류"}`,
         });
         return;
       }
 
       setDashboardNotice({
         tone: "success",
-        text: `시즌성 자동등록 시작: ${data.data?.startDate ?? "-"} ~ ${data.data?.endDate ?? "-"}${
+        text: `시즌·히트·인기 자동등록 시작: ${data.data?.startDate ?? "-"} ~ ${data.data?.endDate ?? "-"}${
           data.data?.logFile ? ` / 로그: ${data.data.logFile}` : ""
         }`,
       });
@@ -637,10 +827,10 @@ export default function Dashboard() {
         void fetchLinks();
       }, 1500);
     } catch (error) {
-      console.error("시즌성 자동등록 시작 실패:", error);
+      console.error("시즌·히트·인기 자동등록 시작 실패:", error);
       setDashboardNotice({
         tone: "error",
-        text: "시즌성 자동등록 시작 중 오류가 발생했습니다.",
+        text: "시즌·히트·인기 자동등록 시작 중 오류가 발생했습니다.",
       });
     } finally {
       setBulkSeasonalRunning(false);
@@ -669,7 +859,7 @@ export default function Dashboard() {
       return;
     }
 
-    const limit = Math.min(10, readyScheduledCount);
+    const limit = Math.min(MAX_BULK_SCHEDULE_LIMIT, readyScheduledCount);
 
     try {
       setBulkScheduleRunning(true);
@@ -707,6 +897,10 @@ export default function Dashboard() {
       setDashboardNotice({
         tone: "success",
         text: `예약발행 일괄 실행 시작: ${data.data?.targetCount ?? limit}건${
+          data.data?.startDate && data.data?.endDate ? ` (${data.data.startDate} ~ ${data.data.endDate})` : ""
+        }${
+          data.data?.scheduleMode === "preserve-existing-dates" ? " (저장된 예약일 기준)" : ""
+        }${
           data.data?.logFile ? ` / 로그: ${data.data.logFile}` : ""
         }`,
       });
@@ -721,6 +915,144 @@ export default function Dashboard() {
       });
     } finally {
       setBulkScheduleRunning(false);
+    }
+  };
+
+  const handleBulkTodayPublish = async () => {
+    const busyMessage = getBusyMessage();
+    if (busyMessage) {
+      setDashboardNotice({
+        tone: "info",
+        text: busyMessage,
+      });
+      return;
+    }
+
+    const readyImmediateCount = links.filter(
+      (link) => link.status === "READY" && formatDateDisplay(link.scheduledPublishAt) !== "-"
+    ).length;
+
+    if (readyImmediateCount === 0) {
+      setDashboardNotice({
+        tone: "info",
+        text: "바로 발행할 예약 대기 링크(READY)가 없습니다.",
+      });
+      return;
+    }
+
+    const limit = Math.min(MAX_TODAY_PUBLISH_LIMIT, readyImmediateCount);
+
+    try {
+      setBulkTodayRunning(true);
+      setDashboardNotice({
+        tone: "info",
+        text: `바로 일괄발행 요청 시작 (${limit}건)...`,
+      });
+
+      const res = await fetch("/api/brandlinks/bulk-today", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          limit,
+          delayMs: 1500,
+          allScheduled: true,
+        }),
+      });
+      const data = (await res.json()) as BulkActionResponse;
+
+      if (!res.ok || !data.success) {
+        setDashboardNotice({
+          tone: "error",
+          text: `바로 일괄발행 실패: ${data.error || "알 수 없는 오류"}`,
+        });
+        return;
+      }
+
+      if ((data.data?.targetCount ?? 0) === 0) {
+        setDashboardNotice({
+          tone: "info",
+          text: data.message || "바로 발행할 대상이 없습니다.",
+        });
+        return;
+      }
+
+      setDashboardNotice({
+        tone: "success",
+        text: `바로 일괄발행 시작: ${data.data?.targetCount ?? limit}건${
+          data.data?.targetDate ? ` (${data.data.targetDate})` : ""
+        }${data.data?.logFile ? ` / 로그: ${data.data.logFile}` : ""}`,
+      });
+      setTimeout(() => {
+        void fetchLinks();
+      }, 1500);
+    } catch (error) {
+      console.error("바로 일괄발행 실패:", error);
+      setDashboardNotice({
+        tone: "error",
+        text: "바로 일괄발행 중 오류가 발생했습니다.",
+      });
+    } finally {
+      setBulkTodayRunning(false);
+    }
+  };
+
+  const handleSuperPublishing = async () => {
+    const busyMessage = getBusyMessage();
+    if (busyMessage) {
+      setDashboardNotice({
+        tone: "info",
+        text: busyMessage,
+      });
+      return;
+    }
+
+    try {
+      setSuperPublishingRunning(true);
+      setDashboardNotice({
+        tone: "info",
+        text: `수퍼 퍼블리싱 시작 요청 중입니다. 링크 ${SUPER_PUBLISH_COLLECT_COUNT}개 수집 후 ${SUPER_PUBLISH_DAILY_QUOTA}개씩 처리합니다...`,
+      });
+
+      const res = await fetch("/api/brandlinks/super-publish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          collectCount: SUPER_PUBLISH_COLLECT_COUNT,
+          todayCount: SUPER_PUBLISH_DAILY_QUOTA,
+          dailyQuota: SUPER_PUBLISH_DAILY_QUOTA,
+          delayMs: 1500,
+          ...getBrandConnectSelectionPayload(),
+        }),
+      });
+      const data = (await res.json()) as BulkActionResponse;
+
+      if (!res.ok || !data.success) {
+        setDashboardNotice({
+          tone: "error",
+          text: `수퍼 퍼블리싱 시작 실패: ${data.error || "알 수 없는 오류"}`,
+        });
+        return;
+      }
+
+      setDashboardNotice({
+        tone: "success",
+        text: `수퍼 퍼블리싱 시작: 수집 ${data.data?.collectCount ?? SUPER_PUBLISH_COLLECT_COUNT}건, 바로발행 ${
+          data.data?.todayCount ?? SUPER_PUBLISH_DAILY_QUOTA
+        }건, 예약발행 ${data.data?.scheduledCount ?? SUPER_PUBLISH_COLLECT_COUNT - SUPER_PUBLISH_DAILY_QUOTA}건${
+          data.data?.startDate && data.data?.endDate ? ` (${data.data.startDate} ~ ${data.data.endDate})` : ""
+        }${data.data?.logFile ? ` / 로그: ${data.data.logFile}` : ""}`,
+      });
+      setTimeout(() => {
+        void fetchLinks();
+      }, 3000);
+    } catch (error) {
+      console.error("수퍼 퍼블리싱 시작 실패:", error);
+      setDashboardNotice({
+        tone: "error",
+        text: "수퍼 퍼블리싱 시작 중 오류가 발생했습니다.",
+      });
+    } finally {
+      setSuperPublishingRunning(false);
     }
   };
 
@@ -791,6 +1123,7 @@ export default function Dashboard() {
   const readyScheduledCount = links.filter(
     (link) => link.status === "READY" && formatDateDisplay(link.scheduledPublishAt) !== "-"
   ).length;
+  const readyImmediateCount = readyScheduledCount;
   const readyTopicScheduledCount = topicTasks.filter(canBulkScheduleTopicTask).length;
   const busyMessageForUi = getBusyMessage();
 
@@ -1149,12 +1482,6 @@ export default function Dashboard() {
                 className="px-4 py-2 text-sm bg-slate-100 text-slate-600 rounded-lg hover:bg-slate-200 transition-colors"
               >
                 📊 히스토리
-              </Link>
-              <Link
-                href="/settings"
-                className="px-4 py-2 text-sm bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 transition-colors"
-              >
-                ⚙️ 설정
               </Link>
               <button
                 onClick={() => fetchLinks()}
@@ -1530,20 +1857,202 @@ export default function Dashboard() {
             <div className="bg-white border border-slate-200 rounded-xl p-4">
               <h2 className="font-semibold text-slate-800 mb-3">⚙️ 일괄 작업</h2>
               <div className="flex flex-wrap items-center gap-3">
+                <div className="w-full space-y-3">
+                  <div className="grid grid-cols-1 md:grid-cols-[150px_1fr_140px_auto] gap-3 items-end">
+                    <label className="block">
+                      <span className="block text-xs font-medium text-slate-600 mb-1">커넥트 종류</span>
+                      <select
+                        value={brandConnectKind}
+                        onChange={(e) => {
+                          setBrandConnectKind(e.target.value as BrandConnectKind);
+                          setBrandConnectCategoryUrl("");
+                          setBrandConnectCategoryOptions([]);
+                          setBrandConnectPromotionOptions([]);
+                          setSelectedBrandConnectCategoryIds([]);
+                          setSelectedBrandConnectPromotions([]);
+                          setBrandConnectOptionsLoaded(false);
+                          setBrandConnectOptionsError(null);
+                        }}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      >
+                        <option value="shopping">쇼핑커넥트</option>
+                        <option value="travel">여행커넥트</option>
+                      </select>
+                    </label>
+                    <label className="block">
+                      <span className="block text-xs font-medium text-slate-600 mb-1">
+                        {brandConnectKind === "travel" ? "여행커넥트 목록 URL" : "브랜드커넥트 카테고리 URL"}
+                      </span>
+                      <input
+                        type="text"
+                        value={brandConnectCategoryUrl}
+                        onChange={(e) => setBrandConnectCategoryUrl(e.target.value)}
+                        placeholder={
+                          brandConnectKind === "travel"
+                            ? "로그인 후 여행커넥트 목록 URL을 입력"
+                            : "https://brandconnect.naver.com/.../category/..."
+                        }
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="block text-xs font-medium text-slate-600 mb-1">중복 제외</span>
+                      <input
+                        type="number"
+                        min="0"
+                        max="3650"
+                        value={brandConnectDuplicateWindowDays}
+                        onChange={(e) => setBrandConnectDuplicateWindowDays(e.target.value.replace(/[^\d]/g, ""))}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => void loadBrandConnectSelectionOptions()}
+                      disabled={brandConnectOptionsLoading}
+                      className="px-4 py-2 bg-slate-700 text-white rounded-lg hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {brandConnectOptionsLoading ? "불러오는 중..." : "옵션 불러오기"}
+                    </button>
+                  </div>
+
+                  {brandConnectOptionsError && (
+                    <p className="text-xs text-red-600">{brandConnectOptionsError}</p>
+                  )}
+                  {brandConnectKind === "travel" && !brandConnectOptionsError && (
+                    <p className="text-xs text-amber-700">
+                      여행커넥트는 실제 목록 API 계약을 안전하게 확인한 뒤 활성화됩니다. 현재는 잘못된 항목 등록을 방지하도록 차단됩니다.
+                    </p>
+                  )}
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="border border-slate-200 rounded-lg p-3">
+                      <div className="flex items-center justify-between gap-2 mb-2">
+                        <span className="text-sm font-medium text-slate-700">
+                          카테고리 선택 ({selectedBrandConnectCategoryIds.length})
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedBrandConnectCategoryIds([])}
+                          className="text-xs text-slate-500 hover:text-slate-800"
+                        >
+                          초기화
+                        </button>
+                      </div>
+                      <div className="max-h-40 overflow-y-auto space-y-1">
+                        {brandConnectCategoryOptions.length === 0 ? (
+                          <p className="text-xs text-slate-500">
+                            {brandConnectOptionsLoading ? "카테고리 로드 중..." : "로드된 카테고리가 없습니다."}
+                          </p>
+                        ) : (
+                          brandConnectCategoryOptions.map((category) => (
+                            <label
+                              key={category.id}
+                              className="flex items-center gap-2 text-sm text-slate-700"
+                              style={{ paddingLeft: `${Math.min(category.depth, 3) * 12}px` }}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selectedBrandConnectCategoryIds.includes(category.id)}
+                                onChange={() =>
+                                  setSelectedBrandConnectCategoryIds((current) =>
+                                    toggleStringSelection(current, category.id)
+                                  )
+                                }
+                                className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                              />
+                              <span className="flex-1 truncate">{category.name}</span>
+                              <span className="text-xs text-slate-400">{category.productCount}</span>
+                            </label>
+                          ))
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="border border-slate-200 rounded-lg p-3">
+                      <div className="flex items-center justify-between gap-2 mb-2">
+                        <span className="text-sm font-medium text-slate-700">
+                          프로모션/이벤트 카테고리 ({selectedBrandConnectPromotions.length})
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedBrandConnectPromotions([])}
+                          className="text-xs text-slate-500 hover:text-slate-800"
+                        >
+                          초기화
+                        </button>
+                      </div>
+                      <div className="max-h-40 overflow-y-auto space-y-1">
+                        {brandConnectPromotionOptions.length === 0 ? (
+                          <p className="text-xs text-slate-500">
+                            {brandConnectOptionsLoading ? "이벤트 카테고리 로드 중..." : "로드된 이벤트 카테고리가 없습니다."}
+                          </p>
+                        ) : (
+                          brandConnectPromotionOptions.map((promotion) => (
+                            <label
+                              key={promotion.value}
+                              className="flex items-center gap-2 text-sm text-slate-700"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selectedBrandConnectPromotions.includes(promotion.value)}
+                                onChange={() =>
+                                  setSelectedBrandConnectPromotions((current) =>
+                                    toggleStringSelection(current, promotion.value)
+                                  )
+                                }
+                                className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                              />
+                              <span className="flex-1 truncate">{promotion.label}</span>
+                              <span className="text-xs text-slate-400">{promotion.count}</span>
+                            </label>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
                 <button
-                  onClick={handleBulkSeasonalRegister}
-                  disabled={bulkSeasonalRunning || bulkScheduleRunning || topicBulkScheduleRunning || Boolean(publishingId)}
+                  onClick={() => handleBulkSeasonalRegister(SEASONAL_REGISTER_COUNT_10)}
+                  disabled={bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId)}
                   className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   {bulkSeasonalRunning
-                    ? "시즌 상품 등록 시작 중..."
-                    : "시즌 추천 10개 등록"}
+                    ? "인기 상품 등록 시작 중..."
+                    : "시즌·히트·인기 10개 등록"}
+                </button>
+                <button
+                  onClick={() => handleBulkSeasonalRegister(SEASONAL_REGISTER_COUNT_50)}
+                  disabled={bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId)}
+                  className="px-4 py-2 bg-sky-600 text-white rounded-lg hover:bg-sky-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  {bulkSeasonalRunning
+                    ? "인기 상품 등록 시작 중..."
+                    : "시즌·히트·인기 50개 등록"}
+                </button>
+                <button
+                  onClick={handleSuperPublishing}
+                  disabled={
+                    bulkSeasonalRunning ||
+                    bulkScheduleRunning ||
+                    bulkTodayRunning ||
+                    superPublishingRunning ||
+                    topicBulkScheduleRunning ||
+                    Boolean(publishingId)
+                  }
+                  className="px-4 py-2 bg-fuchsia-600 text-white rounded-lg hover:bg-fuchsia-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  {superPublishingRunning
+                    ? "수퍼 퍼블리싱 시작 중..."
+                    : `수퍼 퍼블리싱 ${SUPER_PUBLISH_COLLECT_COUNT}개`}
                 </button>
                 <button
                   onClick={handleBulkSchedulePublish}
                   disabled={
                     bulkSeasonalRunning ||
                     bulkScheduleRunning ||
+                    bulkTodayRunning ||
+                    superPublishingRunning ||
                     topicBulkScheduleRunning ||
                     Boolean(publishingId) ||
                     readyScheduledCount === 0
@@ -1552,10 +2061,35 @@ export default function Dashboard() {
                 >
                   {bulkScheduleRunning
                     ? "예약발행 일괄 실행 중..."
-                    : `예약발행 일괄 실행 (${Math.min(10, readyScheduledCount)}건)`}
+                    : `예약발행 일괄 실행 (${Math.min(MAX_BULK_SCHEDULE_LIMIT, readyScheduledCount)}건)`}
+                </button>
+                <button
+                  onClick={handleBulkTodayPublish}
+                  disabled={
+                    bulkSeasonalRunning ||
+                    bulkScheduleRunning ||
+                    bulkTodayRunning ||
+                    superPublishingRunning ||
+                    topicBulkScheduleRunning ||
+                    Boolean(publishingId) ||
+                    readyImmediateCount === 0
+                  }
+                  className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  {bulkTodayRunning
+                    ? "바로 일괄발행 중..."
+                    : `바로 일괄발행 (${Math.min(MAX_TODAY_PUBLISH_LIMIT, readyImmediateCount)}건)`}
+                </button>
+                <button
+                  onClick={handleStopPosting}
+                  disabled={stoppingPosting}
+                  className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-semibold"
+                  title="진행 중인 모든 포스팅을 즉시 정지하고 대기열을 복구합니다"
+                >
+                  {stoppingPosting ? "정지 중..." : "⛔ 포스팅 정지"}
                 </button>
                 <p className="text-xs text-slate-500">
-                  시즌 등록은 마지막 예약발행일 다음날부터 10일치로 자동 배치됩니다.
+                  상품 등록은 시즌추천, 히트상품, 판매/주문/리뷰/인기 신호를 우선해서 고릅니다. 수퍼 퍼블리싱은 200개 수집 후 당일 50개 바로발행, 1~3일 뒤 50개씩 예약발행합니다.
                 </p>
               </div>
               {busyMessageForUi && (
@@ -1802,10 +2336,12 @@ export default function Dashboard() {
           <ol className="text-sm text-slate-600 space-y-1 list-decimal list-inside">
             <li>먼저 <code className="bg-slate-200 px-1 rounded">npm run login</code>으로 네이버 로그인</li>
             <li>브랜드커넥트 링크를 추가 (https://naver.me/xxx 형태)</li>
-            <li>⚙️ 시즌 추천 10개 등록 버튼으로 마지막 예약발행일 다음날부터 10일치 자동 등록</li>
-            <li>⚙️ 예약발행 일괄 실행 버튼으로 예약발행일이 있는 READY 글을 순차 예약발행</li>
+            <li>⚙️ 시즌·히트·인기 10개/50개 등록 버튼으로 예약발행 대상 링크를 자동 등록</li>
+            <li>⚙️ 수퍼 퍼블리싱 200개 버튼으로 당일 50개 바로발행, 1~3일 뒤 50개씩 예약발행</li>
+            <li>⚙️ 예약발행 일괄 실행 버튼으로 READY 글을 저장된 예약발행일 기준으로 순차 예약발행</li>
+            <li>⚙️ 바로 일괄발행 버튼으로 예약 READY 글 전체를 즉시 순차 발행</li>
             <li>🚀 즉시 버튼은 바로 발행, 📅 예약 버튼은 예약 발행</li>
-            <li>예약발행일이 과거 또는 당일이면 자동으로 다음날로 조정됩니다.</li>
+            <li>단건 예약에서 과거 또는 당일 날짜를 입력하면 자동으로 다음날로 조정됩니다.</li>
           </ol>
         </div>
       </main>

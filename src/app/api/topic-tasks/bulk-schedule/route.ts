@@ -12,6 +12,8 @@ interface BulkTopicScheduleBody {
   delayMs?: number;
 }
 
+const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
+
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "알 수 없는 오류";
 }
@@ -151,8 +153,8 @@ export async function POST(request: NextRequest) {
     let child: ChildProcess;
     try {
       child = spawn(
-        "npx",
-        ["ts-node", "--project", "tsconfig.scripts.json", scriptPath, ...scriptArgs],
+        process.execPath,
+        [TS_NODE_BIN, "--project", "tsconfig.scripts.json", scriptPath, ...scriptArgs],
         {
           cwd: process.cwd(),
           detached: true,

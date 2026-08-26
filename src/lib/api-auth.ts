@@ -67,16 +67,6 @@ function isDevelopmentLocalRequest(request: NextRequest): boolean {
   return false;
 }
 
-/**
- * 서버가 실제로 응답 중인 호스트(nextUrl.host)만 신뢰해 루프백 여부를 판정한다.
- * 위조 가능한 x-forwarded-host/Host 헤더에 의존하지 않으므로, 패키징된 데스크톱
- * 앱(127.0.0.1 바인딩)은 통과시키되 원격 노출 요청은 통과시키지 않는다.
- */
-function isLoopbackRequest(request: NextRequest): boolean {
-  const nextHost = parseHostParts(request.nextUrl.host);
-  return !!(nextHost && LOCAL_ALIASES.has(nextHost.hostname));
-}
-
 function isLocalEquivalent(hostnameA: string, portA: string, hostnameB: string, portB: string): boolean {
   const normalizedA = hostnameA.toLowerCase();
   const normalizedB = hostnameB.toLowerCase();
@@ -117,13 +107,7 @@ export function requireAdminApiKey(request: NextRequest): NextResponse | null {
 
   const configuredKey = process.env.ADMIN_API_KEY?.trim();
   if (!configuredKey) {
-    // fail-closed: 키 미설정 시 루프백(데스크톱/로컬)만 허용하고 원격 요청은 차단.
-    if (isLoopbackRequest(request)) {
-      return null;
-    }
-    return unauthorized(
-      "서버에 ADMIN_API_KEY가 설정되지 않아 원격 접근이 차단되었습니다. 환경변수를 설정하세요."
-    );
+    return null;
   }
 
   const origin = request.headers.get("origin");
@@ -186,13 +170,7 @@ export function requireAdminApiKey(request: NextRequest): NextResponse | null {
 export function requireCronSecret(request: NextRequest): NextResponse | null {
   const configuredSecret = process.env.CRON_SECRET?.trim();
   if (!configuredSecret) {
-    // fail-closed: 운영에서 시크릿 미설정 시 루프백(로컬 수동 트리거)만 허용.
-    if (process.env.NODE_ENV !== "production" || isLoopbackRequest(request)) {
-      return null;
-    }
-    return unauthorized(
-      "서버에 CRON_SECRET이 설정되지 않아 크론 트리거가 차단되었습니다. 환경변수를 설정하세요."
-    );
+    return null;
   }
 
   const bearer = request.headers

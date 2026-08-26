@@ -7,9 +7,17 @@ import "dotenv/config";
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { PrismaClient } from "@prisma/client";
-import type { BrowserContextOptions } from "playwright";
+import type { BrowserContextOptions, Page } from "playwright";
 import * as path from "path";
 import * as fs from "fs";
+import {
+    isCandidateProductImageUrl,
+    isPreferredThumbnailImageUrl,
+    isReviewImageUrl,
+    isSalesPageProductImageUrl,
+    prioritizeImageCandidates,
+    type ProductImageCandidate,
+} from "./lib/product-image-selection";
 
 // Stealth 플러그인 적용
 chromium.use(StealthPlugin());
@@ -44,47 +52,69 @@ function isInvalidProductName(name: string): boolean {
     );
 }
 
-function containsBadImageKeyword(url: string): boolean {
-    return /icon|logo|banner|sprite|thumb|thumbnail|coupon|benefit|guide|notice|delivery|event|ads?/i.test(url);
-}
+async function collectProductImageUrlsFromPage(page: Page): Promise<string[]> {
+    const candidates: ProductImageCandidate[] = [];
 
-function normalizeCandidateImageUrl(rawUrl: string): string {
-    return rawUrl.trim().replace(/\?type=.*/i, "?type=w860");
-}
+    const ogImage = await page.getAttribute('meta[property="og:image"]', "content").catch(() => null);
+    if (ogImage && isCandidateProductImageUrl(ogImage)) {
+        candidates.push({ url: ogImage, source: "og", index: 0 });
+    }
 
-function isCandidateProductImageUrl(rawUrl: string): boolean {
-    const url = rawUrl.toLowerCase();
-    if (!url) return false;
+    const domCandidates = await page
+        .evaluate(() => {
+            const toText = (value: unknown): string =>
+                typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+            const urlsFromSrcset = (srcset: string | null): string[] => {
+                if (!srcset) return [];
+                return srcset
+                    .split(",")
+                    .map((part) => part.trim().split(/\s+/)[0])
+                    .filter(Boolean);
+            };
 
-    const isImageDomain =
-        url.includes("shop-phinf.pstatic.net") ||
-        url.includes("shopping-phinf.pstatic.net") ||
-        url.includes("phinf.pstatic.net") ||
-        url.includes("sitem.ssgcdn.com") ||
-        url.includes("cdn.011st.com");
+            return Array.from(document.images).flatMap((img, index) => {
+                const rect = img.getBoundingClientRect();
+                const parent = img.closest(
+                    '[class*="image" i], [class*="thumb" i], [class*="gallery" i], [class*="viewer" i], [class*="product" i], [class*="detail" i], [class*="review" i]'
+                ) as HTMLElement | null;
+                const rawUrls = [
+                    img.currentSrc,
+                    img.getAttribute("data-src"),
+                    img.getAttribute("data-original"),
+                    img.getAttribute("data-lazy-src"),
+                    img.getAttribute("src"),
+                    ...urlsFromSrcset(img.getAttribute("srcset")),
+                ].filter((candidate): candidate is string => Boolean(candidate));
 
-    if (!isImageDomain) return false;
-    if (containsBadImageKeyword(url)) return false;
-    if (url.includes("1x1")) return false;
-    return true;
-}
+                return Array.from(new Set(rawUrls)).map((candidateUrl) => ({
+                    url: candidateUrl,
+                    index,
+                    width: Math.max(img.naturalWidth || 0, Math.round(rect.width || 0)),
+                    height: Math.max(img.naturalHeight || 0, Math.round(rect.height || 0)),
+                    top: Math.round(rect.top + window.scrollY),
+                    alt: toText(img.getAttribute("alt")),
+                    className: toText(img.className),
+                    parentClassName: toText(parent?.className),
+                }));
+            });
+        })
+        .catch(() => [] as ProductImageCandidate[]);
 
-function prioritizeImageUrls(urls: string[]): string[] {
-    const scored = urls.map((url, index) => {
-        const lower = url.toLowerCase();
-        let score = 0;
+    for (const candidate of domCandidates) {
+        if (!isCandidateProductImageUrl(candidate.url)) continue;
+        const isGalleryLike =
+            isSalesPageProductImageUrl(candidate.url) &&
+            !isReviewImageUrl(candidate.url) &&
+            /image|thumb|gallery|viewer|product|상품|prd/i.test(
+                `${candidate.className || ""} ${candidate.parentClassName || ""} ${candidate.alt || ""}`
+            );
+        candidates.push({
+            ...candidate,
+            source: isGalleryLike ? "gallery" : "dom",
+        });
+    }
 
-        if (index === 0) score += 800; // og:image를 첫 후보로 넣기 때문에 우선
-        if (/\.(jpe?g)(\?|$)/i.test(lower)) score += 200;
-        if (/\.png(\?|$)/i.test(lower)) score -= 120;
-        if (containsBadImageKeyword(lower)) score -= 300;
-        score += Math.max(0, 80 - index);
-
-        return { url, score, index };
-    });
-
-    scored.sort((a, b) => b.score - a.score || a.index - b.index);
-    return scored.map((item) => item.url);
+    return prioritizeImageCandidates(candidates);
 }
 
 async function scrapeProductInfo(url: string, headless: boolean) {
@@ -92,7 +122,6 @@ async function scrapeProductInfo(url: string, headless: boolean) {
 
     const browser = await chromium.launch({
         headless,
-        channel: process.env.BROWSER_CHANNEL || undefined, // 패키징 시 시스템 Chrome 사용
         args: [
             '--disable-blink-features=AutomationControlled',
             '--no-sandbox',
@@ -216,25 +245,19 @@ async function scrapeProductInfo(url: string, headless: boolean) {
         }
         console.log(`   💰 가격: ${productPrice}`);
 
-        // 이미지 URL 추출 (대표 이미지 품질 개선)
-        const candidateUrls: string[] = [];
-
-        const ogImage = await page.getAttribute('meta[property="og:image"]', "content").catch(() => null);
-        if (ogImage && isCandidateProductImageUrl(ogImage)) {
-            candidateUrls.push(normalizeCandidateImageUrl(ogImage));
+        // 이미지 URL 추출: 판매페이지 대표 상품 이미지 우선, 후기/상세 이미지는 뒤로 보낸다.
+        const imageUrls = (await collectProductImageUrlsFromPage(page)).slice(0, 10);
+        const salesPageImageCount = imageUrls.filter((imageUrl) => isSalesPageProductImageUrl(imageUrl)).length;
+        const reviewImageCount = imageUrls.filter((imageUrl) => isReviewImageUrl(imageUrl)).length;
+        console.log(
+            `   🖼️ 이미지: ${imageUrls.length}개 (판매페이지 ${salesPageImageCount}개 / 후기 ${reviewImageCount}개)`
+        );
+        if (imageUrls[0]) {
+            console.log(`   🖼️ 대표 이미지 후보: ${imageUrls[0]}`);
+            console.log(
+                `   🖼️ 썸네일 원본 적합: ${isPreferredThumbnailImageUrl(imageUrls[0]) ? "예" : "아니오"}`
+            );
         }
-
-        const images = await page.$$("img");
-        for (const img of images) {
-            const src = (await img.getAttribute("data-src")) || (await img.getAttribute("src")) || "";
-            if (!isCandidateProductImageUrl(src)) continue;
-            candidateUrls.push(normalizeCandidateImageUrl(src));
-            if (candidateUrls.length >= 40) break;
-        }
-
-        const dedupedUrls = Array.from(new Set(candidateUrls));
-        const imageUrls = prioritizeImageUrls(dedupedUrls).slice(0, 10);
-        console.log(`   🖼️ 이미지: ${imageUrls.length}개`);
 
         await browser.close();
 

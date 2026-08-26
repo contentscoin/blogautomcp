@@ -46,6 +46,13 @@ interface CategoryItem {
   displayName: string;
 }
 
+class BlogCategoryAuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BlogCategoryAuthError";
+  }
+}
+
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "알 수 없는 오류";
 }
@@ -55,12 +62,9 @@ function isDomainMatch(hostname: string, cookieDomain: string): boolean {
   return hostname === normalized || hostname.endsWith(`.${normalized}`);
 }
 
-function buildCookieHeaderForHost(
-  storageStatePath: string,
-  hostname: string
-): string {
+function buildCookieHeaderForHost(storageStatePath: string, hostname: string): string {
   if (!fs.existsSync(storageStatePath)) {
-    throw new Error("네이버 로그인 세션 파일이 없습니다. `npm run login`을 먼저 실행하세요.");
+    throw new BlogCategoryAuthError("네이버 로그인 세션 파일이 없습니다. `npm run login`을 먼저 실행하세요.");
   }
 
   const raw = fs.readFileSync(storageStatePath, "utf-8");
@@ -71,20 +75,15 @@ function buildCookieHeaderForHost(
   const usableCookies = cookies.filter((cookie) => {
     if (!cookie.name || cookie.value === undefined || !cookie.domain) return false;
     if (!isDomainMatch(hostname, cookie.domain)) return false;
-
     if (typeof cookie.expires === "number" && cookie.expires > 0 && cookie.expires <= nowSec) {
       return false;
     }
-
     return true;
   });
 
-  const header = usableCookies
-    .map((cookie) => `${cookie.name}=${cookie.value}`)
-    .join("; ");
-
+  const header = usableCookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
   if (!header) {
-    throw new Error("유효한 네이버 세션 쿠키를 찾지 못했습니다. `npm run login` 후 다시 시도하세요.");
+    throw new BlogCategoryAuthError("유효한 네이버 세션 쿠키를 찾지 못했습니다. `npm run login` 후 다시 시도하세요.");
   }
 
   return header;
@@ -120,8 +119,7 @@ function flattenCategories(rawCategories: RawCategory[]): CategoryItem[] {
       ordered.push({
         categoryNo: String(child.categoryNo),
         categoryName: child.categoryName,
-        parentCategoryNo:
-          child.parentCategoryNo >= 0 ? String(child.parentCategoryNo) : null,
+        parentCategoryNo: child.parentCategoryNo >= 0 ? String(child.parentCategoryNo) : null,
         depth,
         displayName: `${depth > 0 ? `${"· ".repeat(depth)}` : ""}${child.categoryName}`,
       });
@@ -137,8 +135,7 @@ function flattenCategories(rawCategories: RawCategory[]): CategoryItem[] {
     ordered.push({
       categoryNo: String(category.categoryNo),
       categoryName: category.categoryName,
-      parentCategoryNo:
-        category.parentCategoryNo >= 0 ? String(category.parentCategoryNo) : null,
+      parentCategoryNo: category.parentCategoryNo >= 0 ? String(category.parentCategoryNo) : null,
       depth: 0,
       displayName: category.categoryName,
     });
@@ -152,22 +149,17 @@ export async function GET() {
     const blogId = process.env.NAVER_BLOG_ID?.trim();
     if (!blogId) {
       return NextResponse.json(
-        { success: false, error: "NAVER_BLOG_ID가 설정되지 않았습니다." },
-        { status: 500 }
+        { success: false, error: "NAVER_BLOG_ID가 설정되어 있지 않습니다." },
+        { status: 500 },
       );
     }
 
-    const storageStatePath = path.join(
-      process.cwd(),
-      "playwright",
-      "storage",
-      "naver-session.json"
-    );
+    const storageStatePath = path.join(process.cwd(), "playwright", "storage", "naver-session.json");
     const cookieHeader = buildCookieHeaderForHost(storageStatePath, "blog.naver.com");
-
     const endpoint = `https://blog.naver.com/PostWriteFormManagerOptions.naver?blogId=${encodeURIComponent(
-      blogId
+      blogId,
     )}`;
+
     const response = await fetch(endpoint, {
       method: "GET",
       headers: {
@@ -180,6 +172,9 @@ export async function GET() {
     });
 
     if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        throw new BlogCategoryAuthError("네이버 로그인 세션이 만료되었거나 권한이 없습니다. `npm run login`을 다시 실행하세요.");
+      }
       throw new Error(`네이버 카테고리 조회 실패 (HTTP ${response.status})`);
     }
 
@@ -187,40 +182,37 @@ export async function GET() {
     let parsed: FormManagerOptionsResponse;
     try {
       parsed = JSON.parse(text) as FormManagerOptionsResponse;
-    } catch (parseError) {
-      // HTML이 반환되는 경우(로그인 만료 등으로 리다이렉트된 경우)
+    } catch {
       if (text.includes("<!DOCTYPE") || text.includes("<html") || text.includes("<script")) {
-         throw new Error("네이버 로그인 세션이 만료되었거나 권한이 없습니다. 터미널에서 `npm run login`을 다시 실행해주세요.");
+        throw new BlogCategoryAuthError(
+          "네이버 로그인 세션이 만료되었거나 권한이 없습니다. 터미널에서 `npm run login`을 다시 실행해주세요.",
+        );
       }
-      console.error("JSON 파싱 에러. 원본 응답:", text.substring(0, 500));
+      console.error("네이버 카테고리 JSON 파싱 실패. 원본 응답:", text.substring(0, 500));
       throw new Error("네이버 카테고리 응답을 분석할 수 없습니다.");
     }
-    
+
     if (!parsed.isSuccess) {
-      throw new Error("네이버 카테고리 응답이 비정상입니다.");
+      throw new Error("네이버 카테고리 응답이 정상적이지 않습니다.");
     }
 
-    const categoryList =
-      parsed.result?.formView?.categoryListFormView?.categoryFormViewList ?? [];
-    const defaultCategoryId =
-      parsed.result?.formView?.categoryListFormView?.defaultCategoryId;
-
-    const categories = flattenCategories(categoryList);
+    const categoryList = parsed.result?.formView?.categoryListFormView?.categoryFormViewList ?? [];
+    const defaultCategoryId = parsed.result?.formView?.categoryListFormView?.defaultCategoryId;
 
     return NextResponse.json({
       success: true,
       data: {
         blogId,
-        defaultCategoryNo:
-          typeof defaultCategoryId === "number" ? String(defaultCategoryId) : null,
-        categories,
+        defaultCategoryNo: typeof defaultCategoryId === "number" ? String(defaultCategoryId) : null,
+        categories: flattenCategories(categoryList),
       },
     });
   } catch (error: unknown) {
     console.error("블로그 카테고리 조회 실패:", error);
+    const authRequired = error instanceof BlogCategoryAuthError;
     return NextResponse.json(
-      { success: false, error: getErrorMessage(error) },
-      { status: 500 }
+      { success: false, error: getErrorMessage(error), authRequired },
+      { status: authRequired ? 200 : 500 },
     );
   }
 }

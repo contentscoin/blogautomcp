@@ -1,0 +1,542 @@
+{
+  "generated_at": "2026-07-01T14:18:04.760Z",
+  "source_dir": "docs/opencrab-saas-micro-repair-2026-07-01",
+  "output_dir": "docs/opencrab-saas-solo-payloads-2026-07-01",
+  "package_id": "cfe1fd01-a052-4ec0-a97b-b7f45cd92b9d",
+  "project_id": "ce86789f-c294-449f-9add-61de752e810b",
+  "start_minor_version": 16,
+  "product_count": 80,
+  "category_count": 8,
+  "max_solo_doc_chars": 890,
+  "all_solo_docs_fit_900_chars": true,
+  "categories": [
+    {
+      "category": "baby_pet",
+      "product_count": 10,
+      "products": [
+        {
+          "pid": "181e8f0e-4380-4926-bc7e-bd64d54fb8d7",
+          "version": "1.0.16",
+          "chars": 807,
+          "product_name": "페노비스 강아지 고양이 바르는 임상균주 치약 오랄벳"
+        },
+        {
+          "pid": "fe03bf78-db38-4b2a-aa66-19e93d55e45c",
+          "version": "1.0.17",
+          "chars": 835,
+          "product_name": "실버라인펫 블랙라벨 노스트레스 슬리커브러쉬 엉킨털 죽은털..."
+        },
+        {
+          "pid": "d1765a24-077a-4d76-ae57-3838e22cb52b",
+          "version": "1.0.18",
+          "chars": 840,
+          "product_name": "헤잇미 강아지진드기퇴치제 스프레이 강아지해충방지 애견 벌..."
+        },
+        {
+          "pid": "3251bc73-3edf-4e58-9fa9-460b81f20dda",
+          "version": "1.0.19",
+          "chars": 844,
+          "product_name": "[CF상품]붐케어 아기 드라이기 저소음 무선 강아지 고양..."
+        },
+        {
+          "pid": "08a2e8bd-a7f1-4ab0-b92a-cfd8a252163b",
+          "version": "1.0.20",
+          "chars": 817,
+          "product_name": "주문 제작 아크릴 그립톡 강아지 고양이 동물 굿즈"
+        },
+        {
+          "pid": "4c6bdf2e-0eac-4218-a798-e4534006878b",
+          "version": "1.0.21",
+          "chars": 793,
+          "product_name": "안티놀래피드 240캡슐 강아지 고양이 관절염 및 슬개골 ..."
+        },
+        {
+          "pid": "db2a4691-fcce-4668-a7a3-7e58b218fae3",
+          "version": "1.0.22",
+          "chars": 828,
+          "product_name": "바잇미 강아지쿨매트 강아지냉감패드 쿨링애견매트 반려견"
+        },
+        {
+          "pid": "6c8f2f14-ecb4-45f2-8ca8-9949c48a915c",
+          "version": "1.0.23",
+          "chars": 795,
+          "product_name": "[강형욱 추천] 건사료와 섞어 먹는 강아지 화식 큐브 (..."
+        },
+        {
+          "pid": "88f9d71f-f7d3-41d0-a2de-393be79f8f46",
+          "version": "1.0.24",
+          "chars": 826,
+          "product_name": "카누들 에코팩 840g 포켄스 강아지 덴탈껌 치석 입냄새..."
+        },
+        {
+          "pid": "ee5712ce-9dfe-4102-9032-05babdf510ed",
+          "version": "1.0.25",
+          "chars": 843,
+          "product_name": "라비베베 모던핏 구명조끼 유아 아동 물놀이 부력보조복"
+        }
+      ]
+    },
+    {
+      "category": "beauty_body",
+      "product_count": 10,
+      "products": [
+        {
+          "pid": "02954d99-0510-481e-b099-77cc8d2af88f",
+          "version": "1.0.26",
+          "chars": 836,
+          "product_name": "빠른 건조 차이슨 드라이기 bldc 헤어 드라이기 드라이어"
+        },
+        {
+          "pid": "bc1f4cbf-4b2a-43d4-99ac-a9a3caa9d65c",
+          "version": "1.0.27",
+          "chars": 860,
+          "product_name": "레터네 차이슨 헤어 드라이기 BLDC 미용실 CS2026..."
+        },
+        {
+          "pid": "57753b22-e3a0-48f9-9651-9814059cc2df",
+          "version": "1.0.28",
+          "chars": 824,
+          "product_name": "파나소닉 남성용 바디 트리머 방수 ER-GK60"
+        },
+        {
+          "pid": "6228478a-0367-4f87-9273-753d1a10d7fc",
+          "version": "1.0.29",
+          "chars": 866,
+          "product_name": "최다판매 스테디셀러 JMW M5001A PLUS PRO ..."
+        },
+        {
+          "pid": "d8021987-f608-4406-bbfc-8e72b653e5b8",
+          "version": "1.0.30",
+          "chars": 851,
+          "product_name": "스테디셀러 JMW 에어젯 울트라 PRO 고성능 터보 항공..."
+        },
+        {
+          "pid": "abca11d9-8e0b-4be0-a245-b6ea43174ebe",
+          "version": "1.0.31",
+          "chars": 857,
+          "product_name": "유닉스 BLDC 디오 저소음 경량 드라이기 UN"
+        },
+        {
+          "pid": "f7c3e40b-cc36-450e-8311-324b07c7698d",
+          "version": "1.0.32",
+          "chars": 862,
+          "product_name": "차이슨 드라이기 헤어 드라이어 CS2026 최신형 BLD..."
+        },
+        {
+          "pid": "665e00c7-1fb9-4ff1-9399-ba26958b133b",
+          "version": "1.0.33",
+          "chars": 826,
+          "product_name": "필립스 샤티넬 8000 시리즈 모근제거기 라이트블루 BR..."
+        },
+        {
+          "pid": "fba5f43b-85ea-4823-836e-3a6143b07097",
+          "version": "1.0.34",
+          "chars": 815,
+          "product_name": "오아 소닉플로우 미니 드라이기 고속 BLDC 헤어 드라이..."
+        },
+        {
+          "pid": "0d4f0c07-4a81-4887-aa8f-558c950fc808",
+          "version": "1.0.35",
+          "chars": 758,
+          "product_name": "고양이 고기능성 건식사료, 허피스&구내염&유산균&관절&헤..."
+        }
+      ]
+    },
+    {
+      "category": "digital_it",
+      "product_count": 10,
+      "products": [
+        {
+          "pid": "23ff46db-0f93-4cf8-ba47-e87ac7ae789a",
+          "version": "1.0.36",
+          "chars": 859,
+          "product_name": "(162만)2026 엘지 그램 15 15Z95U-GS5S..."
+        },
+        {
+          "pid": "0c188db2-82eb-4879-a72a-ef5cbba6e59f",
+          "version": "1.0.37",
+          "chars": 855,
+          "product_name": "메이튼 안드로이드오토 카플레이 2in1 무선 동시호환 오..."
+        },
+        {
+          "pid": "08f185a1-fb99-4e30-86cf-942958cdaa9c",
+          "version": "1.0.38",
+          "chars": 867,
+          "product_name": "[중고] 레노버 노트북 씽크패드 X1 Carbon Gen..."
+        },
+        {
+          "pid": "5d8421ed-f2cb-4b31-a1fe-f81be726c426",
+          "version": "1.0.39",
+          "chars": 851,
+          "product_name": "앤커 사운드코어 리버티4 NC 노이즈캔슬링 블루투스이어폰..."
+        },
+        {
+          "pid": "de9bf9e7-3ab9-466b-92de-148baf12a2e2",
+          "version": "1.0.40",
+          "chars": 852,
+          "product_name": "앤커 사운드코어 리버티5 노이즈캔슬링 블루투스 이어폰 A..."
+        },
+        {
+          "pid": "fed651b5-a313-4685-ad00-5b7198c579a8",
+          "version": "1.0.41",
+          "chars": 846,
+          "product_name": "USB C타입 to 3.5mm 이어폰잭 어댑터 플러스"
+        },
+        {
+          "pid": "f312dc54-3663-452a-a480-e72d82dd1f9f",
+          "version": "1.0.42",
+          "chars": 835,
+          "product_name": "마타스튜디오 에어튠 블루투스 이어폰 커널형 ANC 노이즈캔슬링"
+        },
+        {
+          "pid": "93632a71-1fab-4a33-b8db-76004ab872d1",
+          "version": "1.0.43",
+          "chars": 826,
+          "product_name": "만컴즈 Z스탠드 알루미늄 접이식 노트북 태블릿 거치대"
+        },
+        {
+          "pid": "4a7138e0-f43f-440c-8117-a8b9e05fbba4",
+          "version": "1.0.44",
+          "chars": 827,
+          "product_name": "[대여] 게이밍 노트북렌탈 대여 렌트 고성능 RTX307..."
+        },
+        {
+          "pid": "e6d8f98f-2b85-4a90-a195-f02bc1c9b705",
+          "version": "1.0.45",
+          "chars": 857,
+          "product_name": "[재고보유] 삼성 갤럭시북 인텔 울트라5 윈도우11Pro..."
+        }
+      ]
+    },
+    {
+      "category": "fashion_goods",
+      "product_count": 10,
+      "products": [
+        {
+          "pid": "52c82315-45b4-4b46-bcde-60790aa010a0",
+          "version": "1.0.46",
+          "chars": 882,
+          "product_name": "삼성 비스포크AI에어드레서 대용량 DF24CB9900DR..."
+        },
+        {
+          "pid": "d1afb770-7cda-467f-a2f7-e8fbd434fa75",
+          "version": "1.0.47",
+          "chars": 851,
+          "product_name": "나이키 기능성 스우시 드라이핏 레전드 반팔 티셔츠"
+        },
+        {
+          "pid": "bfe71e66-05e4-4f43-aa76-2d47da67c89c",
+          "version": "1.0.48",
+          "chars": 816,
+          "product_name": "1+1 오로꼬 여름 퓨어쇼츠 5인치 나일론 반바지 밴딩 ..."
+        },
+        {
+          "pid": "b71e4dab-6384-4494-90f4-ff0864246473",
+          "version": "1.0.49",
+          "chars": 815,
+          "product_name": "[해원 PICK]실크핏 모던 반팔 긴바지 파자마 세트 커..."
+        },
+        {
+          "pid": "68769709-cd16-493f-936e-f17ce7c2ca37",
+          "version": "1.0.50",
+          "chars": 773,
+          "product_name": "쿨 에어 드라이 냉감 기능성 통기성 티셔츠 3팩 2팩"
+        },
+        {
+          "pid": "19095347-96a1-459d-aa22-412fee7a4780",
+          "version": "1.0.51",
+          "chars": 803,
+          "product_name": "아이러브티셔츠 제작 단체 여행 소량 프린팅"
+        },
+        {
+          "pid": "da968cae-fd23-47d1-b57a-3a1141abb574",
+          "version": "1.0.52",
+          "chars": 817,
+          "product_name": "[클라비스][[3pcs 개별구매] 쿨셋업 뷔스티에/티셔츠..."
+        },
+        {
+          "pid": "1143356e-4b3f-4168-bf5b-8ccfba706a7c",
+          "version": "1.0.53",
+          "chars": 833,
+          "product_name": "베이직하우스 면 30수 뉴스탠다드 레귤러핏 무지 라운드 ..."
+        },
+        {
+          "pid": "a1ef37f8-d7e5-4129-af2c-712980699209",
+          "version": "1.0.54",
+          "chars": 809,
+          "product_name": "비스트모드 럭비져지 헬스 짐웨어 오버핏 티셔츠 메쉬 반팔..."
+        },
+        {
+          "pid": "b85a0cd2-26c1-4aa0-832a-53c27c2a797d",
+          "version": "1.0.55",
+          "chars": 837,
+          "product_name": "나이키 기능성 운동 반팔티 드라이핏 스우시 시원한 냉감 ..."
+        }
+      ]
+    },
+    {
+      "category": "food_supplement",
+      "product_count": 10,
+      "products": [
+        {
+          "pid": "f1ea0243-3271-4c96-8f02-f59cdfa2dc56",
+          "version": "1.0.56",
+          "chars": 814,
+          "product_name": "닥터바이 강아지 유산균 프로바이오틱스 장건강 영양제 유익..."
+        },
+        {
+          "pid": "679b94bf-45a0-4605-a94e-145fc98c9fc3",
+          "version": "1.0.57",
+          "chars": 818,
+          "product_name": "트러스티푸드 강아지 동결건조 간식 모음 사료토퍼 밥안먹는..."
+        },
+        {
+          "pid": "d891dda1-0c2e-4d03-a382-e608f8ae8a12",
+          "version": "1.0.58",
+          "chars": 801,
+          "product_name": "닥터바이 강아지 오메가3 피부 관절 심장 영양제 150캡..."
+        },
+        {
+          "pid": "256350e0-5fb8-4b74-b4c1-4543654b593f",
+          "version": "1.0.59",
+          "chars": 857,
+          "product_name": "[바액] 나이아신아마이드(비타민B3) 15% 앰플 [30..."
+        },
+        {
+          "pid": "56bdcdea-8bac-43b2-9b05-91029548d4e1",
+          "version": "1.0.60",
+          "chars": 836,
+          "product_name": "[네이버 단독] 위즈웰 무선 커피그라인더 마치나 휴대용 ..."
+        },
+        {
+          "pid": "af6c5044-e429-4933-a18b-bf458ad8e222",
+          "version": "1.0.61",
+          "chars": 856,
+          "product_name": "[종합비타민+밀크씨슬 +루테인+오메가3]GNM 올인원 뉴..."
+        },
+        {
+          "pid": "b1148498-5ffc-4530-9e01-f38189daccaa",
+          "version": "1.0.62",
+          "chars": 822,
+          "product_name": "더 알티지 초임계 오메가3 1000 비타민D"
+        },
+        {
+          "pid": "25a3e33f-8fb0-458e-84de-d466653bc949",
+          "version": "1.0.63",
+          "chars": 833,
+          "product_name": "[바액] 레티놀(비타민A) 0.5% 앰플 [30ml] 탄..."
+        },
+        {
+          "pid": "7fe75bda-54a2-446b-992d-87a3cd6d8491",
+          "version": "1.0.64",
+          "chars": 741,
+          "product_name": "야쿠르트 유산균 옐로우 보냉백"
+        },
+        {
+          "pid": "fa7a1849-e955-4356-ada9-126f9f961378",
+          "version": "1.0.65",
+          "chars": 741,
+          "product_name": "닥터가 비타도스C 3000mg 대용량 순수비타민C"
+        }
+      ]
+    },
+    {
+      "category": "home_appliance",
+      "product_count": 10,
+      "products": [
+        {
+          "pid": "f1187508-de13-4923-8573-e1be2602ac83",
+          "version": "1.0.66",
+          "chars": 870,
+          "product_name": "[넾다세일] 드리미 L10s Ultra Gen3 로봇청소..."
+        },
+        {
+          "pid": "d297babf-8f28-4adf-bbca-eeaf1d621070",
+          "version": "1.0.67",
+          "chars": 856,
+          "product_name": "[슈퍼적립] 로보락 F25 Ace Pro 거품 진공 물걸..."
+        },
+        {
+          "pid": "97f271ca-44fe-4b15-b56e-44ee84a798a7",
+          "version": "1.0.68",
+          "chars": 843,
+          "product_name": "삼성전자 냉장고 양문형 852L 오토오픈도어 RS84DG..."
+        },
+        {
+          "pid": "4716d3b5-edc3-4798-8d01-6e95b77cdd17",
+          "version": "1.0.69",
+          "chars": 847,
+          "product_name": "비브르 썬더 유선청소기 유선스틱청소기 헤파필터포함 V16"
+        },
+        {
+          "pid": "2e375065-a495-4fba-85a8-a12582c66178",
+          "version": "1.0.70",
+          "chars": 821,
+          "product_name": "쿠쿠 파워클론 Slim 무선청소기 CVC-G820NWM ..."
+        },
+        {
+          "pid": "b12bd043-e807-4e98-9918-737650942261",
+          "version": "1.0.71",
+          "chars": 821,
+          "product_name": "필터포유 고품질 음식물처리기 필터 활성탄 리필용 국내산 ..."
+        },
+        {
+          "pid": "47a107e6-c564-4311-a045-5caa29bd98b5",
+          "version": "1.0.72",
+          "chars": 834,
+          "product_name": "삼성 냉장고 RS84DG5602M9 양문형 푸드쇼케이스 ..."
+        },
+        {
+          "pid": "26ea4258-4898-4f5c-80c4-5461cbe92f68",
+          "version": "1.0.73",
+          "chars": 890,
+          "product_name": "삼성 26년형 인버터 제습기 18L 1등급 AY70H18..."
+        },
+        {
+          "pid": "04697227-78f4-4175-8d92-6c85840fae3c",
+          "version": "1.0.74",
+          "chars": 862,
+          "product_name": "26년형 한일 저소음선풍기 스탠드 가정용 아기바람 무소음..."
+        },
+        {
+          "pid": "413765d6-98b0-442f-b777-b9db583e2e6a",
+          "version": "1.0.75",
+          "chars": 881,
+          "product_name": "26년형 한일선풍기 BLDC 스탠드 가정용 리모컨 무소음..."
+        }
+      ]
+    },
+    {
+      "category": "living_health",
+      "product_count": 10,
+      "products": [
+        {
+          "pid": "4965c80b-e6e0-43a3-9698-7cb8a341c9da",
+          "version": "1.0.76",
+          "chars": 840,
+          "product_name": "디클 원샷클린 습식청소기 패브릭 쇼파 카페트 매트리스 침..."
+        },
+        {
+          "pid": "ce4dc698-467a-4251-8020-808c35ae20a2",
+          "version": "1.0.77",
+          "chars": 811,
+          "product_name": "코코도르 그란데 디퓨저 500ml 3개입 집들이선물 실내..."
+        },
+        {
+          "pid": "cfb945c2-85b7-4493-a166-889e5e1b19a9",
+          "version": "1.0.78",
+          "chars": 831,
+          "product_name": "1+1 더클래스 퍼퓸 사쉐 차량용 방향제 피치바흐 20g"
+        },
+        {
+          "pid": "ccfc8961-ae2f-4959-8e6b-7d0131e891d9",
+          "version": "1.0.79",
+          "chars": 848,
+          "product_name": "피에브 고체 탈취제 화장실 실내 냄새 제거 방향제 250..."
+        },
+        {
+          "pid": "200dd6ac-292d-494d-8ba5-d2615f2340a2",
+          "version": "1.0.80",
+          "chars": 845,
+          "product_name": "헤트라스 프리미엄 대용량 디퓨저 500mlx3개 선물세트..."
+        },
+        {
+          "pid": "346401a8-e331-4ec2-94ff-b26bce75415f",
+          "version": "1.0.81",
+          "chars": 845,
+          "product_name": "헤트라스 프리미엄 대용량 디퓨저 500mlx2개 선물세트..."
+        },
+        {
+          "pid": "51bc5500-3b16-46d9-a441-7d45befa621f",
+          "version": "1.0.82",
+          "chars": 870,
+          "product_name": "헤트라스 헤리티지 퍼퓸 디퓨저 600mlx2개 선물세트 ..."
+        },
+        {
+          "pid": "915d2afd-c551-42c9-9620-148dd9da10b6",
+          "version": "1.0.83",
+          "chars": 870,
+          "product_name": "헤트라스 헤리티지 퍼퓸 디퓨저 600mlx3개 선물세트 ..."
+        },
+        {
+          "pid": "58b6f892-62f2-4fb4-b51c-3f9e8572a53f",
+          "version": "1.0.84",
+          "chars": 837,
+          "product_name": "헤트라스 프리미엄 대용량 디퓨저 500mlx5개 선물세트..."
+        },
+        {
+          "pid": "22e1e4d6-c7c7-40b6-a82f-3df8db7a08f9",
+          "version": "1.0.85",
+          "chars": 851,
+          "product_name": "헤트라스 메가 프리미엄 대용량 디퓨저 리필 1,010ml..."
+        }
+      ]
+    },
+    {
+      "category": "sports_leisure",
+      "product_count": 10,
+      "products": [
+        {
+          "pid": "8d6491ab-dcfa-4385-949d-f638a4ff75b7",
+          "version": "1.0.86",
+          "chars": 844,
+          "product_name": "튼튼한장우산 골프 강풍 장우산 자동 자외선차단 단체주문"
+        },
+        {
+          "pid": "62149951-4368-48f6-9841-9d50a9d69a95",
+          "version": "1.0.87",
+          "chars": 762,
+          "product_name": "[흑고무코팅] 양산 암막 3단 접이식 우양산 골프 우산"
+        },
+        {
+          "pid": "e9090a9c-fbf9-4a60-b1d7-bb3720f2d79b",
+          "version": "1.0.88",
+          "chars": 853,
+          "product_name": "[유투스포츠] 더블로마스크 자외선차단 골프 UV99.9 ..."
+        },
+        {
+          "pid": "e7bb0d5e-1cd8-4d0b-916a-6a38765e278a",
+          "version": "1.0.89",
+          "chars": 871,
+          "product_name": "[보상판매]파인캐디 UPL2000 에이밍 골프거리측정기 ..."
+        },
+        {
+          "pid": "08fe079b-c2b3-47ee-b6f2-8e29250c6710",
+          "version": "1.0.90",
+          "chars": 813,
+          "product_name": "르플렉스 자외선차단 99% 골프 스포츠 마스크"
+        },
+        {
+          "pid": "c2c38311-cc3e-479e-bc63-e4f964f530d6",
+          "version": "1.0.91",
+          "chars": 842,
+          "product_name": "여성 골프스타킹 밑트임 UV 자외선차단 테니스스타킹 쿨 ..."
+        },
+        {
+          "pid": "20100449-377f-459b-a603-afa70509043a",
+          "version": "1.0.92",
+          "chars": 827,
+          "product_name": "르플렉스 골프 쿨 팔토시 등산 무봉제 여름 자외선 차단"
+        },
+        {
+          "pid": "d67873dd-aefe-4e17-b995-e8b1ade30abe",
+          "version": "1.0.93",
+          "chars": 849,
+          "product_name": "유투스포츠 롱넥마스크 자외선차단 골프 UV99.9 페이스..."
+        },
+        {
+          "pid": "97241bd4-8d13-4b80-99e2-7ba1946f042b",
+          "version": "1.0.94",
+          "chars": 761,
+          "product_name": "[3더즌] 볼빅 빅3 VIK3 프리미엄 골프공 (3피스)"
+        },
+        {
+          "pid": "f96970cf-3210-48b4-bfe8-069610fd3be4",
+          "version": "1.0.95",
+          "chars": 838,
+          "product_name": "러닝라이프 마이크로메쉬 러닝긴팔티 기능성티셔츠 롱슬리브"
+        }
+      ]
+    }
+  ]
+}

@@ -9,13 +9,14 @@ import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import * as fs from "fs";
 import * as path from "path";
-import { getSessionStorageDir, getNaverSessionFile } from "./lib/app-paths";
+import { validateNaverPublishingSession } from "../src/lib/naver-session";
 
 // Stealth 플러그인 적용 (봇 감지 우회)
 chromium.use(StealthPlugin());
 
-const STORAGE_PATH = getSessionStorageDir();
-const SESSION_FILE = getNaverSessionFile();
+const STORAGE_PATH = path.join(process.cwd(), "playwright", "storage");
+const SESSION_FILE = path.join(STORAGE_PATH, "naver-session.json");
+const TEMP_SESSION_FILE = path.join(STORAGE_PATH, `naver-session.pending-${process.pid}.json`);
 
 // 폴더가 없으면 생성
 if (!fs.existsSync(STORAGE_PATH)) {
@@ -34,13 +35,9 @@ async function mainV2() {
   console.log("   3. 세션 저장 후 브라우저가 자동으로 닫힙니다");
   console.log("");
 
-  // 번들 Chromium에서 입력 포커스 문제가 있을 때 LOGIN_BROWSER_CHANNEL=chrome 로 실제 Chrome 사용.
-  const launchChannel = process.env.LOGIN_BROWSER_CHANNEL?.trim() || undefined;
-  if (launchChannel) console.log(`🌐 브라우저 채널: ${launchChannel}`);
   const browser = await chromium.launch({
     headless: false,
     slowMo: 50,
-    ...(launchChannel ? { channel: launchChannel } : {}),
     args: [
       '--disable-blink-features=AutomationControlled',
     ],
@@ -67,63 +64,64 @@ async function mainV2() {
   console.log("   (로그인 완료 감지 중...)");
   console.log("");
 
-  // 로그인 성공 감지: 네이버 인증 쿠키(NID_AUT/NID_SES) 존재로 확정 판정.
-  // URL 추측 대신 실제 로그인 신호를 보므로 2FA/기기등록 인터스티셜에도 견고하다.
+  // URL만으로 성공을 판단하지 않고, 임시 세션의 실제 글쓰기 권한을 반복 확인합니다.
   let isLoggedIn = false;
   let checkCount = 0;
-  const maxChecks = 480; // 최대 8분 대기 (1초 * 480)
+  const maxChecks = 300; // 최대 5분 대기 (1초 * 300)
 
   while (!isLoggedIn && checkCount < maxChecks) {
     await new Promise((r) => setTimeout(r, 1000));
     checkCount++;
 
     try {
-      const cookies = await context.cookies();
-      const names = new Set(cookies.map((c) => c.name));
-      if (names.has("NID_AUT") && names.has("NID_SES")) {
+      await context.storageState({ path: TEMP_SESSION_FILE });
+      const validation = await validateNaverPublishingSession(
+        TEMP_SESSION_FILE,
+        process.env.NAVER_BLOG_ID?.trim() || "",
+        5_000,
+      );
+      if (validation.valid) {
         isLoggedIn = true;
-        console.log("🔍 로그인 인증 쿠키 감지됨!");
-        break;
+        console.log("🔍 로그인 및 블로그 글쓰기 권한이 확인되었습니다.");
       }
     } catch {
-      // 페이지/컨텍스트가 닫혔을 수 있음
+      // 페이지가 닫혔을 수 있음
       break;
-    }
-
-    // 30초마다 남은 시간 안내
-    if (checkCount % 30 === 0) {
-      const remain = Math.ceil((maxChecks - checkCount) / 60);
-      console.log(`   ⏳ 로그인 대기 중... (약 ${remain}분 남음)`);
     }
   }
 
   if (isLoggedIn) {
-    // 블로그 페이지로 이동하여 최종 확인 후 세션 저장
-    console.log("🔄 로그인 상태 최종 확인 중...");
-    try {
-      await page.goto("https://blog.naver.com/", { waitUntil: "domcontentloaded", timeout: 10000 });
-      await new Promise((r) => setTimeout(r, 2000));
-    } catch {
-      console.log("⚠️ 블로그 페이지 이동 중 오류(무시) — 현재 컨텍스트로 저장합니다.");
+    // 같은 디렉터리의 임시 파일을 검증한 뒤 원자적으로 교체합니다.
+    await context.storageState({ path: TEMP_SESSION_FILE });
+    const validation = await validateNaverPublishingSession(
+      TEMP_SESSION_FILE,
+      process.env.NAVER_BLOG_ID?.trim() || "",
+    );
+    if (!validation.valid) {
+      console.error(`❌ ${validation.error || "최종 권한 확인 실패"}`);
+      if (fs.existsSync(TEMP_SESSION_FILE)) fs.unlinkSync(TEMP_SESSION_FILE);
+      await browser.close();
+      process.exitCode = 1;
+      return;
     }
-    await context.storageState({ path: SESSION_FILE });
-    console.log("");
-    console.log("✅ 세션이 저장되었습니다!");
-    console.log(`   📁 저장 위치: ${SESSION_FILE}`);
-    console.log("🎉 이제 자동화가 이 세션을 사용합니다. (보통 7~30일 유지)");
+    fs.renameSync(TEMP_SESSION_FILE, SESSION_FILE);
+    console.log("\n✅ 검증된 세션이 저장되었습니다.");
+    console.log("🎉 이제 자동화가 이 세션을 사용합니다.");
   } else {
-    // 로그인 미완료 시 기존 세션을 덮어쓰지 않는다(비로그인 상태 저장 방지).
-    console.log("⏱️ 시간 초과 — 로그인이 감지되지 않았습니다.");
-    console.log("   ⚠️ 비로그인 상태를 저장하지 않도록 기존 세션 파일을 보존합니다.");
-    console.log("   다시 시도하려면 npm run login 을 재실행하세요.");
+    console.error("⏱️ 제한 시간 안에 로그인 및 글쓰기 권한을 확인하지 못했습니다.");
+    if (fs.existsSync(TEMP_SESSION_FILE)) fs.unlinkSync(TEMP_SESSION_FILE);
+    await browser.close();
+    process.exitCode = 1;
+    return;
   }
 
   await browser.close();
   console.log("\n프로그램을 종료합니다.");
-  process.exit(isLoggedIn ? 0 : 1);
+  process.exitCode = 0;
 }
 
 mainV2().catch((error) => {
   console.error("오류 발생:", error);
-  process.exit(1);
+  if (fs.existsSync(TEMP_SESSION_FILE)) fs.unlinkSync(TEMP_SESSION_FILE);
+  process.exitCode = 1;
 });

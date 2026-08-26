@@ -2,7 +2,6 @@ import "server-only";
 
 import fs from "fs";
 import path from "path";
-import { HUMANIZE_RULES } from "../../scripts/lib/humanize-korean";
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
 import { prisma } from "@/lib/db";
@@ -44,12 +43,20 @@ const PEXELS_API_KEY = process.env.PEXELS_API_KEY?.trim() || "";
 const TOPIC_PIPELINE_ALLOW_GENERIC_IMAGE_FALLBACK =
   process.env.TOPIC_PIPELINE_ALLOW_GENERIC_IMAGE_FALLBACK?.toLowerCase() === "true";
 const OPENAI_MODEL = process.env.TOPIC_PIPELINE_OPENAI_MODEL || "gpt-4o-mini";
+const CHATGPT_USE_CUSTOM_GPTS =
+  (process.env.CHATGPT_USE_CUSTOM_GPTS || "false").toLowerCase() === "true";
+const CHATGPT_BASE_URL = process.env.CHATGPT_BASE_URL || "https://chatgpt.com/";
 const BROWSER_TOPIC_GPT_URL =
-  process.env.CHATGPT_GPT_URL_TOPIC || process.env.CHATGPT_GPT_URL_DRAFT || "https://chatgpt.com/";
+  CHATGPT_USE_CUSTOM_GPTS
+    ? process.env.CHATGPT_GPT_URL_TOPIC || process.env.CHATGPT_GPT_URL_DRAFT || CHATGPT_BASE_URL
+    : CHATGPT_BASE_URL;
 const DEFAULT_CHATGPT_IMAGE_GPT_URL =
   "https://chatgpt.com/g/g-69044d98b1f08191b96ca4293c6c8156-jeongboseong-imiji-saengseong-v11-dapeojuneunnamja";
 const CHATGPT_IMAGE_GPT_URL =
   process.env.CHATGPT_GPT_URL_IMAGE || DEFAULT_CHATGPT_IMAGE_GPT_URL;
+const ALLOW_CHATGPT_BROWSER_MODE =
+  (process.env.ALLOW_CHATGPT_BROWSER_MODE || "false").toLowerCase() === "true";
+const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
 const IMAGE_ROOT = path.join(process.cwd(), "temp_images", "topic-pipeline");
 const TOPIC_DAEDAL_IMAGE_ENABLED =
   process.env.TOPIC_PIPELINE_DAEDAL_ENABLED?.toLowerCase() === "true";
@@ -67,6 +74,14 @@ const TOPIC_DAEDAL_MODEL = process.env.TOPIC_PIPELINE_DAEDAL_MODEL?.trim() || ""
 const PREPARE_LOCK_ROOT = path.join(IMAGE_ROOT, "_locks");
 const PREPARE_LOCK_STALE_MS = 20 * 60 * 1000;
 const TOPIC_CRAFT_TIMEOUT_MS = Number(process.env.TOPIC_CRAFT_TIMEOUT_MS || 300_000);
+const BLOG_MOBILE_HUMAN_STYLE_PROMPT = [
+  "문체 기본값:",
+  "- 사람이 휴대폰으로 직접 쓰는 네이버 블로그 글처럼 부드러운 ~요체로 쓴다.",
+  "- 한 문장은 25-45자 안팎으로 짧게 끊고, 1-2문장마다 줄바꿈한다.",
+  "- '결론적으로', '종합적으로', '본 포스팅에서는', '최적의 선택' 같은 AI/광고 문구는 쓰지 않는다.",
+  "- 같은 어미와 같은 문장 구조를 반복하지 않는다.",
+  "- 과장된 보장 표현보다 실제 판단 기준, 작은 아쉬움, 참고 포인트를 자연스럽게 넣는다.",
+].join("\n");
 const TOPIC_CRAFT_AUTH_HEADERS: string[] = process.env.TOPIC_CRAFT_API_KEY
   ? ["-H", `Authorization: Bearer ${process.env.TOPIC_CRAFT_API_KEY}`]
   : [];
@@ -413,10 +428,10 @@ const ENGAGING_ANGLE_PATTERNS = [
 ];
 
 const TITLE_FALLBACK_ENDINGS = [
-  "대개 첫 세 문장에서 들킨다",
-  "사람 냄새는 사례에서 난다",
-  "설명보다 장면이 먼저 남아야 읽힌다",
-  "비슷한 문장이 쌓일수록 티가 난다",
+  "처음 고르는 기준이 중요해요",
+  "작은 차이에서 만족도가 갈려요",
+  "알고 보면 선택이 훨씬 쉬워요",
+  "미리 보면 덜 헤매게 돼요",
 ];
 
 function countPatternHits(value: string, patterns: RegExp[]): number {
@@ -2221,12 +2236,6 @@ function buildFallbackTopicCraftCandidates(params: {
     return selected.length > 0 ? selected : plans.slice(0, 4);
   };
 
-  const ensureSentence = (value: string) => {
-    const normalized = normalizeText(value);
-    if (!normalized) return "";
-    return /[.!?…]$/.test(normalized) ? normalized : `${normalized}.`;
-  };
-
   const buildFallbackSectionCopy = (
     plan: (typeof plans)[number],
     keyword: string,
@@ -2609,7 +2618,7 @@ async function runOpenAiStructured<T>(schemaName: string, _schema: Record<string
 }
 
 async function runBrowserStructured<T>(prompt: string): Promise<T> {
-  const enabled = process.env.BROWSER_GPT_MODE?.toLowerCase() === "true";
+  const enabled = process.env.BROWSER_GPT_MODE?.toLowerCase() === "true" && ALLOW_CHATGPT_BROWSER_MODE;
   if (!enabled) {
     throw new Error("브라우저 GPT 폴백이 비활성화되어 있습니다.");
   }
@@ -2633,9 +2642,8 @@ async function runBrowserStructured<T>(prompt: string): Promise<T> {
   }
 }
 
-// 머신 종속 절대경로 대신 PATH 기반 'codex'를 기본값으로 사용해 이식성 확보.
-// (특정 환경에서 PATH에 없으면 CODEX_BIN 환경변수로 절대경로 지정)
-const CODEX_BIN = process.env.CODEX_BIN || "codex";
+const CODEX_BIN =
+  process.env.CODEX_BIN || "/Users/jakeshin/.nvm/versions/node/v20.19.5/bin/codex";
 
 async function runCodexStructured<T>(prompt: string): Promise<T | null> {
   const { readFile, unlink } = await import("fs/promises");
@@ -2729,6 +2737,7 @@ async function runCodexEditorialPass(
     "당신은 한국어 블로그 최종 에디터다.",
     "아래 JSON 초안을 더 자연스럽고 모바일 친화적으로 다듬어라.",
     "반드시 JSON만 반환한다.",
+    BLOG_MOBILE_HUMAN_STYLE_PROMPT,
     "규칙:",
     "- title, lead, highlights, sections 4개, hashtags, meta 구조를 유지한다.",
     "- sections[].kind, sourceRefIds, imageSlotId는 유지한다.",
@@ -2945,6 +2954,7 @@ function buildPolishPrompt(params: {
   return [
     "당신은 네이버 블로그용 한국어 콘텐츠 에디터다.",
     "반드시 JSON만 반환한다.",
+    BLOG_MOBILE_HUMAN_STYLE_PROMPT,
     "컨설팅 보고서 같은 말투, 체크리스트 남발, 추상적 메타 설명을 금지한다.",
     "과장된 광고체를 피하되, 읽는 맛이 있도록 장면·오해·비교·실수 포인트를 적극적으로 사용한다.",
     "제목에는 '체크리스트', '실전 정리', '적용 판단 프레임', '문제해결 적용 순서' 같은 표현을 쓰지 않는다.",
@@ -2967,8 +2977,6 @@ function buildPolishPrompt(params: {
       ? "주제가 글쓰기/콘텐츠 자체이면 글쓰기 장면과 독자 반응을 다뤄도 된다."
       : "주제가 글쓰기 자체가 아니라면 '글, 문장, 읽히다, 심심하다, 사람 말처럼' 같은 메타 표현을 섞지 않는다.",
     "sections[].sourceRefIds에는 위 sourceRefId 라벨 숫자 문자열만 넣는다. 소스가 없으면 빈 배열이다.",
-    "",
-    HUMANIZE_RULES,
     "",
     `루트 주제: ${params.rootTopic}`,
     `타깃 키워드: ${params.keywords.join(", ") || "(없음)"}`,
@@ -3795,12 +3803,14 @@ async function generateChatGPTBrowserImage(
   query: string,
   destStem: string,
 ): Promise<string | null> {
+  if (!ALLOW_CHATGPT_BROWSER_MODE) return null;
+
   try {
     const { stdout } = await withTimeout(
       execFileAsync(
-        "npx",
+        process.execPath,
         [
-          "ts-node",
+          TS_NODE_BIN,
           "--project",
           "tsconfig.scripts.json",
           "scripts/chatgpt-generate-image.ts",
@@ -3828,6 +3838,10 @@ async function generateChatGPTBrowserImage(
 async function generateChatGPTBrowserImagesBatch(
   jobs: ChatGPTImageBatchJob[],
 ): Promise<Map<string, string>> {
+  if (!ALLOW_CHATGPT_BROWSER_MODE) {
+    return new Map();
+  }
+
   if (jobs.length === 0) {
     return new Map();
   }
@@ -3847,9 +3861,9 @@ async function generateChatGPTBrowserImagesBatch(
     );
     const { stdout } = await withTimeout(
       execFileAsync(
-        "npx",
+        process.execPath,
         [
-          "ts-node",
+          TS_NODE_BIN,
           "--project",
           "tsconfig.scripts.json",
           "scripts/chatgpt-generate-image-batch.ts",
@@ -4389,7 +4403,7 @@ function buildDraftSeed(candidate: TopicCraftCandidate, selection: TopicSelectio
 }
 
 function scoreContentReadiness(readiness: TopicTaskContentReadiness): number {
-  if (readiness.canPublish) return 100;
+  if (Number.isFinite(readiness.score)) return Math.max(0, Math.min(100, readiness.score));
 
   const baseScoreByCode: Record<TopicTaskContentReadiness["code"], number> = {
     ok: 100,
@@ -4401,6 +4415,11 @@ function scoreContentReadiness(readiness: TopicTaskContentReadiness): number {
     "meta-writing-contamination": 50,
     "broken-copy": 48,
     "repeated-structure": 55,
+    "unsupported-factual-claim": 0,
+    "missing-affiliate-disclosure": 0,
+    "broken-critical-media": 0,
+    "quality-score-below-threshold": 60,
+    "manual-review-required": 85,
   };
   const sectionCredit = Math.min(readiness.sectionCount, 5) * 5;
   const highlightCredit = Math.min(readiness.highlightCount, 3) * 5;
@@ -4673,6 +4692,11 @@ export async function prepareTopicTask(taskId: string): Promise<PrepareTaskResul
       type: task.type,
       topicCraftCategory,
       preparedContentJson,
+      sourceUrls,
+      affiliateDisclosureRequired: /(쇼핑|여행|브랜드)\s*커넥트|affiliate|제휴|파트너스/iu.test(
+        [task.topic, task.type, topicCraftCategory].filter(Boolean).join(" "),
+      ),
+      maxRepairAttempts: 3,
     });
     const contentReadinessReportJson = JSON.stringify(contentReadiness);
     const contentReadinessScore = scoreContentReadiness(contentReadiness);

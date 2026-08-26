@@ -10,14 +10,7 @@
 - 📝 **해시태그 자동 생성** - 검색 노출을 위한 해시태그 자동 추가
 - 🌐 **웹 대시보드** - 편리한 웹 UI로 링크 관리 및 발행
 
-### 🆕 V7 신규 기능
-
-- 🖥️ **PC 설치형 앱 (macOS/Windows)** - 개발 환경 설치 없이 설치 파일로 바로 실행. 앱 안에서 설정·네이버 로그인까지 완결 → [다운로드](#-다운로드-설치형-앱)
-- ✍️ **글쓰기 자연스러움 고도화** - "AI 티"(번역투, "결론적으로/시사하는 바가 크다" 류 상투구, 첫째·둘째 기계적 구조, 문장 리듬 평탄화)를 자동으로 줄여 사람이 쓴 듯한 문장 생성 + 발행 전 자연스러움 점검
-- ⚙️ **앱 내 설정/로그인 UI** (`/settings`) - API키·블로그 ID·AI 공급자 입력과 네이버 로그인을 앱 화면에서 처리 (`.env` 수동 편집 불필요)
-- 🔒 **보안·신뢰성 개선** - 인증 fail-closed, 발행 동시성/중복 방지(원자적 클레임·reaper), KST 타임존 일원화, 세션 만료 즉시 감지
-
-### V6 기능
+### 🆕 V6 신규 기능
 
 - 📊 **실시간 발행 진행률** - SSE로 발행 단계별 실시간 상태 표시
 - 📋 **발행 히스토리** - 발행 완료/실패 기록 조회 (`/history`)
@@ -28,39 +21,14 @@
 
 ---
 
-## 📥 다운로드 (설치형 앱)
-
-개발 환경 설치 없이 바로 쓰려면 설치 파일을 받으세요. (최신 릴리스: **[Releases 페이지](https://github.com/contentscoin/naver-bc-automation/releases/latest)**)
-
-| OS | 파일 | 상태 |
-|----|------|------|
-| **macOS (Apple Silicon)** | `BrandConnect Automation-1.0.0-arm64.dmg` | ✅ [v1.0.0 다운로드](https://github.com/contentscoin/naver-bc-automation/releases/tag/v1.0.0) |
-| **Windows (x64)** | `BrandConnect.Automation.Setup.1.0.0.exe` | ✅ [v1.0.0 다운로드](https://github.com/contentscoin/naver-bc-automation/releases/tag/v1.0.0) |
-
-**사전 준비물**: [Google Chrome](https://www.google.com/chrome/) 설치 — 자동화는 시스템 Chrome을 사용합니다.
-
-**설치 & 첫 실행**
-1. 설치
-   - **macOS**: dmg 열기 → `Applications`로 드래그. 최초 실행 시 **우클릭 → 열기**(미공증이라 Gatekeeper 허용 1회)
-   - **Windows**: `BrandConnect.Automation.Setup.1.0.0.exe` 실행 → 설치. SmartScreen 경고 시 **추가 정보 → 실행**(미서명)
-2. 앱 우측 상단 **⚙️ 설정**에서 `OpenAI/Gemini API 키`, `네이버 블로그 ID`, `AI 공급자` 입력
-3. 같은 화면의 **네이버 로그인** 버튼으로 세션 저장
-4. 데이터(`app.db`)·설정(`.env`)·로그인 세션은 사용자 폴더(userData)에 자동 저장됩니다
-
-> 💡 설치본은 미공증/미서명이라 OS 보안 경고가 한 번 뜰 수 있습니다(정상). macOS는 우클릭→열기, Windows는 추가 정보→실행으로 허용하세요.
-> 🔄 새 버전은 `v*` 태그를 푸시하면 GitHub Actions가 macOS/Windows 설치본을 빌드해 릴리스에 자동 첨부합니다 (`.github/workflows/desktop-build.yml`).
-
----
-
 ## 💡 왜 이 도구인가?
 
 | 기존 문제 | 이 도구의 해결책 |
 |----------|----------------|
 | 네이버 봇 감지로 차단됨 | ✅ Stealth Plugin으로 우회 |
-| 글이 뻔하고 기계적임("AI 티") | ✅ AI-tell 룰셋으로 번역투·상투구·리듬 평탄화 자동 제거 |
+| 글이 뻔하고 기계적임 | ✅ GPT가 매번 다른 자연스러운 글 생성 |
 | 할인/쿠폰 정보 누락 | ✅ 할인율, 리뷰 수, 평점까지 자동 수집 |
 | 한 번 로그인하면 끝 | ✅ 세션 저장으로 7~30일간 유지 |
-| 개발 환경 설치가 번거로움 | ✅ PC 설치형 앱(dmg/exe)으로 바로 실행 |
 
 ---
 
@@ -87,7 +55,8 @@ node --version
 4. 생성된 키 복사 (sk-xxx... 형태)
 
 **ChatGPT 구독/로그인 세션 사용 시**
-`BROWSER_GPT_MODE=true`로 설정하고 `npm run login:chatgpt`로 ChatGPT 로그인을 저장합니다.
+기본 발행 흐름은 ChatGPT 브라우저를 열지 않습니다.
+정말 브라우저 ChatGPT를 쓰고 싶을 때만 `BROWSER_GPT_MODE=true`, `ALLOW_CHATGPT_BROWSER_MODE=true`로 설정하고 `npm run login:chatgpt`로 ChatGPT 로그인을 저장합니다.
 
 > ⚠️ API 키는 한 번만 보여주므로 반드시 복사해서 안전한 곳에 저장하세요!
 
@@ -101,11 +70,9 @@ node --version
 
 ### 1단계: 프로젝트 다운로드
 
-> 💡 코드 수정/개발이 아니라 **그냥 쓰고 싶다면** 위 [📥 다운로드](#-다운로드-설치형-앱)에서 설치 파일을 받는 게 가장 쉽습니다. 아래는 개발/직접 빌드용입니다.
-
 **방법 A: Git 사용 (권장)**
 ```bash
-git clone https://github.com/contentscoin/naver-bc-automation.git
+git clone https://github.com/Daewooki/naver-bc-automation.git
 cd naver-bc-automation
 ```
 
@@ -159,8 +126,23 @@ AI_PROVIDER=openai
 # OpenAI 사용 시 (AI_PROVIDER=openai)
 OPENAI_API_KEY=sk-여기에_발급받은_키_붙여넣기
 
-# Browser GPT 모드 사용 시 (OpenAI API 키 없이 ChatGPT 웹 로그인 세션 사용)
-BROWSER_GPT_MODE=true
+# 기본 상품 발행은 ChatGPT 브라우저를 열지 않음
+BROWSER_GPT_MODE=false
+ALLOW_CHATGPT_BROWSER_MODE=false
+CHATGPT_USE_CUSTOM_GPTS=false
+CHATGPT_DIRECT_ONLY=true
+BLOG_HUMANIZE_MOBILE_STYLE=true
+PRODUCT_POST_LOCAL_FALLBACK_ENABLED=true
+PRODUCT_THUMBNAIL_CHATGPT_ENABLED=false
+BRANDCONNECT_SELECTION_PROFILE=seasonal-hit-popular
+
+# 일괄 작업 완료/오류 알림
+CHATBOT_NOTIFY_COMPLETION=true
+CHATBOT_NOTIFY_SINGLE=false
+CHATBOT_MESSAGE_LINK_LIMIT=100
+CHATBOT_COMPLETION_BASE_URL=http://127.0.0.1:3000
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
 
 # 네이버 블로그 ID
 NAVER_BLOG_ID=내_블로그_아이디
@@ -168,6 +150,8 @@ NAVER_BLOG_ID=내_블로그_아이디
 # 데이터베이스 (수정 불필요)
 DATABASE_URL="file:./dev.db"
 ```
+
+> `TELEGRAM_CHAT_ID`를 비워두면 봇의 최근 대화에서 자동으로 찾습니다. 먼저 텔레그램에서 해당 봇에게 아무 메시지나 한 번 보내두세요.
 
 > 💡 주제글/이미지 발행 파이프라인은 GPT만 사용합니다.
 
@@ -211,22 +195,27 @@ npm run login
 
 > 💡 세션은 보통 7~30일간 유지됩니다. 발행 실패 시 다시 로그인하세요.
 
-### Step 1-2: ChatGPT 로그인 (Browser GPT 모드일 때만)
+### Step 1-2: ChatGPT 로그인 (선택, Browser ChatGPT 모드일 때만)
 
-`BROWSER_GPT_MODE=true`로 사용하는 경우에만 필요합니다.
+기본 상품 발행에서는 필요하지 않습니다.
+`BROWSER_GPT_MODE=true`와 `ALLOW_CHATGPT_BROWSER_MODE=true`를 둘 다 켜는 경우에만 필요합니다.
 
 ```bash
 npm run login:chatgpt
 ```
 
 - 브라우저에서 ChatGPT 로그인 후 `Enter`를 누르면 세션이 저장됩니다.
-- 스크립트가 Draft/Polish Custom GPT URL 접근까지 검증합니다.
-- 계정이 다르면 `This GPT is inaccessible or not found` 오류로 실패합니다.
-- 발행 시 Custom GPT는 기본적으로 persistent 프로필 + 새 대화로 시작합니다 (`CHATGPT_RUN_ISOLATED_CONTEXT=false`, `CHATGPT_FORCE_NEW_CHAT=true`).
+- 기본 상품 발행값은 ChatGPT 브라우저 미사용입니다. OpenAI/Gemini API가 실패하거나 키가 없으면 상품 정보 기반 로컬 초안으로 대체합니다.
+- Browser ChatGPT를 명시적으로 켜면 Custom GPTs가 아니라 일반 ChatGPT 화면에 전체 프롬프트를 한 번에 넣는 direct 방식입니다.
+- 사람형 모바일 문체는 기본으로 켜져 있습니다 (`BLOG_HUMANIZE_MOBILE_STYLE=true`).
+- 문장은 짧게 끊고, AI처럼 보이는 반복 표현/과한 광고 문구/허위 체험 단정을 줄입니다.
+- Custom GPTs를 꼭 써야 할 때만 `CHATGPT_USE_CUSTOM_GPTS=true`로 바꾸세요.
+- 발행 시 ChatGPT는 기본적으로 새 대화로 시작합니다 (`CHATGPT_FORCE_NEW_CHAT=true`).
 - temporary chat 모드가 필요하면 `CHATGPT_USE_TEMPORARY_CHAT=true`를 설정하세요.
-- GPT 가이드 상호작용 모드(`CHATGPT_GUIDED_MODE=true`)에서는 GPT가 질문하면 자동으로 답변하고, 최종 구조화 응답이 올 때까지 대화를 이어갑니다.
-- Draft GPT는 1~6단계 질문 흐름(제품정보→SEO키워드→버전→소제목개수→콘텐츠→말투)에 맞춰 응답하며, 기본값은 모바일(2번) + 소제목 5개 + 말투 4번(경험공유형)입니다.
-- Draft/Polish GPT에 상품 이미지를 함께 첨부해 문맥을 강화합니다 (`CHATGPT_IMAGE_CONTEXT_MAX`, `CHATGPT_ATTACH_IMAGES_TO_DRAFT`, `CHATGPT_ATTACH_IMAGES_TO_POLISH`).
+- GPT 가이드 상호작용 모드(`CHATGPT_GUIDED_MODE=true`)에서는 질문형 흐름이 열렸을 때 자동으로 답변하고, 최종 구조화 응답이 올 때까지 대화를 이어갑니다.
+- direct 방식에서는 상품 정보와 작성 규칙을 한 번에 넣고 JSON 결과를 받습니다.
+- 상품 리뷰 글은 발행 전 상품명 반영, 본문 분량, 고지문, URL 직접 노출, 허위 체험 단정, 수수료율 노출, 판매페이지 대표 이미지 확보 여부를 검사합니다.
+  필요 시 `BRANDLINK_CONTENT_READINESS_ENABLED=false`로 게이트를 끄거나 `BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE=false`로 대표 이미지 필수 조건만 완화할 수 있습니다.
 - 주제글 AI 이미지 생성은 기본적으로 ChatGPT 로그인/구독 세션을 사용합니다. API 방식이 필요할 때만 `TOPIC_PIPELINE_DAEDAL_ENABLED=true`와 `OPENAI_API_KEY`를 설정하면 `daedal` CLI(`gpt-image-2`)를 먼저 사용하고 실패 시 기존 ChatGPT/TopicCraft 경로로 폴백합니다.
 - 주제글 prepare 단계는 `TOPIC_AUTO_RESEARCH_ENABLED=true`일 때 입력 주제/키워드로 참고 URL을 자동 탐색합니다. `NAVER_SEARCH_CLIENT_ID`/`NAVER_SEARCH_CLIENT_SECRET`이 있으면 네이버 검색 OpenAPI를 먼저 쓰고, 없으면 DuckDuckGo HTML 검색을 best-effort로 사용합니다.
 - 준비된 주제글은 발행 전에 도입부, 하이라이트, 섹션 구조, 본문 자연스러움, 이미지 확보 상태와 함께 SEO 키워드 커버리지를 검사합니다. 명시 키워드가 본문/제목/태그에 거의 반영되지 않으면 재준비가 필요합니다.
@@ -260,14 +249,13 @@ npm run desktop
 #### 데스크톱 앱 빌드
 
 ```bash
-npm run desktop:pack:mac   # macOS dmg 생성 (macOS에서 실행)
-npm run desktop:pack:win   # Windows 인스톨러 생성 (Windows에서 실행)
+npm run desktop:pack:mac   # macOS dmg 생성 (mac)
+npm run desktop:pack:win   # Windows 인스톨러 생성 (Windows)
+npm run desktop:pack       # 현재 OS 패키지 모두 생성
 ```
 
-- 각 OS 설치본은 **해당 OS에서** 빌드해야 합니다(prisma 엔진·서명 등). `desktop:pack:*`은 내부적으로 `db:template`(빈 스키마 DB) → `npm run build`(Next webpack 빌드) → `electron-builder` 순으로 동작합니다.
-- 자동화 브라우저는 **시스템 Chrome**(`BROWSER_CHANNEL=chrome`)을 사용합니다(Chromium 미번들).
-- 설치된 앱은 DB·설정(`.env`)·로그인 세션을 **사용자 폴더(userData)** 에 저장하며, 앱 내 **⚙️ 설정** 화면에서 설정·네이버 로그인을 처리합니다.
-- macOS 빌드/서명·런타임은 검증 완료. Windows 자동 빌드(CI)는 `.github/workflows/desktop-build.yml`에 구성돼 있습니다. 상세는 [DESKTOP.md](DESKTOP.md).
+※ `desktop:pack:mac`/`desktop:pack:win`은 각각 macOS/Windows 환경에서 실행할 때만 빌드됩니다.
+※ 패키지 생성 전 `npm run build`가 먼저 실행되어야 하며, 빌드된 `.next`를 기반으로 동작합니다.
 
 ### Step 3: 링크 추가 & 발행
 
@@ -292,8 +280,10 @@ npm run desktop:pack:win   # Windows 인스톨러 생성 (Windows에서 실행)
 | 명령어 | 설명 |
 |--------|------|
 | `npm run login` | 네이버 로그인 (세션 저장) |
-| `npm run login:chatgpt` | ChatGPT 로그인 (Browser GPT 모드용 세션 저장) |
+| `npm run login:chatgpt` | ChatGPT 로그인 (Browser ChatGPT 모드용 세션 저장) |
 | `npm run dev` | 웹 대시보드 실행 (localhost:3000) |
+| `npm run brandconnect:seasonal` | 시즌·히트·인기·판매 신호 우선 상품 자동 등록 |
+| `npm run publish:bulk-schedule` | READY 브랜드커넥트 링크 예약발행 일괄 실행 |
 | `npm run desktop` | 데스크톱 앱 실행 (macOS/Windows) |
 | `./scripts/desktop.command` | macOS 데스크톱 앱 실행기 |
 | `./scripts/desktop.bat` | Windows 데스크톱 앱 실행기 |

@@ -2,10 +2,10 @@ import fs from "fs";
 import path from "path";
 import { chromium } from "playwright";
 import { Page, BrowserContextOptions } from "playwright";
-import { getChatgptSessionFile, getSessionStorageDir } from "./app-paths";
 
-const CHATGPT_SESSION_FILE = getChatgptSessionFile();
-const CHATGPT_USER_DATA_DIR = process.env.CHATGPT_USER_DATA_DIR || path.join(getSessionStorageDir(), "..", "profile");
+const CHATGPT_SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "chatgpt-session.json");
+const CHATGPT_USER_DATA_DIR =
+  process.env.CHATGPT_USER_DATA_DIR || path.join(process.cwd(), "playwright", "storage", "chatgpt-profile");
 const CHATGPT_HEADLESS = (process.env.CHATGPT_HEADLESS || "false").toLowerCase() === "true";
 const CHATGPT_USE_PERSISTENT_CONTEXT =
   (process.env.CHATGPT_USE_PERSISTENT_CONTEXT || process.env.CHATGPT_USE_PERSISTENT_PROFILE || "true").toLowerCase() !==
@@ -40,6 +40,43 @@ export interface ChatGPTContextHandle {
   close: () => Promise<void>;
 }
 
+const CHATGPT_MANUAL_VERIFICATION_MESSAGE =
+  "ChatGPT manual verification required. A human-verification or security-check page is visible. Complete it in the browser, then run the job again.";
+
+const CHATGPT_PROTECTION_TEXT_PATTERNS = [
+  "checking your browser",
+  "checking if the site connection is secure",
+  "please stand by",
+  "verify you are human",
+  "needs to review the security of your connection",
+  "cf-challenge",
+  "cloudflare",
+  "turnstile",
+  "unusual activity",
+  "access denied",
+  "\uc0ac\ub78c\uc778\uc9c0 \ud655\uc778",
+  "\uc2e4\uc81c \uc0ac\uc6a9\uc790\uc778\uc9c0 \ud655\uc778",
+  "\uc0ac\uc6a9\uc790\uac00 \uc0ac\ub78c\uc778\uc9c0 \ud655\uc778",
+  "\uc0ac\ub78c\uc784\uc744 \ud655\uc778",
+  "\ub85c\ubd07\uc774 \uc544\ub2d8",
+  "\ubcf4\uc548 \ud655\uc778",
+  "\ubcf4\uc548 \uac80\uc99d",
+  "\ube0c\ub77c\uc6b0\uc800\ub97c \ud655\uc778",
+  "\uc811\uadfc\uc774 \ucc28\ub2e8",
+  "\ube44\uc815\uc0c1\uc801\uc778 \ud65c\ub3d9",
+];
+
+const CHATGPT_PROTECTION_FRAME_PATTERNS = [
+  "cdn-cgi/challenge-platform",
+  "challenge",
+  "captcha",
+  "turnstile",
+  "cloudflare",
+  "cf-chl",
+  "hcaptcha",
+  "recaptcha",
+];
+
 async function findVisibleSelector(page: Page, selectors: string[]): Promise<string | null> {
   for (const selector of selectors) {
     const visible = await page.locator(selector).first().isVisible().catch(() => false);
@@ -54,6 +91,84 @@ function isCustomGptUrl(url: string): boolean {
 
 async function hasComposer(page: Page): Promise<boolean> {
   return (await findVisibleSelector(page, CHATGPT_COMPOSER_SELECTORS)) !== null;
+}
+
+async function detectChatGPTManualVerification(page: Page): Promise<string | null> {
+  const urlEvidence = page.url().toLowerCase();
+  if (CHATGPT_PROTECTION_FRAME_PATTERNS.some((pattern) => urlEvidence.includes(pattern))) {
+    return CHATGPT_MANUAL_VERIFICATION_MESSAGE;
+  }
+
+  const frameEvidence = page.frames().some((frame) => {
+    const evidence = `${frame.url()} ${frame.name()}`.toLowerCase();
+    return CHATGPT_PROTECTION_FRAME_PATTERNS.some((pattern) => evidence.includes(pattern));
+  });
+  if (frameEvidence) {
+    return CHATGPT_MANUAL_VERIFICATION_MESSAGE;
+  }
+
+  const bodyText = (await page.textContent("body").catch(() => "")) || "";
+  const normalized = bodyText.replace(/\s+/g, " ").toLowerCase();
+  if (CHATGPT_PROTECTION_TEXT_PATTERNS.some((pattern) => normalized.includes(pattern))) {
+    return CHATGPT_MANUAL_VERIFICATION_MESSAGE;
+  }
+
+  const domEvidence = await page
+    .evaluate(() => {
+      const visible = (element: Element): boolean => {
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+      };
+
+      const challengeSelectors = [
+        'iframe[src*="challenge"]',
+        'iframe[src*="captcha"]',
+        'iframe[src*="turnstile"]',
+        'iframe[src*="cloudflare"]',
+        '[id*="challenge"]',
+        '[class*="challenge"]',
+        '[id*="captcha"]',
+        '[class*="captcha"]',
+        '[id*="turnstile"]',
+        '[class*="turnstile"]',
+        "[data-sitekey]",
+      ];
+      const hasChallengeElement = challengeSelectors.some((selector) =>
+        Array.from(document.querySelectorAll(selector)).some(visible)
+      );
+
+      const humanTextPattern =
+        /verify|human|robot|captcha|cloudflare|turnstile|\uc0ac\ub78c|\ub85c\ubd07|\ubcf4\uc548|\uc778\uc99d/i;
+      const hasHumanCheckbox = Array.from(
+        document.querySelectorAll('input[type="checkbox"], [role="checkbox"]')
+      ).some((element) => {
+        if (!visible(element)) return false;
+        const nearby =
+          element.closest("label, form, section, main, div")?.textContent ||
+          element.getAttribute("aria-label") ||
+          element.getAttribute("title") ||
+          document.body?.innerText ||
+          "";
+        return humanTextPattern.test(nearby);
+      });
+
+      return { hasChallengeElement, hasHumanCheckbox };
+    })
+    .catch(() => ({ hasChallengeElement: false, hasHumanCheckbox: false }));
+
+  if (domEvidence.hasChallengeElement || domEvidence.hasHumanCheckbox) {
+    return CHATGPT_MANUAL_VERIFICATION_MESSAGE;
+  }
+
+  return null;
+}
+
+async function assertNoChatGPTProtection(page: Page, label = "ChatGPT"): Promise<void> {
+  const protectionIssue = await detectChatGPTManualVerification(page);
+  if (!protectionIssue) return;
+
+  throw new Error(`${label}: ${protectionIssue} Current URL: ${page.url()}`);
 }
 
 async function isChatGPTLoginRequired(page: Page): Promise<boolean> {
@@ -72,6 +187,94 @@ async function isChatGPTLoginRequired(page: Page): Promise<boolean> {
   }
 
   return false;
+}
+
+async function continueChatGPTAccountPicker(page: Page, label = "ChatGPT"): Promise<boolean> {
+  const target = await page
+    .evaluate(() => {
+      const bodyText = (document.body?.innerText || "").replace(/\s+/g, " ");
+      const hasAccountPicker =
+        /welcome back|choose an account|select an account/i.test(bodyText) ||
+        bodyText.includes("\ub2e4\uc2dc \uc624\uc2e0 \uac78 \ud658\uc601\ud569\ub2c8\ub2e4") ||
+        bodyText.includes("\uacc4\uc815\uc744 \uc120\ud0dd\ud574 \uacc4\uc18d\ud558\uc138\uc694");
+
+      if (!hasAccountPicker) return null;
+
+      const visible = (element: Element): boolean => {
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+      };
+
+      const elements = Array.from(document.querySelectorAll("button, [role='button'], a, div, span, p"));
+      const candidates: Array<{
+        x: number;
+        y: number;
+        left: number;
+        width: number;
+        text: string;
+        area: number;
+        top: number;
+      }> = [];
+      const seen = new Set<string>();
+
+      for (const element of elements) {
+        const text = (element.textContent || "").replace(/\s+/g, " ").trim();
+        if (!/@/.test(text) || !visible(element)) continue;
+
+        let clickable = element.closest("button, [role='button'], a");
+        if (!clickable) {
+          let parent: Element | null = element;
+          while (parent && parent !== document.body) {
+            const parentText = (parent.textContent || "").replace(/\s+/g, " ").trim();
+            const parentRect = parent.getBoundingClientRect();
+            if (
+              /@/.test(parentText) &&
+              visible(parent) &&
+              parentRect.width >= 180 &&
+              parentRect.height >= 44 &&
+              parentRect.width <= 560 &&
+              parentRect.height <= 180
+            ) {
+              clickable = parent;
+              break;
+            }
+            parent = parent.parentElement;
+          }
+        }
+        clickable ||= element;
+        if (!visible(clickable)) continue;
+
+        const rect = clickable.getBoundingClientRect();
+        const key = `${Math.round(rect.left)}:${Math.round(rect.top)}:${Math.round(rect.width)}:${Math.round(rect.height)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        candidates.push({
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+          left: rect.left,
+          width: rect.width,
+          text,
+          area: rect.width * rect.height,
+          top: rect.top,
+        });
+      }
+
+      candidates.sort((a, b) => a.top - b.top || b.area - a.area);
+      return candidates[0] || null;
+    })
+    .catch(() => null);
+
+  if (!target) return false;
+
+  console.log(`      - [${label}] ChatGPT account picker detected; selecting saved account.`);
+  await page.mouse.click(target.left + Math.min(74, target.width * 0.24), target.y).catch(() => {});
+  await page.waitForTimeout(700);
+  await page.mouse.click(target.x, target.y).catch(() => {});
+  await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {});
+  await page.waitForTimeout(2500);
+  return true;
 }
 
 async function hasInaccessibleGptBanner(page: Page): Promise<boolean> {
@@ -96,7 +299,7 @@ async function hasInaccessibleGptBanner(page: Page): Promise<boolean> {
 async function hasSessionTokenCookie(page: Page): Promise<boolean> {
   try {
     const cookies = await page.context().cookies("https://chatgpt.com");
-    return cookies.some((cookie) => cookie.name === "__Secure-next-auth.session-token");
+    return cookies.some((cookie) => cookie.name.startsWith("__Secure-next-auth.session-token"));
   } catch {
     return false;
   }
@@ -129,6 +332,8 @@ async function sendProbePrompt(page: Page): Promise<boolean> {
 
   const start = Date.now();
   while (Date.now() - start < 30_000) {
+    await assertNoChatGPTProtection(page, "ChatGPT probe");
+
     if (await isChatGPTLoginRequired(page)) {
       return false;
     }
@@ -172,7 +377,11 @@ async function ensureChatGPTReady(
         throw new Error("ChatGPT 창이 닫혔습니다.");
       }
 
+      await assertNoChatGPTProtection(page, label);
       await dismissTemporaryChatOnboarding(page);
+      if (await continueChatGPTAccountPicker(page, label)) {
+        continue;
+      }
 
       if (await hasInaccessibleGptBanner(page)) {
         throw new Error(
@@ -229,7 +438,6 @@ export async function createChatGPTContext(hasSessionFile: boolean): Promise<Cha
   const commonLaunchOptions = {
     headless: CHATGPT_HEADLESS,
     slowMo: CHATGPT_HEADLESS ? 0 : 30,
-    channel: process.env.BROWSER_CHANNEL || undefined, // 패키징 시 시스템 Chrome 사용
     args: ["--disable-blink-features=AutomationControlled"],
   };
 
@@ -280,7 +488,9 @@ export async function openChatGPTTarget(page: Page, url: string, label: string) 
   console.log(`\n🌐 [${label}] ChatGPT 열기: ${url}`);
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
   await page.waitForTimeout(2000);
+  await assertNoChatGPTProtection(page, label);
   await dismissTemporaryChatOnboarding(page);
+  await continueChatGPTAccountPicker(page, label);
   await ensureChatGPTReady(page, url, label);
 }
 
@@ -296,7 +506,7 @@ export async function dismissTemporaryChatOnboarding(page: Page) {
       await closeBtn.click();
       await page.waitForTimeout(500);
     }
-  } catch (e) {
+  } catch {
     // Ignore
   }
 }
@@ -422,10 +632,14 @@ export async function readAssistantMessages(page: Page): Promise<string[]> {
 
 export async function waitForChatGPTComposer(page: Page, timeoutMs: number): Promise<string> {
   const selectors = ["#prompt-textarea", 'div[contenteditable="true"]', "textarea"];
+  const perSelectorTimeoutMs = Math.max(1000, Math.floor(timeoutMs / selectors.length));
+  await assertNoChatGPTProtection(page);
   for (const selector of selectors) {
+    await assertNoChatGPTProtection(page);
+    await continueChatGPTAccountPicker(page, "ChatGPT composer");
     try {
       const el = page.locator(selector).first();
-      await el.waitFor({ state: "visible", timeout: 2000 });
+      await el.waitFor({ state: "visible", timeout: perSelectorTimeoutMs });
       return selector;
     } catch {
       continue;
@@ -435,12 +649,16 @@ export async function waitForChatGPTComposer(page: Page, timeoutMs: number): Pro
 }
 
 export async function waitForChatGPTSendReady(page: Page, timeoutMs: number) {
+  await assertNoChatGPTProtection(page);
+  await continueChatGPTAccountPicker(page, "ChatGPT send ready");
   try {
     const sendButton = page.locator('button[data-testid="send-button"]').first();
     await sendButton.waitFor({ state: "visible", timeout: timeoutMs });
   } catch {
     // Ignore
   }
+  await assertNoChatGPTProtection(page);
+  await continueChatGPTAccountPicker(page, "ChatGPT send ready");
 }
 
 export async function submitPromptToChatGPT(
@@ -449,10 +667,14 @@ export async function submitPromptToChatGPT(
   label: string = "ChatGPT",
 ): Promise<void> {
   console.log(`      - [${label}] 프롬프트 전송 중...`);
+  await assertNoChatGPTProtection(page, label);
   await dismissTemporaryChatOnboarding(page);
+  await continueChatGPTAccountPicker(page, label);
 
   const idleStart = Date.now();
   while (await isChatGPTGenerating(page)) {
+    await assertNoChatGPTProtection(page, label);
+    await continueChatGPTAccountPicker(page, label);
     if (Date.now() - idleStart > 30000) break;
     await page.waitForTimeout(500);
   }
@@ -460,6 +682,7 @@ export async function submitPromptToChatGPT(
   const composerSelector = await waitForChatGPTComposer(page, 30000);
   const composer = page.locator(composerSelector).first();
 
+  await assertNoChatGPTProtection(page, label);
   await composer.click();
   await page.waitForTimeout(300);
 
@@ -477,6 +700,7 @@ export async function submitPromptToChatGPT(
   }
 
   await waitForChatGPTSendReady(page, 10000);
+  await assertNoChatGPTProtection(page, label);
 
   try {
     const sendBtn = page.locator('button[data-testid="send-button"]').first();
@@ -494,11 +718,15 @@ export async function submitPromptToChatGPT(
 
 export async function sendPromptToChatGPT(page: Page, prompt: string, label: string = "ChatGPT"): Promise<string> {
   console.log(`      - [${label}] 프롬프트 입력 중...`);
+  await assertNoChatGPTProtection(page, label);
   await dismissTemporaryChatOnboarding(page);
+  await continueChatGPTAccountPicker(page, label);
 
   // Wait until idle
-  let idleStart = Date.now();
+  const idleStart = Date.now();
   while (await isChatGPTGenerating(page)) {
+    await assertNoChatGPTProtection(page, label);
+    await continueChatGPTAccountPicker(page, label);
     if (Date.now() - idleStart > 60000) break;
     await page.waitForTimeout(500);
   }
@@ -509,6 +737,7 @@ export async function sendPromptToChatGPT(page: Page, prompt: string, label: str
   const composerSelector = await waitForChatGPTComposer(page, 30000);
   const composer = page.locator(composerSelector).first();
 
+  await assertNoChatGPTProtection(page, label);
   await composer.click();
   await page.waitForTimeout(500);
 
@@ -517,9 +746,7 @@ export async function sendPromptToChatGPT(page: Page, prompt: string, label: str
   } else {
     // For contenteditable
     await page.evaluate(() => {
-        // @ts-ignore
-        const doc = document;
-        const el = doc.querySelector('div[contenteditable="true"]') as any;
+        const el = document.querySelector<HTMLElement>('div[contenteditable="true"]');
         if (el) el.innerText = '';
     });
     // chunk large prompts
@@ -531,6 +758,7 @@ export async function sendPromptToChatGPT(page: Page, prompt: string, label: str
 
   await page.waitForTimeout(1000);
   await waitForChatGPTSendReady(page, 10000);
+  await assertNoChatGPTProtection(page, label);
 
   // Click send
   try {
@@ -548,12 +776,14 @@ export async function sendPromptToChatGPT(page: Page, prompt: string, label: str
   console.log(`      - [${label}] 생성 대기 중...`);
 
   // Wait for new message to appear and generation to start/finish
-  let startWait = Date.now();
+  const startWait = Date.now();
   let generatingSeen = false;
   let lastMessageLength = -1;
   let unchangedCount = 0;
 
   while (Date.now() - startWait < 300000) { // 5 min max
+    await assertNoChatGPTProtection(page, label);
+
     const generating = await isChatGPTGenerating(page);
     if (generating) generatingSeen = true;
 
@@ -644,6 +874,7 @@ export async function waitForChatGPTImageArtifacts(
   let stableCycles = 0;
 
   while (waitedMs < timeoutMs) {
+    await continueChatGPTAccountPicker(page, "ChatGPT image wait");
     const generating = await isChatGPTGenerating(page);
     const imageCount = await countRenderableChatGPTImages(page);
 

@@ -1,9 +1,7 @@
 /**
  * 랜덤 스케줄 생성 모듈
- * 09:00 ~ 18:00(KST) 사이에 5개의 랜덤 발행 시간 생성
+ * 09:00 ~ 18:00 사이에 5개의 랜덤 발행 시간 생성
  */
-
-import { kstWallClockToInstant, getKstParts } from "@/lib/kst";
 
 export interface ScheduleConfig {
   startHour: number;  // 시작 시간 (기본 9)
@@ -44,35 +42,25 @@ export function generateRandomSchedule(
   while (times.length < postCount && attempts < maxAttempts) {
     attempts++;
     const randomMinute = Math.floor(Math.random() * totalMinutes);
-
+    
     // 기존 시간들과 최소 간격 확인
     const isValid = times.every(
       (t) => Math.abs(t - randomMinute) >= minGapMinutes
     );
-
+    
     if (isValid) {
       times.push(randomMinute);
     }
   }
 
-  // 최소 간격 제약으로 요청 개수를 못 채웠으면 조용히 누락하지 않고 경고한다.
-  if (times.length < postCount) {
-    console.warn(
-      `[random-schedule] 요청 ${postCount}개 중 ${times.length}개만 생성됨 ` +
-        `(윈도우 ${endHour - startHour}h, 최소간격 ${minGapMinutes}분 제약). ` +
-        `윈도우를 넓히거나 minGapMinutes/postCount를 조정하세요.`
-    );
-  }
-
-  // 대상 날짜를 KST 기준으로 해석해, 서버 타임존과 무관하게 KST 벽시계 시각을 만든다.
-  const { year, month, day } = getKstParts(date);
-
-  // 시간순 정렬 후 Date(instant)로 변환
+  // 시간순 정렬 후 Date 객체로 변환
   return times.sort((a, b) => a - b).map((minutes) => {
-    const hour = startHour + Math.floor(minutes / 60);
-    const minute = minutes % 60;
-    const second = Math.floor(Math.random() * 60); // 초도 랜덤
-    return kstWallClockToInstant(year, month, day, hour, minute, second);
+    const result = new Date(date);
+    result.setHours(startHour + Math.floor(minutes / 60));
+    result.setMinutes(minutes % 60);
+    result.setSeconds(Math.floor(Math.random() * 60)); // 초도 랜덤
+    result.setMilliseconds(0);
+    return result;
   });
 }
 

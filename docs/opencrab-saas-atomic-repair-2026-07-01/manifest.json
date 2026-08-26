@@ -1,0 +1,73 @@
+{
+  "generated_at": "2026-07-01T10:40:00.946Z",
+  "source": "docs/naver-brandconnect-seo-research-2026-07-01.json",
+  "output_dir": "docs/opencrab-saas-atomic-repair-2026-07-01",
+  "product_count": 80,
+  "category_count": 8,
+  "files": [
+    {
+      "category_key": "home_appliance",
+      "category_label": "가전/청소/주방가전",
+      "product_count": 10,
+      "path": "docs/opencrab-saas-atomic-repair-2026-07-01/atomic-top3-home_appliance.md",
+      "char_count": 19509,
+      "estimated_900_char_chunks": 22
+    },
+    {
+      "category_key": "digital_it",
+      "category_label": "디지털/IT/모바일",
+      "product_count": 10,
+      "path": "docs/opencrab-saas-atomic-repair-2026-07-01/atomic-top3-digital_it.md",
+      "char_count": 20002,
+      "estimated_900_char_chunks": 23
+    },
+    {
+      "category_key": "beauty_body",
+      "category_label": "뷰티/헤어/바디",
+      "product_count": 10,
+      "path": "docs/opencrab-saas-atomic-repair-2026-07-01/atomic-top3-beauty_body.md",
+      "char_count": 18462,
+      "estimated_900_char_chunks": 21
+    },
+    {
+      "category_key": "living_health",
+      "category_label": "생활/건강/욕실",
+      "product_count": 10,
+      "path": "docs/opencrab-saas-atomic-repair-2026-07-01/atomic-top3-living_health.md",
+      "char_count": 19156,
+      "estimated_900_char_chunks": 22
+    },
+    {
+      "category_key": "food_supplement",
+      "category_label": "식품/건강식품",
+      "product_count": 10,
+      "path": "docs/opencrab-saas-atomic-repair-2026-07-01/atomic-top3-food_supplement.md",
+      "char_count": 18135,
+      "estimated_900_char_chunks": 21
+    },
+    {
+      "category_key": "sports_leisure",
+      "category_label": "스포츠/레저/골프",
+      "product_count": 10,
+      "path": "docs/opencrab-saas-atomic-repair-2026-07-01/atomic-top3-sports_leisure.md",
+      "char_count": 18659,
+      "estimated_900_char_chunks": 21
+    },
+    {
+      "category_key": "fashion_goods",
+      "category_label": "패션/잡화/의류",
+      "product_count": 10,
+      "path": "docs/opencrab-saas-atomic-repair-2026-07-01/atomic-top3-fashion_goods.md",
+      "char_count": 18425,
+      "estimated_900_char_chunks": 21
+    },
+    {
+      "category_key": "baby_pet",
+      "category_label": "육아/반려/가족",
+      "product_count": 10,
+      "path": "docs/opencrab-saas-atomic-repair-2026-07-01/atomic-top3-baby_pet.md",
+      "char_count": 18400,
+      "estimated_900_char_chunks": 21
+    }
+  ]
+}

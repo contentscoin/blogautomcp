@@ -1,0 +1,940 @@
+{
+  "package_id": "cfe1fd01-a052-4ec0-a97b-b7f45cd92b9d",
+  "project_id": "ce86789f-c294-449f-9add-61de752e810b",
+  "latest_version": "1.0.95",
+  "latest_snapshot": {
+    "documents": 96,
+    "chunks": 179,
+    "nodes": 1248,
+    "edges": 1152
+  },
+  "completed_categories": [
+    "baby_pet",
+    "beauty_body",
+    "digital_it",
+    "fashion_goods",
+    "food_supplement",
+    "home_appliance",
+    "living_health",
+    "sports_leisure"
+  ],
+  "completed_product_count": 80,
+  "remaining_product_count": 0,
+  "next_version": null,
+  "required_anchor": "ANCHOR|CRAB_MICRO_TOP3|pid=<product_id>|priority=1",
+  "workflow_canonical_v2_rule": "If a canonical v2 solo anchor and a legacy/compact source are both retrieved for the same product_id, select the canonical v2 source even when its vector score is lower.",
+  "recommended_top_k_per_node_after_1_0_65": 40,
+  "batches": [
+    {
+      "category": "baby_pet",
+      "versions": [
+        "1.0.16",
+        "1.0.25"
+      ],
+      "product_count": 10,
+      "qc": {
+        "representative_pid": "181e8f0e-4380-4926-bc7e-bd64d54fb8d7",
+        "direct_project_query": "pass",
+        "workflow_top_k_per_node_12": "pass",
+        "pack_qa_grade": "A",
+        "pack_qa_score": 100,
+        "release_ready": true
+      },
+      "updates": [
+        {
+          "version": "1.0.16",
+          "pid": "181e8f0e-4380-4926-bc7e-bd64d54fb8d7",
+          "event_id": "cca30c7f-52be-4b27-b02a-ea66fd4839c5",
+          "document_id": "d1bb5d03-0d6d-4a42-afcd-83d138c2dd68",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.17",
+          "pid": "fe03bf78-db38-4b2a-aa66-19e93d55e45c",
+          "event_id": "242877f6-eba0-4125-a388-c3dd78dbf6e1",
+          "document_id": "140e8b1d-9a56-40d0-a529-b67789e83bf9",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.18",
+          "pid": "d1765a24-077a-4d76-ae57-3838e22cb52b",
+          "event_id": "99262372-64a5-41f3-92cb-8be3b9ad01ec",
+          "document_id": "af6ed264-ebfc-4710-8ad4-2f3c154e8084",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.19",
+          "pid": "3251bc73-3edf-4e58-9fa9-460b81f20dda",
+          "event_id": "aa7dc930-24bc-4c56-8c13-7b8f3f221481",
+          "document_id": "4c6b7d37-7fad-4978-919a-01ca853a9b44",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.20",
+          "pid": "08a2e8bd-a7f1-4ab0-b92a-cfd8a252163b",
+          "event_id": "c0838e17-1cec-4338-99f9-d958ed4ac3c5",
+          "document_id": "4b31a660-4cbf-4449-948d-3612c855c318",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.21",
+          "pid": "4c6bdf2e-0eac-4218-a798-e4534006878b",
+          "event_id": "e2f7431e-e49c-4ca8-9374-66f21d80928f",
+          "document_id": "5fb328c5-ea5c-4789-9383-0a12d7469e92",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.22",
+          "pid": "db2a4691-fcce-4668-a7a3-7e58b218fae3",
+          "event_id": "f7db6b35-6051-4252-bee9-31cb7fec0d38",
+          "document_id": "d4dac155-b615-453f-aac5-975842a1c302",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.23",
+          "pid": "6c8f2f14-ecb4-45f2-8ca8-9949c48a915c",
+          "event_id": "054ba676-617b-438c-a606-b3b27367d6e0",
+          "document_id": "535005ad-2588-4672-9065-32f07f50d258",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.24",
+          "pid": "88f9d71f-f7d3-41d0-a2de-393be79f8f46",
+          "event_id": "390f32cf-1698-43f6-94ea-ba8e2e2453b8",
+          "document_id": "37a70dec-17f0-4f60-86b9-57ee70b78a6e",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.25",
+          "pid": "ee5712ce-9dfe-4102-9032-05babdf510ed",
+          "event_id": "9bd06f1a-d5c7-4731-8a0b-2e37f2a67585",
+          "document_id": "dd5cb5de-dcc0-4d21-95ab-1c91916e29d0",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        }
+      ]
+    },
+    {
+      "category": "beauty_body",
+      "versions": [
+        "1.0.26",
+        "1.0.35"
+      ],
+      "product_count": 10,
+      "qc": {
+        "representative_pid": "02954d99-0510-481e-b099-77cc8d2af88f",
+        "direct_project_query": "pass",
+        "workflow_top_k_per_node_12_before_workflow_update": "pass_but_legacy_source_ranked_above_canonical_v2",
+        "workflow_top_k_per_node_12_after_workflow_update": "pass_canonical_v2_selected",
+        "pack_qa_grade": "A",
+        "pack_qa_score": 92,
+        "release_ready": true,
+        "known_anomaly": "pid 0d4f0c07-4a81-4887-aa8f-558c950fc808 is queued under beauty_body but product/query terms indicate a pet-food taxonomy mismatch."
+      },
+      "updates": [
+        {
+          "version": "1.0.26",
+          "pid": "02954d99-0510-481e-b099-77cc8d2af88f",
+          "event_id": "8e386314-a085-459d-a567-61532b4a520b",
+          "document_id": "6839d52c-ba5f-42ce-93b6-04c4b2af9479",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.27",
+          "pid": "bc1f4cbf-4b2a-43d4-99ac-a9a3caa9d65c",
+          "event_id": "6f645206-fc8f-4c6b-96e1-a1e6e9fd5063",
+          "document_id": "8889b9bf-9696-4a36-b29c-2a301fde7710",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.28",
+          "pid": "57753b22-e3a0-48f9-9651-9814059cc2df",
+          "event_id": "15a600bd-6530-4f2f-8279-b75e3f71d97f",
+          "document_id": "5d1afd7a-4e71-4543-83bb-accd10589a02",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.29",
+          "pid": "6228478a-0367-4f87-9273-753d1a10d7fc",
+          "event_id": "ddb61aea-00db-4a07-857e-74dd89dde9cf",
+          "document_id": "3c497fcc-247e-40c8-afab-1b9e43143fa4",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.30",
+          "pid": "d8021987-f608-4406-bbfc-8e72b653e5b8",
+          "event_id": "c831571e-31cf-4765-af3b-0c91b1bf6b81",
+          "document_id": "30be66d4-b6c2-41f2-ae56-6505fe60c8d2",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.31",
+          "pid": "abca11d9-8e0b-4be0-a245-b6ea43174ebe",
+          "event_id": "e0617f3f-fe97-41b8-a739-bb600cb23795",
+          "document_id": "7ef2331f-8734-448f-96ca-06121180ba63",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.32",
+          "pid": "f7c3e40b-cc36-450e-8311-324b07c7698d",
+          "event_id": "35a9b54e-0a62-472b-a144-79eb31ca9c4b",
+          "document_id": "a8265645-d3f4-497f-8035-ffb66cc63e00",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.33",
+          "pid": "665e00c7-1fb9-4ff1-9399-ba26958b133b",
+          "event_id": "e268e35e-83b5-4316-8a04-d4496e480119",
+          "document_id": "2a5a33da-bdc0-4cad-86a5-e7ec4ee9d4ae",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.34",
+          "pid": "fba5f43b-85ea-4823-836e-3a6143b07097",
+          "event_id": "f68c1d09-46a5-4192-b3f7-9f09856070fc",
+          "document_id": "d6393346-a5b3-432f-9574-d7c13aa7579c",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.35",
+          "pid": "0d4f0c07-4a81-4887-aa8f-558c950fc808",
+          "event_id": "e56568ff-c271-45f4-a8db-326a5dabda0a",
+          "document_id": "ee9ed658-236d-4819-ab10-fb2900ab501a",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12,
+          "qc_note": "category_payload_contains_pet_food_terms"
+        }
+      ]
+    },
+    {
+      "category": "digital_it",
+      "versions": [
+        "1.0.36",
+        "1.0.45"
+      ],
+      "product_count": 10,
+      "qc": {
+        "representative_pid": "23ff46db-0f93-4cf8-ba47-e87ac7ae789a",
+        "direct_project_query": "pass",
+        "workflow_top_k_per_node_12": "pass_canonical_v2_selected",
+        "pack_qa_grade": "A",
+        "pack_qa_score": 92,
+        "release_ready": true
+      },
+      "updates": [
+        {
+          "version": "1.0.36",
+          "pid": "23ff46db-0f93-4cf8-ba47-e87ac7ae789a",
+          "event_id": "eff11440-6b13-41b8-96c5-52a0d56b4798",
+          "document_id": "53855bc4-f278-42e4-9ce5-e893357d3690",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.37",
+          "pid": "0c188db2-82eb-4879-a72a-ef5cbba6e59f",
+          "event_id": "559bea47-1596-4930-8240-3ebec0de3162",
+          "document_id": "edbc3db7-024c-4bea-9b88-4057e202a793",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.38",
+          "pid": "08f185a1-fb99-4e30-86cf-942958cdaa9c",
+          "event_id": "baf8c170-46dc-422e-b81b-c8bf1d959e1b",
+          "document_id": "bca90024-0adc-4390-980c-fa91015a2b09",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.39",
+          "pid": "5d8421ed-f2cb-4b31-a1fe-f81be726c426",
+          "event_id": "c07b6be0-6fc5-4930-9dd1-320a90d0f6a8",
+          "document_id": "b823283c-2990-4569-aa85-c2a2028487d2",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.40",
+          "pid": "de9bf9e7-3ab9-466b-92de-148baf12a2e2",
+          "event_id": "026ab398-38f2-4fa4-9ee0-943b5530e93d",
+          "document_id": "121e5f8e-7f71-4801-9a25-98ad15450290",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.41",
+          "pid": "fed651b5-a313-4685-ad00-5b7198c579a8",
+          "event_id": "1c83e8f8-4274-441b-b857-20fd4b792060",
+          "document_id": "1feccd8a-f39c-419e-a8d7-f360c11a4561",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.42",
+          "pid": "f312dc54-3663-452a-a480-e72d82dd1f9f",
+          "event_id": "bc1f72e2-22cb-4e39-9f17-c7f5d1f4a4bb",
+          "document_id": "6b4673d9-b573-4290-8acf-ff0ee89f4f7b",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.43",
+          "pid": "93632a71-1fab-4a33-b8db-76004ab872d1",
+          "event_id": "d9f4c399-aa70-4b6b-a33a-65a3172e5d6f",
+          "document_id": "03958d19-51d1-4af8-bed9-85268a4dbd1c",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.44",
+          "pid": "4a7138e0-f43f-440c-8117-a8b9e05fbba4",
+          "event_id": "744eee6d-966a-45af-8627-7798c9527f9d",
+          "document_id": "8c421e0a-f66c-4c66-a96f-020a58b3fab5",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.45",
+          "pid": "e6d8f98f-2b85-4a90-a195-f02bc1c9b705",
+          "event_id": "d5cc6ca2-67a8-469e-8cea-a27f8985a4cc",
+          "document_id": "37ac2deb-656e-4ad0-a359-63f8bcd51b66",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        }
+      ]
+    },
+    {
+      "category": "fashion_goods",
+      "versions": [
+        "1.0.46",
+        "1.0.55"
+      ],
+      "product_count": 10,
+      "qc": {
+        "representative_pid": "52c82315-45b4-4b46-bcde-60790aa010a0",
+        "direct_project_query": "pass",
+        "workflow_top_k_per_node_12": "pass_canonical_v2_selected",
+        "pack_qa_grade": "A",
+        "pack_qa_score": 92,
+        "release_ready": true,
+        "known_outlier": "pid da968cae-fd23-47d1-b57a-3a1141abb574 has D|img=355 from source evidence."
+      },
+      "updates": [
+        {
+          "version": "1.0.46",
+          "pid": "52c82315-45b4-4b46-bcde-60790aa010a0",
+          "event_id": "f63d0681-fa16-42df-9562-64ae073143ec",
+          "document_id": "a2380a2a-15d7-4c13-b605-f6ea7bb301cf",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.47",
+          "pid": "d1afb770-7cda-467f-a2f7-e8fbd434fa75",
+          "event_id": "5b71027f-a402-4edc-a8ac-468578cebff1",
+          "document_id": "4ab8db48-aee4-4f83-8d4f-460941b52c93",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.48",
+          "pid": "bfe71e66-05e4-4f43-aa76-2d47da67c89c",
+          "event_id": "96a48602-b649-4982-a3cf-0d87bdb60506",
+          "document_id": "ae476776-52f5-4eca-aa28-41781909c061",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.49",
+          "pid": "b71e4dab-6384-4494-90f4-ff0864246473",
+          "event_id": "63d5c3cc-5788-4610-a0d4-ae2b24dd93d6",
+          "document_id": "21b43244-35cb-4d25-bf23-6f749fb8ff47",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.50",
+          "pid": "68769709-cd16-493f-936e-f17ce7c2ca37",
+          "event_id": "db5e5c95-223f-49a8-aa0d-218e7a1de878",
+          "document_id": "2bd85976-6faa-4a12-85d3-32732ee899bd",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.51",
+          "pid": "19095347-96a1-459d-aa22-412fee7a4780",
+          "event_id": "c3de2741-bf5c-4ebc-b31e-f8ef98eabc7d",
+          "document_id": "51a6bc17-ac1f-455a-b5b9-d1835e54f12f",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.52",
+          "pid": "da968cae-fd23-47d1-b57a-3a1141abb574",
+          "event_id": "d4205d14-4e23-4add-b326-52f77906bcf9",
+          "document_id": "8befff55-4f1b-46b6-86db-6903340f967d",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12,
+          "qc_note": "D|img=355 is preserved from source evidence and should be treated as an image-count outlier, not a target baseline."
+        },
+        {
+          "version": "1.0.53",
+          "pid": "1143356e-4b3f-4168-bf5b-8ccfba706a7c",
+          "event_id": "d84f2719-279c-45f3-9a1b-9e18f396356d",
+          "document_id": "06eb9bf9-8b32-435f-8da0-5ee9a24cc672",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.54",
+          "pid": "a1ef37f8-d7e5-4129-af2c-712980699209",
+          "event_id": "8cf52794-1345-490d-8745-dcfad8c5ecfc",
+          "document_id": "a9f971f6-c13c-41e0-9626-4d9f0c6eb054",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.55",
+          "pid": "b85a0cd2-26c1-4aa0-832a-53c27c2a797d",
+          "event_id": "e09d9881-399e-4dcd-b040-9c9668630376",
+          "document_id": "9cb34086-117e-42e6-b2da-d1a0bad7fdb3",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        }
+      ]
+    },
+    {
+      "category": "food_supplement",
+      "versions": [
+        "1.0.56",
+        "1.0.65"
+      ],
+      "product_count": 10,
+      "qc": {
+        "representative_pid": "f1ea0243-3271-4c96-8f02-f59cdfa2dc56",
+        "direct_project_query": "pass",
+        "workflow_top_k_per_node_12": "fail_canonical_v2_not_retrieved",
+        "workflow_top_k_per_node_40": "pass_canonical_v2_selected",
+        "pack_qa_grade": "A",
+        "pack_qa_score": 92,
+        "release_ready": true,
+        "known_anomalies": [
+          "pid 56bdcdea-8bac-43b2-9b05-91029548d4e1 is queued under food_supplement but product/query terms indicate a coffee grinder.",
+          "pid 25a3e33f-8fb0-458e-84de-d466653bc949 is queued under food_supplement but product/query terms indicate skincare retinol.",
+          "pid d891dda1-0c2e-4d03-a382-e608f8ae8a12 has very low R1 fetched body/image counts from source evidence."
+        ]
+      },
+      "updates": [
+        {
+          "version": "1.0.56",
+          "pid": "f1ea0243-3271-4c96-8f02-f59cdfa2dc56",
+          "event_id": "c38df565-89f8-412d-95ac-70a5d7df0445",
+          "document_id": "0ba18f8c-a7e1-4bcb-aa41-205d832a440a",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.57",
+          "pid": "679b94bf-45a0-4605-a94e-145fc98c9fc3",
+          "event_id": "8c383063-7d36-4e0f-b127-7641ff570f7c",
+          "document_id": "1b7b617f-4abb-4c71-8f53-2e4b5068fd0c",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.58",
+          "pid": "d891dda1-0c2e-4d03-a382-e608f8ae8a12",
+          "event_id": "0a268d44-896b-4f0e-815d-b8a8e09ce949",
+          "document_id": "3ceb999c-bf3f-4853-86d5-5a29e0bb80db",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12,
+          "qc_note": "R1 has very low fetched body/image counts in source evidence; preserve as-is."
+        },
+        {
+          "version": "1.0.59",
+          "pid": "256350e0-5fb8-4b74-b4c1-4543654b593f",
+          "event_id": "4caf8372-e3cf-4bb6-841e-ccdcea8b20f6",
+          "document_id": "b50b94d8-49c7-418f-a73a-c987b1c6ac07",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.60",
+          "pid": "56bdcdea-8bac-43b2-9b05-91029548d4e1",
+          "event_id": "a9bff6c8-308e-4ed8-b131-546f907256b8",
+          "document_id": "043764d0-53fa-4e4e-bc62-71c63a8a9ae4",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12,
+          "qc_note": "category_payload_contains_coffee_grinder_terms"
+        },
+        {
+          "version": "1.0.61",
+          "pid": "af6c5044-e429-4933-a18b-bf458ad8e222",
+          "event_id": "e6840749-be35-4e37-a504-e7c5acd14ee1",
+          "document_id": "402ce5c1-f2bb-4b51-acfb-67403ab2ffc9",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.62",
+          "pid": "b1148498-5ffc-4530-9e01-f38189daccaa",
+          "event_id": "d50d38da-f4c5-4ce1-8000-2f88a50251be",
+          "document_id": "667f8d84-e43f-4263-ab99-0eec1993154d",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.63",
+          "pid": "25a3e33f-8fb0-458e-84de-d466653bc949",
+          "event_id": "dbf4b8d0-53cb-47eb-81be-8dc6d4e62763",
+          "document_id": "73b5d3b8-b1c3-4698-aef8-a6a8fb1c38d7",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12,
+          "qc_note": "category_payload_contains_skincare_retinol_terms"
+        },
+        {
+          "version": "1.0.64",
+          "pid": "7fe75bda-54a2-446b-992d-87a3cd6d8491",
+          "event_id": "cb86b06a-22d2-4a8d-b3f4-924e559f3c82",
+          "document_id": "c89d6b41-9201-44e5-a3ee-b6c98b48beac",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.65",
+          "pid": "fa7a1849-e955-4356-ada9-126f9f961378",
+          "event_id": "3cf61515-263d-4d49-8d91-dfb493a4051e",
+          "document_id": "556ae9ce-7830-4840-8684-23a47118ce6c",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        }
+      ]
+    },
+    {
+      "category": "home_appliance",
+      "versions": [
+        "1.0.66",
+        "1.0.75"
+      ],
+      "product_count": 10,
+      "qc": {
+        "representative_pid": "413765d6-98b0-442f-b777-b9db583e2e6a",
+        "direct_project_query": "pass_canonical_v2_retrieved_but_legacy_duplicate_ranked_higher",
+        "workflow_top_k_per_node_40": "pass_literal_anchor_selected",
+        "pack_qa_grade": "A",
+        "pack_qa_score": 92,
+        "release_ready": true,
+        "known_anomalies": [
+          "pid 2e375065-a495-4fba-85a8-a12582c66178 has R3 terms that appear to describe a fan result while the target product is a vacuum.",
+          "pid b12bd043-e807-4e98-9918-737650942261 has very low R2 fetched body/image counts from source evidence.",
+          "pid 47a107e6-c564-4311-a045-5caa29bd98b5 has very low R1 fetched body/image counts from source evidence."
+        ]
+      },
+      "updates": [
+        {
+          "version": "1.0.66",
+          "pid": "f1187508-de13-4923-8573-e1be2602ac83",
+          "event_id": "77add53c-b9f5-49b4-b880-8daf5ffd2691",
+          "document_id": "f113e6e4-0688-4e3f-ab84-525569f19f2b",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12,
+          "qc_note": "canonical v2 replacement for earlier Dreame product-level and atomic repair rows"
+        },
+        {
+          "version": "1.0.67",
+          "pid": "d297babf-8f28-4adf-bbca-eeaf1d621070",
+          "event_id": "36e16d93-df74-499c-b92f-b64abe291b8c",
+          "document_id": "a7a1c16e-1a92-4dea-be24-27f38cf24468",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.68",
+          "pid": "97f271ca-44fe-4b15-b56e-44ee84a798a7",
+          "event_id": "7771a1d1-0017-4d34-8283-678899c568d5",
+          "document_id": "ef629079-abbd-4401-85e1-b6e91cb7ca01",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.69",
+          "pid": "4716d3b5-edc3-4798-8d01-6e95b77cdd17",
+          "event_id": "18af8dcd-0318-4b0c-aa98-802e5d428bee",
+          "document_id": "5177dee6-1c48-46b0-8ae3-0f0e06004ef7",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.70",
+          "pid": "2e375065-a495-4fba-85a8-a12582c66178",
+          "event_id": "1c8f58d6-30c1-44bf-a2c9-e171a98040c1",
+          "document_id": "86b1a476-adf8-44e6-bd79-91c84479a47e",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12,
+          "qc_note": "R3 appears to be fan result though target product is a vacuum; preserve source evidence and review before production writing."
+        },
+        {
+          "version": "1.0.71",
+          "pid": "b12bd043-e807-4e98-9918-737650942261",
+          "event_id": "36a2053e-6097-4dbd-9a7c-36b31a314d74",
+          "document_id": "f114513a-50a7-416d-ada8-ba63fb69daac",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12,
+          "qc_note": "R2 has very low fetched body/image counts in source evidence; preserve as-is."
+        },
+        {
+          "version": "1.0.72",
+          "pid": "47a107e6-c564-4311-a045-5caa29bd98b5",
+          "event_id": "213b3e73-66ce-41a9-8c1e-7d88a7c71e9c",
+          "document_id": "e65e0438-625d-428c-bf1d-257634029ada",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12,
+          "qc_note": "R1 has very low fetched body/image counts in source evidence; preserve as-is."
+        },
+        {
+          "version": "1.0.73",
+          "pid": "26ea4258-4898-4f5c-80c4-5461cbe92f68",
+          "event_id": "69366091-ba9e-46cc-835f-ba37b47c69e8",
+          "document_id": "1e5a947f-7f47-4ffb-8f54-24f65965dabe",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.74",
+          "pid": "04697227-78f4-4175-8d92-6c85840fae3c",
+          "event_id": "4682c418-5932-4d9e-98c3-0c70cca57dc1",
+          "document_id": "cc26ec4e-2568-4c68-b09d-64cc23071687",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.75",
+          "pid": "413765d6-98b0-442f-b777-b9db583e2e6a",
+          "event_id": "ab8645b5-1b4b-4481-9c55-2b5749bf4f89",
+          "document_id": "a2f5e606-0893-4c7c-b0d6-fb64fa5446d3",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12,
+          "qc_note": "canonical v2 replacement for earlier failed category-batch probe and strengthened solo anchor repairs"
+        }
+      ]
+    },
+    {
+      "category": "living_health",
+      "versions": [
+        "1.0.76",
+        "1.0.85"
+      ],
+      "product_count": 10,
+      "qc": {
+        "representative_pid": "4965c80b-e6e0-43a3-9698-7cb8a341c9da",
+        "direct_project_query": "pass_canonical_v2_retrieved_but_compact_ranked_higher",
+        "workflow_top_k_per_node_40": "pass_canonical_v2_selected",
+        "pack_qa_grade": "B",
+        "pack_qa_score": 85,
+        "release_ready": true,
+        "known_anomalies": [
+          "pid ce4dc698-467a-4251-8020-808c35ae20a2 has an empty R2 keyword field in source evidence.",
+          "pid cfb945c2-85b7-4493-a166-889e5e1b19a9 has very low R3 fetched image/body counts from source evidence.",
+          "pid ccfc8961-ae2f-4959-8e6b-7d0131e891d9 has very low R1 fetched image/body counts from source evidence.",
+          "Several Hetras diffuser variants share overlapping competitor rows; production writing must distinguish exact product name, capacity, and set quantity."
+        ]
+      },
+      "updates": [
+        {
+          "version": "1.0.76",
+          "pid": "4965c80b-e6e0-43a3-9698-7cb8a341c9da",
+          "event_id": "f757a0a9-ba11-4582-ab38-931949b13318",
+          "document_id": "d8b9bc9c-6fde-474f-ab91-7cc1d1af66c8",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.77",
+          "pid": "ce4dc698-467a-4251-8020-808c35ae20a2",
+          "event_id": "5ef265a3-edc8-4ddb-b85e-b535c6cf91ee",
+          "document_id": "efd1c946-d8a3-470f-9153-3ecddbeef2f6",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12,
+          "qc_note": "R2 has an empty keyword field in source evidence; preserve as-is."
+        },
+        {
+          "version": "1.0.78",
+          "pid": "cfb945c2-85b7-4493-a166-889e5e1b19a9",
+          "event_id": "9cc5aadd-f2ac-4eb3-bdf4-9e1d0b4ca0ba",
+          "document_id": "8bb9bc8a-e9f9-49c3-b26d-5cdd258b1f5e",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12,
+          "qc_note": "R3 has very low fetched image/body counts in source evidence; preserve as-is."
+        },
+        {
+          "version": "1.0.79",
+          "pid": "ccfc8961-ae2f-4959-8e6b-7d0131e891d9",
+          "event_id": "52765867-a1b5-4265-ba73-bb769aa177a9",
+          "document_id": "34d9ff12-3cc7-4114-bf0b-0d8034e10324",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12,
+          "qc_note": "R1 has very low fetched image/body counts in source evidence; preserve as-is."
+        },
+        {
+          "version": "1.0.80",
+          "pid": "200dd6ac-292d-494d-8ba5-d2615f2340a2",
+          "event_id": "6b8e9721-ab28-4838-95eb-db03eabde344",
+          "document_id": "188d3c84-c7a8-45e0-813a-5db020210696",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12,
+          "qc_note": "Hetras diffuser variant shares competitor rows with pid 346401a8-e331-4ec2-94ff-b26bce75415f; distinguish exact set quantity."
+        },
+        {
+          "version": "1.0.81",
+          "pid": "346401a8-e331-4ec2-94ff-b26bce75415f",
+          "event_id": "589cb803-53a7-47d4-9b2d-9846aae9e9e3",
+          "document_id": "c64a0ae5-d648-42df-a94f-af4ab0f83e16",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12,
+          "qc_note": "Hetras diffuser variant shares competitor rows with pid 200dd6ac-292d-494d-8ba5-d2615f2340a2; distinguish exact set quantity."
+        },
+        {
+          "version": "1.0.82",
+          "pid": "51bc5500-3b16-46d9-a441-7d45befa621f",
+          "event_id": "a3512a79-c61f-4681-876a-6297b26ce72e",
+          "document_id": "72df585e-7c1b-4041-a4d8-95da6dcddbfe",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12,
+          "qc_note": "Hetras heritage diffuser variant shares competitor rows with pid 915d2afd-c551-42c9-9620-148dd9da10b6; distinguish exact set quantity."
+        },
+        {
+          "version": "1.0.83",
+          "pid": "915d2afd-c551-42c9-9620-148dd9da10b6",
+          "event_id": "6041402f-cb75-4851-b7a6-bb9a8ecdc088",
+          "document_id": "8a7ed695-93aa-44c2-a71c-03921677bf6d",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12,
+          "qc_note": "Hetras heritage diffuser variant shares competitor rows with pid 51bc5500-3b16-46d9-a441-7d45befa621f; distinguish exact set quantity."
+        },
+        {
+          "version": "1.0.84",
+          "pid": "58b6f892-62f2-4fb4-b51c-3f9e8572a53f",
+          "event_id": "4aa0d232-8584-4557-ad66-79531067951d",
+          "document_id": "50adc73c-451e-4c70-b017-2165f290b692",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.85",
+          "pid": "22e1e4d6-c7c7-40b6-a82f-3df8db7a08f9",
+          "event_id": "2b857d29-25b9-4acd-99c7-7ab299685bf5",
+          "document_id": "80171ea0-b277-4b3b-b49e-6886e70f4761",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        }
+      ]
+    },
+    {
+      "category": "sports_leisure",
+      "versions": [
+        "1.0.86",
+        "1.0.95"
+      ],
+      "product_count": 10,
+      "qc": {
+        "representative_pid": "8d6491ab-dcfa-4385-949d-f638a4ff75b7",
+        "direct_project_query": "pass_canonical_v2_retrieved_but_compact_ranked_higher",
+        "workflow_top_k_per_node_40": "pass_canonical_v2_selected",
+        "pack_qa_grade": "B",
+        "pack_qa_score": 85,
+        "release_ready": true,
+        "known_anomalies": [
+          "pid 8d6491ab-dcfa-4385-949d-f638a4ff75b7 has low R2 fetched image count in source evidence.",
+          "pid 62149951-4368-48f6-9841-9d50a9d69a95 has an empty R2 keyword field in source evidence.",
+          "pid e7bb0d5e-1cd8-4d0b-916a-6a38765e278a has low R3 fetched image/body counts from source evidence.",
+          "pid 97241bd4-8d13-4b80-99e2-7ba1946f042b has very low R3 body length from source evidence."
+        ]
+      },
+      "updates": [
+        {
+          "version": "1.0.86",
+          "pid": "8d6491ab-dcfa-4385-949d-f638a4ff75b7",
+          "event_id": "02f5450d-8a6b-407c-ae5c-b9df536d6127",
+          "document_id": "3dbe2e1c-148e-450f-b5bc-36e038b2e3a6",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12,
+          "qc_note": "R2 has low fetched image count in source evidence; preserve as-is."
+        },
+        {
+          "version": "1.0.87",
+          "pid": "62149951-4368-48f6-9841-9d50a9d69a95",
+          "event_id": "699da2ac-c053-4ba2-bd49-0fca16dfb2af",
+          "document_id": "ee86daac-cff6-441f-8749-16c815f8088d",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12,
+          "qc_note": "R2 has an empty keyword field in source evidence; preserve as-is."
+        },
+        {
+          "version": "1.0.88",
+          "pid": "e9090a9c-fbf9-4a60-b1d7-bb3720f2d79b",
+          "event_id": "c27f7d47-8f38-4d60-8cad-a368ba1c4aa0",
+          "document_id": "46001f4f-d563-4f88-a714-667c4a702ca1",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.89",
+          "pid": "e7bb0d5e-1cd8-4d0b-916a-6a38765e278a",
+          "event_id": "87e5158a-0ddd-4f19-9ff3-194a923094a0",
+          "document_id": "7a7e4fc4-cae4-4a74-882a-d54bc28ff6ae",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12,
+          "qc_note": "R3 has low fetched image/body counts in source evidence; preserve as-is."
+        },
+        {
+          "version": "1.0.90",
+          "pid": "08fe079b-c2b3-47ee-b6f2-8e29250c6710",
+          "event_id": "fccd337e-1618-4e56-9132-93aadd2e001f",
+          "document_id": "6aa7d2ea-138e-4ace-b657-28ee31d13327",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.91",
+          "pid": "c2c38311-cc3e-479e-bc63-e4f964f530d6",
+          "event_id": "2b3c2289-e9d8-4e34-bc1f-afc4d1074aa9",
+          "document_id": "ab0f6f35-60f4-4241-802b-fc4044b66b5c",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.92",
+          "pid": "20100449-377f-459b-a603-afa70509043a",
+          "event_id": "60cadb14-d1b8-4cd1-b95b-d654114f917e",
+          "document_id": "1536c778-ee53-48df-b779-855738b8a28d",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.93",
+          "pid": "d67873dd-aefe-4e17-b995-e8b1ade30abe",
+          "event_id": "58c937ca-642a-4349-a595-25ad27d51808",
+          "document_id": "60f771c5-b05d-4567-b0da-9b97493b71d0",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        },
+        {
+          "version": "1.0.94",
+          "pid": "97241bd4-8d13-4b80-99e2-7ba1946f042b",
+          "event_id": "ecdf8b58-bd7d-4200-9dd6-acf7d2576bd0",
+          "document_id": "604b28f6-97b6-4c96-a6a0-70a68a6b3f4a",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12,
+          "qc_note": "R3 has very low body length in source evidence; preserve as-is."
+        },
+        {
+          "version": "1.0.95",
+          "pid": "f96970cf-3210-48b4-bfe8-069610fd3be4",
+          "event_id": "e2aa2aff-9faa-4a4b-b816-1ff699caa08b",
+          "document_id": "5b5d75a7-97ad-4332-bbf9-dad2bbc54e15",
+          "chunks": 1,
+          "nodes": 13,
+          "edges": 12
+        }
+      ]
+    }
+  ]
+}

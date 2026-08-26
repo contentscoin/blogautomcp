@@ -3,19 +3,16 @@
   "version": "1.0.0",
   "description": "네이버 쇼핑 커넥트(브랜드커넥트) 자동 블로그 포스팅 도구",
   "private": true,
-  "author": "Jake Shin <ninano112@gmail.com>",
   "scripts": {
     "dev": "next dev",
     "dev:open": "node scripts/dev-open.mjs",
     "desktop": "electron .",
     "desktop:dev": "cross-env APP_PORT=3000 APP_HOST=127.0.0.1 electron .",
-    "db:template": "cross-env DATABASE_URL=file:./template.db prisma db push --skip-generate --accept-data-loss",
-    "desktop:prepack": "npm run db:template && npm run build",
-    "desktop:pack": "npm run desktop:prepack && electron-builder --publish=never",
-    "desktop:pack:mac": "npm run desktop:prepack && electron-builder --mac --publish=never",
-    "desktop:pack:win": "npm run desktop:prepack && electron-builder --win --publish=never",
-    "desktop:pack:linux": "npm run desktop:prepack && electron-builder --linux --publish=never",
-    "build": "prisma generate && next build --webpack",
+    "desktop:pack": "npm run build && electron-builder --publish=never",
+    "desktop:pack:mac": "npm run build && electron-builder --mac --publish=never",
+    "desktop:pack:win": "npm run build && electron-builder --win --publish=never",
+    "desktop:pack:linux": "npm run build && electron-builder --linux --publish=never",
+    "build": "prisma generate && next build",
     "postinstall": "prisma generate",
     "start": "next start",
     "lint": "eslint",
@@ -24,7 +21,7 @@
     "check:chatgpt": "npx ts-node --project tsconfig.scripts.json scripts/chatgpt-healthcheck.ts",
     "publish": "npx ts-node --project tsconfig.scripts.json scripts/simple-agent.ts",
     "review": "npx ts-node --project tsconfig.scripts.json scripts/review-agent.ts",
-    "topic": "cross-env TOPIC_AGENT_ALLOW_LEGACY_GENERATION=true npx ts-node --project tsconfig.scripts.json scripts/topic-agent.ts",
+    "topic": "npx ts-node --project tsconfig.scripts.json scripts/topic-agent.ts",
     "brandconnect:seasonal": "npx ts-node --project tsconfig.scripts.json scripts/brandconnect-seasonal-register.ts",
     "publish:bulk-schedule": "npx ts-node --project tsconfig.scripts.json scripts/bulk-schedule-publish.ts",
     "db:studio": "npx prisma studio",
@@ -34,6 +31,7 @@
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
     "@prisma/client": "^5.22.0",
+    "date-fns": "^4.1.0",
     "dotenv": "^17.2.3",
     "next": "16.1.3",
     "openai": "^6.16.0",
@@ -43,8 +41,7 @@
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "react": "19.2.3",
     "react-dom": "19.2.3",
-    "ts-node": "^10.9.2",
-    "typescript": "5.9.3",
+    "sharp": "^0.34.5",
     "uuid": "^13.0.0",
     "winston": "^3.19.0"
   },
@@ -55,11 +52,13 @@
     "@types/react-dom": "^19",
     "@types/uuid": "^10.0.0",
     "cross-env": "^7.0.3",
-    "eslint": "^9",
-    "eslint-config-next": "16.1.3",
     "electron": "^34.1.4",
     "electron-builder": "^26.0.9",
-    "tailwindcss": "^4"
+    "eslint": "^9",
+    "eslint-config-next": "16.1.3",
+    "tailwindcss": "^4",
+    "ts-node": "^10.9.2",
+    "typescript": "5.9.3"
   },
   "build": {
     "appId": "com.jakeshin.naver-bc-automation",
@@ -70,23 +69,16 @@
       "buildResources": "resources"
     },
     "files": [
-      "scripts/**/*",
+      "scripts/electron/**/*",
       ".next/**/*",
-      "!.next/cache/**",
-      "!.next/dev/**",
       "public/**/*",
       "next.config.ts",
       "package.json",
       "node_modules/**/*",
-      "node_modules/.prisma/**/*",
       "prisma/**/*",
       "src/**/*",
-      "styles/**/*",
       "next-env.d.ts",
-      "tsconfig.json",
-      "tsconfig.scripts.json",
-      "!**/*.tsbuildinfo",
-      "!**/*.map"
+      "tsconfig.json"
     ],
     "extraMetadata": {
       "main": "scripts/electron/main.cjs"
@@ -95,25 +87,22 @@
       "target": [
         "dmg"
       ],
-      "category": "public.app-category.developer-tools",
-      "signIgnore": [
-        "puppeteer-extra-plugin-stealth/evasions/chrome\\.app"
-      ]
+      "category": "public.app-category.developer-tools"
     },
     "win": {
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
-    "extraResources": [
-      {
-        "from": "node_modules/.prisma",
-        "to": "app/node_modules/.prisma"
-      }
-    ],
     "npmRebuild": false
+  },
+  "optionalDependencies": {
+    "@tailwindcss/oxide-win32-x64-msvc": "^4.1.18",
+    "lightningcss-win32-x64-msvc": "^1.30.2"
   }
 }

@@ -2,9 +2,7 @@
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
 generator client {
-  provider      = "prisma-client-js"
-  // 데스크톱 멀티플랫폼 배포용 쿼리 엔진 타깃(맥 Intel/ARM + 윈도우).
-  binaryTargets = ["native", "darwin", "darwin-arm64", "windows"]
+  provider = "prisma-client-js"
 }
 
 datasource db {
@@ -156,6 +154,9 @@ model Session {
 model BrandLink {
   id          String   @id @default(uuid())
   url         String   // 브랜드커넥트 단축 URL (https://naver.me/xxx)
+  connectKind String   @default("SHOPPING") // SHOPPING, TRAVEL
+  externalItemId String? // 커넥트 공급자의 상품/여행 항목 ID
+  sourceUrl   String?  // 원본 커넥트 항목 URL
 
   // 스크래핑된 상품 정보
   productName String?  // 상품명
@@ -182,6 +183,8 @@ model BrandLink {
   updatedAt   DateTime @updatedAt
 
   @@index([status])
+  @@index([connectKind])
+  @@index([connectKind, externalItemId])
   @@index([createdAt])
 }
 

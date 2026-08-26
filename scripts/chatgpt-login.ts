@@ -241,7 +241,7 @@ async function waitForComposerOrLoginTimeout(page: Page, timeoutMs: number): Pro
 
 async function hasSessionTokenCookie(page: Page): Promise<boolean> {
   const cookies = await page.context().cookies("https://chatgpt.com");
-  return cookies.some((cookie) => cookie.name === "__Secure-next-auth.session-token");
+  return cookies.some((cookie) => cookie.name.startsWith("__Secure-next-auth.session-token"));
 }
 
 async function verifyBaseChatGPTSession(page: Page): Promise<void> {

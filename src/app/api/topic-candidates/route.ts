@@ -186,8 +186,9 @@ function summarizeCodexFailure(result: CodexRunResult | null, fallbackMessage: s
 
 function runCodex(prompt: string, outputFile: string): Promise<CodexRunResult> {
   return new Promise((resolve) => {
-    // PATH 기반 'codex' 기본값(이식성). 필요 시 CODEX_BIN으로 절대경로 지정.
-    const codexBin = process.env.CODEX_BIN || "codex";
+    const codexBin =
+      process.env.CODEX_BIN ||
+      "/Users/jakeshin/.nvm/versions/node/v20.19.5/bin/codex";
 
     let stdout = "";
     let stderr = "";
