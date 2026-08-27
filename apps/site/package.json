@@ -1,0 +1,30 @@
+{
+  "name": "@blogautomcp/site",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3100",
+    "build": "prisma generate --schema prisma/schema.prisma && next build",
+    "start": "next start -p 3100",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/lib/crypto.test.ts src/lib/http.test.ts src/lib/mcp-connection.test.ts",
+    "db:generate": "prisma generate --schema prisma/schema.prisma",
+    "db:push": "prisma db push --schema prisma/schema.prisma",
+    "db:migrate": "prisma migrate deploy --schema prisma/schema.prisma"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "jose": "^6.1.0",
+    "next": "^16.3.3",
+    "react": "19.2.3",
+    "react-dom": "19.2.3"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.30",
+    "@types/react": "19.2.10",
+    "@types/react-dom": "^19",
+    "prisma": "^5.22.0",
+    "tsx": "^4.23.12",
+    "typescript": "5.9.3"
+  }
+}

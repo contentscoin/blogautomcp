@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
+import { requireRemoteActivation } from "@/lib/api-auth";
 
 export async function GET(request: NextRequest) {
+    const activationError = requireRemoteActivation(request);
+    if (activationError) return activationError;
     try {
         const { searchParams } = new URL(request.url);
 

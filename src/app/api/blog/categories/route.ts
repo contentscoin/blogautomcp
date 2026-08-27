@@ -1,6 +1,7 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
+import { requireRemoteActivation } from "@/lib/api-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -144,7 +145,9 @@ function flattenCategories(rawCategories: RawCategory[]): CategoryItem[] {
   return ordered;
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const activationError = requireRemoteActivation(request);
+  if (activationError) return activationError;
   try {
     const blogId = process.env.NAVER_BLOG_ID?.trim();
     if (!blogId) {
@@ -154,7 +157,8 @@ export async function GET() {
       );
     }
 
-    const storageStatePath = path.join(process.cwd(), "playwright", "storage", "naver-session.json");
+    const storageDir = process.env.SESSION_STORAGE_DIR?.trim();
+    const storageStatePath = path.join(storageDir || path.join(process.cwd(), "playwright", "storage"), "naver-session.json");
     const cookieHeader = buildCookieHeaderForHost(storageStatePath, "blog.naver.com");
     const endpoint = `https://blog.naver.com/PostWriteFormManagerOptions.naver?blogId=${encodeURIComponent(
       blogId,

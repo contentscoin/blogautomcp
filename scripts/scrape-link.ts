@@ -8,7 +8,6 @@ import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { PrismaClient } from "@prisma/client";
 import type { BrowserContextOptions, Page } from "playwright";
-import * as path from "path";
 import * as fs from "fs";
 import {
     isCandidateProductImageUrl,
@@ -18,12 +17,13 @@ import {
     prioritizeImageCandidates,
     type ProductImageCandidate,
 } from "./lib/product-image-selection";
+import { getNaverSessionFile } from "./lib/app-paths";
 
 // Stealth 플러그인 적용
 chromium.use(StealthPlugin());
 
 const prisma = new PrismaClient();
-const SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "naver-session.json");
+const SESSION_FILE = getNaverSessionFile();
 
 function normalizeText(text: string): string {
     return text.replace(/\s+/g, " ").trim();
@@ -121,6 +121,7 @@ async function scrapeProductInfo(url: string, headless: boolean) {
     console.log(`\n🔍 스크래핑 시작: ${url} (headless=${headless})`);
 
     const browser = await chromium.launch({
+        channel: process.env.BROWSER_CHANNEL?.trim() || undefined,
         headless,
         args: [
             '--disable-blink-features=AutomationControlled',

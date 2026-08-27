@@ -5,25 +5,28 @@
  * 브라우저에서 로그인 후 브라우저를 닫으면 자동으로 세션이 저장됩니다.
  */
 
-import { chromium } from "playwright-extra";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
+import { chromium, type BrowserContext } from "playwright";
 import * as fs from "fs";
 import * as path from "path";
 import { validateNaverPublishingSession } from "../src/lib/naver-session";
+import { getSessionStorageDir } from "./lib/app-paths";
+import {
+  replaceSessionFileWithRollback,
+  waitForNaverAuthentication,
+} from "./lib/naver-login-flow";
 
-// Stealth 플러그인 적용 (봇 감지 우회)
-chromium.use(StealthPlugin());
-
-const STORAGE_PATH = path.join(process.cwd(), "playwright", "storage");
+const STORAGE_PATH = getSessionStorageDir();
 const SESSION_FILE = path.join(STORAGE_PATH, "naver-session.json");
 const TEMP_SESSION_FILE = path.join(STORAGE_PATH, `naver-session.pending-${process.pid}.json`);
+const LOGIN_PROFILE_PATH = path.join(STORAGE_PATH, "naver-login-profile");
+const BROWSER_CHANNEL = process.env.BROWSER_CHANNEL?.trim() || "chrome";
+const FORCE_LOGIN = process.argv.includes("--force-login");
 
 // 폴더가 없으면 생성
 if (!fs.existsSync(STORAGE_PATH)) {
   fs.mkdirSync(STORAGE_PATH, { recursive: true });
 }
 
-// 다른 접근 방식: 페이지 이벤트 감지
 async function mainV2() {
   console.log("=".repeat(50));
   console.log("네이버 블로그 자동화 - 로그인 설정");
@@ -35,92 +38,94 @@ async function mainV2() {
   console.log("   3. 세션 저장 후 브라우저가 자동으로 닫힙니다");
   console.log("");
 
-  const browser = await chromium.launch({
-    headless: false,
-    slowMo: 50,
-    args: [
-      '--disable-blink-features=AutomationControlled',
-    ],
-  });
+  let context: BrowserContext | null = null;
+  try {
+    // 수동 로그인에는 페이지 동작을 바꾸는 스텔스 플러그인과 오래된 고정 UA를 쓰지 않습니다.
+    // 실제 설치된 Chrome과 전용 영구 프로필을 사용해 로그인 화면의 반복 초기화를 피합니다.
+    context = await chromium.launchPersistentContext(LOGIN_PROFILE_PATH, {
+      channel: BROWSER_CHANNEL,
+      headless: false,
+      viewport: null,
+      locale: "ko-KR",
+      ignoreDefaultArgs: ["--enable-automation"],
+      args: ["--disable-blink-features=AutomationControlled"],
+    });
 
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 800 },
-    locale: "ko-KR",
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  });
+    const existingPages = context.pages();
+    const page = existingPages[0] ?? (await context.newPage());
+    await Promise.all(existingPages.slice(1).map((extraPage) => extraPage.close().catch(() => {})));
+    page.on("crash", () => console.error("❌ 네이버 로그인 페이지가 비정상 종료되었습니다."));
 
-  const page = await context.newPage();
-  
-  // 봇 감지 우회 스크립트 (문자열로 전달)
-  await page.addInitScript(`
-    Object.defineProperty(navigator, 'webdriver', { get: () => false });
-  `);
-  
-  // 네이버 로그인 페이지로 이동
-  await page.goto("https://nid.naver.com/nidlogin.login");
-
-  console.log("✅ 브라우저가 열렸습니다.");
-  console.log("📝 네이버에 로그인해주세요...");
-  console.log("   (로그인 완료 감지 중...)");
-  console.log("");
-
-  // URL만으로 성공을 판단하지 않고, 임시 세션의 실제 글쓰기 권한을 반복 확인합니다.
-  let isLoggedIn = false;
-  let checkCount = 0;
-  const maxChecks = 300; // 최대 5분 대기 (1초 * 300)
-
-  while (!isLoggedIn && checkCount < maxChecks) {
-    await new Promise((r) => setTimeout(r, 1000));
-    checkCount++;
-
-    try {
-      await context.storageState({ path: TEMP_SESSION_FILE });
-      const validation = await validateNaverPublishingSession(
-        TEMP_SESSION_FILE,
-        process.env.NAVER_BLOG_ID?.trim() || "",
-        5_000,
-      );
-      if (validation.valid) {
-        isLoggedIn = true;
-        console.log("🔍 로그인 및 블로그 글쓰기 권한이 확인되었습니다.");
-      }
-    } catch {
-      // 페이지가 닫혔을 수 있음
-      break;
+    if (FORCE_LOGIN) {
+      await context.clearCookies();
+      console.log("🔄 기존 네이버 브라우저 인증을 비우고 재로그인을 시작합니다.");
     }
-  }
 
-  if (isLoggedIn) {
-    // 같은 디렉터리의 임시 파일을 검증한 뒤 원자적으로 교체합니다.
-    await context.storageState({ path: TEMP_SESSION_FILE });
-    const validation = await validateNaverPublishingSession(
-      TEMP_SESSION_FILE,
-      process.env.NAVER_BLOG_ID?.trim() || "",
-    );
-    if (!validation.valid) {
-      console.error(`❌ ${validation.error || "최종 권한 확인 실패"}`);
-      if (fs.existsSync(TEMP_SESSION_FILE)) fs.unlinkSync(TEMP_SESSION_FILE);
-      await browser.close();
+    await page.goto("https://nid.naver.com/nidlogin.login", {
+      waitUntil: "domcontentloaded",
+      timeout: 45_000,
+    });
+
+    console.log("✅ 브라우저가 열렸습니다.");
+    console.log("📝 네이버에 로그인해주세요...");
+    console.log("   (로그인 완료 감지 중...)");
+    console.log("");
+
+    const result = await waitForNaverAuthentication(context, {
+      sessionPath: TEMP_SESSION_FILE,
+      timeoutMs: 8 * 60_000,
+    });
+
+    if (result.status === "closed") {
+      console.error("❌ 로그인 완료 전에 브라우저 창이 닫혔습니다.");
       process.exitCode = 1;
       return;
     }
-    fs.renameSync(TEMP_SESSION_FILE, SESSION_FILE);
-    console.log("\n✅ 검증된 세션이 저장되었습니다.");
-    console.log("🎉 이제 자동화가 이 세션을 사용합니다.");
-  } else {
-    console.error("⏱️ 제한 시간 안에 로그인 및 글쓰기 권한을 확인하지 못했습니다.");
+    if (result.status === "timeout") {
+      console.error("⏱️ 8분 안에 네이버 로그인을 확인하지 못했습니다.");
+      process.exitCode = 1;
+      return;
+    }
+
+    console.log("🔍 네이버 계정 로그인이 확인되었습니다.");
+    const blogId = process.env.NAVER_BLOG_ID?.trim();
+    if (blogId) {
+      const validation = await validateNaverPublishingSession(TEMP_SESSION_FILE, blogId);
+      if (validation.valid) {
+        console.log("✅ 네이버 블로그 글쓰기 권한도 확인되었습니다.");
+      } else {
+        console.warn(`⚠️ 로그인은 저장하지만 블로그 권한 확인은 완료되지 않았습니다: ${validation.error || "확인 실패"}`);
+      }
+    } else {
+      console.warn("⚠️ 네이버 로그인은 저장합니다. 블로그 ID는 프로그램 설정에서 나중에 입력할 수 있습니다.");
+    }
+
+    replaceSessionFileWithRollback(TEMP_SESSION_FILE, SESSION_FILE);
+    console.log("\n✅ 네이버 로그인 세션이 저장되었습니다.");
+    console.log("🎉 이제 프로그램 설정에서 블로그 ID를 입력하면 발행 권한을 확인합니다.");
+    process.exitCode = 0;
+  } finally {
+    await context?.close().catch(() => {});
     if (fs.existsSync(TEMP_SESSION_FILE)) fs.unlinkSync(TEMP_SESSION_FILE);
-    await browser.close();
-    process.exitCode = 1;
-    return;
   }
 
-  await browser.close();
   console.log("\n프로그램을 종료합니다.");
-  process.exitCode = 0;
 }
 
-mainV2().catch((error) => {
+async function checkRuntime() {
+  const browser = await chromium.launch({ channel: BROWSER_CHANNEL, headless: true });
+  await browser.close();
+  fs.accessSync(STORAGE_PATH, fs.constants.R_OK | fs.constants.W_OK);
+  console.log(JSON.stringify({
+    ok: true,
+    browserChannel: BROWSER_CHANNEL,
+    sessionStorageDir: STORAGE_PATH,
+  }));
+}
+
+const entry = process.argv.includes("--check-runtime") ? checkRuntime() : mainV2();
+
+entry.catch((error) => {
   console.error("오류 발생:", error);
   if (fs.existsSync(TEMP_SESSION_FILE)) fs.unlinkSync(TEMP_SESSION_FILE);
   process.exitCode = 1;

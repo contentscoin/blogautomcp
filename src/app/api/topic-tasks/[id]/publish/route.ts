@@ -4,6 +4,7 @@ import { spawn, type ChildProcess } from "child_process";
 import path from "path";
 import fs from "fs";
 import { requireAdminApiKey } from "@/lib/api-auth";
+import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 import { taskHasPreparedContent } from "@/services/topic-task-pipeline";
 import { getTopicTaskPublishReadiness } from "@/lib/topic-task-publish-readiness";
 import { getTopicTaskContentReadiness } from "@/lib/topic-task-content-readiness";
@@ -122,6 +123,11 @@ export async function POST(
     const authError = requireAdminApiKey(request);
     if (authError) {
       return authError;
+    }
+
+    const updateError = requireNoPendingDesktopUpdate();
+    if (updateError) {
+      return updateError;
     }
 
     let body: PublishRequestBody;
@@ -272,6 +278,7 @@ export async function POST(
         detached: true,
         stdio: ["ignore", logFd, logFd],
         shell: false,
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
       });
     } finally {
       fs.closeSync(logFd);

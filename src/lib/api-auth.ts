@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
+import { hasRemoteActivation } from "@/lib/remote-activation";
 
 const LOCAL_ALIASES = new Set(["localhost", "127.0.0.1", "::1", "0.0.0.0"]);
 
@@ -101,6 +102,9 @@ function unauthorized(message: string) {
 }
 
 export function requireAdminApiKey(request: NextRequest): NextResponse | null {
+  const activationError = requireRemoteActivation(request);
+  if (activationError) return activationError;
+
   if (isDevelopmentLocalRequest(request)) {
     return null;
   }
@@ -168,6 +172,9 @@ export function requireAdminApiKey(request: NextRequest): NextResponse | null {
 }
 
 export function requireCronSecret(request: NextRequest): NextResponse | null {
+  const activationError = requireRemoteActivation(request);
+  if (activationError) return activationError;
+
   const configuredSecret = process.env.CRON_SECRET?.trim();
   if (!configuredSecret) {
     return null;
@@ -185,4 +192,15 @@ export function requireCronSecret(request: NextRequest): NextResponse | null {
   }
 
   return unauthorized("크론 인증이 필요합니다. x-cron-secret 또는 Authorization 헤더를 확인하세요.");
+}
+
+export function requireRemoteActivation(request: NextRequest): NextResponse | null {
+  if (request.nextUrl.pathname === "/api/remote-agent" || request.nextUrl.pathname.startsWith("/api/remote-agent/")) {
+    return null;
+  }
+  if (hasRemoteActivation()) return null;
+  return NextResponse.json(
+    { success: false, code: "MCP_ACTIVATION_REQUIRED", error: "사이트에서 발급한 MCP 주소로 이 PC를 먼저 연결하세요." },
+    { status: 428 },
+  );
 }

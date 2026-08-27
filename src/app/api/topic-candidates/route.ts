@@ -4,6 +4,8 @@ import { readFile, unlink } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { requireAdminApiKey } from "@/lib/api-auth";
+import { beginDesktopActivity } from "@/lib/desktop-activity";
+import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 
 const CATEGORIES: Record<string, string> = {
   tech: "기술/IT",
@@ -186,6 +188,7 @@ function summarizeCodexFailure(result: CodexRunResult | null, fallbackMessage: s
 
 function runCodex(prompt: string, outputFile: string): Promise<CodexRunResult> {
   return new Promise((resolve) => {
+    const finishActivity = beginDesktopActivity("topic-candidates");
     const codexBin =
       process.env.CODEX_BIN ||
       "/Users/jakeshin/.nvm/versions/node/v20.19.5/bin/codex";
@@ -198,6 +201,7 @@ function runCodex(prompt: string, outputFile: string): Promise<CodexRunResult> {
       if (settled) return;
       settled = true;
       clearTimeout(timeoutHandle);
+      finishActivity();
       resolve(result);
     };
     const proc = spawn(
@@ -244,6 +248,8 @@ function runCodex(prompt: string, outputFile: string): Promise<CodexRunResult> {
 export async function POST(req: NextRequest) {
   const authError = requireAdminApiKey(req);
   if (authError) return authError;
+  const updateError = requireNoPendingDesktopUpdate();
+  if (updateError) return updateError;
 
   const body = await req.json();
   const { category, keyword } = body as { category: string; keyword: string };

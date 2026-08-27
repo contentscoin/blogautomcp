@@ -73,7 +73,8 @@ function resolveStorageStatePath(): string {
       ? configured
       : path.join(process.cwd(), configured);
   }
-  return path.join(process.cwd(), "playwright", "storage", "naver-session.json");
+  const storageDir = process.env.SESSION_STORAGE_DIR?.trim();
+  return path.join(storageDir || path.join(process.cwd(), "playwright", "storage"), "naver-session.json");
 }
 
 function isDomainMatch(hostname: string, cookieDomain: string): boolean {
@@ -297,7 +298,10 @@ async function collectPromotionTextsFromRenderedPage(
   let browser: Browser | null = null;
   try {
     const { chromium } = await import("playwright");
-    browser = await chromium.launch({ headless: true });
+    browser = await chromium.launch({
+      channel: process.env.BROWSER_CHANNEL?.trim() || undefined,
+      headless: true,
+    });
     const context = await browser.newContext({
       storageState: storageStatePath,
       viewport: { width: 1440, height: 1000 },

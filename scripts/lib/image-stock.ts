@@ -71,7 +71,10 @@ const usedImageUrls = new Set<string>();
  */
 async function scrapeUnsplash(keyword: string): Promise<string | null> {
   log.info(`Unsplash 스크래핑 검색 시도: ${keyword}`);
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({
+    channel: process.env.BROWSER_CHANNEL?.trim() || undefined,
+    headless: true,
+  });
   const context = await browser.newContext({
     viewport: { width: 1280, height: 800 },
     userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'

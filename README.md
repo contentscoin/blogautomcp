@@ -2,6 +2,19 @@
 
 네이버 쇼핑 커넥트(브랜드커넥트) 상품 리뷰를 자동으로 블로그에 포스팅하는 도구입니다.
 
+## 🌐 BlogAutoMCP 사이트·MCP 구조
+
+이 저장소에는 기존 로컬 자동화와 함께 `apps/site` 서버리스 사이트가 포함되어 있습니다.
+
+- 이메일 확인 없는 가입 신청 → 관리자 `hiway@kakao.com` 승인
+- 한 번만 표시되는 사용자별 MCP URL과 재발급 시 기존 연결 폐기
+- 사용자당 활성 PC 한 대, 새 PC 인증 시 기존 PC 토큰 폐기
+- ChatGPT OAuth + MCP 도구 → PostgreSQL 작업 큐 → 로컬 Electron 앱 실행
+- 쇼핑커넥트 경로 연결, 여행커넥트 실계약 캡처와 fail-closed 출시 게이트
+- Windows 로그인 시 숨김 자동실행, 창을 닫아도 트레이에 상주하는 로컬 에이전트
+
+별도 상주 백엔드 서버는 운영하지 않습니다. 사이트의 Next.js 서버리스 함수와 관리형 PostgreSQL만 필요합니다. 구체적인 현재 구현·미검증 범위는 [구현 기준서](docs/mcp-saas-local-agent-product-plan.md), 사이트 배포는 [사이트 README](apps/site/README.md)를 확인하세요.
+
 ## ✨ 주요 기능
 
 - 🔗 **상품 URL만 입력하면 끝!** - 브랜드커넥트 링크만 넣으면 자동으로 처리
@@ -34,7 +47,7 @@
 
 ## 📋 사전 준비물
 
-### 1. Node.js 설치 (v18 이상)
+### 1. Node.js 설치 (v20.9 이상)
 
 1. [Node.js 공식 사이트](https://nodejs.org/ko) 접속
 2. **LTS** 버전 다운로드 (왼쪽 초록색 버튼)
@@ -43,7 +56,7 @@
 설치 확인:
 ```bash
 node --version
-# v18.x.x 이상이 나오면 성공!
+# v20.9 이상이 나오면 성공!
 ```
 
 ### 2. AI 설정
@@ -54,9 +67,10 @@ node --version
 3. **"Create new secret key"** 클릭
 4. 생성된 키 복사 (sk-xxx... 형태)
 
-**ChatGPT 구독/로그인 세션 사용 시**
-기본 발행 흐름은 ChatGPT 브라우저를 열지 않습니다.
-정말 브라우저 ChatGPT를 쓰고 싶을 때만 `BROWSER_GPT_MODE=true`, `ALLOW_CHATGPT_BROWSER_MODE=true`로 설정하고 `npm run login:chatgpt`로 ChatGPT 로그인을 저장합니다.
+**ChatGPT와 MCP로 연결할 때**
+로컬 프로그램에서는 ChatGPT에 로그인하지 않습니다. 사이트에서 발급받은 MCP 주소로
+PC를 먼저 활성화하고, 같은 주소를 ChatGPT 개발자 모드에 별도로 등록합니다.
+글 생성에 OpenAI API를 선택했다면 ChatGPT 구독과 별개인 API 키가 필요합니다.
 
 > ⚠️ API 키는 한 번만 보여주므로 반드시 복사해서 안전한 곳에 저장하세요!
 
@@ -72,8 +86,8 @@ node --version
 
 **방법 A: Git 사용 (권장)**
 ```bash
-git clone https://github.com/Daewooki/naver-bc-automation.git
-cd naver-bc-automation
+git clone https://github.com/contentscoin/blogautomcp.git
+cd blogautomcp
 ```
 
 **방법 B: ZIP 다운로드**
@@ -126,7 +140,7 @@ AI_PROVIDER=openai
 # OpenAI 사용 시 (AI_PROVIDER=openai)
 OPENAI_API_KEY=sk-여기에_발급받은_키_붙여넣기
 
-# 기본 상품 발행은 ChatGPT 브라우저를 열지 않음
+# 설치형 앱은 로컬 ChatGPT 로그인을 허용하지 않음
 BROWSER_GPT_MODE=false
 ALLOW_CHATGPT_BROWSER_MODE=false
 CHATGPT_USE_CUSTOM_GPTS=false
@@ -183,7 +197,14 @@ curl http://localhost:3001/api/schedule/cron \
 
 ## 📖 사용 방법
 
-### Step 1: 네이버 로그인
+### Step 1: MCP로 PC 활성화
+
+앱을 실행한 뒤 사이트에서 발급받은 MCP 주소를 첫 화면에 입력합니다. 연결되기 전에는
+대시보드와 자동화 API가 잠겨 있습니다. 같은 주소는 ChatGPT에도 별도로 등록합니다.
+
+### Step 1-2: 네이버 로그인
+
+활성화 후 설정 화면에서 **네이버 로그인**을 누릅니다. 개발 환경에서는 아래 명령도 사용할 수 있습니다.
 
 ```bash
 npm run login
@@ -195,33 +216,17 @@ npm run login
 
 > 💡 세션은 보통 7~30일간 유지됩니다. 발행 실패 시 다시 로그인하세요.
 
-### Step 1-2: ChatGPT 로그인 (선택, Browser ChatGPT 모드일 때만)
+### 로컬 AI 작성 설정
 
-기본 상품 발행에서는 필요하지 않습니다.
-`BROWSER_GPT_MODE=true`와 `ALLOW_CHATGPT_BROWSER_MODE=true`를 둘 다 켜는 경우에만 필요합니다.
-
-```bash
-npm run login:chatgpt
-```
-
-- 브라우저에서 ChatGPT 로그인 후 `Enter`를 누르면 세션이 저장됩니다.
-- 기본 상품 발행값은 ChatGPT 브라우저 미사용입니다. OpenAI/Gemini API가 실패하거나 키가 없으면 상품 정보 기반 로컬 초안으로 대체합니다.
-- Browser ChatGPT를 명시적으로 켜면 Custom GPTs가 아니라 일반 ChatGPT 화면에 전체 프롬프트를 한 번에 넣는 direct 방식입니다.
+- 설치형 앱은 ChatGPT 브라우저 로그인과 Custom GPT 조작을 강제로 끕니다.
+- OpenAI/Gemini API가 실패하거나 키가 없으면 상품 정보 기반 로컬 초안으로 대체합니다.
 - 사람형 모바일 문체는 기본으로 켜져 있습니다 (`BLOG_HUMANIZE_MOBILE_STYLE=true`).
 - 문장은 짧게 끊고, AI처럼 보이는 반복 표현/과한 광고 문구/허위 체험 단정을 줄입니다.
-- Custom GPTs를 꼭 써야 할 때만 `CHATGPT_USE_CUSTOM_GPTS=true`로 바꾸세요.
-- 발행 시 ChatGPT는 기본적으로 새 대화로 시작합니다 (`CHATGPT_FORCE_NEW_CHAT=true`).
-- temporary chat 모드가 필요하면 `CHATGPT_USE_TEMPORARY_CHAT=true`를 설정하세요.
-- GPT 가이드 상호작용 모드(`CHATGPT_GUIDED_MODE=true`)에서는 질문형 흐름이 열렸을 때 자동으로 답변하고, 최종 구조화 응답이 올 때까지 대화를 이어갑니다.
-- direct 방식에서는 상품 정보와 작성 규칙을 한 번에 넣고 JSON 결과를 받습니다.
 - 상품 리뷰 글은 발행 전 상품명 반영, 본문 분량, 고지문, URL 직접 노출, 허위 체험 단정, 수수료율 노출, 판매페이지 대표 이미지 확보 여부를 검사합니다.
   필요 시 `BRANDLINK_CONTENT_READINESS_ENABLED=false`로 게이트를 끄거나 `BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE=false`로 대표 이미지 필수 조건만 완화할 수 있습니다.
-- 주제글 AI 이미지 생성은 기본적으로 ChatGPT 로그인/구독 세션을 사용합니다. API 방식이 필요할 때만 `TOPIC_PIPELINE_DAEDAL_ENABLED=true`와 `OPENAI_API_KEY`를 설정하면 `daedal` CLI(`gpt-image-2`)를 먼저 사용하고 실패 시 기존 ChatGPT/TopicCraft 경로로 폴백합니다.
+- 주제글 AI 이미지 생성은 API 방식(`TOPIC_PIPELINE_DAEDAL_ENABLED=true`와 `OPENAI_API_KEY`)이나 준비된 이미지 자산을 사용합니다.
 - 주제글 prepare 단계는 `TOPIC_AUTO_RESEARCH_ENABLED=true`일 때 입력 주제/키워드로 참고 URL을 자동 탐색합니다. `NAVER_SEARCH_CLIENT_ID`/`NAVER_SEARCH_CLIENT_SECRET`이 있으면 네이버 검색 OpenAPI를 먼저 쓰고, 없으면 DuckDuckGo HTML 검색을 best-effort로 사용합니다.
 - 준비된 주제글은 발행 전에 도입부, 하이라이트, 섹션 구조, 본문 자연스러움, 이미지 확보 상태와 함께 SEO 키워드 커버리지를 검사합니다. 명시 키워드가 본문/제목/태그에 거의 반영되지 않으면 재준비가 필요합니다.
-- 필요할 때만 기본 ChatGPT로 폴백하세요 (`CHATGPT_FALLBACK_TO_BASE=true`, 기본값 false).
-- GPT 응답 대기는 고정 시간이 아니라 진행 신호(생성중/텍스트 증가) 기반으로 유지됩니다.
-  필요 시 `.env`의 `CHATGPT_RESPONSE_IDLE_TIMEOUT_MS`, `CHATGPT_RESPONSE_MAX_TIMEOUT_MS`로 조정하세요.
 
 ### Step 2: 웹 대시보드 실행
 
@@ -237,7 +242,7 @@ npm run dev
 npm run desktop
 ```
 
-- 앱 실행 시 Next.js 서버를 자동으로 시작(또는 3000 포트 사용 중이면 기존 서버 재사용)
+- 앱 실행 시 데스크톱 전용 로컬 포트 `43127`에서 Next.js 서버를 자동으로 시작
 - macOS: `BrandConnect Automation.app` 실행
 - Windows: 설치 후 `.exe` 실행
 
@@ -269,7 +274,7 @@ npm run desktop:pack       # 현재 OS 패키지 모두 생성
 발행 버튼을 누르면:
 - 브라우저가 자동으로 열림
 - 상품 이미지 스크래핑
-- GPT가 리뷰 글 작성
+- 설정된 AI API 또는 로컬 생성기가 리뷰 글 작성
 - 이미지 업로드 + 글 작성
 - 자동 발행 완료!
 
@@ -280,7 +285,6 @@ npm run desktop:pack       # 현재 OS 패키지 모두 생성
 | 명령어 | 설명 |
 |--------|------|
 | `npm run login` | 네이버 로그인 (세션 저장) |
-| `npm run login:chatgpt` | ChatGPT 로그인 (Browser ChatGPT 모드용 세션 저장) |
 | `npm run dev` | 웹 대시보드 실행 (localhost:3000) |
 | `npm run brandconnect:seasonal` | 시즌·히트·인기·판매 신호 우선 상품 자동 등록 |
 | `npm run publish:bulk-schedule` | READY 브랜드커넥트 링크 예약발행 일괄 실행 |
@@ -315,14 +319,9 @@ npm run login
 ```
 다시 로그인 후 발행해보세요.
 
-### Q: "ChatGPT 로그인했는데도 Custom GPT 접근 오류가 나요"
-**A:** 현재 로그인 계정이 GPT 링크 소유/공유 계정과 다를 때 발생합니다.
-
-```bash
-npm run login:chatgpt
-```
-
-실행 후 같은 계정으로 로그인했는지 확인하세요. 필요하면 `.env`의 `CHATGPT_GPT_URL_DRAFT`, `CHATGPT_GPT_URL_POLISH` 링크 권한도 점검하세요.
+### Q: "ChatGPT에 연결했는데 로컬 PC가 움직이지 않아요"
+**A:** ChatGPT 로그인만으로는 로컬 프로그램이 연결되지 않습니다. 사이트에서 발급한 같은
+MCP 주소가 로컬 프로그램과 ChatGPT 양쪽에 등록되어 있는지, 로컬 프로그램이 실행 중인지 확인하세요.
 
 ### Q: "OpenAI API 오류가 나요"
 **A:** 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 
 interface SessionData {
   hasSession: boolean;
@@ -13,8 +13,26 @@ interface SessionData {
 
 interface SessionApiData extends SessionData {
   naver: SessionData;
-  chatgpt: SessionData;
 }
+
+interface DesktopUpdateState {
+  currentVersion: string | null;
+  status: string;
+  version: string | null;
+  progress: number;
+  error: string | null;
+  installPending: boolean;
+}
+
+interface ActivationState {
+  configured: boolean;
+  siteUrl: string | null;
+  deviceId: string | null;
+}
+
+type ControlAction = "restart" | "update" | null;
+
+const wait = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 
 function getStatusText(value: SessionData | undefined): string {
   if (!value?.hasSession) return "로그인 필요";
@@ -28,190 +46,399 @@ function getStatusDotClass(value: SessionData | undefined): string {
   return "bg-amber-500";
 }
 
+function updateStatusText(update: DesktopUpdateState | null): string {
+  if (!update) return "업데이트 상태 확인 중";
+  if (update.status === "current") return "최신 버전입니다";
+  if (update.status === "checking" || update.status === "starting") return "새 버전 확인 중";
+  if (update.status === "available") return `v${update.version} 다운로드 준비 중`;
+  if (update.status === "downloading") return `v${update.version} 다운로드 ${Math.round(update.progress)}%`;
+  if (update.status === "downloaded" || update.status === "waiting-for-idle") return `v${update.version} 설치 대기 · 작업 종료 후 자동 재시작`;
+  if (update.status === "installing") return `v${update.version} 자동 설치 중`;
+  if (update.status === "waiting-for-activation") return "MCP 주소 연결 후 자동 업데이트가 시작됩니다";
+  if (update.status === "disabled") return "개발 환경에서는 자동 업데이트가 꺼져 있습니다";
+  if (update.status === "error" || update.status === "install-error") return "중앙 업데이트 연결을 다시 시도해야 합니다";
+  return "중앙 업데이트 대기 중";
+}
+
+function updateStatusDotClass(update: DesktopUpdateState | null): string {
+  if (!update) return "bg-slate-400";
+  if (update.status === "error" || update.status === "install-error") return "bg-red-500";
+  if (["available", "downloading", "downloaded", "waiting-for-idle", "installing"].includes(update.status)) return "bg-sky-500";
+  if (update.status === "current") return "bg-emerald-500";
+  return "bg-amber-500";
+}
+
 export default function SessionStatus() {
   const [session, setSession] = useState<SessionApiData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [loggingIn, setLoggingIn] = useState<string | null>(null);
+  const [loggingIn, setLoggingIn] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [update, setUpdate] = useState<DesktopUpdateState | null>(null);
+  const [activation, setActivation] = useState<ActivationState | null>(null);
+  const [controlBusy, setControlBusy] = useState<ControlAction>(null);
+  const [mcpOpen, setMcpOpen] = useState(false);
+  const [mcpUrl, setMcpUrl] = useState("");
+  const [deviceName, setDeviceName] = useState("");
+  const [reconnecting, setReconnecting] = useState(false);
+  const [blogId, setBlogId] = useState("");
+  const [savingBlogId, setSavingBlogId] = useState(false);
 
-  const fetchSession = async () => {
+  const fetchSession = useCallback(async () => {
     try {
-      setLoading(true);
-      const res = await fetch("/api/session", { cache: "no-store" });
-      const data = await res.json();
-      if (data.success) {
-        setSession(data.data);
-      }
+      const response = await fetch("/api/session", { cache: "no-store" });
+      const payload = await response.json();
+      if (response.ok && payload.success) setSession(payload.data);
     } catch (error) {
       console.error("세션 조회 실패:", error);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const startLogin = async (provider: "naver" | "chatgpt") => {
+  const fetchUpdate = useCallback(async () => {
     try {
-      setLoggingIn(provider);
-      setNotice(null);
-      const res = await fetch("/api/session/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setNotice(data.message || "로그인 창을 열었습니다. 로그인 후 잠시 뒤 새로고침으로 상태를 확인하세요.");
-        const jobId = data.data?.jobId as string | undefined;
-        if (jobId) void pollLoginJob(jobId, provider);
-      } else {
-        setNotice(`오류: ${data.error || "로그인 실행에 실패했습니다."}`);
-      }
-    } catch (error) {
-      console.error("로그인 실행 실패:", error);
-      setNotice("로그인 실행 중 오류가 발생했습니다.");
-    } finally {
-      setLoggingIn(null);
+      const response = await fetch("/api/system/update-readiness", { cache: "no-store" });
+      const payload = await response.json();
+      if (response.ok && payload.success) setUpdate(payload.data.update);
+    } catch {
+      // 주기 확인에서 다시 시도합니다.
     }
-  };
+  }, []);
 
-  async function pollLoginJob(jobId: string, provider: "naver" | "chatgpt") {
+  const fetchActivation = useCallback(async () => {
+    try {
+      const response = await fetch("/api/remote-agent", { cache: "no-store" });
+      const payload = await response.json();
+      if (response.ok && payload.success) setActivation(payload.data);
+    } catch {
+      // 활성화 게이트에서도 상태를 확인하므로 여기서는 화면을 유지합니다.
+    }
+  }, []);
+
+  const fetchBlogId = useCallback(async () => {
+    try {
+      const response = await fetch("/api/settings", { cache: "no-store" });
+      const payload = await response.json();
+      if (response.ok && payload.success) setBlogId(payload.data?.values?.NAVER_BLOG_ID || "");
+    } catch {
+      // 설정 입력란은 서버 상태를 확인할 수 있을 때 채웁니다.
+    }
+  }, []);
+
+  async function saveBlogId() {
+    setSavingBlogId(true);
+    setNotice(null);
+    try {
+      const value = blogId.trim().replace(/^https?:\/\/(?:www\.)?blog\.naver\.com\//i, "").replace(/\/.*/, "");
+      if (!value) throw new Error("네이버 블로그 ID를 입력해주세요.");
+      const response = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ values: { NAVER_BLOG_ID: value } }),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.success) throw new Error(payload.error || "블로그 ID를 저장하지 못했습니다.");
+      setBlogId(value);
+      setNotice("네이버 블로그 ID가 저장되었습니다. 게시판 목록을 다시 확인합니다.");
+      await fetchSession();
+      window.dispatchEvent(new Event("blogautomcp:blog-id-changed"));
+    } catch (error) {
+      setNotice(`오류: ${error instanceof Error ? error.message : "블로그 ID를 저장하지 못했습니다."}`);
+    } finally {
+      setSavingBlogId(false);
+    }
+  }
+
+  async function pollLoginJob(jobId: string) {
     const deadline = Date.now() + 6 * 60_000;
     while (Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      await wait(3_000);
       try {
         const response = await fetch(`/api/session/login?jobId=${encodeURIComponent(jobId)}`, { cache: "no-store" });
         const payload = await response.json();
-        if (!payload.success) continue;
+        if (!response.ok || !payload.success) continue;
         if (payload.data.status === "succeeded") {
-          setNotice(`${provider === "naver" ? "네이버" : "ChatGPT"} 로그인이 완료되었습니다.`);
+          setNotice("네이버 재로그인이 완료되었습니다.");
+          setLoggingIn(false);
           await fetchSession();
           return;
         }
         if (payload.data.status === "failed") {
-          setNotice(`오류: ${payload.data.error || "로그인에 실패했습니다."}`);
+          setNotice(`오류: ${payload.data.error || "네이버 로그인에 실패했습니다."}`);
+          setLoggingIn(false);
           await fetchSession();
           return;
         }
       } catch {
-        // 일시적인 조회 오류는 다음 주기에 재시도합니다.
+        // 로그인 창이 열려 있는 동안 일시적인 조회 실패는 재시도합니다.
       }
     }
-    setNotice("로그인 확인 시간이 초과되었습니다. 상태를 다시 확인해주세요.");
+    setNotice("로그인 확인 시간이 초과되었습니다. 로그인 상태를 다시 확인해주세요.");
+    setLoggingIn(false);
     await fetchSession();
   }
 
-  useEffect(() => {
-    void fetchSession();
-  }, []);
-
-  if (loading) {
-    return (
-      <div className="rounded-xl border border-slate-200 bg-white p-4">
-        <div className="flex animate-pulse items-center gap-3">
-          <div className="h-3 w-3 rounded-full bg-slate-300" />
-          <div className="h-4 w-32 rounded bg-slate-200" />
-        </div>
-      </div>
-    );
+  async function startLogin() {
+    try {
+      setLoggingIn(true);
+      setNotice(null);
+      const response = await fetch("/api/session/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider: "naver", force: true }),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.success) throw new Error(payload.error || "네이버 로그인을 시작하지 못했습니다.");
+      setNotice(payload.message || "열린 창에서 네이버 로그인을 완료하세요.");
+      const jobId = payload.data?.jobId as string | undefined;
+      if (jobId) void pollLoginJob(jobId);
+      else setLoggingIn(false);
+    } catch (error) {
+      setNotice(`오류: ${error instanceof Error ? error.message : "네이버 로그인을 시작하지 못했습니다."}`);
+      setLoggingIn(false);
+    }
   }
 
-  const cards: Array<{
-    key: "naver" | "chatgpt";
-    title: string;
-    command: string;
-    description: string;
-    value: SessionData;
-  }> = session
-    ? [
-        {
-          key: "naver",
-          title: "네이버 로그인",
-          command: "npm run login",
-          description: "발행, 예약발행, 블로그 카테고리에 사용",
-          value: session.naver,
-        },
-        {
-          key: "chatgpt",
-          title: "ChatGPT 로그인",
-          command: "npm run login:chatgpt",
-          description: "글 작성, 이미지 생성에 사용",
-          value: session.chatgpt,
-        },
-      ]
-    : [];
+  async function restartServer() {
+    setControlBusy("restart");
+    setNotice("로컬 서버 재시작을 요청하고 있습니다…");
+    try {
+      const response = await fetch("/api/system/control", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "restart-server" }),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.success) throw new Error(payload.error || "서버를 다시 시작하지 못했습니다.");
+      setNotice(payload.message || "로컬 서버를 다시 시작합니다.");
+
+      await wait(1_500);
+      const deadline = Date.now() + 60_000;
+      while (Date.now() < deadline) {
+        try {
+          const health = await fetch("/api/system/control", { cache: "no-store" });
+          if (health.ok) {
+            window.location.reload();
+            return;
+          }
+        } catch {
+          // 서버가 내려갔다 올라오는 동안 연결 실패는 정상입니다.
+        }
+        await wait(750);
+      }
+      throw new Error("서버가 제한 시간 안에 다시 연결되지 않았습니다. 트레이에서 프로그램을 다시 열어주세요.");
+    } catch (error) {
+      setNotice(`오류: ${error instanceof Error ? error.message : "서버를 다시 시작하지 못했습니다."}`);
+      setControlBusy(null);
+    }
+  }
+
+  async function checkUpdates() {
+    setControlBusy("update");
+    setNotice("중앙 서버에서 새 버전을 확인하고 있습니다…");
+    try {
+      const response = await fetch("/api/system/control", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "check-updates" }),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.success) throw new Error(payload.error || "업데이트 확인을 시작하지 못했습니다.");
+      await fetchUpdate();
+      const updateError = payload.data?.update?.error as string | undefined;
+      setNotice(updateError ? `업데이트 확인 실패: ${updateError}` : payload.message || "업데이트 확인을 완료했습니다.");
+    } catch (error) {
+      setNotice(`오류: ${error instanceof Error ? error.message : "업데이트를 확인하지 못했습니다."}`);
+    } finally {
+      setControlBusy(null);
+    }
+  }
+
+  async function reconnectMcp(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!mcpUrl.trim()) return;
+    setReconnecting(true);
+    setNotice("새 MCP 주소로 이 PC를 다시 연결하고 있습니다…");
+    try {
+      const response = await fetch("/api/remote-agent", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mcpUrl: mcpUrl.trim(), deviceName: deviceName.trim() }),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.success) throw new Error(payload.error || "GPT(MCP)를 다시 연결하지 못했습니다.");
+      setActivation(payload.data);
+      setMcpUrl("");
+      setDeviceName("");
+      setMcpOpen(false);
+      setNotice("GPT(MCP) 재연결이 완료되었습니다. 이 PC의 인증이 즉시 교체되었습니다.");
+      window.dispatchEvent(new Event("blogautomcp:activation-changed"));
+    } catch (error) {
+      setNotice(`오류: ${error instanceof Error ? error.message : "GPT(MCP)를 다시 연결하지 못했습니다."}`);
+    } finally {
+      setReconnecting(false);
+    }
+  }
+
+  useEffect(() => {
+    void Promise.all([fetchSession(), fetchUpdate(), fetchActivation(), fetchBlogId()]);
+    const timer = window.setInterval(() => void fetchUpdate(), 15_000);
+    return () => window.clearInterval(timer);
+  }, [fetchActivation, fetchBlogId, fetchSession, fetchUpdate]);
+
+  const naver = session?.naver;
 
   return (
-    <div className="rounded-xl border border-slate-200 bg-white p-4">
-      <div className="flex flex-col gap-3">
-        {cards.map(({ key, title, command, description, value }) => {
-          const needsLogin = !value?.hasSession || !value?.isValid;
-
-          return (
-            <div
-              key={key}
-              className="flex flex-col gap-2 rounded-lg border border-slate-200 bg-slate-50/60 p-3 md:flex-row md:items-center md:justify-between"
-            >
-              <div className="flex items-start gap-3">
-                <div className={`mt-1 h-3 w-3 rounded-full ${getStatusDotClass(value)}`} />
-                <div>
-                  <h3 className="font-medium text-slate-900">{title}</h3>
-                  <p className="text-sm text-slate-600">{getStatusText(value)}</p>
-                  <p className="mt-1 text-xs text-slate-400">{description}</p>
-                  {value?.mode ? <p className="mt-1 text-xs text-slate-400">모드: {value.mode}</p> : null}
-                  {value?.error ? <p className="mt-1 text-xs text-amber-700">{value.error}</p> : null}
-                </div>
-              </div>
-
-              <div className="flex flex-col items-start gap-2 md:items-end">
-                <button
-                  onClick={() => void startLogin(key)}
-                  disabled={loggingIn === key}
-                  className={`rounded-lg px-4 py-2 text-sm font-medium text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                    key === "naver"
-                      ? "bg-green-600 hover:bg-green-700"
-                      : "bg-slate-800 hover:bg-slate-900"
-                  }`}
-                  title={`${title} 창을 엽니다`}
-                >
-                  {loggingIn === key
-                    ? "로그인 창 여는 중..."
-                    : needsLogin
-                      ? `${title}`
-                      : `${title} 다시하기`}
-                </button>
-
-                <details className="text-left md:text-right">
-                  <summary className="cursor-pointer text-xs text-slate-400">터미널 명령</summary>
-                  <code className="mt-1 inline-block rounded bg-slate-100 px-2 py-1 font-mono text-xs">
-                    {command}
-                  </code>
-                </details>
-
-                {value?.savedAt ? (
-                  <p className="text-xs text-slate-400">
-                    저장 시각: {new Date(value.savedAt).toLocaleString("ko-KR")}
-                  </p>
-                ) : null}
-                {value?.checkedAt ? (
-                  <p className="text-xs text-slate-400">
-                    확인 시각: {new Date(value.checkedAt).toLocaleString("ko-KR")}
-                  </p>
-                ) : null}
-              </div>
-            </div>
-          );
-        })}
+    <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <p className="text-xs font-semibold tracking-[0.18em] text-sky-600">LOCAL CONTROL</p>
+          <h2 className="mt-1 text-lg font-bold text-slate-900">로컬 프로그램 제어</h2>
+          <p className="mt-1 text-sm text-slate-500">Electron 프로그램과 연결 상태를 이 화면에서 바로 관리합니다.</p>
+        </div>
+        {activation?.siteUrl ? (
+          <span className="max-w-full truncate rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700" title={activation.siteUrl}>
+            MCP 연결됨 · {activation.siteUrl}
+          </span>
+        ) : null}
       </div>
 
-      {notice ? <p className="mt-3 text-xs text-sky-700">{notice}</p> : null}
-      <button
-        type="button"
-        onClick={() => void fetchSession()}
-        className="mt-3 text-xs font-medium text-slate-600 underline underline-offset-2"
-      >
-        로그인 상태 다시 확인
-      </button>
-      {session?.error ? <p className="mt-2 text-xs text-red-600">{session.error}</p> : null}
-    </div>
+      <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <button
+          type="button"
+          onClick={() => void restartServer()}
+          disabled={controlBusy === "restart"}
+          className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-sky-300 hover:bg-sky-50 disabled:cursor-wait disabled:opacity-60"
+        >
+          <span className="text-xl" aria-hidden="true">↻</span>
+          <span className="mt-2 block text-sm font-semibold text-slate-900">{controlBusy === "restart" ? "재시작 중…" : "서버 재시작"}</span>
+          <span className="mt-1 block text-xs leading-5 text-slate-500">프로그램과 로컬 MCP 서버를 안전하게 다시 실행</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => void startLogin()}
+          disabled={loggingIn}
+          className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-wait disabled:opacity-60"
+        >
+          <span className="text-xl" aria-hidden="true">N</span>
+          <span className="mt-2 block text-sm font-semibold text-slate-900">{loggingIn ? "로그인 대기 중…" : "네이버 재로그인"}</span>
+          <span className="mt-1 block text-xs leading-5 text-slate-500">전용 창을 열고 저장된 네이버 세션 교체</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setMcpOpen((open) => !open);
+            setNotice(null);
+          }}
+          aria-expanded={mcpOpen}
+          className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-violet-300 hover:bg-violet-50"
+        >
+          <span className="text-xl" aria-hidden="true">◎</span>
+          <span className="mt-2 block text-sm font-semibold text-slate-900">GPT(MCP) 재연결</span>
+          <span className="mt-1 block text-xs leading-5 text-slate-500">새 MCP 주소로 이 PC 인증 즉시 교체</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => void checkUpdates()}
+          disabled={controlBusy === "update"}
+          className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-amber-300 hover:bg-amber-50 disabled:cursor-wait disabled:opacity-60"
+        >
+          <span className="text-xl" aria-hidden="true">⇩</span>
+          <span className="mt-2 block text-sm font-semibold text-slate-900">{controlBusy === "update" ? "확인 중…" : "업데이트 확인"}</span>
+          <span className="mt-1 block text-xs leading-5 text-slate-500">중앙 배포 서버에서 최신 설치본 확인</span>
+        </button>
+      </div>
+
+      {mcpOpen ? (
+        <form onSubmit={reconnectMcp} className="mt-4 rounded-xl border border-violet-200 bg-violet-50/60 p-4">
+          <div className="mb-3">
+            <h3 className="text-sm font-semibold text-slate-900">새 MCP 주소로 다시 연결</h3>
+            <p className="mt-1 text-xs leading-5 text-slate-600">사이트에서 새로 발급한 주소를 입력하세요. 연결에 성공해야 현재 인증이 교체됩니다.</p>
+          </div>
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px_auto] md:items-end">
+            <label className="block text-xs font-medium text-slate-700" htmlFor="control-mcp-url">
+              MCP 주소
+              <input
+                id="control-mcp-url"
+                type="password"
+                autoComplete="new-password"
+                value={mcpUrl}
+                onChange={(event) => setMcpUrl(event.target.value)}
+                placeholder="https://사이트/api/mcp/…"
+                className="mt-1 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-violet-500"
+              />
+            </label>
+            <label className="block text-xs font-medium text-slate-700" htmlFor="control-device-name">
+              PC 이름 (선택)
+              <input
+                id="control-device-name"
+                type="text"
+                autoComplete="off"
+                value={deviceName}
+                onChange={(event) => setDeviceName(event.target.value)}
+                placeholder="비우면 컴퓨터 이름"
+                className="mt-1 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-violet-500"
+              />
+            </label>
+            <button
+              type="submit"
+              disabled={reconnecting || !mcpUrl.trim()}
+              className="rounded-lg bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {reconnecting ? "연결 중…" : "인증 교체"}
+            </button>
+          </div>
+        </form>
+      ) : null}
+
+      {notice ? (
+        <p className={`mt-4 rounded-lg px-3 py-2 text-sm ${notice.startsWith("오류") || notice.includes("실패") ? "bg-red-50 text-red-700" : "bg-sky-50 text-sky-700"}`} role="status">
+          {notice}
+        </p>
+      ) : null}
+
+      <div className="mt-4 grid gap-3 lg:grid-cols-2">
+        <div className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+          <div className="flex items-start gap-3">
+            <div className={`mt-1 h-3 w-3 shrink-0 rounded-full ${loading ? "bg-slate-400" : getStatusDotClass(naver)}`} />
+            <div>
+              <h3 className="font-medium text-slate-900">네이버 로그인</h3>
+              <p className="text-sm text-slate-600">{loading ? "상태 확인 중" : getStatusText(naver)}</p>
+              <p className="mt-1 text-xs text-slate-400">브랜드커넥트 조회와 블로그 발행에 사용</p>
+              {naver?.error ? <p className="mt-1 text-xs text-amber-700">{naver.error}</p> : null}
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <label className="sr-only" htmlFor="naver-blog-id">네이버 블로그 ID</label>
+                <input
+                  id="naver-blog-id"
+                  type="text"
+                  value={blogId}
+                  onChange={(event) => setBlogId(event.target.value)}
+                  placeholder="네이버 블로그 ID"
+                  className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs outline-none focus:border-emerald-500"
+                />
+                <button type="button" onClick={() => void saveBlogId()} disabled={savingBlogId} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-60">
+                  {savingBlogId ? "저장 중…" : "ID 저장"}
+                </button>
+              </div>
+              <p className="mt-1 text-xs text-slate-400">blog.naver.com/ 뒤의 아이디만 입력해도 됩니다.</p>
+            </div>
+          </div>
+          <button type="button" onClick={() => void fetchSession()} className="shrink-0 text-xs font-medium text-slate-600 underline underline-offset-2">상태 확인</button>
+        </div>
+        <div className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+          <div className="flex items-start gap-3">
+            <div className={`mt-1 h-3 w-3 shrink-0 rounded-full ${updateStatusDotClass(update)}`} />
+            <div>
+              <h3 className="font-medium text-slate-900">프로그램 자동 업데이트{update?.currentVersion ? ` · v${update.currentVersion}` : ""}</h3>
+              <p className="text-sm text-slate-600">{updateStatusText(update)}</p>
+              <p className="mt-1 text-xs text-slate-400">포스팅 작업 중에는 설치를 기다렸다가 안전할 때 자동 재시작합니다.</p>
+              {update?.error ? <p className="mt-1 break-all text-xs text-amber-700">{update.error}</p> : null}
+            </div>
+          </div>
+          <button type="button" onClick={() => void fetchUpdate()} className="shrink-0 text-xs font-medium text-slate-600 underline underline-offset-2">상태 확인</button>
+        </div>
+      </div>
+      {session?.error ? <p className="mt-3 text-xs text-red-600">{session.error}</p> : null}
+    </section>
   );
 }

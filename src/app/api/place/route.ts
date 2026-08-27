@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { requireRemoteActivation } from "@/lib/api-auth";
 
 interface NaverLocalSearchItem {
     title: string;
@@ -24,6 +25,8 @@ function getErrorMessage(error: unknown): string {
  * V5 Phase 13: 장소명으로 정보 자동 추출
  */
 export async function GET(req: NextRequest) {
+    const activationError = requireRemoteActivation(req);
+    if (activationError) return activationError;
     try {
         const { searchParams } = new URL(req.url);
         const query = searchParams.get("q");

@@ -4,6 +4,8 @@ import path from "path";
 import fs from "fs";
 import { randomUUID } from "crypto";
 import { requireAdminApiKey } from "@/lib/api-auth";
+import { beginDesktopActivity } from "@/lib/desktop-activity";
+import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,20 +27,30 @@ function formatLogStamp(date: Date): string {
 }
 
 interface LoginBody {
-  provider?: "naver" | "chatgpt";
+  provider?: "naver";
+  force?: boolean;
 }
 
 interface LoginJob {
   id: string;
-  provider: "naver" | "chatgpt";
+  provider: "naver";
   status: "starting" | "running" | "succeeded" | "failed";
   startedAt: string;
   finishedAt?: string;
   error?: string;
 }
 
-const globalJobs = globalThis as typeof globalThis & { __loginJobs?: Map<string, LoginJob> };
+const globalJobs = globalThis as typeof globalThis & {
+  __loginJobs?: Map<string, LoginJob>;
+  __activeNaverLoginJobId?: string;
+};
 const loginJobs = globalJobs.__loginJobs ?? (globalJobs.__loginJobs = new Map<string, LoginJob>());
+
+function clearActiveLoginJob(jobId: string): void {
+  if (globalJobs.__activeNaverLoginJobId === jobId) {
+    delete globalJobs.__activeNaverLoginJobId;
+  }
+}
 
 export async function GET(request: NextRequest) {
   const authError = requireAdminApiKey(request);
@@ -51,10 +63,17 @@ export async function GET(request: NextRequest) {
 
 // POST: 로그인 브라우저 실행 (사용자 데스크탑에 로그인 창이 열림)
 export async function POST(request: NextRequest) {
+  let finishLoginActivity: (() => void) | null = null;
+  let startedJobId: string | null = null;
   try {
     const authError = requireAdminApiKey(request);
     if (authError) {
       return authError;
+    }
+
+    const updateError = requireNoPendingDesktopUpdate();
+    if (updateError) {
+      return updateError;
     }
 
     let body: LoginBody = {};
@@ -65,17 +84,25 @@ export async function POST(request: NextRequest) {
     }
 
     const provider = body.provider;
-    if (provider !== "naver" && provider !== "chatgpt") {
+    if (provider !== "naver") {
       return NextResponse.json(
-        { success: false, error: "provider는 naver 또는 chatgpt 여야 합니다." },
+        { success: false, error: "로컬 프로그램에서는 네이버 로그인만 지원합니다. ChatGPT 연결은 MCP 주소를 사용하세요." },
         { status: 400 }
       );
     }
 
-    const scriptPath =
-      provider === "naver"
-        ? path.join(process.cwd(), "scripts", "login.ts")
-        : path.join(process.cwd(), "scripts", "chatgpt-login.ts");
+    const activeJobId = globalJobs.__activeNaverLoginJobId;
+    const activeJob = activeJobId ? loginJobs.get(activeJobId) : undefined;
+    if (activeJob && (activeJob.status === "starting" || activeJob.status === "running")) {
+      return NextResponse.json({
+        success: true,
+        message: "이미 열린 네이버 로그인 창을 사용해주세요.",
+        data: { provider, jobId: activeJob.id, reused: true },
+      });
+    }
+    if (activeJobId) clearActiveLoginJob(activeJobId);
+
+    const scriptPath = path.join(process.cwd(), "scripts", "login.ts");
 
     if (!fs.existsSync(scriptPath)) {
       return NextResponse.json(
@@ -91,22 +118,23 @@ export async function POST(request: NextRequest) {
 
     let child: ChildProcess;
     const jobId = randomUUID();
+    startedJobId = jobId;
     const job: LoginJob = { id: jobId, provider, status: "starting", startedAt: new Date().toISOString() };
     loginJobs.set(jobId, job);
+    globalJobs.__activeNaverLoginJobId = jobId;
+    finishLoginActivity = beginDesktopActivity("naver-login");
     try {
+      const loginArgs = [TS_NODE_BIN, "--project", "tsconfig.scripts.json", scriptPath];
+      if (body.force === true) loginArgs.push("--force-login");
       child = spawn(
         process.execPath,
-        [TS_NODE_BIN, "--project", "tsconfig.scripts.json", scriptPath],
+        loginArgs,
         {
           cwd: process.cwd(),
           detached: true,
           stdio: ["ignore", logFd, logFd],
           shell: false,
-          env: {
-            ...process.env,
-            // ChatGPT 로그인은 터미널 입력(Enter) 없이 자동 감지·저장되도록 수동확인 끔
-            ...(provider === "chatgpt" ? { CHATGPT_LOGIN_MANUAL_CONFIRM: "false" } : {}),
-          },
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
         }
       );
     } finally {
@@ -114,6 +142,8 @@ export async function POST(request: NextRequest) {
     }
 
     if (!child.pid) {
+      finishLoginActivity();
+      clearActiveLoginJob(jobId);
       loginJobs.set(jobId, { ...job, status: "failed", finishedAt: new Date().toISOString(), error: "프로세스 PID가 생성되지 않았습니다." });
       return NextResponse.json(
         { success: false, error: "로그인 프로세스를 시작하지 못했습니다." },
@@ -135,18 +165,26 @@ export async function POST(request: NextRequest) {
       setTimeout(() => finish(null), 750);
     });
     if (startupError) {
+      finishLoginActivity();
+      clearActiveLoginJob(jobId);
       loginJobs.set(jobId, { ...job, status: "failed", finishedAt: new Date().toISOString(), error: startupError });
       return NextResponse.json({ success: false, error: startupError, data: { jobId } }, { status: 500 });
     }
 
     if (earlyExitCode !== undefined) {
+      finishLoginActivity();
+      clearActiveLoginJob(jobId);
       loginJobs.set(jobId, { ...job, status: "succeeded", finishedAt: new Date().toISOString() });
     } else {
       loginJobs.set(jobId, { ...job, status: "running" });
       child.once("exit", (code) => {
+        finishLoginActivity?.();
+        clearActiveLoginJob(jobId);
         loginJobs.set(jobId, { ...job, status: code === 0 ? "succeeded" : "failed", finishedAt: new Date().toISOString(), error: code === 0 ? undefined : `로그인 프로세스가 실패했습니다 (코드 ${code ?? "없음"}).` });
       });
       child.once("error", (error) => {
+        finishLoginActivity?.();
+        clearActiveLoginJob(jobId);
         loginJobs.set(jobId, { ...job, status: "failed", finishedAt: new Date().toISOString(), error: getErrorMessage(error) });
       });
     }
@@ -155,13 +193,14 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      message:
-        provider === "naver"
-          ? "네이버 로그인 창을 열었습니다. 열린 브라우저에서 로그인하면 자동으로 세션이 저장됩니다."
-          : "ChatGPT 로그인 창을 열었습니다. 열린 브라우저에서 로그인/보안 인증을 완료하면 자동으로 세션이 저장됩니다.",
+      message: body.force === true
+        ? "기존 브라우저 인증을 비우고 네이버 재로그인 창을 열었습니다. 로그인하면 새 세션으로 교체됩니다."
+        : "네이버 로그인 창을 열었습니다. 열린 브라우저에서 로그인하면 자동으로 세션이 저장됩니다.",
       data: { provider, jobId },
     });
   } catch (error: unknown) {
+    finishLoginActivity?.();
+    if (startedJobId) clearActiveLoginJob(startedJobId);
     console.error("로그인 실행 실패:", error);
     return NextResponse.json(
       { success: false, error: getErrorMessage(error) },

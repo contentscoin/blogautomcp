@@ -20,13 +20,14 @@ import {
     generateReviewHashtags,
 } from "./lib/review-prompt";
 import { createTaskLogger } from "./lib/logger";
+import { getNaverSessionFile } from "./lib/app-paths";
 
 const log = createTaskLogger("ReviewAgent");
 
 chromium.use(StealthPlugin());
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
-const SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "naver-session.json");
+const SESSION_FILE = getNaverSessionFile();
 const BLOG_ID = process.env.NAVER_BLOG_ID || "";
 
 interface StyleProfile {
@@ -299,7 +300,10 @@ async function main() {
 
     // 5. 브라우저로 발행
     log.info("브라우저 시작");
-    const browser = await chromium.launch({ headless: false });
+    const browser = await chromium.launch({
+        channel: process.env.BROWSER_CHANNEL?.trim() || undefined,
+        headless: false,
+    });
     const context = await browser.newContext({
         storageState: SESSION_FILE,
         viewport: { width: 1280, height: 900 },

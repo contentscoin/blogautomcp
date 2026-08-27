@@ -9,6 +9,8 @@ node_modules/
 # Database
 prisma/dev.db
 prisma/dev.db-journal
+prisma/blogautomcp.db
+prisma/blogautomcp.db-journal
 
 # Playwright 세션 (로그인 정보)
 playwright/storage/
@@ -42,3 +44,16 @@ Thumbs.db
 *.swp
 *.swo
 .vercel
+
+# Standalone cloud site
+apps/site/.next/
+apps/site/.env
+apps/site/.env.local
+apps/site/src/generated/prisma/
+src/generated/prisma/
+
+# Local QA/build artifacts
+.playwright-cli/
+output/
+tsconfig.tsbuildinfo
+apps/site/tsconfig.tsbuildinfo

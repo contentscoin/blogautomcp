@@ -1,5 +1,6 @@
 import { spawn } from "child_process";
 import path from "path";
+import { beginDesktopActivity } from "@/lib/desktop-activity";
 
 export interface RunScriptResult {
   stdout: string;
@@ -47,6 +48,9 @@ export function runTsNodeScript(
   args: string[] = [],
   options: RunScriptOptions = {}
 ): Promise<RunScriptResult> {
+  if (process.env.DESKTOP_UPDATE_INSTALL_PENDING === "1") {
+    return Promise.reject(new ScriptExecutionError("업데이트 설치가 준비되어 새 자동화 작업을 시작할 수 없습니다."));
+  }
   const cwd = options.cwd ?? process.cwd();
   const timeoutMs = options.timeoutMs ?? 300_000;
   const resolvedScriptPath = path.isAbsolute(scriptPath)
@@ -54,16 +58,24 @@ export function runTsNodeScript(
     : path.join(cwd, scriptPath);
 
   return new Promise((resolve, reject) => {
-    const child = spawn(
-      process.execPath,
-      [resolveTsNodeBin(cwd), "--project", "tsconfig.scripts.json", resolvedScriptPath, ...args],
-      {
-        cwd,
-        env: { ...process.env, ...options.env },
-        stdio: ["ignore", "pipe", "pipe"],
-        shell: false,
-      }
-    );
+    const finishActivity = beginDesktopActivity(`script:${path.basename(resolvedScriptPath)}`);
+    let child;
+    try {
+      child = spawn(
+        process.execPath,
+        [resolveTsNodeBin(cwd), "--project", "tsconfig.scripts.json", resolvedScriptPath, ...args],
+        {
+          cwd,
+          env: { ...process.env, ...options.env, ELECTRON_RUN_AS_NODE: "1" },
+          stdio: ["ignore", "pipe", "pipe"],
+          shell: false,
+        }
+      );
+    } catch (error) {
+      finishActivity();
+      reject(error);
+      return;
+    }
 
     let stdout = "";
     let stderr = "";
@@ -84,6 +96,7 @@ export function runTsNodeScript(
 
     child.once("error", (error) => {
       clearTimeout(timeout);
+      finishActivity();
       reject(
         new ScriptExecutionError(`스크립트 실행 실패: ${error.message}`, {
           stdout,
@@ -96,6 +109,7 @@ export function runTsNodeScript(
 
     child.once("close", (code, signal) => {
       clearTimeout(timeout);
+      finishActivity();
 
       if (timedOut) {
         reject(

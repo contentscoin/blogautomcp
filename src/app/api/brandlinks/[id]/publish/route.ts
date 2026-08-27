@@ -4,6 +4,7 @@ import { spawn, type ChildProcess } from "child_process";
 import path from "path";
 import fs from "fs";
 import { requireAdminApiKey } from "@/lib/api-auth";
+import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 
 const NAVER_SCHEDULE_TIMEZONE = process.env.NAVER_SCHEDULE_TIMEZONE || "Asia/Seoul";
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
@@ -121,6 +122,11 @@ export async function POST(
       return authError;
     }
 
+    const updateError = requireNoPendingDesktopUpdate();
+    if (updateError) {
+      return updateError;
+    }
+
     let body: PublishRequestBody;
     try {
       body = (await request.json()) as PublishRequestBody;
@@ -220,6 +226,7 @@ export async function POST(
         shell: false,
         env: {
           ...process.env,
+          ELECTRON_RUN_AS_NODE: "1",
           AI_PROVIDER: agentAiProvider,
           BROWSER_GPT_MODE: "false",
           ALLOW_CHATGPT_BROWSER_MODE: "false",

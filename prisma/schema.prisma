@@ -5,6 +5,14 @@ generator client {
   provider = "prisma-client-js"
 }
 
+// Electron packaging does not reliably preserve Prisma's hidden
+// node_modules/.prisma directory. Generate a self-contained copy inside the
+// application source so the packaged Next.js server can load it directly.
+generator desktopClient {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
 datasource db {
   provider = "sqlite"
   url      = env("DATABASE_URL")

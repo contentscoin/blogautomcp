@@ -4,6 +4,7 @@ import { spawn, type ChildProcess } from "child_process";
 import fs from "fs";
 import path from "path";
 import { requireAdminApiKey } from "@/lib/api-auth";
+import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 
 interface BulkTodayBody {
   limit?: number;
@@ -69,6 +70,11 @@ export async function POST(request: NextRequest) {
     const authError = requireAdminApiKey(request);
     if (authError) {
       return authError;
+    }
+
+    const updateError = requireNoPendingDesktopUpdate();
+    if (updateError) {
+      return updateError;
     }
 
     let body: BulkTodayBody = {};
@@ -171,6 +177,7 @@ export async function POST(request: NextRequest) {
           detached: true,
           stdio: ["ignore", logFd, logFd],
           shell: false,
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
         }
       );
     } finally {

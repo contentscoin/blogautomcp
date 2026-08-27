@@ -53,6 +53,11 @@ import {
   getBrandLinkContentReadiness,
   type BrandLinkContentReadiness,
 } from "./lib/brandlink-content-readiness";
+import {
+  getChatgptSessionFile,
+  getNaverSessionFile,
+  getSessionStorageDir,
+} from "./lib/app-paths";
 
 // Stealth 플러그인 적용 (봇 감지 우회)
 chromium.use(StealthPlugin());
@@ -77,8 +82,8 @@ const gemini = AI_PROVIDER === "gemini"
   ? new GoogleGenerativeAI(GEMINI_API_KEY)
   : null;
 
-const SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "naver-session.json");
-const CHATGPT_SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "chatgpt-session.json");
+const SESSION_FILE = getNaverSessionFile();
+const CHATGPT_SESSION_FILE = getChatgptSessionFile();
 const TEMP_PATH = path.join(process.cwd(), "temp_images");
 const NAVER_BLOG_ID = process.env.NAVER_BLOG_ID || "";
 const NAVER_SCHEDULE_TIMEZONE = process.env.NAVER_SCHEDULE_TIMEZONE || "Asia/Seoul";
@@ -174,7 +179,7 @@ const CHATGPT_DEFAULT_SUBTITLE_COUNT = Math.max(
 );
 const CHATGPT_USER_DATA_DIR =
   process.env.CHATGPT_USER_DATA_DIR ||
-  path.join(process.cwd(), "playwright", "storage", "chatgpt-profile");
+  path.join(getSessionStorageDir(), "chatgpt-profile");
 
 function parseBoundedInteger(
   value: string | undefined,
@@ -8631,6 +8636,7 @@ async function main() {
     setStage("브라우저 시작");
     // 브라우저 시작 (봇 감지 우회 설정)
     browser = await chromium.launch({
+      channel: process.env.BROWSER_CHANNEL?.trim() || undefined,
       headless: false,
       slowMo: 80,  // 더 자연스러운 속도
       args: [

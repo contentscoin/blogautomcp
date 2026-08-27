@@ -4,6 +4,7 @@ import { spawn, type ChildProcess } from "child_process";
 import fs from "fs";
 import path from "path";
 import { requireAdminApiKey } from "@/lib/api-auth";
+import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 import { getTopicTaskContentReadiness } from "@/lib/topic-task-content-readiness";
 import { getTopicTaskPublishReadiness } from "@/lib/topic-task-publish-readiness";
 
@@ -98,6 +99,11 @@ export async function POST(request: NextRequest) {
       return authError;
     }
 
+    const updateError = requireNoPendingDesktopUpdate();
+    if (updateError) {
+      return updateError;
+    }
+
     let body: BulkTopicScheduleBody = {};
     try {
       body = (await request.json()) as BulkTopicScheduleBody;
@@ -160,6 +166,7 @@ export async function POST(request: NextRequest) {
           detached: true,
           stdio: ["ignore", logFd, logFd],
           shell: false,
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
         },
       );
     } finally {

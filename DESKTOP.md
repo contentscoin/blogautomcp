@@ -4,10 +4,13 @@
 in-process Next 서버(127.0.0.1)로 띄우고, 실제 발행/생성은 백그라운드 ts-node
 스크립트가 수행한다.
 
+설치형 앱의 기본 주소는 `http://127.0.0.1:43127`이다. 일반 개발 서버가 흔히 쓰는
+3000 포트와 충돌하지 않도록 데스크톱 전용 포트를 사용한다.
+
 ## 사전 준비물
 
 - **Node.js 18+**
-- **Google Chrome** — 자동화(네이버/ChatGPT 조작)는 시스템 Chrome을 사용한다.
+- **Google Chrome** — 네이버 로그인과 포스팅 자동화는 시스템 Chrome을 사용한다.
   패키징 앱은 `BROWSER_CHANNEL=chrome`로 Playwright가 설치된 Chrome을 구동한다.
   (Chromium을 앱에 번들하지 않는다 — 용량·코드서명 문제 회피)
 - macOS 빌드는 macOS에서, **Windows 빌드는 Windows에서** 수행해야 한다(아래 참고).
@@ -21,7 +24,26 @@ npm run desktop:pack:win     # Windows → out/*.exe (NSIS 설치 프로그램)
 npm run desktop:pack         # 현재 OS 기본 타깃
 ```
 
-산출물은 `out/`에 생성된다(예: `BrandConnect Automation-1.0.0-arm64.dmg`).
+Windows 산출물은 `out/`에 생성된다(예: `BrandConnect-Automation-Setup-1.1.0.exe`,
+동일 이름의 `.blockmap`, `latest.yml`).
+
+## 중앙 자동업데이트
+
+- Windows 설치본은 `electron-updater`의 NSIS 자동업데이트를 사용한다.
+- MCP 주소로 활성화된 PC만 장치 토큰으로 업데이트 파일을 내려받을 수 있다.
+- 앱은 중앙 채널을 2분마다 확인하고 새 버전을 자동 다운로드한다.
+- 다운로드가 끝나면 새 포스팅·로그인·스크립트 작업을 막고, 진행 중인 작업이 0건인
+  상태를 두 번 확인한 뒤 조용히 재시작하여 설치한다.
+- 트레이 메뉴의 `업데이트 확인`으로 즉시 확인할 수도 있다.
+- 자동업데이트 기능이 처음 포함된 1.1.0은 기존 설치 사용자가 한 번 직접 설치해야 한다.
+  이후 1.1.1부터는 중앙 배포만으로 자동 반영된다.
+
+패키지 네트워크·유휴 설치 검증은 다음 명령으로 재현할 수 있다.
+
+```powershell
+npm run test:auto-update
+npm run test:packaged-update
+```
 
 ## 동작 방식 (패키징 특이사항)
 
@@ -63,11 +85,17 @@ Windows 환경에서 빌드**해야 신뢰성이 높다. macOS에서 `--win` 빌
 
 ## 첫 실행 후 할 일
 
-1. `userData/brandconnect-automation/.env`에 설정(`OPENAI_API_KEY`, `NAVER_BLOG_ID`,
-   `ADMIN_API_KEY` 등)을 넣는다. (위 "사용자 설정" 경로 참고)
-2. 앱 실행 → 웹 대시보드가 뜬다. DB는 userData에 자동 생성된다.
-3. 네이버 로그인 세션이 필요하다. (현재는 개발 명령 `npm run login`으로 세션 저장 —
-   패키징 앱 내 로그인 버튼 UX는 후속 작업)
+1. 앱을 실행하면 MCP 활성화 화면만 표시된다. 사이트에서 발급받은 MCP 주소를 입력해
+   이 PC를 활성 장치로 연결한다. 활성화 전에는 대시보드와 자동화 API를 사용할 수 없다.
+2. 연결 후 설정 화면의 `네이버 로그인` 버튼으로 네이버 세션을 저장한다.
+3. 같은 MCP 주소를 ChatGPT 개발자 모드에도 별도로 등록한다. 로컬 앱의 로그인과
+   ChatGPT의 MCP 등록은 서로 자동 연동되지 않는다.
+4. 필요한 경우 `userData/brandconnect-automation/.env`에 `OPENAI_API_KEY`,
+   `NAVER_BLOG_ID`, `ADMIN_API_KEY` 등의 실행 설정을 넣는다.
+
+MCP 주소가 재발급되거나, 관리자가 계정을 정지하거나, 다른 PC가 같은 주소로
+인증하면 기존 장치 토큰은 폐기된다. 로컬 앱은 다음 폴링에서 인증 실패를 확인하고
+즉시 활성화 화면으로 다시 잠긴다.
 
 ## 런타임 검증 상태 (2026-05, macOS arm64)
 
@@ -81,6 +109,5 @@ Windows 환경에서 빌드**해야 신뢰성이 높다. macOS에서 `--win` 빌
 
 ## 알려진 후속 과제
 
-- 패키징 앱 내에서 네이버/ChatGPT 로그인을 트리거하는 UI(현재 CLI 의존).
 - 공증(macOS)·코드서명(Windows) 자동화.
 - 실제 설치→발행까지의 엔드투엔드 런타임 검증(설치 환경에서 1회 수행 권장).

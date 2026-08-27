@@ -27,6 +27,7 @@ import {
 import { buildHumanMobileStyleGuide } from "./lib/blog-writing-style";
 import { loadImages } from "./lib/image-content";
 import { createTaskLogger } from "./lib/logger";
+import { getNaverSessionFile } from "./lib/app-paths";
 import {
     parsePreparedTopicContent,
     preparedSectionsToPublishBlocks,
@@ -41,7 +42,7 @@ const log = createTaskLogger("TopicAgent");
 // Stealth 플러그인 적용
 chromium.use(StealthPlugin());
 
-const SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "naver-session.json");
+const SESSION_FILE = getNaverSessionFile();
 const STYLES_DIR = path.join(process.cwd(), "styles");
 const NAVER_BLOG_ID = process.env.NAVER_BLOG_ID || "";
 const IMAGE_WORK_DIR = path.join(process.cwd(), "temp_images", "topic-agent");
@@ -3114,7 +3115,10 @@ async function main() {
 
     // 5. 브라우저로 발행
     console.log("\n🌐 브라우저 시작...");
-    const browser = await chromium.launch({ headless: (process.env.HEADLESS || "false").toLowerCase() === "true" });
+    const browser = await chromium.launch({
+        channel: process.env.BROWSER_CHANNEL?.trim() || undefined,
+        headless: (process.env.HEADLESS || "false").toLowerCase() === "true",
+    });
     const context = await browser.newContext({
         storageState: SESSION_FILE,
         viewport: { width: 1280, height: 900 },

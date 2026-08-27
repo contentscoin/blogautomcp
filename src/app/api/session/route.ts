@@ -1,15 +1,13 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
-import path from "path";
-import { readUsableCookies, validateNaverPublishingSession } from "@/lib/naver-session";
+import { validateNaverPublishingSession } from "@/lib/naver-session";
+import { requireRemoteActivation } from "@/lib/api-auth";
+import { getNaverSessionFile } from "../../../../scripts/lib/app-paths";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const NAVER_SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "naver-session.json");
-const CHATGPT_SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "chatgpt-session.json");
-const CHATGPT_PROFILE_DIR =
-  process.env.CHATGPT_USER_DATA_DIR || path.join(process.cwd(), "playwright", "storage", "chatgpt-profile");
+const NAVER_SESSION_FILE = getNaverSessionFile();
 interface SessionSummary {
   hasSession: boolean;
   isValid: boolean;
@@ -64,39 +62,11 @@ async function readNaverSessionSummary(): Promise<SessionSummary> {
   }
 }
 
-function readChatGptSessionSummary(): SessionSummary {
-  const hasSessionFile = fs.existsSync(CHATGPT_SESSION_FILE);
-  const hasProfile = fs.existsSync(CHATGPT_PROFILE_DIR);
-  const profileSavedAt = hasProfile ? getLastModifiedIso(CHATGPT_PROFILE_DIR) : undefined;
-  const sessionSavedAt = hasSessionFile ? getLastModifiedIso(CHATGPT_SESSION_FILE) : undefined;
-  const usesPersistentProfile =
-    (process.env.CHATGPT_USE_PERSISTENT_CONTEXT || process.env.CHATGPT_USE_PERSISTENT_PROFILE || "true").toLowerCase() !==
-    "false";
-  const hasSession = hasProfile || hasSessionFile;
-  const hasSessionToken = hasSessionFile
-    ? readUsableCookies(CHATGPT_SESSION_FILE, "chatgpt.com").some((cookie) =>
-        cookie.name.startsWith("__Secure-next-auth.session-token"),
-      )
-    : false;
-
-  return {
-    hasSession,
-    isValid: hasSessionToken,
-    savedAt: profileSavedAt || sessionSavedAt,
-    checkedAt: new Date().toISOString(),
-    mode: usesPersistentProfile ? "persistent-profile" : "storage-state",
-    error: hasSessionToken
-      ? undefined
-      : hasSession
-        ? "저장된 ChatGPT 세션/프로필이 있지만 세션 토큰이 확인되지 않습니다. `npm run login:chatgpt`를 다시 실행하세요."
-        : "ChatGPT 세션 파일이 없습니다. `npm run login:chatgpt`를 실행하세요.",
-  };
-}
-
-export async function GET() {
+export async function GET(request: NextRequest) {
+  const activationError = requireRemoteActivation(request);
+  if (activationError) return activationError;
   try {
     const naver = await readNaverSessionSummary();
-    const chatgpt = readChatGptSessionSummary();
 
     return NextResponse.json({
       success: true,
@@ -106,7 +76,6 @@ export async function GET() {
         savedAt: naver.savedAt,
         checkedAt: naver.checkedAt,
         naver,
-        chatgpt,
       },
     });
   } catch (error) {
@@ -121,20 +90,17 @@ export async function GET() {
   }
 }
 
-export async function POST() {
+export async function POST(request: NextRequest) {
+  const activationError = requireRemoteActivation(request);
+  if (activationError) return activationError;
   return NextResponse.json({
     success: true,
-    message: "필요한 세션에 맞는 로그인 명령을 실행해주세요.",
+    message: "네이버 로그인 세션을 준비해주세요. ChatGPT는 로컬 로그인 대신 MCP 주소로 연결합니다.",
     instructions: {
       naver: [
         "1. 터미널에서 `npm run login` 실행",
         "2. 열린 브라우저에서 네이버 로그인 완료",
         "3. 세션이 저장되면 페이지 새로고침",
-      ],
-      chatgpt: [
-        "1. 터미널에서 `npm run login:chatgpt` 실행",
-        "2. 열린 브라우저에서 ChatGPT 로그인 및 보안 인증 완료",
-        "3. 입력창이 보이는 상태까지 확인 후 페이지 새로고침",
       ],
     },
   });

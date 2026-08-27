@@ -1,17 +1,8 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { ThemeProvider } from "@/components/ThemeProvider";
-
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
+import { RemoteAgentPoller } from "@/components/RemoteAgentPoller";
+import { ActivationGate } from "@/components/ActivationGate";
 
 export const metadata: Metadata = {
   title: "네이버 블로그 자동화 | V6",
@@ -25,11 +16,12 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="ko" suppressHydrationWarning>
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-      >
+      <body className="antialiased">
         <ThemeProvider>
-          {children}
+          <ActivationGate>
+            <RemoteAgentPoller />
+            {children}
+          </ActivationGate>
         </ThemeProvider>
       </body>
     </html>

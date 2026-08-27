@@ -4,6 +4,7 @@ import { spawn, type ChildProcess } from "child_process";
 import fs from "fs";
 import path from "path";
 import { requireAdminApiKey } from "@/lib/api-auth";
+import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 import { buildCaptureRequiredPayload, parseConnectKind, resolveConnectContract } from "@/lib/brandconnect-kind";
 
 interface BulkSeasonalBody {
@@ -170,7 +171,8 @@ function resolveStorageStatePath(): string {
       ? configured
       : path.join(process.cwd(), configured);
   }
-  return path.join(process.cwd(), "playwright", "storage", "naver-session.json");
+  const storageDir = process.env.SESSION_STORAGE_DIR?.trim();
+  return path.join(storageDir || path.join(process.cwd(), "playwright", "storage"), "naver-session.json");
 }
 
 export async function POST(request: NextRequest) {
@@ -178,6 +180,11 @@ export async function POST(request: NextRequest) {
     const authError = requireAdminApiKey(request);
     if (authError) {
       return authError;
+    }
+
+    const updateError = requireNoPendingDesktopUpdate();
+    if (updateError) {
+      return updateError;
     }
 
     let body: BulkSeasonalBody = {};
@@ -305,6 +312,7 @@ export async function POST(request: NextRequest) {
           detached: true,
           stdio: ["ignore", logFd, logFd],
           shell: false,
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
         }
       );
     } finally {

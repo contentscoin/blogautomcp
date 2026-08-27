@@ -1,0 +1,237 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum UserStatus {
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+enum McpConnectionStatus {
+  ACTIVE
+  REVOKED
+}
+
+enum DeviceStatus {
+  ACTIVE
+  REPLACED
+  REVOKED
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+model User {
+  id           String     @id @default(cuid())
+  email        String     @unique
+  displayName  String
+  passwordHash String
+  role         UserRole   @default(USER)
+  status       UserStatus @default(PENDING_APPROVAL)
+  approvedAt   DateTime?
+  approvedById String?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  sessions       Session[]
+  approvalEvents ApprovalEvent[] @relation("ApprovalTarget")
+  approvalActions ApprovalEvent[] @relation("ApprovalActor")
+  mcpConnection  McpConnection?
+  devices        Device[]
+  jobs           AgentJob[]
+  refreshTokens  OAuthRefreshToken[]
+
+  @@index([status, createdAt])
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+model ApprovalEvent {
+  id        String   @id @default(cuid())
+  userId    String
+  actorId   String
+  action    String
+  reason    String?
+  createdAt DateTime @default(now())
+
+  user  User @relation("ApprovalTarget", fields: [userId], references: [id], onDelete: Cascade)
+  actor User @relation("ApprovalActor", fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@index([userId, createdAt])
+  @@index([actorId, createdAt])
+}
+
+model McpConnection {
+  id          String              @id @default(cuid())
+  userId      String              @unique
+  endpointId  String              @unique
+  secretHash  String
+  generation  Int                 @default(1)
+  status      McpConnectionStatus @default(ACTIVE)
+  shownAt     DateTime?
+  rotatedAt   DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  oauthCodes OAuthAuthorizationCode[]
+  refreshTokens OAuthRefreshToken[]
+
+  @@index([status])
+}
+
+model Device {
+  id              String       @id @default(cuid())
+  userId          String
+  tokenHash       String       @unique
+  name            String
+  platform        String?
+  appVersion      String?
+  status          DeviceStatus @default(ACTIVE)
+  pairedAt        DateTime     @default(now())
+  lastSeenAt      DateTime?
+  revokedAt       DateTime?
+  replacedById    String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobs AgentJob[]
+
+  @@index([userId, status])
+  @@index([lastSeenAt])
+}
+
+model AgentJob {
+  id             String    @id @default(cuid())
+  userId         String
+  deviceId       String?
+  type           String
+  inputJson      Json
+  status         JobStatus @default(QUEUED)
+  progress       Int       @default(0)
+  idempotencyKey String?
+  resultJson     Json?
+  errorCode      String?
+  errorMessage   String?
+  createdAt      DateTime  @default(now())
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  updatedAt      DateTime  @updatedAt
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device Device? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, idempotencyKey])
+  @@index([userId, status, createdAt])
+  @@index([deviceId, status])
+}
+
+model OAuthClient {
+  id                    String   @id
+  name                  String?
+  redirectUris          Json
+  tokenEndpointAuthMethod String @default("none")
+  createdAt             DateTime @default(now())
+
+  authorizationCodes OAuthAuthorizationCode[]
+  refreshTokens      OAuthRefreshToken[]
+}
+
+model OAuthAuthorizationCode {
+  id              String   @id @default(cuid())
+  codeHash        String   @unique
+  userId          String
+  clientId        String
+  connectionId    String
+  redirectUri     String
+  resource        String
+  scope           String
+  codeChallenge   String
+  expiresAt       DateTime
+  usedAt          DateTime?
+  createdAt       DateTime @default(now())
+
+  client     OAuthClient  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  connection McpConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([connectionId, expiresAt])
+}
+
+model OAuthRefreshToken {
+  id           String   @id @default(cuid())
+  tokenHash    String   @unique
+  userId       String
+  clientId     String
+  connectionId String
+  generation   Int
+  scope        String
+  resource     String
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  createdAt    DateTime @default(now())
+  lastUsedAt   DateTime?
+
+  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  client     OAuthClient   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  connection McpConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([connectionId, generation])
+}
+
+model AuditLog {
+  id           String   @id @default(cuid())
+  actorUserId  String?
+  actorType    String
+  action       String
+  resourceType String
+  resourceId   String?
+  result       String
+  requestId    String?
+  metadataJson Json?
+  createdAt    DateTime @default(now())
+
+  @@index([actorUserId, createdAt])
+  @@index([action, createdAt])
+}
+
+model RateLimitBucket {
+  keyHash      String    @id
+  action       String
+  count        Int       @default(0)
+  windowStart  DateTime  @default(now())
+  blockedUntil DateTime?
+  updatedAt    DateTime  @updatedAt
+
+  @@index([action, updatedAt])
+}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import SessionStatus from "@/components/SessionStatus";
 import PublishProgress from "@/components/PublishProgress";
@@ -253,6 +253,7 @@ export default function Dashboard() {
   const [superPublishingRunning, setSuperPublishingRunning] = useState(false);
   const [brandConnectCategoryUrl, setBrandConnectCategoryUrl] = useState("");
   const [brandConnectKind, setBrandConnectKind] = useState<BrandConnectKind>("shopping");
+  const brandConnectKindRef = useRef<BrandConnectKind>("shopping");
   const [brandConnectDuplicateWindowDays, setBrandConnectDuplicateWindowDays] = useState("30");
   const [brandConnectCategoryOptions, setBrandConnectCategoryOptions] = useState<BrandConnectCategoryOption[]>([]);
   const [brandConnectPromotionOptions, setBrandConnectPromotionOptions] = useState<BrandConnectPromotionOption[]>([]);
@@ -261,6 +262,8 @@ export default function Dashboard() {
   const [brandConnectOptionsLoading, setBrandConnectOptionsLoading] = useState(false);
   const [brandConnectOptionsLoaded, setBrandConnectOptionsLoaded] = useState(false);
   const [brandConnectOptionsError, setBrandConnectOptionsError] = useState<string | null>(null);
+  const [travelContractCapturing, setTravelContractCapturing] = useState(false);
+  const [travelContractMessage, setTravelContractMessage] = useState<string | null>(null);
 
   // V5: 콘텐츠 모드
   const [contentMode, setContentMode] = useState<ContentMode>("product");
@@ -416,6 +419,9 @@ export default function Dashboard() {
       });
       const data = (await res.json()) as BrandConnectSelectionOptionsResponse;
 
+      // Ignore a late response from the previously selected connect kind.
+      if (brandConnectKindRef.current !== brandConnectKind) return;
+
       if (!res.ok || !data.success) {
         setBrandConnectCategoryOptions([]);
         setBrandConnectPromotionOptions([]);
@@ -450,6 +456,26 @@ export default function Dashboard() {
     }
   }, [brandConnectCategoryUrl, brandConnectKind]);
 
+  const captureTravelContract = useCallback(async () => {
+    const categoryUrl = brandConnectCategoryUrl.trim();
+    setTravelContractCapturing(true);
+    setTravelContractMessage(null);
+    try {
+      const response = await fetch("/api/brandlinks/travel-contract", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(categoryUrl ? { categoryUrl } : {}),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.success) throw new Error(typeof payload.error === "string" ? payload.error : "여행커넥트 계약 캡처에 실패했습니다.");
+      setTravelContractMessage(`${payload.data.message} (${payload.data.logFile})`);
+    } catch (error) {
+      setTravelContractMessage(error instanceof Error ? error.message : "여행커넥트 계약 캡처에 실패했습니다.");
+    } finally {
+      setTravelContractCapturing(false);
+    }
+  }, [brandConnectCategoryUrl]);
+
   useEffect(() => {
     fetchLinks();
     fetchTopicTasks();
@@ -457,6 +483,12 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetchCategories();
+  }, [fetchCategories]);
+
+  useEffect(() => {
+    const handleBlogIdChanged = () => void fetchCategories();
+    window.addEventListener("blogautomcp:blog-id-changed", handleBlogIdChanged);
+    return () => window.removeEventListener("blogautomcp:blog-id-changed", handleBlogIdChanged);
   }, [fetchCategories]);
 
   useEffect(() => {
@@ -1483,6 +1515,12 @@ export default function Dashboard() {
               >
                 📊 히스토리
               </Link>
+              <Link
+                href="/settings"
+                className="px-4 py-2 text-sm bg-emerald-100 text-emerald-700 rounded-lg hover:bg-emerald-200 transition-colors"
+              >
+                ⚙️ 설정
+              </Link>
               <button
                 onClick={() => fetchLinks()}
                 className="p-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
@@ -1864,7 +1902,9 @@ export default function Dashboard() {
                       <select
                         value={brandConnectKind}
                         onChange={(e) => {
-                          setBrandConnectKind(e.target.value as BrandConnectKind);
+                          const nextKind = e.target.value as BrandConnectKind;
+                          brandConnectKindRef.current = nextKind;
+                          setBrandConnectKind(nextKind);
                           setBrandConnectCategoryUrl("");
                           setBrandConnectCategoryOptions([]);
                           setBrandConnectPromotionOptions([]);
@@ -1872,6 +1912,7 @@ export default function Dashboard() {
                           setSelectedBrandConnectPromotions([]);
                           setBrandConnectOptionsLoaded(false);
                           setBrandConnectOptionsError(null);
+                          setTravelContractMessage(null);
                         }}
                         className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                       >
@@ -1881,7 +1922,7 @@ export default function Dashboard() {
                     </label>
                     <label className="block">
                       <span className="block text-xs font-medium text-slate-600 mb-1">
-                        {brandConnectKind === "travel" ? "여행커넥트 목록 URL" : "브랜드커넥트 카테고리 URL"}
+                        {brandConnectKind === "travel" ? "여행커넥트 목록 URL (선택)" : "브랜드커넥트 카테고리 URL"}
                       </span>
                       <input
                         type="text"
@@ -1889,7 +1930,7 @@ export default function Dashboard() {
                         onChange={(e) => setBrandConnectCategoryUrl(e.target.value)}
                         placeholder={
                           brandConnectKind === "travel"
-                            ? "로그인 후 여행커넥트 목록 URL을 입력"
+                            ? "비워두면 로그인 세션에서 자동 탐색"
                             : "https://brandconnect.naver.com/.../category/..."
                         }
                         className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -1919,11 +1960,22 @@ export default function Dashboard() {
                   {brandConnectOptionsError && (
                     <p className="text-xs text-red-600">{brandConnectOptionsError}</p>
                   )}
-                  {brandConnectKind === "travel" && !brandConnectOptionsError && (
-                    <p className="text-xs text-amber-700">
-                      여행커넥트는 실제 목록 API 계약을 안전하게 확인한 뒤 활성화됩니다. 현재는 잘못된 항목 등록을 방지하도록 차단됩니다.
-                    </p>
+                  {brandConnectKind === "travel" && (
+                    <div className="flex flex-col md:flex-row md:items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                      <p className="text-xs text-amber-800 flex-1">
+                        여행커넥트는 로그인된 세션에서 화면과 응답 구조를 자동 탐색해 1회 캡처합니다. 원문 개인정보는 저장하지 않습니다.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => void captureTravelContract()}
+                        disabled={travelContractCapturing}
+                        className="px-3 py-2 text-xs font-medium bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {travelContractCapturing ? "자동 캡처 중..." : "여행 계약 자동 캡처"}
+                      </button>
+                    </div>
                   )}
+                  {travelContractMessage && <p className="text-xs text-amber-700">{travelContractMessage}</p>}
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     <div className="border border-slate-200 rounded-lg p-3">

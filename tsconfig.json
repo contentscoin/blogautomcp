@@ -37,6 +37,8 @@
     "**/*.mts"
   ],
   "exclude": [
+    "apps/site",
+    "apps/sites",
     "node_modules",
     "out"
   ]

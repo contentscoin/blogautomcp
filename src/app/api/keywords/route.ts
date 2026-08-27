@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { requireRemoteActivation } from "@/lib/api-auth";
 
 // 카테고리별 인기 키워드 (실제로는 네이버 API 연동 필요)
 const TRENDING_KEYWORDS: Record<string, string[]> = {
@@ -141,6 +142,8 @@ function calculateQualityScore(content: {
 }
 
 export async function POST(request: NextRequest) {
+    const activationError = requireRemoteActivation(request);
+    if (activationError) return activationError;
     try {
         const body = await request.json();
         const { action, category, location, baseKeyword, content } = body;
@@ -197,7 +200,9 @@ export async function POST(request: NextRequest) {
     }
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
+    const activationError = requireRemoteActivation(request);
+    if (activationError) return activationError;
     // 전체 카테고리별 키워드 목록 반환
     return NextResponse.json({
         success: true,

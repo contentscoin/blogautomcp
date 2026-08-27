@@ -6,18 +6,14 @@ import type { APIResponse, Page } from "playwright";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { PrismaClient } from "@prisma/client";
 import { buildAppUrl, notifyAndLogCompletion } from "./lib/chatbot-notifier";
+import { getNaverSessionFile } from "./lib/app-paths";
 import { buildCaptureRequiredPayload, parseConnectKind, resolveConnectContract, toStoredConnectKind, type ConnectKind } from "../src/lib/brandconnect-kind";
 
 chromium.use(StealthPlugin());
 
 const DEFAULT_CATEGORY_URL =
   "https://brandconnect.naver.com/916297527319296/affiliate/products/category/10031299";
-const DEFAULT_STORAGE_STATE_PATH = path.join(
-  process.cwd(),
-  "playwright",
-  "storage",
-  "naver-session.json"
-);
+const DEFAULT_STORAGE_STATE_PATH = getNaverSessionFile();
 const KST_TIMEZONE = "Asia/Seoul";
 const BRANDCONNECT_MINIMIZE_WINDOW =
   (process.env.BRANDCONNECT_MINIMIZE_WINDOW || "true").toLowerCase() === "true";
@@ -1307,6 +1303,7 @@ async function main() {
   console.log(`✅ 게시판 매핑 로드: ${categoryMap.size}개`);
 
   const browser = await chromium.launch({
+    channel: process.env.BROWSER_CHANNEL?.trim() || undefined,
     headless: options.headless,
     args:
       !options.headless && BRANDCONNECT_MINIMIZE_WINDOW
