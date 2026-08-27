@@ -25,7 +25,8 @@ jobs:
           - os: windows-latest
             pack: desktop:pack:win
             artifact: windows-installer
-            glob: "out/*.exe"
+            # 자동업데이트 채널에 올릴 파일까지 포함: 설치본 + blockmap + latest.yml
+            glob: "out/*.exe\nout/*.blockmap\nout/latest.yml"
           - os: macos-latest
             pack: desktop:pack:mac
             artifact: macos-dmg
@@ -76,4 +77,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REL_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
-        run: gh release upload "$REL_TAG" ${{ matrix.glob }} --repo "${{ github.repository }}" --clobber
+        run: |
+          FILES=$(printf '%s' "${{ matrix.glob }}" | tr '\n' ' ')
+          gh release upload "$REL_TAG" $FILES --repo "${{ github.repository }}" --clobber
