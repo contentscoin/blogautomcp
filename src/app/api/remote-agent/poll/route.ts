@@ -107,7 +107,13 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: true, data: { configured: true, job: null, updatePending: true } });
   }
   const auth = { authorization: `Bearer ${remote.token}`, "content-type": "application/json" };
-  const claimResponse = await fetch(`${remote.siteUrl}/api/agent/jobs/claim`, { method: "POST", headers: auth, body: "{}", cache: "no-store" }).catch(() => null);
+  const appVersion = process.env.DESKTOP_APP_VERSION || process.env.npm_package_version || "1.0.0";
+  const claimResponse = await fetch(`${remote.siteUrl}/api/agent/jobs/claim`, {
+    method: "POST",
+    headers: auth,
+    body: JSON.stringify({ appVersion }),
+    cache: "no-store",
+  }).catch(() => null);
   if (!claimResponse) return NextResponse.json({ success: false, error: "사이트 작업 채널에 연결할 수 없습니다." }, { status: 502 });
   const claimed = await claimResponse.json().catch(() => null);
   if (!claimResponse.ok) {

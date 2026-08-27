@@ -8,9 +8,11 @@ export async function POST(request: NextRequest) {
   const device = await authenticateDevice(request);
   if (!device) return apiError("DEVICE_REVOKED", "PC 인증이 유효하지 않습니다.", 401);
   if (!userCanUseMcp(device.user)) return apiError("ACCOUNT_DISABLED", "계정 이용이 중지되었습니다.", 403);
+  const body = await request.json().catch(() => null) as { appVersion?: unknown } | null;
+  const appVersion = typeof body?.appVersion === "string" ? body.appVersion.trim().slice(0, 40) : "";
   const now = new Date();
   const job = await db.$transaction(async (tx) => {
-    await tx.device.update({ where: { id: device.id }, data: { lastSeenAt: now } });
+    await tx.device.update({ where: { id: device.id }, data: { lastSeenAt: now, ...(appVersion ? { appVersion } : {}) } });
     const next = await tx.agentJob.findFirst({ where: { userId: device.userId, status: "QUEUED" }, orderBy: { createdAt: "asc" } });
     if (!next) return null;
     const claimed = await tx.agentJob.updateMany({ where: { id: next.id, status: "QUEUED" }, data: { status: "RUNNING", deviceId: device.id, startedAt: now, progress: 1 } });

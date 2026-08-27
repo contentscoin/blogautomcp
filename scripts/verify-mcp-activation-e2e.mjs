@@ -57,6 +57,7 @@ const userData = await mkdtemp(join(tmpdir(), "blogautomcp-activation-e2e-"));
 let revoked = false;
 let pairCalls = 0;
 let expectedToken = "";
+const claimBodies = [];
 
 const mockServer = createServer(async (request, response) => {
   if (request.method === "POST" && request.url === "/api/device/pair") {
@@ -71,6 +72,9 @@ const mockServer = createServer(async (request, response) => {
   }
 
   if (request.method === "POST" && request.url === "/api/agent/jobs/claim") {
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    claimBodies.push(body ? JSON.parse(body) : null);
     const tokenMatches = request.headers.authorization === `Bearer ${expectedToken}`;
     response.writeHead(revoked || !tokenMatches ? 401 : 200, { "content-type": "application/json" });
     response.end(JSON.stringify(revoked || !tokenMatches
@@ -99,6 +103,7 @@ const child = spawn(process.execPath, [nextCli, "dev", "--hostname", "127.0.0.1"
     REMOTE_DEVICE_ID: "",
     REMOTE_DEVICE_TOKEN: "",
     ADMIN_API_KEY: "",
+    DESKTOP_APP_VERSION: "1.1.12-test",
   },
   stdio: ["ignore", "pipe", "pipe"],
 });
@@ -137,6 +142,7 @@ try {
   }));
   assert.equal(healthyPoll.response.status, 200);
   assert.equal(healthyPoll.payload.data.configured, true);
+  assert.equal(claimBodies.at(-1)?.appVersion, "1.1.12-test");
 
   const repaired = await json(await fetch(`${appOrigin}/api/remote-agent`, {
     method: "POST",

@@ -17,7 +17,11 @@ export async function POST(request: Request) {
   await ensureDatabase();
   const d1 = getD1();
   const now = Date.now();
-  const heartbeat = await d1.prepare(`UPDATE devices SET last_seen_at=? WHERE id=? AND status='ACTIVE'`).bind(now, device.id).run();
+  const body = await request.json().catch(() => null) as { appVersion?: unknown } | null;
+  const appVersion = typeof body?.appVersion === 'string' ? body.appVersion.trim().slice(0, 40) : '';
+  const heartbeat = appVersion
+    ? await d1.prepare(`UPDATE devices SET last_seen_at=?, app_version=? WHERE id=? AND status='ACTIVE'`).bind(now, appVersion, device.id).run()
+    : await d1.prepare(`UPDATE devices SET last_seen_at=? WHERE id=? AND status='ACTIVE'`).bind(now, device.id).run();
   if (Number(heartbeat.meta.changes || 0) !== 1) return apiError('DEVICE_REVOKED', 'PC 인증이 폐기되었습니다.', 401);
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
