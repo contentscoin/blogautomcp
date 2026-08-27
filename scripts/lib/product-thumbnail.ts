@@ -298,8 +298,13 @@ export function buildProductThumbnailGenerationPrompt(
     "Photorealistic product scene:",
     `- ${scenePrompt}`,
     "- Realistic hands, shadows, reflections, product material, package texture where appropriate.",
-    "- Cinematic lighting and depth of field.",
-    "- No flat vector illustration, cheap icons, cartoon, or abstract placeholder background.",
+    // 실사감은 디테일을 더해서가 아니라 광고 화보 쪽 기본 끌림을 상쇄해서 얻는다.
+    // 부정문은 모델이 흘리기 쉬우므로 남길 것을 긍정문으로 함께 지목한다(photoreal 스킬).
+    "- The scene looks like a real photo taken for a blog with a good camera, not a staged stock advertisement.",
+    "- Natural daylight or believable indoor lighting with one consistent shadow direction; keep contact shadows under the product.",
+    "- Keep the subtle texture of a real photograph (slight grain, natural color temperature); avoid CG-perfect gloss and heavy retouching.",
+    "- Slightly off-center, believable composition instead of perfectly symmetric catalog framing.",
+    "- No flat vector illustration, cheap icons, cartoon, or abstract placeholder background — render the product as a physical object in a real place.",
     "",
     "Hard negatives:",
     "- No misspelled Korean, malformed Hangul, fake letters, random extra captions, or cropped text.",
@@ -334,7 +339,7 @@ function svgTextLines(
       ? ` stroke="${options.stroke}" stroke-width="${options.strokeWidth}" paint-order="stroke"`
       : "";
   return [
-    `<text x="${x}" y="${y}" text-anchor="${anchor}" font-size="${fontSize}" font-weight="${
+    `<text x="${x}" y="${y}" text-anchor="${anchor}" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans CJK KR, Arial, sans-serif" font-size="${fontSize}" font-weight="${
       options.weight ?? 800
     }" fill="${options.fill}"${stroke}>`,
     ...lines.map((line, index) => {

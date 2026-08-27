@@ -11,6 +11,11 @@ export const HUMAN_MOBILE_STYLE_GUIDE = `
 - 직접 사용했다는 근거가 없는 내용은 단정하지 말고, 사진/스펙/가격/사용 상황을 바탕으로 자연스럽게 표현하세요.
 - 장점만 나열하지 말고 작은 아쉬움이나 참고할 점을 1개 이상 넣어 신뢰감을 주세요.
 - SEO 키워드는 문장 안에 자연스럽게 흩어 넣고, 같은 키워드를 억지로 반복하지 마세요.
+- 인사말로 시작하지 말고 첫 문장부터 상황이나 문제로 바로 들어가세요.
+- "~이 아니라 ~이다" 대조 구문을 반복하지 마세요. 반전이 필요하면 문장을 끊어서 쓰세요.
+- "여정", "~자리", "진짜 기준" 같은 은유보다 실제 동작과 사실로 쓰세요.
+- "걱정 안 하셔도 돼요", "절대 ~하지 않아요" 같은 안심시키기용 문장은 넣지 마세요.
+- 안내 문장은 "~하시면 됩니다"보다 "어느 화면의 무엇을 누른다"처럼 구체적으로 쓰세요.
 `.trim();
 
 export const MOBILE_BODY_RULES = `
@@ -34,4 +39,46 @@ export function buildHumanMobileStyleGuide(extra?: string): string {
   return [HUMAN_MOBILE_STYLE_GUIDE, MOBILE_BODY_RULES, HUMAN_REVIEW_SAFETY_RULES, extra]
     .filter((value): value is string => Boolean(value?.trim()))
     .join("\n\n");
+}
+
+/**
+ * 네이버 검색 노출용 제목 규칙.
+ * 네이버가 낚시성 제목과 키워드 남용을 스팸으로 명시하고 있어(콘텐츠 작성 5대 원칙),
+ * 어그로형 제목은 프롬프트에서 금지하고 아래 패턴으로 생성 후에도 걸러낸다.
+ */
+export const NAVER_SEO_TITLE_RULES = `
+## 네이버 검색 제목 규칙 (필수)
+- 핵심 검색 키워드를 제목 맨 앞쪽에 배치하세요. 상위 노출 글들이 전부 그렇게 합니다.
+- "완벽 가이드", "총정리", "완전 정복", "꿀팁 Zip", "핵꿀팁", "역대급" 같은 낚시성 문구는 금지입니다.
+  네이버가 낚시성 제목을 스팸으로 명시하고 있습니다.
+- 제목에 쓴 단어는 본문에서 실제로 다뤄야 합니다.
+- 같은 키워드를 제목·본문에서 억지로 반복하지 마세요. 키워드 남용도 스팸으로 명시돼 있습니다.
+- 제목은 실제 내용이 하는 일을 그대로 쓰세요. 과장 대신 구체적인 정보로 클릭을 얻습니다.
+`.trim();
+
+/** 낚시성 제목 문구 — 생성 결과에서 하드 필터링한다. */
+export const NAVER_CLICKBAIT_TITLE_PATTERNS: RegExp[] = [
+  /완벽\s*가이드/giu,
+  /완전\s*정복/giu,
+  /총\s*정리/giu,
+  /핵\s*꿀팁/giu,
+  /꿀팁\s*(?:zip|집)/giu,
+  /역대급/giu,
+];
+
+/**
+ * 제목에서 낚시성 문구를 제거하고 구분자 잔재를 정리한다.
+ * 전부 지워져 빈 문자열이 되면 원본을 돌려준다(제목이 사라지는 것보다는 낫다).
+ */
+export function stripClickbaitFromTitle(title: string): string {
+  let cleaned = title;
+  for (const pattern of NAVER_CLICKBAIT_TITLE_PATTERNS) {
+    cleaned = cleaned.replace(pattern, " ");
+  }
+  cleaned = cleaned
+    .replace(/\s*[|\-·~]\s*(?=[|\-·~]|$)/g, " ")
+    .replace(/^[\s|\-·~]+|[\s|\-·~]+$/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  return cleaned.length >= 8 ? cleaned : title.trim();
 }

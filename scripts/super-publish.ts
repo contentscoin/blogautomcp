@@ -2,6 +2,7 @@ import "dotenv/config";
 import path from "path";
 import { spawnSync } from "child_process";
 import { PrismaClient } from "../src/generated/prisma";
+import { parseConnectKind, type ConnectKind } from "../src/lib/brandconnect-kind";
 import {
   buildAppUrl,
   notifyAndLogCompletion,
@@ -9,7 +10,7 @@ import {
 } from "./lib/chatbot-notifier";
 
 interface CliOptions {
-  connectKind: "shopping" | "travel";
+  connectKind: ConnectKind;
   collectCount: number;
   todayCount: number;
   dailyQuota: number;
@@ -81,7 +82,7 @@ function parseArgs(argv: string[]): CliOptions {
 
   for (const arg of argv) {
     if (arg.startsWith("--connect-kind=")) {
-      options.connectKind = arg.split("=")[1]?.trim().toLowerCase() === "travel" ? "travel" : "shopping";
+      options.connectKind = parseConnectKind(arg.split("=")[1]);
       continue;
     }
     if (arg.startsWith("--collect-count=")) {

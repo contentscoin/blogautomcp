@@ -14,6 +14,11 @@ function config() {
 async function localApi(request: NextRequest, path: string, init?: RequestInit) {
   const headers = new Headers(init?.headers);
   headers.set("content-type", "application/json");
+  // 서버가 자기 자신을 호출하는 요청이라 브라우저가 붙여주는 Origin/sec-fetch-site가
+  // 없다. ADMIN_API_KEY가 설정되지 않은 데스크톱에서는 requireTrustedLocalMutation이
+  // 이 부재를 외부 요청으로 보고 403을 돌려줘 MCP 작업이 전부 실패했다.
+  // 같은 오리진에서 시작한 요청임을 정확히 표시한다.
+  headers.set("origin", request.nextUrl.origin);
   const adminKey = process.env.ADMIN_API_KEY?.trim();
   if (adminKey) headers.set("x-admin-api-key", adminKey);
   const url = new URL(path, request.nextUrl.origin);
@@ -25,12 +30,17 @@ async function localApi(request: NextRequest, path: string, init?: RequestInit) 
       await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
       continue;
     }
+    if (response.status === 404) {
+      throw new Error(
+        `로컬 API가 이 앱 버전에 없습니다: ${path} (404). 블로그오토 PC 앱을 최신 버전으로 업데이트한 뒤 다시 시도하세요.`
+      );
+    }
     const detail = typeof payload?.error === "string"
       ? payload.error
       : JSON.stringify(payload?.error || `Local API ${response.status} (${url.pathname})`);
     throw new Error(detail);
   }
-  throw new Error(`Local API 404 (${url.pathname})`);
+  throw new Error(`로컬 API가 이 앱 버전에 없습니다: ${path} (404). 블로그오토 PC 앱을 최신 버전으로 업데이트한 뒤 다시 시도하세요.`);
 }
 
 async function executeJob(request: NextRequest, job: Job): Promise<unknown> {

@@ -24,6 +24,8 @@ import {
   HUMAN_MOBILE_STYLE_GUIDE,
   HUMAN_REVIEW_SAFETY_RULES,
   MOBILE_BODY_RULES,
+  NAVER_SEO_TITLE_RULES,
+  stripClickbaitFromTitle,
 } from "./lib/blog-writing-style";
 import { buildAppUrl, notifyAndLogCompletion } from "./lib/chatbot-notifier";
 import {
@@ -44,6 +46,11 @@ import {
   buildProductThumbnailGenerationPrompt,
   generateProductThumbnail,
 } from "./lib/product-thumbnail";
+import {
+  generateProductThumbnailViaImageApi,
+  isImageApiThumbnailAvailable,
+  qcGeneratedThumbnail,
+} from "./lib/openai-image";
 import {
   buildOpenCrabSeoBrief,
   formatOpenCrabSeoBriefForPrompt,
@@ -67,6 +74,7 @@ import {
   parseProductThumbnailSettings,
   productThumbnailSettingKey,
 } from "./lib/product-thumbnail-settings";
+import { buildHumanizeRewritePrompt, HUMANIZE_RULES, scanAiTells } from "./lib/humanize-korean";
 
 // Stealth 플러그인 적용 (봇 감지 우회)
 chromium.use(StealthPlugin());
@@ -182,6 +190,18 @@ const BLOG_HUMANIZE_MOBILE_STYLE =
   (process.env.BLOG_HUMANIZE_MOBILE_STYLE || "true").toLowerCase() === "true";
 const HUMAN_MOBILE_POLISH_ENABLED =
   (process.env.HUMAN_MOBILE_POLISH_ENABLED || "true").toLowerCase() === "true";
+// 상위 노출 글 실측 기준 태그 3~5개. 과다 태그는 키워드 남용(스팸) 신호가 된다.
+const NAVER_BLOG_HASHTAG_COUNT = Math.min(
+  20,
+  Math.max(3, Number.parseInt(process.env.NAVER_BLOG_HASHTAG_COUNT || "5", 10) || 5)
+);
+// AI 티 스캔 점수가 이 값 이상이면 생성문을 한 번 더 자연스럽게 재작성한다.
+const BLOG_HUMANIZE_REWRITE_ENABLED =
+  (process.env.BLOG_HUMANIZE_REWRITE_ENABLED || "true").toLowerCase() === "true";
+const BLOG_HUMANIZE_REWRITE_THRESHOLD = Math.max(
+  1,
+  Number.parseInt(process.env.BLOG_HUMANIZE_REWRITE_THRESHOLD || "10", 10) || 10
+);
 const CHATGPT_DEFAULT_SUBTITLE_COUNT = Math.max(
   4,
   Math.min(8, Number(process.env.CHATGPT_DEFAULT_SUBTITLE_COUNT || "5"))
@@ -375,9 +395,10 @@ function isSectionTitleLine(text: string): boolean {
 }
 
 function sanitizeTitle(rawTitle: string, fallback: string): string {
-  const cleaned = stripEmoji(rawTitle).replace(/\s+/g, " ").trim();
+  // 낚시성 문구는 네이버가 스팸으로 명시한 항목이라 프롬프트 금지에 더해 여기서도 걸러낸다.
+  const cleaned = stripClickbaitFromTitle(stripEmoji(rawTitle).replace(/\s+/g, " ").trim());
   if (cleaned.length > 0) return cleaned.slice(0, 80);
-  return stripEmoji(fallback).replace(/\s+/g, " ").trim().slice(0, 80);
+  return stripClickbaitFromTitle(stripEmoji(fallback).replace(/\s+/g, " ").trim()).slice(0, 80);
 }
 
 function collapseRepeatedLeadingTitleTokens(title: string): string {
@@ -426,7 +447,7 @@ function buildLocalProductTitle(
   return sanitizeTitle(collapseRepeatedLeadingTitleTokens(rawTitle), product.name);
 }
 
-type ProductThumbnailSource = "chatgpt" | "codex-imagegen" | "local-script" | "composite" | "saved-studio";
+type ProductThumbnailSource = "image-api" | "chatgpt" | "codex-imagegen" | "local-script" | "composite" | "saved-studio";
 
 interface GeneratedProductThumbnail {
   path: string;
@@ -518,31 +539,39 @@ function renderThumbnailSvgText(
 }
 
 function buildCompactThumbnailOverlaySvg(promptInfo: ReturnType<typeof buildProductThumbnailGenerationPrompt>): string {
-  const productLines = splitThumbnailTextLines(promptInfo.productNameLabel, 12, 2);
+  // 피드 썸네일은 실제로 200~300px로 축소돼 보인다. 예전 오버레이(제품명 30px,
+  // 헤드라인 20px)는 그 크기에서 읽히지 않아, 하단 밴드에 큰 글자로 다시 그린다.
+  const productLines = splitThumbnailTextLines(promptInfo.productNameLabel, 14, 2);
   const headlineLines = splitThumbnailTextLines(promptInfo.headline || "구매 전 확인", 8, 1);
-  const sublineLines = splitThumbnailTextLines(promptInfo.subline || "장단점 체크", 15, 1);
-  const productFontSize = productLines.length >= 2 ? 30 : 34;
-  const productLineHeight = productLines.length >= 2 ? 35 : 40;
-  const blockWidth = 438;
-  const blockHeight = productLines.length >= 2 ? 206 : 184;
-  const headlineY = productLines.length >= 2 ? 178 : 162;
-  const sublineY = productLines.length >= 2 ? 202 : 186;
+  const sublineLines = splitThumbnailTextLines(promptInfo.subline || "장단점 체크", 16, 1);
+  const productFontSize = productLines.length >= 2 ? 58 : 66;
+  const productLineHeight = productLines.length >= 2 ? 70 : 78;
+  const bandHeight = productLines.length >= 2 ? 436 : 366;
+  const bandTop = 1080 - bandHeight;
+  const headlineY = bandTop + 130;
+  const productY = headlineY + 94;
+  const sublineY = productY + (productLines.length - 1) * productLineHeight + 76;
 
   return `
 <svg width="1080" height="1080" viewBox="0 0 1080 1080" xmlns="http://www.w3.org/2000/svg">
   <defs>
+    <linearGradient id="bottomBand" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0f172a" stop-opacity="0"/>
+      <stop offset="26%" stop-color="#0f172a" stop-opacity="0.74"/>
+      <stop offset="100%" stop-color="#0f172a" stop-opacity="0.95"/>
+    </linearGradient>
     <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#0f172a" flood-opacity="0.26"/>
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#0f172a" flood-opacity="0.3"/>
     </filter>
   </defs>
-  <rect x="34" y="34" width="${blockWidth}" height="${blockHeight}" rx="22" fill="#0f172a" opacity="0.68" filter="url(#softShadow)"/>
-  <rect x="60" y="60" width="118" height="34" rx="17" fill="#ffffff" opacity="0.94"/>
-  <text x="119" y="83" text-anchor="middle" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans CJK KR, Arial, sans-serif" font-size="17" font-weight="900" fill="#0f172a">구매 체크</text>
-  ${renderThumbnailSvgText(productLines, 60, 124, productFontSize, productLineHeight)}
-  <text x="60" y="${headlineY}" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans CJK KR, Arial, sans-serif" font-size="20" font-weight="850" fill="#dbeafe">${escapeSvgText(
+  <rect x="0" y="${bandTop}" width="1080" height="${bandHeight}" fill="url(#bottomBand)"/>
+  <rect x="48" y="48" width="232" height="72" rx="36" fill="#e11d2e" filter="url(#softShadow)"/>
+  <text x="164" y="97" text-anchor="middle" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans CJK KR, Arial, sans-serif" font-size="38" font-weight="900" fill="#ffffff">구매 체크</text>
+  <text x="60" y="${headlineY}" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans CJK KR, Arial, sans-serif" font-size="92" font-weight="950" fill="#fde047" stroke="#0f172a" stroke-width="5" paint-order="stroke">${escapeSvgText(
     headlineLines[0] || "구매 전 확인"
   )}</text>
-  <text x="60" y="${sublineY}" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans CJK KR, Arial, sans-serif" font-size="18" font-weight="750" fill="#f8fafc" opacity="0.9">${escapeSvgText(
+  ${renderThumbnailSvgText(productLines, 60, productY, productFontSize, productLineHeight)}
+  <text x="60" y="${sublineY}" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans CJK KR, Arial, sans-serif" font-size="42" font-weight="800" fill="#e2e8f0">${escapeSvgText(
     sublineLines[0] || "장단점 체크"
   )}</text>
 </svg>`;
@@ -845,6 +874,32 @@ async function generateTopTextCutoutThumbnail(
     features: product.features,
     price: product.price,
   });
+
+  // 1순위: Images API 생성형 썸네일(제품 이미지 레퍼런스 + 큰 한글 제목을 생성 단계에서 함께).
+  // 데스크톱에서 유일하게 스스로 동작하는 생성형 경로다. QC(한글 오탈자·제품 왜곡)를
+  // 통과하지 못하면 아래 로컬 합성으로 넘어간다.
+  if (isImageApiThumbnailAvailable()) {
+    console.log("   🎨 Images API 생성형 썸네일 시도...");
+    const apiPath = await generateProductThumbnailViaImageApi({
+      prompt: promptInfo.prompt,
+      referenceImagePath: product.representativeImagePath,
+      outputDir: TEMP_PATH,
+      fileLabel: promptInfo.productNameLabel,
+    });
+    if (apiPath) {
+      const qc = await qcGeneratedThumbnail(apiPath, {
+        productName: promptInfo.productNameLabel,
+        headline: promptInfo.headline,
+      });
+      if (qc.pass) {
+        console.log(
+          `   ✅ Images API 썸네일 사용: ${path.basename(apiPath)}${qc.checked ? "" : ` (${qc.reason})`}`
+        );
+        return { path: apiPath, source: "image-api" };
+      }
+      console.log(`   ⚠️ 생성형 썸네일 QC 불합격: ${qc.reason} — 로컬 합성으로 대체합니다.`);
+    }
+  }
 
   const localSharpPath = await generateProductThumbnailWithSharpLocal(product, promptInfo);
   if (localSharpPath) {
@@ -4232,7 +4287,7 @@ function normalizeHashtags(
 
   const openCrabTags = openCrabSeoBrief?.hashtags || [];
   const merged = [...normalized, ...openCrabTags, ...productSeed, ...DEFAULT_HASHTAGS];
-  const deduped = Array.from(new Set(merged)).slice(0, 20);
+  const deduped = Array.from(new Set(merged)).slice(0, NAVER_BLOG_HASHTAG_COUNT);
   return deduped;
 }
 
@@ -5024,6 +5079,66 @@ async function downloadImage(url: string, filePath: string): Promise<void> {
 // ============================================
 // AI 공통 호출 함수 (OpenAI / Gemini)
 // ============================================
+const HUMANIZE_SECTION_SEPARATOR = "\n\n<<<섹션구분>>>\n\n";
+
+/**
+ * AI 티 점수가 높은 본문을 한 번만 재작성한다(휴머나이징 패스).
+ * 섹션 수가 어긋나거나 점수가 오히려 나빠지면 원문을 그대로 유지한다(fail-safe).
+ */
+async function rewriteSectionsForHumanTone(
+  sections: string[],
+  beforeScore: number
+): Promise<string[]> {
+  const joined = sections.join(HUMANIZE_SECTION_SEPARATOR);
+  const prompt = `${buildHumanizeRewritePrompt(joined)}
+
+[추가 형식 규칙]
+- 원문에 있는 "<<<섹션구분>>>" 표시는 섹션 경계이므로 절대 지우거나 옮기지 말고 그대로 유지하세요.
+- 표시 개수(${sections.length - 1}개)도 그대로여야 합니다.`;
+
+  let rewritten = "";
+  try {
+    if (AI_PROVIDER === "gemini" && gemini) {
+      const model = gemini.getGenerativeModel({
+        model: GEMINI_MODEL,
+        generationConfig: { temperature: 0.5, maxOutputTokens: 4000 },
+      });
+      const result = await model.generateContent(prompt);
+      rewritten = result.response.text();
+    } else if (AI_PROVIDER === "openai") {
+      rewritten = await runOpenAiApi(
+        "당신은 한국어 문장을 자연스럽게 다듬는 편집자입니다. 지시받은 형식 규칙을 정확히 지키세요.",
+        prompt
+      );
+    } else {
+      return sections;
+    }
+  } catch (error) {
+    console.log(`   ⚠️ 휴머나이징 재작성 실패, 원문 유지: ${getErrorMessage(error)}`);
+    return sections;
+  }
+
+  const parts = rewritten
+    .split("<<<섹션구분>>>")
+    .map((part) => part.replace(/^\s+|\s+$/g, ""))
+    .filter(Boolean);
+  if (parts.length !== sections.length) {
+    console.log(
+      `   ⚠️ 재작성 결과 섹션 수 불일치(${parts.length}/${sections.length}), 원문을 유지합니다.`
+    );
+    return sections;
+  }
+
+  const afterScore = scanAiTells(parts.join("\n\n")).score;
+  if (afterScore >= beforeScore) {
+    console.log(`   ⚠️ 재작성 후 점수 개선 없음(${beforeScore}→${afterScore}), 원문을 유지합니다.`);
+    return sections;
+  }
+
+  console.log(`   ✅ 휴머나이징 재작성 적용 (AI 티 점수 ${beforeScore}→${afterScore})`);
+  return parts;
+}
+
 async function generateWithAI(
   systemPrompt: string,
   userPrompt: string,
@@ -5077,9 +5192,11 @@ async function generateWithAI(
 async function step2_generatePost(
   product: ProductInfo,
   brandLink: string,
-  productId?: string | null
+  productId?: string | null,
+  connectKind: "SHOPPING" | "TRAVEL" = "SHOPPING"
 ): Promise<GeneratedPostPreview> {
-  console.log("\n📝 STEP 2: SEO 최적화 블로그 글 생성 (확장판)");
+  const isTravel = connectKind === "TRAVEL";
+  console.log(`\n📝 STEP 2: SEO 최적화 블로그 글 생성 (확장판${isTravel ? " · 여행" : ""})`);
   console.log(`   🤖 AI Provider: ${AI_PROVIDER.toUpperCase()}`);
   if (REQUESTED_AI_PROVIDER !== AI_PROVIDER) {
     console.log(`      - 요청 Provider ${REQUESTED_AI_PROVIDER.toUpperCase()} 대신 ${AI_PROVIDER.toUpperCase()} API로 진행합니다.`);
@@ -5139,20 +5256,36 @@ async function step2_generatePost(
   }
   
   // 인트로 변화를 위한 랜덤 요소. 직접 구매/사용을 단정하지 않는 관찰형 힌트만 사용한다.
-  const intros = [
-    "상세 정보를 보면서 구매 전 기준을 정리해봤어요",
-    "후기와 스펙을 같이 확인해봤어요",
-    "옵션을 고르기 전에 체크할 점이 보였어요",
-    "가격과 구성을 기준으로 살펴봤어요",
-    "상품 이미지를 보면서 포인트를 정리했어요"
-  ];
+  const intros = isTravel
+    ? [
+        "일정과 포함 사항을 기준으로 정리해봤어요",
+        "예약 전에 확인할 조건들을 먼저 살펴봤어요",
+        "코스 구성을 보면서 동선을 그려봤어요",
+        "가격에 뭐가 포함되는지부터 확인해봤어요",
+        "여행 시기와 조건을 같이 놓고 봤어요",
+      ]
+    : [
+        "상세 정보를 보면서 구매 전 기준을 정리해봤어요",
+        "후기와 스펙을 같이 확인해봤어요",
+        "옵션을 고르기 전에 체크할 점이 보였어요",
+        "가격과 구성을 기준으로 살펴봤어요",
+        "상품 이미지를 보면서 포인트를 정리했어요"
+      ];
   const randomIntro = intros[Math.floor(Math.random() * intros.length)];
 
-  const endings = [
-    "구매 전 비교 기준으로 보기 좋아요", "옵션 확인 후 고르면 좋겠어요",
-    "필요한 분께 참고가 될 만해요", "가격과 구성을 함께 보면 좋아요",
-    "상세 조건은 한 번 더 확인해보세요"
-  ];
+  const endings = isTravel
+    ? [
+        "예약 전 일정·포함 조건은 꼭 확인해보세요",
+        "출발일 기준으로 가격이 달라질 수 있어요",
+        "동행 유형에 맞는 옵션인지 살펴보면 좋아요",
+        "취소·변경 규정은 예약 페이지에서 확인하세요",
+        "비슷한 코스와 비교해보고 결정해도 늦지 않아요",
+      ]
+    : [
+        "구매 전 비교 기준으로 보기 좋아요", "옵션 확인 후 고르면 좋겠어요",
+        "필요한 분께 참고가 될 만해요", "가격과 구성을 함께 보면 좋아요",
+        "상세 조건은 한 번 더 확인해보세요"
+      ];
   const randomEnding = endings[Math.floor(Math.random() * endings.length)];
 
   const systemPrompt = `당신은 인기 네이버 블로거입니다.
@@ -5162,9 +5295,44 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? buildHumanMobileStyleGuide() : "- 친근하고 �
 - SEO를 위해 상품명, 관련 키워드를 자연스럽게 본문에 포함
 - 매번 조금씩 다른 표현 사용 (똑같은 문구 반복 금지)
 - 과장 없이 신뢰감 있게 작성
+${NAVER_SEO_TITLE_RULES}
+${BLOG_HUMANIZE_MOBILE_STYLE ? `\n${HUMANIZE_RULES}` : ""}
 ${openCrabPromptBlock ? `\n${openCrabPromptBlock}` : ""}`;
 
-  const userPrompt = `다음 상품의 상세 블로그 리뷰를 작성해주세요.
+  // 여행 상품은 리뷰가 아니라 "예약 전 정보 정리 글"이다. 일정·포함사항·여행지
+  // 정보를 제공된 데이터와 널리 알려진 사실 안에서만 쓰도록 별도 계획을 준다.
+  const travelSectionPlan = `4. 섹션 구성 (${bodySectionCount}개, 아래에서 상품 정보에 맞는 것만 골라 구성):
+   - 이 상품이 어떤 여행인지 (지역·기간·형태)
+   - 일정/코스 정리 (상품 설명에 있는 일정만, 없으면 "일정은 예약 페이지 기준 확인" 안내)
+   - 주요 방문지 소개 ① (그 지역의 널리 알려진 특징 위주)
+   - 주요 방문지 소개 ②
+   - 포함/불포함 사항 체크 (상품 정보에 있는 것만)
+   - 이런 여행 스타일에 잘 맞아요
+   - 예약 전 확인 포인트 (출발일·인원·취소규정)
+   - 준비물과 팁 (일반적인 여행 준비 상식 수준)
+   - 시기별 참고 사항 (계절 특성 등 일반 상식 수준)
+
+   ⚠️ 사실 기반 원칙 (여행):
+   - 위 "상품 정보"에 없는 일정·가격·포함사항·호텔 등급을 지어내지 마세요.
+   - 방문지 설명은 그 지역에 대해 널리 알려진 사실(대표 명소, 지리, 계절 특성)만 쓰고,
+     영업시간·입장료·최신 행사처럼 변동되는 세부 정보는 단정하지 마세요.
+   - 실제 다녀온 것처럼 "다녀왔다", "먹어봤다"라고 단정하지 마세요.`;
+  const productSectionPlan = `4. 섹션 구성 (${bodySectionCount}개):
+   - 구매 전 확인 포인트
+   - 구성 및 패키지 확인
+   - 첫인상 / 디자인
+   - 크기 & 스펙 정보
+   - 주요 기능 ①
+   - 주요 기능 ②
+   - 사용 장면별 체크
+   - 장점으로 보이는 부분
+   - 확인하면 좋을 아쉬운 점
+   - 이런 분께 잘 맞아요
+
+   실제 구매/택배 수령/직접 사용 경험이 제공되지 않았으므로
+   "주문했다", "받아봤다", "써봤다", "재구매 의사"처럼 체험을 단정하지 마세요.`;
+
+  const userPrompt = `다음 ${isTravel ? "여행 상품을 소개하는 블로그 글" : "상품의 상세 블로그 리뷰"}를 작성해주세요.
 
 ## 상품 정보
 - 상품명: ${product.name}
@@ -5187,26 +5355,31 @@ ${product.rating ? `- 평점: ${product.rating}점` : ''}
 ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일 버전 고정" : ""}
 
 ## 작성 규칙
-1. 제목: 상품 카테고리 + 상품명 키워드 포함, 25-35자
+1. 제목: ${isTravel ? "핵심 여행지 검색 키워드를 맨 앞에 + 상품명" : "핵심 검색 키워드(상품 카테고리)를 맨 앞에 + 상품명"}, 25-35자
    - 제목에는 이모지를 절대 넣지 마세요.
-   예: "아기비데 추천 | 해피달링 시그니처 워터탭 솔직 후기"
+   - "완벽 가이드", "총정리", "꿀팁" 같은 낚시성 문구 금지 (네이버 스팸 기준).
+   예: ${isTravel ? '"제주 서부 코스 | ○○ 패키지 일정과 포함사항"' : '"아기비데 추천 | 해피달링 시그니처 워터탭 솔직 후기"'}
 
-2. 본문을 정확히 ${bodySectionCount}개 섹션으로 작성 (총 2000자 이상)
+2. 본문을 정확히 ${bodySectionCount}개 섹션으로 작성
+   - 전체 분량은 공백 제외 1,300~1,800자. 상위 노출 글 실측 기준이며, 억지로 늘리지 마세요.
+   - 글자보다 이미지가 본체입니다. 문장은 사진 사이를 잇는 역할로 짧게.
 
 3. 각 섹션 구조:
    - 소제목 (한 줄, 이모지 금지)
    - 빈 줄
-   - 본문 4-6문장 (각 문장 끝에 줄바꿈, 각 문장 25-45자)
+   - 본문 3-5문장 (각 문장 끝에 줄바꿈, 각 문장 25-45자)
    - 한 문장에 정보 하나만 담고, 어색하면 더 짧게 나누기
    - 빈 줄
 
 4. 섹션 구성 (${bodySectionCount}개):
-${productEditorialPlan.sections.map((section, index) => `   ${index + 1}) ${section.title}: ${section.purpose}`).join("\n")}
+${isTravel
+  ? travelSectionPlan
+  : `${productEditorialPlan.sections.map((section, index) => `   ${index + 1}) ${section.title}: ${section.purpose}`).join("\n")}
 
 ${productEditorialPromptBlock}
 
    실제 구매/택배 수령/직접 사용 경험이 제공되지 않았으므로
-   "주문했다", "받아봤다", "써봤다", "재구매 의사"처럼 체험을 단정하지 마세요.
+   "주문했다", "받아봤다", "써봤다", "재구매 의사"처럼 체험을 단정하지 마세요.`}
 
 5. SEO 키워드 삽입:
    - 제목에 메인 키워드
@@ -5221,11 +5394,12 @@ ${productEditorialPromptBlock}
    - 리뷰 수/평점은 확인된 경우에만 참고 포인트로 언급
    - 구매 유도보다 가격 판단 기준을 알려주는 방식으로 작성
 
-7. 해시태그 20개:
-   - 상품명 관련 (3개)
-   - 카테고리 관련 (5개)  
-   - 검색용 키워드 (7개): 추천, 후기, 리뷰, 비교, 순위, 가격, 장단점
-   - 일반 태그 (5개): 일상, 육아템, 생활용품, 가성비 등
+7. 해시태그 ${NAVER_BLOG_HASHTAG_COUNT}개 (상위 노출 글 실측 기준 3~5개):
+${isTravel
+  ? `   - 여행지·상품명 키워드를 우선하고, 여행 형태(패키지여행/자유여행 등)로 보완
+   - 검색 의도가 분명한 태그만. 개수를 채우기 위한 일반 태그는 넣지 마세요`
+  : `   - 상품명·카테고리 키워드를 우선하고, 검색 의도가 분명한 태그(추천/후기/비교)로 보완
+   - 개수를 채우기 위한 일반 태그(일상 등)는 넣지 마세요`}
 
 8. AI 티가 나는 문장 금지:
 ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES}\n${HUMAN_REVIEW_SAFETY_RULES}` : "   - 반복적인 문장 구조와 과장 표현 금지"}
@@ -5281,8 +5455,14 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
     );
   }
   
-  // 마지막에 필수 고지 문구만 추가하고, 링크는 에디터의 쇼핑커넥트 컴포넌트로 별도 삽입한다.
-  const lastSection = `
+  // 마지막에 필수 고지 문구만 추가하고, 링크는 에디터의 커넥트 컴포넌트로 별도 삽입한다.
+  const lastSection = isTravel
+    ? `
+
+이 포스팅은 네이버 여행 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받습니다.
+
+자세한 일정과 예약 정보는 아래 여행커넥트에서 확인해보세요.`
+    : `
 
 이 포스팅은 네이버 쇼핑 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받습니다.
 
@@ -5294,6 +5474,17 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
     bodySections = bodySections.map((section, index) =>
       applyHumanMobilePolishToSection(section, index, product)
     );
+  }
+
+  // AI 티(번역투·상투구·기계적 구조)를 코드로 측정하고, 기준을 넘으면 한 번 재작성한다.
+  const aiTellScan = scanAiTells(bodySections.join("\n\n"));
+  console.log(`   🧪 AI 티 스캔: ${aiTellScan.summary}`);
+  if (
+    BLOG_HUMANIZE_REWRITE_ENABLED &&
+    !BROWSER_GPT_MODE &&
+    aiTellScan.score >= BLOG_HUMANIZE_REWRITE_THRESHOLD
+  ) {
+    bodySections = await rewriteSectionsForHumanTone(bodySections, aiTellScan.score);
   }
 
   const sections = [...bodySections];
@@ -6002,6 +6193,7 @@ async function clickFirstVisibleLocator(
 }
 
 const SHOPPING_CONNECT_TOOL_LABEL = "쇼핑커넥트";
+const TRAVEL_CONNECT_TOOL_LABEL = "여행커넥트";
 
 const SHOPPING_CONNECT_TOOL_SELECTORS = [
   'button[data-name="shoppingConnect"]',
@@ -6015,6 +6207,34 @@ const SHOPPING_CONNECT_TOOL_SELECTORS = [
   'li:has-text("쇼핑커넥트") button',
   'li:has-text("쇼핑커넥트")',
 ];
+
+// 여행커넥트 전용 메뉴 후보. 에디터가 여행 항목을 별도 메뉴로 제공하면 이쪽이 먼저
+// 걸리고, 같은 커넥트 패널을 공유하면 아래 쇼핑커넥트 선택자로 폴백한다.
+const TRAVEL_CONNECT_TOOL_SELECTORS = [
+  'button[data-name="travelConnect"]',
+  'button[data-name="travel-connect"]',
+  'button[data-name*="travel" i]',
+  'button[aria-label*="여행커넥트"]',
+  'button[title*="여행커넥트"]',
+  '[role="menuitem"]:has-text("여행커넥트")',
+  'button:has-text("여행커넥트")',
+  'a:has-text("여행커넥트")',
+  'li:has-text("여행커넥트") button',
+  'li:has-text("여행커넥트")',
+];
+
+type EditorConnectKind = "SHOPPING" | "TRAVEL";
+
+function connectToolLabel(kind: EditorConnectKind): string {
+  return kind === "TRAVEL" ? TRAVEL_CONNECT_TOOL_LABEL : SHOPPING_CONNECT_TOOL_LABEL;
+}
+
+function connectToolSelectors(kind: EditorConnectKind): string[] {
+  // 여행은 전용 선택자를 먼저 시도하고 쇼핑커넥트 메뉴를 폴백으로 둔다.
+  return kind === "TRAVEL"
+    ? [...TRAVEL_CONNECT_TOOL_SELECTORS, ...SHOPPING_CONNECT_TOOL_SELECTORS]
+    : SHOPPING_CONNECT_TOOL_SELECTORS;
+}
 
 const EDITOR_INSERT_MENU_SELECTORS = [
   'button[data-name="insert"]',
@@ -6136,22 +6356,27 @@ async function waitForShoppingConnectPanel(page: Page, timeout = 8000): Promise<
   return null;
 }
 
-async function selectShoppingConnectToolFromMenu(page: Page): Promise<boolean> {
-  if (await clickFirstVisibleLocator(page, SHOPPING_CONNECT_TOOL_SELECTORS, 1200)) {
+async function selectShoppingConnectToolFromMenu(
+  page: Page,
+  kind: EditorConnectKind = "SHOPPING"
+): Promise<boolean> {
+  const toolSelectors = connectToolSelectors(kind);
+  if (await clickFirstVisibleLocator(page, toolSelectors, 1200)) {
     return (await waitForShoppingConnectPanel(page, 3000)) !== null;
   }
 
   const searchInput = await findFirstVisibleLocator(page, MENU_SEARCH_INPUT_SELECTORS);
   if (!searchInput) return false;
 
+  const label = connectToolLabel(kind);
   await searchInput.click({ timeout: 1200 }).catch(() => {});
-  await searchInput.fill(SHOPPING_CONNECT_TOOL_LABEL, { timeout: 1500 }).catch(async () => {
+  await searchInput.fill(label, { timeout: 1500 }).catch(async () => {
     await searchInput.press("Control+A").catch(() => {});
-    await searchInput.type(SHOPPING_CONNECT_TOOL_LABEL, { delay: 20 }).catch(() => {});
+    await searchInput.type(label, { delay: 20 }).catch(() => {});
   });
   await page.waitForTimeout(350);
 
-  if (await clickFirstVisibleLocator(page, SHOPPING_CONNECT_TOOL_SELECTORS, 1600)) {
+  if (await clickFirstVisibleLocator(page, toolSelectors, 1600)) {
     return (await waitForShoppingConnectPanel(page, 3000)) !== null;
   }
 
@@ -6160,16 +6385,19 @@ async function selectShoppingConnectToolFromMenu(page: Page): Promise<boolean> {
   return (await getShoppingConnectPanel(page)) !== null;
 }
 
-async function openShoppingConnectTool(page: Page): Promise<boolean> {
+async function openShoppingConnectTool(
+  page: Page,
+  kind: EditorConnectKind = "SHOPPING"
+): Promise<boolean> {
   for (let attempt = 1; attempt <= 4; attempt += 1) {
-    if (await selectShoppingConnectToolFromMenu(page)) {
+    if (await selectShoppingConnectToolFromMenu(page, kind)) {
       return true;
     }
 
     await clickFirstVisibleLocator(page, EDITOR_INSERT_MENU_SELECTORS, 1200);
     await page.waitForTimeout(350);
 
-    if (await selectShoppingConnectToolFromMenu(page)) {
+    if (await selectShoppingConnectToolFromMenu(page, kind)) {
       return true;
     }
 
@@ -6190,10 +6418,14 @@ async function countEditorShoppingConnectArtifacts(page: Page, brandLink: string
       const selectors = [
         '[class*="shopping" i]',
         '[class*="commerce" i]',
+        '[class*="travel" i]',
         '[data-name*="shopping" i]',
         '[data-module*="shopping" i]',
+        '[data-name*="travel" i]',
+        '[data-module*="travel" i]',
         'a[href*="naver.me"]',
         'a[href*="shopping.naver.com"]',
+        'a[href*="brandconnect.naver.com"]',
       ];
       const elements = new Set<Element>();
       for (const selector of selectors) {
@@ -6632,17 +6864,19 @@ async function insertShoppingConnectLink(
   page: Page,
   brandLink: string,
   productName?: string | null,
-  productFinalUrl?: string | null
+  productFinalUrl?: string | null,
+  kind: EditorConnectKind = "SHOPPING"
 ): Promise<void> {
-  console.log("   쇼핑커넥트 링크 삽입...");
+  const label = connectToolLabel(kind);
+  console.log(`   ${label} 링크 삽입...`);
   await setNaverTextFormat(page, "text");
   await page.keyboard.press("Enter").catch(() => {});
   await page.waitForTimeout(250);
 
   const previousArtifactCount = await countEditorShoppingConnectArtifacts(page, brandLink);
 
-  if (!(await openShoppingConnectTool(page))) {
-    throw new Error("쇼핑커넥트 메뉴를 열지 못했습니다.");
+  if (!(await openShoppingConnectTool(page, kind))) {
+    throw new Error(`${label} 메뉴를 열지 못했습니다. 에디터에 해당 메뉴가 있는지 확인하세요.`);
   }
 
   if (productName?.trim() || productFinalUrl?.trim()) {
@@ -6836,16 +7070,14 @@ async function step5and6_uploadAndWrite(
   }
 
   if (options?.shoppingConnectUrl) {
-    if (options.connectKind === "TRAVEL") {
-      throw new Error(
-        "여행커넥트 에디터 삽입 계약이 아직 확인되지 않았습니다. 잘못된 링크 삽입을 막기 위해 발행을 중단합니다."
-      );
-    }
+    // 삽입 실패는 insertShoppingConnectLink가 throw로 알리고 발행이 중단된다(fail-closed).
+    // 여행커넥트도 같은 검증을 거치므로, 잘못된 상품이 첨부된 채 발행되지 않는다.
     await insertShoppingConnectLink(
       page,
       options.shoppingConnectUrl,
       options.shoppingConnectProductName,
-      options.shoppingConnectProductFinalUrl
+      options.shoppingConnectProductFinalUrl,
+      options.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING"
     );
   }
   
@@ -8632,13 +8864,6 @@ async function main() {
     console.error("❌ 링크를 찾을 수 없습니다.");
     process.exit(1);
   }
-  if (link.connectKind === "TRAVEL") {
-    console.error(
-      "❌ 여행커넥트 에디터 삽입 계약이 아직 확인되지 않았습니다. 잘못된 초안 생성을 막기 위해 브라우저 실행 전에 중단합니다."
-    );
-    process.exit(1);
-  }
-  
   console.log(`\n📎 URL: ${link.url}`);
   console.log(`📂 게시판 번호: ${link.categoryNo || "기본"}`);
   console.log(`🧩 소제목 스타일: ${link.useSectionHeading ? "ON" : "OFF"}`);
@@ -8776,7 +9001,12 @@ async function main() {
     
     setStage("STEP2 SEO 글 생성");
     // STEP 2: SEO 최적화 글 생성
-    const post = await step2_generatePost(product, link.url, link.id);
+    const post = await step2_generatePost(
+      product,
+      link.url,
+      link.id,
+      link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING"
+    );
 
     setStage("STEP2.5 대표 썸네일 생성");
     const generatedThumbnail = await generateTopTextCutoutThumbnail(

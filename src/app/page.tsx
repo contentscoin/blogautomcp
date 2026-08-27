@@ -150,6 +150,10 @@ interface BrandConnectSelectionOptionsResponse {
     categoryUrl?: string;
     categories?: BrandConnectCategoryOption[];
     promotions?: BrandConnectPromotionOption[];
+    itemCount?: number;
+    registrationAvailable?: boolean;
+    /** 시간 예산을 넘겨 일부만 채워진 응답. */
+    truncated?: boolean;
   };
 }
 
@@ -168,6 +172,12 @@ function getBrandConnectErrorMessage(
 ): string {
   if (typeof error === "string") return error;
   return error?.message || "BrandConnect 옵션을 불러오지 못했습니다.";
+}
+
+function isCaptureRequiredError(
+  error: BrandConnectSelectionOptionsResponse["error"]
+): boolean {
+  return typeof error === "object" && error !== null && error.code === "CONNECT_CONTRACT_CAPTURE_REQUIRED";
 }
 
 const SEASONAL_REGISTER_COUNT_10 = 10;
@@ -263,7 +273,6 @@ export default function Dashboard() {
   const [superPublishingRunning, setSuperPublishingRunning] = useState(false);
   const [brandConnectCategoryUrl, setBrandConnectCategoryUrl] = useState("");
   const [brandConnectKind, setBrandConnectKind] = useState<BrandConnectKind>("shopping");
-  const brandConnectKindRef = useRef<BrandConnectKind>("shopping");
   const [brandConnectDuplicateWindowDays, setBrandConnectDuplicateWindowDays] = useState("30");
   const [brandConnectCategoryOptions, setBrandConnectCategoryOptions] = useState<BrandConnectCategoryOption[]>([]);
   const [brandConnectPromotionOptions, setBrandConnectPromotionOptions] = useState<BrandConnectPromotionOption[]>([]);
@@ -272,6 +281,10 @@ export default function Dashboard() {
   const [brandConnectOptionsLoading, setBrandConnectOptionsLoading] = useState(false);
   const [brandConnectOptionsLoaded, setBrandConnectOptionsLoaded] = useState(false);
   const [brandConnectOptionsError, setBrandConnectOptionsError] = useState<string | null>(null);
+  const [brandConnectOptionsNotice, setBrandConnectOptionsNotice] = useState<string | null>(null);
+  const [brandConnectCaptureRequired, setBrandConnectCaptureRequired] = useState(false);
+  const brandConnectAbortRef = useRef<AbortController | null>(null);
+  const brandConnectRequestGenerationRef = useRef(0);
   const [travelContractCapturing, setTravelContractCapturing] = useState(false);
   const [travelContractMessage, setTravelContractMessage] = useState<string | null>(null);
 
@@ -354,7 +367,6 @@ export default function Dashboard() {
 
   const selectBrandConnectKind = (nextKind: BrandConnectKind) => {
     if (nextKind === brandConnectKind) return;
-    brandConnectKindRef.current = nextKind;
     setBrandConnectKind(nextKind);
     setBrandConnectCategoryUrl("");
     setBrandConnectCategoryOptions([]);
@@ -427,9 +439,21 @@ export default function Dashboard() {
   }, []);
 
   const loadBrandConnectSelectionOptions = useCallback(async () => {
+    // 요청마다 세대 번호를 올린다. 늦게 도착한 이전 요청은 상태를 건드리지 못한다.
+    // (예전에는 늦은 응답이 로딩 완료 플래그만 세워서, 커넥트 종류를 바꾸면
+    //  새 목록을 영영 불러오지 않고 빈 화면에 머물렀다.)
+    const generation = brandConnectRequestGenerationRef.current + 1;
+    brandConnectRequestGenerationRef.current = generation;
+    const isCurrent = () => brandConnectRequestGenerationRef.current === generation;
+
+    brandConnectAbortRef.current?.abort();
+    const controller = new AbortController();
+    brandConnectAbortRef.current = controller;
+
     try {
       setBrandConnectOptionsLoading(true);
       setBrandConnectOptionsError(null);
+      setBrandConnectOptionsNotice(null);
 
       const params = new URLSearchParams();
       params.set("connectKind", brandConnectKind);
@@ -437,19 +461,18 @@ export default function Dashboard() {
         params.set("categoryUrl", brandConnectCategoryUrl.trim());
       }
 
-      const query = params.toString();
-      const res = await fetch(`/api/brandlinks/selection-options${query ? `?${query}` : ""}`, {
+      const res = await fetch(`/api/brandlinks/selection-options?${params.toString()}`, {
         cache: "no-store",
+        signal: controller.signal,
       });
       const data = (await res.json()) as BrandConnectSelectionOptionsResponse;
-
-      // Ignore a late response from the previously selected connect kind.
-      if (brandConnectKindRef.current !== brandConnectKind) return;
+      if (!isCurrent()) return;
 
       if (!res.ok || !data.success) {
         setBrandConnectCategoryOptions([]);
         setBrandConnectPromotionOptions([]);
         setBrandConnectOptionsError(getBrandConnectErrorMessage(data.error));
+        setBrandConnectCaptureRequired(isCaptureRequiredError(data.error));
         return;
       }
 
@@ -458,6 +481,7 @@ export default function Dashboard() {
       const categoryIds = new Set(categories.map((category) => category.id));
       const promotionValues = new Set(promotions.map((promotion) => promotion.value));
 
+      setBrandConnectCaptureRequired(false);
       setBrandConnectCategoryOptions(categories);
       setBrandConnectPromotionOptions(promotions);
       setSelectedBrandConnectCategoryIds((current) =>
@@ -466,24 +490,35 @@ export default function Dashboard() {
       setSelectedBrandConnectPromotions((current) =>
         current.filter((value) => promotionValues.has(value))
       );
+      if (data.data?.truncated) {
+        setBrandConnectOptionsNotice(
+          "시간이 오래 걸려 일부 옵션만 불러왔습니다. 다시 불러오면 더 채워질 수 있습니다."
+        );
+      } else if (typeof data.data?.itemCount === "number") {
+        setBrandConnectOptionsNotice(`항목 ${data.data.itemCount}개를 확인했습니다.`);
+      }
       if (data.data?.categoryUrl) {
         setBrandConnectCategoryUrl(data.data.categoryUrl);
       }
     } catch (error) {
+      // 새 요청이 이전 요청을 취소한 경우는 오류가 아니다.
+      if (controller.signal.aborted || !isCurrent()) return;
       console.error("BrandConnect 옵션 로드 실패:", error);
       setBrandConnectCategoryOptions([]);
       setBrandConnectPromotionOptions([]);
       setBrandConnectOptionsError("BrandConnect 옵션 로드 중 오류가 발생했습니다.");
     } finally {
-      setBrandConnectOptionsLoaded(true);
-      setBrandConnectOptionsLoading(false);
+      if (isCurrent()) {
+        setBrandConnectOptionsLoaded(true);
+        setBrandConnectOptionsLoading(false);
+      }
     }
   }, [brandConnectCategoryUrl, brandConnectKind]);
 
   const captureTravelContract = useCallback(async () => {
     const categoryUrl = brandConnectCategoryUrl.trim();
     setTravelContractCapturing(true);
-    setTravelContractMessage(null);
+    setTravelContractMessage("브라우저 창에서 여행커넥트 목록을 여는 중입니다. 최대 1분 정도 걸릴 수 있습니다.");
     try {
       const response = await fetch("/api/brandlinks/travel-contract", {
         method: "POST",
@@ -492,13 +527,16 @@ export default function Dashboard() {
       });
       const payload = await response.json();
       if (!response.ok || !payload.success) throw new Error(typeof payload.error === "string" ? payload.error : "여행커넥트 계약 캡처에 실패했습니다.");
-      setTravelContractMessage(`${payload.data.message} (${payload.data.logFile})`);
+      setTravelContractMessage(payload.data.message);
+      // 계약이 저장됐으니 곧바로 목록을 불러와 캡처 결과를 눈으로 확인시켜 준다.
+      setBrandConnectCaptureRequired(false);
+      await loadBrandConnectSelectionOptions();
     } catch (error) {
       setTravelContractMessage(error instanceof Error ? error.message : "여행커넥트 계약 캡처에 실패했습니다.");
     } finally {
       setTravelContractCapturing(false);
     }
-  }, [brandConnectCategoryUrl]);
+  }, [brandConnectCategoryUrl, loadBrandConnectSelectionOptions]);
 
   useEffect(() => {
     fetchLinks();
@@ -523,6 +561,9 @@ export default function Dashboard() {
     brandConnectOptionsLoading,
     loadBrandConnectSelectionOptions,
   ]);
+
+  // 화면을 떠날 때 진행 중인 옵션 요청을 정리한다.
+  useEffect(() => () => brandConnectAbortRef.current?.abort(), []);
 
   useEffect(() => {
     if (!publishingId) return;
@@ -1998,16 +2039,23 @@ export default function Dashboard() {
                   {brandConnectOptionsError && (
                     <p className="text-xs text-red-600">{brandConnectOptionsError}</p>
                   )}
+                  {!brandConnectOptionsError && brandConnectOptionsNotice && (
+                    <p className="text-xs text-slate-500">{brandConnectOptionsNotice}</p>
+                  )}
                   {brandConnectKind === "travel" && (
                     <div className="flex flex-col md:flex-row md:items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
                       <p className="text-xs text-amber-800 flex-1">
-                        여행커넥트 목록은 로그인된 세션에서 자동으로 불러옵니다. 아래 캡처는 응답 구조가 바뀌었을 때 진단용으로만 사용합니다.
+                        {brandConnectCaptureRequired
+                          ? "여행커넥트 목록 계약이 아직 없습니다. 아래 버튼으로 1회 캡처하면 이후에는 목록 조회와 등록·발행이 열립니다."
+                          : "여행커넥트는 로그인된 세션에서 화면과 응답 구조를 자동 탐색해 1회 캡처합니다. 원문 개인정보는 저장하지 않습니다."}
+                        {" "}
+                        발행 시 에디터 삽입 결과를 검증해, 올바른 여행 상품이 첨부되지 않으면 발행을 중단합니다.
                       </p>
                       <button
                         type="button"
                         onClick={() => void captureTravelContract()}
                         disabled={travelContractCapturing}
-                        className="px-3 py-2 text-xs font-medium bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="px-3 py-2 text-xs font-medium bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
                       >
                         {travelContractCapturing ? "진단 캡처 중..." : "여행 응답 진단 캡처"}
                       </button>

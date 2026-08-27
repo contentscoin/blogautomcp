@@ -168,8 +168,10 @@ export function getBrandLinkContentReadiness(
   const totalLength = sections.reduce((sum, section) => sum + section.length, 0);
   const mainSectionCount = Math.max(0, sections.length - 1);
   const disclosureText = sections[sections.length - 1] || "";
+  // 쇼핑커넥트/여행커넥트 모두 인정한다. 여행 글의 고지 문구는 "여행 커넥트"라서
+  // 쇼핑만 검사하면 여행 발행이 전부 게이트에서 막힌다.
   const hasDisclosure =
-    /쇼핑\s*커넥트|쇼핑커넥트/u.test(disclosureText) &&
+    /(?:쇼핑|여행)\s*커넥트/u.test(disclosureText) &&
     /수수료/u.test(disclosureText) &&
     /제공/u.test(disclosureText);
   const normalizedBrandLink = normalizeText(input.brandLink);
@@ -211,7 +213,14 @@ export function getBrandLinkContentReadiness(
     {
       key: "hashtags",
       label: "해시태그",
-      status: input.hashtags.length >= 15 ? "pass" : input.hashtags.length >= 10 ? "warn" : "fail",
+      // 상위 노출 글 실측 기준 태그 3~5개. 과다 태그는 키워드 남용(스팸)으로 읽힐
+      // 수 있어 10개 초과도 경고로 본다.
+      status:
+        input.hashtags.length >= 3 && input.hashtags.length <= 10
+          ? "pass"
+          : input.hashtags.length >= 2
+            ? "warn"
+            : "fail",
     },
     {
       key: "raw-link",
@@ -220,7 +229,7 @@ export function getBrandLinkContentReadiness(
     },
     {
       key: "disclosure",
-      label: "쇼핑커넥트 고지",
+      label: "커넥트 활동 고지",
       status: hasDisclosure ? "pass" : "fail",
     },
     {
@@ -299,10 +308,10 @@ export function getBrandLinkContentReadiness(
     });
   }
 
-  if (input.hashtags.length < 10) {
+  if (input.hashtags.length < 3) {
     return buildResult({
       code: "too-few-hashtags",
-      reason: `해시태그가 부족합니다. 현재 ${input.hashtags.length}개입니다.`,
+      reason: `해시태그가 부족합니다. 현재 ${input.hashtags.length}개입니다. (권장 3~5개)`,
       score,
       sectionCount: sections.length,
       hashtagCount: input.hashtags.length,
@@ -330,7 +339,7 @@ export function getBrandLinkContentReadiness(
   if (!hasDisclosure) {
     return buildResult({
       code: "missing-disclosure",
-      reason: "쇼핑커넥트 활동 고지 문구가 없습니다.",
+      reason: "커넥트 활동 고지 문구가 없습니다.",
       score,
       sectionCount: sections.length,
       hashtagCount: input.hashtags.length,
