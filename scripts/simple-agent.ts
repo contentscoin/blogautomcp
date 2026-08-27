@@ -6781,8 +6781,11 @@ async function step5and6_uploadAndWrite(
 
   if (options?.shoppingConnectUrl) {
     if (options.connectKind === "TRAVEL") {
+      // 여행커넥트는 목록 조회까지만 지원한다. 제휴 링크 발급·에디터 삽입 계약이
+      // 확인되지 않은 상태에서 무언가를 끼워 넣으면 글에 잘못된 링크가 남는다.
       throw new Error(
-        "여행커넥트 에디터 삽입 계약이 아직 확인되지 않았습니다. 잘못된 링크 삽입을 막기 위해 발행을 중단합니다."
+        "여행커넥트는 목록 조회까지만 지원합니다. 제휴 링크 발급과 에디터 삽입 계약이 확인되지 않아, " +
+          "잘못된 링크가 글에 들어가는 것을 막기 위해 발행을 중단합니다. 쇼핑커넥트로 진행하세요."
       );
     }
     await insertShoppingConnectLink(
@@ -8578,7 +8581,8 @@ async function main() {
   }
   if (link.connectKind === "TRAVEL") {
     console.error(
-      "❌ 여행커넥트 에디터 삽입 계약이 아직 확인되지 않았습니다. 잘못된 초안 생성을 막기 위해 브라우저 실행 전에 중단합니다."
+      "❌ 여행커넥트는 목록 조회까지만 지원합니다. 제휴 링크 발급과 에디터 삽입 계약이 확인되지 않아, " +
+        "잘못된 초안 생성을 막기 위해 브라우저 실행 전에 중단합니다. 쇼핑커넥트로 진행하세요."
     );
     process.exit(1);
   }

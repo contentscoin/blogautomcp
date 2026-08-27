@@ -7,7 +7,14 @@ import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { PrismaClient } from "@prisma/client";
 import { buildAppUrl, notifyAndLogCompletion } from "./lib/chatbot-notifier";
 import { getNaverSessionFile } from "./lib/app-paths";
-import { buildCaptureRequiredPayload, parseConnectKind, resolveConnectContract, toStoredConnectKind, type ConnectKind } from "../src/lib/brandconnect-kind";
+import {
+  buildCaptureRequiredPayload,
+  buildRegistrationUnsupportedPayload,
+  parseConnectKind,
+  toStoredConnectKind,
+  type ConnectKind,
+} from "../src/lib/brandconnect-kind";
+import { resolveConnectContract } from "../src/lib/connect-contract-store";
 
 chromium.use(StealthPlugin());
 
@@ -1266,6 +1273,9 @@ async function main() {
   const connectContract = resolveConnectContract(options.connectKind, options.categoryUrl);
   if (connectContract.captureRequired) {
     throw new Error(JSON.stringify(buildCaptureRequiredPayload(connectContract)));
+  }
+  if (!connectContract.registrationAvailable) {
+    throw new Error(JSON.stringify(buildRegistrationUnsupportedPayload(connectContract)));
   }
   const prisma = new PrismaClient();
 

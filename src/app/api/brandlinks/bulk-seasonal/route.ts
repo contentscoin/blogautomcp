@@ -5,7 +5,12 @@ import fs from "fs";
 import path from "path";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
-import { buildCaptureRequiredPayload, parseConnectKind, resolveConnectContract } from "@/lib/brandconnect-kind";
+import {
+  buildCaptureRequiredPayload,
+  buildRegistrationUnsupportedPayload,
+  parseConnectKind,
+} from "@/lib/brandconnect-kind";
+import { resolveConnectContract } from "@/lib/connect-contract-store";
 
 interface BulkSeasonalBody {
   connectKind?: string;
@@ -205,6 +210,12 @@ export async function POST(request: NextRequest) {
     const contract = resolveConnectContract(connectKind, categoryUrl);
     if (contract.captureRequired) {
       return NextResponse.json({ success: false, error: buildCaptureRequiredPayload(contract) }, { status: 501 });
+    }
+    if (!contract.registrationAvailable) {
+      return NextResponse.json(
+        { success: false, error: buildRegistrationUnsupportedPayload(contract) },
+        { status: 501 }
+      );
     }
     const selectionProfile =
       typeof body.selectionProfile === "string" && body.selectionProfile.trim().length > 0
