@@ -127,12 +127,6 @@ export async function POST(request: NextRequest) {
 
     const collectCount = toSafePositiveInt(body.collectCount, 200, 200);
     const connectKind = parseConnectKind(body.connectKind);
-    if (connectKind === "travel") {
-      return NextResponse.json(
-        { success: false, error: "여행커넥트 수퍼 퍼블리싱은 네이버 에디터 삽입 방식 검증 후 사용할 수 있습니다." },
-        { status: 501 }
-      );
-    }
     const todayCount = Math.min(toSafePositiveInt(body.todayCount, 50, 200), collectCount);
     const dailyQuota = toSafePositiveInt(body.dailyQuota, todayCount, 200);
     const delayMs = toSafePositiveInt(body.delayMs, 1500, 60000);

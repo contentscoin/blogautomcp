@@ -95,6 +95,7 @@ const FIELD_KEY_CANDIDATES: Record<keyof ConnectFieldMap, string[]> = {
     "cost",
   ],
   imageUrl: [
+    "representativeproductimageurl",
     "representimageurl",
     "mainimageurl",
     "thumbnailimageurl",

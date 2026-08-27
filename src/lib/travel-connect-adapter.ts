@@ -281,7 +281,7 @@ export async function discoverConnectContract(options: DiscoveryOptions): Promis
     await browser.close().catch(() => {});
   }
 
-  const best = pickBestListResponse(captured);
+  const best = pickBestListResponse(captured, options.kind);
   if (!best) {
     throw new ConnectContractNotFoundError(
       captured.length === 0
@@ -315,7 +315,44 @@ interface BestListResponse {
 }
 
 /** 가로챈 응답들 중 목록으로 가장 그럴듯한 하나를 고른다. */
-function pickBestListResponse(captured: Array<{ url: string; payload: unknown }>): BestListResponse | null {
+function scoreConnectKindAffinity(
+  kind: ConnectKind,
+  url: URL,
+  rows: Record<string, unknown>[]
+): number {
+  const pathname = url.pathname.toLowerCase();
+  const sample = rows.slice(0, 12);
+  const travelMetadataCount = sample.filter((row) => {
+    const extra = row.extra;
+    return (
+      typeof extra === "object" &&
+      extra !== null &&
+      ["cityNames", "countryNames", "duration", "startDate", "tourTicket", "productType"].some(
+        (key) => key in (extra as Record<string, unknown>)
+      )
+    );
+  }).length;
+  const travelServiceCount = sample.filter((row) =>
+    typeof row.connectServiceType === "string" && /travel|tour/i.test(row.connectServiceType)
+  ).length;
+
+  if (kind === "travel") {
+    let score = 0;
+    if (pathname.includes("/connect/recommend-products")) score += 120;
+    if (pathname.includes("/affiliate-products/")) score -= 120;
+    if (travelMetadataCount > 0) score += 100 + travelMetadataCount;
+    if (travelServiceCount > 0) score += 80 + travelServiceCount;
+    return score;
+  }
+
+  return pathname.includes("/affiliate-products/") ? 40 : 0;
+}
+
+/** 같은 화면에 쇼핑·여행 응답이 함께 있어도 요청한 커넥트 종류를 우선한다. */
+export function pickBestListResponse(
+  captured: Array<{ url: string; payload: unknown }>,
+  kind: ConnectKind
+): BestListResponse | null {
   let best: BestListResponse | null = null;
 
   for (const entry of captured) {
@@ -333,7 +370,7 @@ function pickBestListResponse(captured: Array<{ url: string; payload: unknown }>
       const items = normalizeConnectItems(candidate.rows, fieldMap);
       if (items.length < MIN_DISCOVERED_ITEMS) continue;
 
-      const score = candidate.score + items.length;
+      const score = candidate.score + items.length + scoreConnectKindAffinity(kind, url, candidate.rows);
       if (best && score <= best.score) continue;
 
       best = {

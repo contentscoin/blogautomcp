@@ -5,7 +5,8 @@ import fs from "fs";
 import path from "path";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
-import { parseConnectKind, toStoredConnectKind } from "@/lib/brandconnect-kind";
+import { buildCaptureRequiredPayload, parseConnectKind, toStoredConnectKind } from "@/lib/brandconnect-kind";
+import { resolveConnectContract } from "@/lib/connect-contract-store";
 
 interface BulkScheduleBody {
   connectKind?: string;
@@ -73,9 +74,10 @@ export async function POST(request: NextRequest) {
     const requestedLimit = toSafePositiveInt(body.limit, 10, 200);
     const connectKind = parseConnectKind(body.connectKind);
     const storedConnectKind = toStoredConnectKind(connectKind);
-    if (connectKind === "travel") {
+    const contract = resolveConnectContract(connectKind);
+    if (contract.captureRequired) {
       return NextResponse.json(
-        { success: false, error: "여행커넥트 발행은 네이버 에디터 삽입 방식 검증 후 사용할 수 있습니다." },
+        { success: false, error: buildCaptureRequiredPayload(contract) },
         { status: 501 }
       );
     }

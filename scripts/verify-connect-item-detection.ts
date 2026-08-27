@@ -10,6 +10,7 @@
  */
 
 import { findItemArrays, detectFieldMap, normalizeConnectItems, readArrayAtPath } from "../src/lib/connect-item";
+import { pickBestListResponse } from "../src/lib/travel-connect-adapter";
 
 let failures = 0;
 
@@ -95,6 +96,50 @@ const exotic = {
 const exoticBest = findItemArrays(exotic)[0];
 const exoticMap = exoticBest ? detectFieldMap(exoticBest.rows) : null;
 check("exotic: falls back to longest string column", exoticMap?.name === "zzz", exoticMap);
+
+// 6. 여행 화면은 쇼핑 추천과 여행 추천을 동시에 호출한다. 더 많은 행을 가진 쇼핑
+// 응답이 있어도 여행 메타데이터와 connect 전용 엔드포인트가 있는 쪽을 골라야 한다.
+const mixedCaptured = [
+  {
+    url: "https://gw-brandconnect.naver.com/affiliate/query/affiliate-products/recommend-by-display-category?limit=60",
+    payload: {
+      data: Array.from({ length: 60 }, (_, i) => ({
+        id: 1000 + i,
+        productName: `쇼핑 상품 ${i}`,
+        storeName: "쇼핑몰",
+        discountedSalePrice: 10000 + i,
+        productUrl: `https://shopping.example/${i}`,
+      })),
+    },
+  },
+  {
+    url: "https://gw-brandconnect.naver.com/affiliate/query/connect/recommend-products?limit=20",
+    payload: {
+      data: Array.from({ length: 20 }, (_, i) => ({
+        productId: `TRAVEL-${i}`,
+        name: `여행 상품 ${i}`,
+        storeName: "여행사",
+        discountedSalePrice: 200000 + i,
+        representativeProductImageUrl: `https://travel.example/${i}.jpg`,
+        url: `https://travel.example/product/${i}`,
+        connectServiceType: "TRAVEL",
+        extra: { countryNames: ["대한민국"], cityNames: ["제주"], duration: "2박 3일" },
+      })),
+    },
+  },
+];
+const mixedTravelBest = pickBestListResponse(mixedCaptured, "travel");
+check(
+  "mixed response: travel contract wins over larger shopping response",
+  mixedTravelBest?.endpoint.endsWith("/affiliate/query/connect/recommend-products") === true,
+  mixedTravelBest
+);
+check("mixed response: travel name key", mixedTravelBest?.fieldMap.name === "name", mixedTravelBest?.fieldMap);
+check(
+  "mixed response: travel representative image key",
+  mixedTravelBest?.fieldMap.imageUrl === "representativeProductImageUrl",
+  mixedTravelBest?.fieldMap
+);
 
 if (failures > 0) {
   console.error(`\n${failures}개 검증 실패`);

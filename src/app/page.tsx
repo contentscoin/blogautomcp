@@ -283,6 +283,7 @@ export default function Dashboard() {
   const [brandConnectOptionsError, setBrandConnectOptionsError] = useState<string | null>(null);
   const [brandConnectOptionsNotice, setBrandConnectOptionsNotice] = useState<string | null>(null);
   const [brandConnectCaptureRequired, setBrandConnectCaptureRequired] = useState(false);
+  const [brandConnectRegistrationAvailable, setBrandConnectRegistrationAvailable] = useState(true);
   const brandConnectAbortRef = useRef<AbortController | null>(null);
   const brandConnectRequestGenerationRef = useRef(0);
   const [travelContractCapturing, setTravelContractCapturing] = useState(false);
@@ -375,6 +376,7 @@ export default function Dashboard() {
     setSelectedBrandConnectPromotions([]);
     setBrandConnectOptionsLoaded(false);
     setBrandConnectOptionsError(null);
+    setBrandConnectRegistrationAvailable(nextKind === "shopping");
     setTravelContractMessage(null);
   };
 
@@ -473,6 +475,7 @@ export default function Dashboard() {
         setBrandConnectPromotionOptions([]);
         setBrandConnectOptionsError(getBrandConnectErrorMessage(data.error));
         setBrandConnectCaptureRequired(isCaptureRequiredError(data.error));
+        setBrandConnectRegistrationAvailable(brandConnectKind === "shopping");
         return;
       }
 
@@ -482,6 +485,7 @@ export default function Dashboard() {
       const promotionValues = new Set(promotions.map((promotion) => promotion.value));
 
       setBrandConnectCaptureRequired(false);
+      setBrandConnectRegistrationAvailable(data.data?.registrationAvailable !== false);
       setBrandConnectCategoryOptions(categories);
       setBrandConnectPromotionOptions(promotions);
       setSelectedBrandConnectCategoryIds((current) =>
@@ -1177,7 +1181,8 @@ export default function Dashboard() {
 
   const visibleLinks = links.filter((link) => isBrandLinkForKind(link, brandConnectKind));
   const activeConnectLabel = brandConnectKind === "travel" ? "여행커넥트" : "쇼핑커넥트";
-  const travelPublishingUnavailable = brandConnectKind === "travel";
+  const travelPublishingUnavailable =
+    brandConnectKind === "travel" && !brandConnectRegistrationAvailable;
 
   // 현재 선택한 커넥트 통계 계산
   const stats = {
@@ -2178,7 +2183,7 @@ export default function Dashboard() {
                     <button
                       onClick={handleSuperPublishing}
                       disabled={travelPublishingUnavailable || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId)}
-                      title={travelPublishingUnavailable ? "여행커넥트 에디터 삽입 방식 확인 후 사용할 수 있습니다." : undefined}
+                      title={travelPublishingUnavailable ? "여행 계약 자동 캡처 후 사용할 수 있습니다." : undefined}
                       className="px-4 py-2 bg-fuchsia-600 text-white rounded-lg hover:bg-fuchsia-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                     >
                       {superPublishingRunning ? "수퍼 퍼블리싱 시작 중..." : `${activeConnectLabel} 수퍼 퍼블리싱 ${SUPER_PUBLISH_COLLECT_COUNT}개`}
@@ -2186,7 +2191,7 @@ export default function Dashboard() {
                     <button
                       onClick={handleBulkSchedulePublish}
                       disabled={travelPublishingUnavailable || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId) || readyScheduledCount === 0}
-                      title={travelPublishingUnavailable ? "여행커넥트 에디터 삽입 방식 확인 후 사용할 수 있습니다." : undefined}
+                      title={travelPublishingUnavailable ? "여행 계약 자동 캡처 후 사용할 수 있습니다." : undefined}
                       className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                     >
                       {bulkScheduleRunning ? "예약발행 일괄 실행 중..." : `${activeConnectLabel} 예약발행 (${Math.min(MAX_BULK_SCHEDULE_LIMIT, readyScheduledCount)}건)`}
@@ -2194,7 +2199,7 @@ export default function Dashboard() {
                     <button
                       onClick={handleBulkTodayPublish}
                       disabled={travelPublishingUnavailable || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId) || readyImmediateCount === 0}
-                      title={travelPublishingUnavailable ? "여행커넥트 에디터 삽입 방식 확인 후 사용할 수 있습니다." : undefined}
+                      title={travelPublishingUnavailable ? "여행 계약 자동 캡처 후 사용할 수 있습니다." : undefined}
                       className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                     >
                       {bulkTodayRunning ? "바로 일괄발행 중..." : `${activeConnectLabel} 바로발행 (${Math.min(MAX_TODAY_PUBLISH_LIMIT, readyImmediateCount)}건)`}
@@ -2202,11 +2207,13 @@ export default function Dashboard() {
                   </div>
                   {travelPublishingUnavailable && (
                     <p className="mt-3 rounded-lg bg-amber-100 px-3 py-2 text-xs text-amber-900">
-                      여행상품 동기화와 목록 확인은 사용할 수 있습니다. 여행 링크를 네이버 에디터에 넣는 방식은 아직 검증되지 않아 수퍼·예약·바로발행은 안전을 위해 잠겨 있습니다.
+                      여행상품 계약이 아직 확인되지 않았습니다. 위의 “여행 계약 자동 캡처”를 실행하면 목록 확인 후 발행 버튼이 열립니다.
                     </p>
                   )}
                   {!travelPublishingUnavailable && (
-                    <p className="mt-3 text-xs text-slate-500">수퍼 퍼블리싱은 쇼핑상품 200개 수집 후 당일 50개 바로발행, 이후 50개씩 예약발행합니다.</p>
+                    <p className="mt-3 text-xs text-slate-500">
+                      수퍼 퍼블리싱은 {brandConnectKind === "travel" ? "여행상품" : "쇼핑상품"} 200개 수집 후 당일 50개 바로발행, 이후 50개씩 예약발행합니다.
+                    </p>
                   )}
                 </div>
                 <div className="flex w-full items-center gap-3 border-t border-slate-200 pt-3">

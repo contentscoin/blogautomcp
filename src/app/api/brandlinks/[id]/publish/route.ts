@@ -5,6 +5,8 @@ import path from "path";
 import fs from "fs";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
+import { buildCaptureRequiredPayload } from "@/lib/brandconnect-kind";
+import { resolveConnectContract } from "@/lib/connect-contract-store";
 
 const NAVER_SCHEDULE_TIMEZONE = process.env.NAVER_SCHEDULE_TIMEZONE || "Asia/Seoul";
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
@@ -177,13 +179,13 @@ export async function POST(
     }
 
     if (link.connectKind === "TRAVEL") {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "여행커넥트 발행은 네이버 에디터 삽입 방식 검증 후 사용할 수 있습니다.",
-        },
-        { status: 501 }
-      );
+      const contract = resolveConnectContract("travel", link.sourceUrl);
+      if (contract.captureRequired) {
+        return NextResponse.json(
+          { success: false, error: buildCaptureRequiredPayload(contract) },
+          { status: 501 }
+        );
+      }
     }
 
     if (link.status === "PUBLISHING") {
