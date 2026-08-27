@@ -24,6 +24,8 @@ import {
   HUMAN_MOBILE_STYLE_GUIDE,
   HUMAN_REVIEW_SAFETY_RULES,
   MOBILE_BODY_RULES,
+  NAVER_SEO_TITLE_RULES,
+  stripClickbaitFromTitle,
 } from "./lib/blog-writing-style";
 import { buildAppUrl, notifyAndLogCompletion } from "./lib/chatbot-notifier";
 import {
@@ -179,6 +181,11 @@ const BLOG_HUMANIZE_MOBILE_STYLE =
   (process.env.BLOG_HUMANIZE_MOBILE_STYLE || "true").toLowerCase() === "true";
 const HUMAN_MOBILE_POLISH_ENABLED =
   (process.env.HUMAN_MOBILE_POLISH_ENABLED || "true").toLowerCase() === "true";
+// 상위 노출 글 실측 기준 태그 3~5개. 과다 태그는 키워드 남용(스팸) 신호가 된다.
+const NAVER_BLOG_HASHTAG_COUNT = Math.min(
+  20,
+  Math.max(3, Number.parseInt(process.env.NAVER_BLOG_HASHTAG_COUNT || "5", 10) || 5)
+);
 // AI 티 스캔 점수가 이 값 이상이면 생성문을 한 번 더 자연스럽게 재작성한다.
 const BLOG_HUMANIZE_REWRITE_ENABLED =
   (process.env.BLOG_HUMANIZE_REWRITE_ENABLED || "true").toLowerCase() === "true";
@@ -377,9 +384,10 @@ function isSectionTitleLine(text: string): boolean {
 }
 
 function sanitizeTitle(rawTitle: string, fallback: string): string {
-  const cleaned = stripEmoji(rawTitle).replace(/\s+/g, " ").trim();
+  // 낚시성 문구는 네이버가 스팸으로 명시한 항목이라 프롬프트 금지에 더해 여기서도 걸러낸다.
+  const cleaned = stripClickbaitFromTitle(stripEmoji(rawTitle).replace(/\s+/g, " ").trim());
   if (cleaned.length > 0) return cleaned.slice(0, 80);
-  return stripEmoji(fallback).replace(/\s+/g, " ").trim().slice(0, 80);
+  return stripClickbaitFromTitle(stripEmoji(fallback).replace(/\s+/g, " ").trim()).slice(0, 80);
 }
 
 function collapseRepeatedLeadingTitleTokens(title: string): string {
@@ -4233,7 +4241,7 @@ function normalizeHashtags(
 
   const openCrabTags = openCrabSeoBrief?.hashtags || [];
   const merged = [...normalized, ...openCrabTags, ...productSeed, ...DEFAULT_HASHTAGS];
-  const deduped = Array.from(new Set(merged)).slice(0, 20);
+  const deduped = Array.from(new Set(merged)).slice(0, NAVER_BLOG_HASHTAG_COUNT);
   return deduped;
 }
 
@@ -5226,6 +5234,7 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? buildHumanMobileStyleGuide() : "- 친근하고 �
 - SEO를 위해 상품명, 관련 키워드를 자연스럽게 본문에 포함
 - 매번 조금씩 다른 표현 사용 (똑같은 문구 반복 금지)
 - 과장 없이 신뢰감 있게 작성
+${NAVER_SEO_TITLE_RULES}
 ${BLOG_HUMANIZE_MOBILE_STYLE ? `\n${HUMANIZE_RULES}` : ""}
 ${openCrabPromptBlock ? `\n${openCrabPromptBlock}` : ""}`;
 
@@ -5285,16 +5294,19 @@ ${product.rating ? `- 평점: ${product.rating}점` : ''}
 ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일 버전 고정" : ""}
 
 ## 작성 규칙
-1. 제목: ${isTravel ? "여행지·상품명 키워드 포함" : "상품 카테고리 + 상품명 키워드 포함"}, 25-35자
+1. 제목: ${isTravel ? "핵심 여행지 검색 키워드를 맨 앞에 + 상품명" : "핵심 검색 키워드(상품 카테고리)를 맨 앞에 + 상품명"}, 25-35자
    - 제목에는 이모지를 절대 넣지 마세요.
-   예: ${isTravel ? '"제주 서부 코스 정리 | ○○ 패키지 일정과 포함사항"' : '"아기비데 추천 | 해피달링 시그니처 워터탭 솔직 후기"'}
+   - "완벽 가이드", "총정리", "꿀팁" 같은 낚시성 문구 금지 (네이버 스팸 기준).
+   예: ${isTravel ? '"제주 서부 코스 | ○○ 패키지 일정과 포함사항"' : '"아기비데 추천 | 해피달링 시그니처 워터탭 솔직 후기"'}
 
-2. 본문을 정확히 ${bodySectionCount}개 섹션으로 작성 (총 2000자 이상)
+2. 본문을 정확히 ${bodySectionCount}개 섹션으로 작성
+   - 전체 분량은 공백 제외 1,300~1,800자. 상위 노출 글 실측 기준이며, 억지로 늘리지 마세요.
+   - 글자보다 이미지가 본체입니다. 문장은 사진 사이를 잇는 역할로 짧게.
 
 3. 각 섹션 구조:
    - 소제목 (한 줄, 이모지 금지)
    - 빈 줄
-   - 본문 4-6문장 (각 문장 끝에 줄바꿈, 각 문장 25-45자)
+   - 본문 3-5문장 (각 문장 끝에 줄바꿈, 각 문장 25-45자)
    - 한 문장에 정보 하나만 담고, 어색하면 더 짧게 나누기
    - 빈 줄
 
@@ -5313,16 +5325,12 @@ ${isTravel ? travelSectionPlan : productSectionPlan}
    - 리뷰 수/평점은 확인된 경우에만 참고 포인트로 언급
    - 구매 유도보다 가격 판단 기준을 알려주는 방식으로 작성
 
-7. 해시태그 20개:
+7. 해시태그 ${NAVER_BLOG_HASHTAG_COUNT}개 (상위 노출 글 실측 기준 3~5개):
 ${isTravel
-  ? `   - 여행지/상품명 관련 (5개)
-   - 여행 형태 관련 (5개): 패키지여행, 자유여행, 가족여행 등
-   - 검색용 키워드 (5개): 여행코스, 여행일정, 여행추천, 여행경비, 여행팁
-   - 일반 태그 (5개): 여행스타그램, 국내여행 또는 해외여행, 휴가 등`
-  : `   - 상품명 관련 (3개)
-   - 카테고리 관련 (5개)
-   - 검색용 키워드 (7개): 추천, 후기, 리뷰, 비교, 순위, 가격, 장단점
-   - 일반 태그 (5개): 일상, 육아템, 생활용품, 가성비 등`}
+  ? `   - 여행지·상품명 키워드를 우선하고, 여행 형태(패키지여행/자유여행 등)로 보완
+   - 검색 의도가 분명한 태그만. 개수를 채우기 위한 일반 태그는 넣지 마세요`
+  : `   - 상품명·카테고리 키워드를 우선하고, 검색 의도가 분명한 태그(추천/후기/비교)로 보완
+   - 개수를 채우기 위한 일반 태그(일상 등)는 넣지 마세요`}
 
 8. AI 티가 나는 문장 금지:
 ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES}\n${HUMAN_REVIEW_SAFETY_RULES}` : "   - 반복적인 문장 구조와 과장 표현 금지"}
