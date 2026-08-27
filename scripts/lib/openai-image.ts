@@ -20,9 +20,12 @@ const OPENAI_IMAGE_ENDPOINT_GENERATIONS = "https://api.openai.com/v1/images/gene
 
 const IMAGE_API_ENABLED =
   (process.env.PRODUCT_THUMBNAIL_IMAGE_API_ENABLED || "true").toLowerCase() !== "false";
-const IMAGE_API_MODEL = process.env.PRODUCT_THUMBNAIL_IMAGE_MODEL?.trim() || "gpt-image-1";
+// gpt-image-2: 텍스트 렌더링(특히 한글)과 편집 시 원본 보존이 이전 세대보다 좋다.
+// 구모델이 필요하면 PRODUCT_THUMBNAIL_IMAGE_MODEL=gpt-image-1 로 내릴 수 있다.
+const IMAGE_API_MODEL = process.env.PRODUCT_THUMBNAIL_IMAGE_MODEL?.trim() || "gpt-image-2";
 // 네이버 블로그 썸네일에 맞는 가로형. gpt-image 계열이 지원하는 크기만 허용된다.
 const IMAGE_API_SIZE = process.env.PRODUCT_THUMBNAIL_IMAGE_SIZE?.trim() || "1536x1024";
+const IMAGE_API_QUALITY = process.env.PRODUCT_THUMBNAIL_IMAGE_QUALITY?.trim() || "high";
 const IMAGE_API_TIMEOUT_MS = (() => {
   const parsed = Number.parseInt(process.env.PRODUCT_THUMBNAIL_IMAGE_WAIT_MS || "", 10);
   return Number.isFinite(parsed) && parsed >= 10_000 ? parsed : 120_000;
@@ -64,14 +67,14 @@ export async function generateProductThumbnailViaImageApi(
     options.referenceImagePath && fs.existsSync(options.referenceImagePath)
   );
 
-  let response: Response | null = null;
-  try {
+  const requestWithModel = async (model: string): Promise<Response> => {
     if (hasReference) {
       const referencePath = options.referenceImagePath as string;
       const form = new FormData();
-      form.append("model", IMAGE_API_MODEL);
+      form.append("model", model);
       form.append("prompt", options.prompt);
       form.append("size", IMAGE_API_SIZE);
+      form.append("quality", IMAGE_API_QUALITY);
       form.append(
         "image",
         new Blob([new Uint8Array(fs.readFileSync(referencePath))], {
@@ -79,41 +82,59 @@ export async function generateProductThumbnailViaImageApi(
         }),
         path.basename(referencePath)
       );
-      response = await fetch(OPENAI_IMAGE_ENDPOINT_EDITS, {
+      return fetch(OPENAI_IMAGE_ENDPOINT_EDITS, {
         method: "POST",
         headers: { Authorization: `Bearer ${apiKey}` },
         body: form,
         signal: AbortSignal.timeout(IMAGE_API_TIMEOUT_MS),
       });
-    } else {
-      response = await fetch(OPENAI_IMAGE_ENDPOINT_GENERATIONS, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ model: IMAGE_API_MODEL, prompt: options.prompt, size: IMAGE_API_SIZE }),
-        signal: AbortSignal.timeout(IMAGE_API_TIMEOUT_MS),
-      });
     }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.log(`   ⚠️ Images API 썸네일 요청 실패: ${message}`);
-    return null;
+    return fetch(OPENAI_IMAGE_ENDPOINT_GENERATIONS, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ model, prompt: options.prompt, size: IMAGE_API_SIZE, quality: IMAGE_API_QUALITY }),
+      signal: AbortSignal.timeout(IMAGE_API_TIMEOUT_MS),
+    });
+  };
+
+  // 계정에 따라 gpt-image-2 접근이 아직 안 열려 있을 수 있다(조직 인증 필요).
+  // 모델 접근 오류로 보이면 gpt-image-1로 한 번 내려서 재시도한다.
+  const candidateModels = Array.from(new Set([IMAGE_API_MODEL, "gpt-image-1"]));
+  let b64: string | null = null;
+
+  for (const [index, model] of candidateModels.entries()) {
+    let response: Response;
+    try {
+      response = await requestWithModel(model);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.log(`   ⚠️ Images API 썸네일 요청 실패(${model}): ${message}`);
+      return null;
+    }
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      const modelAccessProblem =
+        (response.status === 400 || response.status === 403 || response.status === 404) &&
+        /model|verification|not\s*found|unsupported/i.test(body);
+      console.log(`   ⚠️ Images API 썸네일 실패 (${model}, HTTP ${response.status}): ${body.slice(0, 240)}`);
+      if (modelAccessProblem && index < candidateModels.length - 1) {
+        console.log(`   ↪️ ${candidateModels[index + 1]} 모델로 재시도합니다.`);
+        continue;
+      }
+      return null;
+    }
+
+    const payload = (await response.json().catch(() => null)) as {
+      data?: Array<{ b64_json?: string }>;
+    } | null;
+    b64 = payload?.data?.[0]?.b64_json || null;
+    break;
   }
 
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    console.log(
-      `   ⚠️ Images API 썸네일 실패 (HTTP ${response.status}): ${body.slice(0, 300)}`
-    );
-    return null;
-  }
-
-  const payload = (await response.json().catch(() => null)) as {
-    data?: Array<{ b64_json?: string }>;
-  } | null;
-  const b64 = payload?.data?.[0]?.b64_json;
   if (!b64) {
     console.log("   ⚠️ Images API 응답에 이미지 데이터가 없습니다.");
     return null;

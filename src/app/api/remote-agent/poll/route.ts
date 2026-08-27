@@ -23,6 +23,13 @@ async function localApi(request: NextRequest, path: string, init?: RequestInit) 
   if (adminKey) headers.set("x-admin-api-key", adminKey);
   const response = await fetch(new URL(path, request.nextUrl.origin), { ...init, headers, cache: "no-store" });
   const payload = await response.json().catch(() => null);
+  if (response.status === 404) {
+    // 라우트 자체가 없다는 뜻 — 설치된 앱 빌드가 이 기능을 포함하지 않는 경우다.
+    // 재시작으로는 해결되지 않으므로 업데이트를 안내한다.
+    throw new Error(
+      `로컬 API가 이 앱 버전에 없습니다: ${path} (404). 블로그오토 PC 앱을 최신 버전으로 업데이트한 뒤 다시 시도하세요.`
+    );
+  }
   if (!response.ok || payload?.success === false) throw new Error(typeof payload?.error === "string" ? payload.error : JSON.stringify(payload?.error || `Local API ${response.status}`));
   return payload;
 }

@@ -43,12 +43,13 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Lint
-        run: npx eslint src scripts/verify-connect-item-detection.ts scripts/verify-connect-contract-store.ts
+        run: npx eslint src scripts/verify-connect-item-detection.ts scripts/verify-connect-contract-store.ts scripts/verify-title-rules.ts
 
-      - name: Connect contract tests
+      - name: Unit checks
         run: |
           npm run test:connect-detection
           npm run test:connect-store
+          npm run test:title-rules
 
       # npm run build = prisma generate + 임시 생성물 정리 + next build --webpack.
       # 데스크톱 패키징(desktop:pack)이 쓰는 것과 같은 빌드 경로다.
