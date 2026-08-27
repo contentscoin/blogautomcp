@@ -11,6 +11,8 @@
 
 import { findItemArrays, detectFieldMap, normalizeConnectItems, readArrayAtPath } from "../src/lib/connect-item";
 import { pickBestListResponse } from "../src/lib/travel-connect-adapter";
+import fs from "fs";
+import path from "path";
 
 let failures = 0;
 
@@ -139,6 +141,18 @@ check(
   "mixed response: travel representative image key",
   mixedTravelBest?.fieldMap.imageUrl === "representativeProductImageUrl",
   mixedTravelBest?.fieldMap
+);
+
+// 7. 계약 확인 뒤에도 행 단위 버튼이 별도로 잠기면 일괄 버튼만 열리는 반쪽 수정이 된다.
+const dashboardSource = fs.readFileSync(path.join(process.cwd(), "src", "app", "page.tsx"), "utf8");
+check("travel row: legacy fixed lock removed", !dashboardSource.includes("🔒 여행 발행 준비중"));
+check(
+  "travel row: ready buttons follow contract availability",
+  dashboardSource.includes('link.status === "READY" && (link.connectKind !== "TRAVEL" || !travelPublishingUnavailable)')
+);
+check(
+  "travel row: retry buttons follow contract availability",
+  dashboardSource.includes('link.status === "FAILED" && (link.connectKind !== "TRAVEL" || !travelPublishingUnavailable)')
 );
 
 if (failures > 0) {

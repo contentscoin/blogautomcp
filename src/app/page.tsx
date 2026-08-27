@@ -2393,25 +2393,23 @@ export default function Dashboard() {
                           </td>
                           <td className="px-4 py-3 text-center">
                             <div className="flex items-center justify-center gap-2">
-                              {link.connectKind !== "TRAVEL" && (
-                                <button
-                                  onClick={() => setThumbnailStudioLink(link)}
-                                  className="px-3 py-1 text-sm bg-blue-100 text-blue-700 rounded hover:bg-blue-200 transition-colors"
-                                  title="실제 제품 사진으로 카피 썸네일 만들기"
-                                >
-                                  🖼️ 썸네일
-                                </button>
-                              )}
+                              <button
+                                onClick={() => setThumbnailStudioLink(link)}
+                                className="px-3 py-1 text-sm bg-blue-100 text-blue-700 rounded hover:bg-blue-200 transition-colors"
+                                title="실제 상품 사진으로 카피 썸네일 만들기"
+                              >
+                                🖼️ 썸네일
+                              </button>
                               {/* 발행하기 버튼 */}
-                              {link.status === "READY" && link.connectKind === "TRAVEL" && (
+                              {link.status === "READY" && link.connectKind === "TRAVEL" && travelPublishingUnavailable && (
                                 <span
                                   className="rounded-lg bg-amber-100 px-3 py-1.5 text-xs font-medium text-amber-800"
-                                  title="여행커넥트 에디터 삽입 방식 확인 후 사용할 수 있습니다."
+                                  title="여행 계약 자동 캡처 후 사용할 수 있습니다."
                                 >
-                                  🔒 여행 발행 준비중
+                                  🔒 여행 계약 확인 필요
                                 </span>
                               )}
-                              {link.status === "READY" && link.connectKind !== "TRAVEL" && (
+                              {link.status === "READY" && (link.connectKind !== "TRAVEL" || !travelPublishingUnavailable) && (
                                 <>
                                   <button
                                     onClick={() => handlePublish(link.id)}
@@ -2431,15 +2429,15 @@ export default function Dashboard() {
                               )}
 
                               {/* 재발행 */}
-                              {link.status === "FAILED" && link.connectKind === "TRAVEL" && (
+                              {link.status === "FAILED" && link.connectKind === "TRAVEL" && travelPublishingUnavailable && (
                                 <span
                                   className="rounded-lg bg-amber-100 px-3 py-1.5 text-xs font-medium text-amber-800"
-                                  title="여행커넥트 에디터 삽입 방식 확인 후 사용할 수 있습니다."
+                                  title="여행 계약 자동 캡처 후 사용할 수 있습니다."
                                 >
-                                  🔒 여행 발행 준비중
+                                  🔒 여행 계약 확인 필요
                                 </span>
                               )}
-                              {link.status === "FAILED" && link.connectKind !== "TRAVEL" && (
+                              {link.status === "FAILED" && (link.connectKind !== "TRAVEL" || !travelPublishingUnavailable) && (
                                 <>
                                   <button
                                     onClick={() => handlePublish(link.id)}
