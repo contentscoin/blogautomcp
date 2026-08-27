@@ -7,7 +7,16 @@ import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { PrismaClient } from "@prisma/client";
 import { buildAppUrl, notifyAndLogCompletion } from "./lib/chatbot-notifier";
 import { getNaverSessionFile } from "./lib/app-paths";
-import { buildCaptureRequiredPayload, parseConnectKind, resolveConnectContract, toStoredConnectKind, type ConnectKind } from "../src/lib/brandconnect-kind";
+import {
+  buildCaptureRequiredPayload,
+  getSpaceIdFromConnectUrl,
+  parseConnectKind,
+  toStoredConnectKind,
+  type ConnectKind,
+} from "../src/lib/brandconnect-kind";
+import { resolveConnectContract } from "../src/lib/connect-contract-store";
+import { listTravelItems } from "../src/lib/travel-connect-adapter";
+import type { ConnectItem } from "../src/lib/connect-item";
 
 chromium.use(StealthPlugin());
 
@@ -1261,6 +1270,240 @@ function buildMemo(item: PlannedProduct): string {
   ].join(" | ");
 }
 
+/** 캡처된 계약 기반으로 여행 상품 제휴 단축링크 발급을 시도한다. 실패하면 null. */
+async function issueTravelAffiliateShortUrl(
+  externalItemId: string,
+  storageStatePath: string,
+  sourceUrl: string
+): Promise<string | null> {
+  if (!/^\d+$/.test(externalItemId)) return null;
+  const spaceId = getSpaceIdFromConnectUrl(sourceUrl);
+  if (!spaceId) return null;
+
+  let cookieHeader = "";
+  try {
+    cookieHeader = buildCookieHeaderForHost(storageStatePath, "gw-brandconnect.naver.com");
+  } catch {
+    return null;
+  }
+  if (!cookieHeader) return null;
+
+  const response = await fetch(
+    `https://gw-brandconnect.naver.com/affiliate/command/affiliate-urls?affiliateProductId=${externalItemId}`,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json, text/plain, */*",
+        "content-type": "application/json",
+        cookie: cookieHeader,
+        origin: "https://brandconnect.naver.com",
+        referer: sourceUrl,
+        "x-space-id": spaceId,
+      },
+      body: "{}",
+      signal: AbortSignal.timeout(10_000),
+    }
+  ).catch(() => null);
+
+  if (!response?.ok) return null;
+  const payload = (await response.json().catch(() => null)) as { url?: unknown } | null;
+  const url = typeof payload?.url === "string" ? payload.url.trim() : "";
+  return /^https:\/\/naver\.me\//.test(url) ? url : null;
+}
+
+/**
+ * 여행커넥트 등록 플로우. 쇼핑 플로우와 달리 화면 스크래핑 없이 캡처된 계약으로
+ * 목록을 가져오고, 단축링크 발급이 안 되는 항목은 관측한 상품 URL을 그대로 쓴다.
+ */
+async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient): Promise<void> {
+  const startDate = options.startDate ?? addDaysToYmd(formatKstYmd(new Date()), 1);
+  // 쇼핑용 기본 카테고리 URL이 그대로 넘어온 경우는 지정 없음으로 본다.
+  const travelCategoryUrl =
+    options.categoryUrl && options.categoryUrl !== DEFAULT_CATEGORY_URL ? options.categoryUrl : null;
+
+  console.log("=".repeat(70));
+  console.log("✈️ 여행커넥트 상품 자동 등록 시작");
+  console.log(`- categoryUrl: ${travelCategoryUrl || "(캡처된 계약 기준 자동)"}`);
+  console.log(`- count: ${options.count}`);
+  console.log(`- startDate: ${startDate}`);
+  console.log(`- duplicateWindowDays: ${options.duplicateWindowDays}`);
+  console.log(`- dryRun: ${options.dryRun ? "YES" : "NO"}`);
+  console.log("=".repeat(70));
+
+  const blogId = process.env.NAVER_BLOG_ID?.trim();
+  if (!blogId) throw new Error(".env의 NAVER_BLOG_ID가 필요합니다.");
+  const categoryMap = await fetchBlogCategoryMap(options.storageStatePath, blogId);
+  console.log(`✅ 게시판 매핑 로드: ${categoryMap.size}개`);
+
+  const { items, contract, source } = await listTravelItems({
+    categoryUrl: travelCategoryUrl,
+    limit: Math.min(100, Math.max(options.count * 4, 40)),
+    storageStatePath: options.storageStatePath,
+    allowDiscovery: true,
+  });
+  console.log(`✅ 여행 상품 수집: ${items.length}개 (${source === "contract" ? "저장된 계약" : "실시간 재탐색"})`);
+
+  const existingBrandLinks = await prisma.brandLink.findMany({
+    select: {
+      id: true,
+      productName: true,
+      storeName: true,
+      status: true,
+      createdAt: true,
+      updatedAt: true,
+      publishedAt: true,
+      scheduledPublishAt: true,
+    },
+  });
+  const duplicateReferenceNow = new Date();
+  const existingStrictKeys = new Set<string>();
+  const existingRelaxedKeys = new Set<string>();
+  for (const row of existingBrandLinks) {
+    if (!row.productName) continue;
+    if (!shouldBlockDuplicateBrandLink(row, duplicateReferenceNow, options.duplicateWindowDays)) continue;
+    const { strictKeys, relaxedKeys } = buildProductIdentityKeys(row.productName, row.storeName);
+    for (const key of strictKeys) existingStrictKeys.add(key);
+    for (const key of relaxedKeys) existingRelaxedKeys.add(key);
+  }
+
+  const getScheduledDate = (successIndex: number) =>
+    addDaysToYmd(startDate, Math.floor(successIndex / options.dailyQuota) * options.intervalDays);
+
+  interface TravelRegisterResult {
+    action: "created" | "duplicate" | "failed";
+    productName: string;
+    url: string | null;
+    scheduledDate: string;
+    reason?: string;
+    linkId?: string;
+  }
+
+  const results: TravelRegisterResult[] = [];
+  const createdUrls = new Set<string>();
+  let successCount = 0;
+
+  const isDuplicateName = (item: ConnectItem): boolean => {
+    const { strictKeys, relaxedKeys } = buildProductIdentityKeys(item.name, item.storeName || null);
+    return (
+      strictKeys.some((key) => existingStrictKeys.has(key)) ||
+      relaxedKeys.some((key) => existingRelaxedKeys.has(key))
+    );
+  };
+
+  for (const item of items) {
+    if (successCount >= options.count) break;
+    const scheduledDate = getScheduledDate(successCount);
+
+    if (isDuplicateName(item)) {
+      results.push({
+        action: "duplicate",
+        productName: item.name,
+        url: null,
+        scheduledDate,
+        reason: `최근 ${options.duplicateWindowDays}일 내 동일 상품 등록 이력`,
+      });
+      continue;
+    }
+
+    const shortUrl = await issueTravelAffiliateShortUrl(
+      item.externalItemId || "",
+      options.storageStatePath,
+      contract.sourceUrl
+    );
+    const linkUrl = shortUrl || item.linkUrl;
+    if (!linkUrl) {
+      results.push({
+        action: "failed",
+        productName: item.name,
+        url: null,
+        scheduledDate,
+        reason: "제휴 단축링크 발급 실패 + 상품 URL 없음",
+      });
+      continue;
+    }
+    console.log(`\n🔗 ${item.name}`);
+    console.log(
+      `   ${shortUrl ? `✅ 제휴 단축링크 ${shortUrl}` : `↪️ 단축링크 발급 불가 — 상품 URL 사용 (${linkUrl})`}`
+    );
+
+    const normalizedUrl = linkUrl.toLowerCase();
+    if (createdUrls.has(normalizedUrl)) {
+      results.push({ action: "duplicate", productName: item.name, url: linkUrl, scheduledDate, reason: "배치 내 URL 중복" });
+      continue;
+    }
+    const existing = await prisma.brandLink.findFirst({ where: { url: linkUrl } });
+    if (existing && shouldBlockDuplicateBrandLink(existing, duplicateReferenceNow, options.duplicateWindowDays)) {
+      results.push({
+        action: "duplicate",
+        productName: item.name,
+        url: linkUrl,
+        scheduledDate,
+        reason: `기존 링크 존재 (${existing.status})`,
+        linkId: existing.id,
+      });
+      continue;
+    }
+
+    const boardName = inferBoardName(`여행 ${item.name}`);
+    const categoryNo = categoryMap.get(boardName) ?? CATEGORY_NAME_FALLBACK[boardName] ?? null;
+
+    if (options.dryRun) {
+      results.push({ action: "created", productName: item.name, url: linkUrl, scheduledDate, reason: "dry-run" });
+      successCount += 1;
+      continue;
+    }
+
+    const created = await prisma.brandLink.create({
+      data: {
+        url: linkUrl,
+        connectKind: toStoredConnectKind("travel"),
+        externalItemId: item.externalItemId,
+        sourceUrl: item.linkUrl || contract.sourceUrl,
+        memo: `[여행커넥트 자동등록] ${item.storeName || ""}`.trim(),
+        categoryNo,
+        useSectionHeading: true,
+        status: "READY",
+        productName: item.name,
+        storeName: item.storeName || null,
+        productPrice: formatPrice(item.price),
+        imageUrls: item.imageUrl ? JSON.stringify([item.imageUrl]) : null,
+        scheduledPublishAt: new Date(`${scheduledDate}T00:00:00.000Z`),
+      },
+    });
+    results.push({ action: "created", productName: item.name, url: linkUrl, scheduledDate, linkId: created.id });
+    createdUrls.add(normalizedUrl);
+    successCount += 1;
+    console.log(`   ✅ 등록 완료 (${created.id}) → ${scheduledDate} 예약 후보`);
+  }
+
+  const createdCount = results.filter((entry) => entry.action === "created").length;
+  const duplicateCount = results.filter((entry) => entry.action === "duplicate").length;
+  const failedCount = results.filter((entry) => entry.action === "failed").length;
+
+  console.log("\n" + "=".repeat(70));
+  console.log("✅ 여행커넥트 등록 작업 완료");
+  console.log(`- 생성: ${createdCount} / 중복: ${duplicateCount} / 실패: ${failedCount}`);
+  console.log("=".repeat(70));
+
+  if (!options.dryRun) {
+    await notifyAndLogCompletion({
+      taskType: "brandconnect.travel.register",
+      title: "여행커넥트 상품 등록 완료",
+      summary: `신규 ${createdCount}건, 중복 건너뜀 ${duplicateCount}건, 실패 ${failedCount}건`,
+      successCount: createdCount,
+      failedCount,
+      links: results.map((entry) => ({
+        label: entry.productName,
+        url: entry.url || (entry.linkId ? buildAppUrl(`/?brandLinkId=${entry.linkId}`) : buildAppUrl("/")),
+        scheduledDate: entry.scheduledDate,
+        status: entry.action.toUpperCase(),
+        description: entry.reason || "여행커넥트",
+      })),
+      extra: { createdCount, duplicateCount, failedCount, collectedItemCount: items.length },
+    });
+  }
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const connectContract = resolveConnectContract(options.connectKind, options.categoryUrl);
@@ -1268,6 +1511,15 @@ async function main() {
     throw new Error(JSON.stringify(buildCaptureRequiredPayload(connectContract)));
   }
   const prisma = new PrismaClient();
+
+  if (options.connectKind === "travel") {
+    try {
+      await registerTravelItemsFlow(options, prisma);
+    } finally {
+      await prisma.$disconnect();
+    }
+    return;
+  }
 
   const blogId = process.env.NAVER_BLOG_ID?.trim();
   if (!blogId) {

@@ -14,6 +14,11 @@ function config() {
 async function localApi(request: NextRequest, path: string, init?: RequestInit) {
   const headers = new Headers(init?.headers);
   headers.set("content-type", "application/json");
+  // 서버가 자기 자신을 호출하는 요청이라 브라우저가 붙여주는 Origin/sec-fetch-site가
+  // 없다. ADMIN_API_KEY가 설정되지 않은 데스크톱에서는 requireTrustedLocalMutation이
+  // 이 부재를 외부 요청으로 보고 403을 돌려줘 MCP 작업이 전부 실패했다.
+  // 같은 오리진에서 시작한 요청임을 정확히 표시한다.
+  headers.set("origin", request.nextUrl.origin);
   const adminKey = process.env.ADMIN_API_KEY?.trim();
   if (adminKey) headers.set("x-admin-api-key", adminKey);
   const response = await fetch(new URL(path, request.nextUrl.origin), { ...init, headers, cache: "no-store" });

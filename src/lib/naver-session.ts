@@ -1,4 +1,7 @@
 import fs from "fs";
+import { getNaverSessionFile } from "../../scripts/lib/app-paths";
+
+export { getNaverSessionFile };
 
 export interface StoredCookie {
   name: string;
@@ -33,6 +36,16 @@ export function readUsableCookies(storageStatePath: string, hostname: string): S
     if (!isDomainMatch(hostname, cookie.domain)) return false;
     return !(typeof cookie.expires === "number" && cookie.expires > 0 && cookie.expires <= nowSec);
   });
+}
+
+/**
+ * 해당 호스트로 보낼 쿠키 헤더. 호스트를 그대로 받으므로 gw-brandconnect처럼
+ * 서브도메인이 다른 API에도 그 호스트 기준으로 정확히 계산된다.
+ */
+export function buildCookieHeaderForHost(storageStatePath: string, hostname: string): string {
+  return readUsableCookies(storageStatePath, hostname)
+    .map(({ name, value }) => `${name}=${value}`)
+    .join("; ");
 }
 
 export async function validateNaverPublishingSession(

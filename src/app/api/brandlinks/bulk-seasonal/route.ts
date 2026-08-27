@@ -5,7 +5,8 @@ import fs from "fs";
 import path from "path";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
-import { buildCaptureRequiredPayload, parseConnectKind, resolveConnectContract } from "@/lib/brandconnect-kind";
+import { buildCaptureRequiredPayload, parseConnectKind } from "@/lib/brandconnect-kind";
+import { resolveConnectContract } from "@/lib/connect-contract-store";
 
 interface BulkSeasonalBody {
   connectKind?: string;
