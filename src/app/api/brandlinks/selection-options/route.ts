@@ -3,7 +3,17 @@ import fs from "fs";
 import path from "path";
 import type { Browser } from "playwright";
 import { requireAdminApiKey } from "@/lib/api-auth";
-import { buildCaptureRequiredPayload, getShoppingCategoryIdFromUrl, getSpaceIdFromConnectUrl, parseConnectKind, resolveConnectContract } from "@/lib/brandconnect-kind";
+import {
+  buildTravelConnectUrl,
+  buildTravelTabKey,
+  getShoppingCategoryIdFromUrl,
+  getSpaceIdFromConnectUrl,
+  parseConnectKind,
+  parseTravelConnectTabs,
+  resolveConnectContract,
+  TRAVEL_CONNECT_SERVICE_TYPE,
+  type TravelConnectTab,
+} from "@/lib/brandconnect-kind";
 
 export const runtime = "nodejs";
 
@@ -28,7 +38,7 @@ const BRANDCONNECT_RENDERED_OPTION_TIMEOUT_MS = parseBoundedInteger(
   60000
 );
 const BRANDCONNECT_RENDERED_PROMOTION_SCAN_ENABLED =
-  (process.env.BRANDCONNECT_RENDERED_PROMOTION_SCAN_ENABLED || "true").toLowerCase() !== "false";
+  (process.env.BRANDCONNECT_RENDERED_PROMOTION_SCAN_ENABLED || "false").toLowerCase() === "true";
 
 interface StoredCookie {
   name?: string;
@@ -116,10 +126,86 @@ async function fetchBrandConnectJson(
       "x-space-id": spaceId,
     },
     cache: "no-store",
+    signal: AbortSignal.timeout(10_000),
   }).catch(() => null);
 
   if (!response?.ok) return null;
   return response.json().catch(() => null);
+}
+
+function travelSectionLabel(section: string): string {
+  if (section === "SPECIAL_OFFER") return "특가/이벤트";
+  if (section === "REGION_BEST") return "지역 베스트";
+  if (section === "PRICE_DROP") return "가격 인하";
+  return section;
+}
+
+async function fetchTravelTabs(
+  spaceId: string,
+  cookieHeader: string,
+  referer: string
+): Promise<TravelConnectTab[]> {
+  const url = new URL("https://gw-brandconnect.naver.com/affiliate/query/connect/recommend-tabs");
+  url.searchParams.set("serviceType", TRAVEL_CONNECT_SERVICE_TYPE);
+  const payload = await fetchBrandConnectJson(url.toString(), spaceId, cookieHeader, referer);
+  return parseTravelConnectTabs(payload);
+}
+
+async function fetchTravelProductCount(
+  tab: TravelConnectTab,
+  spaceId: string,
+  cookieHeader: string,
+  referer: string
+): Promise<number> {
+  const url = new URL("https://gw-brandconnect.naver.com/affiliate/query/connect/recommend-products");
+  url.searchParams.set("serviceType", TRAVEL_CONNECT_SERVICE_TYPE);
+  url.searchParams.set("section", tab.section);
+  url.searchParams.set("tabId", tab.tabId);
+  const payload = await fetchBrandConnectJson(url.toString(), spaceId, cookieHeader, referer);
+  if (typeof payload !== "object" || payload === null) return tab.totalCount;
+  const data = (payload as { data?: unknown }).data;
+  return Array.isArray(data) ? data.length : tab.totalCount;
+}
+
+async function loadTravelSelectionOptions(
+  categoryUrl: string,
+  spaceId: string,
+  cookieHeader: string
+) {
+  const tabs = await fetchTravelTabs(spaceId, cookieHeader, categoryUrl);
+  if (tabs.length === 0) {
+    throw new Error("여행커넥트 탭을 불러오지 못했습니다. 네이버 로그인을 다시 확인하세요.");
+  }
+
+  const counts = new Map<string, number>();
+  for (let offset = 0; offset < tabs.length; offset += 6) {
+    const batch = tabs.slice(offset, offset + 6);
+    const batchCounts = await Promise.all(
+      batch.map((tab) => fetchTravelProductCount(tab, spaceId, cookieHeader, categoryUrl))
+    );
+    batch.forEach((tab, index) => counts.set(buildTravelTabKey(tab.section, tab.tabId), batchCounts[index]));
+  }
+
+  const toOption = (tab: TravelConnectTab) => ({
+    id: buildTravelTabKey(tab.section, tab.tabId),
+    name: `[${travelSectionLabel(tab.section)}] ${tab.title}`,
+    parentId: null,
+    depth: 0,
+    productCount: counts.get(buildTravelTabKey(tab.section, tab.tabId)) ?? tab.totalCount,
+  });
+  const promotionTabs = tabs.filter((tab) => tab.section === "SPECIAL_OFFER");
+  const categoryTabs = tabs.filter((tab) => tab.section !== "SPECIAL_OFFER");
+
+  return {
+    connectKind: "travel" as const,
+    categoryUrl,
+    categories: categoryTabs.map(toOption),
+    promotions: promotionTabs.map((tab) => ({
+      value: buildTravelTabKey(tab.section, tab.tabId),
+      label: `[${travelSectionLabel(tab.section)}] ${tab.title}`,
+      count: counts.get(buildTravelTabKey(tab.section, tab.tabId)) ?? tab.totalCount,
+    })),
+  };
 }
 
 async function fetchBrandConnectText(
@@ -482,13 +568,15 @@ export async function GET(request: NextRequest) {
 
     const connectKind = parseConnectKind(request.nextUrl.searchParams.get("connectKind"));
     const contract = resolveConnectContract(connectKind, request.nextUrl.searchParams.get("categoryUrl"));
-    if (contract.captureRequired) {
-      return NextResponse.json({ success: false, error: buildCaptureRequiredPayload(contract) }, { status: 501 });
-    }
-    const categoryUrl = contract.configuredUrl || DEFAULT_CATEGORY_URL;
+    const defaultSpaceId = getSpaceIdFromConnectUrl(DEFAULT_CATEGORY_URL);
+    const categoryUrl = contract.configuredUrl || (
+      connectKind === "travel" && defaultSpaceId
+        ? buildTravelConnectUrl(defaultSpaceId)
+        : DEFAULT_CATEGORY_URL
+    );
     const spaceId = getSpaceIdFromConnectUrl(categoryUrl);
-    const rootCategoryId = getShoppingCategoryIdFromUrl(categoryUrl);
-    if (!spaceId || !rootCategoryId) {
+    const rootCategoryId = connectKind === "shopping" ? getShoppingCategoryIdFromUrl(categoryUrl) : null;
+    if (!spaceId || (connectKind === "shopping" && !rootCategoryId)) {
       return NextResponse.json(
         { success: false, error: "BrandConnect categoryUrl에서 spaceId/categoryId를 찾지 못했습니다." },
         { status: 400 }
@@ -512,6 +600,15 @@ export async function GET(request: NextRequest) {
         { success: false, error: "BrandConnect에 사용할 네이버 세션 쿠키가 없습니다." },
         { status: 400 }
       );
+    }
+
+    if (connectKind === "travel") {
+      const data = await loadTravelSelectionOptions(categoryUrl, spaceId, cookieHeader);
+      return NextResponse.json({ success: true, data });
+    }
+
+    if (!rootCategoryId) {
+      return NextResponse.json({ success: false, error: "쇼핑 카테고리 ID가 없습니다." }, { status: 400 });
     }
 
     const categoriesById = new Map<string, DisplayCategory>();

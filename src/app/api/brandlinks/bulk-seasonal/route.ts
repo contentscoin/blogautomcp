@@ -5,7 +5,7 @@ import fs from "fs";
 import path from "path";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
-import { buildCaptureRequiredPayload, parseConnectKind, resolveConnectContract } from "@/lib/brandconnect-kind";
+import { buildCaptureRequiredPayload, parseConnectKind, resolveConnectContract, toStoredConnectKind } from "@/lib/brandconnect-kind";
 
 interface BulkSeasonalBody {
   connectKind?: string;
@@ -18,6 +18,7 @@ interface BulkSeasonalBody {
   promotionFilter?: string;
   categoryFilter?: string;
   duplicateWindowDays?: number;
+  waitForCompletion?: boolean;
 }
 
 const NAVER_SCHEDULE_TIMEZONE = process.env.NAVER_SCHEDULE_TIMEZONE || "Asia/Seoul";
@@ -196,6 +197,7 @@ export async function POST(request: NextRequest) {
 
     const count = toSafePositiveInt(body.count, 10, 200);
     const connectKind = parseConnectKind(body.connectKind);
+    const waitForCompletion = body.waitForCompletion === true;
     const intervalDays = toSafePositiveInt(body.intervalDays, 1, 30);
     const dailyQuota = toSafePositiveInt(body.dailyQuota, 1, 200);
     const categoryUrl =
@@ -302,6 +304,7 @@ export async function POST(request: NextRequest) {
       } dailyQuota=${dailyQuota} selectionProfile=${selectionProfile} promotionFilter=${promotionFilter || "-"} categoryFilter=${categoryFilter || "-"} duplicateWindowDays=${duplicateWindowDays}\n`
     );
 
+    const runStartedAt = new Date();
     let child: ChildProcess;
     try {
       child = spawn(
@@ -309,7 +312,7 @@ export async function POST(request: NextRequest) {
         [TS_NODE_BIN, "--project", "tsconfig.scripts.json", scriptPath, ...scriptArgs],
         {
           cwd: process.cwd(),
-          detached: true,
+          detached: !waitForCompletion,
           stdio: ["ignore", logFd, logFd],
           shell: false,
           env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
@@ -321,6 +324,43 @@ export async function POST(request: NextRequest) {
 
     if (!child.pid) {
       throw new Error("시즌·히트·인기 등록 프로세스를 시작하지 못했습니다.");
+    }
+
+    if (waitForCompletion) {
+      const exitCode = await new Promise<number>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", (code) => resolve(code ?? 1));
+      });
+      if (exitCode !== 0) {
+        throw new Error(`여행상품 동기화 프로세스가 종료 코드 ${exitCode}로 실패했습니다. 로그: ${logFileRelativePath}`);
+      }
+
+      const storedKind = toStoredConnectKind(connectKind);
+      const [created, totalCount] = await Promise.all([
+        prisma.brandLink.findMany({
+          where: { connectKind: storedKind, createdAt: { gte: runStartedAt } },
+          orderBy: { createdAt: "desc" },
+          take: count,
+          select: { id: true, productName: true, storeName: true, productPrice: true, status: true, url: true },
+        }),
+        prisma.brandLink.count({ where: { connectKind: storedKind } }),
+      ]);
+      if (totalCount === 0) {
+        throw new Error(`동기화가 끝났지만 ${connectKind === "travel" ? "여행" : "쇼핑"}상품이 등록되지 않았습니다. 로그: ${logFileRelativePath}`);
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: `${connectKind === "travel" ? "여행" : "쇼핑"}상품 동기화를 완료했습니다.`,
+        data: {
+          completed: true,
+          connectKind,
+          importedCount: created.length,
+          totalCount,
+          products: created,
+          logFile: logFileRelativePath,
+        },
+      });
     }
 
     child.unref();

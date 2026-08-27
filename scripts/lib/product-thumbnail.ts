@@ -5,7 +5,7 @@ import sharp from "sharp";
 const CANVAS_WIDTH = 1600;
 const CANVAS_HEIGHT = 900;
 
-interface ProductThumbnailCopy {
+export interface ProductThumbnailCopy {
   productNameLabel: string;
   headline: string;
   subline: string;
@@ -29,6 +29,8 @@ export interface GenerateProductThumbnailOptions {
   productName: string;
   outputDir: string;
   enabled?: boolean;
+  copy?: Partial<ProductThumbnailCopy>;
+  preferredImagePath?: string;
 }
 
 export interface ProductThumbnailResult {
@@ -348,6 +350,7 @@ function buildOverlaySvg(copy: ProductThumbnailCopy): string {
   const productFontSize = productLines.length >= 3 ? 43 : 48;
   const productLineHeight = productLines.length >= 3 ? 54 : 60;
   const headlineLines = splitTextLines(copy.headline, 7, 2);
+  const sublineLines = splitTextLines(copy.subline, 17, 2);
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg width="${CANVAS_WIDTH}" height="${CANVAS_HEIGHT}" viewBox="0 0 ${CANVAS_WIDTH} ${CANVAS_HEIGHT}" xmlns="http://www.w3.org/2000/svg">
@@ -383,20 +386,23 @@ function buildOverlaySvg(copy: ProductThumbnailCopy): string {
     strokeWidth: 2,
   })}
 
-  <rect x="88" y="438" width="16" height="172" rx="8" fill="#38bdf8"/>
-  ${svgTextLines(headlineLines, 126, 532, 112, 118, {
+  <rect x="88" y="430" width="16" height="190" rx="8" fill="#38bdf8"/>
+  ${svgTextLines(headlineLines, 126, 510, 96, 104, {
     fill: "#fff1a8",
     weight: 950,
     stroke: "#000000",
     strokeWidth: 5,
   })}
 
-  <text x="126" y="674" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans CJK KR, Arial, sans-serif" font-size="48" font-weight="850" fill="#ffffff" stroke="#000000" stroke-width="2" paint-order="stroke">${escapeXml(
-    copy.subline
-  )}</text>
+  ${svgTextLines(sublineLines, 126, 686, 40, 44, {
+    fill: "#ffffff",
+    weight: 850,
+    stroke: "#000000",
+    strokeWidth: 2,
+  })}
 
-  <rect x="88" y="740" width="392" height="84" rx="42" fill="#facc15" filter="url(#shadow)"/>
-  <text x="284" y="795" text-anchor="middle" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans CJK KR, Arial, sans-serif" font-size="44" font-weight="950" fill="#111827">${escapeXml(
+  <rect x="88" y="760" width="392" height="84" rx="42" fill="#facc15" filter="url(#shadow)"/>
+  <text x="284" y="815" text-anchor="middle" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans CJK KR, Arial, sans-serif" font-size="44" font-weight="950" fill="#111827">${escapeXml(
     copy.cta
   )}</text>
 </svg>`;
@@ -664,10 +670,22 @@ export async function generateProductThumbnail(
   if (options.enabled === false) return null;
   if (options.imagePaths.length === 0) return null;
 
-  const resolvedImages = await resolveThumbnailImages(options.imagePaths);
+  const preferredImagePath = options.preferredImagePath && fs.existsSync(options.preferredImagePath)
+    ? options.preferredImagePath
+    : null;
+  const resolvedImages = preferredImagePath
+    ? { backgroundPath: preferredImagePath, heroPath: preferredImagePath }
+    : await resolveThumbnailImages(options.imagePaths);
   if (!resolvedImages) return null;
 
-  const copy = buildProductThumbnailCopy(options.postTitle, options.productName);
+  const suggestedCopy = buildProductThumbnailCopy(options.postTitle, options.productName);
+  const copy: ProductThumbnailCopy = {
+    productNameLabel: sanitizeText(options.copy?.productNameLabel || suggestedCopy.productNameLabel),
+    headline: sanitizeText(options.copy?.headline || suggestedCopy.headline),
+    subline: sanitizeText(options.copy?.subline || suggestedCopy.subline),
+    badge: sanitizeText(options.copy?.badge || suggestedCopy.badge),
+    cta: sanitizeText(options.copy?.cta || suggestedCopy.cta),
+  };
   const timestamp = Date.now();
   const outputPath = path.join(
     options.outputDir,

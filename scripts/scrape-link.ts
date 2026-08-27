@@ -6,7 +6,7 @@
 import "dotenv/config";
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "../src/generated/prisma";
 import type { BrowserContextOptions, Page } from "playwright";
 import * as fs from "fs";
 import {

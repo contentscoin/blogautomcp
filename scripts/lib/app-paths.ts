@@ -38,3 +38,9 @@ export function getEnvFilePath(): string {
   const base = process.env.DESKTOP_USER_DATA || getProjectRoot();
   return path.join(base, ".env");
 }
+
+/** 사용자가 생성·저장한 제품 썸네일 보관 경로. */
+export function getProductThumbnailStorageDir(): string {
+  const base = process.env.DESKTOP_USER_DATA || getProjectRoot();
+  return path.join(base, "generated-thumbnails");
+}

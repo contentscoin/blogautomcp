@@ -16,10 +16,21 @@ async function localApi(request: NextRequest, path: string, init?: RequestInit) 
   headers.set("content-type", "application/json");
   const adminKey = process.env.ADMIN_API_KEY?.trim();
   if (adminKey) headers.set("x-admin-api-key", adminKey);
-  const response = await fetch(new URL(path, request.nextUrl.origin), { ...init, headers, cache: "no-store" });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok || payload?.success === false) throw new Error(typeof payload?.error === "string" ? payload.error : JSON.stringify(payload?.error || `Local API ${response.status}`));
-  return payload;
+  const url = new URL(path, request.nextUrl.origin);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await fetch(url, { ...init, headers, cache: "no-store" });
+    const payload = await response.json().catch(() => null);
+    if (response.ok && payload?.success !== false) return payload;
+    if (response.status === 404 && attempt < 2) {
+      await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
+      continue;
+    }
+    const detail = typeof payload?.error === "string"
+      ? payload.error
+      : JSON.stringify(payload?.error || `Local API ${response.status} (${url.pathname})`);
+    throw new Error(detail);
+  }
+  throw new Error(`Local API 404 (${url.pathname})`);
 }
 
 async function executeJob(request: NextRequest, job: Job): Promise<unknown> {
@@ -36,7 +47,7 @@ async function executeJob(request: NextRequest, job: Job): Promise<unknown> {
       : 10;
     return localApi(request, "/api/brandlinks/bulk-seasonal", {
       method: "POST",
-      body: JSON.stringify({ connectKind: kind.toLowerCase(), count }),
+      body: JSON.stringify({ connectKind: kind.toLowerCase(), count, waitForCompletion: true }),
     });
   }
   if (job.type === "POST_CREATE_DRAFT") {

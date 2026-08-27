@@ -13,7 +13,7 @@ import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { Locator, Page, Response } from "playwright";
 import { IncomingMessage } from "http";
 import { spawnSync } from "child_process";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "../src/generated/prisma";
 import * as path from "path";
 import * as fs from "fs";
 import * as http from "http";

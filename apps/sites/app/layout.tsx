@@ -11,5 +11,35 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="ko"><body className={`${geistSans.variable} ${geistMono.variable}`}>{children}</body></html>;
+  return (
+    <html lang="ko">
+      <body className={`${geistSans.variable} ${geistMono.variable}`}>
+        <div className="site-frame">
+          {children}
+          <footer className="contact-footer">
+            <div className="shell contact-footer-inner">
+              <div>
+                <p className="contact-kicker">CONTACT &amp; CUSTOM DEVELOPMENT</p>
+                <h2>기타 문의나 프로그램 개발이 필요하신가요?</h2>
+                <p>BlogAutoMCP 사용 문의부터 업무 자동화·맞춤 프로그램 개발 상담까지 텔레그램으로 편하게 연락해 주세요.</p>
+              </div>
+              <a
+                className="button contact-button"
+                href="https://t.me/Jake_shin"
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="텔레그램으로 문의하기 (새 창)"
+              >
+                텔레그램 문의 <span aria-hidden="true">↗</span>
+              </a>
+            </div>
+            <div className="shell contact-footer-bottom">
+              <span>BlogAutoMCP</span>
+              <span>기타 문의 · 프로그램 개발 문의</span>
+            </div>
+          </footer>
+        </div>
+      </body>
+    </html>
+  );
 }

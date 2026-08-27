@@ -55,5 +55,6 @@ src/generated/prisma/
 # Local QA/build artifacts
 .playwright-cli/
 output/
+public/completion-reports/
 tsconfig.tsbuildinfo
 apps/site/tsconfig.tsbuildinfo

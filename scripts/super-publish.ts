@@ -1,7 +1,7 @@
 import "dotenv/config";
 import path from "path";
 import { spawnSync } from "child_process";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "../src/generated/prisma";
 import {
   buildAppUrl,
   notifyAndLogCompletion,
@@ -9,6 +9,7 @@ import {
 } from "./lib/chatbot-notifier";
 
 interface CliOptions {
+  connectKind: "shopping" | "travel";
   collectCount: number;
   todayCount: number;
   dailyQuota: number;
@@ -63,6 +64,7 @@ function formatYmd(date: Date): string {
 
 function parseArgs(argv: string[]): CliOptions {
   const options: CliOptions = {
+    connectKind: "shopping",
     collectCount: 200,
     todayCount: 50,
     dailyQuota: 50,
@@ -78,6 +80,10 @@ function parseArgs(argv: string[]): CliOptions {
   };
 
   for (const arg of argv) {
+    if (arg.startsWith("--connect-kind=")) {
+      options.connectKind = arg.split("=")[1]?.trim().toLowerCase() === "travel" ? "travel" : "shopping";
+      continue;
+    }
     if (arg.startsWith("--collect-count=")) {
       options.collectCount = parseBoundedInteger(arg.split("=")[1], options.collectCount, 1, 200);
       continue;
@@ -222,6 +228,7 @@ async function main() {
     console.log("=".repeat(70));
     console.log("Super Publishing start");
     console.log(`- collectCount: ${options.collectCount}`);
+    console.log(`- connectKind: ${options.connectKind}`);
     console.log(`- todayCount: ${options.todayCount}`);
     console.log(`- dailyQuota: ${options.dailyQuota}`);
     console.log(`- startDate: ${options.startDate}`);
@@ -232,6 +239,7 @@ async function main() {
     console.log("=".repeat(70));
 
     const registerArgs = [
+      `--connect-kind=${options.connectKind}`,
       `--count=${options.collectCount}`,
       `--start-date=${options.startDate}`,
       `--interval-days=${options.intervalDays}`,
@@ -258,6 +266,7 @@ async function main() {
 
     const createdLinks = await prisma.brandLink.findMany({
       where: {
+        connectKind: options.connectKind === "travel" ? "TRAVEL" : "SHOPPING",
         createdAt: { gte: startedAt },
         scheduledPublishAt: { not: null },
       },
@@ -287,6 +296,7 @@ async function main() {
           `--delay-ms=${options.delayMs}`,
           "--all-scheduled",
           `--created-after=${startedAtIso}`,
+          `--connect-kind=${options.connectKind}`,
         ])
       );
     } else {
@@ -300,6 +310,7 @@ async function main() {
           `--delay-ms=${options.delayMs}`,
           `--interval-days=${options.intervalDays}`,
           `--created-after=${startedAtIso}`,
+          `--connect-kind=${options.connectKind}`,
         ])
       );
     } else {

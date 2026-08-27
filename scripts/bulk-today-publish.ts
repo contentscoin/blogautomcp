@@ -1,7 +1,7 @@
 import "dotenv/config";
 import path from "path";
 import { spawn } from "child_process";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "../src/generated/prisma";
 import {
   buildAppUrl,
   notifyAndLogCompletion,
@@ -9,6 +9,7 @@ import {
 } from "./lib/chatbot-notifier";
 
 interface CliOptions {
+  connectKind: "SHOPPING" | "TRAVEL";
   limit: number;
   delayMs: number;
   targetDate: string | null;
@@ -22,6 +23,7 @@ const AGENT_AI_PROVIDER = process.env.AI_PROVIDER || "openai";
 
 function parseArgs(argv: string[]): CliOptions {
   const options: CliOptions = {
+    connectKind: "SHOPPING",
     limit: 10,
     delayMs: 1500,
     targetDate: null,
@@ -30,6 +32,10 @@ function parseArgs(argv: string[]): CliOptions {
   };
 
   for (const arg of argv) {
+    if (arg.startsWith("--connect-kind=")) {
+      options.connectKind = arg.split("=")[1]?.trim().toLowerCase() === "travel" ? "TRAVEL" : "SHOPPING";
+      continue;
+    }
     if (arg.startsWith("--limit=")) {
       const value = Number.parseInt(arg.split("=")[1] || "", 10);
       if (Number.isFinite(value) && value > 0 && value <= 100) {
@@ -178,11 +184,13 @@ async function main() {
   const pendingWhere = options.allScheduled
     ? {
         ...createdAfterWhere,
+        connectKind: options.connectKind,
         status: "READY",
         scheduledPublishAt: { not: null },
       }
     : {
         ...createdAfterWhere,
+        connectKind: options.connectKind,
         status: "READY",
         scheduledPublishAt: {
           gte: new Date(`${targetDate}T00:00:00.000Z`),

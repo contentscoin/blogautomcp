@@ -5,8 +5,10 @@ import fs from "fs";
 import path from "path";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
+import { parseConnectKind, toStoredConnectKind } from "@/lib/brandconnect-kind";
 
 interface BulkScheduleBody {
+  connectKind?: string;
   limit?: number;
   delayMs?: number;
   startDate?: string;
@@ -69,6 +71,14 @@ export async function POST(request: NextRequest) {
     }
 
     const requestedLimit = toSafePositiveInt(body.limit, 10, 200);
+    const connectKind = parseConnectKind(body.connectKind);
+    const storedConnectKind = toStoredConnectKind(connectKind);
+    if (connectKind === "travel") {
+      return NextResponse.json(
+        { success: false, error: "여행커넥트 발행은 네이버 에디터 삽입 방식 검증 후 사용할 수 있습니다." },
+        { status: 501 }
+      );
+    }
     const delayMs = toSafePositiveInt(body.delayMs, 1500, 60000);
     const intervalDays = toSafePositiveInt(body.intervalDays, 1, 30);
     const startDate =
@@ -91,6 +101,7 @@ export async function POST(request: NextRequest) {
 
     const pendingCount = await prisma.brandLink.count({
       where: {
+        connectKind: storedConnectKind,
         status: "READY",
         scheduledPublishAt: { not: null },
       },
@@ -114,6 +125,7 @@ export async function POST(request: NextRequest) {
       `--limit=${targetCount}`,
       `--delay-ms=${delayMs}`,
       `--interval-days=${intervalDays}`,
+      `--connect-kind=${connectKind}`,
     ];
     if (startDate) {
       scriptArgs.push(`--start-date=${startDate}`);
@@ -128,7 +140,7 @@ export async function POST(request: NextRequest) {
 
     fs.writeSync(
       logFd,
-      `[${new Date().toISOString()}] bulk schedule start targetCount=${targetCount} delayMs=${delayMs} ${
+      `[${new Date().toISOString()}] bulk schedule start connectKind=${connectKind} targetCount=${targetCount} delayMs=${delayMs} ${
         startDate ? `startDate=${startDate}` : "scheduleMode=preserve-existing-dates"
       } intervalDays=${intervalDays}\n`
     );
@@ -161,6 +173,7 @@ export async function POST(request: NextRequest) {
       message: "예약발행 일괄 실행을 시작했습니다.",
       data: {
         targetCount,
+        connectKind,
         delayMs,
         startDate: startDate ?? undefined,
         endDate: endDate ?? undefined,

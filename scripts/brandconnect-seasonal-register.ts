@@ -4,10 +4,21 @@ import path from "path";
 import { chromium } from "playwright-extra";
 import type { APIResponse, Page } from "playwright";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "../src/generated/prisma";
 import { buildAppUrl, notifyAndLogCompletion } from "./lib/chatbot-notifier";
 import { getNaverSessionFile } from "./lib/app-paths";
-import { buildCaptureRequiredPayload, parseConnectKind, resolveConnectContract, toStoredConnectKind, type ConnectKind } from "../src/lib/brandconnect-kind";
+import {
+  buildTravelConnectUrl,
+  buildTravelTabKey,
+  getSpaceIdFromConnectUrl,
+  parseConnectKind,
+  parseTravelConnectTabs,
+  resolveConnectContract,
+  toStoredConnectKind,
+  TRAVEL_CONNECT_SERVICE_TYPE,
+  type ConnectKind,
+  type TravelConnectTab,
+} from "../src/lib/brandconnect-kind";
 
 chromium.use(StealthPlugin());
 
@@ -70,6 +81,8 @@ interface ProductApiItem {
   id: number;
   productName: string;
   storeName: string;
+  sourceUrl?: string;
+  shortenUrl?: string;
   discountedRate: number;
   salePrice: number;
   discountedSalePrice: number;
@@ -222,6 +235,11 @@ function parseArgs(argv: string[]): CliOptions {
     !/^\d{4}-\d{2}-\d{2}$/.test(options.startDate)
   ) {
     throw new Error("--start-date는 YYYY-MM-DD 형식이어야 합니다.");
+  }
+
+  if (options.connectKind === "travel" && options.categoryUrl === DEFAULT_CATEGORY_URL) {
+    const spaceId = getSpaceIdFromConnectUrl(DEFAULT_CATEGORY_URL);
+    if (spaceId) options.categoryUrl = buildTravelConnectUrl(spaceId);
   }
 
   return options;
@@ -497,6 +515,41 @@ function parseProductApiItems(payload: unknown): ProductApiItem[] {
   return parsed;
 }
 
+function parseTravelProductApiItems(payload: unknown): ProductApiItem[] {
+  if (typeof payload !== "object" || payload === null) return [];
+  const rows = (payload as { data?: unknown }).data;
+  if (!Array.isArray(rows)) return [];
+
+  const parsed: ProductApiItem[] = [];
+  for (const row of rows) {
+    if (typeof row !== "object" || row === null) continue;
+    const obj = row as Record<string, unknown>;
+    const id = parseNumber(obj.productId);
+    const productName = typeof obj.name === "string" ? obj.name.trim() : "";
+    if (!id || !productName) continue;
+    parsed.push({
+      id,
+      productName,
+      storeName: typeof obj.storeName === "string" ? obj.storeName.trim() : "",
+      sourceUrl: typeof obj.url === "string" ? obj.url.trim() : undefined,
+      shortenUrl: typeof obj.shortenUrl === "string" ? obj.shortenUrl.trim() : undefined,
+      discountedRate: parseNumber(obj.discountedRate),
+      salePrice: parseNumber(obj.salePrice),
+      discountedSalePrice: parseNumber(obj.discountedSalePrice),
+      salesCount: parseNumberFromKeys(obj, ["salesCount", "saleCount", "soldCount"]),
+      orderCount: parseNumberFromKeys(obj, ["orderCount", "ordersCount"]),
+      purchaseCount: parseNumberFromKeys(obj, ["purchaseCount", "buyCount"]),
+      reviewCount: parseNumberFromKeys(obj, ["reviewCount", "reviewsCount"]),
+      popularityScore: parseNumberFromKeys(obj, ["popularityScore", "score", "recommendScore"]),
+      rank: parseNumberFromKeys(obj, ["rank", "ranking", "displayRank"]),
+      badgeTexts: parseBadgeTexts(obj),
+      sourceCategoryIds: [],
+      sourceCategoryNames: [],
+    });
+  }
+  return parsed;
+}
+
 function parseDisplayCategories(payload: unknown): DisplayCategory[] {
   const rows = Array.isArray(payload)
     ? payload
@@ -659,7 +712,11 @@ function shouldIncludeCategory(category: DisplayCategory, categoryFilter: string
 
 function shouldIncludeProductByPromotion(product: ProductApiItem, promotionFilter: string[]): boolean {
   if (promotionFilter.length === 0) return true;
-  const haystack = product.badgeTexts.join(" ");
+  const haystack = [
+    ...product.badgeTexts,
+    ...product.sourceCategoryIds,
+    ...product.sourceCategoryNames,
+  ].join(" ");
   return matchesAnyTerm(haystack, promotionFilter);
 }
 
@@ -739,6 +796,81 @@ async function collectProductPool(
 
   return {
     products,
+    scannedCategoryCount,
+  };
+}
+
+async function fetchTravelTabs(page: Page, spaceId: string): Promise<TravelConnectTab[]> {
+  const url = new URL("https://gw-brandconnect.naver.com/affiliate/query/connect/recommend-tabs");
+  url.searchParams.set("serviceType", TRAVEL_CONNECT_SERVICE_TYPE);
+  const payload = await fetchBrandConnectJson(page, url.toString(), spaceId);
+  return parseTravelConnectTabs(payload);
+}
+
+async function fetchTravelProductsForTab(
+  page: Page,
+  tab: TravelConnectTab,
+  spaceId: string
+): Promise<ProductApiItem[]> {
+  const url = new URL("https://gw-brandconnect.naver.com/affiliate/query/connect/recommend-products");
+  url.searchParams.set("serviceType", TRAVEL_CONNECT_SERVICE_TYPE);
+  url.searchParams.set("section", tab.section);
+  url.searchParams.set("tabId", tab.tabId);
+  const payload = await fetchBrandConnectJson(page, url.toString(), spaceId);
+  return parseTravelProductApiItems(payload);
+}
+
+function shouldIncludeTravelTab(tab: TravelConnectTab, filters: string[]): boolean {
+  if (filters.length === 0) return true;
+  return matchesAnyTerm(
+    `${buildTravelTabKey(tab.section, tab.tabId)} ${tab.section} ${tab.tabId} ${tab.title}`,
+    filters
+  );
+}
+
+async function collectTravelProductPool(
+  page: Page,
+  spaceId: string,
+  initialProducts: ProductApiItem[],
+  options: Pick<CliOptions, "promotionFilter" | "categoryFilter">
+): Promise<{ products: ProductApiItem[]; scannedCategoryCount: number }> {
+  const tabs = await fetchTravelTabs(page, spaceId);
+  const combinedFilters = [...options.categoryFilter, ...options.promotionFilter];
+  const selectedTabs = tabs.filter((tab) => shouldIncludeTravelTab(tab, combinedFilters));
+  if (tabs.length === 0) throw new Error("여행커넥트 탭 API 응답을 확보하지 못했습니다.");
+  if (combinedFilters.length > 0 && selectedTabs.length === 0) {
+    throw new Error(`선택한 여행커넥트 탭을 찾지 못했습니다: ${combinedFilters.join(", ")}`);
+  }
+
+  const productsById = new Map<number, ProductApiItem>();
+  if (combinedFilters.length === 0 && initialProducts.length > 0) {
+    appendUniqueProduct(productsById, initialProducts, { id: "TRAVEL_RECOMMENDED", name: "여행 추천" });
+  }
+
+  let scannedCategoryCount = 0;
+  for (let offset = 0; offset < selectedTabs.length; offset += 4) {
+    const batch = selectedTabs.slice(offset, offset + 4);
+    const batchProducts = await Promise.all(
+      batch.map((tab) => fetchTravelProductsForTab(page, tab, spaceId))
+    );
+    batch.forEach((tab, index) => {
+      const products = batchProducts[index];
+      if (products.length === 0) return;
+      appendUniqueProduct(productsById, products, {
+        id: buildTravelTabKey(tab.section, tab.tabId),
+        name: tab.title,
+      });
+      scannedCategoryCount += 1;
+      console.log(`   여행 후보 수집: ${tab.title} ${products.length}개 / 누적 ${productsById.size}개`);
+    });
+  }
+
+  return {
+    products: Array.from(productsById.values()).filter(
+      (product) =>
+        shouldIncludeProductByPromotion(product, options.promotionFilter) &&
+        shouldIncludeProductByCategory(product, options.categoryFilter)
+    ),
     scannedCategoryCount,
   };
 }
@@ -1136,10 +1268,61 @@ async function fetchBlogCategoryMap(
 
 async function issueAffiliateShortUrl(
   page: Page,
-  productId: number,
+  item: ProductApiItem,
   issuedUrlsByProductId: Map<number, string>,
-  spaceId: string
+  spaceId: string,
+  connectKind: ConnectKind,
 ): Promise<string | null> {
+  const productId = item.id;
+  if (connectKind === "travel") {
+    if (item.shortenUrl && /^https:\/\/naver\.me\//.test(item.shortenUrl)) {
+      return item.shortenUrl;
+    }
+    if (!item.sourceUrl || !/^https:\/\//.test(item.sourceUrl)) return null;
+
+    const apiUrl = "https://gw-brandconnect.naver.com/affiliate/command/connect-urls";
+    const requestTravelUrl = async (): Promise<string | null> => page.context().request
+      .post(apiUrl, {
+        headers: {
+          accept: "application/json, text/plain, */*",
+          "content-type": "application/json",
+          "x-space-id": spaceId,
+          referer: page.url(),
+          origin: "https://brandconnect.naver.com",
+        },
+        data: { url: item.sourceUrl },
+      })
+      .then(async (res: APIResponse) => {
+        if (!res.ok()) return null;
+        const payload = (await res.json()) as { url?: unknown };
+        return typeof payload.url === "string" ? payload.url : null;
+      })
+      .catch(() => null);
+
+    const directTravelUrl = await requestTravelUrl();
+    if (directTravelUrl && /^https:\/\/naver\.me\//.test(directTravelUrl)) {
+      return directTravelUrl;
+    }
+
+    return page.evaluate(async ({ url }: { url: string }) => {
+      try {
+        const response = await fetch("https://gw-brandconnect.naver.com/affiliate/command/connect-urls", {
+          method: "POST",
+          credentials: "include",
+          headers: { accept: "application/json, text/plain, */*", "content-type": "application/json" },
+          body: JSON.stringify({ url }),
+        });
+        if (!response.ok) return null;
+        const payload = (await response.json()) as { url?: unknown };
+        return typeof payload.url === "string" && /^https:\/\/naver\.me\//.test(payload.url)
+          ? payload.url
+          : null;
+      } catch {
+        return null;
+      }
+    }, { url: item.sourceUrl }).catch(() => null as string | null);
+  }
+
   const apiUrl = `https://gw-brandconnect.naver.com/affiliate/command/affiliate-urls?affiliateProductId=${productId}`;
   const directFromContext = await page.context().request
     .post(apiUrl, {
@@ -1263,22 +1446,21 @@ function buildMemo(item: PlannedProduct): string {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const connectContract = resolveConnectContract(options.connectKind, options.categoryUrl);
-  if (connectContract.captureRequired) {
-    throw new Error(JSON.stringify(buildCaptureRequiredPayload(connectContract)));
-  }
+  resolveConnectContract(options.connectKind, options.categoryUrl);
   const prisma = new PrismaClient();
 
   const blogId = process.env.NAVER_BLOG_ID?.trim();
   if (!blogId) {
     throw new Error(".env의 NAVER_BLOG_ID가 필요합니다.");
   }
-  const spaceId = options.categoryUrl.match(/brandconnect\.naver\.com\/(\d+)\//)?.[1];
+  const spaceId = getSpaceIdFromConnectUrl(options.categoryUrl);
   if (!spaceId) {
     throw new Error("category-url에서 spaceId를 추출하지 못했습니다.");
   }
-  const rootCategoryId = getDisplayCategoryIdFromUrl(options.categoryUrl);
-  if (!rootCategoryId) {
+  const rootCategoryId = options.connectKind === "shopping"
+    ? getDisplayCategoryIdFromUrl(options.categoryUrl)
+    : null;
+  if (options.connectKind === "shopping" && !rootCategoryId) {
     throw new Error("category-url에서 displayCategoryId를 추출하지 못했습니다.");
   }
 
@@ -1361,10 +1543,15 @@ async function main() {
   page.on("response", async (response) => {
     const url = response.url();
 
-    if (url.includes("/affiliate/query/affiliate-products/search-by-display-category")) {
+    if (
+      url.includes("/affiliate/query/affiliate-products/search-by-display-category") ||
+      url.includes("/affiliate/query/connect/recommend-products")
+    ) {
       try {
         const payload = (await response.json()) as unknown;
-        const parsed = parseProductApiItems(payload);
+        const parsed = options.connectKind === "travel"
+          ? parseTravelProductApiItems(payload)
+          : parseProductApiItems(payload);
         if (parsed.length > productsFromApi.length) {
           productsFromApi = parsed;
         }
@@ -1397,19 +1584,23 @@ async function main() {
     timeout: 60000,
   });
 
-  await page.waitForSelector("li.ProductSearchCategory_item__epUPF", { timeout: 30000 });
+  if (options.connectKind === "shopping") {
+    await page.waitForSelector("li.ProductSearchCategory_item__epUPF", { timeout: 30000 });
+  }
 
   for (let i = 0; i < 20 && productsFromApi.length === 0; i += 1) {
     await page.waitForTimeout(300);
   }
 
-  if (productsFromApi.length === 0) {
+  if (options.connectKind === "shopping" && productsFromApi.length === 0) {
     throw new Error("상품 목록 API 응답을 확보하지 못했습니다.");
   }
 
-  console.log(`✅ 카테고리 첫 상품 수집: ${productsFromApi.length}개`);
+  console.log(`✅ 첫 상품 수집: ${productsFromApi.length}개`);
 
-  const productPool = await collectProductPool(page, rootCategoryId, spaceId, productsFromApi, options);
+  const productPool = options.connectKind === "travel"
+    ? await collectTravelProductPool(page, spaceId, productsFromApi, options)
+    : await collectProductPool(page, rootCategoryId as string, spaceId, productsFromApi, options);
   console.log(
     `✅ 확장 후보 수집: ${productPool.products.length}개 / 스캔 카테고리 ${productPool.scannedCategoryCount}개`
   );
@@ -1470,7 +1661,7 @@ async function main() {
 
   console.log("\n📋 선별 결과");
   selected.slice(0, options.count).forEach((item, index) => {
-    const boardName = inferBoardName(item.productName);
+    const boardName = options.connectKind === "travel" ? "여행 오빠" : inferBoardName(item.productName);
     const categoryNo = categoryMap.get(boardName) ?? CATEGORY_NAME_FALLBACK[boardName] ?? null;
     console.log(
       `${String(index + 1).padStart(2, "0")}. [${boardName}/${categoryNo ?? "-"}] ${getScheduledDate(index)} | score=${item.score.toFixed(1)} | ${item.reasons.slice(0, 2).join(", ") || "계절/인기/할인 기반"} | ${item.productName}`
@@ -1486,7 +1677,7 @@ async function main() {
       break;
     }
 
-    const boardName = inferBoardName(item.productName);
+    const boardName = options.connectKind === "travel" ? "여행 오빠" : inferBoardName(item.productName);
     const categoryNo = categoryMap.get(boardName) ?? CATEGORY_NAME_FALLBACK[boardName] ?? null;
     const scheduledDate = getScheduledDate(successfulRegisterCount);
     const plannedItem: PlannedProduct = {
@@ -1496,12 +1687,29 @@ async function main() {
       scheduledDate,
     };
 
+    if (options.dryRun) {
+      console.log(`\n🧪 dry-run: 링크 발급/DB 저장 생략 - ${item.productName}`);
+      results.push({
+        action: "created",
+        productId: item.id,
+        productName: item.productName,
+        shortUrl: null,
+        categoryNo: plannedItem.categoryNo,
+        boardName: plannedItem.boardName,
+        scheduledDate: plannedItem.scheduledDate,
+        reason: "dry-run (외부 링크 발급 및 DB 저장 생략)",
+      });
+      successfulRegisterCount += 1;
+      continue;
+    }
+
     console.log(`\n🔗 링크 발급 중: ${item.productName}`);
     const shortUrl = await issueAffiliateShortUrl(
       page,
-      item.id,
+      item,
       issuedUrlsByProductId,
-      spaceId
+      spaceId,
+      options.connectKind,
     );
 
     if (!shortUrl) {
@@ -1566,21 +1774,6 @@ async function main() {
       console.log(
         `   ↪️ 기존 링크는 ${existing.status}/${getDuplicateReferenceDate(existing).toISOString().slice(0, 10)} 기록이라 중복 판단에서 무시`
       );
-    }
-
-    if (options.dryRun) {
-      results.push({
-        action: "created",
-        productId: item.id,
-        productName: item.productName,
-        shortUrl,
-        categoryNo: plannedItem.categoryNo,
-        boardName: plannedItem.boardName,
-        scheduledDate: plannedItem.scheduledDate,
-        reason: "dry-run",
-      });
-      successfulRegisterCount += 1;
-      continue;
     }
 
     const scheduledPublishAt = new Date(`${plannedItem.scheduledDate}T00:00:00.000Z`);

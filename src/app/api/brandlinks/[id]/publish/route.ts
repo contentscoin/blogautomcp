@@ -176,6 +176,16 @@ export async function POST(
       );
     }
 
+    if (link.connectKind === "TRAVEL") {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "여행커넥트 발행은 네이버 에디터 삽입 방식 검증 후 사용할 수 있습니다.",
+        },
+        { status: 501 }
+      );
+    }
+
     if (link.status === "PUBLISHING") {
       return NextResponse.json(
         { success: false, error: "이미 발행이 진행 중입니다." },

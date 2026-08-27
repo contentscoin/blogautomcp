@@ -12,7 +12,7 @@ import type { BrowserContext } from "playwright";
 import type { BrowserContextOptions } from "playwright";
 import type { Locator } from "playwright";
 import type { Response } from "playwright";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "../src/generated/prisma";
 import type { IncomingMessage } from "http";
 import { spawnSync } from "child_process";
 import * as path from "path";
@@ -54,10 +54,19 @@ import {
   type BrandLinkContentReadiness,
 } from "./lib/brandlink-content-readiness";
 import {
+  buildProductEditorialPlan,
+  formatProductEditorialPlanForPrompt,
+  type ProductEditorialPlan,
+} from "./lib/product-editorial-plan";
+import {
   getChatgptSessionFile,
   getNaverSessionFile,
   getSessionStorageDir,
 } from "./lib/app-paths";
+import {
+  parseProductThumbnailSettings,
+  productThumbnailSettingKey,
+} from "./lib/product-thumbnail-settings";
 
 // Stealth 플러그인 적용 (봇 감지 우회)
 chromium.use(StealthPlugin());
@@ -287,6 +296,7 @@ interface GeneratedPostPreview {
   hashtags: string[];
   rawResponse?: string;
   openCrabSeoBrief?: OpenCrabSeoBrief | null;
+  productEditorialPlan?: ProductEditorialPlan | null;
 }
 
 interface ChatGPTGuidanceContext {
@@ -303,6 +313,7 @@ interface ChatGPTGuidanceContext {
   brandLink: string;
   targetSectionCount: number;
   openCrabSeoBrief?: OpenCrabSeoBrief | null;
+  productEditorialPlan?: ProductEditorialPlan | null;
 }
 
 const DEFAULT_SECTION_TITLES = [
@@ -415,7 +426,7 @@ function buildLocalProductTitle(
   return sanitizeTitle(collapseRepeatedLeadingTitleTokens(rawTitle), product.name);
 }
 
-type ProductThumbnailSource = "chatgpt" | "codex-imagegen" | "local-script" | "composite";
+type ProductThumbnailSource = "chatgpt" | "codex-imagegen" | "local-script" | "composite" | "saved-studio";
 
 interface GeneratedProductThumbnail {
   path: string;
@@ -790,12 +801,40 @@ function generateProductThumbnailWithLocalScript(
 
 async function generateTopTextCutoutThumbnail(
   product: ProductInfo,
-  postTitle: string
+  postTitle: string,
+  brandLinkId?: string,
 ): Promise<GeneratedProductThumbnail | null> {
   if (!THUMBNAIL_AUTOGEN_ENABLED) return null;
+  const savedSetting = brandLinkId
+    ? parseProductThumbnailSettings(
+        (await prisma.setting.findUnique({
+          where: { key: productThumbnailSettingKey(brandLinkId) },
+          select: { value: true },
+        }))?.value,
+      )
+    : null;
+  if (savedSetting?.generatedPath && fs.existsSync(savedSetting.generatedPath)) {
+    console.log(`   ✅ 저장된 썸네일 폼 결과 사용: ${path.basename(savedSetting.generatedPath)}`);
+    return { path: savedSetting.generatedPath, source: "saved-studio" };
+  }
   if (!product.representativeImagePath || !fs.existsSync(product.representativeImagePath)) {
     console.log("   ⚠️ 판매페이지 대표 이미지가 없어 썸네일 생성을 건너뜁니다.");
     return null;
+  }
+  if (savedSetting) {
+    const regenerated = await generateProductThumbnail({
+      imagePaths: [product.representativeImagePath, ...product.imagePaths],
+      preferredImagePath: product.representativeImagePath,
+      postTitle,
+      productName: product.name,
+      outputDir: TEMP_PATH,
+      copy: savedSetting.copy,
+      enabled: true,
+    }).catch(() => null);
+    if (regenerated?.outputPath && fs.existsSync(regenerated.outputPath)) {
+      console.log(`   ✅ 저장된 썸네일 카피로 재생성: ${path.basename(regenerated.outputPath)}`);
+      return { path: regenerated.outputPath, source: "saved-studio" };
+    }
   }
 
   const promptInfo = buildProductThumbnailGenerationPrompt({
@@ -2331,6 +2370,9 @@ function buildDraftContentPayload(
 ): string {
   const topics = buildDraftChapterTopics(context, sectionCount);
   const openCrabBriefText = formatOpenCrabSeoBriefForPrompt(context.openCrabSeoBrief ?? null);
+  const editorialPlanText = context.productEditorialPlan
+    ? formatProductEditorialPlanForPrompt(context.productEditorialPlan)
+    : "";
 
   const topicLines = topics.map((topic, index) => `${index + 1}. ${topic}`).join("\n");
 
@@ -2356,6 +2398,7 @@ function buildDraftContentPayload(
     `- 리뷰수: ${context.reviewCount || "(미확인)"}`,
     `- 평점: ${context.rating || "(미확인)"}`,
     openCrabBriefText ? "\n[내부 SEO 참고자료]\n" + openCrabBriefText : "",
+    editorialPlanText ? "\n" + editorialPlanText : "",
     "",
     `선택된 소제목 개수(${sectionCount}개)와 모바일 버전 규칙을 유지해주세요.`,
   ].join("\n");
@@ -2976,6 +3019,9 @@ function buildGuidanceSummary(context: ChatGPTGuidanceContext): string {
   const openCrabBriefText = formatOpenCrabSeoBriefForPrompt(context.openCrabSeoBrief ?? null);
   if (openCrabBriefText) {
     details.push("", openCrabBriefText);
+  }
+  if (context.productEditorialPlan) {
+    details.push("", formatProductEditorialPlanForPrompt(context.productEditorialPlan));
   }
 
   return details.join("\n");
@@ -4332,6 +4378,7 @@ function saveGeneratedPostPreview(
     sectionCount: post.sections.length,
     hashtagCount: post.hashtags.length,
     openCrabSeoBrief: post.openCrabSeoBrief ?? null,
+    productEditorialPlan: post.productEditorialPlan ?? null,
     contentReadiness: readiness ?? null,
     sections: post.sections,
     hashtags: post.hashtags,
@@ -5063,6 +5110,20 @@ async function step2_generatePost(
     targetSectionCount: bodySectionCount,
   });
   const openCrabPromptBlock = formatOpenCrabSeoBriefForPrompt(openCrabSeoBrief);
+  const productEditorialPlan = buildProductEditorialPlan({
+    productName: product.name,
+    description: product.description,
+    features: product.features,
+    price: product.price,
+    originalPrice: product.originalPrice,
+    discountRate: product.discountRate,
+    couponInfo: product.couponInfo,
+    deliveryInfo: product.deliveryInfo,
+    reviewCount: product.reviewCount,
+    rating: product.rating,
+    targetSectionCount: bodySectionCount,
+  });
+  const productEditorialPromptBlock = formatProductEditorialPlanForPrompt(productEditorialPlan);
   if (openCrabSeoBrief) {
     console.log(
       `   OpenCrab SEO: ${openCrabSeoBrief.matchType} match, confidence=${openCrabSeoBrief.confidence}, images=${openCrabSeoBrief.mediaTargetImageCount}`
@@ -5140,16 +5201,9 @@ ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일
    - 빈 줄
 
 4. 섹션 구성 (${bodySectionCount}개):
-   - 구매 전 확인 포인트
-   - 구성 및 패키지 확인
-   - 첫인상 / 디자인
-   - 크기 & 스펙 정보
-   - 주요 기능 ①
-   - 주요 기능 ②
-   - 사용 장면별 체크
-   - 장점으로 보이는 부분
-   - 확인하면 좋을 아쉬운 점
-   - 이런 분께 잘 맞아요
+${productEditorialPlan.sections.map((section, index) => `   ${index + 1}) ${section.title}: ${section.purpose}`).join("\n")}
+
+${productEditorialPromptBlock}
 
    실제 구매/택배 수령/직접 사용 경험이 제공되지 않았으므로
    "주문했다", "받아봤다", "써봤다", "재구매 의사"처럼 체험을 단정하지 마세요.
@@ -5200,6 +5254,7 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
     brandLink,
     targetSectionCount: bodySectionCount,
     openCrabSeoBrief,
+    productEditorialPlan,
   };
 
   let text: string;
@@ -5262,6 +5317,7 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
     hashtags,
     rawResponse: text,
     openCrabSeoBrief,
+    productEditorialPlan,
   };
 }
 
@@ -8725,7 +8781,8 @@ async function main() {
     setStage("STEP2.5 대표 썸네일 생성");
     const generatedThumbnail = await generateTopTextCutoutThumbnail(
       product,
-      post.title
+      post.title,
+      link.id,
     );
     const generatedThumbnailPath = generatedThumbnail?.path || null;
     const collectedImagePaths = Array.from(

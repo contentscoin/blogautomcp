@@ -1,0 +1,5 @@
+interface:
+  display_name: "제품 사진 썸네일 카피라이팅"
+  short_description: "실제 제품 사진으로 네이버용 썸네일을 설계합니다"
+  brand_color: "#2563EB"
+  default_prompt: "Use $product-photo-thumbnail-copywriting to create a product-photo thumbnail with evidence-safe Korean copy."

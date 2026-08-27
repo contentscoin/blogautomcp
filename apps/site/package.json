@@ -7,7 +7,7 @@
     "build": "prisma generate --schema prisma/schema.prisma && next build",
     "start": "next start -p 3100",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/lib/crypto.test.ts src/lib/http.test.ts src/lib/mcp-connection.test.ts",
+    "test": "tsx --test src/lib/crypto.test.ts src/lib/http.test.ts src/lib/idempotency.test.ts src/lib/mcp-connection.test.ts",
     "db:generate": "prisma generate --schema prisma/schema.prisma",
     "db:push": "prisma db push --schema prisma/schema.prisma",
     "db:migrate": "prisma migrate deploy --schema prisma/schema.prisma"

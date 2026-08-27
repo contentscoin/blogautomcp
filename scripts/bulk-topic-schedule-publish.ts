@@ -1,7 +1,7 @@
 import "dotenv/config";
 import path from "path";
 import { spawn } from "child_process";
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient } from "../src/generated/prisma";
 import { parsePreparedTopicContent } from "../src/lib/topic-task-contract";
 
 interface CliOptions {

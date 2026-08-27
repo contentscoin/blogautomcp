@@ -5,6 +5,7 @@ import Link from "next/link";
 import SessionStatus from "@/components/SessionStatus";
 import PublishProgress from "@/components/PublishProgress";
 import TopicTaskPanel from "@/components/TopicTaskPanel";
+import ProductThumbnailStudio from "@/components/ProductThumbnailStudio";
 import { ThemeToggle } from "@/components/ThemeProvider";
 import { getTopicTaskContentReadiness } from "@/lib/topic-task-content-readiness";
 import { getTopicTaskPublishReadiness } from "@/lib/topic-task-publish-readiness";
@@ -154,6 +155,14 @@ interface BrandConnectSelectionOptionsResponse {
 
 type BrandConnectKind = "shopping" | "travel";
 
+function toStoredBrandConnectKind(kind: BrandConnectKind): "SHOPPING" | "TRAVEL" {
+  return kind === "travel" ? "TRAVEL" : "SHOPPING";
+}
+
+function isBrandLinkForKind(link: BrandLink, kind: BrandConnectKind): boolean {
+  return (link.connectKind ?? "SHOPPING") === toStoredBrandConnectKind(kind);
+}
+
 function getBrandConnectErrorMessage(
   error: BrandConnectSelectionOptionsResponse["error"]
 ): string {
@@ -246,6 +255,7 @@ export default function Dashboard() {
   const [newUseSectionHeading, setNewUseSectionHeading] = useState(true);
   const [adding, setAdding] = useState(false);
   const [publishingId, setPublishingId] = useState<string | null>(null);
+  const [thumbnailStudioLink, setThumbnailStudioLink] = useState<BrandLink | null>(null);
   const [stoppingPosting, setStoppingPosting] = useState(false);
   const [bulkSeasonalRunning, setBulkSeasonalRunning] = useState(false);
   const [bulkScheduleRunning, setBulkScheduleRunning] = useState(false);
@@ -341,6 +351,20 @@ export default function Dashboard() {
     brandConnectCategoryUrl,
     brandConnectDuplicateWindowDays,
   ]);
+
+  const selectBrandConnectKind = (nextKind: BrandConnectKind) => {
+    if (nextKind === brandConnectKind) return;
+    brandConnectKindRef.current = nextKind;
+    setBrandConnectKind(nextKind);
+    setBrandConnectCategoryUrl("");
+    setBrandConnectCategoryOptions([]);
+    setBrandConnectPromotionOptions([]);
+    setSelectedBrandConnectCategoryIds([]);
+    setSelectedBrandConnectPromotions([]);
+    setBrandConnectOptionsLoaded(false);
+    setBrandConnectOptionsError(null);
+    setTravelContractMessage(null);
+  };
 
   const fetchLinks = useCallback(async () => {
     try {
@@ -880,7 +904,7 @@ export default function Dashboard() {
     }
 
     const readyScheduledCount = links.filter(
-      (link) => link.status === "READY" && formatDateDisplay(link.scheduledPublishAt) !== "-"
+      (link) => isBrandLinkForKind(link, brandConnectKind) && link.status === "READY" && formatDateDisplay(link.scheduledPublishAt) !== "-"
     ).length;
 
     if (readyScheduledCount === 0) {
@@ -906,6 +930,7 @@ export default function Dashboard() {
         body: JSON.stringify({
           limit,
           delayMs: 1500,
+          connectKind: brandConnectKind,
         }),
       });
       const data = (await res.json()) as BulkActionResponse;
@@ -961,7 +986,7 @@ export default function Dashboard() {
     }
 
     const readyImmediateCount = links.filter(
-      (link) => link.status === "READY" && formatDateDisplay(link.scheduledPublishAt) !== "-"
+      (link) => isBrandLinkForKind(link, brandConnectKind) && link.status === "READY" && formatDateDisplay(link.scheduledPublishAt) !== "-"
     ).length;
 
     if (readyImmediateCount === 0) {
@@ -988,6 +1013,7 @@ export default function Dashboard() {
           limit,
           delayMs: 1500,
           allScheduled: true,
+          connectKind: brandConnectKind,
         }),
       });
       const data = (await res.json()) as BulkActionResponse;
@@ -1108,13 +1134,17 @@ export default function Dashboard() {
     setPublishingId(null);
   };
 
-  // 통계 계산
+  const visibleLinks = links.filter((link) => isBrandLinkForKind(link, brandConnectKind));
+  const activeConnectLabel = brandConnectKind === "travel" ? "여행커넥트" : "쇼핑커넥트";
+  const travelPublishingUnavailable = brandConnectKind === "travel";
+
+  // 현재 선택한 커넥트 통계 계산
   const stats = {
-    total: links.length,
-    ready: links.filter((l) => l.status === "READY").length,
-    scheduled: links.filter((l) => l.status === "SCHEDULED").length,
-    published: links.filter((l) => l.status === "PUBLISHED").length,
-    failed: links.filter((l) => l.status === "FAILED").length,
+    total: visibleLinks.length,
+    ready: visibleLinks.filter((l) => l.status === "READY").length,
+    scheduled: visibleLinks.filter((l) => l.status === "SCHEDULED").length,
+    published: visibleLinks.filter((l) => l.status === "PUBLISHED").length,
+    failed: visibleLinks.filter((l) => l.status === "FAILED").length,
   };
 
   // 상태 배지 색상
@@ -1152,7 +1182,7 @@ export default function Dashboard() {
     }
   };
 
-  const readyScheduledCount = links.filter(
+  const readyScheduledCount = visibleLinks.filter(
     (link) => link.status === "READY" && formatDateDisplay(link.scheduledPublishAt) !== "-"
   ).length;
   const readyImmediateCount = readyScheduledCount;
@@ -1893,33 +1923,41 @@ export default function Dashboard() {
             </div>
 
             <div className="bg-white border border-slate-200 rounded-xl p-4">
-              <h2 className="font-semibold text-slate-800 mb-3">⚙️ 일괄 작업</h2>
+              <div className="flex flex-col gap-3 mb-4">
+                <div className="flex items-center justify-between gap-3">
+                  <h2 className="font-semibold text-slate-800">⚙️ 커넥트별 일괄 작업</h2>
+                  <span className="text-xs font-medium text-slate-500">현재 목록 {visibleLinks.length}건</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1" role="tablist" aria-label="브랜드커넥트 종류">
+                  {([
+                    { kind: "shopping" as const, label: "🛍️ 쇼핑커넥트", count: links.filter((link) => isBrandLinkForKind(link, "shopping")).length },
+                    { kind: "travel" as const, label: "✈️ 여행커넥트", count: links.filter((link) => isBrandLinkForKind(link, "travel")).length },
+                  ]).map((tab) => {
+                    const selected = brandConnectKind === tab.kind;
+                    return (
+                      <button
+                        key={tab.kind}
+                        type="button"
+                        role="tab"
+                        aria-selected={selected}
+                        onClick={() => selectBrandConnectKind(tab.kind)}
+                        className={`rounded-lg px-4 py-3 text-sm font-semibold transition-colors ${
+                          selected
+                            ? tab.kind === "travel"
+                              ? "bg-amber-500 text-white shadow-sm"
+                              : "bg-blue-600 text-white shadow-sm"
+                            : "text-slate-600 hover:bg-white hover:text-slate-900"
+                        }`}
+                      >
+                        {tab.label} <span className={selected ? "text-white/80" : "text-slate-400"}>({tab.count})</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
               <div className="flex flex-wrap items-center gap-3">
                 <div className="w-full space-y-3">
-                  <div className="grid grid-cols-1 md:grid-cols-[150px_1fr_140px_auto] gap-3 items-end">
-                    <label className="block">
-                      <span className="block text-xs font-medium text-slate-600 mb-1">커넥트 종류</span>
-                      <select
-                        value={brandConnectKind}
-                        onChange={(e) => {
-                          const nextKind = e.target.value as BrandConnectKind;
-                          brandConnectKindRef.current = nextKind;
-                          setBrandConnectKind(nextKind);
-                          setBrandConnectCategoryUrl("");
-                          setBrandConnectCategoryOptions([]);
-                          setBrandConnectPromotionOptions([]);
-                          setSelectedBrandConnectCategoryIds([]);
-                          setSelectedBrandConnectPromotions([]);
-                          setBrandConnectOptionsLoaded(false);
-                          setBrandConnectOptionsError(null);
-                          setTravelContractMessage(null);
-                        }}
-                        className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      >
-                        <option value="shopping">쇼핑커넥트</option>
-                        <option value="travel">여행커넥트</option>
-                      </select>
-                    </label>
+                  <div className="grid grid-cols-1 md:grid-cols-[1fr_140px_auto] gap-3 items-end">
                     <label className="block">
                       <span className="block text-xs font-medium text-slate-600 mb-1">
                         {brandConnectKind === "travel" ? "여행커넥트 목록 URL (선택)" : "브랜드커넥트 카테고리 URL"}
@@ -1963,7 +2001,7 @@ export default function Dashboard() {
                   {brandConnectKind === "travel" && (
                     <div className="flex flex-col md:flex-row md:items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
                       <p className="text-xs text-amber-800 flex-1">
-                        여행커넥트는 로그인된 세션에서 화면과 응답 구조를 자동 탐색해 1회 캡처합니다. 원문 개인정보는 저장하지 않습니다.
+                        여행커넥트 목록은 로그인된 세션에서 자동으로 불러옵니다. 아래 캡처는 응답 구조가 바뀌었을 때 진단용으로만 사용합니다.
                       </p>
                       <button
                         type="button"
@@ -1971,7 +2009,7 @@ export default function Dashboard() {
                         disabled={travelContractCapturing}
                         className="px-3 py-2 text-xs font-medium bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
-                        {travelContractCapturing ? "자동 캡처 중..." : "여행 계약 자동 캡처"}
+                        {travelContractCapturing ? "진단 캡처 중..." : "여행 응답 진단 캡처"}
                       </button>
                     </div>
                   )}
@@ -2064,85 +2102,76 @@ export default function Dashboard() {
                     </div>
                   </div>
                 </div>
-                <button
-                  onClick={() => handleBulkSeasonalRegister(SEASONAL_REGISTER_COUNT_10)}
-                  disabled={bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId)}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                  {bulkSeasonalRunning
-                    ? "인기 상품 등록 시작 중..."
-                    : "시즌·히트·인기 10개 등록"}
-                </button>
-                <button
-                  onClick={() => handleBulkSeasonalRegister(SEASONAL_REGISTER_COUNT_50)}
-                  disabled={bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId)}
-                  className="px-4 py-2 bg-sky-600 text-white rounded-lg hover:bg-sky-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                  {bulkSeasonalRunning
-                    ? "인기 상품 등록 시작 중..."
-                    : "시즌·히트·인기 50개 등록"}
-                </button>
-                <button
-                  onClick={handleSuperPublishing}
-                  disabled={
-                    bulkSeasonalRunning ||
-                    bulkScheduleRunning ||
-                    bulkTodayRunning ||
-                    superPublishingRunning ||
-                    topicBulkScheduleRunning ||
-                    Boolean(publishingId)
-                  }
-                  className="px-4 py-2 bg-fuchsia-600 text-white rounded-lg hover:bg-fuchsia-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                  {superPublishingRunning
-                    ? "수퍼 퍼블리싱 시작 중..."
-                    : `수퍼 퍼블리싱 ${SUPER_PUBLISH_COLLECT_COUNT}개`}
-                </button>
-                <button
-                  onClick={handleBulkSchedulePublish}
-                  disabled={
-                    bulkSeasonalRunning ||
-                    bulkScheduleRunning ||
-                    bulkTodayRunning ||
-                    superPublishingRunning ||
-                    topicBulkScheduleRunning ||
-                    Boolean(publishingId) ||
-                    readyScheduledCount === 0
-                  }
-                  className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                  {bulkScheduleRunning
-                    ? "예약발행 일괄 실행 중..."
-                    : `예약발행 일괄 실행 (${Math.min(MAX_BULK_SCHEDULE_LIMIT, readyScheduledCount)}건)`}
-                </button>
-                <button
-                  onClick={handleBulkTodayPublish}
-                  disabled={
-                    bulkSeasonalRunning ||
-                    bulkScheduleRunning ||
-                    bulkTodayRunning ||
-                    superPublishingRunning ||
-                    topicBulkScheduleRunning ||
-                    Boolean(publishingId) ||
-                    readyImmediateCount === 0
-                  }
-                  className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                  {bulkTodayRunning
-                    ? "바로 일괄발행 중..."
-                    : `바로 일괄발행 (${Math.min(MAX_TODAY_PUBLISH_LIMIT, readyImmediateCount)}건)`}
-                </button>
-                <button
-                  onClick={handleStopPosting}
-                  disabled={stoppingPosting}
-                  className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-semibold"
-                  title="진행 중인 모든 포스팅을 즉시 정지하고 대기열을 복구합니다"
-                >
-                  {stoppingPosting ? "정지 중..." : "⛔ 포스팅 정지"}
-                </button>
-                <p className="text-xs text-slate-500">
-                  상품 등록은 시즌추천, 히트상품, 판매/주문/리뷰/인기 신호를 우선해서 고릅니다. 수퍼 퍼블리싱은 200개 수집 후 당일 50개 바로발행, 1~3일 뒤 50개씩 예약발행합니다.
-                </p>
+                <div className={`w-full rounded-xl border p-3 ${brandConnectKind === "travel" ? "border-amber-200 bg-amber-50/60" : "border-blue-200 bg-blue-50/50"}`}>
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold text-slate-800">{activeConnectLabel} 기능</h3>
+                      <p className="text-xs text-slate-500">아래 작업과 상품 목록은 {activeConnectLabel} 항목에만 적용됩니다.</p>
+                    </div>
+                    <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${brandConnectKind === "travel" ? "bg-amber-100 text-amber-800" : "bg-blue-100 text-blue-800"}`}>
+                      {visibleLinks.length}개
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={() => handleBulkSeasonalRegister(SEASONAL_REGISTER_COUNT_10)}
+                      disabled={bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId)}
+                      className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {bulkSeasonalRunning ? "상품 동기화 중..." : `${brandConnectKind === "travel" ? "여행" : "쇼핑"} 인기상품 10개 동기화`}
+                    </button>
+                    <button
+                      onClick={() => handleBulkSeasonalRegister(SEASONAL_REGISTER_COUNT_50)}
+                      disabled={bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId)}
+                      className="px-4 py-2 bg-sky-600 text-white rounded-lg hover:bg-sky-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {bulkSeasonalRunning ? "상품 동기화 중..." : `${brandConnectKind === "travel" ? "여행" : "쇼핑"} 인기상품 50개 동기화`}
+                    </button>
+                    <button
+                      onClick={handleSuperPublishing}
+                      disabled={travelPublishingUnavailable || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId)}
+                      title={travelPublishingUnavailable ? "여행커넥트 에디터 삽입 방식 확인 후 사용할 수 있습니다." : undefined}
+                      className="px-4 py-2 bg-fuchsia-600 text-white rounded-lg hover:bg-fuchsia-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {superPublishingRunning ? "수퍼 퍼블리싱 시작 중..." : `${activeConnectLabel} 수퍼 퍼블리싱 ${SUPER_PUBLISH_COLLECT_COUNT}개`}
+                    </button>
+                    <button
+                      onClick={handleBulkSchedulePublish}
+                      disabled={travelPublishingUnavailable || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId) || readyScheduledCount === 0}
+                      title={travelPublishingUnavailable ? "여행커넥트 에디터 삽입 방식 확인 후 사용할 수 있습니다." : undefined}
+                      className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {bulkScheduleRunning ? "예약발행 일괄 실행 중..." : `${activeConnectLabel} 예약발행 (${Math.min(MAX_BULK_SCHEDULE_LIMIT, readyScheduledCount)}건)`}
+                    </button>
+                    <button
+                      onClick={handleBulkTodayPublish}
+                      disabled={travelPublishingUnavailable || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId) || readyImmediateCount === 0}
+                      title={travelPublishingUnavailable ? "여행커넥트 에디터 삽입 방식 확인 후 사용할 수 있습니다." : undefined}
+                      className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {bulkTodayRunning ? "바로 일괄발행 중..." : `${activeConnectLabel} 바로발행 (${Math.min(MAX_TODAY_PUBLISH_LIMIT, readyImmediateCount)}건)`}
+                    </button>
+                  </div>
+                  {travelPublishingUnavailable && (
+                    <p className="mt-3 rounded-lg bg-amber-100 px-3 py-2 text-xs text-amber-900">
+                      여행상품 동기화와 목록 확인은 사용할 수 있습니다. 여행 링크를 네이버 에디터에 넣는 방식은 아직 검증되지 않아 수퍼·예약·바로발행은 안전을 위해 잠겨 있습니다.
+                    </p>
+                  )}
+                  {!travelPublishingUnavailable && (
+                    <p className="mt-3 text-xs text-slate-500">수퍼 퍼블리싱은 쇼핑상품 200개 수집 후 당일 50개 바로발행, 이후 50개씩 예약발행합니다.</p>
+                  )}
+                </div>
+                <div className="flex w-full items-center gap-3 border-t border-slate-200 pt-3">
+                  <button
+                    onClick={handleStopPosting}
+                    disabled={stoppingPosting}
+                    className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-semibold"
+                    title="진행 중인 모든 포스팅을 즉시 정지하고 대기열을 복구합니다"
+                  >
+                    {stoppingPosting ? "정지 중..." : "⛔ 전체 포스팅 정지"}
+                  </button>
+                  <p className="text-xs text-slate-500">정지 기능은 쇼핑·여행 작업 전체에 적용됩니다.</p>
+                </div>
               </div>
               {busyMessageForUi && (
                 <p className="mt-2 text-xs text-amber-700">
@@ -2153,6 +2182,13 @@ export default function Dashboard() {
 
             {/* 링크 테이블 */}
             <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+              <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+                <div>
+                  <h2 className="font-semibold text-slate-800">{activeConnectLabel} 상품 목록</h2>
+                  <p className="text-xs text-slate-500">다른 커넥트 상품은 해당 탭에서 확인할 수 있습니다.</p>
+                </div>
+                <span className="text-sm font-semibold text-slate-600">{visibleLinks.length}건</span>
+              </div>
               <table className="w-full">
                 <thead className="bg-slate-50 border-b border-slate-200">
                   <tr>
@@ -2171,14 +2207,14 @@ export default function Dashboard() {
                         로딩 중...
                       </td>
                     </tr>
-                  ) : links.length === 0 ? (
+                  ) : visibleLinks.length === 0 ? (
                     <tr>
                       <td colSpan={6} className="px-4 py-8 text-center text-slate-500">
-                        등록된 링크가 없습니다. 위에서 브랜드커넥트 링크를 추가하세요.
+                        등록된 {activeConnectLabel} 상품이 없습니다. 위에서 상품을 동기화하거나 링크를 추가하세요.
                       </td>
                     </tr>
                   ) : (
-                    links.map((link) => {
+                    visibleLinks.map((link) => {
                       const thumbnailUrl = getFirstImageUrl(link.imageUrls);
 
                       return (
@@ -2302,8 +2338,25 @@ export default function Dashboard() {
                           </td>
                           <td className="px-4 py-3 text-center">
                             <div className="flex items-center justify-center gap-2">
+                              {link.connectKind !== "TRAVEL" && (
+                                <button
+                                  onClick={() => setThumbnailStudioLink(link)}
+                                  className="px-3 py-1 text-sm bg-blue-100 text-blue-700 rounded hover:bg-blue-200 transition-colors"
+                                  title="실제 제품 사진으로 카피 썸네일 만들기"
+                                >
+                                  🖼️ 썸네일
+                                </button>
+                              )}
                               {/* 발행하기 버튼 */}
-                              {link.status === "READY" && (
+                              {link.status === "READY" && link.connectKind === "TRAVEL" && (
+                                <span
+                                  className="rounded-lg bg-amber-100 px-3 py-1.5 text-xs font-medium text-amber-800"
+                                  title="여행커넥트 에디터 삽입 방식 확인 후 사용할 수 있습니다."
+                                >
+                                  🔒 여행 발행 준비중
+                                </span>
+                              )}
+                              {link.status === "READY" && link.connectKind !== "TRAVEL" && (
                                 <>
                                   <button
                                     onClick={() => handlePublish(link.id)}
@@ -2323,7 +2376,15 @@ export default function Dashboard() {
                               )}
 
                               {/* 재발행 */}
-                              {link.status === "FAILED" && (
+                              {link.status === "FAILED" && link.connectKind === "TRAVEL" && (
+                                <span
+                                  className="rounded-lg bg-amber-100 px-3 py-1.5 text-xs font-medium text-amber-800"
+                                  title="여행커넥트 에디터 삽입 방식 확인 후 사용할 수 있습니다."
+                                >
+                                  🔒 여행 발행 준비중
+                                </span>
+                              )}
+                              {link.status === "FAILED" && link.connectKind !== "TRAVEL" && (
                                 <>
                                   <button
                                     onClick={() => handlePublish(link.id)}
@@ -2398,10 +2459,35 @@ export default function Dashboard() {
         </div>
       </main>
 
+      {thumbnailStudioLink && (
+        <ProductThumbnailStudio
+          brandLinkId={thumbnailStudioLink.id}
+          productName={thumbnailStudioLink.productName || "추천 상품"}
+          onClose={() => setThumbnailStudioLink(null)}
+        />
+      )}
+
       {/* 푸터 */}
-      <footer className="border-t border-slate-200 bg-white mt-8">
-        <div className="max-w-6xl mx-auto px-4 py-4 text-center text-sm text-slate-500">
-          네이버 블로그 자동화 시스템 • 브랜드커넥트
+      <footer className="border-t border-slate-800 bg-slate-950 mt-8 text-white">
+        <div className="max-w-6xl mx-auto px-4 py-8 flex flex-col md:flex-row md:items-center md:justify-between gap-5">
+          <div>
+            <p className="text-xs font-semibold tracking-[0.16em] text-lime-300 mb-2">CONTACT &amp; CUSTOM DEVELOPMENT</p>
+            <h2 className="text-xl md:text-2xl font-bold tracking-tight">기타 문의나 프로그램 개발이 필요하신가요?</h2>
+            <p className="mt-2 text-sm text-slate-400">프로그램 사용 문의부터 업무 자동화·맞춤 프로그램 개발 상담까지 텔레그램으로 연락해 주세요.</p>
+          </div>
+          <a
+            href="https://t.me/Jake_shin"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="텔레그램으로 문의하기 (새 창)"
+            className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-white px-5 py-3 text-sm font-semibold text-slate-950 shadow-[5px_5px_0_#bef264] transition-transform hover:-translate-y-0.5"
+          >
+            텔레그램 문의 <span aria-hidden="true">↗</span>
+          </a>
+        </div>
+        <div className="max-w-6xl mx-auto border-t border-slate-800 px-4 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1 text-xs text-slate-500">
+          <span>네이버 블로그 자동화 시스템 • 브랜드커넥트</span>
+          <span>기타 문의 · 프로그램 개발 문의</span>
         </div>
       </footer>
     </div>

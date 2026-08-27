@@ -5,8 +5,10 @@ import fs from "fs";
 import path from "path";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
+import { parseConnectKind, toStoredConnectKind } from "@/lib/brandconnect-kind";
 
 interface BulkTodayBody {
+  connectKind?: string;
   limit?: number;
   delayMs?: number;
   targetDate?: string;
@@ -85,6 +87,14 @@ export async function POST(request: NextRequest) {
     }
 
     const requestedLimit = toSafePositiveInt(body.limit, 10, 100);
+    const connectKind = parseConnectKind(body.connectKind);
+    const storedConnectKind = toStoredConnectKind(connectKind);
+    if (connectKind === "travel") {
+      return NextResponse.json(
+        { success: false, error: "여행커넥트 발행은 네이버 에디터 삽입 방식 검증 후 사용할 수 있습니다." },
+        { status: 501 }
+      );
+    }
     const delayMs = toSafePositiveInt(body.delayMs, 1500, 60000);
     const allScheduled = body.allScheduled !== false;
     const targetDate =
@@ -108,11 +118,13 @@ export async function POST(request: NextRequest) {
 
     const pendingCount = await prisma.brandLink.count({
       where: allScheduled
-        ? {
+          ? {
+            connectKind: storedConnectKind,
             status: "READY",
             scheduledPublishAt: { not: null },
           }
-        : {
+          : {
+            connectKind: storedConnectKind,
             status: "READY",
             scheduledPublishAt: {
               gte: new Date(`${targetDate}T00:00:00.000Z`),
@@ -146,7 +158,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const scriptArgs = [`--limit=${targetCount}`, `--delay-ms=${delayMs}`];
+    const scriptArgs = [`--limit=${targetCount}`, `--delay-ms=${delayMs}`, `--connect-kind=${connectKind}`];
     if (allScheduled) {
       scriptArgs.push("--all-scheduled");
     } else {
@@ -162,7 +174,7 @@ export async function POST(request: NextRequest) {
 
     fs.writeSync(
       logFd,
-      `[${new Date().toISOString()}] bulk today start targetCount=${targetCount} delayMs=${delayMs}${
+      `[${new Date().toISOString()}] bulk today start connectKind=${connectKind} targetCount=${targetCount} delayMs=${delayMs}${
         allScheduled ? " allScheduled=true" : ` targetDate=${targetDate}`
       }\n`
     );
@@ -195,6 +207,7 @@ export async function POST(request: NextRequest) {
       message: allScheduled ? "바로 일괄발행을 시작했습니다." : "당일 일괄발행을 시작했습니다.",
       data: {
         targetCount,
+        connectKind,
         targetDate: allScheduled ? undefined : targetDate,
         delayMs,
         logFile: logFileRelativePath,

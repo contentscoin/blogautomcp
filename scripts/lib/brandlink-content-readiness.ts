@@ -1,3 +1,5 @@
+import { assessProductEditorialCoverage } from "./product-editorial-plan";
+
 export interface BrandLinkContentReadinessInput {
   productName: string;
   title: string;
@@ -178,6 +180,7 @@ export function getBrandLinkContentReadiness(
   const commissionRateCount = countPatternHits(fullBody, COMMISSION_RATE_PATTERNS);
   const internalGuidanceCount = countPatternHits(fullBody, INTERNAL_GUIDANCE_PATTERNS);
   const requireRepresentativeImage = input.requireRepresentativeImage !== false;
+  const editorialCoverage = assessProductEditorialCoverage(sections.slice(0, -1));
 
   const baseSignals: BrandLinkContentReadinessSignal[] = [
     {
@@ -194,6 +197,11 @@ export function getBrandLinkContentReadiness(
       key: "sections",
       label: "본문 섹션",
       status: mainSectionCount >= 4 ? "pass" : "fail",
+    },
+    {
+      key: "editorial-flow",
+      label: "문제-효익-근거-사용-주의 흐름",
+      status: editorialCoverage.missingCoreRoles.length <= 1 ? "pass" : "warn",
     },
     {
       key: "length",

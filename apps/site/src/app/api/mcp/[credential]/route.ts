@@ -6,6 +6,7 @@ import { verifyMcpAccessToken } from "@/lib/oauth";
 import { userCanUseMcp } from "@/lib/auth";
 import { Prisma } from "@/generated/prisma";
 import { readObject } from "@/lib/http";
+import { isSameIdempotentRequest } from "@/lib/idempotency";
 
 type JsonRpcId = string | number | null;
 type JsonObject = Record<string, unknown>;
@@ -130,7 +131,22 @@ async function enqueue(userId: string, type: string, args: JsonObject) {
   const idempotencyKey = stringArg(args, "idempotencyKey") || null;
   if (idempotencyKey) {
     const existing = await db.agentJob.findFirst({ where: { userId, idempotencyKey } });
-    if (existing) return toolPayload({ ok: true, jobId: existing.id, status: existing.status, reused: true });
+    if (existing) {
+      if (!isSameIdempotentRequest({
+        existingType: existing.type,
+        existingInput: existing.inputJson,
+        requestedType: type,
+        requestedInput: args,
+      })) {
+        return toolPayload({
+          ok: false,
+          code: "IDEMPOTENCY_CONFLICT",
+          message: "같은 idempotencyKey가 다른 작업 내용에 이미 사용되었습니다. 새 키로 다시 요청하세요.",
+          jobId: existing.id,
+        }, true);
+      }
+      return toolPayload({ ok: true, jobId: existing.id, status: existing.status, reused: true });
+    }
   }
   const job = await db.agentJob.create({
     data: { userId, type, inputJson: args as Prisma.InputJsonObject, idempotencyKey },
