@@ -11,6 +11,7 @@
 
 import { findItemArrays, detectFieldMap, normalizeConnectItems, readArrayAtPath } from "../src/lib/connect-item";
 import { pickBestListResponse } from "../src/lib/travel-connect-adapter";
+import { buildTravelSelectionOptions, matchesTravelSelectionFilters } from "../src/lib/travel-selection-options";
 import fs from "fs";
 import path from "path";
 
@@ -141,6 +142,83 @@ check(
   "mixed response: travel representative image key",
   mixedTravelBest?.fieldMap.imageUrl === "representativeProductImageUrl",
   mixedTravelBest?.fieldMap
+);
+
+const liveTravelShape = normalizeConnectItems(
+  [
+    {
+      productId: "TRAVEL-SEOUL",
+      name: "[출발확정] 일본 후쿠오카 노쇼핑 특가",
+      storeName: "테스트여행",
+      salePrice: 500000,
+      discountedSalePrice: 399000,
+      discountedRate: 20,
+      representativeProductImageUrl: "https://travel.example/fukuoka.jpg",
+      url: "https://travel.example/fukuoka",
+      connectServiceType: "TRAVEL_PACKAGE",
+      extra: {
+        countryNames: ["일본"],
+        cityNames: ["후쿠오카", "유후인"],
+        duration: "2박 3일",
+        productType: "패키지",
+        tourTicket: false,
+      },
+    },
+    {
+      productId: "TRAVEL-JEJU",
+      name: "제주 자유여행 투어",
+      storeName: "테스트여행",
+      salePrice: 220000,
+      discountedSalePrice: 220000,
+      representativeProductImageUrl: "https://travel.example/jeju.jpg",
+      url: "https://travel.example/jeju",
+      connectServiceType: "TRAVEL_PACKAGE",
+      extra: {
+        countryNames: ["대한민국"],
+        cityNames: ["제주"],
+        duration: "3박 4일",
+        productType: "자유여행",
+        tourTicket: { enabled: true },
+      },
+    },
+  ],
+  {
+    id: "productId",
+    name: "name",
+    storeName: "storeName",
+    price: "discountedSalePrice",
+    imageUrl: "representativeProductImageUrl",
+    linkUrl: "url",
+  }
+);
+const travelOptions = buildTravelSelectionOptions(liveTravelShape);
+check(
+  "travel options: nested countries are exposed",
+  travelOptions.categories.some((option) => option.id === "country:일본" && option.name === "국가 · 일본")
+);
+check(
+  "travel options: nested cities are exposed",
+  travelOptions.categories.some((option) => option.id === "city:후쿠오카")
+);
+check(
+  "travel options: duration survives large city lists",
+  travelOptions.categories.some((option) => option.id === "duration:2박 3일")
+);
+check(
+  "travel options: generic service type is hidden",
+  !travelOptions.categories.some((option) => option.name.includes("TRAVEL_PACKAGE"))
+);
+check(
+  "travel options: observed discount becomes a benefit",
+  travelOptions.promotions.some((option) => option.value === "travel-benefit:discount" && option.count === 1)
+);
+check(
+  "travel filters: selected city narrows actual registration rows",
+  liveTravelShape.filter((item) => matchesTravelSelectionFilters(item, ["city:후쿠오카"], [])).length === 1
+);
+check(
+  "travel filters: selected benefit narrows actual registration rows",
+  liveTravelShape.filter((item) => matchesTravelSelectionFilters(item, [], ["travel-benefit:tour-ticket"])).length === 1
 );
 
 // 7. 계약 확인 뒤에도 행 단위 버튼이 별도로 잠기면 일괄 버튼만 열리는 반쪽 수정이 된다.

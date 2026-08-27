@@ -16,7 +16,7 @@ import {
   ConnectSessionExpiredError,
   listTravelItems,
 } from "@/lib/travel-connect-adapter";
-import type { ConnectItem } from "@/lib/connect-item";
+import { buildTravelSelectionOptions } from "@/lib/travel-selection-options";
 
 export const runtime = "nodejs";
 
@@ -28,6 +28,7 @@ const BRANDCONNECT_OPTION_CATEGORY_LIMIT = parseBoundedInteger(
   1,
   80
 );
+const TRAVEL_OPTION_CATEGORY_LIMIT = 80;
 const BRANDCONNECT_OPTION_PRODUCT_LIMIT = parseBoundedInteger(
   process.env.BRANDCONNECT_OPTION_PRODUCT_LIMIT,
   60,
@@ -639,40 +640,6 @@ async function loadShoppingOptions(
   return { categories, promotions: sortPromotions(promotionMap), truncated, sessionExpired };
 }
 
-/** 여행 항목 행에서 카테고리처럼 쓸 수 있는 값(테마/지역/도시 등)을 찾는다. */
-const TRAVEL_GROUPING_KEY_PATTERN = /(category|theme|region|area|city|country|destination|type|genre)/;
-
-function buildTravelCategories(items: ConnectItem[]): DisplayCategory[] {
-  const counts = new Map<string, number>();
-
-  for (const item of items) {
-    for (const [key, value] of Object.entries(item.raw)) {
-      if (!TRAVEL_GROUPING_KEY_PATTERN.test(key.toLowerCase())) continue;
-      const label = typeof value === "string" ? value.trim() : "";
-      if (!label || label.length > 40) continue;
-      counts.set(label, (counts.get(label) ?? 0) + 1);
-    }
-  }
-
-  if (counts.size === 0) {
-    return [{ id: "all", name: "전체", parentId: null, depth: 0, productCount: items.length }];
-  }
-
-  return Array.from(counts.entries())
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "ko"))
-    .slice(0, BRANDCONNECT_OPTION_CATEGORY_LIMIT)
-    .map(([name, productCount]) => ({ id: name, name, parentId: null, depth: 0, productCount }));
-}
-
-function buildTravelPromotions(items: ConnectItem[]): PromotionOption[] {
-  const promotionMap = new Map<string, PromotionOption>();
-  for (const item of items) {
-    for (const text of parseBadgeTexts(item.raw)) addPromotion(promotionMap, text);
-    for (const text of collectPromotionLikeTexts(item.raw)) addPromotion(promotionMap, text);
-  }
-  return sortPromotions(promotionMap);
-}
-
 export async function GET(request: NextRequest) {
   const deadline = new Deadline(BRANDCONNECT_OPTION_BUDGET_MS);
   let connectKind: ConnectKind = "shopping";
@@ -704,14 +671,15 @@ export async function GET(request: NextRequest) {
         // 사용자가 "자동 캡처"를 다시 눌러 명시적으로 재탐색하게 한다.
         allowDiscovery: false,
       });
+      const travelOptions = buildTravelSelectionOptions(items, TRAVEL_OPTION_CATEGORY_LIMIT);
 
       return NextResponse.json({
         success: true,
         data: {
           connectKind,
           categoryUrl: contract.configuredUrl || stored.sourceUrl,
-          categories: buildTravelCategories(items),
-          promotions: buildTravelPromotions(items),
+          categories: travelOptions.categories,
+          promotions: travelOptions.promotions,
           itemCount: items.length,
           registrationAvailable: contract.registrationAvailable,
           contractSource: source,

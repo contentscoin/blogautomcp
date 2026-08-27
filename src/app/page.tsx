@@ -2072,7 +2072,7 @@ export default function Dashboard() {
                     <div className="border border-slate-200 rounded-lg p-3">
                       <div className="flex items-center justify-between gap-2 mb-2">
                         <span className="text-sm font-medium text-slate-700">
-                          카테고리 선택 ({selectedBrandConnectCategoryIds.length})
+                          {brandConnectKind === "travel" ? "여행 조건 선택" : "카테고리 선택"} ({selectedBrandConnectCategoryIds.length})
                         </span>
                         <button
                           type="button"
@@ -2085,7 +2085,9 @@ export default function Dashboard() {
                       <div className="max-h-40 overflow-y-auto space-y-1">
                         {brandConnectCategoryOptions.length === 0 ? (
                           <p className="text-xs text-slate-500">
-                            {brandConnectOptionsLoading ? "카테고리 로드 중..." : "로드된 카테고리가 없습니다."}
+                            {brandConnectOptionsLoading
+                              ? brandConnectKind === "travel" ? "여행 조건 로드 중..." : "카테고리 로드 중..."
+                              : brandConnectKind === "travel" ? "로드된 여행 조건이 없습니다." : "로드된 카테고리가 없습니다."}
                           </p>
                         ) : (
                           brandConnectCategoryOptions.map((category) => (
@@ -2115,7 +2117,7 @@ export default function Dashboard() {
                     <div className="border border-slate-200 rounded-lg p-3">
                       <div className="flex items-center justify-between gap-2 mb-2">
                         <span className="text-sm font-medium text-slate-700">
-                          프로모션/이벤트 카테고리 ({selectedBrandConnectPromotions.length})
+                          {brandConnectKind === "travel" ? "여행 혜택 선택" : "프로모션/이벤트 카테고리"} ({selectedBrandConnectPromotions.length})
                         </span>
                         <button
                           type="button"
@@ -2128,7 +2130,9 @@ export default function Dashboard() {
                       <div className="max-h-40 overflow-y-auto space-y-1">
                         {brandConnectPromotionOptions.length === 0 ? (
                           <p className="text-xs text-slate-500">
-                            {brandConnectOptionsLoading ? "이벤트 카테고리 로드 중..." : "로드된 이벤트 카테고리가 없습니다."}
+                            {brandConnectOptionsLoading
+                              ? brandConnectKind === "travel" ? "여행 혜택 로드 중..." : "이벤트 카테고리 로드 중..."
+                              : brandConnectKind === "travel" ? "감지된 여행 혜택이 없습니다." : "로드된 이벤트 카테고리가 없습니다."}
                           </p>
                         ) : (
                           brandConnectPromotionOptions.map((promotion) => (

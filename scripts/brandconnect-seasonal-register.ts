@@ -17,6 +17,7 @@ import {
 import { resolveConnectContract } from "../src/lib/connect-contract-store";
 import { listTravelItems } from "../src/lib/travel-connect-adapter";
 import type { ConnectItem } from "../src/lib/connect-item";
+import { matchesTravelSelectionFilters } from "../src/lib/travel-selection-options";
 
 chromium.use(StealthPlugin());
 
@@ -1342,6 +1343,14 @@ async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient
     allowDiscovery: true,
   });
   console.log(`✅ 여행 상품 수집: ${items.length}개 (${source === "contract" ? "저장된 계약" : "실시간 재탐색"})`);
+  const selectedItems = items.filter((item) =>
+    matchesTravelSelectionFilters(item, options.categoryFilter, options.promotionFilter)
+  );
+  console.log(
+    `✅ 여행 옵션 적용: ${selectedItems.length}개` +
+      `${options.categoryFilter.length > 0 ? ` / 조건 ${options.categoryFilter.join(", ")}` : ""}` +
+      `${options.promotionFilter.length > 0 ? ` / 혜택 ${options.promotionFilter.join(", ")}` : ""}`
+  );
 
   const existingBrandLinks = await prisma.brandLink.findMany({
     select: {
@@ -1390,7 +1399,7 @@ async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient
     );
   };
 
-  for (const item of items) {
+  for (const item of selectedItems) {
     if (successCount >= options.count) break;
     const scheduledDate = getScheduledDate(successCount);
 
