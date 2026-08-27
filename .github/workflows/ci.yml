@@ -22,14 +22,22 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
 
-      # desktop-build.yml과 같은 방식: 다른 OS에서 생성된 lockfile은 리눅스 네이티브
-      # 바이너리(lightningcss, @tailwindcss/oxide)를 빼놓아 빌드가 깨진다.
-      # lockfile을 지우고 설치해 현재 러너 플랫폼의 optional deps를 받는다.
+      # lockfile을 그대로 쓴다(로컬과 같은 의존성 버전으로 검사해야 결과가 재현된다).
+      # 단, 다른 OS에서 생성된 lockfile에는 리눅스 네이티브 바이너리(lightningcss,
+      # @tailwindcss/oxide)가 빠져 있어(npm/cli#4828) 빌드가 깨지므로, 설치된 래퍼
+      # 패키지와 같은 버전의 리눅스 바이너리만 추가로 받는다.
+      # lockfile 전체를 지우고 재설치하면 eslint 플러그인 등이 최신으로 끌려와
+      # 로컬에 없는 새 규칙으로 실패한다 — 그래서 이 방식은 쓰지 않는다.
       - name: Install dependencies
         run: |
-          rm -f package-lock.json
           npm install --no-audit --no-fund
+          LIGHTNINGCSS_VERSION=$(node -p "JSON.parse(require('fs').readFileSync('node_modules/lightningcss/package.json','utf8')).version")
+          OXIDE_VERSION=$(node -p "JSON.parse(require('fs').readFileSync('node_modules/@tailwindcss/oxide/package.json','utf8')).version")
+          npm install --no-save --no-audit --no-fund \
+            "lightningcss-linux-x64-gnu@${LIGHTNINGCSS_VERSION}" \
+            "@tailwindcss/oxide-linux-x64-gnu@${OXIDE_VERSION}"
 
       - name: Typecheck
         run: npx tsc --noEmit
