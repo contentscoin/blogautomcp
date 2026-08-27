@@ -2,6 +2,7 @@ import "dotenv/config";
 import path from "path";
 import { spawnSync } from "child_process";
 import { PrismaClient } from "@prisma/client";
+import { parseConnectKind, type ConnectKind } from "../src/lib/brandconnect-kind";
 import {
   buildAppUrl,
   notifyAndLogCompletion,
@@ -9,6 +10,7 @@ import {
 } from "./lib/chatbot-notifier";
 
 interface CliOptions {
+  connectKind: ConnectKind;
   collectCount: number;
   todayCount: number;
   dailyQuota: number;
@@ -63,6 +65,7 @@ function formatYmd(date: Date): string {
 
 function parseArgs(argv: string[]): CliOptions {
   const options: CliOptions = {
+    connectKind: "shopping",
     collectCount: 200,
     todayCount: 50,
     dailyQuota: 50,
@@ -78,6 +81,10 @@ function parseArgs(argv: string[]): CliOptions {
   };
 
   for (const arg of argv) {
+    if (arg.startsWith("--connect-kind=")) {
+      options.connectKind = parseConnectKind(arg.split("=")[1]);
+      continue;
+    }
     if (arg.startsWith("--collect-count=")) {
       options.collectCount = parseBoundedInteger(arg.split("=")[1], options.collectCount, 1, 200);
       continue;
@@ -232,6 +239,7 @@ async function main() {
     console.log("=".repeat(70));
 
     const registerArgs = [
+      `--connect-kind=${options.connectKind}`,
       `--count=${options.collectCount}`,
       `--start-date=${options.startDate}`,
       `--interval-days=${options.intervalDays}`,

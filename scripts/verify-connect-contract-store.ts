@@ -2,8 +2,8 @@
  * 커넥트 계약 저장소 + 게이트 동작 검증.
  *
  * "여행 계약 자동 캡처를 성공했는데도 여행커넥트가 계속 막혀 있던" 버그를
- * 그대로 재현해 막는다: 계약을 저장하면 목록 게이트가 풀려야 하고,
- * 등록·발행 게이트는 그대로 닫혀 있어야 한다.
+ * 그대로 재현해 막는다: 계약을 저장하면 목록·등록 게이트가 함께 풀려야 하고,
+ * 캡처 전에는 둘 다 닫혀 있어야 한다.
  *
  *   npm run test:connect-store
  */
@@ -27,6 +27,7 @@ function check(label: string, ok: boolean, extra?: unknown) {
 const travelBefore = resolveConnectContract("travel");
 check("travel before capture: captureRequired", travelBefore.captureRequired === true, travelBefore);
 check("travel before capture: listAvailable false", travelBefore.listAvailable === false, travelBefore);
+check("travel before capture: registration gated", travelBefore.registrationAvailable === false, travelBefore);
 const shopping = resolveConnectContract("shopping");
 check("shopping: never captureRequired", shopping.captureRequired === false, shopping);
 check("shopping: registration allowed", shopping.registrationAvailable === true, shopping);
@@ -47,7 +48,7 @@ writeStoredConnectContract({
 const travelAfter = resolveConnectContract("travel");
 check("travel after capture: captureRequired false", travelAfter.captureRequired === false, travelAfter);
 check("travel after capture: listAvailable true", travelAfter.listAvailable === true, travelAfter);
-check("travel after capture: registration still gated", travelAfter.registrationAvailable === false, travelAfter);
+check("travel after capture: registration opens", travelAfter.registrationAvailable === true, travelAfter);
 
 const roundTrip = readStoredConnectContract("travel");
 check("contract round-trips", roundTrip?.listEndpoint === "https://gw-brandconnect.naver.com/travel/query/products", roundTrip);

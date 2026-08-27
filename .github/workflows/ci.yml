@@ -1,0 +1,46 @@
+name: CI
+
+# PR과 main 푸시에서 타입체크·린트·단위검증·프로덕션 빌드를 돌린다.
+# 데스크톱 패키징(desktop-build.yml)은 태그/수동 전용이라 PR에는 체크가 없었다.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # lockfile이 macOS/Windows에서 갱신돼 리눅스 네이티브 바이너리(lightningcss 등)가
+      # 빠져 있을 수 있어, desktop-build.yml과 같은 이유로 npm install을 쓴다.
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npx eslint src scripts/verify-connect-item-detection.ts scripts/verify-connect-contract-store.ts
+
+      - name: Connect contract tests
+        run: |
+          npm run test:connect-detection
+          npm run test:connect-store
+
+      # npm run build = prisma generate + 임시 생성물 정리 + next build --webpack.
+      # 데스크톱 패키징(desktop:pack)이 쓰는 것과 같은 빌드 경로다.
+      - name: Build
+        run: npm run build

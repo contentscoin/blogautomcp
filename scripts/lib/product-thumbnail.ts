@@ -332,7 +332,7 @@ function svgTextLines(
       ? ` stroke="${options.stroke}" stroke-width="${options.strokeWidth}" paint-order="stroke"`
       : "";
   return [
-    `<text x="${x}" y="${y}" text-anchor="${anchor}" font-size="${fontSize}" font-weight="${
+    `<text x="${x}" y="${y}" text-anchor="${anchor}" font-family="Malgun Gothic, Apple SD Gothic Neo, Noto Sans CJK KR, Arial, sans-serif" font-size="${fontSize}" font-weight="${
       options.weight ?? 800
     }" fill="${options.fill}"${stroke}>`,
     ...lines.map((line, index) => {

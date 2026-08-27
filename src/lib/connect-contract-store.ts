@@ -90,19 +90,21 @@ export function clearStoredConnectContract(kind: ConnectKind): void {
 /**
  * 커넥트 종류별 사용 가능 여부를 판단한다.
  *
- * 목록: 쇼핑커넥트는 엔드포인트가 코드에 내장돼 있어 항상 가능하고,
- * 여행커넥트는 계약을 캡처해 저장해 둔 경우에만 가능하다 — 캡처를 마쳤는데도
- * 계속 "캡처 필요"로 막히던 것이 이 함수가 고치는 문제다.
+ * 쇼핑커넥트는 엔드포인트가 코드에 내장돼 있어 항상 가능하고, 여행커넥트는
+ * 계약을 캡처해 저장해 둔 경우에만 가능하다 — 캡처를 마쳤는데도 계속
+ * "캡처 필요"로 막히던 것이 이 함수가 고치는 문제다.
  *
- * 등록·발행: 제휴 링크 발급과 에디터 삽입 계약까지 확인된 쇼핑커넥트만 가능하다.
- * 목록 계약만으로는 발행 링크를 만들 수 없으므로 목록 가능 여부와 분리해서 본다.
+ * 여행커넥트 등록·발행도 캡처 후에는 허용한다. 에디터 삽입은 발행 단계에서
+ * 삽입 결과를 검증해 실패 시 발행을 중단하므로(fail-closed), 잘못된 링크가
+ * 글에 들어가는 일은 여기서가 아니라 그 검증이 막는다.
  */
 export function resolveConnectContract(
   kind: ConnectKind,
   requestedUrl?: string | null
 ): ConnectContract {
+  const available = kind === "shopping" || hasStoredConnectContract(kind);
   return buildConnectContract(kind, requestedUrl, {
-    listAvailable: kind === "shopping" || hasStoredConnectContract(kind),
-    registrationAvailable: kind === "shopping",
+    listAvailable: available,
+    registrationAvailable: available,
   });
 }

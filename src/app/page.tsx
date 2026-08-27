@@ -2010,10 +2010,10 @@ export default function Dashboard() {
                     <div className="flex flex-col md:flex-row md:items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
                       <p className="text-xs text-amber-800 flex-1">
                         {brandConnectCaptureRequired
-                          ? "여행커넥트 목록 계약이 아직 없습니다. 아래 버튼으로 1회 캡처하면 이후에는 자동으로 목록을 불러옵니다."
+                          ? "여행커넥트 목록 계약이 아직 없습니다. 아래 버튼으로 1회 캡처하면 이후에는 목록 조회와 등록·발행이 열립니다."
                           : "여행커넥트는 로그인된 세션에서 화면과 응답 구조를 자동 탐색해 1회 캡처합니다. 원문 개인정보는 저장하지 않습니다."}
                         {" "}
-                        목록 조회까지만 지원하며, 자동 등록·발행은 쇼핑커넥트에서만 동작합니다.
+                        발행 시 에디터 삽입 결과를 검증해, 올바른 여행 상품이 첨부되지 않으면 발행을 중단합니다.
                       </p>
                       <button
                         type="button"

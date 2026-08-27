@@ -80,20 +80,3 @@ export function buildCaptureRequiredPayload(contract: ConnectContract) {
   };
 }
 
-/**
- * 목록은 되지만 등록·발행 계약은 아직 확인되지 않은 상태를 알린다.
- * "캡처하면 풀린다"고 오해하게 두지 않고, 무엇이 더 필요한지 정확히 말한다.
- */
-export function buildRegistrationUnsupportedPayload(contract: ConnectContract) {
-  const label = CONNECT_KIND_LABELS[contract.kind];
-  return {
-    code: "CONNECT_REGISTRATION_UNSUPPORTED",
-    connectKind: contract.kind,
-    captureRequired: false,
-    registrationAvailable: false,
-    configuredUrl: contract.configuredUrl,
-    message:
-      `${label}은 목록 조회까지만 지원합니다. 제휴 링크 발급과 블로그 에디터 삽입 계약이 아직 확인되지 않아, ` +
-      `잘못된 링크가 글에 들어가는 것을 막기 위해 자동 등록·발행은 막아 두었습니다. 쇼핑커넥트로 전환해 진행하세요.`,
-  };
-}
