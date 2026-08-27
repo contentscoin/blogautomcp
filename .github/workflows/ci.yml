@@ -22,12 +22,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
 
-      # lockfile이 macOS/Windows에서 갱신돼 리눅스 네이티브 바이너리(lightningcss 등)가
-      # 빠져 있을 수 있어, desktop-build.yml과 같은 이유로 npm install을 쓴다.
+      # desktop-build.yml과 같은 방식: 다른 OS에서 생성된 lockfile은 리눅스 네이티브
+      # 바이너리(lightningcss, @tailwindcss/oxide)를 빼놓아 빌드가 깨진다.
+      # lockfile을 지우고 설치해 현재 러너 플랫폼의 optional deps를 받는다.
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: |
+          rm -f package-lock.json
+          npm install --no-audit --no-fund
 
       - name: Typecheck
         run: npx tsc --noEmit
