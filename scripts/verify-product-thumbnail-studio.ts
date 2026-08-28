@@ -11,6 +11,7 @@ import {
   normalizeCandidateImageUrl,
 } from "./lib/product-image-selection";
 import { buildLocalTravelPostJson, buildTravelThumbnailCopy, extractTravelProductFacts } from "./lib/travel-content";
+import { generateTravelEditorialSummaryCard } from "./lib/travel-editorial-card";
 
 async function main() {
   const sourcePath = path.resolve(
@@ -59,8 +60,22 @@ async function main() {
   const travelCopy = buildTravelThumbnailCopy(travelName);
   assert.match(travelCopy.headline, /일정 체크/u);
   const travelDraft = JSON.parse(buildLocalTravelPostJson({ name: travelName, description: "", features: [], price: "" }, 6));
-  assert.equal(travelDraft.sections.length, 6);
+  assert.equal(travelDraft.sections.length, 8, "여행 글은 최소 8개 장면형 섹션을 유지해야 합니다.");
+  assert.equal(
+    new Set(travelDraft.sections.map((section: string) => section.split("\n")[0])).size,
+    travelDraft.sections.length,
+    "여행 소제목을 반복하면 안 됩니다.",
+  );
   assert.doesNotMatch(travelDraft.sections.join("\n"), /배송|구성품|택배|교환\/반품/u);
+  const travelCardPath = await generateTravelEditorialSummaryCard({
+    productName: travelName,
+    price: "3,149,000원",
+    outputDir,
+  });
+  const travelCardMetadata = await sharp(travelCardPath).metadata();
+  assert.equal(travelCardMetadata.width, 1200);
+  assert.equal(travelCardMetadata.height, 1200);
+  assert.ok((await fs.promises.stat(travelCardPath)).size > 20_000, "여행 일정 요약 카드가 비정상적으로 작습니다.");
 
   const travelResult = await generateProductThumbnail({
     imagePaths: [sourcePath],

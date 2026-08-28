@@ -50,13 +50,16 @@ import {
 } from "./lib/product-thumbnail";
 import {
   buildLocalTravelPostJson,
+  buildTravelEditorialPlan,
   extractTravelProductFacts,
+  formatTravelEditorialPlanForPrompt,
   formatTravelFactsForPrompt,
 } from "./lib/travel-content";
 import {
   getConnectEditorInsertionMode,
   type EditorConnectKind,
 } from "./lib/connect-editor-insertion";
+import { generateTravelEditorialSummaryCard } from "./lib/travel-editorial-card";
 import {
   generateProductThumbnailViaImageApi,
   isImageApiThumbnailAvailable,
@@ -694,6 +697,7 @@ async function buildBlogUploadImagePaths(input: {
   imagePaths: string[];
   generatedThumbnailPath: string | null;
   representativeImagePath: string | null;
+  editorialImagePath?: string | null;
 }): Promise<string[]> {
   const output: string[] = [];
   const seen = new Set<string>();
@@ -723,6 +727,9 @@ async function buildBlogUploadImagePaths(input: {
   }
 
   const preferredBody: string[] = [];
+  if (input.editorialImagePath && (await isUsableBodyUploadImage(input.editorialImagePath))) {
+    preferredBody.push(input.editorialImagePath);
+  }
   if (
     input.representativeImagePath &&
     (await isUsableBodyUploadImage(input.representativeImagePath))
@@ -5280,6 +5287,12 @@ async function step2_generatePost(
     ? extractTravelProductFacts(product.name, product.description, product.features)
     : null;
   const travelFactsPromptBlock = travelFacts ? formatTravelFactsForPrompt(travelFacts) : "";
+  const travelEditorialPlan = isTravel
+    ? buildTravelEditorialPlan(product, bodySectionCount)
+    : [];
+  const travelEditorialPromptBlock = isTravel
+    ? formatTravelEditorialPlanForPrompt(travelEditorialPlan)
+    : "";
   if (openCrabSeoBrief) {
     console.log(
       `   OpenCrab SEO: ${openCrabSeoBrief.matchType} match, confidence=${openCrabSeoBrief.confidence}, images=${openCrabSeoBrief.mediaTargetImageCount}`
@@ -5337,26 +5350,27 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? buildHumanMobileStyleGuide() : "- 친근하고 �
 ${NAVER_SEO_TITLE_RULES}
 ${BLOG_HUMANIZE_MOBILE_STYLE ? `\n${HUMANIZE_RULES}` : ""}
 ${openCrabPromptBlock ? `\n${openCrabPromptBlock}` : ""}
-${travelFactsPromptBlock ? `\n${travelFactsPromptBlock}` : ""}`;
+${travelFactsPromptBlock ? `\n${travelFactsPromptBlock}` : ""}
+${travelEditorialPromptBlock ? `\n${travelEditorialPromptBlock}` : ""}`;
 
   // 여행 상품은 리뷰가 아니라 "예약 전 정보 정리 글"이다. 일정·포함사항·여행지
   // 정보를 제공된 데이터와 널리 알려진 사실 안에서만 쓰도록 별도 계획을 준다.
-  const travelSectionPlan = `4. 섹션 구성 (${bodySectionCount}개, 아래에서 상품 정보에 맞는 것만 골라 구성):
-   - 이 상품이 어떤 여행인지 (지역·기간·형태)
-   - 일정/코스 정리 (상품 설명에 있는 일정만, 없으면 "일정은 예약 페이지 기준 확인" 안내)
-   - 주요 방문지 소개 ① (그 지역의 널리 알려진 특징 위주)
-   - 주요 방문지 소개 ②
-   - 포함/불포함 사항 체크 (상품 정보에 있는 것만)
-   - 이런 여행 스타일에 잘 맞아요
-   - 예약 전 확인 포인트 (출발일·인원·취소규정)
-   - 준비물과 팁 (일반적인 여행 준비 상식 수준)
-   - 시기별 참고 사항 (계절 특성 등 일반 상식 수준)
+  const travelSectionPlan = `4. 섹션 구성 (${bodySectionCount}개, 아래 순서를 유지):
+${travelEditorialPlan.map((section, index) => `   ${index + 1}) ${section.title}: ${section.purpose}`).join("\n")}
+
+   편집 구도:
+   - 첫 화면: 대표 여행사진 다음에 검색 키워드와 여행 결론을 3~5줄로 제시
+   - 초반 25%: 기간·목적지·출발조건과 전체 코스를 먼저 요약
+   - 중반: 코스 포인트를 한 장면씩 풀고, 각 섹션 사이에 관련 실제 사진 배치
+   - 후반: 이동 강도·포함사항·추천 여행자·예약 전 체크 순서
+   - 마지막: 경제적 이해관계 고지 다음에 여행커넥트 외부 링크 카드 삽입
 
    ⚠️ 사실 기반 원칙 (여행):
    - 위 "상품 정보"에 없는 일정·가격·포함사항·호텔 등급을 지어내지 마세요.
    - 방문지 설명은 그 지역에 대해 널리 알려진 사실(대표 명소, 지리, 계절 특성)만 쓰고,
      영업시간·입장료·최신 행사처럼 변동되는 세부 정보는 단정하지 마세요.
-   - 실제 다녀온 것처럼 "다녀왔다", "먹어봤다"라고 단정하지 마세요.`;
+   - 실제 다녀온 것처럼 "다녀왔다", "먹어봤다"라고 단정하지 마세요.
+   - 동일한 소제목이나 문단을 반복해서 글자 수를 채우지 마세요.`;
   const contentFactsPrompt = isTravel
     ? `- 여행상품명: ${product.name}\n${travelFactsPromptBlock}\n- 표시 가격: ${product.price || "출발일별 확인 필요"}\n- 상세 URL: ${product.finalUrl || brandLink}`
     : `- 상품명: ${product.name}\n- 설명: ${product.description || '(상품 설명 참고)'}\n- 특징: ${product.features.join(', ') || '(상품 특징 참고)'}\n- 가격: ${product.price || '(가격 정보 참고)'}\n${product.originalPrice ? `- 원가: ${product.originalPrice}` : ''}\n${product.discountRate ? `- 할인율: ${product.discountRate}` : ''}\n${product.couponInfo ? `- 쿠폰/혜택: ${product.couponInfo}` : ''}\n${product.deliveryInfo ? `- 배송: ${product.deliveryInfo}` : ''}\n${product.reviewCount ? `- 리뷰: ${product.reviewCount}개` : ''}\n${product.rating ? `- 평점: ${product.rating}점` : ''}`;
@@ -5381,7 +5395,7 @@ ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일
    예: ${isTravel ? '"제주 서부 코스 | ○○ 패키지 일정과 포함사항"' : '"아기비데 추천 | 해피달링 시그니처 워터탭 솔직 후기"'}
 
 2. 본문을 정확히 ${bodySectionCount}개 섹션으로 작성
-   - 전체 분량은 공백 제외 1,300~1,800자. 상위 노출 글 실측 기준이며, 억지로 늘리지 마세요.
+   - 여행 글 전체 분량은 공백 제외 1,800~2,300자, 쇼핑 글은 1,300~1,800자.
    - 글자보다 이미지가 본체입니다. 문장은 사진 사이를 잇는 역할로 짧게.
 
 3. 각 섹션 구조:
@@ -5389,6 +5403,7 @@ ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일
    - 빈 줄
    - 본문 3-5문장 (각 문장 끝에 줄바꿈, 각 문장 25-45자)
    - 한 문장에 정보 하나만 담고, 어색하면 더 짧게 나누기
+   - 여행 글은 한 섹션 90~180자로 제한하고 장면→판단→확인 순서로 쓰기
    - 빈 줄
 
 4. 섹션 구성 (${bodySectionCount}개):
@@ -7166,21 +7181,38 @@ async function step5and6_uploadAndWrite(
   const tailSection = sections.length > 1 ? sections[sections.length - 1] : "";
   // 우선순위 이미지(썸네일, 대표이미지)는 섹션 수가 적어도 최소 2장까지 업로드
   const maxLoop = Math.max(mainSections.length, Math.min(imagePaths.length, 2));
+  const imagePathBySection = new Map<number, string>();
+  if (options?.connectKind === "TRAVEL" && mainSections.length > 1) {
+    const usableImageCount = Math.min(imagePaths.length, mainSections.length);
+    for (let imageIndex = 0; imageIndex < usableImageCount; imageIndex += 1) {
+      const sectionIndex =
+        usableImageCount <= 1
+          ? 0
+          : Math.round((imageIndex * (mainSections.length - 1)) / (usableImageCount - 1));
+      imagePathBySection.set(sectionIndex, imagePaths[imageIndex]);
+    }
+    console.log(
+      `   ✈️ 여행 사진 분산 배치: ${Array.from(imagePathBySection.keys()).map((index) => index + 1).join(", ")}번 섹션 앞`
+    );
+  } else {
+    imagePaths.forEach((imagePath, index) => imagePathBySection.set(index, imagePath));
+  }
   let uploadedCount = 0;
   
   for (let i = 0; i < maxLoop; i++) {
     // 이미지 업로드 (있으면)
-    if (i < imagePaths.length) {
+    const imagePath = imagePathBySection.get(i);
+    if (imagePath) {
       console.log(`   [${i + 1}] 🖼️ 이미지 업로드...`);
-      const success = await uploadOneImage(page, imagePaths[i]);
+      const success = await uploadOneImage(page, imagePath);
       if (success) {
         uploadedCount++;
       } else if (
         i === 0 &&
         options?.requiredFirstImagePath &&
-        path.resolve(imagePaths[i]) === path.resolve(options.requiredFirstImagePath)
+        path.resolve(imagePath) === path.resolve(options.requiredFirstImagePath)
       ) {
-        throw new Error(`썸네일 첫 이미지 업로드 확인 실패: ${path.basename(imagePaths[i])}`);
+        throw new Error(`썸네일 첫 이미지 업로드 확인 실패: ${path.basename(imagePath)}`);
       }
     }
 
@@ -9150,9 +9182,26 @@ async function main() {
       link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
     );
     const generatedThumbnailPath = generatedThumbnail?.path || null;
+    const travelEditorialCardPath =
+      link.connectKind === "TRAVEL"
+        ? await generateTravelEditorialSummaryCard({
+            productName: product.name,
+            description: product.description,
+            features: product.features,
+            price: product.price,
+            outputDir: TEMP_PATH,
+          }).catch((error) => {
+            console.log(`   ⚠️ 여행 일정 요약 카드 생성 실패: ${getErrorMessage(error)}`);
+            return null;
+          })
+        : null;
+    if (travelEditorialCardPath) {
+      console.log(`   ✅ 여행 일정 요약 카드 생성: ${path.basename(travelEditorialCardPath)}`);
+    }
     const collectedImagePaths = Array.from(
       new Set([
         ...(generatedThumbnailPath ? [generatedThumbnailPath] : []),
+        ...(travelEditorialCardPath ? [travelEditorialCardPath] : []),
         ...(product.representativeImagePath ? [product.representativeImagePath] : []),
         ...product.imagePaths,
       ])
@@ -9161,6 +9210,7 @@ async function main() {
       imagePaths: collectedImagePaths,
       generatedThumbnailPath,
       representativeImagePath: product.representativeImagePath,
+      editorialImagePath: travelEditorialCardPath,
     });
     product.imagePaths = uploadImagePaths;
     if (generatedThumbnailPath) {
