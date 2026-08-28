@@ -31,6 +31,17 @@ interface BrandLink {
   connectKind?: "SHOPPING" | "TRAVEL";
 }
 
+interface BrandPostDraftPreview {
+  brandLinkId: string;
+  connectKind: "SHOPPING" | "TRAVEL";
+  title: string;
+  markdown: string;
+  heroImagePath: string;
+  bodyImagePaths: string[];
+  imagePolicy: "LOCKED_PRODUCT_OR_ORIGINAL" | "TRAVEL_EDITORIAL";
+  approvedAt: string | null;
+}
+
 export interface TopicPostTask {
   id: string;
   topic: string;
@@ -266,6 +277,9 @@ export default function Dashboard() {
   const [adding, setAdding] = useState(false);
   const [publishingId, setPublishingId] = useState<string | null>(null);
   const [thumbnailStudioLink, setThumbnailStudioLink] = useState<BrandLink | null>(null);
+  const [draftGeneratingId, setDraftGeneratingId] = useState<string | null>(null);
+  const [draftPreview, setDraftPreview] = useState<BrandPostDraftPreview | null>(null);
+  const [draftApproving, setDraftApproving] = useState(false);
   const [stoppingPosting, setStoppingPosting] = useState(false);
   const [bulkSeasonalRunning, setBulkSeasonalRunning] = useState(false);
   const [bulkScheduleRunning, setBulkScheduleRunning] = useState(false);
@@ -719,6 +733,54 @@ export default function Dashboard() {
     await handleUpdateLinkSettings(link.id, {
       useSectionHeading: !link.useSectionHeading,
     });
+  };
+  const handlePrepareBrandDraft = async (link: BrandLink) => {
+    setDraftGeneratingId(link.id);
+    setDashboardNotice({ tone: "info", text: "고품질 글과 이미지 패키지를 만들고 있습니다. 잠시만 기다려 주세요." });
+    try {
+      const response = await fetch(`/api/brandlinks/${link.id}/draft`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const payload = await response.json();
+      if (!response.ok || !payload.success) throw new Error(payload.error || "초안 생성 실패");
+      setDraftPreview(payload.data as BrandPostDraftPreview);
+      setDashboardNotice({ tone: "success", text: "고품질 초안이 준비됐습니다. 내용을 확인한 뒤 승인해 주세요." });
+    } catch (error) {
+      setDashboardNotice({ tone: "error", text: error instanceof Error ? error.message : "초안 생성 중 오류가 발생했습니다." });
+    } finally {
+      setDraftGeneratingId(null);
+    }
+  };
+  const handleOpenOrPrepareBrandDraft = async (link: BrandLink) => {
+    try {
+      const response = await fetch(`/api/brandlinks/${link.id}/draft`, { cache: "no-store" });
+      const payload = await response.json();
+      if (response.ok && payload.success && payload.data) {
+        setDraftPreview(payload.data as BrandPostDraftPreview);
+        return;
+      }
+    } catch {
+      // 저장된 패키지가 없거나 읽지 못하면 새로 만든다.
+    }
+    await handlePrepareBrandDraft(link);
+  };
+
+  const handleApproveBrandDraft = async () => {
+    if (!draftPreview) return;
+    setDraftApproving(true);
+    try {
+      const response = await fetch(`/api/brandlinks/${draftPreview.brandLinkId}/draft`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "approve" }),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.success) throw new Error(payload.error || "초안 승인 실패");
+      setDraftPreview(payload.data as BrandPostDraftPreview);
+      setDashboardNotice({ tone: "success", text: "승인됐습니다. 발행 시 이 글과 이미지가 그대로 사용됩니다." });
+    } catch (error) {
+      setDashboardNotice({ tone: "error", text: error instanceof Error ? error.message : "초안 승인 중 오류가 발생했습니다." });
+    } finally {
+      setDraftApproving(false);
+    }
   };
   const startPublish = async (
     id: string,
@@ -2239,8 +2301,16 @@ export default function Dashboard() {
               )}
             </div>
 
-            {/* 링크 테이블 */}
-            <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+            <div className="mb-4 grid gap-2 rounded-2xl border border-slate-200 bg-white p-3 sm:grid-cols-3">
+              {[
+                { no: "1", title: "글 준비", text: "고품질 초안을 먼저 만듭니다", color: "bg-violet-600" },
+                { no: "2", title: "썸네일", text: brandConnectKind === "travel" ? "여행 표지 스타일을 고릅니다" : "상품 원본을 잠그고 합성합니다", color: brandConnectKind === "travel" ? "bg-amber-500" : "bg-blue-600" },
+                { no: "3", title: "확인 후 발행", text: "승인한 글과 이미지만 발행합니다", color: "bg-emerald-600" },
+              ].map((step) => <div key={step.no} className="flex items-center gap-3 rounded-xl bg-slate-50 px-3 py-2"><span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-black text-white ${step.color}`}>{step.no}</span><div><p className="text-sm font-bold text-slate-900">{step.title}</p><p className="text-[11px] text-slate-500">{step.text}</p></div></div>)}
+            </div>
+
+            {/* 간결한 상품 작업 목록 */}
+            <div className="bg-white border border-slate-200 rounded-xl overflow-x-auto">
               <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
                 <div>
                   <h2 className="font-semibold text-slate-800">{activeConnectLabel} 상품 목록</h2>
@@ -2252,23 +2322,21 @@ export default function Dashboard() {
                 <thead className="bg-slate-50 border-b border-slate-200">
                   <tr>
                     <th className="px-4 py-3 text-left text-sm font-medium text-slate-600">상품</th>
-                    <th className="px-4 py-3 text-left text-sm font-medium text-slate-600">URL</th>
                     <th className="px-4 py-3 text-center text-sm font-medium text-slate-600">상태</th>
-                    <th className="px-4 py-3 text-center text-sm font-medium text-slate-600">메모</th>
                     <th className="px-4 py-3 text-center text-sm font-medium text-slate-600">설정</th>
-                    <th className="px-4 py-3 text-center text-sm font-medium text-slate-600">작업</th>
+                    <th className="px-4 py-3 text-center text-sm font-medium text-slate-600">글 만들기</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {loading ? (
                     <tr>
-                      <td colSpan={6} className="px-4 py-8 text-center text-slate-500">
+                      <td colSpan={4} className="px-4 py-8 text-center text-slate-500">
                         로딩 중...
                       </td>
                     </tr>
                   ) : visibleLinks.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="px-4 py-8 text-center text-slate-500">
+                      <td colSpan={4} className="px-4 py-8 text-center text-slate-500">
                         등록된 {activeConnectLabel} 상품이 없습니다. 위에서 상품을 동기화하거나 링크를 추가하세요.
                       </td>
                     </tr>
@@ -2296,30 +2364,9 @@ export default function Dashboard() {
                                 {link.productPrice && (
                                   <div className="text-sm text-slate-500">{link.productPrice}</div>
                                 )}
+                                <div className="mt-1 flex gap-2 text-xs"><a href={link.url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">상품 보기</a>{link.postUrl && <a href={link.postUrl} target="_blank" rel="noopener noreferrer" className="text-emerald-600 hover:underline">발행 글</a>}</div>
                               </div>
                             </div>
-                          </td>
-                          <td className="px-4 py-3">
-                            <a
-                              href={link.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-blue-600 hover:underline text-sm"
-                            >
-                              {link.url.length > 40 ? link.url.substring(0, 40) + "..." : link.url}
-                            </a>
-                            {link.postUrl && (
-                              <div className="mt-1">
-                                <a
-                                  href={link.postUrl}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="text-green-600 hover:underline text-xs"
-                                >
-                                  📄 발행된 글 보기
-                                </a>
-                              </div>
-                            )}
                           </td>
                           <td className="px-4 py-3 text-center">
                             <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(link.status)}`}>
@@ -2330,9 +2377,6 @@ export default function Dashboard() {
                                 ⚠️
                               </div>
                             )}
-                          </td>
-                          <td className="px-4 py-3 text-center text-sm text-slate-500">
-                            {link.memo || "-"}
                           </td>
                           <td className="px-4 py-3 text-center">
                             <div className="space-y-1">
@@ -2396,15 +2440,23 @@ export default function Dashboard() {
                             </div>
                           </td>
                           <td className="px-4 py-3 text-center">
-                            <div className="flex items-center justify-center gap-2">
+                            <div className="flex flex-wrap items-center justify-center gap-2">
                               <button
                                 onClick={() => setThumbnailStudioLink(link)}
-                                className="px-3 py-1 text-sm bg-blue-100 text-blue-700 rounded hover:bg-blue-200 transition-colors"
+                                className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${link.connectKind === "TRAVEL" ? "bg-amber-100 text-amber-800 hover:bg-amber-200" : "bg-blue-100 text-blue-700 hover:bg-blue-200"}`}
                                 title="실제 상품 사진으로 카피 썸네일 만들기"
                               >
-                                🖼️ 썸네일
+                                2. 썸네일
                               </button>
-                              {/* 발행하기 버튼 */}
+                              <button
+                                onClick={() => void handleOpenOrPrepareBrandDraft(link)}
+                                disabled={draftGeneratingId === link.id || Boolean(publishingId)}
+                                className="rounded-lg bg-violet-600 px-3 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:opacity-50 transition-colors"
+                                title="글·이미지를 먼저 만들고 확인한 뒤 같은 결과를 발행합니다"
+                              >
+                                {draftGeneratingId === link.id ? "글 준비 중..." : "1. 글 준비·확인"}
+                              </button>
+                              {/* 여행 계약 잠금만 목록에서 표시하고, 실제 발행은 승인 창에서 진행 */}
                               {link.status === "READY" && link.connectKind === "TRAVEL" && travelPublishingUnavailable && (
                                 <span
                                   className="rounded-lg bg-amber-100 px-3 py-1.5 text-xs font-medium text-amber-800"
@@ -2412,24 +2464,6 @@ export default function Dashboard() {
                                 >
                                   🔒 여행 계약 확인 필요
                                 </span>
-                              )}
-                              {link.status === "READY" && (link.connectKind !== "TRAVEL" || !travelPublishingUnavailable) && (
-                                <>
-                                  <button
-                                    onClick={() => handlePublish(link.id)}
-                                    disabled={publishingId === link.id}
-                                    className="px-3 py-1 text-sm bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50 transition-colors"
-                                  >
-                                    {publishingId === link.id ? "⏳" : "🚀 즉시"}
-                                  </button>
-                                  <button
-                                    onClick={() => handleSchedulePublish(link)}
-                                    disabled={publishingId === link.id}
-                                    className="px-3 py-1 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50 transition-colors"
-                                  >
-                                    {publishingId === link.id ? "⏳" : "📅 예약"}
-                                  </button>
-                                </>
                               )}
 
                               {/* 재발행 */}
@@ -2441,32 +2475,14 @@ export default function Dashboard() {
                                   🔒 여행 계약 확인 필요
                                 </span>
                               )}
-                              {link.status === "FAILED" && (link.connectKind !== "TRAVEL" || !travelPublishingUnavailable) && (
-                                <>
-                                  <button
-                                    onClick={() => handlePublish(link.id)}
-                                    disabled={publishingId === link.id}
-                                    className="px-3 py-1 text-sm bg-amber-500 text-white rounded hover:bg-amber-600 disabled:opacity-50 transition-colors"
-                                  >
-                                    🔄 즉시 재시도
-                                  </button>
-                                  <button
-                                    onClick={() => handleSchedulePublish(link)}
-                                    disabled={publishingId === link.id}
-                                    className="px-3 py-1 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50 transition-colors"
-                                  >
-                                    📅 예약 재시도
-                                  </button>
-                                </>
-                              )}
 
                               {/* 삭제 */}
                               <button
                                 onClick={() => handleDeleteLink(link.id)}
-                                className="px-3 py-1 text-sm bg-red-100 text-red-600 rounded hover:bg-red-200 transition-colors"
+                                className="rounded-lg px-2 py-2 text-xs text-slate-400 hover:bg-red-50 hover:text-red-600 transition-colors"
                                 title="삭제"
                               >
-                                🗑️
+                                삭제
                               </button>
                             </div>
                             {/* 발행 진행률 */}
@@ -2504,14 +2520,10 @@ export default function Dashboard() {
         <div className="bg-slate-50 border border-slate-200 rounded-xl p-4">
           <h3 className="font-medium text-slate-800 mb-2">💡 사용 방법</h3>
           <ol className="text-sm text-slate-600 space-y-1 list-decimal list-inside">
-            <li>먼저 <code className="bg-slate-200 px-1 rounded">npm run login</code>으로 네이버 로그인</li>
-            <li>브랜드커넥트 링크를 추가 (https://naver.me/xxx 형태)</li>
-            <li>⚙️ 시즌·히트·인기 10개/50개 등록 버튼으로 예약발행 대상 링크를 자동 등록</li>
-            <li>⚙️ 수퍼 퍼블리싱 200개 버튼으로 당일 50개 바로발행, 1~3일 뒤 50개씩 예약발행</li>
-            <li>⚙️ 예약발행 일괄 실행 버튼으로 READY 글을 저장된 예약발행일 기준으로 순차 예약발행</li>
-            <li>⚙️ 바로 일괄발행 버튼으로 예약 READY 글 전체를 즉시 순차 발행</li>
-            <li>🚀 즉시 버튼은 바로 발행, 📅 예약 버튼은 예약 발행</li>
-            <li>단건 예약에서 과거 또는 당일 날짜를 입력하면 자동으로 다음날로 조정됩니다.</li>
+            <li>네이버 로그인 상태를 확인하고 쇼핑 또는 여행 탭을 선택합니다.</li>
+            <li>상품을 동기화한 뒤 목록에서 <strong>1. 글 준비·확인</strong>을 누릅니다.</li>
+            <li><strong>2. 썸네일</strong>에서 실제 사진과 디자인 스타일을 고릅니다.</li>
+            <li>초안을 승인한 뒤 <strong>3. 바로 발행</strong> 또는 예약 발행을 선택합니다.</li>
           </ol>
         </div>
       </main>
@@ -2522,6 +2534,33 @@ export default function Dashboard() {
           productName={thumbnailStudioLink.productName || "추천 상품"}
           onClose={() => setThumbnailStudioLink(null)}
         />
+      )}
+
+      {draftPreview && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4" role="dialog" aria-modal="true" aria-label="고품질 초안 미리보기">
+          <div className="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <div className="flex items-start justify-between border-b border-slate-200 px-6 py-4">
+              <div>
+                <p className="text-xs font-semibold text-violet-600">{draftPreview.connectKind === "SHOPPING" ? "쇼핑커넥트" : "여행커넥트"} 고품질 패키지</p>
+                <h2 className="mt-1 text-xl font-bold text-slate-900">{draftPreview.title}</h2>
+                <p className="mt-1 text-xs text-slate-500">{draftPreview.imagePolicy === "LOCKED_PRODUCT_OR_ORIGINAL" ? "상품 원본 잠금 적용 · 변형 금지" : "여행 전용 에디토리얼 이미지"}</p>
+              </div>
+              <button onClick={() => setDraftPreview(null)} className="rounded-lg px-3 py-1 text-slate-500 hover:bg-slate-100">닫기</button>
+            </div>
+            <pre className="flex-1 overflow-auto whitespace-pre-wrap px-6 py-5 text-sm leading-7 text-slate-700">{draftPreview.markdown}</pre>
+            <div className="flex items-center justify-between gap-3 border-t border-slate-200 px-6 py-4">
+              <span className={`text-sm font-semibold ${draftPreview.approvedAt ? "text-emerald-600" : "text-amber-600"}`}>
+                {draftPreview.approvedAt ? "승인 완료 · 발행 결과 고정" : "승인 전 · 아직 발행되지 않음"}
+              </span>
+              <div className="flex flex-wrap justify-end gap-2">
+                <button onClick={() => { const link = links.find((item) => item.id === draftPreview.brandLinkId); if (link) void handlePrepareBrandDraft(link); }} disabled={Boolean(draftGeneratingId)} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">다시 만들기</button>
+                {!draftPreview.approvedAt && <button onClick={() => void handleApproveBrandDraft()} disabled={draftApproving} className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:opacity-50">{draftApproving ? "승인 중..." : "이 초안 승인"}</button>}
+                {draftPreview.approvedAt && <button onClick={() => { const link = links.find((item) => item.id === draftPreview.brandLinkId); if (link) { setDraftPreview(null); void handleSchedulePublish(link); } }} className="rounded-lg border border-indigo-300 px-4 py-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-50">예약 발행</button>}
+                {draftPreview.approvedAt && <button onClick={() => { const id = draftPreview.brandLinkId; setDraftPreview(null); void handlePublish(id); }} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700">3. 승인본 바로 발행</button>}
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* 푸터 */}

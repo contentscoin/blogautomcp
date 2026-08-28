@@ -66,7 +66,7 @@ async function executeJob(request: NextRequest, job: Job): Promise<unknown> {
     const product = await prisma.brandLink.findUnique({ where: { id: productId }, select: { connectKind: true } });
     if (!product) throw new Error("선택한 상품을 찾을 수 없습니다.");
     if (product.connectKind !== kind) throw new Error("상품의 커넥트 종류가 요청과 일치하지 않습니다.");
-    return localApi(request, `/api/brandlinks/${encodeURIComponent(productId)}/scrape`, { method: "POST", body: "{}" });
+    return localApi(request, `/api/brandlinks/${encodeURIComponent(productId)}/draft`, { method: "POST", body: "{}" });
   }
   if (job.type === "POST_PUBLISH" || job.type === "POST_SCHEDULE") {
     const draftId = typeof input.draftId === "string" ? input.draftId : "";
@@ -74,6 +74,10 @@ async function executeJob(request: NextRequest, job: Job): Promise<unknown> {
     const schedule = job.type === "POST_SCHEDULE";
     const scheduledDate = typeof input.scheduledDate === "string" ? input.scheduledDate : "";
     if (schedule && !/^\d{4}-\d{2}-\d{2}$/.test(scheduledDate)) throw new Error("scheduledDate는 YYYY-MM-DD 형식이어야 합니다.");
+    await localApi(request, `/api/brandlinks/${encodeURIComponent(draftId)}/draft`, {
+      method: "PATCH",
+      body: JSON.stringify({ action: "approve" }),
+    });
     return localApi(request, `/api/brandlinks/${encodeURIComponent(draftId)}/publish`, { method: "POST", body: JSON.stringify(schedule ? { publishMode: "schedule", scheduledDate } : { publishMode: "now" }) });
   }
   throw new Error(`지원하지 않는 원격 작업입니다: ${job.type}`);

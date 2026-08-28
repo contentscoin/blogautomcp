@@ -17,6 +17,7 @@ import type { IncomingMessage } from "http";
 import { spawnSync } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
+import * as crypto from "crypto";
 import sharp from "sharp";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import {
@@ -89,6 +90,7 @@ import {
   productThumbnailSettingKey,
 } from "./lib/product-thumbnail-settings";
 import { buildHumanizeRewritePrompt, HUMANIZE_RULES, scanAiTells } from "./lib/humanize-korean";
+import { createLockedProductThumbnail, createOriginalProductPhotoThumbnail, type ShoppingThumbnailStyle } from "./lib/product-image-lock";
 
 // Stealth 플러그인 적용 (봇 감지 우회)
 chromium.use(StealthPlugin());
@@ -461,7 +463,7 @@ function buildLocalProductTitle(
   return sanitizeTitle(collapseRepeatedLeadingTitleTokens(rawTitle), product.name);
 }
 
-type ProductThumbnailSource = "image-api" | "chatgpt" | "codex-imagegen" | "local-script" | "composite" | "saved-studio";
+type ProductThumbnailSource = "image-api" | "chatgpt" | "codex-imagegen" | "local-script" | "composite" | "saved-studio" | "locked-product";
 
 interface GeneratedProductThumbnail {
   path: string;
@@ -868,6 +870,48 @@ async function generateTopTextCutoutThumbnail(
   if (!product.representativeImagePath || !fs.existsSync(product.representativeImagePath)) {
     console.log("   ⚠️ 판매페이지 대표 이미지가 없어 썸네일 생성을 건너뜁니다.");
     return null;
+  }
+  // 쇼핑 상품은 생성형 모델에 상품 픽셀을 넘기지 않는다. 원본 RGB를 보존한
+  // 투명 PNG를 로컬에서 만든 뒤 배경과 카피만 합성한다. 분리가 불확실하면
+  // 원본 상세 이미지가 본문 대표 이미지로 유지되도록 썸네일 생성을 중단한다.
+  if (contentKind === "SHOPPING") {
+    const suggestedCopy = buildProductThumbnailGenerationPrompt({
+      postTitle,
+      productName: product.name,
+      categoryName: inferCategoryKeyword(product.name),
+      description: product.description,
+      features: product.features,
+      price: product.price,
+    });
+    try {
+      const locked = await createLockedProductThumbnail({
+        sourcePath: product.representativeImagePath,
+        outputDir: TEMP_PATH,
+        productName: savedSetting?.copy.productNameLabel || suggestedCopy.productNameLabel,
+        headline: savedSetting?.copy.headline || suggestedCopy.headline,
+        subline: savedSetting?.copy.subline || suggestedCopy.subline,
+        style: (savedSetting?.style || "shopping-clean") as ShoppingThumbnailStyle,
+      });
+      console.log(`   🔒 상품 원본 잠금 썸네일: ${path.basename(locked.outputPath)}`);
+      console.log(`   🔒 원본 SHA-256: ${locked.lock.sourceSha256}`);
+      return { path: locked.outputPath, source: "locked-product" };
+    } catch (error) {
+      console.log(`   🔒 상품 분리 중단: ${getErrorMessage(error)}`);
+      const original = await createOriginalProductPhotoThumbnail({
+        sourcePath: product.representativeImagePath,
+        outputDir: TEMP_PATH,
+        productName: savedSetting?.copy.productNameLabel || suggestedCopy.productNameLabel,
+        headline: savedSetting?.copy.headline || suggestedCopy.headline,
+        subline: savedSetting?.copy.subline || suggestedCopy.subline,
+        style: (savedSetting?.style || "shopping-clean") as ShoppingThumbnailStyle,
+      }).catch(() => null);
+      if (original) {
+        console.log("   ✅ 상품 분리 대신 상세페이지 원본 사진을 변형 없이 카드에 배치합니다.");
+        return { path: original.outputPath, source: "locked-product" };
+      }
+      console.log("   ✅ 생성형 변형 없이 원본 상세페이지 이미지를 그대로 사용합니다.");
+      return null;
+    }
   }
   if (savedSetting) {
     const regenerated = await generateProductThumbnail({
@@ -6274,6 +6318,147 @@ function connectToolSelectors(kind: EditorConnectKind): string[] {
   return kind === "TRAVEL" ? TRAVEL_CONNECT_TOOL_SELECTORS : SHOPPING_CONNECT_TOOL_SELECTORS;
 }
 
+interface PreparedBrandLinkPostOverride {
+  post: GeneratedPostPreview;
+  heroImagePath: string;
+  bodyImagePaths: string[];
+}
+
+function writePreparedBrandPostPackage(params: {
+  outputDir: string;
+  brandLinkId: string;
+  connectKind: "SHOPPING" | "TRAVEL";
+  post: GeneratedPostPreview;
+  imagePaths: string[];
+}): string {
+  const images = params.imagePaths.filter((imagePath) => fs.existsSync(imagePath));
+  if (images.length < 5) {
+    throw new Error(`고품질 초안 패키지에는 대표 1장과 본문 4장 이상이 필요합니다. 현재 ${images.length}장`);
+  }
+  fs.mkdirSync(params.outputDir, { recursive: true });
+  const imageDir = path.join(params.outputDir, "images");
+  fs.mkdirSync(imageDir, { recursive: true });
+  const packagedImages = images.map((sourcePath, index) => {
+    const extension = path.extname(sourcePath) || ".png";
+    const destination = path.join(imageDir, `${String(index + 1).padStart(2, "0")}${extension}`);
+    fs.copyFileSync(sourcePath, destination);
+    return {
+      path: path.resolve(destination),
+      sourcePath: path.resolve(sourcePath),
+      sha256: crypto.createHash("sha256").update(fs.readFileSync(destination)).digest("hex"),
+      role: index === 0 ? "hero" : "body",
+    };
+  });
+  const markdownPath = path.join(params.outputDir, "post.md");
+  const sections = params.post.sections.map((section) => {
+    const [heading = "본문", ...body] = section.split(/\r?\n/);
+    return `## ${heading.trim() || "본문"}\n\n${body.join("\n").trim()}`;
+  });
+  const markdown = [`# ${params.post.title}`, "", ...sections, "", params.post.hashtags.map((tag) => `#${tag.replace(/^#+/, "")}`).join(" ")].join("\n");
+  fs.writeFileSync(markdownPath, markdown, "utf8");
+  const manifestPath = path.join(params.outputDir, "manifest.json");
+  fs.writeFileSync(manifestPath, JSON.stringify({
+    version: "brand-post-package/v1",
+    brandLinkId: params.brandLinkId,
+    connectKind: params.connectKind,
+    title: params.post.title,
+    markdownPath: path.resolve(markdownPath),
+    heroImagePath: packagedImages[0].path,
+    bodyImagePaths: packagedImages.slice(1).map((image) => image.path),
+    imageAssets: packagedImages,
+    hashtags: params.post.hashtags,
+    imagePolicy: params.connectKind === "SHOPPING" ? "LOCKED_PRODUCT_OR_ORIGINAL" : "TRAVEL_EDITORIAL",
+    createdAt: new Date().toISOString(),
+    approvedAt: null,
+  }, null, 2), "utf8");
+  return manifestPath;
+}
+
+function resolvePreparedOverridePath(manifestPath: string, value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error("준비된 원고 매니페스트의 파일 경로가 비어 있습니다.");
+  }
+  const resolved = path.isAbsolute(value)
+    ? value
+    : path.resolve(path.dirname(manifestPath), value);
+  if (!fs.existsSync(resolved)) {
+    throw new Error(`준비된 원고 파일을 찾을 수 없습니다: ${resolved}`);
+  }
+  return resolved;
+}
+
+function loadPreparedBrandLinkPostOverride(): PreparedBrandLinkPostOverride | null {
+  const configuredPath = process.env.BRANDLINK_PREPARED_POST_MANIFEST?.trim();
+  if (!configuredPath) return null;
+
+  const manifestPath = path.resolve(configuredPath);
+  if (!fs.existsSync(manifestPath)) {
+    throw new Error(`준비된 원고 매니페스트를 찾을 수 없습니다: ${manifestPath}`);
+  }
+
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
+    markdownPath?: unknown;
+    heroImagePath?: unknown;
+    bodyImagePaths?: unknown;
+    hashtags?: unknown;
+  };
+  const markdownPath = resolvePreparedOverridePath(manifestPath, manifest.markdownPath);
+  const heroImagePath = resolvePreparedOverridePath(manifestPath, manifest.heroImagePath);
+  const bodyImagePaths = Array.isArray(manifest.bodyImagePaths)
+    ? manifest.bodyImagePaths.map((value) => resolvePreparedOverridePath(manifestPath, value))
+    : [];
+  if (bodyImagePaths.length < 4) {
+    throw new Error("준비된 원고에는 본문 이미지가 최소 4장 필요합니다.");
+  }
+
+  const markdown = fs.readFileSync(markdownPath, "utf8");
+  const titleMatch = markdown.match(/^#\s+(.+)$/m);
+  if (!titleMatch?.[1]?.trim()) {
+    throw new Error("준비된 원고에서 제목을 찾지 못했습니다.");
+  }
+
+  const visibleMarkdown = markdown
+    .split(/^##\s+Sources\s*$/m)[0]
+    .replace(/<!--[^]*?-->/g, "")
+    .trim();
+  const withoutTitle = visibleMarkdown.replace(/^#\s+.+\r?\n+/, "");
+  const chunks = withoutTitle.split(/^##\s+/m);
+  const intro = chunks.shift()?.replace(/!\[[^\]]*\]\([^\)]+\)/g, "").trim() || "";
+  const sections = [
+    ...(intro ? [`여행 전 확인\n\n${intro}`] : []),
+    ...chunks.map((chunk) => {
+      const [heading = "", ...bodyLines] = chunk.split(/\r?\n/);
+      const body = bodyLines
+        .join("\n")
+        .replace(/!\[[^\]]*\]\([^\)]+\)/g, "")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+      return [heading.trim(), body].filter(Boolean).join("\n\n");
+    }).filter(Boolean),
+  ];
+  if (sections.length < 5) {
+    throw new Error(`준비된 원고의 본문 섹션이 부족합니다: ${sections.length}개`);
+  }
+
+  const hashtags = Array.isArray(manifest.hashtags)
+    ? manifest.hashtags
+        .filter((value): value is string => typeof value === "string")
+        .map((value) => value.replace(/^#+/, "").trim())
+        .filter(Boolean)
+    : [];
+
+  return {
+    post: {
+      title: titleMatch[1].trim(),
+      sections,
+      hashtags,
+      rawResponse: `prepared:${markdownPath}`,
+    },
+    heroImagePath,
+    bodyImagePaths,
+  };
+}
+
 const EDITOR_INSERT_MENU_SELECTORS = [
   'button[data-name="insert"]',
   'button[data-name="more"]',
@@ -9165,25 +9350,32 @@ async function main() {
     console.log(`🖼️ 이미지: ${product.imagePaths.length}개`);
     console.log("-".repeat(40));
     
-    setStage("STEP2 SEO 글 생성");
-    // STEP 2: SEO 최적화 글 생성
-    const post = await step2_generatePost(
+    const preparedPostOverride = loadPreparedBrandLinkPostOverride();
+    setStage(preparedPostOverride ? "STEP2 준비된 원고 불러오기" : "STEP2 SEO 글 생성");
+    // 승인된 준비 원고가 있으면 재생성하지 않고 그대로 사용한다.
+    const post = preparedPostOverride?.post ?? await step2_generatePost(
       product,
       link.url,
       link.id,
       link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING"
     );
+    if (preparedPostOverride) {
+      console.log(`   ✅ 승인 원고 적용: ${post.title}`);
+      console.log(`   ✅ 승인 이미지 적용: ${1 + preparedPostOverride.bodyImagePaths.length}장`);
+    }
 
     setStage("STEP2.5 대표 썸네일 생성");
-    const generatedThumbnail = await generateTopTextCutoutThumbnail(
-      product,
-      post.title,
-      link.id,
-      link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
-    );
+    const generatedThumbnail: GeneratedProductThumbnail | null = preparedPostOverride
+      ? { path: preparedPostOverride.heroImagePath, source: "codex-imagegen" }
+      : await generateTopTextCutoutThumbnail(
+          product,
+          post.title,
+          link.id,
+          link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
+        );
     const generatedThumbnailPath = generatedThumbnail?.path || null;
     const travelEditorialCardPath =
-      link.connectKind === "TRAVEL"
+      link.connectKind === "TRAVEL" && !preparedPostOverride
         ? await generateTravelEditorialSummaryCard({
             productName: product.name,
             description: product.description,
@@ -9198,14 +9390,14 @@ async function main() {
     if (travelEditorialCardPath) {
       console.log(`   ✅ 여행 일정 요약 카드 생성: ${path.basename(travelEditorialCardPath)}`);
     }
-    const collectedImagePaths = Array.from(
-      new Set([
-        ...(generatedThumbnailPath ? [generatedThumbnailPath] : []),
-        ...(travelEditorialCardPath ? [travelEditorialCardPath] : []),
-        ...(product.representativeImagePath ? [product.representativeImagePath] : []),
-        ...product.imagePaths,
-      ])
-    );
+    const collectedImagePaths = Array.from(new Set(preparedPostOverride
+      ? [preparedPostOverride.heroImagePath, ...preparedPostOverride.bodyImagePaths]
+      : [
+          ...(generatedThumbnailPath ? [generatedThumbnailPath] : []),
+          ...(travelEditorialCardPath ? [travelEditorialCardPath] : []),
+          ...(product.representativeImagePath ? [product.representativeImagePath] : []),
+          ...product.imagePaths,
+        ]));
     const uploadImagePaths = await buildBlogUploadImagePaths({
       imagePaths: collectedImagePaths,
       generatedThumbnailPath,
@@ -9256,6 +9448,17 @@ async function main() {
     }
 
     let previewPath: string | null = null;
+    const prepareOutputDir = process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim();
+    if (prepareOutputDir) {
+      const manifestPath = writePreparedBrandPostPackage({
+        outputDir: path.resolve(prepareOutputDir),
+        brandLinkId: linkId,
+        connectKind: link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
+        post,
+        imagePaths: product.imagePaths,
+      });
+      console.log(`   📦 승인 대기 초안 패키지 저장: ${manifestPath}`);
+    }
     if (DEBUG_SAVE_GENERATED_POST || DRY_RUN_GENERATE_ONLY) {
       previewPath = saveGeneratedPostPreview(linkId, post, product, contentReadiness);
       console.log(`   🧾 생성 결과 저장: ${previewPath}`);

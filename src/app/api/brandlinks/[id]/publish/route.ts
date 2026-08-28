@@ -7,6 +7,7 @@ import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 import { buildCaptureRequiredPayload } from "@/lib/brandconnect-kind";
 import { resolveConnectContract } from "@/lib/connect-contract-store";
+import { getBrandPostPackageManifestPath, readBrandPostPackage } from "@/lib/brand-post-package";
 
 const NAVER_SCHEDULE_TIMEZONE = process.env.NAVER_SCHEDULE_TIMEZONE || "Asia/Seoul";
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
@@ -195,6 +196,14 @@ export async function POST(
       );
     }
 
+    const preparedPackage = readBrandPostPackage(id);
+    if (preparedPackage && !preparedPackage.approvedAt) {
+      return NextResponse.json(
+        { success: false, error: "고품질 초안을 먼저 확인하고 승인해 주세요." },
+        { status: 409 }
+      );
+    }
+
     // 상태를 발행중으로 변경
     await prisma.brandLink.update({
       where: { id },
@@ -256,6 +265,9 @@ export async function POST(
             process.env.PRODUCT_THUMBNAIL_IMAGE_WAIT_MS || "60000",
           PRODUCT_THUMBNAIL_COMPOSITE_FALLBACK_ENABLED:
             process.env.PRODUCT_THUMBNAIL_COMPOSITE_FALLBACK_ENABLED || "false",
+          ...(preparedPackage
+            ? { BRANDLINK_PREPARED_POST_MANIFEST: getBrandPostPackageManifestPath(id) }
+            : {}),
         },
       });
     } finally {

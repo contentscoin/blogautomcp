@@ -12,6 +12,7 @@ export interface ProductThumbnailSettings {
   generatedPath: string;
   copy: ProductThumbnailCopySettings;
   updatedAt: string;
+  style?: string;
 }
 
 export const PRODUCT_THUMBNAIL_SETTING_PREFIX = "brandlink.thumbnail.";
@@ -68,6 +69,7 @@ export function parseProductThumbnailSettings(value: string | null | undefined):
       generatedPath: clean(parsed.generatedPath),
       copy: normalizeProductThumbnailCopy(parsed.copy, parsed.copy.productNameLabel || "추천 상품"),
       updatedAt: clean(parsed.updatedAt) || new Date(0).toISOString(),
+      style: clean(parsed.style),
     };
   } catch {
     return null;

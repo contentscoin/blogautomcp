@@ -6,11 +6,12 @@ import { prisma } from "@/lib/db";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import {
   buildProductThumbnailCopy,
-  generateProductThumbnail,
 } from "../../../../../../scripts/lib/product-thumbnail";
 import { buildTravelThumbnailCopy } from "../../../../../../scripts/lib/travel-content";
 import { getProductThumbnailStorageDir } from "../../../../../../scripts/lib/app-paths";
 import { normalizeCandidateImageUrl } from "../../../../../../scripts/lib/product-image-selection";
+import { createLockedProductThumbnail, createOriginalProductPhotoThumbnail, type ShoppingThumbnailStyle } from "../../../../../../scripts/lib/product-image-lock";
+import { createTravelEditorialThumbnail, type TravelThumbnailStyle } from "../../../../../../scripts/lib/travel-thumbnail";
 import {
   normalizeProductThumbnailCopy,
   parseProductThumbnailSettings,
@@ -88,7 +89,8 @@ async function getPayload(id: string) {
     const stat = await fs.promises.stat(saved.generatedPath).catch(() => null);
     if (stat?.isFile() && stat.size <= 8 * 1024 * 1024) {
       const bytes = await fs.promises.readFile(saved.generatedPath);
-      previewDataUrl = `data:image/jpeg;base64,${bytes.toString("base64")}`;
+      const mime = path.extname(saved.generatedPath).toLowerCase() === ".png" ? "png" : "jpeg";
+      previewDataUrl = `data:image/${mime};base64,${bytes.toString("base64")}`;
     }
   }
   return {
@@ -130,29 +132,31 @@ export async function POST(
       sourceImageUrl?: unknown;
       copy?: Record<string, unknown>;
       save?: unknown;
+      style?: unknown;
     };
     const sourceImageUrl = typeof body.sourceImageUrl === "string" ? body.sourceImageUrl.trim() : "";
     if (!payload.imageUrls.includes(sourceImageUrl)) {
       return NextResponse.json({ success: false, error: "이 상품에서 수집된 제품 사진을 선택하세요." }, { status: 422 });
     }
     const copy = normalizeProductThumbnailCopy(body.copy || {}, payload.productName);
+    const requestedStyle = typeof body.style === "string" ? body.style : "";
+    const style = payload.connectKind === "SHOPPING"
+      ? (["shopping-clean", "shopping-bold", "shopping-soft"].includes(requestedStyle) ? requestedStyle : "shopping-clean") as ShoppingThumbnailStyle
+      : (["travel-editorial", "travel-postcard", "travel-route"].includes(requestedStyle) ? requestedStyle : "travel-editorial") as TravelThumbnailStyle;
     const storageDir = getProductThumbnailStorageDir();
     await fs.promises.mkdir(storageDir, { recursive: true });
     const runId = randomUUID();
     const sourcePath = path.join(storageDir, `${id}-${runId}.source`);
     await downloadProductImage(sourceImageUrl, sourcePath);
-    let result;
+    let result: { outputPath: string } | null;
     try {
-      result = await generateProductThumbnail({
-        imagePaths: [sourcePath],
-        preferredImagePath: sourcePath,
-        postTitle: `${payload.productName} ${copy.headline}`,
-        productName: payload.productName,
-        outputDir: storageDir,
-        copy,
-        contentKind: payload.connectKind,
-        enabled: true,
-      });
+      if (payload.connectKind === "SHOPPING") {
+        const shoppingStyle = style as ShoppingThumbnailStyle;
+        result = await createLockedProductThumbnail({ sourcePath, outputDir: storageDir, productName: payload.productName, headline: copy.headline, subline: copy.subline, style: shoppingStyle })
+          .catch(() => createOriginalProductPhotoThumbnail({ sourcePath, outputDir: storageDir, productName: payload.productName, headline: copy.headline, subline: copy.subline, style: shoppingStyle }));
+      } else {
+        result = await createTravelEditorialThumbnail({ sourcePath, outputDir: storageDir, destination: payload.productName, headline: copy.headline, subline: copy.subline, badge: copy.badge, style: style as TravelThumbnailStyle });
+      }
     } finally {
       await fs.promises.unlink(sourcePath).catch(() => undefined);
     }
@@ -162,8 +166,8 @@ export async function POST(
     if (body.save === true) {
       await prisma.setting.upsert({
         where: { key: productThumbnailSettingKey(id) },
-        update: { value: JSON.stringify({ version: 1, sourceImageUrl, generatedPath: result.outputPath, copy, updatedAt }) },
-        create: { key: productThumbnailSettingKey(id), value: JSON.stringify({ version: 1, sourceImageUrl, generatedPath: result.outputPath, copy, updatedAt }) },
+        update: { value: JSON.stringify({ version: 1, sourceImageUrl, generatedPath: result.outputPath, copy, style, updatedAt }) },
+        create: { key: productThumbnailSettingKey(id), value: JSON.stringify({ version: 1, sourceImageUrl, generatedPath: result.outputPath, copy, style, updatedAt }) },
       });
     }
     const bytes = await fs.promises.readFile(result.outputPath);
@@ -173,8 +177,9 @@ export async function POST(
         saved: body.save === true,
         sourceImageUrl,
         copy,
+        style,
         outputPath: result.outputPath,
-        previewDataUrl: `data:image/jpeg;base64,${bytes.toString("base64")}`,
+        previewDataUrl: `data:image/${path.extname(result.outputPath).toLowerCase() === ".png" ? "png" : "jpeg"};base64,${bytes.toString("base64")}`,
         updatedAt,
       },
     });
