@@ -32,8 +32,10 @@ import {
   isCandidateProductImageUrl,
   isPreferredThumbnailImageUrl,
   isRepresentativeProductImageDimension,
+  isRepresentativeTravelImageDimension,
   isReviewImageUrl,
   isSalesPageProductImageUrl,
+  isTravelProductImageUrl,
   isUsableBlogProductImageDimension,
   normalizeCandidateImageUrl,
   prioritizeImageCandidates,
@@ -46,6 +48,11 @@ import {
   buildProductThumbnailGenerationPrompt,
   generateProductThumbnail,
 } from "./lib/product-thumbnail";
+import {
+  buildLocalTravelPostJson,
+  extractTravelProductFacts,
+  formatTravelFactsForPrompt,
+} from "./lib/travel-content";
 import {
   generateProductThumbnailViaImageApi,
   isImageApiThumbnailAvailable,
@@ -832,6 +839,7 @@ async function generateTopTextCutoutThumbnail(
   product: ProductInfo,
   postTitle: string,
   brandLinkId?: string,
+  contentKind: "SHOPPING" | "TRAVEL" = "SHOPPING",
 ): Promise<GeneratedProductThumbnail | null> {
   if (!THUMBNAIL_AUTOGEN_ENABLED) return null;
   const savedSetting = brandLinkId
@@ -858,11 +866,28 @@ async function generateTopTextCutoutThumbnail(
       productName: product.name,
       outputDir: TEMP_PATH,
       copy: savedSetting.copy,
+      contentKind,
       enabled: true,
     }).catch(() => null);
     if (regenerated?.outputPath && fs.existsSync(regenerated.outputPath)) {
       console.log(`   ✅ 저장된 썸네일 카피로 재생성: ${path.basename(regenerated.outputPath)}`);
       return { path: regenerated.outputPath, source: "saved-studio" };
+    }
+  }
+
+  if (contentKind === "TRAVEL") {
+    const travelThumbnail = await generateProductThumbnail({
+      imagePaths: [product.representativeImagePath, ...product.imagePaths],
+      preferredImagePath: product.representativeImagePath,
+      postTitle,
+      productName: product.name,
+      outputDir: TEMP_PATH,
+      contentKind: "TRAVEL",
+      enabled: true,
+    }).catch(() => null);
+    if (travelThumbnail?.outputPath && fs.existsSync(travelThumbnail.outputPath)) {
+      console.log(`   ✅ 실제 여행사진 + 투명 PNG 장식 합성: ${path.basename(travelThumbnail.outputPath)}`);
+      return { path: travelThumbnail.outputPath, source: "local-script" };
     }
   }
 
@@ -954,13 +979,14 @@ async function generateTopTextCutoutThumbnail(
   }
 
   console.log("   ⚠️ 생성형 썸네일 실패. 명시적 fallback 설정에 따라 후합성 썸네일을 생성합니다.");
-  const compositePath = await generateCompositeThumbnailFallback(product, postTitle);
+  const compositePath = await generateCompositeThumbnailFallback(product, postTitle, contentKind);
   return compositePath ? { path: compositePath, source: "composite" } : null;
 }
 
 async function generateCompositeThumbnailFallback(
   product: ProductInfo,
-  postTitle: string
+  postTitle: string,
+  contentKind: "SHOPPING" | "TRAVEL" = "SHOPPING",
 ): Promise<string | null> {
   if (!product.representativeImagePath || !fs.existsSync(product.representativeImagePath)) return null;
   const thumbnailSourcePaths = Array.from(
@@ -977,6 +1003,7 @@ async function generateCompositeThumbnailFallback(
       postTitle,
       productName: product.name,
       outputDir: TEMP_PATH,
+      contentKind,
       enabled: true,
     });
 
@@ -4669,7 +4696,8 @@ async function materializeProductImages(
       if (
         !representativeImagePath &&
         isPreferredThumbnailImageUrl(prioritizedUrls[i]) &&
-        isRepresentativeProductImageDimension(width, height)
+        (isRepresentativeProductImageDimension(width, height) ||
+          (isTravelProductImageUrl(prioritizedUrls[i]) && isRepresentativeTravelImageDimension(width, height)))
       ) {
         representativeImagePath = imgPath;
       }
@@ -4694,7 +4722,10 @@ async function materializeProductImages(
   });
 
   representativeImagePath =
-    downloaded.find((item) => isRepresentativeProductImageDimension(item.width, item.height))?.path ||
+    downloaded.find((item) =>
+      isRepresentativeProductImageDimension(item.width, item.height) ||
+      (isTravelProductImageUrl(item.url) && isRepresentativeTravelImageDimension(item.width, item.height))
+    )?.path ||
     representativeImagePath;
 
   if (!representativeImagePath) {
@@ -5241,6 +5272,10 @@ async function step2_generatePost(
     targetSectionCount: bodySectionCount,
   });
   const productEditorialPromptBlock = formatProductEditorialPlanForPrompt(productEditorialPlan);
+  const travelFacts = isTravel
+    ? extractTravelProductFacts(product.name, product.description, product.features)
+    : null;
+  const travelFactsPromptBlock = travelFacts ? formatTravelFactsForPrompt(travelFacts) : "";
   if (openCrabSeoBrief) {
     console.log(
       `   OpenCrab SEO: ${openCrabSeoBrief.matchType} match, confidence=${openCrabSeoBrief.confidence}, images=${openCrabSeoBrief.mediaTargetImageCount}`
@@ -5297,7 +5332,8 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? buildHumanMobileStyleGuide() : "- 친근하고 �
 - 과장 없이 신뢰감 있게 작성
 ${NAVER_SEO_TITLE_RULES}
 ${BLOG_HUMANIZE_MOBILE_STYLE ? `\n${HUMANIZE_RULES}` : ""}
-${openCrabPromptBlock ? `\n${openCrabPromptBlock}` : ""}`;
+${openCrabPromptBlock ? `\n${openCrabPromptBlock}` : ""}
+${travelFactsPromptBlock ? `\n${travelFactsPromptBlock}` : ""}`;
 
   // 여행 상품은 리뷰가 아니라 "예약 전 정보 정리 글"이다. 일정·포함사항·여행지
   // 정보를 제공된 데이터와 널리 알려진 사실 안에서만 쓰도록 별도 계획을 준다.
@@ -5317,34 +5353,14 @@ ${openCrabPromptBlock ? `\n${openCrabPromptBlock}` : ""}`;
    - 방문지 설명은 그 지역에 대해 널리 알려진 사실(대표 명소, 지리, 계절 특성)만 쓰고,
      영업시간·입장료·최신 행사처럼 변동되는 세부 정보는 단정하지 마세요.
    - 실제 다녀온 것처럼 "다녀왔다", "먹어봤다"라고 단정하지 마세요.`;
-  const productSectionPlan = `4. 섹션 구성 (${bodySectionCount}개):
-   - 구매 전 확인 포인트
-   - 구성 및 패키지 확인
-   - 첫인상 / 디자인
-   - 크기 & 스펙 정보
-   - 주요 기능 ①
-   - 주요 기능 ②
-   - 사용 장면별 체크
-   - 장점으로 보이는 부분
-   - 확인하면 좋을 아쉬운 점
-   - 이런 분께 잘 맞아요
+  const contentFactsPrompt = isTravel
+    ? `- 여행상품명: ${product.name}\n${travelFactsPromptBlock}\n- 표시 가격: ${product.price || "출발일별 확인 필요"}\n- 상세 URL: ${product.finalUrl || brandLink}`
+    : `- 상품명: ${product.name}\n- 설명: ${product.description || '(상품 설명 참고)'}\n- 특징: ${product.features.join(', ') || '(상품 특징 참고)'}\n- 가격: ${product.price || '(가격 정보 참고)'}\n${product.originalPrice ? `- 원가: ${product.originalPrice}` : ''}\n${product.discountRate ? `- 할인율: ${product.discountRate}` : ''}\n${product.couponInfo ? `- 쿠폰/혜택: ${product.couponInfo}` : ''}\n${product.deliveryInfo ? `- 배송: ${product.deliveryInfo}` : ''}\n${product.reviewCount ? `- 리뷰: ${product.reviewCount}개` : ''}\n${product.rating ? `- 평점: ${product.rating}점` : ''}`;
 
-   실제 구매/택배 수령/직접 사용 경험이 제공되지 않았으므로
-   "주문했다", "받아봤다", "써봤다", "재구매 의사"처럼 체험을 단정하지 마세요.`;
-
-  const userPrompt = `다음 ${isTravel ? "여행 상품을 소개하는 블로그 글" : "상품의 상세 블로그 리뷰"}를 작성해주세요.
+  const userPrompt = `다음 ${isTravel ? "여행 상품을 예약 전 검토하는 블로그 글" : "상품의 상세 블로그 리뷰"}를 작성해주세요.
 
 ## 상품 정보
-- 상품명: ${product.name}
-- 설명: ${product.description || '(상품 설명 참고)'}
-- 특징: ${product.features.join(', ') || '(상품 특징 참고)'}
-- 가격: ${product.price || '(가격 정보 참고)'}
-${product.originalPrice ? `- 원가: ${product.originalPrice}` : ''}
-${product.discountRate ? `- 할인율: ${product.discountRate} 할인 중!` : ''}
-${product.couponInfo ? `- 쿠폰/혜택: ${product.couponInfo}` : ''}
-${product.deliveryInfo ? `- 배송: ${product.deliveryInfo}` : ''}
-${product.reviewCount ? `- 리뷰: ${product.reviewCount}개` : ''}
-${product.rating ? `- 평점: ${product.rating}점` : ''}
+${contentFactsPrompt}
 
 ## 이번 글의 톤
 - 인트로 힌트: "${randomIntro}"
@@ -5387,12 +5403,18 @@ ${productEditorialPromptBlock}
    - 본문 중간중간 관련 키워드 자연스럽게 배치
    - 같은 키워드를 연속 반복하지 않기
 
-6. 할인/특가 정보 활용 (있는 경우만):
+6. ${isTravel ? "여행상품 검토 기준" : "할인/특가 정보 활용 (있는 경우만)"}:
+${isTravel ? `   - 상품명이 아니라 일정표에서 확인된 코스만 확정적으로 표현
+   - 여행지의 매력, 하루 이동 흐름, 포함/불포함, 여행 강도, 추천 여행자 순서로 분석
+   - 가격은 출발일·인원·객실 조건에 따라 달라질 수 있음을 안내
+   - 실제 탑승·숙박·식사 경험이나 현지 후기를 만들어내지 않기
+   - 쇼핑 상품의 배송·구성품·스펙·교환/반품 문구를 절대 사용하지 않기`
+  : `
    - 할인율이 있으면 담백하게 "현재 할인가 기준으로는 부담이 줄어드는 편이에요"처럼 표현
    - 쿠폰 정보가 있으면 "구매 전 쿠폰 적용 여부도 확인해보면 좋아요" 정도로 언급
    - 무료배송이면 "배송비까지 보면 체감 가격이 달라질 수 있어요"처럼 자연스럽게 언급
    - 리뷰 수/평점은 확인된 경우에만 참고 포인트로 언급
-   - 구매 유도보다 가격 판단 기준을 알려주는 방식으로 작성
+   - 구매 유도보다 가격 판단 기준을 알려주는 방식으로 작성`}
 
 7. 해시태그 ${NAVER_BLOG_HASHTAG_COUNT}개 (상위 노출 글 실측 기준 3~5개):
 ${isTravel
@@ -5444,7 +5466,9 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
       throw error;
     }
     console.log(`   ⚠️ AI 글 생성 실패, 로컬 상품글 초안으로 대체합니다: ${getErrorMessage(error)}`);
-    text = buildLocalProductPostJson(product, bodySectionCount, openCrabSeoBrief);
+    text = isTravel
+      ? buildLocalTravelPostJson(product, bodySectionCount)
+      : buildLocalProductPostJson(product, bodySectionCount, openCrabSeoBrief);
   }
   const json = parseJsonObjectFromText(text);
   const minimumSections = Math.min(8, Math.max(4, bodySectionCount - 1));
@@ -9013,6 +9037,7 @@ async function main() {
       product,
       post.title,
       link.id,
+      link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
     );
     const generatedThumbnailPath = generatedThumbnail?.path || null;
     const collectedImagePaths = Array.from(

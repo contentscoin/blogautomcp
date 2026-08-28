@@ -39,6 +39,11 @@ export function normalizeCandidateImageUrl(rawUrl: string): string {
     return trimmed.replace(/\?type=.*/i, "");
   }
 
+  // 여행커넥트 원본 서버는 쇼핑 이미지와 달리 ?type=w860 변환을 지원하지 않아 404를 반환한다.
+  if (/pkgtour-phinf\.pstatic\.net/i.test(trimmed)) {
+    return trimmed.replace(/\?type=.*/i, "");
+  }
+
   if (/shop-phinf\.pstatic\.net|shopping-phinf\.pstatic\.net|phinf\.pstatic\.net/i.test(trimmed)) {
     return trimmed.replace(/\?type=.*/i, "?type=w860");
   }
@@ -57,9 +62,14 @@ export function isSalesPageProductImageUrl(rawUrl: string): boolean {
   return (
     url.includes("shop-phinf.pstatic.net") ||
     url.includes("shopping-phinf.pstatic.net") ||
+    url.includes("pkgtour-phinf.pstatic.net") ||
     url.includes("sitem.ssgcdn.com") ||
     url.includes("cdn.011st.com")
   );
+}
+
+export function isTravelProductImageUrl(rawUrl: string): boolean {
+  return rawUrl.toLowerCase().includes("pkgtour-phinf.pstatic.net");
 }
 
 export function isPreferredThumbnailImageUrl(rawUrl: string): boolean {
@@ -93,6 +103,12 @@ export function isRepresentativeProductImageDimension(width: number, height: num
   if (width < 500 || height < 500) return false;
   const ratio = width / height;
   return ratio >= 0.78 && ratio <= 1.28;
+}
+
+export function isRepresentativeTravelImageDimension(width: number, height: number): boolean {
+  if (width < 640 || height < 420) return false;
+  const ratio = width / height;
+  return ratio >= 0.72 && ratio <= 2.15;
 }
 
 export function scoreProductImageDimensions(width: number, height: number): number {

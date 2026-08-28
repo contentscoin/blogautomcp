@@ -12,6 +12,7 @@ interface ThumbnailCopy {
 
 interface StudioData {
   productName: string;
+  connectKind: "SHOPPING" | "TRAVEL";
   imageUrls: string[];
   suggestedCopy: ThumbnailCopy;
   saved: { sourceImageUrl: string; copy: ThumbnailCopy } | null;
@@ -51,15 +52,31 @@ export default function ProductThumbnailStudio({
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedMessage, setSavedMessage] = useState<string | null>(null);
+  const [syncingImages, setSyncingImages] = useState(false);
 
   useEffect(() => {
     let active = true;
-    void fetch(`/api/brandlinks/${encodeURIComponent(brandLinkId)}/thumbnail`, { cache: "no-store" })
-      .then(async (response) => {
+    const load = async () => {
+      const thumbnailUrl = `/api/brandlinks/${encodeURIComponent(brandLinkId)}/thumbnail`;
+      const read = async () => {
+        const response = await fetch(thumbnailUrl, { cache: "no-store" });
         const payload = await response.json();
         if (!response.ok || !payload?.success) throw new Error(payload?.error || "썸네일 정보를 불러오지 못했습니다.");
         return payload.data as StudioData;
-      })
+      };
+      let nextData = await read();
+      if (nextData.imageUrls.length === 0) {
+        setSyncingImages(true);
+        const response = await fetch(`/api/brandlinks/${encodeURIComponent(brandLinkId)}/scrape`, { method: "POST" });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok || !payload?.success) {
+          throw new Error(payload?.error || "여행상품 사진을 자동으로 가져오지 못했습니다.");
+        }
+        nextData = await read();
+      }
+      return nextData;
+    };
+    void load()
       .then((nextData) => {
         if (!active) return;
         setData(nextData);
@@ -71,7 +88,10 @@ export default function ProductThumbnailStudio({
         if (active) setError(loadError instanceof Error ? loadError.message : "썸네일 정보를 불러오지 못했습니다.");
       })
       .finally(() => {
-        if (active) setLoading(false);
+        if (active) {
+          setLoading(false);
+          setSyncingImages(false);
+        }
       });
     return () => { active = false; };
   }, [brandLinkId]);
@@ -108,20 +128,20 @@ export default function ProductThumbnailStudio({
       <div className="max-h-[94vh] w-full max-w-6xl overflow-y-auto rounded-2xl bg-white shadow-2xl">
         <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-200 bg-white px-6 py-4">
           <div>
-            <h2 className="text-xl font-bold text-slate-900">제품 사진 썸네일 만들기</h2>
-            <p className="mt-1 text-sm text-slate-500">실제 제품 사진에 검증 가능한 카피를 합성합니다.</p>
+            <h2 className="text-xl font-bold text-slate-900">{data?.connectKind === "TRAVEL" ? "여행 사진 썸네일 만들기" : "제품 사진 썸네일 만들기"}</h2>
+            <p className="mt-1 text-sm text-slate-500">실제 수집 사진에 카피와 투명 PNG 장식 레이어를 합성합니다.</p>
           </div>
           <button type="button" onClick={onClose} className="rounded-lg px-3 py-2 text-slate-500 hover:bg-slate-100" aria-label="닫기">✕</button>
         </div>
 
         {loading ? (
-          <div className="p-12 text-center text-slate-500">상품 사진과 추천 문구를 불러오는 중...</div>
+          <div className="p-12 text-center text-slate-500">{syncingImages ? "상세 페이지에서 실제 여행 사진을 자동 수집하는 중..." : "상품 사진과 추천 문구를 불러오는 중..."}</div>
         ) : (
           <div className="grid gap-6 p-6 lg:grid-cols-[1fr_1.05fr]">
             <div className="space-y-6">
               <section>
-                <h3 className="font-semibold text-slate-900">1. 실제 제품 사진 선택</h3>
-                <p className="mt-1 text-xs text-slate-500">리뷰·쿠폰 배너가 아닌 제품이 크게 보이는 사진을 고르세요.</p>
+                <h3 className="font-semibold text-slate-900">1. 실제 {data?.connectKind === "TRAVEL" ? "여행지" : "제품"} 사진 선택</h3>
+                <p className="mt-1 text-xs text-slate-500">배너가 아닌 핵심 장면이 선명하게 보이는 사진을 고르세요.</p>
                 {data?.imageUrls.length ? (
                   <div className="mt-3 grid grid-cols-4 gap-2">
                     {data.imageUrls.map((imageUrl, index) => (

@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
-import sharp from "sharp";
+import sharp, { type OverlayOptions } from "sharp";
+import { buildTravelThumbnailCopy } from "./travel-content";
 
 const CANVAS_WIDTH = 1600;
 const CANVAS_HEIGHT = 900;
@@ -31,6 +32,7 @@ export interface GenerateProductThumbnailOptions {
   enabled?: boolean;
   copy?: Partial<ProductThumbnailCopy>;
   preferredImagePath?: string;
+  contentKind?: "SHOPPING" | "TRAVEL";
 }
 
 export interface ProductThumbnailResult {
@@ -212,8 +214,10 @@ function inferCategoryName(categoryName: string, productName: string): string {
 
 export function buildProductThumbnailCopy(
   postTitle: string,
-  productName: string
+  productName: string,
+  contentKind: "SHOPPING" | "TRAVEL" = "SHOPPING",
 ): ProductThumbnailCopy {
+  if (contentKind === "TRAVEL") return buildTravelThumbnailCopy(productName);
   const productNameLabel = sanitizeText(productName) || "추천 상품";
   const theme = pickTheme(productNameLabel, postTitle);
 
@@ -224,6 +228,15 @@ export function buildProductThumbnailCopy(
     badge: DEFAULT_COPY.badge,
     cta: theme?.cta || DEFAULT_COPY.cta,
   };
+}
+
+async function buildTravelAccentPng(): Promise<Buffer> {
+  const svg = Buffer.from(`<svg width="1600" height="900" viewBox="0 0 1600 900" xmlns="http://www.w3.org/2000/svg">
+    <path d="M865 170 C1080 30 1410 130 1490 315" fill="none" stroke="#ffffff" stroke-opacity="0.82" stroke-width="8" stroke-linecap="round" stroke-dasharray="15 18"/>
+    <g transform="translate(1430 270) rotate(26)"><path d="M0 20 L104 0 L68 34 L105 57 L88 67 L50 45 L27 70 L13 67 L25 38 L0 28 Z" fill="#ffffff"/></g>
+    <circle cx="865" cy="170" r="11" fill="#fbbf24" stroke="#fff" stroke-width="5"/>
+  </svg>`);
+  return sharp(svg).png().toBuffer();
 }
 
 function inferScenePrompt(categoryName: string, productName: string): string {
@@ -683,7 +696,7 @@ export async function generateProductThumbnail(
     : await resolveThumbnailImages(options.imagePaths);
   if (!resolvedImages) return null;
 
-  const suggestedCopy = buildProductThumbnailCopy(options.postTitle, options.productName);
+  const suggestedCopy = buildProductThumbnailCopy(options.postTitle, options.productName, options.contentKind);
   const copy: ProductThumbnailCopy = {
     productNameLabel: sanitizeText(options.copy?.productNameLabel || suggestedCopy.productNameLabel),
     headline: sanitizeText(options.copy?.headline || suggestedCopy.headline),
@@ -697,11 +710,12 @@ export async function generateProductThumbnail(
     `thumb_${timestamp}_${sanitizeFileNamePart(copy.productNameLabel)}.jpg`
   );
 
+  const isTravel = options.contentKind === "TRAVEL";
   const fullBackground = await sharp(resolvedImages.backgroundPath)
     .rotate()
     .resize(CANVAS_WIDTH, CANVAS_HEIGHT, { fit: "cover", position: "centre" })
-    .blur(22)
-    .modulate({ brightness: 0.64, saturation: 0.78 })
+    .blur(isTravel ? 8 : 22)
+    .modulate(isTravel ? { brightness: 0.72, saturation: 1.06 } : { brightness: 0.64, saturation: 0.78 })
     .jpeg({ quality: 92 })
     .toBuffer();
 
@@ -715,17 +729,24 @@ export async function generateProductThumbnail(
     .png()
     .toBuffer();
 
-  const heroWithAlpha = await buildHeroLayer(heroImage, heroWidth, heroHeight);
+  const heroWithAlpha = isTravel
+    ? await sharp(heroImage)
+        .composite([{ input: Buffer.from(`<svg width="${heroWidth}" height="${heroHeight}" xmlns="http://www.w3.org/2000/svg"><rect x="8" y="8" width="${heroWidth - 16}" height="${heroHeight - 16}" rx="42" fill="none" stroke="white" stroke-width="16"/></svg>`) }])
+        .png()
+        .toBuffer()
+    : await buildHeroLayer(heroImage, heroWidth, heroHeight);
   const heroLeft = CANVAS_WIDTH - 32 - heroWidth;
   const heroTop = 32;
 
   await fs.promises.mkdir(options.outputDir, { recursive: true });
-  await sharp(fullBackground)
-    .composite([
+  const layers: OverlayOptions[] = [
       { input: Buffer.from(buildHeroStageSvg()), top: 0, left: 0 },
       { input: heroWithAlpha, top: heroTop, left: heroLeft },
-      { input: Buffer.from(buildOverlaySvg(copy)), top: 0, left: 0 },
-    ])
+  ];
+  if (isTravel) layers.push({ input: await buildTravelAccentPng(), top: 0, left: 0 });
+  layers.push({ input: Buffer.from(buildOverlaySvg(copy)), top: 0, left: 0 });
+  await sharp(fullBackground)
+    .composite(layers)
     .jpeg({ quality: 95, mozjpeg: true })
     .toFile(outputPath);
 

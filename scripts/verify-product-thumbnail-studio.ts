@@ -5,6 +5,12 @@ import path from "node:path";
 import sharp from "sharp";
 import { generateProductThumbnail } from "./lib/product-thumbnail";
 import { normalizeProductThumbnailCopy } from "./lib/product-thumbnail-settings";
+import {
+  isPreferredThumbnailImageUrl,
+  isRepresentativeTravelImageDimension,
+  normalizeCandidateImageUrl,
+} from "./lib/product-image-selection";
+import { buildLocalTravelPostJson, buildTravelThumbnailCopy, extractTravelProductFacts } from "./lib/travel-content";
 
 async function main() {
   const sourcePath = path.resolve(
@@ -42,12 +48,41 @@ async function main() {
   assert.ok((await fs.promises.stat(result.outputPath)).size > 100_000, "완성 이미지가 비정상적으로 작습니다.");
   assert.equal(result.backgroundPath, sourcePath);
 
+  const travelUrl = "https://pkgtour-phinf.pstatic.net/example/landscape.JPEG?type=w860";
+  assert.equal(isPreferredThumbnailImageUrl(travelUrl), true, "여행커넥트 사진은 대표 사진 후보여야 합니다.");
+  assert.equal(normalizeCandidateImageUrl(travelUrl).includes("?type="), false, "여행 사진의 404 변환 쿼리를 제거해야 합니다.");
+  assert.equal(isRepresentativeTravelImageDimension(1200, 800), true, "여행 풍경 가로 사진을 허용해야 합니다.");
+  const travelName = "[출발확정][노쇼핑/노옵션/팁포함] 스위스 이탈리아 9일 <융프라우/루체른/피사>";
+  const travelFacts = extractTravelProductFacts(travelName);
+  assert.equal(travelFacts.duration, "9일");
+  assert.ok(travelFacts.conditions.some((value) => /쇼핑/u.test(value)));
+  const travelCopy = buildTravelThumbnailCopy(travelName);
+  assert.match(travelCopy.headline, /일정 체크/u);
+  const travelDraft = JSON.parse(buildLocalTravelPostJson({ name: travelName, description: "", features: [], price: "" }, 6));
+  assert.equal(travelDraft.sections.length, 6);
+  assert.doesNotMatch(travelDraft.sections.join("\n"), /배송|구성품|택배|교환\/반품/u);
+
+  const travelResult = await generateProductThumbnail({
+    imagePaths: [sourcePath],
+    preferredImagePath: sourcePath,
+    postTitle: "스위스 이탈리아 9일 일정과 포함조건",
+    productName: travelName,
+    outputDir,
+    contentKind: "TRAVEL",
+    enabled: true,
+  });
+  assert.ok(travelResult?.outputPath && fs.existsSync(travelResult.outputPath));
+  const travelMetadata = await sharp(travelResult.outputPath).metadata();
+  assert.equal(travelMetadata.width, 1600);
+  assert.equal(travelMetadata.height, 900);
+
   console.log(JSON.stringify({
     ok: true,
     outputPath: result.outputPath,
     width: metadata.width,
     height: metadata.height,
     copy,
+    travelCopy,
   }, null, 2));
 }
 

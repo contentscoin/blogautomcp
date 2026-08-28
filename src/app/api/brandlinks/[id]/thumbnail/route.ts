@@ -8,7 +8,9 @@ import {
   buildProductThumbnailCopy,
   generateProductThumbnail,
 } from "../../../../../../scripts/lib/product-thumbnail";
+import { buildTravelThumbnailCopy } from "../../../../../../scripts/lib/travel-content";
 import { getProductThumbnailStorageDir } from "../../../../../../scripts/lib/app-paths";
+import { normalizeCandidateImageUrl } from "../../../../../../scripts/lib/product-image-selection";
 import {
   normalizeProductThumbnailCopy,
   parseProductThumbnailSettings,
@@ -26,7 +28,12 @@ function parseImageUrls(value: string | null): string[] {
   try {
     const parsed = JSON.parse(value);
     if (!Array.isArray(parsed)) return [];
-    return Array.from(new Set(parsed.filter((item): item is string => typeof item === "string" && item.trim().length > 0))).slice(0, 12);
+    return Array.from(new Set(
+      parsed
+        .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        .map(normalizeCandidateImageUrl)
+        .filter(Boolean),
+    )).slice(0, 12);
   } catch {
     return [];
   }
@@ -48,7 +55,10 @@ async function downloadProductImage(rawUrl: string, destination: string): Promis
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 20_000);
   try {
-    const response = await fetch(rawUrl, { signal: controller.signal, cache: "no-store" });
+    let response = await fetch(rawUrl, { signal: controller.signal, cache: "no-store" });
+    if (response.status === 404 && /\?type=/i.test(rawUrl)) {
+      response = await fetch(rawUrl.replace(/\?type=.*/i, ""), { signal: controller.signal, cache: "no-store" });
+    }
     if (!response.ok) throw new Error(`제품 이미지 다운로드 실패 (${response.status})`);
     const contentLength = Number(response.headers.get("content-length") || "0");
     if (contentLength > MAX_SOURCE_BYTES) throw new Error("제품 이미지가 너무 큽니다.");
@@ -66,10 +76,13 @@ async function getPayload(id: string) {
   const imageUrls = parseImageUrls(link.imageUrls);
   const setting = await prisma.setting.findUnique({ where: { key: productThumbnailSettingKey(id) } });
   const saved = parseProductThumbnailSettings(setting?.value);
-  const suggestedCopy = buildProductThumbnailCopy(
-    `${link.productName || "상품"} 구매 전 확인`,
-    link.productName || "추천 상품",
-  );
+  const isTravel = link.connectKind === "TRAVEL";
+  const suggestedCopy = isTravel
+    ? buildTravelThumbnailCopy(link.productName || "여행 상품")
+    : buildProductThumbnailCopy(
+        `${link.productName || "상품"} 구매 전 확인`,
+        link.productName || "추천 상품",
+      );
   let previewDataUrl: string | null = null;
   if (saved?.generatedPath && fs.existsSync(saved.generatedPath)) {
     const stat = await fs.promises.stat(saved.generatedPath).catch(() => null);
@@ -81,6 +94,7 @@ async function getPayload(id: string) {
   return {
     id: link.id,
     productName: link.productName || "추천 상품",
+    connectKind: isTravel ? ("TRAVEL" as const) : ("SHOPPING" as const),
     imageUrls,
     suggestedCopy,
     saved,
@@ -136,6 +150,7 @@ export async function POST(
         productName: payload.productName,
         outputDir: storageDir,
         copy,
+        contentKind: payload.connectKind,
         enabled: true,
       });
     } finally {
