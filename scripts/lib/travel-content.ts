@@ -221,27 +221,63 @@ export function buildTravelEditorialPlan(
         "대표 사진 한 장보다 여러 장소의 분위기가 고르게 담겼는지 보는 편이 실제 코스를 이해하기 좋아요.",
       ],
     },
+    {
+      title: "여행지 미리 알아보기",
+      purpose: "처음 검색하는 독자가 지역의 분위기와 대표 장면을 출발 전에 이해하게 한다.",
+      imageIntent: "도시 전경, 지역 상징, 현지 거리의 실제 사진",
+      body: [
+        `${destination}은 어떤 분위기의 여행지인지 대표 풍경과 생활권을 먼저 찾아보면 일정이 훨씬 잘 보입니다.`,
+        `이번 상품에서 확인되는 방문 포인트는 ${highlights}이고, 각 장소의 성격이 서로 어떻게 다른지 비교해보세요.`,
+        "유명한 장소 이름만 저장하기보다 오전·오후·저녁 중 언제 어울리는지까지 메모해두면 동선이 편해요.",
+        "최신 운영시간과 휴무일처럼 바뀔 수 있는 정보는 출발 전에 공식 페이지에서 다시 확인해야 합니다.",
+      ],
+    },
+    {
+      title: "교통과 이동 동선 확인",
+      purpose: "관광지 목록을 실제 이동 가능한 하루 흐름으로 바꿔 체력과 시간을 판단하게 한다.",
+      imageIntent: "역, 공항, 골목, 차창처럼 이동 방식이 보이는 실제 사진",
+      body: [
+        "여행지에서는 명소 사이의 거리가 가까워 보여도 환승과 대기 시간이 하루 리듬을 바꿀 수 있어요.",
+        "상품 일정표에서 이동 수단과 출발·도착 시각이 확인되는 구간을 먼저 표시해두세요.",
+        "자유시간이 있는 날에는 가장 보고 싶은 장소를 먼저 정하고, 남은 시간에 식사와 쇼핑을 배치하면 무리가 적습니다.",
+        "정확한 소요 시간과 교통 상황은 출발일과 현지 운영 상태에 따라 달라질 수 있어 최신 정보를 확인해야 해요.",
+      ],
+    },
+    {
+      title: "날씨와 여행 준비",
+      purpose: "계절·복장·짐·현지 결제처럼 출발 전에 검색하는 실용 정보를 빠뜨리지 않는다.",
+      imageIntent: "계절감과 복장이 자연스럽게 드러나는 실제 여행 사진",
+      body: [
+        `${destination} 여행은 출발 시기의 날씨와 걷는 일정에 따라 체감 난도가 달라질 수 있어요.`,
+        "기온만 보지 말고 비 예보, 일교차, 실내외 이동 비중을 함께 확인하면 준비물이 구체적으로 정리됩니다.",
+        "편한 신발과 가벼운 겉옷처럼 여러 일정에 공통으로 쓰는 준비물을 먼저 챙기는 편이 안전해요.",
+        "환전·결제수단·통신·여행자보험처럼 상품에 포함되지 않을 수 있는 항목도 출발 전에 따로 점검하세요.",
+      ],
+    },
   ];
   const desiredCount = Math.max(8, Math.min(12, targetSectionCount));
   const prefix = sections.slice(0, 3);
   const highlightSections = sections.slice(3, 3 + confirmedHighlights.length);
   const suffix = sections.slice(3 + confirmedHighlights.length);
-  const highlightSlots = Math.max(0, desiredCount - prefix.length - suffix.length);
-  const selected = [
-    ...prefix,
-    ...highlightSections.slice(0, highlightSlots),
-    ...suffix,
-  ];
-
-  if (selected.length >= desiredCount) return selected.slice(0, desiredCount - 1).concat(selected.at(-1)!);
-  return selected.slice(0, -1).concat(inserts.slice(0, desiredCount - selected.length), selected.at(-1)!);
+  const orderedInserts = [inserts[1], inserts[2], inserts[3], inserts[0]];
+  const closing = suffix.at(-1)!;
+  if (desiredCount <= 8) {
+    // 짧은 폴백도 이동·포함·추천 판단을 잃지 않게 한다.
+    const core = suffix.slice(0, 3);
+    const info = orderedInserts.slice(0, Math.max(0, desiredCount - prefix.length - core.length - 1));
+    return [...prefix, ...core, ...info, closing].slice(0, desiredCount);
+  }
+  const highlightLimit = Math.min(highlightSections.length, desiredCount >= 11 ? 4 : 3);
+  const infoCount = Math.max(1, desiredCount - prefix.length - highlightLimit - 1 - 1);
+  const selected = [...prefix, ...highlightSections.slice(0, highlightLimit), ...suffix.slice(0, 1), ...orderedInserts.slice(0, infoCount), closing];
+  return selected.slice(0, desiredCount);
 }
 
 export function formatTravelEditorialPlanForPrompt(sections: TravelEditorialSection[]): string {
   return [
     "## 여행 인플루언서형 편집 설계",
-    "- 흐름: 대표 장면 → 핵심 요약 → 일정 한눈에 보기 → 코스별 장면 → 이동/비용 판단 → 예약 링크",
-    "- 각 섹션은 90~180자, 1~2문장 단락으로 끊고 사진 사이를 잇는 역할만 합니다.",
+    "- 흐름: 대표 장면 → 핵심 요약 → 여행지 사전정보 → 전체 일정 한눈에 보기 → 코스/이동/준비 → 비용/예약 판단 → 예약 링크",
+    "- 여행지를 처음 알아보는 독자가 출발 전에 검색할 정보를 우선하고, 각 섹션은 120~220자 안팎으로 씁니다.",
     "- 실제 체험이 없으면 1인칭 방문 후기처럼 쓰지 않습니다.",
     ...sections.map(
       (section, index) =>

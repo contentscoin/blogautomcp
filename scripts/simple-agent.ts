@@ -5302,8 +5302,10 @@ async function step2_generatePost(
   }
   
   const bodySectionCount = BROWSER_GPT_MODE
-    ? CHATGPT_DEFAULT_SUBTITLE_COUNT
-    : Math.max(Math.min(product.imagePaths.length, 10), 8);
+    ? (isTravel ? Math.max(CHATGPT_DEFAULT_SUBTITLE_COUNT, 10) : CHATGPT_DEFAULT_SUBTITLE_COUNT)
+    : isTravel
+      ? Math.max(Math.min(product.imagePaths.length + 2, 12), 10)
+      : Math.max(Math.min(product.imagePaths.length, 10), 8);
   const openCrabSeoBrief = buildOpenCrabSeoBrief({
     productId,
     productName: product.name,
@@ -5403,10 +5405,10 @@ ${travelEditorialPromptBlock ? `\n${travelEditorialPromptBlock}` : ""}`;
 ${travelEditorialPlan.map((section, index) => `   ${index + 1}) ${section.title}: ${section.purpose}`).join("\n")}
 
    편집 구도:
-   - 첫 화면: 대표 여행사진 다음에 검색 키워드와 여행 결론을 3~5줄로 제시
-   - 초반 25%: 기간·목적지·출발조건과 전체 코스를 먼저 요약
-   - 중반: 코스 포인트를 한 장면씩 풀고, 각 섹션 사이에 관련 실제 사진 배치
-   - 후반: 이동 강도·포함사항·추천 여행자·예약 전 체크 순서
+   - 첫 화면: 대표 여행사진 다음에 검색 키워드와 여행지의 핵심 분위기를 3~5줄로 제시
+   - 초반 30%: 기간·목적지·여행지 배경·전체 코스·출발조건을 먼저 요약
+   - 중반: 여행지 정보(대표 장소·교통·날씨·준비물)를 실제 방문 전 검색 가이드처럼 설명
+   - 후반: 코스 포인트·이동 강도·식사/숙박·포함/불포함·추가비용·추천 여행자·예약 전 체크
    - 마지막: 경제적 이해관계 고지 다음에 여행커넥트 외부 링크 카드 삽입
 
    ⚠️ 사실 기반 원칙 (여행):
@@ -5439,7 +5441,7 @@ ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일
    예: ${isTravel ? '"제주 서부 코스 | ○○ 패키지 일정과 포함사항"' : '"아기비데 추천 | 해피달링 시그니처 워터탭 솔직 후기"'}
 
 2. 본문을 정확히 ${bodySectionCount}개 섹션으로 작성
-   - 여행 글 전체 분량은 공백 제외 1,800~2,300자, 쇼핑 글은 1,300~1,800자.
+   - 여행 글 전체 분량은 공백 제외 2,600~3,500자, 쇼핑 글은 1,300~1,800자.
    - 글자보다 이미지가 본체입니다. 문장은 사진 사이를 잇는 역할로 짧게.
 
 3. 각 섹션 구조:
@@ -5447,7 +5449,7 @@ ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일
    - 빈 줄
    - 본문 3-5문장 (각 문장 끝에 줄바꿈, 각 문장 25-45자)
    - 한 문장에 정보 하나만 담고, 어색하면 더 짧게 나누기
-   - 여행 글은 한 섹션 90~180자로 제한하고 장면→판단→확인 순서로 쓰기
+   - 여행 글은 한 섹션 120~220자로 쓰고 정보→여행 장면→독자가 확인할 항목 순서로 쓰기
    - 빈 줄
 
 4. 섹션 구성 (${bodySectionCount}개):
@@ -5468,7 +5470,9 @@ ${productEditorialPromptBlock}
 
 6. ${isTravel ? "여행상품 검토 기준" : "할인/특가 정보 활용 (있는 경우만)"}:
 ${isTravel ? `   - 상품명이 아니라 일정표에서 확인된 코스만 확정적으로 표현
-   - 여행지의 매력, 하루 이동 흐름, 포함/불포함, 여행 강도, 추천 여행자 순서로 분석
+   - 여행지의 배경과 대표 볼거리, 이동 방법, 계절·복장·준비물, 식사·숙박, 포함/불포함, 추가비용, 여행 강도, 추천 여행자 순서로 분석
+   - 여행을 처음 검색하는 독자가 출발 전에 궁금해할 정보(어디에 있는지, 무엇을 보는지, 어떻게 움직이는지, 무엇을 준비하는지)를 본문 앞쪽에 배치
+   - 최신 운영시간·입장료·환율·날씨처럼 변동되는 정보는 확인 필요로 표시하고 단정하지 않기
    - 가격은 출발일·인원·객실 조건에 따라 달라질 수 있음을 안내
    - 실제 탑승·숙박·식사 경험이나 현지 후기를 만들어내지 않기
    - 쇼핑 상품의 배송·구성품·스펙·교환/반품 문구를 절대 사용하지 않기`
