@@ -54,6 +54,10 @@ import {
   formatTravelFactsForPrompt,
 } from "./lib/travel-content";
 import {
+  getConnectEditorInsertionMode,
+  type EditorConnectKind,
+} from "./lib/connect-editor-insertion";
+import {
   generateProductThumbnailViaImageApi,
   isImageApiThumbnailAvailable,
   qcGeneratedThumbnail,
@@ -6232,8 +6236,8 @@ const SHOPPING_CONNECT_TOOL_SELECTORS = [
   'li:has-text("쇼핑커넥트")',
 ];
 
-// 여행커넥트 전용 메뉴 후보. 에디터가 여행 항목을 별도 메뉴로 제공하면 이쪽이 먼저
-// 걸리고, 같은 커넥트 패널을 공유하면 아래 쇼핑커넥트 선택자로 폴백한다.
+// 여행커넥트 전용 메뉴 후보. 쇼핑커넥트는 스마트스토어 상품 전용이므로
+// 여행 발행에서는 쇼핑 선택자로 절대 폴백하지 않는다.
 const TRAVEL_CONNECT_TOOL_SELECTORS = [
   'button[data-name="travelConnect"]',
   'button[data-name="travel-connect"]',
@@ -6247,17 +6251,12 @@ const TRAVEL_CONNECT_TOOL_SELECTORS = [
   'li:has-text("여행커넥트")',
 ];
 
-type EditorConnectKind = "SHOPPING" | "TRAVEL";
-
 function connectToolLabel(kind: EditorConnectKind): string {
   return kind === "TRAVEL" ? TRAVEL_CONNECT_TOOL_LABEL : SHOPPING_CONNECT_TOOL_LABEL;
 }
 
 function connectToolSelectors(kind: EditorConnectKind): string[] {
-  // 여행은 전용 선택자를 먼저 시도하고 쇼핑커넥트 메뉴를 폴백으로 둔다.
-  return kind === "TRAVEL"
-    ? [...TRAVEL_CONNECT_TOOL_SELECTORS, ...SHOPPING_CONNECT_TOOL_SELECTORS]
-    : SHOPPING_CONNECT_TOOL_SELECTORS;
+  return kind === "TRAVEL" ? TRAVEL_CONNECT_TOOL_SELECTORS : SHOPPING_CONNECT_TOOL_SELECTORS;
 }
 
 const EDITOR_INSERT_MENU_SELECTORS = [
@@ -6961,6 +6960,112 @@ async function insertShoppingConnectLink(
   console.log("   쇼핑커넥트 링크 삽입 완료");
 }
 
+const NAVER_EXTERNAL_LINK_ARTIFACT_SELECTORS = [
+  ".se-component.se-oglink",
+  ".se-oglink",
+  '[data-name*="oglink" i]',
+  '[data-module*="oglink" i]',
+  'a[href*="naver.me"]',
+  'a[href*="brandconnect.naver.com"]',
+];
+
+async function countEditorExternalLinkArtifacts(page: Page, targetUrl: string): Promise<number> {
+  return page
+    .evaluate(
+      ({ selectors, url }) => {
+        const editor =
+          document.querySelector(".se-main-container") ||
+          document.querySelector(".se-content") ||
+          document.body;
+        const artifacts = new Set<Element>();
+
+        for (const selector of selectors) {
+          for (const element of Array.from(editor.querySelectorAll(selector))) {
+            const className =
+              typeof (element as HTMLElement).className === "string"
+                ? (element as HTMLElement).className
+                : "";
+            const href = element.getAttribute("href") || "";
+            const html = element.outerHTML || "";
+            const isLinkComponent = /(?:^|\s)se-(?:component-)?oglink(?:\s|$)/i.test(className);
+            const matchesTarget = Boolean(url) && (href.includes(url) || html.includes(url));
+            if (isLinkComponent || matchesTarget) artifacts.add(element);
+          }
+        }
+
+        return artifacts.size;
+      },
+      { selectors: NAVER_EXTERNAL_LINK_ARTIFACT_SELECTORS, url: targetUrl }
+    )
+    .catch(() => 0);
+}
+
+async function waitForEditorExternalLinkInserted(
+  page: Page,
+  targetUrl: string,
+  previousArtifactCount: number,
+  timeout = 15000
+): Promise<boolean> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeout) {
+    const count = await countEditorExternalLinkArtifacts(page, targetUrl);
+    if (count > previousArtifactCount) return true;
+    await page.waitForTimeout(400);
+  }
+  return false;
+}
+
+async function captureTravelLinkArtifacts(page: Page, reason: string): Promise<void> {
+  try {
+    const dirPath = path.join(process.cwd(), "logs", "manual", "travel-link");
+    fs.mkdirSync(dirPath, { recursive: true });
+    const baseName = `${createTimestampLabel()}-${reason}`;
+    await page.screenshot({ path: path.join(dirPath, `${baseName}.png`), fullPage: true }).catch(() => {});
+    const snapshot = await page
+      .evaluate(() => ({
+        url: location.href,
+        bodyText: (document.body?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 6000),
+        html: document.documentElement.outerHTML,
+      }))
+      .catch(() => ({ url: page.url(), bodyText: "", html: "" }));
+    fs.writeFileSync(path.join(dirPath, `${baseName}.html`), snapshot.html, "utf8");
+    fs.writeFileSync(
+      path.join(dirPath, `${baseName}.json`),
+      JSON.stringify({ url: snapshot.url, bodyText: snapshot.bodyText }, null, 2),
+      "utf8"
+    );
+    console.log(`   여행커넥트 링크 진단 저장: logs\\manual\\travel-link\\${baseName}.json`);
+  } catch {
+    console.log("   여행커넥트 링크 진단 저장 실패");
+  }
+}
+
+/**
+ * 여행커넥트 링크는 네이버 쇼핑커넥트 검색 대상이 아니다. 네이버 블로그가
+ * 공식 지원하는 URL 붙여넣기 방식으로 OG 링크 컴포넌트를 생성한다.
+ */
+async function insertTravelConnectLink(page: Page, travelLink: string): Promise<void> {
+  console.log("   여행커넥트 외부 링크 컴포넌트 삽입...");
+  await setNaverTextFormat(page, "text");
+  await page.keyboard.press("Enter").catch(() => {});
+  await page.waitForTimeout(250);
+
+  const previousArtifactCount = await countEditorExternalLinkArtifacts(page, travelLink);
+  await page.keyboard.type(travelLink, { delay: 5 });
+  await page.keyboard.press("Enter");
+
+  if (!(await waitForEditorExternalLinkInserted(page, travelLink, previousArtifactCount))) {
+    await captureTravelLinkArtifacts(page, "external-link-conversion-failed");
+    throw new Error(
+      "여행커넥트 링크를 네이버 외부 링크 컴포넌트로 변환하지 못했습니다. 쇼핑커넥트 상품 검색은 실행하지 않았습니다."
+    );
+  }
+
+  await page.waitForTimeout(500);
+  await page.keyboard.press("Enter").catch(() => {});
+  console.log("   여행커넥트 외부 링크 삽입 완료");
+}
+
 async function insertNaverHorizontalDivider(page: Page): Promise<boolean> {
   const clicked = await clickFirstVisible(page, [
     'button[data-name="horizontal-line"][data-value="default"]',
@@ -7094,15 +7199,20 @@ async function step5and6_uploadAndWrite(
   }
 
   if (options?.shoppingConnectUrl) {
-    // 삽입 실패는 insertShoppingConnectLink가 throw로 알리고 발행이 중단된다(fail-closed).
-    // 여행커넥트도 같은 검증을 거치므로, 잘못된 상품이 첨부된 채 발행되지 않는다.
-    await insertShoppingConnectLink(
-      page,
-      options.shoppingConnectUrl,
-      options.shoppingConnectProductName,
-      options.shoppingConnectProductFinalUrl,
-      options.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING"
-    );
+    const connectKind = options.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING";
+    const insertionMode = getConnectEditorInsertionMode(connectKind);
+    if (insertionMode === "EXTERNAL_LINK") {
+      await insertTravelConnectLink(page, options.shoppingConnectUrl);
+    } else {
+      // 쇼핑커넥트는 상품명/상품번호가 정확히 일치한 경우에만 삽입한다.
+      await insertShoppingConnectLink(
+        page,
+        options.shoppingConnectUrl,
+        options.shoppingConnectProductName,
+        options.shoppingConnectProductFinalUrl,
+        "SHOPPING"
+      );
+    }
   }
   
   // 해시태그 (맨 마지막) - 스페이스 제거하여 태그 깨짐 방지
