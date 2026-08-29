@@ -4,6 +4,28 @@ import os from "node:os";
 import path from "node:path";
 
 async function main() {
+  const projectRoot = process.cwd();
+  const draftRouteSource = fs.readFileSync(
+    path.join(projectRoot, "src", "app", "api", "brandlinks", "[id]", "draft", "route.ts"),
+    "utf8"
+  );
+  const simpleAgentSource = fs.readFileSync(path.join(projectRoot, "scripts", "simple-agent.ts"), "utf8");
+  assert.equal(
+    draftRouteSource.includes('PRODUCT_POST_LOCAL_FALLBACK_ENABLED: "true"'),
+    true,
+    "API 키가 없는 데스크톱 초안은 로컬 생성기로 자동 전환해야 합니다."
+  );
+  assert.equal(
+    draftRouteSource.includes("readPrepareFailure(logPath)"),
+    true,
+    "초안 실패 시 실제 원인을 화면에 전달해야 합니다."
+  );
+  assert.equal(
+    simpleAgentSource.includes("process.exitCode = 1"),
+    true,
+    "초안 생성 실패는 성공 종료 코드로 숨겨지면 안 됩니다."
+  );
+
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), "brand-post-package-"));
   process.env.DESKTOP_USER_DATA = userData;
   const store = await import("../src/lib/brand-post-package");

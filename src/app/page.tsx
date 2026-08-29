@@ -137,6 +137,10 @@ interface BulkActionResponse {
     categoryFilter?: string | null;
     duplicateWindowDays?: number;
     logFile?: string;
+    completed?: boolean;
+    synchronizedCount?: number;
+    importedCount?: number;
+    totalCount?: number;
   };
 }
 
@@ -967,6 +971,7 @@ export default function Dashboard() {
         body: JSON.stringify({
           count,
           intervalDays: 1,
+          waitForCompletion: true,
           ...getBrandConnectSelectionPayload(),
         }),
       });
@@ -982,13 +987,11 @@ export default function Dashboard() {
 
       setDashboardNotice({
         tone: "success",
-        text: `시즌·히트·인기 자동등록 시작: ${data.data?.startDate ?? "-"} ~ ${data.data?.endDate ?? "-"}${
-          data.data?.logFile ? ` / 로그: ${data.data.logFile}` : ""
-        }`,
+        text: data.data?.completed
+          ? `${brandConnectKind === "travel" ? "여행" : "쇼핑"}상품 동기화 완료: ${data.data.synchronizedCount ?? data.data.importedCount ?? 0}건 반영, 현재 ${data.data.totalCount ?? 0}건`
+          : `상품 동기화 시작: ${data.data?.startDate ?? "-"} ~ ${data.data?.endDate ?? "-"}`,
       });
-      setTimeout(() => {
-        void fetchLinks();
-      }, 1500);
+      await fetchLinks();
     } catch (error) {
       console.error("시즌·히트·인기 자동등록 시작 실패:", error);
       setDashboardNotice({

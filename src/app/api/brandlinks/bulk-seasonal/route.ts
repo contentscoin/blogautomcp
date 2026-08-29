@@ -7,6 +7,7 @@ import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 import { buildCaptureRequiredPayload, parseConnectKind, toStoredConnectKind } from "@/lib/brandconnect-kind";
 import { resolveConnectContract } from "@/lib/connect-contract-store";
+import { getLogsDir } from "../../../../../scripts/lib/app-paths";
 
 interface BulkSeasonalBody {
   connectKind?: string;
@@ -291,7 +292,7 @@ export async function POST(request: NextRequest) {
     }
     scriptArgs.push(`--duplicate-window-days=${duplicateWindowDays}`);
 
-    const logDir = path.join(process.cwd(), "logs", "seasonal");
+    const logDir = path.join(getLogsDir(), "seasonal");
     fs.mkdirSync(logDir, { recursive: true });
     const logFileName = `${formatLogStamp(new Date())}-bulk-seasonal.log`;
     const logFilePath = path.join(logDir, logFileName);
@@ -337,12 +338,12 @@ export async function POST(request: NextRequest) {
       }
 
       const storedKind = toStoredConnectKind(connectKind);
-      const [created, totalCount] = await Promise.all([
+      const [synchronized, totalCount] = await Promise.all([
         prisma.brandLink.findMany({
-          where: { connectKind: storedKind, createdAt: { gte: runStartedAt } },
+          where: { connectKind: storedKind, updatedAt: { gte: runStartedAt } },
           orderBy: { createdAt: "desc" },
           take: count,
-          select: { id: true, productName: true, storeName: true, productPrice: true, status: true, url: true },
+          select: { id: true, productName: true, storeName: true, productPrice: true, status: true, url: true, createdAt: true },
         }),
         prisma.brandLink.count({ where: { connectKind: storedKind } }),
       ]);
@@ -356,9 +357,10 @@ export async function POST(request: NextRequest) {
         data: {
           completed: true,
           connectKind,
-          importedCount: created.length,
+          synchronizedCount: synchronized.length,
+          importedCount: synchronized.filter((product) => product.createdAt >= runStartedAt).length,
           totalCount,
-          products: created,
+          products: synchronized,
           logFile: logFileRelativePath,
         },
       });

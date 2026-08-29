@@ -4,7 +4,9 @@ import path from "path";
 import { chromium } from "playwright-extra";
 import type { APIResponse, Page } from "playwright";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import { PrismaClient } from "@prisma/client";
+// 패키징 앱에는 node_modules/.prisma가 포함되지 않는다. 데스크톱 전용으로
+// 생성해 함께 배포하는 클라이언트를 사용해야 설치본에서도 실행된다.
+import { PrismaClient } from "../src/generated/prisma";
 import { buildAppUrl, notifyAndLogCompletion } from "./lib/chatbot-notifier";
 import { getNaverSessionFile } from "./lib/app-paths";
 import {
@@ -1353,10 +1355,18 @@ async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient
   );
 
   const existingBrandLinks = await prisma.brandLink.findMany({
+    where: { connectKind: toStoredConnectKind("travel") },
     select: {
       id: true,
+      url: true,
+      connectKind: true,
+      externalItemId: true,
+      sourceUrl: true,
       productName: true,
+      productPrice: true,
       storeName: true,
+      imageUrls: true,
+      categoryNo: true,
       status: true,
       createdAt: true,
       updatedAt: true,
@@ -1365,21 +1375,27 @@ async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient
     },
   });
   const duplicateReferenceNow = new Date();
-  const existingStrictKeys = new Set<string>();
-  const existingRelaxedKeys = new Set<string>();
+  const existingByExternalId = new Map<string, (typeof existingBrandLinks)[number]>();
+  const existingByStrictKey = new Map<string, (typeof existingBrandLinks)[number]>();
+  const existingByRelaxedKey = new Map<string, (typeof existingBrandLinks)[number]>();
   for (const row of existingBrandLinks) {
+    if (row.externalItemId) existingByExternalId.set(row.externalItemId, row);
     if (!row.productName) continue;
     if (!shouldBlockDuplicateBrandLink(row, duplicateReferenceNow, options.duplicateWindowDays)) continue;
     const { strictKeys, relaxedKeys } = buildProductIdentityKeys(row.productName, row.storeName);
-    for (const key of strictKeys) existingStrictKeys.add(key);
-    for (const key of relaxedKeys) existingRelaxedKeys.add(key);
+    for (const key of strictKeys) {
+      existingByStrictKey.set(key, row);
+    }
+    for (const key of relaxedKeys) {
+      existingByRelaxedKey.set(key, row);
+    }
   }
 
   const getScheduledDate = (successIndex: number) =>
     addDaysToYmd(startDate, Math.floor(successIndex / options.dailyQuota) * options.intervalDays);
 
   interface TravelRegisterResult {
-    action: "created" | "duplicate" | "failed";
+    action: "created" | "updated" | "duplicate" | "failed";
     productName: string;
     url: string | null;
     scheduledDate: string;
@@ -1391,26 +1407,54 @@ async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient
   const createdUrls = new Set<string>();
   let successCount = 0;
 
-  const isDuplicateName = (item: ConnectItem): boolean => {
+  const findExistingItem = (item: ConnectItem): (typeof existingBrandLinks)[number] | null => {
+    if (item.externalItemId) {
+      const exact = existingByExternalId.get(item.externalItemId);
+      if (exact) return exact;
+    }
     const { strictKeys, relaxedKeys } = buildProductIdentityKeys(item.name, item.storeName || null);
-    return (
-      strictKeys.some((key) => existingStrictKeys.has(key)) ||
-      relaxedKeys.some((key) => existingRelaxedKeys.has(key))
-    );
+    for (const key of strictKeys) {
+      const existing = existingByStrictKey.get(key);
+      if (existing) return existing;
+    }
+    for (const key of relaxedKeys) {
+      const existing = existingByRelaxedKey.get(key);
+      if (existing) return existing;
+    }
+    return null;
   };
 
   for (const item of selectedItems) {
     if (successCount >= options.count) break;
     const scheduledDate = getScheduledDate(successCount);
+    const boardName = inferBoardName(`여행 ${item.name}`);
+    const categoryNo = categoryMap.get(boardName) ?? CATEGORY_NAME_FALLBACK[boardName] ?? null;
+    const existingItem = findExistingItem(item);
 
-    if (isDuplicateName(item)) {
+    if (existingItem) {
+      if (!options.dryRun) {
+        await prisma.brandLink.update({
+          where: { id: existingItem.id },
+          data: {
+            externalItemId: item.externalItemId || existingItem.externalItemId,
+            sourceUrl: item.linkUrl || existingItem.sourceUrl || contract.sourceUrl,
+            productName: item.name,
+            storeName: item.storeName || existingItem.storeName,
+            productPrice: item.price > 0 ? formatPrice(item.price) : existingItem.productPrice,
+            imageUrls: item.imageUrl ? JSON.stringify([item.imageUrl]) : existingItem.imageUrls,
+            categoryNo: existingItem.categoryNo || categoryNo,
+          },
+        });
+      }
       results.push({
-        action: "duplicate",
+        action: "updated",
         productName: item.name,
-        url: null,
+        url: existingItem.url,
         scheduledDate,
-        reason: `최근 ${options.duplicateWindowDays}일 내 동일 상품 등록 이력`,
+        reason: options.dryRun ? "기존 상품 최신화 대상 (dry-run)" : "기존 상품 정보 최신화",
+        linkId: existingItem.id,
       });
+      successCount += 1;
       continue;
     }
 
@@ -1453,9 +1497,6 @@ async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient
       continue;
     }
 
-    const boardName = inferBoardName(`여행 ${item.name}`);
-    const categoryNo = categoryMap.get(boardName) ?? CATEGORY_NAME_FALLBACK[boardName] ?? null;
-
     if (options.dryRun) {
       results.push({ action: "created", productName: item.name, url: linkUrl, scheduledDate, reason: "dry-run" });
       successCount += 1;
@@ -1486,20 +1527,21 @@ async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient
   }
 
   const createdCount = results.filter((entry) => entry.action === "created").length;
+  const updatedCount = results.filter((entry) => entry.action === "updated").length;
   const duplicateCount = results.filter((entry) => entry.action === "duplicate").length;
   const failedCount = results.filter((entry) => entry.action === "failed").length;
 
   console.log("\n" + "=".repeat(70));
   console.log("✅ 여행커넥트 등록 작업 완료");
-  console.log(`- 생성: ${createdCount} / 중복: ${duplicateCount} / 실패: ${failedCount}`);
+  console.log(`- 신규: ${createdCount} / 최신화: ${updatedCount} / 중복: ${duplicateCount} / 실패: ${failedCount}`);
   console.log("=".repeat(70));
 
   if (!options.dryRun) {
     await notifyAndLogCompletion({
       taskType: "brandconnect.travel.register",
       title: "여행커넥트 상품 등록 완료",
-      summary: `신규 ${createdCount}건, 중복 건너뜀 ${duplicateCount}건, 실패 ${failedCount}건`,
-      successCount: createdCount,
+      summary: `신규 ${createdCount}건, 최신화 ${updatedCount}건, 중복 건너뜀 ${duplicateCount}건, 실패 ${failedCount}건`,
+      successCount: createdCount + updatedCount,
       failedCount,
       links: results.map((entry) => ({
         label: entry.productName,
@@ -1508,7 +1550,7 @@ async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient
         status: entry.action.toUpperCase(),
         description: entry.reason || "여행커넥트",
       })),
-      extra: { createdCount, duplicateCount, failedCount, collectedItemCount: items.length },
+      extra: { createdCount, updatedCount, duplicateCount, failedCount, collectedItemCount: items.length },
     });
   }
 }

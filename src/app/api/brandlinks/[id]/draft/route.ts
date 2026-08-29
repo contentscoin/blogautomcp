@@ -15,6 +15,16 @@ import {
 
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
 
+function readPrepareFailure(logPath: string): string | null {
+  try {
+    const tail = fs.readFileSync(logPath, "utf8").slice(-12_000);
+    const matches = Array.from(tail.matchAll(/❌\s*(?:오류|실행 실패):\s*(.+)/g));
+    return matches.at(-1)?.[1]?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const unauthorized = requireAdminApiKey(request);
   if (unauthorized) return unauthorized;
@@ -74,7 +84,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           CHATGPT_SKIP_POLISH: "false",
           HUMAN_MOBILE_POLISH_ENABLED: "true",
           BLOG_HUMANIZE_REWRITE_ENABLED: "true",
-          PRODUCT_POST_LOCAL_FALLBACK_ENABLED: "false",
+          // 데스크톱은 GPT 로그인을 요구하지 않는다. API 키가 없는 PC에서도
+          // 상품별 로컬 초안 생성기로 계속 진행해 매니페스트를 완성한다.
+          PRODUCT_POST_LOCAL_FALLBACK_ENABLED: "true",
           PRODUCT_THUMBNAIL_CHATGPT_ENABLED: "false",
           PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_FALLBACK_ENABLED: "false",
         },
@@ -82,9 +94,17 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       child.once("error", reject);
       child.once("exit", (code, signal) => resolve({ code, signal }));
     });
-    if (exit.code !== 0) throw new Error(`초안 생성 프로세스가 종료되었습니다(code=${exit.code}, signal=${exit.signal ?? "none"}).`);
+    if (exit.code !== 0) {
+      const failure = readPrepareFailure(logPath);
+      throw new Error(failure || `초안 생성 프로세스가 종료되었습니다(code=${exit.code}, signal=${exit.signal ?? "none"}).`);
+    }
     const manifest = readBrandPostPackage(id);
-    if (!manifest) throw new Error(`초안 매니페스트가 생성되지 않았습니다: ${getBrandPostPackageManifestPath(id)}`);
+    if (!manifest) {
+      const failure = readPrepareFailure(logPath);
+      throw new Error(
+        failure || `초안 매니페스트가 생성되지 않았습니다: ${getBrandPostPackageManifestPath(id)}`
+      );
+    }
     return NextResponse.json({ success: true, data: packagePreview(manifest), logPath });
   } catch (error) {
     return NextResponse.json({ success: false, error: error instanceof Error ? error.message : "고품질 초안 생성 실패", logPath }, { status: 500 });

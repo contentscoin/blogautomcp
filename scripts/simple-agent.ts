@@ -9653,6 +9653,9 @@ async function main() {
       where: { id: linkId },
       data: { status: "FAILED", errorMessage: message }
     });
+    // 호출 API가 성공(0)으로 오인해 뒤늦게 "manifest 없음"만 표시하지 않도록
+    // 실제 실패를 프로세스 종료 코드로 전달한다.
+    process.exitCode = 1;
   } finally {
     try {
       if (timeoutHandle) {

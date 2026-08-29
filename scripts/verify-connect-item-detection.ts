@@ -225,12 +225,32 @@ check(
 const dashboardSource = fs.readFileSync(path.join(process.cwd(), "src", "app", "page.tsx"), "utf8");
 check("travel row: legacy fixed lock removed", !dashboardSource.includes("🔒 여행 발행 준비중"));
 check(
-  "travel row: ready buttons follow contract availability",
-  dashboardSource.includes('link.status === "READY" && (link.connectKind !== "TRAVEL" || !travelPublishingUnavailable)')
+  "travel row: unavailable contract is shown as a lock",
+  dashboardSource.includes('link.status === "READY" && link.connectKind === "TRAVEL" && travelPublishingUnavailable')
 );
 check(
-  "travel row: retry buttons follow contract availability",
-  dashboardSource.includes('link.status === "FAILED" && (link.connectKind !== "TRAVEL" || !travelPublishingUnavailable)')
+  "travel row: failed travel item uses the same contract lock",
+  dashboardSource.includes('link.status === "FAILED" && link.connectKind === "TRAVEL" && travelPublishingUnavailable')
+);
+
+// 8. 데스크톱 설치본의 동기화는 숨은 Prisma 폴더에 의존하지 않고, 완료를
+// 기다린 뒤 실제 결과를 다시 읽어야 한다. 이 회귀가 생기면 UI는 성공처럼
+// 보이면서 이전 목록만 계속 표시한다.
+const registerSource = fs.readFileSync(
+  path.join(process.cwd(), "scripts", "brandconnect-seasonal-register.ts"),
+  "utf8"
+);
+check(
+  "packaged travel sync: bundled Prisma client is used",
+  registerSource.includes('from "../src/generated/prisma"') && !registerSource.includes('from "@prisma/client"')
+);
+check(
+  "travel sync: existing items are refreshed",
+  registerSource.includes('action: "updated"') && registerSource.includes("기존 상품 정보 최신화")
+);
+check(
+  "dashboard sync: waits for completion before refreshing",
+  dashboardSource.includes("waitForCompletion: true") && dashboardSource.includes("await fetchLinks();")
 );
 
 if (failures > 0) {
