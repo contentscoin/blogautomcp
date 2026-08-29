@@ -39,11 +39,8 @@ interface ProductThumbnailStudioProps {
 }
 
 const COPY_FIELDS: Array<{ key: keyof ThumbnailCopy; label: string; hint: string; maxLength: number }> = [
-  { key: "productNameLabel", label: "제품명 라벨", hint: "제품을 정확히 식별하는 이름", maxLength: 36 },
-  { key: "headline", label: "메인 카피", hint: "한 가지 구매 판단만 표현", maxLength: 24 },
-  { key: "subline", label: "보조 카피", hint: "확인할 특징 2~3개", maxLength: 44 },
-  { key: "badge", label: "상단 배지", hint: "구매 체크처럼 짧게", maxLength: 16 },
-  { key: "cta", label: "하단 문구", hint: "장단점 보기처럼 중립적으로", maxLength: 20 },
+  { key: "productNameLabel", label: "작은 라벨", hint: "상품명 또는 여행지", maxLength: 24 },
+  { key: "headline", label: "메인 카피", hint: "10자 안팎의 한 가지 메시지", maxLength: 14 },
 ];
 
 export default function ProductThumbnailStudio({
@@ -67,7 +64,6 @@ export default function ProductThumbnailStudio({
   const [savedMessage, setSavedMessage] = useState<string | null>(null);
   const [syncingImages, setSyncingImages] = useState(false);
   const [style, setStyle] = useState("shopping-clean");
-  const [showAdvancedCopy, setShowAdvancedCopy] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -189,10 +185,10 @@ export default function ProductThumbnailStudio({
               </section>
 
               <section className="rounded-2xl border border-slate-200 p-4">
-                <div className="flex items-center justify-between"><div className="flex items-center gap-2"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-violet-600 text-xs font-bold text-white">3</span><h3 className="font-semibold text-slate-900">핵심 문구</h3></div><button type="button" onClick={() => setShowAdvancedCopy((value) => !value)} className="text-xs font-semibold text-slate-500 hover:text-slate-900">{showAdvancedCopy ? "간단히" : "상세 설정"}</button></div>
+                <div className="flex items-center gap-2"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-violet-600 text-xs font-bold text-white">3</span><h3 className="font-semibold text-slate-900">핵심 문구</h3></div>
                 <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                  {COPY_FIELDS.filter((field) => showAdvancedCopy || field.key === "headline" || field.key === "subline").map((field) => (
-                    <label key={field.key} className={field.key === "subline" ? "sm:col-span-2" : ""}>
+                  {COPY_FIELDS.map((field) => (
+                    <label key={field.key}>
                       <span className="flex items-center justify-between text-sm font-medium text-slate-700">
                         {field.label}
                         <span className="text-xs text-slate-400">{copy[field.key].length}/{field.maxLength}</span>
@@ -207,7 +203,7 @@ export default function ProductThumbnailStudio({
                     </label>
                   ))}
                 </div>
-                <p className="mt-3 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-800">검증되지 않은 최저가·1위·직접 체험 문구는 자동 차단됩니다.</p>
+                <p className="mt-3 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-800">썸네일은 작은 라벨·메인 카피·실사 피사체 3요소만 사용합니다. 최저가·1위·직접 체험 문구는 자동 차단됩니다.</p>
               </section>
             </div>
 
@@ -215,10 +211,10 @@ export default function ProductThumbnailStudio({
               <div className="flex items-center justify-between">
                 <div>
                   <h3 className="font-semibold text-white">완성 미리보기</h3>
-                  <p className="text-xs text-slate-400">1600×900 · 네이버 첫 이미지용</p>
+                  <p className="text-xs text-slate-400">1080×1080 · 네이버 대표 이미지용</p>
                 </div>
               </div>
-              <div className="mt-4 flex aspect-video items-center justify-center overflow-hidden rounded-xl bg-slate-900">
+              <div className="mx-auto mt-4 flex aspect-square w-full max-w-[560px] items-center justify-center overflow-hidden rounded-xl bg-slate-900">
                 {previewDataUrl ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img src={previewDataUrl} alt="생성된 제품 썸네일" className="h-full w-full object-contain" />
@@ -226,6 +222,25 @@ export default function ProductThumbnailStudio({
                   <p className="px-6 text-center text-sm text-slate-400">왼쪽에서 사진과 스타일을 고른 뒤 미리보기를 만드세요.</p>
                 )}
               </div>
+              {previewDataUrl && (
+                <div className="mt-4 grid grid-cols-[120px_1fr_1fr] gap-3">
+                  <div>
+                    <p className="mb-1 text-[11px] text-slate-400">120px 가독성</p>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={previewDataUrl} alt="120픽셀 가독성 미리보기" className="h-[120px] w-[120px] rounded-lg object-cover" />
+                  </div>
+                  <div>
+                    <p className="mb-1 text-[11px] text-slate-400">4:3 잘림</p>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={previewDataUrl} alt="4대3 크롭 미리보기" className="aspect-[4/3] w-full rounded-lg object-cover" />
+                  </div>
+                  <div>
+                    <p className="mb-1 text-[11px] text-slate-400">16:9 잘림</p>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={previewDataUrl} alt="16대9 크롭 미리보기" className="aspect-video w-full rounded-lg object-cover" />
+                  </div>
+                </div>
+              )}
               {error && <p className="mt-3 rounded-lg bg-red-950/70 px-3 py-2 text-sm text-red-200">{error}</p>}
               {savedMessage && <p className="mt-3 rounded-lg bg-emerald-950/70 px-3 py-2 text-sm text-emerald-200">{savedMessage}</p>}
               <div className="mt-4 grid gap-2 sm:grid-cols-2">

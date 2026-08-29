@@ -32,6 +32,7 @@ interface BrandLink {
 }
 
 interface BrandPostDraftPreview {
+  version?: "brand-post-package/v1" | "brand-post-package/v2";
   brandLinkId: string;
   connectKind: "SHOPPING" | "TRAVEL";
   title: string;
@@ -40,6 +41,38 @@ interface BrandPostDraftPreview {
   bodyImagePaths: string[];
   imagePolicy: "LOCKED_PRODUCT_OR_ORIGINAL" | "TRAVEL_EDITORIAL";
   approvedAt: string | null;
+  heroPreviewDataUrl?: string | null;
+  thumbnailSpec?: {
+    canvas: { width: number; height: number; aspect: string };
+    style: string;
+    sourcePolicy: string;
+  };
+  composition?: {
+    contractVersion: string;
+    qualityPreset: "STANDARD" | "PREMIUM";
+    experienceMode: "AI_ASSISTED_INFORMATION" | "VERIFIED_EXPERIENCE";
+    sections: Array<{
+      id: string;
+      title: string;
+      imagePaths: string[];
+      imageIntent: string;
+      characterCount: number;
+    }>;
+    renderNodes: Array<{ kind: string; placement?: string; role?: string; sectionId?: string | null }>;
+    qualityReport: {
+      preset: "STANDARD" | "PREMIUM";
+      canAutoPublish: boolean;
+      score: number;
+      actual: { characters: number; sections: number; images: number };
+      target: {
+        characters: { min: number; max: number };
+        sections: { min: number; max: number };
+        images: { min: number; max: number };
+      };
+      blockers: string[];
+      warnings: string[];
+    };
+  };
 }
 
 export interface TopicPostTask {
@@ -283,6 +316,7 @@ export default function Dashboard() {
   const [thumbnailStudioLink, setThumbnailStudioLink] = useState<BrandLink | null>(null);
   const [draftGeneratingId, setDraftGeneratingId] = useState<string | null>(null);
   const [draftPreview, setDraftPreview] = useState<BrandPostDraftPreview | null>(null);
+  const [draftPreviewTab, setDraftPreviewTab] = useState<"post" | "images" | "thumbnail" | "quality">("post");
   const [draftApproving, setDraftApproving] = useState(false);
   const [stoppingPosting, setStoppingPosting] = useState(false);
   const [bulkSeasonalRunning, setBulkSeasonalRunning] = useState(false);
@@ -742,10 +776,11 @@ export default function Dashboard() {
     setDraftGeneratingId(link.id);
     setDashboardNotice({ tone: "info", text: "고품질 글과 이미지 패키지를 만들고 있습니다. 잠시만 기다려 주세요." });
     try {
-      const response = await fetch(`/api/brandlinks/${link.id}/draft`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const response = await fetch(`/api/brandlinks/${link.id}/draft`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ qualityPreset: "premium", experienceMode: "ai_assisted_information" }) });
       const payload = await response.json();
       if (!response.ok || !payload.success) throw new Error(payload.error || "초안 생성 실패");
       setDraftPreview(payload.data as BrandPostDraftPreview);
+      setDraftPreviewTab("post");
       setDashboardNotice({ tone: "success", text: "고품질 초안이 준비됐습니다. 내용을 확인한 뒤 승인해 주세요." });
     } catch (error) {
       setDashboardNotice({ tone: "error", text: error instanceof Error ? error.message : "초안 생성 중 오류가 발생했습니다." });
@@ -759,6 +794,7 @@ export default function Dashboard() {
       const payload = await response.json();
       if (response.ok && payload.success && payload.data) {
         setDraftPreview(payload.data as BrandPostDraftPreview);
+        setDraftPreviewTab("post");
         return;
       }
     } catch {
@@ -2541,23 +2577,86 @@ export default function Dashboard() {
 
       {draftPreview && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4" role="dialog" aria-modal="true" aria-label="고품질 초안 미리보기">
-          <div className="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+          <div className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
             <div className="flex items-start justify-between border-b border-slate-200 px-6 py-4">
               <div>
                 <p className="text-xs font-semibold text-violet-600">{draftPreview.connectKind === "SHOPPING" ? "쇼핑커넥트" : "여행커넥트"} 고품질 패키지</p>
                 <h2 className="mt-1 text-xl font-bold text-slate-900">{draftPreview.title}</h2>
-                <p className="mt-1 text-xs text-slate-500">{draftPreview.imagePolicy === "LOCKED_PRODUCT_OR_ORIGINAL" ? "상품 원본 잠금 적용 · 변형 금지" : "여행 전용 에디토리얼 이미지"}</p>
+                <p className="mt-1 text-xs text-slate-500">{draftPreview.imagePolicy === "LOCKED_PRODUCT_OR_ORIGINAL" ? "상품 원본 잠금 적용 · 변형 금지" : "여행 전용 에디토리얼 이미지"} · {draftPreview.composition?.contractVersion || "호환 초안"}</p>
               </div>
               <button onClick={() => setDraftPreview(null)} className="rounded-lg px-3 py-1 text-slate-500 hover:bg-slate-100">닫기</button>
             </div>
-            <pre className="flex-1 overflow-auto whitespace-pre-wrap px-6 py-5 text-sm leading-7 text-slate-700">{draftPreview.markdown}</pre>
+            <div className="flex gap-1 border-b border-slate-200 bg-slate-50 px-6 pt-3">
+              {([
+                ["post", "글"],
+                ["images", `이미지 배치 ${draftPreview.composition?.qualityReport.actual.images || draftPreview.bodyImagePaths.length + 1}`],
+                ["thumbnail", "썸네일"],
+                ["quality", `품질검사 ${draftPreview.composition?.qualityReport.score ?? "-"}점`],
+              ] as const).map(([tab, label]) => (
+                <button key={tab} type="button" onClick={() => setDraftPreviewTab(tab)} className={`rounded-t-lg px-4 py-2 text-sm font-semibold ${draftPreviewTab === tab ? "bg-white text-violet-700 shadow-sm ring-1 ring-slate-200" : "text-slate-500 hover:text-slate-900"}`}>{label}</button>
+              ))}
+            </div>
+            <div className="flex-1 overflow-auto px-6 py-5">
+              {draftPreviewTab === "post" && (
+                <pre className="whitespace-pre-wrap text-sm leading-7 text-slate-700">{draftPreview.markdown}</pre>
+              )}
+              {draftPreviewTab === "images" && (
+                <div className="space-y-3">
+                  {draftPreview.composition?.sections.length ? draftPreview.composition.sections.map((section, index) => (
+                    <div key={section.id} className="rounded-xl border border-slate-200 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div><p className="text-xs font-bold text-violet-600">{index + 1}. {section.id}</p><h3 className="mt-1 font-semibold text-slate-900">{section.title}</h3></div>
+                        <span className={`rounded-full px-2.5 py-1 text-xs font-bold ${section.imagePaths.length ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>이미지 {section.imagePaths.length}장</span>
+                      </div>
+                      <p className="mt-2 text-sm text-slate-600">{section.imageIntent}</p>
+                      <p className="mt-1 text-xs text-slate-400">본문 {section.characterCount}자</p>
+                    </div>
+                  )) : <p className="rounded-xl bg-slate-50 p-5 text-sm text-slate-500">기존 v1 초안입니다. 다시 만들면 섹션별 이미지 배치를 확인할 수 있습니다.</p>}
+                </div>
+              )}
+              {draftPreviewTab === "thumbnail" && (
+                <div className="grid gap-6 md:grid-cols-[minmax(0,520px)_1fr]">
+                  <div className="aspect-square overflow-hidden rounded-2xl bg-slate-950">
+                    {draftPreview.heroPreviewDataUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={draftPreview.heroPreviewDataUrl} alt="초안 대표 썸네일" className="h-full w-full object-contain" />
+                    ) : <div className="flex h-full items-center justify-center p-8 text-center text-sm text-slate-400">대표 이미지 미리보기를 불러올 수 없습니다.</div>}
+                  </div>
+                  <div className="space-y-3">
+                    <div className="rounded-xl border border-slate-200 p-4"><p className="text-xs text-slate-500">캔버스</p><p className="mt-1 font-bold text-slate-900">{draftPreview.thumbnailSpec ? `${draftPreview.thumbnailSpec.canvas.width}×${draftPreview.thumbnailSpec.canvas.height} · ${draftPreview.thumbnailSpec.canvas.aspect}` : "기존 비율"}</p></div>
+                    <div className="rounded-xl border border-slate-200 p-4"><p className="text-xs text-slate-500">스타일</p><p className="mt-1 font-bold text-slate-900">{draftPreview.thumbnailSpec?.style || "호환 스타일"}</p></div>
+                    <div className="rounded-xl border border-slate-200 p-4"><p className="text-xs text-slate-500">소스 정책</p><p className="mt-1 text-sm font-semibold text-slate-900">{draftPreview.thumbnailSpec?.sourcePolicy || draftPreview.imagePolicy}</p></div>
+                    <p className="rounded-xl bg-blue-50 p-4 text-sm text-blue-800">작은 라벨·메인 카피·실사 피사체 3요소만 사용합니다. 쇼핑 상품은 원본 RGB와 비율을 잠그고 배경만 연출합니다.</p>
+                  </div>
+                </div>
+              )}
+              {draftPreviewTab === "quality" && (
+                draftPreview.composition ? (
+                  <div className="space-y-4">
+                    <div className={`rounded-2xl p-5 ${draftPreview.composition.qualityReport.canAutoPublish ? "bg-emerald-50" : "bg-amber-50"}`}>
+                      <div className="flex items-end justify-between gap-4"><div><p className="text-sm font-semibold text-slate-600">{draftPreview.composition.qualityReport.preset} 품질 게이트</p><p className="mt-1 text-3xl font-black text-slate-950">{draftPreview.composition.qualityReport.score}점</p></div><span className={`rounded-full px-3 py-1 text-sm font-bold ${draftPreview.composition.qualityReport.canAutoPublish ? "bg-emerald-600 text-white" : "bg-amber-500 text-white"}`}>{draftPreview.composition.qualityReport.canAutoPublish ? "자동발행 가능" : "보완 필요"}</span></div>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      {([
+                        ["본문", draftPreview.composition.qualityReport.actual.characters, `${draftPreview.composition.qualityReport.target.characters.min}~${draftPreview.composition.qualityReport.target.characters.max}자`],
+                        ["섹션", draftPreview.composition.qualityReport.actual.sections, `${draftPreview.composition.qualityReport.target.sections.min}~${draftPreview.composition.qualityReport.target.sections.max}개`],
+                        ["이미지", draftPreview.composition.qualityReport.actual.images, `${draftPreview.composition.qualityReport.target.images.min}~${draftPreview.composition.qualityReport.target.images.max}장`],
+                      ] as const).map(([label, actual, target]) => <div key={label} className="rounded-xl border border-slate-200 p-4"><p className="text-xs text-slate-500">{label}</p><p className="mt-1 text-2xl font-black text-slate-900">{actual}</p><p className="text-xs text-slate-400">목표 {target}</p></div>)}
+                    </div>
+                    {draftPreview.composition.qualityReport.blockers.map((message) => <p key={message} className="rounded-xl bg-red-50 px-4 py-3 text-sm font-medium text-red-700">차단 · {message}</p>)}
+                    {draftPreview.composition.qualityReport.warnings.map((message) => <p key={message} className="rounded-xl bg-amber-50 px-4 py-3 text-sm font-medium text-amber-700">확인 · {message}</p>)}
+                    <p className="rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-600">작성 모드: {draftPreview.composition.experienceMode === "VERIFIED_EXPERIENCE" ? "검증된 실제 체험" : "AI 보조 정보형 · 실제 체험 후기 아님"}</p>
+                  </div>
+                ) : <p className="rounded-xl bg-slate-50 p-5 text-sm text-slate-500">기존 v1 초안입니다. 다시 만들면 품질 점수와 차단 사유를 확인할 수 있습니다.</p>
+              )}
+            </div>
             <div className="flex items-center justify-between gap-3 border-t border-slate-200 px-6 py-4">
               <span className={`text-sm font-semibold ${draftPreview.approvedAt ? "text-emerald-600" : "text-amber-600"}`}>
                 {draftPreview.approvedAt ? "승인 완료 · 발행 결과 고정" : "승인 전 · 아직 발행되지 않음"}
               </span>
               <div className="flex flex-wrap justify-end gap-2">
                 <button onClick={() => { const link = links.find((item) => item.id === draftPreview.brandLinkId); if (link) void handlePrepareBrandDraft(link); }} disabled={Boolean(draftGeneratingId)} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">다시 만들기</button>
-                {!draftPreview.approvedAt && <button onClick={() => void handleApproveBrandDraft()} disabled={draftApproving} className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:opacity-50">{draftApproving ? "승인 중..." : "이 초안 승인"}</button>}
+                {!draftPreview.approvedAt && <button onClick={() => void handleApproveBrandDraft()} disabled={draftApproving || (draftPreview.composition?.qualityReport.preset === "PREMIUM" && !draftPreview.composition.qualityReport.canAutoPublish)} title={!draftPreview.composition?.qualityReport.canAutoPublish ? "품질검사 탭의 차단 항목을 먼저 보완하세요." : undefined} className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-40">{draftApproving ? "승인 중..." : "이 초안 승인"}</button>}
                 {draftPreview.approvedAt && <button onClick={() => { const link = links.find((item) => item.id === draftPreview.brandLinkId); if (link) { setDraftPreview(null); void handleSchedulePublish(link); } }} className="rounded-lg border border-indigo-300 px-4 py-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-50">예약 발행</button>}
                 {draftPreview.approvedAt && <button onClick={() => { const id = draftPreview.brandLinkId; setDraftPreview(null); void handlePublish(id); }} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700">3. 승인본 바로 발행</button>}
               </div>

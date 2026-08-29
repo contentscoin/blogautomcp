@@ -51,11 +51,13 @@ import {
 } from "./lib/product-thumbnail";
 import {
   buildLocalTravelPostJson,
-  buildTravelEditorialPlan,
+  buildTravelContractEditorialPlan,
+  buildTravelThumbnailCopy,
   extractTravelProductFacts,
   formatTravelEditorialPlanForPrompt,
   formatTravelFactsForPrompt,
 } from "./lib/travel-content";
+import { createTravelEditorialThumbnail, type TravelThumbnailStyle } from "./lib/travel-thumbnail";
 import {
   getConnectEditorInsertionMode,
   type EditorConnectKind,
@@ -91,6 +93,16 @@ import {
 } from "./lib/product-thumbnail-settings";
 import { buildHumanizeRewritePrompt, HUMANIZE_RULES, scanAiTells } from "./lib/humanize-korean";
 import { createLockedProductThumbnail, createOriginalProductPhotoThumbnail, type ShoppingThumbnailStyle } from "./lib/product-image-lock";
+import { deduplicateImagePaths } from "./lib/image-dedup";
+import { createThreeImageCollage } from "./lib/image-collage";
+import {
+  formatPostContractForPrompt,
+  getPostCompositionContract,
+  resolvePostDocument,
+  type PostExperienceMode,
+  type PostQualityPreset,
+  type ResolvedPostDocumentV1,
+} from "../src/lib/post-composition-contract";
 
 // Stealth 플러그인 적용 (봇 감지 우회)
 chromium.use(StealthPlugin());
@@ -218,10 +230,6 @@ const BLOG_HUMANIZE_REWRITE_THRESHOLD = Math.max(
   1,
   Number.parseInt(process.env.BLOG_HUMANIZE_REWRITE_THRESHOLD || "10", 10) || 10
 );
-const CHATGPT_DEFAULT_SUBTITLE_COUNT = Math.max(
-  4,
-  Math.min(8, Number(process.env.CHATGPT_DEFAULT_SUBTITLE_COUNT || "5"))
-);
 const CHATGPT_USER_DATA_DIR =
   process.env.CHATGPT_USER_DATA_DIR ||
   path.join(getSessionStorageDir(), "chatgpt-profile");
@@ -280,12 +288,28 @@ const BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE =
   (process.env.BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE || "true").toLowerCase() !== "false";
 const PRODUCT_POST_LOCAL_FALLBACK_ENABLED =
   (process.env.PRODUCT_POST_LOCAL_FALLBACK_ENABLED || "true").toLowerCase() !== "false";
-const BLOG_BODY_IMAGE_MAX = parseBoundedInteger(
-  process.env.BLOG_BODY_IMAGE_MAX,
-  4,
+const SHOPPING_BODY_IMAGE_MAX = parseBoundedInteger(
+  process.env.SHOPPING_BODY_IMAGE_MAX || process.env.BLOG_BODY_IMAGE_MAX,
+  14,
   1,
-  12
+  30
 );
+const TRAVEL_BODY_IMAGE_MAX = parseBoundedInteger(
+  process.env.TRAVEL_BODY_IMAGE_MAX || process.env.BLOG_BODY_IMAGE_MAX,
+  26,
+  1,
+  30
+);
+const BRANDLINK_QUALITY_PRESET: PostQualityPreset =
+  (process.env.BRANDLINK_QUALITY_PRESET || "PREMIUM").toUpperCase() === "STANDARD"
+    ? "STANDARD"
+    : "PREMIUM";
+const BRANDLINK_EXPERIENCE_MODE: PostExperienceMode =
+  (process.env.BRANDLINK_EXPERIENCE_MODE || "AI_ASSISTED_INFORMATION").toUpperCase() ===
+  "VERIFIED_EXPERIENCE"
+    ? "VERIFIED_EXPERIENCE"
+    : "AI_ASSISTED_INFORMATION";
+const BRANDLINK_EXPERIENCE_NOTES = (process.env.BRANDLINK_EXPERIENCE_NOTES || "").trim().slice(0, 4000);
 const AGENT_MAX_RUNTIME_MS = Math.max(
   5 * 60 * 1000,
   Number(process.env.AGENT_MAX_RUNTIME_MS || "1500000")
@@ -333,6 +357,7 @@ interface GeneratedPostPreview {
   rawResponse?: string;
   openCrabSeoBrief?: OpenCrabSeoBrief | null;
   productEditorialPlan?: ProductEditorialPlan | null;
+  composition?: ResolvedPostDocumentV1 | null;
 }
 
 interface ChatGPTGuidanceContext {
@@ -700,7 +725,10 @@ async function buildBlogUploadImagePaths(input: {
   generatedThumbnailPath: string | null;
   representativeImagePath: string | null;
   editorialImagePath?: string | null;
+  connectKind: "SHOPPING" | "TRAVEL";
 }): Promise<string[]> {
+  const bodyImageMax =
+    input.connectKind === "TRAVEL" ? TRAVEL_BODY_IMAGE_MAX : SHOPPING_BODY_IMAGE_MAX;
   const output: string[] = [];
   const seen = new Set<string>();
   const addPath = (imagePath: string | null | undefined) => {
@@ -739,14 +767,18 @@ async function buildBlogUploadImagePaths(input: {
     preferredBody.push(input.representativeImagePath);
   }
   for (const imagePath of bodyCandidates) {
-    if (preferredBody.length >= BLOG_BODY_IMAGE_MAX) break;
+    if (preferredBody.length >= bodyImageMax) break;
     if (preferredBody.some((candidate) => path.resolve(candidate) === path.resolve(imagePath))) {
       continue;
     }
     preferredBody.push(imagePath);
   }
 
-  for (const imagePath of preferredBody.slice(0, BLOG_BODY_IMAGE_MAX)) {
+  const deduplicated = await deduplicateImagePaths(preferredBody, 5);
+  if (deduplicated.removed.length > 0) {
+    console.log(`   🧹 동일·유사 이미지 ${deduplicated.removed.length}장 제외`);
+  }
+  for (const imagePath of deduplicated.paths.slice(0, bodyImageMax)) {
     addPath(imagePath);
   }
 
@@ -864,8 +896,12 @@ async function generateTopTextCutoutThumbnail(
       )
     : null;
   if (savedSetting?.generatedPath && fs.existsSync(savedSetting.generatedPath)) {
-    console.log(`   ✅ 저장된 썸네일 폼 결과 사용: ${path.basename(savedSetting.generatedPath)}`);
-    return { path: savedSetting.generatedPath, source: "saved-studio" };
+    const savedMetadata = await sharp(savedSetting.generatedPath).metadata().catch(() => null);
+    if (savedMetadata?.width === 1080 && savedMetadata?.height === 1080) {
+      console.log(`   ✅ 저장된 정사각 썸네일 사용: ${path.basename(savedSetting.generatedPath)}`);
+      return { path: savedSetting.generatedPath, source: "saved-studio" };
+    }
+    console.log("   ♻️ 이전 16:9 썸네일은 사용하지 않고 1080×1080 규격으로 다시 만듭니다.");
   }
   if (!product.representativeImagePath || !fs.existsSync(product.representativeImagePath)) {
     console.log("   ⚠️ 판매페이지 대표 이미지가 없어 썸네일 생성을 건너뜁니다.");
@@ -913,7 +949,7 @@ async function generateTopTextCutoutThumbnail(
       return null;
     }
   }
-  if (savedSetting) {
+  if (savedSetting && contentKind !== "TRAVEL") {
     const regenerated = await generateProductThumbnail({
       imagePaths: [product.representativeImagePath, ...product.imagePaths],
       preferredImagePath: product.representativeImagePath,
@@ -931,14 +967,15 @@ async function generateTopTextCutoutThumbnail(
   }
 
   if (contentKind === "TRAVEL") {
-    const travelThumbnail = await generateProductThumbnail({
-      imagePaths: [product.representativeImagePath, ...product.imagePaths],
-      preferredImagePath: product.representativeImagePath,
-      postTitle,
-      productName: product.name,
+    const copy = buildTravelThumbnailCopy(product.name);
+    const travelThumbnail = await createTravelEditorialThumbnail({
+      sourcePath: product.representativeImagePath,
       outputDir: TEMP_PATH,
-      contentKind: "TRAVEL",
-      enabled: true,
+      destination: savedSetting?.copy.productNameLabel || copy.productNameLabel,
+      headline: savedSetting?.copy.headline || copy.headline,
+      subline: savedSetting?.copy.subline || copy.subline,
+      badge: savedSetting?.copy.badge || copy.badge,
+      style: (savedSetting?.style || "travel-editorial") as TravelThumbnailStyle,
     }).catch(() => null);
     if (travelThumbnail?.outputPath && fs.existsSync(travelThumbnail.outputPath)) {
       console.log(`   ✅ 실제 여행사진 + 투명 PNG 장식 합성: ${path.basename(travelThumbnail.outputPath)}`);
@@ -4214,6 +4251,24 @@ function buildLocalProductPostJson(
       ],
     },
     {
+      title: "사용 장면과 체감 포인트",
+      lines: [
+        `${product.name}은 필요한 기능과 사용 장소가 분명할수록 선택이 쉬워지는 상품이에요.`,
+        "직접 사용한 경험을 만들지 않고, 상세 이미지에서 확인되는 사용 장면을 기준으로 정리했어요.",
+        "매일 둘 공간과 전원·보관 방식이 생활 동선에 맞는지 먼저 생각해보세요.",
+        "연출 이미지가 실제 제품의 크기나 구성을 과장하지 않는지도 원본 상품 사진과 비교하면 좋아요.",
+      ],
+    },
+    {
+      title: "크기와 사용감 판단",
+      lines: [
+        "크기와 무게 수치가 있다면 평소 두거나 들고 다닐 장소에 대입해보는 게 좋아요.",
+        "정확한 수치가 확인되지 않는 항목은 사진만 보고 임의로 추정하지 않았어요.",
+        "제품과 주변 사물의 비율, 손에 잡히는 모습, 설치 공간을 함께 보면 크기감이 더 잘 보여요.",
+        "부속품까지 보관할 자리가 필요한지도 구매 전에 확인해두면 사용이 편해져요.",
+      ],
+    },
+    {
       title: "장점으로 보이는 부분",
       lines: [
         `${product.name}은 상품 정보 기준으로 비교 포인트가 비교적 분명한 편이에요.`,
@@ -4238,6 +4293,15 @@ function buildLocalProductPostJson(
         "구매 전 기준을 정리하고 싶은 분께 참고용으로 보기 좋아요.",
         "사용 일정이 정해져 있는 경우에는 배송 가능일을 먼저 보는 편이 좋아요.",
         "이미 필요한 기능이 정해진 분이라면 옵션 차이만 좁혀서 확인해도 충분해요.",
+      ],
+    },
+    {
+      title: "마지막 선택 기준",
+      lines: [
+        `${product.name}은 필요한 기능, 옵션 구성, 실제 결제 조건을 함께 놓고 판단하는 게 좋아요.`,
+        "비슷한 상품과 비교할 때는 기능 개수보다 자주 쓸 기능이 포함됐는지 먼저 보세요.",
+        "가격과 혜택은 시점에 따라 달라질 수 있어 최종 결제 화면에서 다시 확인해야 해요.",
+        "아래 쇼핑커넥트 카드에서 최신 옵션과 판매 조건을 확인한 뒤 결정해도 늦지 않아요.",
       ],
     },
   ];
@@ -4517,6 +4581,7 @@ function saveGeneratedPostPreview(
     openCrabSeoBrief: post.openCrabSeoBrief ?? null,
     productEditorialPlan: post.productEditorialPlan ?? null,
     contentReadiness: readiness ?? null,
+    composition: post.composition ?? null,
     sections: post.sections,
     hashtags: post.hashtags,
     rawResponse: post.rawResponse ?? "",
@@ -4696,9 +4761,11 @@ async function createDetailImageCrop(
 
 async function materializeProductImages(
   imageUrls: string[],
-  filePrefix: string
+  filePrefix: string,
+  targetImageCount = SHOPPING_BODY_IMAGE_MAX,
 ): Promise<{ representativeImagePath: string | null; imagePaths: string[] }> {
-  const prioritizedUrls = prioritizeImageUrls(Array.from(new Set(imageUrls))).slice(0, 15);
+  const candidateLimit = Math.max(targetImageCount + 6, 18);
+  const prioritizedUrls = prioritizeImageUrls(Array.from(new Set(imageUrls))).slice(0, candidateLimit);
   const downloaded: {
     path: string;
     url: string;
@@ -4708,7 +4775,7 @@ async function materializeProductImages(
     height: number;
     detailCrop?: boolean;
   }[] = [];
-  const downloadCount = Math.min(10, prioritizedUrls.length);
+  const downloadCount = Math.min(targetImageCount, prioritizedUrls.length);
   let representativeImagePath: string | null = null;
 
   for (let i = 0; i < downloadCount; i++) {
@@ -4801,7 +4868,10 @@ async function materializeProductImages(
   };
 }
 
-async function buildProductInfoFromStoredBrandLink(link: StoredBrandLinkSeed): Promise<ProductInfo | null> {
+async function buildProductInfoFromStoredBrandLink(
+  link: StoredBrandLinkSeed,
+  connectKind: "SHOPPING" | "TRAVEL",
+): Promise<ProductInfo | null> {
   const name = sanitizeText(link.productName || "");
   const price = sanitizeText(link.productPrice || "");
   const imageUrls = parseStoredBrandLinkImageUrls(link.imageUrls);
@@ -4812,7 +4882,11 @@ async function buildProductInfoFromStoredBrandLink(link: StoredBrandLinkSeed): P
 
   const materializedImages =
     imageUrls.length > 0
-      ? await materializeProductImages(imageUrls, "stored_product")
+      ? await materializeProductImages(
+          imageUrls,
+          "stored_product",
+          connectKind === "TRAVEL" ? TRAVEL_BODY_IMAGE_MAX : SHOPPING_BODY_IMAGE_MAX,
+        )
       : { representativeImagePath: null, imagePaths: [] };
 
   return {
@@ -4864,7 +4938,11 @@ function mergeProductInfo(base: ProductInfo | null, live: ProductInfo): ProductI
   };
 }
 
-async function step1_getProductInfo(page: Page, url: string): Promise<ProductInfo> {
+async function step1_getProductInfo(
+  page: Page,
+  url: string,
+  connectKind: "SHOPPING" | "TRAVEL",
+): Promise<ProductInfo> {
   console.log("\n📦 STEP 1: 상품 정보 수집");
   
   await page.goto(url, { timeout: 30000 });
@@ -5086,7 +5164,8 @@ async function step1_getProductInfo(page: Page, url: string): Promise<ProductInf
   
   // 5. 상품 이미지 URL 추출
   console.log("   🖼️ 이미지 URL 추출 중...");
-  const imageUrls = (await collectProductImageUrlsFromPage(page)).slice(0, 15);
+  const imageCandidateMax = connectKind === "TRAVEL" ? 32 : 20;
+  const imageUrls = (await collectProductImageUrlsFromPage(page)).slice(0, imageCandidateMax);
   const salesPageImageCount = imageUrls.filter((url) => isSalesPageProductImageUrl(url)).length;
   const reviewImageCount = imageUrls.filter((url) => isReviewImageUrl(url)).length;
   console.log(
@@ -5096,7 +5175,11 @@ async function step1_getProductInfo(page: Page, url: string): Promise<ProductInf
     console.log(`   🖼️ 대표 이미지 후보: ${imageUrls[0]}`);
     console.log(`   🖼️ 썸네일 원본 적합: ${isPreferredThumbnailImageUrl(imageUrls[0]) ? "예" : "아니오"}`);
   }
-  const { representativeImagePath, imagePaths } = await materializeProductImages(imageUrls, "product");
+  const { representativeImagePath, imagePaths } = await materializeProductImages(
+    imageUrls,
+    "product",
+    connectKind === "TRAVEL" ? TRAVEL_BODY_IMAGE_MAX : SHOPPING_BODY_IMAGE_MAX,
+  );
   
   return {
     name: productName,
@@ -5282,6 +5365,9 @@ async function step2_generatePost(
   connectKind: "SHOPPING" | "TRAVEL" = "SHOPPING"
 ): Promise<GeneratedPostPreview> {
   const isTravel = connectKind === "TRAVEL";
+  if (BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE" && BRANDLINK_EXPERIENCE_NOTES.length < 20) {
+    throw new Error("실제 체험형 문체를 사용하려면 구체적인 체험 사실 메모가 필요합니다.");
+  }
   console.log(`\n📝 STEP 2: SEO 최적화 블로그 글 생성 (확장판${isTravel ? " · 여행" : ""})`);
   console.log(`   🤖 AI Provider: ${AI_PROVIDER.toUpperCase()}`);
   if (REQUESTED_AI_PROVIDER !== AI_PROVIDER) {
@@ -5301,11 +5387,13 @@ async function step2_generatePost(
     }
   }
   
-  const bodySectionCount = BROWSER_GPT_MODE
-    ? (isTravel ? Math.max(CHATGPT_DEFAULT_SUBTITLE_COUNT, 10) : CHATGPT_DEFAULT_SUBTITLE_COUNT)
-    : isTravel
-      ? Math.max(Math.min(product.imagePaths.length + 2, 12), 10)
-      : Math.max(Math.min(product.imagePaths.length, 10), 8);
+  const compositionContract = getPostCompositionContract(connectKind);
+  const bodySectionCount = compositionContract.sections.length;
+  const compositionPromptBlock = formatPostContractForPrompt(compositionContract);
+  const experiencePromptBlock =
+    BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE"
+      ? `[검증된 실제 체험 메모]\n${BRANDLINK_EXPERIENCE_NOTES}\n- 위 메모에 명시된 체험 사실만 1인칭으로 표현하고 나머지는 정보형으로 씁니다.`
+      : "[작성 모드: AI 정보 정리]\n- 실제 구매·사용·방문 경험을 만들지 않습니다. 체험 후기처럼 단정하지 않습니다.";
   const openCrabSeoBrief = buildOpenCrabSeoBrief({
     productId,
     productName: product.name,
@@ -5334,7 +5422,7 @@ async function step2_generatePost(
     : null;
   const travelFactsPromptBlock = travelFacts ? formatTravelFactsForPrompt(travelFacts) : "";
   const travelEditorialPlan = isTravel
-    ? buildTravelEditorialPlan(product, bodySectionCount)
+    ? buildTravelContractEditorialPlan(product)
     : [];
   const travelEditorialPromptBlock = isTravel
     ? formatTravelEditorialPlanForPrompt(travelEditorialPlan)
@@ -5397,7 +5485,9 @@ ${NAVER_SEO_TITLE_RULES}
 ${BLOG_HUMANIZE_MOBILE_STYLE ? `\n${HUMANIZE_RULES}` : ""}
 ${openCrabPromptBlock ? `\n${openCrabPromptBlock}` : ""}
 ${travelFactsPromptBlock ? `\n${travelFactsPromptBlock}` : ""}
-${travelEditorialPromptBlock ? `\n${travelEditorialPromptBlock}` : ""}`;
+${travelEditorialPromptBlock ? `\n${travelEditorialPromptBlock}` : ""}
+${compositionPromptBlock ? `\n${compositionPromptBlock}` : ""}
+${experiencePromptBlock ? `\n${experiencePromptBlock}` : ""}`;
 
   // 여행 상품은 리뷰가 아니라 "예약 전 정보 정리 글"이다. 일정·포함사항·여행지
   // 정보를 제공된 데이터와 널리 알려진 사실 안에서만 쓰도록 별도 계획을 준다.
@@ -5409,7 +5499,7 @@ ${travelEditorialPlan.map((section, index) => `   ${index + 1}) ${section.title}
    - 초반 30%: 기간·목적지·여행지 배경·전체 코스·출발조건을 먼저 요약
    - 중반: 여행지 정보(대표 장소·교통·날씨·준비물)를 실제 방문 전 검색 가이드처럼 설명
    - 후반: 코스 포인트·이동 강도·식사/숙박·포함/불포함·추가비용·추천 여행자·예약 전 체크
-   - 마지막: 경제적 이해관계 고지 다음에 여행커넥트 외부 링크 카드 삽입
+   - 여행커넥트 레퍼럴 카드는 하이라이트 뒤와 마지막 체크 뒤에 에디터가 자동 삽입
 
    ⚠️ 사실 기반 원칙 (여행):
    - 위 "상품 정보"에 없는 일정·가격·포함사항·호텔 등급을 지어내지 마세요.
@@ -5437,19 +5527,22 @@ ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일
 ## 작성 규칙
 1. 제목: ${isTravel ? "핵심 여행지 검색 키워드를 맨 앞에 + 상품명" : "핵심 검색 키워드(상품 카테고리)를 맨 앞에 + 상품명"}, 25-35자
    - 제목에는 이모지를 절대 넣지 마세요.
+   ${BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE"
+     ? "- 제목의 체험 표현은 제공된 실제 체험 메모로 증명되는 범위에서만 사용하세요."
+     : "- 실제 체험 증빙이 없으므로 제목에 후기, 내돈내산, 실사용, 직접 써본, 직접 다녀온 표현을 넣지 마세요."}
    - "완벽 가이드", "총정리", "꿀팁" 같은 낚시성 문구 금지 (네이버 스팸 기준).
-   예: ${isTravel ? '"제주 서부 코스 | ○○ 패키지 일정과 포함사항"' : '"아기비데 추천 | 해피달링 시그니처 워터탭 솔직 후기"'}
+   예: ${isTravel ? '"제주 서부 코스 | ○○ 패키지 일정과 포함사항"' : '"아기비데 추천 | 해피달링 워터탭 선택 기준"'}
 
 2. 본문을 정확히 ${bodySectionCount}개 섹션으로 작성
-   - 여행 글 전체 분량은 공백 제외 2,600~3,500자, 쇼핑 글은 1,300~1,800자.
+   - 여행 글 전체 분량은 공백 제외 3,200~4,800자, 쇼핑 글은 1,800~2,600자.
    - 글자보다 이미지가 본체입니다. 문장은 사진 사이를 잇는 역할로 짧게.
 
 3. 각 섹션 구조:
    - 소제목 (한 줄, 이모지 금지)
    - 빈 줄
-   - 본문 3-5문장 (각 문장 끝에 줄바꿈, 각 문장 25-45자)
+   - ${isTravel ? "본문 5-6문장 (각 문장 끝에 줄바꿈, 각 문장 35-60자)" : "본문 4-5문장 (각 문장 끝에 줄바꿈, 각 문장 25-45자)"}
    - 한 문장에 정보 하나만 담고, 어색하면 더 짧게 나누기
-   - 여행 글은 한 섹션 120~220자로 쓰고 정보→여행 장면→독자가 확인할 항목 순서로 쓰기
+   - 여행 글은 계약에 적힌 섹션별 분량 안에서 정보→여행 장면→독자가 확인할 항목 순서로 쓰기
    - 빈 줄
 
 4. 섹션 구성 (${bodySectionCount}개):
@@ -6326,6 +6419,7 @@ interface PreparedBrandLinkPostOverride {
   post: GeneratedPostPreview;
   heroImagePath: string;
   bodyImagePaths: string[];
+  composition: ResolvedPostDocumentV1 | null;
 }
 
 function writePreparedBrandPostPackage(params: {
@@ -6334,10 +6428,11 @@ function writePreparedBrandPostPackage(params: {
   connectKind: "SHOPPING" | "TRAVEL";
   post: GeneratedPostPreview;
   imagePaths: string[];
+  composition: ResolvedPostDocumentV1;
 }): string {
   const images = params.imagePaths.filter((imagePath) => fs.existsSync(imagePath));
-  if (images.length < 5) {
-    throw new Error(`고품질 초안 패키지에는 대표 1장과 본문 4장 이상이 필요합니다. 현재 ${images.length}장`);
+  if (images.length < 1) {
+    throw new Error("초안 패키지에 저장할 대표 이미지가 없습니다.");
   }
   fs.mkdirSync(params.outputDir, { recursive: true });
   const imageDir = path.join(params.outputDir, "images");
@@ -6361,17 +6456,67 @@ function writePreparedBrandPostPackage(params: {
   const markdown = [`# ${params.post.title}`, "", ...sections, "", params.post.hashtags.map((tag) => `#${tag.replace(/^#+/, "")}`).join(" ")].join("\n");
   fs.writeFileSync(markdownPath, markdown, "utf8");
   const manifestPath = path.join(params.outputDir, "manifest.json");
+  const packagedPathBySource = new Map(
+    packagedImages.map((image) => [path.resolve(image.sourcePath), image.path]),
+  );
+  const packagedComposition: ResolvedPostDocumentV1 = {
+    ...params.composition,
+    sections: params.composition.sections.map((section) => ({
+      ...section,
+      imagePaths: section.imagePaths.map(
+        (imagePath) => packagedPathBySource.get(path.resolve(imagePath)) || imagePath,
+      ),
+    })),
+    renderNodes: params.composition.renderNodes.map((node) =>
+      node.kind === "image"
+        ? {
+            ...node,
+            assetPath: packagedPathBySource.get(path.resolve(node.assetPath)) || node.assetPath,
+          }
+        : node,
+    ),
+  };
+  const renderImageByPath = new Map(
+    packagedComposition.renderNodes
+      .filter((node): node is Extract<(typeof packagedComposition.renderNodes)[number], { kind: "image" }> => node.kind === "image")
+      .map((node) => [path.resolve(node.assetPath), node]),
+  );
+  const manifestImageAssets = packagedImages.map((image) => {
+    const renderImage = renderImageByPath.get(path.resolve(image.path));
+    return {
+      ...image,
+      sectionId: renderImage?.sectionId || null,
+      imageIntent: renderImage?.altText || "",
+      provenance:
+        image.role === "hero"
+          ? params.connectKind === "SHOPPING"
+            ? "LOCKED_PRODUCT"
+            : "GENERATED_BACKGROUND"
+          : params.connectKind === "SHOPPING"
+            ? "ORIGINAL"
+            : "ORIGINAL",
+    };
+  });
   fs.writeFileSync(manifestPath, JSON.stringify({
-    version: "brand-post-package/v1",
+    version: "brand-post-package/v2",
     brandLinkId: params.brandLinkId,
     connectKind: params.connectKind,
     title: params.post.title,
     markdownPath: path.resolve(markdownPath),
     heroImagePath: packagedImages[0].path,
     bodyImagePaths: packagedImages.slice(1).map((image) => image.path),
-    imageAssets: packagedImages,
+    imageAssets: manifestImageAssets,
     hashtags: params.post.hashtags,
     imagePolicy: params.connectKind === "SHOPPING" ? "LOCKED_PRODUCT_OR_ORIGINAL" : "TRAVEL_EDITORIAL",
+    contractVersion: "post-composition-contract/v1",
+    composition: packagedComposition,
+    thumbnailSpec: {
+      version: "thumbnail-spec/v2",
+      canvas: { width: 1080, height: 1080, aspect: "1:1" },
+      style: params.connectKind === "SHOPPING" ? "clean-editorial" : "cinematic",
+      sourcePolicy: params.connectKind === "SHOPPING" ? "LOCKED_PRODUCT_OR_ORIGINAL" : "TRAVEL_EDITORIAL",
+      sourceImagePath: packagedImages[0].path,
+    },
     createdAt: new Date().toISOString(),
     approvedAt: null,
   }, null, 2), "utf8");
@@ -6401,19 +6546,18 @@ function loadPreparedBrandLinkPostOverride(): PreparedBrandLinkPostOverride | nu
   }
 
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
+    version?: unknown;
     markdownPath?: unknown;
     heroImagePath?: unknown;
     bodyImagePaths?: unknown;
     hashtags?: unknown;
+    composition?: unknown;
   };
   const markdownPath = resolvePreparedOverridePath(manifestPath, manifest.markdownPath);
   const heroImagePath = resolvePreparedOverridePath(manifestPath, manifest.heroImagePath);
   const bodyImagePaths = Array.isArray(manifest.bodyImagePaths)
     ? manifest.bodyImagePaths.map((value) => resolvePreparedOverridePath(manifestPath, value))
     : [];
-  if (bodyImagePaths.length < 4) {
-    throw new Error("준비된 원고에는 본문 이미지가 최소 4장 필요합니다.");
-  }
 
   const markdown = fs.readFileSync(markdownPath, "utf8");
   const titleMatch = markdown.match(/^#\s+(.+)$/m);
@@ -6450,6 +6594,13 @@ function loadPreparedBrandLinkPostOverride(): PreparedBrandLinkPostOverride | nu
         .map((value) => value.replace(/^#+/, "").trim())
         .filter(Boolean)
     : [];
+  const composition =
+    manifest.version === "brand-post-package/v2" &&
+    manifest.composition &&
+    typeof manifest.composition === "object" &&
+    (manifest.composition as { version?: unknown }).version === "resolved-post-document/v1"
+      ? (manifest.composition as ResolvedPostDocumentV1)
+      : null;
 
   return {
     post: {
@@ -6457,9 +6608,11 @@ function loadPreparedBrandLinkPostOverride(): PreparedBrandLinkPostOverride | nu
       sections,
       hashtags,
       rawResponse: `prepared:${markdownPath}`,
+      composition,
     },
     heroImagePath,
     bodyImagePaths,
+    composition,
   };
 }
 
@@ -7283,6 +7436,161 @@ async function insertNaverHorizontalDivider(page: Page): Promise<boolean> {
   return true;
 }
 
+async function inputPlainParagraph(page: Page, text: string): Promise<void> {
+  const normalized = text.replace(/\r/g, "").trim();
+  if (!normalized) return;
+  await setNaverTextFormat(page, "text");
+  for (const line of normalized.split("\n")) {
+    const value = line.trim();
+    if (value) await page.keyboard.type(value, { delay: 3 });
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(35);
+  }
+  await page.keyboard.press("Enter");
+}
+
+async function inputNaverHeading(page: Page, text: string): Promise<void> {
+  const headingApplied = await setNaverTextFormat(page, "sectionTitle");
+  if (!headingApplied) console.log("   ⚠️ 소제목 스타일 적용 실패, 본문 스타일로 대체");
+  await page.keyboard.type(text, { delay: 3 });
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(80);
+  await setNaverTextFormat(page, "text");
+}
+
+async function insertNaverQuotationHeading(page: Page, text: string): Promise<boolean> {
+  const beforeCount = await page
+    .locator('.se-component.se-quotation, [class*="se-quotation"], [data-comp="quotation"]')
+    .count()
+    .catch(() => 0);
+  const opened = await clickFirstVisible(page, [
+    'button[data-name="quotation"]',
+    'button[aria-label*="인용구"]',
+    'button[aria-label*="인용"]',
+    'button:has-text("인용구")',
+  ]);
+  if (!opened) return false;
+
+  await clickFirstVisible(page, [
+    'button[data-value="quotation_1"]',
+    'button[data-value="quotation1"]',
+    '.se-toolbar-option-quotation button',
+    '[class*="quotation"] button',
+  ]).catch(() => false);
+  await page.waitForTimeout(220);
+  const afterCount = await page
+    .locator('.se-component.se-quotation, [class*="se-quotation"], [data-comp="quotation"]')
+    .count()
+    .catch(() => beforeCount);
+  if (afterCount <= beforeCount) {
+    await page.keyboard.press("Escape").catch(() => {});
+    return false;
+  }
+
+  await page.keyboard.type(text, { delay: 3 });
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(100);
+  await setNaverTextFormat(page, "text");
+  return true;
+}
+
+async function renderResolvedPostDocument(
+  page: Page,
+  document: ResolvedPostDocumentV1,
+  options: {
+    shoppingConnectProductName?: string | null;
+    shoppingConnectProductFinalUrl?: string | null;
+    requiredFirstImagePath?: string | null;
+  },
+): Promise<{ uploadedCount: number; connectCardCount: number }> {
+  let uploadedCount = 0;
+  let connectCardCount = 0;
+  let imageNodeIndex = 0;
+
+  for (let renderIndex = 0; renderIndex < document.renderNodes.length; renderIndex += 1) {
+    const node = document.renderNodes[renderIndex];
+    if (node.kind === "divider") {
+      await insertNaverHorizontalDivider(page).catch(() => false);
+      continue;
+    }
+    if (node.kind === "disclosure" || node.kind === "paragraph") {
+      await inputPlainParagraph(page, node.text);
+      continue;
+    }
+    if (node.kind === "quotation") {
+      const inserted = await insertNaverQuotationHeading(page, node.text);
+      if (!inserted) {
+        console.log(`   ⚠️ 인용구 미지원, 소제목으로 대체: ${node.text}`);
+        await inputNaverHeading(page, node.text);
+      }
+      continue;
+    }
+    if (node.kind === "heading") {
+      await inputNaverHeading(page, node.text);
+      continue;
+    }
+    if (node.kind === "image") {
+      if (node.layout === "collage-3") {
+        const collageNodes = document.renderNodes
+          .slice(renderIndex, renderIndex + 3)
+          .filter(
+            (candidate): candidate is Extract<typeof candidate, { kind: "image" }> =>
+              candidate.kind === "image" && candidate.layout === "collage-3",
+          );
+        if (collageNodes.length === 3) {
+          const collagePath = await createThreeImageCollage({
+            sourcePaths: collageNodes.map((candidate) => candidate.assetPath),
+            outputDir: TEMP_PATH,
+          });
+          imageNodeIndex += 1;
+          console.log(`   [이미지 ${imageNodeIndex}] 🧩 여행 하이라이트 3장 콜라주`);
+          if (await uploadOneImage(page, collagePath)) uploadedCount += 1;
+          renderIndex += 2;
+          continue;
+        }
+      }
+      imageNodeIndex += 1;
+      console.log(`   [이미지 ${imageNodeIndex}] 🖼️ ${node.role} · ${path.basename(node.assetPath)}`);
+      const uploaded = await uploadOneImage(page, node.assetPath);
+      if (uploaded) {
+        uploadedCount += 1;
+      } else if (
+        node.role === "thumbnail" &&
+        options.requiredFirstImagePath &&
+        path.resolve(node.assetPath) === path.resolve(options.requiredFirstImagePath)
+      ) {
+        throw new Error(`썸네일 첫 이미지 업로드 확인 실패: ${path.basename(node.assetPath)}`);
+      }
+      continue;
+    }
+    if (node.kind === "connectCard") {
+      if (node.connectKind === "TRAVEL") {
+        await insertTravelConnectLink(page, node.url);
+      } else {
+        await insertShoppingConnectLink(
+          page,
+          node.url,
+          options.shoppingConnectProductName,
+          options.shoppingConnectProductFinalUrl,
+          "SHOPPING",
+        );
+      }
+      connectCardCount += 1;
+      continue;
+    }
+    if (node.kind === "hashtags") {
+      await setNaverTextFormat(page, "text");
+      await page.keyboard.press("Enter");
+      const hashtagText = node.values
+        .map((tag) => `#${tag.replace(/^#+/, "").replace(/\s+/g, "")}`)
+        .join(" ");
+      await page.keyboard.type(hashtagText, { delay: 10 });
+    }
+  }
+
+  return { uploadedCount, connectCardCount };
+}
+
 // 텍스트 섹션 입력 (줄바꿈 포함)
 async function inputTextSection(
   page: Page,
@@ -7355,6 +7663,7 @@ async function step5and6_uploadAndWrite(
     shoppingConnectProductFinalUrl?: string | null;
     requiredFirstImagePath?: string | null;
     connectKind?: "SHOPPING" | "TRAVEL";
+    resolvedDocument?: ResolvedPostDocumentV1 | null;
   }
 ): Promise<void> {
   console.log("\n📝 STEP 5+6: 이미지 + 본문 번갈아 입력");
@@ -7365,6 +7674,21 @@ async function step5and6_uploadAndWrite(
   await page.keyboard.press('Tab');
   await page.waitForTimeout(500);
   await setNaverTextFormat(page, "text");
+
+  if (options?.resolvedDocument) {
+    const result = await renderResolvedPostDocument(page, options.resolvedDocument, {
+      shoppingConnectProductName: options.shoppingConnectProductName,
+      shoppingConnectProductFinalUrl: options.shoppingConnectProductFinalUrl,
+      requiredFirstImagePath: options.requiredFirstImagePath,
+    });
+    console.log(
+      `\n   ✅ 렌더 계약 실행 완료: 이미지 ${result.uploadedCount}개, 커넥트 카드 ${result.connectCardCount}개`,
+    );
+    if (result.connectCardCount < 2 && options.shoppingConnectUrl) {
+      throw new Error(`커넥트 카드 삽입 결과가 부족합니다: ${result.connectCardCount}/2`);
+    }
+    return;
+  }
   
   const mainSections = sections.length > 1 ? sections.slice(0, -1) : sections;
   const tailSection = sections.length > 1 ? sections[sections.length - 1] : "";
@@ -9301,6 +9625,7 @@ async function main() {
 
     setStage("STEP1 상품 정보/이미지 수집");
     // STEP 1: DB에 저장된 스크랩 결과를 우선 사용하고, 부족할 때만 보강 스크랩
+    const runtimeConnectKind = link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING";
     let product = await buildProductInfoFromStoredBrandLink({
       url: link.url,
       finalUrl: link.finalUrl,
@@ -9308,7 +9633,7 @@ async function main() {
       productPrice: link.productPrice,
       storeName: link.storeName,
       imageUrls: link.imageUrls,
-    });
+    }, runtimeConnectKind);
 
     if (product) {
       console.log("\n📦 STEP 1: 저장된 스크랩 결과 재사용");
@@ -9327,7 +9652,7 @@ async function main() {
       if (product) {
         console.log("   ⚠️ 저장된 스크랩 정보가 부족해서 상품 페이지를 다시 확인합니다.");
       }
-      const liveProduct = await step1_getProductInfo(page, sourceUrl);
+      const liveProduct = await step1_getProductInfo(page, sourceUrl, runtimeConnectKind);
       product = mergeProductInfo(product, liveProduct);
     }
 
@@ -9407,6 +9732,7 @@ async function main() {
       generatedThumbnailPath,
       representativeImagePath: product.representativeImagePath,
       editorialImagePath: travelEditorialCardPath,
+      connectKind: runtimeConnectKind,
     });
     product.imagePaths = uploadImagePaths;
     if (generatedThumbnailPath) {
@@ -9425,6 +9751,35 @@ async function main() {
       );
     }
 
+    const prepareOutputDir = process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim();
+    const composition =
+      preparedPostOverride?.composition ||
+      resolvePostDocument({
+        connectKind: runtimeConnectKind,
+        title: post.title,
+        sections: post.sections,
+        hashtags: post.hashtags,
+        imagePaths: product.imagePaths,
+        connectUrl: link.url,
+        qualityPreset: BRANDLINK_QUALITY_PRESET,
+        experienceMode: BRANDLINK_EXPERIENCE_MODE,
+      });
+    post.composition = composition;
+    console.log(
+      `   🧱 렌더 계약: ${composition.contractVersion}, 노드 ${composition.renderNodes.length}개, 품질 ${composition.qualityReport.score}점`,
+    );
+    for (const warning of composition.qualityReport.warnings) {
+      console.log(`      - WARN ${warning}`);
+    }
+    for (const blocker of composition.qualityReport.blockers) {
+      console.log(`      - BLOCK ${blocker}`);
+    }
+    if (!composition.qualityReport.canAutoPublish && !prepareOutputDir) {
+      throw new Error(
+        `프리미엄 자동발행 품질 게이트 미통과: ${composition.qualityReport.blockers.join(" ")}`,
+      );
+    }
+
     let contentReadiness: BrandLinkContentReadiness | null = null;
     if (BRANDLINK_CONTENT_READINESS_ENABLED) {
       contentReadiness = getBrandLinkContentReadiness({
@@ -9437,6 +9792,9 @@ async function main() {
         requireRepresentativeImage: BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE,
         thumbnailGenerated:
           Boolean(generatedThumbnailPath) && generatedThumbnail?.source !== "composite",
+        connectKind: runtimeConnectKind,
+        experienceMode: BRANDLINK_EXPERIENCE_MODE,
+        compositionQualityReport: composition.qualityReport,
       });
 
       console.log(`   🧪 상품글 발행 게이트: ${contentReadiness.summary}`);
@@ -9446,13 +9804,12 @@ async function main() {
         console.log(`      - ${mark} ${signal.label}`);
       }
 
-      if (!contentReadiness.canPublish) {
+      if (!contentReadiness.canPublish && !prepareOutputDir) {
         throw new Error(contentReadiness.reason || contentReadiness.summary);
       }
     }
 
     let previewPath: string | null = null;
-    const prepareOutputDir = process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim();
     if (prepareOutputDir) {
       const manifestPath = writePreparedBrandPostPackage({
         outputDir: path.resolve(prepareOutputDir),
@@ -9460,6 +9817,7 @@ async function main() {
         connectKind: link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
         post,
         imagePaths: product.imagePaths,
+        composition,
       });
       console.log(`   📦 승인 대기 초안 패키지 저장: ${manifestPath}`);
     }
@@ -9499,6 +9857,7 @@ async function main() {
       shoppingConnectProductFinalUrl: product.finalUrl || link.finalUrl,
       requiredFirstImagePath: generatedThumbnailPath,
       connectKind: link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
+      resolvedDocument: composition,
     });
     
     setStage(runtimePublishOptions.mode === "schedule" ? "STEP7 예약 발행" : "STEP7 즉시 발행");

@@ -254,12 +254,34 @@ export function buildTravelEditorialPlan(
         "환전·결제수단·통신·여행자보험처럼 상품에 포함되지 않을 수 있는 항목도 출발 전에 따로 점검하세요.",
       ],
     },
+    {
+      title: "숙소와 밤의 동선",
+      purpose: "숙소 위치·연박·귀가 동선이 실제 여행 리듬에 미치는 영향을 판단한다.",
+      imageIntent: "숙소 외관과 객실 또는 숙소 주변 거리 사진 2장",
+      body: [
+        "숙소가 확정된 상품이라면 이름보다 위치와 연박 여부를 먼저 확인하는 편이 좋아요.",
+        "마지막 관광지에서 숙소까지 이동 시간은 저녁 자유시간과 다음 날 피로도에 바로 영향을 줍니다.",
+        "객실 조건이 출발일에 따라 달라질 수 있다면 예약 단계에 표시된 배정 기준을 확인하세요.",
+        "숙소명이 아직 정해지지 않았다면 특정 호텔을 추정하지 말고 지역과 등급 조건만 비교하는 게 안전해요.",
+      ],
+    },
+    {
+      title: "식사와 자유시간 활용",
+      purpose: "포함 식사와 자유시간을 구분해 현지 경험과 추가 지출을 함께 계획한다.",
+      imageIntent: "상품에 포함된 식사 또는 현지 거리와 식당 분위기 사진",
+      body: [
+        "포함 식사가 있는 날과 자유식이 필요한 날을 나눠 보면 예상 경비가 더 또렷해져요.",
+        "메뉴가 확정되지 않은 식사는 특정 음식을 제공한다고 단정하지 않고 예약 화면을 기준으로 확인해야 합니다.",
+        "자유시간에는 이동 거리와 영업시간을 고려해 한 지역에서 식사와 산책을 묶는 편이 여유로워요.",
+        "알레르기나 식단 제한이 있다면 출발 전에 여행사 안내 범위와 개별 준비가 필요한지 문의해보세요.",
+      ],
+    },
   ];
-  const desiredCount = Math.max(8, Math.min(12, targetSectionCount));
+  const desiredCount = Math.max(8, Math.min(14, targetSectionCount));
   const prefix = sections.slice(0, 3);
   const highlightSections = sections.slice(3, 3 + confirmedHighlights.length);
   const suffix = sections.slice(3 + confirmedHighlights.length);
-  const orderedInserts = [inserts[1], inserts[2], inserts[3], inserts[0]];
+  const orderedInserts = [inserts[1], inserts[2], inserts[4], inserts[5], inserts[3], inserts[0]];
   const closing = suffix.at(-1)!;
   if (desiredCount <= 8) {
     // 짧은 폴백도 이동·포함·추천 판단을 잃지 않게 한다.
@@ -268,9 +290,174 @@ export function buildTravelEditorialPlan(
     return [...prefix, ...core, ...info, closing].slice(0, desiredCount);
   }
   const highlightLimit = Math.min(highlightSections.length, desiredCount >= 11 ? 4 : 3);
-  const infoCount = Math.max(1, desiredCount - prefix.length - highlightLimit - 1 - 1);
-  const selected = [...prefix, ...highlightSections.slice(0, highlightLimit), ...suffix.slice(0, 1), ...orderedInserts.slice(0, infoCount), closing];
-  return selected.slice(0, desiredCount);
+  const candidates = [
+    ...prefix,
+    ...highlightSections.slice(0, highlightLimit),
+    suffix[0],
+    orderedInserts[2],
+    orderedInserts[3],
+    orderedInserts[0],
+    orderedInserts[1],
+    suffix[1],
+    suffix[2],
+    orderedInserts[4],
+    orderedInserts[5],
+  ].filter((section): section is TravelEditorialSection => Boolean(section));
+  return [...candidates.slice(0, desiredCount - 1), closing];
+}
+
+/**
+ * v1 포스트 계약과 순서가 정확히 일치하는 13개 여행 섹션이다.
+ * 날짜별 원문 데이터가 없으면 확인된 코스 포인트를 사용하고, 호텔·항공·식사를 추정하지 않는다.
+ */
+export function buildTravelContractEditorialPlan(product: {
+  name: string;
+  description: string;
+  features: string[];
+  price: string;
+}): TravelEditorialSection[] {
+  const facts = extractTravelProductFacts(product.name, product.description, product.features);
+  const destination = destinationLabel(facts);
+  const duration = facts.duration || "일정 확인이 필요한";
+  const highlights = facts.highlights.length ? facts.highlights : facts.destinations;
+  const point = (index: number) => highlights[index] || `${destination} 코스 포인트 ${index + 1}`;
+  const conditions = facts.conditions.join(", ") || "출발 확정·포함 사항·추가 비용";
+  const price = product.price || "출발일별 표시 가격";
+  const commonCheck = "선택한 출발일의 최신 일정표와 예약 조건을 기준으로 다시 확인해야 해요.";
+  return [
+    {
+      title: "이 여행, 누구에게 맞을까",
+      purpose: "독자의 고민과 코스 결론을 첫 화면에서 제시",
+      imageIntent: `${destination}을 대표하는 실사 풍경`,
+      body: [
+        `${product.name}은 ${destination}의 핵심 장면을 ${duration} 일정으로 살펴보는 여행상품이에요.`,
+        `${highlights.slice(0, 4).join(", ") || "주요 방문지"}가 현재 정보에서 확인되는 코스 포인트예요.`,
+        "여러 장소를 정해진 동선으로 보고 싶은 분께 먼저 비교해볼 만한 구성이에요.",
+        "자유시간이 가장 중요하다면 일자별 체류 시간과 선택 일정부터 보는 편이 맞아요.",
+        commonCheck,
+      ],
+    },
+    {
+      title: "이 상품의 핵심 차이",
+      purpose: "기간·동선·여행 성격을 비교 가능한 언어로 정리",
+      imageIntent: "여행 성격과 이동 범위를 보여주는 대표 풍경",
+      body: [
+        `${duration} 안에 ${destination}의 여러 포인트를 묶었다는 점이 이 상품의 기본 성격이에요.`,
+        `${conditions}이 현재 상품명과 수집 정보에서 확인되는 조건이에요.`,
+        "명소 개수보다 연박 여부와 도시 사이 이동 횟수를 함께 봐야 체감 강도가 보여요.",
+        `${price}은 날짜·인원·객실 조건을 적용한 최종 단계에서 다시 확인하세요.`,
+        commonCheck,
+      ],
+    },
+    {
+      title: "사진으로 먼저 보는 하이라이트",
+      purpose: "핵심 방문지를 세 장의 흐름으로 보여준다",
+      imageIntent: `${point(0)}, ${point(1)}, ${point(2)}의 서로 다른 실사 사진 3장`,
+      body: [
+        `${point(0)}, ${point(1)}, ${point(2)}를 먼저 보면 코스의 분위기가 한눈에 잡혀요.`,
+        "사진은 상품 페이지에서 확인된 장소와 연결되는 장면만 배치하는 것이 원칙이에요.",
+        "비슷한 전경이 반복되기보다 도시·자연·거리처럼 서로 다른 장면을 고르면 이해가 빨라요.",
+        "사진의 계절과 실제 출발 시기가 다를 수 있으니 복장과 날씨는 별도로 확인하세요.",
+        commonCheck,
+      ],
+    },
+    {
+      title: "항공·기간·숙박·식사",
+      purpose: "예약 판단에 필요한 기본 조건을 묶어서 제시",
+      imageIntent: "항공·교통 또는 일정 요약 이미지",
+      body: [
+        `여행 기간은 ${duration}으로 읽히지만 실제 출발·도착 시각은 선택한 날짜에서 확인해야 해요.`,
+        "항공편과 공항, 수하물 조건이 명시되지 않았다면 임의로 특정 항공사를 붙이지 않아요.",
+        "숙박 등급과 식사 횟수도 상세표에 명시된 범위에서만 확정적으로 볼 수 있어요.",
+        "도착일과 귀국일의 관광 가능 시간은 항공 스케줄에 따라 크게 달라질 수 있어요.",
+        commonCheck,
+      ],
+    },
+    {
+      title: "숙소에서 확인할 포인트",
+      purpose: "위치·연박·객실 조건이 일정에 미치는 영향을 설명",
+      imageIntent: "숙소 외관과 객실 또는 주변 동선 사진 2장",
+      body: [
+        "숙소가 확정돼 있다면 이름보다 위치와 연박 여부를 먼저 표시해두는 편이 좋아요.",
+        "마지막 관광지에서 숙소까지 이동 시간은 저녁 자유시간과 다음 날 피로도에 영향을 줘요.",
+        "객실 타입과 조식 여부가 출발일에 따라 달라지는지도 예약 단계에서 확인하세요.",
+        "숙소명이 미정이라면 특정 호텔을 추정하지 않고 지역·등급 조건만 비교해야 해요.",
+        commonCheck,
+      ],
+    },
+    {
+      title: "전체 동선 한눈에 보기",
+      purpose: "도시와 방문지의 순서를 이동 강도 관점에서 정리",
+      imageIntent: "일정 요약 카드 또는 이동 동선 이미지",
+      body: [
+        `확인되는 코스 포인트는 ${highlights.slice(0, 6).join(" → ") || destination} 순서로 놓고 비교할 수 있어요.`,
+        "날짜별 방문 순서가 원문에 없으면 임의의 일정을 만들지 않고 장소 목록으로만 정리해요.",
+        "도시가 바뀌는 날, 숙소를 옮기는 날, 자유시간이 있는 날을 구분하면 강도가 보여요.",
+        "지도상 거리 외에 환승·대기·짐 이동 시간을 함께 생각해야 실제 하루가 그려져요.",
+        commonCheck,
+      ],
+    },
+    ...[0, 1, 2].map((index): TravelEditorialSection => ({
+      title: `코스 ${index + 1} · ${point(index)}`,
+      purpose: `${index + 1}번째 확인된 코스 포인트를 정보와 장면으로 설명`,
+      imageIntent: `${point(index)}의 실제 장소 사진 1~2장`,
+      body: [
+        `${withTopicParticle(point(index))} 현재 상품 정보에서 확인되는 주요 코스 포인트예요.`,
+        "장소 이름만 보기보다 앞뒤 이동 구간과 실제 머무는 시간을 함께 보는 게 중요해요.",
+        "사진에서 기대한 풍경이나 활동이 선택한 출발일 일정에도 포함되는지 확인하세요.",
+        "운영시간·입장료·현지 행사는 바뀔 수 있어 출발 전 공식 정보를 다시 봐야 해요.",
+        commonCheck,
+      ],
+    })),
+    {
+      title: "포함·불포함과 추가 비용",
+      purpose: "표시가보다 실제 예상 지출을 판단하게 한다",
+      imageIntent: "식사·교통·포함 조건을 설명하는 사진",
+      body: [
+        `${conditions}이 현재 확인되는 조건이며 세부 포함 범위는 일정표를 기준으로 봐야 해요.`,
+        "항공·숙박·식사·입장료 중 포함되는 항목과 현지에서 선택할 항목을 나눠 적어보세요.",
+        "표시 가격에 필수 현지 비용을 더한 예상 지출로 비교해야 상품 차이가 정확히 보여요.",
+        "환율·유류할증료·선택 일정처럼 달라질 수 있는 금액은 결제 직전 다시 확인하세요.",
+        commonCheck,
+      ],
+    },
+    {
+      title: "날씨·교통·준비물",
+      purpose: "출발 전 실용 정보를 빠짐없이 점검",
+      imageIntent: "계절감과 현지 이동 방식이 드러나는 실사 사진",
+      body: [
+        `${destination}의 출발일별 기온과 강수 예보를 확인해 걷는 시간에 맞는 옷을 준비하세요.`,
+        "일교차와 실내외 이동 비중을 함께 보면 겉옷과 신발 선택이 구체적으로 정리돼요.",
+        "자유시간이 있다면 현지 교통카드·환승 방식·막차 시간을 출발 전에 살펴보세요.",
+        "여권 유효기간·통신·결제수단·여행자보험도 상품 포함 여부와 별개로 점검해야 해요.",
+        commonCheck,
+      ],
+    },
+    {
+      title: "이런 여행자에게 잘 맞아요",
+      purpose: "동행·체력·자유시간 선호에 따라 적합도를 판단",
+      imageIntent: "여행자와 목적지 분위기가 함께 보이는 사진",
+      body: [
+        `${destination}의 핵심 포인트를 ${duration} 안에 정해진 동선으로 보고 싶은 분께 잘 맞을 수 있어요.`,
+        "항공·숙소·교통을 각각 예약하기보다 한 번에 준비하는 방식을 선호할 때 비교하기 좋아요.",
+        "반대로 자유시간과 한 지역의 긴 체류가 중요하다면 일자별 여유 시간을 먼저 확인하세요.",
+        "아이·부모님과 함께라면 이른 출발과 장거리 이동 구간을 동행자 기준으로 살펴보세요.",
+        commonCheck,
+      ],
+    },
+    {
+      title: "예약 전 마지막 체크",
+      purpose: "최신 일정과 조건 확인 후 레퍼럴 카드로 연결",
+      imageIntent: "여행의 여운을 남기는 마지막 대표 풍경",
+      body: [
+        "출발 확정 여부, 취소·변경 규정, 포함·불포함 항목을 마지막으로 확인하세요.",
+        "상품명에 적힌 혜택도 선택한 날짜와 인원에서 동일하게 적용되는지 봐야 해요.",
+        "동행자와 일정표를 함께 보면서 모두가 동의한 코스인지 확인하면 좋아요.",
+        "아래 여행커넥트 카드에서 실제 일정과 최신 예약 조건을 비교할 수 있어요.",
+        "최종 결제 화면에 표시된 조건을 기준으로 결정하는 것이 가장 안전해요.",
+      ],
+    },
+  ];
 }
 
 export function formatTravelEditorialPlanForPrompt(sections: TravelEditorialSection[]): string {
@@ -298,6 +485,55 @@ export function buildTravelThumbnailCopy(productName: string) {
   };
 }
 
+function expandTravelSectionBody(
+  section: TravelEditorialSection,
+  facts: TravelProductFacts,
+): string[] {
+  const destination = destinationLabel(facts);
+  const title = section.title;
+  const lines = /숙소|호텔/u.test(title)
+    ? [
+        "연박 여부와 숙소 이동 횟수를 일정표에 표시해두면 짐을 옮기는 날과 쉴 수 있는 날이 분명해져요.",
+        "정확한 숙소명이 미정이라면 출발 전 최종 확정서에서 지역·등급·객실 조건을 다시 확인하세요.",
+      ]
+    : /식사|자유시간/u.test(title)
+      ? [
+          "포함 식사와 자유식을 구분해두면 현지에서 따로 준비할 식비와 이동 시간을 함께 계산하기 쉬워요.",
+          "자유시간에는 꼭 보고 싶은 장소 하나를 기준으로 식사와 산책 동선을 가까운 범위에 묶어보세요.",
+        ]
+      : /이동|교통|동선/u.test(title)
+        ? [
+            "지도상 거리뿐 아니라 환승·대기·짐 이동까지 함께 보면 하루에 실제로 쓸 수 있는 시간이 보여요.",
+            "동행자의 체력과 걷는 속도를 기준으로 긴 이동 다음 일정에 충분한 여유가 있는지 확인하세요.",
+          ]
+        : /포함|비용|가격/u.test(title)
+          ? [
+              "표시 가격에 반드시 더해지는 현지 비용과 개인 선택 비용을 나눠 적으면 상품끼리 비교하기 쉬워요.",
+              "환율·유류할증료·선택 일정처럼 바뀔 수 있는 항목은 결제 직전 화면의 최신 금액을 기준으로 보세요.",
+            ]
+          : /날씨|준비/u.test(title)
+            ? [
+                `${destination}의 출발일별 기온과 강수 예보를 확인해 걷는 시간에 맞는 신발과 겉옷을 준비하세요.`,
+                "여권 유효기간·통신·결제수단·여행자보험은 상품 포함 여부와 별개로 출발 전에 점검해야 해요.",
+              ]
+            : /코스|일정|하이라이트|여행지/u.test(title)
+              ? [
+                  "장소 이름만 나열하기보다 앞뒤 이동 구간과 실제 머무는 시간을 같이 보면 코스의 밀도가 보여요.",
+                  "꼭 보고 싶은 장소가 선택한 출발일 일정에도 포함되는지 예약 페이지에서 다시 맞춰보세요.",
+                ]
+              : /맞아요|여행자/u.test(title)
+                ? [
+                    "정해진 동선의 편리함과 자유시간의 여유 중 무엇을 더 중요하게 보는지가 가장 큰 선택 기준이에요.",
+                    "아이·부모님과 함께라면 이른 출발과 장거리 이동 구간을 동행자 기준으로 한 번 더 살펴보세요.",
+                  ]
+                : [
+                    "같은 상품도 출발일과 인원 조건에 따라 세부 일정이 달라질 수 있어 최신 예약 화면을 기준으로 보세요.",
+                    "동행자와 일정표를 함께 보면서 꼭 필요한 조건과 양보할 수 있는 조건을 미리 나눠두면 결정이 쉬워요.",
+                  ];
+  const decisionSupportLine = `${lines[0]} ${lines[1]}`;
+  return [...section.body, decisionSupportLine].slice(0, 6);
+}
+
 export function buildLocalTravelPostJson(product: {
   name: string;
   description: string;
@@ -307,9 +543,13 @@ export function buildLocalTravelPostJson(product: {
   const facts = extractTravelProductFacts(product.name, product.description, product.features);
   const destination = destinationLabel(facts);
   const duration = facts.duration || "일정";
-  const editorialSections = buildTravelEditorialPlan(product, targetSectionCount);
+  const fullEditorialPlan = buildTravelContractEditorialPlan(product);
+  const desiredSectionCount = Math.max(8, Math.min(13, targetSectionCount));
+  const editorialSections = desiredSectionCount >= fullEditorialPlan.length
+    ? fullEditorialPlan
+    : [...fullEditorialPlan.slice(0, desiredSectionCount - 1), fullEditorialPlan.at(-1)!];
   const sections = editorialSections.map(
-    (section) => `${section.title}\n\n${section.body.join("\n")}\n`,
+    (section) => `${section.title}\n\n${expandTravelSectionBody(section, facts).join("\n")}\n`,
   );
   return JSON.stringify({
     title: `${destination} 여행 코스 ${duration} | 일정과 예약조건`.slice(0, 35),

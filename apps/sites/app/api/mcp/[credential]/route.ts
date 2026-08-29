@@ -4,6 +4,7 @@ import { getD1 } from '@/db';
 import { newId } from '@/lib/crypto';
 import { jsonValue, readObject } from '@/lib/http';
 import { resolveMcpConnection, splitMcpCredential } from '@/lib/mcp';
+import { hasOAuthScope } from '@/lib/oauth';
 
 type JsonObject = Record<string, unknown>;
 type JsonRpcId = string | number | null;
@@ -13,8 +14,8 @@ const LEGACY_PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26'] as const;
 const SUPPORTED_PROTOCOLS = [MODERN_PROTOCOL, ...LEGACY_PROTOCOLS] as const;
 const RESPONSE_HEADERS = { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff' };
 const CONNECT_KINDS = ['shopping', 'travel'];
-const SERVER_INFO = { name: 'BlogAutoMCP', version: '1.1.0' };
-const SERVER_INSTRUCTIONS = '승인된 한 대의 Windows PC에서 쇼핑커넥트와 여행커넥트 조회·초안·발행 작업을 수행합니다. 실제 발행 또는 예약 전에는 사용자의 명시적 확인을 받고 confirmed=true를 전달하세요.';
+const SERVER_INFO = { name: 'BlogAutoMCP', version: '1.2.0' };
+const SERVER_INSTRUCTIONS = '승인된 한 대의 Windows PC에서 쇼핑커넥트와 여행커넥트 조회·초안·발행 작업을 수행합니다. 썸네일 요청에는 thumbnail_prepare로 실제 이미지와 전용 프롬프트를 먼저 가져온 뒤 ChatGPT의 내장 이미지 생성 기능(GPT Image/imagegen)을 사용하세요. 쇼핑은 상품이 없는 실사 배경만 생성하고 원본 상품은 변형하지 마세요. 실제 발행 또는 예약 전에는 사용자의 명시적 확인을 받고 confirmed=true를 전달하세요.';
 
 const TOOLS = [
   {
@@ -41,9 +42,51 @@ const TOOLS = [
   {
     name: 'post_create_draft',
     title: '포스팅 초안 생성',
-    description: '선택한 쇼핑 또는 여행 상품으로 로컬 PC에서 포스팅 초안을 생성합니다.',
-    inputSchema: { type: 'object', properties: { connectKind: { type: 'string', enum: CONNECT_KINDS }, productId: { type: 'string', minLength: 1, maxLength: 160 }, memo: { type: 'string', maxLength: 1000 }, idempotencyKey: { type: 'string', pattern: '^[A-Za-z0-9._:-]{8,120}$' } }, required: ['connectKind', 'productId', 'idempotencyKey'], additionalProperties: false },
+    description: '선택한 쇼핑 또는 여행 상품으로 전용 포스트 계약을 적용한 초안을 생성합니다. premium은 분량·이미지·구조 게이트를 통과해야 자동발행할 수 있습니다.',
+    inputSchema: { type: 'object', properties: { connectKind: { type: 'string', enum: CONNECT_KINDS }, productId: { type: 'string', minLength: 1, maxLength: 160 }, qualityPreset: { type: 'string', enum: ['standard', 'premium'], default: 'premium' }, experienceMode: { type: 'string', enum: ['ai_assisted_information', 'verified_experience'], default: 'ai_assisted_information' }, experienceNotes: { type: 'string', maxLength: 4000, description: '실제 구매·사용·방문 증빙이 있는 경우에만 사실 메모를 입력합니다.' }, memo: { type: 'string', maxLength: 1000 }, idempotencyKey: { type: 'string', pattern: '^[A-Za-z0-9._:-]{8,120}$' } }, required: ['connectKind', 'productId', 'idempotencyKey'], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  {
+    name: 'thumbnail_prepare',
+    title: 'GPT 썸네일 생성 준비',
+    description: '선택한 상품의 실제 이미지와 쇼핑·여행 전용 생성 지침을 PC에서 가져옵니다. 완료된 작업을 job_get으로 확인한 뒤 ChatGPT 내장 GPT Image/imagegen으로 이미지를 생성하세요. 쇼핑은 원본 상품 보호를 위해 상품이 없는 실사 배경만 생성합니다.',
+    inputSchema: { type: 'object', properties: { connectKind: { type: 'string', enum: CONNECT_KINDS }, productId: { type: 'string', minLength: 1, maxLength: 160 }, layout: { type: 'string', enum: ['auto', 'clean-editorial', 'color-block', 'soft-lifestyle', 'cinematic', 'emotional-record', 'route'], default: 'auto' }, candidateCount: { type: 'integer', minimum: 1, maximum: 3, default: 3 }, idempotencyKey: { type: 'string', pattern: '^[A-Za-z0-9._:-]{8,120}$' } }, required: ['connectKind', 'productId', 'idempotencyKey'], additionalProperties: false },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  {
+    name: 'thumbnail_apply_generated',
+    title: 'GPT 생성 썸네일 적용',
+    description: 'ChatGPT GPT Image/imagegen이 만든 다운로드 가능한 HTTPS 이미지를 PC로 보내 썸네일에 적용합니다. 쇼핑은 생성 배경 위에 잠긴 원본 상품을 합성하고, 여행은 생성된 실사 배경 위에 검증된 카피를 합성합니다. 사용자가 이미지를 확인한 뒤에만 confirmed=true로 호출하세요.',
+    inputSchema: { type: 'object', properties: { connectKind: { type: 'string', enum: CONNECT_KINDS }, productId: { type: 'string', minLength: 1, maxLength: 160 }, generatedImageUrl: { type: 'string', format: 'uri', maxLength: 4096 }, layoutId: { type: 'string', minLength: 1, maxLength: 80 }, candidateId: { type: 'string', minLength: 1, maxLength: 80 }, productNameLabel: { type: 'string', maxLength: 24 }, headline: { type: 'string', maxLength: 14 }, confirmed: { type: 'boolean', const: true }, idempotencyKey: { type: 'string', pattern: '^[A-Za-z0-9._:-]{8,120}$' } }, required: ['connectKind', 'productId', 'generatedImageUrl', 'confirmed', 'idempotencyKey'], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  {
+    name: 'blog_profile_get',
+    title: '네이버 블로그 프로필 확인',
+    description: '로그인된 PC에서 현재 네이버 블로그 별명, 블로그명, 소개글과 관리 화면 백업을 읽습니다. 값을 변경하지 않습니다.',
+    inputSchema: { type: 'object', properties: { idempotencyKey: { type: 'string', pattern: '^[A-Za-z0-9._:-]{8,120}$' } }, required: ['idempotencyKey'], additionalProperties: false },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  {
+    name: 'blog_profile_prepare_update',
+    title: '블로그 프로필 변경 미리보기',
+    description: '별명, 블로그명 또는 소개글 변경안을 준비하고 현재 상태와 비교합니다. 이 단계에서는 네이버에 저장하지 않습니다.',
+    inputSchema: { type: 'object', properties: { nickname: { type: 'string', minLength: 1, maxLength: 20 }, blogName: { type: 'string', minLength: 1, maxLength: 50 }, introduction: { type: 'string', maxLength: 200 }, idempotencyKey: { type: 'string', pattern: '^[A-Za-z0-9._:-]{8,120}$' } }, required: ['idempotencyKey'], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  {
+    name: 'blog_profile_apply_update',
+    title: '승인된 블로그 프로필 변경 적용',
+    description: '미리보기에서 발급된 계획과 확인 토큰을 사용해 네이버 블로그 프로필을 실제 저장하고 다시 읽어 검증합니다. 사용자 승인 후에만 confirmed=true로 호출하세요.',
+    inputSchema: { type: 'object', properties: { planId: { type: 'string', minLength: 20, maxLength: 80 }, confirmationToken: { type: 'string', minLength: 20, maxLength: 80 }, confirmed: { type: 'boolean', const: true }, idempotencyKey: { type: 'string', pattern: '^[A-Za-z0-9._:-]{8,120}$' } }, required: ['planId', 'confirmationToken', 'confirmed', 'idempotencyKey'], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+  },
+  {
+    name: 'blog_design_get',
+    title: '네이버 블로그 디자인 설정 확인',
+    description: '현재 스킨, 레이아웃, 세부 디자인 관리 경로를 확인하고 백업 화면을 만듭니다. 값을 변경하지 않습니다. 네이버 디자인 편집기는 구조가 유동적이므로 자동 저장보다 사용자 미리보기와 수동 확인을 우선합니다.',
+    inputSchema: { type: 'object', properties: { idempotencyKey: { type: 'string', pattern: '^[A-Za-z0-9._:-]{8,120}$' } }, required: ['idempotencyKey'], additionalProperties: false },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
   {
     name: 'post_publish',
@@ -74,6 +117,11 @@ const TOOLS = [
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
   },
 ] as const;
+
+const ADVERTISED_TOOLS = TOOLS.map((tool) => ({
+  ...tool,
+  securitySchemes: [{ type: 'oauth2', scopes: [tool.annotations.readOnlyHint ? 'mcp:read' : 'mcp:write'] }],
+}));
 
 function rpcResult(id: JsonRpcId, result: unknown, status = 200) {
   return NextResponse.json({ jsonrpc: '2.0', id, result }, { status, headers: RESPONSE_HEADERS });
@@ -191,9 +239,33 @@ async function callTool(userId: string, name: string, args: JsonObject) {
     return toolPayload({ ok: true, jobId, status: 'CANCELLED' });
   }
 
-  const types: Record<string, string> = { brandconnect_list_products: 'BRANDCONNECT_LIST_PRODUCTS', brandconnect_sync_products: 'BRANDCONNECT_SYNC_PRODUCTS', post_create_draft: 'POST_CREATE_DRAFT', post_publish: 'POST_PUBLISH', post_schedule: 'POST_SCHEDULE' };
+  const types: Record<string, string> = { brandconnect_list_products: 'BRANDCONNECT_LIST_PRODUCTS', brandconnect_sync_products: 'BRANDCONNECT_SYNC_PRODUCTS', post_create_draft: 'POST_CREATE_DRAFT', thumbnail_prepare: 'THUMBNAIL_PREPARE', thumbnail_apply_generated: 'THUMBNAIL_APPLY_GENERATED', blog_profile_get: 'BLOG_PROFILE_GET', blog_profile_prepare_update: 'BLOG_PROFILE_PREPARE', blog_profile_apply_update: 'BLOG_PROFILE_APPLY', blog_design_get: 'BLOG_DESIGN_GET', post_publish: 'POST_PUBLISH', post_schedule: 'POST_SCHEDULE' };
   const type = types[name];
   if (!type) return toolPayload({ ok: false, code: 'TOOL_NOT_FOUND', message: '지원하지 않는 도구입니다.' }, true);
+  if (name.startsWith('blog_profile_') || name === 'blog_design_get') {
+    const idempotencyKey = validIdempotencyKey(args);
+    if (!idempotencyKey) return toolPayload({ ok: false, code: 'INVALID_IDEMPOTENCY_KEY', message: 'idempotencyKey는 영문·숫자·._:- 조합 8~120자로 입력해야 합니다.' }, true);
+    const safeArgs: JsonObject = { idempotencyKey };
+    if (name === 'blog_profile_prepare_update') {
+      const nickname = stringArg(args, 'nickname');
+      const blogName = stringArg(args, 'blogName');
+      const hasIntroduction = typeof args.introduction === 'string';
+      const introduction = hasIntroduction ? (args.introduction as string).trim() : '';
+      if (!nickname && !blogName && !hasIntroduction) return toolPayload({ ok: false, code: 'NO_PROFILE_CHANGES', message: '변경할 별명, 블로그명 또는 소개글이 필요합니다.' }, true);
+      if (nickname) safeArgs.nickname = nickname;
+      if (blogName) safeArgs.blogName = blogName;
+      if (hasIntroduction) safeArgs.introduction = introduction;
+    }
+    if (name === 'blog_profile_apply_update') {
+      const planId = stringArg(args, 'planId');
+      const confirmationToken = stringArg(args, 'confirmationToken');
+      if (!planId || !confirmationToken || args.confirmed !== true) return toolPayload({ ok: false, code: 'CONFIRMATION_REQUIRED', message: '미리보기 계획, 확인 토큰, confirmed=true가 필요합니다.' }, true);
+      safeArgs.planId = planId;
+      safeArgs.confirmationToken = confirmationToken;
+      safeArgs.confirmed = true;
+    }
+    return enqueue(userId, type, safeArgs);
+  }
   const connectKind = stringArg(args, 'connectKind');
   if (!CONNECT_KINDS.includes(connectKind)) return toolPayload({ ok: false, code: 'INVALID_CONNECT_KIND', message: 'connectKind는 shopping 또는 travel이어야 합니다.' }, true);
   const safeArgs: JsonObject = { connectKind };
@@ -217,13 +289,49 @@ async function callTool(userId: string, name: string, args: JsonObject) {
     if (count < 1 || count > 50) return toolPayload({ ok: false, code: 'INVALID_COUNT', message: 'count는 1~50의 정수여야 합니다.' }, true);
     safeArgs.count = count;
   }
-  if (name === 'post_create_draft') {
+  if (name === 'post_create_draft' || name === 'thumbnail_prepare' || name === 'thumbnail_apply_generated') {
     const productId = stringArg(args, 'productId');
     if (!productId || productId.length > 160) return toolPayload({ ok: false, code: 'INVALID_PRODUCT_ID', message: 'productId를 확인하세요.' }, true);
     safeArgs.productId = productId;
-    const memo = stringArg(args, 'memo');
-    if (memo.length > 1000) return toolPayload({ ok: false, code: 'MEMO_TOO_LONG', message: 'memo는 1000자 이하여야 합니다.' }, true);
-    if (memo) safeArgs.memo = memo;
+    if (name === 'post_create_draft') {
+      const memo = stringArg(args, 'memo');
+      if (memo.length > 1000) return toolPayload({ ok: false, code: 'MEMO_TOO_LONG', message: 'memo는 1000자 이하여야 합니다.' }, true);
+      if (memo) safeArgs.memo = memo;
+      const qualityPreset = stringArg(args, 'qualityPreset') || 'premium';
+      const experienceMode = stringArg(args, 'experienceMode') || 'ai_assisted_information';
+      const experienceNotes = stringArg(args, 'experienceNotes');
+      if (!['standard', 'premium'].includes(qualityPreset)) return toolPayload({ ok: false, code: 'INVALID_QUALITY_PRESET', message: 'qualityPreset은 standard 또는 premium이어야 합니다.' }, true);
+      if (!['ai_assisted_information', 'verified_experience'].includes(experienceMode)) return toolPayload({ ok: false, code: 'INVALID_EXPERIENCE_MODE', message: '지원하지 않는 experienceMode입니다.' }, true);
+      if (experienceNotes.length > 4000) return toolPayload({ ok: false, code: 'EXPERIENCE_NOTES_TOO_LONG', message: 'experienceNotes는 4000자 이하여야 합니다.' }, true);
+      if (experienceMode === 'verified_experience' && experienceNotes.length < 20) return toolPayload({ ok: false, code: 'EXPERIENCE_EVIDENCE_REQUIRED', message: '실제 체험형 문체를 사용하려면 구체적인 체험 사실 메모가 필요합니다.' }, true);
+      safeArgs.qualityPreset = qualityPreset;
+      safeArgs.experienceMode = experienceMode;
+      if (experienceNotes) safeArgs.experienceNotes = experienceNotes;
+    }
+    if (name === 'thumbnail_prepare') {
+      const layout = stringArg(args, 'layout') || 'auto';
+      const candidateCount = typeof args.candidateCount === 'number' && Number.isInteger(args.candidateCount) ? args.candidateCount : 3;
+      if (!['auto', 'clean-editorial', 'color-block', 'soft-lifestyle', 'cinematic', 'emotional-record', 'route'].includes(layout)) return toolPayload({ ok: false, code: 'INVALID_THUMBNAIL_LAYOUT', message: '지원하지 않는 썸네일 레이아웃입니다.' }, true);
+      if (candidateCount < 1 || candidateCount > 3) return toolPayload({ ok: false, code: 'INVALID_CANDIDATE_COUNT', message: 'candidateCount는 1~3의 정수여야 합니다.' }, true);
+      safeArgs.layout = layout;
+      safeArgs.candidateCount = candidateCount;
+    }
+    if (name === 'thumbnail_apply_generated') {
+      const generatedImageUrl = stringArg(args, 'generatedImageUrl');
+      try {
+        const parsed = new URL(generatedImageUrl);
+        if (parsed.protocol !== 'https:' || generatedImageUrl.length > 4096) throw new Error('invalid');
+      } catch {
+        return toolPayload({ ok: false, code: 'INVALID_GENERATED_IMAGE_URL', message: 'ChatGPT가 만든 다운로드 가능한 HTTPS 이미지 주소가 필요합니다.' }, true);
+      }
+      if (args.confirmed !== true) return toolPayload({ ok: false, code: 'CONFIRMATION_REQUIRED', message: '생성 이미지를 확인한 뒤 confirmed=true가 필요합니다.' }, true);
+      safeArgs.generatedImageUrl = generatedImageUrl;
+      safeArgs.confirmed = true;
+      for (const key of ['layoutId', 'candidateId', 'productNameLabel', 'headline']) {
+        const value = stringArg(args, key);
+        if (value) safeArgs[key] = value;
+      }
+    }
   }
   if (name === 'post_publish' || name === 'post_schedule') {
     if (args.confirmed !== true) return toolPayload({ ok: false, code: 'CONFIRMATION_REQUIRED', message: '실제 발행 전 confirmed=true 확인이 필요합니다.' }, true);
@@ -241,15 +349,18 @@ async function callTool(userId: string, name: string, args: JsonObject) {
 }
 
 export async function POST(request: Request, context: { params: Promise<{ credential: string }> }) {
-  if (!validOrigin(request)) return rpcError(null, -32000, 'Invalid Origin.', 403);
-  const contentType = request.headers.get('content-type') || '';
-  if (!contentType.toLowerCase().includes('application/json')) return rpcError(null, -32700, 'Content-Type must be application/json.', 415);
-
   const { credential } = await context.params;
   const split = splitMcpCredential(credential);
   if (!split) return rpcError(null, -32001, 'MCP endpoint is invalid.', 404);
   const connection = await resolveMcpConnection(split.endpointId, split.secret);
   if (!connection) return rpcError(null, -32001, 'MCP endpoint was revoked or is invalid.', 401);
+  return handleMcpRequest(request, connection.userId, 'mcp:read mcp:write');
+}
+
+export async function handleMcpRequest(request: Request, userId: string, oauthScope: string) {
+  if (!validOrigin(request)) return rpcError(null, -32000, 'Invalid Origin.', 403);
+  const contentType = request.headers.get('content-type') || '';
+  if (!contentType.toLowerCase().includes('application/json')) return rpcError(null, -32700, 'Content-Type must be application/json.', 415);
 
   const body = await readObject(request, 256 * 1024);
   if (!body) return rpcError(null, -32700, 'Parse error');
@@ -308,10 +419,15 @@ export async function POST(request: Request, context: { params: Promise<{ creden
       }));
     }
     if (method === 'ping') return rpcResult(id, modern ? completeResult({}) : {});
-    if (method === 'tools/list') return rpcResult(id, modern ? completeResult({ tools: TOOLS, ttlMs: 300_000, cacheScope: 'private' }) : { tools: TOOLS });
+    if (method === 'tools/list') return rpcResult(id, modern ? completeResult({ tools: ADVERTISED_TOOLS, ttlMs: 300_000, cacheScope: 'private' }) : { tools: ADVERTISED_TOOLS });
     if (method === 'tools/call') {
       const name = typeof params.name === 'string' ? params.name : '';
-      const result = await callTool(connection.userId, name, asObject(params.arguments));
+      const tool = TOOLS.find((candidate) => candidate.name === name);
+      const requiredScope = tool?.annotations.readOnlyHint ? 'mcp:read' : 'mcp:write';
+      if (!tool || !hasOAuthScope(oauthScope, requiredScope)) {
+        return rpcResult(id, toolPayload({ ok: false, code: 'INSUFFICIENT_SCOPE', message: '이 작업에 필요한 권한이 없습니다.' }, true));
+      }
+      const result = await callTool(userId, name, asObject(params.arguments));
       return rpcResult(id, modern ? completeResult(result) : result);
     }
     return rpcError(id, -32601, 'Method not found', modern ? 404 : 200);

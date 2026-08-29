@@ -1,4 +1,9 @@
 import { assessProductEditorialCoverage } from "./product-editorial-plan";
+import type {
+  BrandConnectKind,
+  PostExperienceMode,
+  PostQualityReportV1,
+} from "../../src/lib/post-composition-contract";
 
 export interface BrandLinkContentReadinessInput {
   productName: string;
@@ -9,6 +14,9 @@ export interface BrandLinkContentReadinessInput {
   hasRepresentativeImage: boolean;
   requireRepresentativeImage?: boolean;
   thumbnailGenerated?: boolean;
+  connectKind?: BrandConnectKind;
+  experienceMode?: PostExperienceMode;
+  compositionQualityReport?: PostQualityReportV1 | null;
 }
 
 export interface BrandLinkContentReadinessSignal {
@@ -30,7 +38,8 @@ export interface BrandLinkContentReadiness {
     | "unsupported-experience-claim"
     | "commission-rate-exposed"
     | "internal-guidance-leak"
-    | "missing-representative-image";
+    | "missing-representative-image"
+    | "composition-quality";
   reason: string | null;
   score: number;
   sectionCount: number;
@@ -66,7 +75,35 @@ const UNSUPPORTED_EXPERIENCE_PATTERNS = [
   /택배\s*(?:도착|받아|열어|뜯어)/u,
   /재구매\s*(?:의사|하고|할|각)/u,
   /(?:강력\s*추천|후회\s*없는\s*선택|무조건\s*추천)/u,
+  /(?:직접\s*)?(?:다녀왔|방문했|묵어봤|먹어봤|걸어봤|찍어봤|탑승했)/u,
+  /(?:공항|숙소|호텔|여행지)에\s*도착하니/u,
 ] as const;
+
+const UNSUPPORTED_EXPERIENCE_TITLE_PATTERN = /(?:내돈내산|실사용|직접\s*(?:써본|다녀온)|솔직\s*후기|체험\s*후기)/u;
+
+function assessTravelEditorialCoverage(sections: string[]): {
+  coveredRoles: string[];
+  missingCoreRoles: string[];
+} {
+  const corpus = sections.join("\n");
+  const rolePatterns: Record<string, RegExp> = {
+    overview: /핵심|한눈에|전체\s*(?:일정|동선)/u,
+    route: /코스|동선|이동|방문지/u,
+    lodging: /숙소|호텔|연박|객실/u,
+    inclusions: /포함|불포함|추가\s*비용|예상\s*지출/u,
+    preparation: /날씨|교통|준비물|복장/u,
+    fit: /여행자|잘\s*맞|동행|체력/u,
+    reservation: /예약|취소|변경|출발\s*확정/u,
+  };
+  const coveredRoles = Object.entries(rolePatterns)
+    .filter(([, pattern]) => pattern.test(corpus))
+    .map(([role]) => role);
+  const coreRoles = Object.keys(rolePatterns);
+  return {
+    coveredRoles,
+    missingCoreRoles: coreRoles.filter((role) => !coveredRoles.includes(role)),
+  };
+}
 
 const COMMISSION_RATE_PATTERNS = [
   /(?:수수료|커미션|commission)\s*\d/iu,
@@ -131,8 +168,8 @@ function buildResult(input: {
   const canPublish = input.code === "ok";
   const passingSignals = input.signals.filter((signal) => signal.status === "pass").length;
   const summary = canPublish
-    ? `상품글 발행 게이트 통과 (${input.score}점, 신호 ${passingSignals}/${input.signals.length})`
-    : `상품글 발행 보류 (${input.score}점, ${input.reason || "게이트 미통과"})`;
+    ? `커넥트 글 발행 게이트 통과 (${input.score}점, 신호 ${passingSignals}/${input.signals.length})`
+    : `커넥트 글 발행 보류 (${input.score}점, ${input.reason || "게이트 미통과"})`;
 
   return {
     canPublish,
@@ -153,6 +190,10 @@ export function getBrandLinkContentReadiness(
   input: BrandLinkContentReadinessInput,
 ): BrandLinkContentReadiness {
   const title = normalizeText(input.title);
+  const connectKind = input.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING";
+  const isTravel = connectKind === "TRAVEL";
+  const sectionMinimum = isTravel ? 10 : 9;
+  const characterMinimum = isTravel ? 3200 : 1800;
   const sections = input.sections.map((section) => normalizeText(section)).filter(Boolean);
   const fullBody = sections.join("\n");
   const corpus = normalizeLoose([title, fullBody, input.hashtags.join(" ")].join(" "));
@@ -178,11 +219,18 @@ export function getBrandLinkContentReadiness(
   const bodyContainsRawLink =
     Boolean(normalizedBrandLink && fullBody.includes(normalizedBrandLink)) ||
     /https?:\/\/(?:naver\.me|brandconnect\.naver\.com|shopping\.naver\.com)\/\S+/iu.test(fullBody);
-  const unsupportedExperienceCount = countPatternHits(fullBody, UNSUPPORTED_EXPERIENCE_PATTERNS);
+  const experienceMode = input.experienceMode || "AI_ASSISTED_INFORMATION";
+  const unsupportedExperienceCount =
+    experienceMode === "VERIFIED_EXPERIENCE"
+      ? 0
+      : countPatternHits(fullBody, UNSUPPORTED_EXPERIENCE_PATTERNS) +
+        (UNSUPPORTED_EXPERIENCE_TITLE_PATTERN.test(title) ? 1 : 0);
   const commissionRateCount = countPatternHits(fullBody, COMMISSION_RATE_PATTERNS);
   const internalGuidanceCount = countPatternHits(fullBody, INTERNAL_GUIDANCE_PATTERNS);
   const requireRepresentativeImage = input.requireRepresentativeImage !== false;
-  const editorialCoverage = assessProductEditorialCoverage(sections.slice(0, -1));
+  const editorialCoverage = isTravel
+    ? assessTravelEditorialCoverage(sections.slice(0, -1))
+    : assessProductEditorialCoverage(sections.slice(0, -1));
 
   const baseSignals: BrandLinkContentReadinessSignal[] = [
     {
@@ -198,17 +246,22 @@ export function getBrandLinkContentReadiness(
     {
       key: "sections",
       label: "본문 섹션",
-      status: mainSectionCount >= 4 ? "pass" : "fail",
+      status: mainSectionCount >= sectionMinimum ? "pass" : "fail",
     },
     {
       key: "editorial-flow",
-      label: "문제-효익-근거-사용-주의 흐름",
+      label: isTravel ? "동선-숙소-비용-준비-예약 흐름" : "문제-효익-근거-사용-주의 흐름",
       status: editorialCoverage.missingCoreRoles.length <= 1 ? "pass" : "warn",
     },
     {
       key: "length",
       label: "본문 분량",
-      status: totalLength >= 1000 ? "pass" : totalLength >= 750 ? "warn" : "fail",
+      status:
+        totalLength >= characterMinimum
+          ? "pass"
+          : totalLength >= Math.round(characterMinimum * 0.8)
+            ? "warn"
+            : "fail",
     },
     {
       key: "hashtags",
@@ -257,6 +310,17 @@ export function getBrandLinkContentReadiness(
       label: "생성형 썸네일",
       status: input.thumbnailGenerated ? "pass" : "warn",
     },
+    {
+      key: "composition-quality",
+      label: "포스트 계약 품질",
+      status: input.compositionQualityReport
+        ? input.compositionQualityReport.canAutoPublish
+          ? "pass"
+          : input.compositionQualityReport.preset === "PREMIUM"
+            ? "fail"
+            : "warn"
+        : "warn",
+    },
   ];
 
   const failSignal = baseSignals.find((signal) => signal.status === "fail");
@@ -280,10 +344,10 @@ export function getBrandLinkContentReadiness(
     });
   }
 
-  if (mainSectionCount < 4) {
+  if (mainSectionCount < sectionMinimum) {
     return buildResult({
       code: "too-few-sections",
-      reason: `본문 섹션이 부족합니다. 현재 ${mainSectionCount}개, 최소 4개가 필요합니다.`,
+      reason: `본문 섹션이 부족합니다. 현재 ${mainSectionCount}개, 최소 ${sectionMinimum}개가 필요합니다.`,
       score,
       sectionCount: sections.length,
       hashtagCount: input.hashtags.length,
@@ -294,7 +358,7 @@ export function getBrandLinkContentReadiness(
     });
   }
 
-  if (totalLength < 750) {
+  if (totalLength < Math.round(characterMinimum * 0.8)) {
     return buildResult({
       code: "too-short-content",
       reason: `본문 분량이 너무 짧습니다. 현재 ${totalLength}자입니다.`,
@@ -396,6 +460,23 @@ export function getBrandLinkContentReadiness(
     return buildResult({
       code: "missing-representative-image",
       reason: "판매페이지 대표 이미지를 확정하지 못했습니다.",
+      score,
+      sectionCount: sections.length,
+      hashtagCount: input.hashtags.length,
+      totalLength,
+      coveredProductTokens,
+      missingProductTokens,
+      signals: baseSignals,
+    });
+  }
+
+  if (
+    input.compositionQualityReport?.preset === "PREMIUM" &&
+    !input.compositionQualityReport.canAutoPublish
+  ) {
+    return buildResult({
+      code: "composition-quality",
+      reason: input.compositionQualityReport.blockers.join(" "),
       score,
       sectionCount: sections.length,
       hashtagCount: input.hashtags.length,

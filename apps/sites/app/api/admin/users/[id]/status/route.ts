@@ -31,6 +31,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   ];
   if (status !== 'APPROVED') {
     statements.push(d1.prepare(`UPDATE devices SET status='REVOKED', revoked_at=? WHERE user_id=? AND status='ACTIVE'`).bind(now, id));
+    statements.push(d1.prepare(`UPDATE oauth_tokens SET status='REVOKED', revoked_at=? WHERE user_id=? AND status='ACTIVE'`).bind(now, id));
     statements.push(d1.prepare(`UPDATE agent_jobs SET status='CANCELLED', error_code='ACCOUNT_DISABLED', error_message='계정 상태 변경으로 취소됨', updated_at=?, finished_at=? WHERE user_id=? AND status IN ('QUEUED','RUNNING')`).bind(now, now, id));
   }
   await d1.batch(statements);

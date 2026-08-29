@@ -58,6 +58,20 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const updateError = requireNoPendingDesktopUpdate();
   if (updateError) return updateError;
   const { id } = await params;
+  const body = await request.json().catch(() => ({})) as {
+    qualityPreset?: string;
+    experienceMode?: string;
+    experienceNotes?: string;
+    memo?: string;
+  };
+  const qualityPreset = body.qualityPreset === "standard" ? "STANDARD" : "PREMIUM";
+  const experienceMode = body.experienceMode === "verified_experience"
+    ? "VERIFIED_EXPERIENCE"
+    : "AI_ASSISTED_INFORMATION";
+  const experienceNotes = typeof body.experienceNotes === "string" ? body.experienceNotes.trim().slice(0, 4000) : "";
+  if (experienceMode === "VERIFIED_EXPERIENCE" && experienceNotes.length < 20) {
+    return NextResponse.json({ success: false, error: "실제 체험형 문체를 사용하려면 구체적인 체험 사실 메모가 필요합니다." }, { status: 400 });
+  }
   const link = await prisma.brandLink.findUnique({ where: { id }, select: { id: true, status: true } });
   if (!link) return NextResponse.json({ success: false, error: "상품을 찾을 수 없습니다." }, { status: 404 });
   if (link.status === "PUBLISHING") return NextResponse.json({ success: false, error: "현재 발행 중인 상품입니다." }, { status: 409 });
@@ -89,6 +103,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           PRODUCT_POST_LOCAL_FALLBACK_ENABLED: "true",
           PRODUCT_THUMBNAIL_CHATGPT_ENABLED: "false",
           PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_FALLBACK_ENABLED: "false",
+          BRANDLINK_QUALITY_PRESET: qualityPreset,
+          BRANDLINK_EXPERIENCE_MODE: experienceMode,
+          BRANDLINK_EXPERIENCE_NOTES: experienceNotes,
         },
       });
       child.once("error", reject);

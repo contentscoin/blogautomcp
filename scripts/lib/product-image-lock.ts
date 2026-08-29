@@ -2,6 +2,11 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
+import {
+  buildThumbnailOverlayV2,
+  generateThumbnailCropPreviews,
+  type ThumbnailV2Style,
+} from "./thumbnail-layout-v2";
 
 export interface ProductImageLockManifest {
   version: "product-image-lock/v1";
@@ -24,10 +29,10 @@ export interface LockedProductThumbnailResult {
 
 export type ShoppingThumbnailStyle = "shopping-clean" | "shopping-bold" | "shopping-soft";
 
-function shoppingPalette(style: ShoppingThumbnailStyle) {
-  if (style === "shopping-bold") return { start: "#09090b", end: "#312e81", halo: "#fef3c7", accent: "#f97316", label: "#fdba74" };
-  if (style === "shopping-soft") return { start: "#f8fafc", end: "#dbeafe", halo: "#ffffff", accent: "#2563eb", label: "#1d4ed8", darkText: true };
-  return { start: "#07111f", end: "#243b53", halo: "#e9f2f9", accent: "#facc15", label: "#8bd3ff" };
+function thumbnailV2Style(style: ShoppingThumbnailStyle | undefined): ThumbnailV2Style {
+  if (style === "shopping-bold") return "shopping-color-block";
+  if (style === "shopping-soft") return "shopping-soft-lifestyle";
+  return "shopping-clean-editorial";
 }
 
 const sha256File = (filePath: string): string =>
@@ -115,10 +120,6 @@ export async function extractLockedProductPng(
   return manifest;
 }
 
-function escapeXml(value: string): string {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
-
 export async function createLockedProductThumbnail(options: {
   sourcePath: string;
   outputDir: string;
@@ -128,34 +129,62 @@ export async function createLockedProductThumbnail(options: {
   style?: ShoppingThumbnailStyle;
 }): Promise<LockedProductThumbnailResult> {
   const lock = await extractLockedProductPng(options.sourcePath, options.outputDir);
-  const palette = shoppingPalette(options.style || "shopping-clean");
-  const headlineColor = palette.darkText ? "#0f172a" : "#ffffff";
-  const sublineColor = palette.darkText ? "#334155" : "#d9e7f2";
   const product = await sharp(lock.lockedPngPath)
     .trim({ background: { r: 255, g: 255, b: 255, alpha: 0 } })
-    .resize(760, 720, { fit: "contain", withoutEnlargement: true, background: { r: 255, g: 255, b: 255, alpha: 0 } })
+    .resize(430, 720, { fit: "contain", withoutEnlargement: true, background: { r: 255, g: 255, b: 255, alpha: 0 } })
     .png()
     .toBuffer();
-  if ((options.style || "shopping-clean") === "shopping-clean") {
-    const outputPath = path.join(options.outputDir, `locked-product-thumbnail-${Date.now()}.png`);
-    const photoFirstSvg = Buffer.from(`<svg width="1600" height="900" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="photoBg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#f8fafc"/><stop offset="1" stop-color="#e8eef5"/></linearGradient><filter id="cardShadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#0f172a" flood-opacity=".14"/></filter><filter id="productShadow" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="18"/></filter></defs><rect width="1600" height="900" fill="url(#photoBg)"/><rect x="56" y="56" width="770" height="788" rx="40" fill="#ffffff" fill-opacity=".74"/><rect x="870" y="56" width="674" height="788" rx="40" fill="#ffffff" filter="url(#cardShadow)"/><ellipse cx="1210" cy="750" rx="230" ry="30" fill="#0f172a" opacity=".14" filter="url(#productShadow)"/><text x="112" y="180" font-family="Malgun Gothic,Noto Sans CJK KR,sans-serif" font-size="34" font-weight="800" fill="${palette.label}">${escapeXml(options.productName.slice(0, 28))}</text><text x="112" y="350" font-family="Malgun Gothic,Noto Sans CJK KR,sans-serif" font-size="72" font-weight="900" fill="#0f172a">${escapeXml(options.headline.slice(0, 16))}</text><text x="112" y="430" font-family="Malgun Gothic,Noto Sans CJK KR,sans-serif" font-size="36" font-weight="700" fill="#475569">${escapeXml(options.subline.slice(0, 24))}</text><rect x="112" y="724" width="292" height="2" fill="#94a3b8"/><text x="112" y="780" font-family="Malgun Gothic,Noto Sans CJK KR,sans-serif" font-size="27" font-weight="600" fill="#475569">실제 상품 이미지 · 구매 전 체크</text></svg>`);
-    await sharp(photoFirstSvg).composite([{ input: product, left: 922, top: 108 }]).png({ compressionLevel: 9 }).toFile(outputPath);
-    return { outputPath, lock };
-  }
-  const svg = Buffer.from(`<svg width="1600" height="900" xmlns="http://www.w3.org/2000/svg">
-    <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="${palette.start}"/><stop offset="1" stop-color="${palette.end}"/></linearGradient><filter id="shadow"><feDropShadow dx="0" dy="18" stdDeviation="20" flood-opacity=".22"/></filter></defs>
-    <rect width="1600" height="900" fill="url(#bg)"/><circle cx="1220" cy="420" r="390" fill="${palette.halo}" opacity=".98"/>
-    <rect x="34" y="34" width="1532" height="832" rx="34" fill="none" stroke="${palette.darkText ? "#94a3b8" : "#fff"}" stroke-width="5" opacity=".9"/>
-    <text x="100" y="165" font-family="Malgun Gothic,Noto Sans CJK KR,sans-serif" font-size="38" font-weight="800" fill="${palette.label}">${escapeXml(options.productName.slice(0, 34))}</text>
-    <text x="100" y="330" font-family="Malgun Gothic,Noto Sans CJK KR,sans-serif" font-size="92" font-weight="900" fill="${headlineColor}">${escapeXml(options.headline)}</text>
-    <text x="100" y="415" font-family="Malgun Gothic,Noto Sans CJK KR,sans-serif" font-size="42" font-weight="700" fill="${sublineColor}">${escapeXml(options.subline)}</text>
-    <rect x="100" y="700" width="330" height="82" rx="41" fill="${palette.accent}" filter="url(#shadow)"/><text x="265" y="755" text-anchor="middle" font-family="Malgun Gothic,Noto Sans CJK KR,sans-serif" font-size="36" font-weight="900" fill="#111827">구매 포인트</text>
-  </svg>`);
+  const svg = await buildThumbnailOverlayV2({
+    eyebrow: options.productName,
+    headline: options.headline || options.subline,
+    style: thumbnailV2Style(options.style),
+    subjectSide: "right",
+  });
   const outputPath = path.join(options.outputDir, `locked-product-thumbnail-${Date.now()}.png`);
   await sharp(svg)
-    .composite([{ input: product, left: 850, top: 100 }])
+    .composite([{ input: product, left: 620, top: 190 }])
     .png({ compressionLevel: 9 })
     .toFile(outputPath);
+  await generateThumbnailCropPreviews(outputPath, options.outputDir);
+  return { outputPath, lock };
+}
+
+/** GPT가 만든 상품 없는 실사 배경 위에 잠긴 원본 상품과 검증된 한글 카피만 합성한다. */
+export async function createLockedProductThumbnailOnBackground(options: {
+  sourcePath: string;
+  backgroundPath: string;
+  outputDir: string;
+  productName: string;
+  headline: string;
+  subline: string;
+  style?: ThumbnailV2Style;
+}): Promise<LockedProductThumbnailResult> {
+  if (!fs.existsSync(options.backgroundPath)) throw new Error("GPT 생성 배경 이미지를 찾을 수 없습니다.");
+  const lock = await extractLockedProductPng(options.sourcePath, options.outputDir);
+  const background = await sharp(options.backgroundPath)
+    .resize(1080, 1080, { fit: "cover", position: "attention" })
+    .modulate({ brightness: 0.96, saturation: 0.94 })
+    .png()
+    .toBuffer();
+  const product = await sharp(lock.lockedPngPath)
+    .trim({ background: { r: 255, g: 255, b: 255, alpha: 0 } })
+    .resize(430, 720, { fit: "contain", withoutEnlargement: true, background: { r: 255, g: 255, b: 255, alpha: 0 } })
+    .png()
+    .toBuffer();
+  const overlay = await buildThumbnailOverlayV2({
+    eyebrow: options.productName,
+    headline: options.headline || options.subline,
+    style: options.style || "shopping-color-block",
+    subjectSide: "right",
+    transparentBackground: true,
+  });
+  fs.mkdirSync(options.outputDir, { recursive: true });
+  const outputPath = path.join(options.outputDir, `gpt-background-product-thumbnail-${Date.now()}.png`);
+  await sharp(background)
+    .composite([{ input: overlay }, { input: product, left: 620, top: 190 }])
+    .png({ compressionLevel: 9 })
+    .toFile(outputPath);
+  await generateThumbnailCropPreviews(outputPath, options.outputDir);
   return { outputPath, lock };
 }
 
@@ -169,11 +198,25 @@ export async function createOriginalProductPhotoThumbnail(options: {
   style?: ShoppingThumbnailStyle;
 }): Promise<{ outputPath: string; sourceSha256: string }> {
   fs.mkdirSync(options.outputDir, { recursive: true });
-  const palette = shoppingPalette(options.style || "shopping-clean");
-  const photo = await sharp(options.sourcePath).resize(760, 720, { fit: "contain", withoutEnlargement: true, background: { r: 255, g: 255, b: 255, alpha: 1 } }).png().toBuffer();
-  const headlineColor = palette.darkText ? "#0f172a" : "#fff";
-  const svg = Buffer.from(`<svg width="1600" height="900" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="bg"><stop stop-color="${palette.start}"/><stop offset="1" stop-color="${palette.end}"/></linearGradient></defs><rect width="1600" height="900" fill="url(#bg)"/><rect x="805" y="70" width="745" height="760" rx="42" fill="#fff"/><text x="92" y="165" font-family="Malgun Gothic,Noto Sans CJK KR,sans-serif" font-size="36" font-weight="800" fill="${palette.label}">${escapeXml(options.productName.slice(0, 34))}</text><text x="92" y="330" font-family="Malgun Gothic,Noto Sans CJK KR,sans-serif" font-size="88" font-weight="900" fill="${headlineColor}">${escapeXml(options.headline)}</text><text x="92" y="420" font-family="Malgun Gothic,Noto Sans CJK KR,sans-serif" font-size="40" font-weight="700" fill="${palette.darkText ? "#334155" : "#dbeafe"}">${escapeXml(options.subline)}</text><rect x="92" y="700" width="330" height="82" rx="41" fill="${palette.accent}"/><text x="257" y="755" text-anchor="middle" font-family="Malgun Gothic,Noto Sans CJK KR,sans-serif" font-size="36" font-weight="900" fill="#111827">원본 사진 사용</text></svg>`);
+  const photo = await sharp(options.sourcePath)
+    .resize(410, 690, {
+      fit: "contain",
+      withoutEnlargement: true,
+      background: { r: 255, g: 255, b: 255, alpha: 1 },
+    })
+    .png()
+    .toBuffer();
+  const svg = await buildThumbnailOverlayV2({
+    eyebrow: options.productName,
+    headline: options.headline || options.subline,
+    style: thumbnailV2Style(options.style),
+    subjectSide: "right",
+  });
   const outputPath = path.join(options.outputDir, `original-product-thumbnail-${Date.now()}.png`);
-  await sharp(svg).composite([{ input: photo, left: 800, top: 90 }]).png({ compressionLevel: 9 }).toFile(outputPath);
+  await sharp(svg)
+    .composite([{ input: photo, left: 630, top: 200 }])
+    .png({ compressionLevel: 9 })
+    .toFile(outputPath);
+  await generateThumbnailCropPreviews(outputPath, options.outputDir);
   return { outputPath, sourceSha256: sha256File(options.sourcePath) };
 }

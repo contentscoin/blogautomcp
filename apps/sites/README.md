@@ -7,8 +7,10 @@ ChatGPT와 한 대의 Windows 로컬 에이전트를 연결해 네이버 브랜�
 - Sites의 ChatGPT 로그인으로 계정을 식별합니다.
 - `hiway@kakao.com` 계정만 관리자로 자동 지정됩니다.
 - 일반 사용자는 D1에 승인 대기로 등록되고 관리자가 승인합니다.
-- 승인된 사용자는 한 번만 표시되는 MCP URL 하나를 발급받습니다.
-- MCP URL을 다시 발급하면 기존 URL, PC 토큰, 대기·진행 작업이 폐기됩니다.
+- ChatGPT에는 고정 주소 `/api/mcp`를 등록하고, Site에서 로그인한 GPT 계정으로 OAuth 2.1 인증합니다.
+- OAuth는 authorization code + PKCE(S256), 짧은 access token, 회전되는 refresh token을 사용합니다.
+- Windows 앱은 별도의 일회성 PC 연결 주소로 인증합니다.
+- PC 연결 주소를 다시 발급하면 기존 주소, PC 토큰, 대기·진행 작업이 폐기됩니다.
 - 새 PC가 연결되면 기존 PC 인증과 기존 PC의 진행 작업이 폐기됩니다.
 - 실제 즉시 발행과 예약 발행은 MCP 도구에 `confirmed=true`가 있어야 큐에 들어갑니다.
 - 활성 PC는 중앙 업데이트 채널을 주기적으로 확인하고, 진행 중 작업이 끝난 뒤 새 버전을 자동 설치합니다.
@@ -48,6 +50,12 @@ npm run build
 ```
 
 `verify-quality.ps1`은 TypeScript, ESLint, 운영 의존성 감사, MCP 2025-11-25 초기화, 단일 PC 교체, 여행커넥트 작업 생명주기, 발행 확인 게이트, 멱등성, MCP 회전을 검증합니다.
+
+OAuth 전용 검증은 개발 서버 주소에 맞춰 실행합니다.
+
+```powershell
+pwsh -NoProfile -File scripts/verify-oauth-e2e.ps1 -BaseUrl http://localhost:3000
+```
 
 ## 데이터
 

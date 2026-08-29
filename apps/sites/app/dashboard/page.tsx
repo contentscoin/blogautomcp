@@ -41,7 +41,7 @@ export default async function DashboardPage() {
           <div className="download-copy">
             <span className="card-kicker">WINDOWS DESKTOP AGENT</span>
             <h2>PC 프로그램 설치</h2>
-            <p>로컬 프로그램을 설치한 뒤, 승인 후 발급되는 MCP 주소로 이 PC를 연결하세요. ChatGPT 로그인은 프로그램에서 요구하지 않습니다.</p>
+            <p>로컬 프로그램을 설치한 뒤 PC 연결 주소로 이 PC를 인증하세요. ChatGPT MCP는 Site의 GPT 로그인 계정으로 별도 인증됩니다.</p>
           </div>
           <div className="download-action">
             <span className="download-platform">WINDOWS 10/11 · 64-BIT</span>
@@ -59,7 +59,7 @@ export default async function DashboardPage() {
         ) : (
           <>
             <section className="metric-grid">
-              <article><span>MCP 연결</span><strong>{connection ? `Generation ${connection.generation}` : '미발급'}</strong><small>{connection ? '활성 주소 1개' : '처음 발급이 필요합니다'}</small></article>
+              <article><span>ChatGPT MCP</span><strong>OAuth 인증</strong><small>GPT 로그인 계정과 연결</small></article>
               <article><span>로컬 PC</span><strong>{online ? '온라인' : device ? '오프라인' : '미연결'}</strong><small>{device?.name || 'MCP 주소를 앱에 입력하세요'}</small></article>
               <article><span>최근 작업</span><strong>{jobs.length}건</strong><small>대기 {jobs.filter((job) => job.status === 'QUEUED').length} · 실행 {jobs.filter((job) => job.status === 'RUNNING').length}</small></article>
             </section>
