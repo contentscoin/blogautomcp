@@ -111,6 +111,23 @@ export function isRepresentativeTravelImageDimension(width: number, height: numb
   return ratio >= 0.72 && ratio <= 2.15;
 }
 
+export function isUsableBodyUploadImageDimension(
+  width: number,
+  height: number,
+  connectKind: "SHOPPING" | "TRAVEL",
+): boolean {
+  if (connectKind === "TRAVEL") {
+    // 여행 판매페이지는 640x480 실사 사진을 다수 제공한다. 상품용 500px 최소변을
+    // 그대로 적용하면 정상 사진의 대부분이 수집 후 업로드 단계에서 다시 탈락한다.
+    return (
+      isUsableBlogProductImageDimension(width, height) ||
+      isRepresentativeTravelImageDimension(width, height)
+    );
+  }
+
+  return width >= 500 && height >= 500 && isUsableBlogProductImageDimension(width, height);
+}
+
 export function scoreProductImageDimensions(width: number, height: number): number {
   if (width <= 0 || height <= 0) return 0;
   const area = width * height;

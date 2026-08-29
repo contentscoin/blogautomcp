@@ -17,6 +17,7 @@ interface BrandPostPackageManifestBase {
   brandLinkId: string;
   connectKind: "SHOPPING" | "TRAVEL";
   title: string;
+  generationSource?: "AI" | "PREPARED_APPROVED";
   markdownPath: string;
   heroImagePath: string;
   bodyImagePaths: string[];
@@ -82,6 +83,9 @@ export function approveBrandPostPackage(brandLinkId: string): BrandPostPackageMa
   const manifestPath = getBrandPostPackageManifestPath(brandLinkId);
   const manifest = readBrandPostPackage(brandLinkId);
   if (!manifest) throw new Error("승인할 고품질 초안이 없습니다.");
+  if (manifest.version === "brand-post-package/v2" && manifest.generationSource !== "AI") {
+    throw new Error("AI 생성 출처가 확인되지 않은 초안은 승인할 수 없습니다. 새 초안을 생성해 주세요.");
+  }
   if (
     manifest.version === "brand-post-package/v2" &&
     manifest.composition.qualityReport.preset === "PREMIUM" &&

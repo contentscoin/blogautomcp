@@ -1,0 +1,518 @@
+{
+  "category": "travel",
+  "generated_at": "2026-08-30T00:34:10+09:00",
+  "method": {
+    "ranking_definition": "Naver blog-tab non-personalized server session, query rank 1-6 at collection time",
+    "causality_warning": "Observed co-occurrence in currently ranked posts; not proof that a pattern caused ranking.",
+    "copyright_policy": "No full post body persisted; only provenance, short search snippets, short headings, and derived metrics.",
+    "quality_threshold": 60
+  },
+  "counts": {
+    "queries": 24,
+    "successful_queries": 24,
+    "candidate_urls": 137,
+    "valid_posts": 137,
+    "quality_eligible_posts": 137,
+    "rank_one_quality_posts": 24
+  },
+  "distribution": {
+    "body_chars": {
+      "p25": 1777.0,
+      "median": 2197.0,
+      "p75": 2742.0
+    },
+    "images": {
+      "p25": 18.0,
+      "median": 29.0,
+      "p75": 39.0
+    },
+    "title_length": {
+      "p25": 31.0,
+      "median": 37.0,
+      "p75": 42.0
+    },
+    "median_sentence_length": {
+      "p25": 17.0,
+      "median": 19.0,
+      "p75": 22.0
+    },
+    "median_paragraph_length": {
+      "p25": 17.0,
+      "median": 19.0,
+      "p75": 23.0
+    }
+  },
+  "structure_prevalence": [
+    {
+      "pattern": "itinerary_overview",
+      "count": 137,
+      "percent": 100.0
+    },
+    {
+      "pattern": "transport",
+      "count": 134,
+      "percent": 97.8
+    },
+    {
+      "pattern": "lodging",
+      "count": 128,
+      "percent": 93.4
+    },
+    {
+      "pattern": "strength",
+      "count": 126,
+      "percent": 92.0
+    },
+    {
+      "pattern": "booking_conditions",
+      "count": 125,
+      "percent": 91.2
+    },
+    {
+      "pattern": "place_value",
+      "count": 122,
+      "percent": 89.1
+    },
+    {
+      "pattern": "problem_or_motivation",
+      "count": 121,
+      "percent": 88.3
+    },
+    {
+      "pattern": "destination_orientation",
+      "count": 119,
+      "percent": 86.9
+    },
+    {
+      "pattern": "food",
+      "count": 113,
+      "percent": 82.5
+    },
+    {
+      "pattern": "pace_or_fatigue",
+      "count": 108,
+      "percent": 78.8
+    },
+    {
+      "pattern": "price_or_value",
+      "count": 105,
+      "percent": 76.6
+    },
+    {
+      "pattern": "limitation",
+      "count": 83,
+      "percent": 60.6
+    },
+    {
+      "pattern": "preparation",
+      "count": 83,
+      "percent": 60.6
+    },
+    {
+      "pattern": "identity_or_summary",
+      "count": 77,
+      "percent": 56.2
+    },
+    {
+      "pattern": "fit",
+      "count": 74,
+      "percent": 54.0
+    },
+    {
+      "pattern": "conclusion",
+      "count": 73,
+      "percent": 53.3
+    },
+    {
+      "pattern": "day_by_day",
+      "count": 71,
+      "percent": 51.8
+    },
+    {
+      "pattern": "comparison",
+      "count": 71,
+      "percent": 51.8
+    },
+    {
+      "pattern": "spec_or_facts",
+      "count": 68,
+      "percent": 49.6
+    },
+    {
+      "pattern": "photo_story",
+      "count": 62,
+      "percent": 45.3
+    },
+    {
+      "pattern": "use_scene",
+      "count": 56,
+      "percent": 40.9
+    },
+    {
+      "pattern": "affiliate_cta",
+      "count": 29,
+      "percent": 21.2
+    },
+    {
+      "pattern": "checklist",
+      "count": 29,
+      "percent": 21.2
+    },
+    {
+      "pattern": "affiliate_disclosure",
+      "count": 22,
+      "percent": 16.1
+    },
+    {
+      "pattern": "first_impression",
+      "count": 5,
+      "percent": 3.6
+    }
+  ],
+  "tone_prevalence": [
+    {
+      "pattern": "hedged_judgement",
+      "count": 128,
+      "percent": 93.4
+    },
+    {
+      "pattern": "information_tone",
+      "count": 124,
+      "percent": 90.5
+    },
+    {
+      "pattern": "sensory_scene",
+      "count": 121,
+      "percent": 88.3
+    },
+    {
+      "pattern": "comparison_tone",
+      "count": 117,
+      "percent": 85.4
+    },
+    {
+      "pattern": "decisive_judgement",
+      "count": 111,
+      "percent": 81.0
+    },
+    {
+      "pattern": "conversational",
+      "count": 111,
+      "percent": 81.0
+    },
+    {
+      "pattern": "first_person",
+      "count": 105,
+      "percent": 76.6
+    },
+    {
+      "pattern": "experience_claim",
+      "count": 68,
+      "percent": 49.6
+    },
+    {
+      "pattern": "reader_address",
+      "count": 30,
+      "percent": 21.9
+    }
+  ],
+  "title_prevalence": [
+    {
+      "pattern": "review_word",
+      "count": 70,
+      "percent": 51.1
+    },
+    {
+      "pattern": "number_word",
+      "count": 61,
+      "percent": 44.5
+    },
+    {
+      "pattern": "recommendation_word",
+      "count": 34,
+      "percent": 24.8
+    },
+    {
+      "pattern": "clickbait_word",
+      "count": 18,
+      "percent": 13.1
+    },
+    {
+      "pattern": "comparison_word",
+      "count": 3,
+      "percent": 2.2
+    },
+    {
+      "pattern": "decision_word",
+      "count": 2,
+      "percent": 1.5
+    }
+  ],
+  "rank_one_structure_prevalence": [
+    {
+      "pattern": "itinerary_overview",
+      "count": 24,
+      "percent": 100.0
+    },
+    {
+      "pattern": "transport",
+      "count": 24,
+      "percent": 100.0
+    },
+    {
+      "pattern": "strength",
+      "count": 23,
+      "percent": 95.8
+    },
+    {
+      "pattern": "booking_conditions",
+      "count": 23,
+      "percent": 95.8
+    },
+    {
+      "pattern": "destination_orientation",
+      "count": 22,
+      "percent": 91.7
+    },
+    {
+      "pattern": "place_value",
+      "count": 22,
+      "percent": 91.7
+    },
+    {
+      "pattern": "problem_or_motivation",
+      "count": 21,
+      "percent": 87.5
+    },
+    {
+      "pattern": "price_or_value",
+      "count": 21,
+      "percent": 87.5
+    },
+    {
+      "pattern": "lodging",
+      "count": 21,
+      "percent": 87.5
+    },
+    {
+      "pattern": "food",
+      "count": 21,
+      "percent": 87.5
+    },
+    {
+      "pattern": "pace_or_fatigue",
+      "count": 18,
+      "percent": 75.0
+    },
+    {
+      "pattern": "fit",
+      "count": 16,
+      "percent": 66.7
+    },
+    {
+      "pattern": "limitation",
+      "count": 14,
+      "percent": 58.3
+    },
+    {
+      "pattern": "identity_or_summary",
+      "count": 13,
+      "percent": 54.2
+    },
+    {
+      "pattern": "preparation",
+      "count": 13,
+      "percent": 54.2
+    },
+    {
+      "pattern": "photo_story",
+      "count": 13,
+      "percent": 54.2
+    },
+    {
+      "pattern": "day_by_day",
+      "count": 11,
+      "percent": 45.8
+    },
+    {
+      "pattern": "comparison",
+      "count": 11,
+      "percent": 45.8
+    },
+    {
+      "pattern": "conclusion",
+      "count": 10,
+      "percent": 41.7
+    },
+    {
+      "pattern": "use_scene",
+      "count": 10,
+      "percent": 41.7
+    },
+    {
+      "pattern": "spec_or_facts",
+      "count": 7,
+      "percent": 29.2
+    },
+    {
+      "pattern": "affiliate_disclosure",
+      "count": 5,
+      "percent": 20.8
+    },
+    {
+      "pattern": "affiliate_cta",
+      "count": 4,
+      "percent": 16.7
+    },
+    {
+      "pattern": "checklist",
+      "count": 2,
+      "percent": 8.3
+    }
+  ],
+  "common_sequences": [
+    {
+      "sequence": "destination_orientation > problem_or_motivation > food > itinerary_overview > strength > preparation > pace_or_fatigue",
+      "count": 1,
+      "percent": 0.7
+    },
+    {
+      "sequence": "pace_or_fatigue > itinerary_overview > transport > price_or_value > lodging > food > booking_conditions",
+      "count": 1,
+      "percent": 0.7
+    },
+    {
+      "sequence": "itinerary_overview > affiliate_disclosure > transport > comparison > lodging > destination_orientation > problem_or_motivation",
+      "count": 1,
+      "percent": 0.7
+    },
+    {
+      "sequence": "affiliate_disclosure > itinerary_overview > destination_orientation > place_value > preparation > pace_or_fatigue > food",
+      "count": 1,
+      "percent": 0.7
+    },
+    {
+      "sequence": "itinerary_overview > destination_orientation > transport > comparison > food > place_value > booking_conditions",
+      "count": 1,
+      "percent": 0.7
+    },
+    {
+      "sequence": "itinerary_overview > pace_or_fatigue > place_value > destination_orientation > fit > identity_or_summary > price_or_value",
+      "count": 1,
+      "percent": 0.7
+    },
+    {
+      "sequence": "strength > preparation > itinerary_overview > booking_conditions > transport > food > destination_orientation",
+      "count": 1,
+      "percent": 0.7
+    },
+    {
+      "sequence": "strength > place_value > food > transport > comparison > destination_orientation > itinerary_overview",
+      "count": 1,
+      "percent": 0.7
+    },
+    {
+      "sequence": "destination_orientation > price_or_value > booking_conditions > strength > itinerary_overview > limitation > transport",
+      "count": 1,
+      "percent": 0.7
+    },
+    {
+      "sequence": "affiliate_cta > booking_conditions > affiliate_disclosure > destination_orientation > problem_or_motivation > fit > pace_or_fatigue",
+      "count": 1,
+      "percent": 0.7
+    },
+    {
+      "sequence": "destination_orientation > food > strength > fit > itinerary_overview > transport > problem_or_motivation",
+      "count": 1,
+      "percent": 0.7
+    },
+    {
+      "sequence": "place_value > destination_orientation > itinerary_overview > price_or_value > booking_conditions > comparison > transport",
+      "count": 1,
+      "percent": 0.7
+    }
+  ],
+  "query_groups": {
+    "americas": {
+      "posts": 6,
+      "eligible": 6,
+      "median_body_chars": 1931.5,
+      "median_images": 19.5
+    },
+    "canada": {
+      "posts": 5,
+      "eligible": 5,
+      "median_body_chars": 2324.0,
+      "median_images": 36.0
+    },
+    "china": {
+      "posts": 6,
+      "eligible": 6,
+      "median_body_chars": 2267.0,
+      "median_images": 24.0
+    },
+    "cruise": {
+      "posts": 5,
+      "eligible": 5,
+      "median_body_chars": 1857.0,
+      "median_images": 47.0
+    },
+    "europe": {
+      "posts": 33,
+      "eligible": 33,
+      "median_body_chars": 2447.0,
+      "median_images": 31.0
+    },
+    "hongkong": {
+      "posts": 6,
+      "eligible": 6,
+      "median_body_chars": 2072.5,
+      "median_images": 17.5
+    },
+    "indonesia": {
+      "posts": 6,
+      "eligible": 6,
+      "median_body_chars": 2076.5,
+      "median_images": 23.0
+    },
+    "japan": {
+      "posts": 22,
+      "eligible": 22,
+      "median_body_chars": 2038.0,
+      "median_images": 36.5
+    },
+    "oceania": {
+      "posts": 6,
+      "eligible": 6,
+      "median_body_chars": 2049.5,
+      "median_images": 21.5
+    },
+    "pacific": {
+      "posts": 12,
+      "eligible": 12,
+      "median_body_chars": 2444.5,
+      "median_images": 18.0
+    },
+    "taiwan": {
+      "posts": 12,
+      "eligible": 12,
+      "median_body_chars": 2213.5,
+      "median_images": 38.0
+    },
+    "thailand": {
+      "posts": 6,
+      "eligible": 6,
+      "median_body_chars": 2833.0,
+      "median_images": 34.5
+    },
+    "vietnam": {
+      "posts": 12,
+      "eligible": 12,
+      "median_body_chars": 2343.5,
+      "median_images": 36.0
+    }
+  },
+  "risk_signal_counts": {
+    "promotional_spam_language": 13
+  }
+}

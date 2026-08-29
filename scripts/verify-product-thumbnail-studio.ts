@@ -10,7 +10,7 @@ import {
   isRepresentativeTravelImageDimension,
   normalizeCandidateImageUrl,
 } from "./lib/product-image-selection";
-import { buildLocalTravelPostJson, buildTravelThumbnailCopy, extractTravelProductFacts } from "./lib/travel-content";
+import { buildTravelContractEditorialPlan, buildTravelThumbnailCopy, extractTravelProductFacts } from "./lib/travel-content";
 import { generateTravelEditorialSummaryCard } from "./lib/travel-editorial-card";
 
 async function main() {
@@ -58,15 +58,16 @@ async function main() {
   assert.equal(travelFacts.duration, "9일");
   assert.ok(travelFacts.conditions.some((value) => /쇼핑/u.test(value)));
   const travelCopy = buildTravelThumbnailCopy(travelName);
-  assert.match(travelCopy.headline, /일정 체크/u);
-  const travelDraft = JSON.parse(buildLocalTravelPostJson({ name: travelName, description: "", features: [], price: "" }, 6));
-  assert.equal(travelDraft.sections.length, 8, "여행 글은 최소 8개 장면형 섹션을 유지해야 합니다.");
+  assert.match(travelCopy.headline, /코스 리뷰/u);
+  assert.match(travelCopy.subline, /노쇼핑|장점/u);
+  const travelPlan = buildTravelContractEditorialPlan({ name: travelName, description: "", features: [], price: "" });
+  assert.equal(travelPlan.length, 13, "여행 글의 13개 의미 기반 섹션을 유지해야 합니다.");
   assert.equal(
-    new Set(travelDraft.sections.map((section: string) => section.split("\n")[0])).size,
-    travelDraft.sections.length,
+    new Set(travelPlan.map((section) => section.title)).size,
+    travelPlan.length,
     "여행 소제목을 반복하면 안 됩니다.",
   );
-  assert.doesNotMatch(travelDraft.sections.join("\n"), /배송|구성품|택배|교환\/반품/u);
+  assert.equal(travelPlan.some((section) => "body" in section), false, "여행 하네스가 완성 본문을 만들면 안 됩니다.");
   const travelCardPath = await generateTravelEditorialSummaryCard({
     productName: travelName,
     price: "3,149,000원",

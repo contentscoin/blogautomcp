@@ -1,0 +1,47 @@
+{
+  "schema": "opencrab-canonical-ontology-pack/v1",
+  "metaontology_profile": "metaontology-os-9-space/v1",
+  "pack_id": "naver-shopping-top-post-patterns-2026-08-30",
+  "title": "Naver shopping Top Post Editorial Patterns 2026-08-30",
+  "category": "shopping",
+  "generated_at": "2026-08-30T00:34:47+09:00",
+  "visibility": "private",
+  "source_count": 132,
+  "source_policy": "provenance_and_derived_metrics_only",
+  "ranking_definition": "Naver blog-tab non-personalized server session, query rank 1-6 at collection time",
+  "quality": {
+    "status": "pass",
+    "source_count": 132,
+    "evidence_count": 132,
+    "node_count": 340,
+    "edge_count": 4875,
+    "broken_edges": [],
+    "invalid_edges": [],
+    "missing_evidence_refs": [],
+    "edges_without_evidence": [],
+    "source_evidence_closure": true,
+    "all_sources_insane_search_validated": true,
+    "full_post_bodies_persisted": false
+  },
+  "files": {
+    "nodes": "graph/nodes.jsonl",
+    "edges": "graph/edges.jsonl",
+    "evidence": "evidence/index.jsonl",
+    "qa": "reports/pack-qa.json",
+    "analysis": "reports/analysis.json",
+    "opencrab_ingest": "opencrab-ingest.md"
+  },
+  "sha256": {
+    "nodes": "1abde6c86020707d725deb7b50876b589bc3549805a1f14c9d27b5ae485cddfb",
+    "edges": "9dc1ae3fc55d0fa1e730564ff12c3647e6438edea6f7326dfcfee5f77dac127d",
+    "evidence": "deb56c589506c67ff92e132300219364db9cd270cfc3584e4c0bc7d1f675af5c",
+    "qa": "73d8609d0547f86916db48ce9378c0d30dff298a24458ca768f54847a96aa605",
+    "analysis": "70b45deb0b1e430022b632b175e98bdea4fe593ebdc4e4d0106b5886d8689447",
+    "opencrab_ingest": "39181f36d3efff41e569ff1f6629621add3428711edc47b203c72c5db72151ae"
+  },
+  "zip": {
+    "path": "packs\\naver-shopping-top-post-patterns-2026-08-30.zip",
+    "sha256": "15d9833bc71d56f5da21b2939e47e921a686fadc314b993b4540a14096975f70",
+    "bytes": 390493
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "schema": "blogautomcp-opencrab-registration/v1",
+  "registered_at": "2026-08-30T00:36:29+09:00",
+  "workspace_id": "7400c733-5a82-4659-a591-139d8259b876",
+  "project": {
+    "project_id": "af228c61-add6-4896-81d7-22dbe6930885",
+    "name": "BlogAuto Adaptive Editorial Intelligence",
+    "status": "active",
+    "package_count": 3
+  },
+  "packages": {
+    "shopping": {
+      "package_id": "2e2e2575-5749-4395-aa1f-838963840de4",
+      "title": "Naver Shopping Top Post Editorial Patterns 2026-08-30",
+      "visibility": "private",
+      "source_count": 132,
+      "qa_grade": "A",
+      "qa_score": 100,
+      "release_ready": true,
+      "retrieval_spot_check": "pass"
+    },
+    "travel": {
+      "package_id": "d62c99c4-4f98-49ef-8ab7-5874a454d9bf",
+      "title": "Naver Travel Top Post Editorial Patterns 2026-08-30",
+      "visibility": "private",
+      "source_count": 137,
+      "qa_grade": "A",
+      "qa_score": 100,
+      "release_ready": true,
+      "retrieval_spot_check": "pass"
+    },
+    "harness": {
+      "package_id": "b74a190b-ae65-4b16-96f6-698c1ecf48e7",
+      "title": "BlogAuto Adaptive Editorial Harness 2026-08-30",
+      "visibility": "private",
+      "qa_grade": "A",
+      "qa_score": 100,
+      "release_ready": true,
+      "retrieval_spot_check": "pass"
+    }
+  }
+}

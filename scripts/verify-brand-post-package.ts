@@ -12,8 +12,37 @@ async function main() {
   const simpleAgentSource = fs.readFileSync(path.join(projectRoot, "scripts", "simple-agent.ts"), "utf8");
   assert.equal(
     draftRouteSource.includes('PRODUCT_POST_LOCAL_FALLBACK_ENABLED: "true"'),
+    false,
+    "데스크톱 초안 경로가 완성 문장형 로컬 폴백을 다시 켜면 안 됩니다."
+  );
+  assert.equal(
+    simpleAgentSource.includes("하네스 문장을 원고로 복사하는 로컬 폴백은 품질 보호를 위해 차단했습니다"),
     true,
-    "API 키가 없는 데스크톱 초안은 로컬 생성기로 자동 전환해야 합니다."
+    "AI 생성 실패를 저품질 로컬 원고로 숨기지 않아야 합니다."
+  );
+  assert.equal(simpleAgentSource.includes("buildLocalTravelPostJson"), false);
+  assert.equal(simpleAgentSource.includes("buildLocalProductReviewSections"), false);
+  assert.equal(simpleAgentSource.includes("폴백 섹션으로 보완합니다"), false);
+  assert.equal(
+    simpleAgentSource.includes("const productEditorialPlan = isTravel\n    ? null"),
+    true,
+    "여행 원고 경로에서 쇼핑 제품 하네스를 생성하면 안 됩니다."
+  );
+  assert.equal(
+    simpleAgentSource.includes('guidanceContext.connectKind === "TRAVEL"') &&
+      simpleAgentSource.includes("쇼핑용 Custom GPT를 건너뛰고"),
+    true,
+    "여행 Browser GPT 경로가 쇼핑 전용 다단계 GPT를 타면 안 됩니다."
+  );
+  assert.equal(
+    simpleAgentSource.includes("제품리뷰 실제 사용기"),
+    false,
+    "검증되지 않은 실사용 제목을 자동 생성하면 안 됩니다."
+  );
+  assert.equal(
+    simpleAgentSource.includes("코스 장단점과 예약 판단"),
+    true,
+    "여행 제목은 체험을 꾸미지 않는 코스 판단형이어야 합니다."
   );
   assert.equal(
     draftRouteSource.includes("readPrepareFailure(logPath)"),
@@ -78,6 +107,7 @@ async function main() {
     brandLinkId: v2Id,
     connectKind: "TRAVEL" as const,
     title: "V2 여행 초안",
+    generationSource: "AI" as const,
     markdownPath: v2MarkdownPath,
     heroImagePath: v2HeroPath,
     bodyImagePaths: [],

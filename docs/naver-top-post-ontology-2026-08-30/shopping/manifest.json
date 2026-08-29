@@ -1,0 +1,30 @@
+{
+  "schema": "naver-top-post-research/v1",
+  "category": "shopping",
+  "generated_at": "2026-08-30T00:33:46+09:00",
+  "target_minimum": 105,
+  "counts": {
+    "queries": 24,
+    "successful_queries": 24,
+    "candidate_urls": 134,
+    "valid_posts": 132,
+    "quality_eligible_posts": 132,
+    "rank_one_quality_posts": 24
+  },
+  "insane_search_required": true,
+  "ranking_definition": "Naver blog-tab non-personalized server session, query rank 1-6 at collection time",
+  "files": {
+    "source_ledger": "source-ledger.jsonl",
+    "source_summary": "source-summary.csv",
+    "analysis": "analysis.json",
+    "report": "analysis.md",
+    "query_runs": "query-runs.json"
+  },
+  "sha256": {
+    "source_ledger": "a4b1093ef716a873272df14c541082fd525f463ff57da194fdfea9c10759c789",
+    "source_summary": "b5ccab603132c78b5b9d4b3cff5363ab80f04af4eeda04567df8d0b3f266027b",
+    "analysis": "70b45deb0b1e430022b632b175e98bdea4fe593ebdc4e4d0106b5886d8689447",
+    "report": "c5dd63270d30124946b86923d1fe8541369bece47820a86beee7760a5ddc30d0",
+    "query_runs": "4dd1b39f4063403135583213898af0e8e3653f13d9bab26bfe3f8149f042cbd8"
+  }
+}

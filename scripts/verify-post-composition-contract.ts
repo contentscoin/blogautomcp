@@ -68,6 +68,26 @@ assert.ok(
   "여행 레퍼럴 카드는 본문 초반에 한 번 배치되어야 합니다.",
 );
 
+const travelMaxImages = Array.from(
+  { length: TRAVEL_POST_CONTRACT_V1.targetImages.max },
+  (_, index) => `C:/fixture/travel-max-${index}.jpg`,
+);
+const travelAtMaximum = resolvePostDocument({
+  connectKind: "TRAVEL",
+  title: "여행 이미지 최대 배치 검증",
+  sections: buildSections("여행 최대 섹션", TRAVEL_POST_CONTRACT_V1.sections.length, 8),
+  hashtags: ["여행커넥트", "여행이미지", "패키지여행"],
+  imagePaths: travelMaxImages,
+  connectUrl: "https://brandconnect.naver.com/travel-max-fixture",
+  qualityPreset: "PREMIUM",
+});
+assert.equal(
+  travelAtMaximum.renderNodes.filter((node) => node.kind === "image").length,
+  travelMaxImages.length,
+  "여행 계약 최대 이미지가 모두 실제 렌더 노드로 배치되어야 합니다.",
+);
+assert.deepEqual(travelAtMaximum.qualityReport.warnings, []);
+
 const premiumBlocked = resolvePostDocument({
   connectKind: "TRAVEL",
   title: "이미지 부족 초안",

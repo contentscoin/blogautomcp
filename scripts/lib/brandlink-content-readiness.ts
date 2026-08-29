@@ -1,9 +1,19 @@
-import { assessProductEditorialCoverage } from "./product-editorial-plan";
+import {
+  assessProductEditorialCoverage,
+  assessProductReviewSubstance,
+} from "./product-editorial-plan";
+import { assessTravelReviewSubstance } from "./travel-content";
 import type {
   BrandConnectKind,
   PostExperienceMode,
   PostQualityReportV1,
 } from "../../src/lib/post-composition-contract";
+
+export type PostGenerationSource =
+  | "AI"
+  | "PREPARED_APPROVED"
+  | "LOCAL_FALLBACK"
+  | "UNKNOWN";
 
 export interface BrandLinkContentReadinessInput {
   productName: string;
@@ -11,6 +21,7 @@ export interface BrandLinkContentReadinessInput {
   sections: string[];
   hashtags: string[];
   brandLink: string;
+  generationSource: PostGenerationSource;
   hasRepresentativeImage: boolean;
   requireRepresentativeImage?: boolean;
   thumbnailGenerated?: boolean;
@@ -38,6 +49,11 @@ export interface BrandLinkContentReadiness {
     | "unsupported-experience-claim"
     | "commission-rate-exposed"
     | "internal-guidance-leak"
+    | "missing-review-substance"
+    | "generic-guidance-heavy"
+    | "category-mismatch"
+    | "repetitive-content"
+    | "non-generative-fallback"
     | "missing-representative-image"
     | "composition-quality";
   reason: string | null;
@@ -231,8 +247,22 @@ export function getBrandLinkContentReadiness(
   const editorialCoverage = isTravel
     ? assessTravelEditorialCoverage(sections.slice(0, -1))
     : assessProductEditorialCoverage(sections.slice(0, -1));
+  const reviewSubstance = isTravel
+    ? assessTravelReviewSubstance({ productName: input.productName, sections: sections.slice(0, -1) })
+    : assessProductReviewSubstance({ productName: input.productName, sections: sections.slice(0, -1) });
+  const categoryMismatchTerms = "categoryMismatchTerms" in reviewSubstance
+    ? reviewSubstance.categoryMismatchTerms
+    : [];
+  const genericGuidanceRatio = reviewSubstance.genericGuidanceCount / Math.max(1, reviewSubstance.sentenceCount);
+  const trustedGenerationSource =
+    input.generationSource === "AI" || input.generationSource === "PREPARED_APPROVED";
 
   const baseSignals: BrandLinkContentReadinessSignal[] = [
+    {
+      key: "generation-source",
+      label: "AI 생성 또는 승인 원고",
+      status: trustedGenerationSource ? "pass" : "fail",
+    },
     {
       key: "product-title",
       label: "제목 상품명 반영",
@@ -250,8 +280,28 @@ export function getBrandLinkContentReadiness(
     },
     {
       key: "editorial-flow",
-      label: isTravel ? "동선-숙소-비용-준비-예약 흐름" : "문제-효익-근거-사용-주의 흐름",
-      status: editorialCoverage.missingCoreRoles.length <= 1 ? "pass" : "warn",
+      label: isTravel ? "여행가치-장단점-적합도-결론 흐름" : "제품정체-근거-장단점-적합도-결론 흐름",
+      status: editorialCoverage.missingCoreRoles.length <= 1 ? "pass" : "fail",
+    },
+    {
+      key: "review-substance",
+      label: isTravel ? "여행상품 고유 장단점과 판단" : "제품 고유 장단점과 판단",
+      status: reviewSubstance.pass ? "pass" : "fail",
+    },
+    {
+      key: "generic-guidance",
+      label: "확인 안내 반복 비율",
+      status: genericGuidanceRatio <= (isTravel ? 0.22 : 0.24) ? "pass" : "fail",
+    },
+    {
+      key: "category-integrity",
+      label: "상품 카테고리 문맥 일치",
+      status: categoryMismatchTerms.length === 0 ? "pass" : "fail",
+    },
+    {
+      key: "sentence-repetition",
+      label: "본문 반복 문장",
+      status: reviewSubstance.repeatedSentenceCount <= 2 ? "pass" : "fail",
     },
     {
       key: "length",
@@ -329,6 +379,21 @@ export function getBrandLinkContentReadiness(
     0,
     100 - baseSignals.filter((signal) => signal.status === "fail").length * 18 - warningCount * 5,
   );
+
+  if (!trustedGenerationSource) {
+    return buildResult({
+      code: "non-generative-fallback",
+      reason:
+        "AI가 작성한 원고 또는 사용자가 승인한 준비 원고가 아닙니다. 하네스 문장으로 만든 로컬 폴백은 발행할 수 없습니다.",
+      score,
+      sectionCount: sections.length,
+      hashtagCount: input.hashtags.length,
+      totalLength,
+      coveredProductTokens,
+      missingProductTokens,
+      signals: baseSignals,
+    });
+  }
 
   if (!titleHasProductToken || !bodyHasProductToken) {
     return buildResult({
@@ -460,6 +525,66 @@ export function getBrandLinkContentReadiness(
     return buildResult({
       code: "missing-representative-image",
       reason: "판매페이지 대표 이미지를 확정하지 못했습니다.",
+      score,
+      sectionCount: sections.length,
+      hashtagCount: input.hashtags.length,
+      totalLength,
+      coveredProductTokens,
+      missingProductTokens,
+      signals: baseSignals,
+    });
+  }
+
+  if (categoryMismatchTerms.length > 0) {
+    return buildResult({
+      code: "category-mismatch",
+      reason: `상품 카테고리와 맞지 않는 문구가 섞였습니다: ${categoryMismatchTerms.join(", ")}`,
+      score,
+      sectionCount: sections.length,
+      hashtagCount: input.hashtags.length,
+      totalLength,
+      coveredProductTokens,
+      missingProductTokens,
+      signals: baseSignals,
+    });
+  }
+
+  if (reviewSubstance.repeatedSentenceCount > 2) {
+    return buildResult({
+      code: "repetitive-content",
+      reason: `같은 판단 문장이 반복됩니다 (${reviewSubstance.repeatedSentenceCount}회 중복).`,
+      score,
+      sectionCount: sections.length,
+      hashtagCount: input.hashtags.length,
+      totalLength,
+      coveredProductTokens,
+      missingProductTokens,
+      signals: baseSignals,
+    });
+  }
+
+  if (genericGuidanceRatio > (isTravel ? 0.22 : 0.24)) {
+    return buildResult({
+      code: "generic-guidance-heavy",
+      reason: `제품 판단보다 확인 안내 문장이 많습니다 (${reviewSubstance.genericGuidanceCount}/${reviewSubstance.sentenceCount}문장).`,
+      score,
+      sectionCount: sections.length,
+      hashtagCount: input.hashtags.length,
+      totalLength,
+      coveredProductTokens,
+      missingProductTokens,
+      signals: baseSignals,
+    });
+  }
+
+  if (!reviewSubstance.pass || editorialCoverage.missingCoreRoles.length > 1) {
+    const missing = [
+      ...reviewSubstance.missingElements,
+      ...editorialCoverage.missingCoreRoles.map((role) => `편집 역할 ${role}`),
+    ];
+    return buildResult({
+      code: "missing-review-substance",
+      reason: `상품 고유 리뷰 요소가 부족합니다: ${Array.from(new Set(missing)).join(", ")}`,
       score,
       sectionCount: sections.length,
       hashtagCount: input.hashtags.length,

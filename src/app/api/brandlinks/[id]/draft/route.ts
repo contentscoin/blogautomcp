@@ -98,9 +98,6 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           CHATGPT_SKIP_POLISH: "false",
           HUMAN_MOBILE_POLISH_ENABLED: "true",
           BLOG_HUMANIZE_REWRITE_ENABLED: "true",
-          // 데스크톱은 GPT 로그인을 요구하지 않는다. API 키가 없는 PC에서도
-          // 상품별 로컬 초안 생성기로 계속 진행해 매니페스트를 완성한다.
-          PRODUCT_POST_LOCAL_FALLBACK_ENABLED: "true",
           PRODUCT_THUMBNAIL_CHATGPT_ENABLED: "false",
           PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_FALLBACK_ENABLED: "false",
           BRANDLINK_QUALITY_PRESET: qualityPreset,

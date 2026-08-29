@@ -1,0 +1,47 @@
+{
+  "schema": "opencrab-canonical-ontology-pack/v1",
+  "metaontology_profile": "metaontology-os-9-space/v1",
+  "pack_id": "naver-travel-top-post-patterns-2026-08-30",
+  "title": "Naver travel Top Post Editorial Patterns 2026-08-30",
+  "category": "travel",
+  "generated_at": "2026-08-30T00:34:47+09:00",
+  "visibility": "private",
+  "source_count": 137,
+  "source_policy": "provenance_and_derived_metrics_only",
+  "ranking_definition": "Naver blog-tab non-personalized server session, query rank 1-6 at collection time",
+  "quality": {
+    "status": "pass",
+    "source_count": 137,
+    "evidence_count": 137,
+    "node_count": 379,
+    "edge_count": 7333,
+    "broken_edges": [],
+    "invalid_edges": [],
+    "missing_evidence_refs": [],
+    "edges_without_evidence": [],
+    "source_evidence_closure": true,
+    "all_sources_insane_search_validated": true,
+    "full_post_bodies_persisted": false
+  },
+  "files": {
+    "nodes": "graph/nodes.jsonl",
+    "edges": "graph/edges.jsonl",
+    "evidence": "evidence/index.jsonl",
+    "qa": "reports/pack-qa.json",
+    "analysis": "reports/analysis.json",
+    "opencrab_ingest": "opencrab-ingest.md"
+  },
+  "sha256": {
+    "nodes": "97c23eeef14995748804e25ce9c8f3ddcec3fa30b5232bff768a2e5f554b8067",
+    "edges": "a2689a56bc55826b24bc8d8468573d73a4794861df0c35741b1919c019090138",
+    "evidence": "ff26da00eafc95344e92b9ecdbdc0dab26c8f601784ce9f4465eaf12b41dbe1d",
+    "qa": "da44d0bcdfba6d0357b7767a6984e30685fd537983a57dce8c1f199a9b6b2924",
+    "analysis": "1254a1b80fcd64f90e0ab58806e059ea1bad00832b4f5c09de2beb497ead7518",
+    "opencrab_ingest": "0203c612578f48d8a42050b420cb2fed0b5dbb3dac9ba5c3f74224c106cf0b5b"
+  },
+  "zip": {
+    "path": "packs\\naver-travel-top-post-patterns-2026-08-30.zip",
+    "sha256": "23c791ecd840e4fc664e031daa577bed0b5fcdfb1084a4a46150a4ba3ca9aed7",
+    "bytes": 484243
+  }
+}

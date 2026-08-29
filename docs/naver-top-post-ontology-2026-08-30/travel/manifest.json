@@ -1,0 +1,30 @@
+{
+  "schema": "naver-top-post-research/v1",
+  "category": "travel",
+  "generated_at": "2026-08-30T00:34:10+09:00",
+  "target_minimum": 105,
+  "counts": {
+    "queries": 24,
+    "successful_queries": 24,
+    "candidate_urls": 137,
+    "valid_posts": 137,
+    "quality_eligible_posts": 137,
+    "rank_one_quality_posts": 24
+  },
+  "insane_search_required": true,
+  "ranking_definition": "Naver blog-tab non-personalized server session, query rank 1-6 at collection time",
+  "files": {
+    "source_ledger": "source-ledger.jsonl",
+    "source_summary": "source-summary.csv",
+    "analysis": "analysis.json",
+    "report": "analysis.md",
+    "query_runs": "query-runs.json"
+  },
+  "sha256": {
+    "source_ledger": "7906b3979b865393258b352685e179865a9032aa736b65aae4bb3396a34847fa",
+    "source_summary": "05e91afcd487d45784c59c50dea5a63edb64351eec9705bdf98cb05965a15387",
+    "analysis": "1254a1b80fcd64f90e0ab58806e059ea1bad00832b4f5c09de2beb497ead7518",
+    "report": "0e543274f0f768ebbbd992bad73762068d67696d9258802849324030a080e2ab",
+    "query_runs": "34ce98893aeb32d305898e0d5db74486a8e1505f254b05427e83188476ebc56b"
+  }
+}

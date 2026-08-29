@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import {
-  buildLocalTravelPostJson,
+  assessTravelReviewSubstance,
   buildTravelContractEditorialPlan,
+  buildTravelReviewAnalysis,
   formatTravelEditorialPlanForPrompt,
+  formatTravelReviewAnalysisForPrompt,
 } from "./lib/travel-content";
 
 const product = {
@@ -12,45 +14,72 @@ const product = {
   price: "3,149,000원",
 };
 
+const analysis = buildTravelReviewAnalysis(product);
+assert.equal(analysis.evidenceLevel, "rich");
+assert.equal(analysis.productType, "package-tour");
+assert.ok(analysis.strengths.length >= 3);
+assert.ok(analysis.limitations.length >= 3);
+assert.ok(analysis.decisionCriteria.some((item) => /체류시간/u.test(item)));
+assert.ok(analysis.highlightReviews.some((item) => item.name === "융프라우" && item.experienceTags.includes("고산 풍경")));
+assert.ok(analysis.highlightReviews.some((item) => item.name === "루체른" && item.experienceTags.includes("호수")));
+
+const analysisJson = JSON.stringify(analysis);
+assert.doesNotMatch(
+  analysisJson,
+  /(?:예요|해요|돼요|있어요|좋아요|어려워요|맞아요)[.!]?/u,
+  "여행 분석 하네스에 발행 가능한 완성 문장을 저장하면 안 됩니다.",
+);
+assert.doesNotMatch(analysisJson, /"(?:identity|verdict|value|tradeoff)"/u);
+
 const plan = buildTravelContractEditorialPlan(product);
 const titles = plan.map((section) => section.title);
-const fullText = plan.flatMap((section) => section.body).join(" ");
-
-assert.equal(plan.length, 13, "여행 포스트 계약의 13개 섹션을 맞춰야 합니다.");
+assert.equal(plan.length, 13, "여행 상품별로 고를 수 있는 판단 렌즈 후보를 보존해야 합니다.");
 assert.equal(new Set(titles).size, titles.length, "여행 소제목을 반복하면 안 됩니다.");
-assert.match(titles[0], /누구에게/u, "첫 섹션은 독자 적합도와 결론을 먼저 제시해야 합니다.");
-assert.match(titles.at(-1) || "", /예약 전/u, "마지막 섹션은 예약 판단으로 끝나야 합니다.");
-assert.ok(titles.some((title) => title.includes("융프라우")), "확인된 코스 포인트를 섹션에 반영해야 합니다.");
-assert.doesNotMatch(fullText, /배송|교환|반품|구성품/u, "쇼핑 상품 문구가 여행 글에 섞이면 안 됩니다.");
-assert.doesNotMatch(fullText, /다녀왔|먹어봤|묵어봤/u, "근거 없는 체험담을 만들면 안 됩니다.");
+assert.match(titles[0], /한 줄 결론/u);
+assert.match(titles.at(-1) || "", /최종 리뷰/u);
+assert.ok(titles.some((title) => title.includes("융프라우")));
+assert.ok(titles.some((title) => /장점/u.test(title)));
+assert.ok(titles.some((title) => /아쉬운/u.test(title)));
+assert.ok(titles.some((title) => /비추천/u.test(title)));
+assert.ok(plan.every((section) => section.requiredEvidence.length > 0));
+assert.ok(plan.every((section) => section.decisionFocus.length > 0));
+assert.equal(plan.some((section) => "body" in section), false, "여행 하네스가 완성 본문을 보유하면 안 됩니다.");
 
-assert.ok(plan.some((section) => /전체 동선/u.test(section.title)));
-assert.ok(plan.some((section) => /포함·불포함/u.test(section.title)));
-assert.ok(plan.some((section) => /잘 맞아요/u.test(section.title)));
+const prompt = `${formatTravelReviewAnalysisForPrompt(analysis)}\n${formatTravelEditorialPlanForPrompt(plan)}`;
+assert.match(prompt, /문장 생성 금지/u);
+assert.match(prompt, /표현을 복사하지 말고/u);
+assert.match(prompt, /장점 후보 1/u);
+assert.match(prompt, /제약 후보 1/u);
+assert.match(prompt, /추천 대상/u);
+assert.match(prompt, /고정 목차가 아니라 선택 가능한 여행 판단 렌즈/u);
+assert.match(prompt, /상품 정보가 풍부한 렌즈만 선택/u);
+assert.doesNotMatch(prompt, /(?:최소 3개|최소 2개|아래 순서를 유지)/u);
+assert.doesNotMatch(prompt, /고산 풍경과 산악 교통 경험이/u);
 
-const prompt = formatTravelEditorialPlanForPrompt(plan);
-assert.match(prompt, /대표 장면.*일정 한눈에 보기.*예약 링크/u, "여행 편집 흐름이 프롬프트에 있어야 합니다.");
+const reviewSections = [
+  "이 여행의 한 줄 결론\n\n스위스와 이탈리아의 대표 장면을 9일에 폭넓게 보는 매력이 큰 상품이에요. 이동과 짐 정리 비중도 큰 편이라 넓은 커버리지를 원하는 여행자에게 맞습니다.",
+  "이 상품이 주는 여행 경험\n\n융프라우와 루체른의 자연, 피사와 폼페이의 역사 장면이 이어져 코스 변화가 선명해요. 노쇼핑 조건은 관광 동선에 시간을 쓰는 장점으로 읽힙니다.",
+  "하이라이트가 만드는 코스의 매력\n\n융프라우는 고산 풍경, 루체른은 호수와 구시가지, 관광열차는 이동형 관광을 맡아요. 서로 다른 장면이 짧은 일정의 밀도를 높이는 선택 이유입니다.",
+  "전체 동선과 여행 강도\n\n스위스와 이탈리아를 잇는 만큼 도시 간 이동과 장거리 버스 구간이 아쉬운 점이 될 수 있어요. 연박 횟수와 실제 장소별 체류시간이 만족도를 가릅니다.",
+  "여행지 리뷰 1 · 융프라우\n\n융프라우의 고산 풍경은 자연 중심 여행의 핵심 매력이에요. 다만 고도와 날씨, 산악 교통 운행에 민감해 대체 일정이 중요한 제약입니다.",
+  "여행지 리뷰 2 · 루체른\n\n루체른의 호수와 구시가지는 산악 구간 사이에 도시 산책의 완급을 더해요. 체류가 짧으면 두 장면을 모두 깊게 보기 어렵다는 한계가 있습니다.",
+  "여행지 리뷰 3 · 관광열차\n\n관광열차는 이동 시간을 차창 풍경으로 바꾸는 장점이 있어요. 탑승 구간과 좌석, 운행 시간이 불분명하면 기대한 경험과 달라질 리스크가 있습니다.",
+  "항공·숙박·식사가 좌우하는 만족도\n\n항공 시각은 실제 현지 체류시간을 바꾸고 숙소 위치는 저녁 자유시간을 좌우해요. 현재 정보가 부족해 편안함과 총비용 판단을 보류해야 하는 제약입니다.",
+  "상품 구성에서 읽히는 장점\n\n출발확정과 노쇼핑, 다양한 방문지 조합이 이 상품의 구체적인 장점이에요. 개별 교통과 숙소 예약 부담을 줄이면서 대표 장면을 묶어 볼 수 있습니다.",
+  "아쉬운 점과 예약 리스크\n\n가장 큰 아쉬운 점은 넓은 코스에서 생기는 이동 부담이에요. 날씨 민감 구간과 유적지 보행이 이어져 동행자의 체력에 따라 리스크가 커질 수 있습니다.",
+  "추천 여행자와 비추천 여행자\n\n추천 여행자는 여러 대표 장소를 한 번에 보고 싶은 사람이고, 비추천 여행자는 한 도시에 오래 머물고 싶은 사람이에요. 일정 자유도보다 예약 편의를 우선할 때 잘 맞습니다.",
+  "가격과 포함 조건의 실제 의미\n\n표시 가격 3,149,000원은 항공과 숙박, 식사, 입장 범위까지 합쳐 판단해야 해요. 필수 현지 비용이 많다면 표시가의 장점이 줄어드는 구조입니다.",
+  "최종 리뷰와 예약 판단\n\n최종 리뷰는 폭넓은 코스와 출발확정의 장점이 이동·보행 제약보다 큰지에 달려 있어요. 긴 체류가 우선이면 느린 코스가, 대표 장면 커버리지가 우선이면 이 상품이 후보입니다.",
+];
+const substance = assessTravelReviewSubstance({ productName: product.name, sections: reviewSections });
+assert.equal(substance.pass, true, substance.missingElements.join(", "));
+assert.ok(substance.coveredPlaces.includes("융프라우"));
+assert.ok(substance.coveredPlaces.includes("루체른"));
 
-const localDraft = JSON.parse(buildLocalTravelPostJson(product, 13)) as {
-  title: string;
-  sections: string[];
-  hashtags: string[];
-};
-assert.equal(localDraft.sections.length, 13, "로컬 폴백도 여행 섹션 수를 유지해야 합니다.");
-assert.equal(new Set(localDraft.sections.map((section) => section.split("\n")[0])).size, 13);
-const localDraftLength = localDraft.sections.join("\n").replace(/\s+/gu, "").length;
-assert.ok(localDraftLength >= 3_200 && localDraftLength <= 4_800, `여행 폴백 본문 길이가 범위를 벗어났습니다: ${localDraftLength}`);
-
-console.log(
-  JSON.stringify(
-    {
-      ok: true,
-      title: localDraft.title,
-      sectionTitles: titles,
-      hashtags: localDraft.hashtags,
-      bodyChars: localDraftLength,
-    },
-    null,
-    2,
-  ),
-);
+console.log(JSON.stringify({
+  ok: true,
+  sectionTitles: titles,
+  strengths: analysis.strengths.length,
+  limitations: analysis.limitations.length,
+  coveredPlaces: substance.coveredPlaces,
+}, null, 2));
