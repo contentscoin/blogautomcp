@@ -83,7 +83,7 @@ interface ChatGptDraftHandoff {
   prompt: string;
 }
 
-type DraftCreationMode = "checking" | "local-ai" | "chatgpt";
+type DraftCreationMode = "checking" | "local-ai" | "browser-chatgpt" | "chatgpt";
 
 export interface TopicPostTask {
   id: string;
@@ -338,6 +338,10 @@ async function copyText(text: string): Promise<void> {
   if (!copied) throw new Error("클립보드 복사를 지원하지 않는 환경입니다.");
 }
 
+const waitForMilliseconds = (milliseconds: number) => new Promise<void>((resolve) => {
+  window.setTimeout(resolve, milliseconds);
+});
+
 export default function Dashboard() {
   const [links, setLinks] = useState<BrandLink[]>([]);
   const [loading, setLoading] = useState(true);
@@ -359,6 +363,7 @@ export default function Dashboard() {
   const [draftApproving, setDraftApproving] = useState(false);
   const [draftCreationMode, setDraftCreationMode] = useState<DraftCreationMode>("checking");
   const [chatGptDraftHandoff, setChatGptDraftHandoff] = useState<ChatGptDraftHandoff | null>(null);
+  const [chatGptDraftHandoffReason, setChatGptDraftHandoffReason] = useState<string | null>(null);
   const [stoppingPosting, setStoppingPosting] = useState(false);
   const [bulkSeasonalRunning, setBulkSeasonalRunning] = useState(false);
   const [bulkScheduleRunning, setBulkScheduleRunning] = useState(false);
@@ -538,10 +543,19 @@ export default function Dashboard() {
       const response = await fetch("/api/settings", { cache: "no-store" });
       const payload = await response.json();
       if (!response.ok || !payload.success) throw new Error("AI 설정을 확인하지 못했습니다.");
-      setDraftCreationMode(payload.data?.desktopDraftProviderConfigured ? "local-ai" : "chatgpt");
+      const mode = payload.data?.draftCreationMode;
+      setDraftCreationMode(
+        mode === "local-ai" || mode === "browser-chatgpt" || mode === "chatgpt"
+          ? mode
+          : payload.data?.desktopDraftProviderConfigured
+            ? "local-ai"
+            : payload.data?.browserDraftAutomationEnabled !== false
+              ? "browser-chatgpt"
+              : "chatgpt",
+      );
     } catch {
-      // 키 상태를 읽지 못해도 안전한 ChatGPT 핸드오프 경로를 기본으로 보여 준다.
-      setDraftCreationMode("chatgpt");
+      // 앱 기본값과 동일하게 로그인된 ChatGPT 웹 자동작성 경로를 우선 표시한다.
+      setDraftCreationMode("browser-chatgpt");
     }
   }, []);
 
@@ -665,6 +679,12 @@ export default function Dashboard() {
     window.addEventListener("blogautomcp:blog-id-changed", handleBlogIdChanged);
     return () => window.removeEventListener("blogautomcp:blog-id-changed", handleBlogIdChanged);
   }, [fetchCategories]);
+
+  useEffect(() => {
+    const handleDraftModeChanged = () => void fetchDraftCreationMode();
+    window.addEventListener("blogautomcp:draft-mode-changed", handleDraftModeChanged);
+    return () => window.removeEventListener("blogautomcp:draft-mode-changed", handleDraftModeChanged);
+  }, [fetchDraftCreationMode]);
 
   useEffect(() => {
     if (brandConnectOptionsLoaded || brandConnectOptionsLoading) return;
@@ -831,25 +851,83 @@ export default function Dashboard() {
   };
   const handlePrepareBrandDraft = async (link: BrandLink) => {
     setDraftGeneratingId(link.id);
+    setChatGptDraftHandoff(null);
+    setChatGptDraftHandoffReason(null);
     setDashboardNotice({
       tone: "info",
       text: draftCreationMode === "chatgpt"
         ? "ChatGPT에서 사용할 상품별 요청문을 준비하고 있습니다."
-        : "고품질 글과 이미지 패키지를 만들고 있습니다. 잠시만 기다려 주세요.",
+        : draftCreationMode === "browser-chatgpt"
+          ? "로그인된 ChatGPT에서 고품질 글과 이미지 패키지를 자동 작성하고 있습니다."
+          : "고품질 글과 이미지 패키지를 만들고 있습니다. 잠시만 기다려 주세요.",
     });
     try {
-      const response = await fetch(`/api/brandlinks/${link.id}/draft`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ qualityPreset: "premium", experienceMode: "ai_assisted_information" }) });
-      const payload = await response.json();
-      const handoff = payload?.data?.handoff;
-      if (response.status === 409 && payload?.code === "CHATGPT_MCP_DRAFT_REQUIRED" && isChatGptDraftHandoff(handoff)) {
-        setChatGptDraftHandoff(handoff);
-        setDashboardNotice({ tone: "info", text: "상품별 요청문이 준비됐습니다. 복사한 뒤 ChatGPT에서 이어서 작성하세요." });
-        return;
-      }
-      if (!response.ok || !payload.success) throw new Error(payload.error || "초안 생성 실패");
-      setDraftPreview(payload.data as BrandPostDraftPreview);
-      setDraftPreviewTab("post");
-      setDashboardNotice({ tone: "success", text: "고품질 초안이 준비됐습니다. 내용을 확인한 뒤 승인해 주세요." });
+      const waitForChatGptLogin = async (jobId: string) => {
+        const deadline = Date.now() + 10 * 60_000;
+        while (Date.now() < deadline) {
+          await waitForMilliseconds(3_000);
+          const statusResponse = await fetch(`/api/session/login?jobId=${encodeURIComponent(jobId)}`, { cache: "no-store" });
+          const statusPayload = await statusResponse.json();
+          if (!statusResponse.ok || !statusPayload.success) continue;
+          if (statusPayload.data?.status === "succeeded") return;
+          if (statusPayload.data?.status === "failed") {
+            throw new Error(statusPayload.data?.error || "ChatGPT 로그인에 실패했습니다.");
+          }
+        }
+        throw new Error("ChatGPT 로그인 확인 시간이 초과되었습니다.");
+      };
+
+      const requestDraft = async (allowLoginRetry: boolean): Promise<void> => {
+        const response = await fetch(`/api/brandlinks/${link.id}/draft`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ qualityPreset: "premium", experienceMode: "ai_assisted_information" }),
+        });
+        const payload = await response.json();
+        const handoff = payload?.data?.handoff;
+
+        if (response.status === 409 && payload?.code === "CHATGPT_BROWSER_LOGIN_REQUIRED" && allowLoginRetry) {
+          setDashboardNotice({ tone: "info", text: "ChatGPT 로그인 창을 열었습니다. 로그인 후 초안 생성을 자동으로 이어갑니다." });
+          const loginResponse = await fetch("/api/session/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ provider: "chatgpt", force: false }),
+          });
+          const loginPayload = await loginResponse.json();
+          if (!loginResponse.ok || !loginPayload.success) {
+            throw new Error(loginPayload.error || "ChatGPT 로그인 창을 열지 못했습니다.");
+          }
+          const jobId = loginPayload.data?.jobId as string | undefined;
+          if (!jobId) throw new Error("ChatGPT 로그인 작업 번호가 없습니다.");
+          await waitForChatGptLogin(jobId);
+          setDashboardNotice({ tone: "info", text: "ChatGPT 로그인이 확인됐습니다. 초안을 자동 작성하고 있습니다." });
+          await requestDraft(false);
+          return;
+        }
+
+        const shouldHandoff = response.status === 409 && [
+          "CHATGPT_MCP_DRAFT_REQUIRED",
+          "CHATGPT_BROWSER_FALLBACK_REQUIRED",
+          "CHATGPT_BROWSER_LOGIN_REQUIRED",
+        ].includes(payload?.code);
+        if (shouldHandoff && isChatGptDraftHandoff(handoff)) {
+          setChatGptDraftHandoffReason(typeof payload.error === "string" ? payload.error : null);
+          setChatGptDraftHandoff(handoff);
+          setDashboardNotice({
+            tone: "info",
+            text: payload?.code === "CHATGPT_MCP_DRAFT_REQUIRED"
+              ? "상품별 요청문이 준비됐습니다. 복사한 뒤 ChatGPT에서 이어서 작성하세요."
+              : "웹 자동작성을 완료하지 못해 안전한 ChatGPT 요청문 방식으로 전환했습니다.",
+          });
+          return;
+        }
+        if (!response.ok || !payload.success) throw new Error(payload.error || "초안 생성 실패");
+        setDraftPreview(payload.data as BrandPostDraftPreview);
+        setDraftPreviewTab("post");
+        setDashboardNotice({ tone: "success", text: "고품질 초안이 준비됐습니다. 내용을 확인한 뒤 승인해 주세요." });
+      };
+
+      await requestDraft(true);
     } catch (error) {
       setDashboardNotice({ tone: "error", text: error instanceof Error ? error.message : "초안 생성 중 오류가 발생했습니다." });
     } finally {
@@ -2430,7 +2508,12 @@ export default function Dashboard() {
 
             <div className="mb-4 grid gap-2 rounded-2xl border border-slate-200 bg-white p-3 sm:grid-cols-3">
               {[
-                { no: "1", title: "글 준비", text: "고품질 초안을 먼저 만듭니다", color: "bg-violet-600" },
+                {
+                  no: "1",
+                  title: draftCreationMode === "browser-chatgpt" ? "ChatGPT 자동작성" : "글 준비",
+                  text: draftCreationMode === "browser-chatgpt" ? "로그인된 ChatGPT에서 만들고 바로 미리봅니다" : "고품질 초안을 먼저 만듭니다",
+                  color: "bg-violet-600",
+                },
                 { no: "2", title: "썸네일", text: brandConnectKind === "travel" ? "여행 표지 스타일을 고릅니다" : "상품 원본을 잠그고 합성합니다", color: brandConnectKind === "travel" ? "bg-amber-500" : "bg-blue-600" },
                 { no: "3", title: "확인 후 발행", text: "승인한 글과 이미지만 발행합니다", color: "bg-emerald-600" },
               ].map((step) => <div key={step.no} className="flex items-center gap-3 rounded-xl bg-slate-50 px-3 py-2"><span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-black text-white ${step.color}`}>{step.no}</span><div><p className="text-sm font-bold text-slate-900">{step.title}</p><p className="text-[11px] text-slate-500">{step.text}</p></div></div>)}
@@ -2579,7 +2662,11 @@ export default function Dashboard() {
                                 onClick={() => void handleOpenOrPrepareBrandDraft(link)}
                                 disabled={draftCreationMode === "checking" || draftGeneratingId === link.id || Boolean(publishingId)}
                                 className="rounded-lg bg-violet-600 px-3 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:opacity-50 transition-colors"
-                                title={draftCreationMode === "chatgpt" ? "상품별 요청문을 복사해 연결된 ChatGPT에서 초안을 만듭니다" : "글·이미지를 먼저 만들고 확인한 뒤 같은 결과를 발행합니다"}
+                                title={draftCreationMode === "chatgpt"
+                                  ? "상품별 요청문을 복사해 연결된 ChatGPT에서 초안을 만듭니다"
+                                  : draftCreationMode === "browser-chatgpt"
+                                    ? "로그인된 ChatGPT 웹에서 초안을 자동 작성하고 미리보기를 엽니다"
+                                    : "글·이미지를 먼저 만들고 확인한 뒤 같은 결과를 발행합니다"}
                               >
                                 {draftGeneratingId === link.id
                                   ? "글 준비 중..."
@@ -2587,7 +2674,9 @@ export default function Dashboard() {
                                     ? "1. 작성 방식 확인 중"
                                     : draftCreationMode === "chatgpt"
                                       ? "1. ChatGPT로 글 만들기"
-                                      : "1. 글 준비·확인"}
+                                      : draftCreationMode === "browser-chatgpt"
+                                        ? "1. ChatGPT 자동작성"
+                                        : "1. 글 준비·확인"}
                               </button>
                               {/* 여행 계약 잠금만 목록에서 표시하고, 실제 발행은 승인 창에서 진행 */}
                               {link.status === "READY" && link.connectKind === "TRAVEL" && travelPublishingUnavailable && (
@@ -2654,7 +2743,7 @@ export default function Dashboard() {
           <h3 className="font-medium text-slate-800 mb-2">💡 사용 방법</h3>
           <ol className="text-sm text-slate-600 space-y-1 list-decimal list-inside">
             <li>네이버 로그인 상태를 확인하고 쇼핑 또는 여행 탭을 선택합니다.</li>
-            <li>상품을 동기화한 뒤 목록에서 <strong>{draftCreationMode === "chatgpt" ? "1. ChatGPT로 글 만들기" : "1. 글 준비·확인"}</strong>를 누릅니다.</li>
+            <li>상품을 동기화한 뒤 목록에서 <strong>{draftCreationMode === "chatgpt" ? "1. ChatGPT로 글 만들기" : draftCreationMode === "browser-chatgpt" ? "1. ChatGPT 자동작성" : "1. 글 준비·확인"}</strong>를 누릅니다.</li>
             <li><strong>2. 썸네일</strong>에서 실제 사진과 디자인 스타일을 고릅니다.</li>
             <li>초안을 승인한 뒤 <strong>3. 바로 발행</strong> 또는 예약 발행을 선택합니다.</li>
           </ol>
@@ -2679,7 +2768,7 @@ export default function Dashboard() {
                   <h2 id="chatgpt-draft-title" className="mt-3 text-2xl font-black tracking-tight">ChatGPT에서 이 상품의 초안을 완성하세요</h2>
                   <p className="mt-2 text-sm leading-6 text-indigo-100">사이트 OAuth는 안전한 MCP 연결을 인증합니다. 실제 원고는 연결된 ChatGPT 대화에서 만들어 PC 앱으로 다시 저장됩니다.</p>
                 </div>
-                <button type="button" onClick={() => setChatGptDraftHandoff(null)} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/10 text-2xl font-light leading-none text-white hover:bg-white/20" aria-label="ChatGPT 초안 안내 닫기">×</button>
+                <button type="button" onClick={() => { setChatGptDraftHandoff(null); setChatGptDraftHandoffReason(null); }} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/10 text-2xl font-light leading-none text-white hover:bg-white/20" aria-label="ChatGPT 초안 안내 닫기">×</button>
               </div>
             </div>
 
@@ -2688,6 +2777,13 @@ export default function Dashboard() {
                 <span className={`w-fit rounded-full px-3 py-1 text-xs font-bold ${chatGptDraftHandoff.connectKind === "TRAVEL" ? "bg-amber-100 text-amber-800" : "bg-blue-100 text-blue-700"}`}>{chatGptDraftHandoff.connectKind === "TRAVEL" ? "여행커넥트" : "쇼핑커넥트"}</span>
                 <p className="truncate font-bold text-slate-950" title={chatGptDraftHandoff.productLabel}>{chatGptDraftHandoff.productLabel}</p>
               </div>
+
+              {chatGptDraftHandoffReason ? (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900">
+                  <strong className="block text-xs font-black uppercase tracking-wide text-amber-700">자동작성 전환 안내</strong>
+                  {chatGptDraftHandoffReason}
+                </div>
+              ) : null}
 
               <ol className="grid gap-3 text-sm text-slate-700 sm:grid-cols-3">
                 {["요청문 자동 복사", "ChatGPT에서 붙여넣기", "완성 초안을 PC에서 승인"].map((label, index) => (

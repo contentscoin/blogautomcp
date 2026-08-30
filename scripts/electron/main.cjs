@@ -91,8 +91,11 @@ function configureRuntimePaths(projectRoot) {
   process.env.DESKTOP_PROJECT_ROOT = process.env.DESKTOP_PROJECT_ROOT || projectRoot;
   process.env.BROWSER_CHANNEL = process.env.BROWSER_CHANNEL || "chrome";
   require("dotenv").config({ path: path.join(userData, ".env"), override: false, quiet: true });
-  process.env.BROWSER_GPT_MODE = "false";
-  process.env.ALLOW_CHATGPT_BROWSER_MODE = "false";
+  const browserChatGptEnabled =
+    (process.env.CHATGPT_BROWSER_AUTOMATION_ENABLED || "true").trim().toLowerCase() === "true";
+  process.env.CHATGPT_BROWSER_AUTOMATION_ENABLED = browserChatGptEnabled ? "true" : "false";
+  process.env.BROWSER_GPT_MODE = browserChatGptEnabled ? "true" : "false";
+  process.env.ALLOW_CHATGPT_BROWSER_MODE = browserChatGptEnabled ? "true" : "false";
   process.env.CHATGPT_USE_CUSTOM_GPTS = "false";
   if (!process.env.DATABASE_URL) {
     const databasePath = app.isPackaged

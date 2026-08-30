@@ -93,9 +93,9 @@ import {
   type ProductEditorialPlan,
 } from "./lib/product-editorial-plan";
 import {
+  getChatgptProfileDir,
   getChatgptSessionFile,
   getNaverSessionFile,
-  getSessionStorageDir,
 } from "./lib/app-paths";
 import {
   parseProductThumbnailSettings,
@@ -247,7 +247,7 @@ const BLOG_HUMANIZE_REWRITE_THRESHOLD = Math.max(
 );
 const CHATGPT_USER_DATA_DIR =
   process.env.CHATGPT_USER_DATA_DIR ||
-  path.join(getSessionStorageDir(), "chatgpt-profile");
+  getChatgptProfileDir();
 
 function parseBoundedInteger(
   value: string | undefined,
@@ -3184,6 +3184,7 @@ interface ChatGPTContextHandle {
 
 async function createChatGPTContext(hasSessionFile: boolean): Promise<ChatGPTContextHandle> {
   const commonLaunchOptions = {
+    channel: process.env.BROWSER_CHANNEL?.trim() || "chrome",
     headless: CHATGPT_HEADLESS,
     slowMo: CHATGPT_HEADLESS ? 0 : 30,
     args: ["--disable-blink-features=AutomationControlled"],
@@ -3199,8 +3200,6 @@ async function createChatGPTContext(hasSessionFile: boolean): Promise<ChatGPTCon
       ...commonLaunchOptions,
       viewport: { width: 1440, height: 960 },
       locale: "ko-KR",
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     });
 
     return {
@@ -3215,8 +3214,6 @@ async function createChatGPTContext(hasSessionFile: boolean): Promise<ChatGPTCon
   const contextOptions: BrowserContextOptions = {
     viewport: { width: 1440, height: 960 },
     locale: "ko-KR",
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   };
 
   if (hasSessionFile) {

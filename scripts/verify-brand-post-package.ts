@@ -98,6 +98,20 @@ async function main() {
     "데스크톱 UI는 API 키 없음 응답을 실패 알림이 아닌 ChatGPT 핸드오프 화면으로 처리해야 합니다.",
   );
   assert.equal(
+    draftRouteSource.includes('code: "CHATGPT_BROWSER_LOGIN_REQUIRED"') &&
+      draftRouteSource.includes('code: "CHATGPT_BROWSER_FALLBACK_REQUIRED"') &&
+      draftRouteSource.includes("buildChatGptBrowserAutomationEnv(useBrowserChatGpt)"),
+    true,
+    "API 키가 없을 때 로그인된 ChatGPT 웹 자동작성과 안전한 핸드오프 폴백을 모두 지원해야 합니다.",
+  );
+  assert.equal(
+    dashboardSource.includes('"1. ChatGPT 자동작성"') &&
+      dashboardSource.includes('provider: "chatgpt", force: false') &&
+      dashboardSource.includes("await requestDraft(false)"),
+    true,
+    "데스크톱 UI는 ChatGPT 로그인 완료 후 같은 초안 요청을 자동 재개해야 합니다.",
+  );
+  assert.equal(
     electronSource.includes("setWindowOpenHandler") &&
       electronSource.includes("shell.openExternal") &&
       electronSource.includes('return { action: "deny" }'),

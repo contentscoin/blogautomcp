@@ -7,6 +7,12 @@ import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 import { buildChatGptDraftHandoff } from "@/lib/chatgpt-draft-handoff";
 import {
+  buildChatGptBrowserAutomationEnv,
+  isChatGptBrowserAutomationEnabled,
+  readChatGptBrowserSessionSummary,
+} from "@/lib/chatgpt-browser-automation";
+import { beginDesktopActivity } from "@/lib/desktop-activity";
+import {
   approveBrandPostPackage,
   getBrandPostPackageDir,
   getBrandPostPackageManifestPath,
@@ -140,6 +146,18 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   if (!link) return NextResponse.json({ success: false, error: "상품을 찾을 수 없습니다." }, { status: 404 });
   if (link.status === "PUBLISHING") return NextResponse.json({ success: false, error: "현재 발행 중인 상품입니다." }, { status: 409 });
   const connectKind = link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING";
+  const provider = (process.env.AI_PROVIDER || "openai").toLowerCase();
+  const hasProviderKey = provider === "gemini"
+    ? Boolean((process.env.GEMINI_API_KEY || process.env.GOOGLE_GENERATIVE_AI_API_KEY || "").trim())
+    : Boolean(process.env.OPENAI_API_KEY?.trim());
+  const browserAutomationEnabled = isChatGptBrowserAutomationEnabled();
+  const useBrowserChatGpt = !action && !hasProviderKey && browserAutomationEnabled;
+  const handoff = () => buildChatGptDraftHandoff({
+    productId: link.id,
+    productName: link.productName,
+    memo: link.memo,
+    connectKind,
+  });
   let submittedDraft: SubmittedDraft | null = null;
   if (action === "submit_generated") {
     try {
@@ -154,24 +172,26 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   }
 
   if (!action) {
-    const provider = (process.env.AI_PROVIDER || "openai").toLowerCase();
-    const hasProviderKey = provider === "gemini"
-      ? Boolean((process.env.GEMINI_API_KEY || process.env.GOOGLE_GENERATIVE_AI_API_KEY || "").trim())
-      : Boolean(process.env.OPENAI_API_KEY?.trim());
-    if (!hasProviderKey) {
+    if (!hasProviderKey && !browserAutomationEnabled) {
       return NextResponse.json({
         success: false,
         code: "CHATGPT_MCP_DRAFT_REQUIRED",
         error: "이 PC에는 데스크톱용 AI API 키가 없습니다. ChatGPT 연결로 이어서 만들 수 있습니다.",
         data: {
-          handoff: buildChatGptDraftHandoff({
-            productId: link.id,
-            productName: link.productName,
-            memo: link.memo,
-            connectKind,
-          }),
+          handoff: handoff(),
         },
       }, { status: 409 });
+    }
+    if (useBrowserChatGpt) {
+      const session = readChatGptBrowserSessionSummary();
+      if (!session.isValid) {
+        return NextResponse.json({
+          success: false,
+          code: "CHATGPT_BROWSER_LOGIN_REQUIRED",
+          error: session.error || "ChatGPT 웹 자동작성을 사용하려면 로그인이 필요합니다.",
+          data: { handoff: handoff(), session },
+        }, { status: 409 });
+      }
     }
   }
 
@@ -185,6 +205,15 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const scriptPath = path.join(process.cwd(), "scripts", "simple-agent.ts");
   const contextPath = path.join(packageDir, "mcp-draft-context.json");
   const submittedDraftPath = path.join(packageDir, "mcp-generated-draft.json");
+  const finishDraftActivity = beginDesktopActivity(
+    action === "prepare_context"
+      ? "mcp-draft-context"
+      : action === "submit_generated"
+        ? "mcp-draft-submit"
+        : useBrowserChatGpt
+          ? "chatgpt-browser-draft"
+          : "api-draft",
+  );
   try {
     if (action === "prepare_context") {
       fs.rmSync(contextPath, { force: true });
@@ -208,9 +237,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           BRANDLINK_PREPARE_OUTPUT_DIR: action === "prepare_context" ? "" : packageDir,
           BRANDLINK_DRAFT_CONTEXT_OUTPUT: action === "prepare_context" ? contextPath : "",
           BRANDLINK_GENERATED_DRAFT_PATH: action === "submit_generated" ? submittedDraftPath : "",
-          BROWSER_GPT_MODE: "false",
-          ALLOW_CHATGPT_BROWSER_MODE: "false",
-          CHATGPT_SKIP_POLISH: "false",
+          ...buildChatGptBrowserAutomationEnv(useBrowserChatGpt),
           HUMAN_MOBILE_POLISH_ENABLED: "true",
           BLOG_HUMANIZE_REWRITE_ENABLED: action === "submit_generated" ? "false" : "true",
           PRODUCT_THUMBNAIL_CHATGPT_ENABLED: "false",
@@ -250,8 +277,22 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     }
     return NextResponse.json({ success: true, data: packagePreview(manifest), logPath });
   } catch (error) {
-    return NextResponse.json({ success: false, error: error instanceof Error ? error.message : "고품질 초안 생성 실패", logPath }, { status: 500 });
+    const message = error instanceof Error ? error.message : "고품질 초안 생성 실패";
+    if (useBrowserChatGpt) {
+      return NextResponse.json({
+        success: false,
+        code: "CHATGPT_BROWSER_FALLBACK_REQUIRED",
+        error: `ChatGPT 웹 자동작성에 실패했습니다: ${message}`,
+        data: {
+          handoff: handoff(),
+          browserError: message,
+        },
+        logPath,
+      }, { status: 409 });
+    }
+    return NextResponse.json({ success: false, error: message, logPath }, { status: 500 });
   } finally {
+    finishDraftActivity();
     fs.closeSync(logFd);
     if (action === "submit_generated") {
       fs.rmSync(submittedDraftPath, { force: true });

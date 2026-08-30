@@ -8,6 +8,11 @@ import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 import { buildCaptureRequiredPayload } from "@/lib/brandconnect-kind";
 import { resolveConnectContract } from "@/lib/connect-contract-store";
 import { getBrandPostPackageManifestPath, readBrandPostPackage } from "@/lib/brand-post-package";
+import {
+  buildChatGptBrowserAutomationEnv,
+  isChatGptBrowserAutomationEnabled,
+  readChatGptBrowserSessionSummary,
+} from "@/lib/chatgpt-browser-automation";
 
 const NAVER_SCHEDULE_TIMEZONE = process.env.NAVER_SCHEDULE_TIMEZONE || "Asia/Seoul";
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
@@ -204,6 +209,27 @@ export async function POST(
       );
     }
 
+    const agentAiProvider = (process.env.AI_PROVIDER || "openai").toLowerCase();
+    const hasProviderKey = agentAiProvider === "gemini"
+      ? Boolean((process.env.GEMINI_API_KEY || process.env.GOOGLE_GENERATIVE_AI_API_KEY || "").trim())
+      : Boolean(process.env.OPENAI_API_KEY?.trim());
+    const useBrowserChatGpt = !preparedPackage && !hasProviderKey && isChatGptBrowserAutomationEnabled();
+    if (!preparedPackage && !hasProviderKey && !useBrowserChatGpt) {
+      return NextResponse.json(
+        { success: false, error: "발행 전에 ChatGPT에서 초안을 만들고 확인해 주세요." },
+        { status: 409 },
+      );
+    }
+    if (useBrowserChatGpt) {
+      const chatgptSession = readChatGptBrowserSessionSummary();
+      if (!chatgptSession.isValid) {
+        return NextResponse.json(
+          { success: false, code: "CHATGPT_BROWSER_LOGIN_REQUIRED", error: chatgptSession.error },
+          { status: 409 },
+        );
+      }
+    }
+
     // 상태를 발행중으로 변경
     await prisma.brandLink.update({
       where: { id },
@@ -238,7 +264,6 @@ export async function POST(
     );
 
     let child: ChildProcess;
-    const agentAiProvider = process.env.AI_PROVIDER || "openai";
     try {
       child = spawn(process.execPath, [TS_NODE_BIN, "--project", "tsconfig.scripts.json", scriptPath, ...scriptArgs], {
         cwd: process.cwd(),
@@ -249,11 +274,7 @@ export async function POST(
           ...process.env,
           ELECTRON_RUN_AS_NODE: "1",
           AI_PROVIDER: agentAiProvider,
-          BROWSER_GPT_MODE: "false",
-          ALLOW_CHATGPT_BROWSER_MODE: "false",
-          CHATGPT_USE_CUSTOM_GPTS: "false",
-          CHATGPT_DIRECT_ONLY: "true",
-          CHATGPT_SKIP_POLISH: "true",
+          ...buildChatGptBrowserAutomationEnv(useBrowserChatGpt),
           HUMAN_MOBILE_POLISH_ENABLED: "true",
           PRODUCT_THUMBNAIL_CHATGPT_ENABLED: process.env.PRODUCT_THUMBNAIL_CHATGPT_ENABLED || "false",
           PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE:

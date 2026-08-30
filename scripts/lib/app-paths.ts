@@ -41,6 +41,11 @@ export function getChatgptSessionFile(): string {
   return path.join(getSessionStorageDir(), "chatgpt-session.json");
 }
 
+/** ChatGPT 웹 자동작성에 사용하는 쓰기 가능한 Chromium 프로필 디렉터리. */
+export function getChatgptProfileDir(): string {
+  return path.join(getSessionStorageDir(), "chatgpt-profile");
+}
+
 /** 쓰기 가능한 사용자 데이터 루트. 패키징 시 userData, 개발 시 프로젝트 루트. */
 export function getUserDataRoot(): string {
   return process.env.DESKTOP_USER_DATA || getProjectRoot();

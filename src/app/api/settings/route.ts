@@ -8,6 +8,7 @@ import { NextRequest, NextResponse } from "next/server";
 import * as fs from "fs";
 import * as path from "path";
 import { requireAdminApiKey } from "@/lib/api-auth";
+import { isChatGptBrowserAutomationEnabled } from "@/lib/chatgpt-browser-automation";
 import { getEnvFilePath } from "../../../../scripts/lib/app-paths";
 
 interface FieldDef {
@@ -17,11 +18,20 @@ interface FieldDef {
   options?: string[];
   secret?: boolean;
   hint?: string;
+  defaultValue?: string;
 }
 
 // 편집 허용 키 화이트리스트(임의 env 노출/주입 방지).
 const FIELDS: FieldDef[] = [
   { key: "AI_PROVIDER", label: "AI 공급자", type: "select", options: ["openai", "gemini"], hint: "글 생성 엔진" },
+  {
+    key: "CHATGPT_BROWSER_AUTOMATION_ENABLED",
+    label: "ChatGPT 웹 자동작성",
+    type: "select",
+    options: ["true", "false"],
+    defaultValue: "true",
+    hint: "API 키가 없을 때 로그인된 ChatGPT 웹 세션으로 초안을 자동 작성합니다.",
+  },
   { key: "OPENAI_API_KEY", label: "OpenAI API 키", type: "password", secret: true },
   { key: "GEMINI_API_KEY", label: "Gemini API 키", type: "password", secret: true },
   { key: "UNSPLASH_ACCESS_KEY", label: "Unsplash 액세스 키", type: "password", secret: true, hint: "스톡 이미지(선택)" },
@@ -76,7 +86,7 @@ export async function GET(request: NextRequest) {
   const values: Record<string, string> = {};
   const configured: Record<string, boolean> = {};
   for (const f of FIELDS) {
-    const current = process.env[f.key] ?? fileEnv[f.key] ?? "";
+    const current = process.env[f.key] ?? fileEnv[f.key] ?? f.defaultValue ?? "";
     configured[f.key] = current.trim().length > 0;
     values[f.key] = f.secret ? (configured[f.key] ? MASK : "") : current;
   }
@@ -85,10 +95,26 @@ export async function GET(request: NextRequest) {
   const desktopDraftProviderConfigured = provider === "gemini"
     ? Boolean((process.env.GEMINI_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY ?? fileEnv.GEMINI_API_KEY ?? fileEnv.GOOGLE_GENERATIVE_AI_API_KEY ?? "").trim())
     : Boolean((process.env.OPENAI_API_KEY ?? fileEnv.OPENAI_API_KEY ?? "").trim());
+  const browserDraftAutomationEnabled = isChatGptBrowserAutomationEnabled({
+    ...fileEnv,
+    ...process.env,
+  });
 
   return NextResponse.json({
     success: true,
-    data: { fields: FIELDS, values, configured, desktopDraftProviderConfigured, envPath: getEnvFilePath() },
+    data: {
+      fields: FIELDS,
+      values,
+      configured,
+      desktopDraftProviderConfigured,
+      browserDraftAutomationEnabled,
+      draftCreationMode: desktopDraftProviderConfigured
+        ? "local-ai"
+        : browserDraftAutomationEnabled
+          ? "browser-chatgpt"
+          : "chatgpt",
+      envPath: getEnvFilePath(),
+    },
   });
 }
 
@@ -119,6 +145,13 @@ export async function POST(request: NextRequest) {
       process.env[key] = trimmed; // 새로 spawn되는 스크립트에 즉시 반영
     }
     applied.push(key);
+  }
+
+  if (applied.includes("CHATGPT_BROWSER_AUTOMATION_ENABLED")) {
+    const enabled = isChatGptBrowserAutomationEnabled(process.env);
+    process.env.BROWSER_GPT_MODE = enabled ? "true" : "false";
+    process.env.ALLOW_CHATGPT_BROWSER_MODE = enabled ? "true" : "false";
+    process.env.CHATGPT_USE_CUSTOM_GPTS = "false";
   }
 
   try {

@@ -3,6 +3,10 @@ import path from "path";
 import { spawn } from "child_process";
 import { PrismaClient } from "../src/generated/prisma";
 import {
+  buildChatGptBrowserAutomationEnv,
+  isChatGptBrowserAutomationEnabled,
+} from "../src/lib/chatgpt-browser-automation";
+import {
   buildAppUrl,
   notifyAndLogCompletion,
   type CompletionLink,
@@ -138,11 +142,7 @@ function runSimpleAgentNow(
         env: {
           ...process.env,
           AI_PROVIDER: AGENT_AI_PROVIDER,
-          BROWSER_GPT_MODE: "false",
-          ALLOW_CHATGPT_BROWSER_MODE: "false",
-          CHATGPT_USE_CUSTOM_GPTS: "false",
-          CHATGPT_DIRECT_ONLY: "true",
-          CHATGPT_SKIP_POLISH: "true",
+          ...buildChatGptBrowserAutomationEnv(isChatGptBrowserAutomationEnabled()),
           HUMAN_MOBILE_POLISH_ENABLED: "true",
           PRODUCT_THUMBNAIL_CHATGPT_ENABLED: process.env.PRODUCT_THUMBNAIL_CHATGPT_ENABLED || "false",
           PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE:

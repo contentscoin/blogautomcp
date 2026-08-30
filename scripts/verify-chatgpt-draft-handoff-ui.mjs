@@ -21,6 +21,11 @@ assert.equal(
   false,
   "이 검증은 별도 AI API 키가 없는 ChatGPT 핸드오프 환경에서 실행해야 합니다.",
 );
+assert.equal(
+  settings.browserDraftAutomationEnabled,
+  false,
+  "수동 핸드오프 UI 검증은 CHATGPT_BROWSER_AUTOMATION_ENABLED=false로 실행해야 합니다.",
+);
 
 const links = await json("/api/brandlinks");
 let candidate = null;
