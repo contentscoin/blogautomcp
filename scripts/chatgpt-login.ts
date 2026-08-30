@@ -6,7 +6,7 @@
 import "dotenv/config";
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import { Page } from "playwright";
+import { Page, type BrowserContext } from "playwright";
 import * as fs from "fs";
 import * as path from "path";
 import * as readline from "readline";
@@ -15,6 +15,7 @@ import {
   getChatgptSessionFile,
   getSessionStorageDir,
 } from "./lib/app-paths";
+import { acquireChatGptProfileLock } from "./lib/chatgpt-profile-lock";
 
 chromium.use(StealthPlugin());
 
@@ -48,7 +49,8 @@ const CHATGPT_LOGIN_USE_PROBE =
 if (!fs.existsSync(STORAGE_PATH)) {
   fs.mkdirSync(STORAGE_PATH, { recursive: true });
 }
-if (FORCE_LOGIN) {
+
+function resetSavedChatGptLogin(): void {
   const resolvedStorage = `${path.resolve(STORAGE_PATH)}${path.sep}`;
   const resolvedProfile = path.resolve(CHATGPT_USER_DATA_DIR);
   if (!resolvedProfile.startsWith(resolvedStorage) || resolvedProfile === path.resolve(STORAGE_PATH)) {
@@ -56,9 +58,6 @@ if (FORCE_LOGIN) {
   }
   fs.rmSync(CHATGPT_SESSION_FILE, { force: true });
   fs.rmSync(resolvedProfile, { recursive: true, force: true });
-}
-if (!fs.existsSync(CHATGPT_USER_DATA_DIR)) {
-  fs.mkdirSync(CHATGPT_USER_DATA_DIR, { recursive: true });
 }
 
 const CHATGPT_COMPOSER_SELECTORS = [
@@ -291,6 +290,29 @@ async function verifyCustomGptAccess(page: Page, url: string, label: string): Pr
   }
 }
 
+async function revealChatGptLoginWindow(page: Page): Promise<void> {
+  await page.bringToFront().catch(() => {});
+  const cdp = await page.context().newCDPSession(page).catch(() => null);
+  if (!cdp) return;
+
+  try {
+    const { windowId } = await cdp.send("Browser.getWindowForTarget");
+    await cdp.send("Browser.setWindowBounds", {
+      windowId,
+      bounds: { windowState: "normal" },
+    });
+    await cdp.send("Browser.setWindowBounds", {
+      windowId,
+      bounds: { left: 80, top: 80, width: 1440, height: 960 },
+    });
+    await page.bringToFront().catch(() => {});
+  } catch {
+    // Chrome 채널/OS가 창 제어를 지원하지 않아도 headful 로그인은 계속 진행합니다.
+  } finally {
+    await cdp.detach().catch(() => {});
+  }
+}
+
 async function main(): Promise<void> {
   console.log("=".repeat(54));
   console.log("ChatGPT 브라우저 세션 설정");
@@ -302,19 +324,33 @@ async function main(): Promise<void> {
   console.log("   3. 세션/프로필 저장 후 브라우저가 자동 종료");
   console.log("");
 
-  const context = await chromium.launchPersistentContext(CHATGPT_USER_DATA_DIR, {
-    channel: BROWSER_CHANNEL,
-    headless: false,
-    slowMo: 40,
-    args: ["--disable-blink-features=AutomationControlled"],
-    viewport: { width: 1440, height: 960 },
-    locale: "ko-KR",
-  });
-
+  const profileLock = await acquireChatGptProfileLock({ purpose: "chatgpt-login" });
+  let context: BrowserContext | null = null;
   try {
-    const page = context.pages()[0] ?? (await context.newPage());
+    if (FORCE_LOGIN) resetSavedChatGptLogin();
+    if (!fs.existsSync(CHATGPT_USER_DATA_DIR)) {
+      fs.mkdirSync(CHATGPT_USER_DATA_DIR, { recursive: true });
+    }
+
+    const activeContext = await chromium.launchPersistentContext(CHATGPT_USER_DATA_DIR, {
+      channel: BROWSER_CHANNEL,
+      headless: false,
+      slowMo: 40,
+      args: [
+        "--disable-blink-features=AutomationControlled",
+        "--window-position=80,80",
+        "--window-size=1440,960",
+        "--start-maximized",
+      ],
+      viewport: { width: 1440, height: 960 },
+      locale: "ko-KR",
+    });
+    context = activeContext;
+    const page = activeContext.pages()[0] ?? (await activeContext.newPage());
+    await revealChatGptLoginWindow(page);
 
     await page.goto(CHATGPT_LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await revealChatGptLoginWindow(page);
     console.log("✅ 브라우저가 열렸습니다.");
     console.log("📝 ChatGPT 로그인 완료를 감지하는 중...");
 
@@ -398,7 +434,11 @@ async function main(): Promise<void> {
     console.log(`   📁 프로필 위치: ${CHATGPT_USER_DATA_DIR}`);
     console.log("   이후 BROWSER_GPT_MODE=true 에서 이 세션을 사용합니다.");
   } finally {
-    await context.close().catch(() => {});
+    try {
+      await context?.close().catch(() => {});
+    } finally {
+      await profileLock.release();
+    }
   }
 }
 

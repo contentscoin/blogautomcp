@@ -63,7 +63,7 @@ $oauthHeaders = @{ Authorization = "Bearer $($token.access_token)" }
 $tools = Invoke-RestMethod -Method Post -Uri $resource -Headers $oauthHeaders -ContentType 'application/json' -Body '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
 $expectedTools = @(
   'agent_get_status', 'brandconnect_list_products', 'brandconnect_sync_products',
-  'post_create_draft', 'thumbnail_prepare', 'thumbnail_apply_generated',
+  'post_create_draft', 'post_submit_draft', 'thumbnail_prepare', 'thumbnail_apply_generated',
   'blog_profile_get', 'blog_profile_prepare_update', 'blog_profile_apply_update',
   'blog_design_get', 'post_publish', 'post_schedule', 'job_get', 'job_cancel'
 )
@@ -71,7 +71,7 @@ $actualTools = @($tools.result.tools | ForEach-Object { [string]$_.name })
 $missingTools = @($expectedTools | Where-Object { $_ -notin $actualTools })
 if ($actualTools.Count -ne $expectedTools.Count -or $missingTools.Count -gt 0 -or $tools.result.tools[0].securitySchemes[0].type -ne 'oauth2') { throw 'OAuth MCP tool discovery is invalid.' }
 
-$writeDenied = Invoke-RestMethod -Method Post -Uri $resource -Headers $oauthHeaders -ContentType 'application/json' -Body '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"post_create_draft","arguments":{}}}'
+$writeDenied = Invoke-RestMethod -Method Post -Uri $resource -Headers $oauthHeaders -ContentType 'application/json' -Body '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"post_submit_draft","arguments":{}}}'
 if ($writeDenied.result.structuredContent.code -ne 'INSUFFICIENT_SCOPE') { throw 'A read-only OAuth token performed a write action.' }
 
 $refreshed = Invoke-RestMethod -Method Post -Uri "$BaseUrl/oauth/token" -ContentType 'application/x-www-form-urlencoded' -Body @{

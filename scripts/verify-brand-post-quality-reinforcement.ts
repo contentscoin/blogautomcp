@@ -1,0 +1,103 @@
+import assert from "node:assert/strict";
+import { getBrandLinkContentReadiness } from "./lib/brandlink-content-readiness";
+import { buildBrandPostImagePrompt } from "../src/lib/brand-post-image-generation";
+import {
+  SHOPPING_POST_CONTRACT_V1,
+  TRAVEL_POST_CONTRACT_V1,
+} from "../src/lib/post-composition-contract";
+
+const productName = "출발확정 여행핫딜 시내숙박 대마도 2일 패키지";
+const disclosure = "이 포스팅은 네이버 여행 커넥트 활동의 일환으로, 예약 발생 시 수수료를 제공받습니다.";
+const weakSections = [
+  "여행 시기와 조건\n\n대마도 2일 상품을 조건 중심으로 살펴봤어요. 선택한 출발일도 확정인지 다시 확인해야 해요. 세부 순서가 공개되지 않아 판단하기 어렵습니다. 현재 정보만으로 자유시간을 알기 어려워요.",
+  "2일 일정\n\n대마도는 짧게 다녀오기 좋아요. 도착 시각을 확인해야 실제 관광 시간을 알 수 있어요. 방문지 수보다 체류시간을 살펴보는 게 좋아요. 이동 강도도 일정표에서 체크해야 합니다.",
+  "출발확정\n\n출발확정 표기는 장점이에요. 다만 특정 날짜인지 예약 화면에서 다시 볼 필요가 있어요. 예약 가능 인원도 확인하세요. 현재 수집 정보만으로 최종 상태를 단정하기 어렵습니다.",
+  "시내숙박\n\n시내숙박은 편리할 수 있어요. 호텔명이 공개되지 않아 위치를 알기 어려워요. 객실 형태를 확인해야 해요. 체크인 시간과 다음 날 집결도 살펴보는 게 좋습니다.",
+  "쇼핑과 특전\n\n티아라몰 쇼핑이 포함돼 있어요. 의무 구매 여부를 확인해야 해요. 라벤더비누 수량도 현재 정보에는 담겨 있지 않아요. 특전 수령 방식도 체크하세요.",
+  "가격 조건\n\n표시가는 126,003원이에요. 실제 적용가는 최종 화면에서 확인해야 합니다. 현지 필수경비는 알기 어렵습니다. 포함 식사와 입장료도 다시 확인하세요.",
+  "교통과 식사\n\n교통편 시간이 중요해요. 출발지와 집결 시각을 확인해야 해요. 식사 횟수는 현재 정보로 단정하기 어렵습니다. 수하물 조건도 체크해보세요.",
+  "추천 여행자\n\n짧은 휴가 여행자에게 맞을 수 있어요. 자유시간을 원하는 여행자에게는 아쉬운 점이 있어요. 추천 여행자와 비추천 여행자는 상세 일정 확인 후 판단해야 합니다. 최종 리뷰도 예약 화면을 다시 보는 편이 안전합니다.",
+  disclosure,
+];
+
+const strongerSections = [
+  "한 줄 결론\n\n대마도 2일 패키지의 장점은 긴 연차 없이 섬 여행과 숙박을 한 번에 묶는다는 점이에요. 대신 왕복 이동이 들어가는 짧은 일정이라 한 장소에 깊게 머무는 여행과는 거리가 있습니다. 넓게 보고 이동 준비를 줄이고 싶은 여행자에게 선택 이유가 분명합니다.",
+  "코스의 성격\n\n히타카츠와 이즈하라를 잇는 동선이라면 대마도의 항구 풍경과 생활권 분위기를 함께 보는 구성이 됩니다. 이 코스의 매력은 서로 다른 지역 인상을 짧게 비교하는 데 있고, 이동 부담은 체류시간이 잘게 나뉠 수 있다는 점입니다. 사진 명소 개수보다 각 구간의 머무는 시간이 만족도를 좌우합니다.",
+  "숙소와 저녁\n\n시내숙박은 저녁에 편의점이나 식당을 찾기 쉬운 위치라면 1박 2일의 짧은 체류를 효율적으로 만듭니다. 숙소가 집결지와 가까울수록 이른 출발 부담도 줄어듭니다. 반대로 시내라는 표현의 범위가 넓다면 자유시간 활용도가 낮아질 수 있는 제약이 있습니다.",
+  "출발확정의 가치\n\n출발확정은 연차와 국내 이동편을 미리 잡는 여행자에게 실질적인 장점입니다. 출발 취소 가능성을 낮춘다는 점에서 단순 할인보다 일정 안정성의 가치가 큽니다. 다만 날짜별 상태가 달라질 수 있으므로 선택 날짜의 출발 조건이 최종 판단 기준입니다.",
+  "포함 조건과 예상 지출\n\n표시가 126,003원은 짧은 해외여행의 진입 가격으로 매력적이지만, 식사·입장료·현지 필수경비가 더해지면 체감 예산이 달라집니다. 티아라몰 쇼핑과 라벤더비누 특전은 부가 요소이고, 핵심 가치는 왕복 교통과 숙박이 어디까지 포함되는지에 달려 있습니다. 가격은 추가 지출까지 합쳐 비교해야 합니다.",
+  "준비와 이동 강도\n\n2일 동안 항구 이동과 관광을 함께 소화하려면 작은 짐과 걷기 편한 복장이 유리합니다. 대마도는 날씨 변화와 해상 이동의 영향을 받을 수 있어 출발 시간에 맞춘 준비가 중요합니다. 보행이 부담인 동행이 있다면 이동 횟수와 휴식 구간이 이 상품의 리스크가 됩니다.",
+  "추천·비추천 여행자\n\n추천 여행자는 첫 대마도 여행에서 교통과 숙소 예약 수고를 줄이고 대표 지역을 폭넓게 보고 싶은 분입니다. 비추천 여행자는 골목과 카페에 오래 머물거나 쇼핑 일정 없이 자유롭게 움직이고 싶은 분입니다. 짧고 정돈된 패키지를 원하는지, 깊게 머무는 자유여행을 원하는지가 적합도를 가릅니다.",
+  "최종 리뷰\n\n최종 리뷰는 출발확정과 시내숙박이 주는 안정성이 분명한 대신, 짧은 일정의 이동 밀도를 감수하는 상품이라는 것입니다. 동행이 이동 중심 코스를 받아들일 수 있고 포함 조건이 예산에 맞는다면 후보에 올릴 만합니다. 자유시간이 최우선이라면 더 긴 일정이나 자유여행이 낫습니다.",
+  disclosure,
+];
+
+const assess = (sections: string[]) => getBrandLinkContentReadiness({
+  productName,
+  title: "대마도 2일 패키지 출발확정 시내숙박 예약 조건",
+  sections,
+  hashtags: ["대마도여행", "대마도2일", "대마도패키지", "여행커넥트"],
+  brandLink: "https://brandconnect.naver.com/travel-fixture",
+  generationSource: "AI",
+  hasRepresentativeImage: true,
+  requireRepresentativeImage: false,
+  thumbnailGenerated: true,
+  connectKind: "TRAVEL",
+  experienceMode: "AI_ASSISTED_INFORMATION",
+  sourceDescription: "히타카츠 이즈하라 시내숙박 출발확정 티아라몰 쇼핑",
+  sourceFeatures: ["1박 2일", "표시가 126,003원"],
+  mode: "editorial",
+});
+
+const weak = assess(weakSections);
+const stronger = assess(strongerSections.map((section, index) => (
+  index === strongerSections.length - 1
+    ? section
+    : `${section}\n\n판단 포인트 ${index + 1}은 상품의 표기 조건을 여행자의 시간·예산·이동 성향에 연결해 장점과 대가를 함께 읽는 것입니다. 선택 차이 ${index + 1}은 단순 예약 안내보다 실제 결정에 필요한 기준을 선명하게 만듭니다.`
+)));
+assert.equal(weak.canPublish, false);
+assert.ok(
+  ["too-short-content", "generic-guidance-heavy", "missing-review-substance"].includes(weak.code),
+  `확인 안내형 여행 원고를 차단해야 합니다. 실제 코드: ${weak.code}`,
+);
+assert.equal(
+  weak.signals.find((signal) => signal.key === "generic-guidance")?.status,
+  "fail",
+  "분량 차단이 먼저 걸려도 확인 안내 반복 문제를 함께 보여줘야 합니다.",
+);
+assert.ok(stronger.score > weak.score, `보강 원고 점수가 개선되어야 합니다: ${weak.score} -> ${stronger.score}`);
+assert.equal(SHOPPING_POST_CONTRACT_V1.targetImages.min, 5);
+assert.equal(SHOPPING_POST_CONTRACT_V1.targetImages.recommended, 8);
+assert.equal(TRAVEL_POST_CONTRACT_V1.targetImages.min, 7);
+assert.equal(TRAVEL_POST_CONTRACT_V1.targetImages.recommended, 10);
+
+const shoppingPrompt = buildBrandPostImagePrompt({
+  connectKind: "SHOPPING",
+  productName: "무선 선풍기",
+  sectionTitle: "바람 세기와 사용 장면",
+  imageIntent: "여름 책상 위 사용 장면",
+  role: "body",
+});
+assert.match(shoppingPrompt, /environment only/u);
+assert.match(shoppingPrompt, /Do not draw, imitate, redesign, recolor/u);
+assert.doesNotMatch(shoppingPrompt, /must generate (?:nine|eighteen)|18 images/iu);
+
+const travelPrompt = buildBrandPostImagePrompt({
+  connectKind: "TRAVEL",
+  productName,
+  sectionTitle: "히타카츠와 이즈하라",
+  imageIntent: "항구와 시내 분위기",
+  role: "body",
+});
+assert.match(travelPrompt, /photorealistic travel editorial photograph/iu);
+assert.match(travelPrompt, /do not invent a named hotel/iu);
+
+console.log(JSON.stringify({
+  ok: true,
+  weak: { code: weak.code, score: weak.score },
+  stronger: { code: stronger.code, score: stronger.score },
+  imageTargets: {
+    shopping: SHOPPING_POST_CONTRACT_V1.targetImages,
+    travel: TRAVEL_POST_CONTRACT_V1.targetImages,
+  },
+}));

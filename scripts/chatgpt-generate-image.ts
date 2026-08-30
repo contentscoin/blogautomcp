@@ -58,9 +58,9 @@ async function maybeConfirmGeneration(page: import("playwright").Page) {
 
 async function main() {
   const { prompt, outStem, gptUrl } = parseArgs(process.argv.slice(2));
-  const handle = await createChatGPTContext(true);
   const tempDir = path.join(path.dirname(outStem), `_chatgpt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
   fs.mkdirSync(tempDir, { recursive: true });
+  const handle = await createChatGPTContext(true);
 
   try {
     const page = await handle.context.newPage();

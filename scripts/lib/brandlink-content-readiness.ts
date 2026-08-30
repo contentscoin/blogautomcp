@@ -8,6 +8,7 @@ import type {
   PostExperienceMode,
   PostQualityReportV1,
 } from "../../src/lib/post-composition-contract";
+import { getPostCompositionContract } from "../../src/lib/post-composition-contract";
 
 export type PostGenerationSource =
   | "AI"
@@ -28,6 +29,9 @@ export interface BrandLinkContentReadinessInput {
   connectKind?: BrandConnectKind;
   experienceMode?: PostExperienceMode;
   compositionQualityReport?: PostQualityReportV1 | null;
+  sourceDescription?: string | null;
+  sourceFeatures?: string[];
+  mode?: "publish" | "editorial";
 }
 
 export interface BrandLinkContentReadinessSignal {
@@ -208,8 +212,9 @@ export function getBrandLinkContentReadiness(
   const title = normalizeText(input.title);
   const connectKind = input.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING";
   const isTravel = connectKind === "TRAVEL";
-  const sectionMinimum = isTravel ? 10 : 9;
-  const characterMinimum = isTravel ? 3200 : 1800;
+  const compositionContract = getPostCompositionContract(connectKind);
+  const sectionMinimum = compositionContract.targetSections.min;
+  const characterMinimum = compositionContract.targetCharacters.min;
   const sections = input.sections.map((section) => normalizeText(section)).filter(Boolean);
   const fullBody = sections.join("\n");
   const corpus = normalizeLoose([title, fullBody, input.hashtags.join(" ")].join(" "));
@@ -248,7 +253,11 @@ export function getBrandLinkContentReadiness(
     ? assessTravelEditorialCoverage(sections.slice(0, -1))
     : assessProductEditorialCoverage(sections.slice(0, -1));
   const reviewSubstance = isTravel
-    ? assessTravelReviewSubstance({ productName: input.productName, sections: sections.slice(0, -1) })
+    ? assessTravelReviewSubstance({
+        productName: input.productName,
+        sections: sections.slice(0, -1),
+        sourceText: [input.sourceDescription || "", ...(input.sourceFeatures || [])].join(" "),
+      })
     : assessProductReviewSubstance({ productName: input.productName, sections: sections.slice(0, -1) });
   const categoryMismatchTerms = "categoryMismatchTerms" in reviewSubstance
     ? reviewSubstance.categoryMismatchTerms
@@ -373,11 +382,15 @@ export function getBrandLinkContentReadiness(
     },
   ];
 
-  const failSignal = baseSignals.find((signal) => signal.status === "fail");
-  const warningCount = baseSignals.filter((signal) => signal.status === "warn").length;
+  const signals = input.mode === "editorial"
+    ? baseSignals.filter((signal) => !["representative-image", "thumbnail", "composition-quality"].includes(signal.key))
+    : baseSignals;
+
+  const failSignal = signals.find((signal) => signal.status === "fail");
+  const warningCount = signals.filter((signal) => signal.status === "warn").length;
   const score = Math.max(
     0,
-    100 - baseSignals.filter((signal) => signal.status === "fail").length * 18 - warningCount * 5,
+    100 - signals.filter((signal) => signal.status === "fail").length * 18 - warningCount * 5,
   );
 
   if (!trustedGenerationSource) {

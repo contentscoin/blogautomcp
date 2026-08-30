@@ -322,13 +322,20 @@ function repeatedSentenceCount(value: string): number {
   return Array.from(counts.values()).reduce((sum, count) => sum + Math.max(0, count - 1), 0);
 }
 
-export function assessTravelReviewSubstance(input: { productName: string; sections: string[] }): TravelReviewSubstanceAssessment {
+export function assessTravelReviewSubstance(input: {
+  productName: string;
+  sections: string[];
+  sourceText?: string;
+}): TravelReviewSubstanceAssessment {
   const body = input.sections.join("\n");
-  const facts = extractTravelProductFacts(input.productName);
+  const facts = extractTravelProductFacts(input.productName, input.sourceText || "");
   const places = unique([...facts.highlights, ...facts.destinations], 8);
   const coveredPlaces = places.filter((place) => body.includes(place));
   const sentenceCount = Math.max(1, body.split(/[\n.!?。]+/u).filter((item) => clean(item).length >= 8).length);
-  const genericGuidanceCount = countMatches(body, /(?:확인(?:해|하|해야|하세요)|살펴보|비교해보|체크해|보는\s*게\s*좋)/u);
+  const genericGuidanceCount = countMatches(
+    body,
+    /(?:확인(?:해|하|해야|하세요)|살펴보|비교해보|체크해|보는\s*게\s*좋|알기\s*어렵|판단하기\s*어렵|단정하기\s*어렵|현재\s*(?:정보|수집)|공개되지\s*않|담겨\s*있지\s*않|확정하기\s*어렵|다시\s*볼\s*필요)/u,
+  );
   const repeats = repeatedSentenceCount(body);
   const checks: Array<[boolean, string]> = [
     [/(?:장점|매력|선택\s*이유)/u.test(body), "패키지의 구체적인 장점"],

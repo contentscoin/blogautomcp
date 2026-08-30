@@ -22,7 +22,7 @@ try {
   await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
   await page.getByRole("heading", { name: "로컬 프로그램 제어" }).waitFor({ state: "visible" });
   await page.getByRole("button", { name: /ChatGPT 재로그인/u }).waitFor({ state: "visible" });
-  await page.getByRole("switch", { name: /웹 자동작성 켜짐/u }).waitFor({ state: "visible" });
+  await page.getByRole("switch", { name: /(?:백그라운드|웹) 자동작성 켜짐/u }).waitFor({ state: "visible" });
   await page.locator("button").filter({ hasText: "1. ChatGPT 자동작성" }).first().waitFor({ state: "visible" });
   await page.getByText(/자동작성 준비됨|ChatGPT 로그인 필요/u).first().waitFor({ state: "visible" });
 

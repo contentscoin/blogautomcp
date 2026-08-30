@@ -31,7 +31,7 @@ export interface PostCompositionContractV1 {
   version: "post-composition-contract/v1";
   connectKind: BrandConnectKind;
   targetCharacters: { min: number; max: number };
-  targetImages: { min: number; max: number };
+  targetImages: { min: number; recommended: number; max: number };
   targetSections: { min: number; max: number };
   earlyConnectAfterSectionId: string;
   finalConnectBeforeDisclosure: boolean;
@@ -84,7 +84,12 @@ export interface PostQualityReportV1 {
   target: {
     characters: { min: number; max: number };
     sections: { min: number; max: number };
-    images: { min: number; max: number };
+    images: { min: number; recommended: number; max: number };
+  };
+  imageCoverage: {
+    requiredSlots: number;
+    filledRequiredSlots: number;
+    missingSectionIds: string[];
   };
   blockers: string[];
   warnings: string[];
@@ -151,7 +156,7 @@ const shoppingSections: PostSectionContractV1[] = [
     headingStyle: "quotation",
     minChars: 170,
     maxChars: 260,
-    image: { min: 1, max: 1, intent: "첫 번째 핵심 기능 상세 사진", placement: "after-lead" },
+    image: { min: 0, max: 1, intent: "첫 번째 핵심 기능 상세 사진", placement: "after-lead" },
   },
   {
     id: "shopping-feature-2",
@@ -161,7 +166,7 @@ const shoppingSections: PostSectionContractV1[] = [
     headingStyle: "quotation",
     minChars: 170,
     maxChars: 260,
-    image: { min: 1, max: 1, intent: "두 번째 핵심 기능 상세 사진", placement: "after-lead" },
+    image: { min: 0, max: 1, intent: "두 번째 핵심 기능 상세 사진", placement: "after-lead" },
   },
   {
     id: "shopping-feature-3",
@@ -171,7 +176,7 @@ const shoppingSections: PostSectionContractV1[] = [
     headingStyle: "quotation",
     minChars: 170,
     maxChars: 260,
-    image: { min: 1, max: 2, intent: "제품 원형을 보존한 연출컷 또는 원본 사용 장면", placement: "after-lead", layout: "sequence" },
+    image: { min: 0, max: 2, intent: "제품 원형을 보존한 연출컷 또는 원본 사용 장면", placement: "after-lead", layout: "sequence" },
   },
   {
     id: "shopping-scale",
@@ -181,7 +186,7 @@ const shoppingSections: PostSectionContractV1[] = [
     headingStyle: "sectionTitle",
     minChars: 130,
     maxChars: 220,
-    image: { min: 1, max: 1, intent: "크기 비교 또는 스펙 이미지", placement: "after-lead" },
+    image: { min: 0, max: 1, intent: "크기 비교 또는 스펙 이미지", placement: "after-lead" },
   },
   {
     id: "shopping-pros-cautions",
@@ -191,7 +196,7 @@ const shoppingSections: PostSectionContractV1[] = [
     headingStyle: "quotation",
     minChars: 180,
     maxChars: 280,
-    image: { min: 1, max: 1, intent: "옵션·주의사항·구성 비교 이미지", placement: "after-body" },
+    image: { min: 0, max: 1, intent: "옵션·주의사항·구성 비교 이미지", placement: "after-body" },
   },
   {
     id: "shopping-fit",
@@ -244,7 +249,7 @@ const travelSections: PostSectionContractV1[] = [
     headingStyle: "sectionTitle",
     minChars: 180,
     maxChars: 280,
-    image: { min: 3, max: 3, intent: "서로 다른 핵심 방문지 3장", placement: "after-lead", layout: "collage-3" },
+    image: { min: 2, max: 3, intent: "서로 다른 핵심 방문지 2~3장", placement: "after-lead", layout: "collage-3" },
   },
   {
     id: "travel-basics",
@@ -264,7 +269,7 @@ const travelSections: PostSectionContractV1[] = [
     headingStyle: "quotation",
     minChars: 220,
     maxChars: 340,
-    image: { min: 2, max: 3, intent: "숙소 외관과 객실 또는 주변 동선 2~3장", placement: "after-lead", layout: "sequence" },
+    image: { min: 1, max: 2, intent: "숙소 또는 핵심 장소와 주변 동선 1~2장", placement: "after-lead", layout: "sequence" },
   },
   {
     id: "travel-route",
@@ -274,7 +279,7 @@ const travelSections: PostSectionContractV1[] = [
     headingStyle: "quotation",
     minChars: 260,
     maxChars: 400,
-    image: { min: 1, max: 2, intent: "일정 요약 카드 또는 이동 동선 이미지", placement: "after-lead", layout: "sequence" },
+    image: { min: 0, max: 1, intent: "일정 요약 카드 또는 이동 동선 이미지", placement: "after-lead", layout: "sequence" },
   },
   {
     id: "travel-day-1",
@@ -284,7 +289,7 @@ const travelSections: PostSectionContractV1[] = [
     headingStyle: "quotation",
     minChars: 260,
     maxChars: 420,
-    image: { min: 1, max: 3, intent: "첫 일정 구간의 실제 장소 사진", placement: "after-lead", layout: "sequence" },
+    image: { min: 0, max: 2, intent: "첫 일정 구간의 실제 장소 사진", placement: "after-lead", layout: "sequence" },
   },
   {
     id: "travel-day-2",
@@ -294,7 +299,7 @@ const travelSections: PostSectionContractV1[] = [
     headingStyle: "quotation",
     minChars: 260,
     maxChars: 420,
-    image: { min: 1, max: 3, intent: "중심 일정의 실제 장소 사진", placement: "after-lead", layout: "sequence" },
+    image: { min: 0, max: 2, intent: "중심 일정의 실제 장소 사진", placement: "after-lead", layout: "sequence" },
   },
   {
     id: "travel-day-3",
@@ -304,7 +309,7 @@ const travelSections: PostSectionContractV1[] = [
     headingStyle: "quotation",
     minChars: 240,
     maxChars: 400,
-    image: { min: 1, max: 3, intent: "후반 일정 또는 지역 분위기 사진", placement: "after-lead", layout: "sequence" },
+    image: { min: 0, max: 2, intent: "후반 일정 또는 지역 분위기 사진", placement: "after-lead", layout: "sequence" },
   },
   {
     id: "travel-inclusions",
@@ -314,7 +319,7 @@ const travelSections: PostSectionContractV1[] = [
     headingStyle: "quotation",
     minChars: 240,
     maxChars: 380,
-    image: { min: 1, max: 1, intent: "식사·교통·포함 조건을 설명하는 사진", placement: "after-body" },
+    image: { min: 0, max: 1, intent: "식사·교통·포함 조건을 설명하는 사진", placement: "after-body" },
   },
   {
     id: "travel-preparation",
@@ -324,7 +329,7 @@ const travelSections: PostSectionContractV1[] = [
     headingStyle: "sectionTitle",
     minChars: 220,
     maxChars: 340,
-    image: { min: 1, max: 1, intent: "계절감·현지 이동이 드러나는 사진", placement: "after-lead" },
+    image: { min: 0, max: 1, intent: "계절감·현지 이동이 드러나는 사진", placement: "after-lead" },
   },
   {
     id: "travel-fit",
@@ -334,7 +339,7 @@ const travelSections: PostSectionContractV1[] = [
     headingStyle: "quotation",
     minChars: 220,
     maxChars: 340,
-    image: { min: 1, max: 1, intent: "여행자와 목적지 분위기가 함께 보이는 사진", placement: "after-lead" },
+    image: { min: 0, max: 1, intent: "여행자와 목적지 분위기가 함께 보이는 사진", placement: "after-lead" },
   },
   {
     id: "travel-close",
@@ -344,7 +349,7 @@ const travelSections: PostSectionContractV1[] = [
     headingStyle: "quotation",
     minChars: 220,
     maxChars: 340,
-    image: { min: 1, max: 1, intent: "여행의 여운을 남기는 마지막 풍경", placement: "after-lead" },
+    image: { min: 0, max: 1, intent: "여행의 여운을 남기는 마지막 풍경", placement: "after-lead" },
   },
 ];
 
@@ -352,7 +357,7 @@ export const SHOPPING_POST_CONTRACT_V1: PostCompositionContractV1 = {
   version: "post-composition-contract/v1",
   connectKind: "SHOPPING",
   targetCharacters: { min: 1200, max: 2800 },
-  targetImages: { min: 9, max: 22 },
+  targetImages: { min: 5, recommended: 8, max: 14 },
   targetSections: { min: 5, max: 10 },
   earlyConnectAfterSectionId: "shopping-summary",
   finalConnectBeforeDisclosure: true,
@@ -363,7 +368,7 @@ export const TRAVEL_POST_CONTRACT_V1: PostCompositionContractV1 = {
   version: "post-composition-contract/v1",
   connectKind: "TRAVEL",
   targetCharacters: { min: 1750, max: 3600 },
-  targetImages: { min: 18, max: 39 },
+  targetImages: { min: 7, recommended: 10, max: 18 },
   targetSections: { min: 7, max: 12 },
   earlyConnectAfterSectionId: "travel-highlights",
   finalConnectBeforeDisclosure: true,
@@ -437,7 +442,7 @@ function allocateImages(
   return allocations;
 }
 
-function buildQualityReport(options: {
+export function buildPostQualityReport(options: {
   contract: PostCompositionContractV1;
   preset: PostQualityPreset;
   sections: ResolvedPostSectionV1[];
@@ -456,6 +461,28 @@ function buildQualityReport(options: {
     sections: options.contract.targetSections,
     images: options.contract.targetImages,
   };
+  const sectionContractById = new Map(
+    options.contract.sections.map((section) => [section.id, section]),
+  );
+  const missingSectionIds = options.sections
+    .filter((section) => {
+      const minimum = sectionContractById.get(section.id)?.image.min || 0;
+      return section.imagePaths.length < minimum;
+    })
+    .map((section) => section.id);
+  const requiredBodySlots = options.sections.reduce(
+    (sum, section) => sum + (sectionContractById.get(section.id)?.image.min || 0),
+    0,
+  );
+  const filledRequiredBodySlots = options.sections.reduce((sum, section) => {
+    const minimum = sectionContractById.get(section.id)?.image.min || 0;
+    return sum + Math.min(minimum, section.imagePaths.length);
+  }, 0);
+  const imageCoverage = {
+    requiredSlots: requiredBodySlots + 1,
+    filledRequiredSlots: filledRequiredBodySlots + (options.imageCount > 0 ? 1 : 0),
+    missingSectionIds,
+  };
   const register = (ok: boolean, message: string) => {
     if (ok) return;
     (options.preset === "PREMIUM" ? blockers : warnings).push(message);
@@ -463,6 +490,9 @@ function buildQualityReport(options: {
   register(actual.characters >= target.characters.min, `본문이 ${target.characters.min}자보다 짧습니다 (${actual.characters}자).`);
   register(actual.sections >= target.sections.min, `본문 섹션이 ${target.sections.min}개보다 적습니다 (${actual.sections}개).`);
   register(actual.images >= target.images.min, `이미지가 ${target.images.min}장보다 적습니다 (${actual.images}장).`);
+  if (actual.images >= target.images.min && actual.images < target.images.recommended) {
+    warnings.push(`이미지 최소 기준은 통과했지만 권장 ${target.images.recommended}장보다 적습니다 (${actual.images}장).`);
+  }
   if (actual.characters > target.characters.max) warnings.push(`본문이 권장 최대 ${target.characters.max}자를 넘었습니다.`);
   if (actual.images > target.images.max) warnings.push(`이미지가 권장 최대 ${target.images.max}장을 넘었습니다.`);
   const deductions = blockers.length * 22 + warnings.length * 6;
@@ -472,6 +502,7 @@ function buildQualityReport(options: {
     score: Math.max(0, 100 - deductions),
     actual,
     target,
+    imageCoverage,
     blockers,
     warnings,
   };
@@ -616,7 +647,7 @@ export function resolvePostDocument(options: {
     title: options.title,
     sections,
     renderNodes,
-    qualityReport: buildQualityReport({
+    qualityReport: buildPostQualityReport({
       contract,
       preset: qualityPreset,
       sections,
@@ -625,10 +656,26 @@ export function resolvePostDocument(options: {
   };
 }
 
+export function refreshPostDocumentQuality(
+  document: ResolvedPostDocumentV1,
+): ResolvedPostDocumentV1 {
+  const contract = getPostCompositionContract(document.connectKind);
+  const imageCount = document.renderNodes.filter((node) => node.kind === "image").length;
+  return {
+    ...document,
+    qualityReport: buildPostQualityReport({
+      contract,
+      preset: document.qualityPreset,
+      sections: document.sections,
+      imageCount,
+    }),
+  };
+}
+
 export function formatPostContractForPrompt(contract: PostCompositionContractV1): string {
   return [
     `[유연한 렌더링 계약 ${contract.version}]`,
-    `- 권장 범위: 섹션 ${contract.targetSections.min}~${contract.targetSections.max}개, 본문 ${contract.targetCharacters.min}~${contract.targetCharacters.max}자, 이미지 ${contract.targetImages.min}~${contract.targetImages.max}장`,
+    `- 권장 범위: 섹션 ${contract.targetSections.min}~${contract.targetSections.max}개, 본문 ${contract.targetCharacters.min}~${contract.targetCharacters.max}자, 이미지 최소 ${contract.targetImages.min}장·권장 ${contract.targetImages.recommended}장·상한 ${contract.targetImages.max}장`,
     "- 위 숫자는 품질 점검 범위이며 정확한 할당량이 아닙니다. 정보가 빈약한 섹션을 만들거나 같은 내용을 반복하지 마세요.",
     "- 아래 항목은 에디터 이미지 배치를 위한 역할 팔레트입니다. 모든 제목·순서를 복사하지 말고, 분석 결과에 맞춰 필요한 역할을 선택·병합·재배열하세요.",
     ...contract.sections.map(

@@ -91,6 +91,11 @@ function configureRuntimePaths(projectRoot) {
   process.env.DESKTOP_PROJECT_ROOT = process.env.DESKTOP_PROJECT_ROOT || projectRoot;
   process.env.BROWSER_CHANNEL = process.env.BROWSER_CHANNEL || "chrome";
   require("dotenv").config({ path: path.join(userData, ".env"), override: false, quiet: true });
+  process.env.CHATGPT_BROWSER_VISIBILITY =
+    process.env.CHATGPT_BROWSER_VISIBILITY ||
+    ((process.env.CHATGPT_HEADLESS || "").trim().toLowerCase() === "true"
+      ? "headless"
+      : "background");
   const browserChatGptEnabled =
     (process.env.CHATGPT_BROWSER_AUTOMATION_ENABLED || "true").trim().toLowerCase() === "true";
   process.env.CHATGPT_BROWSER_AUTOMATION_ENABLED = browserChatGptEnabled ? "true" : "false";

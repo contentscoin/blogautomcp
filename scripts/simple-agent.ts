@@ -98,6 +98,15 @@ import {
   getNaverSessionFile,
 } from "./lib/app-paths";
 import {
+  buildChatGptBrowserLaunchPolicy,
+  describeChatGptBrowserVisibility,
+} from "./lib/chatgpt-browser-visibility";
+import {
+  chatGptAuthenticationRequiredMessage,
+  hasChatGptProtectionText,
+} from "./lib/chatgpt-browser-errors";
+import { acquireChatGptProfileLock } from "./lib/chatgpt-profile-lock";
+import {
   parseProductThumbnailSettings,
   productThumbnailSettingKey,
 } from "./lib/product-thumbnail-settings";
@@ -199,7 +208,6 @@ const CHATGPT_RESPONSE_MAX_TIMEOUT_MS = Number(
 );
 const CHATGPT_DRAFT_STEP_IDLE_TIMEOUT_MS = Number(process.env.CHATGPT_DRAFT_STEP_IDLE_TIMEOUT_MS || "90000");
 const CHATGPT_DRAFT_STEP_MAX_TIMEOUT_MS = Number(process.env.CHATGPT_DRAFT_STEP_MAX_TIMEOUT_MS || "240000");
-const CHATGPT_HEADLESS = (process.env.CHATGPT_HEADLESS || "false").toLowerCase() === "true";
 const CHATGPT_USE_PERSISTENT_PROFILE =
   (process.env.CHATGPT_USE_PERSISTENT_PROFILE || "true").toLowerCase() === "true";
 const CHATGPT_RUN_ISOLATED_CONTEXT =
@@ -299,17 +307,19 @@ const PRODUCT_THUMBNAIL_IMAGE_WAIT_MS = Number(
 );
 const BRANDLINK_CONTENT_READINESS_ENABLED =
   (process.env.BRANDLINK_CONTENT_READINESS_ENABLED || "true").toLowerCase() !== "false";
+const BRANDLINK_FORCE_QUALITY_REPAIR =
+  (process.env.BRANDLINK_FORCE_QUALITY_REPAIR || "false").toLowerCase() === "true";
 const BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE =
   (process.env.BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE || "true").toLowerCase() !== "false";
 const SHOPPING_BODY_IMAGE_MAX = parseBoundedInteger(
   process.env.SHOPPING_BODY_IMAGE_MAX || process.env.BLOG_BODY_IMAGE_MAX,
-  14,
+  getPostCompositionContract("SHOPPING").targetImages.recommended,
   1,
   30
 );
 const TRAVEL_BODY_IMAGE_MAX = parseBoundedInteger(
   process.env.TRAVEL_BODY_IMAGE_MAX || process.env.BLOG_BODY_IMAGE_MAX,
-  26,
+  getPostCompositionContract("TRAVEL").targetImages.recommended,
   1,
   30
 );
@@ -377,6 +387,16 @@ interface GeneratedPostPreview {
   openCrabSeoBrief?: OpenCrabSeoBrief | null;
   productEditorialPlan?: ProductEditorialPlan | null;
   composition?: ResolvedPostDocumentV1 | null;
+  editorialQuality?: BrandLinkContentReadiness | null;
+  qualityRepair?: {
+    attempted: boolean;
+    applied: boolean;
+    beforeScore: number;
+    afterScore: number;
+    beforeCode: BrandLinkContentReadiness["code"];
+    afterCode: BrandLinkContentReadiness["code"];
+    note: string;
+  } | null;
 }
 
 interface McpGeneratedDraftFile {
@@ -1999,30 +2019,9 @@ const CHATGPT_STARTER_BUTTON_SELECTORS = [
 ];
 
 const CHATGPT_MANUAL_VERIFICATION_MESSAGE =
-  "ChatGPT manual verification required. A human-verification or security-check page is visible. Complete it in the browser, then run the job again.";
-
-const CHATGPT_PROTECTION_TEXT_PATTERNS = [
-  "checking your browser",
-  "checking if the site connection is secure",
-  "please stand by",
-  "verify you are human",
-  "needs to review the security of your connection",
-  "cf-challenge",
-  "cloudflare",
-  "turnstile",
-  "unusual activity",
-  "access denied",
-  "\uc0ac\ub78c\uc778\uc9c0 \ud655\uc778",
-  "\uc2e4\uc81c \uc0ac\uc6a9\uc790\uc778\uc9c0 \ud655\uc778",
-  "\uc0ac\uc6a9\uc790\uac00 \uc0ac\ub78c\uc778\uc9c0 \ud655\uc778",
-  "\uc0ac\ub78c\uc784\uc744 \ud655\uc778",
-  "\ub85c\ubd07\uc774 \uc544\ub2d8",
-  "\ubcf4\uc548 \ud655\uc778",
-  "\ubcf4\uc548 \uac80\uc99d",
-  "\ube0c\ub77c\uc6b0\uc800\ub97c \ud655\uc778",
-  "\uc811\uadfc\uc774 \ucc28\ub2e8",
-  "\ube44\uc815\uc0c1\uc801\uc778 \ud65c\ub3d9",
-];
+  chatGptAuthenticationRequiredMessage(
+    "ChatGPT manual verification required. A human-verification or security-check page is visible. Complete it in the browser, then run the job again.",
+  );
 
 const CHATGPT_PROTECTION_FRAME_PATTERNS = [
   "cdn-cgi/challenge-platform",
@@ -2666,26 +2665,14 @@ async function clickGreetingStarterIfVisible(page: Page): Promise<boolean> {
 async function detectChatGPTProtectionIssue(page: Page): Promise<string | null> {
   const url = page.url();
   if (url.includes("/cdn-cgi/challenge-platform/")) {
-    return "Cloudflare 보안 검증 페이지가 표시되었습니다.";
+    return chatGptAuthenticationRequiredMessage("Cloudflare 보안 검증 페이지가 표시되었습니다.");
   }
 
   const bodyText = (await page.textContent("body").catch(() => "")) || "";
-  const normalized = bodyText.replace(/\s+/g, " ").toLowerCase();
-
-  const blockedPatterns = [
-    "checking your browser",
-    "verify you are human",
-    "access denied",
-    "please stand by",
-    "cf-challenge",
-    "unusual activity",
-    "보안",
-    "인증",
-    "차단",
-  ];
-
-  if (blockedPatterns.some((pattern) => normalized.includes(pattern))) {
-    return "ChatGPT 보안 검증 또는 접근 제한 페이지가 감지되었습니다.";
+  if (!(await hasAuthenticatedChatGPTUI(page)) && hasChatGptProtectionText(bodyText)) {
+    return chatGptAuthenticationRequiredMessage(
+      "ChatGPT 보안 검증 또는 접근 제한 페이지가 감지되었습니다.",
+    );
   }
 
   return null;
@@ -2706,8 +2693,7 @@ async function detectChatGPTManualVerification(page: Page): Promise<string | nul
   }
 
   const bodyText = (await page.textContent("body").catch(() => "")) || "";
-  const normalized = bodyText.replace(/\s+/g, " ").toLowerCase();
-  if (CHATGPT_PROTECTION_TEXT_PATTERNS.some((pattern) => normalized.includes(pattern))) {
+  if (!(await hasAuthenticatedChatGPTUI(page)) && hasChatGptProtectionText(bodyText)) {
     return CHATGPT_MANUAL_VERIFICATION_MESSAGE;
   }
 
@@ -2810,7 +2796,11 @@ async function ensureChatGPTReady(page: Page, timeoutMs: number): Promise<void> 
     if (await hasVisibleChatGPTLoginCta(page)) {
       loginSeenRounds += 1;
       if (loginSeenRounds >= loginRoundsThreshold) {
-        throw new Error("ChatGPT 로그인 세션이 만료되었습니다. `npm run login:chatgpt` 실행 후 다시 시도하세요.");
+        throw new Error(
+          chatGptAuthenticationRequiredMessage(
+            "ChatGPT 로그인 세션이 만료되었습니다. `npm run login:chatgpt` 실행 후 다시 시도하세요.",
+          ),
+        );
       }
     } else {
       loginSeenRounds = 0;
@@ -2899,7 +2889,11 @@ async function waitForChatGPTComposer(page: Page, timeoutMs: number): Promise<st
     if (selector) return selector;
 
     if (await isChatGPTLoginRequired(page)) {
-      throw new Error("ChatGPT 로그인이 필요합니다. `npm run login:chatgpt` 실행 후 다시 시도하세요.");
+      throw new Error(
+        chatGptAuthenticationRequiredMessage(
+          "ChatGPT 로그인이 필요합니다. `npm run login:chatgpt` 실행 후 다시 시도하세요.",
+        ),
+      );
     }
 
     await page.waitForTimeout(1000);
@@ -3183,52 +3177,70 @@ interface ChatGPTContextHandle {
 }
 
 async function createChatGPTContext(hasSessionFile: boolean): Promise<ChatGPTContextHandle> {
+  const profileLock = await acquireChatGptProfileLock({ purpose: "brand-post-draft" });
+  const launchPolicy = buildChatGptBrowserLaunchPolicy();
   const commonLaunchOptions = {
     channel: process.env.BROWSER_CHANNEL?.trim() || "chrome",
-    headless: CHATGPT_HEADLESS,
-    slowMo: CHATGPT_HEADLESS ? 0 : 30,
-    args: ["--disable-blink-features=AutomationControlled"],
+    headless: launchPolicy.headless,
+    slowMo: launchPolicy.slowMo,
+    args: launchPolicy.args,
   };
+  console.log(
+    `      - ChatGPT 브라우저 실행 모드: ${describeChatGptBrowserVisibility(launchPolicy.visibility)}`
+  );
 
   // 기본은 persistent 프로필을 사용하되, 새 대화를 강제해 컨텍스트 오염을 줄인다.
   // 필요 시 격리 컨텍스트를 켤 수 있고, 세션 파일이 없으면 persistent로 폴백.
   const usePersistentContext =
     CHATGPT_USE_PERSISTENT_PROFILE && (!CHATGPT_RUN_ISOLATED_CONTEXT || !hasSessionFile);
 
-  if (usePersistentContext) {
-    const context = await chromium.launchPersistentContext(CHATGPT_USER_DATA_DIR, {
-      ...commonLaunchOptions,
+  try {
+    if (usePersistentContext) {
+      const context = await chromium.launchPersistentContext(CHATGPT_USER_DATA_DIR, {
+        ...commonLaunchOptions,
+        viewport: { width: 1440, height: 960 },
+        locale: "ko-KR",
+      });
+
+      return {
+        context,
+        close: async () => {
+          try {
+            await context.close().catch(() => {});
+          } finally {
+            await profileLock.release();
+          }
+        },
+      };
+    }
+
+    const browser = await chromium.launch(commonLaunchOptions);
+    const contextOptions: BrowserContextOptions = {
       viewport: { width: 1440, height: 960 },
       locale: "ko-KR",
-    });
+    };
 
+    if (hasSessionFile) {
+      contextOptions.storageState = CHATGPT_SESSION_FILE;
+    }
+
+    const context = await browser.newContext(contextOptions);
     return {
       context,
       close: async () => {
-        await context.close().catch(() => {});
+        try {
+          if (browser.isConnected()) {
+            await browser.close().catch(() => {});
+          }
+        } finally {
+          await profileLock.release();
+        }
       },
     };
+  } catch (error) {
+    await profileLock.release();
+    throw error;
   }
-
-  const browser = await chromium.launch(commonLaunchOptions);
-  const contextOptions: BrowserContextOptions = {
-    viewport: { width: 1440, height: 960 },
-    locale: "ko-KR",
-  };
-
-  if (hasSessionFile) {
-    contextOptions.storageState = CHATGPT_SESSION_FILE;
-  }
-
-  const context = await browser.newContext(contextOptions);
-  return {
-    context,
-    close: async () => {
-      if (browser.isConnected()) {
-        await browser.close().catch(() => {});
-      }
-    },
-  };
 }
 
 function buildGuidanceSummary(context: ChatGPTGuidanceContext): string {
@@ -5157,7 +5169,11 @@ async function step2_generatePost(
   const isTravel = connectKind === "TRAVEL";
   // 판매/여행 페이지의 과도한 본문이나 삽입 지시가 모델 컨텍스트를 잠식하지 않도록
   // 사실 필드의 크기를 제한한다. 페이지 텍스트는 어디까지나 데이터로만 취급한다.
-  product.name = sanitizeText(product.name).slice(0, 300);
+  product.name = sanitizeText(product.name)
+    .replace(/(\d+\s*일)\s*변경(?=\s*(?:상품|$))/gu, "$1")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+    .slice(0, 300);
   product.description = sanitizeText(product.description).slice(0, 12_000);
   product.features = Array.from(new Set(product.features
     .map((feature) => sanitizeText(feature).slice(0, 500))
@@ -5592,14 +5608,146 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
     );
   }
 
-  const sections = [...bodySections];
-  sections.push(HUMAN_MOBILE_POLISH_ENABLED ? applyHumanMobilePolishToDisclosure(lastSection) : lastSection);
-  const hashtags = normalizeHashtags(json.hashtags, product, openCrabSeoBrief);
-  
-  const normalizedTitle = sanitizeTitle(
+  const disclosureSection = HUMAN_MOBILE_POLISH_ENABLED
+    ? applyHumanMobilePolishToDisclosure(lastSection)
+    : lastSection;
+  let sections = [...bodySections, disclosureSection];
+  let hashtags = normalizeHashtags(json.hashtags, product, openCrabSeoBrief);
+  let normalizedTitle = sanitizeTitle(
     typeof json.title === "string" ? json.title : product.name,
     product.name
   );
+
+  const assessEditorialQuality = (
+    title: string,
+    candidateSections: string[],
+    candidateHashtags: string[],
+  ): BrandLinkContentReadiness => getBrandLinkContentReadiness({
+    productName: product.name,
+    title,
+    sections: candidateSections,
+    hashtags: candidateHashtags,
+    brandLink,
+    generationSource: "AI",
+    hasRepresentativeImage: true,
+    requireRepresentativeImage: false,
+    thumbnailGenerated: true,
+    connectKind,
+    experienceMode: BRANDLINK_EXPERIENCE_MODE,
+    compositionQualityReport: null,
+    sourceDescription: product.description,
+    sourceFeatures: product.features,
+    mode: "editorial",
+  });
+
+  let editorialQuality = assessEditorialQuality(normalizedTitle, sections, hashtags);
+  const beforeEditorialQuality = editorialQuality;
+  const qualityRepair: GeneratedPostPreview["qualityRepair"] = {
+    attempted: false,
+    applied: false,
+    beforeScore: editorialQuality.score,
+    afterScore: editorialQuality.score,
+    beforeCode: editorialQuality.code,
+    afterCode: editorialQuality.code,
+    note: editorialQuality.canPublish ? "원고 품질검사 통과" : editorialQuality.reason || editorialQuality.summary,
+  };
+  const repairableQualityCodes = new Set<BrandLinkContentReadiness["code"]>([
+    "missing-product-name",
+    "too-few-sections",
+    "too-short-content",
+    "unsupported-experience-claim",
+    "internal-guidance-leak",
+    "missing-review-substance",
+    "generic-guidance-heavy",
+    "category-mismatch",
+    "repetitive-content",
+  ]);
+  const shouldAttemptQualityRepair =
+    !BRANDLINK_GENERATED_DRAFT_PATH &&
+    repairableQualityCodes.has(editorialQuality.code) &&
+    (!editorialQuality.canPublish || BRANDLINK_FORCE_QUALITY_REPAIR);
+
+  if (shouldAttemptQualityRepair) {
+    const failedSignals = editorialQuality.signals
+      .filter((signal) => signal.status === "fail")
+      .map((signal) => signal.label);
+    const repairPrompt = `아래 초안을 품질검사 결과에 맞춰 한 번만 고쳐주세요.
+
+[품질검사]
+- 판정: ${editorialQuality.code}
+- 이유: ${editorialQuality.reason || editorialQuality.summary}
+- 실패 항목: ${failedSignals.join(", ") || "없음"}
+
+[수정 원칙]
+- 기존 상품 정보와 초안에 이미 들어 있는 검증 가능한 사실만 사용합니다.
+- 근거가 없는 일정·장소·성능·체험은 새로 만들지 않습니다.
+- "확인 필요", "알기 어렵다", "판단하기 어렵다" 같은 문장을 반복하지 말고, 정보가 없으면 관련 문단을 합치거나 짧게 처리합니다.
+- ${isTravel ? "여행지 소개만 하지 말고 코스 안에서의 가치, 이동의 대가, 잘 맞는 여행자를 구체적으로 판단합니다." : "구매 안내만 하지 말고 제품 자체의 기능, 장점, 구조상 제약, 잘 맞는 사용자를 구체적으로 판단합니다."}
+- 내부 지침 문구와 실제 체험을 가장하는 표현은 제거합니다.
+- 고지 문구와 원시 URL은 출력하지 않습니다. 시스템이 별도로 붙입니다.
+- JSON(title, sections, hashtags)만 출력합니다.
+
+[초안 JSON]
+${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, null, 2)}`;
+
+    try {
+      qualityRepair.attempted = true;
+      const repairedText = await generateWithAI(
+        systemPrompt,
+        repairPrompt,
+        chatgptContext,
+        product.imagePaths,
+      );
+      const repairedJson = parseJsonObjectFromText(repairedText);
+      let repairedBodySections = normalizeSections(
+        repairedJson.sections,
+        minimumBodySectionCount,
+        maximumBodySectionCount,
+        connectKind,
+      );
+      if (HUMAN_MOBILE_POLISH_ENABLED) {
+        repairedBodySections = repairedBodySections.map((section, index) =>
+          applyHumanMobilePolishToSection(section, index, connectKind)
+        );
+      }
+      const repairedTitle = sanitizeTitle(
+        typeof repairedJson.title === "string" ? repairedJson.title : normalizedTitle,
+        product.name,
+      );
+      const repairedHashtags = normalizeHashtags(
+        repairedJson.hashtags,
+        product,
+        openCrabSeoBrief,
+      );
+      const repairedSections = [...repairedBodySections, disclosureSection];
+      const repairedQuality = assessEditorialQuality(
+        repairedTitle,
+        repairedSections,
+        repairedHashtags,
+      );
+      const improvement = repairedQuality.score - editorialQuality.score;
+      if (repairedQuality.canPublish || improvement >= 5) {
+        normalizedTitle = repairedTitle;
+        hashtags = repairedHashtags;
+        bodySections = repairedBodySections;
+        sections = repairedSections;
+        editorialQuality = repairedQuality;
+        qualityRepair.applied = true;
+      }
+      qualityRepair.afterScore = editorialQuality.score;
+      qualityRepair.afterCode = editorialQuality.code;
+      qualityRepair.note = qualityRepair.applied
+        ? `자동 보강 적용 (${beforeEditorialQuality.score}→${editorialQuality.score}점)`
+        : `자동 보강 결과가 개선 기준에 못 미쳐 원문 유지 (${repairedQuality.score}점)`;
+    } catch (error) {
+      qualityRepair.note = `자동 보강 실패: ${getErrorMessage(error)}`;
+    }
+  } else if (BRANDLINK_GENERATED_DRAFT_PATH && !editorialQuality.canPublish) {
+    qualityRepair.note = `ChatGPT 제출 원고에 보강이 필요합니다: ${editorialQuality.reason || editorialQuality.summary}`;
+  }
+
+  console.log(`   🔎 원고 품질검사: ${editorialQuality.summary}`);
+  if (qualityRepair.attempted) console.log(`   🩹 ${qualityRepair.note}`);
 
   const totalLength = sections.reduce((sum: number, s: string) => sum + s.length, 0);
   console.log(`   📌 제목: ${normalizedTitle}`);
@@ -5615,6 +5763,8 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
     rawResponse: text,
     openCrabSeoBrief,
     productEditorialPlan,
+    editorialQuality,
+    qualityRepair,
   };
 }
 
@@ -6351,6 +6501,7 @@ function writePreparedBrandPostPackage(params: {
   post: GeneratedPostPreview;
   imagePaths: string[];
   composition: ResolvedPostDocumentV1;
+  contentReadiness: BrandLinkContentReadiness | null;
 }): string {
   const images = params.imagePaths.filter((imagePath) => fs.existsSync(imagePath));
   if (images.length < 1) {
@@ -6373,6 +6524,9 @@ function writePreparedBrandPostPackage(params: {
   const markdownPath = path.join(params.outputDir, "post.md");
   const sections = params.post.sections.map((section) => {
     const [heading = "본문", ...body] = section.split(/\r?\n/);
+    if (/(?:쇼핑|여행)\s*커넥트/u.test(section) && /수수료/u.test(section)) {
+      return body.join("\n").trim() || heading.trim();
+    }
     return `## ${heading.trim() || "본문"}\n\n${body.join("\n").trim()}`;
   });
   const markdown = [`# ${params.post.title}`, "", ...sections, "", params.post.hashtags.map((tag) => `#${tag.replace(/^#+/, "")}`).join(" ")].join("\n");
@@ -6433,6 +6587,8 @@ function writePreparedBrandPostPackage(params: {
     imagePolicy: params.connectKind === "SHOPPING" ? "LOCKED_PRODUCT_OR_ORIGINAL" : "TRAVEL_EDITORIAL",
     contractVersion: "post-composition-contract/v1",
     composition: packagedComposition,
+    contentQuality: params.contentReadiness,
+    qualityRepair: params.post.qualityRepair || null,
     thumbnailSpec: {
       version: "thumbnail-spec/v2",
       canvas: { width: 1080, height: 1080, aspect: "1:1" },
@@ -9777,6 +9933,8 @@ async function main() {
         connectKind: runtimeConnectKind,
         experienceMode: BRANDLINK_EXPERIENCE_MODE,
         compositionQualityReport: composition.qualityReport,
+        sourceDescription: product.description,
+        sourceFeatures: product.features,
       });
 
       console.log(`   🧪 상품글 발행 게이트: ${contentReadiness.summary}`);
@@ -9800,6 +9958,7 @@ async function main() {
         post,
         imagePaths: product.imagePaths,
         composition,
+        contentReadiness,
       });
       console.log(`   📦 승인 대기 초안 패키지 저장: ${manifestPath}`);
     }

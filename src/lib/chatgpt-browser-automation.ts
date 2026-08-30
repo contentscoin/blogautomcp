@@ -3,6 +3,8 @@ import {
   getChatgptProfileDir,
   getChatgptSessionFile,
 } from "../../scripts/lib/app-paths";
+import { resolveChatGptBrowserVisibility } from "../../scripts/lib/chatgpt-browser-visibility";
+import { CHATGPT_BROWSER_AUTH_REQUIRED_CODE } from "../../scripts/lib/chatgpt-browser-errors";
 
 export interface ChatGptBrowserSessionSummary {
   hasSession: boolean;
@@ -31,7 +33,10 @@ export function isChatGptBrowserAutomationEnabled(
   return (value || "true").trim().toLowerCase() === "true";
 }
 
-export function buildChatGptBrowserAutomationEnv(enabled: boolean): Record<string, string> {
+export function buildChatGptBrowserAutomationEnv(
+  enabled: boolean,
+  env: Record<string, string | undefined> = process.env,
+): Record<string, string> {
   const value = enabled ? "true" : "false";
   return {
     CHATGPT_BROWSER_AUTOMATION_ENABLED: value,
@@ -41,7 +46,32 @@ export function buildChatGptBrowserAutomationEnv(enabled: boolean): Record<strin
     CHATGPT_DIRECT_ONLY: "true",
     CHATGPT_SKIP_POLISH: "true",
     CHATGPT_RUN_ISOLATED_CONTEXT: "false",
+    CHATGPT_BROWSER_VISIBILITY: resolveChatGptBrowserVisibility(env),
   };
+}
+
+export function isChatGptBrowserAuthenticationError(message: string): boolean {
+  const normalized = message.replace(/\s+/gu, " ").trim().toLowerCase();
+  if (!normalized) return false;
+  if (normalized.includes(CHATGPT_BROWSER_AUTH_REQUIRED_CODE.toLowerCase())) return true;
+
+  return [
+    "chatgpt 로그인이 필요",
+    "chatgpt 세션이 없습니다",
+    "chatgpt 로그인 세션이 만료",
+    "세션 쿠키가 없습니다",
+    "세션 파일을 읽을 수 없습니다",
+    "manual verification required",
+    "human-verification",
+    "security-check",
+    "cloudflare",
+    "verify you are human",
+    "보안 검증",
+    "사람인지 확인",
+    "계정을 선택",
+    "choose an account",
+    "unusual activity",
+  ].some((marker) => normalized.includes(marker));
 }
 
 function getLastModifiedIso(targetPath: string): string | undefined {

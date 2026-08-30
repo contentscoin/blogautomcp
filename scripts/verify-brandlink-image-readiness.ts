@@ -23,13 +23,13 @@ assert.equal(
   false,
   "지나치게 납작한 여행 배너는 계속 제외해야 합니다.",
 );
-assert.equal(minimumStoredSourceImageCount("TRAVEL"), 17);
-assert.equal(minimumStoredSourceImageCount("SHOPPING"), 8);
+assert.equal(minimumStoredSourceImageCount("TRAVEL"), 6);
+assert.equal(minimumStoredSourceImageCount("SHOPPING"), 4);
 assert.equal(shouldRefreshStoredImages("TRAVEL", 1), true);
-assert.equal(shouldRefreshStoredImages("TRAVEL", 16), true);
-assert.equal(shouldRefreshStoredImages("TRAVEL", 17), false);
-assert.equal(shouldRefreshStoredImages("SHOPPING", 7), true);
-assert.equal(shouldRefreshStoredImages("SHOPPING", 8), false);
+assert.equal(shouldRefreshStoredImages("TRAVEL", 5), true);
+assert.equal(shouldRefreshStoredImages("TRAVEL", 6), false);
+assert.equal(shouldRefreshStoredImages("SHOPPING", 3), true);
+assert.equal(shouldRefreshStoredImages("SHOPPING", 4), false);
 assert.equal(bodyImageCapacity(39, true), 38);
 assert.equal(bodyImageCapacity(39, false), 39);
 

@@ -2628,8 +2628,8 @@ async function runBrowserStructured<T>(prompt: string): Promise<T> {
   );
 
   const handle = await createChatGPTContext(true);
-  const page = await handle.context.newPage();
   try {
+    const page = await handle.context.newPage();
     await openChatGPTTarget(page, BROWSER_TOPIC_GPT_URL, "주제글 폴백");
     const raw = await sendPromptToChatGPT(page, prompt, "주제글 폴백");
     const parsed = parseJsonObject<T>(raw);

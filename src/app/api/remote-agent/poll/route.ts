@@ -12,6 +12,7 @@ import { getProductThumbnailStorageDir } from "../../../../../scripts/lib/app-pa
 import { createLockedProductThumbnailOnBackground } from "../../../../../scripts/lib/product-image-lock";
 import { createTravelEditorialThumbnail } from "../../../../../scripts/lib/travel-thumbnail";
 import { normalizeProductThumbnailCopy, productThumbnailSettingKey } from "../../../../../scripts/lib/product-thumbnail-settings";
+import { collapseBrandLinkProducts } from "@/lib/brandlink-product-list";
 import {
   applyNaverBlogProfile,
   inspectNaverBlogProfile,
@@ -169,8 +170,31 @@ async function executeJob(request: NextRequest, job: Job): Promise<unknown> {
   const kind = input.connectKind === "travel" ? "TRAVEL" : "SHOPPING";
   if (job.type === "BRANDCONNECT_LIST_PRODUCTS") {
     const status = typeof input.status === "string" ? input.status.toUpperCase() : "ALL";
-    const links = await prisma.brandLink.findMany({ where: { connectKind: kind, ...(status !== "ALL" ? { status } : {}) }, orderBy: { createdAt: "desc" }, take: 200 });
-    return { connectKind: kind.toLowerCase(), count: links.length, products: links.map((item) => ({ id: item.id, productName: item.productName, storeName: item.storeName, price: item.productPrice, status: item.status, url: item.url, postUrl: item.postUrl })) };
+    const links = await prisma.brandLink.findMany({
+      where: { connectKind: kind, ...(status !== "ALL" ? { status } : {}) },
+      orderBy: { updatedAt: "desc" },
+      take: 200,
+    });
+    const products = collapseBrandLinkProducts(links);
+    return {
+      connectKind: kind.toLowerCase(),
+      count: products.length,
+      rawCount: links.length,
+      collapsedDuplicateCount: links.length - products.length,
+      products: products.map((item) => ({
+        id: item.id,
+        productName: item.productName,
+        storeName: item.storeName,
+        price: item.productPrice,
+        status: item.status,
+        statusMeaning: item.statusMeaning,
+        canCreateDraft: item.canCreateDraft,
+        lastError: item.status === "FAILED" ? item.errorMessage : null,
+        duplicateCount: item.duplicateCount,
+        url: item.url,
+        postUrl: item.postUrl,
+      })),
+    };
   }
   if (job.type === "BRANDCONNECT_SYNC_PRODUCTS") {
     const count = typeof input.count === "number" && Number.isInteger(input.count)

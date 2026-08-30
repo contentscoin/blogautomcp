@@ -9,6 +9,14 @@ async function main() {
     path.join(projectRoot, "src", "app", "api", "brandlinks", "[id]", "draft", "route.ts"),
     "utf8"
   );
+  const draftImageRouteSource = fs.readFileSync(
+    path.join(projectRoot, "src", "app", "api", "brandlinks", "[id]", "draft", "images", "route.ts"),
+    "utf8",
+  );
+  const draftImageGenerationSource = fs.readFileSync(
+    path.join(projectRoot, "src", "lib", "brand-post-image-generation.ts"),
+    "utf8",
+  );
   const simpleAgentSource = fs.readFileSync(path.join(projectRoot, "scripts", "simple-agent.ts"), "utf8");
   const dashboardSource = fs.readFileSync(path.join(projectRoot, "src", "app", "page.tsx"), "utf8");
   const electronSource = fs.readFileSync(path.join(projectRoot, "scripts", "electron", "main.cjs"), "utf8");
@@ -72,6 +80,12 @@ async function main() {
     "MCP 제출 원고 패키징은 PC의 OpenAI API 키를 사용하면 안 됩니다.",
   );
   assert.equal(
+    draftRouteSource.includes('status: link.status === "FAILED" ? "READY" : link.status') &&
+      draftRouteSource.includes("errorMessage: null"),
+    true,
+    "FAILED 상품도 초안 근거 준비에 성공하면 READY로 복구되어야 합니다.",
+  );
+  assert.equal(
     simpleAgentSource.includes('BRANDLINK_GENERATED_DRAFT_PATH\n      ? readMcpGeneratedDraft') &&
       simpleAgentSource.includes('!BRANDLINK_GENERATED_DRAFT_PATH &&'),
     true,
@@ -98,8 +112,9 @@ async function main() {
     "데스크톱 UI는 API 키 없음 응답을 실패 알림이 아닌 ChatGPT 핸드오프 화면으로 처리해야 합니다.",
   );
   assert.equal(
-    draftRouteSource.includes('code: "CHATGPT_BROWSER_LOGIN_REQUIRED"') &&
-      draftRouteSource.includes('code: "CHATGPT_BROWSER_FALLBACK_REQUIRED"') &&
+    draftRouteSource.includes('"CHATGPT_BROWSER_LOGIN_REQUIRED"') &&
+      draftRouteSource.includes('"CHATGPT_BROWSER_FALLBACK_REQUIRED"') &&
+      draftRouteSource.includes("isChatGptBrowserAuthenticationError") &&
       draftRouteSource.includes("buildChatGptBrowserAutomationEnv(useBrowserChatGpt)"),
     true,
     "API 키가 없을 때 로그인된 ChatGPT 웹 자동작성과 안전한 핸드오프 폴백을 모두 지원해야 합니다.",
@@ -117,6 +132,27 @@ async function main() {
       electronSource.includes('return { action: "deny" }'),
     true,
     "ChatGPT 링크는 Electron 내부 팝업이 아니라 기본 브라우저에서 열려야 합니다.",
+  );
+  assert.equal(
+    draftImageRouteSource.includes('"generate_missing" | "generate_section" | "regenerate"') &&
+      draftImageRouteSource.includes("applyGeneratedBrandPostImage") &&
+      draftImageRouteSource.includes('"Cache-Control": "private, no-store, max-age=0"'),
+    true,
+    "초안 이미지는 필수 보충·파트 추가·개별 재생성과 안전한 미리보기를 지원해야 합니다.",
+  );
+  assert.equal(
+    draftImageGenerationSource.includes("Generate the environment only") &&
+      draftImageGenerationSource.includes("createLockedProductEditorialScene") &&
+      draftImageGenerationSource.includes("do not invent a named hotel"),
+    true,
+    "쇼핑은 상품을 다시 그리지 않고, 여행은 확인되지 않은 장소를 만들지 않아야 합니다.",
+  );
+  assert.equal(
+    dashboardSource.includes("부족 이미지 자동 생성") &&
+      dashboardSource.includes("handleRegenerateDraftImage") &&
+      dashboardSource.includes("품질 자동 보강"),
+    true,
+    "데스크톱 미리보기에서 이미지 보충·개별 재생성·품질 보강을 실행할 수 있어야 합니다.",
   );
 
   const handoffBuilder = await import("../src/lib/chatgpt-draft-handoff");
@@ -224,8 +260,43 @@ async function main() {
   );
   assert.ok(store.approveBrandPostPackage(v2Id).approvedAt);
   assert.match(store.packagePreview(store.readBrandPostPackage(v2Id)!).heroPreviewDataUrl || "", /^data:image\/png;base64,/u);
+
+  const generatedBodyPath = path.join(userData, "generated-body.png");
+  fs.writeFileSync(generatedBodyPath, "generated-body-v1");
+  const withGeneratedBody = store.applyGeneratedBrandPostImage({
+    brandLinkId: v2Id,
+    generatedPath: generatedBodyPath,
+    sectionId: standardComposition.sections[0].id,
+    provenance: "GENERATED_BACKGROUND",
+    imageIntent: "여행지 본문 미리보기",
+  });
+  assert.equal(withGeneratedBody.approvedAt, null, "이미지를 바꾸면 기존 승인을 해제해야 합니다.");
+  assert.equal(withGeneratedBody.bodyImagePaths.length, 1);
+  assert.equal(withGeneratedBody.composition.qualityReport.actual.images, 2);
+  const generatedPreview = store.packagePreview(withGeneratedBody);
+  const generatedAsset = generatedPreview.imageAssets.find((asset) => asset.role === "body");
+  assert.ok(generatedAsset?.previewUrl.includes("/draft/images?asset="));
+  assert.equal(generatedPreview.imageSlots[0].count, 1);
+  assert.equal(generatedPreview.imageSlots[0].missing, 0);
+
+  const regeneratedBodyPath = path.join(userData, "generated-body-v2.png");
+  fs.writeFileSync(regeneratedBodyPath, "generated-body-v2-different");
+  const regenerated = store.applyGeneratedBrandPostImage({
+    brandLinkId: v2Id,
+    generatedPath: regeneratedBodyPath,
+    replaceAssetKey: generatedAsset!.assetKey,
+    provenance: "GENERATED_BACKGROUND",
+    imageIntent: "재생성된 여행지 본문 이미지",
+  });
+  const regeneratedPreview = store.packagePreview(regenerated);
+  assert.equal(regeneratedPreview.imageAssets.length, generatedPreview.imageAssets.length);
+  assert.notEqual(
+    regeneratedPreview.imageAssets.find((asset) => asset.role === "body")?.assetKey,
+    generatedAsset!.assetKey,
+    "개별 재생성은 해당 이미지 키를 새 파일로 교체해야 합니다.",
+  );
   assert.throws(() => store.getBrandPostPackageDir("../../escape"));
-  console.log(JSON.stringify({ ok: true, approved: true, v2QualityGate: true, pathTraversalBlocked: true }));
+  console.log(JSON.stringify({ ok: true, approved: true, v2QualityGate: true, imagePreviewAndRegeneration: true, pathTraversalBlocked: true }));
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1; });

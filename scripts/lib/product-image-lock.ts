@@ -188,6 +188,49 @@ export async function createLockedProductThumbnailOnBackground(options: {
   return { outputPath, lock };
 }
 
+/** 본문용 실사 연출컷. GPT는 상품 없는 배경만 만들고, 원본 상품 RGB는 그대로 합성한다. */
+export async function createLockedProductEditorialScene(options: {
+  sourcePath: string;
+  backgroundPath: string;
+  outputDir: string;
+  variant?: number;
+}): Promise<LockedProductThumbnailResult> {
+  if (!fs.existsSync(options.backgroundPath)) throw new Error("GPT 생성 배경 이미지를 찾을 수 없습니다.");
+  const lock = await extractLockedProductPng(options.sourcePath, options.outputDir);
+  const canvasWidth = 1200;
+  const canvasHeight = 900;
+  const placeOnLeft = (options.variant || 0) % 2 === 1;
+  const background = await sharp(options.backgroundPath)
+    .resize(canvasWidth, canvasHeight, { fit: "cover", position: "attention" })
+    .modulate({ brightness: 0.98, saturation: 0.92 })
+    .png()
+    .toBuffer();
+  const product = await sharp(lock.lockedPngPath)
+    .trim({ background: { r: 255, g: 255, b: 255, alpha: 0 } })
+    .resize(500, 700, {
+      fit: "contain",
+      withoutEnlargement: true,
+      background: { r: 255, g: 255, b: 255, alpha: 0 },
+    })
+    .png()
+    .toBuffer();
+  const metadata = await sharp(product).metadata();
+  const productWidth = metadata.width || 500;
+  const productHeight = metadata.height || 700;
+  const left = placeOnLeft ? 90 : canvasWidth - productWidth - 90;
+  const top = Math.max(80, canvasHeight - productHeight - 80);
+  const shadow = Buffer.from(
+    `<svg width="${canvasWidth}" height="${canvasHeight}" xmlns="http://www.w3.org/2000/svg"><ellipse cx="${left + productWidth / 2}" cy="${Math.min(canvasHeight - 35, top + productHeight - 5)}" rx="${Math.max(100, productWidth * 0.34)}" ry="26" fill="#111827" opacity=".18" filter="blur(12px)"/></svg>`,
+  );
+  fs.mkdirSync(options.outputDir, { recursive: true });
+  const outputPath = path.join(options.outputDir, `locked-product-scene-${Date.now()}.png`);
+  await sharp(background)
+    .composite([{ input: shadow }, { input: product, left, top }])
+    .png({ compressionLevel: 9 })
+    .toFile(outputPath);
+  return { outputPath, lock };
+}
+
 /** 배경 분리가 불확실할 때 상세페이지 원본 사진을 그대로 카드에 배치한다. */
 export async function createOriginalProductPhotoThumbnail(options: {
   sourcePath: string;

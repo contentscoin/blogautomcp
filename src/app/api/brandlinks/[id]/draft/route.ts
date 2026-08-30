@@ -8,6 +8,7 @@ import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 import { buildChatGptDraftHandoff } from "@/lib/chatgpt-draft-handoff";
 import {
   buildChatGptBrowserAutomationEnv,
+  isChatGptBrowserAuthenticationError,
   isChatGptBrowserAutomationEnabled,
   readChatGptBrowserSessionSummary,
 } from "@/lib/chatgpt-browser-automation";
@@ -19,6 +20,7 @@ import {
   packagePreview,
   readBrandPostPackage,
 } from "@/lib/brand-post-package";
+import { getPostCompositionContract } from "@/lib/post-composition-contract";
 
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
 
@@ -50,8 +52,9 @@ function normalizeSubmittedDraft(
         .map((item) => item.replace(/^#+/, "").trim())
         .filter(Boolean)))
     : [];
-  const requiredSections = connectKind === "TRAVEL" ? 10 : 9;
-  const requiredCharacters = connectKind === "TRAVEL" ? 3200 : 1800;
+  const contract = getPostCompositionContract(connectKind);
+  const requiredSections = contract.targetSections.min;
+  const requiredCharacters = contract.targetCharacters.min;
   const totalCharacters = sections.reduce((sum, section) => sum + section.length, 0);
 
   if (title.length < 8 || title.length > 100) {
@@ -123,6 +126,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     experienceNotes?: string;
     memo?: string;
     draft?: unknown;
+    forceQualityRepair?: boolean;
   };
   const action: DraftAction | null =
     body.action === "prepare_context" || body.action === "submit_generated"
@@ -246,6 +250,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           BRANDLINK_QUALITY_PRESET: qualityPreset,
           BRANDLINK_EXPERIENCE_MODE: experienceMode,
           BRANDLINK_EXPERIENCE_NOTES: experienceNotes,
+          BRANDLINK_FORCE_QUALITY_REPAIR: body.forceQualityRepair === true ? "true" : "false",
           // OAuth MCP 제출 모드에서는 PC가 OpenAI API를 절대 호출하지 않도록 강제로 비운다.
           ...(action ? { OPENAI_API_KEY: "" } : {}),
         },
@@ -266,6 +271,13 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       if (contextData.version !== "brand-draft-context/v1") {
         throw new Error("초안 컨텍스트 형식이 올바르지 않습니다.");
       }
+      await prisma.brandLink.update({
+        where: { id },
+        data: {
+          status: link.status === "FAILED" ? "READY" : link.status,
+          errorMessage: null,
+        },
+      });
       return NextResponse.json({ success: true, data: contextData, logPath });
     }
     const manifest = readBrandPostPackage(id);
@@ -279,10 +291,15 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   } catch (error) {
     const message = error instanceof Error ? error.message : "고품질 초안 생성 실패";
     if (useBrowserChatGpt) {
+      const authenticationRequired = isChatGptBrowserAuthenticationError(message);
       return NextResponse.json({
         success: false,
-        code: "CHATGPT_BROWSER_FALLBACK_REQUIRED",
-        error: `ChatGPT 웹 자동작성에 실패했습니다: ${message}`,
+        code: authenticationRequired
+          ? "CHATGPT_BROWSER_LOGIN_REQUIRED"
+          : "CHATGPT_BROWSER_FALLBACK_REQUIRED",
+        error: authenticationRequired
+          ? `ChatGPT 로그인 또는 보안 확인이 필요합니다: ${message}`
+          : `ChatGPT 웹 자동작성에 실패했습니다: ${message}`,
         data: {
           handoff: handoff(),
           browserError: message,

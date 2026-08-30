@@ -142,9 +142,11 @@ AI_PROVIDER=openai
 # OpenAI 사용 시 (AI_PROVIDER=openai)
 OPENAI_API_KEY=sk-여기에_발급받은_키_붙여넣기
 
-# 설치형 앱은 로컬 ChatGPT 로그인을 허용하지 않음
-BROWSER_GPT_MODE=false
-ALLOW_CHATGPT_BROWSER_MODE=false
+# 설치형 앱은 ChatGPT에 한 번 로그인한 뒤 평소 작업을 백그라운드에서 실행
+CHATGPT_BROWSER_AUTOMATION_ENABLED=true
+BROWSER_GPT_MODE=true
+ALLOW_CHATGPT_BROWSER_MODE=true
+CHATGPT_BROWSER_VISIBILITY=background
 CHATGPT_USE_CUSTOM_GPTS=false
 CHATGPT_DIRECT_ONLY=true
 BLOG_HUMANIZE_MOBILE_STYLE=true
@@ -224,6 +226,8 @@ npm run login
 - 설치형 앱은 ChatGPT 브라우저 로그인과 Custom GPT 조작을 강제로 끕니다.
 - ChatGPT MCP 초안은 `상품 근거 준비 → ChatGPT 원고 생성 → PC 검증·패키징` 순서로 처리하며 API 키가 필요하지 않습니다.
 - 데스크톱 단독 초안은 OpenAI/Gemini API 키가 있어야 하며, 키가 없을 때 하네스 문장을 원고로 복사하는 저품질 폴백은 실행하지 않습니다.
+- 초안 미리보기의 `이미지` 탭에서 각 결과를 확인하고, 필수 슬롯 자동 보충·파트별 추가·개별 재생성을 실행할 수 있습니다. 쇼핑 이미지는 원본 상품을 다시 그리지 않고 잠금 합성하며, 안전한 분리가 불가능하면 수집 원본을 유지합니다.
+- 이미지 수는 쇼핑 `최소 5/권장 8`, 여행 `최소 7/권장 10`으로 검사합니다. `품질검사` 탭은 확인 안내 반복·상품 고유 장단점 부족·허위 체험 표현을 별도로 검사하고 자동 보강 결과를 표시합니다.
 - 사람형 모바일 문체는 기본으로 켜져 있습니다 (`BLOG_HUMANIZE_MOBILE_STYLE=true`).
 - 문장은 짧게 끊고, AI처럼 보이는 반복 표현/과한 광고 문구/허위 체험 단정을 줄입니다.
 - 상품 리뷰 글은 발행 전 상품명 반영, 본문 분량, 고지문, URL 직접 노출, 허위 체험 단정, 수수료율 노출, 판매페이지 대표 이미지 확보 여부를 검사합니다.

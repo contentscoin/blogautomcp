@@ -32,6 +32,7 @@ assert.equal(shopping.renderNodes.filter((node) => node.kind === "image").length
 assert.equal(shopping.renderNodes.at(-1)?.kind, "hashtags");
 assert.equal(shopping.renderNodes[0].kind, "disclosure");
 assert.equal(shopping.renderNodes[1].kind, "disclosure");
+assert.deepEqual(SHOPPING_POST_CONTRACT_V1.targetImages, { min: 5, recommended: 8, max: 14 });
 
 const travelImages = Array.from({ length: 20 }, (_, index) => `C:/fixture/travel-${index}.jpg`);
 const travel = resolvePostDocument({
@@ -52,6 +53,7 @@ assert.equal(travel.renderNodes.filter((node) => node.kind === "connectCard").le
 assert.equal(travel.renderNodes.filter((node) => node.kind === "image").length, travelImages.length);
 assert.equal(travel.qualityReport.actual.images, 20);
 assert.equal(travel.qualityReport.canAutoPublish, true);
+assert.deepEqual(TRAVEL_POST_CONTRACT_V1.targetImages, { min: 7, recommended: 10, max: 18 });
 assert.ok(
   travel.renderNodes.some(
     (node) => node.kind === "image" && node.layout === "collage-3",
@@ -99,6 +101,7 @@ const premiumBlocked = resolvePostDocument({
 });
 assert.equal(premiumBlocked.qualityReport.canAutoPublish, false);
 assert.ok(premiumBlocked.qualityReport.blockers.length >= 2);
+assert.ok(premiumBlocked.qualityReport.imageCoverage.missingSectionIds.length > 0);
 
 console.log("post composition contract verified", {
   shoppingNodes: shopping.renderNodes.length,

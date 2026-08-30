@@ -4,27 +4,79 @@ import os from "node:os";
 import path from "node:path";
 import {
   buildChatGptBrowserAutomationEnv,
+  isChatGptBrowserAuthenticationError,
   isChatGptBrowserAutomationEnabled,
   readChatGptBrowserSessionSummary,
 } from "../src/lib/chatgpt-browser-automation";
 import { getChatgptSessionFile } from "./lib/app-paths";
+import {
+  buildChatGptBrowserLaunchPolicy,
+  resolveChatGptBrowserVisibility,
+} from "./lib/chatgpt-browser-visibility";
+import {
+  CHATGPT_BROWSER_AUTH_REQUIRED_CODE,
+  hasChatGptProtectionText,
+} from "./lib/chatgpt-browser-errors";
+import { acquireChatGptProfileLock } from "./lib/chatgpt-profile-lock";
 
 function source(relativePath: string): string {
   return fs.readFileSync(path.join(process.cwd(), relativePath), "utf8");
 }
 
-function main(): void {
+async function main(): Promise<void> {
   assert.equal(isChatGptBrowserAutomationEnabled({}), true);
   assert.equal(
     isChatGptBrowserAutomationEnabled({ CHATGPT_BROWSER_AUTOMATION_ENABLED: "false" }),
     false,
   );
 
-  const enabledEnv = buildChatGptBrowserAutomationEnv(true);
+  const enabledEnv = buildChatGptBrowserAutomationEnv(true, {});
   assert.equal(enabledEnv.BROWSER_GPT_MODE, "true");
   assert.equal(enabledEnv.ALLOW_CHATGPT_BROWSER_MODE, "true");
   assert.equal(enabledEnv.CHATGPT_USE_CUSTOM_GPTS, "false");
   assert.equal(enabledEnv.CHATGPT_RUN_ISOLATED_CONTEXT, "false");
+  assert.equal(enabledEnv.CHATGPT_BROWSER_VISIBILITY, "background");
+
+  assert.equal(resolveChatGptBrowserVisibility({}), "background");
+  assert.equal(resolveChatGptBrowserVisibility({ CHATGPT_HEADLESS: "true" }), "headless");
+  assert.equal(
+    resolveChatGptBrowserVisibility({
+      CHATGPT_BROWSER_VISIBILITY: "visible",
+      CHATGPT_HEADLESS: "true",
+    }),
+    "visible",
+  );
+
+  const backgroundPolicy = buildChatGptBrowserLaunchPolicy({});
+  assert.equal(backgroundPolicy.visibility, "background");
+  assert.equal(backgroundPolicy.headless, false);
+  assert.equal(backgroundPolicy.slowMo, 0);
+  assert.ok(backgroundPolicy.args.includes("--start-minimized"));
+  assert.ok(backgroundPolicy.args.includes("--window-position=-32000,-32000"));
+  assert.ok(backgroundPolicy.args.includes("--disable-background-timer-throttling"));
+
+  const visiblePolicy = buildChatGptBrowserLaunchPolicy({ CHATGPT_BROWSER_VISIBILITY: "visible" });
+  assert.equal(visiblePolicy.headless, false);
+  assert.equal(visiblePolicy.slowMo, 30);
+  assert.equal(visiblePolicy.args.includes("--start-minimized"), false);
+
+  const headlessPolicy = buildChatGptBrowserLaunchPolicy({ CHATGPT_BROWSER_VISIBILITY: "headless" });
+  assert.equal(headlessPolicy.headless, true);
+  assert.equal(headlessPolicy.args.includes("--start-minimized"), false);
+
+  assert.equal(isChatGptBrowserAuthenticationError("ChatGPT 로그인이 필요합니다."), true);
+  assert.equal(isChatGptBrowserAuthenticationError("ChatGPT 로그인 세션이 만료되었습니다."), true);
+  assert.equal(
+    isChatGptBrowserAuthenticationError(`${CHATGPT_BROWSER_AUTH_REQUIRED_CODE}: verification`),
+    true,
+  );
+  assert.equal(isChatGptBrowserAuthenticationError("Cloudflare 보안 검증 페이지가 표시되었습니다."), true);
+  assert.equal(isChatGptBrowserAuthenticationError("원고 JSON 형식이 올바르지 않습니다."), false);
+  assert.equal(
+    hasChatGptProtectionText("제품의 보안 기능과 본인 인증, 유해 콘텐츠 차단 기능을 비교합니다."),
+    false,
+  );
+  assert.equal(hasChatGptProtectionText("Verify you are human before continuing"), true);
 
   const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "blogautomcp-chatgpt-session-"));
   const previousSessionDir = process.env.SESSION_STORAGE_DIR;
@@ -58,6 +110,27 @@ function main(): void {
     const expired = readChatGptBrowserSessionSummary();
     assert.equal(expired.isValid, false);
     assert.match(expired.error || "", /만료/u);
+
+    const firstLock = await acquireChatGptProfileLock({
+      purpose: "verification-first",
+      timeoutMs: 200,
+      pollMs: 20,
+    });
+    await assert.rejects(
+      acquireChatGptProfileLock({
+        purpose: "verification-second",
+        timeoutMs: 120,
+        pollMs: 20,
+      }),
+      /CHATGPT_BROWSER_BUSY/u,
+    );
+    await firstLock.release();
+    const nextLock = await acquireChatGptProfileLock({
+      purpose: "verification-after-release",
+      timeoutMs: 200,
+      pollMs: 20,
+    });
+    await nextLock.release();
   } finally {
     if (previousSessionDir === undefined) delete process.env.SESSION_STORAGE_DIR;
     else process.env.SESSION_STORAGE_DIR = previousSessionDir;
@@ -66,6 +139,8 @@ function main(): void {
 
   const electron = source("scripts/electron/main.cjs");
   assert.match(electron, /CHATGPT_BROWSER_AUTOMATION_ENABLED/u);
+  assert.match(electron, /CHATGPT_BROWSER_VISIBILITY/u);
+  assert.match(electron, /"background"/u);
   assert.equal(electron.includes('process.env.BROWSER_GPT_MODE = "false"'), false);
 
   const loginRoute = source("src/app/api/session/login/route.ts");
@@ -75,6 +150,7 @@ function main(): void {
   const draftRoute = source("src/app/api/brandlinks/[id]/draft/route.ts");
   assert.match(draftRoute, /CHATGPT_BROWSER_LOGIN_REQUIRED/u);
   assert.match(draftRoute, /CHATGPT_BROWSER_FALLBACK_REQUIRED/u);
+  assert.match(draftRoute, /isChatGptBrowserAuthenticationError/u);
   assert.match(draftRoute, /buildChatGptBrowserAutomationEnv\(useBrowserChatGpt\)/u);
 
   const dashboard = source("src/app/page.tsx");
@@ -87,9 +163,39 @@ function main(): void {
   assert.match(sessionStatus, /CHATGPT_BROWSER_AUTOMATION_ENABLED/u);
 
   const simpleAgent = source("scripts/simple-agent.ts");
+  assert.match(simpleAgent, /buildChatGptBrowserLaunchPolicy/u);
+  assert.match(simpleAgent, /acquireChatGptProfileLock/u);
+  assert.match(simpleAgent, /hasChatGptProtectionText/u);
   assert.match(simpleAgent, /하네스 문장을 원고로 복사하는 로컬 폴백은 품질 보호를 위해 차단했습니다/u);
-  assert.match(source("scripts/chatgpt-login.ts"), /composerVisible && hasAuthCookie/u);
+  const chatGptLogin = source("scripts/chatgpt-login.ts");
+  assert.match(chatGptLogin, /composerVisible && hasAuthCookie/u);
+  assert.match(chatGptLogin, /headless: false/u);
+  assert.match(chatGptLogin, /revealChatGptLoginWindow/u);
+  assert.match(chatGptLogin, /acquireChatGptProfileLock/u);
   assert.equal(simpleAgent.includes("buildLocalProductReviewSections"), false);
+
+  const sharedBrowser = source("scripts/lib/chatgpt-browser.ts");
+  assert.match(sharedBrowser, /getChatgptSessionFile/u);
+  assert.match(sharedBrowser, /getChatgptProfileDir/u);
+  assert.match(sharedBrowser, /buildChatGptBrowserLaunchPolicy/u);
+  assert.match(sharedBrowser, /BROWSER_CHANNEL/u);
+  assert.match(sharedBrowser, /acquireChatGptProfileLock/u);
+  assert.equal(sharedBrowser.includes("Macintosh; Intel Mac OS X"), false);
+  assert.equal(
+    sharedBrowser.includes('path.join(process.cwd(), "playwright", "storage", "chatgpt-session.json")'),
+    false,
+  );
+
+  const topicPipeline = source("src/services/topic-task-pipeline.ts");
+  assert.match(
+    topicPipeline,
+    /const handle = await createChatGPTContext\(true\);\s*try \{\s*const page = await handle\.context\.newPage\(\);/u,
+  );
+  const singleImageGenerator = source("scripts/chatgpt-generate-image.ts");
+  assert.match(
+    singleImageGenerator,
+    /fs\.mkdirSync\(tempDir,[\s\S]*?const handle = await createChatGPTContext\(true\);\s*try \{/u,
+  );
 
   for (const bulkScript of [
     "scripts/bulk-today-publish.ts",
@@ -104,4 +210,7 @@ function main(): void {
   console.log("✅ ChatGPT 웹 자동작성 복구 계약 검증 완료");
 }
 
-main();
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

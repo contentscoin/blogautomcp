@@ -1,7 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { getAppDataDir } from "../../scripts/lib/app-paths";
-import type { ResolvedPostDocumentV1 } from "./post-composition-contract";
+import type { BrandLinkContentReadiness } from "../../scripts/lib/brandlink-content-readiness";
+import {
+  getPostCompositionContract,
+  refreshPostDocumentQuality,
+  type ResolvedPostDocumentV1,
+} from "./post-composition-contract";
 
 export interface BrandPostPackageImageAsset {
   path: string;
@@ -11,6 +17,16 @@ export interface BrandPostPackageImageAsset {
   sectionId?: string | null;
   imageIntent?: string;
   provenance?: "ORIGINAL" | "LOCKED_PRODUCT" | "GENERATED_BACKGROUND" | "EDITORIAL_CARD";
+}
+
+export interface BrandPostQualityRepairSummary {
+  attempted: boolean;
+  applied: boolean;
+  beforeScore: number;
+  afterScore: number;
+  beforeCode: BrandLinkContentReadiness["code"];
+  afterCode: BrandLinkContentReadiness["code"];
+  note: string;
 }
 
 interface BrandPostPackageManifestBase {
@@ -26,6 +42,8 @@ interface BrandPostPackageManifestBase {
   imagePolicy: "LOCKED_PRODUCT_OR_ORIGINAL" | "TRAVEL_EDITORIAL";
   createdAt: string;
   approvedAt: string | null;
+  contentQuality?: BrandLinkContentReadiness | null;
+  qualityRepair?: BrandPostQualityRepairSummary | null;
 }
 
 export interface BrandPostPackageManifestV1 extends BrandPostPackageManifestBase {
@@ -95,6 +113,16 @@ export function approveBrandPostPackage(brandLinkId: string): BrandPostPackageMa
       `프리미엄 초안 품질 게이트를 통과하지 못했습니다: ${manifest.composition.qualityReport.blockers.join(" ")}`,
     );
   }
+  if (
+    manifest.version === "brand-post-package/v2" &&
+    manifest.composition.qualityReport.preset === "PREMIUM" &&
+    manifest.contentQuality &&
+    !manifest.contentQuality.canPublish
+  ) {
+    throw new Error(
+      `원고 내용 품질검사를 통과하지 못했습니다: ${manifest.contentQuality.reason || manifest.contentQuality.summary}`,
+    );
+  }
   const approved = { ...manifest, approvedAt: new Date().toISOString() };
   fs.writeFileSync(manifestPath, JSON.stringify(approved, null, 2), "utf8");
   return approved;
@@ -115,5 +143,261 @@ export function packagePreview(manifest: BrandPostPackageManifest) {
   } catch {
     heroPreviewDataUrl = null;
   }
-  return { ...manifest, markdown, heroPreviewDataUrl };
+  const imageAssets = normalizePackageImageAssets(manifest).map((asset) => ({
+    ...asset,
+    assetKey: asset.sha256,
+    previewUrl: `/api/brandlinks/${encodeURIComponent(manifest.brandLinkId)}/draft/images?asset=${encodeURIComponent(asset.sha256)}`,
+  }));
+  const assetByPath = new Map(imageAssets.map((asset) => [path.resolve(asset.path), asset]));
+  const imageSlots = manifest.version === "brand-post-package/v2"
+    ? manifest.composition.sections.map((section) => {
+        const contract = getPostCompositionContract(manifest.connectKind).sections.find(
+          (candidate) => candidate.id === section.id,
+        );
+        const minimum = contract?.image.min || 0;
+        const maximum = contract?.image.max || Math.max(1, minimum);
+        return {
+          sectionId: section.id,
+          title: section.title,
+          intent: section.imageIntent,
+          minimum,
+          recommended: Math.min(maximum, Math.max(minimum, 1)),
+          maximum,
+          count: section.imagePaths.length,
+          missing: Math.max(0, minimum - section.imagePaths.length),
+          assets: section.imagePaths
+            .map((imagePath) => assetByPath.get(path.resolve(imagePath)))
+            .filter(Boolean),
+        };
+      })
+    : [];
+  return { ...manifest, imageAssets, imageSlots, markdown, heroPreviewDataUrl };
+}
+
+function sha256File(filePath: string): string {
+  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+export function normalizePackageImageAssets(
+  manifest: BrandPostPackageManifest,
+): BrandPostPackageImageAsset[] {
+  const explicit = (manifest.imageAssets || []).filter(
+    (asset) => typeof asset.path === "string" && fs.existsSync(asset.path),
+  );
+  if (explicit.length > 0) return explicit;
+
+  const paths = [manifest.heroImagePath, ...manifest.bodyImagePaths].filter((value) => fs.existsSync(value));
+  const renderImageByPath = manifest.version === "brand-post-package/v2"
+    ? new Map(
+        manifest.composition.renderNodes
+          .filter((node): node is Extract<(typeof manifest.composition.renderNodes)[number], { kind: "image" }> => node.kind === "image")
+          .map((node) => [path.resolve(node.assetPath), node]),
+      )
+    : new Map<string, never>();
+  return paths.map((imagePath, index) => {
+    const renderImage = renderImageByPath.get(path.resolve(imagePath));
+    return {
+      path: path.resolve(imagePath),
+      sourcePath: path.resolve(imagePath),
+      sha256: sha256File(imagePath),
+      role: index === 0 ? "hero" : "body",
+      sectionId: renderImage?.sectionId || null,
+      imageIntent: renderImage?.altText || "",
+      provenance:
+        index === 0
+          ? manifest.connectKind === "SHOPPING"
+            ? "LOCKED_PRODUCT"
+            : "GENERATED_BACKGROUND"
+          : "ORIGINAL",
+    };
+  });
+}
+
+export function writeBrandPostPackageManifest(
+  manifest: BrandPostPackageManifest,
+): BrandPostPackageManifest {
+  const manifestPath = getBrandPostPackageManifestPath(manifest.brandLinkId);
+  fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
+  const temporaryPath = `${manifestPath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(temporaryPath, JSON.stringify(manifest, null, 2), "utf8");
+  try {
+    fs.renameSync(temporaryPath, manifestPath);
+  } catch {
+    fs.copyFileSync(temporaryPath, manifestPath);
+    fs.rmSync(temporaryPath, { force: true });
+  }
+  return manifest;
+}
+
+function refreshStoredContentQuality(
+  quality: BrandLinkContentReadiness | null | undefined,
+  compositionCanPublish: boolean,
+): BrandLinkContentReadiness | null | undefined {
+  if (!quality) return quality;
+  const signals = quality.signals.map((signal) =>
+    signal.key === "composition-quality"
+      ? { ...signal, status: compositionCanPublish ? ("pass" as const) : ("fail" as const) }
+      : signal,
+  );
+  const failures = signals.filter((signal) => signal.status === "fail");
+  const warnings = signals.filter((signal) => signal.status === "warn");
+  const score = Math.max(0, 100 - failures.length * 18 - warnings.length * 5);
+  if (failures.length === 0) {
+    return {
+      ...quality,
+      canPublish: true,
+      code: "ok",
+      reason: null,
+      score,
+      signals,
+      summary: `커넥트 글 발행 게이트 통과 (${score}점, 신호 ${signals.length}/${signals.length})`,
+    };
+  }
+  return {
+    ...quality,
+    canPublish: false,
+    score,
+    signals,
+    reason:
+      quality.code === "composition-quality" && compositionCanPublish
+        ? `${failures[0].label} 항목을 보강해야 합니다.`
+        : quality.reason,
+    summary: `커넥트 글 발행 보류 (${score}점, ${failures[0].label})`,
+  };
+}
+
+function replacePath(values: string[], previousPath: string, nextPath: string): string[] {
+  return values.map((value) =>
+    path.resolve(value) === path.resolve(previousPath) ? nextPath : value,
+  );
+}
+
+export function applyGeneratedBrandPostImage(options: {
+  brandLinkId: string;
+  generatedPath: string;
+  sectionId?: string;
+  replaceAssetKey?: string;
+  provenance: NonNullable<BrandPostPackageImageAsset["provenance"]>;
+  imageIntent?: string;
+}): BrandPostPackageManifestV2 {
+  const manifest = readBrandPostPackage(options.brandLinkId);
+  if (!manifest || manifest.version !== "brand-post-package/v2") {
+    throw new Error("이미지를 편집할 v2 초안 패키지가 없습니다.");
+  }
+  const sourceStat = fs.statSync(options.generatedPath);
+  if (!sourceStat.isFile() || sourceStat.size < 1 || sourceStat.size > 24 * 1024 * 1024) {
+    throw new Error("생성 이미지 파일 크기가 허용 범위를 벗어났습니다.");
+  }
+
+  const extension = [".png", ".jpg", ".jpeg", ".webp"].includes(
+    path.extname(options.generatedPath).toLowerCase(),
+  )
+    ? path.extname(options.generatedPath).toLowerCase()
+    : ".png";
+  const imageDir = path.join(getBrandPostPackageDir(options.brandLinkId), "images");
+  fs.mkdirSync(imageDir, { recursive: true });
+  const destination = path.join(imageDir, `generated-${Date.now()}-${crypto.randomUUID()}${extension}`);
+  fs.copyFileSync(options.generatedPath, destination);
+  const destinationPath = path.resolve(destination);
+  const assets = normalizePackageImageAssets(manifest);
+
+  let composition = manifest.composition;
+  let heroImagePath = manifest.heroImagePath;
+  let bodyImagePaths = [...manifest.bodyImagePaths];
+  let thumbnailSpec = manifest.thumbnailSpec;
+  let nextAssets: BrandPostPackageImageAsset[];
+
+  if (options.replaceAssetKey) {
+    const existing = assets.find((asset) => asset.sha256 === options.replaceAssetKey);
+    if (!existing) throw new Error("다시 만들 원본 이미지 항목을 찾을 수 없습니다.");
+    const replacement: BrandPostPackageImageAsset = {
+      ...existing,
+      path: destinationPath,
+      sourcePath: path.resolve(options.generatedPath),
+      sha256: sha256File(destinationPath),
+      provenance: options.provenance,
+      imageIntent: options.imageIntent || existing.imageIntent,
+    };
+    nextAssets = assets.map((asset) => asset === existing ? replacement : asset);
+    if (existing.role === "hero") {
+      heroImagePath = destinationPath;
+      thumbnailSpec = { ...thumbnailSpec, sourceImagePath: destinationPath };
+    } else {
+      bodyImagePaths = replacePath(bodyImagePaths, existing.path, destinationPath);
+    }
+    composition = {
+      ...composition,
+      sections: composition.sections.map((section) => ({
+        ...section,
+        imagePaths: replacePath(section.imagePaths, existing.path, destinationPath),
+      })),
+      renderNodes: composition.renderNodes.map((node) =>
+        node.kind === "image" && path.resolve(node.assetPath) === path.resolve(existing.path)
+          ? { ...node, assetPath: destinationPath }
+          : node,
+      ),
+    };
+  } else {
+    const sectionId = options.sectionId?.trim();
+    const section = composition.sections.find((candidate) => candidate.id === sectionId);
+    if (!sectionId || !section) throw new Error("이미지를 추가할 본문 파트를 찾을 수 없습니다.");
+    const contract = getPostCompositionContract(manifest.connectKind).sections.find(
+      (candidate) => candidate.id === sectionId,
+    );
+    if (section.imagePaths.length >= (contract?.image.max || 1)) {
+      throw new Error("이 파트는 권장 최대 이미지 수에 도달했습니다.");
+    }
+    const asset: BrandPostPackageImageAsset = {
+      path: destinationPath,
+      sourcePath: path.resolve(options.generatedPath),
+      sha256: sha256File(destinationPath),
+      role: "body",
+      sectionId,
+      imageIntent: options.imageIntent || section.imageIntent,
+      provenance: options.provenance,
+    };
+    nextAssets = [...assets, asset];
+    bodyImagePaths = [...bodyImagePaths, destinationPath];
+    const imageNode = {
+      kind: "image" as const,
+      assetPath: destinationPath,
+      sectionId,
+      role: "scene" as const,
+      altText: `${section.title} - ${asset.imageIntent || section.imageIntent}`,
+      layout: contract?.image.layout || ("single" as const),
+      sourcePolicy: manifest.imagePolicy,
+    };
+    const renderNodes = [...composition.renderNodes];
+    let insertionIndex = -1;
+    renderNodes.forEach((node, index) => {
+      if ("sectionId" in node && node.sectionId === sectionId) insertionIndex = index;
+    });
+    renderNodes.splice(insertionIndex >= 0 ? insertionIndex + 1 : renderNodes.length - 1, 0, imageNode);
+    composition = {
+      ...composition,
+      sections: composition.sections.map((candidate) =>
+        candidate.id === sectionId
+          ? { ...candidate, imagePaths: [...candidate.imagePaths, destinationPath] }
+          : candidate,
+      ),
+      renderNodes,
+    };
+  }
+
+  composition = refreshPostDocumentQuality(composition);
+  const updated: BrandPostPackageManifestV2 = {
+    ...manifest,
+    heroImagePath,
+    bodyImagePaths,
+    imageAssets: nextAssets,
+    composition,
+    thumbnailSpec,
+    contentQuality: refreshStoredContentQuality(
+      manifest.contentQuality,
+      composition.qualityReport.canAutoPublish,
+    ),
+    approvedAt: null,
+  };
+  writeBrandPostPackageManifest(updated);
+  return updated;
 }
