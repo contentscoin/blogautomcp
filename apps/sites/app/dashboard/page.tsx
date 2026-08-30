@@ -79,5 +79,5 @@ function statusLabel(status: string) {
   return ({ APPROVED: '승인됨', PENDING_APPROVAL: '승인 대기', REJECTED: '승인 거절', SUSPENDED: '사용 정지' } as Record<string, string>)[status] || status;
 }
 function jobTitle(type: string) {
-  return ({ BRANDCONNECT_LIST_PRODUCTS: '상품 목록 조회', BRANDCONNECT_SYNC_PRODUCTS: '상품 가져오기', POST_CREATE_DRAFT: '포스팅 초안', POST_PUBLISH: '즉시 발행', POST_SCHEDULE: '예약 발행' } as Record<string, string>)[type] || type;
+  return ({ BRANDCONNECT_LIST_PRODUCTS: '상품 목록 조회', BRANDCONNECT_SYNC_PRODUCTS: '상품 가져오기', POST_CREATE_DRAFT: '초안 근거 준비(구버전)', POST_PREPARE_DRAFT: '초안 근거 준비', POST_SUBMIT_DRAFT: 'ChatGPT 원고 제출', POST_PUBLISH: '즉시 발행', POST_SCHEDULE: '예약 발행' } as Record<string, string>)[type] || type;
 }

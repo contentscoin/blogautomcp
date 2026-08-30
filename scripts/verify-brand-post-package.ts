@@ -10,6 +10,10 @@ async function main() {
     "utf8"
   );
   const simpleAgentSource = fs.readFileSync(path.join(projectRoot, "scripts", "simple-agent.ts"), "utf8");
+  const sitesMcpSource = fs.readFileSync(
+    path.join(projectRoot, "apps", "sites", "app", "api", "mcp", "[credential]", "route.ts"),
+    "utf8",
+  );
   assert.equal(
     draftRouteSource.includes('PRODUCT_POST_LOCAL_FALLBACK_ENABLED: "true"'),
     false,
@@ -53,6 +57,30 @@ async function main() {
     simpleAgentSource.includes("process.exitCode = 1"),
     true,
     "초안 생성 실패는 성공 종료 코드로 숨겨지면 안 됩니다."
+  );
+  assert.equal(
+    draftRouteSource.includes('action: "prepare_context"') || draftRouteSource.includes('body.action === "prepare_context"'),
+    true,
+    "MCP는 모델 호출 전에 PC 상품 근거 컨텍스트를 준비해야 합니다.",
+  );
+  assert.equal(
+    draftRouteSource.includes('BRANDLINK_GENERATED_DRAFT_PATH: action === "submit_generated"') &&
+      draftRouteSource.includes('{ OPENAI_API_KEY: "" }'),
+    true,
+    "MCP 제출 원고 패키징은 PC의 OpenAI API 키를 사용하면 안 됩니다.",
+  );
+  assert.equal(
+    simpleAgentSource.includes('BRANDLINK_GENERATED_DRAFT_PATH\n      ? readMcpGeneratedDraft') &&
+      simpleAgentSource.includes('!BRANDLINK_GENERATED_DRAFT_PATH &&'),
+    true,
+    "ChatGPT 제출 원고는 API 생성 및 API 기반 재작성 경로를 건너뛰어야 합니다.",
+  );
+  assert.equal(
+    sitesMcpSource.includes("name: 'post_submit_draft'") &&
+      sitesMcpSource.includes("post_create_draft: 'POST_PREPARE_DRAFT'") &&
+      sitesMcpSource.includes("post_submit_draft: 'POST_SUBMIT_DRAFT'"),
+    true,
+    "Sites MCP가 2단계 ChatGPT 원고 계약을 광고하고 큐에 전달해야 합니다.",
   );
 
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), "brand-post-package-"));

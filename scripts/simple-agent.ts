@@ -323,6 +323,11 @@ const BRANDLINK_EXPERIENCE_MODE: PostExperienceMode =
     ? "VERIFIED_EXPERIENCE"
     : "AI_ASSISTED_INFORMATION";
 const BRANDLINK_EXPERIENCE_NOTES = (process.env.BRANDLINK_EXPERIENCE_NOTES || "").trim().slice(0, 4000);
+// MCP OAuth 경로에서는 ChatGPT 대화가 원고를 생성하고 PC는 검증·패키징만 한다.
+// context 출력과 generated draft 입력은 파일로 전달해 Windows 환경변수 길이 제한과
+// 원고가 프로세스 목록/로그에 노출되는 문제를 피한다.
+const BRANDLINK_DRAFT_CONTEXT_OUTPUT = process.env.BRANDLINK_DRAFT_CONTEXT_OUTPUT?.trim() || "";
+const BRANDLINK_GENERATED_DRAFT_PATH = process.env.BRANDLINK_GENERATED_DRAFT_PATH?.trim() || "";
 const AGENT_MAX_RUNTIME_MS = Math.max(
   5 * 60 * 1000,
   Number(process.env.AGENT_MAX_RUNTIME_MS || "1500000")
@@ -372,6 +377,58 @@ interface GeneratedPostPreview {
   openCrabSeoBrief?: OpenCrabSeoBrief | null;
   productEditorialPlan?: ProductEditorialPlan | null;
   composition?: ResolvedPostDocumentV1 | null;
+}
+
+interface McpGeneratedDraftFile {
+  version?: unknown;
+  title?: unknown;
+  sections?: unknown;
+  hashtags?: unknown;
+}
+
+function readMcpGeneratedDraft(filePath: string): string {
+  const resolved = path.resolve(filePath);
+  const stat = fs.statSync(resolved);
+  if (!stat.isFile() || stat.size < 2 || stat.size > 96 * 1024) {
+    throw new Error("ChatGPT 원고 파일 크기가 허용 범위를 벗어났습니다.");
+  }
+
+  const parsed = JSON.parse(fs.readFileSync(resolved, "utf8")) as McpGeneratedDraftFile;
+  if (parsed.version !== "mcp-generated-draft/v1") {
+    throw new Error("ChatGPT 원고 파일 버전을 확인할 수 없습니다.");
+  }
+  const title = typeof parsed.title === "string" ? parsed.title.trim() : "";
+  const sections = Array.isArray(parsed.sections)
+    ? parsed.sections
+        .filter((value): value is string => typeof value === "string")
+        .map((value) => value.replace(/\r/g, "").trim())
+        .filter(Boolean)
+    : [];
+  const hashtags = Array.isArray(parsed.hashtags)
+    ? parsed.hashtags
+        .filter((value): value is string => typeof value === "string")
+        .map((value) => value.replace(/^#+/, "").trim())
+        .filter(Boolean)
+    : [];
+  const totalBodyLength = sections.reduce((sum, section) => sum + section.length, 0);
+
+  if (title.length < 8 || title.length > 100) {
+    throw new Error("ChatGPT 원고 제목은 8~100자여야 합니다.");
+  }
+  if (sections.length < 5 || sections.length > 12) {
+    throw new Error("ChatGPT 원고 본문은 5~12개 섹션이어야 합니다.");
+  }
+  if (sections.some((section) => section.length < 80 || section.length > 8000)) {
+    throw new Error("ChatGPT 원고의 각 섹션은 80~8000자여야 합니다.");
+  }
+  if (totalBodyLength > 48_000) {
+    throw new Error("ChatGPT 원고 본문이 허용 길이를 초과했습니다.");
+  }
+  if (hashtags.length < 3 || hashtags.length > 10) {
+    throw new Error("ChatGPT 원고 해시태그는 3~10개여야 합니다.");
+  }
+
+  return JSON.stringify({ title, sections, hashtags });
 }
 
 interface ChatGPTGuidanceContext {
@@ -5101,6 +5158,13 @@ async function step2_generatePost(
   connectKind: "SHOPPING" | "TRAVEL" = "SHOPPING"
 ): Promise<GeneratedPostPreview> {
   const isTravel = connectKind === "TRAVEL";
+  // 판매/여행 페이지의 과도한 본문이나 삽입 지시가 모델 컨텍스트를 잠식하지 않도록
+  // 사실 필드의 크기를 제한한다. 페이지 텍스트는 어디까지나 데이터로만 취급한다.
+  product.name = sanitizeText(product.name).slice(0, 300);
+  product.description = sanitizeText(product.description).slice(0, 12_000);
+  product.features = Array.from(new Set(product.features
+    .map((feature) => sanitizeText(feature).slice(0, 500))
+    .filter(Boolean))).slice(0, 12);
   if (BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE" && BRANDLINK_EXPERIENCE_NOTES.length < 20) {
     throw new Error("실제 체험형 문체를 사용하려면 구체적인 체험 사실 메모가 필요합니다.");
   }
@@ -5398,14 +5462,80 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
     editorialSectionTitles,
   };
 
+  if (BRANDLINK_DRAFT_CONTEXT_OUTPUT) {
+    const outputPath = path.resolve(BRANDLINK_DRAFT_CONTEXT_OUTPUT);
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    const contextJson = JSON.stringify({
+        version: "brand-draft-context/v1",
+        productId: productId || null,
+        connectKind,
+        generatedAt: new Date().toISOString(),
+        product: {
+          name: product.name,
+          description: product.description,
+          features: product.features,
+          price: product.price,
+          originalPrice: product.originalPrice,
+          discountRate: product.discountRate,
+          couponInfo: product.couponInfo,
+          deliveryInfo: product.deliveryInfo,
+          reviewCount: product.reviewCount,
+          rating: product.rating,
+          storeName: product.storeName || null,
+          finalUrl: product.finalUrl || null,
+          referenceImageUrls: product.sourceImageUrls.slice(0, 12),
+        },
+        generation: {
+          source: "chatgpt-mcp-oauth",
+          qualityPreset: BRANDLINK_QUALITY_PRESET,
+          experienceMode: BRANDLINK_EXPERIENCE_MODE,
+          experienceNotes:
+            BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE"
+              ? BRANDLINK_EXPERIENCE_NOTES
+              : "",
+          minimumSectionCount: minimumBodySectionCount,
+          maximumSectionCount: maximumBodySectionCount,
+          targetCharacters: compositionContract.targetCharacters,
+          outputSchema: {
+            title: "8~100자 제목",
+            sections: ["소제목\\n\\n문장1.\\n문장2.\\n문장3."],
+            hashtags: ["상품명", "검색키워드", "비교키워드"],
+          },
+          systemPrompt,
+          userPrompt,
+        },
+        nextAction:
+          "현재 ChatGPT 대화에서 systemPrompt와 userPrompt를 적용해 JSON 원고를 작성한 뒤 post_submit_draft로 제출하세요. 원고를 사용자에게 먼저 보여주고 발행은 별도 확인을 받으세요.",
+      }, null, 2);
+    if (Buffer.byteLength(contextJson, "utf8") > 800 * 1024) {
+      throw new Error("초안 컨텍스트가 800KB를 초과했습니다. 상품 설명 범위를 줄인 뒤 다시 시도하세요.");
+    }
+    fs.writeFileSync(outputPath, contextJson, "utf8");
+    console.log(`   MCP draft context exported: ${outputPath}`);
+    return {
+      title: product.name,
+      sections: [],
+      hashtags: [],
+      generationSource: "AI",
+      rawResponse: "mcp-draft-context-exported",
+      openCrabSeoBrief,
+      productEditorialPlan,
+    };
+  }
+
   let text: string;
   try {
-    text = await generateWithAI(
-      systemPrompt,
-      userPrompt,
-      chatgptContext,
-      product.imagePaths
-    );
+    text = BRANDLINK_GENERATED_DRAFT_PATH
+      ? readMcpGeneratedDraft(BRANDLINK_GENERATED_DRAFT_PATH)
+      : await generateWithAI(
+          systemPrompt,
+          userPrompt,
+          chatgptContext,
+          product.imagePaths
+        );
+    if (BRANDLINK_GENERATED_DRAFT_PATH) {
+      console.log("   MCP OAuth ChatGPT 원고를 불러왔습니다. 로컬 모델 API 호출은 생략합니다.");
+    }
   } catch (error) {
     throw new Error(
       `GPT 원고 생성에 실패했습니다: ${getErrorMessage(error)} ` +
@@ -5452,6 +5582,7 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
   console.log(`   🧪 AI 티 스캔: ${aiTellScan.summary}`);
   if (
     BLOG_HUMANIZE_REWRITE_ENABLED &&
+    !BRANDLINK_GENERATED_DRAFT_PATH &&
     !BROWSER_GPT_MODE &&
     aiTellScan.score >= BLOG_HUMANIZE_REWRITE_THRESHOLD
   ) {
@@ -9530,6 +9661,17 @@ async function main() {
       link.id,
       link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING"
     );
+    if (BRANDLINK_DRAFT_CONTEXT_OUTPUT) {
+      await prisma.brandLink.update({
+        where: { id: linkId },
+        data: { status: "READY", errorMessage: null },
+      });
+      for (const imagePath of product.imagePaths) {
+        try { fs.unlinkSync(imagePath); } catch {}
+      }
+      console.log("   MCP 초안 컨텍스트 준비 완료. ChatGPT 원고 제출을 기다립니다.");
+      return;
+    }
     if (preparedPostOverride) {
       console.log(`   ✅ 승인 원고 적용: ${post.title}`);
       console.log(`   ✅ 승인 이미지 적용: ${1 + preparedPostOverride.bodyImagePaths.length}장`);

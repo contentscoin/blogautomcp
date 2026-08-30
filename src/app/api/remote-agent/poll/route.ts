@@ -181,21 +181,50 @@ async function executeJob(request: NextRequest, job: Job): Promise<unknown> {
       body: JSON.stringify({ connectKind: kind.toLowerCase(), count, waitForCompletion: true }),
     });
   }
-  if (job.type === "POST_CREATE_DRAFT") {
+  if (job.type === "POST_CREATE_DRAFT" || job.type === "POST_PREPARE_DRAFT") {
     const productId = typeof input.productId === "string" ? input.productId : "";
     if (!productId) throw new Error("productId가 필요합니다.");
     const product = await prisma.brandLink.findUnique({ where: { id: productId }, select: { connectKind: true } });
     if (!product) throw new Error("선택한 상품을 찾을 수 없습니다.");
     if (product.connectKind !== kind) throw new Error("상품의 커넥트 종류가 요청과 일치하지 않습니다.");
-    return localApi(request, `/api/brandlinks/${encodeURIComponent(productId)}/draft`, {
+    const response = await localApi(request, `/api/brandlinks/${encodeURIComponent(productId)}/draft`, {
       method: "POST",
       body: JSON.stringify({
+        action: "prepare_context",
         qualityPreset: input.qualityPreset,
         experienceMode: input.experienceMode,
         experienceNotes: input.experienceNotes,
         memo: input.memo,
       }),
     });
+    return {
+      ...(response?.data || response),
+      nextAction:
+        "이 컨텍스트의 systemPrompt와 userPrompt로 현재 ChatGPT가 원고 JSON을 작성한 뒤 post_submit_draft를 호출하세요.",
+    };
+  }
+  if (job.type === "POST_SUBMIT_DRAFT") {
+    const productId = typeof input.productId === "string" ? input.productId : "";
+    if (!productId) throw new Error("productId가 필요합니다.");
+    const product = await prisma.brandLink.findUnique({ where: { id: productId }, select: { connectKind: true } });
+    if (!product) throw new Error("선택한 상품을 찾을 수 없습니다.");
+    if (product.connectKind !== kind) throw new Error("상품의 커넥트 종류가 요청과 일치하지 않습니다.");
+    const response = await localApi(request, `/api/brandlinks/${encodeURIComponent(productId)}/draft`, {
+      method: "POST",
+      body: JSON.stringify({
+        action: "submit_generated",
+        qualityPreset: input.qualityPreset,
+        experienceMode: input.experienceMode,
+        experienceNotes: input.experienceNotes,
+        draft: input.draft,
+      }),
+    });
+    return {
+      ...(response?.data || response),
+      draftId: productId,
+      connectKind: kind.toLowerCase(),
+      message: "ChatGPT 원고를 PC에서 검증하고 승인 대기 초안 패키지로 저장했습니다.",
+    };
   }
   if (job.type === "THUMBNAIL_PREPARE") {
     const productId = typeof input.productId === "string" ? input.productId : "";

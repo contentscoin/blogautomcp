@@ -9,6 +9,8 @@ ChatGPT와 한 대의 Windows 로컬 에이전트를 연결해 네이버 브랜�
 - 일반 사용자는 D1에 승인 대기로 등록되고 관리자가 승인합니다.
 - ChatGPT에는 고정 주소 `/api/mcp`를 등록하고, Site에서 로그인한 GPT 계정으로 OAuth 2.1 인증합니다.
 - OAuth는 authorization code + PKCE(S256), 짧은 access token, 회전되는 refresh token을 사용합니다.
+- API 키 없는 초안은 PC가 상품 사실·이미지·하네스를 준비하고 현재 ChatGPT가 원고 JSON을 만든 뒤, PC가 검증·이미지 배치·승인 대기 패키지를 만드는 2단계 MCP 흐름으로 처리합니다.
+- ChatGPT OAuth는 OpenAI API 과금 자격 증명을 PC에 전달하지 않으며, 이 MCP 흐름은 PC의 `OPENAI_API_KEY`를 읽거나 호출하지 않습니다.
 - Windows 앱은 별도의 일회성 PC 연결 주소로 인증합니다.
 - PC 연결 주소를 다시 발급하면 기존 주소, PC 토큰, 대기·진행 작업이 폐기됩니다.
 - 새 PC가 연결되면 기존 PC 인증과 기존 PC의 진행 작업이 폐기됩니다.
@@ -49,7 +51,7 @@ pwsh -NoProfile -File scripts/verify-quality.ps1
 npm run build
 ```
 
-`verify-quality.ps1`은 TypeScript, ESLint, 운영 의존성 감사, MCP 2025-11-25 초기화, 단일 PC 교체, 여행커넥트 작업 생명주기, 발행 확인 게이트, 멱등성, MCP 회전을 검증합니다.
+`verify-quality.ps1`은 TypeScript, ESLint, 운영 의존성 감사, MCP 초기화, 단일 PC 교체, 여행커넥트 작업 생명주기, API 키 없는 2단계 ChatGPT 초안 제출, 발행 확인 게이트, 멱등성, MCP 회전을 검증합니다.
 
 OAuth 전용 검증은 개발 서버 주소에 맞춰 실행합니다.
 
