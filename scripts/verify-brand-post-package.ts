@@ -10,6 +10,8 @@ async function main() {
     "utf8"
   );
   const simpleAgentSource = fs.readFileSync(path.join(projectRoot, "scripts", "simple-agent.ts"), "utf8");
+  const dashboardSource = fs.readFileSync(path.join(projectRoot, "src", "app", "page.tsx"), "utf8");
+  const electronSource = fs.readFileSync(path.join(projectRoot, "scripts", "electron", "main.cjs"), "utf8");
   const sitesMcpSource = fs.readFileSync(
     path.join(projectRoot, "apps", "sites", "app", "api", "mcp", "[credential]", "route.ts"),
     "utf8",
@@ -82,6 +84,41 @@ async function main() {
     true,
     "Sites MCP가 2단계 ChatGPT 원고 계약을 광고하고 큐에 전달해야 합니다.",
   );
+  assert.equal(
+    draftRouteSource.includes('code: "CHATGPT_MCP_DRAFT_REQUIRED"') &&
+      draftRouteSource.includes("buildChatGptDraftHandoff"),
+    true,
+    "API 키가 없을 때 오류 문장만 반환하지 말고 상품별 ChatGPT 핸드오프를 제공해야 합니다.",
+  );
+  assert.equal(
+    dashboardSource.includes('response.status === 409') &&
+      dashboardSource.includes('"1. ChatGPT로 글 만들기"') &&
+      dashboardSource.includes("setChatGptDraftHandoff(handoff)"),
+    true,
+    "데스크톱 UI는 API 키 없음 응답을 실패 알림이 아닌 ChatGPT 핸드오프 화면으로 처리해야 합니다.",
+  );
+  assert.equal(
+    electronSource.includes("setWindowOpenHandler") &&
+      electronSource.includes("shell.openExternal") &&
+      electronSource.includes('return { action: "deny" }'),
+    true,
+    "ChatGPT 링크는 Electron 내부 팝업이 아니라 기본 브라우저에서 열려야 합니다.",
+  );
+
+  const handoffBuilder = await import("../src/lib/chatgpt-draft-handoff");
+  const handoff = handoffBuilder.buildChatGptDraftHandoff({
+    productId: "travel-product-123",
+    productName: "타이페이\n단수이 4일",
+    connectKind: "TRAVEL",
+  });
+  assert.equal(handoff.productLabel, "타이페이 단수이 4일");
+  assert.equal(handoff.connectKind, "TRAVEL");
+  assert.equal(handoff.chatgptUrl, "https://chatgpt.com/");
+  assert.match(handoff.prompt, /post_create_draft/u);
+  assert.match(handoff.prompt, /job_get/u);
+  assert.match(handoff.prompt, /post_submit_draft/u);
+  assert.match(handoff.prompt, /발행하거나 예약하지 마세요/u);
+  assert.match(handoff.prompt, /신뢰되지 않은 참고 데이터/u);
 
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), "brand-post-package-"));
   process.env.DESKTOP_USER_DATA = userData;

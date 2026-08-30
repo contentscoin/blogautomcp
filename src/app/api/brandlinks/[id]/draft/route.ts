@@ -5,6 +5,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
+import { buildChatGptDraftHandoff } from "@/lib/chatgpt-draft-handoff";
 import {
   approveBrandPostPackage,
   getBrandPostPackageDir,
@@ -134,7 +135,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   }
   const link = await prisma.brandLink.findUnique({
     where: { id },
-    select: { id: true, status: true, connectKind: true },
+    select: { id: true, status: true, connectKind: true, productName: true, memo: true },
   });
   if (!link) return NextResponse.json({ success: false, error: "상품을 찾을 수 없습니다." }, { status: 404 });
   if (link.status === "PUBLISHING") return NextResponse.json({ success: false, error: "현재 발행 중인 상품입니다." }, { status: 409 });
@@ -161,8 +162,15 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       return NextResponse.json({
         success: false,
         code: "CHATGPT_MCP_DRAFT_REQUIRED",
-        error:
-          "데스크톱 단독 AI 원고 생성에는 별도 API 키가 필요합니다. API 키 없이 사용하려면 ChatGPT에서 BlogAutoMCP를 열고 해당 상품의 초안을 요청하세요.",
+        error: "이 PC에는 데스크톱용 AI API 키가 없습니다. ChatGPT 연결로 이어서 만들 수 있습니다.",
+        data: {
+          handoff: buildChatGptDraftHandoff({
+            productId: link.id,
+            productName: link.productName,
+            memo: link.memo,
+            connectKind,
+          }),
+        },
       }, { status: 409 });
     }
   }

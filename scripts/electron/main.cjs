@@ -6,7 +6,7 @@ const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
-const { app, BrowserWindow, dialog, Menu, Notification, Tray } = require("electron");
+const { app, BrowserWindow, dialog, Menu, Notification, shell, Tray } = require("electron");
 const next = require("next");
 const { NsisUpdater } = require("electron-updater");
 const { createDesktopAutoUpdater } = require("./auto-update.cjs");
@@ -217,6 +217,18 @@ async function createWindow() {
     show: !startHidden,
   });
   mainWindow = browserWindow;
+
+  browserWindow.webContents.setWindowOpenHandler(({ url: targetUrl }) => {
+    try {
+      const target = new URL(targetUrl);
+      if (target.protocol === "https:" || target.protocol === "http:") {
+        void shell.openExternal(target.toString()).catch(() => {});
+      }
+    } catch {
+      // 잘못된 URL이나 외부 프로토콜은 열지 않는다.
+    }
+    return { action: "deny" };
+  });
 
   browserWindow.on("close", (event) => {
     if (!isQuitting) {

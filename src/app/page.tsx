@@ -75,6 +75,16 @@ interface BrandPostDraftPreview {
   };
 }
 
+interface ChatGptDraftHandoff {
+  productId: string;
+  productLabel: string;
+  connectKind: "SHOPPING" | "TRAVEL";
+  chatgptUrl: string;
+  prompt: string;
+}
+
+type DraftCreationMode = "checking" | "local-ai" | "chatgpt";
+
 export interface TopicPostTask {
   id: string;
   topic: string;
@@ -299,6 +309,35 @@ function toggleStringSelection(current: string[], value: string): string[] {
     : [...current, value];
 }
 
+function isChatGptDraftHandoff(value: unknown): value is ChatGptDraftHandoff {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const handoff = value as Partial<ChatGptDraftHandoff>;
+  return (
+    typeof handoff.productId === "string" &&
+    typeof handoff.productLabel === "string" &&
+    (handoff.connectKind === "SHOPPING" || handoff.connectKind === "TRAVEL") &&
+    typeof handoff.chatgptUrl === "string" &&
+    typeof handoff.prompt === "string"
+  );
+}
+
+async function copyText(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("클립보드 복사를 지원하지 않는 환경입니다.");
+}
+
 export default function Dashboard() {
   const [links, setLinks] = useState<BrandLink[]>([]);
   const [loading, setLoading] = useState(true);
@@ -318,6 +357,8 @@ export default function Dashboard() {
   const [draftPreview, setDraftPreview] = useState<BrandPostDraftPreview | null>(null);
   const [draftPreviewTab, setDraftPreviewTab] = useState<"post" | "images" | "thumbnail" | "quality">("post");
   const [draftApproving, setDraftApproving] = useState(false);
+  const [draftCreationMode, setDraftCreationMode] = useState<DraftCreationMode>("checking");
+  const [chatGptDraftHandoff, setChatGptDraftHandoff] = useState<ChatGptDraftHandoff | null>(null);
   const [stoppingPosting, setStoppingPosting] = useState(false);
   const [bulkSeasonalRunning, setBulkSeasonalRunning] = useState(false);
   const [bulkScheduleRunning, setBulkScheduleRunning] = useState(false);
@@ -492,6 +533,18 @@ export default function Dashboard() {
     }
   }, []);
 
+  const fetchDraftCreationMode = useCallback(async () => {
+    try {
+      const response = await fetch("/api/settings", { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok || !payload.success) throw new Error("AI 설정을 확인하지 못했습니다.");
+      setDraftCreationMode(payload.data?.desktopDraftProviderConfigured ? "local-ai" : "chatgpt");
+    } catch {
+      // 키 상태를 읽지 못해도 안전한 ChatGPT 핸드오프 경로를 기본으로 보여 준다.
+      setDraftCreationMode("chatgpt");
+    }
+  }, []);
+
   const loadBrandConnectSelectionOptions = useCallback(async () => {
     // 요청마다 세대 번호를 올린다. 늦게 도착한 이전 요청은 상태를 건드리지 못한다.
     // (예전에는 늦은 응답이 로딩 완료 플래그만 세워서, 커넥트 종류를 바꾸면
@@ -602,6 +655,10 @@ export default function Dashboard() {
   useEffect(() => {
     fetchCategories();
   }, [fetchCategories]);
+
+  useEffect(() => {
+    void fetchDraftCreationMode();
+  }, [fetchDraftCreationMode]);
 
   useEffect(() => {
     const handleBlogIdChanged = () => void fetchCategories();
@@ -774,10 +831,21 @@ export default function Dashboard() {
   };
   const handlePrepareBrandDraft = async (link: BrandLink) => {
     setDraftGeneratingId(link.id);
-    setDashboardNotice({ tone: "info", text: "고품질 글과 이미지 패키지를 만들고 있습니다. 잠시만 기다려 주세요." });
+    setDashboardNotice({
+      tone: "info",
+      text: draftCreationMode === "chatgpt"
+        ? "ChatGPT에서 사용할 상품별 요청문을 준비하고 있습니다."
+        : "고품질 글과 이미지 패키지를 만들고 있습니다. 잠시만 기다려 주세요.",
+    });
     try {
       const response = await fetch(`/api/brandlinks/${link.id}/draft`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ qualityPreset: "premium", experienceMode: "ai_assisted_information" }) });
       const payload = await response.json();
+      const handoff = payload?.data?.handoff;
+      if (response.status === 409 && payload?.code === "CHATGPT_MCP_DRAFT_REQUIRED" && isChatGptDraftHandoff(handoff)) {
+        setChatGptDraftHandoff(handoff);
+        setDashboardNotice({ tone: "info", text: "상품별 요청문이 준비됐습니다. 복사한 뒤 ChatGPT에서 이어서 작성하세요." });
+        return;
+      }
       if (!response.ok || !payload.success) throw new Error(payload.error || "초안 생성 실패");
       setDraftPreview(payload.data as BrandPostDraftPreview);
       setDraftPreviewTab("post");
@@ -787,6 +855,26 @@ export default function Dashboard() {
     } finally {
       setDraftGeneratingId(null);
     }
+  };
+
+  const handleCopyChatGptDraftPrompt = async () => {
+    if (!chatGptDraftHandoff) return;
+    try {
+      await copyText(chatGptDraftHandoff.prompt);
+      setDashboardNotice({ tone: "success", text: "요청문을 복사했습니다. ChatGPT 대화창에 붙여넣어 주세요." });
+    } catch (error) {
+      setDashboardNotice({ tone: "error", text: error instanceof Error ? error.message : "요청문을 복사하지 못했습니다." });
+    }
+  };
+
+  const handleCopyAndOpenChatGpt = () => {
+    if (!chatGptDraftHandoff) return;
+    const copyPromise = copyText(chatGptDraftHandoff.prompt);
+    window.open(chatGptDraftHandoff.chatgptUrl, "_blank", "noopener,noreferrer");
+    void copyPromise.then(
+      () => setDashboardNotice({ tone: "success", text: "요청문을 복사하고 ChatGPT를 열었습니다. 대화창에 붙여넣어 실행하세요." }),
+      () => setDashboardNotice({ tone: "error", text: "ChatGPT를 열었지만 요청문 복사에 실패했습니다. 요청문을 직접 선택해 복사해 주세요." }),
+    );
   };
   const handleOpenOrPrepareBrandDraft = async (link: BrandLink) => {
     try {
@@ -2489,11 +2577,17 @@ export default function Dashboard() {
                               </button>
                               <button
                                 onClick={() => void handleOpenOrPrepareBrandDraft(link)}
-                                disabled={draftGeneratingId === link.id || Boolean(publishingId)}
+                                disabled={draftCreationMode === "checking" || draftGeneratingId === link.id || Boolean(publishingId)}
                                 className="rounded-lg bg-violet-600 px-3 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:opacity-50 transition-colors"
-                                title="글·이미지를 먼저 만들고 확인한 뒤 같은 결과를 발행합니다"
+                                title={draftCreationMode === "chatgpt" ? "상품별 요청문을 복사해 연결된 ChatGPT에서 초안을 만듭니다" : "글·이미지를 먼저 만들고 확인한 뒤 같은 결과를 발행합니다"}
                               >
-                                {draftGeneratingId === link.id ? "글 준비 중..." : "1. 글 준비·확인"}
+                                {draftGeneratingId === link.id
+                                  ? "글 준비 중..."
+                                  : draftCreationMode === "checking"
+                                    ? "1. 작성 방식 확인 중"
+                                    : draftCreationMode === "chatgpt"
+                                      ? "1. ChatGPT로 글 만들기"
+                                      : "1. 글 준비·확인"}
                               </button>
                               {/* 여행 계약 잠금만 목록에서 표시하고, 실제 발행은 승인 창에서 진행 */}
                               {link.status === "READY" && link.connectKind === "TRAVEL" && travelPublishingUnavailable && (
@@ -2560,7 +2654,7 @@ export default function Dashboard() {
           <h3 className="font-medium text-slate-800 mb-2">💡 사용 방법</h3>
           <ol className="text-sm text-slate-600 space-y-1 list-decimal list-inside">
             <li>네이버 로그인 상태를 확인하고 쇼핑 또는 여행 탭을 선택합니다.</li>
-            <li>상품을 동기화한 뒤 목록에서 <strong>1. 글 준비·확인</strong>을 누릅니다.</li>
+            <li>상품을 동기화한 뒤 목록에서 <strong>{draftCreationMode === "chatgpt" ? "1. ChatGPT로 글 만들기" : "1. 글 준비·확인"}</strong>를 누릅니다.</li>
             <li><strong>2. 썸네일</strong>에서 실제 사진과 디자인 스타일을 고릅니다.</li>
             <li>초안을 승인한 뒤 <strong>3. 바로 발행</strong> 또는 예약 발행을 선택합니다.</li>
           </ol>
@@ -2573,6 +2667,52 @@ export default function Dashboard() {
           productName={thumbnailStudioLink.productName || "추천 상품"}
           onClose={() => setThumbnailStudioLink(null)}
         />
+      )}
+
+      {chatGptDraftHandoff && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/75 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="chatgpt-draft-title">
+          <div className="w-full max-w-2xl overflow-hidden rounded-3xl border border-white/10 bg-white shadow-2xl">
+            <div className="bg-gradient-to-br from-violet-700 via-indigo-700 to-slate-950 px-6 py-6 text-white sm:px-8">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <span className="inline-flex rounded-full bg-white/15 px-3 py-1 text-xs font-bold ring-1 ring-white/20">API 키 없이 이용</span>
+                  <h2 id="chatgpt-draft-title" className="mt-3 text-2xl font-black tracking-tight">ChatGPT에서 이 상품의 초안을 완성하세요</h2>
+                  <p className="mt-2 text-sm leading-6 text-indigo-100">사이트 OAuth는 안전한 MCP 연결을 인증합니다. 실제 원고는 연결된 ChatGPT 대화에서 만들어 PC 앱으로 다시 저장됩니다.</p>
+                </div>
+                <button type="button" onClick={() => setChatGptDraftHandoff(null)} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/10 text-2xl font-light leading-none text-white hover:bg-white/20" aria-label="ChatGPT 초안 안내 닫기">×</button>
+              </div>
+            </div>
+
+            <div className="space-y-5 px-6 py-6 sm:px-8">
+              <div className="grid gap-3 sm:grid-cols-[auto_1fr] sm:items-center">
+                <span className={`w-fit rounded-full px-3 py-1 text-xs font-bold ${chatGptDraftHandoff.connectKind === "TRAVEL" ? "bg-amber-100 text-amber-800" : "bg-blue-100 text-blue-700"}`}>{chatGptDraftHandoff.connectKind === "TRAVEL" ? "여행커넥트" : "쇼핑커넥트"}</span>
+                <p className="truncate font-bold text-slate-950" title={chatGptDraftHandoff.productLabel}>{chatGptDraftHandoff.productLabel}</p>
+              </div>
+
+              <ol className="grid gap-3 text-sm text-slate-700 sm:grid-cols-3">
+                {["요청문 자동 복사", "ChatGPT에서 붙여넣기", "완성 초안을 PC에서 승인"].map((label, index) => (
+                  <li key={label} className="flex items-center gap-3 rounded-2xl bg-slate-50 px-4 py-3">
+                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-violet-600 text-xs font-black text-white">{index + 1}</span>
+                    <span className="font-semibold">{label}</span>
+                  </li>
+                ))}
+              </ol>
+
+              <div>
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <label htmlFor="chatgpt-draft-prompt" className="text-sm font-bold text-slate-900">상품별 실행 요청문</label>
+                  <span className="text-xs text-slate-400">발행은 포함하지 않음</span>
+                </div>
+                <textarea id="chatgpt-draft-prompt" readOnly value={chatGptDraftHandoff.prompt} className="h-48 w-full resize-none rounded-2xl border border-slate-200 bg-slate-950 p-4 font-mono text-xs leading-5 text-slate-100 outline-none focus:ring-2 focus:ring-violet-400" />
+              </div>
+
+              <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                <button type="button" onClick={() => void handleCopyChatGptDraftPrompt()} className="rounded-xl border border-slate-300 px-5 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">요청문만 복사</button>
+                <button type="button" onClick={handleCopyAndOpenChatGpt} className="rounded-xl bg-violet-600 px-5 py-3 text-sm font-black text-white shadow-lg shadow-violet-200 hover:bg-violet-700">복사하고 ChatGPT 열기 ↗</button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {draftPreview && (

@@ -1,4 +1,4 @@
-export const WINDOWS_INSTALLER_VERSION = '1.2.2';
+export const WINDOWS_INSTALLER_VERSION = '1.2.3';
 export const WINDOWS_INSTALLER_KEY = `windows/BrandConnect-Automation-Setup-${WINDOWS_INSTALLER_VERSION}.exe`;
 export const WINDOWS_INSTALLER_FILENAME = `BrandConnect-Automation-Setup-${WINDOWS_INSTALLER_VERSION}.exe`;
 export const WINDOWS_INSTALLER_CONTENT_TYPE = 'application/vnd.microsoft.portable-executable';

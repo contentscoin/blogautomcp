@@ -81,9 +81,14 @@ export async function GET(request: NextRequest) {
     values[f.key] = f.secret ? (configured[f.key] ? MASK : "") : current;
   }
 
+  const provider = (process.env.AI_PROVIDER ?? fileEnv.AI_PROVIDER ?? "openai").trim().toLowerCase();
+  const desktopDraftProviderConfigured = provider === "gemini"
+    ? Boolean((process.env.GEMINI_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY ?? fileEnv.GEMINI_API_KEY ?? fileEnv.GOOGLE_GENERATIVE_AI_API_KEY ?? "").trim())
+    : Boolean((process.env.OPENAI_API_KEY ?? fileEnv.OPENAI_API_KEY ?? "").trim());
+
   return NextResponse.json({
     success: true,
-    data: { fields: FIELDS, values, configured, envPath: getEnvFilePath() },
+    data: { fields: FIELDS, values, configured, desktopDraftProviderConfigured, envPath: getEnvFilePath() },
   });
 }
 
