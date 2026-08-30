@@ -80,6 +80,9 @@ export interface ProductReviewSubstanceAssessment {
   sentenceCount: number;
   repeatedSentenceCount: number;
   coveredSignals: string[];
+  requiredSignalCount: number;
+  evidenceJudgementCount: number;
+  requiredEvidenceJudgementCount: number;
   categoryMismatchTerms: string[];
 }
 
@@ -576,24 +579,60 @@ function repeatedSentenceCount(value: string): number {
   return Array.from(counts.values()).reduce((sum, count) => sum + Math.max(0, count - 1), 0);
 }
 
-export function assessProductReviewSubstance(input: { productName: string; sections: string[] }): ProductReviewSubstanceAssessment {
+export function assessProductReviewSubstance(input: {
+  productName: string;
+  sections: string[];
+  sourceDescription?: string | null;
+  sourceFeatures?: string[];
+}): ProductReviewSubstanceAssessment {
   const body = input.sections.join("\n");
-  const analysis = buildProductReviewAnalysis({ productName: input.productName, targetSectionCount: 11 });
-  const sentenceCount = Math.max(1, body.split(/[\n.!?。]+/u).filter((item) => clean(item).length >= 8).length);
+  const analysis = buildProductReviewAnalysis({
+    productName: input.productName,
+    description: input.sourceDescription,
+    features: input.sourceFeatures,
+    targetSectionCount: 11,
+  });
+  const sentences = body.split(/[\n.!?。]+/u).map(clean).filter((item) => item.length >= 8);
+  const sentenceCount = Math.max(1, sentences.length);
   const genericGuidanceCount = countMatches(body, /(?:확인(?:해|하|해야|하세요)|살펴보|비교해보|보는\s*게\s*좋|안전해요)/u);
   const categoryMismatchTerms = analysis.forbiddenCategoryTerms.filter((term) => body.includes(term));
   const coveredSignals = analysis.verifiedSignals.filter((signal) => signal.split(/[·\s]+/u).filter((token) => token.length >= 2).some((token) => body.includes(token)));
+  const signalTokens = unique(
+    analysis.verifiedSignals.flatMap((signal) => signal.split(/[^\p{L}\p{N}]+/u)),
+    30,
+  ).filter((token) => token.length >= 2 && !/(?:상품|제품|기능|표기|판매페이지|카테고리)/u.test(token));
+  const evidenceJudgementCount = sentences.filter((sentence) =>
+    signalTokens.some((token) => sentence.includes(token)) &&
+    /(?:장점|강점|선택\s*이유|효율|편의|유리|줄(?:여|어|일)|늘(?:려|어|릴)|대신|반면|아쉬|부담|한계|제약|잘\s*맞|적합|비추천)/u.test(sentence)
+  ).length;
+  const requiredSignalCount = Math.min(
+    analysis.evidenceLevel === "rich" ? 4 : analysis.evidenceLevel === "usable" ? 3 : 1,
+    Math.max(1, analysis.verifiedSignals.length),
+  );
+  const requiredEvidenceJudgementCount = analysis.evidenceLevel === "rich" ? 3 : analysis.evidenceLevel === "usable" ? 2 : 1;
   const repeats = repeatedSentenceCount(body);
   const checks: Array<[boolean, string]> = [
     [/(?:장점|강점|선택\s*이유)/u.test(body), "구체적인 장점"],
     [/(?:아쉬운|단점|한계|제약|비추천)/u.test(body), "제품 자체의 단점·제약"],
     [/(?:추천\s*대상|잘\s*맞|비추천\s*대상|맞지\s*않)/u.test(body), "추천·비추천 대상"],
     [/(?:최종\s*리뷰|조건부\s*결론|후보로|더\s*실용적|고르는\s*편이\s*맞)/u.test(body), "조건부 최종 결론"],
-    [coveredSignals.length >= Math.min(2, Math.max(1, analysis.verifiedSignals.length)), "상품 고유 구조·기능 근거"],
+    [coveredSignals.length >= requiredSignalCount, "상품 고유 구조·기능 근거"],
+    [evidenceJudgementCount >= requiredEvidenceJudgementCount, "근거와 사용 가치가 연결된 판단"],
     [genericGuidanceCount / sentenceCount <= 0.24, "확인 안내가 아닌 리뷰 판단"],
     [categoryMismatchTerms.length === 0, "상품 카테고리 일치"],
     [repeats <= 2, "반복 문장 제거"],
   ];
   const missingElements = checks.filter(([pass]) => !pass).map(([, label]) => label);
-  return { pass: missingElements.length === 0, missingElements, genericGuidanceCount, sentenceCount, repeatedSentenceCount: repeats, coveredSignals, categoryMismatchTerms };
+  return {
+    pass: missingElements.length === 0,
+    missingElements,
+    genericGuidanceCount,
+    sentenceCount,
+    repeatedSentenceCount: repeats,
+    coveredSignals,
+    requiredSignalCount,
+    evidenceJudgementCount,
+    requiredEvidenceJudgementCount,
+    categoryMismatchTerms,
+  };
 }

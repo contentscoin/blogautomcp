@@ -52,6 +52,9 @@ export interface TravelReviewSubstanceAssessment {
   sentenceCount: number;
   repeatedSentenceCount: number;
   coveredPlaces: string[];
+  requiredPlaceCount: number;
+  evidenceJudgementCount: number;
+  requiredEvidenceJudgementCount: number;
 }
 
 function clean(value: string): string {
@@ -60,6 +63,17 @@ function clean(value: string): string {
 
 function unique(values: string[], limit = 12): string[] {
   return Array.from(new Set(values.map(clean).filter((value) => value.length >= 2))).slice(0, limit);
+}
+
+const NON_DESTINATION_TOKEN_PATTERN = /(?:여행|상품|패키지|투어|관광|일정|예약|출발|확정|변경|조건|특가|핫딜|할인|회원|적립|가격|표시가|숙박|호텔|객실|식사|조식|중식|석식|쇼핑|특전|기념품|비누|쿠폰|포함|불포함|교통|항공|직항|시내|자유시간|가이드|인솔자|제공|기준|전용|베스트|추천|리뷰|해외|국내|[가-힣]+몰)$/u;
+
+function looksLikeDestinationToken(token: string): boolean {
+  return (
+    /[가-힣]{2,}/u.test(token) &&
+    token.length <= 12 &&
+    !NON_DESTINATION_TOKEN_PATTERN.test(token) &&
+    !/^\d+(?:개|명|원|국|도시|박|일)?$/u.test(token)
+  );
 }
 
 export function extractTravelProductFacts(
@@ -94,7 +108,7 @@ export function extractTravelProductFacts(
   const destinations = unique(
     destinationSource
       .split(/[\s\/, +·()]+/u)
-      .filter((token) => /[가-힣]{2,}/u.test(token) && token.length <= 12),
+      .filter(looksLikeDestinationToken),
     8,
   );
 
@@ -331,22 +345,40 @@ export function assessTravelReviewSubstance(input: {
   const facts = extractTravelProductFacts(input.productName, input.sourceText || "");
   const places = unique([...facts.highlights, ...facts.destinations], 8);
   const coveredPlaces = places.filter((place) => body.includes(place));
-  const sentenceCount = Math.max(1, body.split(/[\n.!?。]+/u).filter((item) => clean(item).length >= 8).length);
+  const sentences = body.split(/[\n.!?。]+/u).map(clean).filter((item) => item.length >= 8);
+  const sentenceCount = Math.max(1, sentences.length);
   const genericGuidanceCount = countMatches(
     body,
     /(?:확인(?:해|하|해야|하세요)|살펴보|비교해보|체크해|보는\s*게\s*좋|알기\s*어렵|판단하기\s*어렵|단정하기\s*어렵|현재\s*(?:정보|수집)|공개되지\s*않|담겨\s*있지\s*않|확정하기\s*어렵|다시\s*볼\s*필요)/u,
   );
+  const evidenceJudgementCount = sentences.filter((sentence) =>
+    places.some((place) => sentence.includes(place)) &&
+    /(?:매력|가치|역할|동선|이동|체류|완급|밀도|장점|선택\s*이유|대신|반면|아쉬|부담|제약|리스크|잘\s*맞|추천|비추천)/u.test(sentence)
+  ).length;
+  const requiredPlaceCount = Math.min(places.length >= 3 ? 3 : Math.max(1, places.length), Math.max(1, places.length));
+  const requiredEvidenceJudgementCount = places.length >= 3 ? 3 : Math.max(1, places.length);
   const repeats = repeatedSentenceCount(body);
   const checks: Array<[boolean, string]> = [
     [/(?:장점|매력|선택\s*이유)/u.test(body), "패키지의 구체적인 장점"],
     [/(?:아쉬운|단점|한계|제약|리스크|이동\s*부담)/u.test(body), "패키지의 아쉬운 점·리스크"],
     [/(?:추천\s*대상|추천\s*여행자)/u.test(body) && /비추천/u.test(body), "추천·비추천 여행자"],
     [/(?:최종\s*리뷰|한\s*줄\s*결론|폭넓게|깊게\s*머무)/u.test(body), "상품별 최종 판단"],
-    [coveredPlaces.length >= Math.min(2, Math.max(1, places.length)), "여행지별 가치 해석"],
+    [coveredPlaces.length >= requiredPlaceCount, "여행지별 가치 해석"],
+    [evidenceJudgementCount >= requiredEvidenceJudgementCount, "여행지 근거와 코스 가치가 연결된 판단"],
     [genericGuidanceCount / sentenceCount <= 0.22, "확인 안내가 아닌 여행 가치 판단"],
     [!/(?:배송|교환|반품|구성품|제품\s*스펙)/u.test(body), "쇼핑 문구 미혼입"],
     [repeats <= 2, "반복 문장 제거"],
   ];
   const missingElements = checks.filter(([pass]) => !pass).map(([, label]) => label);
-  return { pass: missingElements.length === 0, missingElements, genericGuidanceCount, sentenceCount, repeatedSentenceCount: repeats, coveredPlaces };
+  return {
+    pass: missingElements.length === 0,
+    missingElements,
+    genericGuidanceCount,
+    sentenceCount,
+    repeatedSentenceCount: repeats,
+    coveredPlaces,
+    requiredPlaceCount,
+    evidenceJudgementCount,
+    requiredEvidenceJudgementCount,
+  };
 }

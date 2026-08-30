@@ -1340,11 +1340,16 @@ async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient
 
   const { items, contract, source } = await listTravelItems({
     categoryUrl: travelCategoryUrl,
-    limit: Math.min(100, Math.max(options.count * 4, 40)),
+    // 여러 추천 section/tab을 합친 뒤에도 필터·기등록 상품을 건너뛸 후보가
+    // 충분해야 한다. 수퍼 퍼블리싱 200개 요청을 100개에서 잘라버리지 않는다.
+    limit: Math.min(800, Math.max(options.count * 4, 40)),
     storageStatePath: options.storageStatePath,
     allowDiscovery: true,
   });
-  console.log(`✅ 여행 상품 수집: ${items.length}개 (${source === "contract" ? "저장된 계약" : "실시간 재탐색"})`);
+  console.log(
+    `✅ 여행 상품 수집: ${items.length}개 / 피드 ${contract.feeds?.length || 1}개 ` +
+    `(${source === "contract" ? "저장된 계약" : "실시간 재탐색"})`
+  );
   const selectedItems = items.filter((item) =>
     matchesTravelSelectionFilters(item, options.categoryFilter, options.promotionFilter)
   );

@@ -224,7 +224,7 @@ async function executeJob(request: NextRequest, job: Job): Promise<unknown> {
     return {
       ...(response?.data || response),
       nextAction:
-        "이 컨텍스트의 systemPrompt와 userPrompt로 현재 ChatGPT가 원고 JSON을 작성한 뒤 post_submit_draft를 호출하세요.",
+        "이 컨텍스트의 systemPrompt와 userPrompt로 원고 JSON을 작성하고 qualityChecklist를 내부 검수한 뒤 post_submit_draft를 호출하세요.",
     };
   }
   if (job.type === "POST_SUBMIT_DRAFT") {
@@ -243,11 +243,20 @@ async function executeJob(request: NextRequest, job: Job): Promise<unknown> {
         draft: input.draft,
       }),
     });
+    const result = response?.data || response;
+    const contentQuality = result?.contentQuality;
+    const requiresRepair = Boolean(contentQuality && contentQuality.canPublish === false);
     return {
-      ...(response?.data || response),
+      ...result,
       draftId: productId,
       connectKind: kind.toLowerCase(),
-      message: "ChatGPT 원고를 PC에서 검증하고 승인 대기 초안 패키지로 저장했습니다.",
+      requiresRepair,
+      message: requiresRepair
+        ? `원고는 저장됐지만 품질 보강이 필요합니다: ${contentQuality.reason || contentQuality.summary || "근거 밀도 미달"}`
+        : "ChatGPT 원고를 PC에서 검증하고 승인 대기 초안 패키지로 저장했습니다.",
+      nextAction: requiresRepair
+        ? "contentQuality.reason과 실패 signals를 반영해 같은 컨텍스트로 원고를 고친 뒤 새 idempotencyKey로 post_submit_draft를 다시 호출하세요."
+        : "초안 미리보기를 확인하고 실제 발행은 사용자 확인 뒤 별도로 진행하세요.",
     };
   }
   if (job.type === "THUMBNAIL_PREPARE") {

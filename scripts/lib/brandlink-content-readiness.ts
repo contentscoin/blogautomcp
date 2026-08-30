@@ -54,6 +54,7 @@ export interface BrandLinkContentReadiness {
     | "commission-rate-exposed"
     | "internal-guidance-leak"
     | "missing-review-substance"
+    | "low-evidence-density"
     | "generic-guidance-heavy"
     | "category-mismatch"
     | "repetitive-content"
@@ -258,7 +259,12 @@ export function getBrandLinkContentReadiness(
         sections: sections.slice(0, -1),
         sourceText: [input.sourceDescription || "", ...(input.sourceFeatures || [])].join(" "),
       })
-    : assessProductReviewSubstance({ productName: input.productName, sections: sections.slice(0, -1) });
+    : assessProductReviewSubstance({
+        productName: input.productName,
+        sections: sections.slice(0, -1),
+        sourceDescription: input.sourceDescription,
+        sourceFeatures: input.sourceFeatures,
+      });
   const categoryMismatchTerms = "categoryMismatchTerms" in reviewSubstance
     ? reviewSubstance.categoryMismatchTerms
     : [];
@@ -296,6 +302,14 @@ export function getBrandLinkContentReadiness(
       key: "review-substance",
       label: isTravel ? "여행상품 고유 장단점과 판단" : "제품 고유 장단점과 판단",
       status: reviewSubstance.pass ? "pass" : "fail",
+    },
+    {
+      key: "evidence-density",
+      label: isTravel ? "여행지 근거-코스 가치 연결" : "제품 근거-사용 가치 연결",
+      status:
+        reviewSubstance.evidenceJudgementCount >= reviewSubstance.requiredEvidenceJudgementCount
+          ? "pass"
+          : "fail",
     },
     {
       key: "generic-guidance",
@@ -580,6 +594,22 @@ export function getBrandLinkContentReadiness(
     return buildResult({
       code: "generic-guidance-heavy",
       reason: `제품 판단보다 확인 안내 문장이 많습니다 (${reviewSubstance.genericGuidanceCount}/${reviewSubstance.sentenceCount}문장).`,
+      score,
+      sectionCount: sections.length,
+      hashtagCount: input.hashtags.length,
+      totalLength,
+      coveredProductTokens,
+      missingProductTokens,
+      signals: baseSignals,
+    });
+  }
+
+  if (reviewSubstance.evidenceJudgementCount < reviewSubstance.requiredEvidenceJudgementCount) {
+    return buildResult({
+      code: "low-evidence-density",
+      reason: isTravel
+        ? `여행지 사실을 코스의 가치·이동·체류 대가로 해석한 문장이 부족합니다 (${reviewSubstance.evidenceJudgementCount}/${reviewSubstance.requiredEvidenceJudgementCount}).`
+        : `제품 고유 기능을 사용 장면의 이점·제약으로 해석한 문장이 부족합니다 (${reviewSubstance.evidenceJudgementCount}/${reviewSubstance.requiredEvidenceJudgementCount}).`,
       score,
       sectionCount: sections.length,
       hashtagCount: input.hashtags.length,

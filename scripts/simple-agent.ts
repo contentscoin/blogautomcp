@@ -5271,6 +5271,42 @@ async function step2_generatePost(
   const editorialSectionTitles = isTravel
     ? travelEditorialPlan.map((section) => section.title)
     : productEditorialPlan?.sections.map((section) => section.title) ?? [];
+  const qualityEvidenceAnchors = Array.from(new Set(
+    (isTravel
+      ? [
+          ...(travelFacts?.destinations || []),
+          ...(travelFacts?.highlights || []),
+          ...(travelFacts?.conditions || []),
+          travelFacts?.duration || "",
+          ...(travelReviewAnalysis?.strengths.flatMap((item) => item.evidence) || []),
+          ...(travelReviewAnalysis?.limitations.flatMap((item) => item.evidence) || []),
+        ]
+      : [
+          ...(productEditorialPlan?.reviewAnalysis.verifiedSignals || []),
+          ...product.features,
+        ])
+      .map((value) => value.replace(/\s+/g, " ").trim())
+      .filter((value) => value.length >= 2)
+  )).slice(0, 14);
+  const minimumEvidenceAnchorCount = Math.min(
+    isTravel ? 3 : 4,
+    Math.max(1, qualityEvidenceAnchors.length),
+  );
+  const minimumEvidenceLinkedJudgements = Math.min(
+    3,
+    Math.max(1, qualityEvidenceAnchors.length),
+  );
+  const qualitySelfReviewPromptBlock = `[제출 전 내부 품질검사 · 본문에 체크리스트를 노출하지 않기]
+- 먼저 이 상품만의 편집 논지 1개를 정합니다: 가장 큰 선택 이유 + 가장 큰 대가 + 잘 맞는 독자.
+- 아래 확인 근거 중 서로 다른 ${minimumEvidenceAnchorCount}개 이상을 본문 판단에 실제로 사용합니다: ${qualityEvidenceAnchors.join(" / ") || "상품명과 수집 상세정보"}
+- 최소 ${minimumEvidenceLinkedJudgements}개 판단은 "근거 사실 → 사용/여행 장면의 의미 → 이점 또는 대가"가 한 흐름으로 연결되어야 합니다.
+- ${isTravel
+  ? "장소 이름을 나열하는 데서 멈추지 말고, 각 장소가 코스에서 맡는 역할과 이동·체류·체력의 대가를 해석합니다."
+  : "기능을 나열하는 데서 멈추지 말고, 실제 사용 조건에서 어떤 문제를 줄이며 어떤 한계가 생기는지 해석합니다."}
+- 장점과 단점은 같은 근거를 되풀이하지 않고 서로 다른 선택 기준을 다룹니다.
+- 정보가 없는 항목은 한 군데에서 짧게 경계만 세우고, 여러 섹션을 '확인 필요' 문장으로 채우지 않습니다.
+- 초안을 쓴 뒤 상품 고유명사를 다른 상품명으로 바꿔도 자연스러운 문단은 다시 작성합니다.
+- 제목·본문·해시태그 JSON을 내기 전에 위 기준을 내부적으로 다시 검사하고, 미달이면 스스로 보강합니다.`;
   if (openCrabSeoBrief) {
     console.log(
       `   OpenCrab SEO: ${openCrabSeoBrief.matchType} match, confidence=${openCrabSeoBrief.confidence}, images=${openCrabSeoBrief.mediaTargetImageCount}`
@@ -5288,33 +5324,35 @@ async function step2_generatePost(
   // 인트로 변화를 위한 랜덤 요소. 직접 구매/사용을 단정하지 않는 관찰형 힌트만 사용한다.
   const intros = isTravel
     ? [
-        "일정과 포함 사항을 기준으로 정리해봤어요",
-        "예약 전에 확인할 조건들을 먼저 살펴봤어요",
-        "코스 구성을 보면서 동선을 그려봤어요",
-        "가격에 뭐가 포함되는지부터 확인해봤어요",
-        "여행 시기와 조건을 같이 놓고 봤어요",
+        "대표 장면의 매력과 이동 부담을 같은 저울에 놓고 봤어요",
+        "핵심 방문지가 전체 코스에서 맡는 역할부터 읽어봤어요",
+        "짧은 일정 안에서 실제 체류가 얼마나 남는지를 중심으로 봤어요",
+        "여행지의 분위기와 패키지 동선이 잘 맞는지부터 짚어봤어요",
+        "가격보다 코스의 깊이와 동행 적합도를 먼저 놓고 봤어요",
       ]
     : [
-        "상세 정보를 보면서 구매 전 기준을 정리해봤어요",
-        "후기와 스펙을 같이 확인해봤어요",
-        "옵션을 고르기 전에 체크할 점이 보였어요",
-        "가격과 구성을 기준으로 살펴봤어요",
-        "상품 이미지를 보면서 포인트를 정리했어요"
+        "이 제품이 해결하려는 문제와 구조상 한계를 같이 봤어요",
+        "핵심 기능이 실제 사용 장면에서 어떤 차이를 만드는지 봤어요",
+        "비슷한 제품과 갈리는 선택 기준부터 정리해봤어요",
+        "기능 수보다 내 사용 조건에 맞는지를 중심으로 봤어요",
+        "가장 분명한 장점과 감수해야 할 대가를 함께 놓고 봤어요"
       ];
   const randomIntro = intros[Math.floor(Math.random() * intros.length)];
 
   const endings = isTravel
     ? [
-        "예약 전 일정·포함 조건은 꼭 확인해보세요",
-        "출발일 기준으로 가격이 달라질 수 있어요",
-        "동행 유형에 맞는 옵션인지 살펴보면 좋아요",
-        "취소·변경 규정은 예약 페이지에서 확인하세요",
-        "비슷한 코스와 비교해보고 결정해도 늦지 않아요",
+        "대표 장소를 넓게 보는 가치가 이동 부담보다 큰지가 선택을 가릅니다",
+        "동행의 체력과 자유시간 우선순위가 이 코스의 적합도를 정해요",
+        "깊은 체류보다 장면의 다양성이 우선일 때 선택 이유가 선명해져요",
+        "현지 체류시간과 포함 조건이 맞아야 표시 가격의 의미가 살아나요",
+        "코스의 매력과 이동의 대가를 함께 받아들일 수 있는지가 핵심이에요",
       ]
     : [
-        "구매 전 비교 기준으로 보기 좋아요", "옵션 확인 후 고르면 좋겠어요",
-        "필요한 분께 참고가 될 만해요", "가격과 구성을 함께 보면 좋아요",
-        "상세 조건은 한 번 더 확인해보세요"
+        "핵심 기능이 내 사용 조건에 맞을 때 선택 이유가 선명해져요",
+        "편의와 구조적 제약 중 어느 쪽이 큰지가 최종 기준이에요",
+        "자주 쓰는 장면에서 강점이 살아나는지로 판단하는 편이 실용적이에요",
+        "가격보다 해결하려는 문제가 분명한지가 먼저예요",
+        "장점의 근거와 감수할 한계가 모두 맞을 때 후보가 될 수 있어요"
       ];
   const randomEnding = endings[Math.floor(Math.random() * endings.length)];
 
@@ -5332,6 +5370,7 @@ ${travelFactsPromptBlock ? `\n${travelFactsPromptBlock}` : ""}
 ${travelReviewPromptBlock ? `\n${travelReviewPromptBlock}` : ""}
 ${travelEditorialPromptBlock ? `\n${travelEditorialPromptBlock}` : ""}
 ${adaptiveEditorialPromptBlock ? `\n${adaptiveEditorialPromptBlock}` : ""}
+${qualitySelfReviewPromptBlock ? `\n${qualitySelfReviewPromptBlock}` : ""}
 ${compositionPromptBlock ? `\n${compositionPromptBlock}` : ""}
 ${experiencePromptBlock ? `\n${experiencePromptBlock}` : ""}`;
 
@@ -5516,9 +5555,25 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
           },
           systemPrompt,
           userPrompt,
+          qualityChecklist: {
+            version: "brand-draft-quality-checklist/v1",
+            editorialThesis: "가장 큰 선택 이유, 가장 큰 대가, 잘 맞는 독자를 하나의 논지로 연결",
+            evidenceAnchors: qualityEvidenceAnchors,
+            minimumDistinctEvidenceAnchors: minimumEvidenceAnchorCount,
+            minimumEvidenceLinkedJudgements,
+            checks: [
+              "상품 고유 사실이 실제 판단 근거로 쓰였는가",
+              isTravel
+                ? "장소별 정보가 코스 역할과 이동·체류 대가로 이어지는가"
+                : "기능·구조가 사용 장면의 이점과 한계로 이어지는가",
+              "장점·아쉬운 점·추천·비추천·조건부 결론이 같은 말을 반복하지 않는가",
+              "확인 필요 안내와 미확인 정보가 여러 문단을 차지하지 않는가",
+              "근거 없는 직접 사용·방문 경험이나 변동 정보를 만들지 않았는가",
+            ],
+          },
         },
         nextAction:
-          "현재 ChatGPT 대화에서 systemPrompt와 userPrompt를 적용해 JSON 원고를 작성한 뒤 post_submit_draft로 제출하세요. 원고를 사용자에게 먼저 보여주고 발행은 별도 확인을 받으세요.",
+          "현재 ChatGPT 대화에서 systemPrompt와 userPrompt를 적용하고 qualityChecklist를 내부 검수해 JSON 원고를 작성한 뒤 post_submit_draft로 제출하세요. 제출 작업을 job_get으로 확인하고 contentQuality.canPublish가 false이면 reason과 실패 signals를 반영해 새 idempotencyKey로 보강 원고를 다시 제출하세요. 원고를 사용자에게 먼저 보여주고 발행은 별도 확인을 받으세요.",
       }, null, 2);
     if (Buffer.byteLength(contextJson, "utf8") > 800 * 1024) {
       throw new Error("초안 컨텍스트가 800KB를 초과했습니다. 상품 설명 범위를 줄인 뒤 다시 시도하세요.");
@@ -5658,6 +5713,7 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
     "unsupported-experience-claim",
     "internal-guidance-leak",
     "missing-review-substance",
+    "low-evidence-density",
     "generic-guidance-heavy",
     "category-mismatch",
     "repetitive-content",

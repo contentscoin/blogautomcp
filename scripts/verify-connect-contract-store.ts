@@ -55,6 +55,31 @@ check("contract round-trips", roundTrip?.listEndpoint === "https://gw-brandconne
 check("field map round-trips", roundTrip?.fieldMap.name === "packageName", roundTrip?.fieldMap);
 check("stored under userData", fs.existsSync(path.join(tempRoot, "data", "connect-contracts", "travel.json")));
 
+if (roundTrip) {
+  writeStoredConnectContract({
+    ...roundTrip,
+    sampleCount: 16,
+    feeds: [
+      {
+        listEndpoint: roundTrip.listEndpoint,
+        listQuery: { section: "PRICE_DROP", tabId: "ALL" },
+        itemsPath: roundTrip.itemsPath,
+        fieldMap: roundTrip.fieldMap,
+        sampleCount: 8,
+      },
+      {
+        listEndpoint: roundTrip.listEndpoint,
+        listQuery: { section: "REGION_BEST", tabId: "ALL" },
+        itemsPath: roundTrip.itemsPath,
+        fieldMap: roundTrip.fieldMap,
+        sampleCount: 8,
+      },
+    ],
+  });
+}
+const multiFeedRoundTrip = readStoredConnectContract("travel");
+check("multi-feed contract round-trips", multiFeedRoundTrip?.feeds?.length === 2, multiFeedRoundTrip?.feeds);
+
 // Corrupt / mismatched files must be rejected rather than half-used.
 fs.writeFileSync(path.join(tempRoot, "data", "connect-contracts", "travel.json"), "{ not json", "utf8");
 check("corrupt contract rejected", readStoredConnectContract("travel") === null);

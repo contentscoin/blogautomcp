@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { getBrandLinkContentReadiness } from "./lib/brandlink-content-readiness";
 import { buildBrandPostImagePrompt } from "../src/lib/brand-post-image-generation";
 import {
@@ -55,6 +57,18 @@ const stronger = assess(strongerSections.map((section, index) => (
     ? section
     : `${section}\n\n판단 포인트 ${index + 1}은 상품의 표기 조건을 여행자의 시간·예산·이동 성향에 연결해 장점과 대가를 함께 읽는 것입니다. 선택 차이 ${index + 1}은 단순 예약 안내보다 실제 결정에 필요한 기준을 선명하게 만듭니다.`
 )));
+const lowEvidence = assess(strongerSections.map((section, index) => {
+  const withoutSpecificPlaces = section
+    .replaceAll("히타카츠", "첫 번째 지역")
+    .replaceAll("이즈하라", "두 번째 지역")
+    .replaceAll("대마도", "목적지");
+  const withProductToken = index === 0
+    ? `${withoutSpecificPlaces}\n\n대마도 상품 정보를 바탕으로 정리합니다.`
+    : withoutSpecificPlaces;
+  return index === strongerSections.length - 1
+    ? withProductToken
+    : `${withProductToken}\n\n판단 관점 ${index + 1}은 일정 선택의 장점과 대가를 독자의 시간과 예산에 연결합니다. 선택 기준 ${index + 1}을 놓고 보면 우선순위가 더 분명해집니다.`;
+}));
 assert.equal(weak.canPublish, false);
 assert.ok(
   ["too-short-content", "generic-guidance-heavy", "missing-review-substance"].includes(weak.code),
@@ -66,6 +80,10 @@ assert.equal(
   "분량 차단이 먼저 걸려도 확인 안내 반복 문제를 함께 보여줘야 합니다.",
 );
 assert.ok(stronger.score > weak.score, `보강 원고 점수가 개선되어야 합니다: ${weak.score} -> ${stronger.score}`);
+assert.equal(lowEvidence.canPublish, false);
+assert.equal(lowEvidence.code, "low-evidence-density", lowEvidence.reason || lowEvidence.summary);
+assert.equal(lowEvidence.signals.find((signal) => signal.key === "evidence-density")?.status, "fail");
+assert.equal(stronger.signals.find((signal) => signal.key === "evidence-density")?.status, "pass");
 assert.equal(SHOPPING_POST_CONTRACT_V1.targetImages.min, 5);
 assert.equal(SHOPPING_POST_CONTRACT_V1.targetImages.recommended, 8);
 assert.equal(TRAVEL_POST_CONTRACT_V1.targetImages.min, 7);
@@ -92,10 +110,21 @@ const travelPrompt = buildBrandPostImagePrompt({
 assert.match(travelPrompt, /photorealistic travel editorial photograph/iu);
 assert.match(travelPrompt, /do not invent a named hotel/iu);
 
+const simpleAgentSource = fs.readFileSync(path.join(process.cwd(), "scripts", "simple-agent.ts"), "utf8");
+const sitesMcpSource = fs.readFileSync(
+  path.join(process.cwd(), "apps", "sites", "app", "api", "mcp", "[credential]", "route.ts"),
+  "utf8",
+);
+assert.match(simpleAgentSource, /brand-draft-quality-checklist\/v1/u);
+assert.match(simpleAgentSource, /근거 사실 → 사용\/여행 장면의 의미 → 이점 또는 대가/u);
+assert.match(simpleAgentSource, /contentQuality\.canPublish가 false/u);
+assert.match(sitesMcpSource, /contentQuality\.canPublish가 false/u);
+
 console.log(JSON.stringify({
   ok: true,
   weak: { code: weak.code, score: weak.score },
   stronger: { code: stronger.code, score: stronger.score },
+  lowEvidence: { code: lowEvidence.code, score: lowEvidence.score },
   imageTargets: {
     shopping: SHOPPING_POST_CONTRACT_V1.targetImages,
     travel: TRAVEL_POST_CONTRACT_V1.targetImages,
