@@ -130,8 +130,10 @@ JSON 형식으로 반환:
 
         const json = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || "{}");
         return json;
-    } catch (e: any) {
-        log.warn(`이미지 분석 실패: ${image.filename}`, e);
+    } catch (error: unknown) {
+        log.warn(`이미지 분석 실패: ${image.filename}`, {
+            error: error instanceof Error ? error.message : String(error),
+        });
         return {
             description: "이미지 분석 실패",
             tags: [],
@@ -212,8 +214,11 @@ JSON 형식으로 반환:
         try {
             const response = await model.generateContent(prompt);
             text = response.response.text();
-        } catch (e: any) {
-            log.error("제미나이 전체 스토리 생성 실패", e);
+        } catch (error: unknown) {
+            log.error(
+                "제미나이 전체 스토리 생성 실패",
+                error instanceof Error ? error : { error: String(error) }
+            );
             throw new Error("이미지 기반 스토리 생성 실패");
         }
     }

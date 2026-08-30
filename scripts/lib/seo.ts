@@ -31,11 +31,17 @@ export async function getNaverAutocomplete(query: string): Promise<string[]> {
                     },
                     signal: controller.signal,
                 });
-                const data: any = await response.json();
-                const suggestions = data.items?.[0] || [];
+                const data: unknown = await response.json();
+                const items =
+                    typeof data === "object" && data !== null
+                        ? (data as { items?: unknown }).items
+                        : undefined;
+                const suggestions = Array.isArray(items) && Array.isArray(items[0]) ? items[0] : [];
 
                 log.info(`자동완성 ${suggestions.length}개 수집`, { query });
-                return suggestions.map((item: string[]) => item[0]);
+                return suggestions.flatMap((item: unknown) =>
+                    Array.isArray(item) && typeof item[0] === "string" ? [item[0]] : []
+                );
             } finally {
                 clearTimeout(timeout);
             }

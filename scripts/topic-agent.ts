@@ -98,6 +98,8 @@ interface TopicOutputBlock {
     sectionTitle?: unknown;
     heading?: unknown;
     body?: unknown;
+    draft?: unknown;
+    content?: unknown;
 }
 
 interface StoredPublishPayload {
@@ -1654,7 +1656,7 @@ async function loadPublishContextFromDb(runtimeOptions: RuntimePublishOptions): 
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
     let taskId = explicitTaskId;
-    let postId = explicitPostId;
+    const postId = explicitPostId;
 
     if (!taskId && !postId && firstArg && uuidRegex.test(firstArg)) {
         taskId = firstArg;
@@ -1814,7 +1816,7 @@ function parseSectionsFromLLM(value: unknown): string[] {
         const heading = normalizeOutputText(block.heading ?? block.sectionTitle);
         // The prompt asked for "drafts" which might just be an array of strings,
         // or an array of objects. We handle both.
-        const body = normalizeOutputText(block.body ?? (entry as any).draft ?? (entry as any).content);
+        const body = normalizeOutputText(block.body ?? block.draft ?? block.content);
         const merged = [heading, body].filter(Boolean).join("\n\n");
         if (merged) result.push(merged);
       }
@@ -2061,7 +2063,7 @@ import { createChatGPTContext, openFreshChatGPTTarget, openChatGPTTarget, sendPr
 async function generateAdvancedContent(
     args: TopicArgs,
     styleGuide: string
-): Promise<{ title: string; sections: string[]; hashtags: string[]; imagePrompts?: any[] }> {
+): Promise<{ title: string; sections: string[]; hashtags: string[]; imagePrompts?: unknown[] }> {
     if (!ALLOW_CHATGPT_BROWSER_MODE) {
         throw new Error("ChatGPT 브라우저 생성은 비활성화되어 있습니다. 준비된 주제글만 발행하거나 API 파이프라인을 사용하세요.");
     }

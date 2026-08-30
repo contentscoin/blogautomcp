@@ -24,19 +24,17 @@ jobs:
         include:
           - os: windows-latest
             pack: desktop:pack:win
-            artifact: windows-installer
             # 자동업데이트 채널에 올릴 파일까지 포함: 설치본 + blockmap + latest.yml
             glob: "out/*.exe\nout/*.blockmap\nout/latest.yml"
           - os: macos-latest
             pack: desktop:pack:mac
-            artifact: macos-dmg
             glob: "out/*.dmg"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
@@ -62,15 +60,6 @@ jobs:
           # 빈 CSC_LINK("")를 넘기면 electron-builder가 빈 인증서로 서명을 시도해
           # macOS에서 'not a file'로 실패하므로, CSC_* 환경변수는 넘기지 않는다.
           CSC_IDENTITY_AUTO_DISCOVERY: false
-
-      - name: Upload installer (artifact)
-        uses: actions/upload-artifact@v4
-        # 아티팩트 저장소 쿼터 초과로 실패해도 릴리스 업로드는 진행되도록 한다.
-        continue-on-error: true
-        with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.glob }}
-          if-no-files-found: error
 
       # 수동 실행 시 릴리스가 아직 없으면 생성한다(GITHUB_TOKEN 생성 이벤트는
       # 다른 워크플로를 재트리거하지 않아 태그 빌드가 중복 실행되지 않는다).

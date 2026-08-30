@@ -4,9 +4,19 @@ async function listModels() {
     const apiKey = process.env.GEMINI_API_KEY;
     const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`;
     const res = await fetch(url);
-    const data: any = await res.json();
-    if (data.models) {
-        console.log(data.models.map((m: any) => m.name).join("\n"));
+    const data: unknown = await res.json();
+    const models =
+        typeof data === "object" && data !== null && Array.isArray((data as { models?: unknown }).models)
+            ? (data as { models: unknown[] }).models
+            : null;
+
+    if (models) {
+        const names = models.flatMap((model) => {
+            if (typeof model !== "object" || model === null) return [];
+            const name = (model as { name?: unknown }).name;
+            return typeof name === "string" ? [name] : [];
+        });
+        console.log(names.join("\n"));
     } else {
         console.log(data);
     }
