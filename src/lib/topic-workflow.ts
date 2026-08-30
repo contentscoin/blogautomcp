@@ -320,39 +320,6 @@ function extractKeywordRoot(topic: string, keyword: string): string {
   return uniqueText(tokens, 2).join("|");
 }
 
-const SUBTOPIC_ANGLE_TEMPLATES: Record<TopicType, string[]> = {
-  travel: [
-    "{topic}에서 {keyword} 하나 때문에 하루 리듬이 무너지는 순간",
-    "{topic} 갈 때 {keyword}를 늦게 정하면 바로 꼬이는 장면",
-    "{topic} 여행이 갑자기 편해지는 건 {keyword}를 먼저 잡을 때다",
-    "{keyword}가 바뀌면 {topic}의 체력 배분이 어떻게 달라지는가",
-    "{topic}에서 {keyword}를 아끼다 오히려 더 쓰게 되는 순간",
-    "{topic}에서 {keyword}를 잘 고른 사람과 급하게 고른 사람의 차이",
-    "{topic} 다녀온 뒤 가장 자주 남는 후회는 결국 {keyword}였다",
-    "{topic} 일정이 매끈하게 이어지는 사람들은 {keyword}부터 다르다",
-  ],
-  golf: [
-    "{topic}에서 {keyword}가 흔들리면 바로 티 나는 장면",
-    "{topic} 라운드 전에 {keyword}를 놓치면 스코어가 무너지는 이유",
-    "{keyword} 하나만 바꿔도 {topic} 체감이 달라지는 순간",
-    "{topic}에서 {keyword}를 과하게 잡다가 생기는 실수",
-    "{topic} 골퍼들이 {keyword}에서 유독 급해지는 이유",
-    "{keyword}를 줄였더니 오히려 {topic}가 편해진 사례",
-    "{topic} 직전 {keyword} 판단이 샷 리듬을 갈라놓는 순간",
-    "{topic}에서 {keyword}가 맞아떨어질 때 몸이 보내는 신호",
-  ],
-  knowledge: [
-    "{topic}가 갑자기 재미없어지는 건 {keyword}를 놓칠 때다",
-    "{topic}를 볼 때 독자가 가장 먼저 막히는 지점은 {keyword}다",
-    "{keyword} 하나 바꾸면 {topic}가 훨씬 사람 말처럼 읽힌다",
-    "{topic}를 설명문으로 만들지 않는 사람들은 {keyword}부터 다르다",
-    "{topic}에서 {keyword}를 너무 늦게 넣었을 때 생기는 문제",
-    "{topic}를 읽다 멈추게 되는 순간을 보면 결국 {keyword}였다",
-    "{keyword} 관점에서 다시 보면 {topic}의 장면이 살아난다",
-    "{topic}에서 {keyword}를 살린 글이 유독 오래 남는 이유",
-  ],
-};
-
 const SUBTOPIC_FALLBACK_KEYWORDS: Record<TopicType, string[]> = {
   travel: ["첫날", "체력", "동선", "이동", "숙소", "예산", "날씨", "복장", "식사", "공항", "환전", "보험", "야경", "대기시간"],
   golf: ["첫홀", "티샷", "리듬", "퍼팅", "비거리", "컨디션", "장비", "루틴", "예약", "연습장", "클럽핏", "피로", "날씨", "복기"],
@@ -534,18 +501,6 @@ function buildNarrativeRoleOrder(count: number): TopicSubtopicRole[] {
     default:
       return ["hook", "scene", "mistake", "comparison", "takeaway"];
   }
-}
-
-function extractRoleFocusKeyword(topic: string, subtopic: string, fallback: string): string {
-  const extracted = sanitizeNarrativeKeyword(topic, removeTopicPrefix(topic, subtopic))
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (extracted.length >= 2) {
-    return extracted;
-  }
-  const fallbackKeyword = sanitizeNarrativeKeyword(topic, removeTopicPrefix(topic, fallback)).trim();
-  return fallbackKeyword || normalizeText(topic);
 }
 
 function buildRoleAwareSubtopic(
