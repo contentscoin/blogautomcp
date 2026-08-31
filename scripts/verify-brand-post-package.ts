@@ -38,7 +38,7 @@ async function main() {
   assert.equal(simpleAgentSource.includes("buildLocalProductReviewSections"), false);
   assert.equal(simpleAgentSource.includes("폴백 섹션으로 보완합니다"), false);
   assert.equal(
-    simpleAgentSource.includes("const productEditorialPlan = isTravel\n    ? null"),
+    /(?:const|let) productEditorialPlan = isTravel\r?\n\s+\? null/u.test(simpleAgentSource),
     true,
     "여행 원고 경로에서 쇼핑 제품 하네스를 생성하면 안 됩니다."
   );
@@ -97,6 +97,19 @@ async function main() {
       sitesMcpSource.includes("post_submit_draft: 'POST_SUBMIT_DRAFT'"),
     true,
     "Sites MCP가 2단계 ChatGPT 원고 계약을 광고하고 큐에 전달해야 합니다.",
+  );
+  assert.equal(
+    simpleAgentSource.includes("createProductDetailImageSegments") &&
+      simpleAgentSource.includes("상세 원문") &&
+      simpleAgentSource.includes("상세 근거") &&
+      simpleAgentSource.includes("evidenceFacts"),
+    true,
+    "긴 쇼핑 상세이미지를 분할 첨부하고 구조화 근거로 회수해야 합니다.",
+  );
+  assert.equal(
+    sitesMcpSource.includes("evidenceFacts") && draftRouteSource.includes("evidenceFacts"),
+    true,
+    "MCP 제출 경로가 쇼핑 상세이미지 근거를 보존해야 합니다.",
   );
   assert.equal(
     draftRouteSource.includes('code: "CHATGPT_MCP_DRAFT_REQUIRED"') &&

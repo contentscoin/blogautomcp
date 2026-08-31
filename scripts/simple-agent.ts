@@ -94,6 +94,7 @@ import {
   buildProductReviewAnalysis,
   formatProductEditorialPlanForPrompt,
   hasSufficientProductReviewEvidence,
+  isMeaningfulProductEvidenceFeature,
   type ProductEditorialPlan,
 } from "./lib/product-editorial-plan";
 import {
@@ -118,6 +119,7 @@ import { buildHumanizeRewritePrompt, HUMANIZE_RULES, scanAiTells } from "./lib/h
 import { createLockedProductThumbnail, createOriginalProductPhotoThumbnail, type ShoppingThumbnailStyle } from "./lib/product-image-lock";
 import { deduplicateImagePaths } from "./lib/image-dedup";
 import { createThreeImageCollage } from "./lib/image-collage";
+import { createProductDetailImageSegments } from "./lib/product-detail-image";
 import {
   bodyImageCapacity,
   minimumStoredSourceImageCount,
@@ -406,6 +408,7 @@ interface GeneratedPostPreview {
 interface McpGeneratedDraftFile {
   version?: unknown;
   title?: unknown;
+  evidenceFacts?: unknown;
   sections?: unknown;
   hashtags?: unknown;
 }
@@ -434,6 +437,13 @@ function readMcpGeneratedDraft(filePath: string): string {
         .map((value) => value.replace(/^#+/, "").trim())
         .filter(Boolean)
     : [];
+  const evidenceFacts = Array.isArray(parsed.evidenceFacts)
+    ? Array.from(new Set(parsed.evidenceFacts
+        .filter((value): value is string => typeof value === "string")
+        .map((value) => sanitizeText(value).slice(0, 220))
+        .filter(isMeaningfulProductEvidenceFeature)))
+      .slice(0, 12)
+    : [];
   const totalBodyLength = sections.reduce((sum, section) => sum + section.length, 0);
 
   if (title.length < 8 || title.length > 100) {
@@ -452,7 +462,7 @@ function readMcpGeneratedDraft(filePath: string): string {
     throw new Error("ChatGPT 원고 해시태그는 3~10개여야 합니다.");
   }
 
-  return JSON.stringify({ title, sections, hashtags });
+  return JSON.stringify({ title, evidenceFacts, sections, hashtags });
 }
 
 interface ChatGPTGuidanceContext {
@@ -3293,7 +3303,10 @@ function buildDirectBrowserGptPrompt(
   return [
     "아래 정보를 바탕으로 네이버 블로그 발행용 최종 글을 바로 작성해주세요.",
     "중요: 추가 질문, 확인 질문, 설명 문장 없이 JSON만 출력하세요.",
-    "- 출력 키: title, sections, hashtags",
+    `- 출력 키: title, ${context.connectKind === "SHOPPING" ? "evidenceFacts, " : ""}sections, hashtags`,
+    context.connectKind === "SHOPPING"
+      ? "- evidenceFacts는 첨부 상세이미지에서 직접 읽은 제품 고유 수치·기능·구성만 3~12개 기록"
+      : "",
     `- sections는 내용의 근거 밀도에 따라 ${minimumSectionCount}~${context.maximumSectionCount}개 범위에서 선택`,
     `- ${context.targetSectionCount}개는 중앙 참고값이며 정확한 할당량이 아님`,
     "- sections 각 항목은 '소제목\\n\\n본문' 형태",
@@ -3322,10 +3335,14 @@ async function runDirectChatGPTGeneration(
   userPrompt: string,
   context: ChatGPTGuidanceContext,
   minSections: number,
-  label = "Direct"
+  label = "Direct",
+  imagePaths: string[] = [],
 ): Promise<string> {
   const prompt = buildDirectBrowserGptPrompt(systemPrompt, userPrompt, context, minSections);
   const requiredSections = Math.max(minSections, context.minimumSectionCount);
+  if (CHATGPT_ATTACH_IMAGES_TO_DRAFT && imagePaths.length > 0) {
+    await attachImagesToChatGPT(page, imagePaths, `${label} 상세 근거`);
+  }
   let reply = await sendPromptToChatGPT(page, prompt, {
     label: `${label} 최종`,
     idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, 180_000),
@@ -3432,7 +3449,7 @@ async function requestStructuredOutputWithGuidance(
       : [
           "좋아요. 방금 답변 내용을 유지해서 최종 결과를 JSON으로 정리해주세요.",
           "- 출력: JSON만",
-          "- 키: title, sections, hashtags",
+          `- 키: title, ${context.connectKind === "SHOPPING" ? "evidenceFacts, " : ""}sections, hashtags`,
           `- sections는 ${context.minimumSectionCount}~${context.maximumSectionCount}개 범위에서 내용에 맞게 선택`,
           "- 코드블록 금지",
         ].join("\n");
@@ -3623,7 +3640,7 @@ async function runDraftGptConversation(
   const structuredPrompt = [
     "지금까지 입력한 1~6단계 정보를 기준으로 최종 결과를 정리해주세요.",
     "- 출력은 JSON만",
-    "- 키: title, sections, hashtags",
+    `- 키: title, ${guidanceContext.connectKind === "SHOPPING" ? "evidenceFacts, " : ""}sections, hashtags`,
     `- sections는 ${guidanceContext.minimumSectionCount}~${guidanceContext.maximumSectionCount}개 범위에서 초안의 자연스러운 흐름 유지`,
     "- 모바일 버전 규칙 유지",
     `- 말투는 부드러운 ${guidanceContext.connectKind === "TRAVEL" ? "여행상품 검토형" : "제품 구매 검토형"} 유지`,
@@ -3710,7 +3727,8 @@ async function runChatGPTBrowserTwoPass(
         userPrompt,
         guidanceContext,
         draftMinSections,
-        "Direct"
+        "Direct",
+        imagePaths,
       );
     } else {
       try {
@@ -3735,7 +3753,8 @@ async function runChatGPTBrowserTwoPass(
           userPrompt,
           guidanceContext,
           draftMinSections,
-          "Direct fallback"
+          "Direct fallback",
+          imagePaths,
         );
       }
     }
@@ -3765,7 +3784,7 @@ async function runChatGPTBrowserTwoPass(
       guidanceContext.connectKind === "TRAVEL"
         ? "- 첨부된 여행지·일정 이미지를 참고하되 보이지 않는 체험 사실은 만들지 않기"
         : "- 첨부된 상품 이미지를 참고하되 제품 형태와 표시 정보를 변형하지 않기",
-      "- JSON(title, sections, hashtags)으로 출력",
+      `- JSON(title, ${guidanceContext.connectKind === "SHOPPING" ? "evidenceFacts, " : ""}sections, hashtags)으로 출력`,
       "- 코드블록 금지",
       "",
       "[초안]",
@@ -4369,6 +4388,7 @@ interface ProductInfo {
   rating: string;             // 평점
   representativeImagePath: string | null; // 썸네일용 판매페이지 대표 이미지
   imagePaths: string[];
+  detailImagePaths: string[]; // 상세페이지 원문을 분할한 시각 근거 이미지
   sourceImageUrls: string[];
   finalUrl?: string | null;
   storeName?: string | null;
@@ -4481,52 +4501,11 @@ function isTallDetailImageDimension(width: number, height: number): boolean {
   return ratio >= 1.35 && ratio <= 6.5;
 }
 
-async function createDetailImageCrop(
-  imagePath: string,
-  filePrefix: string,
-  index: number,
-  width: number,
-  height: number
-): Promise<{ path: string; width: number; height: number; size: number } | null> {
-  if (!isTallDetailImageDimension(width, height)) return null;
-
-  const cropSize = Math.min(width, height);
-  const cropTop = Math.min(
-    height - cropSize,
-    Math.max(0, Math.round((height - cropSize) * 0.56))
-  );
-  const cropPath = path.join(TEMP_PATH, `${filePrefix}_detail_crop_${Date.now()}_${index}.jpg`);
-
-  try {
-    await sharp(imagePath)
-      .rotate()
-      .extract({ left: 0, top: cropTop, width: cropSize, height: cropSize })
-      .resize(1080, 1080, {
-        fit: "cover",
-        position: "centre",
-      })
-      .jpeg({ quality: 95, mozjpeg: true })
-      .toFile(cropPath);
-
-    const metadata = await sharp(cropPath).metadata();
-    const stats = fs.statSync(cropPath);
-    return {
-      path: cropPath,
-      width: metadata.width ?? 1080,
-      height: metadata.height ?? 1080,
-      size: stats.size,
-    };
-  } catch {
-    try { fs.unlinkSync(cropPath); } catch {}
-    return null;
-  }
-}
-
 async function materializeProductImages(
   imageUrls: string[],
   filePrefix: string,
   targetImageCount = SHOPPING_BODY_IMAGE_MAX,
-): Promise<{ representativeImagePath: string | null; imagePaths: string[] }> {
+): Promise<{ representativeImagePath: string | null; imagePaths: string[]; detailImagePaths: string[] }> {
   const candidateLimit = Math.max(targetImageCount + 6, 18);
   const prioritizedUrls = prioritizeImageUrls(Array.from(new Set(imageUrls))).slice(0, candidateLimit);
   const downloaded: {
@@ -4557,19 +4536,28 @@ async function materializeProductImages(
       const width = metadata.width ?? 0;
       const height = metadata.height ?? 0;
       if (!isUsableBlogProductImageDimension(width, height)) {
-        const detailCrop = await createDetailImageCrop(imgPath, filePrefix, i, width, height);
-        if (detailCrop) {
-          downloaded.push({
+        // 스마트스토어 상세페이지는 860x10,000px 이상의 한 장 이미지인 경우가 많다.
+        // 중앙 한 컷만 남기지 않고 원문 전체를 최대 8개 구간으로 보존한다.
+        const detailCrops = await createProductDetailImageSegments({
+          imagePath: imgPath,
+          outputDir: TEMP_PATH,
+          filePrefix,
+          index: i,
+          width,
+          height,
+        });
+        if (detailCrops.length > 0) {
+          downloaded.push(...detailCrops.map((detailCrop, segmentIndex) => ({
             path: detailCrop.path,
             url: prioritizedUrls[i],
             size: detailCrop.size,
-            index: i,
+            index: i * 10 + segmentIndex,
             width: detailCrop.width,
             height: detailCrop.height,
             detailCrop: true,
-          });
+          })));
           try { fs.unlinkSync(imgPath); } catch {}
-          console.log(`   ✅ 이미지 ${i + 1}/${downloadCount} 상세 크롭 생성`);
+          console.log(`   ✅ 이미지 ${i + 1}/${downloadCount} 상세 원문 ${detailCrops.length}구간 생성`);
           continue;
         }
         try { fs.unlinkSync(imgPath); } catch {}
@@ -4628,6 +4616,7 @@ async function materializeProductImages(
   return {
     representativeImagePath,
     imagePaths,
+    detailImagePaths: downloaded.filter((item) => item.detailCrop).map((item) => item.path),
   };
 }
 
@@ -4650,7 +4639,7 @@ async function buildProductInfoFromStoredBrandLink(
           "stored_product",
           connectKind === "TRAVEL" ? TRAVEL_BODY_IMAGE_MAX : SHOPPING_BODY_IMAGE_MAX,
         )
-      : { representativeImagePath: null, imagePaths: [] };
+      : { representativeImagePath: null, imagePaths: [], detailImagePaths: [] };
 
   return {
     name: name || sanitizeText(link.storeName || "") || "상품",
@@ -4665,6 +4654,7 @@ async function buildProductInfoFromStoredBrandLink(
     rating: "",
     representativeImagePath: materializedImages.representativeImagePath,
     imagePaths: materializedImages.imagePaths,
+    detailImagePaths: materializedImages.detailImagePaths,
     sourceImageUrls: imageUrls,
     finalUrl: link.finalUrl || link.url,
     storeName: sanitizeText(link.storeName || ""),
@@ -4696,6 +4686,7 @@ function mergeProductInfo(base: ProductInfo | null, live: ProductInfo): ProductI
     rating: live.rating || base.rating,
     representativeImagePath,
     imagePaths,
+    detailImagePaths: Array.from(new Set([...(base.detailImagePaths || []), ...(live.detailImagePaths || [])])),
     sourceImageUrls: Array.from(new Set([...(base.sourceImageUrls || []), ...(live.sourceImageUrls || [])])),
     finalUrl: live.finalUrl || base.finalUrl || null,
     storeName: live.storeName || base.storeName || null,
@@ -5006,7 +4997,7 @@ async function step1_getProductInfo(
     console.log(`   🖼️ 대표 이미지 후보: ${imageUrls[0]}`);
     console.log(`   🖼️ 썸네일 원본 적합: ${isPreferredThumbnailImageUrl(imageUrls[0]) ? "예" : "아니오"}`);
   }
-  const { representativeImagePath, imagePaths } = await materializeProductImages(
+  const { representativeImagePath, imagePaths, detailImagePaths } = await materializeProductImages(
     imageUrls,
     "product",
     connectKind === "TRAVEL" ? TRAVEL_BODY_IMAGE_MAX : SHOPPING_BODY_IMAGE_MAX,
@@ -5025,6 +5016,7 @@ async function step1_getProductInfo(
     rating,
     representativeImagePath,
     imagePaths,
+    detailImagePaths,
     sourceImageUrls: imageUrls,
     finalUrl,
     storeName,
@@ -5259,7 +5251,7 @@ async function step2_generatePost(
     targetSectionCount: bodySectionCount,
   });
   const openCrabPromptBlock = formatOpenCrabSeoBriefForPrompt(openCrabSeoBrief);
-  const productEditorialPlan = isTravel
+  let productEditorialPlan = isTravel
     ? null
     : buildProductEditorialPlan({
         productName: product.name,
@@ -5461,6 +5453,7 @@ ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일
    - ${bodySectionCount}개는 중앙 참고값이며 정확한 개수·제목·순서를 강제하지 않습니다.
    - 전체 분량은 공백 제외 ${compositionContract.targetCharacters.min}~${compositionContract.targetCharacters.max}자를 품질 점검 범위로 참고합니다.
    - 글자보다 이미지가 본체입니다. 문장은 사진 사이를 잇는 역할로 짧게.
+   ${isTravel ? "" : "- 첨부된 상세페이지 이미지의 글자와 사양표를 먼저 읽고, 확인된 수치·기능·구성만 evidenceFacts에 정리한 뒤 본문 판단에 사용하세요."}
 
 3. 각 섹션 구조:
    - 소제목 (한 줄, 이모지 금지)
@@ -5526,6 +5519,7 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
 ## 출력 (JSON만, 줄바꿈은 \\n)
 {
   "title": "SEO 최적화 제목",
+  "evidenceFacts": ["첨부 상세페이지에서 직접 확인한 제품 고유 사실"],
   "sections": [
     "소제목\\n\\n문장1.\\n문장2.\\n문장3.\\n문장4.\\n",
     "소제목\\n\\n문장1.\\n문장2.\\n문장3.\\n"
@@ -5576,7 +5570,8 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
           rating: product.rating,
           storeName: product.storeName || null,
           finalUrl: product.finalUrl || null,
-          referenceImageUrls: product.sourceImageUrls.slice(0, 12),
+          referenceImageUrls: product.sourceImageUrls.slice(0, 20),
+          detailImageSegmentCount: product.detailImagePaths.length,
         },
         generation: {
           source: "chatgpt-mcp-oauth",
@@ -5603,6 +5598,9 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
             minimumDistinctEvidenceAnchors: minimumEvidenceAnchorCount,
             minimumEvidenceLinkedJudgements,
             checks: [
+              isTravel
+                ? "일정 원문에서 확인된 장소와 조건만 근거로 사용했는가"
+                : "referenceImageUrls의 상세이미지를 열어 수치·기능·구성을 evidenceFacts에 구조화했는가",
               "상품 고유 사실이 실제 판단 근거로 쓰였는가",
               isTravel
                 ? "장소별 정보가 코스 역할과 이동·체류 대가로 이어지는가"
@@ -5614,7 +5612,7 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
           },
         },
         nextAction:
-          "현재 ChatGPT 대화에서 systemPrompt와 userPrompt를 적용하고 qualityChecklist를 내부 검수해 JSON 원고를 작성한 뒤 post_submit_draft로 제출하세요. 제출 작업을 job_get으로 확인하고 contentQuality.canPublish가 false이면 reason과 실패 signals를 반영해 새 idempotencyKey로 보강 원고를 다시 제출하세요. 원고를 사용자에게 먼저 보여주고 발행은 별도 확인을 받으세요.",
+          "현재 ChatGPT 대화에서 systemPrompt와 userPrompt를 적용하세요. 쇼핑은 referenceImageUrls의 상세이미지를 먼저 읽어 evidenceFacts를 작성하고, qualityChecklist를 내부 검수한 JSON 원고를 post_submit_draft로 제출하세요. 제출 작업을 job_get으로 확인하고 contentQuality.canPublish가 false이면 reason과 실패 signals를 반영해 새 idempotencyKey로 보강 원고를 다시 제출하세요. 원고를 사용자에게 먼저 보여주고 발행은 별도 확인을 받으세요.",
       }, null, 2);
     if (Buffer.byteLength(contextJson, "utf8") > 800 * 1024) {
       throw new Error("초안 컨텍스트가 800KB를 초과했습니다. 상품 설명 범위를 줄인 뒤 다시 시도하세요.");
@@ -5652,6 +5650,20 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
     );
   }
   const json = parseJsonObjectFromText(text);
+  if (!isTravel) {
+    const visualEvidenceFacts = Array.isArray(json.evidenceFacts)
+      ? Array.from(new Set(json.evidenceFacts
+          .filter((value): value is string => typeof value === "string")
+          .map((value) => sanitizeText(value).slice(0, 220))
+          .filter(isMeaningfulProductEvidenceFeature)))
+        .slice(0, 12)
+      : [];
+    if (visualEvidenceFacts.length > 0) {
+      product.features = Array.from(new Set([...visualEvidenceFacts, ...product.features])).slice(0, 16);
+      productEditorialPlan = buildProductEditorialPlan(toProductEditorialInput(product, bodySectionCount));
+      console.log(`   🔎 상세 이미지에서 제품 근거 ${visualEvidenceFacts.length}개 구조화`);
+    }
+  }
   const structuredSectionCount = getStructuredSectionCount(json);
   if (structuredSectionCount < minimumBodySectionCount) {
     throw new Error(
@@ -9874,13 +9886,17 @@ async function main() {
 
     const finalReviewEvidenceReady = runtimeConnectKind === "TRAVEL"
       ? hasSufficientTravelReviewEvidence(product)
-      : hasSufficientProductReviewEvidence(toProductEditorialInput(product, 11));
+      : hasSufficientProductReviewEvidence(toProductEditorialInput(product, 11)) ||
+        product.detailImagePaths.length >= 2;
     if (!finalReviewEvidenceReady) {
       throw new Error(
         runtimeConnectKind === "TRAVEL"
           ? "여행상품의 코스 장단점을 판단할 목적지·일정·조건 정보가 부족합니다. 상세정보 동기화 후 다시 시도해 주세요."
-          : "제품 자체의 장단점을 판단할 기능·규격 정보가 부족합니다. 상세정보 동기화 후 다시 시도해 주세요.",
+          : "제품 자체의 장단점을 판단할 기능·규격 텍스트나 상세페이지 이미지가 부족합니다. 상세정보 동기화 후 다시 시도해 주세요.",
       );
+    }
+    if (runtimeConnectKind === "SHOPPING" && product.detailImagePaths.length >= 2) {
+      console.log(`   🔎 쇼핑 상세페이지 시각 근거: ${product.detailImagePaths.length}구간`);
     }
 
     await prisma.brandLink.update({

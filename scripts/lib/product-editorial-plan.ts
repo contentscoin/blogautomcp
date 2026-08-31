@@ -179,7 +179,27 @@ function meaningfulDescription(value: string | null | undefined, productName: st
   if (normalized.length < 12) return "";
   if (/^(?:www\.)?[\w.-]+\.(?:com|co\.kr|kr)$/iu.test(normalized)) return "";
   if (normalized === clean(productName)) return "";
+  if (/(?:스마트스토어|공식스토어|공식몰).{0,24}(?:생활|주방|가전|전문|브랜드)/u.test(normalized)) return "";
   return normalized.slice(0, 180);
+}
+
+const SEO_ONLY_FEATURE_PATTERN = /^(?:휴대|가정|거실|캠핑|탁상|충전|저소음|무선|유선|여름|생활|주방|미니)?(?:용)?(?:선풍기|서큘레이터|써큘레이터|가전|추천|제품|상품|핫딜)$/u;
+
+export function isMeaningfulProductEvidenceFeature(value: string): boolean {
+  const normalized = clean(value);
+  if (normalized.length < 4 || normalized.length > 220) return false;
+  if (SEO_ONLY_FEATURE_PATTERN.test(normalized.replace(/\s+/gu, ""))) return false;
+  if (/^(?:추천|인기|베스트|신상품|핫딜|특가|무료배송|오늘출발)$/u.test(normalized)) return false;
+
+  const hasMeasurement = /\d[\d,.]*\s*(?:mAh|m|cm|mm|kg|g|W|V|시간|분|단|도|개|엽|%)/iu.test(normalized);
+  const hasSpecificationRelation = /(?:최대|약|기준|사용시간|충전시간|소비전력|크기|무게|구성품|회전|각도|풍속|풍량|배터리|리모컨|방수|소재|모드|단계|분리|변환|호환|보증)/u.test(normalized);
+  const hasStructuredPair = /[:：]|\s[-–—]\s/u.test(normalized);
+  const wordCount = normalized.split(/\s+/u).filter(Boolean).length;
+  return hasMeasurement || hasSpecificationRelation || hasStructuredPair || wordCount >= 4;
+}
+
+function meaningfulFeatures(values: string[] | undefined): string[] {
+  return unique((values || []).filter(isMeaningfulProductEvidenceFeature), 12);
 }
 
 function detectCategory(source: string): ProductReviewCategory {
@@ -430,7 +450,7 @@ function hairCareAnalysis(source: string, signals: string[]): Omit<ProductReview
 }
 
 function genericAnalysis(input: ProductEditorialPlanInput, signals: string[]): Omit<ProductReviewAnalysis, "evidenceLevel"> {
-  const features = unique(input.features || [], 6);
+  const features = meaningfulFeatures(input.features).slice(0, 6);
   const description = meaningfulDescription(input.description, input.productName);
   const strongestFact = features[0] || description || clean(input.productName);
   return {
@@ -455,7 +475,7 @@ function genericAnalysis(input: ProductEditorialPlanInput, signals: string[]): O
 export function buildProductReviewAnalysis(input: ProductEditorialPlanInput): ProductReviewAnalysis {
   const productName = clean(input.productName) || "상품";
   const description = meaningfulDescription(input.description, productName);
-  const features = unique(input.features || [], 8);
+  const features = meaningfulFeatures(input.features).slice(0, 8);
   const source = clean([productName, description, ...features].join(" "));
   const category = detectCategory(source);
   const signals = collectSignals(source, category);
@@ -468,14 +488,19 @@ export function buildProductReviewAnalysis(input: ProductEditorialPlanInput): Pr
         : category === "hair-care"
           ? hairCareAnalysis(source, signals)
           : genericAnalysis(input, signals);
-  const evidencePoints = signals.length + features.length + (description ? 1 : 0);
-  const evidenceLevel = evidencePoints >= 6 ? "rich" : evidencePoints >= 2 ? "usable" : "sparse";
-  return { ...base, evidenceLevel };
+  const measuredFeatureCount = features.filter((value) => /\d[\d,.]*\s*(?:mAh|m|cm|mm|kg|g|W|V|시간|분|단|도|개|엽|%)/iu.test(value)).length;
+  const evidencePoints = Math.min(signals.length, 2) + features.length + measuredFeatureCount + (description ? 1 : 0);
+  const evidenceLevel = evidencePoints >= 7 && features.length >= 3 ? "rich" : evidencePoints >= 3 && features.length >= 1 ? "usable" : "sparse";
+  return {
+    ...base,
+    verifiedSignals: unique([...features, ...base.verifiedSignals], 12),
+    evidenceLevel,
+  };
 }
 
 export function hasSufficientProductReviewEvidence(input: ProductEditorialPlanInput): boolean {
   const analysis = buildProductReviewAnalysis(input);
-  return analysis.evidenceLevel !== "sparse";
+  return analysis.evidenceLevel === "rich";
 }
 
 export function buildProductEditorialPlan(input: ProductEditorialPlanInput): ProductEditorialPlan {
@@ -483,7 +508,7 @@ export function buildProductEditorialPlan(input: ProductEditorialPlanInput): Pro
   const factLines = [
     clean(input.productName) ? `상품명: ${clean(input.productName)}` : "",
     description ? `설명: ${description}` : "",
-    ...(input.features || []).map((value) => clean(value)).filter(Boolean).slice(0, 8).map((value) => `특징: ${value}`),
+    ...meaningfulFeatures(input.features).slice(0, 10).map((value) => `상세 근거: ${value}`),
     clean(input.price) ? `가격: ${clean(input.price)}` : "",
     clean(input.originalPrice) ? `원가: ${clean(input.originalPrice)}` : "",
     clean(input.discountRate) ? `할인율: ${clean(input.discountRate)}` : "",
@@ -596,13 +621,24 @@ export function assessProductReviewSubstance(input: {
   const sentenceCount = Math.max(1, sentences.length);
   const genericGuidanceCount = countMatches(body, /(?:확인(?:해|하|해야|하세요)|살펴보|비교해보|보는\s*게\s*좋|안전해요)/u);
   const categoryMismatchTerms = analysis.forbiddenCategoryTerms.filter((term) => body.includes(term));
-  const coveredSignals = analysis.verifiedSignals.filter((signal) => signal.split(/[·\s]+/u).filter((token) => token.length >= 2).some((token) => body.includes(token)));
-  const signalTokens = unique(
-    analysis.verifiedSignals.flatMap((signal) => signal.split(/[^\p{L}\p{N}]+/u)),
-    30,
-  ).filter((token) => token.length >= 2 && !/(?:상품|제품|기능|표기|판매페이지|카테고리)/u.test(token));
+  const signalCoveredBySentence = (signal: string, sentence: string): boolean => {
+    const tokens = unique(signal.split(/[^\p{L}\p{N}]+/u), 12)
+      .filter((token) => token.length >= 2 && !/(?:상품|제품|기능|표기|판매페이지|카테고리|방식|구조|기준)/u.test(token));
+    if (tokens.length === 0) return false;
+    const numericTokens = tokens.filter((token) => /\d/u.test(token));
+    const descriptiveTokens = tokens.filter((token) => !/\d/u.test(token));
+    if (numericTokens.length > 0) {
+      return numericTokens.some((token) => sentence.includes(token)) &&
+        (descriptiveTokens.length === 0 || descriptiveTokens.some((token) => sentence.includes(token)));
+    }
+    const required = Math.min(2, tokens.length);
+    return tokens.filter((token) => sentence.includes(token)).length >= required;
+  };
+  const coveredSignals = analysis.verifiedSignals.filter((signal) =>
+    sentences.some((sentence) => signalCoveredBySentence(signal, sentence))
+  );
   const evidenceJudgementCount = sentences.filter((sentence) =>
-    signalTokens.some((token) => sentence.includes(token)) &&
+    analysis.verifiedSignals.some((signal) => signalCoveredBySentence(signal, sentence)) &&
     /(?:장점|강점|선택\s*이유|효율|편의|유리|줄(?:여|어|일)|늘(?:려|어|릴)|대신|반면|아쉬|부담|한계|제약|잘\s*맞|적합|비추천)/u.test(sentence)
   ).length;
   const requiredSignalCount = Math.min(

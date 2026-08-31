@@ -28,6 +28,7 @@ type DraftAction = "prepare_context" | "submit_generated";
 type SubmittedDraft = {
   version: "mcp-generated-draft/v1";
   title: string;
+  evidenceFacts: string[];
   sections: string[];
   hashtags: string[];
 };
@@ -52,6 +53,13 @@ function normalizeSubmittedDraft(
         .map((item) => item.replace(/^#+/, "").trim())
         .filter(Boolean)))
     : [];
+  const evidenceFacts = Array.isArray(input.evidenceFacts)
+    ? Array.from(new Set(input.evidenceFacts
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.replace(/\s+/g, " ").trim().slice(0, 220))
+        .filter((item) => item.length >= 4)))
+      .slice(0, 12)
+    : [];
   const contract = getPostCompositionContract(connectKind);
   const requiredSections = contract.targetSections.min;
   const requiredCharacters = contract.targetCharacters.min;
@@ -73,7 +81,7 @@ function normalizeSubmittedDraft(
     throw new Error("해시태그는 3~10개여야 합니다.");
   }
 
-  return { version: "mcp-generated-draft/v1", title, sections, hashtags };
+  return { version: "mcp-generated-draft/v1", title, evidenceFacts, sections, hashtags };
 }
 
 function readPrepareFailure(logPath: string): string | null {

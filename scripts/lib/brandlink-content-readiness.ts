@@ -268,6 +268,10 @@ export function getBrandLinkContentReadiness(
   const categoryMismatchTerms = "categoryMismatchTerms" in reviewSubstance
     ? reviewSubstance.categoryMismatchTerms
     : [];
+  const sourceEvidenceCoveragePass = isTravel || (
+    "coveredSignals" in reviewSubstance &&
+    reviewSubstance.coveredSignals.length >= reviewSubstance.requiredSignalCount
+  );
   const genericGuidanceRatio = reviewSubstance.genericGuidanceCount / Math.max(1, reviewSubstance.sentenceCount);
   const trustedGenerationSource =
     input.generationSource === "AI" || input.generationSource === "PREPARED_APPROVED";
@@ -307,7 +311,8 @@ export function getBrandLinkContentReadiness(
       key: "evidence-density",
       label: isTravel ? "여행지 근거-코스 가치 연결" : "제품 근거-사용 가치 연결",
       status:
-        reviewSubstance.evidenceJudgementCount >= reviewSubstance.requiredEvidenceJudgementCount
+        reviewSubstance.evidenceJudgementCount >= reviewSubstance.requiredEvidenceJudgementCount &&
+        sourceEvidenceCoveragePass
           ? "pass"
           : "fail",
     },
@@ -604,12 +609,18 @@ export function getBrandLinkContentReadiness(
     });
   }
 
-  if (reviewSubstance.evidenceJudgementCount < reviewSubstance.requiredEvidenceJudgementCount) {
+  if (
+    reviewSubstance.evidenceJudgementCount < reviewSubstance.requiredEvidenceJudgementCount ||
+    !sourceEvidenceCoveragePass
+  ) {
+    const sourceCoverageText = "coveredSignals" in reviewSubstance
+      ? `, 근거 ${reviewSubstance.coveredSignals.length}/${reviewSubstance.requiredSignalCount}`
+      : "";
     return buildResult({
       code: "low-evidence-density",
       reason: isTravel
-        ? `여행지 사실을 코스의 가치·이동·체류 대가로 해석한 문장이 부족합니다 (${reviewSubstance.evidenceJudgementCount}/${reviewSubstance.requiredEvidenceJudgementCount}).`
-        : `제품 고유 기능을 사용 장면의 이점·제약으로 해석한 문장이 부족합니다 (${reviewSubstance.evidenceJudgementCount}/${reviewSubstance.requiredEvidenceJudgementCount}).`,
+        ? `여행지 사실을 코스의 가치·이동·체류 대가로 해석한 근거가 부족합니다 (판단 ${reviewSubstance.evidenceJudgementCount}/${reviewSubstance.requiredEvidenceJudgementCount}).`
+        : `제품 고유 기능·수치를 사용 장면의 이점·제약으로 해석한 근거가 부족합니다 (판단 ${reviewSubstance.evidenceJudgementCount}/${reviewSubstance.requiredEvidenceJudgementCount}${sourceCoverageText}).`,
       score,
       sectionCount: sections.length,
       hashtagCount: input.hashtags.length,

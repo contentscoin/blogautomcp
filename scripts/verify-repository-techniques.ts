@@ -5,6 +5,8 @@ import {
   assessProductEditorialCoverage,
   assessProductReviewSubstance,
   buildProductEditorialPlan,
+  hasSufficientProductReviewEvidence,
+  isMeaningfulProductEvidenceFeature,
   formatProductEditorialPlanForPrompt,
 } from "./lib/product-editorial-plan";
 import { getBrandLinkContentReadiness } from "./lib/brandlink-content-readiness";
@@ -20,6 +22,16 @@ const product = {
   price: "29,800원",
   targetSectionCount: 11,
 };
+
+const keywordOnlyFan = {
+  productName: "샤크 유무선 올인원 저소음 스탠드형 탁상형 선풍기 써큘레이터 플렉스브리즈 FA200KR",
+  description: "[샤크닌자] 샤크닌자 스마트스토어 생활 주방 가전 전문 미국 프리미엄 브랜드",
+  features: ["휴대선풍기", "선풍기추천", "무선선풍기", "거실용선풍기", "가정용선풍기", "충전용선풍기", "여름가전"],
+  targetSectionCount: 11,
+};
+assert.equal(hasSufficientProductReviewEvidence(keywordOnlyFan), false, "SEO 키워드만으로 상세 근거 충분 판정을 내리면 안 됩니다.");
+assert.equal(isMeaningfulProductEvidenceFeature("무선선풍기"), false);
+assert.equal(isMeaningfulProductEvidenceFeature("배터리 3,800mAh, 1단·회전 미사용 기준 최대 24시간"), true);
 
 for (const connectKind of ["SHOPPING", "TRAVEL"] as const) {
   const profile = getAdaptiveEditorialProfile(connectKind);

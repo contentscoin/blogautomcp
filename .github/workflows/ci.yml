@@ -51,6 +51,9 @@ jobs:
           npm run test:connect-store
           npm run test:title-rules
           npm run test:brand-post-package
+          npm run test:brand-post-quality
+          npm run test:product-detail-image
+          npm run test:repository-techniques
           npm run test:brandlink-product-list
           npm run test:chatgpt-browser-automation
 

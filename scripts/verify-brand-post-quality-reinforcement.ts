@@ -84,6 +84,42 @@ assert.equal(lowEvidence.canPublish, false);
 assert.equal(lowEvidence.code, "low-evidence-density", lowEvidence.reason || lowEvidence.summary);
 assert.equal(lowEvidence.signals.find((signal) => signal.key === "evidence-density")?.status, "fail");
 assert.equal(stronger.signals.find((signal) => signal.key === "evidence-density")?.status, "pass");
+
+const shoppingGuideSections = [
+  "한 대를 여러 위치에서 쓰고 싶을 때\n\n샤크 플렉스브리즈 FA200KR은 유무선 올인원 선풍기예요. 한곳에 고정하기보다 필요한 곳으로 옮겨 쓰는 방향이 뚜렷해요. 콘센트가 멀어도 배치할 수 있다는 점이 선택 이유예요. 다만 배터리 조건도 함께 따져봐야 해요.",
+  "유무선 구조가 만드는 차이\n\n일반 유선 선풍기는 전원선 범위 안에서 위치를 정해요. 무선으로도 쓸 수 있어 콘센트 영향을 덜 받아요. 거실에서 작업 공간으로 옮기기 편해요. 야외에서도 배치 선택지가 넓어집니다.",
+  "스탠드형과 탁상형\n\n스탠드형과 탁상형을 함께 쓸 수 있어요. 거실에서 쓰다가 책상 주변으로 옮기는 활용을 생각할 수 있습니다. 한 대를 옮겨 쓰려는 집에 잘 맞아요. 형태를 바꾸는 과정은 상세 구성에서 살펴볼 부분이에요.",
+  "선풍기와 서큘레이터\n\n사람 가까이에 바람을 보내면서 실내 공기 순환도 고려한 구성이에요. 거실 한쪽이나 공기가 머무는 지점에 둘 수 있어요. 위치를 자주 바꿀 때 장점이 커져요. 넓은 공간 성능은 자료를 보고 판단해야 합니다.",
+  "무선 편의와 사용시간\n\n전원선 없이 움직일 수 있다는 점이 편리해요. 배터리가 줄어들면 무선 운전도 이어가기 어려워요. 야외 사용이 목적이라면 지속시간을 먼저 봐야 합니다. 충전 시간도 실제 활용 범위를 가르는 항목이에요.",
+  "저소음과 풍량\n\n제품명에는 저소음 표현이 포함돼 있어요. 침실이나 업무 공간에서 쓸 계획이라면 풍량별 소음을 확인하는 편이 좋아요. 강한 바람이 필요하면 도달거리도 중요해요. 수치 비교가 필요합니다.",
+  "비슷한 선풍기와 비교\n\n배치 자유도와 다양한 형태에 무게를 둔 제품이에요. 자주 옮길 예정이라면 무게와 보관 부피를 봐야 해요. 야외 활용이 많다면 충전 방식이 중요해져요. 강한 바람만 필요하면 일반 스탠드형도 후보예요.",
+  "가격이 어울리는 조건\n\n판매 가격은 179,900원이에요. 보조용 탁상팬만 찾는다면 부담이 커요. 여러 활용을 한 대로 묶고 싶다면 판단이 달라져요. 사용 조건이 분명할 때 후보가 될 수 있습니다.",
+  "최종 선택 기준\n\n유무선과 형태 전환이 필요한 사용자에게 잘 맞아요. 비추천 대상은 확인된 성능 수치 없이 강풍만 기대하는 사용자예요. 편의와 구조적 제약 중 어느 쪽이 큰지가 최종 기준이에요. 조건이 맞으면 선택 후보가 됩니다.",
+  "이 포스팅은 네이버 쇼핑 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받습니다.",
+];
+const shoppingGuide = getBrandLinkContentReadiness({
+  productName: "샤크 플렉스브리즈 FA200KR",
+  title: "무선선풍기 샤크 플렉스브리즈 FA200KR 선택 기준",
+  sections: shoppingGuideSections,
+  hashtags: ["샤크플렉스브리즈", "FA200KR", "무선선풍기", "서큘레이터"],
+  brandLink: "https://naver.me/shark-fixture",
+  generationSource: "AI",
+  hasRepresentativeImage: true,
+  thumbnailGenerated: true,
+  connectKind: "SHOPPING",
+  sourceDescription: "스탠드형에서 탁상형으로 분리 전환하는 유무선 서큘레이터",
+  sourceFeatures: [
+    "3단 풍속과 별도 브리즈부스트 모드",
+    "1단·회전 미사용 기준 최대 24시간",
+    "배터리 3,800mAh, 충전시간 약 6시간",
+    "최대 20m 바람 도달거리",
+    "좌우 최대 180도 회전",
+    "크기 350 x 350 x 940mm, 무게 5.95kg",
+  ],
+  mode: "editorial",
+});
+assert.equal(shoppingGuide.canPublish, false, "제품 고유 사양을 쓰지 않은 선택 가이드형 쇼핑 원고는 차단해야 합니다.");
+assert.equal(shoppingGuide.signals.find((signal) => signal.key === "evidence-density")?.status, "fail");
 assert.equal(SHOPPING_POST_CONTRACT_V1.targetImages.min, 5);
 assert.equal(SHOPPING_POST_CONTRACT_V1.targetImages.recommended, 8);
 assert.equal(TRAVEL_POST_CONTRACT_V1.targetImages.min, 7);
