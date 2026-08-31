@@ -3418,6 +3418,11 @@ async function runDirectChatGPTGeneration(
 ): Promise<string> {
   const prompt = buildDirectBrowserGptPrompt(systemPrompt, userPrompt, context, minSections);
   const requiredSections = Math.max(minSections, context.minimumSectionCount);
+  console.log(
+    `      - ${label} 원고 프롬프트: ${prompt.length.toLocaleString("ko-KR")}자 / 이미지 ${
+      CHATGPT_ATTACH_IMAGES_TO_DRAFT ? Math.min(imagePaths.length, CHATGPT_IMAGE_CONTEXT_MAX) : 0
+    }개 후보`
+  );
   if (CHATGPT_ATTACH_IMAGES_TO_DRAFT && imagePaths.length > 0) {
     await attachImagesToChatGPT(page, imagePaths, `${label} 상세 근거`);
   }
@@ -3432,13 +3437,14 @@ async function runDirectChatGPTGeneration(
     if (!isChatGptReplyStalledError(error)) throw error;
     console.log(`      - ${label} 응답 정지로 새 대화에서 1회 자동 재시도합니다.`);
     await ensureFreshChatGPTConversation(page, label);
-    if (CHATGPT_ATTACH_IMAGES_TO_DRAFT && imagePaths.length > 0) {
-      await attachImagesToChatGPT(page, imagePaths, `${label} 재시도 상세 근거`);
-    }
+    // 이미지 분석이 ChatGPT 웹에서 장시간 멈추는 경우가 있으므로 복구 시도는
+    // 이미 수집한 OCR/상품 근거가 포함된 텍스트 프롬프트만 전송한다.
+    console.log(`      - ${label} 자동 재시도는 이미지 없이 수집된 텍스트 근거로 진행합니다.`);
     reply = await sendPromptToChatGPT(
       page,
       [
         "이전 자동작성 응답이 멈춰 재시도합니다.",
+        "첨부 이미지 처리를 반복하지 말고 아래에 정리된 상품 분석과 텍스트 근거만 사용하세요.",
         "추가 설명 없이 요청한 최종 JSON을 한 번에 완성해주세요.",
         "",
         prompt,

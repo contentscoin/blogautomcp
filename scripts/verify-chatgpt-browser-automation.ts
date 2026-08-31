@@ -200,6 +200,12 @@ async function main(): Promise<void> {
   assert.match(simpleAgent, /텍스트 진행 정지 감지/u);
   assert.match(simpleAgent, /새 대화에서 1회 자동 재시도/u);
   assert.match(simpleAgent, /ensureFreshChatGPTConversation/u);
+  assert.match(simpleAgent, /자동 재시도는 이미지 없이 수집된 텍스트 근거로 진행합니다/u);
+  assert.match(simpleAgent, /첨부 이미지 처리를 반복하지 말고/u);
+  const directGenerationBlock = simpleAgent.match(
+    /async function runDirectChatGPTGeneration[\s\S]*?\n\}\n\nfunction buildClarificationReply/u,
+  )?.[0] ?? "";
+  assert.equal(directGenerationBlock.includes("재시도 상세 근거"), false);
   assert.match(simpleAgent, /if \(!idleConfirmed \|\| await isChatGPTGenerating\(page\)\) return null/u);
   assert.equal(simpleAgent.includes("if (generating) {\n      lastActivityAt = Date.now();"), false);
 
