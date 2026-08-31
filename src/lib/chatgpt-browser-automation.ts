@@ -131,13 +131,22 @@ export function readChatGptBrowserSessionSummary(): ChatGptBrowserSessionSummary
     const cookies = Array.isArray(parsed.cookies)
       ? parsed.cookies.filter((cookie): cookie is BrowserStorageCookie => Boolean(cookie) && typeof cookie === "object")
       : [];
-    if (!cookies.some(isChatGptAuthCookie)) {
+    // ChatGPT can keep the authenticated state in the persistent profile
+    // without exporting the legacy auth cookie into storageState.
+    // The browser UI check remains the definitive validation before a prompt.
+    if (!cookies.some(isChatGptAuthCookie) && !hasProfile) {
       return {
         ...base,
         error: "저장된 ChatGPT 로그인 세션이 만료됐거나 인증 쿠키를 확인할 수 없습니다.",
       };
     }
-    return { ...base, isValid: true, error: undefined };
+    return {
+      ...base,
+      isValid: true,
+      error: cookies.some(isChatGptAuthCookie)
+        ? undefined
+        : "저장된 프로필로 로그인 상태를 확인합니다.",
+    };
   } catch {
     return {
       ...base,

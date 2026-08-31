@@ -3,9 +3,68 @@ import {
   assessTravelReviewSubstance,
   buildTravelContractEditorialPlan,
   buildTravelReviewAnalysis,
+  extractTravelPageResearch,
+  extractTravelProductFacts,
   formatTravelEditorialPlanForPrompt,
+  formatTravelPageResearchForPrompt,
   formatTravelReviewAnalysisForPrompt,
+  travelPageResearchFeatures,
 } from "./lib/travel-content";
+
+const pageResearch = extractTravelPageResearch({
+  props: {
+    pageProps: {
+      initialApolloState: {
+        ROOT_QUERY: {
+          product: {
+            productName: "시드니 일주 6일",
+            dayPeriod: 6,
+            visitAreas: [{ countryName: "오스트레일리아", cityName: "시드니" }],
+            mustSeeTours: {
+              tours: [
+                { name: "오페라하우스", desc: ["시드니 항구의 대표 공연예술 건축물"] },
+                { name: "블루마운틴", desc: ["사암 고원과 계곡 풍경"] },
+                { name: "본다이 비치", desc: ["시드니 동부 해안"] },
+              ],
+            },
+            trafficAir: {
+              detail: {
+                departure: { airlineName: "제트스타항공", flightName: "JQ048", departureCityName: "인천", arrivalCityName: "시드니", departureTime: "21:50", arrivalTime: "10:05", flightTime: "10:15" },
+                return: { airlineName: "제트스타항공", flightName: "JQ047", departureCityName: "시드니", arrivalCityName: "인천", departureTime: "11:40", arrivalTime: "20:15", flightTime: "10:30" },
+              },
+            },
+            shopping: { details: [{ placeName: "건강식품 매장", takeTime: "60분" }] },
+            schedules: [
+              { dayOfSchedule: 1, info: { editors: [{ contents: ["인천 출발"] }] }, meals: { dinner: "기내식" } },
+              { dayOfSchedule: 2, info: { editors: [{ contents: ["본다이 비치", "시드니 하버크루즈", "오페라하우스"] }] }, meals: { breakfast: "기내식", lunch: "현지식", dinner: "한식" } },
+              { dayOfSchedule: 3, info: { editors: [{ contents: ["저비스베이", "돌핀크루즈"] }] }, meals: { breakfast: "호텔식" } },
+              { dayOfSchedule: 4, info: { editors: [{ contents: ["시드니 ZOO", "블루마운틴", "로라 빌리지"] }] }, meals: { breakfast: "호텔식" } },
+              { dayOfSchedule: 5, info: { editors: [{ contents: ["NSW 미술관", "바랑가루", "달링하버"] }] }, meals: { breakfast: "호텔식" } },
+              { dayOfSchedule: 6, info: { editors: [{ contents: ["시드니 공항 출발", "인천 도착"] }] }, meals: { breakfast: "호텔식" } },
+            ],
+          },
+        },
+      },
+    },
+  },
+});
+assert.ok(pageResearch);
+assert.equal(pageResearch.schedules.length, 6);
+assert.equal(pageResearch.highlights.length, 3);
+assert.match(pageResearch.flights[0], /JQ048/u);
+assert.match(travelPageResearchFeatures(pageResearch).join("\n"), /4일차 일정:.*블루마운틴/u);
+const pageResearchPrompt = formatTravelPageResearchForPrompt(pageResearch);
+assert.match(pageResearchPrompt, /원본 여행상품 일정 근거/u);
+assert.match(pageResearchPrompt, /2일차:.*본다이 비치.*오페라하우스/u);
+assert.match(pageResearchPrompt, /쇼핑 일정:.*60분/u);
+const pageResearchFacts = extractTravelProductFacts(
+  "[출발임박] 시드니 일주 6일 (전일정4성)변경",
+  "",
+  travelPageResearchFeatures(pageResearch),
+);
+assert.deepEqual(pageResearchFacts.destinations, ["시드니"]);
+assert.ok(pageResearchFacts.highlights.includes("오페라하우스"));
+assert.ok(pageResearchFacts.highlights.includes("블루마운틴"));
 
 const product = {
   name: "[출발확정/여행핫딜] 스위스/이탈리아 2국 9일 <노쇼핑/융프라우/루체른/관광열차/피사/폼페이/콜로세움내부>",

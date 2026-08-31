@@ -54,11 +54,15 @@ import {
   buildTravelContractEditorialPlan,
   buildTravelReviewAnalysis,
   buildTravelThumbnailCopy,
+  extractTravelPageResearch,
   extractTravelProductFacts,
   formatTravelEditorialPlanForPrompt,
   formatTravelFactsForPrompt,
+  formatTravelPageResearchForPrompt,
   formatTravelReviewAnalysisForPrompt,
   hasSufficientTravelReviewEvidence,
+  travelPageResearchFeatures,
+  type TravelPageResearch,
 } from "./lib/travel-content";
 import { createTravelEditorialThumbnail, type TravelThumbnailStyle } from "./lib/travel-thumbnail";
 import {
@@ -4368,6 +4372,7 @@ interface ProductInfo {
   sourceImageUrls: string[];
   finalUrl?: string | null;
   storeName?: string | null;
+  travelPageResearch?: TravelPageResearch | null;
 }
 
 interface StoredBrandLinkSeed {
@@ -4663,6 +4668,7 @@ async function buildProductInfoFromStoredBrandLink(
     sourceImageUrls: imageUrls,
     finalUrl: link.finalUrl || link.url,
     storeName: sanitizeText(link.storeName || ""),
+    travelPageResearch: null,
   };
 }
 
@@ -4693,6 +4699,7 @@ function mergeProductInfo(base: ProductInfo | null, live: ProductInfo): ProductI
     sourceImageUrls: Array.from(new Set([...(base.sourceImageUrls || []), ...(live.sourceImageUrls || [])])),
     finalUrl: live.finalUrl || base.finalUrl || null,
     storeName: live.storeName || base.storeName || null,
+    travelPageResearch: live.travelPageResearch || base.travelPageResearch || null,
   };
 }
 
@@ -4755,6 +4762,25 @@ async function step1_getProductInfo(
       features: [...features, ...keywords.split(/[,|]/u).map((item) => item.trim()).filter((item) => item.length >= 3)].slice(0, 12),
     };
   });
+
+  let travelPageResearch: TravelPageResearch | null = null;
+  if (connectKind === "TRAVEL") {
+    const nextDataText = await page.locator('script#__NEXT_DATA__[type="application/json"]').textContent().catch(() => null);
+    if (nextDataText) {
+      try {
+        travelPageResearch = extractTravelPageResearch(JSON.parse(nextDataText) as unknown);
+      } catch {
+        travelPageResearch = null;
+      }
+    }
+    if (travelPageResearch) {
+      console.log(
+        `   🧭 여행 일정 구조화: ${travelPageResearch.schedules.length}일 · 핵심 방문지 ${travelPageResearch.highlights.length}곳`,
+      );
+    } else {
+      console.log("   ⚠️ 여행상품 구조화 일정 데이터를 찾지 못했습니다.");
+    }
+  }
   
   // 1. 상품명 추출 (여러 방법 시도)
   let productName = sanitizeText(structuredProduct.name);
@@ -4836,7 +4862,10 @@ async function step1_getProductInfo(
   }
   
   // 3. 상품 특징/키워드 추출
-  const features: string[] = Array.from(new Set(structuredProduct.features.map((value) => sanitizeText(value)).filter(Boolean)));
+  const features: string[] = Array.from(new Set([
+    ...structuredProduct.features.map((value) => sanitizeText(value)).filter(Boolean),
+    ...(travelPageResearch ? travelPageResearchFeatures(travelPageResearch) : []),
+  ]));
   const featureEls = await page.$$('[class*="benefit"], [class*="feature"], [class*="spec"] li');
   for (const el of featureEls.slice(0, 5)) {
     const text = await el.textContent();
@@ -4999,6 +5028,7 @@ async function step1_getProductInfo(
     sourceImageUrls: imageUrls,
     finalUrl,
     storeName,
+    travelPageResearch,
   };
 }
 
@@ -5251,6 +5281,9 @@ async function step2_generatePost(
     ? extractTravelProductFacts(product.name, product.description, product.features)
     : null;
   const travelFactsPromptBlock = travelFacts ? formatTravelFactsForPrompt(travelFacts) : "";
+  const travelPageResearchPromptBlock = isTravel && product.travelPageResearch
+    ? formatTravelPageResearchForPrompt(product.travelPageResearch)
+    : "";
   const travelReviewAnalysis = isTravel
     ? buildTravelReviewAnalysis(product)
     : null;
@@ -5264,7 +5297,7 @@ async function step2_generatePost(
     ? formatTravelEditorialPlanForPrompt(travelEditorialPlan)
     : "";
   const editorialPromptBlock = isTravel
-    ? [travelFactsPromptBlock, travelReviewPromptBlock, travelEditorialPromptBlock]
+    ? [travelPageResearchPromptBlock, travelFactsPromptBlock, travelReviewPromptBlock, travelEditorialPromptBlock]
         .filter(Boolean)
         .join("\n\n")
     : productEditorialPromptBlock;
@@ -5278,6 +5311,8 @@ async function step2_generatePost(
           ...(travelFacts?.highlights || []),
           ...(travelFacts?.conditions || []),
           travelFacts?.duration || "",
+          ...(product.travelPageResearch?.highlights.map((item) => item.name) || []),
+          ...(product.travelPageResearch?.schedules.flatMap((item) => item.activities.filter((activity) => activity.length <= 80).slice(0, 4)) || []),
           ...(travelReviewAnalysis?.strengths.flatMap((item) => item.evidence) || []),
           ...(travelReviewAnalysis?.limitations.flatMap((item) => item.evidence) || []),
         ]
@@ -5366,6 +5401,7 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? buildHumanMobileStyleGuide() : "- 친근하고 �
 ${NAVER_SEO_TITLE_RULES}
 ${BLOG_HUMANIZE_MOBILE_STYLE ? `\n${HUMANIZE_RULES}` : ""}
 ${openCrabPromptBlock ? `\n${openCrabPromptBlock}` : ""}
+${travelPageResearchPromptBlock ? `\n${travelPageResearchPromptBlock}` : ""}
 ${travelFactsPromptBlock ? `\n${travelFactsPromptBlock}` : ""}
 ${travelReviewPromptBlock ? `\n${travelReviewPromptBlock}` : ""}
 ${travelEditorialPromptBlock ? `\n${travelEditorialPromptBlock}` : ""}
@@ -5380,21 +5416,23 @@ ${experiencePromptBlock ? `\n${experiencePromptBlock}` : ""}`;
 ${travelEditorialPlan.map((section, index) => `   ${index + 1}) ${section.title}: ${section.purpose}`).join("\n")}
 
    편집 방향:
-   - 먼저 이 상품의 가장 큰 매력과 가장 큰 제약을 함께 판단하고 글의 논지를 정하기
+   - 먼저 이 상품의 일차별 구성과 이동 축을 요약한 뒤 가장 큰 매력과 가장 큰 제약을 함께 판단하기
    - 일정형·장소형·의사결정형 가운데 실제 수집 정보가 가장 풍부한 흐름을 선택하기
    - 여행지 정보는 코스 안의 가치, 이동·시간·체력의 대가, 예약 조건과 연결하기
+   - 원본 일정에 나온 장소만 대상으로 공식 관광청·공공기관 등 신뢰 가능한 출처의 안정적인 여행정보를 조사해 보강하기
+   - 조사한 장소 정보는 백과사전처럼 따로 나열하지 말고, 해당 일차에서 무엇을 보고 왜 묶였는지와 연결하기
    - 장점·아쉬운 점·추천/비추천 여행자는 근거가 있는 만큼 자연스럽게 묶어 설명하기
    - 여행커넥트 레퍼럴 카드는 에디터가 본문 초반과 마지막에 자동 삽입
 
    ⚠️ 사실 기반 원칙 (여행):
-   - 위 "상품 정보"에 없는 일정·가격·포함사항·호텔 등급을 지어내지 마세요.
-   - 방문지 설명은 그 지역에 대해 널리 알려진 사실(대표 명소, 지리, 계절 특성)만 쓰고,
+   - 위 "원본 여행상품 일정 근거"에 없는 일정·가격·포함사항·호텔 등급을 지어내지 마세요.
+   - 방문지 설명은 원본 일정에 나온 장소를 공식 관광청·공공기관 자료로 교차 확인한 안정적 사실만 쓰고,
      영업시간·입장료·최신 행사처럼 변동되는 세부 정보는 단정하지 마세요.
    - 실제 다녀온 것처럼 "다녀왔다", "먹어봤다"라고 단정하지 마세요.
    - "확인하세요·살펴보세요·비교하세요" 같은 안내형 종결은 글 전체 3회를 넘기지 마세요.
    - 동일한 소제목이나 문단을 반복해서 글자 수를 채우지 마세요.`;
   const contentFactsPrompt = isTravel
-    ? `- 여행상품명: ${product.name}\n${travelFactsPromptBlock}\n- 표시 가격: ${product.price || "출발일별 확인 필요"}\n- 상세 URL: ${product.finalUrl || brandLink}`
+    ? `- 여행상품명: ${product.name}\n${travelPageResearchPromptBlock}\n${travelFactsPromptBlock}\n- 표시 가격: ${product.price || "출발일별 확인 필요"}\n- 상세 URL: ${product.finalUrl || brandLink}`
     : `- 상품명: ${product.name}\n- 설명: ${product.description || '(상품 설명 참고)'}\n- 특징: ${product.features.join(', ') || '(상품 특징 참고)'}\n- 가격: ${product.price || '(가격 정보 참고)'}\n${product.originalPrice ? `- 원가: ${product.originalPrice}` : ''}\n${product.discountRate ? `- 할인율: ${product.discountRate}` : ''}\n${product.couponInfo ? `- 쿠폰/혜택: ${product.couponInfo}` : ''}\n${product.deliveryInfo ? `- 배송: ${product.deliveryInfo}` : ''}\n${product.reviewCount ? `- 리뷰: ${product.reviewCount}개` : ''}\n${product.rating ? `- 평점: ${product.rating}점` : ''}`;
 
   const userPrompt = `다음 ${isTravel ? "여행상품의 코스 가치와 장단점을 판단하는 블로그 리뷰" : "제품 자체의 장단점과 적합도를 판단하는 상세 블로그 리뷰"}를 작성해주세요.
@@ -5454,6 +5492,9 @@ ${productEditorialPromptBlock}
 
 6. ${isTravel ? "여행상품 검토 기준" : "할인/특가 정보 활용 (있는 경우만)"}:
 ${isTravel ? `   - 상품명이 아니라 일정표에서 확인된 코스만 확정적으로 표현
+   - 글을 쓰기 전에 일정표를 일차별로 분석하고, 방문지·이동 축·식사·쇼핑·자유시간 유무를 내부 메모로 정리
+   - 가능한 경우 웹 검색을 사용해 일정에 등장한 핵심 장소 3~6곳을 공식 관광청·공공기관 자료로 조사하고, 안정적인 여행정보만 반영
+   - 웹 검색을 사용할 수 없으면 모델 기억으로 최신 운영정보를 만들지 말고 원본 일정 근거 안에서만 작성
    - 여행지의 배경과 대표 볼거리만 소개하지 말고, 이 패키지 안에서 그 장소가 주는 가치와 이동·시간·체력의 대가를 함께 분석
    - 상품 고유 장점과 아쉬운 점을 근거가 있는 만큼 설명하고, 최소 한 가지 제약 또는 미확인 핵심 조건은 명시
    - 여행을 처음 검색하는 독자가 출발 전에 궁금해할 정보(어디에 있는지, 무엇을 보는지, 어떻게 움직이는지, 무엇을 준비하는지)를 본문 앞쪽에 배치

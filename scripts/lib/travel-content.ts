@@ -6,6 +6,23 @@ export interface TravelProductFacts {
   departureConfirmed: boolean;
 }
 
+export interface TravelPageSchedule {
+  day: number;
+  activities: string[];
+  meals: string[];
+  transport: string | null;
+}
+
+export interface TravelPageResearch {
+  source: "naver-package-next-data";
+  durationDays: number | null;
+  destinations: string[];
+  highlights: Array<{ name: string; description: string }>;
+  schedules: TravelPageSchedule[];
+  flights: string[];
+  shopping: string[];
+}
+
 export interface TravelEditorialSection {
   title: string;
   purpose: string;
@@ -65,6 +82,168 @@ function unique(values: string[], limit = 12): string[] {
   return Array.from(new Set(values.map(clean).filter((value) => value.length >= 2))).slice(0, limit);
 }
 
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function text(value: unknown, maxLength = 240): string {
+  if (typeof value !== "string") return "";
+  const normalized = clean(value.replace(/<[^>]+>/gu, " "));
+  if (!normalized || /^https?:\/\//iu.test(normalized)) return "";
+  return normalized.slice(0, maxLength);
+}
+
+function strings(value: unknown, limit = 24): string[] {
+  const result: string[] = [];
+  const visit = (item: unknown) => {
+    if (result.length >= limit) return;
+    if (typeof item === "string") {
+      const normalized = text(item);
+      if (normalized) result.push(normalized);
+      return;
+    }
+    if (Array.isArray(item)) {
+      item.forEach(visit);
+      return;
+    }
+    const itemRecord = record(item);
+    if (!itemRecord) return;
+    if (Array.isArray(itemRecord.contents)) visit(itemRecord.contents);
+    if (Array.isArray(itemRecord.editors)) visit(itemRecord.editors);
+  };
+  visit(value);
+  return unique(result, limit);
+}
+
+function findNaverPackageProduct(root: unknown): Record<string, unknown> | null {
+  const visited = new Set<object>();
+  let found: Record<string, unknown> | null = null;
+  const visit = (value: unknown, depth: number) => {
+    if (found || depth > 14 || !value || typeof value !== "object" || visited.has(value as object)) return;
+    visited.add(value as object);
+    if (Array.isArray(value)) {
+      value.forEach((item) => visit(item, depth + 1));
+      return;
+    }
+    const valueRecord = value as Record<string, unknown>;
+    if (typeof valueRecord.productName === "string" && Array.isArray(valueRecord.schedules)) {
+      found = valueRecord;
+      return;
+    }
+    Object.values(valueRecord).forEach((item) => visit(item, depth + 1));
+  };
+  visit(root, 0);
+  return found;
+}
+
+function formatFlight(value: unknown, direction: "출국" | "귀국"): string {
+  const flight = record(value);
+  if (!flight) return "";
+  const airline = text(flight.airlineName, 40);
+  const flightName = text(flight.flightName, 24);
+  const departure = text(flight.departureCityName, 40);
+  const arrival = text(flight.arrivalCityName, 40);
+  const departureTime = text(flight.departureTime, 10);
+  const arrivalTime = text(flight.arrivalTime, 10);
+  const flightTime = text(flight.flightTime, 16);
+  const route = [departure, arrival].filter(Boolean).join("→");
+  const times = departureTime && arrivalTime ? `${departureTime}→${arrivalTime}` : "";
+  const carrier = [airline, flightName].filter(Boolean).join(" ");
+  return clean([direction, carrier, route, times, flightTime ? `비행 ${flightTime}` : ""].filter(Boolean).join(" · "));
+}
+
+/** 네이버 패키지 페이지의 __NEXT_DATA__에서 일정·항공·식사·쇼핑 근거를 추출한다. */
+export function extractTravelPageResearch(nextData: unknown): TravelPageResearch | null {
+  const product = findNaverPackageProduct(nextData);
+  if (!product) return null;
+
+  const visitAreas = Array.isArray(product.visitAreas) ? product.visitAreas : [];
+  const destinations = unique(visitAreas.flatMap((item) => {
+    const area = record(item);
+    return area ? [text(area.countryName, 40), text(area.cityName, 40)] : [];
+  }), 8);
+
+  const mustSeeTours = record(product.mustSeeTours)?.tours;
+  const highlights = (Array.isArray(mustSeeTours) ? mustSeeTours : []).flatMap((item) => {
+    const tour = record(item);
+    const name = text(tour?.name, 80);
+    if (!name) return [];
+    return [{ name, description: strings(tour?.desc, 2).join(" ").slice(0, 260) }];
+  }).slice(0, 24);
+
+  const schedules = (Array.isArray(product.schedules) ? product.schedules : []).flatMap((item, index) => {
+    const schedule = record(item);
+    if (!schedule) return [];
+    const day = typeof schedule.dayOfSchedule === "number" ? schedule.dayOfSchedule : index + 1;
+    const activities = strings(record(schedule.info)?.editors, 24);
+    const tripPlaces = (Array.isArray(schedule.tripPlaces) ? schedule.tripPlaces : []).flatMap((place) => {
+      const placeRecord = record(place);
+      return placeRecord ? [text(placeRecord.placeName, 80)] : [];
+    });
+    const mealsRecord = record(schedule.meals);
+    const meals = mealsRecord
+      ? unique(["breakfast", "lunch", "dinner"].map((key) => text(mealsRecord[key], 40)).filter((value) => value && value !== "없음"), 3)
+      : [];
+    const transport = text(record(schedule.localTransport)?.name, 40) || null;
+    return [{ day, activities: unique([...tripPlaces, ...activities], 24), meals, transport }];
+  });
+
+  const flightDetail = record(record(product.trafficAir)?.detail);
+  const flights = flightDetail
+    ? [formatFlight(flightDetail.departure, "출국"), formatFlight(flightDetail.return, "귀국")].filter(Boolean)
+    : [];
+  const shoppingDetails = record(product.shopping)?.details;
+  const shopping = (Array.isArray(shoppingDetails) ? shoppingDetails : []).flatMap((item) => {
+    const shop = record(item);
+    if (!shop) return [];
+    const placeName = text(shop.placeName, 100);
+    const takeTime = text(shop.takeTime, 30);
+    return placeName ? [clean([placeName, takeTime].filter(Boolean).join(" · "))] : [];
+  });
+
+  return {
+    source: "naver-package-next-data",
+    durationDays: typeof product.dayPeriod === "number" ? product.dayPeriod : schedules.length || null,
+    destinations,
+    highlights,
+    schedules,
+    flights,
+    shopping,
+  };
+}
+
+export function travelPageResearchFeatures(research: TravelPageResearch): string[] {
+  const highlights = research.highlights.map((item) => item.name);
+  const dayFeatures = research.schedules.map((schedule) => {
+    // 판매페이지의 긴 홍보 문단은 원고에 그대로 복사되지 않도록 제외하고,
+    // 장소명·이동·체험처럼 일정 판단에 필요한 짧은 근거만 전달한다.
+    const activities = schedule.activities.filter((item) => item.length <= 80).slice(0, 10);
+    return `${schedule.day}일차 일정: ${activities.join(" → ")}`;
+  });
+  return [
+    `핵심 방문지: ${highlights.slice(0, 20).join(", ")}`,
+    ...research.flights,
+    ...dayFeatures,
+    research.shopping.length ? `쇼핑 일정: ${research.shopping.join(" / ")}` : "",
+  ].filter(Boolean);
+}
+
+export function formatTravelPageResearchForPrompt(research: TravelPageResearch): string {
+  return [
+    "## 원본 여행상품 일정 근거 v1",
+    "- 아래 내용은 네이버 패키지 원본 페이지의 구조화 데이터에서 수집했습니다. 상품 구성과 일정 판단의 1차 근거로 사용합니다.",
+    `- 여행 기간: ${research.durationDays ? `${research.durationDays}일` : "확인 필요"}`,
+    `- 목적지: ${research.destinations.join(", ") || "확인 필요"}`,
+    `- 항공: ${research.flights.join(" / ") || "확인 필요"}`,
+    `- 핵심 방문지: ${research.highlights.map((item) => item.name).join(", ") || "확인 필요"}`,
+    ...research.schedules.map((schedule) => `- ${schedule.day}일차: ${schedule.activities.filter((item) => item.length <= 80).slice(0, 14).join(" → ") || "이동 일정"}${schedule.meals.length ? ` | 식사 ${schedule.meals.join(", ")}` : ""}${schedule.transport ? ` | 교통 ${schedule.transport}` : ""}`),
+    `- 쇼핑 일정: ${research.shopping.join(" / ") || "별도 표기 없음"}`,
+    "- 상품 판매 문구의 수식어는 사실로 확대하지 말고, 일정에 실제 포함된 장소·이동·식사·쇼핑만 평가합니다.",
+  ].join("\n");
+}
+
 const NON_DESTINATION_TOKEN_PATTERN = /(?:여행|상품|패키지|투어|관광|일정|예약|출발|확정|변경|조건|특가|핫딜|할인|회원|적립|가격|표시가|숙박|호텔|객실|식사|조식|중식|석식|쇼핑|특전|기념품|비누|쿠폰|포함|불포함|교통|항공|직항|시내|자유시간|가이드|인솔자|제공|기준|전용|베스트|추천|리뷰|해외|국내|[가-힣]+몰)$/u;
 
 function looksLikeDestinationToken(token: string): boolean {
@@ -85,6 +264,10 @@ export function extractTravelProductFacts(
   const duration = source.match(/(?:\d+박\s*\d+일|\d+일)/u)?.[0]?.replace(/\s+/g, "") || null;
   const bracketHighlights = Array.from(source.matchAll(/[<〈]([^>〉]+)[>〉]/gu))
     .flatMap((match) => match[1].split(/[\/, +·]/u));
+  const structuredHighlights = features.flatMap((feature) => {
+    const match = clean(feature).match(/^핵심\s*방문지\s*:\s*(.+)$/u);
+    return match ? match[1].split(/[,/·]/u) : [];
+  });
   const conditionMatchers = [
     /(?:출발확정|무조건출발)/gu,
     /(?:노|NO)\s*쇼핑/giu,
@@ -94,7 +277,7 @@ export function extractTravelProductFacts(
   ];
   const conditions = unique(conditionMatchers.flatMap((matcher) => source.match(matcher) || []), 10);
   const highlights = unique(
-    bracketHighlights.filter(
+    [...structuredHighlights, ...bracketHighlights].filter(
       (value) =>
         !/(?:출발확정|무조건출발|여행핫딜|깜짝특가|노\s*쇼핑|no\s*shopping|노\s*옵션|노\s*팁|직항|국적기|인솔자|특가|할인)/iu.test(
           value,
@@ -102,9 +285,10 @@ export function extractTravelProductFacts(
     ),
     12,
   );
-  const destinationSource = source
+  // 세부 일정·항공·쇼핑 문장을 목적지로 오인하지 않도록 상품명만 사용한다.
+  const destinationSource = clean(productName)
     .replace(/\[[^\]]+\]|[<〈][^>〉]+[>〉]/gu, " ")
-    .replace(/(?:출발확정|무조건출발|여행핫딜|깜짝특가|베스트셀러|패키지|일주|직항|\d+박\s*\d+일|\d+일)/gu, " ");
+    .replace(/(?:출발확정|무조건출발|여행핫딜|깜짝특가|베스트셀러|패키지|일주|직항|전일정\s*\d성|\d+박\s*\d+일|\d+일|변경)/gu, " ");
   const destinations = unique(
     destinationSource
       .split(/[\s\/, +·()]+/u)

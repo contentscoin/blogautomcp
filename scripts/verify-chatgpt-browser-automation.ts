@@ -168,7 +168,7 @@ async function main(): Promise<void> {
   assert.match(simpleAgent, /hasChatGptProtectionText/u);
   assert.match(simpleAgent, /하네스 문장을 원고로 복사하는 로컬 폴백은 품질 보호를 위해 차단했습니다/u);
   const chatGptLogin = source("scripts/chatgpt-login.ts");
-  assert.match(chatGptLogin, /composerVisible && hasAuthCookie/u);
+  assert.match(chatGptLogin, /composerVisible && \(hasAuthCookie \|\| !needLogin\)/u);
   assert.match(chatGptLogin, /headless: false/u);
   assert.match(chatGptLogin, /revealChatGptLoginWindow/u);
   assert.match(chatGptLogin, /acquireChatGptProfileLock/u);

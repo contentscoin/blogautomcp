@@ -257,7 +257,8 @@ async function verifyBaseChatGPTSession(page: Page): Promise<void> {
   await waitForComposerOrLoginTimeout(page, Math.min(LOGIN_TIMEOUT_MS, 120000));
 
   const hasToken = await hasSessionTokenCookie(page);
-  if (!hasToken) {
+  const composerVisible = await hasComposer(page);
+  if (!hasToken && !composerVisible) {
     throw new Error(
       "로그인 세션 쿠키가 확인되지 않습니다. 브라우저에서 재로그인 후 다시 시도하세요."
     );
@@ -370,7 +371,9 @@ async function main(): Promise<void> {
         const composerVisible = await hasComposer(page);
         const hasAuthCookie = await hasSessionTokenCookie(page);
 
-        if (composerVisible && hasAuthCookie) {
+        // New ChatGPT sessions may expose the authenticated composer without
+        // exporting the legacy auth-token cookie in storageState.
+        if (composerVisible && (hasAuthCookie || !needLogin)) {
           stableComposerRounds += 1;
           if (stableComposerRounds >= 3) {
             if (CHATGPT_LOGIN_USE_PROBE) {

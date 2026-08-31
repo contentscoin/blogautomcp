@@ -170,6 +170,12 @@ async function executeJob(request: NextRequest, job: Job): Promise<unknown> {
   const kind = input.connectKind === "travel" ? "TRAVEL" : "SHOPPING";
   if (job.type === "BRANDCONNECT_LIST_PRODUCTS") {
     const status = typeof input.status === "string" ? input.status.toUpperCase() : "ALL";
+    if (kind === "TRAVEL") {
+      // 여행커넥트는 DB에 이미 등록된 링크만 조회하면 추천 피드의 대부분이
+      // 사라진다. 로그인 세션의 전체 여행 피드를 읽어 AVAILABLE/등록 상태로
+      // 합쳐 반환해 ChatGPT가 실제 후보 수를 볼 수 있게 한다.
+      return localApi(request, `/api/brandlinks/available?status=${encodeURIComponent(status)}`);
+    }
     const links = await prisma.brandLink.findMany({
       where: { connectKind: kind, ...(status !== "ALL" ? { status } : {}) },
       orderBy: { updatedAt: "desc" },
