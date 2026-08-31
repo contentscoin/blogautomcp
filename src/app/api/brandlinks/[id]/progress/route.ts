@@ -48,6 +48,12 @@ function mapStatusToEvent(
     scheduledPublishAt?: Date | string | null
 ): PublishEvent {
     switch (status) {
+        case "DRAFTING":
+            return {
+                step: "generating",
+                progress: 35,
+                message: "ChatGPT 초안 작성 중...",
+            };
         case "PUBLISHING":
             return {
                 step: "publishing",
@@ -113,6 +119,7 @@ export async function GET(
             try {
                 const startedAt = Date.now();
                 let lastFingerprint = "";
+                let sawDrafting = false;
 
                 while (Date.now() - startedAt < MAX_STREAM_MS) {
                     if (request.signal.aborted) {
@@ -151,6 +158,19 @@ export async function GET(
                             )
                         );
                         lastFingerprint = fingerprint;
+                    }
+
+                    if (link.status === "DRAFTING") {
+                        sawDrafting = true;
+                    }
+
+                    if (sawDrafting && link.status === "READY") {
+                        sendEvent({
+                            step: "complete",
+                            progress: 100,
+                            message: "초안 작성 완료!",
+                        });
+                        break;
                     }
 
                     if (link.status === "PUBLISHED" || link.status === "SCHEDULED" || link.status === "FAILED") {

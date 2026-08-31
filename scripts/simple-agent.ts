@@ -112,6 +112,11 @@ import {
 } from "./lib/chatgpt-browser-errors";
 import { acquireChatGptProfileLock } from "./lib/chatgpt-profile-lock";
 import {
+  createChatGptReplyProgress,
+  isChatGptReplyTextStalled,
+  recordChatGptReplyText,
+} from "./lib/chatgpt-reply-progress";
+import {
   parseProductThumbnailSettings,
   productThumbnailSettingKey,
 } from "./lib/product-thumbnail-settings";
@@ -2357,7 +2362,7 @@ async function hasInaccessibleGptBanner(page: Page): Promise<boolean> {
   );
 }
 
-async function startNewChatIfAvailable(page: Page): Promise<void> {
+async function startNewChatIfAvailable(page: Page): Promise<boolean> {
   const candidates = [
     page.getByRole("button", { name: /new chat/i }).first(),
     page.getByRole("button", { name: /새 대화/i }).first(),
@@ -2369,10 +2374,29 @@ async function startNewChatIfAvailable(page: Page): Promise<void> {
   for (const candidate of candidates) {
     const visible = await candidate.isVisible().catch(() => false);
     if (!visible) continue;
-    await candidate.click({ timeout: 3000 }).catch(() => {});
+    const clicked = await candidate.click({ timeout: 3000 }).then(() => true).catch(() => false);
+    if (!clicked) continue;
     await page.waitForTimeout(1200);
-    return;
+    return true;
   }
+  return false;
+}
+
+async function ensureFreshChatGPTConversation(page: Page, label: string): Promise<void> {
+  const beforeUrl = page.url();
+  const beforeMessages = await readAssistantMessages(page);
+  const clicked = await startNewChatIfAvailable(page);
+  if (clicked) {
+    await waitForChatGPTComposer(page, CHATGPT_TIMEOUT_MS);
+    const afterMessages = await readAssistantMessages(page);
+    if (page.url() !== beforeUrl || afterMessages.length < beforeMessages.length || afterMessages.length === 0) {
+      return;
+    }
+  }
+
+  console.log(`      - ${label} 새 대화 전환을 확인하지 못해 기본 ChatGPT 화면을 다시 엽니다.`);
+  await openChatGPTTarget(page, CHATGPT_BASE_URL, `${label} 새 대화 복구`);
+  await waitForChatGPTComposer(page, CHATGPT_TIMEOUT_MS);
 }
 
 async function dismissTemporaryChatOnboarding(page: Page): Promise<void> {
@@ -2949,6 +2973,50 @@ async function isChatGPTGenerating(page: Page): Promise<boolean> {
   return false;
 }
 
+const CHATGPT_RESPONSE_STALLED_CODE = "CHATGPT_RESPONSE_STALLED";
+
+function isChatGptReplyStalledError(error: unknown): boolean {
+  return getErrorMessage(error).includes(CHATGPT_RESPONSE_STALLED_CODE);
+}
+
+async function stopChatGPTGeneration(page: Page): Promise<boolean> {
+  for (const selector of CHATGPT_STOP_BUTTON_SELECTORS) {
+    const button = page.locator(selector).first();
+    if (!(await button.isVisible().catch(() => false))) continue;
+    const clicked = await button.click().then(() => true).catch(() => false);
+    if (clicked) {
+      await page.waitForTimeout(1200);
+      return true;
+    }
+  }
+  return false;
+}
+
+async function recoverStoppedChatGPTReply(
+  page: Page,
+  previousCount: number,
+  baselineLastText: string,
+  label: string,
+): Promise<string | null> {
+  let idleConfirmed = !(await isChatGPTGenerating(page));
+  if (await isChatGPTGenerating(page)) {
+    console.log(`      - ${label} 텍스트 진행 정지 감지, 생성 중단 후 응답을 회수합니다.`);
+    const stopped = await stopChatGPTGeneration(page);
+    if (!stopped) return null;
+    idleConfirmed = await waitForChatGPTGenerationIdle(page, 15_000, `${label} 복구`)
+      .then(() => true)
+      .catch(() => false);
+  }
+  if (!idleConfirmed || await isChatGPTGenerating(page)) return null;
+
+  const messages = await readAssistantMessages(page);
+  const candidate = messages[messages.length - 1] ?? "";
+  const hasAdvancedReply =
+    messages.length > previousCount ||
+    (messages.length > 0 && candidate.length > 0 && candidate !== baselineLastText);
+  return hasAdvancedReply && candidate.length > 0 ? candidate : null;
+}
+
 async function waitForChatGPTAssistantReply(
   page: Page,
   previousMessages: string[],
@@ -2959,9 +3027,8 @@ async function waitForChatGPTAssistantReply(
   const previousCount = previousMessages.length;
   const baselineLastText = previousMessages[previousMessages.length - 1] ?? "";
   const start = Date.now();
-  let lastActivityAt = start;
+  let replyProgress = createChatGptReplyProgress(start);
   let lastText = "";
-  let lastLength = 0;
   let stableRounds = 0;
   let lastProgressLogAt = start;
 
@@ -2976,9 +3043,6 @@ async function waitForChatGPTAssistantReply(
     }
 
     const generating = await isChatGPTGenerating(page);
-    if (generating) {
-      lastActivityAt = Date.now();
-    }
 
     const messages = await readAssistantMessages(page);
     const latestText = messages[messages.length - 1] ?? "";
@@ -2989,26 +3053,33 @@ async function waitForChatGPTAssistantReply(
     if (hasAdvancedReply) {
       const candidate = messages[messages.length - 1];
 
-      if (candidate.length !== lastLength || candidate !== lastText) {
-        lastActivityAt = Date.now();
-      }
-
       if (candidate === lastText) {
         stableRounds += 1;
       } else {
         lastText = candidate;
-        lastLength = candidate.length;
         stableRounds = 0;
       }
+
+      replyProgress = recordChatGptReplyText(replyProgress, candidate, Date.now()).progress;
 
       if (!generating && stableRounds >= 2 && candidate.length > 0) {
         return candidate;
       }
     }
 
-    const idleDuration = Date.now() - lastActivityAt;
-    if (!generating && idleDuration > idleTimeoutMs) {
-      break;
+    if (isChatGptReplyTextStalled(replyProgress, Date.now(), idleTimeoutMs)) {
+      const recovered = await recoverStoppedChatGPTReply(
+        page,
+        previousCount,
+        baselineLastText,
+        label,
+      );
+      if (recovered) return recovered;
+      throw new Error(
+        `${CHATGPT_RESPONSE_STALLED_CODE}: ${label} 응답이 ${Math.round(
+          idleTimeoutMs / 1000,
+        )}초 동안 실제 텍스트 진행이 없어 중단되었습니다.`,
+      );
     }
 
     if (Date.now() - lastProgressLogAt >= 15_000) {
@@ -3021,10 +3092,17 @@ async function waitForChatGPTAssistantReply(
     await page.waitForTimeout(1200);
   }
 
+  const recovered = await recoverStoppedChatGPTReply(
+    page,
+    previousCount,
+    baselineLastText,
+    label,
+  );
+  if (recovered) return recovered;
   throw new Error(
-    `${label} 응답 대기 시간이 초과되었습니다. ${Math.round(
-      idleTimeoutMs / 1000
-    )}초 동안 진행 신호가 없어 중단했습니다.`
+    `${CHATGPT_RESPONSE_STALLED_CODE}: ${label} 전체 응답 대기 제한 ${Math.round(
+      maxTimeoutMs / 1000,
+    )}초를 초과했습니다.`,
   );
 }
 
@@ -3343,11 +3421,35 @@ async function runDirectChatGPTGeneration(
   if (CHATGPT_ATTACH_IMAGES_TO_DRAFT && imagePaths.length > 0) {
     await attachImagesToChatGPT(page, imagePaths, `${label} 상세 근거`);
   }
-  let reply = await sendPromptToChatGPT(page, prompt, {
-    label: `${label} 최종`,
-    idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, 180_000),
-    maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, 420_000),
-  });
+  let reply: string;
+  try {
+    reply = await sendPromptToChatGPT(page, prompt, {
+      label: `${label} 최종`,
+      idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, 180_000),
+      maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, 420_000),
+    });
+  } catch (error) {
+    if (!isChatGptReplyStalledError(error)) throw error;
+    console.log(`      - ${label} 응답 정지로 새 대화에서 1회 자동 재시도합니다.`);
+    await ensureFreshChatGPTConversation(page, label);
+    if (CHATGPT_ATTACH_IMAGES_TO_DRAFT && imagePaths.length > 0) {
+      await attachImagesToChatGPT(page, imagePaths, `${label} 재시도 상세 근거`);
+    }
+    reply = await sendPromptToChatGPT(
+      page,
+      [
+        "이전 자동작성 응답이 멈춰 재시도합니다.",
+        "추가 설명 없이 요청한 최종 JSON을 한 번에 완성해주세요.",
+        "",
+        prompt,
+      ].join("\n"),
+      {
+        label: `${label} 자동 재시도`,
+        idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, 150_000),
+        maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, 300_000),
+      },
+    );
+  }
 
   if (getStructuredSectionCount(parseJsonObjectFromText(reply)) >= requiredSections) {
     return reply;

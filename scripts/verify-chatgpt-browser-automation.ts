@@ -18,12 +18,30 @@ import {
   hasChatGptProtectionText,
 } from "./lib/chatgpt-browser-errors";
 import { acquireChatGptProfileLock } from "./lib/chatgpt-profile-lock";
+import {
+  createChatGptReplyProgress,
+  isChatGptReplyTextStalled,
+  recordChatGptReplyText,
+} from "./lib/chatgpt-reply-progress";
 
 function source(relativePath: string): string {
   return fs.readFileSync(path.join(process.cwd(), relativePath), "utf8");
 }
 
 async function main(): Promise<void> {
+  const started = createChatGptReplyProgress(1_000);
+  assert.equal(isChatGptReplyTextStalled(started, 180_999, 180_000), false);
+  assert.equal(isChatGptReplyTextStalled(started, 181_000, 180_000), true);
+  const unchanged = recordChatGptReplyText(started, "", 50_000);
+  assert.equal(unchanged.changed, false);
+  assert.equal(unchanged.progress.lastTextChangedAt, 1_000);
+  const advanced = recordChatGptReplyText(started, "{\"title\":", 50_000);
+  assert.equal(advanced.changed, true);
+  assert.equal(advanced.progress.lastTextChangedAt, 50_000);
+  const sameText = recordChatGptReplyText(advanced.progress, "{\"title\":", 90_000);
+  assert.equal(sameText.changed, false);
+  assert.equal(sameText.progress.lastTextChangedAt, 50_000);
+
   assert.equal(isChatGptBrowserAutomationEnabled({}), true);
   assert.equal(
     isChatGptBrowserAutomationEnabled({ CHATGPT_BROWSER_AUTOMATION_ENABLED: "false" }),
@@ -152,6 +170,17 @@ async function main(): Promise<void> {
   assert.match(draftRoute, /CHATGPT_BROWSER_FALLBACK_REQUIRED/u);
   assert.match(draftRoute, /isChatGptBrowserAuthenticationError/u);
   assert.match(draftRoute, /buildChatGptBrowserAutomationEnv\(useBrowserChatGpt\)/u);
+  assert.match(draftRoute, /status: "DRAFTING"/u);
+  assert.match(draftRoute, /status: "FAILED", errorMessage: message/u);
+  assert.match(draftRoute, /updateMany\(\{[\s\S]*?where: \{ id, status: link\.status \}/u);
+
+  const publishRoute = source("src/app/api/brandlinks/[id]/publish/route.ts");
+  assert.match(publishRoute, /link\.status === "DRAFTING"/u);
+  assert.match(publishRoute, /where: \{ id, status: link\.status \}/u);
+
+  const brandLinkRoute = source("src/app/api/brandlinks/[id]/route.ts");
+  assert.match(brandLinkRoute, /existing\.status === "DRAFTING"/u);
+  assert.match(brandLinkRoute, /notIn: \["DRAFTING", "PUBLISHING"\]/u);
 
   const dashboard = source("src/app/page.tsx");
   assert.match(dashboard, /1\. ChatGPT 자동작성/u);
@@ -167,6 +196,16 @@ async function main(): Promise<void> {
   assert.match(simpleAgent, /acquireChatGptProfileLock/u);
   assert.match(simpleAgent, /hasChatGptProtectionText/u);
   assert.match(simpleAgent, /하네스 문장을 원고로 복사하는 로컬 폴백은 품질 보호를 위해 차단했습니다/u);
+  assert.match(simpleAgent, /CHATGPT_RESPONSE_STALLED/u);
+  assert.match(simpleAgent, /텍스트 진행 정지 감지/u);
+  assert.match(simpleAgent, /새 대화에서 1회 자동 재시도/u);
+  assert.match(simpleAgent, /ensureFreshChatGPTConversation/u);
+  assert.match(simpleAgent, /if \(!idleConfirmed \|\| await isChatGPTGenerating\(page\)\) return null/u);
+  assert.equal(simpleAgent.includes("if (generating) {\n      lastActivityAt = Date.now();"), false);
+
+  const electronMain = source("scripts/electron/main.cjs");
+  assert.match(electronMain, /recoverInterruptedDrafts/u);
+  assert.match(electronMain, /where: \{ status: "DRAFTING" \}/u);
   const chatGptLogin = source("scripts/chatgpt-login.ts");
   assert.match(chatGptLogin, /composerVisible && \(hasAuthCookie \|\| !needLogin\)/u);
   assert.match(chatGptLogin, /headless: false/u);

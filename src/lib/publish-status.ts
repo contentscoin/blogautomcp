@@ -24,6 +24,7 @@ export type PostStatus = (typeof POST_STATUSES)[number];
 /** BrandLink.status / TopicPostTask.status (UI 발행 경로 공통). */
 export const CONTENT_PUBLISH_STATUSES = [
   "READY",
+  "DRAFTING",
   "PUBLISHING",
   "SCHEDULED",
   "PUBLISHED",

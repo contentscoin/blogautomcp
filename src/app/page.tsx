@@ -990,7 +990,7 @@ export default function Dashboard() {
             tone: "info",
             text: payload?.code === "CHATGPT_MCP_DRAFT_REQUIRED"
               ? "상품별 요청문이 준비됐습니다. 복사한 뒤 ChatGPT에서 이어서 작성하세요."
-              : "웹 자동작성을 완료하지 못해 안전한 ChatGPT 요청문 방식으로 전환했습니다.",
+              : "웹 자동작성을 완료하지 못했습니다. 상품별 요청문으로 ChatGPT에서 이어서 작성할 수 있습니다.",
           });
           return;
         }
@@ -1648,6 +1648,7 @@ export default function Dashboard() {
       case "POLISHING": return "bg-purple-100 text-purple-800";
       case "IMAGE_READY": return "bg-amber-100 text-amber-800";
       case "PREPARED": return "bg-emerald-100 text-emerald-800";
+      case "DRAFTING": return "bg-violet-100 text-violet-800";
       case "PUBLISHING": return "bg-yellow-100 text-yellow-800";
       case "SCHEDULED": return "bg-indigo-100 text-indigo-800";
       case "PUBLISHED": return "bg-green-100 text-green-800";
@@ -1665,6 +1666,7 @@ export default function Dashboard() {
       case "POLISHING": return "윤문중";
       case "IMAGE_READY": return "이미지 확보";
       case "PREPARED": return "준비완료";
+      case "DRAFTING": return "초안 작성중";
       case "PUBLISHING": return "발행중";
       case "SCHEDULED": return "예약완료";
       case "PUBLISHED": return "발행완료";
@@ -2854,7 +2856,7 @@ export default function Dashboard() {
                               </button>
                               <button
                                 onClick={() => void handleOpenOrPrepareBrandDraft(link)}
-                                disabled={draftCreationMode === "checking" || draftGeneratingId === link.id || Boolean(publishingId)}
+                                disabled={draftCreationMode === "checking" || draftGeneratingId === link.id || link.status === "DRAFTING" || Boolean(publishingId)}
                                 className="rounded-lg bg-violet-600 px-3 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:opacity-50 transition-colors"
                                 title={draftCreationMode === "chatgpt"
                                   ? "상품별 요청문을 복사해 연결된 ChatGPT에서 초안을 만듭니다"
@@ -2862,7 +2864,7 @@ export default function Dashboard() {
                                     ? "로그인된 ChatGPT 웹에서 초안을 자동 작성하고 미리보기를 엽니다"
                                     : "글·이미지를 먼저 만들고 확인한 뒤 같은 결과를 발행합니다"}
                               >
-                                {draftGeneratingId === link.id
+                                {draftGeneratingId === link.id || link.status === "DRAFTING"
                                   ? "글 준비 중..."
                                   : draftCreationMode === "checking"
                                     ? "1. 작성 방식 확인 중"
@@ -2974,7 +2976,7 @@ export default function Dashboard() {
 
               {chatGptDraftHandoffReason ? (
                 <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900">
-                  <strong className="block text-xs font-black uppercase tracking-wide text-amber-700">자동작성 전환 안내</strong>
+                  <strong className="block text-xs font-black uppercase tracking-wide text-amber-700">웹 자동작성 실패 안내</strong>
                   {chatGptDraftHandoffReason}
                 </div>
               ) : null}

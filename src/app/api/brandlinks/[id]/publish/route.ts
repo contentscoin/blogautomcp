@@ -194,6 +194,13 @@ export async function POST(
       }
     }
 
+    if (link.status === "DRAFTING") {
+      return NextResponse.json(
+        { success: false, error: "현재 초안을 작성 중입니다. 완료 후 발행해 주세요." },
+        { status: 409 }
+      );
+    }
+
     if (link.status === "PUBLISHING") {
       return NextResponse.json(
         { success: false, error: "이미 발행이 진행 중입니다." },
@@ -231,8 +238,8 @@ export async function POST(
     }
 
     // 상태를 발행중으로 변경
-    await prisma.brandLink.update({
-      where: { id },
+    const publishClaim = await prisma.brandLink.updateMany({
+      where: { id, status: link.status },
       data: { 
         status: "PUBLISHING",
         errorMessage: null,
@@ -241,6 +248,12 @@ export async function POST(
           : {}),
       },
     });
+    if (publishClaim.count !== 1) {
+      return NextResponse.json(
+        { success: false, error: "상품 상태가 변경되어 발행을 시작하지 못했습니다. 목록을 새로고침해 주세요." },
+        { status: 409 },
+      );
+    }
     statusUpdated = true;
 
     // 발행 스크립트 실행 (백그라운드) - 단순 에이전트 사용

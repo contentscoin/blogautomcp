@@ -157,6 +157,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   });
   if (!link) return NextResponse.json({ success: false, error: "상품을 찾을 수 없습니다." }, { status: 404 });
   if (link.status === "PUBLISHING") return NextResponse.json({ success: false, error: "현재 발행 중인 상품입니다." }, { status: 409 });
+  if (link.status === "DRAFTING") return NextResponse.json({ success: false, error: "현재 초안을 작성 중인 상품입니다." }, { status: 409 });
   const connectKind = link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING";
   const provider = (process.env.AI_PROVIDER || "openai").toLowerCase();
   const hasProviderKey = provider === "gemini"
@@ -226,6 +227,18 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           ? "chatgpt-browser-draft"
           : "api-draft",
   );
+  const draftClaim = await prisma.brandLink.updateMany({
+    where: { id, status: link.status },
+    data: { status: "DRAFTING", errorMessage: null },
+  });
+  if (draftClaim.count !== 1) {
+    finishDraftActivity();
+    fs.closeSync(logFd);
+    return NextResponse.json({
+      success: false,
+      error: "상품 상태가 변경되어 초안 작성을 시작하지 못했습니다. 목록을 새로고침해 주세요.",
+    }, { status: 409 });
+  }
   try {
     if (action === "prepare_context") {
       fs.rmSync(contextPath, { force: true });
@@ -295,9 +308,17 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         failure || `초안 매니페스트가 생성되지 않았습니다: ${getBrandPostPackageManifestPath(id)}`
       );
     }
+    await prisma.brandLink.update({
+      where: { id },
+      data: { status: "READY", errorMessage: null },
+    });
     return NextResponse.json({ success: true, data: packagePreview(manifest), logPath });
   } catch (error) {
     const message = error instanceof Error ? error.message : "고품질 초안 생성 실패";
+    await prisma.brandLink.update({
+      where: { id },
+      data: { status: "FAILED", errorMessage: message },
+    }).catch(() => undefined);
     if (useBrowserChatGpt) {
       const authenticationRequired = isChatGptBrowserAuthenticationError(message);
       return NextResponse.json({

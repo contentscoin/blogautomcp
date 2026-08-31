@@ -19,6 +19,7 @@ const STATUS_PRIORITY: Record<string, number> = {
   PUBLISHED: 60,
   SCHEDULED: 50,
   PUBLISHING: 40,
+  DRAFTING: 35,
   READY: 30,
   FAILED: 10,
 };
@@ -61,6 +62,8 @@ function statusMeaning(status: string): string {
       return "초안 생성 또는 재생성을 시작할 수 있습니다.";
     case "PUBLISHING":
       return "현재 발행 작업 중이라 새 초안 생성을 기다려야 합니다.";
+    case "DRAFTING":
+      return "현재 ChatGPT에서 초안을 작성하고 있습니다.";
     case "SCHEDULED":
       return "예약 발행이 설정된 상품입니다.";
     case "PUBLISHED":

@@ -23,6 +23,7 @@ let mainWindow = null;
 let tray = null;
 let isQuitting = false;
 let desktopUpdater = null;
+let interruptedDraftsRecovered = false;
 
 function resolveProjectRoot() {
   if (app.isPackaged) {
@@ -135,6 +136,28 @@ async function ensureLocalDatabase(projectRoot) {
   });
 }
 
+async function recoverInterruptedDrafts(projectRoot) {
+  if (interruptedDraftsRecovered) return;
+  interruptedDraftsRecovered = true;
+
+  const { PrismaClient } = require(path.join(projectRoot, "src", "generated", "prisma"));
+  const prisma = new PrismaClient();
+  try {
+    const recovered = await prisma.brandLink.updateMany({
+      where: { status: "DRAFTING" },
+      data: {
+        status: "FAILED",
+        errorMessage: "이전 앱 실행 중 초안 작성이 중단되었습니다. 다시 시도해 주세요.",
+      },
+    });
+    if (recovered.count > 0) {
+      console.warn(`[startup] interrupted drafts recovered: ${recovered.count}`);
+    }
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
 function isPortOpen(port) {
   return new Promise((resolve) => {
     const socket = net.createConnection({ port, host: APP_HOST });
@@ -168,6 +191,7 @@ async function ensureServerReady() {
     const nextDir = resolveProjectRoot();
     configureRuntimePaths(nextDir);
     await ensureLocalDatabase(nextDir);
+    await recoverInterruptedDrafts(nextDir);
 
     nextAppInstance = next({
       dev: !app.isPackaged,

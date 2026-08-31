@@ -31,7 +31,7 @@ export async function GET(request: NextRequest) {
   if (authError) return authError;
 
   const status = (request.nextUrl.searchParams.get("status") || "all").trim().toUpperCase();
-  if (!["ALL", "READY", "PUBLISHED", "SCHEDULED", "PUBLISHING", "FAILED"].includes(status)) {
+  if (!["ALL", "READY", "PUBLISHED", "SCHEDULED", "DRAFTING", "PUBLISHING", "FAILED"].includes(status)) {
     return NextResponse.json({ success: false, error: "지원하지 않는 상품 상태입니다." }, { status: 400 });
   }
 
@@ -60,7 +60,7 @@ export async function GET(request: NextRequest) {
           storeName: item.storeName,
           price: item.price,
           status: itemStatus,
-          statusMeaning: row ? (itemStatus === "FAILED" ? "이전 작업이 실패한 기록입니다. 다시 초안을 만들 수 있습니다." : "로컬 작업 목록에 등록된 상품입니다.") : "여행커넥트에서 확인된 상품입니다. 초안 작업 전 로컬 목록으로 동기화하세요.",
+          statusMeaning: row ? (itemStatus === "FAILED" ? "이전 작업이 실패한 기록입니다. 다시 초안을 만들 수 있습니다." : itemStatus === "DRAFTING" ? "현재 ChatGPT에서 초안을 작성하고 있습니다." : "로컬 작업 목록에 등록된 상품입니다.") : "여행커넥트에서 확인된 상품입니다. 초안 작업 전 로컬 목록으로 동기화하세요.",
           canCreateDraft: Boolean(row && (itemStatus === "READY" || itemStatus === "FAILED")),
           registered: Boolean(row),
           url: row?.url || item.linkUrl,
