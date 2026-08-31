@@ -26,6 +26,9 @@ const travelPoints = [
 export default async function Home() {
   const user = await getChatGPTUser();
   const actionHref = user ? '/dashboard' : chatGPTSignInPath('/dashboard');
+  const downloadHref = user
+    ? '/api/download/windows'
+    : chatGPTSignInPath('/api/download/windows');
 
   return (
     <main className="landing-shell product-landing">
@@ -33,6 +36,7 @@ export default async function Home() {
         <Link className="brand" href="/" aria-label="BlogAutoMCP 홈"><span className="brand-mark">B</span><span>BlogAutoMCP</span></Link>
         <div className="nav-actions">
           <span className="nav-note">쇼핑·여행 포스팅 자동화</span>
+          <a className="button button-small button-primary" href={downloadHref}>Windows 앱 다운로드</a>
           <Link className="button button-small button-ghost" href={actionHref}>{user ? '내 대시보드' : 'ChatGPT로 로그인'}</Link>
         </div>
       </nav>
@@ -45,6 +49,7 @@ export default async function Home() {
           <p className="lp-hero-lead">쇼핑커넥트와 여행커넥트 상품을 불러오고, ChatGPT와 대화해 고품질 초안·이미지·썸네일을 만든 뒤 내 네이버 블로그에 발행하세요.</p>
           <div className="hero-actions">
             <Link className="button button-primary" href={actionHref}>{user ? '내 자동화 열기' : 'ChatGPT로 시작하기'} <span aria-hidden="true">↗</span></Link>
+            <a className="button button-ghost" href={downloadHref}><span aria-hidden="true">↓</span> Windows 앱 다운로드</a>
             <a className="text-link" href="#possibilities">무엇을 할 수 있나요? ↓</a>
           </div>
           <div className="lp-trust"><span><i /> 네이버 로그인은 내 PC에만 저장</span><span><i /> 관리자 승인 사용자만 이용</span></div>
