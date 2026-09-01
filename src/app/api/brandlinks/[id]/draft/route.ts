@@ -116,7 +116,12 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     return NextResponse.json({ success: false, error: "지원하지 않는 초안 작업입니다." }, { status: 400 });
   }
   try {
-    return NextResponse.json({ success: true, data: packagePreview(approveBrandPostPackage(id)) });
+    const manifest = approveBrandPostPackage(id);
+    await prisma.brandLink.updateMany({
+      where: { id, status: { in: ["READY", "FAILED"] } },
+      data: { status: "READY", errorMessage: null },
+    });
+    return NextResponse.json({ success: true, data: packagePreview(manifest) });
   } catch (error) {
     return NextResponse.json({ success: false, error: error instanceof Error ? error.message : "초안 승인 실패" }, { status: 400 });
   }
@@ -136,6 +141,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     memo?: string;
     draft?: unknown;
     forceQualityRepair?: boolean;
+    autoApprove?: boolean;
   };
   const action: DraftAction | null =
     body.action === "prepare_context" || body.action === "submit_generated"
@@ -331,11 +337,26 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         failure || `초안 매니페스트가 생성되지 않았습니다: ${getBrandPostPackageManifestPath(id)}`
       );
     }
+    let finalizedManifest = manifest;
+    let approvalWarning: string | null = null;
+    if (body.autoApprove === true) {
+      try {
+        finalizedManifest = approveBrandPostPackage(id);
+      } catch (error) {
+        approvalWarning = error instanceof Error ? error.message : "자동 승인에 실패했습니다.";
+      }
+    }
     await prisma.brandLink.update({
       where: { id },
       data: { status: "READY", errorMessage: null },
     });
-    return NextResponse.json({ success: true, data: packagePreview(manifest), logPath });
+    return NextResponse.json({
+      success: true,
+      data: packagePreview(finalizedManifest),
+      autoApproved: Boolean(finalizedManifest.approvedAt),
+      approvalWarning,
+      logPath,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "고품질 초안 생성 실패";
     await prisma.brandLink.update({

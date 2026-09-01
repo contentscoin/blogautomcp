@@ -29,6 +29,10 @@ interface BrandLink {
   scheduledPublishAt: string | null;
   createdAt: string;
   connectKind?: "SHOPPING" | "TRAVEL";
+  draftPrepared?: boolean;
+  draftApproved?: boolean;
+  draftTitle?: string | null;
+  draftPreparedAt?: string | null;
 }
 
 interface BrandPostDraftPreview {
@@ -239,6 +243,8 @@ interface BulkActionResponse {
     synchronizedCount?: number;
     importedCount?: number;
     totalCount?: number;
+    jobId?: string;
+    targetIds?: string[];
   };
 }
 
@@ -298,6 +304,7 @@ const SEASONAL_REGISTER_COUNT_50 = 50;
 const SUPER_PUBLISH_COLLECT_COUNT = 200;
 const SUPER_PUBLISH_DAILY_QUOTA = 50;
 const MAX_BULK_SCHEDULE_LIMIT = 200;
+const MAX_BULK_DRAFT_PREPARE_LIMIT = 50;
 const MAX_TODAY_PUBLISH_LIMIT = 100;
 
 function getFirstImageUrl(imageUrls: string | null): string | null {
@@ -431,6 +438,8 @@ export default function Dashboard() {
   const [stoppingPosting, setStoppingPosting] = useState(false);
   const [bulkSeasonalRunning, setBulkSeasonalRunning] = useState(false);
   const [bulkScheduleRunning, setBulkScheduleRunning] = useState(false);
+  const [bulkDraftPreparing, setBulkDraftPreparing] = useState(false);
+  const [bulkDraftProgress, setBulkDraftProgress] = useState({ completed: 0, total: 0 });
   const [bulkTodayRunning, setBulkTodayRunning] = useState(false);
   const [superPublishingRunning, setSuperPublishingRunning] = useState(false);
   const [brandConnectCategoryUrl, setBrandConnectCategoryUrl] = useState("");
@@ -491,6 +500,7 @@ export default function Dashboard() {
     if (topicPublishingId) return "현재 주제글 발행 작업이 진행 중입니다. 완료 후 다시 시도하세요.";
     if (bulkSeasonalRunning) return "시즌·히트·인기 상품 등록 작업이 이미 실행 중입니다.";
     if (bulkScheduleRunning) return "예약발행 일괄 실행 작업이 이미 실행 중입니다.";
+    if (bulkDraftPreparing) return "소재 미리 작성 작업이 이미 실행 중입니다.";
     if (bulkTodayRunning) return "바로 일괄발행 작업이 이미 실행 중입니다.";
     if (superPublishingRunning) return "수퍼 퍼블리싱 작업이 이미 실행 중입니다.";
     if (topicBulkScheduleRunning) return "주제글 예약배포 일괄 실행 작업이 이미 실행 중입니다.";
@@ -500,6 +510,7 @@ export default function Dashboard() {
     topicPublishingId,
     bulkSeasonalRunning,
     bulkScheduleRunning,
+    bulkDraftPreparing,
     bulkTodayRunning,
     superPublishingRunning,
     topicBulkScheduleRunning,
@@ -542,9 +553,9 @@ export default function Dashboard() {
     setTravelContractMessage(null);
   };
 
-  const fetchLinks = useCallback(async () => {
+  const fetchLinks = useCallback(async (options?: { silent?: boolean }) => {
     try {
-      setLoading(true);
+      if (!options?.silent) setLoading(true);
       const res = await fetch("/api/brandlinks", { cache: "no-store" });
       const data = await res.json();
       if (data.success) {
@@ -553,7 +564,7 @@ export default function Dashboard() {
     } catch (error) {
       console.error("링크 조회 실패:", error);
     } finally {
-      setLoading(false);
+      if (!options?.silent) setLoading(false);
     }
   }, []);
 
@@ -915,8 +926,14 @@ export default function Dashboard() {
   };
   const handlePrepareBrandDraft = async (
     link: BrandLink,
-    options?: { forceQualityRepair?: boolean; returnTab?: "post" | "images" | "thumbnail" | "quality" },
-  ) => {
+    options?: {
+      forceQualityRepair?: boolean;
+      returnTab?: "post" | "images" | "thumbnail" | "quality";
+      autoApprove?: boolean;
+      silentPreview?: boolean;
+    },
+  ): Promise<boolean> => {
+    let completed = false;
     setDraftGeneratingId(link.id);
     setChatGptDraftHandoff(null);
     setChatGptDraftHandoffReason(null);
@@ -971,6 +988,7 @@ export default function Dashboard() {
             qualityPreset: "premium",
             experienceMode: "ai_assisted_information",
             forceQualityRepair: options?.forceQualityRepair === true,
+            autoApprove: options?.autoApprove === true,
           }),
         });
         const payload = await response.json();
@@ -1025,8 +1043,14 @@ export default function Dashboard() {
           return;
         }
         if (!response.ok || !payload.success) throw new Error(payload.error || "초안 생성 실패");
-        setDraftPreview(payload.data as BrandPostDraftPreview);
-        setDraftPreviewTab(options?.returnTab || "post");
+        if (!options?.silentPreview) {
+          setDraftPreview(payload.data as BrandPostDraftPreview);
+          setDraftPreviewTab(options?.returnTab || "post");
+        }
+        if (options?.autoApprove && payload.autoApproved !== true) {
+          throw new Error(payload.approvalWarning || "소재는 작성됐지만 품질검사를 통과하지 못해 자동 승인되지 않았습니다.");
+        }
+        completed = true;
         setDashboardNotice({
           tone: "success",
           text: options?.forceQualityRepair
@@ -1041,6 +1065,7 @@ export default function Dashboard() {
     } finally {
       setDraftGeneratingId(null);
     }
+    return completed;
   };
 
   const handleCopyChatGptDraftPrompt = async () => {
@@ -1075,6 +1100,71 @@ export default function Dashboard() {
       // 저장된 패키지가 없거나 읽지 못하면 새로 만든다.
     }
     await handlePrepareBrandDraft(link);
+  };
+
+  const handleBulkPrepareBrandDrafts = async () => {
+    const busyMessage = getBusyMessage();
+    if (busyMessage) {
+      setDashboardNotice({ tone: "info", text: busyMessage });
+      return;
+    }
+    const candidates = links
+      .filter((link) =>
+        isBrandLinkForKind(link, brandConnectKind) &&
+        ["READY", "FAILED"].includes(link.status) &&
+        !link.draftApproved
+      )
+      .slice(0, MAX_BULK_DRAFT_PREPARE_LIMIT);
+    if (candidates.length === 0) {
+      setDashboardNotice({ tone: "info", text: "미리 작성할 상품이 없습니다. 현재 목록은 모두 발행 준비가 끝났습니다." });
+      return;
+    }
+
+    setBulkDraftPreparing(true);
+    setBulkDraftProgress({ completed: 0, total: candidates.length });
+    let approvedCount = 0;
+    let failedCount = 0;
+    try {
+      for (let index = 0; index < candidates.length; index += 1) {
+        const link = candidates[index];
+        setDashboardNotice({
+          tone: "info",
+          text: `소재 미리 작성 ${index + 1}/${candidates.length}: ${link.productName || "상품"}`,
+        });
+        let approved = false;
+        try {
+          if (link.draftPrepared) {
+            const response = await fetch(`/api/brandlinks/${link.id}/draft`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "approve" }),
+            });
+            const payload = await response.json();
+            approved = response.ok && payload.success && Boolean(payload.data?.approvedAt);
+          }
+          if (!approved) {
+            approved = await handlePrepareBrandDraft(link, {
+              autoApprove: true,
+              silentPreview: true,
+              forceQualityRepair: Boolean(link.draftPrepared),
+            });
+          }
+        } catch (error) {
+          console.error(`소재 미리 작성 실패 (${link.id}):`, error);
+        }
+        if (approved) approvedCount += 1;
+        else failedCount += 1;
+        setBulkDraftProgress({ completed: index + 1, total: candidates.length });
+        await fetchLinks({ silent: true });
+      }
+      setDashboardNotice({
+        tone: failedCount > 0 ? "info" : "success",
+        text: `소재 미리 작성 완료: 발행 준비 ${approvedCount}건${failedCount > 0 ? `, 확인 필요 ${failedCount}건` : ""}. 이제 발행 단계에서는 저장된 글과 이미지를 바로 사용합니다.`,
+      });
+    } finally {
+      setBulkDraftPreparing(false);
+      await fetchLinks();
+    }
   };
 
   const handleApproveBrandDraft = async () => {
@@ -1471,9 +1561,60 @@ export default function Dashboard() {
           data.data?.logFile ? ` / 로그: ${data.data.logFile}` : ""
         }`,
       });
-      setTimeout(() => {
-        void fetchLinks();
-      }, 1500);
+      const jobId = data.data?.jobId;
+      if (jobId) {
+        const startedAt = Date.now();
+        const deadline = startedAt + 12 * 60 * 60_000;
+        const targetIds = new Set(data.data?.targetIds || []);
+        let settled = false;
+        while (Date.now() < deadline) {
+          await waitForMilliseconds(Date.now() - startedAt < 60 * 60_000 ? 2_500 : 15_000);
+          let terminalFailure: string | null = null;
+          try {
+            const statusResponse = await fetch(
+              `/api/brandlinks/bulk-schedule?jobId=${encodeURIComponent(jobId)}`,
+              { cache: "no-store" },
+            );
+            const statusPayload = await statusResponse.json();
+            const linksResponse = await fetch("/api/brandlinks", { cache: "no-store" });
+            const linksPayload = await linksResponse.json();
+            const synchronizedLinks = linksResponse.ok && linksPayload.success
+              ? linksPayload.data as BrandLink[]
+              : [];
+            if (synchronizedLinks.length > 0) setLinks(synchronizedLinks);
+            const targetRows = synchronizedLinks.filter((link) => targetIds.has(link.id));
+            const databaseSettled = targetIds.size > 0 &&
+              targetRows.length === targetIds.size &&
+              targetRows.every((link) => ["SCHEDULED", "PUBLISHED", "FAILED"].includes(link.status));
+            if (statusResponse.status === 404 && databaseSettled) {
+              settled = true;
+              setDashboardNotice({
+                tone: "success",
+                text: "예약발행 결과를 상품 목록에서 확인해 상태를 동기화했습니다.",
+              });
+              break;
+            }
+            if (statusResponse.ok && statusPayload.success && statusPayload.data?.status === "completed") {
+              settled = true;
+              setDashboardNotice({
+                tone: "success",
+                text: "예약발행 작업이 완료되어 상품 목록 상태를 동기화했습니다.",
+              });
+              break;
+            }
+            if (statusResponse.ok && statusPayload.success && statusPayload.data?.status === "failed") {
+              terminalFailure = statusPayload.data?.error || "예약발행 작업이 실패했습니다.";
+            }
+          } catch (error) {
+            console.warn("예약발행 상태 확인 일시 실패, 자동 재시도:", error);
+            await waitForMilliseconds(15_000);
+          }
+          if (terminalFailure) throw new Error(terminalFailure);
+        }
+        if (!settled) throw new Error("예약발행 상태 확인이 12시간을 초과했습니다. 목록 새로고침으로 상태를 다시 확인해 주세요.");
+      } else {
+        await fetchLinks();
+      }
     } catch (error) {
       console.error("예약발행 일괄 실행 실패:", error);
       setDashboardNotice({
@@ -1699,6 +1840,9 @@ export default function Dashboard() {
     (link) => link.status === "READY" && formatDateDisplay(link.scheduledPublishAt) !== "-"
   ).length;
   const readyImmediateCount = readyScheduledCount;
+  const draftPrepareCandidateCount = visibleLinks.filter(
+    (link) => ["READY", "FAILED"].includes(link.status) && !link.draftApproved,
+  ).length;
   const readyTopicScheduledCount = topicTasks.filter(canBulkScheduleTopicTask).length;
   const busyMessageForUi = getBusyMessage();
 
@@ -2655,29 +2799,39 @@ export default function Dashboard() {
                   <div className="flex flex-wrap items-center gap-2">
                     <button
                       onClick={() => handleBulkSeasonalRegister(SEASONAL_REGISTER_COUNT_10)}
-                      disabled={bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId)}
+                      disabled={bulkDraftPreparing || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId)}
                       className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                     >
                       {bulkSeasonalRunning ? "상품 동기화 중..." : `${brandConnectKind === "travel" ? "여행" : "쇼핑"} 인기상품 10개 동기화`}
                     </button>
                     <button
                       onClick={() => handleBulkSeasonalRegister(SEASONAL_REGISTER_COUNT_50)}
-                      disabled={bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId)}
+                      disabled={bulkDraftPreparing || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId)}
                       className="px-4 py-2 bg-sky-600 text-white rounded-lg hover:bg-sky-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                     >
                       {bulkSeasonalRunning ? "상품 동기화 중..." : `${brandConnectKind === "travel" ? "여행" : "쇼핑"} 인기상품 50개 동기화`}
                     </button>
                     <button
                       onClick={handleSuperPublishing}
-                      disabled={travelPublishingUnavailable || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId)}
+                      disabled={travelPublishingUnavailable || bulkDraftPreparing || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId)}
                       title={travelPublishingUnavailable ? "여행 계약 자동 캡처 후 사용할 수 있습니다." : undefined}
                       className="px-4 py-2 bg-fuchsia-600 text-white rounded-lg hover:bg-fuchsia-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                     >
                       {superPublishingRunning ? "수퍼 퍼블리싱 시작 중..." : `${activeConnectLabel} 수퍼 퍼블리싱 ${SUPER_PUBLISH_COLLECT_COUNT}개`}
                     </button>
                     <button
+                      onClick={() => void handleBulkPrepareBrandDrafts()}
+                      disabled={travelPublishingUnavailable || bulkDraftPreparing || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId) || draftPrepareCandidateCount === 0}
+                      title="리서치·원고·썸네일·본문 이미지를 미리 만들고 품질 통과본을 자동 승인합니다"
+                      className="px-4 py-2 bg-violet-600 text-white rounded-lg hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {bulkDraftPreparing
+                        ? `소재 작성 중 ${bulkDraftProgress.completed}/${bulkDraftProgress.total}`
+                        : `소재 미리 작성 (${Math.min(MAX_BULK_DRAFT_PREPARE_LIMIT, draftPrepareCandidateCount)}건)`}
+                    </button>
+                    <button
                       onClick={handleBulkSchedulePublish}
-                      disabled={travelPublishingUnavailable || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId) || readyScheduledCount === 0}
+                      disabled={travelPublishingUnavailable || bulkDraftPreparing || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId) || readyScheduledCount === 0}
                       title={travelPublishingUnavailable ? "여행 계약 자동 캡처 후 사용할 수 있습니다." : undefined}
                       className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                     >
@@ -2685,7 +2839,7 @@ export default function Dashboard() {
                     </button>
                     <button
                       onClick={handleBulkTodayPublish}
-                      disabled={travelPublishingUnavailable || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId) || readyImmediateCount === 0}
+                      disabled={travelPublishingUnavailable || bulkDraftPreparing || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId) || readyImmediateCount === 0}
                       title={travelPublishingUnavailable ? "여행 계약 자동 캡처 후 사용할 수 있습니다." : undefined}
                       className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                     >
@@ -2804,6 +2958,11 @@ export default function Dashboard() {
                             <span className={`inline-flex whitespace-nowrap rounded-full px-2 py-1 text-xs font-medium ${getStatusColor(link.status)}`}>
                               {getStatusText(link.status)}
                             </span>
+                            {link.draftApproved ? (
+                              <div className="mt-1 text-[11px] font-semibold text-emerald-700">소재 준비완료</div>
+                            ) : link.draftPrepared ? (
+                              <div className="mt-1 text-[11px] font-semibold text-amber-700">소재 검토필요</div>
+                            ) : null}
                             {link.errorMessage && (
                               <div className="text-xs text-red-500 mt-1" title={link.errorMessage}>
                                 ⚠️
@@ -2882,7 +3041,7 @@ export default function Dashboard() {
                               </button>
                               <button
                                 onClick={() => void handleOpenOrPrepareBrandDraft(link)}
-                                disabled={draftCreationMode === "checking" || draftGeneratingId === link.id || link.status === "DRAFTING" || Boolean(publishingId)}
+                                disabled={bulkDraftPreparing || draftCreationMode === "checking" || draftGeneratingId === link.id || link.status === "DRAFTING" || Boolean(publishingId)}
                                 className="whitespace-nowrap rounded-lg bg-violet-600 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-violet-700 disabled:opacity-50"
                                 title={draftCreationMode === "chatgpt"
                                   ? "상품별 요청문을 복사해 연결된 ChatGPT에서 초안을 만듭니다"
@@ -2894,6 +3053,8 @@ export default function Dashboard() {
                               >
                                 {draftGeneratingId === link.id || link.status === "DRAFTING"
                                   ? "글 준비 중..."
+                                  : link.draftApproved
+                                    ? "1. 준비된 소재 보기"
                                   : draftCreationMode === "checking"
                                     ? "1. 작성 방식 확인 중"
                                     : draftCreationMode === "chatgpt"
@@ -2969,9 +3130,10 @@ export default function Dashboard() {
           <h3 className="font-medium text-slate-800 mb-2">💡 사용 방법</h3>
           <ol className="text-sm text-slate-600 space-y-1 list-decimal list-inside">
             <li>네이버 로그인 상태를 확인하고 쇼핑 또는 여행 탭을 선택합니다.</li>
-            <li>상품을 동기화한 뒤 목록에서 <strong>{draftCreationMode === "chatgpt" ? "1. GPT로 글 만들기" : draftCreationMode === "codex" ? "1. GPT로 글 만들기" : draftCreationMode === "browser-chatgpt" ? "1. 웹 GPT 자동작성" : "1. 글 준비·확인"}</strong>를 누릅니다.</li>
+            <li>여러 상품은 <strong>소재 미리 작성</strong>으로 글·썸네일·본문 이미지를 먼저 준비할 수 있습니다.</li>
+            <li>개별 상품은 <strong>{draftCreationMode === "chatgpt" ? "1. GPT로 글 만들기" : draftCreationMode === "codex" ? "1. GPT로 글 만들기" : draftCreationMode === "browser-chatgpt" ? "1. 웹 GPT 자동작성" : "1. 글 준비·확인"}</strong>에서 확인하고 수정합니다.</li>
             <li><strong>2. 썸네일</strong>에서 실제 사진과 디자인 스타일을 고릅니다.</li>
-            <li>초안을 승인한 뒤 <strong>3. 바로 발행</strong> 또는 예약 발행을 선택합니다.</li>
+            <li>준비완료 소재는 <strong>3. 바로 발행</strong> 또는 예약발행 때 재생성 없이 사용됩니다.</li>
           </ol>
         </div>
       </main>
