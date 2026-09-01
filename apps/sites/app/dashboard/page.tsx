@@ -39,16 +39,25 @@ export default async function DashboardPage() {
 
         <section className="download-card">
           <div className="download-copy">
-            <span className="card-kicker">WINDOWS DESKTOP AGENT</span>
-            <h2>PC 프로그램 설치</h2>
-            <p>로컬 프로그램을 설치한 뒤 PC 연결 주소로 이 PC를 인증하세요. ChatGPT MCP는 Site의 GPT 로그인 계정으로 별도 인증됩니다.</p>
+            <span className="card-kicker">DESKTOP AGENT</span>
+            <h2>데스크톱 프로그램 설치</h2>
+            <p>운영체제에 맞는 프로그램을 설치한 뒤 PC 연결 주소로 이 기기를 인증하세요. ChatGPT MCP는 Site의 GPT 로그인 계정으로 별도 인증됩니다.</p>
           </div>
-          <div className="download-action">
-            <span className="download-platform">WINDOWS 10/11 · 64-BIT</span>
-            <a className="button button-primary download-button" href="/api/download/windows" download>
-              <span aria-hidden="true">↓</span> Windows 프로그램 다운로드
-            </a>
-            <small>버전 {release?.version || WINDOWS_INSTALLER_VERSION} · 현재 코드서명 전 버전으로 SmartScreen 안내가 표시될 수 있습니다.</small>
+          <div className="download-actions">
+            <div className="download-action">
+              <span className="download-platform">WINDOWS 10/11 · 64-BIT</span>
+              <a className="button button-primary download-button" href="/api/download/windows" download>
+                <span aria-hidden="true">↓</span> Windows 다운로드
+              </a>
+              <small>버전 {release?.version || WINDOWS_INSTALLER_VERSION} · SmartScreen 안내가 표시될 수 있습니다.</small>
+            </div>
+            <div className="download-action">
+              <span className="download-platform">macOS · APPLE SILICON</span>
+              <a className="button button-ghost download-button" href="/api/download/macos" download>
+                <span aria-hidden="true">↓</span> macOS 다운로드
+              </a>
+              <small>버전 {release?.version || WINDOWS_INSTALLER_VERSION} · Apple Silicon용 DMG</small>
+            </div>
           </div>
         </section>
 

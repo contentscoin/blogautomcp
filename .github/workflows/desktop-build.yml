@@ -89,8 +89,8 @@ jobs:
       # 릴리스 빌드를 중앙 자동업데이트 채널에도 게시한다. 설치된 앱은 GitHub
       # 릴리스가 아니라 이 채널(latest.yml)을 보므로, 여기 게시돼야 자동업데이트가
       # 동작한다. INSTALLER_UPLOAD_KEY 시크릿이 없으면 경고만 남기고 건너뛴다.
-      - name: Publish to auto-update channel
-        if: matrix.os == 'windows-latest' && (github.ref_type == 'tag' || inputs.release_tag != '')
+      - name: Publish to site download channel
+        if: github.ref_type == 'tag' || inputs.release_tag != ''
         shell: bash
         env:
           INSTALLER_UPLOAD_KEY: ${{ secrets.INSTALLER_UPLOAD_KEY }}
@@ -100,4 +100,10 @@ jobs:
             exit 0
           fi
           SITE_URL=$(node -p "new URL(require('./package.json').build.publish[0].url).origin")
-          node apps/sites/scripts/publish-update.mjs "$SITE_URL" out
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            node apps/sites/scripts/publish-update.mjs "$SITE_URL" out
+          else
+            DMG_FILE=$(find out -maxdepth 1 -type f -name '*.dmg' -print -quit)
+            test -n "$DMG_FILE" || { echo "macOS DMG 파일을 찾지 못했습니다."; exit 1; }
+            node apps/sites/scripts/publish-macos-installer.mjs "$SITE_URL" "$DMG_FILE"
+          fi
