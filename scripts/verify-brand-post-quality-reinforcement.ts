@@ -278,12 +278,15 @@ assert.match(travelPrompt, /photorealistic travel editorial photograph/iu);
 assert.match(travelPrompt, /do not invent a named hotel/iu);
 
 const simpleAgentSource = fs.readFileSync(path.join(process.cwd(), "scripts", "simple-agent.ts"), "utf8");
+const writingStyleSource = fs.readFileSync(path.join(process.cwd(), "scripts", "lib", "blog-writing-style.ts"), "utf8");
 const sitesMcpSource = fs.readFileSync(
   path.join(process.cwd(), "apps", "sites", "app", "api", "mcp", "[credential]", "route.ts"),
   "utf8",
 );
 assert.match(simpleAgentSource, /brand-draft-quality-checklist\/v1/u);
 assert.match(simpleAgentSource, /눈앞의 장면 → 즐길 거리 또는 실용 팁/u);
+assert.match(writingStyleSource, /도착 장면 → 장소의 배경 → 현장에서 할 일/u);
+assert.match(writingStyleSource, /거리·소요시간·입장료·운영시간·교통비/u);
 assert.match(simpleAgentSource, /contentQuality\.canPublish가 false/u);
 assert.match(simpleAgentSource, /maximumRepairAttempts = isTravel \? 3 : 2/u);
 assert.doesNotMatch(simpleAgentSource, /편집 역할 \$\{role\}/u);
