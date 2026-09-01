@@ -597,17 +597,17 @@ export function formatProductEditorialPlanForPrompt(plan: ProductEditorialPlan):
 
 const ROLE_PATTERNS: Record<ProductEditorialRole, RegExp> = {
   "review-hook": /한\s*줄|먼저\s*내린|첫\s*결론|갈리는\s*(?:지점|기준)|먼저\s*보이는/u,
-  "product-identity": /어떤\s*제품|제품\s*정체|핵심\s*구조|상품\s*성격|올인원|쪽에\s*가깝|제품은|기기는/u,
+  "product-identity": /어떤\s*제품|제품\s*정체|핵심\s*구조|상품\s*성격|올인원|쪽에\s*가깝|제품(?:은|이에요|입니다)|기기(?:는|예요|입니다)/u,
   "source-evidence": /핵심\s*기능|작동\s*(?:방식|원리)|구조가|기능이|스펙|수치|배터리|소재/u,
-  "primary-strength": /가장\s*분명한\s*장점|핵심\s*장점|주요\s*기능\s*1|선택\s*이유|실용적|편의성|의미가\s*있/u,
+  "primary-strength": /가장\s*분명한\s*장점|핵심\s*장점|주요\s*기능\s*1|선택\s*이유|장점(?:은|이|으로|을)|강점(?:은|이|으로)|줄여\s*주|덜어\s*주|실용적|편의성|의미가\s*있|유용/u,
   "secondary-strength": /두\s*번째|또\s*다른\s*강점|주요\s*기능\s*2/u,
   "use-case": /사용\s*(?:장면|방법|순서)|활용|설치|조작|충전|세척|관리|보관|잘\s*맞는\s*상황/u,
   "review-evidence": /구매\s*후기|사용자\s*후기|후기에서|구매자(?:가|는|들)|반복(?:해서|되는)?\s*(?:언급|평가)/u,
   comparison: /비슷한\s*제품|비교|갈리는\s*기준/u,
   limitations: /아쉬|단점|한계|제약|주의/u,
-  fit: /추천\s*대상|비추천|이런\s*분|누구/u,
+  fit: /추천\s*대상|비추천|이런\s*분|누구|어떤\s*사람|사람에게\s*(?:더\s*)?맞|잘\s*맞|맞지\s*않|다른\s*제품이\s*낫|큰\s*제품이\s*낫/u,
   offer: /가격|혜택|할인/u,
-  verdict: /최종|결론|마지막\s*선택|후보에\s*올|선택\s*기준|가격까지\s*놓고/u,
+  verdict: /최종|결론|마지막\s*선택|후보에\s*올|선택\s*기준|가격까지\s*놓고|구매\s*기준|고르기\s*전|따져보면\s*선택/u,
 };
 
 export function inferProductEditorialRole(title: string): ProductEditorialRole {

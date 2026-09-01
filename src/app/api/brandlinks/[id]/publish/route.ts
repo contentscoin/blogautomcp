@@ -215,6 +215,16 @@ export async function POST(
         { status: 409 }
       );
     }
+    if (
+      preparedPackage &&
+      preparedPackage.generationSource !== "AI" &&
+      preparedPackage.generationSource !== "PREPARED_APPROVED"
+    ) {
+      return NextResponse.json(
+        { success: false, error: "현재 초안의 생성 출처를 확인할 수 없습니다. 글을 다시 준비해 주세요." },
+        { status: 409 },
+      );
+    }
 
     const agentAiProvider = (process.env.AI_PROVIDER || "openai").toLowerCase();
     const hasProviderKey = agentAiProvider === "gemini"

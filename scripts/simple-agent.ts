@@ -4514,7 +4514,9 @@ function applyHumanMobilePolishToSection(
     );
   }
 
-  return `${title}\n\n${polishedBodyLines.slice(0, 6).join("\n")}\n`;
+  // 긴 문장을 모바일 줄로 나눈 뒤 줄 수로 자르면 문장의 뒷부분이 통째로
+  // 사라질 수 있다. 모델이 만든 완성 문장은 보존하고 줄바꿈만 적용한다.
+  return `${title}\n\n${polishedBodyLines.join("\n")}\n`;
 }
 
 function applyHumanMobilePolishToDisclosure(section: string): string {
@@ -7107,7 +7109,7 @@ function loadPreparedBrandLinkPostOverride(): PreparedBrandLinkPostOverride | nu
   if (typeof manifest.approvedAt !== "string" || !manifest.approvedAt.trim()) {
     throw new Error("준비된 원고는 승인 완료 후에만 발행할 수 있습니다.");
   }
-  if (manifest.generationSource !== "AI") {
+  if (manifest.generationSource !== "AI" && manifest.generationSource !== "PREPARED_APPROVED") {
     throw new Error(
       "준비된 원고의 AI 생성 출처를 확인할 수 없습니다. 이전 로컬 폴백 초안은 폐기하고 새 초안을 생성해 주세요.",
     );
@@ -10135,6 +10137,10 @@ async function main() {
       })();
     }, AGENT_MAX_RUNTIME_MS);
 
+    // 승인된 준비 원고는 상품 페이지를 다시 읽을 이유가 없다. 발행 시작 전에
+    // 먼저 불러와 STEP1의 라이브 상세페이지 재수집을 건너뛰고 곧바로 에디터로 간다.
+    const preparedPostOverride = loadPreparedBrandLinkPostOverride();
+
     setStage("브라우저 시작");
     // 브라우저 시작 (봇 감지 우회 설정)
     browser = await chromium.launch({
@@ -10206,12 +10212,13 @@ async function main() {
     const needsTravelResearchRefresh = Boolean(
       product && runtimeConnectKind === "TRAVEL" && !product.travelPageResearch,
     );
-    const needsLiveRefresh =
+    const needsLiveRefresh = !preparedPostOverride && (
       !product ||
       !sanitizeText(product.name || "") ||
       needsImageRefresh ||
       needsReviewEvidenceRefresh ||
-      needsTravelResearchRefresh;
+      needsTravelResearchRefresh
+    );
 
     if (needsLiveRefresh) {
       const sourceUrl = link.finalUrl || link.url;
@@ -10259,7 +10266,7 @@ async function main() {
           materializedImageCount: product.imagePaths.length,
           detailImageCount: product.detailImagePaths.length,
         });
-    if (!finalReviewEvidenceReady) {
+    if (!preparedPostOverride && !finalReviewEvidenceReady) {
       throw new Error(
         runtimeConnectKind === "TRAVEL"
           ? "여행지 브이로그를 작성할 방문지·일정 정보가 부족합니다. 상세정보 동기화 후 다시 시도해 주세요."
@@ -10292,7 +10299,6 @@ async function main() {
     console.log(`🖼️ 이미지: ${product.imagePaths.length}개`);
     console.log("-".repeat(40));
     
-    const preparedPostOverride = loadPreparedBrandLinkPostOverride();
     setStage(preparedPostOverride ? "STEP2 준비된 원고 불러오기" : "STEP2 SEO 글 생성");
     // 승인된 준비 원고가 있으면 재생성하지 않고 그대로 사용한다.
     const post = preparedPostOverride?.post ?? await step2_generatePost(

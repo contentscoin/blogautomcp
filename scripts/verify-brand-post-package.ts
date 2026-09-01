@@ -9,6 +9,10 @@ async function main() {
     path.join(projectRoot, "src", "app", "api", "brandlinks", "[id]", "draft", "route.ts"),
     "utf8"
   );
+  const publishRouteSource = fs.readFileSync(
+    path.join(projectRoot, "src", "app", "api", "brandlinks", "[id]", "publish", "route.ts"),
+    "utf8",
+  );
   const draftImageRouteSource = fs.readFileSync(
     path.join(projectRoot, "src", "app", "api", "brandlinks", "[id]", "draft", "images", "route.ts"),
     "utf8",
@@ -69,6 +73,26 @@ async function main() {
     simpleAgentSource.includes("상세페이지 낭독문이 아니라 제품 분석 리뷰"),
     true,
     "쇼핑 원고는 상세페이지 낭독형이 아니라 기능·사용법 중심 제품 분석형이어야 합니다.",
+  );
+  assert.ok(
+    simpleAgentSource.indexOf("const preparedPostOverride = loadPreparedBrandLinkPostOverride()") <
+      simpleAgentSource.indexOf('setStage("브라우저 시작")'),
+    "승인된 초안은 상품 상세페이지 브라우저를 열기 전에 먼저 불러와야 합니다.",
+  );
+  assert.equal(
+    simpleAgentSource.includes("const needsLiveRefresh = !preparedPostOverride && ("),
+    true,
+    "승인된 초안 발행은 상품 상세페이지 재수집을 건너뛰어야 합니다.",
+  );
+  assert.equal(
+    simpleAgentSource.includes('manifest.generationSource !== "AI" && manifest.generationSource !== "PREPARED_APPROVED"'),
+    true,
+    "명시적으로 승인한 레거시 초안은 PREPARED_APPROVED 출처로 발행할 수 있어야 합니다.",
+  );
+  assert.equal(
+    publishRouteSource.includes('preparedPackage.generationSource !== "PREPARED_APPROVED"'),
+    true,
+    "출처가 확인되지 않은 초안은 상품 브라우저를 띄우기 전에 API에서 차단해야 합니다.",
   );
   assert.equal(
     draftRouteSource.includes("readPrepareFailure(logPath)"),
@@ -230,8 +254,25 @@ async function main() {
     approvedAt: null,
   }, null, 2));
   assert.equal(store.readBrandPostPackage(id)?.approvedAt, null);
-  assert.ok(store.packagePreview(store.approveBrandPostPackage(id)).markdown.includes("승인 전에는"));
+  const approvedLegacy = store.approveBrandPostPackage(id);
+  assert.ok(store.packagePreview(approvedLegacy).markdown.includes("승인 전에는"));
+  assert.equal(approvedLegacy.generationSource, "PREPARED_APPROVED");
   assert.ok(store.readBrandPostPackage(id)?.approvedAt);
+  assert.equal(store.readBrandPostPackage(id)?.generationSource, "PREPARED_APPROVED");
+  const legacyManifestPath = store.getBrandPostPackageManifestPath(id);
+  const alreadyApprovedLegacy = JSON.parse(fs.readFileSync(legacyManifestPath, "utf8"));
+  delete alreadyApprovedLegacy.generationSource;
+  fs.writeFileSync(legacyManifestPath, JSON.stringify(alreadyApprovedLegacy, null, 2), "utf8");
+  assert.equal(
+    store.readBrandPostPackage(id)?.generationSource,
+    "PREPARED_APPROVED",
+    "이미 승인된 v1 초안도 읽는 즉시 사용자 승인 출처로 마이그레이션해야 합니다.",
+  );
+  assert.equal(
+    JSON.parse(fs.readFileSync(legacyManifestPath, "utf8")).generationSource,
+    "PREPARED_APPROVED",
+    "마이그레이션 결과는 실제 매니페스트에 저장돼 발행 자식 프로세스도 읽을 수 있어야 합니다.",
+  );
 
   const v2Id = "fixture-brand-link-v2-001";
   const v2Dir = store.getBrandPostPackageDir(v2Id);
@@ -293,6 +334,77 @@ async function main() {
   );
   assert.ok(store.approveBrandPostPackage(v2Id).approvedAt);
   assert.match(store.packagePreview(store.readBrandPostPackage(v2Id)!).heroPreviewDataUrl || "", /^data:image\/png;base64,/u);
+
+  const staleFlowId = "fixture-brand-link-v2-stale-flow";
+  const staleFlowDir = store.getBrandPostPackageDir(staleFlowId);
+  fs.mkdirSync(staleFlowDir, { recursive: true });
+  const staleFlowMarkdown = path.join(staleFlowDir, "post.md");
+  fs.writeFileSync(staleFlowMarkdown, "# 자연어 판정 복구 테스트", "utf8");
+  const naturalSections = [
+    "작은 공간에 두는 클립형 바람\n\n이 제품이에요. 클립과 받침대를 함께 쓰는 구조입니다. 배치 자유도가 핵심입니다.",
+    "무선 구조가 줄여주는 불편\n\n전원선 동선을 줄여 주는 장점이 살아나요. 콘센트가 먼 곳에서 유용합니다.",
+    "처음부터 제대로 쓰는 방법\n\n고정력을 확인해 설치하고 충전한 뒤 사용합니다. 사용 후에는 먼지를 닦아 보관합니다.",
+    "책상용으로 볼 때의 장단점\n\n공간 활용은 좋지만 배터리 시간은 제약입니다. 강한 바람이 필요하면 한계가 있습니다.",
+    "어떤 사람에게 더 맞을까\n\n위치를 자주 바꾸는 사람에게 잘 맞고 강풍이 필요하면 큰 제품이 낫습니다.",
+    "가격보다 먼저 볼 선택 기준\n\n사용 위치와 고정할 프레임을 따져보면 선택이 쉬워집니다. 조건이 맞으면 실용적인 후보입니다.",
+  ];
+  const staleCompositionBase = compositionContract.resolvePostDocument({
+    connectKind: "SHOPPING",
+    title: "클립형선풍기 자연어 판정 복구",
+    sections: naturalSections,
+    hashtags: ["클립형선풍기", "무선선풍기", "캠핑선풍기"],
+    imagePaths: [heroImagePath, ...bodyImagePaths],
+    connectUrl: "https://example.test/shopping",
+    qualityPreset: "STANDARD",
+  });
+  const staleComposition = {
+    ...staleCompositionBase,
+    qualityPreset: "PREMIUM" as const,
+    qualityReport: {
+      ...staleCompositionBase.qualityReport,
+      preset: "PREMIUM" as const,
+      canAutoPublish: true,
+      blockers: [],
+    },
+  };
+  const qualitySignals = [
+    { key: "editorial-flow", label: "제품정체-기능원리-사용법-장단점-결론 흐름", status: "fail" },
+    { key: "review-substance", label: "제품 특장점·활용법·후기 근거 리뷰", status: "pass" },
+    { key: "composition-quality", label: "포스트 계약 품질", status: "pass" },
+  ];
+  fs.writeFileSync(store.getBrandPostPackageManifestPath(staleFlowId), JSON.stringify({
+    ...v2Manifest,
+    brandLinkId: staleFlowId,
+    connectKind: "SHOPPING",
+    title: "클립형선풍기 자연어 판정 복구",
+    markdownPath: staleFlowMarkdown,
+    heroImagePath,
+    bodyImagePaths,
+    imagePolicy: "LOCKED_PRODUCT_OR_ORIGINAL",
+    composition: staleComposition,
+    contentQuality: {
+      canPublish: false,
+      code: "missing-review-substance",
+      reason: "상품 고유 리뷰 요소가 부족합니다.",
+      score: 82,
+      sectionCount: naturalSections.length,
+      hashtagCount: 3,
+      totalLength: naturalSections.join("\n").length,
+      coveredProductTokens: ["클립형선풍기"],
+      missingProductTokens: [],
+      signals: qualitySignals,
+      summary: "커넥트 글 발행 보류",
+    },
+    thumbnailSpec: {
+      ...v2Manifest.thumbnailSpec,
+      sourcePolicy: "LOCKED_PRODUCT_OR_ORIGINAL",
+      sourceImagePath: heroImagePath,
+    },
+  }, null, 2));
+  const refreshedStaleFlow = store.readBrandPostPackage(staleFlowId);
+  assert.equal(refreshedStaleFlow?.contentQuality?.canPublish, true);
+  assert.equal(refreshedStaleFlow?.contentQuality?.code, "ok");
+  assert.ok(store.approveBrandPostPackage(staleFlowId).approvedAt);
 
   const generatedBodyPath = path.join(userData, "generated-body.png");
   fs.writeFileSync(generatedBodyPath, "generated-body-v1");

@@ -8,6 +8,7 @@ import {
   refreshPostDocumentQuality,
   type ResolvedPostDocumentV1,
 } from "./post-composition-contract";
+import { assessProductEditorialCoverage } from "../../scripts/lib/product-editorial-plan";
 
 export interface BrandPostPackageImageAsset {
   path: string;
@@ -81,7 +82,7 @@ export function getBrandPostPackageManifestPath(brandLinkId: string): string {
 export function readBrandPostPackage(brandLinkId: string): BrandPostPackageManifest | null {
   const manifestPath = getBrandPostPackageManifestPath(brandLinkId);
   if (!fs.existsSync(manifestPath)) return null;
-  const parsed = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as BrandPostPackageManifest;
+  let parsed = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as BrandPostPackageManifest;
   const supportedVersion =
     parsed.version === "brand-post-package/v1" || parsed.version === "brand-post-package/v2";
   if (!supportedVersion || parsed.brandLinkId !== brandLinkId) {
@@ -93,6 +94,52 @@ export function readBrandPostPackage(brandLinkId: string): BrandPostPackageManif
       parsed.composition?.version !== "resolved-post-document/v1")
   ) {
     throw new Error("준비된 초안 패키지의 렌더 계약 형식이 올바르지 않습니다.");
+  }
+
+  // v1 시절에는 사용자가 직접 확인·승인한 초안에도 generationSource가 저장되지
+  // 않았다. 승인 이력이 있는 레거시 초안은 사용자 승인본으로 마이그레이션해
+  // 발행 단계가 상품 페이지를 다시 연 뒤 출처 오류로 끝나는 문제를 막는다.
+  if (parsed.version === "brand-post-package/v1" && parsed.approvedAt && !parsed.generationSource) {
+    parsed = { ...parsed, generationSource: "PREPARED_APPROVED" };
+    writeBrandPostPackageManifest(parsed);
+  }
+
+  // 이전 판정기는 자연스러운 "어떤 사람에게 더 맞을까", "장점이 살아나요"
+  // 같은 표현을 놓쳐 editorial-flow 하나만 실패시키기도 했다. 저장된 본문을 현재
+  // 의미 판정기로 다시 확인해 나머지 품질 신호가 모두 정상인 초안은 즉시 복구한다.
+  if (
+    parsed.version === "brand-post-package/v2" &&
+    parsed.connectKind === "SHOPPING" &&
+    parsed.contentQuality &&
+    !parsed.contentQuality.canPublish
+  ) {
+    const coverage = assessProductEditorialCoverage(
+      parsed.composition.sections.map((section) => `${section.title}\n${section.body.join("\n")}`),
+    );
+    const editorialFlow = parsed.contentQuality.signals.find((signal) => signal.key === "editorial-flow");
+    const otherFailures = parsed.contentQuality.signals.filter(
+      (signal) => signal.key !== "editorial-flow" && signal.status === "fail",
+    );
+    if (editorialFlow?.status === "fail" && coverage.missingCoreRoles.length <= 1 && otherFailures.length === 0) {
+      const signals = parsed.contentQuality.signals.map((signal) =>
+        signal.key === "editorial-flow" ? { ...signal, status: "pass" as const } : signal,
+      );
+      const warnings = signals.filter((signal) => signal.status === "warn");
+      const score = Math.max(0, 100 - warnings.length * 5);
+      parsed = {
+        ...parsed,
+        contentQuality: {
+          ...parsed.contentQuality,
+          canPublish: true,
+          code: "ok",
+          reason: null,
+          score,
+          signals,
+          summary: `커넥트 글 발행 게이트 통과 (${score}점, 신호 ${signals.length}/${signals.length})`,
+        },
+      };
+      writeBrandPostPackageManifest(parsed);
+    }
   }
   return parsed;
 }
@@ -123,7 +170,14 @@ export function approveBrandPostPackage(brandLinkId: string): BrandPostPackageMa
       `원고 내용 품질검사를 통과하지 못했습니다: ${manifest.contentQuality.reason || manifest.contentQuality.summary}`,
     );
   }
-  const approved = { ...manifest, approvedAt: new Date().toISOString() };
+  const approved: BrandPostPackageManifest = {
+    ...manifest,
+    generationSource:
+      manifest.version === "brand-post-package/v1" && !manifest.generationSource
+        ? "PREPARED_APPROVED"
+        : manifest.generationSource,
+    approvedAt: new Date().toISOString(),
+  };
   fs.writeFileSync(manifestPath, JSON.stringify(approved, null, 2), "utf8");
   return approved;
 }

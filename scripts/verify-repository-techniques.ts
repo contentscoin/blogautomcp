@@ -74,6 +74,25 @@ assert.match(runtimeSource, /formatAdaptiveEditorialHarnessForPrompt/u);
 assert.match(runtimeSource, /minimumBodySectionCount/u);
 assert.match(runtimeSource, /maximumBodySectionCount/u);
 assert.doesNotMatch(runtimeSource, /(?:본문을 정확히|sections는 정확히|아래 순서를 유지)/u);
+assert.doesNotMatch(
+  runtimeSource,
+  /polishedBodyLines\.slice\(0,\s*6\)/u,
+  "모바일 줄바꿈 뒤 고정 줄 수로 자르면 완성 문장의 뒷부분이 유실됩니다.",
+);
+
+const naturalShoppingCoverage = assessProductEditorialCoverage([
+  "작은 공간에 두는 클립형 바람\n\n이 제품이에요. 클립과 받침대를 함께 쓰는 구조입니다.",
+  "무선 구조가 줄여주는 불편\n\n전원선 동선을 줄여 주는 장점이 살아나요.",
+  "처음부터 제대로 쓰는 방법\n\n고정력을 확인해 설치하고 충전한 뒤 사용합니다.",
+  "책상용으로 볼 때의 장단점\n\n공간 활용은 좋지만 배터리 시간은 제약입니다.",
+  "어떤 사람에게 더 맞을까\n\n위치를 자주 바꾸는 사람에게 잘 맞고 강풍이 필요하면 큰 제품이 낫습니다.",
+  "가격보다 먼저 볼 선택 기준\n\n사용 위치와 고정할 프레임을 따져보면 선택이 쉬워집니다.",
+]);
+assert.deepEqual(
+  naturalShoppingCoverage.missingCoreRoles,
+  [],
+  "자연스러운 장점·적합도·결론 표현을 제목 키워드가 다르다는 이유로 차단하면 안 됩니다.",
+);
 
 const plan = buildProductEditorialPlan(product);
 assert.equal(plan.framework, "source-backed-product-review-v3");
