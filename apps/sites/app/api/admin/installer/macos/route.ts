@@ -74,7 +74,11 @@ export async function POST(request: Request) {
     if (parts.length < 1 || parts.length > 10_000 || parts.some((part, index) => !Number.isInteger(part.partNumber) || part.partNumber !== index + 1 || part.etag.length < 1 || part.etag.length > 256)) {
       return apiError('INVALID_PARTS', '업로드 조각 목록을 확인하세요.', 422);
     }
-    const object = await upload.complete(parts);
+    const completedObject = await upload.complete(parts);
+    // Some R2-compatible runtimes omit customMetadata from the multipart
+    // completion response. Re-read the persisted object before validating the
+    // release pointer so integrity metadata is checked consistently.
+    const object = await env.INSTALLERS.head(target.installerKey) || completedObject;
     const sha256 = object.customMetadata?.sha256 || '';
     if (!/^[a-f0-9]{64}$/.test(sha256)) return apiError('INVALID_METADATA', '업로드 무결성 정보를 확인하세요.', 409);
     const release: MacosReleasePointer = {
