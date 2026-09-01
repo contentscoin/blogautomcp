@@ -177,6 +177,10 @@ async function runBrowserImageBatch(
       role: target.role,
     }),
     outStem: path.join(workDir, `raw-${index + 1}-${target.request.requestId.replace(/[^a-zA-Z0-9_-]/gu, "")}`),
+    referenceImagePaths: normalizePackageImageAssets(manifest)
+      .filter((asset) => asset.provenance === "ORIGINAL" && fs.existsSync(asset.path))
+      .slice(0, 3)
+      .map((asset) => asset.path),
   }));
   const jobsPath = path.join(workDir, `jobs-${Date.now()}.json`);
   fs.writeFileSync(jobsPath, JSON.stringify(jobs, null, 2), "utf8");

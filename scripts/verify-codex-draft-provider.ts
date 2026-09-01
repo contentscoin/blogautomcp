@@ -15,7 +15,9 @@ assert.ok(getBundledCodexExecutable(), "bundled native Codex executable must res
 assert.equal(readCodexLocalStatus().installed, true, "bundled Codex runtime must be installed");
 assert.match(providerSource, /sandboxMode:\s*"read-only"/u);
 assert.match(providerSource, /networkAccessEnabled:\s*false/u);
-assert.match(providerSource, /webSearchMode:\s*"disabled"/u);
+assert.match(providerSource, /researchMode\?:\s*"disabled"\s*\|\s*"cached"\s*\|\s*"live"/u);
+assert.match(providerSource, /webSearchMode:\s*researchMode/u);
+assert.match(providerSource, /여행지 사실 확인에만 사용/u);
 assert.match(providerSource, /approvalPolicy:\s*"never"/u);
 assert.match(providerSource, /local_image/u);
 assert.match(providerSource, /detailImages\.slice\(0, 2\)/u);
@@ -37,5 +39,5 @@ console.log(JSON.stringify({
   bundledCodex: getBundledCodexEntrypoint(),
   bundledNativeCodex: getBundledCodexExecutable(),
   localStatus: readCodexLocalStatus(),
-  safety: ["read-only", "network-disabled", "web-search-disabled", "approval-never"],
+  safety: ["read-only", "network-disabled", "travel-web-search-cached", "approval-never"],
 }, null, 2));

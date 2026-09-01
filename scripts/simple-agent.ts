@@ -62,6 +62,7 @@ import {
 import {
   buildTravelContractEditorialPlan,
   buildTravelReviewAnalysis,
+  assessTravelReviewSubstance,
   buildTravelThumbnailCopy,
   extractTravelPageResearch,
   extractTravelProductFacts,
@@ -138,6 +139,7 @@ import { runCodexDraft } from "./lib/codex-draft-provider";
 import { deduplicateImagePaths } from "./lib/image-dedup";
 import { createThreeImageCollage } from "./lib/image-collage";
 import { createProductDetailImageSegments } from "./lib/product-detail-image";
+import { assessTravelImageQuality } from "./lib/travel-image-quality";
 import {
   bodyImageCapacity,
   hasSufficientVisualDraftEvidence,
@@ -781,6 +783,7 @@ async function selectBestLocalThumbnailSourcePath(imagePaths: string[]): Promise
 async function isUsableBodyUploadImage(
   imagePath: string,
   connectKind: "SHOPPING" | "TRAVEL",
+  requireTravelSourceQuality = false,
 ): Promise<boolean> {
   if (!fs.existsSync(imagePath)) return false;
 
@@ -794,7 +797,17 @@ async function isUsableBodyUploadImage(
     const metadata = await sharp(imagePath).metadata();
     const width = metadata.width ?? 0;
     const height = metadata.height ?? 0;
-    return isUsableBodyUploadImageDimension(width, height, connectKind);
+    if (!isUsableBodyUploadImageDimension(width, height, connectKind)) return false;
+    if (connectKind === "TRAVEL" && requireTravelSourceQuality) {
+      const quality = await assessTravelImageQuality(imagePath);
+      if (!quality.pass) {
+        console.log(
+          `   ⚠️ 여행 이미지 QC 제외: ${path.basename(imagePath)} · ${quality.score}점 · ${quality.reasons.join(", ")}`,
+        );
+        return false;
+      }
+    }
+    return true;
   } catch {
     return false;
   }
@@ -831,7 +844,11 @@ async function buildBlogUploadImagePaths(input: {
     ) {
       continue;
     }
-    if (!(await isUsableBodyUploadImage(imagePath, input.connectKind))) continue;
+    if (!(await isUsableBodyUploadImage(
+      imagePath,
+      input.connectKind,
+      input.connectKind === "TRAVEL",
+    ))) continue;
     const resolved = path.resolve(imagePath);
     if (bodyCandidates.some((candidate) => path.resolve(candidate) === resolved)) continue;
     bodyCandidates.push(imagePath);
@@ -5489,6 +5506,7 @@ async function generateWithAI(
         timeoutMs: CODEX_DRAFT_TIMEOUT_MS,
         model: CODEX_DRAFT_MODEL || undefined,
         reasoningEffort: CODEX_DRAFT_REASONING_EFFORT,
+        researchMode: chatgptContext?.connectKind === "TRAVEL" ? "cached" : "disabled",
         onProgress: (message) => console.log(`   ✦ ${message}`),
       });
     } catch (error) {
@@ -6128,7 +6146,7 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
     "repetitive-content",
   ]);
   const shouldAttemptQualityRepair =
-    !BRANDLINK_GENERATED_DRAFT_PATH &&
+    (!BRANDLINK_GENERATED_DRAFT_PATH || AI_PROVIDER === "codex" || BROWSER_GPT_MODE) &&
     repairableQualityCodes.has(editorialQuality.code) &&
     (!editorialQuality.canPublish || BRANDLINK_FORCE_QUALITY_REPAIR);
 
@@ -6137,18 +6155,27 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
       const failedSignals = editorialQuality.signals
         .filter((signal) => signal.status === "fail")
         .map((signal) => signal.label);
+      const travelSubstance = isTravel
+        ? assessTravelReviewSubstance({
+            productName: product.name,
+            sections: bodySections,
+            sourceText: [product.description, ...product.features].join(" "),
+          })
+        : null;
       return `아래 초안을 품질검사 결과를 모두 해결한 완성본으로 고쳐주세요.
 
 [품질검사]
 - 판정: ${editorialQuality.code}
 - 이유: ${editorialQuality.reason || editorialQuality.summary}
 - 실패 항목: ${failedSignals.join(", ") || "없음"}
+${travelSubstance ? `- 여행 원고 부족 요소: ${travelSubstance.missingElements.join(", ") || "없음"}` : ""}
 
 [수정 원칙]
-- 기존 상품 정보와 초안에 이미 들어 있는 검증 가능한 사실만 사용합니다.
+- 쇼핑 글은 기존 상품 정보와 초안에 이미 들어 있는 검증 가능한 사실만 사용합니다.
+- 여행 글은 상품 일정에 실제 등장하는 장소를 기준으로 공식 관광청·공공기관 등 신뢰 가능한 자료를 검색해 역사·문화·분위기·즐길 거리·현지 팁을 보강합니다.
 - 근거가 없는 일정·장소·성능·체험은 새로 만들지 않습니다.
 - "확인 필요", "알기 어렵다", "판단하기 어렵다" 같은 문장을 반복하지 말고, 정보가 없으면 관련 문단을 합치거나 짧게 처리합니다.
-- ${isTravel ? "여행지 소개만 하지 말고 코스 안에서의 가치, 이동의 대가, 잘 맞는 여행자를 구체적으로 판단합니다." : "구매 안내만 하지 말고 제품 자체의 기능, 장점, 구조상 제약, 잘 맞는 사용자를 구체적으로 판단합니다."}
+- ${isTravel ? "상품 가격·예약 조건을 읽어주는 글이 아니라, 이름이 확인된 방문지별 배경지식·눈앞의 풍경·할 수 있는 경험·사진 포인트·이동 팁을 구체적으로 연결한 여행 브이로그형 정보 글로 다시 씁니다. '보입니다', '인 것 같아요', '알기 어렵습니다' 같은 모호한 말투를 쓰지 않습니다." : "구매 안내만 하지 말고 제품 자체의 기능, 장점, 구조상 제약, 잘 맞는 사용자를 구체적으로 판단합니다."}
 - 내부 지침 문구와 실제 체험을 가장하는 표현은 제거합니다.
 - 고지 문구와 원시 URL은 출력하지 않습니다. 시스템이 별도로 붙입니다.
 - JSON(title, sections, hashtags)만 출력합니다.
@@ -6160,7 +6187,8 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
     try {
       qualityRepair.attempted = true;
       let lastRepairScore = editorialQuality.score;
-      for (let repairAttempt = 1; repairAttempt <= 2 && !editorialQuality.canPublish; repairAttempt += 1) {
+      const maximumRepairAttempts = isTravel ? 3 : 2;
+      for (let repairAttempt = 1; repairAttempt <= maximumRepairAttempts && !editorialQuality.canPublish; repairAttempt += 1) {
         const repairedText = await generateWithAI(
           systemPrompt,
           buildRepairPrompt(),
@@ -6212,11 +6240,22 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
         : qualityRepair.applied
           ? `자동 보강 후에도 발행 기준 미달 (${beforeEditorialQuality.score}→${editorialQuality.score}점)`
           : `자동 보강 결과가 개선 기준에 못 미쳐 원문 유지 (${lastRepairScore}점)`;
+      if (isTravel && !editorialQuality.canPublish) {
+        throw new Error(`여행 원고가 ${maximumRepairAttempts}회 자동 재작성 후에도 품질 기준을 통과하지 못했습니다: ${editorialQuality.reason || editorialQuality.summary}`);
+      }
     } catch (error) {
       qualityRepair.note = `자동 보강 실패: ${getErrorMessage(error)}`;
     }
   } else if (BRANDLINK_GENERATED_DRAFT_PATH && !editorialQuality.canPublish) {
     qualityRepair.note = `ChatGPT 제출 원고에 보강이 필요합니다: ${editorialQuality.reason || editorialQuality.summary}`;
+  }
+
+  if (isTravel && !editorialQuality.canPublish) {
+    throw new Error(
+      qualityRepair.attempted
+        ? `여행 원고가 자동 재작성 후에도 품질 기준을 통과하지 못했습니다: ${editorialQuality.reason || editorialQuality.summary}`
+        : `여행 원고 품질 기준을 통과하지 못했습니다: ${editorialQuality.reason || editorialQuality.summary}`,
+    );
   }
 
   console.log(`   🔎 원고 품질검사: ${editorialQuality.summary}`);

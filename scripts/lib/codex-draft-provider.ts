@@ -11,6 +11,7 @@ export interface CodexDraftOptions {
   timeoutMs?: number;
   model?: string;
   reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+  researchMode?: "disabled" | "cached" | "live";
   onProgress?: (message: string) => void;
 }
 const nativeImport = new Function("specifier", "return import(specifier)") as (
@@ -36,11 +37,19 @@ function readableImages(imagePaths: string[]): string[] {
   ])).slice(0, 4);
 }
 
-function buildWritingPrompt(systemPrompt: string, userPrompt: string): string {
+function buildWritingPrompt(
+  systemPrompt: string,
+  userPrompt: string,
+  researchMode: NonNullable<CodexDraftOptions["researchMode"]>,
+): string {
   return [
     "당신은 BlogAutoMCP의 한국어 블로그 원고 작성 엔진입니다.",
-    "이 작업은 글쓰기 전용입니다. 명령 실행, 코드 수정, 파일 생성, MCP 호출, 웹 검색을 하지 마세요.",
-    "제공된 자료와 첨부 이미지 안에서만 사실을 판단하고, 지시에 지정된 최종 형식만 반환하세요.",
+    researchMode === "disabled"
+      ? "이 작업은 글쓰기 전용입니다. 명령 실행, 코드 수정, 파일 생성, MCP 호출, 웹 검색을 하지 마세요."
+      : "이 작업은 여행 리서치와 글쓰기 전용입니다. 명령 실행, 코드 수정, 파일 생성, MCP 호출은 하지 말고 웹 검색은 여행지 사실 확인에만 사용하세요.",
+    researchMode === "disabled"
+      ? "제공된 자료와 첨부 이미지 안에서만 사실을 판단하고, 지시에 지정된 최종 형식만 반환하세요."
+      : "상품 일정에 등장하는 여행지만 공식 관광청·공공기관·신뢰할 수 있는 여행 자료로 교차 확인하세요. 검색 출처나 URL은 최종 원고에 노출하지 말고 확인된 사실만 반영하세요.",
     "첨부 이미지는 제품 또는 여행 상품의 시각적 근거로만 사용하며 보이지 않는 성능이나 체험을 추정하지 마세요.",
     "",
     "[시스템 지시사항]",
@@ -59,6 +68,7 @@ export async function runCodexDraft(options: CodexDraftOptions): Promise<string>
   const workingDirectory = path.join(os.tmpdir(), "blogautomcp-codex-drafts");
   fs.mkdirSync(workingDirectory, { recursive: true });
 
+  const researchMode = options.researchMode ?? "disabled";
   const codex = new Codex();
   const thread = codex.startThread({
     ...(options.model ? { model: options.model } : {}),
@@ -68,11 +78,11 @@ export async function runCodexDraft(options: CodexDraftOptions): Promise<string>
     skipGitRepoCheck: true,
     approvalPolicy: "never",
     networkAccessEnabled: false,
-    webSearchMode: "disabled",
+    webSearchMode: researchMode,
     threadSource: "blogautomcp-draft",
   });
 
-  const prompt = buildWritingPrompt(options.systemPrompt, options.userPrompt);
+  const prompt = buildWritingPrompt(options.systemPrompt, options.userPrompt, researchMode);
   const images = readableImages(options.imagePaths ?? []);
   const input = images.length > 0
     ? [

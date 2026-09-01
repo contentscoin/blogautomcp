@@ -1,6 +1,6 @@
 {
   "name": "brandconnect-automation",
-  "version": "1.2.23",
+  "version": "1.2.24",
   "description": "네이버 쇼핑 커넥트(브랜드커넥트) 자동 블로그 포스팅 도구",
   "private": true,
   "workspaces": [
@@ -18,6 +18,7 @@
     "build": "prisma generate && node scripts/cleanup-prisma-generated-temp.mjs && next build --webpack",
     "typecheck": "tsc --noEmit",
     "test:mcp-activation": "node scripts/verify-mcp-activation-e2e.mjs",
+    "test:mcp-contract": "tsx --test src/lib/brandlink-product-list.test.ts",
     "test:naver-login": "npx ts-node --project tsconfig.scripts.json scripts/verify-naver-login-flow.ts",
     "test:auto-update": "node scripts/verify-auto-update-manager.mjs",
     "test:repository-techniques": "npx ts-node --project tsconfig.scripts.json scripts/verify-repository-techniques.ts",
@@ -44,6 +45,7 @@
     "test:connect-editor-insertion": "npx ts-node --project tsconfig.scripts.json scripts/verify-connect-editor-insertion.ts",
     "test:travel-editorial": "npx ts-node --project tsconfig.scripts.json scripts/verify-travel-editorial-plan.ts",
     "test:travel-draft-resilience": "npx ts-node --project tsconfig.scripts.json scripts/verify-travel-draft-resilience.ts",
+    "test:travel-image-quality": "npx ts-node --project tsconfig.scripts.json scripts/verify-travel-image-quality.ts",
     "test:title-rules": "npx ts-node --project tsconfig.scripts.json scripts/verify-title-rules.ts",
     "test:packaged-update": "pwsh -NoProfile -File scripts/verify-packaged-auto-update.ps1",
     "postinstall": "prisma generate",

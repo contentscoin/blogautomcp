@@ -552,14 +552,6 @@ export function resolvePostDocument(options: {
           : "이 글은 네이버 쇼핑 커넥트 활동의 일환으로, 구매 발생 시 수수료를 제공받을 수 있습니다.",
     },
   ];
-  if (experienceMode === "AI_ASSISTED_INFORMATION") {
-    renderNodes.push({
-      kind: "disclosure",
-      disclosureType: "ai",
-      placement: "top",
-      text: "상품·여행 정보를 바탕으로 AI의 도움을 받아 정리한 정보형 초안이며, 실제 체험 후기는 아닙니다.",
-    });
-  }
   if (thumbnailPath) {
     renderNodes.push({
       kind: "image",

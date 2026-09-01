@@ -20,6 +20,7 @@ interface BatchJob {
   id: string;
   prompt: string;
   outStem: string;
+  referenceImagePaths?: string[];
 }
 
 interface CliArgs {
@@ -34,6 +35,36 @@ interface BatchResult {
 }
 
 const CHATGPT_IMAGE_WAIT_MS = Number(process.env.CHATGPT_IMAGE_WAIT_MS || 60_000);
+const CHATGPT_IMAGE_INPUT_SELECTORS = [
+  'input#upload-photos[type="file"]',
+  'input[type="file"][accept*="image"]',
+];
+const CHATGPT_PLUS_BUTTON_SELECTORS = [
+  '#composer-plus-btn',
+  'button[data-testid="composer-plus-btn"]',
+  'button[aria-label*="파일 추가"]',
+  'button[aria-label*="Attach"]',
+];
+
+async function attachReferenceImages(page: import("playwright").Page, paths: string[]) {
+  const references = paths.filter((value) => value && fs.existsSync(value)).slice(0, 3);
+  if (references.length === 0) return;
+  let input = page.locator(CHATGPT_IMAGE_INPUT_SELECTORS.join(", ")).first();
+  if (!(await input.count())) {
+    for (const selector of CHATGPT_PLUS_BUTTON_SELECTORS) {
+      const button = page.locator(selector).first();
+      if (await button.isVisible().catch(() => false)) {
+        await button.click().catch(() => {});
+        break;
+      }
+    }
+    await page.waitForTimeout(250);
+  }
+  input = page.locator(CHATGPT_IMAGE_INPUT_SELECTORS.join(", ")).first();
+  if (!(await input.count())) throw new Error("GPT Image 레퍼런스 첨부 입력창을 찾지 못했습니다.");
+  await input.setInputFiles(references);
+  await page.waitForTimeout(700);
+}
 
 function parseArgs(argv: string[]): CliArgs {
   const getValue = (flag: string): string => {
@@ -92,6 +123,7 @@ async function runJob(
       await startFreshChat(page, gptUrl, `이미지 슬롯 ${job.id}`);
     }
 
+    await attachReferenceImages(page, job.referenceImagePaths || []);
     await submitPromptToChatGPT(page, job.prompt, `주제 이미지 생성 ${job.id}`);
     await maybeConfirmGeneration(page);
     await waitForImageCompletion(page);

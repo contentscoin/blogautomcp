@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { requireAdminApiKey } from "@/lib/api-auth";
@@ -15,11 +16,13 @@ import {
 import { beginDesktopActivity } from "@/lib/desktop-activity";
 import {
   approveBrandPostPackage,
+  applyGeneratedBrandPostImage,
   getBrandPostPackageDir,
   getBrandPostPackageManifestPath,
   packagePreview,
   readBrandPostPackage,
 } from "@/lib/brand-post-package";
+import { generateBrandPostImages } from "@/lib/brand-post-image-generation";
 import { getPostCompositionContract } from "@/lib/post-composition-contract";
 import { readCodexLocalStatus } from "@/lib/codex-local";
 
@@ -92,6 +95,60 @@ function readPrepareFailure(logPath: string): string | null {
     return matches.at(-1)?.[1]?.trim() || null;
   } catch {
     return null;
+  }
+}
+
+async function autoRepairTravelImages(options: {
+  brandLinkId: string;
+  productName: string;
+}) {
+  if ((process.env.TRAVEL_AUTO_IMAGE_QC_REPAIR || "true").toLowerCase() === "false") {
+    return { manifest: readBrandPostPackage(options.brandLinkId), warning: null as string | null };
+  }
+  let manifest = readBrandPostPackage(options.brandLinkId);
+  if (!manifest || manifest.version !== "brand-post-package/v2" || manifest.connectKind !== "TRAVEL") {
+    return { manifest, warning: null as string | null };
+  }
+  const preview = packagePreview(manifest);
+  const requests = preview.imageSlots.flatMap((slot) =>
+    Array.from({ length: slot.missing }, () => ({
+      requestId: randomUUID(),
+      sectionId: slot.sectionId,
+    })),
+  ).slice(0, 4);
+  if (requests.length === 0) return { manifest, warning: null as string | null };
+
+  try {
+    const results = await generateBrandPostImages({
+      manifest,
+      productName: options.productName || manifest.title,
+      requests,
+    });
+    const failures: string[] = [];
+    for (const result of results) {
+      if (!result.generatedPath) {
+        failures.push(result.error || "GPT Image 결과가 비어 있습니다.");
+        continue;
+      }
+      applyGeneratedBrandPostImage({
+        brandLinkId: options.brandLinkId,
+        generatedPath: result.generatedPath,
+        sectionId: result.sectionId,
+        replaceAssetKey: result.replaceAssetKey,
+        provenance: result.provenance,
+        imageIntent: result.imageIntent,
+      });
+    }
+    manifest = readBrandPostPackage(options.brandLinkId);
+    return {
+      manifest,
+      warning: failures.length > 0 ? `저품질 이미지 자동 대체 일부 실패: ${failures.join(" ")}` : null,
+    };
+  } catch (error) {
+    return {
+      manifest,
+      warning: `저품질 이미지 GPT Image 자동 대체 실패: ${error instanceof Error ? error.message : "알 수 없는 오류"}`,
+    };
   }
 }
 
@@ -337,7 +394,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         failure || `초안 매니페스트가 생성되지 않았습니다: ${getBrandPostPackageManifestPath(id)}`
       );
     }
-    let finalizedManifest = manifest;
+    const imageRepair = await autoRepairTravelImages({
+      brandLinkId: id,
+      productName: link.productName || manifest.title,
+    });
+    let finalizedManifest = imageRepair.manifest || manifest;
     let approvalWarning: string | null = null;
     if (body.autoApprove === true) {
       try {
@@ -355,6 +416,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       data: packagePreview(finalizedManifest),
       autoApproved: Boolean(finalizedManifest.approvedAt),
       approvalWarning,
+      imageRepairWarning: imageRepair.warning,
       logPath,
     });
   } catch (error) {

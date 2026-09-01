@@ -31,7 +31,11 @@ assert.equal(shopping.renderNodes.filter((node) => node.kind === "connectCard").
 assert.equal(shopping.renderNodes.filter((node) => node.kind === "image").length, shoppingImages.length);
 assert.equal(shopping.renderNodes.at(-1)?.kind, "hashtags");
 assert.equal(shopping.renderNodes[0].kind, "disclosure");
-assert.equal(shopping.renderNodes[1].kind, "disclosure");
+assert.equal(
+  shopping.renderNodes.filter((node) => node.kind === "disclosure" && node.disclosureType === "ai").length,
+  0,
+  "AI 작성 안내 문구는 본문에 노출하지 않아야 합니다.",
+);
 assert.equal(
   shopping.renderNodes.filter((node) => node.kind === "quotation").length,
   0,
