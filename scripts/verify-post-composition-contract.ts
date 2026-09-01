@@ -15,7 +15,7 @@ function buildSections(prefix: string, count: number, paragraphLength: number): 
 const shoppingImages = Array.from({ length: 12 }, (_, index) => `C:/fixture/shopping-${index}.png`);
 const shopping = resolvePostDocument({
   connectKind: "SHOPPING",
-  title: "상품 선택 기준",
+  title: "상품 선택 기준 이 글은 네이버 쇼핑 커넥트 활동의 일환으로, 구매 발생 시 수수료를 제공받을 수 있습니다.",
   sections: [
     ...buildSections("쇼핑 섹션", SHOPPING_POST_CONTRACT_V1.sections.length, 4),
     "네이버 쇼핑 커넥트 활동을 통해 수수료를 제공받을 수 있습니다.",
@@ -29,8 +29,9 @@ const shopping = resolvePostDocument({
 assert.equal(shopping.sections.length, SHOPPING_POST_CONTRACT_V1.sections.length);
 assert.equal(shopping.renderNodes.filter((node) => node.kind === "connectCard").length, 2);
 assert.equal(shopping.renderNodes.filter((node) => node.kind === "image").length, shoppingImages.length);
-assert.equal(shopping.renderNodes.at(-1)?.kind, "hashtags");
-assert.equal(shopping.renderNodes[0].kind, "disclosure");
+assert.notEqual(shopping.renderNodes[0].kind, "disclosure");
+assert.equal(shopping.renderNodes.at(-2)?.kind, "hashtags");
+assert.equal(shopping.renderNodes.at(-1)?.kind, "disclosure");
 assert.equal(
   shopping.renderNodes.filter((node) => node.kind === "disclosure" && node.disclosureType === "ai").length,
   0,
@@ -69,6 +70,12 @@ assert.ok(
     (node) => node.kind === "image" && node.layout === "collage-3",
   ),
   "여행 하이라이트 이미지는 3장 콜라주 의도를 보존해야 합니다.",
+);
+
+assert.equal(
+  shopping.title,
+  "상품 선택 기준",
+  "제목에 제휴 고지문이 섞이지 않아야 합니다.",
 );
 assert.ok(
   travel.renderNodes.some(

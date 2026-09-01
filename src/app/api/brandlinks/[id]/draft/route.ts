@@ -23,7 +23,10 @@ import {
   readBrandPostPackage,
 } from "@/lib/brand-post-package";
 import { generateBrandPostImages } from "@/lib/brand-post-image-generation";
-import { getPostCompositionContract } from "@/lib/post-composition-contract";
+import {
+  getPostCompositionContract,
+  stripAffiliateDisclosureFromTitle,
+} from "@/lib/post-composition-contract";
 import { readCodexLocalStatus } from "@/lib/codex-local";
 
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
@@ -44,7 +47,9 @@ function normalizeSubmittedDraft(
   const input = value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
-  const title = typeof input.title === "string" ? input.title.trim() : "";
+  const title = typeof input.title === "string"
+    ? stripAffiliateDisclosureFromTitle(input.title)
+    : "";
   const sections = Array.isArray(input.sections)
     ? input.sections
         .filter((item): item is string => typeof item === "string")

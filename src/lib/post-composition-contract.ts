@@ -399,6 +399,15 @@ function isDisclosureSection(value: string): boolean {
   return /(?:쇼핑|여행)\s*커넥트/u.test(value) && /수수료/u.test(value);
 }
 
+/** 제휴 고지문은 제목이나 본문 섹션에 섞여 들어와도 항상 시스템 노드로 분리한다. */
+export function stripAffiliateDisclosureFromTitle(value: string): string {
+  return value
+    .replace(/^\uFEFF/u, "")
+    .replace(/\s*(?:이\s*(?:글|포스팅)은|본\s*글은)\s*(?:네이버\s*)?(?:쇼핑|여행)\s*커넥트[\s\S]*$/iu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function resolveSectionContracts(
   contract: PostCompositionContractV1,
   count: number,
@@ -541,17 +550,7 @@ export function resolvePostDocument(options: {
     };
   });
 
-  const renderNodes: PostRenderNode[] = [
-    {
-      kind: "disclosure",
-      disclosureType: "affiliate",
-      placement: "top",
-      text:
-        options.connectKind === "TRAVEL"
-          ? "이 글은 네이버 여행 커넥트 활동의 일환으로, 예약 발생 시 수수료를 제공받을 수 있습니다."
-          : "이 글은 네이버 쇼핑 커넥트 활동의 일환으로, 구매 발생 시 수수료를 제공받을 수 있습니다.",
-    },
-  ];
+  const renderNodes: PostRenderNode[] = [];
   if (thumbnailPath) {
     renderNodes.push({
       kind: "image",
@@ -616,6 +615,7 @@ export function resolvePostDocument(options: {
       url: options.connectUrl,
     });
   }
+  renderNodes.push({ kind: "hashtags", values: options.hashtags });
   renderNodes.push({
     kind: "disclosure",
     disclosureType: "affiliate",
@@ -623,10 +623,9 @@ export function resolvePostDocument(options: {
     text:
       clean(disclosureSection || "") ||
       (options.connectKind === "TRAVEL"
-        ? "네이버 여행 커넥트 활동을 통해 수수료를 제공받을 수 있습니다."
-        : "네이버 쇼핑 커넥트 활동을 통해 수수료를 제공받을 수 있습니다."),
+        ? "이 글은 네이버 여행 커넥트 활동의 일환으로, 예약 발생 시 수수료를 제공받을 수 있습니다."
+        : "이 글은 네이버 쇼핑 커넥트 활동의 일환으로, 구매 발생 시 수수료를 제공받을 수 있습니다."),
   });
-  renderNodes.push({ kind: "hashtags", values: options.hashtags });
 
   return {
     version: "resolved-post-document/v1",
@@ -634,7 +633,7 @@ export function resolvePostDocument(options: {
     connectKind: options.connectKind,
     qualityPreset,
     experienceMode,
-    title: options.title,
+    title: stripAffiliateDisclosureFromTitle(options.title),
     sections,
     renderNodes,
     qualityReport: buildPostQualityReport({

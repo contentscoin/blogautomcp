@@ -150,6 +150,7 @@ import {
   formatPostContractForPrompt,
   getPostCompositionContract,
   resolvePostDocument,
+  stripAffiliateDisclosureFromTitle,
   type PostExperienceMode,
   type PostQualityPreset,
   type ResolvedPostDocumentV1,
@@ -566,9 +567,13 @@ function isSectionTitleLine(text: string): boolean {
 
 function sanitizeTitle(rawTitle: string, fallback: string): string {
   // 낚시성 문구는 네이버가 스팸으로 명시한 항목이라 프롬프트 금지에 더해 여기서도 걸러낸다.
-  const cleaned = stripClickbaitFromTitle(stripEmoji(rawTitle).replace(/\s+/g, " ").trim());
+  const cleaned = stripClickbaitFromTitle(
+    stripAffiliateDisclosureFromTitle(stripEmoji(rawTitle).replace(/\s+/g, " ").trim()),
+  );
   if (cleaned.length > 0) return cleaned.slice(0, 80);
-  return stripClickbaitFromTitle(stripEmoji(fallback).replace(/\s+/g, " ").trim()).slice(0, 80);
+  return stripClickbaitFromTitle(
+    stripAffiliateDisclosureFromTitle(stripEmoji(fallback).replace(/\s+/g, " ").trim()),
+  ).slice(0, 80);
 }
 
 type ProductThumbnailSource = "image-api" | "chatgpt" | "codex-imagegen" | "local-script" | "composite" | "saved-studio" | "locked-product";
@@ -7041,7 +7046,18 @@ function writePreparedBrandPostPackage(params: {
     }
     return `## ${heading.trim() || "본문"}\n\n${body.join("\n").trim()}`;
   });
-  const markdown = [`# ${params.post.title}`, "", ...sections, "", params.post.hashtags.map((tag) => `#${tag.replace(/^#+/, "")}`).join(" ")].join("\n");
+  const bottomDisclosure = params.composition.renderNodes.find(
+    (node) => node.kind === "disclosure" && node.placement === "bottom",
+  );
+  const markdown = [
+    `# ${params.composition.title}`,
+    "",
+    ...sections,
+    "",
+    params.post.hashtags.map((tag) => `#${tag.replace(/^#+/, "")}`).join(" "),
+    "",
+    bottomDisclosure?.kind === "disclosure" ? bottomDisclosure.text : "",
+  ].join("\n");
   fs.writeFileSync(markdownPath, markdown, "utf8");
   const manifestPath = path.join(params.outputDir, "manifest.json");
   const packagedPathBySource = new Map(
