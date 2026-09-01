@@ -590,11 +590,9 @@ export function resolvePostDocument(options: {
   for (const section of sections) {
     const sectionContract = contract.sections.find((item) => item.id === section.id);
     renderNodes.push({ kind: "divider", sectionId: section.id });
-    renderNodes.push(
-      section.headingStyle === "quotation"
-        ? { kind: "quotation", sectionId: section.id, text: section.title }
-        : { kind: "heading", sectionId: section.id, text: section.title },
-    );
+    // 네이버 자동 입력에서는 인용구 컴포넌트가 빈 채로 남을 수 있으므로 모든
+    // 섹션 제목을 실제 소제목 서식 노드로 정규화한다.
+    renderNodes.push({ kind: "heading", sectionId: section.id, text: section.title });
     const placement = sectionContract?.image.placement || "after-lead";
     if (placement === "before-body") {
       section.imagePaths.forEach((imagePath, index) => pushImage(section, imagePath, index));

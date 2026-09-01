@@ -84,6 +84,7 @@ import {
   type EditorConnectKind,
 } from "./lib/connect-editor-insertion";
 import { parsePreparedBrandPostSections } from "./lib/prepared-post-markdown";
+import { inspectNaverScheduleSubmissionSignal } from "../src/lib/naver-schedule-submission";
 import { generateTravelEditorialSummaryCard } from "./lib/travel-editorial-card";
 import {
   generateProductThumbnailViaImageApi,
@@ -8002,42 +8003,6 @@ async function inputNaverHeading(page: Page, text: string): Promise<void> {
   await setNaverTextFormat(page, "text");
 }
 
-async function insertNaverQuotationHeading(page: Page, text: string): Promise<boolean> {
-  const beforeCount = await page
-    .locator('.se-component.se-quotation, [class*="se-quotation"], [data-comp="quotation"]')
-    .count()
-    .catch(() => 0);
-  const opened = await clickFirstVisible(page, [
-    'button[data-name="quotation"]',
-    'button[aria-label*="인용구"]',
-    'button[aria-label*="인용"]',
-    'button:has-text("인용구")',
-  ]);
-  if (!opened) return false;
-
-  await clickFirstVisible(page, [
-    'button[data-value="quotation_1"]',
-    'button[data-value="quotation1"]',
-    '.se-toolbar-option-quotation button',
-    '[class*="quotation"] button',
-  ]).catch(() => false);
-  await page.waitForTimeout(220);
-  const afterCount = await page
-    .locator('.se-component.se-quotation, [class*="se-quotation"], [data-comp="quotation"]')
-    .count()
-    .catch(() => beforeCount);
-  if (afterCount <= beforeCount) {
-    await page.keyboard.press("Escape").catch(() => {});
-    return false;
-  }
-
-  await page.keyboard.type(text, { delay: 3 });
-  await page.keyboard.press("Enter");
-  await page.waitForTimeout(100);
-  await setNaverTextFormat(page, "text");
-  return true;
-}
-
 async function renderResolvedPostDocument(
   page: Page,
   document: ResolvedPostDocumentV1,
@@ -8062,11 +8027,11 @@ async function renderResolvedPostDocument(
       continue;
     }
     if (node.kind === "quotation") {
-      const inserted = await insertNaverQuotationHeading(page, node.text);
-      if (!inserted) {
-        console.log(`   ⚠️ 인용구 미지원, 소제목으로 대체: ${node.text}`);
-        await inputNaverHeading(page, node.text);
-      }
+      // 네이버 인용구 컴포넌트는 생성 직후 편집 포커스가 본문에 남는 경우가
+      // 있어 빈 인용구만 생기고 제목이 다음 문단으로 입력될 수 있다. 기존
+      // 준비본의 quotation 노드도 실제 소제목 서식으로 렌더링해 내용 유실을
+      // 막는다.
+      await inputNaverHeading(page, node.text);
       continue;
     }
     if (node.kind === "heading") {
@@ -8981,16 +8946,14 @@ async function verifyScheduleDateApplied(page: Page, scheduledDate: Date): Promi
 interface ScheduleSubmissionTracker {
   stop: () => void;
   hasAnyPublishRequest: () => boolean;
-  hasScheduleSignal: () => boolean;
+  hasConfirmedScheduleRequest: () => boolean;
   getRecentEvents: () => string[];
 }
 
 function createScheduleSubmissionTracker(page: Page, targetYmd: string): ScheduleSubmissionTracker {
-  const dotted = targetYmd.replace(/-/g, ".");
-  const compact = targetYmd.replace(/-/g, "");
   const recentEvents: string[] = [];
   let hasAnyPublishRequest = false;
-  let hasScheduleSignal = false;
+  let hasConfirmedScheduleRequest = false;
 
   const pushEvent = (entry: string) => {
     recentEvents.push(entry);
@@ -9006,36 +8969,22 @@ function createScheduleSubmissionTracker(page: Page, targetYmd: string): Schedul
       if (method !== "POST") return;
 
       const url = response.url();
-      const lowerUrl = url.toLowerCase();
-      if (!lowerUrl.includes("naver.com")) return;
-
-      const looksLikePublishEndpoint =
-        /write|publish|post|reserve|schedule|save|temp|rabbit/i.test(lowerUrl);
-      if (!looksLikePublishEndpoint) return;
+      const postData = request.postData() || "";
+      const signal = inspectNaverScheduleSubmissionSignal({
+        url,
+        postData,
+        status: response.status(),
+        targetYmd,
+      });
+      if (!signal.relevant) return;
 
       hasAnyPublishRequest = true;
-
-      const postData = request.postData() || "";
-      const normalizedPostData = postData.replace(/\s+/g, " ").toLowerCase();
-      const hasUrlScheduleSignal = /reserve|reservation|schedule/.test(lowerUrl);
-
-      const hasKeywordSignal =
-        /reserve|reservation|schedule|publishmode|publish_mode|publishtype|publish_type|pretime|pre_post|prepost|reservedtime|radio_time|예약|발행/.test(
-          normalizedPostData
-        );
-      const hasDateSignal =
-        normalizedPostData.includes(targetYmd) ||
-        normalizedPostData.includes(dotted) ||
-        normalizedPostData.includes(compact);
-
-      if (hasUrlScheduleSignal || hasKeywordSignal || hasDateSignal) {
-        hasScheduleSignal = true;
-      }
+      if (signal.confirmed) hasConfirmedScheduleRequest = true;
 
       pushEvent(
-        `POST ${response.status()} ${url} keyword=${hasKeywordSignal ? "Y" : "N"} date=${
-          hasDateSignal ? "Y" : "N"
-        }`
+        `POST ${response.status()} ${url} schedule=${signal.hasScheduleMode ? "Y" : "N"} date=${
+          signal.hasTargetDate ? "Y" : "N"
+        } confirmed=${signal.confirmed ? "Y" : "N"}`
       );
     } catch {
       // no-op
@@ -9049,7 +8998,7 @@ function createScheduleSubmissionTracker(page: Page, targetYmd: string): Schedul
       page.off("response", listener);
     },
     hasAnyPublishRequest: () => hasAnyPublishRequest,
-    hasScheduleSignal: () => hasScheduleSignal,
+    hasConfirmedScheduleRequest: () => hasConfirmedScheduleRequest,
     getRecentEvents: () => [...recentEvents],
   };
 }
@@ -9064,11 +9013,11 @@ async function verifyScheduleSubmission(
   let publishedUrlSeenAt: number | null = null;
 
   while (Date.now() - startedAt < 12000) {
-    const hasScheduleSignal = tracker?.hasScheduleSignal() ?? false;
+    const hasConfirmedScheduleRequest = tracker?.hasConfirmedScheduleRequest() ?? false;
     const url = page.url();
     if (isPublishedUrl(url)) {
-      if (hasScheduleSignal) {
-        console.log("      - 예약 요청 신호 감지 + PostView 전환: 예약 제출 성공으로 처리");
+      if (hasConfirmedScheduleRequest) {
+        console.log("      - 목표 날짜가 포함된 예약 요청 성공 + PostView 전환 확인");
         return;
       }
 
@@ -9097,8 +9046,8 @@ async function verifyScheduleSubmission(
       return;
     }
 
-    if (hasScheduleSignal) {
-      console.log("      - 예약 요청 신호 감지: 완료 처리");
+    if (hasConfirmedScheduleRequest) {
+      console.log("      - 목표 날짜가 포함된 예약 요청 성공 확인");
       return;
     }
 

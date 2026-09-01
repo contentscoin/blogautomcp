@@ -1,6 +1,6 @@
 {
   "name": "brandconnect-automation",
-  "version": "1.2.20",
+  "version": "1.2.21",
   "description": "네이버 쇼핑 커넥트(브랜드커넥트) 자동 블로그 포스팅 도구",
   "private": true,
   "workspaces": [
@@ -33,6 +33,8 @@
     "test:chatgpt-browser-ui": "node scripts/verify-chatgpt-browser-mode-ui.mjs",
     "test:codex-draft-provider": "npx ts-node --project tsconfig.scripts.json scripts/verify-codex-draft-provider.ts",
     "test:post-composition": "npx ts-node --project tsconfig.scripts.json scripts/verify-post-composition-contract.ts",
+    "test:bulk-schedule-plan": "npx ts-node --project tsconfig.scripts.json scripts/verify-bulk-schedule-plan.ts",
+    "test:naver-schedule-submission": "npx ts-node --project tsconfig.scripts.json scripts/verify-naver-schedule-submission.ts",
     "test:image-dedup": "npx ts-node --project tsconfig.scripts.json scripts/verify-image-dedup.ts",
     "test:brandlink-image-readiness": "npx ts-node --project tsconfig.scripts.json scripts/verify-brandlink-image-readiness.ts",
     "test:image-collage": "npx ts-node --project tsconfig.scripts.json scripts/verify-image-collage.ts",

@@ -32,6 +32,11 @@ assert.equal(shopping.renderNodes.filter((node) => node.kind === "image").length
 assert.equal(shopping.renderNodes.at(-1)?.kind, "hashtags");
 assert.equal(shopping.renderNodes[0].kind, "disclosure");
 assert.equal(shopping.renderNodes[1].kind, "disclosure");
+assert.equal(
+  shopping.renderNodes.filter((node) => node.kind === "quotation").length,
+  0,
+  "네이버 에디터에 빈 인용구가 생기지 않도록 모든 소제목은 heading 노드여야 합니다.",
+);
 assert.deepEqual(SHOPPING_POST_CONTRACT_V1.targetImages, { min: 5, recommended: 8, max: 14 });
 
 const travelImages = Array.from({ length: 20 }, (_, index) => `C:/fixture/travel-${index}.jpg`);
@@ -53,6 +58,7 @@ assert.equal(travel.renderNodes.filter((node) => node.kind === "connectCard").le
 assert.equal(travel.renderNodes.filter((node) => node.kind === "image").length, travelImages.length);
 assert.equal(travel.qualityReport.actual.images, 20);
 assert.equal(travel.qualityReport.canAutoPublish, true);
+assert.equal(travel.renderNodes.filter((node) => node.kind === "quotation").length, 0);
 assert.deepEqual(TRAVEL_POST_CONTRACT_V1.targetImages, { min: 7, recommended: 10, max: 18 });
 assert.ok(
   travel.renderNodes.some(

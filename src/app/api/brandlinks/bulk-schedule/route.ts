@@ -7,6 +7,11 @@ import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 import { buildCaptureRequiredPayload, parseConnectKind, toStoredConnectKind } from "@/lib/brandconnect-kind";
 import { resolveConnectContract } from "@/lib/connect-contract-store";
+import {
+  addDaysToYmd,
+  normalizeBulkScheduleStartDate,
+  ymdInTimeZone,
+} from "@/lib/bulk-schedule-plan";
 
 interface BulkScheduleBody {
   connectKind?: string;
@@ -40,16 +45,6 @@ function toSafePositiveInt(value: unknown, defaultValue: number, max = 100): num
   const parsed = Math.floor(value);
   if (parsed < 1) return defaultValue;
   return Math.min(parsed, max);
-}
-
-function addDaysToYmd(ymd: string, offsetDays: number): string {
-  const [yearText, monthText, dayText] = ymd.split("-");
-  const year = Number.parseInt(yearText, 10);
-  const month = Number.parseInt(monthText, 10);
-  const day = Number.parseInt(dayText, 10);
-
-  const utcDate = new Date(Date.UTC(year, month - 1, day + offsetDays, 0, 0, 0, 0));
-  return utcDate.toISOString().slice(0, 10);
 }
 
 export async function POST(request: NextRequest) {
@@ -101,13 +96,19 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const pendingCount = await prisma.brandLink.count({
-      where: {
-        connectKind: storedConnectKind,
-        status: "READY",
-        scheduledPublishAt: { not: null },
-      },
-    });
+    const pendingWhere = {
+      connectKind: storedConnectKind,
+      status: "READY",
+      scheduledPublishAt: { not: null },
+    } as const;
+    const [pendingCount, earliestPending] = await Promise.all([
+      prisma.brandLink.count({ where: pendingWhere }),
+      prisma.brandLink.findFirst({
+        where: pendingWhere,
+        orderBy: [{ scheduledPublishAt: "asc" }, { createdAt: "asc" }],
+        select: { scheduledPublishAt: true },
+      }),
+    ]);
 
     if (pendingCount === 0) {
       return NextResponse.json({
@@ -120,7 +121,24 @@ export async function POST(request: NextRequest) {
     }
 
     const targetCount = Math.min(requestedLimit, pendingCount);
-    const endDate = startDate ? addDaysToYmd(startDate, (targetCount - 1) * intervalDays) : null;
+    // 저장 날짜에 빈 날이 있더라도 일괄 예약 결과는 성공 건 기준으로 연속
+    // 배정한다. 이미 지난 날짜는 실행 스크립트에서 다음 예약 가능일로 조정한다.
+    const scheduleTimeZone = process.env.NAVER_SCHEDULE_TIMEZONE || "Asia/Seoul";
+    const inferredStartDate =
+      startDate ??
+      (earliestPending?.scheduledPublishAt
+        ? ymdInTimeZone(earliestPending.scheduledPublishAt, scheduleTimeZone)
+        : null);
+    const effectiveStartDate = inferredStartDate
+      ? normalizeBulkScheduleStartDate(
+          inferredStartDate,
+          new Date(),
+          scheduleTimeZone,
+        )
+      : null;
+    const endDate = effectiveStartDate
+      ? addDaysToYmd(effectiveStartDate, (targetCount - 1) * intervalDays)
+      : null;
 
     const scriptPath = path.join(process.cwd(), "scripts", "bulk-schedule-publish.ts");
     const scriptArgs = [
@@ -129,8 +147,8 @@ export async function POST(request: NextRequest) {
       `--interval-days=${intervalDays}`,
       `--connect-kind=${connectKind}`,
     ];
-    if (startDate) {
-      scriptArgs.push(`--start-date=${startDate}`);
+    if (effectiveStartDate) {
+      scriptArgs.push(`--start-date=${effectiveStartDate}`);
     }
 
     const logDir = path.join(process.cwd(), "logs", "publish-bulk");
@@ -143,7 +161,7 @@ export async function POST(request: NextRequest) {
     fs.writeSync(
       logFd,
       `[${new Date().toISOString()}] bulk schedule start connectKind=${connectKind} targetCount=${targetCount} delayMs=${delayMs} ${
-        startDate ? `startDate=${startDate}` : "scheduleMode=preserve-existing-dates"
+        effectiveStartDate ? `startDate=${effectiveStartDate}` : "scheduleMode=preserve-existing-dates"
       } intervalDays=${intervalDays}\n`
     );
 
@@ -177,9 +195,9 @@ export async function POST(request: NextRequest) {
         targetCount,
         connectKind,
         delayMs,
-        startDate: startDate ?? undefined,
+        startDate: effectiveStartDate ?? undefined,
         endDate: endDate ?? undefined,
-        scheduleMode: startDate ? "reassign-from-start-date" : "preserve-existing-dates",
+        scheduleMode: effectiveStartDate ? "compact-success-sequence" : "preserve-existing-dates",
         intervalDays,
         logFile: logFileRelativePath,
       },

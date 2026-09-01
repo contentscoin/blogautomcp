@@ -6,6 +6,7 @@ import {
   buildChatGptBrowserAutomationEnv,
   isChatGptBrowserAutomationEnabled,
 } from "../src/lib/chatgpt-browser-automation";
+import { addDaysToYmd, compactedScheduleDate } from "../src/lib/bulk-schedule-plan";
 import {
   buildAppUrl,
   notifyAndLogCompletion,
@@ -153,16 +154,6 @@ function formatYmdInTimeZone(date: Date, timeZone: string): string {
   return `${String(parts.year).padStart(4, "0")}-${String(parts.month).padStart(2, "0")}-${String(
     parts.day
   ).padStart(2, "0")}`;
-}
-
-function addDaysToYmd(ymd: string, offsetDays: number): string {
-  const [yearText, monthText, dayText] = ymd.split("-");
-  const year = Number.parseInt(yearText, 10);
-  const month = Number.parseInt(monthText, 10);
-  const day = Number.parseInt(dayText, 10);
-
-  const utcDate = new Date(Date.UTC(year, month - 1, day + offsetDays, 0, 0, 0, 0));
-  return formatYmd(utcDate);
 }
 
 function isScheduleDateTimeSchedulable(ymd: string): boolean {
@@ -346,7 +337,9 @@ async function main() {
       let adjustedStoredDate = false;
 
       if (shouldReassignScheduleDates && startDate) {
-        scheduledDate = addDaysToYmd(startDate, index * options.intervalDays);
+        // 실패한 시도는 날짜 슬롯을 소비하지 않는다. 다음 성공 후보가 같은
+        // 날짜를 이어받아 2일, 4일처럼 예약 사이가 비는 현상을 막는다.
+        scheduledDate = compactedScheduleDate(startDate, successCount, options.intervalDays);
         scheduledPublishAt = createScheduledPublishAt(scheduledDate);
       } else if (!isScheduleDateTimeSchedulable(scheduledDate)) {
         const normalizedStoredDate = normalizeStartDate(scheduledDate);
