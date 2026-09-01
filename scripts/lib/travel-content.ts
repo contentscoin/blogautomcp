@@ -244,7 +244,7 @@ export function formatTravelPageResearchForPrompt(research: TravelPageResearch):
   ].join("\n");
 }
 
-const NON_DESTINATION_TOKEN_PATTERN = /(?:여행|상품|패키지|투어|관광|일정|예약|출발|확정|변경|조건|특가|핫딜|할인|회원|적립|가격|표시가|숙박|호텔|객실|식사|조식|중식|석식|쇼핑|특전|기념품|비누|쿠폰|포함|불포함|교통|항공|직항|시내|자유시간|가이드|인솔자|제공|기준|전용|베스트|추천|리뷰|해외|국내|[가-힣]+몰)$/u;
+const NON_DESTINATION_TOKEN_PATTERN = /(?:여행|상품|패키지|투어|관광|일정|예약|출발|확정|변경|조건|특가|핫딜|할인|회원|적립|가격|표시가|숙박|호텔|객실|식사|조식|중식|석식|쇼핑|특전|기념품|비누|쿠폰|포함|불포함|교통|항공|직항|시내|자유시간|가이드|인솔자|제공|기준|전용|베스트|추천|리뷰|해외|국내|레스토랑|마사지\d*분?|사파리|엔티|[가-힣]+몰)$/u;
 
 function looksLikeDestinationToken(token: string): boolean {
   return (
@@ -394,7 +394,8 @@ export function buildTravelReviewAnalysis(product: {
   if (strengths.length < 2) strengths.push(reviewAngle({ key: "packaged-logistics", label: "교통·숙박 통합 준비", evidence: ["패키지 여행상품"], travelerValue: ["도시 간 예약 부담 감소"], tradeoffs: ["동선 변경 자유도 감소"], verificationNeeds: ["교통 수단", "숙소 위치", "자유시간"] }));
 
   if (facts.destinations.length >= 2 || places.length >= 5) limitations.push(reviewAngle({ key: "wide-route-intensity", label: "넓은 커버리지의 이동 부담", evidence: [duration, ...places.slice(0, 5)], travelerValue: ["다수 지역 압축 경험"], tradeoffs: ["도시 간 이동", "짐 정리", "장소별 체류 단축"], verificationNeeds: ["연박 횟수", "버스·열차 이동시간", "이른 출발 횟수"] }));
-  if (places.some((place) => /융프라우|산|열차|할슈타트/u.test(place))) limitations.push(reviewAngle({ key: "weather-operation-sensitivity", label: "날씨·운행 조건 민감도", evidence: places.filter((place) => /융프라우|산|열차|할슈타트/u.test(place)), travelerValue: ["고산·차창 풍경"], tradeoffs: ["시야 제한", "운행 변경", "대체 일정 가능성"], verificationNeeds: ["대체 일정", "운행 중단 대응"] }));
+  const weatherSensitivePlaces = places.filter((place) => /융프라우|알프스|고산|산악|관광열차|할슈타트/u.test(place));
+  if (weatherSensitivePlaces.length > 0) limitations.push(reviewAngle({ key: "weather-operation-sensitivity", label: "날씨·운행 조건 민감도", evidence: weatherSensitivePlaces, travelerValue: ["고산·차창 풍경"], tradeoffs: ["시야 제한", "운행 변경", "대체 일정 가능성"], verificationNeeds: ["대체 일정", "운행 중단 대응"] }));
   if (places.some((place) => /폼페이|콜로세움|에페소스|구시가지|성/u.test(place))) limitations.push(reviewAngle({ key: "walking-load", label: "유적·구시가지 보행 부담", evidence: places.filter((place) => /폼페이|콜로세움|에페소스|구시가지|성/u.test(place)), travelerValue: ["역사·도시 현장 경험"], tradeoffs: ["장시간 도보", "노면·계단", "계절 피로"], verificationNeeds: ["하루 보행 구간", "휴식 시간", "접근성"] }));
   if (!/(?:호텔|숙소|항공|식사|조식|중식|석식)/u.test(source)) limitations.push(reviewAngle({ key: "base-service-unknown", label: "항공·숙소·식사 조건 미확인", evidence: ["현재 수집 정보 범위"], travelerValue: ["패키지 편의성 판단"], tradeoffs: ["실제 현지 체류시간·편안함·총비용 판단 보류"], verificationNeeds: ["항공편", "숙소 위치·연박", "포함 식사", "입장료·현지 비용"] }));
   if (limitations.length < 2) limitations.push(reviewAngle({ key: "stay-depth-unknown", label: "장소별 체류 깊이 미확인", evidence: ["자유시간·체류시간 정보 부족"], travelerValue: ["대표 장소 방문"], tradeoffs: ["명소 수 대비 경험 깊이 불확실"], verificationNeeds: ["자유시간", "장소별 체류시간", "입장·차창 관광 구분"] }));

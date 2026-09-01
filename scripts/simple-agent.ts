@@ -28,6 +28,12 @@ import {
   NAVER_SEO_TITLE_RULES,
   stripClickbaitFromTitle,
 } from "./lib/blog-writing-style";
+import {
+  CHATGPT_DIRECT_PRIMARY_PROMPT_MAX_CHARS,
+  CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS,
+  compactChatGptEvidence,
+  composeBudgetedChatGptPrompt,
+} from "./lib/chatgpt-direct-prompt";
 import { buildAppUrl, notifyAndLogCompletion } from "./lib/chatbot-notifier";
 import {
   isCandidateProductImageUrl,
@@ -3371,40 +3377,78 @@ function buildGuidanceSummary(context: ChatGPTGuidanceContext): string {
 }
 
 function buildDirectBrowserGptPrompt(
-  systemPrompt: string,
-  userPrompt: string,
+  _systemPrompt: string,
+  _userPrompt: string,
   context: ChatGPTGuidanceContext,
-  minSections: number
+  minSections: number,
+  mode: "primary" | "recovery" = "primary",
 ): string {
   const minimumSectionCount = Math.max(minSections, context.minimumSectionCount);
-
-  return [
-    "아래 정보를 바탕으로 네이버 블로그 발행용 최종 글을 바로 작성해주세요.",
-    "중요: 추가 질문, 확인 질문, 설명 문장 없이 JSON만 출력하세요.",
-    `- 출력 키: title, ${context.connectKind === "SHOPPING" ? "evidenceFacts, " : ""}sections, hashtags`,
-    context.connectKind === "SHOPPING"
-      ? "- evidenceFacts는 첨부 상세이미지에서 직접 읽은 제품 고유 수치·기능·구성만 3~12개 기록"
-      : "",
-    `- sections는 내용의 근거 밀도에 따라 ${minimumSectionCount}~${context.maximumSectionCount}개 범위에서 선택`,
-    `- ${context.targetSectionCount}개는 중앙 참고값이며 정확한 할당량이 아님`,
-    "- sections 각 항목은 '소제목\\n\\n본문' 형태",
-    "- 제목과 소제목에는 이모지 금지",
-    "- 모바일 가독성을 위해 짧은 문장과 자연스러운 줄바꿈 사용",
-    "- 과장/허위 체험 표현 금지",
-    `- 구매 URL은 sections에 직접 쓰지 말고, 시스템이 ${context.connectKind === "TRAVEL" ? "여행커넥트" : "쇼핑커넥트"} 컴포넌트로 별도 삽입합니다.`,
-    "- 하네스의 목적·근거·판단 초점은 작성 재료입니다. 그 문구를 완성 문장처럼 그대로 복사하지 마세요.",
-    BLOG_HUMANIZE_MOBILE_STYLE ? buildHumanMobileStyleGuide() : "",
-    "- 코드블록 금지",
-    "",
-    context.connectKind === "TRAVEL" ? "[여행상품/발행 정보]" : "[상품/발행 정보]",
-    buildGuidanceSummary(context),
-    "",
-    "[시스템 지시사항]",
-    systemPrompt,
-    "",
-    "[사용자 요청]",
-    userPrompt,
+  const isTravel = context.connectKind === "TRAVEL";
+  const maxChars = mode === "recovery"
+    ? CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS
+    : CHATGPT_DIRECT_PRIMARY_PROMPT_MAX_CHARS;
+  const descriptionBudget = mode === "recovery" ? 1_350 : 2_250;
+  const editorialBudget = mode === "recovery" ? 1_500 : 2_900;
+  const seoBudget = mode === "recovery" ? 350 : 650;
+  const productFacts = isTravel
+    ? [
+        `여행상품명: ${context.productName}`,
+        `원본 설명·일정: ${compactChatGptEvidence(context.description, descriptionBudget) || "수집 정보 없음"}`,
+        `확인된 조건·방문지: ${compactChatGptEvidence(context.features.join(" / "), 900) || "추가 확인 필요"}`,
+        `표시 가격: ${context.price || "출발일별 확인 필요"}`,
+      ]
+    : [
+        `상품명: ${context.productName}`,
+        `상세 설명: ${compactChatGptEvidence(context.description, descriptionBudget) || "수집 정보 없음"}`,
+        `확인된 특징: ${compactChatGptEvidence(context.features.join(" / "), 900) || "추가 확인 필요"}`,
+        `가격/원가/할인: ${context.price || "미확인"} / ${context.originalPrice || "미확인"} / ${context.discountRate || "미확인"}`,
+        `쿠폰/배송/리뷰/평점: ${context.couponInfo || "없음"} / ${context.deliveryInfo || "미확인"} / ${context.reviewCount || "미확인"} / ${context.rating || "미확인"}`,
+      ];
+  const editorialEvidence = compactChatGptEvidence(context.editorialPromptBlock, editorialBudget);
+  const seoEvidence = compactChatGptEvidence(
+    formatOpenCrabSeoBriefForPrompt(context.openCrabSeoBrief ?? null),
+    seoBudget,
+  );
+  const sectionIdeas = compactChatGptEvidence(context.editorialSectionTitles.join(" / "), 650);
+  const prefix = [
+    mode === "recovery"
+      ? "이전 웹 자동작성은 과도한 입력 때문에 멈췄습니다. 아래 압축 근거만 사용해 즉시 완성하세요."
+      : "아래 확인 근거만 사용해 네이버 블로그 발행용 최종 글을 작성하세요.",
+    "추가 질문이나 작업 설명 없이 JSON 하나만 출력하세요.",
+    isTravel
+      ? "여행 글은 일정과 방문지의 실제 매력, 이동·체류·체력의 대가, 적합한 여행자를 해석하세요. 예약 안내문처럼 쓰지 마세요."
+      : "쇼핑 글은 제품 고유 기능과 구조가 실제 사용 장면에서 주는 장점·한계·추천 대상을 판단하세요. 구매 가이드 문구만 나열하지 마세요.",
+    "실제 사용·구매·방문 경험은 제공되지 않았으므로 체험한 것처럼 꾸미지 마세요.",
+    "미확인 사실은 만들지 말고, 같은 경고나 확인 필요 문장을 여러 섹션에서 반복하지 마세요.",
+    "하네스 문구는 분석 재료일 뿐 본문에 복사하지 마세요.",
   ].join("\n");
+  const evidence = [
+    isTravel ? "[여행상품 사실]" : "[제품 사실]",
+    ...productFacts,
+    editorialEvidence ? "[분석 근거]\n" + editorialEvidence : "",
+    seoEvidence ? "[SEO 참고]\n" + seoEvidence : "",
+    sectionIdeas ? "[전개 후보]\n" + sectionIdeas : "",
+  ].filter(Boolean).join("\n");
+  const suffix = [
+    "[작성 계약]",
+    `- 제목 25~35자, 핵심 검색어를 앞쪽에 배치하고 제목·소제목에 이모지를 쓰지 않습니다.`,
+    `- sections는 근거 밀도에 따라 ${minimumSectionCount}~${context.maximumSectionCount}개, 각 항목은 '소제목\\n\\n본문' 형태입니다.`,
+    "- 짧고 자연스러운 ~요체 문장으로 쓰되 같은 문장 구조와 키워드 반복을 피합니다.",
+    "- 확인된 사실 → 독자에게 주는 의미 → 장점 또는 대가가 연결된 판단을 최소 3곳에 넣습니다.",
+    `- URL은 쓰지 않습니다. ${isTravel ? "여행커넥트" : "쇼핑커넥트"} 카드는 시스템이 별도로 삽입합니다.`,
+    isTravel
+      ? "- 원본 일정에 나온 장소만 다루고, 코스 속 역할과 여행 준비에 유용한 안정적 정보를 함께 설명합니다."
+      : "- evidenceFacts에는 첨부 이미지와 수집 정보에서 직접 확인한 제품 고유 수치·기능·구성만 3~12개 기록합니다.",
+    "- 해시태그는 검색 의도가 분명한 3~5개만 작성합니다.",
+    "- 코드블록은 쓰지 않습니다.",
+    "[출력 JSON]",
+    isTravel
+      ? '{"title":"제목","sections":["소제목\\n\\n본문"],"hashtags":["태그"]}'
+      : '{"title":"제목","evidenceFacts":["확인 사실"],"sections":["소제목\\n\\n본문"],"hashtags":["태그"]}',
+  ].join("\n");
+
+  return composeBudgetedChatGptPrompt({ prefix, evidence, suffix, maxChars });
 }
 
 async function runDirectChatGPTGeneration(
@@ -3439,16 +3483,19 @@ async function runDirectChatGPTGeneration(
     await ensureFreshChatGPTConversation(page, label);
     // 이미지 분석이 ChatGPT 웹에서 장시간 멈추는 경우가 있으므로 복구 시도는
     // 이미 수집한 OCR/상품 근거가 포함된 텍스트 프롬프트만 전송한다.
-    console.log(`      - ${label} 자동 재시도는 이미지 없이 수집된 텍스트 근거로 진행합니다.`);
+    const recoveryPrompt = buildDirectBrowserGptPrompt(
+      systemPrompt,
+      userPrompt,
+      context,
+      minSections,
+      "recovery",
+    );
+    console.log(
+      `      - ${label} 자동 재시도는 이미지 없이 ${recoveryPrompt.length.toLocaleString("ko-KR")}자 압축 근거로 진행합니다.`,
+    );
     reply = await sendPromptToChatGPT(
       page,
-      [
-        "이전 자동작성 응답이 멈춰 재시도합니다.",
-        "첨부 이미지 처리를 반복하지 말고 아래에 정리된 상품 분석과 텍스트 근거만 사용하세요.",
-        "추가 설명 없이 요청한 최종 JSON을 한 번에 완성해주세요.",
-        "",
-        prompt,
-      ].join("\n"),
+      recoveryPrompt,
       {
         label: `${label} 자동 재시도`,
         idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, 150_000),

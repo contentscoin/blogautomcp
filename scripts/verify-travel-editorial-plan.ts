@@ -66,6 +66,22 @@ assert.deepEqual(pageResearchFacts.destinations, ["시드니"]);
 assert.ok(pageResearchFacts.highlights.includes("오페라하우스"));
 assert.ok(pageResearchFacts.highlights.includes("블루마운틴"));
 
+const phuQuocFacts = extractTravelProductFacts(
+  "푸꾸옥 패키지 3박5일 쇼핑엔티 혼똔섬 빈펄사파리 빈산레스토랑 마사지60분 티웨이항공변경",
+);
+assert.deepEqual(phuQuocFacts.destinations, ["푸꾸옥", "혼똔섬"]);
+const phuQuocAnalysis = buildTravelReviewAnalysis({
+  name: "푸꾸옥 패키지 3박5일 쇼핑엔티 혼똔섬 빈펄사파리 빈산레스토랑 마사지60분 티웨이항공변경",
+  description: "",
+  features: [],
+  price: "530,007원",
+});
+assert.equal(
+  phuQuocAnalysis.limitations.some((item) => item.key === "weather-operation-sensitivity"),
+  false,
+  "빈산레스토랑의 '산'을 고산 여행 신호로 오인하면 안 됩니다.",
+);
+
 const product = {
   name: "[출발확정/여행핫딜] 스위스/이탈리아 2국 9일 <노쇼핑/융프라우/루체른/관광열차/피사/폼페이/콜로세움내부>",
   description: "",

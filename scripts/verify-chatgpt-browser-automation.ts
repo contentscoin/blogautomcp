@@ -23,12 +23,33 @@ import {
   isChatGptReplyTextStalled,
   recordChatGptReplyText,
 } from "./lib/chatgpt-reply-progress";
+import {
+  CHATGPT_DIRECT_PRIMARY_PROMPT_MAX_CHARS,
+  CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS,
+  compactChatGptEvidence,
+  composeBudgetedChatGptPrompt,
+} from "./lib/chatgpt-direct-prompt";
 
 function source(relativePath: string): string {
   return fs.readFileSync(path.join(process.cwd(), relativePath), "utf8");
 }
 
 async function main(): Promise<void> {
+  const duplicatedEvidence = Array.from({ length: 200 }, (_, index) =>
+    index % 2 === 0 ? "- 같은 문체 규칙" : `- ${index}일차 일정 근거`,
+  ).join("\n");
+  const compactedEvidence = compactChatGptEvidence(duplicatedEvidence, 700);
+  assert.equal(compactedEvidence.match(/같은 문체 규칙/gu)?.length, 1);
+  assert.ok(compactedEvidence.length <= 700);
+  const budgetedPrompt = composeBudgetedChatGptPrompt({
+    prefix: "압축 프롬프트",
+    evidence: duplicatedEvidence,
+    suffix: '{"title":"제목"}',
+    maxChars: CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS,
+  });
+  assert.ok(budgetedPrompt.length <= CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS);
+  assert.match(budgetedPrompt, /\{"title":"제목"\}$/u);
+
   const started = createChatGptReplyProgress(1_000);
   assert.equal(isChatGptReplyTextStalled(started, 180_999, 180_000), false);
   assert.equal(isChatGptReplyTextStalled(started, 181_000, 180_000), true);
@@ -200,8 +221,12 @@ async function main(): Promise<void> {
   assert.match(simpleAgent, /텍스트 진행 정지 감지/u);
   assert.match(simpleAgent, /새 대화에서 1회 자동 재시도/u);
   assert.match(simpleAgent, /ensureFreshChatGPTConversation/u);
-  assert.match(simpleAgent, /자동 재시도는 이미지 없이 수집된 텍스트 근거로 진행합니다/u);
-  assert.match(simpleAgent, /첨부 이미지 처리를 반복하지 말고/u);
+  assert.match(simpleAgent, /CHATGPT_DIRECT_PRIMARY_PROMPT_MAX_CHARS/u);
+  assert.match(simpleAgent, /CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS/u);
+  assert.match(simpleAgent, /자동 재시도는 이미지 없이 .*자 압축 근거로 진행합니다/u);
+  assert.match(simpleAgent, /mode: "primary" \| "recovery"/u);
+  assert.equal(CHATGPT_DIRECT_PRIMARY_PROMPT_MAX_CHARS, 8_500);
+  assert.equal(CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS, 5_500);
   const directGenerationBlock = simpleAgent.match(
     /async function runDirectChatGPTGeneration[\s\S]*?\n\}\n\nfunction buildClarificationReply/u,
   )?.[0] ?? "";
