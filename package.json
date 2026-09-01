@@ -1,6 +1,6 @@
 {
   "name": "brandconnect-automation",
-  "version": "1.2.11",
+  "version": "1.2.12",
   "description": "네이버 쇼핑 커넥트(브랜드커넥트) 자동 블로그 포스팅 도구",
   "private": true,
   "workspaces": [
@@ -31,6 +31,7 @@
     "test:brand-post-quality": "npx ts-node --project tsconfig.scripts.json scripts/verify-brand-post-quality-reinforcement.ts",
     "test:chatgpt-browser-automation": "npx ts-node --project tsconfig.scripts.json scripts/verify-chatgpt-browser-automation.ts",
     "test:chatgpt-browser-ui": "node scripts/verify-chatgpt-browser-mode-ui.mjs",
+    "test:codex-draft-provider": "npx ts-node --project tsconfig.scripts.json scripts/verify-codex-draft-provider.ts",
     "test:post-composition": "npx ts-node --project tsconfig.scripts.json scripts/verify-post-composition-contract.ts",
     "test:image-dedup": "npx ts-node --project tsconfig.scripts.json scripts/verify-image-dedup.ts",
     "test:brandlink-image-readiness": "npx ts-node --project tsconfig.scripts.json scripts/verify-brandlink-image-readiness.ts",
@@ -64,6 +65,7 @@
   "main": "scripts/electron/main.cjs",
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
+    "@openai/codex-sdk": "^0.151.0",
     "@prisma/client": "^5.22.0",
     "date-fns": "^4.1.0",
     "dotenv": "^17.2.3",

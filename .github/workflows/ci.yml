@@ -43,7 +43,7 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Lint
-        run: npx eslint src scripts/verify-connect-item-detection.ts scripts/verify-connect-contract-store.ts scripts/verify-title-rules.ts scripts/verify-brand-post-package.ts scripts/verify-brandlink-product-list.ts scripts/verify-chatgpt-browser-automation.ts scripts/verify-chatgpt-browser-mode-ui.mjs scripts/verify-chatgpt-draft-handoff-ui.mjs
+        run: npx eslint src scripts/verify-connect-item-detection.ts scripts/verify-connect-contract-store.ts scripts/verify-title-rules.ts scripts/verify-brand-post-package.ts scripts/verify-brandlink-product-list.ts scripts/verify-chatgpt-browser-automation.ts scripts/verify-chatgpt-browser-mode-ui.mjs scripts/verify-chatgpt-draft-handoff-ui.mjs scripts/verify-codex-draft-provider.ts
 
       - name: Unit checks
         run: |
@@ -56,6 +56,7 @@ jobs:
           npm run test:repository-techniques
           npm run test:brandlink-product-list
           npm run test:chatgpt-browser-automation
+          npm run test:codex-draft-provider
 
       # npm run build = prisma generate + 임시 생성물 정리 + next build --webpack.
       # 데스크톱 패키징(desktop:pack)이 쓰는 것과 같은 빌드 경로다.

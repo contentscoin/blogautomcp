@@ -128,6 +128,7 @@ import {
 } from "./lib/product-thumbnail-settings";
 import { buildHumanizeRewritePrompt, HUMANIZE_RULES, scanAiTells } from "./lib/humanize-korean";
 import { createLockedProductThumbnail, createOriginalProductPhotoThumbnail, type ShoppingThumbnailStyle } from "./lib/product-image-lock";
+import { runCodexDraft } from "./lib/codex-draft-provider";
 import { deduplicateImagePaths } from "./lib/image-dedup";
 import { createThreeImageCollage } from "./lib/image-collage";
 import { createProductDetailImageSegments } from "./lib/product-detail-image";
@@ -150,7 +151,7 @@ chromium.use(StealthPlugin());
 
 const prisma = new PrismaClient();
 
-// AI Provider 설정 (openai 또는 gemini)
+// AI Provider 설정 (codex, openai 또는 gemini)
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim() || "";
 const GEMINI_API_KEY = (
   process.env.GEMINI_API_KEY ||
@@ -162,6 +163,13 @@ const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || "120000");
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const REQUESTED_AI_PROVIDER = (process.env.AI_PROVIDER || "openai").toLowerCase();
 const AI_PROVIDER = REQUESTED_AI_PROVIDER;
+const CODEX_DRAFT_MODEL = process.env.CODEX_DRAFT_MODEL?.trim() || "";
+const CODEX_DRAFT_TIMEOUT_MS = Math.max(60_000, Number(process.env.CODEX_DRAFT_TIMEOUT_MS || "300000"));
+const CODEX_DRAFT_REASONING_EFFORT = (
+  process.env.CODEX_DRAFT_REASONING_EFFORT || "medium"
+) as "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+const CODEX_BROWSER_FALLBACK_ENABLED =
+  (process.env.CODEX_BROWSER_FALLBACK_ENABLED || "false").toLowerCase() === "true";
 
 // Gemini 초기화
 const gemini = AI_PROVIDER === "gemini" 
@@ -5305,6 +5313,27 @@ async function generateWithAI(
     } catch (error) {
       const reason = getErrorMessage(error);
       throw new Error(`Browser ChatGPT 실패: ${reason}`);
+    }
+  }
+
+  if (AI_PROVIDER === "codex") {
+    try {
+      return await runCodexDraft({
+        systemPrompt,
+        userPrompt,
+        imagePaths: chatgptImagePaths,
+        timeoutMs: CODEX_DRAFT_TIMEOUT_MS,
+        model: CODEX_DRAFT_MODEL || undefined,
+        reasoningEffort: CODEX_DRAFT_REASONING_EFFORT,
+        onProgress: (message) => console.log(`   ✦ ${message}`),
+      });
+    } catch (error) {
+      const reason = getErrorMessage(error);
+      if (CODEX_BROWSER_FALLBACK_ENABLED && ALLOW_CHATGPT_BROWSER_MODE && chatgptContext) {
+        console.log(`   ⚠️ Codex 작성 실패, ChatGPT 웹 자동작성으로 전환: ${reason}`);
+        return runChatGPTBrowserTwoPass(systemPrompt, userPrompt, chatgptContext, chatgptImagePaths);
+      }
+      throw new Error(`Codex 작성 실패: ${reason}`);
     }
   }
 

@@ -16,15 +16,16 @@ try {
   const settingsResponse = await page.request.get(`${baseUrl}/api/settings`);
   assert.equal(settingsResponse.ok(), true, await settingsResponse.text());
   const settings = await settingsResponse.json();
-  assert.equal(settings.data?.draftCreationMode, "browser-chatgpt");
+  assert.ok(["codex", "browser-chatgpt"].includes(settings.data?.draftCreationMode));
   assert.equal(settings.data?.browserDraftAutomationEnabled, true);
 
   await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
   await page.getByRole("heading", { name: "로컬 프로그램 제어" }).waitFor({ state: "visible" });
+  await page.getByRole("button", { name: /Codex (?:연결|연결 확인)/u }).first().waitFor({ state: "visible" });
   await page.getByRole("button", { name: /ChatGPT 재로그인/u }).waitFor({ state: "visible" });
   await page.getByRole("switch", { name: /(?:백그라운드|웹) 자동작성 켜짐/u }).waitFor({ state: "visible" });
-  await page.locator("button").filter({ hasText: "1. ChatGPT 자동작성" }).first().waitFor({ state: "visible" });
-  await page.getByText(/자동작성 준비됨|ChatGPT 로그인 필요/u).first().waitFor({ state: "visible" });
+  await page.locator("button").filter({ hasText: /1\. (?:Codex로 글 만들기|ChatGPT 자동작성)/u }).first().waitFor({ state: "visible" });
+  await page.getByText(/계정으로 연결됨|자동작성 준비됨|ChatGPT 로그인 필요/u).first().waitFor({ state: "visible" });
 
   assert.deepEqual(pageErrors, []);
   const screenshotPath = path.join(os.tmpdir(), "blogautomcp-chatgpt-browser-mode.png");

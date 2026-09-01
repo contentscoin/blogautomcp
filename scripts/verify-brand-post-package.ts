@@ -112,17 +112,19 @@ async function main() {
     "MCP 제출 경로가 쇼핑 상세이미지 근거를 보존해야 합니다.",
   );
   assert.equal(
-    draftRouteSource.includes('code: "CHATGPT_MCP_DRAFT_REQUIRED"') &&
+    draftRouteSource.includes('"CHATGPT_MCP_DRAFT_REQUIRED"') &&
+      draftRouteSource.includes('"CODEX_LOGIN_REQUIRED"') &&
       draftRouteSource.includes("buildChatGptDraftHandoff"),
     true,
-    "API 키가 없을 때 오류 문장만 반환하지 말고 상품별 ChatGPT 핸드오프를 제공해야 합니다.",
+    "Codex/API 인증이 없을 때 연결 안내와 상품별 ChatGPT 핸드오프를 제공해야 합니다.",
   );
   assert.equal(
     dashboardSource.includes('response.status === 409') &&
+      dashboardSource.includes('"1. Codex로 글 만들기"') &&
       dashboardSource.includes('"1. ChatGPT로 글 만들기"') &&
       dashboardSource.includes("setChatGptDraftHandoff(handoff)"),
     true,
-    "데스크톱 UI는 API 키 없음 응답을 실패 알림이 아닌 ChatGPT 핸드오프 화면으로 처리해야 합니다.",
+    "데스크톱 UI는 Codex 자동작성과 ChatGPT 핸드오프를 모두 지원해야 합니다.",
   );
   assert.equal(
     draftRouteSource.includes('"CHATGPT_BROWSER_LOGIN_REQUIRED"') &&

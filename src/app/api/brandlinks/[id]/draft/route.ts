@@ -21,6 +21,7 @@ import {
   readBrandPostPackage,
 } from "@/lib/brand-post-package";
 import { getPostCompositionContract } from "@/lib/post-composition-contract";
+import { readCodexLocalStatus } from "@/lib/codex-local";
 
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
 
@@ -162,9 +163,15 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const provider = (process.env.AI_PROVIDER || "openai").toLowerCase();
   const hasProviderKey = provider === "gemini"
     ? Boolean((process.env.GEMINI_API_KEY || process.env.GOOGLE_GENERATIVE_AI_API_KEY || "").trim())
-    : Boolean(process.env.OPENAI_API_KEY?.trim());
+    : provider === "openai"
+      ? Boolean(process.env.OPENAI_API_KEY?.trim())
+      : false;
   const browserAutomationEnabled = isChatGptBrowserAutomationEnabled();
-  const useBrowserChatGpt = !action && !hasProviderKey && browserAutomationEnabled;
+  const codexEnabled = (process.env.CODEX_DRAFT_ENABLED || "true").trim().toLowerCase() === "true";
+  const codexStatus = !action && codexEnabled ? readCodexLocalStatus() : null;
+  const useCodex = !action && codexEnabled && Boolean(codexStatus?.authenticated);
+  const useBrowserChatGpt = !action && !useCodex && !hasProviderKey && browserAutomationEnabled;
+  const browserSession = browserAutomationEnabled ? readChatGptBrowserSessionSummary() : null;
   const handoff = () => buildChatGptDraftHandoff({
     productId: link.id,
     productName: link.productName,
@@ -185,18 +192,21 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   }
 
   if (!action) {
-    if (!hasProviderKey && !browserAutomationEnabled) {
+    if (!useCodex && !hasProviderKey && !browserAutomationEnabled) {
       return NextResponse.json({
         success: false,
-        code: "CHATGPT_MCP_DRAFT_REQUIRED",
-        error: "이 PC에는 데스크톱용 AI API 키가 없습니다. ChatGPT 연결로 이어서 만들 수 있습니다.",
+        code: codexEnabled ? "CODEX_LOGIN_REQUIRED" : "CHATGPT_MCP_DRAFT_REQUIRED",
+        error: codexEnabled
+          ? "Codex 로그인이 필요합니다. 로컬 프로그램 제어에서 Codex를 연결해 주세요."
+          : "이 PC에는 데스크톱용 AI API 키가 없습니다. ChatGPT 연결로 이어서 만들 수 있습니다.",
         data: {
           handoff: handoff(),
+          codex: codexStatus,
         },
       }, { status: 409 });
     }
     if (useBrowserChatGpt) {
-      const session = readChatGptBrowserSessionSummary();
+      const session = browserSession || readChatGptBrowserSessionSummary();
       if (!session.isValid) {
         return NextResponse.json({
           success: false,
@@ -223,7 +233,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       ? "mcp-draft-context"
       : action === "submit_generated"
         ? "mcp-draft-submit"
-        : useBrowserChatGpt
+        : useCodex
+          ? "codex-draft"
+          : useBrowserChatGpt
           ? "chatgpt-browser-draft"
           : "api-draft",
   );
@@ -263,6 +275,17 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           BRANDLINK_DRAFT_CONTEXT_OUTPUT: action === "prepare_context" ? contextPath : "",
           BRANDLINK_GENERATED_DRAFT_PATH: action === "submit_generated" ? submittedDraftPath : "",
           ...buildChatGptBrowserAutomationEnv(useBrowserChatGpt),
+          AI_PROVIDER: useCodex ? "codex" : provider,
+          CODEX_DRAFT_ENABLED: useCodex ? "true" : "false",
+          CODEX_BROWSER_FALLBACK_ENABLED:
+            useCodex && browserAutomationEnabled && browserSession?.isValid ? "true" : "false",
+          ALLOW_CHATGPT_BROWSER_MODE:
+            useCodex && browserAutomationEnabled && browserSession?.isValid
+              ? "true"
+              : useBrowserChatGpt
+                ? "true"
+                : "false",
+          BROWSER_GPT_MODE: useBrowserChatGpt ? "true" : "false",
           HUMAN_MOBILE_POLISH_ENABLED: "true",
           BLOG_HUMANIZE_REWRITE_ENABLED: action === "submit_generated" ? "false" : "true",
           PRODUCT_THUMBNAIL_CHATGPT_ENABLED: "false",
@@ -335,6 +358,15 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         },
         logPath,
       }, { status: 409 });
+    }
+    if (useCodex) {
+      return NextResponse.json({
+        success: false,
+        code: "CODEX_DRAFT_FAILED",
+        error: `Codex 원고 작성에 실패했습니다: ${message}`,
+        data: { handoff: handoff(), codex: codexStatus },
+        logPath,
+      }, { status: 500 });
     }
     return NextResponse.json({ success: false, error: message, logPath }, { status: 500 });
   } finally {

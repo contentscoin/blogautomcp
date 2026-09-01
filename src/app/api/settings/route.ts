@@ -10,6 +10,7 @@ import * as path from "path";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { isChatGptBrowserAutomationEnabled } from "@/lib/chatgpt-browser-automation";
 import { getEnvFilePath } from "../../../../scripts/lib/app-paths";
+import { readCodexLocalStatus } from "@/lib/codex-local";
 
 interface FieldDef {
   key: string;
@@ -23,7 +24,16 @@ interface FieldDef {
 
 // 편집 허용 키 화이트리스트(임의 env 노출/주입 방지).
 const FIELDS: FieldDef[] = [
-  { key: "AI_PROVIDER", label: "AI 공급자", type: "select", options: ["openai", "gemini"], hint: "글 생성 엔진" },
+  { key: "AI_PROVIDER", label: "AI 공급자", type: "select", options: ["codex", "openai", "gemini"], defaultValue: "codex", hint: "글 생성 엔진" },
+  {
+    key: "CODEX_DRAFT_ENABLED",
+    label: "Codex 원고 작성",
+    type: "select",
+    options: ["true", "false"],
+    defaultValue: "true",
+    hint: "로그인된 Codex를 백그라운드 원고 작성 엔진으로 우선 사용합니다.",
+  },
+  { key: "CODEX_DRAFT_MODEL", label: "Codex 모델", type: "text", hint: "비우면 계정의 기본 Codex 모델을 사용합니다." },
   {
     key: "CHATGPT_BROWSER_AUTOMATION_ENABLED",
     label: "ChatGPT 웹 자동작성",
@@ -91,14 +101,18 @@ export async function GET(request: NextRequest) {
     values[f.key] = f.secret ? (configured[f.key] ? MASK : "") : current;
   }
 
-  const provider = (process.env.AI_PROVIDER ?? fileEnv.AI_PROVIDER ?? "openai").trim().toLowerCase();
+  const provider = (process.env.AI_PROVIDER ?? fileEnv.AI_PROVIDER ?? "codex").trim().toLowerCase();
   const desktopDraftProviderConfigured = provider === "gemini"
     ? Boolean((process.env.GEMINI_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY ?? fileEnv.GEMINI_API_KEY ?? fileEnv.GOOGLE_GENERATIVE_AI_API_KEY ?? "").trim())
-    : Boolean((process.env.OPENAI_API_KEY ?? fileEnv.OPENAI_API_KEY ?? "").trim());
+    : provider === "openai"
+      ? Boolean((process.env.OPENAI_API_KEY ?? fileEnv.OPENAI_API_KEY ?? "").trim())
+      : false;
   const browserDraftAutomationEnabled = isChatGptBrowserAutomationEnabled({
     ...fileEnv,
     ...process.env,
   });
+  const codexDraftEnabled = (process.env.CODEX_DRAFT_ENABLED ?? fileEnv.CODEX_DRAFT_ENABLED ?? "true").trim().toLowerCase() === "true";
+  const codexDraft = readCodexLocalStatus();
 
   return NextResponse.json({
     success: true,
@@ -108,7 +122,11 @@ export async function GET(request: NextRequest) {
       configured,
       desktopDraftProviderConfigured,
       browserDraftAutomationEnabled,
-      draftCreationMode: desktopDraftProviderConfigured
+      codexDraftEnabled,
+      codexDraft,
+      draftCreationMode: codexDraftEnabled && codexDraft.authenticated
+        ? "codex"
+        : desktopDraftProviderConfigured
         ? "local-ai"
         : browserDraftAutomationEnabled
           ? "browser-chatgpt"

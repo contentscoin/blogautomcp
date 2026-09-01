@@ -100,6 +100,8 @@ function configureRuntimePaths(projectRoot) {
   const browserChatGptEnabled =
     (process.env.CHATGPT_BROWSER_AUTOMATION_ENABLED || "true").trim().toLowerCase() === "true";
   process.env.CHATGPT_BROWSER_AUTOMATION_ENABLED = browserChatGptEnabled ? "true" : "false";
+  process.env.CODEX_DRAFT_ENABLED = process.env.CODEX_DRAFT_ENABLED || "true";
+  process.env.AI_PROVIDER = process.env.AI_PROVIDER || "codex";
   process.env.BROWSER_GPT_MODE = browserChatGptEnabled ? "true" : "false";
   process.env.ALLOW_CHATGPT_BROWSER_MODE = browserChatGptEnabled ? "true" : "false";
   process.env.CHATGPT_USE_CUSTOM_GPTS = "false";
