@@ -10,6 +10,10 @@ on:
         description: "설치파일을 업로드할 기존 릴리스 태그 (비우면 업로드 안 함)"
         required: false
         default: ""
+      publish_platform:
+        description: "사이트 게시 대상 (all, windows, macos)"
+        required: false
+        default: "all"
   push:
     tags:
       - "v*"
@@ -90,7 +94,11 @@ jobs:
       # 릴리스가 아니라 이 채널(latest.yml)을 보므로, 여기 게시돼야 자동업데이트가
       # 동작한다. INSTALLER_UPLOAD_KEY 시크릿이 없으면 경고만 남기고 건너뛴다.
       - name: Publish to site download channel
-        if: github.ref_type == 'tag' || inputs.release_tag != ''
+        if: >-
+          (github.ref_type == 'tag' || inputs.release_tag != '') &&
+          (github.ref_type == 'tag' || inputs.publish_platform == 'all' ||
+          (inputs.publish_platform == 'windows' && matrix.os == 'windows-latest') ||
+          (inputs.publish_platform == 'macos' && matrix.os == 'macos-latest'))
         shell: bash
         env:
           INSTALLER_UPLOAD_KEY: ${{ secrets.INSTALLER_UPLOAD_KEY }}
