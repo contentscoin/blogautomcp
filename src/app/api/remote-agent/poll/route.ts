@@ -12,7 +12,8 @@ import { getProductThumbnailStorageDir } from "../../../../../scripts/lib/app-pa
 import { createLockedProductThumbnailOnBackground } from "../../../../../scripts/lib/product-image-lock";
 import { createTravelEditorialThumbnail } from "../../../../../scripts/lib/travel-thumbnail";
 import { normalizeProductThumbnailCopy, productThumbnailSettingKey } from "../../../../../scripts/lib/product-thumbnail-settings";
-import { collapseBrandLinkProducts } from "@/lib/brandlink-product-list";
+import { collapseBrandLinkProducts, matchesWritingStatusFilter } from "@/lib/brandlink-product-list";
+import { readBrandPostPackage } from "@/lib/brand-post-package";
 import {
   applyNaverBlogProfile,
   inspectNaverBlogProfile,
@@ -133,19 +134,41 @@ function config() {
   return { siteUrl: activation.siteUrl, token: activation.deviceToken };
 }
 
+function localAppOrigin(request: NextRequest): string {
+  const configured = process.env.LOCAL_APP_ORIGIN?.trim();
+  if (!configured) return request.nextUrl.origin;
+  try {
+    const url = new URL(configured);
+    const localHosts = new Set(["localhost", "127.0.0.1", "::1"]);
+    if (url.protocol !== "http:" || !localHosts.has(url.hostname.toLowerCase()) || url.username || url.password || url.pathname !== "/") {
+      return request.nextUrl.origin;
+    }
+    return url.origin;
+  } catch {
+    return request.nextUrl.origin;
+  }
+}
+
 async function localApi(request: NextRequest, path: string, init?: RequestInit) {
+  const origin = localAppOrigin(request);
   const headers = new Headers(init?.headers);
   headers.set("content-type", "application/json");
   // 서버가 자기 자신을 호출하는 요청이라 브라우저가 붙여주는 Origin/sec-fetch-site가
   // 없다. ADMIN_API_KEY가 설정되지 않은 데스크톱에서는 requireTrustedLocalMutation이
   // 이 부재를 외부 요청으로 보고 403을 돌려줘 MCP 작업이 전부 실패했다.
   // 같은 오리진에서 시작한 요청임을 정확히 표시한다.
-  headers.set("origin", request.nextUrl.origin);
+  headers.set("origin", origin);
   const adminKey = process.env.ADMIN_API_KEY?.trim();
   if (adminKey) headers.set("x-admin-api-key", adminKey);
-  const url = new URL(path, request.nextUrl.origin);
+  const url = new URL(path, origin);
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const response = await fetch(url, { ...init, headers, cache: "no-store" });
+    let response: Response;
+    try {
+      response = await fetch(url, { ...init, headers, cache: "no-store" });
+    } catch (error) {
+      const cause = error instanceof Error && error.cause instanceof Error ? `: ${error.cause.message}` : "";
+      throw new Error(`로컬 API 호출에 실패했습니다: ${url.origin}${url.pathname}${cause}`);
+    }
     const payload = await response.json().catch(() => null);
     if (response.ok && payload?.success !== false) return payload;
     if (response.status === 404 && attempt < 2) {
@@ -170,18 +193,26 @@ async function executeJob(request: NextRequest, job: Job): Promise<unknown> {
   const kind = input.connectKind === "travel" ? "TRAVEL" : "SHOPPING";
   if (job.type === "BRANDCONNECT_LIST_PRODUCTS") {
     const status = typeof input.status === "string" ? input.status.toUpperCase() : "ALL";
+    const writingStatus = typeof input.writingStatus === "string" ? input.writingStatus.toLowerCase() : "all";
+    const matchesWritingStatus = (item: { writingStatus: Parameters<typeof matchesWritingStatusFilter>[0] }) =>
+      matchesWritingStatusFilter(item.writingStatus, writingStatus === "written" || writingStatus === "unwritten" ? writingStatus : "all");
     if (kind === "TRAVEL") {
       // 여행커넥트는 DB에 이미 등록된 링크만 조회하면 추천 피드의 대부분이
       // 사라진다. 로그인 세션의 전체 여행 피드를 읽어 AVAILABLE/등록 상태로
       // 합쳐 반환해 ChatGPT가 실제 후보 수를 볼 수 있게 한다.
-      return localApi(request, `/api/brandlinks/available?status=${encodeURIComponent(status)}`);
+      return localApi(request, `/api/brandlinks/available?status=${encodeURIComponent(status)}&writingStatus=${encodeURIComponent(writingStatus)}`);
     }
     const links = await prisma.brandLink.findMany({
       where: { connectKind: kind, ...(status !== "ALL" ? { status } : {}) },
       orderBy: { updatedAt: "desc" },
       take: 200,
     });
-    const products = collapseBrandLinkProducts(links);
+    const products = collapseBrandLinkProducts(links.map((link) => ({
+      ...link,
+      draftPrepared: (() => {
+        try { return Boolean(readBrandPostPackage(link.id)); } catch { return false; }
+      })(),
+    }))).filter(matchesWritingStatus);
     return {
       connectKind: kind.toLowerCase(),
       count: products.length,

@@ -82,6 +82,13 @@ MCP 도구:
 - `job_get`
 - `job_cancel`
 
+`brandconnect_list_products`는 `connectKind=shopping|travel`로 커넥트를 분리하고,
+`writingStatus=unwritten|written|all`로 작성 여부를 서버에서 판정한다. 여기서 `written`은
+완성된 초안(`drafted`)·예약(`scheduled`)·발행 완료(`published`)만 의미한다. 응답에는
+`writingStatus`와 `writingStatusMeaning`이 포함되며, `READY`라도 저장된 초안 패키지가
+있으면 `drafted`로 분류한다. `status`를 함께 사용하면 예약(`SCHEDULED`)·발행 완료
+(`PUBLISHED`)·진행 중 상태까지 세밀하게 조회할 수 있다.
+
 실제 발행과 예약 발행은 `confirmed=true`가 없으면 거절한다. 쓰기 작업은 `idempotencyKey`를 요구한다. 장시간 작업은 즉시 `jobId`를 반환하고 `job_get`으로 확인한다.
 
 ## 6. PostgreSQL 운영 방식

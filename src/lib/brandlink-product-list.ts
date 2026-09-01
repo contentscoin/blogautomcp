@@ -7,12 +7,17 @@ export type BrandLinkProductListRow = {
   errorMessage: string | null;
   createdAt: Date;
   updatedAt: Date;
+  draftPrepared?: boolean;
 };
+
+export type WritingStatus = "unwritten" | "drafted" | "in_progress" | "scheduled" | "published" | "failed";
 
 export type CollapsedBrandLinkProduct<T extends BrandLinkProductListRow> = T & {
   duplicateCount: number;
   canCreateDraft: boolean;
   statusMeaning: string;
+  writingStatus: WritingStatus;
+  writingStatusMeaning: string;
 };
 
 const STATUS_PRIORITY: Record<string, number> = {
@@ -49,6 +54,7 @@ function statusPriority(status: string): number {
 function isPreferred<T extends BrandLinkProductListRow>(candidate: T, current: T): boolean {
   const priorityDelta = statusPriority(candidate.status) - statusPriority(current.status);
   if (priorityDelta !== 0) return priorityDelta > 0;
+  if (Boolean(candidate.draftPrepared) !== Boolean(current.draftPrepared)) return Boolean(candidate.draftPrepared);
   const updatedDelta = candidate.updatedAt.getTime() - current.updatedAt.getTime();
   if (updatedDelta !== 0) return updatedDelta > 0;
   return candidate.createdAt.getTime() > current.createdAt.getTime();
@@ -71,6 +77,33 @@ function statusMeaning(status: string): string {
     default:
       return "현재 상태를 확인한 뒤 작업하세요.";
   }
+}
+
+export function getWritingStatus(row: Pick<BrandLinkProductListRow, "status" | "draftPrepared">): WritingStatus {
+  const status = row.status.toUpperCase();
+  if (status === "PUBLISHED") return "published";
+  if (status === "SCHEDULED") return "scheduled";
+  if (status === "DRAFTING" || status === "PUBLISHING") return "in_progress";
+  if (status === "FAILED") return "failed";
+  if (row.draftPrepared) return "drafted";
+  return "unwritten";
+}
+
+function writingStatusMeaning(status: WritingStatus): string {
+  switch (status) {
+    case "unwritten": return "아직 작성된 초안이 없습니다.";
+    case "drafted": return "초안이 작성되어 검토 또는 발행할 수 있습니다.";
+    case "in_progress": return "현재 초안 작성 또는 발행 작업이 진행 중입니다.";
+    case "scheduled": return "초안 작성이 완료되었고 예약 발행이 설정되었습니다.";
+    case "published": return "블로그 발행이 완료되었습니다.";
+    case "failed": return "이전 작성 또는 발행 작업이 실패했습니다. 원인을 확인하고 다시 시도할 수 있습니다.";
+  }
+}
+
+export function matchesWritingStatusFilter(status: WritingStatus, filter: "all" | "unwritten" | "written"): boolean {
+  if (filter === "all") return true;
+  const completed = status === "drafted" || status === "scheduled" || status === "published";
+  return filter === "written" ? completed : !completed;
 }
 
 /**
@@ -103,5 +136,7 @@ export function collapseBrandLinkProducts<T extends BrandLinkProductListRow>(
       duplicateCount: count,
       canCreateDraft: item.status === "READY" || item.status === "FAILED",
       statusMeaning: statusMeaning(item.status),
+      writingStatus: getWritingStatus(item),
+      writingStatusMeaning: writingStatusMeaning(getWritingStatus(item)),
     }));
 }

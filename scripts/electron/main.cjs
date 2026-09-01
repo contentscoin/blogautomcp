@@ -87,6 +87,8 @@ function configureRuntimePaths(projectRoot) {
   }
   const userData = app.getPath("userData");
   process.env.DESKTOP_APP_VERSION = app.getVersion();
+  // Keep the local callback on loopback while preserving the app's actual port.
+  process.env.LOCAL_APP_ORIGIN = process.env.LOCAL_APP_ORIGIN || APP_BASE_URL;
   process.env.DESKTOP_USER_DATA = process.env.DESKTOP_USER_DATA || userData;
   process.env.SESSION_STORAGE_DIR = process.env.SESSION_STORAGE_DIR || path.join(userData, "playwright", "storage");
   process.env.DESKTOP_PROJECT_ROOT = process.env.DESKTOP_PROJECT_ROOT || projectRoot;
