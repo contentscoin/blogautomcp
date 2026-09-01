@@ -104,7 +104,7 @@ export async function POST(request: NextRequest) {
   if (activationError) return activationError;
   return NextResponse.json({
     success: true,
-    message: "네이버 발행 세션과 ChatGPT 웹 자동작성 세션을 준비해 주세요.",
+    message: "네이버 발행 세션과 GPT 원고 작성 연결을 준비해 주세요.",
     instructions: {
       naver: [
         "1. 터미널에서 `npm run login` 실행",
@@ -112,9 +112,9 @@ export async function POST(request: NextRequest) {
         "3. 세션이 저장되면 페이지 새로고침",
       ],
       chatgpt: [
-        "1. 프로그램에서 `ChatGPT 재로그인` 선택",
-        "2. 열린 전용 브라우저에서 ChatGPT 로그인 완료",
-        "3. 입력창이 확인되면 세션이 자동 저장되고 창이 닫힘",
+        "1. GPT 연결이 안 될 때만 프로그램에서 `웹 GPT 재로그인` 선택",
+        "2. 열린 전용 브라우저에서 GPT 로그인 완료",
+        "3. 입력창이 확인되면 예비 세션이 자동 저장되고 창이 닫힘",
       ],
     },
   });

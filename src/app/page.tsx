@@ -927,7 +927,7 @@ export default function Dashboard() {
         : draftCreationMode === "chatgpt"
         ? "ChatGPT에서 사용할 상품별 요청문을 준비하고 있습니다."
         : draftCreationMode === "codex"
-          ? "Codex가 백그라운드에서 상품을 분석하고 고품질 원고를 작성하고 있습니다."
+          ? "GPT가 백그라운드에서 상품을 분석하고 고품질 원고를 작성하고 있습니다."
         : draftCreationMode === "browser-chatgpt"
           ? "ChatGPT 백그라운드 작업으로 고품질 글과 이미지 패키지를 자동 작성하고 있습니다."
           : "고품질 글과 이미지 패키지를 만들고 있습니다. 잠시만 기다려 주세요.",
@@ -957,10 +957,10 @@ export default function Dashboard() {
           if (!statusResponse.ok || !statusPayload.success) continue;
           if (statusPayload.data?.job?.status === "succeeded") return;
           if (statusPayload.data?.job?.status === "failed") {
-            throw new Error(statusPayload.data?.job?.error || "Codex 로그인에 실패했습니다.");
+            throw new Error(statusPayload.data?.job?.error || "GPT 로그인에 실패했습니다.");
           }
         }
-        throw new Error("Codex 로그인 확인 시간이 초과되었습니다.");
+        throw new Error("GPT 로그인 확인 시간이 초과되었습니다.");
       };
 
       const requestDraft = async (allowLoginRetry: boolean): Promise<void> => {
@@ -977,14 +977,14 @@ export default function Dashboard() {
         const handoff = payload?.data?.handoff;
 
         if (response.status === 409 && payload?.code === "CODEX_LOGIN_REQUIRED" && allowLoginRetry) {
-          setDashboardNotice({ tone: "info", text: "Codex 로그인 창을 열었습니다. 로그인 후 원고 작성을 자동으로 이어갑니다." });
+          setDashboardNotice({ tone: "info", text: "GPT 로그인 창을 열었습니다. 로그인 후 원고 작성을 자동으로 이어갑니다." });
           const loginResponse = await fetch("/api/codex", { method: "POST" });
           const loginPayload = await loginResponse.json();
-          if (!loginResponse.ok || !loginPayload.success) throw new Error(loginPayload.error || "Codex 로그인을 시작하지 못했습니다.");
+          if (!loginResponse.ok || !loginPayload.success) throw new Error(loginPayload.error || "GPT 로그인을 시작하지 못했습니다.");
           const jobId = loginPayload.data?.job?.id as string | undefined;
           if (jobId) await waitForCodexLogin(jobId);
           await fetchDraftCreationMode();
-          setDashboardNotice({ tone: "info", text: "Codex 연결이 확인됐습니다. 원고를 작성하고 있습니다." });
+          setDashboardNotice({ tone: "info", text: "GPT 연결이 확인됐습니다. 원고를 작성하고 있습니다." });
           await requestDraft(false);
           return;
         }
@@ -2736,7 +2736,7 @@ export default function Dashboard() {
               {[
                 {
                   no: "1",
-                  title: draftCreationMode === "codex" ? "Codex 자동작성" : draftCreationMode === "browser-chatgpt" ? "ChatGPT 자동작성" : "글 준비",
+                  title: draftCreationMode === "codex" ? "GPT 자동작성" : draftCreationMode === "browser-chatgpt" ? "웹 GPT 자동작성" : "글 준비",
                   text: draftCreationMode === "codex" ? "브라우저 없이 백그라운드에서 만들고 미리봅니다" : draftCreationMode === "browser-chatgpt" ? "로그인된 ChatGPT에서 만들고 바로 미리봅니다" : "고품질 초안을 먼저 만듭니다",
                   color: "bg-violet-600",
                 },
@@ -2891,7 +2891,7 @@ export default function Dashboard() {
                                 title={draftCreationMode === "chatgpt"
                                   ? "상품별 요청문을 복사해 연결된 ChatGPT에서 초안을 만듭니다"
                                   : draftCreationMode === "codex"
-                                    ? "연결된 Codex가 백그라운드에서 원고를 작성하고 미리보기를 엽니다"
+                                    ? "연결된 GPT가 백그라운드에서 원고를 작성하고 미리보기를 엽니다"
                                   : draftCreationMode === "browser-chatgpt"
                                     ? "로그인된 ChatGPT 웹에서 초안을 자동 작성하고 미리보기를 엽니다"
                                     : "글·이미지를 먼저 만들고 확인한 뒤 같은 결과를 발행합니다"}
@@ -2903,9 +2903,9 @@ export default function Dashboard() {
                                     : draftCreationMode === "chatgpt"
                                       ? "1. ChatGPT로 글 만들기"
                                       : draftCreationMode === "codex"
-                                        ? "1. Codex로 글 만들기"
+                                        ? "1. GPT로 글 만들기"
                                       : draftCreationMode === "browser-chatgpt"
-                                        ? "1. ChatGPT 자동작성"
+                                        ? "1. 웹 GPT 자동작성"
                                         : "1. 글 준비·확인"}
                               </button>
                               {/* 여행 계약 잠금만 목록에서 표시하고, 실제 발행은 승인 창에서 진행 */}
@@ -2973,7 +2973,7 @@ export default function Dashboard() {
           <h3 className="font-medium text-slate-800 mb-2">💡 사용 방법</h3>
           <ol className="text-sm text-slate-600 space-y-1 list-decimal list-inside">
             <li>네이버 로그인 상태를 확인하고 쇼핑 또는 여행 탭을 선택합니다.</li>
-            <li>상품을 동기화한 뒤 목록에서 <strong>{draftCreationMode === "chatgpt" ? "1. ChatGPT로 글 만들기" : draftCreationMode === "codex" ? "1. Codex로 글 만들기" : draftCreationMode === "browser-chatgpt" ? "1. ChatGPT 자동작성" : "1. 글 준비·확인"}</strong>를 누릅니다.</li>
+            <li>상품을 동기화한 뒤 목록에서 <strong>{draftCreationMode === "chatgpt" ? "1. GPT로 글 만들기" : draftCreationMode === "codex" ? "1. GPT로 글 만들기" : draftCreationMode === "browser-chatgpt" ? "1. 웹 GPT 자동작성" : "1. 글 준비·확인"}</strong>를 누릅니다.</li>
             <li><strong>2. 썸네일</strong>에서 실제 사진과 디자인 스타일을 고릅니다.</li>
             <li>초안을 승인한 뒤 <strong>3. 바로 발행</strong> 또는 예약 발행을 선택합니다.</li>
           </ol>

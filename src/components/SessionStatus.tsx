@@ -155,14 +155,14 @@ export default function SessionStatus() {
     try {
       const response = await fetch("/api/codex", { method: "POST" });
       const payload = await response.json();
-      if (!response.ok || !payload.success) throw new Error(payload.error || "Codex 로그인을 시작하지 못했습니다.");
+      if (!response.ok || !payload.success) throw new Error(payload.error || "GPT 연결을 시작하지 못했습니다.");
       if (!payload.data?.job?.id) {
         setCodex(payload.data?.codex || codex);
-        setNotice(payload.message || "Codex가 이미 연결되어 있습니다.");
+        setNotice(payload.message || "GPT가 이미 연결되어 있습니다.");
         return;
       }
       const jobId = payload.data.job.id as string;
-      setNotice("브라우저에서 Codex 로그인을 완료해 주세요.");
+      setNotice("브라우저에서 GPT 로그인을 완료해 주세요.");
       const deadline = Date.now() + 10 * 60_000;
       while (Date.now() < deadline) {
         await wait(2_000);
@@ -171,17 +171,17 @@ export default function SessionStatus() {
         if (!pollResponse.ok || !pollPayload.success) continue;
         setCodex(pollPayload.data?.codex || null);
         if (pollPayload.data?.job?.status === "succeeded") {
-          setNotice("Codex 연결이 완료됐습니다. 이제 브라우저 없이 원고를 작성합니다.");
+          setNotice("GPT 연결이 완료됐습니다. 이제 브라우저 없이 원고를 작성합니다.");
           window.dispatchEvent(new Event("blogautomcp:draft-mode-changed"));
           return;
         }
         if (pollPayload.data?.job?.status === "failed") {
-          throw new Error(pollPayload.data?.job?.error || "Codex 로그인에 실패했습니다.");
+          throw new Error(pollPayload.data?.job?.error || "GPT 로그인에 실패했습니다.");
         }
       }
-      throw new Error("Codex 로그인 확인 시간이 초과되었습니다.");
+      throw new Error("GPT 로그인 확인 시간이 초과되었습니다.");
     } catch (error) {
-      setNotice(`오류: ${error instanceof Error ? error.message : "Codex 로그인에 실패했습니다."}`);
+      setNotice(`오류: ${error instanceof Error ? error.message : "GPT 로그인에 실패했습니다."}`);
     } finally {
       setCodexConnecting(false);
       await fetchSettings();
@@ -422,20 +422,22 @@ export default function SessionStatus() {
           disabled={codexConnecting}
           className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-cyan-300 hover:bg-cyan-50 disabled:cursor-wait disabled:opacity-60"
         >
-          <span className="text-xl" aria-hidden="true">C</span>
-          <span className="mt-2 block text-sm font-semibold text-slate-900">{codexConnecting ? "Codex 연결 중…" : codex?.authenticated ? "Codex 연결 확인" : "Codex 연결"}</span>
+          <span className="text-xl" aria-hidden="true">G</span>
+          <span className="mt-2 block text-sm font-semibold text-slate-900">{codexConnecting ? "GPT 연결 중…" : codex?.authenticated ? "GPT 연결됨" : "GPT 연결"}</span>
           <span className="mt-1 block text-xs leading-5 text-slate-500">브라우저 없이 쇼핑·여행 원고를 백그라운드 작성</span>
         </button>
-        <button
-          type="button"
-          onClick={() => void startLogin("chatgpt")}
-          disabled={chatGptLoggingIn}
-          className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-violet-300 hover:bg-violet-50 disabled:cursor-wait disabled:opacity-60"
-        >
-          <span className="text-xl" aria-hidden="true">✦</span>
-          <span className="mt-2 block text-sm font-semibold text-slate-900">{chatGptLoggingIn ? "로그인 대기 중…" : "ChatGPT 재로그인"}</span>
-          <span className="mt-1 block text-xs leading-5 text-slate-500">자동 초안 작성에 사용할 전용 웹 세션 저장</span>
-        </button>
+        {!codex?.authenticated ? (
+          <button
+            type="button"
+            onClick={() => void startLogin("chatgpt")}
+            disabled={chatGptLoggingIn}
+            className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-violet-300 hover:bg-violet-50 disabled:cursor-wait disabled:opacity-60"
+          >
+            <span className="text-xl" aria-hidden="true">✦</span>
+            <span className="mt-2 block text-sm font-semibold text-slate-900">{chatGptLoggingIn ? "로그인 대기 중…" : "웹 GPT 재로그인"}</span>
+            <span className="mt-1 block text-xs leading-5 text-slate-500">GPT 연결 장애 시 사용할 예비 웹 세션 저장</span>
+          </button>
+        ) : null}
         <button
           type="button"
           onClick={() => {
@@ -541,22 +543,22 @@ export default function SessionStatus() {
           <div className="flex min-w-0 items-start gap-3">
             <div className={`mt-1 h-3 w-3 shrink-0 rounded-full ${codex?.authenticated ? "bg-emerald-500" : codex?.installed ? "bg-amber-500" : "bg-red-500"}`} />
             <div className="min-w-0">
-              <h3 className="font-medium text-slate-900">Codex 원고 작성</h3>
+              <h3 className="font-medium text-slate-900">GPT 원고 작성</h3>
               <p className="text-sm text-slate-600">{codex?.message || "상태 확인 중"}</p>
-              <p className="mt-1 text-xs text-slate-400">격리된 읽기 전용 환경에서 글만 작성하며 ChatGPT 웹은 장애 시에만 사용합니다.</p>
+              <p className="mt-1 text-xs text-slate-400">연결되면 별도 웹 로그인 확인 없이 백그라운드에서 글을 작성합니다.</p>
               {codex?.error && !codex.authenticated ? <p className="mt-1 text-xs text-amber-700">{codex.error}</p> : null}
               <button type="button" onClick={() => void connectCodex()} disabled={codexConnecting} className="mt-3 rounded-full bg-cyan-100 px-3 py-1.5 text-xs font-semibold text-cyan-800 hover:bg-cyan-200 disabled:opacity-60">
-                {codexConnecting ? "연결 중…" : codex?.authenticated ? "연결 상태 확인" : "Codex 로그인"}
+                {codexConnecting ? "연결 중…" : codex?.authenticated ? "GPT 연결됨" : "GPT 로그인"}
               </button>
             </div>
           </div>
           <button type="button" onClick={() => void fetchSettings()} className="shrink-0 text-xs font-medium text-slate-600 underline underline-offset-2">상태 확인</button>
         </div>
-        <div className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+        {!codex?.authenticated ? <div className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
           <div className="flex min-w-0 items-start gap-3">
             <div className={`mt-1 h-3 w-3 shrink-0 rounded-full ${!browserAutomationEnabled ? "bg-slate-400" : loading ? "bg-slate-400" : getStatusDotClass(chatgpt)}`} />
             <div className="min-w-0">
-              <h3 className="font-medium text-slate-900">ChatGPT 자동작성</h3>
+              <h3 className="font-medium text-slate-900">웹 GPT 예비 연결</h3>
               <p className="text-sm text-slate-600">
                 {!browserAutomationEnabled
                   ? "요청문 전달 방식"
@@ -564,7 +566,7 @@ export default function SessionStatus() {
                     ? "상태 확인 중"
                     : chatgpt?.isValid
                       ? "자동작성 준비됨"
-                      : "ChatGPT 로그인 필요"}
+                      : "웹 GPT 로그인 필요"}
               </p>
               <p className="mt-1 text-xs text-slate-400">평소에는 백그라운드로 작성하고, 로그인·보안 확인이 필요할 때만 창을 엽니다.</p>
               {browserAutomationEnabled && chatgpt?.error ? <p className="mt-1 text-xs text-amber-700">{chatgpt.error}</p> : null}
@@ -582,7 +584,7 @@ export default function SessionStatus() {
             </div>
           </div>
           <button type="button" onClick={() => void fetchSession()} className="shrink-0 text-xs font-medium text-slate-600 underline underline-offset-2">상태 확인</button>
-        </div>
+        </div> : null}
         <div className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
           <div className="flex items-start gap-3">
             <div className={`mt-1 h-3 w-3 shrink-0 rounded-full ${updateStatusDotClass(update)}`} />

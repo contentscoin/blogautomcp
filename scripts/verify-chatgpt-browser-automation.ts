@@ -204,12 +204,12 @@ async function main(): Promise<void> {
   assert.match(brandLinkRoute, /notIn: \["DRAFTING", "PUBLISHING"\]/u);
 
   const dashboard = source("src/app/page.tsx");
-  assert.match(dashboard, /1\. ChatGPT 자동작성/u);
+  assert.match(dashboard, /1\. 웹 GPT 자동작성/u);
   assert.match(dashboard, /provider: "chatgpt", force: false/u);
   assert.match(dashboard, /await requestDraft\(false\)/u);
 
   const sessionStatus = source("src/components/SessionStatus.tsx");
-  assert.match(sessionStatus, /ChatGPT 재로그인/u);
+  assert.match(sessionStatus, /웹 GPT 재로그인/u);
   assert.match(sessionStatus, /CHATGPT_BROWSER_AUTOMATION_ENABLED/u);
 
   const simpleAgent = source("scripts/simple-agent.ts");

@@ -363,7 +363,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       return NextResponse.json({
         success: false,
         code: "CODEX_DRAFT_FAILED",
-        error: `Codex 원고 작성에 실패했습니다: ${message}`,
+        error: `GPT 원고 작성에 실패했습니다: ${message}`,
         data: { handoff: handoff(), codex: codexStatus },
         logPath,
       }, { status: 500 });

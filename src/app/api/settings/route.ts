@@ -27,13 +27,13 @@ const FIELDS: FieldDef[] = [
   { key: "AI_PROVIDER", label: "AI 공급자", type: "select", options: ["codex", "openai", "gemini"], defaultValue: "codex", hint: "글 생성 엔진" },
   {
     key: "CODEX_DRAFT_ENABLED",
-    label: "Codex 원고 작성",
+    label: "GPT 원고 작성",
     type: "select",
     options: ["true", "false"],
     defaultValue: "true",
-    hint: "로그인된 Codex를 백그라운드 원고 작성 엔진으로 우선 사용합니다.",
+    hint: "로그인된 GPT를 백그라운드 원고 작성 엔진으로 우선 사용합니다.",
   },
-  { key: "CODEX_DRAFT_MODEL", label: "Codex 모델", type: "text", hint: "비우면 계정의 기본 Codex 모델을 사용합니다." },
+  { key: "CODEX_DRAFT_MODEL", label: "GPT 작성 모델", type: "text", hint: "비우면 연결 계정의 기본 작성 모델을 사용합니다." },
   {
     key: "CHATGPT_BROWSER_AUTOMATION_ENABLED",
     label: "ChatGPT 웹 자동작성",

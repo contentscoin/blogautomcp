@@ -21,11 +21,17 @@ try {
 
   await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
   await page.getByRole("heading", { name: "로컬 프로그램 제어" }).waitFor({ state: "visible" });
-  await page.getByRole("button", { name: /Codex (?:연결|연결 확인)/u }).first().waitFor({ state: "visible" });
-  await page.getByRole("button", { name: /ChatGPT 재로그인/u }).waitFor({ state: "visible" });
-  await page.getByRole("switch", { name: /(?:백그라운드|웹) 자동작성 켜짐/u }).waitFor({ state: "visible" });
-  await page.locator("button").filter({ hasText: /1\. (?:Codex로 글 만들기|ChatGPT 자동작성)/u }).first().waitFor({ state: "visible" });
-  await page.getByText(/계정으로 연결됨|자동작성 준비됨|ChatGPT 로그인 필요/u).first().waitFor({ state: "visible" });
+  await page.getByRole("button", { name: /GPT (?:연결|연결됨)/u }).first().waitFor({ state: "visible" });
+  await page.locator("button").filter({ hasText: /1\. (?:GPT로 글 만들기|웹 GPT 자동작성)/u }).first().waitFor({ state: "visible" });
+  await page.getByText(/GPT 계정 연결됨|자동작성 준비됨|웹 GPT 로그인 필요/u).first().waitFor({ state: "visible" });
+
+  if (settings.data.draftCreationMode === "codex") {
+    assert.equal(await page.getByRole("button", { name: /웹 GPT 재로그인/u }).count(), 0);
+    assert.equal(await page.getByRole("heading", { name: "웹 GPT 예비 연결" }).count(), 0);
+  } else {
+    await page.getByRole("button", { name: /웹 GPT 재로그인/u }).waitFor({ state: "visible" });
+    await page.getByRole("switch", { name: /(?:백그라운드|웹) 자동작성 켜짐/u }).waitFor({ state: "visible" });
+  }
 
   assert.deepEqual(pageErrors, []);
   const screenshotPath = path.join(os.tmpdir(), "blogautomcp-chatgpt-browser-mode.png");

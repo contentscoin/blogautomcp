@@ -100,7 +100,7 @@ export function readCodexLocalStatus(): CodexLocalStatus {
       installed: false,
       authenticated: false,
       method: null,
-      message: "Codex 실행 파일을 찾을 수 없습니다.",
+      message: "GPT 연결 모듈을 찾을 수 없습니다.",
       error: "프로그램 업데이트 또는 재설치가 필요합니다.",
     };
   }
@@ -119,7 +119,7 @@ export function readCodexLocalStatus(): CodexLocalStatus {
     installed: true,
     authenticated,
     method,
-    message: authenticated ? `${method || "OpenAI"} 계정으로 연결됨` : "Codex 로그인 필요",
+    message: authenticated ? "GPT 계정 연결됨" : "GPT 로그인 필요",
     error: authenticated ? null : output.slice(0, 500) || result.error?.message || null,
   };
 }

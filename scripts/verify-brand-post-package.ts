@@ -120,11 +120,11 @@ async function main() {
   );
   assert.equal(
     dashboardSource.includes('response.status === 409') &&
-      dashboardSource.includes('"1. Codex로 글 만들기"') &&
+      dashboardSource.includes('"1. GPT로 글 만들기"') &&
       dashboardSource.includes('"1. ChatGPT로 글 만들기"') &&
       dashboardSource.includes("setChatGptDraftHandoff(handoff)"),
     true,
-    "데스크톱 UI는 Codex 자동작성과 ChatGPT 핸드오프를 모두 지원해야 합니다.",
+    "데스크톱 UI는 GPT 자동작성과 ChatGPT 핸드오프를 모두 지원해야 합니다.",
   );
   assert.equal(
     draftRouteSource.includes('"CHATGPT_BROWSER_LOGIN_REQUIRED"') &&
@@ -135,7 +135,7 @@ async function main() {
     "API 키가 없을 때 로그인된 ChatGPT 웹 자동작성과 안전한 핸드오프 폴백을 모두 지원해야 합니다.",
   );
   assert.equal(
-    dashboardSource.includes('"1. ChatGPT 자동작성"') &&
+    dashboardSource.includes('"1. 웹 GPT 자동작성"') &&
       dashboardSource.includes('provider: "chatgpt", force: false') &&
       dashboardSource.includes("await requestDraft(false)"),
     true,
