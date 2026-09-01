@@ -120,6 +120,12 @@ export interface TravelReviewSubstanceAssessment {
   requiredPlaceCount: number;
   evidenceJudgementCount: number;
   requiredEvidenceJudgementCount: number;
+  backgroundFactCount: number;
+  atmosphereCount: number;
+  activityCount: number;
+  practicalTipCount: number;
+  vagueToneCount: number;
+  productDetailCount: number;
 }
 
 function clean(value: string): string {
@@ -280,15 +286,13 @@ export function travelPageResearchFeatures(research: TravelPageResearch): string
 
 export function formatTravelPageResearchForPrompt(research: TravelPageResearch): string {
   return [
-    "## 원본 여행상품 일정 근거 v1",
-    "- 아래 내용은 네이버 패키지 원본 페이지의 구조화 데이터에서 수집했습니다. 상품 구성과 일정 판단의 1차 근거로 사용합니다.",
+    "## 여행지 리서치용 원본 일정 v2",
+    "- 아래 내용은 네이버 패키지 원본 페이지에서 수집한 방문지 식별 자료입니다. 본문에는 가격·포함조건을 요약하지 말고, 등장 장소를 조사하는 데만 사용합니다.",
     `- 여행 기간: ${research.durationDays ? `${research.durationDays}일` : "확인 필요"}`,
     `- 목적지: ${research.destinations.join(", ") || "확인 필요"}`,
-    `- 항공: ${research.flights.join(" / ") || "확인 필요"}`,
     `- 핵심 방문지: ${research.highlights.map((item) => item.name).join(", ") || "확인 필요"}`,
-    ...research.schedules.map((schedule) => `- ${schedule.day}일차: ${schedule.activities.filter((item) => item.length <= 80).slice(0, 14).join(" → ") || "이동 일정"}${schedule.meals.length ? ` | 식사 ${schedule.meals.join(", ")}` : ""}${schedule.transport ? ` | 교통 ${schedule.transport}` : ""}`),
-    `- 쇼핑 일정: ${research.shopping.join(" / ") || "별도 표기 없음"}`,
-    "- 상품 판매 문구의 수식어는 사실로 확대하지 말고, 일정에 실제 포함된 장소·이동·식사·쇼핑만 평가합니다.",
+    ...research.schedules.map((schedule) => `- ${schedule.day}일차 방문 흐름: ${schedule.activities.filter((item) => item.length <= 80).slice(0, 14).join(" → ") || "이동 일정"}`),
+    "- 상품 판매 수식어는 버리고, 일정에 실제 등장한 장소의 역사·문화·풍경·활동·음식·사진·동선 팁을 별도로 조사합니다.",
   ].join("\n");
 }
 
@@ -355,12 +359,11 @@ export function extractTravelProductFacts(
 
 export function formatTravelFactsForPrompt(facts: TravelProductFacts): string {
   return [
-    "## 여행상품 전용 사실 카드",
+    "## 여행지 조사 대상 카드",
     `- 여행 기간: ${facts.duration || "확인 필요"}`,
     `- 목적지 후보: ${facts.destinations.join(", ") || "상품명에서 확인 필요"}`,
     `- 일정/관광 포인트: ${facts.highlights.join(", ") || "상세 예약 페이지에서 확인 필요"}`,
-    `- 확인된 조건: ${facts.conditions.join(", ") || "상세 예약 페이지에서 확인 필요"}`,
-    "- 이 카드는 상품명과 수집된 상세정보에서 추출한 범위만 사용합니다.",
+    "- 이 카드는 상품 설명용이 아니라 여행지 웹 리서치 대상을 정하는 데만 사용합니다.",
   ].join("\n");
 }
 
@@ -472,26 +475,17 @@ export function hasSufficientTravelReviewEvidence(product: { name: string; descr
   return buildTravelReviewAnalysis(product).evidenceLevel !== "sparse";
 }
 
-function formatReviewAngle(item: TravelReviewAngle, index: number, kind: "장점" | "제약"): string {
-  return `- ${kind} 후보 ${index + 1}: 주제=${item.label} | 근거=${item.evidence.join(", ") || "없음"} | 여행자 가치=${item.travelerValue.join(", ") || "추론 금지"} | 대가=${item.tradeoffs.join(", ") || "없음"} | 확인 필요=${item.verificationNeeds.join(", ") || "없음"}`;
-}
-
 export function formatTravelReviewAnalysisForPrompt(analysis: TravelReviewAnalysis): string {
   return [
-    "## 여행상품 리뷰 해석 데이터 v3 · 문장 생성 금지",
-    "- 아래 항목은 완성 원고가 아닌 의미 단위입니다. 표현을 복사하지 말고 상품별 문맥으로 새 문장을 작성합니다.",
+    "## 여행지 리서치 시드 v4 · 상품평 문장 생성 금지",
+    "- 아래 항목은 일정에서 여행지 이름과 이동 범위를 찾기 위한 내부 시드입니다. 상품 장단점 문장으로 옮기지 마세요.",
     `- 상품 유형: ${analysis.productType}`,
-    `- 코스 범위: ${analysis.routeScope.join(", ") || "추가 수집 필요"}`,
-    `- 확인 조건: ${analysis.verifiedConditions.join(", ") || "추가 수집 필요"}`,
+    `- 조사할 지역·장소 후보: ${analysis.routeScope.join(", ") || "추가 수집 필요"}`,
+    `- 일정 식별 표기: ${analysis.verifiedConditions.join(", ") || "없음"}`,
     `- 근거 수준: ${analysis.evidenceLevel}`,
-    ...analysis.strengths.map((item, index) => formatReviewAngle(item, index, "장점")),
-    ...analysis.limitations.map((item, index) => formatReviewAngle(item, index, "제약")),
-    ...analysis.highlightReviews.map((item) => `- 장소 데이터 ${item.name}: 경험=${item.experienceTags.join(", ")} | 코스 역할=${item.routeRole} | 위험=${item.riskTags.join(", ")} | 확인 필요=${item.verificationNeeds.join(", ")}`),
-    `- 추천 대상: ${analysis.bestFor.join(" / ")}`,
-    `- 비추천 대상: ${analysis.notFor.join(" / ")}`,
-    `- 결론 판단축: ${analysis.decisionCriteria.join(" / ")}`,
-    `- 미확인 사실: ${analysis.unresolvedFacts.join(", ") || "없음"}`,
-    "- 각 장소 문단은 장소 정보, 이 상품 안에서의 역할, 이동·시간·체력의 대가를 GPT가 새 문장으로 연결합니다.",
+    ...analysis.highlightReviews.map((item) => `- 조사 대상 ${item.name}: 장면 후보=${item.experienceTags.join(", ")} | 일정 속 역할=${item.routeRole}`),
+    "- 각 장소를 웹에서 조사해 역사·문화 배경, 대표 풍경, 현지 활동, 음식 또는 산책, 촬영 포인트, 실용 팁을 새로 구성합니다.",
+    "- 상품의 장점·단점·추천 대상·가격·포함조건은 본문 핵심 주제로 사용하지 않습니다.",
   ].join("\n");
 }
 
@@ -512,35 +506,33 @@ export function buildTravelContractEditorialPlan(product: {
   const point = (index: number) => points[index] || highlightReview(facts.destinations[index] || `${destination} 코스 ${index + 1}`);
 
   return [
-    editorialSection("이 여행의 한 줄 결론", "가장 큰 여행 가치와 가장 큰 대가를 동시에 판단", `${destination} 대표 실사 풍경`, ["기간", "목적지", "대표 장점", "대표 제약"], ["추천 조건", "대안이 나은 조건"]),
-    editorialSection("이 상품이 주는 여행 경험", "기간과 목적지 조합이 만드는 경험 성격 해석", "서로 다른 코스 장면 2~3장", ["코스 범위", "확인 조건", "장면 유형"], ["개별 예약 대비 편의", "일정 자유도"]),
-    editorialSection("하이라이트가 만드는 코스의 매력", "핵심 방문지의 서로 다른 역할과 장면 변화 해석", `${point(0).name}, ${point(1).name}, ${point(2).name} 실사 사진`, points.slice(0, 3).flatMap((item) => [item.name, ...item.experienceTags]), ["장면 다양성", "장소별 체류 깊이"]),
-    editorialSection("전체 동선과 여행 강도", "방문지 수를 이동·보행·짐 정리 강도로 변환", "일정 요약 카드 또는 이동 동선", ["방문지 순서", "기간", "연박·이동 정보"], ["커버리지", "현지 체류시간", "동행 체력"]),
+    editorialSection(`${destination}, 어떤 여행지일까`, "도시와 지역의 지리·역사·문화 배경을 짧고 선명하게 소개", `${destination} 대표 실사 풍경`, ["공식 관광 자료", "지역 배경", "대표 정체성"], ["이 여행지만의 분위기", "첫 장면"]),
+    editorialSection("도착하면 먼저 만나는 풍경", "거리·건축·자연·사람의 움직임을 독자가 눈앞에 그리도록 묘사", "도착 장면과 거리 풍경 2~3장", ["실제 거리와 경관", "안정적인 장소 사실"], ["빛", "소리", "색감", "공간 분위기"]),
+    editorialSection("일정의 하이라이트를 따라가는 하루", "일정 순서를 브이로그처럼 연결하고 장소마다 장면이 바뀌는 이유를 설명", `${point(0).name}, ${point(1).name}, ${point(2).name} 실사 사진`, points.slice(0, 3).flatMap((item) => [item.name, ...item.experienceTags]), ["하루 흐름", "장면 전환", "놓치지 말아야 할 순간"]),
     ...[0, 1, 2].map((index) => {
       const item = point(index);
-      return editorialSection(`여행지 리뷰 ${index + 1} · ${item.name}`, `${item.name}의 코스 역할과 감수할 조건을 근거로 판단`, `${item.name} 실제 장소 사진 1~2장`, [item.name, ...item.experienceTags, item.routeRole], [item.routeRole, ...item.riskTags, ...item.verificationNeeds]);
+      return editorialSection(`${item.name}에서 꼭 보고 즐길 것`, `${item.name}의 배경지식, 대표 풍경, 할 수 있는 경험과 현장 팁을 구체적으로 전달`, `${item.name} 실제 장소 사진 1~2장`, [item.name, "공식 관광 자료", ...item.experienceTags], ["역사·문화", "현장 분위기", "즐길 거리", "촬영·관람 팁"]);
     }),
-    editorialSection("항공·숙박·식사가 좌우하는 만족도", "패키지 기본 서비스가 실제 체류·휴식·총비용에 미치는 영향 판단", "항공·숙소·식사 또는 일정표 이미지", ["항공편", "숙소 위치·연박", "포함 식사"], ["현지 체류시간", "저녁 자유시간", "추가 지출"]),
-    editorialSection("상품 구성에서 읽히는 장점", "확인 근거가 있는 상품 고유 장점을 중요도에 따라 종합", "각 장점과 연결되는 여행 장면", review.strengths.flatMap((item) => item.evidence), review.strengths.flatMap((item) => [item.label, ...item.travelerValue])),
-    editorialSection("아쉬운 점과 예약 리스크", "상품 고유 제약과 정보 부족을 중요도에 따라 구분해 판단", "이동·보행·날씨 제약 장면", review.limitations.flatMap((item) => item.evidence), review.limitations.flatMap((item) => [item.label, ...item.tradeoffs, ...item.verificationNeeds])),
-    editorialSection("추천 여행자와 비추천 여행자", "여행 방식·체력·자유시간 선호에 따른 적합도 분리", "동행 유형과 여행 분위기 사진", [...review.bestFor, ...review.notFor], ["적합 조건", "부적합 조건", "대안 여행 방식"]),
-    editorialSection("가격과 포함 조건의 실제 의미", "표시가를 포함 범위와 추가 지출까지 합쳐 판단", "교통·식사·입장 포함 조건 이미지", [product.price || "출발일별 가격", ...facts.conditions], ["총 예상 지출", "필수 현지 비용", "선택 관광"]),
-    editorialSection("최종 리뷰와 예약 판단", "장점과 제약을 동일 기준으로 저울질해 조건부 결론 작성", "마지막 대표 실사 풍경", review.decisionCriteria, ["추천 조건", "보류 조건", "대안 코스 기준"]),
+    editorialSection("현지에서 맛과 분위기를 즐기는 법", "대표 음식·시장·카페·산책 구간을 일정 장소와 연결해 소개", "음식·시장·카페·골목 사진", ["지역 음식 문화", "일정 주변 상권", "공공 관광 자료"], ["무엇을 먹을지", "어떤 분위기인지", "짧은 자유시간 활용"]),
+    editorialSection("사진으로 남기기 좋은 순간", "시간대와 구도에 따라 살아나는 대표 장면을 구체적으로 안내", "노을·야경·건축·자연 풍경", ["대표 전망", "공간 방향", "안정적인 시간대 특성"], ["사진 포인트", "빛과 색감", "사람이 붐빌 때의 대안 구도"]),
+    editorialSection("처음 가도 바로 써먹는 여행 팁", "교통·걷기·복장·예절·준비물을 핵심 장소에 연결해 전달", "교통·보행·준비물 장면", ["공식 교통·관광 정보", "장소별 관람 특성"], ["동선", "신발과 복장", "현지 예절", "시간 활용"]),
+    editorialSection("여행의 마지막에 남는 장면", "여행지의 대표 장면과 감정을 연결해 독자가 떠나고 싶게 마무리", "여운을 남기는 마지막 실사 풍경", [destination, ...review.routeScope], ["기억에 남는 장면", "여행지의 고유한 매력"]),
   ];
 }
 
 export function formatTravelEditorialPlanForPrompt(sections: TravelEditorialSection[]): string {
   return [
-    "## 여행상품 체험가치 리뷰 설계 v3",
-    "- 아래 구성은 고정 목차가 아니라 선택 가능한 여행 판단 렌즈와 근거 슬롯입니다.",
-    "- 상품 정보가 풍부한 렌즈만 선택하고, 독자 질문에 맞춰 합치거나 순서를 바꾸세요. 모든 항목을 억지로 채우지 않습니다.",
+    "## 여행지 브이로그 콘텐츠 설계 v4",
+    "- 아래 구성은 고정 목차가 아니라 여행지 리서치와 장면 구성을 위한 선택 렌즈입니다.",
+    "- 상품 페이지에서는 일정과 장소만 식별하고, 본문은 여행지 정보·분위기·체험·팁으로 채웁니다.",
+    "- 공식 관광청·공공기관 등 신뢰 가능한 출처로 조사한 안정적인 사실을 사용합니다.",
     "- 하네스 문구와 역할명을 본문으로 복사하지 않습니다.",
-    "- 실제 체험이 없으면 1인칭 방문 후기처럼 쓰지 않고 상품 구성 기준의 분석임을 유지합니다.",
+    "- 실제 체험이 없어도 장면 중심으로 생생하게 쓰되, 1인칭 방문 경험은 만들지 않습니다.",
     ...sections.map((section, index) => [
       `${index + 1}. 선택 렌즈: ${section.title}`,
       `   목적: ${section.purpose}`,
       `   필수 근거: ${section.requiredEvidence.join(", ") || "추가 수집 필요"}`,
-      `   판단 초점: ${section.decisionFocus.join(", ") || "추가 수집 필요"}`,
+      `   장면 초점: ${section.decisionFocus.join(", ") || "추가 수집 필요"}`,
       `   이미지: ${section.imageIntent}`,
     ].join("\n")),
   ].join("\n");
@@ -551,10 +543,10 @@ export function buildTravelThumbnailCopy(productName: string) {
   const destination = facts.destinations.slice(0, 2).join(" · ") || "여행 코스";
   return {
     productNameLabel: `${destination} ${facts.duration || "여행"}`.slice(0, 36),
-    headline: `${destination} 코스 리뷰`.slice(0, 24),
-    subline: [facts.duration, ...facts.conditions.slice(0, 2)].filter(Boolean).join(" · ").slice(0, 44) || "장점·동선·예약조건",
-    badge: facts.departureConfirmed ? "출발확정 코스" : "여행상품 리뷰",
-    cta: "코스 장단점 보기",
+    headline: `${destination} 여행 브이로그`.slice(0, 24),
+    subline: [facts.duration, "명소 · 분위기 · 현지 팁"].filter(Boolean).join(" · ").slice(0, 44),
+    badge: "여행지 집중 리뷰",
+    cta: "여행 장면 미리보기",
   };
 }
 
@@ -584,28 +576,42 @@ export function assessTravelReviewSubstance(input: {
     body,
     /(?:확인(?:해|하|해야|하세요)|살펴보|비교해보|체크해|보는\s*게\s*좋|알기\s*어렵|판단하기\s*어렵|단정하기\s*어렵|현재\s*(?:정보|수집)|공개되지\s*않|담겨\s*있지\s*않|확정하기\s*어렵|다시\s*볼\s*필요)/u,
   );
+  const backgroundFactCount = sentences.filter((sentence) =>
+    /(?:역사|문화|유래|건축|전통|시대|세기|왕조|항구|구시가|지형|화산|사원|성당|박물관|유산)/u.test(sentence)
+  ).length;
+  const atmosphereCount = sentences.filter((sentence) =>
+    /(?:분위기|풍경|골목|거리|광장|강변|해안|노을|야경|빛|색감|전망|스카이라인|바람|파도|정취)/u.test(sentence)
+  ).length;
+  const activityCount = sentences.filter((sentence) =>
+    /(?:걷|산책|관람|감상|사진|촬영|먹|맛보|즐기|둘러보|오르|타고|체험|쇼핑|카페|시장)/u.test(sentence)
+  ).length;
+  const practicalTipCount = sentences.filter((sentence) =>
+    /(?:팁|교통|이동|복장|신발|우산|예절|준비|시간대|동선|입구|출구|카드|현금|예약|혼잡|붐비)/u.test(sentence)
+  ).length;
+  const vagueToneCount = countMatches(
+    body,
+    /(?:보입니다|보여요|보이네요|인\s*것\s*같아요|것\s*같습니다|것으로\s*보여요|일\s*듯해요|일\s*듯합니다|판단됩니다)/u,
+  );
+  const productDetailCount = sentences.filter((sentence) =>
+    /(?:표시\s*가격|할인|적립|포함\s*조건|불포함|선택관광|결제|취소\s*규정|예약\s*조건|상품명에는|상품에\s*표시)/u.test(sentence)
+  ).length;
   const evidenceJudgementCount = sentences.filter((sentence) =>
     places.some((place) => sentence.includes(place)) &&
-    /(?:매력|가치|역할|동선|이동|체류|완급|밀도|장점|선택\s*이유|대신|반면|아쉬|부담|제약|리스크|잘\s*맞|추천|비추천)/u.test(sentence)
+    /(?:역사|문화|풍경|분위기|골목|거리|전망|즐기|걷|산책|관람|사진|먹|맛보|팁|동선|시간대)/u.test(sentence)
   ).length;
   const requiredPlaceCount = Math.min(places.length >= 3 ? 3 : Math.max(1, places.length), Math.max(1, places.length));
   const requiredEvidenceJudgementCount = places.length >= 3 ? 3 : Math.max(1, places.length);
   const repeats = repeatedSentenceCount(body);
   const checks: Array<[boolean, string]> = [
-    [/(?:장점|매력|선택\s*이유)/u.test(body), "패키지의 구체적인 장점"],
-    [/(?:아쉬운|단점|한계|제약|리스크|이동\s*부담)/u.test(body), "패키지의 아쉬운 점·리스크"],
-    [
-      /(?:추천\s*(?:대상|여행자)|잘\s*맞|어울리)/u.test(body) &&
-        /(?:비추천|맞지\s*않|아쉬|빡빡|부담(?:스러|이\s*큰)|여유로운\s*여행|천천히\s*(?:보|머무|걷))/u.test(body),
-      "잘 맞는 여행자와 아쉬울 여행자",
-    ],
-    [
-      /(?:최종\s*리뷰|한\s*줄\s*결론|폭?넓게|깊게\s*머무|선택(?:을\s*가르|의\s*기준|\s*기준)|후보(?:가|에|로)|가치가\s*.+보다\s*큰지)/u.test(body),
-      "상품별 최종 판단",
-    ],
-    [coveredPlaces.length >= requiredPlaceCount, "여행지별 가치 해석"],
-    [evidenceJudgementCount >= requiredEvidenceJudgementCount, "여행지 근거와 코스 가치가 연결된 판단"],
-    [genericGuidanceCount / sentenceCount <= 0.22, "확인 안내가 아닌 여행 가치 판단"],
+    [backgroundFactCount >= 2, "여행지의 역사·문화·지리 배경"],
+    [atmosphereCount >= 3, "현장 풍경과 분위기 묘사"],
+    [activityCount >= 4, "여행지에서 실제로 즐길 거리"],
+    [practicalTipCount >= 2, "처음 가는 여행자를 위한 실용 팁"],
+    [coveredPlaces.length >= requiredPlaceCount, "핵심 여행지별 구체적인 정보"],
+    [evidenceJudgementCount >= requiredEvidenceJudgementCount, "여행지 사실과 현장 경험의 연결"],
+    [genericGuidanceCount / sentenceCount <= 0.16, "확인 안내가 아닌 여행지 정보"],
+    [vagueToneCount === 0, "보입니다·인 것 같아요 같은 모호한 말투 제거"],
+    [productDetailCount / sentenceCount <= 0.08, "가격·포함조건 중심 상품 설명 제거"],
     [!/(?:배송|교환|반품|구성품|제품\s*스펙)/u.test(body), "쇼핑 문구 미혼입"],
     [repeats <= 2, "반복 문장 제거"],
   ];
@@ -620,5 +626,11 @@ export function assessTravelReviewSubstance(input: {
     requiredPlaceCount,
     evidenceJudgementCount,
     requiredEvidenceJudgementCount,
+    backgroundFactCount,
+    atmosphereCount,
+    activityCount,
+    practicalTipCount,
+    vagueToneCount,
+    productDetailCount,
   };
 }

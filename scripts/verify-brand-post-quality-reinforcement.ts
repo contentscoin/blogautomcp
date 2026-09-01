@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { getBrandLinkContentReadiness } from "./lib/brandlink-content-readiness";
+import { assessProductReviewSubstance } from "./lib/product-editorial-plan";
 import { buildBrandPostImagePrompt } from "../src/lib/brand-post-image-generation";
 import { parsePreparedBrandPostSections } from "./lib/prepared-post-markdown";
 import {
@@ -24,14 +25,14 @@ const weakSections = [
 ];
 
 const strongerSections = [
-  "한 줄 결론\n\n대마도 2일 패키지의 장점은 긴 연차 없이 섬 여행과 숙박을 한 번에 묶는다는 점이에요. 대신 왕복 이동이 들어가는 짧은 일정이라 한 장소에 깊게 머무는 여행과는 거리가 있습니다. 넓게 보고 이동 준비를 줄이고 싶은 여행자에게 선택 이유가 분명합니다.",
-  "코스의 성격\n\n히타카츠와 이즈하라를 잇는 동선이라면 대마도의 항구 풍경과 생활권 분위기를 함께 보는 구성이 됩니다. 이 코스의 매력은 서로 다른 지역 인상을 짧게 비교하는 데 있고, 이동 부담은 체류시간이 잘게 나뉠 수 있다는 점입니다. 사진 명소 개수보다 각 구간의 머무는 시간이 만족도를 좌우합니다.",
-  "숙소와 저녁\n\n시내숙박은 저녁에 편의점이나 식당을 찾기 쉬운 위치라면 1박 2일의 짧은 체류를 효율적으로 만듭니다. 숙소가 집결지와 가까울수록 이른 출발 부담도 줄어듭니다. 반대로 시내라는 표현의 범위가 넓다면 자유시간 활용도가 낮아질 수 있는 제약이 있습니다.",
-  "출발확정의 가치\n\n출발확정은 연차와 국내 이동편을 미리 잡는 여행자에게 실질적인 장점입니다. 출발 취소 가능성을 낮춘다는 점에서 단순 할인보다 일정 안정성의 가치가 큽니다. 다만 날짜별 상태가 달라질 수 있으므로 선택 날짜의 출발 조건이 최종 판단 기준입니다.",
-  "포함 조건과 예상 지출\n\n표시가 126,003원은 짧은 해외여행의 진입 가격으로 매력적이지만, 식사·입장료·현지 필수경비가 더해지면 체감 예산이 달라집니다. 티아라몰 쇼핑과 라벤더비누 특전은 부가 요소이고, 핵심 가치는 왕복 교통과 숙박이 어디까지 포함되는지에 달려 있습니다. 가격은 추가 지출까지 합쳐 비교해야 합니다.",
-  "준비와 이동 강도\n\n2일 동안 항구 이동과 관광을 함께 소화하려면 작은 짐과 걷기 편한 복장이 유리합니다. 대마도는 날씨 변화와 해상 이동의 영향을 받을 수 있어 출발 시간에 맞춘 준비가 중요합니다. 보행이 부담인 동행이 있다면 이동 횟수와 휴식 구간이 이 상품의 리스크가 됩니다.",
-  "추천·비추천 여행자\n\n추천 여행자는 첫 대마도 여행에서 교통과 숙소 예약 수고를 줄이고 대표 지역을 폭넓게 보고 싶은 분입니다. 비추천 여행자는 골목과 카페에 오래 머물거나 쇼핑 일정 없이 자유롭게 움직이고 싶은 분입니다. 짧고 정돈된 패키지를 원하는지, 깊게 머무는 자유여행을 원하는지가 적합도를 가릅니다.",
-  "최종 리뷰\n\n최종 리뷰는 출발확정과 시내숙박이 주는 안정성이 분명한 대신, 짧은 일정의 이동 밀도를 감수하는 상품이라는 것입니다. 동행이 이동 중심 코스를 받아들일 수 있고 포함 조건이 예산에 맞는다면 후보에 올릴 만합니다. 자유시간이 최우선이라면 더 긴 일정이나 자유여행이 낫습니다.",
+  "부산에서 가장 가까운 일본 섬\n\n대마도는 한반도와 규슈 사이에 길게 놓인 국경의 섬입니다. 예부터 한반도와 일본을 잇는 해상 교류의 길목이어서 항구와 마을 곳곳에 두 문화의 흔적이 남아 있어요. 배에서 내리면 높은 건물보다 산 능선과 잔잔한 만이 먼저 시야를 채웁니다. 대도시 일본과 다른 조용하고 느린 분위기가 여행의 첫 장면을 만듭니다.",
+  "히타카츠 항구에서 시작하는 아침\n\n히타카츠는 대마도 북부의 관문으로 낮은 상점과 항구 풍경이 가까이 붙어 있습니다. 항구 주변을 걸으면 정박한 배와 산으로 둘러싸인 만을 한 프레임에 담을 수 있어요. 골목의 작은 가게를 둘러보고 바닷바람을 맞으며 산책하는 시간이 잘 어울립니다. 배에서 내린 직후에는 차량 동선을 먼저 확인하면 짧은 체류를 효율적으로 쓸 수 있어요.",
+  "미우다 해변의 투명한 물빛\n\n대마도 북쪽 미우다 해변은 밝은 모래와 맑은 바다가 대비되는 장소입니다. 언덕과 해안선이 감싸는 작은 만이라 파도 소리가 가까이 들리고 시야가 아늑해요. 해변 가장자리에서 산책하고 물빛이 바뀌는 구간을 사진으로 남기기 좋습니다. 바위 구간은 미끄러울 수 있어 밑창이 단단한 신발을 챙기세요.",
+  "와타즈미 신사가 들려주는 바다 이야기\n\n와타즈미 신사는 바다 신앙과 연결된 오래된 신사입니다. 조수에 따라 바닷물 위에 선 도리이의 높이가 달라져 같은 장소도 전혀 다른 풍경을 만들어요. 붉은 도리이와 잔잔한 만을 바라보며 신사 주변을 천천히 걸을 수 있습니다. 참배 공간에서는 큰 소리를 줄이고 현지 예절을 지키는 편이 좋습니다.",
+  "이즈하라 골목에서 만나는 생활 풍경\n\n이즈하라는 대마도 남부의 중심 마을로 상점가와 행정 시설, 오래된 골목이 모여 있습니다. 돌담과 낮은 건물이 이어지는 길에서는 관광지보다 현지의 일상 분위기가 더 또렷해요. 골목을 걸으며 작은 식당과 카페를 찾고 항구 쪽 풍경까지 이어서 즐길 수 있습니다. 보행 구간이 길어질 수 있으니 가벼운 가방과 편한 신발이 실용적입니다.",
+  "대마도에서 맛보는 바다의 한 끼\n\n섬 여행에서는 붕장어와 해산물처럼 바다와 가까운 식재료가 식탁의 중심이 됩니다. 따뜻한 국물과 구이 메뉴는 이동 뒤 쉬어가는 시간에 잘 어울려요. 지역 식당에서는 계절과 수급에 따라 메뉴가 달라지므로 그날의 추천 메뉴를 물어보는 재미도 있습니다. 짧은 자유시간에는 주문과 식사 시간을 함께 계산해 동선을 잡으세요.",
+  "사진은 항구와 골목에서 완성돼요\n\n대마도의 사진은 거대한 랜드마크보다 바다와 산, 낮은 마을이 겹치는 구도에서 매력이 살아납니다. 항구에서는 배를 전경에 두고 뒤쪽 산 능선을 함께 담으면 섬의 지형이 선명해요. 골목에서는 돌담과 오래된 표지판을 따라 시선을 깊게 넣으면 생활감 있는 장면이 됩니다. 흐린 날에도 물빛과 숲의 초록이 차분한 색감을 만들어줍니다.",
+  "짧은 여행을 편하게 만드는 준비\n\n대마도는 항구와 해안, 신사, 마을 골목을 오가며 걷는 시간이 많습니다. 바람을 막는 얇은 겉옷과 편한 신발, 작은 우산을 한 가방에 넣어두면 이동이 가벼워요. 휴대전화 지도는 미리 내려받고 배터리도 충분히 준비하세요. 장소의 배경을 하나씩 알고 걸으면 조용한 섬 풍경이 훨씬 깊게 기억됩니다.",
   disclosure,
 ];
 
@@ -59,31 +60,14 @@ const stronger = assess(strongerSections.map((section, index) => (
     : `${section}\n\n판단 포인트 ${index + 1}은 상품의 표기 조건을 여행자의 시간·예산·이동 성향에 연결해 장점과 대가를 함께 읽는 것입니다. 선택 차이 ${index + 1}은 단순 예약 안내보다 실제 결정에 필요한 기준을 선명하게 만듭니다.`
 )));
 
-const naturalTravelSupplements = [
-  "짧은 일정에서 무엇을 더 보고 무엇을 포기하는지가 만족도를 좌우해요.",
-  "항구 사이 실제 체류가 충분해야 서로 다른 지역을 묶은 코스의 가치가 살아나요.",
-  "저녁 동선이 단순하면 관광 뒤 쉬는 시간이 늘어 동행의 피로를 덜 수 있어요.",
-  "정해진 날짜에 움직이는 여행자에게 일정 안정성은 할인보다 중요한 장점이 되기도 해요.",
-  "포함 조건이 명확할수록 현지에서 예산 때문에 코스를 바꾸는 부담도 줄어들어요.",
-  "이동 중심 흐름이 괜찮은 동행인지가 상품 적합도를 가장 선명하게 가릅니다.",
-  "자유시간보다 대표 장면을 고르게 보는 편을 원할 때 선택 이유가 분명해져요.",
-];
-const naturalTravelSections = strongerSections
-  .filter((section) => !section.startsWith("준비와 이동 강도"))
-  .map((section, index) => {
-    const naturalSection = section
-      .replace("추천·비추천 여행자", "잘 맞는 여행자와 아쉬운 점")
-      .replace("추천 여행자는", "이 상품은")
-      .replace("비추천 여행자는", "한곳에 오래 머무는 여행자에게는")
-      .replace("최종 리뷰", "가격과 이동을 같이 보면")
-      .replace("최종 리뷰는", "이 상품은")
-      .replace("후보에 올릴 만합니다", "선택 이유가 분명합니다");
-    return naturalSection === disclosure
-      ? naturalSection
-      : `${naturalSection} ${naturalTravelSupplements[index]}`;
-  });
+const naturalTravelSections = strongerSections;
 const naturalTravel = assess(naturalTravelSections);
 assert.equal(naturalTravel.canPublish, true, naturalTravel.reason || naturalTravel.summary);
+const vagueTravel = assess(naturalTravelSections.map((section, index) =>
+  index === 0 ? `${section}\n\n조용한 섬인 것 같아요. 항구가 인상적으로 보입니다.` : section
+));
+assert.equal(vagueTravel.canPublish, false, "모호한 추정형 말투가 포함된 여행 원고는 차단해야 합니다.");
+assert.match(vagueTravel.reason || "", /모호한 말투/u);
 assert.equal(
   naturalTravel.reason?.includes("편집 역할 preparation") ?? false,
   false,
@@ -158,8 +142,8 @@ const naturalShoppingReview = getBrandLinkContentReadiness({
   title: "전기면도기 블라우풍트 5in1 선택 기준",
   sections: [
     "비슷한 제품과 갈리는 지점\n\n블라우풍트 5in1 3헤드 면도기는 면도만 보는 제품은 아니에요. 3헤드 전동면도기에 트리머 기능을 묶은 올인원 쪽에 가깝습니다. 헤드 구성과 관리 범위가 선택 이유예요. 수염 정리와 잔털 손질을 한 기기로 줄이고 싶은 사람에게 더 맞습니다.",
-    "사진에서 먼저 보이는 구조\n\n대표 이미지에는 3개의 원형 면도 헤드가 보입니다. 상세페이지에는 3D 플렉스 3헤드 시스템이라고 적혀 있어요. 얼굴 굴곡을 따라 움직이는 구조를 강조한 제품입니다. 버튼 하나로 쓰는 단순한 사용감을 기대할 수 있어요.",
-    "5in1 구성은 왜 의미가 있을까\n\n상품 설명에는 팝업트리머, 정밀트리머, 코털트리머가 함께 적혀 있습니다. 5in1 멀티그루밍 구성이라 구레나룻과 잔털까지 정리하는 사람에게 실용적입니다. 여행 가방에 넣을 기기 수를 줄인다는 의미도 있어요. 다만 각 헤드의 보관 방식은 확인이 필요합니다.",
+    "3헤드 구조가 만드는 차이\n\n3개의 원형 면도 헤드는 3D 플렉스 방식으로 얼굴 굴곡을 따라 움직입니다. 턱선처럼 각도가 바뀌는 구간에서 헤드 접촉을 유지하는 데 유리한 구조예요. 버튼 하나로 작동해 조작 순서도 단순합니다. 면도 뒤에는 헤드를 열어 수염 찌꺼기를 털어내면 됩니다.",
+    "5in1 구성은 왜 의미가 있을까\n\n팝업트리머, 정밀트리머, 코털트리머를 바꿔 끼워 손질 범위를 넓힙니다. 구레나룻과 잔털까지 한 기기로 정리하는 사람에게 실용적입니다. 구매후기에서도 여행 가방에 넣을 기기 수가 줄어 편하다는 점이 반복됩니다. 사용 뒤에는 각 헤드를 말린 다음 한곳에 모아 보관하는 편이 좋아요.",
     "방수와 관리 편의\n\n습식과 건식 겸용 방수 설계가 표시되어 있습니다. 원터치 헤드 오픈 구조는 세척 편의성이 분명해요. 물기가 있는 공간에서는 방수 등급 차이가 중요합니다. 상품명은 IPX7, 이미지 일부는 IPX6라 최종 등급은 구매 화면을 기준으로 봐야 합니다.",
     "휴대용으로 볼 때\n\n1회 충전 60분 사용이라고 적혀 있습니다. 디지털 LED 인디케이터는 배터리 상태를 눈으로 확인하는 데 유용합니다. 안전 잠금 장치는 이동 중 버튼 눌림을 줄여줘요. 실제 무게가 없다면 휴대성 판단은 남겨둬야 합니다.",
     "아쉬운 점도 분명해요\n\n8,400rpm 표기는 확인되지만 체감 절삭력을 그대로 말해주지는 않습니다. 사용자 후기가 없어 소음과 피부 자극 판단도 비어 있어요. 민감한 피부라면 교체날 정보가 제품 자체의 제약이 됩니다. 면도 성능 하나만 원한다면 단일 고급 면도기가 더 나을 수 있어요.",
@@ -183,6 +167,7 @@ const naturalShoppingReview = getBrandLinkContentReadiness({
     "디지털 LED 인디케이터",
     "안전 잠금 장치",
     "8,400rpm",
+    "구매후기 근거: 여행 가방에 면도기와 트리머를 따로 넣지 않아도 되어 편합니다",
   ],
   mode: "editorial",
 });
@@ -190,6 +175,31 @@ assert.equal(naturalShoppingReview.canPublish, true, naturalShoppingReview.reaso
 assert.equal(naturalShoppingReview.signals.find((signal) => signal.key === "editorial-flow")?.status, "pass");
 assert.equal(naturalShoppingReview.signals.find((signal) => signal.key === "review-substance")?.status, "pass");
 assert.equal(naturalShoppingReview.signals.find((signal) => signal.key === "evidence-density")?.status, "pass");
+const naturalShoppingSubstance = assessProductReviewSubstance({
+  productName: "블라우풍트 5in1 3헤드 면도기 IPX7 프리미엄 방수 전기면도기",
+  sections: naturalShoppingReview.canPublish ? [
+    "5in1 구성과 사용법\n\n3헤드와 트리머를 바꿔 끼워 수염과 잔털을 정리합니다. 사용 뒤에는 원터치 헤드를 열어 세척하고 물기를 말려 보관합니다. 구매후기에서도 여행 가방에 면도기와 트리머를 따로 넣지 않아 편하다는 점이 반복됩니다. 여러 손질을 한 기기로 줄이는 것이 핵심 장점입니다.",
+    "방수와 충전 관리\n\nLED로 배터리를 확인하고 충전한 뒤 안전 잠금을 켜서 보관합니다. 방수 구조는 세척 시간을 줄여줍니다. 다만 확인된 등급 차이는 최종 규격을 기준으로 판단합니다. 면도 성능만 필요하면 구성 과잉일 수 있습니다.",
+  ] : [],
+  sourceDescription: "블라우풍트 5in1 3헤드 전기면도기",
+  sourceFeatures: [
+    "3D 플렉스 3헤드 시스템",
+    "원터치 헤드 오픈",
+    "1회 충전 60분 사용",
+    "구매후기 근거: 여행 가방에 면도기와 트리머를 따로 넣지 않아도 되어 편합니다",
+  ],
+});
+assert.equal(naturalShoppingSubstance.coveredReviewEvidence.length, 1);
+assert.ok(naturalShoppingSubstance.usageInstructionCount >= 2);
+const detailReadingSubstance = assessProductReviewSubstance({
+  productName: "블라우풍트 5in1 3헤드 전기면도기",
+  sections: Array.from({ length: 6 }, (_, index) =>
+    `상세정보 ${index + 1}\n\n상세페이지에는 3헤드가 적혀 있습니다. 상품 설명에는 트리머가 표시되어 있습니다. 이미지에는 방수 기능이 보입니다. 판매페이지에서 충전 기능이 확인됩니다.`
+  ),
+  sourceDescription: "블라우풍트 5in1 3헤드 전기면도기",
+  sourceFeatures: ["3D 플렉스 3헤드 시스템", "원터치 헤드 오픈", "1회 충전 60분 사용"],
+});
+assert.ok(detailReadingSubstance.missingElements.includes("상세페이지 낭독형 문장 제거"));
 
 const approvedShoppingMarkdown = `# 휴대용선풍기 프롬비 FB150 선택 기준
 
@@ -273,7 +283,7 @@ const sitesMcpSource = fs.readFileSync(
   "utf8",
 );
 assert.match(simpleAgentSource, /brand-draft-quality-checklist\/v1/u);
-assert.match(simpleAgentSource, /근거 사실 → 사용\/여행 장면의 의미 → 이점 또는 대가/u);
+assert.match(simpleAgentSource, /눈앞의 장면 → 즐길 거리 또는 실용 팁/u);
 assert.match(simpleAgentSource, /contentQuality\.canPublish가 false/u);
 assert.match(simpleAgentSource, /repairAttempt <= 2/u);
 assert.doesNotMatch(simpleAgentSource, /편집 역할 \$\{role\}/u);

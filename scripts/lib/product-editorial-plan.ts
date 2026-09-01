@@ -2,6 +2,7 @@ export type ProductEditorialRole =
   | "review-hook"
   | "product-identity"
   | "source-evidence"
+  | "review-evidence"
   | "primary-strength"
   | "secondary-strength"
   | "use-case"
@@ -46,6 +47,7 @@ export interface ProductReviewAnalysis {
   categoryLabel: string;
   primaryUse: string;
   verifiedSignals: string[];
+  reviewEvidence: string[];
   strengths: ProductReviewAngle[];
   limitations: ProductReviewAngle[];
   bestFor: string[];
@@ -84,6 +86,9 @@ export interface ProductReviewSubstanceAssessment {
   evidenceJudgementCount: number;
   requiredEvidenceJudgementCount: number;
   categoryMismatchTerms: string[];
+  usageInstructionCount: number;
+  detailReadingCount: number;
+  coveredReviewEvidence: string[];
 }
 
 const SECTION_LIBRARY: ProductEditorialSection[] = [
@@ -103,10 +108,10 @@ const SECTION_LIBRARY: ProductEditorialSection[] = [
   },
   {
     role: "source-evidence",
-    title: "상세정보에서 확인한 사실",
-    purpose: "리뷰 판단의 근거가 된 기능·구성·수치를 독자에게 공개",
-    evidenceRule: "확인된 사실과 추론을 문장에서 구분하고, 없는 스펙은 없다고 밝힌다.",
-    imageRole: "기능, 스펙, 구성 표기가 선명한 원본 상세 이미지",
+    title: "핵심 기능이 실제로 만드는 차이",
+    purpose: "기능·구조·수치를 나열하지 않고 작동 방식과 사용자 이점으로 번역",
+    evidenceRule: "확인된 기능 → 작동 원리 또는 구조 → 실제로 줄여주는 불편을 연결한다.",
+    imageRole: "기능이 작동하는 방식과 사용 결과를 이해할 수 있는 원본 이미지",
   },
   {
     role: "primary-strength",
@@ -124,10 +129,17 @@ const SECTION_LIBRARY: ProductEditorialSection[] = [
   },
   {
     role: "use-case",
-    title: "실제로 잘 맞는 사용 장면",
-    purpose: "누가 어디에서 어떤 문제를 해결할 때 유용한지 구체화",
+    title: "어디에서 어떻게 쓰면 좋은지",
+    purpose: "설치·조작·충전·세척·보관을 포함해 사용 순서와 활용 장면을 구체화",
     evidenceRule: "직접 써봤다는 표현 없이 구조와 용도에서 이어지는 상황만 제시한다.",
     imageRole: "제품 원형을 보존한 실제 사용 장면 또는 원본 연출 이미지",
+  },
+  {
+    role: "review-evidence",
+    title: "구매후기에서 반복된 좋은 점",
+    purpose: "실제 후기 원문이 수집된 경우에만 반복되는 장점과 사용 맥락을 요약",
+    evidenceRule: "후기 수·평점만으로 만족도를 만들지 않고, 수집된 후기 문장에 있는 내용만 사용한다.",
+    imageRole: "후기에서 언급된 사용 장면과 연결되는 제품 원본 이미지",
   },
   {
     role: "comparison",
@@ -199,7 +211,17 @@ export function isMeaningfulProductEvidenceFeature(value: string): boolean {
 }
 
 function meaningfulFeatures(values: string[] | undefined): string[] {
-  return unique((values || []).filter(isMeaningfulProductEvidenceFeature), 12);
+  return unique((values || []).filter((value) => !isReviewEvidenceFeature(value) && isMeaningfulProductEvidenceFeature(value)), 12);
+}
+
+function isReviewEvidenceFeature(value: string): boolean {
+  return /^구매후기\s*근거\s*:/u.test(clean(value));
+}
+
+function reviewEvidenceFeatures(values: string[] | undefined): string[] {
+  return unique((values || [])
+    .filter(isReviewEvidenceFeature)
+    .map((value) => clean(value).replace(/^구매후기\s*근거\s*:\s*/u, "")), 6);
 }
 
 function detectCategory(source: string): ProductReviewCategory {
@@ -256,7 +278,7 @@ function uniqueAngles(values: ProductReviewAngle[], limit = 6): ProductReviewAng
   }).slice(0, limit);
 }
 
-function fanAnalysis(source: string, signals: string[]): Omit<ProductReviewAnalysis, "evidenceLevel"> {
+function fanAnalysis(source: string, signals: string[]): Omit<ProductReviewAnalysis, "evidenceLevel" | "reviewEvidence"> {
   const mounted = /(?:타프|천장|실링\s*팬|실링팬)/u.test(source);
   const wireless = /무선/u.test(source);
   const clip = /클립/u.test(source);
@@ -378,7 +400,7 @@ function fanAnalysis(source: string, signals: string[]): Omit<ProductReviewAnaly
   };
 }
 
-function coolerBagAnalysis(source: string, signals: string[]): Omit<ProductReviewAnalysis, "evidenceLevel"> {
+function coolerBagAnalysis(source: string, signals: string[]): Omit<ProductReviewAnalysis, "evidenceLevel" | "reviewEvidence"> {
   const foldable = /(?:접이식|폴딩|소프트)/u.test(source);
   const shoulder = /(?:어깨끈|숄더)/u.test(source);
   return {
@@ -404,7 +426,7 @@ function coolerBagAnalysis(source: string, signals: string[]): Omit<ProductRevie
   };
 }
 
-function seatCushionAnalysis(source: string, signals: string[]): Omit<ProductReviewAnalysis, "evidenceLevel"> {
+function seatCushionAnalysis(source: string, signals: string[]): Omit<ProductReviewAnalysis, "evidenceLevel" | "reviewEvidence"> {
   const washable = /(?:세탁|분리형\s*커버)/u.test(source);
   return {
     category: "seat-cushion",
@@ -428,7 +450,7 @@ function seatCushionAnalysis(source: string, signals: string[]): Omit<ProductRev
   };
 }
 
-function hairCareAnalysis(source: string, signals: string[]): Omit<ProductReviewAnalysis, "evidenceLevel"> {
+function hairCareAnalysis(source: string, signals: string[]): Omit<ProductReviewAnalysis, "evidenceLevel" | "reviewEvidence"> {
   const portable = /(?:휴대|여행|무선|미니)/u.test(source);
   return {
     category: "hair-care",
@@ -449,7 +471,7 @@ function hairCareAnalysis(source: string, signals: string[]): Omit<ProductReview
   };
 }
 
-function genericAnalysis(input: ProductEditorialPlanInput, signals: string[]): Omit<ProductReviewAnalysis, "evidenceLevel"> {
+function genericAnalysis(input: ProductEditorialPlanInput, signals: string[]): Omit<ProductReviewAnalysis, "evidenceLevel" | "reviewEvidence"> {
   const features = meaningfulFeatures(input.features).slice(0, 6);
   const description = meaningfulDescription(input.description, input.productName);
   const strongestFact = features[0] || description || clean(input.productName);
@@ -476,6 +498,7 @@ export function buildProductReviewAnalysis(input: ProductEditorialPlanInput): Pr
   const productName = clean(input.productName) || "상품";
   const description = meaningfulDescription(input.description, productName);
   const features = meaningfulFeatures(input.features).slice(0, 8);
+  const reviewEvidence = reviewEvidenceFeatures(input.features);
   const source = clean([productName, description, ...features].join(" "));
   const category = detectCategory(source);
   const signals = collectSignals(source, category);
@@ -494,6 +517,7 @@ export function buildProductReviewAnalysis(input: ProductEditorialPlanInput): Pr
   return {
     ...base,
     verifiedSignals: unique([...features, ...base.verifiedSignals], 12),
+    reviewEvidence,
     evidenceLevel,
   };
 }
@@ -509,6 +533,7 @@ export function buildProductEditorialPlan(input: ProductEditorialPlanInput): Pro
     clean(input.productName) ? `상품명: ${clean(input.productName)}` : "",
     description ? `설명: ${description}` : "",
     ...meaningfulFeatures(input.features).slice(0, 10).map((value) => `상세 근거: ${value}`),
+    ...reviewEvidenceFeatures(input.features).slice(0, 4).map((value) => `구매후기 원문 근거: ${value}`),
     clean(input.price) ? `가격: ${clean(input.price)}` : "",
     clean(input.originalPrice) ? `원가: ${clean(input.originalPrice)}` : "",
     clean(input.discountRate) ? `할인율: ${clean(input.discountRate)}` : "",
@@ -526,6 +551,8 @@ export function buildProductEditorialPlan(input: ProductEditorialPlanInput): Pro
       "직접 구매·수령·사용·재구매 경험을 제공받지 않았다면 체험 사실을 만들지 않기",
       "출처 없는 가격·할인율·평점·리뷰 수·순위·최저가·성능 수치를 만들지 않기",
       "제품 자체의 장단점 대신 배송·쿠폰·교환 확인 문구로 섹션을 채우지 않기",
+      "상세페이지 문장을 읽어주는 데 그치지 말고 기능이 왜 유용한지와 어떻게 쓰는지를 설명하기",
+      "구매후기 원문이 있을 때만 반복 장점을 요약하고 후기 수·평점만으로 만족 내용을 만들지 않기",
       "장점에는 근거가 된 기능을, 단점에는 제품 구조상 제약 또는 미확인 핵심 성능을 함께 쓰기",
       "추천 대상과 비추천 대상을 모두 제시하고 마지막에 조건부 결론을 내리기",
     ],
@@ -541,7 +568,7 @@ export function formatProductEditorialPlanForPrompt(plan: ProductEditorialPlan):
     "[근거 기반 상품 리뷰 하네스 v3 · 문장 생성 금지 데이터]",
     "- 아래 항목은 고정 목차가 아니라 선택 가능한 판단 렌즈입니다. 근거가 충분한 렌즈만 골라 합치거나 순서를 바꾸세요.",
     "- 글 전체는 사실 → 의미 → 구매 판단의 인과만 유지하고, 섹션 수와 제목은 자유롭게 정합니다.",
-    "- 확인 안내만 반복하지 말고 제품 자체의 장점·제약·적합도를 판단합니다.",
+    "- 상세페이지를 읽어주는 문장을 반복하지 말고 제품의 작동 방식·사용 가치·사용법·제약을 설명합니다.",
     "- 아래 해석 카드는 완성 원고가 아니라 의미 단위입니다. 표현을 복사하지 말고 상품별 문맥으로 새 문장을 작성합니다.",
     "- 구성표 이름과 역할 라벨은 본문에 노출하지 마세요.",
     ...plan.sections.map((section) => `- 렌즈 ${section.role} | 목적: ${section.purpose} | 근거: ${section.evidenceRule} | 이미지 역할: ${section.imageRole}`),
@@ -551,6 +578,7 @@ export function formatProductEditorialPlanForPrompt(plan: ProductEditorialPlan):
     `- 1차 용도: ${review.primaryUse}`,
     `- 근거 수준: ${review.evidenceLevel}`,
     `- 확인 신호: ${review.verifiedSignals.join(", ") || "추가 수집 필요"}`,
+    `- 구매후기 원문 근거: ${review.reviewEvidence.join(" / ") || "수집된 후기 문장 없음 · 후기 내용을 만들지 말 것"}`,
     ...review.strengths.map((item, index) => formatAngle(item, index, "장점")),
     ...review.limitations.map((item, index) => formatAngle(item, index, "제약")),
     `- 잘 맞는 대상: ${review.bestFor.join(" / ")}`,
@@ -570,10 +598,11 @@ export function formatProductEditorialPlanForPrompt(plan: ProductEditorialPlan):
 const ROLE_PATTERNS: Record<ProductEditorialRole, RegExp> = {
   "review-hook": /한\s*줄|먼저\s*내린|첫\s*결론|갈리는\s*(?:지점|기준)|먼저\s*보이는/u,
   "product-identity": /어떤\s*제품|제품\s*정체|핵심\s*구조|상품\s*성격|올인원|쪽에\s*가깝|제품은|기기는/u,
-  "source-evidence": /확인한\s*사실|근거|상세\s*(?:정보|페이지|이미지|설명)|대표\s*이미지|스펙|수치|적혀|표시/u,
+  "source-evidence": /핵심\s*기능|작동\s*(?:방식|원리)|구조가|기능이|스펙|수치|배터리|소재/u,
   "primary-strength": /가장\s*분명한\s*장점|핵심\s*장점|주요\s*기능\s*1|선택\s*이유|실용적|편의성|의미가\s*있/u,
   "secondary-strength": /두\s*번째|또\s*다른\s*강점|주요\s*기능\s*2/u,
-  "use-case": /사용\s*장면|활용|잘\s*맞는\s*상황/u,
+  "use-case": /사용\s*(?:장면|방법|순서)|활용|설치|조작|충전|세척|관리|보관|잘\s*맞는\s*상황/u,
+  "review-evidence": /구매\s*후기|사용자\s*후기|후기에서|구매자(?:가|는|들)|반복(?:해서|되는)?\s*(?:언급|평가)/u,
   comparison: /비슷한\s*제품|비교|갈리는\s*기준/u,
   limitations: /아쉬|단점|한계|제약|주의/u,
   fit: /추천\s*대상|비추천|이런\s*분|누구/u,
@@ -589,7 +618,7 @@ export function inferProductEditorialRole(title: string): ProductEditorialRole {
 export function assessProductEditorialCoverage(sections: string[]): { coveredRoles: ProductEditorialRole[]; missingCoreRoles: ProductEditorialRole[] } {
   const corpus = sections.join("\n");
   const coveredRoles = (Object.keys(ROLE_PATTERNS) as ProductEditorialRole[]).filter((role) => ROLE_PATTERNS[role].test(corpus));
-  const coreRoles: ProductEditorialRole[] = ["product-identity", "source-evidence", "primary-strength", "limitations", "fit", "verdict"];
+  const coreRoles: ProductEditorialRole[] = ["product-identity", "source-evidence", "primary-strength", "use-case", "limitations", "fit", "verdict"];
   return { coveredRoles, missingCoreRoles: coreRoles.filter((role) => !coveredRoles.includes(role)) };
 }
 
@@ -637,6 +666,17 @@ export function assessProductReviewSubstance(input: {
   const coveredSignals = analysis.verifiedSignals.filter((signal) =>
     sentences.some((sentence) => signalCoveredBySentence(signal, sentence))
   );
+  const coveredReviewEvidence = analysis.reviewEvidence.filter((evidence) => {
+    const tokens = unique(evidence.split(/[^\p{L}\p{N}]+/u), 16)
+      .filter((token) => token.length >= 2 && !/(?:제품|상품|사용|구매|정말|너무|좋아요|좋습니다)/u.test(token));
+    return tokens.some((token) => body.includes(token));
+  });
+  const usageInstructionCount = sentences.filter((sentence) =>
+    /(?:사용\s*(?:방법|순서)|설치|조작|버튼|모드|충전|세척|관리|보관|연결|착용|분리|조절|조리|섭취|해동|굽|끓|바르|도포|흡수|두고\s*쓰|놓고\s*쓰)/u.test(sentence)
+  ).length;
+  const detailReadingCount = sentences.filter((sentence) =>
+    /(?:상세\s*페이지|상세\s*정보|상품\s*설명에는|판매\s*페이지|사진에는|이미지에는|적혀\s*있|표시되어\s*있|확인됩니다)/u.test(sentence)
+  ).length;
   const evidenceJudgementCount = sentences.filter((sentence) =>
     analysis.verifiedSignals.some((signal) => signalCoveredBySentence(signal, sentence)) &&
     /(?:장점|강점|선택\s*이유|효율|편의|유리|실용|중요|의미|가치|도움|현실적|유용|어울|후보|줄(?:여|어|일)|늘(?:려|어|릴)|대신|반면|아쉬|부담|한계|제약|잘\s*맞|적합|비추천|더\s*낫)/u.test(sentence)
@@ -654,6 +694,9 @@ export function assessProductReviewSubstance(input: {
     [/(?:최종\s*리뷰|조건부\s*결론|후보(?:로|에\s*올)|더\s*실용적|고르는\s*편이\s*맞|선택\s*기준)/u.test(body), "조건부 최종 결론"],
     [coveredSignals.length >= requiredSignalCount, "상품 고유 구조·기능 근거"],
     [evidenceJudgementCount >= requiredEvidenceJudgementCount, "근거와 사용 가치가 연결된 판단"],
+    [usageInstructionCount >= 2, "구체적인 사용·설치·관리 방법"],
+    [analysis.reviewEvidence.length === 0 || (coveredReviewEvidence.length >= 1 && /후기|구매자|사용자/u.test(body)), "구매후기 근거의 장점 요약"],
+    [detailReadingCount / sentenceCount <= 0.15, "상세페이지 낭독형 문장 제거"],
     [genericGuidanceCount / sentenceCount <= 0.24, "확인 안내가 아닌 리뷰 판단"],
     [categoryMismatchTerms.length === 0, "상품 카테고리 일치"],
     [repeats <= 2, "반복 문장 제거"],
@@ -670,5 +713,8 @@ export function assessProductReviewSubstance(input: {
     evidenceJudgementCount,
     requiredEvidenceJudgementCount,
     categoryMismatchTerms,
+    usageInstructionCount,
+    detailReadingCount,
+    coveredReviewEvidence,
   };
 }

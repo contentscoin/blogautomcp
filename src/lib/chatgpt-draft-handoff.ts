@@ -44,7 +44,7 @@ export function buildChatGptDraftHandoff(
     "진행 순서:",
     `1. post_create_draft를 connectKind=${connectKind}, 위 productId, qualityPreset=premium, experienceMode=ai_assisted_information 및 새 idempotencyKey로 호출해 주세요.`,
     "2. 반환된 작업을 job_get으로 완료될 때까지 확인하고, 상품 사실·이미지·systemPrompt·userPrompt를 읽어 주세요.",
-    "3. 그 근거만 사용해 자연스럽고 유용한 원고를 작성해 주세요. 쇼핑은 제품의 실제 특징·장단점·추천 대상을, 여행은 일정·동선·관광지 정보·포함/불포함·예약 판단 포인트를 중심으로 작성해 주세요.",
+    "3. 그 근거만 사용해 자연스럽고 유용한 원고를 작성해 주세요. 쇼핑은 제품의 실제 특징·장단점·추천 대상을 다룹니다. 여행은 상품 페이지에서 방문지만 식별한 뒤 공식 관광 자료를 조사해 여행지의 배경·풍경·즐길 거리·음식·사진·동선 팁을 브이로그처럼 작성하고, 가격·포함조건·예약 판단은 본문 중심으로 쓰지 마세요.",
     "4. 완료된 contextJobId와 원고 JSON을 post_submit_draft에 제출해 PC 앱의 승인 대기 초안으로 저장해 주세요.",
     "5. 저장된 초안을 대화에 요약해 보여 주세요. 지금은 발행하거나 예약하지 마세요.",
     "",

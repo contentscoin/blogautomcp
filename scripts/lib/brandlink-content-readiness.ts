@@ -108,21 +108,17 @@ function assessTravelEditorialCoverage(sections: string[]): {
 } {
   const corpus = sections.join("\n");
   const rolePatterns: Record<string, RegExp> = {
-    overview: /핵심|한눈에|전체\s*(?:일정|동선)/u,
-    route: /코스|동선|이동|방문지/u,
-    lodging: /숙소|호텔|연박|객실/u,
-    inclusions: /포함|불포함|추가\s*비용|예상\s*지출/u,
-    preparation: /날씨|교통|준비물|복장/u,
-    fit: /여행자|잘\s*맞|동행|체력/u,
-    reservation: /예약|취소|변경|출발\s*확정/u,
+    background: /역사|문화|유래|전통|건축|지형|유산/u,
+    atmosphere: /분위기|풍경|골목|거리|강변|해안|노을|야경|전망/u,
+    experience: /즐기|걷|산책|관람|사진|촬영|먹|맛보|체험|시장|카페/u,
+    preparation: /교통|이동|준비물|복장|신발|시간대|동선|예절/u,
+    route: /일정|하루|코스|동선|이동|방문지/u,
   };
   const coveredRoles = Object.entries(rolePatterns)
     .filter(([, pattern]) => pattern.test(corpus))
     .map(([role]) => role);
-  // 모든 패키지에 숙소·준비물·예약 문단을 기계적으로 강제하지 않는다.
-  // 상품 근거에 맞춰 흐름을 자유롭게 구성하되, 전체 성격·동선·적합도만
-  // 여행 리뷰의 공통 핵심 역할로 본다.
-  const coreRoles = ["overview", "route", "fit"];
+  // 상품 검토 항목이 아니라 여행지를 이해하고 즐기는 데 필요한 핵심 역할을 본다.
+  const coreRoles = ["background", "atmosphere", "experience", "preparation"];
   return {
     coveredRoles,
     missingCoreRoles: coreRoles.filter((role) => !coveredRoles.includes(role)),
@@ -302,17 +298,17 @@ export function getBrandLinkContentReadiness(
     },
     {
       key: "editorial-flow",
-      label: isTravel ? "여행가치-장단점-적합도-결론 흐름" : "제품정체-근거-장단점-적합도-결론 흐름",
+      label: isTravel ? "여행지 배경-장면-체험-팁 흐름" : "제품정체-기능원리-사용법-장단점-결론 흐름",
       status: editorialCoverage.missingCoreRoles.length <= 1 ? "pass" : "fail",
     },
     {
       key: "review-substance",
-      label: isTravel ? "여행상품 고유 장단점과 판단" : "제품 고유 장단점과 판단",
+      label: isTravel ? "여행지 고유 정보와 현장감" : "제품 특장점·활용법·후기 근거 리뷰",
       status: reviewSubstance.pass ? "pass" : "fail",
     },
     {
       key: "evidence-density",
-      label: isTravel ? "여행지 근거-코스 가치 연결" : "제품 근거-사용 가치 연결",
+      label: isTravel ? "여행지 근거-즐길 거리 연결" : "제품 기능-작동방식-사용 가치 연결",
       status:
         reviewSubstance.evidenceJudgementCount >= reviewSubstance.requiredEvidenceJudgementCount &&
         sourceEvidenceCoveragePass
@@ -322,7 +318,7 @@ export function getBrandLinkContentReadiness(
     {
       key: "generic-guidance",
       label: "확인 안내 반복 비율",
-      status: genericGuidanceRatio <= (isTravel ? 0.22 : 0.24) ? "pass" : "fail",
+      status: genericGuidanceRatio <= (isTravel ? 0.16 : 0.24) ? "pass" : "fail",
     },
     {
       key: "category-integrity",
@@ -598,10 +594,10 @@ export function getBrandLinkContentReadiness(
     });
   }
 
-  if (genericGuidanceRatio > (isTravel ? 0.22 : 0.24)) {
+  if (genericGuidanceRatio > (isTravel ? 0.16 : 0.24)) {
     return buildResult({
       code: "generic-guidance-heavy",
-      reason: `제품 판단보다 확인 안내 문장이 많습니다 (${reviewSubstance.genericGuidanceCount}/${reviewSubstance.sentenceCount}문장).`,
+      reason: `${isTravel ? "여행지 정보" : "제품 판단"}보다 확인 안내 문장이 많습니다 (${reviewSubstance.genericGuidanceCount}/${reviewSubstance.sentenceCount}문장).`,
       score,
       sectionCount: sections.length,
       hashtagCount: input.hashtags.length,
@@ -622,7 +618,7 @@ export function getBrandLinkContentReadiness(
     return buildResult({
       code: "low-evidence-density",
       reason: isTravel
-        ? `여행지 사실을 코스의 가치·이동·체류 대가로 해석한 근거가 부족합니다 (판단 ${reviewSubstance.evidenceJudgementCount}/${reviewSubstance.requiredEvidenceJudgementCount}).`
+        ? `여행지 사실을 풍경·활동·팁으로 연결한 내용이 부족합니다 (연결 ${reviewSubstance.evidenceJudgementCount}/${reviewSubstance.requiredEvidenceJudgementCount}).`
         : `제품 고유 기능·수치를 사용 장면의 이점·제약으로 해석한 근거가 부족합니다 (판단 ${reviewSubstance.evidenceJudgementCount}/${reviewSubstance.requiredEvidenceJudgementCount}${sourceCoverageText}).`,
       score,
       sectionCount: sections.length,
@@ -636,14 +632,18 @@ export function getBrandLinkContentReadiness(
 
   if (!reviewSubstance.pass || editorialCoverage.missingCoreRoles.length > 1) {
     const travelRoleLabels: Record<string, string> = {
-      overview: "상품 전체 성격",
-      route: "코스·이동 흐름",
-      fit: "잘 맞는 여행자와 아쉬울 여행자",
+      background: "여행지 역사·문화 배경",
+      atmosphere: "현장 풍경과 분위기",
+      experience: "보고 먹고 즐길 거리",
+      preparation: "교통·동선·복장 등 실용 팁",
+      route: "하루의 여행 흐름",
     };
     const shoppingRoleLabels: Record<string, string> = {
       "product-identity": "제품의 정체와 핵심 용도",
-      "source-evidence": "상품 고유 기능·규격 근거",
+      "source-evidence": "핵심 기능의 작동 방식과 사용 가치",
       "primary-strength": "구체적인 핵심 장점",
+      "use-case": "구체적인 사용·설치·관리 방법",
+      "review-evidence": "실제 구매후기 근거의 공통 장점",
       limitations: "제품 자체의 단점·제약",
       fit: "추천·비추천 대상",
       verdict: "조건부 최종 결론",
@@ -657,7 +657,7 @@ export function getBrandLinkContentReadiness(
     ];
     return buildResult({
       code: "missing-review-substance",
-      reason: `상품 고유 리뷰 요소가 부족합니다: ${Array.from(new Set(missing)).join(", ")}`,
+      reason: `${isTravel ? "여행지 콘텐츠" : "상품 고유 리뷰"} 요소가 부족합니다: ${Array.from(new Set(missing)).join(", ")}`,
       score,
       sectionCount: sections.length,
       hashtagCount: input.hashtags.length,

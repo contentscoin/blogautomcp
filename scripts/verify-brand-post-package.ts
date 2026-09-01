@@ -54,9 +54,21 @@ async function main() {
     "검증되지 않은 실사용 제목을 자동 생성하면 안 됩니다."
   );
   assert.equal(
-    simpleAgentSource.includes("코스 장단점과 예약 판단"),
+    simpleAgentSource.includes("명소와 현지 여행 팁") &&
+      simpleAgentSource.includes("여행지 브이로그"),
     true,
-    "여행 제목은 체험을 꾸미지 않는 코스 판단형이어야 합니다."
+    "여행 제목과 본문은 체험을 꾸미지 않는 여행지 브이로그형이어야 합니다."
+  );
+  assert.equal(
+    simpleAgentSource.includes("구매후기 근거:") &&
+      simpleAgentSource.includes("reviewHighlights"),
+    true,
+    "쇼핑 상품의 실제 구매후기 원문을 수집해 하네스 근거로 전달해야 합니다.",
+  );
+  assert.equal(
+    simpleAgentSource.includes("상세페이지 낭독문이 아니라 제품 분석 리뷰"),
+    true,
+    "쇼핑 원고는 상세페이지 낭독형이 아니라 기능·사용법 중심 제품 분석형이어야 합니다.",
   );
   assert.equal(
     draftRouteSource.includes("readPrepareFailure(logPath)"),

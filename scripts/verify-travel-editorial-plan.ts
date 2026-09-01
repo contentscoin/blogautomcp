@@ -54,9 +54,9 @@ assert.equal(pageResearch.highlights.length, 3);
 assert.match(pageResearch.flights[0], /JQ048/u);
 assert.match(travelPageResearchFeatures(pageResearch).join("\n"), /4일차 일정:.*블루마운틴/u);
 const pageResearchPrompt = formatTravelPageResearchForPrompt(pageResearch);
-assert.match(pageResearchPrompt, /원본 여행상품 일정 근거/u);
-assert.match(pageResearchPrompt, /2일차:.*본다이 비치.*오페라하우스/u);
-assert.match(pageResearchPrompt, /쇼핑 일정:.*60분/u);
+assert.match(pageResearchPrompt, /여행지 리서치용 원본 일정/u);
+assert.match(pageResearchPrompt, /2일차 방문 흐름:.*본다이 비치.*오페라하우스/u);
+assert.doesNotMatch(pageResearchPrompt, /쇼핑 일정:/u);
 const pageResearchFacts = extractTravelProductFacts(
   "[출발임박] 시드니 일주 6일 (전일정4성)변경",
   "",
@@ -108,48 +108,44 @@ assert.doesNotMatch(analysisJson, /"(?:identity|verdict|value|tradeoff)"/u);
 
 const plan = buildTravelContractEditorialPlan(product);
 const titles = plan.map((section) => section.title);
-assert.equal(plan.length, 13, "여행 상품별로 고를 수 있는 판단 렌즈 후보를 보존해야 합니다.");
+assert.equal(plan.length, 10, "여행지별로 고를 수 있는 브이로그 렌즈 후보를 보존해야 합니다.");
 assert.equal(new Set(titles).size, titles.length, "여행 소제목을 반복하면 안 됩니다.");
-assert.match(titles[0], /한 줄 결론/u);
-assert.match(titles.at(-1) || "", /최종 리뷰/u);
+assert.match(titles[0], /어떤 여행지/u);
+assert.match(titles.at(-1) || "", /마지막에 남는 장면/u);
 assert.ok(titles.some((title) => title.includes("융프라우")));
-assert.ok(titles.some((title) => /장점/u.test(title)));
-assert.ok(titles.some((title) => /아쉬운/u.test(title)));
-assert.ok(titles.some((title) => /비추천/u.test(title)));
+assert.ok(titles.some((title) => /맛과 분위기/u.test(title)));
+assert.ok(titles.some((title) => /사진/u.test(title)));
+assert.ok(titles.some((title) => /여행 팁/u.test(title)));
+assert.equal(titles.some((title) => /가격|포함 조건|비추천|예약 판단/u.test(title)), false);
 assert.ok(plan.every((section) => section.requiredEvidence.length > 0));
 assert.ok(plan.every((section) => section.decisionFocus.length > 0));
 assert.equal(plan.some((section) => "body" in section), false, "여행 하네스가 완성 본문을 보유하면 안 됩니다.");
 
 const prompt = `${formatTravelReviewAnalysisForPrompt(analysis)}\n${formatTravelEditorialPlanForPrompt(plan)}`;
 assert.match(prompt, /문장 생성 금지/u);
-assert.match(prompt, /표현을 복사하지 말고/u);
-assert.match(prompt, /장점 후보 1/u);
-assert.match(prompt, /제약 후보 1/u);
-assert.match(prompt, /추천 대상/u);
-assert.match(prompt, /고정 목차가 아니라 선택 가능한 여행 판단 렌즈/u);
-assert.match(prompt, /상품 정보가 풍부한 렌즈만 선택/u);
+assert.match(prompt, /여행지 리서치 시드/u);
+assert.match(prompt, /여행지 브이로그 콘텐츠 설계/u);
+assert.match(prompt, /역사·문화 배경/u);
+assert.match(prompt, /상품의 장점·단점·추천 대상·가격·포함조건은 본문 핵심 주제로 사용하지 않습니다/u);
 assert.doesNotMatch(prompt, /(?:최소 3개|최소 2개|아래 순서를 유지)/u);
 assert.doesNotMatch(prompt, /고산 풍경과 산악 교통 경험이/u);
 
 const reviewSections = [
-  "이 여행의 한 줄 결론\n\n스위스와 이탈리아의 대표 장면을 9일에 폭넓게 보는 매력이 큰 상품이에요. 이동과 짐 정리 비중도 큰 편이라 넓은 커버리지를 원하는 여행자에게 맞습니다.",
-  "이 상품이 주는 여행 경험\n\n융프라우와 루체른의 자연, 피사와 폼페이의 역사 장면이 이어져 코스 변화가 선명해요. 노쇼핑 조건은 관광 동선에 시간을 쓰는 장점으로 읽힙니다.",
-  "하이라이트가 만드는 코스의 매력\n\n융프라우는 고산 풍경, 루체른은 호수와 구시가지, 관광열차는 이동형 관광을 맡아요. 서로 다른 장면이 짧은 일정의 밀도를 높이는 선택 이유입니다.",
-  "전체 동선과 여행 강도\n\n스위스와 이탈리아를 잇는 만큼 도시 간 이동과 장거리 버스 구간이 아쉬운 점이 될 수 있어요. 연박 횟수와 실제 장소별 체류시간이 만족도를 가릅니다.",
-  "여행지 리뷰 1 · 융프라우\n\n융프라우의 고산 풍경은 자연 중심 여행의 핵심 매력이에요. 다만 고도와 날씨, 산악 교통 운행에 민감해 대체 일정이 중요한 제약입니다.",
-  "여행지 리뷰 2 · 루체른\n\n루체른의 호수와 구시가지는 산악 구간 사이에 도시 산책의 완급을 더해요. 체류가 짧으면 두 장면을 모두 깊게 보기 어렵다는 한계가 있습니다.",
-  "여행지 리뷰 3 · 관광열차\n\n관광열차는 이동 시간을 차창 풍경으로 바꾸는 장점이 있어요. 탑승 구간과 좌석, 운행 시간이 불분명하면 기대한 경험과 달라질 리스크가 있습니다.",
-  "항공·숙박·식사가 좌우하는 만족도\n\n항공 시각은 실제 현지 체류시간을 바꾸고 숙소 위치는 저녁 자유시간을 좌우해요. 현재 정보가 부족해 편안함과 총비용 판단을 보류해야 하는 제약입니다.",
-  "상품 구성에서 읽히는 장점\n\n출발확정과 노쇼핑, 다양한 방문지 조합이 이 상품의 구체적인 장점이에요. 개별 교통과 숙소 예약 부담을 줄이면서 대표 장면을 묶어 볼 수 있습니다.",
-  "아쉬운 점과 예약 리스크\n\n가장 큰 아쉬운 점은 넓은 코스에서 생기는 이동 부담이에요. 날씨 민감 구간과 유적지 보행이 이어져 동행자의 체력에 따라 리스크가 커질 수 있습니다.",
-  "추천 여행자와 비추천 여행자\n\n추천 여행자는 여러 대표 장소를 한 번에 보고 싶은 사람이고, 비추천 여행자는 한 도시에 오래 머물고 싶은 사람이에요. 일정 자유도보다 예약 편의를 우선할 때 잘 맞습니다.",
-  "가격과 포함 조건의 실제 의미\n\n표시 가격 3,149,000원은 항공과 숙박, 식사, 입장 범위까지 합쳐 판단해야 해요. 필수 현지 비용이 많다면 표시가의 장점이 줄어드는 구조입니다.",
-  "최종 리뷰와 예약 판단\n\n최종 리뷰는 폭넓은 코스와 출발확정의 장점이 이동·보행 제약보다 큰지에 달려 있어요. 긴 체류가 우선이면 느린 코스가, 대표 장면 커버리지가 우선이면 이 상품이 후보입니다.",
+  "알프스가 만든 스위스의 풍경\n\n융프라우 지역은 빙하와 고봉이 이어지는 베르너 오버란트의 중심입니다. 산악열차를 타고 고도가 높아질수록 초원과 암벽, 설원이 차례로 바뀌어요. 전망 구간에서는 깊은 계곡과 빙하의 규모를 한눈에 감상할 수 있습니다. 고산에서는 천천히 걷고 물을 자주 마시는 편이 좋아요.",
+  "융프라우에서 꼭 남길 장면\n\n융프라우의 전망은 맑은 날 설원과 능선이 겹쳐지는 순간 가장 선명합니다. 창가에서는 관광열차가 마을과 초원을 통과하는 장면을 사진으로 남길 수 있어요. 바깥 전망대에서는 바람이 강해 얇은 겉옷보다 방풍 재킷이 실용적입니다. 눈부심을 줄일 선글라스도 챙기세요.",
+  "호수와 구시가지가 만나는 루체른\n\n루체른은 로이스강이 호수에서 흘러나오는 자리에 형성된 도시입니다. 목조 지붕이 이어지는 카펠교와 구시가지의 채색 건물이 중세 도시의 분위기를 만들어요. 강변을 따라 산책하면 다리와 교회 첨탑, 산 능선이 한 프레임에 들어옵니다. 골목 카페에서 쉬며 도시의 느린 리듬을 즐기기 좋아요.",
+  "루체른에서 맛보는 도시의 시간\n\n구시가지 광장에는 오래된 길드 건물과 상점이 이어집니다. 호숫가에서는 유람선이 오가는 풍경을 바라보며 산책할 수 있어요. 스위스 치즈와 감자 요리를 맛보면 산악 지역의 음식문화를 이해하기 쉽습니다. 돌바닥 골목이 많아 밑창이 편한 신발이 잘 맞아요.",
+  "관광열차가 여행 장면이 되는 이유\n\n스위스 관광열차는 도시 사이 이동을 차창 풍경 감상으로 바꿔줍니다. 호수와 목초지, 산악 마을이 이어지며 같은 알프스도 구간마다 색이 달라져요. 창문 반사를 줄이려면 카메라 렌즈를 유리에 가까이 대고 촬영하세요. 큰 짐은 통로를 막지 않도록 지정 보관 공간에 두는 편이 편합니다.",
+  "고대 도시 폼페이를 걷는 법\n\n폼페이는 베수비오 화산 분화로 묻힌 로마 시대 도시 유적입니다. 포장도로와 공공건물, 주택 벽화가 남아 당시 생활의 규모를 구체적으로 보여줘요. 유적 사이를 걸으며 광장과 목욕장, 상점 흔적을 관람할 수 있습니다. 그늘이 적고 바닥이 고르지 않아 모자와 물, 편한 신발이 필수예요.",
+  "로마의 시간을 품은 콜로세움\n\n콜로세움은 로마 제국의 대형 원형경기장으로 도시 역사의 상징입니다. 아치가 반복되는 외벽은 낮에는 석재 질감이, 해 질 무렵에는 따뜻한 색감이 살아나요. 주변을 걸으며 포로 로마노 방향과 함께 촬영하면 고대 도시의 규모가 드러납니다. 혼잡한 구간에서는 소지품을 몸 앞쪽에 두세요.",
+  "여행 끝에 남는 두 가지 표정\n\n스위스에서는 설원과 호수, 열차가 만드는 차분한 풍경을 즐길 수 있어요. 이탈리아에서는 폼페이와 콜로세움의 돌길을 걸으며 고대 역사를 가까이 만납니다. 자연과 도시 유적이 번갈아 이어져 사진의 색과 분위기도 계속 바뀌어요. 배경 이야기를 알고 걸으면 익숙한 명소가 훨씬 입체적으로 기억됩니다.",
 ];
 const substance = assessTravelReviewSubstance({ productName: product.name, sections: reviewSections });
 assert.equal(substance.pass, true, substance.missingElements.join(", "));
 assert.ok(substance.coveredPlaces.includes("융프라우"));
 assert.ok(substance.coveredPlaces.includes("루체른"));
+assert.equal(substance.vagueToneCount, 0);
+assert.equal(substance.productDetailCount, 0);
 
 console.log(JSON.stringify({
   ok: true,

@@ -27,6 +27,8 @@ import {
   HUMAN_REVIEW_SAFETY_RULES,
   MOBILE_BODY_RULES,
   NAVER_SEO_TITLE_RULES,
+  SHOPPING_EXPERT_REVIEW_STYLE_GUIDE,
+  TRAVEL_VLOG_STYLE_GUIDE,
   stripClickbaitFromTitle,
 } from "./lib/blog-writing-style";
 import {
@@ -2528,13 +2530,16 @@ function isDraftStepTonePrompt(text: string): boolean {
 function buildDirectSeoTitle(context: ChatGPTGuidanceContext): string {
   const compactName = stripEmoji(context.productName).replace(/\s+/g, " ").trim();
   const tokens = compactName.split(" ").filter((token) => token.length > 0);
-  const productCore = tokens.slice(0, Math.min(4, tokens.length)).join(" ");
+  const travelCore = context.connectKind === "TRAVEL"
+    ? extractTravelProductFacts(context.productName, context.description, context.features).destinations.slice(0, 2).join(" ")
+    : "";
+  const productCore = travelCore || tokens.slice(0, Math.min(4, tokens.length)).join(" ");
   const base = productCore || (context.connectKind === "TRAVEL" ? "여행상품" : "제품");
   const candidates = context.connectKind === "TRAVEL"
     ? [
-        `${base} 코스 장단점과 예약 판단`,
-        `${base} 일정 구성과 여행 포인트`,
-        `${base} 동선 분석과 선택 기준`,
+        `${base} 명소와 현지 여행 팁`,
+        `${base} 골목과 풍경 여행 이야기`,
+        `${base} 꼭 볼 곳과 즐길 거리`,
       ]
     : [
         `${base} 제품 장단점과 선택 기준`,
@@ -2549,7 +2554,7 @@ function buildDirectSeoTitle(context: ChatGPTGuidanceContext): string {
     }
   }
 
-  const safeSuffix = context.connectKind === "TRAVEL" ? "코스와 예약 판단" : "장단점과 선택 기준";
+  const safeSuffix = context.connectKind === "TRAVEL" ? "명소와 여행 팁" : "장단점과 선택 기준";
   return `${base} ${safeSuffix}`.slice(0, 35).trim();
 }
 
@@ -2587,12 +2592,15 @@ function buildSeoKeywordInput(context: ChatGPTGuidanceContext): string {
     )
     .find((token): token is string => Boolean(token));
 
+  const travelDestinations = context.connectKind === "TRAVEL"
+    ? extractTravelProductFacts(context.productName, context.description, context.features).destinations.slice(0, 2)
+    : [];
   const keywords = (context.connectKind === "TRAVEL"
     ? [
-        ...productTokens,
-        featureToken || "여행코스",
-        "패키지여행",
-        "여행커넥트",
+        ...travelDestinations,
+        featureToken || "여행명소",
+        "여행정보",
+        "여행브이로그",
       ]
     : [
         ...productTokens,
@@ -2651,12 +2659,12 @@ function buildDraftContentPayload(
 
   const sourceDetails = context.connectKind === "TRAVEL"
     ? [
-        "[추가 여행상품 정보]",
-        `- 여행상품명: ${context.productName}`,
+        "[여행지 리서치 시드 · 상품 설명으로 옮기지 않기]",
+        `- 내부 일정 식별용 상품명: ${context.productName}`,
         `- 여행커넥트 삽입용 링크(본문 URL 직접 기재 금지): ${context.brandLink}`,
-        `- 상품 설명·일정 정보: ${context.description || "(설명 없음)"}`,
-        `- 확인된 목적지·조건: ${context.features.length > 0 ? context.features.join(", ") : "(추가 확인 필요)"}`,
-        `- 표시 가격: ${context.price || "(출발일별 확인 필요)"}`,
+        `- 여행지·일정 추출 자료: ${context.description || "(설명 없음)"}`,
+        `- 조사할 목적지·장소: ${context.features.length > 0 ? context.features.join(", ") : "(추가 확인 필요)"}`,
+        "- 본문은 여행지 배경·풍경·즐길 거리·음식·사진·동선 팁 중심으로 작성",
       ]
     : [
         "[추가 제품 정보]",
@@ -2681,7 +2689,7 @@ function buildDraftContentPayload(
     "",
     "2️⃣ 관련 이미지",
     context.connectKind === "TRAVEL"
-      ? "첨부된 여행상품·여행지 이미지를 참고해주세요. 실제로 확인되는 장면만 설명하세요."
+      ? "첨부된 여행지 이미지를 참고해 실제 풍경·건축·거리 분위기를 설명하세요. 상품 조건은 설명하지 마세요."
       : "첨부된 상품 이미지를 참고해주세요. 제품 형태와 표시 정보를 변형하지 마세요.",
     "",
     ...sourceDetails,
@@ -3356,10 +3364,10 @@ async function createChatGPTContext(hasSessionFile: boolean): Promise<ChatGPTCon
 function buildGuidanceSummary(context: ChatGPTGuidanceContext): string {
   const details: string[] = context.connectKind === "TRAVEL"
     ? [
-        `여행상품명: ${context.productName}`,
-        `상품 설명·일정 정보: ${context.description || "(설명 없음)"}`,
-        `확인된 목적지·조건: ${context.features.length > 0 ? context.features.join(", ") : "(추가 확인 필요)"}`,
-        `표시 가격: ${context.price || "(출발일별 확인 필요)"}`,
+        `내부 일정 식별용 상품명: ${context.productName}`,
+        `여행지·일정 추출 자료: ${context.description || "(설명 없음)"}`,
+        `조사할 목적지·장소: ${context.features.length > 0 ? context.features.join(", ") : "(추가 확인 필요)"}`,
+        "본문 방향: 상품 설명이 아니라 여행지 배경·풍경·즐길 거리·현지 팁 중심",
         `여행커넥트 삽입용 링크(본문 URL 직접 기재 금지): ${context.brandLink}`,
         `권장 본문 흐름: ${context.minimumSectionCount}~${context.maximumSectionCount}개 (중앙 참고 ${context.targetSectionCount}개, 할당량 아님)`,
       ]
@@ -3405,10 +3413,9 @@ function buildDirectBrowserGptPrompt(
   const seoBudget = mode === "recovery" ? 350 : 650;
   const productFacts = isTravel
     ? [
-        `여행상품명: ${context.productName}`,
-        `원본 설명·일정: ${compactChatGptEvidence(context.description, descriptionBudget) || "수집 정보 없음"}`,
-        `확인된 조건·방문지: ${compactChatGptEvidence(context.features.join(" / "), 900) || "추가 확인 필요"}`,
-        `표시 가격: ${context.price || "출발일별 확인 필요"}`,
+        `내부 일정 식별용 상품명: ${context.productName}`,
+        `여행지·일정 추출 자료: ${compactChatGptEvidence(context.description, descriptionBudget) || "수집 정보 없음"}`,
+        `조사할 방문지: ${compactChatGptEvidence(context.features.join(" / "), 900) || "추가 확인 필요"}`,
       ]
     : [
         `상품명: ${context.productName}`,
@@ -3429,10 +3436,19 @@ function buildDirectBrowserGptPrompt(
       : "아래 확인 근거만 사용해 네이버 블로그 발행용 최종 글을 작성하세요.",
     "추가 질문이나 작업 설명 없이 JSON 하나만 출력하세요.",
     isTravel
-      ? "여행 글은 일정과 방문지의 실제 매력, 이동·체류·체력의 대가, 적합한 여행자를 해석하세요. 예약 안내문처럼 쓰지 마세요."
-      : "쇼핑 글은 제품 고유 기능과 구조가 실제 사용 장면에서 주는 장점·한계·추천 대상을 판단하세요. 구매 가이드 문구만 나열하지 마세요.",
+      ? "여행 글은 상품 검토문이 아니라 여행지 브이로그입니다. 장소의 배경, 실제 풍경과 분위기, 보고 먹고 즐길 것, 사진·동선 팁을 확실한 말투로 쓰세요."
+      : "쇼핑 글은 상세페이지 낭독문이 아니라 제품 분석 리뷰입니다. 제품의 특장점, 기능의 작동 방식, 구체적인 사용법, 활용 장면, 후기 원문에서 반복된 좋은 점과 구조상 한계를 자세히 설명하세요.",
     "실제 사용·구매·방문 경험은 제공되지 않았으므로 체험한 것처럼 꾸미지 마세요.",
-    "미확인 사실은 만들지 말고, 같은 경고나 확인 필요 문장을 여러 섹션에서 반복하지 마세요.",
+    "미확인 사실은 만들지 말고, 확인할 수 없는 변동 정보는 언급 자체를 생략하세요.",
+    ...(isTravel ? [
+      "웹 검색을 사용할 수 있으면 공식 관광청·공공기관 자료를 우선해 핵심 장소 3~6곳을 조사하세요.",
+      '"보입니다", "보여요", "인 것 같아요", "일 듯해요", "판단됩니다"는 금지합니다.',
+      "상품 가격·할인·포함조건·추천/비추천 여행자·예약 판단을 본문 목차로 만들지 마세요.",
+    ] : [
+      '"상세페이지에 적혀 있어요", "상품 설명에는" 같은 출처 낭독 문장을 반복하지 마세요.',
+      "스펙은 기능의 원리와 실제 이점으로 번역하고, 설치·조작·충전·세척·보관 중 해당하는 사용법을 설명하세요.",
+      "구매후기 근거가 제공된 경우에만 반복되는 장점을 요약하고, 후기 수·평점만으로 만족 내용을 만들지 마세요.",
+    ]),
     "하네스 문구는 분석 재료일 뿐 본문에 복사하지 마세요.",
   ].join("\n");
   const evidence = [
@@ -3447,11 +3463,11 @@ function buildDirectBrowserGptPrompt(
     `- 제목 25~35자, 핵심 검색어를 앞쪽에 배치하고 제목·소제목에 이모지를 쓰지 않습니다.`,
     `- sections는 근거 밀도에 따라 ${minimumSectionCount}~${context.maximumSectionCount}개, 각 항목은 '소제목\\n\\n본문' 형태입니다.`,
     "- 짧고 자연스러운 ~요체 문장으로 쓰되 같은 문장 구조와 키워드 반복을 피합니다.",
-    "- 확인된 사실 → 독자에게 주는 의미 → 장점 또는 대가가 연결된 판단을 최소 3곳에 넣습니다.",
+    `- 확인된 사실 → ${isTravel ? "눈앞의 장면 → 즐길 거리 또는 실용 팁" : "작동 방식 → 사용 장면의 이점 또는 한계"}가 연결된 흐름을 최소 3곳에 넣습니다.`,
     `- URL은 쓰지 않습니다. ${isTravel ? "여행커넥트" : "쇼핑커넥트"} 카드는 시스템이 별도로 삽입합니다.`,
     isTravel
-      ? "- 원본 일정에 나온 장소만 다루고, 코스 속 역할과 여행 준비에 유용한 안정적 정보를 함께 설명합니다."
-      : "- evidenceFacts에는 첨부 이미지와 수집 정보에서 직접 확인한 제품 고유 수치·기능·구성만 3~12개 기록합니다.",
+      ? "- 원본 일정에 나온 장소마다 역사·문화 배경, 현장 분위기, 활동, 음식·사진·동선 팁을 구체적으로 설명합니다."
+      : "- evidenceFacts에는 확인한 제품 고유 수치·기능·구성만 기록하고, 본문에서는 그 근거를 사용 가치와 사용법으로 해석합니다.",
     "- 해시태그는 검색 의도가 분명한 3~5개만 작성합니다.",
     "- 코드블록은 쓰지 않습니다.",
     "[출력 JSON]",
@@ -3690,8 +3706,8 @@ async function runDraftGptConversation(
   const seoKeywordInput = buildSeoKeywordInput(guidanceContext);
   const versionChoice = CHATGPT_FORCE_MOBILE_VERSION ? "2" : "1";
   const toneResponse = guidanceContext.connectKind === "TRAVEL"
-    ? "4번 말투의 자연스러움만 활용한 여행상품 검토형 정보 글로 진행해주세요. 코스의 장면은 생생하게 설명하되, 실제 방문·탑승·숙박 경험은 만들지 마세요."
-    : "4번 말투의 자연스러움만 활용한 제품 구매 검토형 정보 글로 진행해주세요. 확인된 특징을 장단점으로 해석하되, 직접 구매하거나 사용한 경험은 만들지 마세요.";
+    ? "4번 말투의 자연스러움만 활용한 여행지 브이로그형 정보 글로 진행해주세요. 검증된 여행지 사실은 확실하게 쓰고, 실제 방문·탑승·숙박을 했다는 1인칭 경험만 만들지 마세요."
+    : "4번 말투의 자연스러움만 활용한 제품 분석형 리뷰로 진행해주세요. 특장점의 작동 방식과 구체적인 사용법, 후기 원문에서 반복된 장점을 설명하되 직접 구매하거나 사용한 경험은 만들지 마세요.";
   const directSeoTitle = buildDirectSeoTitle(guidanceContext);
 
   const beforeStarterMessages = await readAssistantMessages(page);
@@ -3810,7 +3826,11 @@ async function runDraftGptConversation(
     `- 키: title, ${guidanceContext.connectKind === "SHOPPING" ? "evidenceFacts, " : ""}sections, hashtags`,
     `- sections는 ${guidanceContext.minimumSectionCount}~${guidanceContext.maximumSectionCount}개 범위에서 초안의 자연스러운 흐름 유지`,
     "- 모바일 버전 규칙 유지",
-    `- 말투는 부드러운 ${guidanceContext.connectKind === "TRAVEL" ? "여행상품 검토형" : "제품 구매 검토형"} 유지`,
+    `- 말투는 ${guidanceContext.connectKind === "TRAVEL" ? "확실하고 생생한 여행지 브이로그형" : "확실하고 구체적인 제품 분석형 리뷰"} 유지`,
+    ...(guidanceContext.connectKind === "TRAVEL" ? [
+      '- "보입니다", "보여요", "인 것 같아요", "일 듯해요", "판단됩니다" 금지',
+      "- 가격·할인·포함조건·추천/비추천·예약 판단 섹션 금지",
+    ] : []),
     "- 근거 없는 실제 방문·구매·사용 경험을 만들지 않기",
     "- 문장은 25-45자 안팎으로 짧게 끊고 1-2문장마다 줄바꿈",
     "- AI가 쓴 글처럼 보이는 표현, 반복 어미, 과장 광고 문장 제거",
@@ -3945,11 +3965,11 @@ async function runChatGPTBrowserTwoPass(
       "- sections 소제목에는 이모지 금지",
       "- sections는 소제목 + 본문 구조 유지",
       "- 모바일 버전 가독성(짧은 문장, 잦은 줄바꿈) 유지",
-      `- 말투는 부드러운 ${guidanceContext.connectKind === "TRAVEL" ? "여행상품 검토형" : "제품 구매 검토형"}으로 유지`,
+      `- 말투는 ${guidanceContext.connectKind === "TRAVEL" ? "확실하고 생생한 여행지 브이로그형" : "확실하고 구체적인 제품 분석형 리뷰"}으로 유지`,
       "- AI 티가 나는 표현과 과한 광고 문장을 자연스럽게 덜어내기",
       "- 직접 겪었다는 근거 없는 단정 표현은 상황형 표현으로 바꾸기",
       guidanceContext.connectKind === "TRAVEL"
-        ? "- 첨부된 여행지·일정 이미지를 참고하되 보이지 않는 체험 사실은 만들지 않기"
+        ? '- 첨부된 여행지·일정 이미지를 참고해 장소의 배경·풍경·즐길 거리·현지 팁을 보강하고, "보입니다/인 것 같아요" 말투와 상품조건 설명은 제거하기'
         : "- 첨부된 상품 이미지를 참고하되 제품 형태와 표시 정보를 변형하지 않기",
       `- JSON(title, ${guidanceContext.connectKind === "SHOPPING" ? "evidenceFacts, " : ""}sections, hashtags)으로 출력`,
       "- 코드블록 금지",
@@ -4883,7 +4903,7 @@ async function expandProductDetailSections(page: Page): Promise<number> {
   const candidates = page.locator('button[aria-expanded="false"], [role="button"][aria-expanded="false"]');
   const count = Math.min(await candidates.count().catch(() => 0), 24);
   let expanded = 0;
-  const usefulLabel = /(?:상품|상세|여행|일정|코스|포함|불포함|숙소|항공|식사|더보기|전체보기)/u;
+  const usefulLabel = /(?:상품|상세|후기|리뷰|여행|일정|코스|포함|불포함|숙소|항공|식사|더보기|전체보기)/u;
   for (let index = 0; index < count; index += 1) {
     const candidate = candidates.nth(index);
     const label = sanitizeText([
@@ -4981,6 +5001,18 @@ async function step1_getProductInfo(
     const product = records.find((record) => /Product|TouristTrip|Trip/u.test(String(record["@type"] || ""))) || records[0] || {};
     const offers = (Array.isArray(product.offers) ? product.offers[0] : product.offers) as Record<string, unknown> | undefined;
     const rating = product.aggregateRating as Record<string, unknown> | undefined;
+    const rawReviews = Array.isArray(product.review) ? product.review : product.review ? [product.review] : [];
+    const reviewHighlights = rawReviews.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const review = item as Record<string, unknown>;
+      const value = typeof review.reviewBody === "string"
+        ? review.reviewBody
+        : typeof review.description === "string"
+          ? review.description
+          : "";
+      const normalized = value.replace(/\s+/g, " ").trim();
+      return normalized.length >= 20 ? [normalized.slice(0, 240)] : [];
+    }).slice(0, 4);
     const additional = Array.isArray(product.additionalProperty) ? product.additionalProperty : [];
     const features = additional
       .map((item) => {
@@ -4996,6 +5028,7 @@ async function step1_getProductInfo(
       price: offers && (typeof offers.price === "string" || typeof offers.price === "number") ? String(offers.price) : "",
       reviewCount: rating && (typeof rating.reviewCount === "string" || typeof rating.reviewCount === "number") ? String(rating.reviewCount) : "",
       rating: rating && (typeof rating.ratingValue === "string" || typeof rating.ratingValue === "number") ? String(rating.ratingValue) : "",
+      reviewHighlights,
       features: [...features, ...keywords.split(/[,|]/u).map((item) => item.trim()).filter((item) => item.length >= 3)].slice(0, 12),
     };
   });
@@ -5229,11 +5262,56 @@ async function step1_getProductInfo(
   }
   if (reviewCount) console.log(`   ⭐ 리뷰: ${reviewCount}개`);
   if (rating) console.log(`   ⭐ 평점: ${rating}`);
+
+  // 후기 탭을 열기 전에 판매페이지 이미지를 먼저 보존한다. 일부 스토어는 탭 전환 시
+  // 상세 이미지 DOM을 제거하므로 후기 수집 때문에 제품 이미지가 사라지면 안 된다.
+  const preReviewImageUrls = connectKind === "SHOPPING"
+    ? await collectProductImageUrlsFromPage(page)
+    : [];
+
+  if (connectKind === "SHOPPING") {
+    const reviewTab = page.locator('button, [role="tab"]').filter({
+      hasText: /^(?:리뷰|구매후기|상품평)(?:\s*[\d,]+)?$/u,
+    }).first();
+    if (await reviewTab.isVisible().catch(() => false)) {
+      await reviewTab.click({ timeout: 1800 }).catch(() => undefined);
+      await page.waitForTimeout(800);
+    }
+    const reviewHighlights = new Set<string>(
+      structuredProduct.reviewHighlights.map((value) => sanitizeText(value)).filter(Boolean),
+    );
+    const reviewTextSelectors = [
+      '[class*="review"] [class*="content"]',
+      '[class*="review"] [class*="text"]',
+      '[class*="Review"] [class*="content"]',
+      '[class*="Review"] [class*="text"]',
+    ];
+    for (const selector of reviewTextSelectors) {
+      const candidates = page.locator(selector);
+      const count = Math.min(await candidates.count().catch(() => 0), 12);
+      for (let index = 0; index < count && reviewHighlights.size < 4; index += 1) {
+        const value = sanitizeText((await candidates.nth(index).textContent().catch(() => "")) || "");
+        if (value.length < 20 || value.length > 260) continue;
+        if (/(?:리뷰\s*전체|포토\s*리뷰|평점|신고|도움이\s*돼요|작성자|옵션)/u.test(value)) continue;
+        reviewHighlights.add(value);
+      }
+      if (reviewHighlights.size >= 4) break;
+    }
+    for (const value of reviewHighlights) {
+      features.push(`구매후기 근거: ${value}`);
+    }
+    if (reviewHighlights.size > 0) {
+      console.log(`   💬 구매후기 원문 근거: ${reviewHighlights.size}건`);
+    }
+  }
   
   // 5. 상품 이미지 URL 추출
   console.log("   🖼️ 이미지 URL 추출 중...");
   const imageCandidateMax = connectKind === "TRAVEL" ? 32 : 20;
-  const imageUrls = (await collectProductImageUrlsFromPage(page)).slice(0, imageCandidateMax);
+  const imageUrls = Array.from(new Set([
+    ...preReviewImageUrls,
+    ...(await collectProductImageUrlsFromPage(page)),
+  ])).slice(0, imageCandidateMax);
   const salesPageImageCount = imageUrls.filter((url) => isSalesPageProductImageUrl(url)).length;
   const reviewImageCount = imageUrls.filter((url) => isReviewImageUrl(url)).length;
   console.log(
@@ -5568,12 +5646,8 @@ async function step2_generatePost(
       ? [
           ...(travelFacts?.destinations || []),
           ...(travelFacts?.highlights || []),
-          ...(travelFacts?.conditions || []),
-          travelFacts?.duration || "",
           ...(product.travelPageResearch?.highlights.map((item) => item.name) || []),
           ...(product.travelPageResearch?.schedules.flatMap((item) => item.activities.filter((activity) => activity.length <= 80).slice(0, 4)) || []),
-          ...(travelReviewAnalysis?.strengths.flatMap((item) => item.evidence) || []),
-          ...(travelReviewAnalysis?.limitations.flatMap((item) => item.evidence) || []),
         ]
       : [
           ...(productEditorialPlan?.reviewAnalysis.verifiedSignals || []),
@@ -5591,14 +5665,15 @@ async function step2_generatePost(
     Math.max(1, qualityEvidenceAnchors.length),
   );
   const qualitySelfReviewPromptBlock = `[제출 전 내부 품질검사 · 본문에 체크리스트를 노출하지 않기]
-- 먼저 이 상품만의 편집 논지 1개를 정합니다: 가장 큰 선택 이유 + 가장 큰 대가 + 잘 맞는 독자.
+- 먼저 ${isTravel ? "이 여행지만의 편집 논지 1개를 정합니다: 고유한 배경 + 대표 장면 + 꼭 해볼 경험." : "이 상품만의 편집 논지 1개를 정합니다: 가장 큰 선택 이유 + 가장 큰 대가 + 잘 맞는 독자."}
 - 아래 확인 근거 중 서로 다른 ${minimumEvidenceAnchorCount}개 이상을 본문 판단에 실제로 사용합니다: ${qualityEvidenceAnchors.join(" / ") || "상품명과 수집 상세정보"}
-- 최소 ${minimumEvidenceLinkedJudgements}개 판단은 "근거 사실 → 사용/여행 장면의 의미 → 이점 또는 대가"가 한 흐름으로 연결되어야 합니다.
+- 최소 ${minimumEvidenceLinkedJudgements}개 판단은 "근거 사실 → ${isTravel ? "눈앞의 여행 장면 → 즐길 거리 또는 실용 팁" : "작동 방식 → 사용 장면의 이점 또는 한계"}"가 한 흐름으로 연결되어야 합니다.
 - ${isTravel
-  ? "장소 이름을 나열하는 데서 멈추지 말고, 각 장소가 코스에서 맡는 역할과 이동·체류·체력의 대가를 해석합니다."
-  : "기능을 나열하는 데서 멈추지 말고, 실제 사용 조건에서 어떤 문제를 줄이며 어떤 한계가 생기는지 해석합니다."}
-- 장점과 단점은 같은 근거를 되풀이하지 않고 서로 다른 선택 기준을 다룹니다.
-- 정보가 없는 항목은 한 군데에서 짧게 경계만 세우고, 여러 섹션을 '확인 필요' 문장으로 채우지 않습니다.
+  ? "장소 이름을 나열하는 데서 멈추지 말고, 각 장소의 역사·문화 배경, 실제 분위기, 할 수 있는 경험과 현지 팁을 구체적으로 설명합니다."
+  : "기능을 나열하는 데서 멈추지 말고, 어떤 원리로 작동하며 어떻게 설치·조작·충전·세척·보관하는지와 실제로 줄여주는 불편을 설명합니다."}
+- ${isTravel ? "가격·포함조건·상품 장단점·추천 대상을 본문 목차로 만들지 않습니다." : "상세페이지 낭독형 문장은 제거하고, 구매후기 원문이 있으면 반복 장점을 근거와 함께 따로 분석합니다."}
+- 정보가 없는 항목은 억지로 언급하지 않고, 여러 섹션을 '확인 필요' 문장으로 채우지 않습니다.
+- ${isTravel ? '"보입니다", "인 것 같아요", "일 듯해요"가 한 번이라도 나오면 확정적인 사실 문장 또는 구체적인 장면 문장으로 다시 씁니다.' : "과장된 단정과 근거 없는 체험을 제거합니다."}
 - 초안을 쓴 뒤 상품 고유명사를 다른 상품명으로 바꿔도 자연스러운 문단은 다시 작성합니다.
 - 제목·본문·해시태그 JSON을 내기 전에 위 기준을 내부적으로 다시 검사하고, 미달이면 스스로 보강합니다.`;
   if (openCrabSeoBrief) {
@@ -5618,11 +5693,11 @@ async function step2_generatePost(
   // 인트로 변화를 위한 랜덤 요소. 직접 구매/사용을 단정하지 않는 관찰형 힌트만 사용한다.
   const intros = isTravel
     ? [
-        "대표 장면의 매력과 이동 부담을 같은 저울에 놓고 봤어요",
-        "핵심 방문지가 전체 코스에서 맡는 역할부터 읽어봤어요",
-        "짧은 일정 안에서 실제 체류가 얼마나 남는지를 중심으로 봤어요",
-        "여행지의 분위기와 패키지 동선이 잘 맞는지부터 짚어봤어요",
-        "가격보다 코스의 깊이와 동행 적합도를 먼저 놓고 봤어요",
+        "도착하는 순간 가장 먼저 눈에 들어오는 풍경부터 시작해요",
+        "오래된 거리와 오늘의 일상이 겹치는 장면을 따라가요",
+        "대표 명소보다 그 장소를 특별하게 만드는 이야기부터 만나봐요",
+        "아침 풍경부터 노을과 야경까지 하루의 장면을 이어가요",
+        "처음 가는 여행자도 바로 즐길 수 있는 장소와 팁을 담아요",
       ]
     : [
         "이 제품이 해결하려는 문제와 구조상 한계를 같이 봤어요",
@@ -5635,11 +5710,11 @@ async function step2_generatePost(
 
   const endings = isTravel
     ? [
-        "대표 장소를 넓게 보는 가치가 이동 부담보다 큰지가 선택을 가릅니다",
-        "동행의 체력과 자유시간 우선순위가 이 코스의 적합도를 정해요",
-        "깊은 체류보다 장면의 다양성이 우선일 때 선택 이유가 선명해져요",
-        "현지 체류시간과 포함 조건이 맞아야 표시 가격의 의미가 살아나요",
-        "코스의 매력과 이동의 대가를 함께 받아들일 수 있는지가 핵심이에요",
+        "마지막에는 그 도시만의 빛과 거리 풍경이 오래 기억에 남아요",
+        "사진 한 장보다 직접 걷고 듣고 맛보는 시간이 여행을 완성해요",
+        "배경을 알고 걸으면 익숙한 명소도 전혀 다른 장면으로 다가와요",
+        "낮의 활기와 저녁의 분위기를 함께 누리면 여행지의 표정이 선명해져요",
+        "대표 장소마다 이야기를 하나씩 알고 가면 여행의 밀도가 달라져요",
       ]
     : [
         "핵심 기능이 내 사용 조건에 맞을 때 선택 이유가 선명해져요",
@@ -5651,9 +5726,9 @@ async function step2_generatePost(
   const randomEnding = endings[Math.floor(Math.random() * endings.length)];
 
   const systemPrompt = `당신은 인기 네이버 블로거입니다.
-${BLOG_HUMANIZE_MOBILE_STYLE ? buildHumanMobileStyleGuide() : "- 친근하고 솔직한 ~요체 사용"}
+${BLOG_HUMANIZE_MOBILE_STYLE ? buildHumanMobileStyleGuide(isTravel ? TRAVEL_VLOG_STYLE_GUIDE : SHOPPING_EXPERT_REVIEW_STYLE_GUIDE) : "- 친근하고 솔직한 ~요체 사용"}
 - 상품 정보, 가격, 이미지에서 확인되는 요소를 정확히 이해하고 자연스럽게 작성
-- 실제 사용 여부가 제공되지 않은 내용은 단정하지 말고 상황형 표현으로 풀어쓰기
+- ${isTravel ? "여행지의 검증된 사실은 확실하게 쓰고, 직접 방문했다는 1인칭 경험만 만들지 않기" : "실제 사용 여부가 제공되지 않은 내용은 단정하지 말고 상황형 표현으로 풀어쓰기"}
 - SEO를 위해 상품명, 관련 키워드를 자연스럽게 본문에 포함
 - 매번 조금씩 다른 표현 사용 (똑같은 문구 반복 금지)
 - 과장 없이 신뢰감 있게 작성
@@ -5669,32 +5744,33 @@ ${qualitySelfReviewPromptBlock ? `\n${qualitySelfReviewPromptBlock}` : ""}
 ${compositionPromptBlock ? `\n${compositionPromptBlock}` : ""}
 ${experiencePromptBlock ? `\n${experiencePromptBlock}` : ""}`;
 
-  // 여행 상품도 단순 예약 가이드가 아니라 코스의 매력과 대가를 판단하는 리뷰다.
-  // 실제 방문 경험은 만들지 않되 상품 구성과 안정적인 장소 정보에서 장단점을 해석한다.
-  const travelSectionPlan = `4. 여행 판단 렌즈 후보 (필요한 것만 선택·병합·순서 조정):
+  // 상품 페이지는 일정과 장소를 찾는 시드로만 쓰고, 본문은 여행지 브이로그형 정보 글로 만든다.
+  const travelSectionPlan = `4. 여행지 브이로그 렌즈 후보 (필요한 것만 선택·병합·순서 조정):
 ${travelEditorialPlan.map((section, index) => `   ${index + 1}) ${section.title}: ${section.purpose}`).join("\n")}
 
    편집 방향:
-   - 먼저 이 상품의 일차별 구성과 이동 축을 요약한 뒤 가장 큰 매력과 가장 큰 제약을 함께 판단하기
-   - 일정형·장소형·의사결정형 가운데 실제 수집 정보가 가장 풍부한 흐름을 선택하기
-   - 여행지 정보는 코스 안의 가치, 이동·시간·체력의 대가, 예약 조건과 연결하기
+   - 상품 상세페이지에서는 방문 도시·명소·일정 순서만 뽑고, 상품 설명은 본문에 옮기지 않기
+   - 일정형 브이로그 또는 장소형 브이로그 가운데 여행 장면이 가장 풍부한 흐름을 선택하기
    - 원본 일정에 나온 장소만 대상으로 공식 관광청·공공기관 등 신뢰 가능한 출처의 안정적인 여행정보를 조사해 보강하기
-   - 조사한 장소 정보는 백과사전처럼 따로 나열하지 말고, 해당 일차에서 무엇을 보고 왜 묶였는지와 연결하기
-   - 장점·아쉬운 점·추천/비추천 여행자는 근거가 있는 만큼 자연스럽게 묶어 설명하기
+   - 각 핵심 장소마다 역사·문화 배경, 현장 풍경과 분위기, 할 수 있는 활동, 음식·사진 포인트, 실용 팁을 연결하기
+   - 조사한 사실은 백과사전처럼 나열하지 말고 "도착 장면 → 배경 이야기 → 무엇을 즐길지 → 현지 팁"의 흐름으로 풀기
+   - 가격·할인·포함조건·상품 장단점·추천/비추천 여행자를 독립 섹션으로 만들지 않기
+   - 홍보는 구체적인 풍경과 경험으로 하고, 예약을 압박하거나 상품명을 반복하지 않기
    - 여행커넥트 레퍼럴 카드는 에디터가 본문 초반과 마지막에 자동 삽입
 
    ⚠️ 사실 기반 원칙 (여행):
-   - 위 "원본 여행상품 일정 근거"에 없는 일정·가격·포함사항·호텔 등급을 지어내지 마세요.
+   - 위 "원본 여행상품 일정 근거"에 없는 방문지를 확정 일정처럼 지어내지 마세요.
    - 방문지 설명은 원본 일정에 나온 장소를 공식 관광청·공공기관 자료로 교차 확인한 안정적 사실만 쓰고,
      영업시간·입장료·최신 행사처럼 변동되는 세부 정보는 단정하지 마세요.
-   - 실제 다녀온 것처럼 "다녀왔다", "먹어봤다"라고 단정하지 마세요.
+   - 실제 다녀온 것처럼 "제가 다녀왔다", "먹어봤다"라고 말하지 마세요. 대신 독자가 현장에 들어간 듯한 장면형 문장을 쓰세요.
+   - "보입니다", "보여요", "인 것 같아요", "일 듯해요", "판단됩니다"는 사용하지 마세요.
    - "확인하세요·살펴보세요·비교하세요" 같은 안내형 종결은 글 전체 3회를 넘기지 마세요.
    - 동일한 소제목이나 문단을 반복해서 글자 수를 채우지 마세요.`;
   const contentFactsPrompt = isTravel
-    ? `- 여행상품명: ${product.name}\n${travelPageResearchPromptBlock}\n${travelFactsPromptBlock}\n- 표시 가격: ${product.price || "출발일별 확인 필요"}\n- 상세 URL: ${product.finalUrl || brandLink}`
+    ? `- 내부 일정 식별용 상품명(본문 반복 금지): ${product.name}\n${travelPageResearchPromptBlock}\n${travelFactsPromptBlock}\n- 리서치 시드 URL(상품 설명 인용 금지): ${product.finalUrl || brandLink}`
     : `- 상품명: ${product.name}\n- 설명: ${product.description || '(상품 설명 참고)'}\n- 특징: ${product.features.join(', ') || '(상품 특징 참고)'}\n- 가격: ${product.price || '(가격 정보 참고)'}\n${product.originalPrice ? `- 원가: ${product.originalPrice}` : ''}\n${product.discountRate ? `- 할인율: ${product.discountRate}` : ''}\n${product.couponInfo ? `- 쿠폰/혜택: ${product.couponInfo}` : ''}\n${product.deliveryInfo ? `- 배송: ${product.deliveryInfo}` : ''}\n${product.reviewCount ? `- 리뷰: ${product.reviewCount}개` : ''}\n${product.rating ? `- 평점: ${product.rating}점` : ''}`;
 
-  const userPrompt = `다음 ${isTravel ? "여행상품의 코스 가치와 장단점을 판단하는 블로그 리뷰" : "제품 자체의 장단점과 적합도를 판단하는 상세 블로그 리뷰"}를 작성해주세요.
+  const userPrompt = `다음 ${isTravel ? "일정에 등장하는 여행지를 깊이 있게 소개하는 브이로그형 네이버 블로그 글" : "제품의 특장점·기능 원리·사용법·활용 장면·후기 근거를 깊이 있게 설명하는 네이버 블로그 리뷰"}를 작성해주세요.
 
 ## 상품 정보
 ${contentFactsPrompt}
@@ -5704,7 +5780,7 @@ ${contentFactsPrompt}
 - 마무리 힌트: "${randomEnding}"
 - 이 힌트를 참고해서 자연스럽게 변형해서 사용
 - 휴대폰으로 블로그 앱에서 쓰는 글처럼 짧고 부드럽게 작성
-- 광고 문구보다 실제 구매를 고민하는 사람의 말투로 작성
+- ${isTravel ? "독자가 여행지의 분위기와 즐길 거리를 구체적으로 떠올리고 떠나고 싶어지는 확실한 말투로 작성" : "제품을 충분히 분석한 전문가가 실제 활용법을 알려주는 확실하고 구체적인 말투로 작성"}
 ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일 버전 고정" : ""}
 
 ## 작성 규칙
@@ -5714,13 +5790,13 @@ ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일
      ? "- 제목의 체험 표현은 제공된 실제 체험 메모로 증명되는 범위에서만 사용하세요."
      : "- 실제 체험 증빙이 없으므로 제목에 후기, 내돈내산, 실사용, 직접 써본, 직접 다녀온 표현을 넣지 마세요."}
    - "완벽 가이드", "총정리", "꿀팁" 같은 낚시성 문구 금지 (네이버 스팸 기준).
-   예: ${isTravel ? '"제주 서부 코스 | ○○ 패키지 일정과 포함사항"' : '"아기비데 추천 | 해피달링 워터탭 선택 기준"'}
+   예: ${isTravel ? '"타이베이 단수이 여행, 노을과 골목을 걷는 4일"' : '"아기비데 추천 | 해피달링 워터탭 선택 기준"'}
 
 2. 본문은 근거 밀도에 따라 ${minimumBodySectionCount}~${maximumBodySectionCount}개 흐름으로 자유롭게 구성
    - ${bodySectionCount}개는 중앙 참고값이며 정확한 개수·제목·순서를 강제하지 않습니다.
    - 전체 분량은 공백 제외 ${compositionContract.targetCharacters.min}~${compositionContract.targetCharacters.max}자를 품질 점검 범위로 참고합니다.
    - 글자보다 이미지가 본체입니다. 문장은 사진 사이를 잇는 역할로 짧게.
-   ${isTravel ? "" : "- 첨부된 상세페이지 이미지의 글자와 사양표를 먼저 읽고, 확인된 수치·기능·구성만 evidenceFacts에 정리한 뒤 본문 판단에 사용하세요."}
+   ${isTravel ? "" : "- 첨부된 상세페이지 이미지의 글자와 사양표는 내부 evidenceFacts로만 정리하고, 본문에는 복사하지 말고 기능 원리·사용법·활용 이점으로 변환하세요."}
 
 3. 각 섹션 구조:
    - 소제목 (한 줄, 이모지 금지)
@@ -5730,9 +5806,9 @@ ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일
      : "각 흐름은 처음부터 4~6개의 완결된 문장으로 작성합니다. 3문장 이하로 줄이지 마세요."}
    - 문장 수를 채우기 위해 같은 뜻을 반복하지 말고, 서로 다른 사실·장면·판단을 한 문장씩 배치합니다.
    - 한 문장에 정보 하나만 담고, 어색하면 더 짧게 나누기
-   - 여행 글은 정보→여행 장면→상품 판단의 인과가 보이도록 쓰되, 매번 같은 순서를 반복하지 않기
+   - 여행 글은 배경지식→눈앞의 장면→즐길 거리→현지 팁이 자연스럽게 이어지도록 쓰되, 매번 같은 순서를 반복하지 않기
    - 글 전체에서 상품 고유 사실과 그 사실에 대한 판단이 연결되도록 쓰기
-   ${isTravel ? "- 실제 코스가 잘 맞는 여행자와 일정이 아쉬울 여행자를 모두 판단하고, 마지막 흐름에는 이 상품을 고를 조건과 고르지 않을 조건을 분명하게 씁니다." : ""}
+   ${isTravel ? "- 상품을 고를 조건이 아니라, 여행지에서 놓치지 말아야 할 장면과 경험으로 마지막을 맺습니다." : "- 제품 글은 기능→작동 방식→사용 방법→실제 이점 또는 한계가 이어지도록 씁니다."}
    - "확인하세요·살펴보세요·비교해보세요" 같은 문장은 글 전체 3회 이하
    - 빈 줄
 
@@ -5754,28 +5830,29 @@ ${productEditorialPromptBlock}
    - 본문 중간중간 관련 키워드 자연스럽게 배치
    - 같은 키워드를 연속 반복하지 않기
 
-6. ${isTravel ? "여행상품 검토 기준" : "할인/특가 정보 활용 (있는 경우만)"}:
-${isTravel ? `   - 상품명이 아니라 일정표에서 확인된 코스만 확정적으로 표현
+6. ${isTravel ? "여행지 리서치와 홍보 기준" : "제품 분석과 리뷰 기준"}:
+${isTravel ? `   - 상품 페이지는 여행지와 일정 순서를 찾는 자료로만 사용하고 가격·할인·포함조건을 본문에서 설명하지 않기
    - 글을 쓰기 전에 일정표를 일차별로 분석하고, 방문지·이동 축·식사·쇼핑·자유시간 유무를 내부 메모로 정리
-   - 가능한 경우 웹 검색을 사용해 일정에 등장한 핵심 장소 3~6곳을 공식 관광청·공공기관 자료로 조사하고, 안정적인 여행정보만 반영
+   - 웹 검색 도구가 있으면 반드시 사용해 일정에 등장한 핵심 장소 3~6곳을 공식 관광청·공공기관 자료 우선으로 조사하고, 안정적인 여행정보를 반영
    - 웹 검색을 사용할 수 없으면 모델 기억으로 최신 운영정보를 만들지 말고 원본 일정 근거 안에서만 작성
-   - 여행지의 배경과 대표 볼거리만 소개하지 말고, 이 패키지 안에서 그 장소가 주는 가치와 이동·시간·체력의 대가를 함께 분석
-   - 상품 고유 장점과 아쉬운 점을 근거가 있는 만큼 설명하고, 최소 한 가지 제약 또는 미확인 핵심 조건은 명시
-   - 여행을 처음 검색하는 독자가 출발 전에 궁금해할 정보(어디에 있는지, 무엇을 보는지, 어떻게 움직이는지, 무엇을 준비하는지)를 본문 앞쪽에 배치
-   - 최신 운영시간·입장료·환율·날씨처럼 변동되는 정보는 확인 필요로 표시하고 단정하지 않기
-   - 가격은 출발일·인원·객실 조건에 따라 달라질 수 있음을 안내
+   - 핵심 장소마다 배경지식 1개, 대표 풍경 1개, 할 수 있는 활동 1개, 음식·사진·동선 중 실용 팁 1개 이상 넣기
+   - 여행을 처음 검색하는 독자가 궁금해할 정보(어떤 장소인지, 분위기는 어떤지, 무엇을 보고 먹고 즐길지, 어떻게 움직일지)를 앞쪽에 배치
+   - 최신 운영시간·입장료·환율·날씨처럼 변동되는 정보는 출처가 없으면 본문에서 생략
+   - "보입니다", "보여요", "인 것 같아요", "일 듯해요", "판단됩니다"를 한 번도 사용하지 않기
    - 실제 탑승·숙박·식사 경험이나 현지 후기를 만들어내지 않기
    - 쇼핑 상품의 배송·구성품·스펙·교환/반품 문구를 절대 사용하지 않기`
   : `
-   - 제품을 정확한 카테고리로 분류하고 상품명·기능·구조에서 직접 이어지는 장점을 근거가 있는 만큼 제시
+   - 상세페이지와 이미지는 사실 추출에만 쓰고 "상품 설명에는", "상세페이지에 적혀 있어요" 같은 낭독형 문장을 반복하지 않기
+   - 제품이 해결하는 문제와 정확한 카테고리를 먼저 정의하고, 다른 제품과 갈리는 특장점을 구체적으로 설명
+   - 핵심 기능마다 "어떤 구조로 작동하는가 → 어떻게 사용하는가 → 어떤 불편을 줄이는가"를 연결
+   - 설치·조작·충전·세척·보관 중 제품에 해당하는 사용법을 최소 2가지 이상 구체적으로 설명
+   - 구매후기 원문 근거가 제공되면 구매자들이 반복해 언급한 좋은 점과 사용 맥락을 요약하고, 후기 원문이 없으면 후기 내용을 만들지 않기
+   - 후기 수와 평점은 신뢰 참고값일 뿐, 수치만으로 만족 이유나 장단점을 추정하지 않기
    - 배송·쿠폰·교환 조건을 제품 단점으로 쓰지 말고, 설치·크기·전원·관리·호환성 등 제품 자체의 한계 또는 미확인 핵심 성능을 최소 한 가지 제시
    - 추천 대상과 비추천 대상을 모두 쓰고, 어떤 조건에서 대안 제품이 더 나은지 명시
    - 상세정보가 부족한 성능은 지어내지 말고 "미확인이라 추천 판단을 보류할 항목"으로 구분
-   - 할인율이 있으면 담백하게 "현재 할인가 기준으로는 부담이 줄어드는 편이에요"처럼 표현
-   - 쿠폰 정보가 있으면 "구매 전 쿠폰 적용 여부도 확인해보면 좋아요" 정도로 언급
-   - 무료배송이면 "배송비까지 보면 체감 가격이 달라질 수 있어요"처럼 자연스럽게 언급
-   - 리뷰 수/평점은 확인된 경우에만 참고 포인트로 언급
-   - 구매 유도보다 가격 판단 기준을 알려주는 방식으로 작성`}
+   - 가격·할인·배송은 제품 분석을 끝낸 뒤 필요한 경우 한두 문장만 언급
+   - 구매 유도보다 제품을 어떻게 쓰고 어떤 조건에서 가치가 살아나는지 알려주는 방식으로 작성`}
 
 7. 해시태그 ${NAVER_BLOG_HASHTAG_COUNT}개 (상위 노출 글 실측 기준 3~5개):
 ${isTravel
@@ -5785,7 +5862,7 @@ ${isTravel
    - 개수를 채우기 위한 일반 태그(일상 등)는 넣지 마세요`}
 
 8. AI 티가 나는 문장 금지:
-${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES}\n${HUMAN_REVIEW_SAFETY_RULES}` : "   - 반복적인 문장 구조와 과장 표현 금지"}
+${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES}\n${HUMAN_REVIEW_SAFETY_RULES}\n${isTravel ? TRAVEL_VLOG_STYLE_GUIDE : SHOPPING_EXPERT_REVIEW_STYLE_GUIDE}` : "   - 반복적인 문장 구조와 과장 표현 금지"}
 
 ## 출력 (JSON만, 줄바꿈은 \\n)
 {
@@ -5865,19 +5942,23 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
           userPrompt,
           qualityChecklist: {
             version: "brand-draft-quality-checklist/v1",
-            editorialThesis: "가장 큰 선택 이유, 가장 큰 대가, 잘 맞는 독자를 하나의 논지로 연결",
+            editorialThesis: isTravel
+              ? "여행지의 고유한 배경, 대표 장면, 꼭 해볼 경험을 하나의 브이로그 흐름으로 연결"
+              : "가장 큰 선택 이유, 가장 큰 대가, 잘 맞는 독자를 하나의 논지로 연결",
             evidenceAnchors: qualityEvidenceAnchors,
             minimumDistinctEvidenceAnchors: minimumEvidenceAnchorCount,
             minimumEvidenceLinkedJudgements,
             checks: [
               isTravel
-                ? "일정 원문에서 확인된 장소와 조건만 근거로 사용했는가"
+                ? "일정 원문은 방문 장소를 식별하는 데만 사용하고 상품 조건 설명을 본문에서 제거했는가"
                 : "referenceImageUrls의 상세이미지를 열어 수치·기능·구성을 evidenceFacts에 구조화했는가",
-              "상품 고유 사실이 실제 판단 근거로 쓰였는가",
+              isTravel ? "공식 관광 자료의 안정적인 사실이 여행 장면과 연결됐는가" : "상품 고유 사실이 실제 판단 근거로 쓰였는가",
               isTravel
-                ? "장소별 정보가 코스 역할과 이동·체류 대가로 이어지는가"
-                : "기능·구조가 사용 장면의 이점과 한계로 이어지는가",
-              "장점·아쉬운 점·추천·비추천·조건부 결론이 같은 말을 반복하지 않는가",
+                ? "핵심 장소마다 배경·분위기·즐길 거리·실용 팁이 들어갔는가"
+                : "기능·구조가 작동 방식, 구체적인 사용법, 사용 장면의 이점과 한계로 이어지는가",
+              isTravel
+                ? '"보입니다", "인 것 같아요" 같은 모호한 말투와 가격·포함조건·예약 판단 문단이 없는가'
+                : "상세페이지 낭독형 문장이 없고, 수집된 구매후기 원문이 있으면 반복 장점을 근거대로 요약했는가",
               "확인 필요 안내와 미확인 정보가 여러 문단을 차지하지 않는가",
               "근거 없는 직접 사용·방문 경험이나 변동 정보를 만들지 않았는가",
             ],
@@ -10141,7 +10222,9 @@ async function main() {
         );
       }
       if (product && needsReviewEvidenceRefresh) {
-        console.log("   ⚠️ 제품 장단점을 판단할 상세정보가 부족해 상품 페이지의 설명·기능을 다시 수집합니다.");
+        console.log(runtimeConnectKind === "TRAVEL"
+          ? "   ⚠️ 여행지 리서치에 필요한 방문지·일정 정보가 부족해 상품 페이지를 다시 수집합니다."
+          : "   ⚠️ 제품 장단점을 판단할 상세정보가 부족해 상품 페이지의 설명·기능을 다시 수집합니다.");
       }
       if (needsTravelResearchRefresh) {
         console.log("   ⚠️ 저장된 여행 일정 원문이 없어 상품 페이지의 전체 일정·방문지를 다시 수집합니다.");
@@ -10179,7 +10262,7 @@ async function main() {
     if (!finalReviewEvidenceReady) {
       throw new Error(
         runtimeConnectKind === "TRAVEL"
-          ? "여행상품의 코스 장단점을 판단할 목적지·일정·조건 정보가 부족합니다. 상세정보 동기화 후 다시 시도해 주세요."
+          ? "여행지 브이로그를 작성할 방문지·일정 정보가 부족합니다. 상세정보 동기화 후 다시 시도해 주세요."
           : "제품 자체의 장단점을 판단할 기능·규격 텍스트나 상세페이지 이미지가 부족합니다. 상세정보 동기화 후 다시 시도해 주세요.",
       );
     }
