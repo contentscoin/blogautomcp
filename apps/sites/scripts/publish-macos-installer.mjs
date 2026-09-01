@@ -11,9 +11,10 @@ if (!secret) throw new Error('INSTALLER_UPLOAD_KEY 환경변수가 필요합니�
 const baseUrl = new URL(baseUrlInput);
 if (baseUrl.protocol !== 'https:' && !(baseUrl.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(baseUrl.hostname))) throw new Error('HTTPS 사이트 URL만 사용할 수 있습니다.');
 const filePath = resolve(fileInput);
-const installerName = basename(filePath);
-const version = /^BrandConnect\.Automation-(\d+\.\d+\.\d+)-arm64\.dmg$/.exec(installerName)?.[1];
+const sourceName = basename(filePath);
+const version = /^BrandConnect(?:\.|\s)Automation-(\d+\.\d+\.\d+)-arm64\.dmg$/.exec(sourceName)?.[1];
 if (!version) throw new Error('macOS 설치 파일명이 올바르지 않습니다.');
+const installerName = `BrandConnect.Automation-${version}-arm64.dmg`;
 const info = await stat(filePath);
 if (!info.isFile() || info.size < 1 || info.size > 2 * 1024 * 1024 * 1024) throw new Error('macOS 설치 파일 크기를 확인하세요.');
 const hash = createHash('sha256');
