@@ -10226,6 +10226,17 @@ async function main() {
       link.id,
       link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING"
     );
+    // 쇼핑 GPT가 상세 이미지에서 추출한 evidenceFacts는 step2_generatePost에서
+    // product.features에 합쳐진다. 이 값을 저장하지 않으면 이후 미리보기/QC가
+    // 크롤링 당시의 SEO 키워드만 읽어 근거가 없는 글로 오판한다.
+    if (!preparedPostOverride && runtimeConnectKind === "SHOPPING") {
+      await prisma.brandLink.update({
+        where: { id: linkId },
+        data: {
+          productFeatures: product.features.length > 0 ? JSON.stringify(product.features) : null,
+        },
+      });
+    }
     if (BRANDLINK_DRAFT_CONTEXT_OUTPUT) {
       await prisma.brandLink.update({
         where: { id: linkId },

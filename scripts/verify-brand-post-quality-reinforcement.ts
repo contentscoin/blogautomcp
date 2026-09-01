@@ -120,6 +120,44 @@ const shoppingGuide = getBrandLinkContentReadiness({
 });
 assert.equal(shoppingGuide.canPublish, false, "제품 고유 사양을 쓰지 않은 선택 가이드형 쇼핑 원고는 차단해야 합니다.");
 assert.equal(shoppingGuide.signals.find((signal) => signal.key === "evidence-density")?.status, "fail");
+
+const naturalShoppingReview = getBrandLinkContentReadiness({
+  productName: "블라우풍트 5in1 3헤드 면도기 IPX7 프리미엄 방수 전기면도기",
+  title: "전기면도기 블라우풍트 5in1 선택 기준",
+  sections: [
+    "비슷한 제품과 갈리는 지점\n\n블라우풍트 5in1 3헤드 면도기는 면도만 보는 제품은 아니에요. 3헤드 전동면도기에 트리머 기능을 묶은 올인원 쪽에 가깝습니다. 헤드 구성과 관리 범위가 선택 이유예요. 수염 정리와 잔털 손질을 한 기기로 줄이고 싶은 사람에게 더 맞습니다.",
+    "사진에서 먼저 보이는 구조\n\n대표 이미지에는 3개의 원형 면도 헤드가 보입니다. 상세페이지에는 3D 플렉스 3헤드 시스템이라고 적혀 있어요. 얼굴 굴곡을 따라 움직이는 구조를 강조한 제품입니다. 버튼 하나로 쓰는 단순한 사용감을 기대할 수 있어요.",
+    "5in1 구성은 왜 의미가 있을까\n\n상품 설명에는 팝업트리머, 정밀트리머, 코털트리머가 함께 적혀 있습니다. 5in1 멀티그루밍 구성이라 구레나룻과 잔털까지 정리하는 사람에게 실용적입니다. 여행 가방에 넣을 기기 수를 줄인다는 의미도 있어요. 다만 각 헤드의 보관 방식은 확인이 필요합니다.",
+    "방수와 관리 편의\n\n습식과 건식 겸용 방수 설계가 표시되어 있습니다. 원터치 헤드 오픈 구조는 세척 편의성이 분명해요. 물기가 있는 공간에서는 방수 등급 차이가 중요합니다. 상품명은 IPX7, 이미지 일부는 IPX6라 최종 등급은 구매 화면을 기준으로 봐야 합니다.",
+    "휴대용으로 볼 때\n\n1회 충전 60분 사용이라고 적혀 있습니다. 디지털 LED 인디케이터는 배터리 상태를 눈으로 확인하는 데 유용합니다. 안전 잠금 장치는 이동 중 버튼 눌림을 줄여줘요. 실제 무게가 없다면 휴대성 판단은 남겨둬야 합니다.",
+    "아쉬운 점도 분명해요\n\n8,400rpm 표기는 확인되지만 체감 절삭력을 그대로 말해주지는 않습니다. 사용자 후기가 없어 소음과 피부 자극 판단도 비어 있어요. 민감한 피부라면 교체날 정보가 제품 자체의 제약이 됩니다. 면도 성능 하나만 원한다면 단일 고급 면도기가 더 나을 수 있어요.",
+    "잘 맞는 사람과 덜 맞는 사람\n\n면도와 그루밍을 한 번에 정리하려는 사람에게 잘 맞습니다. 출장 때 트리머를 따로 챙기기 번거로운 사람에게도 어울려요. 이미 별도 트리머가 있다면 5in1 장점은 줄어듭니다. 절삭력만 우선하는 사람에게는 비추천 대상입니다.",
+    "가격까지 놓고 보면\n\n가격과 5in1 구성을 함께 보면 여러 손질을 한 기기로 줄이고 싶은 사람에게 후보가 됩니다. 기능을 실제로 모두 쓸 때 가격의 의미가 살아나요. 반대로 면도만 필요하면 구성 과잉일 수 있습니다. 사용 목적이 맞는지가 최종 선택 기준입니다.",
+    "이 포스팅은 네이버 쇼핑 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받습니다.",
+  ],
+  hashtags: ["전기면도기", "블라우풍트면도기", "남자전기면도기", "여행용면도기"],
+  brandLink: "https://naver.me/shaver-fixture",
+  generationSource: "AI",
+  hasRepresentativeImage: true,
+  thumbnailGenerated: true,
+  connectKind: "SHOPPING",
+  sourceDescription: "블라우풍트 5in1 3헤드 전기면도기 팝업트리머 정밀트리머 코털트리머",
+  sourceFeatures: [
+    "3D 플렉스 3헤드 시스템",
+    "5in1 멀티그루밍 올인원 구성",
+    "습식 건식 겸용 방수 설계",
+    "원터치 헤드 오픈",
+    "1회 충전 60분 사용",
+    "디지털 LED 인디케이터",
+    "안전 잠금 장치",
+    "8,400rpm",
+  ],
+  mode: "editorial",
+});
+assert.equal(naturalShoppingReview.canPublish, true, naturalShoppingReview.reason || naturalShoppingReview.summary);
+assert.equal(naturalShoppingReview.signals.find((signal) => signal.key === "editorial-flow")?.status, "pass");
+assert.equal(naturalShoppingReview.signals.find((signal) => signal.key === "review-substance")?.status, "pass");
+assert.equal(naturalShoppingReview.signals.find((signal) => signal.key === "evidence-density")?.status, "pass");
 assert.equal(SHOPPING_POST_CONTRACT_V1.targetImages.min, 5);
 assert.equal(SHOPPING_POST_CONTRACT_V1.targetImages.recommended, 8);
 assert.equal(TRAVEL_POST_CONTRACT_V1.targetImages.min, 7);
@@ -155,6 +193,16 @@ assert.match(simpleAgentSource, /brand-draft-quality-checklist\/v1/u);
 assert.match(simpleAgentSource, /근거 사실 → 사용\/여행 장면의 의미 → 이점 또는 대가/u);
 assert.match(simpleAgentSource, /contentQuality\.canPublish가 false/u);
 assert.match(sitesMcpSource, /contentQuality\.canPublish가 false/u);
+const step2CallIndex = simpleAgentSource.indexOf("await step2_generatePost(");
+const persistedEvidenceIndex = simpleAgentSource.indexOf(
+  "productFeatures: product.features.length > 0 ? JSON.stringify(product.features) : null",
+  step2CallIndex,
+);
+assert.ok(step2CallIndex >= 0, "step2_generatePost call must exist");
+assert.ok(
+  persistedEvidenceIndex > step2CallIndex,
+  "GPT evidence facts must be persisted after step2_generatePost",
+);
 
 console.log(JSON.stringify({
   ok: true,

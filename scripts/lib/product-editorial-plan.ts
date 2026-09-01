@@ -568,17 +568,17 @@ export function formatProductEditorialPlanForPrompt(plan: ProductEditorialPlan):
 }
 
 const ROLE_PATTERNS: Record<ProductEditorialRole, RegExp> = {
-  "review-hook": /한\s*줄|먼저\s*내린|첫\s*결론/u,
-  "product-identity": /어떤\s*제품|제품\s*정체|핵심\s*구조|상품\s*성격/u,
-  "source-evidence": /확인한\s*사실|근거|상세\s*정보|스펙/u,
-  "primary-strength": /가장\s*분명한\s*장점|핵심\s*장점|주요\s*기능\s*1/u,
+  "review-hook": /한\s*줄|먼저\s*내린|첫\s*결론|갈리는\s*(?:지점|기준)|먼저\s*보이는/u,
+  "product-identity": /어떤\s*제품|제품\s*정체|핵심\s*구조|상품\s*성격|올인원|쪽에\s*가깝|제품은|기기는/u,
+  "source-evidence": /확인한\s*사실|근거|상세\s*(?:정보|페이지|이미지|설명)|대표\s*이미지|스펙|수치|적혀|표시/u,
+  "primary-strength": /가장\s*분명한\s*장점|핵심\s*장점|주요\s*기능\s*1|선택\s*이유|실용적|편의성|의미가\s*있/u,
   "secondary-strength": /두\s*번째|또\s*다른\s*강점|주요\s*기능\s*2/u,
   "use-case": /사용\s*장면|활용|잘\s*맞는\s*상황/u,
   comparison: /비슷한\s*제품|비교|갈리는\s*기준/u,
   limitations: /아쉬|단점|한계|제약|주의/u,
   fit: /추천\s*대상|비추천|이런\s*분|누구/u,
   offer: /가격|혜택|할인/u,
-  verdict: /최종|결론|마지막\s*선택/u,
+  verdict: /최종|결론|마지막\s*선택|후보에\s*올|선택\s*기준|가격까지\s*놓고/u,
 };
 
 export function inferProductEditorialRole(title: string): ProductEditorialRole {
@@ -639,7 +639,7 @@ export function assessProductReviewSubstance(input: {
   );
   const evidenceJudgementCount = sentences.filter((sentence) =>
     analysis.verifiedSignals.some((signal) => signalCoveredBySentence(signal, sentence)) &&
-    /(?:장점|강점|선택\s*이유|효율|편의|유리|줄(?:여|어|일)|늘(?:려|어|릴)|대신|반면|아쉬|부담|한계|제약|잘\s*맞|적합|비추천)/u.test(sentence)
+    /(?:장점|강점|선택\s*이유|효율|편의|유리|실용|중요|의미|가치|도움|현실적|유용|어울|후보|줄(?:여|어|일)|늘(?:려|어|릴)|대신|반면|아쉬|부담|한계|제약|잘\s*맞|적합|비추천|더\s*낫)/u.test(sentence)
   ).length;
   const requiredSignalCount = Math.min(
     analysis.evidenceLevel === "rich" ? 4 : analysis.evidenceLevel === "usable" ? 3 : 1,
@@ -651,7 +651,7 @@ export function assessProductReviewSubstance(input: {
     [/(?:장점|강점|선택\s*이유)/u.test(body), "구체적인 장점"],
     [/(?:아쉬운|단점|한계|제약|비추천)/u.test(body), "제품 자체의 단점·제약"],
     [/(?:추천\s*대상|잘\s*맞|비추천\s*대상|맞지\s*않)/u.test(body), "추천·비추천 대상"],
-    [/(?:최종\s*리뷰|조건부\s*결론|후보로|더\s*실용적|고르는\s*편이\s*맞)/u.test(body), "조건부 최종 결론"],
+    [/(?:최종\s*리뷰|조건부\s*결론|후보(?:로|에\s*올)|더\s*실용적|고르는\s*편이\s*맞|선택\s*기준)/u.test(body), "조건부 최종 결론"],
     [coveredSignals.length >= requiredSignalCount, "상품 고유 구조·기능 근거"],
     [evidenceJudgementCount >= requiredEvidenceJudgementCount, "근거와 사용 가치가 연결된 판단"],
     [genericGuidanceCount / sentenceCount <= 0.24, "확인 안내가 아닌 리뷰 판단"],
