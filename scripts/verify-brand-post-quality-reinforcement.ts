@@ -57,6 +57,37 @@ const stronger = assess(strongerSections.map((section, index) => (
     ? section
     : `${section}\n\n판단 포인트 ${index + 1}은 상품의 표기 조건을 여행자의 시간·예산·이동 성향에 연결해 장점과 대가를 함께 읽는 것입니다. 선택 차이 ${index + 1}은 단순 예약 안내보다 실제 결정에 필요한 기준을 선명하게 만듭니다.`
 )));
+
+const naturalTravelSupplements = [
+  "짧은 일정에서 무엇을 더 보고 무엇을 포기하는지가 만족도를 좌우해요.",
+  "항구 사이 실제 체류가 충분해야 서로 다른 지역을 묶은 코스의 가치가 살아나요.",
+  "저녁 동선이 단순하면 관광 뒤 쉬는 시간이 늘어 동행의 피로를 덜 수 있어요.",
+  "정해진 날짜에 움직이는 여행자에게 일정 안정성은 할인보다 중요한 장점이 되기도 해요.",
+  "포함 조건이 명확할수록 현지에서 예산 때문에 코스를 바꾸는 부담도 줄어들어요.",
+  "이동 중심 흐름이 괜찮은 동행인지가 상품 적합도를 가장 선명하게 가릅니다.",
+  "자유시간보다 대표 장면을 고르게 보는 편을 원할 때 선택 이유가 분명해져요.",
+];
+const naturalTravelSections = strongerSections
+  .filter((section) => !section.startsWith("준비와 이동 강도"))
+  .map((section, index) => {
+    const naturalSection = section
+      .replace("추천·비추천 여행자", "잘 맞는 여행자와 아쉬운 점")
+      .replace("추천 여행자는", "이 상품은")
+      .replace("비추천 여행자는", "한곳에 오래 머무는 여행자에게는")
+      .replace("최종 리뷰", "가격과 이동을 같이 보면")
+      .replace("최종 리뷰는", "이 상품은")
+      .replace("후보에 올릴 만합니다", "선택 이유가 분명합니다");
+    return naturalSection === disclosure
+      ? naturalSection
+      : `${naturalSection} ${naturalTravelSupplements[index]}`;
+  });
+const naturalTravel = assess(naturalTravelSections);
+assert.equal(naturalTravel.canPublish, true, naturalTravel.reason || naturalTravel.summary);
+assert.equal(
+  naturalTravel.reason?.includes("편집 역할 preparation") ?? false,
+  false,
+  "내부 편집 역할명은 사용자 QC 사유에 노출되면 안 됩니다.",
+);
 const lowEvidence = assess(strongerSections.map((section, index) => {
   const withoutSpecificPlaces = section
     .replaceAll("히타카츠", "첫 번째 지역")
@@ -192,6 +223,8 @@ const sitesMcpSource = fs.readFileSync(
 assert.match(simpleAgentSource, /brand-draft-quality-checklist\/v1/u);
 assert.match(simpleAgentSource, /근거 사실 → 사용\/여행 장면의 의미 → 이점 또는 대가/u);
 assert.match(simpleAgentSource, /contentQuality\.canPublish가 false/u);
+assert.match(simpleAgentSource, /repairAttempt <= 2/u);
+assert.doesNotMatch(simpleAgentSource, /편집 역할 \$\{role\}/u);
 assert.match(sitesMcpSource, /contentQuality\.canPublish가 false/u);
 const step2CallIndex = simpleAgentSource.indexOf("await step2_generatePost(");
 const persistedEvidenceIndex = simpleAgentSource.indexOf(

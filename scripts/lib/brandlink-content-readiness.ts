@@ -119,7 +119,10 @@ function assessTravelEditorialCoverage(sections: string[]): {
   const coveredRoles = Object.entries(rolePatterns)
     .filter(([, pattern]) => pattern.test(corpus))
     .map(([role]) => role);
-  const coreRoles = Object.keys(rolePatterns);
+  // 모든 패키지에 숙소·준비물·예약 문단을 기계적으로 강제하지 않는다.
+  // 상품 근거에 맞춰 흐름을 자유롭게 구성하되, 전체 성격·동선·적합도만
+  // 여행 리뷰의 공통 핵심 역할로 본다.
+  const coreRoles = ["overview", "route", "fit"];
   return {
     coveredRoles,
     missingCoreRoles: coreRoles.filter((role) => !coveredRoles.includes(role)),
@@ -632,9 +635,14 @@ export function getBrandLinkContentReadiness(
   }
 
   if (!reviewSubstance.pass || editorialCoverage.missingCoreRoles.length > 1) {
+    const travelRoleLabels: Record<string, string> = {
+      overview: "상품 전체 성격",
+      route: "코스·이동 흐름",
+      fit: "잘 맞는 여행자와 아쉬울 여행자",
+    };
     const missing = [
       ...reviewSubstance.missingElements,
-      ...editorialCoverage.missingCoreRoles.map((role) => `편집 역할 ${role}`),
+      ...editorialCoverage.missingCoreRoles.map((role) => travelRoleLabels[role] || "여행 리뷰 흐름"),
     ];
     return buildResult({
       code: "missing-review-substance",

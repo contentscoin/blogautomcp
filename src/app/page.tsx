@@ -1186,16 +1186,6 @@ export default function Dashboard() {
     }
   };
 
-  const handleReinforceBrandDraft = async () => {
-    if (!draftPreview || draftGeneratingId) return;
-    const link = links.find((item) => item.id === draftPreview.brandLinkId);
-    if (!link) {
-      setDashboardNotice({ tone: "error", text: "품질을 보강할 상품을 현재 목록에서 찾지 못했습니다." });
-      return;
-    }
-    await handlePrepareBrandDraft(link, { forceQualityRepair: true, returnTab: "quality" });
-  };
-
   const startPublish = async (
     id: string,
     payload?: { publishMode?: "now" | "schedule"; scheduledDate?: string }
@@ -3210,14 +3200,6 @@ export default function Dashboard() {
                           <span className={`rounded-full px-3 py-1 text-sm font-bold ${draftContentQualityPassed ? "bg-emerald-600 text-white" : "bg-red-600 text-white"}`}>
                             {draftContentQualityPassed ? "내용 통과" : "내용 보강 필요"}
                           </span>
-                          <button
-                            type="button"
-                            onClick={() => void handleReinforceBrandDraft()}
-                            disabled={Boolean(draftGeneratingId)}
-                            className="rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-black text-white hover:bg-slate-800 disabled:opacity-40"
-                          >
-                            {draftGeneratingId ? "자동 보강 중…" : "품질 자동 보강"}
-                          </button>
                         </div>
                       </div>
                     </div>
@@ -3239,9 +3221,9 @@ export default function Dashboard() {
                         ["이미지", draftPreview.composition.qualityReport.actual.images, `최소 ${draftImageMinimum} · 권장 ${draftImageRecommended}장`],
                       ] as const).map(([label, actual, target]) => <div key={label} className="rounded-xl border border-slate-200 p-4"><p className="text-xs text-slate-500">{label}</p><p className="mt-1 text-2xl font-black text-slate-900">{actual}</p><p className="text-xs text-slate-400">목표 {target}</p></div>)}
                     </div>
-                    {draftPreview.contentQuality?.signals.filter((signal) => signal.status !== "pass").map((signal) => (
-                      <p key={signal.key} className={`rounded-xl px-4 py-3 text-sm font-medium ${signal.status === "fail" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700"}`}>
-                        {signal.status === "fail" ? "내용 차단" : "내용 확인"} · {signal.label}
+                    {draftPreview.contentQuality?.signals.filter((signal) => signal.status === "warn").map((signal) => (
+                      <p key={signal.key} className="rounded-xl bg-amber-50 px-4 py-3 text-sm font-medium text-amber-700">
+                        내용 확인 · {signal.label}
                       </p>
                     ))}
                     {draftPreview.composition.qualityReport.blockers.map((message) => <p key={message} className="rounded-xl bg-red-50 px-4 py-3 text-sm font-medium text-red-700">차단 · {message}</p>)}
@@ -3257,7 +3239,6 @@ export default function Dashboard() {
               </span>
               <div className="flex flex-wrap justify-end gap-2">
                 <button onClick={() => { const link = links.find((item) => item.id === draftPreview.brandLinkId); if (link) void handlePrepareBrandDraft(link); }} disabled={Boolean(draftGeneratingId)} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">다시 만들기</button>
-                {!draftPreview.approvedAt && draftApprovalBlocked && <button onClick={() => void handleReinforceBrandDraft()} disabled={Boolean(draftGeneratingId)} className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-bold text-amber-800 hover:bg-amber-100 disabled:opacity-40">품질 자동 보강</button>}
                 {!draftPreview.approvedAt && <button onClick={() => void handleApproveBrandDraft()} disabled={draftApproving || draftApprovalBlocked} title={draftApprovalBlocked ? "품질검사 탭의 차단 항목을 먼저 보완하세요." : undefined} className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-40">{draftApproving ? "승인 중..." : "이 초안 승인"}</button>}
                 {draftPreview.approvedAt && <button onClick={() => { const link = links.find((item) => item.id === draftPreview.brandLinkId); if (link) { setDraftPreview(null); void handleSchedulePublish(link); } }} className="rounded-lg border border-indigo-300 px-4 py-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-50">예약 발행</button>}
                 {draftPreview.approvedAt && <button onClick={() => { const id = draftPreview.brandLinkId; setDraftPreview(null); void handlePublish(id); }} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700">3. 승인본 바로 발행</button>}

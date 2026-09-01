@@ -594,8 +594,15 @@ export function assessTravelReviewSubstance(input: {
   const checks: Array<[boolean, string]> = [
     [/(?:장점|매력|선택\s*이유)/u.test(body), "패키지의 구체적인 장점"],
     [/(?:아쉬운|단점|한계|제약|리스크|이동\s*부담)/u.test(body), "패키지의 아쉬운 점·리스크"],
-    [/(?:추천\s*대상|추천\s*여행자)/u.test(body) && /비추천/u.test(body), "추천·비추천 여행자"],
-    [/(?:최종\s*리뷰|한\s*줄\s*결론|폭넓게|깊게\s*머무)/u.test(body), "상품별 최종 판단"],
+    [
+      /(?:추천\s*(?:대상|여행자)|잘\s*맞|어울리)/u.test(body) &&
+        /(?:비추천|맞지\s*않|아쉬|빡빡|부담(?:스러|이\s*큰)|여유로운\s*여행|천천히\s*(?:보|머무|걷))/u.test(body),
+      "잘 맞는 여행자와 아쉬울 여행자",
+    ],
+    [
+      /(?:최종\s*리뷰|한\s*줄\s*결론|폭?넓게|깊게\s*머무|선택(?:을\s*가르|의\s*기준|\s*기준)|후보(?:가|에|로)|가치가\s*.+보다\s*큰지)/u.test(body),
+      "상품별 최종 판단",
+    ],
     [coveredPlaces.length >= requiredPlaceCount, "여행지별 가치 해석"],
     [evidenceJudgementCount >= requiredEvidenceJudgementCount, "여행지 근거와 코스 가치가 연결된 판단"],
     [genericGuidanceCount / sentenceCount <= 0.22, "확인 안내가 아닌 여행 가치 판단"],

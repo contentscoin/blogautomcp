@@ -5731,6 +5731,7 @@ ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일
    - 한 문장에 정보 하나만 담고, 어색하면 더 짧게 나누기
    - 여행 글은 정보→여행 장면→상품 판단의 인과가 보이도록 쓰되, 매번 같은 순서를 반복하지 않기
    - 글 전체에서 상품 고유 사실과 그 사실에 대한 판단이 연결되도록 쓰기
+   ${isTravel ? "- 실제 코스가 잘 맞는 여행자와 일정이 아쉬울 여행자를 모두 판단하고, 마지막 흐름에는 이 상품을 고를 조건과 고르지 않을 조건을 분명하게 씁니다." : ""}
    - "확인하세요·살펴보세요·비교해보세요" 같은 문장은 글 전체 3회 이하
    - 빈 줄
 
@@ -6047,10 +6048,11 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
     (!editorialQuality.canPublish || BRANDLINK_FORCE_QUALITY_REPAIR);
 
   if (shouldAttemptQualityRepair) {
-    const failedSignals = editorialQuality.signals
-      .filter((signal) => signal.status === "fail")
-      .map((signal) => signal.label);
-    const repairPrompt = `아래 초안을 품질검사 결과에 맞춰 한 번만 고쳐주세요.
+    const buildRepairPrompt = () => {
+      const failedSignals = editorialQuality.signals
+        .filter((signal) => signal.status === "fail")
+        .map((signal) => signal.label);
+      return `아래 초안을 품질검사 결과를 모두 해결한 완성본으로 고쳐주세요.
 
 [품질검사]
 - 판정: ${editorialQuality.code}
@@ -6068,56 +6070,63 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
 
 [초안 JSON]
 ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, null, 2)}`;
+    };
 
     try {
       qualityRepair.attempted = true;
-      const repairedText = await generateWithAI(
-        systemPrompt,
-        repairPrompt,
-        chatgptContext,
-        product.imagePaths,
-      );
-      const repairedJson = parseJsonObjectFromText(repairedText);
-      let repairedBodySections = normalizeSections(
-        repairedJson.sections,
-        minimumBodySectionCount,
-        maximumBodySectionCount,
-        connectKind,
-      );
-      if (HUMAN_MOBILE_POLISH_ENABLED) {
-        repairedBodySections = repairedBodySections.map((section, index) =>
-          applyHumanMobilePolishToSection(section, index, connectKind)
+      let lastRepairScore = editorialQuality.score;
+      for (let repairAttempt = 1; repairAttempt <= 2 && !editorialQuality.canPublish; repairAttempt += 1) {
+        const repairedText = await generateWithAI(
+          systemPrompt,
+          buildRepairPrompt(),
+          chatgptContext,
+          product.imagePaths,
         );
-      }
-      const repairedTitle = sanitizeTitle(
-        typeof repairedJson.title === "string" ? repairedJson.title : normalizedTitle,
-        product.name,
-      );
-      const repairedHashtags = normalizeHashtags(
-        repairedJson.hashtags,
-        product,
-        openCrabSeoBrief,
-      );
-      const repairedSections = [...repairedBodySections, disclosureSection];
-      const repairedQuality = assessEditorialQuality(
-        repairedTitle,
-        repairedSections,
-        repairedHashtags,
-      );
-      const improvement = repairedQuality.score - editorialQuality.score;
-      if (repairedQuality.canPublish || improvement >= 5) {
-        normalizedTitle = repairedTitle;
-        hashtags = repairedHashtags;
-        bodySections = repairedBodySections;
-        sections = repairedSections;
-        editorialQuality = repairedQuality;
-        qualityRepair.applied = true;
+        const repairedJson = parseJsonObjectFromText(repairedText);
+        let repairedBodySections = normalizeSections(
+          repairedJson.sections,
+          minimumBodySectionCount,
+          maximumBodySectionCount,
+          connectKind,
+        );
+        if (HUMAN_MOBILE_POLISH_ENABLED) {
+          repairedBodySections = repairedBodySections.map((section, index) =>
+            applyHumanMobilePolishToSection(section, index, connectKind)
+          );
+        }
+        const repairedTitle = sanitizeTitle(
+          typeof repairedJson.title === "string" ? repairedJson.title : normalizedTitle,
+          product.name,
+        );
+        const repairedHashtags = normalizeHashtags(
+          repairedJson.hashtags,
+          product,
+          openCrabSeoBrief,
+        );
+        const repairedSections = [...repairedBodySections, disclosureSection];
+        const repairedQuality = assessEditorialQuality(
+          repairedTitle,
+          repairedSections,
+          repairedHashtags,
+        );
+        lastRepairScore = repairedQuality.score;
+        const improvement = repairedQuality.score - editorialQuality.score;
+        if (repairedQuality.canPublish || improvement > 0) {
+          normalizedTitle = repairedTitle;
+          hashtags = repairedHashtags;
+          bodySections = repairedBodySections;
+          sections = repairedSections;
+          editorialQuality = repairedQuality;
+          qualityRepair.applied = true;
+        }
       }
       qualityRepair.afterScore = editorialQuality.score;
       qualityRepair.afterCode = editorialQuality.code;
-      qualityRepair.note = qualityRepair.applied
-        ? `자동 보강 적용 (${beforeEditorialQuality.score}→${editorialQuality.score}점)`
-        : `자동 보강 결과가 개선 기준에 못 미쳐 원문 유지 (${repairedQuality.score}점)`;
+      qualityRepair.note = editorialQuality.canPublish
+        ? `요청 과정에서 품질 자동 보강 완료 (${beforeEditorialQuality.score}→${editorialQuality.score}점)`
+        : qualityRepair.applied
+          ? `자동 보강 후에도 발행 기준 미달 (${beforeEditorialQuality.score}→${editorialQuality.score}점)`
+          : `자동 보강 결과가 개선 기준에 못 미쳐 원문 유지 (${lastRepairScore}점)`;
     } catch (error) {
       qualityRepair.note = `자동 보강 실패: ${getErrorMessage(error)}`;
     }
