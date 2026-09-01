@@ -300,6 +300,24 @@ async function main() {
       return;
     }
 
+    const occupiedScheduleDates = shouldReassignScheduleDates
+      ? new Set(
+          (
+            await prisma.brandLink.findMany({
+              where: {
+                connectKind: options.connectKind,
+                status: "SCHEDULED",
+                scheduledPublishAt: { not: null },
+              },
+              select: { scheduledPublishAt: true },
+            })
+          )
+            .map((row) => row.scheduledPublishAt)
+            .filter((value): value is Date => Boolean(value))
+            .map((value) => formatYmdInTimeZone(value, NAVER_SCHEDULE_TIMEZONE))
+        )
+      : new Set<string>();
+
     console.log(
       `예약발행 일괄 실행 시작: ${pending.length}건 / ${
         shouldReassignScheduleDates ? `기준일=${startDate}` : "기존 예약일 유지"
@@ -337,9 +355,15 @@ async function main() {
       let adjustedStoredDate = false;
 
       if (shouldReassignScheduleDates && startDate) {
-        // 실패한 시도는 날짜 슬롯을 소비하지 않는다. 다음 성공 후보가 같은
-        // 날짜를 이어받아 2일, 4일처럼 예약 사이가 비는 현상을 막는다.
-        scheduledDate = compactedScheduleDate(startDate, successCount, options.intervalDays);
+        // 실패한 시도는 날짜 슬롯을 소비하지 않고, 기존 SCHEDULED 날짜도
+        // 건너뛴다. 2일·4일이 이미 예약돼 있으면 다음 성공 후보는 3일부터
+        // 채워 중복 예약과 빈 날짜를 함께 막는다.
+        scheduledDate = compactedScheduleDate(
+          startDate,
+          successCount,
+          options.intervalDays,
+          occupiedScheduleDates
+        );
         scheduledPublishAt = createScheduledPublishAt(scheduledDate);
       } else if (!isScheduleDateTimeSchedulable(scheduledDate)) {
         const normalizedStoredDate = normalizeStartDate(scheduledDate);

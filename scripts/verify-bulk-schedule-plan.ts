@@ -10,6 +10,14 @@ assert.equal(addDaysToYmd("2026-09-30", 1), "2026-10-01");
 assert.equal(compactedScheduleDate("2026-09-02", 0, 1), "2026-09-02");
 assert.equal(compactedScheduleDate("2026-09-02", 1, 1), "2026-09-03");
 assert.equal(compactedScheduleDate("2026-09-02", 2, 1), "2026-09-04");
+assert.equal(
+  compactedScheduleDate("2026-09-02", 0, 1, ["2026-09-02", "2026-09-04"]),
+  "2026-09-03",
+);
+assert.equal(
+  compactedScheduleDate("2026-09-02", 1, 1, ["2026-09-02", "2026-09-04"]),
+  "2026-09-05",
+);
 assert.equal(ymdInTimeZone(new Date("2026-09-02T00:00:00Z"), "Asia/Seoul"), "2026-09-02");
 assert.equal(
   normalizeBulkScheduleStartDate("2026-09-01", new Date("2026-09-01T10:40:00Z"), "Asia/Seoul"),

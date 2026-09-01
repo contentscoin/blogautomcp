@@ -11,8 +11,17 @@ export function compactedScheduleDate(
   startDate: string,
   successfulCount: number,
   intervalDays: number,
+  occupiedDates: Iterable<string> = [],
 ): string {
-  return addDaysToYmd(startDate, successfulCount * intervalDays);
+  const occupied = new Set(occupiedDates);
+  let availableIndex = 0;
+  for (let slotIndex = 0; slotIndex < 10_000; slotIndex += 1) {
+    const candidate = addDaysToYmd(startDate, slotIndex * intervalDays);
+    if (occupied.has(candidate)) continue;
+    if (availableIndex === successfulCount) return candidate;
+    availableIndex += 1;
+  }
+  throw new Error("예약 가능한 빈 날짜를 계산하지 못했습니다.");
 }
 
 export function ymdInTimeZone(date: Date, timeZone: string): string {
