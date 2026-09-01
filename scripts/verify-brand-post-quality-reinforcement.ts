@@ -285,7 +285,7 @@ const sitesMcpSource = fs.readFileSync(
 assert.match(simpleAgentSource, /brand-draft-quality-checklist\/v1/u);
 assert.match(simpleAgentSource, /눈앞의 장면 → 즐길 거리 또는 실용 팁/u);
 assert.match(simpleAgentSource, /contentQuality\.canPublish가 false/u);
-assert.match(simpleAgentSource, /repairAttempt <= 2/u);
+assert.match(simpleAgentSource, /maximumRepairAttempts = isTravel \? 3 : 2/u);
 assert.doesNotMatch(simpleAgentSource, /편집 역할 \$\{role\}/u);
 assert.match(sitesMcpSource, /contentQuality\.canPublish가 false/u);
 const step2CallIndex = simpleAgentSource.indexOf("await step2_generatePost(");
