@@ -640,9 +640,20 @@ export function getBrandLinkContentReadiness(
       route: "코스·이동 흐름",
       fit: "잘 맞는 여행자와 아쉬울 여행자",
     };
+    const shoppingRoleLabels: Record<string, string> = {
+      "product-identity": "제품의 정체와 핵심 용도",
+      "source-evidence": "상품 고유 기능·규격 근거",
+      "primary-strength": "구체적인 핵심 장점",
+      limitations: "제품 자체의 단점·제약",
+      fit: "추천·비추천 대상",
+      verdict: "조건부 최종 결론",
+    };
+    const roleLabels = isTravel ? travelRoleLabels : shoppingRoleLabels;
     const missing = [
       ...reviewSubstance.missingElements,
-      ...editorialCoverage.missingCoreRoles.map((role) => travelRoleLabels[role] || "여행 리뷰 흐름"),
+      ...editorialCoverage.missingCoreRoles.map(
+        (role) => roleLabels[role] || (isTravel ? "여행 리뷰 흐름" : "제품 리뷰 흐름"),
+      ),
     ];
     return buildResult({
       code: "missing-review-substance",

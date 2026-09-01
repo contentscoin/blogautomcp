@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { getBrandLinkContentReadiness } from "./lib/brandlink-content-readiness";
 import { buildBrandPostImagePrompt } from "../src/lib/brand-post-image-generation";
+import { parsePreparedBrandPostSections } from "./lib/prepared-post-markdown";
 import {
   SHOPPING_POST_CONTRACT_V1,
   TRAVEL_POST_CONTRACT_V1,
@@ -189,6 +190,57 @@ assert.equal(naturalShoppingReview.canPublish, true, naturalShoppingReview.reaso
 assert.equal(naturalShoppingReview.signals.find((signal) => signal.key === "editorial-flow")?.status, "pass");
 assert.equal(naturalShoppingReview.signals.find((signal) => signal.key === "review-substance")?.status, "pass");
 assert.equal(naturalShoppingReview.signals.find((signal) => signal.key === "evidence-density")?.status, "pass");
+
+const approvedShoppingMarkdown = `# 휴대용선풍기 프롬비 FB150 선택 기준
+
+## 기능 수보다 쓰는 조건을 봤어요
+
+프롬비 빅팬 휴대용 폴더블 선풍기 FB150은 손에 드는 선풍기와 탁상용 선풍기를 함께 노린 제품이에요. 상품 설명에는 5,200mAh 배터리와 최대 40시간 사용이 적혀 있어요. 무선 배치가 가장 분명한 장점이고, 풍량 수치가 없는 점은 제약이에요.
+
+## 핸디형과 탁상용을 오가는 구조
+
+핸디형과 탁상용을 하나로 쓸 수 있어 책상과 야외를 오가는 사람에게 실용적이에요. 받침 안정성과 휴대 부피는 사용 전에 비교할 부분입니다.
+
+## 아쉬운 점은 성능 정보가 적다는 것
+
+풍량과 소음 수치가 없어 강한 직진풍을 우선하는 사람에게는 아쉬워요. 작은 가방에 넣을 초소형 제품을 원하는 사람에게도 부피가 제약입니다.
+
+## 잘 맞는 사람과 덜 맞는 사람
+
+책상과 야외를 오가며 쓰는 사람에게 잘 맞습니다. 강한 바람과 낮은 소음의 확인된 수치를 우선하는 사람에게는 비추천 대상입니다.
+
+## 가격까지 놓고 보면
+
+무선 배치와 큰 팬 형태가 필요하다면 프롬비 FB150은 후보에 올릴 만해요. 성능 수치가 우선이면 비교 제품을 고르는 편이 더 낫습니다.
+이 포스팅은 네이버 쇼핑 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받습니다.
+자세한 상품 정보는 아래 쇼핑커넥트에서 확인해보세요.
+
+#휴대용선풍기 #프롬비FB150 #무선선풍기 #탁상용선풍기`;
+const approvedShoppingSections = parsePreparedBrandPostSections(approvedShoppingMarkdown);
+assert.equal(approvedShoppingSections.length, 6, "마지막 결론과 커넥트 고지 문구가 별도 섹션으로 복원되어야 합니다.");
+assert.match(approvedShoppingSections.at(-2) || "", /후보에 올릴/u);
+assert.match(approvedShoppingSections.at(-1) || "", /쇼핑 커넥트 활동/u);
+assert.doesNotMatch(approvedShoppingSections.at(-1) || "", /#휴대용선풍기/u);
+
+const approvedShoppingRoundTrip = getBrandLinkContentReadiness({
+  productName: "프롬비 빅팬 휴대용 폴더블 선풍기 FB150",
+  title: "휴대용선풍기 프롬비 FB150 선택 기준",
+  sections: approvedShoppingSections,
+  hashtags: ["휴대용선풍기", "프롬비FB150", "무선선풍기", "탁상용선풍기"],
+  brandLink: "https://naver.me/fb150-fixture",
+  generationSource: "PREPARED_APPROVED",
+  hasRepresentativeImage: true,
+  thumbnailGenerated: true,
+  connectKind: "SHOPPING",
+  sourceDescription: "핸디형과 탁상형을 오가는 무선 폴더블 선풍기",
+  sourceFeatures: ["5,200mAh 배터리", "최대 40시간 사용", "핸디형과 탁상용"],
+  mode: "publish",
+});
+assert.equal(
+  approvedShoppingRoundTrip.reason?.includes("여행") ?? false,
+  false,
+  "쇼핑 발행 품질 사유에 여행 전용 역할명이 노출되면 안 됩니다.",
+);
 assert.equal(SHOPPING_POST_CONTRACT_V1.targetImages.min, 5);
 assert.equal(SHOPPING_POST_CONTRACT_V1.targetImages.recommended, 8);
 assert.equal(TRAVEL_POST_CONTRACT_V1.targetImages.min, 7);

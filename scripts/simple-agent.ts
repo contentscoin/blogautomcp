@@ -81,6 +81,7 @@ import {
   getConnectEditorInsertionMode,
   type EditorConnectKind,
 } from "./lib/connect-editor-insertion";
+import { parsePreparedBrandPostSections } from "./lib/prepared-post-markdown";
 import { generateTravelEditorialSummaryCard } from "./lib/travel-editorial-card";
 import {
   generateProductThumbnailViaImageApi,
@@ -7042,25 +7043,7 @@ function loadPreparedBrandLinkPostOverride(): PreparedBrandLinkPostOverride | nu
     throw new Error("준비된 원고에서 제목을 찾지 못했습니다.");
   }
 
-  const visibleMarkdown = markdown
-    .split(/^##\s+Sources\s*$/m)[0]
-    .replace(/<!--[^]*?-->/g, "")
-    .trim();
-  const withoutTitle = visibleMarkdown.replace(/^#\s+.+\r?\n+/, "");
-  const chunks = withoutTitle.split(/^##\s+/m);
-  const intro = chunks.shift()?.replace(/!\[[^\]]*\]\([^\)]+\)/g, "").trim() || "";
-  const sections = [
-    ...(intro ? [`여행 전 확인\n\n${intro}`] : []),
-    ...chunks.map((chunk) => {
-      const [heading = "", ...bodyLines] = chunk.split(/\r?\n/);
-      const body = bodyLines
-        .join("\n")
-        .replace(/!\[[^\]]*\]\([^\)]+\)/g, "")
-        .replace(/\n{3,}/g, "\n\n")
-        .trim();
-      return [heading.trim(), body].filter(Boolean).join("\n\n");
-    }).filter(Boolean),
-  ];
+  const sections = parsePreparedBrandPostSections(markdown);
   if (sections.length < 5) {
     throw new Error(`준비된 원고의 본문 섹션이 부족합니다: ${sections.length}개`);
   }
