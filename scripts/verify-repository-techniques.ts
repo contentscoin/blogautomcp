@@ -9,6 +9,7 @@ import {
   isMeaningfulProductEvidenceFeature,
   formatProductEditorialPlanForPrompt,
 } from "./lib/product-editorial-plan";
+import { hasSufficientVisualDraftEvidence } from "./lib/brandlink-image-readiness";
 import { getBrandLinkContentReadiness } from "./lib/brandlink-content-readiness";
 import {
   formatAdaptiveEditorialHarnessForPrompt,
@@ -32,6 +33,25 @@ const keywordOnlyFan = {
 assert.equal(hasSufficientProductReviewEvidence(keywordOnlyFan), false, "SEO 키워드만으로 상세 근거 충분 판정을 내리면 안 됩니다.");
 assert.equal(isMeaningfulProductEvidenceFeature("무선선풍기"), false);
 assert.equal(isMeaningfulProductEvidenceFeature("배터리 3,800mAh, 1단·회전 미사용 기준 최대 24시간"), true);
+
+assert.equal(hasSufficientProductReviewEvidence({
+  productName: "휴대용 LED 조명",
+  description: "야외와 실내에서 밝기를 조절해 사용하는 충전식 조명",
+  features: ["밝기 3단계"],
+  targetSectionCount: 8,
+}), true, "usable 텍스트 근거는 GPT 작성 단계로 전달해야 합니다.");
+assert.equal(hasSufficientVisualDraftEvidence({
+  connectKind: "SHOPPING",
+  sourceImageCount: 20,
+  materializedImageCount: 10,
+  detailImageCount: 0,
+}), true, "충분한 쇼핑 원본 이미지가 있으면 GPT가 시각 근거를 구조화할 수 있어야 합니다.");
+assert.equal(hasSufficientVisualDraftEvidence({
+  connectKind: "SHOPPING",
+  sourceImageCount: 1,
+  materializedImageCount: 1,
+  detailImageCount: 0,
+}), false, "대표 이미지 한 장만으로 제품 리뷰 근거가 충분하다고 판단하면 안 됩니다.");
 
 for (const connectKind of ["SHOPPING", "TRAVEL"] as const) {
   const profile = getAdaptiveEditorialProfile(connectKind);

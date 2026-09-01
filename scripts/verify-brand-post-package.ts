@@ -107,6 +107,12 @@ async function main() {
     "긴 쇼핑 상세이미지를 분할 첨부하고 구조화 근거로 회수해야 합니다.",
   );
   assert.equal(
+    simpleAgentSource.includes("hasSufficientVisualDraftEvidence") &&
+      simpleAgentSource.includes("hasReviewEvidence || hasVisualReviewEvidence"),
+    true,
+    "텍스트 근거가 부족해도 충분한 쇼핑 원본 이미지는 GPT 시각 분석 단계로 전달해야 합니다.",
+  );
+  assert.equal(
     sitesMcpSource.includes("evidenceFacts") && draftRouteSource.includes("evidenceFacts"),
     true,
     "MCP 제출 경로가 쇼핑 상세이미지 근거를 보존해야 합니다.",

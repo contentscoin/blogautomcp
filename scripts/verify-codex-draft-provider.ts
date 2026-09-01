@@ -18,6 +18,8 @@ assert.match(providerSource, /networkAccessEnabled:\s*false/u);
 assert.match(providerSource, /webSearchMode:\s*"disabled"/u);
 assert.match(providerSource, /approvalPolicy:\s*"never"/u);
 assert.match(providerSource, /local_image/u);
+assert.match(providerSource, /detailImages\.slice\(0, 2\)/u);
+assert.match(providerSource, /regularImages\.slice\(0, 2\)/u);
 assert.match(providerSource, /runStreamed/u);
 assert.match(agentSource, /AI_PROVIDER === "codex"/u);
 assert.match(agentSource, /CODEX_BROWSER_FALLBACK_ENABLED/u);

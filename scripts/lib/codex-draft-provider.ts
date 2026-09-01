@@ -18,15 +18,22 @@ const nativeImport = new Function("specifier", "return import(specifier)") as (
 ) => Promise<CodexSdkModule>;
 
 function readableImages(imagePaths: string[]): string[] {
-  return Array.from(new Set(imagePaths.map((item) => path.resolve(item))))
+  const readable = Array.from(new Set(imagePaths.map((item) => path.resolve(item))))
     .filter((item) => {
       try {
         return fs.statSync(item).isFile();
       } catch {
         return false;
       }
-    })
-    .slice(0, 4);
+    });
+  const detailImages = readable.filter((item) => /(?:^|[_-])detail(?:[_-]|$)/iu.test(path.basename(item)));
+  const regularImages = readable.filter((item) => !detailImages.includes(item));
+  return Array.from(new Set([
+    ...detailImages.slice(0, 2),
+    ...regularImages.slice(0, 2),
+    ...detailImages.slice(2),
+    ...regularImages.slice(2),
+  ])).slice(0, 4);
 }
 
 function buildWritingPrompt(systemPrompt: string, userPrompt: string): string {

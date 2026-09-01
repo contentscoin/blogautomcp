@@ -500,7 +500,7 @@ export function buildProductReviewAnalysis(input: ProductEditorialPlanInput): Pr
 
 export function hasSufficientProductReviewEvidence(input: ProductEditorialPlanInput): boolean {
   const analysis = buildProductReviewAnalysis(input);
-  return analysis.evidenceLevel === "rich";
+  return analysis.evidenceLevel !== "sparse";
 }
 
 export function buildProductEditorialPlan(input: ProductEditorialPlanInput): ProductEditorialPlan {

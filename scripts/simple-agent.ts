@@ -134,6 +134,7 @@ import { createThreeImageCollage } from "./lib/image-collage";
 import { createProductDetailImageSegments } from "./lib/product-detail-image";
 import {
   bodyImageCapacity,
+  hasSufficientVisualDraftEvidence,
   minimumStoredSourceImageCount,
   shouldRefreshStoredImages,
 } from "./lib/brandlink-image-readiness";
@@ -4669,7 +4670,7 @@ async function materializeProductImages(
   filePrefix: string,
   targetImageCount = SHOPPING_BODY_IMAGE_MAX,
 ): Promise<{ representativeImagePath: string | null; imagePaths: string[]; detailImagePaths: string[] }> {
-  const candidateLimit = Math.max(targetImageCount + 6, 18);
+  const candidateLimit = Math.max(targetImageCount + 12, 24);
   const prioritizedUrls = prioritizeImageUrls(Array.from(new Set(imageUrls))).slice(0, candidateLimit);
   const downloaded: {
     path: string;
@@ -4680,10 +4681,12 @@ async function materializeProductImages(
     height: number;
     detailCrop?: boolean;
   }[] = [];
-  const downloadCount = Math.min(targetImageCount, prioritizedUrls.length);
+  const inspectionCount = Math.min(candidateLimit, prioritizedUrls.length);
   let representativeImagePath: string | null = null;
+  let regularImageCount = 0;
+  let detailSegmentCount = 0;
 
-  for (let i = 0; i < downloadCount; i++) {
+  for (let i = 0; i < inspectionCount; i++) {
     try {
       const imgPath = path.join(TEMP_PATH, `${filePrefix}_${Date.now()}_${i}.jpg`);
       await downloadImage(prioritizedUrls[i], imgPath);
@@ -4698,7 +4701,7 @@ async function materializeProductImages(
       const metadata = await sharp(imgPath).metadata();
       const width = metadata.width ?? 0;
       const height = metadata.height ?? 0;
-      if (!isUsableBlogProductImageDimension(width, height)) {
+      if (isTallDetailImageDimension(width, height) || !isUsableBlogProductImageDimension(width, height)) {
         // 스마트스토어 상세페이지는 860x10,000px 이상의 한 장 이미지인 경우가 많다.
         // 중앙 한 컷만 남기지 않고 원문 전체를 최대 8개 구간으로 보존한다.
         const detailCrops = await createProductDetailImageSegments({
@@ -4710,7 +4713,9 @@ async function materializeProductImages(
           height,
         });
         if (detailCrops.length > 0) {
-          downloaded.push(...detailCrops.map((detailCrop, segmentIndex) => ({
+          const remainingDetailCapacity = Math.max(0, 8 - detailSegmentCount);
+          const acceptedDetailCrops = detailCrops.slice(0, remainingDetailCapacity);
+          downloaded.push(...acceptedDetailCrops.map((detailCrop, segmentIndex) => ({
             path: detailCrop.path,
             url: prioritizedUrls[i],
             size: detailCrop.size,
@@ -4719,8 +4724,12 @@ async function materializeProductImages(
             height: detailCrop.height,
             detailCrop: true,
           })));
+          for (const unusedDetailCrop of detailCrops.slice(remainingDetailCapacity)) {
+            try { fs.unlinkSync(unusedDetailCrop.path); } catch {}
+          }
+          detailSegmentCount += acceptedDetailCrops.length;
           try { fs.unlinkSync(imgPath); } catch {}
-          console.log(`   ✅ 이미지 ${i + 1}/${downloadCount} 상세 원문 ${detailCrops.length}구간 생성`);
+          console.log(`   ✅ 이미지 ${i + 1}/${inspectionCount} 상세 원문 ${acceptedDetailCrops.length}구간 생성`);
           continue;
         }
         try { fs.unlinkSync(imgPath); } catch {}
@@ -4728,7 +4737,12 @@ async function materializeProductImages(
         continue;
       }
 
+      if (regularImageCount >= targetImageCount) {
+        try { fs.unlinkSync(imgPath); } catch {}
+        continue;
+      }
       downloaded.push({ path: imgPath, url: prioritizedUrls[i], size: stats.size, index: i, width, height });
+      regularImageCount += 1;
       if (
         !representativeImagePath &&
         isPreferredThumbnailImageUrl(prioritizedUrls[i]) &&
@@ -4737,7 +4751,7 @@ async function materializeProductImages(
       ) {
         representativeImagePath = imgPath;
       }
-      console.log(`   ✅ 이미지 ${i + 1}/${downloadCount} 다운로드`);
+      console.log(`   ✅ 이미지 ${i + 1}/${inspectionCount} 다운로드`);
     } catch {
       console.log(`   ⚠️ 다운로드 실패 ${i + 1}`);
     }
@@ -10034,6 +10048,12 @@ async function main() {
         : buildProductReviewAnalysis(toProductEditorialInput(product, 11)).evidenceLevel
       : "sparse";
     const hasReviewEvidence = reviewEvidenceLevel !== "sparse";
+    const hasVisualReviewEvidence = Boolean(product && hasSufficientVisualDraftEvidence({
+      connectKind: runtimeConnectKind,
+      sourceImageCount: product.sourceImageUrls.length,
+      materializedImageCount: product.imagePaths.length,
+      detailImageCount: product.detailImagePaths.length,
+    }));
     const needsReviewEvidenceRefresh = Boolean(product && reviewEvidenceLevel !== "rich");
     const needsLiveRefresh =
       !product ||
@@ -10056,8 +10076,8 @@ async function main() {
         const liveProduct = await step1_getProductInfo(page, sourceUrl, runtimeConnectKind);
         product = mergeProductInfo(product, liveProduct);
       } catch (error) {
-        if (product && hasReviewEvidence && !needsImageRefresh) {
-          console.log(`   ⚠️ 상세정보 보강 실패, 확인된 상품명 근거로 조건부 리뷰를 작성합니다: ${getErrorMessage(error)}`);
+        if (product && (hasReviewEvidence || hasVisualReviewEvidence) && !needsImageRefresh) {
+          console.log(`   ⚠️ 상세정보 보강 실패, 확보된 텍스트·이미지 근거로 조건부 리뷰를 작성합니다: ${getErrorMessage(error)}`);
         } else {
           throw error;
         }
@@ -10071,7 +10091,12 @@ async function main() {
     const finalReviewEvidenceReady = runtimeConnectKind === "TRAVEL"
       ? hasSufficientTravelReviewEvidence(product)
       : hasSufficientProductReviewEvidence(toProductEditorialInput(product, 11)) ||
-        product.detailImagePaths.length >= 2;
+        hasSufficientVisualDraftEvidence({
+          connectKind: runtimeConnectKind,
+          sourceImageCount: product.sourceImageUrls.length,
+          materializedImageCount: product.imagePaths.length,
+          detailImageCount: product.detailImagePaths.length,
+        });
     if (!finalReviewEvidenceReady) {
       throw new Error(
         runtimeConnectKind === "TRAVEL"
