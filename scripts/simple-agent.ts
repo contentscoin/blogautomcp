@@ -22,6 +22,7 @@ import sharp from "sharp";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import {
   buildHumanMobileStyleGuide,
+  getMobileSectionLinePolicy,
   HUMAN_MOBILE_STYLE_GUIDE,
   HUMAN_REVIEW_SAFETY_RULES,
   MOBILE_BODY_RULES,
@@ -67,6 +68,7 @@ import {
   formatTravelPageResearchForPrompt,
   formatTravelReviewAnalysisForPrompt,
   hasSufficientTravelReviewEvidence,
+  parseStoredTravelPageResearch,
   travelPageResearchFeatures,
   type TravelPageResearch,
 } from "./lib/travel-content";
@@ -164,7 +166,7 @@ const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || "120000");
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const REQUESTED_AI_PROVIDER = (process.env.AI_PROVIDER || "openai").toLowerCase();
 const AI_PROVIDER = REQUESTED_AI_PROVIDER;
-const CODEX_DRAFT_MODEL = process.env.CODEX_DRAFT_MODEL?.trim() || "";
+const CODEX_DRAFT_MODEL = process.env.CODEX_DRAFT_MODEL?.trim() || "gpt-5.5";
 const CODEX_DRAFT_TIMEOUT_MS = Math.max(60_000, Number(process.env.CODEX_DRAFT_TIMEOUT_MS || "300000"));
 const CODEX_DRAFT_REASONING_EFFORT = (
   process.env.CODEX_DRAFT_REASONING_EFFORT || "medium"
@@ -4473,15 +4475,21 @@ function applyHumanMobilePolishToSection(
 
   const sourceBodyLines = lines.slice(1);
   let polishedBodyLines = buildMobilePolishLines(sourceBodyLines.join(" "));
-  const minimumBodyLines = connectKind === "TRAVEL" ? 5 : 4;
+  const { preferred: preferredBodyLines, hardMinimum: hardMinimumBodyLines } =
+    getMobileSectionLinePolicy(connectKind);
 
-  if (polishedBodyLines.length < minimumBodyLines) {
+  if (polishedBodyLines.length < preferredBodyLines) {
     polishedBodyLines = dedupeAdjacentLines(sourceBodyLines);
   }
-  if (polishedBodyLines.length < minimumBodyLines) {
+  if (polishedBodyLines.length < hardMinimumBodyLines) {
     throw new Error(
       `GPT 원고의 "${title}" 섹션이 모바일 윤문 후 ${polishedBodyLines.length}문장만 남았습니다. ` +
-      `최소 ${minimumBodyLines}문장이 필요합니다.`,
+      `최소 ${hardMinimumBodyLines}문장이 필요합니다.`,
+    );
+  }
+  if (polishedBodyLines.length < preferredBodyLines) {
+    console.log(
+      `   ⚠️ "${title}" 섹션은 ${polishedBodyLines.length}문장이지만 내용 기반 품질검사와 자동 보강 단계로 넘깁니다.`,
     );
   }
 
@@ -4566,6 +4574,26 @@ interface StoredBrandLinkSeed {
   productPrice?: string | null;
   storeName?: string | null;
   imageUrls?: string | null;
+  productDescription?: string | null;
+  productFeatures?: string | null;
+  travelResearchJson?: string | null;
+}
+
+function parseStoredTextArray(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed)
+      ? Array.from(new Set(
+          parsed
+            .filter((item): item is string => typeof item === "string")
+            .map(sanitizeText)
+            .filter(Boolean),
+        )).slice(0, 40)
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 function parseStoredBrandLinkImageUrls(raw: string | null | undefined): string[] {
@@ -4804,6 +4832,11 @@ async function buildProductInfoFromStoredBrandLink(
   const name = sanitizeText(link.productName || "");
   const price = sanitizeText(link.productPrice || "");
   const imageUrls = parseStoredBrandLinkImageUrls(link.imageUrls);
+  const description = sanitizeText(link.productDescription || "");
+  const features = parseStoredTextArray(link.productFeatures);
+  const travelPageResearch = connectKind === "TRAVEL"
+    ? parseStoredTravelPageResearch(link.travelResearchJson)
+    : null;
 
   if (!name && imageUrls.length === 0 && !price) {
     return null;
@@ -4820,8 +4853,8 @@ async function buildProductInfoFromStoredBrandLink(
 
   return {
     name: name || sanitizeText(link.storeName || "") || "상품",
-    description: sanitizeText(link.storeName || ""),
-    features: [],
+    description: description || sanitizeText(link.storeName || ""),
+    features,
     price,
     originalPrice: "",
     discountRate: "",
@@ -4835,8 +4868,39 @@ async function buildProductInfoFromStoredBrandLink(
     sourceImageUrls: imageUrls,
     finalUrl: link.finalUrl || link.url,
     storeName: sanitizeText(link.storeName || ""),
-    travelPageResearch: null,
+    travelPageResearch,
   };
+}
+
+async function expandProductDetailSections(page: Page): Promise<number> {
+  await page.evaluate(() => {
+    for (const details of Array.from(document.querySelectorAll("details:not([open])"))) {
+      details.setAttribute("open", "");
+    }
+  }).catch(() => undefined);
+
+  const candidates = page.locator('button[aria-expanded="false"], [role="button"][aria-expanded="false"]');
+  const count = Math.min(await candidates.count().catch(() => 0), 24);
+  let expanded = 0;
+  const usefulLabel = /(?:상품|상세|여행|일정|코스|포함|불포함|숙소|항공|식사|더보기|전체보기)/u;
+  for (let index = 0; index < count; index += 1) {
+    const candidate = candidates.nth(index);
+    const label = sanitizeText([
+      await candidate.getAttribute("aria-label").catch(() => ""),
+      await candidate.textContent().catch(() => ""),
+    ].filter(Boolean).join(" "));
+    if (!usefulLabel.test(label)) continue;
+    try {
+      if (await candidate.isVisible()) {
+        await candidate.click({ timeout: 1500 });
+        expanded += 1;
+        await page.waitForTimeout(120);
+      }
+    } catch {
+      // 일부 아코디언은 화면 이동이나 애니메이션 중 클릭을 거부한다. 다음 후보를 계속 확인한다.
+    }
+  }
+  return expanded;
 }
 
 function mergeProductInfo(base: ProductInfo | null, live: ProductInfo): ProductInfo {
@@ -4881,6 +4945,10 @@ async function step1_getProductInfo(
   await page.goto(url, { timeout: 30000 });
   await page.waitForTimeout(5000);
   const finalUrl = page.url();
+  const expandedSectionCount = await expandProductDetailSections(page);
+  if (expandedSectionCount > 0) {
+    console.log(`   📖 접힌 상세영역 ${expandedSectionCount}개 자동 확장`);
+  }
 
   const bodyText = await page.textContent("body");
   if (bodyText && isSecurityVerificationPage(bodyText)) {
@@ -5656,7 +5724,10 @@ ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일
 3. 각 섹션 구조:
    - 소제목 (한 줄, 이모지 금지)
    - 빈 줄
-   - 각 흐름은 근거의 양에 따라 2문장 이상 자연스럽게 작성하고, 내용이 많으면 더 길게 써도 됩니다.
+   - ${isTravel
+     ? "각 흐름은 처음부터 반드시 5~6개의 완결된 문장으로 작성합니다. 4문장 이하로 줄이지 마세요."
+     : "각 흐름은 처음부터 4~6개의 완결된 문장으로 작성합니다. 3문장 이하로 줄이지 마세요."}
+   - 문장 수를 채우기 위해 같은 뜻을 반복하지 말고, 서로 다른 사실·장면·판단을 한 문장씩 배치합니다.
    - 한 문장에 정보 하나만 담고, 어색하면 더 짧게 나누기
    - 여행 글은 정보→여행 장면→상품 판단의 인과가 보이도록 쓰되, 매번 같은 순서를 반복하지 않기
    - 글 전체에서 상품 고유 사실과 그 사실에 대한 판단이 연결되도록 쓰기
@@ -5719,8 +5790,9 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
   "title": "SEO 최적화 제목",
   "evidenceFacts": ["첨부 상세페이지에서 직접 확인한 제품 고유 사실"],
   "sections": [
-    "소제목\\n\\n문장1.\\n문장2.\\n문장3.\\n문장4.\\n",
-    "소제목\\n\\n문장1.\\n문장2.\\n문장3.\\n"
+    ${isTravel
+      ? '"소제목\\n\\n문장1.\\n문장2.\\n문장3.\\n문장4.\\n문장5.\\n",\n    "소제목\\n\\n문장1.\\n문장2.\\n문장3.\\n문장4.\\n문장5.\\n"'
+      : '"소제목\\n\\n문장1.\\n문장2.\\n문장3.\\n문장4.\\n",\n    "소제목\\n\\n문장1.\\n문장2.\\n문장3.\\n문장4.\\n"'}
   ],
   "hashtags": ["키워드1", "키워드2", ...]
 }`;
@@ -10030,6 +10102,9 @@ async function main() {
       productPrice: link.productPrice,
       storeName: link.storeName,
       imageUrls: link.imageUrls,
+      productDescription: link.productDescription,
+      productFeatures: link.productFeatures,
+      travelResearchJson: link.travelResearchJson,
     }, runtimeConnectKind);
 
     if (product) {
@@ -10055,11 +10130,15 @@ async function main() {
       detailImageCount: product.detailImagePaths.length,
     }));
     const needsReviewEvidenceRefresh = Boolean(product && reviewEvidenceLevel !== "rich");
+    const needsTravelResearchRefresh = Boolean(
+      product && runtimeConnectKind === "TRAVEL" && !product.travelPageResearch,
+    );
     const needsLiveRefresh =
       !product ||
       !sanitizeText(product.name || "") ||
       needsImageRefresh ||
-      needsReviewEvidenceRefresh;
+      needsReviewEvidenceRefresh ||
+      needsTravelResearchRefresh;
 
     if (needsLiveRefresh) {
       const sourceUrl = link.finalUrl || link.url;
@@ -10072,11 +10151,19 @@ async function main() {
       if (product && needsReviewEvidenceRefresh) {
         console.log("   ⚠️ 제품 장단점을 판단할 상세정보가 부족해 상품 페이지의 설명·기능을 다시 수집합니다.");
       }
+      if (needsTravelResearchRefresh) {
+        console.log("   ⚠️ 저장된 여행 일정 원문이 없어 상품 페이지의 전체 일정·방문지를 다시 수집합니다.");
+      }
       try {
         const liveProduct = await step1_getProductInfo(page, sourceUrl, runtimeConnectKind);
         product = mergeProductInfo(product, liveProduct);
       } catch (error) {
-        if (product && (hasReviewEvidence || hasVisualReviewEvidence) && !needsImageRefresh) {
+        if (
+          product &&
+          (hasReviewEvidence || hasVisualReviewEvidence) &&
+          !needsImageRefresh &&
+          !needsTravelResearchRefresh
+        ) {
           console.log(`   ⚠️ 상세정보 보강 실패, 확보된 텍스트·이미지 근거로 조건부 리뷰를 작성합니다: ${getErrorMessage(error)}`);
         } else {
           throw error;
@@ -10089,7 +10176,7 @@ async function main() {
     }
 
     const finalReviewEvidenceReady = runtimeConnectKind === "TRAVEL"
-      ? hasSufficientTravelReviewEvidence(product)
+      ? Boolean(product.travelPageResearch) && hasSufficientTravelReviewEvidence(product)
       : hasSufficientProductReviewEvidence(toProductEditorialInput(product, 11)) ||
         hasSufficientVisualDraftEvidence({
           connectKind: runtimeConnectKind,
@@ -10117,6 +10204,9 @@ async function main() {
         finalUrl: product.finalUrl || link.finalUrl || undefined,
         imageUrls:
           product.sourceImageUrls.length > 0 ? JSON.stringify(product.sourceImageUrls) : link.imageUrls,
+        productDescription: product.description || null,
+        productFeatures: product.features.length > 0 ? JSON.stringify(product.features) : null,
+        travelResearchJson: product.travelPageResearch ? JSON.stringify(product.travelPageResearch) : null,
         errorMessage: null,
       },
     });

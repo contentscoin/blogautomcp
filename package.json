@@ -1,6 +1,6 @@
 {
   "name": "brandconnect-automation",
-  "version": "1.2.14",
+  "version": "1.2.15",
   "description": "네이버 쇼핑 커넥트(브랜드커넥트) 자동 블로그 포스팅 도구",
   "private": true,
   "workspaces": [
@@ -41,6 +41,7 @@
     "test:connect-store": "npx ts-node --project tsconfig.scripts.json scripts/verify-connect-contract-store.ts",
     "test:connect-editor-insertion": "npx ts-node --project tsconfig.scripts.json scripts/verify-connect-editor-insertion.ts",
     "test:travel-editorial": "npx ts-node --project tsconfig.scripts.json scripts/verify-travel-editorial-plan.ts",
+    "test:travel-draft-resilience": "npx ts-node --project tsconfig.scripts.json scripts/verify-travel-draft-resilience.ts",
     "test:title-rules": "npx ts-node --project tsconfig.scripts.json scripts/verify-title-rules.ts",
     "test:packaged-update": "pwsh -NoProfile -File scripts/verify-packaged-auto-update.ps1",
     "postinstall": "prisma generate",

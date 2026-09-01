@@ -23,6 +23,54 @@ export interface TravelPageResearch {
   shopping: string[];
 }
 
+/** 실패 후 재시도에서도 원본 일정 근거를 잃지 않도록 저장 JSON을 검증해 복원한다. */
+export function parseStoredTravelPageResearch(raw: string | null | undefined): TravelPageResearch | null {
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw) as unknown;
+    const root = record(value);
+    if (!root || root.source !== "naver-package-next-data") return null;
+    if (!Array.isArray(root.destinations) || !Array.isArray(root.highlights) || !Array.isArray(root.schedules)) return null;
+    const destinations = unique(root.destinations.filter((item): item is string => typeof item === "string"), 8);
+    const highlights = root.highlights.flatMap((item) => {
+      const highlight = record(item);
+      const name = text(highlight?.name, 80);
+      return name ? [{ name, description: text(highlight?.description, 260) }] : [];
+    }).slice(0, 24);
+    const schedules = root.schedules.flatMap((item) => {
+      const schedule = record(item);
+      const day = typeof schedule?.day === "number" && Number.isFinite(schedule.day) ? schedule.day : null;
+      if (!day || !Array.isArray(schedule?.activities)) return [];
+      return [{
+        day,
+        activities: unique(schedule.activities.filter((entry): entry is string => typeof entry === "string"), 24),
+        meals: Array.isArray(schedule.meals)
+          ? unique(schedule.meals.filter((entry): entry is string => typeof entry === "string"), 3)
+          : [],
+        transport: typeof schedule.transport === "string" ? text(schedule.transport, 40) || null : null,
+      }];
+    });
+    if (schedules.length === 0 && highlights.length === 0) return null;
+    return {
+      source: "naver-package-next-data",
+      durationDays: typeof root.durationDays === "number" && Number.isFinite(root.durationDays)
+        ? root.durationDays
+        : schedules.length || null,
+      destinations,
+      highlights,
+      schedules,
+      flights: Array.isArray(root.flights)
+        ? unique(root.flights.filter((item): item is string => typeof item === "string"), 4)
+        : [],
+      shopping: Array.isArray(root.shopping)
+        ? unique(root.shopping.filter((item): item is string => typeof item === "string"), 8)
+        : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
 export interface TravelEditorialSection {
   title: string;
   purpose: string;

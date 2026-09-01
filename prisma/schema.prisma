@@ -171,6 +171,9 @@ model BrandLink {
   productPrice String? // 가격
   storeName   String?  // 스토어명
   finalUrl    String?  // 리다이렉트된 최종 URL
+  productDescription String? // 상세페이지에서 수집한 상품 설명
+  productFeatures String? // 상세페이지 특징 JSON 배열
+  travelResearchJson String? // 여행 일정·방문지·항공·식사 구조화 JSON
 
   // 이미지 (JSON 배열)
   imageUrls   String?  // 스크래핑된 이미지 URL들

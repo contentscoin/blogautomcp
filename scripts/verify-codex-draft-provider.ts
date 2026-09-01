@@ -23,10 +23,14 @@ assert.match(providerSource, /regularImages\.slice\(0, 2\)/u);
 assert.match(providerSource, /runStreamed/u);
 assert.match(agentSource, /AI_PROVIDER === "codex"/u);
 assert.match(agentSource, /CODEX_BROWSER_FALLBACK_ENABLED/u);
+assert.match(agentSource, /CODEX_DRAFT_MODEL[^\n]+"gpt-5\.5"/u);
+assert.match(agentSource, /처음부터 반드시 5~6개의 완결된 문장/u);
 assert.match(routeSource, /const useCodex/u);
 assert.match(routeSource, /AI_PROVIDER: useCodex \? "codex" : provider/u);
 assert.match(settingsSource, /draftCreationMode: codexDraftEnabled && codexDraft\.authenticated/u);
 assert.match(electronSource, /process\.env\.CODEX_DRAFT_ENABLED = process\.env\.CODEX_DRAFT_ENABLED \|\| "true"/u);
+assert.match(electronSource, /CODEX_DRAFT_MODEL[^\n]+"gpt-5\.5"/u);
+assert.match(settingsSource, /defaultValue: "gpt-5\.5"/u);
 
 console.log(JSON.stringify({
   ok: true,

@@ -2754,7 +2754,13 @@ export default function Dashboard() {
                 </div>
                 <span className="text-sm font-semibold text-slate-600">{visibleLinks.length}건</span>
               </div>
-              <table className="w-full">
+              <table className="w-full min-w-[1080px] table-fixed">
+                <colgroup>
+                  <col className="w-[44%]" />
+                  <col className="w-[10%]" />
+                  <col className="w-[20%]" />
+                  <col className="w-[26%]" />
+                </colgroup>
                 <thead className="bg-slate-50 border-b border-slate-200">
                   <tr>
                     <th className="px-4 py-3 text-left text-sm font-medium text-slate-600">상품</th>
@@ -2783,18 +2789,18 @@ export default function Dashboard() {
                       return (
                         <tr key={link.id} className="hover:bg-slate-50">
                           <td className="px-4 py-3">
-                            <div className="flex items-center gap-3">
+                            <div className="flex min-w-0 items-center gap-3">
                               {/* 이미지 썸네일 */}
                               {thumbnailUrl && (
                                 // eslint-disable-next-line @next/next/no-img-element
                                 <img
                                   src={thumbnailUrl}
                                   alt=""
-                                  className="w-12 h-12 object-cover rounded-lg"
+                                  className="h-12 w-12 shrink-0 rounded-lg object-cover"
                                 />
                               )}
-                              <div>
-                                <div className="font-medium text-slate-800">
+                              <div className="min-w-0">
+                                <div className="line-clamp-2 break-keep font-medium leading-6 text-slate-800">
                                   {link.productName || "(상품 정보 없음)"}
                                 </div>
                                 {link.productPrice && (
@@ -2804,8 +2810,8 @@ export default function Dashboard() {
                               </div>
                             </div>
                           </td>
-                          <td className="px-4 py-3 text-center">
-                            <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(link.status)}`}>
+                          <td className="whitespace-nowrap px-3 py-3 text-center">
+                            <span className={`inline-flex whitespace-nowrap rounded-full px-2 py-1 text-xs font-medium ${getStatusColor(link.status)}`}>
                               {getStatusText(link.status)}
                             </span>
                             {link.errorMessage && (
@@ -2814,26 +2820,26 @@ export default function Dashboard() {
                               </div>
                             )}
                           </td>
-                          <td className="px-4 py-3 text-center">
+                          <td className="px-3 py-3 text-center">
                             <div className="space-y-1">
-                              <div className="text-xs text-slate-500">
+                              <div className="whitespace-nowrap text-xs text-slate-500">
                                 게시판: {getCategoryLabel(link.categoryNo)}
                                 {link.categoryNo ? ` (${link.categoryNo})` : ""}
                               </div>
-                              <div className="text-xs text-slate-500">
+                              <div className="whitespace-nowrap text-xs text-slate-500">
                                 소제목: {link.useSectionHeading ? "ON" : "OFF"}
                               </div>
-                              <div className="text-xs text-slate-500">
+                              <div className="whitespace-nowrap text-xs text-slate-500">
                                 예약발행일: {formatDateDisplay(link.scheduledPublishAt)}
                               </div>
-                              <div className="flex items-center justify-center gap-1">
+                              <div className="flex items-center justify-center gap-2">
                                 {categoryOptions.length > 0 || categoryLoading ? (
                                   <select
                                     value={link.categoryNo ?? ""}
                                     onChange={(e) => {
                                       void handleSelectCategoryNo(link, e.target.value);
                                     }}
-                                    className="max-w-36 px-2 py-1 text-xs border border-slate-300 rounded bg-white text-slate-700"
+                                    className="min-w-0 flex-1 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700"
                                     disabled={
                                       updatingCategoryId === link.id ||
                                       categoryLoading ||
@@ -2864,7 +2870,7 @@ export default function Dashboard() {
                                 )}
                                 <button
                                   onClick={() => handleToggleSectionHeading(link)}
-                                  className={`px-2 py-1 text-xs rounded transition-colors ${
+                                  className={`shrink-0 whitespace-nowrap rounded px-2 py-1 text-xs transition-colors ${
                                     link.useSectionHeading
                                       ? "bg-indigo-100 text-indigo-700 hover:bg-indigo-200"
                                       : "bg-amber-100 text-amber-700 hover:bg-amber-200"
@@ -2875,11 +2881,11 @@ export default function Dashboard() {
                               </div>
                             </div>
                           </td>
-                          <td className="px-4 py-3 text-center">
+                          <td className="px-3 py-3 text-center">
                             <div className="flex flex-wrap items-center justify-center gap-2">
                               <button
                                 onClick={() => setThumbnailStudioLink(link)}
-                                className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${link.connectKind === "TRAVEL" ? "bg-amber-100 text-amber-800 hover:bg-amber-200" : "bg-blue-100 text-blue-700 hover:bg-blue-200"}`}
+                                className={`whitespace-nowrap rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${link.connectKind === "TRAVEL" ? "bg-amber-100 text-amber-800 hover:bg-amber-200" : "bg-blue-100 text-blue-700 hover:bg-blue-200"}`}
                                 title="실제 상품 사진으로 카피 썸네일 만들기"
                               >
                                 2. 썸네일
@@ -2887,7 +2893,7 @@ export default function Dashboard() {
                               <button
                                 onClick={() => void handleOpenOrPrepareBrandDraft(link)}
                                 disabled={draftCreationMode === "checking" || draftGeneratingId === link.id || link.status === "DRAFTING" || Boolean(publishingId)}
-                                className="rounded-lg bg-violet-600 px-3 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:opacity-50 transition-colors"
+                                className="whitespace-nowrap rounded-lg bg-violet-600 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-violet-700 disabled:opacity-50"
                                 title={draftCreationMode === "chatgpt"
                                   ? "상품별 요청문을 복사해 연결된 ChatGPT에서 초안을 만듭니다"
                                   : draftCreationMode === "codex"

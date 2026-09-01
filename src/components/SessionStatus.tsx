@@ -395,12 +395,12 @@ export default function SessionStatus() {
         ) : null}
       </div>
 
-      <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
+      <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(210px,1fr))] gap-3">
         <button
           type="button"
           onClick={() => void restartServer()}
           disabled={controlBusy === "restart"}
-          className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-sky-300 hover:bg-sky-50 disabled:cursor-wait disabled:opacity-60"
+          className="min-h-32 rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-sky-300 hover:bg-sky-50 disabled:cursor-wait disabled:opacity-60"
         >
           <span className="text-xl" aria-hidden="true">↻</span>
           <span className="mt-2 block text-sm font-semibold text-slate-900">{controlBusy === "restart" ? "재시작 중…" : "서버 재시작"}</span>
@@ -410,7 +410,7 @@ export default function SessionStatus() {
           type="button"
           onClick={() => void startLogin("naver")}
           disabled={naverLoggingIn}
-          className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-wait disabled:opacity-60"
+          className="min-h-32 rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-wait disabled:opacity-60"
         >
           <span className="text-xl" aria-hidden="true">N</span>
           <span className="mt-2 block text-sm font-semibold text-slate-900">{naverLoggingIn ? "로그인 대기 중…" : "네이버 재로그인"}</span>
@@ -420,7 +420,7 @@ export default function SessionStatus() {
           type="button"
           onClick={() => void connectCodex()}
           disabled={codexConnecting}
-          className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-cyan-300 hover:bg-cyan-50 disabled:cursor-wait disabled:opacity-60"
+          className="min-h-32 rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-cyan-300 hover:bg-cyan-50 disabled:cursor-wait disabled:opacity-60"
         >
           <span className="text-xl" aria-hidden="true">G</span>
           <span className="mt-2 block text-sm font-semibold text-slate-900">{codexConnecting ? "GPT 연결 중…" : codex?.authenticated ? "GPT 연결됨" : "GPT 연결"}</span>
@@ -431,7 +431,7 @@ export default function SessionStatus() {
             type="button"
             onClick={() => void startLogin("chatgpt")}
             disabled={chatGptLoggingIn}
-            className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-violet-300 hover:bg-violet-50 disabled:cursor-wait disabled:opacity-60"
+            className="min-h-32 rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-violet-300 hover:bg-violet-50 disabled:cursor-wait disabled:opacity-60"
           >
             <span className="text-xl" aria-hidden="true">✦</span>
             <span className="mt-2 block text-sm font-semibold text-slate-900">{chatGptLoggingIn ? "로그인 대기 중…" : "웹 GPT 재로그인"}</span>
@@ -445,7 +445,7 @@ export default function SessionStatus() {
             setNotice(null);
           }}
           aria-expanded={mcpOpen}
-          className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-violet-300 hover:bg-violet-50"
+          className="min-h-32 rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-violet-300 hover:bg-violet-50"
         >
           <span className="text-xl" aria-hidden="true">◎</span>
           <span className="mt-2 block text-sm font-semibold text-slate-900">GPT(MCP) 재연결</span>
@@ -455,7 +455,7 @@ export default function SessionStatus() {
           type="button"
           onClick={() => void checkUpdates()}
           disabled={controlBusy === "update"}
-          className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-amber-300 hover:bg-amber-50 disabled:cursor-wait disabled:opacity-60"
+          className="min-h-32 rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-amber-300 hover:bg-amber-50 disabled:cursor-wait disabled:opacity-60"
         >
           <span className="text-xl" aria-hidden="true">⇩</span>
           <span className="mt-2 block text-sm font-semibold text-slate-900">{controlBusy === "update" ? "확인 중…" : "업데이트 확인"}</span>
@@ -511,8 +511,8 @@ export default function SessionStatus() {
         </p>
       ) : null}
 
-      <div className="mt-4 grid gap-3 xl:grid-cols-4">
-        <div className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+      <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(320px,1fr))] gap-3">
+        <div className="flex min-h-40 items-start justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-4">
           <div className="flex items-start gap-3">
             <div className={`mt-1 h-3 w-3 shrink-0 rounded-full ${loading ? "bg-slate-400" : getStatusDotClass(naver)}`} />
             <div>
@@ -539,7 +539,7 @@ export default function SessionStatus() {
           </div>
           <button type="button" onClick={() => void fetchSession()} className="shrink-0 text-xs font-medium text-slate-600 underline underline-offset-2">상태 확인</button>
         </div>
-        <div className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+        <div className="flex min-h-40 items-start justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-4">
           <div className="flex min-w-0 items-start gap-3">
             <div className={`mt-1 h-3 w-3 shrink-0 rounded-full ${codex?.authenticated ? "bg-emerald-500" : codex?.installed ? "bg-amber-500" : "bg-red-500"}`} />
             <div className="min-w-0">
@@ -554,7 +554,7 @@ export default function SessionStatus() {
           </div>
           <button type="button" onClick={() => void fetchSettings()} className="shrink-0 text-xs font-medium text-slate-600 underline underline-offset-2">상태 확인</button>
         </div>
-        {!codex?.authenticated ? <div className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+        {!codex?.authenticated ? <div className="flex min-h-40 items-start justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-4">
           <div className="flex min-w-0 items-start gap-3">
             <div className={`mt-1 h-3 w-3 shrink-0 rounded-full ${!browserAutomationEnabled ? "bg-slate-400" : loading ? "bg-slate-400" : getStatusDotClass(chatgpt)}`} />
             <div className="min-w-0">
@@ -585,11 +585,11 @@ export default function SessionStatus() {
           </div>
           <button type="button" onClick={() => void fetchSession()} className="shrink-0 text-xs font-medium text-slate-600 underline underline-offset-2">상태 확인</button>
         </div> : null}
-        <div className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
-          <div className="flex items-start gap-3">
+        <div className="flex min-h-40 items-start justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-4">
+          <div className="flex min-w-0 items-start gap-3">
             <div className={`mt-1 h-3 w-3 shrink-0 rounded-full ${updateStatusDotClass(update)}`} />
-            <div>
-              <h3 className="font-medium text-slate-900">프로그램 자동 업데이트{update?.currentVersion ? ` · v${update.currentVersion}` : ""}</h3>
+            <div className="min-w-0">
+              <h3 className="break-keep font-medium text-slate-900">프로그램 자동 업데이트{update?.currentVersion ? ` · v${update.currentVersion}` : ""}</h3>
               <p className="text-sm text-slate-600">{updateStatusText(update)}</p>
               <p className="mt-1 text-xs text-slate-400">포스팅 작업 중에는 설치를 기다렸다가 안전할 때 자동 재시작합니다.</p>
               {update?.error ? <p className="mt-1 break-all text-xs text-amber-700">{update.error}</p> : null}

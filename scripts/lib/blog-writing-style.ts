@@ -21,11 +21,21 @@ export const HUMAN_MOBILE_STYLE_GUIDE = `
 export const MOBILE_BODY_RULES = `
 ## 모바일 본문 규칙
 - 본문은 짧은 호흡의 문장과 줄바꿈이 살아 있어야 합니다.
-- 각 섹션 본문은 4-6문장으로 쓰되, 문장마다 줄바꿈을 넣어주세요.
+- 각 섹션 본문은 상품 유형별 작성 규칙에 지정된 문장 수를 지키고, 문장마다 줄바꿈을 넣어주세요.
 - 한 문단에 정보 하나만 담아 읽는 속도를 가볍게 만드세요.
 - 모바일에서 손가락으로 넘기며 읽어도 핵심이 보이도록 문장을 빽빽하게 붙이지 마세요.
 - 제목과 소제목에는 이모지를 넣지 마세요.
 `.trim();
+
+export function getMobileSectionLinePolicy(connectKind: "SHOPPING" | "TRAVEL"): {
+  preferred: number;
+  hardMinimum: number;
+} {
+  return {
+    preferred: connectKind === "TRAVEL" ? 5 : 4,
+    hardMinimum: 3,
+  };
+}
 
 export const HUMAN_REVIEW_SAFETY_RULES = `
 ## 자연스러운 리뷰 안전 규칙

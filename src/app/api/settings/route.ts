@@ -33,7 +33,7 @@ const FIELDS: FieldDef[] = [
     defaultValue: "true",
     hint: "로그인된 GPT를 백그라운드 원고 작성 엔진으로 우선 사용합니다.",
   },
-  { key: "CODEX_DRAFT_MODEL", label: "GPT 작성 모델", type: "text", hint: "비우면 연결 계정의 기본 작성 모델을 사용합니다." },
+  { key: "CODEX_DRAFT_MODEL", label: "GPT 작성 모델", type: "text", defaultValue: "gpt-5.5", hint: "기본값은 gpt-5.5입니다." },
   {
     key: "CHATGPT_BROWSER_AUTOMATION_ENABLED",
     label: "ChatGPT 웹 자동작성",
