@@ -4,7 +4,7 @@
 
 import path from "path";
 import { normalizeLines, renderSectionText } from "./render";
-import type { AssembledPost, GeneratedDraft, HeaderFormat, PostCompositionContract, PostSpec, SectionSlot, ValidationReport } from "./types";
+import type { AssembledPost, CompositionSectionPlan, GeneratedDraft, HeaderFormat, PostCompositionContract, PostSpec, SectionSlot, ValidationReport } from "./types";
 
 export interface AssembleOptions {
   /** 인용구 헤더를 실제로 쓸지. 에디터 셀렉터 실측 전까지는 false → sectionTitle 로 강등 */
@@ -44,11 +44,40 @@ export function buildHashtags(spec: PostSpec, draft: GeneratedDraft): string[] {
   return output.slice(0, spec.seo.hashtags.count);
 }
 
-export function assemblePost(spec: PostSpec, draft: GeneratedDraft, validation: ValidationReport, options: AssembleOptions): AssembledPost {
+function slotPathsBySection(spec: PostSpec): Map<number, string[]> {
   const slotsBySection = new Map<number, string[]>();
   for (const slot of spec.imagePlan.slots) {
     slotsBySection.set(slot.sectionIndex, [...(slotsBySection.get(slot.sectionIndex) || []), slot.path]);
   }
+  return slotsBySection;
+}
+
+/**
+ * 렌더 계약이 따를 섹션별 이미지 플랜. 스펙이 확정한 슬롯·의도·하한/상한을 그대로 옮기고,
+ * 첫 커넥트 카드는 일정 흐름(여행) 또는 핵심 사실(쇼핑) 섹션 뒤에 둔다.
+ */
+export function buildCompositionSectionPlan(spec: PostSpec, options: Pick<AssembleOptions, "quotationHeaders">): CompositionSectionPlan[] {
+  const slotsBySection = slotPathsBySection(spec);
+  const earlyRole = spec.connectKind === "TRAVEL" ? "itinerary-overview" : "key-facts";
+  return spec.sections.map((section) => {
+    const imagePaths = slotsBySection.get(section.index) || [];
+    const [minCount, maxCount] = section.imageCount || [imagePaths.length, Math.max(1, imagePaths.length)];
+    const headingStyle = section.headerFormat === "quotation" && options.quotationHeaders ? "quotation" : section.headerFormat === "none" ? "plain" : "sectionTitle";
+    return {
+      role: section.role,
+      imagePaths,
+      imageIntent: section.imageIntent,
+      // 확보된 장수가 하한보다 적어도 플랜은 하한을 그대로 알려 준다(품질 리포트가 부족을 표시하도록).
+      imageMin: Math.max(0, minCount),
+      imageMax: Math.max(minCount, maxCount, imagePaths.length),
+      headingStyle,
+      earlyConnectCard: section.role === earlyRole,
+    };
+  });
+}
+
+export function assemblePost(spec: PostSpec, draft: GeneratedDraft, validation: ValidationReport, options: AssembleOptions): AssembledPost {
+  const slotsBySection = slotPathsBySection(spec);
   const composition: PostCompositionContract = {
     version: "post-composition/v1",
     kind: spec.connectKind,
@@ -93,6 +122,7 @@ export function assemblePost(spec: PostSpec, draft: GeneratedDraft, validation: 
     draft,
     validation,
     composition,
+    sectionPlan: buildCompositionSectionPlan(spec, options),
     heroImagePath,
     bodyImagePaths,
     uploadImagePaths,

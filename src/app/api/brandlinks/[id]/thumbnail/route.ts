@@ -77,8 +77,16 @@ async function downloadProductImage(rawUrl: string, destination: string): Promis
   }
 }
 
+/** 저장된 경로가 손상·변조되어도 썸네일 저장 폴더 밖의 파일은 절대 읽지 않는다. */
+function isInsideThumbnailStorage(filePath: string): boolean {
+  const storageDir = path.resolve(getProductThumbnailStorageDir());
+  const resolved = path.resolve(filePath);
+  const relative = path.relative(storageDir, resolved);
+  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
 async function previewDataUrlFor(filePath: string | null | undefined): Promise<string | null> {
-  if (!filePath || !fs.existsSync(filePath)) return null;
+  if (!filePath || !isInsideThumbnailStorage(filePath) || !fs.existsSync(filePath)) return null;
   const stat = await fs.promises.stat(filePath).catch(() => null);
   if (!stat?.isFile() || stat.size > 8 * 1024 * 1024) return null;
   const bytes = await fs.promises.readFile(filePath);
@@ -117,9 +125,11 @@ async function getPayload(id: string) {
 }
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  const authError = requireAdminApiKey(request);
+  if (authError) return authError;
   const { id } = await params;
   const payload = await getPayload(id);
   if (!payload) return NextResponse.json({ success: false, error: "상품을 찾을 수 없습니다." }, { status: 404 });

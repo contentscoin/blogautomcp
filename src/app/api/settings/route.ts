@@ -48,7 +48,7 @@ const FIELDS: FieldDef[] = [
   { key: "OPENAI_API_KEY", label: "OpenAI API 키 (선택)", type: "password", secret: true, hint: "글·썸네일 생성에 사용. 없으면 ChatGPT 2단계 경로 또는 로컬 템플릿 초안으로 동작합니다." },
   { key: "UNSPLASH_ACCESS_KEY", label: "Unsplash 액세스 키", type: "password", secret: true, hint: "스톡 이미지(선택)" },
   { key: "NAVER_BLOG_ID", label: "네이버 블로그 ID", type: "text", hint: "blog.naver.com/<여기>" },
-  { key: "ADMIN_API_KEY", label: "관리자 API 키", type: "password", secret: true, hint: "로컬 API 를 외부 스크립트에서 호출할 때만 필요(선택). 일반 사용에는 비워 두세요.", advanced: true },
+  { key: "ADMIN_API_KEY", label: "관리자 API 키", type: "password", secret: true, hint: "설정하면 발행·설정 같은 관리자 API 가 이 키를 요구합니다(선택). 외부 스크립트는 x-admin-api-key 헤더, 브라우저 대시보드는 첫 화면에서 키를 한 번 입력하고, 데스크톱 앱은 자동으로 붙입니다. 일반 로컬 사용에는 비워 두세요.", advanced: true },
 ];
 
 const MASK = "********";

@@ -185,6 +185,77 @@ async function main() {
   assert.ok(daySections.every((section) => section.imageSlotIds.length >= 1), "코스 포인트 섹션마다 이미지 1장 이상");
   assert.equal(travel.spec.generation.mode, "chunked");
   assert.equal(travel.spec.generation.chunks.length, 2);
+  assert.ok(!travel.validation.repair.targets.some((t) => t.code === "REPEATED_LINE"), "코스 포인트 문장이 장소 이름만 바꾼 반복이면 안 됨");
+  assert.equal(travel.validation.quality.categories.find((c) => c.key === "diversity")?.status, "pass", "문단 다양성 통과");
+  // 렌더 계약 플랜은 스펙 슬롯 배정과 같아야 한다.
+  assert.equal(travel.sectionPlan.length, travel.spec.sections.length);
+  for (const [index, planned] of travel.sectionPlan.entries()) {
+    const section = travel.spec.sections[index];
+    assert.equal(planned.role, section.role);
+    assert.equal(planned.imagePaths.length, section.imageSlotIds.length, `${section.title} 플랜 이미지 수`);
+    assert.equal(planned.imageMin, section.imageCount?.[0]);
+  }
+  assert.ok(travel.sectionPlan.find((planned) => planned.role === "itinerary-overview")?.earlyConnectCard, "첫 커넥트 카드는 일정 흐름 뒤");
+
+  // --- 여행: 같은 유형(마사지 2개)·긴 상품명·출발지 꼬리표 — 로컬 템플릿만으로 발행 게이트를 통과해야 한다 ---
+  const banaInput = {
+    ...travelInput,
+    product: {
+      name: "대한항공 노쇼핑 VVIP 풀패키지 [신축 M 호텔 다낭 3박5일] 바나힐/호이안 1일 1마사지 - 인천 오후 출발변경",
+      description: "",
+      features: ["핵심 방문지: 발마사지 1시간, 호이안 야투 (소원배+소원등+야시장), 아로마 핫스톤 마사지 2시간, 바나힐 테마파크 입장권"],
+      price: "1,011,000원",
+    },
+  };
+  const bana = await runSpecFirstPipeline(banaInput);
+  assert.deepEqual(bana.spec.facts.travel?.destinations, ["바나힐", "호이안"], "출발지(인천)·출발 시간(오후)은 목적지가 아님");
+  assert.equal(bana.validation.status, "READY", bana.validation.summary);
+  assert.ok(!bana.validation.repair.targets.some((t) => t.code === "REPEATED_LINE"), "마사지 코스 2개가 같은 문장을 쓰면 안 됨");
+  for (const key of ["diversity", "specificity", "usefulness", "clarity"]) {
+    assert.equal(bana.validation.quality.categories.find((c) => c.key === key)?.status, "pass", `${key} 통과`);
+  }
+  const banaBody = bana.sections.join("\n");
+  assert.match(banaBody, /호이안 구시가지는 유네스코/u, "호이안 코스에는 널리 알려진 배경 한 줄");
+  assert.doesNotMatch(banaBody, /콜로세움|포로 로마노/u, "'아로마'가 로마로 잘못 매칭되면 안 됨");
+  assert.doesNotMatch(banaBody, /보여요|보입니다|것 같아요/u, "모호한 말투 금지");
+  assert.ok((banaBody.match(/바나힐 패키지/gu) || []).length >= 2, "핵심 키워드가 본문에 2회 이상");
+  // 실제 발행 게이트(simple-agent 가 쓰는 비-편집 모드)도 통과해야 승인 버튼이 열린다.
+  const { getBrandLinkContentReadiness } = await import("./lib/brandlink-content-readiness");
+  const { resolvePostDocument } = await import("../src/lib/post-composition-contract");
+  const banaComposition = resolvePostDocument({
+    connectKind: "TRAVEL",
+    title: bana.title,
+    sections: bana.sections,
+    hashtags: bana.hashtags,
+    // simple-agent 와 같은 순서: [생성 썸네일, 대표 이미지, 슬롯 순서…]
+    imagePaths: [path.join(dir, "generated-thumbnail.jpg"), ...bana.uploadImagePaths],
+    connectUrl: "https://naver.me/travel",
+    qualityPreset: "PREMIUM",
+    sectionPlan: bana.sectionPlan,
+  });
+  assert.equal(banaComposition.qualityReport.canAutoPublish, true, banaComposition.qualityReport.blockers.join(" "));
+  const courseSections = banaComposition.sections.filter((section) => section.id.startsWith("travel-day-course"));
+  assert.equal(courseSections.length, 3);
+  assert.ok(courseSections.every((section) => section.imagePaths.length >= 1 && section.imageMin === 1), "코스 포인트마다 이미지가 실제로 배치되고 하한이 표시된다");
+  assert.ok(banaComposition.sections.every((section) => !/travel-(?:hook|route|day-1|day-2|lodging)/u.test(section.id)), "팔레트 id 를 끼워 맞추지 않는다");
+  const banaGate = getBrandLinkContentReadiness({
+    productName: banaInput.product.name,
+    title: bana.title,
+    sections: bana.sections,
+    hashtags: bana.hashtags,
+    brandLink: "https://naver.me/travel",
+    generationSource: "AI",
+    hasRepresentativeImage: true,
+    requireRepresentativeImage: true,
+    thumbnailGenerated: true,
+    connectKind: "TRAVEL",
+    experienceMode: "AI_ASSISTED_INFORMATION",
+    compositionQualityReport: banaComposition.qualityReport,
+    sourceDescription: "",
+    sourceFeatures: banaInput.product.features,
+  });
+  assert.equal(banaGate.canPublish, true, `${banaGate.code}: ${banaGate.reason || banaGate.summary}`);
+  assert.ok(banaGate.score >= 90, `발행 게이트 점수 ${banaGate.score}`);
 
   // --- 콜라주 ---
   const collage = await buildCollageImage([candidates[1].path, candidates[2].path, candidates[3].path], path.join(dir, "collage.jpg"));

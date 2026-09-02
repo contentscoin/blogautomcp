@@ -126,6 +126,7 @@ function sectionSpecFromTemplate(template: SectionTemplate, index: number, evide
     maxLines: rule.maxLines,
     imageSlotIds: [],
     imageIntent: template.imageIntent,
+    imageCount: template.imageCount,
     hints: template.hints,
   };
 }

@@ -6,6 +6,7 @@ import type { BrandLinkContentReadiness } from "../../scripts/lib/brandlink-cont
 import {
   getPostCompositionContract,
   refreshPostDocumentQuality,
+  sectionImageBounds,
   type ResolvedPostDocumentV1,
 } from "./post-composition-contract";
 import { assessProductEditorialCoverage } from "../../scripts/lib/product-editorial-plan";
@@ -283,11 +284,10 @@ export function packagePreview(manifest: BrandPostPackageManifest) {
   const assetByPath = new Map(imageAssets.map((asset) => [path.resolve(asset.path), asset]));
   const imageSlots = manifest.version === "brand-post-package/v2"
     ? manifest.composition.sections.map((section) => {
-        const contract = getPostCompositionContract(manifest.connectKind).sections.find(
-          (candidate) => candidate.id === section.id,
+        const { min: minimum, max: maximum } = sectionImageBounds(
+          getPostCompositionContract(manifest.connectKind),
+          section,
         );
-        const minimum = contract?.image.min || 0;
-        const maximum = contract?.image.max || Math.max(1, minimum);
         return {
           sectionId: section.id,
           title: section.title,
@@ -487,7 +487,8 @@ export function applyGeneratedBrandPostImage(options: {
     const contract = getPostCompositionContract(manifest.connectKind).sections.find(
       (candidate) => candidate.id === sectionId,
     );
-    if (section.imagePaths.length >= (contract?.image.max || 1)) {
+    const bounds = sectionImageBounds(getPostCompositionContract(manifest.connectKind), section);
+    if (section.imagePaths.length >= Math.max(1, bounds.max)) {
       throw new Error("이 파트는 권장 최대 이미지 수에 도달했습니다.");
     }
     const asset: BrandPostPackageImageAsset = {

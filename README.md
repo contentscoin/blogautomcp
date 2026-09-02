@@ -4,7 +4,7 @@
 
 ## 🌐 BlogAutoMCP 사이트·MCP 구조
 
-이 저장소에는 기존 로컬 자동화와 함께 `apps/site` 서버리스 사이트가 포함되어 있습니다.
+이 저장소에는 기존 로컬 자동화와 함께 `apps/sites` 서버리스 사이트가 포함되어 있습니다. 사이트는 자체 `package-lock.json` 을 가진 별도 프로젝트이며 루트의 `site:*` 스크립트로 실행합니다.
 
 - 이메일 확인 없는 가입 신청 → 관리자 `hiway@kakao.com` 승인
 - 한 번만 표시되는 사용자별 MCP URL과 재발급 시 기존 연결 폐기
@@ -13,7 +13,7 @@
 - 쇼핑커넥트 경로 연결, 여행커넥트 실계약 캡처와 fail-closed 출시 게이트
 - Windows 로그인 시 숨김 자동실행, 창을 닫아도 트레이에 상주하는 로컬 에이전트
 
-별도 상주 백엔드 서버는 운영하지 않습니다. 사이트의 Next.js 서버리스 함수와 관리형 PostgreSQL만 필요합니다. 구체적인 현재 구현·미검증 범위는 [구현 기준서](docs/mcp-saas-local-agent-product-plan.md), 사이트 배포는 [사이트 README](apps/site/README.md)를 확인하세요.
+별도 상주 백엔드 서버는 운영하지 않습니다. 사이트의 Next.js 서버리스 함수와 관리형 PostgreSQL만 필요합니다. 구체적인 현재 구현·미검증 범위는 [구현 기준서](docs/mcp-saas-local-agent-product-plan.md), 사이트 배포는 [사이트 README](apps/sites/README.md)를 확인하세요.
 
 ## ✨ 주요 기능
 
@@ -189,9 +189,9 @@ ADMIN_API_KEY="랜덤한_긴_문자열"
 CRON_SECRET="랜덤한_긴_문자열"
 ```
 
-- `ADMIN_API_KEY`: 대시보드 외부에서 API 호출할 때 `x-admin-api-key` 헤더 필요
+- `ADMIN_API_KEY`: 설정하면 모든 관리자 API(발행/설정/중지/썸네일 등)가 실제 자격 증명을 요구합니다. 외부 스크립트는 `x-admin-api-key` 헤더를 붙이고, 브라우저 대시보드는 첫 화면에서 키를 한 번 입력해 HttpOnly 세션 쿠키를 받습니다(데스크톱 앱은 자동으로 헤더를 붙입니다). `Origin`/`Referer` 같은 출처 헤더만으로는 통과하지 않습니다.
 - `CRON_SECRET`: `/api/schedule/cron` 호출 시 `x-cron-secret` 또는 `Authorization: Bearer ...` 필요
-- 대시보드(동일 오리진)에서 발생하는 브라우저 요청은 정상 동작하도록 허용됨
+- 키를 비워 두면(기본 로컬 사용) 종전처럼 인증 없이 동작합니다.
 
 예시:
 ```bash

@@ -10274,6 +10274,7 @@ async function runPreparedPostRevision(
     connectUrl: link.url,
     qualityPreset: BRANDLINK_QUALITY_PRESET,
     experienceMode: BRANDLINK_EXPERIENCE_MODE,
+    sectionPlan: result.sectionPlan,
   });
   post.composition = composition;
   const contentReadiness = BRANDLINK_CONTENT_READINESS_ENABLED
@@ -10711,6 +10712,8 @@ async function main() {
         connectUrl: link.url,
         qualityPreset: BRANDLINK_QUALITY_PRESET,
         experienceMode: BRANDLINK_EXPERIENCE_MODE,
+        // Spec-first: 섹션별 슬롯 배정을 그대로 따른다(팔레트 순서로 이미지를 앞쪽에 몰아 넣지 않는다).
+        sectionPlan: assembled?.sectionPlan ?? null,
       });
     post.composition = composition;
     console.log(

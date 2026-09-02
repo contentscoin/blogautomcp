@@ -87,6 +87,8 @@ export interface SectionSpec {
   maxLines: number;
   imageSlotIds: string[];
   imageIntent: string;
+  /** 이 섹션이 받을 수 있는 본문 이미지 [최소, 최대]. 구버전 스펙에는 없을 수 있다. */
+  imageCount?: [number, number];
   /** 모델에게 주는 작성 힌트 (형식·관점) */
   hints: string[];
 }
@@ -239,9 +241,21 @@ export interface AssembledPost {
   draft: GeneratedDraft;
   validation: ValidationReport;
   composition: PostCompositionContract;
+  /** 렌더 계약(resolvePostDocument)에 넘길 섹션별 이미지 플랜 — 팔레트 순서 대신 실제 슬롯 배정을 따르게 한다. */
+  sectionPlan: CompositionSectionPlan[];
   heroImagePath: string | null;
   bodyImagePaths: string[];
   uploadImagePaths: string[];
   attempts: number;
   generationSource: GeneratedDraft["source"];
+}
+
+export interface CompositionSectionPlan {
+  role: SectionRole;
+  imagePaths: string[];
+  imageIntent: string;
+  imageMin: number;
+  imageMax: number;
+  headingStyle: "quotation" | "sectionTitle" | "plain";
+  earlyConnectCard?: boolean;
 }

@@ -3,9 +3,6 @@
   "version": "1.3.1",
   "description": "네이버 쇼핑 커넥트(브랜드커넥트) 자동 블로그 포스팅 도구",
   "private": true,
-  "workspaces": [
-    "apps/site"
-  ],
   "scripts": {
     "dev": "next dev",
     "dev:open": "node scripts/dev-open.mjs",
@@ -49,6 +46,7 @@
     "test:travel-draft-resilience": "npx ts-node --project tsconfig.scripts.json scripts/verify-travel-draft-resilience.ts",
     "test:travel-image-quality": "npx ts-node --project tsconfig.scripts.json scripts/verify-travel-image-quality.ts",
     "test:title-rules": "npx ts-node --project tsconfig.scripts.json scripts/verify-title-rules.ts",
+    "test:api-auth": "npx ts-node --project tsconfig.scripts.json scripts/verify-api-auth.ts",
     "test:packaged-update": "pwsh -NoProfile -File scripts/verify-packaged-auto-update.ps1",
     "postinstall": "prisma generate",
     "start": "next start",
@@ -61,13 +59,14 @@
     "publish:bulk-schedule": "npx ts-node --project tsconfig.scripts.json scripts/bulk-schedule-publish.ts",
     "db:studio": "npx prisma studio",
     "db:push": "npx prisma db push",
-    "site:dev": "npm run dev --workspace @blogautomcp/site",
-    "site:build": "npm run build --workspace @blogautomcp/site",
-    "site:typecheck": "npm run typecheck --workspace @blogautomcp/site",
-    "site:test": "npm run test --workspace @blogautomcp/site",
-    "site:db:generate": "npm run db:generate --workspace @blogautomcp/site",
-    "site:db:push": "npm run db:push --workspace @blogautomcp/site",
-    "site:db:migrate": "npm run db:migrate --workspace @blogautomcp/site"
+    "site:install": "npm ci --prefix apps/sites",
+    "site:dev": "npm run dev --prefix apps/sites",
+    "site:build": "npm run build --prefix apps/sites",
+    "site:lint": "npm run lint --prefix apps/sites",
+    "site:typecheck": "npx --prefix apps/sites tsc --noEmit -p apps/sites/tsconfig.json",
+    "site:db:generate": "npm run db:generate --prefix apps/sites",
+    "site:update:publish": "npm run update:publish --prefix apps/sites",
+    "site:update:verify": "npm run update:verify --prefix apps/sites"
   },
   "main": "scripts/electron/main.cjs",
   "dependencies": {
