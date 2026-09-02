@@ -284,7 +284,7 @@ function readInteger(input: Record<string, unknown>, key: string, fallback: numb
   return Math.min(max, Math.max(min, value));
 }
 
-function envelope(job: Job, kind: string, summary: string, data: Record<string, unknown>, ctx: JobContext, extra: { readiness?: unknown; nextAction?: string } = {}): JobResultEnvelope {
+function envelope(job: Job, kind: string, summary: string, data: Record<string, unknown>, ctx: JobContext, extra: { readiness?: unknown; nextAction?: string; contentQuality?: unknown } = {}): JobResultEnvelope {
   return {
     schema: "blogautomcp.job-result/v1",
     jobType: job.type,
@@ -595,13 +595,37 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
       }),
     });
     const preview = (response.data || {}) as DraftPreview;
-    const contentQuality = preview.contentQuality as { canPublish?: boolean; reason?: string | null; summary?: string } | null | undefined;
+    const contentQuality = preview.contentQuality as {
+      canPublish?: boolean;
+      code?: string;
+      score?: number;
+      reason?: string | null;
+      summary?: string;
+      signals?: unknown;
+    } | null | undefined;
     const requiresRepair = Boolean(contentQuality && contentQuality.canPublish === false);
     const view = draftView(productId, preview, false);
     return envelope(job, "draft", requiresRepair
       ? `원고는 저장됐지만 품질 보강이 필요합니다: ${contentQuality?.reason || contentQuality?.summary || "근거 밀도 미달"}`
       : "ChatGPT 원고를 PC에서 검증하고 승인 대기 초안 패키지로 저장했습니다.", { ...view, requiresRepair }, ctx, {
       readiness: draftReadiness(preview),
+      contentQuality: contentQuality
+        ? {
+            canPublish: contentQuality.canPublish,
+            code: contentQuality.code,
+            score: contentQuality.score,
+            reason: contentQuality.reason,
+            summary: contentQuality.summary,
+            signals: Array.isArray(contentQuality.signals)
+              ? contentQuality.signals.map((signal: Record<string, unknown>) => ({
+                  key: signal.key,
+                  label: signal.label,
+                  status: signal.status,
+                  detail: signal.detail,
+                }))
+              : [],
+          }
+        : null,
       nextAction: requiresRepair
         ? "contentQuality.reason과 실패 signals를 반영해 같은 컨텍스트로 원고를 고친 뒤 새 idempotencyKey로 post_submit_draft를 다시 호출하세요."
         : "post_get_draft 로 초안을 확인하고 post_approve_draft 로 승인한 뒤, 실제 발행은 사용자 확인 후 진행하세요.",

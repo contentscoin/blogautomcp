@@ -58,7 +58,7 @@ async function main() {
   assert.equal(travelFacts.duration, "9일");
   assert.ok(travelFacts.conditions.some((value) => /쇼핑/u.test(value)));
   const travelCopy = buildTravelThumbnailCopy(travelName);
-  assert.match(travelCopy.headline, /코스 리뷰/u);
+  assert.match(travelCopy.headline, /여행 브이로그/u);
   assert.match(travelCopy.subline, /노쇼핑|장점/u);
   const travelPlan = buildTravelContractEditorialPlan({ name: travelName, description: "", features: [], price: "" });
   assert.equal(travelPlan.length, 13, "여행 글의 13개 의미 기반 섹션을 유지해야 합니다.");

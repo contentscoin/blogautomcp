@@ -122,8 +122,9 @@ async function main() {
     "FAILED 상품도 초안 근거 준비에 성공하면 READY로 복구되어야 합니다.",
   );
   assert.equal(
-    simpleAgentSource.includes('BRANDLINK_GENERATED_DRAFT_PATH\n      ? readMcpGeneratedDraft') &&
-      simpleAgentSource.includes('!BRANDLINK_GENERATED_DRAFT_PATH &&'),
+    simpleAgentSource.includes("text = BRANDLINK_GENERATED_DRAFT_PATH") &&
+      simpleAgentSource.includes("readMcpGeneratedDraft(BRANDLINK_GENERATED_DRAFT_PATH)") &&
+      simpleAgentSource.includes("!BRANDLINK_GENERATED_DRAFT_PATH"),
     true,
     "ChatGPT 제출 원고는 API 생성 및 API 기반 재작성 경로를 건너뛰어야 합니다.",
   );

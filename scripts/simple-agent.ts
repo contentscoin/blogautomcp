@@ -6332,9 +6332,15 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
     sections: sections,
     hashtags,
     generationSource: "AI",
-    rawResponse: text,
-    openCrabSeoBrief,
-    productEditorialPlan,
+    // The full prompt/response is already persisted in the local preview log.
+    // Returning it to the remote job-completion endpoint can exceed its 1 MB
+    // request limit, even when the generated post itself passes quality gates.
+    rawResponse: "",
+    // These prompt-sized diagnostics remain in the local generated preview;
+    // omitting them from the remote job result keeps completion payloads well
+    // below the site's 1 MB request limit.
+    openCrabSeoBrief: undefined,
+    productEditorialPlan: undefined,
     editorialQuality,
     qualityRepair,
   };
@@ -8111,15 +8117,18 @@ async function captureTravelLinkArtifacts(page: Page, reason: string): Promise<v
  */
 async function insertTravelConnectLink(page: Page, travelLink: string): Promise<void> {
   console.log("   여행커넥트 외부 링크 컴포넌트 삽입...");
+  // Naver's URL parser rejects the raw pipe separator used in some package
+  // URLs. Encode it before typing so the external-link card can be created.
+  const normalizedTravelLink = travelLink.replace(/\|/g, "%7C");
   await setNaverTextFormat(page, "text");
   await page.keyboard.press("Enter").catch(() => {});
   await page.waitForTimeout(250);
 
-  const previousArtifactCount = await countEditorExternalLinkArtifacts(page, travelLink);
-  await page.keyboard.type(travelLink, { delay: 5 });
+  const previousArtifactCount = await countEditorExternalLinkArtifacts(page, normalizedTravelLink);
+  await page.keyboard.type(normalizedTravelLink, { delay: 5 });
   await page.keyboard.press("Enter");
 
-  if (!(await waitForEditorExternalLinkInserted(page, travelLink, previousArtifactCount))) {
+  if (!(await waitForEditorExternalLinkInserted(page, normalizedTravelLink, previousArtifactCount))) {
     await captureTravelLinkArtifacts(page, "external-link-conversion-failed");
     throw new Error(
       "여행커넥트 링크를 네이버 외부 링크 컴포넌트로 변환하지 못했습니다. 쇼핑커넥트 상품 검색은 실행하지 않았습니다."
