@@ -1,3 +1,5 @@
+import { assessRepetition } from "./draft-quality-signals";
+
 export type ProductEditorialRole =
   | "review-hook"
   | "product-identity"
@@ -626,11 +628,9 @@ function countMatches(value: string, pattern: RegExp): number {
   return Array.from(value.matchAll(new RegExp(pattern.source, `${pattern.flags.replace("g", "")}g`))).length;
 }
 
-function repeatedSentenceCount(value: string): number {
-  const counts = new Map<string, number>();
-  const sentences = value.split(/[\n.!?。]+/u).map((item) => clean(item).replace(/[^\p{L}\p{N}]/gu, "")).filter((item) => item.length >= 18);
-  for (const item of sentences) counts.set(item, (counts.get(item) || 0) + 1);
-  return Array.from(counts.values()).reduce((sum, count) => sum + Math.max(0, count - 1), 0);
+/** 정확히 같은 문장뿐 아니라 숫자·어미만 바뀐 근사 중복까지 반복으로 센다. */
+function repeatedSentenceCount(sections: string[]): number {
+  return assessRepetition(sections).nearDuplicateCount;
 }
 
 export function assessProductReviewSubstance(input: {
@@ -686,7 +686,7 @@ export function assessProductReviewSubstance(input: {
     Math.max(1, analysis.verifiedSignals.length),
   );
   const requiredEvidenceJudgementCount = analysis.evidenceLevel === "rich" ? 3 : analysis.evidenceLevel === "usable" ? 2 : 1;
-  const repeats = repeatedSentenceCount(body);
+  const repeats = repeatedSentenceCount(input.sections);
   const checks: Array<[boolean, string]> = [
     [/(?:장점|강점|선택\s*이유)/u.test(body), "구체적인 장점"],
     [/(?:아쉬운|단점|한계|제약|비추천)/u.test(body), "제품 자체의 단점·제약"],

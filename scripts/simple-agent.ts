@@ -6204,6 +6204,7 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
     "generic-guidance-heavy",
     "category-mismatch",
     "repetitive-content",
+    "quality-score-below-threshold",
   ]);
   const shouldAttemptQualityRepair =
     (!BRANDLINK_GENERATED_DRAFT_PATH || AI_PROVIDER === "codex" || BROWSER_GPT_MODE) &&
@@ -6222,12 +6223,22 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
             sourceText: [product.description, ...product.features].join(" "),
           })
         : null;
+      const qualityNotes = editorialQuality.quality.categories
+        .filter((category) => category.status !== "pass")
+        .map((category) => `  - ${category.label} ${category.score}/${category.maxScore}${category.notes.length ? `: ${category.notes.join(" ")}` : ""}`);
+      const repetitionSamples = editorialQuality.quality.repetition.samples
+        .slice(0, 3)
+        .map((sample) => `  - "${sample.a.slice(0, 40)}" ≈ "${sample.b.slice(0, 40)}"`);
       return `아래 초안을 품질검사 결과를 모두 해결한 완성본으로 고쳐주세요.
 
 [품질검사]
 - 판정: ${editorialQuality.code}
 - 이유: ${editorialQuality.reason || editorialQuality.summary}
 - 실패 항목: ${failedSignals.join(", ") || "없음"}
+- 하드 차단: ${editorialQuality.blockers.map((blocker) => blocker.reason).join(" / ") || "없음"}
+- 품질 점수: ${editorialQuality.quality.score}/${editorialQuality.quality.passScore}
+${qualityNotes.length ? `- 보강할 품질 항목:\n${qualityNotes.join("\n")}` : ""}
+${repetitionSamples.length ? `- 같은 뜻으로 반복된 문장(하나만 남기고 새 근거로 교체):\n${repetitionSamples.join("\n")}` : ""}
 ${travelSubstance ? `- 여행 원고 부족 요소: ${travelSubstance.missingElements.join(", ") || "없음"}` : ""}
 
 [수정 원칙]

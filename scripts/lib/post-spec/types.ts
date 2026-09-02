@@ -76,8 +76,10 @@ export interface SectionSpec {
   shape: SectionShape;
   purpose: string;
   evidenceRule: string;
-  /** 이 섹션이 사용할 수 있는 확인된 근거 줄 */
+  /** 이 섹션이 사용할 수 있는 확인된 근거 줄 (전용 + 공용) */
   evidence: string[];
+  /** 이 섹션 전용 근거. 최소 1개는 본문에 구체적으로 써야 하고 다른 섹션은 재사용하지 않는다. */
+  mustUseEvidence: string[];
   requiredKeywords: string[];
   minChars: number;
   maxChars: number;
@@ -112,6 +114,16 @@ export interface GeoTargets {
   sourceLine: string;
 }
 
+/** 섹션별 근거표: 생성 전에 어떤 근거를 어느 섹션이 전담하는지 고정한다. */
+export interface EvidenceLedgerEntry {
+  sectionIndex: number;
+  role: SectionRole;
+  /** 이 섹션만 쓰는 근거 */
+  exclusive: string[];
+  /** 여러 섹션이 함께 참조해도 되는 근거(가격·상품명 등) */
+  shared: string[];
+}
+
 export interface PostSpec {
   version: "post-spec/v1";
   connectKind: ConnectKind;
@@ -124,6 +136,7 @@ export interface PostSpec {
   };
   brief: OpenCrabSeoBrief | null;
   sections: SectionSpec[];
+  evidenceLedger: EvidenceLedgerEntry[];
   imagePlan: ImagePlan;
   seo: SeoTargets;
   geo: GeoTargets;
@@ -172,10 +185,22 @@ export interface ValidationSignal {
   detail?: string;
 }
 
+export interface ValidationQualitySummary {
+  /** 판정기의 순수 품질 점수(0~100). 하드 차단과 분리된 값. */
+  score: number;
+  passScore: number;
+  categories: Array<{ key: string; label: string; score: number; maxScore: number; status: "pass" | "warn" | "fail"; notes: string[] }>;
+  /** 판정기가 잡은 하드 차단(안전·구조) */
+  blockers: Array<{ code: string; tier: "safety" | "structure"; reason: string }>;
+}
+
 export interface ValidationReport {
   canPublish: boolean;
+  /** BLOCKED: 하드 차단 / NEEDS_REVIEW: 수리 대상 또는 품질 미달 / READY: 차단 없음 + 품질 기준 충족 */
   status: "READY" | "NEEDS_REVIEW" | "BLOCKED";
+  /** 품질 점수 60% + 스펙 준수 점수 40% */
   score: number;
+  quality: ValidationQualitySummary;
   signals: ValidationSignal[];
   metrics: {
     totalChars: number;

@@ -1,3 +1,5 @@
+import { assessRepetition } from "./draft-quality-signals";
+
 export interface TravelProductFacts {
   duration: string | null;
   destinations: string[];
@@ -554,11 +556,9 @@ function countMatches(value: string, pattern: RegExp): number {
   return Array.from(value.matchAll(new RegExp(pattern.source, `${pattern.flags.replace("g", "")}g`))).length;
 }
 
-function repeatedSentenceCount(value: string): number {
-  const counts = new Map<string, number>();
-  const sentences = value.split(/[\n.!?。]+/u).map((item) => clean(item).replace(/[^\p{L}\p{N}]/gu, "")).filter((item) => item.length >= 18);
-  for (const item of sentences) counts.set(item, (counts.get(item) || 0) + 1);
-  return Array.from(counts.values()).reduce((sum, count) => sum + Math.max(0, count - 1), 0);
+/** 정확히 같은 문장뿐 아니라 숫자·어미만 바뀐 근사 중복까지 반복으로 센다. */
+function repeatedSentenceCount(sections: string[]): number {
+  return assessRepetition(sections).nearDuplicateCount;
 }
 
 export function assessTravelReviewSubstance(input: {
@@ -605,7 +605,7 @@ export function assessTravelReviewSubstance(input: {
   ).length;
   const requiredPlaceCount = Math.min(places.length >= 3 ? 3 : Math.max(1, places.length), Math.max(1, places.length));
   const requiredEvidenceJudgementCount = places.length >= 3 ? 3 : Math.max(1, places.length);
-  const repeats = repeatedSentenceCount(body);
+  const repeats = repeatedSentenceCount(input.sections);
   const checks: Array<[boolean, string]> = [
     [backgroundFactCount >= 2, "여행지의 역사·문화·지리 배경"],
     [atmosphereCount >= 3, "현장 풍경과 분위기 묘사"],

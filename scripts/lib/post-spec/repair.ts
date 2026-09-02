@@ -49,7 +49,7 @@ export async function repairDraft(spec: PostSpec, draft: GeneratedDraft, report:
     const spec$ = spec.sections[section.index];
     const neighbors = draft.sections
       .filter((other) => other.index !== section.index)
-      .map((other) => `- ${other.title}: ${other.lines[0] || ""}`)
+      .map((other) => `- ${other.title}: ${other.lines.slice(0, 2).join(" ")}`)
       .join("\n");
     try {
       const result = await generateStructured<{ section?: { lines?: unknown } }>({
@@ -62,8 +62,12 @@ export async function repairDraft(spec: PostSpec, draft: GeneratedDraft, report:
           section.lines.join("\n"),
           "## 고쳐야 할 점",
           ...sectionTargets.map((t) => `- ${t.reason}: ${t.instruction}`),
-          "## 다른 섹션 (내용이 겹치지 않게)",
+          "## 다른 섹션 (내용·근거·판단이 겹치지 않게)",
           neighbors,
+          "## 고칠 때 지킬 것",
+          "- 이 섹션 전용 근거를 최소 1개 수치·이름 그대로 쓰고 독자에게 어떤 차이가 나는지까지 잇기",
+          "- 확인 안내·일반론 문장은 1개 이하로 줄이고, 지운 자리는 전용 근거로 채우기",
+          "- 다른 섹션의 첫 문장과 같은 뜻의 문장을 쓰지 않기",
           ctx.memo ? `## 요청 메모\n${ctx.memo}` : "",
           "## 출력",
           'JSON 객체 {"section": {"role": "...", "title": "...", "lines": ["..."]}} 만. 제목은 그대로.',
