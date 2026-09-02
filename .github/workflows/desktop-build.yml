@@ -10,6 +10,10 @@ on:
         description: "설치파일을 업로드할 기존 릴리스 태그 (비우면 업로드 안 함)"
         required: false
         default: ""
+      publish_platform:
+        description: "사이트 게시 대상 (all, windows, macos)"
+        required: false
+        default: "all"
   push:
     tags:
       - "v*"
@@ -24,19 +28,17 @@ jobs:
         include:
           - os: windows-latest
             pack: desktop:pack:win
-            artifact: windows-installer
             # 자동업데이트 채널에 올릴 파일까지 포함: 설치본 + blockmap + latest.yml
             glob: "out/*.exe\nout/*.blockmap\nout/latest.yml"
           - os: macos-latest
             pack: desktop:pack:mac
-            artifact: macos-dmg
             glob: "out/*.dmg"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
@@ -62,15 +64,6 @@ jobs:
           # 빈 CSC_LINK("")를 넘기면 electron-builder가 빈 인증서로 서명을 시도해
           # macOS에서 'not a file'로 실패하므로, CSC_* 환경변수는 넘기지 않는다.
           CSC_IDENTITY_AUTO_DISCOVERY: false
-
-      - name: Upload installer (artifact)
-        uses: actions/upload-artifact@v4
-        # 아티팩트 저장소 쿼터 초과로 실패해도 릴리스 업로드는 진행되도록 한다.
-        continue-on-error: true
-        with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.glob }}
-          if-no-files-found: error
 
       # 수동 실행 시 릴리스가 아직 없으면 생성한다(GITHUB_TOKEN 생성 이벤트는
       # 다른 워크플로를 재트리거하지 않아 태그 빌드가 중복 실행되지 않는다).
@@ -100,8 +93,12 @@ jobs:
       # 릴리스 빌드를 중앙 자동업데이트 채널에도 게시한다. 설치된 앱은 GitHub
       # 릴리스가 아니라 이 채널(latest.yml)을 보므로, 여기 게시돼야 자동업데이트가
       # 동작한다. INSTALLER_UPLOAD_KEY 시크릿이 없으면 경고만 남기고 건너뛴다.
-      - name: Publish to auto-update channel
-        if: matrix.os == 'windows-latest' && (github.ref_type == 'tag' || inputs.release_tag != '')
+      - name: Publish to site download channel
+        if: >-
+          (github.ref_type == 'tag' || inputs.release_tag != '') &&
+          (github.ref_type == 'tag' || inputs.publish_platform == 'all' ||
+          (inputs.publish_platform == 'windows' && matrix.os == 'windows-latest') ||
+          (inputs.publish_platform == 'macos' && matrix.os == 'macos-latest'))
         shell: bash
         env:
           INSTALLER_UPLOAD_KEY: ${{ secrets.INSTALLER_UPLOAD_KEY }}
@@ -111,4 +108,10 @@ jobs:
             exit 0
           fi
           SITE_URL=$(node -p "new URL(require('./package.json').build.publish[0].url).origin")
-          node apps/sites/scripts/publish-update.mjs "$SITE_URL" out
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            node apps/sites/scripts/publish-update.mjs "$SITE_URL" out
+          else
+            DMG_FILE=$(find out -maxdepth 1 -type f -name '*.dmg' -print -quit)
+            test -n "$DMG_FILE" || { echo "macOS DMG 파일을 찾지 못했습니다."; exit 1; }
+            node apps/sites/scripts/publish-macos-installer.mjs "$SITE_URL" "$DMG_FILE"
+          fi

@@ -78,6 +78,11 @@ node --version
 
 OpenAI API 키는 선택 사항이며 ChatGPT 구독과 별개입니다. 없으면 로컬 초안 모드로 동작하지만 글·썸네일 품질이 낮아집니다.
 
+ChatGPT 커넥터는 OAuth 고정 주소(`/api/mcp`)로도 연결할 수 있습니다(대시보드 안내 참고). 두 방식 모두 같은 도구를 제공합니다.
+
+초안은 기본적으로 PC 가 OpenAI API 키로 Spec-first 파이프라인(이미지 플랜 → 구조화 생성 → 검증·수리)을 돌려 만듭니다.
+PC 에 API 키가 없으면 `post_prepare_draft → (ChatGPT 가 원고 작성) → post_submit_draft` 2단계 경로로 ChatGPT 대화가 원고를 쓰고 PC 가 검증·패키징합니다.
+
 > ⚠️ API 키는 한 번만 보여주므로 반드시 복사해서 안전한 곳에 저장하세요!
 
 ### 3. 네이버 블로그 ID 확인
@@ -143,13 +148,16 @@ cp .env.example .env
 # OpenAI API 키 (글 생성·썸네일 생성·QC 모두 OpenAI 사용)
 OPENAI_API_KEY=sk-여기에_발급받은_키_붙여넣기
 
-# 설치형 앱은 로컬 ChatGPT 로그인을 허용하지 않음
-BROWSER_GPT_MODE=false
-ALLOW_CHATGPT_BROWSER_MODE=false
+# 설치형 앱은 ChatGPT에 한 번 로그인한 뒤 평소 작업을 백그라운드에서 실행
+CHATGPT_BROWSER_AUTOMATION_ENABLED=true
+BROWSER_GPT_MODE=true
+ALLOW_CHATGPT_BROWSER_MODE=true
+CHATGPT_BROWSER_VISIBILITY=background
 CHATGPT_USE_CUSTOM_GPTS=false
 CHATGPT_DIRECT_ONLY=true
 BLOG_HUMANIZE_MOBILE_STYLE=true
-PRODUCT_POST_LOCAL_FALLBACK_ENABLED=true
+# 본문은 AI 생성 원고 또는 사용자가 승인한 준비 원고만 발행합니다.
+# AI 실패 시 하네스 문장을 복사한 로컬 원고로 대체하지 않습니다.
 PRODUCT_THUMBNAIL_CHATGPT_ENABLED=false
 BRANDCONNECT_SELECTION_PROFILE=seasonal-hit-popular
 
@@ -224,7 +232,10 @@ npm run login
 ### 로컬 AI 작성 설정
 
 - 설치형 앱은 ChatGPT 브라우저 로그인과 Custom GPT 조작을 강제로 끕니다.
-- OpenAI API가 실패하거나 키가 없으면 상품 정보 기반 로컬 초안으로 대체합니다.
+- OpenAI API가 실패하거나 키가 없으면 Spec-first 로컬 템플릿 초안으로 대체하고 검증 리포트에 NEEDS_REVIEW 로 표시합니다.
+- ChatGPT MCP 2단계 초안은 `상품 근거 준비(post_prepare_draft) → ChatGPT 원고 생성 → PC 검증·패키징(post_submit_draft)` 순서로 처리하며 API 키가 필요하지 않습니다.
+- 초안 미리보기의 `이미지` 탭에서 각 결과를 확인하고, 필수 슬롯 자동 보충·파트별 추가·개별 재생성을 실행할 수 있습니다. 쇼핑 이미지는 원본 상품을 다시 그리지 않고 잠금 합성하며, 안전한 분리가 불가능하면 수집 원본을 유지합니다.
+- 이미지 수는 쇼핑 `최소 5/권장 8`, 여행 `최소 7/권장 10`으로 검사합니다. `품질검사` 탭은 확인 안내 반복·상품 고유 장단점 부족·허위 체험 표현을 별도로 검사하고 자동 보강 결과를 표시합니다.
 - 사람형 모바일 문체는 기본으로 켜져 있습니다 (`BLOG_HUMANIZE_MOBILE_STYLE=true`).
 - 문장은 짧게 끊고, AI처럼 보이는 반복 표현/과한 광고 문구/허위 체험 단정을 줄입니다.
 - 상품 리뷰 글은 발행 전 상품명 반영, 본문 분량, 고지문, URL 직접 노출, 허위 체험 단정, 수수료율 노출, 판매페이지 대표 이미지 확보 여부를 검사합니다.
@@ -331,9 +342,8 @@ npm run login
 
 ### Q: "OpenAI API 오류가 나요"
 **A:** 
-- API 키가 올바른지 확인
-- OpenAI 계정에 크레딧이 있는지 확인
-- .env 파일에 키가 제대로 입력되었는지 확인
+- ChatGPT MCP에서 초안을 요청했다면 별도 API 키가 필요하지 않습니다. 앱을 최신 버전으로 업데이트한 뒤 ChatGPT에서 다시 요청하세요.
+- 데스크톱의 단독 초안 버튼을 사용한다면 API 키, API 계정 크레딧, `.env` 또는 설정 저장 상태를 확인하세요.
 
 ### Q: "이미지가 안 올라가요"
 **A:** 네트워크 문제일 수 있습니다. 잠시 후 다시 시도하거나, 상품 페이지의 이미지가 정상인지 확인해보세요.

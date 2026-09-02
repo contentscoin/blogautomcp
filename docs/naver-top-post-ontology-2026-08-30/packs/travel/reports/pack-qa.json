@@ -1,0 +1,14 @@
+{
+  "status": "pass",
+  "source_count": 137,
+  "evidence_count": 137,
+  "node_count": 379,
+  "edge_count": 7333,
+  "broken_edges": [],
+  "invalid_edges": [],
+  "missing_evidence_refs": [],
+  "edges_without_evidence": [],
+  "source_evidence_closure": true,
+  "all_sources_insane_search_validated": true,
+  "full_post_bodies_persisted": false
+}

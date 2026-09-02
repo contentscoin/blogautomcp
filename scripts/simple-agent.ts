@@ -21,12 +21,21 @@ import * as crypto from "crypto";
 import sharp from "sharp";
 import {
   buildHumanMobileStyleGuide,
+  getMobileSectionLinePolicy,
   HUMAN_MOBILE_STYLE_GUIDE,
   HUMAN_REVIEW_SAFETY_RULES,
   MOBILE_BODY_RULES,
   NAVER_SEO_TITLE_RULES,
+  SHOPPING_EXPERT_REVIEW_STYLE_GUIDE,
+  TRAVEL_VLOG_STYLE_GUIDE,
   stripClickbaitFromTitle,
 } from "./lib/blog-writing-style";
+import {
+  CHATGPT_DIRECT_PRIMARY_PROMPT_MAX_CHARS,
+  CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS,
+  compactChatGptEvidence,
+  composeBudgetedChatGptPrompt,
+} from "./lib/chatgpt-direct-prompt";
 import { buildAppUrl, notifyAndLogCompletion } from "./lib/chatbot-notifier";
 import {
   isCandidateProductImageUrl,
@@ -36,6 +45,7 @@ import {
   isReviewImageUrl,
   isSalesPageProductImageUrl,
   isTravelProductImageUrl,
+  isUsableBodyUploadImageDimension,
   isUsableBlogProductImageDimension,
   normalizeCandidateImageUrl,
   prioritizeImageCandidates,
@@ -45,22 +55,37 @@ import {
   type ProductImageCandidate,
 } from "./lib/product-image-selection";
 import {
+  buildProductThumbnailCopy,
   buildProductThumbnailGenerationPrompt,
   generateProductThumbnail,
-  buildProductThumbnailCopy,
 } from "./lib/product-thumbnail";
 import {
-  buildLocalTravelPostJson,
-  buildTravelEditorialPlan,
+  buildTravelContractEditorialPlan,
+  buildTravelReviewAnalysis,
+  assessTravelReviewSubstance,
+  buildTravelThumbnailCopy,
+  extractTravelPageResearch,
   extractTravelProductFacts,
   formatTravelEditorialPlanForPrompt,
   formatTravelFactsForPrompt,
-  buildTravelThumbnailCopy,
+  formatTravelPageResearchForPrompt,
+  formatTravelReviewAnalysisForPrompt,
+  hasSufficientTravelReviewEvidence,
+  parseStoredTravelPageResearch,
+  travelPageResearchFeatures,
+  type TravelPageResearch,
 } from "./lib/travel-content";
+import { createTravelEditorialThumbnail, type TravelThumbnailStyle } from "./lib/travel-thumbnail";
+import {
+  formatAdaptiveEditorialHarnessForPrompt,
+  getAdaptiveEditorialProfile,
+} from "./lib/adaptive-editorial-harness";
 import {
   getConnectEditorInsertionMode,
   type EditorConnectKind,
 } from "./lib/connect-editor-insertion";
+import { parsePreparedBrandPostSections } from "./lib/prepared-post-markdown";
+import { inspectNaverScheduleSubmissionSignal } from "../src/lib/naver-schedule-submission";
 import { generateTravelEditorialSummaryCard } from "./lib/travel-editorial-card";
 import { generateThumbnail, isGenerativeThumbnailAvailable } from "./lib/thumbnail-gen";
 import {
@@ -68,9 +93,7 @@ import {
   runSpecFirstPipeline,
   type AssembledPost,
   type GeneratedDraft as SpecGeneratedDraft,
-  type HeaderFormat,
   type ImageCandidateInput,
-  type PostCompositionContract,
   type PostSpec,
 } from "./lib/post-spec";
 import {
@@ -81,30 +104,68 @@ import {
 import {
   getBrandLinkContentReadiness,
   type BrandLinkContentReadiness,
+  type PostGenerationSource,
 } from "./lib/brandlink-content-readiness";
 import {
   buildProductEditorialPlan,
+  buildProductReviewAnalysis,
   formatProductEditorialPlanForPrompt,
+  hasSufficientProductReviewEvidence,
+  isMeaningfulProductEvidenceFeature,
   type ProductEditorialPlan,
 } from "./lib/product-editorial-plan";
 import {
+  getChatgptProfileDir,
   getChatgptSessionFile,
   getNaverSessionFile,
-  getSessionStorageDir,
 } from "./lib/app-paths";
+import {
+  buildChatGptBrowserLaunchPolicy,
+  describeChatGptBrowserVisibility,
+} from "./lib/chatgpt-browser-visibility";
+import {
+  chatGptAuthenticationRequiredMessage,
+  hasChatGptProtectionText,
+} from "./lib/chatgpt-browser-errors";
+import { acquireChatGptProfileLock } from "./lib/chatgpt-profile-lock";
+import {
+  createChatGptReplyProgress,
+  isChatGptReplyTextStalled,
+  recordChatGptReplyText,
+} from "./lib/chatgpt-reply-progress";
 import {
   parseProductThumbnailSettings,
   productThumbnailSettingKey,
 } from "./lib/product-thumbnail-settings";
 import { buildHumanizeRewritePrompt, HUMANIZE_RULES, scanAiTells } from "./lib/humanize-korean";
 import { createLockedProductThumbnail, createOriginalProductPhotoThumbnail, type ShoppingThumbnailStyle } from "./lib/product-image-lock";
+import { runCodexDraft } from "./lib/codex-draft-provider";
+import { deduplicateImagePaths } from "./lib/image-dedup";
+import { createThreeImageCollage } from "./lib/image-collage";
+import { createProductDetailImageSegments } from "./lib/product-detail-image";
+import { assessTravelImageQuality } from "./lib/travel-image-quality";
+import {
+  bodyImageCapacity,
+  hasSufficientVisualDraftEvidence,
+  minimumStoredSourceImageCount,
+  shouldRefreshStoredImages,
+} from "./lib/brandlink-image-readiness";
+import {
+  formatPostContractForPrompt,
+  getPostCompositionContract,
+  resolvePostDocument,
+  stripAffiliateDisclosureFromTitle,
+  type PostExperienceMode,
+  type PostQualityPreset,
+  type ResolvedPostDocumentV1,
+} from "../src/lib/post-composition-contract";
 
 // Stealth 플러그인 적용 (봇 감지 우회)
 chromium.use(StealthPlugin());
 
 const prisma = new PrismaClient();
 
-// AI Provider: OpenAI 단일 경로 (Gemini는 제거됨)
+// AI Provider 설정: openai(기본, Spec-first 파이프라인) 또는 codex(선택). Gemini 는 제거되어 openai 로 처리한다.
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim() || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const OPENAI_MAX_OUTPUT_TOKENS = parseBoundedInteger(
@@ -114,7 +175,15 @@ const OPENAI_MAX_OUTPUT_TOKENS = parseBoundedInteger(
   32768
 );
 const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || "120000");
-const AI_PROVIDER = "openai";
+const REQUESTED_AI_PROVIDER = (process.env.AI_PROVIDER || "openai").toLowerCase();
+const AI_PROVIDER: "openai" | "codex" = REQUESTED_AI_PROVIDER === "codex" ? "codex" : "openai";
+const CODEX_DRAFT_MODEL = process.env.CODEX_DRAFT_MODEL?.trim() || "gpt-5.5";
+const CODEX_DRAFT_TIMEOUT_MS = Math.max(60_000, Number(process.env.CODEX_DRAFT_TIMEOUT_MS || "300000"));
+const CODEX_DRAFT_REASONING_EFFORT = (
+  process.env.CODEX_DRAFT_REASONING_EFFORT || "medium"
+) as "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+const CODEX_BROWSER_FALLBACK_ENABLED =
+  (process.env.CODEX_BROWSER_FALLBACK_ENABLED || "false").toLowerCase() === "true";
 
 const SESSION_FILE = getNaverSessionFile();
 const CHATGPT_SESSION_FILE = getChatgptSessionFile();
@@ -173,7 +242,6 @@ const CHATGPT_RESPONSE_MAX_TIMEOUT_MS = Number(
 );
 const CHATGPT_DRAFT_STEP_IDLE_TIMEOUT_MS = Number(process.env.CHATGPT_DRAFT_STEP_IDLE_TIMEOUT_MS || "90000");
 const CHATGPT_DRAFT_STEP_MAX_TIMEOUT_MS = Number(process.env.CHATGPT_DRAFT_STEP_MAX_TIMEOUT_MS || "240000");
-const CHATGPT_HEADLESS = (process.env.CHATGPT_HEADLESS || "false").toLowerCase() === "true";
 const CHATGPT_USE_PERSISTENT_PROFILE =
   (process.env.CHATGPT_USE_PERSISTENT_PROFILE || "true").toLowerCase() === "true";
 const CHATGPT_RUN_ISOLATED_CONTEXT =
@@ -219,13 +287,9 @@ const BLOG_HUMANIZE_REWRITE_THRESHOLD = Math.max(
   1,
   Number.parseInt(process.env.BLOG_HUMANIZE_REWRITE_THRESHOLD || "10", 10) || 10
 );
-const CHATGPT_DEFAULT_SUBTITLE_COUNT = Math.max(
-  4,
-  Math.min(8, Number(process.env.CHATGPT_DEFAULT_SUBTITLE_COUNT || "5"))
-);
 const CHATGPT_USER_DATA_DIR =
   process.env.CHATGPT_USER_DATA_DIR ||
-  path.join(getSessionStorageDir(), "chatgpt-profile");
+  getChatgptProfileDir();
 
 function parseBoundedInteger(
   value: string | undefined,
@@ -277,18 +341,42 @@ const PRODUCT_THUMBNAIL_IMAGE_WAIT_MS = Number(
 );
 const BRANDLINK_CONTENT_READINESS_ENABLED =
   (process.env.BRANDLINK_CONTENT_READINESS_ENABLED || "true").toLowerCase() !== "false";
+const BRANDLINK_FORCE_QUALITY_REPAIR =
+  (process.env.BRANDLINK_FORCE_QUALITY_REPAIR || "false").toLowerCase() === "true";
 const BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE =
   (process.env.BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE || "true").toLowerCase() !== "false";
+const SHOPPING_BODY_IMAGE_MAX = parseBoundedInteger(
+  process.env.SHOPPING_BODY_IMAGE_MAX || process.env.BLOG_BODY_IMAGE_MAX,
+  getPostCompositionContract("SHOPPING").targetImages.recommended,
+  1,
+  30
+);
+const TRAVEL_BODY_IMAGE_MAX = parseBoundedInteger(
+  process.env.TRAVEL_BODY_IMAGE_MAX || process.env.BLOG_BODY_IMAGE_MAX,
+  getPostCompositionContract("TRAVEL").targetImages.recommended,
+  1,
+  30
+);
+const BRANDLINK_QUALITY_PRESET: PostQualityPreset =
+  (process.env.BRANDLINK_QUALITY_PRESET || "PREMIUM").toUpperCase() === "STANDARD"
+    ? "STANDARD"
+    : "PREMIUM";
+const BRANDLINK_EXPERIENCE_MODE: PostExperienceMode =
+  (process.env.BRANDLINK_EXPERIENCE_MODE || "AI_ASSISTED_INFORMATION").toUpperCase() ===
+  "VERIFIED_EXPERIENCE"
+    ? "VERIFIED_EXPERIENCE"
+    : "AI_ASSISTED_INFORMATION";
+const BRANDLINK_EXPERIENCE_NOTES = (process.env.BRANDLINK_EXPERIENCE_NOTES || "").trim().slice(0, 4000);
+// MCP OAuth 경로에서는 ChatGPT 대화가 원고를 생성하고 PC는 검증·패키징만 한다.
+// context 출력과 generated draft 입력은 파일로 전달해 Windows 환경변수 길이 제한과
+// 원고가 프로세스 목록/로그에 노출되는 문제를 피한다.
+const BRANDLINK_DRAFT_CONTEXT_OUTPUT = process.env.BRANDLINK_DRAFT_CONTEXT_OUTPUT?.trim() || "";
+const BRANDLINK_GENERATED_DRAFT_PATH = process.env.BRANDLINK_GENERATED_DRAFT_PATH?.trim() || "";
+// OpenAI 생성 실패/키 누락 시 Spec-first 로컬 템플릿 초안으로 대체(검증은 NEEDS_REVIEW). 하네스 복사 폴백은 없다.
 const PRODUCT_POST_LOCAL_FALLBACK_ENABLED =
   (process.env.PRODUCT_POST_LOCAL_FALLBACK_ENABLED || "true").toLowerCase() !== "false";
-const BLOG_BODY_IMAGE_MAX = parseBoundedInteger(
-  process.env.BLOG_BODY_IMAGE_MAX,
-  10,
-  1,
-  12
-);
 // Spec-first 파이프라인: 이미지 플랜 → 스펙 → 구조화 생성 → 검증/타깃 수리 → 조립.
-// false 로 내리면 예전 단발 생성 + 사후 보정 경로로 돌아간다.
+// false 로 내리면 단발 생성 + 사후 품질 보강 경로로 돌아간다.
 const POST_SPEC_PIPELINE_ENABLED =
   (process.env.POST_SPEC_PIPELINE_ENABLED || "true").toLowerCase() !== "false";
 // 인용구 섹션 헤더는 에디터 셀렉터 실측 전까지 기본 OFF (소제목으로 강등).
@@ -338,10 +426,22 @@ interface GeneratedPostPreview {
   title: string;
   sections: string[];
   hashtags: string[];
+  generationSource: PostGenerationSource;
   rawResponse?: string;
   openCrabSeoBrief?: OpenCrabSeoBrief | null;
   productEditorialPlan?: ProductEditorialPlan | null;
-  /** Spec-first 파이프라인 산출물 (스펙·검증·에디터 입력 계약·이미지 슬롯) */
+  composition?: ResolvedPostDocumentV1 | null;
+  editorialQuality?: BrandLinkContentReadiness | null;
+  qualityRepair?: {
+    attempted: boolean;
+    applied: boolean;
+    beforeScore: number;
+    afterScore: number;
+    beforeCode: BrandLinkContentReadiness["code"];
+    afterCode: BrandLinkContentReadiness["code"];
+    note: string;
+  } | null;
+  /** Spec-first 파이프라인 산출물 (스펙·검증·이미지 슬롯). 부분 수정과 매니페스트 기록에 쓴다. */
   assembled?: AssembledPost | null;
   notes?: string[];
 }
@@ -352,7 +452,68 @@ interface SpecStep2Input {
   memo?: string | null;
 }
 
+interface McpGeneratedDraftFile {
+  version?: unknown;
+  title?: unknown;
+  evidenceFacts?: unknown;
+  sections?: unknown;
+  hashtags?: unknown;
+}
+
+function readMcpGeneratedDraft(filePath: string): string {
+  const resolved = path.resolve(filePath);
+  const stat = fs.statSync(resolved);
+  if (!stat.isFile() || stat.size < 2 || stat.size > 96 * 1024) {
+    throw new Error("ChatGPT 원고 파일 크기가 허용 범위를 벗어났습니다.");
+  }
+
+  const parsed = JSON.parse(fs.readFileSync(resolved, "utf8")) as McpGeneratedDraftFile;
+  if (parsed.version !== "mcp-generated-draft/v1") {
+    throw new Error("ChatGPT 원고 파일 버전을 확인할 수 없습니다.");
+  }
+  const title = typeof parsed.title === "string" ? parsed.title.trim() : "";
+  const sections = Array.isArray(parsed.sections)
+    ? parsed.sections
+        .filter((value): value is string => typeof value === "string")
+        .map((value) => value.replace(/\r/g, "").trim())
+        .filter(Boolean)
+    : [];
+  const hashtags = Array.isArray(parsed.hashtags)
+    ? parsed.hashtags
+        .filter((value): value is string => typeof value === "string")
+        .map((value) => value.replace(/^#+/, "").trim())
+        .filter(Boolean)
+    : [];
+  const evidenceFacts = Array.isArray(parsed.evidenceFacts)
+    ? Array.from(new Set(parsed.evidenceFacts
+        .filter((value): value is string => typeof value === "string")
+        .map((value) => sanitizeText(value).slice(0, 220))
+        .filter(isMeaningfulProductEvidenceFeature)))
+      .slice(0, 12)
+    : [];
+  const totalBodyLength = sections.reduce((sum, section) => sum + section.length, 0);
+
+  if (title.length < 8 || title.length > 100) {
+    throw new Error("ChatGPT 원고 제목은 8~100자여야 합니다.");
+  }
+  if (sections.length < 5 || sections.length > 12) {
+    throw new Error("ChatGPT 원고 본문은 5~12개 섹션이어야 합니다.");
+  }
+  if (sections.some((section) => section.length < 80 || section.length > 8000)) {
+    throw new Error("ChatGPT 원고의 각 섹션은 80~8000자여야 합니다.");
+  }
+  if (totalBodyLength > 48_000) {
+    throw new Error("ChatGPT 원고 본문이 허용 길이를 초과했습니다.");
+  }
+  if (hashtags.length < 3 || hashtags.length > 10) {
+    throw new Error("ChatGPT 원고 해시태그는 3~10개여야 합니다.");
+  }
+
+  return JSON.stringify({ title, evidenceFacts, sections, hashtags });
+}
+
 interface ChatGPTGuidanceContext {
+  connectKind: "SHOPPING" | "TRAVEL";
   productName: string;
   description: string;
   features: string[];
@@ -365,23 +526,17 @@ interface ChatGPTGuidanceContext {
   rating: string;
   brandLink: string;
   targetSectionCount: number;
+  minimumSectionCount: number;
+  maximumSectionCount: number;
   openCrabSeoBrief?: OpenCrabSeoBrief | null;
   productEditorialPlan?: ProductEditorialPlan | null;
+  editorialPromptBlock: string;
+  editorialSectionTitles: string[];
 }
 
-const DEFAULT_SECTION_TITLES = [
-  "구매 전 확인 포인트",
-  "구성 및 패키지 확인",
-  "첫인상 / 디자인",
-  "크기 & 스펙 정보",
-  "주요 기능 ①",
-  "주요 기능 ②",
-  "사용 장면별 체크",
-  "장점으로 보이는 부분",
-  "확인하면 좋을 아쉬운 점",
-  "이런 분께 잘 맞아요",
-];
-
+function getDefaultSectionTitles(connectKind: "SHOPPING" | "TRAVEL"): string[] {
+  return getPostCompositionContract(connectKind).sections.map((section) => section.title);
+}
 
 function stripEmoji(text: string): string {
   return text.replace(/[\p{Extended_Pictographic}\uFE0F]/gu, "");
@@ -407,55 +562,13 @@ function isSectionTitleLine(text: string): boolean {
 
 function sanitizeTitle(rawTitle: string, fallback: string): string {
   // 낚시성 문구는 네이버가 스팸으로 명시한 항목이라 프롬프트 금지에 더해 여기서도 걸러낸다.
-  const cleaned = stripClickbaitFromTitle(stripEmoji(rawTitle).replace(/\s+/g, " ").trim());
+  const cleaned = stripClickbaitFromTitle(
+    stripAffiliateDisclosureFromTitle(stripEmoji(rawTitle).replace(/\s+/g, " ").trim()),
+  );
   if (cleaned.length > 0) return cleaned.slice(0, 80);
-  return stripClickbaitFromTitle(stripEmoji(fallback).replace(/\s+/g, " ").trim()).slice(0, 80);
-}
-
-function collapseRepeatedLeadingTitleTokens(title: string): string {
-  let tokens = stripEmoji(title).replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
-  let changed = true;
-
-  while (changed) {
-    changed = false;
-    for (let size = Math.min(5, Math.floor(tokens.length / 2)); size >= 1; size -= 1) {
-      const first = tokens.slice(0, size).join(" ").toLowerCase();
-      const second = tokens.slice(size, size * 2).join(" ").toLowerCase();
-      if (first && first === second) {
-        tokens = [...tokens.slice(0, size), ...tokens.slice(size * 2)];
-        changed = true;
-        break;
-      }
-    }
-  }
-
-  return tokens.join(" ");
-}
-
-function compactProductNameForTitle(productName: string): string {
-  const tokens = stripEmoji(productName)
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .split(" ")
-    .filter(Boolean);
-
-  const compact = tokens.slice(0, Math.min(tokens.length, 7)).join(" ");
-  return compact || "상품";
-}
-
-function buildLocalProductTitle(
-  product: ProductInfo,
-  openCrabSeoBrief?: OpenCrabSeoBrief | null
-): string {
-  const reliableOpenCrabTitle =
-    openCrabSeoBrief &&
-    openCrabSeoBrief.confidence >= 0.55 &&
-    openCrabSeoBrief.matchType !== "category" &&
-    openCrabSeoBrief.titleCandidates[0];
-
-  const rawTitle = reliableOpenCrabTitle || `${compactProductNameForTitle(product.name)} 구매 전 체크`;
-  return sanitizeTitle(collapseRepeatedLeadingTitleTokens(rawTitle), product.name);
+  return stripClickbaitFromTitle(
+    stripAffiliateDisclosureFromTitle(stripEmoji(fallback).replace(/\s+/g, " ").trim()),
+  ).slice(0, 80);
 }
 
 type ProductThumbnailSource = "image-api" | "chatgpt" | "codex-imagegen" | "local-script" | "composite" | "saved-studio" | "locked-product";
@@ -667,12 +780,16 @@ async function selectBestLocalThumbnailSourcePath(imagePaths: string[]): Promise
   return scored.sort((a, b) => b.score - a.score)[0]?.imagePath || null;
 }
 
-async function isUsableBodyUploadImage(imagePath: string): Promise<boolean> {
+async function isUsableBodyUploadImage(
+  imagePath: string,
+  connectKind: "SHOPPING" | "TRAVEL",
+  requireTravelSourceQuality = false,
+): Promise<boolean> {
   if (!fs.existsSync(imagePath)) return false;
 
   const basename = path.basename(imagePath).toLowerCase();
-  // 세로 상세 이미지에서 잘라낸 _detail_crop_ 파일은 본문 이미지 후보로 허용한다.
-  // (이전에는 여기서 무조건 탈락시켜 가장 높은 점수를 받은 이미지가 항상 버려졌다.)
+  // 세로 상세 이미지를 잘라 만든 조각(_detail_crop_)은 본문 이미지로 쓴다(치수 검사만 적용).
+  // 예전에는 무조건 탈락시켜 본문 이미지 부족의 직접 원인이 됐다.
   if (/banner|event|coupon|benefit|delivery|shipping|review|notice|guide/.test(basename)) {
     return false;
   }
@@ -681,10 +798,16 @@ async function isUsableBodyUploadImage(imagePath: string): Promise<boolean> {
     const metadata = await sharp(imagePath).metadata();
     const width = metadata.width ?? 0;
     const height = metadata.height ?? 0;
-    if (width < 500 || height < 500) return false;
-    const ratio = width / height;
-    if (ratio < 0.72 || ratio > 1.55) return false;
-    if (!isUsableBlogProductImageDimension(width, height)) return false;
+    if (!isUsableBodyUploadImageDimension(width, height, connectKind)) return false;
+    if (connectKind === "TRAVEL" && requireTravelSourceQuality) {
+      const quality = await assessTravelImageQuality(imagePath);
+      if (!quality.pass) {
+        console.log(
+          `   ⚠️ 여행 이미지 QC 제외: ${path.basename(imagePath)} · ${quality.score}점 · ${quality.reasons.join(", ")}`,
+        );
+        return false;
+      }
+    }
     return true;
   } catch {
     return false;
@@ -696,7 +819,11 @@ async function buildBlogUploadImagePaths(input: {
   generatedThumbnailPath: string | null;
   representativeImagePath: string | null;
   editorialImagePath?: string | null;
+  connectKind: "SHOPPING" | "TRAVEL";
 }): Promise<string[]> {
+  const totalImageMax =
+    input.connectKind === "TRAVEL" ? TRAVEL_BODY_IMAGE_MAX : SHOPPING_BODY_IMAGE_MAX;
+  const bodyImageMax = bodyImageCapacity(totalImageMax, Boolean(input.generatedThumbnailPath));
   const output: string[] = [];
   const seen = new Set<string>();
   const addPath = (imagePath: string | null | undefined) => {
@@ -718,31 +845,42 @@ async function buildBlogUploadImagePaths(input: {
     ) {
       continue;
     }
-    if (!(await isUsableBodyUploadImage(imagePath))) continue;
+    if (!(await isUsableBodyUploadImage(
+      imagePath,
+      input.connectKind,
+      input.connectKind === "TRAVEL",
+    ))) continue;
     const resolved = path.resolve(imagePath);
     if (bodyCandidates.some((candidate) => path.resolve(candidate) === resolved)) continue;
     bodyCandidates.push(imagePath);
   }
 
   const preferredBody: string[] = [];
-  if (input.editorialImagePath && (await isUsableBodyUploadImage(input.editorialImagePath))) {
+  if (
+    input.editorialImagePath &&
+    (await isUsableBodyUploadImage(input.editorialImagePath, input.connectKind))
+  ) {
     preferredBody.push(input.editorialImagePath);
   }
   if (
     input.representativeImagePath &&
-    (await isUsableBodyUploadImage(input.representativeImagePath))
+    (await isUsableBodyUploadImage(input.representativeImagePath, input.connectKind))
   ) {
     preferredBody.push(input.representativeImagePath);
   }
   for (const imagePath of bodyCandidates) {
-    if (preferredBody.length >= BLOG_BODY_IMAGE_MAX) break;
+    if (preferredBody.length >= bodyImageMax) break;
     if (preferredBody.some((candidate) => path.resolve(candidate) === path.resolve(imagePath))) {
       continue;
     }
     preferredBody.push(imagePath);
   }
 
-  for (const imagePath of preferredBody.slice(0, BLOG_BODY_IMAGE_MAX)) {
+  const deduplicated = await deduplicateImagePaths(preferredBody, 5);
+  if (deduplicated.removed.length > 0) {
+    console.log(`   🧹 동일·유사 이미지 ${deduplicated.removed.length}장 제외`);
+  }
+  for (const imagePath of deduplicated.paths.slice(0, bodyImageMax)) {
     addPath(imagePath);
   }
 
@@ -860,8 +998,12 @@ async function generateTopTextCutoutThumbnail(
       )
     : null;
   if (savedSetting?.generatedPath && fs.existsSync(savedSetting.generatedPath)) {
-    console.log(`   ✅ 저장된 썸네일 폼 결과 사용: ${path.basename(savedSetting.generatedPath)}`);
-    return { path: savedSetting.generatedPath, source: "saved-studio" };
+    const savedMetadata = await sharp(savedSetting.generatedPath).metadata().catch(() => null);
+    if (savedMetadata?.width === 1080 && savedMetadata?.height === 1080) {
+      console.log(`   ✅ 저장된 정사각 썸네일 사용: ${path.basename(savedSetting.generatedPath)}`);
+      return { path: savedSetting.generatedPath, source: "saved-studio" };
+    }
+    console.log("   ♻️ 이전 16:9 썸네일은 사용하지 않고 1080×1080 규격으로 다시 만듭니다.");
   }
   if (!product.representativeImagePath || !fs.existsSync(product.representativeImagePath)) {
     console.log("   ⚠️ 판매페이지 대표 이미지가 없어 썸네일 생성을 건너뜁니다.");
@@ -901,7 +1043,9 @@ async function generateTopTextCutoutThumbnail(
   } else {
     console.log("   ℹ️ OPENAI_API_KEY 가 없어 생성형 썸네일을 건너뛰고 로컬 합성을 사용합니다.");
   }
-
+  // 쇼핑 상품은 생성형 모델에 상품 픽셀을 넘기지 않는다. 원본 RGB를 보존한
+  // 투명 PNG를 로컬에서 만든 뒤 배경과 카피만 합성한다. 분리가 불확실하면
+  // 원본 상세 이미지가 본문 대표 이미지로 유지되도록 썸네일 생성을 중단한다.
   if (contentKind === "SHOPPING") {
     const suggestedCopy = buildProductThumbnailGenerationPrompt({
       postTitle,
@@ -941,7 +1085,7 @@ async function generateTopTextCutoutThumbnail(
       return null;
     }
   }
-  if (savedSetting) {
+  if (savedSetting && contentKind !== "TRAVEL") {
     const regenerated = await generateProductThumbnail({
       imagePaths: [product.representativeImagePath, ...product.imagePaths],
       preferredImagePath: product.representativeImagePath,
@@ -959,14 +1103,15 @@ async function generateTopTextCutoutThumbnail(
   }
 
   if (contentKind === "TRAVEL") {
-    const travelThumbnail = await generateProductThumbnail({
-      imagePaths: [product.representativeImagePath, ...product.imagePaths],
-      preferredImagePath: product.representativeImagePath,
-      postTitle,
-      productName: product.name,
+    const copy = buildTravelThumbnailCopy(product.name);
+    const travelThumbnail = await createTravelEditorialThumbnail({
+      sourcePath: product.representativeImagePath,
       outputDir: TEMP_PATH,
-      contentKind: "TRAVEL",
-      enabled: true,
+      destination: savedSetting?.copy.productNameLabel || copy.productNameLabel,
+      headline: savedSetting?.copy.headline || copy.headline,
+      subline: savedSetting?.copy.subline || copy.subline,
+      badge: savedSetting?.copy.badge || copy.badge,
+      style: (savedSetting?.style || "travel-editorial") as TravelThumbnailStyle,
     }).catch(() => null);
     if (travelThumbnail?.outputPath && fs.existsSync(travelThumbnail.outputPath)) {
       console.log(`   ✅ 실제 여행사진 + 투명 PNG 장식 합성: ${path.basename(travelThumbnail.outputPath)}`);
@@ -982,7 +1127,6 @@ async function generateTopTextCutoutThumbnail(
     features: product.features,
     price: product.price,
   });
-
 
   const localSharpPath = await generateProductThumbnailWithSharpLocal(product, promptInfo);
   if (localSharpPath) {
@@ -1150,7 +1294,7 @@ async function generateProductThumbnailWithChatGPT(
     fs.readdirSync(CHATGPT_USER_DATA_DIR).length > 0;
 
   if (!hasSessionFile && !hasPersistentProfile) {
-    console.log("   ⚠️ 생성형 썸네일: ChatGPT 브라우저 자동화는 설치형 앱에서 사용하지 않습니다. OpenAI API 키 기반 생성형 썸네일을 사용하세요.");
+    console.log("   ⚠️ 생성형 썸네일: ChatGPT 세션이 없어 건너뜁니다. `npm run login:chatgpt` 후 사용하세요.");
     return null;
   }
 
@@ -1961,30 +2105,9 @@ const CHATGPT_STARTER_BUTTON_SELECTORS = [
 ];
 
 const CHATGPT_MANUAL_VERIFICATION_MESSAGE =
-  "ChatGPT manual verification required. A human-verification or security-check page is visible. Complete it in the browser, then run the job again.";
-
-const CHATGPT_PROTECTION_TEXT_PATTERNS = [
-  "checking your browser",
-  "checking if the site connection is secure",
-  "please stand by",
-  "verify you are human",
-  "needs to review the security of your connection",
-  "cf-challenge",
-  "cloudflare",
-  "turnstile",
-  "unusual activity",
-  "access denied",
-  "\uc0ac\ub78c\uc778\uc9c0 \ud655\uc778",
-  "\uc2e4\uc81c \uc0ac\uc6a9\uc790\uc778\uc9c0 \ud655\uc778",
-  "\uc0ac\uc6a9\uc790\uac00 \uc0ac\ub78c\uc778\uc9c0 \ud655\uc778",
-  "\uc0ac\ub78c\uc784\uc744 \ud655\uc778",
-  "\ub85c\ubd07\uc774 \uc544\ub2d8",
-  "\ubcf4\uc548 \ud655\uc778",
-  "\ubcf4\uc548 \uac80\uc99d",
-  "\ube0c\ub77c\uc6b0\uc800\ub97c \ud655\uc778",
-  "\uc811\uadfc\uc774 \ucc28\ub2e8",
-  "\ube44\uc815\uc0c1\uc801\uc778 \ud65c\ub3d9",
-];
+  chatGptAuthenticationRequiredMessage(
+    "ChatGPT manual verification required. A human-verification or security-check page is visible. Complete it in the browser, then run the job again.",
+  );
 
 const CHATGPT_PROTECTION_FRAME_PATTERNS = [
   "cdn-cgi/challenge-platform",
@@ -2306,7 +2429,7 @@ async function hasInaccessibleGptBanner(page: Page): Promise<boolean> {
   );
 }
 
-async function startNewChatIfAvailable(page: Page): Promise<void> {
+async function startNewChatIfAvailable(page: Page): Promise<boolean> {
   const candidates = [
     page.getByRole("button", { name: /new chat/i }).first(),
     page.getByRole("button", { name: /새 대화/i }).first(),
@@ -2318,10 +2441,29 @@ async function startNewChatIfAvailable(page: Page): Promise<void> {
   for (const candidate of candidates) {
     const visible = await candidate.isVisible().catch(() => false);
     if (!visible) continue;
-    await candidate.click({ timeout: 3000 }).catch(() => {});
+    const clicked = await candidate.click({ timeout: 3000 }).then(() => true).catch(() => false);
+    if (!clicked) continue;
     await page.waitForTimeout(1200);
-    return;
+    return true;
   }
+  return false;
+}
+
+async function ensureFreshChatGPTConversation(page: Page, label: string): Promise<void> {
+  const beforeUrl = page.url();
+  const beforeMessages = await readAssistantMessages(page);
+  const clicked = await startNewChatIfAvailable(page);
+  if (clicked) {
+    await waitForChatGPTComposer(page, CHATGPT_TIMEOUT_MS);
+    const afterMessages = await readAssistantMessages(page);
+    if (page.url() !== beforeUrl || afterMessages.length < beforeMessages.length || afterMessages.length === 0) {
+      return;
+    }
+  }
+
+  console.log(`      - ${label} 새 대화 전환을 확인하지 못해 기본 ChatGPT 화면을 다시 엽니다.`);
+  await openChatGPTTarget(page, CHATGPT_BASE_URL, `${label} 새 대화 복구`);
+  await waitForChatGPTComposer(page, CHATGPT_TIMEOUT_MS);
 }
 
 async function dismissTemporaryChatOnboarding(page: Page): Promise<void> {
@@ -2435,13 +2577,22 @@ function isDraftStepTonePrompt(text: string): boolean {
 function buildDirectSeoTitle(context: ChatGPTGuidanceContext): string {
   const compactName = stripEmoji(context.productName).replace(/\s+/g, " ").trim();
   const tokens = compactName.split(" ").filter((token) => token.length > 0);
-  const productCore = tokens.slice(0, Math.min(4, tokens.length)).join(" ");
-  const base = productCore || "제품";
-  const candidates = [
-    `${base} 실사용 후기와 장단점`,
-    `${base} 제품리뷰 실제 사용기`,
-    `${base} 솔직 후기와 구매팁`,
-  ];
+  const travelCore = context.connectKind === "TRAVEL"
+    ? extractTravelProductFacts(context.productName, context.description, context.features).destinations.slice(0, 2).join(" ")
+    : "";
+  const productCore = travelCore || tokens.slice(0, Math.min(4, tokens.length)).join(" ");
+  const base = productCore || (context.connectKind === "TRAVEL" ? "여행상품" : "제품");
+  const candidates = context.connectKind === "TRAVEL"
+    ? [
+        `${base} 명소와 현지 여행 팁`,
+        `${base} 골목과 풍경 여행 이야기`,
+        `${base} 꼭 볼 곳과 즐길 거리`,
+      ]
+    : [
+        `${base} 제품 장단점과 선택 기준`,
+        `${base} 기능 비교와 구매 판단`,
+        `${base} 핵심 특징과 확인 기준`,
+      ];
 
   for (const candidate of candidates) {
     const trimmed = candidate.trim();
@@ -2450,7 +2601,8 @@ function buildDirectSeoTitle(context: ChatGPTGuidanceContext): string {
     }
   }
 
-  return `${base} 실사용 후기`.slice(0, 35).trim();
+  const safeSuffix = context.connectKind === "TRAVEL" ? "명소와 여행 팁" : "장단점과 선택 기준";
+  return `${base} ${safeSuffix}`.slice(0, 35).trim();
 }
 
 function inferCategoryKeyword(productName: string): string {
@@ -2487,12 +2639,22 @@ function buildSeoKeywordInput(context: ChatGPTGuidanceContext): string {
     )
     .find((token): token is string => Boolean(token));
 
-  const keywords = [
-    ...productTokens,
-    inferCategoryKeyword(context.productName),
-    featureToken || "실사용후기",
-    "가성비추천",
-  ]
+  const travelDestinations = context.connectKind === "TRAVEL"
+    ? extractTravelProductFacts(context.productName, context.description, context.features).destinations.slice(0, 2)
+    : [];
+  const keywords = (context.connectKind === "TRAVEL"
+    ? [
+        ...travelDestinations,
+        featureToken || "여행명소",
+        "여행정보",
+        "여행브이로그",
+      ]
+    : [
+        ...productTokens,
+        inferCategoryKeyword(context.productName),
+        featureToken || "제품비교",
+        "구매전확인",
+      ])
     .map((keyword) => keyword.replace(/\s+/g, "").trim())
     .filter((keyword) => keyword.length > 0);
 
@@ -2503,11 +2665,19 @@ function buildDraftChapterTopics(
   context: ChatGPTGuidanceContext,
   sectionCount: number
 ): string[] {
+  if (context.connectKind === "TRAVEL") {
+    const travelTopics = context.editorialSectionTitles.length > 0
+      ? context.editorialSectionTitles
+      : getDefaultSectionTitles("TRAVEL");
+    return travelTopics.slice(0, sectionCount);
+  }
+
+  if (context.editorialSectionTitles.length > 0) {
+    return context.editorialSectionTitles.slice(0, sectionCount);
+  }
+
   if (context.openCrabSeoBrief?.recommendedSectionTitles.length) {
-    return context.openCrabSeoBrief.recommendedSectionTitles.slice(
-      0,
-      Math.max(4, Math.min(10, sectionCount))
-    );
+    return context.openCrabSeoBrief.recommendedSectionTitles.slice(0, sectionCount);
   }
 
   const baseTopics = [
@@ -2521,7 +2691,7 @@ function buildDraftChapterTopics(
     "비슷한 제품과 비교했을 때 차이점",
   ];
 
-  return baseTopics.slice(0, Math.max(4, Math.min(8, sectionCount)));
+  return baseTopics.slice(0, sectionCount);
 }
 
 function buildDraftContentPayload(
@@ -2530,11 +2700,33 @@ function buildDraftContentPayload(
 ): string {
   const topics = buildDraftChapterTopics(context, sectionCount);
   const openCrabBriefText = formatOpenCrabSeoBriefForPrompt(context.openCrabSeoBrief ?? null);
-  const editorialPlanText = context.productEditorialPlan
-    ? formatProductEditorialPlanForPrompt(context.productEditorialPlan)
-    : "";
+  const editorialPlanText = context.editorialPromptBlock;
 
   const topicLines = topics.map((topic, index) => `${index + 1}. ${topic}`).join("\n");
+
+  const sourceDetails = context.connectKind === "TRAVEL"
+    ? [
+        "[여행지 리서치 시드 · 상품 설명으로 옮기지 않기]",
+        `- 내부 일정 식별용 상품명: ${context.productName}`,
+        `- 여행커넥트 삽입용 링크(본문 URL 직접 기재 금지): ${context.brandLink}`,
+        `- 여행지·일정 추출 자료: ${context.description || "(설명 없음)"}`,
+        `- 조사할 목적지·장소: ${context.features.length > 0 ? context.features.join(", ") : "(추가 확인 필요)"}`,
+        "- 본문은 여행지 배경·풍경·즐길 거리·음식·사진·동선 팁 중심으로 작성",
+      ]
+    : [
+        "[추가 제품 정보]",
+        `- 상품명: ${context.productName}`,
+        `- 쇼핑커넥트 삽입용 링크(본문 URL 직접 기재 금지): ${context.brandLink}`,
+        `- 상품 설명: ${context.description || "(설명 없음)"}`,
+        `- 핵심 특징: ${context.features.length > 0 ? context.features.join(", ") : "(특징 없음)"}`,
+        `- 가격: ${context.price || "(가격 미확인)"}`,
+        `- 원가: ${context.originalPrice || "(원가 미확인)"}`,
+        `- 할인율: ${context.discountRate || "(할인율 미확인)"}`,
+        `- 쿠폰/혜택: ${context.couponInfo || "(없음)"}`,
+        `- 배송: ${context.deliveryInfo || "(정보 없음)"}`,
+        `- 리뷰수: ${context.reviewCount || "(미확인)"}`,
+        `- 평점: ${context.rating || "(미확인)"}`,
+      ];
 
   return [
     "아래 형식대로 입력합니다.",
@@ -2543,24 +2735,15 @@ function buildDraftContentPayload(
     topicLines,
     "",
     "2️⃣ 관련 이미지",
-    "첨부된 상품 이미지를 참고해주세요.",
+    context.connectKind === "TRAVEL"
+      ? "첨부된 여행지 이미지를 참고해 실제 풍경·건축·거리 분위기를 설명하세요. 상품 조건은 설명하지 마세요."
+      : "첨부된 상품 이미지를 참고해주세요. 제품 형태와 표시 정보를 변형하지 마세요.",
     "",
-    "[추가 제품 정보]",
-    `- 상품명: ${context.productName}`,
-    `- 쇼핑커넥트 삽입용 링크(본문 URL 직접 기재 금지): ${context.brandLink}`,
-    `- 상품 설명: ${context.description || "(설명 없음)"}`,
-    `- 핵심 특징: ${context.features.length > 0 ? context.features.join(", ") : "(특징 없음)"}`,
-    `- 가격: ${context.price || "(가격 미확인)"}`,
-    `- 원가: ${context.originalPrice || "(원가 미확인)"}`,
-    `- 할인율: ${context.discountRate || "(할인율 미확인)"}`,
-    `- 쿠폰/혜택: ${context.couponInfo || "(없음)"}`,
-    `- 배송: ${context.deliveryInfo || "(정보 없음)"}`,
-    `- 리뷰수: ${context.reviewCount || "(미확인)"}`,
-    `- 평점: ${context.rating || "(미확인)"}`,
+    ...sourceDetails,
     openCrabBriefText ? "\n[내부 SEO 참고자료]\n" + openCrabBriefText : "",
     editorialPlanText ? "\n" + editorialPlanText : "",
     "",
-    `선택된 소제목 개수(${sectionCount}개)와 모바일 버전 규칙을 유지해주세요.`,
+    `위 ${sectionCount}개 항목은 소제목 후보입니다. 근거 밀도에 따라 ${context.minimumSectionCount}~${context.maximumSectionCount}개 흐름으로 선택·병합·재배열하고 모바일 가독성을 유지해주세요.`,
   ].join("\n");
 }
 
@@ -2593,26 +2776,14 @@ async function clickGreetingStarterIfVisible(page: Page): Promise<boolean> {
 async function detectChatGPTProtectionIssue(page: Page): Promise<string | null> {
   const url = page.url();
   if (url.includes("/cdn-cgi/challenge-platform/")) {
-    return "Cloudflare 보안 검증 페이지가 표시되었습니다.";
+    return chatGptAuthenticationRequiredMessage("Cloudflare 보안 검증 페이지가 표시되었습니다.");
   }
 
   const bodyText = (await page.textContent("body").catch(() => "")) || "";
-  const normalized = bodyText.replace(/\s+/g, " ").toLowerCase();
-
-  const blockedPatterns = [
-    "checking your browser",
-    "verify you are human",
-    "access denied",
-    "please stand by",
-    "cf-challenge",
-    "unusual activity",
-    "보안",
-    "인증",
-    "차단",
-  ];
-
-  if (blockedPatterns.some((pattern) => normalized.includes(pattern))) {
-    return "ChatGPT 보안 검증 또는 접근 제한 페이지가 감지되었습니다.";
+  if (!(await hasAuthenticatedChatGPTUI(page)) && hasChatGptProtectionText(bodyText)) {
+    return chatGptAuthenticationRequiredMessage(
+      "ChatGPT 보안 검증 또는 접근 제한 페이지가 감지되었습니다.",
+    );
   }
 
   return null;
@@ -2633,8 +2804,7 @@ async function detectChatGPTManualVerification(page: Page): Promise<string | nul
   }
 
   const bodyText = (await page.textContent("body").catch(() => "")) || "";
-  const normalized = bodyText.replace(/\s+/g, " ").toLowerCase();
-  if (CHATGPT_PROTECTION_TEXT_PATTERNS.some((pattern) => normalized.includes(pattern))) {
+  if (!(await hasAuthenticatedChatGPTUI(page)) && hasChatGptProtectionText(bodyText)) {
     return CHATGPT_MANUAL_VERIFICATION_MESSAGE;
   }
 
@@ -2737,7 +2907,11 @@ async function ensureChatGPTReady(page: Page, timeoutMs: number): Promise<void> 
     if (await hasVisibleChatGPTLoginCta(page)) {
       loginSeenRounds += 1;
       if (loginSeenRounds >= loginRoundsThreshold) {
-        throw new Error("ChatGPT 로그인 세션이 만료되었습니다. `npm run login:chatgpt` 실행 후 다시 시도하세요.");
+        throw new Error(
+          chatGptAuthenticationRequiredMessage(
+            "ChatGPT 로그인 세션이 만료되었습니다. `npm run login:chatgpt` 실행 후 다시 시도하세요.",
+          ),
+        );
       }
     } else {
       loginSeenRounds = 0;
@@ -2826,7 +3000,11 @@ async function waitForChatGPTComposer(page: Page, timeoutMs: number): Promise<st
     if (selector) return selector;
 
     if (await isChatGPTLoginRequired(page)) {
-      throw new Error("ChatGPT 로그인이 필요합니다. `npm run login:chatgpt` 실행 후 다시 시도하세요.");
+      throw new Error(
+        chatGptAuthenticationRequiredMessage(
+          "ChatGPT 로그인이 필요합니다. `npm run login:chatgpt` 실행 후 다시 시도하세요.",
+        ),
+      );
     }
 
     await page.waitForTimeout(1000);
@@ -2868,6 +3046,50 @@ async function isChatGPTGenerating(page: Page): Promise<boolean> {
   return false;
 }
 
+const CHATGPT_RESPONSE_STALLED_CODE = "CHATGPT_RESPONSE_STALLED";
+
+function isChatGptReplyStalledError(error: unknown): boolean {
+  return getErrorMessage(error).includes(CHATGPT_RESPONSE_STALLED_CODE);
+}
+
+async function stopChatGPTGeneration(page: Page): Promise<boolean> {
+  for (const selector of CHATGPT_STOP_BUTTON_SELECTORS) {
+    const button = page.locator(selector).first();
+    if (!(await button.isVisible().catch(() => false))) continue;
+    const clicked = await button.click().then(() => true).catch(() => false);
+    if (clicked) {
+      await page.waitForTimeout(1200);
+      return true;
+    }
+  }
+  return false;
+}
+
+async function recoverStoppedChatGPTReply(
+  page: Page,
+  previousCount: number,
+  baselineLastText: string,
+  label: string,
+): Promise<string | null> {
+  let idleConfirmed = !(await isChatGPTGenerating(page));
+  if (await isChatGPTGenerating(page)) {
+    console.log(`      - ${label} 텍스트 진행 정지 감지, 생성 중단 후 응답을 회수합니다.`);
+    const stopped = await stopChatGPTGeneration(page);
+    if (!stopped) return null;
+    idleConfirmed = await waitForChatGPTGenerationIdle(page, 15_000, `${label} 복구`)
+      .then(() => true)
+      .catch(() => false);
+  }
+  if (!idleConfirmed || await isChatGPTGenerating(page)) return null;
+
+  const messages = await readAssistantMessages(page);
+  const candidate = messages[messages.length - 1] ?? "";
+  const hasAdvancedReply =
+    messages.length > previousCount ||
+    (messages.length > 0 && candidate.length > 0 && candidate !== baselineLastText);
+  return hasAdvancedReply && candidate.length > 0 ? candidate : null;
+}
+
 async function waitForChatGPTAssistantReply(
   page: Page,
   previousMessages: string[],
@@ -2878,9 +3100,8 @@ async function waitForChatGPTAssistantReply(
   const previousCount = previousMessages.length;
   const baselineLastText = previousMessages[previousMessages.length - 1] ?? "";
   const start = Date.now();
-  let lastActivityAt = start;
+  let replyProgress = createChatGptReplyProgress(start);
   let lastText = "";
-  let lastLength = 0;
   let stableRounds = 0;
   let lastProgressLogAt = start;
 
@@ -2895,9 +3116,6 @@ async function waitForChatGPTAssistantReply(
     }
 
     const generating = await isChatGPTGenerating(page);
-    if (generating) {
-      lastActivityAt = Date.now();
-    }
 
     const messages = await readAssistantMessages(page);
     const latestText = messages[messages.length - 1] ?? "";
@@ -2908,26 +3126,33 @@ async function waitForChatGPTAssistantReply(
     if (hasAdvancedReply) {
       const candidate = messages[messages.length - 1];
 
-      if (candidate.length !== lastLength || candidate !== lastText) {
-        lastActivityAt = Date.now();
-      }
-
       if (candidate === lastText) {
         stableRounds += 1;
       } else {
         lastText = candidate;
-        lastLength = candidate.length;
         stableRounds = 0;
       }
+
+      replyProgress = recordChatGptReplyText(replyProgress, candidate, Date.now()).progress;
 
       if (!generating && stableRounds >= 2 && candidate.length > 0) {
         return candidate;
       }
     }
 
-    const idleDuration = Date.now() - lastActivityAt;
-    if (!generating && idleDuration > idleTimeoutMs) {
-      break;
+    if (isChatGptReplyTextStalled(replyProgress, Date.now(), idleTimeoutMs)) {
+      const recovered = await recoverStoppedChatGPTReply(
+        page,
+        previousCount,
+        baselineLastText,
+        label,
+      );
+      if (recovered) return recovered;
+      throw new Error(
+        `${CHATGPT_RESPONSE_STALLED_CODE}: ${label} 응답이 ${Math.round(
+          idleTimeoutMs / 1000,
+        )}초 동안 실제 텍스트 진행이 없어 중단되었습니다.`,
+      );
     }
 
     if (Date.now() - lastProgressLogAt >= 15_000) {
@@ -2940,10 +3165,17 @@ async function waitForChatGPTAssistantReply(
     await page.waitForTimeout(1200);
   }
 
+  const recovered = await recoverStoppedChatGPTReply(
+    page,
+    previousCount,
+    baselineLastText,
+    label,
+  );
+  if (recovered) return recovered;
   throw new Error(
-    `${label} 응답 대기 시간이 초과되었습니다. ${Math.round(
-      idleTimeoutMs / 1000
-    )}초 동안 진행 신호가 없어 중단했습니다.`
+    `${CHATGPT_RESPONSE_STALLED_CODE}: ${label} 전체 응답 대기 제한 ${Math.round(
+      maxTimeoutMs / 1000,
+    )}초를 초과했습니다.`,
   );
 }
 
@@ -3110,113 +3342,188 @@ interface ChatGPTContextHandle {
 }
 
 async function createChatGPTContext(hasSessionFile: boolean): Promise<ChatGPTContextHandle> {
+  const profileLock = await acquireChatGptProfileLock({ purpose: "brand-post-draft" });
+  const launchPolicy = buildChatGptBrowserLaunchPolicy();
   const commonLaunchOptions = {
-    headless: CHATGPT_HEADLESS,
-    slowMo: CHATGPT_HEADLESS ? 0 : 30,
-    args: ["--disable-blink-features=AutomationControlled"],
+    channel: process.env.BROWSER_CHANNEL?.trim() || "chrome",
+    headless: launchPolicy.headless,
+    slowMo: launchPolicy.slowMo,
+    args: launchPolicy.args,
   };
+  console.log(
+    `      - ChatGPT 브라우저 실행 모드: ${describeChatGptBrowserVisibility(launchPolicy.visibility)}`
+  );
 
   // 기본은 persistent 프로필을 사용하되, 새 대화를 강제해 컨텍스트 오염을 줄인다.
   // 필요 시 격리 컨텍스트를 켤 수 있고, 세션 파일이 없으면 persistent로 폴백.
   const usePersistentContext =
     CHATGPT_USE_PERSISTENT_PROFILE && (!CHATGPT_RUN_ISOLATED_CONTEXT || !hasSessionFile);
 
-  if (usePersistentContext) {
-    const context = await chromium.launchPersistentContext(CHATGPT_USER_DATA_DIR, {
-      ...commonLaunchOptions,
+  try {
+    if (usePersistentContext) {
+      const context = await chromium.launchPersistentContext(CHATGPT_USER_DATA_DIR, {
+        ...commonLaunchOptions,
+        viewport: { width: 1440, height: 960 },
+        locale: "ko-KR",
+      });
+
+      return {
+        context,
+        close: async () => {
+          try {
+            await context.close().catch(() => {});
+          } finally {
+            await profileLock.release();
+          }
+        },
+      };
+    }
+
+    const browser = await chromium.launch(commonLaunchOptions);
+    const contextOptions: BrowserContextOptions = {
       viewport: { width: 1440, height: 960 },
       locale: "ko-KR",
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    });
+    };
 
+    if (hasSessionFile) {
+      contextOptions.storageState = CHATGPT_SESSION_FILE;
+    }
+
+    const context = await browser.newContext(contextOptions);
     return {
       context,
       close: async () => {
-        await context.close().catch(() => {});
+        try {
+          if (browser.isConnected()) {
+            await browser.close().catch(() => {});
+          }
+        } finally {
+          await profileLock.release();
+        }
       },
     };
+  } catch (error) {
+    await profileLock.release();
+    throw error;
   }
-
-  const browser = await chromium.launch(commonLaunchOptions);
-  const contextOptions: BrowserContextOptions = {
-    viewport: { width: 1440, height: 960 },
-    locale: "ko-KR",
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  };
-
-  if (hasSessionFile) {
-    contextOptions.storageState = CHATGPT_SESSION_FILE;
-  }
-
-  const context = await browser.newContext(contextOptions);
-  return {
-    context,
-    close: async () => {
-      if (browser.isConnected()) {
-        await browser.close().catch(() => {});
-      }
-    },
-  };
 }
 
 function buildGuidanceSummary(context: ChatGPTGuidanceContext): string {
-  const details: string[] = [
-    `상품명: ${context.productName}`,
-    `설명: ${context.description || "(설명 없음)"}`,
-    `특징: ${context.features.length > 0 ? context.features.join(", ") : "(특징 없음)"}`,
-    `가격: ${context.price || "(가격 미확인)"}`,
-    `원가: ${context.originalPrice || "(원가 미확인)"}`,
-    `할인율: ${context.discountRate || "(할인율 미확인)"}`,
-    `쿠폰: ${context.couponInfo || "(쿠폰 정보 없음)"}`,
-    `배송: ${context.deliveryInfo || "(배송 정보 없음)"}`,
-    `리뷰수: ${context.reviewCount || "(리뷰수 미확인)"}`,
-    `평점: ${context.rating || "(평점 미확인)"}`,
-    `쇼핑커넥트 삽입용 링크(본문 URL 직접 기재 금지): ${context.brandLink}`,
-    `희망 섹션 수: ${context.targetSectionCount}`,
-  ];
+  const details: string[] = context.connectKind === "TRAVEL"
+    ? [
+        `내부 일정 식별용 상품명: ${context.productName}`,
+        `여행지·일정 추출 자료: ${context.description || "(설명 없음)"}`,
+        `조사할 목적지·장소: ${context.features.length > 0 ? context.features.join(", ") : "(추가 확인 필요)"}`,
+        "본문 방향: 상품 설명이 아니라 여행지 배경·풍경·즐길 거리·현지 팁 중심",
+        `여행커넥트 삽입용 링크(본문 URL 직접 기재 금지): ${context.brandLink}`,
+        `권장 본문 흐름: ${context.minimumSectionCount}~${context.maximumSectionCount}개 (중앙 참고 ${context.targetSectionCount}개, 할당량 아님)`,
+      ]
+    : [
+        `상품명: ${context.productName}`,
+        `설명: ${context.description || "(설명 없음)"}`,
+        `특징: ${context.features.length > 0 ? context.features.join(", ") : "(특징 없음)"}`,
+        `가격: ${context.price || "(가격 미확인)"}`,
+        `원가: ${context.originalPrice || "(원가 미확인)"}`,
+        `할인율: ${context.discountRate || "(할인율 미확인)"}`,
+        `쿠폰: ${context.couponInfo || "(쿠폰 정보 없음)"}`,
+        `배송: ${context.deliveryInfo || "(배송 정보 없음)"}`,
+        `리뷰수: ${context.reviewCount || "(리뷰수 미확인)"}`,
+        `평점: ${context.rating || "(평점 미확인)"}`,
+        `쇼핑커넥트 삽입용 링크(본문 URL 직접 기재 금지): ${context.brandLink}`,
+        `권장 본문 흐름: ${context.minimumSectionCount}~${context.maximumSectionCount}개 (중앙 참고 ${context.targetSectionCount}개, 할당량 아님)`,
+      ];
   const openCrabBriefText = formatOpenCrabSeoBriefForPrompt(context.openCrabSeoBrief ?? null);
   if (openCrabBriefText) {
     details.push("", openCrabBriefText);
   }
-  if (context.productEditorialPlan) {
-    details.push("", formatProductEditorialPlanForPrompt(context.productEditorialPlan));
+  if (context.editorialPromptBlock) {
+    details.push("", context.editorialPromptBlock);
   }
 
   return details.join("\n");
 }
 
 function buildDirectBrowserGptPrompt(
-  systemPrompt: string,
-  userPrompt: string,
+  _systemPrompt: string,
+  _userPrompt: string,
   context: ChatGPTGuidanceContext,
-  minSections: number
+  minSections: number,
+  mode: "primary" | "recovery" = "primary",
 ): string {
-  const sectionCount = Math.max(minSections, Math.min(8, context.targetSectionCount));
-
-  return [
-    "아래 정보를 바탕으로 네이버 블로그 발행용 최종 글을 바로 작성해주세요.",
-    "중요: 추가 질문, 확인 질문, 설명 문장 없이 JSON만 출력하세요.",
-    "- 출력 키: title, sections, hashtags",
-    `- sections는 최소 ${sectionCount}개`,
-    "- sections 각 항목은 '소제목\\n\\n본문' 형태",
-    "- 제목과 소제목에는 이모지 금지",
-    "- 모바일 가독성을 위해 짧은 문장과 자연스러운 줄바꿈 사용",
-    "- 과장/허위 체험 표현 금지",
-    "- 구매 URL은 sections에 직접 쓰지 말고, 시스템이 쇼핑커넥트 컴포넌트로 별도 삽입합니다.",
-    BLOG_HUMANIZE_MOBILE_STYLE ? buildHumanMobileStyleGuide() : "",
-    "- 코드블록 금지",
-    "",
-    "[상품/발행 정보]",
-    buildGuidanceSummary(context),
-    "",
-    "[시스템 지시사항]",
-    systemPrompt,
-    "",
-    "[사용자 요청]",
-    userPrompt,
+  const minimumSectionCount = Math.max(minSections, context.minimumSectionCount);
+  const isTravel = context.connectKind === "TRAVEL";
+  const maxChars = mode === "recovery"
+    ? CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS
+    : CHATGPT_DIRECT_PRIMARY_PROMPT_MAX_CHARS;
+  const descriptionBudget = mode === "recovery" ? 1_350 : 2_250;
+  const editorialBudget = mode === "recovery" ? 1_500 : 2_900;
+  const seoBudget = mode === "recovery" ? 350 : 650;
+  const productFacts = isTravel
+    ? [
+        `내부 일정 식별용 상품명: ${context.productName}`,
+        `여행지·일정 추출 자료: ${compactChatGptEvidence(context.description, descriptionBudget) || "수집 정보 없음"}`,
+        `조사할 방문지: ${compactChatGptEvidence(context.features.join(" / "), 900) || "추가 확인 필요"}`,
+      ]
+    : [
+        `상품명: ${context.productName}`,
+        `상세 설명: ${compactChatGptEvidence(context.description, descriptionBudget) || "수집 정보 없음"}`,
+        `확인된 특징: ${compactChatGptEvidence(context.features.join(" / "), 900) || "추가 확인 필요"}`,
+        `가격/원가/할인: ${context.price || "미확인"} / ${context.originalPrice || "미확인"} / ${context.discountRate || "미확인"}`,
+        `쿠폰/배송/리뷰/평점: ${context.couponInfo || "없음"} / ${context.deliveryInfo || "미확인"} / ${context.reviewCount || "미확인"} / ${context.rating || "미확인"}`,
+      ];
+  const editorialEvidence = compactChatGptEvidence(context.editorialPromptBlock, editorialBudget);
+  const seoEvidence = compactChatGptEvidence(
+    formatOpenCrabSeoBriefForPrompt(context.openCrabSeoBrief ?? null),
+    seoBudget,
+  );
+  const sectionIdeas = compactChatGptEvidence(context.editorialSectionTitles.join(" / "), 650);
+  const prefix = [
+    mode === "recovery"
+      ? "이전 웹 자동작성은 과도한 입력 때문에 멈췄습니다. 아래 압축 근거만 사용해 즉시 완성하세요."
+      : "아래 확인 근거만 사용해 네이버 블로그 발행용 최종 글을 작성하세요.",
+    "추가 질문이나 작업 설명 없이 JSON 하나만 출력하세요.",
+    isTravel
+      ? "여행 글은 상품 검토문이 아니라 여행지 브이로그입니다. 장소의 배경, 실제 풍경과 분위기, 보고 먹고 즐길 것, 사진·동선 팁을 확실한 말투로 쓰세요."
+      : "쇼핑 글은 상세페이지 낭독문이 아니라 제품 분석 리뷰입니다. 제품의 특장점, 기능의 작동 방식, 구체적인 사용법, 활용 장면, 후기 원문에서 반복된 좋은 점과 구조상 한계를 자세히 설명하세요.",
+    "실제 사용·구매·방문 경험은 제공되지 않았으므로 체험한 것처럼 꾸미지 마세요.",
+    "미확인 사실은 만들지 말고, 확인할 수 없는 변동 정보는 언급 자체를 생략하세요.",
+    ...(isTravel ? [
+      "웹 검색을 사용할 수 있으면 공식 관광청·공공기관 자료를 우선해 핵심 장소 3~6곳을 조사하세요.",
+      '"보입니다", "보여요", "인 것 같아요", "일 듯해요", "판단됩니다"는 금지합니다.',
+      "상품 가격·할인·포함조건·추천/비추천 여행자·예약 판단을 본문 목차로 만들지 마세요.",
+    ] : [
+      '"상세페이지에 적혀 있어요", "상품 설명에는" 같은 출처 낭독 문장을 반복하지 마세요.',
+      "스펙은 기능의 원리와 실제 이점으로 번역하고, 설치·조작·충전·세척·보관 중 해당하는 사용법을 설명하세요.",
+      "구매후기 근거가 제공된 경우에만 반복되는 장점을 요약하고, 후기 수·평점만으로 만족 내용을 만들지 마세요.",
+    ]),
+    "하네스 문구는 분석 재료일 뿐 본문에 복사하지 마세요.",
   ].join("\n");
+  const evidence = [
+    isTravel ? "[여행상품 사실]" : "[제품 사실]",
+    ...productFacts,
+    editorialEvidence ? "[분석 근거]\n" + editorialEvidence : "",
+    seoEvidence ? "[SEO 참고]\n" + seoEvidence : "",
+    sectionIdeas ? "[전개 후보]\n" + sectionIdeas : "",
+  ].filter(Boolean).join("\n");
+  const suffix = [
+    "[작성 계약]",
+    `- 제목 25~35자, 핵심 검색어를 앞쪽에 배치하고 제목·소제목에 이모지를 쓰지 않습니다.`,
+    `- sections는 근거 밀도에 따라 ${minimumSectionCount}~${context.maximumSectionCount}개, 각 항목은 '소제목\\n\\n본문' 형태입니다.`,
+    "- 짧고 자연스러운 ~요체 문장으로 쓰되 같은 문장 구조와 키워드 반복을 피합니다.",
+    `- 확인된 사실 → ${isTravel ? "눈앞의 장면 → 즐길 거리 또는 실용 팁" : "작동 방식 → 사용 장면의 이점 또는 한계"}가 연결된 흐름을 최소 3곳에 넣습니다.`,
+    `- URL은 쓰지 않습니다. ${isTravel ? "여행커넥트" : "쇼핑커넥트"} 카드는 시스템이 별도로 삽입합니다.`,
+    isTravel
+      ? "- 원본 일정에 나온 장소마다 역사·문화 배경, 현장 분위기, 활동, 음식·사진·동선 팁을 구체적으로 설명합니다."
+      : "- evidenceFacts에는 확인한 제품 고유 수치·기능·구성만 기록하고, 본문에서는 그 근거를 사용 가치와 사용법으로 해석합니다.",
+    "- 해시태그는 검색 의도가 분명한 3~5개만 작성합니다.",
+    "- 코드블록은 쓰지 않습니다.",
+    "[출력 JSON]",
+    isTravel
+      ? '{"title":"제목","sections":["소제목\\n\\n본문"],"hashtags":["태그"]}'
+      : '{"title":"제목","evidenceFacts":["확인 사실"],"sections":["소제목\\n\\n본문"],"hashtags":["태그"]}',
+  ].join("\n");
+
+  return composeBudgetedChatGptPrompt({ prefix, evidence, suffix, maxChars });
 }
 
 async function runDirectChatGPTGeneration(
@@ -3225,16 +3532,54 @@ async function runDirectChatGPTGeneration(
   userPrompt: string,
   context: ChatGPTGuidanceContext,
   minSections: number,
-  label = "Direct"
+  label = "Direct",
+  imagePaths: string[] = [],
 ): Promise<string> {
   const prompt = buildDirectBrowserGptPrompt(systemPrompt, userPrompt, context, minSections);
-  let reply = await sendPromptToChatGPT(page, prompt, {
-    label: `${label} 최종`,
-    idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, 180_000),
-    maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, 420_000),
-  });
+  const requiredSections = Math.max(minSections, context.minimumSectionCount);
+  console.log(
+    `      - ${label} 원고 프롬프트: ${prompt.length.toLocaleString("ko-KR")}자 / 이미지 ${
+      CHATGPT_ATTACH_IMAGES_TO_DRAFT ? Math.min(imagePaths.length, CHATGPT_IMAGE_CONTEXT_MAX) : 0
+    }개 후보`
+  );
+  if (CHATGPT_ATTACH_IMAGES_TO_DRAFT && imagePaths.length > 0) {
+    await attachImagesToChatGPT(page, imagePaths, `${label} 상세 근거`);
+  }
+  let reply: string;
+  try {
+    reply = await sendPromptToChatGPT(page, prompt, {
+      label: `${label} 최종`,
+      idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, 180_000),
+      maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, 420_000),
+    });
+  } catch (error) {
+    if (!isChatGptReplyStalledError(error)) throw error;
+    console.log(`      - ${label} 응답 정지로 새 대화에서 1회 자동 재시도합니다.`);
+    await ensureFreshChatGPTConversation(page, label);
+    // 이미지 분석이 ChatGPT 웹에서 장시간 멈추는 경우가 있으므로 복구 시도는
+    // 이미 수집한 OCR/상품 근거가 포함된 텍스트 프롬프트만 전송한다.
+    const recoveryPrompt = buildDirectBrowserGptPrompt(
+      systemPrompt,
+      userPrompt,
+      context,
+      minSections,
+      "recovery",
+    );
+    console.log(
+      `      - ${label} 자동 재시도는 이미지 없이 ${recoveryPrompt.length.toLocaleString("ko-KR")}자 압축 근거로 진행합니다.`,
+    );
+    reply = await sendPromptToChatGPT(
+      page,
+      recoveryPrompt,
+      {
+        label: `${label} 자동 재시도`,
+        idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, 150_000),
+        maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, 300_000),
+      },
+    );
+  }
 
-  if (getStructuredSectionCount(parseJsonObjectFromText(reply)) >= minSections) {
+  if (getStructuredSectionCount(parseJsonObjectFromText(reply)) >= requiredSections) {
     return reply;
   }
 
@@ -3242,7 +3587,7 @@ async function runDirectChatGPTGeneration(
   reply = await sendPromptToChatGPT(page, [
     "방금 답변을 유지하되 JSON만 다시 출력해주세요.",
     "- 키: title, sections, hashtags",
-    `- sections는 최소 ${minSections}개`,
+    `- sections는 ${requiredSections}~${context.maximumSectionCount}개 범위에서 내용에 맞게 선택`,
     "- 코드블록 금지",
   ].join("\n"), {
     label: `${label} 보완`,
@@ -3256,14 +3601,11 @@ async function runDirectChatGPTGeneration(
 function buildClarificationReply(assistantReply: string, context: ChatGPTGuidanceContext): string {
   const lines: string[] = ["가이드에 맞춰 진행할게요. 요청하신 정보를 전달합니다."];
   const text = assistantReply.toLowerCase();
-  const safeTitle = sanitizeTitle(`${context.productName} 후기`, context.productName);
-  const fallbackKeywords = [
-    context.productName,
-    ...context.features.slice(0, 3),
-    "추천",
-    "후기",
-    "리뷰",
-  ].filter((value) => value && value.trim().length > 0);
+  const safeTitle = sanitizeTitle(buildDirectSeoTitle(context), context.productName);
+  const fallbackKeywords = buildSeoKeywordInput(context)
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
 
   if (/제목|title/.test(text)) {
     lines.push(`- 제목 후보: ${safeTitle}`);
@@ -3276,23 +3618,27 @@ function buildClarificationReply(assistantReply: string, context: ChatGPTGuidanc
     lines.push("- AI 티가 나는 반복 표현, 과한 광고 문장, 허위 체험 단정 금지");
   }
   if (/분량|섹션|구성|길이|글자/.test(text)) {
-    lines.push(`- 구성: 본문 ${context.targetSectionCount}개 섹션`);
+    lines.push(`- 구성: 본문 ${context.minimumSectionCount}~${context.maximumSectionCount}개 흐름, 내용에 따라 선택·병합`);
   }
   if (/상품|제품명/.test(text)) {
-    lines.push(`- 상품명: ${context.productName}`);
+    lines.push(`- ${context.connectKind === "TRAVEL" ? "여행상품명" : "상품명"}: ${context.productName}`);
   }
-  if (/가격|할인|쿠폰|비용/.test(text)) {
+  if (/가격|할인|쿠폰|비용/.test(text) && context.connectKind === "SHOPPING") {
     lines.push(`- 가격: ${context.price || "(가격 미확인)"}`);
     lines.push(`- 원가: ${context.originalPrice || "(원가 미확인)"}`);
     lines.push(`- 할인율: ${context.discountRate || "(할인율 미확인)"}`);
     lines.push(`- 쿠폰: ${context.couponInfo || "(쿠폰 정보 없음)"}`);
   }
-  if (/리뷰|평점/.test(text)) {
+  if (/가격|비용/.test(text) && context.connectKind === "TRAVEL") {
+    lines.push(`- 표시 가격: ${context.price || "(출발일별 확인 필요)"}`);
+    lines.push("- 출발일·인원·객실 조건에 따른 변동 여부는 확인되지 않은 값으로 다룹니다.");
+  }
+  if (/리뷰|평점/.test(text) && context.connectKind === "SHOPPING") {
     lines.push(`- 리뷰수: ${context.reviewCount || "(리뷰수 미확인)"}`);
     lines.push(`- 평점: ${context.rating || "(평점 미확인)"}`);
   }
   if (/링크|url/.test(text)) {
-    lines.push(`- 쇼핑커넥트 삽입용 링크(본문 URL 직접 기재 금지): ${context.brandLink}`);
+    lines.push(`- ${context.connectKind === "TRAVEL" ? "여행커넥트" : "쇼핑커넥트"} 삽입용 링크(본문 URL 직접 기재 금지): ${context.brandLink}`);
   }
 
   if (lines.length === 1) {
@@ -3333,8 +3679,8 @@ async function requestStructuredOutputWithGuidance(
       : [
           "좋아요. 방금 답변 내용을 유지해서 최종 결과를 JSON으로 정리해주세요.",
           "- 출력: JSON만",
-          "- 키: title, sections, hashtags",
-          `- sections는 최소 ${context.targetSectionCount}개`,
+          `- 키: title, ${context.connectKind === "SHOPPING" ? "evidenceFacts, " : ""}sections, hashtags`,
+          `- sections는 ${context.minimumSectionCount}~${context.maximumSectionCount}개 범위에서 내용에 맞게 선택`,
           "- 코드블록 금지",
         ].join("\n");
 
@@ -3403,11 +3749,12 @@ async function runDraftGptConversation(
   imagePaths: string[],
   minSections: number
 ): Promise<string> {
-  const sectionCount = Math.max(4, Math.min(8, guidanceContext.targetSectionCount));
+  const sectionCount = guidanceContext.targetSectionCount;
   const seoKeywordInput = buildSeoKeywordInput(guidanceContext);
   const versionChoice = CHATGPT_FORCE_MOBILE_VERSION ? "2" : "1";
-  const toneResponse =
-    "4번 경험 공유 말투로 진행하되, 휴대폰으로 직접 쓰는 블로그처럼 문장을 짧고 부드럽게 다듬어주세요. AI 티가 나는 반복 표현과 과한 광고 문장은 빼주세요.";
+  const toneResponse = guidanceContext.connectKind === "TRAVEL"
+    ? "4번 말투의 자연스러움만 활용한 여행지 브이로그형 정보 글로 진행해주세요. 검증된 여행지 사실은 확실하게 쓰고, 실제 방문·탑승·숙박을 했다는 1인칭 경험만 만들지 마세요."
+    : "4번 말투의 자연스러움만 활용한 제품 분석형 리뷰로 진행해주세요. 특장점의 작동 방식과 구체적인 사용법, 후기 원문에서 반복된 장점을 설명하되 직접 구매하거나 사용한 경험은 만들지 마세요.";
   const directSeoTitle = buildDirectSeoTitle(guidanceContext);
 
   const beforeStarterMessages = await readAssistantMessages(page);
@@ -3439,8 +3786,8 @@ async function runDraftGptConversation(
       matcher: isDraftStepProductInfoPrompt,
       response: () =>
         [
-          `제품명: ${guidanceContext.productName}`,
-          `쇼핑커넥트 삽입용 링크(본문 URL 직접 기재 금지): ${guidanceContext.brandLink}`,
+          `${guidanceContext.connectKind === "TRAVEL" ? "여행상품명" : "제품명"}: ${guidanceContext.productName}`,
+          `${guidanceContext.connectKind === "TRAVEL" ? "여행커넥트" : "쇼핑커넥트"} 삽입용 링크(본문 URL 직접 기재 금지): ${guidanceContext.brandLink}`,
         ].join("\n"),
     },
     {
@@ -3523,10 +3870,15 @@ async function runDraftGptConversation(
   const structuredPrompt = [
     "지금까지 입력한 1~6단계 정보를 기준으로 최종 결과를 정리해주세요.",
     "- 출력은 JSON만",
-    "- 키: title, sections, hashtags",
-    `- sections는 ${sectionCount}개 구성 유지`,
+    `- 키: title, ${guidanceContext.connectKind === "SHOPPING" ? "evidenceFacts, " : ""}sections, hashtags`,
+    `- sections는 ${guidanceContext.minimumSectionCount}~${guidanceContext.maximumSectionCount}개 범위에서 초안의 자연스러운 흐름 유지`,
     "- 모바일 버전 규칙 유지",
-    "- 말투는 부드러운 경험공유형 유지",
+    `- 말투는 ${guidanceContext.connectKind === "TRAVEL" ? "확실하고 생생한 여행지 브이로그형" : "확실하고 구체적인 제품 분석형 리뷰"} 유지`,
+    ...(guidanceContext.connectKind === "TRAVEL" ? [
+      '- "보입니다", "보여요", "인 것 같아요", "일 듯해요", "판단됩니다" 금지',
+      "- 가격·할인·포함조건·추천/비추천·예약 판단 섹션 금지",
+    ] : []),
+    "- 근거 없는 실제 방문·구매·사용 경험을 만들지 않기",
     "- 문장은 25-45자 안팎으로 짧게 끊고 1-2문장마다 줄바꿈",
     "- AI가 쓴 글처럼 보이는 표현, 반복 어미, 과장 광고 문장 제거",
     "- sections는 소제목 + 본문 구조 유지",
@@ -3585,20 +3937,21 @@ async function runChatGPTBrowserTwoPass(
   }
 
   const contextHandle = await createChatGPTContext(hasSessionFile);
-  const requiredFinalSections = Math.min(
-    8,
-    Math.max(4, guidanceContext.targetSectionCount - 1)
-  );
+  const requiredFinalSections = guidanceContext.minimumSectionCount;
 
   try {
     const context = contextHandle.context;
     const page = await context.newPage();
 
-    const draftMinSections = Math.min(6, Math.max(3, guidanceContext.targetSectionCount - 2));
+    const draftMinSections = guidanceContext.minimumSectionCount;
     let firstDraft: string;
 
-    if (CHATGPT_DIRECT_ONLY) {
-      console.log("      - Direct only 모드: 기본 ChatGPT 단일 프롬프트로 생성합니다.");
+    if (CHATGPT_DIRECT_ONLY || guidanceContext.connectKind === "TRAVEL") {
+      console.log(
+        guidanceContext.connectKind === "TRAVEL"
+          ? "      - 여행 전용 경로: 쇼핑용 Custom GPT를 건너뛰고 기본 ChatGPT에서 생성합니다."
+          : "      - Direct only 모드: 기본 ChatGPT 단일 프롬프트로 생성합니다."
+      );
       await openChatGPTTarget(page, CHATGPT_BASE_URL, "Direct");
       await startNewChatIfAvailable(page);
       await ensureChatGPTReady(page, Math.min(CHATGPT_TIMEOUT_MS, 120000));
@@ -3608,7 +3961,8 @@ async function runChatGPTBrowserTwoPass(
         userPrompt,
         guidanceContext,
         draftMinSections,
-        "Direct"
+        "Direct",
+        imagePaths,
       );
     } else {
       try {
@@ -3633,7 +3987,8 @@ async function runChatGPTBrowserTwoPass(
           userPrompt,
           guidanceContext,
           draftMinSections,
-          "Direct fallback"
+          "Direct fallback",
+          imagePaths,
         );
       }
     }
@@ -3644,7 +3999,10 @@ async function runChatGPTBrowserTwoPass(
     }
 
     // 2차 다듬기는 별도 GPT(또는 동일 GPT)로 수행
-    if (CHATGPT_POLISH_GPT_URL !== CHATGPT_DRAFT_GPT_URL) {
+    if (
+      guidanceContext.connectKind === "SHOPPING" &&
+      CHATGPT_POLISH_GPT_URL !== CHATGPT_DRAFT_GPT_URL
+    ) {
       await openChatGPTTarget(page, CHATGPT_POLISH_GPT_URL, "Polish");
     }
 
@@ -3654,11 +4012,13 @@ async function runChatGPTBrowserTwoPass(
       "- sections 소제목에는 이모지 금지",
       "- sections는 소제목 + 본문 구조 유지",
       "- 모바일 버전 가독성(짧은 문장, 잦은 줄바꿈) 유지",
-      "- 말투는 부드러운 경험공유형 그대로 유지",
+      `- 말투는 ${guidanceContext.connectKind === "TRAVEL" ? "확실하고 생생한 여행지 브이로그형" : "확실하고 구체적인 제품 분석형 리뷰"}으로 유지`,
       "- AI 티가 나는 표현과 과한 광고 문장을 자연스럽게 덜어내기",
       "- 직접 겪었다는 근거 없는 단정 표현은 상황형 표현으로 바꾸기",
-      "- 첨부된 상품 이미지도 참고해 설명을 더 구체화",
-      "- JSON(title, sections, hashtags)으로 출력",
+      guidanceContext.connectKind === "TRAVEL"
+        ? '- 첨부된 여행지·일정 이미지를 참고해 장소의 배경·풍경·즐길 거리·현지 팁을 보강하고, "보입니다/인 것 같아요" 말투와 상품조건 설명은 제거하기'
+        : "- 첨부된 상품 이미지를 참고하되 제품 형태와 표시 정보를 변형하지 않기",
+      `- JSON(title, ${guidanceContext.connectKind === "SHOPPING" ? "evidenceFacts, " : ""}sections, hashtags)으로 출력`,
       "- 코드블록 금지",
       "",
       "[초안]",
@@ -3701,7 +4061,7 @@ async function runChatGPTBrowserTwoPass(
         "- 질문 금지",
         "- JSON만 출력",
         "- 키: title, sections, hashtags",
-        "- sections는 최소 8개",
+        `- sections는 ${guidanceContext.minimumSectionCount}~${guidanceContext.maximumSectionCount}개 범위에서 내용에 맞게 선택`,
         "- 휴대폰으로 읽기 좋은 짧은 문장과 자연스러운 줄바꿈 유지",
         "- AI처럼 보이는 표현, 같은 어미 반복, 과장 문장 제거",
         "",
@@ -3963,349 +4323,31 @@ function splitSectionCandidates(text: string): string[] {
   return parts.length > 0 ? parts : [normalized];
 }
 
-function buildFallbackSection(title: string, product: ProductInfo): string {
-  const plainTitle = stripSectionPrefix(title) || "구매 전 확인 포인트";
-  const priceText = product.price || "가격 정보";
-
-  return [
-    title,
-    "",
-    `${product.name} 기준으로 ${plainTitle}를 먼저 정리해봤어요.`,
-    `판매페이지 정보와 상품 이미지를 함께 보면 선택 기준이 더 분명해져요.`,
-    `${priceText} 기준으로 옵션과 구성을 같이 비교해보면 좋아요.`,
-    `구매 전에는 배송, 쿠폰, 후기 조건까지 한 번 더 확인하는 편이 안전해요.`,
-    "",
-  ].join("\n");
+function toProductEditorialInput(product: ProductInfo, targetSectionCount: number) {
+  return {
+    productName: product.name,
+    description: product.description,
+    features: product.features,
+    price: product.price,
+    originalPrice: product.originalPrice,
+    discountRate: product.discountRate,
+    couponInfo: product.couponInfo,
+    deliveryInfo: product.deliveryInfo,
+    reviewCount: product.reviewCount,
+    rating: product.rating,
+    targetSectionCount,
+  };
 }
 
-function uniqueLocalProductLines(lines: string[]): string[] {
-  const seen = new Set<string>();
-  return lines
-    .map((line) => normalizeText(line))
-    .filter((line) => {
-      if (!line) return false;
-      const key = line.replace(/[^\p{L}\p{N}]+/gu, "").toLowerCase();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-}
-
-function buildLocalProductSection(title: string, product: ProductInfo, extraLines: string[] = []): string {
-  const categoryKeyword = inferCategoryKeyword(product.name);
-  const sectionLines = buildLocalProductLinesForTitle(title, product, categoryKeyword);
-  const lines = uniqueLocalProductLines(
-    sectionLines.length >= 4 ? sectionLines : [...extraLines, ...sectionLines]
-  ).slice(0, 4);
-  return `${title}\n\n${lines.join("\n")}\n`;
-}
-
-function normalizeSectionTitleKey(title: string): string {
-  return stripSectionPrefix(title)
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, "");
-}
-
-function isPublishableSectionTitle(title: string): boolean {
-  const normalized = normalizeText(stripSectionPrefix(title));
-  if (!normalized || normalized.length > 45) return false;
-  return !/(?:작성\s*(?:규칙|지침|가이드|프로세스)|프롬프트|출력\s*형식|json|브리프|리서치\s*팩|워크플로우|opencrab|오픈크랩|해시태그)/iu.test(
-    normalized
-  );
-}
-
-function buildLocalProductLinesForTitle(
-  title: string,
-  product: ProductInfo,
-  categoryKeyword: string
-): string[] {
-  const normalized = normalizeSectionTitleKey(title);
-  const productNameForMatch = normalizePromptForStepMatch(product.name);
-  const isSeatCushion = /꼬리뼈|치질|자세교정|방석|쿠션|의자/.test(productNameForMatch);
-  const isCoolerBag = /보냉백|쿨러백|아이스박스|소프트쿨러|캠핑|피크닉/.test(productNameForMatch);
-  const isPortableCare = /드라이기|선풍기|휴대|여행|외출|캠핑|피크닉/.test(productNameForMatch);
-  const featureText = product.features.slice(0, 2).join(", ");
-  const priceText = product.price || "판매가";
-  const deliveryText = product.deliveryInfo || "배송 조건";
-  const couponText = product.couponInfo || "쿠폰/혜택";
-  const reviewText = product.reviewCount || product.rating
-    ? [product.reviewCount ? `리뷰 ${product.reviewCount}` : "", product.rating ? `평점 ${product.rating}` : ""]
-        .filter(Boolean)
-        .join(", ")
-    : "";
-  const categoryLabel =
-    categoryKeyword && categoryKeyword !== "제품리뷰" ? `${categoryKeyword} 제품` : "비슷한 상품";
-
-  if (/사용|장면|활용|공간/.test(normalized)) {
-    if (isSeatCushion) {
-      return [
-        `${product.name}은 오래 앉아 있는 책상, 사무실 의자, 차량 시트처럼 실제 앉는 자리에 맞는지 보는 게 중요해요.`,
-        "방석류는 좌판 크기, 두께, 커버 소재, 미끄럼 방지 여부가 체감에 영향을 줄 수 있어요.",
-        "의자 위에 올렸을 때 높이가 너무 올라가지는 않는지, 허벅지와 등받이 위치가 어색하지 않은지도 확인해보세요.",
-        deliveryText ? `${deliveryText}도 사용하려는 날짜와 맞물려 확인해두면 좋아요.` : "사용하려는 날짜가 정해져 있다면 배송 일정까지 함께 확인해두면 좋아요.",
-      ];
-    }
-
-    if (isCoolerBag) {
-      return [
-        `${product.name}은 캠핑, 피크닉, 장보기처럼 어떤 상황에 들고 갈지에 따라 보는 포인트가 달라져요.`,
-        "보냉백류는 용량, 손잡이, 어깨끈, 접었을 때 보관 방식이 실제 사용감에 영향을 줘요.",
-        "음료나 식재료를 어느 정도 넣을지 미리 정해두면 크기 선택이 쉬워져요.",
-        deliveryText ? `${deliveryText}도 사용 예정일과 맞는지 같이 확인해두면 좋아요.` : "야외 일정이 있다면 배송 가능일을 먼저 확인하는 편이 좋아요.",
-      ];
-    }
-
-    if (!isPortableCare) {
-      return [
-        `${product.name}은 실제로 놓고 쓸 자리와 사용 빈도를 먼저 정해두면 비교가 쉬워져요.`,
-        `${categoryLabel}은 크기, 소재, 관리 방식이 생활 공간과 맞는지 확인하는 게 좋아요.`,
-        deliveryText ? `${deliveryText}도 사용하려는 날짜와 맞물려 확인해두면 좋아요.` : "사용 일정이 정해져 있다면 배송 일정까지 함께 확인해두면 좋아요.",
-        "제품 사진에서는 실제 배치했을 때의 크기감과 주변 공간을 중심으로 살펴보면 좋아요.",
-      ];
-    }
-
-    return [
-      `${product.name}은 집에서 두고 쓸지, 여행이나 외출 때 챙길지에 따라 보는 포인트가 달라져요.`,
-      `${categoryLabel}은 크기와 보관 방식이 생활 동선에 맞는지 먼저 보면 좋아요.`,
-      deliveryText ? `${deliveryText}도 사용 예정일과 맞물려 확인해두면 선택이 더 편해요.` : "당장 필요한 제품이라면 배송 일정까지 같이 확인해두는 편이 좋아요.",
-      "제품 사진의 사용 장면을 보면 실제로 어느 정도 공간을 차지할지 감이 잡혀요.",
-    ];
-  }
-
-  if (/구성|패키지|옵션|세트/.test(normalized)) {
-    return [
-      "옵션마다 구성품이나 색상, 수량이 달라질 수 있어서 구매 전 확인이 필요해요.",
-      "대표 이미지와 상세 설명의 구성 안내가 서로 맞는지도 같이 보면 좋아요.",
-      couponText ? `${couponText} 조건이 붙어 있다면 같은 옵션도 최종 금액이 달라질 수 있어요.` : "옵션명이 비슷해도 포함 구성은 다를 수 있어서 마지막 화면까지 보는 게 안전해요.",
-      `${priceText} 기준으로 구성 차이를 같이 보면 단순 가격 비교보다 판단이 쉬워져요.`,
-    ];
-  }
-
-  if (/디자인|첫인상|외관|색상/.test(normalized)) {
-    return [
-      "디자인은 상품 이미지에서 보이는 색상과 형태를 기준으로 차분히 보는 게 좋아요.",
-      "책상, 거실, 차량처럼 놓을 공간과 어울리는지도 함께 확인하면 선택이 쉬워져요.",
-      `${product.name}은 제품 사진에서 보이는 비율과 마감 느낌을 먼저 살펴보면 좋아요.`,
-      "색상은 화면 환경에 따라 조금 달라 보일 수 있으니 옵션명도 같이 확인해두세요.",
-    ];
-  }
-
-  if (/크기|스펙|무게|사이즈|용량/.test(normalized)) {
-    if (isSeatCushion) {
-      return [
-        "방석은 의자 좌판보다 너무 크거나 작으면 앉았을 때 안정감이 떨어질 수 있어요.",
-        "두께가 있는 제품은 착석 높이가 달라질 수 있어서 책상 높이와도 같이 보는 게 좋아요.",
-        `${product.name}은 커버 소재와 관리 방식도 실제 사용 만족도에 영향을 줄 수 있어요.`,
-        "사무실 의자, 식탁 의자, 차량 시트 중 어디에 둘지 먼저 정하면 사이즈 판단이 쉬워져요.",
-      ];
-    }
-
-    return [
-      "스펙은 숫자만 보기보다 실제 놓을 공간과 사용 장면에 맞춰 보는 게 좋아요.",
-      "무게, 길이, 용량처럼 체감에 영향을 주는 항목은 상세페이지에서 다시 확인해두면 좋아요.",
-      isPortableCare
-        ? `${product.name}을 자주 옮겨 쓸 예정이라면 크기와 무게가 특히 중요해져요.`
-        : `${product.name}은 설치하거나 둘 공간의 여유까지 함께 보는 게 좋아요.`,
-      "보관 공간이 정해져 있다면 제품 치수와 함께 충전기나 부속품 공간도 같이 생각해보면 좋아요.",
-    ];
-  }
-
-  if (/기능|성능|효과|바람|냉각|전력/.test(normalized)) {
-    return [
-      featureText ? `${featureText}처럼 표시된 기능은 필요한 사용 목적과 맞는지 비교해보면 좋아요.` : `${product.name}의 기능 설명은 실제로 자주 쓸 항목부터 확인하는 게 좋아요.`,
-      "필요한 기능이 옵션별로 다른지 확인하면 불필요한 선택 실수를 줄일 수 있어요.",
-      "성능 표현은 과장 문구보다 작동 방식, 단계 조절, 전원 방식처럼 확인 가능한 항목 위주로 보는 게 안전해요.",
-      `${priceText}대에서 기대하는 기능 범위를 정해두면 비슷한 상품과 비교하기 쉬워요.`,
-    ];
-  }
-
-  if (/장점/.test(normalized) && /아쉬/.test(normalized)) {
-    return [
-      `${product.name}의 장점은 가격, 구성, 사용 목적이 맞을 때 더 분명하게 보이는 편이에요.`,
-      `반대로 ${deliveryText}, 옵션 차이, 구성품 누락 여부는 구매 전에 한 번 더 확인할 부분이에요.`,
-      reviewText ? `${reviewText}가 확인된다면 반복해서 언급되는 내용 위주로 참고하면 좋아요.` : "후기 정보는 한두 문장보다 반복되는 의견을 중심으로 보는 편이 좋아요.",
-      `${couponText} 조건이 있다면 최종 결제 단계에서 실제 적용 여부를 확인해두세요.`,
-    ];
-  }
-
-  if (/장점|좋은|강점/.test(normalized)) {
-    return [
-      `${product.name}은 상품 정보 기준으로 비교 포인트가 비교적 분명한 편이에요.`,
-      `${priceText}, 구성, 후기 조건을 같이 보면 장점이 더 잘 보일 수 있어요.`,
-      featureText ? `${featureText} 항목이 필요했던 기능과 맞는지도 함께 보면 좋아요.` : "필요한 기능이 뚜렷한 분일수록 장점과 불필요한 기능이 쉽게 구분돼요.",
-      "같은 가격대 상품과 비교할 때는 구성과 배송 조건을 같이 놓고 보는 편이 현실적이에요.",
-    ];
-  }
-
-  if (/아쉬|주의|단점|확인/.test(normalized)) {
-    return [
-      `구매 전에는 ${deliveryText}, ${couponText}, 옵션 조건처럼 달라질 수 있는 부분을 확인하는 게 좋아요.`,
-      "상세 조건은 바뀔 수 있으니 최종 결제 화면에서 한 번 더 보는 편이 안전해요.",
-      `${product.name}은 상품명은 같아 보여도 색상이나 구성 옵션이 나뉠 수 있어요.`,
-      "가격만 보고 고르기보다 필요한 구성인지, 교환/반품 조건은 어떤지도 함께 보면 좋아요.",
-    ];
-  }
-
-  if (/추천|맞아|대상|누구/.test(normalized)) {
-    if (isSeatCushion) {
-      return [
-        `오래 앉아 일하거나 좌석 쿠션감을 보완하고 싶은 분이라면 ${product.name}을 후보로 볼 만해요.`,
-        "사무실 의자, 공부방 의자, 차량 시트처럼 앉는 시간이 긴 자리에서 쓸 제품을 찾는 분께 잘 맞아요.",
-        "다만 체형과 의자 높이에 따라 체감이 달라질 수 있어 사이즈와 두께는 꼭 확인하는 게 좋아요.",
-        "커버 세탁이나 관리 방식까지 같이 보면 매일 쓰기 편한지 판단하기 쉬워요.",
-      ];
-    }
-
-    return [
-      `${categoryLabel}을 비교 중인 분이라면 ${product.name}을 후보로 살펴볼 만해요.`,
-      "가격, 구성, 후기 기준을 한 번에 정리하고 싶은 분께 참고용으로 보기 좋아요.",
-      "사용 일정이 정해져 있는 경우에는 배송 가능일을 먼저 보는 편이 좋아요.",
-      "이미 필요한 기능이 정해진 분이라면 옵션 차이만 좁혀서 확인해도 충분해요.",
-    ];
-  }
-
-  return [
-    `${product.name}을 볼 때는 상품명, 옵션, 가격대를 함께 확인하는 게 먼저예요.`,
-    "상세페이지에 적힌 정보와 대표 이미지를 같이 보면 제품 성격이 더 잘 보여요.",
-    `${priceText} 기준으로 필요한 구성인지 확인하면 비교 기준이 더 분명해져요.`,
-    couponText ? `${couponText}까지 반영하면 실제 구매 조건이 달라질 수 있어요.` : "할인이나 배송 조건은 시점에 따라 바뀔 수 있어 마지막에 다시 확인해보세요.",
-  ];
-}
-
-function buildLocalProductPostJson(
-  product: ProductInfo,
-  targetSectionCount: number,
-  openCrabSeoBrief?: OpenCrabSeoBrief | null
+function normalizeSectionText(
+  raw: string,
+  fallbackTitle: string,
+  minimumBodyLines: number,
 ): string {
-  const categoryKeyword = inferCategoryKeyword(product.name);
-  const categoryLabel =
-    categoryKeyword && categoryKeyword !== "제품리뷰" ? `${categoryKeyword} 제품` : "비슷한 상품";
-  const title = buildLocalProductTitle(product, openCrabSeoBrief);
-  const sectionSeeds = [
-    {
-      title: "구매 전 확인 포인트",
-      lines: [
-        `${product.name}을 볼 때는 상품명, 옵션, 가격대를 함께 확인하는 게 먼저예요.`,
-        "상세페이지에 적힌 정보와 대표 이미지를 같이 보면 제품 성격이 더 잘 보여요.",
-        `${product.price || "판매가"} 기준으로 필요한 구성인지 확인하면 비교 기준이 더 분명해져요.`,
-        "배송과 할인 조건은 시점에 따라 달라질 수 있어 마지막 화면에서 다시 보는 편이 좋아요.",
-      ],
-    },
-    {
-      title: "구성 및 패키지 확인",
-      lines: [
-        "구성품은 옵션에 따라 달라질 수 있어서 구매 전 확인이 필요해요.",
-        "대표 이미지와 상세 설명의 구성 안내가 서로 맞는지도 보면 좋아요.",
-        "옵션명이 비슷해도 포함 수량이나 색상 구성이 다를 수 있어요.",
-        `${product.price || "판매가"} 기준으로 구성 차이를 같이 보면 단순 가격 비교보다 판단이 쉬워져요.`,
-      ],
-    },
-    {
-      title: "첫인상 / 디자인",
-      lines: [
-        "디자인은 상품 이미지에서 보이는 색상과 형태를 중심으로 보는 게 안전해요.",
-        "사용 공간에 어울리는 크기인지도 함께 확인하면 좋아요.",
-        `${product.name}은 제품 사진에서 보이는 비율과 마감 느낌을 먼저 살펴보면 좋아요.`,
-        "색상은 화면 환경에 따라 조금 달라 보일 수 있으니 옵션명도 같이 확인해두세요.",
-      ],
-    },
-    {
-      title: "크기 & 스펙 정보",
-      lines: [
-        "스펙은 숫자만 보기보다 실제 놓을 공간과 사용 장면에 맞춰 보는 게 좋아요.",
-        "무게, 길이, 용량처럼 체감에 영향을 주는 항목은 다시 확인해두면 좋아요.",
-        `${product.name}을 자주 옮겨 쓸 예정이라면 크기와 무게가 특히 중요해져요.`,
-        "보관 공간이 정해져 있다면 부속품까지 같이 둘 수 있는지도 생각해보면 좋아요.",
-      ],
-    },
-    {
-      title: "주요 기능 ①",
-      lines: [
-        "주요 기능은 상세페이지에 표시된 설명을 기준으로 정리하는 게 좋아요.",
-        "필요한 기능이 옵션별로 다른지 확인하면 선택 실수를 줄일 수 있어요.",
-        "성능 표현은 작동 방식, 단계 조절, 전원 방식처럼 확인 가능한 항목 위주로 보는 게 안전해요.",
-        `${product.price || "판매가"}대에서 기대하는 기능 범위를 정해두면 비슷한 상품과 비교하기 쉬워요.`,
-      ],
-    },
-    {
-      title: "주요 기능 ②",
-      lines: [
-        "부가 기능은 실제로 자주 쓸 기능인지 따져보는 게 좋아요.",
-        "가격 차이가 있다면 꼭 필요한 기능인지 비교해보면 판단이 쉬워져요.",
-        "기능이 많아도 자주 쓰는 항목이 아니라면 체감 만족도는 낮을 수 있어요.",
-        "옵션별 기능 차이가 있다면 상세 이미지와 옵션명을 같이 맞춰보는 편이 좋아요.",
-      ],
-    },
-    {
-      title: "장점으로 보이는 부분",
-      lines: [
-        `${product.name}은 상품 정보 기준으로 비교 포인트가 비교적 분명한 편이에요.`,
-        "가격, 구성, 후기 조건을 같이 보면 장점이 더 잘 보일 수 있어요.",
-        "필요한 기능이 뚜렷한 분일수록 장점과 불필요한 기능이 쉽게 구분돼요.",
-        "같은 가격대 상품과 비교할 때는 구성과 배송 조건을 같이 놓고 보는 편이 현실적이에요.",
-      ],
-    },
-    {
-      title: "확인하면 좋을 아쉬운 점",
-      lines: [
-        "아쉬운 점은 옵션, 배송, 쿠폰 조건처럼 구매 전에 달라질 수 있는 부분이에요.",
-        "상세 조건이 바뀔 수 있으니 최종 화면에서 한 번 더 확인하는 게 좋아요.",
-        `${product.name}은 상품명은 같아 보여도 색상이나 구성 옵션이 나뉠 수 있어요.`,
-        "가격만 보고 고르기보다 교환/반품 조건도 함께 보면 좋아요.",
-      ],
-    },
-    {
-      title: "이런 분께 잘 맞아요",
-      lines: [
-        `${categoryLabel}을 비교 중인 분이라면 ${product.name}을 후보로 살펴볼 만해요.`,
-        "구매 전 기준을 정리하고 싶은 분께 참고용으로 보기 좋아요.",
-        "사용 일정이 정해져 있는 경우에는 배송 가능일을 먼저 보는 편이 좋아요.",
-        "이미 필요한 기능이 정해진 분이라면 옵션 차이만 좁혀서 확인해도 충분해요.",
-      ],
-    },
-  ];
-
-  const seedByKey = new Map(sectionSeeds.map((seed) => [normalizeSectionTitleKey(seed.title), seed]));
-  const selectedSeeds = (openCrabSeoBrief?.recommendedSectionTitles || [])
-    .map((sectionTitle) => stripSectionPrefix(sectionTitle))
-    .filter(isPublishableSectionTitle)
-    .map((sectionTitle) => {
-      const existingSeed = seedByKey.get(normalizeSectionTitleKey(sectionTitle));
-      return {
-        title: sectionTitle,
-        lines:
-          existingSeed?.lines ||
-          buildLocalProductLinesForTitle(sectionTitle, product, categoryKeyword),
-      };
-    });
-
-  for (const seed of sectionSeeds) {
-    if (selectedSeeds.length >= targetSectionCount) break;
-    const alreadySelected = selectedSeeds.some(
-      (selectedSeed) => normalizeSectionTitleKey(selectedSeed.title) === normalizeSectionTitleKey(seed.title)
-    );
-    if (!alreadySelected) selectedSeeds.push(seed);
-  }
-
-  const safeSelectedSeeds = selectedSeeds.length > 0 ? selectedSeeds : sectionSeeds;
-  const sections = safeSelectedSeeds
-    .slice(0, Math.max(4, Math.min(safeSelectedSeeds.length, targetSectionCount)))
-    .map((seed) => buildLocalProductSection(seed.title, product, seed.lines));
-  const hashtags = normalizeHashtags([], product, openCrabSeoBrief);
-
-  return JSON.stringify({
-    title,
-    sections,
-    hashtags,
-    openCrabSeoBrief,
-  });
-}
-
-function normalizeSectionText(raw: string, fallbackTitle: string, product: ProductInfo): string {
   const normalized = raw.replace(/\r/g, "").trim();
 
   if (!normalized) {
-    return buildFallbackSection(fallbackTitle, product);
+    throw new Error(`GPT 원고의 "${fallbackTitle}" 섹션이 비어 있습니다.`);
   }
 
   const allLines = normalized
@@ -4320,27 +4362,22 @@ function normalizeSectionText(raw: string, fallbackTitle: string, product: Produ
 
   let bodyLines = allLines.slice(1).filter((line) => !isInstructionLeakLine(line));
 
-  if (bodyLines.length === 0) {
-    const sentenceParts = normalized
-      .replace(title, "")
+  if (bodyLines.length < minimumBodyLines) {
+    const sentenceParts = bodyLines
+      .join(" ")
       .split(/(?<=[.!?])\s+|\n+/)
       .map((part) => part.trim())
       .filter((part) => part.length > 0)
       .filter((part) => !isInstructionLeakLine(part));
-    bodyLines = sentenceParts;
+    if (sentenceParts.length > bodyLines.length) {
+      bodyLines = sentenceParts;
+    }
   }
 
-  if (bodyLines.length < 4) {
-    const fallback = buildFallbackSection(title, product)
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0)
-      .slice(1);
-    bodyLines = [...bodyLines, ...fallback].slice(0, 4);
-  }
-
-  if (bodyLines.length > 6) {
-    bodyLines = bodyLines.slice(0, 6);
+  if (bodyLines.length < minimumBodyLines) {
+    throw new Error(
+      `GPT 원고의 "${title}" 섹션 문장이 부족합니다. 현재 ${bodyLines.length}개, 최소 ${minimumBodyLines}개가 필요합니다.`,
+    );
   }
 
   return `${title}\n\n${bodyLines.join("\n")}\n`;
@@ -4348,13 +4385,11 @@ function normalizeSectionText(raw: string, fallbackTitle: string, product: Produ
 
 function normalizeSections(
   rawSections: unknown,
-  targetCount: number,
-  product: ProductInfo,
-  fallbackTitles: string[] = DEFAULT_SECTION_TITLES
+  minimumCount: number,
+  maximumCount: number,
+  connectKind: "SHOPPING" | "TRAVEL",
 ): string[] {
-  // 부족한 섹션을 채울 때는 이번 글의 편집 구성표 제목을 쓴다. 예전처럼 쇼핑용
-  // 기본 제목을 쓰면 여행 글에 "구성 및 패키지 확인" 같은 제목이 섞여 들어갔다.
-  const titles = fallbackTitles.length > 0 ? fallbackTitles : DEFAULT_SECTION_TITLES;
+  const defaultTitles = getDefaultSectionTitles(connectKind);
   const rawList = Array.isArray(rawSections)
     ? rawSections.filter((item): item is string => typeof item === "string")
     : [];
@@ -4364,17 +4399,23 @@ function normalizeSections(
     expanded.push(...splitSectionCandidates(section));
   }
 
-  const normalized = expanded.map((section, index) =>
-    normalizeSectionText(section, titles[index % titles.length], product)
-  );
-
-  while (normalized.length < targetCount) {
-    const index = normalized.length;
-    console.log(`   ⚠️ 구조화 섹션 부족: ${index + 1}번째 섹션을 구성표 제목 "${titles[index % titles.length]}"로 보강합니다.`);
-    normalized.push(buildFallbackSection(titles[index % titles.length], product));
+  if (expanded.length < minimumCount) {
+    throw new Error(
+      `GPT 원고의 본문 흐름이 부족합니다. 현재 ${expanded.length}개, 최소 ${minimumCount}개입니다. ` +
+      "완성 문장형 로컬 폴백은 품질 보호를 위해 사용하지 않습니다.",
+    );
   }
 
-  return normalized.slice(0, targetCount);
+  const minimumBodyLines = 2;
+  const normalized = expanded.map((section, index) =>
+    normalizeSectionText(
+      section,
+      defaultTitles[index % defaultTitles.length],
+      minimumBodyLines,
+    )
+  );
+
+  return normalized.slice(0, maximumCount);
 }
 
 function normalizeHashtags(
@@ -4398,13 +4439,9 @@ function normalizeHashtags(
     .slice(0, 4);
 
   const openCrabTags = openCrabSeoBrief?.hashtags || [];
-  // "추천/후기/일상" 같은 일반 태그로 개수를 채우지 않는다. 프롬프트가 금지하는
-  // 태그를 코드가 넣던 모순을 없애고, 부족하면 부족한 채로 둔다.
+  // 일반 태그(추천·후기·가성비…)는 넣지 않는다. 키워드·OpenCrab 태그·상품 토큰만 사용한다.
   const merged = [...normalized, ...openCrabTags, ...productSeed];
   const deduped = Array.from(new Set(merged)).slice(0, NAVER_BLOG_HASHTAG_COUNT);
-  if (deduped.length < 3) {
-    console.log(`   ⚠️ 해시태그가 ${deduped.length}개뿐입니다(일반 태그로 채우지 않음).`);
-  }
   return deduped;
 }
 
@@ -4488,31 +4525,46 @@ function buildMobilePolishLines(text: string): string[] {
   return dedupeAdjacentLines(mobileLines);
 }
 
-function applyHumanMobilePolishToSection(section: string, index: number, product: ProductInfo): string {
+function applyHumanMobilePolishToSection(
+  section: string,
+  index: number,
+  connectKind: "SHOPPING" | "TRAVEL",
+): string {
+  const defaultTitles = getDefaultSectionTitles(connectKind);
   const lines = section
     .replace(/\r/g, "")
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
 
-  let title = stripSectionPrefix(lines[0] || DEFAULT_SECTION_TITLES[index % DEFAULT_SECTION_TITLES.length]);
+  let title = stripSectionPrefix(lines[0] || defaultTitles[index % defaultTitles.length]);
   if (!title || title.length > 60) {
-    title = DEFAULT_SECTION_TITLES[index % DEFAULT_SECTION_TITLES.length];
+    title = defaultTitles[index % defaultTitles.length];
   }
 
   const sourceBodyLines = lines.slice(1);
   let polishedBodyLines = buildMobilePolishLines(sourceBodyLines.join(" "));
+  const { preferred: preferredBodyLines, hardMinimum: hardMinimumBodyLines } =
+    getMobileSectionLinePolicy(connectKind);
 
-  if (polishedBodyLines.length < 4) {
-    const fallbackLines = buildFallbackSection(title, product)
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0)
-      .slice(1);
-    polishedBodyLines = dedupeAdjacentLines([...polishedBodyLines, ...fallbackLines]);
+  if (polishedBodyLines.length < preferredBodyLines) {
+    polishedBodyLines = dedupeAdjacentLines(sourceBodyLines);
+  }
+  if (polishedBodyLines.length < hardMinimumBodyLines) {
+    throw new Error(
+      `GPT 원고의 "${title}" 섹션이 모바일 윤문 후 ${polishedBodyLines.length}문장만 남았습니다. ` +
+      `최소 ${hardMinimumBodyLines}문장이 필요합니다.`,
+    );
+  }
+  if (polishedBodyLines.length < preferredBodyLines) {
+    console.log(
+      `   ⚠️ "${title}" 섹션은 ${polishedBodyLines.length}문장이지만 내용 기반 품질검사와 자동 보강 단계로 넘깁니다.`,
+    );
   }
 
-  return `${title}\n\n${polishedBodyLines.slice(0, 6).join("\n")}\n`;
+  // 긴 문장을 모바일 줄로 나눈 뒤 줄 수로 자르면 문장의 뒷부분이 통째로
+  // 사라질 수 있다. 모델이 만든 완성 문장은 보존하고 줄바꿈만 적용한다.
+  return `${title}\n\n${polishedBodyLines.join("\n")}\n`;
 }
 
 function applyHumanMobilePolishToDisclosure(section: string): string {
@@ -4541,6 +4593,7 @@ function saveGeneratedPostPreview(
     chatgptDraftUrl: CHATGPT_USE_CUSTOM_GPTS ? CHATGPT_DRAFT_GPT_URL : undefined,
     chatgptPolishUrl: CHATGPT_USE_CUSTOM_GPTS ? CHATGPT_POLISH_GPT_URL : undefined,
     humanMobilePolishEnabled: HUMAN_MOBILE_POLISH_ENABLED,
+    generationSource: post.generationSource,
     productName: product.name,
     productPrice: product.price,
     representativeImagePath: product.representativeImagePath,
@@ -4552,10 +4605,7 @@ function saveGeneratedPostPreview(
     openCrabSeoBrief: post.openCrabSeoBrief ?? null,
     productEditorialPlan: post.productEditorialPlan ?? null,
     contentReadiness: readiness ?? null,
-    postSpec: post.assembled?.spec ?? null,
-    specValidation: post.assembled?.validation ?? null,
-    composition: post.assembled?.composition ?? null,
-    pipelineNotes: post.notes ?? null,
+    composition: post.composition ?? null,
     sections: post.sections,
     hashtags: post.hashtags,
     rawResponse: post.rawResponse ?? "",
@@ -4581,9 +4631,11 @@ interface ProductInfo {
   rating: string;             // 평점
   representativeImagePath: string | null; // 썸네일용 판매페이지 대표 이미지
   imagePaths: string[];
+  detailImagePaths: string[]; // 상세페이지 원문을 분할한 시각 근거 이미지
   sourceImageUrls: string[];
   finalUrl?: string | null;
   storeName?: string | null;
+  travelPageResearch?: TravelPageResearch | null;
 }
 
 interface StoredBrandLinkSeed {
@@ -4593,6 +4645,26 @@ interface StoredBrandLinkSeed {
   productPrice?: string | null;
   storeName?: string | null;
   imageUrls?: string | null;
+  productDescription?: string | null;
+  productFeatures?: string | null;
+  travelResearchJson?: string | null;
+}
+
+function parseStoredTextArray(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed)
+      ? Array.from(new Set(
+          parsed
+            .filter((item): item is string => typeof item === "string")
+            .map(sanitizeText)
+            .filter(Boolean),
+        )).slice(0, 40)
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 function parseStoredBrandLinkImageUrls(raw: string | null | undefined): string[] {
@@ -4692,52 +4764,13 @@ function isTallDetailImageDimension(width: number, height: number): boolean {
   return ratio >= 1.35 && ratio <= 6.5;
 }
 
-async function createDetailImageCrop(
-  imagePath: string,
-  filePrefix: string,
-  index: number,
-  width: number,
-  height: number
-): Promise<{ path: string; width: number; height: number; size: number } | null> {
-  if (!isTallDetailImageDimension(width, height)) return null;
-
-  const cropSize = Math.min(width, height);
-  const cropTop = Math.min(
-    height - cropSize,
-    Math.max(0, Math.round((height - cropSize) * 0.56))
-  );
-  const cropPath = path.join(TEMP_PATH, `${filePrefix}_detail_crop_${Date.now()}_${index}.jpg`);
-
-  try {
-    await sharp(imagePath)
-      .rotate()
-      .extract({ left: 0, top: cropTop, width: cropSize, height: cropSize })
-      .resize(1080, 1080, {
-        fit: "cover",
-        position: "centre",
-      })
-      .jpeg({ quality: 95, mozjpeg: true })
-      .toFile(cropPath);
-
-    const metadata = await sharp(cropPath).metadata();
-    const stats = fs.statSync(cropPath);
-    return {
-      path: cropPath,
-      width: metadata.width ?? 1080,
-      height: metadata.height ?? 1080,
-      size: stats.size,
-    };
-  } catch {
-    try { fs.unlinkSync(cropPath); } catch {}
-    return null;
-  }
-}
-
 async function materializeProductImages(
   imageUrls: string[],
-  filePrefix: string
-): Promise<{ representativeImagePath: string | null; imagePaths: string[] }> {
-  const prioritizedUrls = prioritizeImageUrls(Array.from(new Set(imageUrls))).slice(0, 15);
+  filePrefix: string,
+  targetImageCount = SHOPPING_BODY_IMAGE_MAX,
+): Promise<{ representativeImagePath: string | null; imagePaths: string[]; detailImagePaths: string[] }> {
+  const candidateLimit = Math.max(targetImageCount + 12, 24);
+  const prioritizedUrls = prioritizeImageUrls(Array.from(new Set(imageUrls))).slice(0, candidateLimit);
   const downloaded: {
     path: string;
     url: string;
@@ -4747,10 +4780,12 @@ async function materializeProductImages(
     height: number;
     detailCrop?: boolean;
   }[] = [];
-  const downloadCount = Math.min(10, prioritizedUrls.length);
+  const inspectionCount = Math.min(candidateLimit, prioritizedUrls.length);
   let representativeImagePath: string | null = null;
+  let regularImageCount = 0;
+  let detailSegmentCount = 0;
 
-  for (let i = 0; i < downloadCount; i++) {
+  for (let i = 0; i < inspectionCount; i++) {
     try {
       const imgPath = path.join(TEMP_PATH, `${filePrefix}_${Date.now()}_${i}.jpg`);
       await downloadImage(prioritizedUrls[i], imgPath);
@@ -4765,20 +4800,35 @@ async function materializeProductImages(
       const metadata = await sharp(imgPath).metadata();
       const width = metadata.width ?? 0;
       const height = metadata.height ?? 0;
-      if (!isUsableBlogProductImageDimension(width, height)) {
-        const detailCrop = await createDetailImageCrop(imgPath, filePrefix, i, width, height);
-        if (detailCrop) {
-          downloaded.push({
+      if (isTallDetailImageDimension(width, height) || !isUsableBlogProductImageDimension(width, height)) {
+        // 스마트스토어 상세페이지는 860x10,000px 이상의 한 장 이미지인 경우가 많다.
+        // 중앙 한 컷만 남기지 않고 원문 전체를 최대 8개 구간으로 보존한다.
+        const detailCrops = await createProductDetailImageSegments({
+          imagePath: imgPath,
+          outputDir: TEMP_PATH,
+          filePrefix,
+          index: i,
+          width,
+          height,
+        });
+        if (detailCrops.length > 0) {
+          const remainingDetailCapacity = Math.max(0, 8 - detailSegmentCount);
+          const acceptedDetailCrops = detailCrops.slice(0, remainingDetailCapacity);
+          downloaded.push(...acceptedDetailCrops.map((detailCrop, segmentIndex) => ({
             path: detailCrop.path,
             url: prioritizedUrls[i],
             size: detailCrop.size,
-            index: i,
+            index: i * 10 + segmentIndex,
             width: detailCrop.width,
             height: detailCrop.height,
             detailCrop: true,
-          });
+          })));
+          for (const unusedDetailCrop of detailCrops.slice(remainingDetailCapacity)) {
+            try { fs.unlinkSync(unusedDetailCrop.path); } catch {}
+          }
+          detailSegmentCount += acceptedDetailCrops.length;
           try { fs.unlinkSync(imgPath); } catch {}
-          console.log(`   ✅ 이미지 ${i + 1}/${downloadCount} 상세 크롭 생성`);
+          console.log(`   ✅ 이미지 ${i + 1}/${inspectionCount} 상세 원문 ${acceptedDetailCrops.length}구간 생성`);
           continue;
         }
         try { fs.unlinkSync(imgPath); } catch {}
@@ -4786,7 +4836,12 @@ async function materializeProductImages(
         continue;
       }
 
+      if (regularImageCount >= targetImageCount) {
+        try { fs.unlinkSync(imgPath); } catch {}
+        continue;
+      }
       downloaded.push({ path: imgPath, url: prioritizedUrls[i], size: stats.size, index: i, width, height });
+      regularImageCount += 1;
       if (
         !representativeImagePath &&
         isPreferredThumbnailImageUrl(prioritizedUrls[i]) &&
@@ -4795,7 +4850,7 @@ async function materializeProductImages(
       ) {
         representativeImagePath = imgPath;
       }
-      console.log(`   ✅ 이미지 ${i + 1}/${downloadCount} 다운로드`);
+      console.log(`   ✅ 이미지 ${i + 1}/${inspectionCount} 다운로드`);
     } catch {
       console.log(`   ⚠️ 다운로드 실패 ${i + 1}`);
     }
@@ -4837,13 +4892,22 @@ async function materializeProductImages(
   return {
     representativeImagePath,
     imagePaths,
+    detailImagePaths: downloaded.filter((item) => item.detailCrop).map((item) => item.path),
   };
 }
 
-async function buildProductInfoFromStoredBrandLink(link: StoredBrandLinkSeed): Promise<ProductInfo | null> {
+async function buildProductInfoFromStoredBrandLink(
+  link: StoredBrandLinkSeed,
+  connectKind: "SHOPPING" | "TRAVEL",
+): Promise<ProductInfo | null> {
   const name = sanitizeText(link.productName || "");
   const price = sanitizeText(link.productPrice || "");
   const imageUrls = parseStoredBrandLinkImageUrls(link.imageUrls);
+  const description = sanitizeText(link.productDescription || "");
+  const features = parseStoredTextArray(link.productFeatures);
+  const travelPageResearch = connectKind === "TRAVEL"
+    ? parseStoredTravelPageResearch(link.travelResearchJson)
+    : null;
 
   if (!name && imageUrls.length === 0 && !price) {
     return null;
@@ -4851,13 +4915,17 @@ async function buildProductInfoFromStoredBrandLink(link: StoredBrandLinkSeed): P
 
   const materializedImages =
     imageUrls.length > 0
-      ? await materializeProductImages(imageUrls, "stored_product")
-      : { representativeImagePath: null, imagePaths: [] };
+      ? await materializeProductImages(
+          imageUrls,
+          "stored_product",
+          connectKind === "TRAVEL" ? TRAVEL_BODY_IMAGE_MAX : SHOPPING_BODY_IMAGE_MAX,
+        )
+      : { representativeImagePath: null, imagePaths: [], detailImagePaths: [] };
 
   return {
     name: name || sanitizeText(link.storeName || "") || "상품",
-    description: sanitizeText(link.storeName || ""),
-    features: [],
+    description: description || sanitizeText(link.storeName || ""),
+    features,
     price,
     originalPrice: "",
     discountRate: "",
@@ -4867,10 +4935,43 @@ async function buildProductInfoFromStoredBrandLink(link: StoredBrandLinkSeed): P
     rating: "",
     representativeImagePath: materializedImages.representativeImagePath,
     imagePaths: materializedImages.imagePaths,
+    detailImagePaths: materializedImages.detailImagePaths,
     sourceImageUrls: imageUrls,
     finalUrl: link.finalUrl || link.url,
     storeName: sanitizeText(link.storeName || ""),
+    travelPageResearch,
   };
+}
+
+async function expandProductDetailSections(page: Page): Promise<number> {
+  await page.evaluate(() => {
+    for (const details of Array.from(document.querySelectorAll("details:not([open])"))) {
+      details.setAttribute("open", "");
+    }
+  }).catch(() => undefined);
+
+  const candidates = page.locator('button[aria-expanded="false"], [role="button"][aria-expanded="false"]');
+  const count = Math.min(await candidates.count().catch(() => 0), 24);
+  let expanded = 0;
+  const usefulLabel = /(?:상품|상세|후기|리뷰|여행|일정|코스|포함|불포함|숙소|항공|식사|더보기|전체보기)/u;
+  for (let index = 0; index < count; index += 1) {
+    const candidate = candidates.nth(index);
+    const label = sanitizeText([
+      await candidate.getAttribute("aria-label").catch(() => ""),
+      await candidate.textContent().catch(() => ""),
+    ].filter(Boolean).join(" "));
+    if (!usefulLabel.test(label)) continue;
+    try {
+      if (await candidate.isVisible()) {
+        await candidate.click({ timeout: 1500 });
+        expanded += 1;
+        await page.waitForTimeout(120);
+      }
+    } catch {
+      // 일부 아코디언은 화면 이동이나 애니메이션 중 클릭을 거부한다. 다음 후보를 계속 확인한다.
+    }
+  }
+  return expanded;
 }
 
 function mergeProductInfo(base: ProductInfo | null, live: ProductInfo): ProductInfo {
@@ -4897,26 +4998,112 @@ function mergeProductInfo(base: ProductInfo | null, live: ProductInfo): ProductI
     rating: live.rating || base.rating,
     representativeImagePath,
     imagePaths,
+    detailImagePaths: Array.from(new Set([...(base.detailImagePaths || []), ...(live.detailImagePaths || [])])),
     sourceImageUrls: Array.from(new Set([...(base.sourceImageUrls || []), ...(live.sourceImageUrls || [])])),
     finalUrl: live.finalUrl || base.finalUrl || null,
     storeName: live.storeName || base.storeName || null,
+    travelPageResearch: live.travelPageResearch || base.travelPageResearch || null,
   };
 }
 
-async function step1_getProductInfo(page: Page, url: string): Promise<ProductInfo> {
+async function step1_getProductInfo(
+  page: Page,
+  url: string,
+  connectKind: "SHOPPING" | "TRAVEL",
+): Promise<ProductInfo> {
   console.log("\n📦 STEP 1: 상품 정보 수집");
   
   await page.goto(url, { timeout: 30000 });
   await page.waitForTimeout(5000);
   const finalUrl = page.url();
+  const expandedSectionCount = await expandProductDetailSections(page);
+  if (expandedSectionCount > 0) {
+    console.log(`   📖 접힌 상세영역 ${expandedSectionCount}개 자동 확장`);
+  }
 
   const bodyText = await page.textContent("body");
   if (bodyText && isSecurityVerificationPage(bodyText)) {
     throw new Error("네이버 보안 인증 페이지가 표시되어 상품 정보를 가져올 수 없습니다. 브라우저에서 인증 후 다시 시도하세요.");
   }
+
+  const structuredProduct = await page.evaluate(() => {
+    const records: Record<string, unknown>[] = [];
+    const visit = (value: unknown) => {
+      if (Array.isArray(value)) {
+        value.forEach(visit);
+        return;
+      }
+      if (!value || typeof value !== "object") return;
+      const record = value as Record<string, unknown>;
+      const rawType = record["@type"];
+      const types = Array.isArray(rawType) ? rawType.map(String) : [String(rawType || "")];
+      if (types.some((type) => /Product|TouristTrip|Trip|Offer/u.test(type))) records.push(record);
+      if (record["@graph"]) visit(record["@graph"]);
+      if (record.itemListElement) visit(record.itemListElement);
+    };
+    for (const script of Array.from(document.querySelectorAll('script[type="application/ld+json"]'))) {
+      try {
+        visit(JSON.parse(script.textContent || "null") as unknown);
+      } catch {
+        // 일부 판매 페이지의 잘못된 JSON-LD는 건너뛴다.
+      }
+    }
+    const product = records.find((record) => /Product|TouristTrip|Trip/u.test(String(record["@type"] || ""))) || records[0] || {};
+    const offers = (Array.isArray(product.offers) ? product.offers[0] : product.offers) as Record<string, unknown> | undefined;
+    const rating = product.aggregateRating as Record<string, unknown> | undefined;
+    const rawReviews = Array.isArray(product.review) ? product.review : product.review ? [product.review] : [];
+    const reviewHighlights = rawReviews.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const review = item as Record<string, unknown>;
+      const value = typeof review.reviewBody === "string"
+        ? review.reviewBody
+        : typeof review.description === "string"
+          ? review.description
+          : "";
+      const normalized = value.replace(/\s+/g, " ").trim();
+      return normalized.length >= 20 ? [normalized.slice(0, 240)] : [];
+    }).slice(0, 4);
+    const additional = Array.isArray(product.additionalProperty) ? product.additionalProperty : [];
+    const features = additional
+      .map((item) => {
+        if (!item || typeof item !== "object") return "";
+        const record = item as Record<string, unknown>;
+        return [record.name, record.value].filter(Boolean).map(String).join(": ");
+      })
+      .filter(Boolean);
+    const keywords = document.querySelector('meta[name="keywords"]')?.getAttribute("content") || "";
+    return {
+      name: typeof product.name === "string" ? product.name : "",
+      description: typeof product.description === "string" ? product.description : "",
+      price: offers && (typeof offers.price === "string" || typeof offers.price === "number") ? String(offers.price) : "",
+      reviewCount: rating && (typeof rating.reviewCount === "string" || typeof rating.reviewCount === "number") ? String(rating.reviewCount) : "",
+      rating: rating && (typeof rating.ratingValue === "string" || typeof rating.ratingValue === "number") ? String(rating.ratingValue) : "",
+      reviewHighlights,
+      features: [...features, ...keywords.split(/[,|]/u).map((item) => item.trim()).filter((item) => item.length >= 3)].slice(0, 12),
+    };
+  });
+
+  let travelPageResearch: TravelPageResearch | null = null;
+  if (connectKind === "TRAVEL") {
+    const nextDataText = await page.locator('script#__NEXT_DATA__[type="application/json"]').textContent().catch(() => null);
+    if (nextDataText) {
+      try {
+        travelPageResearch = extractTravelPageResearch(JSON.parse(nextDataText) as unknown);
+      } catch {
+        travelPageResearch = null;
+      }
+    }
+    if (travelPageResearch) {
+      console.log(
+        `   🧭 여행 일정 구조화: ${travelPageResearch.schedules.length}일 · 핵심 방문지 ${travelPageResearch.highlights.length}곳`,
+      );
+    } else {
+      console.log("   ⚠️ 여행상품 구조화 일정 데이터를 찾지 못했습니다.");
+    }
+  }
   
   // 1. 상품명 추출 (여러 방법 시도)
-  let productName = "";
+  let productName = sanitizeText(structuredProduct.name);
   
   // og:title에서 추출
   const ogTitle = await page.$('meta[property="og:title"]');
@@ -4955,7 +5142,7 @@ async function step1_getProductInfo(page: Page, url: string): Promise<ProductInf
   console.log(`   📌 상품명: ${productName}`);
   
   // 2. 상품 설명 추출
-  let description = "";
+  let description = sanitizeText(structuredProduct.description);
   const descSelectors = [
     '._1s2eOHMQjt',           // 스마트스토어 상품 설명
     '.product_detail_description',
@@ -4995,7 +5182,10 @@ async function step1_getProductInfo(page: Page, url: string): Promise<ProductInf
   }
   
   // 3. 상품 특징/키워드 추출
-  const features: string[] = [];
+  const features: string[] = Array.from(new Set([
+    ...structuredProduct.features.map((value) => sanitizeText(value)).filter(Boolean),
+    ...(travelPageResearch ? travelPageResearchFeatures(travelPageResearch) : []),
+  ]));
   const featureEls = await page.$$('[class*="benefit"], [class*="feature"], [class*="spec"] li');
   for (const el of featureEls.slice(0, 5)) {
     const text = await el.textContent();
@@ -5006,7 +5196,7 @@ async function step1_getProductInfo(page: Page, url: string): Promise<ProductInf
   console.log(`   ✨ 특징: ${features.length}개`);
   
   // 4. 가격 추출
-  let price = "";
+  let price = sanitizeText(structuredProduct.price);
   const priceSelectors = ['._1LY7DqCnwR', '.total_price', '[class*="price"]:not([class*="original"])'];
   for (const selector of priceSelectors) {
     const el = await page.$(selector);
@@ -5097,8 +5287,8 @@ async function step1_getProductInfo(page: Page, url: string): Promise<ProductInf
   if (deliveryInfo) console.log(`   🚚 배송: ${deliveryInfo}`);
 
   // 4-5. 리뷰 수 & 평점 추출
-  let reviewCount = "";
-  let rating = "";
+  let reviewCount = sanitizeText(structuredProduct.reviewCount);
+  let rating = sanitizeText(structuredProduct.rating);
   const reviewSelectors = [
     '[class*="review"]', '[class*="rating"]',
     '._2LvUD5PAiM',  // 스마트스토어 리뷰
@@ -5122,10 +5312,56 @@ async function step1_getProductInfo(page: Page, url: string): Promise<ProductInf
   }
   if (reviewCount) console.log(`   ⭐ 리뷰: ${reviewCount}개`);
   if (rating) console.log(`   ⭐ 평점: ${rating}`);
+
+  // 후기 탭을 열기 전에 판매페이지 이미지를 먼저 보존한다. 일부 스토어는 탭 전환 시
+  // 상세 이미지 DOM을 제거하므로 후기 수집 때문에 제품 이미지가 사라지면 안 된다.
+  const preReviewImageUrls = connectKind === "SHOPPING"
+    ? await collectProductImageUrlsFromPage(page)
+    : [];
+
+  if (connectKind === "SHOPPING") {
+    const reviewTab = page.locator('button, [role="tab"]').filter({
+      hasText: /^(?:리뷰|구매후기|상품평)(?:\s*[\d,]+)?$/u,
+    }).first();
+    if (await reviewTab.isVisible().catch(() => false)) {
+      await reviewTab.click({ timeout: 1800 }).catch(() => undefined);
+      await page.waitForTimeout(800);
+    }
+    const reviewHighlights = new Set<string>(
+      structuredProduct.reviewHighlights.map((value) => sanitizeText(value)).filter(Boolean),
+    );
+    const reviewTextSelectors = [
+      '[class*="review"] [class*="content"]',
+      '[class*="review"] [class*="text"]',
+      '[class*="Review"] [class*="content"]',
+      '[class*="Review"] [class*="text"]',
+    ];
+    for (const selector of reviewTextSelectors) {
+      const candidates = page.locator(selector);
+      const count = Math.min(await candidates.count().catch(() => 0), 12);
+      for (let index = 0; index < count && reviewHighlights.size < 4; index += 1) {
+        const value = sanitizeText((await candidates.nth(index).textContent().catch(() => "")) || "");
+        if (value.length < 20 || value.length > 260) continue;
+        if (/(?:리뷰\s*전체|포토\s*리뷰|평점|신고|도움이\s*돼요|작성자|옵션)/u.test(value)) continue;
+        reviewHighlights.add(value);
+      }
+      if (reviewHighlights.size >= 4) break;
+    }
+    for (const value of reviewHighlights) {
+      features.push(`구매후기 근거: ${value}`);
+    }
+    if (reviewHighlights.size > 0) {
+      console.log(`   💬 구매후기 원문 근거: ${reviewHighlights.size}건`);
+    }
+  }
   
   // 5. 상품 이미지 URL 추출
   console.log("   🖼️ 이미지 URL 추출 중...");
-  const imageUrls = (await collectProductImageUrlsFromPage(page)).slice(0, 15);
+  const imageCandidateMax = connectKind === "TRAVEL" ? 32 : 20;
+  const imageUrls = Array.from(new Set([
+    ...preReviewImageUrls,
+    ...(await collectProductImageUrlsFromPage(page)),
+  ])).slice(0, imageCandidateMax);
   const salesPageImageCount = imageUrls.filter((url) => isSalesPageProductImageUrl(url)).length;
   const reviewImageCount = imageUrls.filter((url) => isReviewImageUrl(url)).length;
   console.log(
@@ -5135,7 +5371,11 @@ async function step1_getProductInfo(page: Page, url: string): Promise<ProductInf
     console.log(`   🖼️ 대표 이미지 후보: ${imageUrls[0]}`);
     console.log(`   🖼️ 썸네일 원본 적합: ${isPreferredThumbnailImageUrl(imageUrls[0]) ? "예" : "아니오"}`);
   }
-  const { representativeImagePath, imagePaths } = await materializeProductImages(imageUrls, "product");
+  const { representativeImagePath, imagePaths, detailImagePaths } = await materializeProductImages(
+    imageUrls,
+    "product",
+    connectKind === "TRAVEL" ? TRAVEL_BODY_IMAGE_MAX : SHOPPING_BODY_IMAGE_MAX,
+  );
   
   return {
     name: productName,
@@ -5150,9 +5390,11 @@ async function step1_getProductInfo(page: Page, url: string): Promise<ProductInf
     rating,
     representativeImagePath,
     imagePaths,
+    detailImagePaths,
     sourceImageUrls: imageUrls,
     finalUrl,
     storeName,
+    travelPageResearch,
   };
 }
 
@@ -5202,7 +5444,7 @@ async function downloadImage(url: string, filePath: string): Promise<void> {
 }
 
 // ============================================
-// AI 공통 호출 함수 (OpenAI)
+// AI 공통 호출 함수 (OpenAI / Gemini)
 // ============================================
 const HUMANIZE_SECTION_SEPARATOR = "\n\n<<<섹션구분>>>\n\n";
 
@@ -5223,10 +5465,14 @@ async function rewriteSectionsForHumanTone(
 
   let rewritten = "";
   try {
-    rewritten = await runOpenAiApi(
-      "당신은 한국어 문장을 자연스럽게 다듬는 편집자입니다. 지시받은 형식 규칙을 정확히 지키세요.",
-      prompt
-    );
+    if (OPENAI_API_KEY) {
+      rewritten = await runOpenAiApi(
+        "당신은 한국어 문장을 자연스럽게 다듬는 편집자입니다. 지시받은 형식 규칙을 정확히 지키세요.",
+        prompt
+      );
+    } else {
+      return sections;
+    }
   } catch (error) {
     console.log(`   ⚠️ 휴머나이징 재작성 실패, 원문 유지: ${getErrorMessage(error)}`);
     return sections;
@@ -5259,7 +5505,6 @@ async function generateWithAI(
   chatgptContext?: ChatGPTGuidanceContext,
   chatgptImagePaths: string[] = []
 ): Promise<string> {
-
   if (BROWSER_GPT_MODE) {
     if (!chatgptContext) {
       throw new Error("Browser ChatGPT 모드에 필요한 가이드 컨텍스트가 없습니다.");
@@ -5270,6 +5515,28 @@ async function generateWithAI(
     } catch (error) {
       const reason = getErrorMessage(error);
       throw new Error(`Browser ChatGPT 실패: ${reason}`);
+    }
+  }
+
+  if (AI_PROVIDER === "codex") {
+    try {
+      return await runCodexDraft({
+        systemPrompt,
+        userPrompt,
+        imagePaths: chatgptImagePaths,
+        timeoutMs: CODEX_DRAFT_TIMEOUT_MS,
+        model: CODEX_DRAFT_MODEL || undefined,
+        reasoningEffort: CODEX_DRAFT_REASONING_EFFORT,
+        researchMode: chatgptContext?.connectKind === "TRAVEL" ? "cached" : "disabled",
+        onProgress: (message) => console.log(`   ✦ ${message}`),
+      });
+    } catch (error) {
+      const reason = getErrorMessage(error);
+      if (CODEX_BROWSER_FALLBACK_ENABLED && ALLOW_CHATGPT_BROWSER_MODE && chatgptContext) {
+        console.log(`   ⚠️ Codex 작성 실패, ChatGPT 웹 자동작성으로 전환: ${reason}`);
+        return runChatGPTBrowserTwoPass(systemPrompt, userPrompt, chatgptContext, chatgptImagePaths);
+      }
+      throw new Error(`Codex 작성 실패: ${reason}`);
     }
   }
 
@@ -5287,8 +5554,25 @@ async function step2_generatePost(
   specInput?: SpecStep2Input | null
 ): Promise<GeneratedPostPreview> {
   const isTravel = connectKind === "TRAVEL";
+  // 판매/여행 페이지의 과도한 본문이나 삽입 지시가 모델 컨텍스트를 잠식하지 않도록
+  // 사실 필드의 크기를 제한한다. 페이지 텍스트는 어디까지나 데이터로만 취급한다.
+  product.name = sanitizeText(product.name)
+    .replace(/(\d+\s*일)\s*변경(?=\s*(?:상품|$))/gu, "$1")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+    .slice(0, 300);
+  product.description = sanitizeText(product.description).slice(0, 12_000);
+  product.features = Array.from(new Set(product.features
+    .map((feature) => sanitizeText(feature).slice(0, 500))
+    .filter(Boolean))).slice(0, 12);
+  if (BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE" && BRANDLINK_EXPERIENCE_NOTES.length < 20) {
+    throw new Error("실제 체험형 문체를 사용하려면 구체적인 체험 사실 메모가 필요합니다.");
+  }
   console.log(`\n📝 STEP 2: SEO 최적화 블로그 글 생성 (확장판${isTravel ? " · 여행" : ""})`);
-  console.log(`   🤖 AI Provider: ${AI_PROVIDER.toUpperCase()} (${OPENAI_MODEL})`);
+  console.log(`   🤖 AI Provider: ${AI_PROVIDER.toUpperCase()}`);
+  if (REQUESTED_AI_PROVIDER !== AI_PROVIDER) {
+    console.log(`      - 요청 Provider ${REQUESTED_AI_PROVIDER.toUpperCase()} 대신 ${AI_PROVIDER.toUpperCase()} API로 진행합니다.`);
+  }
   if (REQUESTED_BROWSER_GPT_MODE && !ALLOW_CHATGPT_BROWSER_MODE) {
     console.log("   🌐 Browser ChatGPT Mode: OFF (ChatGPT/opencode 미사용 설정)");
   }
@@ -5303,11 +5587,26 @@ async function step2_generatePost(
     }
   }
   
-  const bodySectionCount = BROWSER_GPT_MODE
-    ? (isTravel ? Math.max(CHATGPT_DEFAULT_SUBTITLE_COUNT, 10) : CHATGPT_DEFAULT_SUBTITLE_COUNT)
-    : isTravel
-      ? Math.max(Math.min(product.imagePaths.length + 2, 12), 10)
-      : Math.max(Math.min(product.imagePaths.length, 10), 8);
+  const compositionContract = getPostCompositionContract(connectKind);
+  const adaptiveEditorialProfile = getAdaptiveEditorialProfile(connectKind);
+  const minimumBodySectionCount = Math.max(
+    compositionContract.targetSections.min,
+    adaptiveEditorialProfile.sectionRange.min,
+  );
+  const maximumBodySectionCount = Math.min(
+    compositionContract.targetSections.max,
+    adaptiveEditorialProfile.sectionRange.max,
+  );
+  const bodySectionCount = Math.min(
+    maximumBodySectionCount,
+    Math.max(minimumBodySectionCount, adaptiveEditorialProfile.sectionRange.preferred),
+  );
+  const compositionPromptBlock = formatPostContractForPrompt(compositionContract);
+  const adaptiveEditorialPromptBlock = formatAdaptiveEditorialHarnessForPrompt(connectKind);
+  const experiencePromptBlock =
+    BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE"
+      ? `[검증된 실제 체험 메모]\n${BRANDLINK_EXPERIENCE_NOTES}\n- 위 메모에 명시된 체험 사실만 1인칭으로 표현하고 나머지는 정보형으로 씁니다.`
+      : "[작성 모드: AI 정보 정리]\n- 실제 구매·사용·방문 경험을 만들지 않습니다. 체험 후기처럼 단정하지 않습니다.";
   const openCrabSeoBrief = buildOpenCrabSeoBrief({
     productId,
     productName: product.name,
@@ -5318,7 +5617,17 @@ async function step2_generatePost(
   });
   const openCrabPromptBlock = formatOpenCrabSeoBriefForPrompt(openCrabSeoBrief);
 
-  if (POST_SPEC_PIPELINE_ENABLED && !BROWSER_GPT_MODE && specInput) {
+  // Spec-first 파이프라인(기본 경로): 이미지 플랜을 먼저 확정하고 섹션 수를 그로부터 파생한 뒤
+  // json_schema 구조화 생성 → 전 신호 검증 → 섹션 단위 타깃 수리 순으로 진행한다.
+  // ChatGPT 2단계(context/제출) 모드, 브라우저 모드, Codex 모드에서는 기존 경로를 쓴다.
+  if (
+    POST_SPEC_PIPELINE_ENABLED &&
+    specInput &&
+    !BROWSER_GPT_MODE &&
+    AI_PROVIDER === "openai" &&
+    !BRANDLINK_GENERATED_DRAFT_PATH &&
+    !BRANDLINK_DRAFT_CONTEXT_OUTPUT
+  ) {
     console.log("   🧭 Spec-first: 이미지 플랜 → 스펙 → 구조화 생성 → 검증/타깃 수리 → 조립");
     const result = await runSpecFirstPipeline({
       kind: connectKind,
@@ -5358,38 +5667,96 @@ async function step2_generatePost(
       title: result.title,
       sections: result.sections,
       hashtags: result.hashtags,
+      generationSource: "AI",
       rawResponse: `spec-first:${result.generationSource}`,
       openCrabSeoBrief,
       productEditorialPlan: null,
+      editorialQuality: null,
+      qualityRepair: null,
       assembled: result,
       notes: result.notes,
     };
   }
-
-  const productEditorialPlan = buildProductEditorialPlan({
-    productName: product.name,
-    description: product.description,
-    features: product.features,
-    price: product.price,
-    originalPrice: product.originalPrice,
-    discountRate: product.discountRate,
-    couponInfo: product.couponInfo,
-    deliveryInfo: product.deliveryInfo,
-    reviewCount: product.reviewCount,
-    rating: product.rating,
-    targetSectionCount: bodySectionCount,
-  });
-  const productEditorialPromptBlock = formatProductEditorialPlanForPrompt(productEditorialPlan);
+  let productEditorialPlan = isTravel
+    ? null
+    : buildProductEditorialPlan({
+        productName: product.name,
+        description: product.description,
+        features: product.features,
+        price: product.price,
+        originalPrice: product.originalPrice,
+        discountRate: product.discountRate,
+        couponInfo: product.couponInfo,
+        deliveryInfo: product.deliveryInfo,
+        reviewCount: product.reviewCount,
+        rating: product.rating,
+        targetSectionCount: bodySectionCount,
+      });
+  const productEditorialPromptBlock = productEditorialPlan
+    ? formatProductEditorialPlanForPrompt(productEditorialPlan)
+    : "";
   const travelFacts = isTravel
     ? extractTravelProductFacts(product.name, product.description, product.features)
     : null;
   const travelFactsPromptBlock = travelFacts ? formatTravelFactsForPrompt(travelFacts) : "";
+  const travelPageResearchPromptBlock = isTravel && product.travelPageResearch
+    ? formatTravelPageResearchForPrompt(product.travelPageResearch)
+    : "";
+  const travelReviewAnalysis = isTravel
+    ? buildTravelReviewAnalysis(product)
+    : null;
+  const travelReviewPromptBlock = travelReviewAnalysis
+    ? formatTravelReviewAnalysisForPrompt(travelReviewAnalysis)
+    : "";
   const travelEditorialPlan = isTravel
-    ? buildTravelEditorialPlan(product, bodySectionCount)
+    ? buildTravelContractEditorialPlan(product)
     : [];
   const travelEditorialPromptBlock = isTravel
     ? formatTravelEditorialPlanForPrompt(travelEditorialPlan)
     : "";
+  const editorialPromptBlock = isTravel
+    ? [travelPageResearchPromptBlock, travelFactsPromptBlock, travelReviewPromptBlock, travelEditorialPromptBlock]
+        .filter(Boolean)
+        .join("\n\n")
+    : productEditorialPromptBlock;
+  const editorialSectionTitles = isTravel
+    ? travelEditorialPlan.map((section) => section.title)
+    : productEditorialPlan?.sections.map((section) => section.title) ?? [];
+  const qualityEvidenceAnchors = Array.from(new Set(
+    (isTravel
+      ? [
+          ...(travelFacts?.destinations || []),
+          ...(travelFacts?.highlights || []),
+          ...(product.travelPageResearch?.highlights.map((item) => item.name) || []),
+          ...(product.travelPageResearch?.schedules.flatMap((item) => item.activities.filter((activity) => activity.length <= 80).slice(0, 4)) || []),
+        ]
+      : [
+          ...(productEditorialPlan?.reviewAnalysis.verifiedSignals || []),
+          ...product.features,
+        ])
+      .map((value) => value.replace(/\s+/g, " ").trim())
+      .filter((value) => value.length >= 2)
+  )).slice(0, 14);
+  const minimumEvidenceAnchorCount = Math.min(
+    isTravel ? 3 : 4,
+    Math.max(1, qualityEvidenceAnchors.length),
+  );
+  const minimumEvidenceLinkedJudgements = Math.min(
+    3,
+    Math.max(1, qualityEvidenceAnchors.length),
+  );
+  const qualitySelfReviewPromptBlock = `[제출 전 내부 품질검사 · 본문에 체크리스트를 노출하지 않기]
+- 먼저 ${isTravel ? "이 여행지만의 편집 논지 1개를 정합니다: 고유한 배경 + 대표 장면 + 꼭 해볼 경험." : "이 상품만의 편집 논지 1개를 정합니다: 가장 큰 선택 이유 + 가장 큰 대가 + 잘 맞는 독자."}
+- 아래 확인 근거 중 서로 다른 ${minimumEvidenceAnchorCount}개 이상을 본문 판단에 실제로 사용합니다: ${qualityEvidenceAnchors.join(" / ") || "상품명과 수집 상세정보"}
+- 최소 ${minimumEvidenceLinkedJudgements}개 판단은 "근거 사실 → ${isTravel ? "눈앞의 여행 장면 → 즐길 거리 또는 실용 팁" : "작동 방식 → 사용 장면의 이점 또는 한계"}"가 한 흐름으로 연결되어야 합니다.
+- ${isTravel
+  ? "장소 이름을 나열하는 데서 멈추지 말고, 각 장소의 역사·문화 배경, 실제 분위기, 할 수 있는 경험과 현지 팁을 구체적으로 설명합니다."
+  : "기능을 나열하는 데서 멈추지 말고, 어떤 원리로 작동하며 어떻게 설치·조작·충전·세척·보관하는지와 실제로 줄여주는 불편을 설명합니다."}
+- ${isTravel ? "가격·포함조건·상품 장단점·추천 대상을 본문 목차로 만들지 않습니다." : "상세페이지 낭독형 문장은 제거하고, 구매후기 원문이 있으면 반복 장점을 근거와 함께 따로 분석합니다."}
+- 정보가 없는 항목은 억지로 언급하지 않고, 여러 섹션을 '확인 필요' 문장으로 채우지 않습니다.
+- ${isTravel ? '"보입니다", "인 것 같아요", "일 듯해요"가 한 번이라도 나오면 확정적인 사실 문장 또는 구체적인 장면 문장으로 다시 씁니다.' : "과장된 단정과 근거 없는 체험을 제거합니다."}
+- 초안을 쓴 뒤 상품 고유명사를 다른 상품명으로 바꿔도 자연스러운 문단은 다시 작성합니다.
+- 제목·본문·해시태그 JSON을 내기 전에 위 기준을 내부적으로 다시 검사하고, 미달이면 스스로 보강합니다.`;
   if (openCrabSeoBrief) {
     console.log(
       `   OpenCrab SEO: ${openCrabSeoBrief.matchType} match, confidence=${openCrabSeoBrief.confidence}, images=${openCrabSeoBrief.mediaTargetImageCount}`
@@ -5407,72 +5774,84 @@ async function step2_generatePost(
   // 인트로 변화를 위한 랜덤 요소. 직접 구매/사용을 단정하지 않는 관찰형 힌트만 사용한다.
   const intros = isTravel
     ? [
-        "일정과 포함 사항을 기준으로 정리해봤어요",
-        "예약 전에 확인할 조건들을 먼저 살펴봤어요",
-        "코스 구성을 보면서 동선을 그려봤어요",
-        "가격에 뭐가 포함되는지부터 확인해봤어요",
-        "여행 시기와 조건을 같이 놓고 봤어요",
+        "도착하는 순간 가장 먼저 눈에 들어오는 풍경부터 시작해요",
+        "오래된 거리와 오늘의 일상이 겹치는 장면을 따라가요",
+        "대표 명소보다 그 장소를 특별하게 만드는 이야기부터 만나봐요",
+        "아침 풍경부터 노을과 야경까지 하루의 장면을 이어가요",
+        "처음 가는 여행자도 바로 즐길 수 있는 장소와 팁을 담아요",
       ]
     : [
-        "상세 정보를 보면서 구매 전 기준을 정리해봤어요",
-        "후기와 스펙을 같이 확인해봤어요",
-        "옵션을 고르기 전에 체크할 점이 보였어요",
-        "가격과 구성을 기준으로 살펴봤어요",
-        "상품 이미지를 보면서 포인트를 정리했어요"
+        "이 제품이 해결하려는 문제와 구조상 한계를 같이 봤어요",
+        "핵심 기능이 실제 사용 장면에서 어떤 차이를 만드는지 봤어요",
+        "비슷한 제품과 갈리는 선택 기준부터 정리해봤어요",
+        "기능 수보다 내 사용 조건에 맞는지를 중심으로 봤어요",
+        "가장 분명한 장점과 감수해야 할 대가를 함께 놓고 봤어요"
       ];
   const randomIntro = intros[Math.floor(Math.random() * intros.length)];
 
   const endings = isTravel
     ? [
-        "예약 전 일정·포함 조건은 꼭 확인해보세요",
-        "출발일 기준으로 가격이 달라질 수 있어요",
-        "동행 유형에 맞는 옵션인지 살펴보면 좋아요",
-        "취소·변경 규정은 예약 페이지에서 확인하세요",
-        "비슷한 코스와 비교해보고 결정해도 늦지 않아요",
+        "마지막에는 그 도시만의 빛과 거리 풍경이 오래 기억에 남아요",
+        "사진 한 장보다 직접 걷고 듣고 맛보는 시간이 여행을 완성해요",
+        "배경을 알고 걸으면 익숙한 명소도 전혀 다른 장면으로 다가와요",
+        "낮의 활기와 저녁의 분위기를 함께 누리면 여행지의 표정이 선명해져요",
+        "대표 장소마다 이야기를 하나씩 알고 가면 여행의 밀도가 달라져요",
       ]
     : [
-        "구매 전 비교 기준으로 보기 좋아요", "옵션 확인 후 고르면 좋겠어요",
-        "필요한 분께 참고가 될 만해요", "가격과 구성을 함께 보면 좋아요",
-        "상세 조건은 한 번 더 확인해보세요"
+        "핵심 기능이 내 사용 조건에 맞을 때 선택 이유가 선명해져요",
+        "편의와 구조적 제약 중 어느 쪽이 큰지가 최종 기준이에요",
+        "자주 쓰는 장면에서 강점이 살아나는지로 판단하는 편이 실용적이에요",
+        "가격보다 해결하려는 문제가 분명한지가 먼저예요",
+        "장점의 근거와 감수할 한계가 모두 맞을 때 후보가 될 수 있어요"
       ];
   const randomEnding = endings[Math.floor(Math.random() * endings.length)];
 
   const systemPrompt = `당신은 인기 네이버 블로거입니다.
-${BLOG_HUMANIZE_MOBILE_STYLE ? buildHumanMobileStyleGuide() : "- 친근하고 솔직한 ~요체 사용"}
+${BLOG_HUMANIZE_MOBILE_STYLE ? buildHumanMobileStyleGuide(isTravel ? TRAVEL_VLOG_STYLE_GUIDE : SHOPPING_EXPERT_REVIEW_STYLE_GUIDE) : "- 친근하고 솔직한 ~요체 사용"}
 - 상품 정보, 가격, 이미지에서 확인되는 요소를 정확히 이해하고 자연스럽게 작성
-- 실제 사용 여부가 제공되지 않은 내용은 단정하지 말고 상황형 표현으로 풀어쓰기
+- ${isTravel ? "여행지의 검증된 사실은 확실하게 쓰고, 직접 방문했다는 1인칭 경험만 만들지 않기" : "실제 사용 여부가 제공되지 않은 내용은 단정하지 말고 상황형 표현으로 풀어쓰기"}
 - SEO를 위해 상품명, 관련 키워드를 자연스럽게 본문에 포함
 - 매번 조금씩 다른 표현 사용 (똑같은 문구 반복 금지)
 - 과장 없이 신뢰감 있게 작성
 ${NAVER_SEO_TITLE_RULES}
 ${BLOG_HUMANIZE_MOBILE_STYLE ? `\n${HUMANIZE_RULES}` : ""}
 ${openCrabPromptBlock ? `\n${openCrabPromptBlock}` : ""}
+${travelPageResearchPromptBlock ? `\n${travelPageResearchPromptBlock}` : ""}
 ${travelFactsPromptBlock ? `\n${travelFactsPromptBlock}` : ""}
-${travelEditorialPromptBlock ? `\n${travelEditorialPromptBlock}` : ""}`;
+${travelReviewPromptBlock ? `\n${travelReviewPromptBlock}` : ""}
+${travelEditorialPromptBlock ? `\n${travelEditorialPromptBlock}` : ""}
+${adaptiveEditorialPromptBlock ? `\n${adaptiveEditorialPromptBlock}` : ""}
+${qualitySelfReviewPromptBlock ? `\n${qualitySelfReviewPromptBlock}` : ""}
+${compositionPromptBlock ? `\n${compositionPromptBlock}` : ""}
+${experiencePromptBlock ? `\n${experiencePromptBlock}` : ""}`;
 
-  // 여행 상품은 리뷰가 아니라 "예약 전 정보 정리 글"이다. 일정·포함사항·여행지
-  // 정보를 제공된 데이터와 널리 알려진 사실 안에서만 쓰도록 별도 계획을 준다.
-  const travelSectionPlan = `4. 섹션 구성 (${bodySectionCount}개, 아래 순서를 유지):
+  // 상품 페이지는 일정과 장소를 찾는 시드로만 쓰고, 본문은 여행지 브이로그형 정보 글로 만든다.
+  const travelSectionPlan = `4. 여행지 브이로그 렌즈 후보 (필요한 것만 선택·병합·순서 조정):
 ${travelEditorialPlan.map((section, index) => `   ${index + 1}) ${section.title}: ${section.purpose}`).join("\n")}
 
-   편집 구도:
-   - 첫 화면: 대표 여행사진 다음에 검색 키워드와 여행지의 핵심 분위기를 3~5줄로 제시
-   - 초반 30%: 기간·목적지·여행지 배경·전체 코스·출발조건을 먼저 요약
-   - 중반: 여행지 정보(대표 장소·교통·날씨·준비물)를 실제 방문 전 검색 가이드처럼 설명
-   - 후반: 코스 포인트·이동 강도·식사/숙박·포함/불포함·추가비용·추천 여행자·예약 전 체크
-   - 마지막: 경제적 이해관계 고지 다음에 여행커넥트 외부 링크 카드 삽입
+   편집 방향:
+   - 상품 상세페이지에서는 방문 도시·명소·일정 순서만 뽑고, 상품 설명은 본문에 옮기지 않기
+   - 일정형 브이로그 또는 장소형 브이로그 가운데 여행 장면이 가장 풍부한 흐름을 선택하기
+   - 원본 일정에 나온 장소만 대상으로 공식 관광청·공공기관 등 신뢰 가능한 출처의 안정적인 여행정보를 조사해 보강하기
+   - 각 핵심 장소마다 역사·문화 배경, 현장 풍경과 분위기, 할 수 있는 활동, 음식·사진 포인트, 실용 팁을 연결하기
+   - 조사한 사실은 백과사전처럼 나열하지 말고 "도착 장면 → 배경 이야기 → 무엇을 즐길지 → 현지 팁"의 흐름으로 풀기
+   - 가격·할인·포함조건·상품 장단점·추천/비추천 여행자를 독립 섹션으로 만들지 않기
+   - 홍보는 구체적인 풍경과 경험으로 하고, 예약을 압박하거나 상품명을 반복하지 않기
+   - 여행커넥트 레퍼럴 카드는 에디터가 본문 초반과 마지막에 자동 삽입
 
    ⚠️ 사실 기반 원칙 (여행):
-   - 위 "상품 정보"에 없는 일정·가격·포함사항·호텔 등급을 지어내지 마세요.
-   - 방문지 설명은 그 지역에 대해 널리 알려진 사실(대표 명소, 지리, 계절 특성)만 쓰고,
+   - 위 "원본 여행상품 일정 근거"에 없는 방문지를 확정 일정처럼 지어내지 마세요.
+   - 방문지 설명은 원본 일정에 나온 장소를 공식 관광청·공공기관 자료로 교차 확인한 안정적 사실만 쓰고,
      영업시간·입장료·최신 행사처럼 변동되는 세부 정보는 단정하지 마세요.
-   - 실제 다녀온 것처럼 "다녀왔다", "먹어봤다"라고 단정하지 마세요.
+   - 실제 다녀온 것처럼 "제가 다녀왔다", "먹어봤다"라고 말하지 마세요. 대신 독자가 현장에 들어간 듯한 장면형 문장을 쓰세요.
+   - "보입니다", "보여요", "인 것 같아요", "일 듯해요", "판단됩니다"는 사용하지 마세요.
+   - "확인하세요·살펴보세요·비교하세요" 같은 안내형 종결은 글 전체 3회를 넘기지 마세요.
    - 동일한 소제목이나 문단을 반복해서 글자 수를 채우지 마세요.`;
   const contentFactsPrompt = isTravel
-    ? `- 여행상품명: ${product.name}\n${travelFactsPromptBlock}\n- 표시 가격: ${product.price || "출발일별 확인 필요"}\n- 상세 URL: ${product.finalUrl || brandLink}`
+    ? `- 내부 일정 식별용 상품명(본문 반복 금지): ${product.name}\n${travelPageResearchPromptBlock}\n${travelFactsPromptBlock}\n- 리서치 시드 URL(상품 설명 인용 금지): ${product.finalUrl || brandLink}`
     : `- 상품명: ${product.name}\n- 설명: ${product.description || '(상품 설명 참고)'}\n- 특징: ${product.features.join(', ') || '(상품 특징 참고)'}\n- 가격: ${product.price || '(가격 정보 참고)'}\n${product.originalPrice ? `- 원가: ${product.originalPrice}` : ''}\n${product.discountRate ? `- 할인율: ${product.discountRate}` : ''}\n${product.couponInfo ? `- 쿠폰/혜택: ${product.couponInfo}` : ''}\n${product.deliveryInfo ? `- 배송: ${product.deliveryInfo}` : ''}\n${product.reviewCount ? `- 리뷰: ${product.reviewCount}개` : ''}\n${product.rating ? `- 평점: ${product.rating}점` : ''}`;
 
-  const userPrompt = `다음 ${isTravel ? "여행 상품을 예약 전 검토하는 블로그 글" : "상품의 상세 블로그 리뷰"}를 작성해주세요.
+  const userPrompt = `다음 ${isTravel ? "일정에 등장하는 여행지를 깊이 있게 소개하는 브이로그형 네이버 블로그 글" : "제품의 특장점·기능 원리·사용법·활용 장면·후기 근거를 깊이 있게 설명하는 네이버 블로그 리뷰"}를 작성해주세요.
 
 ## 상품 정보
 ${contentFactsPrompt}
@@ -5482,31 +5861,44 @@ ${contentFactsPrompt}
 - 마무리 힌트: "${randomEnding}"
 - 이 힌트를 참고해서 자연스럽게 변형해서 사용
 - 휴대폰으로 블로그 앱에서 쓰는 글처럼 짧고 부드럽게 작성
-- 광고 문구보다 실제 구매를 고민하는 사람의 말투로 작성
+- ${isTravel ? "독자가 여행지의 분위기와 즐길 거리를 구체적으로 떠올리고 떠나고 싶어지는 확실한 말투로 작성" : "제품을 충분히 분석한 전문가가 실제 활용법을 알려주는 확실하고 구체적인 말투로 작성"}
 ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일 버전 고정" : ""}
 
 ## 작성 규칙
 1. 제목: ${isTravel ? "핵심 여행지 검색 키워드를 맨 앞에 + 상품명" : "핵심 검색 키워드(상품 카테고리)를 맨 앞에 + 상품명"}, 25-35자
    - 제목에는 이모지를 절대 넣지 마세요.
+   ${BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE"
+     ? "- 제목의 체험 표현은 제공된 실제 체험 메모로 증명되는 범위에서만 사용하세요."
+     : "- 실제 체험 증빙이 없으므로 제목에 후기, 내돈내산, 실사용, 직접 써본, 직접 다녀온 표현을 넣지 마세요."}
    - "완벽 가이드", "총정리", "꿀팁" 같은 낚시성 문구 금지 (네이버 스팸 기준).
-   예: ${isTravel ? '"제주 서부 코스 | ○○ 패키지 일정과 포함사항"' : '"아기비데 추천 | 해피달링 시그니처 워터탭 솔직 후기"'}
+   예: ${isTravel ? '"타이베이 단수이 여행, 노을과 골목을 걷는 4일"' : '"아기비데 추천 | 해피달링 워터탭 선택 기준"'}
 
-2. 본문을 정확히 ${bodySectionCount}개 섹션으로 작성
-   - 여행 글 전체 분량은 공백 제외 2,600~3,500자, 쇼핑 글은 1,300~1,800자.
+2. 본문은 근거 밀도에 따라 ${minimumBodySectionCount}~${maximumBodySectionCount}개 흐름으로 자유롭게 구성
+   - ${bodySectionCount}개는 중앙 참고값이며 정확한 개수·제목·순서를 강제하지 않습니다.
+   - 전체 분량은 공백 제외 ${compositionContract.targetCharacters.min}~${compositionContract.targetCharacters.max}자를 품질 점검 범위로 참고합니다.
    - 글자보다 이미지가 본체입니다. 문장은 사진 사이를 잇는 역할로 짧게.
+   ${isTravel ? "" : "- 첨부된 상세페이지 이미지의 글자와 사양표는 내부 evidenceFacts로만 정리하고, 본문에는 복사하지 말고 기능 원리·사용법·활용 이점으로 변환하세요."}
 
 3. 각 섹션 구조:
    - 소제목 (한 줄, 이모지 금지)
    - 빈 줄
-   - 본문 3-5문장 (각 문장 끝에 줄바꿈, 각 문장 25-45자)
+   - ${isTravel
+     ? "각 흐름은 처음부터 반드시 5~6개의 완결된 문장으로 작성합니다. 4문장 이하로 줄이지 마세요."
+     : "각 흐름은 처음부터 4~6개의 완결된 문장으로 작성합니다. 3문장 이하로 줄이지 마세요."}
+   - 문장 수를 채우기 위해 같은 뜻을 반복하지 말고, 서로 다른 사실·장면·판단을 한 문장씩 배치합니다.
    - 한 문장에 정보 하나만 담고, 어색하면 더 짧게 나누기
-   - 여행 글은 한 섹션 120~220자로 쓰고 정보→여행 장면→독자가 확인할 항목 순서로 쓰기
+   - 여행 글은 배경지식→눈앞의 장면→즐길 거리→현지 팁이 자연스럽게 이어지도록 쓰되, 매번 같은 순서를 반복하지 않기
+   - 글 전체에서 상품 고유 사실과 그 사실에 대한 판단이 연결되도록 쓰기
+   ${isTravel ? "- 상품을 고를 조건이 아니라, 여행지에서 놓치지 말아야 할 장면과 경험으로 마지막을 맺습니다." : "- 제품 글은 기능→작동 방식→사용 방법→실제 이점 또는 한계가 이어지도록 씁니다."}
+   - "확인하세요·살펴보세요·비교해보세요" 같은 문장은 글 전체 3회 이하
    - 빈 줄
 
-4. 섹션 구성 (${bodySectionCount}개):
+4. 선택 가능한 분석·전개 렌즈:
 ${isTravel
   ? travelSectionPlan
-  : `${productEditorialPlan.sections.map((section, index) => `   ${index + 1}) ${section.title}: ${section.purpose}`).join("\n")}
+  : `${productEditorialPlan?.sections.map((section, index) => `   ${index + 1}) ${section.title}: ${section.purpose}`).join("\n") ?? ""}
+
+   위 항목은 후보입니다. 상품 분석 결과에 맞는 것만 선택하고, 서로 겹치면 합치거나 순서를 바꾸세요.
 
 ${productEditorialPromptBlock}
 
@@ -5519,20 +5911,29 @@ ${productEditorialPromptBlock}
    - 본문 중간중간 관련 키워드 자연스럽게 배치
    - 같은 키워드를 연속 반복하지 않기
 
-6. ${isTravel ? "여행상품 검토 기준" : "할인/특가 정보 활용 (있는 경우만)"}:
-${isTravel ? `   - 상품명이 아니라 일정표에서 확인된 코스만 확정적으로 표현
-   - 여행지의 배경과 대표 볼거리, 이동 방법, 계절·복장·준비물, 식사·숙박, 포함/불포함, 추가비용, 여행 강도, 추천 여행자 순서로 분석
-   - 여행을 처음 검색하는 독자가 출발 전에 궁금해할 정보(어디에 있는지, 무엇을 보는지, 어떻게 움직이는지, 무엇을 준비하는지)를 본문 앞쪽에 배치
-   - 최신 운영시간·입장료·환율·날씨처럼 변동되는 정보는 확인 필요로 표시하고 단정하지 않기
-   - 가격은 출발일·인원·객실 조건에 따라 달라질 수 있음을 안내
+6. ${isTravel ? "여행지 리서치와 홍보 기준" : "제품 분석과 리뷰 기준"}:
+${isTravel ? `   - 상품 페이지는 여행지와 일정 순서를 찾는 자료로만 사용하고 가격·할인·포함조건을 본문에서 설명하지 않기
+   - 글을 쓰기 전에 일정표를 일차별로 분석하고, 방문지·이동 축·식사·쇼핑·자유시간 유무를 내부 메모로 정리
+   - 웹 검색 도구가 있으면 반드시 사용해 일정에 등장한 핵심 장소 3~6곳을 공식 관광청·공공기관 자료 우선으로 조사하고, 안정적인 여행정보를 반영
+   - 웹 검색을 사용할 수 없으면 모델 기억으로 최신 운영정보를 만들지 말고 원본 일정 근거 안에서만 작성
+   - 핵심 장소마다 배경지식 1개, 대표 풍경 1개, 할 수 있는 활동 1개, 음식·사진·동선 중 실용 팁 1개 이상 넣기
+   - 여행을 처음 검색하는 독자가 궁금해할 정보(어떤 장소인지, 분위기는 어떤지, 무엇을 보고 먹고 즐길지, 어떻게 움직일지)를 앞쪽에 배치
+   - 최신 운영시간·입장료·환율·날씨처럼 변동되는 정보는 출처가 없으면 본문에서 생략
+   - "보입니다", "보여요", "인 것 같아요", "일 듯해요", "판단됩니다"를 한 번도 사용하지 않기
    - 실제 탑승·숙박·식사 경험이나 현지 후기를 만들어내지 않기
    - 쇼핑 상품의 배송·구성품·스펙·교환/반품 문구를 절대 사용하지 않기`
   : `
-   - 할인율이 있으면 담백하게 "현재 할인가 기준으로는 부담이 줄어드는 편이에요"처럼 표현
-   - 쿠폰 정보가 있으면 "구매 전 쿠폰 적용 여부도 확인해보면 좋아요" 정도로 언급
-   - 무료배송이면 "배송비까지 보면 체감 가격이 달라질 수 있어요"처럼 자연스럽게 언급
-   - 리뷰 수/평점은 확인된 경우에만 참고 포인트로 언급
-   - 구매 유도보다 가격 판단 기준을 알려주는 방식으로 작성`}
+   - 상세페이지와 이미지는 사실 추출에만 쓰고 "상품 설명에는", "상세페이지에 적혀 있어요" 같은 낭독형 문장을 반복하지 않기
+   - 제품이 해결하는 문제와 정확한 카테고리를 먼저 정의하고, 다른 제품과 갈리는 특장점을 구체적으로 설명
+   - 핵심 기능마다 "어떤 구조로 작동하는가 → 어떻게 사용하는가 → 어떤 불편을 줄이는가"를 연결
+   - 설치·조작·충전·세척·보관 중 제품에 해당하는 사용법을 최소 2가지 이상 구체적으로 설명
+   - 구매후기 원문 근거가 제공되면 구매자들이 반복해 언급한 좋은 점과 사용 맥락을 요약하고, 후기 원문이 없으면 후기 내용을 만들지 않기
+   - 후기 수와 평점은 신뢰 참고값일 뿐, 수치만으로 만족 이유나 장단점을 추정하지 않기
+   - 배송·쿠폰·교환 조건을 제품 단점으로 쓰지 말고, 설치·크기·전원·관리·호환성 등 제품 자체의 한계 또는 미확인 핵심 성능을 최소 한 가지 제시
+   - 추천 대상과 비추천 대상을 모두 쓰고, 어떤 조건에서 대안 제품이 더 나은지 명시
+   - 상세정보가 부족한 성능은 지어내지 말고 "미확인이라 추천 판단을 보류할 항목"으로 구분
+   - 가격·할인·배송은 제품 분석을 끝낸 뒤 필요한 경우 한두 문장만 언급
+   - 구매 유도보다 제품을 어떻게 쓰고 어떤 조건에서 가치가 살아나는지 알려주는 방식으로 작성`}
 
 7. 해시태그 ${NAVER_BLOG_HASHTAG_COUNT}개 (상위 노출 글 실측 기준 3~5개):
 ${isTravel
@@ -5542,19 +5943,22 @@ ${isTravel
    - 개수를 채우기 위한 일반 태그(일상 등)는 넣지 마세요`}
 
 8. AI 티가 나는 문장 금지:
-${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES}\n${HUMAN_REVIEW_SAFETY_RULES}` : "   - 반복적인 문장 구조와 과장 표현 금지"}
+${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES}\n${HUMAN_REVIEW_SAFETY_RULES}\n${isTravel ? TRAVEL_VLOG_STYLE_GUIDE : SHOPPING_EXPERT_REVIEW_STYLE_GUIDE}` : "   - 반복적인 문장 구조와 과장 표현 금지"}
 
 ## 출력 (JSON만, 줄바꿈은 \\n)
 {
   "title": "SEO 최적화 제목",
+  "evidenceFacts": ["첨부 상세페이지에서 직접 확인한 제품 고유 사실"],
   "sections": [
-    "소제목\\n\\n문장1.\\n문장2.\\n문장3.\\n문장4.\\n",
-    "소제목\\n\\n문장1.\\n문장2.\\n문장3.\\n"
+    ${isTravel
+      ? '"소제목\\n\\n문장1.\\n문장2.\\n문장3.\\n문장4.\\n문장5.\\n",\n    "소제목\\n\\n문장1.\\n문장2.\\n문장3.\\n문장4.\\n문장5.\\n"'
+      : '"소제목\\n\\n문장1.\\n문장2.\\n문장3.\\n문장4.\\n",\n    "소제목\\n\\n문장1.\\n문장2.\\n문장3.\\n문장4.\\n"'}
   ],
   "hashtags": ["키워드1", "키워드2", ...]
 }`;
 
   const chatgptContext: ChatGPTGuidanceContext = {
+    connectKind,
     productName: product.name,
     description: product.description,
     features: product.features,
@@ -5567,33 +5971,138 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
     rating: product.rating,
     brandLink,
     targetSectionCount: bodySectionCount,
+    minimumSectionCount: minimumBodySectionCount,
+    maximumSectionCount: maximumBodySectionCount,
     openCrabSeoBrief,
     productEditorialPlan,
+    editorialPromptBlock,
+    editorialSectionTitles,
   };
+
+  if (BRANDLINK_DRAFT_CONTEXT_OUTPUT) {
+    const outputPath = path.resolve(BRANDLINK_DRAFT_CONTEXT_OUTPUT);
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    const contextJson = JSON.stringify({
+        version: "brand-draft-context/v1",
+        productId: productId || null,
+        connectKind,
+        generatedAt: new Date().toISOString(),
+        product: {
+          name: product.name,
+          description: product.description,
+          features: product.features,
+          price: product.price,
+          originalPrice: product.originalPrice,
+          discountRate: product.discountRate,
+          couponInfo: product.couponInfo,
+          deliveryInfo: product.deliveryInfo,
+          reviewCount: product.reviewCount,
+          rating: product.rating,
+          storeName: product.storeName || null,
+          finalUrl: product.finalUrl || null,
+          referenceImageUrls: product.sourceImageUrls.slice(0, 20),
+          detailImageSegmentCount: product.detailImagePaths.length,
+        },
+        generation: {
+          source: "chatgpt-mcp-oauth",
+          qualityPreset: BRANDLINK_QUALITY_PRESET,
+          experienceMode: BRANDLINK_EXPERIENCE_MODE,
+          experienceNotes:
+            BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE"
+              ? BRANDLINK_EXPERIENCE_NOTES
+              : "",
+          minimumSectionCount: minimumBodySectionCount,
+          maximumSectionCount: maximumBodySectionCount,
+          targetCharacters: compositionContract.targetCharacters,
+          outputSchema: {
+            title: "8~100자 제목",
+            sections: ["소제목\\n\\n문장1.\\n문장2.\\n문장3."],
+            hashtags: ["상품명", "검색키워드", "비교키워드"],
+          },
+          systemPrompt,
+          userPrompt,
+          qualityChecklist: {
+            version: "brand-draft-quality-checklist/v1",
+            editorialThesis: isTravel
+              ? "여행지의 고유한 배경, 대표 장면, 꼭 해볼 경험을 하나의 브이로그 흐름으로 연결"
+              : "가장 큰 선택 이유, 가장 큰 대가, 잘 맞는 독자를 하나의 논지로 연결",
+            evidenceAnchors: qualityEvidenceAnchors,
+            minimumDistinctEvidenceAnchors: minimumEvidenceAnchorCount,
+            minimumEvidenceLinkedJudgements,
+            checks: [
+              isTravel
+                ? "일정 원문은 방문 장소를 식별하는 데만 사용하고 상품 조건 설명을 본문에서 제거했는가"
+                : "referenceImageUrls의 상세이미지를 열어 수치·기능·구성을 evidenceFacts에 구조화했는가",
+              isTravel ? "공식 관광 자료의 안정적인 사실이 여행 장면과 연결됐는가" : "상품 고유 사실이 실제 판단 근거로 쓰였는가",
+              isTravel
+                ? "핵심 장소마다 배경·분위기·즐길 거리·실용 팁이 들어갔는가"
+                : "기능·구조가 작동 방식, 구체적인 사용법, 사용 장면의 이점과 한계로 이어지는가",
+              isTravel
+                ? '"보입니다", "인 것 같아요" 같은 모호한 말투와 가격·포함조건·예약 판단 문단이 없는가'
+                : "상세페이지 낭독형 문장이 없고, 수집된 구매후기 원문이 있으면 반복 장점을 근거대로 요약했는가",
+              "확인 필요 안내와 미확인 정보가 여러 문단을 차지하지 않는가",
+              "근거 없는 직접 사용·방문 경험이나 변동 정보를 만들지 않았는가",
+            ],
+          },
+        },
+        nextAction:
+          "현재 ChatGPT 대화에서 systemPrompt와 userPrompt를 적용하세요. 쇼핑은 referenceImageUrls의 상세이미지를 먼저 읽어 evidenceFacts를 작성하고, qualityChecklist를 내부 검수한 JSON 원고를 post_submit_draft로 제출하세요. 제출 작업을 job_get으로 확인하고 contentQuality.canPublish가 false이면 reason과 실패 signals를 반영해 새 idempotencyKey로 보강 원고를 다시 제출하세요. 원고를 사용자에게 먼저 보여주고 발행은 별도 확인을 받으세요.",
+      }, null, 2);
+    if (Buffer.byteLength(contextJson, "utf8") > 800 * 1024) {
+      throw new Error("초안 컨텍스트가 800KB를 초과했습니다. 상품 설명 범위를 줄인 뒤 다시 시도하세요.");
+    }
+    fs.writeFileSync(outputPath, contextJson, "utf8");
+    console.log(`   MCP draft context exported: ${outputPath}`);
+    return {
+      title: product.name,
+      sections: [],
+      hashtags: [],
+      generationSource: "AI",
+      rawResponse: "mcp-draft-context-exported",
+      openCrabSeoBrief,
+      productEditorialPlan,
+    };
+  }
 
   let text: string;
   try {
-    text = await generateWithAI(
-      systemPrompt,
-      userPrompt,
-      chatgptContext,
-      product.imagePaths
-    );
-  } catch (error) {
-    if (!PRODUCT_POST_LOCAL_FALLBACK_ENABLED) {
-      throw error;
+    text = BRANDLINK_GENERATED_DRAFT_PATH
+      ? readMcpGeneratedDraft(BRANDLINK_GENERATED_DRAFT_PATH)
+      : await generateWithAI(
+          systemPrompt,
+          userPrompt,
+          chatgptContext,
+          product.imagePaths
+        );
+    if (BRANDLINK_GENERATED_DRAFT_PATH) {
+      console.log("   MCP OAuth ChatGPT 원고를 불러왔습니다. 로컬 모델 API 호출은 생략합니다.");
     }
-    console.log(`   ⚠️ AI 글 생성 실패, 로컬 상품글 초안으로 대체합니다: ${getErrorMessage(error)}`);
-    text = isTravel
-      ? buildLocalTravelPostJson(product, bodySectionCount)
-      : buildLocalProductPostJson(product, bodySectionCount, openCrabSeoBrief);
+  } catch (error) {
+    throw new Error(
+      `GPT 원고 생성에 실패했습니다: ${getErrorMessage(error)} ` +
+      "제품 분석 데이터는 준비됐지만, 하네스 문장을 원고로 복사하는 로컬 폴백은 품질 보호를 위해 차단했습니다.",
+    );
   }
   const json = parseJsonObjectFromText(text);
-  const minimumSections = Math.min(8, Math.max(4, bodySectionCount - 1));
+  if (!isTravel) {
+    const visualEvidenceFacts = Array.isArray(json.evidenceFacts)
+      ? Array.from(new Set(json.evidenceFacts
+          .filter((value): value is string => typeof value === "string")
+          .map((value) => sanitizeText(value).slice(0, 220))
+          .filter(isMeaningfulProductEvidenceFeature)))
+        .slice(0, 12)
+      : [];
+    if (visualEvidenceFacts.length > 0) {
+      product.features = Array.from(new Set([...visualEvidenceFacts, ...product.features])).slice(0, 16);
+      productEditorialPlan = buildProductEditorialPlan(toProductEditorialInput(product, bodySectionCount));
+      console.log(`   🔎 상세 이미지에서 제품 근거 ${visualEvidenceFacts.length}개 구조화`);
+    }
+  }
   const structuredSectionCount = getStructuredSectionCount(json);
-  if (structuredSectionCount < minimumSections) {
-    console.log(
-      `   ⚠️ 구조화 섹션 부족(${structuredSectionCount}/${minimumSections}), 폴백 섹션으로 보완합니다.`
+  if (structuredSectionCount < minimumBodySectionCount) {
+    throw new Error(
+      `GPT 원고의 구조화 흐름이 부족합니다. 현재 ${structuredSectionCount}개, 최소 ${minimumBodySectionCount}개입니다. ` +
+      "완성 문장형 로컬 폴백은 품질 보호를 위해 사용하지 않습니다.",
     );
   }
   
@@ -5601,7 +6110,7 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
   const lastSection = isTravel
     ? `
 
-이 포스팅은 네이버 여행 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받습니다.
+이 포스팅은 네이버 여행 커넥트 활동의 일환으로, 예약 발생 시 수수료를 제공받습니다.
 
 자세한 일정과 예약 정보는 아래 여행커넥트에서 확인해보세요.`
     : `
@@ -5610,14 +6119,16 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
 
 자세한 상품 정보는 아래 쇼핑커넥트에서 확인해보세요.`;
 
-  const planSectionTitles = isTravel
-    ? travelEditorialPlan.map((section) => section.title)
-    : productEditorialPlan.sections.map((section) => section.title);
-  let bodySections = normalizeSections(json.sections, bodySectionCount, product, planSectionTitles);
+  let bodySections = normalizeSections(
+    json.sections,
+    minimumBodySectionCount,
+    maximumBodySectionCount,
+    connectKind,
+  );
   if (HUMAN_MOBILE_POLISH_ENABLED) {
     console.log("   🧽 로컬 사람형 모바일 윤문/배치 적용");
     bodySections = bodySections.map((section, index) =>
-      applyHumanMobilePolishToSection(section, index, product)
+      applyHumanMobilePolishToSection(section, index, connectKind)
     );
   }
 
@@ -5626,20 +6137,189 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
   console.log(`   🧪 AI 티 스캔: ${aiTellScan.summary}`);
   if (
     BLOG_HUMANIZE_REWRITE_ENABLED &&
+    !BRANDLINK_GENERATED_DRAFT_PATH &&
     !BROWSER_GPT_MODE &&
     aiTellScan.score >= BLOG_HUMANIZE_REWRITE_THRESHOLD
   ) {
-    bodySections = await rewriteSectionsForHumanTone(bodySections, aiTellScan.score);
+    const rewrittenSections = await rewriteSectionsForHumanTone(bodySections, aiTellScan.score);
+    bodySections = normalizeSections(
+      rewrittenSections,
+      minimumBodySectionCount,
+      maximumBodySectionCount,
+      connectKind,
+    );
   }
 
-  const sections = [...bodySections];
-  sections.push(HUMAN_MOBILE_POLISH_ENABLED ? applyHumanMobilePolishToDisclosure(lastSection) : lastSection);
-  const hashtags = normalizeHashtags(json.hashtags, product, openCrabSeoBrief);
-  
-  const normalizedTitle = sanitizeTitle(
+  const disclosureSection = HUMAN_MOBILE_POLISH_ENABLED
+    ? applyHumanMobilePolishToDisclosure(lastSection)
+    : lastSection;
+  let sections = [...bodySections, disclosureSection];
+  let hashtags = normalizeHashtags(json.hashtags, product, openCrabSeoBrief);
+  let normalizedTitle = sanitizeTitle(
     typeof json.title === "string" ? json.title : product.name,
     product.name
   );
+
+  const assessEditorialQuality = (
+    title: string,
+    candidateSections: string[],
+    candidateHashtags: string[],
+  ): BrandLinkContentReadiness => getBrandLinkContentReadiness({
+    productName: product.name,
+    title,
+    sections: candidateSections,
+    hashtags: candidateHashtags,
+    brandLink,
+    generationSource: "AI",
+    hasRepresentativeImage: true,
+    requireRepresentativeImage: false,
+    thumbnailGenerated: true,
+    connectKind,
+    experienceMode: BRANDLINK_EXPERIENCE_MODE,
+    compositionQualityReport: null,
+    sourceDescription: product.description,
+    sourceFeatures: product.features,
+    mode: "editorial",
+  });
+
+  let editorialQuality = assessEditorialQuality(normalizedTitle, sections, hashtags);
+  const beforeEditorialQuality = editorialQuality;
+  const qualityRepair: GeneratedPostPreview["qualityRepair"] = {
+    attempted: false,
+    applied: false,
+    beforeScore: editorialQuality.score,
+    afterScore: editorialQuality.score,
+    beforeCode: editorialQuality.code,
+    afterCode: editorialQuality.code,
+    note: editorialQuality.canPublish ? "원고 품질검사 통과" : editorialQuality.reason || editorialQuality.summary,
+  };
+  const repairableQualityCodes = new Set<BrandLinkContentReadiness["code"]>([
+    "missing-product-name",
+    "too-few-sections",
+    "too-short-content",
+    "unsupported-experience-claim",
+    "internal-guidance-leak",
+    "missing-review-substance",
+    "low-evidence-density",
+    "generic-guidance-heavy",
+    "category-mismatch",
+    "repetitive-content",
+  ]);
+  const shouldAttemptQualityRepair =
+    (!BRANDLINK_GENERATED_DRAFT_PATH || AI_PROVIDER === "codex" || BROWSER_GPT_MODE) &&
+    repairableQualityCodes.has(editorialQuality.code) &&
+    (!editorialQuality.canPublish || BRANDLINK_FORCE_QUALITY_REPAIR);
+
+  if (shouldAttemptQualityRepair) {
+    const buildRepairPrompt = () => {
+      const failedSignals = editorialQuality.signals
+        .filter((signal) => signal.status === "fail")
+        .map((signal) => signal.label);
+      const travelSubstance = isTravel
+        ? assessTravelReviewSubstance({
+            productName: product.name,
+            sections: bodySections,
+            sourceText: [product.description, ...product.features].join(" "),
+          })
+        : null;
+      return `아래 초안을 품질검사 결과를 모두 해결한 완성본으로 고쳐주세요.
+
+[품질검사]
+- 판정: ${editorialQuality.code}
+- 이유: ${editorialQuality.reason || editorialQuality.summary}
+- 실패 항목: ${failedSignals.join(", ") || "없음"}
+${travelSubstance ? `- 여행 원고 부족 요소: ${travelSubstance.missingElements.join(", ") || "없음"}` : ""}
+
+[수정 원칙]
+- 쇼핑 글은 기존 상품 정보와 초안에 이미 들어 있는 검증 가능한 사실만 사용합니다.
+- 여행 글은 상품 일정에 실제 등장하는 장소를 기준으로 공식 관광청·공공기관 등 신뢰 가능한 자료를 검색해 역사·문화·분위기·즐길 거리·현지 팁을 보강합니다.
+- 근거가 없는 일정·장소·성능·체험은 새로 만들지 않습니다.
+- "확인 필요", "알기 어렵다", "판단하기 어렵다" 같은 문장을 반복하지 말고, 정보가 없으면 관련 문단을 합치거나 짧게 처리합니다.
+- ${isTravel ? "상품 가격·예약 조건을 읽어주는 글이 아니라, 이름이 확인된 방문지별 배경지식·눈앞의 풍경·할 수 있는 경험·사진 포인트·이동 팁을 구체적으로 연결한 여행 브이로그형 정보 글로 다시 씁니다. '보입니다', '인 것 같아요', '알기 어렵습니다' 같은 모호한 말투를 쓰지 않습니다." : "구매 안내만 하지 말고 제품 자체의 기능, 장점, 구조상 제약, 잘 맞는 사용자를 구체적으로 판단합니다."}
+- 내부 지침 문구와 실제 체험을 가장하는 표현은 제거합니다.
+- 고지 문구와 원시 URL은 출력하지 않습니다. 시스템이 별도로 붙입니다.
+- JSON(title, sections, hashtags)만 출력합니다.
+
+[초안 JSON]
+${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, null, 2)}`;
+    };
+
+    try {
+      qualityRepair.attempted = true;
+      let lastRepairScore = editorialQuality.score;
+      const maximumRepairAttempts = isTravel ? 3 : 2;
+      for (let repairAttempt = 1; repairAttempt <= maximumRepairAttempts && !editorialQuality.canPublish; repairAttempt += 1) {
+        const repairedText = await generateWithAI(
+          systemPrompt,
+          buildRepairPrompt(),
+          chatgptContext,
+          product.imagePaths,
+        );
+        const repairedJson = parseJsonObjectFromText(repairedText);
+        let repairedBodySections = normalizeSections(
+          repairedJson.sections,
+          minimumBodySectionCount,
+          maximumBodySectionCount,
+          connectKind,
+        );
+        if (HUMAN_MOBILE_POLISH_ENABLED) {
+          repairedBodySections = repairedBodySections.map((section, index) =>
+            applyHumanMobilePolishToSection(section, index, connectKind)
+          );
+        }
+        const repairedTitle = sanitizeTitle(
+          typeof repairedJson.title === "string" ? repairedJson.title : normalizedTitle,
+          product.name,
+        );
+        const repairedHashtags = normalizeHashtags(
+          repairedJson.hashtags,
+          product,
+          openCrabSeoBrief,
+        );
+        const repairedSections = [...repairedBodySections, disclosureSection];
+        const repairedQuality = assessEditorialQuality(
+          repairedTitle,
+          repairedSections,
+          repairedHashtags,
+        );
+        lastRepairScore = repairedQuality.score;
+        const improvement = repairedQuality.score - editorialQuality.score;
+        if (repairedQuality.canPublish || improvement > 0) {
+          normalizedTitle = repairedTitle;
+          hashtags = repairedHashtags;
+          bodySections = repairedBodySections;
+          sections = repairedSections;
+          editorialQuality = repairedQuality;
+          qualityRepair.applied = true;
+        }
+      }
+      qualityRepair.afterScore = editorialQuality.score;
+      qualityRepair.afterCode = editorialQuality.code;
+      qualityRepair.note = editorialQuality.canPublish
+        ? `요청 과정에서 품질 자동 보강 완료 (${beforeEditorialQuality.score}→${editorialQuality.score}점)`
+        : qualityRepair.applied
+          ? `자동 보강 후에도 발행 기준 미달 (${beforeEditorialQuality.score}→${editorialQuality.score}점)`
+          : `자동 보강 결과가 개선 기준에 못 미쳐 원문 유지 (${lastRepairScore}점)`;
+      if (isTravel && !editorialQuality.canPublish) {
+        throw new Error(`여행 원고가 ${maximumRepairAttempts}회 자동 재작성 후에도 품질 기준을 통과하지 못했습니다: ${editorialQuality.reason || editorialQuality.summary}`);
+      }
+    } catch (error) {
+      qualityRepair.note = `자동 보강 실패: ${getErrorMessage(error)}`;
+    }
+  } else if (BRANDLINK_GENERATED_DRAFT_PATH && !editorialQuality.canPublish) {
+    qualityRepair.note = `ChatGPT 제출 원고에 보강이 필요합니다: ${editorialQuality.reason || editorialQuality.summary}`;
+  }
+
+  if (isTravel && !editorialQuality.canPublish) {
+    throw new Error(
+      qualityRepair.attempted
+        ? `여행 원고가 자동 재작성 후에도 품질 기준을 통과하지 못했습니다: ${editorialQuality.reason || editorialQuality.summary}`
+        : `여행 원고 품질 기준을 통과하지 못했습니다: ${editorialQuality.reason || editorialQuality.summary}`,
+    );
+  }
+
+  console.log(`   🔎 원고 품질검사: ${editorialQuality.summary}`);
+  if (qualityRepair.attempted) console.log(`   🩹 ${qualityRepair.note}`);
 
   const totalLength = sections.reduce((sum: number, s: string) => sum + s.length, 0);
   console.log(`   📌 제목: ${normalizedTitle}`);
@@ -5651,9 +6331,12 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
     title: normalizedTitle,
     sections: sections,
     hashtags,
+    generationSource: "AI",
     rawResponse: text,
     openCrabSeoBrief,
     productEditorialPlan,
+    editorialQuality,
+    qualityRepair,
   };
 }
 
@@ -6380,9 +7063,48 @@ interface PreparedBrandLinkPostOverride {
   post: GeneratedPostPreview;
   heroImagePath: string;
   bodyImagePaths: string[];
-  composition?: PostCompositionContract | null;
-  spec?: PostSpec | null;
-  draft?: SpecGeneratedDraft | null;
+  composition: ResolvedPostDocumentV1 | null;
+  /** Spec-first 초안이면 부분 수정에 쓰는 스펙·초안 원본 */
+  spec: PostSpec | null;
+  draft: SpecGeneratedDraft | null;
+}
+
+/** 스펙의 이미지 슬롯 경로를 패키지 안 복사본 경로로 바꾼다(임시 파일은 실행 후 사라진다). */
+function remapSpecImagePaths(spec: PostSpec, packagedPathBySource: Map<string, string>): PostSpec {
+  const remap = (imagePath: string) => packagedPathBySource.get(path.resolve(imagePath)) || imagePath;
+  return {
+    ...spec,
+    imagePlan: {
+      ...spec.imagePlan,
+      hero: spec.imagePlan.hero ? { ...spec.imagePlan.hero, path: remap(spec.imagePlan.hero.path) } : spec.imagePlan.hero,
+      slots: spec.imagePlan.slots.map((slot) => ({ ...slot, path: remap(slot.path) })),
+    },
+  };
+}
+
+function summarizeSpecValidation(assembled: AssembledPost) {
+  const validation = assembled.validation;
+  return {
+    status: validation.status,
+    score: validation.score,
+    summary: validation.summary,
+    signals: validation.signals.map((signal) => ({
+      key: signal.key,
+      label: signal.label,
+      status: signal.status,
+      ...(signal.sectionIndex !== undefined ? { sectionIndex: signal.sectionIndex } : {}),
+      ...(signal.detail ? { detail: signal.detail } : {}),
+    })),
+    repairTargets: validation.repair.targets.map((target) => ({
+      sectionIndex: target.sectionIndex,
+      code: target.code,
+      reason: target.reason,
+      priority: target.priority,
+      instruction: target.instruction,
+    })),
+    generationSource: assembled.generationSource,
+    attempts: assembled.attempts,
+  };
 }
 
 function writePreparedBrandPostPackage(params: {
@@ -6391,20 +7113,22 @@ function writePreparedBrandPostPackage(params: {
   connectKind: "SHOPPING" | "TRAVEL";
   post: GeneratedPostPreview;
   imagePaths: string[];
+  composition: ResolvedPostDocumentV1;
+  contentReadiness: BrandLinkContentReadiness | null;
+  /** Spec-first 산출물. 부분 수정(post_revise_draft)에 필요하므로 이미지 경로를 패키지 복사본으로 옮겨 저장한다. */
+  assembled?: AssembledPost | null;
 }): string {
   const images = params.imagePaths.filter((imagePath) => fs.existsSync(imagePath));
-  if (images.length < 5) {
-    throw new Error(`고품질 초안 패키지에는 대표 1장과 본문 4장 이상이 필요합니다. 현재 ${images.length}장`);
+  if (images.length < 1) {
+    throw new Error("초안 패키지에 저장할 대표 이미지가 없습니다.");
   }
   fs.mkdirSync(params.outputDir, { recursive: true });
   const imageDir = path.join(params.outputDir, "images");
   fs.mkdirSync(imageDir, { recursive: true });
-  // 수정(revise) 시에는 원본이 패키지 images/ 안에 있을 수 있어, 먼저 전부 읽은 뒤 쓴다.
-  const buffers = images.map((sourcePath) => fs.readFileSync(sourcePath));
   const packagedImages = images.map((sourcePath, index) => {
     const extension = path.extname(sourcePath) || ".png";
     const destination = path.join(imageDir, `${String(index + 1).padStart(2, "0")}${extension}`);
-    fs.writeFileSync(destination, buffers[index]);
+    fs.copyFileSync(sourcePath, destination);
     return {
       path: path.resolve(destination),
       sourcePath: path.resolve(sourcePath),
@@ -6415,97 +7139,97 @@ function writePreparedBrandPostPackage(params: {
   const markdownPath = path.join(params.outputDir, "post.md");
   const sections = params.post.sections.map((section) => {
     const [heading = "본문", ...body] = section.split(/\r?\n/);
+    if (/(?:쇼핑|여행)\s*커넥트/u.test(section) && /수수료/u.test(section)) {
+      return body.join("\n").trim() || heading.trim();
+    }
     return `## ${heading.trim() || "본문"}\n\n${body.join("\n").trim()}`;
   });
-  const markdown = [`# ${params.post.title}`, "", ...sections, "", params.post.hashtags.map((tag) => `#${tag.replace(/^#+/, "")}`).join(" ")].join("\n");
+  const bottomDisclosure = params.composition.renderNodes.find(
+    (node) => node.kind === "disclosure" && node.placement === "bottom",
+  );
+  const markdown = [
+    `# ${params.composition.title}`,
+    "",
+    ...sections,
+    "",
+    params.post.hashtags.map((tag) => `#${tag.replace(/^#+/, "")}`).join(" "),
+    "",
+    bottomDisclosure?.kind === "disclosure" ? bottomDisclosure.text : "",
+  ].join("\n");
   fs.writeFileSync(markdownPath, markdown, "utf8");
   const manifestPath = path.join(params.outputDir, "manifest.json");
-  const assembled = params.post.assembled ?? null;
-  // 패키지 안의 복사본 경로로 슬롯/구성 정보를 다시 매핑한다(임시 파일은 이후 사라질 수 있다).
-  const packagedBySource = new Map(packagedImages.map((image) => [image.sourcePath, image.path] as const));
-  const remap = (imagePath: string) => packagedBySource.get(path.resolve(imagePath)) || imagePath;
-  const composition = assembled
-    ? {
-        ...assembled.composition,
-        sections: assembled.composition.sections.map((section) => ({
-          ...section,
-          imagePaths: section.imagePaths.map(remap).filter((imagePath) => fs.existsSync(imagePath)),
-        })),
-      }
-    : null;
-  const spec = assembled
-    ? {
-        ...assembled.spec,
-        imagePlan: {
-          ...assembled.spec.imagePlan,
-          hero: assembled.spec.imagePlan.hero ? { ...assembled.spec.imagePlan.hero, path: packagedImages[0].path } : null,
-          slots: assembled.spec.imagePlan.slots.map((slot) => ({ ...slot, path: remap(slot.path) })),
-        },
-      }
-    : null;
-  const base = {
+  const packagedPathBySource = new Map(
+    packagedImages.map((image) => [path.resolve(image.sourcePath), image.path]),
+  );
+  const packagedComposition: ResolvedPostDocumentV1 = {
+    ...params.composition,
+    sections: params.composition.sections.map((section) => ({
+      ...section,
+      imagePaths: section.imagePaths.map(
+        (imagePath) => packagedPathBySource.get(path.resolve(imagePath)) || imagePath,
+      ),
+    })),
+    renderNodes: params.composition.renderNodes.map((node) =>
+      node.kind === "image"
+        ? {
+            ...node,
+            assetPath: packagedPathBySource.get(path.resolve(node.assetPath)) || node.assetPath,
+          }
+        : node,
+    ),
+  };
+  const renderImageByPath = new Map(
+    packagedComposition.renderNodes
+      .filter((node): node is Extract<(typeof packagedComposition.renderNodes)[number], { kind: "image" }> => node.kind === "image")
+      .map((node) => [path.resolve(node.assetPath), node]),
+  );
+  const manifestImageAssets = packagedImages.map((image) => {
+    const renderImage = renderImageByPath.get(path.resolve(image.path));
+    return {
+      ...image,
+      sectionId: renderImage?.sectionId || null,
+      imageIntent: renderImage?.altText || "",
+      provenance:
+        image.role === "hero"
+          ? params.connectKind === "SHOPPING"
+            ? "LOCKED_PRODUCT"
+            : "GENERATED_BACKGROUND"
+          : params.connectKind === "SHOPPING"
+            ? "ORIGINAL"
+            : "ORIGINAL",
+    };
+  });
+  fs.writeFileSync(manifestPath, JSON.stringify({
+    version: "brand-post-package/v2",
     brandLinkId: params.brandLinkId,
     connectKind: params.connectKind,
     title: params.post.title,
+    generationSource: params.post.generationSource,
     markdownPath: path.resolve(markdownPath),
     heroImagePath: packagedImages[0].path,
     bodyImagePaths: packagedImages.slice(1).map((image) => image.path),
-    imageAssets: packagedImages,
+    imageAssets: manifestImageAssets,
     hashtags: params.post.hashtags,
     imagePolicy: params.connectKind === "SHOPPING" ? "LOCKED_PRODUCT_OR_ORIGINAL" : "TRAVEL_EDITORIAL",
+    contractVersion: "post-composition-contract/v1",
+    composition: packagedComposition,
+    contentQuality: params.contentReadiness,
+    qualityRepair: params.post.qualityRepair || null,
+    postSpec: params.assembled ? remapSpecImagePaths(params.assembled.spec, packagedPathBySource) : null,
+    specDraft: params.assembled?.draft ?? null,
+    specValidation: params.assembled ? summarizeSpecValidation(params.assembled) : null,
+    pipelineNotes: params.post.notes ?? null,
+    thumbnailSpec: {
+      version: "thumbnail-spec/v2",
+      canvas: { width: 1080, height: 1080, aspect: "1:1" },
+      style: params.connectKind === "SHOPPING" ? "clean-editorial" : "cinematic",
+      sourcePolicy: params.connectKind === "SHOPPING" ? "LOCKED_PRODUCT_OR_ORIGINAL" : "TRAVEL_EDITORIAL",
+      sourceImagePath: packagedImages[0].path,
+    },
     createdAt: new Date().toISOString(),
     approvedAt: null,
-  };
-  const manifest = assembled
-    ? {
-        version: "brand-post-package/v2",
-        ...base,
-        sections: params.post.sections,
-        composition,
-        spec,
-        draft: assembled.draft,
-        readiness: {
-          status: assembled.validation.status,
-          score: assembled.validation.score,
-          summary: assembled.validation.summary,
-          signals: assembled.validation.signals,
-          repairTargets: assembled.validation.repair.targets,
-          generationSource: assembled.generationSource,
-          attempts: assembled.attempts,
-        },
-        pipeline: { version: "post-spec/v1", model: assembled.draft.model, notes: params.post.notes ?? [] },
-      }
-    : { version: "brand-post-package/v1", ...base };
-  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+  }, null, 2), "utf8");
   return manifestPath;
-}
-
-/** 실패 메시지를 MCP/UI가 구분할 수 있는 코드로 분류한다. */
-function classifyFailureCode(message: string): string {
-  if (/세션|로그인/u.test(message)) return "NAVER_SESSION_EXPIRED";
-  if (/본문 이미지|이미지 부족|IMAGE_SHORTFALL/u.test(message)) return "IMAGE_SHORTFALL";
-  if (/발행 보류|BLOCKED|게이트/u.test(message)) return "CONTENT_BLOCKED";
-  if (/OPENAI_API_KEY|OpenAI API/u.test(message)) return "LLM_UNAVAILABLE";
-  if (/찾을 수 없|상품 정보를 확보/u.test(message)) return "PRODUCT_NOT_FOUND";
-  if (/여행커넥트|계약/u.test(message)) return "TRAVEL_CONTRACT_LOCKED";
-  return "LOCAL_AUTOMATION_FAILED";
-}
-
-/** 초안 생성 결과를 패키지 디렉터리에 남긴다. 라우트가 로그 대신 이 파일로 원인을 읽는다. */
-function writePrepareResult(
-  outputDir: string,
-  payload: { ok: boolean; code: string; message: string; readiness?: unknown },
-): void {
-  try {
-    fs.mkdirSync(outputDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(outputDir, "result.json"),
-      JSON.stringify({ ...payload, at: new Date().toISOString() }, null, 2),
-      "utf8",
-    );
-  } catch {
-    // 결과 파일 기록 실패는 발행 자체를 막지 않는다.
-  }
 }
 
 function resolvePreparedOverridePath(manifestPath: string, value: unknown): string {
@@ -6521,7 +7245,9 @@ function resolvePreparedOverridePath(manifestPath: string, value: unknown): stri
   return resolved;
 }
 
-function loadPreparedBrandLinkPostOverride(): PreparedBrandLinkPostOverride | null {
+function loadPreparedBrandLinkPostOverride(
+  options: { requireApproval?: boolean } = {},
+): PreparedBrandLinkPostOverride | null {
   const configuredPath = process.env.BRANDLINK_PREPARED_POST_MANIFEST?.trim();
   if (!configuredPath) return null;
 
@@ -6532,52 +7258,29 @@ function loadPreparedBrandLinkPostOverride(): PreparedBrandLinkPostOverride | nu
 
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
     version?: unknown;
-    title?: unknown;
     markdownPath?: unknown;
     heroImagePath?: unknown;
     bodyImagePaths?: unknown;
     hashtags?: unknown;
-    sections?: unknown;
     composition?: unknown;
-    spec?: unknown;
-    draft?: unknown;
+    approvedAt?: unknown;
+    generationSource?: unknown;
+    postSpec?: unknown;
+    specDraft?: unknown;
   };
+  if (options.requireApproval !== false && (typeof manifest.approvedAt !== "string" || !manifest.approvedAt.trim())) {
+    throw new Error("준비된 원고는 승인 완료 후에만 발행할 수 있습니다.");
+  }
+  if (manifest.generationSource !== "AI" && manifest.generationSource !== "PREPARED_APPROVED") {
+    throw new Error(
+      "준비된 원고의 AI 생성 출처를 확인할 수 없습니다. 이전 로컬 폴백 초안은 폐기하고 새 초안을 생성해 주세요.",
+    );
+  }
   const markdownPath = resolvePreparedOverridePath(manifestPath, manifest.markdownPath);
   const heroImagePath = resolvePreparedOverridePath(manifestPath, manifest.heroImagePath);
   const bodyImagePaths = Array.isArray(manifest.bodyImagePaths)
     ? manifest.bodyImagePaths.map((value) => resolvePreparedOverridePath(manifestPath, value))
     : [];
-  if (bodyImagePaths.length < 4) {
-    throw new Error("준비된 원고에는 본문 이미지가 최소 4장 필요합니다.");
-  }
-
-  // v2 패키지는 섹션 문자열과 에디터 입력 계약을 그대로 담고 있어 마크다운을 다시 파싱하지 않는다.
-  if (
-    manifest.version === "brand-post-package/v2" &&
-    Array.isArray(manifest.sections) &&
-    manifest.sections.every((value) => typeof value === "string") &&
-    typeof manifest.title === "string"
-  ) {
-    const hashtagsV2 = Array.isArray(manifest.hashtags)
-      ? manifest.hashtags
-          .filter((value): value is string => typeof value === "string")
-          .map((value) => value.replace(/^#+/, "").trim())
-          .filter(Boolean)
-      : [];
-    return {
-      post: {
-        title: manifest.title.trim(),
-        sections: manifest.sections as string[],
-        hashtags: hashtagsV2,
-        rawResponse: `prepared:${manifestPath}`,
-      },
-      heroImagePath,
-      bodyImagePaths,
-      composition: (manifest.composition as PostCompositionContract | null) ?? null,
-      spec: (manifest.spec as PostSpec | null) ?? null,
-      draft: (manifest.draft as SpecGeneratedDraft | null) ?? null,
-    };
-  }
 
   const markdown = fs.readFileSync(markdownPath, "utf8");
   const titleMatch = markdown.match(/^#\s+(.+)$/m);
@@ -6585,25 +7288,7 @@ function loadPreparedBrandLinkPostOverride(): PreparedBrandLinkPostOverride | nu
     throw new Error("준비된 원고에서 제목을 찾지 못했습니다.");
   }
 
-  const visibleMarkdown = markdown
-    .split(/^##\s+Sources\s*$/m)[0]
-    .replace(/<!--[^]*?-->/g, "")
-    .trim();
-  const withoutTitle = visibleMarkdown.replace(/^#\s+.+\r?\n+/, "");
-  const chunks = withoutTitle.split(/^##\s+/m);
-  const intro = chunks.shift()?.replace(/!\[[^\]]*\]\([^\)]+\)/g, "").trim() || "";
-  const sections = [
-    ...(intro ? [`여행 전 확인\n\n${intro}`] : []),
-    ...chunks.map((chunk) => {
-      const [heading = "", ...bodyLines] = chunk.split(/\r?\n/);
-      const body = bodyLines
-        .join("\n")
-        .replace(/!\[[^\]]*\]\([^\)]+\)/g, "")
-        .replace(/\n{3,}/g, "\n\n")
-        .trim();
-      return [heading.trim(), body].filter(Boolean).join("\n\n");
-    }).filter(Boolean),
-  ];
+  const sections = parsePreparedBrandPostSections(markdown);
   if (sections.length < 5) {
     throw new Error(`준비된 원고의 본문 섹션이 부족합니다: ${sections.length}개`);
   }
@@ -6614,16 +7299,28 @@ function loadPreparedBrandLinkPostOverride(): PreparedBrandLinkPostOverride | nu
         .map((value) => value.replace(/^#+/, "").trim())
         .filter(Boolean)
     : [];
+  const composition =
+    manifest.version === "brand-post-package/v2" &&
+    manifest.composition &&
+    typeof manifest.composition === "object" &&
+    (manifest.composition as { version?: unknown }).version === "resolved-post-document/v1"
+      ? (manifest.composition as ResolvedPostDocumentV1)
+      : null;
 
   return {
     post: {
       title: titleMatch[1].trim(),
       sections,
       hashtags,
+      generationSource: "PREPARED_APPROVED",
       rawResponse: `prepared:${markdownPath}`,
+      composition,
     },
     heroImagePath,
     bodyImagePaths,
+    composition,
+    spec: manifest.postSpec && typeof manifest.postSpec === "object" ? (manifest.postSpec as PostSpec) : null,
+    draft: manifest.specDraft && typeof manifest.specDraft === "object" ? (manifest.specDraft as SpecGeneratedDraft) : null,
   };
 }
 
@@ -7447,37 +8144,130 @@ async function insertNaverHorizontalDivider(page: Page): Promise<boolean> {
   return true;
 }
 
-// 텍스트 섹션 입력 (줄바꿈 포함)
-/**
- * 인용구 컴포넌트에 섹션 헤더를 넣는다. 셀렉터는 실측 전 추정값이라 기본 OFF 이며,
- * 실패하면 호출자가 소제목 서식으로 되돌린다. 삽입 후 본문 서식으로 반드시 빠져나온다.
- */
-async function insertNaverQuotation(page: Page, text: string): Promise<boolean> {
-  const clicked = await clickFirstVisible(page, [
-    'button[data-name="quotation"][data-value="quotation_underline"]',
-    'button[data-name="quotation"]',
-    'button[aria-label*="인용구"]',
-    'button:has-text("인용구")',
-  ]);
-  if (!clicked) return false;
-  await page.waitForTimeout(200);
-  await clickFirstVisible(page, [
-    'button[data-value="quotation_underline"]',
-    '[data-value^="quotation_"]',
-  ]).catch(() => false);
-  await page.waitForTimeout(150);
-  await page.keyboard.type(text, { delay: 3 });
+async function inputPlainParagraph(page: Page, text: string): Promise<void> {
+  const normalized = text.replace(/\r/g, "").trim();
+  if (!normalized) return;
+  await setNaverTextFormat(page, "text");
+  for (const line of normalized.split("\n")) {
+    const value = line.trim();
+    if (value) await page.keyboard.type(value, { delay: 3 });
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(35);
+  }
   await page.keyboard.press("Enter");
+}
+
+async function inputNaverHeading(page: Page, text: string): Promise<void> {
+  const headingApplied = await setNaverTextFormat(page, "sectionTitle");
+  if (!headingApplied) console.log("   ⚠️ 소제목 스타일 적용 실패, 본문 스타일로 대체");
+  await page.keyboard.type(text, { delay: 3 });
   await page.keyboard.press("Enter");
   await page.waitForTimeout(80);
   await setNaverTextFormat(page, "text");
-  return true;
 }
 
+async function renderResolvedPostDocument(
+  page: Page,
+  document: ResolvedPostDocumentV1,
+  options: {
+    shoppingConnectProductName?: string | null;
+    shoppingConnectProductFinalUrl?: string | null;
+    requiredFirstImagePath?: string | null;
+  },
+): Promise<{ uploadedCount: number; connectCardCount: number }> {
+  let uploadedCount = 0;
+  let connectCardCount = 0;
+  let imageNodeIndex = 0;
+
+  for (let renderIndex = 0; renderIndex < document.renderNodes.length; renderIndex += 1) {
+    const node = document.renderNodes[renderIndex];
+    if (node.kind === "divider") {
+      await insertNaverHorizontalDivider(page).catch(() => false);
+      continue;
+    }
+    if (node.kind === "disclosure" || node.kind === "paragraph") {
+      await inputPlainParagraph(page, node.text);
+      continue;
+    }
+    if (node.kind === "quotation") {
+      // 네이버 인용구 컴포넌트는 생성 직후 편집 포커스가 본문에 남는 경우가
+      // 있어 빈 인용구만 생기고 제목이 다음 문단으로 입력될 수 있다. 기존
+      // 준비본의 quotation 노드도 실제 소제목 서식으로 렌더링해 내용 유실을
+      // 막는다.
+      await inputNaverHeading(page, node.text);
+      continue;
+    }
+    if (node.kind === "heading") {
+      await inputNaverHeading(page, node.text);
+      continue;
+    }
+    if (node.kind === "image") {
+      if (node.layout === "collage-3") {
+        const collageNodes = document.renderNodes
+          .slice(renderIndex, renderIndex + 3)
+          .filter(
+            (candidate): candidate is Extract<typeof candidate, { kind: "image" }> =>
+              candidate.kind === "image" && candidate.layout === "collage-3",
+          );
+        if (collageNodes.length === 3) {
+          const collagePath = await createThreeImageCollage({
+            sourcePaths: collageNodes.map((candidate) => candidate.assetPath),
+            outputDir: TEMP_PATH,
+          });
+          imageNodeIndex += 1;
+          console.log(`   [이미지 ${imageNodeIndex}] 🧩 여행 하이라이트 3장 콜라주`);
+          if (await uploadOneImage(page, collagePath)) uploadedCount += 1;
+          renderIndex += 2;
+          continue;
+        }
+      }
+      imageNodeIndex += 1;
+      console.log(`   [이미지 ${imageNodeIndex}] 🖼️ ${node.role} · ${path.basename(node.assetPath)}`);
+      const uploaded = await uploadOneImage(page, node.assetPath);
+      if (uploaded) {
+        uploadedCount += 1;
+      } else if (
+        node.role === "thumbnail" &&
+        options.requiredFirstImagePath &&
+        path.resolve(node.assetPath) === path.resolve(options.requiredFirstImagePath)
+      ) {
+        throw new Error(`썸네일 첫 이미지 업로드 확인 실패: ${path.basename(node.assetPath)}`);
+      }
+      continue;
+    }
+    if (node.kind === "connectCard") {
+      if (node.connectKind === "TRAVEL") {
+        await insertTravelConnectLink(page, node.url);
+      } else {
+        await insertShoppingConnectLink(
+          page,
+          node.url,
+          options.shoppingConnectProductName,
+          options.shoppingConnectProductFinalUrl,
+          "SHOPPING",
+        );
+      }
+      connectCardCount += 1;
+      continue;
+    }
+    if (node.kind === "hashtags") {
+      await setNaverTextFormat(page, "text");
+      await page.keyboard.press("Enter");
+      const hashtagText = node.values
+        .map((tag) => `#${tag.replace(/^#+/, "").replace(/\s+/g, "")}`)
+        .join(" ");
+      await page.keyboard.type(hashtagText, { delay: 10 });
+    }
+  }
+
+  return { uploadedCount, connectCardCount };
+}
+
+// 텍스트 섹션 입력 (줄바꿈 포함)
 async function inputTextSection(
   page: Page,
   text: string,
-  options?: { useSectionHeading?: boolean; insertDividerAboveHeading?: boolean; headerFormat?: HeaderFormat }
+  options?: { useSectionHeading?: boolean; insertDividerAboveHeading?: boolean }
 ): Promise<void> {
   const useSectionHeading = options?.useSectionHeading ?? true;
   const insertDividerAboveHeading =
@@ -7501,23 +8291,14 @@ async function inputTextSection(
       }
     }
 
-    let quotationInserted = false;
-    if (options?.headerFormat === "quotation" && NAVER_EDITOR_QUOTATION_ENABLED) {
-      quotationInserted = await insertNaverQuotation(page, titleLine);
-      if (!quotationInserted) {
-        console.log("   ⚠️ 인용구 삽입 실패, 소제목 서식으로 대체");
-      }
+    const headingApplied = await setNaverTextFormat(page, "sectionTitle");
+    if (!headingApplied) {
+      console.log("   ⚠️ 소제목 스타일 적용 실패, 본문 스타일로 대체");
     }
-    if (!quotationInserted) {
-      const headingApplied = await setNaverTextFormat(page, "sectionTitle");
-      if (!headingApplied) {
-        console.log("   ⚠️ 소제목 스타일 적용 실패, 본문 스타일로 대체");
-      }
-      await page.keyboard.type(titleLine, { delay: 3 });
-      await page.keyboard.press("Enter");
-      await page.waitForTimeout(80);
-      await setNaverTextFormat(page, "text");
-    }
+    await page.keyboard.type(titleLine, { delay: 3 });
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(80);
+    await setNaverTextFormat(page, "text");
   } else {
     await setNaverTextFormat(page, "text");
     await page.keyboard.type(titleLine, { delay: 3 });
@@ -7554,7 +8335,7 @@ async function step5and6_uploadAndWrite(
     shoppingConnectProductFinalUrl?: string | null;
     requiredFirstImagePath?: string | null;
     connectKind?: "SHOPPING" | "TRAVEL";
-    composition?: PostCompositionContract | null;
+    resolvedDocument?: ResolvedPostDocumentV1 | null;
   }
 ): Promise<void> {
   console.log("\n📝 STEP 5+6: 이미지 + 본문 번갈아 입력");
@@ -7565,55 +8346,48 @@ async function step5and6_uploadAndWrite(
   await page.keyboard.press('Tab');
   await page.waitForTimeout(500);
   await setNaverTextFormat(page, "text");
+
+  if (options?.resolvedDocument) {
+    const result = await renderResolvedPostDocument(page, options.resolvedDocument, {
+      shoppingConnectProductName: options.shoppingConnectProductName,
+      shoppingConnectProductFinalUrl: options.shoppingConnectProductFinalUrl,
+      requiredFirstImagePath: options.requiredFirstImagePath,
+    });
+    console.log(
+      `\n   ✅ 렌더 계약 실행 완료: 이미지 ${result.uploadedCount}개, 커넥트 카드 ${result.connectCardCount}개`,
+    );
+    if (result.connectCardCount < 2 && options.shoppingConnectUrl) {
+      throw new Error(`커넥트 카드 삽입 결과가 부족합니다: ${result.connectCardCount}/2`);
+    }
+    return;
+  }
   
   const mainSections = sections.length > 1 ? sections.slice(0, -1) : sections;
   const tailSection = sections.length > 1 ? sections[sections.length - 1] : "";
   // 우선순위 이미지(썸네일, 대표이미지)는 섹션 수가 적어도 최소 2장까지 업로드
-  // 스펙 파이프라인이 만든 에디터 입력 계약이 있으면 섹션별 슬롯(이미지 0~2장, 헤더 형식)을 그대로 따른다.
-  const compositionSections =
-    options?.composition && options.composition.sections.length === mainSections.length
-      ? options.composition.sections
-      : null;
-  const imagePathsBySection = new Map<number, string[]>();
-  if (compositionSections) {
-    const existing = (imagePath: string) => Boolean(imagePath) && fs.existsSync(imagePath);
-    compositionSections.forEach((slot) => imagePathsBySection.set(slot.index, slot.imagePaths.filter(existing)));
-    // 업로드 목록의 첫 장(hero/썸네일)이 슬롯 어디에도 없으면 본문 맨 앞에 넣는다.
-    const heroPath = imagePaths[0];
-    const heroPlaced = compositionSections.some((slot) =>
-      slot.imagePaths.some((imagePath) => path.resolve(imagePath) === path.resolve(heroPath || "")),
-    );
-    if (heroPath && !heroPlaced) {
-      imagePathsBySection.set(0, [heroPath, ...(imagePathsBySection.get(0) || [])]);
-    }
-    console.log(
-      `   🧩 슬롯 배치: ${compositionSections
-        .map((slot) => `${slot.index + 1}:${(imagePathsBySection.get(slot.index) || []).length}장/${slot.headerFormat}`)
-        .join(" ")}`
-    );
-  } else if (options?.connectKind === "TRAVEL" && mainSections.length > 1) {
+  const maxLoop = Math.max(mainSections.length, Math.min(imagePaths.length, 2));
+  const imagePathBySection = new Map<number, string>();
+  if (options?.connectKind === "TRAVEL" && mainSections.length > 1) {
     const usableImageCount = Math.min(imagePaths.length, mainSections.length);
     for (let imageIndex = 0; imageIndex < usableImageCount; imageIndex += 1) {
       const sectionIndex =
         usableImageCount <= 1
           ? 0
           : Math.round((imageIndex * (mainSections.length - 1)) / (usableImageCount - 1));
-      imagePathsBySection.set(sectionIndex, [imagePaths[imageIndex]]);
+      imagePathBySection.set(sectionIndex, imagePaths[imageIndex]);
     }
     console.log(
-      `   ✈️ 여행 사진 분산 배치: ${Array.from(imagePathsBySection.keys()).map((index) => index + 1).join(", ")}번 섹션 앞`
+      `   ✈️ 여행 사진 분산 배치: ${Array.from(imagePathBySection.keys()).map((index) => index + 1).join(", ")}번 섹션 앞`
     );
   } else {
-    imagePaths.forEach((imagePath, index) => imagePathsBySection.set(index, [imagePath]));
+    imagePaths.forEach((imagePath, index) => imagePathBySection.set(index, imagePath));
   }
-  const maxLoop = compositionSections
-    ? mainSections.length
-    : Math.max(mainSections.length, Math.min(imagePaths.length, 2));
   let uploadedCount = 0;
   
   for (let i = 0; i < maxLoop; i++) {
-    // 이미지 업로드 (있으면, 슬롯당 여러 장 가능)
-    for (const imagePath of imagePathsBySection.get(i) || []) {
+    // 이미지 업로드 (있으면)
+    const imagePath = imagePathBySection.get(i);
+    if (imagePath) {
       console.log(`   [${i + 1}] 🖼️ 이미지 업로드...`);
       const success = await uploadOneImage(page, imagePath);
       if (success) {
@@ -7630,12 +8404,7 @@ async function step5and6_uploadAndWrite(
     // 텍스트 섹션 입력 (있으면)
     if (i < mainSections.length) {
       console.log(`   [${i + 1}] ✏️ 텍스트 입력 (${mainSections[i].length}자)`);
-      const slot = compositionSections?.[i];
-      await inputTextSection(page, mainSections[i], {
-        useSectionHeading: slot ? slot.headerFormat !== "none" && useSectionHeading : useSectionHeading,
-        insertDividerAboveHeading: slot ? slot.dividerBefore && useSectionHeading : undefined,
-        headerFormat: slot?.headerFormat,
-      });
+      await inputTextSection(page, mainSections[i], { useSectionHeading });
       await page.waitForTimeout(300);
     }
   }
@@ -8340,16 +9109,14 @@ async function verifyScheduleDateApplied(page: Page, scheduledDate: Date): Promi
 interface ScheduleSubmissionTracker {
   stop: () => void;
   hasAnyPublishRequest: () => boolean;
-  hasScheduleSignal: () => boolean;
+  hasConfirmedScheduleRequest: () => boolean;
   getRecentEvents: () => string[];
 }
 
 function createScheduleSubmissionTracker(page: Page, targetYmd: string): ScheduleSubmissionTracker {
-  const dotted = targetYmd.replace(/-/g, ".");
-  const compact = targetYmd.replace(/-/g, "");
   const recentEvents: string[] = [];
   let hasAnyPublishRequest = false;
-  let hasScheduleSignal = false;
+  let hasConfirmedScheduleRequest = false;
 
   const pushEvent = (entry: string) => {
     recentEvents.push(entry);
@@ -8365,36 +9132,22 @@ function createScheduleSubmissionTracker(page: Page, targetYmd: string): Schedul
       if (method !== "POST") return;
 
       const url = response.url();
-      const lowerUrl = url.toLowerCase();
-      if (!lowerUrl.includes("naver.com")) return;
-
-      const looksLikePublishEndpoint =
-        /write|publish|post|reserve|schedule|save|temp|rabbit/i.test(lowerUrl);
-      if (!looksLikePublishEndpoint) return;
+      const postData = request.postData() || "";
+      const signal = inspectNaverScheduleSubmissionSignal({
+        url,
+        postData,
+        status: response.status(),
+        targetYmd,
+      });
+      if (!signal.relevant) return;
 
       hasAnyPublishRequest = true;
-
-      const postData = request.postData() || "";
-      const normalizedPostData = postData.replace(/\s+/g, " ").toLowerCase();
-      const hasUrlScheduleSignal = /reserve|reservation|schedule/.test(lowerUrl);
-
-      const hasKeywordSignal =
-        /reserve|reservation|schedule|publishmode|publish_mode|publishtype|publish_type|pretime|pre_post|prepost|reservedtime|radio_time|예약|발행/.test(
-          normalizedPostData
-        );
-      const hasDateSignal =
-        normalizedPostData.includes(targetYmd) ||
-        normalizedPostData.includes(dotted) ||
-        normalizedPostData.includes(compact);
-
-      if (hasUrlScheduleSignal || hasKeywordSignal || hasDateSignal) {
-        hasScheduleSignal = true;
-      }
+      if (signal.confirmed) hasConfirmedScheduleRequest = true;
 
       pushEvent(
-        `POST ${response.status()} ${url} keyword=${hasKeywordSignal ? "Y" : "N"} date=${
-          hasDateSignal ? "Y" : "N"
-        }`
+        `POST ${response.status()} ${url} schedule=${signal.hasScheduleMode ? "Y" : "N"} date=${
+          signal.hasTargetDate ? "Y" : "N"
+        } confirmed=${signal.confirmed ? "Y" : "N"}`
       );
     } catch {
       // no-op
@@ -8408,7 +9161,7 @@ function createScheduleSubmissionTracker(page: Page, targetYmd: string): Schedul
       page.off("response", listener);
     },
     hasAnyPublishRequest: () => hasAnyPublishRequest,
-    hasScheduleSignal: () => hasScheduleSignal,
+    hasConfirmedScheduleRequest: () => hasConfirmedScheduleRequest,
     getRecentEvents: () => [...recentEvents],
   };
 }
@@ -8423,11 +9176,11 @@ async function verifyScheduleSubmission(
   let publishedUrlSeenAt: number | null = null;
 
   while (Date.now() - startedAt < 12000) {
-    const hasScheduleSignal = tracker?.hasScheduleSignal() ?? false;
+    const hasConfirmedScheduleRequest = tracker?.hasConfirmedScheduleRequest() ?? false;
     const url = page.url();
     if (isPublishedUrl(url)) {
-      if (hasScheduleSignal) {
-        console.log("      - 예약 요청 신호 감지 + PostView 전환: 예약 제출 성공으로 처리");
+      if (hasConfirmedScheduleRequest) {
+        console.log("      - 목표 날짜가 포함된 예약 요청 성공 + PostView 전환 확인");
         return;
       }
 
@@ -8456,8 +9209,8 @@ async function verifyScheduleSubmission(
       return;
     }
 
-    if (hasScheduleSignal) {
-      console.log("      - 예약 요청 신호 감지: 완료 처리");
+    if (hasConfirmedScheduleRequest) {
+      console.log("      - 목표 날짜가 포함된 예약 요청 성공 확인");
       return;
     }
 
@@ -9412,14 +10165,51 @@ function parseRuntimePublishOptions(argv: string[]): RuntimePublishOptions {
 // ============================================
 // 메인 실행
 // ============================================
+function classifyFailureCode(message: string): string {
+  if (/세션|로그인/u.test(message)) return "NAVER_SESSION_EXPIRED";
+  if (/본문 이미지|이미지 부족|IMAGE_SHORTFALL|이미지가 부족/u.test(message)) return "IMAGE_SHORTFALL";
+  if (/발행 보류|BLOCKED|게이트|품질 기준/u.test(message)) return "CONTENT_BLOCKED";
+  if (/OPENAI_API_KEY|OpenAI API|Codex 로그인|Codex 작성 실패/u.test(message)) return "LLM_UNAVAILABLE";
+  if (/찾을 수 없|상품 정보를 확보/u.test(message)) return "PRODUCT_NOT_FOUND";
+  if (/여행커넥트|계약/u.test(message)) return "TRAVEL_CONTRACT_LOCKED";
+  return "LOCAL_AUTOMATION_FAILED";
+}
+
+/** 초안 생성 결과를 패키지 디렉터리에 남긴다. 라우트가 로그 정규식 대신 이 파일로 원인을 읽는다. */
+function writePrepareResult(
+  outputDir: string,
+  payload: { ok: boolean; code: string; message: string; readiness?: unknown },
+): void {
+  try {
+    fs.mkdirSync(outputDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(outputDir, "result.json"),
+      JSON.stringify({ ...payload, at: new Date().toISOString() }, null, 2),
+      "utf8",
+    );
+  } catch {
+    // 결과 파일 기록 실패는 발행 자체를 막지 않는다.
+  }
+}
+
+function parseStoredFeatures(value: string | null | undefined): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 /**
- * 초안 수정 모드: 저장된 v2 패키지의 스펙/초안에 사용자 지시를 반영해 지정 섹션만 다시 쓴다.
- * 재스크랩·전체 재생성 없이 패키지를 갱신하고 result.json 을 남긴다.
+ * 초안 부분 수정 모드(BRANDLINK_REVISE_REQUEST). 네이버 세션·상품 페이지 수집 없이,
+ * 저장된 스펙·초안을 바탕으로 지시한 섹션만 다시 생성하고 패키지를 갱신한다.
  */
 async function runPreparedPostRevision(
   linkId: string,
   connectKind: "SHOPPING" | "TRAVEL",
-  brandLink: string,
+  link: { url: string; productName: string | null; productDescription?: string | null; productFeatures?: string | null },
   requestPath: string,
 ): Promise<void> {
   const outputDir = process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim();
@@ -9430,9 +10220,9 @@ async function runPreparedPostRevision(
   const sectionIndexes = Array.isArray(request.sectionIndexes)
     ? request.sectionIndexes.filter((value): value is number => Number.isInteger(value))
     : [];
-  const prepared = loadPreparedBrandLinkPostOverride();
+  const prepared = loadPreparedBrandLinkPostOverride({ requireApproval: false });
   if (!prepared?.spec || !prepared.draft) {
-    throw new Error("이 초안은 스펙 정보가 없어 부분 수정을 지원하지 않습니다. 초안을 다시 생성하세요.");
+    throw new Error("이 초안은 스펙 정보가 없어 부분 수정을 지원하지 않습니다(ChatGPT 제출 초안 등). 초안을 다시 생성하세요.");
   }
   console.log(`\n✏️ 초안 수정 모드: ${instructions.slice(0, 80)}${sectionIndexes.length ? ` (섹션 ${sectionIndexes.join(", ")})` : ""}`);
   const result = await reviseAssembledPost({
@@ -9440,7 +10230,7 @@ async function runPreparedPostRevision(
     draft: prepared.draft,
     instructions,
     sectionIndexes,
-    brandLink,
+    brandLink: link.url,
     options: { quotationHeaders: NAVER_EDITOR_QUOTATION_ENABLED },
   });
   for (const note of result.notes) console.log(`   · ${note}`);
@@ -9449,22 +10239,56 @@ async function runPreparedPostRevision(
     title: result.title,
     sections: result.sections,
     hashtags: result.hashtags,
+    generationSource: "AI",
     rawResponse: "spec-first:revise",
     assembled: result,
     notes: result.notes,
   };
+  const imagePaths = Array.from(new Set([prepared.heroImagePath, ...result.bodyImagePaths].filter((imagePath) => fs.existsSync(imagePath))));
+  const composition = resolvePostDocument({
+    connectKind,
+    title: post.title,
+    sections: post.sections,
+    hashtags: post.hashtags,
+    imagePaths,
+    connectUrl: link.url,
+    qualityPreset: BRANDLINK_QUALITY_PRESET,
+    experienceMode: BRANDLINK_EXPERIENCE_MODE,
+  });
+  post.composition = composition;
+  const contentReadiness = BRANDLINK_CONTENT_READINESS_ENABLED
+    ? getBrandLinkContentReadiness({
+        productName: link.productName || "",
+        title: post.title,
+        sections: post.sections,
+        hashtags: post.hashtags,
+        brandLink: link.url,
+        generationSource: "AI",
+        hasRepresentativeImage: true,
+        requireRepresentativeImage: BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE,
+        thumbnailGenerated: true,
+        connectKind,
+        experienceMode: BRANDLINK_EXPERIENCE_MODE,
+        compositionQualityReport: composition.qualityReport,
+        sourceDescription: link.productDescription || "",
+        sourceFeatures: parseStoredFeatures(link.productFeatures),
+      })
+    : null;
   const manifestPath = writePreparedBrandPostPackage({
     outputDir: path.resolve(outputDir),
     brandLinkId: linkId,
     connectKind,
     post,
-    imagePaths: [prepared.heroImagePath, ...result.bodyImagePaths],
+    imagePaths,
+    composition,
+    contentReadiness,
+    assembled: result,
   });
   writePrepareResult(path.resolve(outputDir), {
     ok: result.validation.canPublish,
     code: result.validation.canPublish ? "OK" : "CONTENT_BLOCKED",
     message: result.validation.summary,
-    readiness: { status: result.validation.status, score: result.validation.score, summary: result.validation.summary, repairTargets: result.validation.repair.targets },
+    readiness: summarizeSpecValidation(result),
   });
   console.log(`   📦 수정된 초안 패키지 저장: ${manifestPath}`);
   await prisma.brandLink.update({ where: { id: linkId }, data: { errorMessage: `초안 수정 완료 (${result.validation.status})` } });
@@ -9508,7 +10332,17 @@ async function main() {
   }
 
   if (reviseRequestPath) {
-    await runPreparedPostRevision(linkId, link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING", link.url, reviseRequestPath);
+    try {
+      await runPreparedPostRevision(linkId, link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING", link, reviseRequestPath);
+    } catch (error) {
+      const message = getErrorMessage(error);
+      console.error("\n❌ 오류:", message);
+      const outputDir = process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim();
+      if (outputDir) writePrepareResult(path.resolve(outputDir), { ok: false, code: classifyFailureCode(message), message });
+      process.exitCode = 1;
+    } finally {
+      await prisma.$disconnect();
+    }
     return;
   }
   console.log(`\n📎 URL: ${link.url}`);
@@ -9561,6 +10395,10 @@ async function main() {
       })();
     }, AGENT_MAX_RUNTIME_MS);
 
+    // 승인된 준비 원고는 상품 페이지를 다시 읽을 이유가 없다. 발행 시작 전에
+    // 먼저 불러와 STEP1의 라이브 상세페이지 재수집을 건너뛰고 곧바로 에디터로 간다.
+    const preparedPostOverride = loadPreparedBrandLinkPostOverride();
+
     setStage("브라우저 시작");
     // 브라우저 시작 (봇 감지 우회 설정)
     browser = await chromium.launch({
@@ -9593,6 +10431,7 @@ async function main() {
 
     setStage("STEP1 상품 정보/이미지 수집");
     // STEP 1: DB에 저장된 스크랩 결과를 우선 사용하고, 부족할 때만 보강 스크랩
+    const runtimeConnectKind = link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING";
     let product = await buildProductInfoFromStoredBrandLink({
       url: link.url,
       finalUrl: link.finalUrl,
@@ -9600,7 +10439,10 @@ async function main() {
       productPrice: link.productPrice,
       storeName: link.storeName,
       imageUrls: link.imageUrls,
-    });
+      productDescription: link.productDescription,
+      productFeatures: link.productFeatures,
+      travelResearchJson: link.travelResearchJson,
+    }, runtimeConnectKind);
 
     if (product) {
       console.log("\n📦 STEP 1: 저장된 스크랩 결과 재사용");
@@ -9609,22 +10451,88 @@ async function main() {
       console.log(`   🖼️ 이미지: ${product.imagePaths.length}개`);
     }
 
-    const needsLiveRefresh =
+    const needsImageRefresh = Boolean(
+      product && shouldRefreshStoredImages(runtimeConnectKind, product.imagePaths.length),
+    );
+    const reviewEvidenceLevel = product
+      ? runtimeConnectKind === "TRAVEL"
+        ? buildTravelReviewAnalysis(product).evidenceLevel
+        : buildProductReviewAnalysis(toProductEditorialInput(product, 11)).evidenceLevel
+      : "sparse";
+    const hasReviewEvidence = reviewEvidenceLevel !== "sparse";
+    const hasVisualReviewEvidence = Boolean(product && hasSufficientVisualDraftEvidence({
+      connectKind: runtimeConnectKind,
+      sourceImageCount: product.sourceImageUrls.length,
+      materializedImageCount: product.imagePaths.length,
+      detailImageCount: product.detailImagePaths.length,
+    }));
+    const needsReviewEvidenceRefresh = Boolean(product && reviewEvidenceLevel !== "rich");
+    const needsTravelResearchRefresh = Boolean(
+      product && runtimeConnectKind === "TRAVEL" && !product.travelPageResearch,
+    );
+    const needsLiveRefresh = !preparedPostOverride && (
       !product ||
       !sanitizeText(product.name || "") ||
-      product.imagePaths.length === 0;
+      needsImageRefresh ||
+      needsReviewEvidenceRefresh ||
+      needsTravelResearchRefresh
+    );
 
     if (needsLiveRefresh) {
       const sourceUrl = link.finalUrl || link.url;
-      if (product) {
-        console.log("   ⚠️ 저장된 스크랩 정보가 부족해서 상품 페이지를 다시 확인합니다.");
+      if (product && needsImageRefresh) {
+        const minimumImages = minimumStoredSourceImageCount(runtimeConnectKind);
+        console.log(
+          `   ⚠️ 저장 이미지가 초안 기준에 부족합니다 (${product.imagePaths.length}/${minimumImages}장). 상품 페이지를 다시 확인합니다.`,
+        );
       }
-      const liveProduct = await step1_getProductInfo(page, sourceUrl);
-      product = mergeProductInfo(product, liveProduct);
+      if (product && needsReviewEvidenceRefresh) {
+        console.log(runtimeConnectKind === "TRAVEL"
+          ? "   ⚠️ 여행지 리서치에 필요한 방문지·일정 정보가 부족해 상품 페이지를 다시 수집합니다."
+          : "   ⚠️ 제품 장단점을 판단할 상세정보가 부족해 상품 페이지의 설명·기능을 다시 수집합니다.");
+      }
+      if (needsTravelResearchRefresh) {
+        console.log("   ⚠️ 저장된 여행 일정 원문이 없어 상품 페이지의 전체 일정·방문지를 다시 수집합니다.");
+      }
+      try {
+        const liveProduct = await step1_getProductInfo(page, sourceUrl, runtimeConnectKind);
+        product = mergeProductInfo(product, liveProduct);
+      } catch (error) {
+        if (
+          product &&
+          (hasReviewEvidence || hasVisualReviewEvidence) &&
+          !needsImageRefresh &&
+          !needsTravelResearchRefresh
+        ) {
+          console.log(`   ⚠️ 상세정보 보강 실패, 확보된 텍스트·이미지 근거로 조건부 리뷰를 작성합니다: ${getErrorMessage(error)}`);
+        } else {
+          throw error;
+        }
+      }
     }
 
     if (!product) {
       throw new Error("발행에 사용할 상품 정보를 확보하지 못했습니다.");
+    }
+
+    const finalReviewEvidenceReady = runtimeConnectKind === "TRAVEL"
+      ? Boolean(product.travelPageResearch) && hasSufficientTravelReviewEvidence(product)
+      : hasSufficientProductReviewEvidence(toProductEditorialInput(product, 11)) ||
+        hasSufficientVisualDraftEvidence({
+          connectKind: runtimeConnectKind,
+          sourceImageCount: product.sourceImageUrls.length,
+          materializedImageCount: product.imagePaths.length,
+          detailImageCount: product.detailImagePaths.length,
+        });
+    if (!preparedPostOverride && !finalReviewEvidenceReady) {
+      throw new Error(
+        runtimeConnectKind === "TRAVEL"
+          ? "여행지 브이로그를 작성할 방문지·일정 정보가 부족합니다. 상세정보 동기화 후 다시 시도해 주세요."
+          : "제품 자체의 장단점을 판단할 기능·규격 텍스트나 상세페이지 이미지가 부족합니다. 상세정보 동기화 후 다시 시도해 주세요.",
+      );
+    }
+    if (runtimeConnectKind === "SHOPPING" && product.detailImagePaths.length >= 2) {
+      console.log(`   🔎 쇼핑 상세페이지 시각 근거: ${product.detailImagePaths.length}구간`);
     }
 
     await prisma.brandLink.update({
@@ -9636,6 +10544,9 @@ async function main() {
         finalUrl: product.finalUrl || link.finalUrl || undefined,
         imageUrls:
           product.sourceImageUrls.length > 0 ? JSON.stringify(product.sourceImageUrls) : link.imageUrls,
+        productDescription: product.description || null,
+        productFeatures: product.features.length > 0 ? JSON.stringify(product.features) : null,
+        travelResearchJson: product.travelPageResearch ? JSON.stringify(product.travelPageResearch) : null,
         errorMessage: null,
       },
     });
@@ -9646,8 +10557,6 @@ async function main() {
     console.log(`🖼️ 이미지: ${product.imagePaths.length}개`);
     console.log("-".repeat(40));
     
-    const preparedPostOverride = loadPreparedBrandLinkPostOverride();
-    const connectKindValue: "SHOPPING" | "TRAVEL" = link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING";
     // 여행 일정 요약 카드는 글보다 먼저 만들어 이미지 플랜의 입력이 되게 한다.
     const travelEditorialCardPath =
       link.connectKind === "TRAVEL" && !preparedPostOverride
@@ -9682,14 +10591,36 @@ async function main() {
       product,
       link.url,
       link.id,
-      connectKindValue,
+      link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
       { imageCandidates: specImageCandidates, tempDir: TEMP_PATH, memo: process.env.BRANDLINK_DRAFT_MEMO?.trim() || null }
     );
+    const assembled: AssembledPost | null = post.assembled ?? null;
+    // 쇼핑 GPT가 상세 이미지에서 추출한 evidenceFacts는 step2_generatePost에서
+    // product.features에 합쳐진다. 이 값을 저장하지 않으면 이후 미리보기/QC가
+    // 크롤링 당시의 SEO 키워드만 읽어 근거가 없는 글로 오판한다.
+    if (!preparedPostOverride && runtimeConnectKind === "SHOPPING") {
+      await prisma.brandLink.update({
+        where: { id: linkId },
+        data: {
+          productFeatures: product.features.length > 0 ? JSON.stringify(product.features) : null,
+        },
+      });
+    }
+    if (BRANDLINK_DRAFT_CONTEXT_OUTPUT) {
+      await prisma.brandLink.update({
+        where: { id: linkId },
+        data: { status: "READY", errorMessage: null },
+      });
+      for (const imagePath of product.imagePaths) {
+        try { fs.unlinkSync(imagePath); } catch {}
+      }
+      console.log("   MCP 초안 컨텍스트 준비 완료. ChatGPT 원고 제출을 기다립니다.");
+      return;
+    }
     if (preparedPostOverride) {
       console.log(`   ✅ 승인 원고 적용: ${post.title}`);
       console.log(`   ✅ 승인 이미지 적용: ${1 + preparedPostOverride.bodyImagePaths.length}장`);
     }
-    const assembled: AssembledPost | null = post.assembled ?? null;
 
     setStage("STEP2.5 대표 썸네일 생성");
     const generatedThumbnail: GeneratedProductThumbnail | null = preparedPostOverride
@@ -9701,35 +10632,35 @@ async function main() {
           link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
         );
     const generatedThumbnailPath = generatedThumbnail?.path || null;
-    let uploadImagePaths: string[];
-    let collectedImagePaths: string[];
+    const collectedImagePaths = Array.from(new Set(preparedPostOverride
+      ? [preparedPostOverride.heroImagePath, ...preparedPostOverride.bodyImagePaths]
+      : [
+          ...(generatedThumbnailPath ? [generatedThumbnailPath] : []),
+          ...(travelEditorialCardPath ? [travelEditorialCardPath] : []),
+          ...(product.representativeImagePath ? [product.representativeImagePath] : []),
+          ...product.imagePaths,
+        ]));
+    let uploadImagePaths = await buildBlogUploadImagePaths({
+      imagePaths: collectedImagePaths,
+      generatedThumbnailPath,
+      representativeImagePath: product.representativeImagePath,
+      editorialImagePath: travelEditorialCardPath,
+      connectKind: runtimeConnectKind,
+    });
     if (assembled) {
-      // Spec-first: 슬롯이 확정한 이미지 목록을 그대로 쓴다. 첫 장(hero)만 생성 썸네일로 교체한다.
-      const heroPath = generatedThumbnailPath || assembled.heroImagePath;
-      collectedImagePaths = [...(heroPath ? [heroPath] : []), ...assembled.bodyImagePaths];
+      // Spec-first: 이미지 플랜이 확정한 슬롯 순서를 그대로 쓴다(생성 썸네일이 있으면 맨 앞).
       const seenUpload = new Set<string>();
-      uploadImagePaths = collectedImagePaths.filter((imagePath) => {
+      uploadImagePaths = [
+        ...(generatedThumbnailPath ? [generatedThumbnailPath] : []),
+        ...assembled.uploadImagePaths,
+      ].filter((imagePath) => {
         if (!imagePath || !fs.existsSync(imagePath)) return false;
         const resolved = path.resolve(imagePath);
         if (seenUpload.has(resolved)) return false;
         seenUpload.add(resolved);
         return true;
       });
-    } else {
-      collectedImagePaths = Array.from(new Set(preparedPostOverride
-        ? [preparedPostOverride.heroImagePath, ...preparedPostOverride.bodyImagePaths]
-        : [
-            ...(generatedThumbnailPath ? [generatedThumbnailPath] : []),
-            ...(travelEditorialCardPath ? [travelEditorialCardPath] : []),
-            ...(product.representativeImagePath ? [product.representativeImagePath] : []),
-            ...product.imagePaths,
-          ]));
-      uploadImagePaths = await buildBlogUploadImagePaths({
-        imagePaths: collectedImagePaths,
-        generatedThumbnailPath,
-        representativeImagePath: product.representativeImagePath,
-        editorialImagePath: travelEditorialCardPath,
-      });
+      console.log(`   🧭 Spec-first 이미지 슬롯 적용: 업로드 ${uploadImagePaths.length}장`);
     }
     product.imagePaths = uploadImagePaths;
     if (generatedThumbnailPath) {
@@ -9748,30 +10679,53 @@ async function main() {
       );
     }
 
+    const prepareOutputDir = process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim();
+    const composition =
+      preparedPostOverride?.composition ||
+      resolvePostDocument({
+        connectKind: runtimeConnectKind,
+        title: post.title,
+        sections: post.sections,
+        hashtags: post.hashtags,
+        imagePaths: product.imagePaths,
+        connectUrl: link.url,
+        qualityPreset: BRANDLINK_QUALITY_PRESET,
+        experienceMode: BRANDLINK_EXPERIENCE_MODE,
+      });
+    post.composition = composition;
+    console.log(
+      `   🧱 렌더 계약: ${composition.contractVersion}, 노드 ${composition.renderNodes.length}개, 품질 ${composition.qualityReport.score}점`,
+    );
+    for (const warning of composition.qualityReport.warnings) {
+      console.log(`      - WARN ${warning}`);
+    }
+    for (const blocker of composition.qualityReport.blockers) {
+      console.log(`      - BLOCK ${blocker}`);
+    }
+    if (!composition.qualityReport.canAutoPublish && !prepareOutputDir) {
+      throw new Error(
+        `프리미엄 자동발행 품질 게이트 미통과: ${composition.qualityReport.blockers.join(" ")}`,
+      );
+    }
+
     let contentReadiness: BrandLinkContentReadiness | null = null;
-    if (assembled) {
-      const validation = assembled.validation;
-      console.log(`   🧪 스펙 검증 게이트: ${validation.summary}`);
-      for (const signal of validation.signals.filter((item) => item.status !== "pass")) {
-        console.log(`      - ${signal.status.toUpperCase()} ${signal.label}${signal.detail ? ` (${signal.detail})` : ""}`);
-      }
-      if (validation.repair.targets.length > 0) {
-        console.log(`      · 남은 수리 대상 ${validation.repair.targets.length}건: ${validation.repair.targets.slice(0, 4).map((item) => `${item.sectionIndex ?? "제목"}:${item.code}`).join(", ")}`);
-      }
-      if (!validation.canPublish) {
-        throw new Error(validation.summary);
-      }
-    } else if (BRANDLINK_CONTENT_READINESS_ENABLED) {
+    if (BRANDLINK_CONTENT_READINESS_ENABLED) {
       contentReadiness = getBrandLinkContentReadiness({
         productName: product.name,
         title: post.title,
         sections: post.sections,
         hashtags: post.hashtags,
         brandLink: link.url,
+        generationSource: post.generationSource,
         hasRepresentativeImage: Boolean(product.representativeImagePath),
         requireRepresentativeImage: BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE,
         thumbnailGenerated:
           Boolean(generatedThumbnailPath) && generatedThumbnail?.source !== "composite",
+        connectKind: runtimeConnectKind,
+        experienceMode: BRANDLINK_EXPERIENCE_MODE,
+        compositionQualityReport: composition.qualityReport,
+        sourceDescription: product.description,
+        sourceFeatures: product.features,
       });
 
       console.log(`   🧪 상품글 발행 게이트: ${contentReadiness.summary}`);
@@ -9781,13 +10735,12 @@ async function main() {
         console.log(`      - ${mark} ${signal.label}`);
       }
 
-      if (!contentReadiness.canPublish) {
+      if (!contentReadiness.canPublish && !prepareOutputDir) {
         throw new Error(contentReadiness.reason || contentReadiness.summary);
       }
     }
 
     let previewPath: string | null = null;
-    const prepareOutputDir = process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim();
     if (prepareOutputDir) {
       const manifestPath = writePreparedBrandPostPackage({
         outputDir: path.resolve(prepareOutputDir),
@@ -9795,15 +10748,19 @@ async function main() {
         connectKind: link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
         post,
         imagePaths: product.imagePaths,
+        composition,
+        contentReadiness,
+        assembled,
       });
       console.log(`   📦 승인 대기 초안 패키지 저장: ${manifestPath}`);
+      const readyToPublish = (contentReadiness?.canPublish ?? true) && composition.qualityReport.canAutoPublish;
       writePrepareResult(path.resolve(prepareOutputDir), {
         ok: true,
-        code: "OK",
-        message: assembled ? assembled.validation.summary : "초안 생성 완료",
-        readiness: assembled
-          ? { status: assembled.validation.status, score: assembled.validation.score, summary: assembled.validation.summary, repairTargets: assembled.validation.repair.targets }
-          : null,
+        code: readyToPublish ? "OK" : "CONTENT_BLOCKED",
+        message: readyToPublish
+          ? "초안 패키지를 저장했습니다."
+          : contentReadiness?.reason || contentReadiness?.summary || composition.qualityReport.blockers.join(" "),
+        readiness: assembled ? summarizeSpecValidation(assembled) : contentReadiness,
       });
     }
     if (DEBUG_SAVE_GENERATED_POST || DRY_RUN_GENERATE_ONLY) {
@@ -9842,7 +10799,7 @@ async function main() {
       shoppingConnectProductFinalUrl: product.finalUrl || link.finalUrl,
       requiredFirstImagePath: generatedThumbnailPath,
       connectKind: link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
-      composition: assembled?.composition ?? preparedPostOverride?.composition ?? null,
+      resolvedDocument: composition,
     });
     
     setStage(runtimePublishOptions.mode === "schedule" ? "STEP7 예약 발행" : "STEP7 즉시 발행");
@@ -9992,20 +10949,15 @@ async function main() {
   } catch (error: unknown) {
     const message = `[${currentStage}] ${getErrorMessage(error)}`;
     console.error("\n❌ 오류:", message);
+    const prepareOutputDirOnError = process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim();
+    if (prepareOutputDirOnError) {
+      writePrepareResult(path.resolve(prepareOutputDirOnError), { ok: false, code: classifyFailureCode(message), message });
+    }
     
     await prisma.brandLink.update({
       where: { id: linkId },
       data: { status: "FAILED", errorMessage: message }
     });
-    // 초안 생성/수정 모드라면 원인을 코드와 함께 패키지 디렉터리에 남긴다(라우트·MCP가 읽음).
-    const prepareOutputDirOnError = process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim();
-    if (prepareOutputDirOnError) {
-      writePrepareResult(path.resolve(prepareOutputDirOnError), {
-        ok: false,
-        code: classifyFailureCode(getErrorMessage(error)),
-        message,
-      });
-    }
     // 호출 API가 성공(0)으로 오인해 뒤늦게 "manifest 없음"만 표시하지 않도록
     // 실제 실패를 프로세스 종료 코드로 전달한다.
     process.exitCode = 1;

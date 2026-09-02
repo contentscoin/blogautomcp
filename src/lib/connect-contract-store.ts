@@ -16,6 +16,21 @@ import {
   type ConnectKind,
 } from "./brandconnect-kind";
 
+/**
+ * 같은 커넥트 화면에서 발견된 하나의 목록 피드다.
+ *
+ * 여행커넥트는 가격하락·지역인기·특가처럼 여러 section/tab 조합을 각각
+ * 별도 요청으로 제공한다. 단일 엔드포인트 계약만 저장하면 가장 큰 한 응답만
+ * 남기 때문에, 하위 호환용 최상위 계약과 함께 모든 관측 피드를 보관한다.
+ */
+export interface StoredConnectFeed {
+  listEndpoint: string;
+  listQuery: Record<string, string>;
+  itemsPath: string;
+  fieldMap: ConnectFieldMap;
+  sampleCount: number;
+}
+
 export interface StoredConnectContract {
   kind: ConnectKind;
   capturedAt: string;
@@ -30,6 +45,8 @@ export interface StoredConnectContract {
   sourceUrl: string;
   /** 캡처 시점에 확인한 항목 수(진단용). */
   sampleCount: number;
+  /** 여러 추천 section/tab을 합쳐야 하는 커넥트의 목록 피드. 구버전 계약에는 없다. */
+  feeds?: StoredConnectFeed[];
 }
 
 const CONTRACT_DIR_NAME = "connect-contracts";
@@ -47,6 +64,31 @@ function isConnectFieldMap(value: unknown): value is ConnectFieldMap {
   );
 }
 
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.values(value as Record<string, unknown>).every((entry) => typeof entry === "string")
+  );
+}
+
+function isStoredConnectFeed(value: unknown): value is StoredConnectFeed {
+  if (typeof value !== "object" || value === null) return false;
+  const feed = value as Record<string, unknown>;
+  return (
+    typeof feed.listEndpoint === "string" &&
+    feed.listEndpoint.length > 0 &&
+    isStringRecord(feed.listQuery) &&
+    typeof feed.itemsPath === "string" &&
+    feed.itemsPath.length > 0 &&
+    isConnectFieldMap(feed.fieldMap) &&
+    typeof feed.sampleCount === "number" &&
+    Number.isFinite(feed.sampleCount) &&
+    feed.sampleCount >= 0
+  );
+}
+
 function isStoredConnectContract(value: unknown): value is StoredConnectContract {
   if (typeof value !== "object" || value === null) return false;
   const contract = value as Record<string, unknown>;
@@ -55,9 +97,14 @@ function isStoredConnectContract(value: unknown): value is StoredConnectContract
     CONNECT_KINDS.includes(contract.kind as ConnectKind) &&
     typeof contract.listEndpoint === "string" &&
     contract.listEndpoint.length > 0 &&
+    isStringRecord(contract.listQuery) &&
     typeof contract.itemsPath === "string" &&
     contract.itemsPath.length > 0 &&
-    isConnectFieldMap(contract.fieldMap)
+    isConnectFieldMap(contract.fieldMap) &&
+    (contract.feeds === undefined ||
+      (Array.isArray(contract.feeds) &&
+        contract.feeds.length > 0 &&
+        contract.feeds.every(isStoredConnectFeed)))
   );
 }
 

@@ -11,17 +11,13 @@ import "dotenv/config";
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { Locator, Page, Response } from "playwright";
-import { IncomingMessage } from "http";
 import { spawnSync } from "child_process";
 import { PrismaClient } from "../src/generated/prisma";
 import * as path from "path";
 import * as fs from "fs";
-import * as http from "http";
-import * as https from "https";
 import {
     PostCategory,
     getTemplate,
-    generatePrompt,
     categoryNames
 } from "./lib/templates";
 import { buildHumanMobileStyleGuide } from "./lib/blog-writing-style";
@@ -70,7 +66,6 @@ interface PublishExecutionOptions {
   scheduledDate?: Date | null;
 }
 
-const NAVER_SCHEDULE_TIMEZONE = "Asia/Seoul";
 
 // ============================================
 // CLI 인자 파싱
@@ -98,6 +93,8 @@ interface TopicOutputBlock {
     sectionTitle?: unknown;
     heading?: unknown;
     body?: unknown;
+    draft?: unknown;
+    content?: unknown;
 }
 
 interface StoredPublishPayload {
@@ -587,24 +584,6 @@ async function insertNaverHorizontalDivider(page: Page): Promise<boolean> {
     return true;
 }
 
-function formatDateYmdInTimeZone(date: Date, timeZone: string): string {
-    const parts = new Intl.DateTimeFormat("en-US", {
-        timeZone,
-        hour12: false,
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-    }).formatToParts(date);
-    const map = new Map(parts.map((part) => [part.type, part.value]));
-    return `${map.get("year")}-${map.get("month")}-${map.get("day")}`;
-}
-
-function toNextDayAtNine(date: Date): Date {
-    const next = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 9, 0, 0, 0);
-    next.setDate(next.getDate() + 1);
-    return next;
-}
-
 function normalizeDateCandidate(value: string): string {
     const compact = value.replace(/\s+/g, "");
     const ymd = compact.match(/(\d{4})[-./년](\d{1,2})[-./월](\d{1,2})/);
@@ -620,29 +599,6 @@ function isScheduleDateMatch(value: string, expectedYmd: string): boolean {
     const normalized = normalizeDateCandidate(value);
     if (!normalized) return false;
     return normalized === expectedYmd;
-}
-
-function isScheduleTimeFuture(targetYmd: string, targetTimeLabel: string): boolean {
-    const timeMatch = targetTimeLabel.match(/^(\d{1,2}):(\d{1,2})$/);
-    if (!timeMatch) return false;
-    const targetHour = Number.parseInt(timeMatch[1], 10);
-    const targetMinute = Number.parseInt(timeMatch[2], 10);
-    const now = new Date();
-    const nowYmd = formatDateYmdInTimeZone(now, NAVER_SCHEDULE_TIMEZONE);
-    if (targetYmd > nowYmd) return true;
-    if (targetYmd < nowYmd) return false;
-
-    const nowFormatter = new Intl.DateTimeFormat("en-US", {
-        timeZone: NAVER_SCHEDULE_TIMEZONE,
-        hour12: false,
-        hour: "2-digit",
-        minute: "2-digit",
-    }).formatToParts(now);
-    const nowMap = new Map(nowFormatter.map((part) => [part.type, part.value]));
-    const nowMinutes =
-        Number.parseInt(nowMap.get("hour") || "0", 10) * 60 + Number.parseInt(nowMap.get("minute") || "0", 10);
-  const targetMinutes = targetHour * 60 + targetMinute;
-  return targetMinutes > nowMinutes;
 }
 
 function createScheduleSubmissionTracker(page: Page, scheduledDate: Date): ScheduleSubmissionTracker {
@@ -1172,52 +1128,6 @@ async function verifyScheduleDateApplied(page: Page, scheduledDate: Date): Promi
     return false;
 }
 
-async function readAppliedScheduleDateYmd(page: Page): Promise<string | null> {
-    const panel = await getSchedulePanelLocator(page);
-    const dateInputs = panel.locator('div[class*="time_setting" i] input.input_date__QmA0s, div[class*="date" i] input.input_date__QmA0s, input.input_date__QmA0s, input[type="date"]');
-    const count = Math.min(await dateInputs.count().catch(() => 0), 20);
-    for (let i = 0; i < count; i += 1) {
-        const input = dateInputs.nth(i);
-        const visible = await input.isVisible().catch(() => false);
-        if (!visible) continue;
-        const value = await input.inputValue().catch(() => "");
-        const normalized = normalizeDateCandidate(value);
-        if (normalized) return normalized;
-    }
-
-    const globalDateInput = page.locator('input.input_date__QmA0s, input[type="date"]').first();
-    if (await globalDateInput.isVisible().catch(() => false)) {
-        const value = await globalDateInput.inputValue().catch(() => "");
-        const normalized = normalizeDateCandidate(value);
-        if (normalized) return normalized;
-    }
-    return null;
-}
-
-async function readAppliedScheduleTimeLabel(page: Page): Promise<string | null> {
-    const panel = await getSchedulePanelLocator(page);
-    const timeInput = panel.locator('input[type="time"]').first();
-    if (await timeInput.isVisible().catch(() => false)) {
-        const value = await timeInput.inputValue().catch(() => "");
-        const match = value.match(/(\d{1,2})[:시](\d{1,2})/);
-        if (match) return `${String(Number(match[1])).padStart(2, "0")}:${String(Number(match[2])).padStart(2, "0")}`;
-    }
-
-    const hourSelect = panel.locator('select[class*="hour" i], select[name*="hour" i], select[id*="hour" i]').first();
-    const minuteSelect = panel.locator('select[class*="minute" i], select[name*="minute" i], select[id*="minute" i]').first();
-    const hasHour = await hourSelect.isVisible().catch(() => false);
-    const hasMinute = await minuteSelect.isVisible().catch(() => false);
-    if (hasHour && hasMinute) {
-        const hourValue = await hourSelect.inputValue().catch(() => "");
-        const minuteValue = await minuteSelect.inputValue().catch(() => "");
-        if (hourValue && minuteValue) {
-            return `${String(Number(hourValue)).padStart(2, "0")}:${String(Number(minuteValue)).padStart(2, "0")}`;
-        }
-    }
-
-    return null;
-}
-
 async function trySetScheduleTimeInputs(page: Page, scheduledDate: Date): Promise<string | null> {
     console.log(`   [디버그] trySetScheduleTimeInputs 시작`);
 
@@ -1242,7 +1152,7 @@ async function trySetScheduleTimeInputs(page: Page, scheduledDate: Date): Promis
 
         await page.waitForTimeout(500);
         return `${hStr}:${mStr}`;
-    } catch(e) {
+    } catch {
     return null;
     }
 }
@@ -1433,19 +1343,6 @@ async function ensureScheduleDateTimeFuture(
     return { effectiveDate: scheduledDate, appliedTimeLabel: appliedTimeLabel };
 }
 
-function parseDateCandidate(ymd: string): Date | null {
-    const match = ymd.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-    if (!match) return null;
-    const year = Number.parseInt(match[1], 10);
-    const month = Number.parseInt(match[2], 10);
-    const day = Number.parseInt(match[3], 10);
-    const parsed = new Date(year, month - 1, day, 9, 0, 0, 0);
-    if (parsed.getFullYear() !== year || parsed.getMonth() !== month - 1 || parsed.getDate() !== day) {
-        return null;
-    }
-    return parsed;
-}
-
 async function configureSchedulePublish(page: Page, scheduledDate: Date): Promise<Date> {
     console.log(`   🗓️ 예약 발행 옵션 설정 시작: ${formatDateYmd(scheduledDate)}`);
     const scheduleModeSelected = await selectScheduleMode(page);
@@ -1455,7 +1352,7 @@ async function configureSchedulePublish(page: Page, scheduledDate: Date): Promis
             const debugPath = path.join(process.cwd(), 'temp_images', 'debug-schedule-fail.png');
             await page.screenshot({ path: debugPath, fullPage: false });
             console.log(`   📸 디버그 스크린샷 저장: ${debugPath}`);
-        } catch(e) {}
+        } catch {}
         throw new Error("예약 발행 옵션을 찾지 못했습니다. 네이버 편집기 UI가 변경되었을 수 있습니다.");
     }
 
@@ -1654,7 +1551,7 @@ async function loadPublishContextFromDb(runtimeOptions: RuntimePublishOptions): 
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
     let taskId = explicitTaskId;
-    let postId = explicitPostId;
+    const postId = explicitPostId;
 
     if (!taskId && !postId && firstArg && uuidRegex.test(firstArg)) {
         taskId = firstArg;
@@ -1814,7 +1711,7 @@ function parseSectionsFromLLM(value: unknown): string[] {
         const heading = normalizeOutputText(block.heading ?? block.sectionTitle);
         // The prompt asked for "drafts" which might just be an array of strings,
         // or an array of objects. We handle both.
-        const body = normalizeOutputText(block.body ?? (entry as any).draft ?? (entry as any).content);
+        const body = normalizeOutputText(block.body ?? block.draft ?? block.content);
         const merged = [heading, body].filter(Boolean).join("\n\n");
         if (merged) result.push(merged);
       }
@@ -1915,96 +1812,6 @@ function parseLLMOutput(raw: string): TopicAgentOutput {
   };
 }
 
-function normalizeImageSources(raw: string): string[] {
-  if (!raw) return [];
-  return raw
-    .split(/[,\n]/)
-    .map((value) => value.trim())
-    .filter(Boolean)
-    .filter((value) => /^https?:\/\//i.test(value));
-}
-
-async function resolveImagesArg(raw: string): Promise<string | null> {
-  if (!raw) return null;
-  if (fs.existsSync(raw)) return raw;
-
-  if (/^\[/.test(raw)) {
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        const urls = parsed
-          .filter((entry): entry is string => typeof entry === "string")
-          .map((entry) => entry.trim())
-          .filter(Boolean);
-        const normalized = normalizeImageSources(urls.join(","));
-        if (normalized.length > 0) {
-          return saveImageListToTempDir(normalized);
-        }
-      }
-    } catch {
-      return null;
-    }
-  }
-
-  const urls = normalizeImageSources(raw);
-  if (urls.length > 0) {
-    return saveImageListToTempDir(urls);
-  }
-
-  return null;
-}
-
-function downloadImage(url: string, filePath: string, redirectCount = 0): Promise<void> {
-  if (redirectCount > 5) {
-    return Promise.reject(new Error(`Too many redirects for URL: ${url}`));
-  }
-  const protocol = url.startsWith("https:") ? https : http;
-  return new Promise((resolve, reject) => {
-    const stream = fs.createWriteStream(filePath);
-    const req = protocol.get(url, (response: IncomingMessage) => {
-      if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400) {
-        const redirectUrl = response.headers.location;
-        if (redirectUrl) {
-          stream.destroy();
-          downloadImage(redirectUrl, filePath, redirectCount + 1).then(resolve).catch(reject);
-          return;
-        }
-      }
-      response.pipe(stream);
-      response.on("error", reject);
-      stream.on("error", reject);
-      stream.on("finish", () => resolve());
-    });
-    req.on("error", reject);
-  });
-}
-
-function ensureImageWorkspace(): string {
-  const dir = path.join(IMAGE_WORK_DIR, `run-${Date.now().toString(36)}`);
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
-}
-
-async function saveImageListToTempDir(imageUrls: string[]): Promise<string | null> {
-  if (imageUrls.length === 0) return null;
-
-  const dir = ensureImageWorkspace();
-  const targets = imageUrls.slice(0, 6).map((url, index) => ({
-    url,
-    filePath: path.join(dir, `image-${index + 1}.jpg`),
-  }));
-
-  const settled = await Promise.allSettled(
-    targets.map((target) => downloadImage(target.url, target.filePath).then(() => target.filePath)),
-  );
-
-  if (!settled.some((entry) => entry.status === "fulfilled")) {
-    return null;
-  }
-
-  return dir;
-}
-
 function loadStyleProfile(styleName?: string): StyleProfile | null {
     if (!styleName) return null;
 
@@ -2061,7 +1868,7 @@ import { createChatGPTContext, openFreshChatGPTTarget, openChatGPTTarget, sendPr
 async function generateAdvancedContent(
     args: TopicArgs,
     styleGuide: string
-): Promise<{ title: string; sections: string[]; hashtags: string[]; imagePrompts?: any[] }> {
+): Promise<{ title: string; sections: string[]; hashtags: string[]; imagePrompts?: unknown[] }> {
     if (!ALLOW_CHATGPT_BROWSER_MODE) {
         throw new Error("ChatGPT 브라우저 생성은 비활성화되어 있습니다. 준비된 주제글만 발행하거나 API 파이프라인을 사용하세요.");
     }
@@ -2899,7 +2706,7 @@ async function publish(
     try {
         await page.locator('span.text', { hasText: '발행' }).click();
         clicked = true;
-    } catch (e) {
+    } catch {
     await page.mouse.click(1210, 22);
     }
   }
@@ -2924,7 +2731,7 @@ async function publish(
         if (await nowRadio.isVisible()) {
             await nowRadio.check({ force: true });
         }
-    } catch (e) {}
+    } catch {}
   }
 
   if (await clickFinalPublishButton(page, mode)) {
@@ -3078,8 +2885,8 @@ async function main() {
                 } else {
                     console.log("   ⚠️ 이미지 생성 실패, 기본 텍스트만 발행합니다.");
                 }
-            } catch (e) {
-                console.error("❌ 이미지 생성 파이프라인 에러:", e);
+            } catch (error) {
+                console.error("❌ 이미지 생성 파이프라인 에러:", error);
             } finally {
                 if (imageGptHandle) {
                     await imageGptHandle.close();
@@ -3177,7 +2984,7 @@ async function main() {
                         capturedUrl = href.startsWith("http") ? href : `https://blog.naver.com${href}`;
                     }
                 }
-            } catch (e) {
+            } catch {
                 console.log("   ⚠️ 최신 글 URL 자동 획득 실패, 글쓰기 페이지 URL로 기록합니다.");
             }
         }
@@ -3229,7 +3036,7 @@ async function main() {
                     }
                 });
                 await prisma.$disconnect();
-            } catch (e) {}
+            } catch {}
         }
         if (postId) {
             try {
@@ -3242,7 +3049,7 @@ async function main() {
                     }
                 });
                 await prisma.$disconnect();
-            } catch (e) {}
+            } catch {}
         }
         throw error;
     } finally {

@@ -231,7 +231,7 @@ export default function ProductThumbnailStudio({
               </section>
 
               <section className="rounded-2xl border border-slate-200 p-4">
-                <div className="flex items-center justify-between"><div className="flex items-center gap-2"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-violet-600 text-xs font-bold text-white">3</span><h3 className="font-semibold text-slate-900">핵심 문구</h3></div><button type="button" onClick={() => setShowAdvancedCopy((value) => !value)} className="text-xs font-semibold text-slate-500 hover:text-slate-900">{showAdvancedCopy ? "간단히" : "상세 설정"}</button></div>
+                <div className="flex items-center gap-2"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-violet-600 text-xs font-bold text-white">3</span><h3 className="font-semibold text-slate-900">핵심 문구</h3></div>
                 <div className="mt-3 grid gap-3 sm:grid-cols-2">
                   {COPY_FIELDS.filter((field) => showAdvancedCopy || field.key === "headline" || field.key === "subline").map((field) => {
                     const overRecommended = field.recommended !== undefined && copy[field.key].length > field.recommended;

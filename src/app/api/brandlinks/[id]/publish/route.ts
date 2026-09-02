@@ -8,6 +8,11 @@ import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 import { buildCaptureRequiredPayload } from "@/lib/brandconnect-kind";
 import { resolveConnectContract } from "@/lib/connect-contract-store";
 import { getBrandPostPackageManifestPath, readBrandPostPackage } from "@/lib/brand-post-package";
+import {
+  buildChatGptBrowserAutomationEnv,
+  isChatGptBrowserAutomationEnabled,
+  readChatGptBrowserSessionSummary,
+} from "@/lib/chatgpt-browser-automation";
 
 const NAVER_SCHEDULE_TIMEZONE = process.env.NAVER_SCHEDULE_TIMEZONE || "Asia/Seoul";
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
@@ -189,6 +194,13 @@ export async function POST(
       }
     }
 
+    if (link.status === "DRAFTING") {
+      return NextResponse.json(
+        { success: false, error: "현재 초안을 작성 중입니다. 완료 후 발행해 주세요." },
+        { status: 409 }
+      );
+    }
+
     if (link.status === "PUBLISHING") {
       return NextResponse.json(
         { success: false, error: "이미 발행이 진행 중입니다." },
@@ -203,10 +215,40 @@ export async function POST(
         { status: 409 }
       );
     }
+    if (
+      preparedPackage &&
+      preparedPackage.generationSource !== "AI" &&
+      preparedPackage.generationSource !== "PREPARED_APPROVED"
+    ) {
+      return NextResponse.json(
+        { success: false, error: "현재 초안의 생성 출처를 확인할 수 없습니다. 글을 다시 준비해 주세요." },
+        { status: 409 },
+      );
+    }
+
+    // Gemini 는 제거됐다. openai(기본) 또는 codex 만 유효하며 키 확인은 OpenAI 키 기준이다.
+    const agentAiProvider = (process.env.AI_PROVIDER || "openai").toLowerCase() === "codex" ? "codex" : "openai";
+    const hasProviderKey = Boolean(process.env.OPENAI_API_KEY?.trim());
+    const useBrowserChatGpt = !preparedPackage && !hasProviderKey && isChatGptBrowserAutomationEnabled();
+    if (!preparedPackage && !hasProviderKey && !useBrowserChatGpt) {
+      return NextResponse.json(
+        { success: false, error: "발행 전에 ChatGPT에서 초안을 만들고 확인해 주세요." },
+        { status: 409 },
+      );
+    }
+    if (useBrowserChatGpt) {
+      const chatgptSession = readChatGptBrowserSessionSummary();
+      if (!chatgptSession.isValid) {
+        return NextResponse.json(
+          { success: false, code: "CHATGPT_BROWSER_LOGIN_REQUIRED", error: chatgptSession.error },
+          { status: 409 },
+        );
+      }
+    }
 
     // 상태를 발행중으로 변경
-    await prisma.brandLink.update({
-      where: { id },
+    const publishClaim = await prisma.brandLink.updateMany({
+      where: { id, status: link.status },
       data: { 
         status: "PUBLISHING",
         errorMessage: null,
@@ -215,6 +257,12 @@ export async function POST(
           : {}),
       },
     });
+    if (publishClaim.count !== 1) {
+      return NextResponse.json(
+        { success: false, error: "상품 상태가 변경되어 발행을 시작하지 못했습니다. 목록을 새로고침해 주세요." },
+        { status: 409 },
+      );
+    }
     statusUpdated = true;
 
     // 발행 스크립트 실행 (백그라운드) - 단순 에이전트 사용
@@ -247,17 +295,14 @@ export async function POST(
         env: {
           ...process.env,
           ELECTRON_RUN_AS_NODE: "1",
-          AI_PROVIDER: "openai",
-          BROWSER_GPT_MODE: "false",
-          ALLOW_CHATGPT_BROWSER_MODE: "false",
-          CHATGPT_USE_CUSTOM_GPTS: "false",
-          CHATGPT_DIRECT_ONLY: "true",
-          CHATGPT_SKIP_POLISH: "true",
+          AI_PROVIDER: agentAiProvider,
+          ...buildChatGptBrowserAutomationEnv(useBrowserChatGpt),
           HUMAN_MOBILE_POLISH_ENABLED: "true",
-          PRODUCT_POST_LOCAL_FALLBACK_ENABLED: "true",
-          PRODUCT_THUMBNAIL_CHATGPT_ENABLED: "false",
-          PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE: "false",
-          PRODUCT_THUMBNAIL_CHATGPT_BASE_FALLBACK_ENABLED: "false",
+          PRODUCT_THUMBNAIL_CHATGPT_ENABLED: process.env.PRODUCT_THUMBNAIL_CHATGPT_ENABLED || "false",
+          PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE:
+            process.env.PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE || "false",
+          PRODUCT_THUMBNAIL_CHATGPT_BASE_FALLBACK_ENABLED:
+            process.env.PRODUCT_THUMBNAIL_CHATGPT_BASE_FALLBACK_ENABLED || "false",
           PRODUCT_THUMBNAIL_IMAGE_WAIT_MS:
             process.env.PRODUCT_THUMBNAIL_IMAGE_WAIT_MS || "60000",
           PRODUCT_THUMBNAIL_COMPOSITE_FALLBACK_ENABLED:

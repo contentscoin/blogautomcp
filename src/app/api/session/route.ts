@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import { validateNaverPublishingSession } from "@/lib/naver-session";
 import { requireRemoteActivation } from "@/lib/api-auth";
+import {
+  isChatGptBrowserAutomationEnabled,
+  readChatGptBrowserSessionSummary,
+} from "@/lib/chatgpt-browser-automation";
 import { getNaverSessionFile } from "../../../../scripts/lib/app-paths";
 
 export const runtime = "nodejs";
@@ -67,6 +71,7 @@ export async function GET(request: NextRequest) {
   if (activationError) return activationError;
   try {
     const naver = await readNaverSessionSummary();
+    const chatgpt = readChatGptBrowserSessionSummary();
 
     return NextResponse.json({
       success: true,
@@ -76,6 +81,10 @@ export async function GET(request: NextRequest) {
         savedAt: naver.savedAt,
         checkedAt: naver.checkedAt,
         naver,
+        chatgpt: {
+          ...chatgpt,
+          automationEnabled: isChatGptBrowserAutomationEnabled(),
+        },
       },
     });
   } catch (error) {
@@ -95,12 +104,17 @@ export async function POST(request: NextRequest) {
   if (activationError) return activationError;
   return NextResponse.json({
     success: true,
-    message: "네이버 로그인 세션을 준비해주세요. ChatGPT는 로컬 로그인 대신 MCP 주소로 연결합니다.",
+    message: "네이버 발행 세션과 GPT 원고 작성 연결을 준비해 주세요.",
     instructions: {
       naver: [
         "1. 터미널에서 `npm run login` 실행",
         "2. 열린 브라우저에서 네이버 로그인 완료",
         "3. 세션이 저장되면 페이지 새로고침",
+      ],
+      chatgpt: [
+        "1. GPT 연결이 안 될 때만 프로그램에서 `웹 GPT 재로그인` 선택",
+        "2. 열린 전용 브라우저에서 GPT 로그인 완료",
+        "3. 입력창이 확인되면 예비 세션이 자동 저장되고 창이 닫힘",
       ],
     },
   });

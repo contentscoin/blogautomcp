@@ -1,4 +1,6 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import sharp from "sharp";
 import { prisma } from "@/lib/db";
@@ -8,6 +10,7 @@ import { clearRemoteActivation, readRemoteActivation } from "@/lib/remote-activa
 import { getNaverSessionFile } from "@/lib/naver-session";
 import { hasStoredConnectContract } from "@/lib/connect-contract-store";
 import { readBrandPostPackage } from "@/lib/brand-post-package";
+import { collapseBrandLinkProducts, matchesWritingStatusFilter } from "@/lib/brandlink-product-list";
 import {
   LOCAL_AUTOMATION_ERROR_HINTS,
   LocalAutomationError,
@@ -15,7 +18,20 @@ import {
   extractLocalApiError,
   toLocalAutomationError,
 } from "@/lib/local-automation-error";
+import { buildProductThumbnailCopy } from "../../../../../scripts/lib/product-thumbnail";
+import { buildTravelThumbnailCopy } from "../../../../../scripts/lib/travel-content";
+import { getProductThumbnailStorageDir } from "../../../../../scripts/lib/app-paths";
+import { createLockedProductThumbnailOnBackground } from "../../../../../scripts/lib/product-image-lock";
+import { createTravelEditorialThumbnail } from "../../../../../scripts/lib/travel-thumbnail";
+import { normalizeProductThumbnailCopy, productThumbnailSettingKey } from "../../../../../scripts/lib/product-thumbnail-settings";
 import { isGenerativeThumbnailAvailable } from "../../../../../scripts/lib/thumbnail-gen";
+import {
+  applyNaverBlogProfile,
+  inspectNaverBlogProfile,
+  validateNaverBlogProfileChanges,
+  type NaverBlogProfileChanges,
+  type NaverBlogProfileSnapshot,
+} from "../../../../../scripts/lib/naver-blog-profile";
 
 /**
  * 사이트 작업 큐 폴러(데스크톱 로컬 API).
@@ -36,6 +52,8 @@ type JobResultEnvelope = {
   data: Record<string, unknown>;
   readiness?: unknown;
   warnings: string[];
+  /** 2단계 초안·썸네일 경로처럼 ChatGPT 가 다음에 해야 할 일 */
+  nextAction?: string;
 };
 
 type JobContext = {
@@ -47,6 +65,16 @@ type JobContext = {
   setStage: (stage: string, message?: string, progress?: number) => void;
 };
 
+type ProfilePlan = {
+  version: 1;
+  token: string;
+  expiresAt: string;
+  current: Pick<NaverBlogProfileSnapshot, "nickname" | "blogName" | "introduction">;
+  desired: NaverBlogProfileChanges;
+};
+
+const PROFILE_PLAN_PREFIX = "naver.blog.profile.plan.";
+const MAX_REMOTE_IMAGE_BYTES = 12 * 1024 * 1024;
 const JOB_HEARTBEAT_INTERVAL_MS = 30_000;
 const PUBLISH_WAIT_MS = parseBoundedInteger(process.env.REMOTE_PUBLISH_WAIT_MS, 25 * 60_000, 60_000, 3 * 60 * 60_000);
 const PUBLISH_POLL_MS = 5_000;
@@ -97,19 +125,136 @@ function buildStatusSnapshot(): Record<string, unknown> {
   };
 }
 
-async function localApi(request: NextRequest, path: string, init?: RequestInit): Promise<Record<string, unknown>> {
+function isAllowedGeneratedImageUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== "https:" || url.username || url.password) return false;
+    const host = url.hostname.toLowerCase();
+    return host === "openai.com" || host.endsWith(".openai.com") || host.endsWith(".oaiusercontent.com") || host.endsWith(".chatgpt.com") || host.endsWith(".blob.core.windows.net");
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedNaverImageUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    const host = url.hostname.toLowerCase();
+    return url.protocol === "https:" && (host === "pstatic.net" || host.endsWith(".pstatic.net") || host.endsWith(".naver.net"));
+  } catch {
+    return false;
+  }
+}
+
+async function downloadBoundedImage(rawUrl: string, destination: string, kind: "generated" | "naver"): Promise<void> {
+  if (kind === "generated" ? !isAllowedGeneratedImageUrl(rawUrl) : !isAllowedNaverImageUrl(rawUrl)) {
+    throw new LocalAutomationError("INVALID_INPUT", kind === "generated" ? "ChatGPT가 제공한 안전한 이미지 주소만 적용할 수 있습니다." : "허용되지 않은 네이버 이미지 주소입니다.");
+  }
+  const response = await fetch(rawUrl, { cache: "no-store", redirect: "error", signal: AbortSignal.timeout(25_000) });
+  if (!response.ok) throw new Error(`이미지 다운로드 실패 (${response.status})`);
+  const contentType = (response.headers.get("content-type") || "").toLowerCase();
+  if (!contentType.startsWith("image/")) throw new Error("다운로드 결과가 이미지가 아닙니다.");
+  const length = Number(response.headers.get("content-length") || "0");
+  if (length > MAX_REMOTE_IMAGE_BYTES) throw new Error("이미지가 허용 크기를 초과했습니다.");
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length < 1 || bytes.length > MAX_REMOTE_IMAGE_BYTES) throw new Error("이미지 크기를 확인할 수 없습니다.");
+  await fs.promises.writeFile(destination, bytes);
+}
+
+function parseImageUrls(value: string | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return Array.from(new Set(parsed.filter((item): item is string => {
+      if (typeof item !== "string") return false;
+      try {
+        const url = new URL(item);
+        return url.protocol === "https:";
+      } catch {
+        return false;
+      }
+    }))).slice(0, 6);
+  } catch {
+    return [];
+  }
+}
+
+function buildChatGptThumbnailPrompt(kind: "SHOPPING" | "TRAVEL", productName: string) {
+  if (kind === "TRAVEL") {
+    const copy = buildTravelThumbnailCopy(productName);
+    return {
+      copy,
+      generationRole: "complete-travel-photo-background",
+      prompt: [
+        "Create one premium photorealistic square travel editorial thumbnail background for a Korean Naver Blog.",
+        `Travel product or destination: ${productName}`,
+        "Use the supplied real travel image as the primary factual visual reference.",
+        "Show useful destination context a traveler would want to preview: place, atmosphere, season, realistic light, and human-scale depth.",
+        "Natural travel photography, subtle film grain, believable weather and shadows, not a glossy stock advertisement.",
+        "Leave a clean dark-to-transparent text-safe area on the left and preserve the main landmark on the right.",
+        "Do not add any text, logo, watermark, price, itinerary fact, landmark, or activity that is not supported by the supplied image and product name.",
+        "Output one finished 1:1 square image only, 1536x1536 or the closest supported square size.",
+      ].join("\n"),
+      sourcePolicy: "TRAVEL_EDITORIAL",
+      canvas: { width: 1080, height: 1080, aspect: "1:1" },
+      localLayoutCandidates: ["travel-cinematic", "travel-emotional-record", "travel-route"],
+    };
+  }
+  const copy = buildProductThumbnailCopy(`${productName} 구매 전 확인`, productName, "SHOPPING");
+  return {
+    copy,
+    generationRole: "background-only-product-lock",
+    prompt: [
+      "Create one premium photorealistic square lifestyle BACKGROUND ONLY for a Korean Naver Blog product thumbnail.",
+      `Product context: ${productName}`,
+      "The real product will be composited later from a locked original PNG, so DO NOT draw, recreate, alter, imitate, silhouette, or include the product itself.",
+      "Create a believable real-life environment suitable for this product, with natural daylight, one consistent shadow direction, subtle photographic grain, and a clean editorial composition.",
+      "Reserve a clear placement area on the right for the locked product PNG and a clean text-safe area on the left.",
+      "No text, logo, watermark, package, mock product, floating object, fake UI, phone screen, or shopping card.",
+      "Output one finished 1:1 square background only, 1536x1536 or the closest supported square size.",
+    ].join("\n"),
+    sourcePolicy: "LOCKED_PRODUCT_OR_ORIGINAL",
+    canvas: { width: 1080, height: 1080, aspect: "1:1" },
+    localLayoutCandidates: ["shopping-clean-editorial", "shopping-color-block", "shopping-soft-lifestyle"],
+  };
+}
+
+function localAppOrigin(request: NextRequest): string {
+  const configured = process.env.LOCAL_APP_ORIGIN?.trim();
+  if (!configured) return request.nextUrl.origin;
+  try {
+    const url = new URL(configured);
+    const localHosts = new Set(["localhost", "127.0.0.1", "::1"]);
+    if (url.protocol !== "http:" || !localHosts.has(url.hostname.toLowerCase()) || url.username || url.password || url.pathname !== "/") {
+      return request.nextUrl.origin;
+    }
+    return url.origin;
+  } catch {
+    return request.nextUrl.origin;
+  }
+}
+
+async function localApi(request: NextRequest, apiPath: string, init?: RequestInit): Promise<Record<string, unknown>> {
+  const origin = localAppOrigin(request);
   const headers = new Headers(init?.headers);
   headers.set("content-type", "application/json");
   // 서버가 자기 자신을 호출하는 요청이라 브라우저가 붙여주는 Origin/sec-fetch-site가
   // 없다. ADMIN_API_KEY가 설정되지 않은 데스크톱에서는 requireTrustedLocalMutation이
   // 이 부재를 외부 요청으로 보고 403을 돌려줘 MCP 작업이 전부 실패했다.
   // 같은 오리진에서 시작한 요청임을 정확히 표시한다.
-  headers.set("origin", request.nextUrl.origin);
+  headers.set("origin", origin);
   const adminKey = process.env.ADMIN_API_KEY?.trim();
   if (adminKey) headers.set("x-admin-api-key", adminKey);
-  const url = new URL(path, request.nextUrl.origin);
+  const url = new URL(apiPath, origin);
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const response = await fetch(url, { ...init, headers, cache: "no-store" });
+    let response: Response;
+    try {
+      response = await fetch(url, { ...init, headers, cache: "no-store" });
+    } catch (error) {
+      const cause = error instanceof Error && error.cause instanceof Error ? `: ${error.cause.message}` : "";
+      throw new LocalAutomationError("LOCAL_AUTOMATION_FAILED", `로컬 API 호출에 실패했습니다: ${url.origin}${url.pathname}${cause}`);
+    }
     const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
     if (response.ok && payload?.success !== false) return payload || {};
     // 라우트 자체가 없는 404(HTML 응답)만 재시도한다. JSON 404 는 "대상 없음"이다.
@@ -123,7 +268,7 @@ async function localApi(request: NextRequest, path: string, init?: RequestInit):
     const extracted = extractLocalApiError(payload);
     const code = classifyLocalFailure({ status: response.status, code: extracted.code, message: extracted.message, path: url.pathname });
     const message = extracted.message || LOCAL_AUTOMATION_ERROR_HINTS[code] || `Local API ${response.status} (${url.pathname})`;
-    throw new LocalAutomationError(code, message, { httpStatus: response.status, detail: extracted.code });
+    throw new LocalAutomationError(code, message, { httpStatus: response.status, detail: payload?.data ?? extracted.code });
   }
   throw new LocalAutomationError("LOCAL_API_MISSING", `로컬 API가 이 앱 버전에 없습니다: ${url.pathname} (404).`, { httpStatus: 404 });
 }
@@ -139,14 +284,15 @@ function readInteger(input: Record<string, unknown>, key: string, fallback: numb
   return Math.min(max, Math.max(min, value));
 }
 
-function envelope(job: Job, kind: string, summary: string, data: Record<string, unknown>, ctx: JobContext, readiness?: unknown): JobResultEnvelope {
+function envelope(job: Job, kind: string, summary: string, data: Record<string, unknown>, ctx: JobContext, extra: { readiness?: unknown; nextAction?: string } = {}): JobResultEnvelope {
   return {
     schema: "blogautomcp.job-result/v1",
     jobType: job.type,
     kind,
     summary,
     data,
-    ...(readiness !== undefined ? { readiness } : {}),
+    ...(extra.readiness !== undefined ? { readiness: extra.readiness } : {}),
+    ...(extra.nextAction ? { nextAction: extra.nextAction } : {}),
     warnings: Array.from(new Set(ctx.warnings)),
   };
 }
@@ -172,6 +318,7 @@ async function requireProduct(productId: string, kind: "SHOPPING" | "TRAVEL") {
 type DraftPreview = Record<string, unknown> & {
   sectionOutline?: unknown;
   readiness?: unknown;
+  contentQuality?: unknown;
   markdown?: unknown;
   hashtags?: unknown;
   approvedAt?: unknown;
@@ -179,11 +326,26 @@ type DraftPreview = Record<string, unknown> & {
   title?: unknown;
   connectKind?: unknown;
   version?: unknown;
-  pipeline?: unknown;
   imageCount?: unknown;
   heroImagePath?: unknown;
   bodyImagePaths?: unknown;
+  imageSlots?: unknown;
+  qualityRepair?: unknown;
+  generationSource?: unknown;
 };
+
+function stripPaths(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripPaths);
+  if (!value || typeof value !== "object") return value;
+  const record = value as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(record)) {
+    if (/path|Path$/u.test(key) && typeof item === "string") continue;
+    if (key === "assets" || key === "previewUrl") continue;
+    output[key] = stripPaths(item);
+  }
+  return output;
+}
 
 /** 초안 미리보기에서 PC 파일 경로를 제거하고 ChatGPT 가 검토할 정보만 남긴다. */
 function draftView(draftId: string, preview: DraftPreview, includeMarkdown: boolean): Record<string, unknown> {
@@ -198,12 +360,15 @@ function draftView(draftId: string, preview: DraftPreview, includeMarkdown: bool
     createdAt: preview.createdAt ?? null,
     approvedAt: preview.approvedAt ?? null,
     approved: Boolean(preview.approvedAt),
+    generationSource: preview.generationSource ?? null,
     hashtags: Array.isArray(preview.hashtags) ? preview.hashtags : [],
     imageCount: typeof preview.imageCount === "number" ? preview.imageCount : 1 + bodyImageCount,
     heroImageReady: typeof preview.heroImagePath === "string" && fs.existsSync(preview.heroImagePath),
     sectionOutline: preview.sectionOutline ?? null,
-    pipeline: preview.pipeline ?? null,
+    imageSlots: stripPaths(preview.imageSlots ?? null),
     readiness: preview.readiness ?? null,
+    contentQuality: preview.contentQuality ?? null,
+    qualityRepair: preview.qualityRepair ?? null,
     ...(includeMarkdown ? { markdown: truncated ? `${markdown.slice(0, DRAFT_MARKDOWN_MAX_CHARS)}\n\n…(본문이 길어 일부만 표시)` : markdown, markdownTruncated: truncated } : {}),
   };
 }
@@ -226,10 +391,14 @@ async function heroImagePayload(heroImagePath: unknown): Promise<{ base64: strin
 function readinessSummary(readiness: unknown): string {
   if (!readiness || typeof readiness !== "object") return "검증 정보 없음";
   const record = readiness as Record<string, unknown>;
-  const status = typeof record.status === "string" ? record.status : "UNKNOWN";
+  const status = typeof record.status === "string" ? record.status : typeof record.canPublish === "boolean" ? (record.canPublish ? "READY" : "BLOCKED") : "UNKNOWN";
   const score = typeof record.score === "number" ? ` ${record.score}점` : "";
   const summary = typeof record.summary === "string" && record.summary ? ` — ${record.summary}` : "";
   return `${status}${score}${summary}`;
+}
+
+function draftReadiness(preview: DraftPreview): unknown {
+  return preview.readiness ?? preview.contentQuality ?? null;
 }
 
 async function waitForPublishOutcome(ctx: JobContext, id: string): Promise<{ status: string; postUrl: string | null; publishedAt: string | null; scheduledPublishAt: string | null; errorMessage: string | null; timedOut: boolean }> {
@@ -277,38 +446,67 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
   if (job.type === "BRANDCONNECT_LIST_PRODUCTS") {
     ctx.setStage("listing", "상품 목록 조회", 20);
     const status = readString(input, "status").toUpperCase() || "ALL";
+    const writingStatus = readString(input, "writingStatus").toLowerCase() || "all";
     const keyword = readString(input, "keyword").slice(0, 80);
     const limit = readInteger(input, "limit", 50, 1, 200);
     const sort = readString(input, "sort") || "newest";
+    const matchesWritingStatus = (item: { writingStatus: Parameters<typeof matchesWritingStatusFilter>[0] }) =>
+      matchesWritingStatusFilter(item.writingStatus, writingStatus === "written" || writingStatus === "unwritten" ? writingStatus : "all");
+    if (kind === "TRAVEL") {
+      // 여행커넥트는 DB에 이미 등록된 링크만 조회하면 추천 피드의 대부분이
+      // 사라진다. 로그인 세션의 전체 여행 피드를 읽어 AVAILABLE/등록 상태로
+      // 합쳐 반환해 ChatGPT가 실제 후보 수를 볼 수 있게 한다.
+      const payload = await localApi(request, `/api/brandlinks/available?status=${encodeURIComponent(status)}&writingStatus=${encodeURIComponent(writingStatus)}`);
+      const data = (payload.data || {}) as Record<string, unknown>;
+      let products = Array.isArray(data.products) ? (data.products as Array<Record<string, unknown>>) : [];
+      if (keyword) products = products.filter((item) => `${item.productName ?? ""} ${item.storeName ?? ""}`.includes(keyword));
+      products = products.slice(0, limit);
+      return envelope(job, "product-list", `${kindLabel} 상품 ${products.length}건 (필터: ${status.toLowerCase()}${keyword ? `, "${keyword}"` : ""})`, { ...data, connectKind: "travel", count: products.length, products }, ctx);
+    }
     const links = await prisma.brandLink.findMany({
       where: {
         connectKind: kind,
         ...(status !== "ALL" ? { status } : {}),
         ...(keyword ? { OR: [{ productName: { contains: keyword } }, { storeName: { contains: keyword } }] } : {}),
       },
-      orderBy: sort === "name" ? { productName: "asc" } : { createdAt: sort === "oldest" ? "asc" : "desc" },
-      take: limit,
+      orderBy: sort === "name" ? { productName: "asc" } : sort === "oldest" ? { createdAt: "asc" } : { updatedAt: "desc" },
+      take: 200,
     });
-    const products = links.map((item) => ({
+    const products = collapseBrandLinkProducts(links.map((link) => ({
+      ...link,
+      draftPrepared: (() => {
+        try { return Boolean(readBrandPostPackage(link.id)); } catch { return false; }
+      })(),
+    }))).filter(matchesWritingStatus).slice(0, limit);
+    const view = products.map((item) => ({
       id: item.id,
       productName: item.productName,
       storeName: item.storeName,
       price: item.productPrice,
       status: item.status,
+      statusMeaning: item.statusMeaning,
+      canCreateDraft: item.canCreateDraft,
+      lastError: item.status === "FAILED" ? item.errorMessage : null,
+      duplicateCount: item.duplicateCount,
       url: item.url,
       postUrl: item.postUrl,
-      scheduledPublishAt: item.scheduledPublishAt ? item.scheduledPublishAt.toISOString() : null,
+      scheduledPublishAt: item.scheduledPublishAt ? new Date(item.scheduledPublishAt).toISOString() : null,
       draft: (() => {
         try {
           const manifest = readBrandPostPackage(item.id);
-          return manifest ? { exists: true, approved: Boolean(manifest.approvedAt), readiness: manifest.readiness?.status ?? null } : { exists: false, approved: false, readiness: null };
+          return manifest ? { exists: true, approved: Boolean(manifest.approvedAt), canPublish: manifest.contentQuality?.canPublish ?? null } : { exists: false, approved: false, canPublish: null };
         } catch {
-          return { exists: false, approved: false, readiness: null };
+          return { exists: false, approved: false, canPublish: null };
         }
       })(),
-      createdAt: item.createdAt.toISOString(),
     }));
-    return envelope(job, "product-list", `${kindLabel} 상품 ${products.length}건 (필터: ${status.toLowerCase()}${keyword ? `, "${keyword}"` : ""})`, { connectKind: kind.toLowerCase(), count: products.length, products }, ctx);
+    return envelope(job, "product-list", `${kindLabel} 상품 ${view.length}건 (필터: ${status.toLowerCase()}${keyword ? `, "${keyword}"` : ""})`, {
+      connectKind: kind.toLowerCase(),
+      count: view.length,
+      rawCount: links.length,
+      collapsedDuplicateCount: links.length - products.length,
+      products: view,
+    }, ctx);
   }
 
   if (job.type === "BRANDCONNECT_LIST_CATEGORIES") {
@@ -356,9 +554,58 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     ctx.setStage("drafting", `초안 생성: ${product.productName || productId}`, 10);
     const payload = await localApi(request, `/api/brandlinks/${encodeURIComponent(productId)}/draft`, { method: "POST", body: JSON.stringify(memo ? { memo } : {}) });
     const preview = (payload.data || {}) as DraftPreview;
+    if (typeof payload.imageRepairWarning === "string") ctx.warnings.push(payload.imageRepairWarning);
     const view = draftView(productId, preview, true);
-    const readiness = preview.readiness ?? null;
-    return envelope(job, "draft", `초안 생성 완료 — ${readinessSummary(readiness)}. 검토 후 post_approve_draft 로 승인하세요.`, view, ctx, readiness);
+    const readiness = draftReadiness(preview);
+    return envelope(job, "draft", `초안 생성 완료 — ${readinessSummary(readiness)}. 검토 후 post_approve_draft 로 승인하세요.`, view, ctx, { readiness });
+  }
+
+  if (job.type === "POST_PREPARE_DRAFT") {
+    const productId = readString(input, "productId");
+    const product = await requireProduct(productId, kind);
+    ctx.setStage("draft-context", `초안 근거 준비: ${product.productName || productId}`, 10);
+    const response = await localApi(request, `/api/brandlinks/${encodeURIComponent(productId)}/draft`, {
+      method: "POST",
+      body: JSON.stringify({
+        action: "prepare_context",
+        qualityPreset: input.qualityPreset,
+        experienceMode: input.experienceMode,
+        experienceNotes: input.experienceNotes,
+        memo: input.memo,
+      }),
+    });
+    const data = (response.data || response) as Record<string, unknown>;
+    return envelope(job, "draft-context", `초안 근거 준비 완료 (${product.productName || productId}). ChatGPT 가 원고를 작성해 post_submit_draft 로 제출하세요.`, { ...data, productId }, ctx, {
+      nextAction: "이 컨텍스트의 systemPrompt와 userPrompt로 원고 JSON을 작성하고 qualityChecklist를 내부 검수한 뒤 post_submit_draft를 호출하세요.",
+    });
+  }
+
+  if (job.type === "POST_SUBMIT_DRAFT") {
+    const productId = readString(input, "productId");
+    await requireProduct(productId, kind);
+    ctx.setStage("draft-submit", "ChatGPT 원고 검증·패키징", 15);
+    const response = await localApi(request, `/api/brandlinks/${encodeURIComponent(productId)}/draft`, {
+      method: "POST",
+      body: JSON.stringify({
+        action: "submit_generated",
+        qualityPreset: input.qualityPreset,
+        experienceMode: input.experienceMode,
+        experienceNotes: input.experienceNotes,
+        draft: input.draft,
+      }),
+    });
+    const preview = (response.data || {}) as DraftPreview;
+    const contentQuality = preview.contentQuality as { canPublish?: boolean; reason?: string | null; summary?: string } | null | undefined;
+    const requiresRepair = Boolean(contentQuality && contentQuality.canPublish === false);
+    const view = draftView(productId, preview, false);
+    return envelope(job, "draft", requiresRepair
+      ? `원고는 저장됐지만 품질 보강이 필요합니다: ${contentQuality?.reason || contentQuality?.summary || "근거 밀도 미달"}`
+      : "ChatGPT 원고를 PC에서 검증하고 승인 대기 초안 패키지로 저장했습니다.", { ...view, requiresRepair }, ctx, {
+      readiness: draftReadiness(preview),
+      nextAction: requiresRepair
+        ? "contentQuality.reason과 실패 signals를 반영해 같은 컨텍스트로 원고를 고친 뒤 새 idempotencyKey로 post_submit_draft를 다시 호출하세요."
+        : "post_get_draft 로 초안을 확인하고 post_approve_draft 로 승인한 뒤, 실제 발행은 사용자 확인 후 진행하세요.",
+    });
   }
 
   if (job.type === "POST_GET_DRAFT") {
@@ -374,7 +621,8 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
       if (hero) view.heroImage = hero;
       else ctx.warnings.push("대표 이미지를 첨부하지 못했습니다(파일 없음 또는 크기 초과).");
     }
-    return envelope(job, "draft", `초안 ${view.approved ? "(승인됨)" : "(미승인)"} — ${readinessSummary(preview.readiness)}`, view, ctx, preview.readiness ?? null);
+    const readiness = draftReadiness(preview);
+    return envelope(job, "draft", `초안 ${view.approved ? "(승인됨)" : "(미승인)"} — ${readinessSummary(readiness)}`, view, ctx, { readiness });
   }
 
   if (job.type === "POST_REVISE_DRAFT") {
@@ -387,7 +635,8 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     const payload = await localApi(request, `/api/brandlinks/${encodeURIComponent(draftId)}/draft`, { method: "PATCH", body: JSON.stringify({ action: "revise", instructions, sectionIndexes }) });
     const preview = (payload.data || {}) as DraftPreview;
     const view = draftView(draftId, preview, true);
-    return envelope(job, "draft", `초안 수정 완료 — ${readinessSummary(preview.readiness)}. 승인은 다시 필요합니다.`, view, ctx, preview.readiness ?? null);
+    const readiness = draftReadiness(preview);
+    return envelope(job, "draft", `초안 수정 완료 — ${readinessSummary(readiness)}. 승인은 다시 필요합니다.`, view, ctx, { readiness });
   }
 
   if (job.type === "POST_APPROVE_DRAFT") {
@@ -396,10 +645,8 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     ctx.setStage("approving", "초안 승인", 40);
     const payload = await localApi(request, `/api/brandlinks/${encodeURIComponent(draftId)}/draft`, { method: "PATCH", body: JSON.stringify({ action: "approve" }) });
     const preview = (payload.data || {}) as DraftPreview;
-    const readiness = preview.readiness as { status?: string } | null | undefined;
-    if (readiness?.status === "BLOCKED") ctx.warnings.push("검증 상태가 BLOCKED 인 초안입니다. 발행 시 게이트에서 막힐 수 있습니다.");
     const view = draftView(draftId, preview, false);
-    return envelope(job, "draft", "초안을 승인했습니다. post_publish 또는 post_schedule 로 발행할 수 있습니다.", view, ctx, preview.readiness ?? null);
+    return envelope(job, "draft", "초안을 승인했습니다. post_publish 또는 post_schedule 로 발행할 수 있습니다.", view, ctx, { readiness: draftReadiness(preview) });
   }
 
   if (job.type === "POST_SET_THUMBNAIL") {
@@ -410,6 +657,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     const metaData = (meta.data || {}) as Record<string, unknown>;
     const imageUrls = Array.isArray(metaData.imageUrls) ? metaData.imageUrls.filter((value): value is string => typeof value === "string") : [];
     if (imageUrls.length === 0) throw new LocalAutomationError("IMAGE_SHORTFALL", "썸네일 원본으로 쓸 제품 사진이 없습니다. 상품을 먼저 동기화하세요.");
+    if (metaData.engine === "local") ctx.warnings.push("이 PC 에는 OpenAI 키가 없어 로컬 합성 썸네일만 만들 수 있습니다. ChatGPT 이미지 생성이 필요하면 thumbnail_prepare 를 사용하세요.");
     const suggested = (metaData.suggestedCopy || {}) as Record<string, unknown>;
     const headline = readString(input, "headline") || (typeof suggested.headline === "string" ? suggested.headline : product.productName || "");
     const subline = readString(input, "subline") || (typeof suggested.subline === "string" ? suggested.subline : "");
@@ -421,12 +669,8 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     const data = (payload.data || {}) as Record<string, unknown>;
     const engine = typeof data.engine === "string" ? data.engine : "unknown";
     const qc = data.qc as { score?: number; passed?: boolean } | null | undefined;
-    if (engine === "local") ctx.warnings.push("gpt-image 결과가 QC 를 통과하지 못해 로컬 합성 썸네일로 저장했습니다.");
-    const previewDataUrl = typeof data.previewDataUrl === "string" ? data.previewDataUrl : "";
-    const heroImage = previewDataUrl.startsWith("data:image/")
-      ? { base64: previewDataUrl.slice(previewDataUrl.indexOf(",") + 1), mimeType: previewDataUrl.slice(5, previewDataUrl.indexOf(";")) }
-      : null;
-    const heroSmall = heroImage && heroImage.base64.length <= HERO_IMAGE_MAX_BYTES * 1.37 ? heroImage : typeof data.outputPath === "string" ? await heroImagePayload(data.outputPath) : null;
+    if (engine === "local" && metaData.engine !== "local") ctx.warnings.push("gpt-image 결과가 QC 를 통과하지 못해 로컬 합성 썸네일로 저장했습니다.");
+    const heroSmall = typeof data.outputPath === "string" ? await heroImagePayload(data.outputPath) : null;
     return envelope(job, "thumbnail", `썸네일 저장 완료 (${engine}${typeof qc?.score === "number" ? `, QC ${qc.score}점` : ""}, ${data.attempts ?? 0}회 시도). 다음 초안 생성/발행부터 이 썸네일을 사용합니다.`, {
       draftId,
       engine,
@@ -435,6 +679,174 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
       qc: qc ?? null,
       attempts: data.attempts ?? null,
       ...(heroSmall ? { heroImage: heroSmall } : {}),
+    }, ctx);
+  }
+
+  if (job.type === "THUMBNAIL_PREPARE") {
+    const productId = readString(input, "productId");
+    const product = await requireProduct(productId, kind);
+    ctx.setStage("thumbnail-prepare", "GPT 썸네일 지침 준비", 30);
+    const imageUrls = parseImageUrls(product.imageUrls);
+    if (imageUrls.length === 0) throw new LocalAutomationError("IMAGE_SHORTFALL", "GPT 썸네일에 사용할 실제 이미지가 없습니다. 상품 정보를 먼저 동기화하세요.");
+    const brief = buildChatGptThumbnailPrompt(kind, product.productName || (kind === "TRAVEL" ? "여행 상품" : "추천 상품"));
+    const requestedLayout = readString(input, "layout") || "auto";
+    const candidateCount = readInteger(input, "candidateCount", 3, 1, 3);
+    const layoutCandidates = requestedLayout === "auto"
+      ? brief.localLayoutCandidates.slice(0, candidateCount)
+      : [requestedLayout];
+    return envelope(job, "thumbnail-brief", `썸네일 생성 지침 준비 완료 (${product.productName})`, {
+      productId: product.id,
+      connectKind: kind.toLowerCase(),
+      productName: product.productName,
+      productPrice: product.productPrice,
+      storeName: product.storeName,
+      referralUrl: product.url,
+      referenceImageUrls: imageUrls,
+      preferredReferenceImageUrl: imageUrls[0],
+      ...brief,
+      layoutCandidates,
+    }, ctx, {
+      nextAction: kind === "SHOPPING"
+        ? "ChatGPT 내장 이미지 생성으로 prompt의 배경만 생성하세요. 원본 상품은 생성 이미지에 넣지 마세요. 생성 후 사용자 확인을 받고 thumbnail_apply_generated 를 호출하세요."
+        : "ChatGPT 내장 이미지 생성으로 prompt의 여행 실사 배경을 생성하세요. 생성 전 사용자에게 참고 이미지와 방향을 보여주고, 생성 후 thumbnail_apply_generated 를 호출하세요.",
+    });
+  }
+
+  if (job.type === "THUMBNAIL_APPLY_GENERATED") {
+    const productId = readString(input, "productId");
+    const generatedImageUrl = readString(input, "generatedImageUrl");
+    if (!productId || !generatedImageUrl || input.confirmed !== true) throw new LocalAutomationError("INVALID_INPUT", "상품, 생성 이미지 주소, confirmed=true가 필요합니다.");
+    const product = await requireProduct(productId, kind);
+    ctx.setStage("thumbnail-apply", "생성 배경 + 원본 합성", 20);
+    const imageUrls = parseImageUrls(product.imageUrls);
+    const sourceImageUrl = imageUrls[0];
+    if (!sourceImageUrl) throw new LocalAutomationError("IMAGE_SHORTFALL", "원본 상품·여행 이미지가 없습니다. 상품 정보를 먼저 동기화하세요.");
+    const suggested = kind === "TRAVEL"
+      ? buildTravelThumbnailCopy(product.productName || "여행 상품")
+      : buildProductThumbnailCopy(`${product.productName || "상품"} 구매 전 확인`, product.productName || "추천 상품", "SHOPPING");
+    const copy = normalizeProductThumbnailCopy({
+      productNameLabel: readString(input, "productNameLabel") || suggested.productNameLabel,
+      headline: readString(input, "headline") || suggested.headline,
+      subline: readString(input, "subline") || suggested.subline,
+      badge: readString(input, "badge") || suggested.badge,
+      cta: readString(input, "cta") || suggested.cta,
+    }, product.productName || "추천 상품");
+    const outputDir = getProductThumbnailStorageDir();
+    await fs.promises.mkdir(outputDir, { recursive: true });
+    const runId = randomUUID();
+    const sourcePath = path.join(outputDir, `${productId}-${runId}.source`);
+    const backgroundPath = path.join(outputDir, `${productId}-${runId}.gpt-background`);
+    try {
+      await Promise.all([
+        downloadBoundedImage(sourceImageUrl, sourcePath, "naver"),
+        downloadBoundedImage(generatedImageUrl, backgroundPath, "generated"),
+      ]);
+      const layoutId = readString(input, "layoutId");
+      const shoppingStyle = layoutId === "shopping-clean-editorial"
+        ? "shopping-clean-editorial"
+        : layoutId === "shopping-soft-lifestyle"
+          ? "shopping-soft-lifestyle"
+          : "shopping-color-block";
+      const travelStyle = layoutId === "travel-emotional-record"
+        ? "travel-postcard"
+        : layoutId === "travel-route"
+          ? "travel-route"
+          : "travel-editorial";
+      const result = kind === "SHOPPING"
+        ? await createLockedProductThumbnailOnBackground({ sourcePath, backgroundPath, outputDir, productName: product.productName || "추천 상품", headline: copy.headline, subline: copy.subline, style: shoppingStyle })
+        : await createTravelEditorialThumbnail({ sourcePath: backgroundPath, outputDir, destination: product.productName || "여행 상품", headline: copy.headline, subline: copy.subline, badge: copy.badge, style: travelStyle });
+      const updatedAt = new Date().toISOString();
+      const settingValue = JSON.stringify({ version: 1, sourceImageUrl, generatedPath: result.outputPath, copy, style: kind === "SHOPPING" ? "gpt-background-lock" : "gpt-travel-editorial", updatedAt });
+      await prisma.setting.upsert({
+        where: { key: productThumbnailSettingKey(productId) },
+        update: { value: settingValue },
+        create: { key: productThumbnailSettingKey(productId), value: settingValue },
+      });
+      const heroSmall = await heroImagePayload(result.outputPath);
+      return envelope(job, "thumbnail", "ChatGPT 생성 배경과 원본을 합성해 썸네일로 저장했습니다.", {
+        applied: true,
+        productId,
+        connectKind: kind.toLowerCase(),
+        sourceImageUrl,
+        generatedImageUrl,
+        copy,
+        layoutId: layoutId || (kind === "SHOPPING" ? "shopping-color-block" : "travel-cinematic"),
+        candidateId: readString(input, "candidateId") || null,
+        updatedAt,
+        ...(heroSmall ? { heroImage: heroSmall } : {}),
+      }, ctx);
+    } finally {
+      await Promise.all([fs.promises.unlink(sourcePath).catch(() => undefined), fs.promises.unlink(backgroundPath).catch(() => undefined)]);
+    }
+  }
+
+  if (job.type === "BLOG_PROFILE_GET" || job.type === "BLOG_DESIGN_GET") {
+    ctx.setStage("blog-profile", "네이버 블로그 관리 화면 읽기", 30);
+    const snapshot = await inspectNaverBlogProfile();
+    if (job.type === "BLOG_DESIGN_GET") {
+      return envelope(job, "blog-design", "블로그 디자인 설정 경로를 확인했습니다.", {
+        skinUrl: snapshot.skinUrl,
+        layoutUrl: snapshot.layoutUrl,
+        detailDesignUrl: snapshot.detailDesignUrl,
+        capturedAt: snapshot.capturedAt,
+        backupScreenshotSaved: Boolean(snapshot.screenshotPath),
+        supportedAutomaticChanges: [],
+        manualReviewRequired: ["skin", "layout", "widget", "title background", "post style"],
+      }, ctx);
+    }
+    const { screenshotPath: _screenshotPath, ...rest } = snapshot as NaverBlogProfileSnapshot & { screenshotPath?: string | null };
+    return envelope(job, "blog-profile", `블로그 프로필: ${snapshot.nickname} / ${snapshot.blogName}`, { ...rest, backupScreenshotSaved: Boolean(_screenshotPath) }, ctx);
+  }
+
+  if (job.type === "BLOG_PROFILE_PREPARE") {
+    ctx.setStage("blog-profile", "프로필 변경 미리보기", 30);
+    const desired = validateNaverBlogProfileChanges({
+      ...(typeof input.nickname === "string" ? { nickname: input.nickname } : {}),
+      ...(typeof input.blogName === "string" ? { blogName: input.blogName } : {}),
+      ...(typeof input.introduction === "string" ? { introduction: input.introduction } : {}),
+    });
+    const snapshot = await inspectNaverBlogProfile();
+    const planId = randomUUID();
+    const token = randomUUID();
+    const plan: ProfilePlan = {
+      version: 1,
+      token,
+      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+      current: { nickname: snapshot.nickname, blogName: snapshot.blogName, introduction: snapshot.introduction },
+      desired,
+    };
+    await prisma.setting.create({ data: { key: `${PROFILE_PLAN_PREFIX}${planId}`, value: JSON.stringify(plan) } });
+    return envelope(job, "blog-profile-plan", "아직 네이버에는 저장하지 않았습니다. 변경 내용을 사용자에게 보여주고 명시적 승인을 받은 뒤 적용하세요.", {
+      planId,
+      confirmationToken: token,
+      expiresAt: plan.expiresAt,
+      current: plan.current,
+      desired,
+      backupScreenshotSaved: Boolean(snapshot.screenshotPath),
+    }, ctx, { nextAction: "사용자 승인 후 blog_profile_apply_update(planId, confirmationToken, confirmed=true) 를 호출하세요." });
+  }
+
+  if (job.type === "BLOG_PROFILE_APPLY") {
+    const planId = readString(input, "planId");
+    const token = readString(input, "confirmationToken");
+    if (!planId || !token || input.confirmed !== true) throw new LocalAutomationError("INVALID_INPUT", "프로필 적용 계획, 확인 토큰, confirmed=true가 필요합니다.");
+    ctx.setStage("blog-profile", "프로필 변경 적용", 30);
+    const key = `${PROFILE_PLAN_PREFIX}${planId}`;
+    const stored = await prisma.setting.findUnique({ where: { key } });
+    if (!stored) throw new LocalAutomationError("INVALID_INPUT", "프로필 변경 계획을 찾을 수 없습니다. 미리보기를 다시 생성하세요.");
+    let plan: ProfilePlan;
+    try { plan = JSON.parse(stored.value) as ProfilePlan; } catch { throw new LocalAutomationError("INVALID_INPUT", "프로필 변경 계획이 손상되었습니다."); }
+    if (plan.version !== 1 || plan.token !== token) throw new LocalAutomationError("INVALID_INPUT", "프로필 변경 확인 토큰이 일치하지 않습니다.");
+    if (Date.parse(plan.expiresAt) <= Date.now()) {
+      await prisma.setting.delete({ where: { key } }).catch(() => undefined);
+      throw new LocalAutomationError("TIMEOUT", "프로필 변경 확인 시간이 만료되었습니다. 미리보기를 다시 생성하세요.");
+    }
+    const result = await applyNaverBlogProfile(plan.desired, plan.current);
+    await prisma.setting.delete({ where: { key } }).catch(() => undefined);
+    return envelope(job, "blog-profile-applied", "네이버 블로그 프로필을 저장하고 다시 읽어 확인했습니다.", {
+      applied: true,
+      before: { nickname: result.before.nickname, blogName: result.before.blogName, introduction: result.before.introduction },
+      after: { nickname: result.after.nickname, blogName: result.after.blogName, introduction: result.after.introduction },
     }, ctx);
   }
 
@@ -449,7 +861,9 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     const manifest = readBrandPostPackage(draftId);
     if (!manifest) throw new LocalAutomationError("DRAFT_NOT_FOUND", LOCAL_AUTOMATION_ERROR_HINTS.DRAFT_NOT_FOUND);
     if (!manifest.approvedAt) throw new LocalAutomationError("DRAFT_NOT_APPROVED", LOCAL_AUTOMATION_ERROR_HINTS.DRAFT_NOT_APPROVED);
-    if (manifest.readiness?.status === "BLOCKED") throw new LocalAutomationError("CONTENT_BLOCKED", `초안 검증이 BLOCKED 상태입니다: ${manifest.readiness.summary}`);
+    if (manifest.contentQuality && manifest.contentQuality.canPublish === false) {
+      throw new LocalAutomationError("CONTENT_BLOCKED", `초안 품질검사가 발행 보류 상태입니다: ${manifest.contentQuality.reason || manifest.contentQuality.summary}`);
+    }
     ctx.setStage("publish:start", schedule ? `예약 발행 시작 (${scheduledDate})` : "즉시 발행 시작", 10);
     const started = await localApi(request, `/api/brandlinks/${encodeURIComponent(draftId)}/publish`, {
       method: "POST",
@@ -458,7 +872,8 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     const startedData = (started.data || {}) as Record<string, unknown>;
     const outcome = await waitForPublishOutcome(ctx, draftId);
     if (outcome.status === "FAILED") {
-      throw new LocalAutomationError(classifyLocalFailure({ message: outcome.errorMessage || "" }) === "LOCAL_AUTOMATION_FAILED" ? "EDITOR_FAILED" : classifyLocalFailure({ message: outcome.errorMessage || "" }), outcome.errorMessage || "발행 프로세스가 실패했습니다.");
+      const classified = classifyLocalFailure({ message: outcome.errorMessage || "" });
+      throw new LocalAutomationError(classified === "LOCAL_AUTOMATION_FAILED" ? "EDITOR_FAILED" : classified, outcome.errorMessage || "발행 프로세스가 실패했습니다.");
     }
     if (outcome.timedOut) ctx.warnings.push("발행이 아직 진행 중입니다. post_verify_published 로 결과를 확인하세요.");
     const summary = outcome.timedOut
@@ -478,7 +893,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
       effectiveScheduledDate: startedData.effectiveScheduledDate ?? null,
       adjustedFromPast: startedData.adjustedFromPast ?? false,
       inProgress: outcome.timedOut,
-    }, ctx, manifest.readiness ?? null);
+    }, ctx, { readiness: manifest.specValidation ?? manifest.contentQuality ?? null });
   }
 
   if (job.type === "POST_BULK_SCHEDULE") {
@@ -536,14 +951,14 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
       const key = String(field.key);
       return { key, label: field.label, secret: field.secret === true, configured: Boolean(configured[key]), ...(field.secret ? {} : { value: values[key] ?? "" }) };
     });
-    return envelope(job, "settings", `설정 ${settings.length}개 (시크릿은 설정 여부만 표시)`, { settings, status: buildStatusSnapshot() }, ctx);
+    return envelope(job, "settings", `설정 ${settings.length}개 (시크릿은 설정 여부만 표시)`, { settings, draftCreationMode: data.draftCreationMode ?? null, status: buildStatusSnapshot() }, ctx);
   }
 
   throw new LocalAutomationError("LOCAL_API_MISSING", `이 PC 앱 버전은 원격 작업 ${job.type} 을(를) 지원하지 않습니다. 앱을 업데이트하세요.`);
 }
 
-async function siteFetch(siteUrl: string, token: string, path: string, body: Record<string, unknown>): Promise<{ ok: boolean; status: number; payload: Record<string, unknown> | null }> {
-  const response = await fetch(`${siteUrl}${path}`, {
+async function siteFetch(siteUrl: string, token: string, apiPath: string, body: Record<string, unknown>): Promise<{ ok: boolean; status: number; payload: Record<string, unknown> | null }> {
+  const response = await fetch(`${siteUrl}${apiPath}`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify(body),

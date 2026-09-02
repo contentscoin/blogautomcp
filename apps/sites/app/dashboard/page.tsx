@@ -39,16 +39,25 @@ export default async function DashboardPage() {
 
         <section className="download-card">
           <div className="download-copy">
-            <span className="card-kicker">WINDOWS DESKTOP AGENT</span>
-            <h2>PC 프로그램 설치</h2>
-            <p>로컬 프로그램을 설치한 뒤, 승인 후 발급되는 MCP 주소로 이 PC를 연결하세요. ChatGPT 로그인은 프로그램에서 요구하지 않습니다.</p>
+            <span className="card-kicker">DESKTOP AGENT</span>
+            <h2>데스크톱 프로그램 설치</h2>
+            <p>운영체제에 맞는 프로그램을 설치한 뒤 PC 연결 주소로 이 기기를 인증하세요. ChatGPT MCP는 Site의 GPT 로그인 계정으로 별도 인증됩니다.</p>
           </div>
-          <div className="download-action">
-            <span className="download-platform">WINDOWS 10/11 · 64-BIT</span>
-            <a className="button button-primary download-button" href="/api/download/windows" download>
-              <span aria-hidden="true">↓</span> Windows 프로그램 다운로드
-            </a>
-            <small>버전 {release?.version || WINDOWS_INSTALLER_VERSION} · 현재 코드서명 전 버전으로 SmartScreen 안내가 표시될 수 있습니다.</small>
+          <div className="download-actions">
+            <div className="download-action">
+              <span className="download-platform">WINDOWS 10/11 · 64-BIT</span>
+              <a className="button button-primary download-button" href="/api/download/windows" download>
+                <span aria-hidden="true">↓</span> Windows 다운로드
+              </a>
+              <small>버전 {release?.version || WINDOWS_INSTALLER_VERSION} · SmartScreen 안내가 표시될 수 있습니다.</small>
+            </div>
+            <div className="download-action">
+              <span className="download-platform">macOS · APPLE SILICON</span>
+              <a className="button button-ghost download-button" href="/api/download/macos" download>
+                <span aria-hidden="true">↓</span> macOS 다운로드
+              </a>
+              <small>버전 {release?.version || WINDOWS_INSTALLER_VERSION} · Apple Silicon용 DMG</small>
+            </div>
           </div>
         </section>
 
@@ -59,7 +68,7 @@ export default async function DashboardPage() {
         ) : (
           <>
             <section className="metric-grid">
-              <article><span>MCP 연결</span><strong>{connection ? `Generation ${connection.generation}` : '미발급'}</strong><small>{connection ? '활성 주소 1개' : '처음 발급이 필요합니다'}</small></article>
+              <article><span>ChatGPT MCP</span><strong>OAuth 인증</strong><small>GPT 로그인 계정과 연결</small></article>
               <article><span>로컬 PC</span><strong>{online ? '온라인' : device ? '오프라인' : '미연결'}</strong><small>{device?.name || 'MCP 주소를 앱에 입력하세요'}</small></article>
               <article><span>최근 작업</span><strong>{jobs.length}건</strong><small>대기 {jobs.filter((job) => job.status === 'QUEUED').length} · 실행 {jobs.filter((job) => job.status === 'RUNNING').length}</small></article>
             </section>
@@ -79,5 +88,5 @@ function statusLabel(status: string) {
   return ({ APPROVED: '승인됨', PENDING_APPROVAL: '승인 대기', REJECTED: '승인 거절', SUSPENDED: '사용 정지' } as Record<string, string>)[status] || status;
 }
 function jobTitle(type: string) {
-  return ({ BRANDCONNECT_LIST_PRODUCTS: '상품 목록 조회', BRANDCONNECT_SYNC_PRODUCTS: '상품 가져오기', POST_CREATE_DRAFT: '포스팅 초안', POST_PUBLISH: '즉시 발행', POST_SCHEDULE: '예약 발행' } as Record<string, string>)[type] || type;
+  return ({ BRANDCONNECT_LIST_PRODUCTS: '상품 목록 조회', BRANDCONNECT_SYNC_PRODUCTS: '상품 가져오기', POST_CREATE_DRAFT: '초안 근거 준비(구버전)', POST_PREPARE_DRAFT: '초안 근거 준비', POST_SUBMIT_DRAFT: 'ChatGPT 원고 제출', POST_PUBLISH: '즉시 발행', POST_SCHEDULE: '예약 발행' } as Record<string, string>)[type] || type;
 }

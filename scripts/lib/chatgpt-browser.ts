@@ -2,11 +2,20 @@ import fs from "fs";
 import path from "path";
 import { chromium } from "playwright";
 import { Page, BrowserContextOptions } from "playwright";
+import { getChatgptProfileDir, getChatgptSessionFile } from "./app-paths";
+import {
+  buildChatGptBrowserLaunchPolicy,
+  describeChatGptBrowserVisibility,
+} from "./chatgpt-browser-visibility";
+import {
+  chatGptAuthenticationRequiredMessage,
+  hasChatGptProtectionText,
+} from "./chatgpt-browser-errors";
+import { acquireChatGptProfileLock } from "./chatgpt-profile-lock";
 
-const CHATGPT_SESSION_FILE = path.join(process.cwd(), "playwright", "storage", "chatgpt-session.json");
+const CHATGPT_SESSION_FILE = getChatgptSessionFile();
 const CHATGPT_USER_DATA_DIR =
-  process.env.CHATGPT_USER_DATA_DIR || path.join(process.cwd(), "playwright", "storage", "chatgpt-profile");
-const CHATGPT_HEADLESS = (process.env.CHATGPT_HEADLESS || "false").toLowerCase() === "true";
+  process.env.CHATGPT_USER_DATA_DIR || getChatgptProfileDir();
 const CHATGPT_USE_PERSISTENT_CONTEXT =
   (process.env.CHATGPT_USE_PERSISTENT_CONTEXT || process.env.CHATGPT_USE_PERSISTENT_PROFILE || "true").toLowerCase() !==
   "false";
@@ -41,30 +50,9 @@ export interface ChatGPTContextHandle {
 }
 
 const CHATGPT_MANUAL_VERIFICATION_MESSAGE =
-  "ChatGPT manual verification required. A human-verification or security-check page is visible. Complete it in the browser, then run the job again.";
-
-const CHATGPT_PROTECTION_TEXT_PATTERNS = [
-  "checking your browser",
-  "checking if the site connection is secure",
-  "please stand by",
-  "verify you are human",
-  "needs to review the security of your connection",
-  "cf-challenge",
-  "cloudflare",
-  "turnstile",
-  "unusual activity",
-  "access denied",
-  "\uc0ac\ub78c\uc778\uc9c0 \ud655\uc778",
-  "\uc2e4\uc81c \uc0ac\uc6a9\uc790\uc778\uc9c0 \ud655\uc778",
-  "\uc0ac\uc6a9\uc790\uac00 \uc0ac\ub78c\uc778\uc9c0 \ud655\uc778",
-  "\uc0ac\ub78c\uc784\uc744 \ud655\uc778",
-  "\ub85c\ubd07\uc774 \uc544\ub2d8",
-  "\ubcf4\uc548 \ud655\uc778",
-  "\ubcf4\uc548 \uac80\uc99d",
-  "\ube0c\ub77c\uc6b0\uc800\ub97c \ud655\uc778",
-  "\uc811\uadfc\uc774 \ucc28\ub2e8",
-  "\ube44\uc815\uc0c1\uc801\uc778 \ud65c\ub3d9",
-];
+  chatGptAuthenticationRequiredMessage(
+    "ChatGPT manual verification required. A human-verification or security-check page is visible. Complete it in the browser, then run the job again.",
+  );
 
 const CHATGPT_PROTECTION_FRAME_PATTERNS = [
   "cdn-cgi/challenge-platform",
@@ -108,8 +96,7 @@ async function detectChatGPTManualVerification(page: Page): Promise<string | nul
   }
 
   const bodyText = (await page.textContent("body").catch(() => "")) || "";
-  const normalized = bodyText.replace(/\s+/g, " ").toLowerCase();
-  if (CHATGPT_PROTECTION_TEXT_PATTERNS.some((pattern) => normalized.includes(pattern))) {
+  if (!(await hasComposer(page)) && hasChatGptProtectionText(bodyText)) {
     return CHATGPT_MANUAL_VERIFICATION_MESSAGE;
   }
 
@@ -393,7 +380,9 @@ async function ensureChatGPTReady(
         const hasToken = await hasSessionTokenCookie(page);
         const tokenHint = hasToken ? "세션 쿠키는 있지만 UI가 로그아웃 상태입니다." : "세션 쿠키가 없습니다.";
         throw new Error(
-          `ChatGPT 브라우저 자동화는 설치형 앱에서 사용하지 않습니다. ${tokenHint} 설정에서 OpenAI API 키를 입력하거나 로컬 초안 모드를 사용하세요.`,
+          chatGptAuthenticationRequiredMessage(
+            `ChatGPT 로그인이 필요합니다. ${tokenHint} 먼저 'npm run login:chatgpt'로 프로필을 갱신하세요.`,
+          ),
         );
       }
 
@@ -435,53 +424,70 @@ async function ensureChatGPTReady(
 }
 
 export async function createChatGPTContext(hasSessionFile: boolean): Promise<ChatGPTContextHandle> {
+  const profileLock = await acquireChatGptProfileLock({ purpose: "shared-chatgpt-browser" });
+  const launchPolicy = buildChatGptBrowserLaunchPolicy();
   const commonLaunchOptions = {
-    headless: CHATGPT_HEADLESS,
-    slowMo: CHATGPT_HEADLESS ? 0 : 30,
-    args: ["--disable-blink-features=AutomationControlled"],
+    channel: process.env.BROWSER_CHANNEL?.trim() || "chrome",
+    headless: launchPolicy.headless,
+    slowMo: launchPolicy.slowMo,
+    args: launchPolicy.args,
   };
+  console.log(
+    `      - ChatGPT 브라우저 실행 모드: ${describeChatGptBrowserVisibility(launchPolicy.visibility)}`,
+  );
 
   const contextOptions: BrowserContextOptions = {
     viewport: { width: 1440, height: 960 },
     locale: "ko-KR",
-    userAgent:
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
   };
   const sessionFileAvailable = hasSessionFile && fs.existsSync(CHATGPT_SESSION_FILE);
 
-  if (CHATGPT_USE_PERSISTENT_CONTEXT) {
-    try {
-      const context = await chromium.launchPersistentContext(CHATGPT_USER_DATA_DIR, {
-        ...commonLaunchOptions,
-        ...contextOptions,
-      });
+  try {
+    if (CHATGPT_USE_PERSISTENT_CONTEXT) {
+      try {
+        const context = await chromium.launchPersistentContext(CHATGPT_USER_DATA_DIR, {
+          ...commonLaunchOptions,
+          ...contextOptions,
+        });
 
-      return {
-        context,
-        close: async () => {
-          await context.close().catch(() => {});
-        },
-      };
-    } catch (error) {
-      if (!sessionFileAvailable) {
-        throw error;
+        return {
+          context,
+          close: async () => {
+            try {
+              await context.close().catch(() => {});
+            } finally {
+              await profileLock.release();
+            }
+          },
+        };
+      } catch (error) {
+        if (!sessionFileAvailable) {
+          throw error;
+        }
       }
     }
-  }
 
-  const browser = await chromium.launch(commonLaunchOptions);
-  if (sessionFileAvailable) {
-    contextOptions.storageState = CHATGPT_SESSION_FILE;
+    const browser = await chromium.launch(commonLaunchOptions);
+    if (sessionFileAvailable) {
+      contextOptions.storageState = CHATGPT_SESSION_FILE;
+    }
+    const context = await browser.newContext(contextOptions);
+    return {
+      context,
+      close: async () => {
+        try {
+          if (browser.isConnected()) {
+            await browser.close().catch(() => {});
+          }
+        } finally {
+          await profileLock.release();
+        }
+      },
+    };
+  } catch (error) {
+    await profileLock.release();
+    throw error;
   }
-  const context = await browser.newContext(contextOptions);
-  return {
-    context,
-    close: async () => {
-      if (browser.isConnected()) {
-        await browser.close().catch(() => {});
-      }
-    },
-  };
 }
 
 export async function openChatGPTTarget(page: Page, url: string, label: string) {

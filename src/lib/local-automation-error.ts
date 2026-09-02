@@ -96,6 +96,8 @@ export function classifyLocalFailure(input: { status?: number | null; code?: str
   const status = input.status ?? null;
   if (isLocalAutomationErrorCode(code)) return code;
   if (code === "DESKTOP_UPDATE_PENDING") return "UPDATE_PENDING";
+  if (code === "CODEX_LOGIN_REQUIRED" || code === "CHATGPT_BROWSER_LOGIN_REQUIRED" || code === "CHATGPT_MCP_DRAFT_REQUIRED" || code === "CHATGPT_BROWSER_FALLBACK_REQUIRED" || code === "CODEX_DRAFT_FAILED") return "LLM_UNAVAILABLE";
+  if (code === "INVALID_GENERATED_DRAFT") return "INVALID_INPUT";
   if (code === "CONNECT_CONTRACT_CAPTURE_REQUIRED") return "TRAVEL_CONTRACT_LOCKED";
   if (/DRAFT_NOT_APPROVED|승인해 주세요|승인되지 않/u.test(message)) return "DRAFT_NOT_APPROVED";
   if (/초안이 없|초안을 먼저|수정할 초안/u.test(message)) return "DRAFT_NOT_FOUND";

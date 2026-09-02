@@ -6,23 +6,30 @@
 import "dotenv/config";
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import { Page } from "playwright";
+import { Page, type BrowserContext } from "playwright";
 import * as fs from "fs";
 import * as path from "path";
 import * as readline from "readline";
+import {
+  getChatgptProfileDir,
+  getChatgptSessionFile,
+  getSessionStorageDir,
+} from "./lib/app-paths";
+import { acquireChatGptProfileLock } from "./lib/chatgpt-profile-lock";
 
 chromium.use(StealthPlugin());
 
-const STORAGE_PATH = path.join(process.cwd(), "playwright", "storage");
-const CHATGPT_SESSION_FILE = path.join(STORAGE_PATH, "chatgpt-session.json");
+const STORAGE_PATH = getSessionStorageDir();
+const CHATGPT_SESSION_FILE = getChatgptSessionFile();
+const CHATGPT_USER_DATA_DIR = process.env.CHATGPT_USER_DATA_DIR || getChatgptProfileDir();
+const CHATGPT_BASE_URL = process.env.CHATGPT_BASE_URL || "https://chatgpt.com/";
+const CHATGPT_LOGIN_URL = process.env.CHATGPT_LOGIN_URL || CHATGPT_BASE_URL;
+const BROWSER_CHANNEL = process.env.BROWSER_CHANNEL?.trim() || "chrome";
+const FORCE_LOGIN = process.argv.includes("--force-login");
 const DEFAULT_CHATGPT_DRAFT_GPT_URL =
   "https://chatgpt.com/g/g-69044e83643481918a83e45a0bfec330-jepum-ribyu-jagseong-v11-dapeojuneunnamja";
 const DEFAULT_CHATGPT_POLISH_GPT_URL =
   "https://chatgpt.com/g/g-683347512adc8191bd26d40336990cb1-seo-coejeoghwa-jadong-geul-byeonhwan-v5-0-dapeojuneunnamja";
-const CHATGPT_LOGIN_URL =
-  process.env.CHATGPT_GPT_URL_DRAFT ||
-  process.env.CHATGPT_GPT_URL ||
-  DEFAULT_CHATGPT_DRAFT_GPT_URL;
 const CHATGPT_DRAFT_GPT_URL =
   process.env.CHATGPT_GPT_URL_DRAFT ||
   process.env.CHATGPT_GPT_URL ||
@@ -32,23 +39,25 @@ const CHATGPT_POLISH_GPT_URL =
   process.env.CHATGPT_GPT_URL_DRAFT ||
   process.env.CHATGPT_GPT_URL ||
   DEFAULT_CHATGPT_POLISH_GPT_URL;
-const CHATGPT_BASE_URL = process.env.CHATGPT_GPT_URL || "https://chatgpt.com/";
 const LOGIN_TIMEOUT_MS = Number(process.env.CHATGPT_LOGIN_TIMEOUT_MS || "600000");
 const CHATGPT_LOGIN_MANUAL_CONFIRM =
-  (process.env.CHATGPT_LOGIN_MANUAL_CONFIRM || "true").toLowerCase() === "true";
+  (process.env.CHATGPT_LOGIN_MANUAL_CONFIRM || "false").toLowerCase() === "true";
 const CHATGPT_VERIFY_CUSTOM_GPTS =
-  (process.env.CHATGPT_VERIFY_CUSTOM_GPTS || "true").toLowerCase() === "true";
+  (process.env.CHATGPT_VERIFY_CUSTOM_GPTS || "false").toLowerCase() === "true";
 const CHATGPT_LOGIN_USE_PROBE =
   (process.env.CHATGPT_LOGIN_USE_PROBE || "false").toLowerCase() === "true";
-const CHATGPT_USER_DATA_DIR =
-  process.env.CHATGPT_USER_DATA_DIR ||
-  path.join(STORAGE_PATH, "chatgpt-profile");
-
 if (!fs.existsSync(STORAGE_PATH)) {
   fs.mkdirSync(STORAGE_PATH, { recursive: true });
 }
-if (!fs.existsSync(CHATGPT_USER_DATA_DIR)) {
-  fs.mkdirSync(CHATGPT_USER_DATA_DIR, { recursive: true });
+
+function resetSavedChatGptLogin(): void {
+  const resolvedStorage = `${path.resolve(STORAGE_PATH)}${path.sep}`;
+  const resolvedProfile = path.resolve(CHATGPT_USER_DATA_DIR);
+  if (!resolvedProfile.startsWith(resolvedStorage) || resolvedProfile === path.resolve(STORAGE_PATH)) {
+    throw new Error("ChatGPT 프로필 초기화 경로가 세션 저장소 밖을 가리킵니다.");
+  }
+  fs.rmSync(CHATGPT_SESSION_FILE, { force: true });
+  fs.rmSync(resolvedProfile, { recursive: true, force: true });
 }
 
 const CHATGPT_COMPOSER_SELECTORS = [
@@ -85,8 +94,6 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function isChatGPTLoginRequired(page: Page): Promise<boolean> {
-  if (await hasComposer(page)) return false;
-
   const candidates = [
     page.getByRole("button", { name: /log in/i }).first(),
     page.getByRole("button", { name: /로그인/i }).first(),
@@ -99,6 +106,7 @@ async function isChatGPTLoginRequired(page: Page): Promise<boolean> {
     if (visible) return true;
   }
 
+  if (await hasComposer(page)) return false;
   return false;
 }
 
@@ -241,7 +249,7 @@ async function waitForComposerOrLoginTimeout(page: Page, timeoutMs: number): Pro
 
 async function hasSessionTokenCookie(page: Page): Promise<boolean> {
   const cookies = await page.context().cookies("https://chatgpt.com");
-  return cookies.some((cookie) => cookie.name.startsWith("__Secure-next-auth.session-token"));
+  return cookies.some((cookie) => /(?:session-token|access-token|auth-token)/iu.test(cookie.name));
 }
 
 async function verifyBaseChatGPTSession(page: Page): Promise<void> {
@@ -249,7 +257,8 @@ async function verifyBaseChatGPTSession(page: Page): Promise<void> {
   await waitForComposerOrLoginTimeout(page, Math.min(LOGIN_TIMEOUT_MS, 120000));
 
   const hasToken = await hasSessionTokenCookie(page);
-  if (!hasToken) {
+  const composerVisible = await hasComposer(page);
+  if (!hasToken && !composerVisible) {
     throw new Error(
       "로그인 세션 쿠키가 확인되지 않습니다. 브라우저에서 재로그인 후 다시 시도하세요."
     );
@@ -282,6 +291,29 @@ async function verifyCustomGptAccess(page: Page, url: string, label: string): Pr
   }
 }
 
+async function revealChatGptLoginWindow(page: Page): Promise<void> {
+  await page.bringToFront().catch(() => {});
+  const cdp = await page.context().newCDPSession(page).catch(() => null);
+  if (!cdp) return;
+
+  try {
+    const { windowId } = await cdp.send("Browser.getWindowForTarget");
+    await cdp.send("Browser.setWindowBounds", {
+      windowId,
+      bounds: { windowState: "normal" },
+    });
+    await cdp.send("Browser.setWindowBounds", {
+      windowId,
+      bounds: { left: 80, top: 80, width: 1440, height: 960 },
+    });
+    await page.bringToFront().catch(() => {});
+  } catch {
+    // Chrome 채널/OS가 창 제어를 지원하지 않아도 headful 로그인은 계속 진행합니다.
+  } finally {
+    await cdp.detach().catch(() => {});
+  }
+}
+
 async function main(): Promise<void> {
   console.log("=".repeat(54));
   console.log("ChatGPT 브라우저 세션 설정");
@@ -293,20 +325,33 @@ async function main(): Promise<void> {
   console.log("   3. 세션/프로필 저장 후 브라우저가 자동 종료");
   console.log("");
 
-  const context = await chromium.launchPersistentContext(CHATGPT_USER_DATA_DIR, {
-    headless: false,
-    slowMo: 40,
-    args: ["--disable-blink-features=AutomationControlled"],
-    viewport: { width: 1440, height: 960 },
-    locale: "ko-KR",
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  });
-
+  const profileLock = await acquireChatGptProfileLock({ purpose: "chatgpt-login" });
+  let context: BrowserContext | null = null;
   try {
-    const page = context.pages()[0] ?? (await context.newPage());
+    if (FORCE_LOGIN) resetSavedChatGptLogin();
+    if (!fs.existsSync(CHATGPT_USER_DATA_DIR)) {
+      fs.mkdirSync(CHATGPT_USER_DATA_DIR, { recursive: true });
+    }
+
+    const activeContext = await chromium.launchPersistentContext(CHATGPT_USER_DATA_DIR, {
+      channel: BROWSER_CHANNEL,
+      headless: false,
+      slowMo: 40,
+      args: [
+        "--disable-blink-features=AutomationControlled",
+        "--window-position=80,80",
+        "--window-size=1440,960",
+        "--start-maximized",
+      ],
+      viewport: { width: 1440, height: 960 },
+      locale: "ko-KR",
+    });
+    context = activeContext;
+    const page = activeContext.pages()[0] ?? (await activeContext.newPage());
+    await revealChatGptLoginWindow(page);
 
     await page.goto(CHATGPT_LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await revealChatGptLoginWindow(page);
     console.log("✅ 브라우저가 열렸습니다.");
     console.log("📝 ChatGPT 로그인 완료를 감지하는 중...");
 
@@ -317,14 +362,18 @@ async function main(): Promise<void> {
       const start = Date.now();
       let loggedIn = false;
       let loginSeenRounds = 0;
+      let loginReminderShown = false;
       let stableComposerRounds = 0;
       let lastProbeAttemptAt = 0;
 
       while (Date.now() - start < LOGIN_TIMEOUT_MS) {
         const needLogin = await isChatGPTLoginRequired(page);
         const composerVisible = await hasComposer(page);
+        const hasAuthCookie = await hasSessionTokenCookie(page);
 
-        if (composerVisible) {
+        // New ChatGPT sessions may expose the authenticated composer without
+        // exporting the legacy auth-token cookie in storageState.
+        if (composerVisible && (hasAuthCookie || !needLogin)) {
           stableComposerRounds += 1;
           if (stableComposerRounds >= 3) {
             if (CHATGPT_LOGIN_USE_PROBE) {
@@ -354,8 +403,9 @@ async function main(): Promise<void> {
           loginSeenRounds = 0;
         }
 
-        if (loginSeenRounds >= 5) {
+        if (!loginReminderShown && (loginSeenRounds >= 5 || (composerVisible && !hasAuthCookie))) {
           console.log("ℹ️ 로그인 버튼이 표시됩니다. 브라우저에서 로그인 후 잠시 기다려주세요.");
+          loginReminderShown = true;
         }
 
         await sleep(1200);
@@ -387,7 +437,11 @@ async function main(): Promise<void> {
     console.log(`   📁 프로필 위치: ${CHATGPT_USER_DATA_DIR}`);
     console.log("   이후 BROWSER_GPT_MODE=true 에서 이 세션을 사용합니다.");
   } finally {
-    await context.close().catch(() => {});
+    try {
+      await context?.close().catch(() => {});
+    } finally {
+      await profileLock.release();
+    }
   }
 }
 

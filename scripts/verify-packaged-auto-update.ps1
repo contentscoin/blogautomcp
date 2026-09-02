@@ -13,6 +13,11 @@ if (-not $resolvedAppPath.StartsWith($expectedAppRoot + [IO.Path]::DirectorySepa
 }
 if (-not (Test-Path -LiteralPath $resolvedAppPath -PathType Leaf)) { throw "패키지 실행 파일을 찾지 못했습니다: $resolvedAppPath" }
 if (Get-NetTCPConnection -State Listen -LocalPort $AppPort,$UpdatePort -ErrorAction SilentlyContinue) { throw '패키지 검증 포트가 이미 사용 중입니다.' }
+$preexistingAppProcessIds = @(
+  Get-CimInstance Win32_Process | Where-Object {
+    $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -eq $resolvedAppPath
+  } | ForEach-Object { [int]$_.ProcessId }
+)
 
 $packagedPackagePath = Join-Path $expectedAppRoot 'resources\app\package.json'
 if (-not (Test-Path -LiteralPath $packagedPackagePath -PathType Leaf)) { throw '패키지 앱의 package.json을 찾지 못했습니다.' }
@@ -106,7 +111,9 @@ try {
         $_.ExecutablePath -and
         [IO.Path]::GetFullPath($_.ExecutablePath) -eq $resolvedAppPath -and
         $_.ProcessId -ne $mainProcessId -and
-        $_.CommandLine -notmatch '--type='
+        $_.CommandLine -notmatch '--type=' -and
+        $_.CommandLine -and
+        $_.CommandLine.Contains("--user-data-dir=$testRoot")
       } | Select-Object -First 1
       if (-not $nextMain) { return $false }
       $controlAfter = Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:$AppPort/api/system/control" -TimeoutSec 3
@@ -117,7 +124,9 @@ try {
       return $false
     }
   }
-  if (Get-Process -Id $mainProcessId -ErrorAction SilentlyContinue) { throw '재시작 후 이전 Electron 메인 프로세스가 남아 있습니다.' }
+  Wait-Until -TimeoutSeconds 20 -FailureMessage '재시작 후 이전 Electron 메인 프로세스가 남아 있습니다.' -Condition {
+    -not (Get-Process -Id $mainProcessId -ErrorAction SilentlyContinue)
+  }
   $restartedProcessInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $restartedMainProcessId"
   if (-not $restartedProcessInfo.CommandLine.Contains("--user-data-dir=$testRoot")) {
     throw '재시작된 Electron 프로세스가 격리된 사용자 데이터 경로를 유지하지 않았습니다.'
@@ -159,7 +168,11 @@ try {
   }
   Start-Sleep -Milliseconds 300
   for ($cleanupAttempt = 0; $cleanupAttempt -lt 20; $cleanupAttempt += 1) {
-    $remainingAppProcesses = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -eq $resolvedAppPath })
+    $remainingAppProcesses = @(Get-CimInstance Win32_Process | Where-Object {
+      $_.ExecutablePath -and
+      [IO.Path]::GetFullPath($_.ExecutablePath) -eq $resolvedAppPath -and
+      $preexistingAppProcessIds -notcontains [int]$_.ProcessId
+    })
     if ($remainingAppProcesses.Count -eq 0) { break }
     foreach ($remaining in $remainingAppProcesses) { Stop-Process -Id $remaining.ProcessId -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Milliseconds 250

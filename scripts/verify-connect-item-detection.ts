@@ -10,7 +10,12 @@
  */
 
 import { findItemArrays, detectFieldMap, normalizeConnectItems, readArrayAtPath } from "../src/lib/connect-item";
-import { pickBestListResponse } from "../src/lib/travel-connect-adapter";
+import {
+  buildMultiFeedListDiscovery,
+  extractRecommendationTabPairs,
+  mergeConnectItems,
+  pickBestListResponse,
+} from "../src/lib/travel-connect-adapter";
 import { buildTravelSelectionOptions, matchesTravelSelectionFilters } from "../src/lib/travel-selection-options";
 import fs from "fs";
 import path from "path";
@@ -144,6 +149,63 @@ check(
   mixedTravelBest?.fieldMap
 );
 
+// 7. 실제 여행커넥트는 추천 섹션마다 별도 응답을 보내며, recommend-tabs에는
+// 화면에서 아직 호출하지 않은 지역 탭도 들어 있다. 단일 최대 배열만 고르지 말고
+// 관측 응답을 합친 뒤 모든 section/tab 계약을 확장해야 한다.
+const makeTravelRows = (ids: string[]) => ids.map((id) => ({
+  productId: id,
+  name: `여행 상품 ${id}`,
+  storeName: "테스트여행",
+  discountedSalePrice: 300000,
+  representativeProductImageUrl: `https://travel.example/${id}.jpg`,
+  url: `https://travel.example/product/${id}`,
+  connectServiceType: "TRAVEL_PACKAGE",
+  extra: { countryNames: ["일본"], cityNames: ["도쿄"], duration: "2박 3일" },
+}));
+const multiFeedCaptured = [
+  {
+    url: "https://gw-brandconnect.naver.com/affiliate/query/connect/recommend-tabs?serviceType=TRAVEL_PACKAGE",
+    payload: {
+      data: [
+        { section: "PRICE_DROP", tabs: [{ tabId: "ALL" }, { tabId: "JP" }] },
+        { section: "REGION_BEST", tabs: [{ tabId: "ALL" }, { tabId: "EURO" }] },
+        { section: "SPECIAL_OFFER", tabs: [{ tabId: "SUPER_WEEK" }] },
+      ],
+    },
+  },
+  {
+    url: "https://gw-brandconnect.naver.com/affiliate/query/connect/recommend-products?serviceType=TRAVEL_PACKAGE&section=PRICE_DROP&tabId=ALL",
+    payload: { data: makeTravelRows(["A", "B", "C", "D"]) },
+  },
+  {
+    url: "https://gw-brandconnect.naver.com/affiliate/query/connect/recommend-products?serviceType=TRAVEL_PACKAGE&section=REGION_BEST&tabId=ALL",
+    payload: { data: makeTravelRows(["C", "D", "E", "F"]) },
+  },
+  {
+    url: "https://gw-brandconnect.naver.com/affiliate/query/connect/recommend-products?serviceType=TRAVEL_PACKAGE&section=SPECIAL_OFFER&tabId=SUPER_WEEK",
+    payload: { data: makeTravelRows(["F", "G", "H"]) },
+  },
+];
+const tabPairs = extractRecommendationTabPairs(multiFeedCaptured.map((entry) => entry.payload));
+check("travel multi-feed: all observed section/tab pairs", tabPairs.length === 5, tabPairs);
+const multiFeed = buildMultiFeedListDiscovery(multiFeedCaptured, "travel");
+check("travel multi-feed: five reusable feed contracts", multiFeed?.feeds.length === 5, multiFeed?.feeds);
+check("travel multi-feed: observed responses are unioned", multiFeed?.items.length === 8, multiFeed?.items);
+check(
+  "travel multi-feed: duplicate products keep one row",
+  mergeConnectItems(multiFeedCaptured.slice(1).map((entry) => {
+    const rows = readArrayAtPath(entry.payload, "$.data") || [];
+    return normalizeConnectItems(rows, {
+      id: "productId",
+      name: "name",
+      storeName: "storeName",
+      price: "discountedSalePrice",
+      imageUrl: "representativeProductImageUrl",
+      linkUrl: "url",
+    });
+  })).length === 8
+);
+
 const liveTravelShape = normalizeConnectItems(
   [
     {
@@ -221,7 +283,7 @@ check(
   liveTravelShape.filter((item) => matchesTravelSelectionFilters(item, [], ["travel-benefit:tour-ticket"])).length === 1
 );
 
-// 7. 계약 확인 뒤에도 행 단위 버튼이 별도로 잠기면 일괄 버튼만 열리는 반쪽 수정이 된다.
+// 8. 계약 확인 뒤에도 행 단위 버튼이 별도로 잠기면 일괄 버튼만 열리는 반쪽 수정이 된다.
 const dashboardSource = fs.readFileSync(path.join(process.cwd(), "src", "app", "page.tsx"), "utf8");
 check("travel row: legacy fixed lock removed", !dashboardSource.includes("🔒 여행 발행 준비중"));
 check(
@@ -233,7 +295,7 @@ check(
   dashboardSource.includes('link.status === "FAILED" && link.connectKind === "TRAVEL" && travelPublishingUnavailable')
 );
 
-// 8. 데스크톱 설치본의 동기화는 숨은 Prisma 폴더에 의존하지 않고, 완료를
+// 9. 데스크톱 설치본의 동기화는 숨은 Prisma 폴더에 의존하지 않고, 완료를
 // 기다린 뒤 실제 결과를 다시 읽어야 한다. 이 회귀가 생기면 UI는 성공처럼
 // 보이면서 이전 목록만 계속 표시한다.
 const registerSource = fs.readFileSync(

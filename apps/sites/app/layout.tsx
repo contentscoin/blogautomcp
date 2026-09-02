@@ -6,8 +6,8 @@ const geistSans = Geist({ variable: '--font-geist-sans', subsets: ['latin'] });
 const geistMono = Geist_Mono({ variable: '--font-geist-mono', subsets: ['latin'] });
 
 export const metadata: Metadata = {
-  title: 'BlogAutoMCP — 네이버 브랜드커넥트 자동화',
-  description: 'ChatGPT와 내 Windows PC를 연결하는 쇼핑·여행커넥트 운영 사이트',
+  title: 'BlogAutoMCP — 상품을 고르면 포스팅이 완성됩니다',
+  description: '쇼핑·여행커넥트 상품 동기화부터 SEO 초안, GPT 이미지, 썸네일, 네이버 블로그 발행까지 대화로 완성하세요.',
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

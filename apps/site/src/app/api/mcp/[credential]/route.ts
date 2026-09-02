@@ -27,7 +27,7 @@ const TOOLS = [
     name: "brandconnect_list_products",
     title: "브랜드커넥트 상품 목록",
     description: "로컬 PC에서 쇼핑커넥트 또는 여행커넥트 상품 목록을 조회하는 작업을 시작합니다.",
-    inputSchema: { type: "object", properties: { connectKind: { type: "string", enum: ["shopping", "travel"] }, status: { type: "string", enum: ["all", "ready", "published", "failed"] }, idempotencyKey: { type: "string", minLength: 8, maxLength: 120 } }, required: ["connectKind"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { connectKind: { type: "string", enum: ["shopping", "travel"] }, status: { type: "string", enum: ["all", "ready", "drafting", "publishing", "scheduled", "published", "failed"] }, writingStatus: { type: "string", enum: ["all", "unwritten", "written"] }, idempotencyKey: { type: "string", minLength: 8, maxLength: 120 } }, required: ["connectKind"], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     securitySchemes: SECURITY_SCHEMES,
     _meta: { securitySchemes: SECURITY_SCHEMES },
@@ -181,8 +181,11 @@ async function callTool(userId: string, name: string, args: JsonObject) {
 
   if (name === "brandconnect_list_products") {
     const status = stringArg(args, "status") || "all";
-    if (!["all", "ready", "published", "failed"].includes(status)) return toolPayload({ ok: false, code: "INVALID_STATUS", message: "지원하지 않는 상품 상태입니다." }, true);
+    if (!["all", "ready", "drafting", "publishing", "scheduled", "published", "failed"].includes(status)) return toolPayload({ ok: false, code: "INVALID_STATUS", message: "지원하지 않는 상품 상태입니다." }, true);
     safeArgs.status = status;
+    const writingStatus = stringArg(args, "writingStatus") || "all";
+    if (!["all", "unwritten", "written"].includes(writingStatus)) return toolPayload({ ok: false, code: "INVALID_WRITING_STATUS", message: "writingStatus는 all, unwritten 또는 written이어야 합니다." }, true);
+    safeArgs.writingStatus = writingStatus;
     return enqueue(userId, type, safeArgs);
   }
 

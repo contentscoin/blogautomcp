@@ -6,7 +6,7 @@ const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
-const { app, BrowserWindow, dialog, Menu, Notification, Tray } = require("electron");
+const { app, BrowserWindow, dialog, Menu, Notification, shell, Tray } = require("electron");
 const next = require("next");
 const { NsisUpdater } = require("electron-updater");
 const { createDesktopAutoUpdater } = require("./auto-update.cjs");
@@ -23,6 +23,7 @@ let mainWindow = null;
 let tray = null;
 let isQuitting = false;
 let desktopUpdater = null;
+let interruptedDraftsRecovered = false;
 
 function resolveProjectRoot() {
   if (app.isPackaged) {
@@ -86,13 +87,27 @@ function configureRuntimePaths(projectRoot) {
   }
   const userData = app.getPath("userData");
   process.env.DESKTOP_APP_VERSION = app.getVersion();
+  // Keep the local callback on loopback while preserving the app's actual port.
+  process.env.LOCAL_APP_ORIGIN = process.env.LOCAL_APP_ORIGIN || APP_BASE_URL;
   process.env.DESKTOP_USER_DATA = process.env.DESKTOP_USER_DATA || userData;
   process.env.SESSION_STORAGE_DIR = process.env.SESSION_STORAGE_DIR || path.join(userData, "playwright", "storage");
   process.env.DESKTOP_PROJECT_ROOT = process.env.DESKTOP_PROJECT_ROOT || projectRoot;
   process.env.BROWSER_CHANNEL = process.env.BROWSER_CHANNEL || "chrome";
   require("dotenv").config({ path: path.join(userData, ".env"), override: false, quiet: true });
-  process.env.BROWSER_GPT_MODE = "false";
-  process.env.ALLOW_CHATGPT_BROWSER_MODE = "false";
+  process.env.CHATGPT_BROWSER_VISIBILITY =
+    process.env.CHATGPT_BROWSER_VISIBILITY ||
+    ((process.env.CHATGPT_HEADLESS || "").trim().toLowerCase() === "true"
+      ? "headless"
+      : "background");
+  const browserChatGptEnabled =
+    (process.env.CHATGPT_BROWSER_AUTOMATION_ENABLED || "false").trim().toLowerCase() === "true";
+  process.env.CHATGPT_BROWSER_AUTOMATION_ENABLED = browserChatGptEnabled ? "true" : "false";
+  // 기본 엔진은 OpenAI API 키 + Spec-first 파이프라인. Codex/ChatGPT 웹 자동작성은 설정에서 켜는 선택 경로다.
+  process.env.CODEX_DRAFT_ENABLED = process.env.CODEX_DRAFT_ENABLED || "false";
+  process.env.CODEX_DRAFT_MODEL = process.env.CODEX_DRAFT_MODEL?.trim() || "gpt-5.5";
+  process.env.AI_PROVIDER = process.env.AI_PROVIDER || "openai";
+  process.env.BROWSER_GPT_MODE = browserChatGptEnabled ? "true" : "false";
+  process.env.ALLOW_CHATGPT_BROWSER_MODE = browserChatGptEnabled ? "true" : "false";
   process.env.CHATGPT_USE_CUSTOM_GPTS = "false";
   // 썸네일 생성도 ChatGPT 브라우저 자동화를 쓰지 않는다. 사용자 .env로도 켤 수 없게 고정한다.
   process.env.PRODUCT_THUMBNAIL_CHATGPT_ENABLED = "false";
@@ -131,6 +146,28 @@ async function ensureLocalDatabase(projectRoot) {
   });
 }
 
+async function recoverInterruptedDrafts(projectRoot) {
+  if (interruptedDraftsRecovered) return;
+  interruptedDraftsRecovered = true;
+
+  const { PrismaClient } = require(path.join(projectRoot, "src", "generated", "prisma"));
+  const prisma = new PrismaClient();
+  try {
+    const recovered = await prisma.brandLink.updateMany({
+      where: { status: "DRAFTING" },
+      data: {
+        status: "FAILED",
+        errorMessage: "이전 앱 실행 중 초안 작성이 중단되었습니다. 다시 시도해 주세요.",
+      },
+    });
+    if (recovered.count > 0) {
+      console.warn(`[startup] interrupted drafts recovered: ${recovered.count}`);
+    }
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
 function isPortOpen(port) {
   return new Promise((resolve) => {
     const socket = net.createConnection({ port, host: APP_HOST });
@@ -164,6 +201,7 @@ async function ensureServerReady() {
     const nextDir = resolveProjectRoot();
     configureRuntimePaths(nextDir);
     await ensureLocalDatabase(nextDir);
+    await recoverInterruptedDrafts(nextDir);
 
     nextAppInstance = next({
       dev: !app.isPackaged,
@@ -221,6 +259,18 @@ async function createWindow() {
     show: !startHidden,
   });
   mainWindow = browserWindow;
+
+  browserWindow.webContents.setWindowOpenHandler(({ url: targetUrl }) => {
+    try {
+      const target = new URL(targetUrl);
+      if (target.protocol === "https:" || target.protocol === "http:") {
+        void shell.openExternal(target.toString()).catch(() => {});
+      }
+    } catch {
+      // 잘못된 URL이나 외부 프로토콜은 열지 않는다.
+    }
+    return { action: "deny" };
+  });
 
   browserWindow.on("close", (event) => {
     if (!isQuitting) {

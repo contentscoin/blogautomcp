@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 interface SessionData {
   hasSession: boolean;
   isValid: boolean;
+  automationEnabled?: boolean;
   savedAt?: string;
   checkedAt?: string;
   error?: string;
@@ -13,6 +14,7 @@ interface SessionData {
 
 interface SessionApiData extends SessionData {
   naver: SessionData;
+  chatgpt: SessionData;
 }
 
 interface DesktopUpdateState {
@@ -28,6 +30,14 @@ interface ActivationState {
   configured: boolean;
   siteUrl: string | null;
   deviceId: string | null;
+}
+
+interface CodexStatus {
+  installed: boolean;
+  authenticated: boolean;
+  method: string | null;
+  message: string;
+  error: string | null;
 }
 
 type ControlAction = "restart" | "update" | null;
@@ -71,7 +81,8 @@ function updateStatusDotClass(update: DesktopUpdateState | null): string {
 export default function SessionStatus() {
   const [session, setSession] = useState<SessionApiData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [loggingIn, setLoggingIn] = useState(false);
+  const [naverLoggingIn, setNaverLoggingIn] = useState(false);
+  const [chatGptLoggingIn, setChatGptLoggingIn] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [update, setUpdate] = useState<DesktopUpdateState | null>(null);
   const [activation, setActivation] = useState<ActivationState | null>(null);
@@ -82,12 +93,21 @@ export default function SessionStatus() {
   const [reconnecting, setReconnecting] = useState(false);
   const [blogId, setBlogId] = useState("");
   const [savingBlogId, setSavingBlogId] = useState(false);
+  const [browserAutomationEnabled, setBrowserAutomationEnabled] = useState(true);
+  const [savingBrowserMode, setSavingBrowserMode] = useState(false);
+  const [codex, setCodex] = useState<CodexStatus | null>(null);
+  const [codexConnecting, setCodexConnecting] = useState(false);
 
   const fetchSession = useCallback(async () => {
     try {
       const response = await fetch("/api/session", { cache: "no-store" });
       const payload = await response.json();
-      if (response.ok && payload.success) setSession(payload.data);
+      if (response.ok && payload.success) {
+        setSession(payload.data);
+        if (typeof payload.data?.chatgpt?.automationEnabled === "boolean") {
+          setBrowserAutomationEnabled(payload.data.chatgpt.automationEnabled);
+        }
+      }
     } catch (error) {
       console.error("세션 조회 실패:", error);
     } finally {
@@ -115,15 +135,82 @@ export default function SessionStatus() {
     }
   }, []);
 
-  const fetchBlogId = useCallback(async () => {
+  const fetchSettings = useCallback(async () => {
     try {
       const response = await fetch("/api/settings", { cache: "no-store" });
       const payload = await response.json();
-      if (response.ok && payload.success) setBlogId(payload.data?.values?.NAVER_BLOG_ID || "");
+      if (response.ok && payload.success) {
+        setBlogId(payload.data?.values?.NAVER_BLOG_ID || "");
+        setBrowserAutomationEnabled(payload.data?.browserDraftAutomationEnabled !== false);
+        setCodex(payload.data?.codexDraft || null);
+      }
     } catch {
       // 설정 입력란은 서버 상태를 확인할 수 있을 때 채웁니다.
     }
   }, []);
+
+  async function connectCodex() {
+    setCodexConnecting(true);
+    setNotice(null);
+    try {
+      const response = await fetch("/api/codex", { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok || !payload.success) throw new Error(payload.error || "GPT 연결을 시작하지 못했습니다.");
+      if (!payload.data?.job?.id) {
+        setCodex(payload.data?.codex || codex);
+        setNotice(payload.message || "GPT가 이미 연결되어 있습니다.");
+        return;
+      }
+      const jobId = payload.data.job.id as string;
+      setNotice("브라우저에서 GPT 로그인을 완료해 주세요.");
+      const deadline = Date.now() + 10 * 60_000;
+      while (Date.now() < deadline) {
+        await wait(2_000);
+        const pollResponse = await fetch(`/api/codex?jobId=${encodeURIComponent(jobId)}`, { cache: "no-store" });
+        const pollPayload = await pollResponse.json();
+        if (!pollResponse.ok || !pollPayload.success) continue;
+        setCodex(pollPayload.data?.codex || null);
+        if (pollPayload.data?.job?.status === "succeeded") {
+          setNotice("GPT 연결이 완료됐습니다. 이제 브라우저 없이 원고를 작성합니다.");
+          window.dispatchEvent(new Event("blogautomcp:draft-mode-changed"));
+          return;
+        }
+        if (pollPayload.data?.job?.status === "failed") {
+          throw new Error(pollPayload.data?.job?.error || "GPT 로그인에 실패했습니다.");
+        }
+      }
+      throw new Error("GPT 로그인 확인 시간이 초과되었습니다.");
+    } catch (error) {
+      setNotice(`오류: ${error instanceof Error ? error.message : "GPT 로그인에 실패했습니다."}`);
+    } finally {
+      setCodexConnecting(false);
+      await fetchSettings();
+    }
+  }
+
+  async function saveBrowserAutomation(enabled: boolean) {
+    setSavingBrowserMode(true);
+    setNotice(null);
+    try {
+      const response = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ values: { CHATGPT_BROWSER_AUTOMATION_ENABLED: enabled ? "true" : "false" } }),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.success) throw new Error(payload.error || "ChatGPT 작성 방식을 저장하지 못했습니다.");
+      setBrowserAutomationEnabled(enabled);
+      setNotice(enabled
+        ? "ChatGPT 백그라운드 자동작성을 켰습니다. 로그인 상태가 확인되면 작업을 백그라운드에서 처리합니다."
+        : "ChatGPT 웹 자동작성을 껐습니다. 초안 요청문을 ChatGPT로 넘기는 방식으로 동작합니다.");
+      await fetchSession();
+      window.dispatchEvent(new Event("blogautomcp:draft-mode-changed"));
+    } catch (error) {
+      setNotice(`오류: ${error instanceof Error ? error.message : "ChatGPT 작성 방식을 저장하지 못했습니다."}`);
+    } finally {
+      setSavingBrowserMode(false);
+    }
+  }
 
   async function saveBlogId() {
     setSavingBlogId(true);
@@ -149,8 +236,10 @@ export default function SessionStatus() {
     }
   }
 
-  async function pollLoginJob(jobId: string) {
-    const deadline = Date.now() + 6 * 60_000;
+  async function pollLoginJob(jobId: string, provider: "naver" | "chatgpt") {
+    const providerLabel = provider === "chatgpt" ? "ChatGPT" : "네이버";
+    const deadline = Date.now() + (provider === "chatgpt" ? 10 : 6) * 60_000;
+    const setProviderLoggingIn = provider === "chatgpt" ? setChatGptLoggingIn : setNaverLoggingIn;
     while (Date.now() < deadline) {
       await wait(3_000);
       try {
@@ -158,14 +247,14 @@ export default function SessionStatus() {
         const payload = await response.json();
         if (!response.ok || !payload.success) continue;
         if (payload.data.status === "succeeded") {
-          setNotice("네이버 재로그인이 완료되었습니다.");
-          setLoggingIn(false);
+          setNotice(`${providerLabel} 재로그인이 완료되었습니다.`);
+          setProviderLoggingIn(false);
           await fetchSession();
           return;
         }
         if (payload.data.status === "failed") {
-          setNotice(`오류: ${payload.data.error || "네이버 로그인에 실패했습니다."}`);
-          setLoggingIn(false);
+          setNotice(`오류: ${payload.data.error || `${providerLabel} 로그인에 실패했습니다.`}`);
+          setProviderLoggingIn(false);
           await fetchSession();
           return;
         }
@@ -173,29 +262,31 @@ export default function SessionStatus() {
         // 로그인 창이 열려 있는 동안 일시적인 조회 실패는 재시도합니다.
       }
     }
-    setNotice("로그인 확인 시간이 초과되었습니다. 로그인 상태를 다시 확인해주세요.");
-    setLoggingIn(false);
+    setNotice(`${providerLabel} 로그인 확인 시간이 초과되었습니다. 로그인 상태를 다시 확인해주세요.`);
+    setProviderLoggingIn(false);
     await fetchSession();
   }
 
-  async function startLogin() {
+  async function startLogin(provider: "naver" | "chatgpt") {
+    const providerLabel = provider === "chatgpt" ? "ChatGPT" : "네이버";
+    const setProviderLoggingIn = provider === "chatgpt" ? setChatGptLoggingIn : setNaverLoggingIn;
     try {
-      setLoggingIn(true);
+      setProviderLoggingIn(true);
       setNotice(null);
       const response = await fetch("/api/session/login", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ provider: "naver", force: true }),
+        body: JSON.stringify({ provider, force: true }),
       });
       const payload = await response.json();
-      if (!response.ok || !payload.success) throw new Error(payload.error || "네이버 로그인을 시작하지 못했습니다.");
-      setNotice(payload.message || "열린 창에서 네이버 로그인을 완료하세요.");
+      if (!response.ok || !payload.success) throw new Error(payload.error || `${providerLabel} 로그인을 시작하지 못했습니다.`);
+      setNotice(payload.message || `열린 창에서 ${providerLabel} 로그인을 완료하세요.`);
       const jobId = payload.data?.jobId as string | undefined;
-      if (jobId) void pollLoginJob(jobId);
-      else setLoggingIn(false);
+      if (jobId) void pollLoginJob(jobId, provider);
+      else setProviderLoggingIn(false);
     } catch (error) {
-      setNotice(`오류: ${error instanceof Error ? error.message : "네이버 로그인을 시작하지 못했습니다."}`);
-      setLoggingIn(false);
+      setNotice(`오류: ${error instanceof Error ? error.message : `${providerLabel} 로그인을 시작하지 못했습니다.`}`);
+      setProviderLoggingIn(false);
     }
   }
 
@@ -281,12 +372,13 @@ export default function SessionStatus() {
   }
 
   useEffect(() => {
-    void Promise.all([fetchSession(), fetchUpdate(), fetchActivation(), fetchBlogId()]);
+    void Promise.all([fetchSession(), fetchUpdate(), fetchActivation(), fetchSettings()]);
     const timer = window.setInterval(() => void fetchUpdate(), 15_000);
     return () => window.clearInterval(timer);
-  }, [fetchActivation, fetchBlogId, fetchSession, fetchUpdate]);
+  }, [fetchActivation, fetchSession, fetchSettings, fetchUpdate]);
 
   const naver = session?.naver;
+  const chatgpt = session?.chatgpt;
 
   return (
     <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -303,12 +395,12 @@ export default function SessionStatus() {
         ) : null}
       </div>
 
-      <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(210px,1fr))] gap-3">
         <button
           type="button"
           onClick={() => void restartServer()}
           disabled={controlBusy === "restart"}
-          className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-sky-300 hover:bg-sky-50 disabled:cursor-wait disabled:opacity-60"
+          className="min-h-32 rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-sky-300 hover:bg-sky-50 disabled:cursor-wait disabled:opacity-60"
         >
           <span className="text-xl" aria-hidden="true">↻</span>
           <span className="mt-2 block text-sm font-semibold text-slate-900">{controlBusy === "restart" ? "재시작 중…" : "서버 재시작"}</span>
@@ -316,14 +408,36 @@ export default function SessionStatus() {
         </button>
         <button
           type="button"
-          onClick={() => void startLogin()}
-          disabled={loggingIn}
-          className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-wait disabled:opacity-60"
+          onClick={() => void startLogin("naver")}
+          disabled={naverLoggingIn}
+          className="min-h-32 rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-wait disabled:opacity-60"
         >
           <span className="text-xl" aria-hidden="true">N</span>
-          <span className="mt-2 block text-sm font-semibold text-slate-900">{loggingIn ? "로그인 대기 중…" : "네이버 재로그인"}</span>
+          <span className="mt-2 block text-sm font-semibold text-slate-900">{naverLoggingIn ? "로그인 대기 중…" : "네이버 재로그인"}</span>
           <span className="mt-1 block text-xs leading-5 text-slate-500">전용 창을 열고 저장된 네이버 세션 교체</span>
         </button>
+        <button
+          type="button"
+          onClick={() => void connectCodex()}
+          disabled={codexConnecting}
+          className="min-h-32 rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-cyan-300 hover:bg-cyan-50 disabled:cursor-wait disabled:opacity-60"
+        >
+          <span className="text-xl" aria-hidden="true">G</span>
+          <span className="mt-2 block text-sm font-semibold text-slate-900">{codexConnecting ? "GPT 연결 중…" : codex?.authenticated ? "GPT 연결됨" : "GPT 연결"}</span>
+          <span className="mt-1 block text-xs leading-5 text-slate-500">브라우저 없이 쇼핑·여행 원고를 백그라운드 작성</span>
+        </button>
+        {!codex?.authenticated ? (
+          <button
+            type="button"
+            onClick={() => void startLogin("chatgpt")}
+            disabled={chatGptLoggingIn}
+            className="min-h-32 rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-violet-300 hover:bg-violet-50 disabled:cursor-wait disabled:opacity-60"
+          >
+            <span className="text-xl" aria-hidden="true">✦</span>
+            <span className="mt-2 block text-sm font-semibold text-slate-900">{chatGptLoggingIn ? "로그인 대기 중…" : "웹 GPT 재로그인"}</span>
+            <span className="mt-1 block text-xs leading-5 text-slate-500">GPT 연결 장애 시 사용할 예비 웹 세션 저장</span>
+          </button>
+        ) : null}
         <button
           type="button"
           onClick={() => {
@@ -331,7 +445,7 @@ export default function SessionStatus() {
             setNotice(null);
           }}
           aria-expanded={mcpOpen}
-          className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-violet-300 hover:bg-violet-50"
+          className="min-h-32 rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-violet-300 hover:bg-violet-50"
         >
           <span className="text-xl" aria-hidden="true">◎</span>
           <span className="mt-2 block text-sm font-semibold text-slate-900">GPT(MCP) 재연결</span>
@@ -341,7 +455,7 @@ export default function SessionStatus() {
           type="button"
           onClick={() => void checkUpdates()}
           disabled={controlBusy === "update"}
-          className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-amber-300 hover:bg-amber-50 disabled:cursor-wait disabled:opacity-60"
+          className="min-h-32 rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-amber-300 hover:bg-amber-50 disabled:cursor-wait disabled:opacity-60"
         >
           <span className="text-xl" aria-hidden="true">⇩</span>
           <span className="mt-2 block text-sm font-semibold text-slate-900">{controlBusy === "update" ? "확인 중…" : "업데이트 확인"}</span>
@@ -397,8 +511,8 @@ export default function SessionStatus() {
         </p>
       ) : null}
 
-      <div className="mt-4 grid gap-3 lg:grid-cols-2">
-        <div className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+      <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(320px,1fr))] gap-3">
+        <div className="flex min-h-40 items-start justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-4">
           <div className="flex items-start gap-3">
             <div className={`mt-1 h-3 w-3 shrink-0 rounded-full ${loading ? "bg-slate-400" : getStatusDotClass(naver)}`} />
             <div>
@@ -425,11 +539,57 @@ export default function SessionStatus() {
           </div>
           <button type="button" onClick={() => void fetchSession()} className="shrink-0 text-xs font-medium text-slate-600 underline underline-offset-2">상태 확인</button>
         </div>
-        <div className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
-          <div className="flex items-start gap-3">
+        <div className="flex min-h-40 items-start justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-4">
+          <div className="flex min-w-0 items-start gap-3">
+            <div className={`mt-1 h-3 w-3 shrink-0 rounded-full ${codex?.authenticated ? "bg-emerald-500" : codex?.installed ? "bg-amber-500" : "bg-red-500"}`} />
+            <div className="min-w-0">
+              <h3 className="font-medium text-slate-900">GPT 원고 작성</h3>
+              <p className="text-sm text-slate-600">{codex?.message || "상태 확인 중"}</p>
+              <p className="mt-1 text-xs text-slate-400">연결되면 별도 웹 로그인 확인 없이 백그라운드에서 글을 작성합니다.</p>
+              {codex?.error && !codex.authenticated ? <p className="mt-1 text-xs text-amber-700">{codex.error}</p> : null}
+              <button type="button" onClick={() => void connectCodex()} disabled={codexConnecting} className="mt-3 rounded-full bg-cyan-100 px-3 py-1.5 text-xs font-semibold text-cyan-800 hover:bg-cyan-200 disabled:opacity-60">
+                {codexConnecting ? "연결 중…" : codex?.authenticated ? "GPT 연결됨" : "GPT 로그인"}
+              </button>
+            </div>
+          </div>
+          <button type="button" onClick={() => void fetchSettings()} className="shrink-0 text-xs font-medium text-slate-600 underline underline-offset-2">상태 확인</button>
+        </div>
+        {!codex?.authenticated ? <div className="flex min-h-40 items-start justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-4">
+          <div className="flex min-w-0 items-start gap-3">
+            <div className={`mt-1 h-3 w-3 shrink-0 rounded-full ${!browserAutomationEnabled ? "bg-slate-400" : loading ? "bg-slate-400" : getStatusDotClass(chatgpt)}`} />
+            <div className="min-w-0">
+              <h3 className="font-medium text-slate-900">웹 GPT 예비 연결</h3>
+              <p className="text-sm text-slate-600">
+                {!browserAutomationEnabled
+                  ? "요청문 전달 방식"
+                  : loading
+                    ? "상태 확인 중"
+                    : chatgpt?.isValid
+                      ? "자동작성 준비됨"
+                      : "웹 GPT 로그인 필요"}
+              </p>
+              <p className="mt-1 text-xs text-slate-400">평소에는 백그라운드로 작성하고, 로그인·보안 확인이 필요할 때만 창을 엽니다.</p>
+              {browserAutomationEnabled && chatgpt?.error ? <p className="mt-1 text-xs text-amber-700">{chatgpt.error}</p> : null}
+              <button
+                type="button"
+                role="switch"
+                aria-checked={browserAutomationEnabled}
+                onClick={() => void saveBrowserAutomation(!browserAutomationEnabled)}
+                disabled={savingBrowserMode}
+                className={`mt-3 inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold transition disabled:opacity-60 ${browserAutomationEnabled ? "bg-violet-100 text-violet-700 hover:bg-violet-200" : "bg-slate-200 text-slate-600 hover:bg-slate-300"}`}
+              >
+                <span className={`h-2 w-2 rounded-full ${browserAutomationEnabled ? "bg-violet-600" : "bg-slate-500"}`} />
+                {savingBrowserMode ? "저장 중…" : browserAutomationEnabled ? "백그라운드 자동작성 켜짐" : "웹 자동작성 꺼짐"}
+              </button>
+            </div>
+          </div>
+          <button type="button" onClick={() => void fetchSession()} className="shrink-0 text-xs font-medium text-slate-600 underline underline-offset-2">상태 확인</button>
+        </div> : null}
+        <div className="flex min-h-40 items-start justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50/60 p-4">
+          <div className="flex min-w-0 items-start gap-3">
             <div className={`mt-1 h-3 w-3 shrink-0 rounded-full ${updateStatusDotClass(update)}`} />
-            <div>
-              <h3 className="font-medium text-slate-900">프로그램 자동 업데이트{update?.currentVersion ? ` · v${update.currentVersion}` : ""}</h3>
+            <div className="min-w-0">
+              <h3 className="break-keep font-medium text-slate-900">프로그램 자동 업데이트{update?.currentVersion ? ` · v${update.currentVersion}` : ""}</h3>
               <p className="text-sm text-slate-600">{updateStatusText(update)}</p>
               <p className="mt-1 text-xs text-slate-400">포스팅 작업 중에는 설치를 기다렸다가 안전할 때 자동 재시작합니다.</p>
               {update?.error ? <p className="mt-1 break-all text-xs text-amber-700">{update.error}</p> : null}

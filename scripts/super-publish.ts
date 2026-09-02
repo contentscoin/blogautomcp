@@ -4,6 +4,10 @@ import { spawnSync } from "child_process";
 import { PrismaClient } from "../src/generated/prisma";
 import { parseConnectKind, type ConnectKind } from "../src/lib/brandconnect-kind";
 import {
+  buildChatGptBrowserAutomationEnv,
+  isChatGptBrowserAutomationEnabled,
+} from "../src/lib/chatgpt-browser-automation";
+import {
   buildAppUrl,
   notifyAndLogCompletion,
   type CompletionLink,
@@ -172,16 +176,13 @@ function runScript(scriptName: string, args: string[]): PhaseResult {
       env: {
         ...process.env,
         AI_PROVIDER: AGENT_AI_PROVIDER,
-        BROWSER_GPT_MODE: "false",
-        ALLOW_CHATGPT_BROWSER_MODE: "false",
-        CHATGPT_USE_CUSTOM_GPTS: "false",
-        CHATGPT_DIRECT_ONLY: "true",
-        CHATGPT_SKIP_POLISH: "true",
+        ...buildChatGptBrowserAutomationEnv(isChatGptBrowserAutomationEnabled()),
         HUMAN_MOBILE_POLISH_ENABLED: "true",
-        PRODUCT_POST_LOCAL_FALLBACK_ENABLED: "true",
-        PRODUCT_THUMBNAIL_CHATGPT_ENABLED: "false",
-        PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE: "false",
-        PRODUCT_THUMBNAIL_CHATGPT_BASE_FALLBACK_ENABLED: "false",
+        PRODUCT_THUMBNAIL_CHATGPT_ENABLED: process.env.PRODUCT_THUMBNAIL_CHATGPT_ENABLED || "false",
+        PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE:
+          process.env.PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE || "false",
+        PRODUCT_THUMBNAIL_CHATGPT_BASE_FALLBACK_ENABLED:
+          process.env.PRODUCT_THUMBNAIL_CHATGPT_BASE_FALLBACK_ENABLED || "false",
         PRODUCT_THUMBNAIL_IMAGE_WAIT_MS:
           process.env.PRODUCT_THUMBNAIL_IMAGE_WAIT_MS || "60000",
         PRODUCT_THUMBNAIL_COMPOSITE_FALLBACK_ENABLED:

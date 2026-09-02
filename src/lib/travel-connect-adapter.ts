@@ -23,6 +23,7 @@ import {
   readStoredConnectContract,
   writeStoredConnectContract,
   type StoredConnectContract,
+  type StoredConnectFeed,
 } from "./connect-contract-store";
 import { buildCookieHeaderForHost, getNaverSessionFile } from "./naver-session";
 
@@ -112,10 +113,11 @@ export function isValidConnectUrl(raw: string): boolean {
 
 /** 목록 크기를 뜻하는 쿼리 파라미터. 재조회 때 더 많이 받아오는 데 쓴다. */
 const LIMIT_QUERY_KEYS = new Set(["limit", "size", "pagesize", "count", "perpage", "rows"]);
+const CONTRACT_FETCH_CONCURRENCY = 4;
 
-function buildContractRequestUrl(contract: StoredConnectContract, limit: number): string {
-  const url = new URL(contract.listEndpoint);
-  for (const [key, value] of Object.entries(contract.listQuery)) {
+function buildContractRequestUrl(feed: StoredConnectFeed, limit: number): string {
+  const url = new URL(feed.listEndpoint);
+  for (const [key, value] of Object.entries(feed.listQuery)) {
     const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
     if (LIMIT_QUERY_KEYS.has(normalized)) {
       const captured = Number.parseInt(value, 10);
@@ -128,13 +130,83 @@ function buildContractRequestUrl(contract: StoredConnectContract, limit: number)
   return url.toString();
 }
 
-/** 저장된 계약으로 목록을 바로 가져온다. 실패하면 null(호출자가 재탐색으로 넘어간다). */
-export async function listItemsViaContract(
+function toLegacyFeed(contract: StoredConnectContract): StoredConnectFeed {
+  return {
+    listEndpoint: contract.listEndpoint,
+    listQuery: contract.listQuery,
+    itemsPath: contract.itemsPath,
+    fieldMap: contract.fieldMap,
+    sampleCount: contract.sampleCount,
+  };
+}
+
+function stableQueryKey(query: Record<string, string>): string {
+  return Object.entries(query)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("&");
+}
+
+function feedIdentity(feed: StoredConnectFeed): string {
+  return `${feed.listEndpoint}?${stableQueryKey(feed.listQuery)}#${feed.itemsPath}`;
+}
+
+function contractFeeds(contract: StoredConnectContract): StoredConnectFeed[] {
+  const feeds = contract.feeds?.length ? contract.feeds : [toLegacyFeed(contract)];
+  return Array.from(new Map(feeds.map((feed) => [feedIdentity(feed), feed])).values());
+}
+
+function normalizedItemUrl(value: string | null): string {
+  if (!value) return "";
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return value.trim();
+  }
+}
+
+function connectItemIdentity(item: ConnectItem): string {
+  const id = item.externalItemId?.trim();
+  if (id) return `id:${id}`;
+  const link = normalizedItemUrl(item.linkUrl);
+  if (link) return `url:${link}`;
+  return `name:${item.name.replace(/\s+/g, " ").trim().toLowerCase()}|${item.storeName
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase()}`;
+}
+
+function itemRichness(item: ConnectItem): number {
+  return (
+    (item.externalItemId ? 4 : 0) +
+    (item.linkUrl ? 3 : 0) +
+    (item.imageUrl ? 2 : 0) +
+    (item.price > 0 ? 2 : 0) +
+    (item.storeName ? 1 : 0) +
+    Object.keys(item.raw).length / 100
+  );
+}
+
+/** 여러 추천 피드에서 같은 상품을 하나로 합치되 정보가 더 풍부한 행을 보존한다. */
+export function mergeConnectItems(groups: ConnectItem[][]): ConnectItem[] {
+  const merged = new Map<string, ConnectItem>();
+  for (const item of groups.flat()) {
+    const key = connectItemIdentity(item);
+    const previous = merged.get(key);
+    if (!previous || itemRichness(item) > itemRichness(previous)) merged.set(key, item);
+  }
+  return Array.from(merged.values());
+}
+
+async function fetchContractFeed(
   contract: StoredConnectContract,
-  options: { limit?: number; storageStatePath?: string } = {}
+  feed: StoredConnectFeed,
+  storageStatePath: string,
+  limit: number
 ): Promise<ConnectItem[] | null> {
-  const storageStatePath = options.storageStatePath || getNaverSessionFile();
-  const requestUrl = buildContractRequestUrl(contract, options.limit ?? 60);
+  const requestUrl = buildContractRequestUrl(feed, limit);
   const endpointHost = new URL(requestUrl).hostname;
 
   let cookieHeader = "";
@@ -165,10 +237,34 @@ export async function listItemsViaContract(
   const payload: unknown = await response.json().catch(() => null);
   if (payload === null) return null;
 
-  const rows = readArrayAtPath(payload, contract.itemsPath);
+  const rows = readArrayAtPath(payload, feed.itemsPath);
   if (!rows || rows.length === 0) return null;
+  const items = normalizeConnectItems(rows, feed.fieldMap);
+  return items.length > 0 ? items : null;
+}
 
-  const items = normalizeConnectItems(rows, contract.fieldMap);
+/** 저장된 계약으로 목록을 바로 가져온다. 실패하면 null(호출자가 재탐색으로 넘어간다). */
+export async function listItemsViaContract(
+  contract: StoredConnectContract,
+  options: { limit?: number; storageStatePath?: string } = {}
+): Promise<ConnectItem[] | null> {
+  const storageStatePath = options.storageStatePath || getNaverSessionFile();
+  const feeds = contractFeeds(contract);
+  const groups: ConnectItem[][] = [];
+  const limit = options.limit ?? 60;
+
+  // 한 피드 실패 때문에 나머지 정상 추천 구간까지 버리지 않는다. 인증 만료만 즉시 전파한다.
+  for (let index = 0; index < feeds.length; index += CONTRACT_FETCH_CONCURRENCY) {
+    const batch = feeds.slice(index, index + CONTRACT_FETCH_CONCURRENCY);
+    const results = await Promise.all(
+      batch.map((feed) => fetchContractFeed(contract, feed, storageStatePath, limit))
+    );
+    for (const items of results) {
+      if (items?.length) groups.push(items);
+    }
+  }
+
+  const items = mergeConnectItems(groups);
   return items.length > 0 ? items : null;
 }
 
@@ -177,6 +273,7 @@ interface DiscoveryOptions {
   categoryUrl?: string | null;
   storageStatePath?: string;
   headless?: boolean;
+  limit?: number;
 }
 
 /**
@@ -281,8 +378,8 @@ export async function discoverConnectContract(options: DiscoveryOptions): Promis
     await browser.close().catch(() => {});
   }
 
-  const best = pickBestListResponse(captured, options.kind);
-  if (!best) {
+  const discoveredFeeds = buildMultiFeedListDiscovery(captured, options.kind);
+  if (!discoveredFeeds) {
     throw new ConnectContractNotFoundError(
       captured.length === 0
         ? "여행커넥트 화면에서 JSON 응답을 찾지 못했습니다. 목록 URL과 로그인 상태를 확인하세요."
@@ -290,6 +387,7 @@ export async function discoverConnectContract(options: DiscoveryOptions): Promis
     );
   }
 
+  const best = discoveredFeeds.primary;
   const contract: StoredConnectContract = {
     kind: options.kind,
     capturedAt: new Date().toISOString(),
@@ -298,20 +396,44 @@ export async function discoverConnectContract(options: DiscoveryOptions): Promis
     itemsPath: best.itemsPath,
     fieldMap: best.fieldMap,
     sourceUrl: finalUrl,
-    sampleCount: best.items.length,
+    sampleCount: discoveredFeeds.items.length,
+    feeds: discoveredFeeds.feeds,
   };
+
+  // 화면에서 자동 호출된 기본 탭뿐 아니라 recommend-tabs에서 관측한 모든
+  // section/tab 조합을 직접 조회해 전체 상품군을 한 번에 계약에 반영한다.
+  const expandedItems = await listItemsViaContract(contract, {
+    limit: options.limit,
+    storageStatePath,
+  }).catch((error) => {
+    if (error instanceof ConnectSessionExpiredError) throw error;
+    return null;
+  });
+  const items = expandedItems?.length ? expandedItems : discoveredFeeds.items;
+  contract.sampleCount = items.length;
   writeStoredConnectContract(contract);
 
-  return { contract, items: best.items, profiles: dedupeProfiles(profiles), finalUrl };
+  return { contract, items, profiles: dedupeProfiles(profiles), finalUrl };
 }
 
-interface BestListResponse {
+export interface BestListResponse {
   endpoint: string;
   query: Record<string, string>;
   itemsPath: string;
   fieldMap: NonNullable<ReturnType<typeof detectFieldMap>>;
   items: ConnectItem[];
   score: number;
+}
+
+interface RecommendationTabPair {
+  section: string;
+  tabId: string;
+}
+
+export interface MultiFeedListDiscovery {
+  primary: BestListResponse;
+  feeds: StoredConnectFeed[];
+  items: ConnectItem[];
 }
 
 /** 가로챈 응답들 중 목록으로 가장 그럴듯한 하나를 고른다. */
@@ -348,43 +470,188 @@ function scoreConnectKindAffinity(
   return pathname.includes("/affiliate-products/") ? 40 : 0;
 }
 
+function bestListResponseForEntry(
+  entry: { url: string; payload: unknown },
+  kind: ConnectKind
+): BestListResponse | null {
+  let url: URL;
+  try {
+    url = new URL(entry.url);
+  } catch {
+    return null;
+  }
+
+  let best: BestListResponse | null = null;
+  for (const candidate of findItemArrays(entry.payload).slice(0, 3)) {
+    if (candidate.rows.length < MIN_DISCOVERED_ITEMS) continue;
+    const fieldMap = detectFieldMap(candidate.rows);
+    if (!fieldMap) continue;
+    const items = normalizeConnectItems(candidate.rows, fieldMap);
+    if (items.length < MIN_DISCOVERED_ITEMS) continue;
+
+    const score = candidate.score + items.length + scoreConnectKindAffinity(kind, url, candidate.rows);
+    if (best && score <= best.score) continue;
+    best = {
+      endpoint: `${url.origin}${url.pathname}`,
+      query: Object.fromEntries(url.searchParams.entries()),
+      itemsPath: candidate.path,
+      fieldMap,
+      items,
+      score,
+    };
+  }
+  return best;
+}
+
+/** 응답마다 가장 가능성 높은 상품 배열 하나만 남긴다. 필터 탭 배열의 오인을 줄인다. */
+export function collectListResponses(
+  captured: Array<{ url: string; payload: unknown }>,
+  kind: ConnectKind
+): BestListResponse[] {
+  return captured
+    .map((entry) => bestListResponseForEntry(entry, kind))
+    .filter((entry): entry is BestListResponse => entry !== null);
+}
+
 /** 같은 화면에 쇼핑·여행 응답이 함께 있어도 요청한 커넥트 종류를 우선한다. */
 export function pickBestListResponse(
   captured: Array<{ url: string; payload: unknown }>,
   kind: ConnectKind
 ): BestListResponse | null {
-  let best: BestListResponse | null = null;
+  return collectListResponses(captured, kind).reduce<BestListResponse | null>(
+    (best, candidate) => (!best || candidate.score > best.score ? candidate : best),
+    null
+  );
+}
 
-  for (const entry of captured) {
-    let url: URL;
-    try {
-      url = new URL(entry.url);
-    } catch {
-      continue;
+function stringValueByNormalizedKey(
+  value: Record<string, unknown>,
+  expected: string
+): string | null {
+  for (const [key, entry] of Object.entries(value)) {
+    if (key.toLowerCase().replace(/[^a-z0-9]/g, "") !== expected) continue;
+    return typeof entry === "string" && entry.trim() ? entry.trim() : null;
+  }
+  return null;
+}
+
+function arrayValueByNormalizedKey(
+  value: Record<string, unknown>,
+  expected: string
+): unknown[] | null {
+  for (const [key, entry] of Object.entries(value)) {
+    if (key.toLowerCase().replace(/[^a-z0-9]/g, "") !== expected) continue;
+    return Array.isArray(entry) ? entry : null;
+  }
+  return null;
+}
+
+/** recommend-tabs 응답에서 개인정보 값 없이 section/tabId 계약만 추출한다. */
+export function extractRecommendationTabPairs(payloads: unknown[]): RecommendationTabPair[] {
+  const pairs = new Map<string, RecommendationTabPair>();
+
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > 7 || value === null || value === undefined) return;
+    if (Array.isArray(value)) {
+      for (const entry of value) visit(entry, depth + 1);
+      return;
     }
+    if (typeof value !== "object") return;
+    const record = value as Record<string, unknown>;
+    const section = stringValueByNormalizedKey(record, "section");
+    const tabs = arrayValueByNormalizedKey(record, "tabs");
+    if (section && tabs) {
+      for (const tab of tabs) {
+        if (typeof tab !== "object" || tab === null || Array.isArray(tab)) continue;
+        const tabId = stringValueByNormalizedKey(tab as Record<string, unknown>, "tabid");
+        if (!tabId) continue;
+        pairs.set(`${section}\u0000${tabId}`, { section, tabId });
+      }
+    }
+    for (const entry of Object.values(record)) visit(entry, depth + 1);
+  };
 
-    for (const candidate of findItemArrays(entry.payload).slice(0, 3)) {
-      if (candidate.rows.length < MIN_DISCOVERED_ITEMS) continue;
-      const fieldMap = detectFieldMap(candidate.rows);
-      if (!fieldMap) continue;
-      const items = normalizeConnectItems(candidate.rows, fieldMap);
-      if (items.length < MIN_DISCOVERED_ITEMS) continue;
+  for (const payload of payloads) visit(payload, 0);
+  return Array.from(pairs.values());
+}
 
-      const score = candidate.score + items.length + scoreConnectKindAffinity(kind, url, candidate.rows);
-      if (best && score <= best.score) continue;
+function queryKey(query: Record<string, string>, expected: string): string | null {
+  return (
+    Object.keys(query).find(
+      (key) => key.toLowerCase().replace(/[^a-z0-9]/g, "") === expected
+    ) || null
+  );
+}
 
-      best = {
-        endpoint: `${url.origin}${url.pathname}`,
-        query: Object.fromEntries(url.searchParams.entries()),
-        itemsPath: candidate.path,
-        fieldMap,
-        items,
-        score,
-      };
+function queryValue(query: Record<string, string>, expected: string): string | null {
+  const key = queryKey(query, expected);
+  return key ? query[key] || null : null;
+}
+
+function responseToFeed(response: BestListResponse): StoredConnectFeed {
+  return {
+    listEndpoint: response.endpoint,
+    listQuery: response.query,
+    itemsPath: response.itemsPath,
+    fieldMap: response.fieldMap,
+    sampleCount: response.items.length,
+  };
+}
+
+/**
+ * 상품 응답과 탭 계약을 합쳐 재사용 가능한 다중 피드 계약을 만든다.
+ * 탭 API가 없는 커넥트도 관측된 상품 응답 피드들을 그대로 보존한다.
+ */
+export function buildMultiFeedListDiscovery(
+  captured: Array<{ url: string; payload: unknown }>,
+  kind: ConnectKind
+): MultiFeedListDiscovery | null {
+  const responses = collectListResponses(captured, kind);
+  const primary = responses.reduce<BestListResponse | null>(
+    (best, candidate) => (!best || candidate.score > best.score ? candidate : best),
+    null
+  );
+  if (!primary) return null;
+
+  // 필터 목록 등 다른 응답 계약이 섞이지 않도록 최상위 상품 엔드포인트와 같은 응답만 합친다.
+  const productResponses = responses.filter(
+    (response) => response.endpoint === primary.endpoint && response.itemsPath === primary.itemsPath
+  );
+  const observedFeeds = productResponses.map(responseToFeed);
+  const expandedFeeds: StoredConnectFeed[] = [];
+
+  if (kind === "travel") {
+    const pairs = extractRecommendationTabPairs(captured.map((entry) => entry.payload));
+    for (const pair of pairs) {
+      const sameSection = productResponses.find(
+        (response) => queryValue(response.query, "section") === pair.section
+      );
+      const template = sameSection || primary;
+      const sectionKey = queryKey(template.query, "section");
+      const tabIdKey = queryKey(template.query, "tabid");
+      if (!sectionKey || !tabIdKey) continue;
+      expandedFeeds.push({
+        listEndpoint: template.endpoint,
+        listQuery: {
+          ...template.query,
+          [sectionKey]: pair.section,
+          [tabIdKey]: pair.tabId,
+        },
+        itemsPath: template.itemsPath,
+        fieldMap: template.fieldMap,
+        sampleCount: 0,
+      });
     }
   }
 
-  return best;
+  const feeds = Array.from(
+    new Map([...observedFeeds, ...expandedFeeds].map((feed) => [feedIdentity(feed), feed])).values()
+  );
+  return {
+    primary,
+    feeds: feeds.length > 0 ? feeds : [responseToFeed(primary)],
+    items: mergeConnectItems(productResponses.map((response) => response.items)),
+  };
 }
 
 function dedupeProfiles(profiles: ResponseProfile[]): ResponseProfile[] {
@@ -413,7 +680,9 @@ export async function listTravelItems(
   } = {}
 ): Promise<ListTravelItemsResult> {
   const stored = readStoredConnectContract("travel");
-  if (stored) {
+  // v1 단일 피드 계약은 정상 응답을 주더라도 전체 목록을 놓친다. 자동 탐색이 허용된
+  // 호출에서는 한 번 재캡처해 v2 다중 피드 계약으로 마이그레이션한다.
+  if (stored && (stored.feeds?.length || options.allowDiscovery === false)) {
     const items = await listItemsViaContract(stored, {
       limit: options.limit,
       storageStatePath: options.storageStatePath,
@@ -433,6 +702,7 @@ export async function listTravelItems(
     kind: "travel",
     categoryUrl: options.categoryUrl,
     storageStatePath: options.storageStatePath,
+    limit: options.limit,
   });
   return { items: discovered.items, contract: discovered.contract, source: "discovery" };
 }

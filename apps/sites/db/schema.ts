@@ -21,6 +21,39 @@ export const mcpConnections = sqliteTable('mcp_connections', {
   rotatedAt: integer('rotated_at'),
 }, (table) => [uniqueIndex('idx_mcp_connections_user').on(table.userId), uniqueIndex('idx_mcp_connections_endpoint').on(table.endpointId)]);
 
+export const oauthAuthorizationCodes = sqliteTable('oauth_authorization_codes', {
+  codeHash: text('code_hash').primaryKey(),
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  clientId: text('client_id').notNull(),
+  redirectUri: text('redirect_uri').notNull(),
+  resource: text('resource').notNull(),
+  scope: text('scope').notNull(),
+  codeChallenge: text('code_challenge').notNull(),
+  expiresAt: integer('expires_at').notNull(),
+  createdAt: integer('created_at').notNull(),
+  consumedAt: integer('consumed_at'),
+}, (table) => [index('idx_oauth_codes_user_expires').on(table.userId, table.expiresAt)]);
+
+export const oauthTokens = sqliteTable('oauth_tokens', {
+  id: text('id').primaryKey(),
+  accessTokenHash: text('access_token_hash').notNull(),
+  refreshTokenHash: text('refresh_token_hash'),
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  clientId: text('client_id').notNull(),
+  resource: text('resource').notNull(),
+  scope: text('scope').notNull(),
+  status: text('status').notNull().default('ACTIVE'),
+  accessExpiresAt: integer('access_expires_at').notNull(),
+  refreshExpiresAt: integer('refresh_expires_at'),
+  createdAt: integer('created_at').notNull(),
+  rotatedAt: integer('rotated_at'),
+  revokedAt: integer('revoked_at'),
+}, (table) => [
+  uniqueIndex('idx_oauth_tokens_access').on(table.accessTokenHash),
+  uniqueIndex('idx_oauth_tokens_refresh').on(table.refreshTokenHash),
+  index('idx_oauth_tokens_user_status').on(table.userId, table.status),
+]);
+
 export const devices = sqliteTable('devices', {
   id: text('id').primaryKey(),
   userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),

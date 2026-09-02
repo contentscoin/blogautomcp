@@ -113,7 +113,7 @@ interface PlannedProduct extends CandidateProduct {
 }
 
 interface RegisterResult {
-  action: "created" | "skipped" | "duplicate" | "failed";
+  action: "created" | "updated" | "skipped" | "duplicate" | "failed";
   productId: number;
   productName: string;
   shortUrl: string | null;
@@ -1340,11 +1340,16 @@ async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient
 
   const { items, contract, source } = await listTravelItems({
     categoryUrl: travelCategoryUrl,
-    limit: Math.min(100, Math.max(options.count * 4, 40)),
+    // 여러 추천 section/tab을 합친 뒤에도 필터·기등록 상품을 건너뛸 후보가
+    // 충분해야 한다. 수퍼 퍼블리싱 200개 요청을 100개에서 잘라버리지 않는다.
+    limit: Math.min(800, Math.max(options.count * 4, 40)),
     storageStatePath: options.storageStatePath,
     allowDiscovery: true,
   });
-  console.log(`✅ 여행 상품 수집: ${items.length}개 (${source === "contract" ? "저장된 계약" : "실시간 재탐색"})`);
+  console.log(
+    `✅ 여행 상품 수집: ${items.length}개 / 피드 ${contract.feeds?.length || 1}개 ` +
+    `(${source === "contract" ? "저장된 계약" : "실시간 재탐색"})`
+  );
   const selectedItems = items.filter((item) =>
     matchesTravelSelectionFilters(item, options.categoryFilter, options.promotionFilter)
   );
@@ -1356,6 +1361,7 @@ async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient
 
   const existingBrandLinks = await prisma.brandLink.findMany({
     where: { connectKind: toStoredConnectKind("travel") },
+    orderBy: { updatedAt: "asc" },
     select: {
       id: true,
       url: true,
@@ -1443,6 +1449,9 @@ async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient
             productPrice: item.price > 0 ? formatPrice(item.price) : existingItem.productPrice,
             imageUrls: item.imageUrl ? JSON.stringify([item.imageUrl]) : existingItem.imageUrls,
             categoryNo: existingItem.categoryNo || categoryNo,
+            ...(existingItem.status === "FAILED"
+              ? { status: "READY", errorMessage: null }
+              : {}),
           },
         });
       }
@@ -1451,7 +1460,11 @@ async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient
         productName: item.name,
         url: existingItem.url,
         scheduledDate,
-        reason: options.dryRun ? "기존 상품 최신화 대상 (dry-run)" : "기존 상품 정보 최신화",
+        reason: options.dryRun
+          ? "기존 상품 최신화 대상 (dry-run)"
+          : existingItem.status === "FAILED"
+            ? "이전 실패 상품을 READY로 복구하고 정보 최신화"
+            : "기존 상품 정보 최신화",
         linkId: existingItem.id,
       });
       successCount += 1;
@@ -1484,7 +1497,43 @@ async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient
       results.push({ action: "duplicate", productName: item.name, url: linkUrl, scheduledDate, reason: "배치 내 URL 중복" });
       continue;
     }
-    const existing = await prisma.brandLink.findFirst({ where: { url: linkUrl } });
+    const existing = await prisma.brandLink.findFirst({
+      where: { url: linkUrl },
+      orderBy: { updatedAt: "desc" },
+    });
+    if (existing?.status === "FAILED") {
+      if (!options.dryRun) {
+        await prisma.brandLink.update({
+          where: { id: existing.id },
+          data: {
+            connectKind: toStoredConnectKind("travel"),
+            externalItemId: item.externalItemId || existing.externalItemId,
+            sourceUrl: item.linkUrl || existing.sourceUrl || contract.sourceUrl,
+            memo: `[여행커넥트 자동등록] ${item.storeName || ""}`.trim(),
+            categoryNo: existing.categoryNo || categoryNo,
+            useSectionHeading: true,
+            status: "READY",
+            errorMessage: null,
+            productName: item.name,
+            storeName: item.storeName || existing.storeName,
+            productPrice: item.price > 0 ? formatPrice(item.price) : existing.productPrice,
+            imageUrls: item.imageUrl ? JSON.stringify([item.imageUrl]) : existing.imageUrls,
+            scheduledPublishAt: new Date(`${scheduledDate}T00:00:00.000Z`),
+          },
+        });
+      }
+      results.push({
+        action: "updated",
+        productName: item.name,
+        url: linkUrl,
+        scheduledDate,
+        reason: options.dryRun ? "이전 실패 링크 복구 대상 (dry-run)" : "이전 실패 링크를 READY로 복구",
+        linkId: existing.id,
+      });
+      createdUrls.add(normalizedUrl);
+      successCount += 1;
+      continue;
+    }
     if (existing && shouldBlockDuplicateBrandLink(existing, duplicateReferenceNow, options.duplicateWindowDays)) {
       results.push({
         action: "duplicate",
@@ -1840,7 +1889,46 @@ async function main() {
       continue;
     }
 
-    const existing = await prisma.brandLink.findFirst({ where: { url: shortUrl } });
+    const existing = await prisma.brandLink.findFirst({
+      where: { url: shortUrl },
+      orderBy: { updatedAt: "desc" },
+    });
+    if (existing?.status === "FAILED") {
+      if (!options.dryRun) {
+        await prisma.brandLink.update({
+          where: { id: existing.id },
+          data: {
+            connectKind: toStoredConnectKind(options.connectKind),
+            externalItemId: String(item.id),
+            sourceUrl: options.categoryUrl,
+            memo: buildMemo(plannedItem),
+            categoryNo: existing.categoryNo || plannedItem.categoryNo,
+            useSectionHeading: true,
+            status: "READY",
+            errorMessage: null,
+            productName: item.productName,
+            storeName: item.storeName || existing.storeName,
+            productPrice: formatPrice(item.discountedSalePrice || item.salePrice),
+            scheduledPublishAt: new Date(`${plannedItem.scheduledDate}T00:00:00.000Z`),
+          },
+        });
+      }
+      results.push({
+        action: "updated",
+        productId: item.id,
+        productName: item.productName,
+        shortUrl,
+        categoryNo: existing.categoryNo || plannedItem.categoryNo,
+        boardName: plannedItem.boardName,
+        scheduledDate: plannedItem.scheduledDate,
+        reason: options.dryRun ? "이전 실패 링크 복구 대상 (dry-run)" : "이전 실패 링크를 READY로 복구",
+        linkId: existing.id,
+      });
+      console.log(`   ♻️ 이전 실패 링크를 READY로 복구 (${existing.id})`);
+      createdUrls.add(normalizedShortUrl);
+      successfulRegisterCount += 1;
+      continue;
+    }
     if (
       existing &&
       shouldBlockDuplicateBrandLink(existing, duplicateReferenceNow, options.duplicateWindowDays)
@@ -1958,6 +2046,7 @@ async function main() {
   );
 
   const createdCount = results.filter((item) => item.action === "created").length;
+  const updatedCount = results.filter((item) => item.action === "updated").length;
   const skippedCount = results.filter((item) => item.action === "skipped").length;
   const duplicateCount = results.filter((item) => item.action === "duplicate").length;
   const failedCount = results.filter((item) => item.action === "failed").length;
@@ -1965,6 +2054,7 @@ async function main() {
   console.log("\n" + "=".repeat(70));
   console.log("✅ 시즌·히트·인기 링크 등록 작업 완료");
   console.log(`- 생성: ${createdCount}`);
+  console.log(`- 복구·최신화: ${updatedCount}`);
   console.log(`- 스킵: ${skippedCount}`);
   if (duplicateCount > 0) {
     console.log(`- 중복: ${duplicateCount}`);
@@ -1977,8 +2067,8 @@ async function main() {
     await notifyAndLogCompletion({
       taskType: "brandconnect.seasonal.register",
       title: "시즌·히트·인기 상품 등록 완료",
-      summary: `신규 ${createdCount}건, 중복 건너뜀 ${duplicateCount}건, 실패 ${failedCount}건`,
-      successCount: createdCount,
+      summary: `신규 ${createdCount}건, 복구·최신화 ${updatedCount}건, 중복 건너뜀 ${duplicateCount}건, 실패 ${failedCount}건`,
+      successCount: createdCount + updatedCount,
       failedCount,
       links: results.map((item) => ({
         label: item.productName,
@@ -1989,6 +2079,7 @@ async function main() {
       })),
       extra: {
         createdCount,
+        updatedCount,
         skippedCount,
         duplicateCount,
         failedCount,

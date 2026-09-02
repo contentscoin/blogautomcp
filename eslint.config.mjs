@@ -5,6 +5,21 @@ import nextTs from "eslint-config-next/typescript";
 const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
+  {
+    files: [
+      "fix-editor.js",
+      "fix-openai.js",
+      "fix-topic-agent.js",
+      "print-env.js",
+      "update-content.js",
+      "update-main.js",
+      "update-topic-agent.js",
+    ],
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
+      "@typescript-eslint/no-unused-vars": "off",
+    },
+  },
   // Override default ignores of eslint-config-next.
   globalIgnores([
     // Default ignores of eslint-config-next:
@@ -12,6 +27,7 @@ const eslintConfig = defineConfig([
     "**/.next/**",
     "out/**",
     "build/**",
+    "apps/sites/dist/**",
     "**/src/generated/**",
     "**/tsconfig.tsbuildinfo",
     "next-env.d.ts",

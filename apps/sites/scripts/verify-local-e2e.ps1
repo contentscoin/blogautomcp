@@ -22,7 +22,11 @@ if (-not $mcpUrl.StartsWith("$BaseUrl/api/mcp/")) { throw 'MCP URL origin or pat
 $initialize = Invoke-Mcp -Url $mcpUrl -Message @{ jsonrpc = '2.0'; id = 1; method = 'initialize'; params = @{ protocolVersion = '2025-11-25'; capabilities = @{}; clientInfo = @{ name = 'sites-e2e'; version = '1.0' } } }
 if ($initialize.result.protocolVersion -ne '2025-11-25') { throw 'MCP protocol negotiation failed.' }
 $tools = Invoke-Mcp -Url $mcpUrl -Message @{ jsonrpc = '2.0'; id = 2; method = 'tools/list'; params = @{} }
-if (@($tools.result.tools).Count -ne 17) { throw 'Expected seventeen MCP tools.' }
+$expectedToolCount = 25
+if (@($tools.result.tools).Count -ne $expectedToolCount) { throw "Expected $expectedToolCount MCP tools." }
+$toolNames = @($tools.result.tools | ForEach-Object { [string]$_.name })
+if ($toolNames -notcontains 'post_prepare_draft' -or $toolNames -notcontains 'post_submit_draft') { throw 'Two-stage ChatGPT draft tools are missing.' }
+foreach ($required in @('post_create_draft','post_get_draft','post_revise_draft','post_approve_draft','post_set_thumbnail','post_verify_published','travel_capture_contract','settings_get','job_cancel')) { if ($toolNames -notcontains $required) { throw "MCP tool $required is missing." } }
 
 $modernProtocol = '2026-07-28'
 $modernMeta = @{
@@ -36,7 +40,7 @@ if ($discovery.result.resultType -ne 'complete' -or $discovery.result.supportedV
 
 $modernToolsHeaders = @{ Accept = 'application/json, text/event-stream'; 'MCP-Protocol-Version' = $modernProtocol; 'Mcp-Method' = 'tools/list' }
 $modernTools = Invoke-Mcp -Url $mcpUrl -Headers $modernToolsHeaders -Message @{ jsonrpc = '2.0'; id = 30; method = 'tools/list'; params = @{ _meta = $modernMeta } }
-if ($modernTools.result.resultType -ne 'complete' -or @($modernTools.result.tools).Count -ne 17 -or $modernTools.result.cacheScope -ne 'private') { throw 'Modern MCP tool discovery failed.' }
+if ($modernTools.result.resultType -ne 'complete' -or @($modernTools.result.tools).Count -ne $expectedToolCount -or $modernTools.result.cacheScope -ne 'private') { throw 'Modern MCP tool discovery failed.' }
 
 $modernStatusHeaders = @{ Accept = 'application/json, text/event-stream'; 'MCP-Protocol-Version' = $modernProtocol; 'Mcp-Method' = 'tools/call'; 'Mcp-Name' = 'agent_get_status' }
 $modernStatus = Invoke-Mcp -Url $mcpUrl -Headers $modernStatusHeaders -Message @{ jsonrpc = '2.0'; id = 31; method = 'tools/call'; params = @{ name = 'agent_get_status'; arguments = @{}; _meta = $modernMeta } }
@@ -84,6 +88,58 @@ if ($completed.data.status -ne 'SUCCEEDED') { throw 'The job completion was not 
 
 $jobResult = Invoke-Mcp -Url $mcpUrl -Message @{ jsonrpc = '2.0'; id = 4; method = 'tools/call'; params = @{ name = 'job_get'; arguments = @{ jobId = $jobId } } }
 if ($jobResult.result.structuredContent.job.status -ne 'SUCCEEDED') { throw 'MCP could not read the completed job.' }
+
+# OAuth MCP 초안은 PC 사실 수집 -> 현재 ChatGPT 원고 작성 -> PC 초안 제출의
+# 두 단계여야 한다. PC에서 OpenAI API를 다시 부르는 예전 계약으로 회귀하지 않도록
+# 실제 큐 입력과 contextJobId 결합을 검증한다.
+$draftProductId = 'product-e2e-shopping'
+$draftContextKey = 'e2e-draft-context:' + [guid]::NewGuid().ToString('N')
+$draftContextQueued = Invoke-Mcp -Url $mcpUrl -Message @{ jsonrpc = '2.0'; id = 41; method = 'tools/call'; params = @{ name = 'post_create_draft'; arguments = @{ connectKind = 'shopping'; productId = $draftProductId; qualityPreset = 'premium'; experienceMode = 'ai_assisted_information'; idempotencyKey = $draftContextKey } } }
+if (-not $draftContextQueued.result.structuredContent.ok) { throw 'Draft context job was not queued.' }
+$draftContextJobId = [string]$draftContextQueued.result.structuredContent.jobId
+$draftContextClaim = Invoke-RestMethod -Method Post -Uri "$BaseUrl/api/agent/jobs/claim" -Headers @{ Authorization = "Bearer $($secondPair.data.deviceToken)" } -ContentType 'application/json' -Body '{}'
+if ($draftContextClaim.data.id -ne $draftContextJobId -or $draftContextClaim.data.type -ne 'POST_PREPARE_DRAFT') { throw 'Draft context job type is invalid.' }
+$draftContextResult = @{
+  status = 'SUCCEEDED'
+  result = @{
+    version = 'brand-draft-context/v1'
+    productId = $draftProductId
+    connectKind = 'SHOPPING'
+    generation = @{ minimumSectionCount = 9; maximumSectionCount = 12 }
+  }
+} | ConvertTo-Json -Depth 10 -Compress
+Invoke-RestMethod -Method Post -Uri "$BaseUrl/api/agent/jobs/$draftContextJobId/complete" -Headers @{ Authorization = "Bearer $($secondPair.data.deviceToken)" } -ContentType 'application/json' -Body $draftContextResult | Out-Null
+
+$draftSections = @(1..9 | ForEach-Object {
+  "제품 판단 $_`n`n" + ("확인된 상품 사실을 바탕으로 제품의 장점과 한계를 구체적으로 해석합니다. 구매 목적과 사용 환경에 따라 적합도가 달라지며, 확인되지 않은 성능은 단정하지 않습니다. " * 3)
+})
+$draftSubmitKey = 'e2e-draft-submit:' + [guid]::NewGuid().ToString('N')
+$draftSubmitted = Invoke-Mcp -Url $mcpUrl -Message @{
+  jsonrpc = '2.0'
+  id = 42
+  method = 'tools/call'
+  params = @{
+    name = 'post_submit_draft'
+    arguments = @{
+      connectKind = 'shopping'
+      productId = $draftProductId
+      contextJobId = $draftContextJobId
+      draft = @{
+        title = '휴대용 선풍기 선택 기준과 제품 장단점'
+        sections = $draftSections
+        hashtags = @('휴대용선풍기', '선풍기추천', '제품비교')
+      }
+      idempotencyKey = $draftSubmitKey
+    }
+  }
+}
+if (-not $draftSubmitted.result.structuredContent.ok) { throw "ChatGPT draft submission was rejected: $($draftSubmitted.result.structuredContent.message)" }
+$draftSubmitJobId = [string]$draftSubmitted.result.structuredContent.jobId
+$draftSubmitClaim = Invoke-RestMethod -Method Post -Uri "$BaseUrl/api/agent/jobs/claim" -Headers @{ Authorization = "Bearer $($secondPair.data.deviceToken)" } -ContentType 'application/json' -Body '{}'
+if ($draftSubmitClaim.data.id -ne $draftSubmitJobId -or $draftSubmitClaim.data.type -ne 'POST_SUBMIT_DRAFT') { throw 'Submitted draft job type is invalid.' }
+if ($draftSubmitClaim.data.input.contextJobId -ne $draftContextJobId -or @($draftSubmitClaim.data.input.draft.sections).Count -ne 9) { throw 'Submitted ChatGPT draft payload was not preserved.' }
+$draftSubmitCompletion = @{ status = 'SUCCEEDED'; result = @{ draftId = $draftProductId; connectKind = 'shopping' } } | ConvertTo-Json -Depth 8 -Compress
+Invoke-RestMethod -Method Post -Uri "$BaseUrl/api/agent/jobs/$draftSubmitJobId/complete" -Headers @{ Authorization = "Bearer $($secondPair.data.deviceToken)" } -ContentType 'application/json' -Body $draftSubmitCompletion | Out-Null
 
 $rotated = Invoke-RestMethod -Method Post -Uri "$BaseUrl/api/mcp-connections" -Headers $browserHeaders -ContentType 'application/json' -Body '{"action":"rotate"}'
 $oldMcp = Invoke-WebRequest -SkipHttpErrorCheck -Method Post -Uri $mcpUrl -Headers $jsonHeaders -ContentType 'application/json' -Body '{"jsonrpc":"2.0","id":5,"method":"ping"}'
@@ -228,6 +284,8 @@ if ($verifiedRelease.data.release.version -ne $releaseVersion -or $verifiedRelea
   idempotentRetryReused = [bool]$reused.result.structuredContent.reused
   idempotencyConflictRejected = $conflict.result.structuredContent.code -eq 'IDEMPOTENCY_CONFLICT'
   travelJobLifecycle = [string]$jobResult.result.structuredContent.job.status
+  oauthDraftContextJob = [string]$draftContextClaim.data.type
+  oauthDraftSubmissionJob = [string]$draftSubmitClaim.data.type
   rotatedGeneration = [int]$rotated.data.generation
   oldMcpRevoked = $oldMcp.StatusCode -eq 401
   oldPcRevokedAfterRotation = $oldActiveDevice.StatusCode -eq 401

@@ -3,7 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
-import { createLockedProductThumbnail, extractLockedProductPng } from "./lib/product-image-lock";
+import {
+  createLockedProductEditorialScene,
+  createLockedProductThumbnail,
+  extractLockedProductPng,
+} from "./lib/product-image-lock";
 
 async function main() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "product-lock-"));
@@ -30,7 +34,21 @@ async function main() {
   assert.equal(manifest.rgbPreserved, true);
   const thumbnail = await createLockedProductThumbnail({ sourcePath, outputDir: dir, productName: "원본 잠금 테스트 상품", headline: "형태 그대로", subline: "배경만 연출" });
   assert.ok(fs.existsSync(thumbnail.outputPath));
-  console.log(JSON.stringify({ ok: true, rgbPreserved: true, confidence: manifest.confidence, thumbnail: thumbnail.outputPath }));
+  const backgroundPath = path.join(dir, "background.png");
+  await sharp({ create: { width: 1200, height: 900, channels: 4, background: "#dbeafe" } })
+    .png()
+    .toFile(backgroundPath);
+  const scene = await createLockedProductEditorialScene({
+    sourcePath,
+    backgroundPath,
+    outputDir: dir,
+    variant: 1,
+  });
+  assert.ok(fs.existsSync(scene.outputPath));
+  const sceneMetadata = await sharp(scene.outputPath).metadata();
+  assert.equal(sceneMetadata.width, 1200);
+  assert.equal(sceneMetadata.height, 900);
+  console.log(JSON.stringify({ ok: true, rgbPreserved: true, confidence: manifest.confidence, thumbnail: thumbnail.outputPath, scene: scene.outputPath }));
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1; });

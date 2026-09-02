@@ -1,4 +1,20 @@
-import { assessProductEditorialCoverage } from "./product-editorial-plan";
+import {
+  assessProductEditorialCoverage,
+  assessProductReviewSubstance,
+} from "./product-editorial-plan";
+import { assessTravelReviewSubstance } from "./travel-content";
+import type {
+  BrandConnectKind,
+  PostExperienceMode,
+  PostQualityReportV1,
+} from "../../src/lib/post-composition-contract";
+import { getPostCompositionContract } from "../../src/lib/post-composition-contract";
+
+export type PostGenerationSource =
+  | "AI"
+  | "PREPARED_APPROVED"
+  | "LOCAL_FALLBACK"
+  | "UNKNOWN";
 
 export interface BrandLinkContentReadinessInput {
   productName: string;
@@ -6,9 +22,16 @@ export interface BrandLinkContentReadinessInput {
   sections: string[];
   hashtags: string[];
   brandLink: string;
+  generationSource: PostGenerationSource;
   hasRepresentativeImage: boolean;
   requireRepresentativeImage?: boolean;
   thumbnailGenerated?: boolean;
+  connectKind?: BrandConnectKind;
+  experienceMode?: PostExperienceMode;
+  compositionQualityReport?: PostQualityReportV1 | null;
+  sourceDescription?: string | null;
+  sourceFeatures?: string[];
+  mode?: "publish" | "editorial";
 }
 
 export interface BrandLinkContentReadinessSignal {
@@ -30,7 +53,14 @@ export interface BrandLinkContentReadiness {
     | "unsupported-experience-claim"
     | "commission-rate-exposed"
     | "internal-guidance-leak"
-    | "missing-representative-image";
+    | "missing-review-substance"
+    | "low-evidence-density"
+    | "generic-guidance-heavy"
+    | "category-mismatch"
+    | "repetitive-content"
+    | "non-generative-fallback"
+    | "missing-representative-image"
+    | "composition-quality";
   reason: string | null;
   score: number;
   sectionCount: number;
@@ -66,7 +96,34 @@ export const UNSUPPORTED_EXPERIENCE_PATTERNS = [
   /택배\s*(?:도착|받아|열어|뜯어)/u,
   /재구매\s*(?:의사|하고|할|각)/u,
   /(?:강력\s*추천|후회\s*없는\s*선택|무조건\s*추천)/u,
+  /(?:직접\s*)?(?:다녀왔|방문했|묵어봤|먹어봤|걸어봤|찍어봤|탑승했)/u,
+  /(?:공항|숙소|호텔|여행지)에\s*도착하니/u,
 ] as const;
+
+const UNSUPPORTED_EXPERIENCE_TITLE_PATTERN = /(?:내돈내산|실사용|직접\s*(?:써본|다녀온)|솔직\s*후기|체험\s*후기)/u;
+
+function assessTravelEditorialCoverage(sections: string[]): {
+  coveredRoles: string[];
+  missingCoreRoles: string[];
+} {
+  const corpus = sections.join("\n");
+  const rolePatterns: Record<string, RegExp> = {
+    background: /역사|문화|유래|전통|건축|지형|유산/u,
+    atmosphere: /분위기|풍경|골목|거리|강변|해안|노을|야경|전망/u,
+    experience: /즐기|걷|산책|관람|사진|촬영|먹|맛보|체험|시장|카페/u,
+    preparation: /교통|이동|준비물|복장|신발|시간대|동선|예절/u,
+    route: /일정|하루|코스|동선|이동|방문지/u,
+  };
+  const coveredRoles = Object.entries(rolePatterns)
+    .filter(([, pattern]) => pattern.test(corpus))
+    .map(([role]) => role);
+  // 상품 검토 항목이 아니라 여행지를 이해하고 즐기는 데 필요한 핵심 역할을 본다.
+  const coreRoles = ["background", "atmosphere", "experience", "preparation"];
+  return {
+    coveredRoles,
+    missingCoreRoles: coreRoles.filter((role) => !coveredRoles.includes(role)),
+  };
+}
 
 export const COMMISSION_RATE_PATTERNS = [
   /(?:수수료|커미션|commission)\s*\d/iu,
@@ -131,8 +188,8 @@ function buildResult(input: {
   const canPublish = input.code === "ok";
   const passingSignals = input.signals.filter((signal) => signal.status === "pass").length;
   const summary = canPublish
-    ? `상품글 발행 게이트 통과 (${input.score}점, 신호 ${passingSignals}/${input.signals.length})`
-    : `상품글 발행 보류 (${input.score}점, ${input.reason || "게이트 미통과"})`;
+    ? `커넥트 글 발행 게이트 통과 (${input.score}점, 신호 ${passingSignals}/${input.signals.length})`
+    : `커넥트 글 발행 보류 (${input.score}점, ${input.reason || "게이트 미통과"})`;
 
   return {
     canPublish,
@@ -153,6 +210,11 @@ export function getBrandLinkContentReadiness(
   input: BrandLinkContentReadinessInput,
 ): BrandLinkContentReadiness {
   const title = normalizeText(input.title);
+  const connectKind = input.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING";
+  const isTravel = connectKind === "TRAVEL";
+  const compositionContract = getPostCompositionContract(connectKind);
+  const sectionMinimum = compositionContract.targetSections.min;
+  const characterMinimum = compositionContract.targetCharacters.min;
   const sections = input.sections.map((section) => normalizeText(section)).filter(Boolean);
   const fullBody = sections.join("\n");
   const corpus = normalizeLoose([title, fullBody, input.hashtags.join(" ")].join(" "));
@@ -178,13 +240,47 @@ export function getBrandLinkContentReadiness(
   const bodyContainsRawLink =
     Boolean(normalizedBrandLink && fullBody.includes(normalizedBrandLink)) ||
     /https?:\/\/(?:naver\.me|brandconnect\.naver\.com|shopping\.naver\.com)\/\S+/iu.test(fullBody);
-  const unsupportedExperienceCount = countPatternHits(fullBody, UNSUPPORTED_EXPERIENCE_PATTERNS);
+  const experienceMode = input.experienceMode || "AI_ASSISTED_INFORMATION";
+  const unsupportedExperienceCount =
+    experienceMode === "VERIFIED_EXPERIENCE"
+      ? 0
+      : countPatternHits(fullBody, UNSUPPORTED_EXPERIENCE_PATTERNS) +
+        (UNSUPPORTED_EXPERIENCE_TITLE_PATTERN.test(title) ? 1 : 0);
   const commissionRateCount = countPatternHits(fullBody, COMMISSION_RATE_PATTERNS);
   const internalGuidanceCount = countPatternHits(fullBody, INTERNAL_GUIDANCE_PATTERNS);
   const requireRepresentativeImage = input.requireRepresentativeImage !== false;
-  const editorialCoverage = assessProductEditorialCoverage(sections.slice(0, -1));
+  const editorialCoverage = isTravel
+    ? assessTravelEditorialCoverage(sections.slice(0, -1))
+    : assessProductEditorialCoverage(sections.slice(0, -1));
+  const reviewSubstance = isTravel
+    ? assessTravelReviewSubstance({
+        productName: input.productName,
+        sections: sections.slice(0, -1),
+        sourceText: [input.sourceDescription || "", ...(input.sourceFeatures || [])].join(" "),
+      })
+    : assessProductReviewSubstance({
+        productName: input.productName,
+        sections: sections.slice(0, -1),
+        sourceDescription: input.sourceDescription,
+        sourceFeatures: input.sourceFeatures,
+      });
+  const categoryMismatchTerms = "categoryMismatchTerms" in reviewSubstance
+    ? reviewSubstance.categoryMismatchTerms
+    : [];
+  const sourceEvidenceCoveragePass = isTravel || (
+    "coveredSignals" in reviewSubstance &&
+    reviewSubstance.coveredSignals.length >= reviewSubstance.requiredSignalCount
+  );
+  const genericGuidanceRatio = reviewSubstance.genericGuidanceCount / Math.max(1, reviewSubstance.sentenceCount);
+  const trustedGenerationSource =
+    input.generationSource === "AI" || input.generationSource === "PREPARED_APPROVED";
 
   const baseSignals: BrandLinkContentReadinessSignal[] = [
+    {
+      key: "generation-source",
+      label: "AI 생성 또는 승인 원고",
+      status: trustedGenerationSource ? "pass" : "fail",
+    },
     {
       key: "product-title",
       label: "제목 상품명 반영",
@@ -198,17 +294,51 @@ export function getBrandLinkContentReadiness(
     {
       key: "sections",
       label: "본문 섹션",
-      status: mainSectionCount >= 4 ? "pass" : "fail",
+      status: mainSectionCount >= sectionMinimum ? "pass" : "fail",
     },
     {
       key: "editorial-flow",
-      label: "문제-효익-근거-사용-주의 흐름",
-      status: editorialCoverage.missingCoreRoles.length <= 1 ? "pass" : "warn",
+      label: isTravel ? "여행지 배경-장면-체험-팁 흐름" : "제품정체-기능원리-사용법-장단점-결론 흐름",
+      status: editorialCoverage.missingCoreRoles.length <= 1 ? "pass" : "fail",
+    },
+    {
+      key: "review-substance",
+      label: isTravel ? "여행지 고유 정보와 현장감" : "제품 특장점·활용법·후기 근거 리뷰",
+      status: reviewSubstance.pass ? "pass" : "fail",
+    },
+    {
+      key: "evidence-density",
+      label: isTravel ? "여행지 근거-즐길 거리 연결" : "제품 기능-작동방식-사용 가치 연결",
+      status:
+        reviewSubstance.evidenceJudgementCount >= reviewSubstance.requiredEvidenceJudgementCount &&
+        sourceEvidenceCoveragePass
+          ? "pass"
+          : "fail",
+    },
+    {
+      key: "generic-guidance",
+      label: "확인 안내 반복 비율",
+      status: genericGuidanceRatio <= (isTravel ? 0.16 : 0.24) ? "pass" : "fail",
+    },
+    {
+      key: "category-integrity",
+      label: "상품 카테고리 문맥 일치",
+      status: categoryMismatchTerms.length === 0 ? "pass" : "fail",
+    },
+    {
+      key: "sentence-repetition",
+      label: "본문 반복 문장",
+      status: reviewSubstance.repeatedSentenceCount <= 2 ? "pass" : "fail",
     },
     {
       key: "length",
       label: "본문 분량",
-      status: totalLength >= 1000 ? "pass" : totalLength >= 750 ? "warn" : "fail",
+      status:
+        totalLength >= characterMinimum
+          ? "pass"
+          : totalLength >= Math.round(characterMinimum * 0.8)
+            ? "warn"
+            : "fail",
     },
     {
       key: "hashtags",
@@ -257,14 +387,44 @@ export function getBrandLinkContentReadiness(
       label: "생성형 썸네일",
       status: input.thumbnailGenerated ? "pass" : "warn",
     },
+    {
+      key: "composition-quality",
+      label: "포스트 계약 품질",
+      status: input.compositionQualityReport
+        ? input.compositionQualityReport.canAutoPublish
+          ? "pass"
+          : input.compositionQualityReport.preset === "PREMIUM"
+            ? "fail"
+            : "warn"
+        : "warn",
+    },
   ];
 
-  const failSignal = baseSignals.find((signal) => signal.status === "fail");
-  const warningCount = baseSignals.filter((signal) => signal.status === "warn").length;
+  const signals = input.mode === "editorial"
+    ? baseSignals.filter((signal) => !["representative-image", "thumbnail", "composition-quality"].includes(signal.key))
+    : baseSignals;
+
+  const failSignal = signals.find((signal) => signal.status === "fail");
+  const warningCount = signals.filter((signal) => signal.status === "warn").length;
   const score = Math.max(
     0,
-    100 - baseSignals.filter((signal) => signal.status === "fail").length * 18 - warningCount * 5,
+    100 - signals.filter((signal) => signal.status === "fail").length * 18 - warningCount * 5,
   );
+
+  if (!trustedGenerationSource) {
+    return buildResult({
+      code: "non-generative-fallback",
+      reason:
+        "AI가 작성한 원고 또는 사용자가 승인한 준비 원고가 아닙니다. 하네스 문장으로 만든 로컬 폴백은 발행할 수 없습니다.",
+      score,
+      sectionCount: sections.length,
+      hashtagCount: input.hashtags.length,
+      totalLength,
+      coveredProductTokens,
+      missingProductTokens,
+      signals: baseSignals,
+    });
+  }
 
   if (!titleHasProductToken || !bodyHasProductToken) {
     return buildResult({
@@ -280,10 +440,10 @@ export function getBrandLinkContentReadiness(
     });
   }
 
-  if (mainSectionCount < 4) {
+  if (mainSectionCount < sectionMinimum) {
     return buildResult({
       code: "too-few-sections",
-      reason: `본문 섹션이 부족합니다. 현재 ${mainSectionCount}개, 최소 4개가 필요합니다.`,
+      reason: `본문 섹션이 부족합니다. 현재 ${mainSectionCount}개, 최소 ${sectionMinimum}개가 필요합니다.`,
       score,
       sectionCount: sections.length,
       hashtagCount: input.hashtags.length,
@@ -294,7 +454,7 @@ export function getBrandLinkContentReadiness(
     });
   }
 
-  if (totalLength < 750) {
+  if (totalLength < Math.round(characterMinimum * 0.8)) {
     return buildResult({
       code: "too-short-content",
       reason: `본문 분량이 너무 짧습니다. 현재 ${totalLength}자입니다.`,
@@ -396,6 +556,125 @@ export function getBrandLinkContentReadiness(
     return buildResult({
       code: "missing-representative-image",
       reason: "판매페이지 대표 이미지를 확정하지 못했습니다.",
+      score,
+      sectionCount: sections.length,
+      hashtagCount: input.hashtags.length,
+      totalLength,
+      coveredProductTokens,
+      missingProductTokens,
+      signals: baseSignals,
+    });
+  }
+
+  if (categoryMismatchTerms.length > 0) {
+    return buildResult({
+      code: "category-mismatch",
+      reason: `상품 카테고리와 맞지 않는 문구가 섞였습니다: ${categoryMismatchTerms.join(", ")}`,
+      score,
+      sectionCount: sections.length,
+      hashtagCount: input.hashtags.length,
+      totalLength,
+      coveredProductTokens,
+      missingProductTokens,
+      signals: baseSignals,
+    });
+  }
+
+  if (reviewSubstance.repeatedSentenceCount > 2) {
+    return buildResult({
+      code: "repetitive-content",
+      reason: `같은 판단 문장이 반복됩니다 (${reviewSubstance.repeatedSentenceCount}회 중복).`,
+      score,
+      sectionCount: sections.length,
+      hashtagCount: input.hashtags.length,
+      totalLength,
+      coveredProductTokens,
+      missingProductTokens,
+      signals: baseSignals,
+    });
+  }
+
+  if (genericGuidanceRatio > (isTravel ? 0.16 : 0.24)) {
+    return buildResult({
+      code: "generic-guidance-heavy",
+      reason: `${isTravel ? "여행지 정보" : "제품 판단"}보다 확인 안내 문장이 많습니다 (${reviewSubstance.genericGuidanceCount}/${reviewSubstance.sentenceCount}문장).`,
+      score,
+      sectionCount: sections.length,
+      hashtagCount: input.hashtags.length,
+      totalLength,
+      coveredProductTokens,
+      missingProductTokens,
+      signals: baseSignals,
+    });
+  }
+
+  if (
+    reviewSubstance.evidenceJudgementCount < reviewSubstance.requiredEvidenceJudgementCount ||
+    !sourceEvidenceCoveragePass
+  ) {
+    const sourceCoverageText = "coveredSignals" in reviewSubstance
+      ? `, 근거 ${reviewSubstance.coveredSignals.length}/${reviewSubstance.requiredSignalCount}`
+      : "";
+    return buildResult({
+      code: "low-evidence-density",
+      reason: isTravel
+        ? `여행지 사실을 풍경·활동·팁으로 연결한 내용이 부족합니다 (연결 ${reviewSubstance.evidenceJudgementCount}/${reviewSubstance.requiredEvidenceJudgementCount}).`
+        : `제품 고유 기능·수치를 사용 장면의 이점·제약으로 해석한 근거가 부족합니다 (판단 ${reviewSubstance.evidenceJudgementCount}/${reviewSubstance.requiredEvidenceJudgementCount}${sourceCoverageText}).`,
+      score,
+      sectionCount: sections.length,
+      hashtagCount: input.hashtags.length,
+      totalLength,
+      coveredProductTokens,
+      missingProductTokens,
+      signals: baseSignals,
+    });
+  }
+
+  if (!reviewSubstance.pass || editorialCoverage.missingCoreRoles.length > 1) {
+    const travelRoleLabels: Record<string, string> = {
+      background: "여행지 역사·문화 배경",
+      atmosphere: "현장 풍경과 분위기",
+      experience: "보고 먹고 즐길 거리",
+      preparation: "교통·동선·복장 등 실용 팁",
+      route: "하루의 여행 흐름",
+    };
+    const shoppingRoleLabels: Record<string, string> = {
+      "product-identity": "제품의 정체와 핵심 용도",
+      "source-evidence": "핵심 기능의 작동 방식과 사용 가치",
+      "primary-strength": "구체적인 핵심 장점",
+      "use-case": "구체적인 사용·설치·관리 방법",
+      "review-evidence": "실제 구매후기 근거의 공통 장점",
+      limitations: "제품 자체의 단점·제약",
+      fit: "추천·비추천 대상",
+      verdict: "조건부 최종 결론",
+    };
+    const roleLabels = isTravel ? travelRoleLabels : shoppingRoleLabels;
+    const missing = [
+      ...reviewSubstance.missingElements,
+      ...editorialCoverage.missingCoreRoles.map(
+        (role) => roleLabels[role] || (isTravel ? "여행 리뷰 흐름" : "제품 리뷰 흐름"),
+      ),
+    ];
+    return buildResult({
+      code: "missing-review-substance",
+      reason: `${isTravel ? "여행지 콘텐츠" : "상품 고유 리뷰"} 요소가 부족합니다: ${Array.from(new Set(missing)).join(", ")}`,
+      score,
+      sectionCount: sections.length,
+      hashtagCount: input.hashtags.length,
+      totalLength,
+      coveredProductTokens,
+      missingProductTokens,
+      signals: baseSignals,
+    });
+  }
+
+  if (
+    input.compositionQualityReport?.preset === "PREMIUM" &&
+    !input.compositionQualityReport.canAutoPublish
+  ) {
+    return buildResult({
+      code: "composition-quality",
+      reason: input.compositionQualityReport.blockers.join(" "),
       score,
       sectionCount: sections.length,
       hashtagCount: input.hashtags.length,

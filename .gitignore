@@ -58,3 +58,7 @@ output/
 public/completion-reports/
 tsconfig.tsbuildinfo
 apps/site/tsconfig.tsbuildinfo
+
+# Python research tooling cache
+__pycache__/
+*.py[cod]

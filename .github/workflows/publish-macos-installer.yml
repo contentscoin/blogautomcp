@@ -1,0 +1,45 @@
+name: Publish macOS Installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "사이트에 게시할 macOS 설치파일의 릴리스 태그"
+        required: true
+        default: "v1.2.20"
+
+jobs:
+  publish:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+
+      - name: Download DMG from release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REL_TAG: ${{ inputs.release_tag }}
+        run: |
+          mkdir -p out
+          gh release download "$REL_TAG" --repo "${{ github.repository }}" --pattern '*.dmg' --dir out
+          test "$(find out -maxdepth 1 -type f -name '*.dmg' | wc -l | tr -d ' ')" = "1" || {
+            echo "릴리스에는 macOS DMG가 정확히 1개 있어야 합니다."
+            exit 1
+          }
+
+      - name: Publish DMG to site
+        shell: bash
+        env:
+          INSTALLER_UPLOAD_KEY: ${{ secrets.INSTALLER_UPLOAD_KEY }}
+        run: |
+          test -n "$INSTALLER_UPLOAD_KEY" || { echo "INSTALLER_UPLOAD_KEY 시크릿이 필요합니다."; exit 1; }
+          SITE_URL=$(node -p "new URL(require('./package.json').build.publish[0].url).origin")
+          DMG_FILE=$(find out -maxdepth 1 -type f -name '*.dmg' -print -quit)
+          node apps/sites/scripts/publish-macos-installer.mjs "$SITE_URL" "$DMG_FILE"

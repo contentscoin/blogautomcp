@@ -77,7 +77,7 @@ async function killRunningPublishProcesses(): Promise<{ killed: number; detail: 
   }
 }
 
-// POST: 모든 포스팅 정지 — 실행 중 프로세스 종료 + PUBLISHING 상태 복구
+// POST: 모든 포스팅 정지 — 실행 중 프로세스 종료 + DRAFTING/PUBLISHING 상태 복구
 export async function POST(request: NextRequest) {
   try {
     const authError = requireAdminApiKey(request);
@@ -91,7 +91,7 @@ export async function POST(request: NextRequest) {
     const note = `사용자가 포스팅을 정지했습니다. (${stamp})`;
 
     const links = await prisma.brandLink.updateMany({
-      where: { status: "PUBLISHING" },
+      where: { status: { in: ["DRAFTING", "PUBLISHING"] } },
       data: { status: "READY", errorMessage: note },
     });
     const tasks = await prisma.topicPostTask.updateMany({

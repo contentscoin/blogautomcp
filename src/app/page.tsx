@@ -29,9 +29,14 @@ interface BrandLink {
   scheduledPublishAt: string | null;
   createdAt: string;
   connectKind?: "SHOPPING" | "TRAVEL";
+  draftPrepared?: boolean;
+  draftApproved?: boolean;
+  draftTitle?: string | null;
+  draftPreparedAt?: string | null;
 }
 
 interface BrandPostDraftPreview {
+  version?: "brand-post-package/v1" | "brand-post-package/v2";
   brandLinkId: string;
   connectKind: "SHOPPING" | "TRAVEL";
   title: string;
@@ -40,7 +45,104 @@ interface BrandPostDraftPreview {
   bodyImagePaths: string[];
   imagePolicy: "LOCKED_PRODUCT_OR_ORIGINAL" | "TRAVEL_EDITORIAL";
   approvedAt: string | null;
+  generationSource?: "AI" | "PREPARED_APPROVED";
+  heroPreviewDataUrl?: string | null;
+  imageAssets?: Array<{
+    path: string;
+    sourcePath: string;
+    sha256: string;
+    assetKey: string;
+    previewUrl: string;
+    role: "hero" | "body";
+    sectionId?: string | null;
+    imageIntent?: string;
+    provenance?: "ORIGINAL" | "LOCKED_PRODUCT" | "GENERATED_BACKGROUND" | "EDITORIAL_CARD";
+  }>;
+  imageSlots?: Array<{
+    sectionId: string;
+    title: string;
+    intent: string;
+    minimum: number;
+    recommended: number;
+    maximum: number;
+    count: number;
+    missing: number;
+    assets: Array<{
+      path: string;
+      sourcePath: string;
+      sha256: string;
+      assetKey: string;
+      previewUrl: string;
+      role: "hero" | "body";
+      sectionId?: string | null;
+      imageIntent?: string;
+      provenance?: "ORIGINAL" | "LOCKED_PRODUCT" | "GENERATED_BACKGROUND" | "EDITORIAL_CARD";
+    }>;
+  }>;
+  contentQuality?: {
+    canPublish: boolean;
+    code: string;
+    reason: string | null;
+    score: number;
+    summary: string;
+    signals: Array<{ key: string; label: string; status: "pass" | "warn" | "fail" }>;
+  } | null;
+  qualityRepair?: {
+    attempted: boolean;
+    applied: boolean;
+    beforeScore: number;
+    afterScore: number;
+    beforeCode: string;
+    afterCode: string;
+    note: string;
+  } | null;
+  thumbnailSpec?: {
+    canvas: { width: number; height: number; aspect: string };
+    style: string;
+    sourcePolicy: string;
+  };
+  composition?: {
+    contractVersion: string;
+    qualityPreset: "STANDARD" | "PREMIUM";
+    experienceMode: "AI_ASSISTED_INFORMATION" | "VERIFIED_EXPERIENCE";
+    sections: Array<{
+      id: string;
+      title: string;
+      imagePaths: string[];
+      imageIntent: string;
+      characterCount: number;
+    }>;
+    renderNodes: Array<{ kind: string; placement?: string; role?: string; sectionId?: string | null }>;
+    qualityReport: {
+      preset: "STANDARD" | "PREMIUM";
+      canAutoPublish: boolean;
+      score: number;
+      actual: { characters: number; sections: number; images: number };
+      target: {
+        characters: { min: number; max: number };
+        sections: { min: number; max: number };
+        images: { min: number; recommended?: number; max: number };
+      };
+      imageCoverage?: {
+        requiredSlots: number;
+        filledRequiredSlots: number;
+        missingSectionIds: string[];
+      };
+      blockers: string[];
+      warnings: string[];
+    };
+  };
 }
+
+interface ChatGptDraftHandoff {
+  productId: string;
+  productLabel: string;
+  connectKind: "SHOPPING" | "TRAVEL";
+  chatgptUrl: string;
+  prompt: string;
+}
+
+type DraftCreationMode = "checking" | "codex" | "local-ai" | "browser-chatgpt" | "chatgpt";
 
 export interface TopicPostTask {
   id: string;
@@ -141,6 +243,8 @@ interface BulkActionResponse {
     synchronizedCount?: number;
     importedCount?: number;
     totalCount?: number;
+    jobId?: string;
+    targetIds?: string[];
   };
 }
 
@@ -200,6 +304,7 @@ const SEASONAL_REGISTER_COUNT_50 = 50;
 const SUPER_PUBLISH_COLLECT_COUNT = 200;
 const SUPER_PUBLISH_DAILY_QUOTA = 50;
 const MAX_BULK_SCHEDULE_LIMIT = 200;
+const MAX_BULK_DRAFT_PREPARE_LIMIT = 50;
 const MAX_TODAY_PUBLISH_LIMIT = 100;
 
 function getFirstImageUrl(imageUrls: string | null): string | null {
@@ -266,6 +371,47 @@ function toggleStringSelection(current: string[], value: string): string[] {
     : [...current, value];
 }
 
+function isChatGptDraftHandoff(value: unknown): value is ChatGptDraftHandoff {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const handoff = value as Partial<ChatGptDraftHandoff>;
+  return (
+    typeof handoff.productId === "string" &&
+    typeof handoff.productLabel === "string" &&
+    (handoff.connectKind === "SHOPPING" || handoff.connectKind === "TRAVEL") &&
+    typeof handoff.chatgptUrl === "string" &&
+    typeof handoff.prompt === "string"
+  );
+}
+
+async function copyText(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+  if (!copied) throw new Error("클립보드 복사를 지원하지 않는 환경입니다.");
+}
+
+const waitForMilliseconds = (milliseconds: number) => new Promise<void>((resolve) => {
+  window.setTimeout(resolve, milliseconds);
+});
+
+function brandImageProvenanceLabel(value?: string): string {
+  if (value === "LOCKED_PRODUCT") return "원본 상품 잠금";
+  if (value === "ORIGINAL") return "수집 원본";
+  if (value === "EDITORIAL_CARD") return "에디토리얼 합성";
+  if (value === "GENERATED_BACKGROUND") return "AI 실사 이미지";
+  return "이미지";
+}
+
 export default function Dashboard() {
   const [links, setLinks] = useState<BrandLink[]>([]);
   const [loading, setLoading] = useState(true);
@@ -283,10 +429,17 @@ export default function Dashboard() {
   const [thumbnailStudioLink, setThumbnailStudioLink] = useState<BrandLink | null>(null);
   const [draftGeneratingId, setDraftGeneratingId] = useState<string | null>(null);
   const [draftPreview, setDraftPreview] = useState<BrandPostDraftPreview | null>(null);
+  const [draftPreviewTab, setDraftPreviewTab] = useState<"post" | "images" | "thumbnail" | "quality">("post");
   const [draftApproving, setDraftApproving] = useState(false);
+  const [draftImageActionKey, setDraftImageActionKey] = useState<string | null>(null);
+  const [draftCreationMode, setDraftCreationMode] = useState<DraftCreationMode>("checking");
+  const [chatGptDraftHandoff, setChatGptDraftHandoff] = useState<ChatGptDraftHandoff | null>(null);
+  const [chatGptDraftHandoffReason, setChatGptDraftHandoffReason] = useState<string | null>(null);
   const [stoppingPosting, setStoppingPosting] = useState(false);
   const [bulkSeasonalRunning, setBulkSeasonalRunning] = useState(false);
   const [bulkScheduleRunning, setBulkScheduleRunning] = useState(false);
+  const [bulkDraftPreparing, setBulkDraftPreparing] = useState(false);
+  const [bulkDraftProgress, setBulkDraftProgress] = useState({ completed: 0, total: 0 });
   const [bulkTodayRunning, setBulkTodayRunning] = useState(false);
   const [superPublishingRunning, setSuperPublishingRunning] = useState(false);
   const [brandConnectCategoryUrl, setBrandConnectCategoryUrl] = useState("");
@@ -347,6 +500,7 @@ export default function Dashboard() {
     if (topicPublishingId) return "현재 주제글 발행 작업이 진행 중입니다. 완료 후 다시 시도하세요.";
     if (bulkSeasonalRunning) return "시즌·히트·인기 상품 등록 작업이 이미 실행 중입니다.";
     if (bulkScheduleRunning) return "예약발행 일괄 실행 작업이 이미 실행 중입니다.";
+    if (bulkDraftPreparing) return "소재 미리 작성 작업이 이미 실행 중입니다.";
     if (bulkTodayRunning) return "바로 일괄발행 작업이 이미 실행 중입니다.";
     if (superPublishingRunning) return "수퍼 퍼블리싱 작업이 이미 실행 중입니다.";
     if (topicBulkScheduleRunning) return "주제글 예약배포 일괄 실행 작업이 이미 실행 중입니다.";
@@ -356,6 +510,7 @@ export default function Dashboard() {
     topicPublishingId,
     bulkSeasonalRunning,
     bulkScheduleRunning,
+    bulkDraftPreparing,
     bulkTodayRunning,
     superPublishingRunning,
     topicBulkScheduleRunning,
@@ -398,9 +553,9 @@ export default function Dashboard() {
     setTravelContractMessage(null);
   };
 
-  const fetchLinks = useCallback(async () => {
+  const fetchLinks = useCallback(async (options?: { silent?: boolean }) => {
     try {
-      setLoading(true);
+      if (!options?.silent) setLoading(true);
       const res = await fetch("/api/brandlinks", { cache: "no-store" });
       const data = await res.json();
       if (data.success) {
@@ -409,7 +564,7 @@ export default function Dashboard() {
     } catch (error) {
       console.error("링크 조회 실패:", error);
     } finally {
-      setLoading(false);
+      if (!options?.silent) setLoading(false);
     }
   }, []);
 
@@ -455,6 +610,27 @@ export default function Dashboard() {
       setCategoryError("게시판 목록 조회 중 오류가 발생했습니다.");
     } finally {
       setCategoryLoading(false);
+    }
+  }, []);
+
+  const fetchDraftCreationMode = useCallback(async () => {
+    try {
+      const response = await fetch("/api/settings", { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok || !payload.success) throw new Error("AI 설정을 확인하지 못했습니다.");
+      const mode = payload.data?.draftCreationMode;
+      setDraftCreationMode(
+        mode === "codex" || mode === "local-ai" || mode === "browser-chatgpt" || mode === "chatgpt"
+          ? mode
+          : payload.data?.desktopDraftProviderConfigured
+            ? "local-ai"
+            : payload.data?.browserDraftAutomationEnabled !== false
+              ? "browser-chatgpt"
+              : "chatgpt",
+      );
+    } catch {
+      // 앱 기본값과 동일하게 로그인된 ChatGPT 웹 자동작성 경로를 우선 표시한다.
+      setDraftCreationMode("browser-chatgpt");
     }
   }, []);
 
@@ -570,10 +746,20 @@ export default function Dashboard() {
   }, [fetchCategories]);
 
   useEffect(() => {
+    void fetchDraftCreationMode();
+  }, [fetchDraftCreationMode]);
+
+  useEffect(() => {
     const handleBlogIdChanged = () => void fetchCategories();
     window.addEventListener("blogautomcp:blog-id-changed", handleBlogIdChanged);
     return () => window.removeEventListener("blogautomcp:blog-id-changed", handleBlogIdChanged);
   }, [fetchCategories]);
+
+  useEffect(() => {
+    const handleDraftModeChanged = () => void fetchDraftCreationMode();
+    window.addEventListener("blogautomcp:draft-mode-changed", handleDraftModeChanged);
+    return () => window.removeEventListener("blogautomcp:draft-mode-changed", handleDraftModeChanged);
+  }, [fetchDraftCreationMode]);
 
   useEffect(() => {
     if (brandConnectOptionsLoaded || brandConnectOptionsLoading) return;
@@ -738,20 +924,168 @@ export default function Dashboard() {
       useSectionHeading: !link.useSectionHeading,
     });
   };
-  const handlePrepareBrandDraft = async (link: BrandLink) => {
+  const handlePrepareBrandDraft = async (
+    link: BrandLink,
+    options?: {
+      forceQualityRepair?: boolean;
+      returnTab?: "post" | "images" | "thumbnail" | "quality";
+      autoApprove?: boolean;
+      silentPreview?: boolean;
+    },
+  ): Promise<boolean> => {
+    let completed = false;
     setDraftGeneratingId(link.id);
-    setDashboardNotice({ tone: "info", text: "고품질 글과 이미지 패키지를 만들고 있습니다. 잠시만 기다려 주세요." });
+    setChatGptDraftHandoff(null);
+    setChatGptDraftHandoffReason(null);
+    setDashboardNotice({
+      tone: "info",
+      text: options?.forceQualityRepair
+        ? "품질검사에서 발견한 약한 부분을 AI가 자동 보강하고 있습니다."
+        : draftCreationMode === "chatgpt"
+        ? "ChatGPT에서 사용할 상품별 요청문을 준비하고 있습니다."
+        : draftCreationMode === "codex"
+          ? "GPT가 백그라운드에서 상품을 분석하고 고품질 원고를 작성하고 있습니다."
+        : draftCreationMode === "browser-chatgpt"
+          ? "ChatGPT 백그라운드 작업으로 고품질 글과 이미지 패키지를 자동 작성하고 있습니다."
+          : "고품질 글과 이미지 패키지를 만들고 있습니다. 잠시만 기다려 주세요.",
+    });
     try {
-      const response = await fetch(`/api/brandlinks/${link.id}/draft`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-      const payload = await response.json();
-      if (!response.ok || !payload.success) throw new Error(payload.error || "초안 생성 실패");
-      setDraftPreview(payload.data as BrandPostDraftPreview);
-      setDashboardNotice({ tone: "success", text: "고품질 초안이 준비됐습니다. 내용을 확인한 뒤 승인해 주세요." });
+      const waitForChatGptLogin = async (jobId: string) => {
+        const deadline = Date.now() + 10 * 60_000;
+        while (Date.now() < deadline) {
+          await waitForMilliseconds(3_000);
+          const statusResponse = await fetch(`/api/session/login?jobId=${encodeURIComponent(jobId)}`, { cache: "no-store" });
+          const statusPayload = await statusResponse.json();
+          if (!statusResponse.ok || !statusPayload.success) continue;
+          if (statusPayload.data?.status === "succeeded") return;
+          if (statusPayload.data?.status === "failed") {
+            throw new Error(statusPayload.data?.error || "ChatGPT 로그인에 실패했습니다.");
+          }
+        }
+        throw new Error("ChatGPT 로그인 확인 시간이 초과되었습니다.");
+      };
+
+      const waitForCodexLogin = async (jobId: string) => {
+        const deadline = Date.now() + 10 * 60_000;
+        while (Date.now() < deadline) {
+          await waitForMilliseconds(2_000);
+          const statusResponse = await fetch(`/api/codex?jobId=${encodeURIComponent(jobId)}`, { cache: "no-store" });
+          const statusPayload = await statusResponse.json();
+          if (!statusResponse.ok || !statusPayload.success) continue;
+          if (statusPayload.data?.job?.status === "succeeded") return;
+          if (statusPayload.data?.job?.status === "failed") {
+            throw new Error(statusPayload.data?.job?.error || "GPT 로그인에 실패했습니다.");
+          }
+        }
+        throw new Error("GPT 로그인 확인 시간이 초과되었습니다.");
+      };
+
+      const requestDraft = async (allowLoginRetry: boolean): Promise<void> => {
+        const response = await fetch(`/api/brandlinks/${link.id}/draft`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            qualityPreset: "premium",
+            experienceMode: "ai_assisted_information",
+            forceQualityRepair: options?.forceQualityRepair === true,
+            autoApprove: options?.autoApprove === true,
+          }),
+        });
+        const payload = await response.json();
+        const handoff = payload?.data?.handoff;
+
+        if (response.status === 409 && payload?.code === "CODEX_LOGIN_REQUIRED" && allowLoginRetry) {
+          setDashboardNotice({ tone: "info", text: "GPT 로그인 창을 열었습니다. 로그인 후 원고 작성을 자동으로 이어갑니다." });
+          const loginResponse = await fetch("/api/codex", { method: "POST" });
+          const loginPayload = await loginResponse.json();
+          if (!loginResponse.ok || !loginPayload.success) throw new Error(loginPayload.error || "GPT 로그인을 시작하지 못했습니다.");
+          const jobId = loginPayload.data?.job?.id as string | undefined;
+          if (jobId) await waitForCodexLogin(jobId);
+          await fetchDraftCreationMode();
+          setDashboardNotice({ tone: "info", text: "GPT 연결이 확인됐습니다. 원고를 작성하고 있습니다." });
+          await requestDraft(false);
+          return;
+        }
+
+        if (response.status === 409 && payload?.code === "CHATGPT_BROWSER_LOGIN_REQUIRED" && allowLoginRetry) {
+          setDashboardNotice({ tone: "info", text: "ChatGPT 로그인·보안 확인 창을 열었습니다. 확인 후 초안 생성을 자동으로 이어갑니다." });
+          const loginResponse = await fetch("/api/session/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ provider: "chatgpt", force: false }),
+          });
+          const loginPayload = await loginResponse.json();
+          if (!loginResponse.ok || !loginPayload.success) {
+            throw new Error(loginPayload.error || "ChatGPT 로그인 창을 열지 못했습니다.");
+          }
+          const jobId = loginPayload.data?.jobId as string | undefined;
+          if (!jobId) throw new Error("ChatGPT 로그인 작업 번호가 없습니다.");
+          await waitForChatGptLogin(jobId);
+          setDashboardNotice({ tone: "info", text: "ChatGPT 로그인이 확인됐습니다. 초안을 자동 작성하고 있습니다." });
+          await requestDraft(false);
+          return;
+        }
+
+        const shouldHandoff = response.status === 409 && [
+          "CHATGPT_MCP_DRAFT_REQUIRED",
+          "CHATGPT_BROWSER_FALLBACK_REQUIRED",
+          "CHATGPT_BROWSER_LOGIN_REQUIRED",
+        ].includes(payload?.code);
+        if (shouldHandoff && isChatGptDraftHandoff(handoff)) {
+          setChatGptDraftHandoffReason(typeof payload.error === "string" ? payload.error : null);
+          setChatGptDraftHandoff(handoff);
+          setDashboardNotice({
+            tone: "info",
+            text: payload?.code === "CHATGPT_MCP_DRAFT_REQUIRED"
+              ? "상품별 요청문이 준비됐습니다. 복사한 뒤 ChatGPT에서 이어서 작성하세요."
+              : "웹 자동작성을 완료하지 못했습니다. 상품별 요청문으로 ChatGPT에서 이어서 작성할 수 있습니다.",
+          });
+          return;
+        }
+        if (!response.ok || !payload.success) throw new Error(payload.error || "초안 생성 실패");
+        if (!options?.silentPreview) {
+          setDraftPreview(payload.data as BrandPostDraftPreview);
+          setDraftPreviewTab(options?.returnTab || "post");
+        }
+        if (options?.autoApprove && payload.autoApproved !== true) {
+          throw new Error(payload.approvalWarning || "소재는 작성됐지만 품질검사를 통과하지 못해 자동 승인되지 않았습니다.");
+        }
+        completed = true;
+        setDashboardNotice({
+          tone: "success",
+          text: options?.forceQualityRepair
+            ? "품질 자동 보강이 끝났습니다. 점수와 보강 결과를 확인해 주세요."
+            : "고품질 초안이 준비됐습니다. 내용을 확인한 뒤 승인해 주세요.",
+        });
+      };
+
+      await requestDraft(true);
     } catch (error) {
       setDashboardNotice({ tone: "error", text: error instanceof Error ? error.message : "초안 생성 중 오류가 발생했습니다." });
     } finally {
       setDraftGeneratingId(null);
     }
+    return completed;
+  };
+
+  const handleCopyChatGptDraftPrompt = async () => {
+    if (!chatGptDraftHandoff) return;
+    try {
+      await copyText(chatGptDraftHandoff.prompt);
+      setDashboardNotice({ tone: "success", text: "요청문을 복사했습니다. ChatGPT 대화창에 붙여넣어 주세요." });
+    } catch (error) {
+      setDashboardNotice({ tone: "error", text: error instanceof Error ? error.message : "요청문을 복사하지 못했습니다." });
+    }
+  };
+
+  const handleCopyAndOpenChatGpt = () => {
+    if (!chatGptDraftHandoff) return;
+    const copyPromise = copyText(chatGptDraftHandoff.prompt);
+    window.open(chatGptDraftHandoff.chatgptUrl, "_blank", "noopener,noreferrer");
+    void copyPromise.then(
+      () => setDashboardNotice({ tone: "success", text: "요청문을 복사하고 ChatGPT를 열었습니다. 대화창에 붙여넣어 실행하세요." }),
+      () => setDashboardNotice({ tone: "error", text: "ChatGPT를 열었지만 요청문 복사에 실패했습니다. 요청문을 직접 선택해 복사해 주세요." }),
+    );
   };
   const handleOpenOrPrepareBrandDraft = async (link: BrandLink) => {
     try {
@@ -759,12 +1093,78 @@ export default function Dashboard() {
       const payload = await response.json();
       if (response.ok && payload.success && payload.data) {
         setDraftPreview(payload.data as BrandPostDraftPreview);
+        setDraftPreviewTab("post");
         return;
       }
     } catch {
       // 저장된 패키지가 없거나 읽지 못하면 새로 만든다.
     }
     await handlePrepareBrandDraft(link);
+  };
+
+  const handleBulkPrepareBrandDrafts = async () => {
+    const busyMessage = getBusyMessage();
+    if (busyMessage) {
+      setDashboardNotice({ tone: "info", text: busyMessage });
+      return;
+    }
+    const candidates = links
+      .filter((link) =>
+        isBrandLinkForKind(link, brandConnectKind) &&
+        ["READY", "FAILED"].includes(link.status) &&
+        !link.draftApproved
+      )
+      .slice(0, MAX_BULK_DRAFT_PREPARE_LIMIT);
+    if (candidates.length === 0) {
+      setDashboardNotice({ tone: "info", text: "미리 작성할 상품이 없습니다. 현재 목록은 모두 발행 준비가 끝났습니다." });
+      return;
+    }
+
+    setBulkDraftPreparing(true);
+    setBulkDraftProgress({ completed: 0, total: candidates.length });
+    let approvedCount = 0;
+    let failedCount = 0;
+    try {
+      for (let index = 0; index < candidates.length; index += 1) {
+        const link = candidates[index];
+        setDashboardNotice({
+          tone: "info",
+          text: `소재 미리 작성 ${index + 1}/${candidates.length}: ${link.productName || "상품"}`,
+        });
+        let approved = false;
+        try {
+          if (link.draftPrepared) {
+            const response = await fetch(`/api/brandlinks/${link.id}/draft`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "approve" }),
+            });
+            const payload = await response.json();
+            approved = response.ok && payload.success && Boolean(payload.data?.approvedAt);
+          }
+          if (!approved) {
+            approved = await handlePrepareBrandDraft(link, {
+              autoApprove: true,
+              silentPreview: true,
+              forceQualityRepair: Boolean(link.draftPrepared),
+            });
+          }
+        } catch (error) {
+          console.error(`소재 미리 작성 실패 (${link.id}):`, error);
+        }
+        if (approved) approvedCount += 1;
+        else failedCount += 1;
+        setBulkDraftProgress({ completed: index + 1, total: candidates.length });
+        await fetchLinks({ silent: true });
+      }
+      setDashboardNotice({
+        tone: failedCount > 0 ? "info" : "success",
+        text: `소재 미리 작성 완료: 발행 준비 ${approvedCount}건${failedCount > 0 ? `, 확인 필요 ${failedCount}건` : ""}. 이제 발행 단계에서는 저장된 글과 이미지를 바로 사용합니다.`,
+      });
+    } finally {
+      setBulkDraftPreparing(false);
+      await fetchLinks();
+    }
   };
 
   const handleApproveBrandDraft = async () => {
@@ -786,6 +1186,96 @@ export default function Dashboard() {
       setDraftApproving(false);
     }
   };
+
+  const requestDraftImageAction = async (body: {
+    action: "generate_missing" | "generate_section" | "regenerate";
+    sectionId?: string;
+    assetKey?: string;
+    batchSize?: number;
+  }) => {
+    if (!draftPreview) throw new Error("열린 초안이 없습니다.");
+    const response = await fetch(`/api/brandlinks/${draftPreview.brandLinkId}/draft/images`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json() as {
+      success?: boolean;
+      data?: BrandPostDraftPreview;
+      generatedCount?: number;
+      remainingMissing?: number;
+      errors?: string[];
+      error?: string;
+      message?: string;
+    };
+    if (payload.data) setDraftPreview(payload.data);
+    if (!response.ok || !payload.success) {
+      throw new Error(payload.error || payload.errors?.join(" ") || "이미지 생성에 실패했습니다.");
+    }
+    return payload;
+  };
+
+  const handleGenerateMissingDraftImages = async () => {
+    if (!draftPreview || draftImageActionKey) return;
+    setDraftImageActionKey("missing");
+    setDashboardNotice({ tone: "info", text: "필수 이미지 슬롯을 파트별로 자동 보충하고 있습니다." });
+    try {
+      let generatedTotal = 0;
+      let remaining = draftPreview.imageSlots?.reduce((sum, slot) => sum + slot.missing, 0) || 0;
+      for (let batch = 0; batch < 4 && remaining > 0; batch += 1) {
+        const payload = await requestDraftImageAction({ action: "generate_missing", batchSize: 4 });
+        const generated = payload.generatedCount || 0;
+        generatedTotal += generated;
+        remaining = payload.remainingMissing || 0;
+        // 사용자 수정이 필요한 오류는 같은 요청에서 무작정 재시도하지 않는다.
+        if (generated === 0 || (payload.errors?.length || 0) > 0) {
+          if (payload.errors?.length) throw new Error(payload.errors.join(" "));
+          break;
+        }
+      }
+      setDraftPreviewTab("images");
+      setDashboardNotice({
+        tone: remaining === 0 ? "success" : "info",
+        text: remaining === 0
+          ? `필수 이미지 보충 완료 · ${generatedTotal}장 추가`
+          : `${generatedTotal}장을 추가했고 필수 슬롯 ${remaining}장이 남았습니다.`,
+      });
+    } catch (error) {
+      setDashboardNotice({ tone: "error", text: error instanceof Error ? error.message : "필수 이미지 보충에 실패했습니다." });
+    } finally {
+      setDraftImageActionKey(null);
+    }
+  };
+
+  const handleGenerateDraftSectionImage = async (sectionId: string) => {
+    if (!draftPreview || draftImageActionKey) return;
+    setDraftImageActionKey(`section:${sectionId}`);
+    setDashboardNotice({ tone: "info", text: "선택한 파트의 이미지를 한 장 더 만들고 있습니다." });
+    try {
+      const payload = await requestDraftImageAction({ action: "generate_section", sectionId });
+      setDraftPreviewTab("images");
+      setDashboardNotice({ tone: "success", text: payload.message || "파트 이미지 한 장을 추가했습니다." });
+    } catch (error) {
+      setDashboardNotice({ tone: "error", text: error instanceof Error ? error.message : "파트 이미지 생성에 실패했습니다." });
+    } finally {
+      setDraftImageActionKey(null);
+    }
+  };
+
+  const handleRegenerateDraftImage = async (assetKey: string) => {
+    if (!draftPreview || draftImageActionKey) return;
+    setDraftImageActionKey(`asset:${assetKey}`);
+    setDashboardNotice({ tone: "info", text: "선택한 이미지만 새로 만들고 있습니다." });
+    try {
+      const payload = await requestDraftImageAction({ action: "regenerate", assetKey });
+      setDashboardNotice({ tone: "success", text: payload.message || "선택한 이미지를 교체했습니다." });
+    } catch (error) {
+      setDashboardNotice({ tone: "error", text: error instanceof Error ? error.message : "이미지 재생성에 실패했습니다." });
+    } finally {
+      setDraftImageActionKey(null);
+    }
+  };
+
   const startPublish = async (
     id: string,
     payload?: { publishMode?: "now" | "schedule"; scheduledDate?: string }
@@ -1071,9 +1561,60 @@ export default function Dashboard() {
           data.data?.logFile ? ` / 로그: ${data.data.logFile}` : ""
         }`,
       });
-      setTimeout(() => {
-        void fetchLinks();
-      }, 1500);
+      const jobId = data.data?.jobId;
+      if (jobId) {
+        const startedAt = Date.now();
+        const deadline = startedAt + 12 * 60 * 60_000;
+        const targetIds = new Set(data.data?.targetIds || []);
+        let settled = false;
+        while (Date.now() < deadline) {
+          await waitForMilliseconds(Date.now() - startedAt < 60 * 60_000 ? 2_500 : 15_000);
+          let terminalFailure: string | null = null;
+          try {
+            const statusResponse = await fetch(
+              `/api/brandlinks/bulk-schedule?jobId=${encodeURIComponent(jobId)}`,
+              { cache: "no-store" },
+            );
+            const statusPayload = await statusResponse.json();
+            const linksResponse = await fetch("/api/brandlinks", { cache: "no-store" });
+            const linksPayload = await linksResponse.json();
+            const synchronizedLinks = linksResponse.ok && linksPayload.success
+              ? linksPayload.data as BrandLink[]
+              : [];
+            if (synchronizedLinks.length > 0) setLinks(synchronizedLinks);
+            const targetRows = synchronizedLinks.filter((link) => targetIds.has(link.id));
+            const databaseSettled = targetIds.size > 0 &&
+              targetRows.length === targetIds.size &&
+              targetRows.every((link) => ["SCHEDULED", "PUBLISHED", "FAILED"].includes(link.status));
+            if (statusResponse.status === 404 && databaseSettled) {
+              settled = true;
+              setDashboardNotice({
+                tone: "success",
+                text: "예약발행 결과를 상품 목록에서 확인해 상태를 동기화했습니다.",
+              });
+              break;
+            }
+            if (statusResponse.ok && statusPayload.success && statusPayload.data?.status === "completed") {
+              settled = true;
+              setDashboardNotice({
+                tone: "success",
+                text: "예약발행 작업이 완료되어 상품 목록 상태를 동기화했습니다.",
+              });
+              break;
+            }
+            if (statusResponse.ok && statusPayload.success && statusPayload.data?.status === "failed") {
+              terminalFailure = statusPayload.data?.error || "예약발행 작업이 실패했습니다.";
+            }
+          } catch (error) {
+            console.warn("예약발행 상태 확인 일시 실패, 자동 재시도:", error);
+            await waitForMilliseconds(15_000);
+          }
+          if (terminalFailure) throw new Error(terminalFailure);
+        }
+        if (!settled) throw new Error("예약발행 상태 확인이 12시간을 초과했습니다. 목록 새로고침으로 상태를 다시 확인해 주세요.");
+      } else {
+        await fetchLinks();
+      }
     } catch (error) {
       console.error("예약발행 일괄 실행 실패:", error);
       setDashboardNotice({
@@ -1268,6 +1809,7 @@ export default function Dashboard() {
       case "POLISHING": return "bg-purple-100 text-purple-800";
       case "IMAGE_READY": return "bg-amber-100 text-amber-800";
       case "PREPARED": return "bg-emerald-100 text-emerald-800";
+      case "DRAFTING": return "bg-violet-100 text-violet-800";
       case "PUBLISHING": return "bg-yellow-100 text-yellow-800";
       case "SCHEDULED": return "bg-indigo-100 text-indigo-800";
       case "PUBLISHED": return "bg-green-100 text-green-800";
@@ -1285,6 +1827,7 @@ export default function Dashboard() {
       case "POLISHING": return "윤문중";
       case "IMAGE_READY": return "이미지 확보";
       case "PREPARED": return "준비완료";
+      case "DRAFTING": return "초안 작성중";
       case "PUBLISHING": return "발행중";
       case "SCHEDULED": return "예약완료";
       case "PUBLISHED": return "발행완료";
@@ -1297,6 +1840,9 @@ export default function Dashboard() {
     (link) => link.status === "READY" && formatDateDisplay(link.scheduledPublishAt) !== "-"
   ).length;
   const readyImmediateCount = readyScheduledCount;
+  const draftPrepareCandidateCount = visibleLinks.filter(
+    (link) => ["READY", "FAILED"].includes(link.status) && !link.draftApproved,
+  ).length;
   const readyTopicScheduledCount = topicTasks.filter(canBulkScheduleTopicTask).length;
   const busyMessageForUi = getBusyMessage();
 
@@ -1624,6 +2170,22 @@ export default function Dashboard() {
       setTopicBulkScheduleRunning(false);
     }
   };
+
+  const draftImageMinimum = draftPreview?.composition?.qualityReport.target.images.min || 0;
+  const draftImageRecommended = draftPreview?.composition?.qualityReport.target.images.recommended
+    || draftImageMinimum;
+  const draftImageActual = draftPreview?.composition?.qualityReport.actual.images
+    || (draftPreview ? draftPreview.bodyImagePaths.length + 1 : 0);
+  const draftMissingImageCount = draftPreview?.imageSlots?.reduce(
+    (sum, slot) => sum + slot.missing,
+    0,
+  ) || 0;
+  const draftCompositionQualityPassed = draftPreview?.composition?.qualityReport.canAutoPublish !== false;
+  const draftContentQualityPassed = draftPreview?.contentQuality?.canPublish !== false;
+  const draftApprovalBlocked = Boolean(
+    draftPreview?.composition?.qualityReport.preset === "PREMIUM" &&
+    (!draftCompositionQualityPassed || !draftContentQualityPassed),
+  );
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
@@ -2237,29 +2799,39 @@ export default function Dashboard() {
                   <div className="flex flex-wrap items-center gap-2">
                     <button
                       onClick={() => handleBulkSeasonalRegister(SEASONAL_REGISTER_COUNT_10)}
-                      disabled={bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId)}
+                      disabled={bulkDraftPreparing || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId)}
                       className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                     >
                       {bulkSeasonalRunning ? "상품 동기화 중..." : `${brandConnectKind === "travel" ? "여행" : "쇼핑"} 인기상품 10개 동기화`}
                     </button>
                     <button
                       onClick={() => handleBulkSeasonalRegister(SEASONAL_REGISTER_COUNT_50)}
-                      disabled={bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId)}
+                      disabled={bulkDraftPreparing || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId)}
                       className="px-4 py-2 bg-sky-600 text-white rounded-lg hover:bg-sky-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                     >
                       {bulkSeasonalRunning ? "상품 동기화 중..." : `${brandConnectKind === "travel" ? "여행" : "쇼핑"} 인기상품 50개 동기화`}
                     </button>
                     <button
                       onClick={handleSuperPublishing}
-                      disabled={travelPublishingUnavailable || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId)}
+                      disabled={travelPublishingUnavailable || bulkDraftPreparing || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId)}
                       title={travelPublishingUnavailable ? "여행 계약 자동 캡처 후 사용할 수 있습니다." : undefined}
                       className="px-4 py-2 bg-fuchsia-600 text-white rounded-lg hover:bg-fuchsia-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                     >
                       {superPublishingRunning ? "수퍼 퍼블리싱 시작 중..." : `${activeConnectLabel} 수퍼 퍼블리싱 ${SUPER_PUBLISH_COLLECT_COUNT}개`}
                     </button>
                     <button
+                      onClick={() => void handleBulkPrepareBrandDrafts()}
+                      disabled={travelPublishingUnavailable || bulkDraftPreparing || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId) || draftPrepareCandidateCount === 0}
+                      title="리서치·원고·썸네일·본문 이미지를 미리 만들고 품질 통과본을 자동 승인합니다"
+                      className="px-4 py-2 bg-violet-600 text-white rounded-lg hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {bulkDraftPreparing
+                        ? `소재 작성 중 ${bulkDraftProgress.completed}/${bulkDraftProgress.total}`
+                        : `소재 미리 작성 (${Math.min(MAX_BULK_DRAFT_PREPARE_LIMIT, draftPrepareCandidateCount)}건)`}
+                    </button>
+                    <button
                       onClick={handleBulkSchedulePublish}
-                      disabled={travelPublishingUnavailable || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId) || readyScheduledCount === 0}
+                      disabled={travelPublishingUnavailable || bulkDraftPreparing || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId) || readyScheduledCount === 0}
                       title={travelPublishingUnavailable ? "여행 계약 자동 캡처 후 사용할 수 있습니다." : undefined}
                       className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                     >
@@ -2267,7 +2839,7 @@ export default function Dashboard() {
                     </button>
                     <button
                       onClick={handleBulkTodayPublish}
-                      disabled={travelPublishingUnavailable || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId) || readyImmediateCount === 0}
+                      disabled={travelPublishingUnavailable || bulkDraftPreparing || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId) || readyImmediateCount === 0}
                       title={travelPublishingUnavailable ? "여행 계약 자동 캡처 후 사용할 수 있습니다." : undefined}
                       className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                     >
@@ -2306,7 +2878,12 @@ export default function Dashboard() {
 
             <div className="mb-4 grid gap-2 rounded-2xl border border-slate-200 bg-white p-3 sm:grid-cols-3">
               {[
-                { no: "1", title: "글 준비", text: "고품질 초안을 먼저 만듭니다", color: "bg-violet-600" },
+                {
+                  no: "1",
+                  title: draftCreationMode === "codex" ? "GPT 자동작성" : draftCreationMode === "browser-chatgpt" ? "웹 GPT 자동작성" : "글 준비",
+                  text: draftCreationMode === "codex" ? "브라우저 없이 백그라운드에서 만들고 미리봅니다" : draftCreationMode === "browser-chatgpt" ? "로그인된 ChatGPT에서 만들고 바로 미리봅니다" : "고품질 초안을 먼저 만듭니다",
+                  color: "bg-violet-600",
+                },
                 { no: "2", title: "썸네일", text: brandConnectKind === "travel" ? "여행 표지 스타일을 고릅니다" : "상품 원본을 잠그고 합성합니다", color: brandConnectKind === "travel" ? "bg-amber-500" : "bg-blue-600" },
                 { no: "3", title: "확인 후 발행", text: "승인한 글과 이미지만 발행합니다", color: "bg-emerald-600" },
               ].map((step) => <div key={step.no} className="flex items-center gap-3 rounded-xl bg-slate-50 px-3 py-2"><span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-black text-white ${step.color}`}>{step.no}</span><div><p className="text-sm font-bold text-slate-900">{step.title}</p><p className="text-[11px] text-slate-500">{step.text}</p></div></div>)}
@@ -2321,7 +2898,13 @@ export default function Dashboard() {
                 </div>
                 <span className="text-sm font-semibold text-slate-600">{visibleLinks.length}건</span>
               </div>
-              <table className="w-full">
+              <table className="w-full min-w-[1080px] table-fixed">
+                <colgroup>
+                  <col className="w-[44%]" />
+                  <col className="w-[10%]" />
+                  <col className="w-[20%]" />
+                  <col className="w-[26%]" />
+                </colgroup>
                 <thead className="bg-slate-50 border-b border-slate-200">
                   <tr>
                     <th className="px-4 py-3 text-left text-sm font-medium text-slate-600">상품</th>
@@ -2350,18 +2933,18 @@ export default function Dashboard() {
                       return (
                         <tr key={link.id} className="hover:bg-slate-50">
                           <td className="px-4 py-3">
-                            <div className="flex items-center gap-3">
+                            <div className="flex min-w-0 items-center gap-3">
                               {/* 이미지 썸네일 */}
                               {thumbnailUrl && (
                                 // eslint-disable-next-line @next/next/no-img-element
                                 <img
                                   src={thumbnailUrl}
                                   alt=""
-                                  className="w-12 h-12 object-cover rounded-lg"
+                                  className="h-12 w-12 shrink-0 rounded-lg object-cover"
                                 />
                               )}
-                              <div>
-                                <div className="font-medium text-slate-800">
+                              <div className="min-w-0">
+                                <div className="line-clamp-2 break-keep font-medium leading-6 text-slate-800">
                                   {link.productName || "(상품 정보 없음)"}
                                 </div>
                                 {link.productPrice && (
@@ -2371,36 +2954,41 @@ export default function Dashboard() {
                               </div>
                             </div>
                           </td>
-                          <td className="px-4 py-3 text-center">
-                            <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(link.status)}`}>
+                          <td className="whitespace-nowrap px-3 py-3 text-center">
+                            <span className={`inline-flex whitespace-nowrap rounded-full px-2 py-1 text-xs font-medium ${getStatusColor(link.status)}`}>
                               {getStatusText(link.status)}
                             </span>
+                            {link.draftApproved ? (
+                              <div className="mt-1 text-[11px] font-semibold text-emerald-700">소재 준비완료</div>
+                            ) : link.draftPrepared ? (
+                              <div className="mt-1 text-[11px] font-semibold text-amber-700">소재 검토필요</div>
+                            ) : null}
                             {link.errorMessage && (
                               <div className="text-xs text-red-500 mt-1" title={link.errorMessage}>
                                 ⚠️
                               </div>
                             )}
                           </td>
-                          <td className="px-4 py-3 text-center">
+                          <td className="px-3 py-3 text-center">
                             <div className="space-y-1">
-                              <div className="text-xs text-slate-500">
+                              <div className="whitespace-nowrap text-xs text-slate-500">
                                 게시판: {getCategoryLabel(link.categoryNo)}
                                 {link.categoryNo ? ` (${link.categoryNo})` : ""}
                               </div>
-                              <div className="text-xs text-slate-500">
+                              <div className="whitespace-nowrap text-xs text-slate-500">
                                 소제목: {link.useSectionHeading ? "ON" : "OFF"}
                               </div>
-                              <div className="text-xs text-slate-500">
+                              <div className="whitespace-nowrap text-xs text-slate-500">
                                 예약발행일: {formatDateDisplay(link.scheduledPublishAt)}
                               </div>
-                              <div className="flex items-center justify-center gap-1">
+                              <div className="flex items-center justify-center gap-2">
                                 {categoryOptions.length > 0 || categoryLoading ? (
                                   <select
                                     value={link.categoryNo ?? ""}
                                     onChange={(e) => {
                                       void handleSelectCategoryNo(link, e.target.value);
                                     }}
-                                    className="max-w-36 px-2 py-1 text-xs border border-slate-300 rounded bg-white text-slate-700"
+                                    className="min-w-0 flex-1 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700"
                                     disabled={
                                       updatingCategoryId === link.id ||
                                       categoryLoading ||
@@ -2431,7 +3019,7 @@ export default function Dashboard() {
                                 )}
                                 <button
                                   onClick={() => handleToggleSectionHeading(link)}
-                                  className={`px-2 py-1 text-xs rounded transition-colors ${
+                                  className={`shrink-0 whitespace-nowrap rounded px-2 py-1 text-xs transition-colors ${
                                     link.useSectionHeading
                                       ? "bg-indigo-100 text-indigo-700 hover:bg-indigo-200"
                                       : "bg-amber-100 text-amber-700 hover:bg-amber-200"
@@ -2442,22 +3030,40 @@ export default function Dashboard() {
                               </div>
                             </div>
                           </td>
-                          <td className="px-4 py-3 text-center">
+                          <td className="px-3 py-3 text-center">
                             <div className="flex flex-wrap items-center justify-center gap-2">
                               <button
                                 onClick={() => setThumbnailStudioLink(link)}
-                                className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${link.connectKind === "TRAVEL" ? "bg-amber-100 text-amber-800 hover:bg-amber-200" : "bg-blue-100 text-blue-700 hover:bg-blue-200"}`}
+                                className={`whitespace-nowrap rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${link.connectKind === "TRAVEL" ? "bg-amber-100 text-amber-800 hover:bg-amber-200" : "bg-blue-100 text-blue-700 hover:bg-blue-200"}`}
                                 title="실제 상품 사진으로 카피 썸네일 만들기"
                               >
                                 2. 썸네일
                               </button>
                               <button
                                 onClick={() => void handleOpenOrPrepareBrandDraft(link)}
-                                disabled={draftGeneratingId === link.id || Boolean(publishingId)}
-                                className="rounded-lg bg-violet-600 px-3 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:opacity-50 transition-colors"
-                                title="글·이미지를 먼저 만들고 확인한 뒤 같은 결과를 발행합니다"
+                                disabled={bulkDraftPreparing || draftCreationMode === "checking" || draftGeneratingId === link.id || link.status === "DRAFTING" || Boolean(publishingId)}
+                                className="whitespace-nowrap rounded-lg bg-violet-600 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-violet-700 disabled:opacity-50"
+                                title={draftCreationMode === "chatgpt"
+                                  ? "상품별 요청문을 복사해 연결된 ChatGPT에서 초안을 만듭니다"
+                                  : draftCreationMode === "codex"
+                                    ? "연결된 GPT가 백그라운드에서 원고를 작성하고 미리보기를 엽니다"
+                                  : draftCreationMode === "browser-chatgpt"
+                                    ? "로그인된 ChatGPT 웹에서 초안을 자동 작성하고 미리보기를 엽니다"
+                                    : "글·이미지를 먼저 만들고 확인한 뒤 같은 결과를 발행합니다"}
                               >
-                                {draftGeneratingId === link.id ? "글 준비 중..." : "1. 글 준비·확인"}
+                                {draftGeneratingId === link.id || link.status === "DRAFTING"
+                                  ? "글 준비 중..."
+                                  : link.draftApproved
+                                    ? "1. 준비된 소재 보기"
+                                  : draftCreationMode === "checking"
+                                    ? "1. 작성 방식 확인 중"
+                                    : draftCreationMode === "chatgpt"
+                                      ? "1. ChatGPT로 글 만들기"
+                                      : draftCreationMode === "codex"
+                                        ? "1. GPT로 글 만들기"
+                                      : draftCreationMode === "browser-chatgpt"
+                                        ? "1. 웹 GPT 자동작성"
+                                        : "1. 글 준비·확인"}
                               </button>
                               {/* 여행 계약 잠금만 목록에서 표시하고, 실제 발행은 승인 창에서 진행 */}
                               {link.status === "READY" && link.connectKind === "TRAVEL" && travelPublishingUnavailable && (
@@ -2524,9 +3130,10 @@ export default function Dashboard() {
           <h3 className="font-medium text-slate-800 mb-2">💡 사용 방법</h3>
           <ol className="text-sm text-slate-600 space-y-1 list-decimal list-inside">
             <li>네이버 로그인 상태를 확인하고 쇼핑 또는 여행 탭을 선택합니다.</li>
-            <li>상품을 동기화한 뒤 목록에서 <strong>1. 글 준비·확인</strong>을 누릅니다.</li>
+            <li>여러 상품은 <strong>소재 미리 작성</strong>으로 글·썸네일·본문 이미지를 먼저 준비할 수 있습니다.</li>
+            <li>개별 상품은 <strong>{draftCreationMode === "chatgpt" ? "1. GPT로 글 만들기" : draftCreationMode === "codex" ? "1. GPT로 글 만들기" : draftCreationMode === "browser-chatgpt" ? "1. 웹 GPT 자동작성" : "1. 글 준비·확인"}</strong>에서 확인하고 수정합니다.</li>
             <li><strong>2. 썸네일</strong>에서 실제 사진과 디자인 스타일을 고릅니다.</li>
-            <li>초안을 승인한 뒤 <strong>3. 바로 발행</strong> 또는 예약 발행을 선택합니다.</li>
+            <li>준비완료 소재는 <strong>3. 바로 발행</strong> 또는 예약발행 때 재생성 없이 사용됩니다.</li>
           </ol>
         </div>
       </main>
@@ -2539,25 +3146,262 @@ export default function Dashboard() {
         />
       )}
 
+      {chatGptDraftHandoff && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/75 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="chatgpt-draft-title">
+          <div className="w-full max-w-2xl overflow-hidden rounded-3xl border border-white/10 bg-white shadow-2xl">
+            <div className="bg-gradient-to-br from-violet-700 via-indigo-700 to-slate-950 px-6 py-6 text-white sm:px-8">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <span className="inline-flex rounded-full bg-white/15 px-3 py-1 text-xs font-bold ring-1 ring-white/20">API 키 없이 이용</span>
+                  <h2 id="chatgpt-draft-title" className="mt-3 text-2xl font-black tracking-tight">ChatGPT에서 이 상품의 초안을 완성하세요</h2>
+                  <p className="mt-2 text-sm leading-6 text-indigo-100">사이트 OAuth는 안전한 MCP 연결을 인증합니다. 실제 원고는 연결된 ChatGPT 대화에서 만들어 PC 앱으로 다시 저장됩니다.</p>
+                </div>
+                <button type="button" onClick={() => { setChatGptDraftHandoff(null); setChatGptDraftHandoffReason(null); }} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/10 text-2xl font-light leading-none text-white hover:bg-white/20" aria-label="ChatGPT 초안 안내 닫기">×</button>
+              </div>
+            </div>
+
+            <div className="space-y-5 px-6 py-6 sm:px-8">
+              <div className="grid gap-3 sm:grid-cols-[auto_1fr] sm:items-center">
+                <span className={`w-fit rounded-full px-3 py-1 text-xs font-bold ${chatGptDraftHandoff.connectKind === "TRAVEL" ? "bg-amber-100 text-amber-800" : "bg-blue-100 text-blue-700"}`}>{chatGptDraftHandoff.connectKind === "TRAVEL" ? "여행커넥트" : "쇼핑커넥트"}</span>
+                <p className="truncate font-bold text-slate-950" title={chatGptDraftHandoff.productLabel}>{chatGptDraftHandoff.productLabel}</p>
+              </div>
+
+              {chatGptDraftHandoffReason ? (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900">
+                  <strong className="block text-xs font-black uppercase tracking-wide text-amber-700">웹 자동작성 실패 안내</strong>
+                  {chatGptDraftHandoffReason}
+                </div>
+              ) : null}
+
+              <ol className="grid gap-3 text-sm text-slate-700 sm:grid-cols-3">
+                {["요청문 자동 복사", "ChatGPT에서 붙여넣기", "완성 초안을 PC에서 승인"].map((label, index) => (
+                  <li key={label} className="flex items-center gap-3 rounded-2xl bg-slate-50 px-4 py-3">
+                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-violet-600 text-xs font-black text-white">{index + 1}</span>
+                    <span className="font-semibold">{label}</span>
+                  </li>
+                ))}
+              </ol>
+
+              <div>
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <label htmlFor="chatgpt-draft-prompt" className="text-sm font-bold text-slate-900">상품별 실행 요청문</label>
+                  <span className="text-xs text-slate-400">발행은 포함하지 않음</span>
+                </div>
+                <textarea id="chatgpt-draft-prompt" readOnly value={chatGptDraftHandoff.prompt} className="h-48 w-full resize-none rounded-2xl border border-slate-200 bg-slate-950 p-4 font-mono text-xs leading-5 text-slate-100 outline-none focus:ring-2 focus:ring-violet-400" />
+              </div>
+
+              <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                <button type="button" onClick={() => void handleCopyChatGptDraftPrompt()} className="rounded-xl border border-slate-300 px-5 py-3 text-sm font-bold text-slate-700 hover:bg-slate-50">요청문만 복사</button>
+                <button type="button" onClick={handleCopyAndOpenChatGpt} className="rounded-xl bg-violet-600 px-5 py-3 text-sm font-black text-white shadow-lg shadow-violet-200 hover:bg-violet-700">복사하고 ChatGPT 열기 ↗</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {draftPreview && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4" role="dialog" aria-modal="true" aria-label="고품질 초안 미리보기">
-          <div className="flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+          <div className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
             <div className="flex items-start justify-between border-b border-slate-200 px-6 py-4">
               <div>
                 <p className="text-xs font-semibold text-violet-600">{draftPreview.connectKind === "SHOPPING" ? "쇼핑커넥트" : "여행커넥트"} 고품질 패키지</p>
                 <h2 className="mt-1 text-xl font-bold text-slate-900">{draftPreview.title}</h2>
-                <p className="mt-1 text-xs text-slate-500">{draftPreview.imagePolicy === "LOCKED_PRODUCT_OR_ORIGINAL" ? "상품 원본 잠금 적용 · 변형 금지" : "여행 전용 에디토리얼 이미지"}</p>
+                <p className="mt-1 text-xs text-slate-500">{draftPreview.imagePolicy === "LOCKED_PRODUCT_OR_ORIGINAL" ? "상품 원본 잠금 적용 · 변형 금지" : "여행 전용 에디토리얼 이미지"} · {draftPreview.composition?.contractVersion || "호환 초안"}</p>
               </div>
               <button onClick={() => setDraftPreview(null)} className="rounded-lg px-3 py-1 text-slate-500 hover:bg-slate-100">닫기</button>
             </div>
-            <pre className="flex-1 overflow-auto whitespace-pre-wrap px-6 py-5 text-sm leading-7 text-slate-700">{draftPreview.markdown}</pre>
+            <div className="flex gap-1 border-b border-slate-200 bg-slate-50 px-6 pt-3">
+              {([
+                ["post", "글"],
+                ["images", `이미지 ${draftImageActual}장`],
+                ["thumbnail", "썸네일"],
+                ["quality", `품질검사 ${draftPreview.contentQuality?.score ?? draftPreview.composition?.qualityReport.score ?? "-"}점`],
+              ] as const).map(([tab, label]) => (
+                <button key={tab} type="button" onClick={() => setDraftPreviewTab(tab)} className={`rounded-t-lg px-4 py-2 text-sm font-semibold ${draftPreviewTab === tab ? "bg-white text-violet-700 shadow-sm ring-1 ring-slate-200" : "text-slate-500 hover:text-slate-900"}`}>{label}</button>
+              ))}
+            </div>
+            <div className="flex-1 overflow-auto px-6 py-5">
+              {draftPreviewTab === "post" && (
+                <pre className="whitespace-pre-wrap text-sm leading-7 text-slate-700">{draftPreview.markdown}</pre>
+              )}
+              {draftPreviewTab === "images" && (
+                <div className="space-y-5">
+                  <div className="flex flex-col gap-4 rounded-2xl border border-violet-200 bg-violet-50 p-5 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="text-xs font-black uppercase tracking-[0.14em] text-violet-600">Image coverage</p>
+                      <p className="mt-1 text-lg font-black text-slate-950">현재 {draftImageActual}장 · 최소 {draftImageMinimum}장 · 권장 {draftImageRecommended}장</p>
+                      <p className="mt-1 text-sm text-slate-600">
+                        {draftMissingImageCount > 0
+                          ? `필수 파트에 ${draftMissingImageCount}장이 부족합니다. 필요한 슬롯만 자동 생성합니다.`
+                          : "필수 파트는 모두 채워졌습니다. 원하는 파트에만 이미지를 더 추가할 수 있습니다."}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void handleGenerateMissingDraftImages()}
+                      disabled={Boolean(draftImageActionKey) || draftMissingImageCount === 0}
+                      className="shrink-0 rounded-xl bg-violet-600 px-4 py-3 text-sm font-black text-white shadow-lg shadow-violet-200 hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      {draftImageActionKey === "missing" ? "필수 이미지 생성 중…" : "부족 이미지 자동 생성"}
+                    </button>
+                  </div>
+
+                  {(draftPreview.imageAssets || []).filter((asset) => asset.role === "hero").map((asset) => (
+                    <div key={`hero-${asset.assetKey}`} className="rounded-2xl border border-slate-200 p-4">
+                      <div className="mb-3 flex items-center justify-between gap-3">
+                        <div><p className="text-xs font-bold text-violet-600">대표 썸네일</p><p className="mt-1 text-sm font-semibold text-slate-700">{brandImageProvenanceLabel(asset.provenance)}</p></div>
+                        <button
+                          type="button"
+                          onClick={() => void handleRegenerateDraftImage(asset.assetKey)}
+                          disabled={Boolean(draftImageActionKey)}
+                          className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+                        >
+                          {draftImageActionKey === `asset:${asset.assetKey}` ? "재생성 중…" : "이 썸네일 다시 생성"}
+                        </button>
+                      </div>
+                      <div className="max-w-xs overflow-hidden rounded-xl bg-slate-100">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={asset.previewUrl} alt={`${draftPreview.title} 대표 썸네일`} className="aspect-square w-full object-cover" />
+                      </div>
+                    </div>
+                  ))}
+
+                  {draftPreview.imageSlots?.length ? draftPreview.imageSlots.map((slot, index) => (
+                    <div key={slot.sectionId} className={`rounded-2xl border p-4 ${slot.missing > 0 ? "border-amber-300 bg-amber-50/50" : "border-slate-200"}`}>
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div>
+                          <p className="text-xs font-bold text-violet-600">{index + 1}. {slot.sectionId}</p>
+                          <h3 className="mt-1 font-semibold text-slate-900">{slot.title}</h3>
+                          <p className="mt-2 text-sm text-slate-600">{slot.intent}</p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-2">
+                          <span className={`rounded-full px-2.5 py-1 text-xs font-bold ${slot.missing > 0 ? "bg-amber-200 text-amber-900" : "bg-emerald-100 text-emerald-700"}`}>
+                            {slot.count}장 · 최소 {slot.minimum}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => void handleGenerateDraftSectionImage(slot.sectionId)}
+                            disabled={Boolean(draftImageActionKey) || slot.count >= slot.maximum}
+                            className="rounded-lg border border-violet-300 bg-white px-3 py-2 text-xs font-bold text-violet-700 hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            {draftImageActionKey === `section:${slot.sectionId}` ? "추가 중…" : "+ 이미지 추가"}
+                          </button>
+                        </div>
+                      </div>
+                      {slot.assets.length > 0 ? (
+                        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                          {slot.assets.map((asset, assetIndex) => (
+                            <figure key={`${asset.assetKey}-${assetIndex}`} className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                              <div className="aspect-[4/3] overflow-hidden bg-slate-100">
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img src={asset.previewUrl} alt={`${slot.title} 이미지 ${assetIndex + 1}`} className="h-full w-full object-cover" />
+                              </div>
+                              <figcaption className="flex items-center justify-between gap-2 p-3">
+                                <span className="truncate text-xs font-semibold text-slate-500">{brandImageProvenanceLabel(asset.provenance)}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => void handleRegenerateDraftImage(asset.assetKey)}
+                                  disabled={Boolean(draftImageActionKey)}
+                                  className="shrink-0 rounded-lg bg-slate-900 px-2.5 py-1.5 text-xs font-bold text-white hover:bg-slate-700 disabled:opacity-40"
+                                >
+                                  {draftImageActionKey === `asset:${asset.assetKey}` ? "생성 중…" : "다시 생성"}
+                                </button>
+                              </figcaption>
+                            </figure>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="mt-4 flex min-h-28 items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white p-5 text-center text-sm text-slate-400">
+                          아직 배치된 이미지가 없습니다.
+                        </div>
+                      )}
+                    </div>
+                  )) : <p className="rounded-xl bg-slate-50 p-5 text-sm text-slate-500">기존 v1 초안입니다. 다시 만들면 이미지 미리보기와 파트별 추가 생성을 사용할 수 있습니다.</p>}
+                </div>
+              )}
+              {draftPreviewTab === "thumbnail" && (
+                <div className="grid gap-6 md:grid-cols-[minmax(0,520px)_1fr]">
+                  <div className="aspect-square overflow-hidden rounded-2xl bg-slate-950">
+                    {draftPreview.heroPreviewDataUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={draftPreview.heroPreviewDataUrl} alt="초안 대표 썸네일" className="h-full w-full object-contain" />
+                    ) : <div className="flex h-full items-center justify-center p-8 text-center text-sm text-slate-400">대표 이미지 미리보기를 불러올 수 없습니다.</div>}
+                  </div>
+                  <div className="space-y-3">
+                    <div className="rounded-xl border border-slate-200 p-4"><p className="text-xs text-slate-500">캔버스</p><p className="mt-1 font-bold text-slate-900">{draftPreview.thumbnailSpec ? `${draftPreview.thumbnailSpec.canvas.width}×${draftPreview.thumbnailSpec.canvas.height} · ${draftPreview.thumbnailSpec.canvas.aspect}` : "기존 비율"}</p></div>
+                    <div className="rounded-xl border border-slate-200 p-4"><p className="text-xs text-slate-500">스타일</p><p className="mt-1 font-bold text-slate-900">{draftPreview.thumbnailSpec?.style || "호환 스타일"}</p></div>
+                    <div className="rounded-xl border border-slate-200 p-4"><p className="text-xs text-slate-500">소스 정책</p><p className="mt-1 text-sm font-semibold text-slate-900">{draftPreview.thumbnailSpec?.sourcePolicy || draftPreview.imagePolicy}</p></div>
+                    <p className="rounded-xl bg-blue-50 p-4 text-sm text-blue-800">작은 라벨·메인 카피·실사 피사체 3요소만 사용합니다. 쇼핑 상품은 원본 RGB와 비율을 잠그고 배경만 연출합니다.</p>
+                    {(draftPreview.imageAssets || []).some((asset) => asset.role === "hero") && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const hero = (draftPreview.imageAssets || []).find((asset) => asset.role === "hero");
+                          if (hero) void handleRegenerateDraftImage(hero.assetKey);
+                        }}
+                        disabled={Boolean(draftImageActionKey)}
+                        className="w-full rounded-xl bg-violet-600 px-4 py-3 text-sm font-black text-white hover:bg-violet-700 disabled:opacity-40"
+                      >
+                        {draftImageActionKey?.startsWith("asset:") ? "썸네일 생성 중…" : "이 썸네일 다시 생성"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+              {draftPreviewTab === "quality" && (
+                draftPreview.composition ? (
+                  <div className="space-y-4">
+                    <div className={`rounded-2xl p-5 ${draftContentQualityPassed ? "bg-emerald-50" : "bg-red-50"}`}>
+                      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+                        <div>
+                          <p className="text-sm font-semibold text-slate-600">원고 내용 QC</p>
+                          <p className="mt-1 text-3xl font-black text-slate-950">{draftPreview.contentQuality?.score ?? "-"}점</p>
+                          <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-700">{draftPreview.contentQuality?.reason || draftPreview.contentQuality?.summary || "이전 버전 초안이라 원고 내용 QC가 저장되어 있지 않습니다."}</p>
+                        </div>
+                        <div className="flex shrink-0 flex-col items-end gap-2">
+                          <span className={`rounded-full px-3 py-1 text-sm font-bold ${draftContentQualityPassed ? "bg-emerald-600 text-white" : "bg-red-600 text-white"}`}>
+                            {draftContentQualityPassed ? "내용 통과" : "내용 보강 필요"}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                    {draftPreview.qualityRepair && (
+                      <div className={`rounded-xl px-4 py-3 text-sm font-semibold ${draftPreview.qualityRepair.applied ? "bg-blue-50 text-blue-800" : "bg-slate-100 text-slate-700"}`}>
+                        자동 보강 이력 · {draftPreview.qualityRepair.note}
+                      </div>
+                    )}
+                    <div className={`rounded-2xl border p-5 ${draftCompositionQualityPassed ? "border-emerald-200" : "border-amber-300 bg-amber-50"}`}>
+                      <div className="flex items-end justify-between gap-4">
+                        <div><p className="text-sm font-semibold text-slate-600">구성·이미지 게이트</p><p className="mt-1 text-2xl font-black text-slate-950">{draftPreview.composition.qualityReport.score}점</p></div>
+                        <span className={`rounded-full px-3 py-1 text-sm font-bold ${draftCompositionQualityPassed ? "bg-emerald-100 text-emerald-700" : "bg-amber-500 text-white"}`}>{draftCompositionQualityPassed ? "구성 통과" : "구성 보완 필요"}</span>
+                      </div>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      {([
+                        ["본문", draftPreview.composition.qualityReport.actual.characters, `${draftPreview.composition.qualityReport.target.characters.min}~${draftPreview.composition.qualityReport.target.characters.max}자`],
+                        ["섹션", draftPreview.composition.qualityReport.actual.sections, `${draftPreview.composition.qualityReport.target.sections.min}~${draftPreview.composition.qualityReport.target.sections.max}개`],
+                        ["이미지", draftPreview.composition.qualityReport.actual.images, `최소 ${draftImageMinimum} · 권장 ${draftImageRecommended}장`],
+                      ] as const).map(([label, actual, target]) => <div key={label} className="rounded-xl border border-slate-200 p-4"><p className="text-xs text-slate-500">{label}</p><p className="mt-1 text-2xl font-black text-slate-900">{actual}</p><p className="text-xs text-slate-400">목표 {target}</p></div>)}
+                    </div>
+                    {draftPreview.contentQuality?.signals.filter((signal) => signal.status === "warn").map((signal) => (
+                      <p key={signal.key} className="rounded-xl bg-amber-50 px-4 py-3 text-sm font-medium text-amber-700">
+                        내용 확인 · {signal.label}
+                      </p>
+                    ))}
+                    {draftPreview.composition.qualityReport.blockers.map((message) => <p key={message} className="rounded-xl bg-red-50 px-4 py-3 text-sm font-medium text-red-700">차단 · {message}</p>)}
+                    {draftPreview.composition.qualityReport.warnings.map((message) => <p key={message} className="rounded-xl bg-amber-50 px-4 py-3 text-sm font-medium text-amber-700">확인 · {message}</p>)}
+                    <p className="rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-600">작성 모드: {draftPreview.composition.experienceMode === "VERIFIED_EXPERIENCE" ? "검증된 실제 체험" : "AI 보조 정보형 · 실제 체험 후기 아님"}</p>
+                  </div>
+                ) : <p className="rounded-xl bg-slate-50 p-5 text-sm text-slate-500">기존 v1 초안입니다. 다시 만들면 품질 점수와 차단 사유를 확인할 수 있습니다.</p>
+              )}
+            </div>
             <div className="flex items-center justify-between gap-3 border-t border-slate-200 px-6 py-4">
               <span className={`text-sm font-semibold ${draftPreview.approvedAt ? "text-emerald-600" : "text-amber-600"}`}>
                 {draftPreview.approvedAt ? "승인 완료 · 발행 결과 고정" : "승인 전 · 아직 발행되지 않음"}
               </span>
               <div className="flex flex-wrap justify-end gap-2">
                 <button onClick={() => { const link = links.find((item) => item.id === draftPreview.brandLinkId); if (link) void handlePrepareBrandDraft(link); }} disabled={Boolean(draftGeneratingId)} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">다시 만들기</button>
-                {!draftPreview.approvedAt && <button onClick={() => void handleApproveBrandDraft()} disabled={draftApproving} className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:opacity-50">{draftApproving ? "승인 중..." : "이 초안 승인"}</button>}
+                {!draftPreview.approvedAt && <button onClick={() => void handleApproveBrandDraft()} disabled={draftApproving || draftApprovalBlocked} title={draftApprovalBlocked ? "품질검사 탭의 차단 항목을 먼저 보완하세요." : undefined} className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-40">{draftApproving ? "승인 중..." : "이 초안 승인"}</button>}
                 {draftPreview.approvedAt && <button onClick={() => { const link = links.find((item) => item.id === draftPreview.brandLinkId); if (link) { setDraftPreview(null); void handleSchedulePublish(link); } }} className="rounded-lg border border-indigo-300 px-4 py-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-50">예약 발행</button>}
                 {draftPreview.approvedAt && <button onClick={() => { const id = draftPreview.brandLinkId; setDraftPreview(null); void handlePublish(id); }} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700">3. 승인본 바로 발행</button>}
               </div>

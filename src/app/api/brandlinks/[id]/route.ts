@@ -67,7 +67,7 @@ export async function DELETE(
 
     const existing = await prisma.brandLink.findUnique({
       where: { id },
-      select: { id: true },
+      select: { id: true, status: true },
     });
 
     if (!existing) {
@@ -77,9 +77,22 @@ export async function DELETE(
       );
     }
     
-    await prisma.brandLink.delete({
-      where: { id },
+    if (existing.status === "DRAFTING" || existing.status === "PUBLISHING") {
+      return NextResponse.json(
+        { success: false, error: "초안 작성 또는 발행 중인 상품은 삭제할 수 없습니다." },
+        { status: 409 },
+      );
+    }
+
+    const deleted = await prisma.brandLink.deleteMany({
+      where: { id, status: { notIn: ["DRAFTING", "PUBLISHING"] } },
     });
+    if (deleted.count !== 1) {
+      return NextResponse.json(
+        { success: false, error: "상품 상태가 변경되어 삭제하지 못했습니다." },
+        { status: 409 },
+      );
+    }
 
     return NextResponse.json({ success: true });
   } catch (error: unknown) {

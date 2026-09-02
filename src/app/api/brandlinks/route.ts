@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { unstable_noStore as noStore } from "next/cache";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { parseConnectKind, toStoredConnectKind } from "@/lib/brandconnect-kind";
+import { readBrandPostPackage } from "@/lib/brand-post-package";
 
 export const dynamic = "force-dynamic";
 
@@ -65,7 +66,28 @@ export async function GET() {
       orderBy: { createdAt: "desc" },
     });
 
-    return NextResponse.json({ success: true, data: links });
+    const data = links.map((link) => {
+      try {
+        const prepared = readBrandPostPackage(link.id);
+        return {
+          ...link,
+          draftPrepared: Boolean(prepared),
+          draftApproved: Boolean(prepared?.approvedAt),
+          draftTitle: prepared?.title || null,
+          draftPreparedAt: prepared?.createdAt || null,
+        };
+      } catch {
+        return {
+          ...link,
+          draftPrepared: false,
+          draftApproved: false,
+          draftTitle: null,
+          draftPreparedAt: null,
+        };
+      }
+    });
+
+    return NextResponse.json({ success: true, data });
   } catch (error: unknown) {
     console.error("링크 조회 실패:", error);
     return NextResponse.json(

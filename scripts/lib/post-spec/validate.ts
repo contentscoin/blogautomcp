@@ -44,9 +44,14 @@ export function validateDraft(spec: PostSpec, draft: GeneratedDraft, options: Va
     sections: [...sectionTexts, spec.disclosure],
     hashtags: draft.hashtags,
     brandLink: options.brandLink,
+    generationSource: "AI",
     hasRepresentativeImage: options.hasRepresentativeImage,
     requireRepresentativeImage: options.requireRepresentativeImage,
     thumbnailGenerated: options.thumbnailGenerated,
+    connectKind: spec.connectKind,
+    sourceDescription: spec.facts.lines.join("\n"),
+    sourceFeatures: spec.facts.lines,
+    mode: "editorial",
   });
 
   for (const signal of gate.signals) {

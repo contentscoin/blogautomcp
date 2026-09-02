@@ -1,13 +1,18 @@
 import fs from "fs";
 import path from "path";
 import { chromium } from "playwright-extra";
-import { Page } from "playwright";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { createTaskLogger } from "./logger";
 
 chromium.use(StealthPlugin());
 
 const log = createTaskLogger("ImageStock");
+
+interface UnsplashPhotoResponse {
+  urls?: {
+    regular?: unknown;
+  };
+}
 
 /**
  * 이미지 다운로드 유틸리티 함수
@@ -51,14 +56,18 @@ async function fetchFromUnsplashAPI(keyword: string): Promise<string | null> {
       log.warn(`Unsplash API 오류: ${res.status}`);
       return null;
     }
-    const data = await res.json() as any;
-    if (data && data.urls && data.urls.regular) {
-      log.info(`Unsplash API로 이미지 찾음`, { keyword, url: data.urls.regular });
-      usedImageUrls.add(data.urls.regular);
-      return data.urls.regular;
+    const data = await res.json() as UnsplashPhotoResponse;
+    const regularUrl = typeof data.urls?.regular === "string" ? data.urls.regular : null;
+    if (regularUrl) {
+      log.info(`Unsplash API로 이미지 찾음`, { keyword, url: regularUrl });
+      usedImageUrls.add(regularUrl);
+      return regularUrl;
     }
-  } catch (e: any) {
-    log.error("Unsplash API 호출 중 예외", e);
+  } catch (error: unknown) {
+    log.error(
+      "Unsplash API 호출 중 예외",
+      error instanceof Error ? error : { error: String(error) }
+    );
   }
   return null;
 }
@@ -91,9 +100,9 @@ async function scrapeUnsplash(keyword: string): Promise<string | null> {
     // Unsplash의 고화질 이미지 URL 추출 (정규식이나 srcset 등 활용)
     // img 태그 중 srcset 속성이 있는 것들 중 가장 큰 이미지를 선택
     const validUrls = await page.evaluate(() => {
-      // @ts-ignore
-      const doc = document;
-      const imgElements = Array.from(doc.querySelectorAll('figure img[srcset]')) as any[];
+      const imgElements = Array.from(
+        document.querySelectorAll<HTMLImageElement>('figure img[srcset]')
+      );
       // 찾은 이미지 중 무료 이미지를 모두 수집
       const urls: string[] = [];
       for (const img of imgElements) {

@@ -8,6 +8,13 @@
       "when": 1787749129330,
       "tag": "0000_opposite_molten_man",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1787963584922,
+      "tag": "0001_mushy_katie_power",
+      "breakpoints": true
     }
   ]
 }
