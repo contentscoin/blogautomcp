@@ -449,6 +449,65 @@ async function main() {
   assert.equal(refreshedStaleFlow?.contentQuality?.code, "ok");
   assert.ok(store.approveBrandPostPackage(staleFlowId).approvedAt);
 
+  const limitationFalsePositiveId = "fixture-brand-link-v2-limitation-false-positive";
+  const limitationFalsePositiveDir = store.getBrandPostPackageDir(limitationFalsePositiveId);
+  fs.mkdirSync(limitationFalsePositiveDir, { recursive: true });
+  const limitationMarkdown = path.join(limitationFalsePositiveDir, "post.md");
+  fs.writeFileSync(limitationMarkdown, "# 제품 제약 의미 판정 복구 테스트", "utf8");
+  const limitationSections = naturalSections.map((section, index) =>
+    index === 3
+      ? "사용 조건에 따른 차이\n\n향은 건조 환경과 취향에 따라 체감이 달라질 수 있습니다. 반대로 처음 접하는 향이라면 3개 구성이 부담이 될 수 있어요. 객관적인 성능 수치는 확인되지 않았습니다."
+      : section,
+  );
+  const limitationComposition = {
+    ...staleComposition,
+    sections: staleComposition.sections.map((section, index) => ({
+      ...section,
+      title: limitationSections[index]?.split("\n")[0] || section.title,
+      body: [limitationSections[index]?.split("\n\n").slice(1).join("\n\n") || section.body.join("\n")],
+    })),
+  };
+  fs.writeFileSync(store.getBrandPostPackageManifestPath(limitationFalsePositiveId), JSON.stringify({
+    ...v2Manifest,
+    brandLinkId: limitationFalsePositiveId,
+    connectKind: "SHOPPING",
+    title: "제품 제약 의미 판정 복구",
+    markdownPath: limitationMarkdown,
+    composition: limitationComposition,
+    contentQuality: {
+      canPublish: false,
+      verdict: "quality",
+      code: "missing-review-substance",
+      reason: "상품 고유 리뷰 요소가 부족합니다: 제품 자체의 단점·제약",
+      score: 96,
+      sectionCount: limitationSections.length,
+      hashtagCount: 3,
+      totalLength: limitationSections.join("\n").length,
+      coveredProductTokens: ["섬유유연제"],
+      missingProductTokens: [],
+      signals: [
+        { key: "review-substance", label: "제품 특장점·활용법·후기 근거 리뷰", status: "fail" },
+        { key: "editorial-flow", label: "제품정체-기능원리-사용법-장단점-결론 흐름", status: "pass" },
+      ],
+      summary: "커넥트 글 품질 미달",
+      blockers: [],
+      quality: {
+        score: 96,
+        passScore: 70,
+        categories: [
+          { key: "usefulness", label: "구매 판단에 필요한 요소", maxScore: 15, score: 11, status: "fail", notes: ["제품 자체의 단점·제약"] },
+        ],
+        repetition: { nearDuplicateCount: 0, exactDuplicateCount: 0, duplicateOpeningCount: 0, samples: [] },
+        generic: { sentenceCount: 20, guidanceCount: 0, generalStatementCount: 0, guidanceRatio: 0, generalRatio: 0, threshold: 0.24 },
+      },
+    },
+  }, null, 2));
+  const refreshedLimitationFalsePositive = store.readBrandPostPackage(limitationFalsePositiveId);
+  assert.equal(refreshedLimitationFalsePositive?.contentQuality?.canPublish, true);
+  assert.equal(refreshedLimitationFalsePositive?.contentQuality?.score, 100);
+  assert.equal(refreshedLimitationFalsePositive?.contentQuality?.signals[0]?.status, "pass");
+  assert.ok(store.approveBrandPostPackage(limitationFalsePositiveId).approvedAt);
+
   const generatedBodyPath = path.join(userData, "generated-body.png");
   fs.writeFileSync(generatedBodyPath, "generated-body-v1");
   const withGeneratedBody = store.applyGeneratedBrandPostImage({

@@ -9,7 +9,10 @@ import {
   sectionImageBounds,
   type ResolvedPostDocumentV1,
 } from "./post-composition-contract";
-import { assessProductEditorialCoverage } from "../../scripts/lib/product-editorial-plan";
+import {
+  assessProductEditorialCoverage,
+  hasProductLimitationLanguage,
+} from "../../scripts/lib/product-editorial-plan";
 
 export interface BrandPostPackageImageAsset {
   path: string;
@@ -215,6 +218,62 @@ export function readBrandPostPackage(brandLinkId: string): BrandPostPackageManif
           score,
           signals,
           summary: `커넥트 글 발행 게이트 통과 (${score}점, 신호 ${signals.length}/${signals.length})`,
+        },
+      };
+      writeBrandPostPackageManifest(parsed);
+    }
+  }
+
+  // 이전 의미 판정기는 "부담이 될 수 있어요", "성능 수치는 확인되지
+  // 않았습니다"처럼 실제 제약을 설명한 문장도 '단점'이라는 단어가 없으면
+  // 누락으로 보았다. 다른 실패가 없고 이 단일 오탐만 남은 저장 초안은 현재
+  // 판정 의미에 맞게 복구해 다시 생성하지 않아도 승인할 수 있게 한다.
+  if (
+    parsed.version === "brand-post-package/v2" &&
+    parsed.connectKind === "SHOPPING" &&
+    parsed.contentQuality &&
+    !parsed.contentQuality.canPublish &&
+    parsed.contentQuality.code === "missing-review-substance" &&
+    parsed.contentQuality.reason?.trim() === "상품 고유 리뷰 요소가 부족합니다: 제품 자체의 단점·제약"
+  ) {
+    const corpus = parsed.composition.sections
+      .map((section) => `${section.title}\n${section.body.join("\n")}`)
+      .join("\n");
+    const otherFailures = parsed.contentQuality.signals.filter(
+      (signal) => signal.key !== "review-substance" && signal.status === "fail",
+    );
+    if (hasProductLimitationLanguage(corpus) && otherFailures.length === 0) {
+      const signals = parsed.contentQuality.signals.map((signal) =>
+        signal.key === "review-substance" ? { ...signal, status: "pass" as const } : signal,
+      );
+      const usefulness = parsed.contentQuality.quality?.categories.find(
+        (category) => category.key === "usefulness",
+      );
+      const recoveredPoints = usefulness ? usefulness.maxScore - usefulness.score : 0;
+      const quality = parsed.contentQuality.quality
+        ? {
+            ...parsed.contentQuality.quality,
+            score: Math.min(100, parsed.contentQuality.quality.score + recoveredPoints),
+            categories: parsed.contentQuality.quality.categories.map((category) =>
+              category.key === "usefulness"
+                ? { ...category, score: category.maxScore, status: "pass" as const, notes: [] }
+                : category,
+            ),
+          }
+        : undefined;
+      const score = quality?.score ?? parsed.contentQuality.score;
+      parsed = {
+        ...parsed,
+        contentQuality: {
+          ...parsed.contentQuality,
+          canPublish: true,
+          verdict: "pass",
+          code: "ok",
+          reason: null,
+          score,
+          signals,
+          summary: `커넥트 글 발행 게이트 통과 (품질 ${score}점, 신호 ${signals.length}/${signals.length})`,
+          ...(quality ? { quality } : {}),
         },
       };
       writeBrandPostPackageManifest(parsed);

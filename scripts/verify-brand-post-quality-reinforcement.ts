@@ -267,6 +267,20 @@ const naturalShoppingSubstance = assessProductReviewSubstance({
 });
 assert.equal(naturalShoppingSubstance.coveredReviewEvidence.length, 1);
 assert.ok(naturalShoppingSubstance.usageInstructionCount >= 2);
+const semanticLimitationSubstance = assessProductReviewSubstance({
+  productName: "칸토 섬유유연제 1.3L 3개입",
+  sections: [
+    "향과 사용량\n\n칸토 섬유유연제는 1.3L 파우치 3개 구성입니다. 권장량을 계량해 사용하고 원래 용기에 밀봉해 보관합니다. 향은 건조 환경과 취향에 따라 체감이 달라질 수 있습니다.",
+    "구성을 고를 때\n\n향이 맞아 꾸준히 쓰는 가정에는 편리합니다. 반대로 처음 접하는 향이라면 3개 구성이 부담이 될 수 있어요. 객관적인 탈취 성능 수치는 확인되지 않았습니다.",
+  ],
+  sourceDescription: "고농축 퍼퓸 섬유유연제 일반 드럼 세탁기 겸용",
+  sourceFeatures: ["1.3L 파우치 3개", "7~10kg 세탁물 14~23ml"],
+});
+assert.equal(
+  semanticLimitationSubstance.missingElements.includes("제품 자체의 단점·제약"),
+  false,
+  "부담·취향 의존·미확인 성능을 명시한 문장은 제품 제약으로 인정해야 합니다.",
+);
 const detailReadingSubstance = assessProductReviewSubstance({
   productName: "블라우풍트 5in1 3헤드 전기면도기",
   sections: Array.from({ length: 6 }, (_, index) =>
