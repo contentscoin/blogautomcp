@@ -18,7 +18,7 @@ const LEGACY_PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26'] as const;
 const SUPPORTED_PROTOCOLS = [MODERN_PROTOCOL, ...LEGACY_PROTOCOLS] as const;
 const RESPONSE_HEADERS = { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff' };
 const CONNECT_KINDS = ['shopping', 'travel'];
-const SERVER_INFO = { name: 'BlogAutoMCP', version: '1.3.0' };
+const SERVER_INFO = { name: 'BlogAutoMCP', version: '1.3.1' };
 const SERVER_INSTRUCTIONS = [
   '승인된 한 대의 Windows PC에서 네이버 쇼핑커넥트·여행커넥트 작업을 수행합니다. 대부분의 도구는 작업(jobId)을 큐에 넣고 즉시 반환하며, job_get 으로 진행 단계(stage)와 결과를 확인합니다.',
   '기본 흐름: brandconnect_sync_products → brandconnect_list_products → post_create_draft(PC 가 OpenAI 키로 Spec-first 생성·검증) → post_get_draft(검토, readiness 확인) → 필요 시 post_revise_draft / post_set_thumbnail → post_approve_draft → post_publish 또는 post_schedule(confirmed=true).',
