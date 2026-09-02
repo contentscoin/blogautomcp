@@ -30,6 +30,7 @@ import {
   stripAffiliateDisclosureFromTitle,
 } from "@/lib/post-composition-contract";
 import { readCodexLocalStatus } from "@/lib/codex-local";
+import { readProductSnapshot } from "@/lib/draft-context-snapshot";
 
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
 
@@ -323,6 +324,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     experienceNotes?: string;
     memo?: string;
     draft?: unknown;
+    contextSnapshot?: unknown;
     forceQualityRepair?: boolean;
     autoApprove?: boolean;
   };
@@ -419,6 +421,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const scriptPath = path.join(process.cwd(), "scripts", "simple-agent.ts");
   const contextPath = path.join(packageDir, "mcp-draft-context.json");
   const submittedDraftPath = path.join(packageDir, "mcp-generated-draft.json");
+  const submittedContextPath = path.join(packageDir, "mcp-submitted-context.json");
   const finishDraftActivity = beginDesktopActivity(
     action === "prepare_context"
       ? "mcp-draft-context"
@@ -449,7 +452,20 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     }
     if (action === "submit_generated") {
       if (!submittedDraft) throw new Error("검증된 ChatGPT 원고가 없습니다.");
+      const suppliedContext = body.contextSnapshot && typeof body.contextSnapshot === "object" && !Array.isArray(body.contextSnapshot)
+        ? body.contextSnapshot as Record<string, unknown>
+        : fs.existsSync(contextPath)
+          ? JSON.parse(fs.readFileSync(contextPath, "utf8")) as Record<string, unknown>
+          : null;
+      const submittedSnapshot = readProductSnapshot(suppliedContext?.snapshot, { productId: id, connectKind });
+      if (!suppliedContext || !submittedSnapshot || suppliedContext.snapshotId !== submittedSnapshot.snapshotId) {
+        throw new PrepareProcessError(
+          "PRODUCT_SNAPSHOT_CHANGED",
+          "초안 생성 시점의 상품 스냅샷이 없거나 무결성 검증에 실패했습니다. 같은 contextJobId로 다시 제출하세요.",
+        );
+      }
       fs.writeFileSync(submittedDraftPath, JSON.stringify(submittedDraft, null, 2), "utf8");
+      fs.writeFileSync(submittedContextPath, JSON.stringify(suppliedContext, null, 2), "utf8");
       fs.rmSync(getBrandPostPackageManifestPath(id), { force: true });
     }
     if (!action) {
@@ -470,6 +486,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           BRANDLINK_PREPARE_OUTPUT_DIR: action === "prepare_context" ? "" : packageDir,
           BRANDLINK_DRAFT_CONTEXT_OUTPUT: action === "prepare_context" ? contextPath : "",
           BRANDLINK_GENERATED_DRAFT_PATH: action === "submit_generated" ? submittedDraftPath : "",
+          BRANDLINK_SUBMITTED_CONTEXT_PATH: action === "submit_generated" ? submittedContextPath : "",
           BRANDLINK_DRAFT_MEMO: requestMemo,
           ...buildChatGptBrowserAutomationEnv(useBrowserChatGpt),
           AI_PROVIDER: useCodex ? "codex" : provider,
@@ -511,7 +528,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         throw new PrepareProcessError(failure?.code || "LOCAL_AUTOMATION_FAILED", failure?.message || `초안 컨텍스트가 생성되지 않았습니다: ${contextPath}`);
       }
       const contextData = JSON.parse(fs.readFileSync(contextPath, "utf8")) as Record<string, unknown>;
-      if (contextData.version !== "brand-draft-context/v1") {
+      if (contextData.version !== "brand-draft-context/v1" && contextData.version !== "brand-draft-context/v2") {
         throw new Error("초안 컨텍스트 형식이 올바르지 않습니다.");
       }
       await prisma.brandLink.update({
@@ -591,6 +608,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     fs.closeSync(logFd);
     if (action === "submit_generated") {
       fs.rmSync(submittedDraftPath, { force: true });
+      fs.rmSync(submittedContextPath, { force: true });
     }
   }
 }

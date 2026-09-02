@@ -80,9 +80,9 @@ async function main() {
     "승인된 초안은 상품 상세페이지 브라우저를 열기 전에 먼저 불러와야 합니다.",
   );
   assert.equal(
-    simpleAgentSource.includes("const needsLiveRefresh = !preparedPostOverride && ("),
+    simpleAgentSource.includes("const needsLiveRefresh = !preparedPostOverride && !submittedSnapshot && ("),
     true,
-    "승인된 초안 발행은 상품 상세페이지 재수집을 건너뛰어야 합니다.",
+    "승인된 초안 발행과 고정 스냅샷 제출은 상품 상세페이지 재수집을 건너뛰어야 합니다.",
   );
   assert.equal(
     simpleAgentSource.includes('manifest.generationSource !== "AI" && manifest.generationSource !== "PREPARED_APPROVED"'),

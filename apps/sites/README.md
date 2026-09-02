@@ -63,12 +63,12 @@ pwsh -NoProfile -File scripts/verify-oauth-e2e.ps1 -BaseUrl http://localhost:300
 
 D1 테이블 정의는 `db/schema.ts`, 런타임 안전 초기화는 `db/init.ts`, 배포 마이그레이션은 `drizzle/`에 있습니다. 별도의 PostgreSQL 서버는 필요하지 않습니다.
 
-## MCP 도구 (서버 1.3.0, 25개)
+## MCP 도구 (서버 1.3.7, 25개)
 
 `agent_get_status`, `brandconnect_list_categories`, `brandconnect_list_products`, `brandconnect_sync_products`, `post_create_draft`, `post_prepare_draft`, `post_submit_draft`, `post_get_draft`, `post_revise_draft`, `post_approve_draft`, `post_set_thumbnail`, `thumbnail_prepare`, `thumbnail_apply_generated`, `blog_profile_get`, `blog_profile_prepare_update`, `blog_profile_apply_update`, `blog_design_get`, `post_publish`, `post_schedule`, `post_bulk_schedule`, `post_verify_published`, `travel_capture_contract`, `settings_get`, `job_get`, `job_cancel`.
 
 - ChatGPT 커넥터는 OAuth 고정 주소(`/api/mcp`)와 MCP URL(`/api/mcp/{credential}`) 두 경로로 연결할 수 있으며 같은 도구를 제공합니다.
-- 초안은 `post_create_draft`(PC 가 OpenAI 키로 Spec-first 생성)가 기본이고, 키가 없는 PC 는 `post_prepare_draft → post_submit_draft` 2단계 경로를 씁니다.
+- 초안은 `post_create_draft`(PC 가 OpenAI 키로 Spec-first 생성)가 기본이고, 키가 없는 PC 는 `post_prepare_draft → post_submit_draft` 2단계 경로를 씁니다. 2단계 제출은 `contextJobId`의 상품 스냅샷을 고정해 목록 재조회 중 상품명·URL이 바뀌어도 다른 상품 데이터와 섞이지 않습니다.
 
 - 큐 작업은 claim 시 120초 임대를 받고, PC 가 30초마다 하트비트로 임대를 연장하며 진행 단계(`stage`)를 올립니다. 임대가 끊기면 `AGENT_LOST` 로 회수됩니다.
 - 결과는 `blogautomcp.job-result/v1` 봉투(`summary`, `data`, `readiness`, `warnings`)이며 PC 파일 경로를 포함하지 않습니다. 실패 코드는 `docs/mcp-saas-local-agent-product-plan.md` 상단 표를 참고하세요.

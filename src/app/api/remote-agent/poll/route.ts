@@ -388,6 +388,65 @@ async function heroImagePayload(heroImagePath: unknown): Promise<{ base64: strin
   }
 }
 
+async function uploadRemoteImageAsset(imagePath: string): Promise<string | null> {
+  if (!fs.existsSync(imagePath)) return null;
+  const remote = config();
+  if (!remote.siteUrl || !remote.token) return null;
+  const image = fs.readFileSync(imagePath);
+  const contentType = image[0] === 0xff && image[1] === 0xd8 && image[2] === 0xff
+    ? "image/jpeg"
+    : image.subarray(0, 4).toString("ascii") === "RIFF" && image.subarray(8, 12).toString("ascii") === "WEBP"
+      ? "image/webp"
+      : image[0] === 0x89 && image.subarray(1, 4).toString("ascii") === "PNG"
+        ? "image/png"
+        : null;
+  if (!contentType) return null;
+  const response = await fetch(`${remote.siteUrl}/api/agent/assets`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${remote.token}`, "content-type": contentType },
+    body: image,
+    cache: "no-store",
+  });
+  const payload = await response.json().catch(() => null) as { data?: { url?: unknown } } | null;
+  const url = payload?.data?.url;
+  return response.ok && typeof url === "string" && url.startsWith("https://") ? url : null;
+}
+
+async function uploadDraftImageAssets(preview: DraftPreview): Promise<Array<{ role: "hero" | "body"; sectionIndex: number | null; url: string }>> {
+  const heroPath = typeof preview.heroImagePath === "string" ? preview.heroImagePath : null;
+  const bodyPaths = Array.isArray(preview.bodyImagePaths)
+    ? preview.bodyImagePaths.filter((value): value is string => typeof value === "string")
+    : [];
+  const sectionByPath = new Map<string, number>();
+  if (Array.isArray(preview.imageSlots)) {
+    preview.imageSlots.forEach((slot, sectionIndex) => {
+      if (!slot || typeof slot !== "object" || Array.isArray(slot)) return;
+      const assets = (slot as Record<string, unknown>).assets;
+      if (!Array.isArray(assets)) return;
+      for (const asset of assets) {
+        if (!asset || typeof asset !== "object" || Array.isArray(asset)) continue;
+        const imagePath = (asset as Record<string, unknown>).path;
+        if (typeof imagePath === "string") sectionByPath.set(path.resolve(imagePath), sectionIndex);
+      }
+    });
+  }
+  const candidates = [
+    ...(heroPath ? [{ role: "hero" as const, sectionIndex: null, path: heroPath }] : []),
+    ...bodyPaths.map((imagePath) => ({
+      role: "body" as const,
+      sectionIndex: sectionByPath.get(path.resolve(imagePath)) ?? null,
+      path: imagePath,
+    })),
+  ];
+  const uploaded = await Promise.all(candidates.map(async (candidate) => ({
+    ...candidate,
+    url: await uploadRemoteImageAsset(candidate.path).catch(() => null),
+  })));
+  return uploaded
+    .filter((item): item is typeof item & { url: string } => typeof item.url === "string")
+    .map(({ role, sectionIndex, url }) => ({ role, sectionIndex, url }));
+}
+
 function readinessSummary(readiness: unknown): string {
   if (!readiness || typeof readiness !== "object") return "검증 정보 없음";
   const record = readiness as Record<string, unknown>;
@@ -556,8 +615,10 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     const preview = (payload.data || {}) as DraftPreview;
     if (typeof payload.imageRepairWarning === "string") ctx.warnings.push(payload.imageRepairWarning);
     const view = draftView(productId, preview, true);
+    const imageAssets = await uploadDraftImageAssets(preview);
+    if (imageAssets.length === 0) ctx.warnings.push("초안 이미지를 HTTPS 미리보기 주소로 업로드하지 못했습니다.");
     const readiness = draftReadiness(preview);
-    return envelope(job, "draft", `초안 생성 완료 — ${readinessSummary(readiness)}. 검토 후 post_approve_draft 로 승인하세요.`, view, ctx, { readiness });
+    return envelope(job, "draft", `초안 생성 완료 — ${readinessSummary(readiness)}. 검토 후 post_approve_draft 로 승인하세요.`, { ...view, imageAssets }, ctx, { readiness });
   }
 
   if (job.type === "POST_PREPARE_DRAFT") {
@@ -592,6 +653,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
         experienceMode: input.experienceMode,
         experienceNotes: input.experienceNotes,
         draft: input.draft,
+        contextSnapshot: input.contextSnapshot,
       }),
     });
     const preview = (response.data || {}) as DraftPreview;
@@ -605,9 +667,11 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     } | null | undefined;
     const requiresRepair = Boolean(contentQuality && contentQuality.canPublish === false);
     const view = draftView(productId, preview, false);
+    const imageAssets = await uploadDraftImageAssets(preview);
+    if (imageAssets.length === 0) ctx.warnings.push("초안 이미지를 HTTPS 미리보기 주소로 업로드하지 못했습니다.");
     return envelope(job, "draft", requiresRepair
       ? `원고는 저장됐지만 품질 보강이 필요합니다: ${contentQuality?.reason || contentQuality?.summary || "근거 밀도 미달"}`
-      : "ChatGPT 원고를 PC에서 검증하고 승인 대기 초안 패키지로 저장했습니다.", { ...view, requiresRepair }, ctx, {
+      : "ChatGPT 원고를 PC에서 검증하고 승인 대기 초안 패키지로 저장했습니다.", { ...view, requiresRepair, imageAssets }, ctx, {
       readiness: draftReadiness(preview),
       contentQuality: contentQuality
         ? {
@@ -695,6 +759,8 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     const qc = data.qc as { score?: number; passed?: boolean } | null | undefined;
     if (engine === "local" && metaData.engine !== "local") ctx.warnings.push("gpt-image 결과가 QC 를 통과하지 못해 로컬 합성 썸네일로 저장했습니다.");
     const heroSmall = typeof data.outputPath === "string" ? await heroImagePayload(data.outputPath) : null;
+    const heroImageUrl = typeof data.outputPath === "string" ? await uploadRemoteImageAsset(data.outputPath).catch(() => null) : null;
+    if (!heroImageUrl) ctx.warnings.push("썸네일 HTTPS 미리보기 업로드에 실패해 인라인 이미지만 반환했습니다.");
     return envelope(job, "thumbnail", `썸네일 저장 완료 (${engine}${typeof qc?.score === "number" ? `, QC ${qc.score}점` : ""}, ${data.attempts ?? 0}회 시도). 다음 초안 생성/발행부터 이 썸네일을 사용합니다.`, {
       draftId,
       engine,
@@ -702,6 +768,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
       copy: data.copy ?? { headline, subline },
       qc: qc ?? null,
       attempts: data.attempts ?? null,
+      ...(heroImageUrl ? { heroImageUrl } : {}),
       ...(heroSmall ? { heroImage: heroSmall } : {}),
     }, ctx);
   }
@@ -787,6 +854,8 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
         create: { key: productThumbnailSettingKey(productId), value: settingValue },
       });
       const heroSmall = await heroImagePayload(result.outputPath);
+      const heroImageUrl = await uploadRemoteImageAsset(result.outputPath).catch(() => null);
+      if (!heroImageUrl) ctx.warnings.push("썸네일 HTTPS 미리보기 업로드에 실패해 인라인 이미지만 반환했습니다.");
       return envelope(job, "thumbnail", "ChatGPT 생성 배경과 원본을 합성해 썸네일로 저장했습니다.", {
         applied: true,
         productId,
@@ -797,6 +866,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
         layoutId: layoutId || (kind === "SHOPPING" ? "shopping-color-block" : "travel-cinematic"),
         candidateId: readString(input, "candidateId") || null,
         updatedAt,
+        ...(heroImageUrl ? { heroImageUrl } : {}),
         ...(heroSmall ? { heroImage: heroSmall } : {}),
       }, ctx);
     } finally {

@@ -18,7 +18,7 @@ const LEGACY_PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26'] as const;
 const SUPPORTED_PROTOCOLS = [MODERN_PROTOCOL, ...LEGACY_PROTOCOLS] as const;
 const RESPONSE_HEADERS = { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff' };
 const CONNECT_KINDS = ['shopping', 'travel'];
-const SERVER_INFO = { name: 'BlogAutoMCP', version: '1.3.1' };
+const SERVER_INFO = { name: 'BlogAutoMCP', version: '1.3.7' };
 const SERVER_INSTRUCTIONS = [
   '승인된 한 대의 Windows PC에서 네이버 쇼핑커넥트·여행커넥트 작업을 수행합니다. 대부분의 도구는 작업(jobId)을 큐에 넣고 즉시 반환하며, job_get 으로 진행 단계(stage)와 결과를 확인합니다.',
   '기본 흐름: brandconnect_sync_products → brandconnect_list_products → post_create_draft(PC 가 OpenAI 키로 Spec-first 생성·검증) → post_get_draft(검토, readiness 확인) → 필요 시 post_revise_draft / post_set_thumbnail → post_approve_draft → post_publish 또는 post_schedule(confirmed=true).',
@@ -54,6 +54,7 @@ interface ToolDefinition {
 
 /** 이 릴리스에서 추가된 작업 타입을 이해하는 데스크톱 최소 버전. */
 const V2_TOOLS_MIN_APP = '1.3.0';
+const DRAFT_SNAPSHOT_MIN_APP = '1.3.7';
 const THUMBNAIL_LAYOUTS = ['auto', 'clean-editorial', 'color-block', 'soft-lifestyle', 'cinematic', 'emotional-record', 'route'];
 
 const TOOLS: ToolDefinition[] = [
@@ -111,6 +112,7 @@ const TOOLS: ToolDefinition[] = [
     outputSchema: JOB_RESULT_SCHEMA,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     jobType: 'POST_PREPARE_DRAFT',
+    minAppVersion: DRAFT_SNAPSHOT_MIN_APP,
     requiresIdempotency: true,
   },
   {
@@ -136,12 +138,13 @@ const TOOLS: ToolDefinition[] = [
         },
         idempotencyKey: IDEMPOTENCY,
       },
-      required: ['connectKind', 'productId', 'contextJobId', 'draft', 'idempotencyKey'],
+      required: ['contextJobId', 'draft', 'idempotencyKey'],
       additionalProperties: false,
     },
     outputSchema: JOB_RESULT_SCHEMA,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     jobType: 'POST_SUBMIT_DRAFT',
+    minAppVersion: DRAFT_SNAPSHOT_MIN_APP,
     requiresIdempotency: true,
   },
   {
@@ -576,8 +579,6 @@ async function callTool(userId: string, name: string, rawArgs: JsonObject) {
     if (experienceMode === 'verified_experience' && experienceNotes.length < 20) return toolPayload({ ok: false, code: 'EXPERIENCE_EVIDENCE_REQUIRED', message: '실제 체험형 문체를 사용하려면 구체적인 체험 사실 메모가 필요합니다.' }, true);
   }
   if (name === 'post_submit_draft') {
-    const connectKind = stringArg(args, 'connectKind');
-    const productId = stringArg(args, 'productId');
     const contextJobId = stringArg(args, 'contextJobId');
     const contextJob = contextJobId
       ? await d1.prepare(`SELECT type,status,input_json AS inputJson,result_json AS resultJson,finished_at AS finishedAt FROM agent_jobs WHERE id=? AND user_id=? LIMIT 1`).bind(contextJobId, userId).first<{ type: string; status: string; inputJson: string; resultJson: string | null; finishedAt: number | null }>()
@@ -591,20 +592,41 @@ async function callTool(userId: string, name: string, rawArgs: JsonObject) {
     const contextInput = asObject(jsonValue(contextJob.inputJson));
     const contextResult = asObject(jsonValue(contextJob.resultJson));
     const contextData = asObject(contextResult.data);
-    const contextProductId = stringArg(contextResult, 'productId') || stringArg(contextData, 'productId');
-    if (stringArg(contextInput, 'productId') !== productId || stringArg(contextInput, 'connectKind') !== connectKind || contextProductId !== productId) {
-      return toolPayload({ ok: false, code: 'DRAFT_CONTEXT_MISMATCH', message: '초안 근거와 제출 상품이 일치하지 않습니다.' }, true);
+    const contextProductId = stringArg(contextData, 'productId') || stringArg(contextResult, 'productId');
+    const preparedProductId = stringArg(contextInput, 'productId');
+    const preparedConnectKind = stringArg(contextInput, 'connectKind');
+    const contextSnapshot = asObject(contextData.snapshot);
+    const snapshotProductId = stringArg(contextSnapshot, 'productId');
+    const snapshotConnectKind = stringArg(contextSnapshot, 'connectKind').toLowerCase();
+    const snapshotId = stringArg(contextSnapshot, 'snapshotId');
+    if (
+      !preparedProductId || !contextProductId || contextProductId !== preparedProductId ||
+      !CONNECT_KINDS.includes(preparedConnectKind) ||
+      snapshotProductId !== preparedProductId || snapshotConnectKind !== preparedConnectKind ||
+      !/^[a-f0-9]{64}$/.test(snapshotId) || stringArg(contextData, 'snapshotId') !== snapshotId
+    ) {
+      return toolPayload({
+        ok: false,
+        code: 'PRODUCT_SNAPSHOT_CHANGED',
+        message: '초안 생성 시점의 상품 스냅샷이 없거나 상품 식별자가 변경되었습니다. post_prepare_draft부터 다시 실행하세요.',
+      }, true);
     }
-    const draft = normalizeSubmittedDraft(args.draft, connectKind);
+    const draft = normalizeSubmittedDraft(args.draft, preparedConnectKind);
     if (!draft) {
       return toolPayload({
         ok: false,
         code: 'INVALID_GENERATED_DRAFT',
-        message: connectKind === 'travel'
+        message: preparedConnectKind === 'travel'
           ? '여행 원고는 7~12개 섹션·본문 1750자 이상·해시태그 3~10개여야 합니다.'
           : '쇼핑 원고는 5~12개 섹션·본문 1200자 이상·해시태그 3~10개여야 합니다.',
       }, true);
     }
+    // contextJobId가 제출 대상의 권위 있는 식별자다. 목록 재조회로 전달된 최신 ID/종류가
+    // 달라도 기존 스냅샷을 다른 상품 데이터와 섞지 않고 준비 작업의 정규 값으로 고정한다.
+    args.productId = preparedProductId;
+    args.connectKind = preparedConnectKind;
+    args.contextSnapshot = contextData;
+    args.snapshotId = snapshotId;
     args.qualityPreset = stringArg(contextInput, 'qualityPreset') || 'premium';
     args.experienceMode = stringArg(contextInput, 'experienceMode') || 'ai_assisted_information';
     const contextExperienceNotes = stringArg(contextInput, 'experienceNotes');

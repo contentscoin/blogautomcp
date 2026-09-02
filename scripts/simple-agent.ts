@@ -86,6 +86,7 @@ import {
 } from "./lib/connect-editor-insertion";
 import { parsePreparedBrandPostSections } from "./lib/prepared-post-markdown";
 import { inspectNaverScheduleSubmissionSignal } from "../src/lib/naver-schedule-submission";
+import { createProductSnapshot, readProductSnapshot } from "../src/lib/draft-context-snapshot";
 import { generateTravelEditorialSummaryCard } from "./lib/travel-editorial-card";
 import { generateThumbnail, isGenerativeThumbnailAvailable } from "./lib/thumbnail-gen";
 import {
@@ -349,6 +350,7 @@ const BRANDLINK_EXPERIENCE_NOTES = (process.env.BRANDLINK_EXPERIENCE_NOTES || ""
 // 원고가 프로세스 목록/로그에 노출되는 문제를 피한다.
 const BRANDLINK_DRAFT_CONTEXT_OUTPUT = process.env.BRANDLINK_DRAFT_CONTEXT_OUTPUT?.trim() || "";
 const BRANDLINK_GENERATED_DRAFT_PATH = process.env.BRANDLINK_GENERATED_DRAFT_PATH?.trim() || "";
+const BRANDLINK_SUBMITTED_CONTEXT_PATH = process.env.BRANDLINK_SUBMITTED_CONTEXT_PATH?.trim() || "";
 // OpenAI 생성 실패/키 누락 시 Spec-first 로컬 템플릿 초안으로 대체(검증은 NEEDS_REVIEW). 하네스 복사 폴백은 없다.
 const PRODUCT_POST_LOCAL_FALLBACK_ENABLED =
   (process.env.PRODUCT_POST_LOCAL_FALLBACK_ENABLED || "true").toLowerCase() !== "false";
@@ -487,6 +489,21 @@ function readMcpGeneratedDraft(filePath: string): string {
   }
 
   return JSON.stringify({ title, evidenceFacts, sections, hashtags });
+}
+
+function readSubmittedProductSnapshot(filePath: string, productId: string, connectKind: "SHOPPING" | "TRAVEL") {
+  if (!filePath) return null;
+  const resolved = path.resolve(filePath);
+  const stat = fs.statSync(resolved);
+  if (!stat.isFile() || stat.size < 2 || stat.size > 850 * 1024) {
+    throw new Error("초안 상품 스냅샷 파일 크기가 허용 범위를 벗어났습니다.");
+  }
+  const context = JSON.parse(fs.readFileSync(resolved, "utf8")) as Record<string, unknown>;
+  const snapshot = readProductSnapshot(context.snapshot, { productId, connectKind });
+  if (!snapshot) {
+    throw new Error("PRODUCT_SNAPSHOT_CHANGED: 초안 생성 시점의 상품 스냅샷이 없거나 무결성 검증에 실패했습니다.");
+  }
+  return snapshot;
 }
 
 interface ChatGPTGuidanceContext {
@@ -3945,7 +3962,7 @@ async function buildProductInfoFromStoredBrandLink(
   link: StoredBrandLinkSeed,
   connectKind: "SHOPPING" | "TRAVEL",
 ): Promise<ProductInfo | null> {
-  const name = sanitizeText(link.productName || "");
+  const name = sanitizeText(link.productName || "").replace(/\s*변경\s*$/u, "").trim();
   const price = sanitizeText(link.productPrice || "");
   const imageUrls = parseStoredBrandLinkImageUrls(link.imageUrls);
   const description = sanitizeText(link.productDescription || "");
@@ -4031,7 +4048,8 @@ function mergeProductInfo(base: ProductInfo | null, live: ProductInfo): ProductI
   );
 
   return {
-    name: live.name || base.name,
+    // 라이브 페이지의 마케팅 헤드라인이 실제 상품명을 덮어쓰지 않게 등록 당시 이름을 우선한다.
+    name: base.name || live.name,
     description: live.description || base.description,
     features: live.features.length > 0 ? live.features : base.features,
     price: live.price || base.price,
@@ -4596,7 +4614,8 @@ async function step2_generatePost(
   brandLink: string,
   productId?: string | null,
   connectKind: "SHOPPING" | "TRAVEL" = "SHOPPING",
-  specInput?: SpecStep2Input | null
+  specInput?: SpecStep2Input | null,
+  productIdentity?: { externalProductId?: string | null; sourceUrl?: string | null } | null,
 ): Promise<GeneratedPostPreview> {
   const isTravel = connectKind === "TRAVEL";
   // 판매/여행 페이지의 과도한 본문이나 삽입 지시가 모델 컨텍스트를 잠식하지 않도록
@@ -5021,27 +5040,42 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
   if (BRANDLINK_DRAFT_CONTEXT_OUTPUT) {
     const outputPath = path.resolve(BRANDLINK_DRAFT_CONTEXT_OUTPUT);
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    const capturedAt = new Date().toISOString();
+    const productPayload = {
+      name: product.name,
+      description: product.description,
+      features: product.features,
+      price: product.price,
+      originalPrice: product.originalPrice,
+      discountRate: product.discountRate,
+      couponInfo: product.couponInfo,
+      deliveryInfo: product.deliveryInfo,
+      reviewCount: product.reviewCount,
+      rating: product.rating,
+      storeName: product.storeName || null,
+      finalUrl: product.finalUrl || null,
+      referenceImageUrls: product.sourceImageUrls.slice(0, 20),
+      detailImageSegmentCount: product.detailImagePaths.length,
+      travelPageResearch: product.travelPageResearch || null,
+    };
+    const snapshot = createProductSnapshot({
+      productId: productId || "",
+      connectKind,
+      externalProductId: productIdentity?.externalProductId || null,
+      sourceUrl: productIdentity?.sourceUrl || brandLink || null,
+      product: productPayload,
+      capturedAt,
+    });
     const contextJson = JSON.stringify({
-        version: "brand-draft-context/v1",
+        version: "brand-draft-context/v2",
         productId: productId || null,
         connectKind,
-        generatedAt: new Date().toISOString(),
-        product: {
-          name: product.name,
-          description: product.description,
-          features: product.features,
-          price: product.price,
-          originalPrice: product.originalPrice,
-          discountRate: product.discountRate,
-          couponInfo: product.couponInfo,
-          deliveryInfo: product.deliveryInfo,
-          reviewCount: product.reviewCount,
-          rating: product.rating,
-          storeName: product.storeName || null,
-          finalUrl: product.finalUrl || null,
-          referenceImageUrls: product.sourceImageUrls.slice(0, 20),
-          detailImageSegmentCount: product.detailImagePaths.length,
-        },
+        externalProductId: snapshot.externalProductId,
+        sourceUrl: snapshot.sourceUrl,
+        snapshotId: snapshot.snapshotId,
+        generatedAt: capturedAt,
+        snapshot,
+        product: productPayload,
         generation: {
           source: "chatgpt-mcp-oauth",
           qualityPreset: BRANDLINK_QUALITY_PRESET,
@@ -9497,17 +9531,37 @@ async function main() {
     setStage("STEP1 상품 정보/이미지 수집");
     // STEP 1: DB에 저장된 스크랩 결과를 우선 사용하고, 부족할 때만 보강 스크랩
     const runtimeConnectKind = link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING";
+    const submittedSnapshot = BRANDLINK_SUBMITTED_CONTEXT_PATH
+      ? readSubmittedProductSnapshot(BRANDLINK_SUBMITTED_CONTEXT_PATH, linkId, runtimeConnectKind)
+      : null;
+    const frozenProduct = submittedSnapshot?.product || null;
+    const frozenString = (key: string): string | null => {
+      const value = frozenProduct?.[key];
+      return typeof value === "string" && value.trim() ? value.trim() : null;
+    };
+    const frozenStrings = (key: string): string[] => {
+      const value = frozenProduct?.[key];
+      return Array.isArray(value)
+        ? value.filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
+        : [];
+    };
     let product = await buildProductInfoFromStoredBrandLink({
-      url: link.url,
-      finalUrl: link.finalUrl,
-      productName: link.productName,
-      productPrice: link.productPrice,
-      storeName: link.storeName,
-      imageUrls: link.imageUrls,
-      productDescription: link.productDescription,
-      productFeatures: link.productFeatures,
-      travelResearchJson: link.travelResearchJson,
+      url: submittedSnapshot?.sourceUrl || link.url,
+      finalUrl: submittedSnapshot ? (frozenString("finalUrl") || submittedSnapshot.sourceUrl) : link.finalUrl,
+      productName: submittedSnapshot ? (frozenString("name") || "상품") : link.productName,
+      productPrice: submittedSnapshot ? frozenString("price") : link.productPrice,
+      storeName: submittedSnapshot ? frozenString("storeName") : link.storeName,
+      imageUrls: submittedSnapshot ? JSON.stringify(frozenStrings("referenceImageUrls")) : link.imageUrls,
+      productDescription: submittedSnapshot ? frozenString("description") : link.productDescription,
+      productFeatures: submittedSnapshot ? JSON.stringify(frozenStrings("features")) : link.productFeatures,
+      travelResearchJson: submittedSnapshot
+        ? frozenProduct?.travelPageResearch ? JSON.stringify(frozenProduct.travelPageResearch) : null
+        : link.travelResearchJson,
     }, runtimeConnectKind);
+
+    if (submittedSnapshot) {
+      console.log(`   🔒 초안 상품 스냅샷 고정: ${submittedSnapshot.snapshotId.slice(0, 12)} (${submittedSnapshot.productId})`);
+    }
 
     if (product) {
       console.log("\n📦 STEP 1: 저장된 스크랩 결과 재사용");
@@ -9535,7 +9589,7 @@ async function main() {
     const needsTravelResearchRefresh = Boolean(
       product && runtimeConnectKind === "TRAVEL" && !product.travelPageResearch,
     );
-    const needsLiveRefresh = !preparedPostOverride && (
+    const needsLiveRefresh = !preparedPostOverride && !submittedSnapshot && (
       !product ||
       !sanitizeText(product.name || "") ||
       needsImageRefresh ||
@@ -9600,21 +9654,25 @@ async function main() {
       console.log(`   🔎 쇼핑 상세페이지 시각 근거: ${product.detailImagePaths.length}구간`);
     }
 
-    await prisma.brandLink.update({
-      where: { id: linkId },
-      data: {
-        productName: product.name || undefined,
-        productPrice: product.price || undefined,
-        storeName: product.storeName || undefined,
-        finalUrl: product.finalUrl || link.finalUrl || undefined,
-        imageUrls:
-          product.sourceImageUrls.length > 0 ? JSON.stringify(product.sourceImageUrls) : link.imageUrls,
-        productDescription: product.description || null,
-        productFeatures: product.features.length > 0 ? JSON.stringify(product.features) : null,
-        travelResearchJson: product.travelPageResearch ? JSON.stringify(product.travelPageResearch) : null,
-        errorMessage: null,
-      },
-    });
+    if (!submittedSnapshot) {
+      await prisma.brandLink.update({
+        where: { id: linkId },
+        data: {
+          productName: product.name || undefined,
+          productPrice: product.price || undefined,
+          storeName: product.storeName || undefined,
+          finalUrl: product.finalUrl || link.finalUrl || undefined,
+          imageUrls:
+            product.sourceImageUrls.length > 0 ? JSON.stringify(product.sourceImageUrls) : link.imageUrls,
+          productDescription: product.description || null,
+          productFeatures: product.features.length > 0 ? JSON.stringify(product.features) : null,
+          travelResearchJson: product.travelPageResearch ? JSON.stringify(product.travelPageResearch) : null,
+          errorMessage: null,
+        },
+      });
+    } else {
+      console.log("   🔒 제출 검증 중 최신 상품 재조회·DB 덮어쓰기를 생략했습니다.");
+    }
     
     console.log("\n" + "-".repeat(40));
     console.log(`📦 상품: ${product.name}`);
@@ -9657,13 +9715,14 @@ async function main() {
       link.url,
       link.id,
       link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
-      { imageCandidates: specImageCandidates, tempDir: TEMP_PATH, memo: process.env.BRANDLINK_DRAFT_MEMO?.trim() || null }
+      { imageCandidates: specImageCandidates, tempDir: TEMP_PATH, memo: process.env.BRANDLINK_DRAFT_MEMO?.trim() || null },
+      { externalProductId: link.externalItemId, sourceUrl: link.sourceUrl || link.url },
     );
     const assembled: AssembledPost | null = post.assembled ?? null;
     // 쇼핑 GPT가 상세 이미지에서 추출한 evidenceFacts는 step2_generatePost에서
     // product.features에 합쳐진다. 이 값을 저장하지 않으면 이후 미리보기/QC가
     // 크롤링 당시의 SEO 키워드만 읽어 근거가 없는 글로 오판한다.
-    if (!preparedPostOverride && runtimeConnectKind === "SHOPPING") {
+    if (!preparedPostOverride && !submittedSnapshot && runtimeConnectKind === "SHOPPING") {
       await prisma.brandLink.update({
         where: { id: linkId },
         data: {
