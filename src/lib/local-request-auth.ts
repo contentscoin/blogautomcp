@@ -1,23 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { configuredAdminApiKey, isAuthenticatedAdminRequest, isCrossSiteBrowserRequest } from "./admin-session";
-
-const LOCAL_ALIASES = new Set(["localhost", "127.0.0.1", "::1"]);
-
-function sameOrigin(request: NextRequest, value: string | null): boolean {
-  if (!value) return false;
-  try {
-    const supplied = new URL(value);
-    if (supplied.origin === request.nextUrl.origin) return true;
-    return (
-      LOCAL_ALIASES.has(supplied.hostname.toLowerCase()) &&
-      LOCAL_ALIASES.has(request.nextUrl.hostname.toLowerCase()) &&
-      supplied.protocol === request.nextUrl.protocol &&
-      supplied.port === request.nextUrl.port
-    );
-  } catch {
-    return false;
-  }
-}
+import {
+  configuredAdminApiKey,
+  isAuthenticatedAdminRequest,
+  isCrossSiteBrowserRequest,
+  isSameRequestOrigin,
+} from "./admin-session";
 
 /**
  * Remote-agent mutations hold a reusable device credential.
@@ -43,8 +30,8 @@ export function requireTrustedLocalMutation(request: NextRequest): NextResponse 
       { status: 403 },
     );
   }
-  if (sameOrigin(request, request.headers.get("origin"))) return null;
-  if (sameOrigin(request, request.headers.get("referer"))) return null;
+  if (isSameRequestOrigin(request, request.headers.get("origin"))) return null;
+  if (isSameRequestOrigin(request, request.headers.get("referer"))) return null;
 
   const fetchSite = request.headers.get("sec-fetch-site");
   if (fetchSite === "same-origin") return null;

@@ -2,7 +2,8 @@
  * 관리자 API 인증 회귀 검증.
  *   - ADMIN_API_KEY 가 설정되면 Origin/Referer/Sec-Fetch-Site 만으로는 통과하지 못한다.
  *   - x-admin-api-key 헤더 또는 대시보드 세션 쿠키(+동일 출처)만 통과한다.
- *   - 키가 없으면 종전처럼 열려 있다.
+ *   - 키가 없으면 동일 출처인 로컬 앱 요청만 통과한다.
+ *   - 커스텀 서버 내부 URL과 실제 수신 Host가 달라도 실제 로컬 Origin을 인식한다.
  */
 
 import assert from "node:assert/strict";
@@ -58,6 +59,54 @@ async function main() {
   assert.equal(status(requireTrustedLocalMutation(request({ origin: base }))), 200, "키 미설정: 동일 출처 브라우저 요청 허용");
   assert.equal(status(requireTrustedLocalMutation(request({ origin: "https://evil.example" }))), 403, "키 미설정: 다른 출처 거부");
   assert.equal(status(requireTrustedLocalMutation(request({ "sec-fetch-site": "cross-site" }))), 403, "키 미설정: cross-site 거부");
+
+  // 패키지 커스텀 서버가 내부 URL을 기본값으로 구성해도 실제 수신 Host를 기준으로 판정한다.
+  const packagedRequest = (headers: Record<string, string> = {}, cookie?: string) =>
+    new NextRequest("http://localhost:3000/api/system/control", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:43127",
+        ...(cookie ? { cookie: `${ADMIN_SESSION_COOKIE}=${cookie}` } : {}),
+        ...headers,
+      },
+    });
+  assert.equal(
+    status(requireTrustedLocalMutation(packagedRequest({ origin: "http://127.0.0.1:43127", "sec-fetch-site": "same-origin" }))),
+    200,
+    "실제 수신 Host와 일치하는 패키지 앱 Origin 허용",
+  );
+  assert.equal(
+    status(requireTrustedLocalMutation(packagedRequest({ origin: "http://localhost:43127", "sec-fetch-site": "same-origin" }))),
+    200,
+    "같은 포트의 loopback 별칭 허용",
+  );
+  assert.equal(
+    status(requireTrustedLocalMutation(packagedRequest({ origin: "http://127.0.0.1:43128", "sec-fetch-site": "same-origin" }))),
+    403,
+    "다른 로컬 포트의 Origin 거부",
+  );
+  assert.equal(
+    status(requireTrustedLocalMutation(packagedRequest({ origin: "https://evil.example", "sec-fetch-site": "same-origin" }))),
+    403,
+    "실제 Host가 로컬이어도 외부 Origin 거부",
+  );
+  assert.equal(
+    status(requireTrustedLocalMutation(packagedRequest({ origin: "http://localhost:3000" }))),
+    403,
+    "Next 내부 기본 Origin은 실제 수신 Host와 다르면 신뢰하지 않음",
+  );
+
+  process.env.ADMIN_API_KEY = "secret-key-1234";
+  assert.equal(
+    status(requireTrustedLocalMutation(packagedRequest({ origin: "http://127.0.0.1:43127", "sec-fetch-site": "same-origin" }, token))),
+    200,
+    "관리자 세션도 실제 수신 Host 기준 동일 출처 허용",
+  );
+  assert.equal(
+    status(requireTrustedLocalMutation(packagedRequest({ origin: "https://evil.example", "sec-fetch-site": "same-origin" }, token))),
+    401,
+    "관리자 세션의 외부 Origin은 계속 거부",
+  );
 
   console.log(JSON.stringify({ ok: true, checks: "admin-api-key/session-cookie/csrf" }));
 }

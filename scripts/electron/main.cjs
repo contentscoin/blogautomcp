@@ -205,6 +205,8 @@ async function ensureServerReady() {
     nextAppInstance = next({
       dev: !app.isPackaged,
       dir: nextDir,
+      hostname: APP_HOST,
+      port: APP_PORT,
     });
 
     const requestHandler = nextAppInstance.getRequestHandler();

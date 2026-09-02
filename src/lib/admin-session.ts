@@ -12,6 +12,52 @@ import type { NextRequest } from "next/server";
 export const ADMIN_SESSION_COOKIE = "blogautomcp_admin_session";
 const SESSION_PURPOSE = "blogautomcp-admin-session/v1";
 export const ADMIN_SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
+const LOCAL_LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+
+function effectivePort(url: URL): string {
+  if (url.port) return url.port;
+  if (url.protocol === "http:") return "80";
+  if (url.protocol === "https:") return "443";
+  return "";
+}
+
+function requestHostUrl(request: NextRequest): URL | null {
+  const host = request.headers.get("host")?.trim();
+  if (!host) return null;
+  try {
+    return new URL(`${request.nextUrl.protocol}//${host}`);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Next custom servers can expose a different public host/port from the URL that
+ * NextRequest internally constructs. Compare both Next's URL and the actual
+ * inbound Host header, while treating loopback aliases as equivalent only on
+ * the same protocol and port.
+ */
+export function isSameRequestOrigin(request: NextRequest, value: string | null): boolean {
+  if (!value || value === "null") return false;
+  try {
+    const supplied = new URL(value);
+    const inboundHost = requestHostUrl(request);
+    // Host is the public request target seen by the HTTP server. Only fall back
+    // to Next's internal URL when the adapter did not preserve that header.
+    const candidates = inboundHost ? [inboundHost] : [request.nextUrl];
+    return candidates.some((candidate) => {
+      if (supplied.origin === candidate.origin) return true;
+      return (
+        LOCAL_LOOPBACK_HOSTS.has(supplied.hostname.toLowerCase()) &&
+        LOCAL_LOOPBACK_HOSTS.has(candidate.hostname.toLowerCase()) &&
+        supplied.protocol === candidate.protocol &&
+        effectivePort(supplied) === effectivePort(candidate)
+      );
+    });
+  } catch {
+    return false;
+  }
+}
 
 export function configuredAdminApiKey(): string {
   return process.env.ADMIN_API_KEY?.trim() || "";
@@ -47,13 +93,7 @@ export function isCrossSiteBrowserRequest(request: NextRequest): boolean {
   const fetchSite = request.headers.get("sec-fetch-site");
   if (fetchSite && fetchSite !== "same-origin" && fetchSite !== "none") return true;
   const origin = request.headers.get("origin");
-  if (origin && origin !== "null") {
-    try {
-      if (new URL(origin).origin !== request.nextUrl.origin) return true;
-    } catch {
-      return true;
-    }
-  }
+  if (origin && origin !== "null" && !isSameRequestOrigin(request, origin)) return true;
   return false;
 }
 
