@@ -67,6 +67,9 @@ interface BrandPostDraftPreview {
     maximum: number;
     count: number;
     missing: number;
+    originalCount: number;
+    generatedCount: number;
+    generationMissing: number;
     assets: Array<{
       path: string;
       sourcePath: string;
@@ -1218,17 +1221,18 @@ export default function Dashboard() {
   const handleGenerateMissingDraftImages = async () => {
     if (!draftPreview || draftImageActionKey) return;
     setDraftImageActionKey("missing");
-    setDashboardNotice({ tone: "info", text: "필수 이미지 슬롯을 파트별로 자동 보충하고 있습니다." });
+    setDashboardNotice({ tone: "info", text: "생성 이미지가 없는 파트를 자동 보충하고 있습니다." });
     try {
       let generatedTotal = 0;
-      let remaining = draftPreview.imageSlots?.reduce((sum, slot) => sum + slot.missing, 0) || 0;
+      let remaining = draftPreview.imageSlots?.reduce((sum, slot) => sum + slot.generationMissing, 0) || 0;
       for (let batch = 0; batch < 4 && remaining > 0; batch += 1) {
+        const previousRemaining = remaining;
         const payload = await requestDraftImageAction({ action: "generate_missing", batchSize: 4 });
         const generated = payload.generatedCount || 0;
         generatedTotal += generated;
         remaining = payload.remainingMissing || 0;
         // 사용자 수정이 필요한 오류는 같은 요청에서 무작정 재시도하지 않는다.
-        if (generated === 0 || (payload.errors?.length || 0) > 0) {
+        if (generated === 0 || remaining >= previousRemaining || (payload.errors?.length || 0) > 0) {
           if (payload.errors?.length) throw new Error(payload.errors.join(" "));
           break;
         }
@@ -1237,8 +1241,8 @@ export default function Dashboard() {
       setDashboardNotice({
         tone: remaining === 0 ? "success" : "info",
         text: remaining === 0
-          ? `필수 이미지 보충 완료 · ${generatedTotal}장 추가`
-          : `${generatedTotal}장을 추가했고 필수 슬롯 ${remaining}장이 남았습니다.`,
+          ? `섹션별 생성 이미지 보충 완료 · ${generatedTotal}장 반영`
+          : `${generatedTotal}장을 반영했고 생성 이미지가 없는 파트 ${remaining}개가 남았습니다.`,
       });
     } catch (error) {
       setDashboardNotice({ tone: "error", text: error instanceof Error ? error.message : "필수 이미지 보충에 실패했습니다." });
@@ -2177,7 +2181,7 @@ export default function Dashboard() {
   const draftImageActual = draftPreview?.composition?.qualityReport.actual.images
     || (draftPreview ? draftPreview.bodyImagePaths.length + 1 : 0);
   const draftMissingImageCount = draftPreview?.imageSlots?.reduce(
-    (sum, slot) => sum + slot.missing,
+    (sum, slot) => sum + slot.generationMissing,
     0,
   ) || 0;
   const draftCompositionQualityPassed = draftPreview?.composition?.qualityReport.canAutoPublish !== false;
@@ -3232,8 +3236,8 @@ export default function Dashboard() {
                       <p className="mt-1 text-lg font-black text-slate-950">현재 {draftImageActual}장 · 최소 {draftImageMinimum}장 · 권장 {draftImageRecommended}장</p>
                       <p className="mt-1 text-sm text-slate-600">
                         {draftMissingImageCount > 0
-                          ? `필수 파트에 ${draftMissingImageCount}장이 부족합니다. 필요한 슬롯만 자동 생성합니다.`
-                          : "필수 파트는 모두 채워졌습니다. 원하는 파트에만 이미지를 더 추가할 수 있습니다."}
+                          ? `생성 이미지가 없는 파트가 ${draftMissingImageCount}개입니다. 원본 이미지는 참고용으로 유지하거나 생성 이미지로 교체합니다.`
+                          : "이미지가 필요한 모든 파트에 생성 이미지가 연결됐습니다."}
                       </p>
                     </div>
                     <button
@@ -3242,7 +3246,7 @@ export default function Dashboard() {
                       disabled={Boolean(draftImageActionKey) || draftMissingImageCount === 0}
                       className="shrink-0 rounded-xl bg-violet-600 px-4 py-3 text-sm font-black text-white shadow-lg shadow-violet-200 hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-40"
                     >
-                      {draftImageActionKey === "missing" ? "필수 이미지 생성 중…" : "부족 이미지 자동 생성"}
+                      {draftImageActionKey === "missing" ? "섹션 이미지 생성 중…" : "섹션별 이미지 자동 생성"}
                     </button>
                   </div>
 
@@ -3267,7 +3271,7 @@ export default function Dashboard() {
                   ))}
 
                   {draftPreview.imageSlots?.length ? draftPreview.imageSlots.map((slot, index) => (
-                    <div key={slot.sectionId} className={`rounded-2xl border p-4 ${slot.missing > 0 ? "border-amber-300 bg-amber-50/50" : "border-slate-200"}`}>
+                    <div key={slot.sectionId} className={`rounded-2xl border p-4 ${slot.generationMissing > 0 ? "border-amber-300 bg-amber-50/50" : "border-slate-200"}`}>
                       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                         <div>
                           <p className="text-xs font-bold text-violet-600">{index + 1}. {slot.sectionId}</p>
@@ -3275,13 +3279,13 @@ export default function Dashboard() {
                           <p className="mt-2 text-sm text-slate-600">{slot.intent}</p>
                         </div>
                         <div className="flex shrink-0 items-center gap-2">
-                          <span className={`rounded-full px-2.5 py-1 text-xs font-bold ${slot.missing > 0 ? "bg-amber-200 text-amber-900" : "bg-emerald-100 text-emerald-700"}`}>
-                            {slot.count}장 · 최소 {slot.minimum}
+                          <span className={`rounded-full px-2.5 py-1 text-xs font-bold ${slot.generationMissing > 0 ? "bg-amber-200 text-amber-900" : "bg-emerald-100 text-emerald-700"}`}>
+                            원본 {slot.originalCount} · 생성 {slot.generatedCount}
                           </span>
                           <button
                             type="button"
                             onClick={() => void handleGenerateDraftSectionImage(slot.sectionId)}
-                            disabled={Boolean(draftImageActionKey) || slot.count >= slot.maximum}
+                            disabled={Boolean(draftImageActionKey) || slot.maximum === 0 || (slot.count >= slot.maximum && slot.generationMissing === 0)}
                             className="rounded-lg border border-violet-300 bg-white px-3 py-2 text-xs font-bold text-violet-700 hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-40"
                           >
                             {draftImageActionKey === `section:${slot.sectionId}` ? "추가 중…" : "+ 이미지 추가"}

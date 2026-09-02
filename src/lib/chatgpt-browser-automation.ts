@@ -42,9 +42,7 @@ export function buildChatGptBrowserAutomationEnv(
     CHATGPT_BROWSER_AUTOMATION_ENABLED: value,
     BROWSER_GPT_MODE: value,
     ALLOW_CHATGPT_BROWSER_MODE: value,
-    CHATGPT_USE_CUSTOM_GPTS: "false",
-    CHATGPT_DIRECT_ONLY: "true",
-    CHATGPT_SKIP_POLISH: "true",
+    CHATGPT_BASE_URL: "https://chatgpt.com/",
     CHATGPT_RUN_ISOLATED_CONTEXT: "false",
     CHATGPT_BROWSER_VISIBILITY: resolveChatGptBrowserVisibility(env),
   };

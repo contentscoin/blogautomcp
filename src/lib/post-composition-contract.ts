@@ -592,6 +592,8 @@ export function resolvePostDocument(options: {
   sections: string[];
   hashtags: string[];
   imagePaths: string[];
+  /** Spec-first가 이미 계산한 섹션별 이미지 배치를 보존한다. 미지정 시에만 기존 순차 배치를 사용한다. */
+  sectionImagePaths?: string[][];
   connectUrl: string;
   qualityPreset?: PostQualityPreset;
   experienceMode?: PostExperienceMode;
@@ -608,7 +610,11 @@ export function resolvePostDocument(options: {
   const sectionContracts = resolveSectionContracts(contract, contentSections.length);
   const thumbnailPath = options.imagePaths[0] || "";
   const bodyImagePaths = thumbnailPath ? options.imagePaths.slice(1) : options.imagePaths;
-  const allocations = plan ? allocatePlannedImages(plan, bodyImagePaths) : allocateImages(sectionContracts, bodyImagePaths);
+  const allocations = options.sectionImagePaths
+    ? contentSections.map((_, index) => Array.from(new Set(options.sectionImagePaths?.[index] || [])))
+    : plan
+      ? allocatePlannedImages(plan, bodyImagePaths)
+      : allocateImages(sectionContracts, bodyImagePaths);
   const planIds = plan ? planSectionIds(options.connectKind, plan) : [];
   const sections = contentSections.map((section, index): ResolvedPostSectionV1 => {
     const parsed = parseGeneratedSection(section);

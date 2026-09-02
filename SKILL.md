@@ -17,7 +17,7 @@ description: "Executes an agentic 5-stage pipeline (Topic Agent V2: Research/Out
 4. **고품질 시각 자료 수급 (Visual Matching)**: 단락별 문맥을 분석하여 감성적인 영어 검색어(예: `golf course aesthetic`)를 추출하고, Unsplash 등에서 전문 포토그래퍼의 고해상도 스탁 이미지를 다운로드합니다.
 5. **최종 조립 및 발행 (Publishing)**: 네이버 블로그 에디터를 열고 완성된 텍스트와 이미지를 교차로 삽입한 뒤 해시태그를 달아 최종 발행(또는 예약)합니다.
 
-상품 리뷰 발행 흐름에서는 Custom GPTs를 명시적으로 켠 경우가 아니면 ChatGPT의 별도 Polish GPT를 띄우지 않습니다. 초안 생성 이후에는 로컬 사람형 모바일 윤문 레이어(`HUMAN_MOBILE_POLISH_ENABLED=true`)가 문장 줄바꿈, 반복 표현 제거, 모바일 배치를 담당합니다.
+상품 리뷰 발행 흐름은 일반 ChatGPT 페이지에서 초안을 작성하고, 이후 로컬 사람형 모바일 윤문 레이어(`HUMAN_MOBILE_POLISH_ENABLED=true`)가 문장 줄바꿈, 반복 표현 제거, 모바일 배치를 담당합니다.
 
 ## Instructions (실행 방법)
 
@@ -49,7 +49,7 @@ npm run topic -- --type="travel" --topic="다낭 골프 여행" --keywords="다�
 2. 실행이 완료되면 사용자에게 성공 여부와 함께 기획된 제목, 생성된 단락 수, 해시태그 수, 삽입된 이미지 개수를 요약하여 보고합니다.
 
 ## Trouble Shooting (문제 해결)
-- **ChatGPT 로그인 세션 만료**: 브라우저 창이 열렸을 때 ChatGPT 로그인이 풀려있다면 사용자가 수동으로 로그인해야 합니다. 기본 작성 흐름은 Custom GPTs가 아니라 일반 ChatGPT 페이지에 전체 프롬프트를 한 번에 넣는 방식입니다.
+- **ChatGPT 로그인 세션 만료**: 브라우저 창이 열렸을 때 ChatGPT 로그인이 풀려있다면 사용자가 수동으로 로그인해야 합니다. 작성 흐름은 일반 ChatGPT 페이지에 전체 프롬프트를 한 번에 넣는 방식입니다.
 - **Unsplash 이미지 다운로드 실패**: API 키가 없어도 자동으로 웹 스크래핑(Fallback)을 시도하며, 이조차 실패하면 빈 이미지를 생성하여 포스팅 프로세스가 멈추지 않도록 안전하게 설계되어 있습니다.
 - **브라우저 종료 에러**: 모델 응답 지연 등 문제일 수 있습니다. 터미널 출력을 확인하고 재실행을 안내하세요.
 

@@ -13,14 +13,14 @@ const imageGenLogic = `
             hashtags: advancedContent.hashtags,
         };
         
-        console.log(\`\\n📷 커스텀 GPT를 활용한 이미지 생성 시작\`);
+        console.log(\`\\n📷 일반 ChatGPT를 활용한 이미지 생성 시작\`);
         
         const autoImageDir = path.join(IMAGE_WORK_DIR, \`auto-\${Date.now()}\`);
         if (!fs.existsSync(autoImageDir)) {
             fs.mkdirSync(autoImageDir, { recursive: true });
         }
         
-        const CHATGPT_GPT_URL_IMAGE = "https://chatgpt.com/g/g-69044d98b1f08191b96ca4293c6c8156-jeongboseong-imiji-saengseong-v11-dapeojuneunnamja";
+        const CHATGPT_BASE_URL = "https://chatgpt.com/";
         
         let imageGptHandle = null;
         try {
@@ -28,7 +28,7 @@ const imageGenLogic = `
             imageGptHandle = await createChatGPTContext(true);
             const imagePage = await imageGptHandle.context.newPage();
             
-            await openChatGPTTarget(imagePage, CHATGPT_GPT_URL_IMAGE, "이미지 생성 GPT");
+            await openChatGPTTarget(imagePage, CHATGPT_BASE_URL, "이미지 생성 ChatGPT");
             
             console.log("   [1/2] 이미지 생성 GPT에 내용 전달 중...");
             const imagePrompt = \`다음 블로그 글 내용에 어울리는 고품질 이미지를 3장 생성해줘:\\n\\n\${content.sections.join("\\n\\n").substring(0, 1500)}\`;

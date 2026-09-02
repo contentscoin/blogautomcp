@@ -169,7 +169,7 @@ export async function POST(request: NextRequest) {
     const enabled = isChatGptBrowserAutomationEnabled(process.env);
     process.env.BROWSER_GPT_MODE = enabled ? "true" : "false";
     process.env.ALLOW_CHATGPT_BROWSER_MODE = enabled ? "true" : "false";
-    process.env.CHATGPT_USE_CUSTOM_GPTS = "false";
+    process.env.CHATGPT_BASE_URL = "https://chatgpt.com/";
   }
 
   try {

@@ -43,17 +43,9 @@ const PEXELS_API_KEY = process.env.PEXELS_API_KEY?.trim() || "";
 const TOPIC_PIPELINE_ALLOW_GENERIC_IMAGE_FALLBACK =
   process.env.TOPIC_PIPELINE_ALLOW_GENERIC_IMAGE_FALLBACK?.toLowerCase() === "true";
 const OPENAI_MODEL = process.env.TOPIC_PIPELINE_OPENAI_MODEL || "gpt-4o-mini";
-const CHATGPT_USE_CUSTOM_GPTS =
-  (process.env.CHATGPT_USE_CUSTOM_GPTS || "false").toLowerCase() === "true";
 const CHATGPT_BASE_URL = process.env.CHATGPT_BASE_URL || "https://chatgpt.com/";
-const BROWSER_TOPIC_GPT_URL =
-  CHATGPT_USE_CUSTOM_GPTS
-    ? process.env.CHATGPT_GPT_URL_TOPIC || process.env.CHATGPT_GPT_URL_DRAFT || CHATGPT_BASE_URL
-    : CHATGPT_BASE_URL;
-const DEFAULT_CHATGPT_IMAGE_GPT_URL =
-  "https://chatgpt.com/g/g-69044d98b1f08191b96ca4293c6c8156-jeongboseong-imiji-saengseong-v11-dapeojuneunnamja";
-const CHATGPT_IMAGE_GPT_URL =
-  process.env.CHATGPT_GPT_URL_IMAGE || DEFAULT_CHATGPT_IMAGE_GPT_URL;
+const BROWSER_TOPIC_GPT_URL = CHATGPT_BASE_URL;
+const CHATGPT_IMAGE_GPT_URL = CHATGPT_BASE_URL;
 const ALLOW_CHATGPT_BROWSER_MODE =
   (process.env.ALLOW_CHATGPT_BROWSER_MODE || "false").toLowerCase() === "true";
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");

@@ -47,18 +47,18 @@ async function main() {
     "여행 원고 경로에서 쇼핑 제품 하네스를 생성하면 안 됩니다."
   );
   assert.equal(
-    simpleAgentSource.includes('guidanceContext.connectKind === "TRAVEL"') &&
-      simpleAgentSource.includes("쇼핑용 Custom GPT를 건너뛰고"),
+    simpleAgentSource.includes("일반 ChatGPT 단일 프롬프트로 생성합니다."),
     true,
-    "여행 Browser GPT 경로가 쇼핑 전용 다단계 GPT를 타면 안 됩니다."
+    "Browser ChatGPT 경로는 계정 종속 전용 GPT 없이 단일 프롬프트를 사용해야 합니다."
   );
+  assert.equal(/https:\/\/chatgpt\.com\/g\//u.test(simpleAgentSource), false);
   assert.equal(
     simpleAgentSource.includes("제품리뷰 실제 사용기"),
     false,
     "검증되지 않은 실사용 제목을 자동 생성하면 안 됩니다."
   );
   assert.equal(
-    simpleAgentSource.includes("명소와 현지 여행 팁") &&
+    simpleAgentSource.includes("장소의 배경, 실제 풍경과 분위기") &&
       simpleAgentSource.includes("여행지 브이로그"),
     true,
     "여행 제목과 본문은 체험을 꾸미지 않는 여행지 브이로그형이어야 합니다."
@@ -208,11 +208,24 @@ async function main() {
     "쇼핑은 상품을 다시 그리지 않고, 여행은 확인되지 않은 장소를 만들지 않아야 합니다.",
   );
   assert.equal(
-    dashboardSource.includes("부족 이미지 자동 생성") &&
+    dashboardSource.includes("섹션별 이미지 자동 생성") &&
       dashboardSource.includes("handleRegenerateDraftImage") &&
       dashboardSource.includes("품질 자동 보강"),
     true,
     "데스크톱 미리보기에서 이미지 보충·개별 재생성·품질 보강을 실행할 수 있어야 합니다.",
+  );
+  assert.equal(
+    draftImageRouteSource.includes("slot.generationMissing") &&
+      draftImageRouteSource.includes('asset?.provenance === "ORIGINAL"') &&
+      draftImageRouteSource.includes("replaceAssetKey"),
+    true,
+    "원본 이미지는 생성 완료로 계산하지 않고, 꽉 찬 슬롯에서는 원본을 생성 이미지로 교체해야 합니다.",
+  );
+  assert.equal(
+    draftRouteSource.includes("slot.generationMissing") &&
+      draftRouteSource.includes("for (let batch = 0; batch < 4; batch += 1)"),
+    true,
+    "여행 초안 자동 보충은 첫 4장만 만들고 끝나지 않고 남은 섹션을 후속 배치로 처리해야 합니다.",
   );
 
   const handoffBuilder = await import("../src/lib/chatgpt-draft-handoff");
@@ -293,6 +306,25 @@ async function main() {
     connectUrl: "https://example.test/travel",
     qualityPreset: "PREMIUM",
   });
+  const firstMappedImage = path.join(v2Dir, "first.jpg");
+  const thirdMappedImage = path.join(v2Dir, "third.jpg");
+  fs.writeFileSync(firstMappedImage, "first-original");
+  fs.writeFileSync(thirdMappedImage, "third-original");
+  const mappedComposition = compositionContract.resolvePostDocument({
+    connectKind: "TRAVEL",
+    title: "섹션 이미지 배치 테스트",
+    sections: ["첫 섹션\n\n본문", "둘째 섹션\n\n본문", "셋째 섹션\n\n본문"],
+    hashtags: [],
+    imagePaths: [v2HeroPath, firstMappedImage, thirdMappedImage],
+    sectionImagePaths: [[firstMappedImage], [], [thirdMappedImage]],
+    connectUrl: "https://example.test/travel",
+    qualityPreset: "STANDARD",
+  });
+  assert.deepEqual(mappedComposition.sections.map((section) => section.imagePaths), [
+    [firstMappedImage],
+    [],
+    [thirdMappedImage],
+  ], "Spec-first의 섹션별 이미지 배치를 순차 재분배로 덮어쓰면 안 됩니다.");
   const v2Manifest = {
     version: "brand-post-package/v2" as const,
     contractVersion: "post-composition-contract/v1" as const,
@@ -316,6 +348,14 @@ async function main() {
       sourceImagePath: v2HeroPath,
     },
   };
+  const mappedPreview = store.packagePreview({
+    ...v2Manifest,
+    bodyImagePaths: [firstMappedImage, thirdMappedImage],
+    composition: mappedComposition,
+  });
+  assert.equal(mappedPreview.imageSlots[2].originalCount, 1);
+  assert.equal(mappedPreview.imageSlots[2].generatedCount, 0);
+  assert.equal(mappedPreview.imageSlots[2].generationMissing, 1, "원본 이미지는 섹션 생성 이미지 충족으로 계산하면 안 됩니다.");
   fs.writeFileSync(store.getBrandPostPackageManifestPath(v2Id), JSON.stringify(v2Manifest, null, 2));
   assert.throws(
     () => store.approveBrandPostPackage(v2Id),

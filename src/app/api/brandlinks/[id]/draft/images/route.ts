@@ -120,10 +120,13 @@ export async function POST(
   const generationRequests: BrandPostImageGenerationRequest[] = [];
   if (body.action === "generate_missing") {
     for (const slot of preview.imageSlots) {
-      for (let index = 0; index < slot.missing && generationRequests.length < batchSize; index += 1) {
+      for (let index = 0; index < slot.generationMissing && generationRequests.length < batchSize; index += 1) {
+        const replaceableOriginal = slot.assets.find((asset) => asset?.provenance === "ORIGINAL");
+        if (slot.count >= slot.maximum && !replaceableOriginal) continue;
         generationRequests.push({
           requestId: randomUUID(),
           sectionId: slot.sectionId,
+          replaceAssetKey: slot.count >= slot.maximum ? replaceableOriginal?.assetKey : undefined,
         });
       }
       if (generationRequests.length >= batchSize) break;
@@ -134,10 +137,15 @@ export async function POST(
     if (!slot) {
       return NextResponse.json({ success: false, error: "이미지를 추가할 파트를 찾을 수 없습니다." }, { status: 404 });
     }
-    if (slot.count >= slot.maximum) {
+    const replaceableOriginal = slot.assets.find((asset) => asset?.provenance === "ORIGINAL");
+    if (slot.maximum === 0 || (slot.count >= slot.maximum && !replaceableOriginal)) {
       return NextResponse.json({ success: false, error: "이 파트는 최대 이미지 수에 도달했습니다." }, { status: 422 });
     }
-    generationRequests.push({ requestId: randomUUID(), sectionId });
+    generationRequests.push({
+      requestId: randomUUID(),
+      sectionId,
+      replaceAssetKey: slot.count >= slot.maximum ? replaceableOriginal?.assetKey : undefined,
+    });
   } else {
     const assetKey = body.assetKey?.trim() || "";
     if (!/^[a-f0-9]{64}$/u.test(assetKey) || !preview.imageAssets.some((asset) => asset.assetKey === assetKey)) {
@@ -151,9 +159,9 @@ export async function POST(
       success: true,
       data: preview,
       generatedCount: 0,
-      remainingMissing: preview.imageSlots.reduce((sum, slot) => sum + slot.missing, 0),
+      remainingMissing: preview.imageSlots.reduce((sum, slot) => sum + slot.generationMissing, 0),
       errors: [],
-      message: "필수 이미지 슬롯이 이미 채워져 있습니다.",
+      message: "이미지가 필요한 모든 파트에 생성 이미지가 연결되어 있습니다.",
     });
   }
 
@@ -189,7 +197,7 @@ export async function POST(
     const updated = readBrandPostPackage(id);
     if (!updated) throw new Error("이미지 작업 후 초안 패키지를 읽지 못했습니다.");
     const updatedPreview = packagePreview(updated);
-    const remainingMissing = updatedPreview.imageSlots.reduce((sum, slot) => sum + slot.missing, 0);
+    const remainingMissing = updatedPreview.imageSlots.reduce((sum, slot) => sum + slot.generationMissing, 0);
     return NextResponse.json({
       success: generatedCount > 0 || errors.length === 0,
       data: updatedPreview,

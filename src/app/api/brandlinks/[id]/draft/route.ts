@@ -141,37 +141,50 @@ async function autoRepairTravelImages(options: {
   if (!manifest || manifest.version !== "brand-post-package/v2" || manifest.connectKind !== "TRAVEL") {
     return { manifest, warning: null as string | null };
   }
-  const preview = packagePreview(manifest);
-  const requests = preview.imageSlots.flatMap((slot) =>
-    Array.from({ length: slot.missing }, () => ({
-      requestId: randomUUID(),
-      sectionId: slot.sectionId,
-    })),
-  ).slice(0, 4);
-  if (requests.length === 0) return { manifest, warning: null as string | null };
-
   try {
-    const results = await generateBrandPostImages({
-      manifest,
-      productName: options.productName || manifest.title,
-      requests,
-    });
     const failures: string[] = [];
-    for (const result of results) {
-      if (!result.generatedPath) {
-        failures.push(result.error || "GPT Image 결과가 비어 있습니다.");
-        continue;
-      }
-      applyGeneratedBrandPostImage({
-        brandLinkId: options.brandLinkId,
-        generatedPath: result.generatedPath,
-        sectionId: result.sectionId,
-        replaceAssetKey: result.replaceAssetKey,
-        provenance: result.provenance,
-        imageIntent: result.imageIntent,
+    for (let batch = 0; batch < 4; batch += 1) {
+      const preview = packagePreview(manifest);
+      const beforeMissing = preview.imageSlots.reduce((sum, slot) => sum + slot.generationMissing, 0);
+      const requests = preview.imageSlots.flatMap((slot) => {
+        const replaceableOriginal = slot.assets.find((asset) => asset?.provenance === "ORIGINAL");
+        return Array.from({ length: slot.generationMissing }, () => ({
+          requestId: randomUUID(),
+          sectionId: slot.sectionId,
+          replaceAssetKey: slot.count >= slot.maximum ? replaceableOriginal?.assetKey : undefined,
+        }));
+      }).filter((request) => request.replaceAssetKey || preview.imageSlots.some(
+        (slot) => slot.sectionId === request.sectionId && slot.count < slot.maximum,
+      )).slice(0, 4);
+      if (requests.length === 0) break;
+
+      const results = await generateBrandPostImages({
+        manifest,
+        productName: options.productName || manifest.title,
+        requests,
       });
+      for (const result of results) {
+        if (!result.generatedPath) {
+          failures.push(result.error || "ChatGPT 이미지 결과가 비어 있습니다.");
+          continue;
+        }
+        applyGeneratedBrandPostImage({
+          brandLinkId: options.brandLinkId,
+          generatedPath: result.generatedPath,
+          sectionId: result.sectionId,
+          replaceAssetKey: result.replaceAssetKey,
+          provenance: result.provenance,
+          imageIntent: result.imageIntent,
+        });
+      }
+      manifest = readBrandPostPackage(options.brandLinkId);
+      if (!manifest || manifest.version !== "brand-post-package/v2") break;
+      const afterMissing = packagePreview(manifest).imageSlots.reduce(
+        (sum, slot) => sum + slot.generationMissing,
+        0,
+      );
+      if (afterMissing >= beforeMissing || failures.length > 0) break;
     }
-    manifest = readBrandPostPackage(options.brandLinkId);
     return {
       manifest,
       warning: failures.length > 0 ? `저품질 이미지 자동 대체 일부 실패: ${failures.join(" ")}` : null,
@@ -340,12 +353,14 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   // 기본 엔진은 OpenAI API 키(Spec-first). codex 는 설정에서 켠 경우에만, ChatGPT 웹 자동작성도 설정에서 켠 경우에만 쓴다.
   const provider = (process.env.AI_PROVIDER || "openai").toLowerCase() === "codex" ? "codex" : "openai";
   const hasProviderKey = Boolean(process.env.OPENAI_API_KEY?.trim());
-  const localFallbackEnabled = (process.env.PRODUCT_POST_LOCAL_FALLBACK_ENABLED || "true").toLowerCase() !== "false";
+  const localFallbackEnabled = (process.env.PRODUCT_POST_LOCAL_FALLBACK_ENABLED || "false").toLowerCase() === "true";
   const browserAutomationEnabled = isChatGptBrowserAutomationEnabled();
   const codexEnabled = (process.env.CODEX_DRAFT_ENABLED || "false").trim().toLowerCase() === "true";
   const codexStatus = !action && codexEnabled ? readCodexLocalStatus() : null;
   const useCodex = !action && codexEnabled && Boolean(codexStatus?.authenticated);
-  const useBrowserChatGpt = !action && !useCodex && !hasProviderKey && !localFallbackEnabled && browserAutomationEnabled;
+  // 로그인된 일반 ChatGPT 자동작성이 켜져 있으면 저품질 로컬 템플릿보다 우선한다.
+  // 글 작성은 일반 ChatGPT 경로만 사용한다.
+  const useBrowserChatGpt = !action && !useCodex && !hasProviderKey && browserAutomationEnabled;
   const browserSession = browserAutomationEnabled ? readChatGptBrowserSessionSummary() : null;
   const handoff = () => buildChatGptDraftHandoff({
     productId: link.id,

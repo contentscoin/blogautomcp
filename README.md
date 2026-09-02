@@ -153,8 +153,7 @@ CHATGPT_BROWSER_AUTOMATION_ENABLED=true
 BROWSER_GPT_MODE=true
 ALLOW_CHATGPT_BROWSER_MODE=true
 CHATGPT_BROWSER_VISIBILITY=background
-CHATGPT_USE_CUSTOM_GPTS=false
-CHATGPT_DIRECT_ONLY=true
+CHATGPT_BASE_URL=https://chatgpt.com/
 BLOG_HUMANIZE_MOBILE_STYLE=true
 # 본문은 AI 생성 원고 또는 사용자가 승인한 준비 원고만 발행합니다.
 # AI 실패 시 하네스 문장을 복사한 로컬 원고로 대체하지 않습니다.
@@ -229,10 +228,10 @@ npm run login
 
 > 💡 세션은 보통 7~30일간 유지됩니다. 발행 실패 시 다시 로그인하세요.
 
-### 로컬 AI 작성 설정
+### AI 작성 설정
 
-- 설치형 앱은 ChatGPT 브라우저 로그인과 Custom GPT 조작을 강제로 끕니다.
-- OpenAI API가 실패하거나 키가 없으면 Spec-first 로컬 템플릿 초안으로 대체하고 검증 리포트에 NEEDS_REVIEW 로 표시합니다.
+- 브라우저 자동화는 특정 공유 GPT에 의존하지 않고 일반 ChatGPT에서 단일 프롬프트로 글을 생성합니다.
+- OpenAI API가 실패하거나 키가 없으면 기본 설정상 자동 승인을 받을 수 없는 로컬 템플릿으로 덮어쓰지 않고 `LLM_UNAVAILABLE`로 중단합니다.
 - ChatGPT MCP 2단계 초안은 `상품 근거 준비(post_prepare_draft) → ChatGPT 원고 생성 → PC 검증·패키징(post_submit_draft)` 순서로 처리하며 API 키가 필요하지 않습니다.
 - 초안 미리보기의 `이미지` 탭에서 각 결과를 확인하고, 필수 슬롯 자동 보충·파트별 추가·개별 재생성을 실행할 수 있습니다. 쇼핑 이미지는 원본 상품을 다시 그리지 않고 잠금 합성하며, 안전한 분리가 불가능하면 수집 원본을 유지합니다.
 - 이미지 수는 쇼핑 `최소 5/권장 8`, 여행 `최소 7/권장 10`으로 검사합니다. `품질검사` 탭은 확인 안내 반복·상품 고유 장단점 부족·허위 체험 표현을 별도로 검사하고 자동 보강 결과를 표시합니다.

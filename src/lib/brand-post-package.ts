@@ -288,6 +288,12 @@ export function packagePreview(manifest: BrandPostPackageManifest) {
           getPostCompositionContract(manifest.connectKind),
           section,
         );
+        const sectionAssets = section.imagePaths
+          .map((imagePath) => assetByPath.get(path.resolve(imagePath)))
+          .filter(Boolean);
+        const originalCount = sectionAssets.filter((asset) => asset?.provenance === "ORIGINAL").length;
+        const generatedCount = sectionAssets.length - originalCount;
+        const generatedMinimum = maximum > 0 ? 1 : 0;
         return {
           sectionId: section.id,
           title: section.title,
@@ -297,9 +303,10 @@ export function packagePreview(manifest: BrandPostPackageManifest) {
           maximum,
           count: section.imagePaths.length,
           missing: Math.max(0, minimum - section.imagePaths.length),
-          assets: section.imagePaths
-            .map((imagePath) => assetByPath.get(path.resolve(imagePath)))
-            .filter(Boolean),
+          originalCount,
+          generatedCount,
+          generationMissing: Math.max(0, generatedMinimum - generatedCount),
+          assets: sectionAssets,
         };
       })
     : [];

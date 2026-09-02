@@ -148,7 +148,6 @@ export async function POST(request: NextRequest) {
             ...(provider === "chatgpt"
               ? {
                   CHATGPT_LOGIN_MANUAL_CONFIRM: "false",
-                  CHATGPT_VERIFY_CUSTOM_GPTS: "false",
                   CHATGPT_LOGIN_USE_PROBE: "false",
                   BROWSER_CHANNEL: process.env.BROWSER_CHANNEL || "chrome",
                 }

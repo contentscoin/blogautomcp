@@ -108,11 +108,10 @@ function configureRuntimePaths(projectRoot) {
   process.env.AI_PROVIDER = process.env.AI_PROVIDER || "openai";
   process.env.BROWSER_GPT_MODE = browserChatGptEnabled ? "true" : "false";
   process.env.ALLOW_CHATGPT_BROWSER_MODE = browserChatGptEnabled ? "true" : "false";
-  process.env.CHATGPT_USE_CUSTOM_GPTS = "false";
+  process.env.CHATGPT_BASE_URL = "https://chatgpt.com/";
   // 썸네일 생성도 ChatGPT 브라우저 자동화를 쓰지 않는다. 사용자 .env로도 켤 수 없게 고정한다.
   process.env.PRODUCT_THUMBNAIL_CHATGPT_ENABLED = "false";
   process.env.PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE = "false";
-  process.env.PRODUCT_THUMBNAIL_CHATGPT_BASE_FALLBACK_ENABLED = "false";
   if (!process.env.DATABASE_URL) {
     const databasePath = app.isPackaged
       ? path.join(userData, "data", "blogautomcp.db")

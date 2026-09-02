@@ -24,7 +24,7 @@ const CHATGPT_HEALTHCHECK_USE_PROBE =
   (process.env.CHATGPT_HEALTHCHECK_USE_PROBE || process.env.CHATGPT_LOGIN_USE_PROBE || "false").toLowerCase() ===
   "true";
 const CHATGPT_TARGET_RECOVERY_ATTEMPTS = Number(process.env.CHATGPT_TARGET_RECOVERY_ATTEMPTS || 1);
-const CHATGPT_BASE_URL = process.env.CHATGPT_GPT_URL || "https://chatgpt.com/";
+const CHATGPT_BASE_URL = "https://chatgpt.com/";
 
 const CHATGPT_COMPOSER_SELECTORS = [
   "#prompt-textarea",
@@ -71,10 +71,6 @@ async function findVisibleSelector(page: Page, selectors: string[]): Promise<str
     if (visible) return selector;
   }
   return null;
-}
-
-function isCustomGptUrl(url: string): boolean {
-  return /https?:\/\/chatgpt\.com\/g\//i.test(url);
 }
 
 async function hasComposer(page: Page): Promise<boolean> {
@@ -264,25 +260,6 @@ async function continueChatGPTAccountPicker(page: Page, label = "ChatGPT"): Prom
   return true;
 }
 
-async function hasInaccessibleGptBanner(page: Page): Promise<boolean> {
-  const bannerByText = page
-    .getByText(/This GPT is inaccessible or not found|GPT에 접근할 수 없습니다|사용할 수 없습니다/i)
-    .first();
-  if (await bannerByText.isVisible().catch(() => false)) {
-    return true;
-  }
-
-  const bodyText = ((await page.textContent("body").catch(() => "")) || "")
-    .replace(/\s+/g, " ")
-    .toLowerCase();
-
-  return (
-    bodyText.includes("this gpt is inaccessible or not found") ||
-    bodyText.includes("ensure you're using the right account") ||
-    bodyText.includes("gpt에 접근할 수 없습니다")
-  );
-}
-
 async function hasSessionTokenCookie(page: Page): Promise<boolean> {
   try {
     const cookies = await page.context().cookies("https://chatgpt.com");
@@ -348,14 +325,13 @@ export interface ChatGPTReadyOptions {
 
 async function ensureChatGPTReady(
   page: Page,
-  requestedUrl: string,
   label: string,
   options: ChatGPTReadyOptions = {},
 ): Promise<void> {
   const timeoutMs = options.timeoutMs ?? CHATGPT_READY_TIMEOUT_MS;
   const requireProbe = options.requireProbe ?? CHATGPT_HEALTHCHECK_USE_PROBE;
   const allowRecovery = options.allowRecovery !== false;
-  let lastReason = "입력창을 찾지 못했습니다.";
+  const lastReason = "입력창을 찾지 못했습니다.";
 
   for (let attempt = 0; attempt <= (allowRecovery ? CHATGPT_TARGET_RECOVERY_ATTEMPTS : 0); attempt += 1) {
     const start = Date.now();
@@ -368,12 +344,6 @@ async function ensureChatGPTReady(
       await dismissTemporaryChatOnboarding(page);
       if (await continueChatGPTAccountPicker(page, label)) {
         continue;
-      }
-
-      if (await hasInaccessibleGptBanner(page)) {
-        throw new Error(
-          `${label} GPT 접근 실패: 현재 로그인 계정에서 이 GPT를 사용할 수 없습니다. URL=${requestedUrl}`,
-        );
       }
 
       if (await isChatGPTLoginRequired(page)) {
@@ -397,10 +367,6 @@ async function ensureChatGPTReady(
         return;
       }
 
-      if (isCustomGptUrl(requestedUrl) && page.url() && !page.url().startsWith(requestedUrl) && page.url().startsWith(CHATGPT_BASE_URL)) {
-        lastReason = "커스텀 GPT 대신 기본 ChatGPT 홈으로 이동되었습니다.";
-      }
-
       await page.waitForTimeout(1000);
     }
 
@@ -409,14 +375,9 @@ async function ensureChatGPTReady(
     }
 
     console.log(`⚠️ [${label}] ChatGPT 상태가 불안정하여 복구를 시도합니다. (${attempt + 1}/${CHATGPT_TARGET_RECOVERY_ATTEMPTS})`);
-    if (isCustomGptUrl(requestedUrl)) {
-      await page.goto(CHATGPT_BASE_URL, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
-      await page.waitForTimeout(1200);
-    } else {
-      await page.reload({ waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
-      await page.waitForTimeout(1200);
-    }
-    await page.goto(requestedUrl, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
+    await page.reload({ waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
+    await page.waitForTimeout(1200);
+    await page.goto(CHATGPT_BASE_URL, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
     await page.waitForTimeout(1800);
   }
 
@@ -490,14 +451,14 @@ export async function createChatGPTContext(hasSessionFile: boolean): Promise<Cha
   }
 }
 
-export async function openChatGPTTarget(page: Page, url: string, label: string) {
-  console.log(`\n🌐 [${label}] ChatGPT 열기: ${url}`);
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+export async function openChatGPTTarget(page: Page, _url: string, label: string) {
+  console.log(`\n🌐 [${label}] 일반 ChatGPT 열기: ${CHATGPT_BASE_URL}`);
+  await page.goto(CHATGPT_BASE_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
   await page.waitForTimeout(2000);
   await assertNoChatGPTProtection(page, label);
   await dismissTemporaryChatOnboarding(page);
   await continueChatGPTAccountPicker(page, label);
-  await ensureChatGPTReady(page, url, label);
+  await ensureChatGPTReady(page, label);
 }
 
 export async function dismissTemporaryChatOnboarding(page: Page) {
@@ -517,7 +478,7 @@ export async function dismissTemporaryChatOnboarding(page: Page) {
   }
 }
 
-export async function startFreshChat(page: Page, gptUrl: string, label: string = "새 채팅") {
+export async function startFreshChat(page: Page, _gptUrl: string, label: string = "새 채팅") {
   console.log(`      - [${label}] 같은 창에서 새 채팅 시작...`);
   await dismissTemporaryChatOnboarding(page);
 
@@ -540,11 +501,6 @@ export async function startFreshChat(page: Page, gptUrl: string, label: string =
       await target.click({ timeout: 3000 });
       await page.waitForTimeout(1800);
 
-      if (gptUrl && gptUrl !== "https://chatgpt.com/" && !page.url().startsWith(gptUrl)) {
-        await page.goto(gptUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
-        await page.waitForTimeout(1800);
-      }
-
       await dismissTemporaryChatOnboarding(page);
       await waitForChatGPTComposer(page, 30000);
       return;
@@ -553,17 +509,17 @@ export async function startFreshChat(page: Page, gptUrl: string, label: string =
     }
   }
 
-  await openChatGPTTarget(page, gptUrl || "https://chatgpt.com/", label);
+  await openChatGPTTarget(page, CHATGPT_BASE_URL, label);
 }
 
 export async function openFreshChatGPTTarget(
   page: Page,
-  gptUrl: string,
+  _gptUrl: string,
   label: string,
   freshChatLabel: string = `${label} 새 채팅`,
 ) {
-  await openChatGPTTarget(page, gptUrl, label);
-  await startFreshChat(page, gptUrl, freshChatLabel);
+  await openChatGPTTarget(page, CHATGPT_BASE_URL, label);
+  await startFreshChat(page, CHATGPT_BASE_URL, freshChatLabel);
 }
 
 export async function isChatGPTGenerating(page: Page): Promise<boolean> {

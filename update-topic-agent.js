@@ -13,11 +13,11 @@ async function generateAdvancedContent(
     args: TopicArgs,
     styleGuide: string
 ): Promise<{ title: string; sections: string[]; hashtags: string[]; imagePrompts?: any[] }> {
-    console.log("\\n🚀 [Topic Agent V2] 인간 지능 모방형 파이프라인 시작 (커스텀 GPT 기반)...");
+    console.log("\\n🚀 [Topic Agent V2] 일반 ChatGPT 기반 파이프라인 시작...");
 
     const template = getTemplate(args.type);
     const baseKeywords = args.keywords.length > 0 ? args.keywords.join(", ") : template.seoKeywords.join(", ");
-    const CHATGPT_GPT_URL_TOPIC = process.env.CHATGPT_GPT_URL_TOPIC || "https://chatgpt.com/";
+    const CHATGPT_BASE_URL = "https://chatgpt.com/";
 
     let chatgptHandle: ChatGPTContextHandle | null = null;
     
@@ -25,7 +25,7 @@ async function generateAdvancedContent(
         console.log("   🌐 브라우저 세션 초기화 (ChatGPT)...");
         chatgptHandle = await createChatGPTContext(true);
         const page = await chatgptHandle.context.newPage();
-        await openChatGPTTarget(page, CHATGPT_GPT_URL_TOPIC, "기획/작성 GPT");
+        await openChatGPTTarget(page, CHATGPT_BASE_URL, "기획/작성 ChatGPT");
 
         // [1단계] 자료조사 및 기획 (Research & Outline)
         console.log("   [1/5] 기획 스킬 적용: 웹 검색 및 스토리보드 구성 중...");

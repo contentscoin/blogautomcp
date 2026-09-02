@@ -72,9 +72,23 @@ async function main(): Promise<void> {
   const enabledEnv = buildChatGptBrowserAutomationEnv(true, {});
   assert.equal(enabledEnv.BROWSER_GPT_MODE, "true");
   assert.equal(enabledEnv.ALLOW_CHATGPT_BROWSER_MODE, "true");
-  assert.equal(enabledEnv.CHATGPT_USE_CUSTOM_GPTS, "false");
+  assert.equal(enabledEnv.CHATGPT_BASE_URL, "https://chatgpt.com/");
   assert.equal(enabledEnv.CHATGPT_RUN_ISOLATED_CONTEXT, "false");
   assert.equal(enabledEnv.CHATGPT_BROWSER_VISIBILITY, "background");
+  for (const runtimePath of [
+    "scripts/simple-agent.ts",
+    "scripts/topic-agent.ts",
+    "scripts/chatgpt-login.ts",
+    "scripts/lib/chatgpt-browser.ts",
+    "src/services/topic-task-pipeline.ts",
+    "src/lib/brand-post-image-generation.ts",
+  ]) {
+    assert.equal(
+      /https:\/\/chatgpt\.com\/g\//u.test(source(runtimePath)),
+      false,
+      `${runtimePath}에 계정 종속 전용 GPT URL이 남아 있으면 안 됩니다.`,
+    );
+  }
 
   assert.equal(resolveChatGptBrowserVisibility({}), "background");
   assert.equal(resolveChatGptBrowserVisibility({ CHATGPT_HEADLESS: "true" }), "headless");

@@ -9,12 +9,12 @@ async function generateAdvancedContent(
     args: TopicArgs,
     styleGuide: string
 ): Promise<{ title: string; sections: string[]; hashtags: string[]; imagePrompts?: any[] }> {
-    console.log("\\n🚀 [Topic Agent V2] 인간 지능 모방형 파이프라인 시작 (커스텀 GPT 기반)...");
+    console.log("\\n🚀 [Topic Agent V2] 일반 ChatGPT 기반 파이프라인 시작...");
 
     const template = getTemplate(args.type);
     const baseKeywords = args.keywords.length > 0 ? args.keywords.join(", ") : template.seoKeywords.join(", ");
     
-    const CHATGPT_GPT_URL_TOPIC = "https://chatgpt.com/g/g-690490188af4819188bc1da73019a60f-jeongboseong-beomyong-isyu-geul-saengseonggi-v11-dapeojuneunnamja";
+    const CHATGPT_BASE_URL = "https://chatgpt.com/";
 
     let chatgptHandle: ChatGPTContextHandle | null = null;
     
@@ -24,7 +24,7 @@ async function generateAdvancedContent(
         const page = await chatgptHandle.context.newPage();
         
         // 1. 글 생성 파이프라인
-        await openChatGPTTarget(page, CHATGPT_GPT_URL_TOPIC, "글 생성 GPT");
+        await openChatGPTTarget(page, CHATGPT_BASE_URL, "글 생성 ChatGPT");
         
         console.log("   [1/3] GPT와 대화 시작 (안녕하세요)...");
         await sendPromptToChatGPT(page, "안녕하세요", "인사");

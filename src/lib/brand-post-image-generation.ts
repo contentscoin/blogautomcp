@@ -16,8 +16,7 @@ import {
   type BrandPostPackageManifestV2,
 } from "./brand-post-package";
 
-const DEFAULT_CHATGPT_IMAGE_GPT_URL =
-  "https://chatgpt.com/g/g-69044d98b1f08191b96ca4293c6c8156-jeongboseong-imiji-saengseong-v11-dapeojuneunnamja";
+const CHATGPT_BASE_URL = "https://chatgpt.com/";
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
 const IMAGE_BATCH_SCRIPT = path.join(process.cwd(), "scripts", "chatgpt-generate-image-batch.ts");
 const IMAGE_BATCH_TIMEOUT_MS = Number(
@@ -196,7 +195,7 @@ async function runBrowserImageBatch(
         "--jobs-file",
         jobsPath,
         "--gpt-url",
-        process.env.CHATGPT_GPT_URL_IMAGE || DEFAULT_CHATGPT_IMAGE_GPT_URL,
+        CHATGPT_BASE_URL,
       ],
       {
         cwd: process.cwd(),

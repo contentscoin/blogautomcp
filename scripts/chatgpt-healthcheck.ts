@@ -6,22 +6,8 @@ import {
 
 const targets = [
   {
-    label: "base",
-    url: process.env.CHATGPT_GPT_URL || "https://chatgpt.com/",
-  },
-  {
-    label: "topic",
-    url:
-      process.env.CHATGPT_GPT_URL_TOPIC ||
-      process.env.CHATGPT_GPT_URL_DRAFT ||
-      "https://chatgpt.com/",
-  },
-  {
-    label: "image",
-    url:
-      process.env.CHATGPT_GPT_URL_IMAGE ||
-      process.env.CHATGPT_GPT_URL ||
-      "https://chatgpt.com/",
+    label: "ChatGPT",
+    url: "https://chatgpt.com/",
   },
 ];
 

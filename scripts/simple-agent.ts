@@ -216,22 +216,8 @@ const REQUESTED_BROWSER_GPT_MODE = (process.env.BROWSER_GPT_MODE || "false").toL
 const ALLOW_CHATGPT_BROWSER_MODE =
   (process.env.ALLOW_CHATGPT_BROWSER_MODE || "false").toLowerCase() === "true";
 const BROWSER_GPT_MODE = REQUESTED_BROWSER_GPT_MODE && ALLOW_CHATGPT_BROWSER_MODE;
-const DEFAULT_CHATGPT_DRAFT_GPT_URL =
-  "https://chatgpt.com/g/g-69044e83643481918a83e45a0bfec330-jepum-ribyu-jagseong-v11-dapeojuneunnamja";
-const DEFAULT_CHATGPT_POLISH_GPT_URL =
-  "https://chatgpt.com/g/g-683347512adc8191bd26d40336990cb1-seo-coejeoghwa-jadong-geul-byeonhwan-v5-0-dapeojuneunnamja";
-const CHATGPT_DRAFT_GPT_URL =
-  process.env.CHATGPT_GPT_URL_DRAFT ||
-  process.env.CHATGPT_GPT_URL ||
-  DEFAULT_CHATGPT_DRAFT_GPT_URL;
-const CHATGPT_POLISH_GPT_URL =
-  process.env.CHATGPT_GPT_URL_POLISH ||
-  process.env.CHATGPT_GPT_URL_DRAFT ||
-  process.env.CHATGPT_GPT_URL ||
-  DEFAULT_CHATGPT_POLISH_GPT_URL;
-const CHATGPT_USE_CUSTOM_GPTS =
-  (process.env.CHATGPT_USE_CUSTOM_GPTS || "false").toLowerCase() === "true";
-const CHATGPT_BASE_URL = process.env.CHATGPT_BASE_URL || "https://chatgpt.com/";
+const CHATGPT_BASE_URL = "https://chatgpt.com/";
+// 글 작성은 특정 계정/공유 링크에 종속되지 않는 일반 ChatGPT에서만 실행한다.
 const CHATGPT_TIMEOUT_MS = Number(process.env.CHATGPT_TIMEOUT_MS || "420000");
 const CHATGPT_RESPONSE_IDLE_TIMEOUT_MS = Number(
   process.env.CHATGPT_RESPONSE_IDLE_TIMEOUT_MS || String(Math.max(CHATGPT_TIMEOUT_MS, 300000))
@@ -240,35 +226,18 @@ const CHATGPT_RESPONSE_MAX_TIMEOUT_MS = Number(
   process.env.CHATGPT_RESPONSE_MAX_TIMEOUT_MS ||
     String(Math.max(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS * 4, 1800000))
 );
-const CHATGPT_DRAFT_STEP_IDLE_TIMEOUT_MS = Number(process.env.CHATGPT_DRAFT_STEP_IDLE_TIMEOUT_MS || "90000");
-const CHATGPT_DRAFT_STEP_MAX_TIMEOUT_MS = Number(process.env.CHATGPT_DRAFT_STEP_MAX_TIMEOUT_MS || "240000");
 const CHATGPT_USE_PERSISTENT_PROFILE =
   (process.env.CHATGPT_USE_PERSISTENT_PROFILE || "true").toLowerCase() === "true";
 const CHATGPT_RUN_ISOLATED_CONTEXT =
   (process.env.CHATGPT_RUN_ISOLATED_CONTEXT || "false").toLowerCase() === "true";
-const CHATGPT_FALLBACK_TO_BASE =
-  (process.env.CHATGPT_FALLBACK_TO_BASE || "false").toLowerCase() === "true";
-const CHATGPT_FORCE_NEW_CHAT =
-  (process.env.CHATGPT_FORCE_NEW_CHAT || "true").toLowerCase() === "true";
-const CHATGPT_DIRECT_ONLY =
-  !CHATGPT_USE_CUSTOM_GPTS ||
-  (process.env.CHATGPT_DIRECT_ONLY || "true").toLowerCase() === "true";
-const CHATGPT_SKIP_POLISH =
-  !CHATGPT_USE_CUSTOM_GPTS ||
-  (process.env.CHATGPT_SKIP_POLISH || "true").toLowerCase() === "true";
 const CHATGPT_USE_TEMPORARY_CHAT =
   (process.env.CHATGPT_USE_TEMPORARY_CHAT || "false").toLowerCase() === "true";
-const CHATGPT_GUIDED_MODE =
-  (process.env.CHATGPT_GUIDED_MODE || "true").toLowerCase() === "true";
-const CHATGPT_GUIDED_MAX_TURNS = Number(process.env.CHATGPT_GUIDED_MAX_TURNS || "6");
 const CHATGPT_IMAGE_CONTEXT_MAX = Number(process.env.CHATGPT_IMAGE_CONTEXT_MAX || "4");
 const CHATGPT_IMAGE_ATTACH_TIMEOUT_MS = Number(
   process.env.CHATGPT_IMAGE_ATTACH_TIMEOUT_MS || process.env.CHATGPT_IMAGE_WAIT_MS || "30000"
 );
 const CHATGPT_ATTACH_IMAGES_TO_DRAFT =
   (process.env.CHATGPT_ATTACH_IMAGES_TO_DRAFT || "true").toLowerCase() === "true";
-const CHATGPT_ATTACH_IMAGES_TO_POLISH =
-  (process.env.CHATGPT_ATTACH_IMAGES_TO_POLISH || "true").toLowerCase() === "true";
 const CHATGPT_FORCE_MOBILE_VERSION =
   (process.env.CHATGPT_FORCE_MOBILE_VERSION || "true").toLowerCase() === "true";
 const BLOG_HUMANIZE_MOBILE_STYLE =
@@ -328,17 +297,25 @@ const PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_PATH =
 const PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_REQUEST_DIR =
   process.env.PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_REQUEST_DIR ||
   path.join(process.cwd(), "logs", "codex-imagegen-requests");
-const PRODUCT_THUMBNAIL_CHATGPT_BASE_FALLBACK_ENABLED =
-  (process.env.PRODUCT_THUMBNAIL_CHATGPT_BASE_FALLBACK_ENABLED || "false").toLowerCase() === "true";
-const DEFAULT_CHATGPT_IMAGE_GPT_URL =
-  "https://chatgpt.com/g/g-69044d98b1f08191b96ca4293c6c8156-jeongboseong-imiji-saengseong-v11-dapeojuneunnamja";
-const PRODUCT_THUMBNAIL_IMAGE_GPT_URL =
-  process.env.CHATGPT_GPT_URL_PRODUCT_THUMBNAIL ||
-  process.env.CHATGPT_GPT_URL_IMAGE ||
-  DEFAULT_CHATGPT_IMAGE_GPT_URL;
 const PRODUCT_THUMBNAIL_IMAGE_WAIT_MS = Number(
   process.env.PRODUCT_THUMBNAIL_IMAGE_WAIT_MS || process.env.CHATGPT_IMAGE_WAIT_MS || "60000"
 );
+
+function inferCategoryKeyword(productName: string): string {
+  const name = normalizeText(productName).toLowerCase();
+  if (/꼬리뼈|치질|자세교정|방석|쿠션|의자/.test(name)) return "자세교정 방석";
+  if (/보냉백|쿨러백|아이스박스|소프트쿨러/.test(name)) return "보냉백";
+  if (/드라이기|헤어드라이어/.test(name)) return "헤어 드라이기";
+  if (/선풍기|서큘레이터/.test(name)) return "선풍기";
+  if (/키보드|마우스|트랙패드|이어팟|아이폰|아이패드|맥북/.test(name)) return "디지털 기기";
+  if (name.includes("음식물") && name.includes("처리기")) return "음식물처리기";
+  if (name.includes("청소기")) return "무선청소기";
+  if (name.includes("공기청정")) return "공기청정기";
+  if (name.includes("노트북")) return "사무용노트북";
+  if (name.includes("에센스")) return "스킨케어";
+  if (name.includes("갈치")) return "수산물선물세트";
+  return "제품리뷰";
+}
 const BRANDLINK_CONTENT_READINESS_ENABLED =
   (process.env.BRANDLINK_CONTENT_READINESS_ENABLED || "true").toLowerCase() !== "false";
 const BRANDLINK_FORCE_QUALITY_REPAIR =
@@ -1303,90 +1280,14 @@ async function generateProductThumbnailWithChatGPT(
     contextHandle = await createChatGPTContext(hasSessionFile);
     const page = await contextHandle.context.newPage();
 
-    const targetUrls = [PRODUCT_THUMBNAIL_IMAGE_GPT_URL];
-    if (
-      PRODUCT_THUMBNAIL_CHATGPT_BASE_FALLBACK_ENABLED &&
-      isCustomGptUrl(PRODUCT_THUMBNAIL_IMAGE_GPT_URL) &&
-      !targetUrls.includes(CHATGPT_BASE_URL)
-    ) {
-      targetUrls.push(CHATGPT_BASE_URL);
-    }
-
-    for (let index = 0; index < targetUrls.length; index += 1) {
-      const targetUrl = targetUrls[index];
-      const label = index === 0 ? "Product Thumbnail" : "Product Thumbnail Base Fallback";
-      const generatedPath = await attemptProductThumbnailChatGPTGeneration(
-        page,
-        prompt,
-        referenceImagePath,
-        productNameLabel,
-        targetUrl,
-        label
-      );
-      if (generatedPath) return generatedPath;
-      if (index < targetUrls.length - 1) {
-        console.log("   Warning: Product Thumbnail custom GPT failed; retrying with base ChatGPT.");
-      } else if (
-        isCustomGptUrl(PRODUCT_THUMBNAIL_IMAGE_GPT_URL) &&
-        !PRODUCT_THUMBNAIL_CHATGPT_BASE_FALLBACK_ENABLED
-      ) {
-        console.log("   Warning: Product Thumbnail base ChatGPT fallback disabled; skipping browser retry.");
-      }
-    }
-
-    return null;
-
-    await openChatGPTTarget(page, PRODUCT_THUMBNAIL_IMAGE_GPT_URL, "Product Thumbnail");
-    await continueChatGPTAccountPicker(page, "Product Thumbnail");
-    if (!isCustomGptUrl(PRODUCT_THUMBNAIL_IMAGE_GPT_URL)) {
-      await startNewChatIfAvailable(page);
-      await ensureChatGPTReady(page, Math.min(CHATGPT_TIMEOUT_MS, 120000));
-    }
-
-    await continueChatGPTAccountPicker(page, "Product Thumbnail");
-    const attached = await attachImagesToChatGPT(page, [referenceImagePath], "Thumbnail reference");
-    if (attached === 0) {
-      console.log("   ⚠️ 생성형 썸네일: 제품 레퍼런스 이미지 첨부 실패");
-      await saveProductThumbnailDebugScreenshot(page, "attach-failed");
-      return null;
-    }
-
-    await page.waitForTimeout(3000);
-    const beforeSources = await collectRenderableChatGPTImageSources(page);
-    console.log(`      - 생성 전 이미지 기준점: ${beforeSources.size}개`);
-    await submitProductThumbnailImagePrompt(page, prompt);
-    await maybeConfirmProductThumbnailGeneration(page, beforeSources);
-    const imageCount = await waitForProductThumbnailImageArtifacts(
+    return await attemptProductThumbnailChatGPTGeneration(
       page,
-      beforeSources,
-      PRODUCT_THUMBNAIL_IMAGE_WAIT_MS
+      prompt,
+      referenceImagePath,
+      productNameLabel,
+      CHATGPT_BASE_URL,
+      "Product Thumbnail"
     );
-
-    if (imageCount === 0) {
-      const latestAssistantMessage = normalizeText((await readAssistantMessages(page)).at(-1) || "");
-      if (latestAssistantMessage) {
-        console.log(`   ⚠️ 생성형 썸네일 마지막 응답: ${latestAssistantMessage.slice(0, 240)}`);
-      }
-      console.log("   ⚠️ 생성형 썸네일: 새 이미지 산출물을 찾지 못했습니다.");
-      await saveProductThumbnailDebugScreenshot(page, "no-image-artifact");
-      return null;
-    }
-
-    const outDir = path.join(TEMP_PATH, `product-thumbnail-${Date.now()}`);
-    const downloadedPaths = await downloadProductThumbnailImages(page, outDir, beforeSources);
-    const firstImagePath = downloadedPaths.find((value) => value && fs.existsSync(value)) || "";
-    if (!firstImagePath) {
-      console.log("   ⚠️ 생성형 썸네일: 생성 이미지 다운로드 실패");
-      await saveProductThumbnailDebugScreenshot(page, "download-failed");
-      return null;
-    }
-
-    const finalPath = path.join(
-      TEMP_PATH,
-      `product_thumbnail_generated_${Date.now()}_${sanitizeFileNameForPath(productNameLabel)}${path.extname(firstImagePath) || ".png"}`
-    );
-    fs.copyFileSync(firstImagePath, finalPath);
-    return finalPath;
   } catch (error) {
     console.log(`   ⚠️ 생성형 썸네일 실패: ${getErrorMessage(error)}`);
     return null;
@@ -1407,10 +1308,8 @@ async function attemptProductThumbnailChatGPTGeneration(
 ): Promise<string | null> {
   await openChatGPTTarget(page, targetUrl, label);
   await continueChatGPTAccountPicker(page, label);
-  if (!isCustomGptUrl(targetUrl)) {
-    await startNewChatIfAvailable(page);
-    await ensureChatGPTReady(page, Math.min(CHATGPT_TIMEOUT_MS, 120000));
-  }
+  await startNewChatIfAvailable(page);
+  await ensureChatGPTReady(page, Math.min(CHATGPT_TIMEOUT_MS, 120000));
 
   await continueChatGPTAccountPicker(page, label);
   const attached = await attachImagesToChatGPT(page, [referenceImagePath], `${label} reference`);
@@ -2097,13 +1996,6 @@ const CHATGPT_AUTHENTICATED_UI_SELECTORS = [
   'button:has-text("새 대화")',
 ];
 
-const CHATGPT_STARTER_BUTTON_SELECTORS = [
-  'button[data-testid*="conversation-starter"]',
-  'button:has-text("안녕하세요")',
-  'button:has-text("Hello")',
-  'button:has-text("시작")',
-];
-
 const CHATGPT_MANUAL_VERIFICATION_MESSAGE =
   chatGptAuthenticationRequiredMessage(
     "ChatGPT manual verification required. A human-verification or security-check page is visible. Complete it in the browser, then run the job again.",
@@ -2119,14 +2011,6 @@ const CHATGPT_PROTECTION_FRAME_PATTERNS = [
   "hcaptcha",
   "recaptcha",
 ];
-
-function isCustomGptUrl(url: string): boolean {
-  return /https?:\/\/chatgpt\.com\/g\//i.test(url);
-}
-
-function isCustomGptPageUrl(url: string): boolean {
-  return /https?:\/\/chatgpt\.com\/g\//i.test(url);
-}
 
 async function findVisibleSelector(page: Page, selectors: string[]): Promise<string | null> {
   for (const selector of selectors) {
@@ -2399,7 +2283,7 @@ async function continueChatGPTAccountPicker(page: Page, label = "ChatGPT"): Prom
 }
 
 function withTemporaryChatParam(url: string): string {
-  if (!isCustomGptUrl(url) || !CHATGPT_USE_TEMPORARY_CHAT) return url;
+  if (!CHATGPT_USE_TEMPORARY_CHAT) return url;
 
   try {
     const parsed = new URL(url);
@@ -2408,25 +2292,6 @@ function withTemporaryChatParam(url: string): string {
   } catch {
     return url;
   }
-}
-
-async function hasInaccessibleGptBanner(page: Page): Promise<boolean> {
-  const bannerByText = page
-    .getByText(/This GPT is inaccessible or not found|GPT에 접근할 수 없습니다|사용할 수 없습니다/i)
-    .first();
-  if (await bannerByText.isVisible().catch(() => false)) {
-    return true;
-  }
-
-  const bodyText = ((await page.textContent("body").catch(() => "")) || "")
-    .replace(/\s+/g, " ")
-    .toLowerCase();
-
-  return (
-    bodyText.includes("this gpt is inaccessible or not found") ||
-    bodyText.includes("ensure you're using the right account") ||
-    bodyText.includes("gpt에 접근할 수 없습니다")
-  );
 }
 
 async function startNewChatIfAvailable(page: Page): Promise<boolean> {
@@ -2493,285 +2358,7 @@ async function dismissTemporaryChatOnboarding(page: Page): Promise<void> {
   await page.waitForTimeout(400);
 }
 
-function normalizePromptForStepMatch(text: string): string {
-  return normalizeText(text).toLowerCase();
-}
 
-function includesAny(text: string, needles: string[]): boolean {
-  return needles.some((needle) => text.includes(needle));
-}
-
-function isDraftStepProductInfoPrompt(text: string): boolean {
-  const normalized = normalizePromptForStepMatch(text);
-  return (
-    (includesAny(normalized, ["1단계", "제품 정보 수집"]) &&
-      includesAny(normalized, ["제품명", "구매페이지"])) ||
-    (normalized.includes("제품명") && normalized.includes("구매페이지"))
-  );
-}
-
-function isDraftStepSeoKeywordPrompt(text: string): boolean {
-  const normalized = normalizePromptForStepMatch(text);
-  return (
-    includesAny(normalized, ["2단계", "seo 제목", "seo제목"]) &&
-      normalized.includes("키워드")
-  ) || (normalized.includes("seo") && normalized.includes("키워드"));
-}
-
-function isDraftStepSeoTitleSelectionPrompt(text: string): boolean {
-  const normalized = normalizePromptForStepMatch(text);
-  const hasTitleKeyword = includesAny(normalized, ["seo 제목", "제목", "타이틀"]);
-  const hasSelectionKeyword = includesAny(normalized, [
-    "선택",
-    "골라",
-    "번호",
-    "1번",
-    "2번",
-    "3번",
-    "4번",
-    "4가지",
-  ]);
-  return hasTitleKeyword && hasSelectionKeyword;
-}
-
-function isDraftStepVersionPrompt(text: string): boolean {
-  const normalized = normalizePromptForStepMatch(text);
-  return (
-    includesAny(normalized, ["3단계", "출력 형식", "어떤 버전"]) ||
-    (normalized.includes("pc 버전") && normalized.includes("모바일 버전"))
-  );
-}
-
-function isDraftStepSubtitleCountPrompt(text: string): boolean {
-  const normalized = normalizePromptForStepMatch(text);
-  return (
-    includesAny(normalized, ["4단계", "소제목 개수"]) ||
-    (normalized.includes("소제목") &&
-      includesAny(normalized, ["몇 개", "몇개", "개수", "숫자로 입력"]))
-  );
-}
-
-function isDraftStepContentPrompt(text: string): boolean {
-  const normalized = normalizePromptForStepMatch(text);
-  return (
-    includesAny(normalized, ["5단계", "콘텐츠 구성", "아래 형식으로 입력"]) ||
-    includesAny(normalized, ["챕터", "다루고 싶은 내용"])
-  );
-}
-
-function isDraftStepTonePrompt(text: string): boolean {
-  const normalized = normalizePromptForStepMatch(text);
-  return (
-    includesAny(normalized, ["6단계", "말투 설정", "어떤 말투"]) ||
-    includesAny(normalized, [
-      "전문가 리뷰 말투",
-      "직접 입력",
-      "경험 공유 말투",
-      "친근한 말투",
-      "따뜻하고 친절한 말투",
-      "원하시는 번호",
-    ])
-  );
-}
-
-function buildDirectSeoTitle(context: ChatGPTGuidanceContext): string {
-  const compactName = stripEmoji(context.productName).replace(/\s+/g, " ").trim();
-  const tokens = compactName.split(" ").filter((token) => token.length > 0);
-  const travelCore = context.connectKind === "TRAVEL"
-    ? extractTravelProductFacts(context.productName, context.description, context.features).destinations.slice(0, 2).join(" ")
-    : "";
-  const productCore = travelCore || tokens.slice(0, Math.min(4, tokens.length)).join(" ");
-  const base = productCore || (context.connectKind === "TRAVEL" ? "여행상품" : "제품");
-  const candidates = context.connectKind === "TRAVEL"
-    ? [
-        `${base} 명소와 현지 여행 팁`,
-        `${base} 골목과 풍경 여행 이야기`,
-        `${base} 꼭 볼 곳과 즐길 거리`,
-      ]
-    : [
-        `${base} 제품 장단점과 선택 기준`,
-        `${base} 기능 비교와 구매 판단`,
-        `${base} 핵심 특징과 확인 기준`,
-      ];
-
-  for (const candidate of candidates) {
-    const trimmed = candidate.trim();
-    if (trimmed.length >= 16 && trimmed.length <= 35) {
-      return trimmed;
-    }
-  }
-
-  const safeSuffix = context.connectKind === "TRAVEL" ? "명소와 여행 팁" : "장단점과 선택 기준";
-  return `${base} ${safeSuffix}`.slice(0, 35).trim();
-}
-
-function inferCategoryKeyword(productName: string): string {
-  const name = normalizePromptForStepMatch(productName);
-  if (/꼬리뼈|치질|자세교정|방석|쿠션|의자/.test(name)) return "자세교정 방석";
-  if (/보냉백|쿨러백|아이스박스|소프트쿨러/.test(name)) return "보냉백";
-  if (/드라이기|헤어드라이어/.test(name)) return "헤어 드라이기";
-  if (/선풍기|서큘레이터/.test(name)) return "선풍기";
-  if (/키보드|마우스|트랙패드|이어팟|아이폰|아이패드|맥북/.test(name)) return "디지털 기기";
-  if (name.includes("음식물") && name.includes("처리기")) return "음식물처리기";
-  if (name.includes("청소기")) return "무선청소기";
-  if (name.includes("공기청정")) return "공기청정기";
-  if (name.includes("노트북")) return "사무용노트북";
-  if (name.includes("에센스")) return "스킨케어";
-  if (name.includes("갈치")) return "수산물선물세트";
-  return "제품리뷰";
-}
-
-function buildSeoKeywordInput(context: ChatGPTGuidanceContext): string {
-  const productTokens = context.productName
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .split(/\s+/)
-    .map((token) => token.trim())
-    .filter((token) => token.length >= 2)
-    .slice(0, 2);
-
-  const featureToken = context.features
-    .map((item) =>
-      item
-        .replace(/[^\p{L}\p{N}\s]/gu, " ")
-        .split(/\s+/)
-        .map((token) => token.trim())
-        .find((token) => token.length >= 2)
-    )
-    .find((token): token is string => Boolean(token));
-
-  const travelDestinations = context.connectKind === "TRAVEL"
-    ? extractTravelProductFacts(context.productName, context.description, context.features).destinations.slice(0, 2)
-    : [];
-  const keywords = (context.connectKind === "TRAVEL"
-    ? [
-        ...travelDestinations,
-        featureToken || "여행명소",
-        "여행정보",
-        "여행브이로그",
-      ]
-    : [
-        ...productTokens,
-        inferCategoryKeyword(context.productName),
-        featureToken || "제품비교",
-        "구매전확인",
-      ])
-    .map((keyword) => keyword.replace(/\s+/g, "").trim())
-    .filter((keyword) => keyword.length > 0);
-
-  return Array.from(new Set(keywords)).slice(0, 4).join(", ");
-}
-
-function buildDraftChapterTopics(
-  context: ChatGPTGuidanceContext,
-  sectionCount: number
-): string[] {
-  if (context.connectKind === "TRAVEL") {
-    const travelTopics = context.editorialSectionTitles.length > 0
-      ? context.editorialSectionTitles
-      : getDefaultSectionTitles("TRAVEL");
-    return travelTopics.slice(0, sectionCount);
-  }
-
-  if (context.editorialSectionTitles.length > 0) {
-    return context.editorialSectionTitles.slice(0, sectionCount);
-  }
-
-  if (context.openCrabSeoBrief?.recommendedSectionTitles.length) {
-    return context.openCrabSeoBrief.recommendedSectionTitles.slice(0, sectionCount);
-  }
-
-  const baseTopics = [
-    `${context.productName} 구매 전 확인할 기준`,
-    "상품 이미지 기준 첫인상, 디자인, 크기 체크",
-    "핵심 기능과 사용 장면별 확인 포인트",
-    "상세 정보 기준 장점과 아쉬운 점 정리",
-    "추천 대상과 구매 전 체크 팁",
-    "가격대와 할인/쿠폰 확인 포인트",
-    "유지관리와 관리 팁",
-    "비슷한 제품과 비교했을 때 차이점",
-  ];
-
-  return baseTopics.slice(0, sectionCount);
-}
-
-function buildDraftContentPayload(
-  context: ChatGPTGuidanceContext,
-  sectionCount: number
-): string {
-  const topics = buildDraftChapterTopics(context, sectionCount);
-  const openCrabBriefText = formatOpenCrabSeoBriefForPrompt(context.openCrabSeoBrief ?? null);
-  const editorialPlanText = context.editorialPromptBlock;
-
-  const topicLines = topics.map((topic, index) => `${index + 1}. ${topic}`).join("\n");
-
-  const sourceDetails = context.connectKind === "TRAVEL"
-    ? [
-        "[여행지 리서치 시드 · 상품 설명으로 옮기지 않기]",
-        `- 내부 일정 식별용 상품명: ${context.productName}`,
-        `- 여행커넥트 삽입용 링크(본문 URL 직접 기재 금지): ${context.brandLink}`,
-        `- 여행지·일정 추출 자료: ${context.description || "(설명 없음)"}`,
-        `- 조사할 목적지·장소: ${context.features.length > 0 ? context.features.join(", ") : "(추가 확인 필요)"}`,
-        "- 본문은 여행지 배경·풍경·즐길 거리·음식·사진·동선 팁 중심으로 작성",
-      ]
-    : [
-        "[추가 제품 정보]",
-        `- 상품명: ${context.productName}`,
-        `- 쇼핑커넥트 삽입용 링크(본문 URL 직접 기재 금지): ${context.brandLink}`,
-        `- 상품 설명: ${context.description || "(설명 없음)"}`,
-        `- 핵심 특징: ${context.features.length > 0 ? context.features.join(", ") : "(특징 없음)"}`,
-        `- 가격: ${context.price || "(가격 미확인)"}`,
-        `- 원가: ${context.originalPrice || "(원가 미확인)"}`,
-        `- 할인율: ${context.discountRate || "(할인율 미확인)"}`,
-        `- 쿠폰/혜택: ${context.couponInfo || "(없음)"}`,
-        `- 배송: ${context.deliveryInfo || "(정보 없음)"}`,
-        `- 리뷰수: ${context.reviewCount || "(미확인)"}`,
-        `- 평점: ${context.rating || "(미확인)"}`,
-      ];
-
-  return [
-    "아래 형식대로 입력합니다.",
-    "",
-    "1️⃣ 이 챕터에서 다루고 싶은 내용",
-    topicLines,
-    "",
-    "2️⃣ 관련 이미지",
-    context.connectKind === "TRAVEL"
-      ? "첨부된 여행지 이미지를 참고해 실제 풍경·건축·거리 분위기를 설명하세요. 상품 조건은 설명하지 마세요."
-      : "첨부된 상품 이미지를 참고해주세요. 제품 형태와 표시 정보를 변형하지 마세요.",
-    "",
-    ...sourceDetails,
-    openCrabBriefText ? "\n[내부 SEO 참고자료]\n" + openCrabBriefText : "",
-    editorialPlanText ? "\n" + editorialPlanText : "",
-    "",
-    `위 ${sectionCount}개 항목은 소제목 후보입니다. 근거 밀도에 따라 ${context.minimumSectionCount}~${context.maximumSectionCount}개 흐름으로 선택·병합·재배열하고 모바일 가독성을 유지해주세요.`,
-  ].join("\n");
-}
-
-async function clickGreetingStarterIfVisible(page: Page): Promise<boolean> {
-  const roleCandidates = [
-    page.getByRole("button", { name: /안녕하세요/i }).first(),
-    page.getByRole("button", { name: /hello/i }).first(),
-  ];
-
-  for (const candidate of roleCandidates) {
-    const visible = await candidate.isVisible().catch(() => false);
-    if (!visible) continue;
-    await candidate.click({ timeout: 2000 }).catch(() => {});
-    await page.waitForTimeout(400);
-    return true;
-  }
-
-  for (const selector of CHATGPT_STARTER_BUTTON_SELECTORS) {
-    const starter = page.locator(selector).first();
-    const visible = await starter.isVisible().catch(() => false);
-    if (!visible) continue;
-    await starter.click({ timeout: 2000 }).catch(() => {});
-    await page.waitForTimeout(400);
-    return true;
-  }
-
-  return false;
-}
 
 async function detectChatGPTProtectionIssue(page: Page): Promise<string | null> {
   const url = page.url();
@@ -2950,41 +2537,14 @@ async function navigateWithRetry(
   throw new Error(`${label} 이동 실패: ${getErrorMessage(lastError)}`);
 }
 
-async function openChatGPTTarget(page: Page, requestedUrl: string, label: string): Promise<void> {
-  const targetUrl = withTemporaryChatParam(requestedUrl);
+async function openChatGPTTarget(page: Page, _requestedUrl: string, label: string): Promise<void> {
+  const targetUrl = withTemporaryChatParam(CHATGPT_BASE_URL);
 
-  await navigateWithRetry(page, targetUrl, `${label} GPT`);
+  await navigateWithRetry(page, targetUrl, `${label} ChatGPT`);
   await continueChatGPTAccountPicker(page, label);
   await ensureChatGPTReady(page, Math.min(CHATGPT_TIMEOUT_MS, 120000));
   await dismissTemporaryChatOnboarding(page);
-
-  if (!isCustomGptUrl(requestedUrl)) {
-    console.log(`      - ${label} URL: ${page.url()}`);
-    return;
-  }
-
-  await page.waitForTimeout(1200);
-  let currentUrl = page.url();
-  let inaccessible = await hasInaccessibleGptBanner(page);
-
-  if (CHATGPT_FORCE_NEW_CHAT) {
-    await startNewChatIfAvailable(page);
-    await navigateWithRetry(page, targetUrl, `${label} GPT(새 대화)`);
-    await ensureChatGPTReady(page, Math.min(CHATGPT_TIMEOUT_MS, 120000));
-    await dismissTemporaryChatOnboarding(page);
-    await page.waitForTimeout(1200);
-    currentUrl = page.url();
-    inaccessible = await hasInaccessibleGptBanner(page);
-  }
-
-  if (!isCustomGptPageUrl(currentUrl) || inaccessible) {
-    throw new Error(
-      `${label} GPT가 활성화되지 않았습니다. 요청 URL=${requestedUrl}, 현재 URL=${currentUrl}. ` +
-        "현재 로그인 계정의 GPT 권한/공유 상태를 확인하세요."
-    );
-  }
-
-  console.log(`      - ${label} GPT 활성 URL: ${currentUrl}`);
+  console.log(`      - ${label} URL: ${page.url()}`);
 }
 
 async function waitForChatGPTComposer(page: Page, timeoutMs: number): Promise<string> {
@@ -3408,41 +2968,6 @@ async function createChatGPTContext(hasSessionFile: boolean): Promise<ChatGPTCon
   }
 }
 
-function buildGuidanceSummary(context: ChatGPTGuidanceContext): string {
-  const details: string[] = context.connectKind === "TRAVEL"
-    ? [
-        `내부 일정 식별용 상품명: ${context.productName}`,
-        `여행지·일정 추출 자료: ${context.description || "(설명 없음)"}`,
-        `조사할 목적지·장소: ${context.features.length > 0 ? context.features.join(", ") : "(추가 확인 필요)"}`,
-        "본문 방향: 상품 설명이 아니라 여행지 배경·풍경·즐길 거리·현지 팁 중심",
-        `여행커넥트 삽입용 링크(본문 URL 직접 기재 금지): ${context.brandLink}`,
-        `권장 본문 흐름: ${context.minimumSectionCount}~${context.maximumSectionCount}개 (중앙 참고 ${context.targetSectionCount}개, 할당량 아님)`,
-      ]
-    : [
-        `상품명: ${context.productName}`,
-        `설명: ${context.description || "(설명 없음)"}`,
-        `특징: ${context.features.length > 0 ? context.features.join(", ") : "(특징 없음)"}`,
-        `가격: ${context.price || "(가격 미확인)"}`,
-        `원가: ${context.originalPrice || "(원가 미확인)"}`,
-        `할인율: ${context.discountRate || "(할인율 미확인)"}`,
-        `쿠폰: ${context.couponInfo || "(쿠폰 정보 없음)"}`,
-        `배송: ${context.deliveryInfo || "(배송 정보 없음)"}`,
-        `리뷰수: ${context.reviewCount || "(리뷰수 미확인)"}`,
-        `평점: ${context.rating || "(평점 미확인)"}`,
-        `쇼핑커넥트 삽입용 링크(본문 URL 직접 기재 금지): ${context.brandLink}`,
-        `권장 본문 흐름: ${context.minimumSectionCount}~${context.maximumSectionCount}개 (중앙 참고 ${context.targetSectionCount}개, 할당량 아님)`,
-      ];
-  const openCrabBriefText = formatOpenCrabSeoBriefForPrompt(context.openCrabSeoBrief ?? null);
-  if (openCrabBriefText) {
-    details.push("", openCrabBriefText);
-  }
-  if (context.editorialPromptBlock) {
-    details.push("", context.editorialPromptBlock);
-  }
-
-  return details.join("\n");
-}
-
 function buildDirectBrowserGptPrompt(
   _systemPrompt: string,
   _userPrompt: string,
@@ -3598,328 +3123,8 @@ async function runDirectChatGPTGeneration(
   return reply;
 }
 
-function buildClarificationReply(assistantReply: string, context: ChatGPTGuidanceContext): string {
-  const lines: string[] = ["가이드에 맞춰 진행할게요. 요청하신 정보를 전달합니다."];
-  const text = assistantReply.toLowerCase();
-  const safeTitle = sanitizeTitle(buildDirectSeoTitle(context), context.productName);
-  const fallbackKeywords = buildSeoKeywordInput(context)
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
 
-  if (/제목|title/.test(text)) {
-    lines.push(`- 제목 후보: ${safeTitle}`);
-  }
-  if (/키워드|해시태그|tag/.test(text)) {
-    lines.push(`- 핵심 키워드: ${fallbackKeywords.join(", ")}`);
-  }
-  if (/톤|말투|문체/.test(text)) {
-    lines.push("- 톤/말투: 부드러운 ~요체, 모바일 블로그처럼 짧고 자연스럽게");
-    lines.push("- AI 티가 나는 반복 표현, 과한 광고 문장, 허위 체험 단정 금지");
-  }
-  if (/분량|섹션|구성|길이|글자/.test(text)) {
-    lines.push(`- 구성: 본문 ${context.minimumSectionCount}~${context.maximumSectionCount}개 흐름, 내용에 따라 선택·병합`);
-  }
-  if (/상품|제품명/.test(text)) {
-    lines.push(`- ${context.connectKind === "TRAVEL" ? "여행상품명" : "상품명"}: ${context.productName}`);
-  }
-  if (/가격|할인|쿠폰|비용/.test(text) && context.connectKind === "SHOPPING") {
-    lines.push(`- 가격: ${context.price || "(가격 미확인)"}`);
-    lines.push(`- 원가: ${context.originalPrice || "(원가 미확인)"}`);
-    lines.push(`- 할인율: ${context.discountRate || "(할인율 미확인)"}`);
-    lines.push(`- 쿠폰: ${context.couponInfo || "(쿠폰 정보 없음)"}`);
-  }
-  if (/가격|비용/.test(text) && context.connectKind === "TRAVEL") {
-    lines.push(`- 표시 가격: ${context.price || "(출발일별 확인 필요)"}`);
-    lines.push("- 출발일·인원·객실 조건에 따른 변동 여부는 확인되지 않은 값으로 다룹니다.");
-  }
-  if (/리뷰|평점/.test(text) && context.connectKind === "SHOPPING") {
-    lines.push(`- 리뷰수: ${context.reviewCount || "(리뷰수 미확인)"}`);
-    lines.push(`- 평점: ${context.rating || "(평점 미확인)"}`);
-  }
-  if (/링크|url/.test(text)) {
-    lines.push(`- ${context.connectKind === "TRAVEL" ? "여행커넥트" : "쇼핑커넥트"} 삽입용 링크(본문 URL 직접 기재 금지): ${context.brandLink}`);
-  }
-
-  if (lines.length === 1) {
-    lines.push(buildGuidanceSummary(context));
-  }
-
-  lines.push("위 정보를 기준으로 가이드에 따라 작성해주세요.");
-  lines.push("최종 출력은 JSON(title, sections, hashtags) 형식으로 부탁합니다.");
-  return lines.join("\n");
-}
-
-async function requestStructuredOutputWithGuidance(
-  page: Page,
-  initialPrompt: string,
-  label: string,
-  context: ChatGPTGuidanceContext,
-  minSections: number
-): Promise<string> {
-  let reply = await sendPromptToChatGPT(page, initialPrompt, {
-    label: `${label} 최종`,
-    idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, 240_000),
-    maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, 720_000),
-  });
-
-  for (let turn = 0; turn < CHATGPT_GUIDED_MAX_TURNS; turn += 1) {
-    const parsed = parseJsonObjectFromText(reply);
-    const sectionCount = getStructuredSectionCount(parsed);
-
-    if (sectionCount >= minSections) {
-      return reply;
-    }
-
-    const needsClarification = looksLikeClarificationRequest(reply);
-    console.log(`      - ${label} GPT 추가 상호작용 ${turn + 1}/${CHATGPT_GUIDED_MAX_TURNS}`);
-
-    const followupPrompt = needsClarification
-      ? buildClarificationReply(reply, context)
-      : [
-          "좋아요. 방금 답변 내용을 유지해서 최종 결과를 JSON으로 정리해주세요.",
-          "- 출력: JSON만",
-          `- 키: title, ${context.connectKind === "SHOPPING" ? "evidenceFacts, " : ""}sections, hashtags`,
-          `- sections는 ${context.minimumSectionCount}~${context.maximumSectionCount}개 범위에서 내용에 맞게 선택`,
-          "- 코드블록 금지",
-        ].join("\n");
-
-    reply = await sendPromptToChatGPT(page, followupPrompt, {
-      label: `${label} 보완`,
-      idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, 180_000),
-      maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, 420_000),
-    });
-  }
-
-  throw new Error(
-    `${label} GPT가 가이드 상호작용 후에도 구조화된 결과를 반환하지 않았습니다.`
-  );
-}
-
-function hasStructuredDraftOutput(reply: string, minSections: number): boolean {
-  const parsed = parseJsonObjectFromText(reply);
-  return getStructuredSectionCount(parsed) >= minSections;
-}
-
-interface DraftFlowStep {
-  key: string;
-  label: string;
-  matcher: (text: string) => boolean;
-  response: (latestReply: string) => string;
-  attachImages?: boolean;
-}
-
-async function waitForDraftStepPrompt(
-  page: Page,
-  currentReply: string,
-  step: DraftFlowStep,
-  minSections: number
-): Promise<string> {
-  let reply = currentReply;
-
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    if (hasStructuredDraftOutput(reply, minSections)) {
-      return reply;
-    }
-
-    if (step.matcher(reply)) {
-      return reply;
-    }
-
-    console.log(`      - Draft ${step.label} 질문 대기 ${attempt + 1}/3`);
-    reply = await sendPromptToChatGPT(
-      page,
-      `${step.label} 단계 질문을 이어서 진행해주세요. 질문 확인 후 답변하겠습니다.`,
-      {
-        label: `Draft ${step.label} 질문`,
-        idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, CHATGPT_DRAFT_STEP_IDLE_TIMEOUT_MS),
-        maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, CHATGPT_DRAFT_STEP_MAX_TIMEOUT_MS),
-      }
-    );
-  }
-
-  return reply;
-}
-
-async function runDraftGptConversation(
-  page: Page,
-  systemPrompt: string,
-  userPrompt: string,
-  guidanceContext: ChatGPTGuidanceContext,
-  imagePaths: string[],
-  minSections: number
-): Promise<string> {
-  const sectionCount = guidanceContext.targetSectionCount;
-  const seoKeywordInput = buildSeoKeywordInput(guidanceContext);
-  const versionChoice = CHATGPT_FORCE_MOBILE_VERSION ? "2" : "1";
-  const toneResponse = guidanceContext.connectKind === "TRAVEL"
-    ? "4번 말투의 자연스러움만 활용한 여행지 브이로그형 정보 글로 진행해주세요. 검증된 여행지 사실은 확실하게 쓰고, 실제 방문·탑승·숙박을 했다는 1인칭 경험만 만들지 마세요."
-    : "4번 말투의 자연스러움만 활용한 제품 분석형 리뷰로 진행해주세요. 특장점의 작동 방식과 구체적인 사용법, 후기 원문에서 반복된 장점을 설명하되 직접 구매하거나 사용한 경험은 만들지 마세요.";
-  const directSeoTitle = buildDirectSeoTitle(guidanceContext);
-
-  const beforeStarterMessages = await readAssistantMessages(page);
-  const starterClicked = await clickGreetingStarterIfVisible(page);
-  let latestReply = "";
-
-  if (starterClicked) {
-    console.log("      - Draft GPT 스타터(안녕하세요) 클릭");
-    try {
-      latestReply = await waitForChatGPTAssistantReply(
-        page,
-        beforeStarterMessages,
-        Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, 45000),
-        Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, 90000),
-        "Draft 스타터"
-      );
-    } catch (error) {
-      console.log(`      - Draft 스타터 응답 대기 생략: ${getErrorMessage(error)}`);
-      latestReply = "";
-    }
-  } else {
-    console.log("      - Draft GPT 스타터 버튼 미노출, 일반 대화로 진행");
-  }
-
-  const steps: DraftFlowStep[] = [
-    {
-      key: "product",
-      label: "1단계(제품 정보)",
-      matcher: isDraftStepProductInfoPrompt,
-      response: () =>
-        [
-          `${guidanceContext.connectKind === "TRAVEL" ? "여행상품명" : "제품명"}: ${guidanceContext.productName}`,
-          `${guidanceContext.connectKind === "TRAVEL" ? "여행커넥트" : "쇼핑커넥트"} 삽입용 링크(본문 URL 직접 기재 금지): ${guidanceContext.brandLink}`,
-        ].join("\n"),
-    },
-    {
-      key: "keywords",
-      label: "2단계(SEO 키워드)",
-      matcher: isDraftStepSeoKeywordPrompt,
-      response: () => seoKeywordInput,
-    },
-    {
-      key: "title-choice",
-      label: "2단계(SEO 제목 선택)",
-      matcher: isDraftStepSeoTitleSelectionPrompt,
-      response: () =>
-        [
-          `직접 제목으로 진행할게요: ${directSeoTitle}`,
-          "번호 선택 형식이 꼭 필요하면 1번으로 선택해주세요.",
-        ].join("\n"),
-    },
-    {
-      key: "version",
-      label: "3단계(출력 형식)",
-      matcher: isDraftStepVersionPrompt,
-      response: () => versionChoice,
-    },
-    {
-      key: "subtitle-count",
-      label: "4단계(소제목 개수)",
-      matcher: isDraftStepSubtitleCountPrompt,
-      response: () => String(sectionCount),
-    },
-    {
-      key: "content",
-      label: "5단계(콘텐츠 구성)",
-      matcher: isDraftStepContentPrompt,
-      response: () =>
-        [
-          buildDraftContentPayload(guidanceContext, sectionCount),
-          "",
-          "[작성 요청]",
-          userPrompt,
-          "",
-          "[작성 가이드]",
-          systemPrompt,
-          "",
-          "참고: 첨부 이미지를 반영해서 1차 글을 작성해주세요.",
-        ].join("\n"),
-      attachImages: true,
-    },
-    {
-      key: "tone",
-      label: "6단계(말투 설정)",
-      matcher: isDraftStepTonePrompt,
-      response: () => toneResponse,
-    },
-  ];
-
-  for (const step of steps) {
-    latestReply = await waitForDraftStepPrompt(page, latestReply, step, minSections);
-
-    if (!step.matcher(latestReply)) {
-      console.log(`      - Draft ${step.label} 질문 미확인, 단계 응답을 강행합니다.`);
-    }
-
-    if (step.attachImages && CHATGPT_ATTACH_IMAGES_TO_DRAFT) {
-      await attachImagesToChatGPT(page, imagePaths, "Draft");
-    }
-
-    console.log(`      - Draft ${step.label} 응답 전송`);
-    latestReply = await sendPromptToChatGPT(page, step.response(latestReply), {
-      label: `Draft ${step.label}`,
-      idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, CHATGPT_DRAFT_STEP_IDLE_TIMEOUT_MS),
-      maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, CHATGPT_DRAFT_STEP_MAX_TIMEOUT_MS),
-    });
-  }
-
-  if (hasStructuredDraftOutput(latestReply, minSections)) {
-    return latestReply;
-  }
-
-  const structuredPrompt = [
-    "지금까지 입력한 1~6단계 정보를 기준으로 최종 결과를 정리해주세요.",
-    "- 출력은 JSON만",
-    `- 키: title, ${guidanceContext.connectKind === "SHOPPING" ? "evidenceFacts, " : ""}sections, hashtags`,
-    `- sections는 ${guidanceContext.minimumSectionCount}~${guidanceContext.maximumSectionCount}개 범위에서 초안의 자연스러운 흐름 유지`,
-    "- 모바일 버전 규칙 유지",
-    `- 말투는 ${guidanceContext.connectKind === "TRAVEL" ? "확실하고 생생한 여행지 브이로그형" : "확실하고 구체적인 제품 분석형 리뷰"} 유지`,
-    ...(guidanceContext.connectKind === "TRAVEL" ? [
-      '- "보입니다", "보여요", "인 것 같아요", "일 듯해요", "판단됩니다" 금지',
-      "- 가격·할인·포함조건·추천/비추천·예약 판단 섹션 금지",
-    ] : []),
-    "- 근거 없는 실제 방문·구매·사용 경험을 만들지 않기",
-    "- 문장은 25-45자 안팎으로 짧게 끊고 1-2문장마다 줄바꿈",
-    "- AI가 쓴 글처럼 보이는 표현, 반복 어미, 과장 광고 문장 제거",
-    "- sections는 소제목 + 본문 구조 유지",
-    "- 제목/소제목에 이모지 금지",
-    "- 코드블록 금지",
-  ].join("\n");
-
-  if (CHATGPT_GUIDED_MODE) {
-    try {
-      return await requestStructuredOutputWithGuidance(
-        page,
-        structuredPrompt,
-        "Draft",
-        guidanceContext,
-        minSections
-      );
-    } catch (error) {
-      console.log(`      - Draft 최종 구조화 실패, 직전 응답으로 진행: ${getErrorMessage(error)}`);
-      if (latestReply.trim().length > 0) {
-        return latestReply;
-      }
-      throw error;
-    }
-  }
-
-  try {
-    return await sendPromptToChatGPT(page, structuredPrompt, {
-      label: "Draft 최종 구조화",
-      idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, 240_000),
-      maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, 720_000),
-    });
-  } catch (error) {
-    console.log(`      - Draft 최종 구조화 실패, 직전 응답으로 진행: ${getErrorMessage(error)}`);
-    if (latestReply.trim().length > 0) {
-      return latestReply;
-    }
-    throw error;
-  }
-}
-
-async function runChatGPTBrowserTwoPass(
+async function runChatGPTBrowserDirect(
   systemPrompt: string,
   userPrompt: string,
   guidanceContext: ChatGPTGuidanceContext,
@@ -3937,165 +3142,26 @@ async function runChatGPTBrowserTwoPass(
   }
 
   const contextHandle = await createChatGPTContext(hasSessionFile);
-  const requiredFinalSections = guidanceContext.minimumSectionCount;
 
   try {
     const context = contextHandle.context;
     const page = await context.newPage();
-
     const draftMinSections = guidanceContext.minimumSectionCount;
-    let firstDraft: string;
-
-    if (CHATGPT_DIRECT_ONLY || guidanceContext.connectKind === "TRAVEL") {
-      console.log(
-        guidanceContext.connectKind === "TRAVEL"
-          ? "      - 여행 전용 경로: 쇼핑용 Custom GPT를 건너뛰고 기본 ChatGPT에서 생성합니다."
-          : "      - Direct only 모드: 기본 ChatGPT 단일 프롬프트로 생성합니다."
-      );
-      await openChatGPTTarget(page, CHATGPT_BASE_URL, "Direct");
-      await startNewChatIfAvailable(page);
-      await ensureChatGPTReady(page, Math.min(CHATGPT_TIMEOUT_MS, 120000));
-      firstDraft = await runDirectChatGPTGeneration(
-        page,
-        systemPrompt,
-        userPrompt,
-        guidanceContext,
-        draftMinSections,
-        "Direct",
-        imagePaths,
-      );
-    } else {
-      try {
-      await openChatGPTTarget(page, CHATGPT_DRAFT_GPT_URL, "Draft");
-      firstDraft = await runDraftGptConversation(
-        page,
-        systemPrompt,
-        userPrompt,
-        guidanceContext,
-        imagePaths,
-        draftMinSections
-      );
-      } catch (error) {
-        console.log(`      - Draft GPT 다단계 흐름 실패: ${getErrorMessage(error)}`);
-        console.log("      - 기본 ChatGPT 단일 프롬프트 폴백을 시도합니다.");
-        await openChatGPTTarget(page, CHATGPT_BASE_URL, "Direct fallback");
-        await startNewChatIfAvailable(page);
-        await ensureChatGPTReady(page, Math.min(CHATGPT_TIMEOUT_MS, 120000));
-        firstDraft = await runDirectChatGPTGeneration(
-          page,
-          systemPrompt,
-          userPrompt,
-          guidanceContext,
-          draftMinSections,
-          "Direct fallback",
-          imagePaths,
-        );
-      }
-    }
-
-    if (CHATGPT_SKIP_POLISH) {
-      console.log("      - Polish 생략 모드: 초안 결과로 바로 진행합니다.");
-      return firstDraft;
-    }
-
-    // 2차 다듬기는 별도 GPT(또는 동일 GPT)로 수행
-    if (
-      guidanceContext.connectKind === "SHOPPING" &&
-      CHATGPT_POLISH_GPT_URL !== CHATGPT_DRAFT_GPT_URL
-    ) {
-      await openChatGPTTarget(page, CHATGPT_POLISH_GPT_URL, "Polish");
-    }
-
-    const secondPrompt = [
-      "아래 초안을 가이드에 맞춰 최종본으로 다듬어 주세요.",
-      "- title에는 이모지 금지",
-      "- sections 소제목에는 이모지 금지",
-      "- sections는 소제목 + 본문 구조 유지",
-      "- 모바일 버전 가독성(짧은 문장, 잦은 줄바꿈) 유지",
-      `- 말투는 ${guidanceContext.connectKind === "TRAVEL" ? "확실하고 생생한 여행지 브이로그형" : "확실하고 구체적인 제품 분석형 리뷰"}으로 유지`,
-      "- AI 티가 나는 표현과 과한 광고 문장을 자연스럽게 덜어내기",
-      "- 직접 겪었다는 근거 없는 단정 표현은 상황형 표현으로 바꾸기",
-      guidanceContext.connectKind === "TRAVEL"
-        ? '- 첨부된 여행지·일정 이미지를 참고해 장소의 배경·풍경·즐길 거리·현지 팁을 보강하고, "보입니다/인 것 같아요" 말투와 상품조건 설명은 제거하기'
-        : "- 첨부된 상품 이미지를 참고하되 제품 형태와 표시 정보를 변형하지 않기",
-      `- JSON(title, ${guidanceContext.connectKind === "SHOPPING" ? "evidenceFacts, " : ""}sections, hashtags)으로 출력`,
-      "- 코드블록 금지",
-      "",
-      "[초안]",
-      firstDraft,
-      "",
-      "[보완 정보]",
-      buildGuidanceSummary(guidanceContext),
-    ].join("\n");
-
-    if (CHATGPT_ATTACH_IMAGES_TO_POLISH) {
-      await attachImagesToChatGPT(page, imagePaths, "Polish");
-    }
-
-    let polished = firstDraft;
-    try {
-      polished = CHATGPT_GUIDED_MODE
-        ? await requestStructuredOutputWithGuidance(
-            page,
-            secondPrompt,
-            "Polish",
-            guidanceContext,
-            requiredFinalSections
-          )
-        : await sendPromptToChatGPT(page, secondPrompt, {
-            label: "Polish 최종",
-            idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, 240_000),
-            maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, 720_000),
-          });
-    } catch (error) {
-      console.log(`      - Polish GPT 실패, Draft 결과로 대체 진행: ${getErrorMessage(error)}`);
-      polished = firstDraft;
-    }
-    let polishedParsed = parseJsonObjectFromText(polished);
-
-    if (getStructuredSectionCount(polishedParsed) < requiredFinalSections && CHATGPT_FALLBACK_TO_BASE) {
-      await openChatGPTTarget(page, CHATGPT_BASE_URL, "Base");
-
-      const baseFallbackPrompt = [
-        "아래 지시사항과 요청으로 블로그 글을 작성해.",
-        "- 질문 금지",
-        "- JSON만 출력",
-        "- 키: title, sections, hashtags",
-        `- sections는 ${guidanceContext.minimumSectionCount}~${guidanceContext.maximumSectionCount}개 범위에서 내용에 맞게 선택`,
-        "- 휴대폰으로 읽기 좋은 짧은 문장과 자연스러운 줄바꿈 유지",
-        "- AI처럼 보이는 표현, 같은 어미 반복, 과장 문장 제거",
-        "",
-        "[시스템 지시사항]",
-        systemPrompt,
-        "",
-        "[사용자 요청]",
-        userPrompt,
-      ].join("\n");
-
-      polished = CHATGPT_GUIDED_MODE
-        ? await requestStructuredOutputWithGuidance(
-            page,
-            baseFallbackPrompt,
-            "Base",
-            guidanceContext,
-            requiredFinalSections
-          )
-        : await sendPromptToChatGPT(page, baseFallbackPrompt, {
-            label: "Base 최종",
-            idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, 240_000),
-            maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, 720_000),
-          });
-      polishedParsed = parseJsonObjectFromText(polished);
-    }
-
-    if (getStructuredSectionCount(polishedParsed) < requiredFinalSections) {
-      console.log(
-        `      - 구조화 섹션 부족(${getStructuredSectionCount(polishedParsed)}/${requiredFinalSections}), 폴백 파싱으로 진행합니다.`
-      );
-    }
+    console.log("      - 일반 ChatGPT 단일 프롬프트로 생성합니다.");
+    await openChatGPTTarget(page, CHATGPT_BASE_URL, "Direct");
+    await startNewChatIfAvailable(page);
+    await ensureChatGPTReady(page, Math.min(CHATGPT_TIMEOUT_MS, 120000));
+    const draft = await runDirectChatGPTGeneration(
+      page,
+      systemPrompt,
+      userPrompt,
+      guidanceContext,
+      draftMinSections,
+      "Direct",
+      imagePaths,
+    );
     await context.storageState({ path: CHATGPT_SESSION_FILE });
-
-    return polished;
+    return draft;
   } finally {
     await contextHandle.close();
   }
@@ -4263,23 +3329,6 @@ function getStructuredSectionCount(parsed: Record<string, unknown>): number {
     .length;
 }
 
-function looksLikeClarificationRequest(text: string): boolean {
-  const normalized = text.replace(/\s+/g, " ").trim().toLowerCase();
-  if (!normalized) return false;
-
-  const patterns = [
-    "입력해주세요",
-    "알려주세요",
-    "원하시나요",
-    "필요해요",
-    "제목을 입력",
-    "정보를 주세요",
-    "먼저",
-    "작성해드릴게요",
-  ];
-
-  return patterns.some((pattern) => normalized.includes(pattern));
-}
 
 function parseJsonObjectFromText(text: string): Record<string, unknown> {
   const candidates = extractJsonCandidates(text);
@@ -4587,11 +3636,7 @@ function saveGeneratedPostPreview(
     linkId,
     aiProvider: AI_PROVIDER,
     browserGptMode: BROWSER_GPT_MODE,
-    chatgptUseCustomGpts: CHATGPT_USE_CUSTOM_GPTS,
-    chatgptDirectOnly: CHATGPT_DIRECT_ONLY,
     chatgptBaseUrl: CHATGPT_BASE_URL,
-    chatgptDraftUrl: CHATGPT_USE_CUSTOM_GPTS ? CHATGPT_DRAFT_GPT_URL : undefined,
-    chatgptPolishUrl: CHATGPT_USE_CUSTOM_GPTS ? CHATGPT_POLISH_GPT_URL : undefined,
     humanMobilePolishEnabled: HUMAN_MOBILE_POLISH_ENABLED,
     generationSource: post.generationSource,
     productName: product.name,
@@ -5511,7 +4556,7 @@ async function generateWithAI(
     }
 
     try {
-      return await runChatGPTBrowserTwoPass(systemPrompt, userPrompt, chatgptContext, chatgptImagePaths);
+      return await runChatGPTBrowserDirect(systemPrompt, userPrompt, chatgptContext, chatgptImagePaths);
     } catch (error) {
       const reason = getErrorMessage(error);
       throw new Error(`Browser ChatGPT 실패: ${reason}`);
@@ -5534,7 +4579,7 @@ async function generateWithAI(
       const reason = getErrorMessage(error);
       if (CODEX_BROWSER_FALLBACK_ENABLED && ALLOW_CHATGPT_BROWSER_MODE && chatgptContext) {
         console.log(`   ⚠️ Codex 작성 실패, ChatGPT 웹 자동작성으로 전환: ${reason}`);
-        return runChatGPTBrowserTwoPass(systemPrompt, userPrompt, chatgptContext, chatgptImagePaths);
+        return runChatGPTBrowserDirect(systemPrompt, userPrompt, chatgptContext, chatgptImagePaths);
       }
       throw new Error(`Codex 작성 실패: ${reason}`);
     }
@@ -5578,13 +4623,7 @@ async function step2_generatePost(
   }
   if (BROWSER_GPT_MODE) {
     console.log(`   🌐 Browser ChatGPT Mode: ON`);
-    if (CHATGPT_USE_CUSTOM_GPTS) {
-      console.log(`      - Draft GPT: ${CHATGPT_DRAFT_GPT_URL}`);
-      console.log(`      - Polish GPT: ${CHATGPT_POLISH_GPT_URL}`);
-    } else {
-      console.log(`      - Custom GPTs: OFF`);
-      console.log(`      - Direct URL: ${CHATGPT_BASE_URL}`);
-    }
+    console.log(`      - 일반 ChatGPT URL: ${CHATGPT_BASE_URL}`);
   }
   
   const compositionContract = getPostCompositionContract(connectKind);
@@ -10271,6 +9310,7 @@ async function runPreparedPostRevision(
     sections: post.sections,
     hashtags: post.hashtags,
     imagePaths,
+    sectionImagePaths: result.composition.sections.map((section) => section.imagePaths),
     connectUrl: link.url,
     qualityPreset: BRANDLINK_QUALITY_PRESET,
     experienceMode: BRANDLINK_EXPERIENCE_MODE,
@@ -10709,6 +9749,7 @@ async function main() {
         sections: post.sections,
         hashtags: post.hashtags,
         imagePaths: product.imagePaths,
+        sectionImagePaths: assembled?.composition.sections.map((section) => section.imagePaths),
         connectUrl: link.url,
         qualityPreset: BRANDLINK_QUALITY_PRESET,
         experienceMode: BRANDLINK_EXPERIENCE_MODE,

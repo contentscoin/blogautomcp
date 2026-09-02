@@ -179,6 +179,11 @@ async function main() {
   const travelBody = travel.sections.join("\n");
   assert.doesNotMatch(travelBody, /배송|교환|반품|구성품/u, "쇼핑 문구 금지");
   assert.doesNotMatch(travelBody, /다녀왔|먹어봤|묵어봤/u, "체험 단정 금지");
+  assert.equal(
+    travel.validation.repair.targets.some((target) => target.code === "REPEATED_LINE"),
+    false,
+    "코스별 폴백 문장이 같은 뜻으로 반복되면 안 됩니다.",
+  );
   assert.ok(travel.sections.at(-1)?.includes("여행 커넥트"));
   assert.notEqual(travel.validation.status, "BLOCKED", travel.validation.summary);
   const daySections = travel.spec.sections.filter((section) => section.role === "day-course");

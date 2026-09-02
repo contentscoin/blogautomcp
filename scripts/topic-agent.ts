@@ -1877,9 +1877,7 @@ async function generateAdvancedContent(
 
     const template = getTemplate(args.type);
     const baseKeywords = args.keywords.length > 0 ? args.keywords.join(", ") : template.seoKeywords.join(", ");
-    const CHATGPT_GPT_URL_TOPIC =
-        process.env.CHATGPT_GPT_URL_TOPIC ||
-        "https://chatgpt.com/g/g-690490188af4819188bc1da73019a60f-jeongboseong-beomyong-isyu-geul-saengseonggi-v11-dapeojuneunnamja";
+    const CHATGPT_BASE_URL = "https://chatgpt.com/";
 
     let chatgptHandle: ChatGPTContextHandle | null = null;
 
@@ -1888,7 +1886,7 @@ async function generateAdvancedContent(
         chatgptHandle = await createChatGPTContext(true);
         const page = await chatgptHandle.context.newPage();
 
-        await openFreshChatGPTTarget(page, CHATGPT_GPT_URL_TOPIC, "글 생성 GPT");
+        await openFreshChatGPTTarget(page, CHATGPT_BASE_URL, "글 생성 ChatGPT");
 
         const contentPrompt = [
             "너는 네이버 블로그 상식/정보 글을 쓰는 한국어 전문 에디터다.",
@@ -2849,7 +2847,7 @@ async function main() {
             console.log(`   ✅ Daedal 이미지 ${daedalPaths.length}장 생성 완료`);
         }
 
-        const CHATGPT_GPT_URL_IMAGE = "https://chatgpt.com/g/g-69044d98b1f08191b96ca4293c6c8156-jeongboseong-imiji-saengseong-v11-dapeojuneunnamja";
+        const CHATGPT_BASE_URL = "https://chatgpt.com/";
 
         let imageGptHandle = null;
         if (imagePaths.length === 0 && ALLOW_CHATGPT_BROWSER_MODE) {
@@ -2859,7 +2857,7 @@ async function main() {
                 imageGptHandle = await createChatGPTContext(true);
                 const imagePage = await imageGptHandle.context.newPage();
 
-                await openChatGPTTarget(imagePage, CHATGPT_GPT_URL_IMAGE, "이미지 생성 GPT");
+                await openChatGPTTarget(imagePage, CHATGPT_BASE_URL, "이미지 생성 ChatGPT");
 
                 console.log("   [1/2] 이미지 생성 GPT에 내용 전달 중...");
                 const imagePrompt = `다음 블로그 글 내용을 바탕으로 관련있고 예쁜 고품질 DALL-E 이미지를 무조건 3장 생성해줘. 다른 말 필요 없이 바로 생성해줘:\n\n${content.sections.join("\n\n").substring(0, 1500)}`;

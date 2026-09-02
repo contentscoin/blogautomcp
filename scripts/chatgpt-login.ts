@@ -26,24 +26,9 @@ const CHATGPT_BASE_URL = process.env.CHATGPT_BASE_URL || "https://chatgpt.com/";
 const CHATGPT_LOGIN_URL = process.env.CHATGPT_LOGIN_URL || CHATGPT_BASE_URL;
 const BROWSER_CHANNEL = process.env.BROWSER_CHANNEL?.trim() || "chrome";
 const FORCE_LOGIN = process.argv.includes("--force-login");
-const DEFAULT_CHATGPT_DRAFT_GPT_URL =
-  "https://chatgpt.com/g/g-69044e83643481918a83e45a0bfec330-jepum-ribyu-jagseong-v11-dapeojuneunnamja";
-const DEFAULT_CHATGPT_POLISH_GPT_URL =
-  "https://chatgpt.com/g/g-683347512adc8191bd26d40336990cb1-seo-coejeoghwa-jadong-geul-byeonhwan-v5-0-dapeojuneunnamja";
-const CHATGPT_DRAFT_GPT_URL =
-  process.env.CHATGPT_GPT_URL_DRAFT ||
-  process.env.CHATGPT_GPT_URL ||
-  DEFAULT_CHATGPT_DRAFT_GPT_URL;
-const CHATGPT_POLISH_GPT_URL =
-  process.env.CHATGPT_GPT_URL_POLISH ||
-  process.env.CHATGPT_GPT_URL_DRAFT ||
-  process.env.CHATGPT_GPT_URL ||
-  DEFAULT_CHATGPT_POLISH_GPT_URL;
 const LOGIN_TIMEOUT_MS = Number(process.env.CHATGPT_LOGIN_TIMEOUT_MS || "600000");
 const CHATGPT_LOGIN_MANUAL_CONFIRM =
   (process.env.CHATGPT_LOGIN_MANUAL_CONFIRM || "false").toLowerCase() === "true";
-const CHATGPT_VERIFY_CUSTOM_GPTS =
-  (process.env.CHATGPT_VERIFY_CUSTOM_GPTS || "false").toLowerCase() === "true";
 const CHATGPT_LOGIN_USE_PROBE =
   (process.env.CHATGPT_LOGIN_USE_PROBE || "false").toLowerCase() === "true";
 if (!fs.existsSync(STORAGE_PATH)) {
@@ -112,33 +97,6 @@ async function isChatGPTLoginRequired(page: Page): Promise<boolean> {
 
 async function hasComposer(page: Page): Promise<boolean> {
   return (await findVisibleSelector(page, CHATGPT_COMPOSER_SELECTORS)) !== null;
-}
-
-function isCustomGptUrl(url: string): boolean {
-  return /https?:\/\/chatgpt\.com\/g\//i.test(url);
-}
-
-function isCustomGptPageUrl(url: string): boolean {
-  return /https?:\/\/chatgpt\.com\/g\//i.test(url);
-}
-
-async function hasInaccessibleGptBanner(page: Page): Promise<boolean> {
-  const bannerByText = page
-    .getByText(/This GPT is inaccessible or not found|GPT에 접근할 수 없습니다|사용할 수 없습니다/i)
-    .first();
-  if (await bannerByText.isVisible().catch(() => false)) {
-    return true;
-  }
-
-  const bodyText = ((await page.textContent("body").catch(() => "")) || "")
-    .replace(/\s+/g, " ")
-    .toLowerCase();
-
-  return (
-    bodyText.includes("this gpt is inaccessible or not found") ||
-    bodyText.includes("ensure you're using the right account") ||
-    bodyText.includes("gpt에 접근할 수 없습니다")
-  );
 }
 
 async function waitForManualConfirmation(): Promise<void> {
@@ -274,23 +232,6 @@ async function verifyBaseChatGPTSession(page: Page): Promise<void> {
   }
 }
 
-async function verifyCustomGptAccess(page: Page, url: string, label: string): Promise<void> {
-  if (!isCustomGptUrl(url)) return;
-
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-  await sleep(2500);
-
-  const currentUrl = page.url();
-  const inaccessibleBanner = await hasInaccessibleGptBanner(page);
-
-  if (!isCustomGptPageUrl(currentUrl) || inaccessibleBanner) {
-    throw new Error(
-      `${label} GPT 접근 실패: 현재 로그인 계정에서 이 GPT를 사용할 수 없습니다. ` +
-        `요청 URL=${url}, 현재 URL=${currentUrl}. 올바른 계정으로 로그인했는지 확인하세요.`
-    );
-  }
-}
-
 async function revealChatGptLoginWindow(page: Page): Promise<void> {
   await page.bringToFront().catch(() => {});
   const cdp = await page.context().newCDPSession(page).catch(() => null);
@@ -418,16 +359,6 @@ async function main(): Promise<void> {
 
     console.log("🔎 로그인 세션 응답 검증 중...");
     await verifyBaseChatGPTSession(page);
-
-    if (CHATGPT_VERIFY_CUSTOM_GPTS) {
-      console.log("🔗 Custom GPT 접근 검증 중 (Draft)...");
-      await verifyCustomGptAccess(page, CHATGPT_DRAFT_GPT_URL, "Draft");
-
-      if (CHATGPT_POLISH_GPT_URL !== CHATGPT_DRAFT_GPT_URL) {
-        console.log("🔗 Custom GPT 접근 검증 중 (Polish)...");
-        await verifyCustomGptAccess(page, CHATGPT_POLISH_GPT_URL, "Polish");
-      }
-    }
 
     await context.storageState({ path: CHATGPT_SESSION_FILE });
 
