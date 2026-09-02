@@ -336,6 +336,50 @@ async function getUpdateReadiness() {
   }
 }
 
+/**
+ * 작업 큐 워치독. 렌더러(RemoteAgentPoller)가 폴링을 멈춘 상태(창이 닫히거나 렌더러가
+ * 죽은 경우)에도 MCP 작업이 실행되도록 메인 프로세스가 주기적으로 로컬 폴 엔드포인트를
+ * 직접 호출한다. 폴 라우트는 프로세스 내 단일 실행 락을 갖고 있어 두 폴러가 겹쳐도
+ * 작업은 한 번에 하나만 실행된다.
+ */
+const REMOTE_AGENT_WATCHDOG_INTERVAL_MS = 45_000;
+let remoteAgentWatchdogTimer = null;
+let remoteAgentWatchdogBusy = false;
+
+async function pollRemoteAgentOnce() {
+  if (remoteAgentWatchdogBusy || isQuitting || !nextServer) return;
+  remoteAgentWatchdogBusy = true;
+  const headers = { "content-type": "application/json", origin: APP_BASE_URL };
+  const adminKey = process.env.ADMIN_API_KEY?.trim();
+  if (adminKey) headers["x-admin-api-key"] = adminKey;
+  const controller = new AbortController();
+  // 작업 실행(발행)은 수십 분 걸릴 수 있다. 폴 요청은 작업이 끝날 때까지 열려 있으므로
+  // 타임아웃을 길게 두고, 워치독 자체는 busy 플래그로 중복 호출을 막는다.
+  const timeout = setTimeout(() => controller.abort(), 3 * 60 * 60 * 1000);
+  try {
+    await fetch(`${APP_BASE_URL}/api/remote-agent/poll`, { method: "POST", headers, body: "{}", signal: controller.signal });
+  } catch {
+    // 서버 재시작 중이거나 네트워크 문제 — 다음 주기에 다시 시도한다.
+  } finally {
+    clearTimeout(timeout);
+    remoteAgentWatchdogBusy = false;
+  }
+}
+
+function startRemoteAgentWatchdog() {
+  if (remoteAgentWatchdogTimer) return;
+  remoteAgentWatchdogTimer = setInterval(() => {
+    void pollRemoteAgentOnce();
+  }, REMOTE_AGENT_WATCHDOG_INTERVAL_MS);
+  if (typeof remoteAgentWatchdogTimer.unref === "function") remoteAgentWatchdogTimer.unref();
+}
+
+function stopRemoteAgentWatchdog() {
+  if (!remoteAgentWatchdogTimer) return;
+  clearInterval(remoteAgentWatchdogTimer);
+  remoteAgentWatchdogTimer = null;
+}
+
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 if (!hasSingleInstanceLock) {
@@ -349,6 +393,7 @@ if (!hasSingleInstanceLock) {
 
   app.on("before-quit", async () => {
     isQuitting = true;
+    stopRemoteAgentWatchdog();
     desktopUpdater?.stop();
     await shutdownServer();
   });
@@ -368,6 +413,7 @@ if (!hasSingleInstanceLock) {
       beforeInstall: async () => {},
     });
     desktopUpdater.start();
+    startRemoteAgentWatchdog();
   }).catch((error) => {
     const message = error instanceof Error ? error.message : String(error);
     dialog.showErrorBox("BrandConnect Automation 시작 실패", message);

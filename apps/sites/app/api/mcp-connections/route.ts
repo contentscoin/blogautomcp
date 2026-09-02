@@ -7,6 +7,7 @@ import { getD1, getDb } from '@/db';
 import { mcpConnections } from '@/db/schema';
 import { hashToken, newId, randomToken } from '@/lib/crypto';
 import { apiError, hasTrustedBrowserOrigin, readObject } from '@/lib/http';
+import { enforceRateLimit } from '@/lib/rate-limit';
 
 export async function GET() {
   const identity = await getChatGPTUser();
@@ -27,6 +28,8 @@ export async function POST(request: Request) {
   if (!body || !['issue', 'rotate'].includes(String(body.action || ''))) return apiError('INVALID_REQUEST', '발급 요청을 확인하세요.', 400);
   await ensureDatabase();
   const d1 = getD1();
+  const limit = await enforceRateLimit(d1, `mcp-issue:user:${account.id}`, 5, 60_000);
+  if (!limit.allowed) return apiError('RATE_LIMITED', 'MCP 주소 발급 요청이 너무 많습니다. 잠시 후 다시 시도하세요.', 429);
   const current = await d1.prepare('SELECT generation FROM mcp_connections WHERE user_id = ? AND status = ? LIMIT 1').bind(account.id, 'ACTIVE').first<{ generation: number }>();
   const now = Date.now();
   const endpointId = randomToken(15);

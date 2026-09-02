@@ -4,8 +4,12 @@ import { getD1 } from '@/db';
 import { hashToken, newId, randomToken } from '@/lib/crypto';
 import { apiError, readObject } from '@/lib/http';
 import { parseMcpUrl, resolveMcpConnection } from '@/lib/mcp';
+import { clientIp, enforceRateLimit } from '@/lib/rate-limit';
 
 export async function POST(request: Request) {
+  await ensureDatabase();
+  const limit = await enforceRateLimit(getD1(), `pair:ip:${clientIp(request)}`, 10, 60_000);
+  if (!limit.allowed) return apiError('RATE_LIMITED', '페어링 시도가 너무 많습니다. 잠시 후 다시 시도하세요.', 429);
   const body = await readObject(request, 32 * 1024);
   if (!body) return apiError('INVALID_REQUEST', '요청 형식을 확인하세요.', 400);
   const mcpUrl = typeof body.mcpUrl === 'string' ? body.mcpUrl.trim() : '';

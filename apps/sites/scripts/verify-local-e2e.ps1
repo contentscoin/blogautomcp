@@ -22,7 +22,7 @@ if (-not $mcpUrl.StartsWith("$BaseUrl/api/mcp/")) { throw 'MCP URL origin or pat
 $initialize = Invoke-Mcp -Url $mcpUrl -Message @{ jsonrpc = '2.0'; id = 1; method = 'initialize'; params = @{ protocolVersion = '2025-11-25'; capabilities = @{}; clientInfo = @{ name = 'sites-e2e'; version = '1.0' } } }
 if ($initialize.result.protocolVersion -ne '2025-11-25') { throw 'MCP protocol negotiation failed.' }
 $tools = Invoke-Mcp -Url $mcpUrl -Message @{ jsonrpc = '2.0'; id = 2; method = 'tools/list'; params = @{} }
-if (@($tools.result.tools).Count -ne 8) { throw 'Expected eight MCP tools.' }
+if (@($tools.result.tools).Count -ne 17) { throw 'Expected seventeen MCP tools.' }
 
 $modernProtocol = '2026-07-28'
 $modernMeta = @{
@@ -36,7 +36,7 @@ if ($discovery.result.resultType -ne 'complete' -or $discovery.result.supportedV
 
 $modernToolsHeaders = @{ Accept = 'application/json, text/event-stream'; 'MCP-Protocol-Version' = $modernProtocol; 'Mcp-Method' = 'tools/list' }
 $modernTools = Invoke-Mcp -Url $mcpUrl -Headers $modernToolsHeaders -Message @{ jsonrpc = '2.0'; id = 30; method = 'tools/list'; params = @{ _meta = $modernMeta } }
-if ($modernTools.result.resultType -ne 'complete' -or @($modernTools.result.tools).Count -ne 8 -or $modernTools.result.cacheScope -ne 'private') { throw 'Modern MCP tool discovery failed.' }
+if ($modernTools.result.resultType -ne 'complete' -or @($modernTools.result.tools).Count -ne 17 -or $modernTools.result.cacheScope -ne 'private') { throw 'Modern MCP tool discovery failed.' }
 
 $modernStatusHeaders = @{ Accept = 'application/json, text/event-stream'; 'MCP-Protocol-Version' = $modernProtocol; 'Mcp-Method' = 'tools/call'; 'Mcp-Name' = 'agent_get_status' }
 $modernStatus = Invoke-Mcp -Url $mcpUrl -Headers $modernStatusHeaders -Message @{ jsonrpc = '2.0'; id = 31; method = 'tools/call'; params = @{ name = 'agent_get_status'; arguments = @{}; _meta = $modernMeta } }

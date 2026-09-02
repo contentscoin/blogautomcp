@@ -52,3 +52,12 @@ npm run build
 ## 데이터
 
 D1 테이블 정의는 `db/schema.ts`, 런타임 안전 초기화는 `db/init.ts`, 배포 마이그레이션은 `drizzle/`에 있습니다. 별도의 PostgreSQL 서버는 필요하지 않습니다.
+
+## MCP 도구 (서버 1.2.0, 17개)
+
+`agent_get_status`, `brandconnect_list_categories`, `brandconnect_list_products`, `brandconnect_sync_products`, `post_create_draft`, `post_get_draft`, `post_revise_draft`, `post_approve_draft`, `post_set_thumbnail`, `post_publish`, `post_schedule`, `post_bulk_schedule`, `post_verify_published`, `travel_capture_contract`, `settings_get`, `job_get`, `job_cancel`.
+
+- 큐 작업은 claim 시 120초 임대를 받고, PC 가 30초마다 하트비트로 임대를 연장하며 진행 단계(`stage`)를 올립니다. 임대가 끊기면 `AGENT_LOST` 로 회수됩니다.
+- 결과는 `blogautomcp.job-result/v1` 봉투(`summary`, `data`, `readiness`, `warnings`)이며 PC 파일 경로를 포함하지 않습니다. 실패 코드는 `docs/mcp-saas-local-agent-product-plan.md` 상단 표를 참고하세요.
+- 도구 인자는 선언한 JSON 스키마로 서버에서 검증하고, 새 도구는 데스크톱 최소 버전(`minAppVersion`)을 요구합니다. 미달 PC 에는 `APP_UPDATE_REQUIRED` 를 돌려줍니다.
+- 레이트리밋: MCP IP 600회/분, 호출 120회/분, 페어링 10회/분/IP, MCP URL 발급 5회/분/사용자.

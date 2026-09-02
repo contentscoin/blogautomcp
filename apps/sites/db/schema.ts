@@ -32,6 +32,7 @@ export const devices = sqliteTable('devices', {
   pairedAt: integer('paired_at').notNull(),
   lastSeenAt: integer('last_seen_at'),
   revokedAt: integer('revoked_at'),
+  statusJson: text('status_json'),
 }, (table) => [uniqueIndex('idx_devices_token').on(table.tokenHash), index('idx_devices_user_status').on(table.userId, table.status)]);
 
 export const agentJobs = sqliteTable('agent_jobs', {
@@ -51,6 +52,11 @@ export const agentJobs = sqliteTable('agent_jobs', {
   updatedAt: integer('updated_at').notNull(),
   claimedAt: integer('claimed_at'),
   finishedAt: integer('finished_at'),
+  leaseUntil: integer('lease_until'),
+  heartbeatAt: integer('heartbeat_at'),
+  stage: text('stage'),
+  stageMessage: text('stage_message'),
+  cancelRequested: integer('cancel_requested').notNull().default(0),
 }, (table) => [index('idx_agent_jobs_user_status_created').on(table.userId, table.status, table.createdAt), uniqueIndex('idx_agent_jobs_user_idempotency').on(table.userId, table.idempotencyKey)]);
 
 export const auditEvents = sqliteTable('audit_events', {
@@ -61,3 +67,18 @@ export const auditEvents = sqliteTable('audit_events', {
   metadataJson: text('metadata_json'),
   createdAt: integer('created_at').notNull(),
 }, (table) => [index('idx_audit_events_created').on(table.createdAt)]);
+
+export const rateLimits = sqliteTable('rate_limits', {
+  key: text('key').primaryKey(),
+  windowStart: integer('window_start').notNull(),
+  count: integer('count').notNull().default(0),
+});
+
+export const pairCodes = sqliteTable('pair_codes', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  codeHash: text('code_hash').notNull(),
+  expiresAt: integer('expires_at').notNull(),
+  usedAt: integer('used_at'),
+  createdAt: integer('created_at').notNull(),
+}, (table) => [uniqueIndex('idx_pair_codes_hash').on(table.codeHash), index('idx_pair_codes_user').on(table.userId, table.expiresAt)]);

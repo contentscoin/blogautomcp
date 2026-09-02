@@ -5,6 +5,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
+import { classifyLocalFailure } from "@/lib/local-automation-error";
 import {
   approveBrandPostPackage,
   getBrandPostPackageDir,
@@ -16,19 +17,39 @@ import {
 
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
 
-function readPrepareFailure(logPath: string, brandLinkId?: string): string | null {
+interface PrepareFailure {
+  code: string;
+  message: string;
+}
+
+function readPrepareFailure(logPath: string, brandLinkId?: string): PrepareFailure | null {
   // 1순위: 파이프라인이 남긴 result.json (코드+메시지). 2순위: 로그 꼬리의 오류 줄.
   if (brandLinkId) {
     const result = readBrandPostPackageResult(brandLinkId);
-    if (result && !result.ok && result.message) return `${result.code ? `[${result.code}] ` : ""}${result.message}`;
+    if (result && !result.ok && result.message) return { code: result.code || "LOCAL_AUTOMATION_FAILED", message: result.message };
   }
   try {
     const tail = fs.readFileSync(logPath, "utf8").slice(-12_000);
     const matches = Array.from(tail.matchAll(/❌\s*(?:오류|실행 실패):\s*(.+)/g));
-    return matches.at(-1)?.[1]?.trim() || null;
+    const message = matches.at(-1)?.[1]?.trim();
+    return message ? { code: classifyLocalFailure({ message }), message } : null;
   } catch {
     return null;
   }
+}
+
+class PrepareProcessError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
+function failureResponse(error: unknown, fallbackMessage: string, status: number, extra: Record<string, unknown> = {}) {
+  const message = error instanceof Error ? error.message : fallbackMessage;
+  const code = error instanceof PrepareProcessError ? error.code : classifyLocalFailure({ message, status });
+  return NextResponse.json({ success: false, code, error: message, ...extra }, { status });
 }
 
 type PrepareEnv = Record<string, string | undefined>;
@@ -66,7 +87,8 @@ async function runPrepareProcess(id: string, packageDir: string, logPath: string
     });
     if (exit.code !== 0) {
       const failure = readPrepareFailure(logPath, id);
-      throw new Error(failure || `초안 생성 프로세스가 종료되었습니다(code=${exit.code}, signal=${exit.signal ?? "none"}).`);
+      if (failure) throw new PrepareProcessError(failure.code, failure.message);
+      throw new PrepareProcessError("LOCAL_AUTOMATION_FAILED", `초안 생성 프로세스가 종료되었습니다(code=${exit.code}, signal=${exit.signal ?? "none"}).`);
     }
   } finally {
     fs.closeSync(logFd);
@@ -94,7 +116,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     try {
       return NextResponse.json({ success: true, data: packagePreview(approveBrandPostPackage(id)) });
     } catch (error) {
-      return NextResponse.json({ success: false, error: error instanceof Error ? error.message : "초안 승인 실패" }, { status: 400 });
+      return failureResponse(error, "초안 승인 실패", 400);
     }
   }
   if (body.action === "revise") {
@@ -106,7 +128,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     const updateError = requireNoPendingDesktopUpdate();
     if (updateError) return updateError;
     const existing = readBrandPostPackage(id);
-    if (!existing) return NextResponse.json({ success: false, error: "수정할 초안이 없습니다. 먼저 초안을 생성하세요." }, { status: 404 });
+    if (!existing) return NextResponse.json({ success: false, code: "DRAFT_NOT_FOUND", error: "수정할 초안이 없습니다. 먼저 초안을 생성하세요." }, { status: 404 });
     if (existing.version !== "brand-post-package/v2") {
       return NextResponse.json({ success: false, error: "이 초안은 예전 형식이라 부분 수정을 지원하지 않습니다. 초안을 다시 생성하세요." }, { status: 409 });
     }
@@ -123,7 +145,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       if (!manifest) throw new Error("수정된 초안 매니페스트를 찾지 못했습니다.");
       return NextResponse.json({ success: true, data: packagePreview(manifest), logPath });
     } catch (error) {
-      return NextResponse.json({ success: false, error: error instanceof Error ? error.message : "초안 수정 실패", logPath }, { status: 500 });
+      return failureResponse(error, "초안 수정 실패", 500, { logPath });
     }
   }
   return NextResponse.json({ success: false, error: "지원하지 않는 초안 작업입니다." }, { status: 400 });
@@ -136,8 +158,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   if (updateError) return updateError;
   const { id } = await params;
   const link = await prisma.brandLink.findUnique({ where: { id }, select: { id: true, status: true } });
-  if (!link) return NextResponse.json({ success: false, error: "상품을 찾을 수 없습니다." }, { status: 404 });
-  if (link.status === "PUBLISHING") return NextResponse.json({ success: false, error: "현재 발행 중인 상품입니다." }, { status: 409 });
+  if (!link) return NextResponse.json({ success: false, code: "PRODUCT_NOT_FOUND", error: "상품을 찾을 수 없습니다." }, { status: 404 });
+  if (link.status === "PUBLISHING") return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "현재 발행 중인 상품입니다." }, { status: 409 });
 
   const requestBody = await request.json().catch(() => ({})) as { memo?: unknown };
   const memo = typeof requestBody.memo === "string" ? requestBody.memo.trim().slice(0, 1000) : "";
@@ -149,12 +171,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const manifest = readBrandPostPackage(id);
     if (!manifest) {
       const failure = readPrepareFailure(logPath, id);
-      throw new Error(
-        failure || `초안 매니페스트가 생성되지 않았습니다: ${getBrandPostPackageManifestPath(id)}`
-      );
+      if (failure) throw new PrepareProcessError(failure.code, failure.message);
+      throw new PrepareProcessError("LOCAL_AUTOMATION_FAILED", `초안 매니페스트가 생성되지 않았습니다: ${getBrandPostPackageManifestPath(id)}`);
     }
     return NextResponse.json({ success: true, data: packagePreview(manifest), logPath });
   } catch (error) {
-    return NextResponse.json({ success: false, error: error instanceof Error ? error.message : "고품질 초안 생성 실패", logPath }, { status: 500 });
+    return failureResponse(error, "고품질 초안 생성 실패", 500, { logPath });
   }
 }
