@@ -635,6 +635,25 @@ export function assessProductEditorialCoverage(sections: string[]): { coveredRol
   return { coveredRoles, missingCoreRoles: coreRoles.filter((role) => !coveredRoles.includes(role)) };
 }
 
+function hasConditionalProductVerdict(sections: string[]): boolean {
+  const body = sections.join("\n");
+  if (/(?:최종\s*리뷰|조건부\s*결론|후보(?:로|에\s*올)|더\s*실용적|고르는\s*편이\s*맞|선택\s*기준)/u.test(body)) {
+    return true;
+  }
+
+  // 자연스러운 총평은 "조건부 결론"이나 "선택 기준"이라는 정답 문구를
+  // 그대로 쓰지 않는다. 마지막 두 섹션 안에서 조건과 구매 판단이 같은
+  // 문장에 함께 있으면 의미상 조건부 결론으로 인정한다.
+  const conclusionScope = sections.slice(-2).join("\n");
+  const conclusionSentences = conclusionScope
+    .split(/[\n.!?。]+/u)
+    .map(clean)
+    .filter((sentence) => sentence.length >= 8);
+  const conditionPattern = /(?:이라면|라면(?=[,\s])|한다면|원한다면|필요하다면|경우(?:에|에는|라면)?|조건(?:에서는|이라면|에\s*따라)|환경(?:에서는|이라면)|용도(?:에서는|라면))/u;
+  const judgementPattern = /(?:추천|비추천|잘\s*맞|맞지\s*않|맞을\s*수|더\s*(?:낫|적합|실용)|강점|선택\s*이유|후보|어울|적합|구성\s*과잉)/u;
+  return conclusionSentences.some((sentence) => conditionPattern.test(sentence) && judgementPattern.test(sentence));
+}
+
 function countMatches(value: string, pattern: RegExp): number {
   return Array.from(value.matchAll(new RegExp(pattern.source, `${pattern.flags.replace("g", "")}g`))).length;
 }
@@ -702,7 +721,7 @@ export function assessProductReviewSubstance(input: {
     [/(?:장점|강점|선택\s*이유)/u.test(body), "구체적인 장점"],
     [hasProductLimitationLanguage(body), "제품 자체의 단점·제약"],
     [/(?:추천\s*대상|잘\s*맞|비추천\s*대상|맞지\s*않)/u.test(body), "추천·비추천 대상"],
-    [/(?:최종\s*리뷰|조건부\s*결론|후보(?:로|에\s*올)|더\s*실용적|고르는\s*편이\s*맞|선택\s*기준)/u.test(body), "조건부 최종 결론"],
+    [hasConditionalProductVerdict(input.sections), "조건부 최종 결론"],
     [coveredSignals.length >= requiredSignalCount, "상품 고유 구조·기능 근거"],
     [evidenceJudgementCount >= requiredEvidenceJudgementCount, "근거와 사용 가치가 연결된 판단"],
     [usageInstructionCount >= 2, "구체적인 사용·설치·관리 방법"],

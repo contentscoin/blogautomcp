@@ -310,6 +310,34 @@ assert.equal(
   false,
   "부담·취향 의존·미확인 성능을 명시한 문장은 제품 제약으로 인정해야 합니다.",
 );
+const semanticConditionalVerdict = assessProductReviewSubstance({
+  productName: "엔산마운트 FS-100 캠핑 TV스탠드",
+  sections: [
+    "호환 규격과 조절 범위\n\nFS-100은 15~32인치, 10kg 미만 화면을 지원합니다. 높이와 방향을 바꿀 수 있다는 점이 장점이고, VESA 규격이 맞지 않으면 설치할 수 없다는 점은 제품 자체의 제약입니다. 설치할 때는 다리를 펼치고 고정핀을 체결한 뒤 화면 각도를 조절합니다. 캠핑 장비를 자주 옮기는 사용자에게 잘 맞아요.",
+    "구매 전에는 이동성보다 호환 규격을 먼저 보세요\n\n캠핑이나 야외처럼 설치 위치와 시청 방향이 계속 달라지는 환경이라면 조절 기능이 제품 선택 이유가 될 수 있어요. 반대로 한 자리에 고정할 화면이라면 더 단순한 거치 방식이 맞을 수도 있습니다. 결국 FS-100은 호환 규격이 맞는 화면을 가지고 다니면서 높이와 방향을 자주 바꾸려는 경우에 강점이 분명한 제품이에요.",
+  ],
+  sourceDescription: "15~32인치 캠핑용 접이식 TV 모니터 스탠드",
+  sourceFeatures: ["10kg 미만", "VESA 75×75mm와 100×100mm", "높이와 방향 조절"],
+});
+assert.equal(
+  semanticConditionalVerdict.missingElements.includes("조건부 최종 결론"),
+  false,
+  "조건과 판단을 함께 제시한 자연스러운 마지막 총평은 고정 문구 없이도 조건부 결론으로 인정해야 합니다.",
+);
+const conditionWithoutVerdict = assessProductReviewSubstance({
+  productName: "엔산마운트 FS-100 캠핑 TV스탠드",
+  sections: [
+    "확인할 조건\n\nFS-100은 15~32인치 화면을 지원합니다. 캠핑에서 사용한다면 설치 전에 VESA 규격을 확인해야 합니다. 높이 조절은 장점이고, 10kg을 넘는 화면을 설치할 수 없는 점은 제약입니다. 화면 규격이 맞는 사용자에게 잘 맞아요.",
+    "마지막 안내\n\n구매하는 경우 배송 일정은 결제 화면에서 확인하세요. 캠핑 라면은 조리 편의가 강점인 별도 식품입니다.",
+  ],
+  sourceDescription: "15~32인치 캠핑용 접이식 TV 모니터 스탠드",
+  sourceFeatures: ["10kg 미만", "VESA 75×75mm와 100×100mm", "높이 조절"],
+});
+assert.equal(
+  conditionWithoutVerdict.missingElements.includes("조건부 최종 결론"),
+  true,
+  "마지막 섹션에 조건만 있고 제품 선택 판단이 없으면 조건부 결론으로 통과시키면 안 됩니다.",
+);
 const detailReadingSubstance = assessProductReviewSubstance({
   productName: "블라우풍트 5in1 3헤드 전기면도기",
   sections: Array.from({ length: 6 }, (_, index) =>
