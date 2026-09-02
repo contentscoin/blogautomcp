@@ -119,6 +119,7 @@ export interface TravelReviewSubstanceAssessment {
   sentenceCount: number;
   repeatedSentenceCount: number;
   coveredPlaces: string[];
+  uncoveredPlaces: string[];
   requiredPlaceCount: number;
   evidenceJudgementCount: number;
   requiredEvidenceJudgementCount: number;
@@ -136,6 +137,26 @@ function clean(value: string): string {
 
 function unique(values: string[], limit = 12): string[] {
   return Array.from(new Set(values.map(clean).filter((value) => value.length >= 2))).slice(0, limit);
+}
+
+function normalizedPlaceText(value: string): string {
+  return clean(value).replace(/[\s·・,，/()（）\[\]]+/gu, "").toLowerCase();
+}
+
+/** 판매페이지의 "밀라노 관광", "바티칸박물관 입장" 같은 일정 역할 꼬리표를
+ * 실제 본문 지명과 비교할 때만 제거한다. 원본 장소명과 출력 문구는 바꾸지 않는다. */
+function placeCoverageAliases(place: string): string[] {
+  const exact = normalizedPlaceText(place);
+  const base = exact
+    .replace(/(?:시내)?관광$/u, "")
+    .replace(/(?:내부)?입장$/u, "")
+    .replace(/유적지$/u, "");
+  return unique([exact, base].filter((value) => value.length >= 2));
+}
+
+function textCoversPlace(value: string, place: string): boolean {
+  const normalized = normalizedPlaceText(value);
+  return placeCoverageAliases(place).some((alias) => normalized.includes(alias));
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -576,7 +597,8 @@ export function assessTravelReviewSubstance(input: {
   const sourceText = input.sourceText || "";
   const facts = extractTravelProductFacts(input.productName, sourceText, sourceText ? [sourceText] : []);
   const places = unique([...facts.highlights, ...facts.destinations], 8);
-  const coveredPlaces = places.filter((place) => body.includes(place));
+  const coveredPlaces = places.filter((place) => textCoversPlace(body, place));
+  const uncoveredPlaces = places.filter((place) => !textCoversPlace(body, place));
   // 발행 게이트는 섹션 공백을 한 줄로 접어 넘기므로 "• 항목" 형식의 사실 목록이 한 문장으로 붙는다.
   // 글머리표 앞에서도 문장을 끊어 항목 하나가 문장 하나로 세어지게 한다.
   const sentences = body.split(/[\n.!?。]+|\s+(?=[•▸])/u).map(clean).filter((item) => item.length >= 8);
@@ -609,7 +631,7 @@ export function assessTravelReviewSubstance(input: {
   ).length;
   const proseSentenceCount = Math.max(1, proseSentences.length);
   const evidenceJudgementCount = sentences.filter((sentence) =>
-    places.some((place) => sentence.includes(place)) &&
+    places.some((place) => textCoversPlace(sentence, place)) &&
     /(?:역사|문화|풍경|분위기|골목|거리|전망|즐기|걷|산책|관람|사진|먹|맛보|팁|동선|시간대)/u.test(sentence)
   ).length;
   const requiredPlaceCount = Math.min(places.length >= 3 ? 3 : Math.max(1, places.length), Math.max(1, places.length));
@@ -636,6 +658,7 @@ export function assessTravelReviewSubstance(input: {
     sentenceCount,
     repeatedSentenceCount: repeats,
     coveredPlaces,
+    uncoveredPlaces,
     requiredPlaceCount,
     evidenceJudgementCount,
     requiredEvidenceJudgementCount,

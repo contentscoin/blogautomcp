@@ -811,9 +811,17 @@ export function getBrandLinkContentReadiness(
       const sourceCoverageText = "coveredSignals" in reviewSubstance
         ? `, 근거 ${reviewSubstance.coveredSignals.length}/${reviewSubstance.requiredSignalCount}`
         : "";
-      reason = isTravel
-        ? `여행지 사실을 풍경·활동·팁으로 연결한 내용이 부족합니다 (연결 ${reviewSubstance.evidenceJudgementCount}/${reviewSubstance.requiredEvidenceJudgementCount}). ${[...evidence.notes, ...linkage.notes].join(" ")}`.trim()
-        : `제품 고유 기능·수치를 사용 장면의 이점·제약으로 해석한 근거가 부족합니다 (판단 ${reviewSubstance.evidenceJudgementCount}/${reviewSubstance.requiredEvidenceJudgementCount}${sourceCoverageText}).`;
+      if (isTravel && "coveredPlaces" in reviewSubstance) {
+        const deficits = [
+          evidence.status === "fail" ? evidence.notes.join(" ") : "",
+          linkage.status === "fail"
+            ? `여행지 사실을 풍경·활동·팁으로 연결한 문장이 부족합니다 (연결 ${reviewSubstance.evidenceJudgementCount}/${reviewSubstance.requiredEvidenceJudgementCount}).`
+            : "",
+        ].filter(Boolean);
+        reason = deficits.join(" ").trim();
+      } else {
+        reason = `제품 고유 기능·수치를 사용 장면의 이점·제약으로 해석한 근거가 부족합니다 (판단 ${reviewSubstance.evidenceJudgementCount}/${reviewSubstance.requiredEvidenceJudgementCount}${sourceCoverageText}).`;
+      }
     } else {
       const travelRoleLabels: Record<string, string> = {
         background: "여행지 역사·문화 배경",

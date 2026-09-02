@@ -168,6 +168,27 @@ assert.ok(daNangSubstance.coveredPlaces.includes("다낭 대성당"));
 assert.ok(daNangSubstance.coveredPlaces.includes("호이안 구시가지"));
 assert.ok(daNangSubstance.coveredPlaces.includes("내원교"));
 
+const itineraryLabelSubstance = assessTravelReviewSubstance({
+  productName: "영국/프랑스/이탈리아 11일",
+  sourceText: "핵심 방문지: 대영박물관, 런던 시내 관광, 밀라노 관광, 폼페이유적지, 바티칸박물관 입장 출국: 인천",
+  sections: [
+    "대영박물관은 여러 시대의 유물을 관람하며 세계사를 한 자리에서 읽을 수 있는 장소입니다.",
+    "런던은 빅벤과 버킹엄 궁전을 잇는 거리 풍경을 걸으며 사진으로 남기기 좋습니다.",
+    "밀라노에서는 두오모 대성당의 대리석 외관과 광장 분위기를 즐길 수 있어요.",
+    "폼페이는 화산재 아래 보존된 고대 도시 유적을 걸으며 당시 생활상을 살펴볼 수 있습니다.",
+    "바티칸 박물관은 긴 관람 동선을 고려해 편한 신발을 준비하는 팁이 유용합니다.",
+  ],
+});
+assert.ok(itineraryLabelSubstance.coveredPlaces.includes("런던 시내 관광"), "일정 역할 꼬리표가 없는 실제 지명도 같은 장소로 인식한다");
+assert.ok(itineraryLabelSubstance.coveredPlaces.includes("밀라노 관광"));
+assert.ok(itineraryLabelSubstance.coveredPlaces.includes("폼페이유적지"));
+assert.ok(itineraryLabelSubstance.coveredPlaces.includes("바티칸박물관 입장"));
+assert.equal(
+  itineraryLabelSubstance.uncoveredPlaces.some((place) => /(?:관광|입장|유적지)$/u.test(place)),
+  false,
+  "본문에서 실제 지명으로 다룬 일정 라벨을 누락 후보로 다시 요구하면 안 된다",
+);
+
 console.log(JSON.stringify({
   ok: true,
   sectionTitles: titles,

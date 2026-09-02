@@ -113,6 +113,35 @@ assert.equal(lowEvidence.code, "low-evidence-density", lowEvidence.reason || low
 assert.equal(lowEvidence.signals.find((signal) => signal.key === "evidence-density")?.status, "fail");
 assert.equal(stronger.signals.find((signal) => signal.key === "evidence-density")?.status, "pass");
 
+const coverageOnlyFailure = getBrandLinkContentReadiness({
+  productName,
+  title: "대마도 2일 패키지 여행지 정보",
+  sections: strongerSections.map((section, index) => {
+    const withoutThirdPlace = section.replaceAll("미우다 해변", "북쪽 해변").replaceAll("대마도", "목적지");
+    return index === 0
+      ? `${withoutThirdPlace}\n\n2일 패키지 일정의 핵심 장소를 중심으로 설명합니다. 히타카츠에서는 항구 풍경을 걸으며 사진으로 남길 수 있어요. 이즈하라 골목은 현지 거리 분위기를 즐기기 좋습니다. 히타카츠 이동 동선은 배 도착 시간대에 맞춰 잡는 팁이 유용합니다.`
+      : withoutThirdPlace;
+  }),
+  hashtags: ["대마도여행", "대마도2일", "대마도패키지", "여행커넥트"],
+  brandLink: "https://brandconnect.naver.com/travel-fixture",
+  generationSource: "AI",
+  hasRepresentativeImage: true,
+  requireRepresentativeImage: false,
+  thumbnailGenerated: true,
+  connectKind: "TRAVEL",
+  experienceMode: "AI_ASSISTED_INFORMATION",
+  sourceDescription: "",
+  sourceFeatures: ["핵심 방문지: 히타카츠, 이즈하라, 미우다 해변"],
+  mode: "editorial",
+});
+assert.equal(coverageOnlyFailure.code, "low-evidence-density", coverageOnlyFailure.reason || coverageOnlyFailure.summary);
+assert.match(coverageOnlyFailure.reason || "", /핵심 방문지 2\/3곳/u);
+assert.doesNotMatch(
+  coverageOnlyFailure.reason || "",
+  /연결 3\/3|연결한 (?:내용|문장)이 부족/u,
+  "장면 연결을 통과한 원고에 연결 부족이라는 모순된 사유를 표시하면 안 된다",
+);
+
 // --- 하드 차단과 품질 점수의 분리 ---
 assert.equal(weak.verdict, "blocked");
 assert.ok(weak.blockers.some((blocker) => blocker.code === "too-short-content" && blocker.tier === "structure"));

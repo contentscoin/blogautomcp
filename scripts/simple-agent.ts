@@ -5279,6 +5279,9 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
 ${qualityNotes.length ? `- 보강할 품질 항목:\n${qualityNotes.join("\n")}` : ""}
 ${repetitionSamples.length ? `- 같은 뜻으로 반복된 문장(하나만 남기고 새 근거로 교체):\n${repetitionSamples.join("\n")}` : ""}
 ${travelSubstance ? `- 여행 원고 부족 요소: ${travelSubstance.missingElements.join(", ") || "없음"}` : ""}
+${travelSubstance && travelSubstance.coveredPlaces.length < travelSubstance.requiredPlaceCount
+  ? `- 아직 본문에서 확인되지 않은 방문지 후보: ${travelSubstance.uncoveredPlaces.slice(0, travelSubstance.requiredPlaceCount - travelSubstance.coveredPlaces.length).join(", ")}`
+  : ""}
 
 [수정 원칙]
 - 쇼핑 글은 기존 상품 정보와 초안에 이미 들어 있는 검증 가능한 사실만 사용합니다.
@@ -5286,6 +5289,7 @@ ${travelSubstance ? `- 여행 원고 부족 요소: ${travelSubstance.missingEle
 - 근거가 없는 일정·장소·성능·체험은 새로 만들지 않습니다.
 - "확인 필요", "알기 어렵다", "판단하기 어렵다" 같은 문장을 반복하지 말고, 정보가 없으면 관련 문단을 합치거나 짧게 처리합니다.
 - ${isTravel ? "상품 가격·예약 조건을 읽어주는 글이 아니라, 이름이 확인된 방문지별 배경지식·눈앞의 풍경·할 수 있는 경험·사진 포인트·이동 팁을 구체적으로 연결한 여행 브이로그형 정보 글로 다시 씁니다. '보입니다', '인 것 같아요', '알기 어렵습니다' 같은 모호한 말투를 쓰지 않습니다." : "구매 안내만 하지 말고 제품 자체의 기능, 장점, 구조상 제약, 잘 맞는 사용자를 구체적으로 판단합니다."}
+${isTravel ? "- 여행 원본의 장소명에 붙은 ‘관광·입장·유적지’ 같은 일정 역할은 문장에 억지로 복사하지 말고, 실제 지명을 자연스럽게 쓰되 누락된 방문지를 본문에서 구체적으로 다룹니다." : ""}
 - 내부 지침 문구와 실제 체험을 가장하는 표현은 제거합니다.
 - 고지 문구와 원시 URL은 출력하지 않습니다. 시스템이 별도로 붙입니다.
 - JSON(title, sections, hashtags)만 출력합니다.
