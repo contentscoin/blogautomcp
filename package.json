@@ -94,7 +94,8 @@
       "src/**/*",
       "next-env.d.ts",
       "tsconfig.json",
-      "tsconfig.scripts.json"
+      "tsconfig.scripts.json",
+      "!scripts/chatgpt-login.ts"
     ],
     "extraMetadata": {
       "main": "scripts/electron/main.cjs"
@@ -124,7 +125,15 @@
         }
       ]
     },
-    "npmRebuild": false
+    "npmRebuild": false,
+    "protocols": [
+      {
+        "name": "BlogAutoMCP",
+        "schemes": [
+          "blogautomcp"
+        ]
+      }
+    ]
   },
   "optionalDependencies": {
     "@tailwindcss/oxide-win32-x64-msvc": "^4.1.18",

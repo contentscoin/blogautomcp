@@ -10,6 +10,7 @@ interface FieldDef {
   options?: string[];
   secret?: boolean;
   hint?: string;
+  advanced?: boolean;
 }
 
 interface SessionState {
@@ -177,6 +178,40 @@ export default function SettingsPage() {
     }
   };
 
+  const renderField = (f: FieldDef) => (
+                <div key={f.key}>
+                  <label className="block text-sm font-medium text-gray-300 mb-1">
+                    {f.label}
+                    {f.secret && configured[f.key] ? (
+                      <span className="ml-2 text-xs text-green-500">설정됨</span>
+                    ) : null}
+                  </label>
+                  {f.type === "select" ? (
+                    <select
+                      value={values[f.key] ?? ""}
+                      onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm"
+                    >
+                      <option value="">(미설정)</option>
+                      {f.options?.map((o) => (
+                        <option key={o} value={o}>
+                          {o}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      type={f.type === "password" ? "password" : "text"}
+                      value={values[f.key] ?? ""}
+                      placeholder={f.secret ? "변경하려면 새 값 입력" : ""}
+                      onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
+                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm"
+                    />
+                  )}
+                  {f.hint ? <p className="text-xs text-gray-500 mt-1">{f.hint}</p> : null}
+                </div>
+  );
+
   return (
     <main className="min-h-screen bg-gray-950 text-gray-100 p-6">
       <div className="max-w-2xl mx-auto">
@@ -245,39 +280,15 @@ export default function SettingsPage() {
             <p className="text-gray-400">불러오는 중…</p>
           ) : (
             <div className="space-y-4">
-              {fields.map((f) => (
-                <div key={f.key}>
-                  <label className="block text-sm font-medium text-gray-300 mb-1">
-                    {f.label}
-                    {f.secret && configured[f.key] ? (
-                      <span className="ml-2 text-xs text-green-500">설정됨</span>
-                    ) : null}
-                  </label>
-                  {f.type === "select" ? (
-                    <select
-                      value={values[f.key] ?? ""}
-                      onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
-                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm"
-                    >
-                      <option value="">(미설정)</option>
-                      {f.options?.map((o) => (
-                        <option key={o} value={o}>
-                          {o}
-                        </option>
-                      ))}
-                    </select>
-                  ) : (
-                    <input
-                      type={f.type === "password" ? "password" : "text"}
-                      value={values[f.key] ?? ""}
-                      placeholder={f.secret ? "변경하려면 새 값 입력" : ""}
-                      onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
-                      className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm"
-                    />
-                  )}
-                  {f.hint ? <p className="text-xs text-gray-500 mt-1">{f.hint}</p> : null}
-                </div>
-              ))}
+              {fields.filter((f) => !f.advanced).map((f) => renderField(f))}
+              {fields.some((f) => f.advanced) ? (
+                <details className="rounded-lg border border-gray-800 p-3">
+                  <summary className="cursor-pointer text-sm text-gray-400">고급 설정</summary>
+                  <div className="space-y-4 mt-3">
+                    {fields.filter((f) => f.advanced).map((f) => renderField(f))}
+                  </div>
+                </details>
+              ) : null}
             </div>
           )}
 

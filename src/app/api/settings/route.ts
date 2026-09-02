@@ -17,14 +17,16 @@ interface FieldDef {
   options?: string[];
   secret?: boolean;
   hint?: string;
+  /** 고급 섹션(접힘)에 표시 */
+  advanced?: boolean;
 }
 
 // 편집 허용 키 화이트리스트(임의 env 노출/주입 방지).
 const FIELDS: FieldDef[] = [
-  { key: "OPENAI_API_KEY", label: "OpenAI API 키", type: "password", secret: true },
+  { key: "OPENAI_API_KEY", label: "OpenAI API 키 (선택)", type: "password", secret: true, hint: "글·썸네일 생성에 사용. 없으면 로컬 초안 모드로 동작하며 품질이 낮아집니다." },
   { key: "UNSPLASH_ACCESS_KEY", label: "Unsplash 액세스 키", type: "password", secret: true, hint: "스톡 이미지(선택)" },
   { key: "NAVER_BLOG_ID", label: "네이버 블로그 ID", type: "text", hint: "blog.naver.com/<여기>" },
-  { key: "ADMIN_API_KEY", label: "관리자 API 키", type: "password", secret: true, hint: "원격 접근 보호(선택)" },
+  { key: "ADMIN_API_KEY", label: "관리자 API 키", type: "password", secret: true, hint: "로컬 API 를 외부 스크립트에서 호출할 때만 필요(선택). 일반 사용에는 비워 두세요.", advanced: true },
 ];
 
 const MASK = "********";
