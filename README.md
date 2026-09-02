@@ -318,6 +318,10 @@ DRY_RUN_GENERATE_ONLY=true DEBUG_SAVE_GENERATED_POST=true npm run publish -- <li
 ```
 결과 파일은 `logs/generated/*.json`에 저장됩니다.
 
+### 에이전트로 직접 원고 쓰기 (naver-connect-writer 스킬)
+
+Claude Code·Codex 같은 에이전트에게 쇼핑커넥트·여행커넥트 원고를 직접 쓰게 할 때는 별도 공개 스킬 [naver-connect-writer](https://github.com/contentscoin/naver-connect-writer)를 씁니다. 페르소나 → 웹 조사 장부 → 고정 구조 초안 → 루브릭 자기 채점 → 결정론 검사기 순서를 강제하고, 결과 markdown은 이 앱의 prepared-post 형식에 그대로 붙여넣을 수 있습니다(머리 주석과 `## Sources`는 자동 제거). 검사기 정규식은 이 저장소의 `scripts/lib/humanize-korean.ts`, `brandlink-content-readiness.ts`, `blog-writing-style.ts`에서 이식했습니다.
+
 ---
 
 ## ❓ FAQ / 문제 해결
