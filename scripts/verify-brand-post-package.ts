@@ -16,7 +16,7 @@ async function main() {
     "API 키가 없는 데스크톱 초안은 로컬 생성기로 자동 전환해야 합니다."
   );
   assert.equal(
-    draftRouteSource.includes("readPrepareFailure(logPath)"),
+    draftRouteSource.includes("readPrepareFailure(logPath"),
     true,
     "초안 실패 시 실제 원인을 화면에 전달해야 합니다."
   );
@@ -55,7 +55,38 @@ async function main() {
   assert.ok(store.packagePreview(store.approveBrandPostPackage(id)).markdown.includes("승인 전에는"));
   assert.ok(store.readBrandPostPackage(id)?.approvedAt);
   assert.throws(() => store.getBrandPostPackageDir("../../escape"));
-  console.log(JSON.stringify({ ok: true, approved: true, pathTraversalBlocked: true }));
+
+  // v2 패키지(Spec-first): 섹션 문자열·검증 요약을 미리보기에서 읽을 수 있어야 한다.
+  const id2 = "fixture-brand-link-002";
+  const dir2 = store.getBrandPostPackageDir(id2);
+  fs.mkdirSync(dir2, { recursive: true });
+  fs.writeFileSync(path.join(dir2, "post.md"), "# v2 초안\n\n## 한눈에 보기\n\n요약", "utf8");
+  fs.writeFileSync(store.getBrandPostPackageManifestPath(id2), JSON.stringify({
+    version: "brand-post-package/v2",
+    brandLinkId: id2,
+    connectKind: "TRAVEL",
+    title: "v2 초안",
+    markdownPath: path.join(dir2, "post.md"),
+    heroImagePath,
+    bodyImagePaths,
+    hashtags: ["대만패키지"],
+    imagePolicy: "TRAVEL_EDITORIAL",
+    createdAt: new Date().toISOString(),
+    approvedAt: null,
+    sections: ["한눈에 보기\n\n결론부터 말하면 좋은 구성이에요.\n", "마무리\n\n아래 링크에서 확인하세요.\n", "\n고지\n"],
+    composition: { version: "post-composition/v1", kind: "TRAVEL", sections: [], connectCard: "EXTERNAL_LINK" },
+    spec: { version: "post-spec/v1" },
+    draft: { title: "v2 초안", sections: [], hashtags: [], source: "openai", model: "gpt-4o-mini", attempts: 1 },
+    readiness: { status: "READY", score: 92, summary: "발행 준비 완료", signals: [], repairTargets: [], generationSource: "openai", attempts: 1 },
+  }, null, 2));
+  const preview2 = store.packagePreview(store.readBrandPostPackage(id2)!);
+  assert.equal(preview2.readiness?.status, "READY");
+  assert.equal(preview2.sectionOutline?.length, 3);
+  assert.equal(preview2.imageCount, 5);
+  assert.ok(!("spec" in preview2), "미리보기에는 스펙 원본을 싣지 않는다");
+  fs.writeFileSync(store.getBrandPostPackageResultPath(id2), JSON.stringify({ ok: false, code: "CONTENT_BLOCKED", message: "이미지 부족" }));
+  assert.equal(store.readBrandPostPackageResult(id2)?.code, "CONTENT_BLOCKED");
+  console.log(JSON.stringify({ ok: true, approved: true, pathTraversalBlocked: true, v2Preview: true }));
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1; });

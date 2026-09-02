@@ -60,7 +60,7 @@ const GENERIC_PRODUCT_TOKENS = new Set([
   "세트",
 ]);
 
-const UNSUPPORTED_EXPERIENCE_PATTERNS = [
+export const UNSUPPORTED_EXPERIENCE_PATTERNS = [
   /(?:제가|저도|직접)\s*(?:구매|주문|사용|써|받아|개봉|체험|먹어|발라|입어|신어)/u,
   /(?:구매|주문|사용|써|받아|개봉|체험|먹어|발라|입어|신어)\s*해?\s*봤/u,
   /택배\s*(?:도착|받아|열어|뜯어)/u,
@@ -68,13 +68,13 @@ const UNSUPPORTED_EXPERIENCE_PATTERNS = [
   /(?:강력\s*추천|후회\s*없는\s*선택|무조건\s*추천)/u,
 ] as const;
 
-const COMMISSION_RATE_PATTERNS = [
+export const COMMISSION_RATE_PATTERNS = [
   /(?:수수료|커미션|commission)\s*\d/iu,
   /\d+(?:\.\d+)?\s*%\s*(?:수수료|커미션|commission)/iu,
   /(?:제휴율|정산\s*조건|내부\s*정산)/u,
 ] as const;
 
-const INTERNAL_GUIDANCE_PATTERNS = [
+export const INTERNAL_GUIDANCE_PATTERNS = [
   /상위\s*노출\s*글에서/u,
   /제품명,\s*사용\s*장면,\s*구매\s*전\s*확인\s*포인트/u,
   /상세페이지의\s*주요\s*기능\s*같은\s*정보/u,
@@ -96,7 +96,7 @@ function normalizeLoose(value: string): string {
     .trim();
 }
 
-function getProductTokens(productName: string): string[] {
+export function getProductTokens(productName: string): string[] {
   const normalized = normalizeLoose(productName);
   if (!normalized) return [];
 

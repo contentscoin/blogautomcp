@@ -66,6 +66,16 @@ import {
   qcGeneratedThumbnail,
 } from "./lib/openai-image";
 import {
+  reviseAssembledPost,
+  runSpecFirstPipeline,
+  type AssembledPost,
+  type GeneratedDraft as SpecGeneratedDraft,
+  type HeaderFormat,
+  type ImageCandidateInput,
+  type PostCompositionContract,
+  type PostSpec,
+} from "./lib/post-spec";
+import {
   buildOpenCrabSeoBrief,
   formatOpenCrabSeoBriefForPrompt,
   type OpenCrabSeoBrief,
@@ -279,6 +289,13 @@ const BLOG_BODY_IMAGE_MAX = parseBoundedInteger(
   1,
   12
 );
+// Spec-first 파이프라인: 이미지 플랜 → 스펙 → 구조화 생성 → 검증/타깃 수리 → 조립.
+// false 로 내리면 예전 단발 생성 + 사후 보정 경로로 돌아간다.
+const POST_SPEC_PIPELINE_ENABLED =
+  (process.env.POST_SPEC_PIPELINE_ENABLED || "true").toLowerCase() !== "false";
+// 인용구 섹션 헤더는 에디터 셀렉터 실측 전까지 기본 OFF (소제목으로 강등).
+const NAVER_EDITOR_QUOTATION_ENABLED =
+  (process.env.NAVER_EDITOR_QUOTATION_ENABLED || "false").toLowerCase() === "true";
 const AGENT_MAX_RUNTIME_MS = Math.max(
   5 * 60 * 1000,
   Number(process.env.AGENT_MAX_RUNTIME_MS || "1500000")
@@ -326,6 +343,15 @@ interface GeneratedPostPreview {
   rawResponse?: string;
   openCrabSeoBrief?: OpenCrabSeoBrief | null;
   productEditorialPlan?: ProductEditorialPlan | null;
+  /** Spec-first 파이프라인 산출물 (스펙·검증·에디터 입력 계약·이미지 슬롯) */
+  assembled?: AssembledPost | null;
+  notes?: string[];
+}
+
+interface SpecStep2Input {
+  imageCandidates: ImageCandidateInput[];
+  tempDir: string;
+  memo?: string | null;
 }
 
 interface ChatGPTGuidanceContext {
@@ -4521,6 +4547,10 @@ function saveGeneratedPostPreview(
     openCrabSeoBrief: post.openCrabSeoBrief ?? null,
     productEditorialPlan: post.productEditorialPlan ?? null,
     contentReadiness: readiness ?? null,
+    postSpec: post.assembled?.spec ?? null,
+    specValidation: post.assembled?.validation ?? null,
+    composition: post.assembled?.composition ?? null,
+    pipelineNotes: post.notes ?? null,
     sections: post.sections,
     hashtags: post.hashtags,
     rawResponse: post.rawResponse ?? "",
@@ -5248,7 +5278,8 @@ async function step2_generatePost(
   product: ProductInfo,
   brandLink: string,
   productId?: string | null,
-  connectKind: "SHOPPING" | "TRAVEL" = "SHOPPING"
+  connectKind: "SHOPPING" | "TRAVEL" = "SHOPPING",
+  specInput?: SpecStep2Input | null
 ): Promise<GeneratedPostPreview> {
   const isTravel = connectKind === "TRAVEL";
   console.log(`\n📝 STEP 2: SEO 최적화 블로그 글 생성 (확장판${isTravel ? " · 여행" : ""})`);
@@ -5281,6 +5312,55 @@ async function step2_generatePost(
     targetSectionCount: bodySectionCount,
   });
   const openCrabPromptBlock = formatOpenCrabSeoBriefForPrompt(openCrabSeoBrief);
+
+  if (POST_SPEC_PIPELINE_ENABLED && !BROWSER_GPT_MODE && specInput) {
+    console.log("   🧭 Spec-first: 이미지 플랜 → 스펙 → 구조화 생성 → 검증/타깃 수리 → 조립");
+    const result = await runSpecFirstPipeline({
+      kind: connectKind,
+      productId: productId || null,
+      product: {
+        name: product.name,
+        description: product.description,
+        features: product.features,
+        price: product.price,
+        originalPrice: product.originalPrice,
+        discountRate: product.discountRate,
+        couponInfo: product.couponInfo,
+        deliveryInfo: product.deliveryInfo,
+        reviewCount: product.reviewCount,
+        rating: product.rating,
+        storeName: product.storeName,
+      },
+      brief: openCrabSeoBrief,
+      imageCandidates: specInput.imageCandidates,
+      tempDir: specInput.tempDir,
+      brandLink,
+      memo: specInput.memo,
+      options: {
+        maxRepairRounds: 2,
+        allowLocalFallback: PRODUCT_POST_LOCAL_FALLBACK_ENABLED,
+        quotationHeaders: NAVER_EDITOR_QUOTATION_ENABLED,
+        requireRepresentativeImage: BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE,
+        thumbnailGenerated: THUMBNAIL_AUTOGEN_ENABLED,
+      },
+    });
+    for (const note of result.notes) console.log(`   · ${note}`);
+    console.log(`   📌 제목: ${result.title}`);
+    console.log(`   📝 섹션: ${result.sections.length}개 (${result.generationSource}, 호출 ${result.attempts}회)`);
+    console.log(`   🖼️ 이미지 플랜: 본문 ${result.spec.imagePlan.resolvedBody}장 / 목표 ${result.spec.imagePlan.targetBody}장`);
+    console.log(`   🧪 검증: ${result.validation.summary}`);
+    return {
+      title: result.title,
+      sections: result.sections,
+      hashtags: result.hashtags,
+      rawResponse: `spec-first:${result.generationSource}`,
+      openCrabSeoBrief,
+      productEditorialPlan: null,
+      assembled: result,
+      notes: result.notes,
+    };
+  }
+
   const productEditorialPlan = buildProductEditorialPlan({
     productName: product.name,
     description: product.description,
@@ -6295,6 +6375,9 @@ interface PreparedBrandLinkPostOverride {
   post: GeneratedPostPreview;
   heroImagePath: string;
   bodyImagePaths: string[];
+  composition?: PostCompositionContract | null;
+  spec?: PostSpec | null;
+  draft?: SpecGeneratedDraft | null;
 }
 
 function writePreparedBrandPostPackage(params: {
@@ -6311,10 +6394,12 @@ function writePreparedBrandPostPackage(params: {
   fs.mkdirSync(params.outputDir, { recursive: true });
   const imageDir = path.join(params.outputDir, "images");
   fs.mkdirSync(imageDir, { recursive: true });
+  // 수정(revise) 시에는 원본이 패키지 images/ 안에 있을 수 있어, 먼저 전부 읽은 뒤 쓴다.
+  const buffers = images.map((sourcePath) => fs.readFileSync(sourcePath));
   const packagedImages = images.map((sourcePath, index) => {
     const extension = path.extname(sourcePath) || ".png";
     const destination = path.join(imageDir, `${String(index + 1).padStart(2, "0")}${extension}`);
-    fs.copyFileSync(sourcePath, destination);
+    fs.writeFileSync(destination, buffers[index]);
     return {
       path: path.resolve(destination),
       sourcePath: path.resolve(sourcePath),
@@ -6330,8 +6415,30 @@ function writePreparedBrandPostPackage(params: {
   const markdown = [`# ${params.post.title}`, "", ...sections, "", params.post.hashtags.map((tag) => `#${tag.replace(/^#+/, "")}`).join(" ")].join("\n");
   fs.writeFileSync(markdownPath, markdown, "utf8");
   const manifestPath = path.join(params.outputDir, "manifest.json");
-  fs.writeFileSync(manifestPath, JSON.stringify({
-    version: "brand-post-package/v1",
+  const assembled = params.post.assembled ?? null;
+  // 패키지 안의 복사본 경로로 슬롯/구성 정보를 다시 매핑한다(임시 파일은 이후 사라질 수 있다).
+  const packagedBySource = new Map(packagedImages.map((image) => [image.sourcePath, image.path] as const));
+  const remap = (imagePath: string) => packagedBySource.get(path.resolve(imagePath)) || imagePath;
+  const composition = assembled
+    ? {
+        ...assembled.composition,
+        sections: assembled.composition.sections.map((section) => ({
+          ...section,
+          imagePaths: section.imagePaths.map(remap).filter((imagePath) => fs.existsSync(imagePath)),
+        })),
+      }
+    : null;
+  const spec = assembled
+    ? {
+        ...assembled.spec,
+        imagePlan: {
+          ...assembled.spec.imagePlan,
+          hero: assembled.spec.imagePlan.hero ? { ...assembled.spec.imagePlan.hero, path: packagedImages[0].path } : null,
+          slots: assembled.spec.imagePlan.slots.map((slot) => ({ ...slot, path: remap(slot.path) })),
+        },
+      }
+    : null;
+  const base = {
     brandLinkId: params.brandLinkId,
     connectKind: params.connectKind,
     title: params.post.title,
@@ -6343,8 +6450,57 @@ function writePreparedBrandPostPackage(params: {
     imagePolicy: params.connectKind === "SHOPPING" ? "LOCKED_PRODUCT_OR_ORIGINAL" : "TRAVEL_EDITORIAL",
     createdAt: new Date().toISOString(),
     approvedAt: null,
-  }, null, 2), "utf8");
+  };
+  const manifest = assembled
+    ? {
+        version: "brand-post-package/v2",
+        ...base,
+        sections: params.post.sections,
+        composition,
+        spec,
+        draft: assembled.draft,
+        readiness: {
+          status: assembled.validation.status,
+          score: assembled.validation.score,
+          summary: assembled.validation.summary,
+          signals: assembled.validation.signals,
+          repairTargets: assembled.validation.repair.targets,
+          generationSource: assembled.generationSource,
+          attempts: assembled.attempts,
+        },
+        pipeline: { version: "post-spec/v1", model: assembled.draft.model, notes: params.post.notes ?? [] },
+      }
+    : { version: "brand-post-package/v1", ...base };
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
   return manifestPath;
+}
+
+/** 실패 메시지를 MCP/UI가 구분할 수 있는 코드로 분류한다. */
+function classifyFailureCode(message: string): string {
+  if (/세션|로그인/u.test(message)) return "NAVER_SESSION_EXPIRED";
+  if (/본문 이미지|이미지 부족|IMAGE_SHORTFALL/u.test(message)) return "IMAGE_SHORTFALL";
+  if (/발행 보류|BLOCKED|게이트/u.test(message)) return "CONTENT_BLOCKED";
+  if (/OPENAI_API_KEY|OpenAI API/u.test(message)) return "LLM_UNAVAILABLE";
+  if (/찾을 수 없|상품 정보를 확보/u.test(message)) return "PRODUCT_NOT_FOUND";
+  if (/여행커넥트|계약/u.test(message)) return "TRAVEL_CONTRACT_LOCKED";
+  return "LOCAL_AUTOMATION_FAILED";
+}
+
+/** 초안 생성 결과를 패키지 디렉터리에 남긴다. 라우트가 로그 대신 이 파일로 원인을 읽는다. */
+function writePrepareResult(
+  outputDir: string,
+  payload: { ok: boolean; code: string; message: string; readiness?: unknown },
+): void {
+  try {
+    fs.mkdirSync(outputDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(outputDir, "result.json"),
+      JSON.stringify({ ...payload, at: new Date().toISOString() }, null, 2),
+      "utf8",
+    );
+  } catch {
+    // 결과 파일 기록 실패는 발행 자체를 막지 않는다.
+  }
 }
 
 function resolvePreparedOverridePath(manifestPath: string, value: unknown): string {
@@ -6370,10 +6526,16 @@ function loadPreparedBrandLinkPostOverride(): PreparedBrandLinkPostOverride | nu
   }
 
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
+    version?: unknown;
+    title?: unknown;
     markdownPath?: unknown;
     heroImagePath?: unknown;
     bodyImagePaths?: unknown;
     hashtags?: unknown;
+    sections?: unknown;
+    composition?: unknown;
+    spec?: unknown;
+    draft?: unknown;
   };
   const markdownPath = resolvePreparedOverridePath(manifestPath, manifest.markdownPath);
   const heroImagePath = resolvePreparedOverridePath(manifestPath, manifest.heroImagePath);
@@ -6382,6 +6544,34 @@ function loadPreparedBrandLinkPostOverride(): PreparedBrandLinkPostOverride | nu
     : [];
   if (bodyImagePaths.length < 4) {
     throw new Error("준비된 원고에는 본문 이미지가 최소 4장 필요합니다.");
+  }
+
+  // v2 패키지는 섹션 문자열과 에디터 입력 계약을 그대로 담고 있어 마크다운을 다시 파싱하지 않는다.
+  if (
+    manifest.version === "brand-post-package/v2" &&
+    Array.isArray(manifest.sections) &&
+    manifest.sections.every((value) => typeof value === "string") &&
+    typeof manifest.title === "string"
+  ) {
+    const hashtagsV2 = Array.isArray(manifest.hashtags)
+      ? manifest.hashtags
+          .filter((value): value is string => typeof value === "string")
+          .map((value) => value.replace(/^#+/, "").trim())
+          .filter(Boolean)
+      : [];
+    return {
+      post: {
+        title: manifest.title.trim(),
+        sections: manifest.sections as string[],
+        hashtags: hashtagsV2,
+        rawResponse: `prepared:${manifestPath}`,
+      },
+      heroImagePath,
+      bodyImagePaths,
+      composition: (manifest.composition as PostCompositionContract | null) ?? null,
+      spec: (manifest.spec as PostSpec | null) ?? null,
+      draft: (manifest.draft as SpecGeneratedDraft | null) ?? null,
+    };
   }
 
   const markdown = fs.readFileSync(markdownPath, "utf8");
@@ -7253,10 +7443,36 @@ async function insertNaverHorizontalDivider(page: Page): Promise<boolean> {
 }
 
 // 텍스트 섹션 입력 (줄바꿈 포함)
+/**
+ * 인용구 컴포넌트에 섹션 헤더를 넣는다. 셀렉터는 실측 전 추정값이라 기본 OFF 이며,
+ * 실패하면 호출자가 소제목 서식으로 되돌린다. 삽입 후 본문 서식으로 반드시 빠져나온다.
+ */
+async function insertNaverQuotation(page: Page, text: string): Promise<boolean> {
+  const clicked = await clickFirstVisible(page, [
+    'button[data-name="quotation"][data-value="quotation_underline"]',
+    'button[data-name="quotation"]',
+    'button[aria-label*="인용구"]',
+    'button:has-text("인용구")',
+  ]);
+  if (!clicked) return false;
+  await page.waitForTimeout(200);
+  await clickFirstVisible(page, [
+    'button[data-value="quotation_underline"]',
+    '[data-value^="quotation_"]',
+  ]).catch(() => false);
+  await page.waitForTimeout(150);
+  await page.keyboard.type(text, { delay: 3 });
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(80);
+  await setNaverTextFormat(page, "text");
+  return true;
+}
+
 async function inputTextSection(
   page: Page,
   text: string,
-  options?: { useSectionHeading?: boolean; insertDividerAboveHeading?: boolean }
+  options?: { useSectionHeading?: boolean; insertDividerAboveHeading?: boolean; headerFormat?: HeaderFormat }
 ): Promise<void> {
   const useSectionHeading = options?.useSectionHeading ?? true;
   const insertDividerAboveHeading =
@@ -7280,14 +7496,23 @@ async function inputTextSection(
       }
     }
 
-    const headingApplied = await setNaverTextFormat(page, "sectionTitle");
-    if (!headingApplied) {
-      console.log("   ⚠️ 소제목 스타일 적용 실패, 본문 스타일로 대체");
+    let quotationInserted = false;
+    if (options?.headerFormat === "quotation" && NAVER_EDITOR_QUOTATION_ENABLED) {
+      quotationInserted = await insertNaverQuotation(page, titleLine);
+      if (!quotationInserted) {
+        console.log("   ⚠️ 인용구 삽입 실패, 소제목 서식으로 대체");
+      }
     }
-    await page.keyboard.type(titleLine, { delay: 3 });
-    await page.keyboard.press("Enter");
-    await page.waitForTimeout(80);
-    await setNaverTextFormat(page, "text");
+    if (!quotationInserted) {
+      const headingApplied = await setNaverTextFormat(page, "sectionTitle");
+      if (!headingApplied) {
+        console.log("   ⚠️ 소제목 스타일 적용 실패, 본문 스타일로 대체");
+      }
+      await page.keyboard.type(titleLine, { delay: 3 });
+      await page.keyboard.press("Enter");
+      await page.waitForTimeout(80);
+      await setNaverTextFormat(page, "text");
+    }
   } else {
     await setNaverTextFormat(page, "text");
     await page.keyboard.type(titleLine, { delay: 3 });
@@ -7324,6 +7549,7 @@ async function step5and6_uploadAndWrite(
     shoppingConnectProductFinalUrl?: string | null;
     requiredFirstImagePath?: string | null;
     connectKind?: "SHOPPING" | "TRAVEL";
+    composition?: PostCompositionContract | null;
   }
 ): Promise<void> {
   console.log("\n📝 STEP 5+6: 이미지 + 본문 번갈아 입력");
@@ -7338,29 +7564,51 @@ async function step5and6_uploadAndWrite(
   const mainSections = sections.length > 1 ? sections.slice(0, -1) : sections;
   const tailSection = sections.length > 1 ? sections[sections.length - 1] : "";
   // 우선순위 이미지(썸네일, 대표이미지)는 섹션 수가 적어도 최소 2장까지 업로드
-  const maxLoop = Math.max(mainSections.length, Math.min(imagePaths.length, 2));
-  const imagePathBySection = new Map<number, string>();
-  if (options?.connectKind === "TRAVEL" && mainSections.length > 1) {
+  // 스펙 파이프라인이 만든 에디터 입력 계약이 있으면 섹션별 슬롯(이미지 0~2장, 헤더 형식)을 그대로 따른다.
+  const compositionSections =
+    options?.composition && options.composition.sections.length === mainSections.length
+      ? options.composition.sections
+      : null;
+  const imagePathsBySection = new Map<number, string[]>();
+  if (compositionSections) {
+    const existing = (imagePath: string) => Boolean(imagePath) && fs.existsSync(imagePath);
+    compositionSections.forEach((slot) => imagePathsBySection.set(slot.index, slot.imagePaths.filter(existing)));
+    // 업로드 목록의 첫 장(hero/썸네일)이 슬롯 어디에도 없으면 본문 맨 앞에 넣는다.
+    const heroPath = imagePaths[0];
+    const heroPlaced = compositionSections.some((slot) =>
+      slot.imagePaths.some((imagePath) => path.resolve(imagePath) === path.resolve(heroPath || "")),
+    );
+    if (heroPath && !heroPlaced) {
+      imagePathsBySection.set(0, [heroPath, ...(imagePathsBySection.get(0) || [])]);
+    }
+    console.log(
+      `   🧩 슬롯 배치: ${compositionSections
+        .map((slot) => `${slot.index + 1}:${(imagePathsBySection.get(slot.index) || []).length}장/${slot.headerFormat}`)
+        .join(" ")}`
+    );
+  } else if (options?.connectKind === "TRAVEL" && mainSections.length > 1) {
     const usableImageCount = Math.min(imagePaths.length, mainSections.length);
     for (let imageIndex = 0; imageIndex < usableImageCount; imageIndex += 1) {
       const sectionIndex =
         usableImageCount <= 1
           ? 0
           : Math.round((imageIndex * (mainSections.length - 1)) / (usableImageCount - 1));
-      imagePathBySection.set(sectionIndex, imagePaths[imageIndex]);
+      imagePathsBySection.set(sectionIndex, [imagePaths[imageIndex]]);
     }
     console.log(
-      `   ✈️ 여행 사진 분산 배치: ${Array.from(imagePathBySection.keys()).map((index) => index + 1).join(", ")}번 섹션 앞`
+      `   ✈️ 여행 사진 분산 배치: ${Array.from(imagePathsBySection.keys()).map((index) => index + 1).join(", ")}번 섹션 앞`
     );
   } else {
-    imagePaths.forEach((imagePath, index) => imagePathBySection.set(index, imagePath));
+    imagePaths.forEach((imagePath, index) => imagePathsBySection.set(index, [imagePath]));
   }
+  const maxLoop = compositionSections
+    ? mainSections.length
+    : Math.max(mainSections.length, Math.min(imagePaths.length, 2));
   let uploadedCount = 0;
   
   for (let i = 0; i < maxLoop; i++) {
-    // 이미지 업로드 (있으면)
-    const imagePath = imagePathBySection.get(i);
-    if (imagePath) {
+    // 이미지 업로드 (있으면, 슬롯당 여러 장 가능)
+    for (const imagePath of imagePathsBySection.get(i) || []) {
       console.log(`   [${i + 1}] 🖼️ 이미지 업로드...`);
       const success = await uploadOneImage(page, imagePath);
       if (success) {
@@ -7377,7 +7625,12 @@ async function step5and6_uploadAndWrite(
     // 텍스트 섹션 입력 (있으면)
     if (i < mainSections.length) {
       console.log(`   [${i + 1}] ✏️ 텍스트 입력 (${mainSections[i].length}자)`);
-      await inputTextSection(page, mainSections[i], { useSectionHeading });
+      const slot = compositionSections?.[i];
+      await inputTextSection(page, mainSections[i], {
+        useSectionHeading: slot ? slot.headerFormat !== "none" && useSectionHeading : useSectionHeading,
+        insertDividerAboveHeading: slot ? slot.dividerBefore && useSectionHeading : undefined,
+        headerFormat: slot?.headerFormat,
+      });
       await page.waitForTimeout(300);
     }
   }
@@ -9154,6 +9407,64 @@ function parseRuntimePublishOptions(argv: string[]): RuntimePublishOptions {
 // ============================================
 // 메인 실행
 // ============================================
+/**
+ * 초안 수정 모드: 저장된 v2 패키지의 스펙/초안에 사용자 지시를 반영해 지정 섹션만 다시 쓴다.
+ * 재스크랩·전체 재생성 없이 패키지를 갱신하고 result.json 을 남긴다.
+ */
+async function runPreparedPostRevision(
+  linkId: string,
+  connectKind: "SHOPPING" | "TRAVEL",
+  brandLink: string,
+  requestPath: string,
+): Promise<void> {
+  const outputDir = process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim();
+  if (!outputDir) throw new Error("BRANDLINK_PREPARE_OUTPUT_DIR 이 필요합니다.");
+  const request = JSON.parse(fs.readFileSync(requestPath, "utf8")) as { instructions?: unknown; sectionIndexes?: unknown };
+  const instructions = typeof request.instructions === "string" ? request.instructions.trim() : "";
+  if (!instructions) throw new Error("수정 지시가 비어 있습니다.");
+  const sectionIndexes = Array.isArray(request.sectionIndexes)
+    ? request.sectionIndexes.filter((value): value is number => Number.isInteger(value))
+    : [];
+  const prepared = loadPreparedBrandLinkPostOverride();
+  if (!prepared?.spec || !prepared.draft) {
+    throw new Error("이 초안은 스펙 정보가 없어 부분 수정을 지원하지 않습니다. 초안을 다시 생성하세요.");
+  }
+  console.log(`\n✏️ 초안 수정 모드: ${instructions.slice(0, 80)}${sectionIndexes.length ? ` (섹션 ${sectionIndexes.join(", ")})` : ""}`);
+  const result = await reviseAssembledPost({
+    spec: prepared.spec,
+    draft: prepared.draft,
+    instructions,
+    sectionIndexes,
+    brandLink,
+    options: { quotationHeaders: NAVER_EDITOR_QUOTATION_ENABLED },
+  });
+  for (const note of result.notes) console.log(`   · ${note}`);
+  console.log(`   🧪 검증: ${result.validation.summary}`);
+  const post: GeneratedPostPreview = {
+    title: result.title,
+    sections: result.sections,
+    hashtags: result.hashtags,
+    rawResponse: "spec-first:revise",
+    assembled: result,
+    notes: result.notes,
+  };
+  const manifestPath = writePreparedBrandPostPackage({
+    outputDir: path.resolve(outputDir),
+    brandLinkId: linkId,
+    connectKind,
+    post,
+    imagePaths: [prepared.heroImagePath, ...result.bodyImagePaths],
+  });
+  writePrepareResult(path.resolve(outputDir), {
+    ok: result.validation.canPublish,
+    code: result.validation.canPublish ? "OK" : "CONTENT_BLOCKED",
+    message: result.validation.summary,
+    readiness: { status: result.validation.status, score: result.validation.score, summary: result.validation.summary, repairTargets: result.validation.repair.targets },
+  });
+  console.log(`   📦 수정된 초안 패키지 저장: ${manifestPath}`);
+  await prisma.brandLink.update({ where: { id: linkId }, data: { errorMessage: `초안 수정 완료 (${result.validation.status})` } });
+}
+
 async function main() {
   const linkId = process.argv[2];
   const runtimePublishOptions = parseRuntimePublishOptions(process.argv.slice(3));
@@ -9176,8 +9487,10 @@ async function main() {
   console.log("🤖 심플 에이전트 시작");
   console.log("=".repeat(50));
   
-  // 세션 확인
-  if (!fs.existsSync(SESSION_FILE)) {
+  const reviseRequestPath = process.env.BRANDLINK_REVISE_REQUEST?.trim() || "";
+
+  // 세션 확인 (초안 수정 모드는 네이버 세션이 필요 없다)
+  if (!reviseRequestPath && !fs.existsSync(SESSION_FILE)) {
     console.error("❌ 네이버 로그인 세션이 없습니다. npm run login 실행하세요.");
     process.exit(1);
   }
@@ -9187,6 +9500,11 @@ async function main() {
   if (!link) {
     console.error("❌ 링크를 찾을 수 없습니다.");
     process.exit(1);
+  }
+
+  if (reviseRequestPath) {
+    await runPreparedPostRevision(linkId, link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING", link.url, reviseRequestPath);
+    return;
   }
   console.log(`\n📎 URL: ${link.url}`);
   console.log(`📂 게시판 번호: ${link.categoryNo || "기본"}`);
@@ -9324,29 +9642,8 @@ async function main() {
     console.log("-".repeat(40));
     
     const preparedPostOverride = loadPreparedBrandLinkPostOverride();
-    setStage(preparedPostOverride ? "STEP2 준비된 원고 불러오기" : "STEP2 SEO 글 생성");
-    // 승인된 준비 원고가 있으면 재생성하지 않고 그대로 사용한다.
-    const post = preparedPostOverride?.post ?? await step2_generatePost(
-      product,
-      link.url,
-      link.id,
-      link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING"
-    );
-    if (preparedPostOverride) {
-      console.log(`   ✅ 승인 원고 적용: ${post.title}`);
-      console.log(`   ✅ 승인 이미지 적용: ${1 + preparedPostOverride.bodyImagePaths.length}장`);
-    }
-
-    setStage("STEP2.5 대표 썸네일 생성");
-    const generatedThumbnail: GeneratedProductThumbnail | null = preparedPostOverride
-      ? { path: preparedPostOverride.heroImagePath, source: "codex-imagegen" }
-      : await generateTopTextCutoutThumbnail(
-          product,
-          post.title,
-          link.id,
-          link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
-        );
-    const generatedThumbnailPath = generatedThumbnail?.path || null;
+    const connectKindValue: "SHOPPING" | "TRAVEL" = link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING";
+    // 여행 일정 요약 카드는 글보다 먼저 만들어 이미지 플랜의 입력이 되게 한다.
     const travelEditorialCardPath =
       link.connectKind === "TRAVEL" && !preparedPostOverride
         ? await generateTravelEditorialSummaryCard({
@@ -9363,20 +9660,72 @@ async function main() {
     if (travelEditorialCardPath) {
       console.log(`   ✅ 여행 일정 요약 카드 생성: ${path.basename(travelEditorialCardPath)}`);
     }
-    const collectedImagePaths = Array.from(new Set(preparedPostOverride
-      ? [preparedPostOverride.heroImagePath, ...preparedPostOverride.bodyImagePaths]
-      : [
-          ...(generatedThumbnailPath ? [generatedThumbnailPath] : []),
-          ...(travelEditorialCardPath ? [travelEditorialCardPath] : []),
-          ...(product.representativeImagePath ? [product.representativeImagePath] : []),
-          ...product.imagePaths,
-        ]));
-    const uploadImagePaths = await buildBlogUploadImagePaths({
-      imagePaths: collectedImagePaths,
-      generatedThumbnailPath,
-      representativeImagePath: product.representativeImagePath,
-      editorialImagePath: travelEditorialCardPath,
-    });
+    const specImageCandidates: ImageCandidateInput[] = [
+      ...(product.representativeImagePath
+        ? [{ path: product.representativeImagePath, kind: "hero" as const, score: 1000 }]
+        : []),
+      ...(travelEditorialCardPath ? [{ path: travelEditorialCardPath, kind: "card" as const, score: 900 }] : []),
+      ...product.imagePaths.map((imagePath, index) => ({
+        path: imagePath,
+        kind: (path.basename(imagePath).includes("_detail_crop_") ? "crop" : "source") as ImageCandidateInput["kind"],
+        score: 500 - index,
+      })),
+    ];
+    setStage(preparedPostOverride ? "STEP2 준비된 원고 불러오기" : "STEP2 SEO 글 생성");
+    // 승인된 준비 원고가 있으면 재생성하지 않고 그대로 사용한다.
+    const post = preparedPostOverride?.post ?? await step2_generatePost(
+      product,
+      link.url,
+      link.id,
+      connectKindValue,
+      { imageCandidates: specImageCandidates, tempDir: TEMP_PATH, memo: process.env.BRANDLINK_DRAFT_MEMO?.trim() || null }
+    );
+    if (preparedPostOverride) {
+      console.log(`   ✅ 승인 원고 적용: ${post.title}`);
+      console.log(`   ✅ 승인 이미지 적용: ${1 + preparedPostOverride.bodyImagePaths.length}장`);
+    }
+    const assembled: AssembledPost | null = post.assembled ?? null;
+
+    setStage("STEP2.5 대표 썸네일 생성");
+    const generatedThumbnail: GeneratedProductThumbnail | null = preparedPostOverride
+      ? { path: preparedPostOverride.heroImagePath, source: "codex-imagegen" }
+      : await generateTopTextCutoutThumbnail(
+          product,
+          post.title,
+          link.id,
+          link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
+        );
+    const generatedThumbnailPath = generatedThumbnail?.path || null;
+    let uploadImagePaths: string[];
+    let collectedImagePaths: string[];
+    if (assembled) {
+      // Spec-first: 슬롯이 확정한 이미지 목록을 그대로 쓴다. 첫 장(hero)만 생성 썸네일로 교체한다.
+      const heroPath = generatedThumbnailPath || assembled.heroImagePath;
+      collectedImagePaths = [...(heroPath ? [heroPath] : []), ...assembled.bodyImagePaths];
+      const seenUpload = new Set<string>();
+      uploadImagePaths = collectedImagePaths.filter((imagePath) => {
+        if (!imagePath || !fs.existsSync(imagePath)) return false;
+        const resolved = path.resolve(imagePath);
+        if (seenUpload.has(resolved)) return false;
+        seenUpload.add(resolved);
+        return true;
+      });
+    } else {
+      collectedImagePaths = Array.from(new Set(preparedPostOverride
+        ? [preparedPostOverride.heroImagePath, ...preparedPostOverride.bodyImagePaths]
+        : [
+            ...(generatedThumbnailPath ? [generatedThumbnailPath] : []),
+            ...(travelEditorialCardPath ? [travelEditorialCardPath] : []),
+            ...(product.representativeImagePath ? [product.representativeImagePath] : []),
+            ...product.imagePaths,
+          ]));
+      uploadImagePaths = await buildBlogUploadImagePaths({
+        imagePaths: collectedImagePaths,
+        generatedThumbnailPath,
+        representativeImagePath: product.representativeImagePath,
+        editorialImagePath: travelEditorialCardPath,
+      });
+    }
     product.imagePaths = uploadImagePaths;
     if (generatedThumbnailPath) {
       console.log(
@@ -9395,7 +9744,19 @@ async function main() {
     }
 
     let contentReadiness: BrandLinkContentReadiness | null = null;
-    if (BRANDLINK_CONTENT_READINESS_ENABLED) {
+    if (assembled) {
+      const validation = assembled.validation;
+      console.log(`   🧪 스펙 검증 게이트: ${validation.summary}`);
+      for (const signal of validation.signals.filter((item) => item.status !== "pass")) {
+        console.log(`      - ${signal.status.toUpperCase()} ${signal.label}${signal.detail ? ` (${signal.detail})` : ""}`);
+      }
+      if (validation.repair.targets.length > 0) {
+        console.log(`      · 남은 수리 대상 ${validation.repair.targets.length}건: ${validation.repair.targets.slice(0, 4).map((item) => `${item.sectionIndex ?? "제목"}:${item.code}`).join(", ")}`);
+      }
+      if (!validation.canPublish) {
+        throw new Error(validation.summary);
+      }
+    } else if (BRANDLINK_CONTENT_READINESS_ENABLED) {
       contentReadiness = getBrandLinkContentReadiness({
         productName: product.name,
         title: post.title,
@@ -9431,6 +9792,14 @@ async function main() {
         imagePaths: product.imagePaths,
       });
       console.log(`   📦 승인 대기 초안 패키지 저장: ${manifestPath}`);
+      writePrepareResult(path.resolve(prepareOutputDir), {
+        ok: true,
+        code: "OK",
+        message: assembled ? assembled.validation.summary : "초안 생성 완료",
+        readiness: assembled
+          ? { status: assembled.validation.status, score: assembled.validation.score, summary: assembled.validation.summary, repairTargets: assembled.validation.repair.targets }
+          : null,
+      });
     }
     if (DEBUG_SAVE_GENERATED_POST || DRY_RUN_GENERATE_ONLY) {
       previewPath = saveGeneratedPostPreview(linkId, post, product, contentReadiness);
@@ -9468,6 +9837,7 @@ async function main() {
       shoppingConnectProductFinalUrl: product.finalUrl || link.finalUrl,
       requiredFirstImagePath: generatedThumbnailPath,
       connectKind: link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
+      composition: assembled?.composition ?? preparedPostOverride?.composition ?? null,
     });
     
     setStage(runtimePublishOptions.mode === "schedule" ? "STEP7 예약 발행" : "STEP7 즉시 발행");
@@ -9622,6 +9992,15 @@ async function main() {
       where: { id: linkId },
       data: { status: "FAILED", errorMessage: message }
     });
+    // 초안 생성/수정 모드라면 원인을 코드와 함께 패키지 디렉터리에 남긴다(라우트·MCP가 읽음).
+    const prepareOutputDirOnError = process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim();
+    if (prepareOutputDirOnError) {
+      writePrepareResult(path.resolve(prepareOutputDirOnError), {
+        ok: false,
+        code: classifyFailureCode(getErrorMessage(error)),
+        message,
+      });
+    }
     // 호출 API가 성공(0)으로 오인해 뒤늦게 "manifest 없음"만 표시하지 않도록
     // 실제 실패를 프로세스 종료 코드로 전달한다.
     process.exitCode = 1;

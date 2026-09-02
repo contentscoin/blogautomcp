@@ -119,7 +119,7 @@ JSON 형식으로 반환:
         });
         return json;
     } catch (e: unknown) {
-        log.warn(`이미지 분석 실패: ${image.filename}`, e);
+        log.warn(`이미지 분석 실패: ${image.filename}`, e instanceof Error ? e : { error: String(e) });
         return {
             description: "이미지 분석 실패",
             tags: [],
@@ -198,7 +198,7 @@ JSON 형식으로 반환:
         try {
             text = await openaiChatText({ user: prompt, json: true, temperature: 0.7, maxOutputTokens: 8192 });
         } catch (e: unknown) {
-            log.error("OpenAI 전체 스토리 생성 실패", e);
+            log.error("OpenAI 전체 스토리 생성 실패", e instanceof Error ? e : { error: String(e) });
             throw new Error("이미지 기반 스토리 생성 실패");
         }
     }
