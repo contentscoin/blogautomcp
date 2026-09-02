@@ -58,15 +58,26 @@ let revoked = false;
 let pairCalls = 0;
 let expectedToken = "";
 const claimBodies = [];
+const pairBodies = [];
 
 const mockServer = createServer(async (request, response) => {
   if (request.method === "POST" && request.url === "/api/device/pair") {
+    let raw = "";
+    for await (const chunk of request) raw += chunk;
+    const body = raw ? JSON.parse(raw) : {};
+    pairBodies.push(body);
+    const normalizedCode = typeof body.pairCode === "string" ? body.pairCode.toUpperCase().replace(/[\s-]/g, "") : "";
+    if (body.pairCode && normalizedCode !== "K7PM3XQ2") {
+      response.writeHead(401, { "content-type": "application/json" });
+      response.end(JSON.stringify({ success: false, error: { code: "INVALID_PAIR_CODE", message: "연결 코드가 틀렸거나 만료되었습니다." } }));
+      return;
+    }
     pairCalls += 1;
     expectedToken = `token-e2e-${pairCalls}`;
-    response.writeHead(200, { "content-type": "application/json" });
+    response.writeHead(201, { "content-type": "application/json" });
     response.end(JSON.stringify({
       success: true,
-      data: { deviceId: `device-e2e-${pairCalls}`, deviceToken: expectedToken },
+      data: { deviceId: `device-e2e-${pairCalls}`, deviceToken: expectedToken, method: body.pairCode ? "pair-code" : "mcp-url" },
     }));
     return;
   }
@@ -163,6 +174,44 @@ try {
   assert.equal(reconnectedPoll.response.status, 200, JSON.stringify(reconnectedPoll.payload));
   assert.equal(reconnectedPoll.payload.data.configured, true);
 
+  // 페어 코드 경로(딥링크/코드 입력): 허용되지 않은 사이트는 네트워크 요청 없이 거부한다.
+  const pairCallsBefore = pairCalls;
+  const foreignSite = await json(await fetch(`${appOrigin}/api/remote-agent`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: appOrigin },
+    body: JSON.stringify({ pairCode: "K7PM3XQ2", siteUrl: "https://evil.example.com" }),
+  }));
+  assert.equal(foreignSite.response.status, 422, JSON.stringify(foreignSite.payload));
+  assert.equal(pairCalls, pairCallsBefore);
+
+  const wrongCode = await json(await fetch(`${appOrigin}/api/remote-agent`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: appOrigin },
+    body: JSON.stringify({ pairCode: "AAAABBBB", siteUrl: `http://127.0.0.1:${mockPort}` }),
+  }));
+  assert.equal(wrongCode.response.status, 401, JSON.stringify(wrongCode.payload));
+  assert.equal(wrongCode.payload.code, "INVALID_PAIR_CODE");
+
+  const codePaired = await json(await fetch(`${appOrigin}/api/remote-agent`, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: appOrigin },
+    body: JSON.stringify({ pairCode: "k7pm-3xq2", siteUrl: `http://127.0.0.1:${mockPort}`, deviceName: "E2E PC by code" }),
+  }));
+  assert.equal(codePaired.response.status, 200, JSON.stringify(codePaired.payload));
+  assert.equal(codePaired.payload.data.method, "pair-code");
+  assert.equal(codePaired.payload.data.deviceId, "device-e2e-3");
+  assert.equal(pairBodies.at(-1)?.pairCode, "k7pm-3xq2");
+  assert.equal(pairBodies.at(-1)?.deviceName, "E2E PC by code");
+  assert.equal(pairBodies.at(-1)?.mcpUrl, undefined);
+
+  const codePoll = await json(await fetch(`${appOrigin}/api/remote-agent/poll`, {
+    method: "POST",
+    headers: { origin: appOrigin },
+  }));
+  assert.equal(codePoll.response.status, 200, JSON.stringify(codePoll.payload));
+  assert.equal(codePoll.payload.data.configured, true);
+  assert.equal(typeof claimBodies.at(-1)?.status?.naverSessionPresent, "boolean");
+
   revoked = true;
   const revokedPoll = await json(await fetch(`${appOrigin}/api/remote-agent/poll`, {
     method: "POST",
@@ -183,7 +232,7 @@ try {
   assert.equal(envFile.includes("REMOTE_DEVICE_ID"), false);
   assert.equal(envFile.includes("REMOTE_SITE_URL"), false);
 
-  console.log("PASS: unpaired lock -> MCP pair -> live MCP reconnect -> revoked re-lock");
+  console.log("PASS: unpaired lock -> MCP pair -> live MCP reconnect -> pair-code (allowlist/invalid/valid) -> revoked re-lock");
 } finally {
   child.kill();
   await new Promise((resolve) => mockServer.close(resolve));

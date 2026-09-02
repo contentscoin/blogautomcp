@@ -11,7 +11,6 @@ import * as fs from "fs";
 import * as path from "path";
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import type { Page } from "playwright";
 import {
     ReviewInput,
@@ -20,13 +19,13 @@ import {
     generateReviewHashtags,
 } from "./lib/review-prompt";
 import { createTaskLogger } from "./lib/logger";
+import { openaiChatText } from "./lib/openai-text";
 import { getNaverSessionFile } from "./lib/app-paths";
 
 const log = createTaskLogger("ReviewAgent");
 
 chromium.use(StealthPlugin());
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 const SESSION_FILE = getNaverSessionFile();
 const BLOG_ID = process.env.NAVER_BLOG_ID || "";
 
@@ -128,13 +127,11 @@ async function generateReviewContent(
 ): Promise<ReviewOutput> {
     log.info("리뷰 콘텐츠 생성 시작");
 
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
     const prompt = buildReviewPrompt(input, styleGuide);
 
     log.debug("프롬프트 생성 완료", { length: prompt.length });
 
-    const response = await model.generateContent(prompt);
-    const text = response.response.text();
+    const text = await openaiChatText({ user: prompt, json: true, temperature: 0.7, maxOutputTokens: 8192 });
 
     try {
         const json = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || "{}") as Partial<ReviewOutput>;

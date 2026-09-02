@@ -10,15 +10,15 @@
 
 제품 썸네일은 한 번에 완성형으로 만든다.
 
-GPT Image 2.0 또는 Codex 이미지 생성 프롬프트 안에 아래 요소를 모두 포함한다.
+gpt-image-2 생성 프롬프트 안에 아래 요소를 모두 포함한다 (구현: `scripts/lib/thumbnail-gen/prompt.ts`).
 
 - 실제 상품 또는 상품과 직접 연결된 실사 장면
 - 실제 제품명. `productName`을 임의로 요약하거나 다른 상품명으로 바꾸지 않는다.
 - 큰 한글 메인 제목
 - 상단 배지
 - 하단 CTA
-- 흰색 내부 테두리
-- 좌우 분할 또는 제품 중심 레이아웃
+- 가장자리 10% 세이프존 (네이버 1:1 크롭 대응)
+- 상단 헤드라인 + 하단 제품/장면 중심 레이아웃 (1024×1024 정사각)
 
 스마트폰/쇼핑 화면/리뷰 카드 목업은 기본 필수 요소가 아니다.
 
@@ -482,17 +482,18 @@ Optional info card text: "사용감 체크", "옵션 확인", "후기 보기"
 
 ## 12. 실제 자동화 반영 및 삽입 규칙
 
-현재 제품 포스팅 자동화는 아래 코드 경로로 이 지침을 적용한다.
+현재 제품·여행 포스팅 자동화는 아래 코드 경로로 이 지침을 적용한다 (2026-09-02 기준).
 
-- 생성 모듈: `scripts/lib/product-thumbnail.ts`
-- 호출 위치: `scripts/simple-agent.ts`의 `STEP2.5 대표 썸네일 생성`
-- 기본 처리 방식: 검증된 판매페이지 대표 이미지를 OAuth 기반 ChatGPT/GPT Image 생성 프롬프트에 레퍼런스로 첨부하고, 이 문서의 완성형 프롬프트 규칙에 따라 제품 장면, 정확한 제품명, 메인 문구, 배지, CTA가 한 이미지 안에서 함께 생성되도록 한다.
-- Codex imagegen fallback: OAuth/ChatGPT 이미지 생성이 `GPT 상호작용 접근 불가`, 로그인 요구, 이미지 산출물 없음으로 실패하면 Codex 내장 imagegen을 사용한다. 자동화 스크립트는 `PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_PATH`에 지정된 Codex imagegen 결과 파일을 첫 썸네일로 복사해 사용한다. 경로가 비어 있으면 `logs/codex-imagegen-requests/`에 Codex imagegen 요청 MD를 남긴다.
-- 후합성 금지: `sharp`로 제품명 라벨, 배지, CTA를 나중에 얹는 방식은 기본 경로가 아니다.
-- 예외 처리: `PRODUCT_THUMBNAIL_COMPOSITE_FALLBACK_ENABLED=true`가 명시된 경우에만 후합성 fallback을 허용한다.
+- 생성 모듈: `scripts/lib/thumbnail-gen/` — `prompt.ts`(§7~§9 프롬프트, 1:1 레이아웃, 무드 프리셋), `qc.ts`(§10 배점 OpenAI 비전 채점), `corrective.ts`(§11 교정 프롬프트), `generate.ts`(생성→QC→교정 재생성 루프)
+- 호출 위치: `scripts/simple-agent.ts`의 `STEP2.5 대표 썸네일 생성` (`generateTopTextCutoutThumbnail`) 과 썸네일 스튜디오 `POST /api/brandlinks/{id}/thumbnail`
+- 기본 처리 방식: 판매페이지 대표 이미지(여행은 대표 여행 사진)를 gpt-image-2 `images/edits` 레퍼런스로 첨부하고, 제품 장면·정확한 제품명·큰 한글 헤드라인·서브라인·배지가 한 이미지 안에서 함께 생성되도록 한다. 크기는 네이버 1:1 노출에 맞춘 `1024x1024` 기본.
+- QC: 생성 결과를 OpenAI 비전(`OPENAI_VISION_MODEL`, 기본 `gpt-4o-mini`)이 §10 배점표로 채점한다. `PRODUCT_THUMBNAIL_QC_MIN_SCORE`(기본 95) 미만이거나 자동 탈락 조건(제품 왜곡·제품명 누락·한글 오탈자·글자 잘림·금지 정보·목업)이 있으면 §11 교정 프롬프트를 붙여 재생성한다. 최대 `PRODUCT_THUMBNAIL_MAX_ATTEMPTS`(기본 4)회.
+- 강등: 최대 시도 안에 통과본이 없으면 오탈자 썸네일을 내보내지 않고 로컬 합성(`product-image-lock.ts` / `travel-thumbnail.ts`)으로 강등한다. 이 경우 로그에 사유를 남긴다.
+- 카피: 헤드라인은 12자 안팎으로 압축해 렌더한다(`condenseHeadline`). 생성형 한글은 짧을수록 정확하다.
 - 제품명 기준: DB/스크랩에서 확보한 `product.name`을 `productNameLabel`로 그대로 그린다.
 - 목업 기준: 폰, 노트북, 쇼핑 화면 목업은 기본 생성하지 않는다.
-- 실패 처리: 판매페이지 대표 이미지를 확정하지 못하거나 썸네일 생성에 실패하면 썸네일은 만들지 않고 포스팅은 본문 이미지 순서로 계속 진행하되, 로그에 실패 사유를 남긴다.
+- 실패 처리: 대표 이미지를 확정하지 못하면 썸네일은 만들지 않고 포스팅은 본문 이미지 순서로 계속 진행한다.
+- Codex imagegen / ChatGPT 브라우저 경로는 설치형 앱에서 사용하지 않는다.
 
 제품 포스팅 자동화에서 썸네일이 생성되면 이미지 우선순위는 아래와 같다.
 

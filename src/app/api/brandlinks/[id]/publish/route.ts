@@ -226,10 +226,9 @@ export async function POST(
       );
     }
 
-    const agentAiProvider = (process.env.AI_PROVIDER || "openai").toLowerCase();
-    const hasProviderKey = agentAiProvider === "gemini"
-      ? Boolean((process.env.GEMINI_API_KEY || process.env.GOOGLE_GENERATIVE_AI_API_KEY || "").trim())
-      : Boolean(process.env.OPENAI_API_KEY?.trim());
+    // Gemini 는 제거됐다. openai(기본) 또는 codex 만 유효하며 키 확인은 OpenAI 키 기준이다.
+    const agentAiProvider = (process.env.AI_PROVIDER || "openai").toLowerCase() === "codex" ? "codex" : "openai";
+    const hasProviderKey = Boolean(process.env.OPENAI_API_KEY?.trim());
     const useBrowserChatGpt = !preparedPackage && !hasProviderKey && isChatGptBrowserAutomationEnabled();
     if (!preparedPackage && !hasProviderKey && !useBrowserChatGpt) {
       return NextResponse.json(

@@ -128,9 +128,11 @@ async function main() {
     "ChatGPT 제출 원고는 API 생성 및 API 기반 재작성 경로를 건너뛰어야 합니다.",
   );
   assert.equal(
-    sitesMcpSource.includes("name: 'post_submit_draft'") &&
-      sitesMcpSource.includes("post_create_draft: 'POST_PREPARE_DRAFT'") &&
-      sitesMcpSource.includes("post_submit_draft: 'POST_SUBMIT_DRAFT'"),
+    sitesMcpSource.includes("name: 'post_prepare_draft'") &&
+      sitesMcpSource.includes("name: 'post_submit_draft'") &&
+      sitesMcpSource.includes("jobType: 'POST_PREPARE_DRAFT'") &&
+      sitesMcpSource.includes("jobType: 'POST_SUBMIT_DRAFT'") &&
+      sitesMcpSource.includes("jobType: 'POST_CREATE_DRAFT'"),
     true,
     "Sites MCP가 2단계 ChatGPT 원고 계약을 광고하고 큐에 전달해야 합니다.",
   );
@@ -441,7 +443,14 @@ async function main() {
     "개별 재생성은 해당 이미지 키를 새 파일로 교체해야 합니다.",
   );
   assert.throws(() => store.getBrandPostPackageDir("../../escape"));
-  console.log(JSON.stringify({ ok: true, approved: true, v2QualityGate: true, imagePreviewAndRegeneration: true, pathTraversalBlocked: true }));
+
+  // 초안 프로세스 결과 파일(result.json): 라우트가 로그 정규식 대신 코드/메시지를 읽는다.
+  fs.writeFileSync(store.getBrandPostPackageResultPath(v2Id), JSON.stringify({ ok: false, code: "CONTENT_BLOCKED", message: "이미지 부족" }));
+  assert.equal(store.readBrandPostPackageResult(v2Id)?.code, "CONTENT_BLOCKED");
+  const previewWithOutline = store.packagePreview(regenerated);
+  assert.ok(Array.isArray(previewWithOutline.sectionOutline) && previewWithOutline.sectionOutline.length > 0, "v2 미리보기는 섹션 아웃라인을 제공한다");
+  assert.ok(previewWithOutline.readiness && typeof previewWithOutline.readiness.status === "string", "v2 미리보기는 readiness 요약을 제공한다");
+  console.log(JSON.stringify({ ok: true, approved: true, v2QualityGate: true, imagePreviewAndRegeneration: true, pathTraversalBlocked: true, resultFile: true }));
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1; });

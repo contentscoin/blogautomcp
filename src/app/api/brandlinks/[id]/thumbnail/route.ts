@@ -4,14 +4,20 @@ import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { requireAdminApiKey } from "@/lib/api-auth";
-import {
-  buildProductThumbnailCopy,
-} from "../../../../../../scripts/lib/product-thumbnail";
+import { buildProductThumbnailCopy } from "../../../../../../scripts/lib/product-thumbnail";
 import { buildTravelThumbnailCopy } from "../../../../../../scripts/lib/travel-content";
 import { getProductThumbnailStorageDir } from "../../../../../../scripts/lib/app-paths";
 import { normalizeCandidateImageUrl } from "../../../../../../scripts/lib/product-image-selection";
-import { createLockedProductThumbnail, createOriginalProductPhotoThumbnail, type ShoppingThumbnailStyle } from "../../../../../../scripts/lib/product-image-lock";
-import { createTravelEditorialThumbnail, type TravelThumbnailStyle } from "../../../../../../scripts/lib/travel-thumbnail";
+import { createLockedProductThumbnail, createOriginalProductPhotoThumbnail } from "../../../../../../scripts/lib/product-image-lock";
+import { createTravelEditorialThumbnail } from "../../../../../../scripts/lib/travel-thumbnail";
+import {
+  generateThumbnail,
+  isGenerativeThumbnailAvailable,
+  listThumbnailMoods,
+  maxThumbnailAttempts,
+  qcMinScore,
+  type ThumbnailQcReport,
+} from "../../../../../../scripts/lib/thumbnail-gen";
 import {
   normalizeProductThumbnailCopy,
   parseProductThumbnailSettings,
@@ -71,6 +77,15 @@ async function downloadProductImage(rawUrl: string, destination: string): Promis
   }
 }
 
+async function previewDataUrlFor(filePath: string | null | undefined): Promise<string | null> {
+  if (!filePath || !fs.existsSync(filePath)) return null;
+  const stat = await fs.promises.stat(filePath).catch(() => null);
+  if (!stat?.isFile() || stat.size > 8 * 1024 * 1024) return null;
+  const bytes = await fs.promises.readFile(filePath);
+  const mime = path.extname(filePath).toLowerCase() === ".png" ? "png" : "jpeg";
+  return `data:image/${mime};base64,${bytes.toString("base64")}`;
+}
+
 async function getPayload(id: string) {
   const link = await prisma.brandLink.findUnique({ where: { id } });
   if (!link) return null;
@@ -78,29 +93,26 @@ async function getPayload(id: string) {
   const setting = await prisma.setting.findUnique({ where: { key: productThumbnailSettingKey(id) } });
   const saved = parseProductThumbnailSettings(setting?.value);
   const isTravel = link.connectKind === "TRAVEL";
+  const connectKind = isTravel ? ("TRAVEL" as const) : ("SHOPPING" as const);
   const suggestedCopy = isTravel
     ? buildTravelThumbnailCopy(link.productName || "여행 상품")
     : buildProductThumbnailCopy(
         `${link.productName || "상품"} 구매 전 확인`,
         link.productName || "추천 상품",
       );
-  let previewDataUrl: string | null = null;
-  if (saved?.generatedPath && fs.existsSync(saved.generatedPath)) {
-    const stat = await fs.promises.stat(saved.generatedPath).catch(() => null);
-    if (stat?.isFile() && stat.size <= 8 * 1024 * 1024) {
-      const bytes = await fs.promises.readFile(saved.generatedPath);
-      const mime = path.extname(saved.generatedPath).toLowerCase() === ".png" ? "png" : "jpeg";
-      previewDataUrl = `data:image/${mime};base64,${bytes.toString("base64")}`;
-    }
-  }
   return {
     id: link.id,
     productName: link.productName || "추천 상품",
-    connectKind: isTravel ? ("TRAVEL" as const) : ("SHOPPING" as const),
+    connectKind,
     imageUrls,
     suggestedCopy,
     saved,
-    previewDataUrl,
+    previewDataUrl: await previewDataUrlFor(saved?.generatedPath),
+    engine: isGenerativeThumbnailAvailable() ? ("gpt-image" as const) : ("local" as const),
+    moods: listThumbnailMoods(connectKind),
+    qcMinScore: qcMinScore(),
+    maxAttempts: maxThumbnailAttempts(),
+    description: link.productName || "",
   };
 }
 
@@ -132,54 +144,88 @@ export async function POST(
       sourceImageUrl?: unknown;
       copy?: Record<string, unknown>;
       save?: unknown;
+      mood?: unknown;
       style?: unknown;
+      engine?: unknown;
     };
     const sourceImageUrl = typeof body.sourceImageUrl === "string" ? body.sourceImageUrl.trim() : "";
     if (!payload.imageUrls.includes(sourceImageUrl)) {
       return NextResponse.json({ success: false, error: "이 상품에서 수집된 제품 사진을 선택하세요." }, { status: 422 });
     }
     const copy = normalizeProductThumbnailCopy(body.copy || {}, payload.productName);
-    const requestedStyle = typeof body.style === "string" ? body.style : "";
-    const style = payload.connectKind === "SHOPPING"
-      ? (["shopping-clean", "shopping-bold", "shopping-soft"].includes(requestedStyle) ? requestedStyle : "shopping-clean") as ShoppingThumbnailStyle
-      : (["travel-editorial", "travel-postcard", "travel-route"].includes(requestedStyle) ? requestedStyle : "travel-editorial") as TravelThumbnailStyle;
+    const requestedMood = typeof body.mood === "string" ? body.mood : typeof body.style === "string" ? body.style : "";
+    const mood = payload.moods.some((item) => item.id === requestedMood) ? requestedMood : payload.moods[0].id;
+    const wantLocal = body.engine === "local";
     const storageDir = getProductThumbnailStorageDir();
     await fs.promises.mkdir(storageDir, { recursive: true });
     const runId = randomUUID();
     const sourcePath = path.join(storageDir, `${id}-${runId}.source`);
     await downloadProductImage(sourceImageUrl, sourcePath);
-    let result: { outputPath: string } | null;
+
+    let outputPath: string | null = null;
+    let engine: "gpt-image" | "local" = "local";
+    let qc: ThumbnailQcReport | null = null;
+    let attempts = 0;
+    const logs: string[] = [];
     try {
-      if (payload.connectKind === "SHOPPING") {
-        const shoppingStyle = style as ShoppingThumbnailStyle;
-        result = await createLockedProductThumbnail({ sourcePath, outputDir: storageDir, productName: payload.productName, headline: copy.headline, subline: copy.subline, style: shoppingStyle })
-          .catch(() => createOriginalProductPhotoThumbnail({ sourcePath, outputDir: storageDir, productName: payload.productName, headline: copy.headline, subline: copy.subline, style: shoppingStyle }));
-      } else {
-        result = await createTravelEditorialThumbnail({ sourcePath, outputDir: storageDir, destination: payload.productName, headline: copy.headline, subline: copy.subline, badge: copy.badge, style: style as TravelThumbnailStyle });
+      if (!wantLocal && isGenerativeThumbnailAvailable()) {
+        const generated = await generateThumbnail({
+          kind: payload.connectKind,
+          productName: payload.productName,
+          description: payload.description,
+          copy,
+          moodId: mood,
+          referenceImagePath: sourcePath,
+          outputDir: storageDir,
+          onLog: (line) => logs.push(line),
+        });
+        if (generated) {
+          outputPath = generated.path;
+          engine = "gpt-image";
+          qc = generated.qc;
+          attempts = generated.attempts;
+        } else {
+          logs.push("gpt-image 결과가 QC 를 통과하지 못해 로컬 합성으로 강등합니다.");
+        }
+      }
+      if (!outputPath) {
+        if (payload.connectKind === "SHOPPING") {
+          const result = await createLockedProductThumbnail({ sourcePath, outputDir: storageDir, productName: payload.productName, headline: copy.headline, subline: copy.subline, style: "shopping-clean" })
+            .catch(() => createOriginalProductPhotoThumbnail({ sourcePath, outputDir: storageDir, productName: payload.productName, headline: copy.headline, subline: copy.subline, style: "shopping-clean" }));
+          outputPath = result.outputPath;
+        } else {
+          const result = await createTravelEditorialThumbnail({ sourcePath, outputDir: storageDir, destination: payload.productName, headline: copy.headline, subline: copy.subline, badge: copy.badge, style: "travel-editorial" });
+          outputPath = result.outputPath;
+        }
+        engine = "local";
       }
     } finally {
       await fs.promises.unlink(sourcePath).catch(() => undefined);
     }
-    if (!result || !fs.existsSync(result.outputPath)) throw new Error("완성 썸네일 파일을 만들지 못했습니다.");
+    if (!outputPath || !fs.existsSync(outputPath)) throw new Error("완성 썸네일 파일을 만들지 못했습니다.");
 
     const updatedAt = new Date().toISOString();
     if (body.save === true) {
+      const value = JSON.stringify({ version: 1, sourceImageUrl, generatedPath: outputPath, copy, style: mood, updatedAt });
       await prisma.setting.upsert({
         where: { key: productThumbnailSettingKey(id) },
-        update: { value: JSON.stringify({ version: 1, sourceImageUrl, generatedPath: result.outputPath, copy, style, updatedAt }) },
-        create: { key: productThumbnailSettingKey(id), value: JSON.stringify({ version: 1, sourceImageUrl, generatedPath: result.outputPath, copy, style, updatedAt }) },
+        update: { value },
+        create: { key: productThumbnailSettingKey(id), value },
       });
     }
-    const bytes = await fs.promises.readFile(result.outputPath);
     return NextResponse.json({
       success: true,
       data: {
         saved: body.save === true,
         sourceImageUrl,
         copy,
-        style,
-        outputPath: result.outputPath,
-        previewDataUrl: `data:image/${path.extname(result.outputPath).toLowerCase() === ".png" ? "png" : "jpeg"};base64,${bytes.toString("base64")}`,
+        mood,
+        engine,
+        qc,
+        attempts,
+        logs,
+        outputPath,
+        previewDataUrl: await previewDataUrlFor(outputPath),
         updatedAt,
       },
     });

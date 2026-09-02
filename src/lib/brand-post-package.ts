@@ -20,6 +20,26 @@ export interface BrandPostPackageImageAsset {
   provenance?: "ORIGINAL" | "LOCKED_PRODUCT" | "GENERATED_BACKGROUND" | "EDITORIAL_CARD";
 }
 
+/** Spec-first 파이프라인 검증 리포트 요약(매니페스트 specValidation / 미리보기 readiness). */
+export interface BrandPostPackageReadiness {
+  status: "READY" | "NEEDS_REVIEW" | "BLOCKED";
+  score: number;
+  summary: string;
+  signals: Array<{ key: string; label: string; status: "pass" | "warn" | "fail"; sectionIndex?: number; detail?: string }>;
+  repairTargets: Array<{ sectionIndex: number | null; code: string; reason: string; priority: string; instruction: string }>;
+  generationSource: string;
+  attempts: number;
+}
+
+/** 초안 생성 프로세스가 패키지 디렉터리에 남기는 결과(코드+메시지). 라우트가 로그 정규식 대신 이 파일로 원인을 읽는다. */
+export interface BrandPostPackageResult {
+  ok: boolean;
+  code: string;
+  message: string;
+  readiness?: unknown;
+  at?: string;
+}
+
 export interface BrandPostQualityRepairSummary {
   attempted: boolean;
   applied: boolean;
@@ -45,6 +65,11 @@ interface BrandPostPackageManifestBase {
   approvedAt: string | null;
   contentQuality?: BrandLinkContentReadiness | null;
   qualityRepair?: BrandPostQualityRepairSummary | null;
+  /** Spec-first 파이프라인 산출물(부분 수정에 필요). 미리보기에는 싣지 않는다. */
+  postSpec?: unknown;
+  specDraft?: unknown;
+  specValidation?: BrandPostPackageReadiness | null;
+  pipelineNotes?: string[] | null;
 }
 
 export interface BrandPostPackageManifestV1 extends BrandPostPackageManifestBase {
@@ -67,6 +92,59 @@ export interface BrandPostPackageManifestV2 extends BrandPostPackageManifestBase
 export type BrandPostPackageManifest =
   | BrandPostPackageManifestV1
   | BrandPostPackageManifestV2;
+
+export function getBrandPostPackageResultPath(brandLinkId: string): string {
+  return path.join(getBrandPostPackageDir(brandLinkId), "result.json");
+}
+
+export function readBrandPostPackageResult(brandLinkId: string): BrandPostPackageResult | null {
+  const resultPath = getBrandPostPackageResultPath(brandLinkId);
+  if (!fs.existsSync(resultPath)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(resultPath, "utf8")) as BrandPostPackageResult;
+  } catch {
+    return null;
+  }
+}
+
+/** contentQuality(발행 게이트)를 Spec-first 검증 리포트 형태로 요약한다(specValidation 이 없을 때). */
+function readinessFromContentQuality(
+  quality: BrandLinkContentReadiness | null | undefined,
+  generationSource: string,
+): BrandPostPackageReadiness | null {
+  if (!quality) return null;
+  const failing = quality.signals.filter((signal) => signal.status === "fail");
+  return {
+    status: quality.canPublish ? "READY" : "BLOCKED",
+    score: quality.score,
+    summary: quality.summary,
+    signals: quality.signals.map((signal) => ({ key: signal.key, label: signal.label, status: signal.status })),
+    repairTargets: failing.map((signal) => ({ sectionIndex: null, code: signal.key, reason: signal.label, priority: "P0", instruction: quality.reason || signal.label })),
+    generationSource,
+    attempts: 1,
+  };
+}
+
+/** contentQuality 가 없는 v2 패키지는 렌더 계약 품질 리포트로 readiness 를 요약한다. */
+function readinessFromQualityReport(
+  report: ResolvedPostDocumentV1["qualityReport"],
+  generationSource: string,
+): BrandPostPackageReadiness {
+  return {
+    status: report.canAutoPublish ? "READY" : "NEEDS_REVIEW",
+    score: report.score,
+    summary: report.canAutoPublish
+      ? `렌더 계약 품질 ${report.score}점 (자동 발행 가능)`
+      : `렌더 계약 품질 ${report.score}점 — ${report.blockers.join(" ") || report.warnings.join(" ")}`,
+    signals: [
+      ...report.blockers.map((blocker) => ({ key: "composition-blocker", label: blocker, status: "fail" as const })),
+      ...report.warnings.map((warning) => ({ key: "composition-warning", label: warning, status: "warn" as const })),
+    ],
+    repairTargets: report.blockers.map((blocker) => ({ sectionIndex: null, code: "COMPOSITION_QUALITY", reason: blocker, priority: "P0", instruction: blocker })),
+    generationSource,
+    attempts: 1,
+  };
+}
 
 export function getBrandPostPackageDir(brandLinkId: string): string {
   if (!/^[a-zA-Z0-9_-]{8,80}$/.test(brandLinkId)) {
@@ -225,7 +303,18 @@ export function packagePreview(manifest: BrandPostPackageManifest) {
         };
       })
     : [];
-  return { ...manifest, imageAssets, imageSlots, markdown, heroPreviewDataUrl };
+  // 스펙/초안 원본은 크고(MCP 결과 900KB 제한) 화면에 필요 없어 미리보기에서는 뺀다.
+  const { postSpec: _postSpec, specDraft: _specDraft, ...rest } = manifest;
+  void _postSpec;
+  void _specDraft;
+  const sectionOutline = manifest.version === "brand-post-package/v2"
+    ? manifest.composition.sections.map((section, index) => ({ index, id: section.id, title: section.title, chars: section.characterCount, images: section.imagePaths.length }))
+    : null;
+  const readiness =
+    manifest.specValidation ??
+    readinessFromContentQuality(manifest.contentQuality, manifest.generationSource || "AI") ??
+    (manifest.version === "brand-post-package/v2" ? readinessFromQualityReport(manifest.composition.qualityReport, manifest.generationSource || "AI") : null);
+  return { ...rest, imageAssets, imageSlots, markdown, heroPreviewDataUrl, sectionOutline, readiness, imageCount: 1 + manifest.bodyImagePaths.length };
 }
 
 function sha256File(filePath: string): string {

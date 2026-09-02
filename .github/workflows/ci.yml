@@ -50,6 +50,8 @@ jobs:
           npm run test:connect-detection
           npm run test:connect-store
           npm run test:title-rules
+          npm run test:post-spec
+          npm run test:thumbnail-gen
           npm run test:brand-post-package
           npm run test:brand-post-quality
           npm run test:product-detail-image
@@ -62,3 +64,29 @@ jobs:
       # 데스크톱 패키징(desktop:pack)이 쓰는 것과 같은 빌드 경로다.
       - name: Build
         run: npm run build
+
+  # 운영 사이트/MCP 서버(apps/sites, OpenAI Sites + Cloudflare D1). 예전에는 CI 커버리지가 없어
+  # MCP 라우트가 깨져도 PR 에서 드러나지 않았다.
+  sites:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/sites
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/sites/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        run: npx tsc --noEmit -p tsconfig.json
+
+      - name: Lint
+        run: npm run lint

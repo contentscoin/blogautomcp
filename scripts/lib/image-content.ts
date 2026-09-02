@@ -1,17 +1,15 @@
 /**
  * 이미지 기반 콘텐츠 생성 (멀티모달)
- * V4 Phase 9: Gemini Vision으로 이미지 분석 → 스토리 생성
+ * V4 Phase 9: OpenAI 비전으로 이미지 분석 → 스토리 생성
  */
 
 import "dotenv/config";
 import * as fs from "fs";
 import * as path from "path";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import { createTaskLogger } from "./logger";
+import { isOpenAiAvailable, openaiChatJson, openaiChatText } from "./openai-text";
 
 const log = createTaskLogger("ImageContent");
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
 interface ImageInfo {
     path: string;
@@ -87,13 +85,13 @@ export function loadImages(folderPath: string): ImageInfo[] {
 }
 
 /**
- * Gemini Vision으로 이미지 분석
+ * OpenAI 비전으로 이미지 분석
  */
 export async function analyzeImage(image: ImageInfo): Promise<ImageAnalysis> {
     log.debug(`이미지 분석: ${image.filename}`);
 
-    if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY.trim() === "") {
-        console.warn("⚠️ GEMINI_API_KEY_MISSING: 이미지를 분석하지 않고 기본 정보만 반환합니다.");
+    if (!isOpenAiAvailable()) {
+        console.warn("⚠️ OPENAI_API_KEY_MISSING: 이미지를 분석하지 않고 기본 정보만 반환합니다.");
         return {
             description: "제공된 이미지입니다.",
             tags: ["이미지"],
@@ -102,8 +100,6 @@ export async function analyzeImage(image: ImageInfo): Promise<ImageAnalysis> {
             visualComposition: "기본값"
         };
     }
-
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
     const prompt = `이 이미지를 분석해주세요. 단순한 사물 묘사를 넘어, 사진 속 상황에 스토리를 부여하여 매우 구체적으로 분석해주세요. 
 JSON 형식으로 반환:
@@ -116,24 +112,14 @@ JSON 형식으로 반환:
 }`;
 
     try {
-        const response = await model.generateContent([
-            prompt,
-            {
-                inlineData: {
-                    mimeType: image.mimeType,
-                    data: image.base64,
-                },
-            },
-        ]);
-
-        const text = response.response.text();
-
-        const json = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || "{}");
-        return json;
-    } catch (error: unknown) {
-        log.warn(`이미지 분석 실패: ${image.filename}`, {
-            error: error instanceof Error ? error.message : String(error),
+        const json = await openaiChatJson<ImageAnalysis>({
+            user: prompt,
+            images: [{ base64: image.base64, mimeType: image.mimeType }],
+            temperature: 0.5,
         });
+        return json;
+    } catch (e: unknown) {
+        log.warn(`이미지 분석 실패: ${image.filename}`, e instanceof Error ? e : { error: String(e) });
         return {
             description: "이미지 분석 실패",
             tags: [],
@@ -155,8 +141,8 @@ export async function generateContentFromImages(
 ): Promise<ImageBasedContent> {
     log.info(`이미지 기반 콘텐츠 생성 시작: ${images.length}장`);
 
-    if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY.trim() === "") {
-        throw new Error("GEMINI_API_KEY가 없어 이미지 기반 콘텐츠를 생성할 수 없습니다.");
+    if (!isOpenAiAvailable()) {
+        throw new Error("OPENAI_API_KEY가 없어 이미지 기반 콘텐츠를 생성할 수 없습니다.");
     }
 
     // 1. 각 이미지 분석
@@ -174,8 +160,6 @@ export async function generateContentFromImages(
     // 2. 전체 스토리 생성
     let text = "";
     {
-        const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-
         const imageDescriptions = analyses.map((a, i) =>
             `[이미지 ${i + 1}] ${a.description}\n- 분위기/감성: ${a.mood}\n- 시각적 구도: ${a.visualComposition || '정보 없음'}`
         ).join("\n\n");
@@ -212,13 +196,9 @@ JSON 형식으로 반환:
 }`;
 
         try {
-            const response = await model.generateContent(prompt);
-            text = response.response.text();
-        } catch (error: unknown) {
-            log.error(
-                "제미나이 전체 스토리 생성 실패",
-                error instanceof Error ? error : { error: String(error) }
-            );
+            text = await openaiChatText({ user: prompt, json: true, temperature: 0.7, maxOutputTokens: 8192 });
+        } catch (e: unknown) {
+            log.error("OpenAI 전체 스토리 생성 실패", e instanceof Error ? e : { error: String(e) });
             throw new Error("이미지 기반 스토리 생성 실패");
         }
     }

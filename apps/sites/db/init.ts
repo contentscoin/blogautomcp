@@ -22,12 +22,44 @@ const statements = [
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_jobs_user_idempotency ON agent_jobs(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL`,
   `CREATE TABLE IF NOT EXISTS audit_events (id TEXT PRIMARY KEY NOT NULL, actor_user_id TEXT, target_user_id TEXT, action TEXT NOT NULL, metadata_json TEXT, created_at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_audit_events_created ON audit_events(created_at)`,
+  // 요청 빈도 제한 (endpoint/IP/user 단위 고정 윈도우 카운터)
+  `CREATE TABLE IF NOT EXISTS rate_limits (key TEXT PRIMARY KEY NOT NULL, window_start INTEGER NOT NULL, count INTEGER NOT NULL DEFAULT 0)`,
+  // 딥링크/코드 입력 페어링용 단발 코드 (해시만 저장, 짧은 TTL)
+  `CREATE TABLE IF NOT EXISTS pair_codes (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, code_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER, created_at INTEGER NOT NULL)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_pair_codes_hash ON pair_codes(code_hash)`,
+  `CREATE INDEX IF NOT EXISTS idx_pair_codes_user ON pair_codes(user_id, expires_at)`,
 ];
+
+/**
+ * D1(SQLite)에는 `ADD COLUMN IF NOT EXISTS` 가 없어 PRAGMA table_info 로 확인한 뒤
+ * 빠진 컬럼만 추가한다. 기존 배포 DB 를 깨지 않는 멱등 마이그레이션.
+ */
+const columnMigrations: Array<{ table: string; column: string; ddl: string }> = [
+  { table: 'agent_jobs', column: 'lease_until', ddl: 'INTEGER' },
+  { table: 'agent_jobs', column: 'heartbeat_at', ddl: 'INTEGER' },
+  { table: 'agent_jobs', column: 'stage', ddl: 'TEXT' },
+  { table: 'agent_jobs', column: 'stage_message', ddl: 'TEXT' },
+  { table: 'agent_jobs', column: 'cancel_requested', ddl: 'INTEGER NOT NULL DEFAULT 0' },
+  { table: 'devices', column: 'status_json', ddl: 'TEXT' },
+];
+
+async function ensureColumns(d1: ReturnType<typeof getD1>): Promise<void> {
+  const tables = Array.from(new Set(columnMigrations.map((migration) => migration.table)));
+  for (const table of tables) {
+    const info = await d1.prepare(`PRAGMA table_info(${table})`).all<{ name: string }>();
+    const existing = new Set((info.results || []).map((row) => row.name));
+    for (const migration of columnMigrations.filter((item) => item.table === table)) {
+      if (existing.has(migration.column)) continue;
+      await d1.prepare(`ALTER TABLE ${table} ADD COLUMN ${migration.column} ${migration.ddl}`).run();
+    }
+  }
+}
 
 export async function ensureDatabase(): Promise<void> {
   initialization ??= (async () => {
     const d1 = getD1();
     await d1.batch(statements.map((statement) => d1.prepare(statement)));
+    await ensureColumns(d1);
     await d1.prepare('PRAGMA optimize').run();
   })().catch((error) => { initialization = null; throw error; });
   return initialization;

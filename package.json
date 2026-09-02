@@ -1,6 +1,6 @@
 {
   "name": "brandconnect-automation",
-  "version": "1.2.28",
+  "version": "1.3.0",
   "description": "네이버 쇼핑 커넥트(브랜드커넥트) 자동 블로그 포스팅 도구",
   "private": true,
   "workspaces": [
@@ -28,6 +28,8 @@
     "test:gpt-thumbnail-bridge": "npx ts-node --project tsconfig.scripts.json scripts/verify-gpt-thumbnail-bridge.ts",
     "test:naver-blog-profile": "npx ts-node --project tsconfig.scripts.json scripts/verify-naver-blog-profile.ts",
     "test:brand-post-package": "npx ts-node --project tsconfig.scripts.json scripts/verify-brand-post-package.ts",
+    "test:post-spec": "npx ts-node --project tsconfig.scripts.json scripts/verify-post-spec.ts",
+    "test:thumbnail-gen": "npx ts-node --project tsconfig.scripts.json scripts/verify-thumbnail-gen.ts",
     "test:brandlink-product-list": "npx ts-node --project tsconfig.scripts.json scripts/verify-brandlink-product-list.ts",
     "test:brand-post-quality": "npx ts-node --project tsconfig.scripts.json scripts/verify-brand-post-quality-reinforcement.ts",
     "test:chatgpt-browser-automation": "npx ts-node --project tsconfig.scripts.json scripts/verify-chatgpt-browser-automation.ts",
@@ -69,7 +71,6 @@
   },
   "main": "scripts/electron/main.cjs",
   "dependencies": {
-    "@google/generative-ai": "^0.21.0",
     "@openai/codex-sdk": "^0.151.0",
     "@prisma/client": "^5.22.0",
     "date-fns": "^4.1.0",
@@ -167,7 +168,15 @@
         }
       ]
     },
-    "npmRebuild": false
+    "npmRebuild": false,
+    "protocols": [
+      {
+        "name": "BlogAutoMCP",
+        "schemes": [
+          "blogautomcp"
+        ]
+      }
+    ]
   },
   "optionalDependencies": {
     "@tailwindcss/oxide-win32-x64-msvc": "^4.1.18",

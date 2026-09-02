@@ -24,7 +24,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   const now = Date.now();
   const updated = await d1.prepare(`
     UPDATE agent_jobs
-       SET status=?, progress=100, result_json=?, error_code=?, error_message=?, updated_at=?, finished_at=?
+       SET status=?, progress=100, result_json=?, error_code=?, error_message=?, updated_at=?, finished_at=?, lease_until=NULL, stage='finished'
      WHERE id=? AND user_id=? AND claimed_by_device_id=? AND status='RUNNING'
        AND EXISTS (SELECT 1 FROM devices WHERE id=? AND status='ACTIVE')
   `).bind(status, resultJson, errorCode, errorMessage, now, now, id, device.userId, device.id, device.id).run();

@@ -30,7 +30,8 @@ assert.match(agentSource, /처음부터 반드시 5~6개의 완결된 문장/u);
 assert.match(routeSource, /const useCodex/u);
 assert.match(routeSource, /AI_PROVIDER: useCodex \? "codex" : provider/u);
 assert.match(settingsSource, /draftCreationMode: codexDraftEnabled && codexDraft\.authenticated/u);
-assert.match(electronSource, /process\.env\.CODEX_DRAFT_ENABLED = process\.env\.CODEX_DRAFT_ENABLED \|\| "true"/u);
+// 기본 엔진은 OpenAI API 키(Spec-first). Codex 는 설정에서 켜는 선택 경로라 기본값이 false 다.
+assert.match(electronSource, /process\.env\.CODEX_DRAFT_ENABLED = process\.env\.CODEX_DRAFT_ENABLED \|\| "false"/u);
 assert.match(electronSource, /CODEX_DRAFT_MODEL[^\n]+"gpt-5\.5"/u);
 assert.match(settingsSource, /defaultValue: "gpt-5\.5"/u);
 

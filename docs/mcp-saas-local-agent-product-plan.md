@@ -1,5 +1,40 @@
 # BlogAutoMCP 구현 기준서
 
+> **현행 기준 안내 (2026-09-02)** — 이 문서의 2~6절은 초기 시안(`apps/site`: Vercel + PostgreSQL) 기준이며 **현재 운영 코드와 다르다.** 운영 사이트·MCP 서버는 `apps/sites`(OpenAI Sites, Cloudflare Workers + D1)이고 인증 모델은 다음과 같다.
+>
+> - 사이트 로그인: Sign in with ChatGPT(사이트 런타임 헤더) + 관리자 승인.
+> - ChatGPT 커넥터: OAuth 고정 주소(`/api/mcp`, `apps/sites/lib/oauth.ts`, 스코프 `mcp:read`/`mcp:write`) 또는 한 번만 표시되는 MCP URL(`/api/mcp/{credential}`, 해시 저장). 두 경로는 같은 `handleMcpRequest` 를 공유한다.
+> - PC 연결: 대시보드 "PC 앱 연결" 버튼(딥링크 `blogautomcp://pair`) 또는 8자 페어 코드로 장치 토큰을 발급한다(구버전 호환으로 PC 연결 주소 붙여넣기도 남아 있음). 데스크톱은 ChatGPT 로그인을 요구하지 않는다.
+> - 큐: D1 `agent_jobs`. claim 시 120초 임대(lease), 실행 중 30초 하트비트로 연장·진행 단계 보고, 임대 만료는 `AGENT_LOST` 로 회수. `job_cancel` 은 실행 중 작업에 취소 요청을 남기고 PC 가 로컬 프로세스를 정지한다.
+> - 초안: 기본은 `post_create_draft`(PC 가 OpenAI 키로 Spec-first 생성·검증). PC 에 키가 없으면 `post_prepare_draft → (ChatGPT 작성) → post_submit_draft` 2단계 경로. 썸네일도 `post_set_thumbnail`(PC gpt-image + 비전 QC) 기본, `thumbnail_prepare → thumbnail_apply_generated` 는 ChatGPT 이미지 생성 경로.
+> - 결과 봉투: `{schema:"blogautomcp.job-result/v1", jobType, kind, summary, data, readiness?, warnings[], nextAction?}` — PC 파일 경로는 포함하지 않는다. 실패는 `NAVER_SESSION_EXPIRED | PRODUCT_NOT_FOUND | CONNECT_KIND_MISMATCH | CONTENT_BLOCKED | IMAGE_SHORTFALL | LLM_UNAVAILABLE | EDITOR_FAILED | UPDATE_PENDING | TRAVEL_CONTRACT_LOCKED | DRAFT_NOT_FOUND | DRAFT_NOT_APPROVED | ALREADY_PUBLISHING | INVALID_INPUT | USER_CANCELLED | TIMEOUT | LOCAL_API_MISSING | LOCAL_AUTOMATION_FAILED` 로 분류한다.
+> - 보호: MCP 엔드포인트 IP 600회/분·호출 120회/분, 페어링 10회/분/IP, MCP URL 발급 5회/분/사용자. 도구 인자는 선언한 JSON 스키마로 서버에서 검증하고, 새 도구는 데스크톱 최소 버전(1.3.0) 미달 PC 에 `APP_UPDATE_REQUIRED` 를 돌려준다.
+>
+> **MCP 도구(25개, 서버 1.3.0)**
+>
+> | 도구 | 큐 작업 | 로컬 라우트 | 비고 |
+> |---|---|---|---|
+> | `agent_get_status` | 동기 | – | 온라인 여부·앱 버전·네이버 세션·여행 계약·업데이트·실행 중 작업 |
+> | `brandconnect_list_categories` | `BRANDCONNECT_LIST_CATEGORIES` | `GET /api/brandlinks/selection-options` | 카테고리·프로모션 |
+> | `brandconnect_list_products` | `BRANDCONNECT_LIST_PRODUCTS` | (로컬 DB / 여행은 `GET /api/brandlinks/available`) | `status/writingStatus/keyword/limit/sort` 필터 |
+> | `brandconnect_sync_products` | `BRANDCONNECT_SYNC_PRODUCTS` | `POST /api/brandlinks/bulk-seasonal` | |
+> | `post_create_draft` | `POST_CREATE_DRAFT` | `POST /api/brandlinks/{id}/draft` | PC Spec-first 생성(기본), readiness 포함 |
+> | `post_prepare_draft` / `post_submit_draft` | `POST_PREPARE_DRAFT` / `POST_SUBMIT_DRAFT` | `POST draft {action:"prepare_context"|"submit_generated"}` | ChatGPT 가 원고를 쓰는 2단계 경로(키 없는 PC) |
+> | `post_get_draft` | `POST_GET_DRAFT` | `GET /api/brandlinks/{id}/draft` | 본문(≤60KB)·아웃라인·이미지 슬롯·readiness, `includeImages=thumbnail` 이면 대표 이미지 첨부 |
+> | `post_revise_draft` | `POST_REVISE_DRAFT` | `PATCH draft {action:"revise"}` | 섹션 단위 부분 수정(Spec-first 초안) |
+> | `post_approve_draft` | `POST_APPROVE_DRAFT` | `PATCH draft {action:"approve"}` | 발행 전 필수 |
+> | `post_set_thumbnail` | `POST_SET_THUMBNAIL` | `POST /api/brandlinks/{id}/thumbnail` | gpt-image + 비전 QC 루프 |
+> | `thumbnail_prepare` / `thumbnail_apply_generated` | `THUMBNAIL_PREPARE` / `THUMBNAIL_APPLY_GENERATED` | (로컬 합성) | ChatGPT 이미지 생성 배경 + 원본 잠금 합성 |
+> | `blog_profile_get` / `blog_profile_prepare_update` / `blog_profile_apply_update` / `blog_design_get` | `BLOG_*` | (Playwright) | 프로필 미리보기 → 확인 토큰 → 적용 |
+> | `post_publish` / `post_schedule` | `POST_PUBLISH` / `POST_SCHEDULE` | `POST /api/brandlinks/{id}/publish` | `confirmed=true` 필수, 미승인 초안은 `DRAFT_NOT_APPROVED`, 발행 완료까지 대기(기본 25분) |
+> | `post_bulk_schedule` | `POST_BULK_SCHEDULE` | `POST /api/brandlinks/bulk-schedule` | `confirmed=true` 필수 |
+> | `post_verify_published` | `POST_VERIFY_PUBLISHED` | `GET /api/brandlinks/{id}/verify` | DB 상태 + 실제 글 URL 응답 확인 |
+> | `travel_capture_contract` | `TRAVEL_CAPTURE_CONTRACT` | `POST /api/brandlinks/travel-contract` | 여행커넥트 잠금 해제 |
+> | `settings_get` | `SETTINGS_GET` | `GET /api/settings` | 시크릿은 설정 여부만 |
+> | `job_get` / `job_cancel` | 동기 | – | 진행 단계·하트비트·결과 봉투 / 취소 요청 |
+>
+> 아래 본문은 이력 참고용으로 남긴다.
+
 기준일: 2026-08-26
 상태: 사이트·MCP·로컬 에이전트 세로 슬라이스 구현 완료, 외부 자격증명 기반 실연동 검증 대기
 

@@ -100,14 +100,19 @@ function configureRuntimePaths(projectRoot) {
       ? "headless"
       : "background");
   const browserChatGptEnabled =
-    (process.env.CHATGPT_BROWSER_AUTOMATION_ENABLED || "true").trim().toLowerCase() === "true";
+    (process.env.CHATGPT_BROWSER_AUTOMATION_ENABLED || "false").trim().toLowerCase() === "true";
   process.env.CHATGPT_BROWSER_AUTOMATION_ENABLED = browserChatGptEnabled ? "true" : "false";
-  process.env.CODEX_DRAFT_ENABLED = process.env.CODEX_DRAFT_ENABLED || "true";
+  // 기본 엔진은 OpenAI API 키 + Spec-first 파이프라인. Codex/ChatGPT 웹 자동작성은 설정에서 켜는 선택 경로다.
+  process.env.CODEX_DRAFT_ENABLED = process.env.CODEX_DRAFT_ENABLED || "false";
   process.env.CODEX_DRAFT_MODEL = process.env.CODEX_DRAFT_MODEL?.trim() || "gpt-5.5";
-  process.env.AI_PROVIDER = process.env.AI_PROVIDER || "codex";
+  process.env.AI_PROVIDER = process.env.AI_PROVIDER || "openai";
   process.env.BROWSER_GPT_MODE = browserChatGptEnabled ? "true" : "false";
   process.env.ALLOW_CHATGPT_BROWSER_MODE = browserChatGptEnabled ? "true" : "false";
   process.env.CHATGPT_USE_CUSTOM_GPTS = "false";
+  // 썸네일 생성도 ChatGPT 브라우저 자동화를 쓰지 않는다. 사용자 .env로도 켤 수 없게 고정한다.
+  process.env.PRODUCT_THUMBNAIL_CHATGPT_ENABLED = "false";
+  process.env.PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE = "false";
+  process.env.PRODUCT_THUMBNAIL_CHATGPT_BASE_FALLBACK_ENABLED = "false";
   if (!process.env.DATABASE_URL) {
     const databasePath = app.isPackaged
       ? path.join(userData, "data", "blogautomcp.db")
@@ -381,12 +386,153 @@ async function getUpdateReadiness() {
   }
 }
 
+/**
+ * 작업 큐 워치독. 렌더러(RemoteAgentPoller)가 폴링을 멈춘 상태(창이 닫히거나 렌더러가
+ * 죽은 경우)에도 MCP 작업이 실행되도록 메인 프로세스가 주기적으로 로컬 폴 엔드포인트를
+ * 직접 호출한다. 폴 라우트는 프로세스 내 단일 실행 락을 갖고 있어 두 폴러가 겹쳐도
+ * 작업은 한 번에 하나만 실행된다.
+ */
+const REMOTE_AGENT_WATCHDOG_INTERVAL_MS = 45_000;
+let remoteAgentWatchdogTimer = null;
+let remoteAgentWatchdogBusy = false;
+
+async function pollRemoteAgentOnce() {
+  if (remoteAgentWatchdogBusy || isQuitting || !nextServer) return;
+  remoteAgentWatchdogBusy = true;
+  const headers = { "content-type": "application/json", origin: APP_BASE_URL };
+  const adminKey = process.env.ADMIN_API_KEY?.trim();
+  if (adminKey) headers["x-admin-api-key"] = adminKey;
+  const controller = new AbortController();
+  // 작업 실행(발행)은 수십 분 걸릴 수 있다. 폴 요청은 작업이 끝날 때까지 열려 있으므로
+  // 타임아웃을 길게 두고, 워치독 자체는 busy 플래그로 중복 호출을 막는다.
+  const timeout = setTimeout(() => controller.abort(), 3 * 60 * 60 * 1000);
+  try {
+    await fetch(`${APP_BASE_URL}/api/remote-agent/poll`, { method: "POST", headers, body: "{}", signal: controller.signal });
+  } catch {
+    // 서버 재시작 중이거나 네트워크 문제 — 다음 주기에 다시 시도한다.
+  } finally {
+    clearTimeout(timeout);
+    remoteAgentWatchdogBusy = false;
+  }
+}
+
+function startRemoteAgentWatchdog() {
+  if (remoteAgentWatchdogTimer) return;
+  remoteAgentWatchdogTimer = setInterval(() => {
+    void pollRemoteAgentOnce();
+  }, REMOTE_AGENT_WATCHDOG_INTERVAL_MS);
+  if (typeof remoteAgentWatchdogTimer.unref === "function") remoteAgentWatchdogTimer.unref();
+}
+
+function stopRemoteAgentWatchdog() {
+  if (!remoteAgentWatchdogTimer) return;
+  clearInterval(remoteAgentWatchdogTimer);
+  remoteAgentWatchdogTimer = null;
+}
+
+/**
+ * 딥링크 페어링: 사이트 대시보드의 "PC 앱 연결" 버튼이 blogautomcp://pair?code=…&site=… 를 연다.
+ * 메인 프로세스가 코드를 로컬 API(/api/remote-agent)에 넘겨 사이트와 페어링하고 창을 띄운다.
+ * site 는 로컬 API 의 허용 목록으로 다시 검증되므로 임의 페이지가 만든 링크로는 연결되지 않는다.
+ */
+const DEEP_LINK_PROTOCOL = "blogautomcp";
+let pendingDeepLink = null;
+
+function registerDeepLinkProtocol() {
+  try {
+    if (process.defaultApp && process.argv.length >= 2) {
+      app.setAsDefaultProtocolClient(DEEP_LINK_PROTOCOL, process.execPath, [path.resolve(process.argv[1])]);
+    } else {
+      app.setAsDefaultProtocolClient(DEEP_LINK_PROTOCOL);
+    }
+  } catch {
+    // 프로토콜 등록 실패는 치명적이지 않다(코드 입력 폴백이 있다).
+  }
+}
+
+function extractDeepLink(argv) {
+  if (!Array.isArray(argv)) return null;
+  const found = argv.find((value) => typeof value === "string" && value.toLowerCase().startsWith(`${DEEP_LINK_PROTOCOL}://`));
+  return found || null;
+}
+
+function parsePairDeepLink(rawUrl) {
+  let url;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== `${DEEP_LINK_PROTOCOL}:`) return null;
+  const action = (url.hostname || url.pathname.replace(/^\/+/, "")).toLowerCase();
+  if (action !== "pair") return null;
+  const code = (url.searchParams.get("code") || "").trim();
+  const site = (url.searchParams.get("site") || "").trim();
+  if (!/^[A-Za-z0-9-\s]{8,12}$/.test(code)) return null;
+  return { code, site };
+}
+
+function notifyDesktop(title, body) {
+  try {
+    if (Notification.isSupported()) new Notification({ title, body }).show();
+  } catch {
+    // 알림 실패는 무시
+  }
+}
+
+async function handlePairDeepLink(rawUrl) {
+  const parsed = parsePairDeepLink(rawUrl);
+  if (!parsed) return;
+  if (!nextServer) {
+    pendingDeepLink = rawUrl;
+    return;
+  }
+  showMainWindow();
+  const headers = { "content-type": "application/json", origin: APP_BASE_URL };
+  const adminKey = process.env.ADMIN_API_KEY?.trim();
+  if (adminKey) headers["x-admin-api-key"] = adminKey;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const response = await fetch(`${APP_BASE_URL}/api/remote-agent`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ pairCode: parsed.code, ...(parsed.site ? { siteUrl: parsed.site } : {}) }),
+      signal: controller.signal,
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || !payload?.success) {
+      notifyDesktop("PC 연결 실패", payload?.error || `사이트 연결에 실패했습니다 (${response.status}).`);
+    } else {
+      notifyDesktop("PC 연결 완료", "이 PC가 BlogAutoMCP 계정에 연결되었습니다. 네이버 로그인을 진행하세요.");
+    }
+  } catch (error) {
+    notifyDesktop("PC 연결 실패", error instanceof Error ? error.message : String(error));
+  } finally {
+    clearTimeout(timeout);
+    // 렌더러의 활성화 게이트를 즉시 갱신한다.
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.executeJavaScript('window.dispatchEvent(new Event("blogautomcp:activation-changed")); true;').catch(() => undefined);
+    }
+  }
+}
+
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {
-  app.on("second-instance", showMainWindow);
+  app.on("second-instance", (_event, argv) => {
+    const link = extractDeepLink(argv);
+    if (link) void handlePairDeepLink(link);
+    else showMainWindow();
+  });
+
+  // macOS 는 open-url 로 딥링크를 받는다.
+  app.on("open-url", (event, url) => {
+    event.preventDefault();
+    void handlePairDeepLink(url);
+  });
 
   app.on("window-all-closed", () => {
     // The tray process intentionally keeps the local MCP agent alive.
@@ -394,6 +540,7 @@ if (!hasSingleInstanceLock) {
 
   app.on("before-quit", async () => {
     isQuitting = true;
+    stopRemoteAgentWatchdog();
     desktopUpdater?.stop();
     await shutdownServer();
   });
@@ -401,6 +548,7 @@ if (!hasSingleInstanceLock) {
   app.whenReady().then(async () => {
     const projectRoot = resolveProjectRoot();
     configureAutoStart();
+    registerDeepLinkProtocol();
     installDesktopControlBridge();
     ensureTray(projectRoot);
     await createWindow();
@@ -413,6 +561,11 @@ if (!hasSingleInstanceLock) {
       beforeInstall: async () => {},
     });
     desktopUpdater.start();
+    startRemoteAgentWatchdog();
+    // 앱이 딥링크로 처음 실행된 경우(Windows 는 argv 로 전달) 서버 준비 후 처리한다.
+    const initialLink = pendingDeepLink || extractDeepLink(process.argv);
+    pendingDeepLink = null;
+    if (initialLink) void handlePairDeepLink(initialLink);
   }).catch((error) => {
     const message = error instanceof Error ? error.message : String(error);
     dialog.showErrorBox("BrandConnect Automation 시작 실패", message);

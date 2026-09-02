@@ -19,7 +19,6 @@ import * as path from "path";
 import * as fs from "fs";
 import * as crypto from "crypto";
 import sharp from "sharp";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import {
   buildHumanMobileStyleGuide,
   getMobileSectionLinePolicy,
@@ -56,6 +55,7 @@ import {
   type ProductImageCandidate,
 } from "./lib/product-image-selection";
 import {
+  buildProductThumbnailCopy,
   buildProductThumbnailGenerationPrompt,
   generateProductThumbnail,
 } from "./lib/product-thumbnail";
@@ -87,11 +87,15 @@ import {
 import { parsePreparedBrandPostSections } from "./lib/prepared-post-markdown";
 import { inspectNaverScheduleSubmissionSignal } from "../src/lib/naver-schedule-submission";
 import { generateTravelEditorialSummaryCard } from "./lib/travel-editorial-card";
+import { generateThumbnail, isGenerativeThumbnailAvailable } from "./lib/thumbnail-gen";
 import {
-  generateProductThumbnailViaImageApi,
-  isImageApiThumbnailAvailable,
-  qcGeneratedThumbnail,
-} from "./lib/openai-image";
+  reviseAssembledPost,
+  runSpecFirstPipeline,
+  type AssembledPost,
+  type GeneratedDraft as SpecGeneratedDraft,
+  type ImageCandidateInput,
+  type PostSpec,
+} from "./lib/post-spec";
 import {
   buildOpenCrabSeoBrief,
   formatOpenCrabSeoBriefForPrompt,
@@ -161,18 +165,18 @@ chromium.use(StealthPlugin());
 
 const prisma = new PrismaClient();
 
-// AI Provider 설정 (codex, openai 또는 gemini)
+// AI Provider 설정: openai(기본, Spec-first 파이프라인) 또는 codex(선택). Gemini 는 제거되어 openai 로 처리한다.
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim() || "";
-const GEMINI_API_KEY = (
-  process.env.GEMINI_API_KEY ||
-  process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
-  ""
-).trim();
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_MAX_OUTPUT_TOKENS = parseBoundedInteger(
+  process.env.OPENAI_MAX_OUTPUT_TOKENS,
+  8192,
+  1024,
+  32768
+);
 const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || "120000");
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const REQUESTED_AI_PROVIDER = (process.env.AI_PROVIDER || "openai").toLowerCase();
-const AI_PROVIDER = REQUESTED_AI_PROVIDER;
+const AI_PROVIDER: "openai" | "codex" = REQUESTED_AI_PROVIDER === "codex" ? "codex" : "openai";
 const CODEX_DRAFT_MODEL = process.env.CODEX_DRAFT_MODEL?.trim() || "gpt-5.5";
 const CODEX_DRAFT_TIMEOUT_MS = Math.max(60_000, Number(process.env.CODEX_DRAFT_TIMEOUT_MS || "300000"));
 const CODEX_DRAFT_REASONING_EFFORT = (
@@ -180,11 +184,6 @@ const CODEX_DRAFT_REASONING_EFFORT = (
 ) as "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 const CODEX_BROWSER_FALLBACK_ENABLED =
   (process.env.CODEX_BROWSER_FALLBACK_ENABLED || "false").toLowerCase() === "true";
-
-// Gemini 초기화
-const gemini = AI_PROVIDER === "gemini" 
-  ? new GoogleGenerativeAI(GEMINI_API_KEY)
-  : null;
 
 const SESSION_FILE = getNaverSessionFile();
 const CHATGPT_SESSION_FILE = getChatgptSessionFile();
@@ -373,6 +372,16 @@ const BRANDLINK_EXPERIENCE_NOTES = (process.env.BRANDLINK_EXPERIENCE_NOTES || ""
 // 원고가 프로세스 목록/로그에 노출되는 문제를 피한다.
 const BRANDLINK_DRAFT_CONTEXT_OUTPUT = process.env.BRANDLINK_DRAFT_CONTEXT_OUTPUT?.trim() || "";
 const BRANDLINK_GENERATED_DRAFT_PATH = process.env.BRANDLINK_GENERATED_DRAFT_PATH?.trim() || "";
+// OpenAI 생성 실패/키 누락 시 Spec-first 로컬 템플릿 초안으로 대체(검증은 NEEDS_REVIEW). 하네스 복사 폴백은 없다.
+const PRODUCT_POST_LOCAL_FALLBACK_ENABLED =
+  (process.env.PRODUCT_POST_LOCAL_FALLBACK_ENABLED || "true").toLowerCase() !== "false";
+// Spec-first 파이프라인: 이미지 플랜 → 스펙 → 구조화 생성 → 검증/타깃 수리 → 조립.
+// false 로 내리면 단발 생성 + 사후 품질 보강 경로로 돌아간다.
+const POST_SPEC_PIPELINE_ENABLED =
+  (process.env.POST_SPEC_PIPELINE_ENABLED || "true").toLowerCase() !== "false";
+// 인용구 섹션 헤더는 에디터 셀렉터 실측 전까지 기본 OFF (소제목으로 강등).
+const NAVER_EDITOR_QUOTATION_ENABLED =
+  (process.env.NAVER_EDITOR_QUOTATION_ENABLED || "false").toLowerCase() === "true";
 const AGENT_MAX_RUNTIME_MS = Math.max(
   5 * 60 * 1000,
   Number(process.env.AGENT_MAX_RUNTIME_MS || "1500000")
@@ -432,6 +441,15 @@ interface GeneratedPostPreview {
     afterCode: BrandLinkContentReadiness["code"];
     note: string;
   } | null;
+  /** Spec-first 파이프라인 산출물 (스펙·검증·이미지 슬롯). 부분 수정과 매니페스트 기록에 쓴다. */
+  assembled?: AssembledPost | null;
+  notes?: string[];
+}
+
+interface SpecStep2Input {
+  imageCandidates: ImageCandidateInput[];
+  tempDir: string;
+  memo?: string | null;
 }
 
 interface McpGeneratedDraftFile {
@@ -519,29 +537,6 @@ interface ChatGPTGuidanceContext {
 function getDefaultSectionTitles(connectKind: "SHOPPING" | "TRAVEL"): string[] {
   return getPostCompositionContract(connectKind).sections.map((section) => section.title);
 }
-
-const DEFAULT_HASHTAGS = [
-  "추천",
-  "후기",
-  "리뷰",
-  "비교",
-  "순위",
-  "가격",
-  "장단점",
-  "일상",
-  "가성비",
-  "생활용품",
-  "쇼핑",
-  "쇼핑추천",
-  "구매전확인",
-  "상품정보",
-  "옵션확인",
-  "구성확인",
-  "가격비교",
-  "할인정보",
-  "실속쇼핑",
-  "네이버쇼핑",
-];
 
 function stripEmoji(text: string): string {
   return text.replace(/[\p{Extended_Pictographic}\uFE0F]/gu, "");
@@ -793,7 +788,8 @@ async function isUsableBodyUploadImage(
   if (!fs.existsSync(imagePath)) return false;
 
   const basename = path.basename(imagePath).toLowerCase();
-  if (basename.includes("_detail_crop_")) return false;
+  // 세로 상세 이미지를 잘라 만든 조각(_detail_crop_)은 본문 이미지로 쓴다(치수 검사만 적용).
+  // 예전에는 무조건 탈락시켜 본문 이미지 부족의 직접 원인이 됐다.
   if (/banner|event|coupon|benefit|delivery|shipping|review|notice|guide/.test(basename)) {
     return false;
   }
@@ -1013,6 +1009,40 @@ async function generateTopTextCutoutThumbnail(
     console.log("   ⚠️ 판매페이지 대표 이미지가 없어 썸네일 생성을 건너뜁니다.");
     return null;
   }
+  // 1순위: gpt-image 가 문구까지 한 번에 그리고 OpenAI 비전 QC(95점)로 검수한다.
+  // 최대 시도 안에 통과하지 못하면 아래 로컬 합성으로 강등한다(오탈자 썸네일 방지).
+  if (isGenerativeThumbnailAvailable()) {
+    const generativeCopy =
+      savedSetting?.copy ??
+      (contentKind === "TRAVEL"
+        ? buildTravelThumbnailCopy(product.name)
+        : buildProductThumbnailCopy(postTitle, product.name, "SHOPPING"));
+    const generated = await generateThumbnail({
+      kind: contentKind,
+      productName: product.name,
+      categoryName: inferCategoryKeyword(product.name),
+      description: product.description,
+      features: product.features,
+      price: product.price,
+      copy: generativeCopy,
+      moodId: savedSetting?.style || undefined,
+      referenceImagePath: product.representativeImagePath,
+      outputDir: TEMP_PATH,
+      onLog: (line) => console.log(`   🎨 ${line}`),
+    }).catch((error) => {
+      console.log(`   ⚠️ gpt-image 썸네일 생성 오류: ${getErrorMessage(error)}`);
+      return null;
+    });
+    if (generated) {
+      console.log(
+        `   ✅ gpt-image 썸네일 사용: ${path.basename(generated.path)} (QC ${generated.qc.checked ? `${generated.qc.score}점` : "생략"}, ${generated.attempts}회 시도)`
+      );
+      return { path: generated.path, source: "image-api" };
+    }
+    console.log("   ⚠️ gpt-image 썸네일이 QC 를 통과하지 못해 로컬 합성으로 강등합니다.");
+  } else {
+    console.log("   ℹ️ OPENAI_API_KEY 가 없어 생성형 썸네일을 건너뛰고 로컬 합성을 사용합니다.");
+  }
   // 쇼핑 상품은 생성형 모델에 상품 픽셀을 넘기지 않는다. 원본 RGB를 보존한
   // 투명 PNG를 로컬에서 만든 뒤 배경과 카피만 합성한다. 분리가 불확실하면
   // 원본 상세 이미지가 본문 대표 이미지로 유지되도록 썸네일 생성을 중단한다.
@@ -1097,32 +1127,6 @@ async function generateTopTextCutoutThumbnail(
     features: product.features,
     price: product.price,
   });
-
-  // 1순위: Images API 생성형 썸네일(제품 이미지 레퍼런스 + 큰 한글 제목을 생성 단계에서 함께).
-  // 데스크톱에서 유일하게 스스로 동작하는 생성형 경로다. QC(한글 오탈자·제품 왜곡)를
-  // 통과하지 못하면 아래 로컬 합성으로 넘어간다.
-  if (isImageApiThumbnailAvailable()) {
-    console.log("   🎨 Images API 생성형 썸네일 시도...");
-    const apiPath = await generateProductThumbnailViaImageApi({
-      prompt: promptInfo.prompt,
-      referenceImagePath: product.representativeImagePath,
-      outputDir: TEMP_PATH,
-      fileLabel: promptInfo.productNameLabel,
-    });
-    if (apiPath) {
-      const qc = await qcGeneratedThumbnail(apiPath, {
-        productName: promptInfo.productNameLabel,
-        headline: promptInfo.headline,
-      });
-      if (qc.pass) {
-        console.log(
-          `   ✅ Images API 썸네일 사용: ${path.basename(apiPath)}${qc.checked ? "" : ` (${qc.reason})`}`
-        );
-        return { path: apiPath, source: "image-api" };
-      }
-      console.log(`   ⚠️ 생성형 썸네일 QC 불합격: ${qc.reason} — 로컬 합성으로 대체합니다.`);
-    }
-  }
 
   const localSharpPath = await generateProductThumbnailWithSharpLocal(product, promptInfo);
   if (localSharpPath) {
@@ -1984,46 +1988,66 @@ async function runOpenAiApi(systemPrompt: string, userPrompt: string): Promise<s
     throw new Error("OPENAI_API_KEY가 비어 있어 OpenAI API로 글을 생성할 수 없습니다.");
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
-  try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: OPENAI_MODEL,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-        temperature: 0.75,
-        response_format: { type: "json_object" },
-      }),
-      signal: controller.signal,
-    });
+  // 출력 토큰 상한을 명시하고, 상한에 걸려 잘린 응답(finish_reason=length)은
+  // 조용히 파싱 폴백으로 흘리지 않고 한 번 더 간결하게 재요청한다.
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
+    try {
+      const system =
+        attempt === 0
+          ? systemPrompt
+          : `${systemPrompt}\n\n[출력 길이 주의] 직전 응답이 출력 한도에서 잘렸습니다. 섹션 수와 구조는 유지하되 각 섹션을 더 간결하게 써서 JSON을 반드시 완결하세요.`;
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: OPENAI_MODEL,
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: userPrompt },
+          ],
+          temperature: 0.75,
+          max_completion_tokens: OPENAI_MAX_OUTPUT_TOKENS,
+          response_format: { type: "json_object" },
+        }),
+        signal: controller.signal,
+      });
 
-    if (!response.ok) {
-      const detail = await response.text().catch(() => "");
-      throw new Error(`OpenAI API 호출 실패 (${response.status}): ${detail.slice(0, 400)}`);
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error(`OpenAI API 호출 실패 (${response.status}): ${detail.slice(0, 400)}`);
+      }
+
+      const payload = (await response.json()) as {
+        choices?: Array<{
+          message?: { content?: string | null };
+          finish_reason?: string | null;
+        }>;
+      };
+      const choice = payload.choices?.[0];
+      const output = choice?.message?.content?.trim();
+      if (!output) {
+        throw new Error("OpenAI API 응답에서 본문을 찾지 못했습니다.");
+      }
+      if (choice?.finish_reason === "length") {
+        lastError = new Error(
+          `OpenAI API 응답이 출력 토큰 상한(${OPENAI_MAX_OUTPUT_TOKENS})에서 잘렸습니다.`
+        );
+        console.log(`   ⚠️ ${lastError.message}${attempt === 0 ? " 간결하게 재요청합니다." : ""}`);
+        continue;
+      }
+
+      return output;
+    } finally {
+      clearTimeout(timeout);
     }
-
-    const payload = (await response.json()) as {
-      choices?: Array<{
-        message?: { content?: string | null };
-      }>;
-    };
-    const output = payload.choices?.[0]?.message?.content?.trim();
-    if (!output) {
-      throw new Error("OpenAI API 응답에서 본문을 찾지 못했습니다.");
-    }
-
-    return output;
-  } finally {
-    clearTimeout(timeout);
   }
+  throw lastError || new Error("OpenAI API 응답이 잘렸습니다.");
 }
 
 const CHATGPT_COMPOSER_SELECTORS = [
@@ -4415,7 +4439,8 @@ function normalizeHashtags(
     .slice(0, 4);
 
   const openCrabTags = openCrabSeoBrief?.hashtags || [];
-  const merged = [...normalized, ...openCrabTags, ...productSeed, ...DEFAULT_HASHTAGS];
+  // 일반 태그(추천·후기·가성비…)는 넣지 않는다. 키워드·OpenCrab 태그·상품 토큰만 사용한다.
+  const merged = [...normalized, ...openCrabTags, ...productSeed];
   const deduped = Array.from(new Set(merged)).slice(0, NAVER_BLOG_HASHTAG_COUNT);
   return deduped;
 }
@@ -5440,14 +5465,7 @@ async function rewriteSectionsForHumanTone(
 
   let rewritten = "";
   try {
-    if (AI_PROVIDER === "gemini" && gemini) {
-      const model = gemini.getGenerativeModel({
-        model: GEMINI_MODEL,
-        generationConfig: { temperature: 0.5, maxOutputTokens: 4000 },
-      });
-      const result = await model.generateContent(prompt);
-      rewritten = result.response.text();
-    } else if (AI_PROVIDER === "openai") {
+    if (OPENAI_API_KEY) {
       rewritten = await runOpenAiApi(
         "당신은 한국어 문장을 자연스럽게 다듬는 편집자입니다. 지시받은 형식 규칙을 정확히 지키세요.",
         prompt
@@ -5487,8 +5505,6 @@ async function generateWithAI(
   chatgptContext?: ChatGPTGuidanceContext,
   chatgptImagePaths: string[] = []
 ): Promise<string> {
-  const combinedPrompt = `[시스템 지시사항]\n${systemPrompt}\n\n[사용자 요청]\n${userPrompt}`;
-
   if (BROWSER_GPT_MODE) {
     if (!chatgptContext) {
       throw new Error("Browser ChatGPT 모드에 필요한 가이드 컨텍스트가 없습니다.");
@@ -5524,30 +5540,7 @@ async function generateWithAI(
     }
   }
 
-  if (AI_PROVIDER === "gemini" && gemini) {
-    if (!GEMINI_API_KEY) {
-      throw new Error("GEMINI_API_KEY 또는 GOOGLE_GENERATIVE_AI_API_KEY가 비어 있어 Gemini API로 글을 생성할 수 없습니다.");
-    }
-
-    // Gemini 사용
-    const model = gemini.getGenerativeModel({ 
-      model: GEMINI_MODEL,
-      generationConfig: {
-        temperature: 0.75,
-        maxOutputTokens: 4000,
-      }
-    });
-    
-    // Gemini는 system prompt를 user prompt에 합쳐서 전달
-    const result = await model.generateContent(combinedPrompt);
-    return result.response.text();
-    
-  } else if (AI_PROVIDER === "openai") {
-    return runOpenAiApi(systemPrompt, userPrompt);
-    
-  } else {
-    throw new Error("AI Provider가 설정되지 않았습니다. .env 파일을 확인하세요.");
-  }
+  return runOpenAiApi(systemPrompt, userPrompt);
 }
 
 // ============================================
@@ -5557,7 +5550,8 @@ async function step2_generatePost(
   product: ProductInfo,
   brandLink: string,
   productId?: string | null,
-  connectKind: "SHOPPING" | "TRAVEL" = "SHOPPING"
+  connectKind: "SHOPPING" | "TRAVEL" = "SHOPPING",
+  specInput?: SpecStep2Input | null
 ): Promise<GeneratedPostPreview> {
   const isTravel = connectKind === "TRAVEL";
   // 판매/여행 페이지의 과도한 본문이나 삽입 지시가 모델 컨텍스트를 잠식하지 않도록
@@ -5622,6 +5616,67 @@ async function step2_generatePost(
     targetSectionCount: bodySectionCount,
   });
   const openCrabPromptBlock = formatOpenCrabSeoBriefForPrompt(openCrabSeoBrief);
+
+  // Spec-first 파이프라인(기본 경로): 이미지 플랜을 먼저 확정하고 섹션 수를 그로부터 파생한 뒤
+  // json_schema 구조화 생성 → 전 신호 검증 → 섹션 단위 타깃 수리 순으로 진행한다.
+  // ChatGPT 2단계(context/제출) 모드, 브라우저 모드, Codex 모드에서는 기존 경로를 쓴다.
+  if (
+    POST_SPEC_PIPELINE_ENABLED &&
+    specInput &&
+    !BROWSER_GPT_MODE &&
+    AI_PROVIDER === "openai" &&
+    !BRANDLINK_GENERATED_DRAFT_PATH &&
+    !BRANDLINK_DRAFT_CONTEXT_OUTPUT
+  ) {
+    console.log("   🧭 Spec-first: 이미지 플랜 → 스펙 → 구조화 생성 → 검증/타깃 수리 → 조립");
+    const result = await runSpecFirstPipeline({
+      kind: connectKind,
+      productId: productId || null,
+      product: {
+        name: product.name,
+        description: product.description,
+        features: product.features,
+        price: product.price,
+        originalPrice: product.originalPrice,
+        discountRate: product.discountRate,
+        couponInfo: product.couponInfo,
+        deliveryInfo: product.deliveryInfo,
+        reviewCount: product.reviewCount,
+        rating: product.rating,
+        storeName: product.storeName,
+      },
+      brief: openCrabSeoBrief,
+      imageCandidates: specInput.imageCandidates,
+      tempDir: specInput.tempDir,
+      brandLink,
+      memo: specInput.memo,
+      options: {
+        maxRepairRounds: 2,
+        allowLocalFallback: PRODUCT_POST_LOCAL_FALLBACK_ENABLED,
+        quotationHeaders: NAVER_EDITOR_QUOTATION_ENABLED,
+        requireRepresentativeImage: BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE,
+        thumbnailGenerated: THUMBNAIL_AUTOGEN_ENABLED,
+      },
+    });
+    for (const note of result.notes) console.log(`   · ${note}`);
+    console.log(`   📌 제목: ${result.title}`);
+    console.log(`   📝 섹션: ${result.sections.length}개 (${result.generationSource}, 호출 ${result.attempts}회)`);
+    console.log(`   🖼️ 이미지 플랜: 본문 ${result.spec.imagePlan.resolvedBody}장 / 목표 ${result.spec.imagePlan.targetBody}장`);
+    console.log(`   🧪 검증: ${result.validation.summary}`);
+    return {
+      title: result.title,
+      sections: result.sections,
+      hashtags: result.hashtags,
+      generationSource: "AI",
+      rawResponse: `spec-first:${result.generationSource}`,
+      openCrabSeoBrief,
+      productEditorialPlan: null,
+      editorialQuality: null,
+      qualityRepair: null,
+      assembled: result,
+      notes: result.notes,
+    };
+  }
   let productEditorialPlan = isTravel
     ? null
     : buildProductEditorialPlan({
@@ -7009,6 +7064,47 @@ interface PreparedBrandLinkPostOverride {
   heroImagePath: string;
   bodyImagePaths: string[];
   composition: ResolvedPostDocumentV1 | null;
+  /** Spec-first 초안이면 부분 수정에 쓰는 스펙·초안 원본 */
+  spec: PostSpec | null;
+  draft: SpecGeneratedDraft | null;
+}
+
+/** 스펙의 이미지 슬롯 경로를 패키지 안 복사본 경로로 바꾼다(임시 파일은 실행 후 사라진다). */
+function remapSpecImagePaths(spec: PostSpec, packagedPathBySource: Map<string, string>): PostSpec {
+  const remap = (imagePath: string) => packagedPathBySource.get(path.resolve(imagePath)) || imagePath;
+  return {
+    ...spec,
+    imagePlan: {
+      ...spec.imagePlan,
+      hero: spec.imagePlan.hero ? { ...spec.imagePlan.hero, path: remap(spec.imagePlan.hero.path) } : spec.imagePlan.hero,
+      slots: spec.imagePlan.slots.map((slot) => ({ ...slot, path: remap(slot.path) })),
+    },
+  };
+}
+
+function summarizeSpecValidation(assembled: AssembledPost) {
+  const validation = assembled.validation;
+  return {
+    status: validation.status,
+    score: validation.score,
+    summary: validation.summary,
+    signals: validation.signals.map((signal) => ({
+      key: signal.key,
+      label: signal.label,
+      status: signal.status,
+      ...(signal.sectionIndex !== undefined ? { sectionIndex: signal.sectionIndex } : {}),
+      ...(signal.detail ? { detail: signal.detail } : {}),
+    })),
+    repairTargets: validation.repair.targets.map((target) => ({
+      sectionIndex: target.sectionIndex,
+      code: target.code,
+      reason: target.reason,
+      priority: target.priority,
+      instruction: target.instruction,
+    })),
+    generationSource: assembled.generationSource,
+    attempts: assembled.attempts,
+  };
 }
 
 function writePreparedBrandPostPackage(params: {
@@ -7019,6 +7115,8 @@ function writePreparedBrandPostPackage(params: {
   imagePaths: string[];
   composition: ResolvedPostDocumentV1;
   contentReadiness: BrandLinkContentReadiness | null;
+  /** Spec-first 산출물. 부분 수정(post_revise_draft)에 필요하므로 이미지 경로를 패키지 복사본으로 옮겨 저장한다. */
+  assembled?: AssembledPost | null;
 }): string {
   const images = params.imagePaths.filter((imagePath) => fs.existsSync(imagePath));
   if (images.length < 1) {
@@ -7117,6 +7215,10 @@ function writePreparedBrandPostPackage(params: {
     composition: packagedComposition,
     contentQuality: params.contentReadiness,
     qualityRepair: params.post.qualityRepair || null,
+    postSpec: params.assembled ? remapSpecImagePaths(params.assembled.spec, packagedPathBySource) : null,
+    specDraft: params.assembled?.draft ?? null,
+    specValidation: params.assembled ? summarizeSpecValidation(params.assembled) : null,
+    pipelineNotes: params.post.notes ?? null,
     thumbnailSpec: {
       version: "thumbnail-spec/v2",
       canvas: { width: 1080, height: 1080, aspect: "1:1" },
@@ -7143,7 +7245,9 @@ function resolvePreparedOverridePath(manifestPath: string, value: unknown): stri
   return resolved;
 }
 
-function loadPreparedBrandLinkPostOverride(): PreparedBrandLinkPostOverride | null {
+function loadPreparedBrandLinkPostOverride(
+  options: { requireApproval?: boolean } = {},
+): PreparedBrandLinkPostOverride | null {
   const configuredPath = process.env.BRANDLINK_PREPARED_POST_MANIFEST?.trim();
   if (!configuredPath) return null;
 
@@ -7161,8 +7265,10 @@ function loadPreparedBrandLinkPostOverride(): PreparedBrandLinkPostOverride | nu
     composition?: unknown;
     approvedAt?: unknown;
     generationSource?: unknown;
+    postSpec?: unknown;
+    specDraft?: unknown;
   };
-  if (typeof manifest.approvedAt !== "string" || !manifest.approvedAt.trim()) {
+  if (options.requireApproval !== false && (typeof manifest.approvedAt !== "string" || !manifest.approvedAt.trim())) {
     throw new Error("준비된 원고는 승인 완료 후에만 발행할 수 있습니다.");
   }
   if (manifest.generationSource !== "AI" && manifest.generationSource !== "PREPARED_APPROVED") {
@@ -7213,6 +7319,8 @@ function loadPreparedBrandLinkPostOverride(): PreparedBrandLinkPostOverride | nu
     heroImagePath,
     bodyImagePaths,
     composition,
+    spec: manifest.postSpec && typeof manifest.postSpec === "object" ? (manifest.postSpec as PostSpec) : null,
+    draft: manifest.specDraft && typeof manifest.specDraft === "object" ? (manifest.specDraft as SpecGeneratedDraft) : null,
   };
 }
 
@@ -10057,6 +10165,135 @@ function parseRuntimePublishOptions(argv: string[]): RuntimePublishOptions {
 // ============================================
 // 메인 실행
 // ============================================
+function classifyFailureCode(message: string): string {
+  if (/세션|로그인/u.test(message)) return "NAVER_SESSION_EXPIRED";
+  if (/본문 이미지|이미지 부족|IMAGE_SHORTFALL|이미지가 부족/u.test(message)) return "IMAGE_SHORTFALL";
+  if (/발행 보류|BLOCKED|게이트|품질 기준/u.test(message)) return "CONTENT_BLOCKED";
+  if (/OPENAI_API_KEY|OpenAI API|Codex 로그인|Codex 작성 실패/u.test(message)) return "LLM_UNAVAILABLE";
+  if (/찾을 수 없|상품 정보를 확보/u.test(message)) return "PRODUCT_NOT_FOUND";
+  if (/여행커넥트|계약/u.test(message)) return "TRAVEL_CONTRACT_LOCKED";
+  return "LOCAL_AUTOMATION_FAILED";
+}
+
+/** 초안 생성 결과를 패키지 디렉터리에 남긴다. 라우트가 로그 정규식 대신 이 파일로 원인을 읽는다. */
+function writePrepareResult(
+  outputDir: string,
+  payload: { ok: boolean; code: string; message: string; readiness?: unknown },
+): void {
+  try {
+    fs.mkdirSync(outputDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(outputDir, "result.json"),
+      JSON.stringify({ ...payload, at: new Date().toISOString() }, null, 2),
+      "utf8",
+    );
+  } catch {
+    // 결과 파일 기록 실패는 발행 자체를 막지 않는다.
+  }
+}
+
+function parseStoredFeatures(value: string | null | undefined): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 초안 부분 수정 모드(BRANDLINK_REVISE_REQUEST). 네이버 세션·상품 페이지 수집 없이,
+ * 저장된 스펙·초안을 바탕으로 지시한 섹션만 다시 생성하고 패키지를 갱신한다.
+ */
+async function runPreparedPostRevision(
+  linkId: string,
+  connectKind: "SHOPPING" | "TRAVEL",
+  link: { url: string; productName: string | null; productDescription?: string | null; productFeatures?: string | null },
+  requestPath: string,
+): Promise<void> {
+  const outputDir = process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim();
+  if (!outputDir) throw new Error("BRANDLINK_PREPARE_OUTPUT_DIR 이 필요합니다.");
+  const request = JSON.parse(fs.readFileSync(requestPath, "utf8")) as { instructions?: unknown; sectionIndexes?: unknown };
+  const instructions = typeof request.instructions === "string" ? request.instructions.trim() : "";
+  if (!instructions) throw new Error("수정 지시가 비어 있습니다.");
+  const sectionIndexes = Array.isArray(request.sectionIndexes)
+    ? request.sectionIndexes.filter((value): value is number => Number.isInteger(value))
+    : [];
+  const prepared = loadPreparedBrandLinkPostOverride({ requireApproval: false });
+  if (!prepared?.spec || !prepared.draft) {
+    throw new Error("이 초안은 스펙 정보가 없어 부분 수정을 지원하지 않습니다(ChatGPT 제출 초안 등). 초안을 다시 생성하세요.");
+  }
+  console.log(`\n✏️ 초안 수정 모드: ${instructions.slice(0, 80)}${sectionIndexes.length ? ` (섹션 ${sectionIndexes.join(", ")})` : ""}`);
+  const result = await reviseAssembledPost({
+    spec: prepared.spec,
+    draft: prepared.draft,
+    instructions,
+    sectionIndexes,
+    brandLink: link.url,
+    options: { quotationHeaders: NAVER_EDITOR_QUOTATION_ENABLED },
+  });
+  for (const note of result.notes) console.log(`   · ${note}`);
+  console.log(`   🧪 검증: ${result.validation.summary}`);
+  const post: GeneratedPostPreview = {
+    title: result.title,
+    sections: result.sections,
+    hashtags: result.hashtags,
+    generationSource: "AI",
+    rawResponse: "spec-first:revise",
+    assembled: result,
+    notes: result.notes,
+  };
+  const imagePaths = Array.from(new Set([prepared.heroImagePath, ...result.bodyImagePaths].filter((imagePath) => fs.existsSync(imagePath))));
+  const composition = resolvePostDocument({
+    connectKind,
+    title: post.title,
+    sections: post.sections,
+    hashtags: post.hashtags,
+    imagePaths,
+    connectUrl: link.url,
+    qualityPreset: BRANDLINK_QUALITY_PRESET,
+    experienceMode: BRANDLINK_EXPERIENCE_MODE,
+  });
+  post.composition = composition;
+  const contentReadiness = BRANDLINK_CONTENT_READINESS_ENABLED
+    ? getBrandLinkContentReadiness({
+        productName: link.productName || "",
+        title: post.title,
+        sections: post.sections,
+        hashtags: post.hashtags,
+        brandLink: link.url,
+        generationSource: "AI",
+        hasRepresentativeImage: true,
+        requireRepresentativeImage: BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE,
+        thumbnailGenerated: true,
+        connectKind,
+        experienceMode: BRANDLINK_EXPERIENCE_MODE,
+        compositionQualityReport: composition.qualityReport,
+        sourceDescription: link.productDescription || "",
+        sourceFeatures: parseStoredFeatures(link.productFeatures),
+      })
+    : null;
+  const manifestPath = writePreparedBrandPostPackage({
+    outputDir: path.resolve(outputDir),
+    brandLinkId: linkId,
+    connectKind,
+    post,
+    imagePaths,
+    composition,
+    contentReadiness,
+    assembled: result,
+  });
+  writePrepareResult(path.resolve(outputDir), {
+    ok: result.validation.canPublish,
+    code: result.validation.canPublish ? "OK" : "CONTENT_BLOCKED",
+    message: result.validation.summary,
+    readiness: summarizeSpecValidation(result),
+  });
+  console.log(`   📦 수정된 초안 패키지 저장: ${manifestPath}`);
+  await prisma.brandLink.update({ where: { id: linkId }, data: { errorMessage: `초안 수정 완료 (${result.validation.status})` } });
+}
+
 async function main() {
   const linkId = process.argv[2];
   const runtimePublishOptions = parseRuntimePublishOptions(process.argv.slice(3));
@@ -10079,8 +10316,10 @@ async function main() {
   console.log("🤖 심플 에이전트 시작");
   console.log("=".repeat(50));
   
-  // 세션 확인
-  if (!fs.existsSync(SESSION_FILE)) {
+  const reviseRequestPath = process.env.BRANDLINK_REVISE_REQUEST?.trim() || "";
+
+  // 세션 확인 (초안 수정 모드는 네이버 세션이 필요 없다)
+  if (!reviseRequestPath && !fs.existsSync(SESSION_FILE)) {
     console.error("❌ 네이버 로그인 세션이 없습니다. npm run login 실행하세요.");
     process.exit(1);
   }
@@ -10090,6 +10329,21 @@ async function main() {
   if (!link) {
     console.error("❌ 링크를 찾을 수 없습니다.");
     process.exit(1);
+  }
+
+  if (reviseRequestPath) {
+    try {
+      await runPreparedPostRevision(linkId, link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING", link, reviseRequestPath);
+    } catch (error) {
+      const message = getErrorMessage(error);
+      console.error("\n❌ 오류:", message);
+      const outputDir = process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim();
+      if (outputDir) writePrepareResult(path.resolve(outputDir), { ok: false, code: classifyFailureCode(message), message });
+      process.exitCode = 1;
+    } finally {
+      await prisma.$disconnect();
+    }
+    return;
   }
   console.log(`\n📎 URL: ${link.url}`);
   console.log(`📂 게시판 번호: ${link.categoryNo || "기본"}`);
@@ -10303,14 +10557,44 @@ async function main() {
     console.log(`🖼️ 이미지: ${product.imagePaths.length}개`);
     console.log("-".repeat(40));
     
+    // 여행 일정 요약 카드는 글보다 먼저 만들어 이미지 플랜의 입력이 되게 한다.
+    const travelEditorialCardPath =
+      link.connectKind === "TRAVEL" && !preparedPostOverride
+        ? await generateTravelEditorialSummaryCard({
+            productName: product.name,
+            description: product.description,
+            features: product.features,
+            price: product.price,
+            outputDir: TEMP_PATH,
+          }).catch((error) => {
+            console.log(`   ⚠️ 여행 일정 요약 카드 생성 실패: ${getErrorMessage(error)}`);
+            return null;
+          })
+        : null;
+    if (travelEditorialCardPath) {
+      console.log(`   ✅ 여행 일정 요약 카드 생성: ${path.basename(travelEditorialCardPath)}`);
+    }
+    const specImageCandidates: ImageCandidateInput[] = [
+      ...(product.representativeImagePath
+        ? [{ path: product.representativeImagePath, kind: "hero" as const, score: 1000 }]
+        : []),
+      ...(travelEditorialCardPath ? [{ path: travelEditorialCardPath, kind: "card" as const, score: 900 }] : []),
+      ...product.imagePaths.map((imagePath, index) => ({
+        path: imagePath,
+        kind: (path.basename(imagePath).includes("_detail_crop_") ? "crop" : "source") as ImageCandidateInput["kind"],
+        score: 500 - index,
+      })),
+    ];
     setStage(preparedPostOverride ? "STEP2 준비된 원고 불러오기" : "STEP2 SEO 글 생성");
     // 승인된 준비 원고가 있으면 재생성하지 않고 그대로 사용한다.
     const post = preparedPostOverride?.post ?? await step2_generatePost(
       product,
       link.url,
       link.id,
-      link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING"
+      link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
+      { imageCandidates: specImageCandidates, tempDir: TEMP_PATH, memo: process.env.BRANDLINK_DRAFT_MEMO?.trim() || null }
     );
+    const assembled: AssembledPost | null = post.assembled ?? null;
     // 쇼핑 GPT가 상세 이미지에서 추출한 evidenceFacts는 step2_generatePost에서
     // product.features에 합쳐진다. 이 값을 저장하지 않으면 이후 미리보기/QC가
     // 크롤링 당시의 SEO 키워드만 읽어 근거가 없는 글로 오판한다.
@@ -10348,22 +10632,6 @@ async function main() {
           link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
         );
     const generatedThumbnailPath = generatedThumbnail?.path || null;
-    const travelEditorialCardPath =
-      link.connectKind === "TRAVEL" && !preparedPostOverride
-        ? await generateTravelEditorialSummaryCard({
-            productName: product.name,
-            description: product.description,
-            features: product.features,
-            price: product.price,
-            outputDir: TEMP_PATH,
-          }).catch((error) => {
-            console.log(`   ⚠️ 여행 일정 요약 카드 생성 실패: ${getErrorMessage(error)}`);
-            return null;
-          })
-        : null;
-    if (travelEditorialCardPath) {
-      console.log(`   ✅ 여행 일정 요약 카드 생성: ${path.basename(travelEditorialCardPath)}`);
-    }
     const collectedImagePaths = Array.from(new Set(preparedPostOverride
       ? [preparedPostOverride.heroImagePath, ...preparedPostOverride.bodyImagePaths]
       : [
@@ -10372,13 +10640,28 @@ async function main() {
           ...(product.representativeImagePath ? [product.representativeImagePath] : []),
           ...product.imagePaths,
         ]));
-    const uploadImagePaths = await buildBlogUploadImagePaths({
+    let uploadImagePaths = await buildBlogUploadImagePaths({
       imagePaths: collectedImagePaths,
       generatedThumbnailPath,
       representativeImagePath: product.representativeImagePath,
       editorialImagePath: travelEditorialCardPath,
       connectKind: runtimeConnectKind,
     });
+    if (assembled) {
+      // Spec-first: 이미지 플랜이 확정한 슬롯 순서를 그대로 쓴다(생성 썸네일이 있으면 맨 앞).
+      const seenUpload = new Set<string>();
+      uploadImagePaths = [
+        ...(generatedThumbnailPath ? [generatedThumbnailPath] : []),
+        ...assembled.uploadImagePaths,
+      ].filter((imagePath) => {
+        if (!imagePath || !fs.existsSync(imagePath)) return false;
+        const resolved = path.resolve(imagePath);
+        if (seenUpload.has(resolved)) return false;
+        seenUpload.add(resolved);
+        return true;
+      });
+      console.log(`   🧭 Spec-first 이미지 슬롯 적용: 업로드 ${uploadImagePaths.length}장`);
+    }
     product.imagePaths = uploadImagePaths;
     if (generatedThumbnailPath) {
       console.log(
@@ -10467,8 +10750,18 @@ async function main() {
         imagePaths: product.imagePaths,
         composition,
         contentReadiness,
+        assembled,
       });
       console.log(`   📦 승인 대기 초안 패키지 저장: ${manifestPath}`);
+      const readyToPublish = (contentReadiness?.canPublish ?? true) && composition.qualityReport.canAutoPublish;
+      writePrepareResult(path.resolve(prepareOutputDir), {
+        ok: true,
+        code: readyToPublish ? "OK" : "CONTENT_BLOCKED",
+        message: readyToPublish
+          ? "초안 패키지를 저장했습니다."
+          : contentReadiness?.reason || contentReadiness?.summary || composition.qualityReport.blockers.join(" "),
+        readiness: assembled ? summarizeSpecValidation(assembled) : contentReadiness,
+      });
     }
     if (DEBUG_SAVE_GENERATED_POST || DRY_RUN_GENERATE_ONLY) {
       previewPath = saveGeneratedPostPreview(linkId, post, product, contentReadiness);
@@ -10656,6 +10949,10 @@ async function main() {
   } catch (error: unknown) {
     const message = `[${currentStage}] ${getErrorMessage(error)}`;
     console.error("\n❌ 오류:", message);
+    const prepareOutputDirOnError = process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim();
+    if (prepareOutputDirOnError) {
+      writePrepareResult(path.resolve(prepareOutputDirOnError), { ok: false, code: classifyFailureCode(message), message });
+    }
     
     await prisma.brandLink.update({
       where: { id: linkId },

@@ -22,10 +22,11 @@ if (-not $mcpUrl.StartsWith("$BaseUrl/api/mcp/")) { throw 'MCP URL origin or pat
 $initialize = Invoke-Mcp -Url $mcpUrl -Message @{ jsonrpc = '2.0'; id = 1; method = 'initialize'; params = @{ protocolVersion = '2025-11-25'; capabilities = @{}; clientInfo = @{ name = 'sites-e2e'; version = '1.0' } } }
 if ($initialize.result.protocolVersion -ne '2025-11-25') { throw 'MCP protocol negotiation failed.' }
 $tools = Invoke-Mcp -Url $mcpUrl -Message @{ jsonrpc = '2.0'; id = 2; method = 'tools/list'; params = @{} }
-$expectedToolCount = 15
+$expectedToolCount = 25
 if (@($tools.result.tools).Count -ne $expectedToolCount) { throw "Expected $expectedToolCount MCP tools." }
 $toolNames = @($tools.result.tools | ForEach-Object { [string]$_.name })
-if ($toolNames -notcontains 'post_create_draft' -or $toolNames -notcontains 'post_submit_draft') { throw 'Two-stage ChatGPT draft tools are missing.' }
+if ($toolNames -notcontains 'post_prepare_draft' -or $toolNames -notcontains 'post_submit_draft') { throw 'Two-stage ChatGPT draft tools are missing.' }
+foreach ($required in @('post_create_draft','post_get_draft','post_revise_draft','post_approve_draft','post_set_thumbnail','post_verify_published','travel_capture_contract','settings_get','job_cancel')) { if ($toolNames -notcontains $required) { throw "MCP tool $required is missing." } }
 
 $modernProtocol = '2026-07-28'
 $modernMeta = @{
