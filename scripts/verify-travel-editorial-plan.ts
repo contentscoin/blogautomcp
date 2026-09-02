@@ -147,6 +147,22 @@ assert.ok(substance.coveredPlaces.includes("루체른"));
 assert.equal(substance.vagueToneCount, 0);
 assert.equal(substance.productDetailCount, 0);
 
+const daNangSource =
+  "럭셔리 상품 설명 핵심 방문지: 다낭 대성당, 호이안 구시가지, 내원교, 쩐가사당, 풍흥고가, 광조회관, 바나산 국립공원, 영흥사 2일차 일정: 미케비치";
+const daNangSubstance = assessTravelReviewSubstance({
+  productName: "[노옵션다낭/호이안] 5성호텔 5일",
+  sourceText: daNangSource,
+  sections: [
+    "다낭 대성당의 문화와 건축을 살펴보고 주변 거리의 색을 사진으로 남겨보세요.",
+    "호이안 구시가지는 오래된 골목과 강변 풍경이 이어져 천천히 걷고 야경을 즐기기 좋습니다.",
+    "내원교는 호이안의 역사와 분위기를 함께 느낄 수 있는 장소라 해 질 무렵 동선과 촬영 시간을 잡는 팁이 유용합니다.",
+  ],
+});
+assert.ok(daNangSubstance.evidenceJudgementCount >= 3);
+assert.ok(daNangSubstance.coveredPlaces.includes("다낭 대성당"));
+assert.ok(daNangSubstance.coveredPlaces.includes("호이안 구시가지"));
+assert.ok(daNangSubstance.coveredPlaces.includes("내원교"));
+
 console.log(JSON.stringify({
   ok: true,
   sectionTitles: titles,

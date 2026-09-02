@@ -205,7 +205,11 @@ function normalizeSubmittedDraft(value: unknown, connectKind: string): { title: 
     .map((item) => item.replace(/\s+/g, ' ').slice(0, 220))
     .filter((item) => item.length >= 4))).slice(0, 12);
   const minimumSections = connectKind === 'travel' ? 10 : 9;
-  const minimumCharacters = connectKind === 'travel' ? 3200 : 1800;
+  // Keep the MCP boundary aligned with the travel generation contract. The
+  // quality gate already enforces the configured 1,750-character minimum;
+  // rejecting valid 1,750~3,600-character drafts here made the two-step flow
+  // impossible for otherwise publishable standard drafts.
+  const minimumCharacters = connectKind === 'travel' ? 1750 : 1800;
   const totalCharacters = sections.reduce((sum, section) => sum + section.length, 0);
   if (title.length < 8 || title.length > 100) return null;
   if (sections.length < minimumSections || sections.length > 12) return null;
@@ -386,7 +390,7 @@ async function callTool(userId: string, name: string, args: JsonObject) {
           ok: false,
           code: 'INVALID_GENERATED_DRAFT',
           message: connectKind === 'travel'
-            ? '여행 원고는 10~12개 섹션·본문 3200자 이상·해시태그 3~10개여야 합니다.'
+            ? '여행 원고는 10~12개 섹션·본문 1750자 이상·해시태그 3~10개여야 합니다.'
             : '쇼핑 원고는 9~12개 섹션·본문 1800자 이상·해시태그 3~10개여야 합니다.',
         }, true);
       }

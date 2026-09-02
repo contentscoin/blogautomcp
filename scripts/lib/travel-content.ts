@@ -317,7 +317,7 @@ export function extractTravelProductFacts(
   const bracketHighlights = Array.from(source.matchAll(/[<〈]([^>〉]+)[>〉]/gu))
     .flatMap((match) => match[1].split(/[\/, +·]/u));
   const structuredHighlights = features.flatMap((feature) => {
-    const match = clean(feature).match(/^핵심\s*방문지\s*:\s*(.+)$/u);
+    const match = clean(feature).match(/핵심\s*방문지\s*:\s*(.+?)(?=\s+(?:출국|귀국|\d+일차\s*일정|쇼핑\s*일정)\s*:|$)/u);
     return match ? match[1].split(/[,/·]/u) : [];
   });
   const conditionMatchers = [
@@ -567,7 +567,11 @@ export function assessTravelReviewSubstance(input: {
   sourceText?: string;
 }): TravelReviewSubstanceAssessment {
   const body = input.sections.join("\n");
-  const facts = extractTravelProductFacts(input.productName, input.sourceText || "");
+  // The editorial gate receives the product description and features as one
+  // sourceText string. Pass that source through the feature parser as well so
+  // structured lines such as "핵심 방문지: ..." remain exact place evidence.
+  const sourceText = input.sourceText || "";
+  const facts = extractTravelProductFacts(input.productName, sourceText, sourceText ? [sourceText] : []);
   const places = unique([...facts.highlights, ...facts.destinations], 8);
   const coveredPlaces = places.filter((place) => body.includes(place));
   const sentences = body.split(/[\n.!?。]+/u).map(clean).filter((item) => item.length >= 8);
