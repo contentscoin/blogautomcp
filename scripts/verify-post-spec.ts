@@ -76,6 +76,23 @@ async function main() {
   assert.ok(imageSections.length >= 4, "이미지가 붙은 섹션이 4개 이상");
   assert.equal(spec.sections[0].imageSlotIds.length, 0, "요약 섹션 앞에는 hero 만 온다");
 
+  // --- 섹션별 근거표: 본문 섹션마다 전용 근거 1개 이상, 전용 근거는 한 섹션에만 ---
+  assert.equal(spec.evidenceLedger.length, spec.sections.length, "근거표는 섹션 수와 같아야 함");
+  const exclusiveSeen = new Map<string, number>();
+  for (const entry of spec.evidenceLedger) {
+    for (const line of entry.exclusive) {
+      assert.ok(!exclusiveSeen.has(line), `전용 근거 "${line}"가 섹션 ${exclusiveSeen.get(line)}와 ${entry.sectionIndex}에 중복 배정됨`);
+      exclusiveSeen.set(line, entry.sectionIndex);
+    }
+  }
+  for (const section of spec.sections) {
+    if (section.shape === "prose" || section.shape === "qa-3" || section.shape === "checklist") {
+      assert.ok(section.mustUseEvidence.length >= 1, `${section.title}(${section.role}) 섹션에 전용 근거가 없음`);
+    }
+    for (const line of section.mustUseEvidence) assert.ok(section.evidence.includes(line), "전용 근거는 사용 가능 근거에도 포함");
+  }
+  assert.ok(spec.sections.some((section) => section.mustUseEvidence.some((line) => /물살 3단계|온수 조절|분리 세척 노즐/u.test(line))), "상세 근거 줄이 전용 근거로 배정되어야 함(특징 접두사 버그 회귀)");
+
   const shopping = await runSpecFirstPipeline(shoppingInput);
   assert.equal(shopping.generationSource, "local-template");
   assert.equal(shopping.sections.length, spec.sections.length + 1, "마지막은 고지 섹션");
@@ -105,6 +122,33 @@ async function main() {
   assert.ok(report.repair.targets.some((t) => t.code === "RAW_LINK" && t.sectionIndex === 4), "URL 섹션 4 타깃");
   assert.ok(report.repair.targets.some((t) => t.sectionIndex === null && t.code.startsWith("TITLE_")), "제목 타깃");
   assert.ok(report.signals.length >= 20, "모든 신호를 계산해야 함(early-return 금지)");
+  assert.ok(report.quality && typeof report.quality.score === "number" && report.quality.categories.length === 6, "검증 보고서는 품질 카테고리를 담아야 함");
+  assert.ok(report.quality.blockers.length === 0 || report.quality.blockers.every((b) => b.tier === "safety" || b.tier === "structure"));
+
+  // --- 검증기: 근거를 안 쓴 일반론 섹션 / 숫자만 바뀐 반복 문장 ---
+  const generic = normalizeDraft(spec, shopping.draft);
+  const benefitIndex = spec.sections.find((section) => section.role === "benefit")!.index;
+  const useCaseIndex = spec.sections.find((section) => section.role === "use-case")!.index;
+  generic.sections[benefitIndex].lines = [
+    "사용 환경에 따라 체감이 달라질 수 있어요.",
+    "구매 전에 상세 설명을 한 번 더 확인해보세요.",
+    "옵션은 주문 화면에서 살펴보는 게 좋아요.",
+    "상황에 따라 다른 제품이 맞을 수도 있어요.",
+  ];
+  generic.sections[useCaseIndex].lines = generic.sections[benefitIndex].lines.map((line, index) => `${line.slice(0, -1)} ${index + 1}.`);
+  const genericReport = validateDraft(spec, generic, { brandLink: "https://naver.me/example", hasRepresentativeImage: true, requireRepresentativeImage: true, thumbnailGenerated: true });
+  assert.ok(genericReport.repair.targets.some((t) => t.code === "EVIDENCE_UNUSED" && t.sectionIndex === benefitIndex), "전용 근거를 쓰지 않은 섹션은 수리 타깃");
+  assert.ok(genericReport.repair.targets.some((t) => t.code === "GENERIC_GUIDANCE" && t.sectionIndex === benefitIndex), "확인 안내·일반론으로 채운 섹션은 수리 타깃");
+  assert.ok(genericReport.repair.targets.some((t) => t.code === "REPEATED_LINE" && t.sectionIndex === useCaseIndex), "숫자만 바뀐 반복 문장은 REPEATED_LINE 타깃");
+  assert.notEqual(genericReport.status, "READY", "일반론·반복 초안은 READY 가 될 수 없음");
+  assert.ok(genericReport.score <= shopping.validation.score, "품질이 나빠지면 점수도 내려가야 함");
+
+  // --- 검증기: 카테고리 혼입은 하드 차단(P0) ---
+  const mixed = normalizeDraft(spec, shopping.draft);
+  mixed.sections[benefitIndex].lines = [...mixed.sections[benefitIndex].lines, "구성품 확인 후 배송 조건과 교환 규정을 살펴보세요."];
+  const mixedReport = validateDraft({ ...spec, connectKind: "TRAVEL" }, mixed, { brandLink: "https://naver.me/example", hasRepresentativeImage: true, requireRepresentativeImage: true, thumbnailGenerated: true });
+  assert.equal(mixedReport.status, "BLOCKED", "여행 글에 쇼핑 문구가 섞이면 차단");
+  assert.ok(mixedReport.repair.targets.some((t) => t.code === "CATEGORY_MISMATCH" && t.sectionIndex === benefitIndex));
 
   // --- 여행 ---
   const travelInput = {

@@ -112,7 +112,8 @@ function shoppingTemplates(ctx: LibraryContext): Record<string, SectionTemplate>
   const name = ctx.shortName;
   const keyword = ctx.primaryKeyword;
   const price = factValue(ctx, "가격") || ctx.price || "판매 페이지 확인";
-  const features = ctx.factLines.filter((line) => line.startsWith("특징:")).map((line) => line.slice(3).trim());
+  // 확인 사실 줄은 "상세 근거: …" 형식이다 (product-editorial-plan.buildProductEditorialPlan 참고).
+  const features = ctx.factLines.filter((line) => /^(?:상세 근거|특징):/u.test(line)).map((line) => line.replace(/^(?:상세 근거|특징):\s*/u, "").trim());
   const feature1 = features[0] || "핵심 기능";
   const feature2 = features[1] || "구성";
   return {

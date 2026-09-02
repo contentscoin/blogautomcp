@@ -13,6 +13,7 @@ import { getProductTokens } from "../brandlink-content-readiness";
 import { isOpenAiAvailable } from "../openai-text";
 import { extractTravelProductFacts, type TravelProductFacts } from "../travel-content";
 import { assemblePost, normalizeDraft } from "./assemble";
+import { buildEvidenceLedger } from "./evidence-ledger";
 import { generateDraftWithOpenAi, type GenerateContext } from "./generate";
 import { assignImageSlots, prepareImagePool } from "./image-plan";
 import { buildLocalDraft } from "./local-template";
@@ -106,7 +107,7 @@ function choosePrimaryKeyword(kind: ConnectKind, product: SpecFirstProductInput,
   return tokens[0] || shortProductName(product.name);
 }
 
-function sectionSpecFromTemplate(template: SectionTemplate, index: number, evidence: string[]): SectionSpec {
+function sectionSpecFromTemplate(template: SectionTemplate, index: number, evidence: string[], mustUseEvidence: string[]): SectionSpec {
   const rule = SHAPE_RULES[template.shape];
   return {
     index,
@@ -117,6 +118,7 @@ function sectionSpecFromTemplate(template: SectionTemplate, index: number, evide
     purpose: template.purpose,
     evidenceRule: template.evidenceRule,
     evidence,
+    mustUseEvidence,
     requiredKeywords: template.requiredKeywords,
     minChars: rule.minChars,
     maxChars: rule.maxChars,
@@ -193,9 +195,21 @@ export async function buildPostSpec(input: SpecFirstPipelineInput): Promise<Buil
     collectedAt: todayLabel(),
   };
   const templates = buildSectionTemplates(ctx, sectionCount);
-  const sections = templates.map((template, index) =>
-    sectionSpecFromTemplate(template, index, template.role === "key-facts" || template.role === "offer-check" || template.role === "inclusions" ? editorial.verifiedFactLines : []),
-  );
+  // A″. 섹션별 근거표: 본문 섹션마다 전용 근거를 1개 이상 배정하고 재사용을 막는다.
+  const evidenceLedger = buildEvidenceLedger({
+    kind,
+    productName: product.name,
+    factLines: editorial.verifiedFactLines,
+    review: kind === "SHOPPING" ? editorial.reviewAnalysis : null,
+    travel,
+    templates,
+  });
+  const sections = templates.map((template, index) => {
+    const entry = evidenceLedger[index];
+    const legacyEvidence = template.role === "key-facts" || template.role === "offer-check" || template.role === "inclusions" ? editorial.verifiedFactLines : [];
+    const evidence = Array.from(new Set([...(entry?.exclusive || []), ...(entry?.shared || []), ...legacyEvidence]));
+    return sectionSpecFromTemplate(template, index, evidence, entry?.exclusive || []);
+  });
   const imagePlan = assignImageSlots(
     pool,
     templates.map((template, index) => ({ index, imageCount: template.imageCount, imageIntent: template.imageIntent })),
@@ -224,6 +238,7 @@ export async function buildPostSpec(input: SpecFirstPipelineInput): Promise<Buil
     facts: { lines: editorial.verifiedFactLines, travel, blockedClaimRules: editorial.blockedClaimRules },
     brief: input.brief,
     sections,
+    evidenceLedger,
     imagePlan,
     seo: {
       primaryKeyword,

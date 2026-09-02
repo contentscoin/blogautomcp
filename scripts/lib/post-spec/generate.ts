@@ -7,6 +7,7 @@ import { buildHumanMobileStyleGuide, NAVER_SEO_TITLE_RULES } from "../blog-writi
 import { HUMANIZE_RULES } from "../humanize-korean";
 import { formatOpenCrabSeoBriefForPrompt } from "../opencrab-seo-brief";
 import { formatTravelFactsForPrompt } from "../travel-content";
+import { otherSectionsEvidence } from "./evidence-ledger";
 import { generateStructured } from "./llm-client";
 import { buildDraftJsonSchema, sectionKey } from "./schema";
 import { SHAPE_RULES } from "./section-library";
@@ -32,6 +33,9 @@ export function renderSystemPrompt(spec: PostSpec, ctx: GenerateContext): string
     "- 섹션마다 지정된 형식(줄 수·글자 수·접두사)을 정확히 지키세요.",
     "- 본문 문장은 부드러운 ~요체로, 개인 검토 소감(~더라고요, ~마음에 들었어요, 찾아보니 ~라고 해요)은 허용하되 실제 구매·사용·방문 사실은 단정하지 마세요.",
     "- URL, 내부 지침, 역할 이름, JSON 키는 본문에 쓰지 마세요.",
+    "- 섹션마다 '이 섹션 전용 근거'를 최소 1개 골라 수치·이름을 그대로 쓰고, 그 근거가 독자에게 무엇을 뜻하는지(어떤 장면에서 어떤 차이가 나는지)까지 한 문장으로 잇습니다.",
+    "- 다른 섹션 전용 근거와 앞 섹션에서 이미 쓴 문장·판단은 되풀이하지 않습니다. 같은 뜻을 어미만 바꿔 다시 쓰는 것도 반복입니다.",
+    "- '확인해보세요', '살펴보는 게 좋아요', '상황에 따라 달라요' 같은 확인 안내·일반론 문장은 섹션당 1개까지만 씁니다. 근거가 없으면 문단을 짧게 끝내고 안내 문장으로 채우지 않습니다.",
     briefBlock,
     travelBlock,
     "[금지 주장]",
@@ -66,6 +70,9 @@ export function renderTitleRules(spec: PostSpec): string {
 
 export function renderSectionInstruction(section: SectionSpec, spec: PostSpec): string {
   const rule = SHAPE_RULES[section.shape];
+  const mustUse = section.mustUseEvidence || [];
+  const sharedEvidence = section.evidence.filter((line) => !mustUse.includes(line));
+  const others = otherSectionsEvidence(spec.evidenceLedger || [], section.index, spec.sections.map((item) => item.title));
   const imageNote =
     section.imageSlotIds.length > 0
       ? `- 이 섹션 앞에 이미지 ${section.imageSlotIds.length}장이 옵니다: ${section.imageIntent}. 사진과 어긋나지 않게 쓰세요.`
@@ -79,7 +86,11 @@ export function renderSectionInstruction(section: SectionSpec, spec: PostSpec): 
     `- 형식: ${rule.formatHint}`,
     `- 분량: ${section.minLines}~${section.maxLines}줄, 공백 제외 ${section.minChars}~${section.maxChars}자`,
     section.requiredKeywords.length ? `- 반드시 포함: ${section.requiredKeywords.join(", ")}` : "",
-    section.evidence.length ? `- 이 섹션에서 쓸 수 있는 근거: ${section.evidence.join(" / ")}` : "",
+    mustUse.length
+      ? `- 이 섹션 전용 근거 (최소 1개는 수치·이름 그대로 사용, 다른 섹션에서는 쓰지 않음): ${mustUse.join(" / ")}`
+      : "",
+    sharedEvidence.length ? `- 함께 참조할 수 있는 공용 근거: ${sharedEvidence.join(" / ")}` : "",
+    others.length ? `- 다른 섹션 전용 근거 (여기서는 쓰지 않기): ${others.slice(0, 6).join(" | ")}` : "",
     imageNote,
     ...section.hints.map((hint) => `- ${hint}`),
     spec.connectKind === "TRAVEL" && section.role === "day-course"
@@ -103,8 +114,8 @@ function renderHashtagRules(spec: PostSpec): string {
 function previousChunkSummary(sections: GeneratedSection[]): string {
   if (sections.length === 0) return "";
   return [
-    "## 앞서 작성된 섹션 (반복하지 마세요)",
-    ...sections.map((section) => `- ${section.title}: ${section.lines[0] || ""}`),
+    "## 앞서 작성된 섹션 (같은 근거·같은 판단을 되풀이하지 마세요)",
+    ...sections.map((section) => `- ${section.title}: ${section.lines.slice(0, 2).join(" ")}`),
   ].join("\n");
 }
 

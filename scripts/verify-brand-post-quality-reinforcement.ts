@@ -54,10 +54,22 @@ const assess = (sections: string[]) => getBrandLinkContentReadiness({
 });
 
 const weak = assess(weakSections);
+// 분량을 채우는 보강 문장은 섹션마다 다른 뜻이어야 한다. 숫자만 바뀐 문장은
+// 반복으로 잡히므로(의도된 동작) 여기서는 서로 다른 판단 문장을 쓴다.
+const DISTINCT_FILLERS = [
+  "출발확정 표기는 모객 실패로 취소될 걱정을 덜어 줘서 휴가를 먼저 확정해야 하는 직장인에게 실질적인 장점이에요.",
+  "시내숙박 조건은 저녁 시간에 이즈하라 골목을 따로 걸어볼 여유를 만들어 주는 대신 아침 집결이 빨라질 수 있어요.",
+  "1박 2일이라는 짧은 일정은 이동 시간을 줄이는 대신 한 장소에 오래 머무는 여유는 포기해야 한다는 뜻이에요.",
+  "표시가 126,003원은 교통과 숙박이 묶인 값이라 부산 출발 자유여행과 비교할 때는 현지 이동비를 더해 봐야 해요.",
+  "티아라몰 쇼핑 일정은 기념품을 한 번에 사기에는 편하지만 자유 산책 시간이 그만큼 줄어드는 선택이에요.",
+  "항구 도착 직후 일정이 이어지는 구조라 멀미가 있는 여행자라면 배 안에서 쉬는 자세를 미리 정해 두는 편이 좋아요.",
+  "사진 위주 여행자라면 미우다 해변과 와타즈미 신사가 같은 날에 묶이는지 일정표에서 먼저 보는 게 실속 있어요.",
+  "짐이 가벼운 짧은 여행이라 편한 신발과 얇은 겉옷만 챙겨도 이동 부담이 크지 않아요.",
+];
 const stronger = assess(strongerSections.map((section, index) => (
   index === strongerSections.length - 1
     ? section
-    : `${section}\n\n판단 포인트 ${index + 1}은 상품의 표기 조건을 여행자의 시간·예산·이동 성향에 연결해 장점과 대가를 함께 읽는 것입니다. 선택 차이 ${index + 1}은 단순 예약 안내보다 실제 결정에 필요한 기준을 선명하게 만듭니다.`
+    : `${section}\n\n${DISTINCT_FILLERS[index % DISTINCT_FILLERS.length]}`
 )));
 
 const naturalTravelSections = strongerSections;
@@ -75,15 +87,15 @@ assert.equal(
 );
 const lowEvidence = assess(strongerSections.map((section, index) => {
   const withoutSpecificPlaces = section
-    .replaceAll("히타카츠", "첫 번째 지역")
-    .replaceAll("이즈하라", "두 번째 지역")
-    .replaceAll("대마도", "목적지");
+    .split("히타카츠").join("첫 번째 지역")
+    .split("이즈하라").join("두 번째 지역")
+    .split("대마도").join("목적지");
   const withProductToken = index === 0
     ? `${withoutSpecificPlaces}\n\n대마도 상품 정보를 바탕으로 정리합니다.`
     : withoutSpecificPlaces;
   return index === strongerSections.length - 1
     ? withProductToken
-    : `${withProductToken}\n\n판단 관점 ${index + 1}은 일정 선택의 장점과 대가를 독자의 시간과 예산에 연결합니다. 선택 기준 ${index + 1}을 놓고 보면 우선순위가 더 분명해집니다.`;
+    : `${withProductToken}\n\n${DISTINCT_FILLERS[index % DISTINCT_FILLERS.length].split("히타카츠").join("첫 번째 지역").split("이즈하라").join("두 번째 지역").split("대마도").join("목적지")}`;
 }));
 assert.equal(weak.canPublish, false);
 assert.ok(
@@ -100,6 +112,70 @@ assert.equal(lowEvidence.canPublish, false);
 assert.equal(lowEvidence.code, "low-evidence-density", lowEvidence.reason || lowEvidence.summary);
 assert.equal(lowEvidence.signals.find((signal) => signal.key === "evidence-density")?.status, "fail");
 assert.equal(stronger.signals.find((signal) => signal.key === "evidence-density")?.status, "pass");
+
+// --- 하드 차단과 품질 점수의 분리 ---
+assert.equal(weak.verdict, "blocked");
+assert.ok(weak.blockers.some((blocker) => blocker.code === "too-short-content" && blocker.tier === "structure"));
+assert.ok(weak.quality.categories.find((category) => category.key === "clarity")?.status === "fail", "차단과 별개로 품질 카테고리도 함께 계산해야 함");
+assert.equal(naturalTravel.verdict, "pass");
+assert.ok(naturalTravel.quality.score >= naturalTravel.quality.passScore);
+assert.equal(lowEvidence.verdict, "quality");
+assert.equal(lowEvidence.blockers.length, 0, "품질 미달은 하드 차단이 아니다");
+
+// 숫자·어미만 바뀐 문장이 섹션마다 반복되면 정규식으로 같은 문장이 아니어도 반복으로 본다.
+const numberedRepeat = assess(strongerSections.map((section, index) =>
+  index === strongerSections.length - 1
+    ? section
+    : `${section}\n\n판단 포인트 ${index + 1}은 상품의 표기 조건을 여행자의 시간과 예산에 연결해 장점과 대가를 함께 읽는 것입니다.`
+));
+assert.equal(numberedRepeat.code, "repetitive-content", numberedRepeat.reason || numberedRepeat.summary);
+assert.equal(numberedRepeat.verdict, "quality");
+assert.ok(numberedRepeat.quality.repetition.nearDuplicateCount >= 5);
+assert.ok(numberedRepeat.score < naturalTravel.score, "반복 원고 점수는 자연 원고보다 낮아야 함");
+
+// 여행 글에 쇼핑 문구(배송·교환·구성품)가 섞이면 카테고리 혼입 하드 차단.
+const travelWithShopping = assess(strongerSections.map((section, index) =>
+  index === 2 ? `${section}\n\n구성품과 배송 조건은 판매 페이지에서 확인해야 해요.` : section
+));
+assert.equal(travelWithShopping.code, "category-mismatch", travelWithShopping.reason || travelWithShopping.summary);
+assert.equal(travelWithShopping.verdict, "blocked");
+assert.ok(travelWithShopping.blockers.some((blocker) => blocker.tier === "safety"));
+
+// 편집 단계에서는 대표 이미지가 아직 없어도 차단하지 않는다(발행 단계에서만 요구).
+const editorialWithoutHero = getBrandLinkContentReadiness({
+  productName,
+  title: "대마도 2일 패키지 출발확정 시내숙박 예약 조건",
+  sections: naturalTravelSections,
+  hashtags: ["대마도여행", "대마도2일", "대마도패키지"],
+  brandLink: "https://brandconnect.naver.com/travel-fixture",
+  generationSource: "AI",
+  hasRepresentativeImage: false,
+  requireRepresentativeImage: true,
+  thumbnailGenerated: false,
+  connectKind: "TRAVEL",
+  sourceDescription: "히타카츠 이즈하라 시내숙박 출발확정 티아라몰 쇼핑",
+  sourceFeatures: ["1박 2일", "표시가 126,003원"],
+  mode: "editorial",
+});
+assert.equal(editorialWithoutHero.canPublish, true, editorialWithoutHero.reason || editorialWithoutHero.summary);
+assert.ok(!editorialWithoutHero.signals.some((signal) => signal.key === "representative-image"), "편집 모드 신호에는 이미지 항목이 없어야 함");
+const publishWithoutHero = getBrandLinkContentReadiness({
+  productName,
+  title: "대마도 2일 패키지 출발확정 시내숙박 예약 조건",
+  sections: naturalTravelSections,
+  hashtags: ["대마도여행", "대마도2일", "대마도패키지"],
+  brandLink: "https://brandconnect.naver.com/travel-fixture",
+  generationSource: "AI",
+  hasRepresentativeImage: false,
+  requireRepresentativeImage: true,
+  thumbnailGenerated: false,
+  connectKind: "TRAVEL",
+  sourceDescription: "히타카츠 이즈하라 시내숙박 출발확정 티아라몰 쇼핑",
+  sourceFeatures: ["1박 2일", "표시가 126,003원"],
+  mode: "publish",
+});
+assert.equal(publishWithoutHero.code, "missing-representative-image");
+assert.equal(publishWithoutHero.score, editorialWithoutHero.score, "하드 차단은 품질 점수를 바꾸지 않는다");
 
 const shoppingGuideSections = [
   "한 대를 여러 위치에서 쓰고 싶을 때\n\n샤크 플렉스브리즈 FA200KR은 유무선 올인원 선풍기예요. 한곳에 고정하기보다 필요한 곳으로 옮겨 쓰는 방향이 뚜렷해요. 콘센트가 멀어도 배치할 수 있다는 점이 선택 이유예요. 다만 배터리 조건도 함께 따져봐야 해요.",
