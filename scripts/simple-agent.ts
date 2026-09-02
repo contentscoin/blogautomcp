@@ -47,6 +47,7 @@ import {
 import {
   buildProductThumbnailGenerationPrompt,
   generateProductThumbnail,
+  buildProductThumbnailCopy,
 } from "./lib/product-thumbnail";
 import {
   buildLocalTravelPostJson,
@@ -54,17 +55,14 @@ import {
   extractTravelProductFacts,
   formatTravelEditorialPlanForPrompt,
   formatTravelFactsForPrompt,
+  buildTravelThumbnailCopy,
 } from "./lib/travel-content";
 import {
   getConnectEditorInsertionMode,
   type EditorConnectKind,
 } from "./lib/connect-editor-insertion";
 import { generateTravelEditorialSummaryCard } from "./lib/travel-editorial-card";
-import {
-  generateProductThumbnailViaImageApi,
-  isImageApiThumbnailAvailable,
-  qcGeneratedThumbnail,
-} from "./lib/openai-image";
+import { generateThumbnail, isGenerativeThumbnailAvailable } from "./lib/thumbnail-gen";
 import {
   reviseAssembledPost,
   runSpecFirstPipeline,
@@ -869,9 +867,41 @@ async function generateTopTextCutoutThumbnail(
     console.log("   ⚠️ 판매페이지 대표 이미지가 없어 썸네일 생성을 건너뜁니다.");
     return null;
   }
-  // 쇼핑 상품은 생성형 모델에 상품 픽셀을 넘기지 않는다. 원본 RGB를 보존한
-  // 투명 PNG를 로컬에서 만든 뒤 배경과 카피만 합성한다. 분리가 불확실하면
-  // 원본 상세 이미지가 본문 대표 이미지로 유지되도록 썸네일 생성을 중단한다.
+  // 1순위: gpt-image 가 문구까지 한 번에 그리고 OpenAI 비전 QC(95점)로 검수한다.
+  // 최대 시도 안에 통과하지 못하면 아래 로컬 합성으로 강등한다(오탈자 썸네일 방지).
+  if (isGenerativeThumbnailAvailable()) {
+    const generativeCopy =
+      savedSetting?.copy ??
+      (contentKind === "TRAVEL"
+        ? buildTravelThumbnailCopy(product.name)
+        : buildProductThumbnailCopy(postTitle, product.name, "SHOPPING"));
+    const generated = await generateThumbnail({
+      kind: contentKind,
+      productName: product.name,
+      categoryName: inferCategoryKeyword(product.name),
+      description: product.description,
+      features: product.features,
+      price: product.price,
+      copy: generativeCopy,
+      moodId: savedSetting?.style || undefined,
+      referenceImagePath: product.representativeImagePath,
+      outputDir: TEMP_PATH,
+      onLog: (line) => console.log(`   🎨 ${line}`),
+    }).catch((error) => {
+      console.log(`   ⚠️ gpt-image 썸네일 생성 오류: ${getErrorMessage(error)}`);
+      return null;
+    });
+    if (generated) {
+      console.log(
+        `   ✅ gpt-image 썸네일 사용: ${path.basename(generated.path)} (QC ${generated.qc.checked ? `${generated.qc.score}점` : "생략"}, ${generated.attempts}회 시도)`
+      );
+      return { path: generated.path, source: "image-api" };
+    }
+    console.log("   ⚠️ gpt-image 썸네일이 QC 를 통과하지 못해 로컬 합성으로 강등합니다.");
+  } else {
+    console.log("   ℹ️ OPENAI_API_KEY 가 없어 생성형 썸네일을 건너뛰고 로컬 합성을 사용합니다.");
+  }
+
   if (contentKind === "SHOPPING") {
     const suggestedCopy = buildProductThumbnailGenerationPrompt({
       postTitle,
@@ -953,31 +983,6 @@ async function generateTopTextCutoutThumbnail(
     price: product.price,
   });
 
-  // 1순위: Images API 생성형 썸네일(제품 이미지 레퍼런스 + 큰 한글 제목을 생성 단계에서 함께).
-  // 데스크톱에서 유일하게 스스로 동작하는 생성형 경로다. QC(한글 오탈자·제품 왜곡)를
-  // 통과하지 못하면 아래 로컬 합성으로 넘어간다.
-  if (isImageApiThumbnailAvailable()) {
-    console.log("   🎨 Images API 생성형 썸네일 시도...");
-    const apiPath = await generateProductThumbnailViaImageApi({
-      prompt: promptInfo.prompt,
-      referenceImagePath: product.representativeImagePath,
-      outputDir: TEMP_PATH,
-      fileLabel: promptInfo.productNameLabel,
-    });
-    if (apiPath) {
-      const qc = await qcGeneratedThumbnail(apiPath, {
-        productName: promptInfo.productNameLabel,
-        headline: promptInfo.headline,
-      });
-      if (qc.pass) {
-        console.log(
-          `   ✅ Images API 썸네일 사용: ${path.basename(apiPath)}${qc.checked ? "" : ` (${qc.reason})`}`
-        );
-        return { path: apiPath, source: "image-api" };
-      }
-      console.log(`   ⚠️ 생성형 썸네일 QC 불합격: ${qc.reason} — 로컬 합성으로 대체합니다.`);
-    }
-  }
 
   const localSharpPath = await generateProductThumbnailWithSharpLocal(product, promptInfo);
   if (localSharpPath) {

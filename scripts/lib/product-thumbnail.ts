@@ -197,7 +197,7 @@ function pickTheme(productName: string, postTitle: string): ThumbnailTheme | nul
   return THUMBNAIL_THEMES.find((theme) => theme.keywords.some((keyword) => keyword.test(target))) ?? null;
 }
 
-function inferCategoryName(categoryName: string, productName: string): string {
+export function inferCategoryName(categoryName: string, productName: string): string {
   const given = sanitizeText(categoryName);
   if (given && given !== "상품리뷰") return given;
 
@@ -239,7 +239,7 @@ async function buildTravelAccentPng(): Promise<Buffer> {
   return sharp(svg).png().toBuffer();
 }
 
-function inferScenePrompt(categoryName: string, productName: string): string {
+export function inferScenePrompt(categoryName: string, productName: string): string {
   const target = normalizeForMatch(`${categoryName} ${productName}`);
   if (/드라이기|헤어|고데기|뷰티|바디|트리머|면도기/.test(target)) {
     return "Photorealistic vanity or clean bathroom counter scene, product as the hero object, premium beauty review mood, realistic shadow and material texture.";

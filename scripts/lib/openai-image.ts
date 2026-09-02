@@ -8,13 +8,11 @@
  *
  * 여기서는 판매페이지의 실제 제품 이미지를 레퍼런스로 넣고(images/edits),
  * ProductThumbnail.md 지침대로 큰 한글 제목까지 생성 단계에서 함께 그리게 한다.
- * 생성 후에는 OpenAI 비전으로 한글 오탈자·제품 왜곡을 검사하고(QC), 통과하지
- * 못하면 호출자가 로컬 합성 폴백으로 넘어간다.
+ * 생성 후 QC(OpenAI 비전, §10 배점)와 교정 재생성 루프는 thumbnail-gen/ 이 담당한다.
  */
 
 import fs from "fs";
 import path from "path";
-import { getOpenAiApiKey, openaiChatJson } from "./openai-text";
 
 const OPENAI_IMAGE_ENDPOINT_EDITS = "https://api.openai.com/v1/images/edits";
 const OPENAI_IMAGE_ENDPOINT_GENERATIONS = "https://api.openai.com/v1/images/generations";
@@ -24,9 +22,11 @@ const IMAGE_API_ENABLED =
 // gpt-image-2: 텍스트 렌더링(특히 한글)과 편집 시 원본 보존이 이전 세대보다 좋다.
 // 구모델이 필요하면 PRODUCT_THUMBNAIL_IMAGE_MODEL=gpt-image-1 로 내릴 수 있다.
 const IMAGE_API_MODEL = process.env.PRODUCT_THUMBNAIL_IMAGE_MODEL?.trim() || "gpt-image-2";
-// 네이버 블로그 썸네일에 맞는 가로형. gpt-image 계열이 지원하는 크기만 허용된다.
-const IMAGE_API_SIZE = process.env.PRODUCT_THUMBNAIL_IMAGE_SIZE?.trim() || "1536x1024";
-const IMAGE_API_QUALITY = process.env.PRODUCT_THUMBNAIL_IMAGE_QUALITY?.trim() || "high";
+// 네이버 검색/피드 노출은 1:1 크롭 중심이라 정사각을 기본으로 한다. gpt-image 계열이
+// 지원하는 크기(1024x1024, 1024x1536, 1536x1024)만 허용된다.
+const IMAGE_API_SIZE = process.env.PRODUCT_THUMBNAIL_IMAGE_SIZE?.trim() || "1024x1024";
+// 재시도 루프 비용을 줄이기 위해 기본 medium. 최종본만 high 로 올리려면 env 로 조정.
+const IMAGE_API_QUALITY = process.env.PRODUCT_THUMBNAIL_IMAGE_QUALITY?.trim() || "medium";
 const IMAGE_API_TIMEOUT_MS = (() => {
   const parsed = Number.parseInt(process.env.PRODUCT_THUMBNAIL_IMAGE_WAIT_MS || "", 10);
   return Number.isFinite(parsed) && parsed >= 10_000 ? parsed : 120_000;
@@ -38,6 +38,10 @@ export interface ImageApiThumbnailOptions {
   referenceImagePath?: string | null;
   outputDir: string;
   fileLabel: string;
+  /** 기본 env PRODUCT_THUMBNAIL_IMAGE_SIZE (1024x1024) */
+  size?: string;
+  /** 기본 env PRODUCT_THUMBNAIL_IMAGE_QUALITY (medium) */
+  quality?: string;
 }
 
 function sanitizeLabel(value: string): string {
@@ -68,14 +72,16 @@ export async function generateProductThumbnailViaImageApi(
     options.referenceImagePath && fs.existsSync(options.referenceImagePath)
   );
 
+  const size = options.size?.trim() || IMAGE_API_SIZE;
+  const quality = options.quality?.trim() || IMAGE_API_QUALITY;
   const requestWithModel = async (model: string): Promise<Response> => {
     if (hasReference) {
       const referencePath = options.referenceImagePath as string;
       const form = new FormData();
       form.append("model", model);
       form.append("prompt", options.prompt);
-      form.append("size", IMAGE_API_SIZE);
-      form.append("quality", IMAGE_API_QUALITY);
+      form.append("size", size);
+      form.append("quality", quality);
       form.append(
         "image",
         new Blob([new Uint8Array(fs.readFileSync(referencePath))], {
@@ -96,7 +102,7 @@ export async function generateProductThumbnailViaImageApi(
         Authorization: `Bearer ${apiKey}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ model, prompt: options.prompt, size: IMAGE_API_SIZE, quality: IMAGE_API_QUALITY }),
+      body: JSON.stringify({ model, prompt: options.prompt, size, quality }),
       signal: AbortSignal.timeout(IMAGE_API_TIMEOUT_MS),
     });
   };
@@ -148,72 +154,4 @@ export async function generateProductThumbnailViaImageApi(
   );
   fs.writeFileSync(outputPath, Buffer.from(b64, "base64"));
   return outputPath;
-}
-
-export interface ThumbnailQcResult {
-  pass: boolean;
-  /** QC를 실제로 수행했는지. 키가 없으면 검사 없이 통과 처리하고 false가 된다. */
-  checked: boolean;
-  reason: string;
-}
-
-const IMAGE_QC_ENABLED =
-  (process.env.PRODUCT_THUMBNAIL_IMAGE_QC_ENABLED || "true").toLowerCase() !== "false";
-
-/**
- * 생성 썸네일 QC — ProductThumbnail.md의 최종 금지 항목을 자동 검사한다.
- * (한글 오탈자, 제품명 누락, 잘림, 플랫 벡터화)
- * OpenAI 키가 없으면 검사 없이 통과시키되 checked=false로 알린다.
- */
-export async function qcGeneratedThumbnail(
-  imagePath: string,
-  expected: { productName: string; headline: string }
-): Promise<ThumbnailQcResult> {
-  if (!IMAGE_QC_ENABLED) return { pass: true, checked: false, reason: "QC 비활성화" };
-  if (!getOpenAiApiKey()) return { pass: true, checked: false, reason: "OPENAI_API_KEY 없음 — QC 생략" };
-
-  try {
-    const imageBase64 = fs.readFileSync(imagePath).toString("base64");
-
-    const prompt = [
-      "이 이미지는 네이버 블로그 상품 썸네일이다. 아래 기준으로만 검사해서 JSON으로 답하라.",
-      `기대 제품명: "${expected.productName}"`,
-      `기대 헤드라인: "${expected.headline}"`,
-      "",
-      "검사 기준:",
-      "1. koreanTypo: 이미지 속 한글에 오탈자·깨진 글자·가짜 글자가 있는가",
-      "2. productNameMissing: 기대 제품명(또는 그와 동일하게 읽히는 표기)이 화면에 없는가",
-      "3. textCut: 주요 문구가 화면 밖으로 잘렸는가",
-      "4. flatVector: 실사 제품 사진 없이 플랫 벡터/아이콘/만화풍으로만 구성됐는가",
-      "",
-      '응답 형식: {"koreanTypo": bool, "productNameMissing": bool, "textCut": bool, "flatVector": bool, "note": "짧은 설명"}',
-    ].join("\n");
-
-    const parsed = await openaiChatJson<{
-      koreanTypo?: boolean;
-      productNameMissing?: boolean;
-      textCut?: boolean;
-      flatVector?: boolean;
-      note?: string;
-    }>({
-      user: prompt,
-      images: [{ base64: imageBase64, mimeType: mimeTypeForExtension(imagePath), detail: "high" }],
-      temperature: 0,
-    });
-
-    const failures: string[] = [];
-    if (parsed.koreanTypo) failures.push("한글 오탈자");
-    if (parsed.productNameMissing) failures.push("제품명 누락");
-    if (parsed.textCut) failures.push("문구 잘림");
-    if (parsed.flatVector) failures.push("플랫 벡터 스타일");
-
-    if (failures.length > 0) {
-      return { pass: false, checked: true, reason: `${failures.join(", ")}${parsed.note ? ` (${parsed.note})` : ""}` };
-    }
-    return { pass: true, checked: true, reason: parsed.note || "통과" };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    // QC 자체가 실패하면 이미지를 버리지 않는다 — 검사 불가로 통과 처리.
-    return { pass: true, checked: false, reason: `QC 실행 실패 — 생략 (${message})` };
-  }
 }

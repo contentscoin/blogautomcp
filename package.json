@@ -30,6 +30,7 @@
     "test:connect-editor-insertion": "npx ts-node --project tsconfig.scripts.json scripts/verify-connect-editor-insertion.ts",
     "test:travel-editorial": "npx ts-node --project tsconfig.scripts.json scripts/verify-travel-editorial-plan.ts",
     "test:post-spec": "npx ts-node --project tsconfig.scripts.json scripts/verify-post-spec.ts",
+    "test:thumbnail-gen": "npx ts-node --project tsconfig.scripts.json scripts/verify-thumbnail-gen.ts",
     "test:title-rules": "npx ts-node --project tsconfig.scripts.json scripts/verify-title-rules.ts",
     "test:packaged-update": "pwsh -NoProfile -File scripts/verify-packaged-auto-update.ps1",
     "postinstall": "prisma generate",
