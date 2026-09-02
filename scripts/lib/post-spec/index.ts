@@ -195,7 +195,10 @@ export async function buildPostSpec(input: SpecFirstPipelineInput): Promise<Buil
     hasReviewProof: Boolean(product.reviewCount || product.rating),
     collectedAt: todayLabel(),
   };
-  const templates = buildSectionTemplates(ctx, sectionCount);
+  const templates = buildSectionTemplates(ctx, sectionCount).map((template): SectionTemplate => ({
+    ...template,
+    imageCount: [template.imageCount[1] > 0 ? Math.max(1, template.imageCount[0]) : template.imageCount[0], template.imageCount[1]],
+  }));
   // A″. 섹션별 근거표: 본문 섹션마다 전용 근거를 1개 이상 배정하고 재사용을 막는다.
   const evidenceLedger = buildEvidenceLedger({
     kind,

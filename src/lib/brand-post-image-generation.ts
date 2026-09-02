@@ -19,9 +19,15 @@ import {
 const CHATGPT_BASE_URL = "https://chatgpt.com/";
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
 const IMAGE_BATCH_SCRIPT = path.join(process.cwd(), "scripts", "chatgpt-generate-image-batch.ts");
-const IMAGE_BATCH_TIMEOUT_MS = Number(
-  process.env.BRAND_POST_IMAGE_BATCH_TIMEOUT_MS || 8 * 60_000,
-);
+const IMAGE_BATCH_PROGRESS_PREFIX = "[chatgpt-image-batch:result] ";
+
+// Jobs run sequentially. Keep the old single-job allowance, but budget for all jobs.
+export function imageBatchTimeoutMs(jobCount: number): number {
+  const override = Number(process.env.BRAND_POST_IMAGE_BATCH_TIMEOUT_MS);
+  return Math.min(2_147_483_647, Number.isFinite(override) && override > 0
+    ? override
+    : 8 * 60_000 * Math.max(1, jobCount));
+}
 
 export interface BrandPostImageGenerationRequest {
   requestId: string;
@@ -164,9 +170,12 @@ async function runBrowserImageBatch(
   manifest: BrandPostPackageManifestV2,
   productName: string,
   workDir: string,
+  onResult: (result: BrowserImageBatchResult, index: number) => Promise<void>,
+  signal?: AbortSignal,
 ): Promise<BrowserImageBatchResult[]> {
   const jobs = targets.map((target, index) => ({
-    id: target.request.requestId,
+    // Transport IDs are unique even when callers reuse a requestId.
+    id: String(index),
     prompt: buildBrandPostImagePrompt({
       connectKind: manifest.connectKind,
       productName,
@@ -182,58 +191,147 @@ async function runBrowserImageBatch(
       .map((asset) => asset.path),
   }));
   const jobsPath = path.join(workDir, `jobs-${Date.now()}.json`);
+  const resultsPath = `${jobsPath}.results.jsonl`;
   fs.writeFileSync(jobsPath, JSON.stringify(jobs, null, 2), "utf8");
 
-  return await new Promise<BrowserImageBatchResult[]>((resolve, reject) => {
-    const child = spawn(
-      process.execPath,
-      [
-        TS_NODE_BIN,
-        "--project",
-        "tsconfig.scripts.json",
-        IMAGE_BATCH_SCRIPT,
-        "--jobs-file",
-        jobsPath,
-        "--gpt-url",
-        CHATGPT_BASE_URL,
-      ],
-      {
-        cwd: process.cwd(),
-        shell: false,
-        windowsHide: true,
-        env: {
-          ...process.env,
-          ELECTRON_RUN_AS_NODE: "1",
-          CHATGPT_BROWSER_VISIBILITY: process.env.CHATGPT_BROWSER_VISIBILITY || "background",
-        },
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
+  return await new Promise<BrowserImageBatchResult[]>((resolve) => {
+    const results = new Map<string, BrowserImageBatchResult>();
+    const jobIndexes = new Map(jobs.map((job, index) => [job.id, index]));
+    let deliveries = Promise.resolve();
     let stdout = "";
     let stderr = "";
-    const timeout = setTimeout(() => {
-      child.kill();
-      reject(new Error("ChatGPT 이미지 생성 시간이 초과되었습니다. 로그인 상태를 확인한 뒤 다시 시도해 주세요."));
-    }, IMAGE_BATCH_TIMEOUT_MS);
-    child.stdout.on("data", (chunk) => { stdout += String(chunk); });
-    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
-    child.once("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-    child.once("exit", (code) => {
-      clearTimeout(timeout);
-      if (code !== 0) {
-        reject(new Error(clean(stderr.slice(-4000)) || `ChatGPT 이미지 생성 프로세스가 종료되었습니다(code=${code}).`));
-        return;
-      }
+    let progressBuffer = "";
+    let stdoutOverflow = false;
+    let settled = false;
+    const timers: {
+      timeout?: ReturnType<typeof setTimeout>;
+      checkpointPoll?: ReturnType<typeof setInterval>;
+      abortHandler?: () => void;
+    } = {};
+    const accept = (value: unknown) => {
+      if (!value || typeof value !== "object") return;
+      const result = value as BrowserImageBatchResult;
+      const index = jobIndexes.get(result.id);
+      if (index === undefined || results.has(result.id)) return;
+      if (typeof result.localPath !== "string" && result.localPath !== null) return;
+      if (result.error !== undefined && typeof result.error !== "string") return;
+      results.set(result.id, result);
+      // Serialize image finishing and caller persistence, without holding up the child.
+      deliveries = deliveries.then(() => onResult(result, index)).catch((error) => {
+        // A failed consumer must not poison the queue or leave complete() pending forever.
+        results.set(result.id, {
+          ...result,
+          error: [result.error, `이미지 결과 전달 실패: ${error instanceof Error ? error.message : String(error)}`]
+            .filter(Boolean).join("; "),
+        });
+      });
+    };
+    const readCheckpoint = () => {
       try {
-        const parsed = JSON.parse(stdout) as { ok?: boolean; jobs?: BrowserImageBatchResult[] };
-        if (!parsed.ok || !Array.isArray(parsed.jobs)) throw new Error("이미지 생성 결과 형식이 올바르지 않습니다.");
-        resolve(parsed.jobs);
-      } catch (error) {
-        reject(new Error(error instanceof Error ? error.message : "이미지 생성 결과를 읽지 못했습니다."));
+        const lines = fs.readFileSync(resultsPath, "utf8").split("\n");
+        // A killed writer may leave an incomplete last record. Ignore it.
+        for (const line of lines.slice(0, -1)) {
+          try { accept(JSON.parse(line)); } catch { /* Ignore a damaged record. */ }
+        }
+      } catch { /* The child may not have created the checkpoint yet. */ }
+    };
+    const readProgress = (line: string) => {
+      if (!line.startsWith(IMAGE_BATCH_PROGRESS_PREFIX)) return;
+      try { accept(JSON.parse(line.slice(IMAGE_BATCH_PROGRESS_PREFIX.length))); } catch { /* Diagnostic, not a result. */ }
+    };
+    const complete = (failure?: string) => {
+      if (settled) return;
+      settled = true;
+      if (timers.abortHandler) signal?.removeEventListener("abort", timers.abortHandler);
+      clearTimeout(timers.timeout);
+      clearInterval(timers.checkpointPoll);
+      readProgress(progressBuffer);
+      readCheckpoint();
+      try {
+        const parsed = JSON.parse(stdout) as { ok?: boolean; jobs?: unknown[] };
+        if (!Array.isArray(parsed.jobs)) throw new Error("이미지 생성 결과 형식이 올바르지 않습니다.");
+        parsed.jobs.forEach(accept);
+        if (!parsed.ok) failure ||= "이미지 생성 배치가 완료되지 않았습니다.";
+      } catch {
+        failure ||= stdoutOverflow
+          ? "이미지 생성 결과 출력이 허용 크기를 초과했습니다."
+          : "이미지 생성 결과를 읽지 못했습니다.";
       }
+      for (const job of jobs) {
+        accept({ id: job.id, localPath: null, error: failure || "ChatGPT 이미지 생성 결과가 비어 있습니다." });
+      }
+      void deliveries.then(() => resolve(jobs.map((job) => results.get(job.id)!)));
+    };
+    let child: ReturnType<typeof spawn>;
+    if (signal?.aborted) { complete("사용자가 이미지 생성을 중지했습니다."); return; }
+    try {
+      child = spawn(
+        process.execPath,
+        [
+          TS_NODE_BIN,
+          "--project",
+          "tsconfig.scripts.json",
+          IMAGE_BATCH_SCRIPT,
+          "--jobs-file",
+          jobsPath,
+          "--results-file",
+          resultsPath,
+          "--gpt-url",
+          CHATGPT_BASE_URL,
+        ],
+        {
+          cwd: process.cwd(),
+          shell: false,
+          windowsHide: true,
+          env: {
+            ...process.env,
+            ELECTRON_RUN_AS_NODE: "1",
+            CHATGPT_BROWSER_VISIBILITY: process.env.CHATGPT_BROWSER_VISIBILITY || "background",
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+    } catch (error) {
+      complete(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    const stopChild = () => {
+      if (process.platform === "win32" && child.pid) {
+        const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, shell: false, stdio: "ignore" });
+        killer.on("error", () => { child.kill("SIGKILL"); });
+        killer.once("exit", (code) => { if (code !== 0) child.kill("SIGKILL"); });
+      } else child.kill("SIGKILL");
+    };
+    timers.abortHandler = () => { complete("사용자가 이미지 생성을 중지했습니다."); stopChild(); };
+    signal?.addEventListener("abort", timers.abortHandler, { once: true });
+    timers.timeout = setTimeout(() => {
+      // Finalize independently of close: an unresponsive child must not hang the caller.
+      complete("ChatGPT 이미지 생성 시간이 초과되었습니다. 로그인 상태를 확인한 뒤 다시 시도해 주세요.");
+      stopChild();
+    }, imageBatchTimeoutMs(jobs.length));
+    timers.checkpointPoll = setInterval(readCheckpoint, 250);
+    child.stdout!.setEncoding("utf8");
+    child.stderr!.setEncoding("utf8");
+    child.stdout!.on("data", (chunk: string) => {
+      if (settled) return;
+      if (stdout.length + chunk.length <= 8 * 1024 * 1024) stdout += chunk;
+      else stdoutOverflow = true;
+    });
+    child.stderr!.on("data", (chunk: string) => {
+      if (settled) return;
+      stderr = (stderr + chunk).slice(-4000);
+      progressBuffer += chunk;
+      const lines = progressBuffer.split("\n");
+      progressBuffer = lines.pop() || "";
+      lines.forEach(readProgress);
+      if (progressBuffer.length > 64 * 1024) progressBuffer = "";
+    });
+    child.once("error", (error) => {
+      complete(error.message);
+    });
+    // close, unlike exit, waits for both output pipes to drain.
+    child.once("close", (code, signal) => {
+      complete(code === 0 ? undefined : clean(stderr) || `ChatGPT 이미지 생성 프로세스가 종료되었습니다(code=${code}, signal=${signal}).`);
     });
   });
 }
@@ -311,57 +409,76 @@ export async function generateBrandPostImages(options: {
   manifest: BrandPostPackageManifestV2;
   productName: string;
   requests: BrandPostImageGenerationRequest[];
+  /** Called once per request after product locking/finishing; awaited before return. */
+  onResult?: (result: BrandPostImageGenerationResult) => void | Promise<void>;
+  signal?: AbortSignal;
 }): Promise<BrandPostImageGenerationResult[]> {
-  const requests = options.requests.slice(0, 4);
+  const requests = options.requests;
   if (requests.length === 0) return [];
-  const targets = requests.map((request) => resolveTarget(options.manifest, request));
-  const workDir = path.join(
-    getBrandPostPackageDir(options.manifest.brandLinkId),
-    "image-generation-work",
-    `${Date.now()}-${process.pid}`,
-  );
-  fs.mkdirSync(workDir, { recursive: true });
-  const browserResults = await runBrowserImageBatch(
-    targets,
-    options.manifest,
-    options.productName,
-    workDir,
-  );
-  const byId = new Map(browserResults.map((result) => [result.id, result]));
-
-  return await Promise.all(targets.map(async (target, index): Promise<BrandPostImageGenerationResult> => {
-    const browserResult = byId.get(target.request.requestId);
-    const base = {
-      requestId: target.request.requestId,
-      sectionId: target.sectionId,
-      replaceAssetKey: target.request.replaceAssetKey,
-      imageIntent: target.imageIntent,
-    };
-    if (!browserResult?.localPath || !fs.existsSync(browserResult.localPath)) {
-      return {
-        ...base,
-        generatedPath: null,
-        provenance: options.manifest.connectKind === "SHOPPING" ? "LOCKED_PRODUCT" : "GENERATED_BACKGROUND",
-        error: clean(browserResult?.error || "ChatGPT 이미지 생성 결과가 비어 있습니다."),
-      };
-    }
+  const results: BrandPostImageGenerationResult[] = new Array(requests.length);
+  const targets: ResolvedImageTarget[] = [];
+  const requestIndexes: number[] = [];
+  const baseResult = (index: number): BrandPostImageGenerationResult => ({
+    ...requests[index],
+    imageIntent: "",
+    generatedPath: null,
+    provenance: options.manifest.connectKind === "SHOPPING" ? "LOCKED_PRODUCT" : "GENERATED_BACKGROUND",
+  });
+  const publish = async (index: number, result: BrandPostImageGenerationResult) => {
+    if (results[index]) return;
+    results[index] = result;
     try {
-      const finished = await finishGeneratedImage({
-        manifest: options.manifest,
-        productName: options.productName,
-        target,
-        rawPath: browserResult.localPath,
-        workDir,
-        index,
-      });
-      return { ...base, ...finished };
+      await options.onResult?.(result);
     } catch (error) {
-      return {
-        ...base,
-        generatedPath: null,
-        provenance: options.manifest.connectKind === "SHOPPING" ? "LOCKED_PRODUCT" : "GENERATED_BACKGROUND",
-        error: error instanceof Error ? error.message : "생성 이미지를 패키지에 맞게 처리하지 못했습니다.",
+      // Preserve the finished path for recovery if caller persistence fails.
+      results[index] = {
+        ...result,
+        error: [result.error, `이미지 결과 저장 콜백 실패: ${error instanceof Error ? error.message : String(error)}`]
+          .filter(Boolean).join("; "),
       };
     }
-  }));
+  };
+  for (const [index, request] of requests.entries()) {
+    try {
+      targets.push(resolveTarget(options.manifest, request));
+      requestIndexes.push(index);
+    } catch (error) {
+      await publish(index, { ...baseResult(index), error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  if (targets.length === 0) return results;
+
+  try {
+    const workRoot = path.join(getBrandPostPackageDir(options.manifest.brandLinkId), "image-generation-work");
+    fs.mkdirSync(workRoot, { recursive: true });
+    const workDir = fs.mkdtempSync(path.join(workRoot, `${Date.now()}-${process.pid}-`));
+    await runBrowserImageBatch(targets, options.manifest, options.productName, workDir, async (browserResult, targetIndex) => {
+      const target = targets[targetIndex];
+      const index = requestIndexes[targetIndex];
+      const base = { ...baseResult(index), sectionId: target.sectionId, imageIntent: target.imageIntent };
+      let result: BrandPostImageGenerationResult;
+      try {
+        if (!browserResult.localPath || !fs.existsSync(browserResult.localPath)) {
+          throw new Error(clean(browserResult.error || "ChatGPT 이미지 생성 결과가 비어 있습니다."));
+        }
+        const finished = await finishGeneratedImage({
+          manifest: options.manifest,
+          productName: options.productName,
+          target,
+          rawPath: browserResult.localPath,
+          workDir,
+          index,
+        });
+        result = { ...base, ...finished };
+      } catch (error) {
+        result = { ...base, error: error instanceof Error ? error.message : "생성 이미지를 패키지에 맞게 처리하지 못했습니다." };
+      }
+      await publish(index, result);
+    }, options.signal);
+  } catch (error) {
+    for (const index of requestIndexes) {
+      await publish(index, { ...baseResult(index), error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return results;
 }

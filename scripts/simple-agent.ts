@@ -34,7 +34,6 @@ import {
   CHATGPT_DIRECT_PRIMARY_PROMPT_MAX_CHARS,
   CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS,
   compactChatGptEvidence,
-  composeBudgetedChatGptPrompt,
 } from "./lib/chatgpt-direct-prompt";
 import { buildAppUrl, notifyAndLogCompletion } from "./lib/chatbot-notifier";
 import {
@@ -80,6 +79,15 @@ import {
   formatAdaptiveEditorialHarnessForPrompt,
   getAdaptiveEditorialProfile,
 } from "./lib/adaptive-editorial-harness";
+import {
+  composeBudgetedWritingPrompt,
+  createWritingPromptContract,
+  formatDraftSubmissionNextAction,
+  formatWritingPromptContract,
+  getWritingOutputExample,
+  reviewGeneratedEvidenceFacts,
+  type WritingPromptContract,
+} from "./lib/writing-prompt-contract";
 import {
   getConnectEditorInsertionMode,
   type EditorConnectKind,
@@ -466,7 +474,7 @@ function readMcpGeneratedDraft(filePath: string): string {
   const evidenceFacts = Array.isArray(parsed.evidenceFacts)
     ? Array.from(new Set(parsed.evidenceFacts
         .filter((value): value is string => typeof value === "string")
-        .map((value) => sanitizeText(value).slice(0, 220))
+        .map((value) => sanitizeText(value))
         .filter(isMeaningfulProductEvidenceFeature)))
       .slice(0, 12)
     : [];
@@ -522,6 +530,7 @@ interface ChatGPTGuidanceContext {
   targetSectionCount: number;
   minimumSectionCount: number;
   maximumSectionCount: number;
+  writingContract: WritingPromptContract;
   openCrabSeoBrief?: OpenCrabSeoBrief | null;
   productEditorialPlan?: ProductEditorialPlan | null;
   editorialPromptBlock: string;
@@ -3027,8 +3036,6 @@ function buildDirectBrowserGptPrompt(
     isTravel
       ? "여행 글은 상품 검토문이 아니라 여행지 브이로그입니다. 장소의 배경, 실제 풍경과 분위기, 보고 먹고 즐길 것, 사진·동선 팁을 확실한 말투로 쓰세요."
       : "쇼핑 글은 상세페이지 낭독문이 아니라 제품 분석 리뷰입니다. 제품의 특장점, 기능의 작동 방식, 구체적인 사용법, 활용 장면, 후기 원문에서 반복된 좋은 점과 구조상 한계를 자세히 설명하세요.",
-    "실제 사용·구매·방문 경험은 제공되지 않았으므로 체험한 것처럼 꾸미지 마세요.",
-    "미확인 사실은 만들지 말고, 확인할 수 없는 변동 정보는 언급 자체를 생략하세요.",
     ...(isTravel ? [
       "웹 검색을 사용할 수 있으면 공식 관광청·공공기관 자료를 우선해 핵심 장소 3~6곳을 조사하세요.",
       '"보입니다", "보여요", "인 것 같아요", "일 듯해요", "판단됩니다"는 금지합니다.',
@@ -3049,23 +3056,21 @@ function buildDirectBrowserGptPrompt(
   ].filter(Boolean).join("\n");
   const suffix = [
     "[작성 계약]",
-    `- 제목 25~35자, 핵심 검색어를 앞쪽에 배치하고 제목·소제목에 이모지를 쓰지 않습니다.`,
-    `- sections는 근거 밀도에 따라 ${minimumSectionCount}~${context.maximumSectionCount}개, 각 항목은 '소제목\\n\\n본문' 형태입니다.`,
     "- 짧고 자연스러운 ~요체 문장으로 쓰되 같은 문장 구조와 키워드 반복을 피합니다.",
     `- 확인된 사실 → ${isTravel ? "눈앞의 장면 → 즐길 거리 또는 실용 팁" : "작동 방식 → 사용 장면의 이점 또는 한계"}가 연결된 흐름을 최소 3곳에 넣습니다.`,
     `- URL은 쓰지 않습니다. ${isTravel ? "여행커넥트" : "쇼핑커넥트"} 카드는 시스템이 별도로 삽입합니다.`,
     isTravel
       ? "- 원본 일정에 나온 장소마다 역사·문화 배경, 현장 분위기, 활동, 음식·사진·동선 팁을 구체적으로 설명합니다."
       : "- evidenceFacts에는 확인한 제품 고유 수치·기능·구성만 기록하고, 본문에서는 그 근거를 사용 가치와 사용법으로 해석합니다.",
-    "- 해시태그는 검색 의도가 분명한 3~5개만 작성합니다.",
-    "- 코드블록은 쓰지 않습니다.",
-    "[출력 JSON]",
-    isTravel
-      ? '{"title":"제목","sections":["소제목\\n\\n본문"],"hashtags":["태그"]}'
-      : '{"title":"제목","evidenceFacts":["확인 사실"],"sections":["소제목\\n\\n본문"],"hashtags":["태그"]}',
   ].join("\n");
 
-  return composeBudgetedChatGptPrompt({ prefix, evidence, suffix, maxChars });
+  return composeBudgetedWritingPrompt({
+    contract: {
+      ...context.writingContract,
+      sections: { min: minimumSectionCount, max: context.maximumSectionCount },
+    },
+    prefix, evidence, suffix, maxChars,
+  });
 }
 
 async function runDirectChatGPTGeneration(
@@ -4661,6 +4666,16 @@ async function step2_generatePost(
   );
   const compositionPromptBlock = formatPostContractForPrompt(compositionContract);
   const adaptiveEditorialPromptBlock = formatAdaptiveEditorialHarnessForPrompt(connectKind);
+  const writingContract = createWritingPromptContract({
+    kind: connectKind,
+    minimumSections: minimumBodySectionCount,
+    maximumSections: maximumBodySectionCount,
+    targetCharacters: compositionContract.targetCharacters,
+    hashtagCount: NAVER_BLOG_HASHTAG_COUNT,
+    verifiedExperienceNotes: BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE"
+      ? BRANDLINK_EXPERIENCE_NOTES : "",
+  });
+  const mandatoryWritingPromptBlock = formatWritingPromptContract(writingContract);
   const experiencePromptBlock =
     BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE"
       ? `[검증된 실제 체험 메모]\n${BRANDLINK_EXPERIENCE_NOTES}\n- 위 메모에 명시된 체험 사실만 1인칭으로 표현하고 나머지는 정보형으로 씁니다.`
@@ -4735,7 +4750,7 @@ async function step2_generatePost(
       notes: result.notes,
     };
   }
-  let productEditorialPlan = isTravel
+  const productEditorialPlan = isTravel
     ? null
     : buildProductEditorialPlan({
         productName: product.name,
@@ -4812,7 +4827,7 @@ async function step2_generatePost(
   : "기능을 나열하는 데서 멈추지 말고, 어떤 원리로 작동하며 어떻게 설치·조작·충전·세척·보관하는지와 실제로 줄여주는 불편을 설명합니다."}
 - ${isTravel ? "가격·포함조건·상품 장단점·추천 대상을 본문 목차로 만들지 않습니다." : "상세페이지 낭독형 문장은 제거하고, 구매후기 원문이 있으면 반복 장점을 근거와 함께 따로 분석합니다."}
 - 정보가 없는 항목은 억지로 언급하지 않고, 여러 섹션을 '확인 필요' 문장으로 채우지 않습니다.
-- ${isTravel ? '"보입니다", "인 것 같아요", "일 듯해요"가 한 번이라도 나오면 확정적인 사실 문장 또는 구체적인 장면 문장으로 다시 씁니다.' : "과장된 단정과 근거 없는 체험을 제거합니다."}
+- ${isTravel ? '"보입니다", "인 것 같아요", "일 듯해요"가 나오면 근거가 확인된 내용만 사실 문장으로 고치고, 불확실한 주장은 생략합니다. 확정형 말투로 바꿔 근거 없는 사실을 만들지 않습니다.' : "과장된 단정과 근거 없는 체험을 제거합니다."}
 - 초안을 쓴 뒤 상품 고유명사를 다른 상품명으로 바꿔도 자연스러운 문단은 다시 작성합니다.
 - 제목·본문·해시태그 JSON을 내기 전에 위 기준을 내부적으로 다시 검사하고, 미달이면 스스로 보강합니다.`;
   if (openCrabSeoBrief) {
@@ -4881,6 +4896,7 @@ ${travelEditorialPromptBlock ? `\n${travelEditorialPromptBlock}` : ""}
 ${adaptiveEditorialPromptBlock ? `\n${adaptiveEditorialPromptBlock}` : ""}
 ${qualitySelfReviewPromptBlock ? `\n${qualitySelfReviewPromptBlock}` : ""}
 ${compositionPromptBlock ? `\n${compositionPromptBlock}` : ""}
+- 관측 분포와 역할 팔레트는 선택 참고입니다. 본문 분량·섹션·출력 형식은 userPrompt의 공유 필수 작성 계약을 따릅니다.
 ${experiencePromptBlock ? `\n${experiencePromptBlock}` : ""}`;
 
   // 상품 페이지는 일정과 장소를 찾는 시드로만 쓰고, 본문은 여행지 브이로그형 정보 글로 만든다.
@@ -4931,18 +4947,16 @@ ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일
    - "완벽 가이드", "총정리", "꿀팁" 같은 낚시성 문구 금지 (네이버 스팸 기준).
    예: ${isTravel ? '"타이베이 단수이 여행, 노을과 골목을 걷는 4일"' : '"아기비데 추천 | 해피달링 워터탭 선택 기준"'}
 
-2. 본문은 근거 밀도에 따라 ${minimumBodySectionCount}~${maximumBodySectionCount}개 흐름으로 자유롭게 구성
+2. 본문은 공유 필수 작성 계약의 섹션·분량 범위 안에서 근거 밀도에 따라 자유롭게 구성
    - ${bodySectionCount}개는 중앙 참고값이며 정확한 개수·제목·순서를 강제하지 않습니다.
-   - 전체 분량은 공백 제외 ${compositionContract.targetCharacters.min}~${compositionContract.targetCharacters.max}자를 품질 점검 범위로 참고합니다.
+   - 분량 기준은 제목·고지 문구를 제외한 실제 본문에 적용합니다.
    - 글자보다 이미지가 본체입니다. 문장은 사진 사이를 잇는 역할로 짧게.
-   ${isTravel ? "" : "- 첨부된 상세페이지 이미지의 글자와 사양표는 내부 evidenceFacts로만 정리하고, 본문에는 복사하지 말고 기능 원리·사용법·활용 이점으로 변환하세요."}
+   ${isTravel ? "" : "- 상세페이지 이미지의 글자·사양표를 제공된 확인 사실과 대조하세요. 일치하는 사실만 evidenceFacts에 기록하고, 새 추정은 제외합니다. 본문에는 근거가 있는 기능 원리·사용법·활용 이점으로 풀어 씁니다."}
 
 3. 각 섹션 구조:
    - 소제목 (한 줄, 이모지 금지)
    - 빈 줄
-   - ${isTravel
-     ? "각 흐름은 처음부터 반드시 5~6개의 완결된 문장으로 작성합니다. 4문장 이하로 줄이지 마세요."
-     : "각 흐름은 처음부터 4~6개의 완결된 문장으로 작성합니다. 3문장 이하로 줄이지 마세요."}
+   - 문장 수와 출력 구조는 공유 필수 작성 계약을 따릅니다.
    - 문장 수를 채우기 위해 같은 뜻을 반복하지 말고, 서로 다른 사실·장면·판단을 한 문장씩 배치합니다.
    - 한 문장에 정보 하나만 담고, 어색하면 더 짧게 나누기
    - 여행 글은 배경지식→눈앞의 장면→즐길 거리→현지 팁이 자연스럽게 이어지도록 쓰되, 매번 같은 순서를 반복하지 않기
@@ -5003,17 +5017,7 @@ ${isTravel
 8. AI 티가 나는 문장 금지:
 ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES}\n${HUMAN_REVIEW_SAFETY_RULES}\n${isTravel ? TRAVEL_VLOG_STYLE_GUIDE : SHOPPING_EXPERT_REVIEW_STYLE_GUIDE}` : "   - 반복적인 문장 구조와 과장 표현 금지"}
 
-## 출력 (JSON만, 줄바꿈은 \\n)
-{
-  "title": "SEO 최적화 제목",
-  "evidenceFacts": ["첨부 상세페이지에서 직접 확인한 제품 고유 사실"],
-  "sections": [
-    ${isTravel
-      ? '"소제목\\n\\n문장1.\\n문장2.\\n문장3.\\n문장4.\\n문장5.\\n",\n    "소제목\\n\\n문장1.\\n문장2.\\n문장3.\\n문장4.\\n문장5.\\n"'
-      : '"소제목\\n\\n문장1.\\n문장2.\\n문장3.\\n문장4.\\n",\n    "소제목\\n\\n문장1.\\n문장2.\\n문장3.\\n문장4.\\n"'}
-  ],
-  "hashtags": ["키워드1", "키워드2", ...]
-}`;
+${mandatoryWritingPromptBlock}`;
 
   const chatgptContext: ChatGPTGuidanceContext = {
     connectKind,
@@ -5031,6 +5035,7 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
     targetSectionCount: bodySectionCount,
     minimumSectionCount: minimumBodySectionCount,
     maximumSectionCount: maximumBodySectionCount,
+    writingContract,
     openCrabSeoBrief,
     productEditorialPlan,
     editorialPromptBlock,
@@ -5087,11 +5092,8 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
           minimumSectionCount: minimumBodySectionCount,
           maximumSectionCount: maximumBodySectionCount,
           targetCharacters: compositionContract.targetCharacters,
-          outputSchema: {
-            title: "8~100자 제목",
-            sections: ["소제목\\n\\n문장1.\\n문장2.\\n문장3."],
-            hashtags: ["상품명", "검색키워드", "비교키워드"],
-          },
+          writingContract,
+          outputSchema: getWritingOutputExample(writingContract),
           systemPrompt,
           userPrompt,
           qualityChecklist: {
@@ -5105,7 +5107,7 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
             checks: [
               isTravel
                 ? "일정 원문은 방문 장소를 식별하는 데만 사용하고 상품 조건 설명을 본문에서 제거했는가"
-                : "referenceImageUrls의 상세이미지를 열어 수치·기능·구성을 evidenceFacts에 구조화했는가",
+                : "referenceImageUrls의 수치·기능·구성을 제공된 확인 사실과 대조하고, 미검증 후보를 evidenceFacts와 사실 단정에서 제외했는가",
               isTravel ? "공식 관광 자료의 안정적인 사실이 여행 장면과 연결됐는가" : "상품 고유 사실이 실제 판단 근거로 쓰였는가",
               isTravel
                 ? "핵심 장소마다 배경·분위기·즐길 거리·실용 팁이 들어갔는가"
@@ -5118,8 +5120,7 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
             ],
           },
         },
-        nextAction:
-          "현재 ChatGPT 대화에서 systemPrompt와 userPrompt를 적용하세요. 쇼핑은 referenceImageUrls의 상세이미지를 먼저 읽어 evidenceFacts를 작성하고, qualityChecklist를 내부 검수한 JSON 원고를 post_submit_draft로 제출하세요. 제출 작업을 job_get으로 확인하고 contentQuality.canPublish가 false이면 reason과 실패 signals를 반영해 새 idempotencyKey로 보강 원고를 다시 제출하세요. 원고를 사용자에게 먼저 보여주고 발행은 별도 확인을 받으세요.",
+        nextAction: formatDraftSubmissionNextAction(),
       }, null, 2);
     if (Buffer.byteLength(contextJson, "utf8") > 800 * 1024) {
       throw new Error("초안 컨텍스트가 800KB를 초과했습니다. 상품 설명 범위를 줄인 뒤 다시 시도하세요.");
@@ -5158,18 +5159,10 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
   }
   const json = parseJsonObjectFromText(text);
   if (!isTravel) {
-    const visualEvidenceFacts = Array.isArray(json.evidenceFacts)
-      ? Array.from(new Set(json.evidenceFacts
-          .filter((value): value is string => typeof value === "string")
-          .map((value) => sanitizeText(value).slice(0, 220))
-          .filter(isMeaningfulProductEvidenceFeature)))
-        .slice(0, 12)
-      : [];
-    if (visualEvidenceFacts.length > 0) {
-      product.features = Array.from(new Set([...visualEvidenceFacts, ...product.features])).slice(0, 16);
-      productEditorialPlan = buildProductEditorialPlan(toProductEditorialInput(product, bodySectionCount));
-      console.log(`   🔎 상세 이미지에서 제품 근거 ${visualEvidenceFacts.length}개 구조화`);
-    }
+    // Model assertions cannot expand the source evidence used to score that same draft.
+    // Exact supplied-fact matches are redundant; unmatched candidates stay out of source features/QC.
+    const evidenceReview = reviewGeneratedEvidenceFacts(json.evidenceFacts, product.features);
+    console.log(`   🔎 제공 근거와 일치 ${evidenceReview.matchedSuppliedFacts.length}개 · 미검증 후보 ${evidenceReview.unverifiedFacts.length}개는 검증 근거에서 제외`);
   }
   const structuredSectionCount = getStructuredSectionCount(json);
   if (structuredSectionCount < minimumBodySectionCount) {
@@ -5326,7 +5319,7 @@ ${travelSubstance && travelSubstance.coveredPlaces.length < travelSubstance.requ
 ${isTravel ? "- 여행 원본의 장소명에 붙은 ‘관광·입장·유적지’ 같은 일정 역할은 문장에 억지로 복사하지 말고, 실제 지명을 자연스럽게 쓰되 누락된 방문지를 본문에서 구체적으로 다룹니다." : ""}
 - 내부 지침 문구와 실제 체험을 가장하는 표현은 제거합니다.
 - 고지 문구와 원시 URL은 출력하지 않습니다. 시스템이 별도로 붙입니다.
-- JSON(title, sections, hashtags)만 출력합니다.
+${mandatoryWritingPromptBlock}
 
 [초안 JSON]
 ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, null, 2)}`;
@@ -9719,9 +9712,8 @@ async function main() {
       { externalProductId: link.externalItemId, sourceUrl: link.sourceUrl || link.url },
     );
     const assembled: AssembledPost | null = post.assembled ?? null;
-    // 쇼핑 GPT가 상세 이미지에서 추출한 evidenceFacts는 step2_generatePost에서
-    // product.features에 합쳐진다. 이 값을 저장하지 않으면 이후 미리보기/QC가
-    // 크롤링 당시의 SEO 키워드만 읽어 근거가 없는 글로 오판한다.
+    // Persist supplied source features only. Generated evidenceFacts must never
+    // become verified source evidence for this draft or a later generation.
     if (!preparedPostOverride && !submittedSnapshot && runtimeConnectKind === "SHOPPING") {
       await prisma.brandLink.update({
         where: { id: linkId },

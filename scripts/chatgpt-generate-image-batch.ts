@@ -26,6 +26,7 @@ interface BatchJob {
 interface CliArgs {
   jobsFile: string;
   gptUrl: string;
+  resultsFile: string;
 }
 
 interface BatchResult {
@@ -78,6 +79,9 @@ function parseArgs(argv: string[]): CliArgs {
   return {
     jobsFile: getValue("--jobs-file"),
     gptUrl: getValue("--gpt-url"),
+    resultsFile: argv.includes("--results-file")
+      ? getValue("--results-file")
+      : `${getValue("--jobs-file")}.results.jsonl`,
   };
 }
 
@@ -152,28 +156,49 @@ async function runJob(
   }
 }
 
-async function main() {
-  const { jobsFile, gptUrl } = parseArgs(process.argv.slice(2));
+export async function main() {
+  const { jobsFile, gptUrl, resultsFile } = parseArgs(process.argv.slice(2));
   const jobs = JSON.parse(fs.readFileSync(jobsFile, "utf8")) as BatchJob[];
   if (!Array.isArray(jobs) || jobs.length === 0) {
     throw new Error("jobs-file 에 유효한 작업이 없습니다.");
   }
 
-  const handle = await createChatGPTContext(true);
+  fs.mkdirSync(path.dirname(resultsFile), { recursive: true });
+  // A fresh invocation owns a fresh checkpoint. Never overwrite an older run's evidence.
+  const checkpoint = fs.openSync(resultsFile, "wx");
+  const results: BatchResult[] = [];
+  const record = (result: BatchResult) => {
+    const line = `${JSON.stringify(result)}\n`;
+    // Retain the raw result for final stdout recovery even if the checkpoint disk fails.
+    results.push(result);
+    fs.writeFileSync(checkpoint, line, "utf8");
+    fs.fsyncSync(checkpoint);
+    // Keep stdout as the single legacy JSON document; progress is explicitly framed on stderr.
+    process.stderr.write(`[chatgpt-image-batch:result] ${line}`);
+  };
+  let handle: Awaited<ReturnType<typeof createChatGPTContext>> | undefined;
+  let failure: unknown;
   try {
+    handle = await createChatGPTContext(true);
     const page = await handle.context.newPage();
-    const results: BatchResult[] = [];
     for (const [index, job] of jobs.entries()) {
-      results.push(await runJob(page, job, gptUrl, index === 0));
+      record(await runJob(page, job, gptUrl, index === 0));
     }
-    process.stdout.write(JSON.stringify({ ok: true, jobs: results }));
+  } catch (error) {
+    failure = error;
+    for (const job of jobs.slice(results.length)) {
+      record({ id: job.id, localPath: null, error: error instanceof Error ? error.message : String(error) });
+    }
   } finally {
-    await handle.close().catch(() => {});
+    fs.closeSync(checkpoint);
+    process.stdout.write(JSON.stringify({ ok: !failure, jobs: results }));
+    await handle?.close().catch(() => {});
   }
+  if (failure) throw failure;
 }
 
-main().catch((error) => {
+if (require.main === module) main().catch((error) => {
   const message = error instanceof Error ? error.stack || error.message : String(error);
   console.error(message);
-  process.exit(1);
+  process.exitCode = 1;
 });

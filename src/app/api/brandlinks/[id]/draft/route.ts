@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { requireAdminApiKey } from "@/lib/api-auth";
@@ -17,14 +16,13 @@ import { beginDesktopActivity } from "@/lib/desktop-activity";
 import { classifyLocalFailure } from "@/lib/local-automation-error";
 import {
   approveBrandPostPackage,
-  applyGeneratedBrandPostImage,
   getBrandPostPackageDir,
   getBrandPostPackageManifestPath,
   packagePreview,
   readBrandPostPackage,
   readBrandPostPackageResult,
 } from "@/lib/brand-post-package";
-import { generateBrandPostImages } from "@/lib/brand-post-image-generation";
+import { isBrandPostImageRepairActive, repairBrandPostImages } from "@/lib/brand-post-image-repair";
 import {
   getPostCompositionContract,
   stripAffiliateDisclosureFromTitle,
@@ -131,69 +129,23 @@ function failureResponse(error: unknown, fallbackMessage: string, status: number
   return NextResponse.json({ success: false, code, error: message, ...extra }, { status });
 }
 
-async function autoRepairTravelImages(options: {
+async function autoRepairSectionImages(options: {
   brandLinkId: string;
   productName: string;
 }) {
-  if ((process.env.TRAVEL_AUTO_IMAGE_QC_REPAIR || "true").toLowerCase() === "false") {
-    return { manifest: readBrandPostPackage(options.brandLinkId), warning: null as string | null };
+  if ((process.env.BRAND_POST_AUTO_SECTION_IMAGES ?? process.env.TRAVEL_AUTO_IMAGE_QC_REPAIR ?? "true").toLowerCase() === "false") {
+    return { manifest: readBrandPostPackage(options.brandLinkId), warning: "설정에서 섹션 이미지 자동 생성이 꺼져 있습니다. 이미지 탭에서 필수 파트를 보충하세요." as string | null };
   }
-  let manifest = readBrandPostPackage(options.brandLinkId);
-  if (!manifest || manifest.version !== "brand-post-package/v2" || manifest.connectKind !== "TRAVEL") {
+  const manifest = readBrandPostPackage(options.brandLinkId);
+  if (!manifest || manifest.version !== "brand-post-package/v2") {
     return { manifest, warning: null as string | null };
   }
   try {
-    const failures: string[] = [];
-    for (let batch = 0; batch < 4; batch += 1) {
-      const preview = packagePreview(manifest);
-      const beforeMissing = preview.imageSlots.reduce((sum, slot) => sum + slot.generationMissing, 0);
-      const requests = preview.imageSlots.flatMap((slot) => {
-        const replaceableOriginal = slot.assets.find((asset) => asset?.provenance === "ORIGINAL");
-        return Array.from({ length: slot.generationMissing }, () => ({
-          requestId: randomUUID(),
-          sectionId: slot.sectionId,
-          replaceAssetKey: slot.count >= slot.maximum ? replaceableOriginal?.assetKey : undefined,
-        }));
-      }).filter((request) => request.replaceAssetKey || preview.imageSlots.some(
-        (slot) => slot.sectionId === request.sectionId && slot.count < slot.maximum,
-      )).slice(0, 4);
-      if (requests.length === 0) break;
-
-      const results = await generateBrandPostImages({
-        manifest,
-        productName: options.productName || manifest.title,
-        requests,
-      });
-      for (const result of results) {
-        if (!result.generatedPath) {
-          failures.push(result.error || "ChatGPT 이미지 결과가 비어 있습니다.");
-          continue;
-        }
-        applyGeneratedBrandPostImage({
-          brandLinkId: options.brandLinkId,
-          generatedPath: result.generatedPath,
-          sectionId: result.sectionId,
-          replaceAssetKey: result.replaceAssetKey,
-          provenance: result.provenance,
-          imageIntent: result.imageIntent,
-        });
-      }
-      manifest = readBrandPostPackage(options.brandLinkId);
-      if (!manifest || manifest.version !== "brand-post-package/v2") break;
-      const afterMissing = packagePreview(manifest).imageSlots.reduce(
-        (sum, slot) => sum + slot.generationMissing,
-        0,
-      );
-      if (afterMissing >= beforeMissing || failures.length > 0) break;
-    }
-    return {
-      manifest,
-      warning: failures.length > 0 ? `저품질 이미지 자동 대체 일부 실패: ${failures.join(" ")}` : null,
-    };
+    return await repairBrandPostImages(options);
   } catch (error) {
     return {
-      manifest,
-      warning: `저품질 이미지 GPT Image 자동 대체 실패: ${error instanceof Error ? error.message : "알 수 없는 오류"}`,
+      manifest: readBrandPostPackage(options.brandLinkId) || manifest,
+      warning: `섹션 이미지 자동 생성 실패: ${error instanceof Error ? error.message : "알 수 없는 오류"}`,
     };
   }
 }
@@ -254,6 +206,9 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   const unauthorized = requireAdminApiKey(request);
   if (unauthorized) return unauthorized;
   const { id } = await params;
+  if (isBrandPostImageRepairActive(id)) {
+    return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "섹션 이미지 생성 중입니다. 완료 후 원고를 수정하거나 승인하세요." }, { status: 409 });
+  }
   const body = await request.json().catch(() => ({})) as { action?: string; instructions?: unknown; sectionIndexes?: unknown };
   if (body.action === "approve") {
     try {
@@ -317,6 +272,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const updateError = requireNoPendingDesktopUpdate();
   if (updateError) return updateError;
   const { id } = await params;
+  if (isBrandPostImageRepairActive(id)) {
+    return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "섹션 이미지 생성 중입니다. 기존 작업이 끝난 뒤 초안을 작성하세요." }, { status: 409 });
+  }
   const body = await request.json().catch(() => ({})) as {
     action?: DraftAction;
     qualityPreset?: string;
@@ -545,9 +503,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       const failure = readPrepareFailure(logPath, id);
       throw new PrepareProcessError(failure?.code || "LOCAL_AUTOMATION_FAILED", failure?.message || `초안 매니페스트가 생성되지 않았습니다: ${getBrandPostPackageManifestPath(id)}`);
     }
-    const imageRepair = await autoRepairTravelImages({
+    const imageRepair = await autoRepairSectionImages({
       brandLinkId: id,
-      productName: link.productName || manifest.title,
+      productName: manifest.title,
     });
     let finalizedManifest = imageRepair.manifest || manifest;
     let approvalWarning: string | null = null;

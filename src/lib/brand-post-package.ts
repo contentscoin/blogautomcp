@@ -69,6 +69,14 @@ interface BrandPostPackageManifestBase {
   approvedAt: string | null;
   contentQuality?: BrandLinkContentReadiness | null;
   qualityRepair?: BrandPostQualityRepairSummary | null;
+  imageGeneration?: {
+    status: "running" | "complete" | "incomplete";
+    requested: number;
+    applied: number;
+    remaining: number;
+    errors: string[];
+    updatedAt: string;
+  };
   /** Spec-first 파이프라인 산출물(부분 수정에 필요). 미리보기에는 싣지 않는다. */
   postSpec?: unknown;
   specDraft?: unknown;
@@ -289,6 +297,12 @@ export function approveBrandPostPackage(brandLinkId: string): BrandPostPackageMa
   if (manifest.version === "brand-post-package/v2" && manifest.generationSource !== "AI") {
     throw new Error("AI 생성 출처가 확인되지 않은 초안은 승인할 수 없습니다. 새 초안을 생성해 주세요.");
   }
+  if (manifest.version === "brand-post-package/v2" && manifest.imageGeneration) {
+    const slots = packagePreview(manifest).imageSlots;
+    if (manifest.imageGeneration.status === "running" || slots.some((slot) => slot.missing > 0 || slot.generationMissing > 0)) {
+      throw new Error("섹션 이미지 품질 게이트가 미완료입니다. 이미지 탭에서 남은 파트를 보충하세요. 원고를 다시 작성할 필요는 없습니다.");
+    }
+  }
   if (
     manifest.version === "brand-post-package/v2" &&
     manifest.composition.qualityReport.preset === "PREMIUM" &&
@@ -350,9 +364,9 @@ export function packagePreview(manifest: BrandPostPackageManifest) {
         const sectionAssets = section.imagePaths
           .map((imagePath) => assetByPath.get(path.resolve(imagePath)))
           .filter(Boolean);
-        const originalCount = sectionAssets.filter((asset) => asset?.provenance === "ORIGINAL").length;
+        const originalCount = sectionAssets.filter((asset) => !asset?.provenance || asset.provenance === "ORIGINAL").length;
         const generatedCount = sectionAssets.length - originalCount;
-        const generatedMinimum = maximum > 0 ? 1 : 0;
+        const generatedMinimum = maximum > 0 ? Math.max(1, minimum) : 0;
         return {
           sectionId: section.id,
           title: section.title,
@@ -360,8 +374,8 @@ export function packagePreview(manifest: BrandPostPackageManifest) {
           minimum,
           recommended: Math.min(maximum, Math.max(minimum, 1)),
           maximum,
-          count: section.imagePaths.length,
-          missing: Math.max(0, minimum - section.imagePaths.length),
+          count: sectionAssets.length,
+          missing: Math.max(0, minimum - sectionAssets.length),
           originalCount,
           generatedCount,
           generationMissing: Math.max(0, generatedMinimum - generatedCount),
@@ -449,8 +463,8 @@ function refreshStoredContentQuality(
       : signal,
   );
   const failures = signals.filter((signal) => signal.status === "fail");
-  const warnings = signals.filter((signal) => signal.status === "warn");
-  const score = Math.max(0, 100 - failures.length * 18 - warnings.length * 5);
+  // Image repair must not overwrite the editorial quality score.
+  const score = quality.score;
   if (failures.length === 0) {
     return {
       ...quality,
@@ -497,6 +511,11 @@ export function applyGeneratedBrandPostImage(options: {
   if (!sourceStat.isFile() || sourceStat.size < 1 || sourceStat.size > 24 * 1024 * 1024) {
     throw new Error("생성 이미지 파일 크기가 허용 범위를 벗어났습니다.");
   }
+  const assets = normalizePackageImageAssets(manifest);
+  const generatedHash = sha256File(options.generatedPath);
+  if (assets.some((asset) => asset.sha256 === generatedHash)) {
+    throw new Error("기존 이미지와 동일한 파일입니다. 같은 이미지를 여러 섹션의 생성 결과로 계산하지 않습니다.");
+  }
 
   const extension = [".png", ".jpg", ".jpeg", ".webp"].includes(
     path.extname(options.generatedPath).toLowerCase(),
@@ -508,11 +527,16 @@ export function applyGeneratedBrandPostImage(options: {
   const destination = path.join(imageDir, `generated-${Date.now()}-${crypto.randomUUID()}${extension}`);
   fs.copyFileSync(options.generatedPath, destination);
   const destinationPath = path.resolve(destination);
-  const assets = normalizePackageImageAssets(manifest);
-
-  let composition = manifest.composition;
+  const availablePaths = new Set(assets.map((asset) => path.resolve(asset.path)));
+  let composition = {
+    ...manifest.composition,
+    sections: manifest.composition.sections.map((section) => ({
+      ...section, imagePaths: section.imagePaths.filter((file) => availablePaths.has(path.resolve(file))),
+    })),
+    renderNodes: manifest.composition.renderNodes.filter((node) => node.kind !== "image" || availablePaths.has(path.resolve(node.assetPath))),
+  };
   let heroImagePath = manifest.heroImagePath;
-  let bodyImagePaths = [...manifest.bodyImagePaths];
+  let bodyImagePaths = manifest.bodyImagePaths.filter((file) => availablePaths.has(path.resolve(file)));
   let thumbnailSpec = manifest.thumbnailSpec;
   let nextAssets: BrandPostPackageImageAsset[];
 

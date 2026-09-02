@@ -6,6 +6,7 @@ import sharp from "sharp";
 import { prisma } from "@/lib/db";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireTrustedLocalMutation } from "@/lib/local-request-auth";
+import { localJsonFetch } from "@/lib/local-json-fetch";
 import { clearRemoteActivation, readRemoteActivation } from "@/lib/remote-activation";
 import { getNaverSessionFile } from "@/lib/naver-session";
 import { hasStoredConnectContract } from "@/lib/connect-contract-store";
@@ -250,7 +251,7 @@ async function localApi(request: NextRequest, apiPath: string, init?: RequestIni
   for (let attempt = 0; attempt < 3; attempt += 1) {
     let response: Response;
     try {
-      response = await fetch(url, { ...init, headers, cache: "no-store" });
+      response = await localJsonFetch(url, { ...init, headers, cache: "no-store" });
     } catch (error) {
       const cause = error instanceof Error && error.cause instanceof Error ? `: ${error.cause.message}` : "";
       throw new LocalAutomationError("LOCAL_AUTOMATION_FAILED", `로컬 API 호출에 실패했습니다: ${url.origin}${url.pathname}${cause}`);
@@ -331,6 +332,7 @@ type DraftPreview = Record<string, unknown> & {
   bodyImagePaths?: unknown;
   imageSlots?: unknown;
   qualityRepair?: unknown;
+  imageGeneration?: unknown;
   generationSource?: unknown;
 };
 
@@ -369,6 +371,7 @@ function draftView(draftId: string, preview: DraftPreview, includeMarkdown: bool
     readiness: preview.readiness ?? null,
     contentQuality: preview.contentQuality ?? null,
     qualityRepair: preview.qualityRepair ?? null,
+    imageGeneration: stripPaths(preview.imageGeneration ?? null),
     ...(includeMarkdown ? { markdown: truncated ? `${markdown.slice(0, DRAFT_MARKDOWN_MAX_CHARS)}\n\n…(본문이 길어 일부만 표시)` : markdown, markdownTruncated: truncated } : {}),
   };
 }
@@ -666,11 +669,17 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
       signals?: unknown;
     } | null | undefined;
     const requiresRepair = Boolean(contentQuality && contentQuality.canPublish === false);
+    const failedSignals = Array.isArray(contentQuality?.signals)
+      ? contentQuality.signals.filter((signal: Record<string, unknown>) => signal.status === "fail")
+      : [];
+    const imageOnlyRepair = requiresRepair && failedSignals.length > 0 && failedSignals.every(
+      (signal: Record<string, unknown>) => signal.key === "composition-quality",
+    );
     const view = draftView(productId, preview, false);
     const imageAssets = await uploadDraftImageAssets(preview);
     if (imageAssets.length === 0) ctx.warnings.push("초안 이미지를 HTTPS 미리보기 주소로 업로드하지 못했습니다.");
     return envelope(job, "draft", requiresRepair
-      ? `원고는 저장됐지만 품질 보강이 필요합니다: ${contentQuality?.reason || contentQuality?.summary || "근거 밀도 미달"}`
+      ? imageOnlyRepair ? "원고 내용은 통과했습니다. 구성·이미지 게이트를 보완해야 하며, 이미지 부족 때문에 본문을 다시 작성하지 마세요." : `원고는 저장됐지만 품질 보강이 필요합니다: ${contentQuality?.reason || contentQuality?.summary || "근거 밀도 미달"}`
       : "ChatGPT 원고를 PC에서 검증하고 승인 대기 초안 패키지로 저장했습니다.", { ...view, requiresRepair, imageAssets }, ctx, {
       readiness: draftReadiness(preview),
       contentQuality: contentQuality
@@ -691,7 +700,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
           }
         : null,
       nextAction: requiresRepair
-        ? "contentQuality.reason과 실패 signals를 반영해 같은 컨텍스트로 원고를 고친 뒤 새 idempotencyKey로 post_submit_draft를 다시 호출하세요."
+        ? imageOnlyRepair ? "post_get_draft의 imageGeneration과 imageSlots를 확인하세요. 이미지 생성 중이면 기다리고, 실패한 경우 PC 초안 이미지 탭에서 섹션별 이미지 자동 생성을 실행하세요. 구성 분량 문제는 구성 게이트를 확인하되 이미지 부족만으로 원고를 재제출하지 마세요." : "contentQuality.reason과 실패 signals를 반영해 같은 컨텍스트로 원고를 고친 뒤 새 idempotencyKey로 post_submit_draft를 다시 호출하세요."
         : "post_get_draft 로 초안을 확인하고 post_approve_draft 로 승인한 뒤, 실제 발행은 사용자 확인 후 진행하세요.",
     });
   }

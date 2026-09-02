@@ -105,7 +105,9 @@ export function sectionImageBounds(
   const palette = contract.sections.find((candidate) => candidate.id === section.id);
   const min = section.imageMin ?? palette?.image.min ?? 0;
   const max = section.imageMax ?? palette?.image.max ?? Math.max(1, min);
-  return { min, max: Math.max(min, max) };
+  // Every illustrated body section needs coverage, including late sections.
+  // An explicit zero-capacity plan remains a text-only section.
+  return { min: max > 0 ? Math.max(1, min) : min, max: Math.max(min, max) };
 }
 
 export interface PostQualityReportV1 {
@@ -639,7 +641,7 @@ export function resolvePostDocument(options: {
       body: parsed.body,
       characterCount: parsed.body.join("").length,
       imagePaths: allocations[index] || [],
-      imageIntent: sectionContract.image.intent,
+      imageIntent: `${parsed.title}: ${parsed.body.join(" ").slice(0, 240)}`,
       headingStyle: sectionContract.headingStyle,
     };
   });

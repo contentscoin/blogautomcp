@@ -7,18 +7,13 @@ import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 import { beginDesktopActivity } from "@/lib/desktop-activity";
 import {
-  applyGeneratedBrandPostImage,
   getBrandPostPackageDir,
   normalizePackageImageAssets,
   packagePreview,
   readBrandPostPackage,
 } from "@/lib/brand-post-package";
-import {
-  generateBrandPostImages,
-  type BrandPostImageGenerationRequest,
-} from "@/lib/brand-post-image-generation";
-
-const activeImageJobs = new Set<string>();
+import type { BrandPostImageGenerationRequest } from "@/lib/brand-post-image-generation";
+import { isBrandPostImageRepairActive, planSectionImageRequests, repairBrandPostImages } from "@/lib/brand-post-image-repair";
 
 function imageContentType(filePath: string): string {
   const extension = path.extname(filePath).toLowerCase();
@@ -84,7 +79,7 @@ export async function POST(
   const updateError = requireNoPendingDesktopUpdate();
   if (updateError) return updateError;
   const { id } = await params;
-  if (activeImageJobs.has(id)) {
+  if (isBrandPostImageRepairActive(id)) {
     return NextResponse.json(
       { success: false, error: "이 초안의 이미지 생성이 이미 진행 중입니다." },
       { status: 409 },
@@ -116,21 +111,9 @@ export async function POST(
   }
 
   const preview = packagePreview(manifest);
-  const batchSize = Math.max(1, Math.min(4, Number(body.batchSize) || 4));
   const generationRequests: BrandPostImageGenerationRequest[] = [];
   if (body.action === "generate_missing") {
-    for (const slot of preview.imageSlots) {
-      for (let index = 0; index < slot.generationMissing && generationRequests.length < batchSize; index += 1) {
-        const replaceableOriginal = slot.assets.find((asset) => asset?.provenance === "ORIGINAL");
-        if (slot.count >= slot.maximum && !replaceableOriginal) continue;
-        generationRequests.push({
-          requestId: randomUUID(),
-          sectionId: slot.sectionId,
-          replaceAssetKey: slot.count >= slot.maximum ? replaceableOriginal?.assetKey : undefined,
-        });
-      }
-      if (generationRequests.length >= batchSize) break;
-    }
+    generationRequests.push(...planSectionImageRequests(preview.imageSlots));
   } else if (body.action === "generate_section") {
     const sectionId = body.sectionId?.trim() || "";
     const slot = preview.imageSlots.find((candidate) => candidate.sectionId === sectionId);
@@ -165,37 +148,14 @@ export async function POST(
     });
   }
 
-  activeImageJobs.add(id);
   const finishActivity = beginDesktopActivity("brand-post-image-generation");
   try {
-    const results = await generateBrandPostImages({
-      manifest,
-      productName: link.productName || manifest.title,
+    const repaired = await repairBrandPostImages({
+      brandLinkId: id,
+      productName: manifest.title,
       requests: generationRequests,
     });
-    const errors: string[] = [];
-    let generatedCount = 0;
-    for (const result of results) {
-      if (!result.generatedPath) {
-        errors.push(result.error || "이미지 생성 결과가 비어 있습니다.");
-        continue;
-      }
-      try {
-        applyGeneratedBrandPostImage({
-          brandLinkId: id,
-          generatedPath: result.generatedPath,
-          sectionId: result.sectionId,
-          replaceAssetKey: result.replaceAssetKey,
-          provenance: result.provenance,
-          imageIntent: result.imageIntent,
-        });
-        generatedCount += 1;
-      } catch (error) {
-        errors.push(error instanceof Error ? error.message : "생성 이미지를 초안에 반영하지 못했습니다.");
-      }
-    }
-    const updated = readBrandPostPackage(id);
-    if (!updated) throw new Error("이미지 작업 후 초안 패키지를 읽지 못했습니다.");
+    const { errors, generatedCount, manifest: updated } = repaired;
     const updatedPreview = packagePreview(updated);
     const remainingMissing = updatedPreview.imageSlots.reduce((sum, slot) => sum + slot.generationMissing, 0);
     return NextResponse.json({
@@ -215,6 +175,5 @@ export async function POST(
     }, { status: 500 });
   } finally {
     finishActivity();
-    activeImageJobs.delete(id);
   }
 }

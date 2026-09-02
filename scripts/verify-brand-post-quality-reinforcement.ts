@@ -5,6 +5,7 @@ import { getBrandLinkContentReadiness } from "./lib/brandlink-content-readiness"
 import { assessProductReviewSubstance } from "./lib/product-editorial-plan";
 import { buildBrandPostImagePrompt } from "../src/lib/brand-post-image-generation";
 import { parsePreparedBrandPostSections } from "./lib/prepared-post-markdown";
+import { formatDraftSubmissionNextAction } from "./lib/writing-prompt-contract";
 import {
   SHOPPING_POST_CONTRACT_V1,
   TRAVEL_POST_CONTRACT_V1,
@@ -434,10 +435,12 @@ assert.match(simpleAgentSource, /brand-draft-quality-checklist\/v1/u);
 assert.match(simpleAgentSource, /눈앞의 장면 → 즐길 거리 또는 실용 팁/u);
 assert.match(writingStyleSource, /도착 장면 → 장소의 배경 → 현장에서 할 일/u);
 assert.match(writingStyleSource, /거리·소요시간·입장료·운영시간·교통비/u);
-assert.match(simpleAgentSource, /contentQuality\.canPublish가 false/u);
+assert.match(formatDraftSubmissionNextAction(), /contentQuality\.canPublish가 false/u);
+assert.match(formatDraftSubmissionNextAction(), /이미지·배치 실패만 있으면 원고를 재작성하거나 재제출하지 마세요/u);
 assert.match(simpleAgentSource, /maximumRepairAttempts = isTravel \? 3 : 2/u);
 assert.doesNotMatch(simpleAgentSource, /편집 역할 \$\{role\}/u);
-assert.match(sitesMcpSource, /contentQuality\.canPublish가 false/u);
+assert.match(sitesMcpSource, /contentQuality\.canPublish 가 false/u);
+assert.match(sitesMcpSource, /이미지 부족만으로는 원고를 보강 제출하지 않습니다/u);
 const step2CallIndex = simpleAgentSource.indexOf("await step2_generatePost(");
 const persistedEvidenceIndex = simpleAgentSource.indexOf(
   "productFeatures: product.features.length > 0 ? JSON.stringify(product.features) : null",

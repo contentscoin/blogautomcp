@@ -7,7 +7,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $resolvedAppPath = [IO.Path]::GetFullPath((Join-Path $projectRoot $AppPath))
-$expectedAppRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot 'out\win-unpacked'))
+$outputRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot 'out'))
+$expectedAppRoot = [IO.Path]::GetDirectoryName($resolvedAppPath)
+if (-not $expectedAppRoot.StartsWith($outputRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($expectedAppRoot) -ne 'win-unpacked') {
+  throw '패키지 실행 파일은 out 아래 win-unpacked 폴더 안에 있어야 합니다.'
+}
 if (-not $resolvedAppPath.StartsWith($expectedAppRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
   throw '패키지 실행 파일이 예상 out/win-unpacked 폴더 밖에 있습니다.'
 }

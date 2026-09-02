@@ -9,6 +9,7 @@ import ProductThumbnailStudio from "@/components/ProductThumbnailStudio";
 import { ThemeToggle } from "@/components/ThemeProvider";
 import { getTopicTaskContentReadiness } from "@/lib/topic-task-content-readiness";
 import { getTopicTaskPublishReadiness } from "@/lib/topic-task-publish-readiness";
+import { isDraftEditorialQualityPassed } from "@/lib/brand-post-quality-display";
 
 type ContentMode = "product" | "topic" | "review";
 type ReviewCategory = "place" | "food" | "travel" | "parenting" | "product";
@@ -99,6 +100,7 @@ interface BrandPostDraftPreview {
     afterCode: string;
     note: string;
   } | null;
+  imageGeneration?: { status: "running" | "complete" | "incomplete"; applied: number; remaining: number; errors: string[] };
   thumbnailSpec?: {
     canvas: { width: number; height: number; aspect: string };
     style: string;
@@ -435,6 +437,25 @@ export default function Dashboard() {
   const [draftPreviewTab, setDraftPreviewTab] = useState<"post" | "images" | "thumbnail" | "quality">("post");
   const [draftApproving, setDraftApproving] = useState(false);
   const [draftImageActionKey, setDraftImageActionKey] = useState<string | null>(null);
+  const previewId = draftPreview?.brandLinkId;
+  useEffect(() => {
+    if (!previewId || !draftImageActionKey) return;
+    let cancelled = false;
+    let inFlight = false;
+    const timer = setInterval(async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const response = await fetch(`/api/brandlinks/${previewId}/draft`, { cache: "no-store" });
+        const payload = await response.json();
+        if (!cancelled && response.ok && payload.success && payload.data) {
+          setDraftPreview((current) => current?.brandLinkId === previewId ? payload.data : current);
+        }
+      } catch { /* The owning POST reports errors; progress polling is best effort. */ }
+      finally { inFlight = false; }
+    }, 3000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [previewId, draftImageActionKey]);
   const [draftCreationMode, setDraftCreationMode] = useState<DraftCreationMode>("checking");
   const [chatGptDraftHandoff, setChatGptDraftHandoff] = useState<ChatGptDraftHandoff | null>(null);
   const [chatGptDraftHandoffReason, setChatGptDraftHandoffReason] = useState<string | null>(null);
@@ -1223,26 +1244,15 @@ export default function Dashboard() {
     setDraftImageActionKey("missing");
     setDashboardNotice({ tone: "info", text: "생성 이미지가 없는 파트를 자동 보충하고 있습니다." });
     try {
-      let generatedTotal = 0;
-      let remaining = draftPreview.imageSlots?.reduce((sum, slot) => sum + slot.generationMissing, 0) || 0;
-      for (let batch = 0; batch < 4 && remaining > 0; batch += 1) {
-        const previousRemaining = remaining;
-        const payload = await requestDraftImageAction({ action: "generate_missing", batchSize: 4 });
-        const generated = payload.generatedCount || 0;
-        generatedTotal += generated;
-        remaining = payload.remainingMissing || 0;
-        // 사용자 수정이 필요한 오류는 같은 요청에서 무작정 재시도하지 않는다.
-        if (generated === 0 || remaining >= previousRemaining || (payload.errors?.length || 0) > 0) {
-          if (payload.errors?.length) throw new Error(payload.errors.join(" "));
-          break;
-        }
-      }
+      const payload = await requestDraftImageAction({ action: "generate_missing" });
+      const generatedTotal = payload.generatedCount || 0;
+      const remaining = payload.remainingMissing || 0;
       setDraftPreviewTab("images");
       setDashboardNotice({
         tone: remaining === 0 ? "success" : "info",
         text: remaining === 0
           ? `섹션별 생성 이미지 보충 완료 · ${generatedTotal}장 반영`
-          : `${generatedTotal}장을 반영했고 생성 이미지가 없는 파트 ${remaining}개가 남았습니다.`,
+          : `${generatedTotal}장을 반영했고 필요한 이미지 ${remaining}장이 남았습니다. ${(payload.errors || []).join(" ")}`,
       });
     } catch (error) {
       setDashboardNotice({ tone: "error", text: error instanceof Error ? error.message : "필수 이미지 보충에 실패했습니다." });
@@ -2185,10 +2195,12 @@ export default function Dashboard() {
     0,
   ) || 0;
   const draftCompositionQualityPassed = draftPreview?.composition?.qualityReport.canAutoPublish !== false;
-  const draftContentQualityPassed = draftPreview?.contentQuality?.canPublish !== false;
+  const draftContentQualityPassed = isDraftEditorialQualityPassed(draftPreview?.contentQuality);
   const draftApprovalBlocked = Boolean(
-    draftPreview?.composition?.qualityReport.preset === "PREMIUM" &&
-    (!draftCompositionQualityPassed || !draftContentQualityPassed),
+    draftPreview?.imageGeneration?.status === "running" ||
+    (draftPreview?.imageGeneration && draftMissingImageCount > 0) ||
+    (draftPreview?.composition?.qualityReport.preset === "PREMIUM" &&
+    (!draftCompositionQualityPassed || !draftContentQualityPassed)),
   );
 
   return (
@@ -3360,7 +3372,7 @@ export default function Dashboard() {
                         <div>
                           <p className="text-sm font-semibold text-slate-600">원고 내용 QC</p>
                           <p className="mt-1 text-3xl font-black text-slate-950">{draftPreview.contentQuality?.score ?? "-"}점</p>
-                          <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-700">{draftPreview.contentQuality?.reason || draftPreview.contentQuality?.summary || "이전 버전 초안이라 원고 내용 QC가 저장되어 있지 않습니다."}</p>
+                          <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-700">{draftContentQualityPassed ? "원고 내용 품질검사 통과 · 이미지 준비 상태는 아래 게이트에서 별도로 확인합니다." : draftPreview.contentQuality?.reason || draftPreview.contentQuality?.summary || "이전 버전 초안이라 원고 내용 QC가 저장되어 있지 않습니다."}</p>
                         </div>
                         <div className="flex shrink-0 flex-col items-end gap-2">
                           <span className={`rounded-full px-3 py-1 text-sm font-bold ${draftContentQualityPassed ? "bg-emerald-600 text-white" : "bg-red-600 text-white"}`}>
@@ -3372,6 +3384,13 @@ export default function Dashboard() {
                     {draftPreview.qualityRepair && (
                       <div className={`rounded-xl px-4 py-3 text-sm font-semibold ${draftPreview.qualityRepair.applied ? "bg-blue-50 text-blue-800" : "bg-slate-100 text-slate-700"}`}>
                         자동 보강 이력 · {draftPreview.qualityRepair.note}
+                      </div>
+                    )}
+                    {draftPreview.imageGeneration && (
+                      <div className="rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                        섹션 이미지 · {draftPreview.imageGeneration.status === "running" ? "진행 중" : draftPreview.imageGeneration.status === "complete" ? "완료" : "일부 미완료"}
+                        {` · ${draftPreview.imageGeneration.applied}장 반영 · ${draftPreview.imageGeneration.remaining}장 남음`}
+                        {draftPreview.imageGeneration.errors.map((error, index) => <p key={index}>{error}</p>)}
                       </div>
                     )}
                     <div className={`rounded-2xl border p-5 ${draftCompositionQualityPassed ? "border-emerald-200" : "border-amber-300 bg-amber-50"}`}>

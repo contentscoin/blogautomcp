@@ -804,24 +804,54 @@ export async function sendPromptToChatGPT(page: Page, prompt: string, label: str
     .at(-1) || "";
 }
 
+// Runs inside page.evaluate: keep this function independent of module closures.
+// Positive ownership selectors already used by readAssistantMessages / chatgpt-login.
+function collectRenderableChatGPTGeneratedImages(): Array<{ src: string; width: number; height: number }> {
+  const attachmentSelector = [
+    '[data-testid*="attachment" i]', '[data-testid*="file-preview" i]',
+    '[data-testid*="upload-preview" i]', '[class*="attachment" i]', '[class*="file-preview" i]',
+  ].join(", ");
+  const source = (img: HTMLImageElement) => img.currentSrc || img.src || "";
+  const excluded = (img: HTMLImageElement): boolean => {
+    const role = img.closest("[data-message-author-role]")?.getAttribute("data-message-author-role");
+    if (role && role !== "assistant") return true;
+    if (img.closest(attachmentSelector)) return true;
+    const label = `${img.alt || ""} ${img.getAttribute("title") || ""} ${img.className || ""}`;
+    if (/uploaded|첨부|업로드|avatar|profile[-_ ]?(?:picture|photo)|프로필|아바타/i.test(label)) return true;
+    if (/(?:\/|^)avatars?(?:[\/_.-])|profile-/i.test(source(img))) return true;
+    const article = img.closest('article[data-testid^="conversation-turn-"]');
+    return !!article && (
+      !!article.querySelector('[data-message-author-role="user"]') ||
+      /^(?:나의 말:|You said:)/i.test((article.textContent || "").trim())
+    );
+  };
+  // Exclude a reference even when the assistant echoes its exact source URL.
+  const referenceSources = new Set(Array.from(document.querySelectorAll("img"))
+    .filter(excluded).map(source));
+  const images = Array.from(document.querySelectorAll<HTMLImageElement>(
+    '[data-message-author-role="assistant"] img, article[data-testid^="conversation-turn-"] .agent-turn img',
+  ));
+  const seen = new Set<string>();
+  return images.flatMap((img) => {
+    const src = source(img);
+    if (excluded(img) || referenceSources.has(src) || seen.has(src)) return [];
+    if (!/^https?:\/\//i.test(src) && !src.startsWith("data:image/") && !src.startsWith("blob:")) return [];
+    const rect = img.getBoundingClientRect();
+    const style = window.getComputedStyle(img);
+    if (!img.complete || img.naturalWidth <= 0 || img.naturalHeight <= 0 ||
+        rect.width < 180 || rect.height < 180 || style.visibility === "hidden" ||
+        style.display === "none" || style.opacity === "0") return [];
+    const width = Math.max(rect.width, img.naturalWidth);
+    const height = Math.max(rect.height, img.naturalHeight);
+    if (width < 300 || height < 300) return [];
+    seen.add(src);
+    return [{ src, width, height }];
+  }).sort((a, b) => b.width * b.height - a.width * a.height);
+}
+
 export async function countRenderableChatGPTImages(page: Page): Promise<number> {
   try {
-    return await page.evaluate(() => {
-      const images = Array.from(document.querySelectorAll("img"));
-      return images.filter((img) => {
-        const rect = img.getBoundingClientRect();
-        const src = img.currentSrc || img.getAttribute("src") || "";
-        const width = Math.max(rect.width, img.naturalWidth || 0);
-        const height = Math.max(rect.height, img.naturalHeight || 0);
-        return (
-          (src.startsWith("http") || src.startsWith("data:image/")) &&
-          width >= 300 &&
-          height >= 300 &&
-          rect.width >= 180 &&
-          rect.height >= 180
-        );
-      }).length;
-    });
+    return (await page.evaluate(collectRenderableChatGPTGeneratedImages)).length;
   } catch {
     return 0;
   }
@@ -860,7 +890,8 @@ export async function waitForChatGPTImageArtifacts(
     waitedMs += 3000;
   }
 
-  return Math.max(previousImageCount, 0);
+  // A timeout is not a successful artifact observation, even if previews were visible.
+  return 0;
 }
 
 
@@ -871,54 +902,29 @@ export async function downloadChatGPTImages(page: import('playwright').Page, dow
     await page.waitForTimeout(5000); // Wait for images to fully render
 
     // 디버깅용 스크린샷
-    await page.screenshot({ path: path.join(process.cwd(), "logs", `debug_chatgpt_image_${Date.now()}.png`) });
-    console.log("      - [이미지 다운로드] 디버깅 스크린샷 저장 완료");
+    await page.screenshot({ path: path.join(process.cwd(), "logs", `debug_chatgpt_image_${Date.now()}.png`) })
+      .catch(() => {}); // Diagnostics must not prevent downloading an otherwise valid artifact.
 
-    const imagesData = await page.evaluate(`(async () => {
-      const allImages = Array.from(document.querySelectorAll('img'));
-      const candidates = allImages
-        .map((img) => {
-          const rect = img.getBoundingClientRect();
-          const src = img.currentSrc || img.src || '';
-          return {
-            src,
-            alt: img.alt || '',
-            width: Math.max(rect.width, img.naturalWidth || 0),
-            height: Math.max(rect.height, img.naturalHeight || 0),
-            visible: rect.width >= 180 && rect.height >= 180,
-          };
-        })
-        .filter((item) =>
-          item.visible &&
-          item.src &&
-          (item.src.startsWith('http') || item.src.startsWith('data:image/')) &&
-          item.width >= 300 &&
-          item.height >= 300
-        )
-        .sort((a, b) => (b.width * b.height) - (a.width * a.height));
-
-      const unique = [];
-      const seen = new Set();
-      for (const item of candidates) {
-        if (seen.has(item.src)) continue;
-        seen.add(item.src);
-        unique.push(item);
-      }
-
-      const results = [];
-      for (const item of unique) {
+    const candidates = await page.evaluate(collectRenderableChatGPTGeneratedImages);
+    const imagesData = await page.evaluate(async (images) => {
+      const results: string[] = [];
+      for (const item of images) {
         const src = item.src;
         if (src.startsWith('data:image/')) {
           results.push(src);
           continue;
         }
-        if (src.startsWith('http')) {
+        if (/^https?:\/\//i.test(src) || src.startsWith('blob:')) {
           try {
             const response = await fetch(src);
+            if (!response.ok) continue;
             const blob = await response.blob();
+            if (!blob.type.startsWith("image/")) continue;
             const reader = new FileReader();
-            const base64data = await new Promise((resolve) => {
-              reader.onloadend = () => resolve(reader.result);
+            const base64data = await new Promise<string>((resolve, reject) => {
+              reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("Invalid image data"));
+              reader.onerror = () => reject(reader.error || new Error("Image read failed"));
+              reader.onabort = () => reject(new Error("Image read aborted"));
               reader.readAsDataURL(blob);
             });
             results.push(base64data);
@@ -928,7 +934,7 @@ export async function downloadChatGPTImages(page: import('playwright').Page, dow
         }
       }
       return results;
-    })()`) as string[];
+    }, candidates);
 
     if (imagesData.length === 0) {
       console.log("      - [이미지 다운로드] 생성된 이미지를 찾을 수 없습니다.");

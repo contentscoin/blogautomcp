@@ -106,6 +106,8 @@ export function formatAdaptiveEditorialHarnessForPrompt(kind: AdaptiveEditorialK
     `[분석 우선 자유 생성 하네스 v1 · ${profile.sourcePackId}]`,
     `- 근거 표본: ${profile.sourceCount}건, 수집일 ${profile.collectedAt}`,
     "- 이 하네스는 완성 문장이나 고정 목차가 아니라 판단 방향을 제공합니다.",
+    "- 관측 분포와 선택 렌즈는 참고이며, 공유 필수 작성 계약의 최소 분량·섹션·출력 형식을 완화하지 않습니다.",
+    "- 근거가 없는 배경·장면·실용 정보는 생략합니다. 문체를 확정형으로 바꾸거나 evidenceFacts에 적는 것만으로 검증된 사실이 되지 않습니다.",
     "- 먼저 상품 사실·이미지·미확인 정보를 분석한 뒤, 한 문장짜리 편집 논지를 스스로 정하세요.",
     `- 본문은 근거 밀도에 따라 대략 ${profile.sectionRange.min}~${profile.sectionRange.max}개 흐름으로 자유롭게 묶습니다. 정확한 개수·제목·순서는 강제하지 않습니다.`,
     `- 관측 분포 참고: 본문 ${profile.observedBodyChars.p25}~${profile.observedBodyChars.p75}자(중앙 ${profile.observedBodyChars.median}), 이미지 ${profile.observedImages.p25}~${profile.observedImages.p75}장(중앙 ${profile.observedImages.median}). 목표 할당량이 아니라 정보 밀도 점검용입니다.`,

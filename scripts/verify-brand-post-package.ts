@@ -195,7 +195,7 @@ async function main() {
   );
   assert.equal(
     draftImageRouteSource.includes('"generate_missing" | "generate_section" | "regenerate"') &&
-      draftImageRouteSource.includes("applyGeneratedBrandPostImage") &&
+      draftImageRouteSource.includes("repairBrandPostImages") &&
       draftImageRouteSource.includes('"Cache-Control": "private, no-store, max-age=0"'),
     true,
     "초안 이미지는 필수 보충·파트 추가·개별 재생성과 안전한 미리보기를 지원해야 합니다.",
@@ -215,15 +215,15 @@ async function main() {
     "데스크톱 미리보기에서 이미지 보충·개별 재생성·품질 보강을 실행할 수 있어야 합니다.",
   );
   assert.equal(
-    draftImageRouteSource.includes("slot.generationMissing") &&
+    draftImageRouteSource.includes("planSectionImageRequests") &&
       draftImageRouteSource.includes('asset?.provenance === "ORIGINAL"') &&
       draftImageRouteSource.includes("replaceAssetKey"),
     true,
     "원본 이미지는 생성 완료로 계산하지 않고, 꽉 찬 슬롯에서는 원본을 생성 이미지로 교체해야 합니다.",
   );
   assert.equal(
-    draftRouteSource.includes("slot.generationMissing") &&
-      draftRouteSource.includes("for (let batch = 0; batch < 4; batch += 1)"),
+    draftRouteSource.includes("repairBrandPostImages(options)") &&
+      draftRouteSource.includes("autoRepairSectionImages"),
     true,
     "여행 초안 자동 보충은 첫 4장만 만들고 끝나지 않고 남은 섹션을 후속 배치로 처리해야 합니다.",
   );

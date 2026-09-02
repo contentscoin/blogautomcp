@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { requireAdminApiKey } from "@/lib/api-auth";
+import { cancelBrandPostImageRepairs } from "@/lib/brand-post-image-repair";
 
 const execFileAsync = promisify(execFile);
 
@@ -85,6 +86,7 @@ export async function POST(request: NextRequest) {
       return authError;
     }
 
+    const cancelledImageJobs = cancelBrandPostImageRepairs();
     const kill = await killRunningPublishProcesses();
 
     const stamp = new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
@@ -104,6 +106,7 @@ export async function POST(request: NextRequest) {
       message: `포스팅을 정지했습니다. ${kill.detail} 대기열 복구: 상품 ${links.count}건, 주제글 ${tasks.count}건.`,
       data: {
         killedProcesses: kill.killed,
+        cancelledImageJobs,
         resetBrandLinks: links.count,
         resetTopicTasks: tasks.count,
       },

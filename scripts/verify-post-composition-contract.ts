@@ -169,7 +169,7 @@ assert.equal(planned.sections[3].imageMax, 2);
 // 플랜에 없는 여분(planImages[7], [8])은 여유가 있는 섹션에 얹혀 버려지지 않는다.
 assert.equal(planned.renderNodes.filter((node) => node.kind === "image").length, planImages.length, "플랜 밖 유효 이미지도 렌더 노드로 배치");
 assert.equal(planned.qualityReport.imageCoverage.missingSectionIds.length, 0, "하한을 채운 섹션은 부족으로 보고되지 않는다");
-assert.equal(planned.qualityReport.imageCoverage.requiredSlots, 1 + 4, "필요 슬롯 = 썸네일 1 + 섹션 하한 합 4");
+assert.equal(planned.qualityReport.imageCoverage.requiredSlots, 1 + 5, "필요 슬롯 = 썸네일 1 + 그림이 허용된 모든 섹션 하한 합 5");
 const earlyCardIndex = planned.renderNodes.findIndex((node) => node.kind === "connectCard" && node.placement === "early");
 const overviewHeadingIndex = planned.renderNodes.findIndex((node) => node.kind === "heading" && node.sectionId === "travel-itinerary-overview");
 const firstCourseHeadingIndex = planned.renderNodes.findIndex((node) => node.kind === "heading" && node.sectionId === "travel-day-course");
@@ -194,7 +194,7 @@ const shortPlan = resolvePostDocument({
     { role: "closing", imagePaths: [], imageIntent: "마지막 풍경", imageMin: 0, imageMax: 1 },
   ],
 });
-assert.deepEqual(shortPlan.qualityReport.imageCoverage.missingSectionIds, ["travel-day-course", "travel-day-course-2", "travel-inclusions"]);
+assert.deepEqual(shortPlan.qualityReport.imageCoverage.missingSectionIds, ["travel-day-course", "travel-day-course-2", "travel-inclusions", "travel-closing"]);
 assert.equal(shortPlan.qualityReport.canAutoPublish, false);
 
 // 플랜 길이가 섹션 수와 다르면 무시하고 팔레트로 돌아간다.
