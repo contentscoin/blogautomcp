@@ -19,7 +19,6 @@ import * as path from "path";
 import * as fs from "fs";
 import * as crypto from "crypto";
 import sharp from "sharp";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import {
   buildHumanMobileStyleGuide,
   HUMAN_MOBILE_STYLE_GUIDE,
@@ -97,23 +96,17 @@ chromium.use(StealthPlugin());
 
 const prisma = new PrismaClient();
 
-// AI Provider 설정 (openai 또는 gemini)
+// AI Provider: OpenAI 단일 경로 (Gemini는 제거됨)
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim() || "";
-const GEMINI_API_KEY = (
-  process.env.GEMINI_API_KEY ||
-  process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
-  ""
-).trim();
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_MAX_OUTPUT_TOKENS = parseBoundedInteger(
+  process.env.OPENAI_MAX_OUTPUT_TOKENS,
+  8192,
+  1024,
+  32768
+);
 const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || "120000");
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-const REQUESTED_AI_PROVIDER = (process.env.AI_PROVIDER || "openai").toLowerCase();
-const AI_PROVIDER = REQUESTED_AI_PROVIDER;
-
-// Gemini 초기화
-const gemini = AI_PROVIDER === "gemini" 
-  ? new GoogleGenerativeAI(GEMINI_API_KEY)
-  : null;
+const AI_PROVIDER = "openai";
 
 const SESSION_FILE = getNaverSessionFile();
 const CHATGPT_SESSION_FILE = getChatgptSessionFile();
@@ -282,7 +275,7 @@ const PRODUCT_POST_LOCAL_FALLBACK_ENABLED =
   (process.env.PRODUCT_POST_LOCAL_FALLBACK_ENABLED || "true").toLowerCase() !== "false";
 const BLOG_BODY_IMAGE_MAX = parseBoundedInteger(
   process.env.BLOG_BODY_IMAGE_MAX,
-  4,
+  10,
   1,
   12
 );
@@ -365,28 +358,6 @@ const DEFAULT_SECTION_TITLES = [
   "이런 분께 잘 맞아요",
 ];
 
-const DEFAULT_HASHTAGS = [
-  "추천",
-  "후기",
-  "리뷰",
-  "비교",
-  "순위",
-  "가격",
-  "장단점",
-  "일상",
-  "가성비",
-  "생활용품",
-  "쇼핑",
-  "쇼핑추천",
-  "구매전확인",
-  "상품정보",
-  "옵션확인",
-  "구성확인",
-  "가격비교",
-  "할인정보",
-  "실속쇼핑",
-  "네이버쇼핑",
-];
 
 function stripEmoji(text: string): string {
   return text.replace(/[\p{Extended_Pictographic}\uFE0F]/gu, "");
@@ -676,7 +647,8 @@ async function isUsableBodyUploadImage(imagePath: string): Promise<boolean> {
   if (!fs.existsSync(imagePath)) return false;
 
   const basename = path.basename(imagePath).toLowerCase();
-  if (basename.includes("_detail_crop_")) return false;
+  // 세로 상세 이미지에서 잘라낸 _detail_crop_ 파일은 본문 이미지 후보로 허용한다.
+  // (이전에는 여기서 무조건 탈락시켜 가장 높은 점수를 받은 이미지가 항상 버려졌다.)
   if (/banner|event|coupon|benefit|delivery|shipping|review|notice|guide/.test(basename)) {
     return false;
   }
@@ -1147,7 +1119,7 @@ async function generateProductThumbnailWithChatGPT(
     fs.readdirSync(CHATGPT_USER_DATA_DIR).length > 0;
 
   if (!hasSessionFile && !hasPersistentProfile) {
-    console.log("   ⚠️ 생성형 썸네일: ChatGPT 세션이 없어 건너뜁니다. `npm run login:chatgpt` 후 사용하세요.");
+    console.log("   ⚠️ 생성형 썸네일: ChatGPT 브라우저 자동화는 설치형 앱에서 사용하지 않습니다. OpenAI API 키 기반 생성형 썸네일을 사용하세요.");
     return null;
   }
 
@@ -1841,46 +1813,66 @@ async function runOpenAiApi(systemPrompt: string, userPrompt: string): Promise<s
     throw new Error("OPENAI_API_KEY가 비어 있어 OpenAI API로 글을 생성할 수 없습니다.");
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
-  try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: OPENAI_MODEL,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-        temperature: 0.75,
-        response_format: { type: "json_object" },
-      }),
-      signal: controller.signal,
-    });
+  // 출력 토큰 상한을 명시하고, 상한에 걸려 잘린 응답(finish_reason=length)은
+  // 조용히 파싱 폴백으로 흘리지 않고 한 번 더 간결하게 재요청한다.
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
+    try {
+      const system =
+        attempt === 0
+          ? systemPrompt
+          : `${systemPrompt}\n\n[출력 길이 주의] 직전 응답이 출력 한도에서 잘렸습니다. 섹션 수와 구조는 유지하되 각 섹션을 더 간결하게 써서 JSON을 반드시 완결하세요.`;
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: OPENAI_MODEL,
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: userPrompt },
+          ],
+          temperature: 0.75,
+          max_completion_tokens: OPENAI_MAX_OUTPUT_TOKENS,
+          response_format: { type: "json_object" },
+        }),
+        signal: controller.signal,
+      });
 
-    if (!response.ok) {
-      const detail = await response.text().catch(() => "");
-      throw new Error(`OpenAI API 호출 실패 (${response.status}): ${detail.slice(0, 400)}`);
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error(`OpenAI API 호출 실패 (${response.status}): ${detail.slice(0, 400)}`);
+      }
+
+      const payload = (await response.json()) as {
+        choices?: Array<{
+          message?: { content?: string | null };
+          finish_reason?: string | null;
+        }>;
+      };
+      const choice = payload.choices?.[0];
+      const output = choice?.message?.content?.trim();
+      if (!output) {
+        throw new Error("OpenAI API 응답에서 본문을 찾지 못했습니다.");
+      }
+      if (choice?.finish_reason === "length") {
+        lastError = new Error(
+          `OpenAI API 응답이 출력 토큰 상한(${OPENAI_MAX_OUTPUT_TOKENS})에서 잘렸습니다.`
+        );
+        console.log(`   ⚠️ ${lastError.message}${attempt === 0 ? " 간결하게 재요청합니다." : ""}`);
+        continue;
+      }
+
+      return output;
+    } finally {
+      clearTimeout(timeout);
     }
-
-    const payload = (await response.json()) as {
-      choices?: Array<{
-        message?: { content?: string | null };
-      }>;
-    };
-    const output = payload.choices?.[0]?.message?.content?.trim();
-    if (!output) {
-      throw new Error("OpenAI API 응답에서 본문을 찾지 못했습니다.");
-    }
-
-    return output;
-  } finally {
-    clearTimeout(timeout);
   }
+  throw lastError || new Error("OpenAI API 응답이 잘렸습니다.");
 }
 
 const CHATGPT_COMPOSER_SELECTORS = [
@@ -4323,7 +4315,15 @@ function normalizeSectionText(raw: string, fallbackTitle: string, product: Produ
   return `${title}\n\n${bodyLines.join("\n")}\n`;
 }
 
-function normalizeSections(rawSections: unknown, targetCount: number, product: ProductInfo): string[] {
+function normalizeSections(
+  rawSections: unknown,
+  targetCount: number,
+  product: ProductInfo,
+  fallbackTitles: string[] = DEFAULT_SECTION_TITLES
+): string[] {
+  // 부족한 섹션을 채울 때는 이번 글의 편집 구성표 제목을 쓴다. 예전처럼 쇼핑용
+  // 기본 제목을 쓰면 여행 글에 "구성 및 패키지 확인" 같은 제목이 섞여 들어갔다.
+  const titles = fallbackTitles.length > 0 ? fallbackTitles : DEFAULT_SECTION_TITLES;
   const rawList = Array.isArray(rawSections)
     ? rawSections.filter((item): item is string => typeof item === "string")
     : [];
@@ -4334,14 +4334,13 @@ function normalizeSections(rawSections: unknown, targetCount: number, product: P
   }
 
   const normalized = expanded.map((section, index) =>
-    normalizeSectionText(section, DEFAULT_SECTION_TITLES[index % DEFAULT_SECTION_TITLES.length], product)
+    normalizeSectionText(section, titles[index % titles.length], product)
   );
 
   while (normalized.length < targetCount) {
     const index = normalized.length;
-    normalized.push(
-      buildFallbackSection(DEFAULT_SECTION_TITLES[index % DEFAULT_SECTION_TITLES.length], product)
-    );
+    console.log(`   ⚠️ 구조화 섹션 부족: ${index + 1}번째 섹션을 구성표 제목 "${titles[index % titles.length]}"로 보강합니다.`);
+    normalized.push(buildFallbackSection(titles[index % titles.length], product));
   }
 
   return normalized.slice(0, targetCount);
@@ -4368,8 +4367,13 @@ function normalizeHashtags(
     .slice(0, 4);
 
   const openCrabTags = openCrabSeoBrief?.hashtags || [];
-  const merged = [...normalized, ...openCrabTags, ...productSeed, ...DEFAULT_HASHTAGS];
+  // "추천/후기/일상" 같은 일반 태그로 개수를 채우지 않는다. 프롬프트가 금지하는
+  // 태그를 코드가 넣던 모순을 없애고, 부족하면 부족한 채로 둔다.
+  const merged = [...normalized, ...openCrabTags, ...productSeed];
   const deduped = Array.from(new Set(merged)).slice(0, NAVER_BLOG_HASHTAG_COUNT);
+  if (deduped.length < 3) {
+    console.log(`   ⚠️ 해시태그가 ${deduped.length}개뿐입니다(일반 태그로 채우지 않음).`);
+  }
   return deduped;
 }
 
@@ -5163,7 +5167,7 @@ async function downloadImage(url: string, filePath: string): Promise<void> {
 }
 
 // ============================================
-// AI 공통 호출 함수 (OpenAI / Gemini)
+// AI 공통 호출 함수 (OpenAI)
 // ============================================
 const HUMANIZE_SECTION_SEPARATOR = "\n\n<<<섹션구분>>>\n\n";
 
@@ -5184,21 +5188,10 @@ async function rewriteSectionsForHumanTone(
 
   let rewritten = "";
   try {
-    if (AI_PROVIDER === "gemini" && gemini) {
-      const model = gemini.getGenerativeModel({
-        model: GEMINI_MODEL,
-        generationConfig: { temperature: 0.5, maxOutputTokens: 4000 },
-      });
-      const result = await model.generateContent(prompt);
-      rewritten = result.response.text();
-    } else if (AI_PROVIDER === "openai") {
-      rewritten = await runOpenAiApi(
-        "당신은 한국어 문장을 자연스럽게 다듬는 편집자입니다. 지시받은 형식 규칙을 정확히 지키세요.",
-        prompt
-      );
-    } else {
-      return sections;
-    }
+    rewritten = await runOpenAiApi(
+      "당신은 한국어 문장을 자연스럽게 다듬는 편집자입니다. 지시받은 형식 규칙을 정확히 지키세요.",
+      prompt
+    );
   } catch (error) {
     console.log(`   ⚠️ 휴머나이징 재작성 실패, 원문 유지: ${getErrorMessage(error)}`);
     return sections;
@@ -5231,7 +5224,6 @@ async function generateWithAI(
   chatgptContext?: ChatGPTGuidanceContext,
   chatgptImagePaths: string[] = []
 ): Promise<string> {
-  const combinedPrompt = `[시스템 지시사항]\n${systemPrompt}\n\n[사용자 요청]\n${userPrompt}`;
 
   if (BROWSER_GPT_MODE) {
     if (!chatgptContext) {
@@ -5246,30 +5238,7 @@ async function generateWithAI(
     }
   }
 
-  if (AI_PROVIDER === "gemini" && gemini) {
-    if (!GEMINI_API_KEY) {
-      throw new Error("GEMINI_API_KEY 또는 GOOGLE_GENERATIVE_AI_API_KEY가 비어 있어 Gemini API로 글을 생성할 수 없습니다.");
-    }
-
-    // Gemini 사용
-    const model = gemini.getGenerativeModel({ 
-      model: GEMINI_MODEL,
-      generationConfig: {
-        temperature: 0.75,
-        maxOutputTokens: 4000,
-      }
-    });
-    
-    // Gemini는 system prompt를 user prompt에 합쳐서 전달
-    const result = await model.generateContent(combinedPrompt);
-    return result.response.text();
-    
-  } else if (AI_PROVIDER === "openai") {
-    return runOpenAiApi(systemPrompt, userPrompt);
-    
-  } else {
-    throw new Error("AI Provider가 설정되지 않았습니다. .env 파일을 확인하세요.");
-  }
+  return runOpenAiApi(systemPrompt, userPrompt);
 }
 
 // ============================================
@@ -5283,10 +5252,7 @@ async function step2_generatePost(
 ): Promise<GeneratedPostPreview> {
   const isTravel = connectKind === "TRAVEL";
   console.log(`\n📝 STEP 2: SEO 최적화 블로그 글 생성 (확장판${isTravel ? " · 여행" : ""})`);
-  console.log(`   🤖 AI Provider: ${AI_PROVIDER.toUpperCase()}`);
-  if (REQUESTED_AI_PROVIDER !== AI_PROVIDER) {
-    console.log(`      - 요청 Provider ${REQUESTED_AI_PROVIDER.toUpperCase()} 대신 ${AI_PROVIDER.toUpperCase()} API로 진행합니다.`);
-  }
+  console.log(`   🤖 AI Provider: ${AI_PROVIDER.toUpperCase()} (${OPENAI_MODEL})`);
   if (REQUESTED_BROWSER_GPT_MODE && !ALLOW_CHATGPT_BROWSER_MODE) {
     console.log("   🌐 Browser ChatGPT Mode: OFF (ChatGPT/opencode 미사용 설정)");
   }
@@ -5559,7 +5525,10 @@ ${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES
 
 자세한 상품 정보는 아래 쇼핑커넥트에서 확인해보세요.`;
 
-  let bodySections = normalizeSections(json.sections, bodySectionCount, product);
+  const planSectionTitles = isTravel
+    ? travelEditorialPlan.map((section) => section.title)
+    : productEditorialPlan.sections.map((section) => section.title);
+  let bodySections = normalizeSections(json.sections, bodySectionCount, product, planSectionTitles);
   if (HUMAN_MOBILE_POLISH_ENABLED) {
     console.log("   🧽 로컬 사람형 모바일 윤문/배치 적용");
     bodySections = bodySections.map((section, index) =>

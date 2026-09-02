@@ -21,9 +21,7 @@ interface FieldDef {
 
 // 편집 허용 키 화이트리스트(임의 env 노출/주입 방지).
 const FIELDS: FieldDef[] = [
-  { key: "AI_PROVIDER", label: "AI 공급자", type: "select", options: ["openai", "gemini"], hint: "글 생성 엔진" },
   { key: "OPENAI_API_KEY", label: "OpenAI API 키", type: "password", secret: true },
-  { key: "GEMINI_API_KEY", label: "Gemini API 키", type: "password", secret: true },
   { key: "UNSPLASH_ACCESS_KEY", label: "Unsplash 액세스 키", type: "password", secret: true, hint: "스톡 이미지(선택)" },
   { key: "NAVER_BLOG_ID", label: "네이버 블로그 ID", type: "text", hint: "blog.naver.com/<여기>" },
   { key: "ADMIN_API_KEY", label: "관리자 API 키", type: "password", secret: true, hint: "원격 접근 보호(선택)" },

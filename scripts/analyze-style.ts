@@ -6,14 +6,12 @@
 import "dotenv/config";
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { openaiChatText } from "./lib/openai-text";
 import * as fs from "fs";
 import * as path from "path";
 
 // Stealth 플러그인 적용
 chromium.use(StealthPlugin());
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
 interface StyleProfile {
     // 기본 스타일 요소
@@ -113,8 +111,6 @@ async function scrapeBlogContent(url: string): Promise<string> {
 async function analyzeStyle(content: string, sourceUrl: string): Promise<StyleProfile> {
     console.log("\n🔍 스타일 분석 중...");
 
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-
     const prompt = `다음 블로그 글의 글쓰기 스타일을 상세히 분석해주세요.
 
 ## 블로그 글 내용
@@ -143,8 +139,7 @@ ${content}
 
 JSON만 반환하세요.`;
 
-    const response = await model.generateContent(prompt);
-    const text = response.response.text();
+    const text = await openaiChatText({ user: prompt, json: true, temperature: 0.4 });
 
     try {
         const json = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || "{}");

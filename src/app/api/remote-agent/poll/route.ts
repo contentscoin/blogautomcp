@@ -83,6 +83,27 @@ async function executeJob(request: NextRequest, job: Job): Promise<unknown> {
   throw new Error(`지원하지 않는 원격 작업입니다: ${job.type}`);
 }
 
+/**
+ * 작업 실행 중 PC 생존 신호. claim 이 유일한 하트비트였던 시절에는 초안 생성처럼
+ * 몇 분 걸리는 작업 동안 사이트가 PC를 오프라인으로 판정해 모든 MCP 호출을
+ * AGENT_OFFLINE 으로 거부했다. 실행이 끝날 때까지 주기적으로 알린다.
+ */
+const JOB_HEARTBEAT_INTERVAL_MS = 30_000;
+
+function startJobHeartbeat(siteUrl: string, token: string, jobId: string, appVersion: string): () => void {
+  const send = () =>
+    fetch(`${siteUrl}/api/agent/jobs/${encodeURIComponent(jobId)}/heartbeat`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ appVersion }),
+      cache: "no-store",
+    }).catch(() => undefined);
+  const timer = setInterval(send, JOB_HEARTBEAT_INTERVAL_MS);
+  // Node 타이머가 프로세스 종료를 막지 않도록 한다(데스크톱 in-process 서버).
+  (timer as { unref?: () => void }).unref?.();
+  return () => clearInterval(timer);
+}
+
 async function completeRemoteJob(
   siteUrl: string,
   token: string,
@@ -126,8 +147,14 @@ export async function POST(request: NextRequest) {
   }
   const job = claimed?.data as Job | null;
   if (!job) return NextResponse.json({ success: true, data: { configured: true, job: null } });
+  const stopHeartbeat = startJobHeartbeat(remote.siteUrl, remote.token, job.id, appVersion);
   try {
-    const result = await executeJob(request, job);
+    let result: unknown;
+    try {
+      result = await executeJob(request, job);
+    } finally {
+      stopHeartbeat();
+    }
     await completeRemoteJob(remote.siteUrl, remote.token, job.id, { status: "SUCCEEDED", result });
     return NextResponse.json({ success: true, data: { configured: true, job: { id: job.id, status: "SUCCEEDED" } } });
   } catch (error) {

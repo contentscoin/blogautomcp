@@ -8,12 +8,13 @@
  *
  * 여기서는 판매페이지의 실제 제품 이미지를 레퍼런스로 넣고(images/edits),
  * ProductThumbnail.md 지침대로 큰 한글 제목까지 생성 단계에서 함께 그리게 한다.
- * 생성 후에는 Gemini 비전으로 한글 오탈자·제품 왜곡을 검사하고(QC), 통과하지
+ * 생성 후에는 OpenAI 비전으로 한글 오탈자·제품 왜곡을 검사하고(QC), 통과하지
  * 못하면 호출자가 로컬 합성 폴백으로 넘어간다.
  */
 
 import fs from "fs";
 import path from "path";
+import { getOpenAiApiKey, openaiChatJson } from "./openai-text";
 
 const OPENAI_IMAGE_ENDPOINT_EDITS = "https://api.openai.com/v1/images/edits";
 const OPENAI_IMAGE_ENDPOINT_GENERATIONS = "https://api.openai.com/v1/images/generations";
@@ -162,20 +163,16 @@ const IMAGE_QC_ENABLED =
 /**
  * 생성 썸네일 QC — ProductThumbnail.md의 최종 금지 항목을 자동 검사한다.
  * (한글 오탈자, 제품명 누락, 잘림, 플랫 벡터화)
- * Gemini 키가 없으면 검사 없이 통과시키되 checked=false로 알린다.
+ * OpenAI 키가 없으면 검사 없이 통과시키되 checked=false로 알린다.
  */
 export async function qcGeneratedThumbnail(
   imagePath: string,
   expected: { productName: string; headline: string }
 ): Promise<ThumbnailQcResult> {
   if (!IMAGE_QC_ENABLED) return { pass: true, checked: false, reason: "QC 비활성화" };
-  const geminiKey = process.env.GEMINI_API_KEY?.trim();
-  if (!geminiKey) return { pass: true, checked: false, reason: "GEMINI_API_KEY 없음 — QC 생략" };
+  if (!getOpenAiApiKey()) return { pass: true, checked: false, reason: "OPENAI_API_KEY 없음 — QC 생략" };
 
   try {
-    const { GoogleGenerativeAI } = await import("@google/generative-ai");
-    const genAI = new GoogleGenerativeAI(geminiKey);
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
     const imageBase64 = fs.readFileSync(imagePath).toString("base64");
 
     const prompt = [
@@ -192,18 +189,17 @@ export async function qcGeneratedThumbnail(
       '응답 형식: {"koreanTypo": bool, "productNameMissing": bool, "textCut": bool, "flatVector": bool, "note": "짧은 설명"}',
     ].join("\n");
 
-    const response = await model.generateContent([
-      prompt,
-      { inlineData: { mimeType: mimeTypeForExtension(imagePath), data: imageBase64 } },
-    ]);
-    const text = response.response.text();
-    const parsed = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || "{}") as {
+    const parsed = await openaiChatJson<{
       koreanTypo?: boolean;
       productNameMissing?: boolean;
       textCut?: boolean;
       flatVector?: boolean;
       note?: string;
-    };
+    }>({
+      user: prompt,
+      images: [{ base64: imageBase64, mimeType: mimeTypeForExtension(imagePath), detail: "high" }],
+      temperature: 0,
+    });
 
     const failures: string[] = [];
     if (parsed.koreanTypo) failures.push("한글 오탈자");

@@ -134,10 +134,7 @@ cp .env.example .env
 메모장 또는 VS Code로 `.env` 파일을 열고 아래 내용을 입력:
 
 ```env
-# AI 선택
-AI_PROVIDER=openai
-
-# OpenAI 사용 시 (AI_PROVIDER=openai)
+# OpenAI API 키 (글 생성·썸네일 생성·QC 모두 OpenAI 사용)
 OPENAI_API_KEY=sk-여기에_발급받은_키_붙여넣기
 
 # 설치형 앱은 로컬 ChatGPT 로그인을 허용하지 않음
@@ -219,7 +216,7 @@ npm run login
 ### 로컬 AI 작성 설정
 
 - 설치형 앱은 ChatGPT 브라우저 로그인과 Custom GPT 조작을 강제로 끕니다.
-- OpenAI/Gemini API가 실패하거나 키가 없으면 상품 정보 기반 로컬 초안으로 대체합니다.
+- OpenAI API가 실패하거나 키가 없으면 상품 정보 기반 로컬 초안으로 대체합니다.
 - 사람형 모바일 문체는 기본으로 켜져 있습니다 (`BLOG_HUMANIZE_MOBILE_STYLE=true`).
 - 문장은 짧게 끊고, AI처럼 보이는 반복 표현/과한 광고 문구/허위 체험 단정을 줄입니다.
 - 상품 리뷰 글은 발행 전 상품명 반영, 본문 분량, 고지문, URL 직접 노출, 허위 체험 단정, 수수료율 노출, 판매페이지 대표 이미지 확보 여부를 검사합니다.

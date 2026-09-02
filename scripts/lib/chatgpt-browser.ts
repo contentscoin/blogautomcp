@@ -393,7 +393,7 @@ async function ensureChatGPTReady(
         const hasToken = await hasSessionTokenCookie(page);
         const tokenHint = hasToken ? "세션 쿠키는 있지만 UI가 로그아웃 상태입니다." : "세션 쿠키가 없습니다.";
         throw new Error(
-          `ChatGPT 로그인이 필요합니다. ${tokenHint} 먼저 'npm run login:chatgpt'로 프로필을 갱신하세요.`,
+          `ChatGPT 브라우저 자동화는 설치형 앱에서 사용하지 않습니다. ${tokenHint} 설정에서 OpenAI API 키를 입력하거나 로컬 초안 모드를 사용하세요.`,
         );
       }
 

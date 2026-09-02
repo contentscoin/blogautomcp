@@ -197,36 +197,12 @@ npx prisma db push
 
 가장 중요한 단계예요! 집중해주세요 👀
 
-> 💡 **OpenAI** 또는 **Gemini** 중 하나만 선택하면 돼요!
-> - OpenAI: 유료 (크레딧 필요)
-> - Gemini: **무료!** ⭐ (구글 계정만 있으면 OK)
+> 💡 글 생성, 썸네일 생성, 품질 검사는 모두 **OpenAI API**를 사용해요.
+> 키가 없어도 상품 정보 기반 로컬 초안으로 발행은 되지만, 글 품질과 썸네일은 API 키가 있을 때 훨씬 좋아져요.
 
 ---
 
-### 6-1. 옵션 A: Gemini API 키 발급받기 (무료! 추천 ⭐)
-
-**무료**로 사용할 수 있어서 처음 시작하기 좋아요!
-
-1. 브라우저에서 이 주소로 접속:
-   ```
-   https://aistudio.google.com/app/apikey
-   ```
-
-2. **구글 계정**으로 로그인하세요
-
-3. **"API 키 만들기"** 버튼 클릭
-
-4. 프로젝트 선택하라고 나오면 아무거나 선택 (또는 새로 만들기)
-
-5. `AIza` 로 시작하는 긴 키가 나와요. **지금 바로 복사하세요!**
-
-> ⚠️ **중요!** 이 키는 한 번만 보여줘요. 반드시 메모장에 저장해두세요!
-
----
-
-### 6-2. 옵션 B: OpenAI API 키 발급받기 (유료)
-
-GPT-5.2 모델을 사용하고 싶다면 이 방법을 선택하세요.
+### 6-1. OpenAI API 키 발급받기
 
 1. 브라우저에서 이 주소로 접속:
    ```
@@ -271,27 +247,8 @@ GPT-5.2 모델을 사용하고 싶다면 이 방법을 선택하세요.
 
 4. 파일 내용을 아래처럼 수정해요:
 
-**🅰️ Gemini 사용 시 (무료!):**
 ```
-# AI 선택 (gemini 또는 openai)
-AI_PROVIDER=gemini
-
-# Gemini API 키 (무료!)
-GEMINI_API_KEY=AIza여기에아까복사한키붙여넣기
-
-# 네이버 블로그 ID (필수)
-NAVER_BLOG_ID=내블로그아이디
-
-# 데이터베이스 (이건 그대로 두세요!)
-DATABASE_URL="file:./dev.db"
-```
-
-**🅱️ OpenAI 사용 시 (유료):**
-```
-# AI 선택 (gemini 또는 openai)
-AI_PROVIDER=openai
-
-# OpenAI API 키 (유료)
+# OpenAI API 키
 OPENAI_API_KEY=sk-여기에아까복사한키붙여넣기
 
 # 네이버 블로그 ID (필수)
@@ -301,10 +258,9 @@ NAVER_BLOG_ID=내블로그아이디
 DATABASE_URL="file:./dev.db"
 ```
 
-**Gemini 예시:**
+**예시:**
 ```
-AI_PROVIDER=gemini
-GEMINI_API_KEY=AIzaSyABC123abc123ABC123abc123
+OPENAI_API_KEY=sk-proj-ABC123abc123ABC123abc123
 NAVER_BLOG_ID=happyblogger123
 DATABASE_URL="file:./dev.db"
 ```

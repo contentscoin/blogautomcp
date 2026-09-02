@@ -238,7 +238,6 @@ export async function POST(
     );
 
     let child: ChildProcess;
-    const agentAiProvider = process.env.AI_PROVIDER || "openai";
     try {
       child = spawn(process.execPath, [TS_NODE_BIN, "--project", "tsconfig.scripts.json", scriptPath, ...scriptArgs], {
         cwd: process.cwd(),
@@ -248,7 +247,7 @@ export async function POST(
         env: {
           ...process.env,
           ELECTRON_RUN_AS_NODE: "1",
-          AI_PROVIDER: agentAiProvider,
+          AI_PROVIDER: "openai",
           BROWSER_GPT_MODE: "false",
           ALLOW_CHATGPT_BROWSER_MODE: "false",
           CHATGPT_USE_CUSTOM_GPTS: "false",
@@ -256,11 +255,9 @@ export async function POST(
           CHATGPT_SKIP_POLISH: "true",
           HUMAN_MOBILE_POLISH_ENABLED: "true",
           PRODUCT_POST_LOCAL_FALLBACK_ENABLED: "true",
-          PRODUCT_THUMBNAIL_CHATGPT_ENABLED: process.env.PRODUCT_THUMBNAIL_CHATGPT_ENABLED || "false",
-          PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE:
-            process.env.PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE || "false",
-          PRODUCT_THUMBNAIL_CHATGPT_BASE_FALLBACK_ENABLED:
-            process.env.PRODUCT_THUMBNAIL_CHATGPT_BASE_FALLBACK_ENABLED || "false",
+          PRODUCT_THUMBNAIL_CHATGPT_ENABLED: "false",
+          PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE: "false",
+          PRODUCT_THUMBNAIL_CHATGPT_BASE_FALLBACK_ENABLED: "false",
           PRODUCT_THUMBNAIL_IMAGE_WAIT_MS:
             process.env.PRODUCT_THUMBNAIL_IMAGE_WAIT_MS || "60000",
           PRODUCT_THUMBNAIL_COMPOSITE_FALLBACK_ENABLED:

@@ -52,7 +52,6 @@
   },
   "main": "scripts/electron/main.cjs",
   "dependencies": {
-    "@google/generative-ai": "^0.21.0",
     "@prisma/client": "^5.22.0",
     "date-fns": "^4.1.0",
     "dotenv": "^17.2.3",
