@@ -298,7 +298,9 @@ export function formatTravelPageResearchForPrompt(research: TravelPageResearch):
   ].join("\n");
 }
 
-const NON_DESTINATION_TOKEN_PATTERN = /(?:여행|상품|패키지|투어|관광|일정|예약|출발|확정|변경|조건|특가|핫딜|할인|회원|적립|가격|표시가|숙박|호텔|객실|식사|조식|중식|석식|쇼핑|특전|기념품|비누|쿠폰|포함|불포함|교통|항공|직항|시내|자유시간|가이드|인솔자|제공|기준|전용|베스트|추천|리뷰|해외|국내|레스토랑|마사지\d*분?|사파리|엔티|[가-힣]+몰)$/u;
+const NON_DESTINATION_TOKEN_PATTERN = /(?:여행|상품|패키지|투어|관광|일정|예약|출발|확정|변경|조건|특가|핫딜|할인|회원|적립|가격|표시가|숙박|호텔|객실|식사|조식|중식|석식|쇼핑|특전|기념품|비누|쿠폰|포함|불포함|교통|항공|직항|시내|자유시간|가이드|인솔자|제공|기준|전용|베스트|추천|리뷰|해외|국내|레스토랑|마사지\d*분?|사파리|엔티|[가-힣]+몰|오전|오후|저녁|새벽|야간|심야|주간|아침|출발일|당일|익일)$/u;
+/** "- 인천 오후 출발변경" 처럼 상품명 끝에 붙는 출발지·출발 시간 꼬리표. 목적지가 아니다. */
+const DEPARTURE_TAIL_PATTERN = /[-–—~]\s*(?:인천|김포|김해|부산|대구|청주|제주|무안|양양)?\s*(?:오전|오후|저녁|새벽|야간|심야|주간|아침)?\s*출발[^\s]*.*$/u;
 
 function looksLikeDestinationToken(token: string): boolean {
   return (
@@ -341,6 +343,7 @@ export function extractTravelProductFacts(
   );
   // 세부 일정·항공·쇼핑 문장을 목적지로 오인하지 않도록 상품명만 사용한다.
   const destinationSource = clean(productName)
+    .replace(DEPARTURE_TAIL_PATTERN, " ")
     .replace(/\[[^\]]+\]|[<〈][^>〉]+[>〉]/gu, " ")
     .replace(/(?:출발확정|무조건출발|여행핫딜|깜짝특가|베스트셀러|패키지|일주|직항|전일정\s*\d성|\d+박\s*\d+일|\d+일|변경)/gu, " ");
   const destinations = unique(
@@ -574,7 +577,9 @@ export function assessTravelReviewSubstance(input: {
   const facts = extractTravelProductFacts(input.productName, sourceText, sourceText ? [sourceText] : []);
   const places = unique([...facts.highlights, ...facts.destinations], 8);
   const coveredPlaces = places.filter((place) => body.includes(place));
-  const sentences = body.split(/[\n.!?。]+/u).map(clean).filter((item) => item.length >= 8);
+  // 발행 게이트는 섹션 공백을 한 줄로 접어 넘기므로 "• 항목" 형식의 사실 목록이 한 문장으로 붙는다.
+  // 글머리표 앞에서도 문장을 끊어 항목 하나가 문장 하나로 세어지게 한다.
+  const sentences = body.split(/[\n.!?。]+|\s+(?=[•▸])/u).map(clean).filter((item) => item.length >= 8);
   const sentenceCount = Math.max(1, sentences.length);
   const genericGuidanceCount = countMatches(
     body,
@@ -596,9 +601,13 @@ export function assessTravelReviewSubstance(input: {
     body,
     /(?:보입니다|보여요|보이네요|인\s*것\s*같아요|것\s*같습니다|것으로\s*보여요|일\s*듯해요|일\s*듯합니다|판단됩니다)/u,
   );
-  const productDetailCount = sentences.filter((sentence) =>
+  // "• 항목: 값" 형식의 사실 목록(가격·포함/불포함 블록)은 독자가 예산을 잡는 데 필요한 정리라
+  // 상품 설명 비율에서 제외하고, 산문 문장이 가격·조건 나열에 치우쳤는지만 본다.
+  const proseSentences = sentences.filter((sentence) => !/^[•▸\-*]\s/u.test(sentence));
+  const productDetailCount = proseSentences.filter((sentence) =>
     /(?:표시\s*가격|할인|적립|포함\s*조건|불포함|선택관광|결제|취소\s*규정|예약\s*조건|상품명에는|상품에\s*표시)/u.test(sentence)
   ).length;
+  const proseSentenceCount = Math.max(1, proseSentences.length);
   const evidenceJudgementCount = sentences.filter((sentence) =>
     places.some((place) => sentence.includes(place)) &&
     /(?:역사|문화|풍경|분위기|골목|거리|전망|즐기|걷|산책|관람|사진|먹|맛보|팁|동선|시간대)/u.test(sentence)
@@ -615,7 +624,7 @@ export function assessTravelReviewSubstance(input: {
     [evidenceJudgementCount >= requiredEvidenceJudgementCount, "여행지 사실과 현장 경험의 연결"],
     [genericGuidanceCount / sentenceCount <= 0.16, "확인 안내가 아닌 여행지 정보"],
     [vagueToneCount === 0, "보입니다·인 것 같아요 같은 모호한 말투 제거"],
-    [productDetailCount / sentenceCount <= 0.08, "가격·포함조건 중심 상품 설명 제거"],
+    [productDetailCount / proseSentenceCount <= 0.08, "가격·포함조건 중심 상품 설명 제거"],
     [!/(?:배송|교환|반품|구성품|제품\s*스펙)/u.test(body), "쇼핑 문구 미혼입"],
     [repeats <= 2, "반복 문장 제거"],
   ];

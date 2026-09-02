@@ -135,9 +135,11 @@ export async function exchangeAuthorizationCode(input: URLSearchParams, origin: 
   const challenge = await pkceChallenge(verifier);
   if (!safeEqualText(challenge, row.codeChallenge)) return null;
 
-  const consumed = await d1.prepare(`UPDATE oauth_authorization_codes SET consumed_at=? WHERE code_hash=? AND consumed_at IS NULL`).bind(now, codeHash).run();
-  if (Number(consumed.meta.changes || 0) !== 1) return null;
-  return issueTokenPair(row.userId, clientId, resource, row.scope);
+  // 코드 소모와 토큰 발급을 한 트랜잭션(batch)으로 묶는다. 소모 UPDATE 가 0행이면
+  // (동시 요청이 먼저 썼거나 만료) INSERT 도 함께 무효가 되고, INSERT 가 실패하면 소모도 되돌아간다.
+  return issueTokenPair(row.userId, clientId, resource, row.scope, {
+    consume: d1.prepare(`UPDATE oauth_authorization_codes SET consumed_at=? WHERE code_hash=? AND consumed_at IS NULL`).bind(now, codeHash),
+  });
 }
 
 export async function exchangeRefreshToken(input: URLSearchParams, origin: string) {
@@ -161,9 +163,10 @@ export async function exchangeRefreshToken(input: URLSearchParams, origin: strin
 
   const requestedScope = normalizeScope(input.get('scope') || row.scope);
   if (!requestedScope.ok || !isScopeSubset(requestedScope.scope, row.scope)) return null;
-  const rotated = await d1.prepare(`UPDATE oauth_tokens SET status='ROTATED',rotated_at=? WHERE id=? AND status='ACTIVE'`).bind(now, row.id).run();
-  if (Number(rotated.meta.changes || 0) !== 1) return null;
-  return issueTokenPair(row.userId, clientId, resource, requestedScope.scope);
+  // 기존 토큰 회전과 새 토큰 발급을 한 트랜잭션으로 묶는다(부분 실패 시 기존 토큰이 살아남는다).
+  return issueTokenPair(row.userId, clientId, resource, requestedScope.scope, {
+    consume: d1.prepare(`UPDATE oauth_tokens SET status='ROTATED',rotated_at=? WHERE id=? AND status='ACTIVE'`).bind(now, row.id),
+  });
 }
 
 export async function authenticateMcpOAuth(request: Request): Promise<OAuthIdentity | null> {
@@ -200,21 +203,45 @@ export async function revokeOAuthToken(token: string, clientId: string): Promise
   `).bind(now, clientId, tokenHash, tokenHash).run();
 }
 
-async function issueTokenPair(userId: string, clientId: string, resource: string, scope: string) {
+/**
+ * 새 access/refresh 토큰을 발급한다.
+ *
+ * `consume` 이 주어지면(코드 소모·기존 토큰 회전) 그 UPDATE 와 INSERT 를 D1 batch(단일 트랜잭션)로
+ * 실행한다. INSERT 는 SQLite `changes()` 로 직전 UPDATE 가 정확히 1행을 바꿨을 때만 행을 쓰므로,
+ * 이미 소모된 코드·회전된 토큰으로는 새 토큰이 만들어지지 않고, INSERT 가 실패하면 소모도 함께 롤백된다.
+ */
+async function issueTokenPair(
+  userId: string,
+  clientId: string,
+  resource: string,
+  scope: string,
+  options: { consume?: D1PreparedStatement } = {},
+) {
   const d1 = getD1();
   const accessToken = randomToken(32);
   const refreshToken = scope.split(/\s+/).includes('offline_access') ? randomToken(32) : null;
   const now = Date.now();
-  await d1.prepare(`
-    INSERT INTO oauth_tokens
-      (id,access_token_hash,refresh_token_hash,user_id,client_id,resource,scope,status,access_expires_at,refresh_expires_at,created_at)
-    VALUES (?,?,?,?,?,?,?,'ACTIVE',?,?,?)
-  `).bind(
+  const insertValues = [
     `oauth_${randomToken(12)}`, await hashToken(accessToken),
     refreshToken ? await hashToken(refreshToken) : null,
     userId, clientId, resource, scope, now + ACCESS_TOKEN_TTL_MS,
     refreshToken ? now + REFRESH_TOKEN_TTL_MS : null, now,
-  ).run();
+  ];
+  if (options.consume) {
+    const insert = d1.prepare(`
+      INSERT INTO oauth_tokens
+        (id,access_token_hash,refresh_token_hash,user_id,client_id,resource,scope,status,access_expires_at,refresh_expires_at,created_at)
+      SELECT ?,?,?,?,?,?,?,'ACTIVE',?,?,? WHERE changes()=1
+    `).bind(...insertValues);
+    const [consumed, inserted] = await d1.batch([options.consume, insert]);
+    if (Number(consumed.meta.changes || 0) !== 1 || Number(inserted.meta.changes || 0) !== 1) return null;
+  } else {
+    await d1.prepare(`
+      INSERT INTO oauth_tokens
+        (id,access_token_hash,refresh_token_hash,user_id,client_id,resource,scope,status,access_expires_at,refresh_expires_at,created_at)
+      VALUES (?,?,?,?,?,?,?,'ACTIVE',?,?,?)
+    `).bind(...insertValues).run();
+  }
   return {
     access_token: accessToken,
     token_type: 'Bearer',

@@ -9,6 +9,14 @@
  */
 
 import type { TravelProductFacts } from "../travel-content";
+import {
+  buildHighlightCourseLines,
+  classifyHighlight,
+  findDestinationKnowledge,
+  topicParticle,
+  usesGenericCopy,
+  type HighlightKind,
+} from "./travel-knowledge";
 import type { ConnectKind, HeaderFormat, SectionRole, SectionShape } from "./types";
 
 export interface LibraryContext {
@@ -326,7 +334,7 @@ function shoppingTemplates(ctx: LibraryContext): Record<string, SectionTemplate>
 // 여행커넥트
 // ---------------------------------------------------------------------------
 
-function travelTemplates(ctx: LibraryContext): Record<string, SectionTemplate> {
+function travelTemplates(ctx: LibraryContext, usedKnowledge: Set<string>): Record<string, SectionTemplate> {
   const destination = ctx.destination || "여행지";
   const duration = ctx.duration || "일정";
   const conditions = ctx.travel?.conditions || [];
@@ -334,6 +342,17 @@ function travelTemplates(ctx: LibraryContext): Record<string, SectionTemplate> {
   const highlights = ctx.highlights;
   const highlightText = highlights.slice(0, 4).join(", ") || "상세 일정표의 주요 방문지";
   const price = ctx.price || "출발일별 확인 필요";
+  const keyword = ctx.primaryKeyword || `${destination} 패키지`;
+  // 목적지 배경 지식: 일정 흐름 섹션에서 최대 2줄. 코스 포인트가 같은 장소를 다루면 그쪽이 우선 쓰도록 여기서는 예약만 한다.
+  const overviewKnowledge: string[] = [];
+  for (const name of ctx.travel?.destinations.slice(0, 3) || [destination]) {
+    if (overviewKnowledge.length >= 2) break;
+    const found = findDestinationKnowledge(name, usedKnowledge);
+    if (found) {
+      usedKnowledge.add(found.key);
+      overviewKnowledge.push(found.line);
+    }
+  }
   return {
     "summary-glance": {
       role: "summary-glance",
@@ -347,9 +366,9 @@ function travelTemplates(ctx: LibraryContext): Record<string, SectionTemplate> {
       requiredKeywords: [destination],
       hints: ['첫 줄은 "결론부터 말하면"처럼 결론을 먼저', "확인된 조건(직항·노쇼핑 등)만", "3줄"],
       fallbackLines: [
-        `결론부터 말하면 ${ctx.shortName}은 ${destination}을 ${duration}에 묶어 보는 패키지예요.`,
+        `결론부터 말하면 ${ctx.shortName}${topicParticle(ctx.shortName)} ${destination}을 ${duration}에 묶어 보는 패키지예요.`,
         "동선 짜는 시간을 아끼고 핵심 명소를 놓치기 싫은 분께 맞는 구성이에요.",
-        `확인된 조건은 ${conditionText}이고 세부 조건은 예약 페이지에서 다시 봐야 해요.`,
+        `확인된 조건은 ${conditionText}이고, 세부 조건은 예약 페이지 기준으로 정리했어요.`,
       ],
     },
     "key-facts": {
@@ -383,10 +402,10 @@ function travelTemplates(ctx: LibraryContext): Record<string, SectionTemplate> {
       requiredKeywords: [],
       hints: ["방문 포인트를 순서 있는 흐름으로", "일자 배정이 확인되지 않으면 '일정표 기준' 표기"],
       fallbackLines: [
-        `${ctx.shortName}은 ${highlightText}를 중심으로 흐름을 읽으면 이해하기 쉬워요.`,
+        `${keyword}를 고를 때는 ${highlightText}를 어떤 순서로 도는지부터 보면 ${ctx.shortName}의 흐름이 잡혀요.`,
+        ...overviewKnowledge,
         "상품명에 적힌 방문지를 순서대로 따라가면 하루 단위 동선이 대략 그려져요.",
-        "정확한 일자별 순서와 자유시간은 예약 페이지의 일정표를 기준으로 확인해야 해요.",
-        "꼭 가고 싶은 장소가 선택한 출발일 일정에도 포함되는지 먼저 보세요.",
+        "정확한 일자별 순서와 자유시간은 예약 페이지의 일정표가 기준이에요.",
       ],
     },
     "day-course": {
@@ -418,7 +437,7 @@ function travelTemplates(ctx: LibraryContext): Record<string, SectionTemplate> {
         `${FACT_PREFIX}포함 범위: 항공·숙박·차량·입장료 포함 여부는 예약 페이지 확인`,
         `${FACT_PREFIX}불포함 항목: 개인 경비, 선택 관광, 현지 지불 경비 확인`,
         `${FACT_PREFIX}변동 요소: 유류할증료·환율은 예약 시점에 따라 달라짐`,
-        `${FACT_PREFIX}확인된 조건: ${conditionText}`,
+        `${FACT_PREFIX}조건 메모: ${conditionText} 상품이라 표시 가격 외 현지 지불 항목은 예약 페이지 기준`,
       ],
     },
     "reasons-3": {
@@ -469,11 +488,13 @@ function travelTemplates(ctx: LibraryContext): Record<string, SectionTemplate> {
       hints: ["Q. / A. 형식 3쌍", "출발 인원·자유시간·추가 비용처럼 실제 검색 질문"],
       fallbackLines: [
         "Q. 최소 출발 인원이 안 되면 어떻게 되나요?",
-        "A. 출발 확정 조건과 취소 규정은 예약 페이지에 표시된 기준을 따르니 미리 확인하세요.",
+        ctx.travel?.departureConfirmed
+          ? "A. 이 상품은 출발확정 표시가 있어 인원 미달로 취소될 걱정이 적고, 세부 규정은 예약 페이지 기준을 따라요."
+          : "A. 출발 확정 여부는 예약 시점에 안내되고, 인원 미달 시 처리 방식은 예약 페이지에 적힌 기준을 따라요.",
         "Q. 자유시간은 얼마나 있나요?",
-        "A. 일정표에 자유시간이 표시된 날을 기준으로 보고, 선택 관광 여부도 함께 확인하세요.",
+        "A. 일정표에 자유시간이 표시된 날을 기준으로 보고, 그 시간에 맞춰 근처 산책이나 카페 방문을 계획하면 알차요.",
         "Q. 표시 가격 외에 더 내는 비용이 있나요?",
-        "A. 현지 지불 경비, 선택 관광, 1인실 추가 요금은 상품 조건에서 확인해야 해요.",
+        "A. 현지 지불 경비, 선택 관광, 1인실 추가 요금은 상품 조건에 따로 적혀 있어 예약 전에 합산해 두면 예산이 맞아요.",
       ],
     },
     "fit-checklist": {
@@ -488,10 +509,10 @@ function travelTemplates(ctx: LibraryContext): Record<string, SectionTemplate> {
       requiredKeywords: [],
       hints: ["3~5줄", "마지막 줄은 자유여행이 더 맞는 경우"],
       fallbackLines: [
-        `${CHECK_PREFIX}${destination} 핵심 명소를 ${duration} 안에 보고 싶은 분`,
+        `${CHECK_PREFIX}${keyword}로 ${destination} 핵심 명소를 ${duration} 안에 보고 싶은 분`,
         `${CHECK_PREFIX}동선과 숙소 예약에 시간을 쓰기 어려운 분`,
         `${CHECK_PREFIX}가족·부모님과 함께라 이동 부담을 줄이고 싶은 분`,
-        `${CHECK_PREFIX}반대로 자유시간이 가장 중요하다면 일정표의 체류 시간부터 확인하세요`,
+        `${CHECK_PREFIX}반대로 자유시간이 가장 중요한 분께는 자유여행 쪽을 더 추천해요`,
       ],
     },
     closing: {
@@ -506,7 +527,7 @@ function travelTemplates(ctx: LibraryContext): Record<string, SectionTemplate> {
       requiredKeywords: [],
       hints: ["한 줄 정리로 시작", "아래 링크에서 확인 안내", "댓글 유도 한 줄"],
       fallbackLines: [
-        `${ctx.shortName}은 ${duration} 안에 ${destination}의 핵심을 알차게 묶은 구성이라는 점이 눈에 들어와요.`,
+        `${keyword} 중에서 ${ctx.shortName}${topicParticle(ctx.shortName)} ${duration} 안에 ${destination}의 핵심을 알차게 묶은 구성이라는 점이 눈에 들어와요.`,
         "동선 고민 없이 편하게 다니면서 가성비도 챙기고 싶은 분께 먼저 추천드리고 싶어요.",
         "정확한 출발일별 가격과 잔여 좌석은 아래 여행커넥트 링크에서 확인할 수 있어요.",
         "궁금한 점은 댓글로 남겨주시면 아는 범위에서 답변드릴게요.",
@@ -515,20 +536,40 @@ function travelTemplates(ctx: LibraryContext): Record<string, SectionTemplate> {
   };
 }
 
-function dayCourseTemplate(base: SectionTemplate, ctx: LibraryContext, highlight: string, index: number): SectionTemplate {
+interface DayCourseOptions {
+  highlight: string;
+  index: number;
+  /** 같은 유형의 앞선 코스 수 */
+  variant: number;
+  /** generic 문장 세트 번호(글 전체 기준) */
+  genericVariant: number;
+  usedKnowledge: Set<string>;
+}
+
+function dayCourseTemplate(base: SectionTemplate, ctx: LibraryContext, options: DayCourseOptions): SectionTemplate {
+  const { highlight, index } = options;
   const title = highlight ? `코스 포인트 ${index + 1} · ${highlight}` : `코스 포인트 ${index + 1} · 주요 방문지`;
   const place = highlight || "주요 방문지";
+  const destinations = ctx.travel?.destinations || [];
+  // 코스 포인트가 특정 목적지를 이름에 품고 있으면(호이안 야시장 등) 그 목적지를, 아니면 첫 목적지를 쓴다.
+  const primaryDestination = destinations.find((name) => highlight.includes(name)) || destinations[0] || ctx.destination || "이 지역";
+  const knowledge = highlight ? findDestinationKnowledge(highlight, options.usedKnowledge) : null;
+  if (knowledge) options.usedKnowledge.add(knowledge.key);
+  const courseLines = buildHighlightCourseLines({
+    highlight: place,
+    destination: primaryDestination,
+    variant: options.variant,
+    genericVariant: options.genericVariant,
+  });
+  // 배경 지식은 소개 문장 바로 뒤에 넣어 "어떤 곳인지 → 풍경 → 즐길 거리 → 팁" 순서를 유지한다.
+  const fallbackLines = knowledge ? [courseLines[0], knowledge.line, ...courseLines.slice(1)] : courseLines;
   return {
     ...base,
     title,
     imageIntent: `${place}와 연결되는 실제 여행지 사진`,
     requiredKeywords: highlight ? [highlight] : [],
-    fallbackLines: [
-      `${place}은 이 상품이 전면에 내세운 방문 포인트 중 하나예요.`,
-      `${ctx.destination || "이 지역"}에서 손꼽히는 장소라 사진 찍기 좋은 시간대를 미리 찾아두면 좋아요.`,
-      "운영시간과 입장 조건은 바뀔 수 있어서 출발 전에 한 번 더 확인하는 편이 안전해요.",
-      "일정표에서 이 장소의 체류 시간과 앞뒤 이동 구간을 같이 보면 하루 리듬이 보여요.",
-    ],
+    hints: [...base.hints, ...(knowledge ? [`널리 알려진 배경(그대로 인용 가능): ${knowledge.line}`] : [])],
+    fallbackLines,
   };
 }
 
@@ -559,12 +600,26 @@ export function buildSectionTemplates(ctx: LibraryContext, count: number): Secti
     return selected.slice(0, target);
   }
 
-  const lib = travelTemplates(ctx);
   const target = Math.max(10, Math.min(12, count));
   const dayCount = Math.max(1, Math.min(3, target - 9));
   const highlights = ctx.highlights.slice(0, dayCount);
   while (highlights.length < dayCount) highlights.push("");
-  const dayCourses = highlights.map((highlight, index) => dayCourseTemplate(lib["day-course"], ctx, highlight, index));
+  // 코스 포인트 문장이 서로 겹치지 않도록 유형별 변형 번호와 generic 번호를 글 단위로 센다.
+  const usedKnowledge = new Set<string>();
+  const kindCounts = new Map<HighlightKind, number>();
+  let genericVariant = 0;
+  const dayCourseOptions: DayCourseOptions[] = highlights.map((highlight, index) => {
+    const kind = classifyHighlight(highlight);
+    const variant = kindCounts.get(kind) || 0;
+    kindCounts.set(kind, variant + 1);
+    const options: DayCourseOptions = { highlight, index, variant, genericVariant, usedKnowledge };
+    if (usesGenericCopy(kind, variant)) genericVariant += 1;
+    return options;
+  });
+  // 코스 포인트가 먼저 배경 지식을 가져가고, 남은 목적지 지식만 일정 흐름 섹션이 쓴다.
+  const dayCourseBase = travelTemplates(ctx, new Set<string>())["day-course"];
+  const dayCourses = dayCourseOptions.map((options) => dayCourseTemplate(dayCourseBase, ctx, options));
+  const lib = travelTemplates(ctx, usedKnowledge);
   return [
     lib["summary-glance"],
     lib["key-facts"],

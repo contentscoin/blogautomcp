@@ -260,6 +260,18 @@ async function createWindow() {
   });
   mainWindow = browserWindow;
 
+  // ADMIN_API_KEY 가 설정되면 로컬 서버의 관리자 API 는 실제 자격 증명을 요구한다.
+  // 렌더러(대시보드)가 로컬 서버로 보내는 요청에만 키 헤더를 붙여 준다.
+  const adminApiKey = process.env.ADMIN_API_KEY?.trim();
+  if (adminApiKey) {
+    browserWindow.webContents.session.webRequest.onBeforeSendHeaders(
+      { urls: [`${APP_BASE_URL}/*`] },
+      (details, callback) => {
+        callback({ requestHeaders: { ...details.requestHeaders, "x-admin-api-key": adminApiKey } });
+      },
+    );
+  }
+
   browserWindow.webContents.setWindowOpenHandler(({ url: targetUrl }) => {
     try {
       const target = new URL(targetUrl);

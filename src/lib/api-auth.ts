@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
-import { hasRemoteActivation } from "@/lib/remote-activation";
+import { hasRemoteActivation } from "./remote-activation";
+import { configuredAdminApiKey, isAuthenticatedAdminRequest } from "./admin-session";
 
 const LOCAL_ALIASES = new Set(["localhost", "127.0.0.1", "::1", "0.0.0.0"]);
 
@@ -29,7 +30,7 @@ function parseHostParts(hostHeader: string | null): HostParts | null {
   };
 }
 
-function isDevelopmentLocalRequest(request: NextRequest): boolean {
+export function isDevelopmentLocalRequest(request: NextRequest): boolean {
   if (process.env.NODE_ENV === "production") {
     return false;
   }
@@ -94,13 +95,23 @@ function safeCompare(input: string, expected: string): boolean {
   return timingSafeEqual(inputBuffer, expectedBuffer);
 }
 
-function unauthorized(message: string) {
+function unauthorized(message: string, code = "UNAUTHORIZED") {
   return NextResponse.json(
-    { success: false, error: message },
+    { success: false, code, error: message },
     { status: 401 }
   );
 }
 
+export const ADMIN_AUTH_REQUIRED_CODE = "ADMIN_AUTH_REQUIRED";
+
+/**
+ * 관리자 API 인증.
+ *
+ * ADMIN_API_KEY 가 설정된 경우 요청은 x-admin-api-key 헤더 또는 대시보드 세션 쿠키
+ * (/api/admin-session 에서 키를 입력해 발급)로 관리자임을 증명해야 한다.
+ * Origin/Referer/Sec-Fetch-Site 는 요청 출처를 나타낼 뿐 누구나 붙일 수 있으므로
+ * 키를 대신하지 못한다. 키가 없으면(기본 로컬 사용) 종전처럼 열려 있다.
+ */
 export function requireAdminApiKey(request: NextRequest): NextResponse | null {
   const activationError = requireRemoteActivation(request);
   if (activationError) return activationError;
@@ -109,66 +120,19 @@ export function requireAdminApiKey(request: NextRequest): NextResponse | null {
     return null;
   }
 
-  const configuredKey = process.env.ADMIN_API_KEY?.trim();
+  const configuredKey = configuredAdminApiKey();
   if (!configuredKey) {
     return null;
   }
 
-  const origin = request.headers.get("origin");
-  if (origin) {
-    try {
-      const originUrl = new URL(origin);
-      if (originUrl.origin === request.nextUrl.origin) {
-        return null;
-      }
-
-      if (
-        isLocalEquivalent(
-          originUrl.hostname,
-          originUrl.port,
-          request.nextUrl.hostname,
-          request.nextUrl.port,
-        )
-      ) {
-        return null;
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  const referer = request.headers.get("referer");
-  if (!origin && referer) {
-    try {
-      const refererOrigin = new URL(referer).origin;
-      const refererUrl = new URL(refererOrigin);
-      if (
-        refererOrigin === request.nextUrl.origin ||
-        isLocalEquivalent(
-          refererUrl.hostname,
-          refererUrl.port,
-          request.nextUrl.hostname,
-          request.nextUrl.port,
-        )
-      ) {
-        return null;
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  const fetchSite = request.headers.get("sec-fetch-site");
-  if (!origin && (fetchSite === "same-origin" || fetchSite === "same-site")) {
+  if (isAuthenticatedAdminRequest(request, configuredKey)) {
     return null;
   }
 
-  const providedKey = request.headers.get("x-admin-api-key")?.trim();
-  if (providedKey && safeCompare(providedKey, configuredKey)) {
-    return null;
-  }
-
-  return unauthorized("관리자 인증이 필요합니다. x-admin-api-key 헤더를 확인하세요.");
+  return unauthorized(
+    "관리자 인증이 필요합니다. x-admin-api-key 헤더를 붙이거나 대시보드에서 관리자 키를 입력하세요.",
+    ADMIN_AUTH_REQUIRED_CODE,
+  );
 }
 
 export function requireCronSecret(request: NextRequest): NextResponse | null {

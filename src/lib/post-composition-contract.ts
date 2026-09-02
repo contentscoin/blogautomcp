@@ -74,6 +74,38 @@ export interface ResolvedPostSectionV1 {
   imagePaths: string[];
   imageIntent: string;
   headingStyle: PostHeadingStyle;
+  /** 섹션별 이미지 하한·상한. Spec-first 플랜에서 온 값이며, 없으면 계약 팔레트의 값을 쓴다. */
+  imageMin?: number;
+  imageMax?: number;
+}
+
+/**
+ * Spec-first 파이프라인이 글을 쓰기 전에 확정한 섹션별 이미지 플랜.
+ * 이 플랜이 있으면 렌더 계약은 고정 팔레트(travel-hook, travel-day-1 …)에 섹션을 순서대로 끼워 맞추지 않고,
+ * 실제 섹션 역할·이미지 의도·슬롯 배정을 그대로 따른다.
+ */
+export interface PostSectionPlanV1 {
+  /** 섹션 역할(itinerary-overview, day-course …). id 를 만드는 데 쓴다. */
+  role: string;
+  /** 이 섹션 앞에 오는 본문 이미지 경로(플랜이 확정한 순서) */
+  imagePaths: string[];
+  imageIntent: string;
+  imageMin: number;
+  imageMax: number;
+  headingStyle?: PostHeadingStyle;
+  /** 이 섹션 뒤에 첫 커넥트 카드를 놓는다 */
+  earlyConnectCard?: boolean;
+}
+
+/** 섹션의 이미지 하한·상한. 플랜 값이 있으면 그것을, 없으면 계약 팔레트의 값을 돌려준다. */
+export function sectionImageBounds(
+  contract: PostCompositionContractV1,
+  section: Pick<ResolvedPostSectionV1, "id" | "imageMin" | "imageMax">,
+): { min: number; max: number } {
+  const palette = contract.sections.find((candidate) => candidate.id === section.id);
+  const min = section.imageMin ?? palette?.image.min ?? 0;
+  const max = section.imageMax ?? palette?.image.max ?? Math.max(1, min);
+  return { min, max: Math.max(min, max) };
 }
 
 export interface PostQualityReportV1 {
@@ -470,23 +502,15 @@ export function buildPostQualityReport(options: {
     sections: options.contract.targetSections,
     images: options.contract.targetImages,
   };
-  const sectionContractById = new Map(
-    options.contract.sections.map((section) => [section.id, section]),
-  );
+  const minimumOf = (section: ResolvedPostSectionV1) => sectionImageBounds(options.contract, section).min;
   const missingSectionIds = options.sections
-    .filter((section) => {
-      const minimum = sectionContractById.get(section.id)?.image.min || 0;
-      return section.imagePaths.length < minimum;
-    })
+    .filter((section) => section.imagePaths.length < minimumOf(section))
     .map((section) => section.id);
-  const requiredBodySlots = options.sections.reduce(
-    (sum, section) => sum + (sectionContractById.get(section.id)?.image.min || 0),
+  const requiredBodySlots = options.sections.reduce((sum, section) => sum + minimumOf(section), 0);
+  const filledRequiredBodySlots = options.sections.reduce(
+    (sum, section) => sum + Math.min(minimumOf(section), section.imagePaths.length),
     0,
   );
-  const filledRequiredBodySlots = options.sections.reduce((sum, section) => {
-    const minimum = sectionContractById.get(section.id)?.image.min || 0;
-    return sum + Math.min(minimum, section.imagePaths.length);
-  }, 0);
   const imageCoverage = {
     requiredSlots: requiredBodySlots + 1,
     filledRequiredSlots: filledRequiredBodySlots + (options.imageCount > 0 ? 1 : 0),
@@ -499,6 +523,10 @@ export function buildPostQualityReport(options: {
   register(actual.characters >= target.characters.min, `본문이 ${target.characters.min}자보다 짧습니다 (${actual.characters}자).`);
   register(actual.sections >= target.sections.min, `본문 섹션이 ${target.sections.min}개보다 적습니다 (${actual.sections}개).`);
   register(actual.images >= target.images.min, `이미지가 ${target.images.min}장보다 적습니다 (${actual.images}장).`);
+  register(
+    missingSectionIds.length === 0,
+    `이미지 최소 장수를 못 채운 파트가 있습니다: ${missingSectionIds.join(", ")}.`,
+  );
   if (actual.images >= target.images.min && actual.images < target.images.recommended) {
     warnings.push(`이미지 최소 기준은 통과했지만 권장 ${target.images.recommended}장보다 적습니다 (${actual.images}장).`);
   }
@@ -517,6 +545,47 @@ export function buildPostQualityReport(options: {
   };
 }
 
+/** 플랜 역할에서 안정적인 섹션 id 를 만든다 (같은 역할이 반복되면 -2, -3 …). */
+function planSectionIds(connectKind: BrandConnectKind, plan: PostSectionPlanV1[]): string[] {
+  const prefix = connectKind.toLowerCase();
+  const seen = new Map<string, number>();
+  return plan.map((section) => {
+    const base = `${prefix}-${section.role.replace(/[^a-z0-9-]+/giu, "-").toLowerCase() || "section"}`;
+    const count = (seen.get(base) || 0) + 1;
+    seen.set(base, count);
+    return count === 1 ? base : `${base}-${count}`;
+  });
+}
+
+/**
+ * 플랜이 배정한 이미지를 섹션에 적용하고, 플랜에 없는 유효 이미지는 여유가 있는 섹션에 순서대로 얹는다.
+ * 업로드 목록에 없는 경로(교체·삭제된 파일)는 조용히 버린다.
+ */
+function allocatePlannedImages(plan: PostSectionPlanV1[], bodyImagePaths: string[]): string[][] {
+  const available = new Set(bodyImagePaths);
+  const used = new Set<string>();
+  const allocations = plan.map((section) =>
+    section.imagePaths.filter((imagePath) => {
+      if (!available.has(imagePath) || used.has(imagePath)) return false;
+      used.add(imagePath);
+      return true;
+    }),
+  );
+  // 플랜 밖 이미지(대표 이미지가 썸네일로 빠져 슬롯이 비었거나, 나중에 추가된 파일)는
+  // 하한을 못 채운 섹션부터, 다음은 상한에 여유가 있는 섹션, 마지막은 이미지가 허용되는 마지막 섹션 순으로 얹는다.
+  const leftovers = bodyImagePaths.filter((imagePath) => !used.has(imagePath));
+  for (const imagePath of leftovers) {
+    let index = plan.findIndex((section, at) => allocations[at].length < section.imageMin);
+    if (index < 0) index = plan.findIndex((section, at) => allocations[at].length < section.imageMax);
+    if (index < 0) {
+      const lastWithSlot = plan.map((section) => section.imageMax > 0).lastIndexOf(true);
+      index = lastWithSlot >= 0 ? lastWithSlot : Math.max(0, plan.length - 1);
+    }
+    if (allocations[index]) allocations[index].push(imagePath);
+  }
+  return allocations;
+}
+
 export function resolvePostDocument(options: {
   connectKind: BrandConnectKind;
   title: string;
@@ -526,18 +595,37 @@ export function resolvePostDocument(options: {
   connectUrl: string;
   qualityPreset?: PostQualityPreset;
   experienceMode?: PostExperienceMode;
+  /** Spec-first 섹션 플랜. 본문 섹션 수와 길이가 같을 때만 적용된다. */
+  sectionPlan?: PostSectionPlanV1[] | null;
 }): ResolvedPostDocumentV1 {
   const contract = getPostCompositionContract(options.connectKind);
   const qualityPreset = options.qualityPreset || "PREMIUM";
   const experienceMode = options.experienceMode || "AI_ASSISTED_INFORMATION";
   const disclosureSection = options.sections.find(isDisclosureSection);
   const contentSections = options.sections.filter((section) => !isDisclosureSection(section));
+  const plan =
+    options.sectionPlan && options.sectionPlan.length === contentSections.length ? options.sectionPlan : null;
   const sectionContracts = resolveSectionContracts(contract, contentSections.length);
   const thumbnailPath = options.imagePaths[0] || "";
   const bodyImagePaths = thumbnailPath ? options.imagePaths.slice(1) : options.imagePaths;
-  const allocations = allocateImages(sectionContracts, bodyImagePaths);
+  const allocations = plan ? allocatePlannedImages(plan, bodyImagePaths) : allocateImages(sectionContracts, bodyImagePaths);
+  const planIds = plan ? planSectionIds(options.connectKind, plan) : [];
   const sections = contentSections.map((section, index): ResolvedPostSectionV1 => {
     const parsed = parseGeneratedSection(section);
+    if (plan) {
+      const planned = plan[index];
+      return {
+        id: planIds[index],
+        title: parsed.title,
+        body: parsed.body,
+        characterCount: parsed.body.join("").length,
+        imagePaths: allocations[index] || [],
+        imageIntent: planned.imageIntent,
+        headingStyle: planned.headingStyle || "sectionTitle",
+        imageMin: Math.max(0, planned.imageMin),
+        imageMax: Math.max(planned.imageMin, planned.imageMax),
+      };
+    }
     const sectionContract = sectionContracts[index] || contract.sections.at(-1)!;
     return {
       id: sectionContract.id,
@@ -549,6 +637,9 @@ export function resolvePostDocument(options: {
       headingStyle: sectionContract.headingStyle,
     };
   });
+  const earlyConnectSectionId = plan
+    ? planIds[plan.findIndex((section) => section.earlyConnectCard)] ?? null
+    : contract.earlyConnectAfterSectionId;
 
   const renderNodes: PostRenderNode[] = [];
   if (thumbnailPath) {
@@ -565,21 +656,22 @@ export function resolvePostDocument(options: {
   }
 
   const pushImage = (section: ResolvedPostSectionV1, imagePath: string, index: number) => {
-    const sectionContract = contract.sections.find((item) => item.id === section.id);
+    const sectionContract = plan ? undefined : contract.sections.find((item) => item.id === section.id);
+    const summaryRole = /summary|overview|key-facts|travel-route/u.test(section.id);
     renderNodes.push({
       kind: "image",
       assetPath: imagePath,
       sectionId: section.id,
-      role: section.id.includes("summary") || section.id === "travel-route" ? "summary" : index === 0 ? "detail" : "scene",
+      role: summaryRole ? "summary" : index === 0 ? "detail" : "scene",
       altText: `${section.title} - ${section.imageIntent}`,
-      layout: sectionContract?.image.layout || "single",
+      layout: sectionContract?.image.layout || (plan && section.imagePaths.length > 1 ? "sequence" : "single"),
       sourcePolicy:
         options.connectKind === "SHOPPING" ? "LOCKED_PRODUCT_OR_ORIGINAL" : "TRAVEL_EDITORIAL",
     });
   };
 
   for (const section of sections) {
-    const sectionContract = contract.sections.find((item) => item.id === section.id);
+    const sectionContract = plan ? undefined : contract.sections.find((item) => item.id === section.id);
     renderNodes.push({ kind: "divider", sectionId: section.id });
     // 네이버 자동 입력에서는 인용구 컴포넌트가 빈 채로 남을 수 있으므로 모든
     // 섹션 제목을 실제 소제목 서식 노드로 정규화한다.
@@ -597,7 +689,7 @@ export function resolvePostDocument(options: {
     if (placement === "after-body") {
       section.imagePaths.forEach((imagePath, index) => pushImage(section, imagePath, index));
     }
-    if (section.id === contract.earlyConnectAfterSectionId && options.connectUrl) {
+    if (earlyConnectSectionId && section.id === earlyConnectSectionId && options.connectUrl) {
       renderNodes.push({
         kind: "connectCard",
         connectKind: options.connectKind,

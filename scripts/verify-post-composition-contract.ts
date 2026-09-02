@@ -126,3 +126,87 @@ console.log("post composition contract verified", {
   travelScore: travel.qualityReport.score,
   premiumBlockers: premiumBlocked.qualityReport.blockers,
 });
+
+// --- Spec-first 섹션 플랜: 팔레트 순서 대신 실제 슬롯 배정·역할·하한/상한을 따른다 ---
+const planImages = Array.from({ length: 9 }, (_, index) => `C:/fixture/plan-${index}.jpg`);
+const planSections = [
+  "결론부터\n\n첫 줄 요약이에요.\n둘째 줄 요약이에요.\n셋째 줄 요약이에요.",
+  "상품 한눈에 보기\n\n• 상품명: 예시\n• 기간: 3박5일",
+  "전체 일정 흐름\n\n흐름 설명 문장이에요.\n둘째 문장이에요.",
+  "코스 포인트 1 · 야시장\n\n야시장 설명이에요.\n둘째 문장이에요.",
+  "코스 포인트 2 · 마사지\n\n마사지 설명이에요.\n둘째 문장이에요.",
+  "가격, 포함과 불포함\n\n• 표시 가격: 1,000원",
+  "마무리\n\n마무리 문장이에요.",
+];
+const planned = resolvePostDocument({
+  connectKind: "TRAVEL",
+  title: "플랜 검증",
+  sections: [...planSections, "네이버 여행 커넥트 활동을 통해 수수료를 제공받을 수 있습니다."],
+  hashtags: ["여행커넥트", "플랜", "검증"],
+  imagePaths: planImages,
+  connectUrl: "https://brandconnect.naver.com/plan-fixture",
+  qualityPreset: "PREMIUM",
+  sectionPlan: [
+    { role: "summary-glance", imagePaths: [], imageIntent: "이미지 없음", imageMin: 0, imageMax: 0 },
+    { role: "key-facts", imagePaths: [], imageIntent: "이미지 없음", imageMin: 0, imageMax: 0 },
+    { role: "itinerary-overview", imagePaths: [planImages[1]], imageIntent: "일정 요약 카드", imageMin: 1, imageMax: 1, earlyConnectCard: true },
+    { role: "day-course", imagePaths: [planImages[2], planImages[3]], imageIntent: "야시장 풍경", imageMin: 1, imageMax: 2 },
+    { role: "day-course", imagePaths: [planImages[4]], imageIntent: "마사지 숍", imageMin: 1, imageMax: 2 },
+    { role: "inclusions", imagePaths: [planImages[5]], imageIntent: "숙소 사진", imageMin: 1, imageMax: 1 },
+    { role: "closing", imagePaths: [planImages[6]], imageIntent: "마지막 풍경", imageMin: 0, imageMax: 1 },
+  ],
+});
+assert.deepEqual(
+  planned.sections.map((section) => section.id),
+  ["travel-summary-glance", "travel-key-facts", "travel-itinerary-overview", "travel-day-course", "travel-day-course-2", "travel-inclusions", "travel-closing"],
+  "플랜이 있으면 섹션 id 는 역할에서 만들어진다(팔레트 id 를 끼워 맞추지 않는다).",
+);
+assert.deepEqual(planned.sections[0].imagePaths, [], "요약 섹션 앞에는 본문 이미지가 없다(썸네일만)");
+assert.deepEqual(planned.sections[3].imagePaths.slice(0, 2), [planImages[2], planImages[3]], "코스 포인트는 플랜이 배정한 두 장을 그대로 받는다");
+assert.equal(planned.sections[3].imageIntent, "야시장 풍경", "이미지 의도는 실제 섹션 것을 쓴다");
+assert.equal(planned.sections[3].imageMin, 1);
+assert.equal(planned.sections[3].imageMax, 2);
+// 플랜에 없는 여분(planImages[7], [8])은 여유가 있는 섹션에 얹혀 버려지지 않는다.
+assert.equal(planned.renderNodes.filter((node) => node.kind === "image").length, planImages.length, "플랜 밖 유효 이미지도 렌더 노드로 배치");
+assert.equal(planned.qualityReport.imageCoverage.missingSectionIds.length, 0, "하한을 채운 섹션은 부족으로 보고되지 않는다");
+assert.equal(planned.qualityReport.imageCoverage.requiredSlots, 1 + 4, "필요 슬롯 = 썸네일 1 + 섹션 하한 합 4");
+const earlyCardIndex = planned.renderNodes.findIndex((node) => node.kind === "connectCard" && node.placement === "early");
+const overviewHeadingIndex = planned.renderNodes.findIndex((node) => node.kind === "heading" && node.sectionId === "travel-itinerary-overview");
+const firstCourseHeadingIndex = planned.renderNodes.findIndex((node) => node.kind === "heading" && node.sectionId === "travel-day-course");
+assert.ok(earlyCardIndex > overviewHeadingIndex && earlyCardIndex < firstCourseHeadingIndex, "첫 커넥트 카드는 플랜이 지정한 일정 흐름 섹션 뒤에 온다");
+
+// 하한을 못 채운 플랜 섹션은 프리미엄에서 차단 사유가 된다.
+const shortPlan = resolvePostDocument({
+  connectKind: "TRAVEL",
+  title: "플랜 부족 검증",
+  sections: planSections,
+  hashtags: ["여행커넥트", "플랜", "검증"],
+  imagePaths: planImages.slice(0, 2),
+  connectUrl: "https://brandconnect.naver.com/plan-fixture",
+  qualityPreset: "PREMIUM",
+  sectionPlan: [
+    { role: "summary-glance", imagePaths: [], imageIntent: "이미지 없음", imageMin: 0, imageMax: 0 },
+    { role: "key-facts", imagePaths: [], imageIntent: "이미지 없음", imageMin: 0, imageMax: 0 },
+    { role: "itinerary-overview", imagePaths: [planImages[1]], imageIntent: "일정 요약 카드", imageMin: 1, imageMax: 1 },
+    { role: "day-course", imagePaths: [], imageIntent: "야시장 풍경", imageMin: 1, imageMax: 2 },
+    { role: "day-course", imagePaths: [], imageIntent: "마사지 숍", imageMin: 1, imageMax: 2 },
+    { role: "inclusions", imagePaths: [], imageIntent: "숙소 사진", imageMin: 1, imageMax: 1 },
+    { role: "closing", imagePaths: [], imageIntent: "마지막 풍경", imageMin: 0, imageMax: 1 },
+  ],
+});
+assert.deepEqual(shortPlan.qualityReport.imageCoverage.missingSectionIds, ["travel-day-course", "travel-day-course-2", "travel-inclusions"]);
+assert.equal(shortPlan.qualityReport.canAutoPublish, false);
+
+// 플랜 길이가 섹션 수와 다르면 무시하고 팔레트로 돌아간다.
+const ignoredPlan = resolvePostDocument({
+  connectKind: "TRAVEL",
+  title: "플랜 무시 검증",
+  sections: planSections,
+  hashtags: ["여행커넥트", "플랜", "검증"],
+  imagePaths: planImages,
+  connectUrl: "https://brandconnect.naver.com/plan-fixture",
+  sectionPlan: [{ role: "summary-glance", imagePaths: [], imageIntent: "이미지 없음", imageMin: 0, imageMax: 0 }],
+});
+assert.equal(ignoredPlan.sections[0].id, "travel-hook");
+
+console.log(JSON.stringify({ ok: true, sectionPlan: true }));

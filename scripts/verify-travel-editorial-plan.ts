@@ -66,6 +66,11 @@ assert.deepEqual(pageResearchFacts.destinations, ["시드니"]);
 assert.ok(pageResearchFacts.highlights.includes("오페라하우스"));
 assert.ok(pageResearchFacts.highlights.includes("블루마운틴"));
 
+const departureTailFacts = extractTravelProductFacts(
+  "대한항공 노쇼핑 VVIP 풀패키지 [신축 M 호텔 다낭 3박5일] 바나힐/호이안 1일 1마사지 - 인천 오후 출발변경",
+);
+assert.deepEqual(departureTailFacts.destinations, ["바나힐", "호이안"], "출발 공항·출발 시간대는 목적지로 잡지 않는다");
+assert.equal(departureTailFacts.duration, "3박5일");
 const phuQuocFacts = extractTravelProductFacts(
   "푸꾸옥 패키지 3박5일 쇼핑엔티 혼똔섬 빈펄사파리 빈산레스토랑 마사지60분 티웨이항공변경",
 );
