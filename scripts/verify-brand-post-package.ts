@@ -445,9 +445,13 @@ async function main() {
     },
   }, null, 2));
   const refreshedStaleFlow = store.readBrandPostPackage(staleFlowId);
-  assert.equal(refreshedStaleFlow?.contentQuality?.canPublish, true);
-  assert.equal(refreshedStaleFlow?.contentQuality?.code, "ok");
-  assert.ok(store.approveBrandPostPackage(staleFlowId).approvedAt);
+  const preMigration = JSON.parse(fs.readFileSync(`${store.getBrandPostPackageManifestPath(staleFlowId)}.pre-qc-v139.bak`, "utf8"));
+  assert.equal(preMigration.contentQuality.signals[0].status, "fail", "Backup precedes even earlier text migrations");
+  assert.equal(preMigration.contentQuality.score, 82);
+  assert.equal(refreshedStaleFlow?.contentQuality?.signals.find((signal) => signal.key === "editorial-flow")?.status, "pass");
+  assert.equal(refreshedStaleFlow?.contentQuality?.canPublish, false, "Text recovery must not trust a forged passing composition report for a short, under-illustrated fixture");
+  assert.equal(refreshedStaleFlow?.contentQuality?.code, "composition-quality");
+  assert.throws(() => store.approveBrandPostPackage(staleFlowId), /프리미엄 초안 품질 게이트/u);
 
   const limitationFalsePositiveId = "fixture-brand-link-v2-limitation-false-positive";
   const limitationFalsePositiveDir = store.getBrandPostPackageDir(limitationFalsePositiveId);
@@ -503,10 +507,11 @@ async function main() {
     },
   }, null, 2));
   const refreshedLimitationFalsePositive = store.readBrandPostPackage(limitationFalsePositiveId);
-  assert.equal(refreshedLimitationFalsePositive?.contentQuality?.canPublish, true);
+  assert.equal(refreshedLimitationFalsePositive?.contentQuality?.canPublish, false);
+  assert.equal(refreshedLimitationFalsePositive?.contentQuality?.code, "composition-quality");
   assert.equal(refreshedLimitationFalsePositive?.contentQuality?.score, 100);
   assert.equal(refreshedLimitationFalsePositive?.contentQuality?.signals[0]?.status, "pass");
-  assert.ok(store.approveBrandPostPackage(limitationFalsePositiveId).approvedAt);
+  assert.throws(() => store.approveBrandPostPackage(limitationFalsePositiveId), /프리미엄 초안 품질 게이트/u);
 
   const generatedBodyPath = path.join(userData, "generated-body.png");
   fs.writeFileSync(generatedBodyPath, "generated-body-v1");

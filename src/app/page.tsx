@@ -88,6 +88,7 @@ interface BrandPostDraftPreview {
     code: string;
     reason: string | null;
     score: number;
+    quality?: { score: number };
     summary: string;
     signals: Array<{ key: string; label: string; status: "pass" | "warn" | "fail" }>;
   } | null;
@@ -3231,7 +3232,7 @@ export default function Dashboard() {
                 ["post", "글"],
                 ["images", `이미지 ${draftImageActual}장`],
                 ["thumbnail", "썸네일"],
-                ["quality", `품질검사 ${draftPreview.contentQuality?.score ?? draftPreview.composition?.qualityReport.score ?? "-"}점`],
+                ["quality", `품질검사 ${draftPreview.contentQuality?.quality?.score ?? draftPreview.contentQuality?.score ?? draftPreview.composition?.qualityReport.score ?? "-"}점`],
               ] as const).map(([tab, label]) => (
                 <button key={tab} type="button" onClick={() => setDraftPreviewTab(tab)} className={`rounded-t-lg px-4 py-2 text-sm font-semibold ${draftPreviewTab === tab ? "bg-white text-violet-700 shadow-sm ring-1 ring-slate-200" : "text-slate-500 hover:text-slate-900"}`}>{label}</button>
               ))}
@@ -3371,7 +3372,7 @@ export default function Dashboard() {
                       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
                         <div>
                           <p className="text-sm font-semibold text-slate-600">원고 내용 QC</p>
-                          <p className="mt-1 text-3xl font-black text-slate-950">{draftPreview.contentQuality?.score ?? "-"}점</p>
+                          <p className="mt-1 text-3xl font-black text-slate-950">{draftPreview.contentQuality?.quality?.score ?? draftPreview.contentQuality?.score ?? "-"}점</p>
                           <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-700">{draftContentQualityPassed ? "원고 내용 품질검사 통과 · 이미지 준비 상태는 아래 게이트에서 별도로 확인합니다." : draftPreview.contentQuality?.reason || draftPreview.contentQuality?.summary || "이전 버전 초안이라 원고 내용 QC가 저장되어 있지 않습니다."}</p>
                         </div>
                         <div className="flex shrink-0 flex-col items-end gap-2">

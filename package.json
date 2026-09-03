@@ -1,6 +1,6 @@
 {
   "name": "brandconnect-automation",
-  "version": "1.3.8",
+  "version": "1.3.9",
   "description": "네이버 쇼핑 커넥트(브랜드커넥트) 자동 블로그 포스팅 도구",
   "private": true,
   "scripts": {
@@ -18,6 +18,7 @@
     "test:mcp-contract": "tsx --test src/lib/brandlink-product-list.test.ts",
     "test:draft-snapshot": "npx ts-node --project tsconfig.scripts.json scripts/verify-draft-snapshot-contract.ts",
     "test:section-images": "npx ts-node --project tsconfig.scripts.json scripts/verify-section-image-repair.ts",
+    "test:package-qc-reconcile": "npx ts-node --project tsconfig.scripts.json scripts/verify-package-qc-reconcile.ts",
     "test:image-batch-progress": "npx ts-node --project tsconfig.scripts.json scripts/verify-image-batch-progress.ts",
     "test:writing-harness": "npx ts-node --project tsconfig.scripts.json scripts/verify-writing-prompt-contract.ts",
     "test:local-json-fetch": "npx ts-node --project tsconfig.scripts.json scripts/verify-local-json-fetch.ts",
@@ -120,6 +121,8 @@
     "files": [
       "scripts/**/*",
       ".next/**/*",
+      "!.next/cache/**/*",
+      "!.next/dev/**/*",
       "public/**/*",
       "next.config.ts",
       "package.json",

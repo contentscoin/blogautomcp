@@ -6,6 +6,7 @@ import type { BrandLinkContentReadiness } from "../../scripts/lib/brandlink-cont
 import {
   getPostCompositionContract,
   refreshPostDocumentQuality,
+  normalizeLegacyFreeformImageRules,
   sectionImageBounds,
   type ResolvedPostDocumentV1,
 } from "./post-composition-contract";
@@ -186,12 +187,24 @@ export function readBrandPostPackage(brandLinkId: string): BrandPostPackageManif
     throw new Error("준비된 초안 패키지의 렌더 계약 형식이 올바르지 않습니다.");
   }
 
+  const persistMigration = () => {
+    if (parsed.version === "brand-post-package/v2") {
+      // Back up original bytes before ANY read-time migration changes this package.
+      try {
+        fs.copyFileSync(manifestPath, `${manifestPath}.pre-qc-v139.bak`, fs.constants.COPYFILE_EXCL);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      }
+    }
+    writeBrandPostPackageManifest(parsed);
+  };
+
   // v1 시절에는 사용자가 직접 확인·승인한 초안에도 generationSource가 저장되지
   // 않았다. 승인 이력이 있는 레거시 초안은 사용자 승인본으로 마이그레이션해
   // 발행 단계가 상품 페이지를 다시 연 뒤 출처 오류로 끝나는 문제를 막는다.
   if (parsed.version === "brand-post-package/v1" && parsed.approvedAt && !parsed.generationSource) {
     parsed = { ...parsed, generationSource: "PREPARED_APPROVED" };
-    writeBrandPostPackageManifest(parsed);
+    persistMigration();
   }
 
   // 이전 판정기는 자연스러운 "어떤 사람에게 더 맞을까", "장점이 살아나요"
@@ -228,7 +241,7 @@ export function readBrandPostPackage(brandLinkId: string): BrandPostPackageManif
           summary: `커넥트 글 발행 게이트 통과 (${score}점, 신호 ${signals.length}/${signals.length})`,
         },
       };
-      writeBrandPostPackageManifest(parsed);
+      persistMigration();
     }
   }
 
@@ -284,7 +297,14 @@ export function readBrandPostPackage(brandLinkId: string): BrandPostPackageManif
           ...(quality ? { quality } : {}),
         },
       };
-      writeBrandPostPackageManifest(parsed);
+      persistMigration();
+    }
+  }
+  if (parsed.version === "brand-post-package/v2") {
+    const reconciled = reconcileBrandPostPackageQuality(parsed);
+    if (JSON.stringify(reconciled) !== JSON.stringify(parsed)) {
+      parsed = reconciled;
+      persistMigration();
     }
   }
   return parsed;
@@ -454,38 +474,75 @@ export function writeBrandPostPackageManifest(
 
 function refreshStoredContentQuality(
   quality: BrandLinkContentReadiness | null | undefined,
-  compositionCanPublish: boolean,
+  report: ResolvedPostDocumentV1["qualityReport"],
 ): BrandLinkContentReadiness | null | undefined {
   if (!quality) return quality;
+  const compositionCanPublish = report.canAutoPublish;
   const signals = quality.signals.map((signal) =>
     signal.key === "composition-quality"
       ? { ...signal, status: compositionCanPublish ? ("pass" as const) : ("fail" as const) }
       : signal,
   );
+  if (!signals.some((signal) => signal.key === "composition-quality")) {
+    signals.push({ key: "composition-quality", label: "포스트 계약 품질", status: compositionCanPublish ? "pass" : "fail" });
+  }
   const failures = signals.filter((signal) => signal.status === "fail");
-  // Image repair must not overwrite the editorial quality score.
-  const score = quality.score;
-  if (failures.length === 0) {
+  // Older image repair wrote a generic 82 over an independently passing editorial 100.
+  const score = quality.quality?.score ?? quality.score;
+  const blockers = (quality.blockers || []).filter((blocker) => blocker.code !== "composition-quality");
+  if (!compositionCanPublish) blockers.push({
+    code: "composition-quality", tier: "structure",
+    reason: report.blockers.join(" ") || "현재 구성·이미지 게이트 미통과",
+  });
+  const existingTextFailure = !quality.canPublish && quality.code !== "ok" && quality.code !== "composition-quality";
+  const qualityFailed = (quality.quality?.categories || []).some((category) => category.status === "fail") ||
+    (quality.quality != null && score < quality.quality.passScore);
+  if (failures.length === 0 && blockers.length === 0 && !existingTextFailure && !qualityFailed) {
     return {
       ...quality,
       canPublish: true,
+      verdict: "pass",
       code: "ok",
       reason: null,
       score,
       signals,
+      blockers,
       summary: `커넥트 글 발행 게이트 통과 (${score}점, 신호 ${signals.length}/${signals.length})`,
     };
   }
+  const safetyBlocker = blockers.find((blocker) => blocker.tier === "safety");
+  // Legacy packages may carry their ONLY text failure in code/reason. Do not
+  // overwrite it with a temporary image failure and lose it on the next result.
+  const code = safetyBlocker?.code || (existingTextFailure ? quality.code : blockers[0]?.code) || "quality-score-below-threshold";
+  const reason = safetyBlocker?.reason ||
+    (existingTextFailure ? quality.reason : blockers[0]?.reason) ||
+    `${failures[0]?.label || "원고 품질"} 항목을 보강해야 합니다.`;
   return {
     ...quality,
     canPublish: false,
+    verdict: blockers.length ? "blocked" : "quality",
+    code,
     score,
     signals,
-    reason:
-      quality.code === "composition-quality" && compositionCanPublish
-        ? `${failures[0].label} 항목을 보강해야 합니다.`
-        : quality.reason,
-    summary: `커넥트 글 발행 보류 (${score}점, ${failures[0].label})`,
+    blockers,
+    reason,
+    summary: `커넥트 글 발행 보류 (원고 품질 ${score}점, ${reason})`,
+  };
+}
+
+/** Refresh derived gates from this package, never regenerate text or infer new facts. */
+export function reconcileBrandPostPackageQuality(manifest: BrandPostPackageManifestV2): BrandPostPackageManifestV2 {
+  const exists = (file: string) => { try { return fs.statSync(file).isFile(); } catch { return false; } };
+  const source = manifest.postSpec ? manifest.composition : normalizeLegacyFreeformImageRules(manifest.composition);
+  const composition = refreshPostDocumentQuality({
+    ...source,
+    sections: source.sections.map((section) => ({ ...section, imagePaths: section.imagePaths.filter(exists) })),
+    renderNodes: source.renderNodes.filter((node) => node.kind !== "image" || exists(node.assetPath)),
+  });
+  const contentQuality = refreshStoredContentQuality(manifest.contentQuality, composition.qualityReport);
+  return {
+    ...manifest, composition, contentQuality,
+    approvedAt: composition.qualityReport.canAutoPublish && contentQuality?.canPublish !== false ? manifest.approvedAt : null,
   };
 }
 
@@ -574,9 +631,6 @@ export function applyGeneratedBrandPostImage(options: {
     const sectionId = options.sectionId?.trim();
     const section = composition.sections.find((candidate) => candidate.id === sectionId);
     if (!sectionId || !section) throw new Error("이미지를 추가할 본문 파트를 찾을 수 없습니다.");
-    const contract = getPostCompositionContract(manifest.connectKind).sections.find(
-      (candidate) => candidate.id === sectionId,
-    );
     const bounds = sectionImageBounds(getPostCompositionContract(manifest.connectKind), section);
     if (section.imagePaths.length >= Math.max(1, bounds.max)) {
       throw new Error("이 파트는 권장 최대 이미지 수에 도달했습니다.");
@@ -598,7 +652,7 @@ export function applyGeneratedBrandPostImage(options: {
       sectionId,
       role: "scene" as const,
       altText: `${section.title} - ${asset.imageIntent || section.imageIntent}`,
-      layout: contract?.image.layout || ("single" as const),
+      layout: section.imagePaths.length > 0 ? ("sequence" as const) : ("single" as const),
       sourcePolicy: manifest.imagePolicy,
     };
     const renderNodes = [...composition.renderNodes];
@@ -628,7 +682,7 @@ export function applyGeneratedBrandPostImage(options: {
     thumbnailSpec,
     contentQuality: refreshStoredContentQuality(
       manifest.contentQuality,
-      composition.qualityReport.canAutoPublish,
+      composition.qualityReport,
     ),
     approvedAt: null,
   };
