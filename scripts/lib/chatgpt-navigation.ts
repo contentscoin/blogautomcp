@@ -53,6 +53,11 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** 이동 자체가 막힌 신호(타임아웃·네트워크 오류)인지. 그 외 브라우저 오류는 그대로 전달한다. */
+function isNavigationFailure(message: string): boolean {
+  return /timeout|net::err_|err_name_not_resolved|econnrefused|enotfound|socket hang up/iu.test(message);
+}
+
 export async function navigateToChatGpt(
   page: NavigablePage,
   url: string,
@@ -77,24 +82,38 @@ export async function navigateToChatGpt(
     }
   };
 
-  if (await attempt("domcontentloaded", timeoutMs, "1차")) return;
+  // 보안 확인 화면은 문서 로드를 끝내지 않는다. 매 시도마다 확인해야 한다:
+  // 인터스티셜은 commit 단계나 창을 띄운 뒤에야 나타나기도 하는데, 그때 놓치면
+  // 로그인·보안 확인 안내 대신 네트워크 오류로 잘못 보고된다.
+  const throwIfChallenged = (): void => {
+    const challenge = detectNavigationChallenge(page);
+    if (challenge) {
+      throw new Error(`${label} 이동 실패: ${challenge} (현재 URL: ${page.url()})`);
+    }
+  };
 
-  // 보안 확인 화면은 문서 로드를 끝내지 않는다. 여기서 잡아야 사용자가 로그인 창 안내를 받는다.
-  const challenge = detectNavigationChallenge(page);
-  if (challenge) {
-    throw new Error(`${label} 이동 실패: ${challenge} (현재 URL: ${page.url()})`);
-  }
+  if (await attempt("domcontentloaded", timeoutMs, "1차")) return;
+  throwIfChallenged();
 
   if (await attempt("commit", commitTimeoutMs, "2차(commit)")) return;
+  throwIfChallenged();
 
   if (options.reveal) {
     log(`      - ${label} 창을 화면에 표시하고 마지막으로 다시 시도합니다.`);
     await options.reveal().catch(() => undefined);
     if (await attempt("domcontentloaded", timeoutMs, "3차(창 표시)")) return;
+    throwIfChallenged();
+  }
+
+  const lastMessage = errorMessage(lastError);
+  // 도달 실패로 단정할 수 있는 것은 이동·네트워크 오류뿐이다. 브라우저가 죽거나 대상이 닫힌
+  // 경우까지 UNREACHABLE 로 감싸면 네트워크·프록시를 확인하라는 잘못된 안내가 나간다.
+  if (!isNavigationFailure(lastMessage)) {
+    throw new Error(`${label} 이동 실패: ${compactPlaywrightError(lastMessage)}`);
   }
 
   throw new Error(
     `${label} 이동 실패: ${CHATGPT_BROWSER_UNREACHABLE_CODE}: chatgpt.com 에 연결하지 못했습니다 ` +
-    `(${compactPlaywrightError(errorMessage(lastError))})`,
+    `(${compactPlaywrightError(lastMessage)})`,
   );
 }
