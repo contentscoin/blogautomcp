@@ -143,19 +143,31 @@ async function main(): Promise<void> {
     Object.assign(new Error('page.goto: Timeout 60000ms exceeded.\n=========================== logs ===========================\nnavigating to "https://chatgpt.com/"'), {
       name: "TimeoutError",
     });
-  const fakePage = (settings: { failures: number; url?: string; frameUrl?: string }) => {
+  const fakePage = (settings: {
+    failures: number;
+    url?: string;
+    frameUrl?: string;
+    /** 이 시도 횟수를 넘긴 뒤부터 보안 확인 화면이 보이기 시작한다. */
+    challengeAfterAttempt?: number;
+    error?: () => Error;
+  }) => {
     const calls: Array<{ waitUntil: string; timeout: number }> = [];
     let remaining = settings.failures;
+    let attempts = 0;
     const page: NavigablePage = {
       async goto(_url, options) {
+        attempts += 1;
         calls.push({ waitUntil: options.waitUntil, timeout: options.timeout });
         if (remaining > 0) {
           remaining -= 1;
-          throw navigationTimeout();
+          throw (settings.error || navigationTimeout)();
         }
         return null;
       },
-      url: () => settings.url || "about:blank",
+      url: () =>
+        settings.challengeAfterAttempt !== undefined && attempts > settings.challengeAfterAttempt
+          ? "https://chatgpt.com/cdn-cgi/challenge-platform/x"
+          : settings.url || "about:blank",
       frames: () => [{ url: () => settings.frameUrl || "about:blank", name: () => "" }],
     };
     return { page, calls };
@@ -204,6 +216,45 @@ async function main(): Promise<void> {
   const withoutReveal = fakePage({ failures: 3 });
   await assert.rejects(navigateToChatGpt(withoutReveal.page, "https://chatgpt.com/", { label: "Direct ChatGPT", reveal: null }));
   assert.equal(withoutReveal.calls.length, 2, "표시할 창이 없으면 두 단계로 끝냅니다.");
+
+  // 보안 확인 화면은 commit 단계나 창을 띄운 뒤에야 나타나기도 한다. 그때도 네트워크 오류가 아니라
+  // 로그인·보안 확인 안내로 이어져야 한다.
+  for (const challengeAfterAttempt of [1, 2]) {
+    const lateChallenge = fakePage({ failures: 3, challengeAfterAttempt });
+    let lateReveals = 0;
+    await assert.rejects(
+      navigateToChatGpt(lateChallenge.page, "https://chatgpt.com/", {
+        label: "Direct ChatGPT",
+        reveal: async () => { lateReveals += 1; },
+      }),
+      (error: Error) => {
+        assert.equal(
+          isChatGptBrowserAuthenticationError(error.message),
+          true,
+          `${challengeAfterAttempt}번째 시도 뒤 나타난 보안 확인도 로그인 안내로 이어져야 합니다.`,
+        );
+        assert.equal(isChatGptBrowserUnreachableError(error.message), false);
+        return true;
+      },
+    );
+    assert.equal(lateChallenge.calls.length, challengeAfterAttempt + 1, "보안 확인을 확인하면 더 시도하지 않습니다.");
+    assert.equal(lateReveals, challengeAfterAttempt === 2 ? 1 : 0);
+  }
+
+  // 이동·네트워크 오류가 아닌 실패까지 도달 실패로 감싸면 네트워크 확인 안내가 잘못 나간다.
+  const crashed = fakePage({
+    failures: 3,
+    error: () => new Error("Target page, context or browser has been closed"),
+  });
+  await assert.rejects(
+    navigateToChatGpt(crashed.page, "https://chatgpt.com/", { label: "Direct ChatGPT", reveal: null }),
+    (error: Error) => {
+      assert.match(error.message, /Target page, context or browser has been closed/u);
+      assert.equal(isChatGptBrowserUnreachableError(error.message), false);
+      assert.equal(isChatGptBrowserAuthenticationError(error.message), false);
+      return true;
+    },
+  );
   assert.equal(
     hasChatGptProtectionText("제품의 보안 기능과 본인 인증, 유해 콘텐츠 차단 기능을 비교합니다."),
     false,
