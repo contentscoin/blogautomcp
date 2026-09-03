@@ -26,3 +26,14 @@
 - 패키지 smoke test에서 고정 설정 5개와 제거된 설정 필드가 최종 번들에도 반영됐는지 실제 API로 검사한다.
 - 검증용 Electron 실행은 `blogautomcp://` 프로토콜을 등록하지 않아 기존 설치본의 연결을 덮어쓰지 않는다. 테스트 실행 0회 등록, 일반 실행 1회 등록을 실제 초기화 함수 기반 fixture로 검증했다.
 - 최종 설치본 무결성·다운로드·중앙 배포 결과는 완료 후 아래에 기록한다.
+
+## 최종 1.3.12 검증
+
+- `npm run build`: 정상 완료(컴파일, TypeScript, 정적 페이지, 빌드 추적).
+- `npm run test:fixed-draft-settings`, `test:codex-draft-provider`, `test:chatgpt-browser-automation`, `test:section-images`, `test:auto-update`: 통과. scripts TypeScript 및 변경 설정/UI/Electron 파일 ESLint 통과.
+- `npx electron-builder --win --publish=never --config.directories.output=out/release-1.3.12`: 정상 완료.
+- 패키지 검증: currentVersion 1.3.12, 1.3.13 fixture 인증 다운로드, 고정 설정 및 옵션 제거, 격리 캐시, fixture 설치 차단, 자체 Prisma 엔진, 로컬 UI HTTP 200, 앱 재시작, 토큰 마스킹 모두 통과.
+- 설치본 325,480,922 bytes. SHA-256 `d60f64e0dc602bd68cd9b40a6954a3637b5efa16c2a5bcbb138ea35c46dd6cdd`. GitHub v1.3.12 설치본 및 blockmap 해시가 로컬 값과 일치한다.
+- 소스 커밋 `c60468bf0c77ab51a20a9828344b7afb198eb230`. GitHub Actions는 계정 결제 실패 또는 spending limit 안내로 job 시작 전 차단됐으며, 원격 CI 통과를 주장하지 않는다.
+- PC에서 진행 중인 `codex-draft` 작업을 확인했고 강제 재시작이나 중단하지 않았다. 위 실행 검증은 격리된 최종 패키지에 대한 결과이며 PC 설치 완료와 구분한다.
+- 중앙 관리자 화면에서 v1.3.12 및 배포 완료 메시지를 확인했다(2026-09-03 21:55 KST). 연결된 PC는 정상 자동 업데이트 절차로 내려받고 작업 종료 후 적용한다. Sites 웹 코드 자체는 이번 변경 대상이 아니므로 동일 웹 버전을 불필요하게 재배포하지 않았다.
