@@ -8,6 +8,8 @@ import {
   describeChatGptBrowserVisibility,
 } from "./chatgpt-browser-visibility";
 import {
+  CHATGPT_MANUAL_VERIFICATION_MESSAGE,
+  CHATGPT_PROTECTION_FRAME_PATTERNS,
   chatGptAuthenticationRequiredMessage,
   hasChatGptProtectionText,
 } from "./chatgpt-browser-errors";
@@ -48,22 +50,6 @@ export interface ChatGPTContextHandle {
   context: import("playwright").BrowserContext;
   close: () => Promise<void>;
 }
-
-const CHATGPT_MANUAL_VERIFICATION_MESSAGE =
-  chatGptAuthenticationRequiredMessage(
-    "ChatGPT manual verification required. A human-verification or security-check page is visible. Complete it in the browser, then run the job again.",
-  );
-
-const CHATGPT_PROTECTION_FRAME_PATTERNS = [
-  "cdn-cgi/challenge-platform",
-  "challenge",
-  "captcha",
-  "turnstile",
-  "cloudflare",
-  "cf-chl",
-  "hcaptcha",
-  "recaptcha",
-];
 
 async function findVisibleSelector(page: Page, selectors: string[]): Promise<string | null> {
   for (const selector of selectors) {

@@ -148,10 +148,9 @@ cp .env.example .env
 # OpenAI API 키 (글 생성·썸네일 생성·QC 모두 OpenAI 사용)
 OPENAI_API_KEY=sk-여기에_발급받은_키_붙여넣기
 
-# 설치형 앱은 ChatGPT에 한 번 로그인한 뒤 평소 작업을 백그라운드에서 실행
-CHATGPT_BROWSER_AUTOMATION_ENABLED=true
-BROWSER_GPT_MODE=true
-ALLOW_CHATGPT_BROWSER_MODE=true
+# 원고는 ChatGPT MCP 경로(post_create_draft → post_submit_draft)가 기본입니다.
+# 아래를 true 로 켜면 PC 가 로그인된 ChatGPT 웹을 열어 초안을 쓰는 선택 경로가 됩니다.
+CHATGPT_BROWSER_AUTOMATION_ENABLED=false
 CHATGPT_BROWSER_VISIBILITY=background
 CHATGPT_BASE_URL=https://chatgpt.com/
 BLOG_HUMANIZE_MOBILE_STYLE=true

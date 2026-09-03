@@ -6,6 +6,7 @@ import {
   buildChatGptBrowserAutomationEnv,
   isChatGptBrowserAuthenticationError,
   isChatGptBrowserAutomationEnabled,
+  isChatGptBrowserUnreachableError,
   readChatGptBrowserSessionSummary,
 } from "../src/lib/chatgpt-browser-automation";
 import { getChatgptSessionFile } from "./lib/app-paths";
@@ -15,8 +16,11 @@ import {
 } from "./lib/chatgpt-browser-visibility";
 import {
   CHATGPT_BROWSER_AUTH_REQUIRED_CODE,
+  CHATGPT_BROWSER_UNREACHABLE_CODE,
+  compactPlaywrightError,
   hasChatGptProtectionText,
 } from "./lib/chatgpt-browser-errors";
+import { navigateToChatGpt, type NavigablePage } from "./lib/chatgpt-navigation";
 import { acquireChatGptProfileLock } from "./lib/chatgpt-profile-lock";
 import {
   createChatGptReplyProgress,
@@ -125,6 +129,81 @@ async function main(): Promise<void> {
   );
   assert.equal(isChatGptBrowserAuthenticationError("Cloudflare 보안 검증 페이지가 표시되었습니다."), true);
   assert.equal(isChatGptBrowserAuthenticationError("원고 JSON 형식이 올바르지 않습니다."), false);
+  assert.equal(isChatGptBrowserUnreachableError(`Direct ChatGPT 이동 실패: ${CHATGPT_BROWSER_UNREACHABLE_CODE}: chatgpt.com 에 연결하지 못했습니다`), true);
+  assert.equal(isChatGptBrowserUnreachableError("Direct ChatGPT 이동 실패: page.goto: Timeout 60000ms exceeded."), true);
+  assert.equal(isChatGptBrowserUnreachableError("원고 JSON 형식이 올바르지 않습니다."), false);
+  assert.equal(isChatGptBrowserAuthenticationError(`Direct ChatGPT 이동 실패: ${CHATGPT_BROWSER_UNREACHABLE_CODE}: chatgpt.com 에 연결하지 못했습니다`), false);
+  assert.equal(
+    compactPlaywrightError('page.goto: Timeout 60000ms exceeded.\n=========================== logs ===========================\nnavigating to "https://chatgpt.com/"'),
+    "page.goto: Timeout 60000ms exceeded.",
+  );
+
+  // 이동 단계: 숨은 창에서 6분을 태우는 대신 60초 → commit → 창 표시 후 마지막 시도로 끝낸다.
+  const navigationTimeout = () =>
+    Object.assign(new Error('page.goto: Timeout 60000ms exceeded.\n=========================== logs ===========================\nnavigating to "https://chatgpt.com/"'), {
+      name: "TimeoutError",
+    });
+  const fakePage = (settings: { failures: number; url?: string; frameUrl?: string }) => {
+    const calls: Array<{ waitUntil: string; timeout: number }> = [];
+    let remaining = settings.failures;
+    const page: NavigablePage = {
+      async goto(_url, options) {
+        calls.push({ waitUntil: options.waitUntil, timeout: options.timeout });
+        if (remaining > 0) {
+          remaining -= 1;
+          throw navigationTimeout();
+        }
+        return null;
+      },
+      url: () => settings.url || "about:blank",
+      frames: () => [{ url: () => settings.frameUrl || "about:blank", name: () => "" }],
+    };
+    return { page, calls };
+  };
+
+  const firstTry = fakePage({ failures: 0 });
+  await navigateToChatGpt(firstTry.page, "https://chatgpt.com/", { label: "Direct ChatGPT", reveal: null });
+  assert.equal(firstTry.calls.length, 1);
+  assert.equal(firstTry.calls[0].waitUntil, "domcontentloaded");
+
+  const challenged = fakePage({ failures: 3, url: "https://chatgpt.com/cdn-cgi/challenge-platform/x" });
+  await assert.rejects(
+    navigateToChatGpt(challenged.page, "https://chatgpt.com/", { label: "Direct ChatGPT", reveal: null }),
+    (error: Error) => {
+      assert.match(error.message, /이동 실패/u);
+      assert.equal(isChatGptBrowserAuthenticationError(error.message), true, "보안 확인은 로그인 창 안내로 이어져야 합니다.");
+      return true;
+    },
+  );
+  assert.equal(challenged.calls.length, 1, "보안 확인이 보이면 더 기다리지 않습니다.");
+
+  const commitRecovery = fakePage({ failures: 1 });
+  await navigateToChatGpt(commitRecovery.page, "https://chatgpt.com/", { label: "Direct ChatGPT", reveal: null });
+  assert.deepEqual(commitRecovery.calls.map((call) => call.waitUntil), ["domcontentloaded", "commit"]);
+
+  const unreachable = fakePage({ failures: 3 });
+  let revealCalls = 0;
+  await assert.rejects(
+    navigateToChatGpt(unreachable.page, "https://chatgpt.com/", {
+      label: "Direct ChatGPT",
+      reveal: async () => { revealCalls += 1; },
+    }),
+    (error: Error) => {
+      assert.match(error.message, /이동 실패/u);
+      assert.match(error.message, new RegExp(CHATGPT_BROWSER_UNREACHABLE_CODE, "u"));
+      assert.equal(error.message.includes("=== logs"), false, "Playwright call log 는 사용자 메시지에 넣지 않습니다.");
+      assert.equal(isChatGptBrowserUnreachableError(error.message), true);
+      assert.equal(isChatGptBrowserAuthenticationError(error.message), false);
+      return true;
+    },
+  );
+  assert.equal(revealCalls, 1, "마지막 시도 전에 창을 한 번 표시해야 합니다.");
+  assert.equal(unreachable.calls.length, 3);
+  assert.ok(unreachable.calls.reduce((sum, call) => sum + call.timeout, 0) <= 180_000, "총 이동 예산은 3분 이하여야 합니다.");
+
+  const withoutReveal = fakePage({ failures: 3 });
+  await assert.rejects(navigateToChatGpt(withoutReveal.page, "https://chatgpt.com/", { label: "Direct ChatGPT", reveal: null }));
+  assert.equal(withoutReveal.calls.length, 2, "표시할 창이 없으면 두 단계로 끝냅니다.");
   assert.equal(
     hasChatGptProtectionText("제품의 보안 기능과 본인 인증, 유해 콘텐츠 차단 기능을 비교합니다."),
     false,
@@ -204,6 +283,8 @@ async function main(): Promise<void> {
   assert.match(draftRoute, /CHATGPT_BROWSER_LOGIN_REQUIRED/u);
   assert.match(draftRoute, /CHATGPT_BROWSER_FALLBACK_REQUIRED/u);
   assert.match(draftRoute, /isChatGptBrowserAuthenticationError/u);
+  assert.match(draftRoute, /CHATGPT_BROWSER_UNREACHABLE/u);
+  assert.match(draftRoute, /isChatGptBrowserUnreachableError/u);
   assert.match(draftRoute, /buildChatGptBrowserAutomationEnv\(useBrowserChatGpt\)/u);
   assert.match(draftRoute, /status: "DRAFTING"/u);
   assert.match(draftRoute, /status: "FAILED", errorMessage: message/u);
@@ -221,12 +302,16 @@ async function main(): Promise<void> {
   assert.match(dashboard, /1\. 웹 GPT 자동작성/u);
   assert.match(dashboard, /provider: "chatgpt", force: false/u);
   assert.match(dashboard, /await requestDraft\(false\)/u);
+  assert.match(dashboard, /"CHATGPT_BROWSER_UNREACHABLE"/u);
 
   const sessionStatus = source("src/components/SessionStatus.tsx");
   assert.match(sessionStatus, /웹 GPT 재로그인/u);
   assert.match(sessionStatus, /CHATGPT_BROWSER_AUTOMATION_ENABLED/u);
 
   const simpleAgent = source("scripts/simple-agent.ts");
+  assert.match(simpleAgent, /navigateToChatGpt/u);
+  assert.equal(simpleAgent.includes("navigateWithRetry"), false, "3×120초 반복 이동은 제거되어야 합니다.");
+  assert.match(simpleAgent, /CHATGPT_NAVIGATION_TIMEOUT_MS/u);
   assert.match(simpleAgent, /buildChatGptBrowserLaunchPolicy/u);
   assert.match(simpleAgent, /acquireChatGptProfileLock/u);
   assert.match(simpleAgent, /hasChatGptProtectionText/u);

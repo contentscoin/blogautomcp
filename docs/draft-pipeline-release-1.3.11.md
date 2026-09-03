@@ -56,3 +56,48 @@ e2e 픽스처가 `snapshot` 을 손으로 최상위에 넣고 있었고 계약 �
 
 1. 사이트(`apps/sites`) 배포. 이것만으로 1.3.10 PC 의 제출이 즉시 통과한다.
 2. 데스크톱 1.3.11 패키징·게시. 준비 결과가 다시 1.3.9 형태로 돌아온다.
+
+---
+
+# 1.3.11 — 웹 GPT 자동작성 이동 실패 처리
+
+## 증상
+
+`CHATGPT_BROWSER_AUTOMATION_ENABLED=true` 이고 OpenAI 키가 없는 PC 에서 "웹 GPT 자동작성" 을 누르면
+약 6분 뒤 아래 오류로 끝났다.
+
+```
+ChatGPT 웹 자동작성에 실패했습니다: [STEP2 SEO 글 생성] GPT 원고 생성에 실패했습니다:
+Browser ChatGPT 실패: Direct ChatGPT 이동 실패: page.goto: Timeout 120000ms exceeded.
+```
+
+## 원인
+
+- `scripts/simple-agent.ts` 의 `navigateWithRetry` 가 `domcontentloaded` 120초를 3번(백오프 포함 약 6분)
+  똑같이 반복하고 원본 Playwright 메시지를 그대로 던졌다. 튜닝할 환경변수도 없었다.
+- 창은 `--start-minimized --window-position=-32000,-32000` 로 화면 밖에 있어 사용자가 무엇이 막혔는지
+  볼 수 없었다.
+- Cloudflare·캡차 감지(`detectChatGPTManualVerification` 등)는 `goto` 가 성공한 뒤에만 돌아서, 확인 화면이
+  떠 문서 로드가 끝나지 않는 경우를 잡지 못했다.
+- 그 결과 `isChatGptBrowserAuthenticationError` 에 걸리지 않아 로그인 창 자동 열기 경로도 작동하지 않았다.
+
+## 변경
+
+- 신규 `scripts/lib/chatgpt-navigation.ts` `navigateToChatGpt`: ① `domcontentloaded`
+  `CHATGPT_NAVIGATION_TIMEOUT_MS`(기본 60초) ② 실패하면 URL·프레임만으로 보안 확인 흔적을 검사해
+  발견 즉시 인증 필요로 종료(로그인 창 안내로 이어짐) ③ `commit` 30초 ④ 숨은 창이면 창을 화면에 띄우고
+  마지막 `domcontentloaded`. 총 예산 3분 이하.
+- 신규 `scripts/lib/chatgpt-browser-window.ts` `revealChatGptBrowserWindow`: 로그인 스크립트에 있던 CDP
+  창 이동 헬퍼를 공용화해 초안 이동의 마지막 시도에서도 쓴다.
+- `scripts/lib/chatgpt-browser-errors.ts` 에 보호 패턴·수동 확인 메시지·`CHATGPT_BROWSER_UNREACHABLE` 코드와
+  `compactPlaywrightError`(call log 제거)를 모아 `simple-agent`·`chatgpt-browser` 중복을 없앴다.
+- `isChatGptBrowserUnreachableError` 추가. 초안 라우트는 도달 실패를 새 409 `CHATGPT_BROWSER_UNREACHABLE`
+  로 구분해 네트워크·프록시 확인과 요청문 경로를 안내하고, 대시보드는 같은 핸드오프 모달을 연다.
+- README 의 `.env` 예시를 `CHATGPT_BROWSER_AUTOMATION_ENABLED=false` 로 고치고 MCP 경로가 기본임을 명시.
+  `.env.example` 에 `CHATGPT_NAVIGATION_TIMEOUT_MS` 추가.
+
+## 검증
+
+`scripts/verify-chatgpt-browser-automation.ts` 가 가짜 page 로 다섯 경우를 검증한다: 1차 성공,
+보안 확인 URL 이면 1회 만에 인증 필요, commit 단계 복구, 전부 실패 시 창 표시 1회 + `UNREACHABLE`
+메시지(call log 없음), 표시할 창이 없으면 2단계 종료. 총 이동 예산이 3분 이하인지도 확인한다.

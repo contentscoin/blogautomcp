@@ -10,6 +10,7 @@ import {
   buildChatGptBrowserAutomationEnv,
   isChatGptBrowserAuthenticationError,
   isChatGptBrowserAutomationEnabled,
+  isChatGptBrowserUnreachableError,
   readChatGptBrowserSessionSummary,
 } from "@/lib/chatgpt-browser-automation";
 import { beginDesktopActivity } from "@/lib/desktop-activity";
@@ -589,14 +590,21 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     }).catch(() => undefined);
     if (useBrowserChatGpt) {
       const authenticationRequired = isChatGptBrowserAuthenticationError(message);
+      // 사이트에 도달하지 못한 실패는 로그인 창을 열어도 풀리지 않는다. 네트워크·프록시 확인과
+      // MCP 요청문 경로를 안내한다.
+      const unreachable = !authenticationRequired && isChatGptBrowserUnreachableError(message);
       return NextResponse.json({
         success: false,
         code: authenticationRequired
           ? "CHATGPT_BROWSER_LOGIN_REQUIRED"
-          : "CHATGPT_BROWSER_FALLBACK_REQUIRED",
+          : unreachable
+            ? "CHATGPT_BROWSER_UNREACHABLE"
+            : "CHATGPT_BROWSER_FALLBACK_REQUIRED",
         error: authenticationRequired
           ? `ChatGPT 로그인 또는 보안 확인이 필요합니다: ${message}`
-          : `ChatGPT 웹 자동작성에 실패했습니다: ${message}`,
+          : unreachable
+            ? `ChatGPT 웹 페이지에 연결하지 못했습니다. 네트워크·프록시를 확인하거나 "웹 GPT 재로그인"으로 창을 열어 상태를 확인하세요. 상품별 요청문으로 ChatGPT에서 바로 이어서 작성할 수도 있습니다: ${message}`
+            : `ChatGPT 웹 자동작성에 실패했습니다: ${message}`,
         data: {
           handoff: handoff(),
           browserError: message,
