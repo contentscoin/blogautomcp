@@ -31,6 +31,7 @@ Passed commands on 2026-09-03:
 - `npm run test:brand-post-quality`, `test:brand-post-package`, `test:post-composition`, `test:post-spec`, `test:draft-snapshot`, `test:travel-draft-resilience`, `test:chatgpt-browser-automation`, `test:api-auth`
 - Root and Sites TypeScript checks; scoped ESLint; root production build; Sites production build.
 - `npm run test:mcp-activation` and `npm run test:auto-update`; live MCP `agent_get_status` confirmed the paired PC online and no queued/running remote job (old app 1.3.7 before rollout).
+- `pwsh -NoProfile -File scripts/verify-packaged-auto-update.ps1 -AppPath "out/section-images-v1.3.8/win-unpacked/BrandConnect Automation.exe"`: final packaged 1.3.8 started with HTTP 200, detected a fixture 1.3.9 update using authentication, re-launched successfully, loaded its own Prisma engine, and kept the token out of logs. The fixture installer was not applied.
 
 ## Limits and operating notes
 
