@@ -43,7 +43,7 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Lint
-        run: npx eslint src scripts/verify-connect-item-detection.ts scripts/verify-connect-contract-store.ts scripts/verify-title-rules.ts scripts/verify-brand-post-package.ts scripts/verify-brandlink-product-list.ts scripts/verify-chatgpt-browser-automation.ts scripts/verify-chatgpt-browser-mode-ui.mjs scripts/verify-chatgpt-draft-handoff-ui.mjs scripts/verify-codex-draft-provider.ts
+        run: npx eslint src scripts/verify-connect-item-detection.ts scripts/verify-connect-contract-store.ts scripts/verify-title-rules.ts scripts/verify-brand-post-package.ts scripts/verify-brandlink-product-list.ts scripts/verify-chatgpt-browser-automation.ts scripts/verify-chatgpt-browser-mode-ui.mjs scripts/verify-chatgpt-draft-handoff-ui.mjs scripts/verify-codex-draft-provider.ts scripts/verify-image-batch-progress.ts scripts/verify-section-image-repair.ts scripts/verify-writing-prompt-contract.ts scripts/verify-brand-post-quality-reinforcement.ts scripts/chatgpt-generate-image-batch.ts
 
       - name: Unit checks
         run: |
@@ -54,6 +54,11 @@ jobs:
           npm run test:thumbnail-gen
           npm run test:brand-post-package
           npm run test:brand-post-quality
+          npm run test:writing-harness
+          npm run test:section-images
+          npm run test:image-batch-progress
+          npm run test:draft-snapshot
+          npm run test:local-json-fetch
           npm run test:product-detail-image
           npm run test:repository-techniques
           npm run test:brandlink-product-list

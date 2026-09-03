@@ -36,6 +36,10 @@ interface BatchResult {
 }
 
 const CHATGPT_IMAGE_WAIT_MS = Number(process.env.CHATGPT_IMAGE_WAIT_MS || 60_000);
+/** 첫 실패 뒤 남은 작업을 건너뛴다. 같은 세션에서 한 장이 실패하면(로그인·보안 확인·텍스트 응답) 나머지도 같은 이유로 실패하기 때문이다. */
+export function isBatchFailFastEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env.BRAND_POST_IMAGE_BATCH_FAIL_FAST || "true").trim().toLowerCase() !== "false";
+}
 const CHATGPT_IMAGE_INPUT_SELECTORS = [
   'input#upload-photos[type="file"]',
   'input[type="file"][accept*="image"]',
@@ -105,7 +109,14 @@ async function maybeConfirmGeneration(page: import("playwright").Page) {
 }
 
 async function waitForImageCompletion(page: import("playwright").Page) {
-  await waitForChatGPTImageArtifacts(page, CHATGPT_IMAGE_WAIT_MS);
+  const observed = await waitForChatGPTImageArtifacts(page, CHATGPT_IMAGE_WAIT_MS);
+  // The wait returns 0 on timeout. Downloading anyway only produces an empty result later.
+  if (typeof observed === "number" && observed === 0) {
+    throw new Error(
+      `ChatGPT가 ${Math.round(CHATGPT_IMAGE_WAIT_MS / 1000)}초 안에 이미지를 생성하지 않았습니다. ` +
+      "텍스트로만 답했거나 로그인·보안 확인이 필요할 수 있습니다.",
+    );
+  }
 }
 
 async function runJob(
@@ -181,8 +192,18 @@ export async function main() {
   try {
     handle = await createChatGPTContext(true);
     const page = await handle.context.newPage();
+    const failFast = isBatchFailFastEnabled();
     for (const [index, job] of jobs.entries()) {
-      record(await runJob(page, job, gptUrl, index === 0));
+      const result = await runJob(page, job, gptUrl, index === 0);
+      record(result);
+      if (result.error && failFast) {
+        const reason = result.error.split("\n")[0].trim().slice(0, 200);
+        for (const remaining of jobs.slice(index + 1)) {
+          record({ id: remaining.id, localPath: null, error: `fail-fast: 앞선 이미지 생성 실패로 중단했습니다 (${reason})` });
+        }
+        failure = new Error(`이미지 생성 배치를 첫 실패 후 중단했습니다: ${reason}`);
+        break;
+      }
     }
   } catch (error) {
     failure = error;

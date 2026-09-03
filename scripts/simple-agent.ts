@@ -87,6 +87,7 @@ import {
   getWritingOutputExample,
   reviewGeneratedEvidenceFacts,
   type WritingPromptContract,
+  selectGroundedEvidenceFacts,
 } from "./lib/writing-prompt-contract";
 import {
   getConnectEditorInsertionMode,
@@ -95,6 +96,7 @@ import {
 import { parsePreparedBrandPostSections } from "./lib/prepared-post-markdown";
 import { inspectNaverScheduleSubmissionSignal } from "../src/lib/naver-schedule-submission";
 import { createProductSnapshot, readProductSnapshot } from "../src/lib/draft-context-snapshot";
+import { writeDraftProgressFile } from "../src/lib/draft-progress";
 import { generateTravelEditorialSummaryCard } from "./lib/travel-editorial-card";
 import { generateThumbnail, isGenerativeThumbnailAvailable } from "./lib/thumbnail-gen";
 import {
@@ -122,6 +124,7 @@ import {
   hasSufficientProductReviewEvidence,
   isMeaningfulProductEvidenceFeature,
   type ProductEditorialPlan,
+  buildProductScoringFeatures,
 } from "./lib/product-editorial-plan";
 import {
   getChatgptProfileDir,
@@ -359,6 +362,12 @@ const BRANDLINK_EXPERIENCE_NOTES = (process.env.BRANDLINK_EXPERIENCE_NOTES || ""
 const BRANDLINK_DRAFT_CONTEXT_OUTPUT = process.env.BRANDLINK_DRAFT_CONTEXT_OUTPUT?.trim() || "";
 const BRANDLINK_GENERATED_DRAFT_PATH = process.env.BRANDLINK_GENERATED_DRAFT_PATH?.trim() || "";
 const BRANDLINK_SUBMITTED_CONTEXT_PATH = process.env.BRANDLINK_SUBMITTED_CONTEXT_PATH?.trim() || "";
+/** 초안 라우트가 넘긴 progress.json 경로. 단계마다 기록해 데스크톱 실행기 하트비트가 사이트 작업 진행률로 전달한다. */
+const BRANDLINK_DRAFT_PROGRESS_PATH = process.env.BRANDLINK_DRAFT_PROGRESS_PATH?.trim() || "";
+function reportDraftProgress(stage: string, message: string, progress?: number): void {
+  if (!BRANDLINK_DRAFT_PROGRESS_PATH) return;
+  writeDraftProgressFile(BRANDLINK_DRAFT_PROGRESS_PATH, { stage, message, progress });
+}
 // OpenAI 생성 실패/키 누락 시 Spec-first 로컬 템플릿 초안으로 대체(검증은 NEEDS_REVIEW). 하네스 복사 폴백은 없다.
 const PRODUCT_POST_LOCAL_FALLBACK_ENABLED =
   (process.env.PRODUCT_POST_LOCAL_FALLBACK_ENABLED || "true").toLowerCase() !== "false";
@@ -413,6 +422,8 @@ interface GeneratedPostPreview {
   title: string;
   sections: string[];
   hashtags: string[];
+  /** 이번 제출에서 스냅샷과 대조해 근거가 확인된 evidenceFacts. 채점에만 쓰고 저장하지 않는다. */
+  scoringEvidenceFacts?: string[];
   generationSource: PostGenerationSource;
   rawResponse?: string;
   openCrabSeoBrief?: OpenCrabSeoBrief | null;
@@ -3715,6 +3726,12 @@ interface StoredBrandLinkSeed {
   productDescription?: string | null;
   productFeatures?: string | null;
   travelResearchJson?: string | null;
+  originalPrice?: string | null;
+  discountRate?: string | null;
+  couponInfo?: string | null;
+  deliveryInfo?: string | null;
+  reviewCount?: string | null;
+  rating?: string | null;
 }
 
 function parseStoredTextArray(raw: string | null | undefined): string[] {
@@ -3994,12 +4011,13 @@ async function buildProductInfoFromStoredBrandLink(
     description: description || sanitizeText(link.storeName || ""),
     features,
     price,
-    originalPrice: "",
-    discountRate: "",
-    couponInfo: "",
-    deliveryInfo: "",
-    reviewCount: "",
-    rating: "",
+    // 스냅샷(제출 컨텍스트)에 고정된 값은 되살린다. DB에는 이 컬럼이 없으므로 그 외에는 빈 값.
+    originalPrice: sanitizeText(link.originalPrice || ""),
+    discountRate: sanitizeText(link.discountRate || ""),
+    couponInfo: sanitizeText(link.couponInfo || ""),
+    deliveryInfo: sanitizeText(link.deliveryInfo || ""),
+    reviewCount: sanitizeText(link.reviewCount || ""),
+    rating: sanitizeText(link.rating || ""),
     representativeImagePath: materializedImages.representativeImagePath,
     imagePaths: materializedImages.imagePaths,
     detailImagePaths: materializedImages.detailImagePaths,
@@ -5042,6 +5060,7 @@ ${mandatoryWritingPromptBlock}`;
     editorialSectionTitles,
   };
 
+  reportDraftProgress("context", "상품 근거와 작성 하네스 구성");
   if (BRANDLINK_DRAFT_CONTEXT_OUTPUT) {
     const outputPath = path.resolve(BRANDLINK_DRAFT_CONTEXT_OUTPUT);
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
@@ -5120,6 +5139,10 @@ ${mandatoryWritingPromptBlock}`;
             ],
           },
         },
+        // 슬롯별 이미지 의도. ChatGPT 가 내장 이미지 생성으로 만들 장면을 미리 알 수 있게 한다(정확한 문구는 post_get_draft 의 imagePrompt).
+        imageIntents: isTravel
+          ? travelEditorialPlan.map((section) => ({ title: section.title, intent: section.imageIntent }))
+          : (productEditorialPlan?.sections || []).map((section) => ({ title: section.title, intent: section.imageRole })),
         nextAction: formatDraftSubmissionNextAction(),
       }, null, 2);
     if (Buffer.byteLength(contextJson, "utf8") > 800 * 1024) {
@@ -5140,6 +5163,10 @@ ${mandatoryWritingPromptBlock}`;
 
   let text: string;
   try {
+    reportDraftProgress(
+      "generate",
+      BRANDLINK_GENERATED_DRAFT_PATH ? "ChatGPT 제출 원고 불러오기" : "원고 생성",
+    );
     text = BRANDLINK_GENERATED_DRAFT_PATH
       ? readMcpGeneratedDraft(BRANDLINK_GENERATED_DRAFT_PATH)
       : await generateWithAI(
@@ -5157,12 +5184,22 @@ ${mandatoryWritingPromptBlock}`;
       "제품 분석 데이터는 준비됐지만, 하네스 문장을 원고로 복사하는 로컬 폴백은 품질 보호를 위해 차단했습니다.",
     );
   }
+  let scoringEvidenceFacts: string[] = [];
   const json = parseJsonObjectFromText(text);
   if (!isTravel) {
-    // Model assertions cannot expand the source evidence used to score that same draft.
-    // Exact supplied-fact matches are redundant; unmatched candidates stay out of source features/QC.
+    // Model assertions cannot expand the *stored* source evidence. For scoring this submission only,
+    // facts that share ≥2 significant tokens with the product snapshot (name/description/features/price)
+    // count as grounded evidence — ChatGPT reads the detail images the PC cannot OCR.
     const evidenceReview = reviewGeneratedEvidenceFacts(json.evidenceFacts, product.features);
-    console.log(`   🔎 제공 근거와 일치 ${evidenceReview.matchedSuppliedFacts.length}개 · 미검증 후보 ${evidenceReview.unverifiedFacts.length}개는 검증 근거에서 제외`);
+    const grounded = selectGroundedEvidenceFacts(
+      json.evidenceFacts,
+      [product.name, product.description, ...product.features, product.price, product.originalPrice, product.couponInfo].join("\n"),
+    );
+    scoringEvidenceFacts = grounded.grounded;
+    console.log(
+      `   🔎 제공 근거와 일치 ${evidenceReview.matchedSuppliedFacts.length}개 · 스냅샷과 대조해 채점에 인정 ${grounded.grounded.length}개 · ` +
+      `근거 없는 후보 ${grounded.rejected.length}개는 제외`,
+    );
   }
   const structuredSectionCount = getStructuredSectionCount(json);
   if (structuredSectionCount < minimumBodySectionCount) {
@@ -5244,7 +5281,9 @@ ${mandatoryWritingPromptBlock}`;
     experienceMode: BRANDLINK_EXPERIENCE_MODE,
     compositionQualityReport: null,
     sourceDescription: product.description,
-    sourceFeatures: product.features,
+    sourceFeatures: isTravel
+      ? product.features
+      : [...buildProductScoringFeatures(toProductEditorialInput(product, 11)), ...scoringEvidenceFacts],
     mode: "editorial",
   });
 
@@ -5424,6 +5463,7 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
     productEditorialPlan: undefined,
     editorialQuality,
     qualityRepair,
+    scoringEvidenceFacts,
   };
 }
 
@@ -9299,7 +9339,13 @@ function parseStoredFeatures(value: string | null | undefined): string[] {
 async function runPreparedPostRevision(
   linkId: string,
   connectKind: "SHOPPING" | "TRAVEL",
-  link: { url: string; productName: string | null; productDescription?: string | null; productFeatures?: string | null },
+  link: {
+    url: string;
+    productName: string | null;
+    productDescription?: string | null;
+    productFeatures?: string | null;
+    productPrice?: string | null;
+  },
   requestPath: string,
 ): Promise<void> {
   const outputDir = process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim();
@@ -9363,7 +9409,15 @@ async function runPreparedPostRevision(
         experienceMode: BRANDLINK_EXPERIENCE_MODE,
         compositionQualityReport: composition.qualityReport,
         sourceDescription: link.productDescription || "",
-        sourceFeatures: parseStoredFeatures(link.productFeatures),
+        sourceFeatures: connectKind === "TRAVEL"
+          ? parseStoredFeatures(link.productFeatures)
+          : buildProductScoringFeatures({
+              productName: link.productName || "",
+              description: link.productDescription,
+              features: parseStoredFeatures(link.productFeatures),
+              price: link.productPrice,
+              targetSectionCount: 11,
+            }),
       })
     : null;
   const manifestPath = writePreparedBrandPostPackage({
@@ -9522,6 +9576,7 @@ async function main() {
     let page = await context.newPage();
 
     setStage("STEP1 상품 정보/이미지 수집");
+    reportDraftProgress("facts", "상품 정보와 이미지 수집");
     // STEP 1: DB에 저장된 스크랩 결과를 우선 사용하고, 부족할 때만 보강 스크랩
     const runtimeConnectKind = link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING";
     const submittedSnapshot = BRANDLINK_SUBMITTED_CONTEXT_PATH
@@ -9550,6 +9605,12 @@ async function main() {
       travelResearchJson: submittedSnapshot
         ? frozenProduct?.travelPageResearch ? JSON.stringify(frozenProduct.travelPageResearch) : null
         : link.travelResearchJson,
+      originalPrice: submittedSnapshot ? frozenString("originalPrice") : null,
+      discountRate: submittedSnapshot ? frozenString("discountRate") : null,
+      couponInfo: submittedSnapshot ? frozenString("couponInfo") : null,
+      deliveryInfo: submittedSnapshot ? frozenString("deliveryInfo") : null,
+      reviewCount: submittedSnapshot ? frozenString("reviewCount") : null,
+      rating: submittedSnapshot ? frozenString("rating") : null,
     }, runtimeConnectKind);
 
     if (submittedSnapshot) {
@@ -9702,6 +9763,7 @@ async function main() {
       })),
     ];
     setStage(preparedPostOverride ? "STEP2 준비된 원고 불러오기" : "STEP2 SEO 글 생성");
+    reportDraftProgress("images", "상세 이미지 정리");
     // 승인된 준비 원고가 있으면 재생성하지 않고 그대로 사용한다.
     const post = preparedPostOverride?.post ?? await step2_generatePost(
       product,
@@ -9828,6 +9890,7 @@ async function main() {
     }
 
     let contentReadiness: BrandLinkContentReadiness | null = null;
+    reportDraftProgress("qc", "품질 검사");
     if (BRANDLINK_CONTENT_READINESS_ENABLED) {
       contentReadiness = getBrandLinkContentReadiness({
         productName: product.name,
@@ -9844,7 +9907,9 @@ async function main() {
         experienceMode: BRANDLINK_EXPERIENCE_MODE,
         compositionQualityReport: composition.qualityReport,
         sourceDescription: product.description,
-        sourceFeatures: product.features,
+        sourceFeatures: runtimeConnectKind === "TRAVEL"
+          ? product.features
+          : [...buildProductScoringFeatures(toProductEditorialInput(product, 11)), ...(post.scoringEvidenceFacts || [])],
       });
 
       console.log(`   🧪 상품글 발행 게이트: ${contentReadiness.summary}`);
@@ -9861,6 +9926,7 @@ async function main() {
 
     let previewPath: string | null = null;
     if (prepareOutputDir) {
+      reportDraftProgress("save", "초안 패키지 저장");
       const manifestPath = writePreparedBrandPostPackage({
         outputDir: path.resolve(prepareOutputDir),
         brandLinkId: linkId,
@@ -10068,6 +10134,7 @@ async function main() {
   } catch (error: unknown) {
     const message = `[${currentStage}] ${getErrorMessage(error)}`;
     console.error("\n❌ 오류:", message);
+    reportDraftProgress("failed", message, 0);
     const prepareOutputDirOnError = process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim();
     if (prepareOutputDirOnError) {
       writePrepareResult(path.resolve(prepareOutputDirOnError), { ok: false, code: classifyFailureCode(message), message });

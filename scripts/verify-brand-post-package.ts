@@ -137,6 +137,36 @@ async function main() {
     true,
     "Sites MCP가 2단계 ChatGPT 원고 계약을 광고하고 큐에 전달해야 합니다.",
   );
+  const createDraftTool = /name: 'post_create_draft',[\s\S]*?jobType: '([A-Z_]+)'/u.exec(sitesMcpSource);
+  assert.equal(createDraftTool?.[1], "POST_PREPARE_DRAFT", "post_create_draft 는 컨텍스트 준비 전용 작업이어야 합니다(원고는 ChatGPT 가 쓴다).");
+  const localGenerateTool = /name: 'post_generate_draft_local',[\s\S]*?jobType: '([A-Z_]+)'/u.exec(sitesMcpSource);
+  assert.equal(localGenerateTool?.[1], "POST_CREATE_DRAFT", "PC 전량 생성은 post_generate_draft_local 로만 노출해야 합니다.");
+  assert.equal(
+    sitesMcpSource.includes("name: 'post_apply_section_image'") &&
+      sitesMcpSource.includes("jobType: 'POST_APPLY_SECTION_IMAGE'") &&
+      sitesMcpSource.includes("post_apply_section_image 로 붙이세요"),
+    true,
+    "Sites MCP는 ChatGPT 내장 이미지 생성 결과를 섹션에 붙이는 도구와 안내를 제공해야 합니다.",
+  );
+  const pollRouteSource = fs.readFileSync(path.join(projectRoot, "src", "app", "api", "remote-agent", "poll", "route.ts"), "utf8");
+  assert.equal(
+    pollRouteSource.includes('job.type === "POST_APPLY_SECTION_IMAGE"') &&
+      pollRouteSource.includes('action: "apply_generated"') &&
+      pollRouteSource.includes("readDraftProgress(watch.productId") &&
+      pollRouteSource.includes("timeoutMs: DRAFT_GENERATE_WAIT_MS") &&
+      pollRouteSource.includes("timeoutMs: DRAFT_PREPARE_WAIT_MS") &&
+      pollRouteSource.includes("contentQuality: extra.contentQuality"),
+    true,
+    "데스크톱 실행기는 섹션 이미지 적용 작업, 진행률 파일 읽기, 초안 데드라인, contentQuality 봉투를 지원해야 합니다.",
+  );
+  assert.equal(
+    pollRouteSource.includes("verifiedFacts") &&
+      pollRouteSource.includes("sourceImages") &&
+      pollRouteSource.includes("systemPrompt: generation.systemPrompt") &&
+      pollRouteSource.includes("imagePrompt: productName && (title || intent)"),
+    true,
+    "초안 컨텍스트 결과는 verifiedFacts·sourceImages·systemPrompt 를 최상위로 올리고 슬롯마다 imagePrompt 를 제공해야 합니다.",
+  );
   assert.equal(
     simpleAgentSource.includes("createProductDetailImageSegments") &&
       simpleAgentSource.includes("상세 원문") &&
@@ -194,11 +224,28 @@ async function main() {
     "ChatGPT 링크는 Electron 내부 팝업이 아니라 기본 브라우저에서 열려야 합니다.",
   );
   assert.equal(
-    draftImageRouteSource.includes('"generate_missing" | "generate_section" | "regenerate"') &&
+    draftImageRouteSource.includes('["generate_missing", "generate_section", "regenerate", "apply_generated"]') &&
       draftImageRouteSource.includes("repairBrandPostImages") &&
+      draftImageRouteSource.includes("applyExternalGeneratedBrandPostImage") &&
       draftImageRouteSource.includes('"Cache-Control": "private, no-store, max-age=0"'),
     true,
-    "초안 이미지는 필수 보충·파트 추가·개별 재생성과 안전한 미리보기를 지원해야 합니다.",
+    "초안 이미지는 필수 보충·파트 추가·개별 재생성·외부 생성 이미지 적용과 안전한 미리보기를 지원해야 합니다.",
+  );
+  assert.equal(
+    draftImageRouteSource.includes("if (!isChatGptBrowserAutomationEnabled()) {") &&
+      draftImageRouteSource.includes('"CHATGPT_BROWSER_AUTOMATION_DISABLED"') &&
+      draftImageRouteSource.indexOf("if (!isChatGptBrowserAutomationEnabled()) {") <
+        draftImageRouteSource.indexOf("await repairBrandPostImages("),
+    true,
+    "브라우저 자동화가 꺼져 있으면 이미지 배치를 계획하기 전에 거부해 Chrome 을 열지 않아야 합니다.",
+  );
+  assert.equal(
+    draftImageGenerationSource.includes("if (!isChatGptBrowserAutomationEnabled()) {") &&
+      draftImageGenerationSource.includes("BROWSER_IMAGE_AUTOMATION_DISABLED_MESSAGE") &&
+      draftImageGenerationSource.indexOf("if (!isChatGptBrowserAutomationEnabled()) {") <
+        draftImageGenerationSource.indexOf("child = spawn("),
+    true,
+    "이미지 배치 실행기는 spawn 전에 브라우저 자동화 게이트를 검사해야 합니다.",
   );
   assert.equal(
     draftImageGenerationSource.includes("Generate the environment only") &&
@@ -222,10 +269,34 @@ async function main() {
     "원본 이미지는 생성 완료로 계산하지 않고, 꽉 찬 슬롯에서는 원본을 생성 이미지로 교체해야 합니다.",
   );
   assert.equal(
-    draftRouteSource.includes("repairBrandPostImages(options)") &&
-      draftRouteSource.includes("autoRepairSectionImages"),
+    draftRouteSource.includes("scheduleSectionImageRepair") &&
+      draftRouteSource.includes("void repairBrandPostImages({ brandLinkId: options.brandLinkId, productName: options.productName })") &&
+      !draftRouteSource.includes("await repairBrandPostImages(") &&
+      !draftRouteSource.includes("autoRepairSectionImages"),
     true,
-    "여행 초안 자동 보충은 첫 4장만 만들고 끝나지 않고 남은 섹션을 후속 배치로 처리해야 합니다.",
+    "초안 응답은 섹션 이미지 배치를 기다리지 않아야 합니다(분리 실행).",
+  );
+  assert.equal(
+    /process\.env\.BRAND_POST_AUTO_SECTION_IMAGES \?\? process\.env\.TRAVEL_AUTO_IMAGE_QC_REPAIR \?\? "false"/u.test(draftRouteSource) &&
+      draftRouteSource.includes("if (!isAutoSectionImagesEnabled())") &&
+      draftRouteSource.includes("if (!isChatGptBrowserAutomationEnabled())") &&
+      draftRouteSource.indexOf("if (!isChatGptBrowserAutomationEnabled())") < draftRouteSource.indexOf("void repairBrandPostImages("),
+    true,
+    "섹션 이미지 자동 생성은 기본 꺼짐이고, 켜져 있어도 ChatGPT 웹 자동화가 꺼져 있으면 실행하지 않아야 합니다.",
+  );
+  assert.equal(
+    draftRouteSource.includes('skip: action === "submit_generated" || mcpOrigin'),
+    true,
+    "MCP 제출 원고는 PC 이미지 배치를 예약하지 않아야 합니다(ChatGPT 내장 이미지 생성 + post_apply_section_image).",
+  );
+  const batchSource = fs.readFileSync(path.join(projectRoot, "scripts", "chatgpt-generate-image-batch.ts"), "utf8");
+  assert.equal(
+    batchSource.includes("isBatchFailFastEnabled") &&
+      batchSource.includes('(env.BRAND_POST_IMAGE_BATCH_FAIL_FAST || "true")') &&
+      batchSource.includes("fail-fast: 앞선 이미지 생성 실패로 중단했습니다") &&
+      batchSource.includes("if (typeof observed === \"number\" && observed === 0) {"),
+    true,
+    "이미지 배치는 첫 실패 뒤 남은 작업을 중단하고, 이미지가 관측되지 않은 대기 종료를 실패로 취급해야 합니다.",
   );
 
   const handoffBuilder = await import("../src/lib/chatgpt-draft-handoff");

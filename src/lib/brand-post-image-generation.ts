@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -10,23 +11,33 @@ import { buildProductThumbnailCopy } from "../../scripts/lib/product-thumbnail";
 import { buildTravelThumbnailCopy } from "../../scripts/lib/travel-content";
 import { createTravelEditorialThumbnail } from "../../scripts/lib/travel-thumbnail";
 import {
+  applyGeneratedBrandPostImage,
   getBrandPostPackageDir,
   normalizePackageImageAssets,
   type BrandPostPackageImageAsset,
   type BrandPostPackageManifestV2,
 } from "./brand-post-package";
+import { isChatGptBrowserAutomationEnabled } from "./chatgpt-browser-automation";
 
 const CHATGPT_BASE_URL = "https://chatgpt.com/";
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
 const IMAGE_BATCH_SCRIPT = path.join(process.cwd(), "scripts", "chatgpt-generate-image-batch.ts");
 const IMAGE_BATCH_PROGRESS_PREFIX = "[chatgpt-image-batch:result] ";
 
-// Jobs run sequentially. Keep the old single-job allowance, but budget for all jobs.
+/** 장당 기본 예산. 실패하는 이미지 한 장이 1.5~3분을 쓰므로 8분×장수 같은 느슨한 예산은 초안 작업 전체를 멈추게 했다. */
+export const BRAND_POST_IMAGE_JOB_TIMEOUT_DEFAULT_MS = 180_000;
+export const BRAND_POST_IMAGE_BATCH_TIMEOUT_MAX_MS = 30 * 60_000;
+export const BROWSER_IMAGE_AUTOMATION_DISABLED_MESSAGE =
+  "ChatGPT 브라우저 자동화가 꺼져 있어 PC에서 이미지를 생성하지 않습니다. " +
+  "ChatGPT 대화에서 이미지를 만들어 post_apply_section_image로 붙이세요.";
+
+// Jobs run sequentially: budget = jobs × per-job allowance + startup slack, capped so a stuck batch never blocks for hours.
 export function imageBatchTimeoutMs(jobCount: number): number {
   const override = Number(process.env.BRAND_POST_IMAGE_BATCH_TIMEOUT_MS);
-  return Math.min(2_147_483_647, Number.isFinite(override) && override > 0
-    ? override
-    : 8 * 60_000 * Math.max(1, jobCount));
+  if (Number.isFinite(override) && override > 0) return Math.min(2_147_483_647, override);
+  const perJob = Number(process.env.BRAND_POST_IMAGE_JOB_TIMEOUT_MS);
+  const jobBudget = Number.isFinite(perJob) && perJob > 0 ? perJob : BRAND_POST_IMAGE_JOB_TIMEOUT_DEFAULT_MS;
+  return Math.min(BRAND_POST_IMAGE_BATCH_TIMEOUT_MAX_MS, jobBudget * Math.max(1, jobCount) + 60_000);
 }
 
 export interface BrandPostImageGenerationRequest {
@@ -45,7 +56,7 @@ export interface BrandPostImageGenerationResult {
   error?: string;
 }
 
-interface ResolvedImageTarget {
+export interface ResolvedImageTarget {
   request: BrandPostImageGenerationRequest;
   sectionId?: string;
   role: "hero" | "body";
@@ -173,6 +184,14 @@ async function runBrowserImageBatch(
   onResult: (result: BrowserImageBatchResult, index: number) => Promise<void>,
   signal?: AbortSignal,
 ): Promise<BrowserImageBatchResult[]> {
+  if (!isChatGptBrowserAutomationEnabled()) {
+    // Never open chatgpt.com from the PC unless the user turned browser automation on.
+    const refused = targets.map((_, index) => ({ id: String(index), localPath: null, error: BROWSER_IMAGE_AUTOMATION_DISABLED_MESSAGE }));
+    for (const [index, result] of refused.entries()) {
+      try { await onResult(result, index); } catch { /* The caller records its own failure. */ }
+    }
+    return refused;
+  }
   const jobs = targets.map((target, index) => ({
     // Transport IDs are unique even when callers reuse a requestId.
     id: String(index),
@@ -481,4 +500,154 @@ export async function generateBrandPostImages(options: {
     }
   }
   return results;
+}
+
+export { resolveTarget as resolveBrandPostImageTarget, finishGeneratedImage as finishBrandPostGeneratedImage };
+
+function sha256File(filePath: string): string {
+  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+interface ExternalImageLedger {
+  version: "external-image-ledger/v1";
+  entries: Record<string, { assetKey: string; appliedAt: string }>;
+}
+
+function externalLedgerPath(brandLinkId: string): string {
+  return path.join(getBrandPostPackageDir(brandLinkId), "image-generation-work", "external-applied.json");
+}
+
+function readExternalLedger(brandLinkId: string): ExternalImageLedger {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(externalLedgerPath(brandLinkId), "utf8")) as ExternalImageLedger;
+    if (parsed?.version === "external-image-ledger/v1" && parsed.entries && typeof parsed.entries === "object") return parsed;
+  } catch { /* First external image for this draft. */ }
+  return { version: "external-image-ledger/v1", entries: {} };
+}
+
+function writeExternalLedger(brandLinkId: string, ledger: ExternalImageLedger): void {
+  const target = externalLedgerPath(brandLinkId);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, JSON.stringify(ledger, null, 2), "utf8");
+}
+
+export interface ExternalGeneratedImageApplyOptions {
+  brandLinkId: string;
+  manifest: BrandPostPackageManifestV2;
+  productName: string;
+  sectionId?: string;
+  replaceAssetKey?: string;
+  /** ChatGPT 대화(내장 이미지 생성)에서 받은 원본 파일. 패키지 디렉터리 안에 있어야 한다. */
+  rawPath: string;
+  apply?: typeof applyGeneratedBrandPostImage;
+}
+
+export interface ExternalGeneratedImageApplyResult {
+  manifest: BrandPostPackageManifestV2;
+  alreadyApplied: boolean;
+  assetKey: string | null;
+  sectionId?: string;
+  imageIntent: string;
+  provenance: BrandPostImageGenerationResult["provenance"];
+}
+
+/**
+ * ChatGPT 가 만든 이미지를 섹션 슬롯에 붙인다. PC 브라우저 배치와 같은 마감 규칙을 거친다:
+ * 쇼핑 본문은 원본 상품 컷을 잠금 합성하고(제품을 다시 그리지 않는다), 여행 본문은 그대로 쓴다.
+ * 같은 원본(해시)을 같은 슬롯에 다시 보내면 새 이미지를 추가하지 않고 alreadyApplied 로 답한다(멱등 재시도).
+ */
+export async function applyExternalGeneratedBrandPostImage(
+  options: ExternalGeneratedImageApplyOptions,
+): Promise<ExternalGeneratedImageApplyResult> {
+  const apply = options.apply ?? applyGeneratedBrandPostImage;
+  const target = resolveTarget(options.manifest, {
+    requestId: "external",
+    sectionId: options.sectionId,
+    replaceAssetKey: options.replaceAssetKey,
+  });
+  if (!fs.existsSync(options.rawPath) || !fs.statSync(options.rawPath).isFile()) {
+    throw new Error("적용할 생성 이미지 파일을 찾을 수 없습니다.");
+  }
+  const rawHash = sha256File(options.rawPath);
+  const ledgerKey = `${target.sectionId || ""}|${options.replaceAssetKey || ""}|${rawHash}`;
+  const ledger = readExternalLedger(options.brandLinkId);
+  const known = ledger.entries[ledgerKey];
+  const currentAssets = normalizePackageImageAssets(options.manifest);
+  if (known && currentAssets.some((asset) => asset.sha256 === known.assetKey)) {
+    return {
+      manifest: options.manifest,
+      alreadyApplied: true,
+      assetKey: known.assetKey,
+      sectionId: target.sectionId,
+      imageIntent: target.imageIntent,
+      provenance: currentAssets.find((asset) => asset.sha256 === known.assetKey)?.provenance
+        || (options.manifest.connectKind === "SHOPPING" ? "LOCKED_PRODUCT" : "GENERATED_BACKGROUND"),
+    };
+  }
+
+  const workRoot = path.join(getBrandPostPackageDir(options.brandLinkId), "image-generation-work");
+  fs.mkdirSync(workRoot, { recursive: true });
+  const workDir = fs.mkdtempSync(path.join(workRoot, `external-${Date.now()}-`));
+  const sectionIndex = Math.max(
+    0,
+    options.manifest.composition.sections.findIndex((section) => section.id === target.sectionId),
+  );
+  const finished = await finishGeneratedImage({
+    manifest: options.manifest,
+    productName: options.productName,
+    target,
+    rawPath: options.rawPath,
+    workDir,
+    index: sectionIndex,
+  });
+  const finishedPath = finished.generatedPath;
+  if (!finishedPath) throw new Error("생성 이미지를 패키지에 맞게 처리하지 못했습니다.");
+  if (finished.provenance === "ORIGINAL" && path.resolve(finishedPath) !== path.resolve(options.rawPath)) {
+    throw new Error(
+      "상품 원본 사진에서 제품을 분리하지 못해 생성 배경에 합성할 수 없습니다. " +
+      "원본 상세 이미지가 선명한지 확인한 뒤 다른 이미지로 다시 시도하세요.",
+    );
+  }
+  let updated: BrandPostPackageManifestV2;
+  try {
+    updated = apply({
+      brandLinkId: options.brandLinkId,
+      generatedPath: finishedPath,
+      sectionId: target.sectionId,
+      replaceAssetKey: options.replaceAssetKey,
+      provenance: finished.provenance,
+      imageIntent: target.imageIntent,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/동일한 파일/u.test(message)) {
+      const duplicateKey = sha256File(finishedPath);
+      return {
+        manifest: options.manifest,
+        alreadyApplied: true,
+        assetKey: duplicateKey,
+        sectionId: target.sectionId,
+        imageIntent: target.imageIntent,
+        provenance: finished.provenance,
+      };
+    }
+    throw error;
+  }
+  const generatedResolved = path.resolve(finishedPath);
+  const applied = normalizePackageImageAssets(updated).find(
+    (asset) => asset.sourcePath && path.resolve(asset.sourcePath) === generatedResolved,
+  );
+  const assetKey = applied?.sha256 ?? null;
+  if (assetKey) {
+    ledger.entries[ledgerKey] = { assetKey, appliedAt: new Date().toISOString() };
+    try { writeExternalLedger(options.brandLinkId, ledger); } catch { /* Idempotency ledger is best effort. */ }
+  }
+  return {
+    manifest: updated,
+    alreadyApplied: false,
+    assetKey,
+    sectionId: target.sectionId,
+    imageIntent: target.imageIntent,
+    provenance: finished.provenance,
+  };
 }

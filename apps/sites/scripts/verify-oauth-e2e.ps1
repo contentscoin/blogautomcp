@@ -62,10 +62,13 @@ if ($replay.StatusCode -ne 400) { throw 'An authorization code was accepted twic
 $oauthHeaders = @{ Authorization = "Bearer $($token.access_token)" }
 $tools = Invoke-RestMethod -Method Post -Uri $resource -Headers $oauthHeaders -ContentType 'application/json' -Body '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
 $expectedTools = @(
-  'agent_get_status', 'brandconnect_list_products', 'brandconnect_sync_products',
-  'post_create_draft', 'post_submit_draft', 'thumbnail_prepare', 'thumbnail_apply_generated',
-  'blog_profile_get', 'blog_profile_prepare_update', 'blog_profile_apply_update',
-  'blog_design_get', 'post_publish', 'post_schedule', 'job_get', 'job_cancel'
+  'agent_get_status', 'brandconnect_list_categories', 'brandconnect_list_products', 'brandconnect_sync_products',
+  'post_create_draft', 'post_prepare_draft', 'post_generate_draft_local', 'post_submit_draft', 'post_apply_section_image',
+  'post_get_draft', 'post_revise_draft', 'post_approve_draft', 'post_set_thumbnail',
+  'thumbnail_prepare', 'thumbnail_apply_generated',
+  'blog_profile_get', 'blog_profile_prepare_update', 'blog_profile_apply_update', 'blog_design_get',
+  'post_publish', 'post_schedule', 'post_bulk_schedule', 'post_verify_published',
+  'travel_capture_contract', 'settings_get', 'job_get', 'job_cancel'
 )
 $actualTools = @($tools.result.tools | ForEach-Object { [string]$_.name })
 $missingTools = @($expectedTools | Where-Object { $_ -notin $actualTools })

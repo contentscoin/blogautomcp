@@ -15,6 +15,7 @@ import {
   formatWritingPromptContract,
   getWritingOutputExample,
   reviewGeneratedEvidenceFacts,
+  selectGroundedEvidenceFacts,
 } from "./lib/writing-prompt-contract";
 
 // Execute the real prompt builder in isolation. Importing simple-agent would launch
@@ -126,14 +127,26 @@ const parsedDraftIndex = statements.findIndex((node) => ts.isVariableStatement(n
 assert.ok(parsedDraftIndex >= 0);
 const evidenceBoundary = statements[parsedDraftIndex + 1];
 assert.ok(evidenceBoundary && ts.isIfStatement(evidenceBoundary));
-const product = { features: [...supplied] };
+const product = { name: "테스트 보조배터리", description: "", features: [...supplied], price: "13,700원", originalPrice: "", couponInfo: "" };
+const boundaryContext: Record<string, unknown> = {
+  isTravel: false, product, json: { evidenceFacts: [...supplied, ...unsupported, "판매가 13,700원", "판매가 17,300원"] },
+  reviewGeneratedEvidenceFacts, selectGroundedEvidenceFacts, scoringEvidenceFacts: undefined, console: { log: () => undefined },
+};
 vm.runInNewContext(ts.transpileModule(evidenceBoundary.getText(source), {
   compilerOptions: { target: ts.ScriptTarget.ES2020 },
-}).outputText, {
-  isTravel: false, product, json: { evidenceFacts: [...supplied, ...unsupported] },
-  reviewGeneratedEvidenceFacts, console: { log: () => undefined },
-});
+}).outputText, boundaryContext);
 assert.deepEqual(product.features, [...supplied], "Model evidence must not expand or replace QC source features");
+assert.deepEqual(
+  boundaryContext.scoringEvidenceFacts,
+  [supplied[0], supplied[1], "최대 하중 １０kg", "판매가 13,700원"],
+  "Only snapshot-backed statements count for scoring: changed numbers, flipped negation, added claims and bare fragments are rejected",
+);
+const groundedReview = selectGroundedEvidenceFacts(
+  ["메쉬 소재 러닝 조끼 판매가 13,700원", "메쉬 소재 러닝 조끼 판매가 13,900원", "러닝 조끼 방수 등급 IPX7", "러닝"],
+  "RNRN 러닝 조끼 메쉬 소재\n가격: 13,700원\n원가: 59,800원",
+);
+assert.deepEqual(groundedReview.grounded, ["메쉬 소재 러닝 조끼 판매가 13,700원"]);
+assert.equal(groundedReview.rejected.length, 3);
 
 // Test the generated handoff instructions rather than source-code string presence.
 const nextAction = formatDraftSubmissionNextAction();
