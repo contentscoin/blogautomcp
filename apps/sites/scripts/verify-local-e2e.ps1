@@ -22,7 +22,7 @@ if (-not $mcpUrl.StartsWith("$BaseUrl/api/mcp/")) { throw 'MCP URL origin or pat
 $initialize = Invoke-Mcp -Url $mcpUrl -Message @{ jsonrpc = '2.0'; id = 1; method = 'initialize'; params = @{ protocolVersion = '2025-11-25'; capabilities = @{}; clientInfo = @{ name = 'sites-e2e'; version = '1.0' } } }
 if ($initialize.result.protocolVersion -ne '2025-11-25') { throw 'MCP protocol negotiation failed.' }
 $tools = Invoke-Mcp -Url $mcpUrl -Message @{ jsonrpc = '2.0'; id = 2; method = 'tools/list'; params = @{} }
-$expectedToolCount = 25
+$expectedToolCount = 27
 if (@($tools.result.tools).Count -ne $expectedToolCount) { throw "Expected $expectedToolCount MCP tools." }
 $toolNames = @($tools.result.tools | ForEach-Object { [string]$_.name })
 if ($toolNames -notcontains 'post_prepare_draft' -or $toolNames -notcontains 'post_submit_draft') { throw 'Two-stage ChatGPT draft tools are missing.' }
@@ -68,7 +68,7 @@ $oldDevice = Invoke-WebRequest -SkipHttpErrorCheck -Method Post -Uri "$BaseUrl/a
 if ($oldDevice.StatusCode -ne 401) { throw 'The replaced PC token was not revoked.' }
 
 $publishGuard = Invoke-Mcp -Url $mcpUrl -Message @{ jsonrpc = '2.0'; id = 21; method = 'tools/call'; params = @{ name = 'post_publish'; arguments = @{ connectKind = 'travel'; draftId = 'draft-e2e'; confirmed = $false; idempotencyKey = ('e2e-publish:' + [guid]::NewGuid().ToString('N')) } } }
-if ($publishGuard.result.structuredContent.code -ne 'CONFIRMATION_REQUIRED' -or -not $publishGuard.result.isError) { throw 'Unconfirmed publishing was not blocked.' }
+if ($publishGuard.result.structuredContent.code -ne 'INVALID_ARGUMENT' -or -not $publishGuard.result.isError -or $publishGuard.result.structuredContent.errors -notcontains 'confirmed: must equal true' -or $publishGuard.result.structuredContent.jobId) { throw 'Unconfirmed publishing was not blocked by the confirmation schema.' }
 
 $idempotencyKey = 'e2e:' + [guid]::NewGuid().ToString('N')
 $queued = Invoke-Mcp -Url $mcpUrl -Message @{ jsonrpc = '2.0'; id = 3; method = 'tools/call'; params = @{ name = 'brandconnect_list_products'; arguments = @{ connectKind = 'travel'; status = 'all'; idempotencyKey = $idempotencyKey } } }
@@ -309,7 +309,7 @@ if ($verifiedRelease.data.release.version -ne $releaseVersion -or $verifiedRelea
   toolCount = @($tools.result.tools).Count
   foreignOriginRejected = $badOrigin.StatusCode -eq 403
   replacedPcRevoked = $oldDevice.StatusCode -eq 401
-  unconfirmedPublishBlocked = $publishGuard.result.structuredContent.code -eq 'CONFIRMATION_REQUIRED'
+  unconfirmedPublishBlocked = $publishGuard.result.isError -and $publishGuard.result.structuredContent.errors -contains 'confirmed: must equal true'
   idempotentRetryReused = [bool]$reused.result.structuredContent.reused
   idempotencyConflictRejected = $conflict.result.structuredContent.code -eq 'IDEMPOTENCY_CONFLICT'
   travelJobLifecycle = [string]$jobResult.result.structuredContent.job.status

@@ -37,6 +37,27 @@ async function main() {
       } as unknown as BrandPostPackageManifestV2["contentQuality"],
       thumbnailSpec: { version: "thumbnail-spec/v2", canvas: { width: 1000, height: 1000, aspect: "1:1" }, style: "fixture", sourcePolicy: "TRAVEL_EDITORIAL", sourceImagePath: images[0] },
     };
+    // These offline stand-ins represent completed generated travel images.
+    // Execution metadata stays absent, as it does for MCP-submitted images.
+    fixture.imageAssets = store.normalizePackageImageAssets(fixture).map((asset) => ({
+      ...asset, provenance: "GENERATED_BACKGROUND",
+    }));
+    const originals: BrandPostPackageManifestV2 = {
+      ...fixture,
+      brandLinkId: `${id}-originals`,
+      imageAssets: fixture.imageAssets.map((asset) => ({ ...asset, provenance: "ORIGINAL" })),
+    };
+    store.writeBrandPostPackageManifest(originals);
+    const originalRead = store.readBrandPostPackage(originals.brandLinkId) as BrandPostPackageManifestV2;
+    assert.equal(originalRead.imageGeneration, undefined);
+    assert.equal(originalRead.composition.qualityReport.canAutoPublish, true, "Originals satisfy image counts only");
+    const originalSlots = store.packagePreview(originalRead).imageSlots;
+    assert.equal(originalSlots.reduce((sum, slot) => sum + slot.missing, 0), 0);
+    assert.equal(originalSlots.reduce((sum, slot) => sum + slot.generationMissing, 0), 10);
+    assert.throws(() => store.approveBrandPostPackage(originals.brandLinkId), /섹션 이미지 품질 게이트/u,
+      "Original images without execution metadata must not satisfy generated coverage");
+    assert.equal(store.readBrandPostPackage(originals.brandLinkId)?.approvedAt, null);
+
     store.writeBrandPostPackageManifest(fixture);
     const reconciled = store.readBrandPostPackage(id) as BrandPostPackageManifestV2;
     assert.equal(reconciled.composition.qualityReport.canAutoPublish, true, JSON.stringify(reconciled.composition.qualityReport));
@@ -54,6 +75,8 @@ async function main() {
     assert.equal(JSON.parse(backupBytes.toString()).contentQuality.score, 82);
     assert.deepEqual(store.readBrandPostPackage(id), reconciled, "Reconciliation is idempotent");
     assert.deepEqual(fs.readFileSync(backup), backupBytes);
+    assert.equal(reconciled.imageGeneration, undefined);
+    assert.ok(store.packagePreview(reconciled).imageSlots.every((slot) => slot.generationMissing === 0));
     assert.ok(store.approveBrandPostPackage(id).approvedAt, "An isolated complete fixture can be approved");
 
     const explicit = structuredClone(reconciled);
@@ -117,7 +140,7 @@ async function main() {
       assert.deepEqual(fs.readFileSync(sourcePath), original, "Live input must remain untouched");
       console.log(JSON.stringify({ realFixture: { contentScore: result.contentQuality?.score, compositionScore: result.composition.qualityReport.score, sections: result.composition.sections.length, images: result.composition.qualityReport.actual.images, approvedAt: result.approvedAt, blockers: result.composition.qualityReport.blockers } }));
     }
-    console.log("PASS: legacy QC reconciliation, backup/idempotency, isolated approval, explicit minima, safety/content guards, missing files and untouched text/images");
+    console.log("PASS: legacy QC reconciliation, backup/idempotency, generated approval without execution metadata, originals blocked, explicit minima, safety/content guards, missing files and untouched text/images");
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

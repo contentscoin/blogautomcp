@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -435,10 +436,141 @@ async function main() {
   assert.equal(mappedPreview.imageSlots[2].originalCount, 1);
   assert.equal(mappedPreview.imageSlots[2].generatedCount, 0);
   assert.equal(mappedPreview.imageSlots[2].generationMissing, 1, "원본 이미지는 섹션 생성 이미지 충족으로 계산하면 안 됩니다.");
+
+  // Offline release regression: neither default-off nor MCP execution creates
+  // imageGeneration metadata. Original coverage must not satisfy generation.
+  for (const connectKind of ["TRAVEL", "SHOPPING"] as const) {
+    for (const legacy of [false, true]) {
+      const coverageId = `fixture-coverage-${connectKind}-${legacy ? "v139" : "current"}`;
+      const coverageDir = store.getBrandPostPackageDir(coverageId);
+      fs.mkdirSync(coverageDir, { recursive: true });
+      const images = Array.from({ length: 11 }, (_, index) => path.join(coverageDir, `${index}.png`));
+      images.forEach((file, index) => fs.writeFileSync(file, `offline-${coverageId}-${index}`));
+      const composition = compositionContract.resolvePostDocument({
+        connectKind,
+        title: "오프라인 생성 이미지 승인 검사",
+        sections: Array.from({ length: 10 }, (_, index) =>
+          `확인한 정보 ${index + 1}\n\n${"확인된 정보와 사용 조건을 구체적으로 연결해 선택에 필요한 차이를 설명합니다. ".repeat(10)}`),
+        imagePaths: images,
+        hashtags: ["정보", "조건", "선택"],
+        connectUrl: "https://example.test/coverage",
+        qualityPreset: "PREMIUM",
+      });
+      if (legacy) {
+        // 1.3.9 freeform packages have neither explicit bounds nor postSpec.
+        composition.sections.forEach((section) => { delete section.imageMin; delete section.imageMax; });
+      }
+      const originals = {
+        ...v2Manifest,
+        brandLinkId: coverageId,
+        connectKind,
+        heroImagePath: images[0],
+        bodyImagePaths: images.slice(1),
+        composition,
+      };
+      store.writeBrandPostPackageManifest(originals);
+      const loaded = store.readBrandPostPackage(coverageId)!;
+      assert.equal(loaded.imageGeneration, undefined);
+      assert.equal(loaded.version === "brand-post-package/v2" && loaded.composition.qualityReport.canAutoPublish, true,
+        "Fixture must pass ordinary text/image-count quality so generation is the decisive gate");
+      const slots = store.packagePreview(loaded).imageSlots;
+      assert.equal(slots.reduce((sum, slot) => sum + slot.missing, 0), 0);
+      assert.equal(slots.reduce((sum, slot) => sum + slot.generationMissing, 0), 10);
+      assert.throws(() => store.approveBrandPostPackage(coverageId), /섹션 이미지 품질 게이트/u,
+        `${coverageId}: originals without execution metadata must not be approved`);
+
+      store.writeBrandPostPackageManifest({ ...originals, approvedAt: "2026-09-01T00:00:00.000Z" });
+      assert.equal(store.readBrandPostPackage(coverageId)?.approvedAt, null,
+        "Reading a previously approved package must revoke an approval that bypassed generated coverage");
+
+      const generated = {
+        ...originals,
+        imageAssets: store.normalizePackageImageAssets(originals).map((asset) => ({
+          ...asset,
+          provenance: connectKind === "SHOPPING" ? "LOCKED_PRODUCT" as const : "GENERATED_BACKGROUND" as const,
+        })),
+      };
+      store.writeBrandPostPackageManifest(generated);
+      assert.equal(store.packagePreview(store.readBrandPostPackage(coverageId)!).imageSlots.every((slot) => slot.generationMissing === 0), true);
+      assert.ok(store.approveBrandPostPackage(coverageId).approvedAt,
+        `${coverageId}: fully generated coverage without execution metadata can be approved`);
+      assert.ok(store.readBrandPostPackage(coverageId)?.approvedAt, "Valid approval survives read-time reconciliation");
+
+      const unsafe = {
+        ...generated,
+        approvedAt: "2026-09-01T00:00:00.000Z",
+        contentQuality: {
+          canPublish: false, verdict: "blocked" as const, code: "unsupported-experience-claim" as const,
+          reason: "허위 체험 표현", score: 100, sectionCount: 10, hashtagCount: 3, totalLength: 4000,
+          coveredProductTokens: [], missingProductTokens: [], signals: [], summary: "안전성 차단",
+          blockers: [{ code: "unsupported-experience-claim" as const, tier: "safety" as const, reason: "허위 체험 표현" }],
+          quality: {
+            score: 100, passScore: 70, categories: [],
+            repetition: { nearDuplicateCount: 0, exactDuplicateCount: 0, duplicateOpeningCount: 0, samples: [] },
+            generic: { sentenceCount: 10, guidanceCount: 0, generalStatementCount: 0, guidanceRatio: 0, generalRatio: 0, threshold: 0.24 },
+          },
+        },
+      };
+      store.writeBrandPostPackageManifest(unsafe);
+      const unsafeRead = store.readBrandPostPackage(coverageId)!;
+      assert.equal(unsafeRead.approvedAt, null);
+      assert.equal(unsafeRead.contentQuality?.code, "unsupported-experience-claim");
+      assert.throws(() => store.approveBrandPostPackage(coverageId), /원고 내용 품질검사/u,
+        "Complete generated coverage cannot clear a safety failure");
+      store.writeBrandPostPackageManifest({ ...generated, generationSource: undefined });
+      assert.throws(() => store.approveBrandPostPackage(coverageId), /AI 생성 출처/u);
+
+      for (const status of ["complete", "incomplete", "running"] as const) {
+        const imageGeneration = { status, requested: 10, applied: 10, remaining: 0, errors: [], updatedAt: "2026-09-03" };
+        store.writeBrandPostPackageManifest({ ...originals, imageGeneration });
+        assert.throws(() => store.approveBrandPostPackage(coverageId), /섹션 이미지 품질 게이트/u,
+          "Execution counters cannot replace generated asset evidence");
+        store.writeBrandPostPackageManifest({ ...generated, imageGeneration });
+        if (status === "running") {
+          assert.throws(() => store.approveBrandPostPackage(coverageId), /섹션 이미지 품질 게이트/u);
+        } else {
+          assert.ok(store.approveBrandPostPackage(coverageId).approvedAt, "Finished assets determine coverage, not stale counters");
+        }
+      }
+
+      const partial = { ...generated, imageAssets: generated.imageAssets.map((asset, index, assets) =>
+        index === assets.length - 1 ? { ...asset, provenance: "ORIGINAL" as const } : asset) };
+      store.writeBrandPostPackageManifest(partial);
+      const partialSlots = store.packagePreview(partial).imageSlots;
+      assert.equal(partialSlots[partialSlots.length - 1].generationMissing, 1);
+      assert.throws(() => store.approveBrandPostPackage(coverageId), /섹션 이미지 품질 게이트/u,
+        "The last required generated section must also be enforced");
+
+      const extraPath = path.join(coverageDir, "extra.png");
+      fs.writeFileSync(extraPath, `extra-original-${coverageId}`);
+      const twoRequired = structuredClone(generated);
+      const firstSection = twoRequired.composition.sections[0];
+      firstSection.imageMin = firstSection.imageMax = 2;
+      firstSection.imagePaths.push(extraPath);
+      twoRequired.bodyImagePaths.push(extraPath);
+      const firstImageNode = twoRequired.composition.renderNodes.find((node) => node.kind === "image" && node.sectionId === firstSection.id);
+      assert.ok(firstImageNode?.kind === "image");
+      twoRequired.composition.renderNodes.push({ ...firstImageNode, assetPath: extraPath });
+      const extraAsset = {
+        ...store.normalizePackageImageAssets(originals)[1], path: extraPath, sourcePath: extraPath,
+        sha256: crypto.createHash("sha256").update(fs.readFileSync(extraPath)).digest("hex"),
+      };
+      store.writeBrandPostPackageManifest({ ...twoRequired, imageAssets: [...twoRequired.imageAssets, extraAsset] });
+      const twoSlots = store.packagePreview(store.readBrandPostPackage(coverageId)!).imageSlots;
+      assert.equal(twoSlots[0].missing, 0);
+      assert.equal(twoSlots[0].generationMissing, 1);
+      assert.throws(() => store.approveBrandPostPackage(coverageId), /섹션 이미지 품질 게이트/u,
+        "An original cannot fill the second required generated slot");
+      store.writeBrandPostPackageManifest({
+        ...twoRequired, imageAssets: [...twoRequired.imageAssets, { ...extraAsset, provenance: "EDITORIAL_CARD" }],
+      });
+      assert.ok(store.approveBrandPostPackage(coverageId).approvedAt, "Both required generated slots are now filled");
+    }
+  }
   fs.writeFileSync(store.getBrandPostPackageManifestPath(v2Id), JSON.stringify(v2Manifest, null, 2));
   assert.throws(
     () => store.approveBrandPostPackage(v2Id),
-    /프리미엄 초안 품질 게이트/u,
+    /섹션 이미지 품질 게이트/u,
     "프리미엄 V2 초안은 품질 미달 상태에서 승인되면 안 됩니다.",
   );
   const standardComposition = compositionContract.resolvePostDocument({
@@ -454,7 +586,25 @@ async function main() {
     store.getBrandPostPackageManifestPath(v2Id),
     JSON.stringify({ ...v2Manifest, composition: standardComposition }, null, 2),
   );
-  assert.ok(store.approveBrandPostPackage(v2Id).approvedAt);
+  assert.throws(() => store.approveBrandPostPackage(v2Id), /섹션 이미지 품질 게이트/u,
+    "STANDARD still enforces its illustrated section contract");
+  for (const postSpec of [undefined, { fixture: "explicit-text-only" }]) {
+    const textOnlyId = `fixture-text-only-${postSpec ? "spec" : "freeform"}`;
+    store.writeBrandPostPackageManifest({
+      ...v2Manifest,
+      brandLinkId: textOnlyId,
+      postSpec,
+      composition: {
+        ...standardComposition,
+        sections: standardComposition.sections.map((section) => ({ ...section, imageMin: 0, imageMax: 0 })),
+      },
+    });
+    const textOnly = store.readBrandPostPackage(textOnlyId)!;
+    assert.equal(textOnly.imageGeneration, undefined);
+    assert.equal(store.packagePreview(textOnly).imageSlots.every((slot) => slot.missing === 0 && slot.generationMissing === 0), true);
+    assert.ok(store.approveBrandPostPackage(textOnlyId).approvedAt, "An explicit no-generation plan remains approvable");
+    assert.ok(store.readBrandPostPackage(textOnlyId)?.approvedAt);
+  }
   assert.match(store.packagePreview(store.readBrandPostPackage(v2Id)!).heroPreviewDataUrl || "", /^data:image\/png;base64,/u);
 
   const staleFlowId = "fixture-brand-link-v2-stale-flow";
@@ -530,7 +680,7 @@ async function main() {
   assert.equal(refreshedStaleFlow?.contentQuality?.signals.find((signal) => signal.key === "editorial-flow")?.status, "pass");
   assert.equal(refreshedStaleFlow?.contentQuality?.canPublish, false, "Text recovery must not trust a forged passing composition report for a short, under-illustrated fixture");
   assert.equal(refreshedStaleFlow?.contentQuality?.code, "composition-quality");
-  assert.throws(() => store.approveBrandPostPackage(staleFlowId), /프리미엄 초안 품질 게이트/u);
+  assert.throws(() => store.approveBrandPostPackage(staleFlowId), /섹션 이미지 품질 게이트/u);
 
   const limitationFalsePositiveId = "fixture-brand-link-v2-limitation-false-positive";
   const limitationFalsePositiveDir = store.getBrandPostPackageDir(limitationFalsePositiveId);
@@ -590,7 +740,7 @@ async function main() {
   assert.equal(refreshedLimitationFalsePositive?.contentQuality?.code, "composition-quality");
   assert.equal(refreshedLimitationFalsePositive?.contentQuality?.score, 100);
   assert.equal(refreshedLimitationFalsePositive?.contentQuality?.signals[0]?.status, "pass");
-  assert.throws(() => store.approveBrandPostPackage(limitationFalsePositiveId), /프리미엄 초안 품질 게이트/u);
+  assert.throws(() => store.approveBrandPostPackage(limitationFalsePositiveId), /섹션 이미지 품질 게이트/u);
 
   const generatedBodyPath = path.join(userData, "generated-body.png");
   fs.writeFileSync(generatedBodyPath, "generated-body-v1");
@@ -634,7 +784,7 @@ async function main() {
   const previewWithOutline = store.packagePreview(regenerated);
   assert.ok(Array.isArray(previewWithOutline.sectionOutline) && previewWithOutline.sectionOutline.length > 0, "v2 미리보기는 섹션 아웃라인을 제공한다");
   assert.ok(previewWithOutline.readiness && typeof previewWithOutline.readiness.status === "string", "v2 미리보기는 readiness 요약을 제공한다");
-  console.log(JSON.stringify({ ok: true, approved: true, v2QualityGate: true, imagePreviewAndRegeneration: true, pathTraversalBlocked: true, resultFile: true }));
+  console.log(JSON.stringify({ ok: true, approved: true, v2QualityGate: true, generatedCoverageWithoutMetadata: true, legacyGeneratedCoverage: true, staleApprovalRevoked: true, textOnlyPlans: true, imagePreviewAndRegeneration: true, pathTraversalBlocked: true, resultFile: true }));
 }
 
 main().catch((error) => { console.error(error); process.exitCode = 1; });

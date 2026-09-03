@@ -310,6 +310,13 @@ export function readBrandPostPackage(brandLinkId: string): BrandPostPackageManif
   return parsed;
 }
 
+function hasUnfinishedSectionImages(manifest: BrandPostPackageManifestV2): boolean {
+  // Execution metadata is optional (MCP/default-off paths omit it). The
+  // section contract and actual asset provenance always determine coverage.
+  return manifest.imageGeneration?.status === "running" ||
+    packagePreview(manifest).imageSlots.some((slot) => slot.missing > 0 || slot.generationMissing > 0);
+}
+
 export function approveBrandPostPackage(brandLinkId: string): BrandPostPackageManifest {
   const manifestPath = getBrandPostPackageManifestPath(brandLinkId);
   const manifest = readBrandPostPackage(brandLinkId);
@@ -317,11 +324,8 @@ export function approveBrandPostPackage(brandLinkId: string): BrandPostPackageMa
   if (manifest.version === "brand-post-package/v2" && manifest.generationSource !== "AI") {
     throw new Error("AI 생성 출처가 확인되지 않은 초안은 승인할 수 없습니다. 새 초안을 생성해 주세요.");
   }
-  if (manifest.version === "brand-post-package/v2" && manifest.imageGeneration) {
-    const slots = packagePreview(manifest).imageSlots;
-    if (manifest.imageGeneration.status === "running" || slots.some((slot) => slot.missing > 0 || slot.generationMissing > 0)) {
-      throw new Error("섹션 이미지 품질 게이트가 미완료입니다. 이미지 탭에서 남은 파트를 보충하세요. 원고를 다시 작성할 필요는 없습니다.");
-    }
+  if (manifest.version === "brand-post-package/v2" && hasUnfinishedSectionImages(manifest)) {
+    throw new Error("섹션 이미지 품질 게이트가 미완료입니다. 이미지 탭에서 남은 파트를 보충하세요. 원고를 다시 작성할 필요는 없습니다.");
   }
   if (
     manifest.version === "brand-post-package/v2" &&
@@ -542,7 +546,8 @@ export function reconcileBrandPostPackageQuality(manifest: BrandPostPackageManif
   const contentQuality = refreshStoredContentQuality(manifest.contentQuality, composition.qualityReport);
   return {
     ...manifest, composition, contentQuality,
-    approvedAt: composition.qualityReport.canAutoPublish && contentQuality?.canPublish !== false ? manifest.approvedAt : null,
+    approvedAt: manifest.approvedAt && composition.qualityReport.canAutoPublish && contentQuality?.canPublish !== false &&
+      !hasUnfinishedSectionImages({ ...manifest, composition }) ? manifest.approvedAt : null,
   };
 }
 

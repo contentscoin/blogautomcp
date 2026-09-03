@@ -148,6 +148,56 @@ const groundedReview = selectGroundedEvidenceFacts(
 assert.deepEqual(groundedReview.grounded, ["메쉬 소재 러닝 조끼 판매가 13,700원"]);
 assert.equal(groundedReview.rejected.length, 3);
 
+// Attribute/value pairs and polarity must be grounded together, never as a bag of tokens.
+const groundingCases = [
+  {
+    snapshot: "충전 시간: 2시간 / 사용 시간: 8시간",
+    grounded: ["충전 시간: 2시간", "사용 시간: 8시간", "충전시간 : 2 시간."],
+    rejected: ["충전 시간: 8시간", "사용 시간: 2시간", "충전 시간: 2시간 완전 방수"],
+  },
+  {
+    snapshot: "배터리 용량 5000mAh 미지원",
+    grounded: ["배터리 용량 5000mAh 미지원", "배터리 용량: 5,000 mAh 미지원."],
+    rejected: ["배터리 용량 5000mAh 지원", "배터리 용량 5000mAh", "배터리 용량 5000mAh 미포함"],
+  },
+  {
+    snapshot: "충전 시간: 2시간\n사용 시간: 8시간\n배터리 용량 5000mAh 지원",
+    grounded: ["배터리 용량 5000mAh 지원"],
+    rejected: ["충전 시간: 8시간", "배터리 용량 5000mAh 미지원", "배터리 용량 5000mAh 지원 안 함"],
+  },
+  {
+    snapshot: "최대 하중: 10kg.\n무선 충전 지원 안 함\n온도: -5도\n전압: 3.7V\n방수: IPX7 (수영 제외)",
+    grounded: ["최대 하중 １０ kg", "무선충전 지원 안함", "온도: -5도", "전압 3.7 V", "방수: IPX7 (수영 제외)"],
+    rejected: ["최대 하중 100kg", "하중 10kg", "무선 충전 지원", "무선 충전 함", "온도: 5도", "전압 37V", "방수: IPX7", "하중 한도는 10kg입니다"],
+  },
+  {
+    snapshot: "배터리 용량 5000mAh 미지원\n방수 등급 IPX7 지원\n소비전력: 5mW\n방수: IPX7 / 수영 제외",
+    grounded: ["방수 등급: IPX7 지원", "소비전력 5 mW", "방수: IPX7 / 수영 제외"],
+    rejected: ["배터리 용량 5000mAh 지원", "방수 등급 IPX7 미지원", "소비전력: 5MW", "방수: IPX7"],
+  },
+  {
+    snapshot: "RNRN 러닝 조끼 메쉬 소재\n가격: 13,700원\n원가: 59,800원",
+    grounded: ["판매가: 13,700 원", "RNRN 러닝 조끼 메쉬 소재 판매가 13,700원", "메쉬 소재 러닝 조끼 판매가 13,700원"],
+    rejected: ["판매가 59,800원", "메쉬 소재 러닝 조끼 판매가 59,800원", "메쉬 소재 방수 러닝 조끼 판매가 13,700원", "메쉬 소재 러닝 조끼 판매가 13,700원 무료배송"],
+  },
+  {
+    snapshot: "테스트 제품\n13,700원\n59,800원\n면적: 10²m",
+    grounded: ["면적: 10²m"],
+    rejected: ["판매가 13,700원", "판매가 59,800원", "면적: 102m"],
+  },
+] as const;
+for (const testCase of groundingCases) {
+  assert.deepEqual(
+    selectGroundedEvidenceFacts([...testCase.grounded, ...testCase.rejected], testCase.snapshot),
+    { grounded: [...testCase.grounded], rejected: [...testCase.rejected] },
+    `Conservative evidence grounding: ${testCase.snapshot}`,
+  );
+}
+assert.deepEqual(selectGroundedEvidenceFacts(null, "배터리 용량 5000mAh"), { grounded: [], rejected: [] });
+assert.deepEqual(selectGroundedEvidenceFacts([null, 3, "", "  최대 하중 10kg\n", "최대 하중 10kg"], "최대 하중 10kg"), {
+  grounded: ["최대 하중 10kg"], rejected: [],
+});
+
 // Test the generated handoff instructions rather than source-code string presence.
 const nextAction = formatDraftSubmissionNextAction();
 assert.match(nextAction, /텍스트 실패가 명시된 경우에만/u);
@@ -156,4 +206,7 @@ assert.match(nextAction, /composition-quality 안에 본문 분량·섹션 실�
 assert.match(nextAction, /원인이 불명확하면 실패 상세를 조회/u);
 assert.match(nextAction, /발행은 별도 확인/u);
 
-console.log(JSON.stringify({ ok: true, browserCases, unsupportedCandidates: unsupported.length, sourceEvidenceBoundary: true, sharedSchema: true, compositionOnlyHandoff: true }));
+console.log(JSON.stringify({ ok: true, browserCases, unsupportedCandidates: unsupported.length, groundingCases: groundingCases.length,
+  groundedCandidates: groundingCases.reduce((sum, testCase) => sum + testCase.grounded.length, 0),
+  rejectedCandidates: groundingCases.reduce((sum, testCase) => sum + testCase.rejected.length, 0),
+  sourceEvidenceBoundary: true, sharedSchema: true, compositionOnlyHandoff: true }));

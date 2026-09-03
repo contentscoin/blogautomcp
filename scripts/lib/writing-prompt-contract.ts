@@ -108,39 +108,66 @@ export function formatDraftSubmissionNextAction(): string {
   ].join(" ");
 }
 
-const GENERIC_EVIDENCE_TOKENS = new Set([
-  "상품", "제품", "기능", "사용", "구매", "추천", "후기", "확인", "가능", "제공", "포함", "구성", "정품", "공식",
-  "무료배송", "배송", "판매", "가격", "할인", "브랜드", "스토어", "네이버", "이미지", "상세", "페이지",
-]);
-
 function normalizeEvidenceText(text: string): string {
-  return text.normalize("NFKC").toLowerCase().replace(/(\d),(?=\d{3})/gu, "$1");
-}
-
-function evidenceTokens(text: string): string[] {
-  return Array.from(new Set(
-    normalizeEvidenceText(text).replace(/[^\p{L}\p{N}]+/gu, " ").split(/\s+/u)
-      .map((token) => token.trim())
-      .filter((token) => token.length >= 2 && !GENERIC_EVIDENCE_TOKENS.has(token)),
-  ));
-}
-
-function numericEvidenceTokens(text: string): string[] {
-  return Array.from(new Set(
-    normalizeEvidenceText(text).replace(/[^\p{L}\p{N}.]+/gu, " ").split(/\s+/u)
-      .map((token) => token.replace(/^\.+|\.+$/gu, ""))
-      .filter((token) => /\d/u.test(token)),
-  ));
+  return text.normalize("NFC")
+    // Fold full-width typography only: NFKC would also turn numeric exponents (²) into digits (2).
+    .replace(/[\uFF01-\uFF5E]/gu, (character) => String.fromCharCode(character.charCodeAt(0) - 0xFEE0))
+    .replace(/(?<![\d,])\d{1,3}(?:,\d{3})+(?![\d,])/gu, (number) => number.replace(/,/gu, ""))
+    .trim()
+    .replace(/[.!。]$/u, "")
+    // A label colon is formatting; numeric colons, decimal points, signs, units and qualifiers are not.
+    .replace(/(\p{L})\s*:\s*/gu, "$1")
+    .replace(/\s+/gu, " ")
+    .replace(/(?<!\d)\s+|\s+(?!\d)/gu, "");
 }
 
 const EVIDENCE_NEGATION_PATTERN = /안\s*함|안\s*됨|불가|없음|없습니다|미지원|미포함|않|아님|아닙니다|제외/u;
 
+/** Split a specification row only when every slash-delimited part is a labelled pair. */
+function snapshotEvidenceUnits(line: string): string[] {
+  const parts = line.split(/\s+\/\s+/u);
+  return parts.length > 1 && parts.every((part) => /^[^:：/]+[:：]\s*\S/u.test(part))
+    ? [line, ...parts]
+    : [line];
+}
+
+/** Compatibility for the existing product-name + selling-price format, not arbitrary fact recombination. */
+function isGroundedSellingPrice(fact: string, snapshotLines: readonly string[]): boolean {
+  const match = /^(.*?)판매가\s*[:：]?\s*([\d,]+\s*원)[.!。]?$/u.exec(fact);
+  if (!match) return false;
+  const price = normalizeEvidenceText(match[2]);
+  const labelledPrices: string[] = [];
+  const barePrices = new Set<string>();
+  for (const line of snapshotLines) {
+    const sourcePrice = /^(?:(가격|판매가)\s*[:：]?\s*)?([\d,]+\s*원)[.!。]?$/u.exec(line);
+    if (!sourcePrice) continue;
+    const value = normalizeEvidenceText(sourcePrice[2]);
+    if (sourcePrice[1]) labelledPrices.push(value);
+    else barePrices.add(value);
+  }
+  // The caller also supplies originalPrice without a label. Multiple bare prices cannot identify selling price.
+  const supportedPrices = labelledPrices.length ? labelledPrices : barePrices.size === 1 ? [...barePrices] : [];
+  if (!/^\d+원$/u.test(price) || !supportedPrices.includes(price)) return false;
+
+  const identity = match[1].trim();
+  if (!identity) return true;
+  const productName = snapshotLines[0] || "";
+  if (normalizeEvidenceText(identity) === normalizeEvidenceText(productName)) return true;
+
+  // Legacy noun-phrase format: "BRAND 러닝 조끼 메쉬 소재" -> "메쉬 소재 러닝 조끼".
+  // Move only the complete trailing material phrase; never reorder specification tokens or numbers.
+  const materialName = /^(.*?)\s+([\p{L}]+\s+소재)$/u.exec(productName);
+  if (!materialName || /[\d:：/]/u.test(productName) || EVIDENCE_NEGATION_PATTERN.test(productName)) return false;
+  const names = [materialName[1], materialName[1].replace(/^[A-Z][A-Z0-9]*\s+/u, "")];
+  return names.some((name) => normalizeEvidenceText(identity) === normalizeEvidenceText(`${materialName[2]} ${name}`));
+}
+
 /**
  * ChatGPT가 상세이미지에서 읽었다고 제출한 evidenceFacts 중 스냅샷 텍스트(상품명·설명·특징·가격)로
  * 뒷받침되는 것만 "근거가 있는" 사실로 본다. 보수적 규칙:
- * - 유효 토큰(2자 이상, 일반어 제외) 2개 이상 공유하고, 후보 토큰의 60% 이상이 스냅샷에 있어야 한다(추가 주장 차단).
- * - 후보에 숫자가 있으면 그 숫자 토큰이 전부 스냅샷에 있어야 하고(수치 변조 차단), 그 경우에는 토큰 2개 이상·공유 1개 이상·50% 이상이면 인정한다.
- * - 스냅샷의 한 줄이 후보 토큰을 모두 담고 있으면서 부정 표현을 가지는데 후보에는 없으면 거부한다(부정 뒤집기 차단).
+ * - 공백과 제한된 서식만 정규화한 뒤 완전한 원문 항목과 일치해야 한다.
+ * - 속성·값·부정·조건을 함께 비교한다. 토큰 재조합, 부분 발췌, 의역은 인정하지 않는다.
+ * - 기존 상품명·판매가 조합은 별도의 제한된 형식 규칙으로만 인정한다.
  * 이 결과는 이번 제출의 채점에만 쓰이고 패키지나 DB의 source features로 저장되지 않는다.
  */
 export function selectGroundedEvidenceFacts(candidates: unknown, snapshotText: string): {
@@ -148,31 +175,15 @@ export function selectGroundedEvidenceFacts(candidates: unknown, snapshotText: s
   rejected: string[];
 } {
   const snapshotLines = snapshotText.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
-  const haystack = new Set(evidenceTokens(snapshotText));
-  const numericHaystack = new Set(numericEvidenceTokens(snapshotText));
-  const lineTokens = snapshotLines.map((line) => ({
-    tokens: new Set(evidenceTokens(line)),
-    negated: EVIDENCE_NEGATION_PATTERN.test(line),
-  }));
+  const meaningfulUnits = new Set(snapshotLines.flatMap(snapshotEvidenceUnits)
+    .filter(isMeaningfulProductEvidenceFeature).map(normalizeEvidenceText));
   const grounded: string[] = [];
   const rejected: string[] = [];
   for (const candidate of Array.isArray(candidates) ? candidates : []) {
     if (typeof candidate !== "string") continue;
     const fact = candidate.replace(/\s+/gu, " ").trim();
     if (!fact) continue;
-    const tokens = evidenceTokens(fact);
-    const shared = tokens.filter((token) => haystack.has(token)).length;
-    const numbers = numericEvidenceTokens(fact);
-    const numbersGrounded = numbers.every((token) => numericHaystack.has(token));
-    const negationFlipped = !EVIDENCE_NEGATION_PATTERN.test(fact) && lineTokens.some((line) =>
-      line.negated && tokens.length > 0 && tokens.every((token) => line.tokens.has(token)),
-    );
-    // Statements that restate a snapshot number (price, capacity) carry few tokens, so once every number is
-    // grounded one more shared token is enough; everything else needs two shared tokens and 60% coverage.
-    const enoughCoverage = numbers.length > 0 && numbersGrounded
-      ? tokens.length >= 2 && shared >= 1 && shared >= Math.ceil(tokens.length * 0.5)
-      : shared >= 2 && shared >= Math.ceil(tokens.length * 0.6);
-    if (isMeaningfulProductEvidenceFeature(fact) && enoughCoverage && numbersGrounded && !negationFlipped) grounded.push(fact);
+    if (meaningfulUnits.has(normalizeEvidenceText(fact)) || isGroundedSellingPrice(fact, snapshotLines)) grounded.push(fact);
     else rejected.push(fact);
   }
   return { grounded: Array.from(new Set(grounded)).slice(0, 12), rejected };
