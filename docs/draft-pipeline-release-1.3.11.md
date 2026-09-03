@@ -123,4 +123,17 @@ Codex 리뷰가 이동 단계의 결함 두 가지를 지적했고 확인해 고
 - `AUTO_UPDATE_TEST_MODE=1`일 때만 `AUTO_UPDATE_INSTALL=false`로 fixture 실행과 앱 종료 시 설치를 차단할 수 있다. 일반 실행은 이 테스트 전용 설정을 무시하며, 기존 자동 설치·유휴 검사·토큰 마스킹 검사를 유지했다.
 - updater 단위 검사, 루트 및 scripts TypeScript 검사, 변경 JS lint, draft-snapshot, chatgpt-browser-automation, package-qc-reconcile, brand-post-package, writing-harness, section-images 검사가 통과했다. Sites build/type/lint와 MCP/OAuth 로컬 E2E도 통과했다.
 - 첫 전체 빌드는 디스크 ENOSPC와 메모리 할당 실패로 완료되지 않았다. 저장 공간이 확보된 뒤 다시 실행한 `npm run build`는 TypeScript·정적 페이지·빌드 추적까지 정상 완료됐다. 최초 실패를 통과로 간주하지 않는다.
-- 최종 1.3.11 설치본의 실행·다운로드·재시작 및 중앙 배포 결과는 검증 후 기록한다. 유료 생성이나 실제 블로그 추가 발행은 이번 배포 검사에 포함하지 않는다.
+- 유료 생성이나 실제 블로그 추가 발행은 이번 배포 검사에 포함하지 않는다.
+
+## 최종 배포 검증 — 2026-09-03
+
+- `npx electron-builder --win --publish=never --config.directories.output=out/release-1.3.11` 정상 완료. 설치본 325,476,744 bytes, SHA-256 `8c2b879bc0b62e093216dd6f261e636282c8463f943e94bc408a2ae09357ae33`.
+- `pwsh -NoProfile -File scripts/verify-packaged-auto-update.ps1 -AppPath 'out/release-1.3.11/win-unpacked/BrandConnect Automation.exe'` 통과. 실제 1.3.11 실행, 인증된 1.3.12 fixture 다운로드, 격리 캐시 내용, fixture 설치 차단, 패키지 자체 Prisma, HTTP 200, 서버 재시작, 토큰 마스킹을 확인했다.
+- `node apps/sites/scripts/publish-update.mjs --verify-only out/release-1.3.11` 통과. GitHub v1.3.11의 설치본 및 blockmap digest가 로컬 검증값과 일치한다.
+- 사용자 공개 배포 승인 후 Sites 저장 버전 26 배포 성공. 사이트 소스 `5e7f02ced548d60289ba1d620257c5c34a3493c8`, 배포 `appgdep_6a99611ca0308191aede090bbd74be06`.
+- 중앙 배포 화면에서 v1.3.11 및 배포 완료 확인. PC의 작업 0건을 확인한 뒤 정상 앱 업데이트 경로로 1.3.11 다운로드를 시작했다.
+- 실제 사가 원고 검증: 내용 100, 구성 100, 10섹션, 11이미지, blockers 없음. 원문 SHA-256 `D4CAB43468AE0F53EF5E493EE028D25AE878AC856BD13971C21BD9A1DCF914DF` 유지.
+- GitHub Actions는 결제 실패 또는 spending limit 안내로 job 시작 전 차단됨(steps 없음). 원격 CI 통과를 주장하지 않으며 위 로컬 검증과 패키지 테스트 결과를 근거로 배포했다.
+- 중앙 업데이트 후 설치 폴더 실행 파일은 ProductVersion 1.3.11.0 / FileVersion 1.3.11이며 `resources/app-update.yml`도 포함되어 있다. 로컬 API는 currentVersion 1.3.11, status current, error null로 복귀했고 MCP도 1.3.11 온라인으로 확인됐다.
+- 실제 MCP 조회 작업 `job_vlClAPO3rggVZ_Z-`(쇼핑 48건), `job_RV2YyMzByuT8Jy0z`(여행 50건)가 모두 SUCCEEDED. 네이티브 창에서 1.3.11, MCP 연결, 네이버·GPT 연결 표시를 확인했다.
+- 검증 한계: 최종 실행 프로세스 경로는 설치 폴더가 아니라 `out/release-1.3.11/win-unpacked`였다. 이를 설치 폴더 실행으로 전환하는 명령은 실행 정책에 차단되어 실행되지 않았다. 따라서 위 MCP·화면 확인은 1.3.11 검증 빌드에 대한 결과이며, 설치 폴더 실행본의 최종 시작 검증은 사용자 재실행이 필요하다. 정책 차단을 다른 실행 경로로 우회하지 않았다.
