@@ -61,4 +61,22 @@ GitHub Actions `33714548525`의 `check`와 `sites`는 단계 실행 전에 중�
 
 실제 SAGA fixture를 읽기 전용으로 검사하자 보관 이미지 11장 중 9장이 없었다. 기존 `simple-agent.ts`는 승인 패키지 경로로 교체한 `product.imagePaths`를 발행 후 임시 파일로 간주해 삭제했다. 삭제된 9장의 `sourcePath` 사본이 모두 남아 있었고 manifest의 SHA-256과 일치했다. 없는 파일 9장만 원래 경로에 복사해 복구했으며 기존 2장, 본문, manifest, 공개 글은 덮어쓰지 않았다. 복구 후 11장 모두 저장된 SHA-256과 일치하고 실제 fixture는 원고 100점·구성 100점·10개 섹션·11장·차단 없음으로 통과했다.
 
-정리 함수는 실행마다 별도 임시 폴더를 만들고 그 폴더 안의 일반 파일만 삭제한다. 승인 패키지·다른 실행·기존 임시 파일·경로 탈출·링크/정션 대상은 보존한다. 컨텍스트 준비·발행 완료·다운로드 실패의 정리 경로에 같은 소유권 검증을 적용했다. `test:publish-image-cleanup`으로 실제 임시 파일과 9개 보관 이미지 fixture를 검사하고 CI 목록에도 추가했다.
+정리 함수는 이번 실행에서 생성한 파일만 추적하고 임시 폴더 안의 소유권이 확인된 일반 파일만 삭제한다. 승인 이미지로 목록을 교체하기 전 다운로드 목록을 보존해 정리에 사용하며 승인 패키지·다른 실행·기존 임시 파일·경로 탈출·링크/정션 대상은 보존한다. 컨텍스트 준비·발행 완료·다운로드 실패의 정리 경로에 같은 소유권 검증을 적용했다. `test:publish-image-cleanup`으로 실제 임시 파일과 9개 보관 이미지 fixture를 검사하고 CI 목록에도 추가했다.
+
+## 최종 검증 및 배포 상태 (2026-09-03)
+
+- 배포 코드: `818601600f5e68ab6dd54ca1e063edb01f5aa643`. GitHub `v1.3.10` 릴리스에 설치 파일·blockmap·latest.yml을 게시했고 원격 asset digest와 로컬 SHA-256이 일치했다.
+- 설치 파일: `BrandConnect-Automation-Setup-1.3.10.exe`, 325,467,145 bytes, SHA-256 `e806e0491e05aeeef104171696183de9ec91c72fdabfed35f9882588d0ffa61c`. `node apps/sites/scripts/publish-update.mjs --verify-only out/release-1.3.10`의 검증 결과는 success=true다.
+- `npm run build`, 루트 및 scripts TypeScript 검사, 변경 파일 ESLint 통과. 전체 CI lint는 오류 0개이며 기존 ProductThumbnailStudio의 미사용 setter 경고 1개가 남는다.
+- 회귀: writing-harness, section-images, package-qc-reconcile, image-batch-progress, brand-post-package, brand-post-quality, draft-snapshot, post-composition, api-auth, codex-draft-provider, auto-update, connect-detection, connect-store, title-rules, post-spec, thumbnail-gen, local-json-fetch, product-detail-image, repository-techniques, brandlink-product-list, chatgpt-browser-automation, mcp-contract, publish-image-cleanup 통과.
+- Sites build/type/lint 및 로컬 MCP/OAuth E2E 통과: 도구 27개, 발행 확인 누락 차단, PKCE, 코드 재사용 차단, refresh 회전·폐기 검증. 공개 서버의 새 버전 반영을 증명하는 결과는 아니다.
+- 최종 Windows 패키지의 `verify-packaged-auto-update.ps1` 통과: 버전 1.3.10, 격리된 업데이트 fixture 감지, HTTP 200, 인증된 메타데이터, 수동 확인, 재시작, 번들 Prisma 로딩 검증. 테스트용 1.3.11 업데이트는 실제 설치하지 않았다.
+- 실제 기존 PC의 MCP 조회는 쇼핑 48건·여행 50건 모두 SUCCEEDED/100%였다. SAGA 원고는 11장, 원고 QC 100점, 차단 없음, 승인 시각 및 본문 SHA-256 유지 상태를 확인했다. 추가 생성·발행은 실행하지 않았다.
+
+### 아직 완료되지 않은 운영 적용
+
+- PC에 설치된 앱은 1.3.9다. 검증된 설치본 직접 실행은 도구 실행 정책에 차단됐으며 우회하지 않았다. 따라서 실제 설치 후 1.3.10 실행 테스트 완료로 표기하지 않는다.
+- 중앙 업데이트 피드는 1.3.9다. 로그인된 관리자 화면에서 파일 업로드를 시도했으나 Chrome 확장의 파일 URL 접근 권한이 없어 Not allowed로 거부됐다. 사용자 설정 변경 후 중앙 배포가 필요하다.
+- 공개 Sites 서버는 기존 버전이다. 1.3.10 소스를 저장하고 공개 배포 승인을 요청했으며, 응답 전에는 공개 서버 배포를 실행하지 않았다.
+- GitHub Actions는 계정 결제/사용 한도 때문에 작업 시작 전에 차단됐다. 로컬 테스트 통과와 GitHub CI 통과를 구분한다.
+- 설치본 생성 중 C드라이브 공간 부족을 재현했다. 실패한 이번 설치 파일만 제거하고 이번 빌드 스테이징을 NTFS 압축한 후 재생성에 성공했다. D드라이브는 Windows가 Full Repair Needed로 보고해 사용을 중단했고 복구·포맷은 실행하지 않았다. 빌드 임시 폴더 정리는 정책에 차단돼 남아 있으며, 사용자 원고와 기존 설치 앱은 삭제하지 않았다.
