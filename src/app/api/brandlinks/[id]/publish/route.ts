@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import draftRuntimePolicy from "../../../../../../scripts/lib/draft-runtime-policy.json";
+import { readCodexLocalStatus } from "@/lib/codex-local";
 import { prisma } from "@/lib/db";
 import { spawn, type ChildProcess } from "child_process";
 import path from "path";
@@ -226,11 +228,11 @@ export async function POST(
       );
     }
 
-    // Gemini 는 제거됐다. openai(기본) 또는 codex 만 유효하며 키 확인은 OpenAI 키 기준이다.
-    const agentAiProvider = (process.env.AI_PROVIDER || "openai").toLowerCase() === "codex" ? "codex" : "openai";
+    const useCodex = !preparedPackage && readCodexLocalStatus().authenticated;
+    const agentAiProvider = useCodex ? draftRuntimePolicy.AI_PROVIDER : "openai";
     const hasProviderKey = Boolean(process.env.OPENAI_API_KEY?.trim());
-    const useBrowserChatGpt = !preparedPackage && !hasProviderKey && isChatGptBrowserAutomationEnabled();
-    if (!preparedPackage && !hasProviderKey && !useBrowserChatGpt) {
+    const useBrowserChatGpt = !preparedPackage && !useCodex && !hasProviderKey && isChatGptBrowserAutomationEnabled();
+    if (!preparedPackage && !useCodex && !hasProviderKey && !useBrowserChatGpt) {
       return NextResponse.json(
         { success: false, error: "발행 전에 ChatGPT에서 초안을 만들고 확인해 주세요." },
         { status: 409 },
@@ -296,6 +298,7 @@ export async function POST(
           ...process.env,
           ELECTRON_RUN_AS_NODE: "1",
           AI_PROVIDER: agentAiProvider,
+          CODEX_DRAFT_MODEL: draftRuntimePolicy.CODEX_DRAFT_MODEL,
           ...buildChatGptBrowserAutomationEnv(useBrowserChatGpt),
           HUMAN_MOBILE_POLISH_ENABLED: "true",
           PRODUCT_THUMBNAIL_CHATGPT_ENABLED: process.env.PRODUCT_THUMBNAIL_CHATGPT_ENABLED || "false",

@@ -150,7 +150,7 @@ OPENAI_API_KEY=sk-여기에_발급받은_키_붙여넣기
 
 # 원고는 ChatGPT MCP 경로(post_create_draft → post_submit_draft)가 기본입니다.
 # 아래를 true 로 켜면 PC 가 로그인된 ChatGPT 웹을 열어 초안을 쓰는 선택 경로가 됩니다.
-CHATGPT_BROWSER_AUTOMATION_ENABLED=false
+CHATGPT_BROWSER_AUTOMATION_ENABLED=true
 CHATGPT_BROWSER_VISIBILITY=background
 CHATGPT_BASE_URL=https://chatgpt.com/
 BLOG_HUMANIZE_MOBILE_STYLE=true
@@ -232,7 +232,7 @@ npm run login
 - 브라우저 자동화는 특정 공유 GPT에 의존하지 않고 일반 ChatGPT에서 단일 프롬프트로 글을 생성합니다.
 - OpenAI API가 실패하거나 키가 없으면 기본 설정상 자동 승인을 받을 수 없는 로컬 템플릿으로 덮어쓰지 않고 `LLM_UNAVAILABLE`로 중단합니다.
 - ChatGPT MCP 초안은 `상품 근거 준비(post_create_draft = post_prepare_draft) → ChatGPT 원고 생성 → PC 품질검사·저장(post_submit_draft) → ChatGPT 내장 이미지 생성 → post_apply_section_image` 순서로 처리하며 API 키가 필요하지 않습니다. 제출 단계는 이미지를 생성하지 않습니다.
-- 초안 미리보기의 `이미지` 탭에서 각 결과를 확인할 수 있습니다. PC 브라우저로 섹션 이미지를 만드는 "섹션별 이미지 자동 생성"은 `ChatGPT 웹 자동작성` 설정이 켜져 있을 때만 동작하고, 초안 생성 직후 자동 보충(`BRAND_POST_AUTO_SECTION_IMAGES`)은 기본 꺼짐이며 켜도 초안 응답을 기다리게 하지 않습니다. 배치는 첫 실패에서 중단(fail-fast)하고 장당 3분 예산을 씁니다. 쇼핑 이미지는 원본 상품을 다시 그리지 않고 잠금 합성하며, 안전한 분리가 불가능하면 수집 원본을 유지합니다.
+- 원고는 로그인된 Codex/gpt-5.5를 우선 사용합니다. 웹 자동작성과 PC 초안의 섹션 이미지 자동 보충은 기본 고정이며 설정 선택지는 없습니다. 기존 `.env`의 꺼짐 값도 앱 정책으로 대체됩니다. 초안 미리보기의 `이미지` 탭에서 결과를 확인할 수 있고, 자동 보충은 초안 응답을 기다리게 하지 않습니다. MCP 제출은 대화에서 만든 이미지를 `post_apply_section_image`로 적용하는 경로를 유지합니다. 배치는 첫 실패에서 중단(fail-fast)하고 장당 3분 예산을 씁니다. 쇼핑 이미지는 원본 상품을 다시 그리지 않고 잠금 합성하며, 안전한 분리가 불가능하면 수집 원본을 유지합니다.
 - 이미지 수는 쇼핑 `최소 5/권장 8`, 여행 `최소 7/권장 10`으로 검사합니다. `품질검사` 탭은 확인 안내 반복·상품 고유 장단점 부족·허위 체험 표현을 별도로 검사하고 자동 보강 결과를 표시합니다.
 - 사람형 모바일 문체는 기본으로 켜져 있습니다 (`BLOG_HUMANIZE_MOBILE_STYLE=true`).
 - 문장은 짧게 끊고, AI처럼 보이는 반복 표현/과한 광고 문구/허위 체험 단정을 줄입니다.

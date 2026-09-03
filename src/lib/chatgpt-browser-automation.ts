@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import draftRuntimePolicy from "../../scripts/lib/draft-runtime-policy.json";
 import {
   getChatgptProfileDir,
   getChatgptSessionFile,
@@ -31,9 +32,9 @@ interface BrowserStorageState {
 export function isChatGptBrowserAutomationEnabled(
   env: object = process.env,
 ): boolean {
-  const value = (env as { CHATGPT_BROWSER_AUTOMATION_ENABLED?: string })
-    .CHATGPT_BROWSER_AUTOMATION_ENABLED;
-  return (value || "true").trim().toLowerCase() === "true";
+  // Legacy callers may pass saved settings; this capability is no longer optional.
+  void env;
+  return draftRuntimePolicy.CHATGPT_BROWSER_AUTOMATION_ENABLED === "true";
 }
 
 export function buildChatGptBrowserAutomationEnv(

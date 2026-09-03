@@ -11,6 +11,7 @@ import { requireAdminApiKey } from "@/lib/api-auth";
 import { isChatGptBrowserAutomationEnabled } from "@/lib/chatgpt-browser-automation";
 import { getEnvFilePath } from "../../../../scripts/lib/app-paths";
 import { readCodexLocalStatus } from "@/lib/codex-local";
+import draftRuntimePolicy from "../../../../scripts/lib/draft-runtime-policy.json";
 
 interface FieldDef {
   key: string;
@@ -26,35 +27,7 @@ interface FieldDef {
 
 // 편집 허용 키 화이트리스트(임의 env 노출/주입 방지).
 const FIELDS: FieldDef[] = [
-  { key: "AI_PROVIDER", label: "AI 공급자", type: "select", options: ["openai", "codex"], defaultValue: "openai", hint: "글 생성 엔진. openai = OpenAI API 키로 PC 에서 Spec-first 생성(기본), codex = 로그인된 Codex/GPT 사용" },
-  {
-    key: "CODEX_DRAFT_ENABLED",
-    label: "GPT(Codex) 원고 작성",
-    type: "select",
-    options: ["true", "false"],
-    defaultValue: "false",
-    hint: "켜면 로그인된 Codex/GPT 를 백그라운드 원고 작성 엔진으로 우선 사용합니다(선택).",
-  },
-  { key: "CODEX_DRAFT_MODEL", label: "GPT 작성 모델", type: "text", defaultValue: "gpt-5.5", hint: "기본값은 gpt-5.5입니다." },
-  {
-    key: "CHATGPT_BROWSER_AUTOMATION_ENABLED",
-    label: "ChatGPT 웹 자동작성",
-    type: "select",
-    options: ["true", "false"],
-    defaultValue: "false",
-    hint: "켜면 API 키가 없을 때 로그인된 ChatGPT 웹 세션으로 초안을 자동 작성합니다(선택, 기본 꺼짐).",
-    advanced: true,
-  },
-  {
-    key: "BRAND_POST_AUTO_SECTION_IMAGES",
-    label: "섹션 이미지 자동 생성(브라우저 배치)",
-    type: "select",
-    options: ["true", "false"],
-    defaultValue: "false",
-    hint: "켜면 PC 초안 생성 직후 비어 있는 섹션 이미지를 ChatGPT 웹 자동화로 백그라운드 생성합니다(ChatGPT 웹 자동작성이 켜져 있어야 실행, 기본 꺼짐). 꺼져 있으면 ChatGPT 대화에서 만든 이미지를 post_apply_section_image 로 붙입니다.",
-    advanced: true,
-  },
-  { key: "OPENAI_API_KEY", label: "OpenAI API 키 (선택)", type: "password", secret: true, hint: "글·썸네일 생성에 사용. 없으면 ChatGPT 2단계 경로 또는 로컬 템플릿 초안으로 동작합니다." },
+  { key: "OPENAI_API_KEY", label: "OpenAI API 키 (선택)", type: "password", secret: true, hint: "API 기반 보조 기능에 사용합니다. 기본 원고는 로그인된 Codex/GPT로 작성하므로 API 키는 필수가 아닙니다." },
   { key: "UNSPLASH_ACCESS_KEY", label: "Unsplash 액세스 키", type: "password", secret: true, hint: "스톡 이미지(선택)" },
   { key: "NAVER_BLOG_ID", label: "네이버 블로그 ID", type: "text", hint: "blog.naver.com/<여기>" },
   { key: "ADMIN_API_KEY", label: "관리자 API 키", type: "password", secret: true, hint: "설정하면 발행·설정 같은 관리자 API 가 이 키를 요구합니다(선택). 외부 스크립트는 x-admin-api-key 헤더, 브라우저 대시보드는 첫 화면에서 키를 한 번 입력하고, 데스크톱 앱은 자동으로 붙입니다. 일반 로컬 사용에는 비워 두세요.", advanced: true },
@@ -112,15 +85,12 @@ export async function GET(request: NextRequest) {
     values[f.key] = f.secret ? (configured[f.key] ? MASK : "") : current;
   }
 
-  const provider = (process.env.AI_PROVIDER ?? fileEnv.AI_PROVIDER ?? "openai").trim().toLowerCase();
-  const desktopDraftProviderConfigured = provider === "openai" || provider === "gemini"
-    ? Boolean((process.env.OPENAI_API_KEY ?? fileEnv.OPENAI_API_KEY ?? "").trim())
-    : false;
+  const desktopDraftProviderConfigured = Boolean((process.env.OPENAI_API_KEY ?? fileEnv.OPENAI_API_KEY ?? "").trim());
   const browserDraftAutomationEnabled = isChatGptBrowserAutomationEnabled({
     ...fileEnv,
     ...process.env,
   });
-  const codexDraftEnabled = (process.env.CODEX_DRAFT_ENABLED ?? fileEnv.CODEX_DRAFT_ENABLED ?? "false").trim().toLowerCase() === "true";
+  const codexDraftEnabled = draftRuntimePolicy.CODEX_DRAFT_ENABLED === "true";
   const codexDraft = readCodexLocalStatus();
 
   return NextResponse.json({
@@ -129,6 +99,7 @@ export async function GET(request: NextRequest) {
       fields: FIELDS,
       values,
       configured,
+      fixedDraftSettings: draftRuntimePolicy,
       desktopDraftProviderConfigured,
       browserDraftAutomationEnabled,
       codexDraftEnabled,
@@ -174,12 +145,8 @@ export async function POST(request: NextRequest) {
     applied.push(key);
   }
 
-  if (applied.includes("CHATGPT_BROWSER_AUTOMATION_ENABLED")) {
-    const enabled = isChatGptBrowserAutomationEnabled(process.env);
-    process.env.BROWSER_GPT_MODE = enabled ? "true" : "false";
-    process.env.ALLOW_CHATGPT_BROWSER_MODE = enabled ? "true" : "false";
-    process.env.CHATGPT_BASE_URL = "https://chatgpt.com/";
-  }
+  // Even an old UI cannot disable the fixed pipeline. Preserve unrelated settings/secrets.
+  Object.assign(merged, draftRuntimePolicy);
 
   try {
     const p = getEnvFilePath();
@@ -192,5 +159,9 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  Object.assign(process.env, draftRuntimePolicy);
+  process.env.BROWSER_GPT_MODE = "false";
+  process.env.ALLOW_CHATGPT_BROWSER_MODE = "true";
+  process.env.CHATGPT_BASE_URL = "https://chatgpt.com/";
   return NextResponse.json({ success: true, applied, envPath: getEnvFilePath() });
 }

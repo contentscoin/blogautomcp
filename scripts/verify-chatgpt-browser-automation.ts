@@ -70,7 +70,7 @@ async function main(): Promise<void> {
   assert.equal(isChatGptBrowserAutomationEnabled({}), true);
   assert.equal(
     isChatGptBrowserAutomationEnabled({ CHATGPT_BROWSER_AUTOMATION_ENABLED: "false" }),
-    false,
+    true,
   );
 
   const enabledEnv = buildChatGptBrowserAutomationEnv(true, {});
@@ -321,10 +321,11 @@ async function main(): Promise<void> {
   }
 
   const electron = source("scripts/electron/main.cjs");
-  assert.match(electron, /CHATGPT_BROWSER_AUTOMATION_ENABLED/u);
+  assert.match(electron, /draft-runtime-policy\.json/u);
+  assert.match(electron, /Object\.assign\(process\.env, draftRuntimePolicy\)/u);
   assert.match(electron, /CHATGPT_BROWSER_VISIBILITY/u);
   assert.match(electron, /"background"/u);
-  assert.equal(electron.includes('process.env.BROWSER_GPT_MODE = "false"'), false);
+  assert.equal(electron.includes('process.env.BROWSER_GPT_MODE = "false"'), true, "라우터가 Codex 우선으로 선택하기 전에 웹 실행을 강제하지 않습니다.");
 
   const loginRoute = source("src/app/api/session/login/route.ts");
   assert.match(loginRoute, /provider !== "naver" && provider !== "chatgpt"/u);
@@ -357,7 +358,8 @@ async function main(): Promise<void> {
 
   const sessionStatus = source("src/components/SessionStatus.tsx");
   assert.match(sessionStatus, /웹 GPT 재로그인/u);
-  assert.match(sessionStatus, /CHATGPT_BROWSER_AUTOMATION_ENABLED/u);
+  assert.match(sessionStatus, /백그라운드 자동작성 기본 적용/u);
+  assert.equal(sessionStatus.includes("saveBrowserAutomation"), false, "웹 자동작성 선택 스위치는 없어야 합니다.");
 
   const simpleAgent = source("scripts/simple-agent.ts");
   assert.match(simpleAgent, /navigateToChatGpt/u);

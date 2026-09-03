@@ -4,6 +4,7 @@
  */
 
 import "dotenv/config";
+import draftRuntimePolicy from "./lib/draft-runtime-policy.json";
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { Page } from "playwright";
@@ -183,7 +184,7 @@ chromium.use(StealthPlugin());
 
 const prisma = new PrismaClient();
 
-// AI Provider 설정: openai(기본, Spec-first 파이프라인) 또는 codex(선택). Gemini 는 제거되어 openai 로 처리한다.
+// 기본 원고는 Codex. 라우터의 명시적인 API/웹 복구 선택은 유지한다.
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim() || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const OPENAI_MAX_OUTPUT_TOKENS = parseBoundedInteger(
@@ -193,9 +194,9 @@ const OPENAI_MAX_OUTPUT_TOKENS = parseBoundedInteger(
   32768
 );
 const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || "120000");
-const REQUESTED_AI_PROVIDER = (process.env.AI_PROVIDER || "openai").toLowerCase();
+const REQUESTED_AI_PROVIDER = (process.env.AI_PROVIDER || draftRuntimePolicy.AI_PROVIDER).toLowerCase();
 const AI_PROVIDER: "openai" | "codex" = REQUESTED_AI_PROVIDER === "codex" ? "codex" : "openai";
-const CODEX_DRAFT_MODEL = process.env.CODEX_DRAFT_MODEL?.trim() || "gpt-5.5";
+const CODEX_DRAFT_MODEL = draftRuntimePolicy.CODEX_DRAFT_MODEL;
 const CODEX_DRAFT_TIMEOUT_MS = Math.max(60_000, Number(process.env.CODEX_DRAFT_TIMEOUT_MS || "300000"));
 const CODEX_DRAFT_REASONING_EFFORT = (
   process.env.CODEX_DRAFT_REASONING_EFFORT || "medium"

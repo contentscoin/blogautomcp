@@ -98,6 +98,13 @@ try {
   $rootResponse = Invoke-WebRequest -Method Get -Uri "http://127.0.0.1:$AppPort/" -TimeoutSec 5
   if ($rootResponse.StatusCode -ne 200) { throw '패키지 앱의 로컬 화면이 응답하지 않습니다.' }
 
+  $settings = Invoke-RestMethod -Uri "http://127.0.0.1:$AppPort/api/settings" -TimeoutSec 10
+  $expectedPolicy = Get-Content -LiteralPath (Join-Path $projectRoot 'scripts/lib/draft-runtime-policy.json') -Raw | ConvertFrom-Json
+  foreach ($entry in $expectedPolicy.PSObject.Properties) {
+    if ($settings.data.fixedDraftSettings.($entry.Name) -ne $entry.Value) { throw "패키지 고정 설정 불일치: $($entry.Name)" }
+    if (@($settings.data.fields | Where-Object key -eq $entry.Name).Count -ne 0) { throw "제거된 설정 옵션이 패키지에 남음: $($entry.Name)" }
+  }
+
   $controlBefore = Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:$AppPort/api/system/control" -TimeoutSec 5
   if (-not $controlBefore.success -or -not $controlBefore.data.available) {
     throw 'Electron 제어 브리지가 준비되지 않았습니다.'
@@ -173,6 +180,7 @@ try {
     authenticatedInstallerDownloaded = $true
     isolatedDownloadCacheVerified = $true
     fixtureInstallDisabled = $true
+    fixedDraftSettingsVerified = $true
     packagedPrismaEngineLoaded = $true
     workspacePrismaEngineLoaded = $false
     localUiStatus = $rootResponse.StatusCode

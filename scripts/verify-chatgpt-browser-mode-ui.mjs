@@ -30,9 +30,15 @@ try {
     assert.equal(await page.getByRole("heading", { name: "웹 GPT 예비 연결" }).count(), 0);
   } else {
     await page.getByRole("button", { name: /웹 GPT 재로그인/u }).waitFor({ state: "visible" });
-    await page.getByRole("switch", { name: /(?:백그라운드|웹) 자동작성 켜짐/u }).waitFor({ state: "visible" });
+    await page.getByText("백그라운드 자동작성 기본 적용").waitFor({ state: "visible" });
   }
 
+  await page.goto(`${baseUrl}/settings`, { waitUntil: "domcontentloaded" });
+  await page.getByText(/Codex · gpt-5.5 원고 작성/u).waitFor({ state: "visible" });
+  for (const key of ["AI_PROVIDER", "CODEX_DRAFT_ENABLED", "CODEX_DRAFT_MODEL", "CHATGPT_BROWSER_AUTOMATION_ENABLED", "BRAND_POST_AUTO_SECTION_IMAGES"]) {
+    assert.equal(settings.data.fields.some((field) => field.key === key), false);
+  }
+  assert.equal(await page.getByRole("combobox").count(), 0);
   assert.deepEqual(pageErrors, []);
   const screenshotPath = path.join(os.tmpdir(), "blogautomcp-chatgpt-browser-mode.png");
   await page.screenshot({ path: screenshotPath, fullPage: true });

@@ -265,13 +265,16 @@ export default function SettingsPage() {
             {loggingIn ? "로그인 대기 중…" : "네이버 로그인"}
           </button>
           <p className="mt-4 border-t border-gray-800 pt-4 text-xs leading-5 text-gray-500">
-            ChatGPT는 이 프로그램에서 로그인하지 않습니다. 사이트에서 발급한 MCP 주소를 ChatGPT에 등록해 사용합니다.
+            원고는 로그인된 Codex/GPT로 작성합니다. 웹 예비 경로와 섹션 이미지 생성에 필요한 로그인은 메인 화면의 연결 상태에서 확인하세요.
           </p>
         </section>
 
         {/* 설정 폼 */}
         <section className="bg-gray-900 rounded-xl p-5 border border-gray-800">
           <h2 className="text-lg font-semibold mb-1">API · 발행 설정</h2>
+          <p className="my-3 rounded-lg border border-emerald-900 bg-emerald-950/40 p-3 text-sm text-emerald-300">
+            Codex · gpt-5.5 원고 작성, ChatGPT 웹 자동작성 및 섹션 이미지 자동생성이 기본 적용됩니다. 별도 선택은 필요하지 않습니다.
+          </p>
           {envPath ? (
             <p className="text-xs text-gray-500 mb-4 break-all">저장 위치: {envPath}</p>
           ) : null}

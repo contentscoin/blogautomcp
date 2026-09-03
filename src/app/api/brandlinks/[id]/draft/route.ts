@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import draftRuntimePolicy from "../../../../../../scripts/lib/draft-runtime-policy.json";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { NextRequest, NextResponse } from "next/server";
@@ -132,14 +133,13 @@ function failureResponse(error: unknown, fallbackMessage: string, status: number
 }
 
 function isAutoSectionImagesEnabled(): boolean {
-  const value = process.env.BRAND_POST_AUTO_SECTION_IMAGES ?? process.env.TRAVEL_AUTO_IMAGE_QC_REPAIR ?? "false";
-  return value.trim().toLowerCase() === "true";
+  return draftRuntimePolicy.BRAND_POST_AUTO_SECTION_IMAGES === "true";
 }
 
 /**
  * 비어 있는 섹션 이미지 보충은 초안 응답을 기다리게 하지 않는다. 1.3.9 까지는 여기서 ChatGPT 브라우저 배치를
- * await 해 초안 작업이 이미지 6장 × 최대 3분 동안 멈췄다. 이제 기본은 꺼짐이고, 켜져 있어도 분리 실행이며,
- * ChatGPT 웹 자동화가 꺼져 있으면 Chrome 을 열지 않는다. MCP 제출 원고(submit_generated·origin:"mcp")는
+ * await 해 초안 작업이 이미지 6장 × 최대 3분 동안 멈췄다. 이제 자동 보충은 고정이며 분리 실행한다.
+ * MCP 제출 원고(submit_generated·origin:"mcp")는
  * ChatGPT 대화의 내장 이미지 생성 + post_apply_section_image 경로를 쓰므로 항상 건너뛴다.
  */
 function scheduleSectionImageRepair(options: {
@@ -224,7 +224,8 @@ async function runRevision(id: string, packageDir: string, instructions: string,
           BRANDLINK_REVISE_REQUEST: requestPath,
           BROWSER_GPT_MODE: "false",
           ALLOW_CHATGPT_BROWSER_MODE: "false",
-          AI_PROVIDER: "openai",
+          AI_PROVIDER: draftRuntimePolicy.AI_PROVIDER,
+          CODEX_DRAFT_MODEL: draftRuntimePolicy.CODEX_DRAFT_MODEL,
         },
       });
       child.once("error", reject);
@@ -351,12 +352,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   if (link.status === "PUBLISHING") return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "현재 발행 중인 상품입니다." }, { status: 409 });
   if (link.status === "DRAFTING") return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "현재 초안을 작성 중인 상품입니다." }, { status: 409 });
   const connectKind = link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING";
-  // 기본 엔진은 OpenAI API 키(Spec-first). codex 는 설정에서 켠 경우에만, ChatGPT 웹 자동작성도 설정에서 켠 경우에만 쓴다.
-  const provider = (process.env.AI_PROVIDER || "openai").toLowerCase() === "codex" ? "codex" : "openai";
+  // 로그인된 Codex가 항상 우선한다. 사용할 수 없으면 기존 API/웹 복구 경로를 사용한다.
+  const provider = "openai";
   const hasProviderKey = Boolean(process.env.OPENAI_API_KEY?.trim());
   const localFallbackEnabled = (process.env.PRODUCT_POST_LOCAL_FALLBACK_ENABLED || "false").toLowerCase() === "true";
   const browserAutomationEnabled = isChatGptBrowserAutomationEnabled();
-  const codexEnabled = (process.env.CODEX_DRAFT_ENABLED || "false").trim().toLowerCase() === "true";
+  const codexEnabled = draftRuntimePolicy.CODEX_DRAFT_ENABLED === "true";
   const codexStatus = !action && codexEnabled ? readCodexLocalStatus() : null;
   const useCodex = !action && codexEnabled && Boolean(codexStatus?.authenticated);
   // 로그인된 일반 ChatGPT 자동작성이 켜져 있으면 저품질 로컬 템플릿보다 우선한다.
@@ -497,6 +498,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           ...buildChatGptBrowserAutomationEnv(useBrowserChatGpt),
           AI_PROVIDER: useCodex ? "codex" : provider,
           CODEX_DRAFT_ENABLED: useCodex ? "true" : "false",
+          CODEX_DRAFT_MODEL: draftRuntimePolicy.CODEX_DRAFT_MODEL,
           CODEX_BROWSER_FALLBACK_ENABLED:
             useCodex && browserAutomationEnabled && browserSession?.isValid ? "true" : "false",
           ALLOW_CHATGPT_BROWSER_MODE:

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import draftRuntimePolicy from "./lib/draft-runtime-policy.json";
 import { getBundledCodexEntrypoint, getBundledCodexExecutable, readCodexLocalStatus } from "../src/lib/codex-local";
 
 const root = process.cwd();
@@ -25,16 +26,17 @@ assert.match(providerSource, /regularImages\.slice\(0, 2\)/u);
 assert.match(providerSource, /runStreamed/u);
 assert.match(agentSource, /AI_PROVIDER === "codex"/u);
 assert.match(agentSource, /CODEX_BROWSER_FALLBACK_ENABLED/u);
-assert.match(agentSource, /CODEX_DRAFT_MODEL[^\n]+"gpt-5\.5"/u);
+assert.match(agentSource, /CODEX_DRAFT_MODEL = draftRuntimePolicy\.CODEX_DRAFT_MODEL/u);
+assert.equal(draftRuntimePolicy.CODEX_DRAFT_MODEL, "gpt-5.5");
 // 1.3.8 부터 섹션 문장 수는 공유 필수 작성 계약(writing-prompt-contract)이 정하고 Codex 프롬프트는 그 계약을 참조한다.
 assert.match(agentSource, /문장 수와 출력 구조는 공유 필수 작성 계약을 따릅니다/u);
 assert.match(routeSource, /const useCodex/u);
 assert.match(routeSource, /AI_PROVIDER: useCodex \? "codex" : provider/u);
 assert.match(settingsSource, /draftCreationMode: codexDraftEnabled && codexDraft\.authenticated/u);
-// 기본 엔진은 OpenAI API 키(Spec-first). Codex 는 설정에서 켜는 선택 경로라 기본값이 false 다.
-assert.match(electronSource, /process\.env\.CODEX_DRAFT_ENABLED = process\.env\.CODEX_DRAFT_ENABLED \|\| "false"/u);
-assert.match(electronSource, /CODEX_DRAFT_MODEL[^\n]+"gpt-5\.5"/u);
-assert.match(settingsSource, /defaultValue: "gpt-5\.5"/u);
+assert.equal(draftRuntimePolicy.AI_PROVIDER, "codex");
+assert.equal(draftRuntimePolicy.CODEX_DRAFT_ENABLED, "true");
+assert.match(electronSource, /Object\.assign\(process\.env, draftRuntimePolicy\)/u);
+assert.match(settingsSource, /fixedDraftSettings: draftRuntimePolicy/u);
 
 console.log(JSON.stringify({
   ok: true,

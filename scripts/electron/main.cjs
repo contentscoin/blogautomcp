@@ -10,6 +10,7 @@ const { app, BrowserWindow, dialog, Menu, Notification, shell, Tray } = require(
 const next = require("next");
 const { NsisUpdater } = require("electron-updater");
 const { createDesktopAutoUpdater } = require("./auto-update.cjs");
+const draftRuntimePolicy = require("../lib/draft-runtime-policy.json");
 
 const APP_HOST = process.env.APP_HOST || "127.0.0.1";
 const APP_PORT = Number.parseInt(process.env.APP_PORT || "43127", 10) || 43127;
@@ -99,18 +100,10 @@ function configureRuntimePaths(projectRoot) {
     ((process.env.CHATGPT_HEADLESS || "").trim().toLowerCase() === "true"
       ? "headless"
       : "background");
-  const browserChatGptEnabled =
-    (process.env.CHATGPT_BROWSER_AUTOMATION_ENABLED || "false").trim().toLowerCase() === "true";
-  process.env.CHATGPT_BROWSER_AUTOMATION_ENABLED = browserChatGptEnabled ? "true" : "false";
-  // 섹션 이미지 자동 생성(브라우저 배치)은 기본 꺼짐. 켜도 ChatGPT 웹 자동화가 꺼져 있으면 Chrome 을 열지 않는다.
-  process.env.BRAND_POST_AUTO_SECTION_IMAGES =
-    (process.env.BRAND_POST_AUTO_SECTION_IMAGES || "false").trim().toLowerCase() === "true" ? "true" : "false";
-  // 기본 엔진은 OpenAI API 키 + Spec-first 파이프라인. Codex/ChatGPT 웹 자동작성은 설정에서 켜는 선택 경로다.
-  process.env.CODEX_DRAFT_ENABLED = process.env.CODEX_DRAFT_ENABLED || "false";
-  process.env.CODEX_DRAFT_MODEL = process.env.CODEX_DRAFT_MODEL?.trim() || "gpt-5.5";
-  process.env.AI_PROVIDER = process.env.AI_PROVIDER || "openai";
-  process.env.BROWSER_GPT_MODE = browserChatGptEnabled ? "true" : "false";
-  process.env.ALLOW_CHATGPT_BROWSER_MODE = browserChatGptEnabled ? "true" : "false";
+  // 제품 정책은 이전 .env의 선택값보다 우선한다. 실제 자식 작업의 엔진은 라우터가 선택한다.
+  Object.assign(process.env, draftRuntimePolicy);
+  process.env.BROWSER_GPT_MODE = "false";
+  process.env.ALLOW_CHATGPT_BROWSER_MODE = "true";
   process.env.CHATGPT_BASE_URL = "https://chatgpt.com/";
   // 썸네일 생성도 ChatGPT 브라우저 자동화를 쓰지 않는다. 사용자 .env로도 켤 수 없게 고정한다.
   process.env.PRODUCT_THUMBNAIL_CHATGPT_ENABLED = "false";
@@ -455,6 +448,8 @@ const DEEP_LINK_PROTOCOL = "blogautomcp";
 let pendingDeepLink = null;
 
 function registerDeepLinkProtocol() {
+  // A packaged smoke test must not replace the user's installed protocol handler.
+  if (process.env.AUTO_UPDATE_TEST_MODE === "1") return;
   try {
     if (process.defaultApp && process.argv.length >= 2) {
       app.setAsDefaultProtocolClient(DEEP_LINK_PROTOCOL, process.execPath, [path.resolve(process.argv[1])]);

@@ -1,0 +1,7 @@
+{
+  "AI_PROVIDER": "codex",
+  "CODEX_DRAFT_ENABLED": "true",
+  "CODEX_DRAFT_MODEL": "gpt-5.5",
+  "CHATGPT_BROWSER_AUTOMATION_ENABLED": "true",
+  "BRAND_POST_AUTO_SECTION_IMAGES": "true"
+}
