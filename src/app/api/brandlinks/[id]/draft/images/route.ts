@@ -12,8 +12,16 @@ import {
   packagePreview,
   readBrandPostPackage,
 } from "@/lib/brand-post-package";
-import type { BrandPostImageGenerationRequest } from "@/lib/brand-post-image-generation";
+import {
+  applyExternalGeneratedBrandPostImage,
+  BROWSER_IMAGE_AUTOMATION_DISABLED_MESSAGE,
+  type BrandPostImageGenerationRequest,
+} from "@/lib/brand-post-image-generation";
 import { isBrandPostImageRepairActive, planSectionImageRequests, repairBrandPostImages } from "@/lib/brand-post-image-repair";
+import { isChatGptBrowserAutomationEnabled } from "@/lib/chatgpt-browser-automation";
+
+const IMAGE_ACTIONS = ["generate_missing", "generate_section", "regenerate", "apply_generated"] as const;
+type ImageAction = (typeof IMAGE_ACTIONS)[number];
 
 function imageContentType(filePath: string): string {
   const extension = path.extname(filePath).toLowerCase();
@@ -86,12 +94,14 @@ export async function POST(
     );
   }
   const body = await request.json().catch(() => ({})) as {
-    action?: "generate_missing" | "generate_section" | "regenerate";
+    action?: ImageAction;
     sectionId?: string;
     assetKey?: string;
+    replaceAssetKey?: string;
+    generatedPath?: string;
     batchSize?: number;
   };
-  if (!body.action || !["generate_missing", "generate_section", "regenerate"].includes(body.action)) {
+  if (!body.action || !IMAGE_ACTIONS.includes(body.action)) {
     return NextResponse.json({ success: false, error: "지원하지 않는 이미지 작업입니다." }, { status: 400 });
   }
 
@@ -111,6 +121,79 @@ export async function POST(
   }
 
   const preview = packagePreview(manifest);
+  if (body.action === "apply_generated") {
+    // ChatGPT 대화(내장 이미지 생성)에서 받은 파일을 슬롯에 붙인다. PC 브라우저를 열지 않는다.
+    const generatedPath = typeof body.generatedPath === "string" ? body.generatedPath.trim() : "";
+    if (!generatedPath || !isInsidePackage(id, generatedPath) || !fs.existsSync(generatedPath)) {
+      return NextResponse.json(
+        { success: false, code: "INVALID_INPUT", error: "적용할 생성 이미지 파일이 초안 패키지 디렉터리 안에 있어야 합니다." },
+        { status: 400 },
+      );
+    }
+    const sectionId = typeof body.sectionId === "string" ? body.sectionId.trim() : "";
+    const replaceAssetKey = typeof body.replaceAssetKey === "string" ? body.replaceAssetKey.trim() : "";
+    if (replaceAssetKey && (!/^[a-f0-9]{64}$/u.test(replaceAssetKey) || !preview.imageAssets.some((asset) => asset.assetKey === replaceAssetKey))) {
+      return NextResponse.json({ success: false, code: "INVALID_INPUT", error: "교체할 이미지 항목을 찾을 수 없습니다." }, { status: 404 });
+    }
+    if (!replaceAssetKey) {
+      const slot = preview.imageSlots.find((candidate) => candidate.sectionId === sectionId);
+      if (!slot) {
+        return NextResponse.json({ success: false, code: "INVALID_INPUT", error: "이미지를 추가할 파트를 찾을 수 없습니다." }, { status: 404 });
+      }
+      if (slot.maximum === 0 || slot.count >= slot.maximum) {
+        return NextResponse.json({
+          success: false,
+          code: "INVALID_INPUT",
+          error: "이 파트는 최대 이미지 수에 도달했습니다. 교체하려면 replaceAssetKey 로 기존 이미지를 지정하세요.",
+        }, { status: 422 });
+      }
+    }
+    const finishApply = beginDesktopActivity("brand-post-image-apply");
+    try {
+      const applied = await applyExternalGeneratedBrandPostImage({
+        brandLinkId: id,
+        manifest,
+        productName: manifest.title,
+        sectionId: sectionId || undefined,
+        replaceAssetKey: replaceAssetKey || undefined,
+        rawPath: generatedPath,
+      });
+      const updatedPreview = packagePreview(applied.manifest);
+      const remainingMissing = updatedPreview.imageSlots.reduce((sum, slot) => sum + slot.generationMissing, 0);
+      return NextResponse.json({
+        success: true,
+        data: updatedPreview,
+        generatedCount: applied.alreadyApplied ? 0 : 1,
+        alreadyApplied: applied.alreadyApplied,
+        assetKey: applied.assetKey,
+        sectionId: applied.sectionId,
+        provenance: applied.provenance,
+        remainingMissing,
+        errors: [],
+        message: applied.alreadyApplied
+          ? "같은 이미지가 이미 이 파트에 반영되어 있습니다."
+          : `${applied.sectionId ? "본문 파트" : "이미지 항목"}에 생성 이미지를 반영했습니다.`,
+      });
+    } catch (error) {
+      return NextResponse.json({
+        success: false,
+        code: "IMAGE_APPLY_FAILED",
+        error: error instanceof Error ? error.message : "생성 이미지를 반영하지 못했습니다.",
+      }, { status: 422 });
+    } finally {
+      finishApply();
+    }
+  }
+  if (!isChatGptBrowserAutomationEnabled()) {
+    // The browser batch is the only PC-side generator. Refuse before planning so no Chrome starts.
+    return NextResponse.json({
+      success: false,
+      code: "CHATGPT_BROWSER_AUTOMATION_DISABLED",
+      error: BROWSER_IMAGE_AUTOMATION_DISABLED_MESSAGE,
+      data: preview,
+      remainingMissing: preview.imageSlots.reduce((sum, slot) => sum + slot.generationMissing, 0),
+    }, { status: 409 });
+  }
   const generationRequests: BrandPostImageGenerationRequest[] = [];
   if (body.action === "generate_missing") {
     generationRequests.push(...planSectionImageRequests(preview.imageSlots));

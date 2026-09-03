@@ -61,7 +61,7 @@ if ($badOrigin.StatusCode -ne 403) { throw 'A foreign browser Origin was not rej
 
 $pairBody = @{ mcpUrl = $mcpUrl; deviceName = 'E2E-PC-1'; platform = 'win32-x64'; appVersion = '1.0.0' } | ConvertTo-Json -Compress
 $firstPair = Invoke-RestMethod -Method Post -Uri "$BaseUrl/api/device/pair" -ContentType 'application/json' -Body $pairBody
-$secondPairBody = @{ mcpUrl = $mcpUrl; deviceName = 'E2E-PC-2'; platform = 'win32-x64'; appVersion = '1.0.0' } | ConvertTo-Json -Compress
+$secondPairBody = @{ mcpUrl = $mcpUrl; deviceName = 'E2E-PC-2'; platform = 'win32-x64'; appVersion = '1.3.10' } | ConvertTo-Json -Compress
 $secondPair = Invoke-RestMethod -Method Post -Uri "$BaseUrl/api/device/pair" -ContentType 'application/json' -Body $secondPairBody
 
 $oldDevice = Invoke-WebRequest -SkipHttpErrorCheck -Method Post -Uri "$BaseUrl/api/agent/jobs/claim" -Headers @{ Authorization = "Bearer $($firstPair.data.deviceToken)" } -ContentType 'application/json' -Body '{}'
@@ -99,15 +99,32 @@ if (-not $draftContextQueued.result.structuredContent.ok) { throw 'Draft context
 $draftContextJobId = [string]$draftContextQueued.result.structuredContent.jobId
 $draftContextClaim = Invoke-RestMethod -Method Post -Uri "$BaseUrl/api/agent/jobs/claim" -Headers @{ Authorization = "Bearer $($secondPair.data.deviceToken)" } -ContentType 'application/json' -Body '{}'
 if ($draftContextClaim.data.id -ne $draftContextJobId -or $draftContextClaim.data.type -ne 'POST_PREPARE_DRAFT') { throw 'Draft context job type is invalid.' }
+# post_submit_draft 는 준비 작업 결과의 brand-draft-context/v2 스냅샷(productId·connectKind·snapshotId)을 요구한다.
+$draftSnapshotId = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes("e2e-snapshot:$draftProductId"))).ToLowerInvariant()
 $draftContextResult = @{
   status = 'SUCCEEDED'
   result = @{
-    version = 'brand-draft-context/v1'
-    productId = $draftProductId
-    connectKind = 'SHOPPING'
-    generation = @{ minimumSectionCount = 9; maximumSectionCount = 12 }
+    schema = 'blogautomcp.job-result/v1'
+    jobType = 'POST_PREPARE_DRAFT'
+    kind = 'draft-context'
+    summary = 'e2e draft context'
+    warnings = @()
+    data = @{
+      version = 'brand-draft-context/v2'
+      productId = $draftProductId
+      contextJobId = $draftContextJobId
+      connectKind = 'shopping'
+      snapshotId = $draftSnapshotId
+      snapshot = @{ version = 'brand-product-snapshot/v1'; productId = $draftProductId; connectKind = 'shopping'; snapshotId = $draftSnapshotId }
+      verifiedFacts = @('상품명: 휴대용 선풍기')
+      sourceImages = @()
+      harness = @{ minimumSectionCount = 9; maximumSectionCount = 12 }
+      systemPrompt = 'e2e system prompt'
+      userPrompt = 'e2e user prompt'
+      generation = @{ minimumSectionCount = 9; maximumSectionCount = 12 }
+    }
   }
-} | ConvertTo-Json -Depth 10 -Compress
+} | ConvertTo-Json -Depth 12 -Compress
 Invoke-RestMethod -Method Post -Uri "$BaseUrl/api/agent/jobs/$draftContextJobId/complete" -Headers @{ Authorization = "Bearer $($secondPair.data.deviceToken)" } -ContentType 'application/json' -Body $draftContextResult | Out-Null
 
 $draftSections = @(1..9 | ForEach-Object {
@@ -138,6 +155,7 @@ $draftSubmitJobId = [string]$draftSubmitted.result.structuredContent.jobId
 $draftSubmitClaim = Invoke-RestMethod -Method Post -Uri "$BaseUrl/api/agent/jobs/claim" -Headers @{ Authorization = "Bearer $($secondPair.data.deviceToken)" } -ContentType 'application/json' -Body '{}'
 if ($draftSubmitClaim.data.id -ne $draftSubmitJobId -or $draftSubmitClaim.data.type -ne 'POST_SUBMIT_DRAFT') { throw 'Submitted draft job type is invalid.' }
 if ($draftSubmitClaim.data.input.contextJobId -ne $draftContextJobId -or @($draftSubmitClaim.data.input.draft.sections).Count -ne 9) { throw 'Submitted ChatGPT draft payload was not preserved.' }
+if ($draftSubmitClaim.data.input.snapshotId -ne $draftSnapshotId -or $draftSubmitClaim.data.input.contextSnapshot.snapshot.snapshotId -ne $draftSnapshotId) { throw 'Submitted draft did not pin the prepared product snapshot.' }
 $draftSubmitCompletion = @{ status = 'SUCCEEDED'; result = @{ draftId = $draftProductId; connectKind = 'shopping' } } | ConvertTo-Json -Depth 8 -Compress
 Invoke-RestMethod -Method Post -Uri "$BaseUrl/api/agent/jobs/$draftSubmitJobId/complete" -Headers @{ Authorization = "Bearer $($secondPair.data.deviceToken)" } -ContentType 'application/json' -Body $draftSubmitCompletion | Out-Null
 

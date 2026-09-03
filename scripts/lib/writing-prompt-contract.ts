@@ -1,4 +1,5 @@
 import { composeBudgetedChatGptPrompt } from "./chatgpt-direct-prompt";
+import { isMeaningfulProductEvidenceFeature } from "./product-editorial-plan";
 
 export interface WritingPromptContract {
   version: "writing-prompt-contract/v1";
@@ -101,10 +102,80 @@ export function formatDraftSubmissionNextAction(): string {
     "qualityChecklist를 내부 검수한 JSON 원고를 post_submit_draft로 제출하고 작업을 job_get으로 확인하세요.",
     "contentQuality.canPublish가 false이면 score만 보지 말고 code, blockers, 실패 signals와 compositionQualityReport를 구분하세요.",
     "본문 사실성·분량·섹션·반복·고지 등 텍스트 실패가 명시된 경우에만 해당 원인을 고쳐 새 idempotencyKey로 원고를 다시 제출하세요.",
-    "composition-quality, representative-image, thumbnail 등 이미지·배치 실패만 있으면 원고를 재작성하거나 재제출하지 마세요. 기존 원고를 유지하고 이미지·구성 보완 단계로 넘기세요.",
+    "composition-quality, representative-image, thumbnail 등 이미지·배치 실패만 있으면 원고를 재작성하거나 재제출하지 마세요. 기존 원고를 유지하고 이미지·구성 보완 단계로 넘기세요: post_get_draft 의 imageSlots 에서 generationMissing 이 있는 파트의 imagePrompt 로 ChatGPT 내장 이미지 생성을 실행하고 post_apply_section_image 로 붙입니다. PC 는 이미지를 생성하지 않습니다.",
     "composition-quality 안에 본문 분량·섹션 실패도 있으면 그 텍스트 항목만 보강합니다. 원인이 불명확하면 실패 상세를 조회하고 재작성을 추측하지 마세요.",
     "텍스트 QC 통과나 100점은 이미지 준비·전체 발행 가능을 의미하지 않습니다. 원고를 사용자에게 먼저 보여주고 발행은 별도 확인을 받으세요.",
   ].join(" ");
+}
+
+const GENERIC_EVIDENCE_TOKENS = new Set([
+  "상품", "제품", "기능", "사용", "구매", "추천", "후기", "확인", "가능", "제공", "포함", "구성", "정품", "공식",
+  "무료배송", "배송", "판매", "가격", "할인", "브랜드", "스토어", "네이버", "이미지", "상세", "페이지",
+]);
+
+function normalizeEvidenceText(text: string): string {
+  return text.normalize("NFKC").toLowerCase().replace(/(\d),(?=\d{3})/gu, "$1");
+}
+
+function evidenceTokens(text: string): string[] {
+  return Array.from(new Set(
+    normalizeEvidenceText(text).replace(/[^\p{L}\p{N}]+/gu, " ").split(/\s+/u)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 2 && !GENERIC_EVIDENCE_TOKENS.has(token)),
+  ));
+}
+
+function numericEvidenceTokens(text: string): string[] {
+  return Array.from(new Set(
+    normalizeEvidenceText(text).replace(/[^\p{L}\p{N}.]+/gu, " ").split(/\s+/u)
+      .map((token) => token.replace(/^\.+|\.+$/gu, ""))
+      .filter((token) => /\d/u.test(token)),
+  ));
+}
+
+const EVIDENCE_NEGATION_PATTERN = /안\s*함|안\s*됨|불가|없음|없습니다|미지원|미포함|않|아님|아닙니다|제외/u;
+
+/**
+ * ChatGPT가 상세이미지에서 읽었다고 제출한 evidenceFacts 중 스냅샷 텍스트(상품명·설명·특징·가격)로
+ * 뒷받침되는 것만 "근거가 있는" 사실로 본다. 보수적 규칙:
+ * - 유효 토큰(2자 이상, 일반어 제외) 2개 이상 공유하고, 후보 토큰의 60% 이상이 스냅샷에 있어야 한다(추가 주장 차단).
+ * - 후보에 숫자가 있으면 그 숫자 토큰이 전부 스냅샷에 있어야 하고(수치 변조 차단), 그 경우에는 토큰 2개 이상·공유 1개 이상·50% 이상이면 인정한다.
+ * - 스냅샷의 한 줄이 후보 토큰을 모두 담고 있으면서 부정 표현을 가지는데 후보에는 없으면 거부한다(부정 뒤집기 차단).
+ * 이 결과는 이번 제출의 채점에만 쓰이고 패키지나 DB의 source features로 저장되지 않는다.
+ */
+export function selectGroundedEvidenceFacts(candidates: unknown, snapshotText: string): {
+  grounded: string[];
+  rejected: string[];
+} {
+  const snapshotLines = snapshotText.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+  const haystack = new Set(evidenceTokens(snapshotText));
+  const numericHaystack = new Set(numericEvidenceTokens(snapshotText));
+  const lineTokens = snapshotLines.map((line) => ({
+    tokens: new Set(evidenceTokens(line)),
+    negated: EVIDENCE_NEGATION_PATTERN.test(line),
+  }));
+  const grounded: string[] = [];
+  const rejected: string[] = [];
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    if (typeof candidate !== "string") continue;
+    const fact = candidate.replace(/\s+/gu, " ").trim();
+    if (!fact) continue;
+    const tokens = evidenceTokens(fact);
+    const shared = tokens.filter((token) => haystack.has(token)).length;
+    const numbers = numericEvidenceTokens(fact);
+    const numbersGrounded = numbers.every((token) => numericHaystack.has(token));
+    const negationFlipped = !EVIDENCE_NEGATION_PATTERN.test(fact) && lineTokens.some((line) =>
+      line.negated && tokens.length > 0 && tokens.every((token) => line.tokens.has(token)),
+    );
+    // Statements that restate a snapshot number (price, capacity) carry few tokens, so once every number is
+    // grounded one more shared token is enough; everything else needs two shared tokens and 60% coverage.
+    const enoughCoverage = numbers.length > 0 && numbersGrounded
+      ? tokens.length >= 2 && shared >= 1 && shared >= Math.ceil(tokens.length * 0.5)
+      : shared >= 2 && shared >= Math.ceil(tokens.length * 0.6);
+    if (isMeaningfulProductEvidenceFeature(fact) && enoughCoverage && numbersGrounded && !negationFlipped) grounded.push(fact);
+    else rejected.push(fact);
+  }
+  return { grounded: Array.from(new Set(grounded)).slice(0, 12), rejected };
 }
 
 /** Conservative whole-fact matching: no substring, paraphrase, punctuation or number removal. */

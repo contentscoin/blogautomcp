@@ -1076,11 +1076,14 @@ export default function Dashboard() {
           throw new Error(payload.approvalWarning || "소재는 작성됐지만 품질검사를 통과하지 못해 자동 승인되지 않았습니다.");
         }
         completed = true;
+        const imageRepairNote = typeof payload.imageRepairWarning === "string" && payload.imageRepairWarning.trim()
+          ? ` ${payload.imageRepairWarning.trim()}`
+          : "";
         setDashboardNotice({
           tone: "success",
-          text: options?.forceQualityRepair
+          text: (options?.forceQualityRepair
             ? "품질 자동 보강이 끝났습니다. 점수와 보강 결과를 확인해 주세요."
-            : "고품질 초안이 준비됐습니다. 내용을 확인한 뒤 승인해 주세요.",
+            : "고품질 초안이 준비됐습니다. 내용을 확인한 뒤 승인해 주세요.") + imageRepairNote,
         });
       };
 

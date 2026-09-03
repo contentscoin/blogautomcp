@@ -23,6 +23,7 @@ import {
   readBrandPostPackageResult,
 } from "@/lib/brand-post-package";
 import { isBrandPostImageRepairActive, repairBrandPostImages } from "@/lib/brand-post-image-repair";
+import { getDraftProgressPath, writeDraftProgress } from "@/lib/draft-progress";
 import {
   getPostCompositionContract,
   stripAffiliateDisclosureFromTitle,
@@ -129,25 +130,62 @@ function failureResponse(error: unknown, fallbackMessage: string, status: number
   return NextResponse.json({ success: false, code, error: message, ...extra }, { status });
 }
 
-async function autoRepairSectionImages(options: {
+function isAutoSectionImagesEnabled(): boolean {
+  const value = process.env.BRAND_POST_AUTO_SECTION_IMAGES ?? process.env.TRAVEL_AUTO_IMAGE_QC_REPAIR ?? "false";
+  return value.trim().toLowerCase() === "true";
+}
+
+/**
+ * 비어 있는 섹션 이미지 보충은 초안 응답을 기다리게 하지 않는다. 1.3.9 까지는 여기서 ChatGPT 브라우저 배치를
+ * await 해 초안 작업이 이미지 6장 × 최대 3분 동안 멈췄다. 이제 기본은 꺼짐이고, 켜져 있어도 분리 실행이며,
+ * ChatGPT 웹 자동화가 꺼져 있으면 Chrome 을 열지 않는다. MCP 제출 원고(submit_generated·origin:"mcp")는
+ * ChatGPT 대화의 내장 이미지 생성 + post_apply_section_image 경로를 쓰므로 항상 건너뛴다.
+ */
+function scheduleSectionImageRepair(options: {
   brandLinkId: string;
   productName: string;
-}) {
-  if ((process.env.BRAND_POST_AUTO_SECTION_IMAGES ?? process.env.TRAVEL_AUTO_IMAGE_QC_REPAIR ?? "true").toLowerCase() === "false") {
-    return { manifest: readBrandPostPackage(options.brandLinkId), warning: "설정에서 섹션 이미지 자동 생성이 꺼져 있습니다. 이미지 탭에서 필수 파트를 보충하세요." as string | null };
-  }
+  skip: boolean;
+}): { scheduled: boolean; remaining: number; warning: string | null } {
   const manifest = readBrandPostPackage(options.brandLinkId);
   if (!manifest || manifest.version !== "brand-post-package/v2") {
-    return { manifest, warning: null as string | null };
+    return { scheduled: false, remaining: 0, warning: null };
   }
-  try {
-    return await repairBrandPostImages(options);
-  } catch (error) {
+  const remaining = packagePreview(manifest).imageSlots
+    .reduce((sum, slot) => sum + Math.max(slot.missing, slot.generationMissing), 0);
+  if (remaining === 0) return { scheduled: false, remaining, warning: null };
+  const hint = "ChatGPT 대화에서 슬롯별 imagePrompt로 이미지를 만들어 post_apply_section_image 로 붙이거나, 이미지 탭에서 보충하세요.";
+  if (options.skip) {
+    return { scheduled: false, remaining, warning: `섹션 이미지 ${remaining}장이 비어 있습니다. ${hint}` };
+  }
+  if (!isAutoSectionImagesEnabled()) {
     return {
-      manifest: readBrandPostPackage(options.brandLinkId) || manifest,
-      warning: `섹션 이미지 자동 생성 실패: ${error instanceof Error ? error.message : "알 수 없는 오류"}`,
+      scheduled: false,
+      remaining,
+      warning: `섹션 이미지 ${remaining}장이 비어 있습니다. 자동 생성은 꺼져 있습니다(설정 BRAND_POST_AUTO_SECTION_IMAGES). ${hint}`,
     };
   }
+  if (!isChatGptBrowserAutomationEnabled()) {
+    return {
+      scheduled: false,
+      remaining,
+      warning: `섹션 이미지 ${remaining}장이 비어 있습니다. ChatGPT 웹 자동화가 꺼져 있어 PC에서 이미지를 생성하지 않습니다. ${hint}`,
+    };
+  }
+  if (isBrandPostImageRepairActive(options.brandLinkId)) {
+    return { scheduled: false, remaining, warning: "이 초안의 이미지 생성이 이미 진행 중입니다." };
+  }
+  const finishActivity = beginDesktopActivity("brand-post-image-generation");
+  // Detached on purpose: the draft response returns now; imageGeneration.status="running" is persisted before the first await.
+  void repairBrandPostImages({ brandLinkId: options.brandLinkId, productName: options.productName })
+    .catch((error) => {
+      console.error(`[draft] 섹션 이미지 자동 생성 실패(${options.brandLinkId}): ${error instanceof Error ? error.message : String(error)}`);
+    })
+    .finally(finishActivity);
+  return {
+    scheduled: true,
+    remaining,
+    warning: `섹션 이미지 ${remaining}장을 백그라운드에서 생성합니다. 완료 전까지 초안 승인은 보류됩니다.`,
+  };
 }
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -285,6 +323,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     contextSnapshot?: unknown;
     forceQualityRepair?: boolean;
     autoApprove?: boolean;
+    origin?: string;
   };
   const action: DraftAction | null =
     body.action === "prepare_context" || body.action === "submit_generated"
@@ -302,6 +341,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     return NextResponse.json({ success: false, code: "INVALID_INPUT", error: "실제 체험형 문체를 사용하려면 구체적인 체험 사실 메모가 필요합니다." }, { status: 400 });
   }
   const requestMemo = typeof body.memo === "string" ? body.memo.trim().slice(0, 1000) : "";
+  const mcpOrigin = body.origin === "mcp" || request.headers.get("x-blogautomcp-origin") === "mcp";
   const link = await prisma.brandLink.findUnique({
     where: { id },
     select: { id: true, status: true, connectKind: true, productName: true, memo: true },
@@ -404,6 +444,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       error: "상품 상태가 변경되어 초안 작성을 시작하지 못했습니다. 목록을 새로고침해 주세요.",
     }, { status: 409 });
   }
+  const progressPath = getDraftProgressPath(id);
+  writeDraftProgress(id, {
+    stage: "facts",
+    progress: 10,
+    message: action === "submit_generated" ? "제출 원고 검증 준비" : "상품 사실 수집 준비",
+  });
   try {
     if (action === "prepare_context") {
       fs.rmSync(contextPath, { force: true });
@@ -446,6 +492,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           BRANDLINK_GENERATED_DRAFT_PATH: action === "submit_generated" ? submittedDraftPath : "",
           BRANDLINK_SUBMITTED_CONTEXT_PATH: action === "submit_generated" ? submittedContextPath : "",
           BRANDLINK_DRAFT_MEMO: requestMemo,
+          BRANDLINK_DRAFT_PROGRESS_PATH: progressPath,
           ...buildChatGptBrowserAutomationEnv(useBrowserChatGpt),
           AI_PROVIDER: useCodex ? "codex" : provider,
           CODEX_DRAFT_ENABLED: useCodex ? "true" : "false",
@@ -496,6 +543,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           errorMessage: null,
         },
       });
+      writeDraftProgress(id, { stage: "done", progress: 100, message: "초안 컨텍스트 준비 완료" });
       return NextResponse.json({ success: true, data: contextData, logPath });
     }
     const manifest = readBrandPostPackage(id);
@@ -503,11 +551,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       const failure = readPrepareFailure(logPath, id);
       throw new PrepareProcessError(failure?.code || "LOCAL_AUTOMATION_FAILED", failure?.message || `초안 매니페스트가 생성되지 않았습니다: ${getBrandPostPackageManifestPath(id)}`);
     }
-    const imageRepair = await autoRepairSectionImages({
+    const imageRepair = scheduleSectionImageRepair({
       brandLinkId: id,
       productName: manifest.title,
+      skip: action === "submit_generated" || mcpOrigin,
     });
-    let finalizedManifest = imageRepair.manifest || manifest;
+    let finalizedManifest = readBrandPostPackage(id) || manifest;
     let approvalWarning: string | null = null;
     if (body.autoApprove === true) {
       try {
@@ -520,16 +569,20 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       where: { id },
       data: { status: "READY", errorMessage: null },
     });
+    writeDraftProgress(id, { stage: "done", progress: 100, message: "초안 저장 완료" });
     return NextResponse.json({
       success: true,
       data: packagePreview(finalizedManifest),
       autoApproved: Boolean(finalizedManifest.approvedAt),
       approvalWarning,
+      imageRepairScheduled: imageRepair.scheduled,
+      imageRepairRemaining: imageRepair.remaining,
       imageRepairWarning: imageRepair.warning,
       logPath,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "고품질 초안 생성 실패";
+    writeDraftProgress(id, { stage: "failed", progress: 0, message });
     await prisma.brandLink.update({
       where: { id },
       data: { status: "FAILED", errorMessage: message },

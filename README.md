@@ -80,8 +80,8 @@ OpenAI API 키는 선택 사항이며 ChatGPT 구독과 별개입니다. 없으�
 
 ChatGPT 커넥터는 OAuth 고정 주소(`/api/mcp`)로도 연결할 수 있습니다(대시보드 안내 참고). 두 방식 모두 같은 도구를 제공합니다.
 
-초안은 기본적으로 PC 가 OpenAI API 키로 Spec-first 파이프라인(이미지 플랜 → 구조화 생성 → 검증·수리)을 돌려 만듭니다.
-PC 에 API 키가 없으면 `post_prepare_draft → (ChatGPT 가 원고 작성) → post_submit_draft` 2단계 경로로 ChatGPT 대화가 원고를 쓰고 PC 가 검증·패키징합니다.
+초안은 ChatGPT 가 씁니다. `post_create_draft` 로 PC 가 상품 사실·상세이미지·하네스·프롬프트(verifiedFacts / sourceImages / harness / systemPrompt / userPrompt)를 수십 초 안에 준비하고, ChatGPT 대화가 원고 JSON 을 작성해 `post_submit_draft` 로 제출하면 PC 는 품질검사와 저장만 합니다. 섹션 이미지는 ChatGPT 내장 이미지 생성으로 만들어 `post_apply_section_image` 로 붙입니다(PC 가 ChatGPT 브라우저를 열지 않습니다).
+PC 에 OpenAI API 키가 있고 PC 전량 생성을 원할 때만 `post_generate_draft_local`(Spec-first 파이프라인, 수 분)을 씁니다.
 
 > ⚠️ API 키는 한 번만 보여주므로 반드시 복사해서 안전한 곳에 저장하세요!
 
@@ -232,8 +232,8 @@ npm run login
 
 - 브라우저 자동화는 특정 공유 GPT에 의존하지 않고 일반 ChatGPT에서 단일 프롬프트로 글을 생성합니다.
 - OpenAI API가 실패하거나 키가 없으면 기본 설정상 자동 승인을 받을 수 없는 로컬 템플릿으로 덮어쓰지 않고 `LLM_UNAVAILABLE`로 중단합니다.
-- ChatGPT MCP 2단계 초안은 `상품 근거 준비(post_prepare_draft) → ChatGPT 원고 생성 → PC 검증·패키징(post_submit_draft)` 순서로 처리하며 API 키가 필요하지 않습니다.
-- 초안 미리보기의 `이미지` 탭에서 각 결과를 확인하고, 필수 슬롯 자동 보충·파트별 추가·개별 재생성을 실행할 수 있습니다. 쇼핑 이미지는 원본 상품을 다시 그리지 않고 잠금 합성하며, 안전한 분리가 불가능하면 수집 원본을 유지합니다.
+- ChatGPT MCP 초안은 `상품 근거 준비(post_create_draft = post_prepare_draft) → ChatGPT 원고 생성 → PC 품질검사·저장(post_submit_draft) → ChatGPT 내장 이미지 생성 → post_apply_section_image` 순서로 처리하며 API 키가 필요하지 않습니다. 제출 단계는 이미지를 생성하지 않습니다.
+- 초안 미리보기의 `이미지` 탭에서 각 결과를 확인할 수 있습니다. PC 브라우저로 섹션 이미지를 만드는 "섹션별 이미지 자동 생성"은 `ChatGPT 웹 자동작성` 설정이 켜져 있을 때만 동작하고, 초안 생성 직후 자동 보충(`BRAND_POST_AUTO_SECTION_IMAGES`)은 기본 꺼짐이며 켜도 초안 응답을 기다리게 하지 않습니다. 배치는 첫 실패에서 중단(fail-fast)하고 장당 3분 예산을 씁니다. 쇼핑 이미지는 원본 상품을 다시 그리지 않고 잠금 합성하며, 안전한 분리가 불가능하면 수집 원본을 유지합니다.
 - 이미지 수는 쇼핑 `최소 5/권장 8`, 여행 `최소 7/권장 10`으로 검사합니다. `품질검사` 탭은 확인 안내 반복·상품 고유 장단점 부족·허위 체험 표현을 별도로 검사하고 자동 보강 결과를 표시합니다.
 - 사람형 모바일 문체는 기본으로 켜져 있습니다 (`BLOG_HUMANIZE_MOBILE_STYLE=true`).
 - 문장은 짧게 끊고, AI처럼 보이는 반복 표현/과한 광고 문구/허위 체험 단정을 줄입니다.

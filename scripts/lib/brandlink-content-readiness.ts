@@ -281,7 +281,9 @@ function buildQualityReport(input: {
       ? [isTravel
           ? `핵심 방문지 ${coveredEvidence}/${requiredEvidence}곳만 본문에 등장합니다.`
           : `확인된 기능·수치 ${coveredEvidence}/${requiredEvidence}개만 본문에 등장합니다.`]
-      : [],
+      : "coveredSignals" in reviewSubstance && !reviewSubstance.signalEvidenceAvailable
+        ? ["확인된 기능·수치 신호가 없어 상품 고유 근거를 요구하지 않았습니다. 상세정보 동기화 후 재검사를 권장합니다."]
+        : [],
   };
 
   // 2. 사용 장면·여행 장면 연결

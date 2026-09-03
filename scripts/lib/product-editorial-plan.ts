@@ -91,6 +91,8 @@ export interface ProductReviewSubstanceAssessment {
   usageInstructionCount: number;
   detailReadingCount: number;
   coveredReviewEvidence: string[];
+  /** false면 확인 가능한 텍스트 신호가 없어 근거 항목을 요구하지 않은 것. */
+  signalEvidenceAvailable: boolean;
 }
 
 const SECTION_LIBRARY: ProductEditorialSection[] = [
@@ -205,7 +207,7 @@ export function isMeaningfulProductEvidenceFeature(value: string): boolean {
   if (SEO_ONLY_FEATURE_PATTERN.test(normalized.replace(/\s+/gu, ""))) return false;
   if (/^(?:추천|인기|베스트|신상품|핫딜|특가|무료배송|오늘출발)$/u.test(normalized)) return false;
 
-  const hasMeasurement = /\d[\d,.]*\s*(?:mAh|m|cm|mm|kg|g|W|V|시간|분|단|도|개|엽|%)/iu.test(normalized);
+  const hasMeasurement = /\d[\d,.]*\s*(?:mAh|m|cm|mm|kg|g|W|V|시간|분|단|도|개|엽|%|원)/iu.test(normalized);
   const hasSpecificationRelation = /(?:최대|약|기준|사용시간|충전시간|소비전력|크기|무게|구성품|회전|각도|풍속|풍량|배터리|리모컨|방수|소재|모드|단계|분리|변환|호환|보증)/u.test(normalized);
   const hasStructuredPair = /[:：]|\s[-–—]\s/u.test(normalized);
   const wordCount = normalized.split(/\s+/u).filter(Boolean).length;
@@ -529,9 +531,10 @@ export function hasSufficientProductReviewEvidence(input: ProductEditorialPlanIn
   return analysis.evidenceLevel !== "sparse";
 }
 
-export function buildProductEditorialPlan(input: ProductEditorialPlanInput): ProductEditorialPlan {
+/** 판매 페이지에서 확인된 사실을 `라벨: 값` 줄로 만든다. 프롬프트와 품질 채점이 같은 줄을 본다. */
+export function buildProductVerifiedFactLines(input: ProductEditorialPlanInput): string[] {
   const description = meaningfulDescription(input.description, input.productName);
-  const factLines = [
+  return [
     clean(input.productName) ? `상품명: ${clean(input.productName)}` : "",
     description ? `설명: ${description}` : "",
     ...meaningfulFeatures(input.features).slice(0, 10).map((value) => `상세 근거: ${value}`),
@@ -544,6 +547,21 @@ export function buildProductEditorialPlan(input: ProductEditorialPlanInput): Pro
     clean(input.reviewCount) ? `리뷰 수: ${clean(input.reviewCount)}` : "",
     clean(input.rating) ? `평점: ${clean(input.rating)}` : "",
   ].filter(Boolean);
+}
+
+/**
+ * 품질 채점용 근거 목록. 키워드 태그(러닝, 메쉬 …)만 있는 상품도 `상품명: …`, `가격: …`, `원가: …` 같은
+ * 구조화된 사실 줄은 근거로 인정되도록 사실 줄과 구매후기 근거를 합친다. 생성 전 게이트(evidenceLevel)에는 쓰지 않는다.
+ */
+export function buildProductScoringFeatures(input: ProductEditorialPlanInput): string[] {
+  return unique([
+    ...buildProductVerifiedFactLines(input).filter((line) => !line.startsWith("구매후기 원문 근거:")),
+    ...(input.features || []).filter(isReviewEvidenceFeature),
+  ], 24);
+}
+
+export function buildProductEditorialPlan(input: ProductEditorialPlanInput): ProductEditorialPlan {
+  const factLines = buildProductVerifiedFactLines(input);
   const reviewAnalysis = buildProductReviewAnalysis(input);
   return {
     framework: "source-backed-product-review-v3",
@@ -696,6 +714,12 @@ export function assessProductReviewSubstance(input: {
   const coveredSignals = analysis.verifiedSignals.filter((signal) =>
     sentences.some((sentence) => signalCoveredBySentence(signal, sentence))
   );
+  const signalEvidenceAvailable = analysis.verifiedSignals.length > 0;
+  // 텍스트 신호가 하나도 없으면(키워드 태그뿐인 상품) 상품명 토큰을 앵커로 삼아
+  // "상품 사실 → 판단" 문장을 센다. 없는 신호를 요구해 0점을 확정하지 않기 위해서다.
+  const productNameAnchors = unique(clean(input.productName).split(/[^\p{L}\p{N}]+/u), 8)
+    .filter((token) => token.length >= 2 && !/(?:상품|제품|기능|추천|세트|정품|공식|무료배송)/u.test(token));
+  const judgementAnchors = signalEvidenceAvailable ? analysis.verifiedSignals : productNameAnchors;
   const coveredReviewEvidence = analysis.reviewEvidence.filter((evidence) => {
     const tokens = unique(evidence.split(/[^\p{L}\p{N}]+/u), 16)
       .filter((token) => token.length >= 2 && !/(?:제품|상품|사용|구매|정말|너무|좋아요|좋습니다)/u.test(token));
@@ -708,13 +732,15 @@ export function assessProductReviewSubstance(input: {
     /(?:상세\s*페이지|상세\s*정보|상품\s*설명에는|판매\s*페이지|사진에는|이미지에는|적혀\s*있|표시되어\s*있|확인됩니다)/u.test(sentence)
   ).length;
   const evidenceJudgementCount = sentences.filter((sentence) =>
-    analysis.verifiedSignals.some((signal) => signalCoveredBySentence(signal, sentence)) &&
+    judgementAnchors.some((signal) => signalCoveredBySentence(signal, sentence)) &&
     /(?:장점|강점|선택\s*이유|효율|편의|유리|실용|중요|의미|가치|도움|현실적|유용|어울|후보|줄(?:여|어|일)|늘(?:려|어|릴)|대신|반면|아쉬|부담|한계|제약|잘\s*맞|적합|비추천|더\s*낫)/u.test(sentence)
   ).length;
-  const requiredSignalCount = Math.min(
-    analysis.evidenceLevel === "rich" ? 4 : analysis.evidenceLevel === "usable" ? 3 : 1,
-    Math.max(1, analysis.verifiedSignals.length),
-  );
+  const requiredSignalCount = signalEvidenceAvailable
+    ? Math.min(
+        analysis.evidenceLevel === "rich" ? 4 : analysis.evidenceLevel === "usable" ? 3 : 1,
+        analysis.verifiedSignals.length,
+      )
+    : 0;
   const requiredEvidenceJudgementCount = analysis.evidenceLevel === "rich" ? 3 : analysis.evidenceLevel === "usable" ? 2 : 1;
   const repeats = repeatedSentenceCount(input.sections);
   const checks: Array<[boolean, string]> = [
@@ -746,5 +772,6 @@ export function assessProductReviewSubstance(input: {
     usageInstructionCount,
     detailReadingCount,
     coveredReviewEvidence,
+    signalEvidenceAvailable,
   };
 }

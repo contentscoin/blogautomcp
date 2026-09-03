@@ -111,10 +111,43 @@ async function main() {
       assert.equal(cancelled.generatedCount, 0);
       assert.match(cancelled.warning || "", /중지/u);
       assert.equal(cancelBrandPostImageRepairs(), 0, "Cancellation registration must be cleaned up");
+
+      if (connectKind === "TRAVEL") {
+        // ChatGPT 대화(내장 이미지 생성)에서 받은 이미지를 슬롯에 붙이는 외부 적용 경로. 브라우저 배치를 거치지 않는다.
+        type ManifestV2 = import("../src/lib/brand-post-package").BrandPostPackageManifestV2;
+        const generation = await import("../src/lib/brand-post-image-generation");
+        const current = store.readBrandPostPackage(id) as ManifestV2;
+        const slotWithRoom = store.packagePreview(current).imageSlots.find((slot) => slot.maximum > 0 && slot.count < slot.maximum);
+        assert.ok(slotWithRoom, "fixture must leave one slot with room for an external image");
+        const targetSectionId = slotWithRoom.sectionId;
+        const externalRaw = path.join(dir, "image-generation-work", "external-download.png");
+        fs.mkdirSync(path.dirname(externalRaw), { recursive: true });
+        fs.writeFileSync(externalRaw, "chatgpt-built-in-imagegen-result");
+        const applied = await generation.applyExternalGeneratedBrandPostImage({
+          brandLinkId: id, manifest: current, productName: current.title, sectionId: targetSectionId, rawPath: externalRaw,
+        });
+        assert.equal(applied.alreadyApplied, false);
+        assert.ok(applied.assetKey && /^[a-f0-9]{64}$/u.test(applied.assetKey));
+        assert.equal(applied.provenance, "GENERATED_BACKGROUND", "Travel body images are applied as-is");
+        assert.equal(applied.manifest.approvedAt, null, "Applying an image invalidates any approval");
+        const after = store.packagePreview(applied.manifest).imageSlots.find((slot) => slot.sectionId === targetSectionId)!;
+        assert.equal(after.count, slotWithRoom.count + 1);
+        assert.ok(after.assets.some((asset) => asset?.assetKey === applied.assetKey));
+        const retry = await generation.applyExternalGeneratedBrandPostImage({
+          brandLinkId: id, manifest: applied.manifest, productName: current.title, sectionId: targetSectionId, rawPath: externalRaw,
+        });
+        assert.equal(retry.alreadyApplied, true, "Same bytes to the same slot are idempotent");
+        assert.equal(retry.assetKey, applied.assetKey);
+        const afterRetry = store.packagePreview(store.readBrandPostPackage(id) as ManifestV2).imageSlots.find((slot) => slot.sectionId === targetSectionId)!;
+        assert.equal(afterRetry.count, after.count, "Retry must not attach a second copy");
+        await assert.rejects(generation.applyExternalGeneratedBrandPostImage({
+          brandLinkId: id, manifest: store.readBrandPostPackage(id) as ManifestV2, productName: current.title, sectionId: "missing-section", rawPath: externalRaw,
+        }), /본문 파트를 찾을 수 없습니다/u);
+      }
     }
     assert.equal(isDraftEditorialQualityPassed({ canPublish: false, signals: [{ key: "composition-quality", status: "fail" }] }), true);
     assert.equal(isDraftEditorialQualityPassed({ canPublish: false, signals: [{ key: "fact-grounding", status: "fail" }] }), false);
-    console.log("PASS: all-section planning, 2-image minima, partial success persistence, late sections, retry-only deficits, score isolation (travel + shopping)");
+    console.log("PASS: all-section planning, 2-image minima, partial success persistence, late sections, retry-only deficits, score isolation (travel + shopping), external image apply (idempotent)");
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

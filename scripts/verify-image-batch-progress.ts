@@ -43,7 +43,7 @@ class FakeChild extends EventEmitter {
 }
 
 type Job = { id: string; outStem: string; prompt: string };
-function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lockFails?: boolean } = {}) {
+function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lockFails?: boolean; automation?: boolean } = {}) {
   const child = new FakeChild();
   let jobs: Job[] = [];
   let checkpoint = "";
@@ -87,9 +87,12 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       "./brand-post-package": {
         getBrandPostPackageDir: () => root,
         normalizePackageImageAssets: (manifest: { imageAssets?: unknown[] }) => manifest.imageAssets || [],
+        applyGeneratedBrandPostImage: () => { throw new Error("not used by the transport harness"); },
       },
+      "./chatgpt-browser-automation": { isChatGptBrowserAutomationEnabled: () => settings.automation ?? true },
+      "node:crypto": { createHash: () => { throw new Error("not used by the transport harness"); } },
     },
-    { process: { ...process, env: { ...process.env, BRAND_POST_IMAGE_BATCH_TIMEOUT_MS: settings.timeout?.toString() || "" } } },
+    { process: { ...process, env: { ...process.env, BRAND_POST_IMAGE_BATCH_TIMEOUT_MS: settings.timeout?.toString() || "", BRAND_POST_IMAGE_JOB_TIMEOUT_MS: "" } } },
     "\nmodule.exports.runBrowserImageBatch = runBrowserImageBatch;",
   );
   const manifest = {
@@ -155,8 +158,10 @@ async function verifyGenerator() {
     const seen: string[] = [];
     const pending = h.generate(7, { onResult: async (r) => { seen.push(r.requestId); if (seen.length === 1) await gate; } });
     assert.equal(h.jobs.length, 7);
-    assert.equal(h.imageBatchTimeoutMs(7), 7 * 8 * 60_000);
-    assert.equal(h.imageBatchTimeoutMs(1), 8 * 60_000);
+    // Per-job budget (3 min default) plus startup slack, never the old 8 min × jobs.
+    assert.equal(h.imageBatchTimeoutMs(7), 7 * 180_000 + 60_000);
+    assert.equal(h.imageBatchTimeoutMs(1), 180_000 + 60_000);
+    assert.equal(h.imageBatchTimeoutMs(40), 30 * 60_000, "batch budget is capped at 30 minutes");
     h.progress(0);
     await tick();
     assert.equal(seen.length, 1, "first result must arrive before child close");
@@ -301,6 +306,19 @@ async function verifyGenerator() {
     });
   }
 
+  await check("browser automation switched off refuses every request without spawning", async () => {
+    const h = harness({ automation: false });
+    const results = await h.generate(3);
+    assert.equal(h.spawns, 0, "no chatgpt.com process may start while automation is off");
+    assert.equal(results.length, 3);
+    results.forEach((r) => {
+      assert.equal(r.generatedPath, null);
+      assert.match(r.error!, /브라우저 자동화가 꺼져 있어/);
+      assert.match(r.error!, /post_apply_section_image/);
+    });
+    assert.equal(h.callbacks.length, 3);
+  });
+
   await check("empty/invalid-only batches never spawn a generator", async () => {
     const h = harness();
     assert.equal((await h.generate(0)).length, 0);
@@ -309,7 +327,8 @@ async function verifyGenerator() {
   });
 }
 
-async function verifyProducer(startupFailure = false) {
+async function verifyProducer(startupFailure = false, failFast = false) {
+  process.env.BRAND_POST_IMAGE_BATCH_FAIL_FAST = failFast ? "true" : "false";
   const dir = fs.mkdtempSync(path.join(root, "producer-"));
   const jobsFile = path.join(dir, "jobs.json");
   const checkpoint = `${jobsFile}.results.jsonl`;
@@ -339,7 +358,8 @@ async function verifyProducer(startupFailure = false) {
       },
       submitPromptToChatGPT: async () => { submitted += 1; },
       readAssistantMessages: async () => [], countRenderableChatGPTImages: async () => 1,
-      waitForChatGPTImageArtifacts: async () => {},
+      // 0 = timed out without an artifact. The producer must fail the job instead of downloading nothing.
+      waitForChatGPTImageArtifacts: async () => (submitted === 2 && failFast ? 0 : undefined),
       downloadChatGPTImages: async () => { if (submitted === 2) throw new Error("one download failed"); return [rawPath]; },
     },
   }, { process: {
@@ -348,16 +368,25 @@ async function verifyProducer(startupFailure = false) {
     stderr: { write: (chunk: string) => { stderr += chunk; } },
   } });
   if (startupFailure) await assert.rejects(api.main(), /browser startup failed/);
+  else if (failFast) await assert.rejects(api.main(), /첫 실패 후 중단/);
   else await api.main();
   const output = JSON.parse(stdout);
   const records = readRecords();
-  assert.equal(output.ok, !startupFailure);
+  assert.equal(output.ok, !startupFailure && !failFast);
   assert.deepEqual(output.jobs, records);
   assert.equal(records.length, 3);
   assert.equal(stderr.split(prefix).length - 1, 3);
   if (startupFailure) records.forEach((r) => assert.match(r.error, /browser startup failed/));
-  else {
+  else if (failFast) {
     assert.equal(closed, true);
+    assert.equal(submitted, 2, "fail-fast must not submit the third prompt");
+    assert.ok(fs.existsSync(records[0].localPath));
+    assert.match(records[1].error, /이미지를 생성하지 않았습니다/);
+    assert.match(records[2].error, /^fail-fast: /);
+    assert.equal(records[2].localPath, null);
+  } else {
+    assert.equal(closed, true);
+    assert.equal(submitted, 3);
     assert.ok(fs.existsSync(records[0].localPath));
     assert.match(records[1].error, /one download failed/);
     assert.ok(fs.existsSync(records[2].localPath));
@@ -370,8 +399,9 @@ async function verifyProducer(startupFailure = false) {
 async function main() {
   try {
     await verifyGenerator();
-    await check("producer checkpoints each job, streams stderr, preserves legacy stdout", () => verifyProducer());
+    await check("producer checkpoints each job, streams stderr, preserves legacy stdout (fail-fast off)", () => verifyProducer());
     await check("producer startup failure checkpoints per-job errors", () => verifyProducer(true));
+    await check("producer fail-fast stops after the first failure and records the rest", () => verifyProducer(false, true));
     console.log(`Verified ${checks} offline image-batch checks; no paid generation.`);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

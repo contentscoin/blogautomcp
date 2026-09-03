@@ -102,6 +102,9 @@ function configureRuntimePaths(projectRoot) {
   const browserChatGptEnabled =
     (process.env.CHATGPT_BROWSER_AUTOMATION_ENABLED || "false").trim().toLowerCase() === "true";
   process.env.CHATGPT_BROWSER_AUTOMATION_ENABLED = browserChatGptEnabled ? "true" : "false";
+  // 섹션 이미지 자동 생성(브라우저 배치)은 기본 꺼짐. 켜도 ChatGPT 웹 자동화가 꺼져 있으면 Chrome 을 열지 않는다.
+  process.env.BRAND_POST_AUTO_SECTION_IMAGES =
+    (process.env.BRAND_POST_AUTO_SECTION_IMAGES || "false").trim().toLowerCase() === "true" ? "true" : "false";
   // 기본 엔진은 OpenAI API 키 + Spec-first 파이프라인. Codex/ChatGPT 웹 자동작성은 설정에서 켜는 선택 경로다.
   process.env.CODEX_DRAFT_ENABLED = process.env.CODEX_DRAFT_ENABLED || "false";
   process.env.CODEX_DRAFT_MODEL = process.env.CODEX_DRAFT_MODEL?.trim() || "gpt-5.5";

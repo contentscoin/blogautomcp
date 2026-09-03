@@ -26,7 +26,8 @@ assert.match(providerSource, /runStreamed/u);
 assert.match(agentSource, /AI_PROVIDER === "codex"/u);
 assert.match(agentSource, /CODEX_BROWSER_FALLBACK_ENABLED/u);
 assert.match(agentSource, /CODEX_DRAFT_MODEL[^\n]+"gpt-5\.5"/u);
-assert.match(agentSource, /처음부터 반드시 5~6개의 완결된 문장/u);
+// 1.3.8 부터 섹션 문장 수는 공유 필수 작성 계약(writing-prompt-contract)이 정하고 Codex 프롬프트는 그 계약을 참조한다.
+assert.match(agentSource, /문장 수와 출력 구조는 공유 필수 작성 계약을 따릅니다/u);
 assert.match(routeSource, /const useCodex/u);
 assert.match(routeSource, /AI_PROVIDER: useCodex \? "codex" : provider/u);
 assert.match(settingsSource, /draftCreationMode: codexDraftEnabled && codexDraft\.authenticated/u);
