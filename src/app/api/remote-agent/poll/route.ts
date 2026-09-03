@@ -13,6 +13,7 @@ import { hasStoredConnectContract } from "@/lib/connect-contract-store";
 import { getBrandPostPackageDir, readBrandPostPackage } from "@/lib/brand-post-package";
 import { buildBrandPostImagePrompt } from "@/lib/brand-post-image-generation";
 import { readDraftProgress } from "@/lib/draft-progress";
+import { buildPreparedDraftView } from "@/lib/draft-context-view";
 import { collapseBrandLinkProducts, matchesWritingStatusFilter } from "@/lib/brandlink-product-list";
 import {
   LOCAL_AUTOMATION_ERROR_HINTS,
@@ -22,7 +23,6 @@ import {
   toLocalAutomationError,
 } from "@/lib/local-automation-error";
 import { buildProductThumbnailCopy } from "../../../../../scripts/lib/product-thumbnail";
-import { buildProductVerifiedFactLines } from "../../../../../scripts/lib/product-editorial-plan";
 import { buildTravelThumbnailCopy } from "../../../../../scripts/lib/travel-content";
 import { getProductThumbnailStorageDir } from "../../../../../scripts/lib/app-paths";
 import { createLockedProductThumbnailOnBackground } from "../../../../../scripts/lib/product-image-lock";
@@ -589,81 +589,6 @@ function draftContentQuality(preview: DraftPreview): unknown {
         })
       : [],
   };
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-}
-
-function stringOrEmpty(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
-}
-
-/**
- * post_create_draft(=POST_PREPARE_DRAFT) 결과. brand-draft-context/v2 는 context 로 그대로 두고,
- * ChatGPT 가 바로 읽을 verifiedFacts / sourceImages / harness / systemPrompt / userPrompt / imageIntents 를 최상위에 올린다.
- */
-function buildPreparedDraftView(data: Record<string, unknown>, productId: string, contextJobId: string, warnings: string[]): Record<string, unknown> {
-  const product = asRecord(data.product);
-  const generation = asRecord(data.generation);
-  const features = Array.isArray(product.features) ? product.features.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
-  const factLines = buildProductVerifiedFactLines({
-    productName: stringOrEmpty(product.name),
-    description: stringOrEmpty(product.description),
-    features,
-    price: stringOrEmpty(product.price),
-    originalPrice: stringOrEmpty(product.originalPrice),
-    discountRate: stringOrEmpty(product.discountRate),
-    couponInfo: stringOrEmpty(product.couponInfo),
-    deliveryInfo: stringOrEmpty(product.deliveryInfo),
-    reviewCount: stringOrEmpty(product.reviewCount),
-    rating: stringOrEmpty(product.rating),
-    targetSectionCount: 11,
-  });
-  const storeName = stringOrEmpty(product.storeName);
-  const verifiedFacts = Array.from(new Set([
-    ...factLines,
-    ...(storeName ? [`판매처: ${storeName}`] : []),
-    ...(features.length > 0 ? [`상품 태그: ${features.slice(0, 24).join(", ")}`] : []),
-  ]));
-  const sourceImages = Array.isArray(product.referenceImageUrls)
-    ? product.referenceImageUrls.filter((item): item is string => typeof item === "string" && /^https:\/\//u.test(item)).slice(0, 20)
-    : [];
-  const harness: Record<string, unknown> = {
-    writingContract: generation.writingContract ?? null,
-    qualityChecklist: generation.qualityChecklist ?? null,
-    outputSchema: generation.outputSchema ?? null,
-    minimumSectionCount: generation.minimumSectionCount ?? null,
-    maximumSectionCount: generation.maximumSectionCount ?? null,
-    targetCharacters: generation.targetCharacters ?? null,
-    qualityPreset: generation.qualityPreset ?? null,
-    experienceMode: generation.experienceMode ?? null,
-  };
-  const view: Record<string, unknown> = {
-    context: data,
-    productId,
-    contextJobId,
-    connectKind: typeof data.connectKind === "string" ? data.connectKind.toLowerCase() : null,
-    snapshotId: data.snapshotId ?? null,
-    verifiedFacts,
-    sourceImages,
-    harness,
-    systemPrompt: generation.systemPrompt ?? null,
-    userPrompt: generation.userPrompt ?? null,
-    imageIntents: Array.isArray(data.imageIntents) ? data.imageIntents : [],
-    nextAction: data.nextAction ?? null,
-  };
-  // 사이트 complete 본문 한도(900KB) 안에서만 중복을 허용한다. 넘치면 outputSchema → 최상위 프롬프트 순으로 뺀다.
-  const budget = 850 * 1024;
-  if (Buffer.byteLength(JSON.stringify(view), "utf8") > budget) {
-    harness.outputSchema = null;
-  }
-  if (Buffer.byteLength(JSON.stringify(view), "utf8") > budget) {
-    view.systemPrompt = null;
-    view.userPrompt = null;
-    warnings.push("컨텍스트가 커서 systemPrompt·userPrompt 는 context.generation 안에서만 제공합니다.");
-  }
-  return view;
 }
 
 function sniffImageExtension(filePath: string): ".png" | ".jpg" | ".webp" | null {

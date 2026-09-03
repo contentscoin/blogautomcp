@@ -63,12 +63,13 @@ pwsh -NoProfile -File scripts/verify-oauth-e2e.ps1 -BaseUrl http://localhost:300
 
 D1 테이블 정의는 `db/schema.ts`, 런타임 안전 초기화는 `db/init.ts`, 배포 마이그레이션은 `drizzle/`에 있습니다. 별도의 PostgreSQL 서버는 필요하지 않습니다.
 
-## MCP 도구 (서버 1.3.10, 27개)
+## MCP 도구 (서버 1.3.11, 27개)
 
 `agent_get_status`, `brandconnect_list_categories`, `brandconnect_list_products`, `brandconnect_sync_products`, `post_create_draft`, `post_prepare_draft`, `post_generate_draft_local`, `post_submit_draft`, `post_apply_section_image`, `post_get_draft`, `post_revise_draft`, `post_approve_draft`, `post_set_thumbnail`, `thumbnail_prepare`, `thumbnail_apply_generated`, `blog_profile_get`, `blog_profile_prepare_update`, `blog_profile_apply_update`, `blog_design_get`, `post_publish`, `post_schedule`, `post_bulk_schedule`, `post_verify_published`, `travel_capture_contract`, `settings_get`, `job_get`, `job_cancel`.
 
 - ChatGPT 커넥터는 OAuth 고정 주소(`/api/mcp`)와 MCP URL(`/api/mcp/{credential}`) 두 경로로 연결할 수 있으며 같은 도구를 제공합니다.
 - 초안은 ChatGPT 가 씁니다. `post_create_draft`(= `post_prepare_draft`, 큐 작업 `POST_PREPARE_DRAFT`)는 PC 에서 상품 사실·상세이미지·하네스·프롬프트만 준비하고, ChatGPT 가 쓴 원고를 `post_submit_draft` 로 제출하면 PC 는 품질검사·저장만 합니다(이미지 생성 없음). 섹션 이미지는 결과 `imageSlots[].imagePrompt` 로 ChatGPT 내장 이미지 생성을 실행해 `post_apply_section_image` 로 붙입니다. 제출은 `contextJobId`의 상품 스냅샷을 고정해 목록 재조회 중 상품명·URL이 바뀌어도 다른 상품 데이터와 섞이지 않습니다.
+- `post_submit_draft` 는 준비 작업 결과에서 상품 스냅샷을 최상위(`snapshot`)와 1.3.10 형태(`context.snapshot`) 양쪽에서 찾고, PC 에는 검증에 필요한 슬림 컨텍스트만 전달합니다.
 - `post_generate_draft_local`(큐 작업 `POST_CREATE_DRAFT`, PC 1.3.10 이상)은 OpenAI 키가 있는 PC 의 전량 생성 경로입니다. `post_apply_section_image` 도 PC 1.3.10 이상이 필요하며, 1.3.10 미만 PC 에는 제출 시 업데이트 권고 `warning` 을 함께 돌려줍니다.
 
 - 큐 작업은 claim 시 120초 임대를 받고, PC 가 30초마다 하트비트로 임대를 연장하며 진행 단계(`stage`)를 올립니다. 임대가 끊기면 `AGENT_LOST` 로 회수됩니다.

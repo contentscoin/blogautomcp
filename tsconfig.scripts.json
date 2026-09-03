@@ -1,6 +1,9 @@
 {
   "ts-node": {
-    "transpileOnly": true
+    "transpileOnly": true,
+    "moduleTypes": {
+      "apps/sites/**/*.ts": "cjs"
+    }
   },
   "compilerOptions": {
     "target": "ES2020",

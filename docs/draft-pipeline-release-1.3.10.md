@@ -44,3 +44,11 @@
 
 - `AGENT_MAX_RUNTIME_MS`(기본 25분)를 늘린 PC 에서는 라우트 데드라인(30분)이 먼저 `/api/posting/stop` 으로 끊는다.
 - 수동 "섹션별 이미지 자동 생성" 버튼은 `ChatGPT 웹 자동작성` 설정이 켜져 있을 때만 동작한다. 꺼져 있으면 `CHATGPT_BROWSER_AUTOMATION_DISABLED` 로 거부하고 Chrome 을 열지 않는다.
+
+## 1.3.11 정정 (2026-09-03)
+
+위 "`POST_PREPARE_DRAFT` 결과 최상위에 … (원본은 `context`)" 변경은 회귀였다. 원본 `brand-draft-context/v2` 를
+`context` 아래로 내리면서 최상위 `snapshot` 이 사라졌고, 사이트의 `post_submit_draft` 검증과 PC 의 스냅샷 무결성
+검사가 모두 최상위 `snapshot` 을 읽기 때문에 1.3.10 PC 의 제출이 전부 `PRODUCT_SNAPSHOT_CHANGED` 로 막혔다.
+1.3.11 에서 결과는 다시 v2 를 최상위에 펼치고(`context` 없음), 사이트는 두 형태를 모두 받아들인다.
+자세한 내용은 `docs/draft-pipeline-release-1.3.11.md`.

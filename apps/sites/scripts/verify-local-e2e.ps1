@@ -109,19 +109,26 @@ $draftContextResult = @{
     kind = 'draft-context'
     summary = 'e2e draft context'
     warnings = @()
+    # 데스크톱 1.3.11 buildPreparedDraftView 형태: brand-draft-context/v2 를 최상위에 펼치고 ChatGPT 용 필드를 더한다.
     data = @{
       version = 'brand-draft-context/v2'
       productId = $draftProductId
       contextJobId = $draftContextJobId
-      connectKind = 'shopping'
+      connectKind = 'SHOPPING'
+      externalProductId = 'e2e-external-1'
+      sourceUrl = 'https://example.test/products/e2e'
       snapshotId = $draftSnapshotId
-      snapshot = @{ version = 'brand-product-snapshot/v1'; productId = $draftProductId; connectKind = 'shopping'; snapshotId = $draftSnapshotId }
+      generatedAt = '2026-09-03T00:00:00.000Z'
+      snapshot = @{ version = 'brand-product-snapshot/v1'; productId = $draftProductId; connectKind = 'SHOPPING'; externalProductId = 'e2e-external-1'; sourceUrl = 'https://example.test/products/e2e'; snapshotId = $draftSnapshotId; capturedAt = '2026-09-03T00:00:00.000Z'; product = @{ name = '휴대용 선풍기' } }
+      product = @{ name = '휴대용 선풍기'; referenceImageUrls = @() }
+      generation = @{ minimumSectionCount = 9; maximumSectionCount = 12; systemPrompt = 'e2e system prompt'; userPrompt = 'e2e user prompt' }
+      imageIntents = @()
+      nextAction = 'e2e next action'
       verifiedFacts = @('상품명: 휴대용 선풍기')
       sourceImages = @()
       harness = @{ minimumSectionCount = 9; maximumSectionCount = 12 }
       systemPrompt = 'e2e system prompt'
       userPrompt = 'e2e user prompt'
-      generation = @{ minimumSectionCount = 9; maximumSectionCount = 12 }
     }
   }
 } | ConvertTo-Json -Depth 12 -Compress
@@ -156,6 +163,10 @@ $draftSubmitClaim = Invoke-RestMethod -Method Post -Uri "$BaseUrl/api/agent/jobs
 if ($draftSubmitClaim.data.id -ne $draftSubmitJobId -or $draftSubmitClaim.data.type -ne 'POST_SUBMIT_DRAFT') { throw 'Submitted draft job type is invalid.' }
 if ($draftSubmitClaim.data.input.contextJobId -ne $draftContextJobId -or @($draftSubmitClaim.data.input.draft.sections).Count -ne 9) { throw 'Submitted ChatGPT draft payload was not preserved.' }
 if ($draftSubmitClaim.data.input.snapshotId -ne $draftSnapshotId -or $draftSubmitClaim.data.input.contextSnapshot.snapshot.snapshotId -ne $draftSnapshotId) { throw 'Submitted draft did not pin the prepared product snapshot.' }
+$forwardedContext = $draftSubmitClaim.data.input.contextSnapshot
+foreach ($heavyField in @('systemPrompt', 'userPrompt', 'generation', 'context', 'harness', 'verifiedFacts')) {
+  if ($null -ne $forwardedContext.PSObject.Properties[$heavyField]) { throw "Forwarded draft context must be slim; unexpected field: $heavyField" }
+}
 $draftSubmitCompletion = @{ status = 'SUCCEEDED'; result = @{ draftId = $draftProductId; connectKind = 'shopping' } } | ConvertTo-Json -Depth 8 -Compress
 Invoke-RestMethod -Method Post -Uri "$BaseUrl/api/agent/jobs/$draftSubmitJobId/complete" -Headers @{ Authorization = "Bearer $($secondPair.data.deviceToken)" } -ContentType 'application/json' -Body $draftSubmitCompletion | Out-Null
 
