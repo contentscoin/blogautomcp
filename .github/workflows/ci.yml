@@ -53,6 +53,8 @@ jobs:
           npm run test:post-spec
           npm run test:thumbnail-gen
           npm run test:brand-post-package
+          npm run test:package-qc-reconcile
+          npm run test:publish-image-cleanup
           npm run test:brand-post-quality
           npm run test:writing-harness
           npm run test:section-images

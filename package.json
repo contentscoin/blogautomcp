@@ -19,6 +19,7 @@
     "test:draft-snapshot": "npx ts-node --project tsconfig.scripts.json scripts/verify-draft-snapshot-contract.ts",
     "test:section-images": "npx ts-node --project tsconfig.scripts.json scripts/verify-section-image-repair.ts",
     "test:package-qc-reconcile": "npx ts-node --project tsconfig.scripts.json scripts/verify-package-qc-reconcile.ts",
+    "test:publish-image-cleanup": "npx ts-node --project tsconfig.scripts.json scripts/verify-publish-image-cleanup.ts",
     "test:image-batch-progress": "npx ts-node --project tsconfig.scripts.json scripts/verify-image-batch-progress.ts",
     "test:writing-harness": "npx ts-node --project tsconfig.scripts.json scripts/verify-writing-prompt-contract.ts",
     "test:local-json-fetch": "npx ts-node --project tsconfig.scripts.json scripts/verify-local-json-fetch.ts",

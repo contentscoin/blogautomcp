@@ -18,6 +18,7 @@ import { spawnSync } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
 import * as crypto from "crypto";
+import { createPublishImageCleanup } from "./lib/publish-image-cleanup";
 import sharp from "sharp";
 import {
   buildHumanMobileStyleGuide,
@@ -199,7 +200,8 @@ const CODEX_BROWSER_FALLBACK_ENABLED =
 
 const SESSION_FILE = getNaverSessionFile();
 const CHATGPT_SESSION_FILE = getChatgptSessionFile();
-const TEMP_PATH = path.join(process.cwd(), "temp_images");
+const publishImageCleanup = createPublishImageCleanup(path.join(process.cwd(), "temp_images"));
+const TEMP_PATH = publishImageCleanup.tempPath;
 const NAVER_BLOG_ID = process.env.NAVER_BLOG_ID || "";
 const NAVER_SCHEDULE_TIMEZONE = process.env.NAVER_SCHEDULE_TIMEZONE || "Asia/Seoul";
 const NAVER_DEFAULT_SCHEDULE_HOUR = parseBoundedInteger(
@@ -383,7 +385,6 @@ const AGENT_MAX_RUNTIME_MS = Math.max(
   Number(process.env.AGENT_MAX_RUNTIME_MS || "1500000")
 );
 
-if (!fs.existsSync(TEMP_PATH)) fs.mkdirSync(TEMP_PATH, { recursive: true });
 if (!fs.existsSync(CHATGPT_USER_DATA_DIR)) fs.mkdirSync(CHATGPT_USER_DATA_DIR, { recursive: true });
 if (!fs.existsSync(GENERATED_OUTPUT_DIR)) fs.mkdirSync(GENERATED_OUTPUT_DIR, { recursive: true });
 
@@ -3872,11 +3873,12 @@ async function materializeProductImages(
   for (let i = 0; i < inspectionCount; i++) {
     try {
       const imgPath = path.join(TEMP_PATH, `${filePrefix}_${Date.now()}_${i}.jpg`);
+      publishImageCleanup.track([imgPath]);
       await downloadImage(prioritizedUrls[i], imgPath);
       const stats = fs.statSync(imgPath);
 
       if (stats.size < 20_000) {
-        try { fs.unlinkSync(imgPath); } catch {}
+        publishImageCleanup.cleanup([imgPath]);
         console.log(`   ⚠️ 이미지 제외(너무 작음) ${i + 1}`);
         continue;
       }
@@ -3896,6 +3898,7 @@ async function materializeProductImages(
           height,
         });
         if (detailCrops.length > 0) {
+          publishImageCleanup.track(detailCrops.map((crop) => crop.path));
           const remainingDetailCapacity = Math.max(0, 8 - detailSegmentCount);
           const acceptedDetailCrops = detailCrops.slice(0, remainingDetailCapacity);
           downloaded.push(...acceptedDetailCrops.map((detailCrop, segmentIndex) => ({
@@ -3908,20 +3911,20 @@ async function materializeProductImages(
             detailCrop: true,
           })));
           for (const unusedDetailCrop of detailCrops.slice(remainingDetailCapacity)) {
-            try { fs.unlinkSync(unusedDetailCrop.path); } catch {}
+            publishImageCleanup.cleanup([unusedDetailCrop.path]);
           }
           detailSegmentCount += acceptedDetailCrops.length;
-          try { fs.unlinkSync(imgPath); } catch {}
+          publishImageCleanup.cleanup([imgPath]);
           console.log(`   ✅ 이미지 ${i + 1}/${inspectionCount} 상세 원문 ${acceptedDetailCrops.length}구간 생성`);
           continue;
         }
-        try { fs.unlinkSync(imgPath); } catch {}
+        publishImageCleanup.cleanup([imgPath]);
         console.log(`   ⚠️ 이미지 제외(상세/배너 비율 ${width}x${height}) ${i + 1}`);
         continue;
       }
 
       if (regularImageCount >= targetImageCount) {
-        try { fs.unlinkSync(imgPath); } catch {}
+        publishImageCleanup.cleanup([imgPath]);
         continue;
       }
       downloaded.push({ path: imgPath, url: prioritizedUrls[i], size: stats.size, index: i, width, height });
@@ -4519,11 +4522,11 @@ async function downloadImage(url: string, filePath: string): Promise<void> {
       response.pipe(file);
       file.on('finish', () => { file.close(); resolve(); });
       file.on('error', (err: Error) => {
-        fs.unlink(filePath, () => {});
+        publishImageCleanup.cleanup([filePath]);
         reject(err);
       });
     }).on('error', (err: Error) => {
-      fs.unlink(filePath, () => {});
+      publishImageCleanup.cleanup([filePath]);
       reject(err);
     });
   });
@@ -9784,14 +9787,13 @@ async function main() {
         },
       });
     }
+    const downloadedProductImagePaths = [...product.imagePaths];
     if (BRANDLINK_DRAFT_CONTEXT_OUTPUT) {
       await prisma.brandLink.update({
         where: { id: linkId },
         data: { status: "READY", errorMessage: null },
       });
-      for (const imagePath of product.imagePaths) {
-        try { fs.unlinkSync(imagePath); } catch {}
-      }
+      publishImageCleanup.cleanup(downloadedProductImagePaths);
       console.log("   MCP 초안 컨텍스트 준비 완료. ChatGPT 원고 제출을 기다립니다.");
       return;
     }
@@ -10123,10 +10125,8 @@ async function main() {
       }
     }
     
-    // 임시 파일 정리
-    for (const imgPath of product.imagePaths) {
-      try { fs.unlinkSync(imgPath); } catch {}
-    }
+    // 승인 이미지로 교체되기 전 다운로드 목록만 사용하고, 이번 실행의 TEMP_PATH 소유권도 확인한다.
+    publishImageCleanup.cleanup(downloadedProductImagePaths);
     
     // 자동 종료 (백그라운드 실행에서도 프로세스가 남지 않도록)
     await browser.close();
