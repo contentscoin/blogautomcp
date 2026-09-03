@@ -63,6 +63,17 @@ const server = http.createServer((request, response) => {
     return;
   }
 
+  if ((request.method === 'GET' || request.method === 'HEAD') && url.pathname === `/api/updates/windows/${installerName}`) {
+    console.log(`REQUEST ${request.method} ${url.pathname} auth=ok installer=fixture`);
+    response.writeHead(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': String(installer.length),
+      'cache-control': 'no-store',
+    });
+    response.end(request.method === 'HEAD' ? undefined : installer);
+    return;
+  }
+
   console.log(`REQUEST ${request.method} ${url.pathname} auth=ok status=404`);
   json(response, 404, { success: false, error: { message: 'not found' } });
 });

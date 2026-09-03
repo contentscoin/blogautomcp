@@ -24,6 +24,10 @@ $preexistingAppProcessIds = @(
 )
 
 $packagedPackagePath = Join-Path $expectedAppRoot 'resources\app\package.json'
+$packagedUpdateConfig = Join-Path $expectedAppRoot 'resources\app-update.yml'
+if (-not (Test-Path -LiteralPath $packagedUpdateConfig -PathType Leaf)) { throw '패키지 app-update.yml 누락: 실제 다운로드가 ENOENT로 실패합니다.' }
+$updateConfigText = Get-Content -LiteralPath $packagedUpdateConfig -Raw
+if ($updateConfigText -notmatch '(?m)^updaterCacheDirName:\s*brandconnect-automation-updater\s*$') { throw '패키지 업데이트 캐시 설정이 올바르지 않습니다.' }
 if (-not (Test-Path -LiteralPath $packagedPackagePath -PathType Leaf)) { throw '패키지 앱의 package.json을 찾지 못했습니다.' }
 $currentVersion = [string]((Get-Content -LiteralPath $packagedPackagePath -Raw | ConvertFrom-Json).version)
 $versionMatch = [regex]::Match($currentVersion, '^(\d+)\.(\d+)\.(\d+)$')
@@ -71,7 +75,9 @@ try {
     AUTO_UPDATE_ALLOW_LOCAL_HTTP = '1'
     AUTO_UPDATE_FORCE = '1'
     AUTO_UPDATE_TEST_MODE = '1'
-    AUTO_UPDATE_DOWNLOAD = 'false'
+    AUTO_UPDATE_DOWNLOAD = 'true'
+    AUTO_UPDATE_INSTALL = 'false'
+    LOCALAPPDATA = (Join-Path $testRoot 'local-app-data')
     AUTO_UPDATE_START_DELAY_MS = '100'
     AUTO_UPDATE_CHECK_INTERVAL_MS = '60000'
     REMOTE_SITE_URL = "http://127.0.0.1:$UpdatePort"
@@ -83,7 +89,7 @@ try {
   Wait-Until -TimeoutSeconds 120 -FailureMessage "패키지 앱이 $detectedVersion 업데이트를 감지하지 못했습니다." -Condition {
     try {
       $script:readiness = Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:$AppPort/api/system/update-readiness" -TimeoutSec 3
-      return $script:readiness.success -and $script:readiness.data.update.status -eq 'available' -and $script:readiness.data.update.version -eq $detectedVersion
+      return $script:readiness.success -and $script:readiness.data.update.status -eq 'downloaded' -and $script:readiness.data.update.version -eq $detectedVersion
     } catch {
       return $false
     }
@@ -101,7 +107,7 @@ try {
     'Sec-Fetch-Site' = 'same-origin'
   }
   $manualUpdate = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$AppPort/api/system/control" -Headers $controlHeaders -ContentType 'application/json' -Body '{"action":"check-updates"}' -TimeoutSec 15
-  if (-not $manualUpdate.success -or $manualUpdate.data.update.status -ne 'available') {
+  if (-not $manualUpdate.success -or $manualUpdate.data.update.status -ne 'downloaded') {
     throw 'Electron 수동 업데이트 확인 명령이 실행되지 않았습니다.'
   }
 
@@ -146,10 +152,16 @@ try {
   if (-not (Test-Path -LiteralPath $updateLog)) { throw '패키지 자동업데이트 로그가 생성되지 않았습니다.' }
   $updateLogText = Get-Content -LiteralPath $updateLog -Raw
   if ($updateLogText -notmatch "state=available version=$detectedVersionPattern") { throw '패키지 자동업데이트 상태 로그가 올바르지 않습니다.' }
+  if ($updateLogText -match 'state=installing') { throw '격리된 다운로드 fixture가 설치되려고 했습니다.' }
+  if ($updateLogText -notmatch "state=downloaded version=$detectedVersionPattern") { throw '실제 다운로드 단계가 완료되지 않았습니다.' }
+  $fixturePath = Join-Path $testRoot "local-app-data\brandconnect-automation-updater\pending\BrandConnect-Automation-Setup-$detectedVersion.exe"
+  if (-not (Test-Path -LiteralPath $fixturePath -PathType Leaf)) { throw '격리된 캐시에 다운로드 파일이 없습니다.' }
+  if ([IO.File]::ReadAllText($fixturePath) -ne 'packaged-updater-smoke') { throw '다운로드 fixture 내용이 일치하지 않습니다.' }
   if ($updateLogText.Contains($token)) { throw '자동업데이트 로그에 PC 토큰이 노출되었습니다.' }
 
   $serverLogText = Get-Content -LiteralPath $serverOut -Raw
   if ($serverLogText -notmatch 'GET /api/updates/windows/latest.yml auth=ok') { throw '패키지 앱이 인증 헤더로 latest.yml을 요청하지 않았습니다.' }
+  if ($serverLogText -notmatch 'auth=ok installer=fixture') { throw '패키지 앱이 인증된 설치 파일 다운로드를 수행하지 않았습니다.' }
   if ($readiness.data.update.currentVersion -ne $currentVersion -or -not $readiness.data.ready) { throw '패키지 앱 버전 또는 유휴 상태 확인이 올바르지 않습니다.' }
 
   [ordered]@{
@@ -158,6 +170,9 @@ try {
     detectedVersion = [string]$readiness.data.update.version
     updateStatus = [string]$readiness.data.update.status
     authenticatedMetadataRequest = $true
+    authenticatedInstallerDownloaded = $true
+    isolatedDownloadCacheVerified = $true
+    fixtureInstallDisabled = $true
     packagedPrismaEngineLoaded = $true
     workspacePrismaEngineLoaded = $false
     localUiStatus = $rootResponse.StatusCode

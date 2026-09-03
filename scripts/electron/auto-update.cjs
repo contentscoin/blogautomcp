@@ -56,6 +56,8 @@ function createDesktopAutoUpdater({ app, Notification, NsisUpdater, userDataDir,
   const idleConfirmMs = numericEnv('AUTO_UPDATE_IDLE_CONFIRM_MS', IDLE_CONFIRM_MS, testMode ? 10 : 500);
   const downloadedInstallDelayMs = numericEnv('AUTO_UPDATE_INSTALL_DELAY_MS', 1_000, testMode ? 10 : 500);
   const autoDownload = process.env.AUTO_UPDATE_DOWNLOAD !== 'false';
+  // Only isolated test runs may download a fixture without executing it.
+  const autoInstall = !(testMode && process.env.AUTO_UPDATE_INSTALL === 'false');
   let updater = null;
   let updaterOrigin = '';
   let startTimer = null;
@@ -101,7 +103,7 @@ function createDesktopAutoUpdater({ app, Notification, NsisUpdater, userDataDir,
   }
 
   async function installWhenSafe() {
-    if (stopped || !downloaded || !updater) return;
+    if (stopped || !autoInstall || !downloaded || !updater) return;
     let readiness;
     try {
       readiness = await getReadiness();
@@ -134,7 +136,7 @@ function createDesktopAutoUpdater({ app, Notification, NsisUpdater, userDataDir,
   function bindUpdater(nextUpdater) {
     nextUpdater.logger = logger;
     nextUpdater.autoDownload = autoDownload;
-    nextUpdater.autoInstallOnAppQuit = true;
+    nextUpdater.autoInstallOnAppQuit = autoInstall;
     nextUpdater.allowDowngrade = false;
     nextUpdater.allowPrerelease = false;
     nextUpdater.disableWebInstaller = true;
@@ -152,10 +154,10 @@ function createDesktopAutoUpdater({ app, Notification, NsisUpdater, userDataDir,
     });
     nextUpdater.on('update-downloaded', (info) => {
       downloaded = true;
-      process.env.DESKTOP_UPDATE_INSTALL_PENDING = '1';
+      if (autoInstall) process.env.DESKTOP_UPDATE_INSTALL_PENDING = '1';
       setState('downloaded', { version: info.version, progress: 100 });
       notify('업데이트 다운로드 완료', `${info.version} 버전을 준비했습니다. 진행 중인 포스팅이 끝나면 자동 재시작합니다.`);
-      scheduleInstall(downloadedInstallDelayMs);
+      if (autoInstall) scheduleInstall(downloadedInstallDelayMs);
     });
     nextUpdater.on('error', (error) => {
       setState('error', { error: error instanceof Error ? error.message : String(error) });

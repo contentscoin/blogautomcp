@@ -115,3 +115,12 @@ Codex 리뷰가 이동 단계의 결함 두 가지를 지적했고 확인해 고
 
 회귀 검사는 보안 확인이 2·3번째 시도에서 나타나는 경우와 비네트워크 오류를 각각 검증하며, 두 케이스
 모두 수정 전 코드에서 실패하는 것을 확인했다.
+
+## 배포 보완 — 업데이트 설정 포함 및 실제 다운로드 검증
+
+- 1.3.10의 prepackaged 설치본은 `resources/app-update.yml`이 없어 업데이트 감지는 성공하지만 실제 다운로드 캐시 생성이 ENOENT로 실패했다. `resources/app-update.yml`을 소스 관리하고 `build.extraResources`에 명시했다. 이번 1.3.11은 검증된 전체 빌드에서 표준 electron-builder 패키징으로 새로 생성한다.
+- 패키지 검증은 설정 파일과 캐시 디렉터리 이름을 먼저 확인하고, 인증된 fixture 설치 파일을 실제 다운로드해 내용과 캐시 위치를 검증한다. LOCALAPPDATA를 격리된 임시 경로로 지정해 실사용 업데이트 캐시를 건드리지 않는다.
+- `AUTO_UPDATE_TEST_MODE=1`일 때만 `AUTO_UPDATE_INSTALL=false`로 fixture 실행과 앱 종료 시 설치를 차단할 수 있다. 일반 실행은 이 테스트 전용 설정을 무시하며, 기존 자동 설치·유휴 검사·토큰 마스킹 검사를 유지했다.
+- updater 단위 검사, 루트 및 scripts TypeScript 검사, 변경 JS lint, draft-snapshot, chatgpt-browser-automation, package-qc-reconcile, brand-post-package, writing-harness, section-images 검사가 통과했다. Sites build/type/lint와 MCP/OAuth 로컬 E2E도 통과했다.
+- 첫 전체 빌드는 디스크 ENOSPC와 메모리 할당 실패로 완료되지 않았다. 저장 공간이 확보된 뒤 다시 실행한 `npm run build`는 TypeScript·정적 페이지·빌드 추적까지 정상 완료됐다. 최초 실패를 통과로 간주하지 않는다.
+- 최종 1.3.11 설치본의 실행·다운로드·재시작 및 중앙 배포 결과는 검증 후 기록한다. 유료 생성이나 실제 블로그 추가 발행은 이번 배포 검사에 포함하지 않는다.

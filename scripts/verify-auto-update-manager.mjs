@@ -13,6 +13,7 @@ const environmentKeys = [
   'AUTO_UPDATE_CHECK_INTERVAL_MS',
   'AUTO_UPDATE_DOWNLOAD',
   'AUTO_UPDATE_FORCE',
+  'AUTO_UPDATE_INSTALL',
   'AUTO_UPDATE_IDLE_CONFIRM_MS',
   'AUTO_UPDATE_IDLE_RECHECK_MS',
   'AUTO_UPDATE_INSTALL_DELAY_MS',
@@ -149,6 +150,34 @@ try {
   const log = await readFile(path.join(temporaryDirectory, 'logs', 'auto-update.log'), 'utf8');
   assert.ok(log.includes('Bearer [REDACTED]'));
   assert.ok(!log.includes('A'.repeat(43)));
+
+  manager.stop();
+  process.env.AUTO_UPDATE_INSTALL = 'false';
+  manager = createDesktopAutoUpdater({
+    app: { getVersion: () => '1.1.0', isPackaged: true },
+    Notification: FakeNotification, NsisUpdater: FakeNsisUpdater,
+    userDataDir: temporaryDirectory,
+    getReadiness: async () => ({ ready: true }),
+    beforeInstall: async () => { throw new Error('Fixture must not install'); },
+  });
+  await manager.checkNow('manual');
+  const fixtureUpdater = FakeNsisUpdater.instances.at(-1);
+  assert.equal(fixtureUpdater.autoInstallOnAppQuit, false);
+  fixtureUpdater.emit('update-downloaded', { version: '1.1.1' });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal(fixtureUpdater.installArguments, null);
+  assert.equal(manager.getState().status, 'downloaded');
+  assert.equal(process.env.DESKTOP_UPDATE_INSTALL_PENDING, undefined);
+  manager.stop();
+  delete process.env.AUTO_UPDATE_TEST_MODE;
+  manager = createDesktopAutoUpdater({
+    app: { getVersion: () => '1.1.0', isPackaged: true },
+    Notification: FakeNotification, NsisUpdater: FakeNsisUpdater,
+    userDataDir: temporaryDirectory,
+    getReadiness: async () => ({ ready: false }), beforeInstall: async () => {},
+  });
+  await manager.checkNow('manual');
+  assert.equal(FakeNsisUpdater.instances.at(-1).autoInstallOnAppQuit, true, 'Production must ignore test-only install suppression');
 
   console.log(JSON.stringify({
     success: true,

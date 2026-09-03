@@ -137,6 +137,10 @@
     ],
     "extraResources": [
       {
+        "from": "resources/app-update.yml",
+        "to": "app-update.yml"
+      },
+      {
         "from": "node_modules/pretendard/dist/web/static/woff2/Pretendard-Bold.woff2",
         "to": "fonts/Pretendard-Bold.woff2"
       },

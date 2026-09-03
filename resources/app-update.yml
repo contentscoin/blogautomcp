@@ -1,0 +1,5 @@
+provider: generic
+url: https://blogautomcp.hiway350051.chatgpt.site/api/updates/windows
+channel: latest
+useMultipleRangeRequest: false
+updaterCacheDirName: brandconnect-automation-updater
