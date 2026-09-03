@@ -160,13 +160,21 @@ async function main() {
     true,
     "데스크톱 실행기는 섹션 이미지 적용 작업, 진행률 파일 읽기, 초안 데드라인, contentQuality 봉투를 지원해야 합니다.",
   );
+  const draftContextViewSource = fs.readFileSync(path.join(projectRoot, "src", "lib", "draft-context-view.ts"), "utf8");
   assert.equal(
-    pollRouteSource.includes("verifiedFacts") &&
-      pollRouteSource.includes("sourceImages") &&
-      pollRouteSource.includes("systemPrompt: generation.systemPrompt") &&
+    draftContextViewSource.includes("verifiedFacts") &&
+      draftContextViewSource.includes("sourceImages") &&
+      draftContextViewSource.includes("systemPrompt: generation.systemPrompt") &&
+      pollRouteSource.includes("buildPreparedDraftView") &&
       pollRouteSource.includes("imagePrompt: productName && (title || intent)"),
     true,
     "초안 컨텍스트 결과는 verifiedFacts·sourceImages·systemPrompt 를 최상위로 올리고 슬롯마다 imagePrompt 를 제공해야 합니다.",
+  );
+  assert.equal(
+    /const view: Record<string, unknown> = \{\s*\.\.\.data,/u.test(draftContextViewSource) &&
+      !draftContextViewSource.includes("context: data"),
+    true,
+    "brand-draft-context/v2 는 최상위에 펼쳐야 합니다(context 아래로 내리면 제출이 PRODUCT_SNAPSHOT_CHANGED 로 막힙니다).",
   );
   assert.equal(
     simpleAgentSource.includes("createProductDetailImageSegments") &&

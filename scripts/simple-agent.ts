@@ -135,11 +135,16 @@ import {
 import {
   buildChatGptBrowserLaunchPolicy,
   describeChatGptBrowserVisibility,
+  resolveChatGptBrowserVisibility,
 } from "./lib/chatgpt-browser-visibility";
 import {
+  CHATGPT_MANUAL_VERIFICATION_MESSAGE,
+  CHATGPT_PROTECTION_FRAME_PATTERNS,
   chatGptAuthenticationRequiredMessage,
   hasChatGptProtectionText,
 } from "./lib/chatgpt-browser-errors";
+import { navigateToChatGpt } from "./lib/chatgpt-navigation";
+import { revealChatGptBrowserWindow } from "./lib/chatgpt-browser-window";
 import { acquireChatGptProfileLock } from "./lib/chatgpt-profile-lock";
 import {
   createChatGptReplyProgress,
@@ -233,6 +238,8 @@ const BROWSER_GPT_MODE = REQUESTED_BROWSER_GPT_MODE && ALLOW_CHATGPT_BROWSER_MOD
 const CHATGPT_BASE_URL = "https://chatgpt.com/";
 // 글 작성은 특정 계정/공유 링크에 종속되지 않는 일반 ChatGPT에서만 실행한다.
 const CHATGPT_TIMEOUT_MS = Number(process.env.CHATGPT_TIMEOUT_MS || "420000");
+/** chatgpt.com 이동 1회 대기(ms). 예전 하드코딩 120초×3회는 실패를 6분 뒤에야 알렸다. */
+const CHATGPT_NAVIGATION_TIMEOUT_MS = Number(process.env.CHATGPT_NAVIGATION_TIMEOUT_MS || "60000");
 const CHATGPT_RESPONSE_IDLE_TIMEOUT_MS = Number(
   process.env.CHATGPT_RESPONSE_IDLE_TIMEOUT_MS || String(Math.max(CHATGPT_TIMEOUT_MS, 300000))
 );
@@ -2034,22 +2041,6 @@ const CHATGPT_AUTHENTICATED_UI_SELECTORS = [
   'button:has-text("새 대화")',
 ];
 
-const CHATGPT_MANUAL_VERIFICATION_MESSAGE =
-  chatGptAuthenticationRequiredMessage(
-    "ChatGPT manual verification required. A human-verification or security-check page is visible. Complete it in the browser, then run the job again.",
-  );
-
-const CHATGPT_PROTECTION_FRAME_PATTERNS = [
-  "cdn-cgi/challenge-platform",
-  "challenge",
-  "captcha",
-  "turnstile",
-  "cloudflare",
-  "cf-chl",
-  "hcaptcha",
-  "recaptcha",
-];
-
 async function findVisibleSelector(page: Page, selectors: string[]): Promise<string | null> {
   for (const selector of selectors) {
     const isVisible = await page.locator(selector).first().isVisible().catch(() => false);
@@ -2548,37 +2539,18 @@ async function ensureChatGPTReady(page: Page, timeoutMs: number): Promise<void> 
   throw new Error("ChatGPT 페이지 준비 시간이 초과되었습니다. 로그인 상태 또는 GPT URL을 확인하세요.");
 }
 
-async function navigateWithRetry(
-  page: Page,
-  url: string,
-  label: string,
-  maxAttempts = 3
-): Promise<void> {
-  let lastError: unknown = null;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 120000 });
-      return;
-    } catch (error) {
-      lastError = error;
-      console.log(
-        `      - ${label} 이동 재시도 ${attempt}/${maxAttempts} 실패: ${getErrorMessage(error)}`
-      );
-
-      if (attempt < maxAttempts) {
-        await page.waitForTimeout(1500 * attempt);
-      }
-    }
-  }
-
-  throw new Error(`${label} 이동 실패: ${getErrorMessage(lastError)}`);
-}
-
 async function openChatGPTTarget(page: Page, _requestedUrl: string, label: string): Promise<void> {
   const targetUrl = withTemporaryChatParam(CHATGPT_BASE_URL);
 
-  await navigateWithRetry(page, targetUrl, `${label} ChatGPT`);
+  await navigateToChatGpt(page, targetUrl, {
+    label: `${label} ChatGPT`,
+    timeoutMs: CHATGPT_NAVIGATION_TIMEOUT_MS,
+    // 숨은 창에서 막히면 마지막 시도 전에 창을 띄워 사용자가 보안 확인을 끝낼 수 있게 한다.
+    reveal: resolveChatGptBrowserVisibility(process.env) === "background"
+      ? () => revealChatGptBrowserWindow(page)
+      : null,
+    log: (message) => console.log(message),
+  });
   await continueChatGPTAccountPicker(page, label);
   await ensureChatGPTReady(page, Math.min(CHATGPT_TIMEOUT_MS, 120000));
   await dismissTemporaryChatOnboarding(page);

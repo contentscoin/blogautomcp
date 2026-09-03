@@ -1054,6 +1054,7 @@ export default function Dashboard() {
         const shouldHandoff = response.status === 409 && [
           "CHATGPT_MCP_DRAFT_REQUIRED",
           "CHATGPT_BROWSER_FALLBACK_REQUIRED",
+          "CHATGPT_BROWSER_UNREACHABLE",
           "CHATGPT_BROWSER_LOGIN_REQUIRED",
         ].includes(payload?.code);
         if (shouldHandoff && isChatGptDraftHandoff(handoff)) {
@@ -1063,7 +1064,9 @@ export default function Dashboard() {
             tone: "info",
             text: payload?.code === "CHATGPT_MCP_DRAFT_REQUIRED"
               ? "상품별 요청문이 준비됐습니다. 복사한 뒤 ChatGPT에서 이어서 작성하세요."
-              : "웹 자동작성을 완료하지 못했습니다. 상품별 요청문으로 ChatGPT에서 이어서 작성할 수 있습니다.",
+              : payload?.code === "CHATGPT_BROWSER_UNREACHABLE"
+                ? "ChatGPT 웹 페이지에 연결하지 못했습니다. 네트워크를 확인하거나 상품별 요청문으로 ChatGPT에서 이어서 작성하세요."
+                : "웹 자동작성을 완료하지 못했습니다. 상품별 요청문으로 ChatGPT에서 이어서 작성할 수 있습니다.",
           });
           return;
         }

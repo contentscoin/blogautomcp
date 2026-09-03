@@ -10,7 +10,7 @@
 > - 결과 봉투: `{schema:"blogautomcp.job-result/v1", jobType, kind, summary, data, readiness?, warnings[], nextAction?}` — PC 파일 경로는 포함하지 않는다. 실패는 `NAVER_SESSION_EXPIRED | PRODUCT_NOT_FOUND | CONNECT_KIND_MISMATCH | CONTENT_BLOCKED | IMAGE_SHORTFALL | LLM_UNAVAILABLE | EDITOR_FAILED | UPDATE_PENDING | TRAVEL_CONTRACT_LOCKED | DRAFT_NOT_FOUND | DRAFT_NOT_APPROVED | ALREADY_PUBLISHING | INVALID_INPUT | USER_CANCELLED | TIMEOUT | LOCAL_API_MISSING | LOCAL_AUTOMATION_FAILED` 로 분류한다.
 > - 보호: MCP 엔드포인트 IP 600회/분·호출 120회/분, 페어링 10회/분/IP, MCP URL 발급 5회/분/사용자. 도구 인자는 선언한 JSON 스키마로 서버에서 검증하고, 새 도구는 데스크톱 최소 버전(1.3.0) 미달 PC 에 `APP_UPDATE_REQUIRED` 를 돌려준다.
 >
-> **MCP 도구(27개, 서버 1.3.10)**
+> **MCP 도구(27개, 서버 1.3.11)**
 >
 > | 도구 | 큐 작업 | 로컬 라우트 | 비고 |
 > |---|---|---|---|

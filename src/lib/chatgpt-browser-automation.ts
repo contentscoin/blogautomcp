@@ -4,7 +4,10 @@ import {
   getChatgptSessionFile,
 } from "../../scripts/lib/app-paths";
 import { resolveChatGptBrowserVisibility } from "../../scripts/lib/chatgpt-browser-visibility";
-import { CHATGPT_BROWSER_AUTH_REQUIRED_CODE } from "../../scripts/lib/chatgpt-browser-errors";
+import {
+  CHATGPT_BROWSER_AUTH_REQUIRED_CODE,
+  CHATGPT_BROWSER_UNREACHABLE_CODE,
+} from "../../scripts/lib/chatgpt-browser-errors";
 
 export interface ChatGptBrowserSessionSummary {
   hasSession: boolean;
@@ -70,6 +73,18 @@ export function isChatGptBrowserAuthenticationError(message: string): boolean {
     "choose an account",
     "unusual activity",
   ].some((marker) => normalized.includes(marker));
+}
+
+/**
+ * chatgpt.com 자체에 도달하지 못한 실패. 로그인·보안 확인(AUTH_REQUIRED)과 분리해야
+ * 데스크톱이 로그인 창을 여는 대신 네트워크·프록시 안내와 MCP 요청문 경로를 보여준다.
+ * `이동 실패` + 타임아웃 조합은 1.3.10 이하 PC 로그와의 호환용이다.
+ */
+export function isChatGptBrowserUnreachableError(message: string): boolean {
+  const normalized = message.replace(/\s+/gu, " ").trim().toLowerCase();
+  if (!normalized) return false;
+  if (normalized.includes(CHATGPT_BROWSER_UNREACHABLE_CODE.toLowerCase())) return true;
+  return normalized.includes("이동 실패") && /timeout|net::err_/u.test(normalized);
 }
 
 function getLastModifiedIso(targetPath: string): string | undefined {

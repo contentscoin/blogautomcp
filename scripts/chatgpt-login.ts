@@ -1,3 +1,4 @@
+import { revealChatGptBrowserWindow as revealChatGptLoginWindow } from "./lib/chatgpt-browser-window";
 /**
  * ChatGPT 브라우저 로그인 세션 저장 스크립트
  * 사용법: npm run login:chatgpt
@@ -229,29 +230,6 @@ async function verifyBaseChatGPTSession(page: Page): Promise<void> {
         "로그인 후 세션 응답 검증에 실패했습니다. Cloudflare 인증/로그인 상태를 다시 확인하고 재시도하세요."
       );
     }
-  }
-}
-
-async function revealChatGptLoginWindow(page: Page): Promise<void> {
-  await page.bringToFront().catch(() => {});
-  const cdp = await page.context().newCDPSession(page).catch(() => null);
-  if (!cdp) return;
-
-  try {
-    const { windowId } = await cdp.send("Browser.getWindowForTarget");
-    await cdp.send("Browser.setWindowBounds", {
-      windowId,
-      bounds: { windowState: "normal" },
-    });
-    await cdp.send("Browser.setWindowBounds", {
-      windowId,
-      bounds: { left: 80, top: 80, width: 1440, height: 960 },
-    });
-    await page.bringToFront().catch(() => {});
-  } catch {
-    // Chrome 채널/OS가 창 제어를 지원하지 않아도 headful 로그인은 계속 진행합니다.
-  } finally {
-    await cdp.detach().catch(() => {});
   }
 }
 

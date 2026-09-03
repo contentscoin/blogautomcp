@@ -86,3 +86,12 @@ GitHub Actions `33714548525`의 `check`와 `sites`는 단계 실행 전에 중�
 기존 1.3.9와 새 1.3.10 설치 디렉터리에 `resources/app-update.yml`이 없다. 업데이트 감지는 성공하지만 실제 다운로드는 electron-updater의 `getOrCreateDownloadHelper()`에서 `configOnDisk.value.updaterCacheDirName`을 읽다 ENOENT로 중단된다. 기존 패키지 검사는 AUTO_UPDATE_DOWNLOAD=false로 실행했으므로 이 단계를 검증하지 못했다.
 
 현재 사용자 PC에는 기존 package.json의 generic 배포 주소·latest 채널·단일 범위 설정과 `updaterCacheDirName: brandconnect-automation-updater`를 담은 누락 파일을 새로 만들어 복구했다. 기존 앱 재시작 후 정상 다운로드/설치가 완료됐으며, 설치 과정에서 누락 파일이 다시 사라져 1.3.10에도 동일 파일을 복구했다. 인증 토큰이나 비밀키는 이 파일에 넣지 않았다. 게시된 설치본 자체는 교체하지 않았으므로 다른 PC 및 신규 설치에도 이 누락 문제가 남는다. 다음 보완 릴리스에서는 prepackaged 단계의 업데이트 설정 파일 포함 및 실제 다운로드 단계 검증을 추가해야 한다. 현재 PC의 성공을 모든 PC의 무보정 자동 업데이트 성공으로 해석하지 않는다.
+
+## 1.3.11 정정 (2026-09-03)
+
+위 "`POST_PREPARE_DRAFT` 결과 최상위에 … (원본은 `context`)" 변경은 회귀였다. 원본 `brand-draft-context/v2` 를
+`context` 아래로 내리면서 최상위 `snapshot` 이 사라졌고, 사이트의 `post_submit_draft` 검증과 PC 의 스냅샷 무결성
+검사가 모두 최상위 `snapshot` 을 읽기 때문에 1.3.10 PC 의 제출이 전부 `PRODUCT_SNAPSHOT_CHANGED` 로 막혔다.
+1.3.11 에서 결과는 다시 v2 를 최상위에 펼치고(`context` 없음), 사이트는 두 형태를 모두 받아들인다.
+자세한 내용은 `docs/draft-pipeline-release-1.3.11.md`.
+
