@@ -42,3 +42,11 @@ Cancellation tests cover signal propagation and rejection of late results; actua
 The editorial QC is still heuristic, not claim-level source verification: supplied source data is trusted and unsupported prose claims can evade its lexical checks. Destination coverage remains partly global. A score of 100 is not a factual guarantee or a substitute for the image/composition/approval gates.
 
 Existing incomplete drafts can use the missing-image action after updating; they do not need text regeneration solely to repair images. Disabling `BRAND_POST_AUTO_SECTION_IMAGES` (or the legacy fallback setting) disables automatic generation, but does not make missing section images valid.
+
+## Deployment evidence
+
+Published Windows 1.3.8 to the existing central update channel at 2026-09-03 00:13:41 UTC. Authenticated `latest.yml` and installer HEAD both returned 200; installer size is 467315956 bytes and SHA-256 is `c01b410f22ce1055892afe890935c276a44edd0b496071f86c0db961616da8fc`. Sites version 24 contains the matching MCP handoff instructions.
+
+The first installer assembly failed with C-drive space nearly exhausted. No user files were deleted. NTFS compression was applied to the workspace build caches and the new, isolated staged app; content stayed unchanged. Its existing archive passed `7za t` before installer assembly was retried with `--prepackaged`. An interrupted D-drive transfer was marked `D:\blogautomcp-release-1.3.8\brandconnect-automation-1.3.8-x64.nsis.7z.partial`; it is not a valid release artifact.
+
+Final live status: paired PC online and idle, still running 1.3.7. No forced update/install was triggered: C had only approximately 1.2 GB free, insufficient for a comfortable update. Central deployment is complete; applying it to that PC requires disk headroom and an app update. Real generation remains untested as noted above.
