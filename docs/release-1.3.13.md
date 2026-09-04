@@ -24,4 +24,9 @@ See `image-timeout-policy.md` and `writing-timeouts.md` for exact defaults and o
 
 ## Release evidence
 
-Final package and central publication evidence is recorded after validation. Sites application code is unchanged; deployment target is the existing central Windows update feed, not Vercel.
+- Final `npm run build`, scripts TypeScript and scoped ESLint passed. Source commit: `d92c01f05d5c6bf8a9685389e465f7a522e7086b`.
+- Packaged desktop smoke passed: version 1.3.13, isolated authenticated fixture download for 1.3.14 (not installed), HTTP 200, fixed settings, own Prisma engine, manual update check and real process relaunch. All seven changed runtime files checked against packaged files have matching SHA-256 hashes.
+- GitHub CI run 33843288229 did not start its jobs: account payment/spending-limit restriction. Remote CI is not claimed passing.
+- Installer: 325,491,390 bytes, SHA-256 `d1f07d8ac64cccb66bab8442c7d4f9e591408d2a37a63448c4f93af1c9b0b25a`. Blockmap: 332,100 bytes, SHA-256 `8c0ce63c4c0b85d2784e8f7e103f49eda896a82e72c0c36d605e2ecad7bbb064`. GitHub release v1.3.13 asset digests match local verification.
+- Central admin confirmed `1.3.13 버전 배포가 완료되었습니다. 연결된 PC가 자동으로 내려받습니다.` on 2026-09-04. Installed PC had zero active work; normal update check returned `available`, version 1.3.13, no error.
+- Sites application code is unchanged; deployment target is the existing central Windows update feed, not Vercel. Central publication and installed-PC completion are distinct checks.
