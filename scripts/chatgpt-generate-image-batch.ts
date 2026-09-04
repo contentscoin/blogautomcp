@@ -1,6 +1,7 @@
 import "dotenv/config";
 import fs from "fs";
 import path from "path";
+import { imagePageSignals, keepFailedDiagnosticOpen, imageBatchSucceeded } from "./lib/image-batch-diagnostics";
 import {
   countRenderableChatGPTImages,
   createChatGPTContext,
@@ -137,18 +138,34 @@ async function runJob(
   const started = Date.now();
   let phase = "preparation";
   let phaseStarted = started;
+  const trace = async (stage: string) => {
+    try {
+      const signals = await withinImageDeadline(async () => ({
+        ...await imagePageSignals(page),
+        generating: await isChatGPTGenerating(page),
+        renderableImages: await countRenderableChatGPTImages(page),
+      }), 5_000, "diagnostic signals");
+      fs.appendFileSync(path.join(tempDir, "progress.jsonl"), JSON.stringify({
+        stage, elapsedMs: Date.now() - started, ...signals,
+      }) + "\n", { encoding: "utf8", mode: 0o600 });
+    } catch { /* Observation must not change the generation outcome. */ }
+  };
 
   try {
     await withinImageDeadline(async () => {
       await openFreshChatGPTTarget(page, gptUrl, "주제 이미지 생성 GPT");
 
       await attachReferenceImages(page, job.referenceImagePaths || []);
+      await trace("before-submit");
       await submitPromptToChatGPT(page, job.prompt, `주제 이미지 생성 ${job.id}`);
+      await trace("after-submit");
       await maybeConfirmGeneration(page);
+      await trace("after-confirmation-check");
     }, IMAGE_PREPARATION_MS, phase);
     phase = "generation";
     phaseStarted = Date.now();
     await waitForImageCompletion(page);
+    await trace("image-detected");
 
     phase = "download";
     phaseStarted = Date.now();
@@ -174,6 +191,7 @@ async function runJob(
       localPath: finalPath,
     };
   } catch (error) {
+    await trace("failed");
     const sessionWide = isSessionWideImageFailure(error);
     const timedOut = error instanceof Error && /IMAGE_TIMEOUT:/.test(error.message);
     const elapsedSeconds = Math.round((Date.now() - phaseStarted) / 1000);
@@ -229,10 +247,13 @@ export async function main() {
       // Isolate timed-out operations from later slots. Closing this page cancels local
       // preparation/download actions, but never retries the remote generation request.
       const page = await handle.context.newPage();
-      let result: BatchResult;
-      try { result = await runJob(page, job, gptUrl); }
-      finally { await withinImageDeadline(() => page.close(), 10_000, "page cleanup").catch(() => {}); }
+      const result = await runJob(page, job, gptUrl);
       record(result);
+      if (result.error && keepFailedDiagnosticOpen(process.env, jobs.length) && !page.isClosed()) {
+        console.error("[chatgpt-image-batch] 진단 실패: 브라우저를 유지합니다. 확인 후 이 탭/창을 닫으면 진단이 종료됩니다. 추가 생성 요청은 보내지 않습니다.");
+        await page.waitForEvent("close", { timeout: 0 }).catch(() => {});
+      }
+      await withinImageDeadline(() => page.close(), 10_000, "page cleanup").catch(() => {});
       if (result.error && failFast && isSessionWideImageFailure(result.error)) {
         const reason = result.error.split("\n")[0].trim().slice(0, 200);
         for (const remaining of jobs.slice(index + 1)) {
@@ -249,7 +270,9 @@ export async function main() {
     }
   } finally {
     fs.closeSync(checkpoint);
-    process.stdout.write(JSON.stringify({ ok: !failure, jobs: results }));
+    const ok = imageBatchSucceeded(failure, results);
+    process.stdout.write(JSON.stringify({ ok, jobs: results }));
+    if (!ok) process.exitCode = 1;
     await handle?.close().catch(() => {});
   }
   if (failure) throw failure;

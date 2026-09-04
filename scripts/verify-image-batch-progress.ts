@@ -82,6 +82,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
         createLockedProductEditorialScene: locked,
         createLockedProductThumbnailOnBackground: locked,
         createOriginalProductPhotoThumbnail: async () => ({ outputPath: sourcePath }),
+        createOriginalProductPhotoOnBackground: async () => ({ outputPath: sourcePath }),
       },
       "../../scripts/lib/product-thumbnail": { buildProductThumbnailCopy: () => ({}) },
       "../../scripts/lib/travel-content": { buildTravelThumbnailCopy: () => ({}) },
@@ -299,9 +300,9 @@ async function verifyGenerator() {
       h.close(0, { ok: true, jobs: [h.result(0), h.result(1)] });
       const results = await pending;
       assert.equal(h.lockCalls, 2);
-      results.forEach((r) => {
+      results.forEach((r, index) => {
         assert.equal(r.generatedPath, sourcePath);
-        assert.equal(r.provenance, lockFails ? "ORIGINAL" : "LOCKED_PRODUCT");
+        assert.equal(r.provenance, lockFails ? (index === 0 ? "EDITORIAL_CARD" : "ORIGINAL") : "LOCKED_PRODUCT");
       });
       assert.match(h.jobs[0].prompt, /Generate the environment only/);
     });
@@ -350,6 +351,7 @@ async function verifyProducer(startupFailure = false, failFast = false, sessionF
   const api = load<{ main: () => Promise<void> }>("scripts/chatgpt-generate-image-batch.ts", {
     "dotenv/config": {}, fs, path,
     "./lib/image-timeout-policy": producerPolicy,
+    "./lib/image-batch-diagnostics": load("scripts/lib/image-batch-diagnostics.ts", {}),
     "./lib/chatgpt-browser": {
       createChatGPTContext: async () => {
         if (startupFailure) throw new Error("browser startup failed");
@@ -390,7 +392,7 @@ async function verifyProducer(startupFailure = false, failFast = false, sessionF
   else await api.main();
   const output = JSON.parse(stdout);
   const records = readRecords();
-  assert.equal(output.ok, !startupFailure && !(sessionFailure && failFast));
+  assert.equal(output.ok, false, "any failed slot must make the batch unsuccessful");
   assert.ok(!stdout.includes("secret-token"));
   assert.ok(!stderr.includes("secret-token"));
   assert.deepEqual(output.jobs, records);

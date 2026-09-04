@@ -145,6 +145,16 @@ async function main() {
       assert.equal(fs.readFileSync(files[0], "utf8"), "generated data image");
     });
 
+    await check("observed section turns without role attributes detect generated output and exclude echoed uploads", async () => {
+      const f = await fixture(`<section data-testid="conversation-turn-1">${image("https://fixture/uploaded")}</section>` +
+        `<section data-testid="conversation-turn-2"><div class="agent-turn">${image("https://fixture/uploaded")}${image(dataUrl)}</div></section>`);
+      assert.equal(await api.countRenderableChatGPTImages(f.page), 1);
+      const files = await api.downloadChatGPTImages(f.page, path.join(root, "section-turn"));
+      assert.equal(files.length, 1);
+      assert.equal(fs.readFileSync(files[0], "utf8"), "generated data image");
+      assert.equal(await f.wait(24000), 1);
+    });
+
     await check("nested user roles, legacy user turns, upload markers and echoed references excluded", async () => {
       const f = await fixture(user(image("https://fixture/reference")) + assistant(
         image("https://fixture/reference") +

@@ -231,6 +231,43 @@ export async function createLockedProductEditorialScene(options: {
   return { outputPath, lock };
 }
 
+/** Keep the entire original photo visible when safe alpha extraction is impossible.
+ * This is an editorial card, NOT a segmented/locked product or an actual scene photo.
+ */
+export async function createOriginalProductPhotoOnBackground(options: {
+  sourcePath: string;
+  backgroundPath: string;
+  outputDir: string;
+}): Promise<{ outputPath: string; sourceSha256: string }> {
+  fs.mkdirSync(options.outputDir, { recursive: true });
+  const photo = await sharp(fs.readFileSync(options.sourcePath)).rotate()
+    .resize(680, 680, { fit: "inside", withoutEnlargement: true })
+    .png().toBuffer();
+  const metadata = await sharp(photo).metadata();
+  const width = metadata.width!;
+  const height = metadata.height!;
+  const padding = 20;
+  const card = await sharp({ create: {
+    width: width + padding * 2, height: height + padding * 2,
+    channels: 4, background: "#ffffff",
+  } }).composite([{ input: photo, left: padding, top: padding }]).png().toBuffer();
+  const left = 64;
+  const top = Math.floor((900 - height - padding * 2) / 2);
+  const outputPath = path.join(options.outputDir, `original-photo-background-${crypto.randomUUID()}.png`);
+  // Node supports long Windows package paths that native libvips file I/O may reject.
+  const bytes = await sharp(fs.readFileSync(options.backgroundPath)).resize(1200, 900, { fit: "cover" })
+    .composite([{ input: card, left, top }]).png().toBuffer();
+  fs.writeFileSync(outputPath, bytes);
+  const sourceSha256 = sha256File(options.sourcePath);
+  fs.writeFileSync(`${outputPath}.source.json`, JSON.stringify({
+    version: "original-photo-background/v1", sourcePath: path.resolve(options.sourcePath),
+    sourceSha256, backgroundSha256: sha256File(options.backgroundPath),
+    outputSha256: sha256File(outputPath), provenance: "EDITORIAL_CARD",
+    photoTreatment: "whole-photo-resize-only", segmented: false,
+  }, null, 2));
+  return { outputPath, sourceSha256 };
+}
+
 /** 배경 분리가 불확실할 때 상세페이지 원본 사진을 그대로 카드에 배치한다. */
 export async function createOriginalProductPhotoThumbnail(options: {
   sourcePath: string;

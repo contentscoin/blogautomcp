@@ -6,6 +6,7 @@ import {
   createLockedProductEditorialScene,
   createLockedProductThumbnailOnBackground,
   createOriginalProductPhotoThumbnail,
+  createOriginalProductPhotoOnBackground,
 } from "../../scripts/lib/product-image-lock";
 import { buildProductThumbnailCopy } from "../../scripts/lib/product-thumbnail";
 import { buildTravelThumbnailCopy } from "../../scripts/lib/travel-content";
@@ -415,8 +416,11 @@ async function finishGeneratedImage(options: {
     });
     return { generatedPath: result.outputPath, provenance: "LOCKED_PRODUCT" };
   } catch {
-    // 분리 신뢰도가 낮으면 상품 픽셀을 새로 그리지 않고 원본 상세 이미지를 그대로 쓴다.
-    return { generatedPath: sourcePath, provenance: "ORIGINAL" };
+    // Preserve the entire product photo, without pretending it was segmented.
+    const card = await createOriginalProductPhotoOnBackground({
+      sourcePath, backgroundPath: options.rawPath, outputDir: options.workDir,
+    });
+    return { generatedPath: card.outputPath, provenance: "EDITORIAL_CARD" };
   }
 }
 

@@ -803,8 +803,9 @@ function collectRenderableChatGPTGeneratedImages(): Array<{ src: string; width: 
     const label = `${img.alt || ""} ${img.getAttribute("title") || ""} ${img.className || ""}`;
     if (/uploaded|첨부|업로드|avatar|profile[-_ ]?(?:picture|photo)|프로필|아바타/i.test(label)) return true;
     if (/(?:\/|^)avatars?(?:[\/_.-])|profile-/i.test(source(img))) return true;
-    const article = img.closest('article[data-testid^="conversation-turn-"]');
+    const article = img.closest('[data-testid^="conversation-turn-"]');
     return !!article && (
+      (!role && !img.closest('.agent-turn')) ||
       !!article.querySelector('[data-message-author-role="user"]') ||
       /^(?:나의 말:|You said:)/i.test((article.textContent || "").trim())
     );
@@ -813,7 +814,7 @@ function collectRenderableChatGPTGeneratedImages(): Array<{ src: string; width: 
   const referenceSources = new Set(Array.from(document.querySelectorAll("img"))
     .filter(excluded).map(source));
   const images = Array.from(document.querySelectorAll<HTMLImageElement>(
-    '[data-message-author-role="assistant"] img, article[data-testid^="conversation-turn-"] .agent-turn img',
+    '[data-message-author-role="assistant"] img, [data-testid^="conversation-turn-"] .agent-turn img',
   ));
   const seen = new Set<string>();
   return images.flatMap((img) => {
