@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
 import ts from "typescript";
+import * as imagePolicy from "./lib/image-timeout-policy";
+import * as browserErrors from "./lib/chatgpt-browser-errors";
 import { chromium, type Browser, type BrowserContext } from "playwright";
 import type * as ChatGPTBrowser from "./lib/chatgpt-browser";
 
@@ -20,7 +22,8 @@ const dependencies: Record<string, unknown> = {
   playwright: { chromium: { launch() { throw new Error("Browser launch forbidden in offline fixtures"); } } },
   "./app-paths": { getChatgptProfileDir: () => root, getChatgptSessionFile: () => path.join(root, "unused.json") },
   "./chatgpt-browser-visibility": {},
-  "./chatgpt-browser-errors": { chatGptAuthenticationRequiredMessage: (message: string) => message },
+  "./chatgpt-browser-errors": browserErrors,
+  "./image-timeout-policy": imagePolicy,
   "./chatgpt-profile-lock": {},
 };
 vm.runInNewContext(compiled, {
@@ -89,7 +92,8 @@ async function fixture(html: string, onWait?: (document: Document, elapsed: numb
     );
   };
   page.screenshot = async () => { throw new Error("No screenshot in offline fixture"); };
-  return { page, fetched, get elapsed() { return elapsed; } };
+  return { page, fetched, get elapsed() { return elapsed; },
+    wait: (ms: number) => api.waitForChatGPTImageArtifacts(page, ms, { now: () => elapsed }) };
 }
 
 async function check(name: string, test: () => Promise<void>) {
@@ -120,7 +124,7 @@ async function main() {
       assert.equal(await api.countRenderableChatGPTImages(f.page), 0);
       assert.equal((await api.downloadChatGPTImages(f.page, path.join(root, "excluded"))).length, 0);
       assert.equal(f.fetched.length, 0);
-      assert.equal(await api.waitForChatGPTImageArtifacts(f.page, 15000), 0);
+      assert.equal(await f.wait(15000), 0);
     });
 
     await check("large user reference cannot outrank genuine assistant output", async () => {
@@ -188,15 +192,15 @@ async function main() {
 
     await check("wait does not return success while still generating or after an unstable timeout", async () => {
       const streaming = await fixture(assistant(image(dataUrl)) + '<button data-testid="stop-button">Stop</button>');
-      assert.equal(await api.waitForChatGPTImageArtifacts(streaming.page, 15000), 0);
+      assert.equal(await streaming.wait(15000), 0);
       const unstable = await fixture(assistant(image(dataUrl)));
-      assert.equal(await api.waitForChatGPTImageArtifacts(unstable.page, 6000), 0);
+      assert.equal(await unstable.wait(6000), 0);
     });
 
     await check("wait ignores references, then accepts stable loaded assistant artifacts", async () => {
       const f = await fixture(user(image("https://fixture/reference")) + assistant(image(dataUrl, 'data-loading="true"')),
         (document, elapsed) => { if (elapsed >= 15000) document.querySelector('[data-loading]')?.removeAttribute("data-loading"); });
-      assert.equal(await api.waitForChatGPTImageArtifacts(f.page, 24000), 1);
+      assert.equal(await f.wait(24000), 1);
       assert.ok(f.elapsed >= 18000);
     });
     console.log(`Verified ${checks} offline Chromium DOM fixture checks; all external requests blocked, no paid generation.`);

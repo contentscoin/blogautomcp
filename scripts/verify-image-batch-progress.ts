@@ -7,6 +7,7 @@ import vm from "node:vm";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import ts from "typescript";
+import * as imagePolicy from "./lib/image-timeout-policy";
 import type { generateBrandPostImages as Generate, BrandPostImageGenerationResult } from "../src/lib/brand-post-image-generation";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-image-batch-"));
@@ -29,7 +30,7 @@ function load<T>(file: string, dependencies: Record<string, unknown>, overrides:
       assert.ok(Object.prototype.hasOwnProperty.call(dependencies, name), `Unexpected dependency: ${name}`);
       return dependencies[name];
     },
-    process, console: { log() {}, error() {} }, setTimeout, clearTimeout, setInterval, clearInterval,
+    process, Error, console: { log() {}, error() {} }, setTimeout, clearTimeout, setInterval, clearInterval,
     ...overrides,
   }, { filename: file });
   return loadedModule.exports as T;
@@ -64,6 +65,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
   }>(
     "src/lib/brand-post-image-generation.ts", {
       "node:fs": fs, "node:path": path,
+      "../../scripts/lib/image-timeout-policy": imagePolicy,
       "node:child_process": {
         spawn(_command: string, args: string[], options: { windowsHide: boolean; shell: boolean }) {
           spawns += 1;
@@ -158,10 +160,9 @@ async function verifyGenerator() {
     const seen: string[] = [];
     const pending = h.generate(7, { onResult: async (r) => { seen.push(r.requestId); if (seen.length === 1) await gate; } });
     assert.equal(h.jobs.length, 7);
-    // Per-job budget (3 min default) plus startup slack, never the old 8 min × jobs.
-    assert.equal(h.imageBatchTimeoutMs(7), 7 * 180_000 + 60_000);
-    assert.equal(h.imageBatchTimeoutMs(1), 180_000 + 60_000);
-    assert.equal(h.imageBatchTimeoutMs(40), 30 * 60_000, "batch budget is capped at 30 minutes");
+    assert.equal(h.imageBatchTimeoutMs(7), imagePolicy.imageBatchBudgetMs(7, {}));
+    assert.equal(h.imageBatchTimeoutMs(1), imagePolicy.imageBatchBudgetMs(1, {}));
+    assert.equal(h.imageBatchTimeoutMs(40), imagePolicy.imageBatchBudgetMs(40, {}), "every sequential job gets its full budget");
     h.progress(0);
     await tick();
     assert.equal(seen.length, 1, "first result must arrive before child close");
@@ -327,40 +328,57 @@ async function verifyGenerator() {
   });
 }
 
-async function verifyProducer(startupFailure = false, failFast = false) {
+async function verifyProducer(startupFailure = false, failFast = false, sessionFailure = false, downloadRetry = false, count = 3, downloadTimeout = false) {
   process.env.BRAND_POST_IMAGE_BATCH_FAIL_FAST = failFast ? "true" : "false";
   const dir = fs.mkdtempSync(path.join(root, "producer-"));
   const jobsFile = path.join(dir, "jobs.json");
   const checkpoint = `${jobsFile}.results.jsonl`;
-  const jobs = Array.from({ length: 3 }, (_, i) => ({ id: `슬롯-${i}`, prompt: "fake", outStem: path.join(dir, `raw-${i}`) }));
+  const jobs = Array.from({ length: count }, (_, i) => ({ id: `슬롯-${i}`, prompt: "fake", outStem: path.join(dir, `raw-${i}`) }));
   fs.writeFileSync(jobsFile, JSON.stringify(jobs));
   let stdout = "";
   let stderr = "";
   let submitted = 0;
+  let downloads = 0;
   let closed = false;
-  const page = { waitForTimeout: async () => {}, textContent: async () => "" };
+  const page = { waitForTimeout: async () => {}, textContent: async () => "", close: async () => {} };
   const readRecords = () => fs.readFileSync(checkpoint, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const producerPolicy = downloadTimeout ? load<typeof imagePolicy>("scripts/lib/image-timeout-policy.ts", {}, {
+    // Execute the real deadline helper with accelerated download timers, never leave
+    // a 60-second sleep in the offline regression suite.
+    setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms === 60_000 ? 5 : ms),
+  }) : imagePolicy;
   const api = load<{ main: () => Promise<void> }>("scripts/chatgpt-generate-image-batch.ts", {
     "dotenv/config": {}, fs, path,
+    "./lib/image-timeout-policy": producerPolicy,
     "./lib/chatgpt-browser": {
       createChatGPTContext: async () => {
         if (startupFailure) throw new Error("browser startup failed");
         return { context: { newPage: async () => page }, close: async () => {
           // Final stdout must be available even if browser cleanup hangs or fails.
-          assert.equal(JSON.parse(stdout).jobs.length, 3);
+          assert.equal(JSON.parse(stdout).jobs.length, count);
           closed = true;
         } };
       },
-      openFreshChatGPTTarget: async () => {},
-      startFreshChat: async () => {
+      openFreshChatGPTTarget: async () => {
+        if (!submitted) return;
         assert.equal(readRecords().length, submitted, "previous job must be checkpointed before next starts");
         assert.equal(stderr.split(prefix).length - 1, submitted, "previous job must emit progress before next starts");
       },
       submitPromptToChatGPT: async () => { submitted += 1; },
+      isChatGPTGenerating: async () => false,
       readAssistantMessages: async () => [], countRenderableChatGPTImages: async () => 1,
       // 0 = timed out without an artifact. The producer must fail the job instead of downloading nothing.
-      waitForChatGPTImageArtifacts: async () => (submitted === 2 && failFast ? 0 : undefined),
-      downloadChatGPTImages: async () => { if (submitted === 2) throw new Error("one download failed"); return [rawPath]; },
+      waitForChatGPTImageArtifacts: async () => {
+        if (submitted === 2 && sessionFailure) throw new Error("CHATGPT_BROWSER_AUTH_REQUIRED: secret-token@example.test");
+        return submitted === 2 && failFast ? 0 : 1;
+      },
+      downloadChatGPTImages: async () => {
+        downloads += 1;
+        if (downloadTimeout && submitted === 2) return new Promise(() => {});
+        if (downloadRetry && downloads === 1) return [];
+        if (submitted === 2) throw new Error("one download failed secret-token@example.test");
+        return [rawPath];
+      },
     },
   }, { process: {
     ...process, argv: ["node", "script", "--jobs-file", jobsFile, "--gpt-url", "https://invalid.test"],
@@ -368,29 +386,51 @@ async function verifyProducer(startupFailure = false, failFast = false) {
     stderr: { write: (chunk: string) => { stderr += chunk; } },
   } });
   if (startupFailure) await assert.rejects(api.main(), /browser startup failed/);
-  else if (failFast) await assert.rejects(api.main(), /첫 실패 후 중단/);
+  else if (sessionFailure && failFast) await assert.rejects(api.main(), /세션 인증\/보안 오류/);
   else await api.main();
   const output = JSON.parse(stdout);
   const records = readRecords();
-  assert.equal(output.ok, !startupFailure && !failFast);
+  assert.equal(output.ok, !startupFailure && !(sessionFailure && failFast));
+  assert.ok(!stdout.includes("secret-token"));
+  assert.ok(!stderr.includes("secret-token"));
   assert.deepEqual(output.jobs, records);
-  assert.equal(records.length, 3);
-  assert.equal(stderr.split(prefix).length - 1, 3);
+  assert.equal(records.length, count);
+  assert.equal(stderr.split(prefix).length - 1, count);
   if (startupFailure) records.forEach((r) => assert.match(r.error, /browser startup failed/));
-  else if (failFast) {
+  else if (sessionFailure && failFast) {
     assert.equal(closed, true);
     assert.equal(submitted, 2, "fail-fast must not submit the third prompt");
     assert.ok(fs.existsSync(records[0].localPath));
-    assert.match(records[1].error, /이미지를 생성하지 않았습니다/);
+    assert.match(records[1].error, /CHATGPT_BROWSER_AUTH_REQUIRED/);
     assert.match(records[2].error, /^fail-fast: /);
     assert.equal(records[2].localPath, null);
   } else {
     assert.equal(closed, true);
-    assert.equal(submitted, 3);
+    assert.equal(submitted, count);
     assert.ok(fs.existsSync(records[0].localPath));
-    assert.match(records[1].error, /one download failed/);
-    assert.ok(fs.existsSync(records[2].localPath));
+    assert.match(records[1].error, failFast || downloadTimeout ? /IMAGE_TIMEOUT/ : /IMAGE_SLOT_FAILED/);
+    records.slice(2).forEach((record) => assert.ok(fs.existsSync(record.localPath)));
   }
+  if (!startupFailure) {
+    const diagnosticDirs = fs.readdirSync(dir).filter((entry) => entry.startsWith("_chatgpt_"));
+    const diagnostics = diagnosticDirs.flatMap((entry) => {
+      const file = path.join(dir, entry, "failure.json");
+      return fs.existsSync(file) ? [fs.readFileSync(file, "utf8")] : [];
+    });
+    assert.equal(diagnostics.length, 1);
+    assert.ok(!diagnostics[0].includes("secret-token"));
+    const diagnostic = JSON.parse(diagnostics[0]);
+    assert.equal(diagnostic.category, sessionFailure ? "session-auth-security" : "individual");
+    assert.equal(diagnostic.hardMs, 600_000);
+    if (downloadTimeout) {
+      assert.equal(diagnostic.phase, "download");
+      assert.equal(diagnostic.timedOut, true);
+      assert.match(records[1].error, /이미지 다운로드 시간 초과/);
+      assert.match(records[1].error, /최대 60초/);
+      assert.equal(downloads, count, "pending download is not retried; later slots continue");
+    }
+  }
+  if (downloadRetry) assert.equal(downloads, 4, "empty retrieval retries once without another submission");
   const priorCheckpoint = fs.readFileSync(checkpoint, "utf8");
   await assert.rejects(api.main(), /EEXIST/);
   assert.equal(fs.readFileSync(checkpoint, "utf8"), priorCheckpoint, "rerun must not destroy durable evidence");
@@ -401,7 +441,11 @@ async function main() {
     await verifyGenerator();
     await check("producer checkpoints each job, streams stderr, preserves legacy stdout (fail-fast off)", () => verifyProducer());
     await check("producer startup failure checkpoints per-job errors", () => verifyProducer(true));
-    await check("producer fail-fast stops after the first failure and records the rest", () => verifyProducer(false, true));
+    await check("individual timeout continues remaining slots even with fail-fast enabled", () => verifyProducer(false, true));
+    await check("a timeout does not skip the ten remaining slots", () => verifyProducer(false, true, false, false, 12));
+    await check("explicit session auth failure stops and records remaining slots", () => verifyProducer(false, true, true));
+    await check("empty artifact retrieval retries safely without regenerating", () => verifyProducer(false, false, false, true));
+    await check("timed-out retrieval is never retried concurrently; category and later slots survive", () => verifyProducer(false, false, false, false, 3, true));
     console.log(`Verified ${checks} offline image-batch checks; no paid generation.`);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

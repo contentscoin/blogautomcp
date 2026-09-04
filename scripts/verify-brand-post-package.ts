@@ -286,12 +286,12 @@ async function main() {
     "초안 응답은 섹션 이미지 배치를 기다리지 않아야 합니다(분리 실행).",
   );
   assert.equal(
-    /process\.env\.BRAND_POST_AUTO_SECTION_IMAGES \?\? process\.env\.TRAVEL_AUTO_IMAGE_QC_REPAIR \?\? "false"/u.test(draftRouteSource) &&
+    draftRouteSource.includes('draftRuntimePolicy.BRAND_POST_AUTO_SECTION_IMAGES === "true"') &&
       draftRouteSource.includes("if (!isAutoSectionImagesEnabled())") &&
       draftRouteSource.includes("if (!isChatGptBrowserAutomationEnabled())") &&
       draftRouteSource.indexOf("if (!isChatGptBrowserAutomationEnabled())") < draftRouteSource.indexOf("void repairBrandPostImages("),
     true,
-    "섹션 이미지 자동 생성은 기본 꺼짐이고, 켜져 있어도 ChatGPT 웹 자동화가 꺼져 있으면 실행하지 않아야 합니다.",
+    "섹션 이미지 자동 생성은 고정 정책을 따르고, 브라우저 사용 가능 여부를 예약 전에 확인해야 합니다.",
   );
   assert.equal(
     draftRouteSource.includes('skip: action === "submit_generated" || mcpOrigin'),
@@ -302,10 +302,10 @@ async function main() {
   assert.equal(
     batchSource.includes("isBatchFailFastEnabled") &&
       batchSource.includes('(env.BRAND_POST_IMAGE_BATCH_FAIL_FAST || "true")') &&
-      batchSource.includes("fail-fast: 앞선 이미지 생성 실패로 중단했습니다") &&
+      batchSource.includes("if (result.error && failFast && isSessionWideImageFailure(result.error))") &&
       batchSource.includes("if (typeof observed === \"number\" && observed === 0) {"),
     true,
-    "이미지 배치는 첫 실패 뒤 남은 작업을 중단하고, 이미지가 관측되지 않은 대기 종료를 실패로 취급해야 합니다.",
+    "이미지 배치는 세션 전체 오류만 연쇄 중단하고, 완료 이미지가 관측되지 않은 대기 종료는 실패로 취급해야 합니다.",
   );
 
   const handoffBuilder = await import("../src/lib/chatgpt-draft-handoff");

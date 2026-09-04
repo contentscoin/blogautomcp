@@ -1,0 +1,27 @@
+# 1.3.13 — preparation, writing and image time budgets
+
+## Changes
+
+- Section images: five-minute base wait, progress extension with a ten-minute hard limit; stable completed images return immediately.
+- Only explicit session authentication/security errors stop all remaining slots. An individual timeout no longer skips the other ten images.
+- Each slot has an isolated page. Ambiguous generation submissions are not replayed. Only a completed empty retrieval gets one download retry; timeout retrieval is not duplicated.
+- Parent batch allowance includes profile locking, launch, per-slot preparation, generation, download and cleanup. Completed assets and QC/approval gates remain intact.
+- Thumbnail image waiting follows the same five/ten-minute policy while excluding pre-existing reference images.
+- Codex and browser writing calls receive ten minutes, with five minutes of unchanged actual text before browser stall recovery. Existing bounded retry/QC paths are preserved; outer budgets cover their sum.
+- Automatic image generation remains fixed on. Updating does not automatically approve, publish, or regenerate existing drafts.
+
+See `image-timeout-policy.md` and `writing-timeouts.md` for exact defaults and override semantics. Section image repair is detached from the draft response and has its own batch deadline.
+
+## Verification
+
+- Offline real-wait/fake-clock tests: completion beyond 60 seconds, progress extension, hard/idle expiry, hung observations, explicit auth failures and nonduplicated ambiguous sends.
+- 22 image-batch cases: continuation after one failure, checkpoint recovery, safe empty retrieval retry, no retry on pending download timeout, existing product locking.
+- Nine isolated Chromium DOM cases: uploaded reference exclusion and stable generated artifact selection.
+- Writing/thumbnail timing, section repair, QC reconciliation, fixed settings, draft package, browser recovery, Codex provider, MCP contract and updater fixtures passed.
+- `test:brand-post-package` contained a stale pre-1.3.12 expectation that automation was off and all image errors failed fast. Assertions now check the current fixed policy and explicit session-wide failure condition; approval/security assertions remain.
+- Existing unrelated `test:thumbnail-studio` fails at line 62: expected `/노쇼핑|장점/`, actual `9일 · 명소 · 분위기 · 현지 팁`. Its source, fixture and `travel-content.ts` are unchanged from HEAD. This is not claimed passing.
+- Live MCP preflight: online desktop 1.3.12, no running/queued jobs. No paid generation or public post publication is run by verification.
+
+## Release evidence
+
+Final package and central publication evidence is recorded after validation. Sites application code is unchanged; deployment target is the existing central Windows update feed, not Vercel.

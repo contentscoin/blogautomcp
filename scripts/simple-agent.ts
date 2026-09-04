@@ -4,6 +4,8 @@
  */
 
 import "dotenv/config";
+import { thumbnailImageWaitPolicy, waitForThumbnailArtifacts } from "./lib/thumbnail-image-wait";
+import { getWritingTimeoutPolicy } from "./lib/writing-timeout-policy";
 import draftRuntimePolicy from "./lib/draft-runtime-policy.json";
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
@@ -197,7 +199,8 @@ const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || "120000");
 const REQUESTED_AI_PROVIDER = (process.env.AI_PROVIDER || draftRuntimePolicy.AI_PROVIDER).toLowerCase();
 const AI_PROVIDER: "openai" | "codex" = REQUESTED_AI_PROVIDER === "codex" ? "codex" : "openai";
 const CODEX_DRAFT_MODEL = draftRuntimePolicy.CODEX_DRAFT_MODEL;
-const CODEX_DRAFT_TIMEOUT_MS = Math.max(60_000, Number(process.env.CODEX_DRAFT_TIMEOUT_MS || "300000"));
+const writingTimeoutPolicy = getWritingTimeoutPolicy();
+const CODEX_DRAFT_TIMEOUT_MS = writingTimeoutPolicy.codexMs;
 const CODEX_DRAFT_REASONING_EFFORT = (
   process.env.CODEX_DRAFT_REASONING_EFFORT || "medium"
 ) as "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
@@ -241,13 +244,8 @@ const CHATGPT_BASE_URL = "https://chatgpt.com/";
 const CHATGPT_TIMEOUT_MS = Number(process.env.CHATGPT_TIMEOUT_MS || "420000");
 /** chatgpt.com 이동 1회 대기(ms). 예전 하드코딩 120초×3회는 실패를 6분 뒤에야 알렸다. */
 const CHATGPT_NAVIGATION_TIMEOUT_MS = Number(process.env.CHATGPT_NAVIGATION_TIMEOUT_MS || "60000");
-const CHATGPT_RESPONSE_IDLE_TIMEOUT_MS = Number(
-  process.env.CHATGPT_RESPONSE_IDLE_TIMEOUT_MS || String(Math.max(CHATGPT_TIMEOUT_MS, 300000))
-);
-const CHATGPT_RESPONSE_MAX_TIMEOUT_MS = Number(
-  process.env.CHATGPT_RESPONSE_MAX_TIMEOUT_MS ||
-    String(Math.max(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS * 4, 1800000))
-);
+const CHATGPT_RESPONSE_IDLE_TIMEOUT_MS = writingTimeoutPolicy.idleMs;
+const CHATGPT_RESPONSE_MAX_TIMEOUT_MS = writingTimeoutPolicy.responseMs;
 const CHATGPT_USE_PERSISTENT_PROFILE =
   (process.env.CHATGPT_USE_PERSISTENT_PROFILE || "true").toLowerCase() === "true";
 const CHATGPT_RUN_ISOLATED_CONTEXT =
@@ -319,9 +317,7 @@ const PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_PATH =
 const PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_REQUEST_DIR =
   process.env.PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_REQUEST_DIR ||
   path.join(process.cwd(), "logs", "codex-imagegen-requests");
-const PRODUCT_THUMBNAIL_IMAGE_WAIT_MS = Number(
-  process.env.PRODUCT_THUMBNAIL_IMAGE_WAIT_MS || process.env.CHATGPT_IMAGE_WAIT_MS || "60000"
-);
+const PRODUCT_THUMBNAIL_IMAGE_WAIT_POLICY = thumbnailImageWaitPolicy();
 
 function inferCategoryKeyword(productName: string): string {
   const name = normalizeText(productName).toLowerCase();
@@ -388,10 +384,7 @@ const POST_SPEC_PIPELINE_ENABLED =
 // 인용구 섹션 헤더는 에디터 셀렉터 실측 전까지 기본 OFF (소제목으로 강등).
 const NAVER_EDITOR_QUOTATION_ENABLED =
   (process.env.NAVER_EDITOR_QUOTATION_ENABLED || "false").toLowerCase() === "true";
-const AGENT_MAX_RUNTIME_MS = Math.max(
-  5 * 60 * 1000,
-  Number(process.env.AGENT_MAX_RUNTIME_MS || "1500000")
-);
+const AGENT_MAX_RUNTIME_MS = writingTimeoutPolicy.agentMs;
 
 if (!fs.existsSync(CHATGPT_USER_DATA_DIR)) fs.mkdirSync(CHATGPT_USER_DATA_DIR, { recursive: true });
 if (!fs.existsSync(GENERATED_OUTPUT_DIR)) fs.mkdirSync(GENERATED_OUTPUT_DIR, { recursive: true });
@@ -1373,7 +1366,7 @@ async function attemptProductThumbnailChatGPTGeneration(
   const imageCount = await waitForProductThumbnailImageArtifacts(
     page,
     beforeSources,
-    PRODUCT_THUMBNAIL_IMAGE_WAIT_MS
+    PRODUCT_THUMBNAIL_IMAGE_WAIT_POLICY
   );
 
   if (imageCount === 0) {
@@ -1736,58 +1729,33 @@ async function maybeConfirmProductThumbnailGeneration(
 async function waitForProductThumbnailImageArtifacts(
   page: Page,
   beforeSources: Set<string>,
-  timeoutMs: number
+  policy: ReturnType<typeof thumbnailImageWaitPolicy>
 ): Promise<number> {
-  let waitedMs = 0;
-  let previousImageCount = 0;
-  let stableCycles = 0;
-  let interactionRecoveryAttempts = 0;
-  const maxInteractionRecoveryAttempts = 3;
-
-  while (waitedMs < timeoutMs) {
-    await assertNoChatGPTProtection(page, "Product Thumbnail 이미지 생성");
-    const continuedAccount = await continueChatGPTAccountPicker(page, "Product Thumbnail image wait");
-    const retried = await clickChatGPTRetryIfVisible(page, "Product Thumbnail image wait");
-    if (continuedAccount || retried) {
-      interactionRecoveryAttempts += 1;
-      if (interactionRecoveryAttempts > maxInteractionRecoveryAttempts) {
-        console.log("      - Product Thumbnail interaction recovery limit reached.");
-        break;
-      }
-      previousImageCount = 0;
-      stableCycles = 0;
-      await page.waitForTimeout(3000);
-      waitedMs += 3000;
-      continue;
-    }
-    const imageCount = await countNewRenderableChatGPTImages(page, beforeSources);
-    const generating = await isChatGPTGenerating(page);
-
-    if (!generating && imageCount > 0) {
-      if (imageCount === previousImageCount) {
-        stableCycles += 1;
-      } else {
-        previousImageCount = imageCount;
-        stableCycles = 1;
-      }
-
-      if (waitedMs >= 12000 && stableCycles >= 2) {
-        return imageCount;
-      }
-    } else {
-      previousImageCount = imageCount;
-      stableCycles = 0;
-    }
-
-    if (waitedMs > 0 && waitedMs % 15000 === 0) {
-      console.log(`      - 생성형 썸네일 대기 중... (${Math.round(waitedMs / 1000)}초)`);
-    }
-
-    await page.waitForTimeout(3000);
-    waitedMs += 3000;
+  // Close the owned page to cancel pending browser operations at the hard limit.
+  // Await the operation itself and closure; never leave a Promise.race loser running.
+  let closing: Promise<void> | undefined;
+  const timer = setTimeout(() => {
+    closing = page.close({ runBeforeUnload: false }).catch(() => {});
+  }, policy.hardMs);
+  try {
+    return await waitForThumbnailArtifacts({
+      policy,
+      observe: async () => {
+        await assertNoChatGPTProtection(page, "Product Thumbnail 이미지 생성");
+        if (await isChatGPTLoginRequired(page)) {
+          throw new Error("ChatGPT 로그인이 필요합니다.");
+        }
+        return {
+          imageCount: await countNewRenderableChatGPTImages(page, beforeSources),
+          generating: await isChatGPTGenerating(page),
+        };
+      },
+      wait: (ms) => page.waitForTimeout(ms),
+    });
+  } finally {
+    clearTimeout(timer);
+    await closing;
   }
-
-  return Math.max(previousImageCount, 0);
 }
 
 async function downloadProductThumbnailImages(
@@ -3081,8 +3049,8 @@ async function runDirectChatGPTGeneration(
   try {
     reply = await sendPromptToChatGPT(page, prompt, {
       label: `${label} 최종`,
-      idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, 180_000),
-      maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, 420_000),
+      idleTimeoutMs: CHATGPT_RESPONSE_IDLE_TIMEOUT_MS,
+      maxTimeoutMs: CHATGPT_RESPONSE_MAX_TIMEOUT_MS,
     });
   } catch (error) {
     if (!isChatGptReplyStalledError(error)) throw error;
@@ -3105,8 +3073,8 @@ async function runDirectChatGPTGeneration(
       recoveryPrompt,
       {
         label: `${label} 자동 재시도`,
-        idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, 150_000),
-        maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, 300_000),
+        idleTimeoutMs: CHATGPT_RESPONSE_IDLE_TIMEOUT_MS,
+        maxTimeoutMs: CHATGPT_RESPONSE_MAX_TIMEOUT_MS,
       },
     );
   }
@@ -3123,8 +3091,8 @@ async function runDirectChatGPTGeneration(
     "- 코드블록 금지",
   ].join("\n"), {
     label: `${label} 보완`,
-    idleTimeoutMs: Math.min(CHATGPT_RESPONSE_IDLE_TIMEOUT_MS, 120_000),
-    maxTimeoutMs: Math.min(CHATGPT_RESPONSE_MAX_TIMEOUT_MS, 300_000),
+    idleTimeoutMs: CHATGPT_RESPONSE_IDLE_TIMEOUT_MS,
+    maxTimeoutMs: CHATGPT_RESPONSE_MAX_TIMEOUT_MS,
   });
 
   return reply;

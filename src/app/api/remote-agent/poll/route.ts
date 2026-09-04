@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { getWritingTimeoutPolicy } from "../../../../../scripts/lib/writing-timeout-policy";
 import fs from "node:fs";
 import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
@@ -94,8 +95,8 @@ const JOB_HEARTBEAT_INTERVAL_MS = 30_000;
 const PUBLISH_WAIT_MS = parseBoundedInteger(process.env.REMOTE_PUBLISH_WAIT_MS, 25 * 60_000, 60_000, 3 * 60 * 60_000);
 const PUBLISH_POLL_MS = 5_000;
 /** 로컬 초안 호출 데드라인. 예전에는 localJsonFetch 기본 3시간이라 멈춘 이미지 배치를 아무도 끊지 않았다. */
-const DRAFT_PREPARE_WAIT_MS = parseBoundedInteger(process.env.REMOTE_DRAFT_PREPARE_WAIT_MS, 10 * 60_000, 60_000, 60 * 60_000);
-const DRAFT_GENERATE_WAIT_MS = parseBoundedInteger(process.env.REMOTE_DRAFT_GENERATE_WAIT_MS, 30 * 60_000, 60_000, 3 * 60 * 60_000);
+const DRAFT_PREPARE_WAIT_MS = getWritingTimeoutPolicy().prepareMs;
+const DRAFT_GENERATE_WAIT_MS = getWritingTimeoutPolicy().generateMs;
 const SECTION_IMAGE_APPLY_WAIT_MS = 5 * 60_000;
 const SECTION_IMAGE_NEXT_ACTION =
   "post_get_draft 결과의 imageSlots 에서 generationMissing 이 0보다 큰 파트마다 imagePrompt 로 이 ChatGPT 의 내장 이미지 생성을 실행하고, " +

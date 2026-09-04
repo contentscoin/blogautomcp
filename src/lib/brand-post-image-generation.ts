@@ -18,26 +18,22 @@ import {
   type BrandPostPackageManifestV2,
 } from "./brand-post-package";
 import { isChatGptBrowserAutomationEnabled } from "./chatgpt-browser-automation";
+import { imageBatchBudgetMs, imageJobBudgetMs, IMAGE_TIMER_MAX_MS } from "../../scripts/lib/image-timeout-policy";
 
 const CHATGPT_BASE_URL = "https://chatgpt.com/";
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
 const IMAGE_BATCH_SCRIPT = path.join(process.cwd(), "scripts", "chatgpt-generate-image-batch.ts");
 const IMAGE_BATCH_PROGRESS_PREFIX = "[chatgpt-image-batch:result] ";
 
-/** 장당 기본 예산. 실패하는 이미지 한 장이 1.5~3분을 쓰므로 8분×장수 같은 느슨한 예산은 초안 작업 전체를 멈추게 했다. */
-export const BRAND_POST_IMAGE_JOB_TIMEOUT_DEFAULT_MS = 180_000;
-export const BRAND_POST_IMAGE_BATCH_TIMEOUT_MAX_MS = 30 * 60_000;
+export const BRAND_POST_IMAGE_JOB_TIMEOUT_DEFAULT_MS = imageJobBudgetMs({});
+export const BRAND_POST_IMAGE_BATCH_TIMEOUT_MAX_MS = IMAGE_TIMER_MAX_MS;
 export const BROWSER_IMAGE_AUTOMATION_DISABLED_MESSAGE =
   "ChatGPT 브라우저 자동화가 꺼져 있어 PC에서 이미지를 생성하지 않습니다. " +
   "ChatGPT 대화에서 이미지를 만들어 post_apply_section_image로 붙이세요.";
 
-// Jobs run sequentially: budget = jobs × per-job allowance + startup slack, capped so a stuck batch never blocks for hours.
+// Sequential jobs each need preparation, the hard generation window and download retries.
 export function imageBatchTimeoutMs(jobCount: number): number {
-  const override = Number(process.env.BRAND_POST_IMAGE_BATCH_TIMEOUT_MS);
-  if (Number.isFinite(override) && override > 0) return Math.min(2_147_483_647, override);
-  const perJob = Number(process.env.BRAND_POST_IMAGE_JOB_TIMEOUT_MS);
-  const jobBudget = Number.isFinite(perJob) && perJob > 0 ? perJob : BRAND_POST_IMAGE_JOB_TIMEOUT_DEFAULT_MS;
-  return Math.min(BRAND_POST_IMAGE_BATCH_TIMEOUT_MAX_MS, jobBudget * Math.max(1, jobCount) + 60_000);
+  return imageBatchBudgetMs(jobCount, process.env);
 }
 
 export interface BrandPostImageGenerationRequest {
@@ -325,7 +321,7 @@ async function runBrowserImageBatch(
     signal?.addEventListener("abort", timers.abortHandler, { once: true });
     timers.timeout = setTimeout(() => {
       // Finalize independently of close: an unresponsive child must not hang the caller.
-      complete("ChatGPT 이미지 생성 시간이 초과되었습니다. 로그인 상태를 확인한 뒤 다시 시도해 주세요.");
+      complete("ChatGPT 이미지 배치 대기시간이 초과되었습니다. 진행 중인 요청은 자동 재전송하지 않았습니다. 기존 대화의 생성 결과를 먼저 확인하세요.");
       stopChild();
     }, imageBatchTimeoutMs(jobs.length));
     timers.checkpointPoll = setInterval(readCheckpoint, 250);

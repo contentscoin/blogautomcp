@@ -4,13 +4,17 @@ import path from "path";
 import {
   countRenderableChatGPTImages,
   createChatGPTContext,
+  isChatGPTGenerating,
   downloadChatGPTImages,
   openFreshChatGPTTarget,
   readAssistantMessages,
   submitPromptToChatGPT,
-  startFreshChat,
   waitForChatGPTImageArtifacts,
 } from "./lib/chatgpt-browser";
+import {
+  imageWaitPolicy, isSessionWideImageFailure, withinImageDeadline,
+  IMAGE_PREPARATION_MS, IMAGE_DOWNLOAD_ATTEMPT_MS, IMAGE_DOWNLOAD_ATTEMPTS, IMAGE_RETRY_DELAY_MS,
+} from "./lib/image-timeout-policy";
 
 console.log = (...args: unknown[]) => {
   console.error(...args);
@@ -35,8 +39,7 @@ interface BatchResult {
   error?: string;
 }
 
-const CHATGPT_IMAGE_WAIT_MS = Number(process.env.CHATGPT_IMAGE_WAIT_MS || 60_000);
-/** 첫 실패 뒤 남은 작업을 건너뛴다. 같은 세션에서 한 장이 실패하면(로그인·보안 확인·텍스트 응답) 나머지도 같은 이유로 실패하기 때문이다. */
+/** Fail-fast only applies to explicitly observed session-wide authentication/security errors. */
 export function isBatchFailFastEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return (env.BRAND_POST_IMAGE_BATCH_FAIL_FAST || "true").trim().toLowerCase() !== "false";
 }
@@ -91,6 +94,7 @@ function parseArgs(argv: string[]): CliArgs {
 
 async function maybeConfirmGeneration(page: import("playwright").Page) {
   for (let attempt = 0; attempt < 8; attempt += 1) {
+    if (await isChatGPTGenerating(page) || await countRenderableChatGPTImages(page) > 0) return;
     const latestAssistantMessage = ((await readAssistantMessages(page)).at(-1) || "").replace(/\s+/g, "");
     const pageBodyText = ((await page.textContent("body").catch(() => "")) || "").replace(/\s+/g, "");
     const confirmationText = latestAssistantMessage || pageBodyText;
@@ -109,12 +113,13 @@ async function maybeConfirmGeneration(page: import("playwright").Page) {
 }
 
 async function waitForImageCompletion(page: import("playwright").Page) {
-  const observed = await waitForChatGPTImageArtifacts(page, CHATGPT_IMAGE_WAIT_MS);
+  const policy = imageWaitPolicy();
+  const observed = await waitForChatGPTImageArtifacts(page, policy.baseMs, { hardTimeoutMs: policy.hardMs });
   // The wait returns 0 on timeout. Downloading anyway only produces an empty result later.
   if (typeof observed === "number" && observed === 0) {
     throw new Error(
-      `ChatGPT가 ${Math.round(CHATGPT_IMAGE_WAIT_MS / 1000)}초 안에 이미지를 생성하지 않았습니다. ` +
-      "텍스트로만 답했거나 로그인·보안 확인이 필요할 수 있습니다.",
+      "IMAGE_TIMEOUT: 이미지 대기시간 내 완료된 결과를 확인하지 못했습니다. " +
+      "요청을 재전송하지 않았습니다. 기존 대화의 생성 결과를 먼저 확인하세요.",
     );
   }
 }
@@ -123,27 +128,37 @@ async function runJob(
   page: import("playwright").Page,
   job: BatchJob,
   gptUrl: string,
-  isFirst: boolean,
 ): Promise<BatchResult> {
   const tempDir = path.join(
     path.dirname(job.outStem),
     `_chatgpt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
   );
   fs.mkdirSync(tempDir, { recursive: true });
+  const started = Date.now();
+  let phase = "preparation";
+  let phaseStarted = started;
 
   try {
-    if (isFirst) {
+    await withinImageDeadline(async () => {
       await openFreshChatGPTTarget(page, gptUrl, "주제 이미지 생성 GPT");
-    } else {
-      await startFreshChat(page, gptUrl, `이미지 슬롯 ${job.id}`);
-    }
 
-    await attachReferenceImages(page, job.referenceImagePaths || []);
-    await submitPromptToChatGPT(page, job.prompt, `주제 이미지 생성 ${job.id}`);
-    await maybeConfirmGeneration(page);
+      await attachReferenceImages(page, job.referenceImagePaths || []);
+      await submitPromptToChatGPT(page, job.prompt, `주제 이미지 생성 ${job.id}`);
+      await maybeConfirmGeneration(page);
+    }, IMAGE_PREPARATION_MS, phase);
+    phase = "generation";
+    phaseStarted = Date.now();
     await waitForImageCompletion(page);
 
-    const downloadedPaths = await downloadChatGPTImages(page, tempDir);
+    phase = "download";
+    phaseStarted = Date.now();
+    let downloadedPaths: string[] = [];
+    // Retry only retrieval of existing artifacts, never submit/regenerate a prompt.
+    for (let attempt = 0; attempt < IMAGE_DOWNLOAD_ATTEMPTS; attempt += 1) {
+      downloadedPaths = await withinImageDeadline(() => downloadChatGPTImages(page, tempDir), IMAGE_DOWNLOAD_ATTEMPT_MS, phase);
+      if (downloadedPaths.length) break;
+      if (attempt + 1 < IMAGE_DOWNLOAD_ATTEMPTS) await page.waitForTimeout(IMAGE_RETRY_DELAY_MS);
+    }
     const firstImagePath = downloadedPaths.find((value) => value && value.trim().length > 0);
     if (!firstImagePath) {
       throw new Error("ChatGPT 생성 이미지 다운로드 결과가 비어 있습니다.");
@@ -159,10 +174,28 @@ async function runJob(
       localPath: finalPath,
     };
   } catch (error) {
+    const sessionWide = isSessionWideImageFailure(error);
+    const timedOut = error instanceof Error && /IMAGE_TIMEOUT:/.test(error.message);
+    const elapsedSeconds = Math.round((Date.now() - phaseStarted) / 1000);
+    const phaseLabel = phase === "generation" ? "이미지 생성 대기" : phase === "download" ? "이미지 다운로드" : "이미지 준비";
+    const budgetMs = phase === "generation" ? imageWaitPolicy().hardMs : phase === "download" ? IMAGE_DOWNLOAD_ATTEMPT_MS : IMAGE_PREPARATION_MS;
+    const message = sessionWide
+      ? "CHATGPT_BROWSER_AUTH_REQUIRED: 명시적인 로그인 또는 보안 확인이 필요합니다."
+      : `${timedOut ? "IMAGE_TIMEOUT" : "IMAGE_SLOT_FAILED"}: ${phaseLabel} ${timedOut ? "시간 초과" : "실패"} ` +
+        `(경과 ${elapsedSeconds}초 / 최대 ${Math.round(budgetMs / 1000)}초). 요청을 재전송하지 않았습니다.`;
+    // No raw exception, URLs, prompt, DOM, screenshot, cookies or account identifiers.
+    try {
+      fs.writeFileSync(path.join(tempDir, "failure.json"), JSON.stringify({
+        version: 1, phase, elapsedMs: Date.now() - started,
+        category: sessionWide ? "session-auth-security" : "individual",
+        timedOut,
+        ...imageWaitPolicy(),
+      }, null, 2), { encoding: "utf8", mode: 0o600 });
+    } catch { /* Diagnostics must not mask the slot failure. */ }
     return {
       id: job.id,
       localPath: null,
-      error: error instanceof Error ? error.stack || error.message : String(error),
+      error: message,
     };
   }
 }
@@ -191,17 +224,21 @@ export async function main() {
   let failure: unknown;
   try {
     handle = await createChatGPTContext(true);
-    const page = await handle.context.newPage();
     const failFast = isBatchFailFastEnabled();
     for (const [index, job] of jobs.entries()) {
-      const result = await runJob(page, job, gptUrl, index === 0);
+      // Isolate timed-out operations from later slots. Closing this page cancels local
+      // preparation/download actions, but never retries the remote generation request.
+      const page = await handle.context.newPage();
+      let result: BatchResult;
+      try { result = await runJob(page, job, gptUrl); }
+      finally { await withinImageDeadline(() => page.close(), 10_000, "page cleanup").catch(() => {}); }
       record(result);
-      if (result.error && failFast) {
+      if (result.error && failFast && isSessionWideImageFailure(result.error)) {
         const reason = result.error.split("\n")[0].trim().slice(0, 200);
         for (const remaining of jobs.slice(index + 1)) {
-          record({ id: remaining.id, localPath: null, error: `fail-fast: 앞선 이미지 생성 실패로 중단했습니다 (${reason})` });
+          record({ id: remaining.id, localPath: null, error: `fail-fast: 세션 인증/보안 확인이 필요해 중단했습니다 (${reason})` });
         }
-        failure = new Error(`이미지 생성 배치를 첫 실패 후 중단했습니다: ${reason}`);
+        failure = new Error(`이미지 생성 배치를 세션 인증/보안 오류로 중단했습니다: ${reason}`);
         break;
       }
     }

@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getWritingTimeoutPolicy, writingTimeoutMs } from "./writing-timeout-policy";
 
 type CodexSdkModule = typeof import("@openai/codex-sdk");
 
@@ -62,7 +63,7 @@ function buildWritingPrompt(
 
 export async function runCodexDraft(options: CodexDraftOptions): Promise<string> {
   const { Codex } = await nativeImport("@openai/codex-sdk");
-  const timeoutMs = Math.max(60_000, options.timeoutMs ?? 300_000);
+  const timeoutMs = writingTimeoutMs(options.timeoutMs, getWritingTimeoutPolicy().codexMs);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const workingDirectory = path.join(os.tmpdir(), "blogautomcp-codex-drafts");
