@@ -20,3 +20,4 @@
 - GitHub CI run 33860698706 did not start any steps because account payments/spending limits blocked both jobs. Remote CI is not claimed passing.
 - GitHub release v1.3.14 and central admin publication succeeded on 2026-09-04. Installer: 325,509,863 bytes, SHA-256 `797e3543329e32127a5ef007daa4e0d56ec603c75890bad42bd332048996caf7`; GitHub digest matches. Blockmap: 332,076 bytes, SHA-256 `daba00c4f6e11bfc30cd35977ee02aa24194ae89e3c5a5de16c0b33601a155b2`.
 - Existing desktop detected 1.3.14, completed authenticated differential download and invoked the silent installer with force-run. Installed-app restart is a separate verification from publication.
+- PC completion verified after correcting an old `out/release-1.3.13/win-unpacked` relaunch: the regular Local Programs installation runs 1.3.14, local readiness API responds, no active jobs, error null and installPending false. Old test-build processes were stopped without changing drafts or sessions.
