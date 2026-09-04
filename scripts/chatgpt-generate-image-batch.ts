@@ -1,6 +1,7 @@
 import "dotenv/config";
 import fs from "fs";
 import path from "path";
+import crypto from "node:crypto";
 import { imagePageSignals, keepFailedDiagnosticOpen, imageBatchSucceeded } from "./lib/image-batch-diagnostics";
 import {
   countRenderableChatGPTImages,
@@ -16,10 +17,6 @@ import {
   imageWaitPolicy, isSessionWideImageFailure, withinImageDeadline,
   IMAGE_PREPARATION_MS, IMAGE_DOWNLOAD_ATTEMPT_MS, IMAGE_DOWNLOAD_ATTEMPTS, IMAGE_RETRY_DELAY_MS,
 } from "./lib/image-timeout-policy";
-
-console.log = (...args: unknown[]) => {
-  console.error(...args);
-};
 
 interface BatchJob {
   id: string;
@@ -38,6 +35,80 @@ interface BatchResult {
   id: string;
   localPath: string | null;
   error?: string;
+  retryable?: boolean;
+}
+
+export function acquireImageCheckpointLock(lockPath: string): () => void {
+  const token = crypto.randomUUID();
+  const create = () => {
+    const fd = fs.openSync(lockPath, "wx", 0o600);
+    try {
+      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, token }), "utf8");
+      fs.fsyncSync(fd);
+    } finally { fs.closeSync(fd); }
+  };
+  try { create(); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    // Serialize orphan inspection/unlink. Unknown/permission-denied owners stay locked.
+    const recoveryPath = `${lockPath}.recovery`;
+    const guard = fs.openSync(recoveryPath, "wx", 0o600);
+    try {
+      let owner: { pid?: number };
+      try { owner = JSON.parse(fs.readFileSync(lockPath, "utf8")); }
+      catch { throw error; }
+      if (!Number.isSafeInteger(owner.pid) || owner.pid! <= 0) throw error;
+      try { process.kill(owner.pid!, 0); throw error; }
+      catch (probeError) {
+        if ((probeError as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+      fs.unlinkSync(lockPath);
+      create();
+    } finally { fs.closeSync(guard); fs.unlinkSync(recoveryPath); }
+  }
+  return () => {
+    const owner = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+    if (owner.token === token) fs.unlinkSync(lockPath);
+  };
+}
+
+export function imageJobFingerprint(job: BatchJob): string {
+  return crypto.createHash("sha256").update(JSON.stringify({
+    prompt: job.prompt, outStem: path.resolve(job.outStem),
+    references: (job.referenceImagePaths || []).map(file => ({
+      path: path.resolve(file),
+      digest: crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"),
+    })),
+  })).digest("hex");
+}
+
+/** Ambiguous attempts must be recovered manually, never silently regenerated. */
+export function readImageBatchResume(resultsFile: string, jobs: BatchJob[]): Map<string, BatchResult> {
+  const resumed = new Map<string, BatchResult>();
+  if (!fs.existsSync(resultsFile)) return resumed;
+  const records = fs.readFileSync(resultsFile, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line));
+  for (const job of jobs) {
+    const matches = records.filter(record => record.id === job.id);
+    if (!matches.length) continue;
+    const fingerprint = imageJobFingerprint(job);
+    if (matches.some(record => record.fingerprint !== fingerprint)) {
+      throw new Error(`Image checkpoint does not match job ${job.id}; refusing to resend.`);
+    }
+    const last = matches[matches.length - 1];
+    if (last.retryable === true) continue;
+    let valid = false;
+    if (typeof last.localPath === "string" && typeof last.sha256 === "string") {
+      try {
+        const bytes = fs.readFileSync(last.localPath);
+        valid = bytes.length > 0 && crypto.createHash("sha256").update(bytes).digest("hex") === last.sha256;
+      } catch { /* Missing output is not permission to generate again. */ }
+    }
+    resumed.set(job.id, valid ? { id: job.id, localPath: last.localPath } : {
+      id: job.id, localPath: null,
+      error: "IMAGE_RESUME_REQUIRED: 이전 요청 또는 결과를 확인해야 합니다. 자동 재전송하지 않았습니다.",
+    });
+  }
+  return resumed;
 }
 
 /** Fail-fast only applies to explicitly observed session-wide authentication/security errors. */
@@ -93,7 +164,7 @@ function parseArgs(argv: string[]): CliArgs {
   };
 }
 
-async function maybeConfirmGeneration(page: import("playwright").Page) {
+async function maybeConfirmGeneration(page: import("playwright").Page, beforeSend: () => void) {
   for (let attempt = 0; attempt < 8; attempt += 1) {
     if (await isChatGPTGenerating(page) || await countRenderableChatGPTImages(page) > 0) return;
     const latestAssistantMessage = ((await readAssistantMessages(page)).at(-1) || "").replace(/\s+/g, "");
@@ -101,7 +172,7 @@ async function maybeConfirmGeneration(page: import("playwright").Page) {
     const confirmationText = latestAssistantMessage || pageBodyText;
     if (/생성계획미리보기|이대로진행할까요|네라고입력/i.test(confirmationText)) {
       console.error("[chatgpt-image-batch] confirmation detected, sending follow-up.");
-      await submitPromptToChatGPT(page, "네", "주제 이미지 생성 확인");
+      await submitPromptToChatGPT(page, "네", "주제 이미지 생성 확인", beforeSend);
       return;
     }
 
@@ -129,6 +200,7 @@ async function runJob(
   page: import("playwright").Page,
   job: BatchJob,
   gptUrl: string,
+  beforeSend: () => void,
 ): Promise<BatchResult> {
   const tempDir = path.join(
     path.dirname(job.outStem),
@@ -138,6 +210,8 @@ async function runJob(
   const started = Date.now();
   let phase = "preparation";
   let phaseStarted = started;
+  let transmitted = false;
+  let cancelled = false;
   const trace = async (stage: string) => {
     try {
       const signals = await withinImageDeadline(async () => ({
@@ -157,9 +231,15 @@ async function runJob(
 
       await attachReferenceImages(page, job.referenceImagePaths || []);
       await trace("before-submit");
-      await submitPromptToChatGPT(page, job.prompt, `주제 이미지 생성 ${job.id}`);
+      await submitPromptToChatGPT(page, job.prompt, `주제 이미지 생성 ${job.id}`, () => {
+        if (cancelled) throw new Error("Image preparation already ended");
+        beforeSend();
+        transmitted = true;
+      });
       await trace("after-submit");
-      await maybeConfirmGeneration(page);
+      await maybeConfirmGeneration(page, () => {
+        if (cancelled) throw new Error("Image preparation already ended");
+      });
       await trace("after-confirmation-check");
     }, IMAGE_PREPARATION_MS, phase);
     phase = "generation";
@@ -191,6 +271,7 @@ async function runJob(
       localPath: finalPath,
     };
   } catch (error) {
+    cancelled = true;
     await trace("failed");
     const sessionWide = isSessionWideImageFailure(error);
     const timedOut = error instanceof Error && /IMAGE_TIMEOUT:/.test(error.message);
@@ -214,25 +295,38 @@ async function runJob(
       id: job.id,
       localPath: null,
       error: message,
+      retryable: !transmitted,
     };
   }
 }
 
-export async function main() {
+async function runBatch() {
   const { jobsFile, gptUrl, resultsFile } = parseArgs(process.argv.slice(2));
   const jobs = JSON.parse(fs.readFileSync(jobsFile, "utf8")) as BatchJob[];
   if (!Array.isArray(jobs) || jobs.length === 0) {
     throw new Error("jobs-file 에 유효한 작업이 없습니다.");
   }
+  if (new Set(jobs.map(job => job.id)).size !== jobs.length) throw new Error("Duplicate image job IDs.");
+  const fingerprints = new Map(jobs.map(job => [job.id, imageJobFingerprint(job)]));
 
   fs.mkdirSync(path.dirname(resultsFile), { recursive: true });
-  // A fresh invocation owns a fresh checkpoint. Never overwrite an older run's evidence.
-  const checkpoint = fs.openSync(resultsFile, "wx");
+  // Append preserves evidence and supports retrying the same jobs-file safely.
+  const checkpoint = fs.openSync(resultsFile, "a", 0o600);
   const results: BatchResult[] = [];
-  const record = (result: BatchResult) => {
+  const journalPath = (job: BatchJob) => `${job.outStem}.checkpoint.jsonl`;
+  const journal = (job: BatchJob, value: object) => {
+    const fd = fs.openSync(journalPath(job), "a", 0o600);
+    try {
+      fs.writeFileSync(fd, JSON.stringify({ ...value, id: "slot", fingerprint: fingerprints.get(job.id) }) + "\n", "utf8");
+      fs.fsyncSync(fd);
+    } finally { fs.closeSync(fd); }
+  };
+  const record = (result: BatchResult, persist = true) => {
     const line = `${JSON.stringify(result)}\n`;
     // Retain the raw result for final stdout recovery even if the checkpoint disk fails.
     results.push(result);
+    if (persist) journal(jobs.find(job => job.id === result.id)!, { ...result,
+      sha256: result.localPath ? crypto.createHash("sha256").update(fs.readFileSync(result.localPath)).digest("hex") : undefined });
     fs.writeFileSync(checkpoint, line, "utf8");
     fs.fsyncSync(checkpoint);
     // Keep stdout as the single legacy JSON document; progress is explicitly framed on stderr.
@@ -241,13 +335,15 @@ export async function main() {
   let handle: Awaited<ReturnType<typeof createChatGPTContext>> | undefined;
   let failure: unknown;
   try {
-    handle = await createChatGPTContext(true);
     const failFast = isBatchFailFastEnabled();
     for (const [index, job] of jobs.entries()) {
+      const recovered = readImageBatchResume(journalPath(job), [{ ...job, id: "slot" }]).get("slot");
+      if (recovered) { record({ ...recovered, id: job.id }, false); continue; }
+      handle ||= await createChatGPTContext(true);
       // Isolate timed-out operations from later slots. Closing this page cancels local
       // preparation/download actions, but never retries the remote generation request.
       const page = await handle.context.newPage();
-      const result = await runJob(page, job, gptUrl);
+      const result = await runJob(page, job, gptUrl, () => journal(job, { state: "attempted" }));
       record(result);
       if (result.error && keepFailedDiagnosticOpen(process.env, jobs.length) && !page.isClosed()) {
         console.error("[chatgpt-image-batch] 진단 실패: 브라우저를 유지합니다. 확인 후 이 탭/창을 닫으면 진단이 종료됩니다. 추가 생성 요청은 보내지 않습니다.");
@@ -257,7 +353,8 @@ export async function main() {
       if (result.error && failFast && isSessionWideImageFailure(result.error)) {
         const reason = result.error.split("\n")[0].trim().slice(0, 200);
         for (const remaining of jobs.slice(index + 1)) {
-          record({ id: remaining.id, localPath: null, error: `fail-fast: 세션 인증/보안 확인이 필요해 중단했습니다 (${reason})` });
+          // Do not overwrite another slot's successful/uncertain prior journal.
+          record({ id: remaining.id, localPath: null, retryable: true, error: `fail-fast: 세션 인증/보안 확인이 필요해 중단했습니다 (${reason})` }, false);
         }
         failure = new Error(`이미지 생성 배치를 세션 인증/보안 오류로 중단했습니다: ${reason}`);
         break;
@@ -266,7 +363,7 @@ export async function main() {
   } catch (error) {
     failure = error;
     for (const job of jobs.slice(results.length)) {
-      record({ id: job.id, localPath: null, error: error instanceof Error ? error.message : String(error) });
+      record({ id: job.id, localPath: null, retryable: true, error: error instanceof Error ? error.message : String(error) }, false);
     }
   } finally {
     fs.closeSync(checkpoint);
@@ -278,6 +375,22 @@ export async function main() {
   if (failure) throw failure;
 }
 
+export async function main() {
+  const { resultsFile, jobsFile } = parseArgs(process.argv.slice(2));
+  fs.mkdirSync(path.dirname(resultsFile), { recursive: true });
+  const releases: Array<() => void> = [];
+  try {
+    releases.push(acquireImageCheckpointLock(`${resultsFile}.lock`));
+    const jobs = JSON.parse(fs.readFileSync(jobsFile, "utf8")) as BatchJob[];
+    for (const stem of [...new Set(jobs.map(job => path.resolve(job.outStem)))].sort()) {
+      fs.mkdirSync(path.dirname(stem), { recursive: true });
+      releases.push(acquireImageCheckpointLock(`${stem}.lock`));
+    }
+    await runBatch();
+  } finally { for (const release of releases.reverse()) release(); }
+}
+
+if (require.main === module) console.log = (...args: unknown[]) => console.error(...args);
 if (require.main === module) main().catch((error) => {
   const message = error instanceof Error ? error.stack || error.message : String(error);
   console.error(message);

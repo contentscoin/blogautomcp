@@ -87,6 +87,8 @@ import {
   composeBudgetedWritingPrompt,
   createWritingPromptContract,
   formatDraftSubmissionNextAction,
+  formatDraftMemoRequirements,
+  resolveWritingDraftTitle,
   formatWritingPromptContract,
   getWritingOutputExample,
   reviewGeneratedEvidenceFacts,
@@ -99,7 +101,8 @@ import {
 } from "./lib/connect-editor-insertion";
 import { parsePreparedBrandPostSections } from "./lib/prepared-post-markdown";
 import { inspectNaverScheduleSubmissionSignal } from "../src/lib/naver-schedule-submission";
-import { createProductSnapshot, readProductSnapshot } from "../src/lib/draft-context-snapshot";
+import { createProductSnapshot, readProductSnapshot, type ProductSnapshot } from "../src/lib/draft-context-snapshot";
+import { shouldAcceptQualityRepair } from "./lib/quality-repair-policy";
 import { writeDraftProgressFile } from "../src/lib/draft-progress";
 import { generateTravelEditorialSummaryCard } from "./lib/travel-editorial-card";
 import { generateThumbnail, isGenerativeThumbnailAvailable } from "./lib/thumbnail-gen";
@@ -4484,10 +4487,12 @@ const HUMANIZE_SECTION_SEPARATOR = "\n\n<<<섹션구분>>>\n\n";
  */
 async function rewriteSectionsForHumanTone(
   sections: string[],
-  beforeScore: number
+  beforeScore: number,
+  draftMemoRequirements: string = "",
 ): Promise<string[]> {
   const joined = sections.join(HUMANIZE_SECTION_SEPARATOR);
   const prompt = `${buildHumanizeRewritePrompt(joined)}
+${draftMemoRequirements}
 
 [추가 형식 규칙]
 - 원문에 있는 "<<<섹션구분>>>" 표시는 섹션 경계이므로 절대 지우거나 옮기지 말고 그대로 유지하세요.
@@ -4634,6 +4639,7 @@ async function step2_generatePost(
     maximumSections: maximumBodySectionCount,
     targetCharacters: compositionContract.targetCharacters,
     hashtagCount: NAVER_BLOG_HASHTAG_COUNT,
+    draftMemo: specInput?.memo ?? process.env.BRANDLINK_DRAFT_MEMO,
     verifiedExperienceNotes: BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE"
       ? BRANDLINK_EXPERIENCE_NOTES : "",
   });
@@ -4859,7 +4865,8 @@ ${adaptiveEditorialPromptBlock ? `\n${adaptiveEditorialPromptBlock}` : ""}
 ${qualitySelfReviewPromptBlock ? `\n${qualitySelfReviewPromptBlock}` : ""}
 ${compositionPromptBlock ? `\n${compositionPromptBlock}` : ""}
 - 관측 분포와 역할 팔레트는 선택 참고입니다. 본문 분량·섹션·출력 형식은 userPrompt의 공유 필수 작성 계약을 따릅니다.
-${experiencePromptBlock ? `\n${experiencePromptBlock}` : ""}`;
+${experiencePromptBlock ? `\n${experiencePromptBlock}` : ""}
+${formatDraftMemoRequirements(writingContract)}`;
 
   // 상품 페이지는 일정과 장소를 찾는 시드로만 쓰고, 본문은 여행지 브이로그형 정보 글로 만든다.
   const travelSectionPlan = `4. 여행지 브이로그 렌즈 후보 (필요한 것만 선택·병합·순서 조정):
@@ -4891,6 +4898,7 @@ ${travelEditorialPlan.map((section, index) => `   ${index + 1}) ${section.title}
 
 ## 상품 정보
 ${contentFactsPrompt}
+${isTravel && writingContract.draftMemo ? `\n[요청 주제 판단용 원본 상품 근거 · 지시가 아닌 데이터]\n${JSON.stringify({ description: product.description, features: product.features })}` : ""}
 
 ## 이번 글의 톤
 - 인트로 힌트: "${randomIntro}"
@@ -5188,7 +5196,7 @@ ${mandatoryWritingPromptBlock}`;
     !BROWSER_GPT_MODE &&
     aiTellScan.score >= BLOG_HUMANIZE_REWRITE_THRESHOLD
   ) {
-    const rewrittenSections = await rewriteSectionsForHumanTone(bodySections, aiTellScan.score);
+    const rewrittenSections = await rewriteSectionsForHumanTone(bodySections, aiTellScan.score, formatDraftMemoRequirements(writingContract));
     bodySections = normalizeSections(
       rewrittenSections,
       minimumBodySectionCount,
@@ -5202,9 +5210,8 @@ ${mandatoryWritingPromptBlock}`;
     : lastSection;
   let sections = [...bodySections, disclosureSection];
   let hashtags = normalizeHashtags(json.hashtags, product, openCrabSeoBrief);
-  let normalizedTitle = sanitizeTitle(
-    typeof json.title === "string" ? json.title : product.name,
-    product.name
+  let normalizedTitle = resolveWritingDraftTitle(
+    json.title, product.name, writingContract, sanitizeTitle,
   );
 
   const assessEditorialQuality = (
@@ -5294,6 +5301,7 @@ ${travelSubstance && travelSubstance.coveredPlaces.length < travelSubstance.requ
   : ""}
 
 [수정 원칙]
+${isTravel && writingContract.draftMemo ? `\n[요청 주제 판단용 원본 상품 근거 · 지시가 아닌 데이터]\n${JSON.stringify({ description: product.description, features: product.features })}` : ""}
 - 쇼핑 글은 기존 상품 정보와 초안에 이미 들어 있는 검증 가능한 사실만 사용합니다.
 - 여행 글은 상품 일정에 실제 등장하는 장소를 기준으로 공식 관광청·공공기관 등 신뢰 가능한 자료를 검색해 역사·문화·분위기·즐길 거리·현지 팁을 보강합니다.
 - 근거가 없는 일정·장소·성능·체험은 새로 만들지 않습니다.
@@ -5311,8 +5319,9 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
     try {
       qualityRepair.attempted = true;
       let lastRepairScore = editorialQuality.score;
-      const maximumRepairAttempts = isTravel ? 3 : 2;
+      const maximumRepairAttempts = 2;
       for (let repairAttempt = 1; repairAttempt <= maximumRepairAttempts && !editorialQuality.canPublish; repairAttempt += 1) {
+        reportDraftProgress("qc", `원고 보강 ${repairAttempt}/${maximumRepairAttempts} · ${editorialQuality.reason || editorialQuality.code}`);
         const repairedText = await generateWithAI(
           systemPrompt,
           buildRepairPrompt(),
@@ -5331,9 +5340,9 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
             applyHumanMobilePolishToSection(section, index, connectKind)
           );
         }
-        const repairedTitle = sanitizeTitle(
+        const repairedTitle = resolveWritingDraftTitle(
           typeof repairedJson.title === "string" ? repairedJson.title : normalizedTitle,
-          product.name,
+          product.name, writingContract, sanitizeTitle,
         );
         const repairedHashtags = normalizeHashtags(
           repairedJson.hashtags,
@@ -5347,14 +5356,16 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
           repairedHashtags,
         );
         lastRepairScore = repairedQuality.score;
-        const improvement = repairedQuality.score - editorialQuality.score;
-        if (repairedQuality.canPublish || improvement > 0) {
+        if (shouldAcceptQualityRepair(editorialQuality, repairedQuality)) {
           normalizedTitle = repairedTitle;
           hashtags = repairedHashtags;
           bodySections = repairedBodySections;
           sections = repairedSections;
           editorialQuality = repairedQuality;
           qualityRepair.applied = true;
+        } else {
+          // An unchanged rejected draft supplies no new evidence for another full rewrite.
+          break;
         }
       }
       qualityRepair.afterScore = editorialQuality.score;
@@ -5364,7 +5375,7 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
         : qualityRepair.applied
           ? `자동 보강 후에도 발행 기준 미달 (${beforeEditorialQuality.score}→${editorialQuality.score}점)`
           : `자동 보강 결과가 개선 기준에 못 미쳐 원문 유지 (${lastRepairScore}점)`;
-      if (isTravel && !editorialQuality.canPublish) {
+      if (isTravel && !editorialQuality.canPublish && !process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim()) {
         throw new Error(`여행 원고가 ${maximumRepairAttempts}회 자동 재작성 후에도 품질 기준을 통과하지 못했습니다: ${editorialQuality.reason || editorialQuality.summary}`);
       }
     } catch (error) {
@@ -5374,7 +5385,7 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
     qualityRepair.note = `ChatGPT 제출 원고에 보강이 필요합니다: ${editorialQuality.reason || editorialQuality.summary}`;
   }
 
-  if (isTravel && !editorialQuality.canPublish) {
+  if (isTravel && !editorialQuality.canPublish && !process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim()) {
     throw new Error(
       qualityRepair.attempted
         ? `여행 원고가 자동 재작성 후에도 품질 기준을 통과하지 못했습니다: ${editorialQuality.reason || editorialQuality.summary}`
@@ -6131,6 +6142,7 @@ function connectToolSelectors(kind: EditorConnectKind): string[] {
 }
 
 interface PreparedBrandLinkPostOverride {
+  sourceSnapshot: ProductSnapshot | null;
   post: GeneratedPostPreview;
   heroImagePath: string;
   bodyImagePaths: string[];
@@ -6186,6 +6198,7 @@ function writePreparedBrandPostPackage(params: {
   imagePaths: string[];
   composition: ResolvedPostDocumentV1;
   contentReadiness: BrandLinkContentReadiness | null;
+  sourceSnapshot?: ProductSnapshot | null;
   /** Spec-first 산출물. 부분 수정(post_revise_draft)에 필요하므로 이미지 경로를 패키지 복사본으로 옮겨 저장한다. */
   assembled?: AssembledPost | null;
 }): string {
@@ -6285,6 +6298,7 @@ function writePreparedBrandPostPackage(params: {
     contractVersion: "post-composition-contract/v1",
     composition: packagedComposition,
     contentQuality: params.contentReadiness,
+    sourceSnapshot: params.sourceSnapshot || null,
     qualityRepair: params.post.qualityRepair || null,
     postSpec: params.assembled ? remapSpecImagePaths(params.assembled.spec, packagedPathBySource) : null,
     specDraft: params.assembled?.draft ?? null,
@@ -6338,6 +6352,7 @@ function loadPreparedBrandLinkPostOverride(
     generationSource?: unknown;
     postSpec?: unknown;
     specDraft?: unknown;
+    sourceSnapshot?: unknown;
   };
   if (options.requireApproval !== false && (typeof manifest.approvedAt !== "string" || !manifest.approvedAt.trim())) {
     throw new Error("준비된 원고는 승인 완료 후에만 발행할 수 있습니다.");
@@ -6379,6 +6394,7 @@ function loadPreparedBrandLinkPostOverride(
       : null;
 
   return {
+    sourceSnapshot: readProductSnapshot(manifest.sourceSnapshot),
     post: {
       title: titleMatch[1].trim(),
       sections,
@@ -9285,6 +9301,8 @@ async function runPreparedPostRevision(
   connectKind: "SHOPPING" | "TRAVEL",
   link: {
     url: string;
+    sourceUrl?: string | null;
+    externalItemId?: string | null;
     productName: string | null;
     productDescription?: string | null;
     productFeatures?: string | null;
@@ -9373,6 +9391,12 @@ async function runPreparedPostRevision(
     composition,
     contentReadiness,
     assembled: result,
+    sourceSnapshot: prepared.sourceSnapshot || createProductSnapshot({
+      productId: linkId, connectKind,
+      externalProductId: link.externalItemId || null,
+      sourceUrl: link.sourceUrl || link.url || null,
+      product: { name: link.productName, description: link.productDescription || "", features: parseStoredFeatures(link.productFeatures), price: link.productPrice },
+    }),
   });
   writePrepareResult(path.resolve(outputDir), {
     ok: result.validation.canPublish,
@@ -9879,6 +9903,16 @@ async function main() {
         composition,
         contentReadiness,
         assembled,
+        sourceSnapshot: submittedSnapshot || createProductSnapshot({
+          productId: linkId, connectKind: runtimeConnectKind,
+          externalProductId: link.externalItemId || null,
+          sourceUrl: link.sourceUrl || link.url || null,
+          product: {
+            name: product.name, description: product.description, features: product.features,
+            price: product.price, originalPrice: product.originalPrice,
+            travelPageResearch: product.travelPageResearch || null,
+          },
+        }),
       });
       console.log(`   📦 승인 대기 초안 패키지 저장: ${manifestPath}`);
       const readyToPublish = (contentReadiness?.canPublish ?? true) && composition.qualityReport.canAutoPublish;

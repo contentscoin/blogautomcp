@@ -28,7 +28,17 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
      WHERE id=? AND user_id=? AND claimed_by_device_id=? AND status='RUNNING'
        AND EXISTS (SELECT 1 FROM devices WHERE id=? AND status='ACTIVE')
   `).bind(status, resultJson, errorCode, errorMessage, now, now, id, device.userId, device.id, device.id).run();
-  if (Number(updated.meta.changes || 0) !== 1) return apiError('JOB_NOT_ACTIVE', '완료할 수 있는 실행 중 작업이 아닙니다.', 409);
+  if (Number(updated.meta.changes || 0) !== 1) {
+    // A committed response can be lost on the network. Accept only an identical
+    // completion from the same still-active device; never overwrite a terminal job.
+    const previous = await d1.prepare(`SELECT status,result_json AS resultJson,error_code AS errorCode,error_message AS errorMessage FROM agent_jobs WHERE id=? AND user_id=? AND claimed_by_device_id=? AND EXISTS (SELECT 1 FROM devices WHERE id=? AND status='ACTIVE') LIMIT 1`)
+      .bind(id, device.userId, device.id, device.id)
+      .first<{ status: string; resultJson: string | null; errorCode: string | null; errorMessage: string | null }>();
+    if (previous && previous.status === status && previous.resultJson === resultJson && previous.errorCode === errorCode && previous.errorMessage === errorMessage) {
+      return NextResponse.json({ success: true, data: { id, status, reused: true } }, { headers: { 'cache-control': 'no-store' } });
+    }
+    return apiError('JOB_NOT_ACTIVE', '완료할 수 있는 실행 중 작업이 아니거나 저장된 결과와 다릅니다. job_get으로 확인하세요.', 409);
+  }
 
   await d1.batch([
     d1.prepare(`UPDATE devices SET last_seen_at=? WHERE id=? AND status='ACTIVE'`).bind(now, device.id),

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import vm from "node:vm";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
@@ -44,8 +45,10 @@ class FakeChild extends EventEmitter {
 }
 
 type Job = { id: string; outStem: string; prompt: string };
-function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lockFails?: boolean; automation?: boolean } = {}) {
-  const child = new FakeChild();
+function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lockFails?: boolean; automation?: boolean;
+  worker?: (args: string[], child: FakeChild) => void } = {}) {
+  const packageDir = fs.mkdtempSync(path.join(root, "package-"));
+  let child = new FakeChild();
   let jobs: Job[] = [];
   let checkpoint = "";
   let spawns = 0;
@@ -74,6 +77,11 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
           if (settings.spawnError === "sync") throw new Error("spawn sync failure");
           jobs = JSON.parse(fs.readFileSync(args[args.indexOf("--jobs-file") + 1], "utf8"));
           checkpoint = args[args.indexOf("--results-file") + 1];
+          if (settings.worker) {
+            child = new FakeChild();
+            const workerChild = child;
+            setImmediate(() => settings.worker!(args, workerChild));
+          }
           if (settings.spawnError === "async") setImmediate(() => child.emit("error", new Error("spawn async failure")));
           return child;
         },
@@ -88,12 +96,12 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       "../../scripts/lib/travel-content": { buildTravelThumbnailCopy: () => ({}) },
       "../../scripts/lib/travel-thumbnail": { createTravelEditorialThumbnail: async () => ({ outputPath: sourcePath }) },
       "./brand-post-package": {
-        getBrandPostPackageDir: () => root,
+        getBrandPostPackageDir: () => packageDir,
         normalizePackageImageAssets: (manifest: { imageAssets?: unknown[] }) => manifest.imageAssets || [],
         applyGeneratedBrandPostImage: () => { throw new Error("not used by the transport harness"); },
       },
       "./chatgpt-browser-automation": { isChatGptBrowserAutomationEnabled: () => settings.automation ?? true },
-      "node:crypto": { createHash: () => { throw new Error("not used by the transport harness"); } },
+      "node:crypto": crypto,
     },
     { process: { ...process, env: { ...process.env, BRAND_POST_IMAGE_BATCH_TIMEOUT_MS: settings.timeout?.toString() || "", BRAND_POST_IMAGE_JOB_TIMEOUT_MS: "" } } },
     "\nmodule.exports.runBrowserImageBatch = runBrowserImageBatch;",
@@ -119,7 +127,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
     if (output !== undefined) child.stdout.write(JSON.stringify(output));
     child.emit("close", code, null);
   };
-  return { ...api, child, manifest, callbacks, generate, result, progress, close,
+  return { ...api, get child() { return child; }, manifest, callbacks, generate, result, progress, close,
     get jobs() { return jobs; }, get checkpoint() { return checkpoint; },
     get spawns() { return spawns; }, get lockCalls() { return lockCalls; } };
 }
@@ -349,7 +357,7 @@ async function verifyProducer(startupFailure = false, failFast = false, sessionF
     setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms === 60_000 ? 5 : ms),
   }) : imagePolicy;
   const api = load<{ main: () => Promise<void> }>("scripts/chatgpt-generate-image-batch.ts", {
-    "dotenv/config": {}, fs, path,
+    "dotenv/config": {}, fs, path, "node:crypto": crypto,
     "./lib/image-timeout-policy": producerPolicy,
     "./lib/image-batch-diagnostics": load("scripts/lib/image-batch-diagnostics.ts", {}),
     "./lib/chatgpt-browser": {
@@ -366,7 +374,7 @@ async function verifyProducer(startupFailure = false, failFast = false, sessionF
         assert.equal(readRecords().length, submitted, "previous job must be checkpointed before next starts");
         assert.equal(stderr.split(prefix).length - 1, submitted, "previous job must emit progress before next starts");
       },
-      submitPromptToChatGPT: async () => { submitted += 1; },
+      submitPromptToChatGPT: async (_page: unknown, _prompt: string, _label: string, beforeSend?: () => void) => { beforeSend?.(); submitted += 1; },
       isChatGPTGenerating: async () => false,
       readAssistantMessages: async () => [], countRenderableChatGPTImages: async () => 1,
       // 0 = timed out without an artifact. The producer must fail the job instead of downloading nothing.
@@ -434,13 +442,106 @@ async function verifyProducer(startupFailure = false, failFast = false, sessionF
   }
   if (downloadRetry) assert.equal(downloads, 4, "empty retrieval retries once without another submission");
   const priorCheckpoint = fs.readFileSync(checkpoint, "utf8");
+  fs.writeFileSync(`${checkpoint}.lock`, JSON.stringify({ pid: process.pid, token: "live-test-owner" }));
   await assert.rejects(api.main(), /EEXIST/);
-  assert.equal(fs.readFileSync(checkpoint, "utf8"), priorCheckpoint, "rerun must not destroy durable evidence");
+  assert.equal(fs.readFileSync(checkpoint, "utf8"), priorCheckpoint, "live owner must not lose durable evidence");
+}
+
+async function verifyIntegratedResume() {
+  let submits = 0;
+  let opens = 0;
+  let loginFailure = false;
+  let uncertain = false;
+  const page = { waitForTimeout: async () => {}, textContent: async () => "", close: async () => {},
+    locator: () => ({ first() { return this; }, count: async () => 1, setInputFiles: async () => {} }) };
+  const h = harness({ worker: (args, child) => {
+    const worker = load<{ main: () => Promise<void> }>("scripts/chatgpt-generate-image-batch.ts", {
+      "dotenv/config": {}, fs, path, "node:crypto": crypto,
+      "./lib/image-timeout-policy": imagePolicy,
+      "./lib/image-batch-diagnostics": load("scripts/lib/image-batch-diagnostics.ts", {}),
+      "./lib/chatgpt-browser": {
+        createChatGPTContext: async () => { opens++; return { context: { newPage: async () => page }, close: async () => {} }; },
+        openFreshChatGPTTarget: async () => {},
+        // Exercise login failure inside submit's pre-dispatch checks, not only navigation.
+        submitPromptToChatGPT: async (_page: unknown, _prompt: string, _label: string, beforeSend: () => void) => {
+          if (loginFailure) throw new Error("CHATGPT_BROWSER_AUTH_REQUIRED: login");
+          beforeSend(); submits++;
+          if (uncertain) throw new Error("click dispatched but acknowledgement lost");
+        },
+        isChatGPTGenerating: async () => false, readAssistantMessages: async () => [],
+        countRenderableChatGPTImages: async () => 1, waitForChatGPTImageArtifacts: async () => 1,
+        downloadChatGPTImages: async () => [rawPath],
+      },
+    }, { process: { ...process, argv: ["node", "worker", ...args.slice(args.indexOf("--jobs-file"))],
+      env: { ...process.env, BRAND_POST_IMAGE_BATCH_FAIL_FAST: "true" },
+      stdout: { write: (value: string) => child.stdout.write(value) },
+      stderr: { write: (value: string) => child.stderr.write(value) },
+    } });
+    void worker.main().then(() => child.emit("close", 0, null), () => child.emit("close", 1, null));
+  } });
+  h.manifest.createdAt = "2026-09-05T01:00:00Z";
+  const second = { ...h.manifest.composition.sections[0], id: "second", title: "두 번째" };
+  h.manifest.composition.sections.push(second);
+  const requests = [{ requestId: "a", sectionId: "section" }, { requestId: "b", sectionId: "second" }];
+  assert.ok((await h.generate(0, { requests })).every(result => result.generatedPath));
+  const originalStems = h.jobs.map(job => job.outStem);
+  const originalCheckpoint = h.checkpoint;
+  const originalJobsFile = originalCheckpoint.replace(/\.results\.jsonl$/, "");
+  const originalJobs = fs.readFileSync(originalJobsFile, "utf8");
+  assert.equal(submits, 2);
+  assert.ok((await h.generate(0, { requests: requests.map(r => ({ ...r, requestId: "new-" + r.requestId })) })).every(r => r.generatedPath));
+  assert.equal(h.checkpoint, originalCheckpoint, "request IDs do not change stable jobs/results paths");
+  assert.equal(fs.readFileSync(originalJobsFile, "utf8"), originalJobs, "resume preserves the jobs document");
+  assert.equal(submits, 2);
+  assert.equal(opens, 1, "complete batch resume does not open a profile");
+  assert.ok((await h.generate(0, { requests: [requests[1]] }))[0].generatedPath);
+  assert.equal(h.jobs[0].outStem, originalStems[1], "subset and transport ID changes preserve slot identity");
+  assert.equal(submits, 2);
+  second.imageIntent = "새로운 프롬프트";
+  assert.ok((await h.generate(0, { requests: [requests[1]] }))[0].generatedPath);
+  assert.notEqual(h.jobs[0].outStem, originalStems[1]);
+  assert.equal(submits, 3, "changed prompt gets a new identity");
+  h.manifest.createdAt = "2026-09-05T02:00:00Z";
+  assert.ok((await h.generate(0, { requests: [requests[0]] }))[0].generatedPath);
+  assert.notEqual(h.jobs[0].outStem, originalStems[0]);
+  assert.equal(submits, 4, "new draft gets a new identity");
+  loginFailure = true;
+  second.imageIntent = "로그인 복구";
+  assert.match((await h.generate(0, { requests: [requests[1]] }))[0].error!, /AUTH_REQUIRED/);
+  const loginCheckpoint = h.checkpoint;
+  assert.equal(submits, 4, "login failure does not send");
+  loginFailure = false;
+  assert.ok((await h.generate(0, { requests: [requests[1]] }))[0].generatedPath, "old checkpoint failure must not mask successful retry");
+  assert.equal(h.checkpoint, loginCheckpoint);
+  assert.equal(submits, 5, "definitive pre-send login failure can be retried");
+  uncertain = true;
+  second.imageIntent = "불확실한 전송";
+  assert.ok((await h.generate(0, { requests: [requests[1]] }))[0].error);
+  assert.equal(submits, 6);
+  uncertain = false;
+  assert.match((await h.generate(0, { requests: [requests[1]] }))[0].error!, /IMAGE_RESUME_REQUIRED/);
+  assert.equal(submits, 6, "uncertain transmitted request is never regenerated");
+  const savedReference = fs.readFileSync(sourcePath);
+  try {
+    fs.writeFileSync(sourcePath, "changed reference bytes");
+    assert.ok((await h.generate(0, { requests: [requests[0]] }))[0].generatedPath);
+    assert.equal(submits, 7, "changed reference content cannot reuse an older result");
+    const referenceStem = h.jobs[0].outStem;
+    // Different batches still contend on the same slot lock.
+    const slotLock = `${referenceStem}.lock`;
+    fs.writeFileSync(slotLock, JSON.stringify({ pid: process.pid, token: "other-live-batch" }));
+    const blocked = await h.generate(0, { requests: [requests[0], requests[1]] });
+    assert.ok(blocked.every(result => result.error));
+    assert.equal(submits, 7);
+    assert.equal(JSON.parse(fs.readFileSync(slotLock, "utf8")).token, "other-live-batch");
+    fs.unlinkSync(slotLock);
+  } finally { fs.writeFileSync(sourcePath, savedReference); }
 }
 
 async function main() {
   try {
     await verifyGenerator();
+    await check("caller and actual worker: stable draft/section/prompt identity, subset resume, login retry, uncertain-send protection", verifyIntegratedResume);
     await check("producer checkpoints each job, streams stderr, preserves legacy stdout (fail-fast off)", () => verifyProducer());
     await check("producer startup failure checkpoints per-job errors", () => verifyProducer(true));
     await check("individual timeout continues remaining slots even with fail-fast enabled", () => verifyProducer(false, true));

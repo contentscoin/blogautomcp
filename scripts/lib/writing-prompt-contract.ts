@@ -1,5 +1,6 @@
 import { composeBudgetedChatGptPrompt } from "./chatgpt-direct-prompt";
 import { isMeaningfulProductEvidenceFeature } from "./product-editorial-plan";
+import { formatWritingStructureGuide } from "./writing-structure-guide";
 
 export interface WritingPromptContract {
   version: "writing-prompt-contract/v1";
@@ -10,6 +11,43 @@ export interface WritingPromptContract {
   title: { min: number; max: number };
   hashtagCount: number;
   verifiedExperienceNotes: string;
+  draftMemo?: string;
+  requestedTitle?: string;
+}
+
+/** Only extract an explicit title command, never infer a title from a topic memo. */
+export function extractRequestedDraftTitle(memo: string): string | undefined {
+  const match = /(?:^|[\n.!?]\s*)제목(?:은|을)\s*정확히\s+(.+?)\s*(?:으로|로)\s*작성(?=[\s.!?]|$)/u.exec(memo);
+  if (!match) return undefined;
+  const title = match[1].trim();
+  const quotes: Record<string, string> = { '"': '"', "'": "'", "“": "”", "‘": "’" };
+  return quotes[title[0]] === title.at(-1) ? title.slice(1, -1) : title;
+}
+
+export function formatDraftMemoRequirements(contract: Pick<WritingPromptContract, "draftMemo" | "requestedTitle">): string {
+  if (!contract.draftMemo) return "";
+  return [
+    "[사용자 초안 메모 · 최초 작성과 모든 수정에서 유지]",
+    contract.draftMemo,
+    contract.requestedTitle ? `- title은 다음 문자열을 공백·문장부호까지 그대로 사용합니다: ${JSON.stringify(contract.requestedTitle)}` : "",
+    "- 메모의 명시 제목·필수 주제·문체는 기본 SEO 제목 길이, 브이로그 렌즈, 상품 조건 설명 제외 같은 일반 편집 지침보다 우선합니다. 사실성·안전·품질 검증 기준은 그대로 지킵니다.",
+    "- 제목에 요청된 주제도 본문에서 빠짐없이 다룹니다. 숙박·온천호텔 선택 기준 등을 요청했다면 관련 본문을 포함하고 수정·윤문에서도 유지합니다.",
+    "- 메모는 작성 요구이며 사실 증거가 아닙니다. 상품 근거로 확인된 내용만 사실로 쓰고, 부족한 정보는 일반 선택 기준과 미확인 상품 조건을 구분합니다. 호텔명·등급·온천 시설·포함 여부·실제 체험을 지어내지 않습니다.",
+  ].filter(Boolean).join("\n");
+}
+
+/** Preserve exact titles without bypassing the existing title sanitizer. */
+export function resolveWritingDraftTitle(
+  generatedTitle: unknown, fallback: string, contract: WritingPromptContract,
+  sanitize: (title: string, fallback: string) => string,
+): string {
+  if (contract.requestedTitle) {
+    if (sanitize(contract.requestedTitle, fallback) !== contract.requestedTitle) {
+      throw new Error("명시 제목이 기존 제목 정책과 충돌합니다. 요청 제목을 임의로 변경하지 않습니다.");
+    }
+    return contract.requestedTitle;
+  }
+  return sanitize(typeof generatedTitle === "string" ? generatedTitle : fallback, fallback);
 }
 
 export function createWritingPromptContract(input: {
@@ -19,6 +57,7 @@ export function createWritingPromptContract(input: {
   targetCharacters: { min: number; max: number };
   hashtagCount: number;
   verifiedExperienceNotes?: string;
+  draftMemo?: string | null;
 }): WritingPromptContract {
   for (const [min, max] of [
     [input.minimumSections, input.maximumSections],
@@ -40,13 +79,15 @@ export function createWritingPromptContract(input: {
     title: { min: 25, max: 35 },
     hashtagCount: input.hashtagCount,
     verifiedExperienceNotes: input.verifiedExperienceNotes?.trim() || "",
+    draftMemo: input.draftMemo?.trim() || "",
+    requestedTitle: extractRequestedDraftTitle(input.draftMemo?.trim() || ""),
   };
 }
 
 /** Shape example, not a factual draft. The prose requirements still apply. */
 export function getWritingOutputExample(contract: WritingPromptContract) {
   return {
-    title: `${contract.title.min}~${contract.title.max}자 SEO 제목`,
+    title: contract.requestedTitle || `${contract.title.min}~${contract.title.max}자 SEO 제목`,
     evidenceFacts: [] as string[],
     sections: [
       "소제목\n\n" + Array.from(
@@ -76,6 +117,8 @@ export function formatWritingPromptContract(contract: WritingPromptContract): st
     `- 해시태그는 검색 의도가 분명한 ${contract.hashtagCount}개입니다.`,
     "- 고지 문구와 원시 URL은 출력하지 않습니다. 커넥트 카드와 고지는 시스템이 별도로 붙입니다.",
     "- title, evidenceFacts, sections, hashtags 필드를 가진 JSON 하나만 출력합니다. 코드블록·작업 설명은 넣지 않습니다.",
+    formatWritingStructureGuide(contract.kind),
+    formatDraftMemoRequirements(contract),
     "- 다음은 필드와 섹션 한 개의 형식 예시입니다. 실제 sections 개수와 전체 분량은 위 기준을 따릅니다.",
     JSON.stringify(getWritingOutputExample(contract)),
   ].join("\n");

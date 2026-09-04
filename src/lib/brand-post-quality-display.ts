@@ -1,4 +1,7 @@
-/** Content and image gates are separate: never advise rewriting a passing article for missing images. */
+/** Content and image gates are separate: never advise rewriting a passing article for missing images.
+ * Readiness returns structural blockers before category failures, so structure-only
+ * (or empty) blockers do not prove that editorial quality passed, even at 96 points.
+ */
 export function isDraftEditorialQualityPassed(quality?: {
   canPublish: boolean;
   signals: Array<{ key: string; status: string }>;

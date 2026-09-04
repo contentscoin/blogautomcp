@@ -3,6 +3,8 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { getAppDataDir } from "../../scripts/lib/app-paths";
 import type { BrandLinkContentReadiness } from "../../scripts/lib/brandlink-content-readiness";
+import type { ProductSnapshot } from "./draft-context-snapshot";
+import type { SavedTextQcMetadata } from "./brand-post-revalidation";
 import {
   getPostCompositionContract,
   refreshPostDocumentQuality,
@@ -69,6 +71,8 @@ interface BrandPostPackageManifestBase {
   createdAt: string;
   approvedAt: string | null;
   contentQuality?: BrandLinkContentReadiness | null;
+  sourceSnapshot?: ProductSnapshot;
+  textQualityRevalidation?: SavedTextQcMetadata;
   qualityRepair?: BrandPostQualityRepairSummary | null;
   imageGeneration?: {
     status: "running" | "complete" | "incomplete";
@@ -170,7 +174,7 @@ export function getBrandPostPackageManifestPath(brandLinkId: string): string {
   return path.join(getBrandPostPackageDir(brandLinkId), "manifest.json");
 }
 
-export function readBrandPostPackage(brandLinkId: string): BrandPostPackageManifest | null {
+export function readBrandPostPackage(brandLinkId: string, options: { migrate?: boolean } = {}): BrandPostPackageManifest | null {
   const manifestPath = getBrandPostPackageManifestPath(brandLinkId);
   if (!fs.existsSync(manifestPath)) return null;
   let parsed = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as BrandPostPackageManifest;
@@ -185,6 +189,15 @@ export function readBrandPostPackage(brandLinkId: string): BrandPostPackageManif
       parsed.composition?.version !== "resolved-post-document/v1")
   ) {
     throw new Error("준비된 초안 패키지의 렌더 계약 형식이 올바르지 않습니다.");
+  }
+
+  if (options.migrate === false) return parsed;
+  // A full current text evaluation must never be replaced by the narrow legacy
+  // shopping migrations below. Image reconciliation can still refresh its gate.
+  if (parsed.version === "brand-post-package/v2" && parsed.textQualityRevalidation) {
+    const reconciled = reconcileBrandPostPackageQuality(parsed);
+    if (JSON.stringify(reconciled) !== JSON.stringify(parsed)) writeBrandPostPackageManifest(reconciled);
+    return reconciled;
   }
 
   const persistMigration = () => {
@@ -408,7 +421,8 @@ export function packagePreview(manifest: BrandPostPackageManifest) {
       })
     : [];
   // 스펙/초안 원본은 크고(MCP 결과 900KB 제한) 화면에 필요 없어 미리보기에서는 뺀다.
-  const { postSpec: _postSpec, specDraft: _specDraft, ...rest } = manifest;
+  const { postSpec: _postSpec, specDraft: _specDraft, sourceSnapshot: _sourceSnapshot, ...rest } = manifest;
+  void _sourceSnapshot;
   void _postSpec;
   void _specDraft;
   const sectionOutline = manifest.version === "brand-post-package/v2"

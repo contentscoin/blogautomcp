@@ -200,11 +200,20 @@ async function main() {
       assert.equal(fs.readFileSync(files[0], "utf8"), "https://fixture/ok");
     });
 
-    await check("wait does not return success while still generating or after an unstable timeout", async () => {
+    await check("wait rejects artifacts before the stability window or after an unstable timeout", async () => {
       const streaming = await fixture(assistant(image(dataUrl)) + '<button data-testid="stop-button">Stop</button>');
       assert.equal(await streaming.wait(15000), 0);
       const unstable = await fixture(assistant(image(dataUrl)));
       assert.equal(await unstable.wait(6000), 0);
+    });
+
+    await check("completed assistant image wins over stale global stop button", async () => {
+      const f = await fixture(user(image("https://fixture/reference")) +
+        assistant(image(dataUrl)) + '<button data-testid="stop-button">Stop</button>');
+      assert.equal(await f.wait(24000), 1);
+      assert.ok(f.elapsed >= 15000);
+      assert.equal((await api.downloadChatGPTImages(f.page, path.join(root, "stale-stop"))).length, 1);
+      assert.equal(f.fetched.length, 0, "reference not downloaded");
     });
 
     await check("wait ignores references, then accepts stable loaded assistant artifacts", async () => {

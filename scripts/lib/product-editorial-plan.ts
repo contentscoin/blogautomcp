@@ -687,14 +687,25 @@ export function assessProductReviewSubstance(input: {
   sourceDescription?: string | null;
   sourceFeatures?: string[];
 }): ProductReviewSubstanceAssessment {
-  const body = input.sections.join("\n");
+  // The section contract is heading + blank line + body. A single newline
+  // heading is also supported; headings never supply evidence or role labels.
+  const paragraphs = input.sections.flatMap((section) => {
+    const normalized = section.replace(/\r\n?/gu, "\n").trim();
+    const lines = normalized.split("\n");
+    const hasHeading = lines.length > 1 && !/[.!?。]$/u.test(lines[0].trim());
+    return (hasHeading ? lines.slice(1).join("\n") : normalized)
+      .split(/\n\s*\n/u).map((paragraph) => paragraph.trim()).filter(Boolean);
+  });
+  const body = paragraphs.join("\n\n");
   const analysis = buildProductReviewAnalysis({
     productName: input.productName,
     description: input.sourceDescription,
     features: input.sourceFeatures,
     targetSectionCount: 11,
   });
-  const sentences = body.split(/[\n.!?。]+/u).map(clean).filter((item) => item.length >= 8);
+  const paragraphSentences = paragraphs.map((paragraph) =>
+    paragraph.split(/[\n.!?。]+/u).map(clean).filter(Boolean));
+  const sentences = paragraphSentences.flat().filter((item) => item.length >= 8);
   const sentenceCount = Math.max(1, sentences.length);
   const genericGuidanceCount = countMatches(body, /(?:확인(?:해|하|해야|하세요)|살펴보|비교해보|보는\s*게\s*좋|안전해요)/u);
   const categoryMismatchTerms = analysis.forbiddenCategoryTerms.filter((term) => body.includes(term));
@@ -731,10 +742,21 @@ export function assessProductReviewSubstance(input: {
   const detailReadingCount = sentences.filter((sentence) =>
     /(?:상세\s*페이지|상세\s*정보|상품\s*설명에는|판매\s*페이지|사진에는|이미지에는|적혀\s*있|표시되어\s*있|확인됩니다)/u.test(sentence)
   ).length;
-  const evidenceJudgementCount = sentences.filter((sentence) =>
-    judgementAnchors.some((signal) => signalCoveredBySentence(signal, sentence)) &&
-    /(?:장점|강점|선택\s*이유|효율|편의|유리|실용|중요|의미|가치|도움|현실적|유용|어울|후보|줄(?:여|어|일)|늘(?:려|어|릴)|대신|반면|아쉬|부담|한계|제약|잘\s*맞|적합|비추천|더\s*낫)/u.test(sentence)
-  ).length;
+  const benefitPattern = /(?:장점|강점|선택\s*이유|효율|편의|편리|편하|편해|유리|실용|도움|유용|줄(?:여|어|일)|덜(?:어|\s*번거|\s*필요)|넓(?:혀|힐)|수월|간편|쉽게|쉬워|확보)/u;
+  const fitPattern = /(?:추천\s*대상|잘\s*맞|비추천\s*대상|맞지\s*않|어울|적합|사람에게.*(?:맞|실용|유용)|(?:분|사용자|가정|환경|경우|용도)(?:에게|에는|에|라면|이라면).*(?:맞|편리|유용|실용|낫)|(?:라면|다면).*(?:추천|후보|낫|맞))/u;
+  const judgementPattern = /(?:장점|강점|선택\s*이유|효율|편의|유리|실용|중요|의미|가치|도움|현실적|유용|어울|후보|줄(?:여|어|일)|늘(?:려|어|릴)|대신|반면|아쉬|부담|한계|제약|잘\s*맞|적합|비추천|더\s*낫)/u;
+  const hasAnchor = (sentence: string) => judgementAnchors.some((signal) => signalCoveredBySentence(signal, sentence));
+  // Only the immediately preceding fact can support an explanation. Do not
+  // flatten sections, skip intervening sentences, or chain inferred benefits.
+  const groundedJudgements = paragraphSentences.flatMap((group) => group.filter((sentence, index) => {
+    // Bare labels (even with a product token) are not explanatory prose.
+    if (!/(?:다|요|죠)["'”’]?$/u.test(sentence)) return false;
+    if (sentence.length < 8 || !(judgementPattern.test(sentence) || benefitPattern.test(sentence) || fitPattern.test(sentence))) return false;
+    const previous = group[index - 1];
+    const explanatory = /(?:그래서|따라서|덕분에|이\s*(?:구조|구성|기능|방식|점)|그만큼|때문|줄|덜|편리|수월|실용|유용|유리|어울|적합|잘\s*맞)/u.test(sentence);
+    return hasAnchor(sentence) || Boolean(previous && hasAnchor(previous) && explanatory);
+  }));
+  const evidenceJudgementCount = groundedJudgements.length;
   const requiredSignalCount = signalEvidenceAvailable
     ? Math.min(
         analysis.evidenceLevel === "rich" ? 4 : analysis.evidenceLevel === "usable" ? 3 : 1,
@@ -744,9 +766,9 @@ export function assessProductReviewSubstance(input: {
   const requiredEvidenceJudgementCount = analysis.evidenceLevel === "rich" ? 3 : analysis.evidenceLevel === "usable" ? 2 : 1;
   const repeats = repeatedSentenceCount(input.sections);
   const checks: Array<[boolean, string]> = [
-    [/(?:장점|강점|선택\s*이유)/u.test(body), "구체적인 장점"],
+    [groundedJudgements.some((sentence) => benefitPattern.test(sentence)), "구체적인 장점"],
     [hasProductLimitationLanguage(body), "제품 자체의 단점·제약"],
-    [/(?:추천\s*대상|잘\s*맞|비추천\s*대상|맞지\s*않)/u.test(body), "추천·비추천 대상"],
+    [groundedJudgements.some((sentence) => fitPattern.test(sentence)), "추천·비추천 대상"],
     [hasConditionalProductVerdict(input.sections), "조건부 최종 결론"],
     [coveredSignals.length >= requiredSignalCount, "상품 고유 구조·기능 근거"],
     [evidenceJudgementCount >= requiredEvidenceJudgementCount, "근거와 사용 가치가 연결된 판단"],

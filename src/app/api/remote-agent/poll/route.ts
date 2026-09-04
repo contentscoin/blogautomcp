@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { completionOutbox, CompletionDeliveryError, deliverCompletion, type PendingCompletion } from "@/lib/remote-agent-completion";
 import { getWritingTimeoutPolicy } from "../../../../../scripts/lib/writing-timeout-policy";
 import fs from "node:fs";
 import path from "node:path";
@@ -25,7 +26,7 @@ import {
 } from "@/lib/local-automation-error";
 import { buildProductThumbnailCopy } from "../../../../../scripts/lib/product-thumbnail";
 import { buildTravelThumbnailCopy } from "../../../../../scripts/lib/travel-content";
-import { getProductThumbnailStorageDir } from "../../../../../scripts/lib/app-paths";
+import { getProductThumbnailStorageDir, getUserDataRoot } from "../../../../../scripts/lib/app-paths";
 import { createLockedProductThumbnailOnBackground } from "../../../../../scripts/lib/product-image-lock";
 import { createTravelEditorialThumbnail } from "../../../../../scripts/lib/travel-thumbnail";
 import { normalizeProductThumbnailCopy, productThumbnailSettingKey } from "../../../../../scripts/lib/product-thumbnail-settings";
@@ -79,6 +80,7 @@ type JobContext = {
   setStage: (stage: string, message?: string, progress?: number) => void;
   /** 초안 작업 중이면 하트비트가 패키지의 progress.json 을 읽어 단계·진행률을 올린다. */
   draftProgress?: DraftProgressWatch | null;
+  executionFinished?: boolean;
 };
 
 type ProfilePlan = {
@@ -103,7 +105,6 @@ const SECTION_IMAGE_NEXT_ACTION =
   "완성된 이미지의 HTTPS 주소를 post_apply_section_image(sectionId, generatedImageUrl) 로 보내세요. " +
   "쇼핑은 제품이 없는 배경만 생성합니다(PC 가 원본 상품을 잠금 합성). 이미지 부족만으로는 원고를 다시 작성하거나 재제출하지 마세요. " +
   "모든 파트가 채워지면 post_approve_draft 로 승인합니다.";
-const DRAFT_MARKDOWN_MAX_CHARS = 60_000;
 const HERO_IMAGE_MAX_BYTES = 300 * 1024;
 const PIPELINE_VERSION = "post-spec/v1";
 
@@ -462,7 +463,6 @@ function remainingGenerationMissing(slots: Array<Record<string, unknown>> | null
 /** 초안 미리보기에서 PC 파일 경로를 제거하고 ChatGPT 가 검토할 정보만 남긴다. */
 function draftView(draftId: string, preview: DraftPreview, includeMarkdown: boolean, manifest: DraftManifest = null): Record<string, unknown> {
   const markdown = typeof preview.markdown === "string" ? preview.markdown : "";
-  const truncated = markdown.length > DRAFT_MARKDOWN_MAX_CHARS;
   const bodyImageCount = Array.isArray(preview.bodyImagePaths) ? preview.bodyImagePaths.length : 0;
   return {
     draftId,
@@ -482,7 +482,7 @@ function draftView(draftId: string, preview: DraftPreview, includeMarkdown: bool
     contentQuality: preview.contentQuality ?? null,
     qualityRepair: preview.qualityRepair ?? null,
     imageGeneration: stripPaths(preview.imageGeneration ?? null),
-    ...(includeMarkdown ? { markdown: truncated ? `${markdown.slice(0, DRAFT_MARKDOWN_MAX_CHARS)}\n\n…(본문이 길어 일부만 표시)` : markdown, markdownTruncated: truncated } : {}),
+    ...(includeMarkdown ? { markdown, markdownTruncated: false } : {}),
   };
 }
 
@@ -1301,6 +1301,7 @@ async function siteFetch(siteUrl: string, token: string, apiPath: string, body: 
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify(body),
     cache: "no-store",
+    signal: AbortSignal.timeout(20_000),
   });
   const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
   return { ok: response.ok, status: response.status, payload };
@@ -1340,7 +1341,7 @@ function startJobHeartbeat(request: NextRequest, siteUrl: string, token: string,
       message: stageRef.message,
       status: buildStatusSnapshot(),
     }).catch(() => ({ ok: false, status: 0, payload: null }));
-    if (!ok || !payload) return;
+    if (stopping || ctx.executionFinished || !ok || !payload) return;
     const data = (payload.data || {}) as Record<string, unknown>;
     if (data.active === false && !ctx.cancelled) {
       ctx.cancelled = true;
@@ -1366,9 +1367,10 @@ function startJobHeartbeat(request: NextRequest, siteUrl: string, token: string,
 
 async function completeRemoteJob(siteUrl: string, token: string, jobId: string, body: Record<string, unknown>): Promise<void> {
   const { ok, status, payload } = await siteFetch(siteUrl, token, `/api/agent/jobs/${encodeURIComponent(jobId)}/complete`, body);
-  if (!ok) {
-    const error = payload?.error as { message?: string } | undefined;
-    throw new Error(error?.message || `원격 작업 완료 기록 실패 (${status})`);
+  const data = payload?.data as Record<string, unknown> | undefined;
+  if (!ok || payload?.success !== true || data?.id !== jobId || data?.status !== body.status) {
+    const error = payload?.error as { message?: string; code?: string } | undefined;
+    throw new CompletionDeliveryError(status, error?.code || 'COMPLETION_DELIVERY_UNCERTAIN', error?.message || `원격 작업 완료 기록 실패 (${status})`);
   }
 }
 
@@ -1379,6 +1381,7 @@ export async function POST(request: NextRequest) {
   if (unauthorized) return unauthorized;
   const remote = config();
   if (!remote.siteUrl || !remote.token) return NextResponse.json({ success: true, data: { configured: false, job: null } });
+  const outbox = completionOutbox(getUserDataRoot(), remote.siteUrl, remote.token);
   if (process.env.DESKTOP_UPDATE_INSTALL_PENDING === "1") {
     return NextResponse.json({ success: true, data: { configured: true, job: null, updatePending: true } });
   }
@@ -1388,6 +1391,27 @@ export async function POST(request: NextRequest) {
   if (claiming) return NextResponse.json({ success: true, data: { configured: true, job: null, busy: null } });
 
   claiming = true;
+  let pending: PendingCompletion | null;
+  try { pending = outbox.read(); }
+  catch {
+    claiming = false;
+    return NextResponse.json({ success: false, code: 'COMPLETION_OUTBOX_UNREADABLE', error: '완료 보관함을 읽을 수 없어 새 작업을 시작하지 않습니다. PC 저장소를 확인하세요.' }, { status: 503 });
+  }
+  if (pending) {
+    const renew = () => void siteFetch(remote.siteUrl, remote.token, `/api/agent/jobs/${encodeURIComponent(pending!.job.id)}/heartbeat`, { stage: 'completion_pending', message: '실행 완료 · 저장된 결과 재전송 중', progress: 99, appVersion: appVersionString(), status: buildStatusSnapshot() }).catch(() => undefined);
+    renew();
+    const deliveryHeartbeat = setInterval(renew, JOB_HEARTBEAT_INTERVAL_MS);
+    try {
+      // Re-save a memory-only result if an earlier disk write failed.
+      outbox.save(pending);
+      await deliverCompletion(() => completeRemoteJob(remote.siteUrl, remote.token, pending!.job.id, pending!.body));
+      outbox.clear();
+      const success = pending.body.status === 'SUCCEEDED';
+      return NextResponse.json({ success, ...(success ? {} : { error: pending.body.errorMessage, code: pending.body.errorCode }), data: { configured: true, job: { ...pending.job, status: pending.body.status }, completionRecovered: true } }, { status: success ? 200 : 500 });
+    } catch (error) {
+      return NextResponse.json({ success: false, code: 'COMPLETION_DELIVERY_UNCERTAIN', error: '저장된 완료 결과를 전송하지 못했습니다. 작업을 다시 실행하지 마세요. 연결을 복구하고 job_get으로 확인하세요.', deliveryCode: error instanceof CompletionDeliveryError ? error.code : 'NETWORK_ERROR', data: { job: pending.job, executionStatus: pending.body.status, completionPending: true } }, { status: 503 });
+    } finally { clearInterval(deliveryHeartbeat); claiming = false; }
+  }
   let claim: Awaited<ReturnType<typeof siteFetch>> | null;
   try {
     claim = await siteFetch(remote.siteUrl, remote.token, "/api/agent/jobs/claim", { appVersion: appVersionString(), status: buildStatusSnapshot() }).catch(() => null);
@@ -1421,22 +1445,31 @@ export async function POST(request: NextRequest) {
   };
   const stopHeartbeat = startJobHeartbeat(request, remote.siteUrl, remote.token, ctx, stageRef);
   try {
-    let result: JobResultEnvelope;
+    let completion: Record<string, unknown>;
     try {
-      result = await executeJob(ctx);
+      const result = await executeJob(ctx);
       assertNotCancelled(ctx);
-    } finally {
-      stopHeartbeat();
+      completion = { status: "SUCCEEDED", result };
+    } catch (error) {
+      const failure = ctx.cancelled
+        ? new LocalAutomationError(ctx.cancelReason === "LEASE_LOST" ? "TIMEOUT" : "USER_CANCELLED", ctx.cancelReason === "LEASE_LOST" ? "사이트가 작업 임대를 회수했습니다." : LOCAL_AUTOMATION_ERROR_HINTS.USER_CANCELLED)
+        : toLocalAutomationError(error);
+      completion = { status: "FAILED", errorCode: failure.code, errorMessage: failure.message };
     }
-    await completeRemoteJob(remote.siteUrl, remote.token, job.id, { status: "SUCCEEDED", result });
-    return NextResponse.json({ success: true, data: { configured: true, job: { id: job.id, type: job.type, status: "SUCCEEDED" } } });
-  } catch (error) {
-    const failure = ctx.cancelled
-      ? new LocalAutomationError(ctx.cancelReason === "LEASE_LOST" ? "TIMEOUT" : "USER_CANCELLED", ctx.cancelReason === "LEASE_LOST" ? "사이트가 작업 임대를 회수했습니다." : LOCAL_AUTOMATION_ERROR_HINTS.USER_CANCELLED)
-      : toLocalAutomationError(error);
-    await completeRemoteJob(remote.siteUrl, remote.token, job.id, { status: "FAILED", errorCode: failure.code, errorMessage: failure.message }).catch(() => undefined);
-    return NextResponse.json({ success: false, error: failure.message, code: failure.code, data: { job: { id: job.id, type: job.type, status: "FAILED" } } }, { status: 500 });
+    ctx.executionFinished = true;
+    ctx.draftProgress = null;
+    ctx.setStage('completion_pending', '실행 완료 · 결과 전송 중', 99);
+    try {
+      outbox.save({ job: { id: job.id, type: job.type }, body: completion });
+      await deliverCompletion(() => completeRemoteJob(remote.siteUrl, remote.token, job.id, completion));
+      outbox.clear();
+    } catch (error) {
+      return NextResponse.json({ success: false, code: 'COMPLETION_DELIVERY_UNCERTAIN', error: '실행은 종료됐으나 완료 기록을 확인하지 못했습니다. 작업을 재실행하지 말고 job_get으로 확인하세요.', deliveryCode: error instanceof CompletionDeliveryError ? error.code : 'NETWORK_OR_STORAGE_ERROR', data: { job: { id: job.id, type: job.type }, executionStatus: completion.status, completionPending: true } }, { status: 503 });
+    }
+    const success = completion.status === 'SUCCEEDED';
+    return NextResponse.json({ success, ...(success ? {} : { error: completion.errorMessage, code: completion.errorCode }), data: { configured: true, job: { id: job.id, type: job.type, status: completion.status } } }, { status: success ? 200 : 500 });
   } finally {
+    stopHeartbeat();
     activeJob = null;
   }
 }

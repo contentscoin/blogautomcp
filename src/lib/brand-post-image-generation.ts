@@ -200,15 +200,30 @@ async function runBrowserImageBatch(
       bodyExcerpt: target.bodyExcerpt,
       role: target.role,
     }),
-    outStem: path.join(workDir, `raw-${index + 1}-${target.request.requestId.replace(/[^a-zA-Z0-9_-]/gu, "")}`),
+    outStem: "",
     referenceImagePaths: normalizePackageImageAssets(manifest)
       .filter((asset) => asset.provenance === "ORIGINAL" && fs.existsSync(asset.path))
       .slice(0, 3)
       .map((asset) => asset.path),
-  }));
-  const jobsPath = path.join(workDir, `jobs-${Date.now()}.json`);
+  })).map((job, index) => {
+    const target = targets[index];
+    const identity = crypto.createHash("sha256").update(JSON.stringify({
+      version: 1, brandLinkId: manifest.brandLinkId, draftCreatedAt: manifest.createdAt,
+      title: manifest.title, sectionId: target.sectionId, role: target.role,
+      replaceAssetKey: target.request.replaceAssetKey, prompt: job.prompt,
+      references: job.referenceImagePaths.map(file => ({ file,
+        sha256: crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"),
+      })),
+    })).digest("hex");
+    return { ...job, outStem: path.join(workDir, `raw-${identity}`) };
+  });
+  const batchIdentity = crypto.createHash("sha256").update(JSON.stringify(jobs)).digest("hex");
+  const jobsPath = path.join(workDir, `jobs-${batchIdentity}.json`);
   const resultsPath = `${jobsPath}.results.jsonl`;
-  fs.writeFileSync(jobsPath, JSON.stringify(jobs, null, 2), "utf8");
+  try { fs.writeFileSync(jobsPath, JSON.stringify(jobs, null, 2), { encoding: "utf8", flag: "wx" }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  // Old failures must not win over this invocation's resumed/retried results.
+  const checkpointStart = fs.existsSync(resultsPath) ? fs.statSync(resultsPath).size : 0;
 
   return await new Promise<BrowserImageBatchResult[]>((resolve) => {
     const results = new Map<string, BrowserImageBatchResult>();
@@ -244,7 +259,7 @@ async function runBrowserImageBatch(
     };
     const readCheckpoint = () => {
       try {
-        const lines = fs.readFileSync(resultsPath, "utf8").split("\n");
+        const lines = fs.readFileSync(resultsPath).subarray(checkpointStart).toString("utf8").split("\n");
         // A killed writer may leave an incomplete last record. Ignore it.
         for (const line of lines.slice(0, -1)) {
           try { accept(JSON.parse(line)); } catch { /* Ignore a damaged record. */ }
@@ -470,7 +485,8 @@ export async function generateBrandPostImages(options: {
   try {
     const workRoot = path.join(getBrandPostPackageDir(options.manifest.brandLinkId), "image-generation-work");
     fs.mkdirSync(workRoot, { recursive: true });
-    const workDir = fs.mkdtempSync(path.join(workRoot, `${Date.now()}-${process.pid}-`));
+    const workDir = path.join(workRoot, "resume-v1");
+    fs.mkdirSync(workDir, { recursive: true });
     await runBrowserImageBatch(targets, options.manifest, options.productName, workDir, async (browserResult, targetIndex) => {
       const target = targets[targetIndex];
       const index = requestIndexes[targetIndex];

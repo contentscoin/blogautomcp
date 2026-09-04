@@ -26,7 +26,7 @@ vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve("scripts/lib/
 });
 const api = loaded.exports as typeof BrowserApi;
 
-function fixture(settings: { readyAt?: number; generating?: boolean; authAt?: number; securityAt?: number; observationCost?: number } = {}) {
+function fixture(settings: { readyAt?: number; generating?: boolean; staleStop?: boolean; changingArtifact?: boolean; authAt?: number; securityAt?: number; observationCost?: number } = {}) {
   let elapsed = 0;
   const ready = () => settings.readyAt !== undefined && elapsed >= settings.readyAt;
   const auth = () => settings.authAt !== undefined && elapsed >= settings.authAt;
@@ -34,7 +34,7 @@ function fixture(settings: { readyAt?: number; generating?: boolean; authAt?: nu
     first() { return this; },
     isVisible: async () => selector.includes("prompt-textarea") ? !auth()
       : selector === "login" ? auth()
-      : /stop-button|Stop|result-streaming/.test(selector) ? !!settings.generating && !ready() : false,
+      : /stop-button|Stop|result-streaming/.test(selector) ? !!settings.staleStop || !!settings.generating && !ready() : false,
   });
   const page = {
     url: () => settings.securityAt !== undefined && elapsed >= settings.securityAt ? "https://chatgpt.com/captcha" : "https://chatgpt.com/",
@@ -44,7 +44,7 @@ function fixture(settings: { readyAt?: number; generating?: boolean; authAt?: nu
       if (fn.toString().includes("hasAccountPicker")) return null;
       if (fn.name === "collectRenderableChatGPTGeneratedImages") {
         elapsed += settings.observationCost ?? 0;
-        return ready() ? [{ src: "unused" }] : [];
+        return ready() ? [{ src: settings.changingArtifact ? `artifact-${elapsed}` : "unused", width: 1024, height: 768 }] : [];
       }
       return { hasChallengeElement: false, hasHumanCheckbox: false };
     },
@@ -65,6 +65,22 @@ async function main() {
   const stuck = fixture({ generating: true });
   assert.equal(await wait(stuck), 0);
   assert.equal(stuck.now(), 600_000, "permanent progress cannot bypass hard deadline");
+  const completedWithStaleStop = fixture({readyAt:90_000,staleStop:true});
+  assert.equal(await wait(completedWithStaleStop),1);
+  assert.equal(completedWithStaleStop.now(),105_000,"stable loaded artifact wins over stale global stop button");
+  const changingPreview = fixture({readyAt:0,staleStop:true,changingArtifact:true});
+  assert.equal(await wait(changingPreview,60_000,60_000),0,"changing artifact is not a completed result");
+  const transient = fixture({readyAt:0,staleStop:true});
+  const originalEvaluate = transient.page.evaluate.bind(transient.page);
+  let artifactCalls = 0;
+  transient.page.evaluate = (async (fn: { name?: string }, arg?: unknown) => {
+    if (fn.name === "collectRenderableChatGPTGeneratedImages" && ++artifactCalls === 3) {
+      throw new Error("Execution context was destroyed");
+    }
+    return originalEvaluate(fn as never, arg as never);
+  }) as typeof transient.page.evaluate;
+  assert.equal(await wait(transient,60_000,60_000),1,"transient context error recovers");
+  assert.equal(transient.now(),24_000,"transient error resets artifact stability");
   const idle = fixture();
   assert.equal(await wait(idle), 0);
   assert.equal(idle.now(), 300_000, "no progress ends at base deadline");

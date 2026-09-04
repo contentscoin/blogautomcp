@@ -163,6 +163,25 @@ export const UNSUPPORTED_EXPERIENCE_PATTERNS = [
 
 const UNSUPPORTED_EXPERIENCE_TITLE_PATTERN = /(?:내돈내산|실사용|직접\s*(?:써본|다녀온)|솔직\s*후기|체험\s*후기)/u;
 
+/** Return exact claim candidates; exemptions must attach to that candidate, not its sentence. */
+export function detectUnsupportedExperience(text: string): string[] {
+  const matches: string[] = [];
+  for (const pattern of UNSUPPORTED_EXPERIENCE_PATTERNS) {
+    for (const match of text.matchAll(new RegExp(pattern.source, "gu"))) {
+      // Only a small, grammatical continuation is allowed. Never scan ahead for a denial:
+      // "직접 사용해 봤어요. 구매 후기는 없습니다" still contains a claim.
+      const tail = text.slice(match.index! + match[0].length, match.index! + match[0].length + 100).split(/[\n\r.!?;,]/u)[0];
+      const denial = /^(?:\s*(?:나|와|과|및|또는)\s*(?:구매|사용|체험))?(?:\s*(?:후기|경험|기록)(?:는|가|이|을|은)?)?\s*(?:제공되지\s*않|없(?:습니다|어요|다|으)|하지\s*않|한\s*적(?:이|은)?\s*없|해\s*본\s*적(?:이|은)?\s*없)/u;
+      const nonAssertion = /^\s*(?:(?:하|해|해\s*보|해\s*봤다|했다|다)?면|(?:하|해\s*보)?신다면|(?:하|해\s*보)?실\s*경우|하는\s*경우|하기\s*전|하세요|해\s*보세요|해\s*주세요|하지\s*마세요|하는\s*방식|후\s*(?:건조|세척|보관|관리))/u;
+      // Recommendation policy is unchanged; these are not experience predicates.
+      const recommendation = /강력|후회|무조건|재구매/u.test(match[0]);
+      if (!recommendation && (denial.test(tail) || nonAssertion.test(tail))) continue;
+      matches.push(match[0]);
+    }
+  }
+  return [...new Set(matches)];
+}
+
 function assessTravelEditorialCoverage(sections: string[]): {
   coveredRoles: string[];
   missingCoreRoles: string[];
@@ -509,10 +528,11 @@ export function getBrandLinkContentReadiness(
     Boolean(normalizedBrandLink && fullBody.includes(normalizedBrandLink)) ||
     /https?:\/\/(?:naver\.me|brandconnect\.naver\.com|shopping\.naver\.com)\/\S+/iu.test(fullBody);
   const experienceMode = input.experienceMode || "AI_ASSISTED_INFORMATION";
+  const unsupportedExperienceMatches = detectUnsupportedExperience(fullBody);
   const unsupportedExperienceCount =
     experienceMode === "VERIFIED_EXPERIENCE"
       ? 0
-      : countPatternHits(fullBody, UNSUPPORTED_EXPERIENCE_PATTERNS) +
+      : unsupportedExperienceMatches.length +
         (UNSUPPORTED_EXPERIENCE_TITLE_PATTERN.test(title) ? 1 : 0);
   const commissionRateCount = countPatternHits(fullBody, COMMISSION_RATE_PATTERNS);
   const internalGuidanceCount = countPatternHits(fullBody, INTERNAL_GUIDANCE_PATTERNS);
@@ -738,7 +758,7 @@ export function getBrandLinkContentReadiness(
     blockers.push({
       code: "unsupported-experience-claim",
       tier: "safety",
-      reason: "직접 구매/사용/체험을 단정하는 문장이 남아 있습니다.",
+      reason: `직접 구매/사용/체험을 단정하는 문장이 남아 있습니다.${unsupportedExperienceMatches.length ? ` 감지: ${unsupportedExperienceMatches.join(", ")}` : ""}`,
     });
   }
   if (commissionRateCount > 0) {

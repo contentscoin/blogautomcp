@@ -10,6 +10,7 @@ import { clientIp, enforceRateLimit } from '@/lib/rate-limit';
 import { validateToolArguments, type JsonSchema } from '@/lib/tool-schema';
 import { compareVersions } from '@/lib/version';
 import { resolvePreparedDraftContext } from '@/lib/draft-context';
+import { jobGuidance, resultPage } from '@/lib/mcp-job-status';
 
 type JsonObject = Record<string, unknown>;
 type JsonRpcId = string | number | null;
@@ -21,6 +22,7 @@ const RESPONSE_HEADERS = { 'cache-control': 'no-store', 'referrer-policy': 'no-r
 const CONNECT_KINDS = ['shopping', 'travel'];
 const SERVER_INFO = { name: 'BlogAutoMCP', version: '1.3.11' };
 const SERVER_INSTRUCTIONS = [
+  '진행 확인은 job_get(includeResult=false)로 조회하고 pollAfterMs만큼 기다리세요. 완료된 큰 결과가 잘리면 job_result_read를 offset=0부터 nextOffset까지 이어서 읽으세요. AGENT_LOST_UNCERTAIN은 자동 재실행하지 말고 발행 여부부터 확인하세요.',
   '승인된 한 대의 Windows PC에서 네이버 쇼핑커넥트·여행커넥트 작업을 수행합니다. 대부분의 도구는 작업(jobId)을 큐에 넣고 즉시 반환하며, job_get 으로 진행 단계(stage)와 결과를 확인합니다.',
   '원고는 이 ChatGPT 가 씁니다. PC 는 상품 사실·상세이미지·하네스·프롬프트를 준비하고, 제출된 원고를 품질검사해 초안으로 저장하고, 발행만 합니다. 기본 흐름: brandconnect_sync_products → brandconnect_list_products → post_create_draft(PC 가 verifiedFacts·sourceImages·harness·systemPrompt·userPrompt 준비, 수십 초) → 이 ChatGPT 가 systemPrompt·userPrompt 로 원고 JSON 작성 → post_submit_draft(contextJobId, 품질검사·저장) → post_get_draft(imageSlots·imagePrompt 확인) → 비어 있는 파트마다 ChatGPT 내장 이미지 생성 → post_apply_section_image(sectionId, generatedImageUrl) → post_approve_draft → post_publish 또는 post_schedule(confirmed=true). post_prepare_draft 는 post_create_draft 와 같은 작업입니다.',
   '이미지는 PC 브라우저 자동화가 아니라 ChatGPT 내장 이미지 생성으로 만듭니다. post_submit_draft 는 이미지를 생성하지 않으며, contentQuality 가 composition-quality 만 실패하고 이미지가 부족하면 원고를 재제출하지 말고 imageSlots 의 imagePrompt 로 이미지를 만들어 post_apply_section_image 로 붙이세요. 쇼핑은 제품이 없는 배경만 생성하고 PC 가 원본 상품을 잠금 합성합니다. 실제 내용 실패(contentQuality.canPublish 가 false 이고 텍스트 signals 실패)만 새 idempotencyKey 로 보강 제출하세요. 결과의 systemPrompt·userPrompt 가 비어 있으면 generation 안의 값을 사용하세요.',
@@ -286,7 +288,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'post_publish',
     title: '네이버 블로그 즉시 발행',
-    description: '승인된 초안을 로컬 PC에서 네이버 블로그에 즉시 발행합니다. 미승인 초안은 DRAFT_NOT_APPROVED 로 실패합니다. 발행이 끝날 때까지 대기하며 결과에 글 URL 이 포함됩니다.',
+    description: '승인된 초안을 로컬 PC에서 네이버 블로그에 즉시 발행하도록 큐에 넣고 jobId를 반환합니다. 미승인 초안은 DRAFT_NOT_APPROVED 로 실패합니다. job_get으로 완료를 확인하면 결과에 글 URL이 포함됩니다.',
     inputSchema: { type: 'object', properties: { connectKind: CONNECT_KIND, draftId: ID_FIELD, confirmed: { type: 'boolean', const: true }, idempotencyKey: IDEMPOTENCY }, required: ['connectKind', 'draftId', 'confirmed', 'idempotencyKey'], additionalProperties: false },
     outputSchema: JOB_RESULT_SCHEMA,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
@@ -353,7 +355,14 @@ const TOOLS: ToolDefinition[] = [
     name: 'job_get',
     title: '작업 결과 확인',
     description: '비동기 작업의 상태, 진행 단계, 결과 또는 오류를 확인합니다.',
-    inputSchema: { type: 'object', properties: { jobId: { type: 'string', minLength: 1, maxLength: 80 } }, required: ['jobId'], additionalProperties: false },
+    inputSchema: { type: 'object', properties: { jobId: { type: 'string', minLength: 1, maxLength: 80 }, includeResult: { type: 'boolean', default: true, description: 'false이면 결과 없이 상태만 조회합니다. 큰 결과는 job_result_read로 분할 조회하세요.' } }, required: ['jobId'], additionalProperties: false },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  {
+    name: 'job_result_read',
+    title: '작업 결과 분할 조회',
+    description: '큰 작업 결과 JSON을 손실 없이 분할 조회합니다. offset=0부터 nextOffset으로 이어서 읽고 text를 순서대로 합친 뒤 JSON으로 해석하세요. offset은 UTF-16 문자 위치입니다.',
+    inputSchema: { type: 'object', properties: { jobId: { type: 'string', minLength: 1, maxLength: 80 }, offset: { type: 'integer', minimum: 0, default: 0 }, limit: { type: 'integer', minimum: 1, maximum: 16000, default: 8000 } }, required: ['jobId'], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   {
@@ -554,20 +563,41 @@ async function callTool(userId: string, name: string, rawArgs: JsonObject) {
       device: device ? { name: device.name, platform: device.platform, appVersion: device.appVersion, lastSeenAt: device.lastSeenAt ? new Date(device.lastSeenAt).toISOString() : null, status: parseStatusJson(device.statusJson) } : null,
       runningJob: running ? { id: running.id, type: running.type, stage: running.stage, stageMessage: running.stageMessage, progress: running.progress, heartbeatAt: running.heartbeatAt ? new Date(running.heartbeatAt).toISOString() : null } : null,
       queuedJobs: Number(queued?.count || 0),
+      capabilities: {
+        resultPaging: true,
+        statusOnly: true,
+        tools: TOOLS.filter((item) => item.jobType).map((item) => ({
+          name: item.name,
+          minimumAppVersion: item.minAppVersion ?? null,
+          versionSupported: !item.minAppVersion || Boolean(device?.appVersion && compareVersions(device.appVersion, item.minAppVersion) >= 0),
+          // This is transport readiness, not proof of Naver login or content approval.
+          agentOnline: online,
+        })),
+      },
     });
   }
-  if (name === 'job_get') {
+  if (name === 'job_get' || name === 'job_result_read') {
     const jobId = stringArg(args, 'jobId');
     await sweepExpiredLeases(d1, userId);
     const job = jobId ? await d1.prepare(`SELECT id,type,status,progress,stage,stage_message AS stageMessage,heartbeat_at AS heartbeatAt,cancel_requested AS cancelRequested,result_json AS resultJson,error_code AS errorCode,error_message AS errorMessage,created_at AS createdAt,finished_at AS finishedAt FROM agent_jobs WHERE id=? AND user_id=? LIMIT 1`).bind(jobId, userId).first<{ id: string; type: string; status: string; progress: number; stage: string | null; stageMessage: string | null; heartbeatAt: number | null; cancelRequested: number; resultJson: string | null; errorCode: string | null; errorMessage: string | null; createdAt: number; finishedAt: number | null }>() : null;
     if (!job) return toolPayload({ ok: false, code: 'JOB_NOT_FOUND', message: '작업을 찾을 수 없습니다.' }, true);
-    const { result, blocks } = extractImageBlocks(jsonValue(job.resultJson));
+    if (name === 'job_result_read') {
+      if (!['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(job.status)) return toolPayload({ ok: false, code: 'JOB_NOT_FINISHED', jobId, ...jobGuidance(job.status, job.errorCode) }, true);
+      const offset = Number(args.offset ?? 0);
+      if (offset > (job.resultJson ?? 'null').length) return toolPayload({ ok: false, code: 'INVALID_OFFSET', message: 'offset이 결과 길이를 초과했습니다.' }, true);
+      return toolPayload({ ok: true, jobId, status: job.status, ...resultPage(job.resultJson, offset, Number(args.limit ?? 8000)) });
+    }
+    const paged = args.includeResult !== false && (job.resultJson?.length ?? 0) > 32000;
+    const { result, blocks } = extractImageBlocks(args.includeResult === false || paged ? null : jsonValue(job.resultJson));
     return toolPayload({
       ok: true,
       job: {
         id: job.id,
         type: job.type,
         status: job.status,
+        ...jobGuidance(job.status, job.errorCode, Number(job.cancelRequested) === 1),
+        resultIncluded: args.includeResult !== false && !paged,
+        ...(paged ? { resultPaged: true, resultChars: job.resultJson!.length, resultRead: { tool: 'job_result_read', arguments: { jobId: job.id, offset: 0, limit: 8000 } } } : {}),
         progress: job.progress,
         stage: job.stage,
         stageMessage: job.stageMessage,
@@ -711,7 +741,7 @@ export async function handleMcpRequest(request: Request, userId: string, oauthSc
   const id = typeof body.id === 'string' || typeof body.id === 'number' || body.id === null ? body.id : null;
   if (body.jsonrpc !== '2.0') return rpcError(id, -32600, 'Invalid Request');
   const method = typeof body.method === 'string' ? body.method : '';
-  if (!method) return new NextResponse(null, { status: 202, headers: RESPONSE_HEADERS });
+  if (!method) return rpcError(id, -32600, 'Invalid Request');
 
   const params = asObject(body.params);
   const meta = asObject(params._meta);
@@ -772,6 +802,9 @@ export async function handleMcpRequest(request: Request, userId: string, oauthSc
       if (!hasOAuthScope(oauthScope, requiredScope(tool))) {
         const denied = toolPayload({ ok: false, code: 'INSUFFICIENT_SCOPE', message: '이 작업에 필요한 권한이 없습니다.' }, true);
         return rpcResult(id, modern ? completeResult(denied) : denied);
+      }
+      if (params.arguments !== undefined && (!params.arguments || typeof params.arguments !== 'object' || Array.isArray(params.arguments))) {
+        return rpcError(id, -32602, 'Tool arguments must be an object.');
       }
       const result = await callTool(userId, name, asObject(params.arguments));
       return rpcResult(id, modern ? completeResult(result) : result);

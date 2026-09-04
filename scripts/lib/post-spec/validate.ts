@@ -9,7 +9,7 @@ import {
   getBrandLinkContentReadiness,
   getProductTokens,
   INTERNAL_GUIDANCE_PATTERNS,
-  UNSUPPORTED_EXPERIENCE_PATTERNS,
+  detectUnsupportedExperience,
 } from "../brandlink-content-readiness";
 import { assessGenericLanguage, evidenceUsedIn, sentenceTokens, tokenSimilarity } from "../draft-quality-signals";
 import { scanAiTells } from "../humanize-korean";
@@ -70,8 +70,9 @@ export function validateDraft(spec: PostSpec, draft: GeneratedDraft, options: Va
   // 안전 게이트 실패를 섹션 단위 수리 타깃으로 바꾼다.
   draft.sections.forEach((section) => {
     const text = section.lines.join("\n");
-    if (matchesAny(text, UNSUPPORTED_EXPERIENCE_PATTERNS)) {
-      target({ sectionIndex: section.index, code: "FORBIDDEN_CLAIM", priority: "P0", reason: "직접 구매·사용·방문을 단정하는 문장", instruction: "체험 단정 문장을 조건형·조사형 표현으로 바꾸세요 (예: '써보니' → '이런 상황이라면', '다녀왔' → '찾아보니 ~라고 해요')." });
+    const experienceMatches = detectUnsupportedExperience(renderSectionText(section));
+    if (experienceMatches.length > 0) {
+      target({ sectionIndex: section.index, code: "FORBIDDEN_CLAIM", priority: "P0", reason: `직접 구매·사용·방문을 단정하는 문장 (감지: ${experienceMatches.join(", ")})`, instruction: "체험 단정 문장을 조건형·조사형 표현으로 바꾸세요 (예: '써보니' → '이런 상황이라면', '다녀왔' → '찾아보니 ~라고 해요')." });
     }
     if (/https?:\/\/\S+/iu.test(text)) {
       target({ sectionIndex: section.index, code: "RAW_LINK", priority: "P0", reason: "본문에 URL 직접 노출", instruction: "URL을 지우고 '아래 링크에서 확인'처럼 안내 문장으로 바꾸세요." });

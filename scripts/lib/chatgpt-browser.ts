@@ -614,6 +614,7 @@ export async function submitPromptToChatGPT(
   page: Page,
   prompt: string,
   label: string = "ChatGPT",
+  beforeSend?: () => void,
 ): Promise<void> {
   console.log(`      - [${label}] 프롬프트 전송 중...`);
   await assertNoChatGPTProtection(page, label);
@@ -654,8 +655,10 @@ export async function submitPromptToChatGPT(
   // A click timeout can occur after dispatch. Never send Enter as an ambiguous retry.
   const sendBtn = page.locator('button[data-testid="send-button"]').first();
   if (await sendBtn.isVisible()) {
+    beforeSend?.();
     await sendBtn.click();
   } else {
+    beforeSend?.();
     await composer.press("Enter");
   }
 
@@ -855,16 +858,22 @@ export async function waitForChatGPTImageArtifacts(
   let deadline = Math.min(hardDeadline, started + policy.baseMs);
   let previousImageCount = -1;
   let stableCycles = 0;
+  let previousArtifactKey = "";
+  let stableArtifactSince = started;
 
   while (now() < deadline) {
-    let observation: { generating: boolean; imageCount: number };
+    let observation: { generating: boolean; imageCount: number; artifactKey: string };
     try {
       observation = await withinImageDeadline(async () => {
         await assertNoChatGPTProtection(page, "ChatGPT image wait");
         if (await isChatGPTLoginRequired(page)) {
           throw new Error(chatGptAuthenticationRequiredMessage("ChatGPT 로그인이 필요합니다."));
         }
-        return { generating: await isChatGPTGenerating(page), imageCount: await countRenderableChatGPTImages(page) };
+        const artifacts = await page.evaluate(collectRenderableChatGPTGeneratedImages).catch(() => []);
+        return {
+          generating: await isChatGPTGenerating(page), imageCount: artifacts.length,
+          artifactKey: artifacts.map(image => `${image.src}|${image.width}|${image.height}`).join("\n"),
+        };
       }, Math.max(1, deadline - now()), "image observation");
     } catch (error) {
       if (error instanceof ImagePhaseTimeout) return 0;
@@ -872,6 +881,20 @@ export async function waitForChatGPTImageArtifacts(
     }
     if (now() >= deadline) return 0;
     const { generating, imageCount } = observation;
+    // ChatGPT can leave its global stop button visible after an image completes.
+    // Accept only loaded, assistant-owned artifacts whose sources and dimensions
+    // stay unchanged for 15s. Uploaded references/loading previews remain excluded.
+    if (imageCount > 0) {
+      if (observation.artifactKey !== previousArtifactKey) {
+        previousArtifactKey = observation.artifactKey;
+        stableArtifactSince = now();
+      } else if (now() - stableArtifactSince >= 15_000) {
+        return imageCount;
+      }
+    } else {
+      previousArtifactKey = "";
+      stableArtifactSince = now();
+    }
     if (generating || imageCount > previousImageCount && imageCount > 0) {
       deadline = Math.min(hardDeadline, Math.max(deadline, now() + policy.progressGraceMs));
     }
@@ -904,7 +927,8 @@ export async function waitForChatGPTImageArtifacts(
 export async function downloadChatGPTImages(page: import('playwright').Page, downloadDir: string): Promise<string[]> {
   try {
     console.log("      - [이미지 다운로드] 페이지 내 생성된 이미지 탐색 중...");
-    await page.waitForTimeout(5000); // Wait for images to fully render
+    // The collector already requires loaded, visible images. Retry retrieval at the
+    // caller when none are ready instead of delaying every successful download.
 
     // Failure diagnostics are metadata-only in the worker; screenshots can expose account data.
 

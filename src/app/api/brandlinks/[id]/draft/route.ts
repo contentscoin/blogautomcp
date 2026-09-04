@@ -23,7 +23,10 @@ import {
   packagePreview,
   readBrandPostPackage,
   readBrandPostPackageResult,
+  reconcileBrandPostPackageQuality,
+  writeBrandPostPackageManifest,
 } from "@/lib/brand-post-package";
+import { revalidateSavedBrandPostText, SavedTextRevalidationError } from "@/lib/brand-post-revalidation";
 import { isBrandPostImageRepairActive, repairBrandPostImages } from "@/lib/brand-post-image-repair";
 import { getDraftProgressPath, writeDraftProgress } from "@/lib/draft-progress";
 import {
@@ -250,6 +253,37 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "섹션 이미지 생성 중입니다. 완료 후 원고를 수정하거나 승인하세요." }, { status: 409 });
   }
   const body = await request.json().catch(() => ({})) as { action?: string; instructions?: unknown; sectionIndexes?: unknown };
+  if (body.action === "recheck") {
+    try {
+      const link = await prisma.brandLink.findUnique({ where: { id }, select: {
+        id: true, status: true, productName: true, connectKind: true, externalItemId: true, sourceUrl: true, url: true,
+      } });
+      if (!link) return NextResponse.json({ success: false, code: "PRODUCT_NOT_FOUND", error: "상품을 찾을 수 없습니다." }, { status: 404 });
+      if (!["READY", "FAILED"].includes(link.status)) return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "작성·발행·예약 중인 초안은 재검사할 수 없습니다." }, { status: 409 });
+      // Claim before the synchronous read/evaluate/write transaction. No GET migration
+      // or generation pipeline may silently clear a text failure in this action.
+      const claim = await prisma.brandLink.updateMany({ where: { id, status: link.status }, data: { status: "DRAFTING" } });
+      if (claim.count !== 1) return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "상품 상태가 변경되었습니다." }, { status: 409 });
+      try {
+        const manifest = readBrandPostPackage(id, { migrate: false });
+        if (!manifest || manifest.version !== "brand-post-package/v2") return NextResponse.json({ success: false, code: "DRAFT_NOT_FOUND", error: "재검사할 v2 초안이 없습니다." }, { status: 404 });
+        const contextPath = path.join(getBrandPostPackageDir(id), "mcp-draft-context.json");
+        const context = !manifest.sourceSnapshot && fs.existsSync(contextPath) ? JSON.parse(fs.readFileSync(contextPath, "utf8")) : undefined;
+        const evaluated = revalidateSavedBrandPostText(reconcileBrandPostPackageQuality(manifest), {
+          productId: id, connectKind: link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
+          externalProductId: link.externalItemId || null, sourceUrl: link.sourceUrl || link.url || null,
+          productName: link.productName || "", brandLink: link.url,
+        }, context);
+        const updated = reconcileBrandPostPackageQuality(evaluated);
+        writeBrandPostPackageManifest(updated);
+        return NextResponse.json({ success: true, data: packagePreview(updated), rechecked: true });
+      } finally {
+        await prisma.brandLink.updateMany({ where: { id, status: "DRAFTING" }, data: { status: link.status } });
+      }
+    } catch (error) {
+      return NextResponse.json({ success: false, code: error instanceof SavedTextRevalidationError ? error.code : "QC_RECHECK_FAILED", error: error instanceof Error ? error.message : "원고 재검사 실패" }, { status: 409 });
+    }
+  }
   if (body.action === "approve") {
     try {
       const manifest = approveBrandPostPackage(id);

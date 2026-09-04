@@ -12,6 +12,9 @@ import {
   composeBudgetedWritingPrompt,
   createWritingPromptContract,
   formatDraftSubmissionNextAction,
+  formatDraftMemoRequirements,
+  extractRequestedDraftTitle,
+  resolveWritingDraftTitle,
   formatWritingPromptContract,
   getWritingOutputExample,
   reviewGeneratedEvidenceFacts,
@@ -22,6 +25,86 @@ import {
 // the agent and its browser/network workflow, so compile only this pure declaration.
 const agentPath = path.join(__dirname, "simple-agent.ts");
 const source = ts.createSourceFile(agentPath, fs.readFileSync(agentPath, "utf8"), ts.ScriptTarget.Latest, true);
+
+// Run production declarations in isolation: no agent entrypoint, network or DB.
+const declarations = new Map<string, ts.VariableDeclaration>();
+function collectDeclarations(node: ts.Node): void {
+  if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+    declarations.set(node.name.text, node);
+  }
+  ts.forEachChild(node, collectDeclarations);
+}
+collectDeclarations(source);
+function evaluateInitializer<T = unknown>(name: string, context: Record<string, unknown>): T {
+  const initializer = declarations.get(name)?.initializer;
+  assert.ok(initializer, `Production initializer ${name} exists`);
+  const defaults: Record<string, unknown> = {};
+  function collectIdentifiers(node: ts.Node): void {
+    if (ts.isIdentifier(node)) defaults[node.text] = "";
+    ts.forEachChild(node, collectIdentifiers);
+  }
+  collectIdentifiers(initializer);
+  return vm.runInNewContext(ts.transpileModule(`(${initializer.getText(source)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText, { ...defaults, JSON, ...context }) as T;
+}
+const memo = "제목은 정확히 오사카 3일 여행, 교토·고베 일정과 온천호텔 선택 기준 으로 작성. 실제 체험으로 주장하지 말고 상품 근거에 기반한 정보형 원고.";
+const exactTitle = "오사카 3일 여행, 교토·고베 일정과 온천호텔 선택 기준";
+assert.equal(extractRequestedDraftTitle(memo), exactTitle);
+assert.equal(extractRequestedDraftTitle('제목은 정확히 “오사카 여행”으로 작성.'), "오사카 여행");
+assert.equal(extractRequestedDraftTitle("온천호텔 선택 기준을 다뤄주세요."), undefined);
+const memoContractContext = {
+  createWritingPromptContract, connectKind: "TRAVEL", minimumBodySectionCount: 8,
+  maximumBodySectionCount: 11, compositionContract: { targetCharacters: { min: 2400, max: 4200 } },
+  NAVER_BLOG_HASHTAG_COUNT: 4, BRANDLINK_EXPERIENCE_MODE: "AI_INFORMATION",
+  process: { env: { BRANDLINK_DRAFT_MEMO: memo } },
+};
+const memoContract = evaluateInitializer<ReturnType<typeof createWritingPromptContract>>("writingContract", { ...memoContractContext, specInput: undefined });
+assert.equal(memoContract.draftMemo, memo, "Codex must receive the environment memo even without spec-first input");
+assert.equal(evaluateInitializer<ReturnType<typeof createWritingPromptContract>>("writingContract", { ...memoContractContext, specInput: { memo: "상품 선택 기준" } }).draftMemo,
+  "상품 선택 기준", "Explicit input takes precedence over environment");
+const memoBlock = formatWritingPromptContract(memoContract);
+assert.ok(memoBlock.includes(memo));
+assert.match(memoBlock, /필수 주제.*일반 편집 지침보다 우선/u);
+assert.match(memoBlock, /사실 증거가 아닙니다/u);
+assert.match(memoBlock, /숙박·온천호텔 선택 기준/u);
+const prompt = evaluateInitializer<string>("userPrompt", {
+  isTravel: true, product: { description: "숙박 호텔 미정", features: ["교토·고베 일정"] },
+  writingContract: memoContract, mandatoryWritingPromptBlock: memoBlock,
+});
+assert.ok(prompt.includes(memo), "Actual Codex user prompt contains full memo");
+assert.ok(prompt.includes("숙박 호텔 미정"), "Lodging evidence survives the destination-only travel lens");
+const sanitize = (title: string) => title.trim();
+for (const name of ["normalizedTitle", "repairedTitle"]) {
+  assert.equal(evaluateInitializer(name, {
+    json: { title: "오사카3일 교토 고베야경, 란덴과 도톤보리" }, repairedJson: { title: "변경된 제목" },
+    product: { name: "원본 상품명" }, normalizedTitle: exactTitle,
+    writingContract: memoContract, resolveWritingDraftTitle, sanitizeTitle: sanitize,
+  }), exactTitle, `${name} must preserve explicit requested title`);
+}
+assert.throws(() => resolveWritingDraftTitle("title", "fallback", memoContract, () => "changed"), /기존 제목 정책과 충돌/u);
+const noMemoContract = createWritingPromptContract({ kind: "TRAVEL", minimumSections: 8, maximumSections: 11,
+  targetCharacters: { min: 2400, max: 4200 }, hashtagCount: 4 });
+assert.equal(resolveWritingDraftTitle(" normal ", "fallback", noMemoContract, sanitize), "normal");
+assert.equal(formatDraftMemoRequirements(noMemoContract), "");
+const budgetedMemoPrompt = composeBudgetedWritingPrompt({ contract: memoContract, prefix: "", suffix: "",
+  evidence: "원본 근거".repeat(10000), maxChars: 6000 });
+assert.ok(budgetedMemoPrompt.includes(memo), "Evidence truncation cannot remove requirements");
+assert.ok(budgetedMemoPrompt.length <= 6000);
+const repairBuilder = declarations.get("buildRepairPrompt")?.initializer;
+assert.ok(repairBuilder && ts.isArrowFunction(repairBuilder) && ts.isBlock(repairBuilder.body));
+const repairReturn = repairBuilder.body.statements.find(ts.isReturnStatement);
+assert.ok(repairReturn?.expression);
+declarations.set("repairPromptForTest", ts.factory.createVariableDeclaration("repairPromptForTest", undefined, undefined, repairReturn.expression));
+const repairPrompt = evaluateInitializer<string>("repairPromptForTest", {
+  editorialQuality: { code: "too-short-content", reason: "short", blockers: [], quality: { score: 50, passScore: 80 } },
+  failedSignals: [], qualityNotes: [], repetitionSamples: [], travelSubstance: null,
+  isTravel: true, mandatoryWritingPromptBlock: memoBlock, normalizedTitle: exactTitle,
+  writingContract: memoContract, product: { description: "숙박 호텔 미정", features: ["교토·고베 일정"] },
+  bodySections: ["온천호텔 선택 기준\n\n숙박 호텔은 미정입니다."], hashtags: [],
+});
+assert.ok(repairPrompt.includes(memo), "Actual quality repair prompt retains full memo");
+assert.ok(repairPrompt.includes("숙박 호텔 미정"), "Repair retains original lodging evidence");
 const builder = source.statements.find((node): node is ts.FunctionDeclaration =>
   ts.isFunctionDeclaration(node) && node.name?.text === "buildDirectBrowserGptPrompt",
 );

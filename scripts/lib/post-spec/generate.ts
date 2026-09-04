@@ -7,6 +7,7 @@ import { buildHumanMobileStyleGuide, NAVER_SEO_TITLE_RULES } from "../blog-writi
 import { HUMANIZE_RULES } from "../humanize-korean";
 import { formatOpenCrabSeoBriefForPrompt } from "../opencrab-seo-brief";
 import { formatTravelFactsForPrompt } from "../travel-content";
+import { formatWritingStructureGuide } from "../writing-structure-guide";
 import { otherSectionsEvidence } from "./evidence-ledger";
 import { generateStructured } from "./llm-client";
 import { buildDraftJsonSchema, sectionKey } from "./schema";
@@ -24,16 +25,18 @@ export function renderSystemPrompt(spec: PostSpec, ctx: GenerateContext): string
   const travelBlock = spec.facts.travel ? formatTravelFactsForPrompt(spec.facts.travel) : "";
   return [
     spec.connectKind === "TRAVEL"
-      ? "당신은 여행 상품을 예약 전에 꼼꼼히 검토해 정리하는 인기 네이버 블로거입니다. 직접 다녀온 후기가 아니라 상품 정보와 널리 알려진 여행지 정보를 바탕으로 쓰는 '검토형' 글입니다."
+      ? "당신은 확인된 상품 정보와 여행지 자료를 근거로 여행 판단을 돕는 네이버 블로거입니다. 제공되거나 실제 확인한 자료 안에서만 사실을 쓰고 직접 다녀온 경험을 만들지 마세요."
       : "당신은 상품 정보를 근거로 구매 판단을 돕는 글을 쓰는 인기 네이버 블로거입니다. 직접 써본 후기가 아니라 판매 페이지 정보를 바탕으로 쓰는 '검토형' 글입니다.",
     buildHumanMobileStyleGuide(),
     HUMANIZE_RULES,
     NAVER_SEO_TITLE_RULES,
+    formatWritingStructureGuide(spec.connectKind),
+    "- 위 구성 가이드는 지정된 섹션 안의 전개와 문장에 적용합니다. 섹션 ID·순서·제목과 JSON 스키마는 유지하고, 지정된 목록·접두사 형식은 해당 섹션에서만 지킵니다.",
     "- 각 섹션의 제목은 지시된 그대로 사용하고 바꾸지 마세요.",
     "- 섹션마다 지정된 형식(줄 수·글자 수·접두사)을 정확히 지키세요.",
-    "- 본문 문장은 부드러운 ~요체로, 개인 검토 소감(~더라고요, ~마음에 들었어요, 찾아보니 ~라고 해요)은 허용하되 실제 구매·사용·방문 사실은 단정하지 마세요.",
+    "- 본문은 자연스러운 존댓말로 쓰고 짧은 문장과 설명 문장을 섞습니다. 검토 의견은 확인 사실과 적용 조건으로 뒷받침하고, 실제 구매·사용·방문이나 자료를 찾아본 행동을 지어내지 마세요.",
     "- URL, 내부 지침, 역할 이름, JSON 키는 본문에 쓰지 마세요.",
-    "- 섹션마다 '이 섹션 전용 근거'를 최소 1개 골라 수치·이름을 그대로 쓰고, 그 근거가 독자에게 무엇을 뜻하는지(어떤 장면에서 어떤 차이가 나는지)까지 한 문장으로 잇습니다.",
+    "- 섹션마다 '이 섹션 전용 근거'를 최소 1개 골라 수치·이름을 그대로 쓰고, 그 근거가 독자에게 무엇을 뜻하는지 설명합니다. 같은 문장 또는 같은 섹션·문단의 바로 다음 문장에서 근거와 이점을 연결할 수 있습니다. 다른 소제목의 근거를 끌어오거나 근거 없는 효과를 덧붙이지 마세요.",
     "- 다른 섹션 전용 근거와 앞 섹션에서 이미 쓴 문장·판단은 되풀이하지 않습니다. 같은 뜻을 어미만 바꿔 다시 쓰는 것도 반복입니다.",
     "- '확인해보세요', '살펴보는 게 좋아요', '상황에 따라 달라요' 같은 확인 안내·일반론 문장은 섹션당 1개까지만 씁니다. 근거가 없으면 문단을 짧게 끝내고 안내 문장으로 채우지 않습니다.",
     briefBlock,

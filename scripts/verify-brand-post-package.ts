@@ -266,7 +266,8 @@ async function main() {
   assert.equal(
     dashboardSource.includes("섹션별 이미지 자동 생성") &&
       dashboardSource.includes("handleRegenerateDraftImage") &&
-      dashboardSource.includes("품질 자동 보강"),
+      dashboardSource.includes("원고 보강 요청") &&
+      dashboardSource.includes('handlePrepareBrandDraft(link, { forceQualityRepair: true, returnTab: "quality" })'),
     true,
     "데스크톱 미리보기에서 이미지 보충·개별 재생성·품질 보강을 실행할 수 있어야 합니다.",
   );

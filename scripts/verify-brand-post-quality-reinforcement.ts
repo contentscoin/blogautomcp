@@ -437,7 +437,8 @@ assert.match(writingStyleSource, /도착 장면 → 장소의 배경 → 현장�
 assert.match(writingStyleSource, /거리·소요시간·입장료·운영시간·교통비/u);
 assert.match(formatDraftSubmissionNextAction(), /contentQuality\.canPublish가 false/u);
 assert.match(formatDraftSubmissionNextAction(), /이미지·배치 실패만 있으면 원고를 재작성하거나 재제출하지 마세요/u);
-assert.match(simpleAgentSource, /maximumRepairAttempts = isTravel \? 3 : 2/u);
+assert.match(simpleAgentSource, /maximumRepairAttempts = 2/u);
+assert.match(simpleAgentSource, /shouldAcceptQualityRepair\(editorialQuality, repairedQuality\)/u);
 assert.doesNotMatch(simpleAgentSource, /편집 역할 \$\{role\}/u);
 assert.match(sitesMcpSource, /contentQuality\.canPublish 가 false/u);
 assert.match(sitesMcpSource, /이미지 부족만으로는 원고를 보강 제출하지 않습니다/u);
