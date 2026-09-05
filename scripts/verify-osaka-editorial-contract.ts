@@ -1,0 +1,13 @@
+import assert from "node:assert/strict";
+import { splitAffiliateDisclosure } from "../src/lib/post-composition-contract";
+import { buildBrandPostImagePrompt } from "../src/lib/brand-post-image-generation";
+const notice = "이 포스팅은 네이버 여행 커넥트 활동의 일환으로, 예약 발생 시 수수료를 제공받습니다.";
+const split = splitAffiliateDisclosure(`이 코스의 판단\n이동이 많아 느린 여행에는 맞지 않습니다.\n${notice}\n${notice}`);
+assert.ok(split.content.includes("느린 여행"));
+assert.ok(!split.content.includes("수수료"));
+assert.equal(split.disclosure, notice);
+const prompt = buildBrandPostImagePrompt({connectKind:"TRAVEL",productName:"교토 여행",sectionTitle:"청수사 무대",imageIntent:"목조 구조",role:"body",adjacentSectionTitles:["산넨자카 골목"]});
+assert.ok(prompt.includes("산넨자카 골목"));
+assert.ok(prompt.includes("distinct subject"));
+assert.ok(prompt.includes("not evidence of an actual visit"));
+console.log("PASS mixed-section disclosure preservation and distinct image intent");

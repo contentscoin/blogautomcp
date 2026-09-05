@@ -151,12 +151,43 @@ function placeCoverageAliases(place: string): string[] {
     .replace(/(?:시내)?관광$/u, "")
     .replace(/(?:내부)?입장$/u, "")
     .replace(/유적지$/u, "");
-  return unique([exact, base].filter((value) => value.length >= 2));
+  const known = [
+    ["나라사슴공원", "나라공원"],
+    ["청수사", "기요미즈데라"],
+    ["동대사", "도다이지"],
+  ].find((group) => group.includes(base)) || [];
+  return unique([exact, base, ...known].filter((value) => value.length >= 2));
 }
 
 function textCoversPlace(value: string, place: string): boolean {
   const normalized = normalizedPlaceText(value);
   return placeCoverageAliases(place).some((alias) => normalized.includes(alias));
+}
+
+/** Bound implicit references to the immediately following sentence in the same
+ * paragraph and section. Never borrow an unrelated section's activity text. */
+export function travelSceneEvidence(sections: string[], places: string[]): string[] {
+  const scene = /(?:역사|문화|풍경|분위기|골목|거리|전망|즐기|걷|산책|관람|사진|먹|맛보|팁|동선|시간대)/u;
+  const detail = /(?:기둥|무대|다리|강|대불|사슴|사찰|건축|목조|성벽|해자|숲|계단|항구|상점|산|전통|세기|\d+\s*(?:년|미터))/u;
+  const generic = /(?:확인하세요|확인해|알아보|좋은\s*곳|추천합니다)/u;
+  const evidence: string[] = [];
+  for (const section of sections) {
+    for (const paragraph of section.split(/\n\s*\n/u)) {
+      const lines = paragraph.split(/[.!?。]+|\n/u).map(clean).filter(Boolean);
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const anchors = places.filter((place) => textCoversPlace(line, place));
+        if (!anchors.length) continue;
+        if (scene.test(line)) { evidence.push(line); continue; }
+        const next = lines[i + 1];
+        if (!next || !scene.test(next) || generic.test(next) || !detail.test(line + next)) continue;
+        // An explicit different known destination starts a new topic.
+        if (places.some((place) => !anchors.includes(place) && textCoversPlace(next, place))) continue;
+        evidence.push(`${line} → ${next}`);
+      }
+    }
+  }
+  return [...new Set(evidence)];
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -342,7 +373,7 @@ export function extractTravelProductFacts(
   const bracketHighlights = Array.from(source.matchAll(/[<〈]([^>〉]+)[>〉]/gu))
     .flatMap((match) => match[1].split(/[\/, +·]/u));
   const structuredHighlights = features.flatMap((feature) => {
-    const match = clean(feature).match(/핵심\s*방문지\s*:\s*(.+?)(?=\s+(?:출국|귀국|\d+일차\s*일정|쇼핑\s*일정)\s*:|$)/u);
+    const match = clean(feature).match(/핵심\s*방문지\s*:\s*(.+?)(?=\s+(?:출국|귀국|\d+일차\s*일정|쇼핑\s*일정)\s*[:·]|$)/u);
     return match ? match[1].split(/[,/·]/u) : [];
   });
   const conditionMatchers = [
@@ -569,7 +600,7 @@ export function buildTravelThumbnailCopy(productName: string) {
   const destination = facts.destinations.slice(0, 2).join(" · ") || "여행 코스";
   return {
     productNameLabel: `${destination} ${facts.duration || "여행"}`.slice(0, 36),
-    headline: `${destination} 여행 브이로그`.slice(0, 24),
+    headline: `${destination} 여행 가이드`.slice(0, 24),
     subline: [facts.duration, "명소 · 분위기 · 현지 팁"].filter(Boolean).join(" · ").slice(0, 44),
     badge: "여행지 집중 리뷰",
     cta: "여행 장면 미리보기",
@@ -596,7 +627,10 @@ export function assessTravelReviewSubstance(input: {
   // structured lines such as "핵심 방문지: ..." remain exact place evidence.
   const sourceText = input.sourceText || "";
   const facts = extractTravelProductFacts(input.productName, sourceText, sourceText ? [sourceText] : []);
-  const places = unique([...facts.highlights, ...facts.destinations], 8);
+  // Prefer explicit itinerary places over product-title tokens such as hotel
+  // nights or optional attractions; those are not scene evidence.
+  const places = unique((facts.highlights.length ? facts.highlights : facts.destinations)
+    .flatMap((place) => place.split(/\s*[&＆]\s*/u)), 24);
   const coveredPlaces = places.filter((place) => textCoversPlace(body, place));
   const uncoveredPlaces = places.filter((place) => !textCoversPlace(body, place));
   // 발행 게이트는 섹션 공백을 한 줄로 접어 넘기므로 "• 항목" 형식의 사실 목록이 한 문장으로 붙는다.
@@ -630,10 +664,7 @@ export function assessTravelReviewSubstance(input: {
     /(?:표시\s*가격|할인|적립|포함\s*조건|불포함|선택관광|결제|취소\s*규정|예약\s*조건|상품명에는|상품에\s*표시)/u.test(sentence)
   ).length;
   const proseSentenceCount = Math.max(1, proseSentences.length);
-  const evidenceJudgementCount = sentences.filter((sentence) =>
-    places.some((place) => textCoversPlace(sentence, place)) &&
-    /(?:역사|문화|풍경|분위기|골목|거리|전망|즐기|걷|산책|관람|사진|먹|맛보|팁|동선|시간대)/u.test(sentence)
-  ).length;
+  const evidenceJudgementCount = travelSceneEvidence(input.sections, places).length;
   const requiredPlaceCount = Math.min(places.length >= 3 ? 3 : Math.max(1, places.length), Math.max(1, places.length));
   const requiredEvidenceJudgementCount = places.length >= 3 ? 3 : Math.max(1, places.length);
   const repeats = repeatedSentenceCount(input.sections);

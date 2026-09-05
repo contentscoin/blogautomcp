@@ -531,10 +531,15 @@ function refreshStoredContentQuality(
   const safetyBlocker = blockers.find((blocker) => blocker.tier === "safety");
   // Legacy packages may carry their ONLY text failure in code/reason. Do not
   // overwrite it with a temporary image failure and lose it on the next result.
-  const code = safetyBlocker?.code || (existingTextFailure ? quality.code : blockers[0]?.code) || "quality-score-below-threshold";
+  const qualityFailures = (quality.quality?.categories || []).filter(category => category.status === "fail");
+  const categoryCode = qualityFailures.some(category => category.key === "sceneLinkage")
+    ? "low-evidence-density" : qualityFailures.length ? "missing-review-substance" : "quality-score-below-threshold";
+  const code = safetyBlocker?.code || (existingTextFailure ? quality.code : blockers[0]?.code) || categoryCode;
   const reason = safetyBlocker?.reason ||
     (existingTextFailure ? quality.reason : blockers[0]?.reason) ||
-    `${failures[0]?.label || "원고 품질"} 항목을 보강해야 합니다.`;
+    (qualityFailures.length
+      ? `필수 품질 조건 미충족: ${qualityFailures.map(category => `${category.label} (${category.notes.join(" ")})`).join(", ")}`
+      : `${failures[0]?.label || "원고 품질"} 항목을 보강해야 합니다.`);
   return {
     ...quality,
     canPublish: false,
@@ -545,6 +550,7 @@ function refreshStoredContentQuality(
     blockers,
     reason,
     summary: `커넥트 글 발행 보류 (원고 품질 ${score}점, ${reason})`,
+    qualityFailures,
   };
 }
 

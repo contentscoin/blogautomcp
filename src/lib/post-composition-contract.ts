@@ -433,6 +433,16 @@ function isDisclosureSection(value: string): boolean {
   return /(?:쇼핑|여행)\s*커넥트/u.test(value) && /수수료/u.test(value);
 }
 
+/** Remove only the standard disclosure sentence, never a whole mixed section. */
+export function splitAffiliateDisclosure(value: string): { content: string; disclosure: string } {
+  const notices: string[] = [];
+  const content = value.replace(/(?:이\s*(?:글|포스팅)은|본\s*글은)\s*(?:네이버\s*)?(?:쇼핑|여행)\s*커넥트[^.!?\n]*수수료[^.!?\n]*(?:[.!?]|$)/gu, sentence => {
+    notices.push(sentence.trim());
+    return "";
+  }).replace(/자세한 일정과 예약 정보는 아래 여행커넥트에서 확인해보세요\./gu, "").trim();
+  return { content, disclosure: notices[0] || "" };
+}
+
 /** 제휴 고지문은 제목이나 본문 섹션에 섞여 들어와도 항상 시스템 노드로 분리한다. */
 export function stripAffiliateDisclosureFromTitle(value: string): string {
   return value
@@ -593,8 +603,12 @@ export function resolvePostDocument(options: {
   const contract = getPostCompositionContract(options.connectKind);
   const qualityPreset = options.qualityPreset || "PREMIUM";
   const experienceMode = options.experienceMode || "AI_ASSISTED_INFORMATION";
-  const disclosureSection = options.sections.find(isDisclosureSection);
-  const contentSections = options.sections.filter((section) => !isDisclosureSection(section));
+  const separated = options.sections.map(splitAffiliateDisclosure);
+  const disclosureSection = separated.find(section => section.disclosure)?.disclosure
+    || options.sections.find(isDisclosureSection);
+  const contentSections = separated.flatMap((section, index) => section.disclosure
+    ? (section.content ? [section.content] : [])
+    : (!isDisclosureSection(options.sections[index]) ? [section.content] : []));
   const plan =
     options.sectionPlan && options.sectionPlan.length === contentSections.length ? options.sectionPlan : null;
   const sectionContracts = resolveSectionContracts(contract, contentSections.length);

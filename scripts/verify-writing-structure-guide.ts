@@ -65,6 +65,25 @@ for (const kind of ["SHOPPING", "TRAVEL"] as const) {
   assert.match(guide, /모든 섹션을.*반복하지/u);
   assert.match(guide, /추정형 어미만 없애 확정 사실로 만들지/u);
   assert.match(guide, /모두 필수 목차가 아니며/u);
+  // Osaka audit regressions: flexible rhythm must retain limits and source grounding.
+  assert.match(guide, /최소·최대 문장 수와 전체 분량을 지키되 모두 5문장으로 맞추지/u);
+  assert.match(guide, /요약은 짧게.*근거 설명은 충분히.*조건 비교·실제 제약·추천\/비추천 결론/u);
+  assert.match(guide, /문장 수를 채우려고 사실이나 체험을 지어내지/u);
+  assert.match(guide, /첫 문장에 긴 원문 상품명.*통째로 붙이지/u);
+  assert.match(guide, /사용자가 지정한 제목은 유지/u);
+  if (kind === "TRAVEL") {
+    assert.match(guide, /원본의 일차·방문 순서/u);
+    assert.match(guide, /장소별 소개로 재배열하면 일정 순서가 아님을 밝히/u);
+    assert.match(guide, /근거 없는 '돌아오면'·'그날 밤'.*만들지/u);
+    assert.match(guide, /일차가 없으면 임의로 배정하지/u);
+    assert.match(guide, /포함·불포함·선택 조건을 구분.*확정된 불포함.*가정으로 약화하지/u);
+    assert.match(guide, /호텔 미확정 여부와 안내 시점.*필수 방문·체류시간.*원본에 있을 때/u);
+    assert.match(guide, /상품명에만 있는 선택 옵션.*세부 일정·비용·대체 코스를 만들지.*확인되지 않은 범위/u);
+    // The incident is evidence for general rules, not reusable product facts.
+    assert.doesNotMatch(guide, /오사카|도톤보리|고베|USJ|40~60|3~4/u);
+  } else {
+    assert.doesNotMatch(guide, /호텔 미확정|실제 일정은 원본/u);
+  }
   assert.ok(guide.includes(kind === "SHOPPING" ? "[쇼핑 전개 선택]" : "[여행 전개 선택]"));
   assert.ok(!guide.includes(kind === "SHOPPING" ? "[여행 전개 선택]" : "[쇼핑 전개 선택]"));
   const evidence = "확인된 원본 근거입니다.\n".repeat(10000);

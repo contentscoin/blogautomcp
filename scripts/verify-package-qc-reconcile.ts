@@ -88,6 +88,17 @@ async function main() {
     assert.ok(explicitResult.contentQuality?.reason?.includes(explicit.composition.sections[2].id));
     assert.ok(!explicitResult.contentQuality?.reason?.includes("3장"), "Do not retain stale image totals");
 
+    const highScoreFailure = structuredClone(fixture);
+    highScoreFailure.contentQuality!.quality = { score: 91, passScore: 70, categories: [
+      { key: "sceneLinkage", label: "사실-장면 연결", score: 11, maxScore: 20, status: "fail", notes: ["연결 2/3"] },
+    ] } as NonNullable<BrandPostPackageManifestV2["contentQuality"]>["quality"];
+    highScoreFailure.contentQuality!.signals.push({ key: "evidence-density", label: "사실-장면 연결", status: "fail" });
+    const refreshedFailure = store.reconcileBrandPostPackageQuality(highScoreFailure).contentQuality!;
+    assert.equal(refreshedFailure.canPublish, false);
+    assert.equal(refreshedFailure.code, "low-evidence-density");
+    assert.match(refreshedFailure.reason || "", /2\/3/);
+    assert.equal(refreshedFailure.qualityFailures?.length, 1);
+
     const unsafe = structuredClone(reconciled);
     unsafe.contentQuality!.canPublish = false;
     unsafe.contentQuality!.code = "unsupported-experience-claim" as never;

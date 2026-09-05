@@ -36,6 +36,9 @@ interface BatchResult {
   localPath: string | null;
   error?: string;
   retryable?: boolean;
+  startedAt?: string;
+  completedAt?: string;
+  elapsedMs?: number;
 }
 
 export function acquireImageCheckpointLock(lockPath: string): () => void {
@@ -317,7 +320,7 @@ async function runBatch() {
   const journal = (job: BatchJob, value: object) => {
     const fd = fs.openSync(journalPath(job), "a", 0o600);
     try {
-      fs.writeFileSync(fd, JSON.stringify({ ...value, id: "slot", fingerprint: fingerprints.get(job.id) }) + "\n", "utf8");
+      fs.writeFileSync(fd, JSON.stringify({ recordedAt: new Date().toISOString(), ...value, id: "slot", fingerprint: fingerprints.get(job.id) }) + "\n", "utf8");
       fs.fsyncSync(fd);
     } finally { fs.closeSync(fd); }
   };
@@ -339,12 +342,13 @@ async function runBatch() {
     for (const [index, job] of jobs.entries()) {
       const recovered = readImageBatchResume(journalPath(job), [{ ...job, id: "slot" }]).get("slot");
       if (recovered) { record({ ...recovered, id: job.id }, false); continue; }
+      const slotStarted = Date.now();
       handle ||= await createChatGPTContext(true);
       // Isolate timed-out operations from later slots. Closing this page cancels local
       // preparation/download actions, but never retries the remote generation request.
       const page = await handle.context.newPage();
       const result = await runJob(page, job, gptUrl, () => journal(job, { state: "attempted" }));
-      record(result);
+      record({ ...result, startedAt: new Date(slotStarted).toISOString(), completedAt: new Date().toISOString(), elapsedMs: Date.now() - slotStarted });
       if (result.error && keepFailedDiagnosticOpen(process.env, jobs.length) && !page.isClosed()) {
         console.error("[chatgpt-image-batch] 진단 실패: 브라우저를 유지합니다. 확인 후 이 탭/창을 닫으면 진단이 종료됩니다. 추가 생성 요청은 보내지 않습니다.");
         await page.waitForEvent("close", { timeout: 0 }).catch(() => {});

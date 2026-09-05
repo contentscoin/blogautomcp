@@ -127,7 +127,10 @@ export interface BrandLinkContentReadiness {
   missingProductTokens: string[];
   signals: BrandLinkContentReadinessSignal[];
   summary: string;
+  /** 안전·구조 하드 차단만 포함한다. 품질 실패는 qualityFailures를 참조한다. */
   blockers: BrandLinkReadinessBlocker[];
+  /** 총점과 별개로 충족해야 하는 필수 품질 항목의 실패 목록. */
+  qualityFailures?: BrandLinkQualityCategory[];
   quality: BrandLinkQualityReport;
 }
 
@@ -467,11 +470,14 @@ function buildResult(input: {
   const canPublish = input.verdict === "pass";
   const passingSignals = input.signals.filter((signal) => signal.status === "pass").length;
   const score = input.quality.score;
+  const qualityFailures = input.quality.categories.filter((category) => category.status === "fail");
   const summary = canPublish
     ? `커넥트 글 발행 게이트 통과 (품질 ${score}점, 신호 ${passingSignals}/${input.signals.length})`
     : input.verdict === "blocked"
       ? `커넥트 글 발행 차단 (품질 ${score}점, 차단 ${input.blockers.length}건: ${input.reason || input.blockers[0]?.reason || "게이트 미통과"})`
-      : `커넥트 글 품질 미달 (품질 ${score}점/${input.quality.passScore}점, ${input.reason || "품질 기준 미달"})`;
+      : qualityFailures.length > 0
+        ? `커넥트 글 필수 품질 조건 미충족 (품질 ${score}점, 기준 ${input.quality.passScore}점, 실패 ${qualityFailures.length}건: ${qualityFailures.map((category) => category.label).join(", ")}. ${input.reason || "필수 품질 조건 미충족"})`
+        : `커넥트 글 품질 점수 미달 (품질 ${score}점/${input.quality.passScore}점, ${input.reason || "품질 기준 미달"})`;
 
   return {
     canPublish,
@@ -487,6 +493,7 @@ function buildResult(input: {
     signals: input.signals,
     summary,
     blockers: input.blockers,
+    qualityFailures,
     quality: input.quality,
   };
 }
@@ -871,7 +878,7 @@ export function getBrandLinkContentReadiness(
       ];
       reason = `${isTravel ? "여행지 콘텐츠" : "상품 고유 리뷰"} 요소가 부족합니다: ${Array.from(new Set(missing)).join(", ")}`;
     }
-    return buildResult({ ...common, code, verdict: "quality", reason });
+    return buildResult({ ...common, code, verdict: "quality", reason: `필수 품질 조건 미충족: ${primary.label}. ${reason}` });
   }
 
   if (quality.score < quality.passScore) {
