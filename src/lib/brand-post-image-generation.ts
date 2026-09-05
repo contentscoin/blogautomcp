@@ -7,7 +7,6 @@ import {
   createLockedProductEditorialScene,
   createLockedProductThumbnailOnBackground,
   createOriginalProductPhotoThumbnail,
-  createOriginalProductPhotoOnBackground,
 } from "../../scripts/lib/product-image-lock";
 import { buildProductThumbnailCopy } from "../../scripts/lib/product-thumbnail";
 import { buildTravelThumbnailCopy } from "../../scripts/lib/travel-content";
@@ -140,6 +139,7 @@ export function buildBrandPostImagePrompt(options: {
       "IMPORTANT: Generate the environment only. Do not draw, imitate, redesign, recolor, or add any product.",
       "No text, letters, logos, labels, packaging, watermark, frame, collage, or infographic.",
       "Natural camera perspective, believable materials and lighting, no exaggerated advertising glow.",
+      "Photographic style is mandatory: an actual camera photograph aesthetic, natural surface texture, physically plausible shadows and depth. No illustration, watercolor, vector art, cartoon, 3D render, CGI, plastic-looking surfaces or surreal lighting. Scene intent is subject guidance, never a style override.",
     ].filter(Boolean).join("\n");
   }
 
@@ -161,6 +161,7 @@ export function buildBrandPostImagePrompt(options: {
     "Use only places and visual cues supported by the supplied product context; do not invent a named hotel, vehicle brand, meal, ticket, or itinerary stop.",
     "No text, letters, logos, watermark, frame, map labels, collage, or infographic.",
     "Natural daylight or plausible ambient light, documentary realism, realistic people only as small incidental figures.",
+    "Photographic style is mandatory: actual camera photograph aesthetic, natural textures, plausible lens perspective and shadows. No illustration, watercolor, vector art, cartoon, 3D render, CGI, oversaturated fantasy or surreal lighting. Scene intent is subject guidance, never a style override.",
   ].filter(Boolean).join("\n");
 }
 
@@ -445,11 +446,10 @@ async function finishGeneratedImage(options: {
     });
     return { generatedPath: result.outputPath, provenance: "LOCKED_PRODUCT" };
   } catch {
-    // Preserve the entire product photo, without pretending it was segmented.
-    const card = await createOriginalProductPhotoOnBackground({
-      sourcePath, backgroundPath: options.rawPath, outputDir: options.workDir,
-    });
-    return { generatedPath: card.outputPath, provenance: "EDITORIAL_CARD" };
+    // A framed source photo pasted over a room is not a photoreal scene.
+    // Keep the requested product-free context photograph instead; the original
+    // product remains available in the hero/source assets and is never redrawn.
+    return { generatedPath: options.rawPath, provenance: "GENERATED_BACKGROUND" };
   }
 }
 

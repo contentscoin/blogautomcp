@@ -570,6 +570,10 @@ export default function Dashboard() {
 
   const selectBrandConnectKind = (nextKind: BrandConnectKind) => {
     if (nextKind === brandConnectKind) return;
+    // Invalidate immediately, before the next effect/request can run.
+    brandConnectRequestGenerationRef.current += 1;
+    brandConnectAbortRef.current?.abort();
+    setBrandConnectOptionsLoading(false);
     setBrandConnectKind(nextKind);
     setBrandConnectCategoryUrl("");
     setBrandConnectCategoryOptions([]);

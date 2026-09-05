@@ -42,6 +42,7 @@ test('uncertain publication never advises replay; terminal jobs stop polling', (
 let reads = 0;
 let storedResult = '{"hello":"world"}';
 const mocks = {
+  'cloudflare:workers': { env: {} },
   'next/server': { NextResponse: class extends Response { static json(body, init) { return Response.json(body, init); } } },
   '@/db/init': { ensureDatabase: async () => {} },
   '@/db': { getD1: () => ({ prepare(sql) { return { bind(id, userId) { return { async first() {
@@ -60,6 +61,13 @@ async function call(userId, scope, name, args) {
   const request = new Request('https://example.com/api/mcp', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }) });
   return (await route.handleMcpRequest(request, userId, scope)).json();
 }
+
+test('bug report tool requires write scope and explicit consent; lookup requires read scope', async () => {
+  const args = { summary: '동기화 오류', idempotencyKey: 'report-test', confirmed: true };
+  assert.equal((await call('owner', 'mcp:read', 'bug_report_create', args)).result.structuredContent.code, 'INSUFFICIENT_SCOPE');
+  assert.equal((await call('owner', 'mcp:write', 'bug_report_create', { ...args, confirmed: false })).result.structuredContent.code, 'INVALID_ARGUMENT');
+  assert.equal((await call('owner', 'mcp:write', 'bug_report_get', { reportId: 'bug_test' })).result.structuredContent.code, 'INSUFFICIENT_SCOPE');
+});
 test('result pages require read scope and cannot read another user job', async () => {
   reads = 0;
   const denied = await call('owner', 'mcp:write', 'job_result_read', { jobId: 'job_owned' });

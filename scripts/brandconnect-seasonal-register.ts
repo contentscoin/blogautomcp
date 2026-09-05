@@ -12,6 +12,7 @@ import { getNaverSessionFile } from "./lib/app-paths";
 import {
   buildCaptureRequiredPayload,
   getSpaceIdFromConnectUrl,
+  getConfiguredConnectUrl,
   parseConnectKind,
   toStoredConnectKind,
   type ConnectKind,
@@ -1621,6 +1622,8 @@ async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+  const explicitUrl = process.argv.slice(2).find((arg) => arg.startsWith('--category-url='))?.slice('--category-url='.length);
+  options.categoryUrl = getConfiguredConnectUrl(options.connectKind, explicitUrl) || (options.connectKind === 'shopping' ? DEFAULT_CATEGORY_URL : '');
   const connectContract = resolveConnectContract(options.connectKind, options.categoryUrl);
   if (connectContract.captureRequired) {
     throw new Error(JSON.stringify(buildCaptureRequiredPayload(connectContract)));

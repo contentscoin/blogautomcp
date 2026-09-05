@@ -653,7 +653,7 @@ export function assessProductEditorialCoverage(sections: string[]): { coveredRol
   return { coveredRoles, missingCoreRoles: coreRoles.filter((role) => !coveredRoles.includes(role)) };
 }
 
-function hasConditionalProductVerdict(sections: string[]): boolean {
+export function hasConditionalProductVerdict(sections: string[]): boolean {
   const body = sections.join("\n");
   if (/(?:최종\s*리뷰|조건부\s*결론|후보(?:로|에\s*올)|더\s*실용적|고르는\s*편이\s*맞|선택\s*기준)/u.test(body)) {
     return true;
@@ -667,8 +667,8 @@ function hasConditionalProductVerdict(sections: string[]): boolean {
     .split(/[\n.!?。]+/u)
     .map(clean)
     .filter((sentence) => sentence.length >= 8);
-  const conditionPattern = /(?:이라면|라면(?=[,\s])|한다면|원한다면|필요하다면|경우(?:에|에는|라면)?|조건(?:에서는|이라면|에\s*따라)|환경(?:에서는|이라면)|용도(?:에서는|라면))/u;
-  const judgementPattern = /(?:추천|비추천|잘\s*맞|맞지\s*않|맞을\s*수|더\s*(?:낫|적합|실용)|강점|선택\s*이유|후보|어울|적합|구성\s*과잉)/u;
+  const conditionPattern = /(?:이라면|라면(?=[,\s])|한다면|원한다면|필요하다면|우선이면|사람에게|분에게|경우(?:에|에는|라면)?|조건(?:에서는|이라면|에\s*따라)|환경(?:에서는|이라면)|용도(?:에서는|라면))/u;
+  const judgementPattern = /(?:추천|비추천|잘\s*맞|맞지\s*않|맞을\s*수|비교할\s*만|더\s*(?:낫|적합|실용)|강점|선택\s*이유|후보|어울|적합|구성\s*과잉)/u;
   return conclusionSentences.some((sentence) => conditionPattern.test(sentence) && judgementPattern.test(sentence));
 }
 

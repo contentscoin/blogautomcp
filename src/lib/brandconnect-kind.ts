@@ -33,13 +33,29 @@ export function toStoredConnectKind(kind: ConnectKind): StoredConnectKind {
 }
 
 export function getConfiguredConnectUrl(kind: ConnectKind, requestedUrl?: string | null): string | null {
-  return (
+  const url = (
     requestedUrl?.trim() ||
     (kind === "travel"
       ? process.env.BRANDCONNECT_TRAVEL_CATEGORY_URL?.trim()
       : process.env.BRANDCONNECT_SHOPPING_CATEGORY_URL?.trim()) ||
     null
   );
+  if (url) assertConnectUrlKind(kind, url);
+  return url;
+}
+
+/** Preserve the selected kind; never silently switch shopping to travel. */
+export function assertConnectUrlKind(kind: ConnectKind, value: string): void {
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error('CONNECT_URL_INVALID: 브랜드커넥트 주소 형식이 올바르지 않습니다.'); }
+  if (url.protocol !== 'https:' || url.hostname !== 'brandconnect.naver.com' || url.username || url.password) {
+    throw new Error('CONNECT_URL_INVALID: https://brandconnect.naver.com 주소만 사용할 수 있습니다.');
+  }
+  const isTravel = /\/travel-connect(?:\/|$)/.test(url.pathname);
+  const isShopping = /\/affiliate(?:\/|$)/.test(url.pathname);
+  if ((kind === 'shopping' && isTravel) || (kind === 'travel' && isShopping)) {
+    throw new Error(`CONNECT_KIND_URL_MISMATCH: ${CONNECT_KIND_LABELS[kind]} 선택과 입력 주소의 상품 종류가 다릅니다. 주소를 지우고 해당 종류의 목록을 다시 불러오세요.`);
+  }
 }
 
 /**

@@ -203,11 +203,12 @@ export async function POST(request: NextRequest) {
     const waitForCompletion = body.waitForCompletion === true;
     const intervalDays = toSafePositiveInt(body.intervalDays, 1, 30);
     const dailyQuota = toSafePositiveInt(body.dailyQuota, 1, 200);
-    const categoryUrl =
+    const requestedCategoryUrl =
       typeof body.categoryUrl === "string" && body.categoryUrl.trim().length > 0
         ? body.categoryUrl.trim()
         : null;
-    const contract = resolveConnectContract(connectKind, categoryUrl);
+    const contract = resolveConnectContract(connectKind, requestedCategoryUrl);
+    const categoryUrl = contract.configuredUrl;
     if (contract.captureRequired) {
       return NextResponse.json({ success: false, error: buildCaptureRequiredPayload(contract) }, { status: 501 });
     }
@@ -306,7 +307,7 @@ export async function POST(request: NextRequest) {
 
     fs.writeSync(
       logFd,
-      `[${new Date().toISOString()}] bulk seasonal start count=${count} intervalDays=${intervalDays} startDate=${startDate}${
+      `[${new Date().toISOString()}] bulk seasonal start connectKind=${connectKind} count=${count} intervalDays=${intervalDays} startDate=${startDate}${
         categoryUrl ? ` categoryUrl=${categoryUrl}` : ""
       } dailyQuota=${dailyQuota} selectionProfile=${selectionProfile} brandKeyword=${brandKeyword || "-"} promotionFilter=${promotionFilter || "-"} categoryFilter=${categoryFilter || "-"} duplicateWindowDays=${duplicateWindowDays}\n`
     );
@@ -339,7 +340,9 @@ export async function POST(request: NextRequest) {
         child.once("close", (code) => resolve(code ?? 1));
       });
       if (exitCode !== 0) {
-        throw new Error(`여행상품 동기화 프로세스가 종료 코드 ${exitCode}로 실패했습니다. 로그: ${logFileRelativePath}`);
+        const tail = fs.readFileSync(logFilePath, 'utf8').slice(-6000);
+        const cause = tail.split(/\r?\n/).reverse().find((line) => line.includes('실행 실패:'))?.replace(/^.*실행 실패:\s*/, '').slice(0, 600);
+        throw new Error(`${connectKind === 'travel' ? '여행' : '쇼핑'}상품 동기화 실패: ${cause || `프로세스 종료 코드 ${exitCode}`}. 로그: ${logFileRelativePath}`);
       }
 
       const storedKind = toStoredConnectKind(connectKind);

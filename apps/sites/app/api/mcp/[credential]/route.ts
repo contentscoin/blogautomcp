@@ -11,6 +11,7 @@ import { validateToolArguments, type JsonSchema } from '@/lib/tool-schema';
 import { compareVersions } from '@/lib/version';
 import { resolvePreparedDraftContext } from '@/lib/draft-context';
 import { jobGuidance, resultPage } from '@/lib/mcp-job-status';
+import { createBugReport, getBugReport, type BugReportInput } from '@/lib/bug-reports';
 
 type JsonObject = Record<string, unknown>;
 type JsonRpcId = string | number | null;
@@ -66,6 +67,18 @@ const DRAFT_CONTEXT_INPUT: JsonSchema = { type: 'object', properties: { connectK
 const THUMBNAIL_LAYOUTS = ['auto', 'clean-editorial', 'color-block', 'soft-lifestyle', 'cinematic', 'emotional-record', 'route'];
 
 const TOOLS: ToolDefinition[] = [
+  {
+    name: 'bug_report_create', title: '오류 리포트 접수',
+    description: '사용자가 오류 신고를 요청할 때 관리자에게 리포트를 저장하고 텔레그램으로 전달합니다. 전송 내용에 동의한 경우에만 confirmed=true. jobId가 있으면 본인 작업의 오류 요약과 앱 버전을 첨부합니다. PC 파일은 자동 수집하지 않습니다. details에는 필요한 오류 부분만 넣고 토큰, 쿠키, 개인정보, 원고 전문은 넣지 마세요. 같은 신고 재시도는 같은 idempotencyKey를 사용하세요.',
+    inputSchema: { type: 'object', properties: { summary: { type: 'string', minLength: 3, maxLength: 200 }, details: { type: 'string', maxLength: 8000 }, jobId: ID_FIELD, idempotencyKey: IDEMPOTENCY, confirmed: { type: 'boolean', enum: [true] } }, required: ['summary', 'idempotencyKey', 'confirmed'], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  {
+    name: 'bug_report_get', title: '오류 리포트 접수 상태',
+    description: '본인이 접수한 리포트의 저장 및 텔레그램 전달 상태를 확인합니다. SENT만 전달 완료이며 그 외 상태는 저장만 완료된 상태입니다.',
+    inputSchema: { type: 'object', properties: { reportId: ID_FIELD }, required: ['reportId'], additionalProperties: false },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
   {
     name: 'agent_get_status',
     title: '로컬 에이전트 상태 확인',
@@ -547,6 +560,11 @@ async function callTool(userId: string, name: string, rawArgs: JsonObject) {
   const validation = validateToolArguments(tool.inputSchema, rawArgs);
   if (!validation.ok) return toolPayload({ ok: false, code: 'INVALID_ARGUMENT', message: `인자를 확인하세요: ${validation.errors.slice(0, 5).join('; ')}`, errors: validation.errors }, true);
   const args = validation.value;
+
+  if (name === 'bug_report_create' || name === 'bug_report_get') {
+    const result = name === 'bug_report_create' ? await createBugReport(userId, args as unknown as BugReportInput) : await getBugReport(userId, String(args.reportId));
+    return toolPayload(result, !result.ok);
+  }
 
   if (name === 'agent_get_status') {
     const now = Date.now();

@@ -115,3 +115,13 @@ export const pairCodes = sqliteTable('pair_codes', {
   usedAt: integer('used_at'),
   createdAt: integer('created_at').notNull(),
 }, (table) => [uniqueIndex('idx_pair_codes_hash').on(table.codeHash), index('idx_pair_codes_user').on(table.userId, table.expiresAt)]);
+
+export const bugReports = sqliteTable('bug_reports', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  idempotencyKey: text('idempotency_key').notNull(),
+  summary: text('summary').notNull(),
+  diagnosticsJson: text('diagnostics_json').notNull(),
+  deliveryStatus: text('delivery_status').notNull().default('PENDING'),
+  createdAt: integer('created_at').notNull(),
+}, (table) => [uniqueIndex('idx_bug_reports_user_idempotency').on(table.userId, table.idempotencyKey)]);
