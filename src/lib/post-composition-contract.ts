@@ -440,7 +440,7 @@ export function splitAffiliateDisclosure(value: string): { content: string; disc
   const content = value.replace(/(?:이\s*(?:글|포스팅)은|본\s*글은)\s*(?:네이버\s*)?(?:쇼핑|여행)\s*커넥트[^.!?\n]*수수료[^.!?\n]*(?:[.!?]|$)/gu, sentence => {
     notices.push(sentence.trim());
     return "";
-  }).replace(/자세한 일정과 예약 정보는 아래 여행커넥트에서 확인해보세요\./gu, "").trim();
+  }).replace(/자세한 (?:일정과 예약|상품) 정보는 아래 (?:여행|쇼핑)커넥트에서 확인해보세요\./gu, "").trim();
   return { content, disclosure: notices[0] || "" };
 }
 

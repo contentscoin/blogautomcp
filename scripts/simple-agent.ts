@@ -103,6 +103,7 @@ import { parsePreparedBrandPostSections } from "./lib/prepared-post-markdown";
 import { inspectNaverScheduleSubmissionSignal } from "../src/lib/naver-schedule-submission";
 import { createProductSnapshot, readProductSnapshot, type ProductSnapshot } from "../src/lib/draft-context-snapshot";
 import { shouldAcceptQualityRepair } from "./lib/quality-repair-policy";
+import { selectVerifiedProductPhoto } from "./lib/product-photo-review";
 import { writeDraftProgressFile } from "../src/lib/draft-progress";
 import { generateTravelEditorialSummaryCard } from "./lib/travel-editorial-card";
 import { generateThumbnail, isGenerativeThumbnailAvailable } from "./lib/thumbnail-gen";
@@ -180,6 +181,7 @@ import {
   formatPostContractForPrompt,
   getPostCompositionContract,
   resolvePostDocument,
+  splitAffiliateDisclosure,
   stripAffiliateDisclosureFromTitle,
   type PostExperienceMode,
   type PostQualityPreset,
@@ -3404,7 +3406,7 @@ function normalizeSectionText(
     }
   }
 
-  if (bodyLines.length < minimumBodyLines) {
+  if (bodyLines.length === 0) {
     throw new Error(
       `GPT 원고의 "${title}" 섹션 문장이 부족합니다. 현재 ${bodyLines.length}개, 최소 ${minimumBodyLines}개가 필요합니다.`,
     );
@@ -3577,10 +3579,9 @@ function applyHumanMobilePolishToSection(
   const { preferred: preferredBodyLines, hardMinimum: hardMinimumBodyLines } =
     getMobileSectionLinePolicy(connectKind);
 
-  if (polishedBodyLines.length < preferredBodyLines) {
-    polishedBodyLines = dedupeAdjacentLines(sourceBodyLines);
-  }
-  if (polishedBodyLines.length < hardMinimumBodyLines) {
+  // Keep sentence splitting: reverting to source lines turns multiple sentences
+  // in one paragraph into one line and used to reject valid mobile conclusions.
+  if (polishedBodyLines.length === 0) {
     throw new Error(
       `GPT 원고의 "${title}" 섹션이 모바일 윤문 후 ${polishedBodyLines.length}문장만 남았습니다. ` +
       `최소 ${hardMinimumBodyLines}문장이 필요합니다.`,
@@ -3904,12 +3905,13 @@ async function materializeProductImages(
     return bScore - aScore;
   });
 
-  representativeImagePath =
+  // Detail crops are evidence for reading, not verified product photographs.
+  // Never let their evidence-ranking bonus replace the seller's main photo.
+  representativeImagePath = representativeImagePath ||
     downloaded.find((item) =>
-      isRepresentativeProductImageDimension(item.width, item.height) ||
-      (isTravelProductImageUrl(item.url) && isRepresentativeTravelImageDimension(item.width, item.height))
-    )?.path ||
-    representativeImagePath;
+      !item.detailCrop && (isRepresentativeProductImageDimension(item.width, item.height) ||
+      (isTravelProductImageUrl(item.url) && isRepresentativeTravelImageDimension(item.width, item.height)))
+    )?.path || null;
 
   if (!representativeImagePath) {
     console.log("   ⚠️ 판매페이지 대표 상품 이미지를 확정하지 못해 썸네일용 대표 이미지는 비워둡니다.");
@@ -6228,8 +6230,10 @@ function writePreparedBrandPostPackage(params: {
   fs.mkdirSync(imageDir, { recursive: true });
   const packagedImages = images.map((sourcePath, index) => {
     const extension = path.extname(sourcePath) || ".png";
-    const destination = path.join(imageDir, `${String(index + 1).padStart(2, "0")}${extension}`);
-    fs.copyFileSync(sourcePath, destination);
+    // A preview/image worker can still hold the previous package open on Windows.
+    // Write a new immutable asset so regeneration never overwrites that file.
+    const destination = path.join(imageDir, `${String(index + 1).padStart(2, "0")}-${crypto.randomUUID()}${extension}`);
+    fs.writeFileSync(destination, fs.readFileSync(sourcePath), { flag: "wx" });
     return {
       path: path.resolve(destination),
       sourcePath: path.resolve(sourcePath),
@@ -6239,10 +6243,9 @@ function writePreparedBrandPostPackage(params: {
   });
   const markdownPath = path.join(params.outputDir, "post.md");
   const sections = params.post.sections.map((section) => {
-    const [heading = "본문", ...body] = section.split(/\r?\n/);
-    if (/(?:쇼핑|여행)\s*커넥트/u.test(section) && /수수료/u.test(section)) {
-      return body.join("\n").trim() || heading.trim();
-    }
+    const content = splitAffiliateDisclosure(section).content;
+    if (!content) return "";
+    const [heading = "본문", ...body] = content.split(/\r?\n/);
     return `## ${heading.trim() || "본문"}\n\n${body.join("\n").trim()}`;
   });
   const bottomDisclosure = params.composition.renderNodes.find(
@@ -9808,6 +9811,13 @@ async function main() {
     }
 
     setStage("STEP2.5 대표 썸네일 생성");
+    if (!preparedPostOverride && link.connectKind !== "TRAVEL") {
+      product.representativeImagePath = await selectVerifiedProductPhoto(
+        [product.representativeImagePath || "", ...product.imagePaths.filter((file) => !/[_-]detail[_-]/i.test(path.basename(file)))],
+        product.name,
+      );
+      if (!product.representativeImagePath) throw new Error("상품 사진 검사 실패: 공지·안내판을 제외한 실제 상품 사진을 확보하지 못했습니다.");
+    }
     const generatedThumbnail: GeneratedProductThumbnail | null = preparedPostOverride
       ? { path: preparedPostOverride.heroImagePath, source: "codex-imagegen" }
       : await generateTopTextCutoutThumbnail(

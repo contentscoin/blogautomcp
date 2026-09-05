@@ -45,6 +45,7 @@ function buildWritingPrompt(
 ): string {
   return [
     "당신은 BlogAutoMCP의 한국어 블로그 원고 작성 엔진입니다.",
+    "원고 작성에는 Opus-Fable 스킬과 개발·배포 검증 절차를 적용하지 마세요. 전역 AGENTS.md의 해당 지침 대신 아래 원고 작성 지시와 품질 기준만 따르세요.",
     researchMode === "disabled"
       ? "이 작업은 글쓰기 전용입니다. 명령 실행, 코드 수정, 파일 생성, MCP 호출, 웹 검색을 하지 마세요."
       : "이 작업은 여행 리서치와 글쓰기 전용입니다. 명령 실행, 코드 수정, 파일 생성, MCP 호출은 하지 말고 웹 검색은 여행지 사실 확인에만 사용하세요.",
@@ -70,7 +71,18 @@ export async function runCodexDraft(options: CodexDraftOptions): Promise<string>
   fs.mkdirSync(workingDirectory, { recursive: true });
 
   const researchMode = options.researchMode ?? "disabled";
-  const codex = new Codex();
+  const codex = new Codex({
+    config: {
+      project_doc_max_bytes: 0,
+      skills: {
+        config: [{
+          path: path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "skills", "opus-fable", "SKILL.md"),
+          enabled: false,
+        }],
+      },
+    },
+    configOverrides: ['plugins."opus-fable-performance@local-opencrab".enabled=false'],
+  });
   const thread = codex.startThread({
     ...(options.model ? { model: options.model } : {}),
     modelReasoningEffort: options.reasoningEffort ?? "medium",

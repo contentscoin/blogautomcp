@@ -93,6 +93,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
         createOriginalProductPhotoOnBackground: async () => ({ outputPath: sourcePath }),
       },
       "../../scripts/lib/product-thumbnail": { buildProductThumbnailCopy: () => ({}) },
+      "../../scripts/lib/product-photo-review": { selectVerifiedProductPhoto: async () => sourcePath },
       "../../scripts/lib/travel-content": { buildTravelThumbnailCopy: () => ({}) },
       "../../scripts/lib/travel-thumbnail": { createTravelEditorialThumbnail: async () => ({ outputPath: sourcePath }) },
       "./brand-post-package": {

@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { selectVerifiedProductPhoto } from "../../scripts/lib/product-photo-review";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -163,10 +164,10 @@ export function buildBrandPostImagePrompt(options: {
   ].filter(Boolean).join("\n");
 }
 
-function existingShoppingSource(
+async function existingShoppingSource(
   manifest: BrandPostPackageManifestV2,
   target: ResolvedImageTarget,
-): string | null {
+): Promise<string | null> {
   const assets = normalizePackageImageAssets(manifest);
   const candidates = [
     target.existingAsset?.provenance === "ORIGINAL" ? target.existingAsset.path : "",
@@ -176,7 +177,7 @@ function existingShoppingSource(
       .flatMap((asset) => [asset.path, asset.sourcePath]),
     ...assets.flatMap((asset) => [asset.sourcePath, asset.path]),
   ];
-  return candidates.find((candidate) => candidate && fs.existsSync(candidate)) || null;
+  return selectVerifiedProductPhoto(candidates.filter((file): file is string => Boolean(file) && !/[_-]detail[_-]/i.test(path.basename(file!))), String(manifest.sourceSnapshot?.product.name || manifest.title));
 }
 
 async function runBrowserImageBatch(
@@ -212,7 +213,9 @@ async function runBrowserImageBatch(
       role: target.role,
     }),
     outStem: "",
-    referenceImagePaths: normalizePackageImageAssets(manifest)
+    // Shopping jobs generate only an environment. Unreviewed seller banners
+    // must not enter the image model as product references.
+    referenceImagePaths: manifest.connectKind === "SHOPPING" ? [] : normalizePackageImageAssets(manifest)
       .filter((asset) => asset.provenance === "ORIGINAL" && fs.existsSync(asset.path))
       .slice(0, 3)
       .map((asset) => asset.path),
@@ -403,7 +406,7 @@ async function finishGeneratedImage(options: {
     return { generatedPath: options.rawPath, provenance: "GENERATED_BACKGROUND" };
   }
 
-  const sourcePath = existingShoppingSource(options.manifest, options.target);
+  const sourcePath = await existingShoppingSource(options.manifest, options.target);
   if (!sourcePath) {
     throw new Error("상품 원본 사진을 찾지 못했습니다. 상품 정보를 다시 동기화한 뒤 이미지를 생성해 주세요.");
   }

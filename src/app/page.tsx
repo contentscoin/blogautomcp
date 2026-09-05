@@ -1123,6 +1123,7 @@ export default function Dashboard() {
     );
   };
   const handleOpenOrPrepareBrandDraft = async (link: BrandLink) => {
+    setDashboardNotice(null);
     try {
       const response = await fetch(`/api/brandlinks/${link.id}/draft`, { cache: "no-store" });
       const payload = await response.json();
