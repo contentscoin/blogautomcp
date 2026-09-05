@@ -48,6 +48,7 @@
     "test:post-spec": "npx ts-node --project tsconfig.scripts.json scripts/verify-post-spec.ts",
     "test:thumbnail-gen": "npx ts-node --project tsconfig.scripts.json scripts/verify-thumbnail-gen.ts",
     "test:brandlink-product-list": "npx ts-node --project tsconfig.scripts.json scripts/verify-brandlink-product-list.ts",
+    "test:brand-sync-by-brand": "npx ts-node --project tsconfig.scripts.json scripts/verify-brand-sync-by-brand.ts",
     "test:brand-post-quality": "npx ts-node --project tsconfig.scripts.json scripts/verify-brand-post-quality-reinforcement.ts",
     "test:chatgpt-browser-automation": "npx ts-node --project tsconfig.scripts.json scripts/verify-chatgpt-browser-automation.ts",
     "test:chatgpt-browser-ui": "node scripts/verify-chatgpt-browser-mode-ui.mjs",

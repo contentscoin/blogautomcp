@@ -73,6 +73,7 @@ interface CliOptions {
   headless: boolean;
   storageStatePath: string;
   selectionProfile: string;
+  brandFilter: string[];
   promotionFilter: string[];
   categoryFilter: string[];
   duplicateWindowDays: number;
@@ -143,6 +144,7 @@ function parseArgs(argv: string[]): CliOptions {
     headless: false,
     storageStatePath: DEFAULT_STORAGE_STATE_PATH,
     selectionProfile: DEFAULT_SELECTION_PROFILE,
+    brandFilter: parseCommaSeparatedList(process.env.BRANDCONNECT_BRAND_FILTER || ""),
     promotionFilter: parseCommaSeparatedList(process.env.BRANDCONNECT_PROMOTION_FILTER || ""),
     categoryFilter: parseCommaSeparatedList(process.env.BRANDCONNECT_CATEGORY_FILTER || ""),
     duplicateWindowDays: DEFAULT_DUPLICATE_WINDOW_DAYS,
@@ -215,6 +217,10 @@ function parseArgs(argv: string[]): CliOptions {
     }
     if (arg.startsWith("--promotion-filter=")) {
       options.promotionFilter = parseCommaSeparatedList(arg.split("=")[1] || "");
+      continue;
+    }
+    if (arg.startsWith("--brand-filter=") || arg.startsWith("--brand-keyword=")) {
+      options.brandFilter = parseCommaSeparatedList(arg.split("=")[1] || "");
       continue;
     }
     if (arg.startsWith("--category-filter=")) {
@@ -675,6 +681,12 @@ function shouldIncludeProductByPromotion(product: ProductApiItem, promotionFilte
   return matchesAnyTerm(haystack, promotionFilter);
 }
 
+function shouldIncludeProductByBrand(product: ProductApiItem, brandFilter: string[]): boolean {
+  if (brandFilter.length === 0) return true;
+  const haystack = `${product.storeName} ${product.productName} ${product.badgeTexts.join(" ")}`;
+  return matchesAnyTerm(haystack, brandFilter);
+}
+
 function shouldIncludeProductByCategory(product: ProductApiItem, categoryFilter: string[]): boolean {
   if (categoryFilter.length === 0) return true;
   return matchesAnyTerm(
@@ -688,7 +700,7 @@ async function collectProductPool(
   rootCategoryId: string,
   spaceId: string,
   initialProducts: ProductApiItem[],
-  options: Pick<CliOptions, "promotionFilter" | "categoryFilter">
+  options: Pick<CliOptions, "brandFilter" | "promotionFilter" | "categoryFilter">
 ): Promise<{ products: ProductApiItem[]; scannedCategoryCount: number }> {
   const productsById = new Map<number, ProductApiItem>();
   const rootCategory: DisplayCategory = { id: rootCategoryId, name: "현재 카테고리" };
@@ -745,6 +757,7 @@ async function collectProductPool(
 
   const products = Array.from(productsById.values()).filter(
     (product) =>
+      shouldIncludeProductByBrand(product, options.brandFilter) &&
       shouldIncludeProductByPromotion(product, options.promotionFilter) &&
       shouldIncludeProductByCategory(product, options.categoryFilter)
   );
@@ -1351,10 +1364,12 @@ async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient
     `(${source === "contract" ? "저장된 계약" : "실시간 재탐색"})`
   );
   const selectedItems = items.filter((item) =>
+    matchesAnyTerm(`${item.name} ${item.storeName || ""}`, options.brandFilter) &&
     matchesTravelSelectionFilters(item, options.categoryFilter, options.promotionFilter)
   );
   console.log(
     `✅ 여행 옵션 적용: ${selectedItems.length}개` +
+      `${options.brandFilter.length > 0 ? ` / 브랜드 ${options.brandFilter.join(", ")}` : ""}` +
       `${options.categoryFilter.length > 0 ? ` / 조건 ${options.categoryFilter.join(", ")}` : ""}` +
       `${options.promotionFilter.length > 0 ? ` / 혜택 ${options.promotionFilter.join(", ")}` : ""}`
   );
@@ -1645,6 +1660,7 @@ async function main() {
   console.log(`- intervalDays: ${options.intervalDays}`);
   console.log(`- dailyQuota: ${options.dailyQuota}`);
   console.log(`- selectionProfile: ${options.selectionProfile}`);
+  console.log(`- brandFilter: ${options.brandFilter.join(", ") || "-"}`);
   console.log(`- promotionFilter: ${options.promotionFilter.join(", ") || "-"}`);
   console.log(`- categoryFilter: ${options.categoryFilter.join(", ") || "-"}`);
   console.log(`- duplicateWindowDays: ${options.duplicateWindowDays}`);

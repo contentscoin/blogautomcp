@@ -35,8 +35,8 @@ const TOOLS = [
   {
     name: "brandconnect_sync_products",
     title: "브랜드커넥트 상품 가져오기",
-    description: "네이버 브랜드커넥트에서 쇼핑커넥트 또는 여행커넥트 상품을 선택해 로컬 작업 목록으로 가져옵니다.",
-    inputSchema: { type: "object", properties: { connectKind: { type: "string", enum: ["shopping", "travel"] }, count: { type: "integer", minimum: 1, maximum: 50, default: 10 }, idempotencyKey: { type: "string", minLength: 8, maxLength: 120 } }, required: ["connectKind", "idempotencyKey"], additionalProperties: false },
+    description: "네이버 브랜드커넥트에서 브랜드명·스토어명·상품명으로 검색해 쇼핑커넥트 또는 여행커넥트 상품을 로컬 작업 목록으로 가져옵니다.",
+    inputSchema: { type: "object", properties: { connectKind: { type: "string", enum: ["shopping", "travel"] }, count: { type: "integer", minimum: 1, maximum: 50, default: 10 }, brandKeyword: { type: "string", maxLength: 80 }, idempotencyKey: { type: "string", minLength: 8, maxLength: 120 } }, required: ["connectKind", "idempotencyKey"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     securitySchemes: SECURITY_SCHEMES,
     _meta: { securitySchemes: SECURITY_SCHEMES },
@@ -197,6 +197,9 @@ async function callTool(userId: string, name: string, args: JsonObject) {
     const count = typeof args.count === "number" && Number.isInteger(args.count) ? args.count : 10;
     if (count < 1 || count > 50) return toolPayload({ ok: false, code: "INVALID_COUNT", message: "count는 1~50의 정수여야 합니다." }, true);
     safeArgs.count = count;
+    const brandKeyword = stringArg(args, "brandKeyword");
+    if (brandKeyword.length > 80) return toolPayload({ ok: false, code: "BRAND_KEYWORD_TOO_LONG", message: "brandKeyword는 80자 이하여야 합니다." }, true);
+    if (brandKeyword) safeArgs.brandKeyword = brandKeyword;
   }
 
   if (name === "post_create_draft") {

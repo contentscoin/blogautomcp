@@ -95,8 +95,8 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'brandconnect_sync_products',
     title: '브랜드커넥트 상품 동기화',
-    description: '로컬 PC에서 브랜드커넥트 상품을 가져와 등록합니다. categoryFilter/promotionFilter 로 범위를 좁힐 수 있습니다.',
-    inputSchema: { type: 'object', properties: { connectKind: CONNECT_KIND, count: { type: 'integer', minimum: 1, maximum: 50, default: 10 }, categoryFilter: { type: 'string', maxLength: 120 }, promotionFilter: { type: 'string', maxLength: 60 }, idempotencyKey: IDEMPOTENCY }, required: ['connectKind', 'idempotencyKey'], additionalProperties: false },
+    description: '로컬 PC에서 브랜드커넥트 상품을 가져와 등록합니다. brandKeyword 로 브랜드명·스토어명을 검색하고, categoryFilter/promotionFilter 로 범위를 더 좁힐 수 있습니다.',
+    inputSchema: { type: 'object', properties: { connectKind: CONNECT_KIND, count: { type: 'integer', minimum: 1, maximum: 50, default: 10 }, brandKeyword: { type: 'string', maxLength: 80, description: '브랜드명·스토어명·상품명에 포함된 검색어. 예: 아하바, 다케오, 미라클뮤즈' }, categoryFilter: { type: 'string', maxLength: 120 }, promotionFilter: { type: 'string', maxLength: 60 }, idempotencyKey: IDEMPOTENCY }, required: ['connectKind', 'idempotencyKey'], additionalProperties: false },
     outputSchema: JOB_RESULT_SCHEMA,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     jobType: 'BRANDCONNECT_SYNC_PRODUCTS',

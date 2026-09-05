@@ -17,6 +17,7 @@ interface BulkSeasonalBody {
   startDate?: string;
   categoryUrl?: string;
   selectionProfile?: string;
+  brandKeyword?: string;
   promotionFilter?: string;
   categoryFilter?: string;
   duplicateWindowDays?: number;
@@ -216,6 +217,7 @@ export async function POST(request: NextRequest) {
         : process.env.BRANDCONNECT_SELECTION_PROFILE || "seasonal-hit-popular";
     const promotionFilter = normalizeCsvFilter(body.promotionFilter);
     const categoryFilter = normalizeCsvFilter(body.categoryFilter);
+    const brandKeyword = normalizeCsvFilter(body.brandKeyword);
     const duplicateWindowDays = toSafeNonNegativeInt(
       body.duplicateWindowDays,
       parseBoundedInteger(process.env.BRANDCONNECT_DUPLICATE_WINDOW_DAYS, 30, 0, 3650),
@@ -290,6 +292,9 @@ export async function POST(request: NextRequest) {
     if (categoryFilter) {
       scriptArgs.push(`--category-filter=${categoryFilter}`);
     }
+    if (brandKeyword) {
+      scriptArgs.push(`--brand-filter=${brandKeyword}`);
+    }
     scriptArgs.push(`--duplicate-window-days=${duplicateWindowDays}`);
 
     const logDir = path.join(getLogsDir(), "seasonal");
@@ -303,7 +308,7 @@ export async function POST(request: NextRequest) {
       logFd,
       `[${new Date().toISOString()}] bulk seasonal start count=${count} intervalDays=${intervalDays} startDate=${startDate}${
         categoryUrl ? ` categoryUrl=${categoryUrl}` : ""
-      } dailyQuota=${dailyQuota} selectionProfile=${selectionProfile} promotionFilter=${promotionFilter || "-"} categoryFilter=${categoryFilter || "-"} duplicateWindowDays=${duplicateWindowDays}\n`
+      } dailyQuota=${dailyQuota} selectionProfile=${selectionProfile} brandKeyword=${brandKeyword || "-"} promotionFilter=${promotionFilter || "-"} categoryFilter=${categoryFilter || "-"} duplicateWindowDays=${duplicateWindowDays}\n`
     );
 
     const runStartedAt = new Date();

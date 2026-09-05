@@ -738,6 +738,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
   if (job.type === "BRANDCONNECT_SYNC_PRODUCTS") {
     ctx.setStage("sync", "브랜드커넥트 상품 동기화", 15);
     const count = readInteger(input, "count", 10, 1, 50);
+    const brandKeyword = readString(input, "brandKeyword").slice(0, 80);
     const categoryFilter = readString(input, "categoryFilter").slice(0, 120);
     const promotionFilter = readString(input, "promotionFilter").slice(0, 60);
     const payload = await localApi(request, "/api/brandlinks/bulk-seasonal", {
@@ -746,6 +747,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
         connectKind: kind.toLowerCase(),
         count,
         waitForCompletion: true,
+        ...(brandKeyword ? { brandKeyword } : {}),
         ...(categoryFilter ? { categoryFilter } : {}),
         ...(promotionFilter ? { promotionFilter } : {}),
       }),
@@ -754,7 +756,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     const { logFile: _logFile, logPath: _logPath, ...rest } = data;
     void _logFile;
     void _logPath;
-    return envelope(job, "sync-result", typeof payload.message === "string" ? payload.message : `${kindLabel} 상품 동기화 완료`, { connectKind: kind.toLowerCase(), requestedCount: count, ...rest }, ctx);
+    return envelope(job, "sync-result", typeof payload.message === "string" ? payload.message : `${kindLabel} 상품 동기화 완료`, { connectKind: kind.toLowerCase(), requestedCount: count, ...(brandKeyword ? { brandKeyword } : {}), ...rest }, ctx);
   }
 
   if (job.type === "POST_CREATE_DRAFT") {
