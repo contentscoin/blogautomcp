@@ -297,7 +297,7 @@ async function verifyGenerator() {
   });
 
   for (const lockFails of [false, true]) {
-    await check(`shopping body and hero retain product locking (fallback=${lockFails})`, async () => {
+    await check(`shopping keeps locked products or photo-only body fallback (fallback=${lockFails})`, async () => {
       const h = harness({ lockFails });
       h.manifest.connectKind = "SHOPPING";
       const pending = h.generate(0, { requests: [
@@ -305,13 +305,13 @@ async function verifyGenerator() {
       ] });
       h.progress(0);
       await tick();
-      assert.equal(h.callbacks[0].generatedPath, sourcePath);
+      assert.equal(h.callbacks[0].generatedPath, lockFails ? rawPath : sourcePath);
       h.close(0, { ok: true, jobs: [h.result(0), h.result(1)] });
       const results = await pending;
       assert.equal(h.lockCalls, 2);
       results.forEach((r, index) => {
-        assert.equal(r.generatedPath, sourcePath);
-        assert.equal(r.provenance, lockFails ? (index === 0 ? "EDITORIAL_CARD" : "ORIGINAL") : "LOCKED_PRODUCT");
+        assert.equal(r.generatedPath, lockFails && index === 0 ? rawPath : sourcePath);
+        assert.equal(r.provenance, lockFails ? (index === 0 ? "GENERATED_BACKGROUND" : "ORIGINAL") : "LOCKED_PRODUCT");
       });
       assert.match(h.jobs[0].prompt, /Generate the environment only/);
     });
