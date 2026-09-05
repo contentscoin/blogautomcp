@@ -35,6 +35,7 @@ export async function createTravelEditorialThumbnail(options: {
   const svg = await buildThumbnailOverlayV2({
     eyebrow: options.destination || options.badge,
     headline: options.headline || options.subline,
+    subline: options.subline,
     style: thumbnailV2Style(style),
     subjectSide: "full",
     transparentBackground: true,

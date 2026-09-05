@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { selectVerifiedProductPhoto } from "../../../../../scripts/lib/product-photo-review";
 import { completionOutbox, CompletionDeliveryError, deliverCompletion, type PendingCompletion } from "@/lib/remote-agent-completion";
 import { getWritingTimeoutPolicy } from "../../../../../scripts/lib/writing-timeout-policy";
 import fs from "node:fs";
@@ -219,7 +220,8 @@ function buildChatGptThumbnailPrompt(kind: "SHOPPING" | "TRAVEL", productName: s
         "Show useful destination context a traveler would want to preview: place, atmosphere, season, realistic light, and human-scale depth.",
         "Natural travel photography, subtle film grain, believable weather and shadows, not a glossy stock advertisement.",
         "Leave a clean dark-to-transparent text-safe area on the left and preserve the main landmark on the right.",
-        "Do not add any text, logo, watermark, price, itinerary fact, landmark, or activity that is not supported by the supplied image and product name.",
+        "No text, letters, typography, logo, watermark or price anywhere. Korean title text is added by the renderer, never by image generation.",
+        "Do not invent itinerary facts, landmarks or activities not supported by the supplied image and product name.",
         "Output one finished 1:1 square image only, 1536x1536 or the closest supported square size.",
       ].join("\n"),
       sourcePolicy: "TRAVEL_EDITORIAL",
@@ -1057,7 +1059,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     const product = await requireProduct(productId, kind);
     ctx.setStage("thumbnail-apply", "생성 배경 + 원본 합성", 20);
     const imageUrls = parseImageUrls(product.imageUrls);
-    const sourceImageUrl = imageUrls[0];
+    let sourceImageUrl = imageUrls[0];
     if (!sourceImageUrl) throw new LocalAutomationError("IMAGE_SHORTFALL", "원본 상품·여행 이미지가 없습니다. 상품 정보를 먼저 동기화하세요.");
     const suggested = kind === "TRAVEL"
       ? buildTravelThumbnailCopy(product.productName || "여행 상품")
@@ -1079,6 +1081,16 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
         downloadBoundedImage(sourceImageUrl, sourcePath, "naver"),
         downloadBoundedImage(generatedImageUrl, backgroundPath, "generated"),
       ]);
+      if (kind === "SHOPPING") {
+        let verified = await selectVerifiedProductPhoto([sourcePath], product.productName || "상품");
+        for (const candidateUrl of imageUrls.slice(1, 12)) {
+          if (verified) break;
+          await downloadBoundedImage(candidateUrl, sourcePath, "naver");
+          verified = await selectVerifiedProductPhoto([sourcePath], product.productName || "상품");
+          if (verified) sourceImageUrl = candidateUrl;
+        }
+        if (!verified) throw new LocalAutomationError("IMAGE_SHORTFALL", "해당 상품의 원본 사진을 확인하지 못했습니다. 안내판이나 미검증 이미지는 합성하지 않습니다.");
+      }
       const layoutId = readString(input, "layoutId");
       const shoppingStyle = layoutId === "shopping-clean-editorial"
         ? "shopping-clean-editorial"
@@ -1092,7 +1104,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
           : "travel-editorial";
       const result = kind === "SHOPPING"
         ? await createLockedProductThumbnailOnBackground({ sourcePath, backgroundPath, outputDir, productName: product.productName || "추천 상품", headline: copy.headline, subline: copy.subline, style: shoppingStyle })
-        : await createTravelEditorialThumbnail({ sourcePath: backgroundPath, outputDir, destination: product.productName || "여행 상품", headline: copy.headline, subline: copy.subline, badge: copy.badge, style: travelStyle });
+        : await createTravelEditorialThumbnail({ sourcePath: backgroundPath, outputDir, destination: copy.productNameLabel, headline: copy.headline, subline: copy.subline, badge: copy.badge, style: travelStyle });
       const updatedAt = new Date().toISOString();
       const settingValue = JSON.stringify({ version: 1, sourceImageUrl, generatedPath: result.outputPath, copy, style: kind === "SHOPPING" ? "gpt-background-lock" : "gpt-travel-editorial", updatedAt });
       await prisma.setting.upsert({

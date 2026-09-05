@@ -297,7 +297,7 @@ async function verifyGenerator() {
   });
 
   for (const lockFails of [false, true]) {
-    await check(`shopping keeps locked products or photo-only body fallback (fallback=${lockFails})`, async () => {
+    await check(`shopping rejects background-only body results (lockFails=${lockFails})`, async () => {
       const h = harness({ lockFails });
       h.manifest.connectKind = "SHOPPING";
       const pending = h.generate(0, { requests: [
@@ -305,13 +305,14 @@ async function verifyGenerator() {
       ] });
       h.progress(0);
       await tick();
-      assert.equal(h.callbacks[0].generatedPath, lockFails ? rawPath : sourcePath);
+      assert.equal(h.callbacks[0].generatedPath, lockFails ? null : sourcePath);
       h.close(0, { ok: true, jobs: [h.result(0), h.result(1)] });
       const results = await pending;
       assert.equal(h.lockCalls, 2);
       results.forEach((r, index) => {
-        assert.equal(r.generatedPath, lockFails && index === 0 ? rawPath : sourcePath);
-        assert.equal(r.provenance, lockFails ? (index === 0 ? "GENERATED_BACKGROUND" : "ORIGINAL") : "LOCKED_PRODUCT");
+        assert.equal(r.generatedPath, lockFails && index === 0 ? null : sourcePath);
+        if (lockFails && index === 0) assert.match(r.error || "", /배경을 안전하게 분리하지 못했습니다/);
+        else assert.equal(r.provenance, lockFails ? "ORIGINAL" : "LOCKED_PRODUCT");
       });
       assert.match(h.jobs[0].prompt, /Generate the environment only/);
     });

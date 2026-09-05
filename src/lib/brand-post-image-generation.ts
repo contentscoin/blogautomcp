@@ -172,13 +172,12 @@ async function existingShoppingSource(
   const assets = normalizePackageImageAssets(manifest);
   const candidates = [
     target.existingAsset?.provenance === "ORIGINAL" ? target.existingAsset.path : "",
-    target.existingAsset?.sourcePath || "",
+    target.existingAsset?.provenance === "ORIGINAL" ? target.existingAsset.sourcePath : "",
     ...assets
       .filter((asset) => asset.provenance === "ORIGINAL")
       .flatMap((asset) => [asset.path, asset.sourcePath]),
-    ...assets.flatMap((asset) => [asset.sourcePath, asset.path]),
   ];
-  return selectVerifiedProductPhoto(candidates.filter((file): file is string => Boolean(file) && !/[_-]detail[_-]/i.test(path.basename(file!))), String(manifest.sourceSnapshot?.product.name || manifest.title));
+  return selectVerifiedProductPhoto(candidates.filter((file): file is string => Boolean(file)), String(manifest.sourceSnapshot?.product.name || manifest.title));
 }
 
 async function runBrowserImageBatch(
@@ -446,10 +445,8 @@ async function finishGeneratedImage(options: {
     });
     return { generatedPath: result.outputPath, provenance: "LOCKED_PRODUCT" };
   } catch {
-    // A framed source photo pasted over a room is not a photoreal scene.
-    // Keep the requested product-free context photograph instead; the original
-    // product remains available in the hero/source assets and is never redrawn.
-    return { generatedPath: options.rawPath, provenance: "GENERATED_BACKGROUND" };
+    // A background-only image must not masquerade as a completed product scene.
+    throw new Error("상품 원본의 배경을 안전하게 분리하지 못했습니다. 기존 원본 이미지는 유지하며 배경만 생성된 결과를 완성 이미지로 반영하지 않습니다.");
   }
 }
 

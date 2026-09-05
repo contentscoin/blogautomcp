@@ -108,6 +108,7 @@ export async function fitThumbnailHeadline(options: {
   maxHeight: number;
   minFontSize?: number;
   maxFontSize?: number;
+  maxLines?: 1 | 2;
 }): Promise<FittedThumbnailText> {
   const minFontSize = options.minFontSize || 54;
   const maxFontSize = options.maxFontSize || 116;
@@ -120,7 +121,7 @@ export async function fitThumbnailHeadline(options: {
     const lines = await wrapToTwoLines(options.text, fontSize, options.maxWidth);
     const lineHeight = Math.round(fontSize * 1.14);
     const height = (lines?.length || 3) * lineHeight;
-    if (lines && height <= options.maxHeight) {
+    if (lines && lines.length <= (options.maxLines || 2) && height <= options.maxHeight) {
       const widths = await Promise.all(lines.map((line) => measureText(line, fontSize)));
       best = {
         lines,
@@ -139,6 +140,9 @@ export async function fitThumbnailHeadline(options: {
   if (best) return best;
   const fontSize = minFontSize;
   const normalized = options.text.replace(/\s+/g, " ").trim();
+  if (options.maxLines === 1) {
+    return { lines: [await ellipsize(normalized, fontSize, options.maxWidth)], fontSize, lineHeight: Math.round(fontSize * 1.14), width: options.maxWidth, height: Math.round(fontSize * 1.14), truncated: true };
+  }
   const midpoint = Math.max(1, Math.ceil(graphemes(normalized).length / 2));
   const chars = graphemes(normalized);
   const first = await ellipsize(chars.slice(0, midpoint).join(""), fontSize, options.maxWidth);
@@ -173,6 +177,7 @@ function styleTokens(style: ThumbnailV2Style) {
 export async function buildThumbnailOverlayV2(options: {
   eyebrow: string;
   headline: string;
+  subline?: string;
   style: ThumbnailV2Style;
   subjectSide?: "left" | "right" | "full";
   transparentBackground?: boolean;
@@ -189,7 +194,9 @@ export async function buildThumbnailOverlayV2(options: {
     maxFontSize: subjectSide === "full" ? 112 : 96,
   });
   const headlineY = subjectSide === "full" ? 700 : 310;
-  const textElements = fitted.lines
+  const eyebrow = await fitThumbnailHeadline({ text: options.eyebrow, maxWidth: textBox.width, maxHeight: 40, minFontSize: 24, maxFontSize: 30, maxLines: 1 });
+  const subline = options.subline ? await fitThumbnailHeadline({ text: options.subline, maxWidth: textBox.width, maxHeight: 45, minFontSize: 24, maxFontSize: 32, maxLines: 1 }) : null;
+  const textElements = (subline ? `<text x="${textBox.x}" y="${headlineY + fitted.lines.length * fitted.lineHeight + 32}" font-family="${FONT_FAMILY}" font-size="${subline.fontSize}" fill="${tokens.text}">${escapeXml(subline.lines[0])}</text>` : "") + fitted.lines
     .map(
       (line, index) =>
         `<text x="${textBox.x}" y="${headlineY + index * fitted.lineHeight}" font-family="${FONT_FAMILY}" font-size="${fitted.fontSize}" font-weight="900" fill="${tokens.text}" filter="url(#textShadow)">${escapeXml(line)}</text>`,
@@ -209,9 +216,9 @@ export async function buildThumbnailOverlayV2(options: {
     : "";
 
   const backgroundRect = options.transparentBackground
-    ? `<rect width="1080" height="1080" fill="url(#readable)"/>`
+    ? `<rect width="1080" height="1080" fill="url(#${isTravel ? "shade" : "readable"})"/>`
     : `<rect width="1080" height="1080" fill="url(#shade)"/>`;
-  return Buffer.from(`<svg width="${THUMBNAIL_V2_WIDTH}" height="${THUMBNAIL_V2_HEIGHT}" xmlns="http://www.w3.org/2000/svg"><defs><style>${embeddedFontCss()}</style>${shade}${readableShade}<filter id="textShadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="5" stdDeviation="7" flood-color="#000" flood-opacity=".26"/></filter></defs>${backgroundRect}${subjectGuide}${route}<rect x="${textBox.x}" y="${subjectSide === "full" ? 490 : 126}" width="86" height="8" rx="4" fill="${tokens.accent}"/><text x="${textBox.x}" y="${subjectSide === "full" ? 554 : 198}" font-family="${FONT_FAMILY}" font-size="30" font-weight="800" fill="${tokens.eyebrow}" letter-spacing="1">${escapeXml(options.eyebrow.slice(0, 18))}</text>${textElements}</svg>`);
+  return Buffer.from(`<svg width="${THUMBNAIL_V2_WIDTH}" height="${THUMBNAIL_V2_HEIGHT}" xmlns="http://www.w3.org/2000/svg"><defs><style>${embeddedFontCss()}</style>${shade}${readableShade}<filter id="textShadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="5" stdDeviation="7" flood-color="#000" flood-opacity=".26"/></filter></defs>${backgroundRect}${subjectGuide}${route}<rect x="${textBox.x}" y="${subjectSide === "full" ? 490 : 126}" width="86" height="8" rx="4" fill="${tokens.accent}"/><text x="${textBox.x}" y="${subjectSide === "full" ? 554 : 198}" font-family="${FONT_FAMILY}" font-size="${eyebrow.fontSize}" font-weight="800" fill="${tokens.eyebrow}" letter-spacing="1">${escapeXml(eyebrow.lines[0])}</text>${textElements}</svg>`);
 }
 
 export async function generateThumbnailCropPreviews(

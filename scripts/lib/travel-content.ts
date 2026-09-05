@@ -358,6 +358,8 @@ function looksLikeDestinationToken(token: string): boolean {
   return (
     /[가-힣]{2,}/u.test(token) &&
     token.length <= 12 &&
+    !/[0-9]/u.test(token) &&
+    !/^(?:노팁|노옵션|노쇼핑|상당|혜택|무료|증정|특별|럭셔리|프리미엄|인기|성급|출발임박|마감임박|단독|한정)$/u.test(token) &&
     !NON_DESTINATION_TOKEN_PATTERN.test(token) &&
     !/^\d+(?:개|명|원|국|도시|박|일)?$/u.test(token)
   );
@@ -396,7 +398,9 @@ export function extractTravelProductFacts(
   // 세부 일정·항공·쇼핑 문장을 목적지로 오인하지 않도록 상품명만 사용한다.
   const destinationSource = clean(productName)
     .replace(DEPARTURE_TAIL_PATTERN, " ")
-    .replace(/\[[^\]]+\]|[<〈][^>〉]+[>〉]/gu, " ")
+    .replace(/[<〈][^>〉]+[>〉]/gu, " ")
+    .replace(/\[([^\]]+)\]/gu, (_match, group: string) => /(?:호텔|숙박|신축|\d|출발|마감|특가)/u.test(group) ? " " : ` ${group} `)
+    .replace(/[\[\]]/gu, " ")
     .replace(/(?:출발확정|무조건출발|여행핫딜|깜짝특가|베스트셀러|패키지|일주|직항|전일정\s*\d성|\d+박\s*\d+일|\d+일|변경)/gu, " ");
   const destinations = unique(
     destinationSource
@@ -599,9 +603,9 @@ export function buildTravelThumbnailCopy(productName: string) {
   const facts = extractTravelProductFacts(productName);
   const destination = facts.destinations.slice(0, 2).join(" · ") || "여행 코스";
   return {
-    productNameLabel: `${destination} ${facts.duration || "여행"}`.slice(0, 36),
-    headline: `${destination} 여행 가이드`.slice(0, 24),
-    subline: [facts.duration, "명소 · 분위기 · 현지 팁"].filter(Boolean).join(" · ").slice(0, 44),
+    productNameLabel: facts.duration ? `${facts.duration} 여행 가이드` : "여행 가이드",
+    headline: destination,
+    subline: "명소 · 분위기 · 현지 팁",
     badge: "여행지 집중 리뷰",
     cta: "여행 장면 미리보기",
   };
