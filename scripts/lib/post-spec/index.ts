@@ -8,6 +8,7 @@
  */
 
 import { buildProductEditorialPlan } from "../product-editorial-plan";
+import { createEditorialSelection } from "../editorial-templates";
 import type { OpenCrabSeoBrief } from "../opencrab-seo-brief";
 import { getProductTokens } from "../brandlink-content-readiness";
 import { isOpenAiAvailable } from "../openai-text";
@@ -235,6 +236,7 @@ export async function buildPostSpec(input: SpecFirstPipelineInput): Promise<Buil
   const chunks = kind === "TRAVEL" ? [chunkIndexes.slice(0, Math.ceil(chunkIndexes.length / 2)), chunkIndexes.slice(Math.ceil(chunkIndexes.length / 2))] : [chunkIndexes];
 
   const spec: PostSpec = {
+    editorial: createEditorialSelection(kind, { name: product.name, features: editorial.verifiedFactLines }),
     version: "post-spec/v1",
     connectKind: kind,
     productId: input.productId,

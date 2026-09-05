@@ -127,6 +127,7 @@ export interface EvidenceLedgerEntry {
 }
 
 export interface PostSpec {
+  editorial?: import("../editorial-templates").EditorialSelection;
   version: "post-spec/v1";
   connectKind: ConnectKind;
   productId: string | null;

@@ -130,6 +130,7 @@ export interface PostQualityReportV1 {
 }
 
 export interface ResolvedPostDocumentV1 {
+  editorial?: import("../../scripts/lib/editorial-templates").EditorialSelection;
   version: "resolved-post-document/v1";
   contractVersion: "post-composition-contract/v1";
   connectKind: BrandConnectKind;
@@ -587,6 +588,7 @@ function allocatePlannedImages(plan: PostSectionPlanV1[], bodyImagePaths: string
 }
 
 export function resolvePostDocument(options: {
+  editorial?: import("../../scripts/lib/editorial-templates").EditorialSelection;
   connectKind: BrandConnectKind;
   title: string;
   sections: string[];
@@ -680,17 +682,26 @@ export function resolvePostDocument(options: {
 
   for (const section of sections) {
     renderNodes.push({ kind: "divider", sectionId: section.id });
+    const layout = options.editorial?.policy.layout;
+    const pushSectionImages = () => section.imagePaths.forEach((imagePath, index) => pushImage(section, imagePath, index));
+    if (layout?.image === "before-heading") pushSectionImages();
     // 네이버 자동 입력에서는 인용구 컴포넌트가 빈 채로 남을 수 있으므로 모든
     // 섹션 제목을 실제 소제목 서식 노드로 정규화한다.
     renderNodes.push({ kind: "heading", sectionId: section.id, text: section.title });
-    section.body.forEach((paragraph, paragraphIndex) => {
+    if (layout?.image === "before-body") pushSectionImages();
+    const paragraphs: string[] = [];
+    // Existing body entries are complete sentence units. Never split URLs or decimals.
+    for (let i = 0; i < section.body.length; i += layout?.sentences ?? 1) {
+      paragraphs.push(section.body.slice(i, i + (layout?.sentences ?? 1)).join(" "));
+    }
+    paragraphs.forEach((paragraph, paragraphIndex) => {
       renderNodes.push({ kind: "paragraph", sectionId: section.id, text: paragraph });
-      if (paragraphIndex === 0) {
-        section.imagePaths.forEach((imagePath, index) => pushImage(section, imagePath, index));
+      if (paragraphIndex === 0 && (!layout || layout.image === "after-lead")) {
+        pushSectionImages();
       }
     });
-    if (section.body.length === 0) {
-      section.imagePaths.forEach((imagePath, index) => pushImage(section, imagePath, index));
+    if (layout?.image === "after-body" || (section.body.length === 0 && (!layout || layout.image === "after-lead"))) {
+      pushSectionImages();
     }
     if (earlyConnectSectionId && section.id === earlyConnectSectionId && options.connectUrl) {
       renderNodes.push({
@@ -724,6 +735,7 @@ export function resolvePostDocument(options: {
 
   return {
     version: "resolved-post-document/v1",
+    editorial: options.editorial,
     contractVersion: contract.version,
     connectKind: options.connectKind,
     qualityPreset,

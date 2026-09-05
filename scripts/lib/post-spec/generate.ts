@@ -8,6 +8,7 @@ import { HUMANIZE_RULES } from "../humanize-korean";
 import { formatOpenCrabSeoBriefForPrompt } from "../opencrab-seo-brief";
 import { formatTravelFactsForPrompt } from "../travel-content";
 import { formatWritingStructureGuide } from "../writing-structure-guide";
+import { formatEditorialTemplate, selectEditorialTemplate } from "../editorial-templates";
 import { otherSectionsEvidence } from "./evidence-ledger";
 import { generateStructured } from "./llm-client";
 import { buildDraftJsonSchema, sectionKey } from "./schema";
@@ -31,6 +32,9 @@ export function renderSystemPrompt(spec: PostSpec, ctx: GenerateContext): string
     HUMANIZE_RULES,
     NAVER_SEO_TITLE_RULES,
     formatWritingStructureGuide(spec.connectKind),
+    formatEditorialTemplate(spec.connectKind, spec.editorial?.id ?? selectEditorialTemplate(spec.connectKind, {
+      name: spec.productName, features: spec.facts.lines,
+    })),
     "- 위 구성 가이드는 지정된 섹션 안의 전개와 문장에 적용합니다. 섹션 ID·순서·제목과 JSON 스키마는 유지하고, 지정된 목록·접두사 형식은 해당 섹션에서만 지킵니다.",
     "- 각 섹션의 제목은 지시된 그대로 사용하고 바꾸지 마세요.",
     "- 섹션마다 지정된 형식(줄 수·글자 수·접두사)을 정확히 지키세요.",

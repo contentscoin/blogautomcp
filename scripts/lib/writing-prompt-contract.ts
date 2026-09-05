@@ -1,6 +1,7 @@
 import { composeBudgetedChatGptPrompt } from "./chatgpt-direct-prompt";
 import { isMeaningfulProductEvidenceFeature } from "./product-editorial-plan";
 import { formatWritingStructureGuide } from "./writing-structure-guide";
+import { EditorialProduct, EditorialTemplateId, EditorialSelection, createEditorialSelection, formatEditorialTemplate, selectEditorialTemplate } from "./editorial-templates";
 
 export interface WritingPromptContract {
   version: "writing-prompt-contract/v1";
@@ -13,6 +14,8 @@ export interface WritingPromptContract {
   verifiedExperienceNotes: string;
   draftMemo?: string;
   requestedTitle?: string;
+  editorialTemplateId?: EditorialTemplateId;
+  editorial?: EditorialSelection;
 }
 
 /** Only extract an explicit title command, never infer a title from a topic memo. */
@@ -58,6 +61,7 @@ export function createWritingPromptContract(input: {
   hashtagCount: number;
   verifiedExperienceNotes?: string;
   draftMemo?: string | null;
+  product?: EditorialProduct;
 }): WritingPromptContract {
   for (const [min, max] of [
     [input.minimumSections, input.maximumSections],
@@ -73,6 +77,8 @@ export function createWritingPromptContract(input: {
   return {
     version: "writing-prompt-contract/v1",
     kind: input.kind,
+    editorialTemplateId: selectEditorialTemplate(input.kind, input.product),
+    editorial: createEditorialSelection(input.kind, input.product),
     sections: { min: input.minimumSections, max: input.maximumSections },
     characters: { ...input.targetCharacters },
     sentences: { min: input.kind === "TRAVEL" ? 5 : 4, max: 6 },
@@ -118,6 +124,7 @@ export function formatWritingPromptContract(contract: WritingPromptContract): st
     "- 고지 문구와 원시 URL은 출력하지 않습니다. 커넥트 카드와 고지는 시스템이 별도로 붙입니다.",
     "- title, evidenceFacts, sections, hashtags 필드를 가진 JSON 하나만 출력합니다. 코드블록·작업 설명은 넣지 않습니다.",
     formatWritingStructureGuide(contract.kind),
+    formatEditorialTemplate(contract.kind, contract.editorialTemplateId),
     formatDraftMemoRequirements(contract),
     "- 다음은 필드와 섹션 한 개의 형식 예시입니다. 실제 sections 개수와 전체 분량은 위 기준을 따릅니다.",
     JSON.stringify(getWritingOutputExample(contract)),
