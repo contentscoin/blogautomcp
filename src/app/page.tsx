@@ -3,7 +3,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import SessionStatus from "@/components/SessionStatus";
-import PublishProgress from "@/components/PublishProgress";
 import TopicTaskPanel from "@/components/TopicTaskPanel";
 import ProductThumbnailStudio from "@/components/ProductThumbnailStudio";
 import { ThemeToggle } from "@/components/ThemeProvider";
@@ -813,7 +812,7 @@ export default function Dashboard() {
       setPublishingId(null);
       return;
     }
-    if (current.status !== "PUBLISHING") {
+    if (["PUBLISHED", "SCHEDULED"].includes(current.status)) {
       setPublishingId(null);
     }
   }, [links, publishingId]);
@@ -1333,76 +1332,30 @@ export default function Dashboard() {
     payload?: { publishMode?: "now" | "schedule"; scheduledDate?: string }
   ) => {
     setPublishingId(id);
-    setDashboardNotice({
-      tone: "info",
-      text:
-        payload?.publishMode === "schedule"
-          ? "예약 발행 요청을 시작했습니다..."
-          : "즉시 발행 요청을 시작했습니다...",
-    });
+    setDashboardNotice({ tone: "info", text: "저장 초안 확인 → 자동 검수·보강 → 발행을 진행합니다." });
     try {
-      const requestedMode = payload?.publishMode ?? "now";
-      const res = await fetch(`/api/brandlinks/${id}/publish`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload ?? { publishMode: "now" }),
-      });
-      const data = await res.json();
-
-      if (!res.ok || !data.success) {
-        setDashboardNotice({
-          tone: "error",
-          text: `발행 시작 실패: ${data.error || "알 수 없는 오류"}`,
-        });
-        setPublishingId((prev) => (prev === id ? null : prev));
-        fetchLinks();
-        return;
-      }
-
-      const actualMode = data?.data?.publishMode as "now" | "schedule" | undefined;
-      if (actualMode && actualMode !== requestedMode) {
-        setDashboardNotice({
-          tone: "error",
-          text: `발행 모드 불일치: 요청=${requestedMode}, 서버=${actualMode}`,
-        });
-        setPublishingId((prev) => (prev === id ? null : prev));
-        fetchLinks();
-        return;
-      }
-
-      const logFile = data?.data?.logFile as string | undefined;
-
-      fetchLinks();
-
-      if (payload?.publishMode === "schedule") {
-        const requested = data?.data?.requestedScheduledDate as string | undefined;
-        const effective = data?.data?.effectiveScheduledDate as string | undefined;
-        const adjusted = Boolean(data?.data?.adjustedFromPast);
-        if (adjusted && effective) {
-          setDashboardNotice({
-            tone: "success",
-            text: `예약발행 시작: 입력일(${requested ?? "-"}) → 자동조정(${effective})${logFile ? ` / 로그: ${logFile}` : ""}`,
-          });
-        } else if (effective) {
-          setDashboardNotice({
-            tone: "success",
-            text: `예약발행 시작: 예약발행일 ${effective}${logFile ? ` / 로그: ${logFile}` : ""}`,
-          });
+      const endpoint = `/api/brandlinks/${id}/auto-publish`;
+      const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload ?? { publishMode: "now" }) });
+      const started = await response.json();
+      if (!response.ok || !started.success) throw new Error(started.error || "자동 발행 시작 실패");
+      for (;;) {
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        const statusResponse = await fetch(endpoint);
+        const status = await statusResponse.json();
+        if (!statusResponse.ok || !status.success) throw new Error(status.error || "진행 상태 확인 실패");
+        if (status.data.status === "failed") throw new Error(status.data.error || "자동 발행 실패");
+        if (status.data.status === "completed") {
+          setDashboardNotice({ tone: "success", text: payload?.publishMode === "schedule" ? "예약 등록이 완료되었습니다." : "즉시 발행이 완료되었습니다." });
+          break;
         }
-      } else if (logFile) {
-        setDashboardNotice({
-          tone: "success",
-          text: `즉시발행 시작 / 로그: ${logFile}`,
-        });
+        setDashboardNotice({ tone: "info", text: `자동 발행 진행 중 · ${status.data.stage}` });
       }
     } catch (error) {
-      console.error("발행 시작 실패:", error);
-      setDashboardNotice({
-        tone: "error",
-        text: "발행 시작 중 오류가 발생했습니다.",
-      });
-      setPublishingId((prev) => (prev === id ? null : prev));
-      fetchLinks();
+      setDashboardNotice({ tone: "error", text: error instanceof Error ? error.message : "발행 상태를 확인하세요. 자동 재시도하지 않습니다." });
+    } finally {
+      setPublishingId(null);
+      void fetchLinks();
     }
   };
 
@@ -1545,7 +1498,7 @@ export default function Dashboard() {
     }
   };
 
-  const handleBulkSchedulePublish = async () => {
+  const handleBulkSchedulePublish = async (requestedLimit = MAX_BULK_SCHEDULE_LIMIT) => {
     const busyMessage = getBusyMessage();
     if (busyMessage) {
       setDashboardNotice({
@@ -1567,7 +1520,7 @@ export default function Dashboard() {
       return;
     }
 
-    const limit = Math.min(MAX_BULK_SCHEDULE_LIMIT, readyScheduledCount);
+    const limit = Math.min(requestedLimit, MAX_BULK_SCHEDULE_LIMIT, readyScheduledCount);
 
     try {
       setBulkScheduleRunning(true);
@@ -1616,10 +1569,9 @@ export default function Dashboard() {
       const jobId = data.data?.jobId;
       if (jobId) {
         const startedAt = Date.now();
-        const deadline = startedAt + 12 * 60 * 60_000;
         const targetIds = new Set(data.data?.targetIds || []);
         let settled = false;
-        while (Date.now() < deadline) {
+        for (;;) {
           await waitForMilliseconds(Date.now() - startedAt < 60 * 60_000 ? 2_500 : 15_000);
           let terminalFailure: string | null = null;
           try {
@@ -1640,11 +1592,15 @@ export default function Dashboard() {
               targetRows.every((link) => ["SCHEDULED", "PUBLISHED", "FAILED"].includes(link.status));
             if (statusResponse.status === 404 && databaseSettled) {
               settled = true;
+              const succeeded = targetRows.filter(link => link.status === "SCHEDULED").length;
               setDashboardNotice({
-                tone: "success",
-                text: "예약발행 결과를 상품 목록에서 확인해 상태를 동기화했습니다.",
+                tone: succeeded === targetRows.length ? "success" : "error",
+                text: `예약 결과 확인: 성공 ${succeeded}건 / 미완료·실패 ${targetRows.length - succeeded}건`,
               });
               break;
+            }
+            if (statusResponse.status === 404 && !databaseSettled) {
+              terminalFailure = "앱 재시작 등으로 작업 기록이 없습니다. 중복 발행 방지를 위해 실제 발행 상태를 먼저 확인하세요.";
             }
             if (statusResponse.ok && statusPayload.success && statusPayload.data?.status === "completed") {
               settled = true;
@@ -1663,7 +1619,7 @@ export default function Dashboard() {
           }
           if (terminalFailure) throw new Error(terminalFailure);
         }
-        if (!settled) throw new Error("예약발행 상태 확인이 12시간을 초과했습니다. 목록 새로고침으로 상태를 다시 확인해 주세요.");
+        if (!settled) throw new Error("예약발행 결과를 확인하지 못했습니다.");
       } else {
         await fetchLinks();
       }
@@ -1671,14 +1627,14 @@ export default function Dashboard() {
       console.error("예약발행 일괄 실행 실패:", error);
       setDashboardNotice({
         tone: "error",
-        text: "예약발행 일괄 실행 중 오류가 발생했습니다.",
+        text: error instanceof Error ? error.message : "예약발행 일괄 실행 중 오류가 발생했습니다.",
       });
     } finally {
       setBulkScheduleRunning(false);
     }
   };
 
-  const handleBulkTodayPublish = async () => {
+  const handleBulkTodayPublish = async (requestedLimit = MAX_TODAY_PUBLISH_LIMIT) => {
     const busyMessage = getBusyMessage();
     if (busyMessage) {
       setDashboardNotice({
@@ -1689,7 +1645,7 @@ export default function Dashboard() {
     }
 
     const readyImmediateCount = links.filter(
-      (link) => isBrandLinkForKind(link, brandConnectKind) && link.status === "READY" && formatDateDisplay(link.scheduledPublishAt) !== "-"
+      (link) => isBrandLinkForKind(link, brandConnectKind) && link.status === "READY"
     ).length;
 
     if (readyImmediateCount === 0) {
@@ -1700,7 +1656,7 @@ export default function Dashboard() {
       return;
     }
 
-    const limit = Math.min(MAX_TODAY_PUBLISH_LIMIT, readyImmediateCount);
+    const limit = Math.min(requestedLimit, MAX_TODAY_PUBLISH_LIMIT, readyImmediateCount);
 
     try {
       setBulkTodayRunning(true);
@@ -1743,14 +1699,24 @@ export default function Dashboard() {
           data.data?.targetDate ? ` (${data.data.targetDate})` : ""
         }${data.data?.logFile ? ` / 로그: ${data.data.logFile}` : ""}`,
       });
-      setTimeout(() => {
-        void fetchLinks();
-      }, 1500);
+      if (!data.data?.jobId) throw new Error("작업 추적 ID가 없습니다. 중복 실행하지 말고 상태를 확인하세요.");
+      for (;;) {
+        await waitForMilliseconds(3000);
+        const response = await fetch(`/api/brandlinks/bulk-today?jobId=${encodeURIComponent(data.data.jobId)}`);
+        const status = await response.json();
+        if (!response.ok || !status.success) throw new Error(status.error || "상태 확인 실패");
+        await fetchLinks();
+        if (status.data.status === "failed") throw new Error(status.data.error || "일부 발행 실패");
+        if (status.data.status === "completed") {
+          setDashboardNotice({ tone: "success", text: "요청한 바로 일괄발행이 완료되었습니다." });
+          break;
+        }
+      }
     } catch (error) {
       console.error("바로 일괄발행 실패:", error);
       setDashboardNotice({
         tone: "error",
-        text: "바로 일괄발행 중 오류가 발생했습니다.",
+        text: error instanceof Error ? error.message : "바로 일괄발행 중 오류가 발생했습니다.",
       });
     } finally {
       setBulkTodayRunning(false);
@@ -1891,7 +1857,7 @@ export default function Dashboard() {
   const readyScheduledCount = visibleLinks.filter(
     (link) => link.status === "READY" && formatDateDisplay(link.scheduledPublishAt) !== "-"
   ).length;
-  const readyImmediateCount = readyScheduledCount;
+    const readyImmediateCount = visibleLinks.filter(link => link.status === "READY").length;
   const draftPrepareCandidateCount = visibleLinks.filter(
     (link) => ["READY", "FAILED"].includes(link.status) && !link.draftApproved,
   ).length;
@@ -2881,7 +2847,7 @@ export default function Dashboard() {
                         : `소재 미리 작성 (${Math.min(MAX_BULK_DRAFT_PREPARE_LIMIT, draftPrepareCandidateCount)}건)`}
                     </button>
                     <button
-                      onClick={handleBulkSchedulePublish}
+                      onClick={() => void handleBulkSchedulePublish()}
                       disabled={travelPublishingUnavailable || bulkDraftPreparing || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId) || readyScheduledCount === 0}
                       title={travelPublishingUnavailable ? "여행 계약 자동 캡처 후 사용할 수 있습니다." : undefined}
                       className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
@@ -2889,13 +2855,17 @@ export default function Dashboard() {
                       {bulkScheduleRunning ? "예약발행 일괄 실행 중..." : `${activeConnectLabel} 예약발행 (${Math.min(MAX_BULK_SCHEDULE_LIMIT, readyScheduledCount)}건)`}
                     </button>
                     <button
-                      onClick={handleBulkTodayPublish}
+                      onClick={() => void handleBulkTodayPublish()}
                       disabled={travelPublishingUnavailable || bulkDraftPreparing || bulkSeasonalRunning || bulkScheduleRunning || bulkTodayRunning || superPublishingRunning || topicBulkScheduleRunning || Boolean(publishingId) || readyImmediateCount === 0}
                       title={travelPublishingUnavailable ? "여행 계약 자동 캡처 후 사용할 수 있습니다." : undefined}
                       className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                     >
                       {bulkTodayRunning ? "바로 일괄발행 중..." : `${activeConnectLabel} 바로발행 (${Math.min(MAX_TODAY_PUBLISH_LIMIT, readyImmediateCount)}건)`}
                     </button>
+                    {brandConnectKind === "travel" && <>
+                      <button onClick={() => void handleBulkSchedulePublish(10)} disabled={Boolean(getBusyMessage()) || travelPublishingUnavailable || readyScheduledCount === 0} className="rounded-lg bg-indigo-600 px-3 py-2 text-sm text-white disabled:opacity-50">{Math.min(10, readyScheduledCount)}개 예약발행</button>
+                      <button onClick={() => void handleBulkTodayPublish(10)} disabled={Boolean(getBusyMessage()) || travelPublishingUnavailable || readyImmediateCount === 0} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm text-white disabled:opacity-50">{Math.min(10, readyImmediateCount)}개 바로발행</button>
+                    </>}
                   </div>
                   {travelPublishingUnavailable && (
                     <p className="mt-3 rounded-lg bg-amber-100 px-3 py-2 text-xs text-amber-900">
@@ -2932,11 +2902,11 @@ export default function Dashboard() {
                 {
                   no: "1",
                   title: draftCreationMode === "codex" ? "GPT 자동작성" : draftCreationMode === "browser-chatgpt" ? "웹 GPT 자동작성" : "글 준비",
-                  text: draftCreationMode === "codex" ? "브라우저 없이 백그라운드에서 만들고 미리봅니다" : draftCreationMode === "browser-chatgpt" ? "로그인된 ChatGPT에서 만들고 바로 미리봅니다" : "고품질 초안을 먼저 만듭니다",
+                  text: "저장된 원고를 우선 사용하고 없으면 작성합니다",
                   color: "bg-violet-600",
                 },
                 { no: "2", title: "썸네일", text: brandConnectKind === "travel" ? "여행 표지 스타일을 고릅니다" : "상품 원본을 잠그고 합성합니다", color: brandConnectKind === "travel" ? "bg-amber-500" : "bg-blue-600" },
-                { no: "3", title: "확인 후 발행", text: "승인한 글과 이미지만 발행합니다", color: "bg-emerald-600" },
+                { no: "3", title: "자동 검수·발행", text: "검수·보강·승인 후 발행 결과까지 확인합니다", color: "bg-emerald-600" },
               ].map((step) => <div key={step.no} className="flex items-center gap-3 rounded-xl bg-slate-50 px-3 py-2"><span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-black text-white ${step.color}`}>{step.no}</span><div><p className="text-sm font-bold text-slate-900">{step.title}</p><p className="text-[11px] text-slate-500">{step.text}</p></div></div>)}
             </div>
 
@@ -2961,7 +2931,7 @@ export default function Dashboard() {
                     <th className="px-4 py-3 text-left text-sm font-medium text-slate-600">상품</th>
                     <th className="px-4 py-3 text-center text-sm font-medium text-slate-600">상태</th>
                     <th className="px-4 py-3 text-center text-sm font-medium text-slate-600">설정</th>
-                    <th className="px-4 py-3 text-center text-sm font-medium text-slate-600">글 만들기</th>
+                    <th className="px-4 py-3 text-center text-sm font-medium text-slate-600">자동 발행</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -3012,7 +2982,7 @@ export default function Dashboard() {
                             {link.draftApproved ? (
                               <div className="mt-1 text-[11px] font-semibold text-emerald-700">소재 준비완료</div>
                             ) : link.draftPrepared ? (
-                              <div className="mt-1 text-[11px] font-semibold text-amber-700">소재 검토필요</div>
+                              <div className="mt-1 text-[11px] font-semibold text-amber-700">저장 원고 · 자동 검수 대기</div>
                             ) : null}
                             {link.errorMessage && (
                               <div className="text-xs text-red-500 mt-1" title={link.errorMessage}>
@@ -3090,34 +3060,9 @@ export default function Dashboard() {
                               >
                                 2. 썸네일
                               </button>
-                              <button
-                                onClick={() => void handleOpenOrPrepareBrandDraft(link)}
-                                disabled={bulkDraftPreparing || (!link.draftPrepared && draftCreationMode === "checking") || draftGeneratingId === link.id || link.status === "DRAFTING" || Boolean(publishingId)}
-                                className="whitespace-nowrap rounded-lg bg-violet-600 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-violet-700 disabled:opacity-50"
-                                title={link.draftPrepared ? "저장된 초안을 열어 내용과 승인 조건을 확인합니다" : draftCreationMode === "chatgpt"
-                                  ? "상품별 요청문을 복사해 연결된 ChatGPT에서 초안을 만듭니다"
-                                  : draftCreationMode === "codex"
-                                    ? "연결된 GPT가 백그라운드에서 원고를 작성하고 미리보기를 엽니다"
-                                  : draftCreationMode === "browser-chatgpt"
-                                    ? "로그인된 ChatGPT 웹에서 초안을 자동 작성하고 미리보기를 엽니다"
-                                    : "글·이미지를 먼저 만들고 확인한 뒤 같은 결과를 발행합니다"}
-                              >
-                                {draftGeneratingId === link.id || link.status === "DRAFTING"
-                                  ? "글 준비 중..."
-                                  : link.draftApproved
-                                    ? "1. 준비된 소재 보기"
-                                  : link.draftPrepared
-                                    ? "초안 확인·수정"
-                                  : draftCreationMode === "checking"
-                                    ? "1. 작성 방식 확인 중"
-                                    : draftCreationMode === "chatgpt"
-                                      ? "1. ChatGPT로 글 만들기"
-                                      : draftCreationMode === "codex"
-                                        ? "1. GPT로 글 만들기"
-                                      : draftCreationMode === "browser-chatgpt"
-                                        ? "1. 웹 GPT 자동작성"
-                                        : "1. 글 준비·확인"}
-                              </button>
+                              <button onClick={() => void handlePublish(link.id)} disabled={Boolean(getBusyMessage()) || !["READY", "FAILED"].includes(link.status) || (link.connectKind === "TRAVEL" && travelPublishingUnavailable)} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50">즉시발행하기</button>
+                              <button onClick={() => void handleSchedulePublish(link)} disabled={Boolean(getBusyMessage()) || !["READY", "FAILED"].includes(link.status) || (link.connectKind === "TRAVEL" && travelPublishingUnavailable)} className="rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50">예약발행하기</button>
+                              {link.draftPrepared && <button onClick={() => void handleOpenOrPrepareBrandDraft(link)} className="rounded-lg border px-3 py-2 text-sm">저장 원고 보기</button>}
                               {/* 여행 계약 잠금만 목록에서 표시하고, 실제 발행은 승인 창에서 진행 */}
                               {link.status === "READY" && link.connectKind === "TRAVEL" && travelPublishingUnavailable && (
                                 <span
@@ -3149,12 +3094,7 @@ export default function Dashboard() {
                             </div>
                             {/* 발행 진행률 */}
                             {publishingId === link.id && (
-                              <PublishProgress
-                                linkId={link.id}
-                                isPublishing={publishingId === link.id}
-                                onComplete={handlePublishComplete}
-                                onError={handlePublishError}
-                              />
+                              <p role="status" className="mt-2 text-sm text-indigo-700">초안 준비·자동 검수·발행 진행 중 — 완료 결과를 기다리고 있습니다.</p>
                             )}
                             {/* 발행된 글 URL */}
                             {link.status === "PUBLISHED" && link.postUrl && (
@@ -3184,9 +3124,9 @@ export default function Dashboard() {
           <ol className="text-sm text-slate-600 space-y-1 list-decimal list-inside">
             <li>네이버 로그인 상태를 확인하고 쇼핑 또는 여행 탭을 선택합니다.</li>
             <li>여러 상품은 <strong>소재 미리 작성</strong>으로 글·썸네일·본문 이미지를 먼저 준비할 수 있습니다.</li>
-            <li>개별 상품은 <strong>{draftCreationMode === "chatgpt" ? "1. GPT로 글 만들기" : draftCreationMode === "codex" ? "1. GPT로 글 만들기" : draftCreationMode === "browser-chatgpt" ? "1. 웹 GPT 자동작성" : "1. 글 준비·확인"}</strong>에서 확인하고 수정합니다.</li>
+            <li>개별 상품은 <strong>즉시발행하기</strong> 또는 <strong>예약발행하기</strong>를 선택합니다. 예약은 날짜를 지정합니다.</li>
             <li><strong>2. 썸네일</strong>에서 실제 사진과 디자인 스타일을 고릅니다.</li>
-            <li>준비완료 소재는 <strong>3. 바로 발행</strong> 또는 예약발행 때 재생성 없이 사용됩니다.</li>
+            <li>저장된 원고를 우선 재사용합니다. 이미지 보충·검수·보강과 승인은 자동으로 처리하며, 통과하지 못한 글은 사유를 남깁니다.</li>
           </ol>
         </div>
       </main>

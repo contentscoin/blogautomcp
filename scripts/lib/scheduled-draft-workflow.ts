@@ -1,18 +1,19 @@
 import http from "node:http";
 
-interface Result {
+export interface Result {
   success: boolean;
   code?: string;
   error?: string;
   data?: {
     status?: string;
+    postUrl?: string;
     scheduledPublishAt?: string;
     errorMessage?: string;
     imageGeneration?: { status: string };
     imageSlots?: { missing: number; generationMissing: number }[];
   } | null;
 }
-type Call = (path: string, method: string, body?: object) => Promise<Result>;
+export type Call = (path: string, method: string, body?: object) => Promise<Result>;
 
 // Local requests can run for many minutes while images are generated. A broken
 // connection is never automatically retried: publication may have taken effect.
@@ -39,7 +40,7 @@ export const localScheduleCall: Call = (pathname, method, body) => new Promise((
   request.end(body ? JSON.stringify(body) : undefined);
 });
 
-export async function runScheduledDraftWorkflow(id: string, date: string, deps: {
+export async function runAutomaticDraftWorkflow(id: string, publication: { publishMode: "now" | "schedule"; scheduledDate?: string }, deps: {
   call: Call; pause: () => Promise<void>;
 } = { call: localScheduleCall, pause: () => new Promise(resolve => setTimeout(resolve, 3000)) }) {
   const base = `/api/brandlinks/${encodeURIComponent(id)}`;
@@ -68,13 +69,17 @@ export async function runScheduledDraftWorkflow(id: string, date: string, deps: 
     await deps.call(`${base}/draft`, "PATCH", { action: "recheck" });
     await deps.call(`${base}/draft`, "PATCH", { action: "approve" });
   }
-  await deps.call(`${base}/publish`, "POST", { publishMode: "schedule", scheduledDate: date });
+  await deps.call(`${base}/publish`, "POST", publication);
   for (;;) {
     const result = await deps.call(base, "GET");
-    if (result.data?.status === "SCHEDULED") return;
+    const expected = publication.publishMode === "schedule" ? "SCHEDULED" : "PUBLISHED";
+    if (result.data?.status === expected) return result.data;
     if (result.data?.status !== "PUBLISHING") {
       throw new Error(result.data?.errorMessage || `예약 등록 미확인: ${result.data?.status || "MISSING"}`);
     }
     await deps.pause();
   }
 }
+
+export const runScheduledDraftWorkflow = (id: string, date: string, deps?: Parameters<typeof runAutomaticDraftWorkflow>[2]) =>
+  runAutomaticDraftWorkflow(id, { publishMode: "schedule", scheduledDate: date }, deps);

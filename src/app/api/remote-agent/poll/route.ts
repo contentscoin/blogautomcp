@@ -1204,68 +1204,54 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
   }
 
   if (job.type === "POST_PUBLISH" || job.type === "POST_SCHEDULE") {
-    const draftId = readString(input, "draftId");
-    if (!draftId || input.confirmed !== true) throw new LocalAutomationError("INVALID_INPUT", "발행 대상과 confirmed=true 확인이 필요합니다.");
+    const draftId = readString(input, "draftId") || readString(input, "productId");
+    if (!draftId || input.confirmed !== true) throw new LocalAutomationError("INVALID_INPUT", "상품 ID와 confirmed=true가 필요합니다.");
     const product = await requireProduct(draftId, kind);
     const schedule = job.type === "POST_SCHEDULE";
     const scheduledDate = readString(input, "scheduledDate");
-    if (schedule && !/^\d{4}-\d{2}-\d{2}$/.test(scheduledDate)) throw new LocalAutomationError("INVALID_INPUT", "scheduledDate는 YYYY-MM-DD 형식이어야 합니다.");
-    // 자동 승인은 하지 않는다. ChatGPT 가 post_get_draft 로 검토하고 post_approve_draft 로 승인한 초안만 발행한다.
-    const manifest = readBrandPostPackage(draftId);
-    if (!manifest) throw new LocalAutomationError("DRAFT_NOT_FOUND", LOCAL_AUTOMATION_ERROR_HINTS.DRAFT_NOT_FOUND);
-    if (!manifest.approvedAt) throw new LocalAutomationError("DRAFT_NOT_APPROVED", LOCAL_AUTOMATION_ERROR_HINTS.DRAFT_NOT_APPROVED);
-    if (manifest.contentQuality && manifest.contentQuality.canPublish === false) {
-      throw new LocalAutomationError("CONTENT_BLOCKED", `초안 품질검사가 발행 보류 상태입니다: ${manifest.contentQuality.reason || manifest.contentQuality.summary}`);
+    ctx.setStage("auto-publish", "저장 초안 우선 · 자동 검수·보강·발행", 10);
+    const endpoint = `/api/brandlinks/${encodeURIComponent(draftId)}/auto-publish`;
+    await localApi(request, endpoint, { method: "POST", body: JSON.stringify(
+      schedule ? { publishMode: "schedule", scheduledDate } : { publishMode: "now" }) });
+    for (;;) {
+      assertNotCancelled(ctx);
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      const payload = await localApi(request, endpoint);
+      const data = (payload.data || {}) as Record<string, unknown>;
+      if (data.status === "failed") throw new LocalAutomationError("LOCAL_AUTOMATION_FAILED", String(data.error || "자동 발행 실패"));
+      if (!["running", "completed", "failed"].includes(String(data.status))) throw new LocalAutomationError("LOCAL_AUTOMATION_FAILED", "자동 발행 상태가 올바르지 않습니다. 중복 실행하지 말고 결과를 확인하세요.");
+      if (data.status === "completed") return envelope(job, "publish-result", schedule ? "예약 등록 완료" : "즉시 발행 완료", {
+        draftId, productName: product.productName, ...(data.result as Record<string, unknown>), inProgress: false,
+      }, ctx);
+      ctx.setStage("auto-publish", String(data.stage || "발행 결과 확인 중"), 50);
     }
-    ctx.setStage("publish:start", schedule ? `예약 발행 시작 (${scheduledDate})` : "즉시 발행 시작", 10);
-    const started = await localApi(request, `/api/brandlinks/${encodeURIComponent(draftId)}/publish`, {
-      method: "POST",
-      body: JSON.stringify(schedule ? { publishMode: "schedule", scheduledDate } : { publishMode: "now" }),
-    });
-    const startedData = (started.data || {}) as Record<string, unknown>;
-    const outcome = await waitForPublishOutcome(ctx, draftId);
-    if (outcome.status === "FAILED") {
-      const classified = classifyLocalFailure({ message: outcome.errorMessage || "" });
-      throw new LocalAutomationError(classified === "LOCAL_AUTOMATION_FAILED" ? "EDITOR_FAILED" : classified, outcome.errorMessage || "발행 프로세스가 실패했습니다.");
-    }
-    if (outcome.timedOut) ctx.warnings.push("발행이 아직 진행 중입니다. post_verify_published 로 결과를 확인하세요.");
-    const summary = outcome.timedOut
-      ? `발행 진행 중 (${Math.round(PUBLISH_WAIT_MS / 60_000)}분 대기 초과). 잠시 후 post_verify_published 로 확인하세요.`
-      : schedule
-        ? `예약 발행 등록 완료 (${(startedData.effectiveScheduledDate as string) || scheduledDate})${outcome.postUrl ? ` — ${outcome.postUrl}` : ""}`
-        : `발행 완료${outcome.postUrl ? ` — ${outcome.postUrl}` : ""}`;
-    return envelope(job, "publish-result", summary, {
-      draftId,
-      productName: product.productName,
-      publishMode: schedule ? "schedule" : "now",
-      status: outcome.status,
-      postUrl: outcome.postUrl,
-      publishedAt: outcome.publishedAt,
-      scheduledPublishAt: outcome.scheduledPublishAt,
-      requestedScheduledDate: startedData.requestedScheduledDate ?? (schedule ? scheduledDate : null),
-      effectiveScheduledDate: startedData.effectiveScheduledDate ?? null,
-      adjustedFromPast: startedData.adjustedFromPast ?? false,
-      inProgress: outcome.timedOut,
-    }, ctx, { readiness: manifest.specValidation ?? manifest.contentQuality ?? null });
   }
 
   if (job.type === "POST_BULK_SCHEDULE") {
     if (input.confirmed !== true) throw new LocalAutomationError("INVALID_INPUT", "confirmed=true 확인이 필요합니다.");
-    const limit = readInteger(input, "limit", 5, 1, 50);
+    const limit = readInteger(input, "limit", 10, 1, 50);
     const intervalDays = readInteger(input, "intervalDays", 1, 1, 30);
     const startDate = readString(input, "startDate");
-    if (startDate && !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) throw new LocalAutomationError("INVALID_INPUT", "startDate는 YYYY-MM-DD 형식이어야 합니다.");
-    ctx.setStage("bulk-schedule", `예약발행 일괄 실행 (최대 ${limit}건)`, 20);
-    const payload = await localApi(request, "/api/brandlinks/bulk-schedule", {
-      method: "POST",
-      body: JSON.stringify({ connectKind: kind.toLowerCase(), limit, intervalDays, ...(startDate ? { startDate } : {}) }),
+    const now = input.publishMode === "now";
+    const endpoint = now ? "/api/brandlinks/bulk-today" : "/api/brandlinks/bulk-schedule";
+    ctx.setStage("bulk-publish", `자동 검수·보강 후 ${now ? "즉시" : "예약"} 발행 (최대 ${limit}건)`, 10);
+    const payload = await localApi(request, endpoint, { method: "POST",
+      body: JSON.stringify({ connectKind: kind.toLowerCase(), limit, intervalDays, allScheduled: true, ...(startDate ? { startDate } : {}) }),
     });
     const data = (payload.data || {}) as Record<string, unknown>;
-    const { logFile: _logFile, ...rest } = data;
-    void _logFile;
-    return envelope(job, "bulk-schedule", typeof payload.message === "string" ? payload.message : "예약발행 일괄 실행을 시작했습니다.", { connectKind: kind.toLowerCase(), ...rest, note: "백그라운드로 진행됩니다. brandconnect_list_products(status=published) 로 결과를 확인하세요." }, ctx);
+    if (data.targetCount === 0) return envelope(job, "bulk-publish", "발행 가능한 상품이 없습니다.", data, ctx);
+    if (!data.jobId) throw new LocalAutomationError("LOCAL_AUTOMATION_FAILED", "실행 결과 추적 ID가 없습니다. 재실행하지 말고 상태를 확인하세요.");
+    for (;;) {
+      assertNotCancelled(ctx);
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      const status = await localApi(request, `${endpoint}?jobId=${encodeURIComponent(String(data.jobId))}`);
+      const result = (status.data || {}) as Record<string, unknown>;
+      if (result.status === "failed") throw new LocalAutomationError("LOCAL_AUTOMATION_FAILED", `성공 ${result.successCount ?? 0}건 / 실패 ${result.failedCount ?? 0}건 / 대상 ${result.targetCount}건: ${String(result.error || "일부 발행 실패")}`);
+      if (!["running", "completed", "failed"].includes(String(result.status))) throw new LocalAutomationError("LOCAL_AUTOMATION_FAILED", "일괄 발행 상태를 확인할 수 없습니다.");
+      if (result.status === "completed") return envelope(job, "bulk-publish", "요청한 일괄 발행 처리가 완료되었습니다.", result, ctx);
+      ctx.setStage("bulk-publish", `최대 ${limit}건의 실제 발행 결과를 기다리고 있습니다.`, 50);
+    }
   }
-
   if (job.type === "POST_VERIFY_PUBLISHED") {
     const draftId = readString(input, "draftId");
     await requireProduct(draftId, kind);

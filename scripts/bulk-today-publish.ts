@@ -1,11 +1,7 @@
+import { preparedPostsFirst } from "../src/lib/prepared-post-priority";
 import "dotenv/config";
-import path from "path";
-import { spawn } from "child_process";
+import { runAutomaticDraftWorkflow } from "./lib/scheduled-draft-workflow";
 import { PrismaClient } from "../src/generated/prisma";
-import {
-  buildChatGptBrowserAutomationEnv,
-  isChatGptBrowserAutomationEnabled,
-} from "../src/lib/chatgpt-browser-automation";
 import {
   buildAppUrl,
   notifyAndLogCompletion,
@@ -22,8 +18,6 @@ interface CliOptions {
 }
 
 const NAVER_SCHEDULE_TIMEZONE = process.env.NAVER_SCHEDULE_TIMEZONE || "Asia/Seoul";
-const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
-const AGENT_AI_PROVIDER = process.env.AI_PROVIDER || "openai";
 
 function parseArgs(argv: string[]): CliOptions {
   const options: CliOptions = {
@@ -119,53 +113,10 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "알 수 없는 오류";
 }
 
-function runSimpleAgentNow(
-  linkId: string
-): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
-  const scriptPath = path.join(process.cwd(), "scripts", "simple-agent.ts");
-
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      process.execPath,
-      [
-        TS_NODE_BIN,
-        "--project",
-        "tsconfig.scripts.json",
-        scriptPath,
-        linkId,
-        "--publish-mode=now",
-      ],
-      {
-        cwd: process.cwd(),
-        stdio: ["ignore", "inherit", "inherit"],
-        shell: false,
-        env: {
-          ...process.env,
-          AI_PROVIDER: AGENT_AI_PROVIDER,
-          ...buildChatGptBrowserAutomationEnv(isChatGptBrowserAutomationEnabled()),
-          HUMAN_MOBILE_POLISH_ENABLED: "true",
-          PRODUCT_THUMBNAIL_CHATGPT_ENABLED: process.env.PRODUCT_THUMBNAIL_CHATGPT_ENABLED || "false",
-          PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE:
-            process.env.PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE || "false",
-          PRODUCT_THUMBNAIL_IMAGE_WAIT_MS:
-            process.env.PRODUCT_THUMBNAIL_IMAGE_WAIT_MS || "60000",
-          PRODUCT_THUMBNAIL_COMPOSITE_FALLBACK_ENABLED:
-            process.env.PRODUCT_THUMBNAIL_COMPOSITE_FALLBACK_ENABLED || "false",
-          CHATBOT_SUPPRESS_AGENT_NOTIFY: "true",
-        },
-      }
-    );
-
-    child.once("error", (error) => {
-      reject(error);
-    });
-
-    child.once("close", (code, signal) => {
-      resolve({ code, signal });
-    });
-  });
+async function runSimpleAgentNow(linkId: string) {
+  await runAutomaticDraftWorkflow(linkId, { publishMode: "now" });
+  return { code: 0, signal: null };
 }
-
 async function main() {
   const prisma = new PrismaClient();
   const options = parseArgs(process.argv.slice(2));
@@ -183,7 +134,6 @@ async function main() {
         ...createdAfterWhere,
         connectKind: options.connectKind,
         status: "READY",
-        scheduledPublishAt: { not: null },
       }
     : {
         ...createdAfterWhere,
@@ -196,21 +146,26 @@ async function main() {
       };
 
   try {
-    const pending = await prisma.brandLink.findMany({
+    const selected = preparedPostsFirst(await prisma.brandLink.findMany({
       where: pendingWhere,
       orderBy: [{ scheduledPublishAt: "asc" }, { createdAt: "asc" }],
-      take: options.limit,
       select: {
         id: true,
         productName: true,
         scheduledPublishAt: true,
       },
-    });
+    }), process.env.BULK_TARGET_IDS_JSON ? Number.MAX_SAFE_INTEGER : options.limit);
+    const targetIds: string[] | null = process.env.BULK_TARGET_IDS_JSON ? JSON.parse(process.env.BULK_TARGET_IDS_JSON) : null;
+    const pending = targetIds ? targetIds.map(id => {
+      const row = selected.find(item => item.id === id);
+      if (!row) throw new Error(`선택한 상품이 더 이상 발행 가능하지 않습니다: ${id}`);
+      return row;
+    }) : selected;
 
     if (pending.length === 0) {
       console.log(
         options.allScheduled
-          ? "예약발행일이 설정된 READY 링크가 없어 종료합니다."
+          ? "바로 발행할 READY 링크가 없어 종료합니다."
           : `오늘 날짜(${targetDate})로 예약된 READY 링크가 없어 종료합니다.`
       );
       return;
@@ -240,7 +195,6 @@ async function main() {
       await prisma.brandLink.update({
         where: { id: link.id },
         data: {
-          status: "PUBLISHING",
           errorMessage: null,
         },
       });
@@ -290,21 +244,7 @@ async function main() {
             description: refreshed.postUrl ? "발행글" : "대시보드 확인",
           });
         } else if (refreshed?.status === "PUBLISHING") {
-          failedCount += 1;
-          await prisma.brandLink.update({
-            where: { id: link.id },
-            data: {
-              status: "FAILED",
-              errorMessage: "바로 일괄발행 처리 결과를 확인하지 못했습니다.",
-            },
-          });
-          failedLinks.push({
-            label: refreshed.productName || link.productName || link.id,
-            url: buildAppUrl(`/?brandLinkId=${link.id}`),
-            scheduledDate,
-            status: "FAILED",
-            description: "바로발행 결과 확인 실패",
-          });
+          throw new Error("발행 결과가 불확실합니다. 중복 실행하지 말고 진행 상태를 확인하세요.");
         } else if (refreshed?.status === "FAILED") {
           failedCount += 1;
           failedLinks.push({
@@ -315,20 +255,22 @@ async function main() {
             description: refreshed.errorMessage || "발행 실패",
           });
         } else {
-          successCount += 1;
-          completedLinks.push({
+          failedCount += 1;
+          failedLinks.push({
             label: refreshed?.productName || link.productName || link.id,
             url: refreshed?.postUrl || buildAppUrl(`/?brandLinkId=${link.id}`),
             scheduledDate,
             status: refreshed?.status || "DONE",
-            description: "처리 완료",
+            description: "실제 발행 완료가 확인되지 않았습니다.",
           });
         }
       } catch (error: unknown) {
+        const uncertain = await prisma.brandLink.findUnique({ where: { id: link.id }, select: { status: true } });
+        if (uncertain?.status === "PUBLISHING") throw new Error(`발행 중 연결이 끊겼습니다 (${link.id}). 중복 실행 방지를 위해 나머지 작업을 중단합니다. 실제 발행 결과를 먼저 확인하세요.`);
         failedCount += 1;
         const message = getErrorMessage(error);
         await prisma.brandLink.updateMany({
-          where: { id: link.id, status: "PUBLISHING" },
+          where: { id: link.id, status: { in: ["READY", "FAILED"] } },
           data: {
             status: "FAILED",
             errorMessage: `바로 일괄발행 실행 실패: ${message}`,

@@ -1,3 +1,4 @@
+import { preparedPostsFirst } from "../src/lib/prepared-post-priority";
 import "dotenv/config";
 import { runScheduledDraftWorkflow } from "./lib/scheduled-draft-workflow";
 import { PrismaClient } from "../src/generated/prisma";
@@ -228,7 +229,7 @@ async function main() {
     : {};
 
   try {
-    const pending = await prisma.brandLink.findMany({
+    const selected = preparedPostsFirst(await prisma.brandLink.findMany({
       where: {
         ...createdAfterWhere,
         connectKind: options.connectKind,
@@ -236,13 +237,18 @@ async function main() {
         scheduledPublishAt: { not: null },
       },
       orderBy: [{ scheduledPublishAt: "asc" }, { createdAt: "asc" }],
-      take: options.limit,
       select: {
         id: true,
         productName: true,
         scheduledPublishAt: true,
       },
-    });
+    }), process.env.BULK_TARGET_IDS_JSON ? Number.MAX_SAFE_INTEGER : options.limit);
+    const targetIds: string[] | null = process.env.BULK_TARGET_IDS_JSON ? JSON.parse(process.env.BULK_TARGET_IDS_JSON) : null;
+    const pending = targetIds ? targetIds.map(id => {
+      const row = selected.find(item => item.id === id);
+      if (!row) throw new Error(`선택한 상품이 더 이상 발행 가능하지 않습니다: ${id}`);
+      return row;
+    }) : selected;
 
     if (pending.length === 0) {
       console.log("예약발행일이 설정된 READY 링크가 없어 종료합니다.");
@@ -401,21 +407,7 @@ async function main() {
             description: "예약발행 확인",
           });
         } else if (refreshed?.status === "PUBLISHING") {
-          failedCount += 1;
-          await prisma.brandLink.update({
-            where: { id: link.id },
-            data: {
-              status: "FAILED",
-              errorMessage: "예약발행 처리 결과를 확인하지 못했습니다.",
-            },
-          });
-          failedLinks.push({
-            label: refreshed.productName || link.productName || link.id,
-            url: buildAppUrl(`/?brandLinkId=${link.id}`),
-            scheduledDate,
-            status: "FAILED",
-            description: "예약발행 결과 확인 실패",
-          });
+          throw new Error("발행 결과가 불확실합니다. 중복 실행하지 말고 진행 상태를 확인하세요.");
         } else if (refreshed?.status === "FAILED") {
           failedCount += 1;
           failedLinks.push({
@@ -438,6 +430,8 @@ async function main() {
           });
         }
       } catch (error: unknown) {
+        const uncertain = await prisma.brandLink.findUnique({ where: { id: link.id }, select: { status: true } });
+        if (uncertain?.status === "PUBLISHING") throw new Error(`발행 중 연결이 끊겼습니다 (${link.id}). 중복 실행 방지를 위해 나머지 작업을 중단합니다. 실제 발행 결과를 먼저 확인하세요.`);
         failedCount += 1;
         const message = getErrorMessage(error);
         await prisma.brandLink.updateMany({

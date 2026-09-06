@@ -4,6 +4,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { cancelBrandPostImageRepairs } from "@/lib/brand-post-image-repair";
+import { cancelAutomaticPublishing } from "@/lib/desktop-activity";
 
 const execFileAsync = promisify(execFile);
 
@@ -17,6 +18,7 @@ const PUBLISH_SCRIPT_SIGNATURES = [
   "super-publish",
   "topic-agent",
   "bulk-schedule-publish",
+  "bulk-today-publish",
   "bulk-topic-schedule-publish",
   "brandconnect-seasonal-register",
 ];
@@ -33,7 +35,7 @@ async function killRunningPublishProcesses(): Promise<{ killed: number; detail: 
   if (process.platform === "win32") {
     // 1) 발행 스크립트를 실행 중인 node 프로세스 PID 수집
     const psScript =
-      `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | ` +
+      `Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='electron.exe' OR Name='BrandConnect Automation.exe'" | ` +
       `Where-Object { $_.CommandLine -match '${sig}' } | ` +
       `ForEach-Object { $_.ProcessId }`;
     let pids: number[] = [];
@@ -86,6 +88,7 @@ export async function POST(request: NextRequest) {
       return authError;
     }
 
+    cancelAutomaticPublishing();
     const cancelledImageJobs = cancelBrandPostImageRepairs();
     const kill = await killRunningPublishProcesses();
 

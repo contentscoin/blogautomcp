@@ -52,7 +52,13 @@ for (const jobType of ['SETTINGS_GET', 'POST_PUBLISH']) test(`${jobType}: actual
     '@/lib/db': { prisma: { brandLink: { findUnique: async () => ({ connectKind: 'SHOPPING', status: 'PUBLISHED', productName: 'fixture', postUrl: 'https://example.test/post' }) } } },
     '@/lib/brand-post-package': { readBrandPostPackage: () => ({ approvedAt: '2026-09-05', contentQuality: { canPublish: true } }) },
     '@/lib/naver-session': { getNaverSessionFile: () => path.join(root, 'absent') },
-    '@/lib/local-json-fetch': { localJsonFetch: async () => { executes++; return Response.json({ success: true, data: {} }); } },
+    '@/lib/local-json-fetch': { localJsonFetch: async (url, init) => {
+      if (String(url).endsWith('/auto-publish') && init.method !== 'POST') return Response.json({
+        success: true, data: { status: 'completed', result: { status: 'PUBLISHED', postUrl: 'https://example.test/post' } },
+      });
+      executes++;
+      return Response.json({ success: true, data: {} });
+    } },
     '../../../../../scripts/lib/writing-timeout-policy': { getWritingTimeoutPolicy: () => ({}) },
     '../../../../../scripts/lib/app-paths': { getUserDataRoot: () => root },
     '../../../../../scripts/lib/thumbnail-gen': { isGenerativeThumbnailAvailable: () => false },

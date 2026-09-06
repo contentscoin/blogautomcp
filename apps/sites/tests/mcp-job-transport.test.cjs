@@ -124,6 +124,16 @@ test('publication still requires write scope and explicit confirmation', async (
   assert.equal((await call('owner', 'mcp:read', 'post_publish', args)).result.structuredContent.code, 'INSUFFICIENT_SCOPE');
   assert.equal((await call('owner', 'mcp:write', 'post_publish', { ...args, confirmed: false })).result.structuredContent.code, 'INVALID_ARGUMENT');
 });
+
+test('automatic bulk publish requires explicit mode, count and confirmation', async () => {
+  const args = { connectKind: 'travel', publishMode: 'now', limit: 10, confirmed: true, idempotencyKey: 'bulk-10-fixture' };
+  assert.equal((await call('owner', 'mcp:read', 'post_bulk_publish', args)).result.structuredContent.code, 'INSUFFICIENT_SCOPE');
+  for (const change of [{ publishMode: 'invalid' }, { limit: 0 }, { limit: 51 }, { confirmed: false }]) {
+    assert.equal((await call('owner', 'mcp:write', 'post_bulk_publish', { ...args, ...change })).result.structuredContent.code, 'INVALID_ARGUMENT');
+  }
+  const { publishMode, ...missingMode } = args;
+  assert.equal((await call('owner', 'mcp:write', 'post_bulk_publish', missingMode)).result.structuredContent.code, 'INVALID_ARGUMENT');
+});
 test('large job_get is bounded and advertised pages reconstruct stored draft', async () => {
   const previous = storedResult;
   storedResult = JSON.stringify({ markdown: '한글😀'.repeat(25000), markdownTruncated: false });

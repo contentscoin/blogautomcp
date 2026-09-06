@@ -7,6 +7,25 @@ import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 import { buildCaptureRequiredPayload, parseConnectKind, toStoredConnectKind } from "@/lib/brandconnect-kind";
 import { resolveConnectContract } from "@/lib/connect-contract-store";
+import { beginAutomaticPublishing } from "@/lib/desktop-activity";
+import { randomUUID } from "node:crypto";
+import { preparedPostsFirst } from "@/lib/prepared-post-priority";
+
+type TodayJob = { jobId: string; targetCount: number; targetIds: string[]; status: "running" | "completed" | "failed"; error?: string };
+const shared = globalThis as typeof globalThis & { todayPublishJobs?: Map<string, TodayJob> };
+const jobs = shared.todayPublishJobs ??= new Map<string, TodayJob>();
+export async function GET(request: NextRequest) {
+  const auth = requireAdminApiKey(request);
+  if (auth) return auth;
+  const job = jobs.get(request.nextUrl.searchParams.get("jobId") || "");
+  if (job) {
+    const results = await prisma.brandLink.findMany({ where: { id: { in: job.targetIds } }, select: { id: true, status: true, postUrl: true, errorMessage: true } });
+    return NextResponse.json({ success: true, data: { ...job, results,
+      successCount: results.filter(row => row.status === "PUBLISHED").length,
+      failedCount: results.filter(row => row.status === "FAILED").length } });
+  }
+  return NextResponse.json(job ? { success: true, data: job } : { success: false, error: "작업을 찾을 수 없습니다. 발행 결과를 확인하고 재실행하세요." }, { status: job ? 200 : 404 });
+}
 
 interface BulkTodayBody {
   connectKind?: string;
@@ -108,7 +127,7 @@ export async function POST(request: NextRequest) {
     const activePublishing = await prisma.brandLink.count({
       where: { status: "PUBLISHING" },
     });
-    if (activePublishing > 0) {
+    if (activePublishing > 0 || [...jobs.values()].some(job => job.status === "running")) {
       return NextResponse.json(
         {
           success: false,
@@ -118,12 +137,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const pendingCount = await prisma.brandLink.count({
+    const pendingRows = preparedPostsFirst(await prisma.brandLink.findMany({
       where: allScheduled
           ? {
             connectKind: storedConnectKind,
             status: "READY",
-            scheduledPublishAt: { not: null },
           }
           : {
             connectKind: storedConnectKind,
@@ -133,13 +151,15 @@ export async function POST(request: NextRequest) {
               lt: new Date(`${nextDate}T00:00:00.000Z`),
             },
           },
-    });
+      orderBy: [{ scheduledPublishAt: "asc" }, { createdAt: "asc" }],
+      select: { id: true },
+    }), requestedLimit);
 
-    if (pendingCount === 0) {
+    if (pendingRows.length === 0) {
       return NextResponse.json({
         success: true,
         message: allScheduled
-          ? "예약발행일이 설정된 READY 링크가 없습니다."
+          ? "바로 발행할 READY 링크가 없습니다."
           : "오늘 날짜로 예약된 READY 링크가 없습니다.",
         data: {
           targetCount: 0,
@@ -148,7 +168,8 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const targetCount = Math.min(requestedLimit, pendingCount);
+    const targetCount = pendingRows.length;
+    const targetIds = pendingRows.map(row => row.id);
     const scriptPath = path.join(process.cwd(), "scripts", "bulk-today-publish.ts");
     if (!fs.existsSync(scriptPath)) {
       return NextResponse.json(
@@ -181,6 +202,12 @@ export async function POST(request: NextRequest) {
       }\n`
     );
 
+    const jobId = randomUUID();
+    const job: TodayJob = { jobId, targetCount, targetIds, status: "running" };
+    let finish: () => void;
+    try { finish = beginAutomaticPublishing("bulk-today-publish"); }
+    catch (error) { fs.closeSync(logFd); throw error; }
+    jobs.set(jobId, job);
     let child: ChildProcess;
     try {
       child = spawn(
@@ -191,23 +218,33 @@ export async function POST(request: NextRequest) {
           detached: true,
           stdio: ["ignore", logFd, logFd],
           shell: false,
-          env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", BULK_TARGET_IDS_JSON: JSON.stringify(targetIds) },
         }
       );
+    } catch (error) {
+      finish();
+      job.status = "failed";
+      job.error = getErrorMessage(error);
+      throw error;
     } finally {
       fs.closeSync(logFd);
     }
 
     if (!child.pid) {
+      finish();
+      job.status = "failed";
       throw new Error("바로 일괄발행 프로세스를 시작하지 못했습니다.");
     }
 
+    child.once("error", error => { finish(); job.status = "failed"; job.error = error.message; });
+    child.once("exit", code => { finish(); job.status = code === 0 ? "completed" : "failed"; if (code !== 0) job.error = `일부 발행 실패 또는 실행 중단 (code=${code})`; });
     child.unref();
 
     return NextResponse.json({
       success: true,
       message: allScheduled ? "바로 일괄발행을 시작했습니다." : "당일 일괄발행을 시작했습니다.",
       data: {
+        jobId,
         targetCount,
         connectKind,
         targetDate: allScheduled ? undefined : targetDate,

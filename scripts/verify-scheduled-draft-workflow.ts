@@ -1,7 +1,42 @@
 import assert from "node:assert/strict";
-import { runScheduledDraftWorkflow } from "./lib/scheduled-draft-workflow";
+import { runScheduledDraftWorkflow, runAutomaticDraftWorkflow } from "./lib/scheduled-draft-workflow";
+import { preparedPostsFirst } from "../src/lib/prepared-post-priority";
+import { beginAutomaticPublishing, automaticPublishingCancellationCheck, cancelAutomaticPublishing } from "../src/lib/desktop-activity";
 
 async function main() {
+  const candidates = Array.from({ length: 15 }, (_, i) => ({ id: String(i) }));
+  const selected = preparedPostsFirst(candidates, 10, id => Number(id) >= 12);
+  assert.deepEqual(selected.map(row => row.id), ["12", "13", "14", "0", "1", "2", "3", "4", "5", "6"]);
+  assert.equal(preparedPostsFirst(candidates.slice(0, 3), 10, () => false).length, 3);
+  assert.equal(candidates[0].id, "0", "do not mutate source ordering");
+  const release = beginAutomaticPublishing("automatic-post");
+  assert.throws(() => beginAutomaticPublishing("bulk-today-publish"), /진행 중/);
+  const check = automaticPublishingCancellationCheck();
+  cancelAutomaticPublishing();
+  assert.throws(check, /중단/);
+  release();
+  beginAutomaticPublishing("bulk-schedule-publish")();
+  for (const terminal of ["PUBLISHED", "READY", "SCHEDULED", "FAILED"]) {
+    let created = 0, published = 0, waits = 0;
+    const promise = runAutomaticDraftWorkflow("new-product", { publishMode: "now" }, {
+      pause: async () => { waits++; },
+      call: async (url, method, body) => {
+        if (url.endsWith("/draft") && method === "GET") return { success: true, data: null };
+        if (url.endsWith("/draft") && method === "POST") created++;
+        if (url.endsWith("/publish")) {
+          published++;
+          assert.deepEqual(body, { publishMode: "now" });
+        }
+        if (url.endsWith("/new-product")) return { success: true, data: { status: waits < 120 ? "PUBLISHING" : terminal } };
+        return { success: true, data: { imageSlots: [] } };
+      },
+    });
+    if (terminal === "PUBLISHED") await promise;
+    else await assert.rejects(promise);
+    assert.equal(created, 1);
+    assert.equal(published, 1);
+    assert.equal(waits, 120, "long-running publication must not finish early");
+  }
   for (const finalStatus of ["SCHEDULED", "READY", "FAILED", "PUBLISHED", "MISSING"]) {
     const events: string[] = [];
     let polls = 0;

@@ -1,3 +1,4 @@
+import { preparedPostsFirst } from "@/lib/prepared-post-priority";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { spawn, type ChildProcess } from "child_process";
@@ -6,7 +7,7 @@ import path from "path";
 import crypto from "crypto";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
-import { beginDesktopActivity } from "@/lib/desktop-activity";
+import { beginAutomaticPublishing } from "@/lib/desktop-activity";
 import { buildCaptureRequiredPayload, parseConnectKind, toStoredConnectKind } from "@/lib/brandconnect-kind";
 import { resolveConnectContract } from "@/lib/connect-contract-store";
 import {
@@ -46,7 +47,7 @@ const bulkScheduleJobs =
 function pruneBulkScheduleJobs() {
   const cutoff = Date.now() - 12 * 60 * 60_000;
   for (const [id, job] of bulkScheduleJobs) {
-    if (Date.parse(job.startedAt) < cutoff) bulkScheduleJobs.delete(id);
+    if (job.status !== "running" && Date.parse(job.startedAt) < cutoff) bulkScheduleJobs.delete(id);
   }
 }
 
@@ -83,7 +84,10 @@ export async function GET(request: NextRequest) {
   if (!job) {
     return NextResponse.json({ success: false, error: "예약발행 작업을 찾을 수 없습니다." }, { status: 404 });
   }
-  return NextResponse.json({ success: true, data: job });
+  const results = await prisma.brandLink.findMany({ where: { id: { in: job.targetIds } }, select: { id: true, status: true, scheduledPublishAt: true, errorMessage: true } });
+  return NextResponse.json({ success: true, data: { ...job, results,
+    successCount: results.filter(row => row.status === "SCHEDULED").length,
+    failedCount: results.filter(row => row.status === "FAILED").length } });
 }
 
 export async function POST(request: NextRequest) {
@@ -140,12 +144,11 @@ export async function POST(request: NextRequest) {
       status: "READY",
       scheduledPublishAt: { not: null },
     } as const;
-    const pendingRows = await prisma.brandLink.findMany({
+    const pendingRows = preparedPostsFirst(await prisma.brandLink.findMany({
       where: pendingWhere,
       orderBy: [{ scheduledPublishAt: "asc" }, { createdAt: "asc" }],
-      take: requestedLimit,
       select: { id: true, scheduledPublishAt: true },
-    });
+    }), requestedLimit);
     const pendingCount = pendingRows.length;
     const earliestPending = pendingRows[0] ?? null;
 
@@ -217,8 +220,10 @@ export async function POST(request: NextRequest) {
       exitCode: null,
       error: null,
     };
+    let finishActivity: () => void;
+    try { finishActivity = beginAutomaticPublishing("bulk-schedule-publish"); }
+    catch (error) { fs.closeSync(logFd); throw error; }
     bulkScheduleJobs.set(jobId, job);
-    const finishActivity = beginDesktopActivity("bulk-schedule-publish");
     try {
       child = spawn(
         process.execPath,
@@ -228,7 +233,7 @@ export async function POST(request: NextRequest) {
           detached: true,
           stdio: ["ignore", logFd, logFd],
           shell: false,
-          env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", BULK_TARGET_IDS_JSON: JSON.stringify(targetIds) },
         }
       );
     } catch (error) {
