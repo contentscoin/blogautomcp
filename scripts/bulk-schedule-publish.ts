@@ -1,11 +1,6 @@
 import "dotenv/config";
-import path from "path";
-import { spawn } from "child_process";
+import { runScheduledDraftWorkflow } from "./lib/scheduled-draft-workflow";
 import { PrismaClient } from "../src/generated/prisma";
-import {
-  buildChatGptBrowserAutomationEnv,
-  isChatGptBrowserAutomationEnabled,
-} from "../src/lib/chatgpt-browser-automation";
 import { addDaysToYmd, compactedScheduleDate } from "../src/lib/bulk-schedule-plan";
 import {
   buildAppUrl,
@@ -23,7 +18,6 @@ interface CliOptions {
 }
 
 const NAVER_SCHEDULE_TIMEZONE = process.env.NAVER_SCHEDULE_TIMEZONE || "Asia/Seoul";
-const AGENT_AI_PROVIDER = process.env.AI_PROVIDER || "openai";
 const NAVER_DEFAULT_SCHEDULE_HOUR = parseBoundedInteger(
   process.env.NAVER_DEFAULT_SCHEDULE_HOUR,
   9,
@@ -46,7 +40,6 @@ const NAVER_SCHEDULE_MIN_LEAD_MINUTES = parseBoundedInteger(
   0,
   1440
 );
-const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
 
 function parseBoundedInteger(
   value: string | undefined,
@@ -216,49 +209,7 @@ function runSimpleAgent(
   linkId: string,
   scheduledDate: string
 ): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
-  const scriptPath = path.join(process.cwd(), "scripts", "simple-agent.ts");
-
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      process.execPath,
-      [
-        TS_NODE_BIN,
-        "--project",
-        "tsconfig.scripts.json",
-        scriptPath,
-        linkId,
-        "--publish-mode=schedule",
-        `--scheduled-date=${scheduledDate}`,
-      ],
-      {
-        cwd: process.cwd(),
-        stdio: ["ignore", "inherit", "inherit"],
-        shell: false,
-        env: {
-          ...process.env,
-          AI_PROVIDER: AGENT_AI_PROVIDER,
-          ...buildChatGptBrowserAutomationEnv(isChatGptBrowserAutomationEnabled()),
-          HUMAN_MOBILE_POLISH_ENABLED: "true",
-          PRODUCT_THUMBNAIL_CHATGPT_ENABLED: process.env.PRODUCT_THUMBNAIL_CHATGPT_ENABLED || "false",
-          PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE:
-            process.env.PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE || "false",
-          PRODUCT_THUMBNAIL_IMAGE_WAIT_MS:
-            process.env.PRODUCT_THUMBNAIL_IMAGE_WAIT_MS || "60000",
-          PRODUCT_THUMBNAIL_COMPOSITE_FALLBACK_ENABLED:
-            process.env.PRODUCT_THUMBNAIL_COMPOSITE_FALLBACK_ENABLED || "false",
-          CHATBOT_SUPPRESS_AGENT_NOTIFY: "true",
-        },
-      }
-    );
-
-    child.once("error", (error) => {
-      reject(error);
-    });
-
-    child.once("close", (code, signal) => {
-      resolve({ code, signal });
-    });
-  });
+  return runScheduledDraftWorkflow(linkId, scheduledDate).then(() => ({ code: 0, signal: null }));
 }
 
 async function main() {
@@ -400,7 +351,6 @@ async function main() {
       await prisma.brandLink.update({
         where: { id: link.id },
         data: {
-          status: "PUBLISHING",
           errorMessage: null,
           scheduledPublishAt,
         },
@@ -491,7 +441,9 @@ async function main() {
         failedCount += 1;
         const message = getErrorMessage(error);
         await prisma.brandLink.updateMany({
-          where: { id: link.id, status: "PUBLISHING" },
+          // A disconnected API call does not prove the publisher stopped.
+          // Preserve active state to prevent an accidental duplicate retry.
+          where: { id: link.id, status: { in: ["READY", "FAILED"] } },
           data: {
             status: "FAILED",
             errorMessage: `일괄 예약발행 실행 실패: ${message}`,

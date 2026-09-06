@@ -6,6 +6,7 @@ import path from "path";
 import crypto from "crypto";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
+import { beginDesktopActivity } from "@/lib/desktop-activity";
 import { buildCaptureRequiredPayload, parseConnectKind, toStoredConnectKind } from "@/lib/brandconnect-kind";
 import { resolveConnectContract } from "@/lib/connect-contract-store";
 import {
@@ -217,6 +218,7 @@ export async function POST(request: NextRequest) {
       error: null,
     };
     bulkScheduleJobs.set(jobId, job);
+    const finishActivity = beginDesktopActivity("bulk-schedule-publish");
     try {
       child = spawn(
         process.execPath,
@@ -229,11 +231,15 @@ export async function POST(request: NextRequest) {
           env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
         }
       );
+    } catch (error) {
+      finishActivity();
+      throw error;
     } finally {
       fs.closeSync(logFd);
     }
 
     if (!child.pid) {
+      finishActivity();
       bulkScheduleJobs.set(jobId, {
         ...job,
         status: "failed",
@@ -244,6 +250,7 @@ export async function POST(request: NextRequest) {
     }
 
     child.once("error", (error) => {
+      finishActivity();
       bulkScheduleJobs.set(jobId, {
         ...job,
         status: "failed",
@@ -252,6 +259,7 @@ export async function POST(request: NextRequest) {
       });
     });
     child.once("exit", (code) => {
+      finishActivity();
       bulkScheduleJobs.set(jobId, {
         ...job,
         status: code === 0 ? "completed" : "failed",
