@@ -481,6 +481,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     }, { status: 409 });
   }
   const progressPath = getDraftProgressPath(id);
+  const previousManifest = action === "submit_generated" && fs.existsSync(getBrandPostPackageManifestPath(id))
+    ? fs.readFileSync(getBrandPostPackageManifestPath(id), "utf8") : null;
+  let submissionSaved = false;
   writeDraftProgress(id, {
     stage: "facts",
     progress: 10,
@@ -498,6 +501,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           ? JSON.parse(fs.readFileSync(contextPath, "utf8")) as Record<string, unknown>
           : null;
       const submittedSnapshot = readProductSnapshot(suppliedContext?.snapshot, { productId: id, connectKind });
+      if (suppliedContext?.version === "brand-draft-context/v1") {
+        throw new PrepareProcessError("DRAFT_CONTEXT_LEGACY", "구형 컨텍스트에는 검증 가능한 스냅샷이 없습니다. 원고를 보존한 채 post_prepare_draft로 새 근거를 준비하고 재검증하세요.");
+      }
       if (!suppliedContext || !submittedSnapshot || suppliedContext.snapshotId !== submittedSnapshot.snapshotId) {
         throw new PrepareProcessError(
           "PRODUCT_SNAPSHOT_CHANGED",
@@ -506,7 +512,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       }
       fs.writeFileSync(submittedDraftPath, JSON.stringify(submittedDraft, null, 2), "utf8");
       fs.writeFileSync(submittedContextPath, JSON.stringify(suppliedContext, null, 2), "utf8");
-      fs.rmSync(getBrandPostPackageManifestPath(id), { force: true });
+      // Keep the last saved draft until a replacement has passed validation and
+      // is persisted. A failed resubmission must not erase the user's manuscript.
     }
     if (!action) {
       // 새 초안: 이전 실행의 result.json 이 남아 실패 원인으로 오인되지 않게 지운다.
@@ -584,6 +591,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       return NextResponse.json({ success: true, data: contextData, logPath });
     }
     const manifest = readBrandPostPackage(id);
+    if (action === "submit_generated" && previousManifest !== null &&
+        fs.existsSync(getBrandPostPackageManifestPath(id)) &&
+        fs.readFileSync(getBrandPostPackageManifestPath(id), "utf8") === previousManifest) {
+      throw new PrepareProcessError("DRAFT_REPLACEMENT_NOT_SAVED", "새 원고가 저장되지 않았습니다. 기존 초안은 보존했습니다.");
+    }
     if (!manifest) {
       const failure = readPrepareFailure(logPath, id);
       throw new PrepareProcessError(failure?.code || "LOCAL_AUTOMATION_FAILED", failure?.message || `초안 매니페스트가 생성되지 않았습니다: ${getBrandPostPackageManifestPath(id)}`);
@@ -607,6 +619,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       data: { status: "READY", errorMessage: null },
     });
     writeDraftProgress(id, { stage: "done", progress: 100, message: "초안 저장 완료" });
+    submissionSaved = true;
     return NextResponse.json({
       success: true,
       data: packagePreview(finalizedManifest),
@@ -661,7 +674,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   } finally {
     finishDraftActivity();
     fs.closeSync(logFd);
-    if (action === "submit_generated") {
+    if (action === "submit_generated" && submissionSaved) {
       fs.rmSync(submittedDraftPath, { force: true });
       fs.rmSync(submittedContextPath, { force: true });
     }

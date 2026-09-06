@@ -25,7 +25,7 @@ export type PreparedDraftContextResolution =
       /** 큐 작업 입력(args.contextSnapshot)으로 전달할 슬림 컨텍스트. */
       forward: JsonObject;
     }
-  | { ok: false; code: 'PRODUCT_SNAPSHOT_CHANGED'; message: string };
+  | { ok: false; code: 'PRODUCT_SNAPSHOT_CHANGED' | 'DRAFT_CONTEXT_LEGACY' | 'DRAFT_CONTEXT_SNAPSHOT_MISSING'; message: string };
 
 const SNAPSHOT_ID_PATTERN = /^[a-f0-9]{64}$/;
 
@@ -71,6 +71,11 @@ export function resolvePreparedDraftContext(
   const snapshotProductId = snapshot ? stringField(snapshot, 'productId') : '';
   const snapshotConnectKind = snapshot ? stringField(snapshot, 'connectKind').toLowerCase() : '';
   const snapshotOwnId = snapshot ? stringField(snapshot, 'snapshotId') : '';
+  if (!snapshot) {
+    const legacy = firstString([data, nested], 'version') === 'brand-draft-context/v1';
+    return { ok: false, code: legacy ? 'DRAFT_CONTEXT_LEGACY' : 'DRAFT_CONTEXT_SNAPSHOT_MISSING',
+      message: legacy ? '구형 컨텍스트에는 상품 스냅샷이 없습니다. 기존 원고를 보존하고 새 컨텍스트로 재검증하세요.' : '상품 스냅샷이 누락되었습니다. 기존 원고를 보존하고 근거를 다시 준비하세요.' };
+  }
 
   if (
     !expected.productId || !productId || productId !== expected.productId ||

@@ -6,6 +6,13 @@ import { buildPreparedDraftView } from "../src/lib/draft-context-view";
 import { resolvePreparedDraftContext } from "../apps/sites/lib/draft-context";
 
 const productId = "2800ccf0-980c-45be-89bb-7cb64744232f";
+const mutableProduct = { name: "유토렉스 칫솔살균기", referenceImageUrls: ["https://example.test/original.jpg"] };
+const detached = createProductSnapshot({ productId, connectKind: "SHOPPING", externalProductId: "utorex-1", sourceUrl: "https://example.test/utorex", product: mutableProduct });
+mutableProduct.name = "국내생산 100% 3년연속 브랜드 대상 수상";
+mutableProduct.referenceImageUrls.push("https://example.test/other.jpg");
+assert.equal(detached.product.name, "유토렉스 칫솔살균기");
+assert.deepEqual(detached.product.referenceImageUrls, ["https://example.test/original.jpg"]);
+assert.ok(readProductSnapshot(detached), "collection mutations must not invalidate an existing snapshot");
 const snapshot = createProductSnapshot({
   productId,
   connectKind: "TRAVEL",
@@ -31,7 +38,7 @@ const pollRoute = fs.readFileSync(path.join(root, "src", "app", "api", "remote-a
 assert.ok(cloudRoute.includes("args.productId = preparedProductId"), "submit must derive the canonical product id from contextJobId");
 assert.ok(cloudRoute.includes("args.contextSnapshot = resolved.forward"), "cloud submit must forward the resolved immutable context snapshot");
 assert.ok(!cloudRoute.includes("code: 'DRAFT_CONTEXT_MISMATCH'"), "ambiguous mismatch error must be removed");
-assert.ok(cloudRoute.includes("code: 'PRODUCT_SNAPSHOT_CHANGED'"), "snapshot failures need a precise error code");
+assert.ok(cloudRoute.includes("rejectContext('PRODUCT_SNAPSHOT_CHANGED'"), "snapshot failures need a traceable error code");
 assert.ok(localDraftRoute.includes("BRANDLINK_SUBMITTED_CONTEXT_PATH"), "local draft submit must pin the forwarded snapshot");
 assert.ok(pollRoute.includes("contextSnapshot: input.contextSnapshot"), "remote poller must forward the context to the local API");
 assert.ok(pollRoute.includes("uploadDraftImageAssets"), "draft image results must get HTTPS asset URLs");
@@ -74,6 +81,11 @@ assert.equal(view.systemPrompt, "system");
 assert.deepEqual(warnings, []);
 
 const expectation = { productId, connectKind: "travel" };
+const legacyV1 = resolvePreparedDraftContext({ data: { version: "brand-draft-context/v1", productId } }, expectation);
+assert.equal(legacyV1.ok, false);
+if (!legacyV1.ok) assert.equal(legacyV1.code, "DRAFT_CONTEXT_LEGACY");
+const missingSnapshot = resolvePreparedDraftContext({ data: { version: "brand-draft-context/v2", productId } }, expectation);
+if (!missingSnapshot.ok) assert.equal(missingSnapshot.code, "DRAFT_CONTEXT_SNAPSHOT_MISSING");
 const resolvedFixed = resolvePreparedDraftContext({ data: view, productId }, expectation);
 assert.equal(resolvedFixed.ok, true, "the 1.3.11 result shape must resolve");
 if (resolvedFixed.ok) {

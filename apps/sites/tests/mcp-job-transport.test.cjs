@@ -19,7 +19,20 @@ function load(file, mocks = {}) {
   return module.exports;
 }
 
-const { resultPage, jobGuidance } = load('lib/mcp-job-status.ts');
+const { resultPage, jobGuidance, waitForJob } = load('lib/mcp-job-status.ts');
+test('bounded waiting preserves pending jobs across repeated requests', async () => {
+  let polls = 0, elapsed = 0;
+  const read = async () => ({ status: ++polls > 12 ? 'SUCCEEDED' : 'RUNNING' });
+  const sleep = async (ms) => { elapsed += ms; };
+  assert.equal((await waitForJob(read, 20000, sleep)).status, 'RUNNING');
+  assert.equal(elapsed, 20000);
+  assert.equal((await waitForJob(read, 20000, sleep)).status, 'SUCCEEDED');
+  assert.equal(jobGuidance('RUNNING', null).mustContinue, true);
+  assert.equal(jobGuidance('QUEUED', null).taskOutcome, 'pending');
+  assert.equal(jobGuidance('FAILED', 'AUTH_REQUIRED').mustContinue, false);
+  assert.equal(await waitForJob(async () => null, 20000, () => { throw Error('must not wait'); }), null);
+  assert.equal((await waitForJob(async () => ({ status: 'CANCELLED' }), 20000, () => { throw Error('must not wait'); })).status, 'CANCELLED');
+});
 test('large multilingual JSON round trips across split surrogate pairs', () => {
   const original = { prompt: '한글😀\\"\n'.repeat(20000) };
   const serialized = JSON.stringify(original);
@@ -57,6 +70,26 @@ const mocks = {
   '@/lib/rate-limit': { enforceRateLimit: async () => ({ allowed: true }) },
 };
 const route = load('app/api/mcp/[credential]/route.ts', mocks);
+test('expired context returns owned recovery target and auditable rejection without manuscript logging', async () => {
+  const audits = [];
+  const recoveryRoute = load('app/api/mcp/[credential]/route.ts', {
+    ...mocks,
+    '@/lib/crypto': { newId: () => 'draft_rejection_test' },
+    '@/db': { getD1: () => ({ prepare(sql) { return { bind(...values) { return {
+      async first() { assert.equal(values[1], 'owner'); return { type: 'POST_PREPARE_DRAFT', status: 'SUCCEEDED', finishedAt: Date.now() - 3 * 3600000, inputJson: JSON.stringify({ productId: 'original-product', connectKind: 'shopping' }) }; },
+      async run() { audits.push({ sql, values }); return { success: true }; },
+    }; } }; } }) },
+  });
+  const draft = { title: '상품 판단을 위한 제목', sections: Array(5).fill('제품 고유 근거 설명입니다. '.repeat(10)), hashtags: ['제품정보', '선택기준', '사용방법'] };
+  const request = new Request('https://example.com/api/mcp', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'post_submit_draft', arguments: { contextJobId: 'job_old_context', productId: 'wrong-current-product', draft, idempotencyKey: 'submit-recovery-test' } } }) });
+  const result = (await (await recoveryRoute.handleMcpRequest(request, 'owner', 'mcp:write')).json()).result.structuredContent;
+  assert.equal(result.code, 'DRAFT_CONTEXT_EXPIRED');
+  assert.equal(result.traceId, 'draft_rejection_test');
+  assert.equal(result.recovery.nextCall.arguments.productId, 'original-product');
+  assert.equal(result.recovery.requiresRevalidation, true);
+  assert.equal(audits.length, 1);
+  assert.ok(!JSON.stringify(audits).includes(draft.title));
+});
 async function call(userId, scope, name, args) {
   const request = new Request('https://example.com/api/mcp', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }) });
   return (await route.handleMcpRequest(request, userId, scope)).json();

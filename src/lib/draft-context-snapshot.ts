@@ -41,7 +41,8 @@ export function createProductSnapshot(input: ProductSnapshotIdentity & { product
     connectKind: input.connectKind,
     externalProductId: input.externalProductId || null,
     sourceUrl: input.sourceUrl || null,
-    product: input.product,
+    // Detach nested arrays and objects from mutable collection results.
+    product: JSON.parse(JSON.stringify(input.product)) as Record<string, unknown>,
   } satisfies Omit<ProductSnapshot, "snapshotId" | "capturedAt">;
   return {
     ...base,

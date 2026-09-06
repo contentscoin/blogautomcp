@@ -104,6 +104,7 @@ import { inspectNaverScheduleSubmissionSignal } from "../src/lib/naver-schedule-
 import { createProductSnapshot, readProductSnapshot, type ProductSnapshot } from "../src/lib/draft-context-snapshot";
 import { shouldAcceptQualityRepair } from "./lib/quality-repair-policy";
 import { selectVerifiedProductPhoto } from "./lib/product-photo-review";
+import { chooseProductName } from "./lib/product-name-identity";
 import { writeDraftProgressFile } from "../src/lib/draft-progress";
 import { generateTravelEditorialSummaryCard } from "./lib/travel-editorial-card";
 import { generateThumbnail, isGenerativeThumbnailAvailable } from "./lib/thumbnail-gen";
@@ -3936,7 +3937,7 @@ async function buildProductInfoFromStoredBrandLink(
   link: StoredBrandLinkSeed,
   connectKind: "SHOPPING" | "TRAVEL",
 ): Promise<ProductInfo | null> {
-  const name = sanitizeText(link.productName || "").replace(/\s*변경\s*$/u, "").trim();
+  const name = chooseProductName([sanitizeText(link.productName || "").replace(/\s*변경\s*$/u, "").trim()]);
   const price = sanitizeText(link.productPrice || "");
   const imageUrls = parseStoredBrandLinkImageUrls(link.imageUrls);
   const description = sanitizeText(link.productDescription || "");
@@ -3959,7 +3960,7 @@ async function buildProductInfoFromStoredBrandLink(
       : { representativeImagePath: null, imagePaths: [], detailImagePaths: [] };
 
   return {
-    name: name || sanitizeText(link.storeName || "") || "상품",
+    name,
     description: description || sanitizeText(link.storeName || ""),
     features,
     price,
@@ -4024,7 +4025,7 @@ function mergeProductInfo(base: ProductInfo | null, live: ProductInfo): ProductI
 
   return {
     // 라이브 페이지의 마케팅 헤드라인이 실제 상품명을 덮어쓰지 않게 등록 당시 이름을 우선한다.
-    name: base.name || live.name,
+    name: chooseProductName([base.name, live.name]),
     description: live.description || base.description,
     features: live.features.length > 0 ? live.features : base.features,
     price: live.price || base.price,
@@ -4141,13 +4142,14 @@ async function step1_getProductInfo(
   }
   
   // 1. 상품명 추출 (여러 방법 시도)
-  let productName = sanitizeText(structuredProduct.name);
+  const productNameCandidates = [sanitizeText(structuredProduct.name)];
+  let ogProductName = "";
   
   // og:title에서 추출
   const ogTitle = await page.$('meta[property="og:title"]');
   if (ogTitle) {
     const content = await ogTitle.getAttribute('content');
-    if (content) productName = content.split(':')[0].split('-')[0].trim();
+    if (content) ogProductName = content.trim();
   }
   
   // 페이지 내 상품명 요소에서 추출 (더 정확)
@@ -4164,15 +4166,12 @@ async function step1_getProductInfo(
     if (el) {
       const text = await el.textContent();
       if (text && text.length > 3) {
-        productName = text.trim();
-        break;
+        productNameCandidates.push(text.trim());
       }
     }
   }
   
-  if (!productName) {
-    productName = (await page.title()).split(':')[0].split('-')[0].trim();
-  }
+  const productName = chooseProductName([...productNameCandidates, ogProductName, await page.title()]);
 
   if (isInvalidProductName(productName)) {
     throw new Error(`상품명 추출 실패: "${productName || "빈 값"}". 보안 인증 또는 페이지 로딩 문제일 수 있습니다.`);
@@ -9697,6 +9696,9 @@ async function main() {
 
     if (!product) {
       throw new Error("발행에 사용할 상품 정보를 확보하지 못했습니다.");
+    }
+    if (!chooseProductName([product.name])) {
+      throw new Error("PRODUCT_IDENTITY_UNVERIFIED: 실제 상품명을 확인하지 못했습니다. 광고 문구나 판매처 이름으로 원고를 만들지 않습니다. 상품 정보를 다시 동기화하세요.");
     }
 
     const finalReviewEvidenceReady = runtimeConnectKind === "TRAVEL"

@@ -10,7 +10,7 @@ import { clientIp, enforceRateLimit } from '@/lib/rate-limit';
 import { validateToolArguments, type JsonSchema } from '@/lib/tool-schema';
 import { compareVersions } from '@/lib/version';
 import { resolvePreparedDraftContext } from '@/lib/draft-context';
-import { jobGuidance, resultPage } from '@/lib/mcp-job-status';
+import { jobGuidance, resultPage, waitForJob } from '@/lib/mcp-job-status';
 import { createBugReport, getBugReport, type BugReportInput } from '@/lib/bug-reports';
 
 type JsonObject = Record<string, unknown>;
@@ -23,6 +23,7 @@ const RESPONSE_HEADERS = { 'cache-control': 'no-store', 'referrer-policy': 'no-r
 const CONNECT_KINDS = ['shopping', 'travel'];
 const SERVER_INFO = { name: 'BlogAutoMCP', version: '1.3.11' };
 const SERVER_INSTRUCTIONS = [
+  '요청이 완료되거나 실제 진행 불가 사유가 확인될 때까지 수행하세요. QUEUED/RUNNING, 동일 진행률, 긴 소요 시간은 중단 사유가 아닙니다. 같은 jobId로 job_get(waitMs=20000)을 반복하세요. 통신 시간 초과는 작업 실패가 아닙니다. 성공 결과를 읽고 요청 범위 안의 다음 단계를 이어가세요. 사용자 취소·필수 승인 대기는 존중하고 불확실한 발행을 중복 실행하거나 검수를 우회하지 마세요.',
   '진행 확인은 job_get(includeResult=false)로 조회하고 pollAfterMs만큼 기다리세요. 완료된 큰 결과가 잘리면 job_result_read를 offset=0부터 nextOffset까지 이어서 읽으세요. AGENT_LOST_UNCERTAIN은 자동 재실행하지 말고 발행 여부부터 확인하세요.',
   '승인된 한 대의 Windows PC에서 네이버 쇼핑커넥트·여행커넥트 작업을 수행합니다. 대부분의 도구는 작업(jobId)을 큐에 넣고 즉시 반환하며, job_get 으로 진행 단계(stage)와 결과를 확인합니다.',
   '원고는 이 ChatGPT 가 씁니다. PC 는 상품 사실·상세이미지·하네스·프롬프트를 준비하고, 제출된 원고를 품질검사해 초안으로 저장하고, 발행만 합니다. 기본 흐름: brandconnect_sync_products → brandconnect_list_products → post_create_draft(PC 가 verifiedFacts·sourceImages·harness·systemPrompt·userPrompt 준비, 수십 초) → 이 ChatGPT 가 systemPrompt·userPrompt 로 원고 JSON 작성 → post_submit_draft(contextJobId, 품질검사·저장) → post_get_draft(imageSlots·imagePrompt 확인) → 비어 있는 파트마다 ChatGPT 내장 이미지 생성 → post_apply_section_image(sectionId, generatedImageUrl) → post_approve_draft → post_publish 또는 post_schedule(confirmed=true). post_prepare_draft 는 post_create_draft 와 같은 작업입니다.',
@@ -368,7 +369,7 @@ const TOOLS: ToolDefinition[] = [
     name: 'job_get',
     title: '작업 결과 확인',
     description: '비동기 작업의 상태, 진행 단계, 결과 또는 오류를 확인합니다.',
-    inputSchema: { type: 'object', properties: { jobId: { type: 'string', minLength: 1, maxLength: 80 }, includeResult: { type: 'boolean', default: true, description: 'false이면 결과 없이 상태만 조회합니다. 큰 결과는 job_result_read로 분할 조회하세요.' } }, required: ['jobId'], additionalProperties: false },
+    inputSchema: { type: 'object', properties: { jobId: { type: 'string', minLength: 1, maxLength: 80 }, waitMs: { type: 'integer', minimum: 0, maximum: 20000, default: 20000, description: '최대 20초 대기. 미완료이면 같은 jobId로 다시 호출하세요. 0은 즉시 조회.' }, includeResult: { type: 'boolean', default: true, description: 'false이면 결과 없이 상태만 조회합니다. 큰 결과는 job_result_read로 분할 조회하세요.' } }, required: ['jobId'], additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   {
@@ -503,7 +504,7 @@ async function enqueue(userId: string, tool: ToolDefinition, args: JsonObject) {
     const existing = await d1.prepare(`SELECT id,type,input_json AS inputJson,status FROM agent_jobs WHERE user_id=? AND idempotency_key=? LIMIT 1`).bind(userId, idempotencyKey).first<{ id: string; type: string; inputJson: string; status: string }>();
     if (existing) {
       if (existing.type !== type || existing.inputJson !== inputJson) return toolPayload({ ok: false, code: 'IDEMPOTENCY_CONFLICT', message: '같은 idempotencyKey가 다른 요청에 이미 사용되었습니다.' }, true);
-      return toolPayload({ ok: true, jobId: existing.id, status: existing.status, reused: true });
+      return toolPayload({ ok: true, jobId: existing.id, status: existing.status, reused: true, ...jobGuidance(existing.status, null) });
     }
   }
 
@@ -520,7 +521,7 @@ async function enqueue(userId: string, tool: ToolDefinition, args: JsonObject) {
   const inserted = await d1.prepare(`INSERT OR IGNORE INTO agent_jobs (id,user_id,type,connect_kind,input_json,status,progress,idempotency_key,created_at,updated_at) VALUES (?,?,?,?,?,'QUEUED',0,?,?,?)`).bind(jobId, userId, type, typeof args.connectKind === 'string' ? args.connectKind : null, inputJson, idempotencyKey, now, now).run();
   if (Number(inserted.meta.changes || 0) !== 1 && idempotencyKey) {
     const raced = await d1.prepare(`SELECT id,type,input_json AS inputJson,status FROM agent_jobs WHERE user_id=? AND idempotency_key=? LIMIT 1`).bind(userId, idempotencyKey).first<{ id: string; type: string; inputJson: string; status: string }>();
-    if (raced && raced.type === type && raced.inputJson === inputJson) return toolPayload({ ok: true, jobId: raced.id, status: raced.status, reused: true });
+    if (raced && raced.type === type && raced.inputJson === inputJson) return toolPayload({ ok: true, jobId: raced.id, status: raced.status, reused: true, ...jobGuidance(raced.status, null) });
     return toolPayload({ ok: false, code: 'IDEMPOTENCY_CONFLICT', message: '같은 idempotencyKey가 다른 요청과 충돌했습니다.' }, true);
   }
   await d1.prepare(`INSERT INTO audit_events (id,actor_user_id,target_user_id,action,metadata_json,created_at) VALUES (?,?,?,?,?,?)`).bind(newId('audit'), userId, userId, 'AGENT_JOB_ENQUEUED', JSON.stringify({ jobId, type, connectKind: args.connectKind || null }), now).run();
@@ -530,7 +531,8 @@ async function enqueue(userId: string, tool: ToolDefinition, args: JsonObject) {
     ok: true,
     jobId,
     status: 'QUEUED',
-    message: '로컬 프로그램에 작업을 전달했습니다. job_get 으로 진행 상황을 확인하세요.',
+    ...jobGuidance('QUEUED', null),
+    nextCall: { tool: 'job_get', arguments: { jobId, waitMs: 20000, includeResult: false } },
     ...(legacyDraftPipeline ? { warning: `PC 앱 ${device.appVersion || '알 수 없음'} 은 초안 제출 시 이미지 배치를 함께 실행해 오래 걸릴 수 있습니다. ${SECTION_IMAGE_MIN_APP} 이상으로 업데이트하면 이미지는 post_apply_section_image 로 붙입니다.` } : {}),
   });
 }
@@ -597,7 +599,8 @@ async function callTool(userId: string, name: string, rawArgs: JsonObject) {
   if (name === 'job_get' || name === 'job_result_read') {
     const jobId = stringArg(args, 'jobId');
     await sweepExpiredLeases(d1, userId);
-    const job = jobId ? await d1.prepare(`SELECT id,type,status,progress,stage,stage_message AS stageMessage,heartbeat_at AS heartbeatAt,cancel_requested AS cancelRequested,result_json AS resultJson,error_code AS errorCode,error_message AS errorMessage,created_at AS createdAt,finished_at AS finishedAt FROM agent_jobs WHERE id=? AND user_id=? LIMIT 1`).bind(jobId, userId).first<{ id: string; type: string; status: string; progress: number; stage: string | null; stageMessage: string | null; heartbeatAt: number | null; cancelRequested: number; resultJson: string | null; errorCode: string | null; errorMessage: string | null; createdAt: number; finishedAt: number | null }>() : null;
+    const readJob = async () => jobId ? await d1.prepare(`SELECT id,type,status,progress,stage,stage_message AS stageMessage,heartbeat_at AS heartbeatAt,cancel_requested AS cancelRequested,result_json AS resultJson,error_code AS errorCode,error_message AS errorMessage,created_at AS createdAt,finished_at AS finishedAt FROM agent_jobs WHERE id=? AND user_id=? LIMIT 1`).bind(jobId, userId).first<{ id: string; type: string; status: string; progress: number; stage: string | null; stageMessage: string | null; heartbeatAt: number | null; cancelRequested: number; resultJson: string | null; errorCode: string | null; errorMessage: string | null; createdAt: number; finishedAt: number | null }>() : null;
+    const job = await waitForJob(readJob, name === 'job_get' ? Number(args.waitMs ?? 20000) : 0);
     if (!job) return toolPayload({ ok: false, code: 'JOB_NOT_FOUND', message: '작업을 찾을 수 없습니다.' }, true);
     if (name === 'job_result_read') {
       if (!['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(job.status)) return toolPayload({ ok: false, code: 'JOB_NOT_FINISHED', jobId, ...jobGuidance(job.status, job.errorCode) }, true);
@@ -667,29 +670,42 @@ async function callTool(userId: string, name: string, rawArgs: JsonObject) {
   }
   if (name === 'post_submit_draft') {
     const contextJobId = stringArg(args, 'contextJobId');
+    const rejectContext = async (code: string, message: string, preparedInput?: JsonObject) => {
+      const traceId = newId('draft_rejection');
+      // Audit only identifiers/reason, never the full manuscript or credentials.
+      await d1.prepare(`INSERT INTO audit_events (id,actor_user_id,target_user_id,action,metadata_json,created_at) VALUES (?,?,?,?,?,?)`)
+        .bind(traceId, userId, userId, 'DRAFT_SUBMISSION_REJECTED', JSON.stringify({ contextJobId, code }), Date.now()).run();
+      const productId = preparedInput ? stringArg(preparedInput, 'productId') : '';
+      const connectKind = preparedInput ? stringArg(preparedInput, 'connectKind') : '';
+      const canPrepare = Boolean(productId && CONNECT_KINDS.includes(connectKind));
+      return toolPayload({ ok: false, code, message, traceId, contextJobId,
+        recovery: { preserveDraft: true, requiresRevalidation: true, canPrepare,
+          instructions: '기존 원고를 대화에 보존하세요. 새 준비 작업이 성공하면 이전·새 상품 근거를 대조하고 원고를 보강한 뒤 새 contextJobId로 제출하세요. 상품이 다르면 자동 이관하지 마세요. 발행 승인과 검수는 생략하지 마세요.',
+          ...(canPrepare ? { nextCall: { tool: 'post_prepare_draft', arguments: {
+            productId, connectKind, idempotencyKey: `recover-${traceId}`,
+          } } } : {}),
+        },
+      }, true);
+    };
     const contextJob = contextJobId
       ? await d1.prepare(`SELECT type,status,input_json AS inputJson,result_json AS resultJson,finished_at AS finishedAt FROM agent_jobs WHERE id=? AND user_id=? LIMIT 1`).bind(contextJobId, userId).first<{ type: string; status: string; inputJson: string; resultJson: string | null; finishedAt: number | null }>()
       : null;
     if (!contextJob || contextJob.type !== 'POST_PREPARE_DRAFT' || contextJob.status !== 'SUCCEEDED') {
-      return toolPayload({ ok: false, code: 'DRAFT_CONTEXT_REQUIRED', message: '완료된 post_prepare_draft 작업의 contextJobId가 필요합니다.' }, true);
+      return rejectContext('DRAFT_CONTEXT_REQUIRED', '완료된 post_prepare_draft 작업의 contextJobId가 필요합니다.');
     }
     if (!contextJob.finishedAt || Date.now() - contextJob.finishedAt > 2 * 60 * 60 * 1000) {
-      return toolPayload({ ok: false, code: 'DRAFT_CONTEXT_EXPIRED', message: '초안 근거가 만료되었습니다. post_prepare_draft부터 다시 실행하세요.' }, true);
+      return rejectContext('DRAFT_CONTEXT_EXPIRED', '초안 근거의 2시간 유효기간이 지났습니다. 원고를 보존한 채 새 근거로 재검증하세요.', asObject(jsonValue(contextJob.inputJson)));
     }
     const contextInput = asObject(jsonValue(contextJob.inputJson));
     const contextResult = asObject(jsonValue(contextJob.resultJson));
     const preparedProductId = stringArg(contextInput, 'productId');
     const preparedConnectKind = stringArg(contextInput, 'connectKind');
     if (!preparedProductId || !CONNECT_KINDS.includes(preparedConnectKind)) {
-      return toolPayload({
-        ok: false,
-        code: 'PRODUCT_SNAPSHOT_CHANGED',
-        message: '초안 생성 시점의 상품 스냅샷이 없거나 상품 식별자가 변경되었습니다. post_prepare_draft부터 다시 실행하세요.',
-      }, true);
+      return rejectContext('PRODUCT_SNAPSHOT_CHANGED', '준비 작업의 상품 식별자를 확인할 수 없습니다. 자동으로 다른 상품에 이관하지 않습니다.');
     }
     // 1.3.9(최상위 snapshot)·1.3.10(data.context 아래) 두 결과 형태를 모두 받는다.
     const resolved = resolvePreparedDraftContext(contextResult, { productId: preparedProductId, connectKind: preparedConnectKind });
-    if (!resolved.ok) return toolPayload({ ok: false, code: resolved.code, message: resolved.message }, true);
+    if (!resolved.ok) return rejectContext(resolved.code, resolved.message, contextInput);
     const snapshotId = resolved.snapshotId;
     const draft = normalizeSubmittedDraft(args.draft, preparedConnectKind);
     if (!draft) {
