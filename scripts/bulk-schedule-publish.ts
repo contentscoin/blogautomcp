@@ -476,13 +476,15 @@ async function main() {
             description: refreshed.errorMessage || "발행 실패",
           });
         } else {
-          successCount += 1;
-          completedLinks.push({
+          // A zero exit code may mean only a draft was saved. Neither READY,
+          // a missing record, nor an immediate publication proves scheduling.
+          failedCount += 1;
+          failedLinks.push({
             label: refreshed?.productName || link.productName || link.id,
             url: refreshed?.postUrl || buildAppUrl(`/?brandLinkId=${link.id}`),
             scheduledDate,
-            status: refreshed?.status || "DONE",
-            description: "처리 완료",
+            status: "FAILED",
+            description: `예약 등록이 확인되지 않았습니다 (현재 상태: ${refreshed?.status || "MISSING"}). 초안 저장과 예약 완료는 다릅니다.`,
           });
         }
       } catch (error: unknown) {
