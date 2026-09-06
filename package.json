@@ -10,7 +10,7 @@
     "desktop:dev": "cross-env APP_PORT=43127 APP_HOST=127.0.0.1 electron .",
     "desktop:pack": "npm run build && electron-builder --publish=never",
     "desktop:pack:mac": "npm run build && electron-builder --mac --publish=never",
-    "desktop:pack:win": "npm run build && electron-builder --win --publish=never",
+    "desktop:pack:win": "node scripts/check-packaging-target.cjs && npm run build && electron-builder --win --publish=never",
     "desktop:pack:linux": "npm run build && electron-builder --linux --publish=never",
     "build": "prisma generate && node scripts/cleanup-prisma-generated-temp.mjs && next build --webpack",
     "typecheck": "tsc --noEmit",
@@ -126,6 +126,7 @@
     "tailwindcss": "^4"
   },
   "build": {
+    "beforePack": "scripts/electron/before-pack.cjs",
     "appId": "com.jakeshin.naver-bc-automation",
     "productName": "BrandConnect Automation",
     "asar": false,
