@@ -32,5 +32,6 @@ assert.ok(selection.includes('setBrandConnectOptionsLoading(false)'));
 const route = fs.readFileSync('src/app/api/brandlinks/bulk-seasonal/route.ts', 'utf8');
 assert.ok(route.includes('const categoryUrl = contract.configuredUrl'));
 const imageSource = fs.readFileSync('src/lib/brand-post-image-generation.ts', 'utf8');
-assert.ok(!imageSource.includes('createOriginalProductPhotoOnBackground'));
+assert.ok(imageSource.includes('createOriginalProductPhotoOnBackground'));
+assert.ok(imageSource.includes('provenance: "EDITORIAL_CARD"'), 'whole-photo fallback must not claim segmented product provenance');
 console.log('PASS: connect routing, switch race, natural verdict and photographic prompts/fallback');

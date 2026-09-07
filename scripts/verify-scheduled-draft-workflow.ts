@@ -1,9 +1,24 @@
 import assert from "node:assert/strict";
-import { runScheduledDraftWorkflow, runAutomaticDraftWorkflow } from "./lib/scheduled-draft-workflow";
+import http from "node:http";
+import { runScheduledDraftWorkflow, runAutomaticDraftWorkflow, localScheduleCall } from "./lib/scheduled-draft-workflow";
 import { preparedPostsFirst } from "../src/lib/prepared-post-priority";
 import { beginAutomaticPublishing, automaticPublishingCancellationCheck, cancelAutomaticPublishing } from "../src/lib/desktop-activity";
 
 async function main() {
+  const previousPort = process.env.APP_PORT;
+  const server = http.createServer((_request, response) => {
+    response.writeHead(422, { "content-type": "application/json" });
+    response.end(JSON.stringify({ success: false, errors: ["shopping-hook: segmentation failed"], message: "No images" }));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  try {
+    process.env.APP_PORT = String((server.address() as { port: number }).port);
+    await assert.rejects(localScheduleCall("/draft/images", "POST", {}), /shopping-hook: segmentation failed/);
+  } finally {
+    if (previousPort === undefined) delete process.env.APP_PORT;
+    else process.env.APP_PORT = previousPort;
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
   const candidates = Array.from({ length: 15 }, (_, i) => ({ id: String(i) }));
   const selected = preparedPostsFirst(candidates, 10, id => Number(id) >= 12);
   assert.deepEqual(selected.map(row => row.id), ["12", "13", "14", "0", "1", "2", "3", "4", "5", "6"]);

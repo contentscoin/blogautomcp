@@ -7,6 +7,7 @@ import {
   createLockedProductEditorialScene,
   createLockedProductThumbnailOnBackground,
   createOriginalProductPhotoThumbnail,
+  createOriginalProductPhotoOnBackground,
 } from "../../scripts/lib/product-image-lock";
 import { buildProductThumbnailCopy } from "../../scripts/lib/product-thumbnail";
 import { buildTravelThumbnailCopy } from "../../scripts/lib/travel-content";
@@ -170,7 +171,20 @@ async function existingShoppingSource(
   target: ResolvedImageTarget,
 ): Promise<string | null> {
   const assets = normalizePackageImageAssets(manifest);
+  // Replacing the last ORIGINAL slot must not discard the verified source.
+  // Editorial cards retain a content-addressed source record, not a new product.
+  const preservedSources = assets.flatMap(asset => {
+    if (asset.provenance !== "EDITORIAL_CARD" || !asset.sourcePath) return [];
+    try {
+      const record = JSON.parse(fs.readFileSync(`${asset.sourcePath}.source.json`, "utf8"));
+      if (record.version !== "original-photo-background/v1" ||
+          record.outputSha256 !== sha256File(asset.sourcePath) ||
+          !fs.existsSync(record.sourcePath) || record.sourceSha256 !== sha256File(record.sourcePath)) return [];
+      return [record.sourcePath as string];
+    } catch { return []; }
+  });
   const candidates = [
+    ...preservedSources,
     target.existingAsset?.provenance === "ORIGINAL" ? target.existingAsset.path : "",
     target.existingAsset?.provenance === "ORIGINAL" ? target.existingAsset.sourcePath : "",
     ...assets
@@ -445,8 +459,14 @@ async function finishGeneratedImage(options: {
     });
     return { generatedPath: result.outputPath, provenance: "LOCKED_PRODUCT" };
   } catch {
-    // A background-only image must not masquerade as a completed product scene.
-    throw new Error("상품 원본의 배경을 안전하게 분리하지 못했습니다. 기존 원본 이미지는 유지하며 배경만 생성된 결과를 완성 이미지로 반영하지 않습니다.");
+    // Preserve the complete verified photo when segmentation is unsafe. Never
+    // publish the empty background or label a whole-photo card as a cutout.
+    const result = await createOriginalProductPhotoOnBackground({
+      sourcePath,
+      backgroundPath: options.rawPath,
+      outputDir: options.workDir,
+    });
+    return { generatedPath: result.outputPath, provenance: "EDITORIAL_CARD" };
   }
 }
 

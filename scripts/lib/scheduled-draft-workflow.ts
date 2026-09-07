@@ -4,6 +4,8 @@ export interface Result {
   success: boolean;
   code?: string;
   error?: string;
+  errors?: string[];
+  message?: string;
   data?: {
     status?: string;
     postUrl?: string;
@@ -31,7 +33,7 @@ export const localScheduleCall: Call = (pathname, method, body) => new Promise((
     response.on("end", () => {
       try {
         const result = JSON.parse(text) as Result;
-        if (!result.success) reject(Object.assign(new Error(result.error || "예약 준비 실패"), { code: result.code }));
+        if (!result.success) reject(Object.assign(new Error(result.error || result.errors?.join("\n") || result.message || `자동 발행 준비 실패 (${method} ${pathname}, HTTP ${response.statusCode})`), { code: result.code }));
         else resolve(result);
       } catch (error) { reject(error); }
     });
