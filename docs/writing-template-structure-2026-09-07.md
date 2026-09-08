@@ -1,5 +1,7 @@
 # 글작성 템플릿 구조 리포트
 
+> **2026-09-08 개정.** 감사 리포트의 항목 재번호(H18→H21, H30→H36)와 고지 인덱스 결함의 성격 정정을 반영했다.
+
 > 작성일 2026-09-07 · 대상 저장소 `blogautomcp` · 모든 줄 번호는 이 날짜의 작업 트리 실측값
 
 ## 이 문서를 읽는 법
@@ -838,7 +840,9 @@ POST_SPEC_PIPELINE_ENABLED && specInput && !BROWSER_GPT_MODE
 - `:620`에서 그 지점 이후 **모든 섹션이 한 칸씩 당겨져 "다음 섹션의 이미지"를 받는다.** 예외도 에러도 로그도 없다.
 - `:614-615`에서 `plan`이 조용히 `null`이 되어 `allocatePlannedImages` 대신 `allocateFreeformImages`가 돌고, 섹션 id도 플랜 기반이 아닌 계약 기본 id로 바뀐다. `imageIntent` · `headingStyle` · `imageMin`/`imageMax` · `earlyConnectCard` 배치가 **전부 사라지는데 어떤 경고도 나오지 않는다.**
 
-`docs/full-code-audit-2026-09-07.md`의 H18(고지 섹션 제거 시 이미지·플랜 인덱스 밀림)이 같은 결함을 결함 관점에서 기록한 항목이다. **새 템플릿을 추가하면서 고지 위치나 문안을 건드릴 때는 반드시 이 절과 H18을 함께 본다.**
+`docs/full-code-audit-2026-09-07.md`의 **H21**(섹션 제거 시 위치 기반 인덱싱)이 같은 결함을 결함 관점에서 기록한 항목이다. **새 템플릿을 추가하면서 고지 위치나 문안을 건드릴 때는 반드시 이 절과 H21을 함께 본다.**
+
+> **2026-09-08 정정.** 초판은 이 인덱스 밀림이 *현재 발현 중*이라고 적었으나 그것은 틀렸다. `assemble.ts:104`가 고지를 마지막에 append하고 `composition.sections`·`sectionPlan`은 고지를 포함하지 않으므로 현재 호출자에서는 발현하지 않는다. 실제 위험은 **`isDisclosureSection`(`post-composition-contract.ts:434,440`) 과대 매칭으로 본문 섹션이 고지로 오판되는 것**이다 — 여행 `closing` 섹션은 이미 `여행커넥트`를 담고 있고(`section-library.ts:532`) `취소 수수료`는 정상 어휘다. 새 섹션 문안에 그 두 표현이 함께 들어가지 않게 하라.
 
 ### 11.4 렌더 결과에서 유도 문장은 사라진다
 
@@ -993,17 +997,17 @@ Case A에 더해:
 **T4. 섹션 수 계산이 두 곳에 중복돼 있다.**
 `index.ts:178-183`이 `sectionCount`를 구하고, `section-library.ts:576,599-601`이 다시 `clamp(count, 8, 10)` / `clamp(count, 10, 12)`와 `dayCount = clamp(target - 9, 1, 3)`으로 재계산한다. 여행은 `index.ts`가 `resolved - 3` 상한을, 라이브러리가 `target - 9`를 쓰는 **서로 다른 식**이라 이미지가 적을 때 어긋난다. **`9`가 상수화되어 있지 않아** 고정 섹션을 하나만 추가해도 조용히 깨진다.
 
-**T5. `IMAGE_SHORTFALL` — 두 리포트가 같은 사건을 다른 원인으로 기록했다.** (`docs/full-code-audit-2026-09-07.md` H30 교차)
+**T5. `IMAGE_SHORTFALL` — 두 리포트가 같은 사건을 다른 원인으로 기록했다.** (`docs/full-code-audit-2026-09-07.md` **H36** 교차)
 사실관계는 셋이다.
 - `validate.ts:220-222`는 `spec.imagePlan.shortfall > 0`, 즉 **풀 단위 `minBody` 미달만** P0로 올린다. 섹션별 `imageCount[0]`의 **합**이 확보 장수를 넘는 경우는 어떤 신호도 만들지 않는다.
-- `assemble.ts:66-71`의 `imageMin`은 버그가 아니다. "확보된 장수가 하한보다 적어도 플랜은 하한을 그대로 알려 준다(품질 리포트가 부족을 표시하도록)"는 **의도 주석**이 붙어 있다. `docs/full-code-audit-2026-09-07.md`가 H30의 진단 위치를 여기로 잡은 것은 코드 의도와 어긋나며, **고쳐야 할 쪽은 `validate.ts`다.**
+- `assemble.ts:66-71`의 `imageMin`은 버그가 아니다. "확보된 장수가 하한보다 적어도 플랜은 하한을 그대로 알려 준다(품질 리포트가 부족을 표시하도록)"는 **의도 주석**이 붙어 있다. 1차 감사가 진단 위치를 여기로 잡은 것은 코드 의도와 어긋났고, 2차 중재로 **H36 `image-plan.ts:281`**로 정정됐다(`assemble.ts:71`·`validate.ts`·`index.ts:199-202`는 모두 올바른 코드였다).
 - `index.ts:199-202`가 `[0,1]` → `[1,1]`로 승격하면서 하한 합계가 조용히 늘어난다(T5b).
 그리고 `IMAGE_SHORTFALL`은 `repair.ts:10 UNREPAIRABLE`에 있어 **재생성으로 절대 해소되지 않는다.** `minBody`(SHOPPING 4 / TRAVEL 5)에 못 미치면 글 품질과 무관하게 `BLOCKED`로 끝난다. 새 kind/템플릿에서 `minBody`를 잘못 잡으면 전량 차단.
 
 **T5b. `imageCount` 최소값이 라이브러리 밖에서 조용히 바뀐다.**
 영향받는 템플릿: `comparison`(`:255`), `offer-check`(`:273`), 쇼핑 `fit-checklist`(`:312`), 여행 `closing`(`:518`). "이미지 선택"이 "이미지 필수"로 뒤집히고, `assignImageSlots`의 하한 배정이 이미지를 먼저 가져가 앞 섹션이 굶을 수 있다.
 
-**T6. 고지문 위치·문안이 이미지 인덱스와 섹션 플랜을 조용히 밀어낸다.** (`docs/full-code-audit-2026-09-07.md` H18 교차 · 상세는 §11.3)
+**T6. 고지문 위치·문안이 이미지 인덱스와 섹션 플랜을 조용히 밀어낸다.** (`docs/full-code-audit-2026-09-07.md` **H21** 교차 · 상세는 §11.3)
 `post-composition-contract.ts:620`이 `sectionImagePaths`를 **고지 제거 후 인덱스**로 조회하고, `:614-615`가 길이 불일치 시 `sectionPlan`을 **조용히 `null`로 만든다.** 지금 정렬이 맞는 것은 고지가 정확히 마지막이고 `splitAffiliateDisclosure`가 그것을 빈 문자열로 만들기 때문이다 — 우연에 가깝다. 로그도 경고도 없다.
 
 **T7. 로컬 폴백 초안은 수리를 한 번도 못 받는다.**

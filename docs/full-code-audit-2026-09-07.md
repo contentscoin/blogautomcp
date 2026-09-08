@@ -1,7 +1,9 @@
 # 전체 코드 점검 리포트
 
-**작성일** 2026-09-07 · **대상** `blogautomcp` (루트 v1.3.25, `apps/sites` v1.0.0)
-**범위** 1차 18개 서브시스템 + 2차 보강 4개 영역(Codex 출하 작성 경로 / API 라우트 전수 / 이미지 부족 게이트 원인 재판정 / 고아 테스트·환경 토글), 검증 완료 **189건**, 모든 항목을 서로 독립된 적대적 검증자 2명이 교차 확인. 1차 157건 + 2차 32건을 병합하고 중복·오지목을 정리해 최종 등재 **181항목**(CRITICAL 6 / HIGH 56 / MEDIUM 74 / LOW 45).
+**작성일** 2026-09-07 · **개정** 2026-09-08 (외부 리뷰 반영, §9.1) · **대상** `blogautomcp` (루트 v1.3.25, `apps/sites` v1.0.0)
+**범위** 1차 18개 서브시스템 + 2차 보강 4개 영역(Codex 출하 작성 경로 / API 라우트 전수 / 이미지 부족 게이트 원인 재판정 / 고아 테스트·환경 토글), 검증 완료 **189건**, 모든 항목을 서로 독립된 적대적 검증자 2명이 교차 확인. 1차 157건 + 2차 32건을 병합하고 중복·오지목을 정리해 최종 등재 **181항목**(CRITICAL 5 / HIGH 56 / MEDIUM 76 / LOW 45).
+
+> **2026-09-08 개정.** PR #14의 외부 리뷰가 지적한 3건을 재검증해 등급과 서술을 정정했다. 그중 하나는 이 문서의 **헤드라인 발견**이었다. 정정 내역과 근거는 §9.1에 있다.
 
 ---
 
@@ -11,7 +13,7 @@
 
 문제는 그 규율이 균일하지 않다는 점이다. 배포를 막는 사유는 네 갈래다.
 
-1. **설정 API → 페어링 출처 → 자동 업데이트로 이어지는 3단 원격 코드 실행 연쇄.** 이 문서에서 가장 중요한 발견이며 §2 첫머리에 별도로 서술한다. `POST /api/settings`가 `.env`에 개행을 이스케이프하지 않고 값을 쓰므로 화이트리스트(`EDITABLE_KEYS`)를 우회해 임의 키를 심을 수 있고, 그 임의 키 중 `REMOTE_SITE_URL`이 바로 `scripts/electron/auto-update.cjs`의 `updateOrigin()`이 소비하는 값이다. 그리고 그 업데이터는 허용 목록이 없고 앱은 서명되지 않은 채 배포된다.
+1. **서명 없는 자동 업데이트 + 오염 가능한 업데이트 출처.** 이 문서에서 가장 중요한 발견이며 §2 첫머리에 별도로 서술한다. `scripts/electron/auto-update.cjs`의 `updateOrigin()`은 `REMOTE_SITE_URL`을 프로토콜만 보고 그대로 쓰며 허용 목록이 없고, 앱은 서명되지 않은 채 배포되므로 서명 검사에 대조 기준 자체가 없다. 그 출처를 오염시키는 경로는 둘이다 — **즉시 성립하는** mcpUrl 페어링 분기의 허용 목록 미검사(C3), 그리고 **2회 쓰기 + 재시작이 필요한** 설정 API의 파서 차이(H2). *초판은 후자를 "1회 저장으로 즉시 성립"이라고 적었으나 이는 틀렸다 — §9.1 참조.*
 2. **"성공했는데 실패로 기록"에서 오는 중복 발행.** 네이버에 이미 올라간 글을 URL 캡처 실패만으로 FAILED로 적고(`scripts/topic-agent.ts:2993`, `scripts/simple-agent.ts:10174`), UI와 bulk 스크립트는 FAILED를 재발행 대상으로 삼는다. 스케줄러의 catch는 자식 프로세스가 쓴 SUCCESS를 PENDING으로 덮어써 다음 크론에서 다시 발행한다(`src/services/scheduler.ts:197`). 네이버 중복 콘텐츠 제재로 직결된다.
 3. **저장소 루트의 살아 있는 코드모드 4종.** `fix-topic-agent.js` 등이 현재 `scripts/topic-agent.ts`/`scripts/lib/chatgpt-browser.ts`의 앵커에 여전히 매치된다. 드라이런 결과 `fix-topic-agent.js`는 3062줄 중 **1914줄(63%)**을 삭제하고도 "Successfully replaced generateAdvancedContent"를 출력한다(직접 재확인). 백업도 git-clean 검사도 없다.
 4. **로컬 변경 API의 동일 출처 검사 부재.** 41개 API 라우트 중 `requireTrustedLocalMutation`이 걸린 것은 4개뿐이고, 30개가 넘는 변경 핸들러가 무방비다. 기본 설치(`ADMIN_API_KEY` 미설정 — 설정 UI가 "일반 로컬 사용에는 비워 두세요"라고 안내하는 상태)에서 `requireAdminApiKey`는 no-op이므로, 사용자가 방문한 아무 웹페이지나 고정 포트 `127.0.0.1:43127`으로 실제 네이버 발행을 시킬 수 있다.
@@ -39,7 +41,7 @@
 | 심각도 | 영역 | 파일:라인 | 문제 | 영향 |
 |---|---|---|---|---|
 | CRITICAL (CONFIRMED) | auth-secrets / api-brandlinks | `src/app/api/brandlinks/bulk-today/route.ts:92` 외 30+ | 변경 라우트 30여 개에 `requireTrustedLocalMutation` 부재 | 방문한 웹페이지가 실제 네이버 발행·설정 변조 실행 |
-| CRITICAL (CONFIRMED) | auth-secrets / api-rest | `src/app/api/settings/route.ts:56` | `.env` 직렬화가 개행을 이스케이프하지 않아 임의 env 키 주입, `EDITABLE_KEYS` 무력화 | `REMOTE_SITE_URL` 탈취 → 자동 업데이트 RCE로 연쇄 |
+| HIGH (CONFIRMED) | auth-secrets / api-rest | `src/app/api/settings/route.ts:56` | `.env` 직렬화가 개행을 이스케이프하지 않고, 읽는 파서가 dotenv와 줄 단위 파서로 갈림 | 2회 쓰기 + 재시작 후 `REMOTE_SITE_URL` 오염 → 업데이터·잡 폴링 출처 리다이렉트 (2026-09-08 강등) |
 | CRITICAL (CONFIRMED) | build-config | `scripts/electron/auto-update.cjs:17`, `:187` | `updateOrigin()`이 https 여부만 보고 허용 목록 미적용 + 앱 미서명 | 임의 출처의 NSIS 설치 파일을 무확인 설치 |
 | CRITICAL (CONFIRMED) | auth-secrets | `src/app/api/remote-agent/route.ts:46-52` | mcpUrl 페어링 분기가 원격 사이트 허용 목록을 검사하지 않음 | 임의 HTTPS 호스트가 데스크톱 에이전트의 지휘부가 됨 |
 | CRITICAL (CONFIRMED) | agent-scripts | `scripts/topic-agent.ts:2993` | 발행 성공 후 URL 미확보를 FAILED로 기록 | 재발행 경로가 동일 글을 중복 게시 |
@@ -64,13 +66,13 @@
 | HIGH (CONFIRMED) | pipeline-core | `src/services/topic-task-pipeline.ts:4627` | 정렬본 위치를 원본 배열 인덱스로 조회 | 심사하지 않은 최저점 후보가 승인 초안으로 발행 |
 | HIGH (CONFIRMED) | lib-contracts | `src/lib/topic-task-content-readiness.ts:344` | 준비/발행 시 `sourceUrls` 유무가 달라 판정이 뒤집힘 | 100점 통과 문서가 발행 시 P0 차단, 복구 불가 데드락 |
 | HIGH (CONFIRMED) | lib-contracts | `src/lib/topic-task-content-readiness.ts:630` | 본문에 자기 주제를 1회 언급하면 `broken-copy` | 정상 글이 "재준비 필요"로 영구 차단 |
-| HIGH (PLAUSIBLE) | lib-contracts | `src/lib/post-composition-contract.ts:620` | 고지 섹션 제거 후 이미지·플랜 인덱스 미재계산 | 이미지가 다른 소제목에 붙고 스펙 플랜 전량 폐기 |
+| MEDIUM (CONFIRMED) | lib-contracts | `src/lib/post-composition-contract.ts:611-628` | 섹션 제거 후 위치로 이미지·플랜을 조회 — 제거 대상이 항상 마지막일 때만 안전 | 현재 호출자에서는 미발현. `isDisclosureSection` 과대 매칭으로 본문 섹션이 걸리면 즉시 발현 (2026-09-08 정정) |
 | HIGH (CONFIRMED) | topic-workflow | `src/lib/topic-workflow.ts:477` | 조사 보정이 형용사 어미 -는/-은과 일반 명사를 재작성 | "맛있는"→"맛있은", "아이"→"아가" 등 한국어 훼손 |
 | HIGH (CONFIRMED) | topic-workflow | `src/app/api/brandlinks/bulk-schedule/route.ts:153` | 우선순위 재정렬 후 0번 행을 최조기 예약으로 사용 | 기본 경로에서 예약 글이 수개월 뒤로 밀림 |
 | HIGH (CONFIRMED) | codex-draft-path | `scripts/lib/codex-draft-provider.ts:117` | 복구 가능한 `error` 스트림 이벤트를 치명 오류로 처리 | 재연결 알림 한 번에 출하 기본 작성 경로가 사망 |
 | HIGH (CONFIRMED) | codex-draft-path | `src/lib/codex-local.ts:128` | 방치된 `codex login` 잡이 만료되지 않고 영구 running | 프로세스 수명 내내 Codex 재연결 불가 |
 | HIGH (CONFIRMED) | codex-draft-path | `scripts/simple-agent.ts:387` | `PRODUCT_POST_LOCAL_FALLBACK_ENABLED` 기본값 3중 불일치 | AI 호출 실패 시 로컬 템플릿 글이 실제 블로그에 발행 |
-| HIGH (CONFIRMED) | lib-brandpost | `src/lib/run-script.ts:90` | 자식 stdout을 청크 단위로 디코딩 | 64KiB 경계에서 한글 깨짐, 깨진 본문이 그대로 발행 |
+| MEDIUM (CONFIRMED) | lib-brandpost | `src/lib/run-script.ts:89-95` | 자식 stdout/stderr을 `setEncoding` 없이 청크 단위로 디코딩 | 한글이 U+FFFD로 조용히 손상. **발행 본문에는 도달하지 않고** API 응답·운영 로그·오류 메시지에 한정 (2026-09-08 강등) |
 | HIGH (CONFIRMED) | lib-brandpost | `src/lib/brand-post-package.ts:370` | 승인 시 매니페스트를 비원자적으로 덮어씀 | 중단 시 초안 전체(원고·구성·스펙) 복구 불가 |
 | HIGH (CONFIRMED) | lib-brandpost | `src/lib/brand-post-image-generation.ts:191` | 성공 경로에서 검증된 원본 사진 참조 소실 | 이후 모든 이미지 재생성이 영구 실패 |
 | HIGH (CONFIRMED) | lib-brandpost | `src/lib/brand-post-package.ts:329` | `imageGeneration.status:"running"`에 하트비트/만료 없음 | 크래시 1회로 해당 초안의 모든 동작이 영구 잠김 |
@@ -96,36 +98,44 @@
 
 ---
 
-## 2. CRITICAL 상세 (6건)
+## 2. CRITICAL 상세 (5건)
 
-### 이 문서에서 가장 중요한 것 — 3단 원격 코드 실행 연쇄 (C1 → C2 → C3)
+> **2026-09-08 정정.** 이 절의 초판은 C1→C2→C3를 "설정 **1회** 저장으로 즉시 성립하는 RCE 연쇄"로 서술했다. 그 서술은 **틀렸다.** 외부 리뷰(PR #14, Codex P1)의 지적을 받아 재검증한 결과, `.env`를 읽는 파서가 **둘**이고 초판은 그중 라우트 자신의 줄 단위 파서만으로 연쇄를 이어 붙였다. 실제로 기동 시 `process.env`를 만드는 것은 dotenv이며, dotenv는 이 페이로드를 쪼개지 않는다. 아래는 재검증 후 서술이고, C2는 CRITICAL에서 HIGH로 강등해 §4(H2)로 옮겼다. 상세한 실측 근거는 §9.1에 있다.
 
-세 결함은 각각으로도 CRITICAL이지만, 이어 붙이면 **"사용자가 아무 웹페이지나 방문했다"에서 "공격자가 만든 설치 파일이 사용자 권한으로 실행된다"까지 사용자 상호작용 한 번으로 도달한다.** 축은 `REMOTE_SITE_URL` 하나다.
+### 이 문서에서 가장 중요한 것 — `REMOTE_SITE_URL` 오염으로 수렴하는 두 경로
+
+업데이트 출처를 결정하는 `REMOTE_SITE_URL`을 공격자 값으로 바꿀 수 있으면, 서명 없는 설치 파일이 사용자 권한으로 실행된다(C2 = 구 C3). 그 값을 오염시키는 경로는 **두 개**이고 난이도가 크게 다르다.
 
 ```
-① 진입 — C1 (변경 API에 동일 출처 검사 없음)
-   방문한 웹페이지가 preflight 없는 단순 form POST로
-   http://127.0.0.1:43127/api/settings 에 도달한다.
-   기본 설치는 ADMIN_API_KEY가 비어 있고(설정 UI가 그렇게 권장),
-   requireAdminApiKey는 그때 null(=허용)을 반환한다.
+[경로 A — 즉시·파서 무관]  C3 (mcpUrl 페어링 분기의 허용 목록 미검사)
+   remote-agent/route.ts:46-52 의 mcpUrl 분기는 URL 파싱·경로 모양·https 만 보고
+   isAllowedRemoteSiteOrigin 을 호출하지 않는다. 사용자가 공격자의 MCP URL 을
+   한 번 붙여넣으면 saveRemoteActivation 이 REMOTE_SITE_URL 을 그 값으로
+   process.env 와 .env 양쪽에 직접 심는다. 세탁도 재시작도 필요 없다.
         ↓
-② 피벗 — C2 (.env 개행 주입)
-   화이트리스트에 있는 NAVER_BLOG_ID 하나만 보내면서 값에 개행을 넣으면
-   serializeEnv(route.ts:56-63)가 큰따옴표만 이스케이프하고 개행은 그대로 흘려
-   .env에 임의의 추가 키가 기록된다. EDITABLE_KEYS가 무력화된다.
-   심는 키: REMOTE_SITE_URL=https://evil.example
+[경로 B — 파서 차이 세탁, 2회 쓰기 + 재시작 필요]  H2 (구 C2)
+   ① settings POST 로 화이트리스트 키 값에 개행을 넣어
+      REMOTE_SITE_URL=... 줄을 파일에 남긴다.
+      ※ 이 시점에 dotenv 는 아직 이를 NAVER_BLOG_ID 한 개의 여러 줄 값으로 본다.
+   ② 두 번째 env 쓰기(재저장 또는 saveRemoteActivation)가 줄 단위 파서로
+      이를 분리해 REMOTE_SITE_URL 을 독립 줄로 재직렬화한다.
+   ③ 앱 재시작 → main.cjs:97 dotenv.config 가 이제 이를 process.env 로 읽는다.
         ↓
-③ 페이로드 — C3 (자동 업데이트)
-   auto-update.cjs updateOrigin()(17행)은 REMOTE_SITE_URL을 읽어
-   프로토콜이 https인지만 확인하고 url.origin을 그대로 반환한다. 허용 목록이 없다.
-   NsisUpdater가 <공격자 출처>/api/updates/windows/latest.yml을 읽고
-   설치 파일을 받아 quitAndInstall(true, true)한다.
-   앱은 서명돼 있지 않으므로(build.win에 publisherName/certificateFile/
-   forceCodeSigning 모두 없음) electron-updater의 NSIS 서명 검사에는
-   대조할 기준 자체가 없다. sha512는 같은 호스트가 주므로 무의미하다.
+[페이로드 — C2 (자동 업데이트)]
+   auto-update.cjs updateOrigin()(17행)은 REMOTE_SITE_URL 을 읽어
+   프로토콜이 https 인지만 확인하고 url.origin 을 그대로 반환한다. 허용 목록이 없다.
+   NsisUpdater 가 <공격자 출처>/api/updates/windows/latest.yml 을 읽고
+   설치 파일을 받아 quitAndInstall(true, true) 한다.
+   앱은 서명돼 있지 않으므로(build.win 에 publisherName/certificateFile/
+   forceCodeSigning 모두 없음) electron-updater 의 NSIS 서명 검사에는
+   대조할 기준 자체가 없다. sha512 는 같은 호스트가 주므로 무의미하다.
+
+   ※ 오염된 REMOTE_SITE_URL 은 업데이터뿐 아니라
+     poll/route.ts:124-125 의 잡 수신 출처도 바꾼다 — 이쪽은 OS 무관이고
+     디바이스 토큰이 공격자 서버로 전송된다.
 ```
 
-각 단계는 아래에서 개별 근거와 함께 서술한다. 완화 순서도 이 순서가 아니라 **③ → ② → ①**이 옳다. ③을 고정 출처로 못 박으면 ①·②가 남아 있어도 코드 실행으로는 이어지지 않기 때문이다.
+**완화 순서는 페이로드부터다.** `auto-update.cjs`의 출처를 상수로 고정하면 A·B 어느 경로가 남아도 코드 실행으로는 이어지지 않는다. 그다음이 경로 A(허용 목록 한 줄), 마지막이 경로 B(개행 거절 + 직렬화/파서 일치)다.
 
 ---
 
@@ -141,23 +151,32 @@
 
 **수정 방향.** 모든 POST/PATCH/DELETE 핸들러 첫머리에서 `requireTrustedLocalMutation(request)`를 `requireAdminApiKey(request)`보다 먼저 호출한다(`src/app/api/system/control/route.ts:50-54`가 템플릿). 개별 적용은 다시 어긋나므로 `withLocalMutationGuard` 같은 공용 래퍼로 감싸거나 Next 미들웨어로 `/api/*`의 비-GET 전체에 일괄 적용한다. 동시에 `api-auth.ts:113`의 주석을 "헤더는 인증이 아니라 CSRF 방어이며 둘 다 필요하다"로 정정해 같은 오해가 재발하지 않게 한다.
 
-### C2. `.env` 개행 주입으로 `EDITABLE_KEYS` 무력화 — `src/app/api/settings/route.ts:56` (CONFIRMED)
+### H2(구 C2). `.env` 개행 주입으로 `EDITABLE_KEYS` 무력화 — `src/app/api/settings/route.ts:56` (CONFIRMED, 2026-09-08 CRITICAL→HIGH 강등)
 
 **무엇이 잘못됐나.** `serializeEnv`(56-63행)는 `${k}="${String(v).replace(/"/g,'\\"')}"` 형태로 기록한다. **큰따옴표는 이스케이프하지만 개행은 하지 않는다.** POST 핸들러(134행)는 *키*만 화이트리스트(`EDITABLE_KEYS` = `OPENAI_API_KEY`, `UNSPLASH_ACCESS_KEY`, `NAVER_BLOG_ID`, `ADMIN_API_KEY`)로 걸러내고 값은 `value.trim()`만 거쳐 저장하므로 내부 개행은 살아남는다. 기록된 파일은 이 파일 자신의 `parseEnv`(39-53행)와 `scripts/lib/local-env-file.ts`의 `readLocalEnvFile`이 `/\r?\n/`로 잘라 줄마다 key=value로 다시 읽는다. 29행의 주석은 화이트리스트가 "임의 env 노출/주입"을 막는다고 주장하지만 막지 못한다.
 
-**직접 재확인 — 실제 `serializeEnv`/`parseEnv` 로직으로 실행한 결과.** 화이트리스트에 있는 키 하나에만 아래 값을 넣어 제출했다.
+**직접 재확인 — 파서가 둘이고, 결과가 다르다.** 화이트리스트에 있는 키 하나에만 아래 값을 넣어 제출했다.
 
 ```
 myblog\nREMOTE_SITE_URL=https://evil.example\nADMIN_API_KEY=attacker-key\n#
 ```
 
-기록된 `.env`는 다음 기동 때 **세 개의 키로, 정확히 그 값 그대로** 재파싱된다. 마지막의 `#`이 닫는 큰따옴표를 주석으로 삼켜 파일이 문법적으로도 온전하게 남는다. `EDITABLE_KEYS`는 완전히 무력화된다.
+기록된 `.env`를 **두 파서로 각각** 읽으면 결과가 갈린다.
 
-**연쇄(가장 중요).** 주입 가능한 키 중 `REMOTE_SITE_URL`이 바로 `scripts/electron/auto-update.cjs`의 `updateOrigin()`이 소비하는 값이다. 즉 이 결함은 단독 설정 변조에 그치지 않고 **C3의 서명 없는 설치 경로에 입력을 공급한다.** 부수적으로 `scripts/electron/main.cjs:97`이 기동 시 `dotenv.config({path: userData/.env})`를 호출하므로 주입된 줄은 Electron/Next 프로세스의 실제 `process.env`가 되고, `publish/route.ts:292`가 `...process.env`로 스폰하는 모든 발행 자식에게 상속된다. 최소 피해 변형인 `ADMIN_API_KEY` 탈취는 145행이 값을 즉시 `process.env`에 반영하므로 무조건 성립하며, 소유자를 자기 관리 API에서 잠근다.
+| 파서 | 사용처 | 1회 저장 후 결과 |
+|---|---|---|
+| 라우트 자신의 `parseEnv`(39-53행), `local-env-file.ts:5-18` | `readEnvFile()`, `readLocalEnvFile()` | **키 3개로 분리** — 주입 성립 |
+| **dotenv 17.3.1** | `main.cjs:97` — 기동 시 `process.env`를 만드는 주체 | `NAVER_BLOG_ID` **한 개의 여러 줄 값** — 주입 실패 |
 
-**정밀한 단서 두 가지.** (a) 이 라우트도 `requireRemoteActivation`을 먼저 통과해야 하므로 **미활성 PC에서 맨바닥부터 시작하는 공격은 428로 막힌다.** 이미 활성화된 피해자가 필요하다. (b) `parseEnv`와 dotenv는 마지막 줄이 이긴다. 이미 `REMOTE_SITE_URL`이 있는 파일이라면, 아직 파일에 없는 키(예: `ADMIN_API_KEY`)를 통해 주입해 위조 줄이 기존 줄보다 **뒤에** 오게 만들어야 이긴다. 두 조건 모두 만족 가능하다.
+dotenv 17은 큰따옴표 값이 리터럴 개행을 포함하는 것을 허용한다. 따옴표 탈출 변형 4가지(맨따옴표·이스케이프된 따옴표·따옴표+공백)도 모두 시험했으나 어느 것도 dotenv에서 키를 만들지 못했다. **따라서 "1회 저장으로 즉시 `process.env` 오염"은 성립하지 않는다.**
 
-**수정 방향.** 저장 전에 `\r` 또는 `\n`이 포함된 값을 400으로 거절하고, `serializeEnv`가 값을 `JSON.stringify`로 인코딩하도록 바꾼다(읽기 쪽 언이스케이프와 함께 — L14 참조). 그리고 이 POST에 `requireTrustedLocalMutation`을 붙인다.
+**그럼에도 결함이 남는 이유 — 파서 차이 세탁.** 쓰기(`serializeEnv`, 개행 미이스케이프)와 읽기(줄 단위 파서)가 어긋나 있으므로, **두 번째** env 파일 쓰기가 그 여러 줄 값을 분리해 `REMOTE_SITE_URL`을 독립 줄로 재직렬화한다. 그 2세대 파일은 dotenv도 정상 키로 읽는다(실행 확인). 두 번째 쓰기는 사용자의 설정 재저장이나 `saveRemoteActivation`(`local-env-file.ts:30`)이면 충분하다. 이후 **앱 재시작** 시 `main.cjs:97`이 오염 값을 `process.env.REMOTE_SITE_URL`로 로드하고, 그때 비로소 `auto-update.cjs:187`과 `poll/route.ts:124-125`가 이를 소비한다.
+
+**전제 조건(공정하게 명시).** (a) 이 라우트도 `requireRemoteActivation`을 먼저 통과해야 하므로 **미활성 PC 공격은 428로 막힌다** — 이미 활성화된 피해자가 필요하다. (b) 두 파서 모두 마지막 줄이 이기므로, 이미 `REMOTE_SITE_URL`이 있는 파일에서는 위조 줄이 뒤에 오도록 순서를 강제해야 한다(빈 저장으로 키를 지운 뒤 재추가하면 가능 — 실행 확인). (c) **최소 2회의 env 쓰기와 앱 재시작**이 필요하다. 초판이 주장한 "사용자 상호작용 한 번"은 과장이었다.
+
+**초판의 또 다른 오류.** 초판은 `ADMIN_API_KEY` 탈취가 "개행 주입으로 무조건 성립"한다고 적었으나, `ADMIN_API_KEY`는 애초에 `EDITABLE_KEYS`에 들어 있다(37행). 게이트만 지나면 개행 없이 정상 편집으로 설정된다 — 주입 결함과 무관한 별개 사안이며, 그 책임은 C1(동일 출처 검사 부재)에 있다.
+
+**수정 방향.** 저장 전에 `\r` 또는 `\n`이 포함된 값을 400으로 거절하고, `serializeEnv`가 값을 `JSON.stringify`로 인코딩하도록 바꾼다(읽기 쪽 언이스케이프와 함께 — L14 참조). 그리고 이 POST에 `requireTrustedLocalMutation`을 붙인다. 근본 처방은 **쓰기·읽기 양쪽을 한 파서로 통일**하는 것이다 — 지금은 같은 파일을 세 곳이 서로 다르게 읽는다.
 
 ### C3. 자동 업데이트 채널을 통한 원격 코드 실행 — `scripts/electron/auto-update.cjs:17`, `:187` (CONFIRMED)
 
@@ -166,7 +185,7 @@ myblog\nREMOTE_SITE_URL=https://evil.example\nADMIN_API_KEY=attacker-key\n#
 1. **출처에 허용 목록이 없다.** `updateOrigin()`(17행)은 `process.env.REMOTE_SITE_URL`을 읽어 **프로토콜이 https인지만 확인하고 `url.origin`을 그대로 반환한다**(직접 재확인). `isAllowedRemoteSiteOrigin`을 호출하지 않는다. `ensureUpdater()`는 NsisUpdater를 `<그 출처>/api/updates/windows/`로 향하게 하고, `installWhenSafe()`는 사용자 확인 없이 `quitAndInstall(true, true)`를 호출한다.
 2. **앱이 서명되지 않았다.** `package.json`의 `build.win`에는 `publisherName`도 `certificateFile`도 `forceCodeSigning`도 설정돼 있지 않고(직접 재확인), `.github/workflows/desktop-build.yml:66`은 `CSC_IDENTITY_AUTO_DISCOVERY: false`로 서명을 명시적으로 끈다. 여기서 정확한 표현은 "서명 검증이 꺼져 있다"가 아니라 **"서명이 존재하지 않으므로 electron-updater의 NSIS 서명 검사에 대조할 기준이 없다"**이다. `latest.yml`의 sha512는 설치 파일과 같은 호스트가 제공하므로 무결성 보증이 되지 못한다.
 
-**실패 시나리오.** C1+C2로 `.env`에 `REMOTE_SITE_URL=https://evil.example`이 심긴다(또는 H4·H5의 딥링크 경로로 같은 값이 저장된다). `AUTO_UPDATE_CHECK_INTERVAL_MS`(기본 2분) 안에 앱이 공격자의 `latest.yml`을 읽고 NSIS 설치 파일을 내려받아 실행한다. 사용자에게는 평소와 똑같은 업데이트 재시작으로 보인다. 별도 경로로, 문서화되지 않은 `AUTO_UPDATE_ALLOW_LOCAL_HTTP`가 테스트 모드 게이트 없이 적용되므로(L38) 패키징된 프로덕션 빌드가 `http://127.0.0.1:<port>` 피드까지 수용한다.
+**실패 시나리오.** C3(mcpUrl 허용 목록 미검사)로 즉시, 또는 C1+H2(파서 차이 세탁 + 재시작)로 `.env`에 `REMOTE_SITE_URL=https://evil.example`이 심긴다(또는 H4·H5의 딥링크 경로로 같은 값이 저장된다). `AUTO_UPDATE_CHECK_INTERVAL_MS`(기본 2분) 안에 앱이 공격자의 `latest.yml`을 읽고 NSIS 설치 파일을 내려받아 실행한다. 사용자에게는 평소와 똑같은 업데이트 재시작으로 보인다. 별도 경로로, 문서화되지 않은 `AUTO_UPDATE_ALLOW_LOCAL_HTTP`가 테스트 모드 게이트 없이 적용되므로(L38) 패키징된 프로덕션 빌드가 `http://127.0.0.1:<port>` 피드까지 수용한다.
 
 **수정 방향.** 업데이터 출처를 상수 `DEFAULT_REMOTE_SITE_URL`로 못 박거나, 최소한 `updateOrigin()` 안에서 `isAllowedRemoteSiteOrigin`을 통과할 때만 그 값을 쓰고 아니면 업데이트를 중단한다. Windows 빌드를 코드 서명하고 `build.win.publisherName`을 설정해 electron-updater가 실제로 대조할 대상을 갖게 한다(`resources/app-update.yml` 직접 수정은 무의미 — L34 참조). `AUTO_UPDATE_ALLOW_LOCAL_HTTP`와 `AUTO_UPDATE_FORCE`를 `AUTO_UPDATE_TEST_MODE` 게이트 안으로 옮긴다.
 
@@ -239,7 +258,7 @@ myblog\nREMOTE_SITE_URL=https://evil.example\nADMIN_API_KEY=attacker-key\n#
 | **`review`** | POST | |
 | **`schedule`** | POST + DELETE | |
 | **`session/login`** | GET + POST | 네이버 로그인 |
-| **`settings`** | GET + POST | C2의 주입 대상 |
+| **`settings`** | GET + POST | H2의 주입 대상 |
 | `system/update-readiness` | GET | |
 | **`topic`** | GET + POST | |
 | `topic-candidates` | POST | |
@@ -296,7 +315,7 @@ myblog\nREMOTE_SITE_URL=https://evil.example\nADMIN_API_KEY=attacker-key\n#
 
 **무엇이 잘못됐나.** `requireAdminApiKey`는 `configuredAdminApiKey()`를 보기도 전에, `isDevelopmentLocalRequest(request)`가 true면 `null`(=허용)을 반환한다. 그 함수(33-70행)는 `NODE_ENV !== "production"`이고 `request.nextUrl.host` / `Host` 헤더 / `X-Forwarded-Host`가 `localhost`, `127.0.0.1`, `::1`, `0.0.0.0` 중 하나로 해석되면 true다. 그런데 `NextRequest.nextUrl.host`는 **클라이언트가 완전히 통제하는 인바운드 Host 헤더에서 파생된다.** 한편 `scripts/dev-open.mjs:6`은 HOST 기본값을 `0.0.0.0`으로 두어 `npm run dev:open`이 모든 인터페이스에 바인딩하고, `scripts/electron/main.cjs:202`는 `dev: !app.isPackaged`로 Next를 띄우므로 언패키징 데스크톱 실행도 비프로덕션이다. `admin-session/route.ts:17`이 같은 우회를 그대로 반복하며 `required:false`를 보고해 대시보드가 키를 묻지도 않는다.
 
-**실패 시나리오.** 개발자나 파워유저가 `ADMIN_API_KEY`를 설정한 채 `npm run dev:open`(README.md:248, GUIDE.md:317에 문서화됨)을 돌리며 API가 보호된다고 믿는다. 같은 Wi-Fi의 누구든 `curl -H 'Host: localhost:3000' -X POST http://192.168.1.42:3000/api/brandlinks/bulk-today -d '{}'`를 실행하면 `isDevelopmentLocalRequest`가 hostname을 "localhost"로 보고 true를 반환, 실제 글이 발행된다. 같은 헤더 트릭으로 `/api/settings`를 읽고 `ADMIN_API_KEY`를 덮어쓸 수 있다(→ C2).
+**실패 시나리오.** 개발자나 파워유저가 `ADMIN_API_KEY`를 설정한 채 `npm run dev:open`(README.md:248, GUIDE.md:317에 문서화됨)을 돌리며 API가 보호된다고 믿는다. 같은 Wi-Fi의 누구든 `curl -H 'Host: localhost:3000' -X POST http://192.168.1.42:3000/api/brandlinks/bulk-today -d '{}'`를 실행하면 `isDevelopmentLocalRequest`가 hostname을 "localhost"로 보고 true를 반환, 실제 글이 발행된다. 같은 헤더 트릭으로 `/api/settings`를 읽고 `ADMIN_API_KEY`를 덮어쓸 수 있다(→ H2).
 
 **수정 방향.** Host 헤더에서 신뢰를 파생하지 않는다. `x-forwarded-for`도 마찬가지로 신뢰 불가이므로, 편의 우회를 남기려면 서버 자신의 소켓 피어 주소로 판정하고, 그게 어려우면 `NODE_ENV`와 무관하게 키가 설정돼 있으면 항상 요구하도록 우회 자체를 제거한다.
 
@@ -465,15 +484,17 @@ myblog\nREMOTE_SITE_URL=https://evil.example\nADMIN_API_KEY=attacker-key\n#
 
 **수정 방향.** 임계값을 실제 반복 횟수(예: `>= 3`, 또는 섹션당 `>= 2` + 문서 전체 밀도 검사)로 올리거나, 임의 위치의 출현이 아니라 문장 시작부 완전 중복에만 적용한다.
 
-#### H21. 고지 섹션 제거 시 이미지·플랜 인덱스 밀림 — `src/lib/post-composition-contract.ts:620` (PLAUSIBLE)
+#### H21. 섹션 제거 시 위치 기반 인덱싱 — `src/lib/post-composition-contract.ts:611-628` (CONFIRMED, 2026-09-08 HIGH→MEDIUM 정정)
 
-**무엇이 잘못됐나.** 611-613행이 순수 제휴 고지 섹션을 제거하는데, 620행의 `options.sectionImagePaths[index]`와 628행의 `plan[index]`는 *제거 후* 위치로 인덱싱한다. 호출자(`scripts/simple-agent.ts:9394`, `:9889`)는 두 배열을 *제거 전* `options.sections` 기준으로 만든다. 결과는 두 가지다. (a) 제거된 섹션 이후 모든 섹션이 이전 슬롯의 이미지를 받고 마지막 계획 이미지는 본문에서 사라진다. (b) 615행의 `sectionPlan.length === contentSections.length` 가드가 깨져 섹션 id, 이미지 의도, imageMin/imageMax, `earlyConnectCard` 배치를 포함한 스펙 우선 플랜 전체가 조용히 폐기되고 레거시 팔레트가 대신 쓰인다.
+> **정정.** 초판은 이를 "고지 섹션 제거 시 현재 발현 중인 HIGH 결함"으로 적었다. 그 서술은 **틀렸다.** 외부 리뷰(PR #14, Codex P2)의 지적대로, 현재 호출자에서는 발현하지 않는다. 재검증 결과 진짜 결함은 **위치 결합 + `isDisclosureSection` 과대 매칭**이며 성격이 다르다.
 
-**실패 시나리오.** ts-node 재현: 섹션 4개(2번째가 고지 블록), 이미지 경로 `[/p0],[/p1],[/p2],[/p3]`, 플랜 4개를 넣으면 결과는 3개 섹션에 id가 `shopping-hook, shopping-summary, shopping-verdict`(플랜 폐기), 이미지는 `A→/p0.jpg, B→/p1.jpg, C→/p2.jpg`다. `/p1.jpg`는 제거된 고지 슬롯용이었고 `/p3.jpg`는 글에 전혀 등장하지 않는다. 발행된 글은 "B 소제목"과 "C 소제목" 아래에 잘못된 사진을 보여준다.
+**무엇이 잘못됐나.** 611-613행은 **어떤 위치의 섹션이든** 제거할 수 있는데, 615행의 `sectionPlan.length === contentSections.length` 가드와 620행 `sectionImagePaths[index]`, 628행 `plan[index]`는 원본 인덱스를 보존하지 않고 **제거 후 위치**로 조회한다. 이 결합은 **제거 대상이 항상 마지막일 때만** 안전하다.
 
-**템플릿 계층과의 연결.** 여기서 제거 대상이 되는 고지 블록은 `scripts/lib/post-spec/index.ts:69`의 `SHOPPING_DISCLOSURE` / `:74`의 `TRAVEL_DISCLOSURE`이며, readiness의 하드 차단 사유 `missing-disclosure`도 같은 지점을 본다. 고지는 "섹션 카운트 밖 마지막 원소"로 설계돼 있는데 제거 로직이 그 전제를 깨뜨린다. 템플릿 레이어 문서를 고칠 때 이 상호작용을 함께 명시해야 한다.
+**현재 발현하지 않는 이유(초판이 놓친 것).** `assemblePost`는 본문 섹션을 모두 만든 뒤 `scripts/lib/post-spec/assemble.ts:104`에서 고지를 **마지막에 append**하고, 같은 함수가 넘기는 `composition.sections`(:84)와 `sectionPlan`(:125)은 `spec.sections` 기반이라 **고지를 포함하지 않는다**(`types.ts:238` 주석이 이 계약을 명문화). 즉 `sections`는 N+1, 두 배열은 N이므로 마지막 원소가 빠지면 길이가 맞아떨어지고 본문 순서도 보존된다. 초판의 재현은 두 배열에 고지 항목을 직접 넣었는데, **실제 호출자는 그렇게 하지 않는다.**
 
-**수정 방향.** `contentSections`를 만들 때 살아남은 원본 인덱스를 담은 매핑을 유지하고, 그 매핑으로 `options.sectionImagePaths[originalIndex]`/`options.sectionPlan[originalIndex]`를 조회한다. 플랜 길이 비교는 `contentSections.length`가 아니라 `options.sections.length`(또는 필터링된 플랜) 기준으로 한다.
+**그럼에도 남는 진짜 위험 — `isDisclosureSection` 과대 매칭.** 434행은 `(쇼핑|여행) 커넥트` + `수수료` 동시 출현만 보고, 440행의 문장 정규식은 `이 글은|이 포스팅은|본 글은` 접두형만 잡는다. 그런데 여행 `closing` **본문** 섹션은 이미 `여행커넥트`를 담고 있고(`scripts/lib/post-spec/section-library.ts:532`), `취소 수수료`는 여행 상품에서 정상 어휘다. 본문 중간 섹션이 이 판정에 걸리는 순간 위 결합이 즉시 발현해 이미지가 다른 소제목에 붙고 스펙 플랜 전체가 폐기된다.
+
+**수정 방향.** 두 가지를 함께 한다. (a) `contentSections`를 만들 때 살아남은 **원본 인덱스 매핑**을 유지하고 그 매핑으로 두 배열을 조회한다 — 그러면 어떤 위치가 제거돼도 안전하다. (b) `isDisclosureSection`을 위치(마지막) 또는 명시적 마커 기반으로 좁혀 본문 섹션이 걸리지 않게 한다. 현재는 (a) 없이 "고지는 늘 마지막"이라는 암묵적 전제에만 의존하고 있고, 그 전제는 코드가 강제하지 않는다.
 
 #### H22. 조사 보정이 형용사 어미와 일반 명사를 훼손 — `src/lib/topic-workflow.ts:477` (CONFIRMED)
 
@@ -548,13 +569,21 @@ CLI는 전송 방식마다 5회까지 재시도한 뒤 WebSocket → HTTPS로 �
 
 ### 4.5 데이터 손실·자원 누수 (H27–H31)
 
-#### H27. 자식 프로세스 stdout 청크 단위 디코딩으로 한글 깨짐 — `src/lib/run-script.ts:90` (CONFIRMED)
+#### H27. 자식 프로세스 stdout/stderr 청크 단위 디코딩 — `src/lib/run-script.ts:89-95` (CONFIRMED, 2026-09-08 HIGH→MEDIUM 강등)
 
-**무엇이 잘못됐나.** `setEncoding("utf8")` 없이 `stdout += chunk.toString()`을 등록해 각 청크가 독립적으로 디코딩된다. Node 파이프는 최대 64KiB 단위로 전달하며 문자 경계를 고려하지 않고, 한글 코드포인트는 3바이트다. 경계가 문자 중간에 떨어지면 양쪽에 대체 문자(U+FFFD)가 생긴다. 같은 저장소의 `src/lib/brand-post-image-generation.ts:372-373`은 이를 올바르게 처리하므로 의도적 선택이 아니다. `stderr`(94행)도 동일하다.
+> **정정.** 디코딩 결함 자체는 실측으로 확정된 진짜 버그다. 다만 초판은 "깨진 본문이 그대로 발행된다"고 적었는데 그 **영향 범위가 틀렸다.** 외부 리뷰(PR #14, Codex P2)의 지적대로 손상은 발행 글에 도달하지 않는다.
 
-**실패 시나리오.** `POST /api/review`가 `scripts/review-agent.ts`를 실행하고 진행 로그와 생성 원고를 출력한다. 총 stdout이 64KiB를 넘는 순간(해당 에이전트에서는 일상적) 경계가 한글 문자 안에 떨어진다. `src/app/api/review/route.ts:97-105`의 `stdout.match(/제목: (.+)/)`와 `JSON.parse`는 U+FFFD가 유효한 JSON이므로 성공하고, 깨진 텍스트가 제목·본문으로 반환돼 블로그에 발행된다. 오류는 발생하지 않고 사용자는 발행된 글에서만 깨짐을 본다.
+**무엇이 잘못됐나.** `setEncoding("utf8")`이나 `StringDecoder` 없이 `stdout += chunk.toString()` / `stderr += chunk.toString()`으로 청크를 개별 디코딩한다. 읽기 경계가 3바이트 한글 코드포인트 중간에 떨어지면 양쪽에 U+FFFD가 생기고 **오류는 전혀 나지 않는다.** 같은 저장소의 `src/lib/brand-post-image-generation.ts:372-373`은 이를 올바르게 처리하므로 의도적 선택이 아니다.
 
-**수정 방향.** spawn 직후 `child.stdout.setEncoding("utf8")`과 `child.stderr.setEncoding("utf8")`을 호출하거나, Buffer를 모아 close 시점에 `Buffer.concat(...).toString("utf8")`로 한 번에 디코딩한다.
+**직접 재확인.** 149,536바이트 출력에서 U+FFFD 8개 발생(`Buffer.concat`/`StringDecoder` 기준값은 0개), 손상된 JSON도 `JSON.parse`를 그대로 통과했다. 발생 조건은 초판이 적은 "총 stdout 64KiB 초과"가 **아니라** 단일 write가 `PIPE_BUF`(4096)를 넘고 읽기가 분할될 때이며, 스케줄링에 따라 비결정적이다(182KB 이상 매회 재현, 38~56KB 산발, 20KB 이하 미발생).
+
+**영향 범위(정정).** `scripts/review-agent.ts:289`의 `--publish` 분기는 **상호 배타적**이다. `--publish` 없이 실행하면 :293-294가 "생성된 콘텐츠:" JSON을 출력한 뒤 :295에서 `return`하므로 **아무것도 발행하지 않는다.** `--publish`로 실행하면 메모리상의 `content`를 발행하고 그 JSON을 애초에 출력하지 않는다. 따라서 손상은 발행 본문이 아니라 아래에 남는다.
+
+1. `--publish` 없이 호출된 `POST /api/review`가 반환하는 `data.content`(생성 원고 전문)가 조용히 오염된다 — 관리자 키로 게이트된 공개 계약이라 외부 연동 클라이언트는 깨진 한글을 그대로 받는다.
+2. `src/services/scheduler.ts:154-157`이 남기는 `stdout.slice(-500)`은 하필 손상 확률이 가장 높은 꼬리 구간이라, 발행 실패 추적용 운영 로그가 깨질 수 있다.
+3. 동일 결함이 `stderr`(93-95행)에도 있어 `review/route.ts:126`·`scrape/route.ts:52`가 500 응답에 싣는 한국어 오류 메시지가 깨진다.
+
+**수정 방향.** spawn 직후 `child.stdout.setEncoding("utf8")`과 `child.stderr.setEncoding("utf8")`을 호출하거나, Buffer를 모아 close 시점에 `Buffer.concat(...).toString("utf8")`로 한 번에 디코딩한다. 한 줄짜리 수정이고 위험도 없으므로 등급과 무관하게 처리할 가치가 있다.
 
 #### H28. 승인 시 매니페스트 비원자적 기록 — `src/lib/brand-post-package.ts:370` (CONFIRMED)
 
@@ -870,7 +899,7 @@ shortfall: Math.max(0, Math.max(minBody, requiredSlots) - resolvedBody)
 | api-rest | `src/app/api/history/route.ts:13` | `parseInt`만 사용해 NaN/음수 skip 발생 | `/api/schedule`처럼 유한성 검사 + 상하한 clamp |
 | api-rest | `src/app/api/topic/route.ts:391` | `categoryNo`를 숫자 검증 없이 저장 | `normalizeCategoryNo` 재사용 후 400 반환 |
 | api-rest | `src/app/api/topic-tasks/bulk-schedule/route.ts:147` | 로그 경로에 `process.cwd()` 사용(설치 디렉터리) (PLAUSIBLE) | `getLogsDir()`로 교체(발행 라우트도 동일) |
-| auth-secrets | `src/app/api/settings/route.ts:60` | 따옴표 이스케이프를 읽기 쪽이 되돌리지 않아 저장한 키가 변형 | 읽기 시 언이스케이프하고 인코딩 구현을 하나로 공유(C2 수정과 함께) |
+| auth-secrets | `src/app/api/settings/route.ts:60` | 따옴표 이스케이프를 읽기 쪽이 되돌리지 않아 저장한 키가 변형 | 읽기 시 언이스케이프하고 인코딩 구현을 하나로 공유(H2 수정과 함께) |
 | auth-secrets | `apps/sites/lib/pairing.ts:18` | 혼동 문자 보정이 알파벳에 없는 문자로 매핑돼 항상 실패 | 해당 replace 제거 또는 알파벳 방향으로 매핑 + 전용 오류 메시지 |
 | simple-agent-flow | `scripts/simple-agent.ts:206` | 타임아웃 env를 맨 `Number()`로 파싱해 NaN 타이머 발생 | 네 값 모두 `parseBoundedInteger`(또는 정책 헬퍼)로 파싱 |
 | simple-agent-publish | `scripts/simple-agent.ts:8926` | 최종 발행 클릭 실패를 삼키고 true 반환 | 클릭 결과를 확인해 실패 시 다음 셀렉터로, 상태 변화 관측 후에만 성공 |
@@ -951,7 +980,7 @@ shortfall: Math.max(0, Math.max(minBody, requiredSlots) - resolvedBody)
 | `BLOG_HUMANIZE_MOBILE_STYLE` | `simple-agent.ts:272`, 기본 true | **없음** | |
 | `OPENAI_MODEL` | `simple-agent.ts:199`, 기본 `gpt-4o-mini` | `.env.example:5-7`은 다른 모델을 광고 | openai 경로의 실제 기본값이 문서와 불일치 |
 | `TRAVEL_STOCK_IMAGES_ENABLED` | `post-spec/image-plan.ts:118` | **없음** | |
-| `REMOTE_SITE_URL` | `src/lib/remote-activation.ts:12` | **없음** | **C2의 주입 대상이자 C3의 업데이트 출처** |
+| `REMOTE_SITE_URL` | `src/lib/remote-activation.ts:12` | **없음** | **H2의 주입 대상이자 C2의 업데이트 출처** |
 | `REMOTE_SITE_ALLOWLIST` | `src/lib/remote-site.ts:12` | **없음** | 검사가 https 분기 밖(41행) → http 허용 (M) |
 | `AUTO_UPDATE_*` 10종 | `auto-update.cjs:21, 52-60, 207-208` | **전부 없음** | `ALLOW_LOCAL_HTTP`/`FORCE`가 test mode 게이트 밖 (L38) |
 | `ADMIN_API_KEY` / `CRON_SECRET` | `.env.example:224` / `:228` | 문서화됨, 일관 | 다만 `CRON_SECRET`은 설정 화이트리스트에 없어 데스크톱에서 설정 불가 (H3) |
@@ -973,11 +1002,33 @@ shortfall: Math.max(0, Math.max(minBody, requiredSlots) - resolvedBody)
 | C4 `fix-topic-agent.js` 삭제량 | 1741줄 → **1914줄(3062줄 중 63%)** | 드라이런 직접 실행 결과 |
 | H19 `repairKoreanParticles` 피해 범위 | "어미 훼손" → **어미 + 이로 끝나는 일반 명사 훼손** | 실행 결과가 1차 보고보다 나쁨 (§4.3 H22) |
 | H14 이스케이프 지점 행번호 | 302, 484, 497, 507 → **302, 486, 498, 508** | 현재 소스 기준 재확인 |
-| C1/C2 서명 서술 | "서명 검증이 꺼져 있다" → **"앱이 미서명이라 검증할 기준이 없다"** | `build.win`에 `publisherName`/`certificateFile`/`forceCodeSigning`이 모두 없음을 직접 확인 |
+| 자동 업데이트 서명 서술 | "서명 검증이 꺼져 있다" → **"앱이 미서명이라 검증할 기준이 없다"** | `build.win`에 `publisherName`/`certificateFile`/`forceCodeSigning`이 모두 없음을 직접 확인 |
 | C2 페어링 경로 위험도 서술 | "드라이브바이" → **"사용자가 적대적 MCP URL을 붙여넣어야 함"** | POST가 `requireTrustedLocalMutation` + `requireAdminApiKey` 뒤에 있음을 직접 확인 |
 | H1 인증 서술 | "인증 없음" → **"인증 부재가 아니라 CSRF 방어 부재"** | 키 없을 때 허용은 의도된 동작이며 `api-auth.ts:113`에 문서화돼 있음 |
 
 또한 1차의 "죽은 파일 정리" 목록에 **`skills/` 디렉터리가 빠져 있었다.** `skills/product-photo-thumbnail-copywriting/`(SKILL.md, references/, agents/)는 저장소 전체에서 코드 참조가 0건이다. 이것이 죽은 자산인지 외부에서 소비되는 자산인지는 이 감사가 판정하지 못했다 — 소유자가 결정해야 한다(§10 참조).
+
+---
+
+### 9.1 외부 리뷰 반영 정정 (2026-09-08)
+
+PR #14에 붙은 자동 코드 리뷰가 이 문서의 서술 3건을 반박했다. 세 건 모두 코드로 재검증했고 **세 건 모두 지적이 옳았다.** 그중 하나는 이 문서의 헤드라인이었다. 아래가 정정 내역이다.
+
+| 지적 | 초판 서술 | 재검증 결과 | 조치 |
+|---|---|---|---|
+| P1 | `.env` 개행 주입이 **1회 저장**으로 `process.env`를 오염시켜 즉시 업데이터 RCE로 연쇄 | **틀림.** 기동 시 `process.env`를 만드는 것은 dotenv 17.3.1(`main.cjs:97`)인데, dotenv는 큰따옴표 값이 리터럴 개행을 포함하는 것을 허용하므로 페이로드를 `NAVER_BLOG_ID` 한 개의 여러 줄 값으로 유지한다. 따옴표 탈출 4변형 모두 실패 | C2 → **H2**로 강등, §2 연쇄도 재작성 |
+| P2 | 고지 섹션 제거로 이미지·플랜 인덱스가 **현재 밀리고 있다** (HIGH) | **틀림.** `assemble.ts:104`가 고지를 마지막에 append하고 `composition.sections`·`sectionPlan`은 고지를 포함하지 않으므로(`types.ts:238`) 현재 호출자에서는 발현하지 않는다 | H21 **MEDIUM**으로 정정, 진짜 위험은 `isDisclosureSection` 과대 매칭으로 재서술 |
+| P3 | stdout 청크 디코딩 손상이 **발행 본문에 도달**한다 (HIGH) | **틀림.** `review-agent.ts:289`의 `--publish` 분기는 상호 배타적이라 발행 경로에서는 그 JSON을 출력조차 하지 않는다 | H27 **MEDIUM**으로 강등, 영향을 API 응답·운영 로그·오류 메시지로 한정 |
+
+**왜 틀렸는가 — 재발 방지를 위해.** 세 건의 실패 원인이 같다. **검증에 쓴 경로가 제품이 실제로 쓰는 경로가 아니었다.**
+
+- P1: 같은 `.env`를 읽는 파서가 셋(`settings/route.ts:39`, `local-env-file.ts:5`, dotenv)인데 앞의 둘로만 재현하고 "기동 시 주입된다"고 단정했다. 기동 시 파서는 dotenv다.
+- P2: 재현 스크립트가 두 배열에 고지 항목을 직접 넣었는데, 실제 호출자는 그렇게 만들지 않는다. 호출자를 읽지 않고 함수만 읽었다.
+- P3: 결함(디코딩)은 실측했으나 그 출력이 발행에 쓰이는지 확인하지 않고 영향 범위를 단정했다.
+
+**세 건 모두 "결함이 존재하는가"에서는 맞고 "무엇에 도달하는가"에서 틀렸다.** 결함의 존재를 확인한 뒤 소비자 경로를 끝까지 따라가지 않으면 등급이 부풀려진다. 남은 CONFIRMED 항목 중 소비자 추적이 얕은 것이 더 있을 수 있으므로, 조치 착수 전 해당 항목의 소비자 경로를 한 번 더 확인할 것을 권한다.
+
+**반대로, 반박이 지나쳤던 부분도 기록한다.** P1 지적은 "연쇄가 성립하지 않는다"까지 갔지만, 쓰기(`serializeEnv`)와 읽기(줄 단위 파서)의 불일치 때문에 **두 번째 env 쓰기가 주입 줄을 독립 줄로 세탁**하고 그 파일은 dotenv도 정상 키로 읽는다(실행 확인). 따라서 결함은 사라지지 않고 전제가 무거워질 뿐이며(2회 쓰기 + 재시작), 오염된 값은 업데이터와 잡 폴링 출처(`poll/route.ts:124-125`, OS 무관·디바이스 토큰 유출) 양쪽을 리다이렉트한다. HIGH로 강등하되 삭제하지 않은 이유다.
 
 ---
 
@@ -997,7 +1048,7 @@ shortfall: Math.max(0, Math.max(minBody, requiredSlots) - resolvedBody)
 
 ## 11. 우선순위 조치 순서
 
-1. **RCE 연쇄를 역순으로 끊는다 (배포 차단 해제 조건).** ③부터다. `scripts/electron/auto-update.cjs:17`의 업데이트 출처를 상수로 고정 → `src/app/api/settings/route.ts:56`에서 개행 포함 값 거절 + `serializeEnv`를 `JSON.stringify` 기반으로 → `src/lib/remote-site.ts:39`의 와일드카드를 정확한 호스트로 교체하고 41행 검사를 https 분기 안으로 → `src/app/api/remote-agent/route.ts:46-52`의 mcpUrl 분기에 허용 목록 적용 → `scripts/electron/main.cjs:483`의 딥링크 `site` 검증 + 재페어링 확인 모달. (C2, C3, C4, H4, H5)
+1. **업데이트 경로를 페이로드부터 끊는다 (배포 차단 해제 조건).** `scripts/electron/auto-update.cjs:17`의 업데이트 출처를 상수로 고정한다 — 이 한 가지만으로 아래 오염 경로가 남아 있어도 코드 실행으로는 이어지지 않는다. 이어서 즉시 성립하는 경로부터: `src/app/api/remote-agent/route.ts:46-52`의 mcpUrl 분기에 허용 목록 적용 → `src/lib/remote-site.ts:39`의 와일드카드를 정확한 호스트로 교체하고 41행 검사를 https 분기 안으로 → `scripts/electron/main.cjs:483`의 딥링크 `site` 검증 + 재페어링 확인 모달 → 마지막으로 `src/app/api/settings/route.ts:56`에서 개행 포함 값 거절 + `serializeEnv`/읽기 파서 통일. (C2, C3, H2, H4, H5)
 2. **Windows 릴리스를 코드 서명하고 `build.win.publisherName`을 설정한다.** 서명이 없으면 1번의 출처 고정만으로는 electron-updater가 대조할 기준이 여전히 없다. 같은 파이프라인에서 `resources/app-update.yml` extraResources 제거(L34), 릴리스 빌드의 lockfile 삭제 중단(M60), `prisma/**/*` glob 축소로 개발 DB 유출 차단(M61), `AUTO_UPDATE_ALLOW_LOCAL_HTTP`/`AUTO_UPDATE_FORCE`를 test mode 게이트 안으로(L38).
 3. **로컬 API CSRF를 일괄 적용한다.** `requireTrustedLocalMutation`을 §3 그룹 B·C의 모든 비-GET 핸들러에 적용한다(공용 래퍼 또는 미들웨어 — 목록 관리는 반드시 다시 어긋난다) → `/api/schedule/cron`을 POST 전환 + fail-closed → 그룹 E의 무가드 GET 5개에 `request` 인자와 가드 추가 + `admin-session` DELETE 보강 → `isDevelopmentLocalRequest`의 Host 헤더 신뢰 제거 → `apps/sites` 관리자 업데이트 라우트 origin 가드 → MCP 인자 검증의 `__proto__` 우회 차단. (C1, H1, H2, H3, M22, M29, M54)
 4. **루트 코드모드를 정리한다.** `fix-topic-agent.js`, `update-content.js`, `refactor-content.js`, `refactor-image.js`, `add-image-downloader.js`, `fix-topic-agent.py` 및 무동작 파일 6종 삭제 + `eslint.config.mjs` 예외 블록 제거. 커밋 하나로 끝나며 이후 모든 작업의 사고 위험을 없애고 lint 적자도 함께 줄인다. (C6, H42, M56, L30, L31)
