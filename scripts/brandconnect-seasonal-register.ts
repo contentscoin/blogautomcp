@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { optionalBlogCategories } from './lib/optional-blog-categories';
 import fs from "fs";
 import path from "path";
 import { chromium } from "playwright-extra";
@@ -1349,7 +1350,7 @@ async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient
 
   const blogId = process.env.NAVER_BLOG_ID?.trim();
   if (!blogId) throw new Error(".env의 NAVER_BLOG_ID가 필요합니다.");
-  const categoryMap = await fetchBlogCategoryMap(options.storageStatePath, blogId);
+  const categoryMap = await optionalBlogCategories(() => fetchBlogCategoryMap(options.storageStatePath, blogId));
   console.log(`✅ 게시판 매핑 로드: ${categoryMap.size}개`);
 
   const { items, contract, source } = await listTravelItems({
@@ -1450,7 +1451,7 @@ async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient
     if (successCount >= options.count) break;
     const scheduledDate = getScheduledDate(successCount);
     const boardName = inferBoardName(`여행 ${item.name}`);
-    const categoryNo = categoryMap.get(boardName) ?? CATEGORY_NAME_FALLBACK[boardName] ?? null;
+    const categoryNo = categoryMap.get(boardName) ?? null;
     const existingItem = findExistingItem(item);
 
     if (existingItem) {
@@ -1670,7 +1671,7 @@ async function main() {
   console.log(`- dryRun: ${options.dryRun ? "YES" : "NO"}`);
   console.log("=".repeat(70));
 
-  const categoryMap = await fetchBlogCategoryMap(options.storageStatePath, blogId);
+  const categoryMap = await optionalBlogCategories(() => fetchBlogCategoryMap(options.storageStatePath, blogId));
   console.log(`✅ 게시판 매핑 로드: ${categoryMap.size}개`);
 
   const browser = await chromium.launch({
@@ -1842,7 +1843,7 @@ async function main() {
   console.log("\n📋 선별 결과");
   selected.slice(0, options.count).forEach((item, index) => {
     const boardName = inferBoardName(item.productName);
-    const categoryNo = categoryMap.get(boardName) ?? CATEGORY_NAME_FALLBACK[boardName] ?? null;
+    const categoryNo = categoryMap.get(boardName) ?? null;
     console.log(
       `${String(index + 1).padStart(2, "0")}. [${boardName}/${categoryNo ?? "-"}] ${getScheduledDate(index)} | score=${item.score.toFixed(1)} | ${item.reasons.slice(0, 2).join(", ") || "계절/인기/할인 기반"} | ${item.productName}`
     );
@@ -1858,7 +1859,7 @@ async function main() {
     }
 
     const boardName = inferBoardName(item.productName);
-    const categoryNo = categoryMap.get(boardName) ?? CATEGORY_NAME_FALLBACK[boardName] ?? null;
+    const categoryNo = categoryMap.get(boardName) ?? null;
     const scheduledDate = getScheduledDate(successfulRegisterCount);
     const plannedItem: PlannedProduct = {
       ...item,

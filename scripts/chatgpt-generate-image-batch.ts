@@ -39,6 +39,13 @@ interface BatchResult {
   startedAt?: string;
   completedAt?: string;
   elapsedMs?: number;
+  /** A private persisted ChatGPT conversation path, never a new generation request. */
+  recoveryConversationPath?: string;
+}
+interface ImageJournalRecord extends Partial<BatchResult> {
+  fingerprint?: string;
+  sha256?: string;
+  state?: string;
 }
 
 export function acquireImageCheckpointLock(lockPath: string): () => void {
@@ -89,16 +96,34 @@ export function imageJobFingerprint(job: BatchJob): string {
 export function readImageBatchResume(resultsFile: string, jobs: BatchJob[]): Map<string, BatchResult> {
   const resumed = new Map<string, BatchResult>();
   if (!fs.existsSync(resultsFile)) return resumed;
-  const records = fs.readFileSync(resultsFile, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line));
+  const lines = fs.readFileSync(resultsFile, "utf8").split("\n");
+  const records: ImageJournalRecord[] = [];
+  let damagedTail = false;
+  const lastNonempty = lines.map(line => !!line.trim()).lastIndexOf(true);
+  lines.forEach((line, index) => {
+    if (!line.trim()) return;
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (!parsed || typeof parsed !== "object") throw new Error("Invalid image journal record");
+      records.push(parsed as ImageJournalRecord);
+    }
+    catch (error) {
+      if (index !== lastNonempty) throw new Error("IMAGE_CHECKPOINT_CORRUPT: journal 중간 기록이 손상되었습니다. 재전송하지 않았습니다.");
+      damagedTail = true;
+    }
+  });
   for (const job of jobs) {
     const matches = records.filter(record => record.id === job.id);
-    if (!matches.length) continue;
+    if (!matches.length) {
+      if (damagedTail) resumed.set(job.id, { id: job.id, localPath: null, error: "IMAGE_RESUME_REQUIRED: 마지막 기록이 불완전합니다. 기존 요청을 확인하세요." });
+      continue;
+    }
     const fingerprint = imageJobFingerprint(job);
     if (matches.some(record => record.fingerprint !== fingerprint)) {
       throw new Error(`Image checkpoint does not match job ${job.id}; refusing to resend.`);
     }
     const last = matches[matches.length - 1];
-    if (last.retryable === true) continue;
+    if (last.retryable === true && !damagedTail) continue;
     let valid = false;
     if (typeof last.localPath === "string" && typeof last.sha256 === "string") {
       try {
@@ -106,9 +131,13 @@ export function readImageBatchResume(resultsFile: string, jobs: BatchJob[]): Map
         valid = bytes.length > 0 && crypto.createHash("sha256").update(bytes).digest("hex") === last.sha256;
       } catch { /* Missing output is not permission to generate again. */ }
     }
-    resumed.set(job.id, valid ? { id: job.id, localPath: last.localPath } : {
+    const recoveryConversationPath = [...matches].reverse().find(record =>
+      typeof record.recoveryConversationPath === "string" && /^\/c\/[a-zA-Z0-9-]+$/u.test(record.recoveryConversationPath))?.recoveryConversationPath as string | undefined;
+    const refused = typeof last.error === "string" && last.error.startsWith("IMAGE_PROVIDER_REFUSED:");
+    resumed.set(job.id, valid ? { id: job.id, localPath: last.localPath! } : {
       id: job.id, localPath: null,
-      error: "IMAGE_RESUME_REQUIRED: 이전 요청 또는 결과를 확인해야 합니다. 자동 재전송하지 않았습니다.",
+      error: refused ? last.error as string : "IMAGE_RESUME_REQUIRED: 이전 요청 또는 결과를 확인해야 합니다. 자동 재전송하지 않았습니다.",
+      ...(!refused && recoveryConversationPath ? { recoveryConversationPath } : {}),
     });
   }
   return resumed;
@@ -204,6 +233,8 @@ async function runJob(
   job: BatchJob,
   gptUrl: string,
   beforeSend: () => void,
+  saveProgress?: (value: object) => void,
+  recoveryConversationPath?: string,
 ): Promise<BatchResult> {
   const tempDir = path.join(
     path.dirname(job.outStem),
@@ -213,33 +244,57 @@ async function runJob(
   const started = Date.now();
   let phase = "preparation";
   let phaseStarted = started;
-  let transmitted = false;
+  let transmitted = !!recoveryConversationPath;
   let cancelled = false;
   const trace = async (stage: string) => {
+    const observedAt = new Date().toISOString();
+    const elapsedMs = Date.now() - started;
     try {
-      const signals = await withinImageDeadline(async () => ({
+      if (transmitted) {
+        const conversationPath = new URL(page.url()).pathname;
+        if (/^\/c\/[a-zA-Z0-9-]+$/u.test(conversationPath)) saveProgress?.({ state: "submitted", recoveryConversationPath: conversationPath });
+      }
+    } catch { /* Remote identity may not be available yet. */ }
+    try {
+      // Composer substeps need timestamps, not repeated DOM scans on the hot path.
+      const signals = ["before-submit", "after-submit", "image-detected", "failed"].includes(stage) ? await withinImageDeadline(async () => ({
         ...await imagePageSignals(page),
         generating: await isChatGPTGenerating(page),
         renderableImages: await countRenderableChatGPTImages(page),
-      }), 5_000, "diagnostic signals");
+      }), 5_000, "diagnostic signals") : {};
       fs.appendFileSync(path.join(tempDir, "progress.jsonl"), JSON.stringify({
-        stage, elapsedMs: Date.now() - started, ...signals,
+        stage, observedAt, elapsedMs, ...signals,
       }) + "\n", { encoding: "utf8", mode: 0o600 });
     } catch { /* Observation must not change the generation outcome. */ }
   };
 
   try {
     await withinImageDeadline(async () => {
+      if (recoveryConversationPath) {
+        if (!/^\/c\/[a-zA-Z0-9-]+$/u.test(recoveryConversationPath)) throw new Error("Invalid recovery conversation path");
+        await page.goto(`https://chatgpt.com${recoveryConversationPath}`, { waitUntil: "domcontentloaded", timeout: 60_000 });
+        await trace("recovery-opened");
+        return;
+      }
+      await trace("navigation-start");
       await openFreshChatGPTTarget(page, gptUrl, "주제 이미지 생성 GPT");
+      await trace("navigation-complete");
 
       await attachReferenceImages(page, job.referenceImagePaths || []);
+      await trace("references-ready");
       await trace("before-submit");
       await submitPromptToChatGPT(page, job.prompt, `주제 이미지 생성 ${job.id}`, () => {
         if (cancelled) throw new Error("Image preparation already ended");
         beforeSend();
         transmitted = true;
-      });
+      }, stage => trace(stage));
       await trace("after-submit");
+      try {
+        const conversationPath = new URL(page.url()).pathname;
+        if (/^\/c\/[a-zA-Z0-9-]+$/u.test(conversationPath)) {
+          saveProgress?.({ state: "submitted", recoveryConversationPath: conversationPath });
+        }
+      } catch { /* Unknown remote identity is never permission to resend. */ }
       await maybeConfirmGeneration(page, () => {
         if (cancelled) throw new Error("Image preparation already ended");
       });
@@ -281,7 +336,8 @@ async function runJob(
     const elapsedSeconds = Math.round((Date.now() - phaseStarted) / 1000);
     const phaseLabel = phase === "generation" ? "이미지 생성 대기" : phase === "download" ? "이미지 다운로드" : "이미지 준비";
     const budgetMs = phase === "generation" ? imageWaitPolicy().hardMs : phase === "download" ? IMAGE_DOWNLOAD_ATTEMPT_MS : IMAGE_PREPARATION_MS;
-    const message = sessionWide
+    const refused = error instanceof Error && error.message.startsWith("IMAGE_PROVIDER_REFUSED:");
+    const message = refused ? error.message : sessionWide
       ? "CHATGPT_BROWSER_AUTH_REQUIRED: 명시적인 로그인 또는 보안 확인이 필요합니다."
       : `${timedOut ? "IMAGE_TIMEOUT" : "IMAGE_SLOT_FAILED"}: ${phaseLabel} ${timedOut ? "시간 초과" : "실패"} ` +
         `(경과 ${elapsedSeconds}초 / 최대 ${Math.round(budgetMs / 1000)}초). 요청을 재전송하지 않았습니다.`;
@@ -289,7 +345,7 @@ async function runJob(
     try {
       fs.writeFileSync(path.join(tempDir, "failure.json"), JSON.stringify({
         version: 1, phase, elapsedMs: Date.now() - started,
-        category: sessionWide ? "session-auth-security" : "individual",
+        category: refused ? "provider-refused" : sessionWide ? "session-auth-security" : "individual",
         timedOut,
         ...imageWaitPolicy(),
       }, null, 2), { encoding: "utf8", mode: 0o600 });
@@ -318,7 +374,22 @@ async function runBatch() {
   const results: BatchResult[] = [];
   const journalPath = (job: BatchJob) => `${job.outStem}.checkpoint.jsonl`;
   const journal = (job: BatchJob, value: object) => {
-    const fd = fs.openSync(journalPath(job), "a", 0o600);
+    const file = journalPath(job);
+    if (fs.existsSync(file)) {
+      const bytes = fs.readFileSync(file);
+      const lastNewline = bytes.lastIndexOf(10);
+      const tail = bytes.subarray(lastNewline + 1);
+      if (tail.length > 0) {
+        try { JSON.parse(tail.toString("utf8")); fs.appendFileSync(file, "\n"); }
+        catch {
+          // A recovered download may append after a killed writer. Preserve the
+          // incomplete bytes before repairing the tail under the owned slot lock.
+          fs.writeFileSync(`${file}.partial-${crypto.randomUUID()}`, tail, { flag: "wx", mode: 0o600 });
+          fs.truncateSync(file, lastNewline + 1);
+        }
+      }
+    }
+    const fd = fs.openSync(file, "a", 0o600);
     try {
       fs.writeFileSync(fd, JSON.stringify({ recordedAt: new Date().toISOString(), ...value, id: "slot", fingerprint: fingerprints.get(job.id) }) + "\n", "utf8");
       fs.fsyncSync(fd);
@@ -341,13 +412,14 @@ async function runBatch() {
     const failFast = isBatchFailFastEnabled();
     for (const [index, job] of jobs.entries()) {
       const recovered = readImageBatchResume(journalPath(job), [{ ...job, id: "slot" }]).get("slot");
-      if (recovered) { record({ ...recovered, id: job.id }, false); continue; }
+      if (recovered && !recovered.recoveryConversationPath) { record({ ...recovered, id: job.id }, false); continue; }
       const slotStarted = Date.now();
       handle ||= await createChatGPTContext(true);
       // Isolate timed-out operations from later slots. Closing this page cancels local
       // preparation/download actions, but never retries the remote generation request.
       const page = await handle.context.newPage();
-      const result = await runJob(page, job, gptUrl, () => journal(job, { state: "attempted" }));
+      const result = await runJob(page, job, gptUrl, () => journal(job, { state: "attempted" }),
+        value => journal(job, value), recovered?.recoveryConversationPath);
       record({ ...result, startedAt: new Date(slotStarted).toISOString(), completedAt: new Date().toISOString(), elapsedMs: Date.now() - slotStarted });
       if (result.error && keepFailedDiagnosticOpen(process.env, jobs.length) && !page.isClosed()) {
         console.error("[chatgpt-image-batch] 진단 실패: 브라우저를 유지합니다. 확인 후 이 탭/창을 닫으면 진단이 종료됩니다. 추가 생성 요청은 보내지 않습니다.");

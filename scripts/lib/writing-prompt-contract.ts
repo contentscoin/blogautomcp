@@ -120,6 +120,9 @@ export function formatWritingPromptContract(contract: WritingPromptContract): st
       ? `- 실제 체험 표현은 다음 검증 메모에 명시된 사실에만 한정합니다: ${contract.verifiedExperienceNotes}`
       : "- 실제 구매·사용·방문·탑승·숙박·식사 경험을 만들지 않습니다. 제목에 후기·내돈내산·실사용·직접 써본·직접 다녀온 표현을 넣지 않습니다.",
     "- evidenceFacts는 모델이 정리한 후보이며 검증 증명이 아닙니다. 제공된 확인 사실과 일치하는 내용만 기록하고, 이미지에서 새로 추정한 사실이나 근거 없는 후보는 제외합니다. 없으면 []입니다.",
+    contract.kind === "SHOPPING"
+      ? "- 상품명·가격·할인·쿠폰·배송 정보만으로 제품 기능 근거가 충분하다고 쓰지 않습니다. 확인된 기능·구조·규격이 여러 개라면 서로 다른 사실을 각각 같은 문단의 사용 이점 또는 제약과 연결합니다. 근거가 부족하면 일반 사용법이나 성능을 만들어 분량을 채우지 않습니다."
+      : "- 서로 다른 확인 장소와 일정 사실을 각각 현장 장면·활동·이동 판단에 연결합니다. 장소 이름만 나열하거나 같은 설명의 지명만 바꾸지 않습니다.",
     `- 해시태그는 검색 의도가 분명한 ${contract.hashtagCount}개입니다.`,
     "- 고지 문구와 원시 URL은 출력하지 않습니다. 커넥트 카드와 고지는 시스템이 별도로 붙입니다.",
     "- title, evidenceFacts, sections, hashtags 필드를 가진 JSON 하나만 출력합니다. 코드블록·작업 설명은 넣지 않습니다.",
@@ -152,7 +155,7 @@ export function formatDraftSubmissionNextAction(): string {
     "qualityChecklist를 내부 검수한 JSON 원고를 post_submit_draft로 제출하고 작업을 job_get으로 확인하세요.",
     "contentQuality.canPublish가 false이면 score만 보지 말고 code, blockers, 실패 signals와 compositionQualityReport를 구분하세요.",
     "본문 사실성·분량·섹션·반복·고지 등 텍스트 실패가 명시된 경우에만 해당 원인을 고쳐 새 idempotencyKey로 원고를 다시 제출하세요.",
-    "composition-quality, representative-image, thumbnail 등 이미지·배치 실패만 있으면 원고를 재작성하거나 재제출하지 마세요. 기존 원고를 유지하고 이미지·구성 보완 단계로 넘기세요: post_get_draft 의 imageSlots 에서 generationMissing 이 있는 파트의 imagePrompt 로 ChatGPT 내장 이미지 생성을 실행하고 post_apply_section_image 로 붙입니다. PC 는 이미지를 생성하지 않습니다.",
+    "composition-quality, representative-image, thumbnail 등 이미지·배치 실패만 있으면 원고를 재작성하거나 재제출하지 마세요. 기존 원고를 유지하고 이미지·구성 보완 단계로 넘기세요: post_get_draft 의 imageSlots 에서 missing 또는 generationMissing 이 0보다 큰 파트의 imagePrompt 로 ChatGPT 내장 이미지 생성을 실행하고 post_apply_section_image 로 붙입니다. PC 는 이미지를 생성하지 않습니다.",
     "composition-quality 안에 본문 분량·섹션 실패도 있으면 그 텍스트 항목만 보강합니다. 원인이 불명확하면 실패 상세를 조회하고 재작성을 추측하지 마세요.",
     "텍스트 QC 통과나 100점은 이미지 준비·전체 발행 가능을 의미하지 않습니다. 원고를 사용자에게 먼저 보여주고 발행은 별도 확인을 받으세요.",
   ].join(" ");

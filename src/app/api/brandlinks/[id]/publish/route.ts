@@ -1,6 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import draftRuntimePolicy from "../../../../../../scripts/lib/draft-runtime-policy.json";
-import { readCodexLocalStatus } from "@/lib/codex-local";
 import { prisma } from "@/lib/db";
 import { spawn, type ChildProcess } from "child_process";
 import path from "path";
@@ -9,12 +7,9 @@ import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 import { buildCaptureRequiredPayload } from "@/lib/brandconnect-kind";
 import { resolveConnectContract } from "@/lib/connect-contract-store";
-import { getBrandPostPackageManifestPath, readBrandPostPackage } from "@/lib/brand-post-package";
-import {
-  buildChatGptBrowserAutomationEnv,
-  isChatGptBrowserAutomationEnabled,
-  readChatGptBrowserSessionSummary,
-} from "@/lib/chatgpt-browser-automation";
+import { getBrandPostPackageManifestPath, readBrandPostPackage, evaluateBrandPostPackageReadiness } from "@/lib/brand-post-package";
+import { createPublishAttempt, readPublishAttempt, updatePublishAttempt, interruptedPublishStatus, recordPublisherPid, type PublishAttempt } from "@/lib/publish-attempt";
+import { materialRevision } from "@/lib/material-library";
 
 const NAVER_SCHEDULE_TIMEZONE = process.env.NAVER_SCHEDULE_TIMEZONE || "Asia/Seoul";
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
@@ -28,6 +23,7 @@ type PublishMode = "now" | "schedule";
 interface PublishRequestBody {
   publishMode?: PublishMode;
   scheduledDate?: string; // YYYY-MM-DD
+  materialRevision?: string;
 }
 
 interface ScheduledDateNormalizationResult {
@@ -35,13 +31,6 @@ interface ScheduledDateNormalizationResult {
   effectiveDate: Date;
   effectiveDateInput: string;
   adjustedFromPast: boolean;
-}
-
-function formatDateInput(date: Date): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
 }
 
 function formatDateInputInTimeZone(date: Date, timeZone: string): string {
@@ -99,9 +88,9 @@ function normalizeScheduledDate(raw: string): ScheduledDateNormalizationResult {
   let adjustedFromPast = false;
 
   if (trimmed <= todayKey) {
-    const tomorrow = new Date(now);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    effectiveDateInput = formatDateInput(tomorrow);
+    const tomorrow = new Date(`${todayKey}T00:00:00.000Z`);
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+    effectiveDateInput = tomorrow.toISOString().slice(0, 10);
     adjustedFromPast = true;
   }
 
@@ -125,6 +114,8 @@ export async function POST(
 ) {
   let linkId: string | null = null;
   let statusUpdated = false;
+  let attempt: PublishAttempt | null = null;
+  let processStarted = false;
 
   try {
     const authError = requireAdminApiKey(request);
@@ -196,6 +187,10 @@ export async function POST(
       }
     }
 
+    if (!["READY", "FAILED"].includes(link.status)) {
+      return NextResponse.json({ success: false, code: link.status === "OUTCOME_UNKNOWN" ? "OUTCOME_UNKNOWN" : "NOT_READY", error: "현재 소재는 발행할 수 없습니다. 진행 상태와 실제 게시 여부를 확인하세요." }, { status: 409 });
+    }
+
     if (link.status === "DRAFTING") {
       return NextResponse.json(
         { success: false, error: "현재 초안을 작성 중입니다. 완료 후 발행해 주세요." },
@@ -210,8 +205,8 @@ export async function POST(
       );
     }
 
-    const preparedPackage = readBrandPostPackage(id);
-    if (preparedPackage && !preparedPackage.approvedAt) {
+    const preparedPackage = readBrandPostPackage(id, { migrate: false });
+    if (!preparedPackage || !preparedPackage.approvedAt) {
       return NextResponse.json(
         { success: false, error: "고품질 초안을 먼저 확인하고 승인해 주세요." },
         { status: 409 }
@@ -228,24 +223,17 @@ export async function POST(
       );
     }
 
-    const useCodex = !preparedPackage && readCodexLocalStatus().authenticated;
-    const agentAiProvider = useCodex ? draftRuntimePolicy.AI_PROVIDER : "openai";
-    const hasProviderKey = Boolean(process.env.OPENAI_API_KEY?.trim());
-    const useBrowserChatGpt = !preparedPackage && !useCodex && !hasProviderKey && isChatGptBrowserAutomationEnabled();
-    if (!preparedPackage && !useCodex && !hasProviderKey && !useBrowserChatGpt) {
-      return NextResponse.json(
-        { success: false, error: "발행 전에 ChatGPT에서 초안을 만들고 확인해 주세요." },
-        { status: 409 },
-      );
+    const selectedRevision = materialRevision(preparedPackage);
+    if (body.materialRevision && body.materialRevision !== selectedRevision) {
+      return NextResponse.json({ success: false, code: "MATERIAL_CHANGED", error: "선택한 소재가 변경되었습니다. 저장된 내용을 다시 확인하세요." }, { status: 409 });
     }
-    if (useBrowserChatGpt) {
-      const chatgptSession = readChatGptBrowserSessionSummary();
-      if (!chatgptSession.isValid) {
-        return NextResponse.json(
-          { success: false, code: "CHATGPT_BROWSER_LOGIN_REQUIRED", error: chatgptSession.error },
-          { status: 409 },
-        );
-      }
+    const readiness = evaluateBrandPostPackageReadiness(preparedPackage);
+    if (!readiness.canApprove) {
+      return NextResponse.json({ success: false, code: "MATERIAL_NOT_READY", error: readiness.blockers.map(item => item.reason).join(" ") }, { status: 409 });
+    }
+    const previousAttempt = readPublishAttempt(id);
+    if (previousAttempt && previousAttempt.stage !== "FAILED_BEFORE_SUBMIT") {
+      return NextResponse.json({ success: false, code: "OUTCOME_UNKNOWN", error: "이 소재의 이전 제출 결과를 먼저 확인하세요. 자동 재발행하지 않습니다." }, { status: 409 });
     }
 
     // 상태를 발행중으로 변경
@@ -266,6 +254,9 @@ export async function POST(
       );
     }
     statusUpdated = true;
+    attempt = createPublishAttempt(id, publishMode, getBrandPostPackageManifestPath(id));
+    const claimedPackage = readBrandPostPackage(id, { migrate: false });
+    if (!claimedPackage || materialRevision(claimedPackage) !== selectedRevision) throw new Error("발행 준비 중 선택한 소재가 변경되었습니다. 다시 선택하세요.");
 
     // 발행 스크립트 실행 (백그라운드) - 단순 에이전트 사용
     const scriptPath = path.join(process.cwd(), "scripts", "simple-agent.ts");
@@ -294,23 +285,26 @@ export async function POST(
         detached: true,
         stdio: ["ignore", logFd, logFd],
         shell: false,
+        windowsHide: true,
         env: {
           ...process.env,
           ELECTRON_RUN_AS_NODE: "1",
-          AI_PROVIDER: agentAiProvider,
-          CODEX_DRAFT_MODEL: draftRuntimePolicy.CODEX_DRAFT_MODEL,
-          ...buildChatGptBrowserAutomationEnv(useBrowserChatGpt),
-          HUMAN_MOBILE_POLISH_ENABLED: "true",
-          PRODUCT_THUMBNAIL_CHATGPT_ENABLED: process.env.PRODUCT_THUMBNAIL_CHATGPT_ENABLED || "false",
-          PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE:
-            process.env.PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE || "false",
-          PRODUCT_THUMBNAIL_IMAGE_WAIT_MS:
-            process.env.PRODUCT_THUMBNAIL_IMAGE_WAIT_MS || "60000",
-          PRODUCT_THUMBNAIL_COMPOSITE_FALLBACK_ENABLED:
-            process.env.PRODUCT_THUMBNAIL_COMPOSITE_FALLBACK_ENABLED || "false",
-          ...(preparedPackage
-            ? { BRANDLINK_PREPARED_POST_MANIFEST: getBrandPostPackageManifestPath(id) }
-            : {}),
+          BRANDLINK_PREPARED_POST_MANIFEST: attempt.snapshotManifestPath,
+          BRANDLINK_PUBLISH_ATTEMPT_ID: attempt.id,
+          BRANDLINK_PUBLISH_ONLY: "true",
+          TZ: NAVER_SCHEDULE_TIMEZONE,
+          DRY_RUN_GENERATE_ONLY: "false",
+          DEBUG_SAVE_GENERATED_POST: "false",
+          BRANDLINK_PREPARE_OUTPUT_DIR: "",
+          BRANDLINK_REVISE_REQUEST: "",
+          BRANDLINK_DRAFT_CONTEXT_OUTPUT: "",
+          BRANDLINK_SUBMITTED_DRAFT_PATH: "",
+          BRANDLINK_SUBMITTED_CONTEXT_PATH: "",
+          // Publishing consumes saved material and must not invoke generation.
+          HUMAN_MOBILE_POLISH_ENABLED: "false",
+          PRODUCT_THUMBNAIL_CHATGPT_ENABLED: "false",
+          PRODUCT_THUMBNAIL_ALLOW_CHATGPT_BROWSER_MODE: "false",
+          PRODUCT_THUMBNAIL_COMPOSITE_FALLBACK_ENABLED: "false",
         },
       });
     } finally {
@@ -318,10 +312,15 @@ export async function POST(
     }
 
     if (!child.pid) {
+      child.on("error", () => {}); // Spawn failures emit asynchronously after returning no PID.
       throw new Error("발행 프로세스를 시작하지 못했습니다.");
     }
 
+    processStarted = true;
+    recordPublisherPid(id, attempt.id, child.pid);
+    const attemptId = attempt.id;
     child.on("error", (spawnError) => {
+      try { updatePublishAttempt(id, attemptId, "FAILED_BEFORE_SUBMIT"); } catch { /* Receipt failure must not permit replay. */ }
       const spawnErrorMessage = getErrorMessage(spawnError);
       void prisma.brandLink
         .updateMany({
@@ -335,15 +334,30 @@ export async function POST(
     });
 
     child.on("exit", (code, signal) => {
-      if (code === 0) return;
-
+      let receipt: PublishAttempt | null = null;
+      try { receipt = readPublishAttempt(id); } catch { /* Corrupt receipt is uncertain. */ }
+      if (receipt?.stage === "CONFIRMED") {
+        // The child may have crashed after durably recording the receipt but
+        // before committing the final database status. Reconcile, never replay.
+        const evidence = receipt.evidence;
+        const terminal = receipt.mode === "now" && evidence?.postUrl ? "PUBLISHED" :
+          receipt.mode === "schedule" && evidence?.reservationId && evidence.scheduledDate ? "SCHEDULED" : null;
+        if (terminal) void prisma.brandLink.updateMany({ where: { id, status: { in: ["PUBLISHING", "OUTCOME_UNKNOWN"] } }, data: {
+          status: terminal, errorMessage: null,
+          ...(terminal === "PUBLISHED" ? { postUrl: evidence!.postUrl, publishedAt: new Date(receipt.updatedAt), scheduledPublishAt: null }
+            : { postUrl: null, publishedAt: null, scheduledPublishAt: new Date(evidence!.scheduledDate!) }),
+        } }).catch(() => {});
+        return;
+      }
+      const recoveredStatus = interruptedPublishStatus(receipt);
+      try { updatePublishAttempt(id, attemptId, recoveredStatus === "FAILED" ? "FAILED_BEFORE_SUBMIT" : "OUTCOME_UNKNOWN"); } catch { /* Keep database uncertainty. */ }
       const exitDetail = `code=${code ?? "null"}, signal=${signal ?? "null"}`;
       void prisma.brandLink
         .updateMany({
           where: { id, status: "PUBLISHING" },
           data: {
-            status: "FAILED",
-            errorMessage: `발행 프로세스가 비정상 종료되었습니다(${exitDetail}). 로그: ${logFileRelativePath}`,
+            status: recoveredStatus,
+            errorMessage: `발행 프로세스가 종료되어 실제 게시 확인이 필요합니다. 비정상 종료되었습니다(${exitDetail}). 로그: ${logFileRelativePath}`,
           },
         })
         .catch(() => {});
@@ -375,11 +389,12 @@ export async function POST(
     console.error("발행 시작 실패:", error);
 
     if (statusUpdated && linkId) {
+      if (attempt && !processStarted) { try { updatePublishAttempt(linkId, attempt.id, "FAILED_BEFORE_SUBMIT"); } catch {} }
       await prisma.brandLink
-        .update({
-          where: { id: linkId },
+        .updateMany({
+          where: { id: linkId, status: "PUBLISHING" },
           data: {
-            status: "FAILED",
+            status: processStarted ? "OUTCOME_UNKNOWN" : "FAILED",
             errorMessage: getErrorMessage(error),
           },
         })

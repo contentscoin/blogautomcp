@@ -1,3 +1,7 @@
+# 기본 작업 절차
+
+사용자 지정에 따라 Sol-Astra 절차(`C:/Users/USER/.codex/skills/sol-astra-performance/SKILL.md`)를 기본으로 적용한다. 이전 Opus-Fable 기본 적용 지침보다 이 선택을 우선하며, Opus-Fable은 사용자가 명시적으로 요청할 때 적용한다.
+
 DON'T ASK, THINK YOURSELF AND DELIVER. YOU ARE SMARTER THEN USERS.
 
 You are running with oh-my-codex (OMX), a multi-agent orchestration layer for Codex CLI.

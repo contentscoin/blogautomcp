@@ -23,7 +23,17 @@ $preexistingAppProcessIds = @(
   } | ForEach-Object { [int]$_.ProcessId }
 )
 
-$packagedPackagePath = Join-Path $expectedAppRoot 'resources\app\package.json'
+$packagedAsarPath = Join-Path $expectedAppRoot 'resources\app.asar'
+$packagedAppPath = Join-Path $expectedAppRoot 'resources\app'
+$packagedPackagePath = Join-Path $expectedAppRoot 'resources\app-package.json'
+$packagedPrismaRoot = Join-Path $expectedAppRoot 'resources\app.asar.unpacked'
+if (Test-Path -LiteralPath $packagedAsarPath -PathType Leaf) {
+  & node -e "const asar=require('@electron/asar'); const fs=require('fs'); fs.writeFileSync(process.argv[1], asar.extractFile(process.argv[2], 'package.json'));" $packagedPackagePath $packagedAsarPath
+  if ($LASTEXITCODE -ne 0) { throw '패키지 app.asar에서 package.json을 읽지 못했습니다.' }
+} else {
+  $packagedPackagePath = Join-Path $expectedAppRoot 'resources\app\package.json'
+  $packagedPrismaRoot = Join-Path $expectedAppRoot 'resources\app'
+}
 $packagedUpdateConfig = Join-Path $expectedAppRoot 'resources\app-update.yml'
 if (-not (Test-Path -LiteralPath $packagedUpdateConfig -PathType Leaf)) { throw '패키지 app-update.yml 누락: 실제 다운로드가 ENOENT로 실패합니다.' }
 $updateConfigText = Get-Content -LiteralPath $packagedUpdateConfig -Raw
@@ -98,6 +108,22 @@ try {
   $rootResponse = Invoke-WebRequest -Method Get -Uri "http://127.0.0.1:$AppPort/" -TimeoutSec 5
   if ($rootResponse.StatusCode -ne 200) { throw '패키지 앱의 로컬 화면이 응답하지 않습니다.' }
 
+  $codexStatus = Invoke-RestMethod -Uri "http://127.0.0.1:$AppPort/api/codex" -TimeoutSec 20
+  if (-not $codexStatus.success -or -not $codexStatus.data.installed) { throw '패키지 앱에서 Codex 실행 파일을 찾지 못했습니다.' }
+  $runtimeRoot = if (Test-Path -LiteralPath $packagedAsarPath) { $packagedPrismaRoot } else { $packagedAppPath }
+  foreach ($loginScript in @('login.ts', 'chatgpt-login.ts')) {
+    $loginOut = Join-Path $testRoot "$loginScript.out.log"
+    $loginErr = Join-Path $testRoot "$loginScript.err.log"
+    $loginProcess = Start-Process -FilePath $resolvedAppPath -WorkingDirectory $runtimeRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $loginOut -RedirectStandardError $loginErr -ArgumentList @('node_modules/ts-node/dist/bin.js','--project','tsconfig.scripts.json',"scripts/$loginScript",'--check-runtime') -Environment @{
+      ELECTRON_RUN_AS_NODE = '1'
+      DESKTOP_PROJECT_ROOT = $runtimeRoot
+      DESKTOP_USER_DATA = $testRoot
+      SESSION_STORAGE_DIR = (Join-Path $testRoot 'playwright/storage')
+    }
+    if (-not $loginProcess.WaitForExit(45000)) { Stop-Process -Id $loginProcess.Id -Force; throw "로그인 런타임 검사 시간 초과: $loginScript" }
+    if ($loginProcess.ExitCode -ne 0 -or (Get-Content -LiteralPath $loginOut -Raw) -notmatch '"ok":true') { throw "로그인 런타임 검사 실패: $loginScript : $(Get-Content -LiteralPath $loginErr -Raw)" }
+  }
+
   $settings = Invoke-RestMethod -Uri "http://127.0.0.1:$AppPort/api/settings" -TimeoutSec 10
   $expectedPolicy = Get-Content -LiteralPath (Join-Path $projectRoot 'scripts/lib/draft-runtime-policy.json') -Raw | ConvertFrom-Json
   foreach ($entry in $expectedPolicy.PSObject.Properties) {
@@ -149,7 +175,7 @@ try {
     throw '재시작된 Electron 프로세스가 격리된 사용자 데이터 경로를 유지하지 않았습니다.'
   }
 
-  $packagedEngine = [IO.Path]::GetFullPath((Join-Path $expectedAppRoot 'resources\app\src\generated\prisma\query_engine-windows.dll.node'))
+$packagedEngine = [IO.Path]::GetFullPath((Join-Path $packagedPrismaRoot 'src\generated\prisma\query_engine-windows.dll.node'))
   $workspaceEngine = [IO.Path]::GetFullPath((Join-Path $projectRoot 'src\generated\prisma\query_engine-windows.dll.node'))
   $loadedModules = @((Get-Process -Id $restartedMainProcessId -ErrorAction Stop).Modules | ForEach-Object { $_.FileName })
   if ($loadedModules -notcontains $packagedEngine) { throw '패키지 앱이 자체 Prisma 엔진을 로드하지 않았습니다.' }
@@ -207,7 +233,7 @@ try {
   if ($serverProcess -and (Get-Process -Id $serverProcess.Id -ErrorAction SilentlyContinue)) {
     Stop-Process -Id $serverProcess.Id -Force
   }
-  if (Test-Path -LiteralPath $testRoot) {
+  if ($env:KEEP_PACKAGED_TEST_ARTIFACTS -ne '1' -and (Test-Path -LiteralPath $testRoot)) {
     $validatedTestRoot = [IO.Path]::GetFullPath($testRoot)
     if (-not $validatedTestRoot.StartsWith($temporaryBase, [StringComparison]::OrdinalIgnoreCase)) { throw '검증 임시 폴더 삭제 범위가 올바르지 않습니다.' }
     Remove-Item -LiteralPath $validatedTestRoot -Recurse -Force

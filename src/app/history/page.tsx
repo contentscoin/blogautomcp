@@ -2,11 +2,12 @@
 
 import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
+import { MaterialJobProgress } from "@/components/MaterialJobProgress";
 
 interface HistoryItem {
     id: string;
     title: string;
-    status: "PUBLISHED" | "FAILED";
+    status: "PUBLISHED" | "SCHEDULED" | "OUTCOME_UNKNOWN" | "FAILED";
     postUrl: string | null;
     errorMessage: string | null;
     publishedAt: string | null;
@@ -60,6 +61,7 @@ export default function HistoryPage() {
     const formatDate = (dateStr: string | null) => {
         if (!dateStr) return "-";
         return new Date(dateStr).toLocaleDateString("ko-KR", {
+            timeZone: "Asia/Seoul",
             year: "numeric",
             month: "short",
             day: "numeric",
@@ -78,7 +80,7 @@ export default function HistoryPage() {
                             <h1 className="text-xl font-bold text-slate-900">
                                 📊 발행 히스토리
                             </h1>
-                            <p className="text-sm text-slate-500">발행 완료/실패 기록</p>
+                            <p className="text-sm text-slate-500">소재 작업 이력과 현재 발행·예약 결과</p>
                         </div>
                         <Link
                             href="/"
@@ -91,6 +93,7 @@ export default function HistoryPage() {
             </header>
 
             <main className="max-w-6xl mx-auto px-4 py-6 space-y-6">
+                <MaterialJobProgress history />
                 {/* 필터 */}
                 <div className="flex gap-2">
                     {(["ALL", "SUCCESS", "FAILED"] as StatusFilter[]).map((status) => (
@@ -136,7 +139,7 @@ export default function HistoryPage() {
                                     <div className="flex items-center gap-4">
                                         {/* 상태 아이콘 */}
                                         <div className="text-2xl">
-                                            {item.status === "PUBLISHED" ? "✅" : "❌"}
+                                            {item.status === "PUBLISHED" ? "✅" : item.status === "SCHEDULED" ? "📅" : item.status === "OUTCOME_UNKNOWN" ? "❔" : "❌"}
                                         </div>
 
                                         {/* 정보 */}
@@ -152,7 +155,7 @@ export default function HistoryPage() {
                                                     </span>
                                                 )}
                                             </div>
-                                            {item.status === "FAILED" && item.errorMessage && (
+                                            {["FAILED", "OUTCOME_UNKNOWN"].includes(item.status) && item.errorMessage && (
                                                 <div className="text-sm text-red-500 mt-1">
                                                     ⚠️ {item.errorMessage}
                                                 </div>

@@ -8,7 +8,7 @@ async function main() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "package-qc-reconcile-"));
   process.env.DESKTOP_USER_DATA = temp;
   const store = await import("../src/lib/brand-post-package");
-  const { resolvePostDocument } = await import("../src/lib/post-composition-contract");
+  const { resolvePostDocument, stableFreeformSectionId } = await import("../src/lib/post-composition-contract");
   try {
     const id = "legacy-saga-fixture";
     const dir = store.getBrandPostPackageDir(id);
@@ -17,17 +17,26 @@ async function main() {
     images.forEach((file, n) => fs.writeFileSync(file, `unique-fixture-${n}`));
     const markdownPath = path.join(dir, "post.md");
     fs.writeFileSync(markdownPath, "이 본문은 재작성하지 않습니다.");
+    const sections = Array.from({ length: 10 }, (_, n) => `${n === 2 ? "다케오 시립 도서관" : `여행지 ${n + 1}`}\n\n${"확인된 장소의 풍경과 이동 동선을 구체적으로 연결합니다. ".repeat(10)}`);
+    const bindings = Object.fromEntries(sections.map((section, index) => [
+      stableFreeformSectionId("TRAVEL", section.split("\n")[0]),
+      [images[index + 1]],
+    ]));
+    const detailedId = stableFreeformSectionId("TRAVEL", "다케오 시립 도서관");
+    const optionalId = stableFreeformSectionId("TRAVEL", "여행지 10");
+    bindings[detailedId].push(...bindings[optionalId].splice(0, 1));
     const composition = resolvePostDocument({
       connectKind: "TRAVEL", title: "규슈 사가 여행 다케오부터 벳푸 유후인까지 3일 풍경",
-      sections: Array.from({ length: 10 }, (_, n) => `${n === 2 ? "다케오 시립 도서관" : `여행지 ${n + 1}`}\n\n${"확인된 장소의 풍경과 이동 동선을 구체적으로 연결합니다. ".repeat(10)}`),
-      imagePaths: images, hashtags: ["규슈", "사가", "여행"], connectUrl: "https://example.test/", qualityPreset: "PREMIUM",
+      sections, imagePaths: images, sectionImageBindings: bindings,
+      hashtags: ["규슈", "사가", "여행"], connectUrl: "https://example.test/", qualityPreset: "PREMIUM",
     });
     // Reproduce the old freeform document: no explicit image bounds, but each section already has an image.
     composition.sections.forEach((section) => { delete section.imageMin; delete section.imageMax; });
     const fixture: BrandPostPackageManifestV2 = {
       version: "brand-post-package/v2", brandLinkId: id, connectKind: "TRAVEL", title: composition.title,
       generationSource: "AI", markdownPath, heroImagePath: images[0], bodyImagePaths: images.slice(1),
-      hashtags: ["규슈", "사가", "여행"], imagePolicy: "TRAVEL_EDITORIAL", createdAt: "2026-09-03", approvedAt: null,
+      hashtags: ["규슈", "사가", "여행"], imagePolicy: "TRAVEL_EDITORIAL",
+      imageRequirements: { policy: "generated-required" }, createdAt: "2026-09-03", approvedAt: null,
       contractVersion: "post-composition-contract/v1", composition,
       contentQuality: {
         canPublish: false, verdict: "blocked", code: "composition-quality", reason: "이미지가 7장보다 적습니다 (3장).", score: 82,
@@ -53,8 +62,8 @@ async function main() {
     assert.equal(originalRead.composition.qualityReport.canAutoPublish, true, "Originals satisfy image counts only");
     const originalSlots = store.packagePreview(originalRead).imageSlots;
     assert.equal(originalSlots.reduce((sum, slot) => sum + slot.missing, 0), 0);
-    assert.equal(originalSlots.reduce((sum, slot) => sum + slot.generationMissing, 0), 10);
-    assert.throws(() => store.approveBrandPostPackage(originals.brandLinkId), /섹션 이미지 품질 게이트/u,
+    assert.equal(originalSlots.reduce((sum, slot) => sum + slot.generationMissing, 0), 6);
+    assert.throws(() => store.approveBrandPostPackage(originals.brandLinkId), /이미지/u,
       "Original images without execution metadata must not satisfy generated coverage");
     assert.equal(store.readBrandPostPackage(originals.brandLinkId)?.approvedAt, null);
 
@@ -80,7 +89,7 @@ async function main() {
     assert.ok(store.approveBrandPostPackage(id).approvedAt, "An isolated complete fixture can be approved");
 
     const explicit = structuredClone(reconciled);
-    explicit.composition.sections[2].imageMin = 2;
+    explicit.composition.sections[2].imageMin = 3;
     explicit.composition.sections[2].imageMax = 3;
     const explicitResult = store.reconcileBrandPostPackageQuality(explicit);
     assert.equal(explicitResult.composition.qualityReport.canAutoPublish, false);
@@ -128,13 +137,13 @@ async function main() {
     assert.equal(missing.contentQuality?.canPublish, false);
     assert.ok(missing.contentQuality?.reason?.includes(missing.composition.sections[2].id));
     assert.equal(missing.composition.qualityReport.actual.images, 10);
-    assert.throws(() => store.approveBrandPostPackage(id), /게이트/u);
+    assert.throws(() => store.approveBrandPostPackage(id), /이미지/u);
     const repairPath = path.join(dir, "new-library.png");
     fs.writeFileSync(repairPath, "unique-library-replacement");
     const repaired = store.applyGeneratedBrandPostImage({ brandLinkId: id, sectionId: missing.composition.sections[2].id, generatedPath: repairPath, provenance: "GENERATED_BACKGROUND" });
     const imageNode = repaired.composition.renderNodes.find((node) => node.kind === "image" && node.sectionId === missing.composition.sections[2].id);
     assert.ok(imageNode?.kind === "image");
-    assert.equal(imageNode.layout, "single", "Generation cannot reintroduce a positional highlight collage");
+    assert.equal(imageNode.layout, "sequence", "A repaired two-image semantic section uses an ordered sequence, never a positional collage");
     assert.equal(store.readBrandPostPackage(id)?.contentQuality?.canPublish, true);
 
     // Optional real-world fixture: read-only input, in-memory reconciliation only.

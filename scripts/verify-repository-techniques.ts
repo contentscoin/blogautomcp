@@ -129,6 +129,14 @@ const hairCarePlan = buildProductEditorialPlan({
 });
 assert.equal(hairCarePlan.reviewAnalysis.category, "hair-care");
 assert.equal(hairCarePlan.reviewAnalysis.primaryUse, "휴대형 모발 건조·스타일링");
+assert.equal(hairCarePlan.reviewAnalysis.evidenceLevel, "sparse", "상품명의 휴대형 표현은 편집 방향일 뿐 제품 근거가 아닙니다.");
+assert.deepEqual(hairCarePlan.reviewAnalysis.verifiedSignals, [], "짧은 상품명 키워드를 확인된 기능 신호로 승격하면 안 됩니다.");
+assert.equal(hasSufficientProductReviewEvidence({
+  productName: "여행용 무선 미니 헤어 드라이기",
+  description: "",
+  features: ["무선", "미니"],
+  targetSectionCount: 11,
+}), false, "상품명 기반 편집 방향은 생성 전 근거 게이트를 통과시키면 안 됩니다.");
 assert.doesNotMatch(JSON.stringify(hairCarePlan.reviewAnalysis), /(?:예요|해요|돼요|있어요)[.!]?/u);
 
 const genericPlan = buildProductEditorialPlan({
@@ -161,7 +169,12 @@ const reviewText = reviewSections.join("\n");
 
 const coverage = assessProductEditorialCoverage(reviewSections);
 assert.equal(coverage.missingCoreRoles.length, 0);
-const substance = assessProductReviewSubstance({ productName: product.productName, sections: reviewSections });
+const substance = assessProductReviewSubstance({
+  productName: product.productName,
+  sections: reviewSections,
+  sourceDescription: product.description,
+  sourceFeatures: product.features,
+});
 assert.equal(substance.pass, true, substance.missingElements.join(", "));
 assert.equal(substance.categoryMismatchTerms.length, 0);
 
@@ -176,6 +189,8 @@ const readiness = getBrandLinkContentReadiness({
   hasRepresentativeImage: true,
   thumbnailGenerated: true,
   connectKind: "SHOPPING",
+  sourceDescription: product.description,
+  sourceFeatures: product.features,
 });
 assert.equal(readiness.canPublish, true, readiness.reason || readiness.summary);
 assert.equal(readiness.signals.find((signal) => signal.key === "generation-source")?.status, "pass");

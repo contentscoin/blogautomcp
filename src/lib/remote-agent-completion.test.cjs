@@ -8,7 +8,7 @@ const ts = require('typescript');
 function load(file, mocks = {}, globals = {}, tail = '') {
   const code = ts.transpileModule(fs.readFileSync(file, 'utf8') + tail, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
   const module = { exports: {} };
-  vm.runInNewContext(code, { module, exports: module.exports, require: (name) => name in mocks ? mocks[name] : require(name), process, console, Buffer, setTimeout, clearTimeout, setInterval, clearInterval, Request, Response, Headers, URL, AbortSignal, ...globals }, { filename: file });
+  vm.runInNewContext(code, { module, exports: module.exports, require: (name) => name in mocks ? mocks[name] : name.startsWith('.') ? load(path.resolve(path.dirname(file), `${name}.ts`), mocks, globals) : require(name), process, console, Buffer, setTimeout, clearTimeout, setInterval, clearInterval, Request, Response, Headers, URL, AbortSignal, ...globals }, { filename: file });
   return module.exports;
 }
 const helperPath = path.join(__dirname, 'remote-agent-completion.ts');
@@ -32,6 +32,24 @@ test('delivery retries network errors only, permanent failure stops immediately'
   calls = 0;
   await assert.rejects(helper.deliverCompletion(async () => { calls++; throw new helper.CompletionDeliveryError(409, 'JOB_NOT_ACTIVE', 'conflict'); }, async () => {}));
   assert.equal(calls, 1);
+});
+
+test('status snapshot exposes detached image generation without an active remote job', async () => {
+  const routePath = path.join(__dirname, '../app/api/remote-agent/poll/route.ts');
+  const source = fs.readFileSync(routePath, 'utf8');
+  const mocks = {};
+  for (const match of source.matchAll(/from\s+["']([^"']+)["']/g)) if (!match[1].startsWith('node:')) mocks[match[1]] = {};
+  Object.assign(mocks, {
+    '@/lib/db': { prisma: { brandLink: { count: async () => 0 } } },
+    '@/lib/desktop-activity': { getDesktopActivitySnapshot: () => ({ count: 1, activities: [{ label: 'brand-post-image-generation', runningForMs: 1234 }] }) },
+    '@/lib/naver-session': { getNaverSessionFile: () => path.join(os.tmpdir(), 'absent-status-fixture') },
+    '@/lib/connect-contract-store': { hasStoredConnectContract: () => false },
+    '../../../../../scripts/lib/writing-timeout-policy': { getWritingTimeoutPolicy: () => ({ prepareMs: 1, generateMs: 1 }) },
+    '../../../../../scripts/lib/thumbnail-gen': { isGenerativeThumbnailAvailable: () => false },
+  });
+  const route = load(routePath, mocks, {}, '\nexport const testBuildStatusSnapshot = buildStatusSnapshot;');
+  const status = await route.testBuildStatusSnapshot();
+  assert.deepEqual(JSON.parse(JSON.stringify(status.backgroundWork)), { publishing: 0, drafting: 0, processes: 1, imageGeneration: 1, busy: true });
 });
 for (const jobType of ['SETTINGS_GET', 'POST_PUBLISH']) test(`${jobType}: actual poll timeout and late heartbeat never replay execution`, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'remote-poll-'));
@@ -124,4 +142,116 @@ test('outbox limits and privacy fail closed across restart without storing crede
     assert.throws(() => box.read());
     assert.throws(() => load(helperPath).completionOutbox(root, 'https://site', token).read());
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+for (const status of [409, 413, 401]) test(`permanent ${status} delivery is preserved and cannot starve future claims`, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'remote-rejected-'));
+  const routePath = path.join(__dirname, '../app/api/remote-agent/poll/route.ts');
+  const source = fs.readFileSync(routePath, 'utf8');
+  const mocks = {};
+  for (const match of source.matchAll(/from\s+["']([^"']+)["']/g)) if (!match[1].startsWith('node:')) mocks[match[1]] = {};
+  let configured = true, claims = 0, sends = 0;
+  Object.assign(mocks, {
+    'next/server': { NextResponse: Response }, '@/lib/remote-agent-completion': helper,
+    '@/lib/api-auth': { requireAdminApiKey: () => null }, '@/lib/local-request-auth': { requireTrustedLocalMutation: () => null },
+    '@/lib/remote-activation': { readRemoteActivation: () => configured ? { siteUrl: 'https://site', deviceToken: 'private-credential' } : {}, clearRemoteActivation: () => { configured = false; } },
+    '@/lib/connect-contract-store': { hasStoredConnectContract: () => false }, '@/lib/naver-session': { getNaverSessionFile: () => path.join(root, 'absent') },
+    '../../../../../scripts/lib/writing-timeout-policy': { getWritingTimeoutPolicy: () => ({}) },
+    '../../../../../scripts/lib/app-paths': { getUserDataRoot: () => root }, '../../../../../scripts/lib/thumbnail-gen': { isGenerativeThumbnailAvailable: () => false },
+  });
+  const route = load(routePath, mocks, { fetch: async url => {
+    if (url.endsWith('/heartbeat')) return Response.json({ success: true, data: { active: false } });
+    if (url.endsWith('/claim')) { claims++; return Response.json({ success: true, data: null }); }
+    sends++;
+    return Response.json({ success: false, error: { code: 'REJECTED', message: 'fixture' } }, { status });
+  } });
+  const box = helper.completionOutbox(root, 'https://site', 'private-credential');
+  const saved = { job: { id: 'job_1', type: 'POST_PUBLISH' }, body: { status: 'SUCCEEDED', result: { postUrl: 'https://example.test/published' } } };
+  try {
+    box.save(saved);
+    const request = new Request('http://localhost/api/remote-agent/poll', { method: 'POST' }); request.nextUrl = new URL(request.url);
+    assert.equal((await (await route.POST(request)).json()).code, 'COMPLETION_DELIVERY_REJECTED');
+    assert.equal(box.read(), null);
+    const rejected = fs.readdirSync(path.join(root, 'remote-agent-completions/rejected')).filter(file => !file.endsWith('.reason.json'));
+    assert.equal(rejected.length, 1);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, 'remote-agent-completions/rejected', rejected[0]), 'utf8')), saved);
+    await route.POST(request);
+    assert.equal(sends, 1, 'permanent completion is not sent forever');
+    assert.equal(claims, status === 401 ? 0 : 1);
+    assert.equal(configured, status !== 401);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('materials handlers separate preparation, selection and publication and preserve local workflow identity', async () => {
+  const routePath = path.join(__dirname, '../app/api/remote-agent/poll/route.ts');
+  const source = fs.readFileSync(routePath, 'utf8');
+  const mocks = {};
+  for (const match of source.matchAll(/from\s+["']([^"']+)["']/g)) if (!match[1].startsWith('node:')) mocks[match[1]] = {};
+  const requests = [];
+  let loseResponse = false;
+  let backgroundPending = false;
+  Object.assign(mocks, {
+    '@/lib/local-automation-error': load(path.join(__dirname, 'local-automation-error.ts')),
+    '../../../../../scripts/lib/writing-timeout-policy': { getWritingTimeoutPolicy: () => ({}) },
+    '@/lib/local-json-fetch': { localJsonFetch: async (url, init, timeoutMs) => {
+      const parsed = new URL(url);
+      requests.push({ path: parsed.pathname, search: parsed.search, method: init.method || 'GET', body: init.body ? JSON.parse(init.body) : null });
+      assert.ok(timeoutMs === 30000 || requests.at(-1).method === 'GET');
+      if (loseResponse) throw new Error('response lost');
+      if (parsed.pathname === '/api/materials' && parsed.searchParams.get('jobId') === 'local-workflow-1') {
+        return Response.json({ success: true, data: { jobId: 'local-workflow-1', status: backgroundPending ? 'failed' : 'completed', workflowPending: backgroundPending, items: [{ productId: 'product-1', status: backgroundPending ? 'interrupted' : 'scheduled' }] } });
+      }
+      if (parsed.pathname === '/api/materials') {
+        return Response.json({ success: true, data: { materials: [{ productId: 'product-1', revision: 'a'.repeat(64), ready: true, connectKind: 'SHOPPING' }] } });
+      }
+      return Response.json({ success: true, data: init.method === 'POST' ? { jobId: 'local-workflow-1', status: 'running' } : { materials: [] } });
+    } },
+  });
+  const route = load(routePath, mocks, {}, '\nexport const testExecute = executeJob;');
+  const request = new Request('http://localhost/api/remote-agent/poll', { method: 'POST' }); request.nextUrl = new URL(request.url);
+  const execute = (type, input) => route.testExecute({ request, job: { id: 'job_source', type, input }, warnings: [], setStage() {}, cancelled: false });
+  const prepare = await execute('MATERIALS_PREPARE', { productIds: ['product-1'] });
+  assert.equal(requests.at(-1).path, '/api/materials/prepare');
+  assert.equal(requests.at(-1).body.sourceJobId, 'job_source');
+  assert.equal(prepare.data.workflowPending, true);
+  assert.equal(prepare.data.nextCall.arguments.jobId, 'local-workflow-1');
+  backgroundPending = true;
+  const stillPreparing = await execute('MATERIALS_LIST', { jobId: 'local-workflow-1' });
+  assert.equal(stillPreparing.data.workflowPending, true);
+  assert.equal(stillPreparing.data.nextCall.arguments.jobId, 'local-workflow-1');
+  backgroundPending = false;
+  const selected = [{ productId: 'product-1', revision: 'a'.repeat(64) }];
+  await execute('MATERIALS_PUBLISH', { materials: selected, publishMode: 'now', confirmed: true });
+  assert.equal(requests.at(-1).path, '/api/materials/publish');
+  assert.deepEqual(requests.at(-1).body.materials, selected);
+  assert.equal(requests.at(-1).body.sourceJobId, 'job_source');
+  const missingSelection = await execute('POST_SCHEDULE', { confirmed: true });
+  assert.equal(missingSelection.data.selectionRequired, true);
+  assert.equal(missingSelection.data.executed, false);
+  assert.equal(requests.at(-1).path, '/api/materials');
+  assert.equal(requests.at(-1).method, 'GET');
+  const legacySchedule = await execute('POST_SCHEDULE', { draftId: 'product-1', scheduledDate: '2026-09-09', confirmed: true });
+  assert.equal(legacySchedule.kind, 'materials-publish');
+  assert.equal(legacySchedule.summary, '선택 소재 예약 등록을 완료했습니다.');
+  assert.equal(legacySchedule.data.executed, true);
+  assert.equal(legacySchedule.data.workflowPending, false);
+  assert.equal(requests.at(-2).path, '/api/materials/publish');
+  assert.deepEqual(requests.at(-2).body.materials, selected);
+  assert.equal(requests.at(-2).body.publishMode, 'schedule');
+  assert.equal(requests.at(-2).body.scheduledAt, '2026-09-09');
+  assert.equal(requests.at(-1).path, '/api/materials');
+  assert.equal(requests.at(-1).search, '?jobId=local-workflow-1');
+  const legacyPublish = await execute('POST_PUBLISH', { draftId: 'product-1', confirmed: true });
+  assert.equal(legacyPublish.kind, 'materials-publish');
+  assert.equal(legacyPublish.data.executed, true);
+  const bulk = await execute('POST_BULK_SCHEDULE', { confirmed: true });
+  assert.equal(bulk.data.selectionRequired, true);
+  assert.equal(bulk.data.executed, false);
+  const publishCallsBeforeUnknown = requests.filter(call => call.path === '/api/materials/publish').length;
+  loseResponse = true;
+  const unknown = await execute('MATERIALS_PUBLISH', { materials: selected, publishMode: 'now', confirmed: true });
+  assert.equal(unknown.data.submissionUncertain, true);
+  assert.equal(unknown.data.nextCall.arguments.sourceJobId, 'job_source');
+  assert.equal(unknown.data.workflowPending, true);
+  assert.equal(requests.filter(call => call.path === '/api/materials/publish').length, publishCallsBeforeUnknown + 1, 'one request per explicit test call, no automatic replay');
 });

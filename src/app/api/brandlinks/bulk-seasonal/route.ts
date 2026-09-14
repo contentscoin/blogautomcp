@@ -8,6 +8,7 @@ import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 import { buildCaptureRequiredPayload, parseConnectKind, toStoredConnectKind } from "@/lib/brandconnect-kind";
 import { resolveConnectContract } from "@/lib/connect-contract-store";
 import { getLogsDir } from "../../../../../scripts/lib/app-paths";
+import { recoverExitedPublications } from '@/lib/publication-recovery';
 
 interface BulkSeasonalBody {
   connectKind?: string;
@@ -225,6 +226,7 @@ export async function POST(request: NextRequest) {
       3650
     );
 
+    await recoverExitedPublications(prisma);
     const activePublishing = await prisma.brandLink.count({
       where: { status: "PUBLISHING" },
     });
@@ -233,6 +235,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         {
           success: false,
+          code: 'PUBLISHING_ACTIVE',
+          data: { activePublishing },
           error: "현재 발행 작업이 진행 중입니다. 완료 후 다시 시도하세요.",
         },
         { status: 409 }

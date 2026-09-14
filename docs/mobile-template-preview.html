@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>모바일 편집 템플릿 비교</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f2f4f5;color:#242424;font-family:Arial,'Malgun Gothic',sans-serif}header{max-width:1100px;margin:36px auto;padding:0 20px}header h1{font-size:26px}header p{line-height:1.7;color:#555}nav{display:flex;gap:8px;flex-wrap:wrap}button{border:1px solid #c4cbd0;background:white;padding:11px 14px;border-radius:8px;cursor:pointer}button[aria-pressed=true]{background:#203b4b;color:white}main{margin:24px auto 60px;width:min(100%,390px);background:white;padding:24px 22px;box-shadow:0 3px 22px #0001}h2{font-size:24px;line-height:1.5;overflow-wrap:anywhere}h3{font-size:20px;line-height:1.5;color:var(--accent);margin:32px 0 16px}p{font-size:16px;line-height:1.8;margin:0 0 18px;overflow-wrap:anywhere;text-align:left}small,.caption{font-size:13px;color:#626262;line-height:1.7}.photo{aspect-ratio:4/3;background:var(--tint);display:grid;place-items:center;padding:24px;color:var(--accent);text-align:center;margin:20px 0 8px}.note{border-left:3px solid var(--accent);padding-left:14px;margin:24px 0}hr{border:0;border-top:1px solid #e5e7eb;margin:30px 0}.badge{font-size:12px;letter-spacing:.04em;color:var(--accent)}
+</style></head><body><header><h1>모바일에서 읽는 여섯 가지 글 스타일</h1><p>가상 상품으로 만든 편집 시안입니다. 이미지 영역은 배치 예시이며 실제 사진이 아닙니다. 네이버 저장 결과가 아닌 브라우저 미리보기입니다.</p><nav id="tabs" aria-label="템플릿"></nav></header><main id="post"></main>
+<script>
+const examples=[
+['생활 고민 해결형','생활 정리를 돕는 동료','#17675f','#edf6f3','칫솔 둘 곳이 애매한 작은 욕실이라면','세면대 주변에 컵과 세안용품이 놓여 있으면 칫솔 하나 둘 자리도 아쉽죠.','칫솔을 벽으로 옮기는 방법','벽걸이형을 살펴볼 때는 설치할 벽면과 칫솔 거치 규격을 함께 봅니다.','가족이 사용하는 칫솔의 크기가 다르다면, 표시된 수납 개수만으로 선택하기는 어려워요.','설치 위치를 보여주는 제품 사진','after'],
+['구매 비교형','차이를 짚는 구매 도우미','#254c72','#edf2f8','칫솔살균기, 우리 집에 맞는 전원 방식은','설치할 자리를 먼저 정하면 제품을 비교하는 기준이 선명해집니다.','전원 연결은 어디에서 할까요','상시 전원형은 설치 위치와 콘센트 사이를 먼저 살펴봅니다.','충전형을 비교한다면 충전 주기와 본체를 분리하는 방식이 선택 기준이 됩니다.','전원부와 구성품 상세 사진','after'],
+['제품 상세 해설형','구조를 풀어주는 제품 편집자','#4b506e','#f0f0f6','칫솔 거치부, 분리 구조를 살펴보면','외관과 함께 살펴볼 부분은 칫솔을 넣고 꺼내는 안쪽 구조입니다.','분리와 물세척은 다른 조건입니다','거치부가 분리되는 제품이라도 모든 부품을 물로 씻을 수 있다는 뜻은 아닙니다.','세척 방법은 해당 부품에 안내된 범위를 기준으로 설명해야 해요.','분리 구조를 확인할 수 있는 상세 사진','after'],
+['일정 따라가기형','이동 순서를 정리하는 일정 편집자','#285889','#edf3f9','오사카에서 교토로 이어지는 하루','실제 상품에 안내된 방문 순서를 기준으로 하루의 흐름을 정리합니다.','교토에서 걷는 구간을 살펴봐요','방문지 개수와 함께 각 장소에서 걷는 구간도 살펴볼 부분입니다.','일정에 없는 장소나 시간을 덧붙이지 않고, 확인된 이동과 활동을 연결합니다.','해당 일차 방문지의 풍경','before'],
+['여행지 매력형','장소를 소개하는 여행 편집자','#356354','#edf5ef','도시의 저녁과 산책하는 낮 사이','번화한 거리와 야외 산책을 함께 담으면 장소마다 다른 흐름으로 소개할 수 있어요.','아라시야마에서 보고 싶은 풍경','장소의 대표 풍경을 먼저 보여주고 그곳에서 할 수 있는 활동을 이어 설명합니다.','실제 방문담을 꾸미지 않고 확인된 장소의 특징으로 장면을 구체화합니다.','장소를 크게 보여주는 단일 풍경 이미지','before'],
+['조건 비교형','여행 속도를 살피는 여행 상담자','#6b503b','#f8f1eb','교토 포함 일정, 어떤 여행자에게 맞을까','같은 여행 기간이어도 방문 지역과 이동 조건에 따라 보내는 방식은 달라집니다.','여러 지역을 보고 싶다면','교토 방문이 포함된 구성이라면 그날의 이동과 관광에 시간을 배정하게 됩니다.','자유시간이 우선인 분은 시내에 머무는 일정과 조건을 비교해 보세요.','실제 일정 또는 숙소 근거 이미지','after']
+];
+// Actual SmartEditor palette and size options observed on 2026-09-05.
+['#00554c','#003960','#823f00','#004e82','#245b12','#4f0041'].forEach((color,i)=>examples[i][2]=color);
+const style=document.createElement('style');style.textContent='h3{font-size:19px}main p{color:#333333}.caption{color:#555555}';document.head.append(style);
+const tabs=document.getElementById('tabs'), post=document.getElementById('post');
+function render(i){const [name,persona,accent,tint,title,lead,heading,a,b,photo,placement]=examples[i];post.style.setProperty('--accent',accent);post.style.setProperty('--tint',tint);const img=`<div class="photo" role="img" aria-label="배치 예시: ${photo}">${photo}</div><p class="caption">이미지 자리 · 실제 상품 근거에 맞는 사진 사용</p>`;post.innerHTML=`<div class="badge">${name}</div><h2>${title}</h2><p>${lead}</p>${placement==='before'?img:''}<h3>${heading}</h3><p>${a}</p><p>${b}</p>${placement==='after'?img:''}<hr><p class="note">짧은 핵심 판단은 이렇게 본문과 구분합니다.</p><small>작성 관점: ${persona}<br>정보형 시안 · 실제 체험 후기 아님</small>`;[...tabs.children].forEach((button,j)=>button.setAttribute('aria-pressed',String(i===j)));}
+examples.forEach((x,i)=>{const b=document.createElement('button');b.textContent=x[0];b.onclick=()=>render(i);tabs.append(b)});render(0);
+</script></body></html>

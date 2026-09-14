@@ -75,7 +75,7 @@ export default async function DashboardPage() {
             <DashboardActions hasConnection={Boolean(connection)} generation={connection?.generation || 0} />
             <section className="data-card">
               <div className="card-title"><div><span className="card-kicker">JOB LEDGER</span><h2>최근 작업</h2></div><span className={`agent-dot ${online ? 'online' : ''}`}>{online ? 'PC ONLINE' : 'PC OFFLINE'}</span></div>
-              {jobs.length ? <div className="job-list">{jobs.map((job) => <div className="job-row" key={job.id}><div><strong>{jobTitle(job.type)}</strong><small>{new Date(job.createdAt).toLocaleString('ko-KR')}</small></div><span>{job.connectKind || '—'}</span><b className={`job-status job-${job.status.toLowerCase()}`}>{job.status}</b></div>)}</div> : <p className="empty-copy">아직 전달된 작업이 없습니다. MCP 연결 후 ChatGPT에서 요청해보세요.</p>}
+              {jobs.length ? <div className="job-list">{jobs.map((job) => <div className="job-row" key={job.id}><div><strong>{jobTitle(job.type)}</strong><small>{new Date(job.createdAt).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })} KST</small><details><summary>작업 상세</summary><p>작업번호: {job.id}</p><p>단계: {job.stageMessage || job.stage || '대기'} · {job.progress}%</p>{materialJobId(job.resultJson) && <p>소재 작업번호: {materialJobId(job.resultJson)} · ChatGPT에서 이 번호의 소재 작업 결과를 조회할 수 있습니다.</p>}{job.errorCode && <p>원인: {job.errorCode} · {job.errorMessage}</p>}<p>이 기록은 MCP 하위 요청 상태입니다. 소재 준비·발행의 최종 결과는 같은 소재 작업번호로 확인하세요.</p></details></div><span>{job.connectKind || '—'}</span><b className={`job-status job-${job.status.toLowerCase()}`}>{job.status}</b></div>)}</div> : <p className="empty-copy">아직 전달된 작업이 없습니다. MCP 연결 후 ChatGPT에서 요청해보세요.</p>}
             </section>
           </>
         )}
@@ -88,5 +88,14 @@ function statusLabel(status: string) {
   return ({ APPROVED: '승인됨', PENDING_APPROVAL: '승인 대기', REJECTED: '승인 거절', SUSPENDED: '사용 정지' } as Record<string, string>)[status] || status;
 }
 function jobTitle(type: string) {
-  return ({ BRANDCONNECT_LIST_PRODUCTS: '상품 목록 조회', BRANDCONNECT_SYNC_PRODUCTS: '상품 가져오기', POST_CREATE_DRAFT: '초안 근거 준비(구버전)', POST_PREPARE_DRAFT: '초안 근거 준비', POST_SUBMIT_DRAFT: 'ChatGPT 원고 제출', POST_PUBLISH: '즉시 발행', POST_SCHEDULE: '예약 발행' } as Record<string, string>)[type] || type;
+  return ({ BRANDCONNECT_LIST_PRODUCTS: '상품 목록 조회', BRANDCONNECT_SYNC_PRODUCTS: '상품 가져오기', POST_CREATE_DRAFT: '초안 근거 준비(구버전)', POST_PREPARE_DRAFT: '초안 근거 준비', POST_SUBMIT_DRAFT: 'ChatGPT 원고 제출', POST_PUBLISH: '즉시 발행', POST_SCHEDULE: '예약 소재 선택 안내', MATERIALS_LIST: '소재·진행 조회', MATERIALS_PREPARE: '소재 준비 접수', MATERIALS_PUBLISH: '선택 소재 발행 접수' } as Record<string, string>)[type] || type;
+}
+
+function materialJobId(resultJson: string | null): string | null {
+  if (!resultJson) return null;
+  try {
+    const result = JSON.parse(resultJson);
+    const id = result?.data?.workflowJobId || result?.data?.jobId || result?.workflowJobId;
+    return typeof id === 'string' ? id : null;
+  } catch { return null; }
 }

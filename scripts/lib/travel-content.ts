@@ -25,6 +25,88 @@ export interface TravelPageResearch {
   shopping: string[];
 }
 
+export interface TravelSourceCoverage {
+  durationDays: number | null;
+  visitCount: number;
+  itineraryDayCount: number;
+  requiredVisitCount: number;
+  requiredItineraryDayCount: number;
+  sufficient: boolean;
+}
+
+export function requiredTravelSourceCoverage(durationDays: number | null | undefined): {
+  requiredVisitCount: number;
+  requiredItineraryDayCount: number;
+} {
+  const duration = typeof durationDays === "number" && Number.isFinite(durationDays) && durationDays >= 1
+    ? Math.floor(durationDays)
+    : null;
+  if (!duration) return { requiredVisitCount: 1, requiredItineraryDayCount: 1 };
+  return {
+    requiredVisitCount: duration <= 1 ? 1 : duration <= 4 ? 2 : 3,
+    // Airport-only first/last days exist, so require broad itinerary coverage
+    // without insisting that every advertised day contain a sightseeing stop.
+    requiredItineraryDayCount: Math.max(1, Math.ceil(duration * 0.6)),
+  };
+}
+
+/** Only explicit collector labels count as visits and itinerary rows. A duration
+ * parsed from the product identity may raise the required coverage, but cannot
+ * create any missing itinerary evidence. */
+export function assessTravelFeatureCoverage(
+  sourceFeatures: string[] | undefined,
+  fallbackDurationDays: number | null = null,
+): TravelSourceCoverage {
+  const lines = (sourceFeatures || []).flatMap((value) => value.split(/\r?\n/u)).map(clean).filter(Boolean);
+  const visits = new Set<string>();
+  const itineraryDays = new Set<number>();
+  let durationDays: number | null = fallbackDurationDays && Number.isFinite(fallbackDurationDays) && fallbackDurationDays >= 1
+    ? Math.floor(fallbackDurationDays)
+    : null;
+  for (const line of lines) {
+    const durationMatch = line.match(/^여행\s*기간\s*[:：]\s*(\d{1,2})\s*일\s*$/u);
+    if (durationMatch) durationDays = Math.max(durationDays || 0, Number(durationMatch[1]));
+    const visitMatch = line.match(/^핵심\s*방문지\s*[:：]\s*(.+)$/u);
+    if (visitMatch) {
+      for (const place of visitMatch[1].split(/\s*(?:,|\/|→)\s*/u).map(clean).filter(Boolean)) visits.add(place);
+    }
+    const itineraryMatch = line.match(/^(\d{1,2})\s*일차\s*일정\s*[:：]\s*(.+)$/u);
+    if (itineraryMatch && itineraryMatch[2].split(/\s*(?:→|,|\/)\s*/u).map(clean).some(Boolean)) {
+      const day = Number(itineraryMatch[1]);
+      if (day >= 1 && (!durationDays || day <= durationDays)) itineraryDays.add(day);
+    }
+  }
+  const required = requiredTravelSourceCoverage(durationDays);
+  return {
+    durationDays,
+    visitCount: visits.size,
+    itineraryDayCount: itineraryDays.size,
+    ...required,
+    sufficient: visits.size >= required.requiredVisitCount && itineraryDays.size >= required.requiredItineraryDayCount,
+  };
+}
+
+export function assessTravelPageResearchCoverage(research: TravelPageResearch | null | undefined): TravelSourceCoverage {
+  if (!research) {
+    const required = requiredTravelSourceCoverage(null);
+    return { durationDays: null, visitCount: 0, itineraryDayCount: 0, ...required, sufficient: false };
+  }
+  const validHighlights = new Set(research.highlights.map((item) => clean(item.name)).filter(Boolean));
+  const validScheduleDays = new Set(research.schedules
+    .filter((schedule) => Number.isInteger(schedule.day) && schedule.day >= 1 &&
+      (!research.durationDays || schedule.day <= research.durationDays) && schedule.activities.map(clean).some(Boolean))
+    .map((schedule) => schedule.day));
+  const required = requiredTravelSourceCoverage(research.durationDays);
+  return {
+    durationDays: research.durationDays,
+    visitCount: validHighlights.size,
+    itineraryDayCount: validScheduleDays.size,
+    ...required,
+    sufficient: validHighlights.size >= required.requiredVisitCount &&
+      validScheduleDays.size >= required.requiredItineraryDayCount,
+  };
+}
+
 /** 실패 후 재시도에서도 원본 일정 근거를 잃지 않도록 저장 JSON을 검증해 복원한다. */
 export function parseStoredTravelPageResearch(raw: string | null | undefined): TravelPageResearch | null {
   if (!raw) return null;
@@ -331,6 +413,7 @@ export function travelPageResearchFeatures(research: TravelPageResearch): string
     return `${schedule.day}일차 일정: ${activities.join(" → ")}`;
   });
   return [
+    research.durationDays ? `여행 기간: ${research.durationDays}일` : "",
     `핵심 방문지: ${highlights.slice(0, 20).join(", ")}`,
     ...research.flights,
     ...dayFeatures,
@@ -416,6 +499,13 @@ export function extractTravelProductFacts(
     conditions,
     departureConfirmed: /(?:출발확정|무조건출발)/u.test(source),
   };
+}
+
+function travelDurationDays(value: string | null): number | null {
+  if (!value) return null;
+  const matched = value.match(/(?:\d+박\s*)?(\d{1,2})일/u);
+  const days = matched ? Number(matched[1]) : Number.NaN;
+  return Number.isInteger(days) && days >= 1 ? days : null;
 }
 
 export function formatTravelFactsForPrompt(facts: TravelProductFacts): string {
@@ -515,7 +605,13 @@ export function buildTravelReviewAnalysis(product: {
   const broadRoute = facts.destinations.length >= 2 || places.length >= 4;
   const unresolvedFacts = unique([...limitations.flatMap((item) => item.verificationNeeds), ...(!product.price ? ["출발일별 최종 가격"] : [])], 12);
   const evidencePoints = places.length + facts.conditions.length + (facts.duration ? 1 : 0) + (product.description ? 1 : 0) + product.features.length;
-  const evidenceLevel = evidencePoints >= 8 ? "rich" : evidencePoints >= 3 ? "usable" : "sparse";
+  // Collector features occasionally omit the duration label even though the
+  // trusted product title says "10일". Use that duration to set the threshold;
+  // it is never counted as an itinerary row by itself.
+  const sourceCoverage = assessTravelFeatureCoverage(product.features, travelDurationDays(facts.duration));
+  const evidenceLevel = !sourceCoverage.sufficient
+    ? "sparse"
+    : evidencePoints >= 8 ? "rich" : evidencePoints >= 3 ? "usable" : "sparse";
 
   return {
     productType: "package-tour",

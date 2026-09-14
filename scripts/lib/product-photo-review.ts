@@ -4,10 +4,27 @@ import { runCodexDraft } from "./codex-draft-provider";
 
 // Cache by bytes and subject, not temporary filenames or claimed provenance.
 const reviews = new Map<string, boolean>();
-export async function selectVerifiedProductPhoto(paths: string[], productName: string): Promise<string | null> {
-  const candidates = [...new Set(paths)].filter((file) => file && fs.existsSync(file));
-  for (const file of candidates.slice(0, 12)) {
-    const hash = crypto.createHash("sha256").update(fs.readFileSync(file)).update(productName).digest("hex");
+export async function selectVerifiedProductPhotos(
+  paths: string[],
+  productName: string,
+  maximum = 12,
+): Promise<string[]> {
+  const seen = new Set<string>();
+  const acceptedPaths: string[] = [];
+  for (const file of new Set(paths)) {
+    let hash: string;
+    let sourceHash: string;
+    try {
+      const stat = fs.statSync(file);
+      if (!stat.isFile() || stat.size < 1 || stat.size > 24 * 1024 * 1024) continue;
+      const bytes = fs.readFileSync(file);
+      sourceHash = crypto.createHash("sha256").update(bytes).digest("hex");
+      hash = crypto.createHash("sha256").update(sourceHash).update(productName).digest("hex");
+    } catch { continue; }
+    // Copies of one notice/coupon must not exhaust the actual-photo review budget.
+    if (seen.has(hash)) continue;
+    if (seen.size >= 12) break;
+    seen.add(hash);
     let accepted = reviews.get(hash);
     if (accepted === undefined) {
       const answer = await runCodexDraft({
@@ -19,7 +36,14 @@ export async function selectVerifiedProductPhoto(paths: string[], productName: s
       catch { throw new Error("상품 사진 검사의 응답을 해석할 수 없습니다. 미검증 이미지를 합성하지 않았습니다."); }
       reviews.set(hash, accepted!);
     }
-    if (accepted) return file;
+    if (accepted) {
+      acceptedPaths.push(file);
+      if (acceptedPaths.length >= Math.max(1, maximum)) break;
+    }
   }
-  return null;
+  return acceptedPaths;
+}
+
+export async function selectVerifiedProductPhoto(paths: string[], productName: string): Promise<string | null> {
+  return (await selectVerifiedProductPhotos(paths, productName, 1))[0] || null;
 }

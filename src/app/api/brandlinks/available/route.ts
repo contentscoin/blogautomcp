@@ -60,7 +60,7 @@ export async function GET(request: NextRequest) {
         const row = (item.externalItemId ? byExternalId.get(item.externalItemId) : undefined) || byUrl.get(normalizeUrl(item.linkUrl));
         const itemStatus = row?.status || "AVAILABLE";
         const draftPrepared = Boolean(row && (() => {
-          try { return Boolean(readBrandPostPackage(row.id)); } catch { return false; }
+          try { return Boolean(readBrandPostPackage(row.id, { migrate: false })); } catch { return false; }
         })());
         const resolvedWritingStatus = row ? getWritingStatus({ status: itemStatus, draftPrepared }) : "unwritten";
         return {

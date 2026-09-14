@@ -18,10 +18,10 @@ export async function GET(request: NextRequest) {
         const where: Record<string, unknown> = {};
 
         if (status && status !== "ALL") {
-            where.status = status === "SUCCESS" ? "PUBLISHED" : "FAILED";
+            where.status = { in: status === "SUCCESS" ? ["PUBLISHED", "SCHEDULED"] : ["FAILED", "OUTCOME_UNKNOWN"] };
         } else {
             // 기본: 발행완료 + 실패만 (대기 제외)
-            where.status = { in: ["PUBLISHED", "FAILED"] };
+            where.status = { in: ["PUBLISHED", "SCHEDULED", "FAILED", "OUTCOME_UNKNOWN"] };
         }
 
         // 전체 개수

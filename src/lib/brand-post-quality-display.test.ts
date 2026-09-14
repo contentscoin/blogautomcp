@@ -25,6 +25,14 @@ test("empty blockers and high score cannot erase a failing content signal", () =
   const noBlockers = { ...missingFit, blockers: [] };
   assert.equal(isDraftEditorialQualityPassed(noBlockers), false);
 });
+test("category failure cannot be hidden by canPublish or composition-only status", () => {
+  assert.equal(isDraftEditorialQualityPassed({ ...missingFit, canPublish: true, signals: [] }), false);
+  assert.equal(isDraftEditorialQualityPassed({ ...missingFit, signals: [{ key: "composition-quality", status: "fail" }] }), false);
+});
+test("UI uses the canonical server decision even with stale legacy metadata", () => {
+  assert.deepEqual(getDraftApprovalBlockers({ contentQuality: missingFit, imageGeneration: { status: "running", remaining: 10 }, approval: { canApprove: true, blockers: [] } }), []);
+  assert.deepEqual(getDraftApprovalBlockers({ approval: { canApprove: false, blockers: [{ code: "image-coverage", reason: "사진 파일 불일치" }] } }), ["사진 파일 불일치"]);
+});
 test("low score and actual safety failures stay blocked", () => {
   const lowScore = { ...missingFit, score: 60 };
   assert.equal(isDraftEditorialQualityPassed(lowScore), false);

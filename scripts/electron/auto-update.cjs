@@ -126,6 +126,8 @@ function createDesktopAutoUpdater({ app, Notification, NsisUpdater, userDataDir,
     setState('installing', { version: state.version, progress: 100 });
     try {
       await beforeInstall();
+      // NSIS handles the replacement before launching the updated app. Without
+      // forceRunAfterUpdate the desktop agent stays down after silent updates.
       updater.quitAndInstall(true, true);
     } catch (error) {
       setState('install-error', { error: error instanceof Error ? error.message : '업데이트 설치 준비 실패' });

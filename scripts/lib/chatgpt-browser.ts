@@ -615,6 +615,7 @@ export async function submitPromptToChatGPT(
   prompt: string,
   label: string = "ChatGPT",
   beforeSend?: () => void,
+  onPhase?: (phase: string) => void | Promise<void>,
 ): Promise<void> {
   console.log(`      - [${label}] 프롬프트 전송 중...`);
   await assertNoChatGPTProtection(page, label);
@@ -629,27 +630,26 @@ export async function submitPromptToChatGPT(
     await page.waitForTimeout(500);
   }
 
+  await onPhase?.("composer-wait");
   const composerSelector = await waitForChatGPTComposer(page, 30000);
   const composer = page.locator(composerSelector).first();
 
   await assertNoChatGPTProtection(page, label);
   await composer.click();
   await page.waitForTimeout(300);
+  await onPhase?.("input-start");
 
   if (composerSelector.startsWith("textarea")) {
     await composer.fill(prompt);
   } else {
-    await page.evaluate((selector) => {
-      const el = document.querySelector(selector) as HTMLElement | null;
-      if (el) el.innerText = "";
-    }, composerSelector);
-    const chunks = prompt.match(/.{1,1000}/g) || [prompt];
-    for (const chunk of chunks) {
-      await page.keyboard.type(chunk, { delay: 2 });
-    }
+    // Playwright fill supports contenteditable and emits input events. Preserve
+    // line breaks and avoid thousands of per-key browser protocol round trips.
+    await composer.fill(prompt);
   }
 
+  await onPhase?.("input-complete");
   await waitForChatGPTSendReady(page, 10000);
+  await onPhase?.("send-ready");
   await assertNoChatGPTProtection(page, label);
 
   // A click timeout can occur after dispatch. Never send Enter as an ambiguous retry.
@@ -663,6 +663,7 @@ export async function submitPromptToChatGPT(
   }
 
   await page.waitForTimeout(1500);
+  await onPhase?.("dispatch-complete");
 }
 
 export async function sendPromptToChatGPT(page: Page, prompt: string, label: string = "ChatGPT"): Promise<string> {
@@ -845,6 +846,13 @@ export async function countRenderableChatGPTImages(page: Page): Promise<number> 
   }
 }
 
+export function isExplicitImageProviderRefusal(text: string): boolean {
+  const normalized = text.replace(/\s+/gu, " ").trim();
+  const denial = /(?:can(?:not|'t|’t)|unable to)\s+(?:help|create|generate|provide)|(?:생성|제작|도와드릴|제공).{0,16}(?:수 없|어렵)|요청.{0,20}(?:거절|거부)/iu.test(normalized);
+  const policy = /third.party|similarity|copyright|content policy|safety policy|서드.?파티|유사성|저작권|콘텐츠 정책|안전 정책/iu.test(normalized);
+  return denial && policy;
+}
+
 export async function waitForChatGPTImageArtifacts(
   page: Page,
   timeoutMs?: number,
@@ -870,8 +878,15 @@ export async function waitForChatGPTImageArtifacts(
           throw new Error(chatGptAuthenticationRequiredMessage("ChatGPT 로그인이 필요합니다."));
         }
         const artifacts = await page.evaluate(collectRenderableChatGPTGeneratedImages).catch(() => []);
+        const generating = await isChatGPTGenerating(page);
+        if (!generating && artifacts.length === 0) {
+          const message = (await readAssistantMessages(page)).at(-1) || "";
+          if (isExplicitImageProviderRefusal(message)) {
+            throw new Error("IMAGE_PROVIDER_REFUSED: 생성 서비스가 요청을 거절했습니다. 사용 가능한 원본이나 허용되는 대체 장면을 선택하세요.");
+          }
+        }
         return {
-          generating: await isChatGPTGenerating(page), imageCount: artifacts.length,
+          generating, imageCount: artifacts.length,
           artifactKey: artifacts.map(image => `${image.src}|${image.width}|${image.height}`).join("\n"),
         };
       }, Math.max(1, deadline - now()), "image observation");

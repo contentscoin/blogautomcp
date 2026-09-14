@@ -13,6 +13,11 @@ import {
 
 const productName = "출발확정 여행핫딜 시내숙박 대마도 2일 패키지";
 const disclosure = "이 포스팅은 네이버 여행 커넥트 활동의 일환으로, 예약 발생 시 수수료를 제공받습니다.";
+const travelSourceFeatures = [
+  "핵심 방문지: 히타카츠, 이즈하라, 미우다 해변, 와타즈미 신사",
+  "1일차 일정: 히타카츠 → 미우다 해변 → 와타즈미 신사",
+  "2일차 일정: 이즈하라 골목 → 항구",
+];
 const weakSections = [
   "여행 시기와 조건\n\n대마도 2일 상품을 조건 중심으로 살펴봤어요. 선택한 출발일도 확정인지 다시 확인해야 해요. 세부 순서가 공개되지 않아 판단하기 어렵습니다. 현재 정보만으로 자유시간을 알기 어려워요.",
   "2일 일정\n\n대마도는 짧게 다녀오기 좋아요. 도착 시각을 확인해야 실제 관광 시간을 알 수 있어요. 방문지 수보다 체류시간을 살펴보는 게 좋아요. 이동 강도도 일정표에서 체크해야 합니다.",
@@ -50,7 +55,7 @@ const assess = (sections: string[]) => getBrandLinkContentReadiness({
   connectKind: "TRAVEL",
   experienceMode: "AI_ASSISTED_INFORMATION",
   sourceDescription: "히타카츠 이즈하라 시내숙박 출발확정 티아라몰 쇼핑",
-  sourceFeatures: ["1박 2일", "표시가 126,003원"],
+  sourceFeatures: travelSourceFeatures,
   mode: "editorial",
 });
 
@@ -132,7 +137,10 @@ const coverageOnlyFailure = getBrandLinkContentReadiness({
   connectKind: "TRAVEL",
   experienceMode: "AI_ASSISTED_INFORMATION",
   sourceDescription: "",
-  sourceFeatures: ["핵심 방문지: 히타카츠, 이즈하라, 미우다 해변"],
+  sourceFeatures: [
+    "핵심 방문지: 히타카츠, 이즈하라, 미우다 해변",
+    "1일차 일정: 히타카츠 → 이즈하라 → 미우다 해변",
+  ],
   mode: "editorial",
 });
 assert.equal(coverageOnlyFailure.code, "low-evidence-density", coverageOnlyFailure.reason || coverageOnlyFailure.summary);
@@ -184,7 +192,7 @@ const editorialWithoutHero = getBrandLinkContentReadiness({
   thumbnailGenerated: false,
   connectKind: "TRAVEL",
   sourceDescription: "히타카츠 이즈하라 시내숙박 출발확정 티아라몰 쇼핑",
-  sourceFeatures: ["1박 2일", "표시가 126,003원"],
+  sourceFeatures: travelSourceFeatures,
   mode: "editorial",
 });
 assert.equal(editorialWithoutHero.canPublish, true, editorialWithoutHero.reason || editorialWithoutHero.summary);
@@ -201,7 +209,7 @@ const publishWithoutHero = getBrandLinkContentReadiness({
   thumbnailGenerated: false,
   connectKind: "TRAVEL",
   sourceDescription: "히타카츠 이즈하라 시내숙박 출발확정 티아라몰 쇼핑",
-  sourceFeatures: ["1박 2일", "표시가 126,003원"],
+  sourceFeatures: travelSourceFeatures,
   mode: "publish",
 });
 assert.equal(publishWithoutHero.code, "missing-representative-image");
@@ -443,7 +451,8 @@ assert.match(simpleAgentSource, /maximumRepairAttempts = 3/u);
 assert.match(simpleAgentSource, /repairAttempt <= maximumRepairAttempts && !editorialQuality.canPublish/u);
 assert.match(simpleAgentSource, /shouldAcceptQualityRepair\(editorialQuality, repairedQuality\)/u);
 assert.doesNotMatch(simpleAgentSource, /편집 역할 \$\{role\}/u);
-assert.match(sitesMcpSource, /contentQuality\.canPublish 가 false/u);
+assert.match(sitesMcpSource, /실제 원고 내용 실패\(텍스트 signals\)만 새 idempotencyKey 로 보강 제출합니다/u);
+assert.match(sitesMcpSource, /품질검사 기준을 우회하지 마세요/u);
 assert.match(sitesMcpSource, /이미지 부족만으로는 원고를 보강 제출하지 않습니다/u);
 const step2CallIndex = simpleAgentSource.indexOf("await step2_generatePost(");
 const persistedEvidenceIndex = simpleAgentSource.indexOf(
@@ -456,11 +465,11 @@ assert.ok(
   "GPT evidence facts must be persisted after step2_generatePost",
 );
 
-// 키워드 태그만 있는 쇼핑 상품(러닝조끼): 1.3.9에서는 없는 신호 1개를 요구해 productEvidence 0/25·sceneLinkage 0/20이 확정됐다.
+// 키워드 태그만 있는 상품은 원고 문구를 늘려도 제품 근거가 생기지 않는다.
 const vestProductName = "RNRN 러닝조끼 메쉬 남녀공용 러닝 베스트";
 const vestKeywordTags = ["러닝조끼", "메쉬", "러닝", "조끼", "러닝베스트", "여름", "운동"];
 const vestSections = [
-  "가벼운 러닝조끼가 필요한 순간\n\n새벽이나 퇴근 후에 달리면 얇은 티셔츠 위에 뭔가 한 겹이 더 필요할 때가 있어요. RNRN 러닝조끼는 메쉬 소재라 땀이 차는 구간에서 열을 빼 주는 쪽에 가깝습니다. 남녀공용 러닝 베스트라 커플이나 러닝 크루가 같은 옷을 맞추기에도 무난해요. 바람막이처럼 체온을 가두는 옷은 아니라는 점을 먼저 알고 고르는 게 좋습니다.",
+  "가벼운 러닝조끼가 필요한 순간\n\n새벽이나 퇴근 후에 달리면 얇은 티셔츠 위에 뭔가 한 겹이 더 필요할 때가 있어요. RNRN 러닝조끼는 통기용 메쉬 소재라 땀이 차는 구간의 열 배출에 유리합니다. 남녀공용 사이즈라 러닝 크루가 같은 옷을 맞추기 수월해요. 바람막이처럼 체온을 가두는 옷은 아니라는 점을 먼저 알고 고르는 게 좋습니다.",
   "메쉬 소재가 만드는 차이\n\n메쉬는 구멍이 촘촘한 직조라 공기가 통과하면서 등판의 열기를 빼 줍니다. 그래서 RNRN 러닝조끼는 한여름 인터벌처럼 땀이 많이 나는 훈련에서 장점이 뚜렷해요. 반면 초겨울 새벽처럼 바람이 차가운 날에는 보온이 거의 없어서 한계가 분명합니다. 계절에 따라 역할이 갈리는 옷이라고 보면 이해가 빨라요.",
   "착용과 세척은 이렇게\n\n착용은 러닝 티셔츠 위에 조끼를 겹쳐 입고 어깨선이 뒤로 밀리지 않게 정리하면 됩니다. 세척은 메쉬 올이 늘어나지 않도록 세탁망에 넣어 찬물로 돌리는 편이 안전해요. 보관은 옷걸이에 걸기보다 접어서 서랍에 두는 쪽이 형태가 오래 갑니다. 건조기는 열에 약한 합성 소재라 피하는 편이 좋아요.",
   "가격을 어떻게 볼까\n\n판매가는 13,700원이고 할인 전 가격은 59,800원으로 표시돼 있어요. 할인 폭이 큰 대신 이 가격에서 기대할 수 있는 건 기본 메쉬 조끼의 역할까지라고 보는 게 현실적입니다. Npay Plus 적립까지 더하면 러닝 크루 단체 구매처럼 여러 벌을 맞출 때 부담이 줄어요. 고기능 러닝 베스트 가격대와 비교하면 입문용으로 시험해 보기 좋은 값이에요.",
@@ -469,7 +478,7 @@ const vestSections = [
   "최종 판단\n\nRNRN 러닝조끼는 여름 훈련용 메쉬 베스트가 필요하고 13,700원 안에서 해결하고 싶을 때 선택할 만한 후보예요. 보온과 야간 시인성까지 원한다면 이 제품이 아니라 반사 소재가 들어간 러닝 베스트를 고르는 편이 맞습니다. 조건이 맞으면 부담 없이 시험해 볼 수 있는 값이라는 게 결론이에요.",
   "이 포스팅은 네이버 쇼핑 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받습니다.",
 ];
-const assessVest = (sourceFeatures: string[]) => getBrandLinkContentReadiness({
+const assessVest = (sourceFeatures: string[], sourceDescription = "RNRN 공식스토어 러닝 용품") => getBrandLinkContentReadiness({
   productName: vestProductName,
   title: "러닝조끼 RNRN 메쉬 베스트 여름 훈련용으로 볼 때",
   sections: vestSections,
@@ -479,21 +488,23 @@ const assessVest = (sourceFeatures: string[]) => getBrandLinkContentReadiness({
   hasRepresentativeImage: true,
   thumbnailGenerated: true,
   connectKind: "SHOPPING",
-  sourceDescription: "RNRN 공식스토어 러닝 용품",
+  sourceDescription,
   sourceFeatures,
   mode: "editorial",
 });
 const vestCategory = (readiness: ReturnType<typeof getBrandLinkContentReadiness>, key: string) =>
   readiness.quality.categories.find((category) => category.key === key)!;
 const vestKeywordOnly = assessVest(vestKeywordTags);
-assert.equal(vestKeywordOnly.canPublish, true, vestKeywordOnly.reason || vestKeywordOnly.summary);
-assert.equal(vestCategory(vestKeywordOnly, "productEvidence").score, 25, "키워드 태그뿐인 상품에 없는 신호를 요구해 0점을 주면 안 됩니다.");
-assert.match(vestCategory(vestKeywordOnly, "productEvidence").notes.join(" "), /확인된 기능·수치 신호가 없어/u);
-assert.equal(vestCategory(vestKeywordOnly, "sceneLinkage").score, 20, "신호가 없으면 상품명 토큰을 앵커로 판단 문장을 세야 합니다.");
+assert.equal(vestKeywordOnly.canPublish, false, "키워드와 상품명만으로 구체적인 기능·세척법을 쓴 원고를 자동 승인하면 안 됩니다.");
+assert.equal(vestCategory(vestKeywordOnly, "productEvidence").status, "fail");
+assert.match(vestCategory(vestKeywordOnly, "productEvidence").notes.join(" "), /상세 정보를 다시 수집/u);
+assert.equal(vestKeywordOnly.quality.sourceEvidence?.level, "sparse");
+assert.equal(vestKeywordOnly.quality.sourceEvidence?.sufficient, false);
+const vestEvidenceFeatures = ["통기용 메쉬 소재", "남녀공용 사이즈"];
 const vestScoringFeatures = buildProductScoringFeatures({
   productName: vestProductName,
-  description: "RNRN 공식스토어 러닝 용품",
-  features: vestKeywordTags,
+  description: "통기용 메쉬 소재를 사용한 남녀공용 러닝 조끼",
+  features: vestEvidenceFeatures,
   price: "13,700원",
   originalPrice: "59,800원",
   couponInfo: "Npay Plus 적립",
@@ -501,15 +512,24 @@ const vestScoringFeatures = buildProductScoringFeatures({
 });
 assert.ok(vestScoringFeatures.includes("가격: 13,700원") && vestScoringFeatures.includes("원가: 59,800원"), "가격·원가 사실 줄이 채점 입력에 들어가야 합니다.");
 assert.ok(!vestScoringFeatures.some((line) => /^구매후기 원문 근거:/u.test(line)));
-const vestWithFacts = assessVest(vestScoringFeatures);
+const vestWithFacts = assessVest(vestScoringFeatures, "통기용 메쉬 소재를 사용한 남녀공용 러닝 조끼");
 const vestSubstance = assessProductReviewSubstance({
   productName: vestProductName,
   sections: vestSections,
-  sourceDescription: "RNRN 공식스토어 러닝 용품",
+  sourceDescription: "통기용 메쉬 소재를 사용한 남녀공용 러닝 조끼",
   sourceFeatures: vestScoringFeatures,
 });
 assert.equal(vestSubstance.signalEvidenceAvailable, true);
-assert.ok(vestSubstance.coveredSignals.includes("가격: 13,700원"), "본문이 인용한 가격 사실 줄은 확인된 근거로 세야 합니다.");
+assert.ok(!vestSubstance.coveredSignals.some((signal) => /^가격:/u.test(signal)), "가격은 선택 정보지만 제품 기능 근거로 세면 안 됩니다.");
+assert.ok(
+  vestSubstance.groundedSignalCount >= vestSubstance.requiredGroundedSignalCount,
+  JSON.stringify({
+    grounded: vestSubstance.groundedSignalCount,
+    required: vestSubstance.requiredGroundedSignalCount,
+    covered: vestSubstance.coveredSignals,
+    sourceLevel: vestSubstance.sourceEvidenceLevel,
+  }),
+);
 assert.equal(vestCategory(vestWithFacts, "productEvidence").score, 25);
 assert.deepEqual(vestCategory(vestWithFacts, "productEvidence").notes, []);
 assert.equal(vestCategory(vestWithFacts, "sceneLinkage").score, 20);
@@ -525,7 +545,7 @@ const vestNoJudgement = assessProductReviewSubstance({
 assert.equal(vestNoJudgement.signalEvidenceAvailable, false);
 assert.equal(vestNoJudgement.requiredSignalCount, 0, "신호가 없으면 없는 신호를 요구하지 않습니다.");
 assert.equal(vestNoJudgement.evidenceJudgementCount, 0, "상품명 앵커 폴백도 판단 문장이 없으면 0으로 세야 합니다.");
-assert.ok(vestNoJudgement.missingElements.includes("근거와 사용 가치가 연결된 판단"));
+assert.ok(vestNoJudgement.missingElements.includes("서로 다른 근거와 사용 가치가 연결된 판단"));
 
 console.log(JSON.stringify({
   ok: true,

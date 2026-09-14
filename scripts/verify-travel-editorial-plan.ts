@@ -90,10 +90,24 @@ assert.equal(
 const product = {
   name: "[출발확정/여행핫딜] 스위스/이탈리아 2국 9일 <노쇼핑/융프라우/루체른/관광열차/피사/폼페이/콜로세움내부>",
   description: "",
-  features: [],
+  features: [
+    "여행 기간: 9일",
+    "핵심 방문지: 융프라우, 루체른, 피사, 폼페이, 콜로세움",
+    "1일차 일정: 인천 → 취리히",
+    "2일차 일정: 융프라우 → 인터라켄",
+    "3일차 일정: 루체른 → 관광열차",
+    "4일차 일정: 밀라노 → 피사",
+    "5일차 일정: 로마 → 콜로세움",
+    "6일차 일정: 나폴리 → 폼페이",
+  ],
   price: "3,149,000원",
 };
 
+assert.equal(
+  buildTravelReviewAnalysis({ ...product, features: [] }).evidenceLevel,
+  "sparse",
+  "상품명의 기간·방문지 나열만으로 장기 일정 근거를 rich로 올리면 안 됩니다.",
+);
 const analysis = buildTravelReviewAnalysis(product);
 assert.equal(analysis.evidenceLevel, "rich");
 assert.equal(analysis.productType, "package-tour");

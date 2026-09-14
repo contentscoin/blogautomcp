@@ -51,6 +51,7 @@ export interface ImageRepairDependencies {
 export async function repairBrandPostImages(options: {
   brandLinkId: string;
   productName?: string;
+  sourceImageUrls?: string[];
   requests?: BrandPostImageGenerationRequest[];
 }, dependencies: ImageRepairDependencies = {
   read: readBrandPostPackage, write: writeBrandPostPackageManifest,
@@ -60,13 +61,15 @@ export async function repairBrandPostImages(options: {
   activeJobs.add(options.brandLinkId);
   const controller = new AbortController();
   controllers.set(options.brandLinkId, controller);
+  const ownerToken = randomUUID();
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
   let applied = 0;
   const errors: string[] = [];
   let requested = 0;
   let expectedDraft: string | undefined;
   const seen = new Set<string>();
   const read = () => {
-    const manifest = dependencies.read(options.brandLinkId);
+    const manifest = dependencies.read(options.brandLinkId, { migrate: false });
     if (!manifest || manifest.version !== "brand-post-package/v2") throw new Error("이미지를 편집할 v2 초안 패키지가 없습니다.");
     const identity = JSON.stringify({
       createdAt: manifest.createdAt, title: manifest.title,
@@ -86,6 +89,7 @@ export async function repairBrandPostImages(options: {
       imageGeneration: {
         status: running ? "running" : remaining === 0 && errors.length === 0 ? "complete" : "incomplete",
         requested, applied, remaining, errors: [...errors], updatedAt: new Date().toISOString(),
+        ownerPid: process.pid, ownerToken, heartbeatAt: new Date().toISOString(),
       },
     };
     dependencies.write(updated);
@@ -101,6 +105,14 @@ export async function repairBrandPostImages(options: {
     }
     if (requested > 0) {
       persist(true);
+      heartbeat = setInterval(() => {
+        try {
+          const current = read();
+          if (current.imageGeneration?.ownerToken !== ownerToken) throw new Error("Image owner changed");
+          dependencies.write({ ...current, imageGeneration: { ...current.imageGeneration, heartbeatAt: new Date().toISOString(), updatedAt: new Date().toISOString() } });
+        } catch { controller.abort(); }
+      }, 15_000);
+      heartbeat.unref?.();
       const allowed = new Set(requests.map((request) => request.requestId));
       const accept = async (result: BrandPostImageGenerationResult) => {
         if (controller.signal.aborted) return;
@@ -120,7 +132,8 @@ export async function repairBrandPostImages(options: {
         persist(true);
       };
       try {
-        const results = await dependencies.generate({ manifest, productName: options.productName || manifest.title, requests, onResult: accept, signal: controller.signal });
+        const results = await dependencies.generate({ manifest, productName: options.productName || manifest.title,
+          sourceImageUrls: options.sourceImageUrls, requests, onResult: accept, signal: controller.signal });
         for (const result of results) await accept(result);
         for (const request of requests) {
           if (!seen.has(request.requestId)) errors.push(`${request.sectionId || "대표 이미지"}: 생성 결과가 반환되지 않았습니다.`);
@@ -138,6 +151,7 @@ export async function repairBrandPostImages(options: {
         : null,
     };
   } finally {
+    if (heartbeat) clearInterval(heartbeat);
     activeJobs.delete(options.brandLinkId);
     controllers.delete(options.brandLinkId);
   }

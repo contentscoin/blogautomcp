@@ -1,12 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { COMPLETION_BODY_MAX_BYTES, COMPLETION_INLINE_MAX_BYTES, COMPLETION_RESULT_MAX_BYTES, COMPLETION_CHUNK_CHARS, COMPLETION_REFERENCE_VERSION } from '../../apps/sites/lib/completion-contract';
 
 export type PendingCompletion = {
   job: { id: string; type: string };
   body: Record<string, unknown>;
 };
-export const OUTBOX_MAX_BYTES = 8 * 1024 * 1024;
+export const OUTBOX_MAX_BYTES = COMPLETION_BODY_MAX_BYTES + 1024;
 type OutboxRecord = PendingCompletion | { blocked: string };
 const memoryPending = new Map<string, OutboxRecord>();
 
@@ -50,6 +51,18 @@ export function completionOutbox(root: string, siteUrl: string, token: string) {
       try { fs.unlinkSync(file); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       memoryPending.delete(file);
     },
+    quarantine(reason: string): string {
+      // Preserve the exact result, but remove it from the delivery queue. Never replay execution.
+      const target = path.join(root, 'remote-agent-completions', 'rejected', `${identity}-${Date.now()}-${randomUUID()}.json`);
+      fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+      const record = memoryPending.get(file);
+      if (fs.existsSync(file)) fs.renameSync(file, target);
+      else if (record) fs.writeFileSync(target, JSON.stringify(record), { mode: 0o600, flag: 'wx' });
+      else throw new Error('No completion to quarantine');
+      fs.writeFileSync(`${target}.reason.json`, JSON.stringify({ code: reason.slice(0, 80), rejectedAt: new Date().toISOString(), executionReplayAllowed: false }), { mode: 0o600, flag: 'wx' });
+      memoryPending.delete(file);
+      return target;
+    },
   };
 }
 
@@ -57,12 +70,32 @@ export class CompletionDeliveryError extends Error {
   constructor(public status: number, public code: string, message: string) { super(message); }
 }
 
+export function isPermanentCompletionError(error: unknown): error is CompletionDeliveryError {
+  return error instanceof CompletionDeliveryError && error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status);
+}
+
+/** Large results use immutable authenticated chunks, while the outbox retains the original. */
+export async function completionWireBody(body: Record<string, unknown>, upload: (chunk: { sha256: string; index: number; content: string }) => Promise<void>): Promise<Record<string, unknown>> {
+  if (Buffer.byteLength(JSON.stringify(body), 'utf8') > COMPLETION_BODY_MAX_BYTES) throw new CompletionDeliveryError(413, 'RESULT_TOO_LARGE', '완료 결과가 공용 한도를 초과했습니다. 로컬 결과를 보존했습니다.');
+  if (body.status !== 'SUCCEEDED' || body.result === undefined) return body;
+  const result = JSON.stringify(body.result);
+  const bytes = Buffer.byteLength(result, 'utf8');
+  if (bytes > COMPLETION_RESULT_MAX_BYTES) throw new CompletionDeliveryError(413, 'RESULT_TOO_LARGE', '결과가 공용 한도를 초과했습니다. 로컬 결과를 보존했습니다.');
+  if (bytes <= COMPLETION_INLINE_MAX_BYTES) return body;
+  const sha256 = createHash('sha256').update(result).digest('hex');
+  const chunks = Math.ceil(result.length / COMPLETION_CHUNK_CHARS);
+  for (let index = 0; index < chunks; index++) await upload({ sha256, index, content: result.slice(index * COMPLETION_CHUNK_CHARS, (index + 1) * COMPLETION_CHUNK_CHARS) });
+  const { result: _result, ...rest } = body;
+  void _result;
+  return { ...rest, resultReference: { version: COMPLETION_REFERENCE_VERSION, sha256, chunks, bytes } };
+}
+
 /** Retry only the identical completion body, never the operation that produced it. */
 export async function deliverCompletion(send: () => Promise<void>, delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))) {
   for (let attempt = 0; ; attempt++) {
     try { await send(); return; }
     catch (error) {
-      const permanent = error instanceof CompletionDeliveryError && error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status);
+      const permanent = isPermanentCompletionError(error);
       if (permanent || attempt === 2) throw error;
       await delay(500 * (attempt + 1));
     }

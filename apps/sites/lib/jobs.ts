@@ -7,7 +7,7 @@ export const JOB_LEASE_MS = 120_000;
 /** 마지막 접속(claim/heartbeat) 기준 온라인 판정 */
 export const DEVICE_ONLINE_MS = 90_000;
 /** 발행 계열 작업은 PC 유실 시 발행 여부가 불확실하다 → 별도 코드로 표시 */
-export const PUBLISH_JOB_TYPES = new Set(['POST_PUBLISH', 'POST_SCHEDULE', 'POST_BULK_SCHEDULE']);
+export const PUBLISH_JOB_TYPES = new Set(['POST_PUBLISH', 'POST_SCHEDULE', 'POST_BULK_SCHEDULE', 'MATERIALS_PUBLISH']);
 
 export type ActiveDevice = {
   id: string;
@@ -34,7 +34,7 @@ export async function sweepExpiredLeases(d1: D1, userId: string, now = Date.now(
            error_message='로컬 프로그램 응답이 끊겨 작업이 중단되었습니다. 발행이 이미 되었을 수 있으니 post_verify_published 로 확인하세요.',
            updated_at=?, finished_at=?, lease_until=NULL
      WHERE user_id=? AND status='RUNNING' AND lease_until IS NOT NULL AND lease_until < ?
-       AND type IN ('POST_PUBLISH','POST_SCHEDULE','POST_BULK_SCHEDULE')
+       AND type IN ('POST_PUBLISH','POST_SCHEDULE','POST_BULK_SCHEDULE','MATERIALS_PUBLISH')
   `).bind(now, now, userId, now).run();
   const lost = await d1.prepare(`
     UPDATE agent_jobs
@@ -73,6 +73,18 @@ export function sanitizeStatusSnapshot(value: unknown): string | null {
   for (const key of allowed) {
     const item = source[key];
     if (typeof item === 'boolean' || (typeof item === 'string' && item.length <= 120) || typeof item === 'number') output[key] = item;
+  }
+  const background = source.backgroundWork;
+  if (background && typeof background === 'object' && !Array.isArray(background)) {
+    const input = background as Record<string, unknown>;
+    const safe: Record<string, unknown> = {};
+    for (const key of ['publishing', 'drafting', 'processes', 'imageGeneration']) {
+      const count = input[key];
+      if (typeof count === 'number' && Number.isInteger(count) && count >= 0 && count <= 10_000) safe[key] = count;
+    }
+    if (typeof input.busy === 'boolean' || input.busy === null) safe.busy = input.busy;
+    if (input.error === 'BACKGROUND_STATUS_UNAVAILABLE') safe.error = input.error;
+    if (Object.keys(safe).length > 0) output.backgroundWork = safe;
   }
   return Object.keys(output).length > 0 ? JSON.stringify(output) : null;
 }

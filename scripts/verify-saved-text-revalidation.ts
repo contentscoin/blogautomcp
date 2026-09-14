@@ -33,7 +33,11 @@ try {
   assert.equal("sourceSnapshot" in packagePreview(result), false, "Source facts stay server-side");
   assert.throws(() => revalidateSavedBrandPostText(fixture, { ...identity, productId: "another-product" }));
   assert.throws(() => revalidateSavedBrandPostText(fixture, { ...identity, externalProductId: "456" }));
-  assert.doesNotThrow(() => revalidateSavedBrandPostText(fixture, { ...identity, productName: "새 가격 상품 제목", sourceUrl: "https://example.test/item/123?date=next" }));
+  assert.doesNotThrow(() => revalidateSavedBrandPostText(fixture, { ...identity, productName: "[프로모션] 대만 타이베이 여행", sourceUrl: "https://example.test/item/123?date=next" }));
+  assert.throws(
+    () => revalidateSavedBrandPostText(fixture, { ...identity, productName: "완전히 다른 여행 상품", sourceUrl: "https://example.test/item/123" }),
+    (error: unknown) => (error as { code: string }).code === "PRODUCT_SNAPSHOT_CHANGED",
+  );
   const urlIdentity = { ...identity, externalProductId: null };
   const urlFixture = { ...fixture, sourceSnapshot: createProductSnapshot({ ...urlIdentity, product: snapshot.product }) };
   assert.doesNotThrow(() => revalidateSavedBrandPostText(urlFixture, { ...urlIdentity, sourceUrl: `${identity.sourceUrl}#details` }));
@@ -61,7 +65,8 @@ try {
   assert.throws(() => resolveSavedQcSource(legacy, { ...identity, productName: "다른 상품" }));
   writeBrandPostPackageManifest(fixture);
   const raw = readBrandPostPackage(identity.productId, { migrate: false });
-  assert.deepEqual(raw, fixture, "Read-only load must not run old migrations");
+  const persistedFixture = JSON.parse(JSON.stringify(fixture)) as BrandPostPackageManifestV2;
+  assert.deepEqual(raw, persistedFixture, "Read-only load must not run old migrations");
   console.log("PASS saved text revalidation: actual-body, safety, provenance, identity, audit and read-only cases");
 } finally {
   if (oldData === undefined) delete process.env.DESKTOP_USER_DATA; else process.env.DESKTOP_USER_DATA = oldData;

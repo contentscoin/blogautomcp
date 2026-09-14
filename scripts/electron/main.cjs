@@ -28,10 +28,19 @@ let interruptedDraftsRecovered = false;
 
 function resolveProjectRoot() {
   if (app.isPackaged) {
-    return app.getAppPath();
+    const bundledRoot = app.getAppPath();
+    return bundledRoot.endsWith(".asar") ? `${bundledRoot}.unpacked` : bundledRoot;
   }
 
   return path.resolve(__dirname, "../..");
+}
+
+function resolvePackagedResource(projectRoot, ...parts) {
+  const bundled = path.join(projectRoot, ...parts);
+  const marker = `${path.sep}app.asar${path.sep}`;
+  if (!bundled.includes(marker)) return bundled;
+  const unpacked = bundled.replace(marker, `${path.sep}app.asar.unpacked${path.sep}`);
+  return fs.existsSync(unpacked) ? unpacked : bundled;
 }
 
 function configureAutoStart() {
@@ -64,7 +73,12 @@ function ensureTray(projectRoot) {
     return;
   }
 
-  tray = new Tray(path.join(projectRoot, "src", "app", "favicon.ico"));
+  const iconPath = resolvePackagedResource(projectRoot, "src", "app", "favicon.ico");
+  if (!fs.existsSync(iconPath)) {
+    console.warn(`[startup] tray icon not found: ${iconPath}`);
+    return;
+  }
+  tray = new Tray(iconPath);
   tray.setToolTip("BrandConnect Automation");
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: "BrandConnect 열기", click: showMainWindow },
@@ -83,16 +97,15 @@ function ensureTray(projectRoot) {
 }
 
 function configureRuntimePaths(projectRoot) {
-  if (process.cwd() !== projectRoot) {
-    process.chdir(projectRoot);
-  }
+  // Child processes (ts-node, Codex, Prisma) require a physical application root.
+  if (process.cwd() !== projectRoot) process.chdir(projectRoot);
   const userData = app.getPath("userData");
   process.env.DESKTOP_APP_VERSION = app.getVersion();
   // Keep the local callback on loopback while preserving the app's actual port.
   process.env.LOCAL_APP_ORIGIN = process.env.LOCAL_APP_ORIGIN || APP_BASE_URL;
   process.env.DESKTOP_USER_DATA = process.env.DESKTOP_USER_DATA || userData;
   process.env.SESSION_STORAGE_DIR = process.env.SESSION_STORAGE_DIR || path.join(userData, "playwright", "storage");
-  process.env.DESKTOP_PROJECT_ROOT = process.env.DESKTOP_PROJECT_ROOT || projectRoot;
+  process.env.DESKTOP_PROJECT_ROOT = projectRoot;
   process.env.BROWSER_CHANNEL = process.env.BROWSER_CHANNEL || "chrome";
   require("dotenv").config({ path: path.join(userData, ".env"), override: false, quiet: true });
   process.env.CHATGPT_BROWSER_VISIBILITY =
@@ -154,6 +167,15 @@ async function recoverInterruptedDrafts(projectRoot) {
         status: "FAILED",
         errorMessage: "이전 앱 실행 중 초안 작성이 중단되었습니다. 다시 시도해 주세요.",
       },
+    });
+    // A detached publisher may already have submitted. Never reset it to READY.
+    await prisma.brandLink.updateMany({
+      where: { status: "PUBLISHING" },
+      data: { status: "OUTCOME_UNKNOWN", errorMessage: "앱 재시작 전에 시작된 발행의 실제 결과를 확인하세요. 자동 재발행은 차단했습니다." },
+    });
+    await prisma.topicPostTask.updateMany({
+      where: { status: "PUBLISHING" },
+      data: { status: "OUTCOME_UNKNOWN", pipelineStage: "OUTCOME_UNKNOWN", errorMessage: "앱 재시작 전 발행의 실제 결과 확인이 필요합니다." },
     });
     if (recovered.count > 0) {
       console.warn(`[startup] interrupted drafts recovered: ${recovered.count}`);
@@ -579,6 +601,13 @@ if (!hasSingleInstanceLock) {
     if (initialLink) void handlePairDeepLink(initialLink);
   }).catch((error) => {
     const message = error instanceof Error ? error.message : String(error);
+    try {
+      const startupLogPath = path.join(app.getPath("userData"), "logs", "startup-error.log");
+      fs.mkdirSync(path.dirname(startupLogPath), { recursive: true });
+      fs.appendFileSync(startupLogPath, `${new Date().toISOString()} ${message}\n${error?.stack || ""}\n`, "utf8");
+    } catch {
+      // Logging must never prevent the startup error dialog.
+    }
     dialog.showErrorBox("BrandConnect Automation 시작 실패", message);
     app.quit();
   });

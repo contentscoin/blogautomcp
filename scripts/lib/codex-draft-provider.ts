@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getWritingTimeoutPolicy, writingTimeoutMs } from "./writing-timeout-policy";
+import draftRuntimePolicy from "./draft-runtime-policy.json";
 
 type CodexSdkModule = typeof import("@openai/codex-sdk");
 
@@ -84,7 +85,9 @@ export async function runCodexDraft(options: CodexDraftOptions): Promise<string>
     configOverrides: ['plugins."opus-fable-performance@local-opencrab".enabled=false'],
   });
   const thread = codex.startThread({
-    ...(options.model ? { model: options.model } : {}),
+    // Auxiliary callers (including photo review) must not inherit the user's
+    // desktop model, which may require a newer CLI than our bundled runtime.
+    model: options.model?.trim() || draftRuntimePolicy.CODEX_DRAFT_MODEL,
     modelReasoningEffort: options.reasoningEffort ?? "medium",
     sandboxMode: "read-only",
     workingDirectory,

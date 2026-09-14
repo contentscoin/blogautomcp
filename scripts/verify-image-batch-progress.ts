@@ -9,6 +9,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import ts from "typescript";
 import * as imagePolicy from "./lib/image-timeout-policy";
+import * as photoProvenance from "./lib/product-photo-provenance";
 import type { generateBrandPostImages as Generate, BrandPostImageGenerationResult } from "../src/lib/brand-post-image-generation";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-image-batch-"));
@@ -45,7 +46,8 @@ class FakeChild extends EventEmitter {
 }
 
 type Job = { id: string; outStem: string; prompt: string };
-function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lockFails?: boolean; automation?: boolean;
+function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lockFails?: boolean; automation?: boolean; sourceMissing?: boolean; sourceError?: string;
+  sourcePaths?: string[]; segmentablePaths?: string[]; lockedUsesBackground?: boolean;
   worker?: (args: string[], child: FakeChild) => void } = {}) {
   const packageDir = fs.mkdtempSync(path.join(root, "package-"));
   let child = new FakeChild();
@@ -53,10 +55,12 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
   let checkpoint = "";
   let spawns = 0;
   let lockCalls = 0;
-  const locked = async () => {
+  const lockedSourcePaths: string[] = [];
+  const locked = async (options: { sourcePath?: string; backgroundPath?: string } = {}) => {
     lockCalls += 1;
+    if (options.sourcePath) lockedSourcePaths.push(options.sourcePath);
     if (settings.lockFails) throw new Error("cutout failed");
-    return { outputPath: sourcePath };
+    return { outputPath: settings.lockedUsesBackground && options.backgroundPath ? options.backgroundPath : sourcePath };
   };
   const api = load<{
     generateBrandPostImages: typeof Generate;
@@ -90,10 +94,23 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
         createLockedProductEditorialScene: locked,
         createLockedProductThumbnailOnBackground: locked,
         createOriginalProductPhotoThumbnail: async () => ({ outputPath: sourcePath }),
-        createOriginalProductPhotoOnBackground: async () => ({ outputPath: sourcePath }),
+        extractLockedProductPng: async (source: string) => {
+          if (settings.lockFails || (settings.segmentablePaths && !settings.segmentablePaths.includes(source))) throw new Error("cutout failed");
+          return { lockedPngPath: sourcePath };
+        },
       },
       "../../scripts/lib/product-thumbnail": { buildProductThumbnailCopy: () => ({}) },
-      "../../scripts/lib/product-photo-review": { selectVerifiedProductPhoto: async () => sourcePath },
+      "../../scripts/lib/product-photo-provenance": photoProvenance,
+      "../../scripts/lib/product-photo-source": {
+        selectShoppingProductSource: async () => {
+          if (settings.sourceError) throw new Error(settings.sourceError);
+          return settings.sourceMissing ? null : sourcePath;
+        },
+        selectShoppingProductSources: async (_options: unknown) => {
+          if (settings.sourceError) throw new Error(settings.sourceError);
+          return settings.sourceMissing ? [] : settings.sourcePaths || [sourcePath, rawPath];
+        },
+      },
       "../../scripts/lib/travel-content": { buildTravelThumbnailCopy: () => ({}) },
       "../../scripts/lib/travel-thumbnail": { createTravelEditorialThumbnail: async () => ({ outputPath: sourcePath }) },
       "./brand-post-package": {
@@ -130,7 +147,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
   };
   return { ...api, get child() { return child; }, manifest, callbacks, generate, result, progress, close,
     get jobs() { return jobs; }, get checkpoint() { return checkpoint; },
-    get spawns() { return spawns; }, get lockCalls() { return lockCalls; } };
+    get spawns() { return spawns; }, get lockCalls() { return lockCalls; }, get lockedSourcePaths() { return lockedSourcePaths; } };
 }
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -141,6 +158,20 @@ async function check(name: string, run: () => Promise<void>) {
 }
 
 async function verifyGenerator() {
+  await check("photo verifier provider failure retains its cause and never starts image generation", async () => {
+    const h = harness({ sourceError: "CODEX_MODEL_INCOMPATIBLE: newer CLI required" });
+    h.manifest.connectKind = "SHOPPING";
+    const results = await h.generate(2);
+    assert.ok(results.every(result => result.error === "CODEX_MODEL_INCOMPATIBLE: newer CLI required"));
+    assert.equal(h.spawns, 0);
+  });
+  await check("shopping missing source rejects before any provider worker starts", async () => {
+    const h = harness({ sourceMissing: true });
+    h.manifest.connectKind = "SHOPPING";
+    const results = await h.generate(2);
+    assert.ok(results.every(result => result.error?.includes("PRODUCT_SOURCE_REQUIRED")));
+    assert.equal(h.spawns, 0);
+  });
   await check("transport delivery queue resolves even when its consumer rejects", async () => {
     const h = harness();
     const workDir = fs.mkdtempSync(path.join(root, "delivery-"));
@@ -296,13 +327,46 @@ async function verifyGenerator() {
     assert.equal(results[1].error, undefined);
   });
 
+  await check("one verified segmentable product source completes three slots with distinct outputs", async () => {
+    const outputs = Array.from({ length: 3 }, (_, index) => {
+      const file = path.join(root, `scarce-output-${index}.png`);
+      fs.writeFileSync(file, `distinct generated background ${index}`);
+      return file;
+    });
+    const h = harness({
+      sourcePaths: [sourcePath],
+      segmentablePaths: [sourcePath],
+      lockedUsesBackground: true,
+    });
+    h.manifest.connectKind = "SHOPPING";
+    const pending = h.generate(0, { requests: Array.from({ length: 3 }, (_, index) => ({
+      requestId: `scarce-${index}`,
+      sectionId: "section",
+    })) });
+    await tick();
+    assert.equal(h.jobs.length, 3);
+    h.close(0, { ok: true, jobs: outputs.map((file, index) => h.result(index, file)) });
+    const results = await pending;
+    assert.equal(JSON.stringify(results.map(result => result.generatedPath)), JSON.stringify(outputs));
+    assert.ok(results.every(result => result.provenance === "LOCKED_PRODUCT" && !result.error));
+    assert.deepEqual(h.lockedSourcePaths, [sourcePath, sourcePath, sourcePath], "safe cutout is reused only after distinct slot jobs finish");
+    assert.equal(new Set(h.jobs.map(job => job.outStem)).size, 3, "slot identity keeps reused-source outputs distinct");
+  });
+
   for (const lockFails of [false, true]) {
-    await check(`shopping rejects background-only body results (lockFails=${lockFails})`, async () => {
+    await check(`shopping never overlays a full-frame source (lockFails=${lockFails})`, async () => {
       const h = harness({ lockFails });
       h.manifest.connectKind = "SHOPPING";
       const pending = h.generate(0, { requests: [
         { requestId: "body", sectionId: "section" }, { requestId: "hero", replaceAssetKey: "hero" },
       ] });
+      await tick(); // Shopping source preflight finishes before the worker is spawned.
+      if (lockFails) {
+        const results = await pending;
+        assert.equal(h.spawns, 0);
+        assert.ok(results.every(result => result.error?.includes("PRODUCT_CUTOUT_REQUIRED")));
+        return;
+      }
       h.progress(0);
       await tick();
       assert.equal(h.callbacks[0].generatedPath, sourcePath);
@@ -312,7 +376,7 @@ async function verifyGenerator() {
       results.forEach((r, index) => {
         assert.equal(r.generatedPath, sourcePath);
         assert.equal(r.error, undefined);
-        assert.equal(r.provenance, lockFails ? (index === 0 ? "EDITORIAL_CARD" : "ORIGINAL") : "LOCKED_PRODUCT");
+        assert.equal(r.provenance, "LOCKED_PRODUCT");
       });
       assert.match(h.jobs[0].prompt, /Generate the environment only/);
     });
@@ -505,36 +569,36 @@ async function verifyIntegratedResume() {
   assert.equal(submits, 3, "changed prompt gets a new identity");
   h.manifest.createdAt = "2026-09-05T02:00:00Z";
   assert.ok((await h.generate(0, { requests: [requests[0]] }))[0].generatedPath);
-  assert.notEqual(h.jobs[0].outStem, originalStems[0]);
-  assert.equal(submits, 4, "new draft gets a new identity");
+  assert.equal(h.jobs[0].outStem, originalStems[0]);
+  assert.equal(submits, 3, "timestamp-only draft changes reuse the completed visual-intent checkpoint");
   loginFailure = true;
   second.imageIntent = "로그인 복구";
   assert.match((await h.generate(0, { requests: [requests[1]] }))[0].error!, /AUTH_REQUIRED/);
   const loginCheckpoint = h.checkpoint;
-  assert.equal(submits, 4, "login failure does not send");
+  assert.equal(submits, 3, "login failure does not send");
   loginFailure = false;
   assert.ok((await h.generate(0, { requests: [requests[1]] }))[0].generatedPath, "old checkpoint failure must not mask successful retry");
   assert.equal(h.checkpoint, loginCheckpoint);
-  assert.equal(submits, 5, "definitive pre-send login failure can be retried");
+  assert.equal(submits, 4, "definitive pre-send login failure can be retried");
   uncertain = true;
   second.imageIntent = "불확실한 전송";
   assert.ok((await h.generate(0, { requests: [requests[1]] }))[0].error);
-  assert.equal(submits, 6);
+  assert.equal(submits, 5);
   uncertain = false;
   assert.match((await h.generate(0, { requests: [requests[1]] }))[0].error!, /IMAGE_RESUME_REQUIRED/);
-  assert.equal(submits, 6, "uncertain transmitted request is never regenerated");
+  assert.equal(submits, 5, "uncertain transmitted request is never regenerated");
   const savedReference = fs.readFileSync(sourcePath);
   try {
     fs.writeFileSync(sourcePath, "changed reference bytes");
     assert.ok((await h.generate(0, { requests: [requests[0]] }))[0].generatedPath);
-    assert.equal(submits, 7, "changed reference content cannot reuse an older result");
+    assert.equal(submits, 6, "changed reference content cannot reuse an older result");
     const referenceStem = h.jobs[0].outStem;
     // Different batches still contend on the same slot lock.
     const slotLock = `${referenceStem}.lock`;
     fs.writeFileSync(slotLock, JSON.stringify({ pid: process.pid, token: "other-live-batch" }));
     const blocked = await h.generate(0, { requests: [requests[0], requests[1]] });
     assert.ok(blocked.every(result => result.error));
-    assert.equal(submits, 7);
+    assert.equal(submits, 6);
     assert.equal(JSON.parse(fs.readFileSync(slotLock, "utf8")).token, "other-live-batch");
     fs.unlinkSync(slotLock);
   } finally { fs.writeFileSync(sourcePath, savedReference); }

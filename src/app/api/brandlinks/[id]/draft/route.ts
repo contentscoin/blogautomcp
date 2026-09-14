@@ -25,8 +25,14 @@ import {
   readBrandPostPackageResult,
   reconcileBrandPostPackageQuality,
   writeBrandPostPackageManifest,
+  type BrandPostPackageManifest,
 } from "@/lib/brand-post-package";
-import { revalidateSavedBrandPostText, SavedTextRevalidationError } from "@/lib/brand-post-revalidation";
+import {
+  isProductSnapshotEvidenceRicher,
+  revalidateSavedBrandPostText,
+  resolveSavedQcSource,
+  SavedTextRevalidationError,
+} from "@/lib/brand-post-revalidation";
 import { isBrandPostImageRepairActive, repairBrandPostImages } from "@/lib/brand-post-image-repair";
 import { getDraftProgressPath, writeDraftProgress } from "@/lib/draft-progress";
 import {
@@ -35,8 +41,15 @@ import {
 } from "@/lib/post-composition-contract";
 import { readCodexLocalStatus } from "@/lib/codex-local";
 import { readProductSnapshot } from "@/lib/draft-context-snapshot";
+import { planQualityConvergence } from "../../../../../../scripts/lib/quality-convergence";
 
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
+const REVISION_PROCESS_TIMEOUT_MS = (() => {
+  const requested = Number.parseInt(process.env.BRANDLINK_REVISION_MAX_RUNTIME_MS || "", 10);
+  const fallback = 20 * 60 * 1000;
+  if (!Number.isFinite(requested)) return fallback;
+  return Math.max(5 * 60 * 1000, Math.min(requested, 24 * 60 * 1000));
+})();
 
 type DraftAction = "prepare_context" | "submit_generated";
 type SubmittedDraft = {
@@ -58,6 +71,45 @@ class PrepareProcessError extends Error {
     super(message);
     this.code = code;
   }
+}
+
+async function terminateProcessTree(child: ReturnType<typeof spawn>): Promise<void> {
+  if (!child.pid) {
+    child.kill("SIGKILL");
+    return;
+  }
+  if (process.platform !== "win32") {
+    child.kill("SIGTERM");
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+      stdio: "ignore",
+      shell: false,
+      windowsHide: true,
+    });
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish();
+    }, 5_000);
+    timeout.unref();
+    killer.once("error", () => {
+      clearTimeout(timeout);
+      child.kill("SIGKILL");
+      finish();
+    });
+    killer.once("exit", (code) => {
+      clearTimeout(timeout);
+      if (code !== 0) child.kill("SIGKILL");
+      finish();
+    });
+  });
 }
 
 function normalizeSubmittedDraft(
@@ -139,6 +191,54 @@ function isAutoSectionImagesEnabled(): boolean {
   return draftRuntimePolicy.BRAND_POST_AUTO_SECTION_IMAGES === "true";
 }
 
+type ApprovalProductIdentity = {
+  productName: string | null;
+  connectKind: string;
+  externalItemId: string | null;
+  finalUrl: string | null;
+  sourceUrl: string | null;
+  url: string;
+};
+
+/**
+ * Approval is the final publication boundary, so it always reruns the current
+ * evaluator against server-owned evidence. A historical pass stored by an old
+ * evaluator is audit history only and can never authorize a new approval.
+ */
+function revalidatePackageForApproval(
+  brandLinkId: string,
+  link: ApprovalProductIdentity,
+): BrandPostPackageManifest {
+  const manifest = readBrandPostPackage(brandLinkId, { migrate: false });
+  if (!manifest) {
+    throw new SavedTextRevalidationError("승인할 고품질 초안이 없습니다.", "DRAFT_NOT_FOUND");
+  }
+  if (manifest.version !== "brand-post-package/v2") {
+    throw new SavedTextRevalidationError(
+      "이전 형식의 초안은 현재 품질 기준으로 승인할 수 없습니다. 소재 준비를 다시 실행하세요.",
+      "DRAFT_RECHECK_REQUIRED",
+    );
+  }
+  const contextPath = path.join(getBrandPostPackageDir(brandLinkId), "mcp-draft-context.json");
+  const savedContext = !manifest.sourceSnapshot && fs.existsSync(contextPath)
+    ? JSON.parse(fs.readFileSync(contextPath, "utf8"))
+    : undefined;
+  const identity = {
+    productId: brandLinkId,
+    connectKind: link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
+    externalProductId: link.externalItemId || null,
+    sourceUrl: link.finalUrl || link.sourceUrl || link.url || null,
+    productName: link.productName || "",
+    brandLink: link.url,
+  } as const;
+  const evaluated = revalidateSavedBrandPostText(
+    reconcileBrandPostPackageQuality(manifest),
+    identity,
+    savedContext,
+  );
+  return writeBrandPostPackageManifest(reconcileBrandPostPackageQuality(evaluated));
+}
+
 /**
  * 비어 있는 섹션 이미지 보충은 초안 응답을 기다리게 하지 않는다. 1.3.9 까지는 여기서 ChatGPT 브라우저 배치를
  * await 해 초안 작업이 이미지 6장 × 최대 3분 동안 멈췄다. 이제 자동 보충은 고정이며 분리 실행한다.
@@ -197,7 +297,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   if (unauthorized) return unauthorized;
   const { id } = await params;
   try {
-    const manifest = readBrandPostPackage(id);
+    const manifest = readBrandPostPackage(id, { migrate: false });
     return NextResponse.json({ success: true, data: manifest ? packagePreview(manifest) : null });
   } catch (error) {
     return NextResponse.json({ success: false, error: error instanceof Error ? error.message : "초안 조회 실패" }, { status: 500 });
@@ -205,18 +305,19 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 }
 
 /** 초안 부분 수정: simple-agent 를 수정 모드(BRANDLINK_REVISE_REQUEST)로 실행한다. 네이버 세션은 필요 없다. */
-async function runRevision(id: string, packageDir: string, instructions: string, sectionIndexes: number[]): Promise<void> {
+async function runRevision(id: string, packageDir: string, instructions: string, sectionIndexes: number[], qualityConvergence = false): Promise<void> {
   const requestPath = path.join(packageDir, "revise-request.json");
-  fs.writeFileSync(requestPath, JSON.stringify({ instructions, sectionIndexes, requestedAt: new Date().toISOString() }, null, 2), "utf8");
+  fs.writeFileSync(requestPath, JSON.stringify({ instructions, sectionIndexes, qualityConvergence, requestedAt: new Date().toISOString() }, null, 2), "utf8");
   const logPath = path.join(packageDir, "prepare.log");
   const logFd = fs.openSync(logPath, "a");
   const scriptPath = path.join(process.cwd(), "scripts", "simple-agent.ts");
   try {
-    const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+    const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null; timedOut: boolean }>((resolve, reject) => {
       const child = spawn(process.execPath, [TS_NODE_BIN, "--project", "tsconfig.scripts.json", scriptPath, id], {
         cwd: process.cwd(),
         stdio: ["ignore", logFd, logFd],
         shell: false,
+        windowsHide: true,
         env: {
           ...process.env,
           ELECTRON_RUN_AS_NODE: "1",
@@ -231,9 +332,32 @@ async function runRevision(id: string, packageDir: string, instructions: string,
           CODEX_DRAFT_MODEL: draftRuntimePolicy.CODEX_DRAFT_MODEL,
         },
       });
-      child.once("error", reject);
-      child.once("exit", (code, signal) => resolve({ code, signal }));
+      let settled = false;
+      let deadlineExceeded = false;
+      const finish = (result: { code: number | null; signal: NodeJS.Signals | null; timedOut: boolean }) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        resolve(result);
+      };
+      const deadline = setTimeout(() => {
+        deadlineExceeded = true;
+        void terminateProcessTree(child).finally(() => finish({ code: null, signal: "SIGKILL", timedOut: true }));
+      }, REVISION_PROCESS_TIMEOUT_MS);
+      child.once("error", (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        reject(error);
+      });
+      child.once("exit", (code, signal) => finish({ code, signal, timedOut: deadlineExceeded }));
     });
+    if (exit.timedOut) {
+      throw new PrepareProcessError(
+        "QUALITY_REPAIR_TIMEOUT",
+        `초안 보강이 ${Math.round(REVISION_PROCESS_TIMEOUT_MS / 60_000)}분 제한시간을 초과해 하위 프로세스를 종료했습니다. 기존 원고는 보존했습니다.`,
+      );
+    }
     if (exit.code !== 0) {
       const failure = readPrepareFailure(logPath, id);
       if (failure) throw new PrepareProcessError(failure.code, failure.message);
@@ -252,11 +376,18 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   if (isBrandPostImageRepairActive(id)) {
     return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "섹션 이미지 생성 중입니다. 완료 후 원고를 수정하거나 승인하세요." }, { status: 409 });
   }
-  const body = await request.json().catch(() => ({})) as { action?: string; instructions?: unknown; sectionIndexes?: unknown };
+  const body = await request.json().catch(() => ({})) as {
+    action?: string;
+    instructions?: unknown;
+    sectionIndexes?: unknown;
+    qualityConvergence?: unknown;
+    refreshSource?: unknown;
+  };
   if (body.action === "recheck") {
     try {
       const link = await prisma.brandLink.findUnique({ where: { id }, select: {
-        id: true, status: true, productName: true, connectKind: true, externalItemId: true, sourceUrl: true, url: true,
+        id: true, status: true, productName: true, connectKind: true, externalItemId: true,
+        finalUrl: true, sourceUrl: true, url: true,
       } });
       if (!link) return NextResponse.json({ success: false, code: "PRODUCT_NOT_FOUND", error: "상품을 찾을 수 없습니다." }, { status: 404 });
       if (!["READY", "FAILED"].includes(link.status)) return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "작성·발행·예약 중인 초안은 재검사할 수 없습니다." }, { status: 409 });
@@ -268,15 +399,48 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
         const manifest = readBrandPostPackage(id, { migrate: false });
         if (!manifest || manifest.version !== "brand-post-package/v2") return NextResponse.json({ success: false, code: "DRAFT_NOT_FOUND", error: "재검사할 v2 초안이 없습니다." }, { status: 404 });
         const contextPath = path.join(getBrandPostPackageDir(id), "mcp-draft-context.json");
-        const context = !manifest.sourceSnapshot && fs.existsSync(contextPath) ? JSON.parse(fs.readFileSync(contextPath, "utf8")) : undefined;
-        const evaluated = revalidateSavedBrandPostText(reconcileBrandPostPackageQuality(manifest), {
+        const context = fs.existsSync(contextPath) ? JSON.parse(fs.readFileSync(contextPath, "utf8")) : undefined;
+        const identity = {
           productId: id, connectKind: link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
-          externalProductId: link.externalItemId || null, sourceUrl: link.sourceUrl || link.url || null,
+          externalProductId: link.externalItemId || null, sourceUrl: link.finalUrl || link.sourceUrl || link.url || null,
           productName: link.productName || "", brandLink: link.url,
-        }, context);
+        } as const;
+        let sourceRefresh: {
+          requested: boolean;
+          applied: boolean;
+          previousSnapshotId: string | null;
+          candidateSnapshotId: string | null;
+        } = { requested: body.refreshSource === true, applied: false, previousSnapshotId: null, candidateSnapshotId: null };
+        let evaluationInput = reconcileBrandPostPackageQuality(manifest);
+        if (body.refreshSource === true) {
+          if (!context) {
+            throw new SavedTextRevalidationError(
+              "새 상품 컨텍스트가 없습니다. 상품 상세 정보를 다시 수집한 뒤 재검사하세요.",
+              "SOURCE_EVIDENCE_REQUIRED",
+            );
+          }
+          const current = resolveSavedQcSource(evaluationInput, identity);
+          const candidate = resolveSavedQcSource({ ...evaluationInput, sourceSnapshot: undefined }, identity, context);
+          sourceRefresh = {
+            requested: true,
+            applied: isProductSnapshotEvidenceRicher(candidate.snapshot, current.snapshot),
+            previousSnapshotId: current.snapshot.snapshotId,
+            candidateSnapshotId: candidate.snapshot.snapshotId,
+          };
+          if (sourceRefresh.applied) evaluationInput = { ...evaluationInput, sourceSnapshot: candidate.snapshot };
+        }
+        const evaluated = revalidateSavedBrandPostText(evaluationInput, identity, evaluationInput.sourceSnapshot ? undefined : context);
         const updated = reconcileBrandPostPackageQuality(evaluated);
         writeBrandPostPackageManifest(updated);
-        return NextResponse.json({ success: true, data: packagePreview(updated), rechecked: true });
+        const qualityConvergence = updated.contentQuality
+          ? planQualityConvergence({ current: updated.contentQuality, attempt: 0, maximumAttempts: 1 })
+          : null;
+        return NextResponse.json({
+          success: true,
+          data: { ...packagePreview(updated), qualityConvergence },
+          rechecked: true,
+          sourceRefresh,
+        });
       } finally {
         await prisma.brandLink.updateMany({ where: { id, status: "DRAFTING" }, data: { status: link.status } });
       }
@@ -286,15 +450,32 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   }
   if (body.action === "approve") {
     try {
-      const manifest = approveBrandPostPackage(id);
-      await prisma.brandLink.updateMany({
-        where: { id, status: { in: ["READY", "FAILED"] } },
-        data: { status: "READY", errorMessage: null },
-      });
-      return NextResponse.json({ success: true, data: packagePreview(manifest) });
+      const link = await prisma.brandLink.findUnique({ where: { id }, select: {
+        status: true, productName: true, connectKind: true, externalItemId: true,
+        finalUrl: true, sourceUrl: true, url: true,
+      } });
+      if (!link || !["READY", "FAILED"].includes(link.status)) return NextResponse.json({ success: false, code: "NOT_READY", error: "작성·발행 중이거나 게시 여부 확인이 필요한 소재는 승인할 수 없습니다." }, { status: 409 });
+      const claim = await prisma.brandLink.updateMany({ where: { id, status: link.status }, data: { status: "DRAFTING" } });
+      if (claim.count !== 1) return NextResponse.json({ success: false, code: "NOT_READY", error: "소재 상태가 변경되어 승인하지 않았습니다." }, { status: 409 });
+      let approved = false;
+      try {
+        revalidatePackageForApproval(id, link);
+        const manifest = approveBrandPostPackage(id);
+        const preview = packagePreview(manifest);
+        approved = true;
+        return NextResponse.json({ success: true, data: preview });
+      } finally {
+        await prisma.brandLink.updateMany({ where: { id, status: "DRAFTING" }, data: { status: approved ? "READY" : link.status, ...(approved ? { errorMessage: null } : {}) } });
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "초안 승인 실패";
-      const code = /승인할 고품질 초안이 없/u.test(message) ? "DRAFT_NOT_FOUND" : /품질|게이트|검사/u.test(message) ? "CONTENT_BLOCKED" : classifyLocalFailure({ message, status: 400 });
+      const code = error instanceof SavedTextRevalidationError
+        ? error.code
+        : /승인할 고품질 초안이 없/u.test(message)
+          ? "DRAFT_NOT_FOUND"
+          : /품질|게이트|검사/u.test(message)
+            ? "CONTENT_BLOCKED"
+            : classifyLocalFailure({ message, status: 400 });
       return NextResponse.json({ success: false, code, error: message }, { status: 400 });
     }
   }
@@ -308,13 +489,13 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     if (updateError) return updateError;
     const link = await prisma.brandLink.findUnique({ where: { id }, select: { id: true, status: true, productName: true } });
     if (!link) return NextResponse.json({ success: false, code: "PRODUCT_NOT_FOUND", error: "상품을 찾을 수 없습니다." }, { status: 404 });
-    if (link.status === "PUBLISHING" || link.status === "DRAFTING") {
+    if (!["READY", "FAILED"].includes(link.status)) {
       return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "현재 발행 또는 초안 작성 중인 상품입니다." }, { status: 409 });
     }
-    const existing = readBrandPostPackage(id);
+    const existing = readBrandPostPackage(id, { migrate: false });
     if (!existing) return NextResponse.json({ success: false, code: "DRAFT_NOT_FOUND", error: "수정할 초안이 없습니다. 먼저 초안을 생성하세요." }, { status: 404 });
-    if (existing.version !== "brand-post-package/v2" || !existing.postSpec) {
-      return NextResponse.json({ success: false, code: "INVALID_INPUT", error: "이 초안은 Spec-first 스펙이 없어 부분 수정을 지원하지 않습니다(ChatGPT 제출 초안 등). 초안을 다시 생성하세요." }, { status: 409 });
+    if (existing.version !== "brand-post-package/v2") {
+      return NextResponse.json({ success: false, code: "INVALID_INPUT", error: "이전 형식의 초안은 소재 준비에서 다시 저장하세요." }, { status: 409 });
     }
     const packageDir = getBrandPostPackageDir(id);
     const logPath = path.join(packageDir, "prepare.log");
@@ -325,7 +506,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "상품 상태가 변경되어 초안 수정을 시작하지 못했습니다." }, { status: 409 });
     }
     try {
-      await runRevision(id, packageDir, instructions, sectionIndexes);
+      await runRevision(id, packageDir, instructions, sectionIndexes, body.qualityConvergence === true);
       const manifest = readBrandPostPackage(id);
       if (!manifest) throw new PrepareProcessError("LOCAL_AUTOMATION_FAILED", "수정된 초안 매니페스트를 찾지 못했습니다.");
       await prisma.brandLink.update({ where: { id }, data: { status: "READY", errorMessage: null } });
@@ -358,7 +539,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     draft?: unknown;
     contextSnapshot?: unknown;
     forceQualityRepair?: boolean;
+    autoQualityRepair?: boolean;
     autoApprove?: boolean;
+    autoSectionImages?: boolean;
     origin?: string;
   };
   const action: DraftAction | null =
@@ -380,9 +563,13 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const mcpOrigin = body.origin === "mcp" || request.headers.get("x-blogautomcp-origin") === "mcp";
   const link = await prisma.brandLink.findUnique({
     where: { id },
-    select: { id: true, status: true, connectKind: true, productName: true, memo: true },
+    select: {
+      id: true, status: true, connectKind: true, productName: true, memo: true,
+      externalItemId: true, finalUrl: true, sourceUrl: true, url: true,
+    },
   });
   if (!link) return NextResponse.json({ success: false, code: "PRODUCT_NOT_FOUND", error: "상품을 찾을 수 없습니다." }, { status: 404 });
+  if (link.status === "OUTCOME_UNKNOWN" || link.status === "PUBLISHED" || link.status === "SCHEDULED") return NextResponse.json({ success: false, code: "NOT_READY", error: "게시됐거나 게시 여부를 확인 중인 소재는 다시 작성할 수 없습니다." }, { status: 409 });
   if (link.status === "PUBLISHING") return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "현재 발행 중인 상품입니다." }, { status: 409 });
   if (link.status === "DRAFTING") return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "현재 초안을 작성 중인 상품입니다." }, { status: 409 });
   const connectKind = link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING";
@@ -495,11 +682,20 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     }
     if (action === "submit_generated") {
       if (!submittedDraft) throw new Error("검증된 ChatGPT 원고가 없습니다.");
-      const suppliedContext = body.contextSnapshot && typeof body.contextSnapshot === "object" && !Array.isArray(body.contextSnapshot)
+      // The browser/MCP request can only name the prepared snapshot. Its facts
+      // are not trusted request data: use the context written locally by the
+      // preceding prepare_context job as the sole source of product evidence.
+      const forwardedContext = body.contextSnapshot && typeof body.contextSnapshot === "object" && !Array.isArray(body.contextSnapshot)
         ? body.contextSnapshot as Record<string, unknown>
-        : fs.existsSync(contextPath)
-          ? JSON.parse(fs.readFileSync(contextPath, "utf8")) as Record<string, unknown>
-          : null;
+        : null;
+      const localContextSize = fs.existsSync(contextPath) ? fs.statSync(contextPath).size : 0;
+      if (!localContextSize || localContextSize > 850 * 1024) {
+        throw new PrepareProcessError(
+          "DRAFT_CONTEXT_REQUIRED",
+          "이 PC에서 준비한 상품 컨텍스트가 없거나 크기 제한을 초과했습니다. 같은 PC에서 post_prepare_draft부터 다시 실행하세요.",
+        );
+      }
+      const suppliedContext = JSON.parse(fs.readFileSync(contextPath, "utf8")) as Record<string, unknown>;
       const submittedSnapshot = readProductSnapshot(suppliedContext?.snapshot, { productId: id, connectKind });
       if (suppliedContext?.version === "brand-draft-context/v1") {
         throw new PrepareProcessError("DRAFT_CONTEXT_LEGACY", "구형 컨텍스트에는 검증 가능한 스냅샷이 없습니다. 원고를 보존한 채 post_prepare_draft로 새 근거를 준비하고 재검증하세요.");
@@ -509,6 +705,16 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           "PRODUCT_SNAPSHOT_CHANGED",
           "초안 생성 시점의 상품 스냅샷이 없거나 무결성 검증에 실패했습니다. 같은 contextJobId로 다시 제출하세요.",
         );
+      }
+      const forwardedSnapshotId = typeof forwardedContext?.snapshotId === "string" ? forwardedContext.snapshotId : "";
+      if (forwardedContext && forwardedSnapshotId !== submittedSnapshot.snapshotId) {
+        throw new PrepareProcessError(
+          "PRODUCT_SNAPSHOT_CHANGED",
+          "제출 요청의 상품 스냅샷과 이 PC가 준비한 근거가 일치하지 않습니다. 같은 contextJobId로 다시 준비하세요.",
+        );
+      }
+      if (submittedSnapshot.externalProductId !== (link.externalItemId || null)) {
+        throw new PrepareProcessError("PRODUCT_SNAPSHOT_CHANGED", "준비한 상품 ID가 현재 상품과 일치하지 않습니다.");
       }
       fs.writeFileSync(submittedDraftPath, JSON.stringify(submittedDraft, null, 2), "utf8");
       fs.writeFileSync(submittedContextPath, JSON.stringify(suppliedContext, null, 2), "utf8");
@@ -525,6 +731,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         cwd: process.cwd(),
         stdio: ["ignore", logFd, logFd],
         shell: false,
+        windowsHide: true,
         env: {
           ...process.env,
           ELECTRON_RUN_AS_NODE: "1",
@@ -559,6 +766,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           BRANDLINK_EXPERIENCE_MODE: experienceMode,
           BRANDLINK_EXPERIENCE_NOTES: experienceNotes,
           BRANDLINK_FORCE_QUALITY_REPAIR: body.forceQualityRepair === true ? "true" : "false",
+          BRANDLINK_AUTO_QUALITY_REPAIR_ENABLED: body.autoQualityRepair === false ? "false" : "true",
           // OAuth MCP 제출 모드에서는 PC가 OpenAI API를 절대 호출하지 않도록 강제로 비운다.
           ...(action ? { OPENAI_API_KEY: "" } : {}),
         },
@@ -603,12 +811,13 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const imageRepair = scheduleSectionImageRepair({
       brandLinkId: id,
       productName: manifest.title,
-      skip: action === "submit_generated" || mcpOrigin,
+      skip: action === "submit_generated" || mcpOrigin || body.autoSectionImages === false,
     });
     let finalizedManifest = readBrandPostPackage(id) || manifest;
     let approvalWarning: string | null = null;
     if (body.autoApprove === true) {
       try {
+        revalidatePackageForApproval(id, link);
         finalizedManifest = approveBrandPostPackage(id);
       } catch (error) {
         approvalWarning = error instanceof Error ? error.message : "자동 승인에 실패했습니다.";
@@ -632,10 +841,23 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "고품질 초안 생성 실패";
+    if (action === "submit_generated" && previousManifest !== null && !submissionSaved) {
+      // A rejected replacement is evaluated in the working package directory.
+      // Restore the last committed manuscript byte-for-byte so a failed quality
+      // candidate can never replace a previously reviewable draft.
+      const previous = JSON.parse(previousManifest) as BrandPostPackageManifest;
+      if (!previous || previous.brandLinkId !== id) {
+        throw new PrepareProcessError("DRAFT_ROLLBACK_FAILED", "기존 초안의 상품 신원을 확인할 수 없어 안전하게 복구하지 못했습니다.");
+      }
+      writeBrandPostPackageManifest(previous);
+    }
     writeDraftProgress(id, { stage: "failed", progress: 0, message });
     await prisma.brandLink.update({
       where: { id },
-      data: { status: "FAILED", errorMessage: message },
+      data: {
+        status: action === "submit_generated" && previousManifest !== null ? link.status : "FAILED",
+        errorMessage: message,
+      },
     }).catch(() => undefined);
     if (useBrowserChatGpt) {
       const authenticationRequired = isChatGptBrowserAuthenticationError(message);

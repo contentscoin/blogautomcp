@@ -8,6 +8,7 @@ import vm from "node:vm";
 import ts from "typescript";
 import { performance } from "node:perf_hooks";
 import { spawn } from "node:child_process";
+import * as imagePolicy from "./lib/image-timeout-policy";
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "image-resume-speed-"));
 const jobsFile = path.join(dir, "jobs.json");
@@ -49,6 +50,36 @@ async function main() {
   await batch.main();
   assert.equal(JSON.parse(stdout).jobs[0].localPath, output);
   assert.equal(browserCalls, 0, "all-complete resume must not initialize a browser/profile");
+  fs.appendFileSync(journalFile, '{"state":');
+  stdout = "";
+  await batch.main();
+  assert.equal(JSON.parse(stdout).jobs[0].localPath, output, "complete image survives a partially written tail");
+  assert.equal(browserCalls, 0);
+  write({ id: "slot", fingerprint, state: "submitted", recoveryConversationPath: "/c/fixture-conversation" });
+  fs.appendFileSync(journalFile, '{"id":');
+  assert.equal(batch.readImageBatchResume(journalFile, [{ ...job, id: "slot" }]).get("slot")!.recoveryConversationPath, "/c/fixture-conversation", "known conversation permits retrieval-only recovery");
+  let newPrompts = 0;
+  const recoveredUrls: string[] = [];
+  const page = { goto: async (url: string) => { recoveredUrls.push(url); }, url: () => "https://chatgpt.com/c/fixture-conversation", close: async () => {} };
+  const recoveredOutput = path.join(dir, "retrieved.png"); fs.writeFileSync(recoveredOutput, "retrieved fixture");
+  const retrieval = load<typeof import("./chatgpt-generate-image-batch")>("scripts/chatgpt-generate-image-batch.ts", {
+    "dotenv/config": {}, fs, path, "node:crypto": crypto,
+    "./lib/image-batch-diagnostics": { imageBatchSucceeded: () => true, imagePageSignals: async () => ({}), keepFailedDiagnosticOpen: () => false },
+    "./lib/image-timeout-policy": imagePolicy,
+    "./lib/chatgpt-browser": { createChatGPTContext: async () => ({ context: { newPage: async () => page }, close: async () => {} }),
+      isChatGPTGenerating: async () => false, countRenderableChatGPTImages: async () => 1,
+      waitForChatGPTImageArtifacts: async () => 1, downloadChatGPTImages: async () => [recoveredOutput],
+      submitPromptToChatGPT: async () => { newPrompts++; throw Error("must never submit"); }, openFreshChatGPTTarget: async () => { throw Error("must recover existing conversation"); } },
+  });
+  stdout = ""; await retrieval.main();
+  assert.equal(JSON.parse(stdout).jobs[0].localPath, output);
+  assert.deepEqual(recoveredUrls, ["https://chatgpt.com/c/fixture-conversation"]);
+  assert.equal(newPrompts, 0);
+  assert.ok(fs.readdirSync(dir).some(name => name.startsWith("image.checkpoint.jsonl.partial-")), "partial bytes preserved before appending recovered result");
+  write({ id: "slot", fingerprint, error: "IMAGE_PROVIDER_REFUSED: policy" });
+  assert.match(batch.readImageBatchResume(journalFile, [{ ...job, id: "slot" }]).get("slot")!.error!, /IMAGE_PROVIDER_REFUSED/);
+  fs.writeFileSync(journalFile, '{"broken":\n' + JSON.stringify(completed) + '\n');
+  assert.throws(() => batch.readImageBatchResume(journalFile, [{ ...job, id: "slot" }]), /IMAGE_CHECKPOINT_CORRUPT/);
   assert.equal(fs.existsSync(resultsFile + ".lock"), false);
   write({ id: "slot", fingerprint, state: "attempted" });
   stdout = "";
@@ -60,7 +91,10 @@ async function main() {
   assert.equal(batch.readImageBatchResume(journalFile, [{ ...job, id: "slot" }]).get("slot")!.localPath, null);
   assert.throws(() => batch.readImageBatchResume(journalFile, [{ ...job, id: "slot", prompt: "different" }]), /does not match/);
   fs.writeFileSync(journalFile, '{"id":');
-  await assert.rejects(batch.main(), /JSON/);
+  stdout = "";
+  await batch.main();
+  assert.match(JSON.parse(stdout).jobs[0].error, /IMAGE_RESUME_REQUIRED/);
+  assert.equal(browserCalls, 0, "partial journal never permits a new generation");
   assert.equal(fs.existsSync(resultsFile + ".lock"), false, "invalid checkpoint releases owned lock");
   fs.writeFileSync(resultsFile + ".lock", "other worker");
   await assert.rejects(batch.main(), /EEXIST/);
@@ -93,9 +127,9 @@ async function main() {
     "./chatgpt-browser-visibility": {}, "./chatgpt-profile-lock": {}, "./chatgpt-browser-errors": {}, "./image-timeout-policy": {},
   });
   let waits = 0;
-  const page = { waitForTimeout: async (ms: number) => { waits += ms; },
+  const downloadPage = { waitForTimeout: async (ms: number) => { waits += ms; },
     evaluate: async (_fn: unknown, candidates?: unknown) => candidates ? ["data:image/png;base64,aW1hZ2U="] : [{ src: "fixture" }] };
-  const paths = await browser.downloadChatGPTImages(page as unknown as Parameters<typeof browser.downloadChatGPTImages>[0], dir);
+  const paths = await browser.downloadChatGPTImages(downloadPage as unknown as Parameters<typeof browser.downloadChatGPTImages>[0], dir);
   assert.equal(paths.length, 1);
   assert.equal(waits, 0, "loaded artifact download has no unconditional timer");
   assert.equal(fs.readFileSync(paths[0], "utf8"), "image");

@@ -34,8 +34,10 @@ async function main() {
       };
       store.writeBrandPostPackageManifest(fixture);
       const plan = planSectionImageRequests(store.packagePreview(fixture).imageSlots);
-      assert.ok(plan.length > 4, "All sections must be planned, not just first four");
-      assert.equal(new Set(plan.map((r) => r.sectionId)).size, composition.sections.length);
+      const requiredSections = composition.sections.filter(section => (section.imageMin || 0) > 0);
+      const requiredImages = requiredSections.reduce((sum, section) => sum + (section.imageMin || 0), 0);
+      assert.equal(plan.length, requiredImages, "Only explicit contract deficits are planned");
+      assert.equal(new Set(plan.map((r) => r.sectionId)).size, requiredSections.length);
       assert.equal(new Set(plan.filter((r) => r.replaceAssetKey).map((r) => r.replaceAssetKey)).size, plan.filter((r) => r.replaceAssetKey).length);
       const deps: import("../src/lib/brand-post-image-repair").ImageRepairDependencies = {
         read: store.readBrandPostPackage, write: store.writeBrandPostPackageManifest, apply: store.applyGeneratedBrandPostImage,
@@ -70,7 +72,7 @@ async function main() {
       assert.equal(final.manifest.composition.qualityReport.imageCoverage.missingSectionIds.length, 0);
       assert.equal(final.manifest.contentQuality?.score, 100);
       assert.equal(fs.readFileSync(markdown, "utf8"), "검증된 본문은 이미지 보강 중 바뀌지 않습니다.");
-      assert.ok(final.manifest.composition.sections.every((s) => s.imagePaths.length >= 1));
+      assert.ok(final.manifest.composition.sections.every((s) => s.imagePaths.length >= (s.imageMin || 0)));
       assert.throws(() => store.applyGeneratedBrandPostImage({
         brandLinkId: id, sectionId: final.manifest.composition.sections[0].id,
         generatedPath: final.manifest.composition.sections[0].imagePaths[0],
@@ -82,8 +84,8 @@ async function main() {
       const missingPath = final.manifest.composition.sections[0].imagePaths[0];
       fs.unlinkSync(missingPath);
       const missingPreview = store.packagePreview(store.readBrandPostPackage(id)!);
-      assert.ok(missingPreview.imageSlots[0].generationMissing > 0, "Missing files cannot satisfy generated coverage");
-      assert.throws(() => store.approveBrandPostPackage(id), /섹션 이미지 품질 게이트/u);
+      assert.ok(missingPreview.imageSlots[0].missing > 0, "Missing files cannot satisfy verified image coverage");
+      assert.throws(() => store.approveBrandPostPackage(id), /이미지/u);
       const beforeChange = store.readBrandPostPackage(id)!;
       await assert.rejects(repairBrandPostImages({ brandLinkId: id }, {
         ...deps,

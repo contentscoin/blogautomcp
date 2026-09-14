@@ -8,6 +8,7 @@ import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 import { beginDesktopActivity } from "@/lib/desktop-activity";
 import {
   getBrandPostPackageDir,
+  getBrandPostImageGenerationState,
   normalizePackageImageAssets,
   packagePreview,
   readBrandPostPackage,
@@ -22,6 +23,12 @@ import { isChatGptBrowserAutomationEnabled } from "@/lib/chatgpt-browser-automat
 
 const IMAGE_ACTIONS = ["generate_missing", "generate_section", "regenerate", "apply_generated"] as const;
 type ImageAction = (typeof IMAGE_ACTIONS)[number];
+
+function imageFailureCode(errors: string[]): string | undefined {
+  const text = errors.join("\n");
+  return ["CHATGPT_BROWSER_AUTH_REQUIRED", "CHATGPT_BROWSER_BUSY", "IMAGE_RESUME_REQUIRED", "IMAGE_PROVIDER_REFUSED", "PRODUCT_SOURCE_REQUIRED", "PRODUCT_SOURCE_DOWNLOAD_FAILED"]
+    .find(code => text.includes(code));
+}
 
 function imageContentType(filePath: string): string {
   const extension = path.extname(filePath).toLowerCase();
@@ -49,7 +56,7 @@ export async function GET(
     return NextResponse.json({ success: false, error: "이미지 항목 키가 올바르지 않습니다." }, { status: 400 });
   }
   try {
-    const manifest = readBrandPostPackage(id);
+    const manifest = readBrandPostPackage(id, { migrate: false });
     if (!manifest) {
       return NextResponse.json({ success: false, error: "초안 패키지가 없습니다." }, { status: 404 });
     }
@@ -105,19 +112,39 @@ export async function POST(
     return NextResponse.json({ success: false, error: "지원하지 않는 이미지 작업입니다." }, { status: 400 });
   }
 
-  const manifest = readBrandPostPackage(id);
-  if (!manifest || manifest.version !== "brand-post-package/v2") {
-    return NextResponse.json(
-      { success: false, error: "이미지를 편집할 v2 초안 패키지가 없습니다. 초안을 다시 만들어 주세요." },
-      { status: 404 },
-    );
-  }
   const link = await prisma.brandLink.findUnique({
     where: { id },
-    select: { productName: true },
+    select: { productName: true, imageUrls: true, status: true, updatedAt: true },
   });
   if (!link) {
     return NextResponse.json({ success: false, error: "상품을 찾을 수 없습니다." }, { status: 404 });
+  }
+  const sourceImageUrls: string[] = (() => {
+    try {
+      const parsed = JSON.parse(link.imageUrls || "[]");
+      return Array.isArray(parsed) ? parsed.filter((url): url is string => typeof url === "string") : [];
+    } catch { return []; }
+  })();
+  // Explicit mutation recovery only. Reclaim a stale DB claim solely when its
+  // timestamp predates the proven-dead image owner; never steal a newer edit.
+  if (link.status === "DRAFTING" && link.updatedAt) {
+    const interrupted = readBrandPostPackage(id, { migrate: false });
+    const state = interrupted && getBrandPostImageGenerationState(interrupted);
+    const heartbeatAt = interrupted?.imageGeneration?.heartbeatAt;
+    if (state?.recoveryState === "owner-exited" && heartbeatAt && link.updatedAt.getTime() < Date.parse(heartbeatAt)) {
+      const recovery = await prisma.brandLink.updateMany({ where: { id, status: "DRAFTING", updatedAt: link.updatedAt }, data: { status: "READY" } });
+      if (recovery.count === 1) link.status = "READY";
+    }
+  }
+  if (!["READY", "FAILED"].includes(link.status)) {
+    return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "작성·발행·예약 중인 소재의 이미지는 변경할 수 없습니다." }, { status: 409 });
+  }
+  const claim = await prisma.brandLink.updateMany({ where: { id, status: link.status }, data: { status: "DRAFTING" } });
+  if (claim.count !== 1) return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "상품 상태가 변경되었습니다." }, { status: 409 });
+  try {
+  const manifest = readBrandPostPackage(id, { migrate: false });
+  if (!manifest || manifest.version !== "brand-post-package/v2") {
+    return NextResponse.json({ success: false, error: "이미지를 편집할 v2 초안 패키지가 없습니다. 초안을 다시 만들어 주세요." }, { status: 404 });
   }
 
   const preview = packagePreview(manifest);
@@ -153,13 +180,14 @@ export async function POST(
       const applied = await applyExternalGeneratedBrandPostImage({
         brandLinkId: id,
         manifest,
-        productName: manifest.title,
+        productName: link.productName || manifest.title,
+        sourceImageUrls,
         sectionId: sectionId || undefined,
         replaceAssetKey: replaceAssetKey || undefined,
         rawPath: generatedPath,
       });
       const updatedPreview = packagePreview(applied.manifest);
-      const remainingMissing = updatedPreview.imageSlots.reduce((sum, slot) => sum + slot.generationMissing, 0);
+      const remainingMissing = updatedPreview.imageSlots.reduce((sum, slot) => sum + Math.max(slot.missing, slot.generationMissing), 0);
       return NextResponse.json({
         success: true,
         data: updatedPreview,
@@ -177,7 +205,7 @@ export async function POST(
     } catch (error) {
       return NextResponse.json({
         success: false,
-        code: "IMAGE_APPLY_FAILED",
+        code: imageFailureCode([error instanceof Error ? error.message : String(error)]) || "IMAGE_APPLY_FAILED",
         error: error instanceof Error ? error.message : "생성 이미지를 반영하지 못했습니다.",
       }, { status: 422 });
     } finally {
@@ -191,7 +219,7 @@ export async function POST(
       code: "CHATGPT_BROWSER_AUTOMATION_DISABLED",
       error: BROWSER_IMAGE_AUTOMATION_DISABLED_MESSAGE,
       data: preview,
-      remainingMissing: preview.imageSlots.reduce((sum, slot) => sum + slot.generationMissing, 0),
+      remainingMissing: preview.imageSlots.reduce((sum, slot) => sum + Math.max(slot.missing, slot.generationMissing), 0),
     }, { status: 409 });
   }
   const generationRequests: BrandPostImageGenerationRequest[] = [];
@@ -225,7 +253,7 @@ export async function POST(
       success: true,
       data: preview,
       generatedCount: 0,
-      remainingMissing: preview.imageSlots.reduce((sum, slot) => sum + slot.generationMissing, 0),
+      remainingMissing: preview.imageSlots.reduce((sum, slot) => sum + Math.max(slot.missing, slot.generationMissing), 0),
       errors: [],
       message: "이미지가 필요한 모든 파트에 생성 이미지가 연결되어 있습니다.",
     });
@@ -235,14 +263,16 @@ export async function POST(
   try {
     const repaired = await repairBrandPostImages({
       brandLinkId: id,
-      productName: manifest.title,
+      productName: link.productName || manifest.title,
+      sourceImageUrls,
       requests: generationRequests,
     });
     const { errors, generatedCount, manifest: updated } = repaired;
     const updatedPreview = packagePreview(updated);
-    const remainingMissing = updatedPreview.imageSlots.reduce((sum, slot) => sum + slot.generationMissing, 0);
+    const remainingMissing = updatedPreview.imageSlots.reduce((sum, slot) => sum + Math.max(slot.missing, slot.generationMissing), 0);
     return NextResponse.json({
       success: generatedCount > 0 || errors.length === 0,
+      code: imageFailureCode(errors),
       data: updatedPreview,
       generatedCount,
       remainingMissing,
@@ -254,9 +284,13 @@ export async function POST(
   } catch (error) {
     return NextResponse.json({
       success: false,
+      code: imageFailureCode([error instanceof Error ? error.message : String(error)]),
       error: error instanceof Error ? error.message : "이미지 생성에 실패했습니다.",
     }, { status: 500 });
   } finally {
     finishActivity();
+  }
+  } finally {
+    await prisma.brandLink.updateMany({ where: { id, status: "DRAFTING" }, data: { status: link.status } });
   }
 }

@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+let fixtureRoot: string | undefined;
 
 async function main() {
   const projectRoot = process.cwd();
@@ -24,6 +25,7 @@ async function main() {
   );
   const simpleAgentSource = fs.readFileSync(path.join(projectRoot, "scripts", "simple-agent.ts"), "utf8");
   const dashboardSource = fs.readFileSync(path.join(projectRoot, "src", "app", "page.tsx"), "utf8");
+  const materialLibrarySource = fs.readFileSync(path.join(projectRoot, "src", "components", "MaterialLibrary.tsx"), "utf8");
   const electronSource = fs.readFileSync(path.join(projectRoot, "scripts", "electron", "main.cjs"), "utf8");
   const sitesMcpSource = fs.readFileSync(
     path.join(projectRoot, "apps", "sites", "app", "api", "mcp", "[credential]", "route.ts"),
@@ -185,10 +187,11 @@ async function main() {
     "긴 쇼핑 상세이미지를 분할 첨부하고 구조화 근거로 회수해야 합니다.",
   );
   assert.equal(
-    simpleAgentSource.includes("hasSufficientVisualDraftEvidence") &&
-      simpleAgentSource.includes("hasReviewEvidence || hasVisualReviewEvidence"),
+    !simpleAgentSource.includes("hasReviewEvidence || hasVisualReviewEvidence") &&
+      simpleAgentSource.includes("const finalReviewEvidenceReady") &&
+      simpleAgentSource.includes("!finalReviewEvidenceReady"),
     true,
-    "텍스트 근거가 부족해도 충분한 쇼핑 원본 이미지는 GPT 시각 분석 단계로 전달해야 합니다.",
+    "검증된 OCR provenance가 없는 이미지 장수만으로 상품 텍스트 근거를 충족 처리하면 안 됩니다.",
   );
   assert.equal(
     sitesMcpSource.includes("evidenceFacts") && draftRouteSource.includes("evidenceFacts"),
@@ -204,8 +207,8 @@ async function main() {
   );
   assert.equal(
     dashboardSource.includes('response.status === 409') &&
-      dashboardSource.includes('"1. GPT로 글 만들기"') &&
-      dashboardSource.includes('"1. ChatGPT로 글 만들기"') &&
+      dashboardSource.includes('<MaterialLibrary connectKind={brandConnectKind}') &&
+      materialLibrarySource.includes('/api/materials/prepare') &&
       dashboardSource.includes("setChatGptDraftHandoff(handoff)"),
     true,
     "데스크톱 UI는 GPT 자동작성과 ChatGPT 핸드오프를 모두 지원해야 합니다.",
@@ -219,7 +222,7 @@ async function main() {
     "API 키가 없을 때 로그인된 ChatGPT 웹 자동작성과 안전한 핸드오프 폴백을 모두 지원해야 합니다.",
   );
   assert.equal(
-    dashboardSource.includes('"1. 웹 GPT 자동작성"') &&
+    dashboardSource.includes('<MaterialLibrary connectKind={brandConnectKind}') &&
       dashboardSource.includes('provider: "chatgpt", force: false') &&
       dashboardSource.includes("await requestDraft(false)"),
     true,
@@ -267,16 +270,24 @@ async function main() {
     dashboardSource.includes("섹션별 이미지 자동 생성") &&
       dashboardSource.includes("handleRegenerateDraftImage") &&
       dashboardSource.includes("원고 보강 요청") &&
-      dashboardSource.includes('handlePrepareBrandDraft(link, { forceQualityRepair: true, returnTab: "quality" })'),
+      dashboardSource.includes("handleRepairBrandDraft") &&
+      dashboardSource.includes('body: JSON.stringify({ action: "revise", qualityConvergence: true, instructions })'),
     true,
     "데스크톱 미리보기에서 이미지 보충·개별 재생성·품질 보강을 실행할 수 있어야 합니다.",
+  );
+  assert.equal(
+    simpleAgentSource.includes("reconcileBrandPostImageContinuity(params.preserveManifest, next)") &&
+      simpleAgentSource.includes("previousPackage.sourceSnapshot?.snapshotId === submittedSnapshot?.snapshotId") &&
+      simpleAgentSource.includes("sourceSnapshot: snapshot, preserveManifest: prepared.manifest"),
+    true,
+    "부분 보강과 같은 스냅샷 재제출은 기존 이미지·슬롯·생성 체크포인트를 승계해야 합니다.",
   );
   assert.equal(
     draftImageRouteSource.includes("planSectionImageRequests") &&
       draftImageRouteSource.includes('asset?.provenance === "ORIGINAL"') &&
       draftImageRouteSource.includes("replaceAssetKey"),
     true,
-    "원본 이미지는 생성 완료로 계산하지 않고, 꽉 찬 슬롯에서는 원본을 생성 이미지로 교체해야 합니다.",
+    "명시적 생성 요청은 원본 출처를 보존하며 꽉 찬 슬롯에서는 지정한 원본을 교체할 수 있어야 합니다.",
   );
   assert.equal(
     draftRouteSource.includes("scheduleSectionImageRepair") &&
@@ -325,6 +336,7 @@ async function main() {
   assert.match(handoff.prompt, /신뢰되지 않은 참고 데이터/u);
 
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), "brand-post-package-"));
+  fixtureRoot = userData;
   process.env.DESKTOP_USER_DATA = userData;
   const store = await import("../src/lib/brand-post-package");
   const compositionContract = await import("../src/lib/post-composition-contract");
@@ -397,7 +409,10 @@ async function main() {
     sections: ["첫 섹션\n\n본문", "둘째 섹션\n\n본문", "셋째 섹션\n\n본문"],
     hashtags: [],
     imagePaths: [v2HeroPath, firstMappedImage, thirdMappedImage],
-    sectionImagePaths: [[firstMappedImage], [], [thirdMappedImage]],
+    sectionImageBindings: {
+      [compositionContract.stableFreeformSectionId("TRAVEL", "첫 섹션")]: [firstMappedImage],
+      [compositionContract.stableFreeformSectionId("TRAVEL", "셋째 섹션")]: [thirdMappedImage],
+    },
     connectUrl: "https://example.test/travel",
     qualityPreset: "STANDARD",
   });
@@ -420,6 +435,13 @@ async function main() {
     imagePolicy: "TRAVEL_EDITORIAL" as const,
     createdAt: new Date().toISOString(),
     approvedAt: null,
+    contentQuality: {
+      canPublish: true, verdict: "pass" as const, code: "ok" as const, reason: null, score: 96, signals: [], summary: "검수 통과",
+      sectionCount: 10, hashtagCount: 3, totalLength: 4000, coveredProductTokens: [], missingProductTokens: [], blockers: [],
+      quality: { score: 96, passScore: 70, categories: [],
+        repetition: { nearDuplicateCount: 0, exactDuplicateCount: 0, duplicateOpeningCount: 0, samples: [] },
+        generic: { sentenceCount: 10, guidanceCount: 0, generalStatementCount: 0, guidanceRatio: 0, generalRatio: 0, threshold: 0.24 } },
+    },
     composition: premiumComposition,
     thumbnailSpec: {
       version: "thumbnail-spec/v2" as const,
@@ -433,13 +455,16 @@ async function main() {
     ...v2Manifest,
     bodyImagePaths: [firstMappedImage, thirdMappedImage],
     composition: mappedComposition,
+    imageRequirements: { policy: "generated-required" },
+    imageAssets: [v2HeroPath, firstMappedImage, thirdMappedImage].map((file, index) => ({ path: file, sourcePath: file, sha256: crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"), role: index ? "body" as const : "hero" as const, provenance: "ORIGINAL" as const })),
   });
-  assert.equal(mappedPreview.imageSlots[2].originalCount, 1);
-  assert.equal(mappedPreview.imageSlots[2].generatedCount, 0);
-  assert.equal(mappedPreview.imageSlots[2].generationMissing, 1, "원본 이미지는 섹션 생성 이미지 충족으로 계산하면 안 됩니다.");
+  assert.equal(mappedPreview.imageSlots[0].originalCount, 1);
+  assert.equal(mappedPreview.imageSlots[0].generatedCount, 0);
+  assert.equal(mappedPreview.imageSlots[0].generationMissing, 1, "원본 이미지는 섹션 생성 이미지 충족으로 계산하면 안 됩니다.");
 
   // Offline release regression: neither default-off nor MCP execution creates
-  // imageGeneration metadata. Original coverage must not satisfy generation.
+  // imageGeneration metadata. Explicit generated-required coverage must still
+  // require actual remote-generated provenance; default originals pass in the integrity suite.
   for (const connectKind of ["TRAVEL", "SHOPPING"] as const) {
     for (const legacy of [false, true]) {
       const coverageId = `fixture-coverage-${connectKind}-${legacy ? "v139" : "current"}`;
@@ -447,12 +472,23 @@ async function main() {
       fs.mkdirSync(coverageDir, { recursive: true });
       const images = Array.from({ length: 11 }, (_, index) => path.join(coverageDir, `${index}.png`));
       images.forEach((file, index) => fs.writeFileSync(file, `offline-${coverageId}-${index}`));
+      const coverageSections = Array.from({ length: 10 }, (_, index) =>
+        `확인한 정보 ${index + 1}\n\n${"확인된 정보와 사용 조건을 구체적으로 연결해 선택에 필요한 차이를 설명합니다. ".repeat(10)}`);
+      const coverageBindings = Object.fromEntries(coverageSections.map((section, index) => [
+        compositionContract.stableFreeformSectionId(connectKind, section.split("\n")[0]),
+        [images[index + 1]],
+      ]));
+      if (connectKind === "TRAVEL") {
+        const detailed = compositionContract.stableFreeformSectionId(connectKind, "확인한 정보 3");
+        const optional = compositionContract.stableFreeformSectionId(connectKind, "확인한 정보 10");
+        coverageBindings[detailed].push(...coverageBindings[optional].splice(0, 1));
+      }
       const composition = compositionContract.resolvePostDocument({
         connectKind,
         title: "오프라인 생성 이미지 승인 검사",
-        sections: Array.from({ length: 10 }, (_, index) =>
-          `확인한 정보 ${index + 1}\n\n${"확인된 정보와 사용 조건을 구체적으로 연결해 선택에 필요한 차이를 설명합니다. ".repeat(10)}`),
+        sections: coverageSections,
         imagePaths: images,
+        sectionImageBindings: coverageBindings,
         hashtags: ["정보", "조건", "선택"],
         connectUrl: "https://example.test/coverage",
         qualityPreset: "PREMIUM",
@@ -464,6 +500,8 @@ async function main() {
       const originals = {
         ...v2Manifest,
         brandLinkId: coverageId,
+        title: composition.title,
+        imageRequirements: { policy: "generated-required" as const },
         connectKind,
         heroImagePath: images[0],
         bodyImagePaths: images.slice(1),
@@ -476,8 +514,9 @@ async function main() {
         "Fixture must pass ordinary text/image-count quality so generation is the decisive gate");
       const slots = store.packagePreview(loaded).imageSlots;
       assert.equal(slots.reduce((sum, slot) => sum + slot.missing, 0), 0);
-      assert.equal(slots.reduce((sum, slot) => sum + slot.generationMissing, 0), 10);
-      assert.throws(() => store.approveBrandPostPackage(coverageId), /섹션 이미지 품질 게이트/u,
+      const expectedGeneratedMinimum = slots.reduce((sum, slot) => sum + slot.minimum, 0);
+      assert.equal(slots.reduce((sum, slot) => sum + slot.generationMissing, 0), expectedGeneratedMinimum);
+      assert.throws(() => store.approveBrandPostPackage(coverageId), /이미지/u,
         `${coverageId}: originals without execution metadata must not be approved`);
 
       store.writeBrandPostPackageManifest({ ...originals, approvedAt: "2026-09-01T00:00:00.000Z" });
@@ -489,6 +528,7 @@ async function main() {
         imageAssets: store.normalizePackageImageAssets(originals).map((asset) => ({
           ...asset,
           provenance: connectKind === "SHOPPING" ? "LOCKED_PRODUCT" as const : "GENERATED_BACKGROUND" as const,
+          remoteGenerated: true, creationMethod: "remote-generated" as const,
         })),
       };
       store.writeBrandPostPackageManifest(generated);
@@ -516,30 +556,37 @@ async function main() {
       const unsafeRead = store.readBrandPostPackage(coverageId)!;
       assert.equal(unsafeRead.approvedAt, null);
       assert.equal(unsafeRead.contentQuality?.code, "unsupported-experience-claim");
-      assert.throws(() => store.approveBrandPostPackage(coverageId), /원고 내용 품질검사/u,
+      assert.throws(() => store.approveBrandPostPackage(coverageId), /허위 체험 표현/u,
         "Complete generated coverage cannot clear a safety failure");
       store.writeBrandPostPackageManifest({ ...generated, generationSource: undefined });
-      assert.throws(() => store.approveBrandPostPackage(coverageId), /AI 생성 출처/u);
+      assert.throws(() => store.approveBrandPostPackage(coverageId), /AI 원고 출처/u);
 
       for (const status of ["complete", "incomplete", "running"] as const) {
         const imageGeneration = { status, requested: 10, applied: 10, remaining: 0, errors: [], updatedAt: "2026-09-03" };
         store.writeBrandPostPackageManifest({ ...originals, imageGeneration });
-        assert.throws(() => store.approveBrandPostPackage(coverageId), /섹션 이미지 품질 게이트/u,
-          "Execution counters cannot replace generated asset evidence");
+        const originalReadiness = store.evaluateBrandPostPackageReadiness(store.readBrandPostPackage(coverageId)!);
+        assert.equal(originalReadiness.canApprove, false,
+          `${coverageId}/${status}: execution counters cannot replace generated asset evidence: ${JSON.stringify(originalReadiness.blockers)}`);
         store.writeBrandPostPackageManifest({ ...generated, imageGeneration });
         if (status === "running") {
-          assert.throws(() => store.approveBrandPostPackage(coverageId), /섹션 이미지 품질 게이트/u);
+          assert.throws(() => store.approveBrandPostPackage(coverageId), /이미지/u);
         } else {
           assert.ok(store.approveBrandPostPackage(coverageId).approvedAt, "Finished assets determine coverage, not stale counters");
         }
       }
 
-      const partial = { ...generated, imageAssets: generated.imageAssets.map((asset, index, assets) =>
-        index === assets.length - 1 ? { ...asset, provenance: "ORIGINAL" as const } : asset) };
+      const loadedGenerated = store.readBrandPostPackage(coverageId)! as import("../src/lib/brand-post-package").BrandPostPackageManifestV2;
+      const { imageGeneration: _completedGeneration, ...generatedWithoutCounter } = loadedGenerated;
+      const lastRequiredSection = [...generatedWithoutCounter.composition.sections].reverse().find(section => (section.imageMin || 0) > 0)!;
+      const lastRequiredPath = lastRequiredSection.imagePaths.at(-1)!;
+      const partial = { ...generatedWithoutCounter, imageAssets: generatedWithoutCounter.imageAssets!.map((asset) =>
+        path.resolve(asset.path) === path.resolve(lastRequiredPath)
+          ? { ...asset, provenance: "ORIGINAL" as const, remoteGenerated: false, creationMethod: "source" as const }
+          : asset) };
       store.writeBrandPostPackageManifest(partial);
       const partialSlots = store.packagePreview(partial).imageSlots;
-      assert.equal(partialSlots[partialSlots.length - 1].generationMissing, 1);
-      assert.throws(() => store.approveBrandPostPackage(coverageId), /섹션 이미지 품질 게이트/u,
+      assert.equal(partialSlots.find(slot => slot.sectionId === lastRequiredSection.id)?.generationMissing, 1);
+      assert.throws(() => store.approveBrandPostPackage(coverageId), /이미지/u,
         "The last required generated section must also be enforced");
 
       const extraPath = path.join(coverageDir, "extra.png");
@@ -560,10 +607,10 @@ async function main() {
       const twoSlots = store.packagePreview(store.readBrandPostPackage(coverageId)!).imageSlots;
       assert.equal(twoSlots[0].missing, 0);
       assert.equal(twoSlots[0].generationMissing, 1);
-      assert.throws(() => store.approveBrandPostPackage(coverageId), /섹션 이미지 품질 게이트/u,
+      assert.throws(() => store.approveBrandPostPackage(coverageId), /이미지/u,
         "An original cannot fill the second required generated slot");
       store.writeBrandPostPackageManifest({
-        ...twoRequired, imageAssets: [...twoRequired.imageAssets, { ...extraAsset, provenance: "EDITORIAL_CARD" }],
+        ...twoRequired, imageAssets: [...twoRequired.imageAssets, { ...extraAsset, provenance: "EDITORIAL_CARD", remoteGenerated: true, creationMethod: "source-with-generated-background" }],
       });
       assert.ok(store.approveBrandPostPackage(coverageId).approvedAt, "Both required generated slots are now filled");
     }
@@ -571,7 +618,7 @@ async function main() {
   fs.writeFileSync(store.getBrandPostPackageManifestPath(v2Id), JSON.stringify(v2Manifest, null, 2));
   assert.throws(
     () => store.approveBrandPostPackage(v2Id),
-    /섹션 이미지 품질 게이트/u,
+    /이미지/u,
     "프리미엄 V2 초안은 품질 미달 상태에서 승인되면 안 됩니다.",
   );
   const standardComposition = compositionContract.resolvePostDocument({
@@ -587,7 +634,7 @@ async function main() {
     store.getBrandPostPackageManifestPath(v2Id),
     JSON.stringify({ ...v2Manifest, composition: standardComposition }, null, 2),
   );
-  assert.throws(() => store.approveBrandPostPackage(v2Id), /섹션 이미지 품질 게이트/u,
+  assert.throws(() => store.approveBrandPostPackage(v2Id), /이미지/u,
     "STANDARD still enforces its illustrated section contract");
   for (const postSpec of [undefined, { fixture: "explicit-text-only" }]) {
     const textOnlyId = `fixture-text-only-${postSpec ? "spec" : "freeform"}`;
@@ -681,7 +728,7 @@ async function main() {
   assert.equal(refreshedStaleFlow?.contentQuality?.signals.find((signal) => signal.key === "editorial-flow")?.status, "pass");
   assert.equal(refreshedStaleFlow?.contentQuality?.canPublish, false, "Text recovery must not trust a forged passing composition report for a short, under-illustrated fixture");
   assert.equal(refreshedStaleFlow?.contentQuality?.code, "composition-quality");
-  assert.throws(() => store.approveBrandPostPackage(staleFlowId), /섹션 이미지 품질 게이트/u);
+  assert.throws(() => store.approveBrandPostPackage(staleFlowId), /이미지/u);
 
   const limitationFalsePositiveId = "fixture-brand-link-v2-limitation-false-positive";
   const limitationFalsePositiveDir = store.getBrandPostPackageDir(limitationFalsePositiveId);
@@ -741,7 +788,7 @@ async function main() {
   assert.equal(refreshedLimitationFalsePositive?.contentQuality?.code, "composition-quality");
   assert.equal(refreshedLimitationFalsePositive?.contentQuality?.score, 100);
   assert.equal(refreshedLimitationFalsePositive?.contentQuality?.signals[0]?.status, "pass");
-  assert.throws(() => store.approveBrandPostPackage(limitationFalsePositiveId), /섹션 이미지 품질 게이트/u);
+  assert.throws(() => store.approveBrandPostPackage(limitationFalsePositiveId), /이미지/u);
 
   const generatedBodyPath = path.join(userData, "generated-body.png");
   fs.writeFileSync(generatedBodyPath, "generated-body-v1");
@@ -788,4 +835,10 @@ async function main() {
   console.log(JSON.stringify({ ok: true, approved: true, v2QualityGate: true, generatedCoverageWithoutMetadata: true, legacyGeneratedCoverage: true, staleApprovalRevoked: true, textOnlyPlans: true, imagePreviewAndRegeneration: true, pathTraversalBlocked: true, resultFile: true }));
 }
 
-main().catch((error) => { console.error(error); process.exitCode = 1; });
+main().catch((error) => { console.error(error); process.exitCode = 1; }).finally(() => {
+  if (!fixtureRoot) return;
+  const resolved = path.resolve(fixtureRoot);
+  assert.equal(path.dirname(resolved), path.resolve(os.tmpdir()));
+  assert.ok(path.basename(resolved).startsWith("brand-post-package-"));
+  fs.rmSync(resolved, { recursive: true, force: true });
+});

@@ -9,6 +9,8 @@ assert.throws(() => assertConnectUrlKind('travel', 'https://brandconnect.naver.c
 assert.throws(() => assertConnectUrlKind('shopping', 'https://brandconnect.naver.com.evil.test/123/affiliate'), /CONNECT_URL_INVALID/);
 assert.doesNotThrow(() => assertConnectUrlKind('shopping', 'https://brandconnect.naver.com/123/affiliate/products/category/1?foo=bar'));
 assert.doesNotThrow(() => assertConnectUrlKind('travel', 'https://brandconnect.naver.com/123/travel-connect/products'));
+assert.doesNotThrow(() => assertConnectUrlKind('travel', 'https://pkgtour.naver.com/products/ybtour/AIP5220ZE00-20260923?reqChannel=brandconnect'));
+assert.throws(() => assertConnectUrlKind('shopping', 'https://pkgtour.naver.com/products/ybtour/AIP5220ZE00-20260923?reqChannel=brandconnect'), /CONNECT_URL_INVALID/);
 const previous = process.env.BRANDCONNECT_SHOPPING_CATEGORY_URL;
 try {
   process.env.BRANDCONNECT_SHOPPING_CATEGORY_URL = 'https://brandconnect.naver.com/123/affiliate/products/category/777';

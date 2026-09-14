@@ -85,6 +85,8 @@ export interface ResolvedPostSectionV1 {
  * 실제 섹션 역할·이미지 의도·슬롯 배정을 그대로 따른다.
  */
 export interface PostSectionPlanV1 {
+  /** Preserve this identity when revising or reordering a prepared section. */
+  sectionId?: string;
   /** 섹션 역할(itinerary-overview, day-course …). id 를 만드는 데 쓴다. */
   role: string;
   /** 이 섹션 앞에 오는 본문 이미지 경로(플랜이 확정한 순서) */
@@ -103,11 +105,12 @@ export function sectionImageBounds(
   section: Pick<ResolvedPostSectionV1, "id" | "imageMin" | "imageMax">,
 ): { min: number; max: number } {
   const palette = contract.sections.find((candidate) => candidate.id === section.id);
-  const min = section.imageMin ?? palette?.image.min ?? 0;
+  const min = Math.max(0, section.imageMin ?? palette?.image.min ?? 0);
   const max = section.imageMax ?? palette?.image.max ?? Math.max(1, min);
-  // Every illustrated body section needs coverage, including late sections.
-  // An explicit zero-capacity plan remains a text-only section.
-  return { min: max > 0 ? Math.max(1, min) : min, max: Math.max(min, max) };
+  // An explicit zero is meaningful: the contract intentionally makes later
+  // sections optional so a five/seven-image post does not fan out into ten
+  // slow, repetitive generation jobs.
+  return { min, max: Math.max(min, max) };
 }
 
 export interface PostQualityReportV1 {
@@ -466,21 +469,35 @@ function resolveSectionContracts(
 }
 
 function allocateFreeformImages(sectionCount: number, imagePaths: string[]): string[][] {
-  const allocations = Array.from({ length: sectionCount }, () => [] as string[]);
-  // Cover every actual section once before distributing extra images. Palette
-  // positions are legacy identifiers, not evidence of the section's image role.
-  imagePaths.forEach((imagePath, index) => {
-    if (allocations.length) allocations[index % allocations.length].push(imagePath);
-  });
-  return allocations;
+  // Unclassified source order is not evidence of relevance to a paragraph.
+  // Keep these files available as material candidates, never auto-publish them.
+  void imagePaths;
+  return Array.from({ length: sectionCount }, () => [] as string[]);
 }
 
-function freeformImageRules(section: Pick<ResolvedPostSectionV1, "title" | "body" | "imagePaths">) {
+/** Browser-safe deterministic identity; independent of section position. */
+export function stableFreeformSectionId(connectKind: BrandConnectKind, title: string): string {
+  let hash = 2166136261;
+  for (const character of clean(title).normalize("NFKC")) {
+    hash ^= character.codePointAt(0)!;
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${connectKind.toLowerCase()}-section-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+function freeformImageRules(
+  section: Pick<ResolvedPostSectionV1, "title" | "body" | "imagePaths">,
+  contractSection?: PostSectionContractV1,
+) {
+  const minimum = Math.max(0, contractSection?.image.min ?? 0);
+  const maximum = Math.max(minimum, contractSection?.image.max ?? 1, section.imagePaths.length);
   return {
-    imageMin: 1,
-    imageMax: Math.max(1, section.imagePaths.length),
-    imageIntent: `${section.title}: ${section.body.join(" ").slice(0, 240)}`,
-    headingStyle: "sectionTitle" as const,
+    imageMin: minimum,
+    imageMax: maximum,
+    // Body prose changes during quality repair. Keep the visual contract tied
+    // to the section's semantic role so a text-only revision is a cache hit.
+    imageIntent: `${section.title}: ${contractSection?.image.intent || "본문 주제를 설명하는 서로 다른 실사 장면"}`,
+    headingStyle: contractSection?.headingStyle || ("sectionTitle" as const),
   };
 }
 
@@ -551,6 +568,7 @@ function planSectionIds(connectKind: BrandConnectKind, plan: PostSectionPlanV1[]
   const prefix = connectKind.toLowerCase();
   const seen = new Map<string, number>();
   return plan.map((section) => {
+    if (section.sectionId) return section.sectionId;
     const base = `${prefix}-${section.role.replace(/[^a-z0-9-]+/giu, "-").toLowerCase() || "section"}`;
     const count = (seen.get(base) || 0) + 1;
     seen.set(base, count);
@@ -559,7 +577,7 @@ function planSectionIds(connectKind: BrandConnectKind, plan: PostSectionPlanV1[]
 }
 
 /**
- * 플랜이 배정한 이미지를 섹션에 적용하고, 플랜에 없는 유효 이미지는 여유가 있는 섹션에 순서대로 얹는다.
+ * 플랜이 배정한 이미지만 섹션에 적용한다. 의미가 검증되지 않은 잔여 이미지는 미배정으로 둔다.
  * 업로드 목록에 없는 경로(교체·삭제된 파일)는 조용히 버린다.
  */
 function allocatePlannedImages(plan: PostSectionPlanV1[], bodyImagePaths: string[]): string[][] {
@@ -572,18 +590,6 @@ function allocatePlannedImages(plan: PostSectionPlanV1[], bodyImagePaths: string
       return true;
     }),
   );
-  // 플랜 밖 이미지(대표 이미지가 썸네일로 빠져 슬롯이 비었거나, 나중에 추가된 파일)는
-  // 하한을 못 채운 섹션부터, 다음은 상한에 여유가 있는 섹션, 마지막은 이미지가 허용되는 마지막 섹션 순으로 얹는다.
-  const leftovers = bodyImagePaths.filter((imagePath) => !used.has(imagePath));
-  for (const imagePath of leftovers) {
-    let index = plan.findIndex((section, at) => allocations[at].length < section.imageMin);
-    if (index < 0) index = plan.findIndex((section, at) => allocations[at].length < section.imageMax);
-    if (index < 0) {
-      const lastWithSlot = plan.map((section) => section.imageMax > 0).lastIndexOf(true);
-      index = lastWithSlot >= 0 ? lastWithSlot : Math.max(0, plan.length - 1);
-    }
-    if (allocations[index]) allocations[index].push(imagePath);
-  }
   return allocations;
 }
 
@@ -596,6 +602,8 @@ export function resolvePostDocument(options: {
   imagePaths: string[];
   /** Spec-first가 이미 계산한 섹션별 이미지 배치를 보존한다. 미지정 시에만 기존 순차 배치를 사용한다. */
   sectionImagePaths?: string[][];
+  /** Explicit reviewed mappings for freeform sections; keyed by stable section ID. */
+  sectionImageBindings?: Record<string, string[]>;
   connectUrl: string;
   qualityPreset?: PostQualityPreset;
   experienceMode?: PostExperienceMode;
@@ -616,8 +624,19 @@ export function resolvePostDocument(options: {
   const sectionContracts = resolveSectionContracts(contract, contentSections.length);
   const thumbnailPath = options.imagePaths[0] || "";
   const bodyImagePaths = thumbnailPath ? options.imagePaths.slice(1) : options.imagePaths;
-  const allocations = options.sectionImagePaths
-    ? contentSections.map((_, index) => Array.from(new Set(options.sectionImagePaths?.[index] || [])))
+  const freeformIds = contentSections.map(section => stableFreeformSectionId(options.connectKind, parseGeneratedSection(section).title));
+  // Identical headings need disambiguation. Existing prepared plans preserve explicit IDs.
+  const seenIds = new Map<string, number>();
+  freeformIds.forEach((id, index) => {
+    const occurrence = (seenIds.get(id) || 0) + 1;
+    seenIds.set(id, occurrence);
+    if (occurrence > 1) freeformIds[index] = `${id}-${occurrence}`;
+  });
+  const availableBody = new Set(bodyImagePaths);
+  const allocations = options.sectionImageBindings && !plan
+    ? freeformIds.map(id => [...new Set(options.sectionImageBindings?.[id] || [])].filter(file => availableBody.has(file)))
+    : options.sectionImagePaths && options.sectionImagePaths.length === contentSections.length
+    ? contentSections.map((_, index) => Array.from(new Set(options.sectionImagePaths?.[index] || [])).filter(file => availableBody.has(file)))
     : plan
       ? allocatePlannedImages(plan, bodyImagePaths)
       : allocateFreeformImages(contentSections.length, bodyImagePaths);
@@ -638,19 +657,18 @@ export function resolvePostDocument(options: {
         imageMax: Math.max(planned.imageMin, planned.imageMax),
       };
     }
-    const sectionContract = sectionContracts[index] || contract.sections.at(-1)!;
     return {
-      id: sectionContract.id,
+      id: freeformIds[index],
       title: parsed.title,
       body: parsed.body,
       characterCount: parsed.body.join("").length,
       imagePaths: allocations[index] || [],
-      ...freeformImageRules({ ...parsed, imagePaths: allocations[index] || [] }),
+      ...freeformImageRules({ ...parsed, imagePaths: allocations[index] || [] }, sectionContracts[index]),
     };
   });
   const earlyConnectSectionId = plan
     ? planIds[plan.findIndex((section) => section.earlyConnectCard)] ?? null
-    : contract.earlyConnectAfterSectionId;
+    : sections[Math.max(0, sectionContracts.findIndex(section => section.id === contract.earlyConnectAfterSectionId))]?.id;
 
   const renderNodes: PostRenderNode[] = [];
   if (thumbnailPath) {
@@ -747,7 +765,7 @@ export function resolvePostDocument(options: {
       contract,
       preset: qualityPreset,
       sections,
-      imageCount: options.imagePaths.length,
+      imageCount: renderNodes.filter(node => node.kind === "image").length,
     }),
   };
 }
@@ -760,10 +778,14 @@ export function resolvePostDocument(options: {
 export function normalizeLegacyFreeformImageRules(
   document: ResolvedPostDocumentV1,
 ): ResolvedPostDocumentV1 {
+  const contractSections = resolveSectionContracts(
+    getPostCompositionContract(document.connectKind),
+    document.sections.length,
+  );
   const migrated = new Map<string, ResolvedPostSectionV1>();
-  const sections = document.sections.map((section) => {
+  const sections = document.sections.map((section, index) => {
     if (section.imageMin !== undefined || section.imageMax !== undefined) return section;
-    const normalized = { ...section, ...freeformImageRules(section) };
+    const normalized = { ...section, ...freeformImageRules(section, contractSections[index]) };
     migrated.set(section.id, normalized);
     return normalized;
   });

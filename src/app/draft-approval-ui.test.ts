@@ -44,16 +44,28 @@ test("recheck uses the agreed PATCH endpoint without regeneration and surfaces s
   assert.match(page, /onClick=\{\(\) => void handleRecheckBrandDraft\(\)\}/);
 });
 
+test("text repair rechecks then PATCHes the existing package without restarting draft generation", () => {
+  const page = readFileSync("src/app/page.tsx", "utf8");
+  const handler = page.split("const handleRepairBrandDraft = async () => {")[1].split("const requestDraftImageAction")[0];
+  assert.match(handler, /action: "recheck"/);
+  assert.match(handler, /plan\.action !== "repair-text"/);
+  assert.match(handler, /action: "revise", qualityConvergence: true, instructions/);
+  assert.match(handler, /기존 문단 제목, 순서, 이미지 의도와 검수 완료 이미지는 유지하세요/);
+  assert.doesNotMatch(handler, /method: "POST"|forceQualityRepair|handlePrepareBrandDraft/);
+  assert.match(page, /onClick=\{\(\) => void handleRepairBrandDraft\(\)\}/);
+});
+
 test("missing QC source gives recovery steps and preserves the server reason", () => {
   const message = getDraftRecheckError({ code: "QC_SOURCE_REQUIRED", error: "상품 신원 확인 실패" }, "travel-123");
   for (const text of ["상품 신원 확인 실패", "travel-123", "원본 상품 URL", "컨텍스트를 복구", "최신 기준 재검사", "자동 실행되지 않습니다"]) assert.ok(message.includes(text));
   assert.equal(getDraftRecheckError({ code: "OTHER", error: "잠시 후 재시도" }, "123"), "잠시 후 재시도");
 });
 
-test("prepared unapproved rows open the saved draft with a matching label and tooltip", () => {
+test("saved material preview remains read-only and has a matching label", () => {
   const page = readFileSync("src/app/page.tsx", "utf8");
   const row = page.split("onClick={() => void handleOpenOrPrepareBrandDraft(link)}")[1].split("</button>")[0];
-  assert.match(row, /link.draftPrepared\s*\? "초안 확인·수정"/);
-  assert.match(row, /title=\{link.draftPrepared \? "저장된 초안/);
-  assert.match(row, /!link.draftPrepared && draftCreationMode === "checking"/);
+  assert.match(row, /저장 원고 보기/);
+  assert.match(row, /title="저장된 초안과 이미지를 확인합니다"/);
+  const handler = page.split("const handleOpenOrPrepareBrandDraft =")[1].split("const handleBulkPrepareBrandDrafts")[0];
+  assert.doesNotMatch(handler, /handlePrepareBrandDraft|method: "POST"/);
 });

@@ -19,6 +19,7 @@ const statements = [
   `CREATE INDEX IF NOT EXISTS idx_devices_user_status ON devices(user_id, status)`,
   `CREATE TABLE IF NOT EXISTS agent_jobs (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, type TEXT NOT NULL, connect_kind TEXT, input_json TEXT NOT NULL, result_json TEXT, status TEXT NOT NULL DEFAULT 'QUEUED', progress INTEGER NOT NULL DEFAULT 0, idempotency_key TEXT, claimed_by_device_id TEXT, error_code TEXT, error_message TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, claimed_at INTEGER, finished_at INTEGER)`,
   `CREATE INDEX IF NOT EXISTS idx_agent_jobs_user_status_created ON agent_jobs(user_id, status, created_at)`,
+  `CREATE TABLE IF NOT EXISTS agent_job_result_chunks (job_id TEXT NOT NULL REFERENCES agent_jobs(id) ON DELETE CASCADE,user_id TEXT NOT NULL,result_hash TEXT NOT NULL,chunk_index INTEGER NOT NULL,content TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(job_id,result_hash,chunk_index))`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_jobs_user_idempotency ON agent_jobs(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL`,
   `CREATE TABLE IF NOT EXISTS audit_events (id TEXT PRIMARY KEY NOT NULL, actor_user_id TEXT, target_user_id TEXT, action TEXT NOT NULL, metadata_json TEXT, created_at INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS idx_audit_events_created ON audit_events(created_at)`,

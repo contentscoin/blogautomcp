@@ -62,3 +62,11 @@ apps/site/tsconfig.tsbuildinfo
 # Python research tooling cache
 __pycache__/
 *.py[cod]
+
+# Local Codex/agent scratch data and generated evidence
+.codex-remote-attachments/
+.opus-fable/
+.tmp-upload-key.txt
+temp/
+workspace/
+artifacts/

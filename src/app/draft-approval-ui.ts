@@ -7,6 +7,7 @@ export function getDraftRecheckError(payload: { code?: string; error?: string },
 }
 
 type DraftStatus = {
+  approval?: { canApprove: boolean; blockers: Array<{ code: string; reason: string }> };
   contentQuality?: { canPublish: boolean; reason: string | null; score?: number; quality?: { score: number; passScore?: number; categories?: Array<{ key: string; label: string; status: string; notes?: string[] }> }; blockers?: Array<{ code: string; tier: string; reason: string }>; signals: Array<{ key: string; label: string; status: string }> } | null;
   composition?: { qualityReport: { preset: string; canAutoPublish: boolean; blockers: string[] } };
   imageSlots?: Array<{ title: string; generationMissing: number }>;
@@ -15,6 +16,7 @@ type DraftStatus = {
 
 // Presentation only: the approval endpoint remains the authority.
 export function getDraftApprovalBlockers(draft: DraftStatus): string[] {
+  if (draft.approval) return [...new Set(draft.approval.blockers.map(blocker => blocker.reason))];
   const blockers: string[] = [];
   if (draft.imageGeneration?.status === "running") blockers.push("이미지 생성 작업이 진행 중입니다.");
   for (const slot of draft.imageSlots || []) {

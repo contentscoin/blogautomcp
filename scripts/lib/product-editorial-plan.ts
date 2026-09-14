@@ -19,6 +19,7 @@ export type ProductReviewCategory =
   | "cooler-bag"
   | "seat-cushion"
   | "hair-care"
+  | "food"
   | "generic";
 
 export interface ProductEditorialPlanInput {
@@ -93,6 +94,11 @@ export interface ProductReviewSubstanceAssessment {
   coveredReviewEvidence: string[];
   /** false면 확인 가능한 텍스트 신호가 없어 근거 항목을 요구하지 않은 것. */
   signalEvidenceAvailable: boolean;
+  /** 원고가 아니라 저장된 상품 출처에서 계산한 근거 수준. */
+  sourceEvidenceLevel: ProductReviewAnalysis["evidenceLevel"];
+  /** 서로 다른 상품 근거가 실제 판단 문장에 연결된 개수. */
+  groundedSignalCount: number;
+  requiredGroundedSignalCount: number;
 }
 
 const SECTION_LIBRARY: ProductEditorialSection[] = [
@@ -201,21 +207,86 @@ function meaningfulDescription(value: string | null | undefined, productName: st
 
 const SEO_ONLY_FEATURE_PATTERN = /^(?:휴대|가정|거실|캠핑|탁상|충전|저소음|무선|유선|여름|생활|주방|미니)?(?:용)?(?:선풍기|서큘레이터|써큘레이터|가전|추천|제품|상품|핫딜)$/u;
 
+const NON_SUBSTANTIVE_FACT_LINE = /^(?:상품명|제품명|품명|모델명|브랜드|제조자|제조사|판매자|스토어|설명|가격|원가|할인율|쿠폰\s*\/\s*혜택|배송|리뷰\s*수|평점|인증사항|상세페이지\s*참조)\s*[:：]/u;
+const SUBSTANTIVE_FACT_LINE = /^상세\s*근거\s*[:：]\s*/u;
+const SUBSTANTIVE_FACT_LABEL = /^(?:용량|규격|크기|사이즈|가로|세로|높이|폭|깊이|두께|지름|직경|무게|중량|소재|재질|원재료|성분|함량|구성품|구성|수량|개수|색상|전압|정격|소비전력|출력|배터리|충전시간|사용시간|작동시간|풍량|온도|모드|단계|회전각도|방수|방진|호환|원산지|제조국|보관방법|보관조건|유통기한|소비기한|알레르기|세탁방법|세척방법|기능)\s*[:：]/u;
+
+/** Commerce and crawler metadata can contain convincing-looking numbers, but
+ * none of it proves how the product is built or works. Keep it out before both
+ * generation-time evidence grading and saved-draft revalidation. */
+function isNonSubstantiveProductMetadata(value: string): boolean {
+  const normalized = clean(value).normalize("NFKC");
+  if (!normalized) return true;
+  return (
+    /^(?:[\d,.]+\s*원)(?:\s*(?:부터|대|정도))?$/u.test(normalized) ||
+    /^(?:가격|판매가|정가|원가|할인가|최저가|특가|세일가|쿠폰가|혜택가|적립금|배송비)(?:\s|[:：]|$)/u.test(normalized) ||
+    /^(?:할인|쿠폰|적립|혜택|특가|세일|무료배송|오늘출발)(?:\s|[:：]|$).*(?:\d|원|%)/u.test(normalized) ||
+    /^(?:리뷰|후기)\s*(?:수|개수)?\s*[:：]?\s*[\d,.]+\s*(?:개|건)?$/u.test(normalized) ||
+    /^(?:평점|별점)\s*[:：]?\s*[\d.]+(?:\s*\/\s*5)?$/u.test(normalized) ||
+    /^(?:(?:상세|상품|대표|원본|생성)\s*)?(?:이미지|사진|썸네일|컷)\s*[:：]?\s*[\d,.]+\s*(?:개|장|컷)?$/u.test(normalized) ||
+    /^[\d,.]+\s*(?:개|장|컷)\s*(?:이미지|사진|썸네일|컷)$/u.test(normalized)
+  );
+}
+
+/**
+ * 생성 시 쓰는 `라벨: 값` 사실 줄과 재검사 시 쓰는 원본 feature를 같은
+ * 상품 근거로 정규화한다. 상품명·가격·쿠폰 같은 거래 메타데이터는 글에
+ * 사용할 수 있지만 제품의 기능·구조를 입증하지는 않는다.
+ */
+export function normalizeProductSubstanceFeatures(values: string[] | undefined): string[] {
+  return unique((values || []).flatMap((value) => {
+    const normalized = clean(value);
+    if (!normalized || isReviewEvidenceFeature(normalized) || NON_SUBSTANTIVE_FACT_LINE.test(normalized) ||
+        isNonSubstantiveProductMetadata(normalized)) return [];
+    return [normalized.replace(SUBSTANTIVE_FACT_LINE, "")];
+  }), 12);
+}
+
 export function isMeaningfulProductEvidenceFeature(value: string): boolean {
   const normalized = clean(value);
   if (normalized.length < 4 || normalized.length > 220) return false;
+  if (isNonSubstantiveProductMetadata(normalized)) return false;
   if (SEO_ONLY_FEATURE_PATTERN.test(normalized.replace(/\s+/gu, ""))) return false;
   if (/^(?:추천|인기|베스트|신상품|핫딜|특가|무료배송|오늘출발)$/u.test(normalized)) return false;
 
-  const hasMeasurement = /\d[\d,.]*\s*(?:mAh|m|cm|mm|kg|g|W|V|시간|분|단|도|개|엽|%|원)/iu.test(normalized);
-  const hasSpecificationRelation = /(?:최대|약|기준|사용시간|충전시간|소비전력|크기|무게|구성품|회전|각도|풍속|풍량|배터리|리모컨|방수|소재|모드|단계|분리|변환|호환|보증)/u.test(normalized);
-  const hasStructuredPair = /[:：]|\s[-–—]\s/u.test(normalized);
-  const wordCount = normalized.split(/\s+/u).filter(Boolean).length;
-  return hasMeasurement || hasSpecificationRelation || hasStructuredPair || wordCount >= 4;
+  const hasMeasurement = /\d[\d,.]*\s*(?:mAh|rpm|ml|L|m|cm|mm|kg|g|W|V|시간|분|단|도|개|엽|%|원)/iu.test(normalized);
+  const hasSpecificationRelation = /(?:최대|약|기준|사용시간|충전시간|소비전력|크기|무게|사이즈|구성품|구성|헤드|트리머|인디케이터|잠금|회전|각도|풍속|풍량|배터리|리모컨|방수|소재|모드|단계|분리|접이식|칸막이|손잡이|변환|호환|보증)/u.test(normalized);
+  const hasTypedPair = SUBSTANTIVE_FACT_LABEL.test(normalized);
+  return hasMeasurement || hasSpecificationRelation || hasTypedPair;
 }
 
-function meaningfulFeatures(values: string[] | undefined): string[] {
-  return unique((values || []).filter((value) => !isReviewEvidenceFeature(value) && isMeaningfulProductEvidenceFeature(value)), 12);
+function isProductNameFragment(value: string, productName: string): boolean {
+  const nameKey = evidenceFeatureKey(productName);
+  const featureKey = evidenceFeatureKey(value.replace(SUBSTANTIVE_FACT_LINE, ""));
+  if (!nameKey || !featureKey) return false;
+  const tokens = featureKey.split(" ").filter(Boolean);
+  const nameTokens = new Set(nameKey.split(" ").filter(Boolean));
+  return nameKey === featureKey || nameKey.includes(featureKey) ||
+    (tokens.length > 0 && tokens.every((token) => nameTokens.has(token)));
+}
+
+function evidenceFeatureKey(value: string): string {
+  return clean(value).normalize("NFKC").toLocaleLowerCase("ko-KR")
+    .replace(/[^\p{L}\p{N}]+/gu, " ").replace(/\s+/gu, " ").trim();
+}
+
+function meaningfulFeatures(values: string[] | undefined, productName = ""): string[] {
+  return unique(normalizeProductSubstanceFeatures(values)
+    .filter(isMeaningfulProductEvidenceFeature)
+    .filter((value) => !productName || !isProductNameFragment(value, productName)), 12);
+}
+
+function semanticallyUniqueSignals(values: string[], limit = 12): string[] {
+  const output: string[] = [];
+  const keys: string[] = [];
+  for (const value of values.map(clean).filter(Boolean)) {
+    const key = value.normalize("NFKC").toLocaleLowerCase("ko-KR").replace(/[^\p{L}\p{N}]+/gu, "");
+    if (!key || keys.some((existing) => existing.includes(key) || key.includes(existing))) continue;
+    output.push(value);
+    keys.push(key);
+    if (output.length >= limit) break;
+  }
+  return output;
 }
 
 function isReviewEvidenceFeature(value: string): boolean {
@@ -228,15 +299,34 @@ function reviewEvidenceFeatures(values: string[] | undefined): string[] {
     .map((value) => clean(value).replace(/^구매후기\s*근거\s*:\s*/u, "")), 6);
 }
 
-function detectCategory(source: string): ProductReviewCategory {
+function isFoodProductName(name: string): boolean {
+  // Cooking appliances and storage containers can mention food in their use cases.
+  if (/(?:에어프라이어|오븐|그릴|냄비|프라이팬|보관함|용기|도마|청소기|가습기|건조기)/u.test(name)) return false;
+  return /(?:갈비살|소갈비|갈비|소곱창|곱창|막창|대창|소고기|돼지고기|닭고기|김치|밀키트|볶음밥|냉동만두)/u.test(name);
+}
+
+function detectCategory(source: string, productName: string): ProductReviewCategory {
   if (/(?:보냉백|쿨러백|아이스박스|소프트\s*쿨러|냉장\s*가방)/u.test(source)) return "cooler-bag";
   if (/(?:선풍기|써큘레이터|서큘레이터|실링\s*팬|실링팬|파우치팬|손풍기)/u.test(source)) return "fan";
   if (/(?:꼬리뼈|치질|자세교정|방석|좌식\s*쿠션|의자\s*쿠션)/u.test(source)) return "seat-cushion";
   if (/(?:드라이기|헤어\s*드라이어|고데기|스타일러)/u.test(source)) return "hair-care";
+  if (isFoodProductName(productName)) return "food";
   return "generic";
 }
 
 function collectSignals(source: string, category: ProductReviewCategory): string[] {
+  if (category === "food") {
+    // Preserve the words actually supplied by the seller instead of manufacturing
+    // appliance-style labels such as "캠핑 사용 맥락" that the prose cannot match.
+    const patterns = [
+      /\d[\d,.]*\s*(?:kg|g)(?![a-z])/iu,
+      /(?:소갈비살|갈비살|소갈비|LA\s*갈비|la\s*갈비|소곱창|곱창|막창|대창|소고기|돼지고기|닭고기|김치|밀키트|볶음밥|냉동만두)/u,
+      /(?:양념|초벌|비양념|무양념)/u,
+      /(?:냉동|냉장|실온)/u,
+      /(?:캠핑|구이|찜|탕|볶음)/u,
+    ];
+    return unique(patterns.flatMap((pattern) => source.match(pattern)?.[0] || []), 8);
+  }
   const rules: Array<[RegExp, string]> = [
     [/무선/u, "무선 방식"],
     [/(?:타프|천장)/u, "타프·상부 설치 용도"],
@@ -254,11 +344,14 @@ function collectSignals(source: string, category: ProductReviewCategory): string
     [/(?:메모리폼|젤\s*쿠션)/u, "쿠션 소재"],
   ];
   const signals = rules.filter(([pattern]) => pattern.test(source)).map(([, label]) => label);
-  if (category === "fan") signals.unshift("공기 순환용 팬");
-  if (category === "cooler-bag") signals.unshift("식품·음료 보냉 가방");
-  if (category === "seat-cushion") signals.unshift("착석 보조 쿠션");
-  if (category === "hair-care") signals.unshift("헤어 케어 기기");
   return unique(signals, 10);
+}
+
+function isVerifiableProductDescription(description: string, category: ProductReviewCategory): boolean {
+  if (!description) return false;
+  if (isMeaningfulProductEvidenceFeature(description)) return true;
+  if (collectSignals(description, category).length > 0) return true;
+  return /(?:충전식|분리형|접이식|회전형|유무선|냉온풍|자동\s*센서|BLDC|올스텐|로티세리)|(?:밝기|세기|온도|속도|풍량|풍속|각도|높이|길이).{0,12}(?:조절|설정|선택|변경)|(?:모터|센서|필터|브러시|헤드|트레이|칸막이|손잡이|커버|탱크|배터리|리모컨).{0,20}(?:탑재|내장|포함|구성|분리|교체|고정|사용|적용)|(?:가열|살균|건조|세척|흡입|회전|잠금).{0,12}(?:기능|방식|지원|가능)/iu.test(description);
 }
 
 function angle(input: ProductReviewAngle): ProductReviewAngle {
@@ -476,7 +569,7 @@ function hairCareAnalysis(source: string, signals: string[]): Omit<ProductReview
 }
 
 function genericAnalysis(input: ProductEditorialPlanInput, signals: string[]): Omit<ProductReviewAnalysis, "evidenceLevel" | "reviewEvidence"> {
-  const features = meaningfulFeatures(input.features).slice(0, 6);
+  const features = meaningfulFeatures(input.features, input.productName).slice(0, 6);
   const description = meaningfulDescription(input.description, input.productName);
   const strongestFact = features[0] || description || clean(input.productName);
   return {
@@ -498,29 +591,59 @@ function genericAnalysis(input: ProductEditorialPlanInput, signals: string[]): O
   };
 }
 
+function foodAnalysis(input: ProductEditorialPlanInput, signals: string[]): Omit<ProductReviewAnalysis, "evidenceLevel" | "reviewEvidence"> {
+  const fact = signals[0] || clean(input.productName);
+  return {
+    category: "food",
+    categoryLabel: "식품",
+    primaryUse: "확인된 식재료·조리 구성에 따른 식사 준비",
+    verifiedSignals: signals,
+    strengths: [angle({ key: "verified-food-composition", label: "식재료와 구성의 선택 가치", evidence: signals.length ? signals : [fact], readerImpact: ["식사 계획과 구성의 적합성"], appliesWhen: ["확인된 부위·중량·가공 형태가 필요한 경우"], verificationNeeds: ["섭취 인원은 확인된 중량만으로 단정하지 않기"] })],
+    limitations: [angle({ key: "food-source-boundary", label: "확인된 구성과 미확인 식품 정보", evidence: ["수집된 판매 정보 범위"], readerImpact: ["보관과 식사 준비 계획에 필요한 정보 구분"], appliesWhen: ["원산지·원재료·보관 조건이 제공되지 않은 경우"], verificationNeeds: ["원산지", "원재료와 알레르기 표시", "보관 조건", "소비기한"] })],
+    bestFor: ["확인된 식재료와 구성에 맞춰 식사를 준비하려는 사람"],
+    notFor: ["미확인 맛·식감·원산지·섭취 인원을 확정하고 구매하려는 사람"],
+    comparisonAxes: ["부위와 원재료", "표시 중량", "양념·초벌 여부", "보관·조리 조건"],
+    decisionCriteria: ["식사 계획과 표시 구성의 일치", "미확인 식품 조건의 중요도"],
+    unresolvedFacts: ["원산지·원재료·보관·소비기한은 출처에 제공된 항목만 확정", "직접 먹은 후기와 맛·식감은 제공되지 않으면 생성 금지"],
+    forbiddenCategoryTerms: [],
+  };
+}
+
 export function buildProductReviewAnalysis(input: ProductEditorialPlanInput): ProductReviewAnalysis {
   const productName = clean(input.productName) || "상품";
   const description = meaningfulDescription(input.description, productName);
-  const features = meaningfulFeatures(input.features).slice(0, 8);
+  const features = meaningfulFeatures(input.features, productName).slice(0, 8);
   const reviewEvidence = reviewEvidenceFeatures(input.features);
-  const source = clean([productName, description, ...features].join(" "));
-  const category = detectCategory(source);
-  const signals = collectSignals(source, category);
+  const categorySource = clean([productName, description, ...features].join(" "));
+  // The product name can select an editorial category, but it is not evidence
+  // that the named function or form factor is actually present. Derive verified
+  // signals only from seller description and typed/strong specification facts.
+  const category = detectCategory(categorySource, productName);
+  const evidenceDescription = isVerifiableProductDescription(description, category) ? description : "";
+  const evidenceSource = clean([evidenceDescription, ...features].join(" "));
+  const signals = collectSignals(evidenceSource, category);
   const base = category === "fan"
-    ? fanAnalysis(source, signals)
+    ? fanAnalysis(evidenceSource, signals)
     : category === "cooler-bag"
-      ? coolerBagAnalysis(source, signals)
+      ? coolerBagAnalysis(evidenceSource, signals)
       : category === "seat-cushion"
-        ? seatCushionAnalysis(source, signals)
+        ? seatCushionAnalysis(evidenceSource, signals)
         : category === "hair-care"
-          ? hairCareAnalysis(source, signals)
-          : genericAnalysis(input, signals);
+          // Portable wording in the seller-supplied product identity may select
+          // the editorial angle, but it never enters verifiedSignals or the
+          // evidence score calculated below.
+          ? hairCareAnalysis(clean([productName, evidenceDescription].join(" ")), signals)
+          : category === "food"
+            ? foodAnalysis(input, signals)
+            : genericAnalysis(input, signals);
   const measuredFeatureCount = features.filter((value) => /\d[\d,.]*\s*(?:mAh|m|cm|mm|kg|g|W|V|시간|분|단|도|개|엽|%)/iu.test(value)).length;
-  const evidencePoints = Math.min(signals.length, 2) + features.length + measuredFeatureCount + (description ? 1 : 0);
+  const evidencePoints = Math.min(signals.length, 2) + features.length + measuredFeatureCount + (evidenceDescription ? 1 : 0);
   const evidenceLevel = evidencePoints >= 7 && features.length >= 3 ? "rich" : evidencePoints >= 3 && features.length >= 1 ? "usable" : "sparse";
   return {
     ...base,
-    verifiedSignals: unique([...features, ...base.verifiedSignals], 12),
+    // Prefer the concise category fact (for example `1kg`) over a labelled
+    // duplicate (`중량: 1kg`). One source fact must count only once.
+    verifiedSignals: semanticallyUniqueSignals([...base.verifiedSignals, ...features], 12),
     reviewEvidence,
     evidenceLevel,
   };
@@ -537,7 +660,7 @@ export function buildProductVerifiedFactLines(input: ProductEditorialPlanInput):
   return [
     clean(input.productName) ? `상품명: ${clean(input.productName)}` : "",
     description ? `설명: ${description}` : "",
-    ...meaningfulFeatures(input.features).slice(0, 10).map((value) => `상세 근거: ${value}`),
+    ...meaningfulFeatures(input.features, input.productName).slice(0, 10).map((value) => `상세 근거: ${value}`),
     ...reviewEvidenceFeatures(input.features).slice(0, 4).map((value) => `구매후기 원문 근거: ${value}`),
     clean(input.price) ? `가격: ${clean(input.price)}` : "",
     clean(input.originalPrice) ? `원가: ${clean(input.originalPrice)}` : "",
@@ -570,6 +693,8 @@ export function buildProductEditorialPlan(input: ProductEditorialPlanInput): Pro
     blockedClaimRules: [
       "직접 구매·수령·사용·재구매 경험을 제공받지 않았다면 체험 사실을 만들지 않기",
       "출처 없는 가격·할인율·평점·리뷰 수·순위·최저가·성능 수치를 만들지 않기",
+      "상품명·가격·할인·쿠폰·배송 정보를 제품 고유 기능·구조·규격의 대체 근거로 사용하지 않기",
+      "서로 다른 확인 근거를 각각 같은 문단의 사용 이점 또는 제약과 연결하고 한 근거를 여러 판단의 근거처럼 반복하지 않기",
       "제품 자체의 장단점 대신 배송·쿠폰·교환 확인 문구로 섹션을 채우지 않기",
       "상세페이지 문장을 읽어주는 데 그치지 말고 기능이 왜 유용한지와 어떻게 쓰는지를 설명하기",
       "구매후기 원문이 있을 때만 반복 장점을 요약하고 후기 수·평점만으로 만족 내용을 만들지 않기",
@@ -630,13 +755,13 @@ const ROLE_PATTERNS: Record<ProductEditorialRole, RegExp> = {
   "review-hook": /한\s*줄|먼저\s*내린|첫\s*결론|갈리는\s*(?:지점|기준)|먼저\s*보이는/u,
   "product-identity": /어떤\s*제품|제품\s*정체|핵심\s*구조|상품\s*성격|올인원|쪽에\s*가깝|제품(?:은|이에요|입니다)|기기(?:는|예요|입니다)/u,
   "source-evidence": /핵심\s*기능|작동\s*(?:방식|원리)|구조가|기능이|스펙|수치|배터리|소재/u,
-  "primary-strength": /가장\s*분명한\s*장점|핵심\s*장점|주요\s*기능\s*1|선택\s*이유|장점(?:은|이|으로|을)|강점(?:은|이|으로)|줄여\s*주|덜어\s*주|실용적|편의성|의미가\s*있|유용/u,
+  "primary-strength": /가장\s*분명한\s*장점|핵심\s*장점|주요\s*기능\s*1|선택\s*이유|장점(?:은|이|으로|을)|강점(?:은|이|으로)|줄여\s*주|덜어\s*주|실용적|편의성|의미가\s*있|유용|수월|간편/u,
   "secondary-strength": /두\s*번째|또\s*다른\s*강점|주요\s*기능\s*2/u,
   "use-case": /사용\s*(?:장면|방법|순서)|활용|설치|조작|충전|세척|관리|보관|잘\s*맞는\s*상황/u,
   "review-evidence": /구매\s*후기|사용자\s*후기|후기에서|구매자(?:가|는|들)|반복(?:해서|되는)?\s*(?:언급|평가)/u,
   comparison: /비슷한\s*제품|비교|갈리는\s*기준/u,
   limitations: PRODUCT_LIMITATION_PATTERN,
-  fit: /추천\s*대상|비추천|이런\s*분|누구|어떤\s*사람|사람에게\s*(?:더\s*)?맞|잘\s*맞|맞지\s*않|다른\s*제품이\s*낫|큰\s*제품이\s*낫/u,
+  fit: /추천\s*대상|비추천|이런\s*분|누구|어떤\s*사람|사람에게\s*(?:더\s*)?(?:맞|적합|어울)|잘\s*맞|맞지\s*않|다른\s*제품이\s*낫|큰\s*제품이\s*낫/u,
   offer: /가격|혜택|할인/u,
   verdict: /최종|결론|마지막\s*선택|후보에\s*올|선택\s*기준|가격까지\s*놓고|구매\s*기준|고르기\s*전|따져보면\s*선택/u,
 };
@@ -646,9 +771,14 @@ export function inferProductEditorialRole(title: string): ProductEditorialRole {
   return (Object.entries(ROLE_PATTERNS) as Array<[ProductEditorialRole, RegExp]>).find(([, pattern]) => pattern.test(normalized))?.[0] || "source-evidence";
 }
 
-export function assessProductEditorialCoverage(sections: string[]): { coveredRoles: ProductEditorialRole[]; missingCoreRoles: ProductEditorialRole[] } {
+export function assessProductEditorialCoverage(sections: string[], productName = ""): { coveredRoles: ProductEditorialRole[]; missingCoreRoles: ProductEditorialRole[] } {
   const corpus = sections.join("\n");
-  const coveredRoles = (Object.keys(ROLE_PATTERNS) as ProductEditorialRole[]).filter((role) => ROLE_PATTERNS[role].test(corpus));
+  const foodPatterns: Partial<Record<ProductEditorialRole, RegExp>> = isFoodProductName(productName) ? {
+    "product-identity": /(?:갈비|곱창|막창|대창|소고기|돼지고기|닭고기|김치|밀키트|볶음밥|만두).{0,45}(?:구성|식재료|식품|부위|양념|초벌)/u,
+    "source-evidence": /(?:\d[\d,.]*\s*(?:kg|g)|부위|원재료|양념|초벌|냉장|냉동|원산지)/iu,
+    "use-case": /(?:조리|해동|소분|굽|구워|끓|볶|익혀|익히|보관|식사\s*준비)/u,
+  } : {};
+  const coveredRoles = (Object.keys(ROLE_PATTERNS) as ProductEditorialRole[]).filter((role) => ROLE_PATTERNS[role].test(corpus) || foodPatterns[role]?.test(corpus));
   const coreRoles: ProductEditorialRole[] = ["product-identity", "source-evidence", "primary-strength", "use-case", "limitations", "fit", "verdict"];
   return { coveredRoles, missingCoreRoles: coreRoles.filter((role) => !coveredRoles.includes(role)) };
 }
@@ -726,35 +856,36 @@ export function assessProductReviewSubstance(input: {
     sentences.some((sentence) => signalCoveredBySentence(signal, sentence))
   );
   const signalEvidenceAvailable = analysis.verifiedSignals.length > 0;
-  // 텍스트 신호가 하나도 없으면(키워드 태그뿐인 상품) 상품명 토큰을 앵커로 삼아
-  // "상품 사실 → 판단" 문장을 센다. 없는 신호를 요구해 0점을 확정하지 않기 위해서다.
-  const productNameAnchors = unique(clean(input.productName).split(/[^\p{L}\p{N}]+/u), 8)
-    .filter((token) => token.length >= 2 && !/(?:상품|제품|기능|추천|세트|정품|공식|무료배송)/u.test(token));
-  const judgementAnchors = signalEvidenceAvailable ? analysis.verifiedSignals : productNameAnchors;
+  // 상품명은 신원 확인에는 쓰지만 기능·구조 근거로 승격하지 않는다. 출처가
+  // 키워드 태그뿐이면 새 원고를 반복 생성해도 품질 근거가 생기지 않는다.
+  const judgementAnchors = analysis.verifiedSignals;
   const coveredReviewEvidence = analysis.reviewEvidence.filter((evidence) => {
     const tokens = unique(evidence.split(/[^\p{L}\p{N}]+/u), 16)
       .filter((token) => token.length >= 2 && !/(?:제품|상품|사용|구매|정말|너무|좋아요|좋습니다)/u.test(token));
     return tokens.some((token) => body.includes(token));
   });
   const usageInstructionCount = sentences.filter((sentence) =>
-    /(?:사용\s*(?:방법|순서)|설치|조작|버튼|모드|충전|세척|관리|보관|연결|착용|분리|조절|조리|섭취|해동|굽|끓|바르|도포|흡수|두고\s*쓰|놓고\s*쓰)/u.test(sentence)
+    /(?:사용\s*(?:방법|순서)|설치|조작|버튼|모드|충전|세척|관리|보관|연결|착용|분리|조절|조리|섭취|해동|굽|구워|소분|끓|볶|익혀|익히|바르|도포|흡수|두고\s*쓰|놓고\s*쓰)/u.test(sentence)
   ).length;
   const detailReadingCount = sentences.filter((sentence) =>
     /(?:상세\s*페이지|상세\s*정보|상품\s*설명에는|판매\s*페이지|사진에는|이미지에는|적혀\s*있|표시되어\s*있|확인됩니다)/u.test(sentence)
   ).length;
   const benefitPattern = /(?:장점|강점|선택\s*이유|효율|편의|편리|편하|편해|유리|실용|도움|유용|줄(?:여|어|일)|덜(?:어|\s*번거|\s*필요)|넓(?:혀|힐)|수월|간편|쉽게|쉬워|확보)/u;
-  const fitPattern = /(?:추천\s*대상|잘\s*맞|비추천\s*대상|맞지\s*않|어울|적합|사람에게.*(?:맞|실용|유용)|(?:분|사용자|가정|환경|경우|용도)(?:에게|에는|에|라면|이라면).*(?:맞|편리|유용|실용|낫)|(?:라면|다면).*(?:추천|후보|낫|맞))/u;
+  const fitPattern = /(?:추천\s*대상|잘\s*맞|비추천\s*대상|맞지\s*않|어울|적합|사람에게.*(?:맞|실용|유용|후보|추천)|(?:분|사용자|가정|환경|경우|용도)(?:에게|에는|에|라면|이라면).*(?:맞|편리|유용|실용|낫|후보)|(?:라면|다면).*(?:추천|후보|낫|맞))/u;
   const judgementPattern = /(?:장점|강점|선택\s*이유|효율|편의|유리|실용|중요|의미|가치|도움|현실적|유용|어울|후보|줄(?:여|어|일)|늘(?:려|어|릴)|대신|반면|아쉬|부담|한계|제약|잘\s*맞|적합|비추천|더\s*낫)/u;
-  const hasAnchor = (sentence: string) => judgementAnchors.some((signal) => signalCoveredBySentence(signal, sentence));
+  const matchingAnchors = (sentence: string) => judgementAnchors.filter((signal) => signalCoveredBySentence(signal, sentence));
   // Only the immediately preceding fact can support an explanation. Do not
   // flatten sections, skip intervening sentences, or chain inferred benefits.
-  const groundedJudgements = paragraphSentences.flatMap((group) => group.filter((sentence, index) => {
+  const groundedJudgements = paragraphSentences.flatMap((group) => group.flatMap((sentence, index) => {
     // Bare labels (even with a product token) are not explanatory prose.
-    if (!/(?:다|요|죠)["'”’]?$/u.test(sentence)) return false;
-    if (sentence.length < 8 || !(judgementPattern.test(sentence) || benefitPattern.test(sentence) || fitPattern.test(sentence))) return false;
+    if (!/(?:다|요|죠)["'”’]?$/u.test(sentence)) return [];
+    if (sentence.length < 8 || !(judgementPattern.test(sentence) || benefitPattern.test(sentence) || fitPattern.test(sentence))) return [];
     const previous = group[index - 1];
     const explanatory = /(?:그래서|따라서|덕분에|이\s*(?:구조|구성|기능|방식|점)|그만큼|때문|줄|덜|편리|수월|실용|유용|유리|어울|적합|잘\s*맞)/u.test(sentence);
-    return hasAnchor(sentence) || Boolean(previous && hasAnchor(previous) && explanatory);
+    const anchors = matchingAnchors(sentence);
+    const previousAnchors = previous && explanatory ? matchingAnchors(previous) : [];
+    const groundedSignals = anchors.length > 0 ? anchors : previousAnchors;
+    return groundedSignals.length > 0 ? [{ sentence, groundedSignals }] : [];
   }));
   const evidenceJudgementCount = groundedJudgements.length;
   const requiredSignalCount = signalEvidenceAvailable
@@ -764,14 +895,17 @@ export function assessProductReviewSubstance(input: {
       )
     : 0;
   const requiredEvidenceJudgementCount = analysis.evidenceLevel === "rich" ? 3 : analysis.evidenceLevel === "usable" ? 2 : 1;
+  const groundedSignals = unique(groundedJudgements.flatMap((item) => item.groundedSignals), 12);
+  const groundedSignalCount = groundedSignals.length;
+  const requiredGroundedSignalCount = Math.min(requiredEvidenceJudgementCount, requiredSignalCount);
   const repeats = repeatedSentenceCount(input.sections);
   const checks: Array<[boolean, string]> = [
-    [groundedJudgements.some((sentence) => benefitPattern.test(sentence)), "구체적인 장점"],
+    [groundedJudgements.some((item) => benefitPattern.test(item.sentence)), "구체적인 장점"],
     [hasProductLimitationLanguage(body), "제품 자체의 단점·제약"],
-    [groundedJudgements.some((sentence) => fitPattern.test(sentence)), "추천·비추천 대상"],
+    [groundedJudgements.some((item) => fitPattern.test(item.sentence)), "추천·비추천 대상"],
     [hasConditionalProductVerdict(input.sections), "조건부 최종 결론"],
     [coveredSignals.length >= requiredSignalCount, "상품 고유 구조·기능 근거"],
-    [evidenceJudgementCount >= requiredEvidenceJudgementCount, "근거와 사용 가치가 연결된 판단"],
+    [evidenceJudgementCount >= requiredEvidenceJudgementCount && groundedSignalCount >= requiredGroundedSignalCount, "서로 다른 근거와 사용 가치가 연결된 판단"],
     [usageInstructionCount >= 2, "구체적인 사용·설치·관리 방법"],
     [analysis.reviewEvidence.length === 0 || (coveredReviewEvidence.length >= 1 && /후기|구매자|사용자/u.test(body)), "구매후기 근거의 장점 요약"],
     [detailReadingCount / sentenceCount <= 0.15, "상세페이지 낭독형 문장 제거"],
@@ -795,5 +929,8 @@ export function assessProductReviewSubstance(input: {
     detailReadingCount,
     coveredReviewEvidence,
     signalEvidenceAvailable,
+    sourceEvidenceLevel: analysis.evidenceLevel,
+    groundedSignalCount,
+    requiredGroundedSignalCount,
   };
 }

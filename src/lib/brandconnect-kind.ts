@@ -48,10 +48,14 @@ export function getConfiguredConnectUrl(kind: ConnectKind, requestedUrl?: string
 export function assertConnectUrlKind(kind: ConnectKind, value: string): void {
   let url: URL;
   try { url = new URL(value); } catch { throw new Error('CONNECT_URL_INVALID: 브랜드커넥트 주소 형식이 올바르지 않습니다.'); }
-  if (url.protocol !== 'https:' || url.hostname !== 'brandconnect.naver.com' || url.username || url.password) {
-    throw new Error('CONNECT_URL_INVALID: https://brandconnect.naver.com 주소만 사용할 수 있습니다.');
+  if (url.protocol !== 'https:' || url.username || url.password) {
+    throw new Error('CONNECT_URL_INVALID: https 주소만 사용할 수 있습니다.');
   }
-  const isTravel = /\/travel-connect(?:\/|$)/.test(url.pathname);
+  const isTravelProduct = kind === 'travel' && url.hostname === 'pkgtour.naver.com' && /^\/products(?:\/|$)/.test(url.pathname);
+  if (url.hostname !== 'brandconnect.naver.com' && !isTravelProduct) {
+    throw new Error('CONNECT_URL_INVALID: 쇼핑커넥트는 brandconnect.naver.com, 여행커넥트 상품은 pkgtour.naver.com/products 주소만 사용할 수 있습니다.');
+  }
+  const isTravel = isTravelProduct || /\/travel-connect(?:\/|$)/.test(url.pathname);
   const isShopping = /\/affiliate(?:\/|$)/.test(url.pathname);
   if ((kind === 'shopping' && isTravel) || (kind === 'travel' && isShopping)) {
     throw new Error(`CONNECT_KIND_URL_MISMATCH: ${CONNECT_KIND_LABELS[kind]} 선택과 입력 주소의 상품 종류가 다릅니다. 주소를 지우고 해당 종류의 목록을 다시 불러오세요.`);
@@ -95,4 +99,3 @@ export function buildCaptureRequiredPayload(contract: ConnectContract) {
     message: `${label}의 목록 응답 계약이 아직 캡처되지 않았습니다. 로그인된 세션에서 "${label} 계약 자동 캡처"를 한 번 실행하면 이후에는 자동으로 목록을 불러옵니다.`,
   };
 }
-

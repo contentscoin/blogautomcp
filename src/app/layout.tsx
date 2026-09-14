@@ -4,6 +4,7 @@ import { ThemeProvider } from "@/components/ThemeProvider";
 import { RemoteAgentPoller } from "@/components/RemoteAgentPoller";
 import { ActivationGate } from "@/components/ActivationGate";
 import { AdminSessionGate } from "@/components/AdminSessionGate";
+import { MaterialJobProgress } from "@/components/MaterialJobProgress";
 
 export const metadata: Metadata = {
   title: "네이버 블로그 자동화 | V6",
@@ -22,6 +23,7 @@ export default function RootLayout({
           <AdminSessionGate>
             <ActivationGate>
               <RemoteAgentPoller />
+              <MaterialJobProgress />
               {children}
             </ActivationGate>
           </AdminSessionGate>

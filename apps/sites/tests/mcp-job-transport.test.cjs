@@ -6,13 +6,14 @@ const vm = require('node:vm');
 const ts = require('typescript');
 const root = path.resolve(__dirname, '..');
 
-function load(file, mocks = {}) {
+function load(file, mocks = {}, tail = '') {
   const filename = path.join(root, file);
-  const code = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const code = ts.transpileModule(fs.readFileSync(filename, 'utf8') + tail, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const module = { exports: {} };
   const localRequire = (name) => {
     if (name in mocks) return mocks[name];
     if (name.startsWith('@/')) return load(`${name.slice(2)}.ts`, mocks);
+    if (name.startsWith('.')) return load(path.relative(root, path.resolve(path.dirname(filename), `${name}.ts`)), mocks);
     return require(name);
   };
   vm.runInThisContext(`(function(require,module,exports){${code}\n})`, { filename })(localRequire, module, module.exports);
@@ -50,6 +51,23 @@ test('uncertain publication never advises replay; terminal jobs stop polling', (
   assert.equal(jobGuidance('FAILED', 'AGENT_LOST').pollAfterMs, null);
   assert.equal(jobGuidance('RUNNING', null, true).terminal, false);
   assert.equal(resultPage(null, 0, 10).text, 'null');
+});
+
+test('agent status keeps bounded background image work counters without arbitrary nested data', () => {
+  const { sanitizeStatusSnapshot, parseStatusJson } = load('lib/jobs.ts');
+  const stored = sanitizeStatusSnapshot({
+    appVersion: '1.3.49',
+    backgroundWork: {
+      publishing: 0, drafting: 0, processes: 1, imageGeneration: 1, busy: true,
+      ownerToken: 'must-not-leak', processKinds: ['private-script.ts'], extra: { secret: true },
+    },
+  });
+  assert.deepEqual(parseStatusJson(stored), {
+    appVersion: '1.3.49',
+    backgroundWork: { publishing: 0, drafting: 0, processes: 1, imageGeneration: 1, busy: true },
+  });
+  assert.ok(!stored.includes('must-not-leak'));
+  assert.ok(!stored.includes('private-script.ts'));
 });
 
 let reads = 0;
@@ -94,6 +112,23 @@ async function call(userId, scope, name, args) {
   const request = new Request('https://example.com/api/mcp', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }) });
   return (await route.handleMcpRequest(request, userId, scope)).json();
 }
+
+test('draft repair tool guidance preserves images and reruns current approval quality', async () => {
+  const request = new Request('https://example.com/api/mcp', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+  });
+  const payload = await (await route.handleMcpRequest(request, 'owner', 'mcp:read mcp:write')).json();
+  const tools = payload.result.tools;
+  const submit = tools.find(tool => tool.name === 'post_submit_draft');
+  const revise = tools.find(tool => tool.name === 'post_revise_draft');
+  const approve = tools.find(tool => tool.name === 'post_approve_draft');
+  assert.match(submit.description, /post_revise_draft/u);
+  assert.match(submit.description, /전체 패키지를 교체하지 마세요/u);
+  assert.match(revise.description, /기존 검수 이미지·슬롯·생성 진행 상태는 유지/u);
+  assert.match(approve.description, /현재 품질평가기로 다시 검사/u);
+});
 
 test('bug report tool requires write scope and explicit consent; lookup requires read scope', async () => {
   const args = { summary: '동기화 오류', idempotencyKey: 'report-test', confirmed: true };
@@ -225,4 +260,75 @@ test('SQLite route integration: duplicate completion, late heartbeat and expired
     assert.equal((await (await send(heartbeat, {})).json()).data.active, false);
     assert.equal(db.prepare('SELECT status FROM agent_jobs').get().status, 'FAILED');
   } finally { db.close(); }
+});
+
+test('multilingual result larger than inline limit is uploaded, authenticated, hash verified and read losslessly', async () => {
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE devices(id TEXT PRIMARY KEY,status TEXT,last_seen_at INTEGER);
+    CREATE TABLE agent_jobs(id TEXT PRIMARY KEY,user_id TEXT,claimed_by_device_id TEXT,status TEXT,progress INTEGER,result_json TEXT,error_code TEXT,error_message TEXT,updated_at INTEGER,finished_at INTEGER,lease_until INTEGER,stage TEXT);
+    CREATE TABLE agent_job_result_chunks(job_id TEXT,user_id TEXT,result_hash TEXT,chunk_index INTEGER,content TEXT,created_at INTEGER,PRIMARY KEY(job_id,result_hash,chunk_index));
+    CREATE TABLE audit_events(id TEXT,actor_user_id TEXT,target_user_id TEXT,action TEXT,metadata_json TEXT,created_at INTEGER);
+    INSERT INTO devices(id,status) VALUES('device1','ACTIVE');`);
+  const d1 = {
+    prepare(sql) { return { bind(...args) { return {
+      async run() { return { meta: { changes: Number(db.prepare(sql).run(...args).changes) } }; },
+      async first() { return db.prepare(sql).get(...args) ?? null; },
+      async all() { return { results: db.prepare(sql).all(...args) }; },
+    }; } }; }, async batch(statements) { return Promise.all(statements.map(statement => statement.run())); },
+  };
+  let device = { id: 'device1', userId: 'owner' };
+  const shared = { ...mocks, '@/lib/device': { authenticateDevice: async () => device }, '@/lib/crypto': { newId: () => 'audit1' }, '@/db': { getD1: () => d1 } };
+  const chunk = load('app/api/agent/jobs/[id]/result-chunk/route.ts', shared);
+  const complete = load('app/api/agent/jobs/[id]/complete/route.ts', shared);
+  const { readCompletionResult } = load('lib/completion-result.ts', shared);
+  const { completionWireBody } = load('../../src/lib/remote-agent-completion.ts');
+  const id = 'job_1234567890123456';
+  const send = (handler, body) => handler.POST(new Request('https://site/api/agent/jobs', { method: 'POST', body: JSON.stringify(body) }), { params: Promise.resolve({ id }) });
+  const result = { markdown: '한글😀\\"\n'.repeat(120000) };
+  try {
+    db.prepare('INSERT INTO agent_jobs(id,user_id,claimed_by_device_id,status) VALUES(?,?,?,?)').run(id, 'owner', 'device1', 'RUNNING');
+    let uploads = 0;
+    const wire = await completionWireBody({ status: 'SUCCEEDED', result }, async value => {
+      uploads++;
+      assert.equal((await send(chunk, value)).status, 200);
+      assert.equal((await send(chunk, value)).status, 200, 'same chunk retry is idempotent');
+    });
+    assert.ok(uploads > 1);
+    assert.equal(wire.result, undefined);
+    assert.equal((await send(complete, wire)).status, 200);
+    assert.equal((await (await send(complete, wire)).json()).data.reused, true);
+    const stored = db.prepare('SELECT result_json AS resultJson FROM agent_jobs').get().resultJson;
+    assert.ok(stored.length < 500, 'D1 job row stores only the verified reference');
+    assert.deepEqual(JSON.parse(await readCompletionResult(d1, 'owner', id, stored)), result);
+    await assert.rejects(readCompletionResult(d1, 'other', id, stored), /INCOMPLETE/);
+    device = { id: 'otherDevice', userId: 'owner' };
+    assert.equal((await send(chunk, { sha256: wire.resultReference.sha256, index: 0, content: 'changed' })).status, 409);
+    device = { id: 'device1', userId: 'owner' };
+    assert.equal((await send(chunk, { sha256: wire.resultReference.sha256, index: 0, content: 'changed' })).status, 409);
+    db.prepare('UPDATE agent_job_result_chunks SET content=? WHERE chunk_index=0').run('corrupted');
+    await assert.rejects(readCompletionResult(d1, 'owner', id, stored), /INTEGRITY/);
+    assert.equal((await send(complete, wire)).status, 422);
+  } finally { db.close(); }
+});
+
+test('actual enqueue reuses legacy key order but rejects changed revision', async () => {
+  const original = { idempotencyKey: 'selected-material-fixture', materials: [{ revision: 'revision-a', productId: 'product-1' }], confirmed: true, publishMode: 'now' };
+  const reordered = { publishMode: 'now', confirmed: true, materials: [{ productId: 'product-1', revision: 'revision-a' }], idempotencyKey: 'selected-material-fixture' };
+  const route = load('app/api/mcp/[credential]/route.ts', { ...mocks, '@/db': { getD1: () => ({ prepare: () => ({ bind: () => ({ first: async () => ({ id: 'job_existing', type: 'MATERIALS_PUBLISH', inputJson: JSON.stringify(original), status: 'SUCCEEDED' }) }) }) }) } }, '\nexport const testEnqueue = enqueue;');
+  const tool = { jobType: 'MATERIALS_PUBLISH' };
+  assert.equal((await route.testEnqueue('owner', tool, reordered)).structuredContent.reused, true);
+  assert.equal((await route.testEnqueue('owner', tool, { ...reordered, materials: [{ productId: 'product-1', revision: 'changed' }] })).structuredContent.code, 'IDEMPOTENCY_CONFLICT');
+});
+
+test('selected materials need revision, unique IDs, scheduled date and write scope', async () => {
+  const args = { materials: [{ productId: 'product-1', revision: 'revision-a' }], publishMode: 'now', confirmed: true, idempotencyKey: 'selected-material-fixture' };
+  assert.equal((await call('owner', 'mcp:read', 'materials_publish', args)).result.structuredContent.code, 'INSUFFICIENT_SCOPE');
+  for (const changed of [
+    { ...args, materials: [{ productId: 'product-1' }] },
+    { ...args, materials: [args.materials[0], args.materials[0]] },
+    { ...args, publishMode: 'schedule' },
+    { ...args, publishMode: 'schedule', scheduledAt: '2026-02-31' },
+    { ...args, confirmed: false },
+  ]) assert.equal((await call('owner', 'mcp:write', 'materials_publish', changed)).result.structuredContent.code, 'INVALID_ARGUMENT');
 });

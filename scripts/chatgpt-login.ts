@@ -354,7 +354,18 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error: unknown) => {
+async function checkRuntime(): Promise<void> {
+  const browser = await chromium.launch({ channel: BROWSER_CHANNEL, headless: true });
+  try {
+    fs.accessSync(STORAGE_PATH, fs.constants.R_OK | fs.constants.W_OK);
+    console.log(JSON.stringify({ ok: true, browserChannel: BROWSER_CHANNEL }));
+  } finally {
+    await browser.close();
+  }
+}
+
+const entry = process.argv.includes("--check-runtime") ? checkRuntime() : main();
+entry.catch((error: unknown) => {
   console.error("❌ ChatGPT 로그인 설정 실패:", error instanceof Error ? error.message : error);
   process.exit(1);
 });

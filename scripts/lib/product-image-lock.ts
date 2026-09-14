@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
+import { preserveProductPhotoSource } from "./product-photo-provenance";
 import {
   buildThumbnailOverlayV2,
   generateThumbnailCropPreviews,
@@ -146,6 +147,7 @@ export async function createLockedProductThumbnail(options: {
     .png({ compressionLevel: 9 })
     .toFile(outputPath);
   await generateThumbnailCropPreviews(outputPath, options.outputDir);
+  preserveProductPhotoSource({ sourcePath: options.sourcePath, outputPath, segmented: true });
   return { outputPath, lock };
 }
 
@@ -185,6 +187,7 @@ export async function createLockedProductThumbnailOnBackground(options: {
     .png({ compressionLevel: 9 })
     .toFile(outputPath);
   await generateThumbnailCropPreviews(outputPath, options.outputDir);
+  preserveProductPhotoSource({ sourcePath: options.sourcePath, outputPath, segmented: true });
   return { outputPath, lock };
 }
 
@@ -228,6 +231,7 @@ export async function createLockedProductEditorialScene(options: {
     .composite([{ input: shadow }, { input: product, left, top }])
     .png({ compressionLevel: 9 })
     .toFile(outputPath);
+  preserveProductPhotoSource({ sourcePath: options.sourcePath, outputPath, segmented: true });
   return { outputPath, lock };
 }
 
@@ -259,12 +263,7 @@ export async function createOriginalProductPhotoOnBackground(options: {
     .composite([{ input: card, left, top }]).png().toBuffer();
   fs.writeFileSync(outputPath, bytes);
   const sourceSha256 = sha256File(options.sourcePath);
-  fs.writeFileSync(`${outputPath}.source.json`, JSON.stringify({
-    version: "original-photo-background/v1", sourcePath: path.resolve(options.sourcePath),
-    sourceSha256, backgroundSha256: sha256File(options.backgroundPath),
-    outputSha256: sha256File(outputPath), provenance: "EDITORIAL_CARD",
-    photoTreatment: "whole-photo-resize-only", segmented: false,
-  }, null, 2));
+  preserveProductPhotoSource({ sourcePath: options.sourcePath, outputPath, segmented: false });
   return { outputPath, sourceSha256 };
 }
 
@@ -298,5 +297,6 @@ export async function createOriginalProductPhotoThumbnail(options: {
     .png({ compressionLevel: 9 })
     .toFile(outputPath);
   await generateThumbnailCropPreviews(outputPath, options.outputDir);
+  preserveProductPhotoSource({ sourcePath: options.sourcePath, outputPath, segmented: false });
   return { outputPath, sourceSha256: sha256File(options.sourcePath) };
 }

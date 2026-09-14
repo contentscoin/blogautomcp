@@ -1,4 +1,4 @@
-import { index, integer, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 export const users = sqliteTable('users', {
   id: text('id').primaryKey(),
@@ -91,6 +91,15 @@ export const agentJobs = sqliteTable('agent_jobs', {
   stageMessage: text('stage_message'),
   cancelRequested: integer('cancel_requested').notNull().default(0),
 }, (table) => [index('idx_agent_jobs_user_status_created').on(table.userId, table.status, table.createdAt), uniqueIndex('idx_agent_jobs_user_idempotency').on(table.userId, table.idempotencyKey)]);
+
+export const agentJobResultChunks = sqliteTable('agent_job_result_chunks', {
+  jobId: text('job_id').notNull().references(() => agentJobs.id, { onDelete: 'cascade' }),
+  userId: text('user_id').notNull(),
+  resultHash: text('result_hash').notNull(),
+  chunkIndex: integer('chunk_index').notNull(),
+  content: text('content').notNull(),
+  createdAt: integer('created_at').notNull(),
+}, table => [primaryKey({ columns: [table.jobId, table.resultHash, table.chunkIndex] })]);
 
 export const auditEvents = sqliteTable('audit_events', {
   id: text('id').primaryKey(),

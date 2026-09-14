@@ -214,6 +214,7 @@ function runSimpleAgent(
 }
 
 async function main() {
+  if (!process.env.BULK_TARGET_IDS_JSON) throw new Error("자동 상품 선택 발행은 지원하지 않습니다. 소재 보관함에서 준비된 소재를 선택하세요.");
   const prisma = new PrismaClient();
   const options = parseArgs(process.argv.slice(2));
   const requestedStartDate = options.startDate;
@@ -234,7 +235,7 @@ async function main() {
         ...createdAfterWhere,
         connectKind: options.connectKind,
         status: "READY",
-        scheduledPublishAt: { not: null },
+        ...(startDate ? {} : { scheduledPublishAt: { not: null } }),
       },
       orderBy: [{ scheduledPublishAt: "asc" }, { createdAt: "asc" }],
       select: {

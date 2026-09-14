@@ -4,10 +4,17 @@
  */
 export function isDraftEditorialQualityPassed(quality?: {
   canPublish: boolean;
+  code?: string;
+  score?: number;
+  blockers?: Array<{ code: string }>;
+  quality?: { score: number; passScore?: number; categories?: Array<{ status: string }> };
   signals: Array<{ key: string; status: string }>;
 } | null): boolean {
   if (!quality) return false;
-  if (quality.canPublish) return true;
-  const failures = quality.signals.filter((signal) => signal.status === "fail");
-  return failures.length > 0 && failures.every((signal) => signal.key === "composition-quality");
+  if (quality.signals.some(signal => signal.status === "fail" && signal.key !== "composition-quality")) return false;
+  if (quality.blockers?.some(blocker => blocker.code !== "composition-quality")) return false;
+  if (quality.quality?.categories?.some(category => category.status === "fail")) return false;
+  if (quality.quality?.passScore !== undefined && quality.quality.score < quality.quality.passScore) return false;
+  if (quality.code && quality.code !== "ok" && quality.code !== "composition-quality") return false;
+  return quality.canPublish || quality.signals.some(signal => signal.status === "fail" && signal.key === "composition-quality");
 }

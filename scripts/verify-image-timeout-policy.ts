@@ -26,12 +26,16 @@ vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve("scripts/lib/
 });
 const api = loaded.exports as typeof BrowserApi;
 
-function fixture(settings: { readyAt?: number; generating?: boolean; staleStop?: boolean; changingArtifact?: boolean; authAt?: number; securityAt?: number; observationCost?: number } = {}) {
+function fixture(settings: { readyAt?: number; generating?: boolean; staleStop?: boolean; changingArtifact?: boolean; authAt?: number; securityAt?: number; observationCost?: number; refusal?: string } = {}) {
   let elapsed = 0;
   const ready = () => settings.readyAt !== undefined && elapsed >= settings.readyAt;
   const auth = () => settings.authAt !== undefined && elapsed >= settings.authAt;
   const locator = (selector: string) => ({
     first() { return this; },
+    nth() { return this; },
+    locator,
+    count: async () => settings.refusal ? 1 : 0,
+    innerText: async () => settings.refusal || "",
     isVisible: async () => selector.includes("prompt-textarea") ? !auth()
       : selector === "login" ? auth()
       : /stop-button|Stop|result-streaming/.test(selector) ? !!settings.staleStop || !!settings.generating && !ready() : false,
@@ -56,6 +60,11 @@ function fixture(settings: { readyAt?: number; generating?: boolean; staleStop?:
 async function main() {
   const wait = (f: ReturnType<typeof fixture>, base = 300_000, hard = 600_000) =>
     api.waitForChatGPTImageArtifacts(f.page, base, { hardTimeoutMs: hard, now: f.now });
+  const refused = fixture({ refusal: "I can't generate this image due to third-party similarity and copyright policy." });
+  await assert.rejects(wait(refused), /IMAGE_PROVIDER_REFUSED/);
+  assert.equal(refused.now(), 0, "explicit refusal terminates before the long idle deadline");
+  assert.equal(api.isExplicitImageProviderRefusal("저작권 정책 때문에 이미지를 생성할 수 없습니다."), true);
+  assert.equal(api.isExplicitImageProviderRefusal("저작권 정책을 준수하며 이미지를 생성합니다."), false);
   const normal = fixture({ readyAt: 90_000, generating: true });
   assert.equal(await wait(normal), 1);
   assert.equal(normal.now(), 93_000, "completes after >60s without consuming whole budget");
@@ -102,16 +111,19 @@ async function main() {
   const ambiguous = fixture();
   let clicks = 0;
   let presses = 0;
+  let filled = "";
   const originalLocator = ambiguous.page.locator.bind(ambiguous.page);
   ambiguous.page.locator = ((selector: string) => ({
     first() { return this; },
     isVisible: async () => selector.includes("send-button") || await originalLocator(selector).isVisible(),
     waitFor: async () => {},
+    fill: async (value: string) => { filled = value; },
     click: async () => { if (selector.includes("send-button")) { clicks += 1; throw new Error("click dispatched but acknowledgement timed out"); } },
     press: async () => { presses += 1; },
   })) as unknown as typeof ambiguous.page.locator;
   Object.defineProperty(ambiguous.page, "keyboard", { value: { type: async () => {} } });
-  await assert.rejects(api.submitPromptToChatGPT(ambiguous.page, "fixture"), /acknowledgement timed out/);
+  await assert.rejects(api.submitPromptToChatGPT(ambiguous.page, "fixture\nsecond line"), /acknowledgement timed out/);
+  assert.equal(filled, "fixture\nsecond line", "bulk input preserves prompt line breaks");
   assert.equal(clicks, 1);
   assert.equal(presses, 0, "ambiguous send click never retries with Enter");
 

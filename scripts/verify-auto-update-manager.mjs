@@ -185,7 +185,8 @@ try {
     authHeaderAttached: true,
     updateDetected: true,
     waitsForIdle: readinessChecks === 3,
-    silentInstallRequested: updater.installArguments.join(',') === 'true,true',
+    silentInstallRequested: updater.installArguments[0] === true,
+    relaunchRequested: updater.installArguments[1] === true,
     tokenRedacted: true,
   }));
 } finally {

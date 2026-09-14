@@ -1,10 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { copyProductPhotoSource, readProductPhotoSource } from "../../scripts/lib/product-photo-provenance";
 import { getAppDataDir } from "../../scripts/lib/app-paths";
 import type { BrandLinkContentReadiness } from "../../scripts/lib/brandlink-content-readiness";
 import type { ProductSnapshot } from "./draft-context-snapshot";
 import type { SavedTextQcMetadata } from "./brand-post-revalidation";
+import { atomicWriteTextFile } from "./atomic-text-file";
+import { isDraftEditorialQualityPassed } from "./brand-post-quality-display";
 import {
   getPostCompositionContract,
   refreshPostDocumentQuality,
@@ -24,6 +27,9 @@ export interface BrandPostPackageImageAsset {
   role: "hero" | "body";
   sectionId?: string | null;
   imageIntent?: string;
+  slotId?: string;
+  creationMethod?: "source" | "local-composite" | "remote-generated" | "source-with-generated-background";
+  remoteGenerated?: boolean;
   provenance?: "ORIGINAL" | "LOCKED_PRODUCT" | "GENERATED_BACKGROUND" | "EDITORIAL_CARD";
 }
 
@@ -63,11 +69,14 @@ interface BrandPostPackageManifestBase {
   title: string;
   generationSource?: "AI" | "PREPARED_APPROVED";
   markdownPath: string;
+  markdownSha256?: string;
   heroImagePath: string;
   bodyImagePaths: string[];
   imageAssets?: BrandPostPackageImageAsset[];
   hashtags: string[];
   imagePolicy: "LOCKED_PRODUCT_OR_ORIGINAL" | "TRAVEL_EDITORIAL";
+  /** Original photos meet coverage by default; generation is an explicit opt-in contract. */
+  imageRequirements?: { policy: "verified-source-first" | "generated-required" };
   createdAt: string;
   approvedAt: string | null;
   contentQuality?: BrandLinkContentReadiness | null;
@@ -81,6 +90,10 @@ interface BrandPostPackageManifestBase {
     remaining: number;
     errors: string[];
     updatedAt: string;
+    ownerPid?: number;
+    ownerToken?: string;
+    heartbeatAt?: string;
+    recoveryState?: "owner-exited" | "owner-unknown";
   };
   /** Spec-first 파이프라인 산출물(부분 수정에 필요). 미리보기에는 싣지 않는다. */
   postSpec?: unknown;
@@ -326,39 +339,148 @@ export function readBrandPostPackage(brandLinkId: string, options: { migrate?: b
 function hasUnfinishedSectionImages(manifest: BrandPostPackageManifestV2): boolean {
   // Execution metadata is optional (MCP/default-off paths omit it). The
   // section contract and actual asset provenance always determine coverage.
-  return manifest.imageGeneration?.status === "running" ||
-    packagePreview(manifest).imageSlots.some((slot) => slot.missing > 0 || slot.generationMissing > 0);
+  return getBrandPostImageGenerationState(manifest)?.status === "running" ||
+    getBrandPostImageSlots(manifest).some((slot) => slot.missing > 0 || slot.generationMissing > 0);
+}
+
+/** A dead owner is evidence of an interrupted job; age alone is not. Never writes on GET. */
+export function getBrandPostImageGenerationState(manifest: BrandPostPackageManifest) {
+  const state = manifest.imageGeneration;
+  if (!state || state.status !== "running") return state;
+  const active = (globalThis as typeof globalThis & { brandPostImageJobs?: Set<string> }).brandPostImageJobs?.has(manifest.brandLinkId);
+  if (active) return state;
+  if (!state.ownerPid || !Number.isInteger(state.ownerPid) || state.ownerPid < 1) return { ...state, recoveryState: "owner-unknown" as const };
+  let exited = state.ownerPid === process.pid;
+  if (!exited) {
+    try { process.kill(state.ownerPid, 0); }
+    catch (error) { exited = (error as NodeJS.ErrnoException).code === "ESRCH"; }
+  }
+  return exited ? { ...state, status: "incomplete" as const, recoveryState: "owner-exited" as const,
+    errors: [...new Set([...state.errors, "IMAGE_OWNER_EXITED: 이전 이미지 준비 프로세스가 종료되었습니다. 저장된 결과부터 복구합니다."])] } : state;
+}
+
+function isValidPackageImage(asset: BrandPostPackageImageAsset): boolean {
+  try {
+    const stat = fs.statSync(asset.path);
+    return stat.isFile() && stat.size > 0 && stat.size <= 24 * 1024 * 1024 &&
+      /^[a-f0-9]{64}$/u.test(asset.sha256) && sha256File(asset.path) === asset.sha256;
+  } catch { return false; }
+}
+
+export function getBrandPostImageSlots(manifest: BrandPostPackageManifest) {
+  const assets = normalizePackageImageAssets(manifest);
+  const byPath = new Map(assets.filter(isValidPackageImage).map(asset => [path.resolve(asset.path), asset]));
+  return manifest.version === "brand-post-package/v2" ? manifest.composition.sections.map(section => {
+    const { min: minimum, max: maximum } = sectionImageBounds(getPostCompositionContract(manifest.connectKind), section);
+    const sectionAssets = [...new Set(section.imagePaths.map(file => path.resolve(file)))]
+      .flatMap(file => {
+        const asset = byPath.get(file);
+        return asset && (!asset.sectionId || asset.sectionId === section.id) ? [{ ...asset, assetKey: asset.sha256,
+          previewUrl: `/api/brandlinks/${encodeURIComponent(manifest.brandLinkId)}/draft/images?asset=${asset.sha256}` }] : [];
+      });
+    const originalCount = sectionAssets.filter(asset => asset.provenance === "ORIGINAL" || asset.creationMethod === "source").length;
+    const generatedCount = sectionAssets.filter(asset => asset.remoteGenerated === true ||
+      asset.remoteGenerated === undefined && asset.provenance === "GENERATED_BACKGROUND").length;
+    const generatedMinimum = manifest.imageRequirements?.policy === "generated-required" && maximum > 0 ? minimum : 0;
+    return {
+      sectionId: section.id, title: section.title, intent: section.imageIntent,
+      minimum, recommended: Math.min(maximum, Math.max(minimum, 1)), maximum,
+      count: sectionAssets.length, missing: Math.max(0, minimum - sectionAssets.length),
+      originalCount, generatedCount, generatedMinimum,
+      generationMissing: Math.max(0, generatedMinimum - generatedCount), assets: sectionAssets,
+    };
+  }) : [];
+}
+
+/** One read-only decision used by material selection, preview and approval. */
+export function evaluateBrandPostPackageReadiness(manifest: BrandPostPackageManifest) {
+  const blockers: Array<{ code: string; reason: string; sectionId?: string }> = [];
+  const imageGeneration = getBrandPostImageGenerationState(manifest);
+  try {
+    const stat = fs.statSync(manifest.markdownPath);
+    if (!stat.isFile() || stat.size === 0 || stat.size > 8 * 1024 * 1024 || !fs.readFileSync(manifest.markdownPath, "utf8").trim()) throw new Error("missing");
+    if (manifest.markdownSha256 && sha256File(manifest.markdownPath) !== manifest.markdownSha256) throw new Error("changed");
+  } catch { blockers.push({ code: "markdown-invalid", reason: "저장 본문 파일이 없거나 검수한 본문과 일치하지 않습니다." }); }
+  if (manifest.version === "brand-post-package/v2") {
+    const normalize = (text: string) => text.replace(/\s+/gu, " ").trim();
+    const inconsistent = manifest.title !== manifest.composition.title || manifest.composition.sections.some(section => {
+      const rendered = manifest.composition.renderNodes.filter(node => (node.kind === "heading" || node.kind === "quotation" || node.kind === "paragraph") && node.sectionId === section.id)
+        .map(node => "text" in node ? node.text : "").join("\n");
+      return normalize(rendered) !== normalize([section.title, ...section.body].join("\n"));
+    });
+    if (inconsistent) blockers.push({ code: "content-render-mismatch", reason: "검수 본문과 발행할 렌더 문서가 일치하지 않습니다." });
+  }
+  const imageSlots = getBrandPostImageSlots(manifest);
+  if (manifest.version === "brand-post-package/v2") {
+    for (const section of manifest.composition.sections) {
+      const expected = [...new Set(section.imagePaths.map(file => path.resolve(file)))].sort();
+      const rendered = manifest.composition.renderNodes
+        .filter(node => node.kind === "image" && node.sectionId === section.id)
+        .map(node => node.kind === "image" ? path.resolve(node.assetPath) : "").sort();
+      if (JSON.stringify(expected) !== JSON.stringify(rendered)) {
+        blockers.push({ code: "image-render-mismatch", sectionId: section.id,
+          reason: `이미지 · ${section.title}: 저장된 섹션 배치와 발행 이미지가 일치하지 않습니다. 이미지 배치를 복구하세요.` });
+      }
+    }
+  }
+  const assets = normalizePackageImageAssets(manifest);
+  const generatedOutputUse = new Map<string, BrandPostPackageImageAsset[]>();
+  for (const asset of assets) {
+    const source = readProductPhotoSource(asset.path);
+    if (source && !source.segmented && asset.creationMethod !== "source") blockers.push({
+      code: "image-full-frame-overlay",
+      sectionId: asset.sectionId || undefined,
+      reason: "이미지 · 상품 전체 사각형 사진을 생성 배경 위에 카드처럼 합성한 이미지는 승인할 수 없습니다.",
+    });
+    if (!asset.sectionId || !(asset.remoteGenerated === true || asset.creationMethod === "source-with-generated-background" || asset.creationMethod === "remote-generated")) continue;
+    const uses = generatedOutputUse.get(asset.sha256) || [];
+    uses.push(asset);
+    generatedOutputUse.set(asset.sha256, uses);
+  }
+  for (const uses of generatedOutputUse.values()) {
+    if (uses.length < 2) continue;
+    for (const asset of uses) blockers.push({
+      code: "image-output-duplicate",
+      sectionId: asset.sectionId || undefined,
+      reason: "이미지 · 최종 결과가 다른 파트의 이미지와 완전히 같습니다. 슬롯별로 서로 다른 결과 이미지가 필요합니다.",
+    });
+  }
+  const validPaths = new Set(assets.filter(isValidPackageImage).map(asset => path.resolve(asset.path)));
+  if (!validPaths.has(path.resolve(manifest.heroImagePath))) blockers.push({ code: "hero-image-invalid", reason: "대표 이미지 파일이 없거나 저장된 해시와 일치하지 않습니다." });
+  const composition = manifest.version === "brand-post-package/v2" ? refreshPostDocumentQuality({
+    ...manifest.composition,
+    sections: manifest.composition.sections.map(section => ({ ...section,
+      imagePaths: imageSlots.find(slot => slot.sectionId === section.id)?.assets.map(asset => asset.path) || [],
+    })),
+    renderNodes: manifest.composition.renderNodes.filter(node => node.kind !== "image" || validPaths.has(path.resolve(node.assetPath))),
+  }) : null;
+  const editorialPassed = manifest.version === "brand-post-package/v1" ? manifest.contentQuality?.canPublish !== false : isDraftEditorialQualityPassed(manifest.contentQuality);
+  const contentPassed = editorialPassed && !blockers.some(blocker => blocker.code === "markdown-invalid" || blocker.code === "content-render-mismatch");
+  const contentScore = manifest.contentQuality?.quality?.score ?? manifest.contentQuality?.score ?? 0;
+  const compositionPassed = !composition || composition.qualityReport.canAutoPublish;
+  if (manifest.version === "brand-post-package/v2" && manifest.generationSource !== "AI") blockers.push({ code: "generation-source", reason: "AI 원고 출처가 확인되지 않았습니다." });
+  if (!editorialPassed) {
+    const quality = manifest.contentQuality;
+    const failures = [
+      ...(quality?.signals || []).filter(signal => signal.status === "fail" && signal.key !== "composition-quality").map(signal => signal.label),
+      ...(quality?.quality?.categories || []).filter(category => category.status === "fail").map(category => category.label),
+    ];
+    blockers.push({ code: "content-quality", reason: failures.length ? `원고 · ${[...new Set(failures)].join(", ")}` : quality?.reason || quality?.summary || "원고 품질검사 결과가 없거나 통과하지 못했습니다." });
+  }
+  if (!compositionPassed) blockers.push(...(composition!.qualityReport.blockers.length ? composition!.qualityReport.blockers : ["구성 품질검사를 통과하지 못했습니다."]).map(reason => ({ code: "composition-quality", reason })));
+  if (imageGeneration?.status === "running") blockers.push({ code: imageGeneration.recoveryState === "owner-unknown" ? "image-owner-unknown" : "images-running", reason: imageGeneration.recoveryState === "owner-unknown" ? "이전 이미지 작업의 실행 주체를 확인할 수 없습니다. 기존 생성 결과의 복구가 필요합니다." : "이미지 준비 작업이 진행 중입니다." });
+  for (const slot of imageSlots) {
+    if (slot.missing > 0) blockers.push({ code: "image-coverage", sectionId: slot.sectionId, reason: `이미지 · ${slot.title}: 검증된 이미지 ${slot.missing}장 필요` });
+    if (slot.generationMissing > 0) blockers.push({ code: "generation-required", sectionId: slot.sectionId, reason: `이미지 · ${slot.title}: 지정된 생성 이미지 ${slot.generationMissing}장 필요` });
+  }
+  return { canApprove: blockers.length === 0, blockers, imageSlots, imageGeneration, contentPassed, contentScore, compositionPassed, composition };
 }
 
 export function approveBrandPostPackage(brandLinkId: string): BrandPostPackageManifest {
-  const manifestPath = getBrandPostPackageManifestPath(brandLinkId);
-  const manifest = readBrandPostPackage(brandLinkId);
+  const manifest = readBrandPostPackage(brandLinkId, { migrate: false });
   if (!manifest) throw new Error("승인할 고품질 초안이 없습니다.");
-  if (manifest.version === "brand-post-package/v2" && manifest.generationSource !== "AI") {
-    throw new Error("AI 생성 출처가 확인되지 않은 초안은 승인할 수 없습니다. 새 초안을 생성해 주세요.");
-  }
-  if (manifest.version === "brand-post-package/v2" && hasUnfinishedSectionImages(manifest)) {
-    throw new Error("섹션 이미지 품질 게이트가 미완료입니다. 이미지 탭에서 남은 파트를 보충하세요. 원고를 다시 작성할 필요는 없습니다.");
-  }
-  if (
-    manifest.version === "brand-post-package/v2" &&
-    manifest.composition.qualityReport.preset === "PREMIUM" &&
-    !manifest.composition.qualityReport.canAutoPublish
-  ) {
-    throw new Error(
-      `프리미엄 초안 품질 게이트를 통과하지 못했습니다: ${manifest.composition.qualityReport.blockers.join(" ")}`,
-    );
-  }
-  if (
-    manifest.version === "brand-post-package/v2" &&
-    manifest.composition.qualityReport.preset === "PREMIUM" &&
-    manifest.contentQuality &&
-    !manifest.contentQuality.canPublish
-  ) {
-    throw new Error(
-      `원고 내용 품질검사를 통과하지 못했습니다: ${manifest.contentQuality.reason || manifest.contentQuality.summary}`,
-    );
-  }
+  const approval = evaluateBrandPostPackageReadiness(manifest);
+  if (!approval.canApprove) throw new Error(approval.blockers.map(blocker => blocker.reason).join(" "));
   const approved: BrandPostPackageManifest = {
     ...manifest,
     generationSource:
@@ -367,8 +489,7 @@ export function approveBrandPostPackage(brandLinkId: string): BrandPostPackageMa
         : manifest.generationSource,
     approvedAt: new Date().toISOString(),
   };
-  fs.writeFileSync(manifestPath, JSON.stringify(approved, null, 2), "utf8");
-  return approved;
+  return writeBrandPostPackageManifest(approved);
 }
 
 export function packagePreview(manifest: BrandPostPackageManifest) {
@@ -391,35 +512,8 @@ export function packagePreview(manifest: BrandPostPackageManifest) {
     assetKey: asset.sha256,
     previewUrl: `/api/brandlinks/${encodeURIComponent(manifest.brandLinkId)}/draft/images?asset=${encodeURIComponent(asset.sha256)}`,
   }));
-  const assetByPath = new Map(imageAssets.map((asset) => [path.resolve(asset.path), asset]));
-  const imageSlots = manifest.version === "brand-post-package/v2"
-    ? manifest.composition.sections.map((section) => {
-        const { min: minimum, max: maximum } = sectionImageBounds(
-          getPostCompositionContract(manifest.connectKind),
-          section,
-        );
-        const sectionAssets = section.imagePaths
-          .map((imagePath) => assetByPath.get(path.resolve(imagePath)))
-          .filter(Boolean);
-        const originalCount = sectionAssets.filter((asset) => !asset?.provenance || asset.provenance === "ORIGINAL").length;
-        const generatedCount = sectionAssets.length - originalCount;
-        const generatedMinimum = maximum > 0 ? Math.max(1, minimum) : 0;
-        return {
-          sectionId: section.id,
-          title: section.title,
-          intent: section.imageIntent,
-          minimum,
-          recommended: Math.min(maximum, Math.max(minimum, 1)),
-          maximum,
-          count: sectionAssets.length,
-          missing: Math.max(0, minimum - sectionAssets.length),
-          originalCount,
-          generatedCount,
-          generationMissing: Math.max(0, generatedMinimum - generatedCount),
-          assets: sectionAssets,
-        };
-      })
-    : [];
+  const approval = evaluateBrandPostPackageReadiness(manifest);
+  const imageSlots = approval.imageSlots;
   // 스펙/초안 원본은 크고(MCP 결과 900KB 제한) 화면에 필요 없어 미리보기에서는 뺀다.
   const { postSpec: _postSpec, specDraft: _specDraft, sourceSnapshot: _sourceSnapshot, ...rest } = manifest;
   void _sourceSnapshot;
@@ -428,11 +522,19 @@ export function packagePreview(manifest: BrandPostPackageManifest) {
   const sectionOutline = manifest.version === "brand-post-package/v2"
     ? manifest.composition.sections.map((section, index) => ({ index, id: section.id, title: section.title, chars: section.characterCount, images: section.imagePaths.length }))
     : null;
-  const readiness =
-    manifest.specValidation ??
-    readinessFromContentQuality(manifest.contentQuality, manifest.generationSource || "AI") ??
-    (manifest.version === "brand-post-package/v2" ? readinessFromQualityReport(manifest.composition.qualityReport, manifest.generationSource || "AI") : null);
-  return { ...rest, imageAssets, imageSlots, markdown, heroPreviewDataUrl, sectionOutline, readiness, imageCount: 1 + manifest.bodyImagePaths.length };
+  const readiness: BrandPostPackageReadiness = {
+    status: approval.canApprove ? "READY" as const : "BLOCKED" as const,
+    score: approval.contentScore,
+    summary: approval.canApprove ? "준비된 소재의 원고·이미지 검수 통과" : approval.blockers.map(blocker => blocker.reason).join(" "),
+    signals: approval.blockers.map(blocker => ({ key: blocker.code, label: blocker.reason, status: "fail" as const })),
+    repairTargets: approval.blockers.map(blocker => ({ sectionIndex: blocker.sectionId ? manifest.version === "brand-post-package/v2" ? manifest.composition.sections.findIndex(section => section.id === blocker.sectionId) : null : null,
+      code: blocker.code, reason: blocker.reason, priority: "P0", instruction: blocker.reason })),
+    generationSource: manifest.generationSource || "UNKNOWN", attempts: 1,
+  };
+  const imageCount = approval.composition
+    ? approval.composition.renderNodes.filter(node => node.kind === "image").length
+    : imageAssets.filter(isValidPackageImage).length;
+  return { ...rest, imageGeneration: approval.imageGeneration, ...(approval.composition ? { composition: approval.composition } : {}), imageAssets, imageSlots, markdown, heroPreviewDataUrl, sectionOutline, readiness, approval, imageCount };
 }
 
 function sha256File(filePath: string): string {
@@ -464,12 +566,9 @@ export function normalizePackageImageAssets(
       role: index === 0 ? "hero" : "body",
       sectionId: renderImage?.sectionId || null,
       imageIntent: renderImage?.altText || "",
-      provenance:
-        index === 0
-          ? manifest.connectKind === "SHOPPING"
-            ? "LOCKED_PRODUCT"
-            : "GENERATED_BACKGROUND"
-          : "ORIGINAL",
+      // Legacy role/type cannot prove how an image was made. Leave unknown
+      // provenance unknown instead of labelling a local hero as AI-generated.
+      provenance: undefined,
     };
   });
 }
@@ -478,15 +577,7 @@ export function writeBrandPostPackageManifest(
   manifest: BrandPostPackageManifest,
 ): BrandPostPackageManifest {
   const manifestPath = getBrandPostPackageManifestPath(manifest.brandLinkId);
-  fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
-  const temporaryPath = `${manifestPath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(temporaryPath, JSON.stringify(manifest, null, 2), "utf8");
-  try {
-    fs.renameSync(temporaryPath, manifestPath);
-  } catch {
-    fs.copyFileSync(temporaryPath, manifestPath);
-    fs.rmSync(temporaryPath, { force: true });
-  }
+  atomicWriteTextFile(manifestPath, JSON.stringify(manifest, null, 2));
   return manifest;
 }
 
@@ -584,6 +675,9 @@ export function applyGeneratedBrandPostImage(options: {
   replaceAssetKey?: string;
   provenance: NonNullable<BrandPostPackageImageAsset["provenance"]>;
   imageIntent?: string;
+  slotId?: string;
+  creationMethod?: BrandPostPackageImageAsset["creationMethod"];
+  remoteGenerated?: boolean;
 }): BrandPostPackageManifestV2 {
   const manifest = readBrandPostPackage(options.brandLinkId);
   if (!manifest || manifest.version !== "brand-post-package/v2") {
@@ -608,6 +702,7 @@ export function applyGeneratedBrandPostImage(options: {
   fs.mkdirSync(imageDir, { recursive: true });
   const destination = path.join(imageDir, `generated-${Date.now()}-${crypto.randomUUID()}${extension}`);
   fs.copyFileSync(options.generatedPath, destination);
+  copyProductPhotoSource(options.generatedPath, destination);
   const destinationPath = path.resolve(destination);
   const availablePaths = new Set(assets.map((asset) => path.resolve(asset.path)));
   let composition = {
@@ -631,6 +726,9 @@ export function applyGeneratedBrandPostImage(options: {
       sourcePath: path.resolve(options.generatedPath),
       sha256: sha256File(destinationPath),
       provenance: options.provenance,
+      slotId: options.slotId || existing.slotId,
+      creationMethod: options.creationMethod,
+      remoteGenerated: options.remoteGenerated ?? options.provenance === "GENERATED_BACKGROUND",
       imageIntent: options.imageIntent || existing.imageIntent,
     };
     nextAssets = assets.map((asset) => asset === existing ? replacement : asset);
@@ -668,6 +766,9 @@ export function applyGeneratedBrandPostImage(options: {
       sectionId,
       imageIntent: options.imageIntent || section.imageIntent,
       provenance: options.provenance,
+      slotId: options.slotId,
+      creationMethod: options.creationMethod,
+      remoteGenerated: options.remoteGenerated ?? options.provenance === "GENERATED_BACKGROUND",
     };
     nextAssets = [...assets, asset];
     bodyImagePaths = [...bodyImagePaths, destinationPath];

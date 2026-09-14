@@ -1,8 +1,13 @@
 import {
   assessProductEditorialCoverage,
   assessProductReviewSubstance,
+  normalizeProductSubstanceFeatures,
 } from "./product-editorial-plan";
-import { assessTravelReviewSubstance } from "./travel-content";
+import {
+  assessTravelFeatureCoverage,
+  assessTravelReviewSubstance,
+  type TravelSourceCoverage,
+} from "./travel-content";
 import { assessGenericLanguage, assessRepetition } from "./draft-quality-signals";
 import type {
   BrandConnectKind,
@@ -109,6 +114,15 @@ export interface BrandLinkQualityReport {
     guidanceRatio: number;
     generalRatio: number;
     threshold: number;
+  };
+  /** 상품 원고의 자동 승인에 사용한 저장 출처 근거. 거래 메타데이터는 제외한다. */
+  sourceEvidence?: {
+    level: "rich" | "usable" | "sparse" | "travel";
+    sufficient: boolean;
+    coveredCount: number;
+    requiredCount: number;
+    groundedCount: number;
+    requiredGroundedCount: number;
   };
 }
 
@@ -229,11 +243,17 @@ function normalizeText(value: string | null | undefined): string {
 }
 
 function normalizeLoose(value: string): string {
-  return normalizeText(value)
+  return normalizeText(value).normalize("NFKC")
     .toLowerCase()
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/** Korean brand/model names keep their identity when an editor adds word spaces. */
+export function containsProductToken(text: string, token: string): boolean {
+  const identity = normalizeLoose(token).replace(/\s+/gu, "");
+  return identity.length > 0 && normalizeLoose(text).replace(/\s+/gu, "").includes(identity);
 }
 
 export function getProductTokens(productName: string): string[] {
@@ -274,6 +294,13 @@ function ratioScore(actual: number, required: number, maxScore: number): number 
   return Math.round(Math.min(1, actual / required) * maxScore);
 }
 
+export type TravelSourceEvidenceProfile = TravelSourceCoverage;
+
+/** 여행 제목·가격은 일정 근거가 아니다. 수집기가 만든 명시적 방문지/일차별 일정만 인정한다. */
+export function assessTravelSourceEvidence(sourceFeatures: string[] | undefined): TravelSourceEvidenceProfile {
+  return assessTravelFeatureCoverage(sourceFeatures);
+}
+
 function buildQualityReport(input: {
   isTravel: boolean;
   bodySections: string[];
@@ -281,6 +308,7 @@ function buildQualityReport(input: {
   sourceEvidenceCoveragePass: boolean;
   editorialMissingCoreRoles: string[];
   evidenceTokens: string[];
+  sourceEvidenceLevel?: "rich" | "usable" | "sparse";
 }): QualityComputation {
   const { isTravel, reviewSubstance } = input;
   const body = input.bodySections.join("\n");
@@ -301,25 +329,42 @@ function buildQualityReport(input: {
     status: categoryStatus(evidenceFail ? 0 : 25, 25, evidenceFail),
     notes: evidenceFail
       ? [isTravel
-          ? `핵심 방문지 ${coveredEvidence}/${requiredEvidence}곳만 본문에 등장합니다.`
-          : `확인된 기능·수치 ${coveredEvidence}/${requiredEvidence}개만 본문에 등장합니다.`]
+          ? !input.sourceEvidenceCoveragePass
+            ? "저장 출처의 핵심 방문지·일차별 일정 근거가 부족합니다. 원고 재작성 전에 여행상품 상세를 다시 수집해야 합니다."
+            : `핵심 방문지 ${coveredEvidence}/${requiredEvidence}곳만 본문에 등장합니다.`
+          : input.sourceEvidenceLevel === "sparse"
+            ? "저장 출처의 상품 고유 기능·구조·규격이 부족합니다. 원고 재작성 전에 상세 정보를 다시 수집해야 합니다."
+            : `확인된 기능·수치 ${coveredEvidence}/${requiredEvidence}개만 본문에 등장합니다.`]
       : "coveredSignals" in reviewSubstance && !reviewSubstance.signalEvidenceAvailable
         ? ["확인된 기능·수치 신호가 없어 상품 고유 근거를 요구하지 않았습니다. 상세정보 동기화 후 재검사를 권장합니다."]
         : [],
   };
 
   // 2. 사용 장면·여행 장면 연결
-  const linkageFail = reviewSubstance.evidenceJudgementCount < reviewSubstance.requiredEvidenceJudgementCount;
+  const groundedSignalCount = "groundedSignalCount" in reviewSubstance
+    ? reviewSubstance.groundedSignalCount
+    : reviewSubstance.evidenceJudgementCount;
+  const requiredGroundedSignalCount = "requiredGroundedSignalCount" in reviewSubstance
+    ? reviewSubstance.requiredGroundedSignalCount
+    : reviewSubstance.requiredEvidenceJudgementCount;
+  const linkageUnavailable = !isTravel && input.sourceEvidenceLevel === "sparse" &&
+    "signalEvidenceAvailable" in reviewSubstance && !reviewSubstance.signalEvidenceAvailable;
+  const linkageFail = !linkageUnavailable && (reviewSubstance.evidenceJudgementCount < reviewSubstance.requiredEvidenceJudgementCount ||
+    groundedSignalCount < requiredGroundedSignalCount);
   const sceneLinkage: BrandLinkQualityCategory = {
     key: "sceneLinkage",
     label: isTravel ? "여행지 사실-현장 장면 연결" : "기능-사용 장면 연결",
     maxScore: 20,
-    score: linkageFail
+    score: linkageUnavailable
+      ? 0
+      : linkageFail
       ? Math.min(11, ratioScore(reviewSubstance.evidenceJudgementCount, reviewSubstance.requiredEvidenceJudgementCount, 20))
       : 20,
-    status: categoryStatus(linkageFail ? 0 : 20, 20, linkageFail),
-    notes: linkageFail
-      ? [`근거를 장면·판단으로 연결한 문장 ${reviewSubstance.evidenceJudgementCount}/${reviewSubstance.requiredEvidenceJudgementCount}개`]
+    status: linkageUnavailable ? "warn" : categoryStatus(linkageFail ? 0 : 20, 20, linkageFail),
+    notes: linkageUnavailable
+      ? ["상품 근거를 다시 수집한 뒤 기능과 사용 장면의 연결을 검사합니다."]
+      : linkageFail
+      ? [`근거를 장면·판단으로 연결한 문장 ${reviewSubstance.evidenceJudgementCount}/${reviewSubstance.requiredEvidenceJudgementCount}개, 서로 다른 근거 ${groundedSignalCount}/${requiredGroundedSignalCount}개`]
       : [],
   };
 
@@ -333,7 +378,7 @@ function buildQualityReport(input: {
     const readingOk = readingRatio <= 0.15;
     specificityScore = (usageOk ? 7 : Math.min(4, reviewSubstance.usageInstructionCount * 3)) + (readingOk ? 8 : readingRatio <= 0.25 ? 4 : 0);
     specificityFail = !usageOk || !readingOk;
-    if (!usageOk) specificityNotes.push("설치·조작·관리 같은 구체적인 사용 방법 문장이 2개 미만입니다.");
+    if (!usageOk) specificityNotes.push("사용·조리·보관·관리 등 상품에 맞는 구체적인 활용 방법 문장이 2개 미만입니다.");
     if (!readingOk) specificityNotes.push("상세페이지를 읽어주는 문장 비율이 높습니다.");
   } else {
     const parts: Array<[number, number, string]> = [
@@ -432,6 +477,14 @@ function buildQualityReport(input: {
         generalRatio: Number(generic.generalRatio.toFixed(3)),
         threshold: guidanceThreshold,
       },
+      sourceEvidence: {
+        level: isTravel ? "travel" : input.sourceEvidenceLevel || "sparse",
+        sufficient: input.sourceEvidenceCoveragePass,
+        coveredCount: coveredEvidence,
+        requiredCount: requiredEvidence,
+        groundedCount: groundedSignalCount,
+        requiredGroundedCount: requiredGroundedSignalCount,
+      },
     },
     failingCategories: categories.filter((item) => item.status === "fail"),
   };
@@ -508,20 +561,22 @@ export function getBrandLinkContentReadiness(
   const compositionContract = getPostCompositionContract(connectKind);
   const sectionMinimum = compositionContract.targetSections.min;
   const characterMinimum = compositionContract.targetCharacters.min;
-  const sections = input.sections.map((section) => normalizeText(section)).filter(Boolean);
+  // Paragraph boundaries constrain which fact can support an adjacent explanation.
+  // Flattening them also lets section headings impersonate source-backed prose.
+  const sections = input.sections.map((section) => section.replace(/\r\n?/gu, "\n").trim()).filter(Boolean);
   const bodySections = sections.slice(0, -1);
   const fullBody = sections.join("\n");
   const corpus = normalizeLoose([title, fullBody, input.hashtags.join(" ")].join(" "));
   const titleCorpus = normalizeLoose(title);
   const bodyCorpus = normalizeLoose(fullBody);
   const productTokens = getProductTokens(input.productName);
-  const coveredProductTokens = productTokens.filter((token) => corpus.includes(token));
+  const coveredProductTokens = productTokens.filter((token) => containsProductToken(corpus, token));
   const missingProductTokens = productTokens.filter((token) => !coveredProductTokens.includes(token));
   const titleHasProductToken =
-    productTokens.length === 0 || productTokens.some((token) => titleCorpus.includes(token));
+    productTokens.length === 0 || productTokens.some((token) => containsProductToken(titleCorpus, token));
   const bodyHasProductToken =
-    productTokens.length === 0 || productTokens.some((token) => bodyCorpus.includes(token));
-  const totalLength = sections.reduce((sum, section) => sum + section.length, 0);
+    productTokens.length === 0 || productTokens.some((token) => containsProductToken(bodyCorpus, token));
+  const totalLength = sections.reduce((sum, section) => sum + normalizeText(section).length, 0);
   const mainSectionCount = Math.max(0, sections.length - 1);
   const disclosureText = sections[sections.length - 1] || "";
   // 쇼핑커넥트/여행커넥트 모두 인정한다. 여행 글의 고지 문구는 "여행 커넥트"라서
@@ -547,7 +602,7 @@ export function getBrandLinkContentReadiness(
   const requireRepresentativeImage = input.requireRepresentativeImage !== false && !editorialMode;
   const editorialCoverage = isTravel
     ? assessTravelEditorialCoverage(bodySections)
-    : assessProductEditorialCoverage(bodySections);
+    : assessProductEditorialCoverage(bodySections, input.productName);
   const reviewSubstance = isTravel
     ? assessTravelReviewSubstance({
         productName: input.productName,
@@ -564,14 +619,21 @@ export function getBrandLinkContentReadiness(
   const categoryMismatchTerms = "categoryMismatchTerms" in reviewSubstance
     ? reviewSubstance.categoryMismatchTerms
     : Array.from(new Set((bodySections.join("\n").match(new RegExp(TRAVEL_SHOPPING_INTRUSION_PATTERN.source, "gu")) || []).map(normalizeText)));
-  const sourceEvidenceCoveragePass = isTravel || (
-    "coveredSignals" in reviewSubstance &&
-    reviewSubstance.coveredSignals.length >= reviewSubstance.requiredSignalCount
-  );
+  const sourceEvidenceLevel = "sourceEvidenceLevel" in reviewSubstance
+    ? reviewSubstance.sourceEvidenceLevel
+    : undefined;
+  const travelSourceEvidence = assessTravelSourceEvidence(input.sourceFeatures);
+  const sourceEvidenceCoveragePass = isTravel
+    ? travelSourceEvidence.sufficient
+    : (
+        "coveredSignals" in reviewSubstance &&
+        sourceEvidenceLevel !== "sparse" &&
+        reviewSubstance.coveredSignals.length >= reviewSubstance.requiredSignalCount
+      );
   const evidenceTokens = [
     ...productTokens,
     ...("coveredSignals" in reviewSubstance ? reviewSubstance.coveredSignals : reviewSubstance.coveredPlaces),
-    ...(input.sourceFeatures || []),
+    ...(isTravel ? (input.sourceFeatures || []) : normalizeProductSubstanceFeatures(input.sourceFeatures)),
   ];
   const { quality, failingCategories } = buildQualityReport({
     isTravel,
@@ -580,6 +642,7 @@ export function getBrandLinkContentReadiness(
     sourceEvidenceCoveragePass,
     editorialMissingCoreRoles: editorialCoverage.missingCoreRoles,
     evidenceTokens,
+    sourceEvidenceLevel,
   });
   const categoryByKey = new Map(quality.categories.map((item) => [item.key, item] as const));
   const statusOf = (key: BrandLinkQualityCategoryKey): BrandLinkContentReadinessSignal["status"] =>
@@ -849,7 +912,9 @@ export function getBrandLinkContentReadiness(
         ].filter(Boolean);
         reason = deficits.join(" ").trim();
       } else {
-        reason = `제품 고유 기능·수치를 사용 장면의 이점·제약으로 해석한 근거가 부족합니다 (판단 ${reviewSubstance.evidenceJudgementCount}/${reviewSubstance.requiredEvidenceJudgementCount}${sourceCoverageText}).`;
+        reason = sourceEvidenceLevel === "sparse" && evidence.status === "fail"
+          ? evidence.notes.join(" ")
+          : `제품 고유 기능·수치를 사용 장면의 이점·제약으로 해석한 근거가 부족합니다 (판단 ${reviewSubstance.evidenceJudgementCount}/${reviewSubstance.requiredEvidenceJudgementCount}${sourceCoverageText}).`;
       }
     } else {
       const travelRoleLabels: Record<string, string> = {

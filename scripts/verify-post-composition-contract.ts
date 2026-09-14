@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  stableFreeformSectionId,
   SHOPPING_POST_CONTRACT_V1,
   TRAVEL_POST_CONTRACT_V1,
   normalizeLegacyFreeformImageRules,
@@ -15,6 +16,12 @@ function buildSections(prefix: string, count: number, paragraphLength: number): 
   });
 }
 
+function reviewedBindings(kind: "SHOPPING" | "TRAVEL", sections: string[], images: string[]) {
+  const bindings: Record<string, string[]> = Object.fromEntries(sections.map(section => [stableFreeformSectionId(kind, section.split("\n")[0]), []]));
+  const keys = Object.keys(bindings);
+  images.slice(1).forEach((image, index) => bindings[keys[index % keys.length]].push(image));
+  return bindings;
+}
 const shoppingImages = Array.from({ length: 12 }, (_, index) => `C:/fixture/shopping-${index}.png`);
 const shopping = resolvePostDocument({
   connectKind: "SHOPPING",
@@ -25,6 +32,7 @@ const shopping = resolvePostDocument({
   ],
   hashtags: ["쇼핑커넥트", "구매가이드", "상품정보"],
   imagePaths: shoppingImages,
+  sectionImageBindings: reviewedBindings("SHOPPING", buildSections("쇼핑 섹션", SHOPPING_POST_CONTRACT_V1.sections.length, 4), shoppingImages),
   connectUrl: "https://brandconnect.naver.com/shopping-fixture",
   qualityPreset: "STANDARD",
 });
@@ -57,6 +65,7 @@ const travel = resolvePostDocument({
   ],
   hashtags: ["여행커넥트", "타이베이여행", "패키지여행"],
   imagePaths: travelImages,
+  sectionImageBindings: reviewedBindings("TRAVEL", buildSections("여행 섹션", TRAVEL_POST_CONTRACT_V1.sections.length, 8), travelImages),
   connectUrl: "https://brandconnect.naver.com/travel-fixture",
   qualityPreset: "PREMIUM",
 });
@@ -101,6 +110,7 @@ const travelAtMaximum = resolvePostDocument({
   sections: buildSections("여행 최대 섹션", TRAVEL_POST_CONTRACT_V1.sections.length, 8),
   hashtags: ["여행커넥트", "여행이미지", "패키지여행"],
   imagePaths: travelMaxImages,
+  sectionImageBindings: reviewedBindings("TRAVEL", buildSections("여행 최대 섹션", TRAVEL_POST_CONTRACT_V1.sections.length, 8), travelMaxImages),
   connectUrl: "https://brandconnect.naver.com/travel-max-fixture",
   qualityPreset: "PREMIUM",
 });
@@ -170,10 +180,10 @@ assert.deepEqual(planned.sections[3].imagePaths.slice(0, 2), [planImages[2], pla
 assert.equal(planned.sections[3].imageIntent, "야시장 풍경", "이미지 의도는 실제 섹션 것을 쓴다");
 assert.equal(planned.sections[3].imageMin, 1);
 assert.equal(planned.sections[3].imageMax, 2);
-// 플랜에 없는 여분(planImages[7], [8])은 여유가 있는 섹션에 얹혀 버려지지 않는다.
-assert.equal(planned.renderNodes.filter((node) => node.kind === "image").length, planImages.length, "플랜 밖 유효 이미지도 렌더 노드로 배치");
+// 의미가 검증되지 않은 여분(planImages[7], [8])은 임의 섹션에 배치하지 않는다.
+assert.equal(planned.renderNodes.filter((node) => node.kind === "image").length, 7, "플랜으로 연결한 이미지만 실제 렌더한다");
 assert.equal(planned.qualityReport.imageCoverage.missingSectionIds.length, 0, "하한을 채운 섹션은 부족으로 보고되지 않는다");
-assert.equal(planned.qualityReport.imageCoverage.requiredSlots, 1 + 5, "필요 슬롯 = 썸네일 1 + 그림이 허용된 모든 섹션 하한 합 5");
+assert.equal(planned.qualityReport.imageCoverage.requiredSlots, 1 + 4, "필요 슬롯 = 썸네일 1 + 명시된 섹션 하한 합 4");
 const earlyCardIndex = planned.renderNodes.findIndex((node) => node.kind === "connectCard" && node.placement === "early");
 const overviewHeadingIndex = planned.renderNodes.findIndex((node) => node.kind === "heading" && node.sectionId === "travel-itinerary-overview");
 const firstCourseHeadingIndex = planned.renderNodes.findIndex((node) => node.kind === "heading" && node.sectionId === "travel-day-course");
@@ -198,7 +208,7 @@ const shortPlan = resolvePostDocument({
     { role: "closing", imagePaths: [], imageIntent: "마지막 풍경", imageMin: 0, imageMax: 1 },
   ],
 });
-assert.deepEqual(shortPlan.qualityReport.imageCoverage.missingSectionIds, ["travel-day-course", "travel-day-course-2", "travel-inclusions", "travel-closing"]);
+assert.deepEqual(shortPlan.qualityReport.imageCoverage.missingSectionIds, ["travel-day-course", "travel-day-course-2", "travel-inclusions"]);
 assert.equal(shortPlan.qualityReport.canAutoPublish, false);
 
 // 플랜 길이가 섹션 수와 다르면 자유형 규칙과 기존 호환 id 를 사용한다.
@@ -211,10 +221,11 @@ const ignoredPlan = resolvePostDocument({
   connectUrl: "https://brandconnect.naver.com/plan-fixture",
   sectionPlan: [{ role: "summary-glance", imagePaths: [], imageIntent: "이미지 없음", imageMin: 0, imageMax: 0 }],
 });
-assert.equal(ignoredPlan.sections[0].id, "travel-hook");
-assert.equal(ignoredPlan.sections[2].imageMin, 1);
+assert.equal(ignoredPlan.sections[0].id, stableFreeformSectionId("TRAVEL", planSections[0].split("\n")[0]));
+assert.equal(ignoredPlan.sections[2].imageMin, 2);
 
-// Ten real sections need ten body images, not a positional two-image highlight.
+// The contract requires only semantically necessary sections; later sections
+// may still carry reviewed images without becoming mandatory generation jobs.
 const sagaSections = buildSections("사가 산책", 10, 8);
 sagaSections[2] = sagaSections[2].replace("사가 산책 3", "도서관에서 쉬어가기");
 const sagaImages = Array.from({ length: 11 }, (_, index) => `C:/fixture/saga-${index}.jpg`);
@@ -224,24 +235,26 @@ const sagaOptions = {
   sections: sagaSections,
   hashtags: ["사가여행"],
   imagePaths: sagaImages,
+  sectionImageBindings: reviewedBindings("TRAVEL", sagaSections, sagaImages),
   connectUrl: "https://brandconnect.naver.com/saga-fixture",
   qualityPreset: "PREMIUM" as const,
 };
 const saga = resolvePostDocument(sagaOptions);
 assert.equal(saga.sections.length, 10);
-assert.equal(saga.qualityReport.canAutoPublish, true);
+assert.equal(saga.qualityReport.canAutoPublish, false, "the third travel section explicitly needs two distinct images");
 assert.equal(saga.qualityReport.actual.images, 11);
 assert.deepEqual(saga.qualityReport.imageCoverage, {
-  requiredSlots: 11, filledRequiredSlots: 11, missingSectionIds: [],
+  requiredSlots: 7, filledRequiredSlots: 6, missingSectionIds: [stableFreeformSectionId("TRAVEL", "도서관에서 쉬어가기")],
 });
-assert.equal(saga.sections[2].id, "travel-highlights", "legacy IDs remain stable");
-assert.equal(saga.sections.at(-1)?.id, "travel-close");
+assert.equal(saga.sections[2].id, stableFreeformSectionId("TRAVEL", "도서관에서 쉬어가기"), "identity follows meaning");
+assert.equal(saga.sections.at(-1)?.id, stableFreeformSectionId("TRAVEL", "사가 산책 10"));
 saga.sections.forEach((section, index) => {
-  assert.equal(section.imageMin, 1);
-  assert.equal(section.imageMax, 1);
+  const expectedContract = index < 9 ? TRAVEL_POST_CONTRACT_V1.sections[index] : TRAVEL_POST_CONTRACT_V1.sections.at(-1)!;
+  assert.equal(section.imageMin, expectedContract.image.min);
+  assert.equal(section.imageMax, Math.max(expectedContract.image.max, 1));
   assert.deepEqual(section.imagePaths, [sagaImages[index + 1]]);
-  assert.equal(section.headingStyle, "sectionTitle");
-  assert.equal(section.imageIntent, `${section.title}: ${section.body.join(" ").slice(0, 240)}`);
+  assert.equal(section.headingStyle, expectedContract.headingStyle);
+  assert.equal(section.imageIntent, `${section.title}: ${expectedContract.image.intent}`);
   const paragraphIndex = saga.renderNodes.findIndex((node) => node.kind === "paragraph" && node.sectionId === section.id);
   const imageIndex = saga.renderNodes.findIndex((node) => node.kind === "image" && node.sectionId === section.id);
   assert.equal(imageIndex, paragraphIndex + 1, "images follow the actual section lead");
@@ -253,7 +266,7 @@ saga.sections.forEach((section, index) => {
 assert.match(saga.sections[2].imageIntent, /^도서관에서 쉬어가기:/u);
 const sagaEarly = saga.renderNodes.findIndex((node) => node.kind === "connectCard" && node.placement === "early");
 assert.equal(saga.renderNodes[sagaEarly - 1].kind, "image");
-assert.deepEqual(saga.renderNodes[sagaEarly - 1], saga.renderNodes.find((node) => node.kind === "image" && node.sectionId === "travel-highlights"));
+assert.deepEqual(saga.renderNodes[sagaEarly - 1], saga.renderNodes.find((node) => node.kind === "image" && node.sectionId === saga.sections[2].id));
 assert.equal(saga.renderNodes.filter((node) => node.kind === "connectCard").length, 2);
 
 const sagaMapping = saga.sections.map((section) => [...section.imagePaths]);
@@ -288,13 +301,13 @@ assert.equal(normalizeLegacyFreeformImageRules(planned), planned, "explicit text
 
 const missingMapping = sagaMapping.map((paths, index) => index === 2 ? [] : [...paths]);
 missingMapping[9].push(sagaMapping[2][0]);
-const emptyLibrary = resolvePostDocument({ ...sagaOptions, sectionImagePaths: missingMapping });
+const emptyLibrary = resolvePostDocument({ ...sagaOptions, sectionImageBindings: Object.fromEntries(saga.sections.map((section, index) => [section.id, missingMapping[index]])) });
 assert.equal(emptyLibrary.qualityReport.actual.images, 11);
 assert.equal(emptyLibrary.qualityReport.canAutoPublish, false, "global image count cannot hide an empty section");
-assert.deepEqual(emptyLibrary.qualityReport.imageCoverage.missingSectionIds, ["travel-highlights"]);
+assert.deepEqual(emptyLibrary.qualityReport.imageCoverage.missingSectionIds, [saga.sections[2].id]);
 const zeroImages = resolvePostDocument({ ...sagaOptions, imagePaths: [] });
 assert.equal(zeroImages.qualityReport.canAutoPublish, false);
-assert.equal(zeroImages.qualityReport.imageCoverage.missingSectionIds.length, 10);
+assert.equal(zeroImages.qualityReport.imageCoverage.missingSectionIds.length, 5);
 
 function legacyFreeform(document: ResolvedPostDocumentV1): ResolvedPostDocumentV1 {
   return {
@@ -318,7 +331,7 @@ assert.deepEqual(normalized.sections, saga.sections, "real heading/body intent r
 assert.deepEqual(normalized.renderNodes, saga.renderNodes, "assets, text, IDs, links and order remain intact");
 assert.equal(normalized.qualityReport, legacySaga.qualityReport, "caller refreshes QC after normalization");
 assert.equal(normalizeLegacyFreeformImageRules(normalized), normalized, "migration is idempotent");
-assert.equal(refreshPostDocumentQuality(normalized).qualityReport.canAutoPublish, true);
+assert.equal(refreshPostDocumentQuality(normalized).qualityReport.canAutoPublish, false);
 assert.equal(refreshPostDocumentQuality(normalizeLegacyFreeformImageRules(legacyFreeform(emptyLibrary))).qualityReport.canAutoPublish, false);
 assert.equal(refreshPostDocumentQuality(normalizeLegacyFreeformImageRules(legacyFreeform(zeroImages))).qualityReport.canAutoPublish, false);
 const mixedLegacy = legacyFreeform(travel);
@@ -327,9 +340,17 @@ mixedLegacy.sections[1].imageMax = 0;
 const mixedNormalized = normalizeLegacyFreeformImageRules(mixedLegacy);
 assert.equal(mixedNormalized.sections[0], mixedLegacy.sections[0], "even a single explicit bound is preserved");
 assert.equal(mixedNormalized.sections[1], mixedLegacy.sections[1]);
-mixedNormalized.sections.slice(2).forEach((section) => {
-  assert.equal(section.imageMin, 1);
+mixedNormalized.sections.slice(2).forEach((section, offset) => {
+  assert.equal(section.imageMin, TRAVEL_POST_CONTRACT_V1.sections[offset + 2]?.image.min ?? TRAVEL_POST_CONTRACT_V1.sections.at(-1)!.image.min);
   assert.ok(section.imageMax! >= section.imagePaths.length, "migration retains multi-image capacity");
 });
 
 console.log(JSON.stringify({ ok: true, sectionPlan: true, freeformCoverage: true, legacyNormalization: true }));
+
+const explicitFreeform = resolvePostDocument({ ...sagaOptions, sectionImagePaths: sagaMapping });
+assert.deepEqual(explicitFreeform.sections.map(section => section.imagePaths), sagaMapping,
+  "explicit aligned freeform placement must survive document reconstruction");
+assert.equal(explicitFreeform.qualityReport.actual.images, saga.qualityReport.actual.images);
+const unavailableMapping = sagaMapping.map(files => [...files, "C:/fixture/not-uploaded.jpg"]);
+const filteredMapping = resolvePostDocument({ ...sagaOptions, sectionImagePaths: unavailableMapping });
+assert.deepEqual(filteredMapping.sections.map(section => section.imagePaths), sagaMapping);

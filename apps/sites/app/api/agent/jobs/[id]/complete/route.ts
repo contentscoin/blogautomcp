@@ -4,16 +4,20 @@ import { ensureDatabase } from '@/db/init';
 import { getD1 } from '@/db';
 import { newId } from '@/lib/crypto';
 import { apiError, readObject } from '@/lib/http';
+import { COMPLETION_BODY_MAX_BYTES, COMPLETION_INLINE_MAX_BYTES } from '@/lib/completion-contract';
+import { completionReference, readCompletionResult } from '@/lib/completion-result';
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   const device = await authenticateDevice(request);
   if (!device) return apiError('DEVICE_REVOKED', 'PC 인증이 유효하지 않습니다.', 401);
-  const body = await readObject(request, 1024 * 1024);
+  const body = await readObject(request, COMPLETION_BODY_MAX_BYTES);
   if (!body) return apiError('INVALID_REQUEST', '요청 형식 또는 크기를 확인하세요.', 400);
   const status = body.status === 'SUCCEEDED' ? 'SUCCEEDED' : body.status === 'FAILED' ? 'FAILED' : null;
   if (!status) return apiError('INVALID_STATUS', 'status는 SUCCEEDED 또는 FAILED여야 합니다.', 422);
-  const resultJson = status === 'SUCCEEDED' && body.result !== undefined ? JSON.stringify(body.result) : null;
-  if (resultJson && new TextEncoder().encode(resultJson).byteLength > 900 * 1024) return apiError('RESULT_TOO_LARGE', '작업 결과는 900KB 이하여야 합니다.', 413);
+  const reference = body.resultReference === undefined ? null : completionReference(body.resultReference);
+  if (body.resultReference !== undefined && (!reference || body.result !== undefined || status !== 'SUCCEEDED')) return apiError('INVALID_RESULT_REFERENCE', '결과 참조 형식이 올바르지 않습니다.', 422);
+  const resultJson = reference ? JSON.stringify({ completionReference: reference }) : status === 'SUCCEEDED' && body.result !== undefined ? JSON.stringify(body.result) : null;
+  if (!reference && resultJson && new TextEncoder().encode(resultJson).byteLength > COMPLETION_INLINE_MAX_BYTES) return apiError('RESULT_UPLOAD_REQUIRED', '큰 결과는 result-chunk에 저장한 뒤 resultReference로 완료하세요.', 413);
   const errorCode = status === 'FAILED' && typeof body.errorCode === 'string' ? body.errorCode.trim().slice(0, 80) : null;
   const errorMessage = status === 'FAILED' && typeof body.errorMessage === 'string' ? body.errorMessage.trim().slice(0, 2000) : null;
   const { id } = await context.params;
@@ -21,6 +25,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
   await ensureDatabase();
   const d1 = getD1();
+  if (reference) {
+    try { await readCompletionResult(d1, device.userId, id, resultJson); }
+    catch { return apiError('RESULT_INTEGRITY_FAILED', '결과 조각이 누락되었거나 해시가 다릅니다. 저장된 동일 결과를 다시 전송하세요.', 422); }
+  }
   const now = Date.now();
   const updated = await d1.prepare(`
     UPDATE agent_jobs

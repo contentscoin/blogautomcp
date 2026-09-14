@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { selectVerifiedProductPhoto } from "../../../../../scripts/lib/product-photo-review";
-import { completionOutbox, CompletionDeliveryError, deliverCompletion, type PendingCompletion } from "@/lib/remote-agent-completion";
+import { completionOutbox, CompletionDeliveryError, deliverCompletion, isPermanentCompletionError, completionWireBody, type PendingCompletion } from "@/lib/remote-agent-completion";
 import { getWritingTimeoutPolicy } from "../../../../../scripts/lib/writing-timeout-policy";
 import fs from "node:fs";
 import path from "node:path";
@@ -17,6 +17,7 @@ import { getBrandPostPackageDir, readBrandPostPackage } from "@/lib/brand-post-p
 import { buildBrandPostImagePrompt } from "@/lib/brand-post-image-generation";
 import { readDraftProgress } from "@/lib/draft-progress";
 import { buildPreparedDraftView } from "@/lib/draft-context-view";
+import { getDesktopActivitySnapshot } from "@/lib/desktop-activity";
 import { collapseBrandLinkProducts, matchesWritingStatusFilter } from "@/lib/brandlink-product-list";
 import {
   LOCAL_AUTOMATION_ERROR_HINTS,
@@ -102,10 +103,12 @@ const DRAFT_PREPARE_WAIT_MS = getWritingTimeoutPolicy().prepareMs;
 const DRAFT_GENERATE_WAIT_MS = getWritingTimeoutPolicy().generateMs;
 const SECTION_IMAGE_APPLY_WAIT_MS = 5 * 60_000;
 const SECTION_IMAGE_NEXT_ACTION =
-  "post_get_draft 결과의 imageSlots 에서 generationMissing 이 0보다 큰 파트마다 imagePrompt 로 이 ChatGPT 의 내장 이미지 생성을 실행하고, " +
+  "post_get_draft 결과의 imageSlots 에서 missing 또는 generationMissing 이 0보다 큰 파트마다 imagePrompt 로 이 ChatGPT 의 내장 이미지 생성을 실행하고, " +
   "완성된 이미지의 HTTPS 주소를 post_apply_section_image(sectionId, generatedImageUrl) 로 보내세요. " +
   "쇼핑은 제품이 없는 배경만 생성합니다(PC 가 원본 상품을 잠금 합성). 이미지 부족만으로는 원고를 다시 작성하거나 재제출하지 마세요. " +
-  "모든 파트가 채워지면 post_approve_draft 로 승인합니다.";
+  "모든 파트가 채워지면 post_approve_draft 로 승인합니다. " +
+  "PC 자동 보강은 materials_prepare(productIds)로 별도 접수하고 materials_list로 완료를 확인할 수 있습니다. " +
+  "필요한 도구가 대화에 없으면 연결 도구 목록을 갱신하거나 PC 소재 보관함의 미리작성을 사용하세요. drafted는 발행 준비완료가 아닙니다.";
 const HERO_IMAGE_MAX_BYTES = 300 * 1024;
 const PIPELINE_VERSION = "post-spec/v1";
 
@@ -130,7 +133,23 @@ function appVersionString(): string {
 }
 
 /** 사이트 agent_get_status 가 그대로 노출하는 PC 상태 스냅샷(개인정보 없음). */
-function buildStatusSnapshot(): Record<string, unknown> {
+async function buildStatusSnapshot(): Promise<Record<string, unknown>> {
+  let backgroundWork: Record<string, unknown>;
+  try {
+    const desktopActivities = getDesktopActivitySnapshot();
+    const imageGeneration = desktopActivities.activities.filter(activity => activity.label === "brand-post-image-generation").length;
+    const [publishing, drafting] = await Promise.all([
+      prisma.brandLink.count({ where: { status: 'PUBLISHING' } }),
+      prisma.brandLink.count({ where: { status: 'DRAFTING' } }),
+    ]);
+    backgroundWork = {
+      publishing,
+      drafting,
+      processes: desktopActivities.count,
+      imageGeneration,
+      busy: publishing + drafting + desktopActivities.count > 0,
+    };
+  } catch { backgroundWork = { busy: null, error: 'BACKGROUND_STATUS_UNAVAILABLE' }; }
   let naverSessionSavedAt: string | null = null;
   try {
     naverSessionSavedAt = fs.statSync(getNaverSessionFile()).mtime.toISOString();
@@ -148,6 +167,7 @@ function buildStatusSnapshot(): Record<string, unknown> {
     pipelineVersion: PIPELINE_VERSION,
     appVersion: appVersionString(),
     platform: process.platform,
+    backgroundWork,
     checkedAt: new Date().toISOString(),
   };
 }
@@ -339,6 +359,28 @@ function envelope(job: Job, kind: string, summary: string, data: Record<string, 
   };
 }
 
+async function waitForMaterialWorkflow(ctx: JobContext, request: NextRequest, workflowJobId: string): Promise<Record<string, unknown>> {
+  const startedAt = Date.now();
+  let lastStage = "";
+  let latest: Record<string, unknown> | null = null;
+  while (Date.now() - startedAt < PUBLISH_WAIT_MS) {
+    assertNotCancelled(ctx);
+    const payload = await localApi(request, `/api/materials?jobId=${encodeURIComponent(workflowJobId)}`);
+    const data = (payload.data || {}) as Record<string, unknown>;
+    latest = data;
+    const status = String(data.status || "");
+    if (!status || !["running", "queued"].includes(status)) return data;
+    const elapsedMin = Math.floor((Date.now() - startedAt) / 60_000);
+    const stage = `materials-publish:${elapsedMin}m`;
+    if (stage !== lastStage) {
+      lastStage = stage;
+      ctx.setStage("materials-publish", `선택 소재 발행 진행 중 (${elapsedMin}분 경과)`, Math.min(95, 45 + elapsedMin * 4));
+    }
+    await new Promise((resolve) => setTimeout(resolve, PUBLISH_POLL_MS));
+  }
+  return { ...(latest || {}), status: latest?.status || "running", timedOut: true };
+}
+
 function assertNotCancelled(ctx: JobContext): void {
   if (!ctx.cancelled) return;
   if (ctx.cancelReason === "LEASE_LOST") {
@@ -394,7 +436,7 @@ type DraftManifest = ReturnType<typeof readBrandPostPackage>;
 
 function readDraftManifestSafe(id: string): DraftManifest {
   try {
-    return readBrandPostPackage(id);
+    return readBrandPostPackage(id, { migrate: false });
   } catch {
     return null;
   }
@@ -460,7 +502,7 @@ function safeImageSlots(preview: DraftPreview, manifest: DraftManifest): Array<R
 }
 
 function remainingGenerationMissing(slots: Array<Record<string, unknown>> | null): number {
-  return (slots || []).reduce((sum, slot) => sum + numberField(slot, "generationMissing"), 0);
+  return (slots || []).reduce((sum, slot) => sum + Math.max(numberField(slot, "missing"), numberField(slot, "generationMissing")), 0);
 }
 
 /** 초안 미리보기에서 PC 파일 경로를 제거하고 ChatGPT 가 검토할 정보만 남긴다. */
@@ -522,13 +564,14 @@ async function uploadRemoteImageAsset(imagePath: string): Promise<string | null>
     headers: { authorization: `Bearer ${remote.token}`, "content-type": contentType },
     body: image,
     cache: "no-store",
+    signal: AbortSignal.timeout(20_000),
   });
   const payload = await response.json().catch(() => null) as { data?: { url?: unknown } } | null;
   const url = payload?.data?.url;
   return response.ok && typeof url === "string" && url.startsWith("https://") ? url : null;
 }
 
-async function uploadDraftImageAssets(preview: DraftPreview): Promise<Array<{ role: "hero" | "body"; sectionIndex: number | null; url: string }>> {
+async function uploadDraftImageAssets(preview: DraftPreview, warnings: string[] = []): Promise<Array<{ role: "hero" | "body"; sectionIndex: number | null; url: string }>> {
   const heroPath = typeof preview.heroImagePath === "string" ? preview.heroImagePath : null;
   const bodyPaths = Array.isArray(preview.bodyImagePaths)
     ? preview.bodyImagePaths.filter((value): value is string => typeof value === "string")
@@ -554,10 +597,15 @@ async function uploadDraftImageAssets(preview: DraftPreview): Promise<Array<{ ro
       path: imagePath,
     })),
   ];
-  const uploaded = await Promise.all(candidates.map(async (candidate) => ({
-    ...candidate,
-    url: await uploadRemoteImageAsset(candidate.path).catch(() => null),
-  })));
+  const uploaded: Array<(typeof candidates)[number] & { url: string | null }> = [];
+  const deadline = Date.now() + 20_000;
+  for (let index = 0; index < candidates.length && Date.now() < deadline; index += 3) {
+    uploaded.push(...await Promise.all(candidates.slice(index, index + 3).map(async candidate => ({
+      ...candidate, url: await uploadRemoteImageAsset(candidate.path).catch(() => null),
+    }))));
+  }
+  const missing = candidates.length - uploaded.filter(item => item.url).length;
+  if (missing) warnings.push(`초안은 PC에 저장됐지만 원격 미리보기 이미지 ${missing}장을 전송하지 못했습니다. 원고·이미지를 다시 생성할 필요는 없습니다.`);
   return uploaded
     .filter((item): item is typeof item & { url: string } => typeof item.url === "string")
     .map(({ role, sectionIndex, url }) => ({ role, sectionIndex, url }));
@@ -688,7 +736,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     const products = collapseBrandLinkProducts(links.map((link) => ({
       ...link,
       draftPrepared: (() => {
-        try { return Boolean(readBrandPostPackage(link.id)); } catch { return false; }
+        try { return Boolean(readBrandPostPackage(link.id, { migrate: false })); } catch { return false; }
       })(),
     }))).filter(matchesWritingStatus).slice(0, limit);
     const view = products.map((item) => ({
@@ -706,7 +754,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
       scheduledPublishAt: item.scheduledPublishAt ? new Date(item.scheduledPublishAt).toISOString() : null,
       draft: (() => {
         try {
-          const manifest = readBrandPostPackage(item.id);
+          const manifest = readBrandPostPackage(item.id, { migrate: false });
           return manifest ? { exists: true, approved: Boolean(manifest.approvedAt), canPublish: manifest.contentQuality?.canPublish ?? null } : { exists: false, approved: false, canPublish: null };
         } catch {
           return { exists: false, approved: false, canPublish: null };
@@ -782,7 +830,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     const manifest = readDraftManifestSafe(productId);
     const view = draftView(productId, preview, true, manifest);
     const remaining = remainingGenerationMissing(view.imageSlots as Array<Record<string, unknown>> | null);
-    const imageAssets = await uploadDraftImageAssets(preview);
+    const imageAssets = await uploadDraftImageAssets(preview, ctx.warnings);
     if (imageAssets.length === 0) ctx.warnings.push("초안 이미지를 HTTPS 미리보기 주소로 업로드하지 못했습니다.");
     const readiness = draftReadiness(preview);
     return envelope(job, "draft", `초안 생성 완료 — ${readinessSummary(readiness)}.${remaining > 0 ? ` 섹션 이미지 ${remaining}장이 비어 있습니다.` : ""} 검토 후 post_approve_draft 로 승인하세요.`, { ...view, imageAssets, remainingMissing: remaining }, ctx, {
@@ -858,7 +906,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     );
     const view = draftView(productId, preview, false, submittedManifest);
     const remaining = remainingGenerationMissing(view.imageSlots as Array<Record<string, unknown>> | null);
-    const imageAssets = await uploadDraftImageAssets(preview);
+    const imageAssets = await uploadDraftImageAssets(preview, ctx.warnings);
     if (imageAssets.length === 0) ctx.warnings.push("초안 이미지를 HTTPS 미리보기 주소로 업로드하지 못했습니다.");
     return envelope(job, "draft", requiresRepair
       ? imageOnlyRepair ? `원고 내용은 통과했습니다. 섹션 이미지 ${remaining}장을 ChatGPT 내장 이미지 생성으로 만들어 post_apply_section_image 로 붙이세요. 이미지 부족 때문에 본문을 다시 작성하지 마세요.` : `원고는 저장됐지만 품질 보강이 필요합니다: ${contentQuality?.reason || contentQuality?.summary || "근거 밀도 미달"}`
@@ -866,7 +914,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
       readiness: draftReadiness(preview),
       contentQuality: draftContentQuality(preview),
       nextAction: requiresRepair
-        ? imageOnlyRepair ? SECTION_IMAGE_NEXT_ACTION : "contentQuality.reason과 실패 signals를 반영해 같은 컨텍스트로 원고를 고친 뒤 새 idempotencyKey로 post_submit_draft를 다시 호출하세요. 이미지 부족은 재제출 사유가 아닙니다."
+        ? imageOnlyRepair ? SECTION_IMAGE_NEXT_ACTION : "contentQuality.reason과 실패 signals를 수정 지시로 정리해 새 idempotencyKey로 post_revise_draft를 호출하세요. repairTargets의 sectionIndex가 있으면 sectionIndexes에 전달하고, 이미지 부족 때문에 본문이나 기존 이미지를 다시 만들지 마세요."
         : remaining > 0 ? SECTION_IMAGE_NEXT_ACTION : "post_get_draft 로 초안을 확인하고 post_approve_draft 로 승인한 뒤, 실제 발행은 사용자 확인 후 진행하세요.",
     });
   }
@@ -1203,54 +1251,99 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     }, ctx);
   }
 
-  if (job.type === "POST_PUBLISH" || job.type === "POST_SCHEDULE") {
-    const draftId = readString(input, "draftId") || readString(input, "productId");
-    if (!draftId || input.confirmed !== true) throw new LocalAutomationError("INVALID_INPUT", "상품 ID와 confirmed=true가 필요합니다.");
-    const product = await requireProduct(draftId, kind);
-    const schedule = job.type === "POST_SCHEDULE";
-    const scheduledDate = readString(input, "scheduledDate");
-    ctx.setStage("auto-publish", "저장 초안 우선 · 자동 검수·보강·발행", 10);
-    const endpoint = `/api/brandlinks/${encodeURIComponent(draftId)}/auto-publish`;
-    await localApi(request, endpoint, { method: "POST", body: JSON.stringify(
-      schedule ? { publishMode: "schedule", scheduledDate } : { publishMode: "now" }) });
-    for (;;) {
-      assertNotCancelled(ctx);
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      const payload = await localApi(request, endpoint);
-      const data = (payload.data || {}) as Record<string, unknown>;
-      if (data.status === "failed") throw new LocalAutomationError("LOCAL_AUTOMATION_FAILED", String(data.error || "자동 발행 실패"));
-      if (!["running", "completed", "failed"].includes(String(data.status))) throw new LocalAutomationError("LOCAL_AUTOMATION_FAILED", "자동 발행 상태가 올바르지 않습니다. 중복 실행하지 말고 결과를 확인하세요.");
-      if (data.status === "completed") return envelope(job, "publish-result", schedule ? "예약 등록 완료" : "즉시 발행 완료", {
-        draftId, productName: product.productName, ...(data.result as Record<string, unknown>), inProgress: false,
-      }, ctx);
-      ctx.setStage("auto-publish", String(data.stage || "발행 결과 확인 중"), 50);
+  if (job.type === "MATERIALS_LIST" || job.type === "MATERIALS_PREPARE" || job.type === "MATERIALS_PUBLISH") {
+    const localJobId = readString(input, "jobId");
+    const sourceJobId = readString(input, "sourceJobId");
+    const listing = job.type === "MATERIALS_LIST";
+    const preparing = job.type === "MATERIALS_PREPARE";
+    if (!listing && (!Array.isArray(preparing ? input.productIds : input.materials) ||
+        (preparing ? input.productIds as unknown[] : input.materials as unknown[]).length === 0)) {
+      throw new LocalAutomationError("INVALID_INPUT", "준비할 상품 또는 발행할 소재의 ID와 revision을 선택하세요.");
     }
+    if (job.type === "MATERIALS_PUBLISH" && input.confirmed !== true) throw new LocalAutomationError("INVALID_INPUT", "선택한 소재의 발행 지시 확인이 필요합니다.");
+    ctx.setStage("materials", listing ? "소재와 작업 상태 조회" : preparing ? "선택 상품 소재 준비 접수" : "선택 소재 발행 접수", 30);
+    const endpoint = listing ? `/api/materials${localJobId ? `?jobId=${encodeURIComponent(localJobId)}` : sourceJobId ? `?sourceJobId=${encodeURIComponent(sourceJobId)}` : ""}` : `/api/materials/${preparing ? "prepare" : "publish"}`;
+    let payload: Record<string, unknown>;
+    try {
+      payload = await localApi(request, endpoint, listing ? undefined : {
+        method: "POST", body: JSON.stringify(preparing ? { productIds: input.productIds, sourceJobId: job.id } : {
+          materials: input.materials, publishMode: input.publishMode, scheduledAt: input.scheduledAt, intervalDays: input.intervalDays, sourceJobId: job.id,
+        }),
+      }, { timeoutMs: 30_000 });
+    } catch (error) {
+      if (!listing && error instanceof LocalAutomationError && error.httpStatus === null) {
+        return envelope(job, "materials-submission-unknown", "소재 작업 접수 응답을 확인하지 못했습니다. 실행됐을 수 있으므로 같은 작업을 새로 만들지 마세요.", {
+          workflowPending: true, submissionUncertain: true, sourceJobId: job.id,
+          nextCall: { tool: "materials_list", arguments: { sourceJobId: job.id } }, pollAfterMs: 3000,
+        }, ctx, { nextAction: "materials_list(sourceJobId)로 PC에 저장된 원 작업부터 확인하세요. 새 준비·발행 요청으로 대체하지 마세요." });
+      }
+      throw error;
+    }
+    const data = (payload.data || {}) as Record<string, unknown>;
+    if (listing && !localJobId && input.connectKind && Array.isArray(data.materials)) {
+      data.materials = data.materials.filter(item => String((item as Record<string, unknown>).connectKind).toLowerCase() === String(input.connectKind));
+    }
+    const running = ["running", "queued"].includes(String(data.status)) || data.workflowPending === true;
+    const nextJobId = typeof data.jobId === "string" ? data.jobId : localJobId;
+    return envelope(job, "materials", running ? "접수한 소재 작업이 진행 중입니다. 이 MCP 하위 요청 완료는 소재 준비·발행 완료가 아닙니다." : listing ? "저장 소재와 작업 결과를 조회했습니다." : "소재 작업 결과를 확인했습니다.", {
+      ...data, workflowPending: running, workflowJobId: nextJobId || null,
+      ...(running && nextJobId ? { nextCall: { tool: "materials_list", arguments: { jobId: nextJobId } }, pollAfterMs: 3000 } : {}),
+    }, ctx, { nextAction: running ? "materials_list(jobId)로 같은 작업의 최종 상태까지 조회하세요. 작업을 새로 만들지 마세요." : data.kind === "publish" || job.type === "MATERIALS_PUBLISH" ? "소재별 게시·예약·보류 결과를 보고하세요. 완료된 소재를 다시 발행하지 마세요." : "준비된 소재의 productId와 revision을 선택한 뒤 materials_publish로 발행하세요. 준비와 발행은 별도 단계입니다." });
+  }
+
+  if (job.type === "POST_PUBLISH" || job.type === "POST_SCHEDULE") {
+    const draftId = readString(input, "draftId");
+    ctx.setStage("selection-check", "선택 소재 준비 상태 확인", 35);
+    const listingPayload = await localApi(request, `/api/materials?connectKind=${kind}`);
+    const listingData = (listingPayload.data || {}) as Record<string, unknown>;
+    const materials = Array.isArray(listingData.materials) ? listingData.materials as Array<Record<string, unknown>> : [];
+    const selected = draftId ? materials.find(item => item.productId === draftId) : null;
+    if (!draftId || !selected) {
+      return envelope(job, "materials-selection", "발행할 준비 소재를 먼저 선택하세요. 이 요청은 생성하거나 발행하지 않았습니다.", {
+        ...listingData, selectionRequired: true, executed: false, selectedDraftId: draftId || null,
+      }, ctx, { nextAction: "준비된 소재의 productId를 draftId로 지정해 다시 호출하세요. 소재가 부족하면 materials_prepare로 별도 준비하세요." });
+    }
+    if (selected.ready !== true || typeof selected.revision !== "string" || !/^[a-f0-9]{64}$/.test(selected.revision)) {
+      return envelope(job, "materials-selection", "선택한 소재가 아직 발행 준비 상태가 아닙니다. 이 요청은 생성하거나 발행하지 않았습니다.", {
+        selectedMaterial: selected, selectionRequired: true, executed: false,
+      }, ctx, { nextAction: "blockers를 보강해 소재를 ready 상태로 만든 뒤 같은 productId와 최신 revision으로 다시 요청하세요." });
+    }
+    if (job.type === "POST_PUBLISH" && input.confirmed !== true) throw new LocalAutomationError("INVALID_INPUT", "선택한 소재의 즉시 발행 지시 확인이 필요합니다.");
+    if (job.type === "POST_SCHEDULE" && input.confirmed !== true) throw new LocalAutomationError("INVALID_INPUT", "선택한 소재의 예약 발행 지시 확인이 필요합니다.");
+    const scheduledDate = readString(input, "scheduledDate");
+    if (job.type === "POST_SCHEDULE" && !scheduledDate) throw new LocalAutomationError("INVALID_INPUT", "예약일 scheduledDate가 필요합니다.");
+    const publishMode = job.type === "POST_SCHEDULE" ? "schedule" : "now";
+    ctx.setStage("materials-publish", publishMode === "schedule" ? "선택 소재 예약 발행 접수" : "선택 소재 즉시 발행 접수", 45);
+    const publishPayload = await localApi(request, "/api/materials/publish", {
+      method: "POST",
+      body: JSON.stringify({
+        materials: [{ productId: draftId, revision: selected.revision }],
+        publishMode,
+        ...(publishMode === "schedule" ? { scheduledAt: scheduledDate, intervalDays: 1 } : {}),
+        sourceJobId: job.id,
+      }),
+    }, { timeoutMs: 30_000 });
+    const submitted = (publishPayload.data || {}) as Record<string, unknown>;
+    const workflowJobId = typeof submitted.jobId === "string" ? submitted.jobId : "";
+    const running = ["running", "queued"].includes(String(submitted.status));
+    const finalData = workflowJobId && running ? await waitForMaterialWorkflow(ctx, request, workflowJobId) : submitted;
+    const finalStatus = String(finalData.status || submitted.status || "");
+    const completed = finalStatus === "completed";
+    const timedOut = finalData.timedOut === true;
+    return envelope(job, "materials-publish", completed
+      ? (publishMode === "schedule" ? "선택 소재 예약 등록을 완료했습니다." : "선택 소재 즉시 발행을 완료했습니다.")
+      : timedOut ? "선택 소재 발행이 계속 진행 중입니다. PC 소재 보관함에서 최종 결과를 확인하세요." : "선택 소재 발행 결과 확인이 필요합니다.", {
+        ...finalData, executed: true, workflowPending: timedOut || ["running", "queued"].includes(finalStatus), workflowJobId: workflowJobId || null, legacyTool: job.type,
+      }, ctx, { nextAction: completed ? "소재별 게시·예약 결과를 보고하세요. 완료된 소재를 다시 발행하지 마세요." : "PC 소재 보관함 또는 materials_list(jobId)로 최종 상태를 확인하세요. 새 발행 요청으로 대체하지 마세요." });
   }
 
   if (job.type === "POST_BULK_SCHEDULE") {
-    if (input.confirmed !== true) throw new LocalAutomationError("INVALID_INPUT", "confirmed=true 확인이 필요합니다.");
-    const limit = readInteger(input, "limit", 10, 1, 50);
-    const intervalDays = readInteger(input, "intervalDays", 1, 1, 30);
-    const startDate = readString(input, "startDate");
-    const now = input.publishMode === "now";
-    const endpoint = now ? "/api/brandlinks/bulk-today" : "/api/brandlinks/bulk-schedule";
-    ctx.setStage("bulk-publish", `자동 검수·보강 후 ${now ? "즉시" : "예약"} 발행 (최대 ${limit}건)`, 10);
-    const payload = await localApi(request, endpoint, { method: "POST",
-      body: JSON.stringify({ connectKind: kind.toLowerCase(), limit, intervalDays, allScheduled: true, ...(startDate ? { startDate } : {}) }),
-    });
-    const data = (payload.data || {}) as Record<string, unknown>;
-    if (data.targetCount === 0) return envelope(job, "bulk-publish", "발행 가능한 상품이 없습니다.", data, ctx);
-    if (!data.jobId) throw new LocalAutomationError("LOCAL_AUTOMATION_FAILED", "실행 결과 추적 ID가 없습니다. 재실행하지 말고 상태를 확인하세요.");
-    for (;;) {
-      assertNotCancelled(ctx);
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      const status = await localApi(request, `${endpoint}?jobId=${encodeURIComponent(String(data.jobId))}`);
-      const result = (status.data || {}) as Record<string, unknown>;
-      if (result.status === "failed") throw new LocalAutomationError("LOCAL_AUTOMATION_FAILED", `성공 ${result.successCount ?? 0}건 / 실패 ${result.failedCount ?? 0}건 / 대상 ${result.targetCount}건: ${String(result.error || "일부 발행 실패")}`);
-      if (!["running", "completed", "failed"].includes(String(result.status))) throw new LocalAutomationError("LOCAL_AUTOMATION_FAILED", "일괄 발행 상태를 확인할 수 없습니다.");
-      if (result.status === "completed") return envelope(job, "bulk-publish", "요청한 일괄 발행 처리가 완료되었습니다.", result, ctx);
-      ctx.setStage("bulk-publish", `최대 ${limit}건의 실제 발행 결과를 기다리고 있습니다.`, 50);
-    }
+    // Legacy bulk commands must never silently select, generate, or publish materials.
+    ctx.setStage("selection-required", "준비된 소재 목록 조회", 50);
+    const payload = await localApi(request, `/api/materials?connectKind=${kind}`);
+    return envelope(job, "materials-selection", "발행할 준비 소재를 먼저 선택하세요. 이 요청은 생성하거나 발행하지 않았습니다.", {
+      ...((payload.data || {}) as Record<string, unknown>), selectionRequired: true, executed: false,
+    }, ctx, { nextAction: "materials_list에서 준비된 소재의 productId와 revision을 확인하고, 사용자가 선택한 소재만 materials_publish로 전달하세요. 소재가 부족하면 materials_prepare로 별도 준비하세요." });
   }
   if (job.type === "POST_VERIFY_PUBLISHED") {
     const draftId = readString(input, "draftId");
@@ -1290,7 +1383,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
       const key = String(field.key);
       return { key, label: field.label, secret: field.secret === true, configured: Boolean(configured[key]), ...(field.secret ? {} : { value: values[key] ?? "" }) };
     });
-    return envelope(job, "settings", `설정 ${settings.length}개 (시크릿은 설정 여부만 표시)`, { settings, draftCreationMode: data.draftCreationMode ?? null, status: buildStatusSnapshot() }, ctx);
+    return envelope(job, "settings", `설정 ${settings.length}개 (시크릿은 설정 여부만 표시)`, { settings, draftCreationMode: data.draftCreationMode ?? null, status: await buildStatusSnapshot() }, ctx);
   }
 
   throw new LocalAutomationError("LOCAL_API_MISSING", `이 PC 앱 버전은 원격 작업 ${job.type} 을(를) 지원하지 않습니다. 앱을 업데이트하세요.`);
@@ -1340,7 +1433,7 @@ function startJobHeartbeat(request: NextRequest, siteUrl: string, token: string,
       progress: stageRef.progress,
       stage: stageRef.stage,
       message: stageRef.message,
-      status: buildStatusSnapshot(),
+      status: await buildStatusSnapshot(),
     }).catch(() => ({ ok: false, status: 0, payload: null }));
     if (stopping || ctx.executionFinished || !ok || !payload) return;
     const data = (payload.data || {}) as Record<string, unknown>;
@@ -1367,7 +1460,14 @@ function startJobHeartbeat(request: NextRequest, siteUrl: string, token: string,
 }
 
 async function completeRemoteJob(siteUrl: string, token: string, jobId: string, body: Record<string, unknown>): Promise<void> {
-  const { ok, status, payload } = await siteFetch(siteUrl, token, `/api/agent/jobs/${encodeURIComponent(jobId)}/complete`, body);
+  const wireBody = await completionWireBody(body, async chunk => {
+    const response = await siteFetch(siteUrl, token, `/api/agent/jobs/${encodeURIComponent(jobId)}/result-chunk`, chunk);
+    if (!response.ok || response.payload?.success !== true) {
+      const error = response.payload?.error as { code?: string; message?: string } | undefined;
+      throw new CompletionDeliveryError(response.status, error?.code || 'RESULT_CHUNK_DELIVERY_FAILED', error?.message || '결과 조각 전송 실패');
+    }
+  });
+  const { ok, status, payload } = await siteFetch(siteUrl, token, `/api/agent/jobs/${encodeURIComponent(jobId)}/complete`, wireBody);
   const data = payload?.data as Record<string, unknown> | undefined;
   if (!ok || payload?.success !== true || data?.id !== jobId || data?.status !== body.status) {
     const error = payload?.error as { message?: string; code?: string } | undefined;
@@ -1399,7 +1499,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: false, code: 'COMPLETION_OUTBOX_UNREADABLE', error: '완료 보관함을 읽을 수 없어 새 작업을 시작하지 않습니다. PC 저장소를 확인하세요.' }, { status: 503 });
   }
   if (pending) {
-    const renew = () => void siteFetch(remote.siteUrl, remote.token, `/api/agent/jobs/${encodeURIComponent(pending!.job.id)}/heartbeat`, { stage: 'completion_pending', message: '실행 완료 · 저장된 결과 재전송 중', progress: 99, appVersion: appVersionString(), status: buildStatusSnapshot() }).catch(() => undefined);
+    const renew = async () => { await siteFetch(remote.siteUrl, remote.token, `/api/agent/jobs/${encodeURIComponent(pending!.job.id)}/heartbeat`, { stage: 'completion_pending', message: '실행 완료 · 저장된 결과 재전송 중', progress: 99, appVersion: appVersionString(), status: await buildStatusSnapshot() }).catch(() => undefined); };
     renew();
     const deliveryHeartbeat = setInterval(renew, JOB_HEARTBEAT_INTERVAL_MS);
     try {
@@ -1410,12 +1510,19 @@ export async function POST(request: NextRequest) {
       const success = pending.body.status === 'SUCCEEDED';
       return NextResponse.json({ success, ...(success ? {} : { error: pending.body.errorMessage, code: pending.body.errorCode }), data: { configured: true, job: { ...pending.job, status: pending.body.status }, completionRecovered: true } }, { status: success ? 200 : 500 });
     } catch (error) {
+      if (isPermanentCompletionError(error)) {
+        outbox.quarantine(error.code);
+        if (error.status === 401 || error.status === 403) clearRemoteActivation();
+        return NextResponse.json({ success: false, code: 'COMPLETION_DELIVERY_REJECTED', deliveryCode: error.code,
+          error: '완료 결과는 PC에 보존했습니다. 해당 작업을 다시 실행하지 말고 결과를 대조하세요. 다른 작업은 다음 조회에서 진행할 수 있습니다.',
+          data: { job: pending.job, executionStatus: pending.body.status, completionPending: false, completionQuarantined: true, reconnectRequired: error.status === 401 || error.status === 403 } }, { status: error.status });
+      }
       return NextResponse.json({ success: false, code: 'COMPLETION_DELIVERY_UNCERTAIN', error: '저장된 완료 결과를 전송하지 못했습니다. 작업을 다시 실행하지 마세요. 연결을 복구하고 job_get으로 확인하세요.', deliveryCode: error instanceof CompletionDeliveryError ? error.code : 'NETWORK_ERROR', data: { job: pending.job, executionStatus: pending.body.status, completionPending: true } }, { status: 503 });
     } finally { clearInterval(deliveryHeartbeat); claiming = false; }
   }
   let claim: Awaited<ReturnType<typeof siteFetch>> | null;
   try {
-    claim = await siteFetch(remote.siteUrl, remote.token, "/api/agent/jobs/claim", { appVersion: appVersionString(), status: buildStatusSnapshot() }).catch(() => null);
+    claim = await siteFetch(remote.siteUrl, remote.token, "/api/agent/jobs/claim", { appVersion: appVersionString(), status: await buildStatusSnapshot() }).catch(() => null);
     const claimedJob = claim?.ok ? ((claim.payload?.data as Job | null) || null) : null;
     if (claimedJob) activeJob = { id: claimedJob.id, type: claimedJob.type, startedAt: Date.now() };
   } finally {
@@ -1465,6 +1572,13 @@ export async function POST(request: NextRequest) {
       await deliverCompletion(() => completeRemoteJob(remote.siteUrl, remote.token, job.id, completion));
       outbox.clear();
     } catch (error) {
+      if (isPermanentCompletionError(error)) {
+        outbox.quarantine(error.code);
+        if (error.status === 401 || error.status === 403) clearRemoteActivation();
+        return NextResponse.json({ success: false, code: 'COMPLETION_DELIVERY_REJECTED', deliveryCode: error.code,
+          error: '실행 결과를 PC에 보존했습니다. 같은 작업을 재실행하지 말고 중앙 결과와 대조하세요.',
+          data: { job: { id: job.id, type: job.type }, executionStatus: completion.status, completionPending: false, completionQuarantined: true, reconnectRequired: error.status === 401 || error.status === 403 } }, { status: error.status });
+      }
       return NextResponse.json({ success: false, code: 'COMPLETION_DELIVERY_UNCERTAIN', error: '실행은 종료됐으나 완료 기록을 확인하지 못했습니다. 작업을 재실행하지 말고 job_get으로 확인하세요.', deliveryCode: error instanceof CompletionDeliveryError ? error.code : 'NETWORK_OR_STORAGE_ERROR', data: { job: { id: job.id, type: job.type }, executionStatus: completion.status, completionPending: true } }, { status: 503 });
     }
     const success = completion.status === 'SUCCEEDED';

@@ -68,7 +68,7 @@ export async function GET() {
 
     const data = links.map((link) => {
       try {
-        const prepared = readBrandPostPackage(link.id);
+        const prepared = readBrandPostPackage(link.id, { migrate: false });
         return {
           ...link,
           draftPrepared: Boolean(prepared),
