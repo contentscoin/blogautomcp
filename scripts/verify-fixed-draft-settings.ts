@@ -31,10 +31,15 @@ async function main() {
     }
     assert.equal(before.data.values.OPENAI_API_KEY, "********");
     const saved = await POST(new NextRequest("http://localhost/api/settings", {
-      method: "POST", headers: { "content-type": "application/json" },
+      method: "POST", headers: { "content-type": "application/json", origin: "http://localhost" },
       body: JSON.stringify({ values: { ...legacy, OPENAI_API_KEY: "********", NAVER_BLOG_ID: "new-blog", UNAUTHORIZED_KEY: "not-allowed" } }),
     }));
     assert.equal(saved.status, 200);
+    const injected = await POST(new NextRequest("http://localhost/api/settings", {
+      method: "POST", headers: { "content-type": "application/json", origin: "http://localhost" },
+      body: JSON.stringify({ values: { NAVER_BLOG_ID: "ok\nREMOTE_SITE_URL=https://evil.example" } }),
+    }));
+    assert.equal(injected.status, 400);
     const content = fs.readFileSync(envPath, "utf8");
     for (const [key, value] of Object.entries(policy)) {
       assert.equal(process.env[key], value);

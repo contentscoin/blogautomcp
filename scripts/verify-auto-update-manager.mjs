@@ -25,6 +25,7 @@ const environmentKeys = [
   'DESKTOP_UPDATE_STATUS',
   'DESKTOP_UPDATE_VERSION',
   'REMOTE_DEVICE_TOKEN',
+  'REMOTE_SITE_ALLOWLIST',
   'REMOTE_SITE_URL',
 ];
 const previousEnvironment = new Map(environmentKeys.map((key) => [key, process.env[key]]));
@@ -88,15 +89,20 @@ class FakeNotification {
 
 try {
   delete process.env.AUTO_UPDATE_ALLOW_LOCAL_HTTP;
+  delete process.env.REMOTE_SITE_ALLOWLIST;
+  assert.equal(updateOrigin('https://blogautomcp.hiway350051.chatgpt.site/dashboard'), 'https://blogautomcp.hiway350051.chatgpt.site');
+  assert.equal(updateOrigin('https://updates.example.test/path'), null);
+  process.env.REMOTE_SITE_ALLOWLIST = 'https://updates.example.test';
   assert.equal(updateOrigin('https://updates.example.test/path'), 'https://updates.example.test');
   assert.equal(updateOrigin('http://updates.example.test/path'), null);
   assert.equal(updateOrigin('http://127.0.0.1:43130/path'), null);
   process.env.AUTO_UPDATE_ALLOW_LOCAL_HTTP = '1';
+  assert.equal(updateOrigin('http://127.0.0.1:43130/path'), null);
+  process.env.AUTO_UPDATE_TEST_MODE = '1';
   assert.equal(updateOrigin('http://127.0.0.1:43130/path'), 'http://127.0.0.1:43130');
   assert.equal(updateOrigin('not-a-url'), null);
 
   process.env.AUTO_UPDATE_FORCE = '1';
-  process.env.AUTO_UPDATE_TEST_MODE = '1';
   process.env.AUTO_UPDATE_DOWNLOAD = 'false';
   process.env.AUTO_UPDATE_START_DELAY_MS = '10';
   process.env.AUTO_UPDATE_CHECK_INTERVAL_MS = '1000';

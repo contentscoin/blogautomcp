@@ -7,6 +7,21 @@ const DEFAULT_CHECK_INTERVAL_MS = 2 * 60 * 1000;
 const DEFAULT_START_DELAY_MS = 15 * 1000;
 const IDLE_RECHECK_MS = 15 * 1000;
 const IDLE_CONFIRM_MS = 3 * 1000;
+const DEFAULT_REMOTE_SITE_URL = 'https://blogautomcp.hiway350051.chatgpt.site';
+
+function configuredUpdateOrigins() {
+  return new Set(
+    [DEFAULT_REMOTE_SITE_URL, ...(process.env.REMOTE_SITE_ALLOWLIST || '').split(',')]
+      .map((value) => {
+        try {
+          return new URL(String(value).trim()).origin;
+        } catch {
+          return '';
+        }
+      })
+      .filter(Boolean),
+  );
+}
 
 function numericEnv(name, fallback, minimum) {
   const parsed = Number.parseInt(process.env[name] || '', 10);
@@ -18,7 +33,9 @@ function updateOrigin(siteUrl) {
   try {
     const url = new URL(siteUrl);
     const localHttp = url.protocol === 'http:' && ['localhost', '127.0.0.1', '::1'].includes(url.hostname);
-    if (url.protocol !== 'https:' && !(process.env.AUTO_UPDATE_ALLOW_LOCAL_HTTP === '1' && localHttp)) return null;
+    if (process.env.AUTO_UPDATE_TEST_MODE === '1' && process.env.AUTO_UPDATE_ALLOW_LOCAL_HTTP === '1' && localHttp) return url.origin;
+    if (url.protocol !== 'https:') return null;
+    if (!configuredUpdateOrigins().has(url.origin)) return null;
     return url.origin;
   } catch {
     return null;
@@ -206,7 +223,7 @@ function createDesktopAutoUpdater({ app, Notification, NsisUpdater, userDataDir,
   }
 
   function start() {
-    const forced = process.env.AUTO_UPDATE_FORCE === '1';
+    const forced = testMode && process.env.AUTO_UPDATE_FORCE === '1';
     if (process.env.AUTO_UPDATE_DISABLED === '1' || (!forced && (!app.isPackaged || process.platform !== 'win32'))) {
       setState('disabled', { version: app.getVersion(), progress: 0 });
       return;

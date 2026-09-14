@@ -47,6 +47,7 @@ function buildPairRequest(body: { mcpUrl?: unknown; pairCode?: unknown; siteUrl?
   try { parsed = new URL(mcpUrl); } catch { return NextResponse.json({ success: false, error: "연결 코드 또는 MCP URL 을 입력하세요." }, { status: 422 }); }
   if (!/\/api\/mcp\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(parsed.pathname)) return NextResponse.json({ success: false, error: "BlogAutoMCP에서 발급한 MCP URL이 아닙니다." }, { status: 422 });
   if (parsed.protocol !== "https:" && !(process.env.NODE_ENV !== "production" && parsed.protocol === "http:")) return NextResponse.json({ success: false, error: "HTTPS MCP URL만 연결할 수 있습니다." }, { status: 422 });
+  if (!isAllowedRemoteSiteOrigin(parsed.origin)) return NextResponse.json({ success: false, error: "허용되지 않은 MCP URL입니다. BlogAutoMCP 사이트에서 발급한 주소인지 확인하세요." }, { status: 422 });
   return { kind: "mcp-url", siteUrl: parsed.origin, body: { mcpUrl, ...common } };
 }
 

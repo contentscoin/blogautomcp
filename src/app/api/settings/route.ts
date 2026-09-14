@@ -9,6 +9,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { isChatGptBrowserAutomationEnabled } from "@/lib/chatgpt-browser-automation";
+import { requireTrustedLocalMutation } from "@/lib/local-request-auth";
 import { getEnvFilePath } from "../../../../scripts/lib/app-paths";
 import { readCodexLocalStatus } from "@/lib/codex-local";
 import draftRuntimePolicy from "../../../../scripts/lib/draft-runtime-policy.json";
@@ -60,6 +61,16 @@ function serializeEnv(map: Record<string, string>): string {
       .map(([k, v]) => `${k}="${String(v).replace(/"/g, '\\"')}"`)
       .join("\n") + "\n"
   );
+}
+
+function validateEnvValue(key: string, value: string): NextResponse | null {
+  if (/[\r\n]/.test(value)) {
+    return NextResponse.json(
+      { success: false, error: `${key} 값에는 줄바꿈을 포함할 수 없습니다.` },
+      { status: 400 },
+    );
+  }
+  return null;
 }
 
 function readEnvFile(): Record<string, string> {
@@ -117,6 +128,9 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+  const untrusted = requireTrustedLocalMutation(request);
+  if (untrusted) return untrusted;
+
   const unauthorized = requireAdminApiKey(request);
   if (unauthorized) return unauthorized;
 
@@ -135,6 +149,8 @@ export async function POST(request: NextRequest) {
     // 시크릿 마스크 값은 "변경 없음"이므로 건너뛴다.
     if (value === MASK) continue;
     const trimmed = typeof value === "string" ? value.trim() : "";
+    const invalid = validateEnvValue(key, trimmed);
+    if (invalid) return invalid;
     if (trimmed === "") {
       delete merged[key];
       delete process.env[key];

@@ -21,6 +21,10 @@ function serializeEnv(values: Record<string, string>): string {
   return `${Object.entries(values).map(([key, value]) => `${key}="${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`).join("\n")}\n`;
 }
 
+function assertSingleLineEnvValue(key: string, value: string): void {
+  if (/[\r\n]/.test(value)) throw new Error(`${key} value must not contain line breaks`);
+}
+
 export function readLocalEnvFile(): Record<string, string> {
   const filePath = getEnvFilePath();
   if (!fs.existsSync(filePath)) return {};
@@ -35,6 +39,7 @@ export function updateLocalEnvFile(updates: Record<string, string | null>): stri
       delete values[key];
       delete process.env[key];
     } else {
+      assertSingleLineEnvValue(key, value);
       values[key] = value;
       process.env[key] = value;
     }

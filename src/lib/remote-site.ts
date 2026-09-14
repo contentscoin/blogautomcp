@@ -36,7 +36,6 @@ export function isAllowedRemoteSiteOrigin(origin: string): boolean {
   const host = url.hostname.toLowerCase();
   if (url.protocol === "https:") {
     if (origin === DEFAULT_REMOTE_SITE_URL) return true;
-    if (host.endsWith(".chatgpt.site")) return true;
   }
   if (configuredAllowlist().includes(origin)) return true;
   // 개발·E2E: 로컬 모의 사이트 허용
