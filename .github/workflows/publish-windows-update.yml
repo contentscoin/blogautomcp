@@ -1,0 +1,55 @@
+name: Publish Windows Update
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "사이트 자동업데이트 채널에 게시할 Windows 릴리스 태그"
+        required: true
+        default: "v1.3.54"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+
+      - name: Download Windows update artifacts from release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REL_TAG: ${{ inputs.release_tag }}
+        run: |
+          mkdir -p out
+          gh release download "$REL_TAG" --repo "${{ github.repository }}" \
+            --pattern 'BrandConnect-Automation-Setup-*.exe' \
+            --pattern 'BrandConnect-Automation-Setup-*.exe.blockmap' \
+            --pattern 'latest.yml' \
+            --dir out
+          test -f out/latest.yml || { echo "latest.yml 없음"; exit 1; }
+          test "$(find out -maxdepth 1 -type f -name 'BrandConnect-Automation-Setup-*.exe' ! -name '*.blockmap' | wc -l | tr -d ' ')" = "1" || {
+            echo "릴리스에는 Windows 설치 파일이 정확히 1개 있어야 합니다."
+            ls -la out
+            exit 1
+          }
+          test "$(find out -maxdepth 1 -type f -name 'BrandConnect-Automation-Setup-*.exe.blockmap' | wc -l | tr -d ' ')" = "1" || {
+            echo "릴리스에는 blockmap이 정확히 1개 있어야 합니다."
+            ls -la out
+            exit 1
+          }
+
+      - name: Publish Windows update to site channel
+        shell: bash
+        env:
+          INSTALLER_UPLOAD_KEY: ${{ secrets.INSTALLER_UPLOAD_KEY }}
+        run: |
+          test -n "$INSTALLER_UPLOAD_KEY" || { echo "INSTALLER_UPLOAD_KEY 시크릿이 필요합니다."; exit 1; }
+          SITE_URL=$(node -p "new URL(require('./package.json').build.publish[0].url).origin")
+          node apps/sites/scripts/publish-update.mjs "$SITE_URL" out

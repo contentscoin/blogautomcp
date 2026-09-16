@@ -1,6 +1,6 @@
 {
   "name": "brandconnect-automation",
-  "version": "1.3.52",
+  "version": "1.3.54",
   "description": "네이버 쇼핑 커넥트(브랜드커넥트) 자동 블로그 포스팅 도구",
   "private": true,
   "scripts": {
@@ -129,6 +129,7 @@
   },
   "build": {
     "beforePack": "scripts/electron/before-pack.cjs",
+    "afterPack": "scripts/electron/after-pack.cjs",
     "appId": "com.jakeshin.naver-bc-automation",
     "productName": "BrandConnect Automation",
     "asar": false,
@@ -206,6 +207,15 @@
           ]
         }
       ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowElevation": true,
+      "runAfterFinish": false,
+      "deleteAppDataOnUninstall": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
     },
     "npmRebuild": false,
     "protocols": [
