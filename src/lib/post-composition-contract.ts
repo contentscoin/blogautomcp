@@ -174,7 +174,13 @@ const shoppingSections: PostSectionContractV1[] = [
     headingStyle: "quotation",
     minChars: 150,
     maxChars: 240,
-    image: { min: 1, max: 2, intent: "구성품·패키지 원본 사진", placement: "after-lead", layout: "sequence" },
+    image: {
+      min: 1,
+      max: 2,
+      intent: "해당 핵심 기능·작동 방식·조작부를 직접 보여주거나 공식 설명하는 판매페이지 근거 이미지",
+      placement: "after-lead",
+      layout: "sequence",
+    },
   },
   {
     id: "shopping-design",
@@ -184,7 +190,13 @@ const shoppingSections: PostSectionContractV1[] = [
     headingStyle: "quotation",
     minChars: 170,
     maxChars: 260,
-    image: { min: 1, max: 2, intent: "재질·마감·크기 디테일 사진", placement: "after-lead", layout: "sequence" },
+    image: {
+      min: 1,
+      max: 2,
+      intent: "해당 특장점·작동 방식·조작부를 직접 보여주거나 공식 설명하는 판매페이지 근거 이미지",
+      placement: "after-lead",
+      layout: "sequence",
+    },
   },
   {
     id: "shopping-feature-1",
@@ -257,6 +269,11 @@ const shoppingSections: PostSectionContractV1[] = [
     image: { min: 0, max: 1, intent: "제품 대표 원본 사진 재노출", placement: "after-lead" },
   },
 ];
+
+const LEGACY_SHOPPING_FEATURE_IMAGE_INTENTS = new Map<string, string>([
+  ["shopping-package", "구성품·패키지 원본 사진"],
+  ["shopping-design", "재질·마감·크기 디테일 사진"],
+]);
 
 const travelSections: PostSectionContractV1[] = [
   {
@@ -501,6 +518,30 @@ function freeformImageRules(
   };
 }
 
+/**
+ * Replace only the two obsolete shopping feature intents emitted by the old
+ * positional contract. Matching is exact after whitespace normalization and
+ * role-scoped, so a real section that deliberately mentions a package or its
+ * dimensions is left untouched.
+ */
+function currentSectionImageIntent(
+  connectKind: BrandConnectKind,
+  sectionTitle: string,
+  imageIntent: string,
+  contractSection?: PostSectionContractV1,
+): string {
+  if (connectKind !== "SHOPPING" || !contractSection) return imageIntent;
+  const legacyIntent = LEGACY_SHOPPING_FEATURE_IMAGE_INTENTS.get(contractSection.id);
+  if (!legacyIntent) return imageIntent;
+  const normalizedIntent = clean(imageIntent);
+  const normalizedTitle = clean(sectionTitle);
+  if (normalizedIntent === clean(legacyIntent)) return contractSection.image.intent;
+  if (normalizedIntent === `${normalizedTitle}: ${clean(legacyIntent)}`) {
+    return `${normalizedTitle}: ${contractSection.image.intent}`;
+  }
+  return imageIntent;
+}
+
 export function buildPostQualityReport(options: {
   contract: PostCompositionContractV1;
   preset: PostQualityPreset;
@@ -651,7 +692,12 @@ export function resolvePostDocument(options: {
         body: parsed.body,
         characterCount: parsed.body.join("").length,
         imagePaths: allocations[index] || [],
-        imageIntent: planned.imageIntent,
+        imageIntent: currentSectionImageIntent(
+          options.connectKind,
+          parsed.title,
+          planned.imageIntent,
+          sectionContracts[index],
+        ),
         headingStyle: planned.headingStyle || "sectionTitle",
         imageMin: Math.max(0, planned.imageMin),
         imageMax: Math.max(planned.imageMin, planned.imageMax),
@@ -770,6 +816,37 @@ export function resolvePostDocument(options: {
   };
 }
 
+/** Pure migration for bounded/spec-first documents created with stale role intents. */
+export function normalizeLegacyPostImageIntents(
+  document: ResolvedPostDocumentV1,
+): ResolvedPostDocumentV1 {
+  if (document.connectKind !== "SHOPPING") return document;
+  const contractSections = resolveSectionContracts(
+    getPostCompositionContract(document.connectKind),
+    document.sections.length,
+  );
+  const migrated = new Map<string, ResolvedPostSectionV1>();
+  const sections = document.sections.map((section, index) => {
+    const imageIntent = currentSectionImageIntent(
+      document.connectKind,
+      section.title,
+      section.imageIntent,
+      contractSections[index],
+    );
+    if (imageIntent === section.imageIntent) return section;
+    const normalized = { ...section, imageIntent };
+    migrated.set(section.id, normalized);
+    return normalized;
+  });
+  if (migrated.size === 0) return document;
+  const renderNodes = document.renderNodes.map((node): PostRenderNode => {
+    if (node.kind !== "image" || node.sectionId === null) return node;
+    const section = migrated.get(node.sectionId);
+    return section ? { ...node, altText: `${section.title} - ${section.imageIntent}` } : node;
+  });
+  return { ...document, sections, renderNodes };
+}
+
 /**
  * Pure read-time migration: absence of BOTH bounds identifies legacy freeform
  * sections. Never replace either explicit bound (including text-only 0/0).
@@ -778,19 +855,20 @@ export function resolvePostDocument(options: {
 export function normalizeLegacyFreeformImageRules(
   document: ResolvedPostDocumentV1,
 ): ResolvedPostDocumentV1 {
+  const intentNormalized = normalizeLegacyPostImageIntents(document);
   const contractSections = resolveSectionContracts(
-    getPostCompositionContract(document.connectKind),
-    document.sections.length,
+    getPostCompositionContract(intentNormalized.connectKind),
+    intentNormalized.sections.length,
   );
   const migrated = new Map<string, ResolvedPostSectionV1>();
-  const sections = document.sections.map((section, index) => {
+  const sections = intentNormalized.sections.map((section, index) => {
     if (section.imageMin !== undefined || section.imageMax !== undefined) return section;
     const normalized = { ...section, ...freeformImageRules(section, contractSections[index]) };
     migrated.set(section.id, normalized);
     return normalized;
   });
-  if (migrated.size === 0) return document;
-  const renderNodes = document.renderNodes.map((node): PostRenderNode => {
+  if (migrated.size === 0) return intentNormalized;
+  const renderNodes = intentNormalized.renderNodes.map((node): PostRenderNode => {
     if (node.kind !== "image" || node.sectionId === null) return node;
     const section = migrated.get(node.sectionId);
     if (!section) return node;
@@ -801,7 +879,7 @@ export function normalizeLegacyFreeformImageRules(
       altText: `${section.title} - ${section.imageIntent}`,
     };
   });
-  return { ...document, sections, renderNodes };
+  return { ...intentNormalized, sections, renderNodes };
 }
 
 export function refreshPostDocumentQuality(

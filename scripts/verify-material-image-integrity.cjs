@@ -78,7 +78,8 @@ async function main() {
   fs.unlinkSync(images[1]);
   assert.equal(store.packagePreview(fixture).approval.canApprove, false, 'deleted file blocks approval');
 
-  let status = 'READY', reads = 0, applies = 0, loseClaim = false, failApply = false, updatedAt, readManifest = fixture;
+  let status = 'READY', reads = 0, applies = 0, repairs = 0, loseClaim = false, applyFailure = null, updatedAt, readManifest = fixture;
+  let activeRepair = false, repairFailure = null, repairResultErrors = null;
   let automation = false;
   let releaseApply;
   const fakePreview = { imageAssets: [], imageSlots: [{ sectionId: cityId, maximum: 1, count: 0, missing: 1, generationMissing: 0, assets: [] }] };
@@ -91,25 +92,54 @@ async function main() {
     '@/lib/desktop-activity': { beginDesktopActivity: () => () => {} },
     '@/lib/brand-post-package': { getBrandPostPackageDir: () => dir, getBrandPostImageGenerationState: store.getBrandPostImageGenerationState, normalizePackageImageAssets: () => [], packagePreview: () => fakePreview,
       readBrandPostPackage: (_id, options) => { reads++; assert.equal(options.migrate, false); return readManifest; } },
-    '@/lib/brand-post-image-generation': { applyExternalGeneratedBrandPostImage: async () => { applies++; if (failApply) throw Error('fixture failure'); await new Promise(resolve => { releaseApply = resolve; }); return { manifest: fixture }; } },
-    '@/lib/brand-post-image-repair': { isBrandPostImageRepairActive: () => false, planSectionImageRequests: () => [{ requestId: 'fixture', sectionId: cityId }],
-      repairBrandPostImages: async () => ({ manifest: fixture, generatedCount: 1, errors: ['section: CHATGPT_BROWSER_AUTH_REQUIRED: login'] }) },
+    '@/lib/brand-post-image-generation': { applyExternalGeneratedBrandPostImage: async () => { applies++; if (applyFailure) throw Error(applyFailure); await new Promise(resolve => { releaseApply = resolve; }); return { manifest: fixture }; } },
+    '@/lib/brand-post-image-repair': { isBrandPostImageRepairActive: () => activeRepair, planSectionImageRequests: () => [{ requestId: 'fixture', sectionId: cityId }],
+      repairBrandPostImages: async () => { repairs++; if (repairFailure) throw Error(repairFailure); return { manifest: fixture, generatedCount: 1,
+        errors: repairResultErrors || (automation ? ['section: CHATGPT_BROWSER_AUTH_REQUIRED: login'] : []) }; } },
     '@/lib/chatgpt-browser-automation': { isChatGptBrowserAutomationEnabled: () => automation } };
   const mod = { exports: {} };
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, '../src/app/api/brandlinks/[id]/draft/images/route.ts'), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
   }).outputText, { module: mod, exports: mod.exports, require: name => { assert.ok(name in deps, name); return deps[name]; }, process, console });
   const post = (action = 'apply_generated') => mod.exports.POST({ json: async () => ({ action, generatedPath: images[2], sectionId: cityId }) }, { params: Promise.resolve({ id: 'fixture-image' }) });
+  activeRepair = true; status = 'READY'; const readsBeforeBusyHint = reads; const busyHint = await post('generate_missing');
+  assert.equal(busyHint.status, 409); assert.equal(busyHint.body.code, 'IMAGE_REPAIR_BUSY'); assert.equal(reads, readsBeforeBusyHint);
+  activeRepair = false;
   for (const busy of ['PUBLISHING', 'SCHEDULED', 'DRAFTING', 'PUBLISHED']) { status = busy; assert.equal((await post()).status, 409); }
   assert.equal(reads, 0); assert.equal(applies, 0);
   status = 'READY'; loseClaim = true; assert.equal((await post()).status, 409); assert.equal(reads, 0); loseClaim = false;
   status = 'READY'; const pending = post(); await new Promise(resolve => setImmediate(resolve));
   assert.equal(status, 'DRAFTING'); assert.equal((await post()).status, 409); assert.equal(applies, 1);
   releaseApply(); assert.equal((await pending).status, 200); assert.equal(status, 'READY');
-  status = 'FAILED'; failApply = true; assert.equal((await post()).status, 422); assert.equal(status, 'FAILED', 'failure releases mutation claim');
-  for (const action of ['generate_missing', 'generate_section', 'regenerate']) { status = 'READY'; assert.equal((await post(action)).status, 409); assert.equal(status, 'READY', 'early return releases claim'); }
+  status = 'FAILED'; applyFailure = 'fixture failure'; assert.equal((await post()).status, 422); assert.equal(status, 'FAILED', 'failure releases mutation claim');
+  for (const conflictCode of ['IMAGE_REPAIR_BUSY', 'IMAGE_REPAIR_OWNERSHIP_LOST']) {
+    status = 'READY'; applyFailure = `${conflictCode}: fixture apply conflict`;
+    const conflict = await post();
+    assert.equal(conflict.status, 409); assert.equal(conflict.body.code, conflictCode);
+    assert.equal(status, 'READY', 'an apply ownership conflict releases the DB mutation claim');
+  }
+  applyFailure = null;
+  for (const action of ['generate_missing', 'generate_section']) {
+    status = 'READY'; const sourceFirst = await post(action); assert.equal(sourceFirst.status, 200);
+    assert.equal(sourceFirst.body.success, true); assert.equal(status, 'READY', 'source-first completion releases claim');
+  }
+  for (const conflictCode of ['IMAGE_REPAIR_BUSY', 'IMAGE_REPAIR_OWNERSHIP_LOST']) {
+    status = 'READY'; repairFailure = `${conflictCode}: fixture conflict`;
+    const conflict = await post('generate_missing');
+    assert.equal(conflict.status, 409); assert.equal(conflict.body.code, conflictCode);
+    assert.equal(status, 'READY', 'a repair conflict releases the DB mutation claim');
+  }
+  repairFailure = null;
+  for (const conflictCode of ['IMAGE_REPAIR_BUSY', 'IMAGE_REPAIR_OWNERSHIP_LOST']) {
+    status = 'READY'; repairResultErrors = [`${conflictCode}: fixture returned conflict`];
+    const conflict = await post('generate_missing');
+    assert.equal(conflict.status, 409); assert.equal(conflict.body.code, conflictCode); assert.equal(conflict.body.success, false);
+  }
+  repairResultErrors = null;
+  status = 'READY'; assert.equal((await post('regenerate')).status, 404); assert.equal(status, 'READY');
+  assert.equal(repairs, 6, 'source-first repairs and authoritative lock conflicts both reach the repair boundary');
   status = 'DRAFTING'; readManifest = running; updatedAt = new Date(Date.parse(running.imageGeneration.heartbeatAt) - 1000);
-  assert.equal((await post('generate_missing')).body.code, 'CHATGPT_BROWSER_AUTOMATION_DISABLED');
+  assert.equal((await post('generate_missing')).body.success, true);
   assert.equal(status, 'READY', 'explicit recovery releases a proven-dead owner DB claim');
   status = 'DRAFTING'; updatedAt = new Date(Date.parse(running.imageGeneration.heartbeatAt) + 1000);
   assert.equal((await post('generate_missing')).body.code, 'ALREADY_PUBLISHING');

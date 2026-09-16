@@ -63,6 +63,7 @@ async function main() {
         verify: async files => files.find(file => fs.readFileSync(file).equals(originalBytes)) || null,
         download: async () => { throw new Error("retained source must avoid download"); },
       }) },
+      "../../scripts/lib/product-photo-review": { selectVerifiedProductSectionImages: async () => [] },
       "../../scripts/lib/product-image-lock": {}, "../../scripts/lib/product-thumbnail": {},
       "../../scripts/lib/travel-content": {}, "../../scripts/lib/travel-thumbnail": {},
       "../../scripts/lib/image-timeout-policy": { imageJobBudgetMs: () => 1 },

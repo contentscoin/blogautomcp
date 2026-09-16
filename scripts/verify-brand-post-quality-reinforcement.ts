@@ -451,9 +451,9 @@ assert.match(simpleAgentSource, /maximumRepairAttempts = 3/u);
 assert.match(simpleAgentSource, /repairAttempt <= maximumRepairAttempts && !editorialQuality.canPublish/u);
 assert.match(simpleAgentSource, /shouldAcceptQualityRepair\(editorialQuality, repairedQuality\)/u);
 assert.doesNotMatch(simpleAgentSource, /편집 역할 \$\{role\}/u);
-assert.match(sitesMcpSource, /실제 원고 내용 실패\(텍스트 signals\)만 새 idempotencyKey 로 보강 제출합니다/u);
+assert.match(sitesMcpSource, /실제 원고 내용 실패\(텍스트 signals\)는 새 idempotencyKey로 post_revise_draft를 호출/u);
 assert.match(sitesMcpSource, /품질검사 기준을 우회하지 마세요/u);
-assert.match(sitesMcpSource, /이미지 부족만으로는 원고를 보강 제출하지 않습니다/u);
+assert.match(sitesMcpSource, /이미지 부족만으로는 원고를 다시 제출하지 않습니다/u);
 const step2CallIndex = simpleAgentSource.indexOf("await step2_generatePost(");
 const persistedEvidenceIndex = simpleAgentSource.indexOf(
   "productFeatures: product.features.length > 0 ? JSON.stringify(product.features) : null",

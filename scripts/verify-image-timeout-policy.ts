@@ -13,6 +13,7 @@ const dependencies: Record<string, unknown> = {
   "./app-paths": { getChatgptProfileDir: () => "unused", getChatgptSessionFile: () => "unused" },
   "./chatgpt-browser-visibility": {}, "./chatgpt-profile-lock": {},
   "./chatgpt-browser-errors": errors, "./image-timeout-policy": policy,
+  "./chatgpt-navigation": { navigateToChatGpt: async () => {} },
 };
 const loaded = { exports: {} };
 vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve("scripts/lib/chatgpt-browser.ts"), "utf8"), {
@@ -136,10 +137,13 @@ async function main() {
   assert.ok(policy.imageJobBudgetMs({ CHATGPT_IMAGE_WAIT_HARD_MS: "1200000" }) >= 1_652_000);
   assert.equal(policy.imageBatchBudgetMs(11, { BRAND_POST_IMAGE_BATCH_TIMEOUT_MS: "25000" }), 25_000);
   assert.equal(policy.imageBatchBudgetMs(Number.MAX_VALUE, {}), policy.IMAGE_TIMER_MAX_MS);
-  for (const message of ["60s timeout; check login", "download failed", "text-only response", "security might be required", "CHATGPT_BROWSER_UNREACHABLE: offline"]) {
+  for (const message of ["60s timeout; check login", "download failed", "text-only response", "security might be required"]) {
     assert.equal(policy.isSessionWideImageFailure(message), false);
   }
   assert.equal(policy.isSessionWideImageFailure(new Error("ChatGPT: CHATGPT_BROWSER_AUTH_REQUIRED: verification required")), true);
+  assert.equal(policy.classifySessionWideImageFailure(new Error("ChatGPT: CHATGPT_BROWSER_AUTH_REQUIRED: verification required")), "authentication");
+  assert.equal(policy.isSessionWideImageFailure("CHATGPT_BROWSER_UNREACHABLE: offline"), true);
+  assert.equal(policy.classifySessionWideImageFailure("Direct image navigation: CHATGPT_BROWSER_UNREACHABLE: certificate failure"), "unreachable");
   console.log("PASS actual wait: >60s completion, bounded progress extension, hard deadline, idle deadline, wall-clock cost, legacy callers, auth/security, hung page");
   console.log("PASS policy: invalid settings, 11-slot parent budget, 600s profile lock, overrides, finite timer, fail-fast classification");
   console.log("PASS actual submit: ambiguous click failure never submits twice");

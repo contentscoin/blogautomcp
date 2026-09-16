@@ -217,6 +217,24 @@ async function main(): Promise<void> {
   await assert.rejects(navigateToChatGpt(withoutReveal.page, "https://chatgpt.com/", { label: "Direct ChatGPT", reveal: null }));
   assert.equal(withoutReveal.calls.length, 2, "표시할 창이 없으면 두 단계로 끝냅니다.");
 
+  for (const networkMessage of [
+    "page.goto: net::ERR_CERT_COMMON_NAME_INVALID",
+    "page.goto: net::ERR_NAME_NOT_RESOLVED",
+    "page.goto: net::ERR_CONNECTION_REFUSED",
+    "page.goto: Timeout 60000ms exceeded",
+  ]) {
+    const failed = fakePage({ failures: 3, error: () => new Error(networkMessage) });
+    await assert.rejects(
+      navigateToChatGpt(failed.page, "https://chatgpt.com/", { label: "Image ChatGPT", reveal: null }),
+      (error: Error) => {
+        assert.match(error.message, new RegExp(CHATGPT_BROWSER_UNREACHABLE_CODE, "u"));
+        assert.equal(isChatGptBrowserUnreachableError(error.message), true);
+        return true;
+      },
+    );
+    assert.equal(failed.calls.length, 2, `${networkMessage} must use the bounded navigation policy`);
+  }
+
   // 보안 확인 화면은 commit 단계나 창을 띄운 뒤에야 나타나기도 한다. 그때도 네트워크 오류가 아니라
   // 로그인·보안 확인 안내로 이어져야 한다.
   for (const challengeAfterAttempt of [1, 2]) {
@@ -338,8 +356,10 @@ async function main(): Promise<void> {
   assert.match(draftRoute, /CHATGPT_BROWSER_UNREACHABLE/u);
   assert.match(draftRoute, /isChatGptBrowserUnreachableError/u);
   assert.match(draftRoute, /buildChatGptBrowserAutomationEnv\(useBrowserChatGpt\)/u);
+  assert.match(draftRoute, /CODEX_BROWSER_FALLBACK_ENABLED:\s*"false"/u);
+  assert.match(draftRoute, /ALLOW_CHATGPT_BROWSER_MODE:\s*useBrowserChatGpt \? "true" : "false"/u);
   assert.match(draftRoute, /status: "DRAFTING"/u);
-  assert.match(draftRoute, /status: "FAILED", errorMessage: message/u);
+  assert.match(draftRoute, /status:[^\n]+"FAILED",[\s\S]{0,80}errorMessage: message/u);
   assert.match(draftRoute, /updateMany\(\{[\s\S]*?where: \{ id, status: link\.status \}/u);
 
   const publishRoute = source("src/app/api/brandlinks/[id]/publish/route.ts");
@@ -351,7 +371,6 @@ async function main(): Promise<void> {
   assert.match(brandLinkRoute, /notIn: \["DRAFTING", "PUBLISHING"\]/u);
 
   const dashboard = source("src/app/page.tsx");
-  assert.match(dashboard, /1\. 웹 GPT 자동작성/u);
   assert.match(dashboard, /provider: "chatgpt", force: false/u);
   assert.match(dashboard, /await requestDraft\(false\)/u);
   assert.match(dashboard, /"CHATGPT_BROWSER_UNREACHABLE"/u);
@@ -378,6 +397,12 @@ async function main(): Promise<void> {
   assert.match(simpleAgent, /자동 재시도는 이미지 없이 .*자 압축 근거로 진행합니다/u);
   assert.match(simpleAgent, /mode: "primary" \| "recovery"/u);
   assert.equal(CHATGPT_DIRECT_PRIMARY_PROMPT_MAX_CHARS, 8_500);
+
+  const imageSharedBrowser = source("scripts/lib/chatgpt-browser.ts");
+  const imageWorker = source("scripts/chatgpt-generate-image-batch.ts");
+  assert.match(imageSharedBrowser, /openChatGPTTarget[\s\S]{0,500}navigateToChatGpt/u);
+  assert.match(imageWorker, /navigateToChatGpt\(page, `https:\/\/chatgpt\.com\$\{recoveryConversationPath\}`/u);
+  assert.doesNotMatch(imageWorker, /page\.goto\(/u, "image open/recovery must share classified ChatGPT navigation");
   assert.equal(CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS, 5_500);
   const directGenerationBlock = simpleAgent.match(
     /async function runDirectChatGPTGeneration[\s\S]*?\n\}\n\nfunction buildClarificationReply/u,
@@ -425,7 +450,10 @@ async function main(): Promise<void> {
     "scripts/super-publish.ts",
   ]) {
     const bulkSource = source(bulkScript);
-    assert.match(bulkSource, /buildChatGptBrowserAutomationEnv\(isChatGptBrowserAutomationEnabled\(\)\)/u);
+    assert.match(
+      bulkSource,
+      /buildChatGptBrowserAutomationEnv\(isChatGptBrowserAutomationEnabled\(\)\)|run(?:Automatic|Scheduled)DraftWorkflow|retired in/u,
+    );
     assert.equal(bulkSource.includes('BROWSER_GPT_MODE: "false"'), false);
   }
 

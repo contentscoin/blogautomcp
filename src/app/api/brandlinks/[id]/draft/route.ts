@@ -26,6 +26,7 @@ import {
   reconcileBrandPostPackageQuality,
   writeBrandPostPackageManifest,
   type BrandPostPackageManifest,
+  type BrandPostPackageResult,
 } from "@/lib/brand-post-package";
 import {
   isProductSnapshotEvidenceRicher,
@@ -249,6 +250,7 @@ function scheduleSectionImageRepair(options: {
   brandLinkId: string;
   productName: string;
   skip: boolean;
+  sourceOnly?: boolean;
 }): { scheduled: boolean; remaining: number; warning: string | null } {
   const manifest = readBrandPostPackage(options.brandLinkId);
   if (!manifest || manifest.version !== "brand-post-package/v2") {
@@ -268,7 +270,9 @@ function scheduleSectionImageRepair(options: {
       warning: `섹션 이미지 ${remaining}장이 비어 있습니다. 자동 생성은 꺼져 있습니다(설정 BRAND_POST_AUTO_SECTION_IMAGES). ${hint}`,
     };
   }
-  if (!isChatGptBrowserAutomationEnabled()) {
+  const canFillFromVerifiedShoppingSources = manifest.connectKind === "SHOPPING" &&
+    manifest.imageRequirements?.policy !== "generated-required";
+  if (!canFillFromVerifiedShoppingSources && !isChatGptBrowserAutomationEnabled()) {
     return {
       scheduled: false,
       remaining,
@@ -280,7 +284,8 @@ function scheduleSectionImageRepair(options: {
   }
   const finishActivity = beginDesktopActivity("brand-post-image-generation");
   // Detached on purpose: the draft response returns now; imageGeneration.status="running" is persisted before the first await.
-  void repairBrandPostImages({ brandLinkId: options.brandLinkId, productName: options.productName })
+  void repairBrandPostImages({ brandLinkId: options.brandLinkId, productName: options.productName,
+    sourceOnly: options.sourceOnly })
     .catch((error) => {
       console.error(`[draft] 섹션 이미지 자동 생성 실패(${options.brandLinkId}): ${error instanceof Error ? error.message : String(error)}`);
     })
@@ -288,7 +293,9 @@ function scheduleSectionImageRepair(options: {
   return {
     scheduled: true,
     remaining,
-    warning: `섹션 이미지 ${remaining}장을 백그라운드에서 생성합니다. 완료 전까지 초안 승인은 보류됩니다.`,
+    warning: canFillFromVerifiedShoppingSources
+      ? `섹션 이미지 ${remaining}장에 검증된 상품 원본을 먼저 배정하고, 부족한 슬롯만 생성합니다. 완료 전까지 초안 승인은 보류됩니다.`
+      : `섹션 이미지 ${remaining}장을 백그라운드에서 생성합니다. 완료 전까지 초안 승인은 보류됩니다.`,
   };
 }
 
@@ -305,7 +312,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 }
 
 /** 초안 부분 수정: simple-agent 를 수정 모드(BRANDLINK_REVISE_REQUEST)로 실행한다. 네이버 세션은 필요 없다. */
-async function runRevision(id: string, packageDir: string, instructions: string, sectionIndexes: number[], qualityConvergence = false): Promise<void> {
+async function runRevision(id: string, packageDir: string, instructions: string, sectionIndexes: number[], qualityConvergence = false): Promise<BrandPostPackageResult | null> {
   const requestPath = path.join(packageDir, "revise-request.json");
   fs.writeFileSync(requestPath, JSON.stringify({ instructions, sectionIndexes, qualityConvergence, requestedAt: new Date().toISOString() }, null, 2), "utf8");
   const logPath = path.join(packageDir, "prepare.log");
@@ -363,6 +370,9 @@ async function runRevision(id: string, packageDir: string, instructions: string,
       if (failure) throw new PrepareProcessError(failure.code, failure.message);
       throw new PrepareProcessError("LOCAL_AUTOMATION_FAILED", `초안 수정 프로세스가 종료되었습니다(code=${exit.code}, signal=${exit.signal ?? "none"}).`);
     }
+    const result = readBrandPostPackageResult(id);
+    if (result && !result.ok) throw new PrepareProcessError(result.code || "LOCAL_AUTOMATION_FAILED", result.message);
+    return result;
   } finally {
     fs.closeSync(logFd);
     fs.rmSync(requestPath, { force: true });
@@ -506,11 +516,17 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "상품 상태가 변경되어 초안 수정을 시작하지 못했습니다." }, { status: 409 });
     }
     try {
-      await runRevision(id, packageDir, instructions, sectionIndexes, body.qualityConvergence === true);
+      const revisionResult = await runRevision(id, packageDir, instructions, sectionIndexes, body.qualityConvergence === true);
       const manifest = readBrandPostPackage(id);
       if (!manifest) throw new PrepareProcessError("LOCAL_AUTOMATION_FAILED", "수정된 초안 매니페스트를 찾지 못했습니다.");
       await prisma.brandLink.update({ where: { id }, data: { status: "READY", errorMessage: null } });
-      return NextResponse.json({ success: true, data: packagePreview(manifest), logPath });
+      return NextResponse.json({
+        success: true,
+        code: revisionResult?.code || "OK",
+        message: revisionResult?.message,
+        data: packagePreview(manifest),
+        logPath,
+      });
     } catch (error) {
       await prisma.brandLink.update({ where: { id }, data: { status: "READY" } }).catch(() => undefined);
       return failureResponse(error, "초안 수정 실패", 500, { logPath });
@@ -747,14 +763,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           AI_PROVIDER: useCodex ? "codex" : provider,
           CODEX_DRAFT_ENABLED: useCodex ? "true" : "false",
           CODEX_DRAFT_MODEL: draftRuntimePolicy.CODEX_DRAFT_MODEL,
-          CODEX_BROWSER_FALLBACK_ENABLED:
-            useCodex && browserAutomationEnabled && browserSession?.isValid ? "true" : "false",
-          ALLOW_CHATGPT_BROWSER_MODE:
-            useCodex && browserAutomationEnabled && browserSession?.isValid
-              ? "true"
-              : useBrowserChatGpt
-                ? "true"
-                : "false",
+          // A Codex failure is classified and handled on the Codex path. Never
+          // resubmit an ambiguous/auth/model failure through ChatGPT browser automation.
+          CODEX_BROWSER_FALLBACK_ENABLED: "false",
+          ALLOW_CHATGPT_BROWSER_MODE: useBrowserChatGpt ? "true" : "false",
           BROWSER_GPT_MODE: useBrowserChatGpt ? "true" : "false",
           HUMAN_MOBILE_POLISH_ENABLED: "true",
           BLOG_HUMANIZE_REWRITE_ENABLED: action === "submit_generated" ? "false" : "true",
@@ -811,7 +823,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const imageRepair = scheduleSectionImageRepair({
       brandLinkId: id,
       productName: manifest.title,
-      skip: action === "submit_generated" || mcpOrigin || body.autoSectionImages === false,
+      // MCP-submitted shopping drafts may bind reviewed seller originals, but
+      // never launch the PC browser image generator behind the conversation.
+      skip: body.autoSectionImages === false ||
+        ((action === "submit_generated" || mcpOrigin) && manifest.connectKind !== "SHOPPING"),
+      sourceOnly: action === "submit_generated" || mcpOrigin,
     });
     let finalizedManifest = readBrandPostPackage(id) || manifest;
     let approvalWarning: string | null = null;
@@ -884,9 +900,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       }, { status: 409 });
     }
     if (useCodex) {
+      const code = error instanceof PrepareProcessError
+        ? error.code
+        : "CODEX_DRAFT_FAILED";
       return NextResponse.json({
         success: false,
-        code: "CODEX_DRAFT_FAILED",
+        code,
         error: `GPT 원고 작성에 실패했습니다: ${message}`,
         data: { handoff: handoff(), codex: codexStatus },
         logPath,

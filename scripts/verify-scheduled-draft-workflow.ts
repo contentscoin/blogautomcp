@@ -10,6 +10,36 @@ import { readMaterialJob, saveMaterialJob, acquireMaterialJobLock, type Material
 import { materialRevision, validateMaterialSelection } from "../src/lib/material-library";
 import type { BrandPostPackageManifest } from "../src/lib/brand-post-package";
 
+function workflowContentQuality(editorialPassed: boolean) {
+  const usefulness = {
+    key: "usefulness",
+    label: "구매 판단에 필요한 요소",
+    maxScore: 15,
+    score: editorialPassed ? 15 : 11,
+    status: editorialPassed ? "pass" : "fail",
+    notes: editorialPassed ? [] : ["추천·비추천 대상"],
+  };
+  return {
+    canPublish: false,
+    verdict: "blocked",
+    code: "composition-quality",
+    reason: "이미지 구성 보강이 필요합니다.",
+    score: editorialPassed ? 100 : 96,
+    blockers: [{ code: "composition-quality", tier: "structure", reason: "이미지 구성 보강이 필요합니다." }],
+    qualityFailures: editorialPassed ? [] : [usefulness],
+    signals: [
+      { key: "review-substance", label: "제품 리뷰", status: editorialPassed ? "pass" : "fail" },
+      { key: "composition-quality", label: "이미지 구성", status: "fail" },
+    ],
+    quality: {
+      score: editorialPassed ? 100 : 96,
+      passScore: 70,
+      categories: [usefulness],
+      sourceEvidence: { level: "usable", sufficient: true },
+    },
+  };
+}
+
 async function main() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "material-workflow-test-"));
   const previousRoot = process.env.DESKTOP_USER_DATA;
@@ -117,6 +147,71 @@ async function main() {
     assert(travelEvents.indexOf("recheck") < travelEvents.indexOf("generate_missing"));
     assert(travelEvents.indexOf("generate_missing") < travelEvents.indexOf("approve"));
 
+    let repairedText = false, repairedImages = false, sequentialRevisions = 0, sequentialImageRepairs = 0, sequentialApprovals = 0;
+    const sequentialCall: Call = async (url, method, body) => {
+      const action = (body as { action?: string } | undefined)?.action;
+      if (action === "revise") {
+        repairedText = true;
+        sequentialRevisions += 1;
+      }
+      if (url.endsWith("/draft/images") && method === "POST") {
+        repairedImages = true;
+        sequentialImageRepairs += 1;
+        return {
+          success: true,
+          code: "IMAGE_OUTPUT_DUPLICATE",
+          errors: ["서로 다른 파트의 이미지 결과가 같습니다."],
+          data: null,
+        };
+      }
+      if (action === "approve") sequentialApprovals += 1;
+      return {
+        success: true,
+        data: {
+          approvedAt: null,
+          approval: { canApprove: false },
+          imageSlots: [{ missing: repairedImages ? 0 : 1, generationMissing: repairedImages ? 0 : 1 }],
+          contentQuality: workflowContentQuality(repairedText),
+        },
+      };
+    };
+    await assert.rejects(
+      runMaterialPreparation("text-then-composition", { pause: async () => {}, call: sequentialCall }),
+      (error: unknown) => {
+        assert.equal((error as { code?: string }).code, "IMAGE_OUTPUT_DUPLICATE",
+          "the image subsystem code must survive the final composition-only gate");
+        assert.doesNotMatch(error instanceof Error ? error.message : String(error), /원고 보강 후에도/u,
+          "a passing 100-point manuscript must not be reported as exhausted text repair");
+        return true;
+      },
+    );
+    assert.equal(sequentialRevisions, 1, "the 96-point editorial failure is repaired once");
+    assert.equal(sequentialImageRepairs, 1, "the following composition stage runs once");
+    assert.equal(sequentialApprovals, 0, "composition failure must still prevent approval");
+
+    let fallbackImageAttempted = false;
+    await assert.rejects(
+      runMaterialPreparation("composition-missing-slots", { pause: async () => {}, call: async (url, method, body) => {
+        void body;
+        if (url.endsWith("/draft/images") && method === "POST") {
+          fallbackImageAttempted = true;
+          return { success: true, code: "OK", message: "이미지 작업 요청 처리 완료", data: null };
+        }
+        return { success: true, data: {
+          approvedAt: null,
+          approval: { canApprove: false },
+          imageSlots: [{ missing: 1, generationMissing: 1 }],
+          contentQuality: workflowContentQuality(true),
+        } };
+      } }),
+      (error: unknown) => {
+        assert.equal((error as { code?: string }).code, "COMPOSITION_REPAIR_REQUIRED",
+          "a successful provider code cannot mask an unresolved composition slot");
+        return true;
+      },
+    );
+    assert.equal(fallbackImageAttempted, true);
+
     const runningEvents: string[] = [];
     let runningPolls = 0;
     await runMaterialPreparation("travel-running-images", { pause: async () => { runningPolls++; }, call: async (url, method, body) => {
@@ -171,6 +266,44 @@ async function main() {
     await runMaterialJob(auth, { call: async () => { authCalls++; throw Object.assign(new Error("login required"), { code: "CHATGPT_BROWSER_AUTH_REQUIRED" }); },
       material, save: saveMaterialJob, pause: async () => {}, checkCancelled: () => {} });
     assert.equal(authCalls, 1); assert.equal(auth.items.filter(item => item.status === "interrupted").length, 9);
+
+    for (const sessionCode of ["CODEX_MODEL_INCOMPATIBLE", "CODEX_LOGIN_REQUIRED", "CHATGPT_BROWSER_LOGIN_REQUIRED"]) {
+      const sessionFailure = makeJob(10, "prepare"); let sessionCalls = 0;
+      await runMaterialJob(sessionFailure, { call: async () => {
+        sessionCalls += 1;
+        throw Object.assign(new Error(sessionCode), { code: sessionCode });
+      }, material, save: saveMaterialJob, pause: async () => {}, checkCancelled: () => {} });
+      assert.equal(sessionCalls, 1, `${sessionCode} must stop before the second material`);
+      assert.equal(sessionFailure.items.filter(item => item.status === "interrupted").length, 9);
+    }
+    for (const perItemCode of ["CODEX_TIMEOUT", "CODEX_TRANSIENT_FAILURE"]) {
+      const perItemFailure = makeJob(3, "prepare"); let perItemCalls = 0;
+      await runMaterialJob(perItemFailure, { call: async () => {
+        perItemCalls += 1;
+        throw Object.assign(new Error(perItemCode), { code: perItemCode });
+      }, material, save: saveMaterialJob, pause: async () => {}, checkCancelled: () => {} });
+      assert.equal(perItemCalls, 3, `${perItemCode} may be isolated to one product and must not stop the batch`);
+      assert.equal(perItemFailure.items.filter(item => item.status === "interrupted").length, 0);
+    }
+
+    const unreachable = makeJob(10, "prepare"); let unreachableImageCalls = 0;
+    await runMaterialJob(unreachable, { call: async (url, method) => {
+      if (url.endsWith("/draft/images") && method === "POST") {
+        unreachableImageCalls += 1;
+        // Image repair can save earlier source assignments and still report a
+        // session-wide browser failure as a successful partial response.
+        return { success: true, code: "CHATGPT_BROWSER_UNREACHABLE", errors: ["certificate failure"], data: {} };
+      }
+      return { success: true, data: {
+        approvedAt: null,
+        imageSlots: [{ missing: 1, generationMissing: 1 }],
+        contentQuality: { signals: [{ key: "composition-quality", status: "fail" }] },
+      } };
+    }, material, save: saveMaterialJob, pause: async () => {}, checkCancelled: () => {} });
+    assert.equal(unreachableImageCalls, 1, "one browser connection failure must stop the shared session");
+    assert.equal(unreachable.items[0].status, "failed");
+    assert.equal(unreachable.items.filter(item => item.status === "interrupted").length, 9,
+      "the remaining nine materials must not repeat a known session-wide connection failure");
 
     let legacyPolls = 0;
     await assert.rejects(runMaterialPreparation("product-0", { pause: async () => { legacyPolls++; }, call: async () => ({ success: true, data: { imageGeneration: { status: "running", recoveryState: "owner-unknown" } } }) }), /이전 이미지 작업/);
@@ -240,7 +373,7 @@ async function main() {
       if (previousPort === undefined) delete process.env.APP_PORT; else process.env.APP_PORT = previousPort;
       await new Promise<void>(resolve => resetServer.close(() => resolve()));
     }
-    console.log("PASS: 10 selected publications, zero generation during publishing, separate preparation, stale revision, partial 9/10, auth halt, uncertain result halt, durable restart/locking, file hashes, bounded polling, transport errors");
+    console.log("PASS: 10 selected publications, zero generation during publishing, separate preparation, text-to-composition code preservation, stale revision, partial 9/10, auth halt, uncertain result halt, durable restart/locking, file hashes, bounded polling, transport errors");
   } finally {
     if (previousRoot === undefined) delete process.env.DESKTOP_USER_DATA; else process.env.DESKTOP_USER_DATA = previousRoot;
     fs.rmSync(dir, { recursive: true, force: true });

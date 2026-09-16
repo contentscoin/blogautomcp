@@ -147,16 +147,27 @@ async function main() {
     attachedBodyPaths: bodyPaths.slice(0, 4),
     imageGeneration: partialState,
   });
-  const resumeSources = bodyPaths.slice(0, 4).map((bodyPath, index) => {
+  const resumeRecords = bodyPaths.slice(0, 4).map((bodyPath, index) => {
     const source = path.join(packageDir, `resume-source-${index + 1}.png`);
     fs.writeFileSync(source, `unique-resume-source-${index + 1}`);
-    provenance.preserveProductPhotoSource({ sourcePath: source, outputPath: bodyPath, segmented: true });
-    return source;
+    const receipt = provenance.preserveProductPhotoSource({ sourcePath: source, outputPath: bodyPath, segmented: true });
+    return { source, receipt };
   });
+  const resumeSources = resumeRecords.map(record => record.source);
+  let reviewedBodyIndex = 0;
   previous.imageAssets = previous.imageAssets!.map(asset => asset.role === "body" ? {
     ...asset,
     creationMethod: "source-with-generated-background" as const,
     provenance: "LOCKED_PRODUCT" as const,
+    sourceReview: {
+      version: "product-photo-source-review/v1" as const,
+      sourceSha256: resumeRecords[reviewedBodyIndex++].receipt.sourceSha256,
+      usage: "section-matched-product-evidence" as const,
+      sectionIntent: asset.imageIntent || "",
+      reviewClass: "feature-evidence" as const,
+      reason: "fixture feature evidence",
+      reviewedAt: iso(1),
+    },
   } : asset);
   const previousBodyAssets = previous.imageAssets!.filter((asset) => asset.role === "body");
 
@@ -195,6 +206,34 @@ async function main() {
     attachedBodyPaths: [],
   }));
   assertExactPreservation(titleOnly, "title-only revision");
+
+  const unboundPath = bodyPaths[4];
+  const duplicateUnboundPath = path.join(packageDir, "copied-unbound.png");
+  fs.copyFileSync(unboundPath, duplicateUnboundPath);
+  const unboundAsset: BrandPostPackageImageAsset = {
+    path: unboundPath,
+    sourcePath: unboundPath,
+    sha256: digest(unboundPath),
+    role: "body",
+    sectionId: null,
+    creationMethod: "source",
+    provenance: "ORIGINAL",
+  };
+  const previousWithUnbound = {
+    ...previous,
+    bodyImagePaths: [...previous.bodyImagePaths, unboundPath],
+    imageAssets: [...(previous.imageAssets || []), unboundAsset],
+  };
+  const copiedUnbound = continuity.reconcileBrandPostImageContinuity(previousWithUnbound, buildManifest({
+    createdAt: iso(8),
+    bodyRevision: "보강된",
+    attachedBodyPaths: [],
+    imageAssets: [{ ...unboundAsset, path: duplicateUnboundPath, sourcePath: duplicateUnboundPath }],
+  }));
+  const matchingUnbound = copiedUnbound.imageAssets!.filter(asset =>
+    !asset.sectionId && asset.role === "body" && asset.sha256 === unboundAsset.sha256);
+  assert.equal(matchingUnbound.length, 1, "text revision deduplicates copied unbound candidates by sha256");
+  assert.equal(matchingUnbound[0].path, unboundPath, "the reviewed previous package asset wins sha256 deduplication");
 
   const changedIntents = [...intents];
   changedIntents[2] = "완전히 달라진 제3 장면 의도";
@@ -284,6 +323,15 @@ async function main() {
         creationMethod: "source-with-generated-background",
         remoteGenerated: true,
         provenance: "EDITORIAL_CARD",
+        sourceReview: {
+          version: "product-photo-source-review/v1",
+          sourceSha256: digest(sellerSource),
+          usage: "section-matched-product-evidence",
+          sectionIntent: intents[index],
+          reviewClass: "feature-evidence",
+          reason: "fixture feature evidence",
+          reviewedAt: iso(10),
+        },
       })),
     ],
   });
@@ -319,6 +367,15 @@ async function main() {
         creationMethod: "source-with-generated-background",
         remoteGenerated: true,
         provenance: "LOCKED_PRODUCT",
+        sourceReview: {
+          version: "product-photo-source-review/v1",
+          sourceSha256: digest(sellerSource),
+          usage: "section-matched-product-evidence",
+          sectionIntent: intents[index],
+          reviewClass: "feature-evidence",
+          reason: "fixture feature evidence",
+          reviewedAt: iso(10),
+        },
       })),
     ],
   });

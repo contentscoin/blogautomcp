@@ -12,6 +12,7 @@ import {
   getPostCompositionContract,
   refreshPostDocumentQuality,
   normalizeLegacyFreeformImageRules,
+  normalizeLegacyPostImageIntents,
   sectionImageBounds,
   type ResolvedPostDocumentV1,
 } from "./post-composition-contract";
@@ -19,6 +20,13 @@ import {
   assessProductEditorialCoverage,
   hasProductLimitationLanguage,
 } from "../../scripts/lib/product-editorial-plan";
+import {
+  allowsGenericBrandPostProductPhoto,
+  brandPostImageIntentMatches,
+  brandPostSectionSlotId,
+  classifyBrandPostImageEvidence,
+  normalizeBrandPostImageIntent,
+} from "./brand-post-image-evidence";
 
 export interface BrandPostPackageImageAsset {
   path: string;
@@ -31,6 +39,16 @@ export interface BrandPostPackageImageAsset {
   creationMethod?: "source" | "local-composite" | "remote-generated" | "source-with-generated-background";
   remoteGenerated?: boolean;
   provenance?: "ORIGINAL" | "LOCKED_PRODUCT" | "GENERATED_BACKGROUND" | "EDITORIAL_CARD";
+  /** Audit trail for seller bytes used directly or as a locked composite foreground. */
+  sourceReview?: {
+    version: "product-photo-source-review/v1";
+    sourceSha256: string;
+    usage: "general-product-context" | "section-matched-product-evidence";
+    sectionIntent: string;
+    reviewClass?: "product-photo" | "feature-evidence";
+    reason?: string;
+    reviewedAt: string;
+  };
 }
 
 /** Spec-first 파이프라인 검증 리포트 요약(매니페스트 specValidation / 미리보기 readiness). */
@@ -367,29 +385,193 @@ function isValidPackageImage(asset: BrandPostPackageImageAsset): boolean {
   } catch { return false; }
 }
 
-export function getBrandPostImageSlots(manifest: BrandPostPackageManifest) {
+type PreviewImageAsset = BrandPostPackageImageAsset & {
+  assetKey: string;
+  previewUrl: string;
+  expectedSlotId?: string;
+};
+
+interface StaleImageTarget {
+  slotId: string;
+  path: string;
+  assetKey?: string;
+  code: string;
+  reason: string;
+}
+
+interface PackageImageAuditIssue {
+  code: string;
+  reason: string;
+  sectionId?: string;
+}
+
+function packageImagePreviewAsset(manifest: BrandPostPackageManifest, asset: BrandPostPackageImageAsset): PreviewImageAsset {
+  return {
+    ...asset,
+    assetKey: asset.sha256,
+    previewUrl: `/api/brandlinks/${encodeURIComponent(manifest.brandLinkId)}/draft/images?asset=${asset.sha256}`,
+  };
+}
+
+function auditBrandPostImages(manifest: BrandPostPackageManifest) {
   const assets = normalizePackageImageAssets(manifest);
-  const byPath = new Map(assets.filter(isValidPackageImage).map(asset => [path.resolve(asset.path), asset]));
-  return manifest.version === "brand-post-package/v2" ? manifest.composition.sections.map(section => {
+  const assetsByPath = new Map<string, BrandPostPackageImageAsset[]>();
+  for (const asset of assets) {
+    const resolved = path.resolve(asset.path);
+    const current = assetsByPath.get(resolved) || [];
+    current.push(asset);
+    assetsByPath.set(resolved, current);
+  }
+  const assetKeyUseCounts = new Map<string, number>();
+  for (const asset of assets) {
+    assetKeyUseCounts.set(asset.sha256, (assetKeyUseCounts.get(asset.sha256) || 0) + 1);
+  }
+  const issues: PackageImageAuditIssue[] = [];
+  const issueKeys = new Set<string>();
+  const addIssue = (issue: PackageImageAuditIssue) => {
+    const key = `${issue.code}\u0000${issue.sectionId || ""}\u0000${issue.reason}`;
+    if (!issueKeys.has(key)) {
+      issueKeys.add(key);
+      issues.push(issue);
+    }
+  };
+  const heroResolved = path.resolve(manifest.heroImagePath);
+  const heroCandidates = assetsByPath.get(heroResolved) || [];
+  const heroFileAsset = heroCandidates.find(isValidPackageImage);
+  const heroAsset = heroCandidates.find(asset => asset.role === "hero" && !asset.sectionId && isValidPackageImage(asset));
+  const claimedHashes = new Set<string>();
+  if (heroFileAsset) claimedHashes.add(heroFileAsset.sha256);
+  if (!heroAsset) {
+    addIssue({ code: "hero-image-invalid", reason: "대표 이미지 파일·역할·저장 해시가 올바르지 않습니다." });
+  } else {
+    const evidence = classifyBrandPostImageEvidence(heroAsset);
+    if (!evidence.coherent) addIssue({
+      code: "image-provenance-invalid",
+      reason: `대표 이미지 · ${evidence.reason}`,
+    });
+  }
+
+  if (manifest.version !== "brand-post-package/v2") {
+    return {
+      slots: [] as Array<never>,
+      issues,
+      heroAsset,
+      usedPaths: new Set([heroResolved]),
+    };
+  }
+
+  const pathUseCounts = new Map<string, number>();
+  for (const section of manifest.composition.sections) {
+    for (const file of new Set(section.imagePaths.map(candidate => path.resolve(candidate)))) {
+      pathUseCounts.set(file, (pathUseCounts.get(file) || 0) + 1);
+    }
+  }
+  const usedPaths = new Set<string>([heroResolved]);
+  const slots = manifest.composition.sections.map(section => {
     const { min: minimum, max: maximum } = sectionImageBounds(getPostCompositionContract(manifest.connectKind), section);
-    const sectionAssets = [...new Set(section.imagePaths.map(file => path.resolve(file)))]
-      .flatMap(file => {
-        const asset = byPath.get(file);
-        return asset && (!asset.sectionId || asset.sectionId === section.id) ? [{ ...asset, assetKey: asset.sha256,
-          previewUrl: `/api/brandlinks/${encodeURIComponent(manifest.brandLinkId)}/draft/images?asset=${asset.sha256}` }] : [];
-      });
-    const originalCount = sectionAssets.filter(asset => asset.provenance === "ORIGINAL" || asset.creationMethod === "source").length;
-    const generatedCount = sectionAssets.filter(asset => asset.remoteGenerated === true ||
-      asset.remoteGenerated === undefined && asset.provenance === "GENERATED_BACKGROUND").length;
+    const sectionAssets: PreviewImageAsset[] = [];
+    const generatedAssets = new Set<string>();
+    const staleTargets: StaleImageTarget[] = [];
+    const sectionPaths = [...new Set(section.imagePaths.map(file => path.resolve(file)))];
+    for (const [index, file] of sectionPaths.entries()) {
+      usedPaths.add(file);
+      const expectedSlotId = brandPostSectionSlotId(section.id, index + 1);
+      const candidates = assetsByPath.get(file) || [];
+      const exact = candidates.find(asset => asset.role === "body" && asset.sectionId === section.id);
+      const asset = exact || candidates[0];
+      let stale: Omit<StaleImageTarget, "slotId" | "path" | "assetKey"> | null = null;
+      let generated = false;
+      if (!asset || !isValidPackageImage(asset)) {
+        stale = { code: "image-asset-invalid", reason: `이미지 · ${section.title}: 파일이 없거나 저장된 해시와 일치하지 않습니다.` };
+      } else if (asset.role !== "body" || asset.sectionId !== section.id) {
+        stale = { code: "image-asset-binding", reason: `이미지 · ${section.title}: 본문 이미지의 역할 또는 파트 결속이 올바르지 않습니다.` };
+      } else {
+        const evidence = classifyBrandPostImageEvidence(asset);
+        generated = evidence.generated;
+        if (!evidence.coherent) {
+          stale = { code: "image-provenance-invalid", reason: `이미지 · ${section.title}: ${evidence.reason}` };
+        } else if (generated && (!brandPostImageIntentMatches({
+          assetIntent: asset.imageIntent,
+          sectionTitle: section.title,
+          sectionIntent: section.imageIntent,
+        }) || asset.slotId !== expectedSlotId)) {
+          stale = { code: "image-intent-stale", reason: `이미지 · ${section.title}: 생성 이미지의 현재 파트 목적 또는 슬롯 결속이 오래되었습니다.` };
+        } else if (generated && manifest.connectKind === "SHOPPING" &&
+            asset.creationMethod === "source-with-generated-background" &&
+            !allowsGenericBrandPostProductPhoto({ sectionTitle: section.title, imageIntent: section.imageIntent })) {
+          const review = asset.sourceReview;
+          const source = readProductPhotoSource(asset.path);
+          const validFeatureSource = review?.version === "product-photo-source-review/v1" &&
+            review.usage === "section-matched-product-evidence" &&
+            review.reviewClass === "feature-evidence" &&
+            normalizeBrandPostImageIntent(review.sectionIntent) === normalizeBrandPostImageIntent(section.imageIntent) &&
+            source?.segmented === true && source.sourceSha256 === review.sourceSha256;
+          if (!validFeatureSource) stale = {
+            code: "image-source-review-missing",
+            reason: `이미지 · ${section.title}: 생성 배경에 합성한 상품 원본이 현재 기능 목적과 일치한다는 검증 기록이 없습니다.`,
+          };
+        } else if (!generated && manifest.connectKind === "SHOPPING") {
+          const review = asset.sourceReview;
+          const reviewClassAllowed = review?.reviewClass === "feature-evidence" ||
+            (review?.reviewClass === "product-photo" && allowsGenericBrandPostProductPhoto({
+              sectionTitle: section.title,
+              imageIntent: section.imageIntent,
+            }));
+          const validReview = review?.version === "product-photo-source-review/v1" &&
+            review.usage === "section-matched-product-evidence" && review.sourceSha256 === asset.sha256 &&
+            reviewClassAllowed &&
+            normalizeBrandPostImageIntent(review.sectionIntent) === normalizeBrandPostImageIntent(section.imageIntent);
+          if (!validReview) stale = {
+            code: "image-source-review-missing",
+            reason: `이미지 · ${section.title}: 현재 파트 목적과 일치한다는 상품 원본 검증 기록이 없습니다.`,
+          };
+        }
+      }
+      if (!stale && asset && claimedHashes.has(asset.sha256)) {
+        stale = {
+          code: "image-output-duplicate",
+          reason: `이미지 · ${section.title}: 대표 또는 다른 파트와 최종 결과가 완전히 같습니다. 슬롯별로 서로 다른 결과 이미지가 필요합니다.`,
+        };
+      }
+      if (stale) {
+        // replaceAssetKey is the SHA, so it is safe only when it identifies one
+        // manifest asset. Duplicate-SHA repair must use the section path/slot
+        // path instead or it could replace the earlier accepted image (or hero).
+        const safeReplacement = Boolean(exact && isValidPackageImage(exact) &&
+          assetKeyUseCounts.get(exact.sha256) === 1 && pathUseCounts.get(file) === 1 && file !== heroResolved);
+        staleTargets.push({
+          slotId: expectedSlotId,
+          path: file,
+          ...(safeReplacement && exact ? { assetKey: exact.sha256 } : {}),
+          ...stale,
+        });
+        addIssue({ ...stale, sectionId: section.id });
+        continue;
+      }
+      if (!asset) continue;
+      claimedHashes.add(asset.sha256);
+      const previewAsset = { ...packageImagePreviewAsset(manifest, asset), expectedSlotId };
+      sectionAssets.push(previewAsset);
+      if (generated) generatedAssets.add(asset.sha256);
+    }
+    const originalCount = sectionAssets.length - generatedAssets.size;
+    const generatedCount = generatedAssets.size;
     const generatedMinimum = manifest.imageRequirements?.policy === "generated-required" && maximum > 0 ? minimum : 0;
+    const coverageMissing = Math.max(0, minimum - sectionAssets.length);
     return {
       sectionId: section.id, title: section.title, intent: section.imageIntent,
       minimum, recommended: Math.min(maximum, Math.max(minimum, 1)), maximum,
-      count: sectionAssets.length, missing: Math.max(0, minimum - sectionAssets.length),
+      count: sectionAssets.length, missing: Math.max(coverageMissing, staleTargets.length),
       originalCount, generatedCount, generatedMinimum,
       generationMissing: Math.max(0, generatedMinimum - generatedCount), assets: sectionAssets,
+      staleTargets,
     };
-  }) : [];
+  });
+  return { slots, issues, heroAsset, usedPaths };
+}
+
+export function getBrandPostImageSlots(manifest: BrandPostPackageManifest) {
+  return auditBrandPostImages(manifest).slots;
 }
 
 /** One read-only decision used by material selection, preview and approval. */
@@ -410,8 +592,19 @@ export function evaluateBrandPostPackageReadiness(manifest: BrandPostPackageMani
     });
     if (inconsistent) blockers.push({ code: "content-render-mismatch", reason: "검수 본문과 발행할 렌더 문서가 일치하지 않습니다." });
   }
-  const imageSlots = getBrandPostImageSlots(manifest);
+  const imageAudit = auditBrandPostImages(manifest);
+  const imageSlots = imageAudit.slots;
+  blockers.push(...imageAudit.issues);
   if (manifest.version === "brand-post-package/v2") {
+    const renderedHeroPaths = manifest.composition.renderNodes
+      .filter(node => node.kind === "image" && node.sectionId === null)
+      .map(node => node.kind === "image" ? path.resolve(node.assetPath) : "");
+    if (renderedHeroPaths.length !== 1 || renderedHeroPaths[0] !== path.resolve(manifest.heroImagePath)) {
+      blockers.push({
+        code: "image-render-mismatch",
+        reason: "대표 이미지 · 저장된 대표 이미지와 발행 이미지 배치가 일치하지 않습니다. 이미지 배치를 복구하세요.",
+      });
+    }
     for (const section of manifest.composition.sections) {
       const expected = [...new Set(section.imagePaths.map(file => path.resolve(file)))].sort();
       const rendered = manifest.composition.renderNodes
@@ -424,35 +617,40 @@ export function evaluateBrandPostPackageReadiness(manifest: BrandPostPackageMani
     }
   }
   const assets = normalizePackageImageAssets(manifest);
-  const generatedOutputUse = new Map<string, BrandPostPackageImageAsset[]>();
   for (const asset of assets) {
+    if (!imageAudit.usedPaths.has(path.resolve(asset.path))) continue;
     const source = readProductPhotoSource(asset.path);
     if (source && !source.segmented && asset.creationMethod !== "source") blockers.push({
       code: "image-full-frame-overlay",
       sectionId: asset.sectionId || undefined,
       reason: "이미지 · 상품 전체 사각형 사진을 생성 배경 위에 카드처럼 합성한 이미지는 승인할 수 없습니다.",
     });
-    if (!asset.sectionId || !(asset.remoteGenerated === true || asset.creationMethod === "source-with-generated-background" || asset.creationMethod === "remote-generated")) continue;
-    const uses = generatedOutputUse.get(asset.sha256) || [];
-    uses.push(asset);
-    generatedOutputUse.set(asset.sha256, uses);
   }
-  for (const uses of generatedOutputUse.values()) {
-    if (uses.length < 2) continue;
-    for (const asset of uses) blockers.push({
-      code: "image-output-duplicate",
-      sectionId: asset.sectionId || undefined,
-      reason: "이미지 · 최종 결과가 다른 파트의 이미지와 완전히 같습니다. 슬롯별로 서로 다른 결과 이미지가 필요합니다.",
-    });
+  const validHeroPath = imageAudit.heroAsset ? path.resolve(imageAudit.heroAsset.path) : null;
+  const acceptedHashByUsage = new Map<string, string>();
+  for (const slot of imageSlots) {
+    for (const asset of slot.assets) {
+      acceptedHashByUsage.set(`${slot.sectionId}\u0000${path.resolve(asset.path)}`, asset.sha256);
+    }
   }
-  const validPaths = new Set(assets.filter(isValidPackageImage).map(asset => path.resolve(asset.path)));
-  if (!validPaths.has(path.resolve(manifest.heroImagePath))) blockers.push({ code: "hero-image-invalid", reason: "대표 이미지 파일이 없거나 저장된 해시와 일치하지 않습니다." });
+  const renderedHashes = new Set<string>();
   const composition = manifest.version === "brand-post-package/v2" ? refreshPostDocumentQuality({
     ...manifest.composition,
     sections: manifest.composition.sections.map(section => ({ ...section,
       imagePaths: imageSlots.find(slot => slot.sectionId === section.id)?.assets.map(asset => asset.path) || [],
     })),
-    renderNodes: manifest.composition.renderNodes.filter(node => node.kind !== "image" || validPaths.has(path.resolve(node.assetPath))),
+    renderNodes: manifest.composition.renderNodes.filter(node => {
+      if (node.kind !== "image") return true;
+      const resolved = path.resolve(node.assetPath);
+      const sha256 = node.sectionId === null && validHeroPath === resolved
+        ? imageAudit.heroAsset?.sha256
+        : node.sectionId === null
+          ? undefined
+          : acceptedHashByUsage.get(`${node.sectionId}\u0000${resolved}`);
+      if (!sha256 || renderedHashes.has(sha256)) return false;
+      renderedHashes.add(sha256);
+      return true;
+    }),
   }) : null;
   const editorialPassed = manifest.version === "brand-post-package/v1" ? manifest.contentQuality?.canPublish !== false : isDraftEditorialQualityPassed(manifest.contentQuality);
   const contentPassed = editorialPassed && !blockers.some(blocker => blocker.code === "markdown-invalid" || blocker.code === "content-render-mismatch");
@@ -648,7 +846,11 @@ function refreshStoredContentQuality(
 /** Refresh derived gates from this package, never regenerate text or infer new facts. */
 export function reconcileBrandPostPackageQuality(manifest: BrandPostPackageManifestV2): BrandPostPackageManifestV2 {
   const exists = (file: string) => { try { return fs.statSync(file).isFile(); } catch { return false; } };
-  const source = manifest.postSpec ? manifest.composition : normalizeLegacyFreeformImageRules(manifest.composition);
+  // Intent migration applies to both bounded/spec-first documents and old
+  // freeform documents. Assets deliberately keep their recorded intent so the
+  // image audit can mark them stale and schedule a semantic replacement.
+  const intentNormalized = normalizeLegacyPostImageIntents(manifest.composition);
+  const source = manifest.postSpec ? intentNormalized : normalizeLegacyFreeformImageRules(intentNormalized);
   const composition = refreshPostDocumentQuality({
     ...source,
     sections: source.sections.map((section) => ({ ...section, imagePaths: section.imagePaths.filter(exists) })),
@@ -662,10 +864,86 @@ export function reconcileBrandPostPackageQuality(manifest: BrandPostPackageManif
   };
 }
 
-function replacePath(values: string[], previousPath: string, nextPath: string): string[] {
-  return values.map((value) =>
-    path.resolve(value) === path.resolve(previousPath) ? nextPath : value,
-  );
+function imageSlotOrdinal(slotId: string | undefined): number | null {
+  const match = String(slotId || "").match(/:image:(\d+)$/u);
+  const ordinal = Number(match?.[1]);
+  return Number.isInteger(ordinal) && ordinal > 0 ? ordinal : null;
+}
+
+function canonicalBodySlotId(options: {
+  sectionId: string;
+  requestedSlotId?: string;
+  existingSlotId?: string;
+  existingPath?: string;
+  sectionPaths: string[];
+}): string {
+  const ordinal = imageSlotOrdinal(options.requestedSlotId) ||
+    (String(options.existingSlotId || "").startsWith(`${options.sectionId}:image:`)
+      ? imageSlotOrdinal(options.existingSlotId)
+      : null) ||
+    (options.existingPath
+      ? options.sectionPaths.findIndex(file => path.resolve(file) === path.resolve(options.existingPath!)) + 1
+      : 0) || 1;
+  return brandPostSectionSlotId(options.sectionId, ordinal);
+}
+
+function bindBodyImageInComposition(options: {
+  composition: ResolvedPostDocumentV1;
+  connectKind: BrandPostPackageManifestV2["connectKind"];
+  sectionId: string;
+  slotId: string;
+  assetPath: string;
+  imageIntent: string;
+  imagePolicy: BrandPostPackageManifestV2["imagePolicy"];
+  removePaths?: string[];
+}): ResolvedPostDocumentV1 {
+  const removed = new Set((options.removePaths || []).map(file => path.resolve(file)));
+  removed.add(path.resolve(options.assetPath));
+  let composition: ResolvedPostDocumentV1 = {
+    ...options.composition,
+    sections: options.composition.sections.map(section => ({
+      ...section,
+      imagePaths: section.imagePaths.filter(file => !removed.has(path.resolve(file))),
+    })),
+    renderNodes: options.composition.renderNodes.filter(node =>
+      node.kind !== "image" || !removed.has(path.resolve(node.assetPath))),
+  };
+  const section = composition.sections.find(candidate => candidate.id === options.sectionId);
+  if (!section) throw new Error("이미지를 추가할 본문 파트를 찾을 수 없습니다.");
+  const bounds = sectionImageBounds(getPostCompositionContract(options.connectKind), section);
+  if (section.imagePaths.length >= Math.max(1, bounds.max)) {
+    throw new Error("이 파트는 권장 최대 이미지 수에 도달했습니다.");
+  }
+  const insertionAt = Math.min(imageSlotOrdinal(options.slotId)! - 1, section.imagePaths.length);
+  const imagePaths = [...section.imagePaths];
+  imagePaths.splice(insertionAt, 0, options.assetPath);
+  const layout = imagePaths.length > 1 ? ("sequence" as const) : ("single" as const);
+  const imageNode = {
+    kind: "image" as const,
+    assetPath: options.assetPath,
+    sectionId: options.sectionId,
+    role: "scene" as const,
+    altText: `${section.title} - ${options.imageIntent}`,
+    layout,
+    sourcePolicy: options.imagePolicy,
+  };
+  const renderNodes = composition.renderNodes.map(node =>
+    node.kind === "image" && node.sectionId === options.sectionId
+      ? { ...node, layout }
+      : node);
+  let insertionIndex = -1;
+  renderNodes.forEach((node, index) => {
+    if ("sectionId" in node && node.sectionId === options.sectionId) insertionIndex = index;
+  });
+  renderNodes.splice(insertionIndex >= 0 ? insertionIndex + 1 : renderNodes.length, 0, imageNode);
+  composition = {
+    ...composition,
+    sections: composition.sections.map(candidate => candidate.id === options.sectionId
+      ? { ...candidate, imagePaths }
+      : candidate),
+    renderNodes,
+  };
+  return composition;
 }
 
 export function applyGeneratedBrandPostImage(options: {
@@ -673,11 +951,13 @@ export function applyGeneratedBrandPostImage(options: {
   generatedPath: string;
   sectionId?: string;
   replaceAssetKey?: string;
+  bindExistingAssetKey?: string;
   provenance: NonNullable<BrandPostPackageImageAsset["provenance"]>;
   imageIntent?: string;
   slotId?: string;
   creationMethod?: BrandPostPackageImageAsset["creationMethod"];
   remoteGenerated?: boolean;
+  sourceReview?: BrandPostPackageImageAsset["sourceReview"];
 }): BrandPostPackageManifestV2 {
   const manifest = readBrandPostPackage(options.brandLinkId);
   if (!manifest || manifest.version !== "brand-post-package/v2") {
@@ -689,6 +969,77 @@ export function applyGeneratedBrandPostImage(options: {
   }
   const assets = normalizePackageImageAssets(manifest);
   const generatedHash = sha256File(options.generatedPath);
+  if (options.bindExistingAssetKey) {
+    const sourceAsset = assets.find(asset => asset.sha256 === options.bindExistingAssetKey);
+    const replacedAsset = options.replaceAssetKey
+      ? assets.find(asset => asset.sha256 === options.replaceAssetKey)
+      : undefined;
+    const sectionId = options.sectionId?.trim() || replacedAsset?.sectionId || sourceAsset?.sectionId || undefined;
+    const section = sectionId ? manifest.composition.sections.find(candidate => candidate.id === sectionId) : undefined;
+    const sameAssetRefresh = Boolean(sourceAsset && replacedAsset && sourceAsset === replacedAsset);
+    if (!sourceAsset || sourceAsset.role !== "body" || sourceAsset.provenance !== "ORIGINAL" ||
+        sourceAsset.creationMethod !== "source" || !isValidPackageImage(sourceAsset) ||
+        sourceAsset.sectionId && !sameAssetRefresh) {
+      throw new Error("검증된 미배정 상품 원본 이미지 항목을 현재 슬롯에 배정할 수 없습니다.");
+    }
+    if (options.replaceAssetKey && !replacedAsset) throw new Error("다시 만들 원본 이미지 항목을 찾을 수 없습니다.");
+    if (replacedAsset?.role === "hero") throw new Error("대표 이미지를 본문 상품 원본으로 교체할 수 없습니다.");
+    if (!sectionId || !section) throw new Error("이미지를 추가할 본문 파트를 찾을 수 없습니다.");
+    if (generatedHash !== sourceAsset.sha256 || options.sourceReview?.sourceSha256 !== sourceAsset.sha256) {
+      throw new Error("검증한 상품 원본과 배정할 이미지 해시가 일치하지 않습니다.");
+    }
+    const slotId = canonicalBodySlotId({
+      sectionId,
+      requestedSlotId: options.slotId,
+      existingSlotId: replacedAsset?.slotId || sourceAsset.slotId,
+      existingPath: replacedAsset?.path || sourceAsset.path,
+      sectionPaths: section.imagePaths,
+    });
+    const assigned: BrandPostPackageImageAsset = {
+      ...sourceAsset,
+      role: "body",
+      sectionId,
+      slotId,
+      imageIntent: options.imageIntent || section.imageIntent,
+      provenance: "ORIGINAL",
+      creationMethod: "source",
+      remoteGenerated: false,
+      sourceReview: options.sourceReview,
+    };
+    const removePaths = [sourceAsset.path];
+    if (replacedAsset && replacedAsset !== sourceAsset) removePaths.push(replacedAsset.path);
+    let composition = bindBodyImageInComposition({
+      composition: manifest.composition,
+      connectKind: manifest.connectKind,
+      sectionId,
+      slotId,
+      assetPath: sourceAsset.path,
+      imageIntent: assigned.imageIntent || section.imageIntent,
+      imagePolicy: manifest.imagePolicy,
+      removePaths,
+    });
+    composition = refreshPostDocumentQuality(composition);
+    const removedAssetPaths = new Set(removePaths.map(file => path.resolve(file)));
+    const usedBodyPaths = new Set(composition.sections.flatMap(candidate => candidate.imagePaths.map(file => path.resolve(file))));
+    const bodyImagePaths = manifest.bodyImagePaths
+      .filter(file => !removedAssetPaths.has(path.resolve(file)) || usedBodyPaths.has(path.resolve(file)));
+    if (!bodyImagePaths.some(file => path.resolve(file) === path.resolve(sourceAsset.path))) bodyImagePaths.push(sourceAsset.path);
+    const nextAssets = assets.flatMap(asset => {
+      if (asset === sourceAsset) return [assigned];
+      if (replacedAsset && asset === replacedAsset) return [];
+      return [asset];
+    });
+    const updated: BrandPostPackageManifestV2 = {
+      ...manifest,
+      bodyImagePaths: [...new Set(bodyImagePaths)],
+      imageAssets: nextAssets,
+      composition,
+      contentQuality: refreshStoredContentQuality(manifest.contentQuality, composition.qualityReport),
+      approvedAt: null,
+    };
+    writeBrandPostPackageManifest(updated);
+    return updated;
+  }
   if (assets.some((asset) => asset.sha256 === generatedHash)) {
     throw new Error("기존 이미지와 동일한 파일입니다. 같은 이미지를 여러 섹션의 생성 결과로 계산하지 않습니다.");
   }
@@ -720,44 +1071,107 @@ export function applyGeneratedBrandPostImage(options: {
   if (options.replaceAssetKey) {
     const existing = assets.find((asset) => asset.sha256 === options.replaceAssetKey);
     if (!existing) throw new Error("다시 만들 원본 이미지 항목을 찾을 수 없습니다.");
-    const replacement: BrandPostPackageImageAsset = {
-      ...existing,
-      path: destinationPath,
-      sourcePath: path.resolve(options.generatedPath),
-      sha256: sha256File(destinationPath),
-      provenance: options.provenance,
-      slotId: options.slotId || existing.slotId,
-      creationMethod: options.creationMethod,
-      remoteGenerated: options.remoteGenerated ?? options.provenance === "GENERATED_BACKGROUND",
-      imageIntent: options.imageIntent || existing.imageIntent,
-    };
-    nextAssets = assets.map((asset) => asset === existing ? replacement : asset);
+    const requestedSectionId = options.sectionId?.trim();
+    if (existing.role === "hero" && requestedSectionId) {
+      throw new Error("대표 이미지 교체 요청에 본문 파트가 지정되었습니다.");
+    }
     if (existing.role === "hero") {
+      const replacement: BrandPostPackageImageAsset = {
+        ...existing,
+        path: destinationPath,
+        sourcePath: path.resolve(options.generatedPath),
+        sha256: sha256File(destinationPath),
+        role: "hero",
+        sectionId: null,
+        provenance: options.provenance,
+        slotId: options.slotId || existing.slotId,
+        creationMethod: options.creationMethod,
+        remoteGenerated: options.remoteGenerated ?? options.provenance === "GENERATED_BACKGROUND",
+        imageIntent: options.imageIntent || existing.imageIntent,
+        sourceReview: options.sourceReview,
+      };
+      nextAssets = assets.map((asset) => asset === existing ? replacement : asset);
       heroImagePath = destinationPath;
       thumbnailSpec = { ...thumbnailSpec, sourceImagePath: destinationPath };
+      composition = {
+        ...composition,
+        sections: composition.sections.map(section => ({
+          ...section,
+          imagePaths: section.imagePaths.filter(file => path.resolve(file) !== path.resolve(existing.path)),
+        })),
+        renderNodes: composition.renderNodes.map(node =>
+          node.kind === "image" && path.resolve(node.assetPath) === path.resolve(existing.path)
+            ? { ...node, assetPath: destinationPath, sectionId: null }
+            : node),
+      };
     } else {
-      bodyImagePaths = replacePath(bodyImagePaths, existing.path, destinationPath);
+      const sectionId = requestedSectionId || existing.sectionId || undefined;
+      const section = sectionId ? composition.sections.find(candidate => candidate.id === sectionId) : undefined;
+      if (!sectionId || !section) throw new Error("이미지를 교체할 현재 본문 파트를 찾을 수 없습니다.");
+      const slotId = canonicalBodySlotId({
+        sectionId,
+        requestedSlotId: options.slotId,
+        existingSlotId: existing.slotId,
+        existingPath: existing.path,
+        sectionPaths: section.imagePaths,
+      });
+      const imageIntent = options.imageIntent || section.imageIntent;
+      const replacement: BrandPostPackageImageAsset = {
+        ...existing,
+        path: destinationPath,
+        sourcePath: path.resolve(options.generatedPath),
+        sha256: sha256File(destinationPath),
+        role: "body",
+        sectionId,
+        provenance: options.provenance,
+        slotId,
+        creationMethod: options.creationMethod,
+        remoteGenerated: options.remoteGenerated ?? options.provenance === "GENERATED_BACKGROUND",
+        imageIntent,
+        // A replacement is new evidence. Never carry a review signed for the
+        // previous bytes/intent across it.
+        sourceReview: options.sourceReview,
+      };
+      nextAssets = assets.map((asset) => asset === existing ? replacement : asset);
+      composition = bindBodyImageInComposition({
+        composition,
+        connectKind: manifest.connectKind,
+        sectionId,
+        slotId,
+        assetPath: destinationPath,
+        imageIntent,
+        imagePolicy: manifest.imagePolicy,
+        removePaths: [existing.path],
+      });
+      bodyImagePaths = bodyImagePaths.filter(file => path.resolve(file) !== path.resolve(existing.path));
+      bodyImagePaths.push(destinationPath);
     }
-    composition = {
-      ...composition,
-      sections: composition.sections.map((section) => ({
-        ...section,
-        imagePaths: replacePath(section.imagePaths, existing.path, destinationPath),
-      })),
-      renderNodes: composition.renderNodes.map((node) =>
-        node.kind === "image" && path.resolve(node.assetPath) === path.resolve(existing.path)
-          ? { ...node, assetPath: destinationPath }
-          : node,
-      ),
-    };
   } else {
     const sectionId = options.sectionId?.trim();
-    const section = composition.sections.find((candidate) => candidate.id === sectionId);
+    let section = composition.sections.find((candidate) => candidate.id === sectionId);
     if (!sectionId || !section) throw new Error("이미지를 추가할 본문 파트를 찾을 수 없습니다.");
-    const bounds = sectionImageBounds(getPostCompositionContract(manifest.connectKind), section);
-    if (section.imagePaths.length >= Math.max(1, bounds.max)) {
-      throw new Error("이 파트는 권장 최대 이미지 수에 도달했습니다.");
+    const staleTarget = auditBrandPostImages(manifest).slots
+      .find(slot => slot.sectionId === sectionId)?.staleTargets
+      .find(target => target.slotId === options.slotId && !target.assetKey);
+    if (staleTarget) {
+      const stalePath = path.resolve(staleTarget.path);
+      composition = {
+        ...composition,
+        sections: composition.sections.map(candidate => candidate.id === sectionId
+          ? { ...candidate, imagePaths: candidate.imagePaths.filter(file => path.resolve(file) !== stalePath) }
+          : candidate),
+        renderNodes: composition.renderNodes.filter(node =>
+          node.kind !== "image" || node.sectionId !== sectionId || path.resolve(node.assetPath) !== stalePath),
+      };
+      section = composition.sections.find((candidate) => candidate.id === sectionId)!;
+      const stillUsed = composition.sections.some(candidate => candidate.imagePaths.some(file => path.resolve(file) === stalePath));
+      if (!stillUsed) bodyImagePaths = bodyImagePaths.filter(file => path.resolve(file) !== stalePath);
     }
+    const slotId = canonicalBodySlotId({
+      sectionId,
+      requestedSlotId: options.slotId,
+      sectionPaths: section.imagePaths,
+    });
     const asset: BrandPostPackageImageAsset = {
       path: destinationPath,
       sourcePath: path.resolve(options.generatedPath),
@@ -766,36 +1180,23 @@ export function applyGeneratedBrandPostImage(options: {
       sectionId,
       imageIntent: options.imageIntent || section.imageIntent,
       provenance: options.provenance,
-      slotId: options.slotId,
+      slotId,
       creationMethod: options.creationMethod,
       remoteGenerated: options.remoteGenerated ?? options.provenance === "GENERATED_BACKGROUND",
+      sourceReview: options.sourceReview,
     };
     nextAssets = [...assets, asset];
     bodyImagePaths = [...bodyImagePaths, destinationPath];
-    const imageNode = {
-      kind: "image" as const,
-      assetPath: destinationPath,
+    composition = bindBodyImageInComposition({
+      composition,
+      connectKind: manifest.connectKind,
       sectionId,
-      role: "scene" as const,
-      altText: `${section.title} - ${asset.imageIntent || section.imageIntent}`,
-      layout: section.imagePaths.length > 0 ? ("sequence" as const) : ("single" as const),
-      sourcePolicy: manifest.imagePolicy,
-    };
-    const renderNodes = [...composition.renderNodes];
-    let insertionIndex = -1;
-    renderNodes.forEach((node, index) => {
-      if ("sectionId" in node && node.sectionId === sectionId) insertionIndex = index;
+      slotId,
+      assetPath: destinationPath,
+      imageIntent: asset.imageIntent || section.imageIntent,
+      imagePolicy: manifest.imagePolicy,
+      removePaths: staleTarget ? [staleTarget.path] : [],
     });
-    renderNodes.splice(insertionIndex >= 0 ? insertionIndex + 1 : renderNodes.length - 1, 0, imageNode);
-    composition = {
-      ...composition,
-      sections: composition.sections.map((candidate) =>
-        candidate.id === sectionId
-          ? { ...candidate, imagePaths: [...candidate.imagePaths, destinationPath] }
-          : candidate,
-      ),
-      renderNodes,
-    };
   }
 
   composition = refreshPostDocumentQuality(composition);

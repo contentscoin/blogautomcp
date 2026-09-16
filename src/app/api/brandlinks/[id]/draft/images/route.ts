@@ -15,19 +15,25 @@ import {
 } from "@/lib/brand-post-package";
 import {
   applyExternalGeneratedBrandPostImage,
-  BROWSER_IMAGE_AUTOMATION_DISABLED_MESSAGE,
   type BrandPostImageGenerationRequest,
 } from "@/lib/brand-post-image-generation";
 import { isBrandPostImageRepairActive, planSectionImageRequests, repairBrandPostImages } from "@/lib/brand-post-image-repair";
-import { isChatGptBrowserAutomationEnabled } from "@/lib/chatgpt-browser-automation";
 
 const IMAGE_ACTIONS = ["generate_missing", "generate_section", "regenerate", "apply_generated"] as const;
 type ImageAction = (typeof IMAGE_ACTIONS)[number];
+const IMAGE_REPAIR_CONFLICT_CODES = ["IMAGE_REPAIR_BUSY", "IMAGE_REPAIR_OWNERSHIP_LOST"] as const;
 
 function imageFailureCode(errors: string[]): string | undefined {
   const text = errors.join("\n");
-  return ["CHATGPT_BROWSER_AUTH_REQUIRED", "CHATGPT_BROWSER_BUSY", "IMAGE_RESUME_REQUIRED", "IMAGE_PROVIDER_REFUSED", "PRODUCT_SOURCE_REQUIRED", "PRODUCT_SOURCE_DOWNLOAD_FAILED"]
+  return [...IMAGE_REPAIR_CONFLICT_CODES,
+    "CHATGPT_BROWSER_AUTH_REQUIRED", "CHATGPT_BROWSER_AUTOMATION_DISABLED", "CHATGPT_BROWSER_UNREACHABLE",
+    "CHATGPT_BROWSER_BUSY", "IMAGE_RESUME_REQUIRED", "IMAGE_PROVIDER_REFUSED", "PRODUCT_CUTOUT_REQUIRED",
+    "IMAGE_SOURCE_BINDING_REQUIRED", "PRODUCT_SOURCE_REQUIRED", "PRODUCT_SOURCE_DOWNLOAD_FAILED"]
     .find(code => text.includes(code));
+}
+
+function imageFailureStatus(code: string | undefined, fallback: number): number {
+  return code && IMAGE_REPAIR_CONFLICT_CODES.some(conflict => conflict === code) ? 409 : fallback;
 }
 
 function imageContentType(filePath: string): string {
@@ -96,7 +102,7 @@ export async function POST(
   const { id } = await params;
   if (isBrandPostImageRepairActive(id)) {
     return NextResponse.json(
-      { success: false, error: "이 초안의 이미지 생성이 이미 진행 중입니다." },
+      { success: false, code: "IMAGE_REPAIR_BUSY", error: "이 초안의 이미지 생성이 이미 진행 중입니다." },
       { status: 409 },
     );
   }
@@ -203,24 +209,16 @@ export async function POST(
           : `${applied.sectionId ? "본문 파트" : "이미지 항목"}에 생성 이미지를 반영했습니다.`,
       });
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const code = imageFailureCode([message]) || "IMAGE_APPLY_FAILED";
       return NextResponse.json({
         success: false,
-        code: imageFailureCode([error instanceof Error ? error.message : String(error)]) || "IMAGE_APPLY_FAILED",
-        error: error instanceof Error ? error.message : "생성 이미지를 반영하지 못했습니다.",
-      }, { status: 422 });
+        code,
+        error: error instanceof Error ? message : "생성 이미지를 반영하지 못했습니다.",
+      }, { status: imageFailureStatus(code, 422) });
     } finally {
       finishApply();
     }
-  }
-  if (!isChatGptBrowserAutomationEnabled()) {
-    // The browser batch is the only PC-side generator. Refuse before planning so no Chrome starts.
-    return NextResponse.json({
-      success: false,
-      code: "CHATGPT_BROWSER_AUTOMATION_DISABLED",
-      error: BROWSER_IMAGE_AUTOMATION_DISABLED_MESSAGE,
-      data: preview,
-      remainingMissing: preview.imageSlots.reduce((sum, slot) => sum + Math.max(slot.missing, slot.generationMissing), 0),
-    }, { status: 409 });
   }
   const generationRequests: BrandPostImageGenerationRequest[] = [];
   if (body.action === "generate_missing") {
@@ -270,9 +268,11 @@ export async function POST(
     const { errors, generatedCount, manifest: updated } = repaired;
     const updatedPreview = packagePreview(updated);
     const remainingMissing = updatedPreview.imageSlots.reduce((sum, slot) => sum + Math.max(slot.missing, slot.generationMissing), 0);
+    const code = imageFailureCode(errors);
+    const status = imageFailureStatus(code, generatedCount === 0 && errors.length > 0 ? 422 : 200);
     return NextResponse.json({
-      success: generatedCount > 0 || errors.length === 0,
-      code: imageFailureCode(errors),
+      success: status !== 409 && (generatedCount > 0 || errors.length === 0),
+      code,
       data: updatedPreview,
       generatedCount,
       remainingMissing,
@@ -280,13 +280,15 @@ export async function POST(
       message: generatedCount > 0
         ? `${generatedCount}장의 이미지를 반영했습니다.`
         : "새로 반영된 이미지가 없습니다.",
-    }, { status: generatedCount === 0 && errors.length > 0 ? 422 : 200 });
+    }, { status });
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const code = imageFailureCode([message]);
     return NextResponse.json({
       success: false,
-      code: imageFailureCode([error instanceof Error ? error.message : String(error)]),
-      error: error instanceof Error ? error.message : "이미지 생성에 실패했습니다.",
-    }, { status: 500 });
+      code,
+      error: error instanceof Error ? message : "이미지 생성에 실패했습니다.",
+    }, { status: imageFailureStatus(code, 500) });
   } finally {
     finishActivity();
   }

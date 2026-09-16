@@ -39,6 +39,23 @@ export type Call = (path: string, method: string, body?: object) => Promise<Resu
 export type WorkflowDeps = { call: Call; pause: () => Promise<void>; now?: () => number; timeoutMs?: number; onStage?: (stage: string) => void };
 const defaults: WorkflowDeps = { call: localScheduleCall, pause: () => new Promise(resolve => setTimeout(resolve, 3000)) };
 
+const SESSION_WIDE_PREPARATION_FAILURE_CODES = new Set([
+  "CHATGPT_BROWSER_AUTH_REQUIRED",
+  "CHATGPT_BROWSER_LOGIN_REQUIRED",
+  "CHATGPT_BROWSER_UNREACHABLE",
+  "CHATGPT_BROWSER_BUSY",
+  "CODEX_AUTH_REQUIRED",
+  "CODEX_LOGIN_REQUIRED",
+  "CODEX_MODEL_INCOMPATIBLE",
+  "LLM_UNAVAILABLE",
+  "UNAUTHORIZED",
+]);
+
+/** Failures tied to the shared login/browser/runtime cannot improve per item. */
+export function isSessionWidePreparationFailureCode(code: string | null | undefined): boolean {
+  return SESSION_WIDE_PREPARATION_FAILURE_CODES.has(code || "");
+}
+
 export function isUncertainLocalTransportError(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | null)?.code;
   return !code || ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE", "REQUEST_TIMEOUT"].includes(code);
@@ -265,6 +282,17 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     new Error(`원고 보강 후에도 품질 문제가 남았습니다. ${plan.reason}`),
     { code: "QUALITY_REPAIR_EXHAUSTED" },
   );
+  let latestImageRepair: Pick<Result, "code" | "error" | "errors" | "message"> | null = null;
+  const unresolvedCompositionError = (reason: string) => {
+    const imageFailureCode = latestImageRepair?.code && !["OK", "IMAGE_REPAIR_COMPLETE"].includes(latestImageRepair.code)
+      ? latestImageRepair.code
+      : null;
+    const message = latestImageRepair?.errors?.join(" ") || latestImageRepair?.error ||
+      (imageFailureCode ? latestImageRepair?.message : undefined) || reason;
+    return Object.assign(new Error(message), {
+      code: imageFailureCode || "COMPOSITION_REPAIR_REQUIRED",
+    });
+  };
 
   deps.onStage?.("저장 원고 품질검사");
   await waitForImagesIdle();
@@ -291,12 +319,13 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     if (!draft.data) throw new Error("준비 중 소재가 사라졌습니다.");
     if (draft.data.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) {
       const generated = await deps.call(`${base}/draft/images`, "POST", { action: "generate_missing" });
-      if (["CHATGPT_BROWSER_AUTH_REQUIRED", "CHATGPT_BROWSER_BUSY"].includes(generated.code || "")) throw Object.assign(new Error(generated.errors?.join(" ") || generated.message || "이미지 엔진 확인이 필요합니다."), { code: generated.code });
+      latestImageRepair = generated;
+      if (isSessionWidePreparationFailureCode(generated.code)) throw Object.assign(new Error(generated.errors?.join(" ") || generated.message || "이미지 엔진 확인이 필요합니다."), { code: generated.code });
       draft = await deps.call(`${base}/draft`, "GET");
       await waitForImagesIdle();
     }
     if (draft.data?.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) {
-      throw new Error("이미지 준비가 미완료입니다. 저장된 소재에서 실패한 이미지만 보충하세요.");
+      throw unresolvedCompositionError("이미지 준비가 미완료입니다. 저장된 소재에서 실패한 이미지만 보충하세요.");
     }
   };
   await images();
@@ -310,6 +339,9 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     if (revised) throw unresolvedQualityError(plan);
     await revise(plan);
     plan = await recheck(false, 1);
+  }
+  if (plan.action === "repair-composition") {
+    throw unresolvedCompositionError(plan.reason);
   }
   if (plan.action !== "complete") {
     const error = plan.action === "refresh-source" ? sourceEvidenceError(plan) : unresolvedQualityError(plan);

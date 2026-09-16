@@ -1,6 +1,11 @@
 import crypto from "node:crypto";
 import { readProductPhotoSource } from "../../scripts/lib/product-photo-provenance";
-import { selectShoppingProductSource, selectShoppingProductSources } from "../../scripts/lib/product-photo-source";
+import {
+  collectShoppingProductSourceCandidates,
+  selectShoppingProductSource,
+  selectShoppingProductSources,
+} from "../../scripts/lib/product-photo-source";
+import { selectVerifiedProductSectionImages } from "../../scripts/lib/product-photo-review";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -21,6 +26,7 @@ import {
 } from "./brand-post-package";
 import { isChatGptBrowserAutomationEnabled } from "./chatgpt-browser-automation";
 import { imageBatchBudgetMs, imageJobBudgetMs, IMAGE_TIMER_MAX_MS } from "../../scripts/lib/image-timeout-policy";
+import { allowsGenericBrandPostProductPhoto, brandPostSectionSlotId } from "./brand-post-image-evidence";
 
 const CHATGPT_BASE_URL = "https://chatgpt.com/";
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
@@ -30,7 +36,7 @@ const IMAGE_BATCH_PROGRESS_PREFIX = "[chatgpt-image-batch:result] ";
 export const BRAND_POST_IMAGE_JOB_TIMEOUT_DEFAULT_MS = imageJobBudgetMs({});
 export const BRAND_POST_IMAGE_BATCH_TIMEOUT_MAX_MS = IMAGE_TIMER_MAX_MS;
 export const BROWSER_IMAGE_AUTOMATION_DISABLED_MESSAGE =
-  "ChatGPT 브라우저 자동화가 꺼져 있어 PC에서 이미지를 생성하지 않습니다. " +
+  "CHATGPT_BROWSER_AUTOMATION_DISABLED: ChatGPT 브라우저 자동화가 꺼져 있어 PC에서 이미지를 생성하지 않습니다. " +
   "ChatGPT 대화에서 이미지를 만들어 post_apply_section_image로 붙이세요.";
 
 // Sequential jobs each need preparation, the hard generation window and download retries.
@@ -52,9 +58,11 @@ export interface BrandPostImageGenerationResult {
   generatedPath: string | null;
   sectionId?: string;
   replaceAssetKey?: string;
+  bindExistingAssetKey?: string;
   provenance: NonNullable<BrandPostPackageImageAsset["provenance"]>;
   creationMethod?: BrandPostPackageImageAsset["creationMethod"];
   remoteGenerated?: boolean;
+  sourceReview?: BrandPostPackageImageAsset["sourceReview"];
   imageIntent: string;
   error?: string;
 }
@@ -67,6 +75,8 @@ export interface ResolvedImageTarget {
   imageIntent: string;
   bodyExcerpt: string;
   sourcePath?: string;
+  /** Review of the exact seller bytes used as a locked foreground. */
+  sourceReview?: BrandPostPackageImageAsset["sourceReview"];
   existingAsset?: BrandPostPackageImageAsset;
 }
 
@@ -99,12 +109,16 @@ export function resolveBrandPostImageSlots(
   }
   return requests.map(request => {
     const existing = request.replaceAssetKey ? assets.find(asset => asset.sha256 === request.replaceAssetKey) : undefined;
-    const sectionId = existing?.sectionId || request.sectionId || "hero";
+    const sectionId = request.sectionId?.trim() || existing?.sectionId || "hero";
     let slotId = request.slotId || (existing && (slotForAsset.get(existing.sha256) || `${sectionId}:image:1`));
     if (!slotId) {
       let ordinal = 1;
       while (used.has(`${sectionId}:image:${ordinal}`)) ordinal += 1;
       slotId = `${sectionId}:image:${ordinal}`;
+    }
+    if (sectionId !== "hero") {
+      const ordinal = Number(/:image:(\d+)$/u.exec(slotId)?.[1]);
+      slotId = brandPostSectionSlotId(sectionId, Number.isInteger(ordinal) && ordinal > 0 ? ordinal : 1);
     }
     if (requestedSlots.has(slotId)) throw new Error(`IMAGE_SLOT_DUPLICATE: 같은 슬롯을 두 번 요청했습니다 (${slotId}).`);
     requestedSlots.add(slotId);
@@ -121,17 +135,20 @@ function resolveTarget(
   if (request.replaceAssetKey) {
     const existingAsset = assets.find((asset) => asset.sha256 === request.replaceAssetKey);
     if (!existingAsset) throw new Error("다시 만들 이미지 항목을 찾을 수 없습니다.");
-    const section = existingAsset.sectionId
-      ? manifest.composition.sections.find((candidate) => candidate.id === existingAsset.sectionId)
+    const requestedSectionId = request.sectionId?.trim();
+    const sectionId = requestedSectionId || existingAsset.sectionId || undefined;
+    const section = sectionId
+      ? manifest.composition.sections.find((candidate) => candidate.id === sectionId)
       : null;
+    if (requestedSectionId && !section) throw new Error("이미지를 교체할 현재 본문 파트를 찾을 수 없습니다.");
     return {
       request,
-      sectionId: existingAsset.sectionId || undefined,
-      role: existingAsset.role,
+      sectionId,
+      role: section ? "body" : existingAsset.role,
       sectionTitle: section?.title || manifest.title,
       imageIntent:
-        existingAsset.imageIntent ||
         section?.imageIntent ||
+        existingAsset.imageIntent ||
         (existingAsset.role === "hero" ? "글의 내용을 한눈에 보여주는 대표 이미지" : "본문 설명 이미지"),
       bodyExcerpt: clean(section?.body.join(" ") || manifest.title).slice(0, 480),
       existingAsset,
@@ -272,14 +289,18 @@ export function getUsedShoppingProductSources(
 async function existingShoppingSources(
   manifest: BrandPostPackageManifestV2,
   targets: ResolvedImageTarget[],
-  options: { productName?: string; sourceImageUrls?: string[] } = {},
+  options: { productName?: string; sourceImageUrls?: string[]; excludeSha256?: string[] } = {},
   maximum = 1,
 ): Promise<{ fresh: string[]; reusable: string[]; verifiedCount: number }> {
   const assets = normalizePackageImageAssets(manifest);
   const replacedAssetKeys = new Set(targets.flatMap(target =>
     target.request.replaceAssetKey ? [target.request.replaceAssetKey] : []));
   const usedRecords = getUsedShoppingProductSources(manifest, replacedAssetKeys);
-  const usedSourceHashes = new Set(usedRecords.map(record => record.sourceSha256));
+  const explicitlyExcluded = new Set(options.excludeSha256 || []);
+  const usedSourceHashes = new Set([
+    ...usedRecords.map(record => record.sourceSha256),
+    ...explicitlyExcluded,
+  ]);
   const preservedSources = assets.flatMap(asset => [asset.path, asset.sourcePath]
     .filter((file): file is string => Boolean(file))
     .flatMap(file => {
@@ -295,7 +316,9 @@ async function existingShoppingSources(
   ].filter((file): file is string => Boolean(file));
   // Inspect more than the immediate slot count: seller galleries often put
   // lifestyle/full-frame photos before a clean, segmentable packshot.
-  const reusableByHash = new Map(usedRecords.map(record => [record.sourceSha256, record.sourcePath]));
+  const reusableByHash = new Map(usedRecords
+    .filter(record => !explicitlyExcluded.has(record.sourceSha256))
+    .map(record => [record.sourceSha256, record.sourcePath]));
   let fresh: string[] = [];
   try {
     fresh = await selectShoppingProductSources({
@@ -620,6 +643,8 @@ export async function generateBrandPostImages(options: {
   /** Called once per request after product locking/finishing; awaited before return. */
   onResult?: (result: BrandPostImageGenerationResult) => void | Promise<void>;
   signal?: AbortSignal;
+  /** Fill only reviewed seller photos; never start background generation. */
+  sourceOnly?: boolean;
 }): Promise<BrandPostImageGenerationResult[]> {
   const requests = resolveBrandPostImageSlots(options.manifest, options.requests);
   if (requests.length === 0) return [];
@@ -656,12 +681,196 @@ export async function generateBrandPostImages(options: {
   }
   if (targets.length === 0) return results;
 
+  if (options.sourceOnly && options.manifest.connectKind === "TRAVEL") {
+    for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
+      const target = targets[targetIndex];
+      await publish(requestIndexes[targetIndex], {
+        ...baseResult(requestIndexes[targetIndex]),
+        sectionId: target.sectionId,
+        imageIntent: target.imageIntent,
+        error: "TRAVEL_SOURCE_ONLY_UNAVAILABLE: 여행 소재에는 검증된 판매자 상품 사진 원본 배정 경로가 없습니다.",
+      });
+    }
+    return results;
+  }
+
   // Source validation is a prerequisite, never a post-generation surprise.
   if (options.manifest.connectKind === "SHOPPING") {
-    let sourcePalette = { fresh: [] as string[], reusable: [] as string[], verifiedCount: 0 };
+    const sourceAssignedAssetHashes = new Set<string>();
     let sourceError: string | undefined;
-    try { sourcePalette = await existingShoppingSources(options.manifest, targets, options, targets.length); }
+    let semanticCandidateCount = 0;
+
+    const packageAssets = normalizePackageImageAssets(options.manifest);
+    const replaceAssetKeys = new Set(targets.flatMap(target =>
+      target.request.replaceAssetKey ? [target.request.replaceAssetKey] : []));
+    const usedSourceHashes = new Set(getUsedShoppingProductSources(options.manifest, replaceAssetKeys)
+      .map(record => record.sourceSha256));
+    const packageSourceAssets = packageAssets.filter(asset => {
+      if (asset.role !== "body" || asset.provenance !== "ORIGINAL" || asset.creationMethod !== "source") return false;
+      if (asset.sectionId && !replaceAssetKeys.has(asset.sha256)) return false;
+      try { return fs.statSync(asset.path).isFile() && sha256File(asset.path) === asset.sha256; }
+      catch { return false; }
+    });
+    const packageSourceByHash = new Map(packageSourceAssets.map(asset => [asset.sha256, asset]));
+    const directByHash = new Map<string, {
+      sha256: string;
+      path: string;
+      bindExistingAssetKey?: string;
+      boundSectionId?: string;
+    }>();
+    let rawCandidates: string[] = [];
+    const collectionErrors: string[] = [];
+    const outputDir = path.join(getBrandPostPackageDir(options.manifest.brandLinkId), "product-sources");
+    const preservedReplacementSources = packageAssets
+      .filter(asset => replaceAssetKeys.has(asset.sha256))
+      .flatMap(asset => {
+        const source = readProductPhotoSource(asset.path);
+        return source ? [source.sourcePath] : [];
+      });
+    const localCandidates = [
+      ...packageSourceAssets.flatMap(asset => [asset.path, asset.sourcePath]),
+      ...preservedReplacementSources,
+    ].filter((file): file is string => Boolean(file));
+
+    // Local files and the seller URL gallery get independent quotas. A full
+    // local quota must never hide a later URL panel that is the only evidence
+    // for a sensor, control or other feature. Replacement targets participate
+    // in the same global 1:1 review as empty slots.
+    for (const collection of [
+      { localCandidates, sourceImageUrls: [] as string[], maximum: 20 },
+      { localCandidates: [] as string[], sourceImageUrls: options.sourceImageUrls, maximum: 20 },
+    ]) {
+      try {
+        rawCandidates.push(...await collectShoppingProductSourceCandidates({ ...collection, outputDir }));
+      } catch (error) {
+        collectionErrors.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+    rawCandidates = [...new Set(rawCandidates)];
+    if (rawCandidates.length === 0 && collectionErrors.length > 0) {
+      sourceError ||= [...new Set(collectionErrors)].join("; ");
+    }
+    for (const source of rawCandidates) {
+      try {
+        const hash = sha256File(source);
+        if (usedSourceHashes.has(hash) || directByHash.has(hash)) continue;
+        const packageAsset = packageSourceByHash.get(hash);
+        directByHash.set(hash, packageAsset ? {
+          sha256: hash,
+          path: packageAsset.path,
+          bindExistingAssetKey: packageAsset.sha256,
+          boundSectionId: packageAsset.sectionId || undefined,
+        } : { sha256: hash, path: source });
+      } catch { /* A vanished reviewed source is not eligible for assignment. */ }
+    }
+    const directSources = [...directByHash.values()].sort((left, right) => left.sha256.localeCompare(right.sha256));
+    semanticCandidateCount = directSources.length;
+    const eligibleTargets = targets.flatMap((target, targetIndex) =>
+      target.role === "body" ? [{ target, targetIndex }] : []);
+    const reviewedByTarget = new Map<number, Awaited<ReturnType<typeof selectVerifiedProductSectionImages>>[number]>();
+    if (directSources.length > 0 && eligibleTargets.length > 0) {
+      try {
+        const reviewed = await selectVerifiedProductSectionImages(
+          directSources.map(source => source.path),
+          options.productName,
+          eligibleTargets.map(({ target }) => ({
+            sectionTitle: target.sectionTitle,
+            imageIntent: target.imageIntent,
+          })),
+        );
+        for (const assignment of reviewed) {
+          const eligible = eligibleTargets[assignment.targetIndex];
+          if (eligible) reviewedByTarget.set(eligible.targetIndex, assignment);
+        }
+      } catch (error) {
+        sourceError ||= error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    const pendingTargets: ResolvedImageTarget[] = [];
+    const pendingIndexes: number[] = [];
+    const failedFeatureTargets: Array<{ index: number; target: ResolvedImageTarget }> = [];
+    const generatedRequired = options.manifest.imageRequirements?.policy === "generated-required";
+    for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
+      const target = targets[targetIndex];
+      const index = requestIndexes[targetIndex];
+      const reviewed = reviewedByTarget.get(targetIndex);
+      const directSource = reviewed ? directByHash.get(reviewed.sourceSha256) : undefined;
+      const genericAllowed = target.role !== "body" || allowsGenericBrandPostProductPhoto({
+        sectionTitle: target.sectionTitle,
+        imageIntent: target.imageIntent,
+      });
+      const reviewClassAllowed = reviewed?.reviewClass === "feature-evidence" ||
+        (reviewed?.reviewClass === "product-photo" && genericAllowed);
+      const ownsBoundSource = !directSource?.boundSectionId ||
+        directSource.bindExistingAssetKey === target.request.replaceAssetKey;
+      if (reviewed && directSource && reviewClassAllowed && ownsBoundSource &&
+          !sourceAssignedAssetHashes.has(directSource.sha256)) {
+        const sourceReview: NonNullable<BrandPostPackageImageAsset["sourceReview"]> = {
+          version: "product-photo-source-review/v1",
+          sourceSha256: directSource.sha256,
+          usage: "section-matched-product-evidence",
+          sectionIntent: target.imageIntent,
+          reviewClass: reviewed.reviewClass,
+          reason: reviewed.reason,
+          reviewedAt: reviewed.reviewedAt,
+        };
+        sourceAssignedAssetHashes.add(directSource.sha256);
+        if (!generatedRequired) {
+          await publish(index, {
+            ...baseResult(index),
+            sectionId: target.sectionId,
+            bindExistingAssetKey: directSource.bindExistingAssetKey,
+            imageIntent: target.imageIntent,
+            generatedPath: directSource.path,
+            provenance: "ORIGINAL",
+            creationMethod: "source",
+            remoteGenerated: false,
+            sourceReview,
+          });
+          continue;
+        }
+        target.sourcePath = directSource.path;
+        target.sourceReview = sourceReview;
+      } else if (target.role === "body" && !genericAllowed) {
+        failedFeatureTargets.push({ index, target });
+        continue;
+      }
+      pendingTargets.push(target);
+      pendingIndexes.push(index);
+    }
+    targets.splice(0, targets.length, ...pendingTargets);
+    requestIndexes.splice(0, requestIndexes.length, ...pendingIndexes);
+
+    for (const { index, target } of failedFeatureTargets) {
+      await publish(index, {
+        ...baseResult(index),
+        sectionId: target.sectionId,
+        imageIntent: target.imageIntent,
+        error: sourceError || (semanticCandidateCount > 0
+          ? "IMAGE_SOURCE_BINDING_REQUIRED: 이 기능 파트와 직접 일치하는 서로 다른 검증 상품 원본이 필요합니다."
+          : "PRODUCT_SOURCE_REQUIRED: 공지·안내판을 제외한 검증 가능한 상품 원본 사진을 찾지 못했습니다."),
+      });
+    }
+    if (targets.length === 0) return results;
+
+    if (options.sourceOnly) {
+      const error = sourceError || (semanticCandidateCount > 0
+        ? "IMAGE_SOURCE_BINDING_REQUIRED: 검증된 서로 다른 상품 원본이 필수 이미지 슬롯 수보다 적습니다. 남은 슬롯만 생성 또는 수동 검토가 필요합니다."
+        : "PRODUCT_SOURCE_REQUIRED: 공지·안내판을 제외한 검증 가능한 상품 원본 사진을 찾지 못했습니다.");
+      for (const index of requestIndexes) await publish(index, { ...baseResult(index), error });
+      return results;
+    }
+
+    let sourcePalette = { fresh: [] as string[], reusable: [] as string[], verifiedCount: 0 };
+    try {
+      sourcePalette = await existingShoppingSources(options.manifest, targets, {
+        productName: options.productName,
+        sourceImageUrls: options.sourceImageUrls,
+      }, targets.length);
+    }
     catch (error) { sourceError = error instanceof Error ? error.message : String(error); }
+
     const preflightDir = path.join(
       getBrandPostPackageDir(options.manifest.brandLinkId),
       "image-generation-work",
@@ -679,24 +888,47 @@ export async function generateBrandPostImages(options: {
       }
       return safe;
     };
+    const targetSources = [...new Set(targets.flatMap(target => target.sourcePath ? [target.sourcePath] : []))];
+    const safeTargetSources = new Set(await segmentable(targetSources));
+    const unsafeTargetIndexes: number[] = [];
+    for (let index = 0; index < targets.length; index += 1) {
+      if (targets[index].sourcePath && !safeTargetSources.has(targets[index].sourcePath!)) unsafeTargetIndexes.push(index);
+    }
+    for (const index of [...unsafeTargetIndexes].reverse()) {
+      const requestIndex = requestIndexes[index];
+      await publish(requestIndex, {
+        ...baseResult(requestIndex),
+        error: "PRODUCT_CUTOUT_REQUIRED: 현재 기능 파트에 검증된 상품 원본은 있으나 안전하게 분리할 수 없습니다.",
+      });
+      targets.splice(index, 1);
+      requestIndexes.splice(index, 1);
+    }
+    if (targets.length === 0) return results;
+
     const safeFresh = await segmentable(sourcePalette.fresh);
     const safeReusable = await segmentable(sourcePalette.reusable);
     const safePalette = [...safeFresh, ...safeReusable];
-    if (safePalette.length === 0) {
+    const unassignedTargets = targets.filter(target => !target.sourcePath);
+    if (safePalette.length === 0 && unassignedTargets.length > 0) {
       const error = sourceError || (sourcePalette.verifiedCount > 0
         ? "PRODUCT_CUTOUT_REQUIRED: 검증된 상품 사진은 있으나 안전하게 분리 가능한 원본이 없습니다. 전체 사각형 사진은 생성 배경에 합성하지 않았습니다."
         : "PRODUCT_SOURCE_REQUIRED: 공지·안내판을 제외한 검증 가능한 상품 원본 사진을 찾지 못했습니다.");
-      for (const index of requestIndexes) await publish(index, { ...baseResult(index), error });
-      targets.splice(0, targets.length);
-      requestIndexes.splice(0, requestIndexes.length);
+      for (let index = targets.length - 1; index >= 0; index -= 1) {
+        if (targets[index].sourcePath) continue;
+        const requestIndex = requestIndexes[index];
+        await publish(requestIndex, { ...baseResult(requestIndex), error });
+        targets.splice(index, 1);
+        requestIndexes.splice(index, 1);
+      }
     } else {
       // Use every distinct safe source once before round-robin reuse. Reuse is
       // safe because each slot has a distinct prompt/background/output hash;
       // the approval gate still rejects identical final bytes.
-      targets.forEach((target, index) => {
-        target.sourcePath = index < safePalette.length
-          ? safePalette[index]
-          : safePalette[(index - safePalette.length) % safePalette.length];
+      let paletteIndex = 0;
+      targets.forEach((target) => {
+        if (target.sourcePath) return;
+        target.sourcePath = safePalette[paletteIndex % safePalette.length];
+        paletteIndex += 1;
       });
     }
     if (targets.length === 0) return results;
@@ -728,6 +960,7 @@ export async function generateBrandPostImages(options: {
           remoteGenerated: finished.provenance !== "ORIGINAL",
           creationMethod: finished.provenance === "ORIGINAL" ? "local-composite"
             : options.manifest.connectKind === "SHOPPING" ? "source-with-generated-background" : "remote-generated",
+          sourceReview: target.sourceReview,
         };
       } catch (error) {
         result = { ...base, error: error instanceof Error ? error.message : "생성 이미지를 패키지에 맞게 처리하지 못했습니다." };
@@ -850,34 +1083,17 @@ export async function applyExternalGeneratedBrandPostImage(
       "원본 상세 이미지가 선명한지 확인한 뒤 다른 이미지로 다시 시도하세요.",
     );
   }
-  let updated: BrandPostPackageManifestV2;
-  try {
-    updated = apply({
-      brandLinkId: options.brandLinkId,
-      generatedPath: finishedPath,
-      sectionId: target.sectionId,
-      replaceAssetKey: options.replaceAssetKey,
-      provenance: finished.provenance,
-      imageIntent: target.imageIntent,
-      slotId: resolveBrandPostImageSlots(options.manifest, [target.request])[0].slotId,
-      remoteGenerated: finished.provenance !== "ORIGINAL",
-      creationMethod: finished.provenance === "ORIGINAL" ? "local-composite" : options.manifest.connectKind === "SHOPPING" ? "source-with-generated-background" : "remote-generated",
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (/동일한 파일/u.test(message)) {
-      const duplicateKey = sha256File(finishedPath);
-      return {
-        manifest: options.manifest,
-        alreadyApplied: true,
-        assetKey: duplicateKey,
-        sectionId: target.sectionId,
-        imageIntent: target.imageIntent,
-        provenance: finished.provenance,
-      };
-    }
-    throw error;
-  }
+  const updated = apply({
+    brandLinkId: options.brandLinkId,
+    generatedPath: finishedPath,
+    sectionId: target.sectionId,
+    replaceAssetKey: options.replaceAssetKey,
+    provenance: finished.provenance,
+    imageIntent: target.imageIntent,
+    slotId: resolveBrandPostImageSlots(options.manifest, [target.request])[0].slotId,
+    remoteGenerated: finished.provenance !== "ORIGINAL",
+    creationMethod: finished.provenance === "ORIGINAL" ? "local-composite" : options.manifest.connectKind === "SHOPPING" ? "source-with-generated-background" : "remote-generated",
+  });
   const generatedResolved = path.resolve(finishedPath);
   const applied = normalizePackageImageAssets(updated).find(
     (asset) => asset.sourcePath && path.resolve(asset.sourcePath) === generatedResolved,

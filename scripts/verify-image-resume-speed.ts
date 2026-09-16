@@ -60,13 +60,14 @@ async function main() {
   assert.equal(batch.readImageBatchResume(journalFile, [{ ...job, id: "slot" }]).get("slot")!.recoveryConversationPath, "/c/fixture-conversation", "known conversation permits retrieval-only recovery");
   let newPrompts = 0;
   const recoveredUrls: string[] = [];
-  const page = { goto: async (url: string) => { recoveredUrls.push(url); }, url: () => "https://chatgpt.com/c/fixture-conversation", close: async () => {} };
+  const page = { url: () => "https://chatgpt.com/c/fixture-conversation", close: async () => {} };
   const recoveredOutput = path.join(dir, "retrieved.png"); fs.writeFileSync(recoveredOutput, "retrieved fixture");
   const retrieval = load<typeof import("./chatgpt-generate-image-batch")>("scripts/chatgpt-generate-image-batch.ts", {
     "dotenv/config": {}, fs, path, "node:crypto": crypto,
     "./lib/image-batch-diagnostics": { imageBatchSucceeded: () => true, imagePageSignals: async () => ({}), keepFailedDiagnosticOpen: () => false },
     "./lib/image-timeout-policy": imagePolicy,
     "./lib/chatgpt-browser": { createChatGPTContext: async () => ({ context: { newPage: async () => page }, close: async () => {} }),
+      navigateToChatGpt: async (_page: unknown, url: string) => { recoveredUrls.push(url); },
       isChatGPTGenerating: async () => false, countRenderableChatGPTImages: async () => 1,
       waitForChatGPTImageArtifacts: async () => 1, downloadChatGPTImages: async () => [recoveredOutput],
       submitPromptToChatGPT: async () => { newPrompts++; throw Error("must never submit"); }, openFreshChatGPTTarget: async () => { throw Error("must recover existing conversation"); } },
@@ -125,6 +126,7 @@ async function main() {
   const browser = load<typeof import("./lib/chatgpt-browser")>("scripts/lib/chatgpt-browser.ts", {
     fs, path, playwright: {}, "./app-paths": { getChatgptProfileDir: () => "unused", getChatgptSessionFile: () => "unused" },
     "./chatgpt-browser-visibility": {}, "./chatgpt-profile-lock": {}, "./chatgpt-browser-errors": {}, "./image-timeout-policy": {},
+    "./chatgpt-navigation": {},
   });
   let waits = 0;
   const downloadPage = { waitForTimeout: async (ms: number) => { waits += ms; },

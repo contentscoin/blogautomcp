@@ -34,10 +34,19 @@ export function imageBatchBudgetMs(jobCount: number, env: ImageTimeoutEnvironmen
     Math.min(IMAGE_TIMER_MAX_MS, duration(env.CHATGPT_PROFILE_LOCK_TIMEOUT_MS, 600_000) + IMAGE_STARTUP_MS + count * imageJobBudgetMs(env)));
 }
 
-export function isSessionWideImageFailure(error: unknown): boolean {
+export type SessionWideImageFailureKind = "authentication" | "unreachable";
+
+export function classifySessionWideImageFailure(error: unknown): SessionWideImageFailureKind | null {
   const message = error instanceof Error ? error.message : String(error);
-  // Only our explicit auth/security code, never guesses such as "check your login".
-  return /^(?:Error:\s*)?(?:[^\n]*:\s*)?CHATGPT_BROWSER_AUTH_REQUIRED:/.test(message);
+  // Match explicit codes only. Free-form phrases such as "check your login" or
+  // a generic timeout must never cancel unrelated slots.
+  if (/^(?:Error:\s*)?(?:[^\n]*:\s*)?CHATGPT_BROWSER_AUTH_REQUIRED:/.test(message)) return "authentication";
+  if (/^(?:Error:\s*)?(?:[^\n]*:\s*)?CHATGPT_BROWSER_UNREACHABLE:/.test(message)) return "unreachable";
+  return null;
+}
+
+export function isSessionWideImageFailure(error: unknown): boolean {
+  return classifySessionWideImageFailure(error) !== null;
 }
 
 export class ImagePhaseTimeout extends Error {

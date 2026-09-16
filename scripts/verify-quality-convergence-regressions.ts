@@ -13,6 +13,7 @@ import {
   isProductSnapshotEvidenceRicher,
   productSnapshotEvidenceProfile,
 } from "../src/lib/brand-post-revalidation";
+import { isDraftEditorialQualityPassed } from "../src/lib/brand-post-quality-display";
 
 const disclosure = "이 포스팅은 네이버 쇼핑 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받습니다.";
 
@@ -379,15 +380,38 @@ async function main(): Promise<void> {
     "async function runPreparedPostRevision",
     "async function main()",
   );
-  checkCounterexample(counterexampleFailures, "failed convergence never overwrites the package", () => {
+  checkCounterexample(counterexampleFailures, "only editorial convergence failure preserves the previous package", () => {
     const finalReadiness = preparedRevisionSource.lastIndexOf("const contentReadiness =");
     const packageWrite = preparedRevisionSource.indexOf("writePreparedBrandPostPackage", finalReadiness);
     assert.ok(finalReadiness >= 0 && packageWrite > finalReadiness,
       "revision must evaluate final readiness before locating its package commit");
     const beforeCommit = preparedRevisionSource.slice(finalReadiness, packageWrite);
+    assert.match(beforeCommit, /isDraftEditorialQualityPassed\(contentReadiness\)/u,
+      "the commit boundary must classify the editorial gate separately from composition");
     assert.match(beforeCommit,
-      /if\s*\([^)]*!contentReadiness\.canPublish[^)]*\)\s*\{?[\s\S]{0,800}?(?:throw\s+|return\b)/u,
-      "a final canPublish=false result must exit before writePreparedBrandPostPackage and preserve the prior package");
+      /if\s*\([^)]*!editorialReady[^)]*\)\s*\{?[\s\S]{0,800}?(?:throw\s+|return\b)/u,
+      "a final editorial failure must exit before writePreparedBrandPostPackage and preserve the prior package");
+    assert.doesNotMatch(beforeCommit, /if\s*\([^)]*!contentReadiness\.canPublish/u,
+      "composition-only failure must not roll back an accepted manuscript");
+
+    const compositionOnly = {
+      canPublish: false, code: "composition-quality", score: 100,
+      blockers: [{ code: "composition-quality" }],
+      signals: [
+        { key: "review-substance", status: "pass" },
+        { key: "composition-quality", status: "fail" },
+      ],
+      quality: { score: 100, passScore: 70, categories: [] },
+    } as Parameters<typeof isDraftEditorialQualityPassed>[0];
+    assert.equal(isDraftEditorialQualityPassed(compositionOnly), true,
+      "a 100-point text candidate with only missing images is safe to persist");
+    const editorialFailure = {
+      ...compositionOnly!,
+      canPublish: false,
+      signals: [...compositionOnly!.signals, { key: "review-substance", status: "fail" }],
+    } as NonNullable<Parameters<typeof isDraftEditorialQualityPassed>[0]>;
+    assert.equal(isDraftEditorialQualityPassed(editorialFailure), false,
+      "new editorial failures must still block the commit");
   });
   checkCounterexample(counterexampleFailures, "quality convergence bypasses spec section revision", () => {
     const reviseCall = preparedRevisionSource.indexOf("candidateResult = await reviseAssembledPost");

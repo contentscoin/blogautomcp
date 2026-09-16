@@ -4,6 +4,7 @@ import {
   SHOPPING_POST_CONTRACT_V1,
   TRAVEL_POST_CONTRACT_V1,
   normalizeLegacyFreeformImageRules,
+  normalizeLegacyPostImageIntents,
   refreshPostDocumentQuality,
   resolvePostDocument,
   type ResolvedPostDocumentV1,
@@ -54,6 +55,60 @@ assert.equal(
   "네이버 에디터에 빈 인용구가 생기지 않도록 모든 소제목은 heading 노드여야 합니다.",
 );
 assert.deepEqual(SHOPPING_POST_CONTRACT_V1.targetImages, { min: 5, recommended: 8, max: 14 });
+const shoppingPackageRole = SHOPPING_POST_CONTRACT_V1.sections.find(section => section.id === "shopping-package")!;
+const shoppingDesignRole = SHOPPING_POST_CONTRACT_V1.sections.find(section => section.id === "shopping-design")!;
+assert.match(shoppingPackageRole.image.intent, /핵심 기능·작동 방식·조작부/u);
+assert.match(shoppingDesignRole.image.intent, /특장점·작동 방식·조작부/u);
+assert.doesNotMatch(shoppingPackageRole.image.intent, /구성품·패키지/u,
+  "feature sections must not inherit a positional package-photo intent");
+assert.doesNotMatch(shoppingDesignRole.image.intent, /재질·마감·크기/u,
+  "feature sections must request evidence for the actual feature");
+
+const legacyShoppingIntents = structuredClone(shopping);
+legacyShoppingIntents.sections[2].imageIntent = `${legacyShoppingIntents.sections[2].title}: 구성품·패키지 원본 사진`;
+legacyShoppingIntents.sections[3].imageIntent = `${legacyShoppingIntents.sections[3].title}: 재질·마감·크기 디테일 사진`;
+legacyShoppingIntents.sections[4].imageIntent = "구성품·패키지 원본 사진";
+legacyShoppingIntents.renderNodes = legacyShoppingIntents.renderNodes.map((node) => {
+  if (node.kind !== "image" || node.sectionId === null) return node;
+  const section = legacyShoppingIntents.sections.find(candidate => candidate.id === node.sectionId);
+  return section ? { ...node, altText: `${section.title} - ${section.imageIntent}` } : node;
+});
+const currentShoppingIntents = normalizeLegacyPostImageIntents(legacyShoppingIntents);
+assert.match(currentShoppingIntents.sections[2].imageIntent, /핵심 기능·작동 방식·조작부/u);
+assert.match(currentShoppingIntents.sections[3].imageIntent, /특장점·작동 방식·조작부/u);
+assert.equal(currentShoppingIntents.sections[4].imageIntent, "구성품·패키지 원본 사진",
+  "an identical phrase in a different semantic role must not be migrated");
+assert.equal(normalizeLegacyPostImageIntents(currentShoppingIntents), currentShoppingIntents,
+  "the exact role-intent migration is idempotent");
+for (const section of currentShoppingIntents.sections.slice(2, 4)) {
+  const imageNode = currentShoppingIntents.renderNodes.find(node => node.kind === "image" && node.sectionId === section.id);
+  assert.ok(imageNode?.kind === "image");
+  assert.equal(imageNode.altText, `${section.title} - ${section.imageIntent}`);
+}
+
+const revisedShoppingWithLegacyPlan = resolvePostDocument({
+  connectKind: "SHOPPING",
+  title: shopping.title,
+  sections: shopping.sections.map(section => [section.title, ...section.body].join("\n\n")),
+  hashtags: ["쇼핑커넥트", "기능근거"],
+  imagePaths: shoppingImages,
+  sectionImagePaths: shopping.sections.map(section => section.imagePaths),
+  sectionPlan: legacyShoppingIntents.sections.map(section => ({
+    sectionId: section.id,
+    role: section.id,
+    imagePaths: section.imagePaths,
+    imageIntent: section.imageIntent,
+    imageMin: section.imageMin ?? 0,
+    imageMax: section.imageMax ?? 1,
+    headingStyle: section.headingStyle,
+  })),
+  connectUrl: "https://brandconnect.naver.com/shopping-fixture",
+  qualityPreset: "STANDARD",
+});
+assert.match(revisedShoppingWithLegacyPlan.sections[2].imageIntent, /핵심 기능·작동 방식·조작부/u,
+  "text-only revision must refresh an obsolete feature intent");
+assert.match(revisedShoppingWithLegacyPlan.sections[3].imageIntent, /특장점·작동 방식·조작부/u,
+  "text-only revision must refresh an obsolete feature intent");
 
 const travelImages = Array.from({ length: 20 }, (_, index) => `C:/fixture/travel-${index}.jpg`);
 const travel = resolvePostDocument({

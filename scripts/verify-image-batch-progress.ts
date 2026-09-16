@@ -10,6 +10,7 @@ import { PassThrough } from "node:stream";
 import ts from "typescript";
 import * as imagePolicy from "./lib/image-timeout-policy";
 import * as photoProvenance from "./lib/product-photo-provenance";
+import * as imageEvidence from "../src/lib/brand-post-image-evidence";
 import type { generateBrandPostImages as Generate, BrandPostImageGenerationResult } from "../src/lib/brand-post-image-generation";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-image-batch-"));
@@ -48,6 +49,7 @@ class FakeChild extends EventEmitter {
 type Job = { id: string; outStem: string; prompt: string };
 function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lockFails?: boolean; automation?: boolean; sourceMissing?: boolean; sourceError?: string;
   sourcePaths?: string[]; segmentablePaths?: string[]; lockedUsesBackground?: boolean;
+  sectionMatchedPaths?: string[];
   worker?: (args: string[], child: FakeChild) => void } = {}) {
   const packageDir = fs.mkdtempSync(path.join(root, "package-"));
   let child = new FakeChild();
@@ -55,6 +57,8 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
   let checkpoint = "";
   let spawns = 0;
   let lockCalls = 0;
+  let sectionReviewCalls = 0;
+  const sectionReviewCandidatePaths: string[][] = [];
   const lockedSourcePaths: string[] = [];
   const locked = async (options: { sourcePath?: string; backgroundPath?: string } = {}) => {
     lockCalls += 1;
@@ -102,6 +106,14 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       "../../scripts/lib/product-thumbnail": { buildProductThumbnailCopy: () => ({}) },
       "../../scripts/lib/product-photo-provenance": photoProvenance,
       "../../scripts/lib/product-photo-source": {
+        collectShoppingProductSourceCandidates: async (options: { localCandidates: string[]; sourceImageUrls?: string[] }) => {
+          if (settings.sourceError) throw new Error(settings.sourceError);
+          const includeRemote = options.sourceImageUrls === undefined || options.sourceImageUrls.length > 0;
+          return [...new Set([
+            ...options.localCandidates,
+            ...(settings.sourceMissing || !includeRemote ? [] : settings.sourcePaths || [sourcePath, rawPath]),
+          ])];
+        },
         selectShoppingProductSource: async () => {
           if (settings.sourceError) throw new Error(settings.sourceError);
           return settings.sourceMissing ? null : sourcePath;
@@ -109,6 +121,31 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
         selectShoppingProductSources: async (_options: unknown) => {
           if (settings.sourceError) throw new Error(settings.sourceError);
           return settings.sourceMissing ? [] : settings.sourcePaths || [sourcePath, rawPath];
+        },
+      },
+      "../../scripts/lib/product-photo-review": {
+        selectVerifiedProductSectionImages: async (paths: string[], _productName: string, targets: unknown[]) => {
+          sectionReviewCalls += 1;
+          sectionReviewCandidatePaths.push([...paths]);
+          const matched = paths.filter(candidate => settings.sectionMatchedPaths?.includes(candidate));
+          return matched.slice(0, targets.length).map((file, targetIndex) => ({
+            targetIndex,
+            path: file,
+            sourceSha256: crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"),
+            reviewClass: "feature-evidence",
+            reason: "fixture section match",
+            reviewedAt: "2026-09-15T00:00:00.000Z",
+          }));
+        },
+        selectVerifiedProductSectionImage: async (paths: string[]) => {
+          const file = paths.find(candidate => settings.sectionMatchedPaths?.includes(candidate));
+          return file ? {
+            path: file,
+            sourceSha256: crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"),
+            reviewClass: "feature-evidence",
+            reason: "fixture section match",
+            reviewedAt: "2026-09-15T00:00:00.000Z",
+          } : null;
         },
       },
       "../../scripts/lib/travel-content": { buildTravelThumbnailCopy: () => ({}) },
@@ -119,6 +156,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
         applyGeneratedBrandPostImage: () => { throw new Error("not used by the transport harness"); },
       },
       "./chatgpt-browser-automation": { isChatGptBrowserAutomationEnabled: () => settings.automation ?? true },
+      "./brand-post-image-evidence": imageEvidence,
       "node:crypto": crypto,
     },
     { process: { ...process, env: { ...process.env, BRAND_POST_IMAGE_BATCH_TIMEOUT_MS: settings.timeout?.toString() || "", BRAND_POST_IMAGE_JOB_TIMEOUT_MS: "" } } },
@@ -147,7 +185,8 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
   };
   return { ...api, get child() { return child; }, manifest, callbacks, generate, result, progress, close,
     get jobs() { return jobs; }, get checkpoint() { return checkpoint; },
-    get spawns() { return spawns; }, get lockCalls() { return lockCalls; }, get lockedSourcePaths() { return lockedSourcePaths; } };
+    get spawns() { return spawns; }, get lockCalls() { return lockCalls; }, get lockedSourcePaths() { return lockedSourcePaths; },
+    get sectionReviewCalls() { return sectionReviewCalls; }, get sectionReviewCandidatePaths() { return sectionReviewCandidatePaths; } };
 }
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -327,7 +366,248 @@ async function verifyGenerator() {
     assert.equal(results[1].error, undefined);
   });
 
-  await check("one verified segmentable product source completes three slots with distinct outputs", async () => {
+  await check("verified shopping originals fill body slots without browser generation or cutout", async () => {
+    const originals = Array.from({ length: 4 }, (_, index) => {
+      const file = path.join(root, `verified-original-${index}.jpg`);
+      fs.writeFileSync(file, `distinct verified seller photo ${index}`);
+      return file;
+    });
+    const h = harness({ sourcePaths: originals, sectionMatchedPaths: originals, lockFails: true });
+    h.manifest.connectKind = "SHOPPING";
+    const results = await h.generate(0, { requests: originals.map((_, index) => ({
+      requestId: `source-${index}`,
+      sectionId: "section",
+    })) });
+    assert.equal(h.spawns, 0, "source-first coverage must not launch paid/browser generation");
+    assert.equal(h.lockCalls, 0, "an untouched original photo does not require foreground extraction");
+    assert.deepEqual(new Set(results.map(result => result.generatedPath)), new Set(originals));
+    assert.equal(new Set(results.map(result => result.generatedPath)).size, 4);
+    results.forEach((result) => {
+      assert.equal(result.provenance, "ORIGINAL");
+      assert.equal(result.creationMethod, "source");
+      assert.equal(result.remoteGenerated, false);
+      assert.equal(result.sourceReview?.version, "product-photo-source-review/v1");
+      assert.equal(result.sourceReview?.usage, "section-matched-product-evidence");
+      assert.equal(result.error, undefined);
+    });
+  });
+
+  await check("existing and fresh shopping sources share one global semantic review", async () => {
+    const existing = path.join(root, "global-existing.jpg");
+    const fresh = path.join(root, "global-fresh.jpg");
+    fs.writeFileSync(existing, "existing package original");
+    fs.writeFileSync(fresh, "fresh recovered seller original");
+    const existingHash = crypto.createHash("sha256").update(fs.readFileSync(existing)).digest("hex");
+    const h = harness({ sourcePaths: [fresh], sectionMatchedPaths: [existing, fresh] });
+    h.manifest.connectKind = "SHOPPING";
+    h.manifest.imageAssets = [
+      { sha256: "hero", role: "hero", path: sourcePath, provenance: "LOCKED_PRODUCT" },
+      { sha256: existingHash, role: "body", path: existing, sourcePath: existing,
+        provenance: "ORIGINAL", creationMethod: "source" },
+    ] as typeof h.manifest.imageAssets;
+    const results = await h.generate(0, { requests: [
+      { requestId: "global-existing", sectionId: "section" },
+      { requestId: "global-fresh", sectionId: "section" },
+    ] });
+    assert.equal(h.sectionReviewCalls, 1, "all seller candidates must be compared in one semantic batch");
+    assert.equal(h.sectionReviewCandidatePaths.length, 1);
+    assert.deepEqual(new Set(h.sectionReviewCandidatePaths[0]), new Set([existing, fresh]));
+    assert.equal(new Set(results.map(result => result.generatedPath)).size, 2);
+    assert.equal(h.spawns, 0);
+  });
+
+  await check("sixteen generic local files cannot starve a later relevant seller URL", async () => {
+    const local = Array.from({ length: 16 }, (_, index) => {
+      const file = path.join(root, `generic-local-${index}.jpg`);
+      fs.writeFileSync(file, `generic local seller photo ${index}`);
+      return file;
+    });
+    const lateRelevant = path.join(root, "late-feature-evidence.jpg");
+    fs.writeFileSync(lateRelevant, "late relevant seller feature panel");
+    const h = harness({ sourcePaths: [lateRelevant], sectionMatchedPaths: [lateRelevant] });
+    h.manifest.connectKind = "SHOPPING";
+    h.manifest.imageAssets = [
+      { sha256: "hero", role: "hero", path: sourcePath, provenance: "LOCKED_PRODUCT" },
+      ...local.map(file => ({
+        sha256: crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"),
+        role: "body" as const,
+        path: file,
+        sourcePath: file,
+        provenance: "ORIGINAL" as const,
+        creationMethod: "source" as const,
+      })),
+    ] as typeof h.manifest.imageAssets;
+    const results = await h.generate(0, {
+      sourceImageUrls: ["https://fixture.test/late-feature-evidence.jpg"],
+      requests: [{ requestId: "late-feature", sectionId: "section" }],
+    });
+    assert.equal(h.sectionReviewCalls, 1);
+    assert.equal(h.sectionReviewCandidatePaths[0].length, 17,
+      "the semantic reviewer receives both the full local quota and later URL evidence");
+    assert.ok(h.sectionReviewCandidatePaths[0].includes(lateRelevant));
+    assert.equal(results[0].generatedPath, lateRelevant);
+    assert.equal(h.spawns, 0);
+  });
+
+  await check("generic product photos cannot bypass a failed section-intent review", async () => {
+    const originals = [sourcePath, rawPath];
+    const h = harness({ sourcePaths: originals, sectionMatchedPaths: [] });
+    h.manifest.connectKind = "SHOPPING";
+    const results = await h.generate(0, {
+      sourceOnly: true,
+      requests: originals.map((_, index) => ({ requestId: `semantic-reject-${index}`, sectionId: "section" })),
+    });
+    assert.equal(h.spawns, 0);
+    assert.ok(results.every(result => !result.generatedPath));
+    assert.ok(results.every(result => result.error?.includes("IMAGE_SOURCE_BINDING_REQUIRED")));
+  });
+
+  await check("one reviewed feature source is never reused as generic evidence for another feature", async () => {
+    const h = harness({
+      sourcePaths: [sourcePath],
+      sectionMatchedPaths: [sourcePath],
+      segmentablePaths: [sourcePath],
+    });
+    h.manifest.connectKind = "SHOPPING";
+    const results = await h.generate(0, { requests: [
+      { requestId: "feature-one", sectionId: "section" },
+      { requestId: "feature-two", sectionId: "section" },
+    ] });
+    assert.equal(h.spawns, 0);
+    assert.equal(results.filter(result => result.generatedPath === sourcePath).length, 1);
+    assert.equal(results.filter(result => result.error?.includes("IMAGE_SOURCE_BINDING_REQUIRED")).length, 1);
+  });
+
+  await check("reviewed package originals bind atomically to distinct section slots", async () => {
+    const existing = [sourcePath, rawPath];
+    const h = harness({ sectionMatchedPaths: existing, sourceMissing: true });
+    h.manifest.connectKind = "SHOPPING";
+    h.manifest.imageAssets = [
+      { sha256: "hero", role: "hero", path: sourcePath, provenance: "LOCKED_PRODUCT" },
+      ...existing.map(file => ({
+        sha256: crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"),
+        role: "body" as const,
+        path: file,
+        sourcePath: file,
+        provenance: "ORIGINAL" as const,
+        creationMethod: "source" as const,
+      })),
+    ] as typeof h.manifest.imageAssets;
+    const results = await h.generate(0, { requests: existing.map((_, index) => ({
+      requestId: `bind-${index}`,
+      sectionId: "section",
+    })) });
+    assert.equal(h.spawns, 0);
+    assert.equal(new Set(results.map(result => result.bindExistingAssetKey)).size, 2);
+    results.forEach(result => {
+      assert.equal(result.sourceReview?.usage, "section-matched-product-evidence");
+      assert.equal(result.sourceReview?.reviewClass, "feature-evidence");
+    });
+  });
+
+  await check("source-only shopping repair preserves partial originals and never starts generation", async () => {
+    const h = harness({ sourcePaths: [sourcePath], sectionMatchedPaths: [sourcePath], lockFails: false });
+    h.manifest.connectKind = "SHOPPING";
+    const results = await h.generate(0, {
+      sourceOnly: true,
+      requests: Array.from({ length: 3 }, (_, index) => ({ requestId: `source-only-${index}`, sectionId: "section" })),
+    });
+    assert.equal(h.spawns, 0);
+    assert.equal(h.lockCalls, 0);
+    assert.equal(results.filter(result => result.provenance === "ORIGINAL" && result.generatedPath).length, 1);
+    assert.equal(results.filter(result => result.error?.includes("IMAGE_SOURCE_BINDING_REQUIRED")).length, 2);
+  });
+
+  await check("source-only replaces four stale feature slots with four distinct reviewed originals", async () => {
+    const stale = Array.from({ length: 4 }, (_, index) => {
+      const file = path.join(root, `stale-feature-${index}.png`);
+      fs.writeFileSync(file, `stale-feature-${index}`);
+      return file;
+    });
+    const sources = Array.from({ length: 4 }, (_, index) => {
+      const file = path.join(root, `fresh-feature-${index}.jpg`);
+      fs.writeFileSync(file, `fresh-feature-source-${index}`);
+      return file;
+    });
+    const h = harness({ sourcePaths: sources, sectionMatchedPaths: sources });
+    h.manifest.connectKind = "SHOPPING";
+    h.manifest.composition.sections = stale.map((_, index) => ({
+      id: `feature-${index}`,
+      title: `기능 ${index + 1}`,
+      imageIntent: `기능 ${index + 1} 작동 장면`,
+      body: ["기능 근거"],
+      imagePaths: [stale[index]],
+    })) as typeof h.manifest.composition.sections;
+    h.manifest.imageAssets = [
+      { sha256: "hero", role: "hero", path: sourcePath, provenance: "LOCKED_PRODUCT" },
+      ...stale.map((file, index) => ({
+        sha256: crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"),
+        role: "body" as const,
+        sectionId: `legacy-${index}`,
+        slotId: `legacy-${index}:image:1`,
+        imageIntent: "구형 목적",
+        path: file,
+        sourcePath: file,
+        provenance: "ORIGINAL" as const,
+        creationMethod: "source" as const,
+      })),
+    ] as typeof h.manifest.imageAssets;
+    const requests = stale.map((file, index) => ({
+      requestId: `replace-feature-${index}`,
+      sectionId: `feature-${index}`,
+      slotId: `feature-${index}:image:1`,
+      replaceAssetKey: crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"),
+    }));
+    const results = await h.generate(0, { sourceOnly: true, requests });
+    assert.equal(h.spawns, 0);
+    assert.equal(new Set(results.map(result => result.generatedPath)).size, 4);
+    assert.deepEqual(new Set(results.map(result => result.generatedPath)), new Set(sources));
+    results.forEach((result, index) => {
+      assert.equal(result.sectionId, `feature-${index}`);
+      assert.equal(result.slotId, `feature-${index}:image:1`);
+      assert.equal(result.imageIntent, `기능 ${index + 1} 작동 장면`);
+      assert.equal(result.replaceAssetKey, requests[index].replaceAssetKey);
+      assert.equal(result.sourceReview?.reviewClass, "feature-evidence");
+    });
+  });
+
+  await check("source-only travel repair never starts browser generation", async () => {
+    const h = harness();
+    const results = await h.generate(2, { sourceOnly: true });
+    assert.equal(h.spawns, 0);
+    assert.ok(results.every(result => !result.generatedPath));
+    assert.ok(results.every(result => result.error?.includes("TRAVEL_SOURCE_ONLY_UNAVAILABLE")));
+  });
+
+  await check("a section-matched original remains reusable as a safe cutout for later generated slots", async () => {
+    const outputs = Array.from({ length: 2 }, (_, index) => {
+      const file = path.join(root, `mixed-output-${index}.png`);
+      fs.writeFileSync(file, `mixed generated background ${index}`);
+      return file;
+    });
+    const h = harness({
+      sourcePaths: [sourcePath],
+      sectionMatchedPaths: [sourcePath],
+      segmentablePaths: [sourcePath],
+      lockedUsesBackground: true,
+    });
+    h.manifest.connectKind = "SHOPPING";
+    h.manifest.composition.sections[0].title = "어떤 제품인지부터 보면";
+    h.manifest.composition.sections[0].imageIntent = "제품 전체 모습과 구성을 한눈에 보여주는 이미지";
+    const pending = h.generate(0, { requests: Array.from({ length: 3 }, (_, index) => ({
+      requestId: `mixed-${index}`,
+      sectionId: "section",
+    })) });
+    await tick();
+    assert.equal(h.jobs.length, 2, "one reviewed original fills one slot and only two backgrounds are requested");
+    h.close(0, { ok: true, jobs: outputs.map((file, index) => h.result(index, file)) });
+    const results = await pending;
+    assert.equal(results.filter(result => result.provenance === "ORIGINAL").length, 1);
+    assert.equal(results.filter(result => result.provenance === "LOCKED_PRODUCT").length, 2);
+    assert.deepEqual(h.lockedSourcePaths, [sourcePath, sourcePath]);
+  });
+
+  await check("one overview product source completes three generated overview slots with distinct outputs", async () => {
     const outputs = Array.from({ length: 3 }, (_, index) => {
       const file = path.join(root, `scarce-output-${index}.png`);
       fs.writeFileSync(file, `distinct generated background ${index}`);
@@ -335,10 +615,14 @@ async function verifyGenerator() {
     });
     const h = harness({
       sourcePaths: [sourcePath],
+      sectionMatchedPaths: [sourcePath],
       segmentablePaths: [sourcePath],
       lockedUsesBackground: true,
     });
     h.manifest.connectKind = "SHOPPING";
+    h.manifest.imageRequirements = { policy: "generated-required" };
+    h.manifest.composition.sections[0].title = "어떤 제품인지부터 보면";
+    h.manifest.composition.sections[0].imageIntent = "제품 전체 모습과 구성을 한눈에 보여주는 이미지";
     const pending = h.generate(0, { requests: Array.from({ length: 3 }, (_, index) => ({
       requestId: `scarce-${index}`,
       sectionId: "section",
@@ -355,8 +639,9 @@ async function verifyGenerator() {
 
   for (const lockFails of [false, true]) {
     await check(`shopping never overlays a full-frame source (lockFails=${lockFails})`, async () => {
-      const h = harness({ lockFails });
+      const h = harness({ lockFails, sectionMatchedPaths: [sourcePath] });
       h.manifest.connectKind = "SHOPPING";
+      h.manifest.imageRequirements = { policy: "generated-required" };
       const pending = h.generate(0, { requests: [
         { requestId: "body", sectionId: "section" }, { requestId: "hero", replaceAssetKey: "hero" },
       ] });
@@ -403,7 +688,15 @@ async function verifyGenerator() {
   });
 }
 
-async function verifyProducer(startupFailure = false, failFast = false, sessionFailure = false, downloadRetry = false, count = 3, downloadTimeout = false) {
+async function verifyProducer(
+  startupFailure = false,
+  failFast = false,
+  sessionFailure = false,
+  downloadRetry = false,
+  count = 3,
+  downloadTimeout = false,
+  networkFailure = false,
+) {
   process.env.BRAND_POST_IMAGE_BATCH_FAIL_FAST = failFast ? "true" : "false";
   const dir = fs.mkdtempSync(path.join(root, "producer-"));
   const jobsFile = path.join(dir, "jobs.json");
@@ -436,6 +729,9 @@ async function verifyProducer(startupFailure = false, failFast = false, sessionF
         } };
       },
       openFreshChatGPTTarget: async () => {
+        if (networkFailure && submitted === 0) {
+          throw new Error("Image navigation failed: CHATGPT_BROWSER_UNREACHABLE: net::ERR_CERT_COMMON_NAME_INVALID");
+        }
         if (!submitted) return;
         assert.equal(readRecords().length, submitted, "previous job must be checkpointed before next starts");
         assert.equal(stderr.split(prefix).length - 1, submitted, "previous job must emit progress before next starts");
@@ -463,6 +759,7 @@ async function verifyProducer(startupFailure = false, failFast = false, sessionF
   } });
   if (startupFailure) await assert.rejects(api.main(), /browser startup failed/);
   else if (sessionFailure && failFast) await assert.rejects(api.main(), /세션 인증\/보안 오류/);
+  else if (networkFailure) await assert.rejects(api.main(), /ChatGPT 연결 오류/);
   else await api.main();
   const output = JSON.parse(stdout);
   const records = readRecords();
@@ -480,6 +777,14 @@ async function verifyProducer(startupFailure = false, failFast = false, sessionF
     assert.match(records[1].error, /CHATGPT_BROWSER_AUTH_REQUIRED/);
     assert.match(records[2].error, /^fail-fast: /);
     assert.equal(records[2].localPath, null);
+  } else if (networkFailure) {
+    assert.equal(closed, true);
+    assert.equal(submitted, 0, "certificate failure must not submit the first or remaining prompts");
+    assert.match(records[0].error, /^CHATGPT_BROWSER_UNREACHABLE:/u);
+    records.slice(1).forEach((record) => {
+      assert.match(record.error, /^fail-fast: CHATGPT_BROWSER_UNREACHABLE:/u);
+      assert.equal(record.localPath, null);
+    });
   } else {
     assert.equal(closed, true);
     assert.equal(submitted, count);
@@ -496,7 +801,11 @@ async function verifyProducer(startupFailure = false, failFast = false, sessionF
     assert.equal(diagnostics.length, 1);
     assert.ok(!diagnostics[0].includes("secret-token"));
     const diagnostic = JSON.parse(diagnostics[0]);
-    assert.equal(diagnostic.category, sessionFailure ? "session-auth-security" : "individual");
+    assert.equal(diagnostic.category, sessionFailure
+      ? "session-auth-security"
+      : networkFailure
+        ? "session-network"
+        : "individual");
     assert.equal(diagnostic.hardMs, 600_000);
     if (downloadTimeout) {
       assert.equal(diagnostic.phase, "download");
@@ -528,6 +837,7 @@ async function verifyIntegratedResume() {
       "./lib/chatgpt-browser": {
         createChatGPTContext: async () => { opens++; return { context: { newPage: async () => page }, close: async () => {} }; },
         openFreshChatGPTTarget: async () => {},
+        navigateToChatGpt: async () => {},
         // Exercise login failure inside submit's pre-dispatch checks, not only navigation.
         submitPromptToChatGPT: async (_page: unknown, _prompt: string, _label: string, beforeSend: () => void) => {
           if (loginFailure) throw new Error("CHATGPT_BROWSER_AUTH_REQUIRED: login");
@@ -613,6 +923,7 @@ async function main() {
     await check("individual timeout continues remaining slots even with fail-fast enabled", () => verifyProducer(false, true));
     await check("a timeout does not skip the ten remaining slots", () => verifyProducer(false, true, false, false, 12));
     await check("explicit session auth failure stops and records remaining slots", () => verifyProducer(false, true, true));
+    await check("certificate failure preserves unreachable and stops all prompts", () => verifyProducer(false, false, false, false, 10, false, true));
     await check("empty artifact retrieval retries safely without regenerating", () => verifyProducer(false, false, false, true));
     await check("timed-out retrieval is never retried concurrently; category and later slots survive", () => verifyProducer(false, false, false, false, 3, true));
     console.log(`Verified ${checks} offline image-batch checks; no paid generation.`);

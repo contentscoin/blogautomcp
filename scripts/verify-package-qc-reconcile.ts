@@ -8,6 +8,7 @@ async function main() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "package-qc-reconcile-"));
   process.env.DESKTOP_USER_DATA = temp;
   const store = await import("../src/lib/brand-post-package");
+  const { planSectionImageRequests } = await import("../src/lib/brand-post-image-repair");
   const { resolvePostDocument, stableFreeformSectionId } = await import("../src/lib/post-composition-contract");
   try {
     const id = "legacy-saga-fixture";
@@ -47,14 +48,33 @@ async function main() {
       thumbnailSpec: { version: "thumbnail-spec/v2", canvas: { width: 1000, height: 1000, aspect: "1:1" }, style: "fixture", sourcePolicy: "TRAVEL_EDITORIAL", sourceImagePath: images[0] },
     };
     // These offline stand-ins represent completed generated travel images.
-    // Execution metadata stays absent, as it does for MCP-submitted images.
-    fixture.imageAssets = store.normalizePackageImageAssets(fixture).map((asset) => ({
-      ...asset, provenance: "GENERATED_BACKGROUND",
-    }));
+    // Generated coverage is accepted only when its execution metadata is
+    // coherent and bound to the current semantic section slot.
+    fixture.imageAssets = store.normalizePackageImageAssets(fixture).map((asset) => {
+      const section = asset.sectionId
+        ? fixture.composition.sections.find((candidate) => candidate.id === asset.sectionId)
+        : undefined;
+      const ordinal = section
+        ? section.imagePaths.findIndex((imagePath) => path.resolve(imagePath) === path.resolve(asset.path)) + 1
+        : 1;
+      return {
+        ...asset,
+        provenance: "GENERATED_BACKGROUND" as const,
+        creationMethod: "remote-generated" as const,
+        remoteGenerated: true,
+        imageIntent: section?.imageIntent,
+        slotId: section ? `${section.id}:image:${Math.max(1, ordinal)}` : "hero:image:1",
+      };
+    });
     const originals: BrandPostPackageManifestV2 = {
       ...fixture,
       brandLinkId: `${id}-originals`,
-      imageAssets: fixture.imageAssets.map((asset) => ({ ...asset, provenance: "ORIGINAL" })),
+      imageAssets: fixture.imageAssets.map((asset) => ({
+        ...asset,
+        provenance: "ORIGINAL" as const,
+        creationMethod: "source" as const,
+        remoteGenerated: false,
+      })),
     };
     store.writeBrandPostPackageManifest(originals);
     const originalRead = store.readBrandPostPackage(originals.brandLinkId) as BrandPostPackageManifestV2;
@@ -138,13 +158,34 @@ async function main() {
     assert.ok(missing.contentQuality?.reason?.includes(missing.composition.sections[2].id));
     assert.equal(missing.composition.qualityReport.actual.images, 10);
     assert.throws(() => store.approveBrandPostPackage(id), /이미지/u);
-    const repairPath = path.join(dir, "new-library.png");
-    fs.writeFileSync(repairPath, "unique-library-replacement");
-    const repaired = store.applyGeneratedBrandPostImage({ brandLinkId: id, sectionId: missing.composition.sections[2].id, generatedPath: repairPath, provenance: "GENERATED_BACKGROUND" });
+    const repairSection = missing.composition.sections[2];
+    const repairRequests = planSectionImageRequests(store.packagePreview(missing).imageSlots)
+      .filter((request) => request.sectionId === repairSection.id);
+    assert.equal(repairRequests.length, 2,
+      "the shifted old slot must be replaced before the deleted second image is filled");
+    assert.ok(repairRequests.some((request) => request.replaceAssetKey && request.slotId === `${repairSection.id}:image:1`));
+    assert.ok(repairRequests.some((request) => !request.replaceAssetKey && request.slotId === `${repairSection.id}:image:2`));
+    let repaired = missing;
+    repairRequests.forEach((request, index) => {
+      const repairPath = path.join(dir, `new-library-${index + 1}.png`);
+      fs.writeFileSync(repairPath, `unique-library-replacement-${index + 1}`);
+      repaired = store.applyGeneratedBrandPostImage({
+        brandLinkId: id,
+        ...request,
+        generatedPath: repairPath,
+        provenance: "GENERATED_BACKGROUND",
+        creationMethod: "remote-generated",
+        remoteGenerated: true,
+        imageIntent: repairSection.imageIntent,
+      });
+    });
     const imageNode = repaired.composition.renderNodes.find((node) => node.kind === "image" && node.sectionId === missing.composition.sections[2].id);
     assert.ok(imageNode?.kind === "image");
     assert.equal(imageNode.layout, "sequence", "A repaired two-image semantic section uses an ordered sequence, never a positional collage");
     assert.equal(store.readBrandPostPackage(id)?.contentQuality?.canPublish, true);
+    assert.equal(store.evaluateBrandPostPackageReadiness(repaired).canApprove, true,
+      "stale-slot repair must restore the actual approval gate, not only the derived composition score");
+    assert.ok(store.approveBrandPostPackage(id).approvedAt);
 
     // Optional real-world fixture: read-only input, in-memory reconciliation only.
     if (process.argv[2]) {

@@ -56,6 +56,45 @@ export async function downloadProductSourcePhoto(url: string, outputDir: string)
   return file;
 }
 
+/**
+ * Collect intact seller-gallery files without deciding whether they are plain
+ * product photos. A later section-intent review may legitimately accept an
+ * official feature panel that the generic packshot filter must reject.
+ */
+export async function collectShoppingProductSourceCandidates(options: {
+  localCandidates: string[];
+  sourceImageUrls?: string[];
+  outputDir: string;
+  maximum?: number;
+}, dependencies = { download: downloadProductSourcePhoto }): Promise<string[]> {
+  const maximum = Math.max(1, Math.min(20, Math.floor(options.maximum || 16)));
+  const byHash = new Map<string, string>();
+  const add = (file: string) => {
+    if (byHash.size >= maximum) return;
+    try {
+      const stat = fs.statSync(file);
+      if (!stat.isFile() || stat.size < 1 || stat.size > MAX_IMAGE_BYTES) return;
+      const resolved = path.resolve(file);
+      const hash = crypto.createHash("sha256").update(fs.readFileSync(resolved)).digest("hex");
+      if (!byHash.has(hash)) byHash.set(hash, resolved);
+    } catch { /* A missing local candidate is retried from saved URLs. */ }
+  };
+  for (const file of options.localCandidates) add(file);
+  const sources = [...new Set(options.sourceImageUrls || [])].filter(isAllowedProductPhotoUrl).slice(0, 20);
+  let downloaded = 0;
+  for (const url of sources) {
+    if (byHash.size >= maximum) break;
+    try {
+      add(await dependencies.download(url, options.outputDir));
+      downloaded += 1;
+    } catch { /* One unavailable seller image does not block the rest. */ }
+  }
+  if (byHash.size === 0 && sources.length > 0 && downloaded === 0) {
+    throw new Error("PRODUCT_SOURCE_DOWNLOAD_FAILED: 저장된 판매페이지 상품 이미지를 내려받지 못했습니다.");
+  }
+  return [...byHash.values()];
+}
+
 export async function selectShoppingProductSource(options: {
   localCandidates: string[];
   productName: string;

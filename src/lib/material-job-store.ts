@@ -4,6 +4,20 @@ import crypto from "node:crypto";
 import { getAppDataDir } from "../../scripts/lib/app-paths";
 
 export type MaterialItemStatus = "queued" | "preparing" | "ready" | "publishing" | "published" | "scheduled" | "failed" | "outcome_unknown" | "interrupted";
+export interface MaterialJobItem {
+  productId: string;
+  revision?: string;
+  status: MaterialItemStatus;
+  stage: string;
+  /** Backward-compatible human-readable failure summary. Never store a stack. */
+  error?: string;
+  /** Stable, non-sensitive machine code exposed by materials_list. */
+  errorCode?: string;
+  /** Optional stable code from Error.cause; messages and stacks are excluded. */
+  causeCode?: string;
+  scheduledDate?: string;
+  result?: unknown;
+}
 export interface MaterialJob {
   jobId: string;
   kind: "prepare" | "publish";
@@ -16,7 +30,51 @@ export interface MaterialJob {
   requestHash?: string;
   events?: Array<{ at: string; productId: string; stage: string; status: MaterialItemStatus }>;
   publishMode?: "now" | "schedule";
-  items: Array<{ productId: string; revision?: string; status: MaterialItemStatus; stage: string; error?: string; scheduledDate?: string; result?: unknown }>;
+  items: MaterialJobItem[];
+}
+
+const SAFE_MATERIAL_ERROR_CODE = /^[A-Z][A-Z0-9_]{1,79}$/u;
+
+export function safeMaterialErrorCode(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toUpperCase();
+  return SAFE_MATERIAL_ERROR_CODE.test(normalized) ? normalized : undefined;
+}
+
+/** Preserve the legacy summary without serializing Error.name, cause or stack. */
+export function materialJobErrorMessage(error: unknown): string {
+  if (error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string") {
+    return (error as { message: string }).message;
+  }
+  return typeof error === "string" ? error : String(error);
+}
+
+/** Read only bounded machine codes from an Error chain. No message or stack is copied. */
+export function materialJobFailureCodes(error: unknown): { errorCode?: string; causeCode?: string } {
+  const codes: string[] = [];
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current && typeof current === "object" && !seen.has(current) && seen.size < 8) {
+    seen.add(current);
+    const record = current as { code?: unknown; cause?: unknown };
+    const code = safeMaterialErrorCode(record.code);
+    if (code && !codes.includes(code)) codes.push(code);
+    current = record.cause;
+  }
+  return {
+    ...(codes[0] ? { errorCode: codes[0] } : {}),
+    ...(codes[1] ? { causeCode: codes[1] } : {}),
+  };
+}
+
+function normalizeStoredFailureCodes(job: MaterialJob): MaterialJob {
+  for (const item of job.items) {
+    const errorCode = safeMaterialErrorCode(item.errorCode);
+    const causeCode = safeMaterialErrorCode(item.causeCode);
+    if (errorCode) item.errorCode = errorCode; else delete item.errorCode;
+    if (causeCode) item.causeCode = causeCode; else delete item.causeCode;
+  }
+  return job;
 }
 const directory = () => path.join(getAppDataDir(), "material-jobs");
 const shared = globalThis as typeof globalThis & { materialLockOwners?: Set<string> };
@@ -29,6 +87,7 @@ function alive(pid: number) {
   try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
 }
 export function saveMaterialJob(job: MaterialJob) {
+  normalizeStoredFailureCodes(job);
   fs.mkdirSync(directory(), { recursive: true });
   job.updatedAt = new Date().toISOString();
   const target = jobPath(job.jobId);
@@ -39,7 +98,7 @@ export function saveMaterialJob(job: MaterialJob) {
 export function readMaterialJob(id: string): MaterialJob | null {
   const file = jobPath(id);
   if (!fs.existsSync(file)) return null;
-  const job = JSON.parse(fs.readFileSync(file, "utf8")) as MaterialJob;
+  const job = normalizeStoredFailureCodes(JSON.parse(fs.readFileSync(file, "utf8")) as MaterialJob);
   if (job.status === "running" && (!alive(job.ownerPid) || (job.ownerPid === process.pid && !owned.has(job.jobId)))) {
     job.status = "interrupted";
     job.completedAt = new Date().toISOString();
@@ -47,9 +106,11 @@ export function readMaterialJob(id: string): MaterialJob | null {
       if (item.status === "publishing") {
         item.status = "outcome_unknown";
         item.error = "앱이 중단되어 발행 결과를 확인해야 합니다. 자동 재발행하지 않습니다.";
+        item.errorCode = "OUTCOME_UNKNOWN";
       } else if (["queued", "preparing"].includes(item.status)) {
         item.status = "interrupted";
         item.error = "앱이 중단되었습니다. 저장된 소재를 확인한 후 준비를 재개하세요.";
+        item.errorCode = "APP_INTERRUPTED";
       }
     }
     saveMaterialJob(job);

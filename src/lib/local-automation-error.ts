@@ -13,6 +13,13 @@ export const LOCAL_AUTOMATION_ERROR_CODES = [
   "CONTENT_BLOCKED",
   "IMAGE_SHORTFALL",
   "LLM_UNAVAILABLE",
+  "CODEX_AUTH_REQUIRED",
+  "CODEX_MODEL_INCOMPATIBLE",
+  "CODEX_TIMEOUT",
+  "CODEX_TRANSIENT_FAILURE",
+  "CHATGPT_BROWSER_AUTH_REQUIRED",
+  "CHATGPT_BROWSER_UNREACHABLE",
+  "CHATGPT_BROWSER_BUSY",
   "EDITOR_FAILED",
   "UPDATE_PENDING",
   "TRAVEL_CONTRACT_LOCKED",
@@ -56,6 +63,13 @@ export const LOCAL_AUTOMATION_ERROR_HINTS: Record<LocalAutomationErrorCode, stri
   CONTENT_BLOCKED: "생성된 글이 발행 기준(네이버 정책·근거 규칙)을 통과하지 못해 발행을 보류했습니다.",
   IMAGE_SHORTFALL: "본문에 넣을 이미지가 부족합니다. 상품 이미지를 다시 동기화하거나 다른 상품을 선택하세요.",
   LLM_UNAVAILABLE: "OpenAI API 키가 없거나 호출에 실패했습니다. PC 앱 설정에서 키를 확인하세요.",
+  CODEX_AUTH_REQUIRED: "Codex 로그인이 필요합니다. PC 앱에서 Codex 연결 상태를 확인하세요.",
+  CODEX_MODEL_INCOMPATIBLE: "현재 Codex 실행 환경에서 선택한 모델을 지원하지 않습니다. PC 앱을 최신 버전으로 업데이트하세요.",
+  CODEX_TIMEOUT: "Codex 원고 작성이 제한 시간 안에 끝나지 않았습니다.",
+  CODEX_TRANSIENT_FAILURE: "Codex 서비스의 일시 오류가 재시도 후에도 계속됐습니다. 잠시 후 다시 시도하세요.",
+  CHATGPT_BROWSER_AUTH_REQUIRED: "ChatGPT 웹 세션의 로그인 또는 보안 확인이 필요합니다.",
+  CHATGPT_BROWSER_UNREACHABLE: "ChatGPT 웹 페이지에 연결하지 못했습니다. 네트워크와 프록시 상태를 확인하세요.",
+  CHATGPT_BROWSER_BUSY: "다른 ChatGPT 웹 자동화 작업이 진행 중입니다. 현재 작업이 끝난 뒤 다시 시도하세요.",
   EDITOR_FAILED: "네이버 에디터 자동화 단계에서 실패했습니다. PC 앱 로그를 확인하세요.",
   UPDATE_PENDING: "PC 앱이 업데이트 설치를 앞두고 있어 새 작업을 시작할 수 없습니다. 재시작 후 다시 시도하세요.",
   TRAVEL_CONTRACT_LOCKED: "여행커넥트 목록 계약이 아직 캡처되지 않았습니다. travel_capture_contract 를 먼저 실행하세요.",
@@ -95,6 +109,13 @@ export function classifyLocalFailure(input: { status?: number | null; code?: str
   const message = input.message || "";
   const status = input.status ?? null;
   if (isLocalAutomationErrorCode(code)) return code;
+  if (/\bCODEX_AUTH_REQUIRED\b/u.test(message)) return "CODEX_AUTH_REQUIRED";
+  if (/\bCODEX_MODEL_INCOMPATIBLE\b|requires?\s+(?:a\s+)?newer\s+version\s+of\s+Codex/iu.test(message)) return "CODEX_MODEL_INCOMPATIBLE";
+  if (/\bCODEX_TIMEOUT\b/u.test(message)) return "CODEX_TIMEOUT";
+  if (/\bCODEX_TRANSIENT_FAILURE\b/u.test(message)) return "CODEX_TRANSIENT_FAILURE";
+  if (/\bCHATGPT_BROWSER_AUTH_REQUIRED\b/u.test(message)) return "CHATGPT_BROWSER_AUTH_REQUIRED";
+  if (/\bCHATGPT_BROWSER_UNREACHABLE\b/u.test(message)) return "CHATGPT_BROWSER_UNREACHABLE";
+  if (/\bCHATGPT_BROWSER_BUSY\b/u.test(message)) return "CHATGPT_BROWSER_BUSY";
   if (code === "DESKTOP_UPDATE_PENDING") return "UPDATE_PENDING";
   if (code === "CODEX_LOGIN_REQUIRED" || code === "CHATGPT_BROWSER_LOGIN_REQUIRED" || code === "CHATGPT_MCP_DRAFT_REQUIRED" || code === "CHATGPT_BROWSER_FALLBACK_REQUIRED" || code === "CODEX_DRAFT_FAILED") return "LLM_UNAVAILABLE";
   if (code === "INVALID_GENERATED_DRAFT") return "INVALID_INPUT";
@@ -118,6 +139,9 @@ export function classifyLocalFailure(input: { status?: number | null; code?: str
 export function toLocalAutomationError(error: unknown, fallback: LocalAutomationErrorCode = "LOCAL_AUTOMATION_FAILED"): LocalAutomationError {
   if (error instanceof LocalAutomationError) return error;
   const message = error instanceof Error ? error.message : typeof error === "string" ? error : "로컬 작업 실행 실패";
-  const code = classifyLocalFailure({ message });
+  const rawCode = error && typeof error === "object" && typeof (error as { code?: unknown }).code === "string"
+    ? (error as { code: string }).code
+    : null;
+  const code = classifyLocalFailure({ code: rawCode, message });
   return new LocalAutomationError(code === "LOCAL_AUTOMATION_FAILED" ? fallback : code, message);
 }

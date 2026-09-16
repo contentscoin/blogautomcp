@@ -25,6 +25,7 @@ const dependencies: Record<string, unknown> = {
   "./chatgpt-browser-errors": browserErrors,
   "./image-timeout-policy": imagePolicy,
   "./chatgpt-profile-lock": {},
+  "./chatgpt-navigation": { navigateToChatGpt: async () => {} },
 };
 vm.runInNewContext(compiled, {
   module: loadedModule, exports: loadedModule.exports, process, Buffer, console: quietConsole,

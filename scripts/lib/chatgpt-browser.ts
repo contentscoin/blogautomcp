@@ -15,6 +15,9 @@ import {
 } from "./chatgpt-browser-errors";
 import { acquireChatGptProfileLock } from "./chatgpt-profile-lock";
 import { imageWaitPolicy, withinImageDeadline, ImagePhaseTimeout } from "./image-timeout-policy";
+import { navigateToChatGpt } from "./chatgpt-navigation";
+
+export { navigateToChatGpt };
 
 const CHATGPT_SESSION_FILE = getChatgptSessionFile();
 const CHATGPT_USER_DATA_DIR =
@@ -364,7 +367,11 @@ async function ensureChatGPTReady(
     console.log(`⚠️ [${label}] ChatGPT 상태가 불안정하여 복구를 시도합니다. (${attempt + 1}/${CHATGPT_TARGET_RECOVERY_ATTEMPTS})`);
     await page.reload({ waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
     await page.waitForTimeout(1200);
-    await page.goto(CHATGPT_BASE_URL, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
+    await navigateToChatGpt(page, CHATGPT_BASE_URL, {
+      label: `${label} 복구`,
+      reveal: null,
+      log: (message) => console.log(message),
+    });
     await page.waitForTimeout(1800);
   }
 
@@ -440,7 +447,11 @@ export async function createChatGPTContext(hasSessionFile: boolean): Promise<Cha
 
 export async function openChatGPTTarget(page: Page, _url: string, label: string) {
   console.log(`\n🌐 [${label}] 일반 ChatGPT 열기: ${CHATGPT_BASE_URL}`);
-  await page.goto(CHATGPT_BASE_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+  await navigateToChatGpt(page, CHATGPT_BASE_URL, {
+    label,
+    reveal: null,
+    log: (message) => console.log(message),
+  });
   await page.waitForTimeout(2000);
   await assertNoChatGPTProtection(page, label);
   await dismissTemporaryChatOnboarding(page);

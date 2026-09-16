@@ -33,7 +33,7 @@ const json = (body, options = {}) => ({ status: options.status || 200, body: clo
 function harness() {
   const state = { now: '2026-09-07T03:00:00.000Z', authorized: true, updateBlocked: false,
     products: new Map(), manifests: new Map(), jobs: new Map(), runs: [], saves: 0,
-    locks: 0, activities: 0, productReads: 0, countReads: 0 };
+    locks: 0, activities: 0, productReads: 0, countReads: 0, runnerError: null };
   class FakeDate extends Date {
     constructor(...args) { super(...(args.length ? args : [state.now])); }
     static now() { return Date.parse(state.now); }
@@ -75,8 +75,14 @@ function harness() {
       listMaterialJobs: () => [...state.jobs.values()].map(clone),
       readMaterialJob: id => state.jobs.has(id) ? clone(state.jobs.get(id)) : null,
       saveMaterialJob: job => { state.saves++; state.jobs.set(job.jobId, clone(job)); },
+      materialJobFailureCodes: error => {
+        const errorCode = typeof error?.code === 'string' ? error.code : undefined;
+        const causeCode = typeof error?.cause?.code === 'string' ? error.cause.code : undefined;
+        return { ...(errorCode ? { errorCode } : {}), ...(causeCode ? { causeCode } : {}) };
+      },
+      materialJobErrorMessage: error => typeof error?.message === 'string' ? error.message : String(error),
     },
-    './material-job-runner': { runMaterialJob: async job => { state.runs.push(clone(job)); } },
+    './material-job-runner': { runMaterialJob: async job => { state.runs.push(clone(job)); if (state.runnerError) throw state.runnerError; } },
     './bulk-schedule-plan': dates,
   }, { Date: FakeDate });
   function product(index = 0, status = 'READY') {
@@ -200,6 +206,25 @@ test('prepare dispatch is a separate job and contains no publication selection o
   await h.settle();
 });
 
+test('unexpected runner failure stores only legacy text and safe structured codes', async () => {
+  const h = harness(); const item = h.product();
+  const cause = Object.assign(new Error('DO_NOT_STORE_CAUSE_MESSAGE'), {
+    code: 'CODEX_MODEL_INCOMPATIBLE', stack: 'DO_NOT_STORE_CAUSE_STACK',
+  });
+  h.state.runnerError = Object.assign(new Error('shared writer unavailable', { cause }), {
+    code: 'LLM_UNAVAILABLE', stack: 'DO_NOT_STORE_OUTER_STACK',
+  });
+  const response = await h.post({ productIds: [item.productId] }, 'prepare');
+  assert.equal(response.status, 202);
+  await h.settle();
+  const stored = h.state.jobs.get(response.body.data.jobId);
+  assert.equal(stored.status, 'failed');
+  assert.equal(stored.items[0].error, 'shared writer unavailable');
+  assert.equal(stored.items[0].errorCode, 'LLM_UNAVAILABLE');
+  assert.equal(stored.items[0].causeCode, 'CODEX_MODEL_INCOMPATIBLE');
+  assert.doesNotMatch(JSON.stringify(stored), /DO_NOT_STORE_(?:CAUSE_MESSAGE|CAUSE_STACK|OUTER_STACK)/);
+});
+
 test('material status never presents a blocked READY product as publish-ready', async () => {
   const h = harness();
   const ready = h.product(0, 'READY');
@@ -241,12 +266,18 @@ test('terminal material job remains workflow-pending while detached image work i
   };
   h.state.jobs.set('terminal-job', {
     jobId: 'terminal-job', kind: 'prepare', status: 'failed', startedAt: h.state.now,
-    updatedAt: h.state.now, events: [], items: [{ productId: item.productId, status: 'interrupted', stage: '확인 필요' }],
+    updatedAt: h.state.now, events: [], items: [{
+      productId: item.productId, status: 'interrupted', stage: '확인 필요',
+      error: 'shared writer unavailable', errorCode: 'LLM_UNAVAILABLE', causeCode: 'CODEX_MODEL_INCOMPATIBLE',
+    }],
   });
   const pending = await h.api.materialsGet(h.request(null, '?jobId=terminal-job'));
   assert.equal(pending.body.data.status, 'failed', 'the durable job result is preserved');
   assert.equal(pending.body.data.workflowPending, true, 'detached work remains visible after terminal job status');
   assert.equal(pending.body.data.materials[0].status, 'PREPARING');
+  assert.equal(pending.body.data.items[0].error, 'shared writer unavailable', 'legacy error text remains in the API');
+  assert.equal(pending.body.data.items[0].errorCode, 'LLM_UNAVAILABLE');
+  assert.equal(pending.body.data.items[0].causeCode, 'CODEX_MODEL_INCOMPATIBLE');
   delete manifest.imageGeneration;
   const settled = await h.api.materialsGet(h.request(null, '?jobId=terminal-job'));
   assert.equal(settled.body.data.workflowPending, false);

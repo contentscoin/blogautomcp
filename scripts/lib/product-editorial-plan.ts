@@ -1,4 +1,5 @@
 import { assessRepetition } from "./draft-quality-signals";
+import { explicitProductFunctionKey, isUnusableProductFactValue, normalizeTypedProductFact, PRODUCT_MEASUREMENT_PATTERN } from "./product-source-facts";
 
 export type ProductEditorialRole =
   | "review-hook"
@@ -209,7 +210,6 @@ const SEO_ONLY_FEATURE_PATTERN = /^(?:휴대|가정|거실|캠핑|탁상|충전|
 
 const NON_SUBSTANTIVE_FACT_LINE = /^(?:상품명|제품명|품명|모델명|브랜드|제조자|제조사|판매자|스토어|설명|가격|원가|할인율|쿠폰\s*\/\s*혜택|배송|리뷰\s*수|평점|인증사항|상세페이지\s*참조)\s*[:：]/u;
 const SUBSTANTIVE_FACT_LINE = /^상세\s*근거\s*[:：]\s*/u;
-const SUBSTANTIVE_FACT_LABEL = /^(?:용량|규격|크기|사이즈|가로|세로|높이|폭|깊이|두께|지름|직경|무게|중량|소재|재질|원재료|성분|함량|구성품|구성|수량|개수|색상|전압|정격|소비전력|출력|배터리|충전시간|사용시간|작동시간|풍량|온도|모드|단계|회전각도|방수|방진|호환|원산지|제조국|보관방법|보관조건|유통기한|소비기한|알레르기|세탁방법|세척방법|기능)\s*[:：]/u;
 
 /** Commerce and crawler metadata can contain convincing-looking numbers, but
  * none of it proves how the product is built or works. Keep it out before both
@@ -238,20 +238,23 @@ export function normalizeProductSubstanceFeatures(values: string[] | undefined):
     const normalized = clean(value);
     if (!normalized || isReviewEvidenceFeature(normalized) || NON_SUBSTANTIVE_FACT_LINE.test(normalized) ||
         isNonSubstantiveProductMetadata(normalized)) return [];
-    return [normalized.replace(SUBSTANTIVE_FACT_LINE, "")];
+    const fact = normalized.replace(SUBSTANTIVE_FACT_LINE, "");
+    if (isUnusableProductFactValue(fact)) return [];
+    return [normalizeTypedProductFact(fact) || fact];
   }), 12);
 }
 
 export function isMeaningfulProductEvidenceFeature(value: string): boolean {
   const normalized = clean(value);
   if (normalized.length < 4 || normalized.length > 220) return false;
+  if (isUnusableProductFactValue(normalized)) return false;
   if (isNonSubstantiveProductMetadata(normalized)) return false;
   if (SEO_ONLY_FEATURE_PATTERN.test(normalized.replace(/\s+/gu, ""))) return false;
   if (/^(?:추천|인기|베스트|신상품|핫딜|특가|무료배송|오늘출발)$/u.test(normalized)) return false;
 
-  const hasMeasurement = /\d[\d,.]*\s*(?:mAh|rpm|ml|L|m|cm|mm|kg|g|W|V|시간|분|단|도|개|엽|%|원)/iu.test(normalized);
+  const hasMeasurement = PRODUCT_MEASUREMENT_PATTERN.test(normalized);
   const hasSpecificationRelation = /(?:최대|약|기준|사용시간|충전시간|소비전력|크기|무게|사이즈|구성품|구성|헤드|트리머|인디케이터|잠금|회전|각도|풍속|풍량|배터리|리모컨|방수|소재|모드|단계|분리|접이식|칸막이|손잡이|변환|호환|보증)/u.test(normalized);
-  const hasTypedPair = SUBSTANTIVE_FACT_LABEL.test(normalized);
+  const hasTypedPair = Boolean(normalizeTypedProductFact(normalized));
   return hasMeasurement || hasSpecificationRelation || hasTypedPair;
 }
 
@@ -636,8 +639,9 @@ export function buildProductReviewAnalysis(input: ProductEditorialPlanInput): Pr
           : category === "food"
             ? foodAnalysis(input, signals)
             : genericAnalysis(input, signals);
-  const measuredFeatureCount = features.filter((value) => /\d[\d,.]*\s*(?:mAh|m|cm|mm|kg|g|W|V|시간|분|단|도|개|엽|%)/iu.test(value)).length;
-  const evidencePoints = Math.min(signals.length, 2) + features.length + measuredFeatureCount + (evidenceDescription ? 1 : 0);
+  const measuredFeatureCount = features.filter((value) => PRODUCT_MEASUREMENT_PATTERN.test(value)).length;
+  const functionalDetail = new Set(features.map(explicitProductFunctionKey).filter(Boolean)).size >= 2 ? 1 : 0;
+  const evidencePoints = Math.min(signals.length, 2) + features.length + measuredFeatureCount + functionalDetail + (evidenceDescription ? 1 : 0);
   const evidenceLevel = evidencePoints >= 7 && features.length >= 3 ? "rich" : evidencePoints >= 3 && features.length >= 1 ? "usable" : "sparse";
   return {
     ...base,

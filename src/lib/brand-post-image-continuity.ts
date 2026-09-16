@@ -18,6 +18,10 @@ function assetMap(manifest: BrandPostPackageManifestV2): Map<string, BrandPostPa
   return new Map((manifest.imageAssets || []).map(asset => [path.resolve(asset.path), asset]));
 }
 
+function assetIdentity(asset: BrandPostPackageImageAsset): string {
+  return asset.sha256 ? `sha256:${asset.sha256}` : `path:${path.resolve(asset.path)}`;
+}
+
 function uniquePaths(values: string[]): string[] {
   const seen = new Set<string>();
   return values.filter(value => {
@@ -65,8 +69,13 @@ export function reconcileBrandPostImageContinuity(
   const usedPreviousSections = new Set<string>();
   const allPreviousPaths = new Set((previous.imageAssets || []).map(asset => path.resolve(asset.path)));
   const chosenAssets = new Map<string, BrandPostPackageImageAsset>();
+  const chooseAsset = (asset: BrandPostPackageImageAsset) => {
+    const identity = assetIdentity(asset);
+    if (!chosenAssets.has(identity)) chosenAssets.set(identity, asset);
+  };
+  const hasAsset = (asset: BrandPostPackageImageAsset) => chosenAssets.has(assetIdentity(asset));
   const previousHero = previousAssets.get(path.resolve(previous.heroImagePath));
-  if (previousHero) chosenAssets.set(path.resolve(previousHero.path), previousHero);
+  if (previousHero) chooseAsset(previousHero);
 
   const sectionMatches = next.composition.sections.map((section, index) => {
     const byId = previous.composition.sections.find(candidate => candidate.id === section.id);
@@ -98,7 +107,7 @@ export function reconcileBrandPostImageContinuity(
     for (const imagePath of imagePaths) {
       const resolved = path.resolve(imagePath);
       const asset = previousAssets.get(resolved) || nextAssets.get(resolved);
-      if (asset) chosenAssets.set(resolved, {
+      if (asset) chooseAsset({
         ...asset,
         sectionId: section.id,
         imageIntent: section.imageIntent,
@@ -110,11 +119,11 @@ export function reconcileBrandPostImageContinuity(
   // Retain package-local, unbound source candidates. They are useful for a
   // later targeted repair but never count as section coverage.
   for (const asset of previous.imageAssets || []) {
-    if (!asset.sectionId && asset.role !== "hero") chosenAssets.set(path.resolve(asset.path), asset);
+    if (!asset.sectionId && asset.role !== "hero") chooseAsset(asset);
   }
   for (const asset of next.imageAssets || []) {
-    if (!asset.sectionId && asset.role !== "hero" && !chosenAssets.has(path.resolve(asset.path))) {
-      chosenAssets.set(path.resolve(asset.path), asset);
+    if (!asset.sectionId && asset.role !== "hero" && !hasAsset(asset)) {
+      chooseAsset(asset);
     }
   }
 

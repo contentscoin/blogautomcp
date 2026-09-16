@@ -5,7 +5,7 @@ import { requireAdminApiKey } from "./api-auth";
 import { requireNoPendingDesktopUpdate } from "./update-guard";
 import { beginAutomaticPublishing } from "./desktop-activity";
 import { getMaterial, validateMaterialSelection } from "./material-library";
-import { acquireMaterialJobLock, listMaterialJobs, readMaterialJob, saveMaterialJob, type MaterialJob } from "./material-job-store";
+import { acquireMaterialJobLock, listMaterialJobs, materialJobErrorMessage, materialJobFailureCodes, readMaterialJob, saveMaterialJob, type MaterialJob } from "./material-job-store";
 import { runMaterialJob } from "./material-job-runner";
 import { addDaysToYmd, ymdInTimeZone } from "./bulk-schedule-plan";
 
@@ -144,8 +144,11 @@ export async function materialsPost(request: NextRequest, kind: "prepare" | "pub
     const unlock = release; const finishActivity = finish;
     void runMaterialJob(job).catch(error => {
       job.status = "failed"; job.completedAt = new Date().toISOString();
+      const failureCodes = materialJobFailureCodes(error);
       for (const item of job.items) if (["queued", "preparing", "publishing"].includes(item.status)) {
-        item.status = item.status === "publishing" ? "outcome_unknown" : "interrupted"; item.error = String(error);
+        item.status = item.status === "publishing" ? "outcome_unknown" : "interrupted";
+        item.error = materialJobErrorMessage(error);
+        Object.assign(item, failureCodes);
       }
       saveMaterialJob(job);
     }).finally(() => { finishActivity(); unlock(); });

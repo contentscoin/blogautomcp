@@ -199,7 +199,10 @@ test('materials handlers separate preparation, selection and publication and pre
       assert.ok(timeoutMs === 30000 || requests.at(-1).method === 'GET');
       if (loseResponse) throw new Error('response lost');
       if (parsed.pathname === '/api/materials' && parsed.searchParams.get('jobId') === 'local-workflow-1') {
-        return Response.json({ success: true, data: { jobId: 'local-workflow-1', status: backgroundPending ? 'failed' : 'completed', workflowPending: backgroundPending, items: [{ productId: 'product-1', status: backgroundPending ? 'interrupted' : 'scheduled' }] } });
+        return Response.json({ success: true, data: { jobId: 'local-workflow-1', status: backgroundPending ? 'failed' : 'completed', workflowPending: backgroundPending, items: [{
+          productId: 'product-1', status: backgroundPending ? 'interrupted' : 'scheduled',
+          ...(backgroundPending ? { error: 'shared writer unavailable', errorCode: 'LLM_UNAVAILABLE', causeCode: 'CODEX_MODEL_INCOMPATIBLE' } : {}),
+        }] } });
       }
       if (parsed.pathname === '/api/materials') {
         return Response.json({ success: true, data: { materials: [{ productId: 'product-1', revision: 'a'.repeat(64), ready: true, connectKind: 'SHOPPING' }] } });
@@ -219,6 +222,10 @@ test('materials handlers separate preparation, selection and publication and pre
   const stillPreparing = await execute('MATERIALS_LIST', { jobId: 'local-workflow-1' });
   assert.equal(stillPreparing.data.workflowPending, true);
   assert.equal(stillPreparing.data.nextCall.arguments.jobId, 'local-workflow-1');
+  assert.equal(stillPreparing.data.items[0].error, 'shared writer unavailable');
+  assert.equal(stillPreparing.data.items[0].errorCode, 'LLM_UNAVAILABLE');
+  assert.equal(stillPreparing.data.items[0].causeCode, 'CODEX_MODEL_INCOMPATIBLE',
+    'materials_list MCP result must preserve the safe provider cause code');
   backgroundPending = false;
   const selected = [{ productId: 'product-1', revision: 'a'.repeat(64) }];
   await execute('MATERIALS_PUBLISH', { materials: selected, publishMode: 'now', confirmed: true });

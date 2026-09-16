@@ -1,6 +1,6 @@
 {
   "name": "brandconnect-automation",
-  "version": "1.3.50",
+  "version": "1.3.52",
   "description": "네이버 쇼핑 커넥트(브랜드커넥트) 자동 블로그 포스팅 도구",
   "private": true,
   "scripts": {
@@ -30,6 +30,7 @@
     "test:package-qc-reconcile": "npx ts-node --project tsconfig.scripts.json scripts/verify-package-qc-reconcile.ts",
     "test:publish-image-cleanup": "npx ts-node --project tsconfig.scripts.json scripts/verify-publish-image-cleanup.ts",
     "test:image-batch-progress": "npx ts-node --project tsconfig.scripts.json scripts/verify-image-batch-progress.ts",
+    "test:product-section-image-review": "npx ts-node --project tsconfig.scripts.json scripts/verify-product-section-image-review.ts",
     "test:writing-harness": "npx ts-node --project tsconfig.scripts.json scripts/verify-writing-prompt-contract.ts",
     "test:writing-timeouts": "npx ts-node --project tsconfig.scripts.json scripts/verify-writing-timeouts.ts",
     "test:image-timeouts": "npx ts-node --project tsconfig.scripts.json scripts/verify-image-timeout-policy.ts",
@@ -92,7 +93,7 @@
   },
   "main": "scripts/electron/main.cjs",
   "dependencies": {
-    "@openai/codex-sdk": "^0.151.0",
+    "@openai/codex-sdk": "^0.154.0",
     "@prisma/client": "^5.22.0",
     "date-fns": "^4.1.0",
     "dotenv": "^17.2.3",
@@ -123,7 +124,8 @@
     "electron-builder": "^26.15.3",
     "eslint": "^9",
     "eslint-config-next": "^16.3.3",
-    "tailwindcss": "^4"
+    "tailwindcss": "^4",
+    "tsx": "^4.23.13"
   },
   "build": {
     "beforePack": "scripts/electron/before-pack.cjs",
@@ -171,6 +173,10 @@
       {
         "from": "node_modules/pretendard/dist/LICENSE.txt",
         "to": "licenses/Pretendard-OFL.txt"
+      },
+      {
+        "from": "resources/tesseract",
+        "to": "tesseract"
       }
     ],
     "extraMetadata": {

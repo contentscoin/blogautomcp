@@ -8,13 +8,14 @@ import {
   createChatGPTContext,
   isChatGPTGenerating,
   downloadChatGPTImages,
+  navigateToChatGpt,
   openFreshChatGPTTarget,
   readAssistantMessages,
   submitPromptToChatGPT,
   waitForChatGPTImageArtifacts,
 } from "./lib/chatgpt-browser";
 import {
-  imageWaitPolicy, isSessionWideImageFailure, withinImageDeadline,
+  classifySessionWideImageFailure, imageWaitPolicy, withinImageDeadline,
   IMAGE_PREPARATION_MS, IMAGE_DOWNLOAD_ATTEMPT_MS, IMAGE_DOWNLOAD_ATTEMPTS, IMAGE_RETRY_DELAY_MS,
 } from "./lib/image-timeout-policy";
 
@@ -143,7 +144,7 @@ export function readImageBatchResume(resultsFile: string, jobs: BatchJob[]): Map
   return resumed;
 }
 
-/** Fail-fast only applies to explicitly observed session-wide authentication/security errors. */
+/** Fail-fast applies only to explicit session-wide authentication or connection errors. */
 export function isBatchFailFastEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return (env.BRAND_POST_IMAGE_BATCH_FAIL_FAST || "true").trim().toLowerCase() !== "false";
 }
@@ -272,7 +273,11 @@ async function runJob(
     await withinImageDeadline(async () => {
       if (recoveryConversationPath) {
         if (!/^\/c\/[a-zA-Z0-9-]+$/u.test(recoveryConversationPath)) throw new Error("Invalid recovery conversation path");
-        await page.goto(`https://chatgpt.com${recoveryConversationPath}`, { waitUntil: "domcontentloaded", timeout: 60_000 });
+        await navigateToChatGpt(page, `https://chatgpt.com${recoveryConversationPath}`, {
+          label: "기존 이미지 생성 대화 복구",
+          reveal: null,
+          log: (message) => console.log(message),
+        });
         await trace("recovery-opened");
         return;
       }
@@ -331,21 +336,29 @@ async function runJob(
   } catch (error) {
     cancelled = true;
     await trace("failed");
-    const sessionWide = isSessionWideImageFailure(error);
+    const sessionFailure = classifySessionWideImageFailure(error);
     const timedOut = error instanceof Error && /IMAGE_TIMEOUT:/.test(error.message);
     const elapsedSeconds = Math.round((Date.now() - phaseStarted) / 1000);
     const phaseLabel = phase === "generation" ? "이미지 생성 대기" : phase === "download" ? "이미지 다운로드" : "이미지 준비";
     const budgetMs = phase === "generation" ? imageWaitPolicy().hardMs : phase === "download" ? IMAGE_DOWNLOAD_ATTEMPT_MS : IMAGE_PREPARATION_MS;
     const refused = error instanceof Error && error.message.startsWith("IMAGE_PROVIDER_REFUSED:");
-    const message = refused ? error.message : sessionWide
+    const message = refused ? error.message : sessionFailure === "authentication"
       ? "CHATGPT_BROWSER_AUTH_REQUIRED: 명시적인 로그인 또는 보안 확인이 필요합니다."
+      : sessionFailure === "unreachable"
+        ? "CHATGPT_BROWSER_UNREACHABLE: chatgpt.com 연결에 실패하여 이미지 요청을 보내지 않았습니다."
       : `${timedOut ? "IMAGE_TIMEOUT" : "IMAGE_SLOT_FAILED"}: ${phaseLabel} ${timedOut ? "시간 초과" : "실패"} ` +
         `(경과 ${elapsedSeconds}초 / 최대 ${Math.round(budgetMs / 1000)}초). 요청을 재전송하지 않았습니다.`;
     // No raw exception, URLs, prompt, DOM, screenshot, cookies or account identifiers.
     try {
       fs.writeFileSync(path.join(tempDir, "failure.json"), JSON.stringify({
         version: 1, phase, elapsedMs: Date.now() - started,
-        category: refused ? "provider-refused" : sessionWide ? "session-auth-security" : "individual",
+        category: refused
+          ? "provider-refused"
+          : sessionFailure === "authentication"
+            ? "session-auth-security"
+            : sessionFailure === "unreachable"
+              ? "session-network"
+              : "individual",
         timedOut,
         ...imageWaitPolicy(),
       }, null, 2), { encoding: "utf8", mode: 0o600 });
@@ -426,13 +439,17 @@ async function runBatch() {
         await page.waitForEvent("close", { timeout: 0 }).catch(() => {});
       }
       await withinImageDeadline(() => page.close(), 10_000, "page cleanup").catch(() => {});
-      if (result.error && failFast && isSessionWideImageFailure(result.error)) {
+      const sessionFailureKind = result.error ? classifySessionWideImageFailure(result.error) : null;
+      if (result.error && sessionFailureKind && (failFast || sessionFailureKind === "unreachable")) {
         const reason = result.error.split("\n")[0].trim().slice(0, 200);
+        const interruption = sessionFailureKind === "unreachable"
+          ? "ChatGPT 연결 오류"
+          : "세션 인증/보안 오류";
         for (const remaining of jobs.slice(index + 1)) {
           // Do not overwrite another slot's successful/uncertain prior journal.
-          record({ id: remaining.id, localPath: null, retryable: true, error: `fail-fast: 세션 인증/보안 확인이 필요해 중단했습니다 (${reason})` }, false);
+          record({ id: remaining.id, localPath: null, retryable: true, error: `fail-fast: ${reason}` }, false);
         }
-        failure = new Error(`이미지 생성 배치를 세션 인증/보안 오류로 중단했습니다: ${reason}`);
+        failure = new Error(`이미지 생성 배치를 ${interruption}로 중단했습니다: ${reason}`);
         break;
       }
     }

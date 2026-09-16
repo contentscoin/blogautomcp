@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { preserveProductPhotoSource } from "./lib/product-photo-provenance";
 let fixtureRoot: string | undefined;
 
 async function main() {
@@ -244,12 +245,12 @@ async function main() {
     "초안 이미지는 필수 보충·파트 추가·개별 재생성·외부 생성 이미지 적용과 안전한 미리보기를 지원해야 합니다.",
   );
   assert.equal(
-    draftImageRouteSource.includes("if (!isChatGptBrowserAutomationEnabled()) {") &&
+    !draftImageRouteSource.includes("if (!isChatGptBrowserAutomationEnabled()) {") &&
       draftImageRouteSource.includes('"CHATGPT_BROWSER_AUTOMATION_DISABLED"') &&
-      draftImageRouteSource.indexOf("if (!isChatGptBrowserAutomationEnabled()) {") <
+      draftImageRouteSource.indexOf("planSectionImageRequests") <
         draftImageRouteSource.indexOf("await repairBrandPostImages("),
     true,
-    "브라우저 자동화가 꺼져 있으면 이미지 배치를 계획하기 전에 거부해 Chrome 을 열지 않아야 합니다.",
+    "이미지 API는 브라우저 상태와 무관하게 검증 원본 배정을 먼저 실행해야 합니다.",
   );
   assert.equal(
     draftImageGenerationSource.includes("if (!isChatGptBrowserAutomationEnabled()) {") &&
@@ -291,7 +292,8 @@ async function main() {
   );
   assert.equal(
     draftRouteSource.includes("scheduleSectionImageRepair") &&
-      draftRouteSource.includes("void repairBrandPostImages({ brandLinkId: options.brandLinkId, productName: options.productName })") &&
+      draftRouteSource.includes("void repairBrandPostImages({ brandLinkId: options.brandLinkId, productName: options.productName,") &&
+      draftRouteSource.includes("sourceOnly: options.sourceOnly") &&
       !draftRouteSource.includes("await repairBrandPostImages(") &&
       !draftRouteSource.includes("autoRepairSectionImages"),
     true,
@@ -300,21 +302,24 @@ async function main() {
   assert.equal(
     draftRouteSource.includes('draftRuntimePolicy.BRAND_POST_AUTO_SECTION_IMAGES === "true"') &&
       draftRouteSource.includes("if (!isAutoSectionImagesEnabled())") &&
-      draftRouteSource.includes("if (!isChatGptBrowserAutomationEnabled())") &&
-      draftRouteSource.indexOf("if (!isChatGptBrowserAutomationEnabled())") < draftRouteSource.indexOf("void repairBrandPostImages("),
+      draftRouteSource.includes("canFillFromVerifiedShoppingSources") &&
+      draftRouteSource.includes("!canFillFromVerifiedShoppingSources && !isChatGptBrowserAutomationEnabled()") &&
+      draftRouteSource.indexOf("if (!canFillFromVerifiedShoppingSources") < draftRouteSource.indexOf("void repairBrandPostImages("),
     true,
-    "섹션 이미지 자동 생성은 고정 정책을 따르고, 브라우저 사용 가능 여부를 예약 전에 확인해야 합니다.",
+    "쇼핑 원본 우선 배정은 브라우저 없이 예약하고, 실제 생성이 필요한 정책만 브라우저를 선검사해야 합니다.",
   );
   assert.equal(
-    draftRouteSource.includes('skip: action === "submit_generated" || mcpOrigin'),
+    draftRouteSource.includes('manifest.connectKind !== "SHOPPING"') &&
+      draftRouteSource.includes('sourceOnly: action === "submit_generated" || mcpOrigin'),
     true,
-    "MCP 제출 원고는 PC 이미지 배치를 예약하지 않아야 합니다(ChatGPT 내장 이미지 생성 + post_apply_section_image).",
+    "MCP 쇼핑 원고는 검증 원본만 자동 배정하고 PC 브라우저 이미지 생성은 시작하지 않아야 합니다.",
   );
   const batchSource = fs.readFileSync(path.join(projectRoot, "scripts", "chatgpt-generate-image-batch.ts"), "utf8");
   assert.equal(
     batchSource.includes("isBatchFailFastEnabled") &&
       batchSource.includes('(env.BRAND_POST_IMAGE_BATCH_FAIL_FAST || "true")') &&
-      batchSource.includes("if (result.error && failFast && isSessionWideImageFailure(result.error))") &&
+      batchSource.includes("const sessionFailureKind = result.error ? classifySessionWideImageFailure(result.error) : null") &&
+      batchSource.includes('sessionFailureKind && (failFast || sessionFailureKind === "unreachable")') &&
       batchSource.includes("if (typeof observed === \"number\" && observed === 0) {"),
     true,
     "이미지 배치는 세션 전체 오류만 연쇄 중단하고, 완료 이미지가 관측되지 않은 대기 종료는 실패로 취급해야 합니다.",
@@ -339,6 +344,7 @@ async function main() {
   fixtureRoot = userData;
   process.env.DESKTOP_USER_DATA = userData;
   const store = await import("../src/lib/brand-post-package");
+  const { planSectionImageRequests } = await import("../src/lib/brand-post-image-repair");
   const compositionContract = await import("../src/lib/post-composition-contract");
   const id = "fixture-brand-link-001";
   const dir = store.getBrandPostPackageDir(id);
@@ -456,7 +462,22 @@ async function main() {
     bodyImagePaths: [firstMappedImage, thirdMappedImage],
     composition: mappedComposition,
     imageRequirements: { policy: "generated-required" },
-    imageAssets: [v2HeroPath, firstMappedImage, thirdMappedImage].map((file, index) => ({ path: file, sourcePath: file, sha256: crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"), role: index ? "body" as const : "hero" as const, provenance: "ORIGINAL" as const })),
+    imageAssets: [v2HeroPath, firstMappedImage, thirdMappedImage].map((file, index) => {
+      const section = mappedComposition.sections.find(candidate => candidate.imagePaths.includes(file));
+      const ordinal = section ? section.imagePaths.indexOf(file) + 1 : 1;
+      return {
+        path: file,
+        sourcePath: file,
+        sha256: crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"),
+        role: index ? "body" as const : "hero" as const,
+        sectionId: section?.id || null,
+        imageIntent: section?.imageIntent,
+        slotId: section ? `${section.id}:image:${ordinal}` : "hero:image:1",
+        provenance: "ORIGINAL" as const,
+        creationMethod: "source" as const,
+        remoteGenerated: false,
+      };
+    }),
   });
   assert.equal(mappedPreview.imageSlots[0].originalCount, 1);
   assert.equal(mappedPreview.imageSlots[0].generatedCount, 0);
@@ -513,7 +534,11 @@ async function main() {
       assert.equal(loaded.version === "brand-post-package/v2" && loaded.composition.qualityReport.canAutoPublish, true,
         "Fixture must pass ordinary text/image-count quality so generation is the decisive gate");
       const slots = store.packagePreview(loaded).imageSlots;
-      assert.equal(slots.reduce((sum, slot) => sum + slot.missing, 0), 0);
+      assert.equal(
+        slots.reduce((sum, slot) => sum + slot.missing, 0),
+        connectKind === "SHOPPING" ? 10 : 0,
+        "unreviewed shopping originals are stale; travel originals still satisfy ordinary coverage",
+      );
       const expectedGeneratedMinimum = slots.reduce((sum, slot) => sum + slot.minimum, 0);
       assert.equal(slots.reduce((sum, slot) => sum + slot.generationMissing, 0), expectedGeneratedMinimum);
       assert.throws(() => store.approveBrandPostPackage(coverageId), /이미지/u,
@@ -525,17 +550,320 @@ async function main() {
 
       const generated = {
         ...originals,
-        imageAssets: store.normalizePackageImageAssets(originals).map((asset) => ({
-          ...asset,
-          provenance: connectKind === "SHOPPING" ? "LOCKED_PRODUCT" as const : "GENERATED_BACKGROUND" as const,
-          remoteGenerated: true, creationMethod: "remote-generated" as const,
-        })),
+        imageAssets: store.normalizePackageImageAssets(originals).map((asset, assetIndex) => {
+          if (!asset.sectionId) return {
+            ...asset,
+            provenance: connectKind === "SHOPPING" ? "LOCKED_PRODUCT" as const : "GENERATED_BACKGROUND" as const,
+            remoteGenerated: true,
+            creationMethod: connectKind === "SHOPPING" ? "source-with-generated-background" as const : "remote-generated" as const,
+            slotId: "hero:image:1",
+          };
+          const section = composition.sections.find(candidate => candidate.id === asset.sectionId)!;
+          let sourceReview: import("../src/lib/brand-post-package").BrandPostPackageImageAsset["sourceReview"];
+          if (connectKind === "SHOPPING") {
+            const featureSource = path.join(coverageDir, `feature-source-${assetIndex}.png`);
+            fs.writeFileSync(featureSource, `feature-source-${coverageId}-${assetIndex}`);
+            const receipt = preserveProductPhotoSource({ sourcePath: featureSource, outputPath: asset.path, segmented: true });
+            sourceReview = {
+              version: "product-photo-source-review/v1",
+              sourceSha256: receipt.sourceSha256,
+              usage: "section-matched-product-evidence",
+              sectionIntent: section.imageIntent,
+              reviewClass: "feature-evidence",
+              reason: "fixture feature evidence",
+              reviewedAt: "2026-09-15T00:00:00.000Z",
+            };
+          }
+          return {
+            ...asset,
+            provenance: connectKind === "SHOPPING" ? "LOCKED_PRODUCT" as const : "GENERATED_BACKGROUND" as const,
+            remoteGenerated: true,
+            creationMethod: connectKind === "SHOPPING" ? "source-with-generated-background" as const : "remote-generated" as const,
+            imageIntent: section.imageIntent,
+            slotId: `${section.id}:image:${section.imagePaths.findIndex(file => path.resolve(file) === path.resolve(asset.path)) + 1}`,
+            sourceReview,
+          };
+        }),
       };
       store.writeBrandPostPackageManifest(generated);
       assert.equal(store.packagePreview(store.readBrandPostPackage(coverageId)!).imageSlots.every((slot) => slot.generationMissing === 0), true);
       assert.ok(store.approveBrandPostPackage(coverageId).approvedAt,
         `${coverageId}: fully generated coverage without execution metadata can be approved`);
       assert.ok(store.readBrandPostPackage(coverageId)?.approvedAt, "Valid approval survives read-time reconciliation");
+
+      const repeatedHeroRender = structuredClone(generated);
+      const renderedHero = repeatedHeroRender.composition.renderNodes.find(node =>
+        node.kind === "image" && node.sectionId === null)!;
+      repeatedHeroRender.composition.renderNodes.push({ ...renderedHero });
+      const repeatedHeroReadiness = store.evaluateBrandPostPackageReadiness(repeatedHeroRender);
+      assert.ok(repeatedHeroReadiness.blockers.some(blocker => blocker.code === "image-render-mismatch"),
+        "the publish document must render exactly one hero image");
+      assert.equal(
+        repeatedHeroReadiness.composition!.qualityReport.actual.images,
+        1 + repeatedHeroReadiness.imageSlots.reduce((sum, slot) => sum + slot.count, 0),
+        "quality counts each accepted image SHA once even when a render node is duplicated",
+      );
+
+      if (connectKind === "SHOPPING") {
+        const sourceReviewed = structuredClone(generated) as import("../src/lib/brand-post-package").BrandPostPackageManifestV2;
+        sourceReviewed.imageRequirements = { policy: "verified-source-first" };
+        sourceReviewed.imageAssets = sourceReviewed.imageAssets!.map(asset => {
+          if (!asset.sectionId) return asset;
+          const section = sourceReviewed.composition.sections.find(candidate => candidate.id === asset.sectionId)!;
+          return {
+            ...asset,
+            provenance: "ORIGINAL" as const,
+            remoteGenerated: false,
+            creationMethod: "source" as const,
+            sourceReview: {
+              version: "product-photo-source-review/v1" as const,
+              sourceSha256: asset.sha256,
+              usage: "section-matched-product-evidence" as const,
+              sectionIntent: section.imageIntent,
+              reviewClass: "feature-evidence" as const,
+              reason: "fixture semantic match",
+              reviewedAt: "2026-09-15T00:00:00.000Z",
+            },
+          };
+        });
+        assert.equal(store.evaluateBrandPostPackageReadiness(sourceReviewed).canApprove, true,
+          "section-matched seller originals satisfy the source-first image contract");
+        const unreviewed = structuredClone(sourceReviewed);
+        const unreviewedAsset = unreviewed.imageAssets!.find(asset => asset.sectionId)!;
+        delete unreviewedAsset.sourceReview;
+        const unreviewedReadiness = store.evaluateBrandPostPackageReadiness(unreviewed);
+        assert.equal(unreviewedReadiness.canApprove, false);
+        assert.ok(unreviewedReadiness.blockers.some(blocker => blocker.code === "image-source-review-missing"),
+          "a generic or unreviewed original cannot satisfy a semantic section slot");
+
+        const overviewProductPhoto = structuredClone(sourceReviewed);
+        const overviewSection = overviewProductPhoto.composition.sections[0];
+        const overviewAsset = overviewProductPhoto.imageAssets!.find(asset => asset.sectionId === overviewSection.id)!;
+        assert.ok(overviewAsset.sourceReview);
+        overviewAsset.sourceReview.reviewClass = "product-photo";
+        assert.equal(store.evaluateBrandPostPackageReadiness(overviewProductPhoto).canApprove, true,
+          "a generic product photo remains valid for the overview slot only");
+
+        const featureProductPhoto = structuredClone(sourceReviewed);
+        const featureSection = featureProductPhoto.composition.sections[2];
+        const featureAsset = featureProductPhoto.imageAssets!.find(asset => asset.sectionId === featureSection.id)!;
+        assert.ok(featureAsset.sourceReview);
+        featureAsset.sourceReview.reviewClass = "product-photo";
+        const featureReadiness = store.evaluateBrandPostPackageReadiness(featureProductPhoto);
+        assert.equal(featureReadiness.canApprove, false);
+        assert.ok(featureReadiness.blockers.some(blocker =>
+          blocker.code === "image-source-review-missing" && blocker.sectionId === featureSection.id),
+        "a packshot cannot masquerade as feature evidence");
+
+        const staleReview = structuredClone(sourceReviewed);
+        const staleReviewAsset = staleReview.imageAssets!.find(asset => asset.sectionId === featureSection.id)!;
+        staleReviewAsset.sourceReview!.sectionIntent = "구형 파트 목적";
+        assert.ok(store.evaluateBrandPostPackageReadiness(staleReview).blockers.some(blocker =>
+          blocker.code === "image-source-review-missing" && blocker.sectionId === featureSection.id),
+        "a source review bound to an old section intent must be reviewed again");
+        const staleReviewSlot = store.packagePreview(staleReview).imageSlots.find(slot => slot.sectionId === featureSection.id)!;
+        const staleReviewRequest = planSectionImageRequests([staleReviewSlot]).find(request =>
+          request.replaceAssetKey === staleReviewAsset.sha256)!;
+        assert.ok(staleReviewRequest);
+        store.writeBrandPostPackageManifest(staleReview);
+        const reviewedReplacementPath = path.join(coverageDir, `review-replacement-${legacy ? "legacy" : "bounded"}.png`);
+        fs.writeFileSync(reviewedReplacementPath, `review-replacement-${coverageId}`);
+        const reviewedReplacement = store.applyGeneratedBrandPostImage({
+          brandLinkId: coverageId,
+          ...staleReviewRequest,
+          generatedPath: reviewedReplacementPath,
+          provenance: "LOCKED_PRODUCT",
+          creationMethod: "source-with-generated-background",
+          remoteGenerated: true,
+          imageIntent: featureSection.imageIntent,
+        });
+        const replacedReviewAsset = reviewedReplacement.imageAssets!.find(asset =>
+          asset.sectionId === featureSection.id && asset.slotId === staleReviewRequest.slotId)!;
+        assert.equal(replacedReviewAsset.sourceReview, undefined,
+          "a review signed for the replaced source bytes must not carry over to generated evidence");
+        const unverifiedCompositeReadiness = store.evaluateBrandPostPackageReadiness(reviewedReplacement);
+        assert.equal(unverifiedCompositeReadiness.canApprove, false);
+        assert.ok(unverifiedCompositeReadiness.blockers.some(blocker =>
+          blocker.code === "image-source-review-missing" && blocker.sectionId === featureSection.id),
+        "a feature composite cannot pass without a receipt for its locked seller foreground");
+        const replacementSource = path.join(coverageDir, `review-replacement-source-${legacy ? "legacy" : "bounded"}.png`);
+        fs.writeFileSync(replacementSource, `review-replacement-source-${coverageId}`);
+        const replacementReceipt = preserveProductPhotoSource({
+          sourcePath: replacementSource,
+          outputPath: replacedReviewAsset.path,
+          segmented: true,
+        });
+        replacedReviewAsset.sourceReview = {
+          version: "product-photo-source-review/v1",
+          sourceSha256: replacementReceipt.sourceSha256,
+          usage: "section-matched-product-evidence",
+          sectionIntent: featureSection.imageIntent,
+          reviewClass: "feature-evidence",
+          reason: "fixture replacement feature evidence",
+          reviewedAt: "2026-09-15T00:00:00.000Z",
+        };
+        assert.equal(store.evaluateBrandPostPackageReadiness(reviewedReplacement).canApprove, true);
+        store.writeBrandPostPackageManifest(generated);
+      }
+
+      const staleGenerated = structuredClone(generated) as import("../src/lib/brand-post-package").BrandPostPackageManifestV2;
+      const staleAsset = staleGenerated.imageAssets!.find(asset => asset.role === "body" && asset.sectionId)!;
+      const staleSection = staleGenerated.composition.sections.find(section => section.id === staleAsset.sectionId)!;
+      staleAsset.imageIntent = "구형 파트 목적";
+      staleAsset.slotId = `${staleSection.id}:image:99`;
+      const stalePreview = store.packagePreview(staleGenerated);
+      const staleSlot = stalePreview.imageSlots.find(slot => slot.sectionId === staleSection.id)!;
+      assert.ok(staleSlot.staleTargets.some(target =>
+        target.code === "image-intent-stale" && target.assetKey === staleAsset.sha256),
+      "a generated asset from an old intent/slot is a replaceable stale target");
+      const stalePlan = planSectionImageRequests(stalePreview.imageSlots);
+      const replacementRequest = stalePlan.find(request => request.replaceAssetKey === staleAsset.sha256)!;
+      assert.ok(replacementRequest);
+      assert.equal(replacementRequest.slotId, `${staleSection.id}:image:1`);
+      store.writeBrandPostPackageManifest(staleGenerated);
+      const replacementPath = path.join(coverageDir, `stale-replacement-${connectKind.toLowerCase()}-${legacy ? "legacy" : "bounded"}.png`);
+      fs.writeFileSync(replacementPath, `stale-replacement-${coverageId}`);
+      const staleRepaired = store.applyGeneratedBrandPostImage({
+        brandLinkId: coverageId,
+        ...replacementRequest,
+        generatedPath: replacementPath,
+        provenance: connectKind === "SHOPPING" ? "LOCKED_PRODUCT" : "GENERATED_BACKGROUND",
+        creationMethod: connectKind === "SHOPPING" ? "source-with-generated-background" : "remote-generated",
+        remoteGenerated: true,
+        imageIntent: staleSection.imageIntent,
+      });
+      const repairedSlot = store.packagePreview(staleRepaired).imageSlots.find(slot => slot.sectionId === staleSection.id)!;
+      assert.equal(repairedSlot.staleTargets.length, 0);
+      assert.equal(repairedSlot.missing, 0);
+      assert.equal(repairedSlot.generationMissing, 0);
+      assert.ok(!staleRepaired.imageAssets!.some(asset => asset.sha256 === staleAsset.sha256),
+        "automatic stale repair replaces the old asset instead of appending past the slot maximum");
+      store.writeBrandPostPackageManifest(generated);
+
+      if (connectKind === "SHOPPING" && legacy) {
+        const legacyIntentManifest = structuredClone(generated) as import("../src/lib/brand-post-package").BrandPostPackageManifestV2;
+        const legacyFeature = legacyIntentManifest.composition.sections[2];
+        const currentIntent = legacyFeature.imageIntent;
+        const oldIntent = `${legacyFeature.title}: 구성품·패키지 원본 사진`;
+        legacyFeature.imageIntent = oldIntent;
+        legacyIntentManifest.composition.renderNodes = legacyIntentManifest.composition.renderNodes.map(node =>
+          node.kind === "image" && node.sectionId === legacyFeature.id
+            ? { ...node, altText: `${legacyFeature.title} - ${oldIntent}` }
+            : node);
+        const legacyFeatureAsset = legacyIntentManifest.imageAssets!.find(asset => asset.sectionId === legacyFeature.id)!;
+        legacyFeatureAsset.imageIntent = oldIntent;
+        legacyIntentManifest.approvedAt = "2026-09-01T00:00:00.000Z";
+        // postSpec packages also need the role-scoped intent migration on read.
+        legacyIntentManifest.postSpec = { version: "fixture/spec-first" };
+        store.writeBrandPostPackageManifest(legacyIntentManifest);
+        const migratedIntent = store.readBrandPostPackage(coverageId)! as import("../src/lib/brand-post-package").BrandPostPackageManifestV2;
+        assert.equal(migratedIntent.composition.sections[2].imageIntent, currentIntent);
+        assert.equal(migratedIntent.approvedAt, null,
+          "intent migration revokes approval until the old generated visual is replaced");
+        const migratedSlot = store.packagePreview(migratedIntent).imageSlots.find(slot => slot.sectionId === legacyFeature.id)!;
+        assert.ok(migratedSlot.staleTargets.some(target => target.code === "image-intent-stale"));
+        assert.ok(planSectionImageRequests([migratedSlot]).some(request =>
+          request.replaceAssetKey === legacyFeatureAsset.sha256 && request.slotId === `${legacyFeature.id}:image:1`),
+        "read-time intent migration feeds the stale asset into automatic replacement planning");
+        store.writeBrandPostPackageManifest(generated);
+      }
+
+      const badBinding = structuredClone(generated);
+      const badBindingAsset = badBinding.imageAssets!.find(asset => asset.role === "body" && asset.sectionId)!;
+      const badBindingSectionId = badBindingAsset.sectionId!;
+      badBindingAsset.role = "hero";
+      badBindingAsset.sectionId = null;
+      const bindingReadiness = store.evaluateBrandPostPackageReadiness(badBinding);
+      assert.ok(bindingReadiness.blockers.some(blocker =>
+        blocker.code === "image-asset-binding" && blocker.sectionId === badBindingSectionId),
+      "body usage requires an exact body-role and section binding");
+
+      const incoherent = structuredClone(generated);
+      const incoherentAsset = incoherent.imageAssets!.find(asset => asset.role === "body" && asset.sectionId)!;
+      incoherentAsset.remoteGenerated = false;
+      const incoherentReadiness = store.evaluateBrandPostPackageReadiness(incoherent);
+      assert.ok(incoherentReadiness.blockers.some(blocker => blocker.code === "image-provenance-invalid"),
+        "contradictory provenance, creationMethod and remoteGenerated claims are rejected");
+
+      const duplicateFinal = structuredClone(generated);
+      const sectionAssets = duplicateFinal.imageAssets!.filter(asset => asset.sectionId);
+      assert.ok(sectionAssets.length >= 2, "fixture needs two section assets for duplicate-output validation");
+      const duplicateSource = sectionAssets[0];
+      const duplicateTarget = sectionAssets[1];
+      const duplicatePath = path.join(coverageDir, `duplicate-final-${connectKind.toLowerCase()}.png`);
+      fs.copyFileSync(duplicateSource.path, duplicatePath);
+      duplicateFinal.bodyImagePaths = duplicateFinal.bodyImagePaths.map(file =>
+        path.resolve(file) === path.resolve(duplicateTarget.path) ? duplicatePath : file);
+      duplicateFinal.composition.sections = duplicateFinal.composition.sections.map(section => ({
+        ...section,
+        imagePaths: section.imagePaths.map(file =>
+          path.resolve(file) === path.resolve(duplicateTarget.path) ? duplicatePath : file),
+      }));
+      duplicateFinal.composition.renderNodes = duplicateFinal.composition.renderNodes.map(node =>
+        node.kind === "image" && path.resolve(node.assetPath) === path.resolve(duplicateTarget.path)
+          ? { ...node, assetPath: duplicatePath }
+          : node);
+      duplicateFinal.imageAssets = duplicateFinal.imageAssets!.map(asset => asset === duplicateTarget ? {
+        ...asset,
+        path: duplicatePath,
+        sourcePath: duplicatePath,
+        sha256: duplicateSource.sha256,
+      } : asset);
+      const duplicateReadiness = store.evaluateBrandPostPackageReadiness(duplicateFinal);
+      assert.ok(duplicateReadiness.blockers.some(blocker => blocker.code === "image-output-duplicate"),
+        `${coverageId}: byte-identical section images are rejected regardless of provenance`);
+
+      const heroDuplicate = structuredClone(generated);
+      const heroAsset = heroDuplicate.imageAssets!.find(asset => asset.role === "hero")!;
+      const heroDuplicateTarget = heroDuplicate.imageAssets!.find(asset => asset.role === "body" && asset.sectionId)!;
+      const heroDuplicatePath = path.join(coverageDir, `duplicate-hero-${connectKind.toLowerCase()}.png`);
+      fs.copyFileSync(heroAsset.path, heroDuplicatePath);
+      heroDuplicate.bodyImagePaths = heroDuplicate.bodyImagePaths.map(file =>
+        path.resolve(file) === path.resolve(heroDuplicateTarget.path) ? heroDuplicatePath : file);
+      heroDuplicate.composition.sections = heroDuplicate.composition.sections.map(section => ({
+        ...section,
+        imagePaths: section.imagePaths.map(file =>
+          path.resolve(file) === path.resolve(heroDuplicateTarget.path) ? heroDuplicatePath : file),
+      }));
+      heroDuplicate.composition.renderNodes = heroDuplicate.composition.renderNodes.map(node =>
+        node.kind === "image" && path.resolve(node.assetPath) === path.resolve(heroDuplicateTarget.path)
+          ? { ...node, assetPath: heroDuplicatePath }
+          : node);
+      heroDuplicate.imageAssets = heroDuplicate.imageAssets!.map(asset => asset === heroDuplicateTarget ? {
+        ...asset,
+        path: heroDuplicatePath,
+        sourcePath: heroDuplicatePath,
+        sha256: heroAsset.sha256,
+      } : asset);
+      const heroDuplicateReadiness = store.evaluateBrandPostPackageReadiness(heroDuplicate);
+      assert.ok(heroDuplicateReadiness.blockers.some(blocker => blocker.code === "image-output-duplicate"),
+        `${coverageId}: a body slot cannot count the byte-identical hero again`);
+      const heroDuplicateSlot = store.packagePreview(heroDuplicate).imageSlots.find(slot =>
+        slot.sectionId === heroDuplicateTarget.sectionId)!;
+      const heroDuplicateStale = heroDuplicateSlot.staleTargets.find(target => target.code === "image-output-duplicate")!;
+      assert.equal(heroDuplicateStale.assetKey, undefined,
+        "a duplicate SHA is ambiguous and must not be replaced through the SHA-only asset key");
+      const heroDuplicateRequest = planSectionImageRequests([heroDuplicateSlot]).find(request =>
+        request.slotId === heroDuplicateStale.slotId)!;
+      assert.ok(heroDuplicateRequest);
+      assert.equal(heroDuplicateRequest.replaceAssetKey, undefined);
+      store.writeBrandPostPackageManifest(heroDuplicate);
+      const duplicateRepairPath = path.join(coverageDir, `duplicate-hero-repair-${connectKind.toLowerCase()}.png`);
+      fs.writeFileSync(duplicateRepairPath, `duplicate-hero-repair-${coverageId}`);
+      const heroDuplicateRepaired = store.applyGeneratedBrandPostImage({
+        brandLinkId: coverageId,
+        ...heroDuplicateRequest,
+        generatedPath: duplicateRepairPath,
+        provenance: connectKind === "SHOPPING" ? "LOCKED_PRODUCT" : "GENERATED_BACKGROUND",
+        creationMethod: connectKind === "SHOPPING" ? "source-with-generated-background" : "remote-generated",
+        remoteGenerated: true,
+        imageIntent: heroDuplicate.composition.sections.find(section => section.id === heroDuplicateTarget.sectionId)!.imageIntent,
+      });
+      assert.equal(heroDuplicateRepaired.heroImagePath, heroDuplicate.heroImagePath,
+        "repairing a duplicate body slot must never overwrite its same-SHA hero");
+      assert.equal(store.packagePreview(heroDuplicateRepaired).imageSlots.find(slot =>
+        slot.sectionId === heroDuplicateTarget.sectionId)!.staleTargets.length, 0);
+      store.writeBrandPostPackageManifest(generated);
 
       const unsafe = {
         ...generated,
@@ -579,10 +907,26 @@ async function main() {
       const { imageGeneration: _completedGeneration, ...generatedWithoutCounter } = loadedGenerated;
       const lastRequiredSection = [...generatedWithoutCounter.composition.sections].reverse().find(section => (section.imageMin || 0) > 0)!;
       const lastRequiredPath = lastRequiredSection.imagePaths.at(-1)!;
-      const partial = { ...generatedWithoutCounter, imageAssets: generatedWithoutCounter.imageAssets!.map((asset) =>
-        path.resolve(asset.path) === path.resolve(lastRequiredPath)
-          ? { ...asset, provenance: "ORIGINAL" as const, remoteGenerated: false, creationMethod: "source" as const }
-          : asset) };
+      const partial = { ...generatedWithoutCounter, imageAssets: generatedWithoutCounter.imageAssets!.map((asset) => {
+        if (path.resolve(asset.path) !== path.resolve(lastRequiredPath)) return asset;
+        return {
+          ...asset,
+          provenance: "ORIGINAL" as const,
+          remoteGenerated: false,
+          creationMethod: "source" as const,
+          ...(connectKind === "SHOPPING" ? {
+            sourceReview: {
+              version: "product-photo-source-review/v1" as const,
+              sourceSha256: asset.sha256,
+              usage: "section-matched-product-evidence" as const,
+              sectionIntent: lastRequiredSection.imageIntent,
+              reviewClass: "feature-evidence" as const,
+              reason: "fixture semantic match",
+              reviewedAt: "2026-09-15T00:00:00.000Z",
+            },
+          } : {}),
+        };
+      }) };
       store.writeBrandPostPackageManifest(partial);
       const partialSlots = store.packagePreview(partial).imageSlots;
       assert.equal(partialSlots.find(slot => slot.sectionId === lastRequiredSection.id)?.generationMissing, 1);
@@ -602,6 +946,24 @@ async function main() {
       const extraAsset = {
         ...store.normalizePackageImageAssets(originals)[1], path: extraPath, sourcePath: extraPath,
         sha256: crypto.createHash("sha256").update(fs.readFileSync(extraPath)).digest("hex"),
+        role: "body" as const,
+        sectionId: firstSection.id,
+        imageIntent: firstSection.imageIntent,
+        slotId: `${firstSection.id}:image:2`,
+        provenance: "ORIGINAL" as const,
+        remoteGenerated: false,
+        creationMethod: "source" as const,
+        ...(connectKind === "SHOPPING" ? {
+          sourceReview: {
+            version: "product-photo-source-review/v1" as const,
+            sourceSha256: crypto.createHash("sha256").update(fs.readFileSync(extraPath)).digest("hex"),
+            usage: "section-matched-product-evidence" as const,
+            sectionIntent: firstSection.imageIntent,
+            reviewClass: "feature-evidence" as const,
+            reason: "fixture semantic match",
+            reviewedAt: "2026-09-15T00:00:00.000Z",
+          },
+        } : {}),
       };
       store.writeBrandPostPackageManifest({ ...twoRequired, imageAssets: [...twoRequired.imageAssets, extraAsset] });
       const twoSlots = store.packagePreview(store.readBrandPostPackage(coverageId)!).imageSlots;
@@ -610,7 +972,13 @@ async function main() {
       assert.throws(() => store.approveBrandPostPackage(coverageId), /이미지/u,
         "An original cannot fill the second required generated slot");
       store.writeBrandPostPackageManifest({
-        ...twoRequired, imageAssets: [...twoRequired.imageAssets, { ...extraAsset, provenance: "EDITORIAL_CARD", remoteGenerated: true, creationMethod: "source-with-generated-background" }],
+        ...twoRequired, imageAssets: [...twoRequired.imageAssets, {
+          ...extraAsset,
+          provenance: connectKind === "SHOPPING" ? "LOCKED_PRODUCT" : "GENERATED_BACKGROUND",
+          remoteGenerated: true,
+          creationMethod: connectKind === "SHOPPING" ? "source-with-generated-background" : "remote-generated",
+          sourceReview: undefined,
+        }],
       });
       assert.ok(store.approveBrandPostPackage(coverageId).approvedAt, "Both required generated slots are now filled");
     }
@@ -797,7 +1165,10 @@ async function main() {
     generatedPath: generatedBodyPath,
     sectionId: standardComposition.sections[0].id,
     provenance: "GENERATED_BACKGROUND",
-    imageIntent: "여행지 본문 미리보기",
+    creationMethod: "remote-generated",
+    remoteGenerated: true,
+    slotId: `${standardComposition.sections[0].id}:image:1`,
+    imageIntent: standardComposition.sections[0].imageIntent,
   });
   assert.equal(withGeneratedBody.approvedAt, null, "이미지를 바꾸면 기존 승인을 해제해야 합니다.");
   assert.equal(withGeneratedBody.bodyImagePaths.length, 1);
@@ -815,7 +1186,10 @@ async function main() {
     generatedPath: regeneratedBodyPath,
     replaceAssetKey: generatedAsset!.assetKey,
     provenance: "GENERATED_BACKGROUND",
-    imageIntent: "재생성된 여행지 본문 이미지",
+    creationMethod: "remote-generated",
+    remoteGenerated: true,
+    slotId: `${standardComposition.sections[0].id}:image:1`,
+    imageIntent: standardComposition.sections[0].imageIntent,
   });
   const regeneratedPreview = store.packagePreview(regenerated);
   assert.equal(regeneratedPreview.imageAssets.length, generatedPreview.imageAssets.length);
