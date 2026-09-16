@@ -51,9 +51,23 @@ const SESSION_WIDE_PREPARATION_FAILURE_CODES = new Set([
   "UNAUTHORIZED",
 ]);
 
+const DEFERRABLE_MANUSCRIPT_FAILURE_CODES = new Set([
+  "CONTENT_BLOCKED",
+  "QUALITY_REPAIR_EXHAUSTED",
+  "QUALITY_REPAIR_REJECTED",
+]);
+
 /** Failures tied to the shared login/browser/runtime cannot improve per item. */
 export function isSessionWidePreparationFailureCode(code: string | null | undefined): boolean {
   return SESSION_WIDE_PREPARATION_FAILURE_CODES.has(code || "");
+}
+
+/**
+ * Editorial verdicts about the saved manuscript. Binding reviewed seller
+ * originals is free and must not wait for text repair to succeed.
+ */
+export function isDeferrableManuscriptFailureCode(code: string | null | undefined): boolean {
+  return DEFERRABLE_MANUSCRIPT_FAILURE_CODES.has(code || "");
 }
 
 export function isUncertainLocalTransportError(error: unknown): boolean {
@@ -301,17 +315,42 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     plan = await refreshSource();
     if (plan.action === "refresh-source") throw sourceEvidenceError(plan);
   }
-  if (plan.action === "repair-text") {
-    await revise(plan);
-    plan = await recheck(false, 1);
-    if (plan.action === "refresh-source") {
-      plan = await refreshSource();
-      if (plan.action === "refresh-source") throw sourceEvidenceError(plan);
+  // The manuscript and verified source binding are independently repairable.
+  // When text repair cannot close, still place reviewed seller originals so the
+  // next run is not identical. Browser generation stays gated behind a passing
+  // manuscript so we do not spend ChatGPT sessions on blocked drafts.
+  let unresolvedText: Error | null = null;
+  try {
+    if (plan.action === "repair-text") {
+      await revise(plan);
+      plan = await recheck(false, 1);
+      if (plan.action === "refresh-source") {
+        plan = await refreshSource();
+        if (plan.action === "refresh-source") throw sourceEvidenceError(plan);
+      }
+      if (plan.action === "repair-text" || plan.action === "stop") throw unresolvedQualityError(plan);
+    } else if (plan.action === "stop") {
+      throw Object.assign(new Error(plan.reason), { code: "CONTENT_BLOCKED" });
     }
-    if (plan.action === "repair-text" || plan.action === "stop") throw unresolvedQualityError(plan);
-  } else if (plan.action === "stop") {
-    throw Object.assign(new Error(plan.reason), { code: "CONTENT_BLOCKED" });
+  } catch (error) {
+    if (!isDeferrableManuscriptFailureCode((error as { code?: string }).code)) throw error;
+    unresolvedText = error as Error;
   }
+
+  const bindVerifiedSources = async () => {
+    deps.onStage?.("검증 원본 이미지 배정");
+    await waitForImagesIdle();
+    if (!draft.data) throw new Error("준비 중 소재가 사라졌습니다.");
+    if (draft.data.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) {
+      const bound = await deps.call(`${base}/draft/images`, "POST", { action: "bind_sources" });
+      latestImageRepair = bound;
+      if (isSessionWidePreparationFailureCode(bound.code)) {
+        throw Object.assign(new Error(bound.errors?.join(" ") || bound.message || "이미지 엔진 확인이 필요합니다."), { code: bound.code });
+      }
+      draft = await deps.call(`${base}/draft`, "GET");
+      await waitForImagesIdle();
+    }
+  };
 
   const images = async () => {
     deps.onStage?.("이미지 준비");
@@ -328,6 +367,17 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
       throw unresolvedCompositionError("이미지 준비가 미완료입니다. 저장된 소재에서 실패한 이미지만 보충하세요.");
     }
   };
+
+  if (unresolvedText) {
+    try {
+      await bindVerifiedSources();
+    } catch (error) {
+      if (isSessionWidePreparationFailureCode((error as { code?: string }).code)) throw error;
+      // Keep the manuscript cause as the reported failure; source binding is best-effort.
+    }
+    throw unresolvedText;
+  }
+
   await images();
   deps.onStage?.("내용·구성 품질검사");
   plan = await recheck(false, revised ? 1 : 0);

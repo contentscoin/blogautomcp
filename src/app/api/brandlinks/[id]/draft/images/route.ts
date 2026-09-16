@@ -19,7 +19,7 @@ import {
 } from "@/lib/brand-post-image-generation";
 import { isBrandPostImageRepairActive, planSectionImageRequests, repairBrandPostImages } from "@/lib/brand-post-image-repair";
 
-const IMAGE_ACTIONS = ["generate_missing", "generate_section", "regenerate", "apply_generated"] as const;
+const IMAGE_ACTIONS = ["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources"] as const;
 type ImageAction = (typeof IMAGE_ACTIONS)[number];
 const IMAGE_REPAIR_CONFLICT_CODES = ["IMAGE_REPAIR_BUSY", "IMAGE_REPAIR_OWNERSHIP_LOST"] as const;
 
@@ -221,7 +221,7 @@ export async function POST(
     }
   }
   const generationRequests: BrandPostImageGenerationRequest[] = [];
-  if (body.action === "generate_missing") {
+  if (body.action === "generate_missing" || body.action === "bind_sources") {
     generationRequests.push(...planSectionImageRequests(preview.imageSlots));
   } else if (body.action === "generate_section") {
     const sectionId = body.sectionId?.trim() || "";
@@ -264,6 +264,8 @@ export async function POST(
       productName: link.productName || manifest.title,
       sourceImageUrls,
       requests: generationRequests,
+      // bind_sources never opens ChatGPT; it only places reviewed seller photos.
+      sourceOnly: body.action === "bind_sources",
     });
     const { errors, generatedCount, manifest: updated } = repaired;
     const updatedPreview = packagePreview(updated);

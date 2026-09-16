@@ -236,13 +236,47 @@ async function main() {
       pause: async () => {}, call: async () => ({ success: true, data: { approvedAt: null, imageSlots: [] } }),
     }), /소재 준비·승인이 완료되지/);
 
-    let blockedImages = 0, blockedRevisions = 0;
+    let blockedGenerate = 0, blockedBind = 0, blockedRevisions = 0;
     await assert.rejects(runMaterialPreparation("travel-weak", { pause: async () => {}, call: async (url, method, body) => {
-      if (url.endsWith("/images")) blockedImages++;
-      if ((body as { action?: string })?.action === "revise") blockedRevisions++;
+      const action = (body as { action?: string })?.action;
+      if (url.endsWith("/images") && action === "generate_missing") blockedGenerate++;
+      if (url.endsWith("/images") && action === "bind_sources") blockedBind++;
+      if (action === "revise") blockedRevisions++;
       return { success: true, data: { imageSlots: [{ missing: 1, generationMissing: 0 }], contentQuality: { signals: [{ key: "review-substance", status: "fail" }] } } };
     } }), /보강 후에도/);
-    assert.equal(blockedRevisions, 1); assert.equal(blockedImages, 0);
+    assert.equal(blockedRevisions, 1);
+    assert.equal(blockedGenerate, 0, "exhausted text must not spend ChatGPT image generation");
+    assert.equal(blockedBind, 1, "exhausted text still binds verified seller originals without generation");
+
+    let strandedBind = 0;
+    const strandedEvents: string[] = [];
+    await assert.rejects(
+      runMaterialPreparation("text-stuck-bind-sources", { pause: async () => {}, call: async (url, method, body) => {
+        const action = (body as { action?: string } | undefined)?.action || method;
+        strandedEvents.push(action);
+        if (action === "revise") {
+          throw Object.assign(new Error("직전 보강과 실패 항목·점수가 같아 같은 방식의 재작성을 중단합니다."), { code: "QUALITY_REPAIR_EXHAUSTED" });
+        }
+        if (url.endsWith("/draft/images") && method === "POST") {
+          assert.equal(action, "bind_sources");
+          strandedBind += 1;
+          return { success: true, code: "OK", message: "검증 원본 배정 완료", data: null };
+        }
+        return { success: true, data: {
+          approvedAt: null,
+          approval: { canApprove: false },
+          imageSlots: [{ missing: strandedBind > 0 ? 0 : 1, generationMissing: 0 }],
+          contentQuality: workflowContentQuality(false),
+        } };
+      } }),
+      (error: unknown) => {
+        assert.equal((error as { code?: string }).code, "QUALITY_REPAIR_EXHAUSTED");
+        return true;
+      },
+    );
+    assert.equal(strandedBind, 1);
+    assert.ok(strandedEvents.indexOf("revise") < strandedEvents.indexOf("bind_sources"));
+    assert.ok(!strandedEvents.includes("generate_missing"));
 
     const partial = makeJob(10, "prepare");
     await runMaterialJob(partial, { call: async (url) => {

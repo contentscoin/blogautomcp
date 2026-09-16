@@ -49,7 +49,7 @@ class FakeChild extends EventEmitter {
 type Job = { id: string; outStem: string; prompt: string };
 function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lockFails?: boolean; automation?: boolean; sourceMissing?: boolean; sourceError?: string;
   sourcePaths?: string[]; segmentablePaths?: string[]; lockedUsesBackground?: boolean;
-  sectionMatchedPaths?: string[];
+  sectionMatchedPaths?: string[]; sectionReviewError?: string;
   worker?: (args: string[], child: FakeChild) => void } = {}) {
   const packageDir = fs.mkdtempSync(path.join(root, "package-"));
   let child = new FakeChild();
@@ -127,6 +127,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
         selectVerifiedProductSectionImages: async (paths: string[], _productName: string, targets: unknown[]) => {
           sectionReviewCalls += 1;
           sectionReviewCandidatePaths.push([...paths]);
+          if (settings.sectionReviewError) throw new Error(settings.sectionReviewError);
           const matched = paths.filter(candidate => settings.sectionMatchedPaths?.includes(candidate));
           return matched.slice(0, targets.length).map((file, targetIndex) => ({
             targetIndex,
@@ -516,6 +517,38 @@ async function verifyGenerator() {
     assert.equal(h.lockCalls, 0);
     assert.equal(results.filter(result => result.provenance === "ORIGINAL" && result.generatedPath).length, 1);
     assert.equal(results.filter(result => result.error?.includes("IMAGE_SOURCE_BINDING_REQUIRED")).length, 2);
+  });
+
+  await check("source-only overview slots bind unbound originals when section review is unavailable", async () => {
+    const overviewA = path.join(root, "overview-a.jpg");
+    const overviewB = path.join(root, "overview-b.jpg");
+    fs.writeFileSync(overviewA, "overview-source-a");
+    fs.writeFileSync(overviewB, "overview-source-b");
+    const h = harness({
+      sourcePaths: [overviewA, overviewB],
+      sectionReviewError: "You've hit your usage limit",
+    });
+    h.manifest.connectKind = "SHOPPING";
+    h.manifest.composition.sections = [
+      { id: "hook", title: "샤워 뒤 물기 말리는 시간이 번거롭다면", imageIntent: "제품이 한눈에 보이는 대표 사진", body: ["소개"] },
+      { id: "summary", title: "어떤 제품인지부터 보면", imageIntent: "전체 구성 또는 패키지 사진", body: ["요약"] },
+      { id: "feature", title: "냉온풍이 만드는 차이", imageIntent: "해당 핵심 기능·작동 방식·조작부를 직접 보여주거나 공식 설명하는 판매페이지 근거 이미지", body: ["기능"] },
+    ] as typeof h.manifest.composition.sections;
+    const results = await h.generate(0, {
+      sourceOnly: true,
+      requests: [
+        { requestId: "hook", sectionId: "hook" },
+        { requestId: "summary", sectionId: "summary" },
+        { requestId: "feature", sectionId: "feature" },
+      ],
+    });
+    assert.equal(h.spawns, 0);
+    assert.equal(h.sectionReviewCalls, 1);
+    assert.equal(results.filter(result => result.provenance === "ORIGINAL" && result.generatedPath).length, 2);
+    assert.ok(results.find(result => result.sectionId === "hook")?.sourceReview?.reviewClass === "product-photo");
+    assert.ok(results.find(result => result.sectionId === "summary")?.sourceReview?.reviewClass === "product-photo");
+    assert.ok(results.find(result => result.sectionId === "feature")?.error?.includes("IMAGE_SOURCE_BINDING_REQUIRED") ||
+      results.find(result => result.sectionId === "feature")?.error?.includes("usage limit"));
   });
 
   await check("source-only replaces four stale feature slots with four distinct reviewed originals", async () => {

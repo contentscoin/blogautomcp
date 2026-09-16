@@ -237,12 +237,13 @@ async function main() {
     "ChatGPT 링크는 Electron 내부 팝업이 아니라 기본 브라우저에서 열려야 합니다.",
   );
   assert.equal(
-    draftImageRouteSource.includes('["generate_missing", "generate_section", "regenerate", "apply_generated"]') &&
+    draftImageRouteSource.includes('["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources"]') &&
       draftImageRouteSource.includes("repairBrandPostImages") &&
       draftImageRouteSource.includes("applyExternalGeneratedBrandPostImage") &&
+      draftImageRouteSource.includes("sourceOnly: body.action === \"bind_sources\"") &&
       draftImageRouteSource.includes('"Cache-Control": "private, no-store, max-age=0"'),
     true,
-    "초안 이미지는 필수 보충·파트 추가·개별 재생성·외부 생성 이미지 적용과 안전한 미리보기를 지원해야 합니다.",
+    "초안 이미지는 필수 보충·원본 배정·파트 추가·개별 재생성·외부 생성 이미지 적용과 안전한 미리보기를 지원해야 합니다.",
   );
   assert.equal(
     !draftImageRouteSource.includes("if (!isChatGptBrowserAutomationEnabled()) {") &&

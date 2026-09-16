@@ -787,6 +787,35 @@ export async function generateBrandPostImages(options: {
       }
     }
 
+    // Overview slots may bind unbound seller originals without a live model
+    // review when that review is unavailable or incomplete. Feature slots never
+    // receive this fallback — they still require feature-evidence.
+    {
+      const claimedHashes = new Set([...reviewedByTarget.values()].map(row => row.sourceSha256));
+      const unusedSources = directSources.filter(source => !claimedHashes.has(source.sha256));
+      let unusedIndex = 0;
+      for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
+        if (reviewedByTarget.has(targetIndex)) continue;
+        const target = targets[targetIndex];
+        if (target.role !== "body") continue;
+        if (!allowsGenericBrandPostProductPhoto({
+          sectionTitle: target.sectionTitle,
+          imageIntent: target.imageIntent,
+        })) continue;
+        const source = unusedSources[unusedIndex];
+        if (!source) break;
+        unusedIndex += 1;
+        reviewedByTarget.set(targetIndex, {
+          targetIndex,
+          path: source.path,
+          sourceSha256: source.sha256,
+          reviewClass: "product-photo",
+          reason: "overview fallback: unbound verified seller original",
+          reviewedAt: new Date().toISOString(),
+        });
+      }
+    }
+
     const pendingTargets: ResolvedImageTarget[] = [];
     const pendingIndexes: number[] = [];
     const failedFeatureTargets: Array<{ index: number; target: ResolvedImageTarget }> = [];
