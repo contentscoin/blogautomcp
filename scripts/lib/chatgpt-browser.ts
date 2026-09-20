@@ -864,10 +864,36 @@ export function isExplicitImageProviderRefusal(text: string): boolean {
   return denial && policy;
 }
 
+/** Observe receipt only; this function must never submit or retry a prompt. */
+export async function waitForChatGPTImageReceipt(
+  page: Page,
+  previousUserMessages: number,
+  options: { now?: () => number; timeoutMs?: number; onPoll?: () => void } = {},
+): Promise<void> {
+  const now = options.now ?? Date.now;
+  const deadline = now() + (options.timeoutMs ?? 30_000);
+  while (now() < deadline) {
+    options.onPoll?.();
+    const received = await withinImageDeadline(async () => {
+      await assertNoChatGPTProtection(page, "ChatGPT image receipt");
+      if (await isChatGPTLoginRequired(page)) {
+        throw new Error(chatGptAuthenticationRequiredMessage("ChatGPT 로그인이 필요합니다."));
+      }
+      return await page.locator('[data-message-author-role="user"]').count() > previousUserMessages;
+    }, Math.max(1, deadline - now()), "image receipt").catch(error => {
+      if (error instanceof ImagePhaseTimeout) return false;
+      throw error;
+    });
+    if (received) { options.onPoll?.(); return; }
+    await page.waitForTimeout(Math.min(500, Math.max(0, deadline - now())));
+  }
+  throw new Error("IMAGE_SUBMISSION_UNCONFIRMED: 전송을 시도했지만 접수된 메시지를 확인하지 못했습니다. 중복 방지를 위해 재전송하지 않았습니다.");
+}
+
 export async function waitForChatGPTImageArtifacts(
   page: Page,
   timeoutMs?: number,
-  options: { hardTimeoutMs?: number; now?: () => number } = {},
+  options: { hardTimeoutMs?: number; now?: () => number; onPoll?: () => void; onTimeout?: (reason: "hard-limit" | "no-progress") => void } = {},
 ): Promise<number> {
   const policy = imageWaitPolicy(process.env, timeoutMs);
   const now = options.now ?? Date.now;
@@ -879,8 +905,13 @@ export async function waitForChatGPTImageArtifacts(
   let stableCycles = 0;
   let previousArtifactKey = "";
   let stableArtifactSince = started;
+  const timedOut = () => {
+    options.onTimeout?.(deadline >= hardDeadline ? "hard-limit" : "no-progress");
+    return 0;
+  };
 
   while (now() < deadline) {
+    options.onPoll?.();
     let observation: { generating: boolean; imageCount: number; artifactKey: string };
     try {
       observation = await withinImageDeadline(async () => {
@@ -902,10 +933,11 @@ export async function waitForChatGPTImageArtifacts(
         };
       }, Math.max(1, deadline - now()), "image observation");
     } catch (error) {
-      if (error instanceof ImagePhaseTimeout) return 0;
+      if (error instanceof ImagePhaseTimeout) return timedOut();
       throw error;
     }
-    if (now() >= deadline) return 0;
+    options.onPoll?.();
+    if (now() >= deadline) return timedOut();
     const { generating, imageCount } = observation;
     // ChatGPT can leave its global stop button visible after an image completes.
     // Accept only loaded, assistant-owned artifacts whose sources and dimensions
@@ -945,7 +977,7 @@ export async function waitForChatGPTImageArtifacts(
   }
 
   // A timeout is not a successful artifact observation, even if previews were visible.
-  return 0;
+  return timedOut();
 }
 
 

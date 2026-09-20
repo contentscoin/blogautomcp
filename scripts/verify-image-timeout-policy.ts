@@ -59,6 +59,35 @@ function fixture(settings: { readyAt?: number; generating?: boolean; staleStop?:
 }
 
 async function main() {
+  const receipt = fixture();
+  const receiptLocator = receipt.page.locator.bind(receipt.page);
+  receipt.page.locator = ((selector: string) => selector === '[data-message-author-role="user"]'
+    ? { count: async () => receipt.now() >= 2000 ? 2 : 1 }
+    : receiptLocator(selector)) as typeof receipt.page.locator;
+  let receiptPolls = 0;
+  await api.waitForChatGPTImageReceipt(receipt.page, 1, { now: receipt.now, onPoll: () => { receiptPolls++; } });
+  assert.equal(receipt.now(), 2000, "old messages do not acknowledge a new submission");
+  assert.ok(receiptPolls > 1, "receipt wait captures delayed conversation identity");
+  const noReceipt = fixture({ generating: true });
+  await assert.rejects(api.waitForChatGPTImageReceipt(noReceipt.page, 0, { now: noReceipt.now }), /IMAGE_SUBMISSION_UNCONFIRMED/);
+  assert.equal(noReceipt.now(), 30_000, "a stale stop signal alone does not prove receipt");
+  const receiptHung = fixture();
+  const hungLocator = receiptHung.page.locator.bind(receiptHung.page);
+  receiptHung.page.locator = ((selector: string) => selector === '[data-message-author-role="user"]'
+    ? { count: () => new Promise(() => {}) }
+    : hungLocator(selector)) as typeof receiptHung.page.locator;
+  await assert.rejects(api.waitForChatGPTImageReceipt(receiptHung.page, 0, { timeoutMs: 15 }), /IMAGE_SUBMISSION_UNCONFIRMED/);
+  for (const generating of [false, true]) {
+    const timed = fixture({ generating });
+    let reason = "";
+    let polls = 0;
+    await api.waitForChatGPTImageArtifacts(timed.page, 300_000, {
+      now: timed.now, hardTimeoutMs: 600_000,
+      onPoll: () => { polls++; }, onTimeout: value => { reason = value; },
+    });
+    assert.equal(reason, generating ? "hard-limit" : "no-progress");
+    assert.ok(polls > 2, "generation wait continuously checkpoints conversation identity");
+  }
   const wait = (f: ReturnType<typeof fixture>, base = 300_000, hard = 600_000) =>
     api.waitForChatGPTImageArtifacts(f.page, base, { hardTimeoutMs: hard, now: f.now });
   const refused = fixture({ refusal: "I can't generate this image due to third-party similarity and copyright policy." });

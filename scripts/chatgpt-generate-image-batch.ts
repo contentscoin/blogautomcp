@@ -13,6 +13,7 @@ import {
   readAssistantMessages,
   submitPromptToChatGPT,
   waitForChatGPTImageArtifacts,
+  waitForChatGPTImageReceipt,
 } from "./lib/chatgpt-browser";
 import {
   classifySessionWideImageFailure, imageWaitPolicy, withinImageDeadline,
@@ -217,13 +218,17 @@ async function maybeConfirmGeneration(page: import("playwright").Page, beforeSen
   console.error("[chatgpt-image-batch] confirmation prompt not detected, continuing without follow-up.");
 }
 
-async function waitForImageCompletion(page: import("playwright").Page) {
+async function waitForImageCompletion(page: import("playwright").Page, onPoll: () => void) {
   const policy = imageWaitPolicy();
-  const observed = await waitForChatGPTImageArtifacts(page, policy.baseMs, { hardTimeoutMs: policy.hardMs });
+  let reason = "진행 신호 미관측으로 기본 대기 종료";
+  const observed = await waitForChatGPTImageArtifacts(page, policy.baseMs, {
+    hardTimeoutMs: policy.hardMs, onPoll,
+    onTimeout: value => { reason = value === "hard-limit" ? "최대 대기시간 도달" : "진행 신호 미관측으로 기본 대기 종료"; },
+  });
   // The wait returns 0 on timeout. Downloading anyway only produces an empty result later.
   if (typeof observed === "number" && observed === 0) {
     throw new Error(
-      "IMAGE_TIMEOUT: 이미지 대기시간 내 완료된 결과를 확인하지 못했습니다. " +
+      `IMAGE_TIMEOUT: ${reason}. 이미지 대기시간 내 완료된 결과를 확인하지 못했습니다. ` +
       "요청을 재전송하지 않았습니다. 기존 대화의 생성 결과를 먼저 확인하세요.",
     );
   }
@@ -247,15 +252,20 @@ async function runJob(
   let phaseStarted = started;
   let transmitted = !!recoveryConversationPath;
   let cancelled = false;
+  let savedConversationPath = recoveryConversationPath;
+  const saveConversation = () => {
+    if (!transmitted || cancelled) return;
+    let conversationPath: string;
+    try { conversationPath = new URL(page.url()).pathname; } catch { return; }
+    if (/^\/c\/[a-zA-Z0-9-]+$/u.test(conversationPath) && conversationPath !== savedConversationPath) {
+      saveProgress?.({ state: "submitted", recoveryConversationPath: conversationPath });
+      savedConversationPath = conversationPath;
+    }
+  };
   const trace = async (stage: string) => {
     const observedAt = new Date().toISOString();
     const elapsedMs = Date.now() - started;
-    try {
-      if (transmitted) {
-        const conversationPath = new URL(page.url()).pathname;
-        if (/^\/c\/[a-zA-Z0-9-]+$/u.test(conversationPath)) saveProgress?.({ state: "submitted", recoveryConversationPath: conversationPath });
-      }
-    } catch { /* Remote identity may not be available yet. */ }
+    saveConversation();
     try {
       // Composer substeps need timestamps, not repeated DOM scans on the hot path.
       const signals = ["before-submit", "after-submit", "image-detected", "failed"].includes(stage) ? await withinImageDeadline(async () => ({
@@ -288,18 +298,15 @@ async function runJob(
       await attachReferenceImages(page, job.referenceImagePaths || []);
       await trace("references-ready");
       await trace("before-submit");
+      const previousUserMessages = (await imagePageSignals(page)).userMessages;
       await submitPromptToChatGPT(page, job.prompt, `주제 이미지 생성 ${job.id}`, () => {
         if (cancelled) throw new Error("Image preparation already ended");
         beforeSend();
         transmitted = true;
       }, stage => trace(stage));
       await trace("after-submit");
-      try {
-        const conversationPath = new URL(page.url()).pathname;
-        if (/^\/c\/[a-zA-Z0-9-]+$/u.test(conversationPath)) {
-          saveProgress?.({ state: "submitted", recoveryConversationPath: conversationPath });
-        }
-      } catch { /* Unknown remote identity is never permission to resend. */ }
+      await waitForChatGPTImageReceipt(page, previousUserMessages, { onPoll: saveConversation });
+      await trace("receipt-confirmed");
       await maybeConfirmGeneration(page, () => {
         if (cancelled) throw new Error("Image preparation already ended");
       });
@@ -307,7 +314,7 @@ async function runJob(
     }, IMAGE_PREPARATION_MS, phase);
     phase = "generation";
     phaseStarted = Date.now();
-    await waitForImageCompletion(page);
+    await waitForImageCompletion(page, saveConversation);
     await trace("image-detected");
 
     phase = "download";
@@ -334,6 +341,7 @@ async function runJob(
       localPath: finalPath,
     };
   } catch (error) {
+    saveConversation();
     cancelled = true;
     await trace("failed");
     const sessionFailure = classifySessionWideImageFailure(error);
@@ -342,12 +350,17 @@ async function runJob(
     const phaseLabel = phase === "generation" ? "이미지 생성 대기" : phase === "download" ? "이미지 다운로드" : "이미지 준비";
     const budgetMs = phase === "generation" ? imageWaitPolicy().hardMs : phase === "download" ? IMAGE_DOWNLOAD_ATTEMPT_MS : IMAGE_PREPARATION_MS;
     const refused = error instanceof Error && error.message.startsWith("IMAGE_PROVIDER_REFUSED:");
-    const message = refused ? error.message : sessionFailure === "authentication"
+    const unconfirmed = error instanceof Error && error.message.startsWith("IMAGE_SUBMISSION_UNCONFIRMED:");
+    const message = refused || unconfirmed ? (error as Error).message : sessionFailure === "authentication"
       ? "CHATGPT_BROWSER_AUTH_REQUIRED: 명시적인 로그인 또는 보안 확인이 필요합니다."
       : sessionFailure === "unreachable"
         ? "CHATGPT_BROWSER_UNREACHABLE: chatgpt.com 연결에 실패하여 이미지 요청을 보내지 않았습니다."
       : `${timedOut ? "IMAGE_TIMEOUT" : "IMAGE_SLOT_FAILED"}: ${phaseLabel} ${timedOut ? "시간 초과" : "실패"} ` +
-        `(경과 ${elapsedSeconds}초 / 최대 ${Math.round(budgetMs / 1000)}초). 요청을 재전송하지 않았습니다.`;
+        `(경과 ${elapsedSeconds}초 / 최대 ${Math.round(budgetMs / 1000)}초). ` +
+        (timedOut && phase === "generation"
+          ? ((error as Error).message.includes("최대 대기시간 도달") ? "최대 대기시간 도달. "
+            : (error as Error).message.includes("진행 신호 미관측") ? "진행 신호 미관측으로 기본 대기 종료. " : "")
+          : "") + "요청을 재전송하지 않았습니다.";
     // No raw exception, URLs, prompt, DOM, screenshot, cookies or account identifiers.
     try {
       fs.writeFileSync(path.join(tempDir, "failure.json"), JSON.stringify({

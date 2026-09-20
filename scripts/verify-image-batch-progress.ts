@@ -741,7 +741,8 @@ async function verifyProducer(
   let submitted = 0;
   let downloads = 0;
   let closed = false;
-  const page = { waitForTimeout: async () => {}, textContent: async () => "", close: async () => {} };
+  const page = { waitForTimeout: async () => {}, textContent: async () => "", close: async () => {},
+    locator: () => ({ count: async () => 0 }) };
   const readRecords = () => fs.readFileSync(checkpoint, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   const producerPolicy = downloadTimeout ? load<typeof imagePolicy>("scripts/lib/image-timeout-policy.ts", {}, {
     // Execute the real deadline helper with accelerated download timers, never leave
@@ -773,6 +774,7 @@ async function verifyProducer(
       isChatGPTGenerating: async () => false,
       readAssistantMessages: async () => [], countRenderableChatGPTImages: async () => 1,
       // 0 = timed out without an artifact. The producer must fail the job instead of downloading nothing.
+      waitForChatGPTImageReceipt: async () => {},
       waitForChatGPTImageArtifacts: async () => {
         if (submitted === 2 && sessionFailure) throw new Error("CHATGPT_BROWSER_AUTH_REQUIRED: secret-token@example.test");
         return submitted === 2 && failFast ? 0 : 1;
@@ -878,6 +880,7 @@ async function verifyIntegratedResume() {
           if (uncertain) throw new Error("click dispatched but acknowledgement lost");
         },
         isChatGPTGenerating: async () => false, readAssistantMessages: async () => [],
+        waitForChatGPTImageReceipt: async () => {},
         countRenderableChatGPTImages: async () => 1, waitForChatGPTImageArtifacts: async () => 1,
         downloadChatGPTImages: async () => [rawPath],
       },
