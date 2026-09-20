@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { getSessionStorageDir } from "./app-paths";
@@ -32,7 +33,22 @@ function isProcessAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    if ((error as NodeJS.ErrnoException).code !== "EPERM") return false;
+    if (process.platform !== "win32") return true;
+    // Windows can return EPERM for a PID that no longer exists. Confirm its
+    // presence before letting a dead owner block every subsequent image batch.
+    try {
+      const output = execFileSync("tasklist.exe", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], {
+        encoding: "utf8", windowsHide: true, timeout: 5_000,
+      });
+      return output.split(/\r?\n/u).some(line => {
+        const match = /^"(?:[^"]|"")*","(\d+)"/u.exec(line.trim());
+        return match !== null && Number(match[1]) === pid;
+      });
+    } catch {
+      // An unavailable process listing is not evidence that the owner died.
+      return true;
+    }
   }
 }
 
