@@ -22,8 +22,12 @@ import { resolveConnectContract } from "../src/lib/connect-contract-store";
 import { listTravelItems } from "../src/lib/travel-connect-adapter";
 import type { ConnectItem } from "../src/lib/connect-item";
 import { matchesTravelSelectionFilters } from "../src/lib/travel-selection-options";
+import { isLoginRedirect } from "./lib/naver-editor-selectors";
 
 chromium.use(StealthPlugin());
+
+const NAVER_SESSION_EXPIRED_MESSAGE =
+  "네이버 로그인 세션이 만료되었습니다. 앱에서 네이버 재로그인(또는 npm run login) 후 다시 시도하세요.";
 
 const DEFAULT_CATEGORY_URL =
   "https://brandconnect.naver.com/916297527319296/affiliate/products/category/10031299";
@@ -661,6 +665,62 @@ async function fetchBaseDisplayCategories(page: Page, spaceId: string): Promise<
     spaceId
   );
   return parseDisplayCategories(payload);
+}
+
+function assertBrandConnectLoggedIn(page: Page): void {
+  if (isLoginRedirect(page.url())) {
+    throw new Error(NAVER_SESSION_EXPIRED_MESSAGE);
+  }
+}
+
+/**
+ * Prefer the product API over waiting on fragile CSS class names.
+ * Login redirects used to burn 30s on ProductSearchCategory_item before failing.
+ */
+async function loadInitialCategoryProducts(
+  page: Page,
+  rootCategoryId: string,
+  spaceId: string,
+  capturedFromNetwork: () => ProductApiItem[]
+): Promise<ProductApiItem[]> {
+  assertBrandConnectLoggedIn(page);
+
+  const fromApi = await fetchProductsForDisplayCategory(page, rootCategoryId, spaceId);
+  if (fromApi.length > 0) return fromApi;
+
+  const fromNetwork = capturedFromNetwork();
+  if (fromNetwork.length > 0) return fromNetwork;
+
+  try {
+    await Promise.race([
+      page.waitForSelector("li.ProductSearchCategory_item__epUPF", { timeout: 15000 }),
+      page.waitForURL((url) => isLoginRedirect(url.href), { timeout: 15000 }).then(() => {
+        throw new Error(NAVER_SESSION_EXPIRED_MESSAGE);
+      }),
+    ]);
+  } catch (error) {
+    assertBrandConnectLoggedIn(page);
+    if (error instanceof Error && error.message === NAVER_SESSION_EXPIRED_MESSAGE) {
+      throw error;
+    }
+    throw new Error(
+      "브랜드커넥트 상품 목록을 불러오지 못했습니다. 세션·카테고리 URL·권한을 확인하세요."
+    );
+  }
+
+  assertBrandConnectLoggedIn(page);
+
+  for (let i = 0; i < 20 && capturedFromNetwork().length === 0; i += 1) {
+    await page.waitForTimeout(300);
+  }
+
+  const retryApi = await fetchProductsForDisplayCategory(page, rootCategoryId, spaceId);
+  if (retryApi.length > 0) return retryApi;
+
+  const retryNetwork = capturedFromNetwork();
+  if (retryNetwork.length > 0) return retryNetwork;
+
+  throw new Error("상품 목록 API 응답을 확보하지 못했습니다.");
 }
 
 function categoryPriority(category: DisplayCategory, rootCategoryId: string): number {
@@ -1768,20 +1828,21 @@ async function main() {
     waitUntil: "domcontentloaded",
     timeout: 60000,
   });
+  assertBrandConnectLoggedIn(page);
 
-  await page.waitForSelector("li.ProductSearchCategory_item__epUPF", { timeout: 30000 });
-
-  for (let i = 0; i < 20 && productsFromApi.length === 0; i += 1) {
-    await page.waitForTimeout(300);
+  const initialProducts = await loadInitialCategoryProducts(
+    page,
+    rootCategoryId,
+    spaceId,
+    () => productsFromApi
+  );
+  if (productsFromApi.length < initialProducts.length) {
+    productsFromApi = initialProducts;
   }
 
-  if (productsFromApi.length === 0) {
-    throw new Error("상품 목록 API 응답을 확보하지 못했습니다.");
-  }
+  console.log(`✅ 카테고리 첫 상품 수집: ${initialProducts.length}개`);
 
-  console.log(`✅ 카테고리 첫 상품 수집: ${productsFromApi.length}개`);
-
-  const productPool = await collectProductPool(page, rootCategoryId, spaceId, productsFromApi, options);
+  const productPool = await collectProductPool(page, rootCategoryId, spaceId, initialProducts, options);
   console.log(
     `✅ 확장 후보 수집: ${productPool.products.length}개 / 스캔 카테고리 ${productPool.scannedCategoryCount}개`
   );

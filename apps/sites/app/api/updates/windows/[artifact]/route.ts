@@ -3,6 +3,8 @@ import { authenticateDevice } from '@/lib/device';
 import { apiError } from '@/lib/http';
 import {
   WINDOWS_UPDATE_MANIFEST_KEY,
+  readWindowsRelease,
+  windowsReleaseManifest,
   updateArtifactKey,
   validUpdateArtifactName,
 } from '@/lib/update-release';
@@ -53,10 +55,22 @@ async function authorize(request: Request) {
   return device ? null : apiError('DEVICE_UNAUTHORIZED', '승인된 활성 PC만 업데이트를 받을 수 있습니다.', 401);
 }
 
+async function latestManifest(request: Request, head: boolean) {
+  const release = await readWindowsRelease(env.INSTALLERS);
+  if (!release) return apiError('UPDATE_NOT_READY', '아직 배포된 업데이트가 없습니다.', 404);
+  const bytes = new TextEncoder().encode(windowsReleaseManifest(release));
+  const range = head ? null : parseRange(request.headers.get('range'), bytes.length);
+  if (range === 'invalid') return new Response(null, { status: 416, headers: { 'content-range': `bytes */${bytes.length}`, 'cache-control': 'private, no-store' } });
+  const headers = new Headers({ 'content-type': 'application/yaml; charset=utf-8', 'cache-control': 'private, no-store', 'accept-ranges': 'bytes', 'content-length': String(range ? range.length : bytes.length) });
+  if (range) headers.set('content-range', `bytes ${range.offset}-${range.offset + range.length - 1}/${bytes.length}`);
+  return new Response(head ? null : range ? bytes.slice(range.offset, range.offset + range.length) : bytes, { status: range ? 206 : 200, headers });
+}
+
 export async function HEAD(request: Request, context: { params: Promise<{ artifact: string }> }) {
   const unauthorized = await authorize(request);
   if (unauthorized) return unauthorized;
   const { artifact } = await context.params;
+  if (artifact === 'latest.yml') return latestManifest(request, true);
   const key = artifactKey(artifact);
   if (!key) return apiError('INVALID_ARTIFACT', '업데이트 파일명을 확인하세요.', 404);
   const object = await env.INSTALLERS.head(key);
@@ -68,6 +82,7 @@ export async function GET(request: Request, context: { params: Promise<{ artifac
   const unauthorized = await authorize(request);
   if (unauthorized) return unauthorized;
   const { artifact } = await context.params;
+  if (artifact === 'latest.yml') return latestManifest(request, false);
   const key = artifactKey(artifact);
   if (!key) return apiError('INVALID_ARTIFACT', '업데이트 파일명을 확인하세요.', 404);
   const metadata = await env.INSTALLERS.head(key);

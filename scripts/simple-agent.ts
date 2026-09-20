@@ -38,6 +38,7 @@ import {
   HUMAN_MOBILE_STYLE_GUIDE,
   HUMAN_REVIEW_SAFETY_RULES,
   MOBILE_BODY_RULES,
+  NAVER_AI_CITATION_RULES,
   NAVER_SEO_TITLE_RULES,
   SHOPPING_EXPERT_REVIEW_STYLE_GUIDE,
   TRAVEL_VLOG_STYLE_GUIDE,
@@ -120,6 +121,7 @@ import {
   selectQualityRepairSectionIndexes,
 } from "./lib/quality-convergence";
 import { selectVerifiedProductPhoto } from "./lib/product-photo-review";
+import { recoverProductPhotoRegion } from "./lib/product-photo-region";
 import { chooseProductName } from "./lib/product-name-identity";
 import { extractExplicitProductFacts, normalizeTypedProductFact } from "./lib/product-source-facts";
 import { readSellerDetailOcrFacts } from "./lib/product-source-ocr";
@@ -182,10 +184,12 @@ import {
   parseProductThumbnailSettings,
   productThumbnailSettingKey,
 } from "./lib/product-thumbnail-settings";
-import { buildHumanizeRewritePrompt, HUMANIZE_RULES, scanAiTells } from "./lib/humanize-korean";
+import { HUMANIZE_RULES, scanAiTells } from "./lib/humanize-korean";
+import { buildHumanizeSectionsPrompt, parseHumanizeSections } from "./lib/humanize-response-contract";
 import { createLockedProductThumbnail, createOriginalProductPhotoThumbnail, type ShoppingThumbnailStyle } from "./lib/product-image-lock";
 import { copyProductPhotoSource } from "./lib/product-photo-provenance";
 import { codexDraftTerminalFailureCode, runCodexDraft } from "./lib/codex-draft-provider";
+import { TEXT_MODEL, textCompletionParameters } from "./lib/text-model-policy";
 import { deduplicateImagePaths } from "./lib/image-dedup";
 import { createThreeImageCollage } from "./lib/image-collage";
 import { createProductDetailImageSegments } from "./lib/product-detail-image";
@@ -198,7 +202,14 @@ import {
 import { createEditorialSelection, formatEditorialTemplate } from "./lib/editorial-templates";
 import { applyEditorialEditorStyle } from "./lib/naver-editorial-style";
 import {
+  createEditorialBodyStyleState,
+  invalidateBodyStyle,
+  markBodyStyleReady,
+  shouldApplyBodyStyle,
+} from "./lib/editorial-batch-write";
+import {
   formatPostContractForPrompt,
+  normalizePublishedPostText,
   getPostCompositionContract,
   resolvePostDocument,
   splitAffiliateDisclosure,
@@ -207,6 +218,8 @@ import {
   type PostQualityPreset,
   type ResolvedPostDocumentV1,
 } from "../src/lib/post-composition-contract";
+import { assertPublishImagesSafe } from "./lib/publish-image-audit";
+import { assertPublishedEditorText, publishedReadinessSections } from "./lib/published-editor-audit";
 
 // Stealth 플러그인 적용 (봇 감지 우회)
 chromium.use(StealthPlugin());
@@ -215,7 +228,7 @@ const prisma = new PrismaClient();
 
 // 기본 원고는 Codex. 라우터의 명시적인 API/웹 복구 선택은 유지한다.
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim() || "";
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_MODEL = TEXT_MODEL;
 const OPENAI_MAX_OUTPUT_TOKENS = parseBoundedInteger(
   process.env.OPENAI_MAX_OUTPUT_TOKENS,
   8192,
@@ -2068,13 +2081,11 @@ async function runOpenAiApi(systemPrompt: string, userPrompt: string): Promise<s
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: OPENAI_MODEL,
+          ...textCompletionParameters(OPENAI_MAX_OUTPUT_TOKENS, OPENAI_MODEL),
           messages: [
             { role: "system", content: system },
             { role: "user", content: userPrompt },
           ],
-          temperature: 0.75,
-          max_completion_tokens: OPENAI_MAX_OUTPUT_TOKENS,
           response_format: { type: "json_object" },
         }),
         signal: controller.signal,
@@ -3914,6 +3925,8 @@ async function collectProductImageUrlsFromPage(page: Page): Promise<string[]> {
           alt: toText(img.getAttribute("alt")),
           className: toText(img.className),
           parentClassName: toText(parent?.className),
+          source: img.closest('[title="상품 이미지"], [data-shp-inventory="topi"], [data-shp-inventory="topithumb"]')
+            ? "gallery" as const : "dom" as const,
         }));
       });
     })
@@ -3929,7 +3942,7 @@ async function collectProductImageUrlsFromPage(page: Page): Promise<string[]> {
       );
     candidates.push({
       ...candidate,
-      source: isGalleryLike ? "gallery" : "dom",
+      source: candidate.source === "gallery" || isGalleryLike ? "gallery" : "dom",
     });
   }
 
@@ -3948,7 +3961,9 @@ async function materializeProductImages(
   targetImageCount = SHOPPING_BODY_IMAGE_MAX,
 ): Promise<{ representativeImagePath: string | null; imagePaths: string[]; detailImagePaths: string[]; sellerDetailImagePaths: string[] }> {
   const candidateLimit = Math.max(targetImageCount + 12, 24);
-  const prioritizedUrls = prioritizeImageUrls(Array.from(new Set(imageUrls))).slice(0, candidateLimit);
+  // Collection already ranked semantic gallery provenance. URL-only re-ranking
+  // loses it and can move unrelated JPEG recommendations ahead of gallery PNGs.
+  const prioritizedUrls = Array.from(new Set(imageUrls)).slice(0, candidateLimit);
   const downloaded: {
     path: string;
     url: string;
@@ -4388,6 +4403,16 @@ async function step1_getProductInfo(
         if (detail?.matches("dd")) add(clean(term.textContent), clean(detail.textContent));
       }
     }
+    // Brand/Smart Store product pages render the seller-provided 상품정보 rows
+    // with hashed class names, so class-name-only selectors miss them. Anchor the
+    // extraction to the visible heading and keep only direct label/value pairs.
+    const productInfoHeading = Array.from(document.querySelectorAll("strong"))
+      .find((element) => clean(element.textContent) === "상품정보");
+    const productInfoRoot = productInfoHeading?.parentElement?.parentElement;
+    for (const row of Array.from(productInfoRoot?.querySelectorAll(":scope > ul > li") || [])) {
+      const cells = Array.from(row.children).map((cell) => clean(cell.textContent));
+      if (cells.length >= 2) add(cells[0], cells.slice(1).join(" / ").replace(/복사$/u, "").trim());
+    }
     return Array.from(output).slice(0, 20);
   }).catch(() => [] as string[]);
   features.push(...structuredFacts.map(sanitizeTypedProductFactLine).filter(Boolean));
@@ -4489,6 +4514,7 @@ async function step1_getProductInfo(
   let reviewCount = sanitizeText(structuredProduct.reviewCount);
   let rating = sanitizeText(structuredProduct.rating);
   const reviewSelectors = [
+    'a[href*="review"]', 'a[data-shp-contents-type="review"]',
     '[class*="review"]', '[class*="rating"]',
     '._2LvUD5PAiM',  // 스마트스토어 리뷰
     '.review_count'
@@ -4498,16 +4524,22 @@ async function step1_getProductInfo(
     if (el) {
       const text = (await el.textContent())?.trim() || "";
       // 리뷰 수 추출 (숫자가 포함된 경우)
-      const countMatch = text.match(/[\d,]+(?=\s*개|\s*건)?/);
+      const countMatch = text.match(/(?:리뷰|구매후기|상품평)\s*([\d,]+)|([\d,]+)\s*(?:개|건)\s*(?:리뷰|구매후기|상품평)/u);
       if (countMatch && !reviewCount) {
-        reviewCount = countMatch[0];
+        reviewCount = countMatch[1] || countMatch[2];
       }
       // 평점 추출 (4.8 같은 형태)
-      const ratingMatch = text.match(/\d\.\d/);
+      const ratingMatch = text.match(/(?:평점|별점)\s*([0-5](?:\.\d{1,2})?)/u);
       if (ratingMatch && !rating) {
-        rating = ratingMatch[0];
+        rating = ratingMatch[1];
       }
     }
+  }
+  if (!reviewCount) {
+    // Semantic labels survive the store's periodically changing CSS classes.
+    const reviewLink = page.locator('a, button').filter({ hasText: /^\s*[\d,]+\s*건\s*리뷰\s*$/u }).first();
+    const label = (await reviewLink.textContent({ timeout: 1000 }).catch(() => "")) || "";
+    reviewCount = label.match(/([\d,]+)\s*건/u)?.[1] || "";
   }
   if (reviewCount) console.log(`   ⭐ 리뷰: ${reviewCount}개`);
   if (rating) console.log(`   ⭐ 평점: ${rating}`);
@@ -4547,7 +4579,7 @@ async function step1_getProductInfo(
       if (reviewHighlights.size >= 4) break;
     }
     for (const value of reviewHighlights) {
-      const reviewFact = isolateSellerEvidenceText(`구매후기 근거: ${value}`, 500);
+      const reviewFact = isolateSellerEvidenceText(`구매후기 근거: [판매페이지 후기, 선택 옵션 일치 미확인] ${value}`, 500);
       if (reviewFact) sanitizedFeatures.push(reviewFact);
     }
     if (reviewHighlights.size > 0) {
@@ -4657,7 +4689,6 @@ async function downloadImage(url: string, filePath: string): Promise<void> {
 // ============================================
 // AI 공통 호출 함수 (OpenAI / Gemini)
 // ============================================
-const HUMANIZE_SECTION_SEPARATOR = "\n\n<<<섹션구분>>>\n\n";
 
 /**
  * AI 티 점수가 높은 본문을 한 번만 재작성한다(휴머나이징 패스).
@@ -4668,13 +4699,7 @@ async function rewriteSectionsForHumanTone(
   beforeScore: number,
   draftMemoRequirements: string = "",
 ): Promise<string[]> {
-  const joined = sections.join(HUMANIZE_SECTION_SEPARATOR);
-  const prompt = `${buildHumanizeRewritePrompt(joined)}
-${draftMemoRequirements}
-
-[추가 형식 규칙]
-- 원문에 있는 "<<<섹션구분>>>" 표시는 섹션 경계이므로 절대 지우거나 옮기지 말고 그대로 유지하세요.
-- 표시 개수(${sections.length - 1}개)도 그대로여야 합니다.`;
+  const prompt = buildHumanizeSectionsPrompt(sections, draftMemoRequirements);
 
   let rewritten = "";
   try {
@@ -4691,14 +4716,11 @@ ${draftMemoRequirements}
     return sections;
   }
 
-  const parts = rewritten
-    .split("<<<섹션구분>>>")
-    .map((part) => part.replace(/^\s+|\s+$/g, ""))
-    .filter(Boolean);
-  if (parts.length !== sections.length) {
-    console.log(
-      `   ⚠️ 재작성 결과 섹션 수 불일치(${parts.length}/${sections.length}), 원문을 유지합니다.`
-    );
+  let parts: string[];
+  try {
+    parts = parseHumanizeSections(rewritten, sections.length);
+  } catch (error) {
+    console.log(`   ⚠️ 재작성 결과 형식 불일치, 원문 유지: ${getErrorMessage(error)}`);
     return sections;
   }
 
@@ -4719,19 +4741,10 @@ async function generateWithAI(
   chatgptImagePaths: string[] = []
 ): Promise<string> {
   if (BROWSER_GPT_MODE) {
-    if (!chatgptContext) {
-      throw new Error("Browser ChatGPT 모드에 필요한 가이드 컨텍스트가 없습니다.");
-    }
-
-    try {
-      return await runChatGPTBrowserDirect(systemPrompt, userPrompt, chatgptContext, chatgptImagePaths);
-    } catch (error) {
-      const reason = getErrorMessage(error);
-      throw new Error(`Browser ChatGPT 실패: ${reason}`, { cause: error });
-    }
+    console.log(`   ✦ 브라우저 모델을 확인할 수 없어 ${TEXT_MODEL} Codex로 작성합니다.`);
   }
 
-  if (AI_PROVIDER === "codex") {
+  if (AI_PROVIDER === "codex" || BROWSER_GPT_MODE) {
     try {
       return await runCodexDraft({
         systemPrompt,
@@ -4746,10 +4759,6 @@ async function generateWithAI(
     } catch (error) {
       const reason = getErrorMessage(error);
       const providerCode = codexDraftTerminalFailureCode(error);
-      if (!providerCode && CODEX_BROWSER_FALLBACK_ENABLED && ALLOW_CHATGPT_BROWSER_MODE && chatgptContext) {
-        console.log(`   ⚠️ Codex 작성 실패, ChatGPT 웹 자동작성으로 전환: ${reason}`);
-        return runChatGPTBrowserDirect(systemPrompt, userPrompt, chatgptContext, chatgptImagePaths);
-      }
       throw Object.assign(
         new Error(`Codex 작성 실패: ${reason}`, { cause: error }),
         providerCode ? { code: providerCode } : {},
@@ -5150,7 +5159,7 @@ ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일
    ${isTravel ? "" : "- 상세페이지 이미지의 글자·사양표를 제공된 확인 사실과 대조하세요. 일치하는 사실만 evidenceFacts에 기록하고, 새 추정은 제외합니다. 본문에는 근거가 있는 기능 원리·사용법·활용 이점으로 풀어 씁니다."}
 
 3. 각 섹션 구조:
-   - 소제목 (한 줄, 이모지 금지)
+   - 소제목 (한 줄, 이모지 금지, 가능하면 독자 질문형. 글 전체 서너 개)
    - 빈 줄
    - 문장 수와 출력 구조는 공유 필수 작성 계약을 따릅니다.
    - 문장 수를 채우기 위해 같은 뜻을 반복하지 말고, 서로 다른 사실·장면·판단을 한 문장씩 배치합니다.
@@ -5213,7 +5222,7 @@ ${isTravel
    - 개수를 채우기 위한 일반 태그(일상 등)는 넣지 마세요`}
 
 8. AI 티가 나는 문장 금지:
-${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${MOBILE_BODY_RULES}\n${HUMAN_REVIEW_SAFETY_RULES}\n${isTravel ? TRAVEL_VLOG_STYLE_GUIDE : SHOPPING_EXPERT_REVIEW_STYLE_GUIDE}` : "   - 반복적인 문장 구조와 과장 표현 금지"}
+${BLOG_HUMANIZE_MOBILE_STYLE ? `${HUMAN_MOBILE_STYLE_GUIDE}\n${NAVER_AI_CITATION_RULES}\n${MOBILE_BODY_RULES}\n${HUMAN_REVIEW_SAFETY_RULES}\n${isTravel ? TRAVEL_VLOG_STYLE_GUIDE : SHOPPING_EXPERT_REVIEW_STYLE_GUIDE}` : "   - 반복적인 문장 구조와 과장 표현 금지"}
 
 ${mandatoryWritingPromptBlock}`;
 
@@ -5491,6 +5500,7 @@ ${mandatoryWritingPromptBlock}`;
     "too-few-sections",
     "too-short-content",
     "unsupported-experience-claim",
+    "unsupported-option-claim",
     "internal-guidance-leak",
     "missing-review-substance",
     "low-evidence-density",
@@ -7554,13 +7564,22 @@ async function insertNaverHorizontalDivider(page: Page): Promise<boolean> {
   return true;
 }
 
-async function inputPlainParagraph(page: Page, text: string, editorial?: import("./lib/editorial-templates").EditorialSelection): Promise<void> {
+async function inputPlainParagraph(
+  page: Page,
+  text: string,
+  editorial?: import("./lib/editorial-templates").EditorialSelection,
+  options: { applyStyle?: boolean } = {},
+): Promise<void> {
   const normalized = text.replace(/\r/g, "").trim();
   if (!normalized) return;
   await setNaverTextFormat(page, "text");
-  if (editorial) await applyEditorialEditorStyle(page, editorial, "body");
-  for (const line of normalized.split("\n")) {
-    const value = line.trim();
+  if (editorial && options.applyStyle !== false) {
+    await applyEditorialEditorStyle(page, editorial, "body");
+  }
+  // Blank-line separated blocks (\n\n) become empty lines between paragraphs.
+  const lines = normalized.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const value = lines[index]!.trim();
     if (value) await page.keyboard.type(value, { delay: 3 });
     await page.keyboard.press("Enter");
     await page.waitForTimeout(35);
@@ -7576,6 +7595,7 @@ async function inputNaverHeading(page: Page, text: string, editorial?: import(".
   await page.keyboard.press("Enter");
   await page.waitForTimeout(80);
   const bodyApplied = await setNaverTextFormat(page, "text");
+  // Body style is applied once here; following section paragraphs reuse it.
   if (editorial) await applyEditorialEditorStyle(page, editorial, "body");
   return headingApplied && bodyApplied;
 }
@@ -7593,20 +7613,28 @@ async function renderResolvedPostDocument(
   let connectCardCount = 0;
   let imageNodeIndex = 0;
   let headingStyleFailed = false;
+  const batchWrite = document.editorial?.policy.writeMode === "batch";
+  const bodyStyleState = createEditorialBodyStyleState();
   if (document.editorial) {
     document.editorial.application = "partial";
     document.editorial.applied = [];
-    console.log(`   편집 템플릿: ${document.editorial.id}; 미지원 스타일: ${document.editorial.unsupported.join(", ")}`);
+    console.log(
+      `   편집 템플릿: ${document.editorial.id}; writeMode=${document.editorial.policy.writeMode}; 미지원 스타일: ${document.editorial.unsupported.join(", ")}`,
+    );
   }
 
   for (let renderIndex = 0; renderIndex < document.renderNodes.length; renderIndex += 1) {
     const node = document.renderNodes[renderIndex];
     if (node.kind === "divider") {
       await insertNaverHorizontalDivider(page).catch(() => false);
+      invalidateBodyStyle(bodyStyleState);
       continue;
     }
     if (node.kind === "disclosure" || node.kind === "paragraph") {
-      await inputPlainParagraph(page, node.text, document.editorial);
+      const sectionId = node.kind === "paragraph" ? node.sectionId : null;
+      const applyStyle = !batchWrite || shouldApplyBodyStyle(bodyStyleState, sectionId);
+      await inputPlainParagraph(page, node.text, document.editorial, { applyStyle });
+      if (batchWrite && applyStyle) markBodyStyleReady(bodyStyleState, sectionId);
       continue;
     }
     if (node.kind === "quotation") {
@@ -7616,17 +7644,19 @@ async function renderResolvedPostDocument(
       // 막는다.
       const applied = await inputNaverHeading(page, node.text, document.editorial);
       headingStyleFailed ||= !applied;
+      if (batchWrite) markBodyStyleReady(bodyStyleState, node.sectionId);
       if (document.editorial) document.editorial.applied = headingStyleFailed
         ? document.editorial.applied.filter(value => value !== "heading" && value !== "body")
-        : Array.from(new Set([...document.editorial.applied, "heading", "body"]));
+        : Array.from(new Set([...document.editorial.applied, "heading", "body", "batch-section-write"]));
       continue;
     }
     if (node.kind === "heading") {
       const applied = await inputNaverHeading(page, node.text, document.editorial);
       headingStyleFailed ||= !applied;
+      if (batchWrite) markBodyStyleReady(bodyStyleState, node.sectionId);
       if (document.editorial) document.editorial.applied = headingStyleFailed
         ? document.editorial.applied.filter(value => value !== "heading" && value !== "body")
-        : Array.from(new Set([...document.editorial.applied, "heading", "body"]));
+        : Array.from(new Set([...document.editorial.applied, "heading", "body", "batch-section-write"]));
       continue;
     }
     if (node.kind === "image") {
@@ -7645,6 +7675,8 @@ async function renderResolvedPostDocument(
           imageNodeIndex += 1;
           console.log(`   [이미지 ${imageNodeIndex}] 🧩 여행 하이라이트 3장 콜라주`);
           if (await uploadOneImage(page, collagePath)) uploadedCount += 1;
+          else throw new Error("본문 콜라주 업로드 확인 실패");
+          invalidateBodyStyle(bodyStyleState);
           renderIndex += 2;
           continue;
         }
@@ -7654,13 +7686,10 @@ async function renderResolvedPostDocument(
       const uploaded = await uploadOneImage(page, node.assetPath);
       if (uploaded) {
         uploadedCount += 1;
-      } else if (
-        node.role === "thumbnail" &&
-        options.requiredFirstImagePath &&
-        path.resolve(node.assetPath) === path.resolve(options.requiredFirstImagePath)
-      ) {
-        throw new Error(`썸네일 첫 이미지 업로드 확인 실패: ${path.basename(node.assetPath)}`);
+      } else {
+        throw new Error(`발행 이미지 업로드 확인 실패: ${path.basename(node.assetPath)}`);
       }
+      invalidateBodyStyle(bodyStyleState);
       continue;
     }
     if (node.kind === "connectCard") {
@@ -7676,6 +7705,7 @@ async function renderResolvedPostDocument(
         );
       }
       connectCardCount += 1;
+      invalidateBodyStyle(bodyStyleState);
       continue;
     }
     if (node.kind === "hashtags") {
@@ -7685,6 +7715,9 @@ async function renderResolvedPostDocument(
         .map((tag) => `#${tag.replace(/^#+/, "").replace(/\s+/g, "")}`)
         .join(" ");
       await page.keyboard.type(hashtagText, { delay: 10 });
+      // Commit the tag token before a following disclosure can join it.
+      await page.keyboard.press("Enter");
+      await page.keyboard.press("Enter");
     }
   }
 
@@ -7792,6 +7825,11 @@ async function step5and6_uploadAndWrite(
     if (expectedConnectCardCount > 0 && result.connectCardCount < expectedConnectCardCount && options.shoppingConnectUrl) {
       throw new Error(`커넥트 카드 삽입 결과가 부족합니다: ${result.connectCardCount}/${expectedConnectCardCount}`);
     }
+    const editorText = await page.evaluate(() => {
+      const root = document.querySelector(".se-main-container") || document.querySelector(".se-content");
+      return root ? (root as HTMLElement).innerText : "";
+    });
+    assertPublishedEditorText(options.resolvedDocument, editorText);
     return;
   }
   
@@ -9654,7 +9692,7 @@ async function runPreparedPostRevision(
       throw new Error(`SOURCE_EVIDENCE_REQUIRED: ${convergencePlan.reason}`);
     }
     if (convergencePlan && convergencePlan.action !== "repair-text") {
-      throw new Error(`QUALITY_REPAIR_EXHAUSTED: ${convergencePlan.reason}`);
+      throw new Error(`QUALITY_REPAIR_EXHAUSTED: ${convergencePlan.reason} ${diagnostic}`);
     }
     const allowedIndexes = qualityConvergence
       ? selectQualityRepairSectionIndexes({
@@ -10004,6 +10042,7 @@ async function main() {
       product && runtimeConnectKind === "TRAVEL" && !hasCompleteTravelSourceResearch(product.travelPageResearch),
     );
     const needsLiveRefresh = !preparedPostOverride && !submittedSnapshot && (
+      runtimeConnectKind === "SHOPPING" ||
       !product ||
       !sanitizeText(product.name || "") ||
       needsImageRefresh ||
@@ -10186,7 +10225,17 @@ async function main() {
         [product.representativeImagePath || "", ...product.imagePaths],
         product.name,
       );
-      if (!product.representativeImagePath) throw new Error("상품 사진 검사 실패: 공지·안내판을 제외한 실제 상품 사진을 확보하지 못했습니다.");
+      if (!product.representativeImagePath) {
+        console.log("   🔎 판매자 원본에서 상품 사진 영역을 복구하고 재검사합니다.");
+        product.representativeImagePath = await recoverProductPhotoRegion({
+          productName: product.name,
+          localCandidates: product.imagePaths,
+          sourceImageUrls: product.sourceImageUrls,
+          outputDir: TEMP_PATH,
+          onCreated: (file) => { publishImageCleanup.track([file]); downloadedProductImagePaths.push(file); },
+        });
+      }
+      if (!product.representativeImagePath) throw new Error("상품 사진 검사 실패: 판매자 원본과 상품 영역 재검사에서도 해당 상품의 사진을 확보하지 못했습니다.");
     }
     const generatedThumbnail: GeneratedProductThumbnail | null = preparedPostOverride
       ? { path: preparedPostOverride.heroImagePath, source: "saved-studio" }
@@ -10245,7 +10294,7 @@ async function main() {
     }
 
     const prepareOutputDir = process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim();
-    const composition =
+    const composition = normalizePublishedPostText(
       preparedPostOverride?.composition ||
       resolvePostDocument({
         connectKind: runtimeConnectKind,
@@ -10260,8 +10309,18 @@ async function main() {
         experienceMode: BRANDLINK_EXPERIENCE_MODE,
         // Spec-first: 섹션별 슬롯 배정을 그대로 따른다(팔레트 순서로 이미지를 앞쪽에 몰아 넣지 않는다).
         sectionPlan: assembled?.sectionPlan ?? null,
-      });
+      }));
     post.composition = composition;
+    if (runtimeConnectKind === "SHOPPING") {
+      const selectedOptionFacts = product.features.filter(value =>
+        /^(?:선택\s*옵션|선택\s*상품|구성|수량|개수|용량|중량|향|색상|사이즈)\s*[:：]/u.test(value));
+      await assertPublishImagesSafe({
+        productName: product.name,
+        selectedProduct: JSON.stringify({ selectedTitle: product.name, optionFacts: selectedOptionFacts,
+          rule: "선택 상품명에 명시된 향·라인·용량·수량이 우선입니다. 공통 카탈로그 옵션으로 대체하지 마세요. 충돌하거나 식별할 수 없으면 거부하세요." }),
+        composition,
+      });
+    }
     console.log(
       composition.editorial ? `   편집 선택 유지: ${composition.editorial.id}` : "   기존 승인 문서: 저장된 편집 템플릿 없음. 기존 배치 보존, 신규 스타일 적용 안 함.",
     );
@@ -10282,15 +10341,15 @@ async function main() {
 
     let contentReadiness: BrandLinkContentReadiness | null = null;
     reportDraftProgress("qc", "품질 검사");
-    if (BRANDLINK_CONTENT_READINESS_ENABLED) {
+    if (BRANDLINK_CONTENT_READINESS_ENABLED || runtimeConnectKind === "SHOPPING") {
       const finalQualitySource = frozenSnapshot
         ? brandPostQualitySourceFromSnapshot(frozenSnapshot)
         : buildBrandPostQualitySource({ productName: product.name, description: product.description, features: product.features });
       contentReadiness = getBrandLinkContentReadiness({
         productName: product.name,
         title: post.title,
-        sections: post.sections,
-        hashtags: post.hashtags,
+        sections: publishedReadinessSections(composition),
+        hashtags: composition.renderNodes.flatMap(node => node.kind === "hashtags" ? node.values : []),
         brandLink: link.url,
         generationSource: post.generationSource,
         hasRepresentativeImage: Boolean(product.representativeImagePath),
@@ -10344,6 +10403,9 @@ async function main() {
           product: {
             name: product.name, description: product.description, features: product.features,
             price: product.price, originalPrice: product.originalPrice,
+            reviewCount: product.reviewCount, rating: product.rating,
+            discountRate: product.discountRate, couponInfo: product.couponInfo,
+            deliveryInfo: product.deliveryInfo,
             storeName: product.storeName || null,
             finalUrl: product.finalUrl || null,
             referenceImageUrls: product.sourceImageUrls.slice(0, 20),

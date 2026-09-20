@@ -41,9 +41,8 @@ assert.match(productPhotoReviewSource, /preserveImageOrder: true/u,
   "numbered product-photo candidates must not be silently reordered by filename");
 assert.match(providerSource, /runStreamed/u);
 assert.match(agentSource, /AI_PROVIDER === "codex"/u);
-assert.match(agentSource, /CODEX_BROWSER_FALLBACK_ENABLED/u);
-assert.match(agentSource, /if \(!providerCode && CODEX_BROWSER_FALLBACK_ENABLED/u,
-  "terminal Codex failures must never switch to a second provider");
+assert.doesNotMatch(agentSource, /return (?:await )?runChatGPTBrowserDirect\(/u,
+  "automated writing must never fall back to an unpinned browser model");
 assert.match(agentSource, /if \(codexDraftTerminalFailureCode\(error\)\) throw error;/u,
   "revision convergence must immediately preserve provider failures");
 assert.match(routeSource, /error instanceof PrepareProcessError[\s\S]{0,100}\? error\.code/u,

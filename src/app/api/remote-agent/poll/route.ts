@@ -17,7 +17,7 @@ import { getBrandPostPackageDir, readBrandPostPackage } from "@/lib/brand-post-p
 import { buildBrandPostImagePrompt } from "@/lib/brand-post-image-generation";
 import { readDraftProgress } from "@/lib/draft-progress";
 import { buildPreparedDraftView } from "@/lib/draft-context-view";
-import { getDesktopActivitySnapshot } from "@/lib/desktop-activity";
+import { beginDesktopActivity, getDesktopActivitySnapshot } from "@/lib/desktop-activity";
 import { collapseBrandLinkProducts, matchesWritingStatusFilter } from "@/lib/brandlink-product-list";
 import {
   LOCAL_AUTOMATION_ERROR_HINTS,
@@ -116,6 +116,7 @@ const PIPELINE_VERSION = "post-spec/v1";
 let activeJob: { id: string; type: string; startedAt: number } | null = null;
 /** claim 요청이 진행 중인 동안 다른 폴러가 또 claim 하지 못하게 한다(단일 스레드라 검사+설정이 원자적). */
 let claiming = false;
+const jobContexts = new WeakMap<NextRequest, JobContext>();
 
 function parseBoundedInteger(value: string | undefined, fallback: number, min: number, max: number): number {
   const parsed = Number.parseInt(value || "", 10);
@@ -289,6 +290,8 @@ async function localApi(
   init?: RequestInit,
   options: { timeoutMs?: number } = {},
 ): Promise<Record<string, unknown>> {
+  const context = jobContexts.get(request);
+  if (context && apiPath !== "/api/posting/stop") assertNotCancelled(context);
   const origin = localAppOrigin(request);
   const headers = new Headers(init?.headers);
   headers.set("content-type", "application/json");
@@ -301,6 +304,7 @@ async function localApi(
   if (adminKey) headers.set("x-admin-api-key", adminKey);
   const url = new URL(apiPath, origin);
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (context && apiPath !== "/api/posting/stop") assertNotCancelled(context);
     let response: Response;
     try {
       response = options.timeoutMs
@@ -1428,25 +1432,24 @@ function startJobHeartbeat(request: NextRequest, siteUrl: string, token: string,
   const send = async () => {
     if (stopping) return;
     refreshDraftProgress();
-    const { ok, payload } = await siteFetch(siteUrl, token, `/api/agent/jobs/${encodeURIComponent(ctx.job.id)}/heartbeat`, {
+    const { ok, status, payload } = await siteFetch(siteUrl, token, `/api/agent/jobs/${encodeURIComponent(ctx.job.id)}/heartbeat`, {
       appVersion: appVersionString(),
       progress: stageRef.progress,
       stage: stageRef.stage,
       message: stageRef.message,
       status: await buildStatusSnapshot(),
     }).catch(() => ({ ok: false, status: 0, payload: null }));
-    if (stopping || ctx.executionFinished || !ok || !payload) return;
-    const data = (payload.data || {}) as Record<string, unknown>;
-    if (data.active === false && !ctx.cancelled) {
-      ctx.cancelled = true;
-      ctx.cancelReason = "LEASE_LOST";
-    }
-    if (data.cancelRequested === true && !cancelHandled) {
+    if (stopping || ctx.executionFinished) return;
+    const revoked = status === 401 || status === 403;
+    if (revoked) clearRemoteActivation();
+    if (!revoked && (!ok || !payload)) return;
+    const data = (payload?.data || {}) as Record<string, unknown>;
+    if ((revoked || data.active === false || data.cancelRequested === true) && !cancelHandled) {
       cancelHandled = true;
       ctx.cancelled = true;
-      ctx.cancelReason = "USER_CANCELLED";
+      ctx.cancelReason = data.cancelRequested === true ? "USER_CANCELLED" : "LEASE_LOST";
       // 발행/초안 프로세스를 실제로 멈춘다(simple-agent 등 우리 스크립트만 종료).
-      await localApi(request, "/api/posting/stop", { method: "POST", body: "{}" }).catch(() => undefined);
+      await localApi(request, "/api/posting/stop", { method: "POST", body: "{}" }).catch(() => { cancelHandled = false; });
     }
   };
   void send();
@@ -1476,6 +1479,12 @@ async function completeRemoteJob(siteUrl: string, token: string, jobId: string, 
 }
 
 export async function POST(request: NextRequest) {
+  const finish = beginDesktopActivity("remote-agent-poll");
+  try { return await poll(request); }
+  finally { finish(); }
+}
+
+async function poll(request: NextRequest) {
   const untrusted = requireTrustedLocalMutation(request);
   if (untrusted) return untrusted;
   const unauthorized = requireAdminApiKey(request);
@@ -1483,9 +1492,6 @@ export async function POST(request: NextRequest) {
   const remote = config();
   if (!remote.siteUrl || !remote.token) return NextResponse.json({ success: true, data: { configured: false, job: null } });
   const outbox = completionOutbox(getUserDataRoot(), remote.siteUrl, remote.token);
-  if (process.env.DESKTOP_UPDATE_INSTALL_PENDING === "1") {
-    return NextResponse.json({ success: true, data: { configured: true, job: null, updatePending: true } });
-  }
   if (activeJob) {
     return NextResponse.json({ success: true, data: { configured: true, job: null, busy: { id: activeJob.id, type: activeJob.type, startedAt: new Date(activeJob.startedAt).toISOString() } } });
   }
@@ -1520,6 +1526,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, code: 'COMPLETION_DELIVERY_UNCERTAIN', error: '저장된 완료 결과를 전송하지 못했습니다. 작업을 다시 실행하지 마세요. 연결을 복구하고 job_get으로 확인하세요.', deliveryCode: error instanceof CompletionDeliveryError ? error.code : 'NETWORK_ERROR', data: { job: pending.job, executionStatus: pending.body.status, completionPending: true } }, { status: 503 });
     } finally { clearInterval(deliveryHeartbeat); claiming = false; }
   }
+  if (process.env.DESKTOP_UPDATE_INSTALL_PENDING === "1") {
+    claiming = false;
+    return NextResponse.json({ success: true, data: { configured: true, job: null, updatePending: true } });
+  }
   let claim: Awaited<ReturnType<typeof siteFetch>> | null;
   try {
     claim = await siteFetch(remote.siteUrl, remote.token, "/api/agent/jobs/claim", { appVersion: appVersionString(), status: await buildStatusSnapshot() }).catch(() => null);
@@ -1551,6 +1561,7 @@ export async function POST(request: NextRequest) {
       if (typeof progress === "number") stageRef.progress = Math.min(99, Math.max(1, Math.round(progress)));
     },
   };
+  jobContexts.set(request, ctx);
   const stopHeartbeat = startJobHeartbeat(request, remote.siteUrl, remote.token, ctx, stageRef);
   try {
     let completion: Record<string, unknown>;
@@ -1585,6 +1596,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success, ...(success ? {} : { error: completion.errorMessage, code: completion.errorCode }), data: { configured: true, job: { id: job.id, type: job.type, status: completion.status } } }, { status: success ? 200 : 500 });
   } finally {
     stopHeartbeat();
+    jobContexts.delete(request);
     activeJob = null;
   }
 }

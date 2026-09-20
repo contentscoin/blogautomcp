@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
-import { createEditorialSelection, selectEditorialTemplate, EDITORIAL_TEMPLATES } from "./lib/editorial-templates";
+import { createEditorialSelection, selectEditorialTemplate, EDITORIAL_TEMPLATES, listEditorialSectionDesigns } from "./lib/editorial-templates";
 import { createWritingPromptContract, formatWritingPromptContract } from "./lib/writing-prompt-contract";
 import { renderSystemPrompt } from "./lib/post-spec/generate";
 import type { PostSpec } from "./lib/post-spec/types";
 import { resolvePostDocument } from "../src/lib/post-composition-contract";
+import {
+  batchSectionParagraphs,
+  createEditorialBodyStyleState,
+  invalidateBodyStyle,
+  markBodyStyleReady,
+  shouldApplyBodyStyle,
+} from "./lib/editorial-batch-write";
 
 const fixtures = [
   ["SHOPPING", "수납 공간 부족", "shopping-problem"],
@@ -19,9 +26,16 @@ for (const [kind, description, id] of fixtures) {
   const product = { name: "상품", description };
   const editorial = createEditorialSelection(kind, product);
   assert.equal(editorial.id, id);
+  assert.equal(editorial.policy.writeMode, "batch");
+  assert.equal(editorial.policy.citation?.headingForm, "question");
+  assert.equal(editorial.policy.citation?.faqPairs, 3);
+  assert.ok(listEditorialSectionDesigns(id).length >= 6, "category templates define section designs");
   const contract = createWritingPromptContract({ kind, product, minimumSections: 8, maximumSections: 11,
     targetCharacters: { min: 2400, max: 4200 }, hashtagCount: 4 });
-  assert.ok(formatWritingPromptContract(JSON.parse(JSON.stringify(contract))).includes(id));
+  const formatted = formatWritingPromptContract(JSON.parse(JSON.stringify(contract)));
+  assert.ok(formatted.includes(id));
+  assert.ok(formatted.includes("질문형"), "writing contract requires question-form headings");
+  assert.ok(formatted.includes("FAQ"), "writing contract requires FAQ pairs");
   const spec = { connectKind: kind, productName: product.name, brief: null,
     facts: { lines: [description], travel: null, blockedClaimRules: ["QC sentinel"] } } as unknown as PostSpec;
   assert.ok(renderSystemPrompt(spec, {}).includes(id));
@@ -39,12 +53,18 @@ for (const [kind, description, id] of fixtures) {
   const imageAt = nodes.findIndex(n => n.kind === "image");
   const headingAt = nodes.findIndex(n => n.kind === "heading");
   const bodyAt = nodes.findIndex(n => n.kind === "paragraph");
-  if (editorial.policy.layout.image === "before-heading") assert.ok(imageAt < headingAt);
-  if (editorial.policy.layout.image === "before-body") assert.ok(imageAt > headingAt && imageAt < bodyAt);
-  if (editorial.policy.layout.image === "after-body") assert.ok(imageAt > nodes.map(n => n.kind).lastIndexOf("paragraph"));
-  if (editorial.policy.layout.image === "after-lead") assert.equal(imageAt, bodyAt + 1);
+  const imageLayout = editorial.policy.sectionDesigns?.[firstId]?.image ?? editorial.policy.layout.image;
+  if (imageLayout === "before-heading") assert.ok(imageAt < headingAt);
+  if (imageLayout === "before-body") assert.ok(imageAt > headingAt && imageAt < bodyAt);
+  if (imageLayout === "after-body") assert.ok(imageAt > nodes.map(n => n.kind).lastIndexOf("paragraph"));
+  if (imageLayout === "after-lead") assert.equal(imageAt, bodyAt + 1);
   const body = nodes.filter(n => n.kind === "paragraph");
-  assert.equal(body.length, editorial.policy.layout.sentences === 2 ? 2 : 3);
+  // Batch write collapses sentence units into 1–2 body blocks per section.
+  if (imageLayout === "after-lead") {
+    assert.equal(body.length, 2);
+  } else {
+    assert.equal(body.length, 1);
+  }
   assert.equal(body.map(n => n.text).join("").replace(/\s/g, ""), "설명입니다.조건입니다.한계입니다.");
   spec.editorial = editorial;
   spec.facts.lines = ["다른 근거"];
@@ -56,4 +76,16 @@ assert.equal(selectEditorialTemplate("SHOPPING", { name: "최고 비교 상품" 
 assert.equal(selectEditorialTemplate("TRAVEL", { name: "1일차 완벽 일정" }), "travel-scenic");
 assert.equal(selectEditorialTemplate("TRAVEL", { description: "식사 포함, 1일차 서울 방문, 호텔 미확정" }), "travel-itinerary");
 assert.equal(selectEditorialTemplate("TRAVEL", { description: "왕복 항공 포함" }), "travel-scenic");
-console.log("PASS six selections, persisted prompts/render metadata, unchanged image order and QC, unsupported style reporting");
+
+const packed = batchSectionParagraphs(["A.", "B.", "C."], 1, "after-lead");
+assert.equal(packed.blocks.length, 2);
+assert.equal(packed.lead, "A.");
+assert.equal(packed.rest, "B.\n\nC.");
+const styleState = createEditorialBodyStyleState();
+assert.equal(shouldApplyBodyStyle(styleState, "sec-1"), true);
+markBodyStyleReady(styleState, "sec-1");
+assert.equal(shouldApplyBodyStyle(styleState, "sec-1"), false);
+invalidateBodyStyle(styleState);
+assert.equal(shouldApplyBodyStyle(styleState, "sec-1"), true);
+
+console.log("PASS six selections, section designs, batch body nodes, style-once helpers, unchanged image order and QC");

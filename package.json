@@ -1,6 +1,6 @@
 {
   "name": "brandconnect-automation",
-  "version": "1.3.54",
+  "version": "1.3.64",
   "description": "네이버 쇼핑 커넥트(브랜드커넥트) 자동 블로그 포스팅 도구",
   "private": true,
   "scripts": {
@@ -18,11 +18,16 @@
     "test:mcp-delivery": "node --test src/lib/remote-agent-completion.test.cjs apps/sites/tests/*.test.cjs",
     "test:draft-ui": "tsx --test src/app/draft-approval-ui.test.ts",
     "test:saved-text-revalidation": "ts-node --project tsconfig.scripts.json scripts/verify-saved-text-revalidation.ts",
+    "test:shopping-workflow": "ts-node --project tsconfig.scripts.json scripts/verify-shopping-source-safety.ts && ts-node --project tsconfig.scripts.json scripts/verify-published-text-layout.ts && ts-node --project tsconfig.scripts.json scripts/verify-published-editor-audit.ts && ts-node --project tsconfig.scripts.json scripts/verify-publish-image-audit.ts && ts-node --project tsconfig.scripts.json scripts/verify-shopping-thumbnail-copy.ts",
     "test:experience-context": "ts-node --project tsconfig.scripts.json scripts/verify-experience-context.ts",
     "test:product-substance": "ts-node --project tsconfig.scripts.json scripts/verify-product-substance-context.ts",
     "test:writing-structure": "ts-node --project tsconfig.scripts.json scripts/verify-writing-structure-guide.ts",
     "test:osaka-audit": "tsx scripts/verify-travel-scene-context.ts && ts-node --project tsconfig.scripts.json scripts/verify-content-readiness-failures.ts && tsx scripts/verify-osaka-editorial-contract.ts",
     "test:quality-repair": "ts-node --project tsconfig.scripts.json scripts/verify-quality-repair-policy.ts",
+    "test:editorial-calibration": "tsx scripts/verify-editorial-gate-calibration.ts",
+    "test:text-model-policy": "ts-node --project tsconfig.scripts.json scripts/verify-text-model-policy.ts && node scripts/verify-codex-model-default.cjs",
+    "test:topic-publish": "tsx scripts/verify-topic-publish-correctness.ts",
+    "test:operational-safety": "node --test src/lib/operational-correctness.test.cjs src/lib/remote-agent-completion.test.cjs",
     "test:image-resume": "ts-node --project tsconfig.scripts.json scripts/verify-image-resume-speed.ts",
     "test:mcp-contract": "tsx --test src/lib/brandlink-product-list.test.ts",
     "test:draft-snapshot": "npx ts-node --project tsconfig.scripts.json scripts/verify-draft-snapshot-contract.ts",
@@ -139,6 +144,7 @@
     },
     "files": [
       "scripts/**/*",
+      "!scripts/tmp-*",
       "!scripts/diagnose-single-section-image.cjs",
       "!scripts/apply-saved-section-image.ts",
       "!scripts/inspect-image-conversation.ts",

@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getWritingTimeoutPolicy, writingTimeoutMs } from "./writing-timeout-policy";
-import draftRuntimePolicy from "./draft-runtime-policy.json";
+import { resolveTextModel, resolveTextReasoningEffort } from "./text-model-policy";
 
 type CodexSdkModule = typeof import("@openai/codex-sdk");
 
@@ -233,6 +233,8 @@ function buildWritingPrompt(
 }
 
 export async function runCodexDraft(options: CodexDraftOptions): Promise<string> {
+  const model = resolveTextModel(options.model);
+  const reasoningEffort = resolveTextReasoningEffort(options.reasoningEffort);
   const { Codex } = await nativeImport("@openai/codex-sdk");
   const timeoutMs = writingTimeoutMs(options.timeoutMs, getWritingTimeoutPolicy().codexMs);
   const controller = new AbortController();
@@ -268,8 +270,8 @@ export async function runCodexDraft(options: CodexDraftOptions): Promise<string>
       const thread = codex.startThread({
         // Auxiliary callers (including photo review) must not inherit the user's
         // desktop model, which may require a newer CLI than our bundled runtime.
-        model: options.model?.trim() || draftRuntimePolicy.CODEX_DRAFT_MODEL,
-        modelReasoningEffort: options.reasoningEffort ?? "medium",
+        model,
+        modelReasoningEffort: reasoningEffort,
         sandboxMode: "read-only",
         workingDirectory,
         skipGitRepoCheck: true,

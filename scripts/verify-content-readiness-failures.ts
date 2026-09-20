@@ -29,7 +29,7 @@ const assess = (sections: string[]) => getBrandLinkContentReadiness({
   connectKind: "TRAVEL",
   experienceMode: "AI_ASSISTED_INFORMATION",
   sourceDescription: "히타카츠 이즈하라 시내숙박 출발확정 티아라몰 쇼핑",
-  sourceFeatures: ["1박 2일", "표시가 126,003원"],
+  sourceFeatures: ["여행 기간: 2일", "핵심 방문지: 히타카츠, 미우다 해변, 와타즈미 신사, 이즈하라", "1일차 일정: 히타카츠 → 미우다 해변", "2일차 일정: 와타즈미 신사 → 이즈하라", "표시가 126,003원"],
   mode: "editorial",
 });
 

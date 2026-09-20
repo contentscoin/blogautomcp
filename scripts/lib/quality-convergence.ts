@@ -1,3 +1,4 @@
+import { INTERNAL_GUIDANCE_PATTERNS } from "./brandlink-content-readiness";
 import type {
   BrandLinkContentReadiness,
   BrandLinkQualityCategory,
@@ -58,7 +59,7 @@ const BLOCKER_INSTRUCTIONS: Partial<Record<BrandLinkReadinessCode, string>> = {
   "missing-disclosure": "커넥트 고지는 시스템 조립 단계에서 추가하세요.",
   "unsupported-experience-claim": "검증되지 않은 직접 구매·사용·방문 경험 표현을 정보형 문장으로 고치세요.",
   "commission-rate-exposed": "수수료율과 내부 정산 정보를 본문에서 제거하세요.",
-  "internal-guidance-leak": "프롬프트·워크플로우·작성 지침 같은 내부 문구를 제거하세요.",
+  "internal-guidance-leak": "프롬프트·워크플로우·작성 지침 및 후기 원문 미제공·수집 실패 같은 내부 문구를 제거하세요. 후기가 없으면 후기를 만들지 말고 확인된 상품 사실과 독자에게 필요한 구매 판단으로 바꾸세요.",
   "category-mismatch": "다른 상품군이나 여행/쇼핑 문맥이 섞인 문장을 제거하고 현재 상품의 확인 근거만 남기세요.",
   "repetitive-content": CATEGORY_INSTRUCTIONS.diversity,
   "generic-guidance-heavy": CATEGORY_INSTRUCTIONS.clarity,
@@ -225,7 +226,7 @@ const BLOCKER_SECTION_PATTERNS: Partial<Record<BrandLinkReadinessCode, RegExp[]>
   "link-in-body": [/https?:\/\/(?:naver\.me|brandconnect\.naver\.com|shopping\.naver\.com)\/\S+/iu],
   "unsupported-experience-claim": [/(?:제가|저도|직접).{0,24}(?:구매|주문|사용|체험|방문|다녀)|(?:구매|주문|사용|체험|먹어|방문).{0,12}(?:해?\s*봤|다녀왔)/u],
   "commission-rate-exposed": [/(?:수수료|커미션|commission).{0,12}\d|\d+(?:\.\d+)?\s*%.{0,12}(?:수수료|커미션|commission)|(?:제휴율|정산\s*조건|내부\s*정산)/iu],
-  "internal-guidance-leak": [/(?:opencrab|오픈크랩|seo\s*브리프|워크플로우|작성\s*(?:규칙|지침|가이드|프로세스)|프롬프트|출력\s*형식|json\s*만|시스템\s*지시)/iu],
+  "internal-guidance-leak": [...INTERNAL_GUIDANCE_PATTERNS],
   "category-mismatch": [/(?:배송|교환|반품|구성품|제품\s*스펙)/u],
 };
 

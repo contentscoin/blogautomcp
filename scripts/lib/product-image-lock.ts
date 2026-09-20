@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
 import { preserveProductPhotoSource } from "./product-photo-provenance";
+import { compactProductDisplayName } from "./product-thumbnail";
 import {
   buildThumbnailOverlayV2,
   generateThumbnailCropPreviews,
@@ -136,8 +137,9 @@ export async function createLockedProductThumbnail(options: {
     .png()
     .toBuffer();
   const svg = await buildThumbnailOverlayV2({
-    eyebrow: options.productName,
+    eyebrow: compactProductDisplayName(options.productName),
     headline: options.headline || options.subline,
+    subline: options.subline,
     style: thumbnailV2Style(options.style),
     subjectSide: "right",
   });
@@ -174,8 +176,9 @@ export async function createLockedProductThumbnailOnBackground(options: {
     .png()
     .toBuffer();
   const overlay = await buildThumbnailOverlayV2({
-    eyebrow: options.productName,
+    eyebrow: compactProductDisplayName(options.productName),
     headline: options.headline || options.subline,
+    subline: options.subline,
     style: options.style || "shopping-color-block",
     subjectSide: "right",
     transparentBackground: true,
@@ -278,22 +281,26 @@ export async function createOriginalProductPhotoThumbnail(options: {
 }): Promise<{ outputPath: string; sourceSha256: string }> {
   fs.mkdirSync(options.outputDir, { recursive: true });
   const photo = await sharp(options.sourcePath)
-    .resize(410, 690, {
-      fit: "contain",
-      withoutEnlargement: true,
-      background: { r: 255, g: 255, b: 255, alpha: 1 },
-    })
+    .rotate()
+    // V2 text ends at x=562. Use the remaining subject area without cropping
+    // or recoloring the original photograph, including low-resolution sources.
+    .resize(470, 900, { fit: "inside" })
     .png()
     .toBuffer();
   const svg = await buildThumbnailOverlayV2({
-    eyebrow: options.productName,
+    eyebrow: compactProductDisplayName(options.productName),
     headline: options.headline || options.subline,
+    subline: options.subline,
     style: thumbnailV2Style(options.style),
     subjectSide: "right",
   });
   const outputPath = path.join(options.outputDir, `original-product-thumbnail-${Date.now()}.png`);
-  await sharp(svg)
-    .composite([{ input: photo, left: 630, top: 200 }])
+  // The V2 ground shadow is intended for a cutout, not a rectangular photo.
+  // Keep this adaptation local: the shared overlay and segmented path are unchanged.
+  const photoOverlay = Buffer.from(svg.toString().replace(/<ellipse\b[^>]*\/>/g, ""));
+  const dimensions = await sharp(photo).metadata();
+  await sharp(photoOverlay)
+    .composite([{ input: photo, left: 570 + Math.floor((470 - dimensions.width!) / 2), top: Math.floor((1080 - dimensions.height!) / 2) }])
     .png({ compressionLevel: 9 })
     .toFile(outputPath);
   await generateThumbnailCropPreviews(outputPath, options.outputDir);

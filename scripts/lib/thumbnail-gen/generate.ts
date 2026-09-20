@@ -75,6 +75,9 @@ export async function generateThumbnailWithQc(input: GenerateThumbnailWithQcInpu
     const record: ThumbnailAttempt = { attempt, path: generatedPath, qc: report, prompt };
     history.push(record);
     input.onAttempt?.(record);
+    // Regenerating cannot repair an unavailable judge, and must not spend more
+    // image credits. Never accept a legacy unchecked/pass=true report either.
+    if (!report.checked) break;
     if (report.pass) {
       try {
         fs.writeFileSync(

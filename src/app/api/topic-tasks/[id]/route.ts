@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { requireAdminApiKey } from "@/lib/api-auth";
-import { TOPIC_CRAFT_CATEGORIES } from "@/services/topic-task-pipeline";
+import { TOPIC_CRAFT_CATEGORIES, TopicPrepareConflictError } from "@/services/topic-task-pipeline";
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "알 수 없는 오류";
@@ -206,8 +206,14 @@ export async function PATCH(
       );
     }
 
-    const task = await prisma.topicPostTask.update({
-      where: { id },
+    const state = await prisma.topicPostTask.findUnique({
+      where: { id }, select: { pipelineStage: true, status: true, updatedAt: true },
+    });
+    if (!state || state.pipelineStage === "OUTCOME_UNKNOWN" || state.status === "PUBLISHING") {
+      throw new TopicPrepareConflictError("실제 발행/예약 결과를 확인하고 수동 복구하기 전에는 수정하거나 재준비할 수 없습니다.");
+    }
+    const updated = await prisma.topicPostTask.updateMany({
+      where: { id, updatedAt: state.updatedAt, pipelineStage: { not: "OUTCOME_UNKNOWN" }, status: { not: "PUBLISHING" } },
       data: {
         ...(hasTopic && body.topic ? { topic: body.topic.trim() } : {}),
         ...(hasKeywords ? { keywords: body.keywords?.trim() || null } : {}),
@@ -238,12 +244,14 @@ export async function PATCH(
       },
     });
 
+    if (updated.count !== 1) throw new TopicPrepareConflictError("작업 상태가 변경되었습니다. 실제 제출 결과를 먼저 확인하세요.");
+    const task = await prisma.topicPostTask.findUnique({ where: { id } });
     return NextResponse.json({ success: true, data: task });
   } catch (error: unknown) {
     console.error("태스크 수정 실패:", error);
     return NextResponse.json(
       { success: false, error: getErrorMessage(error) },
-      { status: 500 }
+      { status: error instanceof TopicPrepareConflictError ? 409 : 500 }
     );
   }
 }

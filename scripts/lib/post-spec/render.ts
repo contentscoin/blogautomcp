@@ -4,6 +4,7 @@
 
 import { CHECK_PREFIX, FACT_PREFIX } from "./section-library";
 import type { GeneratedSection, SectionShape } from "./types";
+import { normalizePublishedBodyLines } from "../../../src/lib/post-composition-contract";
 
 const MAX_MOBILE_LINE = 58;
 
@@ -57,10 +58,16 @@ export function normalizeLines(rawLines: string[], shape: SectionShape): string[
     });
   }
   if (shape === "qa-3") {
-    return lines.map((line, index) => {
-      const bare = line.replace(/^(?:Q|A|질문|답변)\s*[.:：)]\s*/iu, "");
-      return `${index % 2 === 0 ? "Q." : "A."} ${bare}`;
-    });
+    if (lines.some(line => /^(?:Q|A|질문|답변)\s*[.:：)](?:\s|$)/iu.test(line))) {
+      return normalizePublishedBodyLines(lines);
+    }
+    // Legacy unlabeled drafts use six alternating entries. Preserve a two-line
+    // answer inside its original entry instead of relabeling each physical line.
+    const entries = rawLines.map(line => stripMarkdown(String(line ?? "")).replace(/\s+/gu, " ").trim()).filter(Boolean);
+    if (entries.length === 6) return entries.map((line, index) => `${index % 2 === 0 ? "Q." : "A."} ${line}`);
+    // Ambiguous unlabeled shapes must remain visible to validation, not be
+    // silently assigned invented question/answer boundaries.
+    return lines;
   }
   if (shape === "lines-3") return lines;
   return lines.flatMap((line) => splitLongLine(line));

@@ -7,8 +7,8 @@ import type { EditorialSelection } from "./editorial-templates";
 export async function applyEditorialEditorStyle(page: Page, selection: EditorialSelection, role: "heading" | "body") {
   selection.failures ??= {};
   selection.observedControls ??= [];
-  const size = role === "heading" ? 19 : 16;
-  const color = role === "heading" ? selection.policy.headingColor : "#333333";
+  const size = role === "heading" ? (selection.policy.headingSizePx || 19) : (selection.policy.bodySizePx || 16);
+  const color = role === "heading" ? selection.policy.headingColor : (selection.policy.bodyColor || "#333333");
   const settings = [
     { name: "font-family", value: "nanumgothic", expected: /나눔고딕/u },
     { name: "font-size", value: `fs${size}`, expected: new RegExp(`^${size}(?:\\D|$)`) },

@@ -149,7 +149,9 @@ export function scoreProductImageCandidate(candidate: ProductImageCandidate, fal
 
   if (isSalesPageProductImageUrl(lower)) score += 1200;
   if (isReviewImageUrl(lower)) score -= 900;
-  if (candidate.source === "gallery") score += 520;
+  // Explicit seller gallery beats loaded recommendation/detail images even
+  // when a lazy gallery slide is currently only a 40px thumbnail.
+  if (candidate.source === "gallery") score += 3000;
   if (candidate.source === "og") score += 280;
   if (candidate.source === "stored") score += 120;
 

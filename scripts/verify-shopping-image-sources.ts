@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
+import { createRequire } from "node:module";
 import ts from "typescript";
 import sharp from "sharp";
 import * as provenance from "./lib/product-photo-provenance";
@@ -74,7 +75,7 @@ async function main() {
       compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
     }).outputText + "\nmodule.exports.resolveSource = existingShoppingSource;", {
       module: generationModule, exports: generationModule.exports, process,
-      require: (name: string) => name in generationDependencies ? generationDependencies[name] : require(name),
+      require: (name: string) => name in generationDependencies ? generationDependencies[name] : createRequire(path.resolve("src/lib/brand-post-image-generation.ts"))(name),
     });
     assert.equal(await generationModule.exports.resolveSource({ brandLinkId: "hero-only", title: "미닉스 상품", connectKind: "SHOPPING",
       imageAssets: [{ path: packaged, sourcePath: composites[0].outputPath, provenance: "LOCKED_PRODUCT" }],
@@ -157,7 +158,7 @@ async function main() {
     let reviews = 0;
     vm.runInNewContext(code, { exports: module.exports, module, require: (name: string) => name === "./codex-draft-provider" ? {
       runCodexDraft: async (input: { imagePaths: string[] }) => { reviews++; return JSON.stringify({ productPhoto: input.imagePaths[0] === actual }); },
-    } : require(name) });
+    } : createRequire(path.resolve("scripts/lib/product-photo-review.ts"))(name) });
     assert.equal(await module.exports.selectVerifiedProductPhoto([dir, "missing.png", ...copies, actual], "상품"), actual);
     assert.equal(reviews, 2, "13 copies of one notice consume only one review, preserving the true-photo candidate");
     assert.equal(await module.exports.selectVerifiedProductPhoto(copies, "상품"), null);

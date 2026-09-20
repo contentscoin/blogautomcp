@@ -1,4 +1,4 @@
-import { parsePreparedTopicContent } from "@/lib/topic-task-contract";
+import { parsePreparedTopicContent } from "./topic-task-contract";
 
 const GENERIC_IMAGE_PROVIDERS = new Set(["loremflickr", "picsum", "dummyimage", "stock-generic"]);
 
@@ -10,6 +10,7 @@ export interface TopicTaskPreparedImageLike {
 
 export interface TopicTaskPublishReadinessInput {
   status?: string | null;
+  pipelineStage?: string | null;
   selectedDraftId: string | null;
   preparedContentJson: string | null;
   preparedImages?: TopicTaskPreparedImageLike[] | null;
@@ -20,6 +21,7 @@ export interface TopicTaskPublishReadiness {
   code:
     | "ok"
     | "publishing"
+    | "outcome-unknown"
     | "not-prepared"
     | "missing-images"
     | "generic-images";
@@ -46,7 +48,16 @@ function isResolvedImage(image: TopicTaskPreparedImageLike): boolean {
 
 export function getTopicTaskPublishReadiness(
   task: TopicTaskPublishReadinessInput,
+  isUsableFile?: (localPath: string) => boolean,
 ): TopicTaskPublishReadiness {
+  if (task.pipelineStage === "OUTCOME_UNKNOWN") {
+    return {
+      canPublish: false, code: "outcome-unknown",
+      reason: "이전 제출 결과를 확인하지 못했습니다. 실제 발행/예약 결과 확인 및 수동 복구 전에는 다시 제출할 수 없습니다. 재준비로 해제할 수 없습니다.",
+      needsPrepare: false, resolvedImageCount: 0, genericResolvedImageCount: 0,
+      hasHero: false, heroIsGeneric: false, allImagesAreGeneric: false,
+    };
+  }
   if ((task.status || "").toUpperCase() === "PUBLISHING") {
     return {
       canPublish: false,
@@ -75,7 +86,9 @@ export function getTopicTaskPublishReadiness(
     };
   }
 
-  const resolvedImages = (task.preparedImages || []).filter(isResolvedImage);
+  const resolvedImages = (task.preparedImages || []).filter(
+    (image) => isResolvedImage(image) && (!isUsableFile || isUsableFile(image.localPath!)),
+  );
   const hasHero = resolvedImages.some((image) => (image.role || "").toLowerCase() === "hero");
   const heroImage = resolvedImages.find((image) => (image.role || "").toLowerCase() === "hero");
   const genericResolvedImages = resolvedImages.filter((image) =>
@@ -129,4 +142,31 @@ export function getTopicTaskPublishReadiness(
     heroIsGeneric,
     allImagesAreGeneric,
   };
+}
+
+export function parseTopicSourceUrls(raw: string | null | undefined): string[] {
+  try {
+    const value: unknown = JSON.parse(raw || "[]");
+    return Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === "string" && /^https?:\/\//i.test(item))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Only accept the post URL observed from this submission, never a latest-post lookup. */
+export function isTopicPublishedUrl(raw: string, blogId: string): boolean {
+  if (!blogId) return false;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:" || !["blog.naver.com", "m.blog.naver.com"].includes(url.hostname)) return false;
+    if (url.pathname.toLowerCase() === "/postview.naver") {
+      return url.searchParams.get("blogId") === blogId && /^[1-9]\d*$/.test(url.searchParams.get("logNo") || "");
+    }
+    const parts = url.pathname.split("/").filter(Boolean);
+    return parts.length === 2 && parts[0] === blogId && /^[1-9]\d*$/.test(parts[1]);
+  } catch {
+    return false;
+  }
 }

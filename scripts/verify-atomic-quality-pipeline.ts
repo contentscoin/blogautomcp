@@ -57,10 +57,11 @@ const liveTravel: TravelPageResearch = {
 };
 
 const merged = mergeProductInfo(
-  product({ features: ["용량: 3.5kg"], travelPageResearch: priorTravel }),
+  product({ features: ["용량: 3.5kg", "관리: 필터 분리 세척"], travelPageResearch: priorTravel }),
   product({ description: "히트펌프 방식의 소형 건조기", features: ["소비전력: 700W"], travelPageResearch: liveTravel }),
 );
-assert.deepEqual(merged.features, ["용량: 3.5kg", "소비전력: 700W"], "live facts must extend rather than replace prior facts");
+assert.deepEqual(merged.features, ["소비전력: 700W", "관리: 필터 분리 세척"], "live facts replace stale selected-option rows while retaining additive non-option facts");
+assert.ok(!merged.features.includes("용량: 3.5kg"), "cached capacity must be re-observed before it becomes current option evidence");
 assert.match(merged.description, /3\.5kg 건조기/u);
 assert.match(merged.description, /히트펌프 방식/u);
 assert.deepEqual(merged.travelPageResearch?.highlights.map((item) => item.name), ["로마", "융프라우"]);
@@ -74,6 +75,34 @@ assert.equal(isSameProductInfoIdentity(
   product({ name: "삼성 비스포크 건조기 DV20", finalUrl: "https://naver.me/abc" }),
   product({ name: "삼성 비스포크 냉장고 DV20", finalUrl: "https://brand.naver.com/samsung/products/999" }),
 ), false, "one missing locator plus shared brand/model tokens cannot merge two different product categories");
+assert.equal(isSameProductInfoIdentity(
+  product({
+    name: "향좋은 아비노 고보습 민감피부 저자극 바디워시 스트레스릴리프(라벤더향), 532ml, 2개",
+    finalUrl: "https://naver.me/avino",
+  }),
+  product({
+    name: "향좋은 아비노 고보습 민감피부 저자극 바디워시 스트레스릴리프(라벤더향), 532ml, 2개 : 켄뷰 공식몰",
+    finalUrl: "https://brand.naver.com/aveeno/products/12345",
+  }),
+), true, "detail-page store suffix must not break product identity when the core title matches");
+assert.equal(isSameProductInfoIdentity(
+  product({ name: "스마트카라 스톤 음식물처리기 2L 건조분쇄형 SC-S0201", finalUrl: "https://naver.me/a" }),
+  product({ name: "스마트카라 스톤 음식물처리기 2L 건조분쇄형 SC-S0201 : 스마트카라", finalUrl: "https://brand.naver.com/x/products/2" }),
+), true, "colon + brand-only store label must still match");
+assert.doesNotThrow(
+  () => mergeProductInfo(
+    product({
+      name: "향좋은 아비노 고보습 민감피부 저자극 바디워시 스트레스릴리프(라벤더향), 532ml, 2개",
+      finalUrl: "https://naver.me/avino",
+    }),
+    product({
+      name: "향좋은 아비노 고보습 민감피부 저자극 바디워시 스트레스릴리프(라벤더향), 532ml, 2개 : 켄뷰 공식몰",
+      finalUrl: "https://brand.naver.com/aveeno/products/12345",
+      description: "라벤더향 바디워시",
+    }),
+  ),
+  "store-suffixed live detail must merge into the stored shopping product",
+);
 
 const sparseTenDay: TravelPageResearch = {
   source: "naver-package-next-data",

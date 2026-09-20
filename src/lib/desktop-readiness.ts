@@ -1,5 +1,7 @@
 import { getDesktopActivitySnapshot } from "@/lib/desktop-activity";
 import { prisma } from "@/lib/db";
+import { hasPendingRemoteCompletions } from "@/lib/remote-agent-completion";
+import { getUserDataRoot } from "../../scripts/lib/app-paths";
 
 export async function getDesktopReadiness() {
   const [runningPosts, publishingLinks, publishingTopics, draftingLinks] = await Promise.all([
@@ -9,7 +11,8 @@ export async function getDesktopReadiness() {
     prisma.brandLink.count({ where: { status: "DRAFTING" } }),
   ]);
   const desktopActivities = getDesktopActivitySnapshot();
-  const activeCount = runningPosts + publishingLinks + publishingTopics + draftingLinks + desktopActivities.count;
+  const pendingRemoteCompletions = hasPendingRemoteCompletions(getUserDataRoot());
+  const activeCount = runningPosts + publishingLinks + publishingTopics + draftingLinks + desktopActivities.count + Number(pendingRemoteCompletions);
 
   return {
     ready: activeCount === 0,
@@ -20,6 +23,7 @@ export async function getDesktopReadiness() {
       draftingLinks,
       topicTasks: publishingTopics,
       processes: desktopActivities.count,
+      pendingRemoteCompletions,
       processKinds: desktopActivities.activities.map((item) => item.label),
     },
   };

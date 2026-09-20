@@ -6,6 +6,7 @@
 import { prisma } from "@/lib/db";
 import { createTaskLogger } from "../../scripts/lib/logger";
 import { runTsNodeScript } from "@/lib/run-script";
+import { beginDesktopActivity } from "@/lib/desktop-activity";
 
 const log = createTaskLogger("Scheduler");
 
@@ -95,15 +96,20 @@ export async function executeScheduledPost(
   options: { forceRun?: boolean } = {},
 ): Promise<boolean> {
   const { forceRun = false } = options;
+  if (process.env.DESKTOP_UPDATE_INSTALL_PENDING === "1") return false;
+  const finish = beginDesktopActivity("legacy-post-scheduler");
 
   log.info(`예약 발행 시작: ${postId}`);
+  let ownsClaim = false;
 
     try {
         // 상태를 RUNNING으로 변경
-        await prisma.post.update({
-            where: { id: postId },
+        const claimed = await prisma.post.updateMany({
+            where: { id: postId, status: "PENDING", ...(forceRun ? {} : { scheduledAt: { lte: new Date() } }) },
             data: { status: "RUNNING" },
         });
+        if (claimed.count !== 1) return false;
+        ownsClaim = true;
 
         // 게시물 정보 조회
         const post = await prisma.post.findUnique({ where: { id: postId } });
@@ -124,8 +130,8 @@ export async function executeScheduledPost(
 
         if (!forceRun && scheduledDate && scheduledDate.getTime() > now.getTime()) {
             log.info(`예약발행일이 미래여서 건너뜁니다. postId=${postId}, scheduledAt=${seed.scheduledDate}`);
-            await prisma.post.update({
-                where: { id: postId },
+            await prisma.post.updateMany({
+                where: { id: postId, status: "RUNNING" },
                 data: {
                     status: "PENDING",
                     errorMessage: null,
@@ -161,14 +167,7 @@ export async function executeScheduledPost(
             select: { status: true, title: true, finalUrl: true },
         });
 
-        if (refreshedPost?.status === "RUNNING") {
-            await prisma.post.update({
-                where: { id: postId },
-                data: {
-                    status: "SUCCESS",
-                },
-            });
-        }
+        if (refreshedPost?.status !== "SUCCESS") throw new Error("발행 프로세스가 성공 결과를 저장하지 않았습니다. 자동 재시도 없이 실제 발행 여부를 확인하세요.");
 
         log.info(`발행 성공: ${refreshedPost?.title || post.title || seed.topic}`, {
             finalUrl: refreshedPost?.finalUrl,
@@ -177,35 +176,17 @@ export async function executeScheduledPost(
 
     } catch (error: unknown) {
         log.error(`발행 실패: ${postId}`, error instanceof Error ? error : undefined);
+        if (!ownsClaim) return false;
 
-        // 재시도 횟수 확인
-        const post = await prisma.post.findUnique({ where: { id: postId } });
-        const retryCount = (post?.retryCount || 0) + 1;
-
-        if (retryCount >= 3) {
-            // 최대 재시도 초과
-            await prisma.post.update({
-                where: { id: postId },
-                data: {
-                    status: "FAIL",
-                    errorMessage: getErrorMessage(error),
-                    retryCount,
-                },
-            });
-        } else {
-            // 재시도 대기
-            await prisma.post.update({
-                where: { id: postId },
-                data: {
-                    status: "PENDING",
-                    errorMessage: getErrorMessage(error),
-                    retryCount,
-                },
-            });
-        }
+        // A timeout may follow an external publish. Never replay or overwrite a
+        // terminal result written by the publishing process or a cancellation.
+        await prisma.post.updateMany({
+            where: { id: postId, status: "RUNNING" },
+            data: { status: "FAIL", errorMessage: `${getErrorMessage(error)} 실제 발행 여부를 확인한 뒤 수동으로 재개하세요.`, retryCount: { increment: 1 } },
+        });
 
         return false;
-    }
+    } finally { finish(); }
 }
 
 /**

@@ -11,6 +11,17 @@ export const OUTBOX_MAX_BYTES = COMPLETION_BODY_MAX_BYTES + 1024;
 type OutboxRecord = PendingCompletion | { blocked: string };
 const memoryPending = new Map<string, OutboxRecord>();
 
+/** Include inactive activations and failed disk writes; rejected results are no longer queued. */
+export function hasPendingRemoteCompletions(root: string): boolean {
+  const directory = path.join(root, 'remote-agent-completions');
+  if (Array.from(memoryPending.keys()).some(file => path.dirname(file) === directory)) return true;
+  try { return fs.readdirSync(directory).some(name => name.endsWith('.json') || name.endsWith('.tmp')); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    return true; // An unreadable queue cannot prove restart safety.
+  }
+}
+
 function checkedRecord(value: OutboxRecord): PendingCompletion {
   if ('blocked' in value) throw new Error('Completion outbox blocked: inspect local result before retrying');
   if (!value?.job || typeof value.job.id !== 'string' || !/^job_[A-Za-z0-9_-]{1,80}$/.test(value.job.id) || typeof value.job.type !== 'string' || value.job.type.length > 100 || !['SUCCEEDED', 'FAILED'].includes(String(value.body?.status))) throw new Error('Invalid completion outbox');

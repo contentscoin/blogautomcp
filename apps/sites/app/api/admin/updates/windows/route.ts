@@ -14,7 +14,6 @@ import {
 import {
   MAX_BLOCKMAP_BYTES,
   WINDOWS_RELEASE_POINTER_KEY,
-  WINDOWS_UPDATE_MANIFEST_KEY,
   compareStableVersions,
   installerVersionFromName,
   parseUpdateManifest,
@@ -125,11 +124,8 @@ export async function POST(request: Request) {
       blockmapSize: blockmap.size,
       releaseDate: parsed.releaseDate,
       publishedAt: now,
+      manifest,
     };
-    await env.INSTALLERS.put(WINDOWS_UPDATE_MANIFEST_KEY, manifest, {
-      httpMetadata: { contentType: 'application/yaml; charset=utf-8', cacheControl: 'no-store' },
-      customMetadata: { version: release.version },
-    });
     await env.INSTALLERS.put(WINDOWS_RELEASE_POINTER_KEY, JSON.stringify(release), {
       httpMetadata: { contentType: 'application/json', cacheControl: 'no-store' },
       customMetadata: { version: release.version },

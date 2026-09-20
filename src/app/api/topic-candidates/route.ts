@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { spawn } from "child_process";
-import { readFile, unlink } from "fs/promises";
-import { tmpdir } from "os";
-import { join } from "path";
+import { runCodexDraft, codexDraftTerminalFailureCode } from "../../../../scripts/lib/codex-draft-provider";
+import { extractJsonObject } from "../../../../scripts/lib/openai-text";
+import { TEXT_MODEL } from "../../../../scripts/lib/text-model-policy";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { beginDesktopActivity } from "@/lib/desktop-activity";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
@@ -186,63 +185,26 @@ function summarizeCodexFailure(result: CodexRunResult | null, fallbackMessage: s
   return fallbackMessage;
 }
 
-function runCodex(prompt: string, outputFile: string): Promise<CodexRunResult> {
-  return new Promise((resolve) => {
-    const finishActivity = beginDesktopActivity("topic-candidates");
-    const codexBin =
-      process.env.CODEX_BIN ||
-      "/Users/jakeshin/.nvm/versions/node/v20.19.5/bin/codex";
-
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    let timedOut = false;
-    const finish = (result: CodexRunResult) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeoutHandle);
-      finishActivity();
-      resolve(result);
+async function runCodex(prompt: string): Promise<CodexRunResult> {
+  const finishActivity = beginDesktopActivity("topic-candidates");
+  try {
+    const stdout = await runCodexDraft({
+      systemPrompt: "한국어 블로그 후보를 요청된 JSON 객체로만 반환하세요.",
+      userPrompt: prompt,
+      model: TEXT_MODEL,
+      timeoutMs: getCodexTimeoutMs(),
+    });
+    return { stdout, stderr: "", exitCode: 0 };
+  } catch (error) {
+    return {
+      stdout: "",
+      stderr: error instanceof Error ? error.message : String(error),
+      exitCode: 1,
+      timedOut: codexDraftTerminalFailureCode(error) === "CODEX_TIMEOUT",
     };
-    const proc = spawn(
-      codexBin,
-      ["exec", "--full-auto", "--ephemeral", "--skip-git-repo-check", "-o", outputFile, "-"],
-      {
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          OTEL_SDK_DISABLED: process.env.OTEL_SDK_DISABLED || "true",
-        },
-        stdio: ["pipe", "pipe", "pipe"],
-      },
-    );
-    const timeoutHandle = setTimeout(() => {
-      timedOut = true;
-      if (proc.pid) {
-        try {
-          proc.kill("SIGTERM");
-        } catch {
-          // ignore
-        }
-      }
-      finish({ stdout, stderr, exitCode: null, timedOut: true });
-    }, getCodexTimeoutMs());
-
-    proc.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    proc.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-
-    proc.stdin.write(prompt, "utf-8");
-    proc.stdin.end();
-
-    proc.on("close", (exitCode) => finish({ stdout, stderr, exitCode, timedOut }));
-    proc.on("error", (error) =>
-      finish({ stdout, stderr: `${stderr}\n${error.message}`.trim(), exitCode: null, timedOut }),
-    );
-  });
+  } finally {
+    finishActivity();
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -265,8 +227,6 @@ export async function POST(req: NextRequest) {
   }
 
   const categoryLabel = CATEGORIES[category] || category;
-  const ts = Date.now();
-  const outputFile = join(tmpdir(), `topic-output-${ts}.txt`);
 
   const prompt = `당신은 네이버 블로그 전문 작가입니다. 아래 JSON만 출력하세요 (코드블록, 설명 없이 raw JSON만).
 
@@ -274,27 +234,18 @@ export async function POST(req: NextRequest) {
 키워드: ${keyword}
 
 형식:
-{"topics":[{"title":"제목(30자이내)","subtopics":[{"subtitle":"소주제1","summary":"한줄설명"},{"subtitle":"소주제2","summary":"한줄설명"},{"subtitle":"소주제3","summary":"한줄설명"}],"content":"## 소주제1\\n내용(각소주제별100~200자, 1인칭, 감성적)\\n\\n## 소주제2\\n내용\\n\\n## 소주제3\\n내용","image_prompt":"English photo prompt (warm natural lighting, lifestyle, bokeh)","hashtags":["#태그1","#태그2","#태그3","#태그4","#태그5","#태그6","#태그7"]}]}
+{"topics":[{"title":"제목(30자이내)","subtopics":[{"subtitle":"소주제1","summary":"한줄설명"},{"subtitle":"소주제2","summary":"한줄설명"},{"subtitle":"소주제3","summary":"한줄설명"}],"content":"## 소주제1\\n내용(각소주제별100~200자, 정보형, 사실 기반)\\n\\n## 소주제2\\n내용\\n\\n## 소주제3\\n내용","image_prompt":"English photo prompt (warm natural lighting, lifestyle, bokeh)","hashtags":["#태그1","#태그2","#태그3","#태그4","#태그5","#태그6","#태그7"]}]}
 
-위 형식으로 서로 다른 각도의 소재 10개를 담은 JSON을 출력하세요. JSON만 출력, 다른 텍스트 없음.`;
+위 형식으로 서로 다른 각도의 소재 10개를 담은 JSON을 출력하세요. 문체 예시보다 사실성이 우선입니다. 정보형으로 작성하고, 제공된 체험 증빙이 없으므로 1인칭 구매·사용·방문·후기나 고객 반응을 만들지 마세요. 출처 없는 숫자·성능은 생략하세요. JSON만 출력, 다른 텍스트 없음.`;
 
   try {
-    const result = await runCodex(prompt, outputFile);
+    const result = await runCodex(prompt);
     if (result.timedOut) throw new Error(summarizeCodexFailure(result, "생성 시간 초과"));
-
-    let output: string;
-    try {
-      output = await readFile(outputFile, "utf-8");
-    } catch {
-      output = result.stdout;
+    if (result.exitCode !== 0) throw new Error(summarizeCodexFailure(result, "생성 실패"));
+    const data = extractJsonObject<{ topics: unknown[] }>(result.stdout);
+    if (!data || !Array.isArray(data.topics) || data.topics.length === 0) {
+      throw new Error("주제 후보 응답에 topics 배열이 없습니다.");
     }
-
-    const jsonMatch = output.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      throw new Error(summarizeCodexFailure(result, `JSON을 찾을 수 없습니다. 출력: ${output.slice(0, 300)}`));
-    }
-
-    const data = JSON.parse(jsonMatch[0]) as { topics: unknown[] };
     return NextResponse.json(data);
   } catch (e) {
     const msg = e instanceof Error ? e.message : "생성 실패";
@@ -304,7 +255,5 @@ export async function POST(req: NextRequest) {
       fallback: true,
       warning: "Codex 생성이 실패해 로컬 후보 생성으로 대체했습니다.",
     });
-  } finally {
-    unlink(outputFile).catch(() => {});
   }
 }

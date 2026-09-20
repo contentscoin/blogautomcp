@@ -5,6 +5,7 @@
 const clean = (value: string) => value.normalize("NFKC").replace(/\s+/gu, " ").trim();
 
 const LABEL_ALIASES: Record<string, string> = {
+  "피부타입": "피부타입", "향계열": "향계열", "세부제품특징": "세부제품특징", "용기형태": "용기형태",
   "원재료명": "원재료", "원재료명및함량": "원재료", "원재료및함량": "원재료",
   "보관및취급방법": "보관조건", "보관및취급시주의사항": "보관조건", "보관방법": "보관조건",
   "식품의유형": "식품유형", "식품유형": "식품유형", "부위": "부위",
@@ -15,7 +16,7 @@ const LABEL_ALIASES: Record<string, string> = {
   "정격전압": "전압", "정격전압,소비전력": "전원규격", "정격전압및소비전력": "전원규격",
   "배터리용량": "배터리", "흡입력": "흡입력", "흡입압력": "흡입력",
 };
-const LABELS = new Set(("용량 규격 표시규격 크기 사이즈 가로 세로 높이 폭 깊이 두께 지름 직경 무게 중량 소재 재질 원재료 성분 함량 구성품 구성 수량 개수 색상 전압 정격 소비전력 출력 배터리 충전시간 사용시간 작동시간 풍량 온도 모드 단계 회전각도 방수 방진 호환 원산지 제조국 보관조건 유통기한 소비기한 알레르기 세탁방법 세척방법 기능 식품유형 부위 영양정보 효율등급 전원규격 흡입력").split(" "));
+const LABELS = new Set(("용량 규격 표시규격 크기 사이즈 가로 세로 높이 폭 깊이 두께 지름 직경 면적 무게 중량 소재 재질 원재료 성분 함량 구성품 구성 수량 개수 색상 전압 정격 소비전력 출력 배터리 충전시간 사용시간 작동시간 풍량 온도 모드 단계 회전각도 방수 방진 호환 원산지 제조국 보관조건 유통기한 소비기한 알레르기 세탁방법 세척방법 기능 식품유형 부위 영양정보 효율등급 전원규격 흡입력").split(" "));
 
 export function normalizeProductFactLabel(label: string): string {
   const key = clean(label).replace(/\s+/gu, "");
@@ -48,12 +49,14 @@ export function normalizeTypedProductFact(value: string): string {
 export const PRODUCT_MEASUREMENT_PATTERN = /\d[\d,.]*\s*(?:mAh|rpm|mL|L|mm|cm|kg|g|kW|mW|W|kPa|Pa|V|m|시간|분|단|도|개|엽|%)(?![a-z])/iu;
 
 const FOOD_NAME_PATTERN = /(?:소갈비살|갈비살|늑간살|소갈비|LA\s*갈비|소곱창|통대창|곱창|막창|대창|특양|소고기|돼지고기|닭고기|김치|밀키트|볶음밥|냉동만두)/iu;
-const APPLIANCE_PATTERN = /(?:청소기|에어프라이어|오븐|그릴|냄비|프라이팬|보관함|용기|가습기|건조기|선풍기|서큘레이터|써큘레이터|드라이기|드라이어|고데기)/u;
+const APPLIANCE_PATTERN = /(?:청소기|에어프라이어|오븐|그릴|냄비|프라이팬|보관함|용기|가습기|건조기|음식물\s*처리기|선풍기|서큘레이터|써큘레이터|드라이기|드라이어|고데기)/u;
 const UNSUPPORTED_CONTEXT = /(?:추측|예상|가능할|같아요|할까요|\?)/u;
 const UNSUPPORTED_FOOD_CONTEXT = /(?:미포함|불포함|제외|아니[가-힣]*|아닌|아닙[가-힣]*|없(?:음|는|다)|옵션|선택|예정|미확인|여부)/u;
 
 /** Exact functional phrases only; preserve their spelling, never infer a model's specs. */
 const FUNCTION_PATTERNS = [
+  // Literal seller terms, not inferred from a brand/model or from the category.
+  /건조\s*분쇄형/gu, /눌음\s*방지/gu,
   /자동\s*온수\s*세척/gu, /자동\s*세척/gu, /열풍\s*건조/gu,
   /엉킴\s*방지\s*(?:시스템)?/gu, /모서리\s*밀착\s*청소\s*브러시/gu,
   /습건식\s*동시\s*청소/gu, /물자국\s*방지/gu,

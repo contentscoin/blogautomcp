@@ -121,6 +121,7 @@ try {
     userDataDir: temporaryDirectory,
     getReadiness: async () => {
       readinessChecks += 1;
+      if (readinessChecks === 3) throw new Error('fixture readiness unavailable');
       return { ready: readinessChecks > 1 };
     },
     beforeInstall: async () => {
@@ -147,7 +148,7 @@ try {
   updater.emit('update-downloaded', { version: '1.1.1' });
   assert.equal(process.env.DESKTOP_UPDATE_INSTALL_PENDING, '1');
   await waitFor(() => updater.installArguments !== null, '유휴 상태에서 자동 설치가 시작되지 않았습니다.');
-  assert.equal(readinessChecks, 3);
+  assert.equal(readinessChecks, 5);
   assert.equal(preparedForInstall, true);
   assert.deepEqual(updater.installArguments, [true, true]);
   assert.equal(manager.getState().status, 'installing');
@@ -190,7 +191,7 @@ try {
     provider: updater.options.provider,
     authHeaderAttached: true,
     updateDetected: true,
-    waitsForIdle: readinessChecks === 3,
+    waitsForIdle: readinessChecks === 5,
     silentInstallRequested: updater.installArguments[0] === true,
     relaunchRequested: updater.installArguments[1] === true,
     tokenRedacted: true,

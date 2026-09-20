@@ -57,6 +57,7 @@ export type BrandLinkReadinessCode =
   | "unsupported-experience-claim"
   | "commission-rate-exposed"
   | "internal-guidance-leak"
+  | "unsupported-option-claim"
   | "missing-review-substance"
   | "low-evidence-density"
   | "generic-guidance-heavy"
@@ -229,6 +230,10 @@ export const COMMISSION_RATE_PATTERNS = [
 ] as const;
 
 export const INTERNAL_GUIDANCE_PATTERNS = [
+  /(?:이번|제공된|수집된)\s*자료(?:에는|에서|에|는)?\s*(?:구매\s*)?(?:후기|리뷰)(?:\s*원문)?(?:이|은|가|는)?\s*(?:제공되지|없(?:어|습|다|으|는))/u,
+  /(?:제공된\s*)?(?:구매\s*)?후기\s*원문(?:이|은|을|는)?\s*(?:(?:현재|따로|별도로|아직)\s*)?(?:제공되지|없(?:어|습|다|으|는)|확인(?:되지|할\s*수\s*없))/u,
+  /(?:후기|리뷰)[^.!?\n]{0,20}(?:수집|제공|확보)(?:하지|되지|하지는|되지는)\s*않/u,
+  /(?:추천\s*문장|후기처럼).{0,30}(?:빼는\s*편|만들어\s*말|지어내)/u,
   /상위\s*노출\s*글에서/u,
   /제품명,\s*사용\s*장면,\s*구매\s*전\s*확인\s*포인트/u,
   /상세페이지의\s*주요\s*기능\s*같은\s*정보/u,
@@ -237,6 +242,35 @@ export const INTERNAL_GUIDANCE_PATTERNS = [
   /(?:작성\s*(?:규칙|지침|가이드|프로세스)|프롬프트|출력\s*형식|json\s*만|시스템\s*지시|사용자\s*요청)/iu,
   /(?:recommendedSectionTitles|sections\s*:|hashtags\s*:)/iu,
 ] as const;
+
+/** Quantity alone is never evidence of a refill variant. Negation and questions
+ * are evaluated per clause so an unrelated negative cannot license a claim. */
+function affirmativeRefillClauses(value: string): string[] {
+  return value.split(/[.!?。\n]|[,;]|(?:지만|그러나|반면)/u).filter(clause => {
+    const match = /리필|\brefill\b/iu.exec(clause);
+    if (!match) return false;
+    const tail = clause.slice(match.index);
+    if (/인가요|있나요|되나요|일까요|할까요|비교(?:해|하|할)|(?:인지|여부)를?\s*확인/u.test(tail)) return false;
+    if (/(?:리필|refill)[^.!?\n]{0,35}(?:미포함|불포함|별도|제외|없(?:음|어|습|다|는)|아니|아님|아닙|않|불가|불명|미확인|확인되지|확인할\s*수\s*없|여부|인지|확인\s*(?:필요|하세요)|포함\s*안)/iu.test(tail)) return false;
+    if (/\b(?:no|without)\s+(?:a\s+)?refill\b|\brefill\b.{0,25}\b(?:not|excluded|separately|unknown)\b/iu.test(clause)) return false;
+    return true;
+  });
+}
+
+export function hasUnsupportedRefillClaim(body: string, source: string): boolean {
+  const claims = affirmativeRefillClauses(body).filter(clause =>
+    /(?:본품\s*[+＋]|리필|refill)/iu.test(clause) &&
+    /(?:포함|구성|제공|동봉|들어|세트|증정|사용|쓸|교체|채워|리필형|본품\s*[+＋]|\d+\s*(?:개|팩)|\bincluded\b)/iu.test(clause));
+  if (!claims.length) return false;
+  const evidence = affirmativeRefillClauses(source);
+  if (!evidence.length) return true;
+  const bundle = /본품\s*(?:[+＋]|과|및)\s*리필|리필\s*(?:[+＋]|과|및)\s*본품/u;
+  if (claims.some(clause => bundle.test(clause)) && !evidence.some(clause => bundle.test(clause))) return true;
+  const inclusion = /포함|구성|제공|동봉|들어|세트|증정|본품\s*[+＋]|\d+\s*(?:개|팩)|\bincluded\b/iu;
+  // Refill compatibility does not establish that a refill is in the selected box.
+  return claims.some(clause => inclusion.test(clause)) && !evidence.some(clause =>
+    inclusion.test(clause) || !/사용|가능|호환|교체/iu.test(clause));
+}
 
 function normalizeText(value: string | null | undefined): string {
   return typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
@@ -402,7 +436,10 @@ function buildQualityReport(input: {
     label: "정보의 구체성",
     maxScore: 15,
     score: Math.min(15, specificityScore),
-    status: categoryStatus(specificityFail ? 0 : 15, 15, specificityFail),
+    // Stylistic quotas are advisory. A source-backed article must not invent
+    // care/use instructions or travel history just to fill a sentence count.
+    // Its score still falls; evidence/linkage, safety and total-score gates stay.
+    status: specificityFail ? "warn" : "pass",
     notes: specificityNotes,
   };
 
@@ -779,6 +816,10 @@ export function getBrandLinkContentReadiness(
 
   // ---- 하드 차단 (점수와 무관) ----
   const blockers: BrandLinkReadinessBlocker[] = [];
+  const sourceCorpus = [input.productName, input.sourceDescription || "", ...(input.sourceFeatures || [])].join("\n");
+  if (!isTravel && hasUnsupportedRefillClaim([title, fullBody].join("\n"), sourceCorpus)) {
+    blockers.push({ code: "unsupported-option-claim", tier: "safety", reason: "선택 상품의 출처에 없는 리필 구성을 본문에서 주장합니다. 본품·리필과 수량은 현재 선택 옵션 근거로 다시 확인하세요." });
+  }
   if (!trustedGenerationSource) {
     blockers.push({
       code: "non-generative-fallback",

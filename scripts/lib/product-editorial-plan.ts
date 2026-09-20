@@ -253,7 +253,7 @@ export function isMeaningfulProductEvidenceFeature(value: string): boolean {
   if (/^(?:추천|인기|베스트|신상품|핫딜|특가|무료배송|오늘출발)$/u.test(normalized)) return false;
 
   const hasMeasurement = PRODUCT_MEASUREMENT_PATTERN.test(normalized);
-  const hasSpecificationRelation = /(?:최대|약|기준|사용시간|충전시간|소비전력|크기|무게|사이즈|구성품|구성|헤드|트리머|인디케이터|잠금|회전|각도|풍속|풍량|배터리|리모컨|방수|소재|모드|단계|분리|접이식|칸막이|손잡이|변환|호환|보증)/u.test(normalized);
+  const hasSpecificationRelation = /(?:최대|약|기준|사용시간|충전시간|충전\s*지원|무선\s*충전|소비전력|전압|온도|크기|무게|사이즈|구성품|구성|헤드|트리머|인디케이터|잠금|회전|각도|풍속|풍량|배터리|리모컨|방수|소재|모드|단계|분리|접이식|칸막이|손잡이|변환|호환|보증|바디\s*워시|바디워시|바디\s*클렌저|바디클렌저|바디케어|피부타입|민감성|민감피부|저자극|고보습|보습|약산성|트러블케어|향계열|향료|라벤더|펌프형|용기형태)/u.test(normalized);
   const hasTypedPair = Boolean(normalizeTypedProductFact(normalized));
   return hasMeasurement || hasSpecificationRelation || hasTypedPair;
 }
@@ -661,10 +661,19 @@ export function hasSufficientProductReviewEvidence(input: ProductEditorialPlanIn
 /** 판매 페이지에서 확인된 사실을 `라벨: 값` 줄로 만든다. 프롬프트와 품질 채점이 같은 줄을 본다. */
 export function buildProductVerifiedFactLines(input: ProductEditorialPlanInput): string[] {
   const description = meaningfulDescription(input.description, input.productName);
+  // Collector itinerary records are not shopping feature claims. Preserve their
+  // labels and all supplied days for the travel coverage gate; never derive
+  // missing rows from the product title or a prose description.
+  const collectorLines = Array.from(new Set((input.features || [])
+    .flatMap((value) => value.split(/\r?\n/u))
+    .map((value) => value.trim())
+    .filter((value) => /^(?:여행\s*기간\s*[:：]\s*[1-9]\d?\s*일|핵심\s*방문지\s*[:：]\s*\S.*|[1-9]\d?\s*일차\s*일정\s*[:：]\s*\S.*)$/u.test(value))));
+  const collectorKeys = new Set(collectorLines.map(clean));
   return [
     clean(input.productName) ? `상품명: ${clean(input.productName)}` : "",
     description ? `설명: ${description}` : "",
-    ...meaningfulFeatures(input.features, input.productName).slice(0, 10).map((value) => `상세 근거: ${value}`),
+    ...collectorLines,
+    ...meaningfulFeatures(input.features, input.productName).filter((value) => !collectorKeys.has(clean(value))).slice(0, 10).map((value) => `상세 근거: ${value}`),
     ...reviewEvidenceFeatures(input.features).slice(0, 4).map((value) => `구매후기 원문 근거: ${value}`),
     clean(input.price) ? `가격: ${clean(input.price)}` : "",
     clean(input.originalPrice) ? `원가: ${clean(input.originalPrice)}` : "",

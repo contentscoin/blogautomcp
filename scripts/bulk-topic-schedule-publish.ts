@@ -1,13 +1,18 @@
 import "dotenv/config";
+import { register } from "tsconfig-paths";
+register({ baseUrl: process.cwd(), paths: { "@/*": ["src/*"] } });
 import path from "path";
 import { spawn } from "child_process";
 import { PrismaClient } from "../src/generated/prisma";
-import { parsePreparedTopicContent } from "../src/lib/topic-task-contract";
+import fs from "fs";
+import { getTopicTaskPublishReadiness, parseTopicSourceUrls } from "../src/lib/topic-task-publish-readiness";
+import { getTopicTaskContentReadiness } from "../src/lib/topic-task-content-readiness";
 
 interface CliOptions {
   limit: number;
   delayMs: number;
   dryRun: boolean;
+  taskIds?: string[];
 }
 
 function parseArgs(argv: string[]): CliOptions {
@@ -18,6 +23,14 @@ function parseArgs(argv: string[]): CliOptions {
   };
 
   for (const arg of argv) {
+    if (arg.startsWith("--task-ids=")) {
+      const ids: unknown = JSON.parse(arg.slice("--task-ids=".length));
+      if (!Array.isArray(ids) || ids.length === 0 || ids.length > 100 || ids.some((id) => typeof id !== "string" || !id.trim())) {
+        throw new Error("--task-ids must be a non-empty array of task IDs (max 100)");
+      }
+      options.taskIds = [...new Set(ids as string[])];
+      continue;
+    }
     if (arg === "--dry-run") {
       options.dryRun = true;
       continue;
@@ -54,16 +67,7 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "알 수 없는 오류";
 }
 
-const GENERIC_IMAGE_PROVIDERS = new Set(["loremflickr", "picsum", "dummyimage", "stock-generic"]);
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
-
-function normalizeProvider(provider: string | null | undefined): string {
-  const normalized = typeof provider === "string" ? provider.trim().toLowerCase() : "";
-  if (!normalized) return "unknown";
-  if (normalized === "stock") return "stock-generic";
-  if (normalized === "topic-craft-ai") return "ai";
-  return normalized;
-}
 
 function getPublishBlocker(
   task: {
@@ -72,29 +76,9 @@ function getPublishBlocker(
   },
   images: Array<{ localPath: string | null; provider: string | null; role: string | null }>,
 ): string | null {
-  if (!parsePreparedTopicContent(task.preparedContentJson) || !task.selectedDraftId) {
-    return "발행 전에 prepare 단계가 완료되어야 합니다. 먼저 주제글 준비를 다시 실행하세요.";
-  }
-
-  const resolvedImages = images.filter(
-    (image) => Boolean(image.localPath) && normalizeProvider(image.provider) !== "unresolved",
-  );
-  const heroImage = resolvedImages.find((image) => (image.role || "").toLowerCase() === "hero");
-  if (resolvedImages.length === 0 || !heroImage) {
-    return "준비된 이미지가 부족합니다. hero 포함 이미지가 실제 파일로 확보된 뒤에만 발행할 수 있습니다.";
-  }
-
-  const heroIsGeneric = GENERIC_IMAGE_PROVIDERS.has(normalizeProvider(heroImage.provider));
-  const allImagesAreGeneric = resolvedImages.every((image) =>
-    GENERIC_IMAGE_PROVIDERS.has(normalizeProvider(image.provider)),
-  );
-  if (heroIsGeneric || allImagesAreGeneric) {
-    return allImagesAreGeneric
-      ? "준비된 이미지가 전부 generic fallback 입니다. 다시 준비한 뒤 발행하세요."
-      : "대표(hero) 이미지가 generic fallback 입니다. 다시 준비한 뒤 발행하세요.";
-  }
-
-  return null;
+  return getTopicTaskPublishReadiness({ ...task, preparedImages: images }, (localPath) => {
+    try { const stat = fs.statSync(localPath); return stat.isFile() && stat.size > 0; } catch { return false; }
+  }).reason;
 }
 
 function runTopicAgent(
@@ -139,24 +123,20 @@ async function main() {
   try {
     const pending = await prisma.topicPostTask.findMany({
       where: {
+        ...(options.taskIds ? { id: { in: options.taskIds } } : {}),
         status: { in: ["PREPARED", "FAILED"] },
+        pipelineStage: { not: "OUTCOME_UNKNOWN" },
         scheduledPublishAt: { not: null },
         selectedDraftId: { not: null },
         preparedContentJson: { not: null },
       },
       orderBy: [{ scheduledPublishAt: "asc" }, { createdAt: "asc" }],
-      take: Math.min(Math.max(options.limit * 5, options.limit), 100),
-      select: {
-        id: true,
-        topic: true,
-        selectedDraftId: true,
-        preparedContentJson: true,
-        scheduledPublishAt: true,
-      },
+      take: options.taskIds ? options.taskIds.length : Math.min(Math.max(options.limit * 5, options.limit), 100),
     });
 
     if (pending.length === 0) {
       console.log("예약발행일이 설정된 준비완료 주제글이 없어 종료합니다.");
+      if (options.taskIds) process.exitCode = 1;
       return;
     }
 
@@ -165,7 +145,7 @@ async function main() {
     let attemptedCount = 0;
     let skippedCount = 0;
     let successCount = 0;
-    let failedCount = 0;
+    let failedCount = options.taskIds ? options.taskIds.length - pending.length : 0;
 
     for (let index = 0; index < pending.length; index += 1) {
       if (attemptedCount >= options.limit) break;
@@ -188,10 +168,18 @@ async function main() {
           })
         : [];
 
-      const publishBlocker = getPublishBlocker(task, draftImages);
+      const draft = task.selectedDraftId ? await prisma.topicDraft.findUnique({
+        where: { id: task.selectedDraftId },
+        select: { campaign: { select: { sourceUrls: true } } },
+      }) : null;
+      const publishBlocker = getPublishBlocker(task, draftImages) || getTopicTaskContentReadiness({
+        ...task,
+        sourceUrls: parseTopicSourceUrls(draft?.campaign.sourceUrls),
+      }).reason;
 
       if (publishBlocker) {
         skippedCount += 1;
+        if (options.taskIds) failedCount += 1;
         console.log(`건너뜀: ${publishBlocker}`);
         continue;
       }
@@ -204,8 +192,8 @@ async function main() {
         continue;
       }
 
-      await prisma.topicPostTask.update({
-        where: { id: task.id },
+      const claimed = await prisma.topicPostTask.updateMany({
+        where: { id: task.id, status: { in: ["PREPARED", "FAILED"] }, updatedAt: task.updatedAt, pipelineStage: { not: "OUTCOME_UNKNOWN" } },
         data: {
           status: "PUBLISHING",
           pipelineStage: "PUBLISHING",
@@ -213,6 +201,11 @@ async function main() {
           scheduledPublishAt,
         },
       });
+      if (claimed.count !== 1) {
+        skippedCount += 1;
+        if (options.taskIds) failedCount += 1;
+        continue;
+      }
 
       try {
         const result = await runTopicAgent(task.id, scheduledDate);
@@ -224,7 +217,7 @@ async function main() {
             where: { id: task.id, status: "PUBLISHING" },
             data: {
               status: "FAILED",
-              pipelineStage: "FAILED",
+              pipelineStage: "OUTCOME_UNKNOWN",
               errorMessage: `일괄 예약발행 스크립트 비정상 종료(${detail})`,
             },
           });
@@ -244,14 +237,14 @@ async function main() {
             where: { id: task.id },
             data: {
               status: "FAILED",
-              pipelineStage: "FAILED",
+              pipelineStage: "OUTCOME_UNKNOWN",
               errorMessage: "예약발행 처리 결과를 확인하지 못했습니다.",
             },
           });
         } else if (refreshed?.status === "FAILED") {
           failedCount += 1;
         } else {
-          successCount += 1;
+          failedCount += 1;
         }
       } catch (error: unknown) {
         failedCount += 1;
@@ -260,7 +253,7 @@ async function main() {
           where: { id: task.id, status: "PUBLISHING" },
           data: {
             status: "FAILED",
-            pipelineStage: "FAILED",
+            pipelineStage: "OUTCOME_UNKNOWN",
             errorMessage: `일괄 예약발행 실행 실패: ${message}`,
           },
         });

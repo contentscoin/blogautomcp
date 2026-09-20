@@ -264,7 +264,7 @@ async function main() {
 
     // 1. CLI 인자 파싱
     const input = parseArgs();
-    if (!input) return;
+    if (!input) throw new Error("필수 리뷰 인자가 누락되었습니다.");
 
     log.info(`장소: ${input.placeName}`);
     log.info(`카테고리: ${input.category}`);
@@ -321,9 +321,13 @@ async function main() {
     } catch (error) {
         log.error("발행 실패", { error });
         console.error("❌ 오류:", error);
+        throw error;
     } finally {
         await browser.close();
     }
 }
 
-main().catch(console.error);
+main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+});

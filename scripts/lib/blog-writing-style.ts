@@ -10,12 +10,28 @@ export const HUMAN_MOBILE_STYLE_GUIDE = `
 - 느낌표, 광고성 감탄, 과한 이모지는 줄이고 담백하게 설득하세요.
 - 직접 사용했다는 근거가 없는 내용은 단정하지 말고, 사진/스펙/가격/사용 상황을 바탕으로 자연스럽게 표현하세요.
 - 장점만 나열하지 말고 작은 아쉬움이나 참고할 점을 1개 이상 넣어 신뢰감을 주세요.
-- SEO 키워드는 문장 안에 자연스럽게 흩어 넣고, 같은 키워드를 억지로 반복하지 마세요.
+- SEO 키워드는 문장 안에 자연스럽게 흩어 넣고, 같은 핵심 키워드를 본문에 다섯 번을 넘기지 마세요. 지금은 반복 횟수보다 질문에 답이 됐는지가 중요합니다.
 - 인사말로 시작하지 말고 첫 문장부터 상황이나 문제로 바로 들어가세요.
 - "~이 아니라 ~이다" 대조 구문을 반복하지 마세요. 반전이 필요하면 문장을 끊어서 쓰세요.
 - "여정", "~자리", "진짜 기준" 같은 은유보다 실제 동작과 사실로 쓰세요.
 - "걱정 안 하셔도 돼요", "절대 ~하지 않아요" 같은 안심시키기용 문장은 넣지 마세요.
 - 안내 문장은 "~하시면 됩니다"보다 "어느 화면의 무엇을 누른다"처럼 구체적으로 쓰세요.
+`.trim();
+
+/**
+ * Naver AI Briefing citation shape (Logod free guide, 2026-09).
+ * AI picks answer paragraphs, not whole posts or search rank alone.
+ */
+export const NAVER_AI_CITATION_RULES = `
+## 답 중심 편집 권고 (검색 노출·인용 보장 아님)
+- 문단만 읽어도 질문에 대한 답과 조건이 드러나도록 씁니다.
+- 전체 섹션 수는 작성 계약을 따릅니다. 그중 질문형 소제목은 서너 개 이내를 권장하며 개수를 채우려고 질문을 만들지 마세요.
+- 실제 질문에 답하는 파트만 질문형으로 쓰고 나머지는 설명형으로 씁니다. 예: "제작 기간 안내" → "로고 제작은 며칠 걸리나요?"
+- 질문형 소제목 바로 아래 첫 두 줄에 답을 다 넣으세요. "먼저 배경을 말씀드리면"처럼 뜸을 들이지 마세요.
+- 비교 근거가 있을 때만 비교·선택 기준을 텍스트로 정리하세요. 에디터 표가 없으면 대상·비교 항목·선택 조건으로 나눕니다. 비교 대상이나 수치를 지어내지 마세요.
+- FAQ는 최대 세 쌍입니다. 고객·상세페이지에서 실제로 확인된 질문과 답 근거만 쓰고, 없으면 생략합니다. 답은 간결하게 쓰되 두 줄을 채우려고 반복하지 마세요.
+- AI가 만들어낼 수 없는 검증 근거 한 줄을 정보 문단 사이에 넣으세요. 직접 잰 수치·확인된 사양·수집된 고객 질문·검증된 실패/한계만 허용합니다. 없는 1인칭 체험은 만들지 마세요.
+- 정보성 질문에 정확히 답하는 것을 우선합니다. 순위나 인용 가능성을 단정하지 말고 근거 없는 업체 추천은 쓰지 않습니다.
 `.trim();
 
 export const MOBILE_BODY_RULES = `
@@ -25,6 +41,7 @@ export const MOBILE_BODY_RULES = `
 - 한 문단에 정보 하나만 담아 읽는 속도를 가볍게 만드세요.
 - 모바일에서 손가락으로 넘기며 읽어도 핵심이 보이도록 문장을 빽빽하게 붙이지 마세요.
 - 제목과 소제목에는 이모지를 넣지 마세요.
+- 각 섹션은 소제목(가능하면 질문형) → 바로 이어지는 답 두 줄 → 보조 설명 순서로 씁니다.
 `.trim();
 
 export function getMobileSectionLinePolicy(connectKind: "SHOPPING" | "TRAVEL"): {
@@ -80,7 +97,7 @@ export const SHOPPING_EXPERT_REVIEW_STYLE_GUIDE = `
 `.trim();
 
 export function buildHumanMobileStyleGuide(extra?: string): string {
-  return [HUMAN_MOBILE_STYLE_GUIDE, MOBILE_BODY_RULES, HUMAN_REVIEW_SAFETY_RULES, extra]
+  return [HUMAN_MOBILE_STYLE_GUIDE, NAVER_AI_CITATION_RULES, MOBILE_BODY_RULES, HUMAN_REVIEW_SAFETY_RULES, extra]
     .filter((value): value is string => Boolean(value?.trim()))
     .join("\n\n");
 }

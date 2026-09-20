@@ -9,6 +9,7 @@ import { buildCaptureRequiredPayload, parseConnectKind, toStoredConnectKind } fr
 import { resolveConnectContract } from "@/lib/connect-contract-store";
 import { getLogsDir } from "../../../../../scripts/lib/app-paths";
 import { recoverExitedPublications } from '@/lib/publication-recovery';
+import { validateNaverPublishingSession } from "@/lib/naver-session";
 
 interface BulkSeasonalBody {
   connectKind?: string;
@@ -276,6 +277,22 @@ export async function POST(request: NextRequest) {
         },
         { status: 400 }
       );
+    }
+
+    const blogId = process.env.NAVER_BLOG_ID?.trim() || "";
+    if (blogId) {
+      const session = await validateNaverPublishingSession(storageStatePath, blogId);
+      if (!session.valid) {
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              `네이버 로그인 세션이 유효하지 않습니다${session.error ? ` (${session.error})` : ""}. ` +
+              "앱에서 네이버 재로그인(또는 npm run login) 후 다시 시도하세요.",
+          },
+          { status: 401 }
+        );
+      }
     }
 
     const scriptArgs = [

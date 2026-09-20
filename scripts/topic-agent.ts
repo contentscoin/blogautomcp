@@ -8,6 +8,11 @@
  */
 
 import "dotenv/config";
+import { createScheduleSubmissionTracker, waitForConfirmedScheduleSubmission, type ScheduleSubmissionTracker } from "./lib/naver-schedule-tracker";
+import { register } from "tsconfig-paths";
+register({ baseUrl: process.cwd(), paths: { "@/*": ["src/*"] } });
+import { getTopicTaskPublishReadiness, parseTopicSourceUrls, isTopicPublishedUrl } from "../src/lib/topic-task-publish-readiness";
+import { getTopicTaskContentReadiness } from "../src/lib/topic-task-content-readiness";
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { Locator, Page, Response } from "playwright";
@@ -63,6 +68,7 @@ type PublishMode = "draft" | "now" | "schedule";
 
 interface PublishExecutionOptions {
   mode: PublishMode;
+  beforeSubmit?: () => Promise<void>;
   scheduledDate?: Date | null;
 }
 
@@ -264,13 +270,6 @@ async function inputTopicSectionBlock(page: Page, section: string | PreparedTopi
     }
 
     await page.keyboard.press("Enter");
-}
-
-interface ScheduleSubmissionTracker {
-  stop: () => void;
-  hasAnySignal: () => boolean;
-  hasDateSignal: () => boolean;
-  getRecentEvents: () => string[];
 }
 
 interface LayerNodeRef {
@@ -601,136 +600,17 @@ function isScheduleDateMatch(value: string, expectedYmd: string): boolean {
     return normalized === expectedYmd;
 }
 
-function createScheduleSubmissionTracker(page: Page, scheduledDate: Date): ScheduleSubmissionTracker {
-  const targetYmd = formatDateYmd(scheduledDate);
-  const targetCompact = targetYmd.replace(/-/g, "");
-  let hasAnySignal = false;
-  let hasDateSignal = false;
-  const recentEvents: string[] = [];
-
-  const pushEvent = (entry: string) => {
-    recentEvents.push(entry);
-    if (recentEvents.length > 20) {
-      recentEvents.shift();
-    }
-  };
-
-  const listener = (response: Response) => {
-    try {
-      const request = response.request();
-      if (request.method().toUpperCase() !== "POST") return;
-
-      const url = request.url();
-      const lowerUrl = url.toLowerCase();
-      if (!lowerUrl.includes("naver.com")) return;
-
-      const postData = (request.postData() ?? "").replace(/\s+/g, "").toLowerCase();
-      const hasDateCandidate =
-        postData.includes(targetYmd) ||
-        postData.includes(targetCompact) ||
-        postData.includes(targetYmd.replace(/-/g, ".")) ||
-        postData.includes(targetYmd.replace(/-/g, "/"));
-
-      const hasScheduleKeyword = /reserve|reservation|schedule|publishmode|publish_mode|publishtype|publish_type|pretime|pre_post|prepost|reservedtime|radio_time|\ube44\ubc00|\ubcf4\uac8c/i.test(
-        postData,
-      );
-
-      const hasPublishEndpoint = /write|publish|post|reserve|schedule|save|rabbit/i.test(lowerUrl);
-
-      if (hasDateCandidate || hasScheduleKeyword || hasPublishEndpoint) {
-        hasAnySignal = true;
-        pushEvent(
-          `POST ${response.status()} ${url} dateSignal=${hasDateCandidate ? "Y" : "N"} keywordSignal=${
-            hasScheduleKeyword ? "Y" : "N"
-          } publishSignal=${hasPublishEndpoint ? "Y" : "N"}`,
-        );
-      }
-
-      if (hasDateCandidate) {
-        hasDateSignal = true;
-      }
-    } catch {
-      // ignore
-    }
-  };
-
-  page.on("response", listener);
-
-  return {
-    stop: () => {
-      page.off("response", listener);
-    },
-    hasAnySignal: () => hasAnySignal,
-    hasDateSignal: () => hasDateSignal,
-    getRecentEvents: () => [...recentEvents],
-  };
-}
-
 function isPublishedUrl(url: string): boolean {
-  return /PostView/i.test(url) || /logNo=\d+/.test(url);
+  return isTopicPublishedUrl(url, NAVER_BLOG_ID);
 }
 
 async function waitForScheduleSubmission(
-  page: Page,
+  _page: Page,
   scheduledDate: Date,
   tracker: ScheduleSubmissionTracker,
 ): Promise<void> {
-  const targetYmd = formatDateYmd(scheduledDate);
-  const deadline = Date.now() + 12_000;
-  let publishedUrlSeenAt: number | null = null;
-
-  while (Date.now() < deadline) {
-    if (page.isClosed()) {
-      if (tracker.hasDateSignal() || tracker.hasAnySignal()) {
-        return;
-      }
-
-      throw new Error("예약 발행 요청 직후 브라우저가 닫혀 제출 결과를 확인할 수 없습니다.");
-    }
-
-    const currentUrl = page.url();
-    const bodyText = ((await page.textContent("body").catch(() => "")) || "").replace(/\s+/g, " ");
-    const publishedUrl = isPublishedUrl(currentUrl);
-    const hasReservationCue =
-      /예약\s*발행.*(완료|등록|처리|성공)/.test(bodyText) ||
-      /발행\s*예약.*(완료|등록|처리|성공)/.test(bodyText) ||
-      (bodyText.includes(targetYmd) && /예약.*(완료|등록|처리)/.test(bodyText));
-
-    if (publishedUrl && tracker.hasAnySignal()) {
-      return;
-    }
-
-    if (hasReservationCue) {
-      return;
-    }
-
-    if (publishedUrl) {
-      if (!tracker.hasAnySignal()) {
-        if (publishedUrlSeenAt === null) {
-          publishedUrlSeenAt = Date.now();
-        } else if (Date.now() - publishedUrlSeenAt >= 2_500) {
-          const recentEvents = tracker.getRecentEvents();
-          if (recentEvents.length > 0) {
-            console.log("      - 예약 신호 추적 로그");
-            for (const entry of recentEvents.slice(-8)) {
-              console.log(`        ${entry}`);
-            }
-          }
-          throw new Error("예약 발행 대신 즉시 발행으로 처리되었거나 예약 신호를 확인할 수 없습니다.");
-        }
-      }
-    } else {
-      publishedUrlSeenAt = null;
-    }
-
-    await page.waitForTimeout(400);
-  }
-
-  if (tracker.hasAnySignal()) {
-    return;
-  }
-
-  throw new Error(`예약 발행 완료 신호를 확인하지 못했습니다. (목표일: ${targetYmd})`);
+  if (await waitForConfirmedScheduleSubmission(tracker)) return;
+  throw new Error(`[NAVER_SCHEDULE_UNCONFIRMED] 예약 승인 및 식별자를 확인하지 못했습니다. (목표일: ${formatDateYmd(scheduledDate)})`);
 }
 
 async function getSchedulePanelLocator(page: Page): Promise<Locator> {
@@ -1570,6 +1450,9 @@ async function loadPublishContextFromDb(runtimeOptions: RuntimePublishOptions): 
             if (!task) {
                 throw new Error(`태스크를 찾을 수 없습니다: ${taskId}`);
             }
+            if (task.pipelineStage === "OUTCOME_UNKNOWN" || ["SCHEDULED", "PUBLISHED"].includes(task.status)) {
+                throw new Error("이미 제출된 작업입니다. 실제 발행/예약 결과 확인 및 수동 복구가 필요합니다. 재준비로 해제할 수 없습니다.");
+            }
 
             const preparedContent = toStoredPublishPayload(task.preparedContentJson);
             if (!preparedContent) {
@@ -1580,10 +1463,24 @@ async function loadPublishContextFromDb(runtimeOptions: RuntimePublishOptions): 
             const selectedDraft = task.selectedDraftId
                 ? await prisma.topicDraft.findUnique({
                     where: { id: task.selectedDraftId },
-                    include: { images: true },
+                    include: { images: true, campaign: { select: { sourceUrls: true } } },
                 })
                 : null;
-            const imagePaths = sortDraftImages(selectedDraft?.images || [])
+            const usableImages = sortDraftImages(selectedDraft?.images || []).filter((image) => {
+                try { const stat = fs.statSync(image.localPath || ""); return stat.isFile() && stat.size > 0; } catch { return false; }
+            });
+            const readiness = getTopicTaskPublishReadiness({
+                selectedDraftId: task.selectedDraftId,
+                preparedContentJson: task.preparedContentJson,
+                preparedImages: usableImages,
+            });
+            if (!readiness.canPublish) throw new Error(readiness.reason || "이미지 발행 준비 실패");
+            const contentReadiness = getTopicTaskContentReadiness({
+                ...task,
+                sourceUrls: parseTopicSourceUrls(selectedDraft?.campaign.sourceUrls),
+            });
+            if (!contentReadiness.canPublish) throw new Error(contentReadiness.reason || "본문 발행 준비 실패");
+            const imagePaths = usableImages
                 .map((image) => image.localPath)
                 .filter((imagePath): imagePath is string => Boolean(imagePath && fs.existsSync(imagePath)));
 
@@ -1613,6 +1510,9 @@ async function loadPublishContextFromDb(runtimeOptions: RuntimePublishOptions): 
         if (!post) {
             throw new Error(`예약 Post를 찾을 수 없습니다: ${postId}`);
         }
+        if (["OUTCOME_UNKNOWN", "SUCCESS"].includes(post.status)) {
+            throw new Error("이미 제출된 Post입니다. 먼저 제출 결과를 확인하세요.");
+        }
 
         const seed = post.topicSeed
             ? JSON.parse(post.topicSeed) as {
@@ -1626,7 +1526,7 @@ async function loadPublishContextFromDb(runtimeOptions: RuntimePublishOptions): 
         const draft = seed.draftId
             ? await prisma.topicDraft.findUnique({
                 where: { id: seed.draftId },
-                include: { images: true },
+                include: { images: true, campaign: { select: { sourceUrls: true } } },
             })
             : null;
 
@@ -1638,7 +1538,23 @@ async function loadPublishContextFromDb(runtimeOptions: RuntimePublishOptions): 
             throw new Error("발행에 사용할 저장된 콘텐츠를 찾을 수 없습니다.");
         }
 
-        const imagePaths = sortDraftImages(draft?.images || [])
+        const usableImages = sortDraftImages(draft?.images || []).filter((image) => {
+            try { const stat = fs.statSync(image.localPath || ""); return stat.isFile() && stat.size > 0; } catch { return false; }
+        });
+        const readiness = getTopicTaskPublishReadiness({
+            selectedDraftId: draft?.id || null,
+            preparedContentJson: draft?.contentJson || (typeof seed.contentJson === "string" ? seed.contentJson : post.contentHtml),
+            preparedImages: usableImages,
+        });
+        if (!readiness.canPublish) throw new Error(readiness.reason || "이미지 발행 준비 실패");
+        const contentReadiness = getTopicTaskContentReadiness({
+            topic: post.title,
+            type: seed.type,
+            preparedContentJson: draft?.contentJson || (typeof seed.contentJson === "string" ? seed.contentJson : post.contentHtml),
+            sourceUrls: parseTopicSourceUrls(draft?.campaign.sourceUrls),
+        });
+        if (!contentReadiness.canPublish) throw new Error(contentReadiness.reason || "본문 발행 준비 실패");
+        const imagePaths = usableImages
             .map((image) => image.localPath)
             .filter((imagePath): imagePath is string => Boolean(imagePath && fs.existsSync(imagePath)));
 
@@ -1863,6 +1779,7 @@ ${style.sampleSentences.map((s, i) => `${i + 1}. "${s}"`).join('\n')}
 // LLM으로 글 생성 (에이전틱 다단계 고도화 파이프라인 - V2)
 // ============================================
 import { createChatGPTContext, openFreshChatGPTTarget, openChatGPTTarget, sendPromptToChatGPT, ChatGPTContextHandle, downloadChatGPTImages, isChatGPTGenerating } from "./lib/chatgpt-browser";
+import { runCodexDraft } from "./lib/codex-draft-provider";
 
 
 async function generateAdvancedContent(
@@ -1877,17 +1794,7 @@ async function generateAdvancedContent(
 
     const template = getTemplate(args.type);
     const baseKeywords = args.keywords.length > 0 ? args.keywords.join(", ") : template.seoKeywords.join(", ");
-    const CHATGPT_BASE_URL = "https://chatgpt.com/";
-
-    let chatgptHandle: ChatGPTContextHandle | null = null;
-
     try {
-        console.log("   🌐 브라우저 세션 초기화 (ChatGPT)...");
-        chatgptHandle = await createChatGPTContext(true);
-        const page = await chatgptHandle.context.newPage();
-
-        await openFreshChatGPTTarget(page, CHATGPT_BASE_URL, "글 생성 ChatGPT");
-
         const contentPrompt = [
             "너는 네이버 블로그 상식/정보 글을 쓰는 한국어 전문 에디터다.",
             "아래 조건을 보고 질문하지 말고 최종 발행 가능한 글 JSON만 작성해라.",
@@ -1931,34 +1838,10 @@ async function generateAdvancedContent(
             .join("\n");
 
         console.log("   [1/1] GPT에 최종 JSON 초안 요청...");
-        let raw = await sendPromptToChatGPT(page, contentPrompt, "주제글 JSON 생성");
-        if (!raw.trim()) {
-            const bodyText = ((await page.textContent("body").catch(() => "")) || "").trim();
-            const bodyJsonBlocks = extractJsonObjectBlocks(bodyText);
-            const bodyCandidate = [...bodyJsonBlocks].reverse().find((block) => {
-                try {
-                    const parsed = JSON.parse(block) as Record<string, unknown>;
-                    return normalizeOutputText(parsed.title).length > 0 && parseSectionsFromLLM(parsed.sections).length > 0;
-                } catch {
-                    return false;
-                }
-            });
-            if (bodyCandidate) {
-                raw = bodyCandidate;
-            }
-        }
-
-        if (!raw.trim()) {
-            const debugDir = path.join(process.cwd(), "logs", "manual", "chatgpt-content");
-            fs.mkdirSync(debugDir, { recursive: true });
-            const stamp = Date.now();
-            const screenshotPath = path.join(debugDir, `${stamp}-empty-response.png`);
-            const htmlPath = path.join(debugDir, `${stamp}-empty-response.html`);
-            await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-            fs.writeFileSync(htmlPath, await page.content().catch(() => ""), "utf8");
-            console.log(`   ⚠️ ChatGPT 빈 응답 디버그 저장: ${path.relative(process.cwd(), screenshotPath)}`);
-            throw new Error("ChatGPT 응답이 비어 있습니다.");
-        }
+        const raw = await runCodexDraft({
+            systemPrompt: "한국어 블로그 원고를 요청된 JSON 형식으로만 작성하세요.",
+            userPrompt: contentPrompt,
+        });
         const parsed = parseLLMOutput(raw);
         const content = {
             title: parsed.title,
@@ -1976,10 +1859,6 @@ async function generateAdvancedContent(
     } catch (error) {
         console.error("❌ ChatGPT 파이프라인 에러:", error);
         throw error;
-    } finally {
-        if (chatgptHandle) {
-            await chatgptHandle.close();
-        }
     }
 }
 
@@ -2490,7 +2369,7 @@ async function capturePublishArtifacts(page: Page, reason: string): Promise<void
   }
 }
 
-async function clickFinalPublishButton(page: Page, mode: PublishMode): Promise<boolean> {
+async function clickFinalPublishButton(page: Page, mode: PublishMode, beforeSubmit?: () => Promise<void>): Promise<boolean> {
   const finalPublishSelectors = [
     'div[class*="layer_publish" i] button[data-testid="seOnePublishBtn"]',
     'div[class*="layer_content_set_publish" i] button[data-testid="seOnePublishBtn"]',
@@ -2519,8 +2398,8 @@ async function clickFinalPublishButton(page: Page, mode: PublishMode): Promise<b
       continue;
     }
 
-    await button.click({ force: true }).catch(() => {});
-    await page.waitForTimeout(1200);
+    await beforeSubmit?.();
+    await button.click({ force: true });
     return true;
   }
 
@@ -2613,8 +2492,8 @@ async function clickFinalPublishButton(page: Page, mode: PublishMode): Promise<b
 
     if (!text.includes("발행") || text.includes("예약")) continue;
 
-    await button.click({ force: true }).catch(() => {});
-    await page.waitForTimeout(1200);
+    await beforeSubmit?.();
+    await button.click({ force: true });
     return true;
   }
 
@@ -2628,8 +2507,8 @@ async function clickFinalPublishButton(page: Page, mode: PublishMode): Promise<b
     }
     const picked = rankedCandidates[0];
     console.log(`   🎯 예약 최종 버튼 선택: text="${picked.text}" class="${picked.className}" score=${picked.score}`);
-    await picked.button.click({ force: true }).catch(() => {});
-    await page.waitForTimeout(1200);
+    await beforeSubmit?.();
+    await picked.button.click({ force: true });
     return true;
   }
 
@@ -2645,9 +2524,7 @@ async function publish(
   const mode = options.mode === "schedule" ? "schedule" : "now";
   const scheduledDate = options.scheduledDate;
 
-  const createTracker = mode === "schedule" && scheduledDate
-    ? createScheduleSubmissionTracker(page, scheduledDate)
-    : undefined;
+  let createTracker: ScheduleSubmissionTracker | undefined;
 
   const scheduleContext =
     mode === "schedule"
@@ -2655,10 +2532,7 @@ async function publish(
           if (!scheduledDate) {
             throw new Error("예약 발행 모드에서 예약일이 지정되지 않았습니다.");
           }
-          if (!createTracker) {
-            throw new Error("예약 발행 요청 추적 초기화에 실패했습니다.");
-          }
-          return { date: scheduledDate, tracker: createTracker };
+          return { date: scheduledDate };
         })()
       : null;
 
@@ -2716,6 +2590,7 @@ async function publish(
   if (mode === "schedule") {
     const scheduledContext = scheduleContext!;
     const effectiveDate = await configureSchedulePublish(page, scheduledContext.date);
+    scheduledContext.date = effectiveDate;
     console.log(`   ✅ 예약 발행 설정 완료: ${formatDateYmd(effectiveDate)}`);
 
     const reserveSelected = await ensureScheduleReserveRadioSelected(page);
@@ -2732,10 +2607,13 @@ async function publish(
     } catch {}
   }
 
-  if (await clickFinalPublishButton(page, mode)) {
+  if (await clickFinalPublishButton(page, mode, async () => {
+    await options.beforeSubmit?.();
+    if (scheduleContext) createTracker = createScheduleSubmissionTracker(page, formatDateYmd(scheduleContext.date));
+  })) {
     if (mode === "schedule") {
       const scheduledContext = scheduleContext!;
-      await waitForScheduleSubmission(page, scheduledContext.date, scheduledContext.tracker);
+      await waitForScheduleSubmission(page, scheduledContext.date, createTracker!);
     }
     console.log(mode === "schedule" ? "   🎉 예약 발행 요청 완료!" : "   🎉 발행 완료!");
     return true;
@@ -2931,6 +2809,7 @@ async function main() {
     });
 
     const page = await context.newPage();
+    let submissionStarted = false;
 
     try {
         await openEditor(page);
@@ -2953,15 +2832,38 @@ async function main() {
         const publishSuccess = await publish(page, args.category, {
             mode: args.publishMode,
             scheduledDate,
+            beforeSubmit: async () => {
+                if (submissionStarted) throw new Error("중복 제출을 차단했습니다.");
+                const prisma = new PrismaClient();
+                try {
+                    if (taskId) {
+                        const marked = await prisma.topicPostTask.updateMany({
+                            where: { id: taskId, status: { in: ["PREPARED", "FAILED", "PUBLISHING"] }, pipelineStage: { not: "OUTCOME_UNKNOWN" } },
+                            data: { status: "PUBLISHING", pipelineStage: "OUTCOME_UNKNOWN", errorMessage: "제출 결과 확인 중" },
+                        });
+                        if (marked.count !== 1) throw new Error("이전 제출 또는 작업 변경으로 제출을 차단했습니다.");
+                    }
+                    if (postId) {
+                        const marked = await prisma.post.updateMany({
+                            where: { id: postId, status: { notIn: ["OUTCOME_UNKNOWN", "SUCCESS"] } },
+                            data: { status: "OUTCOME_UNKNOWN", errorMessage: "제출 결과 확인 중" },
+                        });
+                        if (marked.count !== 1) throw new Error("이미 제출된 Post입니다.");
+                    }
+                    submissionStarted = true;
+                } finally {
+                    await prisma.$disconnect();
+                }
+            },
         });
         if (!publishSuccess) {
             throw new Error("발행 완료 버튼을 확인하지 못했습니다.");
         }
 
         // 발행 후 PostView URL 대기 (최대 15초)
-        let capturedUrl = page.url();
+        let capturedUrl = args.publishMode === "now" ? page.url() : "";
         const publishWaitDeadline = Date.now() + 15_000;
-        while (Date.now() < publishWaitDeadline) {
+        while (args.publishMode === "now" && Date.now() < publishWaitDeadline) {
             await page.waitForTimeout(1000);
             capturedUrl = page.url();
             if (isPublishedUrl(capturedUrl)) {
@@ -2969,29 +2871,11 @@ async function main() {
             }
         }
 
-        // PostView URL을 못 잡았을 경우 네이버 블로그 최신 글 URL 시도
-        if (!isPublishedUrl(capturedUrl) && args.publishMode === "now") {
-            try {
-                const blogHomeUrl = `https://blog.naver.com/PostList.naver?blogId=${NAVER_BLOG_ID}&from=postList&categoryNo=0`;
-                await page.goto(blogHomeUrl, { timeout: 10000, waitUntil: "domcontentloaded" });
-                await page.waitForTimeout(2000);
-                const latestLink = await page.locator('a[href*="PostView"], a[href*="logNo="]').first();
-                if (await latestLink.isVisible().catch(() => false)) {
-                    const href = await latestLink.getAttribute("href");
-                    if (href) {
-                        capturedUrl = href.startsWith("http") ? href : `https://blog.naver.com${href}`;
-                    }
-                }
-            } catch {
-                console.log("   ⚠️ 최신 글 URL 자동 획득 실패, 글쓰기 페이지 URL로 기록합니다.");
-            }
-        }
-
-        console.log(`\n✅ 완료! (URL: ${capturedUrl})`);
         const persistedUrl = isPublishedUrl(capturedUrl) ? capturedUrl : null;
         if (args.publishMode === "now" && !persistedUrl) {
             throw new Error("최종 PostView URL을 확보하지 못했습니다.");
         }
+        console.log(`\n✅ 완료! (URL: ${persistedUrl || "예약 완료 확인"})`);
 
         // DB 상태 업데이트
         if (taskId) {
@@ -3025,11 +2909,11 @@ async function main() {
         if (taskId) {
             try {
                 const prisma = new PrismaClient();
-                await prisma.topicPostTask.update({
-                    where: { id: taskId },
+                await prisma.topicPostTask.updateMany({
+                    where: { id: taskId, status: { notIn: ["PUBLISHED", "SCHEDULED"] }, ...(submissionStarted ? {} : { pipelineStage: { not: "OUTCOME_UNKNOWN" } }) },
                     data: {
                         status: "FAILED",
-                        pipelineStage: "FAILED",
+                        pipelineStage: submissionStarted ? "OUTCOME_UNKNOWN" : "FAILED",
                         errorMessage: error instanceof Error ? error.message : String(error)
                     }
                 });
@@ -3039,10 +2923,10 @@ async function main() {
         if (postId) {
             try {
                 const prisma = new PrismaClient();
-                await prisma.post.update({
-                    where: { id: postId },
+                await prisma.post.updateMany({
+                    where: { id: postId, status: { notIn: submissionStarted ? ["SUCCESS"] : ["SUCCESS", "OUTCOME_UNKNOWN"] } },
                     data: {
-                        status: "FAIL",
+                        status: submissionStarted ? "OUTCOME_UNKNOWN" : "FAIL",
                         errorMessage: error instanceof Error ? error.message : String(error),
                     }
                 });

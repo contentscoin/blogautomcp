@@ -5,6 +5,7 @@
  */
 
 import { extractJsonObject, getOpenAiApiKey, getOpenAiTextModel } from "../openai-text";
+import { resolveTextModel, textCompletionParameters } from "../text-model-policy";
 
 const OPENAI_CHAT_ENDPOINT = "https://api.openai.com/v1/chat/completions";
 
@@ -30,7 +31,7 @@ class OutputTruncatedError extends Error {}
 async function call<T>(request: StructuredRequest, useSchema: boolean): Promise<StructuredResult<T>> {
   const apiKey = getOpenAiApiKey();
   if (!apiKey) throw new Error("OPENAI_API_KEY가 비어 있어 글을 생성할 수 없습니다.");
-  const model = request.model || getOpenAiTextModel();
+  const model = resolveTextModel(request.model || getOpenAiTextModel());
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), request.timeoutMs ?? 180_000);
   try {
@@ -38,13 +39,11 @@ async function call<T>(request: StructuredRequest, useSchema: boolean): Promise<
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        model,
+        ...textCompletionParameters(request.maxOutputTokens, model),
         messages: [
           { role: "system", content: request.system },
           { role: "user", content: request.user },
         ],
-        temperature: request.temperature,
-        max_completion_tokens: request.maxOutputTokens,
         response_format: useSchema
           ? { type: "json_schema", json_schema: { name: request.schemaName, strict: true, schema: request.schema } }
           : { type: "json_object" },

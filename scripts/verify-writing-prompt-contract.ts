@@ -30,11 +30,17 @@ const source = ts.createSourceFile(agentPath, fs.readFileSync(agentPath, "utf8")
 const declarations = new Map<string, ts.VariableDeclaration>();
 function collectDeclarations(node: ts.Node): void {
   if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+    assert.ok(!declarations.has(node.name.text), `Ambiguous initializer inside step2_generatePost: ${node.name.text}`);
     declarations.set(node.name.text, node);
   }
   ts.forEachChild(node, collectDeclarations);
 }
-collectDeclarations(source);
+// Prepared-post revision has its own writingContract. Never select by global
+// declaration order: these fixtures exercise the initial generation function.
+const generationFunction = source.statements.find((node): node is ts.FunctionDeclaration =>
+  ts.isFunctionDeclaration(node) && node.name?.text === "step2_generatePost");
+assert.ok(generationFunction?.body, "Production generation function exists");
+collectDeclarations(generationFunction.body);
 function evaluateInitializer<T = unknown>(name: string, context: Record<string, unknown>): T {
   const initializer = declarations.get(name)?.initializer;
   assert.ok(initializer, `Production initializer ${name} exists`);
@@ -70,6 +76,7 @@ assert.match(memoBlock, /사실 증거가 아닙니다/u);
 assert.match(memoBlock, /숙박·온천호텔 선택 기준/u);
 const prompt = evaluateInitializer<string>("userPrompt", {
   isTravel: true, product: { description: "숙박 호텔 미정", features: ["교토·고베 일정"] },
+  contentFactsPrompt: JSON.stringify({ description: "숙박 호텔 미정", features: ["교토·고베 일정"] }),
   writingContract: memoContract, mandatoryWritingPromptBlock: memoBlock,
 });
 assert.ok(prompt.includes(memo), "Actual Codex user prompt contains full memo");
@@ -221,8 +228,8 @@ vm.runInNewContext(ts.transpileModule(evidenceBoundary.getText(source), {
 assert.deepEqual(product.features, [...supplied], "Model evidence must not expand or replace QC source features");
 assert.deepEqual(
   boundaryContext.scoringEvidenceFacts,
-  [supplied[0], supplied[1], "최대 하중 １０kg", "판매가 13,700원"],
-  "Only snapshot-backed statements count for scoring: changed numbers, flipped negation, added claims and bare fragments are rejected",
+  ["무선 충전 지원 안 함", supplied[1], "최대 하중 １０kg"],
+  "Only snapshot-backed statements count for scoring: changed numbers, flipped negation, added claims, prices and bare fragments are rejected",
 );
 const groundedReview = selectGroundedEvidenceFacts(
   ["메쉬 소재 러닝 조끼 판매가 13,700원", "메쉬 소재 러닝 조끼 판매가 13,900원", "러닝 조끼 방수 등급 IPX7", "러닝"],

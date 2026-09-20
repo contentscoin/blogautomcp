@@ -6,7 +6,7 @@ import path from "path";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 import { getTopicTaskContentReadiness } from "@/lib/topic-task-content-readiness";
-import { getTopicTaskPublishReadiness } from "@/lib/topic-task-publish-readiness";
+import { getTopicTaskPublishReadiness, parseTopicSourceUrls } from "@/lib/topic-task-publish-readiness";
 
 interface BulkTopicScheduleBody {
   limit?: number;
@@ -39,10 +39,11 @@ function toSafePositiveInt(value: unknown, defaultValue: number, max = 100): num
   return Math.min(parsed, max);
 }
 
-async function countPublishableScheduledTopicTasks(limit: number): Promise<number> {
+async function selectPublishableScheduledTopicTasks(limit: number): Promise<string[]> {
   const candidates = await prisma.topicPostTask.findMany({
     where: {
       status: { in: ["PREPARED", "FAILED"] },
+      pipelineStage: { not: "OUTCOME_UNKNOWN" },
       scheduledPublishAt: { not: null },
       selectedDraftId: { not: null },
       preparedContentJson: { not: null },
@@ -51,7 +52,7 @@ async function countPublishableScheduledTopicTasks(limit: number): Promise<numbe
     take: Math.min(Math.max(limit * 5, limit), 100),
   });
 
-  if (candidates.length === 0) return 0;
+  if (candidates.length === 0) return [];
 
   const draftIds = Array.from(
     new Set(candidates.map((task) => task.selectedDraftId).filter((value): value is string => Boolean(value))),
@@ -72,16 +73,25 @@ async function countPublishableScheduledTopicTasks(limit: number): Promise<numbe
     return acc;
   }, new Map());
 
+  const drafts = await prisma.topicDraft.findMany({
+    where: { id: { in: draftIds } },
+    select: { id: true, campaign: { select: { sourceUrls: true } } },
+  });
+  const sourcesByDraftId = new Map(drafts.map((draft) => [draft.id, parseTopicSourceUrls(draft.campaign.sourceUrls)]));
   return candidates.filter((task) => {
     const publishReadiness = getTopicTaskPublishReadiness({
       status: task.status,
+      pipelineStage: task.pipelineStage,
       selectedDraftId: task.selectedDraftId,
       preparedContentJson: task.preparedContentJson,
       preparedImages: task.selectedDraftId ? imagesByDraftId.get(task.selectedDraftId) || [] : [],
+    }, (localPath) => {
+      try { const stat = fs.statSync(localPath); return stat.isFile() && stat.size > 0; } catch { return false; }
     });
     if (!publishReadiness.canPublish) return false;
 
     const contentReadiness = getTopicTaskContentReadiness({
+      sourceUrls: sourcesByDraftId.get(task.selectedDraftId!) || [],
       topic: task.topic,
       keywords: task.keywords,
       type: task.type,
@@ -89,7 +99,7 @@ async function countPublishableScheduledTopicTasks(limit: number): Promise<numbe
       preparedContentJson: task.preparedContentJson,
     });
     return contentReadiness.canPublish;
-  }).length;
+  }).slice(0, limit).map((task) => task.id);
 }
 
 export async function POST(request: NextRequest) {
@@ -127,9 +137,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const pendingCount = await countPublishableScheduledTopicTasks(requestedLimit);
+    const taskIds = await selectPublishableScheduledTopicTasks(requestedLimit);
 
-    if (pendingCount === 0) {
+    if (taskIds.length === 0) {
       return NextResponse.json({
         success: true,
         message: "예약발행일이 설정된 준비완료 주제글이 없습니다.",
@@ -139,10 +149,10 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const targetCount = Math.min(requestedLimit, pendingCount);
+    const targetCount = taskIds.length;
 
     const scriptPath = path.join(process.cwd(), "scripts", "bulk-topic-schedule-publish.ts");
-    const scriptArgs = [`--limit=${targetCount}`, `--delay-ms=${delayMs}`];
+    const scriptArgs = [`--limit=${targetCount}`, `--delay-ms=${delayMs}`, `--task-ids=${JSON.stringify(taskIds)}`];
 
     const logDir = path.join(process.cwd(), "logs", "publish-bulk");
     fs.mkdirSync(logDir, { recursive: true });

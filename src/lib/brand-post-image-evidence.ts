@@ -19,7 +19,13 @@ export function allowsGenericBrandPostProductPhoto(target: {
 }): boolean {
   const title = normalizeBrandPostImageIntent(target.sectionTitle);
   const intent = normalizeBrandPostImageIntent(target.imageIntent);
-  const featureSpecific = /기능|작동|조작|특장점|냉온풍|냉풍|온풍|센서|성능|효과|효익|용량|크기|규격|설치|세척|살균|소독|소음|전력|소비전력|소재|재질|마감|안전|보관|사용법|구조|버튼|모드|온도|속도|흡입|건조|주의|한계|비교/u.test(`${title} ${intent}`);
+  // Measurements can identify a product in an overview title ("532ml 전체 구성").
+  // Only that explicit overview may ignore identity attributes, never claims
+  // about operation, efficacy, safety or a feature-specific visual request.
+  const overviewTitle = /한눈|전체\s*(?:모습|구성|형태)|제품\s*(?:소개|개요|정체)|어떤\s*제품/u.test(title);
+  const identityOnlyTitle = overviewTitle && !/선택\s*기준|차이|비교|실측|치수/u.test(title)
+    ? title.replace(/용량|크기|규격/gu, "") : title;
+  const featureSpecific = /기능|작동|조작|특장점|냉온풍|냉풍|온풍|센서|성능|효과|효익|용량|크기|규격|설치|세척|살균|소독|소음|전력|소비전력|소재|재질|마감|안전|보관|사용법|구조|버튼|모드|온도|속도|흡입|건조|주의|한계|비교/u.test(`${identityOnlyTitle} ${intent}`);
   const overviewSpecific = /대표\s*(?:사진|이미지|원본)?|한눈|전체\s*(?:모습|구성|형태)?|외관|패키지|구성품|어떤\s*제품|제품\s*(?:모습|정체)/u.test(intent);
   return overviewSpecific && !featureSpecific;
 }

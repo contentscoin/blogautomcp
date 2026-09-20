@@ -20,7 +20,17 @@ const applianceNames = [
   "[EVENT] CRNK 바디드라이어 전신건조기 냉온풍 자동센서 집들이선물",
   "에어메이드 가열 살균 가습기 열풍 건조 세척 아쿠아마린 9002",
 ];
+const aveenoName = "향좋은 아비노 고보습 민감피부 저자극 바디워시 스트레스릴리프(라벤더향), 532ml, 2개";
 const grade = (productName: string, features: string[], description = "") => buildProductReviewAnalysis({ productName, features, description, targetSectionCount: 8 });
+const cuckooName = "쿠쿠 건조분쇄형 에코웨일 큐브 2L 음식물처리기 CFD-FNL201DCGW 쿠쿠 직접생산 눌음방지";
+const cuckooFacts = extractExplicitProductFacts(cuckooName, "title");
+assert.deepEqual(cuckooFacts, ["표시규격: 2L", "기능: 건조분쇄형", "기능: 눌음방지"]);
+assert.equal(grade(cuckooName, cuckooFacts).evidenceLevel, "usable");
+assert.equal(grade(cuckooName, []).evidenceLevel, "sparse", "raw identity alone still cannot bypass extraction");
+assert.deepEqual(extractExplicitProductFacts("쿠쿠 음식물처리기 CFD-FNL201DCGW", "title"), []);
+for (const denied of ["눌음방지 미지원", "건조분쇄형 아님", "건조분쇄형과 눌음방지 미지원", "건조분쇄형처럼", "눌음방지 효과"]) {
+  assert.deepEqual(extractExplicitProductFacts(denied, "ocr"), [], denied);
+}
 for (const name of [...names, ...applianceNames]) {
   assert.equal(grade(name, []).evidenceLevel, "sparse", "raw title is not automatically promoted to evidence");
   const features = extractExplicitProductFacts(name, "title");
@@ -65,6 +75,17 @@ assert.equal(grade("청소기", ["기능: 자동세척 미지원", "용량: 16L"
 assert.equal(grade("청소기", ["기능: 냉온풍", "기능: 자동센서"]).evidenceLevel, "usable");
 assert.equal(grade("일반 상품", ["성분: 상세페이지 참조", "보관조건: 상품별 상이", "용량: -"]).evidenceLevel, "sparse");
 assert.equal(grade("선풍기", ["색상: 흰색", "소재: 플라스틱"], "일상을 더 편리하게 만들어주는 제품").evidenceLevel, "sparse");
+
+// Brand Store renders this seller-owned product data as hashed-class 상품정보 rows.
+// The title alone must stay sparse, while the visible product attributes are enough
+// to reopen the source-evidence gate without inventing claims from the title.
+assert.equal(grade(aveenoName, []).evidenceLevel, "sparse");
+assert.notEqual(grade(aveenoName, [
+  "피부타입: 모든피부용, 민감성, 중건성",
+  "향계열: 플로럴향, 아로마향, 기타향",
+  "세부제품특징: 향, 트러블케어, 약산성",
+  "용기형태: 펌프형",
+].map(normalizeTypedProductFact).filter(Boolean)).evidenceLevel, "sparse", "seller rows must survive the collector's typed-fact normalization");
 
 const aliases = new Map([
   ["원재료명 및 함량: 소갈비살(호주산)", "원재료: 소갈비살(호주산)"],
@@ -204,6 +225,9 @@ assert.deepEqual(extractExplicitProductFacts(confidentOcrLines(sellerCropTsv).jo
 assert.deepEqual(extractExplicitProductFacts(confidentOcrLines(tsv([[["자동", 95], ["세척", 95], ["미", 95], ["지", 95], ["원", 95]]])).join("\n"), "ocr"), [], "Korean spacing repair must preserve negation");
 
 async function main() {
+  const cuckooEnriched = await context.enrichShoppingSourceFeatures(cuckooName, "", [], []);
+  assert.deepEqual(Array.from(cuckooEnriched), cuckooFacts, "actual collector must retain literal seller facts");
+  assert.equal(grade(cuckooName, cuckooEnriched).evidenceLevel, "usable");
   const enriched = await context.enrichShoppingSourceFeatures(names[2], "", [], ["seller.jpg"]);
   assert.equal(ocrCalls, 0, "explicit sufficient title facts need no OCR");
   assert.notEqual(grade(names[2], enriched).evidenceLevel, "sparse");

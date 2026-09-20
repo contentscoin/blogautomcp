@@ -229,7 +229,14 @@ function normalizedPlaceText(value: string): string {
  * 실제 본문 지명과 비교할 때만 제거한다. 원본 장소명과 출력 문구는 바꾸지 않는다. */
 function placeCoverageAliases(place: string): string[] {
   const exact = normalizedPlaceText(place);
-  const base = exact
+  // Source labels sometimes append a parenthetical descriptor, while the
+  // article naturally uses the shorter place name (e.g. "사바 주립 모스크"
+  // vs. "사바 주립 모스크 (이슬람사원)"). Keep both forms as aliases so
+  // descriptive source text does not create a false missing-place failure.
+  const descriptorFree = normalizedPlaceText(
+    place.replace(/(?:\([^)]*\)|（[^）]*）)/gu, ""),
+  );
+  const base = descriptorFree
     .replace(/(?:시내)?관광$/u, "")
     .replace(/(?:내부)?입장$/u, "")
     .replace(/유적지$/u, "");
@@ -238,7 +245,7 @@ function placeCoverageAliases(place: string): string[] {
     ["청수사", "기요미즈데라"],
     ["동대사", "도다이지"],
   ].find((group) => group.includes(base)) || [];
-  return unique([exact, base, ...known].filter((value) => value.length >= 2));
+  return unique([exact, descriptorFree, base, ...known].filter((value) => value.length >= 2));
 }
 
 function textCoversPlace(value: string, place: string): boolean {

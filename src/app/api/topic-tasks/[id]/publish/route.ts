@@ -6,7 +6,7 @@ import fs from "fs";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 import { taskHasPreparedContent } from "@/services/topic-task-pipeline";
-import { getTopicTaskPublishReadiness } from "@/lib/topic-task-publish-readiness";
+import { getTopicTaskPublishReadiness, parseTopicSourceUrls } from "@/lib/topic-task-publish-readiness";
 import { getTopicTaskContentReadiness } from "@/lib/topic-task-content-readiness";
 
 const NAVER_SCHEDULE_TIMEZONE = process.env.NAVER_SCHEDULE_TIMEZONE || "Asia/Seoul";
@@ -179,6 +179,9 @@ export async function POST(
       );
     }
 
+    if (task.pipelineStage === "OUTCOME_UNKNOWN") {
+      return NextResponse.json({ success: false, error: "실제 발행/예약 결과 확인 및 수동 복구가 필요합니다. 재준비로 해제할 수 없습니다." }, { status: 409 });
+    }
     if (task.status === "PUBLISHING") {
       return NextResponse.json(
         { success: false, error: "이미 발행이 진행 중입니다." },
@@ -206,6 +209,8 @@ export async function POST(
         selectedDraftId: task.selectedDraftId,
         preparedContentJson: task.preparedContentJson,
         preparedImages: draftImages,
+      }, (localPath) => {
+        try { const stat = fs.statSync(localPath); return stat.isFile() && stat.size > 0; } catch { return false; }
       });
 
       if (!publishReadiness.canPublish) {
@@ -218,7 +223,12 @@ export async function POST(
         );
       }
 
+      const draft = await prisma.topicDraft.findUnique({
+        where: { id: task.selectedDraftId },
+        select: { campaign: { select: { sourceUrls: true } } },
+      });
       const contentReadiness = getTopicTaskContentReadiness({
+        sourceUrls: parseTopicSourceUrls(draft?.campaign.sourceUrls),
         topic: task.topic,
         keywords: task.keywords,
         type: task.type,
@@ -238,8 +248,8 @@ export async function POST(
     }
 
     // 상태를 발행중으로 변경
-    await prisma.topicPostTask.update({
-      where: { id },
+    const claimed = await prisma.topicPostTask.updateMany({
+      where: { id, status: task.status, updatedAt: task.updatedAt, pipelineStage: { not: "OUTCOME_UNKNOWN" } },
       data: {
         status: "PUBLISHING",
         pipelineStage: "PUBLISHING",
@@ -249,13 +259,16 @@ export async function POST(
           : {}),
       },
     });
+    if (claimed.count !== 1) {
+      return NextResponse.json({ success: false, error: "작업이 변경되었습니다. 다시 확인해 주세요." }, { status: 409 });
+    }
     statusUpdated = true;
 
     // 발행 스크립트 실행 (백그라운드)
     const scriptPath = path.join(process.cwd(), "scripts", "topic-agent.ts");
-    const scriptArgs = [`--task-id=${id}`];
+    const scriptArgs = [`--task-id=${id}`, `--publish-mode=${publishMode}`];
     if (publishMode === "schedule" && scheduleInfo) {
-      scriptArgs.push("--publish-mode=schedule", `--scheduled-date=${scheduleInfo.effectiveDateInput}`);
+      scriptArgs.push(`--scheduled-date=${scheduleInfo.effectiveDateInput}`);
     }
 
     const publishLogDir = path.join(process.cwd(), "logs", "publish");
@@ -292,7 +305,7 @@ export async function POST(
       const spawnErrorMessage = getErrorMessage(spawnError);
       void prisma.topicPostTask
         .updateMany({
-          where: { id, status: "PUBLISHING" },
+          where: { id, status: "PUBLISHING", pipelineStage: { not: "OUTCOME_UNKNOWN" } },
           data: {
             status: "FAILED",
             pipelineStage: "FAILED",
@@ -303,16 +316,14 @@ export async function POST(
     });
 
     child.on("exit", (code, signal) => {
-      if (code === 0) return;
-
       const exitDetail = `code=${code ?? "null"}, signal=${signal ?? "null"}`;
       void prisma.topicPostTask
         .updateMany({
           where: { id, status: "PUBLISHING" },
           data: {
             status: "FAILED",
-            pipelineStage: "FAILED",
-            errorMessage: `발행 프로세스가 비정상 종료되었습니다(${exitDetail}). 로그: ${logFileRelativePath}`,
+            pipelineStage: "OUTCOME_UNKNOWN",
+            errorMessage: `발행 완료 결과가 저장되지 않았습니다(${exitDetail}). 로그: ${logFileRelativePath}`,
           },
         })
         .catch(() => {});
@@ -345,8 +356,8 @@ export async function POST(
 
     if (statusUpdated && taskId) {
       await prisma.topicPostTask
-        .update({
-          where: { id: taskId },
+        .updateMany({
+          where: { id: taskId, status: "PUBLISHING", pipelineStage: { not: "OUTCOME_UNKNOWN" } },
           data: {
             status: "FAILED",
             pipelineStage: "FAILED",

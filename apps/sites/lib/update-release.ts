@@ -19,6 +19,7 @@ export type WindowsReleasePointer = {
   blockmapSize: number;
   releaseDate: string;
   publishedAt: string;
+  manifest?: string;
 };
 
 export type ParsedUpdateManifest = {
@@ -112,8 +113,17 @@ export async function readWindowsRelease(bucket: R2Bucket): Promise<WindowsRelea
     if (!/^[A-Za-z0-9+/]{86}==$/.test(value.installerSha512)) return null;
     if (value.installerSha256 !== null && !/^[a-f0-9]{64}$/.test(value.installerSha256)) return null;
     if (!Number.isFinite(Date.parse(value.releaseDate)) || !Number.isFinite(Date.parse(value.publishedAt))) return null;
+    if (value.manifest !== undefined) {
+      const parsed = parseUpdateManifest(value.manifest);
+      if (parsed.version !== value.version || parsed.installerName !== value.installerName || parsed.installerSize !== value.installerSize || parsed.installerSha512 !== value.installerSha512) return null;
+    }
     return value;
   } catch {
     return null;
   }
+}
+
+/** Both download metadata and admin status come from the same committed object. */
+export function windowsReleaseManifest(release: WindowsReleasePointer): string {
+  return release.manifest ?? `version: ${release.version}\nfiles:\n  - url: ${release.installerName}\n    sha512: ${release.installerSha512}\n    size: ${release.installerSize}\npath: ${release.installerName}\nsha512: ${release.installerSha512}\nreleaseDate: '${release.releaseDate}'\n`;
 }

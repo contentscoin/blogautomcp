@@ -5,18 +5,10 @@ const STRONG_META_WRITING_PATTERNS = [
   /실제 글 발행에 바로 쓸 수 있는 구조/i,
   /품질이 안정적입니다/i,
   /입력 키워드와 리서치 시그널을 바탕으로/i,
-  /본 포스팅에서는/i,
-  /최적의 선택/i,
 ] as const;
 
 const META_WRITING_PATTERNS = [
   ...STRONG_META_WRITING_PATTERNS,
-  /핵심 내용입니다/i,
-  /결론적으로/i,
-  /종합적으로/i,
-  /이번 글에서는/i,
-  /체계적으로 정리/i,
-  /완벽한 해결책/i,
   /적용 순서가 보이도록 재구성/i,
   /바로 실행할 수 있게 풀어/i,
   /도입에서는/i,
@@ -137,27 +129,10 @@ function isWritingFocusedTopic(input: TopicTaskContentReadinessInput): boolean {
   );
 }
 
-function countNormalizedOccurrences(haystack: string, needle: string): number {
-  const normalizedHaystack = normalizeText(haystack);
-  const normalizedNeedle = normalizeText(needle);
-  if (!normalizedHaystack || !normalizedNeedle) return 0;
-
-  let count = 0;
-  let startIndex = 0;
-  while (startIndex < normalizedHaystack.length) {
-    const foundIndex = normalizedHaystack.indexOf(normalizedNeedle, startIndex);
-    if (foundIndex === -1) break;
-    count += 1;
-    startIndex = foundIndex + normalizedNeedle.length;
-  }
-
-  return count;
-}
-
 function containsNonWritingMetaBody(value: string): boolean {
   const normalized = normalizeText(value);
   if (!normalized) return false;
-  return /(글이|글은|글을|문장이|문장은|읽는 사람|읽힙니다|독자가|본문이)/u.test(normalized);
+  return /(?:본문|문장|원고)(?:을|를)\s*(?:생성|작성|재작성)(?:하겠습니다|해야|하세요)|프롬프트\s*(?:지시|요구)|독자가\s*궁금해/u.test(normalized);
 }
 
 function countDuplicateValues(values: string[]): number {
@@ -375,9 +350,12 @@ function assessNaverRubric(
     ? sections.reduce((sum, section) => sum + normalizeText(section.body).length, 0) / sections.length
     : 0;
   const mobileOk = averageBodyLength >= 45 && averageBodyLength <= 260;
+  // Reward grounded analysis, not an unverified first-person claim or a kind
+  // label alone. Informational posts need not pretend the writer visited/used it.
   const experientialCount = sections.filter((section) =>
-    section.kind === "scene" || section.kind === "comparison" || section.kind === "proof" ||
-    /(직접|실제로|써보|가보|먹어보|비교해|확인해|느꼈|경험)/u.test(section.body),
+    getValidSourceRefs(section.sourceRefIds).length > 0 &&
+    (section.kind === "comparison" || section.kind === "proof" ||
+      /(조건|차이|장단점|선택|비교|반면|적합|제약|동선|특징)/u.test(section.body)),
   ).length;
   const mediaPresent = sections.some((section) => Boolean(section.stockQuery || section.imageSlotId));
 
@@ -398,9 +376,9 @@ function assessNaverRubric(
       notes: mobileOk ? [] : ["문단 호흡을 45~260자 수준으로 조정하세요."],
     },
     {
-      key: "differentiationExperience", label: "체험성·차별성", maxScore: 15,
+      key: "differentiationExperience", label: "근거 기반 분석·차별성", maxScore: 15,
       score: experientialCount >= 2 ? 15 : experientialCount === 1 ? 10 : 5,
-      notes: experientialCount ? [] : ["직접 확인한 장면·비교·근거를 추가하세요."],
+      notes: experientialCount ? [] : ["출처가 연결된 비교·조건·선택 근거를 추가하세요. 직접 경험을 만들 필요는 없습니다."],
     },
     {
       key: "disclosure", label: "광고·제휴 고지", maxScore: 10,
@@ -626,8 +604,9 @@ export function getTopicTaskContentReadiness(
     if (!body) return true;
     if (countPatternHits(body, BROKEN_COPY_PATTERNS) > 0) return true;
     if (!writingTopic && containsNonWritingMetaBody(body)) return true;
-    const topic = normalizeText(input.topic);
-    return topic.length >= 12 && countNormalizedOccurrences(body, topic) >= 1;
+    // Mentioning the requested topic is expected, even when its name is long.
+    // Actual repetition is checked below using headings and paragraph openings.
+    return false;
   });
 
   if (brokenCopyDetected) {

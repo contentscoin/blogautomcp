@@ -219,6 +219,28 @@ assert.deepEqual(
 );
 assert.equal(planQualityConvergence({ current: textFailure, previous: textFailure, attempt: 1, maximumAttempts: 2 }).action, "stop");
 
+const reviewLeakSections = [...sparseSections];
+reviewLeakSections[0] = "짧은 정상 문단";
+reviewLeakSections[6] = "후기 수는 참고값으로만 보기\n\n판매 페이지 기준 리뷰 수는 10,388개로 확인돼요. 다만 실제 후기 원문이 제공되지 않았기 때문에, 구매자들이 냄새나 소음에 만족했다는 식의 내용은 만들 수 없습니다.";
+const reviewLeakFailure = {
+  ...rawLinkFailure,
+  code: "internal-guidance-leak",
+  blockers: [{ code: "internal-guidance-leak", tier: "safety", reason: "본문에 내부 작성 지침이 섞였습니다." }],
+} satisfies BrandLinkContentReadiness;
+const reviewLeakPlan = planQualityConvergence({ current: reviewLeakFailure, attempt: 0, maximumAttempts: 2 });
+assert.equal(reviewLeakPlan.action, "repair-text");
+assert.deepEqual(
+  selectQualityRepairSectionIndexes({ current: reviewLeakFailure, sections: reviewLeakSections, plan: reviewLeakPlan }),
+  [6],
+  "missing-review meta text must target its own section, not the shortest unrelated section",
+);
+reviewLeakSections[3] = "이번 자료에는 구매 후기 원문이 없습니다.";
+assert.deepEqual(
+  selectQualityRepairSectionIndexes({ current: reviewLeakFailure, sections: reviewLeakSections, plan: reviewLeakPlan }),
+  [3, 6],
+  "all sections containing missing-review guidance must be repaired together",
+);
+
 const compositionOnly = {
   ...textFailure,
   verdict: "blocked",

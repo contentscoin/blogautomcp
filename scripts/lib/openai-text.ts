@@ -8,6 +8,7 @@
 
 import fs from "fs";
 import path from "path";
+import { TEXT_MODEL, resolveTextModel, textCompletionParameters } from "./text-model-policy";
 
 const OPENAI_CHAT_ENDPOINT = "https://api.openai.com/v1/chat/completions";
 
@@ -25,7 +26,9 @@ export interface OpenAiChatOptions {
   images?: OpenAiImageInput[];
   /** true 면 response_format=json_object (프롬프트에 "JSON" 언급 필요). */
   json?: boolean;
+  /** Legacy caller compatibility only; sampling overrides are not sent. */
   temperature?: number;
+  /** Visible-output target; shared policy adds reasoning headroom for long output. */
   maxOutputTokens?: number;
   model?: string;
   timeoutMs?: number;
@@ -40,11 +43,11 @@ export function isOpenAiAvailable(): boolean {
 }
 
 export function getOpenAiTextModel(): string {
-  return process.env.OPENAI_MODEL?.trim() || "gpt-4o-mini";
+  return TEXT_MODEL;
 }
 
 export function getOpenAiVisionModel(): string {
-  return process.env.OPENAI_VISION_MODEL?.trim() || getOpenAiTextModel();
+  return TEXT_MODEL;
 }
 
 function mimeTypeForPath(filePath: string): string {
@@ -74,7 +77,7 @@ export async function openaiChatText(options: OpenAiChatOptions): Promise<string
   if (!apiKey) throw new Error("OPENAI_API_KEY가 비어 있어 OpenAI API를 호출할 수 없습니다.");
 
   const hasImages = Boolean(options.images && options.images.length > 0);
-  const model = options.model || (hasImages ? getOpenAiVisionModel() : getOpenAiTextModel());
+  const model = resolveTextModel(options.model);
   const userContent = hasImages
     ? [{ type: "text" as const, text: options.user }, ...(options.images || []).map(toImagePart)]
     : options.user;
@@ -89,10 +92,8 @@ export async function openaiChatText(options: OpenAiChatOptions): Promise<string
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        model,
+        ...textCompletionParameters(options.maxOutputTokens ?? 4096, model),
         messages,
-        temperature: options.temperature ?? 0.7,
-        max_completion_tokens: options.maxOutputTokens ?? 4096,
         ...(options.json ? { response_format: { type: "json_object" } } : {}),
       }),
       signal: controller.signal,

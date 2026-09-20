@@ -132,6 +132,18 @@ async function main() {
   assert.equal(aborted, null);
   assert.equal(calls, 1, "생성 자체가 실패하면 반복하지 않는다");
 
+  let uncheckedCalls = 0;
+  const unchecked = await generateThumbnailWithQc({
+    prompt: "BASE", outputDir: dir, fileLabel: "unchecked",
+    expected: { kind: "SHOPPING", productName: "x", headline: "y" }, maxAttempts: 4,
+    deps: {
+      generate: async () => { uncheckedCalls += 1; return makeImage("unchecked.png"); },
+      qc: async () => ({ ...perfect, checked: false, pass: true, note: "legacy skip" }),
+    },
+  });
+  assert.equal(unchecked, null, "unchecked is never an approved image, even with a legacy pass flag");
+  assert.equal(uncheckedCalls, 1, "an unavailable judge must not trigger paid regeneration loops");
+
   if (process.env.THUMBNAIL_GEN_E2E === "1" && process.env.OPENAI_API_KEY) {
     const { generateThumbnail } = await import("./lib/thumbnail-gen");
     const reference = await makeImage("reference.png");

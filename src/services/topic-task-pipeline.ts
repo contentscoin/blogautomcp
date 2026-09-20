@@ -1,8 +1,11 @@
 import "server-only";
+import { TEXT_MODEL } from "../../scripts/lib/text-model-policy";
+import { runCodexDraft } from "../../scripts/lib/codex-draft-provider";
+import { extractJsonObject, openaiChatText } from "../../scripts/lib/openai-text";
 
 import fs from "fs";
 import path from "path";
-import { execFile, spawn } from "child_process";
+import { execFile } from "child_process";
 import { promisify } from "util";
 import { prisma } from "@/lib/db";
 import {
@@ -32,6 +35,7 @@ import {
   getTopicTaskContentReadiness,
   type TopicTaskContentReadiness,
 } from "@/lib/topic-task-content-readiness";
+import { getTopicTaskPublishReadiness } from "@/lib/topic-task-publish-readiness";
 
 const TOPIC_CRAFT_GENERATE_TOPICS_URL =
   process.env.TOPIC_CRAFT_GENERATE_TOPICS_URL ||
@@ -42,7 +46,7 @@ const TOPIC_CRAFT_GENERATE_IMAGE_URL =
 const PEXELS_API_KEY = process.env.PEXELS_API_KEY?.trim() || "";
 const TOPIC_PIPELINE_ALLOW_GENERIC_IMAGE_FALLBACK =
   process.env.TOPIC_PIPELINE_ALLOW_GENERIC_IMAGE_FALLBACK?.toLowerCase() === "true";
-const OPENAI_MODEL = process.env.TOPIC_PIPELINE_OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_MODEL = TEXT_MODEL;
 const CHATGPT_BASE_URL = process.env.CHATGPT_BASE_URL || "https://chatgpt.com/";
 const BROWSER_TOPIC_GPT_URL = CHATGPT_BASE_URL;
 const CHATGPT_IMAGE_GPT_URL = CHATGPT_BASE_URL;
@@ -555,7 +559,7 @@ function buildPlayfulTitle(
     topicType === "travel"
       ? [
           `${topic}, 어디를 먼저 정하느냐에 따라 만족도가 달라진다`,
-          `${topic}, 다녀온 뒤 후회가 모이는 지점`,
+          `${topic}, 예약 전에 비교할 선택 조건`,
           `${topic}, 마지막까지 분위기를 지키는 선택 기준`,
           `${topic}, 처음부터 흐름이 편한 사람들의 공통점`,
         ]
@@ -633,7 +637,7 @@ function buildSectionHeadingByType(
       scene: ["현장에서 표정이 바뀌는 순간", "그날 일정이 갑자기 편해지는 선택"],
       mistake: ["많이들 여기서 무리하다가 여행이 꼬인다", "아끼려다 오히려 더 피곤해지는 지점"],
       comparison: ["같은 코스라도 체감이 달라지는 이유", "돈보다 동선이 더 크게 갈라놓는 순간"],
-      proof: ["실제 후기에서 반복되는 후회 포인트", "다녀온 사람들 말이 유독 모이는 지점"],
+      proof: ["출처에서 확인한 선택 조건과 제약", "확인된 일정·조건을 비교할 지점"],
       takeaway: ["돌아와서 덜 후회하려면 여기부터 본다", "이번 여행에서 바로 써먹을 선택 기준"],
     },
     golf: {
@@ -2311,26 +2315,23 @@ async function requestTopicCraftCandidates(params: {
   sourceSummaries: TopicSourceSummary[];
   narrativeBriefs: NarrativeAngleBrief[];
 }): Promise<TopicCraftCandidate[]> {
-  const { stdout } = await withTimeout(
-    execFileAsync(
-      "curl",
-      [
-        "-sS",
-        "-X",
-        "POST",
-        TOPIC_CRAFT_GENERATE_TOPICS_URL,
-        "-H",
-        "Content-Type: application/json",
-        ...TOPIC_CRAFT_AUTH_HEADERS,
-        "--data",
-        JSON.stringify({ category: params.category, keyword: params.keyword }),
-      ],
-      { maxBuffer: CURL_MAX_BUFFER_BYTES },
-    ),
-    TOPIC_CRAFT_TIMEOUT_MS,
-    "topic-craft generate-topics",
-  );
-  const payload = JSON.parse(stdout) as TopicCraftResponse;
+  // The remote topic-craft service does not attest its text model. Generate the
+  // same candidate contract locally through the pinned writing provider.
+  const stdout = await runCodexDraft({
+    systemPrompt: "제공된 자료만 근거로 한국어 블로그 후보를 작성하세요. JSON 객체만 반환하세요.",
+    userPrompt: [
+      `주제: ${params.rootTopic}\n카테고리: ${params.category}\n키워드: ${params.keyword}`,
+      '응답 형식: {"topics":[{"title":"제목","content":"본문","hashtags":["태그"],"subtopics":[{"title":"소제목","content":"본문"}],"image_prompt":"이미지 설명"}]}',
+      "후보마다 서로 다른 관점을 사용하고 제공되지 않은 수치나 체험을 만들지 마세요.",
+      JSON.stringify({ sources: params.sourceSummaries, briefs: params.narrativeBriefs }),
+    ].join("\n"),
+    model: TEXT_MODEL,
+    timeoutMs: TOPIC_CRAFT_TIMEOUT_MS,
+  });
+  const payload = extractJsonObject<TopicCraftResponse>(stdout);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("주제 후보 응답은 JSON 객체여야 합니다.");
+  }
   const valid = extractTopicCraftCandidates(payload);
   const narrativeCandidates = buildNarrativeCandidatesFromBriefs(
     params.rootTopic,
@@ -2574,34 +2575,14 @@ async function runOpenAiStructured<T>(schemaName: string, _schema: Record<string
   const apiKey = process.env.OPENAI_API_KEY?.trim();
   if (!apiKey) return null;
 
-  const response = await withTimeout(
-    fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: OPENAI_MODEL,
-        messages: [{ role: "user", content: prompt }],
-        response_format: { type: "json_object" },
-      }),
-    }),
-    STRUCTURED_MODEL_TIMEOUT_MS,
-    `OpenAI ${schemaName}`,
-  );
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(`OpenAI ${schemaName} 호출 실패 (${response.status}): ${detail.slice(0, 400)}`);
-  }
-
-  const payload = (await response.json()) as {
-    choices?: Array<{
-      message?: { content?: string };
-    }>;
-  };
-
-  const outputText = payload.choices?.[0]?.message?.content ?? "";
+  const outputText = await openaiChatText({
+    system: "요청된 JSON 객체만 반환하세요.",
+    user: prompt,
+    model: OPENAI_MODEL,
+    json: true,
+    maxOutputTokens: 8192,
+    timeoutMs: STRUCTURED_MODEL_TIMEOUT_MS,
+  });
   const parsed = parseJsonObject<T>(outputText);
   if (!parsed) {
     throw new Error(`OpenAI 응답을 JSON으로 해석하지 못했습니다 (${schemaName})`);
@@ -2615,87 +2596,33 @@ async function runBrowserStructured<T>(prompt: string): Promise<T> {
     throw new Error("브라우저 GPT 폴백이 비활성화되어 있습니다.");
   }
 
-  const { createChatGPTContext, openChatGPTTarget, sendPromptToChatGPT } = await import(
-    "../../scripts/lib/chatgpt-browser"
-  );
-
-  const handle = await createChatGPTContext(true);
-  try {
-    const page = await handle.context.newPage();
-    await openChatGPTTarget(page, BROWSER_TOPIC_GPT_URL, "주제글 폴백");
-    const raw = await sendPromptToChatGPT(page, prompt, "주제글 폴백");
-    const parsed = parseJsonObject<T>(raw);
-    if (!parsed) {
-      throw new Error("브라우저 GPT 응답을 JSON으로 해석하지 못했습니다.");
-    }
-    return parsed;
-  } finally {
-    await handle.close().catch(() => {});
+  // Browser sessions cannot attest the selected text model. Keep the caller's
+  // existing fallback flow, but execute its request on the pinned provider.
+  const raw = await runCodexDraft({
+    systemPrompt: "요청된 JSON 객체만 반환하세요.",
+    userPrompt: prompt,
+    model: TEXT_MODEL,
+    timeoutMs: STRUCTURED_MODEL_TIMEOUT_MS,
+  });
+  const parsed = parseJsonObject<T>(raw);
+  if (!parsed) {
+    throw new Error("Codex 응답을 JSON으로 해석하지 못했습니다.");
   }
+  return parsed;
 }
 
-const CODEX_BIN =
-  process.env.CODEX_BIN || "/Users/jakeshin/.nvm/versions/node/v20.19.5/bin/codex";
-
 async function runCodexStructured<T>(prompt: string): Promise<T | null> {
-  const { readFile, unlink } = await import("fs/promises");
-  const { join } = await import("path");
-  const { tmpdir } = await import("os");
-
-  const ts = Date.now();
-  const outputFile = join(tmpdir(), `codex-structured-${ts}-${Math.random().toString(36).slice(2)}.txt`);
-  const fullPrompt = `${prompt}\n\n반드시 JSON만 출력하라. 다른 텍스트 없음.`;
-
   try {
-    let proc: ReturnType<typeof spawn> | null = null;
-    let timeoutId: NodeJS.Timeout | null = null;
-
-    await new Promise<void>((resolve, reject) => {
-      proc = spawn(
-        CODEX_BIN,
-        ["exec", "--full-auto", "--ephemeral", "--skip-git-repo-check", "-o", outputFile, "-"],
-        { stdio: ["pipe", "pipe", "pipe"] },
-      );
-
-      const finish = (callback: () => void) => {
-        if (timeoutId) {
-          clearTimeout(timeoutId);
-          timeoutId = null;
-        }
-        callback();
-      };
-
-      timeoutId = setTimeout(() => {
-        if (proc && !proc.killed) {
-          proc.kill("SIGTERM");
-          setTimeout(() => {
-            if (proc && !proc.killed) {
-              proc.kill("SIGKILL");
-            }
-          }, 1_500).unref();
-        }
-        finish(() => reject(new Error(`Codex timeout (${TOPIC_CODEX_TIMEOUT_MS}ms)`)));
-      }, TOPIC_CODEX_TIMEOUT_MS);
-
-      if (!proc.stdin) {
-        finish(() => reject(new Error("Codex stdin을 열 수 없습니다.")));
-        return;
-      }
-
-      proc.stdin.write(fullPrompt, "utf-8");
-      proc.stdin.end();
-      proc.once("close", () => finish(resolve));
-      proc.once("error", (error) => finish(() => reject(error)));
+    const output = await runCodexDraft({
+      systemPrompt: "요청된 JSON 객체만 반환하세요.",
+      userPrompt: prompt,
+      model: TEXT_MODEL,
+      timeoutMs: TOPIC_CODEX_TIMEOUT_MS,
     });
-
-    const output = await readFile(outputFile, "utf-8");
-    const jsonMatch = output.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return null;
-    return JSON.parse(jsonMatch[0]) as T;
+    return parseJsonObject<T>(output);
   } catch {
+    // Preserve the caller's optional editorial-pass contract.
     return null;
-  } finally {
-    await unlink(outputFile).catch(() => {});
   }
 }
 
@@ -4370,14 +4297,15 @@ async function setTaskStage(
   stage: TopicTaskPipelineStage,
   data: Record<string, unknown> = {},
 ) {
-  await prisma.topicPostTask.update({
-    where: { id: taskId },
+  const changed = await prisma.topicPostTask.updateMany({
+    where: { id: taskId, pipelineStage: { not: "OUTCOME_UNKNOWN" }, status: { notIn: ["PUBLISHING", "PUBLISHED", "SCHEDULED"] } },
     data: {
       status: stage,
       pipelineStage: stage,
       ...data,
     },
   });
+  if (changed.count !== 1) throw new TopicPrepareConflictError("발행 상태가 변경되어 준비 작업을 중단했습니다.");
 }
 
 function buildDraftSeed(candidate: TopicCraftCandidate, selection: TopicSelectionDecision, score: ScoredTopicCandidate) {
@@ -4488,7 +4416,21 @@ export async function prepareTopicTask(taskId: string): Promise<PrepareTaskResul
   if (!task) {
     throw new Error("주제 태스크를 찾을 수 없습니다.");
   }
+  // Reject before locks, research, spending, or resetting any stored publication evidence.
+  if (task.pipelineStage === "OUTCOME_UNKNOWN" || task.status === "PUBLISHING") {
+    throw new TopicPrepareConflictError("이전 제출 결과가 미확인 또는 처리 중입니다. 실제 발행/예약 결과를 확인하고 수동 복구하기 전에는 수정하거나 재준비할 수 없습니다.");
+  }
   const releaseLock = acquirePrepareLock(task.id);
+  let activeCampaignId = task.campaignId;
+  let ownsPrepare = false;
+
+  try {
+    const claimed = await prisma.topicPostTask.updateMany({
+      where: { id: task.id, updatedAt: task.updatedAt, pipelineStage: { not: "OUTCOME_UNKNOWN" }, status: { not: "PUBLISHING" } },
+      data: { status: "RESEARCHING", pipelineStage: "RESEARCHING", selectedDraftId: null, preparedContentJson: null },
+    });
+    if (claimed.count !== 1) throw new TopicPrepareConflictError("작업 상태가 변경되어 준비를 시작하지 않았습니다. 실제 제출 결과를 먼저 확인하세요.");
+    ownsPrepare = true;
 
   const topicType = mapTaskTypeToTopicType(task.type, {
     topic: task.topic,
@@ -4512,9 +4454,6 @@ export async function prepareTopicTask(taskId: string): Promise<PrepareTaskResul
     topicType,
     [task.topic, task.keywords || "", task.memo || ""].join(" "),
   );
-  let activeCampaignId = task.campaignId;
-
-  try {
     await setTaskStage(task.id, "RESEARCHING", {
       topicCraftCategory,
       errorMessage: null,
@@ -4667,13 +4606,12 @@ export async function prepareTopicTask(taskId: string): Promise<PrepareTaskResul
         contentJson: serializePreparedTopicContent(polished),
         citations: JSON.stringify(sourceSummaries),
         sourceImagesJson: JSON.stringify(sourceImages.map((image) => image.pageUrl)),
-        status: "APPROVED",
+        status: "REVIEW",
         topicSeedJson: buildDraftSeed(selectedScore.candidate, selection, selectedScore),
         errorMessage: null,
       },
     });
 
-    const imageAssets = await resolveDraftImages(selectedDraft.id, imagePlan, sourceImages);
     const preparedContentJson = serializePreparedTopicContent(polished);
     const preparedHashtags = JSON.stringify(polished.hashtags);
     const narrativeAngleBriefsJson = JSON.stringify(narrativeBriefs);
@@ -4692,9 +4630,24 @@ export async function prepareTopicTask(taskId: string): Promise<PrepareTaskResul
     });
     const contentReadinessReportJson = JSON.stringify(contentReadiness);
     const contentReadinessScore = scoreContentReadiness(contentReadiness);
+    // Text must be usable before spending credits on images. PREPARED means
+    // an inspectable draft exists, not that quality or human approval passed.
+    const imageAssets = contentReadiness.canPublish
+      ? await resolveDraftImages(selectedDraft.id, imagePlan, sourceImages)
+      : [];
+    const imageReadiness = getTopicTaskPublishReadiness({
+      selectedDraftId: selectedDraft.id, preparedContentJson, preparedImages: imageAssets,
+    }, (localPath) => {
+      try { return fs.statSync(localPath).isFile() && fs.statSync(localPath).size > 0; }
+      catch { return false; }
+    });
 
     await prisma.$transaction(
       async (tx) => {
+        await tx.topicDraft.update({
+          where: { id: selectedDraft.id },
+          data: { status: contentReadiness.canPublish && imageReadiness.canPublish ? "APPROVED" : "REVIEW" },
+        });
         await tx.topicDraftImage.deleteMany({
           where: { draftId: selectedDraft.id },
         });
@@ -4718,8 +4671,8 @@ export async function prepareTopicTask(taskId: string): Promise<PrepareTaskResul
           data: { status: "REVIEW" },
         });
 
-        await tx.topicPostTask.update({
-          where: { id: task.id },
+        const completed = await tx.topicPostTask.updateMany({
+          where: { id: task.id, pipelineStage: { not: "OUTCOME_UNKNOWN" }, status: { notIn: ["PUBLISHING", "PUBLISHED", "SCHEDULED"] } },
           data: {
             status: "PREPARED",
             pipelineStage: "PREPARED",
@@ -4733,9 +4686,10 @@ export async function prepareTopicTask(taskId: string): Promise<PrepareTaskResul
             contentReadinessReportJson,
             contentReadinessScore,
             contentReadinessPublishable: contentReadiness.canPublish,
-            errorMessage: null,
+            errorMessage: contentReadiness.reason || imageReadiness.reason || null,
           },
         });
+        if (completed.count !== 1) throw new TopicPrepareConflictError("발행 상태가 변경되어 준비 결과를 저장하지 않았습니다.");
       },
       {
         maxWait: 10_000,
@@ -4752,15 +4706,10 @@ export async function prepareTopicTask(taskId: string): Promise<PrepareTaskResul
       imageCount: imageAssets.length,
     };
   } catch (error) {
+    if (!ownsPrepare || error instanceof TopicPrepareConflictError) throw error;
     const message = error instanceof Error ? error.message : "주제 준비 중 오류가 발생했습니다.";
-    await prisma.topicCampaign
-      .updateMany({
-        where: { id: activeCampaignId || "" },
-        data: { status: "FAILED" },
-      })
-      .catch(() => {});
-    await prisma.topicPostTask.update({
-      where: { id: task.id },
+    const failed = await prisma.topicPostTask.updateMany({
+      where: { id: task.id, pipelineStage: { not: "OUTCOME_UNKNOWN" }, status: { notIn: ["PUBLISHING", "PUBLISHED", "SCHEDULED"] } },
       data: {
         status: "FAILED",
         pipelineStage: "FAILED",
@@ -4771,6 +4720,11 @@ export async function prepareTopicTask(taskId: string): Promise<PrepareTaskResul
         errorMessage: message,
       },
     });
+    if (failed.count === 1) {
+      await prisma.topicCampaign.updateMany({
+        where: { id: activeCampaignId || "" }, data: { status: "FAILED" },
+      }).catch(() => {});
+    }
     throw error;
   } finally {
     releaseLock();

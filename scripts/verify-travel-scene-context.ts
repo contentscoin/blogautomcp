@@ -11,4 +11,15 @@ assert.ok(!result.uncoveredPlaces.includes("나라사슴공원"));
 assert.ok(!result.uncoveredPlaces.includes("신사이바시"));
 assert.ok(!result.uncoveredPlaces.includes("도톤보리"));
 assert.ok(result.uncoveredPlaces.includes("청수사"));
+const parentheticalPlace = assessTravelReviewSubstance({
+  productName: "코타키나발루 5일",
+  sourceText: "핵심 방문지: KK Star Lounge 스타라운지, 사바 주립 모스크 (이슬람사원), 사바 주청사",
+  sections: [
+    "KK Star Lounge 스타라운지에서 출국 전 샤워와 휴식을 할 수 있습니다.",
+    "사바 주립 모스크의 흰 외벽과 미나렛을 사진으로 남깁니다.",
+    "사바 주청사의 원형 건축을 차창 너머로 감상합니다.",
+  ],
+});
+assert.deepEqual(parentheticalPlace.coveredPlaces, ["KK Star Lounge 스타라운지", "사바 주립 모스크 (이슬람사원)", "사바 주청사"]);
+assert.deepEqual(parentheticalPlace.uncoveredPlaces, []);
 console.log("PASS travel aliases, compound places, bounded scene context and negative controls");

@@ -6,6 +6,7 @@ const os = require('node:os');
 const vm = require('node:vm');
 const ts = require('typescript');
 function load(file, mocks = {}, globals = {}, tail = '') {
+  if (mocks['@/lib/desktop-activity']) mocks['@/lib/desktop-activity'].beginDesktopActivity ??= () => () => {};
   const code = ts.transpileModule(fs.readFileSync(file, 'utf8') + tail, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
   const module = { exports: {} };
   vm.runInNewContext(code, { module, exports: module.exports, require: (name) => name in mocks ? mocks[name] : name.startsWith('.') ? load(path.resolve(path.dirname(file), `${name}.ts`), mocks, globals) : require(name), process, console, Buffer, setTimeout, clearTimeout, setInterval, clearInterval, Request, Response, Headers, URL, AbortSignal, ...globals }, { filename: file });
@@ -52,6 +53,7 @@ test('status snapshot exposes detached image generation without an active remote
   assert.deepEqual(JSON.parse(JSON.stringify(status.backgroundWork)), { publishing: 0, drafting: 0, processes: 1, imageGeneration: 1, busy: true });
 });
 for (const jobType of ['SETTINGS_GET', 'POST_PUBLISH']) test(`${jobType}: actual poll timeout and late heartbeat never replay execution`, async () => {
+  const activity = load(path.join(__dirname, 'desktop-activity.ts'));
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'remote-poll-'));
   let executes = 0, claims = 0, heartbeats = 0, stopped = false, tick;
   let recover = false;
@@ -62,6 +64,7 @@ for (const jobType of ['SETTINGS_GET', 'POST_PUBLISH']) test(`${jobType}: actual
   for (const match of source.matchAll(/from\s+["']([^"']+)["']/g)) if (!match[1].startsWith('node:')) mocks[match[1]] = {};
   Object.assign(mocks, {
     'next/server': { NextResponse: Response },
+    '@/lib/desktop-activity': activity,
     '@/lib/remote-agent-completion': { ...helper, deliverCompletion: (send) => helper.deliverCompletion(send, async () => {}) },
     '@/lib/api-auth': { requireAdminApiKey: () => null },
     '@/lib/local-request-auth': { requireTrustedLocalMutation: () => null },
@@ -86,6 +89,7 @@ for (const jobType of ['SETTINGS_GET', 'POST_PUBLISH']) test(`${jobType}: actual
     clearInterval: () => { stopped = true; },
     fetch: async (url, init) => {
       assert.ok(init.signal, 'site calls must have a finite deadline');
+      assert.ok(activity.getDesktopActivitySnapshot().count > 0, 'claim, heartbeat and completion delivery must block updater readiness');
       if (url.endsWith('/claim')) { claims++; return Response.json({ data: { id: 'job_1', type: jobType, input: { draftId: 'draft1', confirmed: true } } }); }
       if (url.endsWith('/heartbeat')) { heartbeats++; return Response.json({ data: { active: bodies.length === 0, cancelRequested: bodies.length > 0 } }); }
       assert.ok(url.endsWith('/complete'));
@@ -104,12 +108,22 @@ for (const jobType of ['SETTINGS_GET', 'POST_PUBLISH']) test(`${jobType}: actual
     const request = new Request('http://localhost/api/remote-agent/poll', { method: 'POST' });
     request.nextUrl = new URL(request.url);
     const first = await (await route.POST(request)).json();
+    assert.equal(activity.getDesktopActivitySnapshot().count, 0);
     assert.equal(first.code, 'COMPLETION_DELIVERY_UNCERTAIN');
     assert.equal(first.data.executionStatus, 'SUCCEEDED');
     assert.ok(heartbeats > 1);
     assert.equal(stopped, true);
     recover = true;
-    const second = await (await route.POST(request)).json();
+    const previousPending = process.env.DESKTOP_UPDATE_INSTALL_PENDING;
+    process.env.DESKTOP_UPDATE_INSTALL_PENDING = '1';
+    let second;
+    try {
+      second = await (await route.POST(request)).json();
+      assert.equal((await (await route.POST(request)).json()).data.updatePending, true);
+    } finally {
+      if (previousPending === undefined) delete process.env.DESKTOP_UPDATE_INSTALL_PENDING;
+      else process.env.DESKTOP_UPDATE_INSTALL_PENDING = previousPending;
+    }
     assert.equal(second.data.completionRecovered, true);
     assert.equal(claims, 1);
     assert.equal(executes, 1);

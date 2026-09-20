@@ -440,24 +440,58 @@ function clean(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
+/** Remove tag lists only; inline references and prose beginning with a tag survive. */
+export function stripHashtagOnlyLines(value: string): string {
+  return value.split(/\r?\n/u)
+    .filter(line => !/^\s*(?:#[\p{L}\p{N}\p{M}_]+\s*)+$/u.test(line))
+    .join("\n").trim();
+}
+
+export function normalizeSystemHashtags(values: string[]): string[] {
+  return [...new Set(values.map(value => value.trim().replace(/^#+/u, "").replace(/\s+/gu, "")).filter(Boolean))];
+}
+
+/** Repair detached labels and repeated answer labels without dropping answer sentences. */
+export function normalizePublishedBodyLines(values: string[]): string[] {
+  const lines = stripHashtagOnlyLines(values.join("\n")).split(/\r?\n/u).map(clean).filter(Boolean);
+  const result: string[] = [];
+  let active: "Q" | "A" | null = null;
+  let question: string[] = [];
+  let answer: string[] = [];
+  const flush = () => {
+    if (question.length) result.push(`Q. ${question.join(" ")}`);
+    if (answer.length) result.push(`A. ${answer.join(" ")}`);
+    question = []; answer = []; active = null;
+  };
+  for (const line of lines) {
+    const marker = /^(Q|A|질문|답변)\s*[.:：)](?:\s+|$)(.*)$/iu.exec(line);
+    if (marker) {
+      const kind = /^(?:Q|질문)$/iu.test(marker[1]) ? "Q" : "A";
+      if (kind === "Q") flush();
+      active = kind;
+      if (marker[2]) (kind === "Q" ? question : answer).push(marker[2]);
+    } else if (active) {
+      (active === "Q" ? question : answer).push(line);
+    } else result.push(line);
+  }
+  flush();
+  return result;
+}
+
 function parseGeneratedSection(value: string): { title: string; body: string[] } {
   const lines = value
     .split(/\r?\n/u)
     .map((line) => clean(line))
     .filter(Boolean);
   const title = lines.shift() || "본문";
-  const body = lines.length ? lines : [title];
+  const body = normalizePublishedBodyLines(lines.length ? lines : [title]);
   return { title, body };
-}
-
-function isDisclosureSection(value: string): boolean {
-  return /(?:쇼핑|여행)\s*커넥트/u.test(value) && /수수료/u.test(value);
 }
 
 /** Remove only the standard disclosure sentence, never a whole mixed section. */
 export function splitAffiliateDisclosure(value: string): { content: string; disclosure: string } {
   const notices: string[] = [];
-  const content = value.replace(/(?:이\s*(?:글|포스팅)은|본\s*글은)\s*(?:네이버\s*)?(?:쇼핑|여행)\s*커넥트[^.!?\n]*수수료[^.!?\n]*(?:[.!?]|$)/gu, sentence => {
+  const content = value.replace(/(?:(?:이\s*(?:글|포스팅)은|본\s*글은)\s*(?:네이버\s*)?|네이버\s*)(?:쇼핑|여행)\s*커넥트\s*활동[^.!?\n#]*수수료[^.!?\n#]*(?:[.!?]|(?=#|\n|$))/gu, sentence => {
     notices.push(sentence.trim());
     return "";
   }).replace(/자세한 (?:일정과 예약|상품) 정보는 아래 (?:여행|쇼핑)커넥트에서 확인해보세요\./gu, "").trim();
@@ -654,12 +688,12 @@ export function resolvePostDocument(options: {
   const contract = getPostCompositionContract(options.connectKind);
   const qualityPreset = options.qualityPreset || "PREMIUM";
   const experienceMode = options.experienceMode || "AI_ASSISTED_INFORMATION";
-  const separated = options.sections.map(splitAffiliateDisclosure);
-  const disclosureSection = separated.find(section => section.disclosure)?.disclosure
-    || options.sections.find(isDisclosureSection);
-  const contentSections = separated.flatMap((section, index) => section.disclosure
-    ? (section.content ? [section.content] : [])
-    : (!isDisclosureSection(options.sections[index]) ? [section.content] : []));
+  const separated = options.sections.map(value => {
+    const separated = splitAffiliateDisclosure(value);
+    return { ...separated, content: stripHashtagOnlyLines(separated.content) };
+  });
+  const disclosureSection = separated.find(section => section.disclosure)?.disclosure;
+  const contentSections = separated.flatMap(section => section.content ? [section.content] : []);
   const plan =
     options.sectionPlan && options.sectionPlan.length === contentSections.length ? options.sectionPlan : null;
   const sectionContracts = resolveSectionContracts(contract, contentSections.length);
@@ -747,25 +781,59 @@ export function resolvePostDocument(options: {
   for (const section of sections) {
     renderNodes.push({ kind: "divider", sectionId: section.id });
     const layout = options.editorial?.policy.layout;
+    const sectionDesign = options.editorial
+      ? (options.editorial.policy.sectionDesigns?.[section.id]
+        ?? Object.entries(options.editorial.policy.sectionDesigns || {}).find(([key]) => section.id.startsWith(key))?.[1])
+      : undefined;
+    const imageLayout = sectionDesign?.image ?? layout?.image ?? "after-lead";
+    const sentencesPerParagraph = sectionDesign?.sentences ?? layout?.sentences ?? 1;
     const pushSectionImages = () => section.imagePaths.forEach((imagePath, index) => pushImage(section, imagePath, index));
-    if (layout?.image === "before-heading") pushSectionImages();
+    if (imageLayout === "before-heading") pushSectionImages();
     // 네이버 자동 입력에서는 인용구 컴포넌트가 빈 채로 남을 수 있으므로 모든
     // 섹션 제목을 실제 소제목 서식 노드로 정규화한다.
     renderNodes.push({ kind: "heading", sectionId: section.id, text: section.title });
-    if (layout?.image === "before-body") pushSectionImages();
+    if (imageLayout === "before-body") pushSectionImages();
+
+    // Batch write: pack sentences into at most two body blocks per section so
+    // the publisher applies toolbar styles once, then types the whole block.
+    const step = Math.max(1, sentencesPerParagraph);
     const paragraphs: string[] = [];
-    // Existing body entries are complete sentence units. Never split URLs or decimals.
-    for (let i = 0; i < section.body.length; i += layout?.sentences ?? 1) {
-      paragraphs.push(section.body.slice(i, i + (layout?.sentences ?? 1)).join(" "));
+    for (let i = 0; i < section.body.length;) {
+      // Keep each question and its complete answer together, regardless of template batching.
+      if (/^Q\. /u.test(section.body[i]) && /^A\. /u.test(section.body[i + 1] || "")) {
+        paragraphs.push(`${section.body[i]}\n${section.body[i + 1]}`);
+        i += 2;
+        continue;
+      }
+      const chunk: string[] = [];
+      do { chunk.push(section.body[i++].trim()); }
+      while (i < section.body.length && chunk.length < step && !/^Q\. /u.test(section.body[i]));
+      if (chunk.length) paragraphs.push(chunk.join(" "));
     }
-    paragraphs.forEach((paragraph, paragraphIndex) => {
-      renderNodes.push({ kind: "paragraph", sectionId: section.id, text: paragraph });
-      if (paragraphIndex === 0 && (!layout || layout.image === "after-lead")) {
+    const batchWrite = options.editorial?.policy.writeMode === "batch";
+    if (batchWrite) {
+      if (paragraphs.length > 0) {
+        if (imageLayout === "after-lead" && paragraphs.length > 1) {
+          renderNodes.push({ kind: "paragraph", sectionId: section.id, text: paragraphs[0]! });
+          pushSectionImages();
+          renderNodes.push({ kind: "paragraph", sectionId: section.id, text: paragraphs.slice(1).join("\n\n") });
+        } else {
+          renderNodes.push({ kind: "paragraph", sectionId: section.id, text: paragraphs.join("\n\n") });
+          if (imageLayout === "after-lead" || imageLayout === "after-body") pushSectionImages();
+        }
+      } else if (imageLayout === "after-lead" || imageLayout === "after-body") {
         pushSectionImages();
       }
-    });
-    if (layout?.image === "after-body" || (section.body.length === 0 && (!layout || layout.image === "after-lead"))) {
-      pushSectionImages();
+    } else {
+      paragraphs.forEach((paragraph, paragraphIndex) => {
+        renderNodes.push({ kind: "paragraph", sectionId: section.id, text: paragraph });
+        if (paragraphIndex === 0 && imageLayout === "after-lead") {
+          pushSectionImages();
+        }
+      });
+      if (imageLayout === "after-body" || (section.body.length === 0 && imageLayout === "after-lead")) {
+        pushSectionImages();
+      }
     }
     if (earlyConnectSectionId && section.id === earlyConnectSectionId && options.connectUrl) {
       renderNodes.push({
@@ -785,7 +853,7 @@ export function resolvePostDocument(options: {
       url: options.connectUrl,
     });
   }
-  renderNodes.push({ kind: "hashtags", values: options.hashtags });
+  renderNodes.push({ kind: "hashtags", values: normalizeSystemHashtags(options.hashtags) });
   renderNodes.push({
     kind: "disclosure",
     disclosureType: "affiliate",
@@ -814,6 +882,45 @@ export function resolvePostDocument(options: {
       imageCount: renderNodes.filter(node => node.kind === "image").length,
     }),
   };
+}
+
+/** Browser-safe read-time repair for prepared documents; keeps image/card order. */
+export function normalizePublishedPostText(document: ResolvedPostDocumentV1): ResolvedPostDocumentV1 {
+  const sections = document.sections.map(section => {
+    const body = normalizePublishedBodyLines(section.body.map(value => splitAffiliateDisclosure(value).content));
+    return { ...section, body, characterCount: body.join("").length };
+  });
+  const renderNodes: PostRenderNode[] = [];
+  const tags = normalizeSystemHashtags(document.renderNodes.flatMap(node => node.kind === "hashtags" ? node.values : []));
+  let tagsWritten = false;
+  for (let i = 0; i < document.renderNodes.length; i++) {
+    const node = document.renderNodes[i];
+    if (node.kind === "hashtags") {
+      if (!tagsWritten) renderNodes.push({ kind: "hashtags", values: tags });
+      tagsWritten = true;
+    } else if (node.kind === "paragraph") {
+      const text = [splitAffiliateDisclosure(node.text).content];
+      while (i + 1 < document.renderNodes.length) {
+        const next = document.renderNodes[i + 1];
+        if (next.kind !== "paragraph" || next.sectionId !== node.sectionId) break;
+        text.push(splitAffiliateDisclosure(next.text).content);
+        i++;
+      }
+      if (text.some(value => /(?:^|\n)\s*(?:Q|A|질문|답변)\s*[.:：)](?:\s|$)/iu.test(value))) {
+        const normalized = normalizePublishedBodyLines(text).join("\n");
+        if (normalized) renderNodes.push({ ...node, text: normalized });
+      } else {
+        // Ordinary paragraphs keep their existing template boundaries and spacing.
+        for (const value of text) {
+          const normalized = stripHashtagOnlyLines(value);
+          if (normalized) renderNodes.push({ ...node, text: normalized });
+        }
+      }
+    } else if (node.kind === "disclosure") {
+      renderNodes.push({ ...node, text: splitAffiliateDisclosure(node.text).disclosure || stripHashtagOnlyLines(node.text) });
+    } else renderNodes.push(node);
+  }
+  return refreshPostDocumentQuality({ ...document, sections, renderNodes });
 }
 
 /** Pure migration for bounded/spec-first documents created with stale role intents. */

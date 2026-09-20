@@ -14,6 +14,8 @@ import sharp from "sharp";
 import { buildCollageImage } from "./lib/post-spec/image-plan";
 import { buildPostSpec, runSpecFirstPipeline, validateDraft, normalizeDraft } from "./lib/post-spec";
 import type { ImageCandidateInput } from "./lib/post-spec";
+import { assessTravelFeatureCoverage } from "./lib/travel-content";
+import { sourceFeaturesForValidation } from "./lib/post-spec/validate";
 
 process.env.OPENAI_API_KEY = "";
 process.env.UNSPLASH_ACCESS_KEY = "";
@@ -208,12 +210,29 @@ async function main() {
     product: {
       name: "대한항공 노쇼핑 VVIP 풀패키지 [신축 M 호텔 다낭 3박5일] 바나힐/호이안 1일 1마사지 - 인천 오후 출발변경",
       description: "",
-      features: ["핵심 방문지: 발마사지 1시간, 호이안 야투 (소원배+소원등+야시장), 아로마 핫스톤 마사지 2시간, 바나힐 테마파크 입장권"],
+      // Synthetic collector fixture, not verified details of a real package.
+      features: [
+        "핵심 방문지: 발마사지 1시간, 호이안 야투 (소원배+소원등+야시장), 아로마 핫스톤 마사지 2시간, 바나힐 테마파크 입장권",
+        "여행 기간: 5일",
+        "1일차 일정: 인천 출발 → 다낭 도착",
+        "2일차 일정: 바나힐 테마파크 → 발마사지 1시간",
+        "3일차 일정: 호이안 야시장 → 아로마 핫스톤 마사지 2시간",
+        "4일차 일정: 다낭 해변 산책 → 다낭 공항 출발",
+      ],
       price: "1,011,000원",
     },
   };
+  const sparseBana = await runSpecFirstPipeline({
+    ...banaInput,
+    product: { ...banaInput.product, features: banaInput.product.features.slice(0, 1) },
+  });
+  assert.notEqual(sparseBana.validation.status, "READY", "방문지 목록만 있고 일차별 일정이 없으면 발행 준비 완료가 아님");
+  assert.equal(sparseBana.validation.quality.categories.find((c) => c.key === "productEvidence")?.status, "fail");
+  assert.equal(assessTravelFeatureCoverage(banaInput.product.features).sufficient, true, "정상 경로 fixture는 명시적 일정 근거를 충족해야 함");
   const bana = await runSpecFirstPipeline(banaInput);
   assert.deepEqual(bana.spec.facts.travel?.destinations, ["바나힐", "호이안"], "출발지(인천)·출발 시간(오후)은 목적지가 아님");
+  assert.equal(assessTravelFeatureCoverage(sourceFeaturesForValidation(bana.spec)).sufficient, true,
+    `수집기 일정 근거가 스펙→검증기 전달 과정에서도 인식되어야 함: ${JSON.stringify(bana.spec.facts.lines)}`);
   assert.equal(bana.validation.status, "READY", bana.validation.summary);
   assert.ok(!bana.validation.repair.targets.some((t) => t.code === "REPEATED_LINE"), "마사지 코스 2개가 같은 문장을 쓰면 안 됨");
   for (const key of ["diversity", "specificity", "usefulness", "clarity"]) {

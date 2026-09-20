@@ -106,9 +106,9 @@ export async function qcThumbnail(imagePath: string, expected: ThumbnailQcExpect
   const enabled = (process.env.PRODUCT_THUMBNAIL_IMAGE_QC_ENABLED || "true").toLowerCase() !== "false";
   const skipped = (reason: string): ThumbnailQcReport => ({
     checked: false,
-    pass: true,
+    pass: false,
     score: 0,
-    breakdown: { ...QC_MAX },
+    breakdown: { productName: 0, fidelity: 0, korean: 0, readability: 0, photoreal: 0, layout: 0, forbidden: 0 },
     failures: [],
     autoFail: false,
     note: reason,
@@ -157,7 +157,7 @@ export async function qcThumbnail(imagePath: string, expected: ThumbnailQcExpect
     return scoreQcReport(raw);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    // QC 자체가 실패하면 이미지를 버리지 않는다 — 검사 불가로 통과 처리하되 표시한다.
+    // 검사 불가와 합격을 구분한다. 호출자는 재생성 대신 원본/로컬 합성 경로로 복귀한다.
     return skipped(`QC 실행 실패 — 생략 (${message.slice(0, 120)})`);
   }
 }

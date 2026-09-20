@@ -33,6 +33,16 @@ function matchesAny(text: string, patterns: readonly RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(text));
 }
 
+/** Restore the editorial wrapper only, never promote title/description to visits. */
+export function sourceFeaturesForValidation(spec: Pick<PostSpec, "connectKind" | "facts">): string[] {
+  if (spec.connectKind !== "TRAVEL") return spec.facts.lines;
+  const lines = spec.facts.lines.map((line) => line.replace(/^상세 근거:\s*/u, ""));
+  // The editorial feature filter can discard duration. Identity may raise the
+  // required coverage, but must never supply missing visits or itinerary rows.
+  const days = spec.facts.travel?.duration?.match(/(\d+)\s*일/u)?.[1];
+  return days ? [`여행 기간: ${days}일`, ...lines] : lines;
+}
+
 export function validateDraft(spec: PostSpec, draft: GeneratedDraft, options: ValidateOptions): ValidationReport {
   const signals: ValidationSignal[] = [];
   const targets: RepairTarget[] = [];
@@ -54,7 +64,7 @@ export function validateDraft(spec: PostSpec, draft: GeneratedDraft, options: Va
     thumbnailGenerated: options.thumbnailGenerated,
     connectKind: spec.connectKind,
     sourceDescription: spec.facts.lines.join("\n"),
-    sourceFeatures: spec.facts.lines,
+    sourceFeatures: sourceFeaturesForValidation(spec),
     mode: "editorial",
   });
 

@@ -72,6 +72,12 @@ type ThumbnailTheme = {
 
 const THUMBNAIL_THEMES: ThumbnailTheme[] = [
   {
+    keywords: [/바디\s*(워시|로션|크림|클렌저)|샤워\s*젤|핸드\s*(워시|크림)|샴푸|린스|트리트먼트|컨디셔너|보디|바디케어/],
+    headline: "향·용량 구성",
+    subline: "상품 정보로 구매 전 확인",
+    cta: "구성 확인",
+  },
+  {
     keywords: [/꼬리뼈|치질|자세교정|방석|쿠션|의자/],
     headline: "착석감 체크",
     subline: "두께·좌판·커버 확인",
@@ -84,8 +90,8 @@ const THUMBNAIL_THEMES: ThumbnailTheme[] = [
     cta: "사용 포인트",
   },
   {
-    keywords: [/드라이기|헤어|고데기|트리머|면도기|뷰티|바디/],
-    headline: "사용감 체크",
+    keywords: [/드라이기|드라이어|고데기|트리머|면도기/],
+    headline: "제품 사양 체크",
     subline: "바람·무게·구성 확인",
     cta: "장단점 확인",
   },
@@ -202,7 +208,9 @@ export function inferCategoryName(categoryName: string, productName: string): st
   if (given && given !== "상품리뷰") return given;
 
   const target = productName;
-  if (/드라이기|헤어|고데기/.test(target)) return "헤어드라이기";
+  if (/바디\s*(워시|로션|크림|클렌저)|보디|샤워\s*젤/.test(target)) return "바디케어";
+  if (/샴푸|린스|트리트먼트|컨디셔너/.test(target)) return "헤어케어";
+  if (/드라이기|드라이어|고데기/.test(target)) return "헤어드라이기";
   if (/꼬리뼈|치질|자세교정|방석|쿠션|의자/.test(target)) return "자세교정 방석";
   if (/보냉백|쿨러백|아이스박스|소프트쿨러|캠핑|피크닉/.test(target)) return "보냉백";
   if (/청소기|로봇청소기/.test(target)) return "청소기";
@@ -212,14 +220,22 @@ export function inferCategoryName(categoryName: string, productName: string): st
   return "상품리뷰";
 }
 
+/** Delete only standalone seller modifiers; never invent a brand/variant or slice identity. */
+export function compactProductDisplayName(productName: string): string {
+  const promotional = /^(?:향좋은|고보습|민감피부|저자극|대용량|촉촉한|촉촉|정품|공식|인기|추천|특가|무료배송)$/u;
+  const source = sanitizeText(productName);
+  const compact = source.split(" ").filter((token) => !promotional.test(token)).join(" ");
+  return compact || source;
+}
+
 export function buildProductThumbnailCopy(
   postTitle: string,
   productName: string,
   contentKind: "SHOPPING" | "TRAVEL" = "SHOPPING",
 ): ProductThumbnailCopy {
   if (contentKind === "TRAVEL") return buildTravelThumbnailCopy(productName);
-  const productNameLabel = sanitizeText(productName) || "추천 상품";
-  const theme = pickTheme(productNameLabel, postTitle);
+  const productNameLabel = compactProductDisplayName(productName) || "추천 상품";
+  const theme = pickTheme(productName, postTitle);
 
   return {
     productNameLabel,

@@ -125,6 +125,7 @@ function createDesktopAutoUpdater({ app, Notification, NsisUpdater, userDataDir,
     try {
       readiness = await getReadiness();
     } catch (error) {
+      idleConfirmations = 0;
       setState('waiting-for-idle', { error: error instanceof Error ? error.message : '작업 상태 확인 실패' });
       scheduleInstall(idleRecheckMs);
       return;

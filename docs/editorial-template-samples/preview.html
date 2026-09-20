@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>발행급 편집 템플릿 미리보기</title>
+  <style>
+    :root {
+      --paper: #ffffff;
+      --ink: #333333;
+      --muted: #555555;
+      --line: #e8ecef;
+      --shell: #e9eef1;
+      --chip: #f4f7f8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(1200px 600px at 10% -10%, #dfe8ec 0%, transparent 55%),
+        radial-gradient(900px 500px at 100% 0%, #e7ebe4 0%, transparent 50%),
+        var(--shell);
+      color: var(--ink);
+      font-family: "Nanum Gothic", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+    }
+    .page {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 28px 18px 64px;
+      display: grid;
+      gap: 20px;
+      grid-template-columns: 300px minmax(0, 420px) minmax(220px, 1fr);
+      align-items: start;
+    }
+    @media (max-width: 980px) {
+      .page { grid-template-columns: 1fr; max-width: 460px; }
+      .side-note { order: 3; }
+    }
+    .panel, .phone, .side-note {
+      background: var(--paper);
+      border-radius: 22px;
+      box-shadow: 0 18px 50px rgba(20, 35, 45, 0.08);
+    }
+    .panel { padding: 20px 18px; position: sticky; top: 16px; }
+    .panel h1 { margin: 0 0 8px; font-size: 20px; line-height: 1.35; letter-spacing: -0.02em; }
+    .panel .lead { margin: 0 0 16px; font-size: 13px; line-height: 1.65; color: var(--muted); }
+    .tabs { display: grid; gap: 8px; }
+    .tabs button {
+      text-align: left;
+      border: 1px solid #d7dee3;
+      background: #fff;
+      border-radius: 14px;
+      padding: 12px 12px;
+      cursor: pointer;
+      font: inherit;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    .tabs button small { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
+    .tabs button[aria-pressed="true"] {
+      border-color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 8%, white);
+      box-shadow: inset 3px 0 0 var(--accent);
+    }
+    .meta-grid { margin-top: 16px; display: grid; gap: 10px; }
+    .meta-grid div {
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: var(--chip);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .meta-grid strong { display: block; font-size: 11px; color: var(--muted); font-weight: 600; margin-bottom: 2px; }
+    .swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; vertical-align: -1px; margin-right: 5px; }
+
+    .phone {
+      width: min(100%, 420px);
+      margin: 0 auto;
+      overflow: hidden;
+      border: 1px solid #dbe2e7;
+    }
+    .phone-top {
+      padding: 14px 18px 10px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11px;
+      color: var(--muted);
+      background: linear-gradient(180deg, #fbfcfd, #fff);
+    }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #34c759; display: inline-block; margin-right: 6px; }
+    .article { padding: 22px 20px 34px; }
+    .badge-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+    .badge {
+      font-size: 11px;
+      letter-spacing: 0.02em;
+      color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 10%, white);
+      border: 1px solid color-mix(in srgb, var(--accent) 22%, white);
+      border-radius: 999px;
+      padding: 5px 10px;
+    }
+    .article > h2 {
+      margin: 0 0 10px;
+      font-size: 23px;
+      line-height: 1.4;
+      letter-spacing: -0.03em;
+      color: #1b1f23;
+    }
+    .dek {
+      margin: 0 0 16px;
+      font-size: 14px;
+      line-height: 1.7;
+      color: var(--muted);
+    }
+    .verdict {
+      margin: 0 0 22px;
+      padding: 14px 14px 14px 16px;
+      border-left: 3px solid var(--accent);
+      background: color-mix(in srgb, var(--accent) 6%, white);
+      border-radius: 0 14px 14px 0;
+      font-size: 14px;
+      line-height: 1.7;
+    }
+    .verdict strong { color: var(--accent); }
+    .rule {
+      border: 0;
+      border-top: 1px solid var(--line);
+      margin: 26px 0;
+    }
+    .article h3 {
+      margin: 0 0 12px;
+      font-size: 19px;
+      line-height: 1.45;
+      color: var(--accent);
+      letter-spacing: -0.02em;
+    }
+    .article p {
+      margin: 0 0 16px;
+      font-size: 16px;
+      line-height: 1.8;
+      color: var(--ink);
+      text-align: left;
+      overflow-wrap: anywhere;
+    }
+    .photo {
+      margin: 8px 0 6px;
+      aspect-ratio: 4 / 3;
+      border-radius: 14px;
+      display: grid;
+      place-items: end start;
+      padding: 14px;
+      color: #fff;
+      font-size: 12px;
+      line-height: 1.4;
+      font-weight: 600;
+      text-shadow: 0 1px 8px rgba(0,0,0,.35);
+      background:
+        linear-gradient(180deg, transparent 35%, rgba(0,0,0,.45)),
+        linear-gradient(135deg, color-mix(in srgb, var(--accent) 55%, #8aa), color-mix(in srgb, var(--accent) 25%, #ddd));
+    }
+    .caption {
+      margin: 0 0 18px;
+      font-size: 13px;
+      line-height: 1.65;
+      color: var(--muted);
+    }
+    .stack {
+      display: grid;
+      gap: 10px;
+      margin: 0 0 18px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 12px 13px;
+      background: #fafbfc;
+    }
+    .card .kicker {
+      font-size: 11px;
+      color: var(--accent);
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+    .card p { margin: 0; font-size: 14px; line-height: 1.65; }
+    .fit-grid {
+      display: grid;
+      gap: 10px;
+      margin: 0 0 18px;
+    }
+    .fit {
+      border-radius: 14px;
+      padding: 13px;
+      border: 1px solid var(--line);
+    }
+    .fit.good { background: #f3faf6; border-color: #cfe6d8; }
+    .fit.care { background: #fbf7f2; border-color: #ead9c8; }
+    .fit h4 { margin: 0 0 6px; font-size: 13px; }
+    .fit ul { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.65; color: #444; }
+    .cta {
+      margin: 22px 0 8px;
+      padding: 16px;
+      border-radius: 16px;
+      background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 12%, white), #fff);
+      border: 1px solid color-mix(in srgb, var(--accent) 25%, white);
+      text-align: center;
+    }
+    .cta .price { font-size: 18px; font-weight: 800; color: var(--accent); margin-bottom: 4px; }
+    .cta .sub { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+    .cta .btn {
+      display: inline-block;
+      padding: 11px 18px;
+      border-radius: 999px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .tags { margin: 18px 0 10px; font-size: 13px; line-height: 1.7; color: var(--accent); }
+    .disclose {
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.65;
+      color: var(--muted);
+      padding-top: 8px;
+      border-top: 1px dashed var(--line);
+    }
+    .side-note { padding: 18px; }
+    .side-note h2 { margin: 0 0 8px; font-size: 15px; }
+    .side-note p, .side-note li { font-size: 12px; line-height: 1.65; color: var(--muted); }
+    .side-note ul { margin: 0; padding-left: 18px; }
+    .side-note li { margin-bottom: 6px; }
+  </style>
+</head>
+<body>
+  <div class="page" style="--accent:#00554c">
+    <aside class="panel">
+      <h1>발행급 템플릿 미리보기</h1>
+      <p class="lead">Instapaper·리뷰형 모바일 아티클의 읽기 리듬을 참고해, 네이버 지원 값(나눔고딕·16/19px·왼쪽 정렬·강조색 1개) 안에서 구성했습니다.</p>
+      <div class="tabs" id="tabs"></div>
+      <div class="meta-grid" id="meta"></div>
+    </aside>
+
+    <main class="phone">
+      <div class="phone-top"><span><span class="status-dot"></span>모바일 읽기 시안</span><span id="clock">발행 미리보기</span></div>
+      <article class="article" id="article"></article>
+    </main>
+
+    <aside class="side-note">
+      <h2>레이아웃 참고 포인트</h2>
+      <ul>
+        <li>상단 짧은 결론/판정 카드로 첫 화면 이해</li>
+        <li>문단 짧게, 소제목 자주, 이미지 단일 컷</li>
+        <li>비교는 표 대신 세로 카드</li>
+        <li>추천/비추천을 분리한 fit 블록</li>
+        <li>하단 커넥트 CTA·고지 고정</li>
+      </ul>
+      <p style="margin-top:14px">마크다운 원문: <code>docs/editorial-template-samples/*.md</code></p>
+    </aside>
+  </div>
+
+<script>
+const T = [
+  {
+    id: "shopping-problem",
+    label: "쇼핑 · 생활 고민",
+    sub: "shopping-problem",
+    accent: "#00554c",
+    kind: "SHOPPING",
+    product: "CRNK 바디드라이어 · 39,000원",
+    imageRule: "after-lead / hook before-body",
+    tone: "부드러운 요체 · 1문장 문단",
+    title: "샤워 후 남은 물기, 수건만으로 정리가 잘 안 될 때",
+    dek: "발등·발가락 사이처럼 물기가 오래 남는 장면을 바람으로 정리하는 발판형 전신건조기 안내입니다.",
+    verdict: "<strong>한 줄 결론</strong> — 확인된 핵심은 냉온풍·자동센서. 수치(세기·전력·크기)는 미확인이므로 단정하지 않습니다.",
+    blocks: [
+      { type: "p", text: "수건으로 몸을 닦아도 발등·발가락 사이·종아리처럼 물기가 오래 남는 날이 있습니다. CRNK 바디드라이어는 그런 장면을 바람으로 정리하는 발판형 전신건조기로 보면 됩니다." },
+      { type: "photo", label: "대표 컷 · 제품이 한눈에 보이는 원본" },
+      { type: "rule" },
+      { type: "h", text: "어떤 제품인지부터 보면" },
+      { type: "p", text: "손으로 들고 특정 부위만 말리는 일반 드라이어와 달리, 바디드라이어는 발판 위에 올라서서 아래에서 위로 바람을 받는 구조에 가깝습니다." },
+      { type: "p", text: "수건을 여러 번 문지르기보다 바람을 대는 방식이라, 피부가 예민한 집에서도 ‘문지름을 줄이는 보조 가전’으로 후보에 올릴 만합니다. 다만 실제 건조 시간·소음은 제공 자료에 없어 체감 속도를 약속할 수는 없습니다." },
+      { type: "photo", label: "전체 구성 · 패키지/본체 원본", afterLead: true },
+      { type: "rule" },
+      { type: "h", text: "냉온풍이 만드는 차이" },
+      { type: "p", text: "냉온풍은 계절과 몸 상태에 따라 바람 온도를 나눠 쓰는 선택지입니다. 찬 바람만 있으면 겨울철 샤워 직후가 부담스럽고, 뜨거운 바람만 있으면 더운 날엔 답답할 수 있습니다." },
+      { type: "p", text: "냉풍은 땀이 다시 나는 상황을 줄이는 쪽으로, 온풍은 물기가 남은 몸을 말릴 때 활용도가 있습니다. 온도 단계·풍량 범위는 미확인이므로 세밀한 조절을 전제로 고르진 마세요." },
+      { type: "photo", label: "냉온풍·조작부 근거 이미지" },
+      { type: "rule" },
+      { type: "h", text: "자동센서를 어떻게 봐야 할까" },
+      { type: "p", text: "자동센서는 발판형 전신건조기에서 조작 부담을 줄이는 기능으로 해석할 수 있습니다. 샤워 직후 젖은 손으로 버튼을 찾는 일 자체가 불편해지기 쉽기 때문입니다." },
+      { type: "photo", label: "자동센서·조작 장면 근거 이미지" },
+      { type: "rule" },
+      { type: "h", text: "어디에 두면 활용도가 살아날까" },
+      { type: "fit", goodTitle: "추천에 가까운 집", careTitle: "신중해야 하는 집",
+        good: ["샤워 후 발등·발가락 사이 물기가 오래 남는 집", "계절에 따라 바람 온도를 나눠 쓰고 싶은 집", "젖은 손 조작 부담을 줄이고 싶은 집"],
+        care: ["건조 시간·소음·풍량·전력을 숫자로 비교해야 하는 집", "공간이 좁거나 콘센트 위치가 애매한 욕실"] },
+      { type: "rule" },
+      { type: "h", text: "가격과 최종 선택 기준" },
+      { type: "p", text: "제공된 가격은 39,000원입니다. 이 가격대에서는 냉온풍과 자동센서를 실제로 자주 쓸지가 가치치를 가릅니다." },
+      { type: "p", text: "전신을 완벽하게 빨리 말려 주는 성능 가전이라기보다, 샤워 후 물기 정리를 돕는 보조 생활가전으로 보는 편이 현실적입니다." },
+      { type: "photo", label: "대표 원본 재노출" },
+      { type: "cta", price: "39,000원", sub: "쇼핑 커넥트 · 상품 상세에서 수치·설치 조건 재확인", btn: "상품 보러가기" },
+      { type: "tags", text: "#바디드라이어 #CRNK바디드라이어 #전신건조기 #냉온풍드라이어 #집들이선물" },
+      { type: "disclose", text: "이 포스팅은 네이버 쇼핑 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받습니다. 정보형 시안이며 실제 사용 후기가 아닙니다." }
+    ]
+  },
+  {
+    id: "shopping-comparison",
+    label: "쇼핑 · 구매 비교",
+    sub: "shopping-comparison",
+    accent: "#003960",
+    kind: "SHOPPING",
+    product: "칫솔살균기 전원·수납·설치 비교",
+    imageRule: "after-body · 세로 비교 카드",
+    tone: "조건문 · 2문장 문단",
+    title: "칫솔살균기, 우리 집에 맞는 전원 방식부터",
+    dek: "상시 전원형과 충전형을 같은 선에 놓고 콘센트·수납·설치만으로 걸러 보는 비교형 가이드입니다.",
+    verdict: "<strong>비교 축</strong> — ① 전원 ② 수납(헤드 크기) ③ 설치. 살균 효과 수치가 없으면 그 항목은 비웁니다.",
+    blocks: [
+      { type: "p", text: "설치할 자리를 먼저 정하면 비교가 빨라집니다. 이 글은 특정 브랜드를 최고로 정하지 않고, 확인된 선택 축만 정리합니다." },
+      { type: "photo", label: "대표 · 제품 원본" },
+      { type: "rule" },
+      { type: "h", text: "세로로 나눈 비교 카드" },
+      { type: "cards", items: [
+        { k: "상시 전원형", t: "콘센트가 가깝고 본체를 거의 안 옮기는 집에 단순합니다. 케이블 길이가 미확인이면 ‘충분하다’고 쓰지 마세요." },
+        { k: "충전형", t: "분리 이동·구멍 부담이 있는 임대 주택에 후보가 됩니다. 무선 시간이 없으면 그 장점은 미확인입니다." },
+        { k: "수납", t: "표시 개수보다 헤드 크기·겹침이 중요합니다. 실제 거치 사진이 있으면 그 근거로만 판단하세요." }
+      ]},
+      { type: "photo", label: "전원·구성품 상세" },
+      { type: "rule" },
+      { type: "h", text: "누구에게 맞는지" },
+      { type: "fit", goodTitle: "상시 전원에 기운다", careTitle: "충전형·대안을 본다",
+        good: ["콘센트 가까움", "칫솔 2~3개", "고정 사용"],
+        care: ["이동·분리 필요", "구멍 부담", "수치 비교가 필수"] },
+      { type: "cta", price: "조건에 맞는 쪽 선택", sub: "전원 → 수납 → 설치 순으로 후보 축소", btn: "비교 기준 적용해 보기" },
+      { type: "tags", text: "#칫솔살균기 #벽걸이살균기 #욕실수납 #구매비교" },
+      { type: "disclose", text: "이 포스팅은 네이버 쇼핑 커넥트 활동의 일환으로, 구매 발생 시 수수료를 제공받습니다." }
+    ]
+  },
+  {
+    id: "shopping-detail",
+    label: "쇼핑 · 상세 해설",
+    sub: "shopping-detail",
+    accent: "#823f00",
+    kind: "SHOPPING",
+    product: "분리형 칫솔 거치부 살균기",
+    imageRule: "after-lead · 주의는 after-body",
+    tone: "구조·소재·관리 연결",
+    title: "칫솔 거치부, 분리 구조부터 보면",
+    dek: "외관보다 칫솔이 닿는 안쪽 부품을 먼저 보는 상세 해설형입니다.",
+    verdict: "<strong>핵심</strong> — 분리형인지가 관리 방식을 가릅니다. 분리 = 전체 물세척 가능은 아닙니다.",
+    blocks: [
+      { type: "p", text: "거치부가 분리되는지, 고정형인지에 따라 관리 방식이 완전히 달라집니다. 살균 강도나 수명은 추정하지 않습니다." },
+      { type: "photo", label: "대표 · 본체 전면" },
+      { type: "rule" },
+      { type: "h", text: "소재와 세척 가능 범위" },
+      { type: "p", text: "거치부가 분리되면 칫솔이 닿는 면만 따로 닦을 수 있는 구조로 해석할 수 있습니다. 물세척이 금지된 본체는 마른 천 관리로 한정하세요." },
+      { type: "photo", label: "소재·분리 디테일" },
+      { type: "rule" },
+      { type: "h", text: "처음부터 쓰는 순서" },
+      { type: "cards", items: [
+        { k: "1", t: "전원·설치 위치 확인" },
+        { k: "2", t: "칫솔 거치" },
+        { k: "3", t: "안내된 모드만 선택 · 설명서에 없는 분해는 만들지 않음" }
+      ]},
+      { type: "photo", label: "주의·옵션 안내" },
+      { type: "cta", price: "구성·관리 범위로 판단", sub: "수치가 필요하면 공개된 대안과 병행 비교", btn: "상세 스펙 확인" },
+      { type: "tags", text: "#칫솔살균기 #제품상세 #욕실용품 #분리세척" },
+      { type: "disclose", text: "이 포스팅은 네이버 쇼핑 커넥트 활동의 일환으로, 구매 발생 시 수수료를 제공받습니다." }
+    ]
+  },
+  {
+    id: "travel-itinerary",
+    label: "여행 · 일정",
+    sub: "travel-itinerary",
+    accent: "#004e82",
+    kind: "TRAVEL",
+    product: "오사카 3일 · 교토·고베 포함",
+    imageRule: "before-body · 순서 고정",
+    tone: "일정 편집자 · 없는 일차 금지",
+    title: "오사카를 축으로, 교토·고베가 이어지는 구성",
+    dek: "상품에 적힌 방문 순서만 따라가는 일정형입니다. 없는 명소를 추가하지 않습니다.",
+    verdict: "<strong>읽는 법</strong> — 매력보다 이동이 체류를 얼마나 줄이는지를 먼저 보세요.",
+    blocks: [
+      { type: "photo", label: "대표 풍경 · 일정 근거 장소" },
+      { type: "p", text: "짧은 기간에 여러 지역을 보는 구성이라면, 사진보다 순서가 우선입니다. 자유시간이 별도 표기되지 않았다면 ‘있음’으로 쓰지 않습니다." },
+      { type: "rule" },
+      { type: "h", text: "1일차 · 시내에서 열리는 방문" },
+      { type: "photo", label: "1일차 방문지 실사" },
+      { type: "p", text: "시내 핵심 구간이 일정에 있다면 그 순서대로 옮깁니다. 이동 수단·소요 시간이 없으면 미확인으로 둡니다." },
+      { type: "rule" },
+      { type: "h", text: "교토가 들어간 날" },
+      { type: "photo", label: "교토 일정 장소" },
+      { type: "p", text: "그날 일정에 적힌 장소만 연결합니다. 여러 도시를 잇는 날에는 이동 시간이 체류를 줄입니다." },
+      { type: "fit", goodTitle: "잘 맞는 분", careTitle: "다른 구성을 볼 분",
+        good: ["짧은 시간에 여러 지역을 보고 싶은 분", "원본 순서를 그대로 소화할 준비가 된 분"],
+        care: ["한 도시에 오래 머물고 싶은 분", "자유 일정이 우선인 분"] },
+      { type: "cta", price: "원본 일정 기준", sub: "없는 일차를 만들지 않는 것이 핵심", btn: "일정 상품 보기" },
+      { type: "tags", text: "#오사카여행 #교토일정 #고베여행 #일본3일" },
+      { type: "disclose", text: "이 글은 네이버 여행 커넥트 활동의 일환으로, 예약 발생 시 수수료를 제공받을 수 있습니다." }
+    ]
+  },
+  {
+    id: "travel-scenic",
+    label: "여행 · 풍경",
+    sub: "travel-scenic",
+    accent: "#245b12",
+    kind: "TRAVEL",
+    product: "오사카·아라시야마 장소 소개",
+    imageRule: "before-heading · 사진 먼저",
+    tone: "풍경 큐레이터 · 1문장",
+    title: "도시의 저녁과, 산책하는 낮 사이",
+    dek: "시간표 복습보다 그곳이 어떤 장면인지를 앞에 두는 풍경형입니다.",
+    verdict: "<strong>리듬</strong> — 이미지 → 소제목 → 본문. 방문담을 꾸미지 않습니다.",
+    blocks: [
+      { type: "photo", label: "저녁 번화가 실사" },
+      { type: "p", text: "번화한 거리와 야외 산책이 한 상품에 같이 담기면, 장소마다 분위기가 달라집니다." },
+      { type: "rule" },
+      { type: "photo", label: "아라시야마 풍경" },
+      { type: "h", text: "아라시야마에서 보고 싶은 풍경" },
+      { type: "p", text: "대표 풍경을 먼저 보여 주고, 활동은 안내된 범위만 이어 적습니다. 실제 체감 문장은 쓰지 않습니다." },
+      { type: "rule" },
+      { type: "photo", label: "번화가 야경" },
+      { type: "h", text: "번화가에서 느껴지는 밀도" },
+      { type: "p", text: "네온과 사람이 모이는 구간은 저녁 분위기가 중심이 됩니다. 낮 산책과 저녁 번화가는 같은 도시라도 리듬이 다릅니다." },
+      { type: "fit", goodTitle: "풍경형에 맞는 분", careTitle: "일정형을 볼 분",
+        good: ["장소 분위기를 천천히 보고 싶은 분"],
+        care: ["체크리스트를 빠르게 채우고 싶은 분"] },
+      { type: "cta", price: "장소 장면 중심", sub: "확인된 특징만으로 소개", btn: "여행 상품 보기" },
+      { type: "tags", text: "#오사카여행 #아라시야마 #도톤보리 #여행지소개" },
+      { type: "disclose", text: "이 글은 네이버 여행 커넥트 활동의 일환으로, 예약 발생 시 수수료를 제공받을 수 있습니다." }
+    ]
+  },
+  {
+    id: "travel-conditions",
+    label: "여행 · 조건",
+    sub: "travel-conditions",
+    accent: "#4f0041",
+    kind: "TRAVEL",
+    product: "교토 포함 · 식사 불포함 · 숙박 미확정",
+    imageRule: "after-body · 조건 우선",
+    tone: "예약 안내 편집자",
+    title: "교토가 들어간 일정, 누구에게 맞을까",
+    dek: "매력보다 포함 범위·숙박 확정·선택관광을 먼저 읽는 조건형입니다.",
+    verdict: "<strong>우선순위</strong> — 조건이 맞는 상품인지가 매력 소개보다 먼저입니다.",
+    blocks: [
+      { type: "p", text: "같은 기간이어도 포함 범위·숙박 확정 여부·선택관광에 따라 체감이 갈립니다." },
+      { type: "photo", label: "대표 · 일정 근거" },
+      { type: "rule" },
+      { type: "h", text: "숙박 확정·미확정" },
+      { type: "p", text: "숙박 미확정이면 호텔명·등급을 지어내지 않습니다. 조식·석식 불포함이면 식사 포함 상품과 같은 선에 두지 마세요." },
+      { type: "photo", label: "숙박 조건 안내" },
+      { type: "rule" },
+      { type: "h", text: "취소·포함 제약" },
+      { type: "cards", items: [
+        { k: "포함", t: "일정에 ‘포함’으로 적힌 항목만 포함으로 소개" },
+        { k: "선택", t: "선택관광은 선택 요금으로 분리" },
+        { k: "취소", t: "프로모션보다 취소 수수료·약관 우선" }
+      ]},
+      { type: "photo", label: "취소·약관 요약" },
+      { type: "fit", goodTitle: "조건형에 맞는 분", careTitle: "다른 구성을 볼 분",
+        good: ["동반자와 속도를 맞추고 싶은 분", "포함 범위를 명확히 보고 싶은 분"],
+        care: ["즉흥 일정·숙소 지정이 우선인 분"] },
+      { type: "cta", price: "조건 확인 후 예약", sub: "미확정·불포함을 전제로 예산 잡기", btn: "예약 조건 보기" },
+      { type: "tags", text: "#일본여행조건 #숙박미확정 #선택관광 #여행비교" },
+      { type: "disclose", text: "이 글은 네이버 여행 커넥트 활동의 일환으로, 예약 발생 시 수수료를 제공받을 수 있습니다." }
+    ]
+  }
+];
+
+const tabs = document.getElementById("tabs");
+const article = document.getElementById("article");
+const meta = document.getElementById("meta");
+const page = document.querySelector(".page");
+
+function renderBlocks(blocks) {
+  return blocks.map((b) => {
+    if (b.type === "p") return `<p>${b.text}</p>`;
+    if (b.type === "h") return `<h3>${b.text}</h3>`;
+    if (b.type === "rule") return `<hr class="rule" />`;
+    if (b.type === "photo") return `<div class="photo">${b.label}</div><p class="caption">이미지 자리 · 실제 상품/일정 근거 원본 사용</p>`;
+    if (b.type === "cards") return `<div class="stack">${b.items.map(i => `<div class="card"><div class="kicker">${i.k}</div><p>${i.t}</p></div>`).join("")}</div>`;
+    if (b.type === "fit") return `<div class="fit-grid"><div class="fit good"><h4>${b.goodTitle}</h4><ul>${b.good.map(x=>`<li>${x}</li>`).join("")}</ul></div><div class="fit care"><h4>${b.careTitle}</h4><ul>${b.care.map(x=>`<li>${x}</li>`).join("")}</ul></div></div>`;
+    if (b.type === "cta") return `<div class="cta"><div class="price">${b.price}</div><div class="sub">${b.sub}</div><div class="btn">${b.btn}</div></div>`;
+    if (b.type === "tags") return `<p class="tags">${b.text}</p>`;
+    if (b.type === "disclose") return `<p class="disclose">${b.text}</p>`;
+    return "";
+  }).join("");
+}
+
+function render(i) {
+  const t = T[i];
+  page.style.setProperty("--accent", t.accent);
+  meta.innerHTML = `
+    <div><strong>템플릿 ID</strong><code>${t.id}</code></div>
+    <div><strong>강조색</strong><span class="swatch" style="background:${t.accent}"></span>${t.accent}</div>
+    <div><strong>상품/주제</strong>${t.product}</div>
+    <div><strong>이미지 규칙</strong>${t.imageRule}</div>
+    <div><strong>말투</strong>${t.tone}</div>`;
+  article.innerHTML = `
+    <div class="badge-row"><span class="badge">${t.label}</span><span class="badge">${t.kind}</span><span class="badge">발행급 시안</span></div>
+    <h2>${t.title}</h2>
+    <p class="dek">${t.dek}</p>
+    <div class="verdict">${t.verdict}</div>
+    ${renderBlocks(t.blocks)}`;
+  [...tabs.children].forEach((btn, j) => btn.setAttribute("aria-pressed", String(j === i)));
+}
+
+T.forEach((t, i) => {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.innerHTML = `${t.label}<small>${t.sub}</small>`;
+  btn.onclick = () => render(i);
+  tabs.append(btn);
+});
+render(0);
+</script>
+</body>
+</html>

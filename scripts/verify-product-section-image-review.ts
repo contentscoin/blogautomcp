@@ -104,6 +104,15 @@ async function main() {
 
     const acceptedOverview = loadReview('{"assignments":[{"targetIndex":1,"selectedIndex":1,"reviewClass":"product-photo","reason":"전체 제품"}]}');
     assert.equal(acceptedOverview.review.allowsGenericProductPhoto(overviewTarget), true);
+    assert.equal(acceptedOverview.review.allowsGenericProductPhoto({
+      sectionTitle: "아비노 532ml 용량과 전체 구성", imageIntent: "전체 구성 또는 패키지 사진",
+    }), true, "identity specification in an overview title is not a feature demonstration");
+    assert.equal(acceptedOverview.review.allowsGenericProductPhoto({
+      sectionTitle: "아비노 용량 비교와 전체 구성", imageIntent: "전체 구성 또는 패키지 사진",
+    }), false, "comparison still requires feature evidence");
+    assert.equal(acceptedOverview.review.allowsGenericProductPhoto({
+      sectionTitle: "아비노 전체 구성", imageIntent: "용량과 규격 실측 사진",
+    }), false, "a feature-specific visual intent cannot be relaxed by an overview title");
     const overviewRows = await acceptedOverview.review.selectVerifiedProductSectionImages(
       [candidate], "CRNK 바디드라이어", [overviewTarget],
     );
