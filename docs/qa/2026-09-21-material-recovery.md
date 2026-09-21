@@ -44,3 +44,16 @@ SHA256: `b96455a2a22b64d325bc438c05ece0e5e349fa5551f70f3209d141a27edd3e37`
 - 설치 직전 기존 앱은 1.3.69, 활성 작업 0개, 업데이트 가능 상태였다.
 - 자동 승인 검토가 설치 파일 실행을 `blocked by policy`로 거부했다. 설치는 실행되지 않았고 명시적 사용자 승인 대기 중이다.
 - 따라서 설치된 1.3.70 앱의 재검사 및 새 소재 준비 작업 4/4 완료는 아직 확인하지 않았다. 앞의 통과 수치는 수정된 작업 소스로 실제 저장 패키지를 검사한 결과이다.
+
+## 후속 배포 및 실제 앱 검증 완료
+
+사용자의 배포 지시 후 다음을 확인했다. 위 설치 차단 기록은 앞선 시점의 이력이다.
+
+- 소스 커밋: `14f6c4c4b00a9a0d9a344fc47c2f3264b7b53ebe`, 릴리스 `v1.3.70`.
+- 중앙 배포 작업 `35580155468` 성공: https://github.com/contentscoin/blogautomcp/actions/runs/35580155468
+- 활성 PC 인증으로 운영 업데이트 피드와 EXE/블록맵을 다시 다운로드했다. 모두 HTTP 200이며 로컬 산출물과 SHA256이 일치한다.
+- 실행 앱 `/api/system/update-readiness`: currentVersion=1.3.70, status=current, activeCount=0.
+- 앱의 재검사 API로 네 소재 모두 100점, canApprove=true, blockers=[], missing=[] 확인.
+- 소재 준비 작업 `457fbc1d-45b9-433b-bbaf-37baf41f15cc`: completed, 네 항목 모두 ready, workflowPending=false. 완료 시각 2026-09-21 17:54:46 KST.
+- 네 소재 모두 materialStatus=READY, ready=true, 원고 100점, 이미지 5장. 신규 생성이나 블로그 발행은 없었다. 이전 중단 작업 이력은 보존했다.
+- 저장소 전체 CI는 기존 CJS 테스트 파일의 lint 오류로 실패했다. 직전 커밋 CI `35553980284`와 이번 CI `35580016558`의 오류 34개를 비교한 결과 차이 0개였다. 수정 범위의 회귀검사·TypeScript·로컬 프로덕션 빌드 및 배포 검증은 통과했다.
