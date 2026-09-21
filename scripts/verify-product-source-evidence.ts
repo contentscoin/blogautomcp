@@ -21,7 +21,22 @@ const applianceNames = [
   "에어메이드 가열 살균 가습기 열풍 건조 세척 아쿠아마린 9002",
 ];
 const aveenoName = "향좋은 아비노 고보습 민감피부 저자극 바디워시 스트레스릴리프(라벤더향), 532ml, 2개";
+const dalbaName = "[쿨톤 아이돌 PICK!][1+1] 달바 비건 워터풀 퍼플 톤업 선크림 50mlX2개";
 const grade = (productName: string, features: string[], description = "") => buildProductReviewAnalysis({ productName, features, description, targetSectionCount: 8 });
+// Exact seller-owned product-info rows observed on dalba/products/9770696257.
+const dalbaRows = ["원산지: 국산", "사용부위: 페이스용", "피부타입: 모든피부용",
+  "종류: 혼합자차(유기+무기)", "자외선차단지수: SPF50+ PA++++",
+  "주요제품특징: 부드러운 발림, 촉촉함(수분공급)",
+  "사용기한 또는 개봉 후 사용기간: 개봉전 30개월 / 개봉후 12개월"];
+const dalbaFacts = dalbaRows.map(normalizeTypedProductFact).filter(Boolean);
+assert.equal(dalbaFacts.length, dalbaRows.length, "cosmetic facts must not disappear before source grading");
+assert.ok(dalbaFacts.includes("자외선차단지수: SPF50+ PA++++"));
+assert.ok(dalbaFacts.includes("사용기간: 개봉전 30개월 / 개봉후 12개월"));
+assert.notEqual(grade(dalbaName, dalbaFacts).evidenceLevel, "sparse");
+assert.equal(grade(dalbaName, []).evidenceLevel, "sparse", "marketing title alone is not evidence");
+assert.equal(grade(dalbaName, ["원산지: 국산", "피부타입: 모든피부용"]).evidenceLevel, "sparse");
+for (const placeholder of ["자외선차단지수: 상세페이지 참조", "종류: 옵션 선택", "주요제품특징: 쿠폰 50%", "사용기간: 확인 불가"])
+  assert.equal(normalizeTypedProductFact(placeholder), "", "new labels must retain placeholder/promotion rejection");
 const cuckooName = "쿠쿠 건조분쇄형 에코웨일 큐브 2L 음식물처리기 CFD-FNL201DCGW 쿠쿠 직접생산 눌음방지";
 const cuckooFacts = extractExplicitProductFacts(cuckooName, "title");
 assert.deepEqual(cuckooFacts, ["표시규격: 2L", "기능: 건조분쇄형", "기능: 눌음방지"]);

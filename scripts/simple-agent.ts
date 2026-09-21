@@ -681,7 +681,7 @@ async function enrichShoppingSourceFeatures(name: string, description: string, f
   if (!hasSufficientProductReviewEvidence({ productName: name, description, features: collected, targetSectionCount: 11 }) && sellerDetailImagePaths.length) {
     const ocr = await readSellerDetailOcrFacts(sellerDetailImagePaths);
     collected.push(...ocr.facts);
-    console.log(`   🔎 판매자 상세 OCR: ${ocr.status}, 근거 ${ocr.facts.length}개 (${ocr.imagePaths.length}구간)`);
+    console.log(`   🔎 판매자 상세 OCR: ${ocr.status}, ${ocr.scannedImageCount}구간 검사, 근거 ${ocr.facts.length}개 (${ocr.imagePaths.length}구간에서 확인)`);
   }
   return sanitizeSellerEvidenceFeatures(collected, name);
 }

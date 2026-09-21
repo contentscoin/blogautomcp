@@ -59,7 +59,7 @@ export async function readSellerDetailOcrFacts(imagePaths: string[], options: {
   run?: Run; exists?: (file: string) => boolean; now?: () => number;
   candidates?: string[]; maximumMs?: number;
   cacheKey?: (file: string) => string | null;
-} = {}): Promise<{ facts: string[]; imagePaths: string[]; status: "complete" | "unavailable" | "timeout" }> {
+} = {}): Promise<{ facts: string[]; imagePaths: string[]; scannedImageCount: number; status: "complete" | "unavailable" | "timeout" }> {
   const execute = options.run || run;
   const exists = options.exists || fs.existsSync;
   const now = options.now || Date.now;
@@ -67,10 +67,13 @@ export async function readSellerDetailOcrFacts(imagePaths: string[], options: {
   const binaries = [...new Set([...(options.candidates || productOcrCandidates()).filter(exists).slice(0, 5), "tesseract"])];
   let binary = ""; let dataArgs: string[] = [];
   const facts = new Set<string>(); const used: string[] = [];
-  const images = [...new Set(imagePaths)].filter(exists).slice(0, 4);
-  if (!images.length) return { facts: [], imagePaths: [], status: "unavailable" };
+  let scannedImageCount = 0;
+  // Materialization preserves up to eight seller crops. Do not silently ignore
+  // their latter half (often the ingredient, usage or specification panel).
+  const images = [...new Set(imagePaths)].filter(exists).slice(0, 8);
+  if (!images.length) return { facts: [], imagePaths: [], scannedImageCount, status: "unavailable" };
   for (const candidate of binaries) {
-    if (deadline <= now()) return { facts: [], imagePaths: [], status: "timeout" };
+    if (deadline <= now()) return { facts: [], imagePaths: [], scannedImageCount, status: "timeout" };
     const tessdata = path.join(path.dirname(candidate), "tessdata");
     const args = exists(path.join(tessdata, "kor.traineddata")) && exists(path.join(tessdata, "eng.traineddata"))
       ? ["--tessdata-dir", tessdata] : [];
@@ -79,14 +82,15 @@ export async function readSellerDetailOcrFacts(imagePaths: string[], options: {
       if (/^kor\s*$/mu.test(languages) && /^eng\s*$/mu.test(languages)) { binary = candidate; dataArgs = args; break; }
     } catch { /* A stale system installation must not hide a working packaged/PATH runtime. */ }
   }
-  if (!binary) return { facts: [], imagePaths: [], status: "unavailable" };
+  if (!binary) return { facts: [], imagePaths: [], scannedImageCount, status: "unavailable" };
   for (const image of images) {
     const remaining = deadline - now();
-    if (remaining <= 0) return { facts: [...facts], imagePaths: used, status: "timeout" };
+    if (remaining <= 0) return { facts: [...facts], imagePaths: used, scannedImageCount, status: "timeout" };
     try {
       const key = (options.cacheKey || imageCacheKey)(image);
       const cached = key ? ocrFactCache.get(key) : undefined;
       if (cached) {
+        scannedImageCount += 1;
         cached.forEach(fact => facts.add(fact));
         if (cached.length) used.push(image);
         continue;
@@ -100,6 +104,7 @@ export async function readSellerDetailOcrFacts(imagePaths: string[], options: {
         "-c", "tessedit_create_tsv=1", "-c", "tessedit_create_txt=0",
       ], Math.min(8_000, remaining));
       const extracted = extractExplicitProductFacts(confidentOcrLines(tsv).join("\n"), "ocr");
+      scannedImageCount += 1;
       if (key) {
         if (ocrFactCache.size >= 64) ocrFactCache.delete(ocrFactCache.keys().next().value!);
         ocrFactCache.set(key, extracted);
@@ -107,5 +112,6 @@ export async function readSellerDetailOcrFacts(imagePaths: string[], options: {
       if (extracted.length) { extracted.forEach(fact => facts.add(fact)); used.push(image); }
     } catch { /* One unreadable crop cannot turn missing evidence into a fact. */ }
   }
-  return { facts: [...facts].slice(0, 16), imagePaths: used, status: now() >= deadline ? "timeout" : "complete" };
+  return { facts: [...facts].slice(0, 16), imagePaths: used, scannedImageCount,
+    status: now() >= deadline ? "timeout" : scannedImageCount > 0 ? "complete" : "unavailable" };
 }
