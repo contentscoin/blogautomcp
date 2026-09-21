@@ -47,7 +47,7 @@ const CATEGORY_INSTRUCTIONS: Record<string, string> = {
   sceneLinkage: "같은 문단 안에서 서로 다른 확인 사실을 각각 사용 장면의 이점 또는 제약으로 해석하세요.",
   specificity: "출처에 있는 규격과 구조를 사용·조리·보관·관리 방법으로 구체화하되 미확인 방법은 만들지 마세요.",
   diversity: "뜻이 겹치는 문장을 제거하고, 반복 자리에는 아직 쓰지 않은 출처 사실과 새로운 판단을 넣으세요.",
-  usefulness: "구체적인 장점, 제품 자체의 제약, 추천·비추천 대상, 조건부 결론 중 누락된 항목을 근거와 함께 보강하세요.",
+  usefulness: "구체적인 장점, 제품 자체의 제약, 추천·비추천 대상, 조건부 결론 중 누락된 항목을 보강하세요. 추천 대상 문장 안에 저장 출처의 구체적인 기능·규격과 그 조건에 맞는 사용자를 함께 쓰세요. 앞 문장의 사실을 받는 경우 같은 문단에서 바로 이어 설명하고, 다른 문단의 근거에 의존하지 마세요. 마지막 총평은 사용 조건과 추천·대안 판단을 같은 문장에 연결하세요. 제목에 역할 이름만 추가하거나 미확인 사실을 만들지 마세요.",
   clarity: "확인·비교 안내와 일반론을 줄이고, 저장 출처 사실과 그 사실이 독자 판단에 주는 의미를 직접 쓰세요.",
 };
 
@@ -359,7 +359,12 @@ export function selectQualityRepairSectionIndexes(input: {
     }
     if (key === "usefulness" || key === "missing-review-substance") {
       const notes = input.current.quality.categories.find((category) => category.key === "usefulness")?.notes || [];
-      addBest(usefulnessPatterns(notes));
+      // The verdict gate reads the final two sections. Editing an earlier section
+      // merely because it repeats "판단" cannot repair that gate.
+      const verdictNotes = notes.filter(note => /조건부.*결론|최종.*결론/u.test(note));
+      if (verdictNotes.length) selected.add(bodySections.length - 1);
+      const remainingNotes = notes.filter(note => !verdictNotes.includes(note));
+      if (remainingNotes.length || !verdictNotes.length) addBest(usefulnessPatterns(remainingNotes));
       continue;
     }
     const patterns = QUALITY_SECTION_PATTERNS[key];

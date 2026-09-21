@@ -712,7 +712,7 @@ export function buildProductEditorialPlan(input: ProductEditorialPlanInput): Pro
       "상세페이지 문장을 읽어주는 데 그치지 말고 기능이 왜 유용한지와 어떻게 쓰는지를 설명하기",
       "구매후기 원문이 있을 때만 반복 장점을 요약하고 후기 수·평점만으로 만족 내용을 만들지 않기",
       "장점에는 근거가 된 기능을, 단점에는 제품 구조상 제약 또는 미확인 핵심 성능을 함께 쓰기",
-      "추천 대상과 비추천 대상을 모두 제시하고 마지막에 조건부 결론을 내리기",
+      "추천 대상과 비추천 대상을 모두 제시하기. 추천 문장에 확인된 기능·규격과 사용자 조건을 함께 쓰거나 같은 문단의 바로 앞 사실을 이어 설명하기. 마지막 본문에 사용자 조건과 추천·대안 판단을 같은 문장으로 연결하기",
     ],
     sections: SECTION_LIBRARY,
   };
@@ -807,10 +807,11 @@ export function hasConditionalProductVerdict(sections: string[]): boolean {
   // 문장에 함께 있으면 의미상 조건부 결론으로 인정한다.
   const conclusionScope = sections.slice(-2).join("\n");
   const conclusionSentences = conclusionScope
-    .split(/[\n.!?。]+/u)
+    .replace(/(?<!\n)\n(?!\n)/gu, " ")
+    .split(/\n\s*\n|[.!?。]+/u)
     .map(clean)
     .filter((sentence) => sentence.length >= 8);
-  const conditionPattern = /(?:이라면|라면(?=[,\s])|한다면|원한다면|필요하다면|우선이면|사람에게|분에게|경우(?:에|에는|라면)?|조건(?:에서는|이라면|에\s*따라)|환경(?:에서는|이라면)|용도(?:에서는|라면))/u;
+  const conditionPattern = /(?:이라면|라면(?=[,\s])|한다면|원한다면|필요하다면|우선이면|사람에게|분에게|(?:집|가구)(?:에는|이라면)|경우(?:에|에는|라면)?|조건(?:에서는|이라면|에\s*따라)|환경(?:에서는|이라면)|용도(?:에서는|라면))/u;
   const judgementPattern = /(?:추천|비추천|잘\s*맞|맞지\s*않|맞을\s*수|비교할\s*만|더\s*(?:낫|적합|실용)|강점|선택\s*이유|후보|어울|적합|구성\s*과잉)/u;
   return conclusionSentences.some((sentence) => conditionPattern.test(sentence) && judgementPattern.test(sentence));
 }
@@ -847,13 +848,16 @@ export function assessProductReviewSubstance(input: {
     targetSectionCount: 11,
   });
   const paragraphSentences = paragraphs.map((paragraph) =>
-    paragraph.split(/[\n.!?。]+/u).map(clean).filter(Boolean));
+    paragraph.replace(/\n/gu, " ").split(/[.!?。]+/u).map(clean).filter(Boolean));
   const sentences = paragraphSentences.flat().filter((item) => item.length >= 8);
   const sentenceCount = Math.max(1, sentences.length);
   const genericGuidanceCount = countMatches(body, /(?:확인(?:해|하|해야|하세요)|살펴보|비교해보|보는\s*게\s*좋|안전해요)/u);
   const categoryMismatchTerms = analysis.forbiddenCategoryTerms.filter((term) => body.includes(term));
   const signalCoveredBySentence = (signal: string, sentence: string): boolean => {
-    const tokens = unique(signal.split(/[^\p{L}\p{N}]+/u), 12)
+    // Field labels are metadata, not words the review must repeat verbatim.
+    // Retain the complete value (including numeric units) as the evidence anchor.
+    const value = signal.replace(/^[^:：\n]{1,24}[:：]\s*/u, "");
+    const tokens = unique(value.split(/[^\p{L}\p{N}]+/u), 12)
       .filter((token) => token.length >= 2 && !/(?:상품|제품|기능|표기|판매페이지|카테고리|방식|구조|기준)/u.test(token));
     if (tokens.length === 0) return false;
     const numericTokens = tokens.filter((token) => /\d/u.test(token));

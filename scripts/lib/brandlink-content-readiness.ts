@@ -942,7 +942,7 @@ export function getBrandLinkContentReadiness(
       const linkage = categoryByKey.get("sceneLinkage")!;
       const evidence = categoryByKey.get("productEvidence")!;
       const sourceCoverageText = "coveredSignals" in reviewSubstance
-        ? `, 근거 ${reviewSubstance.coveredSignals.length}/${reviewSubstance.requiredSignalCount}`
+        ? `, 본문 언급 근거 ${reviewSubstance.coveredSignals.length}/${reviewSubstance.requiredSignalCount}, 판단에 연결된 서로 다른 근거 ${reviewSubstance.groundedSignalCount}/${reviewSubstance.requiredGroundedSignalCount}`
         : "";
       if (isTravel && "coveredPlaces" in reviewSubstance) {
         const deficits = [

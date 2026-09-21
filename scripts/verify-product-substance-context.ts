@@ -47,3 +47,15 @@ assert.equal(weak.pass, false);
 assert.equal(weak.evidenceJudgementCount, 0);
 assert.ok(weak.missingElements.includes("구체적인 장점"));
 console.log("PASS: natural benefit/fit, local adjacent evidence, heading/paragraph isolation, no chained or missing evidence, weak guide rejected");
+
+const pump = (text: string) => assessProductReviewSubstance({ productName: "바디워시", sourceFeatures: ["용기형태: 펌프형"], sections: [`선택 조건\n\n${text}`] });
+const unwrapped = pump("펌프형 용기를 원하는 사용자에게 적합해요.");
+const wrapped = pump("펌프형 용기를 원하는\n사용자에게 적합해요.");
+assert.equal(unwrapped.missingElements.includes("추천·비추천 대상"), false, "metadata label need not appear in prose");
+assert.equal(wrapped.evidenceJudgementCount, unwrapped.evidenceJudgementCount, "soft wraps must not split evidence from judgement");
+assert.equal(wrapped.missingElements.includes("추천·비추천 대상"), false);
+assert.equal(pump("펌프형 용기입니다.\n\n이 구성은 사용자에게 적합해요.").missingElements.includes("추천·비추천 대상"), true, "paragraph boundaries remain evidence boundaries");
+assert.equal(pump("자동 세척 기능을 원하는 사용자에게 적합해요.").evidenceJudgementCount, 0, "unsupported functions remain rejected");
+console.log("PASS: field-value grounding and soft-wrap invariance without crossing paragraphs");
+assert.equal(pump("펌프형을 매일 쓰는 집에는 잘 맞는 제품입니다.").missingElements.includes("조건부 최종 결론"), false,
+  "explicit household condition and judgement constitute a conditional verdict");

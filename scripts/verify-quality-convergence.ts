@@ -183,6 +183,11 @@ const inferredScope = selectQualityRepairSectionIndexes({
   plan: textPlan,
 });
 assert.deepEqual(inferredScope, [7], "a missing conditional verdict targets only the existing final-judgement section");
+const misleadingHeadings = [...sparseSections];
+misleadingHeadings[0] = "선택 기준과 최종 판단\n\n최종 판단과 선택 기준을 먼저 봅니다.";
+misleadingHeadings[7] = "우리 집에 둘 때\n\n구매 조건을 정리합니다.";
+assert.deepEqual(selectQualityRepairSectionIndexes({ current: textFailure, sections: misleadingHeadings, plan: textPlan }), [7],
+  "verdict repair must target the conclusion gate scope, not earlier keyword density");
 const scopedCandidate = [...sparseSections];
 scopedCandidate[7] = `${scopedCandidate[7]}\n추가 판단`;
 assert.doesNotThrow(() => assertUntargetedSectionHashesUnchanged(sparseSections, scopedCandidate, inferredScope));
