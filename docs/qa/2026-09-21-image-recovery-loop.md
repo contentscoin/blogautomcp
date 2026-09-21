@@ -35,3 +35,14 @@
 
 - 변경 파일 대상 ESLint: 오류0, 사용하지 않는 구조분해 변수 경고2.
 - Next production build 성공. 패키지의 변경 런타임 파일6개와 작업 소스의 SHA256 일치 확인.
+
+## 배포 검증
+
+- 런타임 커밋: 6ff15bfa1eb9ba452edf12bda6d3fc5daa8ca9fd, 버전1.3.72.
+- Windows 패키징 전체 성공. GitHub release v1.3.72 생성 및 업데이트 배포 workflow35586263791 성공.
+- 실제 Sites 업데이트 채널 latest.yml의 버전/크기/SHA512 일치. EXE와 blockmap HTTP200, 로컬/원격 SHA256 일치.
+- EXE SHA256: df375619660a5db56fdb982f54c9bca9ab5a50a9905133a168550c52432363ea.
+- 전체 CI35585566134는 기존 lint 오류34개로 실패. 직전1.3.71 CI35581975983과 오류 시그니처 비교 차이0. 변경 범위 검사와 로컬 production build는 통과했으며 전체 CI 통과로 간주하지 않는다.
+- 정상 앱 자동 업데이트로 설치 및 재시작 확인: readiness.currentVersion=1.3.72, activeCount=0, installPending=false.
+- 설치된1.3.72에서 재검증 후 실제 소재 준비 job df519ff7-3c9e-4f73-9a03-e99589371e47 실행. 2026-09-21T10:06:15.395Z completed, 1/1 ready, materialStatus=READY, score100, imageCount6, blockers=[], remaining0, approvedAt=2026-09-21T10:06:15.311Z.
+- 실제 검증 범위: 원본 재수집과 새 재배치 함수 실행, 설치 앱의 복구된 저장 소재 승인/준비 완료. 실패부터 복구까지 전체 자동 루프는 재현 테스트로 검증했으며, 실데이터를 다시 실패 상태로 되돌려 실행하지 않았다.
