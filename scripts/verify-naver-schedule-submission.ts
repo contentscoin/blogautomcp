@@ -19,6 +19,42 @@ assert.equal(
 
 assert.equal(
   inspectNaverScheduleSubmissionSignal({
+    url: "https://blog.naver.com/api/post/reserve?radio_time=pre&preDate=2026.9.3",
+    postData: JSON.stringify({ publish: true }),
+    status: 200,
+    responseBody: { success: true, result: { reservationId: "query-fixture" } },
+    targetYmd,
+  }).confirmed,
+  true,
+  "reservation date/mode may be carried in the URL query"
+);
+
+assert.equal(
+  inspectNaverScheduleSubmissionSignal({
+    url: "https://blog.naver.com/api/post/reserve",
+    postData: JSON.stringify({ publishType: "예약", preDate: "2026년 9월 3일" }),
+    status: 200,
+    responseBody: { success: true, result: { reservationId: "korean-date-fixture" } },
+    targetYmd,
+  }).confirmed,
+  true,
+  "Korean/unpadded date values are recognized"
+);
+
+assert.equal(
+  inspectNaverScheduleSubmissionSignal({
+    url: "https://blog.naver.com/api/post/rabbit",
+    postData: JSON.stringify({ radio_time: "pre", publishAt: 1788393600000 }),
+    status: 200,
+    responseBody: { success: true, result: { reservationId: "epoch-date-fixture" } },
+    targetYmd,
+  }).confirmed,
+  true,
+  "timestamp reservation payloads are recognized"
+);
+
+assert.equal(
+  inspectNaverScheduleSubmissionSignal({
     url: "https://blog.naver.com/api/post/publish",
     postData: JSON.stringify({ publish: true }),
     status: 200,
@@ -103,6 +139,16 @@ async function main() {
   assert.equal(events.listenerCount("request"), 0);
   assert.equal(events.listenerCount("response"), 0);
   assert.equal(events.listenerCount("requestfailed"), 0);
+
+  const unavailableEvents = new EventEmitter();
+  const unavailable = createScheduleSubmissionTracker(unavailableEvents as unknown as Pick<Page, "on" | "off">, targetYmd, { responseBodyTimeoutMs: 100 });
+  const unavailableRequest = fakeRequest();
+  unavailableEvents.emit("request", unavailableRequest);
+  unavailableEvents.emit("response", fakeResponse(unavailableRequest, async () => { throw new Error("Response body is unavailable for https://blog.naver.com/private"); }));
+  await flush();
+  assert.match(unavailable.getRecentEvents().join(" "), /"body":"unavailable"/);
+  assert.match(unavailable.getRecentEvents().join(" "), /"bodyError":"Response body is unavailable for <url>"/);
+  unavailable.stop();
 
   const emptyEvents = new EventEmitter();
   const empty = createScheduleSubmissionTracker(emptyEvents as unknown as Pick<Page, "on" | "off">, targetYmd, { responseBodyTimeoutMs: 10 });

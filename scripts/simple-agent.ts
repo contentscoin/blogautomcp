@@ -8618,7 +8618,10 @@ async function verifyScheduleSubmission(
   const reason = !tracker?.hasAnyPublishRequest() ? "예약 제출 요청을 관찰하지 못했습니다."
     : tracker.getPendingResponseCount() > 0 ? "예약 응답 본문 확인 제한시간을 초과했습니다."
     : "네이버의 명시적 예약 승인과 예약 식별자를 함께 확인하지 못했습니다.";
-  const diagnostic = recentEvents.slice(-3).join(" ");
+  // Keep enough of the bounded request/response tail to include the actual
+  // reservation endpoint. The last `write` response is often an unrelated
+  // autosave that arrives after Naver's reservation request.
+  const diagnostic = recentEvents.slice(-8).join(" ");
   throw new Error(`[NAVER_SCHEDULE_UNCONFIRMED] ${reason} (목표일: ${targetYmd})${diagnostic ? ` 진단: ${diagnostic}` : ""}`);
 }
 

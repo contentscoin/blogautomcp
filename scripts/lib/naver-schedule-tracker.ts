@@ -35,6 +35,13 @@ function endpointKind(url: string): string {
   } catch { return "unknown"; }
 }
 
+function safeResponseReadError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error || "unknown");
+  // Playwright errors may include a full request URL or response payload. Keep
+  // only a bounded, single-line diagnostic so logs remain safe to persist.
+  return message.replace(/https?:\/\/[^\s)]+/gi, "<url>").replace(/[\r\n]+/g, " ").slice(0, 240);
+}
+
 export function createScheduleSubmissionTracker(
   page: Pick<Page, "on" | "off">,
   targetYmd: string,
@@ -85,7 +92,7 @@ export function createScheduleSubmissionTracker(
       return;
     }
     let settled = false;
-    const complete = (bodyState: string, body?: unknown) => {
+    const complete = (bodyState: string, body?: unknown, bodyError?: string) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -98,6 +105,7 @@ export function createScheduleSubmissionTracker(
         schedule: signal.hasScheduleMode, targetDate: signal.hasTargetDate,
         accepted: signal.responseAccepted, idPresent: Boolean(signal.reservationId), confirmed: signal.confirmed,
         shape: bodyState === "json" ? responseShape(body) : undefined,
+        ...(bodyError ? { bodyError } : {}),
       });
     };
     const cancel = () => complete("stopped");
@@ -105,7 +113,19 @@ export function createScheduleSubmissionTracker(
     cancelPending.add(cancel);
     // Playwright emits response at headers, before the body is complete. Track the pending
     // read explicitly so navigation cannot race an otherwise valid reservation receipt.
-    void Promise.resolve().then(() => response.text()).then((text) => {
+    void Promise.resolve().then(async () => {
+      try {
+        return await response.text();
+      } catch (textError) {
+        // Some Chromium responses expose a readable buffer even when the text
+        // convenience method rejects (for example after a navigation). Keep a
+        // second bounded read before classifying the receipt as unavailable.
+        const bodyReader = (response as Response & { body?: () => Promise<Buffer> }).body;
+        if (typeof bodyReader !== "function") throw textError;
+        const bytes = await bodyReader.call(response);
+        return Buffer.from(bytes).toString("utf8");
+      }
+    }).then((text) => {
       if (Buffer.byteLength(text, "utf8") > maxResponseBytes) { complete("too_large"); return; }
       const trimmed = text.trim();
       if (!trimmed) { complete("empty"); return; }
@@ -113,7 +133,7 @@ export function createScheduleSubmissionTracker(
       try { body = JSON.parse(trimmed); }
       catch { complete(trimmed.startsWith("<") ? "html" : "non_json"); return; }
       complete("json", body);
-    }, () => complete("unavailable"));
+    }, (error) => complete("unavailable", undefined, safeResponseReadError(error)));
   };
 
   page.on("request", requestListener);
