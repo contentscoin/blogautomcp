@@ -11,6 +11,8 @@ import ts from "typescript";
 import * as imagePolicy from "./lib/image-timeout-policy";
 import * as photoProvenance from "./lib/product-photo-provenance";
 import * as imageEvidence from "../src/lib/brand-post-image-evidence";
+import * as atomicTextFile from "../src/lib/atomic-text-file";
+import type { ProductSectionImageReviewOptions } from "./lib/product-photo-review";
 import type { generateBrandPostImages as Generate, BrandPostImageGenerationResult } from "../src/lib/brand-post-image-generation";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-image-batch-"));
@@ -76,6 +78,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
   }>(
     "src/lib/brand-post-image-generation.ts", {
       "node:fs": fs, "node:path": path,
+      "./atomic-text-file": atomicTextFile,
       "../../scripts/lib/image-timeout-policy": imagePolicy,
       "node:child_process": {
         spawn(_command: string, args: string[], options: { windowsHide: boolean; shell: boolean }) {
@@ -125,9 +128,17 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
         },
       },
       "../../scripts/lib/product-photo-review": {
-        selectVerifiedProductSectionImages: async (paths: string[], _productName: string, targets: unknown[]) => {
+        selectVerifiedProductSectionImages: async (paths: string[], _productName: string, targets: unknown[], options?: ProductSectionImageReviewOptions) => {
           sectionReviewCalls += 1;
           sectionReviewCandidatePaths.push([...paths]);
+          options?.onDiagnostics?.({ version: 1, status: settings.sectionReviewError ? "failed" : "complete", cacheHit: false,
+            reviewedAt: "2026-09-15T00:00:00.000Z", candidateCount: paths.length, targetCount: targets.length,
+            ...(settings.sectionReviewError ? { error: settings.sectionReviewError } : {}),
+            entries: paths.flatMap(file => targets.map((_, targetIndex) => ({ targetIndex, path: file,
+              sourceSha256: crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"),
+              status: settings.sectionReviewError ? "review-failed" as const : "not-proposed" as const,
+              reason: "fixture diagnostic", reviewedAt: "2026-09-15T00:00:00.000Z" }))),
+          });
           if (settings.sectionReviewError) throw new Error(settings.sectionReviewError);
           const matched = paths.filter(candidate => settings.sectionMatchedPaths?.includes(candidate));
           return matched.slice(0, targets.length).map((file, targetIndex) => ({
@@ -185,7 +196,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
     if (output !== undefined) child.stdout.write(JSON.stringify(output));
     child.emit("close", code, null);
   };
-  return { ...api, get child() { return child; }, manifest, callbacks, generate, result, progress, close,
+  return { ...api, packageDir, get child() { return child; }, manifest, callbacks, generate, result, progress, close,
     get jobs() { return jobs; }, get checkpoint() { return checkpoint; },
     get spawns() { return spawns; }, get lockCalls() { return lockCalls; }, get lockedSourcePaths() { return lockedSourcePaths; },
     get sectionReviewCalls() { return sectionReviewCalls; }, get sectionReviewCandidatePaths() { return sectionReviewCandidatePaths; } };
@@ -199,6 +210,22 @@ async function check(name: string, run: () => Promise<void>) {
 }
 
 async function verifyGenerator() {
+  await check("section review diagnostics persist with target mapping on success and failure", async () => {
+    for (const sectionReviewError of [undefined, "review provider failed"]) {
+      const h = harness({ sectionReviewError });
+      h.manifest.connectKind = "SHOPPING";
+      h.manifest.composition.sections[0].title = "45분 사용시간";
+      h.manifest.composition.sections[0].imageIntent = "기능 작동 근거";
+      await h.generate(1, { sourceOnly: true });
+      const report = JSON.parse(fs.readFileSync(path.join(h.packageDir, "image-source-diagnostics.json"), "utf8"));
+      assert.equal(report.status, sectionReviewError ? "failed" : "complete");
+      assert.equal(report.entries[0].sectionId, "section");
+      assert.equal(report.entries[0].imageIntent, "기능 작동 근거");
+      assert.match(report.entries[0].sourceSha256, /^[a-f0-9]{64}$/);
+      assert.equal(path.isAbsolute(report.entries[0].path), false);
+      assert.equal(h.spawns, 0);
+    }
+  });
   await check("lifestyle slots generate from one verified reference without feature evidence", async () => {
     const h = harness({ sourcePaths: [sourcePath], segmentablePaths: [sourcePath], lockedUsesBackground: true });
     h.manifest.connectKind = "SHOPPING";

@@ -7,6 +7,7 @@ import path from "node:path";
 import vm from "node:vm";
 import ts from "typescript";
 import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene } from "../src/lib/brand-post-image-evidence";
+import type { ProductSectionImageDiagnostics, ProductSectionImageReviewOptions } from "./lib/product-photo-review";
 
 interface ReviewModule {
   allowsGenericProductPhoto(target: { sectionTitle: string; imageIntent: string }): boolean;
@@ -14,6 +15,7 @@ interface ReviewModule {
     paths: string[],
     productName: string,
     targets: Array<{ sectionTitle: string; imageIntent: string }>,
+    options?: ProductSectionImageReviewOptions,
   ): Promise<Array<{ targetIndex: number; sourceSha256: string; reviewClass: string }>>;
   selectVerifiedProductSectionImage(
     paths: string[],
@@ -76,6 +78,33 @@ async function main() {
   };
 
   try {
+    const diagnosticReports: ProductSectionImageDiagnostics[] = [];
+    const diagnosed = loadReview('{"assignments":[],"rejections":[{"targetIndex":1,"selectedIndex":1,"reason":"45분 표시가 없음"}]}');
+    const diagnosticOptions = { onDiagnostics: (report: ProductSectionImageDiagnostics) => diagnosticReports.push(report) };
+    await diagnosed.review.selectVerifiedProductSectionImages([candidate], "diagnostic", [featureTarget, overviewTarget], diagnosticOptions);
+    assert.equal(diagnosticReports[0].status, "complete");
+    assert.equal(diagnosticReports[0].entries.length, 2);
+    assert.equal(diagnosticReports[0].entries[0].status, "rejected");
+    assert.equal(diagnosticReports[0].entries[0].sourceSha256, sha256);
+    assert.equal(diagnosticReports[0].entries[0].reason, "45분 표시가 없음");
+    assert.equal(diagnosticReports[0].entries[1].status, "not-proposed");
+    diagnosticReports[0].entries[0].reason = "caller mutation";
+    await diagnosed.review.selectVerifiedProductSectionImages([candidate], "diagnostic", [featureTarget, overviewTarget], diagnosticOptions);
+    assert.equal(diagnosed.calls.length, 1, "empty assignment results are cached with diagnostics");
+    assert.equal(diagnosticReports[1].cacheHit, true);
+    assert.equal(diagnosticReports[1].entries[0].reason, "45분 표시가 없음", "callback cannot corrupt cached diagnostics");
+    for (const invalid of ["not json", "{}", "null", '{"assignments":null}']) {
+      const broken = loadReview(invalid);
+      const failedReports: ProductSectionImageDiagnostics[] = [];
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await assert.rejects(broken.review.selectVerifiedProductSectionImages([candidate], "invalid", [featureTarget], {
+          onDiagnostics: report => failedReports.push(report),
+        }));
+      }
+      assert.equal(broken.calls.length, 2, "invalid review must not be cached as completed");
+      assert.equal(failedReports[0].status, "failed");
+      assert.equal(failedReports[0].entries[0].status, "review-failed");
+    }
     const rejected = loadReview('{"assignments":[{"targetIndex":1,"selectedIndex":1,"reviewClass":"product-photo","reason":"generic"}]}');
     assert.equal(rejected.review.allowsGenericProductPhoto(featureTarget), false);
     assert.equal(rejected.review.allowsGenericProductPhoto({
@@ -131,6 +160,14 @@ async function main() {
       return file;
     });
     const lateEvidence = manyCandidates[16];
+    const partialFailure = loadReview((_options, callIndex) => callIndex === 0 ? '{"assignments":[]}' : 'invalid');
+    const partialReports: ProductSectionImageDiagnostics[] = [];
+    await assert.rejects(partialFailure.review.selectVerifiedProductSectionImages(
+      manyCandidates, "partial", [featureTarget], { onDiagnostics: report => partialReports.push(report) },
+    ));
+    assert.equal(partialReports[0].status, "failed", "a partially reviewed collection is not complete");
+    assert.equal(partialReports[0].entries.filter(entry => entry.status === "not-proposed").length, 16);
+    assert.equal(partialReports[0].entries.filter(entry => entry.status === "review-failed").length, 1);
     const batched = loadReview((_options, callIndex) => callIndex === 0
       ? '{"assignments":[]}'
       : '{"assignments":[{"targetIndex":1,"selectedIndex":1,"reviewClass":"feature-evidence","reason":"후반 URL 기능 패널"}]}');

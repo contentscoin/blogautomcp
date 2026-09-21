@@ -18,14 +18,16 @@ import {
   type BrandPostImageGenerationRequest,
 } from "@/lib/brand-post-image-generation";
 import { isBrandPostImageRepairActive, planSectionImageRequests, repairBrandPostImages } from "@/lib/brand-post-image-repair";
+import { replanShoppingImageCoverage } from "@/lib/brand-post-image-replan";
 
-const IMAGE_ACTIONS = ["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources"] as const;
+const IMAGE_ACTIONS = ["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources", "replan_sources"] as const;
 type ImageAction = (typeof IMAGE_ACTIONS)[number];
 const IMAGE_REPAIR_CONFLICT_CODES = ["IMAGE_REPAIR_BUSY", "IMAGE_REPAIR_OWNERSHIP_LOST"] as const;
 
 function imageFailureCode(errors: string[]): string | undefined {
   const text = errors.join("\n");
   return [...IMAGE_REPAIR_CONFLICT_CODES,
+    "CODEX_AUTH_REQUIRED", "CODEX_LOGIN_REQUIRED", "CODEX_MODEL_INCOMPATIBLE", "LLM_UNAVAILABLE",
     "CHATGPT_BROWSER_AUTH_REQUIRED", "CHATGPT_BROWSER_AUTOMATION_DISABLED", "CHATGPT_BROWSER_UNREACHABLE",
     "CHATGPT_BROWSER_BUSY", "IMAGE_RESUME_REQUIRED", "IMAGE_PROVIDER_REFUSED", "PRODUCT_CUTOUT_REQUIRED",
     "IMAGE_SOURCE_BINDING_REQUIRED", "PRODUCT_SOURCE_REQUIRED", "PRODUCT_SOURCE_DOWNLOAD_FAILED"]
@@ -154,6 +156,24 @@ export async function POST(
   }
 
   const preview = packagePreview(manifest);
+  if (body.action === "replan_sources") {
+    const finishReplan = beginDesktopActivity("brand-post-image-replan");
+    try {
+      const recovery = await replanShoppingImageCoverage({ brandLinkId: id,
+        productName: link.productName || manifest.title, sourceImageUrls });
+      const current = readBrandPostPackage(id, { migrate: false });
+      const data = current ? packagePreview(current) : preview;
+      const remainingMissing = data.imageSlots.reduce((sum, slot) => sum + Math.max(slot.missing, slot.generationMissing), 0);
+      return NextResponse.json({ success: true, data, recovery, remainingMissing,
+        code: remainingMissing ? "IMAGE_SOURCE_BINDING_REQUIRED" : "IMAGE_REPAIR_COMPLETE",
+        errors: remainingMissing ? [`IMAGE_SOURCE_BINDING_REQUIRED: 상세 원본 재수집과 대체 문단 검토 후에도 검증 이미지 ${remainingMissing}장이 부족합니다. (${recovery.reason})`] : [],
+        message: recovery.changed ? "검증된 원본이 있는 문단으로 필수 이미지 배치를 변경했습니다." : "검증 기준을 유지한 채 대체 가능 여부를 확인했습니다." });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const code = (error as { code?: string }).code || imageFailureCode([message]) || "IMAGE_REPLAN_FAILED";
+      return NextResponse.json({ success: false, code, error: message }, { status: imageFailureStatus(code, 422) });
+    } finally { finishReplan(); }
+  }
   if (body.action === "apply_generated") {
     // ChatGPT 대화(내장 이미지 생성)에서 받은 파일을 슬롯에 붙인다. PC 브라우저를 열지 않는다.
     const generatedPath = typeof body.generatedPath === "string" ? body.generatedPath.trim() : "";

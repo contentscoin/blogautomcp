@@ -20,7 +20,34 @@ export interface ProductSectionImageAssignment extends ProductSectionImageReview
   targetIndex: number;
 }
 
-const sectionBatchReviews = new Map<string, ProductSectionImageAssignment[]>();
+export interface ProductSectionImageDiagnostic {
+  targetIndex: number;
+  path: string;
+  sourceSha256: string;
+  status: "proposed" | "rejected" | "not-proposed" | "review-failed";
+  reason: string;
+  reviewedAt: string;
+}
+
+export interface ProductSectionImageDiagnostics {
+  version: 1;
+  status: "complete" | "failed";
+  cacheHit: boolean;
+  reviewedAt: string;
+  candidateCount: number;
+  targetCount: number;
+  entries: ProductSectionImageDiagnostic[];
+  error?: string;
+}
+
+export interface ProductSectionImageReviewOptions {
+  onDiagnostics?: (report: ProductSectionImageDiagnostics) => void;
+}
+
+const sectionBatchReviews = new Map<string, {
+  assignments: ProductSectionImageAssignment[];
+  diagnostics: ProductSectionImageDiagnostics;
+}>();
 
 const selectedProductPixelRules = "상품명 전체의 라인·향·옵션·용량·묶음 수량을 실제 픽셀로 확인하세요. 같은 옵션의 용기 한 개를 보여주는 근접 사진은 허용하되 구매 묶음과 다른 구성을 암시하면 거부하세요. 파일명이나 생성 출처는 근거가 아닙니다. 유통기한/소비기한 공지표와 안내 이미지는 거부하세요. 라벤더 Stress Relief와 무향 Skin Relief처럼 다른 옵션이 섞인 사진은 해당 파트가 보이는 옵션들을 이름으로 명시해 비교하고 이미지도 각 옵션을 명확히 구분할 때만 허용합니다. 단순 비교 언급은 부족합니다. 길게 이어 붙인 상세페이지 스트립과 식별 불확실한 상품은 거부하세요.";
 
@@ -34,6 +61,7 @@ export async function selectVerifiedProductSectionImages(
   paths: string[],
   productName: string,
   targets: ProductSectionImageTarget[],
+  options: ProductSectionImageReviewOptions = {},
 ): Promise<ProductSectionImageAssignment[]> {
   if (targets.length === 0) return [];
   const candidates: Array<{ path: string; sha256: string }> = [];
@@ -59,15 +87,27 @@ export async function selectVerifiedProductSectionImages(
     allowScene: allowsOriginalShoppingScene(target),
   }));
   const reviewKey = crypto.createHash("sha256").update(JSON.stringify({
-    version: 4,
+    version: 5,
     productName: productName.normalize("NFKC").replace(/\s+/gu, " ").trim(),
     targets: normalizedTargets,
     candidates: candidates.map(candidate => candidate.sha256),
   })).digest("hex");
   const cached = sectionBatchReviews.get(reviewKey);
-  if (cached) return cached.map(assignment => ({ ...assignment }));
+  const emit = (report: ProductSectionImageDiagnostics) => options.onDiagnostics?.({
+    ...report, entries: report.entries.map(entry => ({ ...entry })),
+  });
+  if (cached) {
+    emit({ ...cached.diagnostics, cacheHit: true });
+    return cached.assignments.map(assignment => ({ ...assignment }));
+  }
 
   const proposals: Array<ProductSectionImageAssignment & { candidateOrder: number }> = [];
+  const entries: ProductSectionImageDiagnostic[] = [];
+  const report = (status: "complete" | "failed", error?: string): ProductSectionImageDiagnostics => ({
+    version: 1, status, cacheHit: false, reviewedAt: new Date().toISOString(),
+    candidateCount: candidates.length, targetCount: normalizedTargets.length, entries, ...(error ? { error } : {}),
+  });
+  try {
   for (let offset = 0; offset < candidates.length; offset += 16) {
     const batch = candidates.slice(offset, offset + 16);
     const answer = await runCodexDraft({
@@ -92,6 +132,7 @@ export async function selectVerifiedProductSectionImages(
         "feature-evidence의 reason에는 실제로 보이는 조작부·구조·아이콘 또는 공식 설명 문구를 구체적으로 적으세요. 보이지 않으면 배정하지 마세요.",
         "공지, 배송, 쿠폰, 이벤트, 저작권, 구매후기 안내, 관련 없는 설명판, 다른 상품, 식별 불가 이미지, 무관한 콜라주는 거부하세요.",
         "이미지만으로 확인할 수 없는 기능을 추정하지 마세요. 맞는 이미지가 없는 파트는 assignments에서 빼세요.",
+        "배정하지 않은 후보와 파트의 조합마다 rejections에 targetIndex, selectedIndex, reason을 적으세요. 실제 보이는 내용과 요청 기능의 불일치 이유를 명시하세요. 검토하지 못했다면 거절로 단정하지 말고 생략하세요.",
         '{"assignments":[{"targetIndex":1,"selectedIndex":2,"reviewClass":"product-photo" 또는 "feature-evidence" 또는 "scene-evidence","reason":"판정 근거 한 문장"}]}',
       ].join("\n"),
       imagePaths: batch.map(candidate => candidate.path),
@@ -102,7 +143,10 @@ export async function selectVerifiedProductSectionImages(
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(answer.replace(/^```(?:json)?\s*|\s*```$/gu, "")) as Record<string, unknown>; }
     catch { throw new Error("상품 섹션 이미지 검사의 응답을 해석할 수 없습니다. 미검증 이미지를 배정하지 않았습니다."); }
-    const rows = Array.isArray(parsed.assignments) ? parsed.assignments : [];
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.assignments)) {
+      throw new Error("상품 섹션 이미지 검사에 유효한 assignments 배열이 없습니다.");
+    }
+    const rows = parsed.assignments;
     const usedPairs = new Set<string>();
     for (const row of rows) {
       if (!row || typeof row !== "object" || Array.isArray(row)) continue;
@@ -130,6 +174,34 @@ export async function selectVerifiedProductSectionImages(
         candidateOrder: offset + selectedIndex,
       });
     }
+    const reviewedAt = new Date().toISOString();
+    const rejections = Array.isArray(parsed.rejections) ? parsed.rejections : [];
+    for (let targetIndex = 0; targetIndex < normalizedTargets.length; targetIndex++) {
+      for (let selectedIndex = 0; selectedIndex < batch.length; selectedIndex++) {
+        const candidate = batch[selectedIndex];
+        const proposed = proposals.find(row => row.targetIndex === targetIndex && row.sourceSha256 === candidate.sha256);
+        const rejection = rejections.find(row => row && typeof row === "object" &&
+          row.targetIndex === targetIndex + 1 && row.selectedIndex === selectedIndex + 1 &&
+          typeof row.reason === "string" && row.reason.trim());
+        entries.push({ targetIndex, path: candidate.path, sourceSha256: candidate.sha256,
+          status: proposed ? "proposed" : rejection ? "rejected" : "not-proposed",
+          reason: proposed?.reason ?? (rejection ? String(rejection.reason).replace(/[\r\n\u0000-\u001f]+/gu, " ").trim().slice(0, 500) : "모델이 적합 제안이나 거절 이유를 반환하지 않았습니다."),
+          reviewedAt,
+        });
+      }
+    }
+  }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    for (let targetIndex = 0; targetIndex < normalizedTargets.length; targetIndex++) {
+      for (const candidate of candidates) {
+        if (entries.some(entry => entry.targetIndex === targetIndex && entry.sourceSha256 === candidate.sha256)) continue;
+        entries.push({ targetIndex, path: candidate.path, sourceSha256: candidate.sha256,
+          status: "review-failed", reason: message, reviewedAt: new Date().toISOString() });
+      }
+    }
+    emit(report("failed", message));
+    throw error;
   }
   // Maximum bipartite matching: a flexible scene/overview must not consume
   // the sole direct feature source when it has another reviewed candidate.
@@ -155,7 +227,9 @@ export async function selectVerifiedProductSectionImages(
     .forEach(index => assign(index, new Set()));
   const assignments: ProductSectionImageAssignment[] = [...assigned.values()].map(({ candidateOrder: _, ...row }) => row);
   assignments.sort((left, right) => left.targetIndex - right.targetIndex);
-  sectionBatchReviews.set(reviewKey, assignments);
+  const diagnostics = report("complete");
+  sectionBatchReviews.set(reviewKey, { assignments, diagnostics });
+  emit(diagnostics);
   return assignments.map(assignment => ({ ...assignment }));
 }
 

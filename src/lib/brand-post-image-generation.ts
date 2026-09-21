@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { atomicWriteTextFile } from "./atomic-text-file";
 import { readProductPhotoSource } from "../../scripts/lib/product-photo-provenance";
 import {
   collectShoppingProductSourceCandidates,
@@ -786,6 +787,26 @@ export async function generateBrandPostImages(options: {
             sectionTitle: target.sectionTitle,
             imageIntent: target.imageIntent,
           })),
+          { onDiagnostics: report => {
+            const packageDir = getBrandPostPackageDir(options.manifest.brandLinkId);
+            atomicWriteTextFile(path.join(packageDir, "image-source-diagnostics.json"), JSON.stringify({
+              ...report,
+              error: report.error?.slice(0, 500),
+              targets: eligibleTargets.map(({ target }, targetIndex) => ({
+                targetIndex, sectionId: target.sectionId, imageIntent: target.imageIntent,
+              })),
+              entries: report.entries.map(entry => {
+                const relativePath = path.relative(packageDir, entry.path);
+                return { ...entry,
+                  path: relativePath.startsWith(`..${path.sep}`) || relativePath === ".." || path.isAbsolute(relativePath)
+                    ? path.basename(entry.path) : relativePath,
+                  sectionId: eligibleTargets[entry.targetIndex]?.target.sectionId,
+                  imageIntent: eligibleTargets[entry.targetIndex]?.target.imageIntent,
+                  reason: entry.reason.slice(0, 180),
+                };
+              }),
+            }, null, 2));
+          } },
         );
         for (const assignment of reviewed) {
           const eligible = eligibleTargets[assignment.targetIndex];

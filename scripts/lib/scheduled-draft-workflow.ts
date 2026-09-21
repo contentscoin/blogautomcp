@@ -1,4 +1,5 @@
 import http from "node:http";
+import { isRecoverableImageEvidenceFailure, isRecoverableImageEvidenceResult, runRecordedImageRecovery } from "./material-image-recovery";
 import { getWritingTimeoutPolicy } from "./writing-timeout-policy";
 import type { BrandLinkContentReadiness } from "./brandlink-content-readiness";
 import {
@@ -108,7 +109,7 @@ function localScheduleCallOnce(pathname: string, method: string, body: object | 
       response.on("end", () => {
         try {
           const result = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Result;
-          if (!result.success || (response.statusCode || 500) >= 400) reject(Object.assign(new Error(result.error || result.errors?.join("\n") || result.message || `작업 실패 (HTTP ${response.statusCode})`), { code: result.code || "HTTP_ERROR" }));
+          if (!result.success || (response.statusCode || 500) >= 400) reject(Object.assign(new Error(result.error || result.errors?.join("\n") || result.message || `작업 실패 (HTTP ${response.statusCode})`), { code: result.code || "HTTP_ERROR", errors: result.errors }));
           else resolve(result);
         } catch (error) { reject(error); }
       });
@@ -357,11 +358,43 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     await waitForImagesIdle();
     if (!draft.data) throw new Error("준비 중 소재가 사라졌습니다.");
     if (draft.data.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) {
-      const generated = await deps.call(`${base}/draft/images`, "POST", { action: "generate_missing" });
-      latestImageRepair = generated;
-      if (isSessionWidePreparationFailureCode(generated.code)) throw Object.assign(new Error(generated.errors?.join(" ") || generated.message || "이미지 엔진 확인이 필요합니다."), { code: generated.code });
-      draft = await deps.call(`${base}/draft`, "GET");
-      await waitForImagesIdle();
+      const attemptImages = async (action: string) => {
+        check();
+        try {
+          latestImageRepair = await deps.call(`${base}/draft/images`, "POST", { action });
+        } catch (error) {
+          const failure = { code: (error as { code?: string }).code, errors: (error as { errors?: string[] }).errors, error: (error as Error).message };
+          if (!isRecoverableImageEvidenceResult(failure)) throw error;
+          latestImageRepair = failure;
+        }
+        if (isSessionWidePreparationFailureCode(latestImageRepair?.code)) {
+          throw Object.assign(new Error(latestImageRepair?.error || latestImageRepair?.errors?.join(" ") || "이미지 엔진 확인이 필요합니다."), { code: latestImageRepair?.code });
+        }
+        if (latestImageRepair?.errors?.length && !isRecoverableImageEvidenceResult(latestImageRepair)) {
+          const cause = latestImageRepair.errors.flatMap(message => message.match(/\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b/gu) || [])
+            .find(code => !isRecoverableImageEvidenceFailure(code));
+          throw Object.assign(new Error(latestImageRepair.errors.join("\n")), { code: cause || latestImageRepair.code || "IMAGE_REPAIR_FAILED", errors: latestImageRepair.errors });
+        }
+        draft = await deps.call(`${base}/draft`, "GET");
+        await waitForImagesIdle();
+      };
+      const missing = () => draft.data?.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0);
+      await attemptImages("generate_missing");
+      if (missing() && isRecoverableImageEvidenceResult(latestImageRepair)) {
+        deps.onStage?.("이미지 실패 원인 확인 · 상품 상세 원본 재수집");
+        const refreshed = await runRecordedImageRecovery(id, "refresh-source", async () => {
+          check();
+          await deps.call(`${base}/draft`, "POST", { action: "prepare_context" });
+          // Image URLs refresh independently of textual snapshot promotion.
+          // Keep the manuscript frozen; the final recheck still verifies it.
+          await attemptImages("bind_sources");
+        });
+        if (!refreshed.attempted) deps.onStage?.("같은 근거 재수집은 반복하지 않음 · 대체 구성 검토");
+        if (missing() && isRecoverableImageEvidenceResult(latestImageRepair)) {
+          deps.onStage?.("검증 가능한 문단으로 이미지 배치 재계획");
+          await runRecordedImageRecovery(id, "replan-images", () => attemptImages("replan_sources"));
+        }
+      }
     }
     if (draft.data?.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) {
       throw unresolvedCompositionError("이미지 준비가 미완료입니다. 저장된 소재에서 실패한 이미지만 보충하세요.");
