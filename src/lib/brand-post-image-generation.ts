@@ -8,6 +8,7 @@ import {
   selectShoppingProductSources,
 } from "../../scripts/lib/product-photo-source";
 import { selectVerifiedProductSectionImages } from "../../scripts/lib/product-photo-review";
+import { buildSelectedProductImageAuditContext } from "../../scripts/lib/publish-image-audit";
 import { rejectedPublicationImageHashes } from "../../scripts/lib/publish-image-rejections";
 import fs from "node:fs";
 import path from "node:path";
@@ -715,6 +716,14 @@ export async function generateBrandPostImages(options: {
       target.request.replaceAssetKey ? [target.request.replaceAssetKey] : []));
     const usedSourceHashes = new Set(getUsedShoppingProductSources(options.manifest, replaceAssetKeys)
       .map(record => record.sourceSha256));
+    // A saved seller URL may download the exact bytes already bound elsewhere.
+    // Those originals are not segmented-composite sources, so the source-chain
+    // helper above cannot reserve them. Exclude them before model assignment;
+    // otherwise the model repeatedly proposes a duplicate the apply gate rejects.
+    for (const asset of packageAssets) {
+      if (!replaceAssetKeys.has(asset.sha256) && (asset.role === "hero" || asset.sectionId))
+        usedSourceHashes.add(asset.sha256);
+    }
     const packageSourceAssets = packageAssets.filter(asset => {
       if (asset.role !== "body" || asset.provenance !== "ORIGINAL" || asset.creationMethod !== "source") return false;
       if (asset.sectionId && !replaceAssetKeys.has(asset.sha256)) return false;
@@ -791,13 +800,17 @@ export async function generateBrandPostImages(options: {
             const nodes = options.manifest.composition.renderNodes.filter(node =>
               "sectionId" in node && node.sectionId === target.sectionId);
             return {
+              sectionId: target.sectionId || undefined,
               sectionTitle: nodes.flatMap(node => node.kind === "heading" || node.kind === "quotation" ? [node.text] : []).join("\n"),
               sectionBody: nodes.flatMap(node => node.kind === "paragraph" ? [node.text] : []),
               excludedSourceSha256: rejectedPublicationImageHashes(options.manifest.brandLinkId, options.manifest.composition, target.sectionId ?? null),
               imageIntent: target.imageIntent,
             };
           }),
-          { onDiagnostics: report => {
+          { selectedProduct: buildSelectedProductImageAuditContext(
+            String(options.manifest.sourceSnapshot?.product.name || options.productName),
+            Array.isArray(options.manifest.sourceSnapshot?.product.features)
+              ? options.manifest.sourceSnapshot.product.features.map(String) : []), onDiagnostics: report => {
             const packageDir = getBrandPostPackageDir(options.manifest.brandLinkId);
             atomicWriteTextFile(path.join(packageDir, "image-source-diagnostics.json"), JSON.stringify({
               ...report,

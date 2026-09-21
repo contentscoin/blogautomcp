@@ -892,18 +892,23 @@ export function normalizePublishedPostText(document: ResolvedPostDocumentV1): Re
     const body = normalizePublishedBodyLines(section.body.map(value => splitAffiliateDisclosure(value).content));
     return { ...section, body, characterCount: body.join("").length };
   });
+  return refreshPostDocumentQuality({ ...document, sections, renderNodes: normalizePublishedRenderNodes(document.renderNodes) });
+}
+
+/** Shared published text view for renderers and image-review context fingerprints. */
+export function normalizePublishedRenderNodes(nodes: PostRenderNode[]): PostRenderNode[] {
   const renderNodes: PostRenderNode[] = [];
-  const tags = normalizeSystemHashtags(document.renderNodes.flatMap(node => node.kind === "hashtags" ? node.values : []));
+  const tags = normalizeSystemHashtags(nodes.flatMap(node => node.kind === "hashtags" ? node.values : []));
   let tagsWritten = false;
-  for (let i = 0; i < document.renderNodes.length; i++) {
-    const node = document.renderNodes[i];
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i];
     if (node.kind === "hashtags") {
       if (!tagsWritten) renderNodes.push({ kind: "hashtags", values: tags });
       tagsWritten = true;
     } else if (node.kind === "paragraph") {
       const text = [splitAffiliateDisclosure(node.text).content];
-      while (i + 1 < document.renderNodes.length) {
-        const next = document.renderNodes[i + 1];
+      while (i + 1 < nodes.length) {
+        const next = nodes[i + 1];
         if (next.kind !== "paragraph" || next.sectionId !== node.sectionId) break;
         text.push(splitAffiliateDisclosure(next.text).content);
         i++;
@@ -922,7 +927,7 @@ export function normalizePublishedPostText(document: ResolvedPostDocumentV1): Re
       renderNodes.push({ ...node, text: splitAffiliateDisclosure(node.text).disclosure || stripHashtagOnlyLines(node.text) });
     } else renderNodes.push(node);
   }
-  return refreshPostDocumentQuality({ ...document, sections, renderNodes });
+  return renderNodes;
 }
 
 /** Pure migration for bounded/spec-first documents created with stale role intents. */

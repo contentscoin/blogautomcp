@@ -3,7 +3,8 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { getAppDataDir } from "./app-paths";
 import { atomicWriteTextFile } from "../../src/lib/atomic-text-file";
-import type { ResolvedPostDocumentV1 } from "../../src/lib/post-composition-contract";
+import { normalizePublishedRenderNodes, type ResolvedPostDocumentV1 } from "../../src/lib/post-composition-contract";
+import { invalidateSuccessfulImageAuditReceipt } from "./publish-image-audit-receipt";
 
 type Composition = Pick<ResolvedPostDocumentV1, "renderNodes" | "sections">;
 interface Rejection { sha256: string; sectionId: string | null; context: string; rejectedAt: string }
@@ -14,7 +15,7 @@ function location(id: string): string {
 export function publicationImageContext(composition: Composition, sectionId: string | null): string {
   return crypto.createHash("sha256").update(JSON.stringify({ sectionId,
     intent: composition.sections.find(section => section.id === sectionId)?.imageIntent || "",
-    text: composition.renderNodes.flatMap(node => "sectionId" in node && node.sectionId === sectionId &&
+    text: normalizePublishedRenderNodes(composition.renderNodes).flatMap(node => "sectionId" in node && node.sectionId === sectionId &&
       (node.kind === "paragraph" || node.kind === "heading" || node.kind === "quotation") ? [{ kind: node.kind, text: node.text }] : []),
   })).digest("hex");
 }
@@ -30,6 +31,16 @@ export function rejectedPublicationImageHashes(id: string, composition: Composit
   const context = publicationImageContext(composition, sectionId);
   return read(id).filter(row => row.sectionId === sectionId && row.context === context).map(row => row.sha256);
 }
+/** A fresh complete pixel verdict can resolve a previous false positive, but
+ * only for those exact bytes and unchanged publication context. */
+export function clearReviewedPublicationImageRejections(id: string, composition: Composition,
+  accepted: Array<{ sha256: string; sectionId: string | null }>): void {
+  if (!accepted.length) return;
+  const records = read(id);
+  const remaining = records.filter(row => !accepted.some(item => item.sha256 === row.sha256 &&
+    item.sectionId === row.sectionId && publicationImageContext(composition, item.sectionId) === row.context));
+  if (remaining.length !== records.length) atomicWriteTextFile(location(id), JSON.stringify(remaining, null, 2));
+}
 /** Only definitive pixel rejections, tied to unchanged actual publication text.
  * No raw prompt, image path, credentials, or model response is persisted. */
 export function recordPublicationImageRejections(id: string, composition: Composition,
@@ -43,12 +54,15 @@ export function recordPublicationImageRejections(id: string, composition: Compos
   catch { return; }
   if (manifest.brandLinkId !== id || manifest.version !== "brand-post-package/v2") return;
   const records = read(id);
+  let added = false;
   for (const item of rejected) {
     const context = publicationImageContext(composition, item.sectionId);
     if (!/^[a-f0-9]{64}$/.test(item.sha256) || context !== publicationImageContext(manifest.composition, item.sectionId)) continue;
     const duplicate = records.findIndex(row => row.sha256 === item.sha256 && row.sectionId === item.sectionId && row.context === context);
     if (duplicate >= 0) records.splice(duplicate, 1);
     records.push({ ...item, context, rejectedAt: new Date().toISOString() });
+    added = true;
   }
+  if (added) invalidateSuccessfulImageAuditReceipt(id);
   atomicWriteTextFile(file, JSON.stringify(records.slice(-64), null, 2));
 }

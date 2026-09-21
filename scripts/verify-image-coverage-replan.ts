@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { replanShoppingImageCoverage, type ImageReplanDependencies } from "../src/lib/brand-post-image-replan";
 import type { BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
 
-async function scenario(mode: "semantic" | "geometry" | "success" | "insufficient" | "revision" | "generated" | "overview" | "existing" | "auth" | "external" | "recoverable", repairError?: string) {
+async function scenario(mode: "semantic" | "geometry" | "success" | "insufficient" | "revision" | "generated" | "overview" | "existing" | "auth" | "external" | "recoverable", repairError?: string, fromKind: "feature" | "lifestyle" | "overview" = "feature", targetProductPhoto = false, probes = false) {
   let stored = { version: "brand-post-package/v2", brandLinkId: "fixture", connectKind: "SHOPPING",
     imagePolicy: "LOCKED_PRODUCT_OR_ORIGINAL", approvedAt: "old-approval", title: "45분 청소기", createdAt: "original",
     sourceSnapshot: { snapshotId: "fixed-source", facts: ["사용시간 45분"] }, hashtags: ["청소기"],
@@ -21,6 +21,10 @@ async function scenario(mode: "semantic" | "geometry" | "success" | "insufficien
     stored.imageAssets!.push({ path: "long.jpg", sha256: "long" } as never);
     stored.composition.renderNodes.push({ kind: "image", sectionId: "runtime", assetPath: "long.jpg" } as never);
   }
+  if (fromKind === "lifestyle") stored.composition.sections[0].imageIntent = "AI 연출 이미지: 검증 상품의 생활 공간 배치";
+  if (fromKind === "overview") { stored.composition.sections[0].title = "어떤 제품인지부터 보면"; stored.composition.sections[0].imageIntent = "전체 구성 또는 패키지 사진"; }
+  if (targetProductPhoto) { stored.composition.sections[1].title = "어떤 제품인지부터 보면"; stored.composition.sections[1].imageIntent = "제품 대표 원본 사진 재노출"; }
+  if (probes) stored.composition.sections.push({ ...stored.composition.sections[1], id: "unused", imagePaths: [] });
   const original = structuredClone(stored);
   let repairCalls = 0;
   let writes = 0;
@@ -34,10 +38,16 @@ async function scenario(mode: "semantic" | "geometry" | "success" | "insufficien
       sectionId: section.id, minimum: section.imageMin!, maximum: section.imageMax!, count: section.imagePaths.filter(file => file !== "long.jpg").length,
       missing: Math.max(0, section.imageMin! - section.imagePaths.filter(file => file !== "long.jpg").length), generatedMinimum: 0, generationMissing: 0,
       staleTargets: section.imagePaths.includes("long.jpg") ? [{ path: "long.jpg", code: mode === "semantic" ? "image-publication-rejected" : "image-geometry-invalid" }] : [], assets: section.imagePaths.map(file => ({ path: file, creationMethod: "source",
-        sourceReview: { usage: "section-matched-product-evidence", reviewClass: mode === "overview" ? "product-photo" : "feature-evidence" } })),
+        sourceReview: { usage: "section-matched-product-evidence", reviewClass: mode === "overview" || targetProductPhoto ? "product-photo" : "feature-evidence" } })),
     })),
     repair: async (options: { sourceOnly: boolean; requests: Array<{ sectionId: string }> }) => {
-      repairCalls++; assert.equal(options.sourceOnly, true); assert.deepEqual(options.requests.map(r => r.sectionId), ["filter"]);
+      repairCalls++; assert.equal(options.sourceOnly, true); assert.deepEqual(options.requests.map(r => r.sectionId), probes ? ["filter", "unused"] : ["filter"]);
+      if (probes) {
+        stored.composition.sections.find(s => s.id === "unused")!.imagePaths = ["unused-probe.jpg"];
+        stored.imageAssets!.push({ path: "unused-probe.jpg" } as never);
+        stored.bodyImagePaths = ["a", "unused-probe.jpg"];
+        stored.composition.renderNodes.push({ kind: "image", sectionId: "unused", assetPath: "unused-probe.jpg" } as never);
+      }
       if (mode === "revision") stored.composition.sections[0].body = ["동시 수정"];
       if (mode !== "insufficient") stored.composition.sections[1].imagePaths = ["verified-filter-photo"];
       return { errors: mode === "auth" ? ["AUTH_REQUIRED: 로그인 필요"] : repairError ? [repairError] : [] };
@@ -52,8 +62,9 @@ async function scenario(mode: "semantic" | "geometry" | "success" | "insufficien
     assert.deepEqual(stored.composition.sections[1].imagePaths, ["verified-filter-photo"]);
     return;
   }
+  const allowed = fromKind === "feature" || mode === "semantic";
   const result = await replanShoppingImageCoverage({ brandLinkId: "fixture" }, deps);
-  if (mode === "semantic" || mode === "geometry" || mode === "success" || mode === "existing" || mode === "recoverable") {
+  if (allowed && (!targetProductPhoto || (mode === "semantic" && fromKind !== "feature")) && (mode === "semantic" || mode === "geometry" || mode === "success" || mode === "existing" || mode === "recoverable")) {
     assert.equal(result.changed, true); assert.equal(result.after.required, result.before.required);
     assert.equal(result.after.missing, 0); assert.equal(stored.approvedAt, null);
     assert.deepEqual(stored.sourceSnapshot, original.sourceSnapshot);
@@ -68,10 +79,20 @@ async function scenario(mode: "semantic" | "geometry" | "success" | "insufficien
     assert(stored.pipelineNotes?.some(note => note.includes("old optional failure")));
     assert.equal(writes, 1);
   } else { assert.equal(result.changed, false); assert.equal(writes, 0); assert.equal(stored.composition.sections[0].imageMin, 1); }
-  assert.equal(repairCalls, mode === "generated" || mode === "existing" ? 0 : 1);
-  assert.equal(released, mode !== "generated");
+  assert.equal(repairCalls, !allowed || mode === "generated" || mode === "existing" ? 0 : 1);
+  assert.equal(released, allowed && mode !== "generated");
 }
 async function main() {
+  await scenario("success", undefined, "feature", false, true);
+  await scenario("semantic", undefined, "feature", true);
+  await scenario("success", undefined, "feature", true);
+  for (const kind of ["lifestyle", "overview"] as const) {
+    await scenario("semantic", undefined, kind);
+    await scenario("semantic", undefined, kind, true);
+    await scenario("success", undefined, kind);
+    await scenario("geometry", undefined, kind);
+    await scenario("generated", undefined, kind);
+  }
   for (const mode of ["semantic", "geometry", "success", "insufficient", "revision", "generated", "overview", "existing", "auth"] as const) await scenario(mode);
   for (const error of ["CODEX_MODEL_INCOMPATIBLE: unavailable model", "CHATGPT_BROWSER_UNREACHABLE: closed",
     "IMAGE_RESUME_REQUIRED: interrupted", "request timed out", "unknown transport failure",

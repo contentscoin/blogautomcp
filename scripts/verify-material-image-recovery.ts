@@ -11,6 +11,42 @@ async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "material-image-recovery-"));
   process.env.DESKTOP_USER_DATA = root;
   try {
+    for (const outcome of ["recovered", "second-rejection", "replan-success", "third-rejection", "replan-incomplete", "auth", "mixed", "unstale"] as const) {
+      let approvals = 0; let missing = false; let accepted = false;
+      const actions: string[] = [];
+      const call: Call = async (url, method, body) => {
+        const action = (body as { action?: string })?.action || method; actions.push(action);
+        if (action === "approve") {
+          approvals++;
+          if (outcome === "auth") throw Object.assign(new Error("login required"), { code: "CODEX_AUTH_REQUIRED" });
+          if (approvals === 1 || outcome === "second-rejection" || outcome === "third-rejection" ||
+              (["replan-success", "replan-incomplete"].includes(outcome) && approvals === 2)) {
+            missing = outcome !== "unstale";
+            throw Object.assign(new Error("final pixel rejection"), { code: "PUBLISH_IMAGE_AUDIT_FAILED",
+              errors: outcome === "mixed" ? ["SEMANTIC_REJECTION: wrong feature", "INVALID_REVIEW: malformed"] : ["SEMANTIC_REJECTION: wrong feature"] });
+          }
+          accepted = true;
+        }
+        if (url.endsWith("/images")) {
+          assert(["bind_sources", "replan_sources"].includes(action));
+          if (action === "replan_sources") {
+            const changed = ["replan-success", "third-rejection", "replan-incomplete"].includes(outcome);
+            missing = !changed || outcome === "replan-incomplete";
+            return { success: true, recovery: { changed }, remainingMissing: missing ? 1 : 0 };
+          }
+          missing = false;
+        }
+        return { success: true, data: { approvedAt: accepted ? "yes" : null, approval: { canApprove: !missing },
+          imageSlots: [{ missing: missing ? 1 : 0, generationMissing: 0 }], contentQuality: { signals: [] } } };
+      };
+      const run = runMaterialPreparation(`audit-${outcome}`, { call, pause: async () => {} });
+      if (["recovered", "replan-success"].includes(outcome)) await run; else await assert.rejects(run);
+      assert.equal(accepted, ["recovered", "replan-success"].includes(outcome));
+      assert.equal(approvals, ["replan-success", "third-rejection"].includes(outcome) ? 3 : ["recovered", "second-rejection", "replan-incomplete"].includes(outcome) ? 2 : 1);
+      assert.equal(actions.filter(action => action === "replan_sources").length, ["second-rejection", "replan-success", "third-rejection", "replan-incomplete"].includes(outcome) ? 1 : 0);
+      assert.equal(actions.filter(action => action === "bind_sources").length, ["recovered", "second-rejection", "replan-success", "third-rejection", "replan-incomplete"].includes(outcome) ? 1 : 0);
+      assert(!actions.includes("generate_missing"), "final audit recovery must not generate another background");
+    }
     for (const tail of ["REQUEST_TIMEOUT: response lost", "unclassified reviewer failure", "CODEX_MODEL_INCOMPATIBLE: model"]) {
       assert.equal(isRecoverableImageEvidenceResult({ code: "IMAGE_SOURCE_BINDING_REQUIRED", errors: ["IMAGE_SOURCE_BINDING_REQUIRED: missing", tail] }), false);
     }

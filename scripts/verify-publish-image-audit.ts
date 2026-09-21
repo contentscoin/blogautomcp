@@ -44,6 +44,12 @@ async function main() {
     const feature = options();
     feature.composition.sections[0].imageIntent = "보습 기능 설명";
     await check({}, false, feature);
+    feature.review = async () => JSON.stringify({ reviews: [{ ...good, reason: "선택 제품과 상충하는 다른 브랜드나 옵션 표시는 없습니다." }] });
+    const featureFailure = (await auditPublishImages(feature)).failures[0];
+    assert.match(featureFailure.reason, /기능 근거 부족/);
+    assert.match(featureFailure.reason, /픽셀 관찰/);
+    assert.match(featureFailure.reason, /상충하는 다른 브랜드/);
+    assertions++;
     await check({ reviewClass: "feature-evidence", reason: "Legible official explanation of this feature" }, true, feature);
     const lifestyle = options();
     lifestyle.composition.sections[0].imageIntent = "AI 연출 이미지: 생활 공간 배치";
@@ -67,6 +73,8 @@ async function main() {
     Object.assign(cuckoo.composition.renderNodes[0], { role: "thumbnail", sectionId: null });
     cuckoo.review = async call => {
       assert.match(call.userPrompt, /not OCR certification/);
+      assert.match(call.userPrompt, /Classify the image by its main content/);
+      assert.match(call.userPrompt, /Other attached candidates are also unverified/);
       assert.match(call.userPrompt, /Missing or small specification text alone must not cause rejection/);
       assert.match(call.userPrompt, /brand plus a generic category alone is not sufficient/);
       assert.match(call.userPrompt, /truncate essential copy so its meaning is materially misleading/);

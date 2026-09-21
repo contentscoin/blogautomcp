@@ -1,5 +1,6 @@
 /** Offline transport regression checks. No browser or generation provider is loaded. */
 import assert from "node:assert/strict";
+import { buildSelectedProductImageAuditContext } from "./lib/publish-image-audit";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -81,6 +82,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       "node:fs": fs, "node:path": path,
       "./atomic-text-file": atomicTextFile,
       "../../scripts/lib/publish-image-rejections": { rejectedPublicationImageHashes: () => [] },
+      "../../scripts/lib/publish-image-audit": { buildSelectedProductImageAuditContext },
       "../../scripts/lib/image-timeout-policy": imagePolicy,
       "node:child_process": {
         spawn(_command: string, args: string[], options: { windowsHide: boolean; shell: boolean }) {
@@ -592,6 +594,31 @@ async function verifyGenerator() {
       assert.equal(result.sourceReview?.usage, "section-matched-product-evidence");
       assert.equal(result.sourceReview?.reviewClass, "feature-evidence");
     });
+  });
+
+  await check("downloaded copies of bound originals and hero cannot re-enter source assignment", async () => {
+    const heroCopy = path.join(root, "downloaded-existing-hero.jpg");
+    const bodyCopy = path.join(root, "downloaded-existing-body.jpg");
+    const fresh = path.join(root, "new-unique-evidence.jpg");
+    fs.copyFileSync(rawPath, heroCopy); fs.copyFileSync(sourcePath, bodyCopy);
+    fs.writeFileSync(fresh, "unique evidence not used by any package image");
+    const bodyHash = crypto.createHash("sha256").update(fs.readFileSync(sourcePath)).digest("hex");
+    const h = harness({ sourcePaths: [heroCopy, bodyCopy, fresh], sectionMatchedPaths: [heroCopy, bodyCopy, sourcePath, fresh] });
+    h.manifest.connectKind = "SHOPPING";
+    h.manifest.imageAssets = [
+      { path: rawPath, sourcePath: rawPath, role: "hero", sha256: crypto.createHash("sha256").update(fs.readFileSync(rawPath)).digest("hex"), provenance: "ORIGINAL", creationMethod: "source" },
+      { path: sourcePath, sourcePath, role: "body", sectionId: "already-bound", sha256: bodyHash, provenance: "ORIGINAL", creationMethod: "source" },
+    ];
+    const results = await h.generate(1, { sourceOnly: true });
+    assert.deepEqual(h.sectionReviewCandidatePaths[0], [fresh]);
+    assert.equal(results[0].generatedPath, fresh);
+    assert.equal(h.spawns, 0);
+    // An explicit replacement may still inspect its own source; other slots
+    // and the hero remain reserved. This preserves legitimate repair behavior.
+    h.manifest.composition.sections.push({ ...h.manifest.composition.sections[0], id: "already-bound" });
+    await h.generate(0, { sourceOnly: true, requests: [{ requestId: "replace-own", sectionId: "already-bound", replaceAssetKey: bodyHash }] });
+    assert(h.sectionReviewCandidatePaths[1].includes(sourcePath));
+    assert(!h.sectionReviewCandidatePaths[1].includes(heroCopy));
   });
 
   await check("source-only shopping repair preserves partial originals and never starts generation", async () => {

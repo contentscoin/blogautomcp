@@ -10,6 +10,7 @@ import vm from "node:vm";
 import ts from "typescript";
 import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene } from "../src/lib/brand-post-image-evidence";
 import type { ProductSectionImageDiagnostics, ProductSectionImageReviewOptions } from "./lib/product-photo-review";
+import { auditSectionProposals } from "./lib/product-section-proposal-audit";
 
 interface ReviewModule {
   allowsGenericProductPhoto(target: { sectionTitle: string; imageIntent: string }): boolean;
@@ -47,6 +48,15 @@ function loadReview(answer: string | ((options: ReviewCall, callIndex: number) =
     exports: loadedModule.exports,
     require: (name: string) => {
       if (name === "./publication-image-geometry") return { publicationImageGeometryIssue };
+      // Exercise real bounded proposal logic with an offline final-review result.
+      // Semantic failures/auth/round bounds are covered by verify-product-proposal-audit.
+      if (name === "./product-section-proposal-audit") return {
+        auditSectionProposals: (options: Parameters<typeof auditSectionProposals>[0]) => auditSectionProposals({ ...options,
+          audit: async ({ composition }) => ({ ok: true, checked: composition.sections.length, failures: [],
+            images: composition.renderNodes.flatMap((node, nodeIndex) => node.kind === "image" ? [{ nodeIndex,
+              assetPath: node.assetPath, sha256: crypto.createHash("sha256").update(fs.readFileSync(node.assetPath)).digest("hex") }] : []) }),
+        }),
+      };
       if (name === "node:fs") return fs;
       if (name === "node:crypto") return crypto;
       if (name === "./codex-draft-provider") return {
@@ -92,6 +102,11 @@ async function main() {
     assert.match(bodyAware.prompt, /같은 상품의 다른 효능/);
     await bodyAware.review.selectVerifiedProductSectionImages([candidate], "fixture", [{ ...featureTarget, sectionBody: ["보송한 마무리 기준입니다."] }]);
     assert.equal(bodyAware.calls.length, 2, "body edits invalidate section review cache");
+    const selected = JSON.stringify({ name: "fixture", optionFacts: ["색상: 화이트"] });
+    await bodyAware.review.selectVerifiedProductSectionImages([candidate], "fixture", [featureTarget], { selectedProduct: selected });
+    assert(bodyAware.prompt.includes(selected), "source review receives exact selected variant facts");
+    await bodyAware.review.selectVerifiedProductSectionImages([candidate], "fixture", [featureTarget], { selectedProduct: selected.replace("화이트", "블랙") });
+    assert.equal(bodyAware.calls.length, 4, "selected option edits invalidate source review cache");
     const singleBody = loadReview('{"selectedIndex":null}');
     await singleBody.review.selectVerifiedProductSectionImage([candidate], "fixture", "발림", "공식 기능 설명", body);
     assert.match(singleBody.prompt, /촉촉한 수분 공급/);

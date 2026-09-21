@@ -5,9 +5,9 @@ import path from "node:path";
 import crypto from "node:crypto";
 import sharp from "sharp";
 import { assertPublishImagesSafe } from "./lib/publish-image-audit";
-import { recordPublicationImageRejections, rejectedPublicationImageHashes } from "./lib/publish-image-rejections";
+import { recordPublicationImageRejections, rejectedPublicationImageHashes, publicationImageContext } from "./lib/publish-image-rejections";
 import { imageRecoverySignature } from "./lib/material-image-recovery";
-import type { ResolvedPostDocumentV1 } from "../src/lib/post-composition-contract";
+import { normalizePublishedRenderNodes, type ResolvedPostDocumentV1 } from "../src/lib/post-composition-contract";
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "publish-rejections-"));
@@ -29,6 +29,12 @@ async function main() {
   const opts = { brandLinkId: id, productName: "fixture", composition,
     review: async () => JSON.stringify({ reviews: [verdict] }) };
   try {
+    const faq = structuredClone(composition);
+    faq.renderNodes.splice(1, 1,
+      { kind: "paragraph", sectionId: "body", text: "Q. 사용 방법은?" },
+      { kind: "paragraph", sectionId: "body", text: "A. 공식 안내를 확인하세요.\n#상품" });
+    assert.equal(publicationImageContext(faq, "body"), publicationImageContext({ ...faq,
+      renderNodes: normalizePublishedRenderNodes(faq.renderNodes) }, "body"), "raw and published FAQ share rejection context");
     const before = imageRecoverySignature(dir);
     await assert.rejects(assertPublishImagesSafe(opts), /SEMANTIC_REJECTION/);
     assert.deepEqual(rejectedPublicationImageHashes(id, composition, "body"), [hash]);
@@ -37,6 +43,9 @@ async function main() {
     await assert.rejects(assertPublishImagesSafe(opts));
     assert.equal(imageRecoverySignature(dir), after, "same repeated verdict cannot buy more retries");
     assert.equal(store.getBrandPostImageSlots(manifest)[0].staleTargets[0].code, "image-publication-rejected");
+    await assertPublishImagesSafe({ ...opts, review: async () => JSON.stringify({ reviews: [{ ...verdict, accepted: true }] }) });
+    assert.deepEqual(rejectedPublicationImageHashes(id, composition, "body"), [], "fresh exact-byte pixel review resolves prior false positive");
+    await assert.rejects(assertPublishImagesSafe(opts));
     const changed = structuredClone(composition); (changed.renderNodes[1] as { text: string }).text = "새로운 본문";
     assert.deepEqual(rejectedPublicationImageHashes(id, changed, "body"), []);
     const bytes = fs.readFileSync(photo);

@@ -10,6 +10,7 @@ import {
 
 export interface Result {
   success: boolean; code?: string; error?: string; errors?: string[]; message?: string;
+  recovery?: { changed: boolean }; remainingMissing?: number;
   data?: {
     status?: string; postUrl?: string; scheduledPublishAt?: string; errorMessage?: string;
     published?: boolean; scheduled?: boolean; verificationBasis?: string;
@@ -133,6 +134,11 @@ function bounded(deps: WorkflowDeps, fallback: number) {
 }
 
 const IMAGE_QUALITY_SIGNALS = new Set(["composition-quality", "representative-image", "thumbnail"]);
+function isDefinitivePublishImageFailure(error: unknown): boolean {
+  const failure = error as { code?: string; errors?: string[] };
+  return failure.code === "PUBLISH_IMAGE_AUDIT_FAILED" && Boolean(failure.errors?.length) &&
+    failure.errors!.every(reason => /^(?:SEMANTIC_REJECTION|LONG_IMAGE):/u.test(reason));
+}
 
 function legacyTextFailures(draft: Result): string[] {
   const quality = draft.data?.contentQuality;
@@ -353,7 +359,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     }
   };
 
-  const images = async () => {
+  const images = async (sourceOnly = false) => {
     deps.onStage?.("이미지 준비");
     await waitForImagesIdle();
     if (!draft.data) throw new Error("준비 중 소재가 사라졌습니다.");
@@ -379,7 +385,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
         await waitForImagesIdle();
       };
       const missing = () => draft.data?.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0);
-      await attemptImages("generate_missing");
+      await attemptImages(sourceOnly ? "bind_sources" : "generate_missing");
       if (missing() && isRecoverableImageEvidenceResult(latestImageRepair)) {
         deps.onStage?.("이미지 실패 원인 확인 · 상품 상세 원본 재수집");
         const refreshed = await runRecordedImageRecovery(id, "refresh-source", async () => {
@@ -430,7 +436,40 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     const error = plan.action === "refresh-source" ? sourceEvidenceError(plan) : unresolvedQualityError(plan);
     throw error;
   }
-  await deps.call(`${base}/draft`, "PATCH", { action: "approve" });
+  // Approval executes the same final pixel audit as publication, even for a
+  // previously READY package. Only definitive image findings allow one repair.
+  try {
+    await deps.call(`${base}/draft`, "PATCH", { action: "approve" });
+  } catch (error) {
+    if (!isDefinitivePublishImageFailure(error)) throw error;
+    deps.onStage?.("최종 이미지 검사 실패 · 해당 원본 자동 교체");
+    draft = await deps.call(`${base}/draft`, "GET");
+    if (!draft.data?.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) throw error;
+    await images(true);
+    plan = await recheck(false, revised ? 1 : 0);
+    if (plan.action !== "complete") throw unresolvedCompositionError(plan.reason);
+    deps.onStage?.("교체 이미지 최종 재검사·승인");
+    try {
+      await deps.call(`${base}/draft`, "PATCH", { action: "approve" });
+    } catch (secondError) {
+      if (!isDefinitivePublishImageFailure(secondError)) throw secondError;
+      deps.onStage?.("반복 거절 원인 확인 · 검증된 다른 문단으로 배치 변경");
+      // A second pixel rejection does not buy another replacement attempt.
+      // One source-only structural change may justify a final audit, provided
+      // it actually changed coverage and closed every required slot.
+      const replanned = await runRecordedImageRecovery(id, "replan-images", () =>
+        deps.call(`${base}/draft/images`, "POST", { action: "replan_sources" }));
+      if (!replanned.attempted || !replanned.result?.recovery?.changed ||
+          replanned.result.remainingMissing !== 0 || replanned.result.errors?.length) throw secondError;
+      draft = await deps.call(`${base}/draft`, "GET");
+      if (!draft.data || draft.data.imageGeneration?.status === "running" ||
+          draft.data.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) throw secondError;
+      plan = await recheck(false, revised ? 1 : 0);
+      if (plan.action !== "complete") throw unresolvedCompositionError(plan.reason);
+      deps.onStage?.("변경된 배치 최종 재검사·승인");
+      await deps.call(`${base}/draft`, "PATCH", { action: "approve" });
+    }
+  }
   // HTTP success only means the handler ran. Verify persisted approval and all
   // gates before reporting a material as complete (also used by MCP callers).
   draft = await deps.call(`${base}/draft`, "GET");

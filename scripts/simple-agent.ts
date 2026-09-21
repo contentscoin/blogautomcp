@@ -111,7 +111,7 @@ import {
   getConnectEditorInsertionMode,
   type EditorConnectKind,
 } from "./lib/connect-editor-insertion";
-import { parsePreparedBrandPostSections } from "./lib/prepared-post-markdown";
+import { parsePreparedBrandPostSections, readPreparedCompositionSections } from "./lib/prepared-post-markdown";
 import { createScheduleSubmissionTracker, waitForConfirmedScheduleSubmission, type ScheduleSubmissionTracker } from "./lib/naver-schedule-tracker";
 import { createProductSnapshot, readProductSnapshot, type ProductSnapshot } from "../src/lib/draft-context-snapshot";
 import { buildBrandPostQualitySource, brandPostQualitySourceFromSnapshot } from "../src/lib/brand-post-quality-source";
@@ -219,7 +219,7 @@ import {
   type PostQualityPreset,
   type ResolvedPostDocumentV1,
 } from "../src/lib/post-composition-contract";
-import { assertPublishImagesSafe } from "./lib/publish-image-audit";
+import { buildSelectedProductImageAuditContext, assertPublishImagesSafe } from "./lib/publish-image-audit";
 import { assertPublishedEditorText, publishedReadinessSections } from "./lib/published-editor-audit";
 
 // Stealth 플러그인 적용 (봇 감지 우회)
@@ -6704,7 +6704,21 @@ function loadPreparedBrandLinkPostOverride(
     throw new Error("준비된 원고에서 제목을 찾지 못했습니다.");
   }
 
-  const sections = parsePreparedBrandPostSections(markdown);
+  const composition =
+    manifest.version === "brand-post-package/v2" &&
+    manifest.composition &&
+    typeof manifest.composition === "object" &&
+    (manifest.composition as { version?: unknown }).version === "resolved-post-document/v1"
+      ? (manifest.composition as ResolvedPostDocumentV1)
+      : null;
+  // v2 publishes the approved render document, not the legacy Markdown export.
+  // Re-parsing an export without ## headings collapses a valid eight-part draft.
+  if (manifest.version === "brand-post-package/v2" && !composition) {
+    throw new Error("준비된 v2 원고의 승인 렌더 문서를 확인할 수 없습니다.");
+  }
+  const sections = composition
+    ? readPreparedCompositionSections(composition)
+    : parsePreparedBrandPostSections(markdown);
   if (sections.length < 5) {
     throw new Error(`준비된 원고의 본문 섹션이 부족합니다: ${sections.length}개`);
   }
@@ -6715,13 +6729,6 @@ function loadPreparedBrandLinkPostOverride(
         .map((value) => value.replace(/^#+/, "").trim())
         .filter(Boolean)
     : [];
-  const composition =
-    manifest.version === "brand-post-package/v2" &&
-    manifest.composition &&
-    typeof manifest.composition === "object" &&
-    (manifest.composition as { version?: unknown }).version === "resolved-post-document/v1"
-      ? (manifest.composition as ResolvedPostDocumentV1)
-      : null;
   const preservedManifest = composition
     ? (manifest as unknown as BrandPostPackageManifestV2)
     : null;
@@ -6731,7 +6738,7 @@ function loadPreparedBrandLinkPostOverride(
     sourceSnapshot: readProductSnapshot(manifest.sourceSnapshot),
     imageAssets: Array.isArray(manifest.imageAssets) ? manifest.imageAssets : [],
     post: {
-      title: titleMatch[1].trim(),
+      title: composition?.title.trim() || titleMatch[1].trim(),
       sections,
       hashtags,
       generationSource: "PREPARED_APPROVED",
@@ -10319,14 +10326,11 @@ async function main() {
       }));
     post.composition = composition;
     if (runtimeConnectKind === "SHOPPING") {
-      const selectedOptionFacts = product.features.filter(value =>
-        /^(?:선택\s*옵션|선택\s*상품|구성|수량|개수|용량|중량|향|색상|사이즈)\s*[:：]/u.test(value));
       setStage("STEP2.6 최종 이미지 검증");
       await assertPublishImagesSafe({
         brandLinkId: link.id,
         productName: product.name,
-        selectedProduct: JSON.stringify({ selectedTitle: product.name, optionFacts: selectedOptionFacts,
-          rule: "선택 상품명에 명시된 향·라인·용량·수량이 우선입니다. 공통 카탈로그 옵션으로 대체하지 마세요. 충돌하거나 식별할 수 없으면 거부하세요." }),
+        selectedProduct: buildSelectedProductImageAuditContext(product.name, product.features),
         composition,
       });
     }

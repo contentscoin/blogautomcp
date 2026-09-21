@@ -41,6 +41,8 @@ async function main() {
       sections: Array.from({ length: 8 }, (_, i) => `기능 ${i}\n\n확인된 기능입니다.`),
       imagePaths: [valid, long], hashtags: [], connectUrl: "https://example.test", qualityPreset: "PREMIUM" });
     const section = composition.sections[0]; section.imagePaths = [long]; section.imageMin = 1;
+    composition.renderNodes.push({ kind: "image", assetPath: long, sectionId: section.id, role: "scene",
+      altText: "fixture long photo", layout: "single", sourcePolicy: "LOCKED_PRODUCT_OR_ORIGINAL" });
     const markdown = path.join(root, "post.md"); fs.writeFileSync(markdown, "fixture");
     const manifest = { version: "brand-post-package/v2", brandLinkId: "geometry-fixture", connectKind: "SHOPPING",
       contractVersion: "post-composition-contract/v1",
@@ -57,6 +59,15 @@ async function main() {
     assert.equal(getMaterial(manifest.brandLinkId)?.ready, false);
     assert(getMaterial(manifest.brandLinkId)?.blockers.some(reason => reason.includes("LONG_IMAGE")));
     assert.throws(() => store.approveBrandPostPackage(manifest.brandLinkId));
+    const { validateBrandPostPublishImages } = await import("../src/lib/brand-post-publish-preflight");
+    await assert.rejects(validateBrandPostPublishImages(manifest.brandLinkId, "geometry fixture", {
+      review: async options => JSON.stringify({ reviews: (options.imagePaths || []).map((_, index) => ({ index: index + 1,
+        accepted: true, identityMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false,
+        optionsClearlyLabeled: false, reviewClass: "feature-evidence", reason: "fixture pixels" })) }),
+    }), /LONG_IMAGE/);
+    await assert.rejects(validateBrandPostPublishImages(manifest.brandLinkId, "geometry fixture", {
+      review: async () => { throw Object.assign(new Error("CODEX_AUTH_REQUIRED"), { code: "CODEX_AUTH_REQUIRED" }); },
+    }), /CODEX_AUTH_REQUIRED/); // previous failed audit released its repair lock
     console.log("PASS publication geometry: 3:1 boundaries, four formats, orientation, malformed input, pre-review filtering, saved READY invalidation, replacement planning, approval block");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }

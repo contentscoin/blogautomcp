@@ -1,3 +1,37 @@
+import type { ResolvedPostDocumentV1 } from "../../src/lib/post-composition-contract";
+
+/** Restore the words that v2 actually publishes; Markdown is only an export. */
+export function readPreparedCompositionSections(composition: ResolvedPostDocumentV1): string[] {
+  if (!Array.isArray(composition.sections) || !Array.isArray(composition.renderNodes)) {
+    throw new Error("준비된 원고의 렌더 섹션 구조가 올바르지 않습니다.");
+  }
+  const ids = new Set(composition.sections.map(section => section.id));
+  if (ids.size !== composition.sections.length || ids.has("")) {
+    throw new Error("준비된 원고의 렌더 섹션 식별자가 올바르지 않습니다.");
+  }
+  const grouped = new Map<string, string[]>();
+  const bodyIds = new Set<string>();
+  for (const node of composition.renderNodes) {
+    if (node.kind !== "heading" && node.kind !== "quotation" && node.kind !== "paragraph") continue;
+    if (typeof node.sectionId !== "string" || !ids.has(node.sectionId) || typeof node.text !== "string") {
+      throw new Error("준비된 원고의 본문과 렌더 섹션 연결이 올바르지 않습니다.");
+    }
+    if (!node.text.trim()) continue;
+    if (node.kind === "paragraph") bodyIds.add(node.sectionId);
+    const lines = grouped.get(node.sectionId) || [];
+    lines.push(node.text);
+    grouped.set(node.sectionId, lines);
+  }
+  if (grouped.size !== ids.size || bodyIds.size !== ids.size) {
+    throw new Error("준비된 원고의 렌더 본문이 누락되었습니다.");
+  }
+  // Disclosure cannot inflate the existing five-editorial-section gate.
+  if (grouped.size < 5) throw new Error(`준비된 원고의 본문 섹션이 부족합니다: ${grouped.size}개`);
+  return [...grouped.values()].map(lines => lines.join("\n\n")).concat(
+    composition.renderNodes.flatMap(node => node.kind === "disclosure" ? [node.text] : []),
+  );
+}
+
 export function parsePreparedBrandPostSections(markdown: string): string[] {
   const visibleMarkdown = markdown
     .split(/^##\s+Sources\s*$/m)[0]

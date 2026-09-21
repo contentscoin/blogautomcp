@@ -21,10 +21,36 @@ const defaults: ImageReplanDependencies = { read: readBrandPostPackage, write: w
   reconcile: reconcileBrandPostPackageQuality };
 const summary = (slots: Slots) => ({ required: slots.reduce((n, s) => n + s.minimum, 0),
   missing: slots.reduce((n, s) => n + s.missing + s.generationMissing, 0) });
-const verifiedAlternative = (slot: Slots[number]) => slot.count > 0 && !slot.missing && !slot.generationMissing &&
+const verifiedAlternative = (slot: Slots[number], allowProductPhoto = false) => slot.count > 0 && !slot.missing && !slot.generationMissing &&
   !slot.staleTargets.length && slot.assets.some(asset => asset.creationMethod === "source" &&
     asset.sourceReview?.usage === "section-matched-product-evidence" &&
-    ["feature-evidence", "scene-evidence"].includes(asset.sourceReview.reviewClass || ""));
+    ["feature-evidence", "scene-evidence", ...(allowProductPhoto ? ["product-photo"] : [])].includes(asset.sourceReview.reviewClass || ""));
+function permitsGenericReplacement(slot: Slots[number], manifest: Manifest): boolean {
+  const section = manifest.composition.sections.find(section => section.id === slot.sectionId)!;
+  return slot.staleTargets.some(target => target.code === "image-publication-rejected") &&
+    (isShoppingLifestyleImage(section) || allowsGenericBrandPostProductPhoto({ sectionTitle: section.title, imageIntent: section.imageIntent }));
+}
+/** Match constrained feature donors first so a generic donor cannot consume
+ * the only feature-evidence alternative. Each optional section supplies one slot. */
+function matchAlternatives(donors: Slots, candidates: Slots, manifest: Manifest): Map<string, Slots> | null {
+  const available = [...candidates];
+  const result = new Map<string, Slots>();
+  for (const donor of [...donors].sort((a, b) => Number(permitsGenericReplacement(a, manifest)) - Number(permitsGenericReplacement(b, manifest)))) {
+    const assigned: Slots = [];
+    for (let n = donor.count; n < donor.minimum; n++) {
+      const index = available.findIndex(candidate => {
+        if (verifiedAlternative(candidate)) return true;
+        const section = manifest.composition.sections.find(section => section.id === candidate.sectionId)!;
+        return permitsGenericReplacement(donor, manifest) && verifiedAlternative(candidate, true) &&
+          allowsGenericBrandPostProductPhoto({ sectionTitle: section.title, imageIntent: section.imageIntent });
+      });
+      if (index < 0) return null;
+      assigned.push(available.splice(index, 1)[0]);
+    }
+    result.set(donor.sectionId, assigned);
+  }
+  return result;
+}
 
 /** Images may be added during review, but a changed draft invalidates the plan. */
 export function imageReplanDraftIdentity(manifest: Manifest): string {
@@ -54,18 +80,24 @@ export async function replanShoppingImageCoverage(options: {
   const slots = deps.slots(initial);
   const missing = slots.filter(slot => {
     const section = initial.composition.sections.find(s => s.id === slot.sectionId)!;
+    // A definitive final pixel rejection can make an overview/lifestyle plan
+    // impossible too. Only that persisted verdict permits moving its coverage;
+    // an ordinary missing lifestyle/overview image keeps its original minimum.
+    const publicationRejected = slot.staleTargets.some(target => target.code === "image-publication-rejected");
+    const featureSection = !isShoppingLifestyleImage(section) &&
+      !allowsGenericBrandPostProductPhoto({ sectionTitle: section.title, imageIntent: section.imageIntent });
     return slot.missing > 0 && slot.minimum > slot.count && slot.generatedMinimum === 0 &&
       slot.staleTargets.every(target => ["image-geometry-invalid", "image-publication-rejected"].includes(target.code)) &&
-      !isShoppingLifestyleImage(section) && !allowsGenericBrandPostProductPhoto({ sectionTitle: section.title, imageIntent: section.imageIntent });
+      (featureSection || publicationRejected);
   });
   const needed = missing.reduce((n, slot) => n + slot.minimum - slot.count, 0);
   const candidates = slots.filter(slot => slot.minimum === 0 && slot.maximum > 0 && !slot.staleTargets.length &&
-    (verifiedAlternative(slot) || (slot.count === 0 && !initial.composition.sections.find(s => s.id === slot.sectionId)!.imagePaths.length)));
+    (verifiedAlternative(slot, true) || (slot.count === 0 && !initial.composition.sections.find(s => s.id === slot.sectionId)!.imagePaths.length)));
   if (!needed || candidates.length < needed) return unchanged("REPLAN_NO_ALTERNATIVE_CAPACITY");
   const identity = imageReplanDraftIdentity(initial);
   // Normal repair owns the lock while it reviews and applies seller originals.
   // The number of attempts is bounded by the number of empty optional sections.
-  if (candidates.filter(verifiedAlternative).length < needed) {
+  if (!matchAlternatives(missing, candidates, initial)) {
     const repair = await deps.repair({ ...options, sourceOnly: true, requests: candidates.filter(slot => slot.count === 0).map(slot => ({
       requestId: randomUUID(), sectionId: slot.sectionId, slotId: `${slot.sectionId}:image:1`,
     })) });
@@ -92,8 +124,8 @@ export async function replanShoppingImageCoverage(options: {
       return unchanged("REPLAN_DRAFT_CHANGED");
     if (current.imageGeneration?.status === "running") return unchanged("REPLAN_BUSY");
     const audited = deps.slots(current);
-    const alternatives = candidates.map(c => audited.find(s => s.sectionId === c.sectionId)!).filter(verifiedAlternative);
-    if (alternatives.length < needed) return { ...unchanged("REPLAN_INSUFFICIENT_VERIFIED_ALTERNATIVES"), after: summary(audited) };
+    const alternatives = matchAlternatives(missing, candidates.map(c => audited.find(s => s.sectionId === c.sectionId)!), current);
+    if (!alternatives) return { ...unchanged("REPLAN_INSUFFICIENT_VERIFIED_ALTERNATIVES"), after: summary(audited) };
     const minima = new Map<string, number>();
     const history: Array<{ from: string; to: string; at: string }> = [];
     for (const slot of missing) {
@@ -102,7 +134,7 @@ export async function replanShoppingImageCoverage(options: {
       if (now.count !== slot.count || now.minimum !== slot.minimum) return unchanged("REPLAN_COVERAGE_CHANGED");
       minima.set(slot.sectionId, slot.count);
       for (let n = slot.count; n < slot.minimum; n++) {
-        const alternative = alternatives.shift()!;
+        const alternative = alternatives.get(slot.sectionId)!.shift()!;
         minima.set(alternative.sectionId, 1);
         history.push({ from: slot.sectionId, to: alternative.sectionId, at: new Date().toISOString() });
       }
@@ -110,14 +142,27 @@ export async function replanShoppingImageCoverage(options: {
     // Remove rejected geometry only after equivalent verified coverage exists.
     // Never crop its pixels, silently drop an unfilled requirement, or touch text.
     const rejected = new Set(missing.flatMap(slot => slot.staleTargets.map(target => path.resolve(target.path))));
+    const selectedSections = new Set(history.map(item => item.to));
+    const preservedPaths = new Set([
+      ...initial.composition.sections.flatMap(section => section.imagePaths),
+      ...current.composition.sections.filter(section => selectedSections.has(section.id)).flatMap(section => section.imagePaths),
+      initial.heroImagePath,
+    ].filter((file): file is string => Boolean(file)).map(file => path.resolve(file)));
+    // Source review probes several optional sections, committing successes as it
+    // goes. Only new images chosen by the complete matching plan belong in the
+    // publication; preserve pre-existing optional images and cached source files.
+    const unusedProbes = current.composition.sections.filter(section =>
+      candidates.some(candidate => candidate.sectionId === section.id) && !selectedSections.has(section.id))
+      .flatMap(section => section.imagePaths.filter(file => !preservedPaths.has(path.resolve(file))));
+    for (const file of unusedProbes) rejected.add(path.resolve(file));
     const proposed = deps.reconcile({ ...current, approvedAt: null,
       bodyImagePaths: current.bodyImagePaths?.filter(file => !rejected.has(path.resolve(file))),
       imageAssets: current.imageAssets?.filter(asset => !rejected.has(path.resolve(asset.path))),
       composition: { ...current.composition,
         renderNodes: current.composition.renderNodes.filter(node => node.kind !== "image" || !rejected.has(path.resolve(node.assetPath))),
-        sections: current.composition.sections.map(section =>
-        minima.has(section.id) ? { ...section, imageMin: minima.get(section.id)!,
-          imagePaths: section.imagePaths.filter(file => !rejected.has(path.resolve(file))) } : section) },
+        sections: current.composition.sections.map(section => ({ ...section,
+          ...(minima.has(section.id) ? { imageMin: minima.get(section.id)! } : {}),
+          imagePaths: section.imagePaths.filter(file => !rejected.has(path.resolve(file))) })) },
       pipelineNotes: [...(current.pipelineNotes || []), `IMAGE_COVERAGE_REPLANNED: ${JSON.stringify(history)}`,
         ...(current.imageGeneration?.errors.length ? [`IMAGE_REPLAN_PREVIOUS_ERRORS: ${JSON.stringify(current.imageGeneration.errors)}`] : [])] });
     const after = summary(deps.slots(proposed));

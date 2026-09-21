@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import { validateBrandPostPublishImages } from "@/lib/brand-post-publish-preflight";
+import { PublishImageAuditError } from "../../../../../../scripts/lib/publish-image-audit";
 import draftRuntimePolicy from "../../../../../../scripts/lib/draft-runtime-policy.json";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -458,7 +460,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       return NextResponse.json({ success: false, code: error instanceof SavedTextRevalidationError ? error.code : "QC_RECHECK_FAILED", error: error instanceof Error ? error.message : "원고 재검사 실패" }, { status: 409 });
     }
   }
-  if (body.action === "approve") {
+  if (body.action === "approve" || body.action === "validate_publish_images") {
     try {
       const link = await prisma.brandLink.findUnique({ where: { id }, select: {
         status: true, productName: true, connectKind: true, externalItemId: true,
@@ -470,6 +472,8 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       let approved = false;
       try {
         revalidatePackageForApproval(id, link);
+        const imageAudit = await validateBrandPostPublishImages(id, link.productName || undefined);
+        if (body.action === "validate_publish_images") return NextResponse.json({ success: true, imageAudit });
         const manifest = approveBrandPostPackage(id);
         const preview = packagePreview(manifest);
         approved = true;
@@ -479,6 +483,8 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "초안 승인 실패";
+      if (error instanceof PublishImageAuditError) return NextResponse.json({ success: false, code: "PUBLISH_IMAGE_AUDIT_FAILED",
+        error: message, errors: error.audit.failures.map(failure => `${failure.code}: ${failure.reason}`) }, { status: 422 });
       const code = error instanceof SavedTextRevalidationError
         ? error.code
         : /승인할 고품질 초안이 없/u.test(message)
