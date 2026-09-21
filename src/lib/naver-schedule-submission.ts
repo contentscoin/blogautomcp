@@ -22,9 +22,11 @@ function expandPayload(value: string): string {
   // other JSON payloads. Decode a few bounded rounds so the signal checker sees
   // the date/mode regardless of which transport wrapper carried it.
   for (let i = 0; i < 3; i += 1) {
-    const next = decodePayload(expanded).replace(/\\u([0-9a-f]{4})/gi, (_, code) =>
+    const next = decodePayload(expanded)
+      .replace(/\\u([0-9a-f]{4})/gi, (_, code) =>
       String.fromCharCode(Number.parseInt(code, 16))
-    );
+      )
+      .replace(/\\([\"'])/g, "$1");
     if (next === expanded) break;
     expanded = next;
   }
@@ -51,6 +53,24 @@ function epochCarriesTargetDate(payload: string, targetYmd: string): boolean {
     }
   }
   return false;
+}
+
+function readScheduleField(payload: string, names: string[]): number | null {
+  const namePattern = names.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  const match = payload.match(new RegExp(`(?:[\"']?)(?:${namePattern})(?:[\"']?)\\s*(?:=|:)\\s*[\"']?(\\d{1,4})`, "i"));
+  if (!match) return null;
+  const value = Number.parseInt(match[1], 10);
+  return Number.isFinite(value) ? value : null;
+}
+
+function splitFieldsCarryTargetDate(payload: string, targetYmd: string): boolean {
+  const parts = targetYmd.split("-").map((value) => Number.parseInt(value, 10));
+  if (parts.length !== 3 || parts.some((value) => !Number.isFinite(value))) return false;
+  const [year, month, day] = parts;
+  const submittedYear = readScheduleField(payload, ["prePostYear", "prepostyear", "reserveYear", "scheduledYear"]);
+  const submittedMonth = readScheduleField(payload, ["prePostMonth", "prepostmonth", "reserveMonth", "scheduledMonth"]);
+  const submittedDay = readScheduleField(payload, ["prePostDate", "prepostdate", "reserveDate", "scheduledDate"]);
+  return submittedYear === year && submittedMonth === month && submittedDay === day;
 }
 
 export function isNaverPublishingEndpoint(value: string): boolean {
@@ -102,12 +122,14 @@ export function inspectNaverScheduleSubmissionSignal(input: {
     compactPayload.includes(unpaddedDotted) ||
     compactPayload.includes(unpaddedSlashed) ||
     compactPayload.includes(korean) ||
+    splitFieldsCarryTargetDate(decodedPayload, input.targetYmd) ||
     epochCarriesTargetDate(compactPayload, input.targetYmd);
   const hasScheduleMode =
     /reserve|reservation|schedule|pretime|pre_date|predate|pre_post|prepost|reservedtime/.test(
       `${lowerUrl} ${compactPayload}`
     ) ||
     /(?:예약|예약발행|scheduled)/.test(compactPayload) ||
+    /postwritetimetype(?:%22|["'=:\s])+pre/.test(compactPayload) ||
     /radio_time(?:%22|["'=:\s])+pre/.test(compactPayload) ||
     /publish(?:mode|type)(?:%22|["'=:\s])+(?:reserve|schedule|pre|예약)/.test(compactPayload);
 

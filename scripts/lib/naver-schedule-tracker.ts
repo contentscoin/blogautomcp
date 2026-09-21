@@ -113,7 +113,11 @@ export function createScheduleSubmissionTracker(
     cancelPending.add(cancel);
     // Playwright emits response at headers, before the body is complete. Track the pending
     // read explicitly so navigation cannot race an otherwise valid reservation receipt.
-    void Promise.resolve().then(async () => {
+    // Start the body read synchronously from the response event. Naver's
+    // RabbitWrite response can trigger a navigation immediately; deferring the
+    // first CDP read by even one microtask makes Network.getResponseBody lose
+    // the resource before Playwright can consume it.
+    void (async () => {
       try {
         return await response.text();
       } catch (textError) {
@@ -125,7 +129,7 @@ export function createScheduleSubmissionTracker(
         const bytes = await bodyReader.call(response);
         return Buffer.from(bytes).toString("utf8");
       }
-    }).then((text) => {
+    })().then((text: string) => {
       if (Buffer.byteLength(text, "utf8") > maxResponseBytes) { complete("too_large"); return; }
       const trimmed = text.trim();
       if (!trimmed) { complete("empty"); return; }
@@ -133,7 +137,7 @@ export function createScheduleSubmissionTracker(
       try { body = JSON.parse(trimmed); }
       catch { complete(trimmed.startsWith("<") ? "html" : "non_json"); return; }
       complete("json", body);
-    }, (error) => complete("unavailable", undefined, safeResponseReadError(error)));
+    }, (error: unknown) => complete("unavailable", undefined, safeResponseReadError(error)));
   };
 
   page.on("request", requestListener);

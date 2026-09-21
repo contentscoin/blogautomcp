@@ -26,3 +26,8 @@
 - `scripts/verify-naver-schedule-submission.ts`: query·한국어·epoch 날짜, 지연 응답, body fallback 오류 정제, bounded wait fixture 통과.
 - 설치 앱의 샤크 최종 이미지 감사: `checked=5`, 오류 없음.
 - 네이버 계정에 대한 재예약은 실행하지 않았다. 이전 제출 결과가 확인되지 않은 소재는 중복 발행 방지를 위해 재전송하지 않는다.
+
+## 1.3.76 추가 수정
+
+- SmartEditor ONE의 실제 예약 payload인 `populationMeta.prePostYear/Month/Date` 분리 필드와 `postWriteTimeType=pre`를 예약 신호 검사에 포함했다.
+- 응답 이벤트에서 본문 읽기를 지연시키던 microtask를 제거해 `RabbitWrite.naver` 직후 네비게이션으로 응답 body가 사라지는 경쟁 조건을 줄였다.

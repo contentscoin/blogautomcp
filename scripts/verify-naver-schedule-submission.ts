@@ -55,6 +55,27 @@ assert.equal(
 
 assert.equal(
   inspectNaverScheduleSubmissionSignal({
+    url: "https://blog.naver.com/RabbitWrite.naver",
+    postData: JSON.stringify({
+      populationParams: JSON.stringify({
+        populationMeta: {
+          postWriteTimeType: "pre",
+          prePostYear: 2026,
+          prePostMonth: 9,
+          prePostDate: 3,
+        },
+      }),
+    }),
+    status: 200,
+    responseBody: { success: true, result: { reservationId: "split-date-fixture" } },
+    targetYmd,
+  }).confirmed,
+  true,
+  "SmartEditor populationMeta split date fields are recognized"
+);
+
+assert.equal(
+  inspectNaverScheduleSubmissionSignal({
     url: "https://blog.naver.com/api/post/publish",
     postData: JSON.stringify({ publish: true }),
     status: 200,
