@@ -8,6 +8,18 @@ const passing = {
   composition: { qualityReport: { preset: "PREMIUM", canAutoPublish: true, blockers: [] as string[] } },
 };
 
+test("saved draft auto review is wired to recheck, not generation or approval", () => {
+  const component = readFileSync("src/components/SavedDraftAutoReview.tsx", "utf8");
+  const page = readFileSync("src/app/page.tsx", "utf8");
+  assert.match(page, /<SavedDraftAutoReview/);
+  assert.doesNotMatch(page, /저장 원고 · 자동 검수 대기/);
+  assert.match(component, /method: "PATCH"/);
+  assert.match(component, /action: "recheck"/);
+  assert.match(component, /payload\.rechecked/);
+  assert.match(component, /getDraftApprovalBlockers\(payload\.data\)/);
+  assert.doesNotMatch(component, /action: "(?:approve|revise|generate)"/);
+});
+
 test("passing text does not hide missing section images, even without a job record", () => {
   assert.deepEqual(getDraftApprovalBlockers({ ...passing, imageSlots: [{ title: "객실", generationMissing: 1 }] }), ["이미지 · 객실: 생성 이미지 1장 필요"]);
 });

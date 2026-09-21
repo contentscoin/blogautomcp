@@ -75,6 +75,7 @@ export async function GET() {
           draftApproved: Boolean(prepared?.approvedAt),
           draftTitle: prepared?.title || null,
           draftPreparedAt: prepared?.createdAt || null,
+          draftRevision: prepared ? `${prepared.markdownSha256}:${prepared.sourceSnapshot?.snapshotId || ""}` : null,
         };
       } catch {
         return {

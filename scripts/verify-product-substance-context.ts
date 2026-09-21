@@ -59,3 +59,15 @@ assert.equal(pump("자동 세척 기능을 원하는 사용자에게 적합해�
 console.log("PASS: field-value grounding and soft-wrap invariance without crossing paragraphs");
 assert.equal(pump("펌프형을 매일 쓰는 집에는 잘 맞는 제품입니다.").missingElements.includes("조건부 최종 결론"), false,
   "explicit household condition and judgement constitute a conditional verdict");
+
+const eyeSource = { productName: "아이크림", sourceFeatures: ["원산지: 폴란드산", "피부타입: 모든피부용", "용기형태: 튜브형"] };
+const eye = assessProductReviewSubstance({ ...eyeSource, sections: ["사용 조건\n\n튜브형은 양 조절에 유용해요. 피부타입은 모든피부용으로 안내되어 있지만, 눈가는 개인차가 큰 부위라 소량 사용이 먼저예요."] });
+assert.equal(eye.groundedSignalCount, 2, "a source-grounded suitability limitation supplies distinct evidence");
+const ungroundedCaution = assessProductReviewSubstance({ ...eyeSource, sections: ["사용 조건\n\n개인차가 있어 소량 사용이 먼저예요."] });
+assert.equal(ungroundedCaution.evidenceJudgementCount, 0, "generic caution cannot invent a second source");
+const bareSkinFact = assessProductReviewSubstance({ ...eyeSource, sections: ["사용 조건\n\n모든피부용이고 개인차가 있습니다."] });
+assert.equal(bareSkinFact.evidenceJudgementCount, 0, "a bare fact without practical consequence is not a judgement");
+const tubeFit = assessProductReviewSubstance({ ...eyeSource, sections: ["선택 조건\n\n튜브형이라 위생과 양 조절을 중요하게 보는 분도 선택 이유가 분명해요."] });
+assert.equal(tubeFit.missingElements.includes("추천·비추천 대상"), false);
+const genericFit = assessProductReviewSubstance({ ...eyeSource, sections: ["선택 조건\n\n위생과 양 조절을 중요하게 보는 분도 선택 이유가 분명해요."] });
+assert.equal(genericFit.evidenceJudgementCount, 0, "fit language still requires source evidence");

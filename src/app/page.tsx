@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { MaterialLibrary, type MaterialSelectionRequest } from "@/components/MaterialLibrary";
 import SessionStatus from "@/components/SessionStatus";
+import SavedDraftAutoReview from "@/components/SavedDraftAutoReview";
 import TopicTaskPanel from "@/components/TopicTaskPanel";
 import ProductThumbnailStudio from "@/components/ProductThumbnailStudio";
 import { ThemeToggle } from "@/components/ThemeProvider";
@@ -35,6 +36,7 @@ interface BrandLink {
   draftApproved?: boolean;
   draftTitle?: string | null;
   draftPreparedAt?: string | null;
+  draftRevision?: string | null;
 }
 
 interface BrandPostDraftPreview {
@@ -2603,7 +2605,7 @@ export default function Dashboard() {
                             {link.draftApproved ? (
                               <div className="mt-1 text-[11px] font-semibold text-emerald-700">소재 준비완료</div>
                             ) : link.draftPrepared ? (
-                              <div className="mt-1 text-[11px] font-semibold text-amber-700">저장 원고 · 자동 검수 대기</div>
+                              <SavedDraftAutoReview id={link.id} revision={link.draftRevision || link.draftPreparedAt || "saved"} enabled={["READY", "FAILED"].includes(link.status) && !busyMessageForUi} />
                             ) : null}
                             {link.errorMessage && (
                               <div className="text-xs text-red-500 mt-1" title={link.errorMessage}>
