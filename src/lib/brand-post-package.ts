@@ -22,6 +22,7 @@ import {
 } from "../../scripts/lib/product-editorial-plan";
 import {
   allowsGenericBrandPostProductPhoto,
+  isShoppingLifestyleImage,
   brandPostImageIntentMatches,
   brandPostSectionSlotId,
   classifyBrandPostImageEvidence,
@@ -496,8 +497,12 @@ function auditBrandPostImages(manifest: BrandPostPackageManifest) {
           sectionIntent: section.imageIntent,
         }) || asset.slotId !== expectedSlotId)) {
           stale = { code: "image-intent-stale", reason: `이미지 · ${section.title}: 생성 이미지의 현재 파트 목적 또는 슬롯 결속이 오래되었습니다.` };
+        } else if (generated && manifest.connectKind === "SHOPPING" && isShoppingLifestyleImage(section) &&
+            (asset.creationMethod !== "source-with-generated-background" || !readProductPhotoSource(asset.path)?.segmented)) {
+          stale = { code: "image-source-review-missing", reason: `이미지 · ${section.title}: 연출 이미지의 원본 제품 보존 기록이 없습니다.` };
         } else if (generated && manifest.connectKind === "SHOPPING" &&
             asset.creationMethod === "source-with-generated-background" &&
+            !isShoppingLifestyleImage(section) &&
             !allowsGenericBrandPostProductPhoto({ sectionTitle: section.title, imageIntent: section.imageIntent })) {
           const review = asset.sourceReview;
           const source = readProductPhotoSource(asset.path);
@@ -556,7 +561,8 @@ function auditBrandPostImages(manifest: BrandPostPackageManifest) {
     }
     const originalCount = sectionAssets.length - generatedAssets.size;
     const generatedCount = generatedAssets.size;
-    const generatedMinimum = manifest.imageRequirements?.policy === "generated-required" && maximum > 0 ? minimum : 0;
+    const generatedMinimum = (manifest.imageRequirements?.policy === "generated-required" ||
+      (manifest.connectKind === "SHOPPING" && isShoppingLifestyleImage(section))) && maximum > 0 ? minimum : 0;
     const coverageMissing = Math.max(0, minimum - sectionAssets.length);
     return {
       sectionId: section.id, title: section.title, intent: section.imageIntent,

@@ -12,6 +12,12 @@ export function brandPostSectionSlotId(sectionId: string, ordinal: number): stri
   return `${sectionId}:image:${Math.max(1, Math.floor(ordinal))}`;
 }
 
+/** Scene illustration is not evidence of a feature, measurement or actual use. */
+export function isShoppingLifestyleImage(target: { imageIntent: string }): boolean {
+  const intent = normalizeBrandPostImageIntent(target.imageIntent);
+  return /AI 연출 이미지/iu.test(intent) || /^(추천 사용 장면|제품 원형을 보존한 연출컷 또는 원본 사용 장면)$/u.test(intent);
+}
+
 /** Generic packshots are evidence only when the requested visual is an overview. */
 export function allowsGenericBrandPostProductPhoto(target: {
   sectionTitle: string;

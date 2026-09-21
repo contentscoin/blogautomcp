@@ -116,6 +116,7 @@ export async function repairBrandPostImages(options: {
   const ownerToken = processLock.ownerToken;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let applied = 0;
+  let generated = 0;
   const errors: string[] = [];
   let requested = 0;
   let expectedDraft: string | undefined;
@@ -175,7 +176,7 @@ export async function repairBrandPostImages(options: {
       const recovered = manifest.imageGeneration?.status === "running"
         ? persist(false)
         : { manifest, remaining };
-      return { ...recovered, generatedCount: 0, errors, warning: remaining ? `섹션 이미지 ${remaining}장 미완료.` : null };
+      return { ...recovered, generatedCount: 0, appliedCount: 0, errors, warning: remaining ? `섹션 이미지 ${remaining}장 미완료.` : null };
     }
     if (requested > 0) {
       persist(true);
@@ -200,6 +201,7 @@ export async function repairBrandPostImages(options: {
             dependencies.apply({ brandLinkId: options.brandLinkId, ...result, generatedPath: result.generatedPath });
             processLock.assertOwner();
             applied += 1;
+            if (result.remoteGenerated === true) generated += 1;
           } catch (error) {
             errors.push(`${result.sectionId || "대표 이미지"}: ${error instanceof Error ? error.message : String(error)}`);
           }
@@ -223,7 +225,7 @@ export async function repairBrandPostImages(options: {
     if (controller.signal.aborted) errors.push("사용자가 이미지 생성을 중지했습니다. 중지 후 결과는 적용하지 않습니다.");
     const finished = persist(false);
     return {
-      ...finished, generatedCount: applied, errors,
+      ...finished, generatedCount: generated, appliedCount: applied, errors,
       warning: errors.length || finished.remaining
         ? `섹션 이미지 ${applied}장 반영, ${finished.remaining}장 미완료. ${errors.join(" ")}`.trim()
         : null,

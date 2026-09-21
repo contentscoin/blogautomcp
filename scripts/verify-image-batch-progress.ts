@@ -198,6 +198,35 @@ async function check(name: string, run: () => Promise<void>) {
 }
 
 async function verifyGenerator() {
+  await check("lifestyle slots generate from one verified reference without feature evidence", async () => {
+    const h = harness({ sourcePaths: [sourcePath], segmentablePaths: [sourcePath], lockedUsesBackground: true });
+    h.manifest.connectKind = "SHOPPING";
+    h.manifest.composition.sections[0].title = "선택 기준";
+    h.manifest.composition.sections[0].imageIntent = "AI 연출 이미지: 생활 공간 배치";
+    const outputs = [0, 1].map(index => {
+      const file = path.join(root, `lifestyle-${index}.png`);
+      fs.writeFileSync(file, `different scene ${index}`);
+      return file;
+    });
+    const pending = h.generate(2);
+    await tick();
+    assert.equal(h.jobs.length, 2);
+    h.close(0, { ok: true, jobs: outputs.map((file, index) => h.result(index, file)) });
+    const results = await pending;
+    assert.ok(results.every(result => result.remoteGenerated && result.creationMethod === "source-with-generated-background" && !result.error));
+    assert.deepEqual(h.lockedSourcePaths, [sourcePath, sourcePath]);
+    assert.notEqual(results[0].generatedPath, results[1].generatedPath);
+    assert.ok(h.jobs.every(job => job.prompt.includes("Never depict operation")));
+  });
+  await check("source-only lifestyle requests report generation required, not source binding success", async () => {
+    const h = harness({ sectionMatchedPaths: [sourcePath] });
+    h.manifest.connectKind = "SHOPPING";
+    h.manifest.composition.sections[0].imageIntent = "AI 연출 이미지: 생활 공간 배치";
+    const results = await h.generate(1, { sourceOnly: true });
+    assert.equal(h.spawns, 0);
+    assert.ok(results[0].error?.includes("IMAGE_GENERATION_REQUIRED"));
+    assert.equal(results[0].generatedPath, null);
+  });
   await check("photo verifier provider failure retains its cause and never starts image generation", async () => {
     const h = harness({ sourceError: "CODEX_MODEL_INCOMPATIBLE: newer CLI required" });
     h.manifest.connectKind = "SHOPPING";

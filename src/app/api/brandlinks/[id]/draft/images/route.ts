@@ -267,20 +267,21 @@ export async function POST(
       // bind_sources never opens ChatGPT; it only places reviewed seller photos.
       sourceOnly: body.action === "bind_sources",
     });
-    const { errors, generatedCount, manifest: updated } = repaired;
+    const { errors, generatedCount, appliedCount, manifest: updated } = repaired;
     const updatedPreview = packagePreview(updated);
     const remainingMissing = updatedPreview.imageSlots.reduce((sum, slot) => sum + Math.max(slot.missing, slot.generationMissing), 0);
     const code = imageFailureCode(errors);
-    const status = imageFailureStatus(code, generatedCount === 0 && errors.length > 0 ? 422 : 200);
+    const status = imageFailureStatus(code, appliedCount === 0 && errors.length > 0 ? 422 : 200);
     return NextResponse.json({
-      success: status !== 409 && (generatedCount > 0 || errors.length === 0),
+      success: status !== 409 && (appliedCount > 0 || errors.length === 0),
       code,
       data: updatedPreview,
       generatedCount,
+      appliedCount,
       remainingMissing,
       errors,
-      message: generatedCount > 0
-        ? `${generatedCount}장의 이미지를 반영했습니다.`
+      message: appliedCount > 0
+        ? `총 ${appliedCount}장 반영 (AI 생성 ${generatedCount}장).`
         : "새로 반영된 이미지가 없습니다.",
     }, { status });
   } catch (error) {

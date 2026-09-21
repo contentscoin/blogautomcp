@@ -154,7 +154,7 @@ const shoppingSections: PostSectionContractV1[] = [
     headingStyle: "quotation",
     minChars: 150,
     maxChars: 250,
-    image: { min: 1, max: 1, intent: "제품이 한눈에 보이는 대표 사진", placement: "before-body" },
+    image: { min: 1, max: 1, intent: "AI 연출 이미지: 검증된 상품 원형을 보존한 생활 공간 배치. 기능 시연이나 실제 사용 후기 사진이 아님", placement: "before-body" },
   },
   {
     id: "shopping-summary",
@@ -256,7 +256,7 @@ const shoppingSections: PostSectionContractV1[] = [
     headingStyle: "sectionTitle",
     minChars: 140,
     maxChars: 220,
-    image: { min: 0, max: 1, intent: "추천 사용 장면", placement: "after-lead" },
+    image: { min: 0, max: 1, intent: "AI 연출 이미지: 추천 환경의 공간 배치. 실제 사용이나 성능 증명이 아님", placement: "after-lead" },
   },
   {
     id: "shopping-verdict",
@@ -271,6 +271,8 @@ const shoppingSections: PostSectionContractV1[] = [
 ];
 
 const LEGACY_SHOPPING_FEATURE_IMAGE_INTENTS = new Map<string, string>([
+  ["shopping-hook", "제품이 한눈에 보이는 대표 사진"],
+  ["shopping-fit", "추천 사용 장면"],
   ["shopping-package", "구성품·패키지 원본 사진"],
   ["shopping-design", "재질·마감·크기 디테일 사진"],
 ]);

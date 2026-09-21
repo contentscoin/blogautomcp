@@ -1269,6 +1269,7 @@ export default function Dashboard() {
       success?: boolean;
       data?: BrandPostDraftPreview;
       generatedCount?: number;
+      appliedCount?: number;
       remainingMissing?: number;
       errors?: string[];
       error?: string;
@@ -1288,13 +1289,14 @@ export default function Dashboard() {
     try {
       const payload = await requestDraftImageAction({ action: "generate_missing" });
       const generatedTotal = payload.generatedCount || 0;
+      const appliedTotal = payload.appliedCount ?? generatedTotal;
       const remaining = payload.remainingMissing ?? payload.data?.imageGeneration?.remaining;
       setDraftPreviewTab("images");
       setDashboardNotice({
         tone: remaining === 0 ? "success" : "info",
         text: remaining === 0
-          ? `섹션별 생성 이미지 보충 완료 · ${generatedTotal}장 반영`
-          : `${generatedTotal}장을 반영했습니다. ${remaining == null ? "남은 수량은 상태를 새로 확인하세요." : `필요한 이미지 ${remaining}장이 남았습니다.`} ${(payload.errors || []).join(" ")}`,
+          ? `이미지 보충 완료 · 총 ${appliedTotal}장 반영 (AI 생성 ${generatedTotal}장)`
+          : `총 ${appliedTotal}장 반영 (AI 생성 ${generatedTotal}장). ${remaining == null ? "남은 수량은 상태를 새로 확인하세요." : `필요한 이미지 ${remaining}장이 남았습니다.`} ${(payload.errors || []).join(" ")}`,
       });
     } catch (error) {
       setDashboardNotice({ tone: "error", text: error instanceof Error ? error.message : "필수 이미지 보충에 실패했습니다." });

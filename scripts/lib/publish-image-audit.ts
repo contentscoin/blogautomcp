@@ -4,7 +4,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import sharp from "sharp";
 import { runCodexDraft, type CodexDraftOptions } from "./codex-draft-provider";
-import { allowsGenericBrandPostProductPhoto } from "../../src/lib/brand-post-image-evidence";
+import { allowsGenericBrandPostProductPhoto, isShoppingLifestyleImage } from "../../src/lib/brand-post-image-evidence";
 import type { ResolvedPostDocumentV1 } from "../../src/lib/post-composition-contract";
 
 export interface PublishImageAuditFailure {
@@ -105,7 +105,7 @@ export async function auditPublishImages(options: PublishImageAuditOptions): Pro
       candidates.push({ nodeIndex, assetPath: node.assetPath, snapshot, sha256, role: node.role,
         sectionTitle: thumbnail ? "Thumbnail" : sectionTitle, sectionBody,
         imageIntent: section?.imageIntent || "Selected product overview with title overlay",
-        allowProductPhoto: thumbnail || allowsGenericBrandPostProductPhoto({ sectionTitle, imageIntent: section!.imageIntent }),
+        allowProductPhoto: thumbnail || isShoppingLifestyleImage(section!) || allowsGenericBrandPostProductPhoto({ sectionTitle, imageIntent: section!.imageIntent }),
       });
       result.images.push({ nodeIndex, assetPath: node.assetPath, sha256 });
     }
@@ -127,6 +127,7 @@ export async function auditPublishImages(options: PublishImageAuditOptions): Pro
           "Mixed options reject unless this specific section explicitly compares the named visible options AND the image clearly labels/distinguishes each option without implying a mixed purchase bundle. Merely mentioning comparison, other scents or alternatives is insufficient. Thumbnail mixed options always reject.",
           "sectionTitle and sectionBody are actual published render-node text. Only that text can establish explicitNamedComparison. imageIntent is planning metadata, never proof that a comparison is published. Even when allowProductPhoto=true, reject generic photos used as proof of a feature claim in the published text.",
           "Generic packshots are product-photo, permitted only when allowProductPhoto=true. Feature sections require feature-evidence: pixels directly show the particular structure/control/feature or legible official explanation. A generic bottle beside invented benefit text does not prove a feature. Give concrete visible evidence, not inferred marketing claims.",
+          "For an AI 연출 이미지 intent, judge the exact product identity and believable placement, not feature demonstration. Reject invented operation, accessories or performance claims; require the visible AI 연출 이미지 disclosure. This is not evidence of actual personal use.",
           'Return exactly one review per attached image, with 1-based index: {"reviews":[{"index":1,"accepted":true,"identityMatches":true,"notice":false,"mixedOptions":false,"explicitNamedComparison":false,"optionsClearlyLabeled":false,"reviewClass":"product-photo" or "feature-evidence","reason":"specific pixel evidence"}]}. All boolean fields required. For an allowed named comparison identityMatches means the selected item is clearly identified among the explicitly named alternatives.',
         ].join("\n"),
         imagePaths: batch.map(c => c.snapshot), maxImages: batch.length, preserveImageOrder: true, researchMode: "disabled",

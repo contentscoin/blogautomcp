@@ -230,8 +230,9 @@ export async function createLockedProductEditorialScene(options: {
   );
   fs.mkdirSync(options.outputDir, { recursive: true });
   const outputPath = path.join(options.outputDir, `locked-product-scene-${Date.now()}.png`);
+  const disclosure = Buffer.from(`<svg width="1200" height="900" xmlns="http://www.w3.org/2000/svg"><rect x="20" y="842" width="480" height="40" rx="8" fill="white" fill-opacity=".92"/><text x="36" y="869" font-family="Malgun Gothic, sans-serif" font-size="22" fill="#334155">AI 연출 이미지 · 실제 사용 사진 아님</text></svg>`);
   await sharp(background)
-    .composite([{ input: shadow }, { input: product, left, top }])
+    .composite([{ input: shadow }, { input: product, left, top }, { input: disclosure }])
     .png({ compressionLevel: 9 })
     .toFile(outputPath);
   preserveProductPhotoSource({ sourcePath: options.sourcePath, outputPath, segmented: true });

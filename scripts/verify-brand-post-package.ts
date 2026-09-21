@@ -611,6 +611,7 @@ async function main() {
         sourceReviewed.imageAssets = sourceReviewed.imageAssets!.map(asset => {
           if (!asset.sectionId) return asset;
           const section = sourceReviewed.composition.sections.find(candidate => candidate.id === asset.sectionId)!;
+          if (section.imageIntent.includes("AI 연출 이미지")) return asset;
           return {
             ...asset,
             provenance: "ORIGINAL" as const,
@@ -628,9 +629,9 @@ async function main() {
           };
         });
         assert.equal(store.evaluateBrandPostPackageReadiness(sourceReviewed).canApprove, true,
-          "section-matched seller originals satisfy the source-first image contract");
+          "reviewed evidence originals plus locked lifestyle scenes satisfy the mixed contract");
         const unreviewed = structuredClone(sourceReviewed);
-        const unreviewedAsset = unreviewed.imageAssets!.find(asset => asset.sectionId)!;
+        const unreviewedAsset = unreviewed.imageAssets!.find(asset => asset.sectionId && asset.creationMethod === "source")!;
         delete unreviewedAsset.sourceReview;
         const unreviewedReadiness = store.evaluateBrandPostPackageReadiness(unreviewed);
         assert.equal(unreviewedReadiness.canApprove, false);
@@ -638,7 +639,7 @@ async function main() {
           "a generic or unreviewed original cannot satisfy a semantic section slot");
 
         const overviewProductPhoto = structuredClone(sourceReviewed);
-        const overviewSection = overviewProductPhoto.composition.sections[0];
+        const overviewSection = overviewProductPhoto.composition.sections[1];
         const overviewAsset = overviewProductPhoto.imageAssets!.find(asset => asset.sectionId === overviewSection.id)!;
         assert.ok(overviewAsset.sourceReview);
         overviewAsset.sourceReview.reviewClass = "product-photo";
@@ -703,7 +704,8 @@ async function main() {
           reason: "fixture replacement feature evidence",
           reviewedAt: "2026-09-15T00:00:00.000Z",
         };
-        assert.equal(store.evaluateBrandPostPackageReadiness(reviewedReplacement).canApprove, true);
+        assert.equal(store.evaluateBrandPostPackageReadiness(reviewedReplacement).canApprove, true,
+          JSON.stringify(store.evaluateBrandPostPackageReadiness(reviewedReplacement).blockers));
         store.writeBrandPostPackageManifest(generated);
       }
 
@@ -724,6 +726,9 @@ async function main() {
       store.writeBrandPostPackageManifest(staleGenerated);
       const replacementPath = path.join(coverageDir, `stale-replacement-${connectKind.toLowerCase()}-${legacy ? "legacy" : "bounded"}.png`);
       fs.writeFileSync(replacementPath, `stale-replacement-${coverageId}`);
+      if (connectKind === "SHOPPING") preserveProductPhotoSource({
+        sourcePath: generated.heroImagePath, outputPath: replacementPath, segmented: true,
+      });
       const staleRepaired = store.applyGeneratedBrandPostImage({
         brandLinkId: coverageId,
         ...replacementRequest,
@@ -819,6 +824,9 @@ async function main() {
       const heroDuplicateTarget = heroDuplicate.imageAssets!.find(asset => asset.role === "body" && asset.sectionId)!;
       const heroDuplicatePath = path.join(coverageDir, `duplicate-hero-${connectKind.toLowerCase()}.png`);
       fs.copyFileSync(heroAsset.path, heroDuplicatePath);
+      if (connectKind === "SHOPPING") preserveProductPhotoSource({
+        sourcePath: heroAsset.path, outputPath: heroDuplicatePath, segmented: true,
+      });
       heroDuplicate.bodyImagePaths = heroDuplicate.bodyImagePaths.map(file =>
         path.resolve(file) === path.resolve(heroDuplicateTarget.path) ? heroDuplicatePath : file);
       heroDuplicate.composition.sections = heroDuplicate.composition.sections.map(section => ({
@@ -851,6 +859,9 @@ async function main() {
       store.writeBrandPostPackageManifest(heroDuplicate);
       const duplicateRepairPath = path.join(coverageDir, `duplicate-hero-repair-${connectKind.toLowerCase()}.png`);
       fs.writeFileSync(duplicateRepairPath, `duplicate-hero-repair-${coverageId}`);
+      if (connectKind === "SHOPPING") preserveProductPhotoSource({
+        sourcePath: heroAsset.path, outputPath: duplicateRepairPath, segmented: true,
+      });
       const heroDuplicateRepaired = store.applyGeneratedBrandPostImage({
         brandLinkId: coverageId,
         ...heroDuplicateRequest,
@@ -972,6 +983,9 @@ async function main() {
       assert.equal(twoSlots[0].generationMissing, 1);
       assert.throws(() => store.approveBrandPostPackage(coverageId), /이미지/u,
         "An original cannot fill the second required generated slot");
+      if (connectKind === "SHOPPING") preserveProductPhotoSource({
+        sourcePath: generated.heroImagePath, outputPath: extraPath, segmented: true,
+      });
       store.writeBrandPostPackageManifest({
         ...twoRequired, imageAssets: [...twoRequired.imageAssets, {
           ...extraAsset,

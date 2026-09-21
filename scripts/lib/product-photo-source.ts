@@ -53,6 +53,12 @@ export async function downloadProductSourcePhoto(url: string, outputDir: string)
     if ((error as NodeJS.ErrnoException).code !== "EEXIST" ||
         crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== hash) throw error;
   }
+  // Retrieval is not a rights grant or a model-identity approval. Keep its
+  // origin separately from the subsequent visual QC / locked-product receipt.
+  fs.writeFileSync(`${file}.retrieval.json`, JSON.stringify({
+    version: "product-image-retrieval/v1", sourceUrl: url, sha256: hash,
+    retrievedAt: new Date().toISOString(), identityVerified: false, rightsGranted: false,
+  }), "utf8");
   return file;
 }
 

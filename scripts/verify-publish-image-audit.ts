@@ -45,6 +45,16 @@ async function main() {
     feature.composition.sections[0].imageIntent = "보습 기능 설명";
     await check({}, false, feature);
     await check({ reviewClass: "feature-evidence", reason: "Legible official explanation of this feature" }, true, feature);
+    const lifestyle = options();
+    lifestyle.composition.sections[0].imageIntent = "AI 연출 이미지: 생활 공간 배치";
+    await check({}, true, lifestyle);
+    await check({ identityMatches: false }, false, lifestyle);
+    lifestyle.review = async call => {
+      assert.match(call.userPrompt, /require the visible AI 연출 이미지 disclosure/);
+      return JSON.stringify({ reviews: [good] });
+    };
+    assert.equal((await auditPublishImages(lifestyle)).ok, true);
+    assertions++;
     const thumbnail = options();
     Object.assign(thumbnail.composition.renderNodes[0], { role: "thumbnail", sectionId: null });
     await check({ reason: "Correct product with title overlay" }, true, thumbnail);
