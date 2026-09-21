@@ -62,6 +62,7 @@ import {
   isUsableBlogProductImageDimension,
   normalizeCandidateImageUrl,
   prioritizeImageCandidates,
+  preserveSellerDetailSourceUrls,
   prioritizeImageUrls,
   scoreProductImageCandidate,
   scoreProductImageDimensions,
@@ -4139,7 +4140,7 @@ async function buildProductInfoFromStoredBrandLink(
     representativeImagePath: materializedImages.representativeImagePath,
     imagePaths: materializedImages.imagePaths,
     detailImagePaths: materializedImages.detailImagePaths,
-    sourceImageUrls: imageUrls,
+    sourceImageUrls: preserveSellerDetailSourceUrls(imageUrls),
     finalUrl: link.finalUrl || link.url,
     storeName: isolateSellerEvidenceText(link.storeName, 200),
     travelPageResearch,
@@ -4594,10 +4595,13 @@ async function step1_getProductInfo(
   // 5. 상품 이미지 URL 추출
   console.log("   🖼️ 이미지 URL 추출 중...");
   const imageCandidateMax = connectKind === "TRAVEL" ? 32 : 20;
-  const imageUrls = Array.from(new Set([
+  const allImageUrls = Array.from(new Set([
     ...preReviewImageUrls,
     ...(await collectProductImageUrlsFromPage(page)),
-  ])).slice(0, imageCandidateMax);
+  ]));
+  const imageUrls = allImageUrls.slice(0, imageCandidateMax);
+  const evidenceSourceImageUrls = connectKind === "SHOPPING"
+    ? preserveSellerDetailSourceUrls(allImageUrls, imageCandidateMax) : imageUrls;
   const salesPageImageCount = imageUrls.filter((url) => isSalesPageProductImageUrl(url)).length;
   const reviewImageCount = imageUrls.filter((url) => isReviewImageUrl(url)).length;
   console.log(
@@ -4608,7 +4612,8 @@ async function step1_getProductInfo(
     console.log(`   🖼️ 썸네일 원본 적합: ${isPreferredThumbnailImageUrl(imageUrls[0]) ? "예" : "아니오"}`);
   }
   const { representativeImagePath, imagePaths, detailImagePaths, sellerDetailImagePaths } = await materializeProductImages(
-    imageUrls,
+    // Preserve gallery/thumbnail order; append newly retained detail evidence.
+    [...new Set([...imageUrls, ...evidenceSourceImageUrls])],
     "product",
     connectKind === "TRAVEL" ? TRAVEL_BODY_IMAGE_MAX : SHOPPING_BODY_IMAGE_MAX,
   );
@@ -4634,7 +4639,7 @@ async function step1_getProductInfo(
     representativeImagePath,
     imagePaths,
     detailImagePaths,
-    sourceImageUrls: imageUrls,
+    sourceImageUrls: evidenceSourceImageUrls,
     finalUrl,
     storeName,
     travelPageResearch,
@@ -5267,7 +5272,7 @@ ${mandatoryWritingPromptBlock}`;
       rating: product.rating,
       storeName: product.storeName || null,
       finalUrl: product.finalUrl || null,
-      referenceImageUrls: product.sourceImageUrls.slice(0, 20),
+      referenceImageUrls: preserveSellerDetailSourceUrls(product.sourceImageUrls),
       detailImageSegmentCount: product.detailImagePaths.length,
       travelPageResearch: product.travelPageResearch || null,
     };
@@ -10408,7 +10413,7 @@ async function main() {
             deliveryInfo: product.deliveryInfo,
             storeName: product.storeName || null,
             finalUrl: product.finalUrl || null,
-            referenceImageUrls: product.sourceImageUrls.slice(0, 20),
+            referenceImageUrls: preserveSellerDetailSourceUrls(product.sourceImageUrls),
             detailImageSegmentCount: product.detailImagePaths.length,
             travelPageResearch: product.travelPageResearch || null,
           },

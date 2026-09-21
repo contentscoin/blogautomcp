@@ -10,6 +10,23 @@ export interface ProductImageCandidate {
   parentClassName?: string;
 }
 
+/** Exact seller detail host observed on the product page, never arbitrary CDN tenants. */
+export function isVerifiedSellerDetailCdnUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" && url.hostname === "d15zs6bxpcjiwz.cloudfront.net" &&
+      !url.username && !url.password && (!url.port || url.port === "443");
+  } catch { return false; }
+}
+
+/** Evidence-only ordering; never use this to rank thumbnail candidates. */
+export function preserveSellerDetailSourceUrls(urls: string[], maximum = 20): string[] {
+  const unique = [...new Set(urls)];
+  const detail = unique.filter(isVerifiedSellerDetailCdnUrl).sort((a, b) =>
+    Number(/_spec\.(?:jpe?g|png|webp)(?:\?|$)/iu.test(b)) - Number(/_spec\.(?:jpe?g|png|webp)(?:\?|$)/iu.test(a)));
+  return [...detail, ...unique.filter(url => !isVerifiedSellerDetailCdnUrl(url))].slice(0, maximum);
+}
+
 function keywordHaystack(rawUrl: string): string {
   try {
     return `${rawUrl} ${decodeURIComponent(rawUrl)}`.toLowerCase();
@@ -60,6 +77,7 @@ export function isSalesPageProductImageUrl(rawUrl: string): boolean {
   const url = rawUrl.toLowerCase();
   if (isReviewImageUrl(url)) return false;
   return (
+    isVerifiedSellerDetailCdnUrl(rawUrl) ||
     url.includes("shop-phinf.pstatic.net") ||
     url.includes("shopping-phinf.pstatic.net") ||
     url.includes("pkgtour-phinf.pstatic.net") ||
@@ -74,13 +92,14 @@ export function isTravelProductImageUrl(rawUrl: string): boolean {
 
 export function isPreferredThumbnailImageUrl(rawUrl: string): boolean {
   const url = normalizeCandidateImageUrl(rawUrl).toLowerCase();
-  return isSalesPageProductImageUrl(url) && !isReviewImageUrl(url) && !containsBadImageKeyword(url);
+  return !isVerifiedSellerDetailCdnUrl(url) && isSalesPageProductImageUrl(url) && !isReviewImageUrl(url) && !containsBadImageKeyword(url);
 }
 
 export function isCandidateProductImageUrl(rawUrl: string): boolean {
   const url = rawUrl.toLowerCase();
   if (!url) return false;
   const isImageDomain =
+    isVerifiedSellerDetailCdnUrl(rawUrl) ||
     url.includes("shop-phinf.pstatic.net") ||
     url.includes("shopping-phinf.pstatic.net") ||
     url.includes("phinf.pstatic.net") ||

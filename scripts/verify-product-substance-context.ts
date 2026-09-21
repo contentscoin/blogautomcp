@@ -1,5 +1,58 @@
 import assert from "node:assert/strict";
-import { assessProductReviewSubstance } from "./lib/product-editorial-plan";
+import { assessProductReviewSubstance, buildProductReviewAnalysis, normalizeProductSubstanceFeatures } from "./lib/product-editorial-plan";
+import { getBrandLinkContentReadiness } from "./lib/brandlink-content-readiness";
+import { planQualityConvergence } from "./lib/quality-convergence";
+import { extractExplicitProductFacts } from "./lib/product-source-facts";
+
+// September 21 saved Shokz input: one function plus origin was graded usable
+// and demanded two distinct functional judgements from the writer.
+const shokzSource = {
+  productName: "샥즈 오픈핏 2 T920 오픈형 귀걸이형 블루투스 공기전도 무선 귀걸이 이어폰",
+  description: "[샥즈 코리아] 업계를 선도하는 오픈-이어 이어폰의 강자",
+  features: ["원산지: 중국산(Shenzhen Shokz Co.,Ltd.) 등", "기능: 무선"],
+  targetSectionCount: 8,
+};
+const shokzAnalysis = buildProductReviewAnalysis(shokzSource);
+assert.deepEqual(shokzAnalysis.verifiedSignals, ["무선 방식"]);
+assert.equal(shokzAnalysis.evidenceLevel, "sparse");
+assert.deepEqual(normalizeProductSubstanceFeatures(["상세 근거: 가격: 10000원"]), []);
+const duplicateFunctions = buildProductReviewAnalysis({ ...shokzSource,
+  features: ["기능: 무선", "기능: 무선 방식", "원산지: 중국산"],
+});
+assert.equal(duplicateFunctions.verifiedSignals.length, 1);
+assert.equal(duplicateFunctions.evidenceLevel, "sparse");
+const sparseQuality = getBrandLinkContentReadiness({
+  productName: shokzSource.productName, title: shokzSource.productName,
+  sourceDescription: shokzSource.description, sourceFeatures: shokzSource.features,
+  sections: ["무선 기능\n\n무선 방식은 케이블이 손에 걸리는 부담을 줄여 줍니다."],
+  hashtags: [], brandLink: "", generationSource: "AI", hasRepresentativeImage: true,
+  requireRepresentativeImage: false, connectKind: "SHOPPING", mode: "editorial",
+});
+assert.equal(planQualityConvergence({ current: sparseQuality, attempt: 0, maximumAttempts: 3 }).action,
+  "refresh-source", "missing independent source evidence must trigger collection, not a rewrite loop");
+const collectedAudioFacts = extractExplicitProductFacts(shokzSource.productName, "title");
+assert.deepEqual(collectedAudioFacts, ["기능: 오픈형", "기능: 귀걸이형", "기능: 공기전도", "기능: 무선"]);
+assert.deepEqual(extractExplicitProductFacts("샥즈 오픈핏 2 T920", "title"), [],
+  "model identity alone must not invent the newly supported structures");
+for (const denied of ["오픈형 아님", "귀걸이형 미지원", "공기전도 방식 아님", "오픈형, 귀걸이형 아님"]) {
+  assert.deepEqual(extractExplicitProductFacts(denied, "description"), [], denied);
+}
+const refreshedAudio = buildProductReviewAnalysis({ ...shokzSource, features: collectedAudioFacts });
+assert.equal(refreshedAudio.verifiedSignals.length, 4);
+assert.notEqual(refreshedAudio.evidenceLevel, "sparse");
+const adjacentFit = assessProductReviewSubstance({ productName: shokzSource.productName,
+  sourceFeatures: collectedAudioFacts,
+  sections: ["착용 환경\n\n귀를 막지 않는 오픈형 이어폰이에요. 주변 소리를 같이 들어야 하는 사람에게 맞는 구조입니다."],
+});
+assert.equal(adjacentFit.evidenceJudgementCount, 1, "natural immediately adjacent fit explanation is grounded");
+const isolatedFit = assessProductReviewSubstance({ productName: shokzSource.productName,
+  sourceFeatures: collectedAudioFacts,
+  sections: ["착용 환경\n\n귀를 막지 않는 오픈형 이어폰이에요.\n\n주변 소리를 같이 들어야 하는 사람에게 맞는 구조입니다."],
+});
+assert.equal(isolatedFit.evidenceJudgementCount, 0, "fit cannot borrow facts from a different paragraph");
+const crab = buildProductReviewAnalysis({productName:'제철 꽃게 1kg',features:['원산지: 국산','무게: 1kg','보관조건: 냉동보관'],targetSectionCount:8});
+assert.equal(crab.category,'food');
+assert.ok(crab.verifiedSignals.includes('원산지: 국산'), 'food origin is a legitimate sourcing fact');
 
 const source = {
   productName: "테스트 수납함",

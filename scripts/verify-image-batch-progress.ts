@@ -49,7 +49,7 @@ class FakeChild extends EventEmitter {
 type Job = { id: string; outStem: string; prompt: string };
 function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lockFails?: boolean; automation?: boolean; sourceMissing?: boolean; sourceError?: string;
   sourcePaths?: string[]; segmentablePaths?: string[]; lockedUsesBackground?: boolean;
-  sectionMatchedPaths?: string[]; sectionReviewError?: string;
+  sectionMatchedPaths?: string[]; sectionReviewError?: string; reviewClass?: "feature-evidence" | "scene-evidence";
   worker?: (args: string[], child: FakeChild) => void } = {}) {
   const packageDir = fs.mkdtempSync(path.join(root, "package-"));
   let child = new FakeChild();
@@ -106,6 +106,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       "../../scripts/lib/product-thumbnail": { buildProductThumbnailCopy: () => ({}) },
       "../../scripts/lib/product-photo-provenance": photoProvenance,
       "../../scripts/lib/product-photo-source": {
+        readSavedProductSourceCandidates: () => [],
         collectShoppingProductSourceCandidates: async (options: { localCandidates: string[]; sourceImageUrls?: string[] }) => {
           if (settings.sourceError) throw new Error(settings.sourceError);
           const includeRemote = options.sourceImageUrls === undefined || options.sourceImageUrls.length > 0;
@@ -133,7 +134,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
             targetIndex,
             path: file,
             sourceSha256: crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"),
-            reviewClass: "feature-evidence",
+            reviewClass: settings.reviewClass || "feature-evidence",
             reason: "fixture section match",
             reviewedAt: "2026-09-15T00:00:00.000Z",
           }));
@@ -143,7 +144,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
           return file ? {
             path: file,
             sourceSha256: crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"),
-            reviewClass: "feature-evidence",
+            reviewClass: settings.reviewClass || "feature-evidence",
             reason: "fixture section match",
             reviewedAt: "2026-09-15T00:00:00.000Z",
           } : null;
@@ -226,6 +227,21 @@ async function verifyGenerator() {
     assert.equal(h.spawns, 0);
     assert.ok(results[0].error?.includes("IMAGE_GENERATION_REQUIRED"));
     assert.equal(results[0].generatedPath, null);
+  });
+  await check("verified original scenes bypass impossible cutout without claiming generation", async () => {
+    const h = harness({ sectionMatchedPaths: [sourcePath], reviewClass: "scene-evidence", lockFails: true });
+    h.manifest.connectKind = "SHOPPING";
+    h.manifest.composition.sections[0].imageIntent = "제품 원형을 보존한 연출컷 또는 원본 사용 장면";
+    const results = await h.generate(1, { sourceOnly: true });
+    assert.equal(h.spawns, 0);
+    assert.equal(h.lockCalls, 0);
+    assert.equal(results[0].generatedPath, sourcePath);
+    assert.equal(results[0].provenance, "ORIGINAL");
+    assert.equal(results[0].remoteGenerated, false);
+    assert.equal(results[0].sourceReview?.reviewClass, "scene-evidence");
+    h.manifest.imageRequirements = { policy: "generated-required" } as typeof h.manifest.imageRequirements;
+    const required = await h.generate(1, { sourceOnly: true });
+    assert.match(required[0].error || "", /IMAGE_GENERATION_REQUIRED/);
   });
   await check("photo verifier provider failure retains its cause and never starts image generation", async () => {
     const h = harness({ sourceError: "CODEX_MODEL_INCOMPATIBLE: newer CLI required" });

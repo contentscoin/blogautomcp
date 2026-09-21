@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
 import { runCodexDraft } from "./codex-draft-provider";
-import { allowsGenericBrandPostProductPhoto } from "../../src/lib/brand-post-image-evidence";
+import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene } from "../../src/lib/brand-post-image-evidence";
 
 // Cache by bytes and subject, not temporary filenames or claimed provenance.
 const reviews = new Map<string, boolean>();
@@ -10,7 +10,7 @@ const sectionReviews = new Map<string, ProductSectionImageReview | null>();
 export interface ProductSectionImageReview {
   path: string;
   sourceSha256: string;
-  reviewClass: "product-photo" | "feature-evidence";
+  reviewClass: "product-photo" | "feature-evidence" | "scene-evidence";
   reason: string;
   reviewedAt: string;
 }
@@ -56,9 +56,10 @@ export async function selectVerifiedProductSectionImages(
     sectionTitle: target.sectionTitle.normalize("NFKC").replace(/\s+/gu, " ").trim(),
     imageIntent: target.imageIntent.normalize("NFKC").replace(/\s+/gu, " ").trim(),
     allowProductPhoto: allowsGenericProductPhoto(target),
+    allowScene: allowsOriginalShoppingScene(target),
   }));
   const reviewKey = crypto.createHash("sha256").update(JSON.stringify({
-    version: 3,
+    version: 4,
     productName: productName.normalize("NFKC").replace(/\s+/gu, " ").trim(),
     targets: normalizedTargets,
     candidates: candidates.map(candidate => candidate.sha256),
@@ -78,10 +79,11 @@ export async function selectVerifiedProductSectionImages(
           targetIndex: index + 1,
           sectionTitle: target.sectionTitle,
           imageIntent: target.imageIntent,
-          allowedReviewClasses: target.allowProductPhoto ? ["product-photo", "feature-evidence"] : ["feature-evidence"],
+          allowedReviewClasses: target.allowScene ? ["scene-evidence"] : target.allowProductPhoto ? ["product-photo", "feature-evidence"] : ["feature-evidence"],
         })))}`,
         `전체 후보 ${candidates.length}장 중 이번 첨부 ${offset + 1}~${offset + batch.length}번을 검사합니다. 응답 selectedIndex는 이번 첨부 안의 1번부터 ${batch.length}번까지입니다.`,
-        "각 본문 파트에 실제로 도움이 되는 이미지를 최대 한 장씩 고르세요. 같은 후보를 두 파트에 중복 배정하지 마세요.",
+        "scene-evidence는 원본 사용 장면 목적에서만 허용합니다. 해당 상품이 요청한 생활 공간이나 사용 환경에 실제로 놓여 있는 원본 사진만 인정합니다. 흰 배경 단독 상품, 글자 설명판, 합성 연출 이미지는 scene-evidence가 아닙니다. 실제 후기나 성능을 추정하지 마세요.",
+        "각 본문 파트에 직접 맞는 후보를 최대 세 장씩 제안하세요. 하나의 후보가 여러 파트에 직접 맞으면 각 파트에 제안해도 됩니다. 최종 중복 없는 일대일 배정은 서버가 처리합니다.",
         "product-photo는 allowedReviewClasses에 product-photo가 있는 대표·전체·구성품·패키지 목적에서만 허용합니다.",
         "기능·작동·조작·특장점 목적은 feature-evidence만 허용하며, 해당 기능이나 조작부를 이미지가 직접 보여주거나 판매자 공식 설명으로 명시해야 합니다.",
         "단일 상품 사진도 그 파트의 조작부·구조·기능 표시가 선명해 직접 근거가 되면 feature-evidence로 분류할 수 있습니다.",
@@ -90,7 +92,7 @@ export async function selectVerifiedProductSectionImages(
         "feature-evidence의 reason에는 실제로 보이는 조작부·구조·아이콘 또는 공식 설명 문구를 구체적으로 적으세요. 보이지 않으면 배정하지 마세요.",
         "공지, 배송, 쿠폰, 이벤트, 저작권, 구매후기 안내, 관련 없는 설명판, 다른 상품, 식별 불가 이미지, 무관한 콜라주는 거부하세요.",
         "이미지만으로 확인할 수 없는 기능을 추정하지 마세요. 맞는 이미지가 없는 파트는 assignments에서 빼세요.",
-        '{"assignments":[{"targetIndex":1,"selectedIndex":2,"reviewClass":"product-photo" 또는 "feature-evidence","reason":"판정 근거 한 문장"}]}',
+        '{"assignments":[{"targetIndex":1,"selectedIndex":2,"reviewClass":"product-photo" 또는 "feature-evidence" 또는 "scene-evidence","reason":"판정 근거 한 문장"}]}',
       ].join("\n"),
       imagePaths: batch.map(candidate => candidate.path),
       maxImages: batch.length,
@@ -101,8 +103,7 @@ export async function selectVerifiedProductSectionImages(
     try { parsed = JSON.parse(answer.replace(/^```(?:json)?\s*|\s*```$/gu, "")) as Record<string, unknown>; }
     catch { throw new Error("상품 섹션 이미지 검사의 응답을 해석할 수 없습니다. 미검증 이미지를 배정하지 않았습니다."); }
     const rows = Array.isArray(parsed.assignments) ? parsed.assignments : [];
-    const usedTargets = new Set<number>();
-    const usedCandidates = new Set<number>();
+    const usedPairs = new Set<string>();
     for (const row of rows) {
       if (!row || typeof row !== "object" || Array.isArray(row)) continue;
       const value = row as Record<string, unknown>;
@@ -110,13 +111,13 @@ export async function selectVerifiedProductSectionImages(
         ? value.targetIndex - 1 : -1;
       const selectedIndex = typeof value.selectedIndex === "number" && Number.isInteger(value.selectedIndex)
         ? value.selectedIndex - 1 : -1;
-      const reviewClass = value.reviewClass === "product-photo" || value.reviewClass === "feature-evidence"
+      const reviewClass = value.reviewClass === "product-photo" || value.reviewClass === "feature-evidence" || value.reviewClass === "scene-evidence"
         ? value.reviewClass : null;
       if (targetIndex < 0 || targetIndex >= normalizedTargets.length || selectedIndex < 0 ||
-          selectedIndex >= batch.length || !reviewClass || usedTargets.has(targetIndex) || usedCandidates.has(selectedIndex) ||
-          (reviewClass === "product-photo" && !normalizedTargets[targetIndex].allowProductPhoto)) continue;
-      usedTargets.add(targetIndex);
-      usedCandidates.add(selectedIndex);
+          selectedIndex >= batch.length || !reviewClass || usedPairs.has(`${targetIndex}:${selectedIndex}`) ||
+          (reviewClass === "product-photo" && !normalizedTargets[targetIndex].allowProductPhoto) ||
+          (reviewClass === "scene-evidence" ? !normalizedTargets[targetIndex].allowScene : normalizedTargets[targetIndex].allowScene)) continue;
+      usedPairs.add(`${targetIndex}:${selectedIndex}`);
       const candidate = batch[selectedIndex];
       proposals.push({
         targetIndex,
@@ -130,20 +131,29 @@ export async function selectVerifiedProductSectionImages(
       });
     }
   }
-  const assignments: ProductSectionImageAssignment[] = [];
-  for (let targetIndex = 0; targetIndex < normalizedTargets.length; targetIndex += 1) {
-    const target = normalizedTargets[targetIndex];
-    const selected = proposals
-      .filter(proposal => proposal.targetIndex === targetIndex)
-      .sort((left, right) => {
-        const leftClass = target.allowProductPhoto && left.reviewClass === "product-photo" ? 0 : 1;
-        const rightClass = target.allowProductPhoto && right.reviewClass === "product-photo" ? 0 : 1;
-        return leftClass - rightClass || left.candidateOrder - right.candidateOrder;
-      })[0];
-    if (!selected) continue;
-    const { candidateOrder: _candidateOrder, ...assignment } = selected;
-    assignments.push(assignment);
-  }
+  // Maximum bipartite matching: a flexible scene/overview must not consume
+  // the sole direct feature source when it has another reviewed candidate.
+  const optionsByTarget = normalizedTargets.map((target, targetIndex) => proposals
+    .filter(row => row.targetIndex === targetIndex)
+    .sort((a, b) => Number(b.reviewClass === "product-photo" && target.allowProductPhoto) -
+      Number(a.reviewClass === "product-photo" && target.allowProductPhoto) || a.candidateOrder - b.candidateOrder));
+  const assigned = new Map<string, typeof proposals[number]>();
+  const assign = (targetIndex: number, visited: Set<string>): boolean => {
+    for (const row of optionsByTarget[targetIndex]) {
+      if (visited.has(row.sourceSha256)) continue;
+      visited.add(row.sourceSha256);
+      const owner = assigned.get(row.sourceSha256);
+      if (!owner || assign(owner.targetIndex, visited)) {
+        assigned.set(row.sourceSha256, row);
+        return true;
+      }
+    }
+    return false;
+  };
+  normalizedTargets.map((_, index) => index)
+    .sort((a, b) => optionsByTarget[a].length - optionsByTarget[b].length || a - b)
+    .forEach(index => assign(index, new Set()));
+  const assignments: ProductSectionImageAssignment[] = [...assigned.values()].map(({ candidateOrder: _, ...row }) => row);
   assignments.sort((left, right) => left.targetIndex - right.targetIndex);
   sectionBatchReviews.set(reviewKey, assignments);
   return assignments.map(assignment => ({ ...assignment }));
@@ -176,7 +186,7 @@ export async function selectVerifiedProductSectionImage(
   }
   if (candidates.length === 0) return null;
   const reviewKey = crypto.createHash("sha256").update(JSON.stringify({
-    version: 3,
+    version: 4,
     productName: productName.normalize("NFKC").replace(/\s+/gu, " ").trim(),
     sectionTitle: sectionTitle.normalize("NFKC").replace(/\s+/gu, " ").trim(),
     imageIntent: imageIntent.normalize("NFKC").replace(/\s+/gu, " ").trim(),

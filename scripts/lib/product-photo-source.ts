@@ -6,12 +6,31 @@ import { selectVerifiedProductPhoto, selectVerifiedProductPhotos } from "./produ
 
 const MAX_IMAGE_BYTES = 24 * 1024 * 1024;
 
+/** Resume from an intact download receipt; cached pixels still require visual review. */
+export function readSavedProductSourceCandidates(outputDir: string): string[] {
+  try {
+    return fs.readdirSync(outputDir).filter(name => name.endsWith(".retrieval.json")).flatMap(name => {
+      try {
+        const receipt = JSON.parse(fs.readFileSync(path.join(outputDir, name), "utf8"));
+        const file = path.join(outputDir, name.slice(0, -".retrieval.json".length));
+        if (receipt.version !== "product-image-retrieval/v1" || !isAllowedProductPhotoUrl(receipt.sourceUrl) ||
+            !fs.statSync(file).isFile() || fs.statSync(file).size > MAX_IMAGE_BYTES ||
+            crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== receipt.sha256) return [];
+        return [file];
+      } catch { return []; }
+    });
+  } catch { return []; }
+}
+
 export function isAllowedProductPhotoUrl(raw: string): boolean {
   try {
     const url = new URL(raw);
     const host = url.hostname.toLowerCase();
     return url.protocol === "https:" && !url.username && !url.password && (!url.port || url.port === "443") &&
-      (host === "pstatic.net" || host.endsWith(".pstatic.net") || host === "naver.net" || host.endsWith(".naver.net"));
+      (host === "pstatic.net" || host.endsWith(".pstatic.net") || host === "naver.net" || host.endsWith(".naver.net") ||
+        // Exact seller detail CDN observed on the product page; never trust
+        // arbitrary CloudFront tenants or a hostname suffix lookalike.
+        host === "d15zs6bxpcjiwz.cloudfront.net");
   } catch { return false; }
 }
 

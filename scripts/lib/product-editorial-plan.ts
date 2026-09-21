@@ -239,6 +239,7 @@ export function normalizeProductSubstanceFeatures(values: string[] | undefined):
     if (!normalized || isReviewEvidenceFeature(normalized) || NON_SUBSTANTIVE_FACT_LINE.test(normalized) ||
         isNonSubstantiveProductMetadata(normalized)) return [];
     const fact = normalized.replace(SUBSTANTIVE_FACT_LINE, "");
+    if (NON_SUBSTANTIVE_FACT_LINE.test(fact) || isNonSubstantiveProductMetadata(fact)) return [];
     if (isUnusableProductFactValue(fact)) return [];
     return [normalizeTypedProductFact(fact) || fact];
   }), 12);
@@ -276,6 +277,9 @@ function evidenceFeatureKey(value: string): string {
 function meaningfulFeatures(values: string[] | undefined, productName = ""): string[] {
   return unique(normalizeProductSubstanceFeatures(values)
     .filter(isMeaningfulProductEvidenceFeature)
+    // Origin is a food sourcing fact, but cannot establish an appliance's
+    // functionality or manufacture another independent usage judgement.
+    .filter((value) => isFoodProductName(productName) || !/^(?:원산지|제조국)\s*[:：]/u.test(value))
     .filter((value) => !productName || !isProductNameFragment(value, productName)), 12);
 }
 
@@ -283,7 +287,12 @@ function semanticallyUniqueSignals(values: string[], limit = 12): string[] {
   const output: string[] = [];
   const keys: string[] = [];
   for (const value of values.map(clean).filter(Boolean)) {
-    const key = value.normalize("NFKC").toLocaleLowerCase("ko-KR").replace(/[^\p{L}\p{N}]+/gu, "");
+    // A typed value and its derived label are one fact, not two independent
+    // functions ("기능: 무선" / "무선 방식"). Keep numeric values intact.
+    const key = value.normalize("NFKC").toLocaleLowerCase("ko-KR")
+      .replace(/^기능\s*[:：]\s*/u, "")
+      .replace(/\s+(?:방식|기능|구조)$/u, "")
+      .replace(/[^\p{L}\p{N}]+/gu, "");
     if (!key || keys.some((existing) => existing.includes(key) || key.includes(existing))) continue;
     output.push(value);
     keys.push(key);
@@ -305,7 +314,7 @@ function reviewEvidenceFeatures(values: string[] | undefined): string[] {
 function isFoodProductName(name: string): boolean {
   // Cooking appliances and storage containers can mention food in their use cases.
   if (/(?:에어프라이어|오븐|그릴|냄비|프라이팬|보관함|용기|도마|청소기|가습기|건조기)/u.test(name)) return false;
-  return /(?:갈비살|소갈비|갈비|소곱창|곱창|막창|대창|소고기|돼지고기|닭고기|김치|밀키트|볶음밥|냉동만두)/u.test(name);
+  return /(?:갈비살|소갈비|갈비|소곱창|곱창|막창|대창|소고기|돼지고기|닭고기|김치|밀키트|볶음밥|냉동만두|꽃게|대게|홍게|새우|전복)/u.test(name);
 }
 
 function detectCategory(source: string, productName: string): ProductReviewCategory {
@@ -323,7 +332,7 @@ function collectSignals(source: string, category: ProductReviewCategory): string
     // appliance-style labels such as "캠핑 사용 맥락" that the prose cannot match.
     const patterns = [
       /\d[\d,.]*\s*(?:kg|g)(?![a-z])/iu,
-      /(?:소갈비살|갈비살|소갈비|LA\s*갈비|la\s*갈비|소곱창|곱창|막창|대창|소고기|돼지고기|닭고기|김치|밀키트|볶음밥|냉동만두)/u,
+      /(?:소갈비살|갈비살|소갈비|LA\s*갈비|la\s*갈비|소곱창|곱창|막창|대창|소고기|돼지고기|닭고기|김치|밀키트|볶음밥|냉동만두|꽃게|대게|홍게|새우|전복)/u,
       /(?:양념|초벌|비양념|무양념)/u,
       /(?:냉동|냉장|실온)/u,
       /(?:캠핑|구이|찜|탕|볶음)/u,
@@ -642,12 +651,14 @@ export function buildProductReviewAnalysis(input: ProductEditorialPlanInput): Pr
   const measuredFeatureCount = features.filter((value) => PRODUCT_MEASUREMENT_PATTERN.test(value)).length;
   const functionalDetail = new Set(features.map(explicitProductFunctionKey).filter(Boolean)).size >= 2 ? 1 : 0;
   const evidencePoints = Math.min(signals.length, 2) + features.length + measuredFeatureCount + functionalDetail + (evidenceDescription ? 1 : 0);
-  const evidenceLevel = evidencePoints >= 7 && features.length >= 3 ? "rich" : evidencePoints >= 3 && features.length >= 1 ? "usable" : "sparse";
+  const verifiedSignals = semanticallyUniqueSignals([...base.verifiedSignals, ...features], 12);
+  const evidenceLevel = evidencePoints >= 7 && features.length >= 3 && verifiedSignals.length >= 3
+    ? "rich" : evidencePoints >= 3 && features.length >= 1 && verifiedSignals.length >= 2 ? "usable" : "sparse";
   return {
     ...base,
     // Prefer the concise category fact (for example `1kg`) over a labelled
     // duplicate (`중량: 1kg`). One source fact must count only once.
-    verifiedSignals: semanticallyUniqueSignals([...base.verifiedSignals, ...features], 12),
+    verifiedSignals,
     reviewEvidence,
     evidenceLevel,
   };
@@ -901,7 +912,7 @@ export function assessProductReviewSubstance(input: {
     if (!/(?:다|요|죠)["'”’]?$/u.test(sentence)) return [];
     if (sentence.length < 8 || !(judgementPattern.test(sentence) || benefitPattern.test(sentence) || fitPattern.test(sentence) || suitabilityConstraint.test(sentence))) return [];
     const previous = group[index - 1];
-    const explanatory = /(?:그래서|따라서|덕분에|이\s*(?:구조|구성|기능|방식|점)|그만큼|때문|줄|덜|편리|수월|실용|유용|유리|어울|적합|잘\s*맞)/u.test(sentence);
+    const explanatory = fitPattern.test(sentence) || /(?:그래서|따라서|덕분에|(?:이|이런|그)\s*(?:구조|구성|기능|방식|점)|그만큼|때문|줄|덜|편리|수월|실용|유용|유리|어울|적합|잘\s*맞)/u.test(sentence);
     const anchors = matchingAnchors(sentence);
     const previousAnchors = previous && explanatory ? matchingAnchors(previous) : [];
     const groundedSignals = anchors.length > 0 ? anchors : previousAnchors;

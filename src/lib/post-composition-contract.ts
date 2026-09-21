@@ -154,7 +154,7 @@ const shoppingSections: PostSectionContractV1[] = [
     headingStyle: "quotation",
     minChars: 150,
     maxChars: 250,
-    image: { min: 1, max: 1, intent: "AI 연출 이미지: 검증된 상품 원형을 보존한 생활 공간 배치. 기능 시연이나 실제 사용 후기 사진이 아님", placement: "before-body" },
+    image: { min: 1, max: 1, intent: "제품 원형을 보존한 연출컷 또는 원본 사용 장면", placement: "before-body" },
   },
   {
     id: "shopping-summary",

@@ -65,7 +65,7 @@ const FUNCTION_PATTERNS = [
   /(?:분리형|분리식)\s*(?:트레이|필터|물통|탱크|커버|칸막이)/gu,
   /(?:온도|풍량|풍속|높이|각도)\s*조절/gu,
   /로티세리/gu, /BLDC/giu, /살균/gu, /냉온풍/gu, /자동\s*센서/gu, /가열/gu,
-  /무선/gu,
+  /무선/gu, /오픈형/gu, /귀걸이형/gu, /공기전도/gu,
 ];
 
 interface ExplicitFunctionMatch { start: number; end: number; value: string }

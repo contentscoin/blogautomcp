@@ -132,7 +132,11 @@ async function main() {
       download: async () => { throw new Error("no download expected"); },
     });
     assert.deepEqual(selectedFresh, [freshSource], "partial resume seeks fresh source hashes before reusing its safe palette");
-    for (const invalid of ["http://shop-phinf.pstatic.net/a", "https://pstatic.net.evil.test/a", "https://localhost/a", "https://user:pass@shop-phinf.pstatic.net/a", "https://shop-phinf.pstatic.net:8443/a"]) assert.equal(isAllowedProductPhotoUrl(invalid), false);
+    assert.equal(isAllowedProductPhotoUrl("https://d15zs6bxpcjiwz.cloudfront.net/Home/Dryers/DV21DG8600BW_spec.jpg"), true);
+    for (const invalid of ["http://shop-phinf.pstatic.net/a", "https://pstatic.net.evil.test/a", "https://localhost/a", "https://user:pass@shop-phinf.pstatic.net/a", "https://shop-phinf.pstatic.net:8443/a",
+      "https://other.cloudfront.net/a", "https://d15zs6bxpcjiwz.cloudfront.net.evil.test/a", "https://sub.d15zs6bxpcjiwz.cloudfront.net/a",
+      "http://d15zs6bxpcjiwz.cloudfront.net/a", "https://user@d15zs6bxpcjiwz.cloudfront.net/a", "https://d15zs6bxpcjiwz.cloudfront.net:8443/a"])
+      assert.equal(isAllowedProductPhotoUrl(invalid), false);
 
     // Fetch is stubbed, including redirect mode and streaming size limits.
     globalThis.fetch = async (_input, init) => { assert.equal(init?.redirect, "error"); return new Response(originalBytes, { headers: { "content-type": "image/png" } }); };

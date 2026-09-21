@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { readProductPhotoSource } from "../../scripts/lib/product-photo-provenance";
 import {
   collectShoppingProductSourceCandidates,
+  readSavedProductSourceCandidates,
   selectShoppingProductSource,
   selectShoppingProductSources,
 } from "../../scripts/lib/product-photo-source";
@@ -26,7 +27,7 @@ import {
 } from "./brand-post-package";
 import { isChatGptBrowserAutomationEnabled } from "./chatgpt-browser-automation";
 import { imageBatchBudgetMs, imageJobBudgetMs, IMAGE_TIMER_MAX_MS } from "../../scripts/lib/image-timeout-policy";
-import { allowsGenericBrandPostProductPhoto, brandPostSectionSlotId, isShoppingLifestyleImage } from "./brand-post-image-evidence";
+import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene, brandPostSectionSlotId, isShoppingLifestyleImage } from "./brand-post-image-evidence";
 
 const CHATGPT_BASE_URL = "https://chatgpt.com/";
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
@@ -737,6 +738,7 @@ export async function generateBrandPostImages(options: {
     const localCandidates = [
       ...packageSourceAssets.flatMap(asset => [asset.path, asset.sourcePath]),
       ...preservedReplacementSources,
+      ...readSavedProductSourceCandidates(outputDir),
     ].filter((file): file is string => Boolean(file));
 
     // Local files and the seller URL gallery get independent quotas. A full
@@ -773,7 +775,7 @@ export async function generateBrandPostImages(options: {
     const directSources = [...directByHash.values()].sort((left, right) => left.sha256.localeCompare(right.sha256));
     semanticCandidateCount = directSources.length;
     const eligibleTargets = targets.flatMap((target, targetIndex) =>
-      target.role === "body" && !isShoppingLifestyleImage(target) ? [{ target, targetIndex }] : []);
+      target.role === "body" && (!isShoppingLifestyleImage(target) || allowsOriginalShoppingScene(target)) ? [{ target, targetIndex }] : []);
     const reviewedByTarget = new Map<number, Awaited<ReturnType<typeof selectVerifiedProductSectionImages>>[number]>();
     if (directSources.length > 0 && eligibleTargets.length > 0) {
       try {
@@ -831,7 +833,8 @@ export async function generateBrandPostImages(options: {
     for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
       const target = targets[targetIndex];
       const index = requestIndexes[targetIndex];
-      if (target.role === "body" && isShoppingLifestyleImage(target)) {
+      if (target.role === "body" && isShoppingLifestyleImage(target) &&
+          !(allowsOriginalShoppingScene(target) && reviewedByTarget.get(targetIndex)?.reviewClass === "scene-evidence" && !generatedRequired)) {
         if (options.sourceOnly) {
           await publish(index, { ...baseResult(index), sectionId: target.sectionId, imageIntent: target.imageIntent,
             error: "IMAGE_GENERATION_REQUIRED: AI 연출 이미지 파트입니다. 검증 원본을 참조한 배경 생성이 필요하며 원본 연결만으로 완료하지 않습니다." });
@@ -847,7 +850,7 @@ export async function generateBrandPostImages(options: {
         sectionTitle: target.sectionTitle,
         imageIntent: target.imageIntent,
       });
-      const reviewClassAllowed = reviewed?.reviewClass === "feature-evidence" ||
+      const reviewClassAllowed = (reviewed?.reviewClass === "scene-evidence" && allowsOriginalShoppingScene(target)) || reviewed?.reviewClass === "feature-evidence" ||
         (reviewed?.reviewClass === "product-photo" && genericAllowed);
       const ownsBoundSource = !directSource?.boundSectionId ||
         directSource.bindExistingAssetKey === target.request.replaceAssetKey;

@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
 import ts from "typescript";
-import { allowsGenericBrandPostProductPhoto } from "../src/lib/brand-post-image-evidence";
+import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene } from "../src/lib/brand-post-image-evidence";
 
 interface ReviewModule {
   allowsGenericProductPhoto(target: { sectionTitle: string; imageIntent: string }): boolean;
@@ -51,7 +51,7 @@ function loadReview(answer: string | ((options: ReviewCall, callIndex: number) =
         },
       };
       if (name === "../../src/lib/brand-post-image-evidence") return {
-        allowsGenericBrandPostProductPhoto,
+        allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene,
       };
       throw new Error(`Unexpected dependency: ${name}`);
     },
@@ -145,6 +145,25 @@ async function main() {
       crypto.createHash("sha256").update(fs.readFileSync(lateEvidence)).digest("hex"),
       "a relevant late seller URL must remain eligible after sixteen generic local files");
 
+    const sceneTarget = { sectionTitle: "집에서 활용", imageIntent: "집에서 활용: 제품 원형을 보존한 연출컷 또는 원본 사용 장면" };
+    const scene = loadReview('{"assignments":[{"targetIndex":1,"selectedIndex":1,"reviewClass":"scene-evidence","reason":"상품이 주방 작업대에 놓인 원본 사진"}]}');
+    assert.equal((await scene.review.selectVerifiedProductSectionImages([candidate], "꽃게", [sceneTarget])).length, 1);
+    assert.match(scene.prompt, /"allowedReviewClasses":\["scene-evidence"\]/u);
+    for (const reviewClass of ["product-photo", "feature-evidence"]) {
+      const wrong = loadReview(JSON.stringify({ assignments: [{ targetIndex: 1, selectedIndex: 1, reviewClass, reason: "not a scene" }] }));
+      assert.equal((await wrong.review.selectVerifiedProductSectionImages([candidate], "꽃게", [sceneTarget])).length, 0);
+    }
+    assert.equal((await scene.review.selectVerifiedProductSectionImages([candidate], "꽃게", [featureTarget])).length, 0,
+      "scene photos cannot stand in for direct feature evidence");
+    const alternatives = loadReview(JSON.stringify({ assignments: [
+      { targetIndex: 1, selectedIndex: 1, reviewClass: "product-photo", reason: "overview" },
+      { targetIndex: 1, selectedIndex: 2, reviewClass: "product-photo", reason: "other overview" },
+      { targetIndex: 2, selectedIndex: 1, reviewClass: "feature-evidence", reason: "only feature source" },
+    ] }));
+    const matched = await alternatives.review.selectVerifiedProductSectionImages(
+      manyCandidates.slice(0, 2), "CX PRO", [overviewTarget, featureTarget]);
+    assert.equal(matched.length, 2, "flexible overview must leave the only feature source available");
+    assert.equal(new Set(matched.map(row => row.sourceSha256)).size, 2, "distinct slots must use distinct bytes");
     console.log("Verified section-image review class and server-side evidence gates.");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

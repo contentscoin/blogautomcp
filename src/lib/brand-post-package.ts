@@ -22,6 +22,7 @@ import {
 } from "../../scripts/lib/product-editorial-plan";
 import {
   allowsGenericBrandPostProductPhoto,
+  allowsOriginalShoppingScene,
   isShoppingLifestyleImage,
   brandPostImageIntentMatches,
   brandPostSectionSlotId,
@@ -46,7 +47,7 @@ export interface BrandPostPackageImageAsset {
     sourceSha256: string;
     usage: "general-product-context" | "section-matched-product-evidence";
     sectionIntent: string;
-    reviewClass?: "product-photo" | "feature-evidence";
+    reviewClass?: "product-photo" | "feature-evidence" | "scene-evidence";
     reason?: string;
     reviewedAt: string;
   };
@@ -517,7 +518,7 @@ function auditBrandPostImages(manifest: BrandPostPackageManifest) {
           };
         } else if (!generated && manifest.connectKind === "SHOPPING") {
           const review = asset.sourceReview;
-          const reviewClassAllowed = review?.reviewClass === "feature-evidence" ||
+          const reviewClassAllowed = allowsOriginalShoppingScene(section) ? review?.reviewClass === "scene-evidence" : review?.reviewClass === "feature-evidence" ||
             (review?.reviewClass === "product-photo" && allowsGenericBrandPostProductPhoto({
               sectionTitle: section.title,
               imageIntent: section.imageIntent,
@@ -562,7 +563,7 @@ function auditBrandPostImages(manifest: BrandPostPackageManifest) {
     const originalCount = sectionAssets.length - generatedAssets.size;
     const generatedCount = generatedAssets.size;
     const generatedMinimum = (manifest.imageRequirements?.policy === "generated-required" ||
-      (manifest.connectKind === "SHOPPING" && isShoppingLifestyleImage(section))) && maximum > 0 ? minimum : 0;
+      (manifest.connectKind === "SHOPPING" && isShoppingLifestyleImage(section) && !allowsOriginalShoppingScene(section))) && maximum > 0 ? minimum : 0;
     const coverageMissing = Math.max(0, minimum - sectionAssets.length);
     return {
       sectionId: section.id, title: section.title, intent: section.imageIntent,
@@ -855,7 +856,21 @@ export function reconcileBrandPostPackageQuality(manifest: BrandPostPackageManif
   // Intent migration applies to both bounded/spec-first documents and old
   // freeform documents. Assets deliberately keep their recorded intent so the
   // image audit can mark them stale and schedule a semantic replacement.
-  const intentNormalized = normalizeLegacyPostImageIntents(manifest.composition);
+  const mixedSceneComposition = manifest.connectKind === "SHOPPING" && manifest.imagePolicy === "LOCKED_PRODUCT_OR_ORIGINAL" &&
+    manifest.imageRequirements?.policy !== "generated-required"
+    ? { ...manifest.composition, sections: manifest.composition.sections.map(section => {
+      // Only exact historical system templates qualify. Custom AI-only wording
+      // and generated-required packages retain their explicit requirement.
+      const old = "AI 연출 이미지: 검증된 상품 원형을 보존한 생활 공간 배치. 기능 시연이나 실제 사용 후기 사진이 아님";
+      const replacement = "제품 원형을 보존한 연출컷 또는 원본 사용 장면";
+      const value = section.imageIntent;
+      // Completed generated work retains its signed prompt/intent binding.
+      if (section.imagePaths.some(file => manifest.imageAssets?.some(asset => asset.path === file &&
+          classifyBrandPostImageEvidence(asset).generated))) return section;
+      return value === old || value === `${section.title}: ${old}`
+        ? { ...section, imageIntent: value === old ? replacement : `${section.title}: ${replacement}` } : section;
+    }) } : manifest.composition;
+  const intentNormalized = normalizeLegacyPostImageIntents(mixedSceneComposition);
   const source = manifest.postSpec ? intentNormalized : normalizeLegacyFreeformImageRules(intentNormalized);
   const composition = refreshPostDocumentQuality({
     ...source,

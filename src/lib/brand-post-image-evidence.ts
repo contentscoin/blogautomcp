@@ -15,7 +15,12 @@ export function brandPostSectionSlotId(sectionId: string, ordinal: number): stri
 /** Scene illustration is not evidence of a feature, measurement or actual use. */
 export function isShoppingLifestyleImage(target: { imageIntent: string }): boolean {
   const intent = normalizeBrandPostImageIntent(target.imageIntent);
-  return /AI 연출 이미지/iu.test(intent) || /^(추천 사용 장면|제품 원형을 보존한 연출컷 또는 원본 사용 장면)$/u.test(intent);
+  return /AI 연출 이미지/iu.test(intent) || allowsOriginalShoppingScene(target) || /추천 사용 장면/u.test(intent);
+}
+
+/** An original must show the requested scene, not merely a generic packshot. */
+export function allowsOriginalShoppingScene(target: { imageIntent: string }): boolean {
+  return /제품 원형을 보존한 연출컷 또는 원본 사용 장면/u.test(normalizeBrandPostImageIntent(target.imageIntent));
 }
 
 /** Generic packshots are evidence only when the requested visual is an overview. */

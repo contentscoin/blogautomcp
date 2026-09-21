@@ -34,6 +34,24 @@ async function main() {
         contentQuality: { canPublish: false, code: "composition-quality", reason: "이미지 부족", score: 100, summary: "이미지 준비 필요", signals: [{ key: "composition-quality", label: "구성", status: "fail" }] } as never,
         thumbnailSpec: { version: "thumbnail-spec/v2", canvas: { width: 1000, height: 1000, aspect: "1:1" }, style: "test", sourcePolicy: "TRAVEL_EDITORIAL", sourceImagePath: paths[0] },
       };
+      if (connectKind === "SHOPPING") {
+        const legacy = structuredClone(fixture);
+        const first = legacy.composition.sections[0];
+        const old = `${first.title}: AI 연출 이미지: 검증된 상품 원형을 보존한 생활 공간 배치. 기능 시연이나 실제 사용 후기 사진이 아님`;
+        first.imageIntent = old; first.imagePaths = [];
+        assert.match(store.reconcileBrandPostPackageQuality(legacy).composition.sections[0].imageIntent, /원본 사용 장면/u);
+        const strict = structuredClone(legacy);
+        strict.imageRequirements = { policy: "generated-required" } as typeof strict.imageRequirements;
+        assert.equal(store.reconcileBrandPostPackageQuality(strict).composition.sections[0].imageIntent, old);
+        const completed = structuredClone(legacy);
+        completed.composition.sections[0].imagePaths = [paths[1]];
+        completed.imageAssets = [{ path: paths[1], sourcePath: paths[1], sha256: crypto.createHash("sha256").update(fs.readFileSync(paths[1])).digest("hex"),
+          role: "body", sectionId: first.id, provenance: "LOCKED_PRODUCT", creationMethod: "source-with-generated-background",
+          remoteGenerated: true, imageIntent: old, slotId: `${first.id}:image:1` }];
+        const kept = store.reconcileBrandPostPackageQuality(completed);
+        assert.equal(kept.composition.sections[0].imageIntent, old, "completed generated prompt binding must not be migrated");
+        assert.deepEqual(kept.imageAssets, completed.imageAssets, "completed image metadata and hashes remain intact");
+      }
       store.writeBrandPostPackageManifest(fixture);
       const plan = planSectionImageRequests(store.packagePreview(fixture).imageSlots);
       const requiredSections = composition.sections.filter(section => (section.imageMin || 0) > 0);
