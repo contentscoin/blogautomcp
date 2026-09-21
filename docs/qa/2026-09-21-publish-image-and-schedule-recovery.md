@@ -31,3 +31,17 @@
 - 다음 준비에서 해당 조합은 stale 교체 대상으로 판정하고 후보 재배정에서도 제외한다. 재수집·검증된 대체 배치는 기존 bounded loop를 따른다. 발행 중 원고를 자동 변경하거나 결과 불명 작업을 재발행하지 않는다.
 - 거절기록의 시각 변경만으로 복구 횟수를 초기화하지 않으며 새로운 거절/실제근거 변화는 새 복구 입력으로 처리한다.
 - 실제 제목·원고해시·sourceSnapshot·모든 발행 텍스트가 복구 전후 동일함을 비교 확인했다.
+
+## 빌드 및 배포
+
+- 버전1.3.73, 런타임 커밋 dc60a6be80eeec2abde332549f0bd6ccefe89ead.
+- Next production build 성공. 패키지 런타임10개 파일의 SHA256이 소스와 일치했다.
+- CI35597835710은 기존 lint 오류34개로 실패. 이전1.3.72와 오류 시그니처 차이0. 전체 CI 통과로 주장하지 않는다.
+- Windows 패키징 전체 EXIT0. GitHub release v1.3.73 및 업데이트 workflow35598699905 성공.
+- 실제 업데이트 채널 latest.yml의 버전·SHA512·크기가 로컬과 일치. EXE/blockmap HTTP200 및 SHA256 일치.
+- EXE333958717bytes, SHA256507e00743228fd4bd65674dc23f6fc35252433c8fb7e4c3982ce0ccc6896cc7d.
+- blockmap340273bytes, SHA256fc92e436ceeeaade550bfcad4475974e492e58b63e5cbcede6ea768a7711ae67.
+- 정상 앱 자동 업데이트·재시작 후 readiness.currentVersion=1.3.73, activeCount=0, installPending=false 확인.
+- 설치 런타임에서 날짜 선택 Playwright fixture 실행: simple-agent/topic-agent 모두 PASS(실제 실패 DOM, 이전/현재/미래 클래스 해시, 달력 클릭 상태, 인접 월, 선택 불가 날짜). 실제 네이버 최종 예약 제출은 재실행하지 않았다.
+- 설치 앱에서 실제 준비 job c5d6575c-fedd-45ff-9933-284212c59b3c completed(2026-09-21T12:25:12.501Z). 달바/닥터지2/2 READY, 각각 score100/imageCount5/blockers[]/remaining0 및 persisted approvedAt 확인.
+- 실제 검증 범위: 저장 소재의 sourceOnly 교체, 달바 최종 모델 시각 검사5/5, 설치 앱의 재검증·승인·준비 완료. 날짜 실제계정 제출 및 전체실패부터 자동복구경로는 각각 미재실행/재현 테스트 검증으로 구분한다.
