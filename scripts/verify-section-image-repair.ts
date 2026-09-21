@@ -1,3 +1,4 @@
+import { testPngFixture } from "./lib/test-png-fixture";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -18,7 +19,7 @@ async function main() {
       const dir = store.getBrandPostPackageDir(id);
       fs.mkdirSync(dir, { recursive: true });
       const paths = [0, 1, 2].map((n) => path.join(dir, `${n}.png`));
-      paths.forEach((file, i) => fs.writeFileSync(file, `original-${i}`));
+      paths.forEach((file, i) => fs.writeFileSync(file, testPngFixture(`original-${i}`)));
       const markdown = path.join(dir, "post.md");
       fs.writeFileSync(markdown, "검증된 본문은 이미지 보강 중 바뀌지 않습니다.");
       const composition = resolvePostDocument({
@@ -65,12 +66,12 @@ async function main() {
           const results: import("../src/lib/brand-post-image-generation").BrandPostImageGenerationResult[] = [];
           for (const [i, request] of options.requests.entries()) {
             const file = path.join(dir, `new-${request.requestId}.png`);
-            fs.writeFileSync(file, `generated-${request.requestId}`);
+            fs.writeFileSync(file, testPngFixture(`generated-${request.requestId}`));
             const sectionIntent = composition.sections.find(section => section.id === request.sectionId)?.imageIntent || "해당 섹션 장면";
             let sourceReview: import("../src/lib/brand-post-package").BrandPostPackageImageAsset["sourceReview"];
             if (connectKind === "SHOPPING" && i > 0) {
               const source = path.join(dir, `source-${request.requestId}.png`);
-              fs.writeFileSync(source, `feature-source-${request.requestId}`);
+              fs.writeFileSync(source, testPngFixture(`feature-source-${request.requestId}`));
               const receipt = preserveProductPhotoSource({ sourcePath: source, outputPath: file, segmented: true });
               sourceReview = {
                 version: "product-photo-source-review/v1",
@@ -109,12 +110,12 @@ async function main() {
       assert.equal(pending.length, 1, "Retry only the missing slot");
       deps.generate = async (options) => {
         const request = options.requests[0];
-         const file = path.join(dir, "last.png"); fs.writeFileSync(file, "last-generated");
+         const file = path.join(dir, "last.png"); fs.writeFileSync(file, testPngFixture("last-generated"));
          const sectionIntent = composition.sections.find(section => section.id === request.sectionId)?.imageIntent || "장면";
          let sourceReview: import("../src/lib/brand-post-package").BrandPostPackageImageAsset["sourceReview"];
          if (connectKind === "SHOPPING") {
            const source = path.join(dir, "last-source.png");
-           fs.writeFileSync(source, "last-feature-source");
+           fs.writeFileSync(source, testPngFixture("last-feature-source"));
            const receipt = preserveProductPhotoSource({ sourcePath: source, outputPath: file, segmented: true });
            sourceReview = {
              version: "product-photo-source-review/v1",
@@ -161,7 +162,7 @@ async function main() {
         generate: async (options) => {
           const replacement = { ...store.readBrandPostPackage(id)!, title: "외부에서 교체된 새 원고" };
           store.writeBrandPostPackageManifest(replacement);
-          const file = path.join(dir, "late.png"); fs.writeFileSync(file, "late-old-draft-result");
+          const file = path.join(dir, "late.png"); fs.writeFileSync(file, testPngFixture("late-old-draft-result"));
           return [{ ...options.requests[0], generatedPath: file, provenance: "GENERATED_BACKGROUND", imageIntent: "이전 원고" }];
         },
       }), /원고가 변경/u);
@@ -173,7 +174,7 @@ async function main() {
         generate: async (options) => {
           assert.equal(cancelBrandPostImageRepairs(), 1);
           assert.equal(options.signal?.aborted, true);
-          const file = path.join(dir, "cancelled.png"); fs.writeFileSync(file, "cancelled-late-result");
+          const file = path.join(dir, "cancelled.png"); fs.writeFileSync(file, testPngFixture("cancelled-late-result"));
           const result = { ...options.requests[0], generatedPath: file, provenance: "GENERATED_BACKGROUND" as const, imageIntent: "중지된 생성" };
           await options.onResult?.(result);
           return [result];
@@ -193,7 +194,7 @@ async function main() {
         const targetSectionId = slotWithRoom.sectionId;
         const externalRaw = path.join(dir, "image-generation-work", "external-download.png");
         fs.mkdirSync(path.dirname(externalRaw), { recursive: true });
-        fs.writeFileSync(externalRaw, "chatgpt-built-in-imagegen-result");
+        fs.writeFileSync(externalRaw, testPngFixture("chatgpt-built-in-imagegen-result"));
         const applied = await generation.applyExternalGeneratedBrandPostImage({
           brandLinkId: id, manifest: current, productName: current.title, sectionId: targetSectionId, rawPath: externalRaw,
         });
@@ -229,8 +230,8 @@ async function main() {
     fs.mkdirSync(bindDir, { recursive: true });
     const bindHero = path.join(bindDir, "hero.png");
     const bindSource = path.join(bindDir, "reviewed-source.jpg");
-    fs.writeFileSync(bindHero, "source-binding-hero");
-    fs.writeFileSync(bindSource, "source-binding-body");
+    fs.writeFileSync(bindHero, testPngFixture("source-binding-hero"));
+    fs.writeFileSync(bindSource, testPngFixture("source-binding-body"));
     const bindMarkdown = path.join(bindDir, "post.md");
     fs.writeFileSync(bindMarkdown, "검증 원본 배정 테스트");
     const bindComposition = resolvePostDocument({

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
+import { publicationImageGeometryIssue } from "./publication-image-geometry";
 import { runCodexDraft } from "./codex-draft-provider";
 import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene } from "../../src/lib/brand-post-image-evidence";
 
@@ -51,7 +52,8 @@ const sectionBatchReviews = new Map<string, {
 
 const selectedProductPixelRules = "상품명 전체의 라인·향·옵션·용량·묶음 수량을 실제 픽셀로 확인하세요. 같은 옵션의 용기 한 개를 보여주는 근접 사진은 허용하되 구매 묶음과 다른 구성을 암시하면 거부하세요. 파일명이나 생성 출처는 근거가 아닙니다. 유통기한/소비기한 공지표와 안내 이미지는 거부하세요. 라벤더 Stress Relief와 무향 Skin Relief처럼 다른 옵션이 섞인 사진은 해당 파트가 보이는 옵션들을 이름으로 명시해 비교하고 이미지도 각 옵션을 명확히 구분할 때만 허용합니다. 단순 비교 언급은 부족합니다. 길게 이어 붙인 상세페이지 스트립과 식별 불확실한 상품은 거부하세요.";
 
-type ProductSectionImageTarget = { sectionTitle: string; imageIntent: string };
+type ProductSectionImageTarget = { sectionTitle: string; imageIntent: string; sectionBody?: string[]; excludedSourceSha256?: string[] };
+const publishedSectionPixelRules = "sectionTitle과 sectionBody는 실제 발행 문장입니다. imageIntent는 계획 메타데이터이며 기능 근거를 대신하지 않습니다. 실제 발행 문장이 주장하는 특정 기능·작동·사용 가치와 픽셀이 직접 일치해야 합니다. 같은 상품의 다른 효능·질감·구조 설명을 비슷한 주제라는 이유로 배정하지 마세요. 보이는 기능과 본문의 기능이 다르거나 모순되면 거절하세요. 일반 상품 사진이 허용된 목적이어도 발행 문장의 기능 주장을 입증하는 사진으로 오인되면 거절하세요. 본문에 보이지 않는 기능을 이미지에서 추정하지 마세요.";
 
 /** Generic packshots are evidence only for identity/overview slots. */
 export const allowsGenericProductPhoto = allowsGenericBrandPostProductPhoto;
@@ -69,7 +71,7 @@ export async function selectVerifiedProductSectionImages(
   for (const file of new Set(paths)) {
     try {
       const stat = fs.statSync(file);
-      if (!stat.isFile() || stat.size < 1 || stat.size > 24 * 1024 * 1024) continue;
+      if (!stat.isFile() || stat.size < 1 || stat.size > 24 * 1024 * 1024 || publicationImageGeometryIssue(file)) continue;
       const sha256 = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
       if (seen.has(sha256)) continue;
       seen.add(sha256);
@@ -82,12 +84,14 @@ export async function selectVerifiedProductSectionImages(
   if (candidates.length === 0) return [];
   const normalizedTargets = targets.slice(0, 12).map(target => ({
     sectionTitle: target.sectionTitle.normalize("NFKC").replace(/\s+/gu, " ").trim(),
+    sectionBody: (target.sectionBody || []).map(text => text.normalize("NFKC").replace(/\s+/gu, " ").trim()),
+    excludedSourceSha256: [...new Set(target.excludedSourceSha256 || [])].sort(),
     imageIntent: target.imageIntent.normalize("NFKC").replace(/\s+/gu, " ").trim(),
     allowProductPhoto: allowsGenericProductPhoto(target),
     allowScene: allowsOriginalShoppingScene(target),
   }));
   const reviewKey = crypto.createHash("sha256").update(JSON.stringify({
-    version: 5,
+    version: 6,
     productName: productName.normalize("NFKC").replace(/\s+/gu, " ").trim(),
     targets: normalizedTargets,
     candidates: candidates.map(candidate => candidate.sha256),
@@ -115,9 +119,11 @@ export async function selectVerifiedProductSectionImages(
       userPrompt: [
         `상품: ${JSON.stringify(productName)}`,
         selectedProductPixelRules,
+        publishedSectionPixelRules,
         `본문 파트 목록: ${JSON.stringify(normalizedTargets.map((target, index) => ({
           targetIndex: index + 1,
           sectionTitle: target.sectionTitle,
+          sectionBody: target.sectionBody,
           imageIntent: target.imageIntent,
           allowedReviewClasses: target.allowScene ? ["scene-evidence"] : target.allowProductPhoto ? ["product-photo", "feature-evidence"] : ["feature-evidence"],
         })))}`,
@@ -163,6 +169,7 @@ export async function selectVerifiedProductSectionImages(
           (reviewClass === "scene-evidence" ? !normalizedTargets[targetIndex].allowScene : normalizedTargets[targetIndex].allowScene)) continue;
       usedPairs.add(`${targetIndex}:${selectedIndex}`);
       const candidate = batch[selectedIndex];
+      if (normalizedTargets[targetIndex].excludedSourceSha256.includes(candidate.sha256)) continue;
       proposals.push({
         targetIndex,
         path: candidate.path,
@@ -244,13 +251,14 @@ export async function selectVerifiedProductSectionImage(
   productName: string,
   sectionTitle: string,
   imageIntent: string,
+  sectionBody: string[] = [],
 ): Promise<ProductSectionImageReview | null> {
   const candidates: Array<{ path: string; sha256: string }> = [];
   const seen = new Set<string>();
   for (const file of new Set(paths)) {
     try {
       const stat = fs.statSync(file);
-      if (!stat.isFile() || stat.size < 1 || stat.size > 24 * 1024 * 1024) continue;
+      if (!stat.isFile() || stat.size < 1 || stat.size > 24 * 1024 * 1024 || publicationImageGeometryIssue(file)) continue;
       const sha256 = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
       if (seen.has(sha256)) continue;
       seen.add(sha256);
@@ -260,10 +268,11 @@ export async function selectVerifiedProductSectionImage(
   }
   if (candidates.length === 0) return null;
   const reviewKey = crypto.createHash("sha256").update(JSON.stringify({
-    version: 4,
+    version: 5,
     productName: productName.normalize("NFKC").replace(/\s+/gu, " ").trim(),
     sectionTitle: sectionTitle.normalize("NFKC").replace(/\s+/gu, " ").trim(),
     imageIntent: imageIntent.normalize("NFKC").replace(/\s+/gu, " ").trim(),
+    sectionBody: sectionBody.map(text => text.normalize("NFKC").replace(/\s+/gu, " ").trim()),
     candidates: candidates.map(candidate => candidate.sha256),
   })).digest("hex");
   if (sectionReviews.has(reviewKey)) return sectionReviews.get(reviewKey) || null;
@@ -273,7 +282,9 @@ export async function selectVerifiedProductSectionImage(
     userPrompt: [
       `상품: ${JSON.stringify(productName)}`,
       selectedProductPixelRules,
+      publishedSectionPixelRules,
       `본문 파트: ${JSON.stringify(sectionTitle)}`,
+      `실제 발행 본문 sectionBody: ${JSON.stringify(sectionBody)}`,
       `이미지 목적: ${JSON.stringify(imageIntent)}`,
       `허용 판정: ${allowsGenericProductPhoto({ sectionTitle, imageIntent }) ? "product-photo 또는 feature-evidence" : "feature-evidence만"}`,
       `첨부한 ${candidates.length}개 이미지는 후보 1번부터 ${candidates.length}번까지 입력 순서와 같습니다.`,
@@ -327,7 +338,7 @@ export async function selectVerifiedProductPhotos(
     let sourceHash: string;
     try {
       const stat = fs.statSync(file);
-      if (!stat.isFile() || stat.size < 1 || stat.size > 24 * 1024 * 1024) continue;
+      if (!stat.isFile() || stat.size < 1 || stat.size > 24 * 1024 * 1024 || publicationImageGeometryIssue(file)) continue;
       const bytes = fs.readFileSync(file);
       sourceHash = crypto.createHash("sha256").update(bytes).digest("hex");
       hash = crypto.createHash("sha256").update(sourceHash).update(productName).digest("hex");

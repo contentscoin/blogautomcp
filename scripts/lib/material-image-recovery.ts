@@ -23,6 +23,7 @@ export function imageRecoverySignature(root: string): string | null {
   const manifest = read("manifest.json");
   if (!manifest) return null;
   const context = read("mcp-draft-context.json");
+  const rejected = read("publish-image-rejections.json");
   let receipts: string[] = [];
   try {
     receipts = fs.readdirSync(path.join(root, "product-sources")).filter(name => name.endsWith(".retrieval.json"))
@@ -36,6 +37,7 @@ export function imageRecoverySignature(root: string): string | null {
       imageMin: section.imageMin, imageMax: section.imageMax,
     })),
     assets: manifest.imageAssets?.map((asset: Record<string, unknown>) => [asset.sha256, asset.sectionId]), receipts,
+    rejected: Array.isArray(rejected) ? [...new Set(rejected.map(row => JSON.stringify([row.sha256, row.sectionId, row.context])))].sort() : [],
   })).digest("hex");
 }
 

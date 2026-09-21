@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { allowsGenericBrandPostProductPhoto, isShoppingLifestyleImage } from "./brand-post-image-evidence";
 import { acquireBrandPostImageRepairLock } from "./brand-post-image-repair-lock";
 import { repairBrandPostImages } from "./brand-post-image-repair";
@@ -53,7 +54,8 @@ export async function replanShoppingImageCoverage(options: {
   const slots = deps.slots(initial);
   const missing = slots.filter(slot => {
     const section = initial.composition.sections.find(s => s.id === slot.sectionId)!;
-    return slot.missing > 0 && slot.minimum > slot.count && slot.generatedMinimum === 0 && !slot.staleTargets.length &&
+    return slot.missing > 0 && slot.minimum > slot.count && slot.generatedMinimum === 0 &&
+      slot.staleTargets.every(target => ["image-geometry-invalid", "image-publication-rejected"].includes(target.code)) &&
       !isShoppingLifestyleImage(section) && !allowsGenericBrandPostProductPhoto({ sectionTitle: section.title, imageIntent: section.imageIntent });
   });
   const needed = missing.reduce((n, slot) => n + slot.minimum - slot.count, 0);
@@ -105,9 +107,17 @@ export async function replanShoppingImageCoverage(options: {
         history.push({ from: slot.sectionId, to: alternative.sectionId, at: new Date().toISOString() });
       }
     }
+    // Remove rejected geometry only after equivalent verified coverage exists.
+    // Never crop its pixels, silently drop an unfilled requirement, or touch text.
+    const rejected = new Set(missing.flatMap(slot => slot.staleTargets.map(target => path.resolve(target.path))));
     const proposed = deps.reconcile({ ...current, approvedAt: null,
-      composition: { ...current.composition, sections: current.composition.sections.map(section =>
-        minima.has(section.id) ? { ...section, imageMin: minima.get(section.id)! } : section) },
+      bodyImagePaths: current.bodyImagePaths?.filter(file => !rejected.has(path.resolve(file))),
+      imageAssets: current.imageAssets?.filter(asset => !rejected.has(path.resolve(asset.path))),
+      composition: { ...current.composition,
+        renderNodes: current.composition.renderNodes.filter(node => node.kind !== "image" || !rejected.has(path.resolve(node.assetPath))),
+        sections: current.composition.sections.map(section =>
+        minima.has(section.id) ? { ...section, imageMin: minima.get(section.id)!,
+          imagePaths: section.imagePaths.filter(file => !rejected.has(path.resolve(file))) } : section) },
       pipelineNotes: [...(current.pipelineNotes || []), `IMAGE_COVERAGE_REPLANNED: ${JSON.stringify(history)}`,
         ...(current.imageGeneration?.errors.length ? [`IMAGE_REPLAN_PREVIOUS_ERRORS: ${JSON.stringify(current.imageGeneration.errors)}`] : [])] });
     const after = summary(deps.slots(proposed));

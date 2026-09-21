@@ -8187,6 +8187,8 @@ async function getSchedulePanelLocator(page: Page): Promise<Locator> {
 }
 
 async function setInputValueWithNativeEvents(input: Locator, value: string): Promise<string> {
+  // Read-only picker inputs must change through the calendar, never a DOM-only value.
+  if (!(await input.isEditable().catch(() => false))) return "";
   await input.click({ timeout: 1200 }).catch(() => {});
   await input.press("Meta+A").catch(() => {});
   await input.press("Control+A").catch(() => {});
@@ -8291,7 +8293,7 @@ async function trySetScheduleDateViaDatepicker(page: Page, scheduledDate: Date):
   const targetDay = String(scheduledDate.getDate());
   const panel = await getSchedulePanelLocator(page);
   const dateInput = panel
-    .locator('div[class*="time_setting" i] input.input_date__QmA0s, div[class*="date" i] input.input_date__QmA0s, input.input_date__QmA0s')
+    .locator('div[class*="time_setting" i] input[class*="input_date__"], div[class*="date" i] input[class*="input_date__"], input[class*="input_date__"]')
     .first();
   if (!(await dateInput.isVisible().catch(() => false))) {
     return false;
@@ -8343,10 +8345,10 @@ async function trySetScheduleDateViaDatepicker(page: Page, scheduledDate: Date):
   }
 
   const dayCandidates = [
-    `table td:not(.ui-state-disabled) button.ui-state-default:text-is("${targetDay}")`,
-    `table td:not(.ui-state-disabled) a.ui-state-default:text-is("${targetDay}")`,
-    `button.ui-state-default:text-is("${targetDay}")`,
-    `a.ui-state-default:text-is("${targetDay}")`,
+    `table td:not(.ui-state-disabled):not(.ui-datepicker-other-month) button.ui-state-default:text-is("${targetDay}")`,
+    `table td:not(.ui-state-disabled):not(.ui-datepicker-other-month) a.ui-state-default:text-is("${targetDay}")`,
+    `td:not(.ui-state-disabled):not(.ui-datepicker-other-month) button.ui-state-default:text-is("${targetDay}")`,
+    `td:not(.ui-state-disabled):not(.ui-datepicker-other-month) a.ui-state-default:text-is("${targetDay}")`,
   ];
 
   for (const selector of dayCandidates) {
@@ -8376,19 +8378,19 @@ async function trySetScheduleDateInputs(page: Page, scheduledDate: Date): Promis
   const panel = await getSchedulePanelLocator(page);
   const candidateValues = [dottedSpaced, dottedSpacedNoPad, dotted, dottedNoPad, ymd, slash];
   const panelInputSelectors = [
-    'div[class*="time_setting" i] input.input_date__QmA0s',
-    'div[class*="date" i] input.input_date__QmA0s',
-    "input.input_date__QmA0s",
+    'div[class*="time_setting" i] input[class*="input_date__"]',
+    'div[class*="date" i] input[class*="input_date__"]',
+    'input[class*="input_date__"]',
     'input[title*="예약"]',
     'input[placeholder*="날짜"]',
     'input[type="date"]',
     'input[class*="date" i]',
   ];
   const fallbackInputSelectors = [
-    'div[class*="layer_publish" i] input.input_date__QmA0s',
-    'div[class*="layer_content_set_publish" i] input.input_date__QmA0s',
-    '.publish_layer input.input_date__QmA0s',
-    '[role="dialog"] input.input_date__QmA0s',
+    'div[class*="layer_publish" i] input[class*="input_date__"]',
+    'div[class*="layer_content_set_publish" i] input[class*="input_date__"]',
+    '.publish_layer input[class*="input_date__"]',
+    '[role="dialog"] input[class*="input_date__"]',
     'div[class*="layer_publish" i] input[class*="date" i]',
     'div[class*="layer_content_set_publish" i] input[class*="date" i]',
   ];
@@ -8475,8 +8477,8 @@ async function trySetScheduleDateInputs(page: Page, scheduledDate: Date): Promis
 
 async function hasVisibleScheduleDateInput(page: Page): Promise<boolean> {
   const selectors = [
-    'div[class*="layer_publish" i] input.input_date__QmA0s',
-    'div[class*="layer_content_set_publish" i] input.input_date__QmA0s',
+    'div[class*="layer_publish" i] input[class*="input_date__"]',
+    'div[class*="layer_content_set_publish" i] input[class*="input_date__"]',
     'div[class*="layer_publish" i] input[class*="date" i]',
     'div[class*="layer_content_set_publish" i] input[class*="date" i]',
     '.publish_layer input[type="date"]',
@@ -8513,7 +8515,7 @@ async function trySetScheduleDateInputsFallback(page: Page, scheduledDate: Date)
   const slash = `${yyyy}/${mm}/${dd}`;
   const panel = await getSchedulePanelLocator(page);
   const dialogInputs = panel.locator(
-    'div[class*="time_setting" i] input, div[class*="date" i] input, input.input_date__QmA0s, input[type="date"], input[class*="date" i], input[placeholder*="날짜"], input[name*="date" i], input[id*="date" i]'
+    'div[class*="time_setting" i] input, div[class*="date" i] input, input[class*="input_date__"], input[type="date"], input[class*="date" i], input[placeholder*="날짜"], input[name*="date" i], input[id*="date" i]'
   );
   const inputCount = Math.min(await dialogInputs.count().catch(() => 0), 30);
 
@@ -8551,7 +8553,7 @@ async function trySetScheduleDateInputsFallback(page: Page, scheduledDate: Date)
 async function verifyScheduleDateApplied(page: Page, scheduledDate: Date): Promise<boolean> {
   const ymd = formatDateYmd(scheduledDate);
   const panel = await getSchedulePanelLocator(page);
-  const inputs = panel.locator('div[class*="time_setting" i] input.input_date__QmA0s, input.input_date__QmA0s, input[type="date"]');
+  const inputs = panel.locator('div[class*="time_setting" i] input[class*="input_date__"], input[class*="input_date__"], input[type="date"]');
   const count = Math.min(await inputs.count().catch(() => 0), 20);
   let hasVisibleDateInput = false;
   for (let i = 0; i < count; i += 1) {
@@ -8784,7 +8786,7 @@ async function trySetScheduleTimeInputs(page: Page, scheduledDate: Date): Promis
 async function readAppliedScheduleDateYmd(page: Page): Promise<string | null> {
   const panel = await getSchedulePanelLocator(page);
   const dateInputs = panel.locator(
-    'div[class*="time_setting" i] input.input_date__QmA0s, div[class*="date" i] input.input_date__QmA0s, input.input_date__QmA0s, input[type="date"]'
+    'div[class*="time_setting" i] input[class*="input_date__"], div[class*="date" i] input[class*="input_date__"], input[class*="input_date__"], input[type="date"]'
   );
   const count = Math.min(await dateInputs.count().catch(() => 0), 20);
   let hasVisibleInput = false;
@@ -8803,7 +8805,7 @@ async function readAppliedScheduleDateYmd(page: Page): Promise<string | null> {
   }
 
   const globalDateInput = page
-    .locator('input.input_date__QmA0s, input[type="date"]')
+    .locator('input[class*="input_date__"], input[type="date"]')
     .first();
   if (await globalDateInput.isVisible().catch(() => false)) {
     const value = await globalDateInput.inputValue().catch(() => "");
@@ -10319,7 +10321,9 @@ async function main() {
     if (runtimeConnectKind === "SHOPPING") {
       const selectedOptionFacts = product.features.filter(value =>
         /^(?:선택\s*옵션|선택\s*상품|구성|수량|개수|용량|중량|향|색상|사이즈)\s*[:：]/u.test(value));
+      setStage("STEP2.6 최종 이미지 검증");
       await assertPublishImagesSafe({
+        brandLinkId: link.id,
         productName: product.name,
         selectedProduct: JSON.stringify({ selectedTitle: product.name, optionFacts: selectedOptionFacts,
           rule: "선택 상품명에 명시된 향·라인·용량·수량이 우선입니다. 공통 카탈로그 옵션으로 대체하지 마세요. 충돌하거나 식별할 수 없으면 거부하세요." }),

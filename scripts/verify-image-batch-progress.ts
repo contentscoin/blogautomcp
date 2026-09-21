@@ -61,6 +61,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
   let lockCalls = 0;
   let sectionReviewCalls = 0;
   const sectionReviewCandidatePaths: string[][] = [];
+  const sectionReviewTargets: unknown[][] = [];
   const lockedSourcePaths: string[] = [];
   const locked = async (options: { sourcePath?: string; backgroundPath?: string } = {}) => {
     lockCalls += 1;
@@ -79,6 +80,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
     "src/lib/brand-post-image-generation.ts", {
       "node:fs": fs, "node:path": path,
       "./atomic-text-file": atomicTextFile,
+      "../../scripts/lib/publish-image-rejections": { rejectedPublicationImageHashes: () => [] },
       "../../scripts/lib/image-timeout-policy": imagePolicy,
       "node:child_process": {
         spawn(_command: string, args: string[], options: { windowsHide: boolean; shell: boolean }) {
@@ -129,6 +131,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       },
       "../../scripts/lib/product-photo-review": {
         selectVerifiedProductSectionImages: async (paths: string[], _productName: string, targets: unknown[], options?: ProductSectionImageReviewOptions) => {
+          sectionReviewTargets.push(targets);
           sectionReviewCalls += 1;
           sectionReviewCandidatePaths.push([...paths]);
           options?.onDiagnostics?.({ version: 1, status: settings.sectionReviewError ? "failed" : "complete", cacheHit: false,
@@ -177,7 +180,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
   );
   const manifest = {
     brandLinkId: "fixture", connectKind: "TRAVEL", title: "Fixture",
-    composition: { sections: [{ id: "section", title: "제주", imageIntent: "해변", body: ["문맥"] }] },
+    composition: { renderNodes: [], sections: [{ id: "section", title: "제주", imageIntent: "해변", body: ["문맥"] }] },
     imageAssets: [{ sha256: "hero", role: "hero", path: sourcePath, provenance: "ORIGINAL" }],
   } as unknown as Parameters<typeof Generate>[0]["manifest"];
   const callbacks: BrandPostImageGenerationResult[] = [];
@@ -199,7 +202,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
   return { ...api, packageDir, get child() { return child; }, manifest, callbacks, generate, result, progress, close,
     get jobs() { return jobs; }, get checkpoint() { return checkpoint; },
     get spawns() { return spawns; }, get lockCalls() { return lockCalls; }, get lockedSourcePaths() { return lockedSourcePaths; },
-    get sectionReviewCalls() { return sectionReviewCalls; }, get sectionReviewCandidatePaths() { return sectionReviewCandidatePaths; } };
+    get sectionReviewTargets() { return sectionReviewTargets; }, get sectionReviewCalls() { return sectionReviewCalls; }, get sectionReviewCandidatePaths() { return sectionReviewCandidatePaths; } };
 }
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -210,6 +213,19 @@ async function check(name: string, run: () => Promise<void>) {
 }
 
 async function verifyGenerator() {
+  await check("section review receives full published render text instead of stale planning context", async () => {
+    const h = harness({ sectionMatchedPaths: [sourcePath] });
+    h.manifest.connectKind = "SHOPPING";
+    const body = "앞부분 ".repeat(150) + "수분 공급 효능을 주장하는 실제 마지막 문장";
+    h.manifest.composition.renderNodes = [
+      { kind: "heading", sectionId: "section", text: "실제 발행 제목" },
+      { kind: "paragraph", sectionId: "section", text: body },
+    ] as typeof h.manifest.composition.renderNodes;
+    await h.generate(1, { sourceOnly: true });
+    const target = h.sectionReviewTargets[0][0] as { sectionTitle: string; sectionBody: string[] };
+    assert.equal(target.sectionTitle, "실제 발행 제목");
+    assert.deepEqual(target.sectionBody, [body]);
+  });
   await check("section review diagnostics persist with target mapping on success and failure", async () => {
     for (const sectionReviewError of [undefined, "review provider failed"]) {
       const h = harness({ sectionReviewError });
@@ -591,7 +607,7 @@ async function verifyGenerator() {
     assert.equal(results.filter(result => result.error?.includes("IMAGE_SOURCE_BINDING_REQUIRED")).length, 2);
   });
 
-  await check("source-only overview slots bind unbound originals when section review is unavailable", async () => {
+  await check("source-only overview slots reject unreviewed originals when section review is unavailable", async () => {
     const overviewA = path.join(root, "overview-a.jpg");
     const overviewB = path.join(root, "overview-b.jpg");
     fs.writeFileSync(overviewA, "overview-source-a");
@@ -616,9 +632,9 @@ async function verifyGenerator() {
     });
     assert.equal(h.spawns, 0);
     assert.equal(h.sectionReviewCalls, 1);
-    assert.equal(results.filter(result => result.provenance === "ORIGINAL" && result.generatedPath).length, 2);
-    assert.ok(results.find(result => result.sectionId === "hook")?.sourceReview?.reviewClass === "product-photo");
-    assert.ok(results.find(result => result.sectionId === "summary")?.sourceReview?.reviewClass === "product-photo");
+    assert.equal(results.filter(result => result.provenance === "ORIGINAL" && result.generatedPath).length, 0);
+    assert.ok(results.find(result => result.sectionId === "hook")?.error?.includes("usage limit"));
+    assert.ok(results.find(result => result.sectionId === "summary")?.error?.includes("usage limit"));
     assert.ok(results.find(result => result.sectionId === "feature")?.error?.includes("IMAGE_SOURCE_BINDING_REQUIRED") ||
       results.find(result => result.sectionId === "feature")?.error?.includes("usage limit"));
   });

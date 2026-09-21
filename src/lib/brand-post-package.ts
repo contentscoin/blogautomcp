@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { publicationImageGeometryIssue } from "../../scripts/lib/publication-image-geometry";
+import { rejectedPublicationImageHashes } from "../../scripts/lib/publish-image-rejections";
 import { copyProductPhotoSource, readProductPhotoSource } from "../../scripts/lib/product-photo-provenance";
 import { getAppDataDir } from "../../scripts/lib/app-paths";
 import type { BrandLinkContentReadiness } from "../../scripts/lib/brandlink-content-readiness";
@@ -446,6 +448,10 @@ function auditBrandPostImages(manifest: BrandPostPackageManifest) {
   if (!heroAsset) {
     addIssue({ code: "hero-image-invalid", reason: "대표 이미지 파일·역할·저장 해시가 올바르지 않습니다." });
   } else {
+    const geometry = publicationImageGeometryIssue(heroAsset.path);
+    if (geometry) addIssue({ code: "image-geometry-invalid", reason: `대표 이미지 · ${geometry}` });
+    if (manifest.version === "brand-post-package/v2" && rejectedPublicationImageHashes(manifest.brandLinkId, manifest.composition, null).includes(heroAsset.sha256))
+      addIssue({ code: "image-publication-rejected", reason: "대표 이미지 · SEMANTIC_REJECTION: 최종 픽셀 검사에서 거부한 이미지입니다. 교체해야 합니다." });
     const evidence = classifyBrandPostImageEvidence(heroAsset);
     if (!evidence.coherent) addIssue({
       code: "image-provenance-invalid",
@@ -487,6 +493,10 @@ function auditBrandPostImages(manifest: BrandPostPackageManifest) {
         stale = { code: "image-asset-invalid", reason: `이미지 · ${section.title}: 파일이 없거나 저장된 해시와 일치하지 않습니다.` };
       } else if (asset.role !== "body" || asset.sectionId !== section.id) {
         stale = { code: "image-asset-binding", reason: `이미지 · ${section.title}: 본문 이미지의 역할 또는 파트 결속이 올바르지 않습니다.` };
+      } else if (publicationImageGeometryIssue(asset.path)) {
+        stale = { code: "image-geometry-invalid", reason: `이미지 · ${section.title}: ${publicationImageGeometryIssue(asset.path)}` };
+      } else if (rejectedPublicationImageHashes(manifest.brandLinkId, manifest.composition, section.id).includes(asset.sha256)) {
+        stale = { code: "image-publication-rejected", reason: `이미지 · ${section.title}: SEMANTIC_REJECTION: 현재 본문과 맞지 않아 최종 픽셀 검사에서 거부했습니다. 원본을 교체해야 합니다.` };
       } else {
         const evidence = classifyBrandPostImageEvidence(asset);
         generated = evidence.generated;
@@ -988,6 +998,8 @@ export function applyGeneratedBrandPostImage(options: {
   if (!sourceStat.isFile() || sourceStat.size < 1 || sourceStat.size > 24 * 1024 * 1024) {
     throw new Error("생성 이미지 파일 크기가 허용 범위를 벗어났습니다.");
   }
+  const geometryIssue = publicationImageGeometryIssue(options.generatedPath);
+  if (geometryIssue) throw new Error(geometryIssue);
   const assets = normalizePackageImageAssets(manifest);
   const generatedHash = sha256File(options.generatedPath);
   if (options.bindExistingAssetKey) {

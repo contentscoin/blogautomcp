@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { replanShoppingImageCoverage, type ImageReplanDependencies } from "../src/lib/brand-post-image-replan";
 import type { BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
 
-async function scenario(mode: "success" | "insufficient" | "revision" | "generated" | "overview" | "existing" | "auth" | "external" | "recoverable", repairError?: string) {
+async function scenario(mode: "semantic" | "geometry" | "success" | "insufficient" | "revision" | "generated" | "overview" | "existing" | "auth" | "external" | "recoverable", repairError?: string) {
   let stored = { version: "brand-post-package/v2", brandLinkId: "fixture", connectKind: "SHOPPING",
     imagePolicy: "LOCKED_PRODUCT_OR_ORIGINAL", approvedAt: "old-approval", title: "45분 청소기", createdAt: "original",
     sourceSnapshot: { snapshotId: "fixed-source", facts: ["사용시간 45분"] }, hashtags: ["청소기"],
@@ -15,6 +15,12 @@ async function scenario(mode: "success" | "insufficient" | "revision" | "generat
   } as unknown as BrandPostPackageManifestV2;
   stored.imageGeneration = { status: "incomplete", requested: 1, applied: 0, remaining: 1, errors: ["old optional failure"], updatedAt: "old" };
   if (mode === "existing") stored.composition.sections[1].imagePaths = ["verified-filter-photo"];
+  if (mode === "geometry" || mode === "semantic") {
+    stored.composition.sections[0].imagePaths = ["long.jpg"];
+    stored.bodyImagePaths = ["long.jpg", "a"];
+    stored.imageAssets!.push({ path: "long.jpg", sha256: "long" } as never);
+    stored.composition.renderNodes.push({ kind: "image", sectionId: "runtime", assetPath: "long.jpg" } as never);
+  }
   const original = structuredClone(stored);
   let repairCalls = 0;
   let writes = 0;
@@ -25,9 +31,9 @@ async function scenario(mode: "success" | "insufficient" | "revision" | "generat
     reconcile: (value: BrandPostPackageManifestV2) => value,
     lock: () => ({ assertOwner() {}, release() { released = true; } }),
     slots: (value: BrandPostPackageManifestV2) => value.composition.sections.map(section => ({
-      sectionId: section.id, minimum: section.imageMin!, maximum: section.imageMax!, count: section.imagePaths.length,
-      missing: Math.max(0, section.imageMin! - section.imagePaths.length), generatedMinimum: 0, generationMissing: 0,
-      staleTargets: [], assets: section.imagePaths.map(file => ({ path: file, creationMethod: "source",
+      sectionId: section.id, minimum: section.imageMin!, maximum: section.imageMax!, count: section.imagePaths.filter(file => file !== "long.jpg").length,
+      missing: Math.max(0, section.imageMin! - section.imagePaths.filter(file => file !== "long.jpg").length), generatedMinimum: 0, generationMissing: 0,
+      staleTargets: section.imagePaths.includes("long.jpg") ? [{ path: "long.jpg", code: mode === "semantic" ? "image-publication-rejected" : "image-geometry-invalid" }] : [], assets: section.imagePaths.map(file => ({ path: file, creationMethod: "source",
         sourceReview: { usage: "section-matched-product-evidence", reviewClass: mode === "overview" ? "product-photo" : "feature-evidence" } })),
     })),
     repair: async (options: { sourceOnly: boolean; requests: Array<{ sectionId: string }> }) => {
@@ -47,12 +53,12 @@ async function scenario(mode: "success" | "insufficient" | "revision" | "generat
     return;
   }
   const result = await replanShoppingImageCoverage({ brandLinkId: "fixture" }, deps);
-  if (mode === "success" || mode === "existing" || mode === "recoverable") {
+  if (mode === "semantic" || mode === "geometry" || mode === "success" || mode === "existing" || mode === "recoverable") {
     assert.equal(result.changed, true); assert.equal(result.after.required, result.before.required);
     assert.equal(result.after.missing, 0); assert.equal(stored.approvedAt, null);
     assert.deepEqual(stored.sourceSnapshot, original.sourceSnapshot);
-    assert.deepEqual(stored.imageAssets, original.imageAssets);
-    assert.deepEqual(stored.composition.renderNodes, original.composition.renderNodes);
+    assert.deepEqual(stored.imageAssets, original.imageAssets?.filter(asset => asset.path !== "long.jpg"));
+    assert.deepEqual(stored.composition.renderNodes, original.composition.renderNodes.filter(node => node.kind !== "image" || node.assetPath !== "long.jpg"));
     assert.deepEqual(stored.composition.sections.map(({ id, title, body, imageIntent }) => ({ id, title, body, imageIntent })),
       original.composition.sections.map(({ id, title, body, imageIntent }) => ({ id, title, body, imageIntent })));
     assert.equal(stored.composition.sections[0].imagePaths.length, 0);
@@ -66,7 +72,7 @@ async function scenario(mode: "success" | "insufficient" | "revision" | "generat
   assert.equal(released, mode !== "generated");
 }
 async function main() {
-  for (const mode of ["success", "insufficient", "revision", "generated", "overview", "existing", "auth"] as const) await scenario(mode);
+  for (const mode of ["semantic", "geometry", "success", "insufficient", "revision", "generated", "overview", "existing", "auth"] as const) await scenario(mode);
   for (const error of ["CODEX_MODEL_INCOMPATIBLE: unavailable model", "CHATGPT_BROWSER_UNREACHABLE: closed",
     "IMAGE_RESUME_REQUIRED: interrupted", "request timed out", "unknown transport failure",
     "IMAGE_SOURCE_BINDING_REQUIRED: cause CODEX_MODEL_INCOMPATIBLE"]) await scenario("external", error);

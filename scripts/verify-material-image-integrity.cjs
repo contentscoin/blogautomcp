@@ -15,7 +15,7 @@ const { getDraftApprovalBlockers } = require('../src/app/draft-approval-ui');
 const digest = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 async function main() {
   const dir = store.getBrandPostPackageDir('fixture-image'); fs.mkdirSync(dir, { recursive: true });
-  const images = ['hero', 'city', 'bathroom'].map(name => { const file = path.join(dir, name + '.png'); fs.writeFileSync(file, 'fixture:' + name); return file; });
+  const images = ['hero', 'city', 'bathroom'].map(name => { const file = path.join(dir, name + '.png'); fs.writeFileSync(file, require('./lib/test-png-fixture').testPngFixture('fixture:' + name)); return file; });
   const sections = ['시티투어\n\n도시의 확인된 방문 코스 안내입니다.', '객실 욕실\n\n객실 내 욕실의 확인된 시설 안내입니다.'];
   const cityId = stableFreeformSectionId('TRAVEL', '시티투어');
   const bathroomId = stableFreeformSectionId('TRAVEL', '객실 욕실');
@@ -94,8 +94,9 @@ async function main() {
       readBrandPostPackage: (_id, options) => { reads++; assert.equal(options.migrate, false); return readManifest; } },
     '@/lib/brand-post-image-generation': { applyExternalGeneratedBrandPostImage: async () => { applies++; if (applyFailure) throw Error(applyFailure); await new Promise(resolve => { releaseApply = resolve; }); return { manifest: fixture }; } },
     '@/lib/brand-post-image-repair': { isBrandPostImageRepairActive: () => activeRepair, planSectionImageRequests: () => [{ requestId: 'fixture', sectionId: cityId }],
-      repairBrandPostImages: async () => { repairs++; if (repairFailure) throw Error(repairFailure); return { manifest: fixture, generatedCount: 1,
+      repairBrandPostImages: async () => { repairs++; if (repairFailure) throw Error(repairFailure); return { manifest: fixture, generatedCount: 1, appliedCount: 1,
         errors: repairResultErrors || (automation ? ['section: CHATGPT_BROWSER_AUTH_REQUIRED: login'] : []) }; } },
+    '@/lib/brand-post-image-replan': { replanShoppingImageCoverage: async () => { throw Error('Unexpected replan in route integrity fixture'); } },
     '@/lib/chatgpt-browser-automation': { isChatGptBrowserAutomationEnabled: () => automation } };
   const mod = { exports: {} };
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, '../src/app/api/brandlinks/[id]/draft/images/route.ts'), 'utf8'), {

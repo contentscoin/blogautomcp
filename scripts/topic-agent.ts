@@ -631,6 +631,8 @@ async function getSchedulePanelLocator(page: Page): Promise<Locator> {
 }
 
 async function setInputValueWithNativeEvents(input: Locator, value: string): Promise<string> {
+  // Read-only picker inputs must change through the calendar, never a DOM-only value.
+  if (!(await input.isEditable().catch(() => false))) return "";
     await input.click({ timeout: 1200 }).catch(() => {});
     await input.press("Meta+A").catch(() => {});
     await input.press("Control+A").catch(() => {});
@@ -718,7 +720,7 @@ async function trySetScheduleDateViaDatepicker(page: Page, scheduledDate: Date):
     const targetDay = String(scheduledDate.getDate());
     const panel = await getSchedulePanelLocator(page);
     const dateInput = panel
-        .locator('div[class*="time_setting" i] input.input_date__QmA0s, div[class*="date" i] input.input_date__QmA0s, input.input_date__QmA0s')
+        .locator('div[class*="time_setting" i] input[class*="input_date__"], div[class*="date" i] input[class*="input_date__"], input[class*="input_date__"]')
         .first();
 
     if (!(await dateInput.isVisible().catch(() => false))) {
@@ -771,10 +773,10 @@ async function trySetScheduleDateViaDatepicker(page: Page, scheduledDate: Date):
     }
 
     const dayCandidates = [
-        `table td:not(.ui-state-disabled) button.ui-state-default:text-is("${targetDay}")`,
-        `table td:not(.ui-state-disabled) a.ui-state-default:text-is("${targetDay}")`,
-        `button.ui-state-default:text-is("${targetDay}")`,
-        `a.ui-state-default:text-is("${targetDay}")`,
+        `table td:not(.ui-state-disabled):not(.ui-datepicker-other-month) button.ui-state-default:text-is("${targetDay}")`,
+        `table td:not(.ui-state-disabled):not(.ui-datepicker-other-month) a.ui-state-default:text-is("${targetDay}")`,
+        `td:not(.ui-state-disabled):not(.ui-datepicker-other-month) button.ui-state-default:text-is("${targetDay}")`,
+        `td:not(.ui-state-disabled):not(.ui-datepicker-other-month) a.ui-state-default:text-is("${targetDay}")`,
     ];
 
     for (const selector of dayCandidates) {
@@ -793,8 +795,8 @@ async function trySetScheduleDateViaDatepicker(page: Page, scheduledDate: Date):
 
 async function hasVisibleScheduleDateInput(page: Page): Promise<boolean> {
     const selectors = [
-        'div[class*="layer_publish" i] input.input_date__QmA0s',
-        'div[class*="layer_content_set_publish" i] input.input_date__QmA0s',
+        'div[class*="layer_publish" i] input[class*="input_date__"]',
+        'div[class*="layer_content_set_publish" i] input[class*="input_date__"]',
         'div[class*="layer_publish" i] input[class*="date" i]',
         'div[class*="layer_content_set_publish" i] input[class*="date" i]',
         '.publish_layer input[type="date"]',
@@ -830,19 +832,19 @@ async function trySetScheduleDateInputs(page: Page, scheduledDate: Date): Promis
     const panel = await getSchedulePanelLocator(page);
     const candidateValues = [dottedSpaced, dottedSpacedNoPad, dotted, dottedNoPad, ymd, slash];
     const panelInputSelectors = [
-        'div[class*="time_setting" i] input.input_date__QmA0s',
-        'div[class*="date" i] input.input_date__QmA0s',
-        "input.input_date__QmA0s",
+        'div[class*="time_setting" i] input[class*="input_date__"]',
+        'div[class*="date" i] input[class*="input_date__"]',
+        'input[class*="input_date__"]',
         'input[title*="예약"]',
         'input[placeholder*="날짜"]',
         'input[type="date"]',
         'input[class*="date" i]',
     ];
     const fallbackInputSelectors = [
-        'div[class*="layer_publish" i] input.input_date__QmA0s',
-        'div[class*="layer_content_set_publish" i] input.input_date__QmA0s',
-        '.publish_layer input.input_date__QmA0s',
-        '[role="dialog"] input.input_date__QmA0s',
+        'div[class*="layer_publish" i] input[class*="input_date__"]',
+        'div[class*="layer_content_set_publish" i] input[class*="input_date__"]',
+        '.publish_layer input[class*="input_date__"]',
+        '[role="dialog"] input[class*="input_date__"]',
         'div[class*="layer_publish" i] input[class*="date" i]',
         'div[class*="layer_content_set_publish" i] input[class*="date" i]',
     ];
@@ -936,7 +938,7 @@ async function trySetScheduleDateInputsFallback(page: Page, scheduledDate: Date)
     const slash = `${yyyy}/${mm}/${dd}`;
     const panel = await getSchedulePanelLocator(page);
     const dialogInputs = panel.locator(
-        'div[class*="time_setting" i] input, div[class*="date" i] input, input.input_date__QmA0s, input[type="date"], input[class*="date" i], input[placeholder*="날짜"], input[name*="date" i], input[id*="date" i]'
+        'div[class*="time_setting" i] input, div[class*="date" i] input, input[class*="input_date__"], input[type="date"], input[class*="date" i], input[placeholder*="날짜"], input[name*="date" i], input[id*="date" i]'
     );
     const inputCount = Math.min(await dialogInputs.count().catch(() => 0), 30);
 
@@ -974,7 +976,7 @@ async function trySetScheduleDateInputsFallback(page: Page, scheduledDate: Date)
 async function verifyScheduleDateApplied(page: Page, scheduledDate: Date): Promise<boolean> {
     const ymd = formatDateYmd(scheduledDate);
     const panel = await getSchedulePanelLocator(page);
-    const inputs = panel.locator('div[class*="time_setting" i] input.input_date__QmA0s, input.input_date__QmA0s, input[type="date"]');
+    const inputs = panel.locator('div[class*="time_setting" i] input[class*="input_date__"], input[class*="input_date__"], input[type="date"]');
     const count = Math.min(await inputs.count().catch(() => 0), 20);
     let hasVisibleDateInput = false;
 
@@ -1272,8 +1274,7 @@ async function configureSchedulePublish(page: Page, scheduledDate: Date): Promis
                 '[role="dialog"] button:has-text("날짜")',
                 '.publish_layer button:has-text("날짜")',
             ]);
-            // just assume date is set properly to prevent breaking when we bypass via evaluate script
-            dateSet = true;
+            continue;
         }
 
         dateVerified = await verifyScheduleDateApplied(page, scheduledDate);

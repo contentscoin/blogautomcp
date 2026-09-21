@@ -3,6 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import sharp from "sharp";
+import { isPublicationImageAspectAllowed } from "./publication-image-geometry";
+import { recordPublicationImageRejections } from "./publish-image-rejections";
 import { runCodexDraft, type CodexDraftOptions } from "./codex-draft-provider";
 import { allowsGenericBrandPostProductPhoto, isShoppingLifestyleImage } from "../../src/lib/brand-post-image-evidence";
 import type { ResolvedPostDocumentV1 } from "../../src/lib/post-composition-contract";
@@ -20,6 +22,7 @@ export interface PublishImageAuditResult {
   images: Array<{ nodeIndex: number; assetPath: string; sha256: string }>;
 }
 export interface PublishImageAuditOptions {
+  brandLinkId?: string;
   productName: string;
   /** Must include the selected scent/model/size/quantity, not just the brand. */
   selectedProduct?: string;
@@ -91,7 +94,7 @@ export async function auditPublishImages(options: PublishImageAuditOptions): Pro
         const metadata = await sharp(bytes, { failOn: "warning" }).metadata();
         const { width, height } = metadata;
         if (!width || !height || (metadata.pages ?? 1) !== 1) throw new Error("Invalid/animated image");
-        if (Math.max(width / height, height / width) > 3) {
+        if (!isPublicationImageAspectAllowed(width, height)) {
           fail(nodeIndex, node.assetPath, "LONG_IMAGE", `Final image ${width}x${height} exceeds the 3:1 aspect-ratio limit.`);
           continue;
         }
@@ -169,6 +172,14 @@ export async function auditPublishImages(options: PublishImageAuditOptions): Pro
 
 export async function assertPublishImagesSafe(options: PublishImageAuditOptions): Promise<PublishImageAuditResult> {
   const audit = await auditPublishImages(options);
+  if (options.brandLinkId) recordPublicationImageRejections(options.brandLinkId, options.composition,
+    audit.failures.filter(failure => failure.code === "SEMANTIC_REJECTION" &&
+      !audit.failures.some(other => other.nodeIndex === failure.nodeIndex && other.code === "IMAGE_CHANGED"))
+      .flatMap(failure => {
+        const image = audit.images.find(item => item.nodeIndex === failure.nodeIndex);
+        const node = options.composition.renderNodes[failure.nodeIndex];
+        return image && node?.kind === "image" ? [{ sha256: image.sha256, sectionId: node.sectionId }] : [];
+      }));
   if (!audit.ok) throw new PublishImageAuditError(audit);
   return audit;
 }

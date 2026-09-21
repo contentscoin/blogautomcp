@@ -8,6 +8,7 @@ import {
   selectShoppingProductSources,
 } from "../../scripts/lib/product-photo-source";
 import { selectVerifiedProductSectionImages } from "../../scripts/lib/product-photo-review";
+import { rejectedPublicationImageHashes } from "../../scripts/lib/publish-image-rejections";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -783,10 +784,19 @@ export async function generateBrandPostImages(options: {
         const reviewed = await selectVerifiedProductSectionImages(
           directSources.map(source => source.path),
           options.productName,
-          eligibleTargets.map(({ target }) => ({
-            sectionTitle: target.sectionTitle,
-            imageIntent: target.imageIntent,
-          })),
+          eligibleTargets.map(({ target }) => {
+            // Match final publication audit context exactly, including paragraphs
+            // beyond the short prompt excerpt. Planning intent cannot authorize
+            // a photograph of a different benefit on the same product.
+            const nodes = options.manifest.composition.renderNodes.filter(node =>
+              "sectionId" in node && node.sectionId === target.sectionId);
+            return {
+              sectionTitle: nodes.flatMap(node => node.kind === "heading" || node.kind === "quotation" ? [node.text] : []).join("\n"),
+              sectionBody: nodes.flatMap(node => node.kind === "paragraph" ? [node.text] : []),
+              excludedSourceSha256: rejectedPublicationImageHashes(options.manifest.brandLinkId, options.manifest.composition, target.sectionId ?? null),
+              imageIntent: target.imageIntent,
+            };
+          }),
           { onDiagnostics: report => {
             const packageDir = getBrandPostPackageDir(options.manifest.brandLinkId);
             atomicWriteTextFile(path.join(packageDir, "image-source-diagnostics.json"), JSON.stringify({
@@ -817,35 +827,8 @@ export async function generateBrandPostImages(options: {
       }
     }
 
-    // Overview slots may bind unbound seller originals without a live model
-    // review when that review is unavailable or incomplete. Feature slots never
-    // receive this fallback — they still require feature-evidence.
-    {
-      const claimedHashes = new Set([...reviewedByTarget.values()].map(row => row.sourceSha256));
-      const unusedSources = directSources.filter(source => !claimedHashes.has(source.sha256));
-      let unusedIndex = 0;
-      for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
-        if (reviewedByTarget.has(targetIndex)) continue;
-        const target = targets[targetIndex];
-        if (target.role !== "body") continue;
-        if (isShoppingLifestyleImage(target)) continue;
-        if (!allowsGenericBrandPostProductPhoto({
-          sectionTitle: target.sectionTitle,
-          imageIntent: target.imageIntent,
-        })) continue;
-        const source = unusedSources[unusedIndex];
-        if (!source) break;
-        unusedIndex += 1;
-        reviewedByTarget.set(targetIndex, {
-          targetIndex,
-          path: source.path,
-          sourceSha256: source.sha256,
-          reviewClass: "product-photo",
-          reason: "overview fallback: unbound verified seller original",
-          reviewedAt: new Date().toISOString(),
-        });
-      }
-    }
+    // No overview fallback: a rejected or unavailable section review cannot
+    // become a fabricated product-photo approval. Preserve its cause below.
 
     const pendingTargets: ResolvedImageTarget[] = [];
     const pendingIndexes: number[] = [];

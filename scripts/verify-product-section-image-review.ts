@@ -1,3 +1,5 @@
+import { publicationImageGeometryIssue } from "./lib/publication-image-geometry";
+import { testPngFixture } from "./lib/test-png-fixture";
 /** Offline section-image evidence gate regression checks. */
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
@@ -14,7 +16,7 @@ interface ReviewModule {
   selectVerifiedProductSectionImages(
     paths: string[],
     productName: string,
-    targets: Array<{ sectionTitle: string; imageIntent: string }>,
+    targets: Array<{ sectionTitle: string; imageIntent: string; sectionBody?: string[]; excludedSourceSha256?: string[] }>,
     options?: ProductSectionImageReviewOptions,
   ): Promise<Array<{ targetIndex: number; sourceSha256: string; reviewClass: string }>>;
   selectVerifiedProductSectionImage(
@@ -22,6 +24,7 @@ interface ReviewModule {
     productName: string,
     sectionTitle: string,
     imageIntent: string,
+    sectionBody?: string[],
   ): Promise<{ sourceSha256: string; reviewClass: string } | null>;
 }
 
@@ -43,6 +46,7 @@ function loadReview(answer: string | ((options: ReviewCall, callIndex: number) =
     module: loadedModule,
     exports: loadedModule.exports,
     require: (name: string) => {
+      if (name === "./publication-image-geometry") return { publicationImageGeometryIssue };
       if (name === "node:fs") return fs;
       if (name === "node:crypto") return crypto;
       if (name === "./codex-draft-provider") return {
@@ -66,7 +70,7 @@ function loadReview(answer: string | ((options: ReviewCall, callIndex: number) =
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "section-image-review-"));
   const candidate = path.join(root, "seller-photo.jpg");
-  fs.writeFileSync(candidate, "seller image bytes");
+  fs.writeFileSync(candidate, testPngFixture("seller image bytes"));
   const sha256 = crypto.createHash("sha256").update(fs.readFileSync(candidate)).digest("hex");
   const featureTarget = {
     sectionTitle: "냉온풍이 만드는 차이",
@@ -78,6 +82,21 @@ async function main() {
   };
 
   try {
+    const rejectedHash = loadReview('{"assignments":[{"targetIndex":1,"selectedIndex":1,"reviewClass":"feature-evidence","reason":"same rejected image"}]}');
+    assert.equal((await rejectedHash.review.selectVerifiedProductSectionImages([candidate], "fixture", [{ ...featureTarget, excludedSourceSha256: [sha256] }])).length, 0);
+    const bodyAware = loadReview('{"assignments":[]}');
+    const body = ["촉촉한 수분 공급이 필요한 경우의 선택 기준입니다."];
+    await bodyAware.review.selectVerifiedProductSectionImages([candidate], "fixture", [{ ...featureTarget, sectionBody: body }]);
+    assert.match(bodyAware.prompt, /촉촉한 수분 공급/);
+    assert.match(bodyAware.prompt, /실제 발행 문장/);
+    assert.match(bodyAware.prompt, /같은 상품의 다른 효능/);
+    await bodyAware.review.selectVerifiedProductSectionImages([candidate], "fixture", [{ ...featureTarget, sectionBody: ["보송한 마무리 기준입니다."] }]);
+    assert.equal(bodyAware.calls.length, 2, "body edits invalidate section review cache");
+    const singleBody = loadReview('{"selectedIndex":null}');
+    await singleBody.review.selectVerifiedProductSectionImage([candidate], "fixture", "발림", "공식 기능 설명", body);
+    assert.match(singleBody.prompt, /촉촉한 수분 공급/);
+    await singleBody.review.selectVerifiedProductSectionImage([candidate], "fixture", "발림", "공식 기능 설명", ["보송한 마무리"]);
+    assert.equal(singleBody.calls.length, 2, "single review cache includes actual text");
     const diagnosticReports: ProductSectionImageDiagnostics[] = [];
     const diagnosed = loadReview('{"assignments":[],"rejections":[{"targetIndex":1,"selectedIndex":1,"reason":"45분 표시가 없음"}]}');
     const diagnosticOptions = { onDiagnostics: (report: ProductSectionImageDiagnostics) => diagnosticReports.push(report) };
@@ -156,7 +175,7 @@ async function main() {
 
     const manyCandidates = Array.from({ length: 17 }, (_, index) => {
       const file = path.join(root, `generic-${String(index).padStart(2, "0")}.jpg`);
-      fs.writeFileSync(file, `generic seller photo ${index}`);
+      fs.writeFileSync(file, testPngFixture(`generic seller photo ${index}`));
       return file;
     });
     const lateEvidence = manyCandidates[16];
