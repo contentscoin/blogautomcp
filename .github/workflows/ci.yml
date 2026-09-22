@@ -48,6 +48,7 @@ jobs:
       - name: Unit checks
         run: |
           npm run test:connect-detection
+          npm run test:material-regression
           npm run test:connect-store
           npm run test:title-rules
           npm run test:post-spec

@@ -23,14 +23,14 @@ import { listTravelItems } from "../src/lib/travel-connect-adapter";
 import type { ConnectItem } from "../src/lib/connect-item";
 import { matchesTravelSelectionFilters } from "../src/lib/travel-selection-options";
 import { isLoginRedirect } from "./lib/naver-editor-selectors";
+import { assertShoppingAccess, resolveShoppingCategoryUrl } from "../src/lib/shopping-connect-access";
 
 chromium.use(StealthPlugin());
 
 const NAVER_SESSION_EXPIRED_MESSAGE =
   "네이버 로그인 세션이 만료되었습니다. 앱에서 네이버 재로그인(또는 npm run login) 후 다시 시도하세요.";
 
-const DEFAULT_CATEGORY_URL =
-  "https://brandconnect.naver.com/916297527319296/affiliate/products/category/10031299";
+const DEFAULT_CATEGORY_URL = "";
 const DEFAULT_STORAGE_STATE_PATH = getNaverSessionFile();
 const KST_TIMEZONE = "Asia/Seoul";
 const BRANDCONNECT_MINIMIZE_WINDOW =
@@ -583,7 +583,8 @@ function appendUniqueProduct(
 async function fetchBrandConnectJson(
   page: Page,
   url: string,
-  spaceId: string
+  spaceId: string,
+  requireAccess = false,
 ): Promise<unknown | null> {
   const fromPage = await page
     .evaluate(
@@ -628,13 +629,15 @@ async function fetchBrandConnectJson(
   if (response?.ok()) {
     return response.json().catch(() => null);
   }
+  if (response && requireAccess) assertShoppingAccess(response.status());
   return null;
 }
 
 async function fetchProductsForDisplayCategory(
   page: Page,
   categoryId: string,
-  spaceId: string
+  spaceId: string,
+  requireAccess = false,
 ): Promise<ProductApiItem[]> {
   const url = new URL(
     "https://gw-brandconnect.naver.com/affiliate/query/affiliate-products/search-by-display-category"
@@ -642,7 +645,7 @@ async function fetchProductsForDisplayCategory(
   url.searchParams.set("displayCategoryId", categoryId);
   url.searchParams.set("limit", String(BRANDCONNECT_PRODUCT_LIST_LIMIT));
 
-  const payload = await fetchBrandConnectJson(page, url.toString(), spaceId);
+  const payload = await fetchBrandConnectJson(page, url.toString(), spaceId, requireAccess);
   return parseProductApiItems(payload);
 }
 
@@ -685,7 +688,7 @@ async function loadInitialCategoryProducts(
 ): Promise<ProductApiItem[]> {
   assertBrandConnectLoggedIn(page);
 
-  const fromApi = await fetchProductsForDisplayCategory(page, rootCategoryId, spaceId);
+  const fromApi = await fetchProductsForDisplayCategory(page, rootCategoryId, spaceId, true);
   if (fromApi.length > 0) return fromApi;
 
   const fromNetwork = capturedFromNetwork();
@@ -714,7 +717,7 @@ async function loadInitialCategoryProducts(
     await page.waitForTimeout(300);
   }
 
-  const retryApi = await fetchProductsForDisplayCategory(page, rootCategoryId, spaceId);
+  const retryApi = await fetchProductsForDisplayCategory(page, rootCategoryId, spaceId, true);
   if (retryApi.length > 0) return retryApi;
 
   const retryNetwork = capturedFromNetwork();
@@ -1684,7 +1687,9 @@ async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const explicitUrl = process.argv.slice(2).find((arg) => arg.startsWith('--category-url='))?.slice('--category-url='.length);
-  options.categoryUrl = getConfiguredConnectUrl(options.connectKind, explicitUrl) || (options.connectKind === 'shopping' ? DEFAULT_CATEGORY_URL : '');
+  options.categoryUrl = options.connectKind === "shopping"
+    ? await resolveShoppingCategoryUrl(explicitUrl, options.storageStatePath)
+    : getConfiguredConnectUrl(options.connectKind, explicitUrl) || "";
   const connectContract = resolveConnectContract(options.connectKind, options.categoryUrl);
   if (connectContract.captureRequired) {
     throw new Error(JSON.stringify(buildCaptureRequiredPayload(connectContract)));

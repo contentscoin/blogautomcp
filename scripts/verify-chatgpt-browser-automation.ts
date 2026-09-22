@@ -434,10 +434,11 @@ async function main(): Promise<void> {
   );
 
   const topicPipeline = source("src/services/topic-task-pipeline.ts");
-  assert.match(
-    topicPipeline,
-    /const handle = await createChatGPTContext\(true\);\s*try \{\s*const page = await handle\.context\.newPage\(\);/u,
-  );
+  // Topic images now delegate to the isolated workers; the service must not
+  // create a second shared browser context itself.
+  assert.doesNotMatch(topicPipeline, /createChatGPTContext\(/u);
+  assert.ok(topicPipeline.includes('"scripts/chatgpt-generate-image.ts"'));
+  assert.ok(topicPipeline.includes('"scripts/chatgpt-generate-image-batch.ts"'));
   const singleImageGenerator = source("scripts/chatgpt-generate-image.ts");
   assert.match(
     singleImageGenerator,

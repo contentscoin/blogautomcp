@@ -59,6 +59,31 @@ function fixture(settings: { readyAt?: number; generating?: boolean; staleStop?:
 }
 
 async function main() {
+  const receiptDocument = {
+    querySelectorAll: (selector: string) => selector === '[data-message-author-role="user"]'
+      ? [{ textContent: "reference.png requested\n prompt" }, { textContent: "unrelated" }]
+      : [
+        { textContent: "나의 말: requested prompt", querySelector: () => null },
+        { textContent: "You said: requested prompt", querySelector: () => ({}) },
+        { textContent: "Assistant: requested prompt", querySelector: () => null },
+      ],
+  };
+  const domPage = { evaluate: async (fn: { toString(): string }, expected: string) => vm.runInNewContext(`(${fn.toString()})(expected)`, { document: receiptDocument, expected }) } as unknown as Parameters<typeof api.countChatGPTPromptReceipts>[0];
+  assert.equal(await api.countChatGPTPromptReceipts(domPage, "requested prompt"), 2, "role and Korean user-turn fallback match; assistant and duplicate wrapper never count");
+  assert.equal(await api.countChatGPTPromptReceipts(domPage, "other prompt"), 0);
+  const matched = fixture();
+  const matchedEvaluate = matched.page.evaluate.bind(matched.page);
+  // Isolate matching receipt counts from auth/protection evaluate probes.
+  matched.page.evaluate = ((fn: { toString(): string }) => fn.toString().includes("const wanted")
+    ? Promise.resolve(matched.now() >= 1500 ? 2 : 1) : matchedEvaluate(fn as never)) as typeof matched.page.evaluate;
+  await api.waitForChatGPTImageReceipt(matched.page, 0, { now: matched.now, prompt: "requested prompt", previousPromptReceipts: 1 });
+  assert.equal(matched.now(), 1500, "an old matching user turn is not a new receipt");
+  const unowned = fixture({ generating: true });
+  const unownedEvaluate = unowned.page.evaluate.bind(unowned.page);
+  unowned.page.evaluate = ((fn: { toString(): string }) => fn.toString().includes("const wanted")
+    ? Promise.resolve(0) : unownedEvaluate(fn as never)) as typeof unowned.page.evaluate;
+  await assert.rejects(api.waitForChatGPTImageReceipt(unowned.page, 0, { now: unowned.now, prompt: "requested prompt", previousPromptReceipts: 0 }), /IMAGE_SUBMISSION_UNCONFIRMED/);
+
   const receipt = fixture();
   const receiptLocator = receipt.page.locator.bind(receipt.page);
   receipt.page.locator = ((selector: string) => selector === '[data-message-author-role="user"]'

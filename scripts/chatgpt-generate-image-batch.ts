@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import { imagePageSignals, keepFailedDiagnosticOpen, imageBatchSucceeded } from "./lib/image-batch-diagnostics";
 import {
   countRenderableChatGPTImages,
+  countChatGPTPromptReceipts,
   createChatGPTContext,
   isChatGPTGenerating,
   downloadChatGPTImages,
@@ -38,6 +39,8 @@ interface BatchResult {
   localPath: string | null;
   error?: string;
   retryable?: boolean;
+  failureCause?: string;
+  failedStage?: string;
   startedAt?: string;
   completedAt?: string;
   elapsedMs?: number;
@@ -95,6 +98,22 @@ export function imageJobFingerprint(job: BatchJob): string {
 }
 
 /** Ambiguous attempts must be recovered manually, never silently regenerated. */
+export function isRecoveryConversationPath(value: unknown): value is string {
+  return typeof value === "string" && /^\/(?:g\/[a-zA-Z0-9_-]+\/)?c\/[a-zA-Z0-9-]+$/u.test(value);
+}
+
+/** Only allowlisted categories are persisted; never expose raw exception text. */
+export function imageFailureCause(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/Target page, context or browser has been closed|page.*closed/i.test(message)) return "BROWSER_CLOSED";
+  if (/Timeout|timed out/i.test(message)) return "OPERATION_TIMEOUT";
+  if (/첨부 입력창|file.*input/i.test(message)) return "REFERENCE_INPUT_MISSING";
+  if (/composer|입력창/i.test(message)) return "COMPOSER_UNAVAILABLE";
+  if (/다운로드.*비어|download.*empty/i.test(message)) return "ARTIFACT_NOT_FOUND";
+  if (/net::|network|fetch failed/i.test(message)) return "NETWORK_ERROR";
+  return "OPERATION_FAILED";
+}
+
 export function readImageBatchResume(resultsFile: string, jobs: BatchJob[]): Map<string, BatchResult> {
   const resumed = new Map<string, BatchResult>();
   if (!fs.existsSync(resultsFile)) return resumed;
@@ -134,7 +153,7 @@ export function readImageBatchResume(resultsFile: string, jobs: BatchJob[]): Map
       } catch { /* Missing output is not permission to generate again. */ }
     }
     const recoveryConversationPath = [...matches].reverse().find(record =>
-      typeof record.recoveryConversationPath === "string" && /^\/c\/[a-zA-Z0-9-]+$/u.test(record.recoveryConversationPath))?.recoveryConversationPath as string | undefined;
+      isRecoveryConversationPath(record.recoveryConversationPath))?.recoveryConversationPath as string | undefined;
     const refused = typeof last.error === "string" && last.error.startsWith("IMAGE_PROVIDER_REFUSED:");
     resumed.set(job.id, valid ? { id: job.id, localPath: last.localPath! } : {
       id: job.id, localPath: null,
@@ -241,6 +260,7 @@ async function runJob(
   beforeSend: () => void,
   saveProgress?: (value: object) => void,
   recoveryConversationPath?: string,
+  preparationMs = IMAGE_PREPARATION_MS,
 ): Promise<BatchResult> {
   const tempDir = path.join(
     path.dirname(job.outStem),
@@ -252,17 +272,19 @@ async function runJob(
   let phaseStarted = started;
   let transmitted = !!recoveryConversationPath;
   let cancelled = false;
+  let lastStage = "preparation-start";
   let savedConversationPath = recoveryConversationPath;
   const saveConversation = () => {
     if (!transmitted || cancelled) return;
     let conversationPath: string;
-    try { conversationPath = new URL(page.url()).pathname; } catch { return; }
-    if (/^\/c\/[a-zA-Z0-9-]+$/u.test(conversationPath) && conversationPath !== savedConversationPath) {
+    try { const url = new URL(page.url()); if (url.origin !== "https://chatgpt.com") return; conversationPath = url.pathname; } catch { return; }
+    if (isRecoveryConversationPath(conversationPath) && conversationPath !== savedConversationPath) {
       saveProgress?.({ state: "submitted", recoveryConversationPath: conversationPath });
       savedConversationPath = conversationPath;
     }
   };
   const trace = async (stage: string) => {
+    if (stage !== "failed") lastStage = stage;
     const observedAt = new Date().toISOString();
     const elapsedMs = Date.now() - started;
     saveConversation();
@@ -282,7 +304,7 @@ async function runJob(
   try {
     await withinImageDeadline(async () => {
       if (recoveryConversationPath) {
-        if (!/^\/c\/[a-zA-Z0-9-]+$/u.test(recoveryConversationPath)) throw new Error("Invalid recovery conversation path");
+        if (!isRecoveryConversationPath(recoveryConversationPath)) throw new Error("Invalid recovery conversation path");
         await navigateToChatGpt(page, `https://chatgpt.com${recoveryConversationPath}`, {
           label: "기존 이미지 생성 대화 복구",
           reveal: null,
@@ -299,19 +321,20 @@ async function runJob(
       await trace("references-ready");
       await trace("before-submit");
       const previousUserMessages = (await imagePageSignals(page)).userMessages;
+      const previousPromptReceipts = await countChatGPTPromptReceipts(page, job.prompt);
       await submitPromptToChatGPT(page, job.prompt, `주제 이미지 생성 ${job.id}`, () => {
         if (cancelled) throw new Error("Image preparation already ended");
         beforeSend();
         transmitted = true;
       }, stage => trace(stage));
       await trace("after-submit");
-      await waitForChatGPTImageReceipt(page, previousUserMessages, { onPoll: saveConversation });
+      await waitForChatGPTImageReceipt(page, previousUserMessages, { onPoll: saveConversation, prompt: job.prompt, previousPromptReceipts });
       await trace("receipt-confirmed");
       await maybeConfirmGeneration(page, () => {
         if (cancelled) throw new Error("Image preparation already ended");
       });
       await trace("after-confirmation-check");
-    }, IMAGE_PREPARATION_MS, phase);
+    }, preparationMs, phase);
     phase = "generation";
     phaseStarted = Date.now();
     await waitForImageCompletion(page, saveConversation);
@@ -348,7 +371,7 @@ async function runJob(
     const timedOut = error instanceof Error && /IMAGE_TIMEOUT:/.test(error.message);
     const elapsedSeconds = Math.round((Date.now() - phaseStarted) / 1000);
     const phaseLabel = phase === "generation" ? "이미지 생성 대기" : phase === "download" ? "이미지 다운로드" : "이미지 준비";
-    const budgetMs = phase === "generation" ? imageWaitPolicy().hardMs : phase === "download" ? IMAGE_DOWNLOAD_ATTEMPT_MS : IMAGE_PREPARATION_MS;
+    const budgetMs = phase === "generation" ? imageWaitPolicy().hardMs : phase === "download" ? IMAGE_DOWNLOAD_ATTEMPT_MS : preparationMs;
     const refused = error instanceof Error && error.message.startsWith("IMAGE_PROVIDER_REFUSED:");
     const unconfirmed = error instanceof Error && error.message.startsWith("IMAGE_SUBMISSION_UNCONFIRMED:");
     const message = refused || unconfirmed ? (error as Error).message : sessionFailure === "authentication"
@@ -360,11 +383,12 @@ async function runJob(
         (timedOut && phase === "generation"
           ? ((error as Error).message.includes("최대 대기시간 도달") ? "최대 대기시간 도달. "
             : (error as Error).message.includes("진행 신호 미관측") ? "진행 신호 미관측으로 기본 대기 종료. " : "")
-          : "") + "요청을 재전송하지 않았습니다.";
+          : "") + `원인 ${imageFailureCause(error)} / 단계 ${lastStage}. 요청을 재전송하지 않았습니다.`;
     // No raw exception, URLs, prompt, DOM, screenshot, cookies or account identifiers.
     try {
       fs.writeFileSync(path.join(tempDir, "failure.json"), JSON.stringify({
         version: 1, phase, elapsedMs: Date.now() - started,
+        cause: imageFailureCause(error), stage: lastStage,
         category: refused
           ? "provider-refused"
           : sessionFailure === "authentication"
@@ -381,6 +405,8 @@ async function runJob(
       localPath: null,
       error: message,
       retryable: !transmitted,
+      failureCause: imageFailureCause(error),
+      failedStage: lastStage,
     };
   }
 }
@@ -443,9 +469,22 @@ async function runBatch() {
       handle ||= await createChatGPTContext(true);
       // Isolate timed-out operations from later slots. Closing this page cancels local
       // preparation/download actions, but never retries the remote generation request.
-      const page = await handle.context.newPage();
-      const result = await runJob(page, job, gptUrl, () => journal(job, { state: "attempted" }),
+      let page = await handle.context.newPage();
+      let result = await runJob(page, job, gptUrl, () => journal(job, { state: "attempted" }),
         value => journal(job, value), recovered?.recoveryConversationPath);
+      // Only a proven pre-dispatch transient failure is safe to retry. Never retry
+      // a closed browser (possibly user cancellation), auth, or an ambiguous send.
+      if (result.retryable && Date.now() - slotStarted < IMAGE_PREPARATION_MS &&
+          !classifySessionWideImageFailure(result.error || "") &&
+          ["OPERATION_TIMEOUT", "NETWORK_ERROR"].includes(result.failureCause || "")) {
+        await withinImageDeadline(() => page.close(), 10_000, "preflight cleanup");
+        const remainingPreparationMs = IMAGE_PREPARATION_MS - (Date.now() - slotStarted);
+        if (remainingPreparationMs > 0) {
+          page = await handle.context.newPage();
+          result = await runJob(page, job, gptUrl, () => journal(job, { state: "attempted" }),
+            value => journal(job, value), undefined, remainingPreparationMs);
+        }
+      }
       record({ ...result, startedAt: new Date(slotStarted).toISOString(), completedAt: new Date().toISOString(), elapsedMs: Date.now() - slotStarted });
       if (result.error && keepFailedDiagnosticOpen(process.env, jobs.length) && !page.isClosed()) {
         console.error("[chatgpt-image-batch] 진단 실패: 브라우저를 유지합니다. 확인 후 이 탭/창을 닫으면 진단이 종료됩니다. 추가 생성 요청은 보내지 않습니다.");

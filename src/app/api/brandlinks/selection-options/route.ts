@@ -17,11 +17,10 @@ import {
   listTravelItems,
 } from "@/lib/travel-connect-adapter";
 import { buildTravelSelectionOptions } from "@/lib/travel-selection-options";
+import { assertShoppingAccess, resolveShoppingCategoryUrl, ShoppingConnectAccessError } from "@/lib/shopping-connect-access";
 
 export const runtime = "nodejs";
 
-const DEFAULT_CATEGORY_URL =
-  "https://brandconnect.naver.com/916297527319296/affiliate/products/category/10031299";
 const BRANDCONNECT_OPTION_CATEGORY_LIMIT = parseBoundedInteger(
   process.env.BRANDCONNECT_OPTION_CATEGORY_LIMIT,
   36,
@@ -143,7 +142,7 @@ async function mapWithConcurrency<T, R>(
 
 type JsonResult =
   | { ok: true; payload: unknown }
-  | { ok: false; status: number | null; unauthorized: boolean };
+  | { ok: false; status: number | null };
 
 async function fetchBrandConnectJson(
   url: string,
@@ -164,13 +163,13 @@ async function fetchBrandConnectJson(
     signal: AbortSignal.timeout(timeoutMs),
   }).catch(() => null);
 
-  if (!response) return { ok: false, status: null, unauthorized: false };
+  if (!response) return { ok: false, status: null };
   if (!response.ok) {
-    return { ok: false, status: response.status, unauthorized: response.status === 401 || response.status === 403 };
+    return { ok: false, status: response.status };
   }
 
   const payload = await response.json().catch(() => null);
-  if (payload === null) return { ok: false, status: response.status, unauthorized: false };
+  if (payload === null) return { ok: false, status: response.status };
   return { ok: true, payload };
 }
 
@@ -509,7 +508,7 @@ interface ShoppingOptions {
   categories: DisplayCategory[];
   promotions: PromotionOption[];
   truncated: boolean;
-  sessionExpired: boolean;
+  accessFailure: number | null;
 }
 
 async function loadShoppingOptions(
@@ -520,7 +519,7 @@ async function loadShoppingOptions(
   storageStatePath: string,
   deadline: Deadline
 ): Promise<ShoppingOptions> {
-  let sessionExpired = false;
+  let accessFailure: number | null = null;
   let truncated = false;
 
   const requestJson = async (url: string): Promise<unknown | null> => {
@@ -531,7 +530,7 @@ async function loadShoppingOptions(
     }
     const result = await fetchBrandConnectJson(url, spaceId, cookieHeader, categoryUrl, timeout);
     if (result.ok) return result.payload;
-    if (result.unauthorized) sessionExpired = true;
+    if (result.status === 401 || result.status === 403) accessFailure = result.status;
     return null;
   };
 
@@ -637,11 +636,10 @@ async function loadShoppingOptions(
     addPromotion(promotionMap, promotionText);
   }
 
-  return { categories, promotions: sortPromotions(promotionMap), truncated, sessionExpired };
+  return { categories, promotions: sortPromotions(promotionMap), truncated, accessFailure };
 }
 
 export async function GET(request: NextRequest) {
-  const deadline = new Deadline(BRANDCONNECT_OPTION_BUDGET_MS);
   let connectKind: ConnectKind = "shopping";
 
   try {
@@ -688,7 +686,8 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    const categoryUrl = contract.configuredUrl || DEFAULT_CATEGORY_URL;
+    const categoryUrl = await resolveShoppingCategoryUrl(contract.configuredUrl, storageStatePath);
+    const deadline = new Deadline(BRANDCONNECT_OPTION_BUDGET_MS);
     const spaceId = getSpaceIdFromConnectUrl(categoryUrl);
     const rootCategoryId = getShoppingCategoryIdFromUrl(categoryUrl);
     if (!spaceId || !rootCategoryId) {
@@ -714,7 +713,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const { categories, promotions, truncated, sessionExpired } = await loadShoppingOptions(
+    const { categories, promotions, truncated, accessFailure } = await loadShoppingOptions(
       categoryUrl,
       spaceId,
       rootCategoryId,
@@ -722,15 +721,9 @@ export async function GET(request: NextRequest) {
       storageStatePath,
       deadline
     );
-
-    // 예전에는 모든 실패를 삼켜서 "성공했지만 빈 목록"으로 보였다. 인증 실패는
-    // 빈 결과가 아니라 오류로 알린다.
-    if (sessionExpired && categories.length <= 1) {
-      return NextResponse.json(
-        { success: false, error: "브랜드커넥트 세션이 만료되었습니다. 네이버 로그인을 다시 진행하세요." },
-        { status: 401 }
-      );
-    }
+    // Optional feeds may have different permissions. Keep a usable list, while
+    // preserving 401 vs 403 when no usable category set was obtained.
+    if (accessFailure && categories.length <= 1) assertShoppingAccess(accessFailure);
 
     return NextResponse.json({
       success: true,
@@ -744,6 +737,9 @@ export async function GET(request: NextRequest) {
       },
     });
   } catch (error: unknown) {
+    if (error instanceof ShoppingConnectAccessError) {
+      return NextResponse.json({ success: false, error: error.message, code: error.code }, { status: error.status });
+    }
     if (error instanceof ConnectSessionExpiredError) {
       return NextResponse.json({ success: false, error: error.message }, { status: 401 });
     }

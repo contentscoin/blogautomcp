@@ -844,6 +844,7 @@ async function verifyProducer(
   count = 3,
   downloadTimeout = false,
   networkFailure = false,
+  preflightFailure = false,
 ) {
   process.env.BRAND_POST_IMAGE_BATCH_FAIL_FAST = failFast ? "true" : "false";
   const dir = fs.mkdtempSync(path.join(root, "producer-"));
@@ -856,6 +857,8 @@ async function verifyProducer(
   let submitted = 0;
   let downloads = 0;
   let closed = false;
+  let pagesOpened = 0;
+  let preflightFailed = false;
   const page = { waitForTimeout: async () => {}, textContent: async () => "", close: async () => {},
     locator: () => ({ count: async () => 0 }) };
   const readRecords = () => fs.readFileSync(checkpoint, "utf8").trim().split("\n").map((line) => JSON.parse(line));
@@ -871,13 +874,14 @@ async function verifyProducer(
     "./lib/chatgpt-browser": {
       createChatGPTContext: async () => {
         if (startupFailure) throw new Error("browser startup failed");
-        return { context: { newPage: async () => page }, close: async () => {
+        return { context: { newPage: async () => { pagesOpened++; return page; } }, close: async () => {
           // Final stdout must be available even if browser cleanup hangs or fails.
           assert.equal(JSON.parse(stdout).jobs.length, count);
           closed = true;
         } };
       },
       openFreshChatGPTTarget: async () => {
+        if (preflightFailure && !preflightFailed) { preflightFailed = true; throw new Error("Timeout preparing page"); }
         if (networkFailure && submitted === 0) {
           throw new Error("Image navigation failed: CHATGPT_BROWSER_UNREACHABLE: net::ERR_CERT_COMMON_NAME_INVALID");
         }
@@ -890,6 +894,7 @@ async function verifyProducer(
       readAssistantMessages: async () => [], countRenderableChatGPTImages: async () => 1,
       // 0 = timed out without an artifact. The producer must fail the job instead of downloading nothing.
       waitForChatGPTImageReceipt: async () => {},
+      countChatGPTPromptReceipts: async () => 0,
       waitForChatGPTImageArtifacts: async () => {
         if (submitted === 2 && sessionFailure) throw new Error("CHATGPT_BROWSER_AUTH_REQUIRED: secret-token@example.test");
         return submitted === 2 && failFast ? 0 : 1;
@@ -913,6 +918,7 @@ async function verifyProducer(
   else await api.main();
   const output = JSON.parse(stdout);
   const records = readRecords();
+  if (preflightFailure) assert.equal(pagesOpened, count + 1, "only pre-dispatch transient failure retries on a fresh page");
   assert.equal(output.ok, false, "any failed slot must make the batch unsuccessful");
   assert.ok(!stdout.includes("secret-token"));
   assert.ok(!stderr.includes("secret-token"));
@@ -948,7 +954,7 @@ async function verifyProducer(
       const file = path.join(dir, entry, "failure.json");
       return fs.existsSync(file) ? [fs.readFileSync(file, "utf8")] : [];
     });
-    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics.length, preflightFailure ? 2 : 1);
     assert.ok(!diagnostics[0].includes("secret-token"));
     const diagnostic = JSON.parse(diagnostics[0]);
     assert.equal(diagnostic.category, sessionFailure
@@ -996,6 +1002,7 @@ async function verifyIntegratedResume() {
         },
         isChatGPTGenerating: async () => false, readAssistantMessages: async () => [],
         waitForChatGPTImageReceipt: async () => {},
+        countChatGPTPromptReceipts: async () => 0,
         countRenderableChatGPTImages: async () => 1, waitForChatGPTImageArtifacts: async () => 1,
         downloadChatGPTImages: async () => [rawPath],
       },
@@ -1076,6 +1083,7 @@ async function main() {
     await check("explicit session auth failure stops and records remaining slots", () => verifyProducer(false, true, true));
     await check("certificate failure preserves unreachable and stops all prompts", () => verifyProducer(false, false, false, false, 10, false, true));
     await check("empty artifact retrieval retries safely without regenerating", () => verifyProducer(false, false, false, true));
+    await check("pre-dispatch transient failure retries once on a new page", () => verifyProducer(false, false, false, false, 3, false, false, true));
     await check("timed-out retrieval is never retried concurrently; category and later slots survive", () => verifyProducer(false, false, false, false, 3, true));
     console.log(`Verified ${checks} offline image-batch checks; no paid generation.`);
   } finally {

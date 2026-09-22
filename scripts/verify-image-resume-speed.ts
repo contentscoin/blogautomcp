@@ -39,6 +39,10 @@ const batch = load<typeof import("./chatgpt-generate-image-batch")>("scripts/cha
   "./lib/chatgpt-browser": { createChatGPTContext: () => { browserCalls++; throw new Error("Browser forbidden in offline test"); } },
 });
 async function main() {
+  for (const value of ["/c/abc-123", "/g/g-123-custom/c/abc-123"]) assert.equal(batch.isRecoveryConversationPath(value), true);
+  for (const value of ["//evil.test/c/abc", "/c/abc?token=secret", "/g/x", "/g/x/c/../bad", "https://evil.test/c/abc"]) assert.equal(batch.isRecoveryConversationPath(value), false);
+  assert.equal(batch.imageFailureCause(new Error("Target page, context or browser has been closed")), "BROWSER_CLOSED");
+  assert.equal(batch.imageFailureCause(new Error("locator.click: Timeout 30000ms exceeded secret@example.test")), "OPERATION_TIMEOUT");
   const started = performance.now();
   fs.writeFileSync(jobsFile, JSON.stringify([job]));
   fs.writeFileSync(output, "fixture image bytes");
@@ -76,6 +80,10 @@ async function main() {
   assert.equal(JSON.parse(stdout).jobs[0].localPath, output);
   assert.deepEqual(recoveredUrls, ["https://chatgpt.com/c/fixture-conversation"]);
   assert.equal(newPrompts, 0);
+  write({ id: "slot", fingerprint, state: "submitted", recoveryConversationPath: "/g/g-fixture/c/fixture-conversation" });
+  stdout = ""; await retrieval.main();
+  assert.equal(recoveredUrls.at(-1), "https://chatgpt.com/g/g-fixture/c/fixture-conversation");
+  assert.equal(newPrompts, 0, "custom GPT recovery must only retrieve, never generate");
   assert.ok(fs.readdirSync(dir).some(name => name.startsWith("image.checkpoint.jsonl.partial-")), "partial bytes preserved before appending recovered result");
   write({ id: "slot", fingerprint, error: "IMAGE_PROVIDER_REFUSED: policy" });
   assert.match(batch.readImageBatchResume(journalFile, [{ ...job, id: "slot" }]).get("slot")!.error!, /IMAGE_PROVIDER_REFUSED/);

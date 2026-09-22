@@ -52,6 +52,9 @@ jobs:
           rm -f package-lock.json
           npm install --no-audit --no-fund
 
+      - name: Verify material workflow contracts before packaging
+        run: npm run test:material-regression
+
       # prisma generate는 build 스크립트에 포함되어 OS별 엔진(binaryTargets)을 받는다.
       # asar:false로 node_modules를 통째 복사하므로 파일 디스크립터 한계를 올린다(macOS EMFILE 방지).
       - name: Build installer

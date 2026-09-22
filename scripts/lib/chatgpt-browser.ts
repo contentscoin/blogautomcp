@@ -864,11 +864,29 @@ export function isExplicitImageProviderRefusal(text: string): boolean {
   return denial && policy;
 }
 
+/** Count owned user turns matching this prompt, excluding composer and assistant text. */
+export async function countChatGPTPromptReceipts(page: Page, prompt: string): Promise<number> {
+  return page.evaluate(expected => {
+    const normalize = (text: string) => text.replace(/\s+/gu, " ").trim();
+    const wanted = normalize(expected);
+    if (!wanted) return 0;
+    const roles = Array.from(document.querySelectorAll('[data-message-author-role="user"]'));
+    const fallback = Array.from(document.querySelectorAll('[data-testid^="conversation-turn-"]'))
+      .filter(turn => !turn.querySelector('[data-message-author-role]') && /^(?:You said:|나의 말:)/iu.test((turn.textContent || "").trim()));
+    return [...roles, ...fallback].filter(turn => {
+      const text = normalize((turn.textContent || "").replace(/^\s*(?:You said:|나의 말:)\s*/iu, ""));
+      // Attachment names and action labels can surround the rendered prompt.
+      // Require the whole prompt inside an owned user turn, not the whole wrapper.
+      return text.includes(wanted);
+    }).length;
+  }, prompt);
+}
+
 /** Observe receipt only; this function must never submit or retry a prompt. */
 export async function waitForChatGPTImageReceipt(
   page: Page,
   previousUserMessages: number,
-  options: { now?: () => number; timeoutMs?: number; onPoll?: () => void } = {},
+  options: { now?: () => number; timeoutMs?: number; onPoll?: () => void; prompt?: string; previousPromptReceipts?: number } = {},
 ): Promise<void> {
   const now = options.now ?? Date.now;
   const deadline = now() + (options.timeoutMs ?? 30_000);
@@ -878,6 +896,9 @@ export async function waitForChatGPTImageReceipt(
       await assertNoChatGPTProtection(page, "ChatGPT image receipt");
       if (await isChatGPTLoginRequired(page)) {
         throw new Error(chatGptAuthenticationRequiredMessage("ChatGPT 로그인이 필요합니다."));
+      }
+      if (options.prompt !== undefined && options.previousPromptReceipts !== undefined) {
+        return await countChatGPTPromptReceipts(page, options.prompt) > options.previousPromptReceipts;
       }
       return await page.locator('[data-message-author-role="user"]').count() > previousUserMessages;
     }, Math.max(1, deadline - now()), "image receipt").catch(error => {
