@@ -42,7 +42,7 @@ assert.equal(isMeaningfulProductEvidenceFeature("배터리 3,800mAh, 1단·회�
 assert.equal(hasSufficientProductReviewEvidence({
   productName: "휴대용 LED 조명",
   description: "야외와 실내에서 밝기를 조절해 사용하는 충전식 조명",
-  features: ["밝기 3단계"],
+  features: ["밝기 3단계", "배터리 용량 3,000mAh", "USB-C 충전 방식"],
   targetSectionCount: 8,
 }), true, "usable 텍스트 근거는 GPT 작성 단계로 전달해야 합니다.");
 assert.equal(hasSufficientVisualDraftEvidence({

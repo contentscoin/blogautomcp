@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import sharp from "sharp";
 import type { BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
 
 async function main() {
@@ -15,7 +16,8 @@ async function main() {
     const dir = store.getBrandPostPackageDir(id);
     fs.mkdirSync(dir, { recursive: true });
     const images = Array.from({ length: 11 }, (_, n) => path.join(dir, `${n}.png`));
-    images.forEach((file, n) => fs.writeFileSync(file, `unique-fixture-${n}`));
+    const png = await sharp({ create: { width: 1200, height: 800, channels: 3, background: "#808080" } }).png().toBuffer();
+    images.forEach((file, n) => fs.writeFileSync(file, Buffer.concat([png, Buffer.from(`unique-fixture-${n}`)])));
     const markdownPath = path.join(dir, "post.md");
     fs.writeFileSync(markdownPath, "이 본문은 재작성하지 않습니다.");
     const sections = Array.from({ length: 10 }, (_, n) => `${n === 2 ? "다케오 시립 도서관" : `여행지 ${n + 1}`}\n\n${"확인된 장소의 풍경과 이동 동선을 구체적으로 연결합니다. ".repeat(10)}`);
@@ -168,7 +170,7 @@ async function main() {
     let repaired = missing;
     repairRequests.forEach((request, index) => {
       const repairPath = path.join(dir, `new-library-${index + 1}.png`);
-      fs.writeFileSync(repairPath, `unique-library-replacement-${index + 1}`);
+      fs.writeFileSync(repairPath, Buffer.concat([png, Buffer.from(`unique-library-replacement-${index + 1}`)]));
       repaired = store.applyGeneratedBrandPostImage({
         brandLinkId: id,
         ...request,

@@ -3,10 +3,16 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import sharp from "sharp";
+import { allowsOriginalShoppingScene } from "../src/lib/brand-post-image-evidence";
 import { preserveProductPhotoSource } from "./lib/product-photo-provenance";
 let fixtureRoot: string | undefined;
 
 async function main() {
+  const png = await sharp({ create: { width: 1200, height: 800, channels: 3, background: "#808080" } }).png().toBuffer();
+  // Valid geometry is required even for offline fixtures. A unique trailing test
+  // label keeps hash/dedup cases distinct without weakening the production audit.
+  const writeFixtureImage = (file: string, label: string) => fs.writeFileSync(file, Buffer.concat([png, Buffer.from(label)]));
   const projectRoot = process.cwd();
   const draftRouteSource = fs.readFileSync(
     path.join(projectRoot, "src", "app", "api", "brandlinks", "[id]", "draft", "route.ts"),
@@ -237,7 +243,7 @@ async function main() {
     "ChatGPT 링크는 Electron 내부 팝업이 아니라 기본 브라우저에서 열려야 합니다.",
   );
   assert.equal(
-    draftImageRouteSource.includes('["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources"]') &&
+    ["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources", "replan_sources"].every(action => draftImageRouteSource.includes(`"${action}"`)) &&
       draftImageRouteSource.includes("repairBrandPostImages") &&
       draftImageRouteSource.includes("applyExternalGeneratedBrandPostImage") &&
       draftImageRouteSource.includes("sourceOnly: body.action === \"bind_sources\"") &&
@@ -354,8 +360,8 @@ async function main() {
   const heroImagePath = path.join(dir, "hero.png");
   const bodyImagePaths = [1, 2, 3, 4].map((n) => path.join(dir, `body-${n}.png`));
   fs.writeFileSync(markdownPath, "# 테스트 초안\n\n## 본문\n\n승인 전에는 발행하지 않습니다.", "utf8");
-  fs.writeFileSync(heroImagePath, "hero");
-  bodyImagePaths.forEach((file, index) => fs.writeFileSync(file, `body-${index}`));
+  writeFixtureImage(heroImagePath, "hero");
+  bodyImagePaths.forEach((file, index) => writeFixtureImage(file, `body-${index}`));
   fs.writeFileSync(store.getBrandPostPackageManifestPath(id), JSON.stringify({
     version: "brand-post-package/v1",
     brandLinkId: id,
@@ -396,7 +402,7 @@ async function main() {
   const v2MarkdownPath = path.join(v2Dir, "post.md");
   const v2HeroPath = path.join(v2Dir, "hero.png");
   fs.writeFileSync(v2MarkdownPath, "# V2 품질 게이트 테스트", "utf8");
-  fs.writeFileSync(v2HeroPath, "hero-v2");
+  writeFixtureImage(v2HeroPath, "hero-v2");
   const premiumComposition = compositionContract.resolvePostDocument({
     connectKind: "TRAVEL",
     title: "V2 여행 초안",
@@ -408,8 +414,8 @@ async function main() {
   });
   const firstMappedImage = path.join(v2Dir, "first.jpg");
   const thirdMappedImage = path.join(v2Dir, "third.jpg");
-  fs.writeFileSync(firstMappedImage, "first-original");
-  fs.writeFileSync(thirdMappedImage, "third-original");
+  writeFixtureImage(firstMappedImage, "first-original");
+  writeFixtureImage(thirdMappedImage, "third-original");
   const mappedComposition = compositionContract.resolvePostDocument({
     connectKind: "TRAVEL",
     title: "섹션 이미지 배치 테스트",
@@ -493,7 +499,7 @@ async function main() {
       const coverageDir = store.getBrandPostPackageDir(coverageId);
       fs.mkdirSync(coverageDir, { recursive: true });
       const images = Array.from({ length: 11 }, (_, index) => path.join(coverageDir, `${index}.png`));
-      images.forEach((file, index) => fs.writeFileSync(file, `offline-${coverageId}-${index}`));
+      images.forEach((file, index) => writeFixtureImage(file, `offline-${coverageId}-${index}`));
       const coverageSections = Array.from({ length: 10 }, (_, index) =>
         `확인한 정보 ${index + 1}\n\n${"확인된 정보와 사용 조건을 구체적으로 연결해 선택에 필요한 차이를 설명합니다. ".repeat(10)}`);
       const coverageBindings = Object.fromEntries(coverageSections.map((section, index) => [
@@ -563,7 +569,7 @@ async function main() {
           let sourceReview: import("../src/lib/brand-post-package").BrandPostPackageImageAsset["sourceReview"];
           if (connectKind === "SHOPPING") {
             const featureSource = path.join(coverageDir, `feature-source-${assetIndex}.png`);
-            fs.writeFileSync(featureSource, `feature-source-${coverageId}-${assetIndex}`);
+            writeFixtureImage(featureSource, `feature-source-${coverageId}-${assetIndex}`);
             const receipt = preserveProductPhotoSource({ sourcePath: featureSource, outputPath: asset.path, segmented: true });
             sourceReview = {
               version: "product-photo-source-review/v1",
@@ -622,14 +628,14 @@ async function main() {
               sourceSha256: asset.sha256,
               usage: "section-matched-product-evidence" as const,
               sectionIntent: section.imageIntent,
-              reviewClass: "feature-evidence" as const,
+              reviewClass: allowsOriginalShoppingScene(section) ? "scene-evidence" as const : "feature-evidence" as const,
               reason: "fixture semantic match",
               reviewedAt: "2026-09-15T00:00:00.000Z",
             },
           };
         });
         assert.equal(store.evaluateBrandPostPackageReadiness(sourceReviewed).canApprove, true,
-          "reviewed evidence originals plus locked lifestyle scenes satisfy the mixed contract");
+          JSON.stringify(store.evaluateBrandPostPackageReadiness(sourceReviewed).blockers));
         const unreviewed = structuredClone(sourceReviewed);
         const unreviewedAsset = unreviewed.imageAssets!.find(asset => asset.sectionId && asset.creationMethod === "source")!;
         delete unreviewedAsset.sourceReview;
@@ -669,7 +675,7 @@ async function main() {
         assert.ok(staleReviewRequest);
         store.writeBrandPostPackageManifest(staleReview);
         const reviewedReplacementPath = path.join(coverageDir, `review-replacement-${legacy ? "legacy" : "bounded"}.png`);
-        fs.writeFileSync(reviewedReplacementPath, `review-replacement-${coverageId}`);
+        writeFixtureImage(reviewedReplacementPath, `review-replacement-${coverageId}`);
         const reviewedReplacement = store.applyGeneratedBrandPostImage({
           brandLinkId: coverageId,
           ...staleReviewRequest,
@@ -689,7 +695,7 @@ async function main() {
           blocker.code === "image-source-review-missing" && blocker.sectionId === featureSection.id),
         "a feature composite cannot pass without a receipt for its locked seller foreground");
         const replacementSource = path.join(coverageDir, `review-replacement-source-${legacy ? "legacy" : "bounded"}.png`);
-        fs.writeFileSync(replacementSource, `review-replacement-source-${coverageId}`);
+        writeFixtureImage(replacementSource, `review-replacement-source-${coverageId}`);
         const replacementReceipt = preserveProductPhotoSource({
           sourcePath: replacementSource,
           outputPath: replacedReviewAsset.path,
@@ -725,7 +731,7 @@ async function main() {
       assert.equal(replacementRequest.slotId, `${staleSection.id}:image:1`);
       store.writeBrandPostPackageManifest(staleGenerated);
       const replacementPath = path.join(coverageDir, `stale-replacement-${connectKind.toLowerCase()}-${legacy ? "legacy" : "bounded"}.png`);
-      fs.writeFileSync(replacementPath, `stale-replacement-${coverageId}`);
+      writeFixtureImage(replacementPath, `stale-replacement-${coverageId}`);
       if (connectKind === "SHOPPING") preserveProductPhotoSource({
         sourcePath: generated.heroImagePath, outputPath: replacementPath, segmented: true,
       });
@@ -858,7 +864,7 @@ async function main() {
       assert.equal(heroDuplicateRequest.replaceAssetKey, undefined);
       store.writeBrandPostPackageManifest(heroDuplicate);
       const duplicateRepairPath = path.join(coverageDir, `duplicate-hero-repair-${connectKind.toLowerCase()}.png`);
-      fs.writeFileSync(duplicateRepairPath, `duplicate-hero-repair-${coverageId}`);
+      writeFixtureImage(duplicateRepairPath, `duplicate-hero-repair-${coverageId}`);
       if (connectKind === "SHOPPING") preserveProductPhotoSource({
         sourcePath: heroAsset.path, outputPath: duplicateRepairPath, segmented: true,
       });
@@ -932,7 +938,7 @@ async function main() {
               sourceSha256: asset.sha256,
               usage: "section-matched-product-evidence" as const,
               sectionIntent: lastRequiredSection.imageIntent,
-              reviewClass: "feature-evidence" as const,
+              reviewClass: allowsOriginalShoppingScene(lastRequiredSection) ? "scene-evidence" as const : "feature-evidence" as const,
               reason: "fixture semantic match",
               reviewedAt: "2026-09-15T00:00:00.000Z",
             },
@@ -946,7 +952,7 @@ async function main() {
         "The last required generated section must also be enforced");
 
       const extraPath = path.join(coverageDir, "extra.png");
-      fs.writeFileSync(extraPath, `extra-original-${coverageId}`);
+      writeFixtureImage(extraPath, `extra-original-${coverageId}`);
       const twoRequired = structuredClone(generated);
       const firstSection = twoRequired.composition.sections[0];
       firstSection.imageMin = firstSection.imageMax = 2;
@@ -971,7 +977,7 @@ async function main() {
             sourceSha256: crypto.createHash("sha256").update(fs.readFileSync(extraPath)).digest("hex"),
             usage: "section-matched-product-evidence" as const,
             sectionIntent: firstSection.imageIntent,
-            reviewClass: "feature-evidence" as const,
+            reviewClass: allowsOriginalShoppingScene(firstSection) ? "scene-evidence" as const : "feature-evidence" as const,
             reason: "fixture semantic match",
             reviewedAt: "2026-09-15T00:00:00.000Z",
           },
@@ -1174,7 +1180,7 @@ async function main() {
   assert.throws(() => store.approveBrandPostPackage(limitationFalsePositiveId), /이미지/u);
 
   const generatedBodyPath = path.join(userData, "generated-body.png");
-  fs.writeFileSync(generatedBodyPath, "generated-body-v1");
+  writeFixtureImage(generatedBodyPath, "generated-body-v1");
   const withGeneratedBody = store.applyGeneratedBrandPostImage({
     brandLinkId: v2Id,
     generatedPath: generatedBodyPath,
@@ -1195,7 +1201,7 @@ async function main() {
   assert.equal(generatedPreview.imageSlots[0].missing, 0);
 
   const regeneratedBodyPath = path.join(userData, "generated-body-v2.png");
-  fs.writeFileSync(regeneratedBodyPath, "generated-body-v2-different");
+  writeFixtureImage(regeneratedBodyPath, "generated-body-v2-different");
   const regenerated = store.applyGeneratedBrandPostImage({
     brandLinkId: v2Id,
     generatedPath: regeneratedBodyPath,
