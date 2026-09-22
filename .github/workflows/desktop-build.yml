@@ -1,7 +1,9 @@
 name: Desktop Build
 
 # 설치형 앱(Windows nsis / macOS dmg) 빌드.
-# - 수동 실행(workflow_dispatch) 또는 v* 태그 푸시 시 동작
+# - 수동 실행(workflow_dispatch)으로만 동작한다.
+# - 릴리스 태그 생성과 동시에 다시 빌드하면 검증된 설치 파일을 다른 산출물이
+#   덮어쓰고 중앙 업데이트 채널과 GitHub 릴리스의 해시가 달라질 수 있다.
 # - 코드서명은 시크릿(CSC_LINK/CSC_KEY_PASSWORD)이 있을 때만. 없으면 미서명 산출물.
 on:
   workflow_dispatch:
@@ -14,9 +16,6 @@ on:
         description: "사이트 게시 대상 (all, windows, macos)"
         required: false
         default: "all"
-  push:
-    tags:
-      - "v*"
 
 jobs:
   build:
