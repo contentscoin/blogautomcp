@@ -10,8 +10,21 @@ const REQUIRED_RELATIVE_PATHS = [
   'package.json',
 ];
 
+function resolvePackagedAppRoot(appOutDir) {
+  const candidates = [path.join(appOutDir, 'resources', 'app')];
+  if (appOutDir.endsWith('.app')) candidates.push(path.join(appOutDir, 'Contents', 'Resources', 'app'));
+  if (fs.existsSync(appOutDir)) {
+    for (const entry of fs.readdirSync(appOutDir, { withFileTypes: true })) {
+      if (entry.isDirectory() && entry.name.endsWith('.app')) {
+        candidates.push(path.join(appOutDir, entry.name, 'Contents', 'Resources', 'app'));
+      }
+    }
+  }
+  return candidates.find(candidate => fs.existsSync(candidate)) || candidates[0];
+}
+
 function assertPackagedApp(appOutDir) {
-  const appRoot = path.join(appOutDir, 'resources', 'app');
+  const appRoot = resolvePackagedAppRoot(appOutDir);
   const missing = REQUIRED_RELATIVE_PATHS.filter((relativePath) => !fs.existsSync(path.join(appRoot, relativePath)));
   if (missing.length > 0) {
     throw new Error(`PACKAGING_MISSING_FILES: ${missing.join(', ')}`);
@@ -23,7 +36,7 @@ function assertPackagedApp(appOutDir) {
   console.log('Packaged app contains required editorial batch-write files.');
 }
 
-module.exports = { assertPackagedApp, REQUIRED_RELATIVE_PATHS };
+module.exports = { assertPackagedApp, resolvePackagedAppRoot, REQUIRED_RELATIVE_PATHS };
 if (require.main === module) {
   assertPackagedApp(path.resolve(__dirname, '../../out/win-unpacked'));
 }

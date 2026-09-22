@@ -47,6 +47,11 @@ assert.equal(
 );
 
 async function main(): Promise<void> {
+const loginSource = fs.readFileSync(path.join(__dirname, "login.ts"), "utf8");
+assert.match(loginSource, /nidlogin\.login\?url=https:\/\/brandconnect\.naver\.com/u,
+  "fresh-PC login must complete the first-party BrandConnect SSO handshake");
+assert.match(loginSource, /probeShoppingCategoryFromSession\(TEMP_SESSION_FILE\)/u,
+  "login must verify the persisted shopping space/category before reporting setup");
 let clock = 0;
 const authenticatedContext = new FakeLoginContext([[], authCookies, authCookies]);
 const authenticated = await waitForNaverAuthentication(authenticatedContext, {

@@ -9,6 +9,7 @@ import { chromium, type BrowserContext } from "playwright";
 import * as fs from "fs";
 import * as path from "path";
 import { validateNaverPublishingSession } from "../src/lib/naver-session";
+import { probeShoppingCategoryFromSession, ShoppingConnectAccessError } from "../src/lib/shopping-connect-access";
 import { getSessionStorageDir } from "./lib/app-paths";
 import {
   replaceSessionFileWithRollback,
@@ -21,6 +22,7 @@ const TEMP_SESSION_FILE = path.join(STORAGE_PATH, `naver-session.pending-${proce
 const LOGIN_PROFILE_PATH = path.join(STORAGE_PATH, "naver-login-profile");
 const BROWSER_CHANNEL = process.env.BROWSER_CHANNEL?.trim() || "chrome";
 const FORCE_LOGIN = process.argv.includes("--force-login");
+const BRANDCONNECT_LOGIN_URL = "https://nid.naver.com/nidlogin.login?url=https://brandconnect.naver.com";
 
 // 폴더가 없으면 생성
 if (!fs.existsSync(STORAGE_PATH)) {
@@ -88,6 +90,29 @@ async function mainV2() {
     }
 
     console.log("🔍 네이버 계정 로그인이 확인되었습니다.");
+
+    // A fresh PC has Naver cookies but no BrandConnect account handshake yet.
+    // Complete the same first-party SSO used by BrandConnect, then persist the
+    // refreshed cookie jar before probing the signed-in space/category APIs.
+    try {
+      await page.goto(BRANDCONNECT_LOGIN_URL, {
+        waitUntil: "commit",
+        timeout: 30_000,
+      });
+      await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => {});
+      await context.storageState({ path: TEMP_SESSION_FILE });
+      const shoppingCategoryUrl = await probeShoppingCategoryFromSession(TEMP_SESSION_FILE);
+      if (shoppingCategoryUrl) {
+        console.log("✅ 쇼핑커넥트 계정 공간과 상품 카테고리도 확인되었습니다.");
+      } else {
+        console.warn("⚠️ 네이버 로그인은 저장하지만 쇼핑커넥트 공간은 확인되지 않았습니다. 쇼핑커넥트 가입·권한을 확인하세요.");
+      }
+    } catch (error) {
+      await context.storageState({ path: TEMP_SESSION_FILE }).catch(() => {});
+      const detail = error instanceof ShoppingConnectAccessError ? error.message : "브랜드커넥트 연결 응답 없음";
+      console.warn(`⚠️ 네이버 로그인은 저장하지만 쇼핑커넥트 연결은 완료되지 않았습니다: ${detail}`);
+    }
+
     const blogId = process.env.NAVER_BLOG_ID?.trim();
     if (blogId) {
       const validation = await validateNaverPublishingSession(TEMP_SESSION_FILE, blogId);

@@ -4,7 +4,7 @@ const require = createRequire(import.meta.url);
 const runner = require.resolve('tsx/cli');
 // Stop at the first failure. No account, provider, publication or paid generation.
 const checks = [
-  'verify-shopping-connect-access.ts', 'verify-connect-routing-regression.ts',
+  'verify-shopping-connect-access.ts', 'verify-naver-login-flow.ts', 'verify-connect-routing-regression.ts',
   'verify-connect-contract-store.ts', 'verify-image-resume-speed.ts',
   'verify-image-timeout-policy.ts', 'verify-image-batch-progress.ts',
   'verify-chatgpt-browser-automation.ts',
