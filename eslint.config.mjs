@@ -6,6 +6,14 @@ const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
   {
+    // Node CommonJS test fixtures intentionally load modules through a VM.
+    files: ["src/**/*.test.cjs"],
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
+      "@next/next/no-assign-module-variable": "off",
+    },
+  },
+  {
     files: [
       "fix-editor.js",
       "fix-openai.js",
