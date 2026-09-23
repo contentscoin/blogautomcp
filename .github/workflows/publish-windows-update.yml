@@ -28,11 +28,27 @@ jobs:
           REL_TAG: ${{ inputs.release_tag }}
         run: |
           mkdir -p out
-          gh release download "$REL_TAG" --repo "${{ github.repository }}" \
-            --pattern 'BrandConnect-Automation-Setup-*.exe' \
-            --pattern 'BrandConnect-Automation-Setup-*.exe.blockmap' \
-            --pattern 'latest.yml' \
-            --dir out
+          VERSION="${REL_TAG#v}"
+          RELEASE_ID=$(gh api "repos/${{ github.repository }}/releases/tags/$REL_TAG" --jq '.id')
+          ASSET_INDEX="$RUNNER_TEMP/windows-release-assets.json"
+          # The tag response can briefly expose an empty embedded assets array
+          # immediately after publication. The release-assets endpoint is the
+          # canonical listing and already contains the completed uploads.
+          gh api --paginate "repos/${{ github.repository }}/releases/$RELEASE_ID/assets?per_page=100" > "$ASSET_INDEX"
+          for ASSET_NAME in \
+            "BrandConnect-Automation-Setup-$VERSION.exe" \
+            "BrandConnect-Automation-Setup-$VERSION.exe.blockmap" \
+            "latest.yml"; do
+            ASSET_COUNT=$(jq --arg name "$ASSET_NAME" '[.[] | select(.name == $name and .state == "uploaded")] | length' "$ASSET_INDEX")
+            test "$ASSET_COUNT" = "1" || {
+              echo "릴리스에 업로드 완료된 $ASSET_NAME 파일이 정확히 1개 있어야 합니다."
+              jq -r '.[] | [.name, .state, .size] | @tsv' "$ASSET_INDEX"
+              exit 1
+            }
+            ASSET_ID=$(jq -r --arg name "$ASSET_NAME" '.[] | select(.name == $name and .state == "uploaded") | .id' "$ASSET_INDEX")
+            gh api -H 'Accept: application/octet-stream' \
+              "repos/${{ github.repository }}/releases/assets/$ASSET_ID" > "out/$ASSET_NAME"
+          done
           test -f out/latest.yml || { echo "latest.yml 없음"; exit 1; }
           test "$(find out -maxdepth 1 -type f -name 'BrandConnect-Automation-Setup-*.exe' ! -name '*.blockmap' | wc -l | tr -d ' ')" = "1" || {
             echo "릴리스에는 Windows 설치 파일이 정확히 1개 있어야 합니다."
