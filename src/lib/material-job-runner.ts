@@ -58,6 +58,28 @@ export async function runMaterialJob(job: MaterialJob, deps = {
         if (!current?.ready) throw new Error(current?.blockers.join(" ") || "소재 준비 결과를 확인할 수 없습니다.");
         item.revision = current.revision; item.status = "ready"; item.stage = "소재 준비 완료 · 발행할 항목을 선택하세요";
       } else {
+        const selected = deps.material(item.productId);
+        if (!selected) {
+          throw Object.assign(new Error("선택한 소재를 찾을 수 없습니다."), { code: "MATERIAL_NOT_READY" });
+        }
+        if (selected.revision !== item.revision) {
+          throw Object.assign(new Error("선택 후 소재가 변경되었습니다. 최신 소재를 다시 선택하세요."), { code: "MATERIAL_CHANGED" });
+        }
+        if (!selected.ready) {
+          item.stage = "발행 전 품질 원인 확인 · 자동 복구";
+          deps.save(job);
+          await runMaterialPreparation(item.productId, workflow);
+          const repaired = deps.material(item.productId);
+          if (!repaired?.ready) {
+            throw Object.assign(new Error(repaired?.blockers.join(" ") || "발행 전 자동 복구 후에도 소재 검증을 통과하지 못했습니다."), {
+              code: "MATERIAL_NOT_READY",
+            });
+          }
+          // The bounded repair transaction intentionally creates a new content
+          // revision. Continue only with that exact verified revision.
+          item.revision = repaired.revision;
+          deps.save(job);
+        }
         const result = await runAutomaticDraftWorkflow(item.productId, {
           publishMode: job.publishMode!, scheduledDate: item.scheduledDate, materialRevision: item.revision,
         }, workflow);

@@ -9661,17 +9661,43 @@ async function runPreparedPostRevision(
   const description = qualitySource.sourceDescription;
   const features = qualitySource.sourceFeatures;
   const price = typeof source.price === "string" ? source.price : "";
+  const imagePaths = Array.from(new Set([prepared.heroImagePath, ...prepared.bodyImagePaths]));
+  const resolveRevisedComposition = (candidate: { title: string; sections: string[]; hashtags: string[] }) =>
+    normalizePublishedPostText(resolvePostDocument({
+      connectKind,
+      editorial: prepared.composition!.editorial,
+      title: candidate.title,
+      sections: candidate.sections,
+      hashtags: candidate.hashtags,
+      imagePaths,
+      sectionImagePaths: prepared.composition!.sections.map(section => section.imagePaths),
+      connectUrl: link.url,
+      qualityPreset: BRANDLINK_QUALITY_PRESET,
+      experienceMode: BRANDLINK_EXPERIENCE_MODE,
+      sectionPlan: prepared.composition!.sections.map(section => ({
+        sectionId: section.id,
+        role: section.id,
+        imagePaths: section.imagePaths,
+        imageIntent: section.imageIntent,
+        imageMin: section.imageMin ?? 0,
+        imageMax: section.imageMax ?? 1,
+        headingStyle: section.headingStyle,
+      })),
+    }));
   // The last section is the statutory disclosure and is never a model-edit target.
   const defaultSectionIndexes = prepared.post.sections.slice(0, -1).map((_, index) => index);
   const sectionIndexes = requestedSectionIndexes.filter((index) => defaultSectionIndexes.includes(index));
   const manualAllowedIndexes = sectionIndexes.length ? sectionIndexes : defaultSectionIndexes;
-  const assessCandidate = (candidate: { title: string; sections: string[]; hashtags: string[] }) =>
-    getBrandLinkContentReadiness({
-      productName: name, title: candidate.title, sections: candidate.sections, hashtags: candidate.hashtags,
+  const assessCandidate = (candidate: { title: string; sections: string[]; hashtags: string[] }) => {
+    const candidateComposition = resolveRevisedComposition(candidate);
+    return getBrandLinkContentReadiness({
+      productName: name, title: candidate.title, hashtags: candidate.hashtags,
       brandLink: link.url, generationSource: "AI", hasRepresentativeImage: true, requireRepresentativeImage: false,
       thumbnailGenerated: true, connectKind, experienceMode: "AI_ASSISTED_INFORMATION",
       compositionQualityReport: null, sourceDescription: description, sourceFeatures: features, mode: "editorial",
+      sections: publishedReadinessSections(candidateComposition),
     });
+  };
   const feedbackFor = (quality: BrandLinkContentReadiness) => [
     quality.reason || quality.summary,
     ...quality.blockers.map((blocker) => blocker.reason),
@@ -9805,16 +9831,9 @@ async function runPreparedPostRevision(
         ? `저장 원고 자동 보강 완료 (${beforeQuality.score}→${selectedQuality.score}점, 최대 ${maximumAttempts}회 후보 검수)`
         : `저장 원고 보강 후 추가 근거 또는 수정 필요 (${beforeQuality.score}→${selectedQuality.score}점)` },
     notes: [`저장 출처와 문단 식별자를 유지한 수정 · ${maximumAttempts}회 이내 후보 비교`] };
-  const imagePaths = Array.from(new Set([prepared.heroImagePath, ...prepared.bodyImagePaths]));
-  const composition = resolvePostDocument({ connectKind, editorial: prepared.composition.editorial,
-    title: post.title, sections: post.sections, hashtags: post.hashtags, imagePaths,
-    sectionImagePaths: prepared.composition.sections.map(section => section.imagePaths), connectUrl: link.url,
-    qualityPreset: BRANDLINK_QUALITY_PRESET, experienceMode: BRANDLINK_EXPERIENCE_MODE,
-    sectionPlan: prepared.composition.sections.map(section => ({ sectionId: section.id, role: section.id, imagePaths: section.imagePaths,
-      imageIntent: section.imageIntent, imageMin: section.imageMin ?? 0, imageMax: section.imageMax ?? 1, headingStyle: section.headingStyle })),
-  });
+  const composition = resolveRevisedComposition(post);
   post.composition = composition;
-  const contentReadiness = getBrandLinkContentReadiness({ productName: name, title: post.title, sections: post.sections,
+  const contentReadiness = getBrandLinkContentReadiness({ productName: name, title: post.title, sections: publishedReadinessSections(composition),
     hashtags: post.hashtags, brandLink: link.url, generationSource: "AI", hasRepresentativeImage: fs.existsSync(prepared.heroImagePath),
     requireRepresentativeImage: BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE, connectKind, experienceMode: "AI_ASSISTED_INFORMATION",
     compositionQualityReport: composition.qualityReport, sourceDescription: description, sourceFeatures: features });

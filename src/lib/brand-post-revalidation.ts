@@ -9,7 +9,7 @@ import { buildTravelReviewAnalysis } from "../../scripts/lib/travel-content";
 
 // Bump when the revalidation input contract changes. Every explicit recheck still
 // runs the current evaluator; this is audit metadata, never a cached pass token.
-export const SAVED_TEXT_QC_VERSION = "saved-text-qc/v2";
+export const SAVED_TEXT_QC_VERSION = "saved-text-qc/v3";
 export interface SavedTextQcMetadata {
   version: typeof SAVED_TEXT_QC_VERSION;
   checkedAt: string;
@@ -240,18 +240,19 @@ export function resolveSavedQcSource(manifest: BrandPostPackageManifestV2, ident
 /** Pure with respect to packages: evaluates actual saved text, never writes or approves. */
 export function savedBrandPostTextSections(manifest: BrandPostPackageManifestV2): string[] {
   const nodes = manifest.composition.renderNodes;
+  const renderedSections: string[] = [];
   // The renderer and section source must agree before replacing an old verdict.
   for (const section of manifest.composition.sections) {
     const rendered = nodes.filter((node) => (node.kind === "heading" || node.kind === "quotation" || node.kind === "paragraph") && node.sectionId === section.id)
       .map((node) => "text" in node ? node.text : "").join("\n");
     if (normalized(rendered) !== normalized([section.title, ...section.body].join("\n"))) fail("저장 본문과 렌더 문서가 달라 안전하게 재검사할 수 없습니다.");
+    renderedSections.push(rendered);
   }
-  const sections = manifest.composition.sections.map((section) => [section.title, ...section.body].join("\n"));
   const extraText = nodes.filter((node) => ((node.kind === "paragraph" || node.kind === "heading" || node.kind === "quotation") && !manifest.composition.sections.some((section) => section.id === node.sectionId)) || node.kind === "disclosure")
     .map((node) => "text" in node ? node.text : "").join("\n");
-  sections.push(extraText); // Do not invent a missing disclosure.
+  renderedSections.push(extraText); // Do not invent a missing disclosure.
   if (manifest.title !== manifest.composition.title) fail("저장 제목과 렌더 제목이 일치하지 않습니다.");
-  return sections;
+  return renderedSections;
 }
 
 export function revalidateSavedBrandPostText(manifest: BrandPostPackageManifestV2, identity: RecheckIdentity, savedContext?: unknown): BrandPostPackageManifestV2 {

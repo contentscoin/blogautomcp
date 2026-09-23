@@ -3,9 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
-import { revalidateSavedBrandPostText, resolveSavedQcSource, type RecheckIdentity } from "../src/lib/brand-post-revalidation";
+import { revalidateSavedBrandPostText, resolveSavedQcSource, savedBrandPostTextSections, SAVED_TEXT_QC_VERSION, type RecheckIdentity } from "../src/lib/brand-post-revalidation";
 import { resolvePostDocument } from "../src/lib/post-composition-contract";
-import { readBrandPostPackage, writeBrandPostPackageManifest, packagePreview, type BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
+import { evaluateBrandPostPackageReadiness, readBrandPostPackage, writeBrandPostPackageManifest, packagePreview, type BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "saved-text-qc-"));
 const oldData = process.env.DESKTOP_USER_DATA;
@@ -16,12 +16,24 @@ try {
   const image = path.join(temp, "hero.png");
   fs.writeFileSync(image, "isolated image fixture");
   const composition = resolvePostDocument({ connectKind: "TRAVEL", title: "대만 타이베이 골목과 지우펀 풍경", sections: ["지우펀 골목\n역사와 문화가 담긴 골목에서 야경을 즐겨요. 편한 신발로 이동하세요.", "이 글은 네이버 여행 커넥트 활동으로 수수료를 제공받습니다."], imagePaths: [image], hashtags: ["대만", "지우펀", "타이베이"], connectUrl: identity.brandLink, qualityPreset: "PREMIUM" });
+  const renderedParagraph = composition.renderNodes.find((node) => node.kind === "paragraph" && node.sectionId === composition.sections[0]?.id);
+  if (renderedParagraph?.kind === "paragraph") renderedParagraph.text = renderedParagraph.text.replace(". ", ".\n\n");
   const fixture: BrandPostPackageManifestV2 = {
     version: "brand-post-package/v2", contractVersion: "post-composition-contract/v1", brandLinkId: identity.productId, connectKind: "TRAVEL", title: composition.title,
     generationSource: "AI", composition, sourceSnapshot: snapshot, markdownPath: path.join(temp, "post.md"), heroImagePath: image, bodyImagePaths: [], hashtags: ["대만", "지우펀", "타이베이"], imagePolicy: "TRAVEL_EDITORIAL", createdAt: "2026-09-01", approvedAt: "2026-09-02",
     thumbnailSpec: { version: "thumbnail-spec/v2", canvas: { width: 1000, height: 1000, aspect: "1:1" }, style: "fixture", sourcePolicy: "TRAVEL_EDITORIAL", sourceImagePath: image },
   };
   const first = revalidateSavedBrandPostText(fixture, identity);
+  assert.equal(first.textQualityRevalidation?.version, SAVED_TEXT_QC_VERSION);
+  assert.deepEqual(savedBrandPostTextSections(fixture).slice(0, -1), composition.sections.map((section) =>
+    composition.renderNodes.filter((node) => (node.kind === "heading" || node.kind === "quotation" || node.kind === "paragraph") && node.sectionId === section.id)
+      .map((node) => "text" in node ? node.text : "").join("\n")),
+  "saved revalidation must score the exact render-node text used by publication");
+  const stale = structuredClone(first);
+  stale.textQualityRevalidation = { ...stale.textQualityRevalidation!, version: "saved-text-qc/v2" as typeof SAVED_TEXT_QC_VERSION };
+  stale.approvedAt = "2026-09-02T00:00:00.000Z";
+  assert.ok(evaluateBrandPostPackageReadiness(stale).blockers.some((blocker) => blocker.code === "text-qc-stale"),
+    "packages approved under a previous text input contract must re-enter preparation before publication");
   fixture.contentQuality = { ...first.contentQuality!, code: "missing-review-substance", reason: "추천·비추천 여행자, 상품별 최종 판단, 편집 역할 preparation" };
   const original = JSON.stringify(fixture);
   const result = revalidateSavedBrandPostText(fixture, identity);

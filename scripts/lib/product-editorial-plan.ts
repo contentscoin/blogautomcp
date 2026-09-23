@@ -831,6 +831,16 @@ function countMatches(value: string, pattern: RegExp): number {
   return Array.from(value.matchAll(new RegExp(pattern.source, `${pattern.flags.replace("g", "")}g`))).length;
 }
 
+function splitProductSentences(value: string): string[] {
+  // Product specs commonly contain decimals such as 2.4kg. A decimal point is
+  // evidence, not a sentence boundary; sentence-final periods still split.
+  return value
+    .replace(/\n/gu, " ")
+    .split(/(?<!\d)\.+|[!?。]+|(?<=\d)\.(?=\s|$)/u)
+    .map(clean)
+    .filter(Boolean);
+}
+
 /** 정확히 같은 문장뿐 아니라 숫자·어미만 바뀐 근사 중복까지 반복으로 센다. */
 function repeatedSentenceCount(sections: string[]): number {
   return assessRepetition(sections).nearDuplicateCount;
@@ -844,13 +854,14 @@ export function assessProductReviewSubstance(input: {
 }): ProductReviewSubstanceAssessment {
   // The section contract is heading + blank line + body. A single newline
   // heading is also supported; headings never supply evidence or role labels.
-  const paragraphs = input.sections.flatMap((section) => {
+  const sectionParagraphs = input.sections.map((section) => {
     const normalized = section.replace(/\r\n?/gu, "\n").trim();
     const lines = normalized.split("\n");
     const hasHeading = lines.length > 1 && !/[.!?。]$/u.test(lines[0].trim());
     return (hasHeading ? lines.slice(1).join("\n") : normalized)
       .split(/\n\s*\n/u).map((paragraph) => paragraph.trim()).filter(Boolean);
   });
+  const paragraphs = sectionParagraphs.flat();
   const body = paragraphs.join("\n\n");
   const analysis = buildProductReviewAnalysis({
     productName: input.productName,
@@ -858,8 +869,7 @@ export function assessProductReviewSubstance(input: {
     features: input.sourceFeatures,
     targetSectionCount: 11,
   });
-  const paragraphSentences = paragraphs.map((paragraph) =>
-    paragraph.replace(/\n/gu, " ").split(/[.!?。]+/u).map(clean).filter(Boolean));
+  const paragraphSentences = paragraphs.map(splitProductSentences);
   const sentences = paragraphSentences.flat().filter((item) => item.length >= 8);
   const sentenceCount = Math.max(1, sentences.length);
   const genericGuidanceCount = countMatches(body, /(?:확인(?:해|하|해야|하세요)|살펴보|비교해보|보는\s*게\s*좋|안전해요)/u);
@@ -905,8 +915,8 @@ export function assessProductReviewSubstance(input: {
   // A grounded constraint is a purchase judgement too. Do not require praise
   // when a source's broad suitability claim needs a practical limitation.
   const suitabilityConstraint = /(?:개인차|개인별\s*차이|개인에\s*따라).*(?:소량|반응|주의|달라|다를)/u;
-  // Only the immediately preceding fact can support an explanation. Do not
-  // flatten sections, skip intervening sentences, or chain inferred benefits.
+  // Only the immediately preceding fact in the same paragraph can support an
+  // explanation. Do not cross paragraphs, skip sentences, or chain inferences.
   const groundedJudgements = paragraphSentences.flatMap((group) => group.flatMap((sentence, index) => {
     // Bare labels (even with a product token) are not explanatory prose.
     if (!/(?:다|요|죠)["'”’]?$/u.test(sentence)) return [];

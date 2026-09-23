@@ -14,6 +14,7 @@ import {
   productSnapshotEvidenceProfile,
 } from "../src/lib/brand-post-revalidation";
 import { isDraftEditorialQualityPassed } from "../src/lib/brand-post-quality-display";
+import { assessProductReviewSubstance } from "./lib/product-editorial-plan";
 
 const disclosure = "이 포스팅은 네이버 쇼핑 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받습니다.";
 
@@ -170,6 +171,19 @@ async function verifySparseRefreshStopsWithoutRewrite(sparse: BrandLinkContentRe
 }
 
 async function main(): Promise<void> {
+  const decimalGrounding = assessProductReviewSubstance({
+    productName: "캐치웰 CX PRO 무선청소기",
+    sourceDescription: "무선청소기",
+    sourceFeatures: ["무게: 2.4kg"],
+    sections: [
+      "손목 부담\n\n무게는 2.4kg입니다. 무게 2.4kg은 손목 부담이 우선인 사용자에게 중요한 제약입니다.",
+    ],
+  });
+  assert.ok(decimalGrounding.coveredSignals.includes("무게: 2.4kg"),
+    "decimal measurements must remain intact source evidence");
+  assert.equal(decimalGrounding.groundedSignalCount, 1,
+    "a decimal measurement and its same-paragraph judgement stay grounded");
+
   const rawEvidence = {
     productName: "테스트 정리함 M3",
     description: "작은 부품을 세 구역으로 나눠 옮기는 정리함",
@@ -361,7 +375,7 @@ async function main(): Promise<void> {
       "approval must rerun the current evaluator over reconciled saved text");
     const approvalBranch = sourceBetween(
       draftRouteSource,
-      'if (body.action === "approve")',
+      'if (body.action === "approve"',
       'if (body.action === "revise")',
     );
     const revalidation = approvalBranch.indexOf("revalidatePackageForApproval(id, link)");
@@ -500,7 +514,7 @@ async function main(): Promise<void> {
     throw new Error(`COUNTEREXAMPLE REGRESSIONS (${counterexampleFailures.length})\n${detail}`);
   }
 
-  console.log("PASS: canonical QC source, untrusted request context, cumulative richer refresh, sparse source stop, bounded convergence, no failed commit, spec bypass, child kill deadlines");
+  console.log("PASS: decimal grounding, canonical QC source, untrusted request context, cumulative richer refresh, sparse source stop, bounded convergence, no failed commit, spec bypass, child kill deadlines");
 }
 
 void main();

@@ -66,6 +66,40 @@ async function main() {
     assert(!events.some(event => /PATCH|images/.test(event)), "publication must never repair or generate materials");
     assert.equal(readMaterialJob(job.jobId)?.items.length, 10, "terminal history persists beyond in-memory job lifetime");
 
+    const selfHealing = makeJob(1);
+    let healed = false;
+    let submittedRevision = "";
+    const readyQuality = {
+      canPublish: true, verdict: "pass", code: "ok", reason: null, score: 100,
+      blockers: [], qualityFailures: [], signals: [{ key: "review-substance", label: "제품 리뷰", status: "pass" }],
+      quality: { score: 100, passScore: 70, categories: [], sourceEvidence: { level: "rich", sufficient: true } },
+    };
+    await runMaterialJob(selfHealing, {
+      call: async (url, method, body) => {
+        const action = (body as { action?: string; materialRevision?: string } | undefined)?.action;
+        if (url.endsWith("/draft") && method === "PATCH" && action === "approve") {
+          healed = true;
+          return { success: true, data: { approvedAt: "approved", approval: { canApprove: true }, imageSlots: [], contentQuality: readyQuality } };
+        }
+        if (url.endsWith("/draft")) {
+          return { success: true, data: { approvedAt: healed ? "approved" : null, approval: { canApprove: healed }, imageSlots: [], contentQuality: readyQuality } };
+        }
+        if (url.endsWith("/publish") && method === "POST") {
+          submittedRevision = (body as { materialRevision?: string }).materialRevision || "";
+          return { success: true, data: { status: "PUBLISHING" } };
+        }
+        if (url.endsWith("/verify")) return { success: true, data: { published: true, postUrl: "https://blog.naver.com/test/healed" } };
+        return { success: true, data: { status: "PUBLISHED", published: true, postUrl: "https://blog.naver.com/test/healed" } };
+      },
+      material: id => ({ ...material(id), ready: healed, revision: healed ? "b".repeat(64) : revision,
+        blockers: healed ? [] : ["발행 문서 기준 원고 재검사가 필요합니다."] }),
+      save: saveMaterialJob,
+      pause: async () => {},
+      checkCancelled: () => {},
+    });
+    assert.equal(selfHealing.items[0].status, "published");
+    assert.equal(submittedRevision, "b".repeat(64), "a bounded pre-publication repair must submit the newly verified revision");
+
     for (const unready of [null, { approvedAt: null }, { approvedAt: "yes", imageSlots: [{ missing: 1, generationMissing: 0 }] }, { approvedAt: "yes", approval: { canApprove: false } }]) {
       let submitted = 0;
       await assert.rejects(runAutomaticDraftWorkflow("product-0", { publishMode: "now" }, { pause: async () => {}, call: async (url, method) => {

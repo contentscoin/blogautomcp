@@ -7,7 +7,7 @@ import { copyProductPhotoSource, readProductPhotoSource } from "../../scripts/li
 import { getAppDataDir } from "../../scripts/lib/app-paths";
 import type { BrandLinkContentReadiness } from "../../scripts/lib/brandlink-content-readiness";
 import type { ProductSnapshot } from "./draft-context-snapshot";
-import type { SavedTextQcMetadata } from "./brand-post-revalidation";
+import { SAVED_TEXT_QC_VERSION, type SavedTextQcMetadata } from "./brand-post-revalidation";
 import { atomicWriteTextFile } from "./atomic-text-file";
 import { isDraftEditorialQualityPassed } from "./brand-post-quality-display";
 import {
@@ -608,6 +608,12 @@ export function evaluateBrandPostPackageReadiness(manifest: BrandPostPackageMani
       return normalize(rendered) !== normalize([section.title, ...section.body].join("\n"));
     });
     if (inconsistent) blockers.push({ code: "content-render-mismatch", reason: "검수 본문과 발행할 렌더 문서가 일치하지 않습니다." });
+    if (manifest.approvedAt && manifest.textQualityRevalidation?.version !== SAVED_TEXT_QC_VERSION) {
+      blockers.push({
+        code: "text-qc-stale",
+        reason: "발행 문서 기준 원고 재검사가 필요합니다. 저장된 원고와 이미지를 유지한 채 품질검사를 다시 실행하세요.",
+      });
+    }
   }
   const imageAudit = auditBrandPostImages(manifest);
   const imageSlots = imageAudit.slots;
@@ -670,7 +676,7 @@ export function evaluateBrandPostPackageReadiness(manifest: BrandPostPackageMani
     }),
   }) : null;
   const editorialPassed = manifest.version === "brand-post-package/v1" ? manifest.contentQuality?.canPublish !== false : isDraftEditorialQualityPassed(manifest.contentQuality);
-  const contentPassed = editorialPassed && !blockers.some(blocker => blocker.code === "markdown-invalid" || blocker.code === "content-render-mismatch");
+  const contentPassed = editorialPassed && !blockers.some(blocker => blocker.code === "markdown-invalid" || blocker.code === "content-render-mismatch" || blocker.code === "text-qc-stale");
   const contentScore = manifest.contentQuality?.quality?.score ?? manifest.contentQuality?.score ?? 0;
   const compositionPassed = !composition || composition.qualityReport.canAutoPublish;
   if (manifest.version === "brand-post-package/v2" && manifest.generationSource !== "AI") blockers.push({ code: "generation-source", reason: "AI 원고 출처가 확인되지 않았습니다." });
