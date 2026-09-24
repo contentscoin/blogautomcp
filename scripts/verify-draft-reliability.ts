@@ -5,7 +5,9 @@ import { normalizeDraftSections, sectionEntryToString, splitMergedSection } from
 import { parseVisualReviews } from "./lib/publish-image-audit";
 import { auditSectionProposals } from "./lib/product-section-proposal-audit";
 import { assessProductReviewSubstance, productEvidenceRequirement, productSignalAnchor } from "./lib/product-editorial-plan";
-import { getBrandLinkContentReadiness, stripInternalGuidanceSentences } from "./lib/brandlink-content-readiness";
+import { detectUnsupportedExperience, getBrandLinkContentReadiness, stripInternalGuidanceSentences } from "./lib/brandlink-content-readiness";
+import { IMAGE_RECOVERY_POLICY_VERSION } from "./lib/material-image-recovery";
+import { isSeverelyFailingDraft } from "./lib/scheduled-draft-workflow";
 import { ensureStaticDecodableImage } from "./lib/product-photo-source";
 import { replanShoppingImageCoverage, type ImageReplanDependencies } from "../src/lib/brand-post-image-replan";
 import type { BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
@@ -136,7 +138,60 @@ async function main() {
   assert.equal(stored.composition.sections[0].imageIntent, "흡입 구조 기능 근거", "intent is never relabelled");
   assert.equal(stored.composition.sections[1].imageMin, 1);
 
-  console.log("PASS: draft structure normalization + retry, shared evidence requirement + named missing facts, tolerant visual verdicts + non-fatal per-image proposal failures, leak stripping, static seller images, generated lifestyle replan");
+  // 7. Advice about using the product is not an experience claim; real claims still are.
+  for (const advice of ["직접 사용 전에는 팔 안쪽에 먼저 발라 보세요.", "직접 사용할 때는 소량부터 바르는 게 좋아요.",
+    "직접 사용하시려면 충전부터 확인하세요.", "직접 사용 시 눈가는 피하세요.", "직접 사용하는 분이라면 용량을 먼저 보세요."]) {
+    assert.deepEqual(detectUnsupportedExperience(advice), [], advice);
+  }
+  for (const claim of ["직접 사용해 보니 촉촉했어요.", "제가 직접 사용했는데 좋았어요.", "2주 동안 발라 봤어요."]) {
+    assert.ok(detectUnsupportedExperience(claim).length > 0, claim);
+  }
+
+  // 8. Recovery history is keyed by algorithm version, so new replan logic gets one fresh attempt.
+  assert.ok(IMAGE_RECOVERY_POLICY_VERSION >= 2);
+
+  // 9. Severely failing saved drafts (half or more categories failing) are rewritten from scratch once.
+  const categories = (fails: number) => Array.from({ length: 6 }, (_, index) => ({ status: index < fails ? "fail" : "pass" }));
+  assert.equal(isSeverelyFailingDraft({ canPublish: false, quality: { categories: categories(3) } } as never), true);
+  assert.equal(isSeverelyFailingDraft({ canPublish: false, quality: { categories: categories(1) } } as never), false);
+  assert.equal(isSeverelyFailingDraft({ canPublish: true, quality: { categories: categories(6) } } as never), false);
+  assert.equal(isSeverelyFailingDraft(null), false);
+  const workflow = fs.readFileSync("scripts/lib/scheduled-draft-workflow.ts", "utf8");
+  assert.match(workflow, /reusedSavedDraft && isSeverelyFailingDraft\(previousReadiness\)/u);
+
+  // 10. Replan relaxation: nothing can take the coverage, but the post already has enough images.
+  let relaxedStore = { version: "brand-post-package/v2", brandLinkId: "rx", connectKind: "SHOPPING", imagePolicy: "LOCKED_PRODUCT_OR_ORIGINAL",
+    approvedAt: "old", title: "보풀제거기", createdAt: "c", heroImagePath: "hero.png", imageRequirements: { policy: "verified-source-first" },
+    composition: { sections: [
+      { id: "feature", title: "6중 날", body: ["6중 날"], imageIntent: "6중 날 기능 근거", imageMin: 1, imageMax: 1, imagePaths: [] },
+      { id: "spec", title: "규격", body: ["규격"], imageIntent: "크기 비교 또는 스펙 이미지", imageMin: 0, imageMax: 1, imagePaths: [] },
+      { id: "done", title: "구성", body: ["구성"], imageIntent: "전체 구성 원본", imageMin: 4, imageMax: 4, imagePaths: ["a", "b", "c", "d"] },
+    ], renderNodes: [] }, imageAssets: [] } as unknown as BrandPostPackageManifestV2;
+  const relaxDeps = {
+    read: () => structuredClone(relaxedStore),
+    write: (value: BrandPostPackageManifestV2) => { relaxedStore = value; return value; },
+    reconcile: (value: BrandPostPackageManifestV2) => value,
+    lock: () => ({ assertOwner() {}, release() {} }),
+    slots: (value: BrandPostPackageManifestV2) => value.composition.sections.map((section) => ({
+      sectionId: section.id, minimum: section.imageMin!, maximum: section.imageMax!, count: section.imagePaths.length,
+      missing: Math.max(0, section.imageMin! - section.imagePaths.length), generatedMinimum: 0, generationMissing: 0, staleTargets: [],
+      assets: section.imagePaths.map((file) => ({ path: file, creationMethod: "source", sourceReview: { usage: "section-matched-product-evidence", reviewClass: "product-photo" } })),
+    })),
+    repair: async () => ({ errors: ["IMAGE_SOURCE_BINDING_REQUIRED: 원본 부족"] }),
+  } as unknown as ImageReplanDependencies;
+  const relaxedResult = await replanShoppingImageCoverage({ brandLinkId: "rx" }, relaxDeps);
+  assert.equal(relaxedResult.reason, "COVERAGE_RELAXED_POST_HAS_ENOUGH_IMAGES", "4 section images + hero = 5 meets the floor");
+  assert.equal(relaxedResult.after.missing, 0);
+  assert.equal(relaxedStore.composition.sections[0].imageMin, 0);
+  assert.equal(relaxedStore.composition.sections[0].imageIntent, "6중 날 기능 근거", "intent is not relabelled");
+  assert.ok(relaxedStore.pipelineNotes?.some((note) => note.startsWith("IMAGE_COVERAGE_RELAXED")));
+  relaxedStore.composition.sections[0].imageMin = 1;
+  relaxedStore.composition.sections[2].imagePaths = ["a", "b"];
+  relaxedStore.composition.sections[2].imageMin = 2;
+  const thin = await replanShoppingImageCoverage({ brandLinkId: "rx" }, relaxDeps);
+  assert.match(thin.reason, /^REPLAN_INSUFFICIENT_VERIFIED_ALTERNATIVES · 전체 이미지 3\/5장/u, "too few images overall still asks for more");
+
+  console.log("PASS: draft structure normalization + retry, shared evidence requirement + named missing facts, tolerant visual verdicts + non-fatal per-image proposal failures, leak stripping, static seller images, generated lifestyle replan, advice-not-claim, recovery policy version, severe-draft rewrite, coverage relaxation");
 }
 
 main().catch((error) => {

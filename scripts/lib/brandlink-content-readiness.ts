@@ -214,7 +214,8 @@ export function detectUnsupportedExperience(text: string): string[] {
       // "직접 사용해 봤어요. 구매 후기는 없습니다" still contains a claim.
       const tail = text.slice(match.index! + match[0].length, match.index! + match[0].length + 100).split(/[\n\r.!?;,]/u)[0];
       const denial = /^(?:\s*(?:나|와|과|및|또는)\s*(?:구매|사용|체험))?(?:\s*(?:후기|경험|기록)(?:는|가|이|을|은)?)?\s*(?:제공되지\s*않|없(?:습니다|어요|다|으)|하지\s*않|한\s*적(?:이|은)?\s*없|해\s*본\s*적(?:이|은)?\s*없)/u;
-      const nonAssertion = /^\s*(?:(?:하|해|해\s*보|해\s*봤다|했다|다)?면|(?:하|해\s*보)?신다면|(?:하|해\s*보)?실\s*경우|하는\s*경우|하기\s*전|하세요|해\s*보세요|해\s*주세요|하지\s*마세요|하는\s*방식|후\s*(?:건조|세척|보관|관리))/u;
+      // 조건·권유·일반 설명("직접 사용 전", "직접 사용할 때는", "직접 사용하시려면")은 체험 단정이 아니다.
+      const nonAssertion = /^\s*(?:(?:하|해|해\s*보|해\s*봤다|했다|다)?면|(?:하|해\s*보)?신다면|(?:하|해\s*보)?실\s*경우|하는\s*경우|하기\s*전|하세요|해\s*보세요|해\s*주세요|하지\s*마세요|하는\s*방식|후\s*(?:건조|세척|보관|관리)|전(?:에|에는)?(?:\s|$)|시(?:에|에는)?(?:\s|$)|(?:하|하실|할)\s*(?:때|경우)|하시기\s*전|하(?:시)?려면|해야|하는\s*(?:분|사람|사용자|경우|방법)|하기\s*(?:좋|쉽|편))/u;
       // Recommendation policy is unchanged; these are not experience predicates.
       const recommendation = /강력|후회|무조건|재구매/u.test(match[0]);
       if (!recommendation && (denial.test(tail) || nonAssertion.test(tail))) continue;

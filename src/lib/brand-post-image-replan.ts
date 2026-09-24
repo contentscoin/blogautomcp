@@ -2,11 +2,14 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { allowsGenericBrandPostProductPhoto, isShoppingLifestyleImage } from "./brand-post-image-evidence";
 import { acquireBrandPostImageRepairLock } from "./brand-post-image-repair-lock";
+import { SHOPPING_POST_CONTRACT_V1 } from "./post-composition-contract";
 import { repairBrandPostImages } from "./brand-post-image-repair";
 import { getBrandPostImageSlots, readBrandPostPackage, reconcileBrandPostPackageQuality,
   writeBrandPostPackageManifest, type BrandPostPackageManifestV2 } from "./brand-post-package";
 
 type Manifest = BrandPostPackageManifestV2;
+/** Shopping contract floor (post-composition-contract targetImages.min). */
+const MINIMUM_POST_IMAGES = SHOPPING_POST_CONTRACT_V1.targetImages.min;
 type Slots = ReturnType<typeof getBrandPostImageSlots>;
 export interface ImageReplanDependencies {
   read: typeof readBrandPostPackage;
@@ -130,6 +133,7 @@ export async function replanShoppingImageCoverage(options: {
   // blocking the whole draft, move that coverage to an optional lifestyle section and fill it
   // with the locked real product on a generated background. Feature text and intents stay as is.
   let allowGenerated = false;
+  let generationErrors: string[] = [];
   const afterSource = deps.read(options.brandLinkId, { migrate: false });
   if (afterSource && afterSource.version === "brand-post-package/v2" && imageReplanDraftIdentity(afterSource) === identity) {
     const probed = deps.slots(afterSource);
@@ -142,6 +146,7 @@ export async function replanShoppingImageCoverage(options: {
           requestId: randomUUID(), sectionId: slot.sectionId, slotId: `${slot.sectionId}:image:1`,
         })) });
         allowGenerated = true;
+        generationErrors = generated.errors;
         if (generated.errors.length && generated.errors.every(error => /\b(?:AUTH_REQUIRED|CODEX_AUTH_REQUIRED|CHATGPT_BROWSER_AUTH_REQUIRED)\b/u.test(error))) {
           throw Object.assign(new Error(`IMAGE_REPLAN_EXTERNAL_BLOCKED: ${generated.errors[0]}`), { code: "IMAGE_REPLAN_EXTERNAL_BLOCKED" });
         }
@@ -157,7 +162,15 @@ export async function replanShoppingImageCoverage(options: {
     if (current.imageGeneration?.status === "running") return unchanged("REPLAN_BUSY");
     const audited = deps.slots(current);
     const alternatives = matchAlternatives(missing, candidates.map(c => audited.find(s => s.sectionId === c.sectionId)!), current, allowGenerated);
-    if (!alternatives) return { ...unchanged("REPLAN_INSUFFICIENT_VERIFIED_ALTERNATIVES"), after: summary(audited) };
+    // Last resort: no section can take the coverage. When the post already carries enough images
+    // overall, a feature section may go without a proof photo rather than blocking the whole post.
+    // Its text and image intent stay unchanged; nothing is relabelled as evidence.
+    const totalImages = audited.reduce((n, slot) => n + slot.count, 0) + (current.heroImagePath ? 1 : 0);
+    const relaxed = !alternatives;
+    if (relaxed && totalImages < MINIMUM_POST_IMAGES) {
+      const detail = generationErrors.length ? ` 생활 장면 생성: ${generationErrors.slice(0, 2).join(" / ").slice(0, 300)}` : "";
+      return { ...unchanged(`REPLAN_INSUFFICIENT_VERIFIED_ALTERNATIVES · 전체 이미지 ${totalImages}/${MINIMUM_POST_IMAGES}장${detail}`), after: summary(audited) };
+    }
     const minima = new Map<string, number>();
     const history: Array<{ from: string; to: string; at: string }> = [];
     for (const slot of missing) {
@@ -166,7 +179,11 @@ export async function replanShoppingImageCoverage(options: {
       if (now.count !== slot.count || now.minimum !== slot.minimum) return unchanged("REPLAN_COVERAGE_CHANGED");
       minima.set(slot.sectionId, slot.count);
       for (let n = slot.count; n < slot.minimum; n++) {
-        const alternative = alternatives.get(slot.sectionId)!.shift()!;
+        if (relaxed) {
+          history.push({ from: slot.sectionId, to: "relaxed:post-has-enough-images", at: new Date().toISOString() });
+          continue;
+        }
+        const alternative = alternatives!.get(slot.sectionId)!.shift()!;
         minima.set(alternative.sectionId, 1);
         history.push({ from: slot.sectionId, to: alternative.sectionId, at: new Date().toISOString() });
       }
@@ -183,7 +200,8 @@ export async function replanShoppingImageCoverage(options: {
     // Source review probes several optional sections, committing successes as it
     // goes. Only new images chosen by the complete matching plan belong in the
     // publication; preserve pre-existing optional images and cached source files.
-    const unusedProbes = current.composition.sections.filter(section =>
+    // When relaxing, probes that produced usable images stay: they only add verified or generated coverage.
+    const unusedProbes = relaxed ? [] : current.composition.sections.filter(section =>
       candidates.some(candidate => candidate.sectionId === section.id) && !selectedSections.has(section.id))
       .flatMap(section => section.imagePaths.filter(file => !preservedPaths.has(path.resolve(file))));
     for (const file of unusedProbes) rejected.add(path.resolve(file));
@@ -195,16 +213,16 @@ export async function replanShoppingImageCoverage(options: {
         sections: current.composition.sections.map(section => ({ ...section,
           ...(minima.has(section.id) ? { imageMin: minima.get(section.id)! } : {}),
           imagePaths: section.imagePaths.filter(file => !rejected.has(path.resolve(file))) })) },
-      pipelineNotes: [...(current.pipelineNotes || []), `IMAGE_COVERAGE_REPLANNED: ${JSON.stringify(history)}`,
+      pipelineNotes: [...(current.pipelineNotes || []), `${relaxed ? "IMAGE_COVERAGE_RELAXED" : "IMAGE_COVERAGE_REPLANNED"}: ${JSON.stringify(history)}`,
         ...(current.imageGeneration?.errors.length ? [`IMAGE_REPLAN_PREVIOUS_ERRORS: ${JSON.stringify(current.imageGeneration.errors)}`] : [])] });
     const after = summary(deps.slots(proposed));
-    if (after.required !== before.required || after.missing >= before.missing) return unchanged("REPLAN_INVARIANT_FAILED");
+    if ((!relaxed && after.required !== before.required) || after.missing >= before.missing) return unchanged("REPLAN_INVARIANT_FAILED");
     if (proposed.imageGeneration) proposed.imageGeneration = { ...proposed.imageGeneration,
       remaining: after.missing, status: after.missing ? "incomplete" : "complete", updatedAt: new Date().toISOString(),
       errors: deps.slots(proposed).filter(slot => slot.missing || slot.generationMissing).map(slot =>
         `${slot.sectionId}: IMAGE_COVERAGE_REQUIRED: 검증 이미지 ${Math.max(slot.missing, slot.generationMissing)}장 필요`) };
     lock.assertOwner();
     deps.write(proposed);
-    return { changed: true, before, after, reason: "VERIFIED_ALTERNATIVE_COVERAGE", history };
+    return { changed: true, before, after, reason: relaxed ? "COVERAGE_RELAXED_POST_HAS_ENOUGH_IMAGES" : "VERIFIED_ALTERNATIVE_COVERAGE", history };
   } finally { lock.release(); }
 }
