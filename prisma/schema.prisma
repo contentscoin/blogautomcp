@@ -194,6 +194,9 @@ model BrandLink {
   // 주제 글은 원본(부모) 상품을 복제한 자식 행이며, 원고·발행·예약 파이프라인은 행 단위로 그대로 동작한다.
   parentBrandLinkId String? // 원본 상품 행 ID (null이면 원본 = 전체 리뷰)
   postAngle   String?  // full-review, how-to, prep-tips ... (null = full-review)
+  // 직접 사용·방문한 체험 메모. 20자 이상이면 원고를 1인칭 체험형으로 쓰고, 메모에 있는 사실만 체험으로 표현한다.
+  // 주제 글(자식 행)은 원본 상품의 메모를 함께 쓴다.
+  experienceNotes String?
 
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

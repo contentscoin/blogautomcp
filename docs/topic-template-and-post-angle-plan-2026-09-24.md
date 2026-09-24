@@ -1,5 +1,27 @@
 # 쇼핑커넥트·여행커넥트 주제별 템플릿화 — 수정 계획
 
+## 구현 현황 (2026-09-24)
+
+| 단계 | 내용 | 상태 | 주요 파일 | 테스트 |
+| --- | --- | --- | --- | --- |
+| 1 | 모델 gpt-6-luna, reasoning low | 완료 | `scripts/lib/draft-runtime-policy.json`, `text-model-policy.ts` | `test:text-model-policy`, `test:codex-draft-provider` |
+| 2 | 검수 기준 완화(62점, 필수 카테고리는 근거 1개, 재작성 1회) | 완료 | `brandlink-content-readiness.ts`, `post-spec/validate.ts` | `test:editorial-calibration` |
+| 3 | 상품 유형 템플릿(쇼핑 8+1, 여행 4+1), 여행 꿀팁 | 완료 | `scripts/lib/topic-templates/*`, `post-composition-contract.ts` | `test:topic-templates` |
+| 3-1 | 포스팅 각도(전체 리뷰 + 주제 글), 형제 글 겹침 재작성, 예약 간격 2일, UI | 완료 | `topic-templates/angles.ts`, `api/brandlinks/[id]/angles`, `PostAnglePanel.tsx` | `test:post-angles` |
+| 4 | 섹션별 이미지 출처(원본/크롭/연출컷)와 연출 레시피 | 완료 | `brand-post-image-evidence.ts`, `brand-post-image-generation.ts` | `test:topic-templates` |
+| 5 | 상세 이미지 비전 판독, 자동완성 검색 수요, 웹 리서치 범위 | 완료 | `detail-vision-reader.ts`, `search-demand.ts`, `codex-draft-provider.ts` | `test:detail-vision` |
+| 6 | SEO 제목 기획(후보·필수 규칙 교체) | 완료 | `topic-templates/title-planner.ts` | `test:title-planner` |
+| 7 | 체험 메모(상품 단위 저장·주제 글 상속·근거 경고), UI | 완료 | `experience-notes.ts`, `ExperienceNotesPanel.tsx` | `test:experience-notes` |
+
+### 남은 과제
+- 형제 글 "함께 보면 좋은 글" 링크 삽입: 네이버 에디터 링크 컴포넌트 삽입과 실측 검증이 필요해 이번 범위에서 제외.
+- 인용구(한눈에 보기·꿀팁 박스) 기본 활성화: 실제 네이버 에디터 실측(`verify-naver-editorial-style.ts`) 후 켤 것.
+- 체험 사진 업로드: 체험 메모는 텍스트만 지원.
+- spec-first 경로(section-library)는 섹션 구성이 고정되어 있어 템플릿 요약·각도 메모만 반영.
+- 끄기 스위치: `DETAIL_VISION_READ_ENABLED`, `SEARCH_DEMAND_ENABLED`, `SHOPPING_WEB_RESEARCH_ENABLED` (기본 true).
+
+---
+
 ## Context
 지금 원고는 커넥트 종류별로 템플릿 6개(쇼핑 3개: 문제·비교·상세, 여행 3개: 일정·풍경·조건)를 쓴다. 템플릿 선택은 정규식 몇 개로 정한다(`scripts/lib/editorial-templates.ts`의 `matchedSelection`). 섹션 구성은 커넥트 종류 하나에 한 벌뿐이다(`scripts/lib/post-spec/section-library.ts`). 그래서 상품 종류(가전·뷰티·식품…, 패키지·호텔·티켓…)가 달라도 글 구조, 이미지 배치, 이미지 프롬프트가 거의 같다.
 

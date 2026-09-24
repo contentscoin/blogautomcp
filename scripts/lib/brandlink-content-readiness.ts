@@ -8,7 +8,7 @@ import {
   assessTravelReviewSubstance,
   type TravelSourceCoverage,
 } from "./travel-content";
-import { assessGenericLanguage, assessRepetition } from "./draft-quality-signals";
+import { assessGenericLanguage, assessRepetition, sentenceTokens } from "./draft-quality-signals";
 import type {
   BrandConnectKind,
   PostExperienceMode,
@@ -34,6 +34,8 @@ export interface BrandLinkContentReadinessInput {
   thumbnailGenerated?: boolean;
   connectKind?: BrandConnectKind;
   experienceMode?: PostExperienceMode;
+  /** 체험 모드에서 체험 문장이 메모에 근거하는지 경고용으로만 비교한다. */
+  experienceNotes?: string | null;
   compositionQualityReport?: PostQualityReportV1 | null;
   sourceDescription?: string | null;
   sourceFeatures?: string[];
@@ -189,6 +191,19 @@ export const UNSUPPORTED_EXPERIENCE_PATTERNS = [
 ] as const;
 
 const UNSUPPORTED_EXPERIENCE_TITLE_PATTERN = /(?:내돈내산|실사용|직접\s*(?:써본|다녀온)|솔직\s*후기|체험\s*후기)/u;
+
+/**
+ * 체험 모드에서, 체험 단정 문장 중 체험 메모와 겹치는 단어가 하나도 없는 문장 수.
+ * 메모에 없는 체험을 지어냈을 가능성을 알리는 권고 신호에만 쓴다.
+ */
+export function countUngroundedExperienceSentences(body: string, notes: string): number {
+  const noteTokens = new Set(sentenceTokens(notes));
+  if (noteTokens.size === 0) return 0;
+  const sentences = body.split(/(?<=[.!?。])\s+|\n+/u).map((sentence) => sentence.trim()).filter(Boolean);
+  return sentences.filter((sentence) => detectUnsupportedExperience(sentence).length > 0)
+    .filter((sentence) => !sentenceTokens(sentence).some((token) => noteTokens.has(token)))
+    .length;
+}
 
 /** Return exact claim candidates; exemptions must attach to that candidate, not its sentence. */
 export function detectUnsupportedExperience(text: string): string[] {
@@ -651,6 +666,9 @@ export function getBrandLinkContentReadiness(
       ? 0
       : unsupportedExperienceMatches.length +
         (UNSUPPORTED_EXPERIENCE_TITLE_PATTERN.test(title) ? 1 : 0);
+  const ungroundedExperienceCount = experienceMode === "VERIFIED_EXPERIENCE"
+    ? countUngroundedExperienceSentences(fullBody, input.experienceNotes || "")
+    : 0;
   const commissionRateCount = countPatternHits(fullBody, COMMISSION_RATE_PATTERNS);
   const internalGuidanceCount = countPatternHits(fullBody, INTERNAL_GUIDANCE_PATTERNS);
   // 편집(초안) 단계에서는 이미지가 아직 확정되지 않았으므로 대표 이미지는 발행 단계에서만 요구한다.
@@ -795,6 +813,14 @@ export function getBrandLinkContentReadiness(
       label: "허위 체험 단정",
       status: unsupportedExperienceCount > 0 ? "fail" : "pass",
     },
+    ...(experienceMode === "VERIFIED_EXPERIENCE" ? [{
+      key: "experience-grounding",
+      label: ungroundedExperienceCount > 0
+        ? `체험 메모에 없는 체험 표현 ${ungroundedExperienceCount}건 (확인 권장)`
+        : "체험 표현이 메모에 근거",
+      // 차단하지 않는 권고 신호. 메모와 겹치는 단어가 전혀 없는 체험 문장만 센다.
+      status: ungroundedExperienceCount > 0 ? "warn" as const : "pass" as const,
+    }] : []),
     {
       key: "commission-rate",
       label: "수수료율/커미션 노출",
