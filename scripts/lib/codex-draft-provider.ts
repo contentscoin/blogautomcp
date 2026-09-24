@@ -47,6 +47,8 @@ export interface CodexDraftOptions {
   researchMode?: "disabled" | "cached" | "live";
   /** 웹 리서치 대상. 기본은 여행(기존 동작). 쇼핑은 같은 모델의 공식 정보 확인에만 쓴다. */
   researchScope?: "TRAVEL" | "SHOPPING";
+  /** JSON schema for the final answer (Codex structured output). The answer is still returned as text. */
+  outputSchema?: unknown;
   onProgress?: (message: string) => void;
 }
 const nativeImport = new Function("specifier", "return import(specifier)") as (
@@ -289,7 +291,10 @@ export async function runCodexDraft(options: CodexDraftOptions): Promise<string>
         threadSource: "blogautomcp-draft",
       });
       let finalResponse = "";
-      const { events } = await thread.runStreamed(input, { signal: controller.signal });
+      const { events } = await thread.runStreamed(input, {
+        signal: controller.signal,
+        ...(options.outputSchema ? { outputSchema: options.outputSchema } : {}),
+      });
       for await (const event of events) {
         if (event.type === "item.completed" && event.item.type === "agent_message") {
           finalResponse = event.item.text.trim() || finalResponse;

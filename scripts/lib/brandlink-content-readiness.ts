@@ -392,7 +392,10 @@ function buildQualityReport(input: {
             : `핵심 방문지 ${coveredEvidence}/${requiredEvidence}곳만 본문에 등장합니다.`
           : input.sourceEvidenceLevel === "sparse"
             ? "저장 출처의 상품 고유 기능·구조·규격이 부족합니다. 원고 재작성 전에 상세 정보를 다시 수집해야 합니다."
-            : `확인된 기능·수치 ${coveredEvidence}/${requiredEvidence}개만 본문에 등장합니다.`]
+            : `확인된 기능·수치 ${coveredEvidence}/${requiredEvidence}개만 본문에 등장합니다.`,
+        ...(!isTravel && "missingSignals" in reviewSubstance && reviewSubstance.missingSignals.length > 0
+          ? [`본문에 아직 없는 확인 사실(숫자·핵심 단어를 그대로 한 문장에 쓰기): ${reviewSubstance.missingSignals.slice(0, 6).join(" / ")}`]
+          : [])]
       : "coveredSignals" in reviewSubstance && !reviewSubstance.signalEvidenceAvailable
         ? ["확인된 기능·수치 신호가 없어 상품 고유 근거를 요구하지 않았습니다. 상세정보 동기화 후 재검사를 권장합니다."]
         : [],
@@ -422,7 +425,10 @@ function buildQualityReport(input: {
     notes: linkageUnavailable
       ? ["상품 근거를 다시 수집한 뒤 기능과 사용 장면의 연결을 검사합니다."]
       : linkageFail
-      ? [`근거를 장면·판단으로 연결한 문장 ${reviewSubstance.evidenceJudgementCount}/${reviewSubstance.requiredEvidenceJudgementCount}개, 서로 다른 근거 ${groundedSignalCount}/${requiredGroundedSignalCount}개`]
+      ? [`근거를 장면·판단으로 연결한 문장 ${reviewSubstance.evidenceJudgementCount}/${reviewSubstance.requiredEvidenceJudgementCount}개, 서로 다른 근거 ${groundedSignalCount}/${requiredGroundedSignalCount}개`,
+        ...("unjudgedSignals" in reviewSubstance && reviewSubstance.unjudgedSignals.length + reviewSubstance.missingSignals.length > 0
+          ? [`이점·제약 판단에 아직 연결되지 않은 사실(사실 문장 바로 다음 문장에서 "덕분에/그래서 …편해요·제약이에요"로 잇기): ${[...reviewSubstance.unjudgedSignals, ...reviewSubstance.missingSignals].slice(0, 6).join(" / ")}`]
+          : [])]
       : [],
   };
 

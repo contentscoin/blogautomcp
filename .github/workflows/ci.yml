@@ -69,6 +69,7 @@ jobs:
           npm run test:codex-draft-provider
           npm run test:photoreal
           npm run test:codex-image
+          npm run test:draft-reliability
 
       # npm run build = prisma generate + 임시 생성물 정리 + next build --webpack.
       # 데스크톱 패키징(desktop:pack)이 쓰는 것과 같은 빌드 경로다.
