@@ -32,7 +32,8 @@ for (const template of Object.values(TOPIC_TEMPLATES)) {
 
 // 2. Deterministic selection from product evidence.
 const shoppingCases: Array<[string, string]> = [
-  ["브리즈온 BLDC 헤어 드라이기", "beauty_body"],
+  ["브리즈온 BLDC 헤어 드라이기", "home_appliance"],
+  ["닥터지 레드 블레미쉬 수딩 크림", "beauty_body"],
   ["LG 그램 16인치 노트북", "digital_it"],
   ["닥터바이 프로바이오틱스 유산균 30포", "food_supplement"],
   ["한일 BLDC 서큘레이터 선풍기", "home_appliance"],
@@ -111,9 +112,9 @@ assert.doesNotMatch(compact, /shopping-hook/u, "spec-first keeps its own fixed s
 
 // 6. The resolved render document uses the same overlay through the editorial selection.
 const document = resolvePostDocument({
-  editorial: createEditorialSelection("SHOPPING", { name: "브리즈온 BLDC 헤어 드라이기" }),
+  editorial: createEditorialSelection("SHOPPING", { name: "닥터지 레드 블레미쉬 수딩 크림" }),
   connectKind: "SHOPPING",
-  title: "헤어 드라이기 브리즈온 BLDC 사용 정리",
+  title: "수딩 크림 닥터지 레드 블레미쉬 정리",
   sections: ["도입\n\n브리즈온 BLDC 헤어 드라이기는 가벼운 무게가 특징입니다.", "성분이 아닌 구조\n\nBLDC 모터가 바람 세기를 만듭니다."],
   hashtags: ["드라이기"],
   imagePaths: [],

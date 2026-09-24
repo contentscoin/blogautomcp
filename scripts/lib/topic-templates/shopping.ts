@@ -134,7 +134,7 @@ export const SHOPPING_TOPIC_TEMPLATES: Record<ShoppingTopicTemplateId, TopicTemp
   home_appliance: template("home_appliance", {
     label: "가전 (설치·사용형)",
     readerIntent: "우리 집 공간과 생활 패턴에 맞는지, 소음·전력·관리 부담",
-    keywords: ["청소기", "로봇청소기", "드라이기", "선풍기", "서큘레이터", "에어컨", "냉장고", "세탁기", "건조기", "공기청정기", "제습기", "가습기", "전기포트", "에어프라이어", "밥솥", "믹서기", "블렌더", "커피머신", "식기세척기", "전자레인지", "오븐", "가전", "주방가전", "히터", "전기장판"],
+    keywords: ["청소기", "로봇청소기", "드라이기", "선풍기", "서큘레이터", "에어컨", "냉장고", "세탁기", "건조기", "공기청정기", "제습기", "가습기", "전기포트", "에어프라이어", "밥솥", "믹서기", "블렌더", "커피머신", "식기세척기", "전자레인지", "오븐", "가전", "주방가전", "히터", "전기장판", "트리머", "면도기", "고데기", "미용가전"],
     editorialTemplateId: "shopping-detail",
     sections: {
       "shopping-summary": { ...BASE["shopping-summary"]!, headingHint: "크기와 구성부터", purpose: "본체 크기·무게·구성품과 놓을 자리를 정리한다." },
@@ -150,7 +150,7 @@ export const SHOPPING_TOPIC_TEMPLATES: Record<ShoppingTopicTemplateId, TopicTemp
   beauty_body: template("beauty_body", {
     label: "뷰티·바디 (성분·제형형)",
     readerIntent: "내 피부·모발 고민에 맞는 성분과 제형인지, 사용 루틴과 자극 여부",
-    keywords: ["뷰티", "화장품", "스킨", "토너", "로션", "에센스", "세럼", "앰플", "크림", "선크림", "클렌징", "마스크팩", "샴푸", "트리트먼트", "헤어", "바디워시", "바디로션", "향수", "립", "쿠션", "파운데이션", "트리머", "면도기", "고데기"],
+    keywords: ["뷰티", "화장품", "스킨", "토너", "로션", "에센스", "세럼", "앰플", "크림", "선크림", "클렌징", "마스크팩", "샴푸", "트리트먼트", "헤어", "바디워시", "바디로션", "향수", "립", "쿠션", "파운데이션"],
     editorialTemplateId: "shopping-problem",
     sections: {
       "shopping-summary": { ...BASE["shopping-summary"]!, headingHint: "이런 고민에 쓰는 제품", purpose: "해결하려는 피부·모발 고민과 제품 정체를 연결한다." },

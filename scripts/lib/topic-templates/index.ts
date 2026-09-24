@@ -75,15 +75,17 @@ function selectShopping(input: TopicTemplateInput): TopicTemplateSelection {
   const name = input.name || "";
   const category = input.categoryPath || "";
   const detail = [input.description || "", ...(input.features || []), ...(input.ocrLines || [])].join("\n");
-  let best: { id: ShoppingTopicTemplateId; score: number; hits: string[] } | null = null;
+  let best: { id: ShoppingTopicTemplateId; score: number; specificity: number; hits: string[] } | null = null;
   for (const id of SHOPPING_PRIORITY) {
     const keywords = SHOPPING_TOPIC_TEMPLATES[id].keywords;
     const categoryHits = uniqueHits(category, keywords);
     const nameHits = uniqueHits(name, keywords);
     const detailHits = uniqueHits(detail, keywords).filter((hit) => !nameHits.includes(hit));
     const score = categoryHits.length * 5 + nameHits.length * 3 + Math.min(3, detailHits.length);
-    if (score > 0 && (!best || score > best.score)) {
-      best = { id, score, hits: [...categoryHits, ...nameHits, ...detailHits].slice(0, 4) };
+    // 동점이면 더 긴(구체적인) 상품명 키워드가 이긴다: "헤어 드라이기"는 "헤어"(뷰티)보다 "드라이기"(가전).
+    const specificity = Math.max(0, ...[...categoryHits, ...nameHits].map((hit) => hit.length));
+    if (score > 0 && (!best || score > best.score || (score === best.score && specificity > best.specificity))) {
+      best = { id, score, specificity, hits: [...categoryHits, ...nameHits, ...detailHits].slice(0, 4) };
     }
   }
   if (!best) return { id: "generic_shopping", reason: "상품 유형 신호 없음: 쇼핑 기본형" };

@@ -204,6 +204,7 @@ import { createEditorialSelection, formatEditorialTemplate } from "./lib/editori
 import { formatTopicTemplateForPrompt } from "./lib/topic-templates";
 import { readDetailImagesWithVision } from "./lib/detail-vision-reader";
 import { buildSearchDemandQueries, collectSearchDemand, formatSearchDemandForPrompt } from "./lib/search-demand";
+import { formatTitleCandidatesForPrompt, planTitle, type TitlePlanContext } from "./lib/topic-templates/title-planner";
 import {
   assessSiblingOverlap,
   formatPostAngleForPrompt,
@@ -4930,6 +4931,17 @@ async function step2_generatePost(
   // 상품 유형 템플릿: 같은 섹션 ID 위에 유형별 목적·이미지 의도·이미지 출처를 덮어쓴 역할 팔레트.
   const topicSelection = writingContract.editorial?.topic;
   if (topicSelection) console.log(`   🧩 상품 유형 템플릿: ${topicSelection.id} (${topicSelection.reason})`);
+  // SEO 제목 기획: 템플릿·각도 제목 공식으로 후보를 만들고, 모델 제목이 필수 규칙을 어기면 후보로 바꾼다.
+  const titlePlanContext: TitlePlanContext | null = topicSelection ? {
+    kind: connectKind,
+    productName: product.name,
+    topicId: topicSelection.id,
+    angleId: specInput?.angleContext?.angle,
+    verifiedExperience: BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE",
+    siblingTitles: specInput?.angleContext?.siblings.map((sibling) => sibling.title),
+    minChars: writingContract.title.min,
+    maxChars: writingContract.title.max,
+  } : null;
   // 검색 수요(네이버 자동완성): FAQ·질문형 소제목 후보. 제출 원고 검증 모드에서는 호출하지 않는다.
   const searchDemand = SEARCH_DEMAND_ENABLED && !BRANDLINK_GENERATED_DRAFT_PATH
     ? await collectSearchDemand(buildSearchDemandQueries(connectKind, product.name)).catch(() => [])
@@ -4938,6 +4950,7 @@ async function step2_generatePost(
   const compositionPromptBlock = [
     formatPostContractForPrompt(getPostCompositionContract(connectKind, topicSelection?.id)),
     formatSearchDemandForPrompt(connectKind, searchDemand),
+    titlePlanContext ? formatTitleCandidatesForPrompt(titlePlanContext) : "",
     // Codex/API 경로는 브라우저 예산 제한이 없으므로 섹션 흐름·체험 문장 자리까지 담은 전체 블록을 넣는다.
     topicSelection
       ? formatTopicTemplateForPrompt(topicSelection, { experienceMode: BRANDLINK_EXPERIENCE_MODE })
@@ -5554,6 +5567,13 @@ ${mandatoryWritingPromptBlock}`;
   let normalizedTitle = resolveWritingDraftTitle(
     json.title, product.name, writingContract, sanitizeTitle,
   );
+  if (titlePlanContext && !writingContract.requestedTitle) {
+    const plannedTitle = planTitle(normalizedTitle, titlePlanContext);
+    if (plannedTitle.replaced) {
+      console.log(`   🏷️ 제목 교체(${plannedTitle.reason}): ${normalizedTitle} → ${plannedTitle.title}`);
+      normalizedTitle = sanitizeTitle(plannedTitle.title, normalizedTitle);
+    }
+  }
 
   const qualitySource = buildBrandPostQualitySource({
     productName: product.name,
