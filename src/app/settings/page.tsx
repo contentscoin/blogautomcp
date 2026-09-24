@@ -273,7 +273,7 @@ export default function SettingsPage() {
         <section className="bg-gray-900 rounded-xl p-5 border border-gray-800">
           <h2 className="text-lg font-semibold mb-1">API · 발행 설정</h2>
           <p className="my-3 rounded-lg border border-emerald-900 bg-emerald-950/40 p-3 text-sm text-emerald-300">
-            Codex · gpt-5.5 원고 작성, ChatGPT 웹 자동작성 및 섹션 이미지 자동생성이 기본 적용됩니다. 별도 선택은 필요하지 않습니다.
+            Codex · GPT-6 Luna(low) 원고 작성, ChatGPT 웹 자동작성 및 섹션 이미지 자동생성이 기본 적용됩니다. 별도 선택은 필요하지 않습니다.
           </p>
           {envPath ? (
             <p className="text-xs text-gray-500 mb-4 break-all">저장 위치: {envPath}</p>

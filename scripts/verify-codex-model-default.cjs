@@ -9,14 +9,16 @@ const code=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES
 const moduleObj={exports:{}};
 vm.runInNewContext(code,{exports:moduleObj.exports,require:s=>s.startsWith('.')?require(path.resolve(path.dirname(filename),s)):require(s),MockCodex,process,AbortController,setTimeout,clearTimeout});
 (async()=>{
-  for(const model of [undefined,'','   ','gpt-5.5']) {
+  for(const model of [undefined,'','   ','gpt-6-luna']) {
     const result=await moduleObj.exports.runCodexDraft({systemPrompt:'check',userPrompt:'check',model});
-    assert.equal(captured.model,'gpt-5.5');
+    assert.equal(captured.model,'gpt-6-luna');
+    assert.equal(captured.modelReasoningEffort,'low','blank effort resolves to the fixed low policy');
     assert.equal(result,'{"productPhoto":true}');
     assert.equal(captured.sandboxMode,'read-only');
   }
   captured=undefined;
   await assert.rejects(moduleObj.exports.runCodexDraft({systemPrompt:'check',userPrompt:'check',model:'gpt-4o-mini'}), /TEXT_MODEL_POLICY/);
+  await assert.rejects(moduleObj.exports.runCodexDraft({systemPrompt:'check',userPrompt:'check',model:'gpt-5.5'}), /TEXT_MODEL_POLICY/);
   await assert.rejects(moduleObj.exports.runCodexDraft({systemPrompt:'check',userPrompt:'check',reasoningEffort:'ultra'}), /TEXT_MODEL_POLICY/);
   assert.equal(captured,undefined,'invalid model/effort must fail before starting a thread');
   console.log('PASS: pinned Codex model; blank defaults; foreign model and unsupported effort rejected before execution');

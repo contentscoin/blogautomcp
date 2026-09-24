@@ -99,7 +99,7 @@
   },
   "main": "scripts/electron/main.cjs",
   "dependencies": {
-    "@openai/codex-sdk": "^0.154.0",
+    "@openai/codex-sdk": "^0.156.1",
     "@prisma/client": "^5.22.0",
     "date-fns": "^4.1.0",
     "dotenv": "^17.2.3",

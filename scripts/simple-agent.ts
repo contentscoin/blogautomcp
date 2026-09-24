@@ -190,7 +190,7 @@ import { buildHumanizeSectionsPrompt, parseHumanizeSections } from "./lib/humani
 import { createLockedProductThumbnail, createOriginalProductPhotoThumbnail, type ShoppingThumbnailStyle } from "./lib/product-image-lock";
 import { copyProductPhotoSource } from "./lib/product-photo-provenance";
 import { codexDraftTerminalFailureCode, runCodexDraft } from "./lib/codex-draft-provider";
-import { TEXT_MODEL, textCompletionParameters } from "./lib/text-model-policy";
+import { TEXT_MODEL, TEXT_REASONING_EFFORT, textCompletionParameters } from "./lib/text-model-policy";
 import { deduplicateImagePaths } from "./lib/image-dedup";
 import { createThreeImageCollage } from "./lib/image-collage";
 import { createProductDetailImageSegments } from "./lib/product-detail-image";
@@ -242,9 +242,8 @@ const AI_PROVIDER: "openai" | "codex" = REQUESTED_AI_PROVIDER === "codex" ? "cod
 const CODEX_DRAFT_MODEL = draftRuntimePolicy.CODEX_DRAFT_MODEL;
 const writingTimeoutPolicy = getWritingTimeoutPolicy();
 const CODEX_DRAFT_TIMEOUT_MS = writingTimeoutPolicy.codexMs;
-const CODEX_DRAFT_REASONING_EFFORT = (
-  process.env.CODEX_DRAFT_REASONING_EFFORT || "medium"
-) as "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+// Effort is part of the fixed product policy; legacy .env values cannot raise it.
+const CODEX_DRAFT_REASONING_EFFORT = TEXT_REASONING_EFFORT;
 const CODEX_BROWSER_FALLBACK_ENABLED =
   (process.env.CODEX_BROWSER_FALLBACK_ENABLED || "false").toLowerCase() === "true";
 
