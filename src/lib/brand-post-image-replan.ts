@@ -25,6 +25,13 @@ const verifiedAlternative = (slot: Slots[number], allowProductPhoto = false) => 
   !slot.staleTargets.length && slot.assets.some(asset => asset.creationMethod === "source" &&
     asset.sourceReview?.usage === "section-matched-product-evidence" &&
     ["feature-evidence", "scene-evidence", ...(allowProductPhoto ? ["product-photo"] : [])].includes(asset.sourceReview.reviewClass || ""));
+/** A lifestyle slot filled with the locked real product on a generated background (AI 연출).
+ * It never proves a feature; it only carries image coverage a feature section could not source. */
+const generatedLifestyleAlternative = (slot: Slots[number], manifest: Manifest) => {
+  const section = manifest.composition.sections.find(section => section.id === slot.sectionId);
+  return Boolean(section) && isShoppingLifestyleImage(section!) && slot.count > 0 && !slot.missing && !slot.generationMissing &&
+    !slot.staleTargets.length && slot.assets.some(asset => asset.creationMethod === "source-with-generated-background");
+};
 function permitsGenericReplacement(slot: Slots[number], manifest: Manifest): boolean {
   const section = manifest.composition.sections.find(section => section.id === slot.sectionId)!;
   return slot.staleTargets.some(target => target.code === "image-publication-rejected") &&
@@ -32,14 +39,17 @@ function permitsGenericReplacement(slot: Slots[number], manifest: Manifest): boo
 }
 /** Match constrained feature donors first so a generic donor cannot consume
  * the only feature-evidence alternative. Each optional section supplies one slot. */
-function matchAlternatives(donors: Slots, candidates: Slots, manifest: Manifest): Map<string, Slots> | null {
-  const available = [...candidates];
+function matchAlternatives(donors: Slots, candidates: Slots, manifest: Manifest, allowGenerated = false): Map<string, Slots> | null {
+  // Verified seller evidence first; generated lifestyle coverage only fills what evidence cannot.
+  const available = [...candidates].sort((a, b) =>
+    Number(generatedLifestyleAlternative(a, manifest)) - Number(generatedLifestyleAlternative(b, manifest)));
   const result = new Map<string, Slots>();
   for (const donor of [...donors].sort((a, b) => Number(permitsGenericReplacement(a, manifest)) - Number(permitsGenericReplacement(b, manifest)))) {
     const assigned: Slots = [];
     for (let n = donor.count; n < donor.minimum; n++) {
       const index = available.findIndex(candidate => {
         if (verifiedAlternative(candidate)) return true;
+        if (allowGenerated && generatedLifestyleAlternative(candidate, manifest)) return true;
         const section = manifest.composition.sections.find(section => section.id === candidate.sectionId)!;
         return permitsGenericReplacement(donor, manifest) && verifiedAlternative(candidate, true) &&
           allowsGenericBrandPostProductPhoto({ sectionTitle: section.title, imageIntent: section.imageIntent, imageSource: section.imageSource });
@@ -116,6 +126,28 @@ export async function replanShoppingImageCoverage(options: {
       throw Object.assign(new Error(`IMAGE_REPLAN_EXTERNAL_BLOCKED: ${stop}`), { code: code || "IMAGE_REPLAN_EXTERNAL_BLOCKED" });
     }
   }
+  // Thin seller galleries often have no photo that proves a specific feature. Rather than
+  // blocking the whole draft, move that coverage to an optional lifestyle section and fill it
+  // with the locked real product on a generated background. Feature text and intents stay as is.
+  let allowGenerated = false;
+  const afterSource = deps.read(options.brandLinkId, { migrate: false });
+  if (afterSource && afterSource.version === "brand-post-package/v2" && imageReplanDraftIdentity(afterSource) === identity) {
+    const probed = deps.slots(afterSource);
+    const probedCandidates = candidates.map(c => probed.find(s => s.sectionId === c.sectionId)!).filter(Boolean);
+    if (!matchAlternatives(missing, probedCandidates, afterSource)) {
+      const lifestyle = probedCandidates.filter(slot => slot.count === 0 && !slot.staleTargets.length &&
+        isShoppingLifestyleImage(afterSource.composition.sections.find(section => section.id === slot.sectionId)!));
+      if (lifestyle.length) {
+        const generated = await deps.repair({ ...options, requests: lifestyle.map(slot => ({
+          requestId: randomUUID(), sectionId: slot.sectionId, slotId: `${slot.sectionId}:image:1`,
+        })) });
+        allowGenerated = true;
+        if (generated.errors.length && generated.errors.every(error => /\b(?:AUTH_REQUIRED|CODEX_AUTH_REQUIRED|CHATGPT_BROWSER_AUTH_REQUIRED)\b/u.test(error))) {
+          throw Object.assign(new Error(`IMAGE_REPLAN_EXTERNAL_BLOCKED: ${generated.errors[0]}`), { code: "IMAGE_REPLAN_EXTERNAL_BLOCKED" });
+        }
+      }
+    }
+  }
   const lock = deps.lock(options.brandLinkId, { purpose: "shopping-image-coverage-replan" });
   try {
     lock.assertOwner();
@@ -124,7 +156,7 @@ export async function replanShoppingImageCoverage(options: {
       return unchanged("REPLAN_DRAFT_CHANGED");
     if (current.imageGeneration?.status === "running") return unchanged("REPLAN_BUSY");
     const audited = deps.slots(current);
-    const alternatives = matchAlternatives(missing, candidates.map(c => audited.find(s => s.sectionId === c.sectionId)!), current);
+    const alternatives = matchAlternatives(missing, candidates.map(c => audited.find(s => s.sectionId === c.sectionId)!), current, allowGenerated);
     if (!alternatives) return { ...unchanged("REPLAN_INSUFFICIENT_VERIFIED_ALTERNATIVES"), after: summary(audited) };
     const minima = new Map<string, number>();
     const history: Array<{ from: string; to: string; at: string }> = [];

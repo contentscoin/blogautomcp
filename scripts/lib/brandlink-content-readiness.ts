@@ -267,6 +267,24 @@ export const INTERNAL_GUIDANCE_PATTERNS = [
   /(?:recommendedSectionTitles|sections\s*:|hashtags\s*:)/iu,
 ] as const;
 
+/**
+ * 독자에게 보이면 안 되는 내부 문구(프롬프트·작성 지침·워크플로우·후기 수집 보고 등)가 든 문장만 지운다.
+ * 이런 문장은 고쳐 쓸 대상이 아니라 발행물에서 빠져야 하는 문장이라, 모델 보강에 맡기지 않고 규칙으로 제거한다.
+ * 소제목 줄과 나머지 문장은 그대로 둔다.
+ */
+export function stripInternalGuidanceSentences(section: string): string {
+  const hits = (value: string) => INTERNAL_GUIDANCE_PATTERNS.some((pattern) => pattern.test(value));
+  if (!hits(section)) return section;
+  const lines = section.replace(/\r\n?/gu, "\n").split("\n");
+  const cleaned = lines.map((line) => {
+    if (!hits(line)) return line;
+    const sentences = line.match(/[^.!?。]+(?:[.!?。]+["'”’)]*|$)\s*/gu) || [line];
+    return sentences.filter((sentence) => !hits(sentence)).join("").trim();
+  });
+  // Collapse blank runs left by removed lines, keeping the "heading\n\nbody" shape.
+  return cleaned.join("\n").replace(/\n{3,}/gu, "\n\n").trim();
+}
+
 /** Quantity alone is never evidence of a refill variant. Negation and questions
  * are evaluated per clause so an unrelated negative cannot license a claim. */
 function affirmativeRefillClauses(value: string): string[] {

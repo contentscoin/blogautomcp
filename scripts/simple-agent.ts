@@ -148,6 +148,7 @@ import {
   getBrandLinkContentReadiness,
   type BrandLinkContentReadiness,
   type PostGenerationSource,
+  stripInternalGuidanceSentences,
 } from "./lib/brandlink-content-readiness";
 import {
   buildProductEditorialPlan,
@@ -5552,6 +5553,12 @@ ${mandatoryWritingPromptBlock}`;
       if (getStructuredSectionCount(parsed) < minimumBodySectionCount) {
         parsed.sections = normalizeDraftSections(parsed.sections, minimumBodySectionCount);
       }
+      // 내부 지침 문구가 섞인 문장은 발행물에 남으면 안 되므로 여기서 지운다(보강 루프에 맡기지 않는다).
+      if (Array.isArray(parsed.sections)) {
+        parsed.sections = (parsed.sections as unknown[]).map((section) =>
+          typeof section === "string" ? stripInternalGuidanceSentences(section) : section)
+          .filter((section) => typeof section !== "string" || section.trim().length > 0);
+      }
       return parsed;
     };
     const first = shaped(draftText);
@@ -9959,10 +9966,14 @@ async function runPreparedPostRevision(
   ].filter(Boolean).join(" / ");
 
   let selectedResult: AssembledPost | null = null;
-  let selected = { title: prepared.post.title, sections: prepared.post.sections, hashtags: prepared.post.hashtags };
-  const beforeQuality = assessCandidate(selected);
-  let selectedQuality = beforeQuality;
-  let applied = false;
+  // 저장 원고에 남은 내부 지침 문장은 후보 비교 전에 규칙으로 지운다. 지운 것 자체가 적용된 수정이다.
+  const withoutInternalGuidance = (sections: string[]) => sections.map((section, index) =>
+    index === sections.length - 1 ? section : stripInternalGuidanceSentences(section));
+  const startSections = withoutInternalGuidance(prepared.post.sections);
+  let selected = { title: prepared.post.title, sections: startSections, hashtags: prepared.post.hashtags };
+  const beforeQuality = assessCandidate({ ...selected, sections: prepared.post.sections });
+  let selectedQuality = assessCandidate(selected);
+  let applied = startSections.some((section, index) => section !== prepared.post.sections[index]);
   let lastCandidateQuality = beforeQuality;
   let previousAttemptQuality: BrandLinkContentReadiness | null = null;
   let previousFeedback = "";
@@ -9989,7 +10000,13 @@ async function runPreparedPostRevision(
     if (convergencePlan && convergencePlan.action !== "repair-text") {
       throw new Error(`QUALITY_REPAIR_EXHAUSTED: ${convergencePlan.reason} ${diagnostic}`);
     }
-    const allowedIndexes = qualityConvergence
+    // 품질 항목 절반 이상이 실패한 원고는 문단 몇 개만 고쳐서는 수렴하지 않는다. 본문 전체를 한 번에 보강 대상으로 둔다.
+    const failingCategoryCount = selectedQuality.quality.categories.filter((category) => category.status === "fail").length;
+    const severe = qualityConvergence && sectionIndexes.length === 0 &&
+      failingCategoryCount * 2 >= Math.max(1, selectedQuality.quality.categories.length);
+    const allowedIndexes = severe
+      ? defaultSectionIndexes
+      : qualityConvergence
       ? selectQualityRepairSectionIndexes({
           current: selectedQuality,
           sections: selected.sections,
@@ -10037,7 +10054,7 @@ async function runPreparedPostRevision(
           allowedIndexes,
           { allowTitleChange: allowCandidateTitleChange },
         );
-        candidate = { title: revision.title, sections: revision.sections, hashtags: selected.hashtags };
+        candidate = { title: revision.title, sections: withoutInternalGuidance(revision.sections), hashtags: selected.hashtags };
       }
       assertUntargetedSectionHashesUnchanged(selected.sections, candidate.sections, allowedIndexes);
       lastCandidateQuality = assessCandidate(candidate);
