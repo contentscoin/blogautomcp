@@ -42,6 +42,8 @@
     "test:detail-vision": "tsx scripts/verify-detail-vision-and-research.ts",
     "test:title-planner": "tsx scripts/verify-title-planner.ts",
     "test:experience-notes": "tsx scripts/verify-experience-notes.ts",
+    "test:photoreal": "tsx scripts/verify-photoreal-prompts.ts",
+    "test:codex-image": "tsx scripts/verify-codex-image-generation.ts",
     "test:writing-harness": "npx ts-node --project tsconfig.scripts.json scripts/verify-writing-prompt-contract.ts",
     "test:writing-timeouts": "npx ts-node --project tsconfig.scripts.json scripts/verify-writing-timeouts.ts",
     "test:image-timeouts": "npx ts-node --project tsconfig.scripts.json scripts/verify-image-timeout-policy.ts",

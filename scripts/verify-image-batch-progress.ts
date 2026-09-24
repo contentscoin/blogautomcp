@@ -13,6 +13,7 @@ import * as imagePolicy from "./lib/image-timeout-policy";
 import * as photoProvenance from "./lib/product-photo-provenance";
 import * as imageEvidence from "../src/lib/brand-post-image-evidence";
 import * as atomicTextFile from "../src/lib/atomic-text-file";
+import * as photorealBuild from "./lib/photoreal/build";
 import type { ProductSectionImageReviewOptions } from "./lib/product-photo-review";
 import type { generateBrandPostImages as Generate, BrandPostImageGenerationResult } from "../src/lib/brand-post-image-generation";
 
@@ -73,8 +74,9 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
   const api = load<{
     generateBrandPostImages: typeof Generate;
     imageBatchTimeoutMs: (n: number) => number;
+    prepareImageBatchJobs: (targets: unknown[], manifest: unknown, productName: string, workDir: string) => unknown[];
     runBrowserImageBatch: (
-      targets: unknown[], manifest: unknown, productName: string, workDir: string,
+      jobs: unknown[], workDir: string,
       onResult: () => Promise<void>,
     ) => Promise<{ id: string; localPath: string | null; error?: string }[]>;
   }>(
@@ -175,10 +177,18 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       },
       "./chatgpt-browser-automation": { isChatGptBrowserAutomationEnabled: () => settings.automation ?? true },
       "./brand-post-image-evidence": imageEvidence,
+      "../../scripts/lib/photoreal/build": photorealBuild,
+      // This harness covers the browser transport; the Codex transport has its own test (verify-codex-image-generation).
+      "./codex-image-generation": {
+        resolveBrandPostImageEngine: () => "browser",
+        existingJobResult: () => null,
+        hasBrowserSubmission: () => false,
+        runCodexImageBatch: async () => { throw new Error("codex transport is not used by this harness"); },
+      },
       "node:crypto": crypto,
     },
     { process: { ...process, env: { ...process.env, BRAND_POST_IMAGE_BATCH_TIMEOUT_MS: settings.timeout?.toString() || "", BRAND_POST_IMAGE_JOB_TIMEOUT_MS: "" } } },
-    "\nmodule.exports.runBrowserImageBatch = runBrowserImageBatch;",
+    "\nmodule.exports.runBrowserImageBatch = runBrowserImageBatch; module.exports.prepareImageBatchJobs = prepareImageBatchJobs;",
   );
   const manifest = {
     brandLinkId: "fixture", connectKind: "TRAVEL", title: "Fixture",
@@ -310,7 +320,7 @@ async function verifyGenerator() {
       sectionTitle: "fixture", imageIntent: "fixture", bodyExcerpt: "fixture",
     }));
     let calls = 0;
-    const pending = h.runBrowserImageBatch(targets, h.manifest, "fixture", workDir, async () => {
+    const pending = h.runBrowserImageBatch(h.prepareImageBatchJobs(targets, h.manifest, "fixture", workDir), workDir, async () => {
       calls += 1;
       if (calls === 1) throw new Error("consumer rejected");
     });

@@ -187,7 +187,7 @@ import {
 } from "./lib/product-thumbnail-settings";
 import { HUMANIZE_RULES, scanAiTells } from "./lib/humanize-korean";
 import { buildHumanizeSectionsPrompt, parseHumanizeSections } from "./lib/humanize-response-contract";
-import { createLockedProductThumbnail, createOriginalProductPhotoThumbnail, type ShoppingThumbnailStyle } from "./lib/product-image-lock";
+import { createLockedProductThumbnail, createLockedProductThumbnailOnBackground, createOriginalProductPhotoThumbnail, type ShoppingThumbnailStyle } from "./lib/product-image-lock";
 import { copyProductPhotoSource } from "./lib/product-photo-provenance";
 import { codexDraftTerminalFailureCode, runCodexDraft } from "./lib/codex-draft-provider";
 import { TEXT_MODEL, TEXT_REASONING_EFFORT, textCompletionParameters } from "./lib/text-model-policy";
@@ -1384,10 +1384,10 @@ async function generateTopTextCutoutThumbnail(
   }
 
   if (PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_PATH) {
-    const codexImagegenPath = generateProductThumbnailWithCodexImagegenFallback(
-      promptInfo.prompt,
+    const codexImagegenPath = await generateProductThumbnailWithCodexImagegenFallback(
+      promptInfo,
       product.representativeImagePath,
-      promptInfo.productNameLabel
+      product.name,
     );
     if (codexImagegenPath) {
       console.log(`   ✅ Codex imagegen 썸네일 사용: ${path.basename(codexImagegenPath)}`);
@@ -1410,10 +1410,10 @@ async function generateTopTextCutoutThumbnail(
     return { path: generatedPath, source: "chatgpt" };
   }
 
-  const codexImagegenPath = generateProductThumbnailWithCodexImagegenFallback(
-    promptInfo.prompt,
+  const codexImagegenPath = await generateProductThumbnailWithCodexImagegenFallback(
+    promptInfo,
     product.representativeImagePath,
-    promptInfo.productNameLabel
+    product.name,
   );
   if (codexImagegenPath) {
     console.log(`   OK Codex imagegen thumbnail selected: ${path.basename(codexImagegenPath)}`);
@@ -1463,12 +1463,17 @@ async function generateCompositeThumbnailFallback(
   }
 }
 
-function generateProductThumbnailWithCodexImagegenFallback(
-  prompt: string,
+/**
+ * API 키 없이 Codex 로그인(gpt-image-2)으로 썸네일 배경을 만들고, 실제 상품 누끼와 한글 제목은 로컬에서 합성한다.
+ * PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_PATH 로 직접 만든 이미지를 넘기면 그 파일을 그대로 쓴다(수동 경로).
+ */
+async function generateProductThumbnailWithCodexImagegenFallback(
+  promptInfo: { prompt: string; productNameLabel: string; headline: string; subline: string },
   referenceImagePath: string,
-  productNameLabel: string
-): string | null {
+  productName: string,
+): Promise<string | null> {
   if (!PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_FALLBACK_ENABLED) return null;
+  const productNameLabel = promptInfo.productNameLabel;
 
   if (PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_PATH) {
     const resolved = path.resolve(PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_PATH);
@@ -1486,41 +1491,42 @@ function generateProductThumbnailWithCodexImagegenFallback(
     return finalPath;
   }
 
-  fs.mkdirSync(PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_REQUEST_DIR, { recursive: true });
-  const requestedOutputPath = path.join(
-    TEMP_PATH,
-    `product_thumbnail_codex_imagegen_${Date.now()}_${sanitizeFileNameForPath(productNameLabel)}.png`
-  );
-  const requestPath = path.join(
-    PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_REQUEST_DIR,
-    `product_thumbnail_codex_imagegen_request_${Date.now()}_${sanitizeFileNameForPath(productNameLabel)}.md`
-  );
-
-  const requestBody = [
-    "# Codex Imagegen Product Thumbnail Request",
-    "",
-    `Product name: ${productNameLabel}`,
-    `Reference image: ${referenceImagePath}`,
-    `Desired output path: ${requestedOutputPath}`,
-    "",
-    "Use Codex built-in imagegen. Use the reference product image as the strict product reference.",
-    "After generation, copy the selected image to the desired output path and rerun with:",
-    "",
-    "```powershell",
-    `$env:PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_PATH="${requestedOutputPath}"`,
-    "```",
-    "",
-    "Prompt:",
-    "",
-    "```text",
-    prompt,
-    "```",
-    "",
-  ].join("\n");
-
-  fs.writeFileSync(requestPath, requestBody, "utf8");
-  console.log(`   Codex imagegen request saved: ${requestPath}`);
-  return null;
+  if (!referenceImagePath || !fs.existsSync(referenceImagePath)) return null;
+  const workDir = path.join(PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_REQUEST_DIR, `thumb-${Date.now()}-${sanitizeFileNameForPath(productNameLabel)}`);
+  fs.mkdirSync(workDir, { recursive: true });
+  try {
+    const { runCodexImageBatch } = await import("../src/lib/codex-image-generation");
+    const { buildBrandPostImagePrompt } = await import("../src/lib/brand-post-image-generation");
+    // 상품은 그리지 않고 배경만 만든다. 실제 상품은 검증된 원본에서 잘라 합성한다(상품 모양 변형 방지).
+    const prompt = buildBrandPostImagePrompt({
+      connectKind: "SHOPPING",
+      productName,
+      sectionTitle: promptInfo.headline,
+      imageIntent: "대표 썸네일 배경",
+      role: "hero",
+    });
+    const [result] = await runCodexImageBatch(
+      [{ id: "thumbnail", prompt, outStem: path.join(workDir, "background"), referenceImagePaths: [] }],
+      { onResult: async () => {} },
+    );
+    if (!result?.localPath) {
+      console.log(`   Warning: Codex imagegen thumbnail background failed: ${result?.error || "empty result"}`);
+      return null;
+    }
+    const composed = await createLockedProductThumbnailOnBackground({
+      sourcePath: referenceImagePath,
+      backgroundPath: result.localPath,
+      outputDir: TEMP_PATH,
+      productName: productNameLabel,
+      headline: promptInfo.headline,
+      subline: promptInfo.subline,
+      style: "shopping-color-block",
+    });
+    return fs.existsSync(composed.outputPath) ? composed.outputPath : null;
+  } catch (error) {
+    console.log(`   Warning: Codex imagegen thumbnail failed: ${getErrorMessage(error)}`);
+    return null;
+  }
 }
 
 async function generateProductThumbnailWithChatGPT(

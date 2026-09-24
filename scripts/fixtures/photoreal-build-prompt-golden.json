@@ -1,0 +1,575 @@
+{
+ "source": "skills/photoreal/scripts/build_prompt.py @ 92cca71",
+ "cases": [
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "cafe",
+    "situation": "",
+    "variantIndex": 0,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 카페 창가 자리에서 컵을 내려놓다 말고 창밖을 보는 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 늦은 오후 창으로 들어오는 자연광만으로 촬영. 가벼운 손떨림과 폰 카메라 특유의 노이즈가 약간 남음. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 수평이 1~2도 기울고 인물이 프레임 왼쪽으로 치우친 프레이밍. 카메라를 정면으로 보지 않고 살짝 비낀 시선. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "cafe",
+    "situation": "",
+    "variantIndex": 1,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 카페 창가 자리에서 책장을 넘기다 잠깐 손을 멈춘 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 흐린 날 창가의 부드러운 확산광, 실내등이 약하게 섞임. 초점이 눈에 아슬아슬하게 맞고 귀 쪽은 살짝 흐림. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 머리 위 여백이 조금 넉넉하고 인물이 오른쪽 아래로 내려앉은 프레이밍. 카메라 옆의 다른 사람 쪽을 보는 시선. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "cafe",
+    "situation": "",
+    "variantIndex": 2,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 카페 창가 자리에서 맞은편 사람 말을 듣다 웃음이 번지기 직전. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 해질 무렵 창으로 낮게 드는 빛이 한쪽 뺨에만 걸림. 어두운 부분에 폰 카메라 노이즈가 끼고 해상감이 가볍게 뭉개짐. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 인물이 프레임을 살짝 벗어나 어깨 한쪽이 잘린 프레이밍. 시선이 아래로 내려가 눈꺼풀이 홍채를 조금 덮음. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "cafe",
+    "situation": "",
+    "variantIndex": 3,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 카페 창가 자리에서 빨대를 물다 말고 시선이 딴 데로 간 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 늦은 오후 창으로 들어오는 자연광만으로 촬영. 빛이 강한 쪽이 아주 조금 날아가고 그림자 쪽 디테일이 뭉개짐. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 수평이 오른쪽으로 기울고 아래쪽 여백이 좁은 프레이밍. 먼 데를 보느라 초점이 살짝 풀린 눈. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "commute",
+    "situation": "",
+    "variantIndex": 0,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 지하철 안에서 창밖을 보다 시선이 흐려진 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 차내 형광등만으로 촬영, 창밖은 어두움. 가벼운 손떨림과 폰 카메라 특유의 노이즈가 약간 남음. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 수평이 1~2도 기울고 인물이 프레임 왼쪽으로 치우친 프레이밍. 카메라를 정면으로 보지 않고 살짝 비낀 시선. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "commute",
+    "situation": "",
+    "variantIndex": 1,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 지하철 안에서 이어폰을 고쳐 끼다 만 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 터널을 벗어나며 들어온 바깥 빛이 순간적으로 섞임. 초점이 눈에 아슬아슬하게 맞고 귀 쪽은 살짝 흐림. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 머리 위 여백이 조금 넉넉하고 인물이 오른쪽 아래로 내려앉은 프레이밍. 카메라 옆의 다른 사람 쪽을 보는 시선. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "commute",
+    "situation": "",
+    "variantIndex": 2,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 지하철 안에서 졸다 깨서 눈을 뜬 직후. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 천장 조명이 정수리에 떨어져 눈 아래에 옅은 그림자. 어두운 부분에 폰 카메라 노이즈가 끼고 해상감이 가볍게 뭉개짐. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 인물이 프레임을 살짝 벗어나 어깨 한쪽이 잘린 프레이밍. 시선이 아래로 내려가 눈꺼풀이 홍채를 조금 덮음. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "commute",
+    "situation": "",
+    "variantIndex": 3,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 지하철 안에서 손잡이를 잡고 몸이 흔들리는 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 차내 형광등만으로 촬영, 창밖은 어두움. 빛이 강한 쪽이 아주 조금 날아가고 그림자 쪽 디테일이 뭉개짐. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 수평이 오른쪽으로 기울고 아래쪽 여백이 좁은 프레이밍. 먼 데를 보느라 초점이 살짝 풀린 눈. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "home",
+    "situation": "",
+    "variantIndex": 0,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 자취방에서 머리를 넘기다 만 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 커튼 사이로 들어오는 아침 빛만으로 촬영. 가벼운 손떨림과 폰 카메라 특유의 노이즈가 약간 남음. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 수평이 1~2도 기울고 인물이 프레임 왼쪽으로 치우친 프레이밍. 카메라를 정면으로 보지 않고 살짝 비낀 시선. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "home",
+    "situation": "",
+    "variantIndex": 1,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 자취방에서 이불 위에 앉아 폰을 보다 고개를 든 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 책상 스탠드 하나만 켜진 방, 나머지는 어둑함. 초점이 눈에 아슬아슬하게 맞고 귀 쪽은 살짝 흐림. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 머리 위 여백이 조금 넉넉하고 인물이 오른쪽 아래로 내려앉은 프레이밍. 카메라 옆의 다른 사람 쪽을 보는 시선. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "home",
+    "situation": "",
+    "variantIndex": 2,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 자취방에서 부엌에서 물을 마시다 뒤를 돌아본 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 창가에서 들어온 빛이 바닥에 반사돼 얼굴 아래쪽을 약하게 밝힘. 어두운 부분에 폰 카메라 노이즈가 끼고 해상감이 가볍게 뭉개짐. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 인물이 프레임을 살짝 벗어나 어깨 한쪽이 잘린 프레이밍. 시선이 아래로 내려가 눈꺼풀이 홍채를 조금 덮음. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "home",
+    "situation": "",
+    "variantIndex": 3,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 자취방에서 빨래를 개다 말고 손을 멈춘 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 커튼 사이로 들어오는 아침 빛만으로 촬영. 빛이 강한 쪽이 아주 조금 날아가고 그림자 쪽 디테일이 뭉개짐. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 수평이 오른쪽으로 기울고 아래쪽 여백이 좁은 프레이밍. 먼 데를 보느라 초점이 살짝 풀린 눈. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "night",
+    "situation": "",
+    "variantIndex": 0,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 밤의 실내 창가에서 폰을 보다 고개를 든 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 방 안의 등 하나와 창밖 도시 불빛만으로 촬영. 가벼운 손떨림과 폰 카메라 특유의 노이즈가 약간 남음. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 수평이 1~2도 기울고 인물이 프레임 왼쪽으로 치우친 프레이밍. 카메라를 정면으로 보지 않고 살짝 비낀 시선. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "night",
+    "situation": "",
+    "variantIndex": 1,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 밤의 실내 창가에서 창에 이마를 살짝 기댄 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 폰 화면 빛이 아래에서 얼굴을 약하게 비춤. 초점이 눈에 아슬아슬하게 맞고 귀 쪽은 살짝 흐림. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 머리 위 여백이 조금 넉넉하고 인물이 오른쪽 아래로 내려앉은 프레이밍. 카메라 옆의 다른 사람 쪽을 보는 시선. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "night",
+    "situation": "",
+    "variantIndex": 2,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 밤의 실내 창가에서 불을 끄려다 손을 멈춘 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 옆방에서 새어 들어온 빛이 얼굴 절반만 밝힘. 어두운 부분에 폰 카메라 노이즈가 끼고 해상감이 가볍게 뭉개짐. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 인물이 프레임을 살짝 벗어나 어깨 한쪽이 잘린 프레이밍. 시선이 아래로 내려가 눈꺼풀이 홍채를 조금 덮음. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "night",
+    "situation": "",
+    "variantIndex": 3,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 밤의 실내 창가에서 하품 직후 눈가가 아직 풀린 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 방 안의 등 하나와 창밖 도시 불빛만으로 촬영. 빛이 강한 쪽이 아주 조금 날아가고 그림자 쪽 디테일이 뭉개짐. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 수평이 오른쪽으로 기울고 아래쪽 여백이 좁은 프레이밍. 먼 데를 보느라 초점이 살짝 풀린 눈. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "office",
+    "situation": "",
+    "variantIndex": 0,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 사무실 책상에서 모니터를 보다 옆을 본 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 천장 형광등과 모니터 빛이 섞임. 가벼운 손떨림과 폰 카메라 특유의 노이즈가 약간 남음. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 수평이 1~2도 기울고 인물이 프레임 왼쪽으로 치우친 프레이밍. 카메라를 정면으로 보지 않고 살짝 비낀 시선. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "office",
+    "situation": "",
+    "variantIndex": 1,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 사무실 책상에서 머그를 들다 말고 손을 멈춘 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 블라인드 사이로 들어온 낮 빛이 책상에 줄무늬로 떨어짐. 초점이 눈에 아슬아슬하게 맞고 귀 쪽은 살짝 흐림. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 머리 위 여백이 조금 넉넉하고 인물이 오른쪽 아래로 내려앉은 프레이밍. 카메라 옆의 다른 사람 쪽을 보는 시선. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "office",
+    "situation": "",
+    "variantIndex": 2,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 사무실 책상에서 의자에 기대 천장 쪽으로 시선을 올린 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 모니터 빛만 얼굴 정면에 약하게 닿고 주변은 어둑함. 어두운 부분에 폰 카메라 노이즈가 끼고 해상감이 가볍게 뭉개짐. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 인물이 프레임을 살짝 벗어나 어깨 한쪽이 잘린 프레이밍. 시선이 아래로 내려가 눈꺼풀이 홍채를 조금 덮음. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "office",
+    "situation": "",
+    "variantIndex": 3,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 사무실 책상에서 누가 부르는 쪽으로 고개를 돌리는 중. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 천장 형광등과 모니터 빛이 섞임. 빛이 강한 쪽이 아주 조금 날아가고 그림자 쪽 디테일이 뭉개짐. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 수평이 오른쪽으로 기울고 아래쪽 여백이 좁은 프레이밍. 먼 데를 보느라 초점이 살짝 풀린 눈. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "park",
+    "situation": "",
+    "variantIndex": 0,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 공원에서 벤치에 앉아 고개를 살짝 든 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 나뭇잎 사이로 새는 햇빛이 얼굴에 얼룩덜룩하게 떨어짐. 가벼운 손떨림과 폰 카메라 특유의 노이즈가 약간 남음. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 수평이 1~2도 기울고 인물이 프레임 왼쪽으로 치우친 프레이밍. 카메라를 정면으로 보지 않고 살짝 비낀 시선. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "park",
+    "situation": "",
+    "variantIndex": 1,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 공원에서 바람에 머리가 얼굴을 스치는 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 구름 낀 날의 평평한 자연광. 초점이 눈에 아슬아슬하게 맞고 귀 쪽은 살짝 흐림. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 머리 위 여백이 조금 넉넉하고 인물이 오른쪽 아래로 내려앉은 프레이밍. 카메라 옆의 다른 사람 쪽을 보는 시선. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "park",
+    "situation": "",
+    "variantIndex": 2,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 공원에서 걷다 말고 신발을 내려다보는 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 낮은 해가 뒤에서 들어와 머리카락 가장자리만 빛남. 어두운 부분에 폰 카메라 노이즈가 끼고 해상감이 가볍게 뭉개짐. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 인물이 프레임을 살짝 벗어나 어깨 한쪽이 잘린 프레이밍. 시선이 아래로 내려가 눈꺼풀이 홍채를 조금 덮음. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "park",
+    "situation": "",
+    "variantIndex": 3,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 공원에서 누군가를 기다리며 다른 데를 보는 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 나뭇잎 사이로 새는 햇빛이 얼굴에 얼룩덜룩하게 떨어짐. 빛이 강한 쪽이 아주 조금 날아가고 그림자 쪽 디테일이 뭉개짐. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 수평이 오른쪽으로 기울고 아래쪽 여백이 좁은 프레이밍. 먼 데를 보느라 초점이 살짝 풀린 눈. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "restaurant",
+    "situation": "",
+    "variantIndex": 0,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 식당 테이블에서 말하다 웃음이 터지기 직전. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 천장의 따뜻한 등 하나가 테이블 위로 떨어짐. 가벼운 손떨림과 폰 카메라 특유의 노이즈가 약간 남음. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 수평이 1~2도 기울고 인물이 프레임 왼쪽으로 치우친 프레이밍. 카메라를 정면으로 보지 않고 살짝 비낀 시선. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "restaurant",
+    "situation": "",
+    "variantIndex": 1,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 식당 테이블에서 젓가락을 들다 말고 상대를 보는 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 옆 테이블 조명과 주방 빛이 섞인 잡광. 초점이 눈에 아슬아슬하게 맞고 귀 쪽은 살짝 흐림. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 머리 위 여백이 조금 넉넉하고 인물이 오른쪽 아래로 내려앉은 프레이밍. 카메라 옆의 다른 사람 쪽을 보는 시선. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "restaurant",
+    "situation": "",
+    "variantIndex": 2,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 식당 테이블에서 잔을 내려놓으며 고개를 돌린 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 창가 자리라 바깥의 푸른 빛과 실내 노란 빛이 얼굴 양쪽에 따로 걸림. 어두운 부분에 폰 카메라 노이즈가 끼고 해상감이 가볍게 뭉개짐. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 인물이 프레임을 살짝 벗어나 어깨 한쪽이 잘린 프레이밍. 시선이 아래로 내려가 눈꺼풀이 홍채를 조금 덮음. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "restaurant",
+    "situation": "",
+    "variantIndex": 3,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 식당 테이블에서 메뉴를 보다 고개를 든 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 천장의 따뜻한 등 하나가 테이블 위로 떨어짐. 빛이 강한 쪽이 아주 조금 날아가고 그림자 쪽 디테일이 뭉개짐. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 수평이 오른쪽으로 기울고 아래쪽 여백이 좁은 프레이밍. 먼 데를 보느라 초점이 살짝 풀린 눈. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "street",
+    "situation": "",
+    "variantIndex": 0,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 저녁 골목길에서 걷다 말고 뒤를 돌아본 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 간판 불빛과 가로등이 섞인 잡광만으로 촬영. 가벼운 손떨림과 폰 카메라 특유의 노이즈가 약간 남음. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 수평이 1~2도 기울고 인물이 프레임 왼쪽으로 치우친 프레이밍. 카메라를 정면으로 보지 않고 살짝 비낀 시선. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "street",
+    "situation": "",
+    "variantIndex": 1,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 저녁 골목길에서 신호를 기다리며 다른 데를 보는 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 해가 막 진 뒤 푸른 하늘빛과 노란 상가 조명이 섞임. 초점이 눈에 아슬아슬하게 맞고 귀 쪽은 살짝 흐림. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 머리 위 여백이 조금 넉넉하고 인물이 오른쪽 아래로 내려앉은 프레이밍. 카메라 옆의 다른 사람 쪽을 보는 시선. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "street",
+    "situation": "",
+    "variantIndex": 2,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 저녁 골목길에서 가방을 고쳐 메다 만 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 편의점 창에서 새어 나온 흰 빛이 옆얼굴에 걸림. 어두운 부분에 폰 카메라 노이즈가 끼고 해상감이 가볍게 뭉개짐. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 인물이 프레임을 살짝 벗어나 어깨 한쪽이 잘린 프레이밍. 시선이 아래로 내려가 눈꺼풀이 홍채를 조금 덮음. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 후반 한국인 여성",
+    "scene": "street",
+    "situation": "",
+    "variantIndex": 3,
+    "level": "standard",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 후반 한국인 여성, 저녁 골목길에서 바람에 머리가 얼굴을 스치는 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 간판 불빛과 가로등이 섞인 잡광만으로 촬영. 빛이 강한 쪽이 아주 조금 날아가고 그림자 쪽 디테일이 뭉개짐. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 수평이 오른쪽으로 기울고 아래쪽 여백이 좁은 프레이밍. 먼 데를 보느라 초점이 살짝 풀린 눈. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "30대 일본인 남성",
+    "scene": "commute",
+    "situation": "",
+    "variantIndex": 1,
+    "level": "full",
+    "shot": "other",
+    "lang": "en",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": true
+   },
+   "expected": "30대 일본인 남성, inside a subway car, mid-adjustment of an earbud, a natural smartphone photo — not an ad shoot but a snapshot an ordinary person took during an ordinary day and would post to their feed, with the texture of a phone camera rather than a high-end one, outside light flooding in as the train leaves a tunnel, focus landing just barely on the eyes, the ears going soft, no CG-like surface, no heavy retouching, no unnatural sheen, a little too much headroom, the subject settled toward the lower right, looking at someone standing beside the camera, realistic, coherent proportions across the jawline, brow, eyes, nose, and lips, human-sized pupils, natural sclera, eyelids with real thickness, expression barely there — only a small movement at the mouth and eyes, visible pores and fine hair, faint redness beside the nose, a little shine on the forehead, a few loose strands across the forehead, side hair not tidied, right eye opening slightly less than the left, right corner of the mouth lifting more, if hands are visible, correct finger count, plausible joints, a realistic grip, if the hands are doing something, the grip must be one that actually performs it, read as the stated age — the skin-texture notes must not push the subject older than specified, keep the subject likeable but do not perfect the face or skin; prioritize presence, lived-in texture, and natural imperfection over perfection."
+  },
+  {
+   "input": {
+    "subject": "30대 일본인 남성",
+    "scene": "commute",
+    "situation": "",
+    "variantIndex": 2,
+    "level": "full",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": true
+   },
+   "expected": "30대 일본인 남성, 지하철 안에서 졸다 깨서 눈을 뜬 직후. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 천장 조명이 정수리에 떨어져 눈 아래에 옅은 그림자. 어두운 부분에 폰 카메라 노이즈가 끼고 해상감이 가볍게 뭉개짐. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 인물이 프레임을 살짝 벗어나 어깨 한쪽이 잘린 프레이밍. 시선이 아래로 내려가 눈꺼풀이 홍채를 조금 덮음. 윤곽과 이목구비의 배치가 현실적이고 조화로운 밸런스. 사람 크기의 동공, 흰자위가 자연스럽고 눈꺼풀에 두께가 있음. 입꼬리와 눈가만 미세하게 움직인, 거의 무표정에 가까운 표정. 모공과 잔털이 보이고 코 옆에 옅은 붉은 기가 남은 피부, 이마에 미세한 유분. 이마에 흘러내린 잔머리 몇 가닥과 정돈되지 않은 옆머리. 한쪽 눈가에만 옅은 주름이 잡히고 입술 라인이 좌우로 조금 다름. 손이 화면에 보인다면 손가락 개수와 관절, 쥐는 방식이 현실적일 것. 손이 무언가를 하고 있다면 그 동작을 실제로 할 수 있는 손 모양일 것. 지정한 나이대로 보일 것 — 피부 질감 지시가 실제 나이보다 들어 보이게 만들지 않도록. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 미국인 여성",
+    "scene": null,
+    "situation": "빨래를 개다 말고 고개를 든",
+    "variantIndex": 0,
+    "level": "light",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "plain",
+    "ageLock": false
+   },
+   "expected": "20대 미국인 여성, 빨래를 개다 말고 고개를 든. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 그 자리에 원래 있는 빛만으로 촬영, 스튜디오 조명 없음. 가벼운 손떨림과 폰 카메라 특유의 노이즈가 약간 남음. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 호감 가는 인상은 유지하되 얼굴과 피부를 완벽하게 다듬지 말 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "20대 한국인 친구들",
+    "scene": "restaurant",
+    "situation": "",
+    "variantIndex": 3,
+    "level": "standard",
+    "shot": "other",
+    "lang": "en",
+    "group": 3,
+    "charm": "attractive",
+    "ageLock": false
+   },
+   "expected": "20대 한국인 친구들, at a restaurant table, looking up from a menu, a natural smartphone photo — not an ad shoot but a snapshot an ordinary person took during an ordinary day and would post to their feed, with the texture of a phone camera rather than a high-end one, each person looking somewhere different and nobody at the camera; faces and hands of the people further back rendered clearly; clothing colors and postures varying from person to person, one warm ceiling lamp dropping onto the table, the bright side slightly blown, shadow detail muddied, no CG-like surface, no heavy retouching, no unnatural sheen, horizon tipped to the right, very little room at the bottom, keep the subject genuinely attractive but do not perfect the face or skin; stay clean and approachable, and prioritize presence, lived-in texture, and natural imperfection over perfection."
+  },
+  {
+   "input": {
+    "subject": "20대 한국인 여성",
+    "scene": "night",
+    "situation": "",
+    "variantIndex": 1,
+    "level": "full",
+    "shot": "selfie",
+    "lang": "ko",
+    "group": 0,
+    "charm": "attractive",
+    "ageLock": true
+   },
+   "expected": "20대 한국인 여성, 밤의 실내 창가에서 창에 이마를 살짝 기댄 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 팔 길이 거리에서 직접 든 셀카 — 얼굴이 가깝고 화면 위쪽에 치우치며 광각 왜곡으로 코가 조금 크고 가장자리가 늘어남. 한쪽 어깨가 뻗은 팔 쪽으로 기울고, 렌즈가 아니라 화면 속 자기 얼굴을 보고 있어 시선이 미세하게 어긋남. 폰 화면 빛이 아래에서 얼굴을 약하게 비춤. 초점이 눈에 아슬아슬하게 맞고 귀 쪽은 살짝 흐림. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 카메라 옆의 다른 사람 쪽을 보는 시선. 윤곽과 이목구비의 배치가 현실적이고 조화로운 밸런스. 사람 크기의 동공, 흰자위가 자연스럽고 눈꺼풀에 두께가 있음. 입꼬리와 눈가만 미세하게 움직인, 거의 무표정에 가까운 표정. 모공과 잔털이 보이고 코 옆에 옅은 붉은 기가 남은 피부, 이마에 미세한 유분. 이마에 흘러내린 잔머리 몇 가닥과 정돈되지 않은 옆머리. 오른쪽 눈이 왼쪽보다 미세하게 작게 떠지고 입꼬리는 오른쪽이 더 올라감. 손이 화면에 보인다면 손가락 개수와 관절, 쥐는 방식이 현실적일 것. 손이 무언가를 하고 있다면 그 동작을 실제로 할 수 있는 손 모양일 것. 지정한 나이대로 보일 것 — 피부 질감 지시가 실제 나이보다 들어 보이게 만들지 않도록. 매력적이되 얼굴과 피부를 완벽하게 다듬지 말 것. 청결감과 친근함은 남기고, 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  },
+  {
+   "input": {
+    "subject": "70대 한국인 남성",
+    "scene": "park",
+    "situation": "",
+    "variantIndex": 2,
+    "level": "full",
+    "shot": "other",
+    "lang": "ko",
+    "group": 0,
+    "charm": "none",
+    "ageLock": false
+   },
+   "expected": "70대 한국인 남성, 공원에서 걷다 말고 신발을 내려다보는 순간. 스마트폰으로 찍은 자연스러운 사진. 광고 촬영이 아니라 일반인이 일상 중에 찍어 SNS에 올릴 법한 한 장. 고성능 카메라가 아닌 폰 스냅의 질감. 낮은 해가 뒤에서 들어와 머리카락 가장자리만 빛남. 어두운 부분에 폰 카메라 노이즈가 끼고 해상감이 가볍게 뭉개짐. CG 같은 질감과 과한 보정, 부자연스러운 광택 없음. 인물이 프레임을 살짝 벗어나 어깨 한쪽이 잘린 프레이밍. 시선이 아래로 내려가 눈꺼풀이 홍채를 조금 덮음. 윤곽과 이목구비의 배치가 현실적이고 조화로운 밸런스. 사람 크기의 동공, 흰자위가 자연스럽고 눈꺼풀에 두께가 있음. 입꼬리와 눈가만 미세하게 움직인, 거의 무표정에 가까운 표정. 모공과 잔털이 보이고 코 옆에 옅은 붉은 기가 남은 피부, 이마에 미세한 유분. 이마에 흘러내린 잔머리 몇 가닥과 정돈되지 않은 옆머리. 한쪽 눈가에만 옅은 주름이 잡히고 입술 라인이 좌우로 조금 다름. 손이 화면에 보인다면 손가락 개수와 관절, 쥐는 방식이 현실적일 것. 손이 무언가를 하고 있다면 그 동작을 실제로 할 수 있는 손 모양일 것. 완벽함보다 실존감·생활감·자연스러운 불완전함을 최우선으로."
+  }
+ ]
+}
