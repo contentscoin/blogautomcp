@@ -100,6 +100,52 @@ export interface ProductReviewSubstanceAssessment {
   /** 서로 다른 상품 근거가 실제 판단 문장에 연결된 개수. */
   groundedSignalCount: number;
   requiredGroundedSignalCount: number;
+  /** 본문 어디에도 등장하지 않은 확인 사실(보강 지시에 그대로 넘긴다). */
+  missingSignals: string[];
+  /** 본문에는 있지만 이점·제약 판단 문장에 연결되지 않은 확인 사실. */
+  unjudgedSignals: string[];
+}
+
+export interface ProductEvidenceRequirement {
+  signals: string[];
+  requiredSignalCount: number;
+  requiredJudgementCount: number;
+  requiredGroundedSignalCount: number;
+  evidenceLevel: ProductReviewAnalysis["evidenceLevel"];
+}
+
+/**
+ * 원고 품질검사(assessProductReviewSubstance)가 요구하는 상품 근거 수를 작성 전에 알려준다.
+ * 작성 프롬프트와 검사가 같은 숫자·같은 사실 목록을 보게 해 첫 원고에서 통과하도록 한다.
+ */
+export function productEvidenceRequirement(input: {
+  productName: string;
+  sourceDescription?: string | null;
+  sourceFeatures?: string[];
+}): ProductEvidenceRequirement {
+  const analysis = buildProductReviewAnalysis({
+    productName: input.productName,
+    description: input.sourceDescription,
+    features: input.sourceFeatures,
+    targetSectionCount: 11,
+  });
+  const available = analysis.verifiedSignals.length;
+  const requiredSignalCount = available > 0
+    ? Math.min(analysis.evidenceLevel === "rich" ? 4 : analysis.evidenceLevel === "usable" ? 3 : 1, available)
+    : 0;
+  const requiredJudgementCount = analysis.evidenceLevel === "rich" ? 3 : analysis.evidenceLevel === "usable" ? 2 : 1;
+  return {
+    signals: analysis.verifiedSignals,
+    requiredSignalCount,
+    requiredJudgementCount,
+    requiredGroundedSignalCount: Math.min(requiredJudgementCount, requiredSignalCount),
+    evidenceLevel: analysis.evidenceLevel,
+  };
+}
+
+/** 검사가 사실을 인정하는 방식(숫자 토큰 + 설명 단어 하나)을 작성자에게 보여줄 핵심 표기. */
+export function productSignalAnchor(signal: string): string {
+  return signal.replace(/^[^:：\n]{1,24}[:：]\s*/u, "").replace(/\s+/gu, " ").trim();
 }
 
 const SECTION_LIBRARY: ProductEditorialSection[] = [
@@ -973,5 +1019,7 @@ export function assessProductReviewSubstance(input: {
     sourceEvidenceLevel: analysis.evidenceLevel,
     groundedSignalCount,
     requiredGroundedSignalCount,
+    missingSignals: analysis.verifiedSignals.filter((signal) => !coveredSignals.includes(signal)),
+    unjudgedSignals: coveredSignals.filter((signal) => !groundedSignals.includes(signal)),
   };
 }

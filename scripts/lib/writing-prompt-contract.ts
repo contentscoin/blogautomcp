@@ -105,10 +105,12 @@ export function getWritingOutputExample(contract: WritingPromptContract) {
   return {
     title: contract.requestedTitle || `${contract.title.min}~${contract.title.max}자 SEO 제목`,
     evidenceFacts: [] as string[],
+    // 섹션 두 개(두 번째는 줄임)를 보여줘 "섹션마다 배열 원소 하나"를 분명히 한다. 하나만 보여주면 모델이 전체를 한 원소에 몰아 쓴다.
     sections: [
-      "소제목\n\n" + Array.from(
+      "소제목1\n\n" + Array.from(
         { length: contract.sentences.min }, (_, index) => `근거에 맞춘 문장${index + 1}.`,
       ).join("\n"),
+      "소제목2\n\n…",
     ],
     hashtags: Array.from({ length: contract.hashtagCount }, (_, index) => `검색키워드${index + 1}`),
   };
@@ -123,7 +125,7 @@ export function formatWritingPromptContract(
     `[공유 필수 작성 계약 · ${contract.version}]`,
     "- 관측 분포와 선택 렌즈는 아래 필수 기준을 완화하지 않습니다. 기존 제목·사실성·품질 정책도 지킵니다.",
     `- 제목 ${contract.title.min}~${contract.title.max}자, 핵심 검색어를 앞에 배치합니다. 제목·소제목에 이모지를 넣지 않습니다.`,
-    `- 본문 sections는 ${contract.sections.min}~${contract.sections.max}개입니다. 소제목·순서는 근거에 맞춰 구성합니다.`,
+    `- 본문 sections는 ${contract.sections.min}~${contract.sections.max}개이며 섹션마다 원소 하나("소제목\\n\\n본문")입니다. 소제목·순서는 근거에 맞춥니다.`,
     `- 소제목·고지 문구를 제외하고 본문 문단을 구분자 없이 이은 문자열 길이(문단 내부 공백 포함)로 최소 ${contract.characters.min}자를 충족하고, 권장 상한 ${contract.characters.max}자 안에서 작성합니다.`,
     `- 각 섹션은 소제목, 빈 줄, 핵심 답부터 시작하는 ${contract.sentences.min}~${contract.sentences.max}개의 완결된 문장을 권장하며 문장마다 줄바꿈합니다. 첫 ${Math.min(2, contract.sentences.min)}문장의 답도 이 문장 수에 포함합니다.`,
     "- 전체 섹션 수와 질문형 소제목 수는 다릅니다. 질문형은 글 전체 서너 개 이내를 권장하고 나머지는 설명형으로 씁니다. FAQ는 확인된 질문·답 근거가 있을 때 최대 3쌍만 넣으며 없으면 생략합니다. 비교도 확인된 비교 근거가 있을 때만 대상/비교 항목/선택 조건으로 정리합니다. 표·FAQ를 이미지로 올리지 않습니다.",
@@ -157,7 +159,7 @@ export function formatWritingPromptContract(
       : "",
     options.topicDetail === "minimal" ? contract.postAngleSummary || "" : contract.postAngleBlock || "",
     formatDraftMemoRequirements(contract),
-    "- 다음은 필드와 섹션 한 개의 형식 예시입니다. 실제 sections 개수와 전체 분량은 위 기준을 따릅니다.",
+    "- 다음은 필드와 섹션 두 개의 형식 예시입니다. 실제 sections 개수와 전체 분량은 위 기준을 따릅니다.",
     JSON.stringify(getWritingOutputExample(contract)),
   ].join("\n");
 }

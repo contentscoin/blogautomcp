@@ -35,7 +35,8 @@ export async function auditSectionProposals<T extends SectionProposal>(options: 
     }
     const result = await (options.audit || auditPublishImages)({ productName: options.productName,
       selectedProduct: options.selectedProduct || options.productName, composition: { sections, renderNodes } });
-    const fatal = result.failures.find(failure => failure.code !== "SEMANTIC_REJECTION");
+    // 판정 형식이 깨진 제안은 그 제안만 탈락시킨다(다른 제안·전체 재배치를 막지 않는다).
+    const fatal = result.failures.find(failure => failure.code !== "SEMANTIC_REJECTION" && failure.code !== "INVALID_REVIEW");
     if (fatal) throw new Error(`SOURCE_PROPOSAL_AUDIT_FAILED: ${fatal.code}: ${fatal.reason}`);
     for (const [nodeIndex, row] of byNode) {
       const snapshot = result.images.find(image => image.nodeIndex === nodeIndex);
