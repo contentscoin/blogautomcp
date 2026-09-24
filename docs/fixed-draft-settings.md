@@ -2,6 +2,7 @@
 
 2026-09-03 사용자 요청: Codex, Codex 작성 true, gpt-5.5, 웹 자동작성 true, 섹션 이미지 자동생성 true를 기본 고정하고 선택 UI를 제거한다.
 
+- 2026-09-24 변경: 모델을 `gpt-6-luna`, reasoning effort를 `low`로 고정했다(`CODEX_DRAFT_REASONING_EFFORT`). `.env`로 더 높은 effort를 지정할 수 없다.
 - 공통 정책: `scripts/lib/draft-runtime-policy.json`.
 - Electron 시작 시 이전 사용자 설정보다 정책을 우선 적용한다. 설정 API도 오래된 UI의 비활성화 요청을 무시하고 고정값을 저장한다. API 키·블로그 ID 등 별도 사용자 값은 보존한다.
 - 설정 화면의 공급자·Codex 활성화·모델·웹 자동작성·섹션 이미지 선택 필드 및 메인 화면의 웹 자동작성 스위치를 제거한다.

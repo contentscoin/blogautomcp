@@ -44,7 +44,10 @@ for (const [kind, description, id] of fixtures) {
     hashtags: [], imagePaths: ["hero.jpg", "a.jpg", "b.jpg"], sectionImagePaths: [["b.jpg"], ["a.jpg"]], connectUrl: "https://example.com" };
   const baseline = resolvePostDocument(input);
   const selected = resolvePostDocument({ ...input, editorial });
-  assert.deepEqual(selected.renderNodes.filter(n => n.kind === "image"), baseline.renderNodes.filter(n => n.kind === "image"), "Images keep section IDs and order");
+  // The product-type overlay may refine alt-text wording, never the image binding itself.
+  const binding = (nodes: typeof baseline.renderNodes) => nodes.flatMap(n => n.kind === "image"
+    ? [{ assetPath: n.assetPath, sectionId: n.sectionId, role: n.role, layout: n.layout, sourcePolicy: n.sourcePolicy }] : []);
+  assert.deepEqual(binding(selected.renderNodes), binding(baseline.renderNodes), "Images keep section IDs and order");
   assert.deepEqual(selected.renderNodes.filter(n => ["connectCard", "disclosure", "heading"].includes(n.kind)), baseline.renderNodes.filter(n => ["connectCard", "disclosure", "heading"].includes(n.kind)), "Factual heading order, links and disclosure preserved");
   assert.deepEqual(selected.qualityReport, baseline.qualityReport, "QC is unchanged");
   assert.deepEqual(JSON.parse(JSON.stringify(selected)).editorial, editorial);

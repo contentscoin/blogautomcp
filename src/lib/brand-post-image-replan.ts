@@ -28,7 +28,7 @@ const verifiedAlternative = (slot: Slots[number], allowProductPhoto = false) => 
 function permitsGenericReplacement(slot: Slots[number], manifest: Manifest): boolean {
   const section = manifest.composition.sections.find(section => section.id === slot.sectionId)!;
   return slot.staleTargets.some(target => target.code === "image-publication-rejected") &&
-    (isShoppingLifestyleImage(section) || allowsGenericBrandPostProductPhoto({ sectionTitle: section.title, imageIntent: section.imageIntent }));
+    (isShoppingLifestyleImage(section) || allowsGenericBrandPostProductPhoto({ sectionTitle: section.title, imageIntent: section.imageIntent, imageSource: section.imageSource }));
 }
 /** Match constrained feature donors first so a generic donor cannot consume
  * the only feature-evidence alternative. Each optional section supplies one slot. */
@@ -42,7 +42,7 @@ function matchAlternatives(donors: Slots, candidates: Slots, manifest: Manifest)
         if (verifiedAlternative(candidate)) return true;
         const section = manifest.composition.sections.find(section => section.id === candidate.sectionId)!;
         return permitsGenericReplacement(donor, manifest) && verifiedAlternative(candidate, true) &&
-          allowsGenericBrandPostProductPhoto({ sectionTitle: section.title, imageIntent: section.imageIntent });
+          allowsGenericBrandPostProductPhoto({ sectionTitle: section.title, imageIntent: section.imageIntent, imageSource: section.imageSource });
       });
       if (index < 0) return null;
       assigned.push(available.splice(index, 1)[0]);
@@ -85,7 +85,7 @@ export async function replanShoppingImageCoverage(options: {
     // an ordinary missing lifestyle/overview image keeps its original minimum.
     const publicationRejected = slot.staleTargets.some(target => target.code === "image-publication-rejected");
     const featureSection = !isShoppingLifestyleImage(section) &&
-      !allowsGenericBrandPostProductPhoto({ sectionTitle: section.title, imageIntent: section.imageIntent });
+      !allowsGenericBrandPostProductPhoto({ sectionTitle: section.title, imageIntent: section.imageIntent, imageSource: section.imageSource });
     return slot.missing > 0 && slot.minimum > slot.count && slot.generatedMinimum === 0 &&
       slot.staleTargets.every(target => ["image-geometry-invalid", "image-publication-rejected"].includes(target.code)) &&
       (featureSection || publicationRejected);

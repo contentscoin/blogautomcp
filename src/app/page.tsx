@@ -12,6 +12,9 @@ import { getTopicTaskContentReadiness } from "@/lib/topic-task-content-readiness
 import { getTopicTaskPublishReadiness } from "@/lib/topic-task-publish-readiness";
 import { isDraftEditorialQualityPassed } from "@/lib/brand-post-quality-display";
 import { getDraftApprovalBlockers, getRepairStatus, getDraftRecheckError } from "./draft-approval-ui";
+import PostAnglePanel from "@/components/PostAnglePanel";
+import ExperienceNotesPanel from "@/components/ExperienceNotesPanel";
+import { getPostAngle } from "../../scripts/lib/topic-templates/angles";
 
 type ContentMode = "product" | "topic" | "review";
 type ReviewCategory = "place" | "food" | "travel" | "parenting" | "product";
@@ -37,6 +40,12 @@ interface BrandLink {
   draftTitle?: string | null;
   draftPreparedAt?: string | null;
   draftRevision?: string | null;
+  /** 주제 글이면 원본 상품 행 ID */
+  parentBrandLinkId?: string | null;
+  /** 포스팅 각도(null = 전체 리뷰) */
+  postAngle?: string | null;
+  /** 직접 체험 메모(있으면 체험형 원고) */
+  experienceNotes?: string | null;
 }
 
 interface BrandPostDraftPreview {
@@ -449,6 +458,8 @@ export default function Dashboard() {
   };
   const [publishingId, setPublishingId] = useState<string | null>(null);
   const [thumbnailStudioLink, setThumbnailStudioLink] = useState<BrandLink | null>(null);
+  const [anglePanelLink, setAnglePanelLink] = useState<BrandLink | null>(null);
+  const [experiencePanelLink, setExperiencePanelLink] = useState<BrandLink | null>(null);
   const [draftGeneratingId, setDraftGeneratingId] = useState<string | null>(null);
   const [draftPreview, setDraftPreview] = useState<BrandPostDraftPreview | null>(null);
   const [draftPreviewTab, setDraftPreviewTab] = useState<"post" | "images" | "thumbnail" | "quality">("post");
@@ -1033,7 +1044,7 @@ export default function Dashboard() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             qualityPreset: "premium",
-            experienceMode: "ai_assisted_information",
+            // 작성 모드는 상품에 저장된 체험 메모로 정한다(메모 없으면 정보형).
             forceQualityRepair: options?.forceQualityRepair === true,
             autoApprove: options?.autoApprove === true,
           }),
@@ -1461,7 +1472,22 @@ export default function Dashboard() {
     setPublishingId(null);
   };
 
-  const visibleLinks = links.filter((link) => isBrandLinkForKind(link, brandConnectKind));
+  // 주제 글(자식 행)은 원본 상품 바로 아래에 묶어 보여준다. 원본이 목록에 없으면 제자리에 둔다.
+  const visibleLinks = (() => {
+    const kindLinks = links.filter((link) => isBrandLinkForKind(link, brandConnectKind));
+    const present = new Set(kindLinks.map((link) => link.id));
+    const childrenByParent = new Map<string, BrandLink[]>();
+    for (const link of kindLinks) {
+      if (link.parentBrandLinkId && present.has(link.parentBrandLinkId)) {
+        childrenByParent.set(link.parentBrandLinkId, [...(childrenByParent.get(link.parentBrandLinkId) || []), link]);
+      }
+    }
+    return kindLinks.flatMap((link) => {
+      if (link.parentBrandLinkId && present.has(link.parentBrandLinkId)) return [];
+      const children = (childrenByParent.get(link.id) || []).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      return [link, ...children];
+    });
+  })();
   const activeConnectLabel = brandConnectKind === "travel" ? "여행커넥트" : "쇼핑커넥트";
   const travelPublishingUnavailable =
     brandConnectKind === "travel" && !brandConnectRegistrationAvailable;
@@ -2591,8 +2617,14 @@ export default function Dashboard() {
                               )}
                               <div className="min-w-0">
                                 <div className="line-clamp-2 break-keep font-medium leading-6 text-slate-800">
+                                  {link.parentBrandLinkId && <span className="mr-1 text-slate-400">↳</span>}
                                   {link.productName || "(상품 정보 없음)"}
                                 </div>
+                                {link.postAngle && link.postAngle !== "full-review" && (
+                                  <span className="mt-0.5 inline-flex rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-semibold text-indigo-700">
+                                    주제 글 · {getPostAngle(link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING", link.postAngle).label}
+                                  </span>
+                                )}
                                 {link.productPrice && (
                                   <div className="text-sm text-slate-500">{link.productPrice}</div>
                                 )}
@@ -2685,6 +2717,20 @@ export default function Dashboard() {
                               >
                                 2. 썸네일
                               </button>
+                              <button
+                                onClick={() => setExperiencePanelLink(link)}
+                                className={`whitespace-nowrap rounded-lg border px-3 py-2 text-sm font-semibold ${link.experienceNotes ? "border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "border-slate-200 text-slate-600 hover:bg-slate-50"}`}
+                                title="직접 사용·방문한 체험을 적으면 1인칭 체험형 원고로 작성합니다"
+                              >
+                                {link.experienceNotes ? "체험 메모 ✓" : "체험 메모"}
+                              </button>
+                              <button
+                                onClick={() => setAnglePanelLink(link)}
+                                className="whitespace-nowrap rounded-lg border border-indigo-200 px-3 py-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-50"
+                                title="같은 상품으로 전체 리뷰와 주제별 글을 여러 편 씁니다"
+                              >
+                                포스팅 주제
+                              </button>
                               <button onClick={() => void handlePublish(link.id)} disabled={Boolean(getBusyMessage()) || !["READY", "FAILED"].includes(link.status) || (link.connectKind === "TRAVEL" && travelPublishingUnavailable)} className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50">발행 소재 선택</button>
                               <button onClick={() => void handleSchedulePublish(link)} disabled={Boolean(getBusyMessage()) || !["READY", "FAILED"].includes(link.status) || (link.connectKind === "TRAVEL" && travelPublishingUnavailable)} className="rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50">예약 소재 선택</button>
                               {link.draftPrepared && <button onClick={() => void handleOpenOrPrepareBrandDraft(link)} title="저장된 초안과 이미지를 확인합니다" className="rounded-lg border px-3 py-2 text-sm">저장 원고 보기</button>}
@@ -2755,6 +2801,40 @@ export default function Dashboard() {
           </ol>
         </div>
       </main>
+
+      {experiencePanelLink && (
+        <ExperienceNotesPanel
+          linkId={experiencePanelLink.id}
+          productName={experiencePanelLink.productName || "상품"}
+          connectKind={experiencePanelLink.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING"}
+          initialNotes={experiencePanelLink.experienceNotes ?? null}
+          isTopicPost={Boolean(experiencePanelLink.parentBrandLinkId)}
+          onClose={() => setExperiencePanelLink(null)}
+          onSaved={async (notes) => {
+            setExperiencePanelLink(null);
+            setDashboardNotice({ tone: "info", text: notes ? "체험 메모를 저장했습니다. 다음 원고부터 체험형으로 작성합니다." : "체험 메모를 삭제했습니다. 정보형 원고로 작성합니다." });
+            await fetchLinks({ silent: true });
+          }}
+        />
+      )}
+
+      {anglePanelLink && (
+        <PostAnglePanel
+          linkId={anglePanelLink.id}
+          productName={anglePanelLink.productName || "상품"}
+          onClose={() => setAnglePanelLink(null)}
+          onCreated={async (newLinkId) => {
+            setAnglePanelLink(null);
+            await fetchLinks({ silent: true });
+            const response = await fetch(`/api/brandlinks/${newLinkId}`, { cache: "no-store" });
+            const payload = await response.json();
+            if (response.ok && payload.success) {
+              setDashboardNotice({ tone: "info", text: "주제 글을 추가했습니다. 원고 작성을 시작합니다." });
+              await handlePrepareBrandDraft(payload.data as BrandLink);
+            }
+          }}
+        />
+      )}
 
       {thumbnailStudioLink && (
         <ProductThumbnailStudio

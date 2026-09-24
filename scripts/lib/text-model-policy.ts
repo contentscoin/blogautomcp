@@ -11,20 +11,25 @@ export function resolveTextModel(requested?: string): string {
   return TEXT_MODEL;
 }
 
-export function resolveTextReasoningEffort(requested?: string): "low" | "medium" | "high" | "xhigh" {
-  const effort = requested?.trim() || "medium";
-  if (effort !== "low" && effort !== "medium" && effort !== "high" && effort !== "xhigh") {
+export type TextReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
+/** Fixed default effort for Codex writing, review and vision calls. */
+export const TEXT_REASONING_EFFORT = draftRuntimePolicy.CODEX_DRAFT_REASONING_EFFORT as TextReasoningEffort;
+
+export function resolveTextReasoningEffort(requested?: string): TextReasoningEffort {
+  const effort = requested?.trim() || TEXT_REASONING_EFFORT;
+  if (effort !== "low" && effort !== "medium" && effort !== "high" && effort !== "xhigh" && effort !== "max") {
     throw new Error(`TEXT_MODEL_POLICY: ${TEXT_MODEL}에서 지원하지 않는 reasoning effort입니다.`);
   }
   return effort;
 }
 
 /**
- * GPT-5.5 supports none/low/medium/high/xhigh (official model guide).
- * Small classification/title budgets must not be spent on default reasoning.
- * Longer writing gets low effort and 4096 tokens of reasoning headroom. This is
- * a total cap, not a guarantee of visible output; callers still reject length.
- * https://developers.openai.com/api/docs/models/gpt-5.5
+ * GPT-6 Luna supports low/medium/high/xhigh/max (Codex 0.156 model catalog;
+ * there is no "none" level). Every API call uses the lowest level, low.
+ * Because low still spends reasoning tokens, small classification/title budgets
+ * get 1024 tokens of headroom and longer writing gets 4096. This is a total cap, not a guarantee
+ * of visible output; callers still reject length.
  */
 export function textCompletionParameters(maxOutputTokens: number, requested?: string) {
   if (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1) {
@@ -33,7 +38,7 @@ export function textCompletionParameters(maxOutputTokens: number, requested?: st
   const shortOutput = maxOutputTokens <= 1024;
   return {
     model: resolveTextModel(requested),
-    reasoning_effort: shortOutput ? "none" as const : "low" as const,
-    max_completion_tokens: Math.min(128_000, maxOutputTokens + (shortOutput ? 0 : 4096)),
+    reasoning_effort: "low" as const,
+    max_completion_tokens: Math.min(128_000, maxOutputTokens + (shortOutput ? 1024 : 4096)),
   };
 }

@@ -80,3 +80,15 @@ getBrandLinkContentReadiness()
 - `npm run test:brand-post-quality` — 차단/품질 분리, 숫자만 바뀐 반복 문장 차단, 여행 글 쇼핑 문구 차단, 편집 모드 이미지 미요구
 - `npm run test:post-spec` — 근거표 유일성·전용 근거 보장, `EVIDENCE_UNUSED`/`GENERIC_GUIDANCE`/`REPEATED_LINE`/`CATEGORY_MISMATCH` 타깃
 - `npm run test:repository-techniques`, `test:brand-post-package`, `test:post-composition`, `test:travel-editorial`, `test:travel-draft-resilience`, `test:codex-draft-provider`, `test:mcp-contract` — 회귀 없음
+
+## 2026-09-24 보정 — 적정 기준
+
+"품질 카테고리 하나 실패 = 전체 불통과" 규칙 때문에 점수가 높은 원고도 재작성 루프를 돌았다. 안전 차단은 그대로 두고 품질 기준만 낮췄다.
+
+- 통과 점수: 70 → **62** (`BRANDLINK_QUALITY_PASS_SCORE`)
+- 총점이 기준 이상이면 필수 카테고리는 `productEvidence`(상품·여행지 고유 근거) 하나만 남는다(`BRANDLINK_MANDATORY_QUALITY_CATEGORIES`). 나머지 카테고리 실패는 `warn`으로 낮추고 "총점 기준 충족으로 권고 사항으로 처리" 메모를 붙인다. 점수는 그대로 보고한다.
+- 예외: 거의 같은 틀의 문장이 5회 이상 반복되면(`BRANDLINK_SEVERE_REPETITION_COUNT`) 유사문서 위험 때문에 계속 실패로 남긴다. 반복 허용 한도는 2 → 3이다.
+- 구조: 섹션 최소치는 계약 최소치의 80%(최소 3개)까지 허용한다. 해시태그는 0개일 때만 차단하고 1~2개는 경고 신호로 남긴다.
+- 안전 차단(링크 노출, 고지 누락, 허위 체험, 수수료율, 내부 지침, 카테고리 혼입)은 변경 없음.
+- 재작성: Codex 경로 3회 → 1회, spec 경로 2회 → 1회. 경고만 남은 원고는 `canPublish=true`라서 승인 흐름으로 넘어간다.
+- spec 검증기: 근사 중복 임계 0.72 → 0.8. 경고 5개 이상이라는 이유만으로는 `NEEDS_REVIEW`로 보내지 않는다.

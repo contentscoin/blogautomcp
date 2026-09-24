@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
-import { TEXT_MODEL, resolveTextModel, textCompletionParameters } from "./lib/text-model-policy";
+import { TEXT_MODEL, resolveTextModel, resolveTextReasoningEffort, textCompletionParameters } from "./lib/text-model-policy";
 import { extractJsonObject, getOpenAiTextModel, getOpenAiVisionModel, openaiChatText } from "./lib/openai-text";
 import { generateStructured } from "./lib/post-spec/llm-client";
 import { buildHumanizeSectionsPrompt, parseHumanizeSections } from "./lib/humanize-response-contract";
@@ -37,15 +37,17 @@ async function main() {
   try {
     process.env.OPENAI_API_KEY = "offline-test-placeholder";
     for (const name of envNames.slice(1)) process.env[name] = "gpt-4o-mini";
-    assert.equal(TEXT_MODEL, "gpt-5.5");
+    assert.equal(TEXT_MODEL, "gpt-6-luna");
+    assert.equal(resolveTextReasoningEffort(), "low");
+    assert.throws(() => resolveTextReasoningEffort("none"), /TEXT_MODEL_POLICY/);
     assert.equal(getOpenAiTextModel(), TEXT_MODEL);
     assert.equal(getOpenAiVisionModel(), TEXT_MODEL);
     assert.equal(resolveTextModel("  "), TEXT_MODEL);
     assert.throws(() => resolveTextModel("gpt-4o-mini"), /TEXT_MODEL_POLICY/);
     for (const budget of [400, 600]) {
       await openaiChatText({ user: "Return JSON", json: true, maxOutputTokens: budget });
-      assert.equal(bodies.at(-1).reasoning_effort, "none");
-      assert.equal(bodies.at(-1).max_completion_tokens, budget);
+      assert.equal(bodies.at(-1).reasoning_effort, "low", "GPT-6 Luna has no none level");
+      assert.equal(bodies.at(-1).max_completion_tokens, budget + 1024);
     }
     bodies = [];
 
@@ -81,9 +83,9 @@ async function main() {
     replies = [{ content: '{"sections":["첫 문단"]}' }];
     assert.equal(await api.runOpenAiApi("JSON", "rewrite"), '{"sections":["첫 문단"]}');
     for (const body of bodies) {
-      assert.equal(body.model, "gpt-5.5");
+      assert.equal(body.model, "gpt-6-luna");
       assert.ok(body.max_completion_tokens > 0);
-      assert.ok(body.reasoning_effort === "none" || body.reasoning_effort === "low");
+      assert.equal(body.reasoning_effort, "low");
       assert.ok(!("temperature" in body) && !("max_tokens" in body));
     }
 
@@ -196,7 +198,7 @@ async function main() {
     const topicFunction = topicAst.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === "generateAdvancedContent")!;
     assert.match(topicFunction.getText(topicAst), /await runCodexDraft\(/);
     assert.doesNotMatch(topicFunction.getText(topicAst), /sendPromptToChatGPT|createChatGPTContext/);
-    console.log("PASS: GPT-5.5 text/vision/structured/API/Codex/browser routing, no model downgrade, humanize JSON contract (offline mocks only)");
+    console.log("PASS: GPT-6 Luna text/vision/structured/API/Codex/browser routing, no model downgrade, humanize JSON contract (offline mocks only)");
   } finally {
     globalThis.fetch = originalFetch;
     envNames.forEach((name, index) => {

@@ -34,7 +34,7 @@ try {
   }
 
   await page.goto(`${baseUrl}/settings`, { waitUntil: "domcontentloaded" });
-  await page.getByText(/Codex · gpt-5.5 원고 작성/u).waitFor({ state: "visible" });
+  await page.getByText(/Codex · GPT-6 Luna\(low\) 원고 작성/u).waitFor({ state: "visible" });
   for (const key of ["AI_PROVIDER", "CODEX_DRAFT_ENABLED", "CODEX_DRAFT_MODEL", "CHATGPT_BROWSER_AUTOMATION_ENABLED", "BRAND_POST_AUTO_SECTION_IMAGES"]) {
     assert.equal(settings.data.fields.some((field) => field.key === key), false);
   }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { requireAdminApiKey } from "@/lib/api-auth";
+import { normalizeExperienceNotesInput } from "@/lib/experience-notes";
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "알 수 없는 오류";
@@ -10,6 +11,7 @@ interface UpdateBrandLinkRequest {
   memo?: string | null;
   categoryNo?: string | null;
   useSectionHeading?: boolean;
+  experienceNotes?: string | null;
 }
 
 function normalizeCategoryNo(value: unknown): string | null | undefined {
@@ -122,10 +124,19 @@ export async function PATCH(
     const hasCategoryNo = Object.prototype.hasOwnProperty.call(body, "categoryNo");
     const hasUseSectionHeading =
       Object.prototype.hasOwnProperty.call(body, "useSectionHeading");
+    const hasExperienceNotes = Object.prototype.hasOwnProperty.call(body, "experienceNotes");
 
-    if (!hasMemo && !hasCategoryNo && !hasUseSectionHeading) {
+    if (!hasMemo && !hasCategoryNo && !hasUseSectionHeading && !hasExperienceNotes) {
       return NextResponse.json(
-        { success: false, error: "수정할 필드(memo/categoryNo/useSectionHeading)가 없습니다." },
+        { success: false, error: "수정할 필드(memo/categoryNo/useSectionHeading/experienceNotes)가 없습니다." },
+        { status: 400 }
+      );
+    }
+
+    const experienceNotes = hasExperienceNotes ? normalizeExperienceNotesInput(body.experienceNotes) : undefined;
+    if (hasExperienceNotes && experienceNotes === undefined) {
+      return NextResponse.json(
+        { success: false, error: "experienceNotes는 문자열 또는 null이어야 합니다." },
         { status: 400 }
       );
     }
@@ -183,6 +194,7 @@ export async function PATCH(
         ...(hasUseSectionHeading
           ? { useSectionHeading: parsedUseSectionHeading }
           : {}),
+        ...(hasExperienceNotes ? { experienceNotes } : {}),
       },
     });
 

@@ -62,7 +62,7 @@ function run() {
         if (row.expectedReplacementSha256 && !replacement) throw new Error("Replacement guard does not match the current section image");
         if (!section || (section.imagePaths.length && !refresh && !replacement) || sectionIds.has(section.id)) throw new Error("Expected empty section, same-byte re-review, or guarded replacement");
         if (allowsOriginalShoppingScene(section) !== (row.reviewClass === "scene-evidence")) throw new Error("Review class does not match scene intent");
-        if (row.reviewClass === "product-photo" && !allowsGenericBrandPostProductPhoto({ sectionTitle: section.title, imageIntent: section.imageIntent }))
+        if (row.reviewClass === "product-photo" && !allowsGenericBrandPostProductPhoto({ sectionTitle: section.title, imageIntent: section.imageIntent, imageSource: section.imageSource }))
           throw new Error(`Generic photo cannot prove this feature intent: ${section.id}`);
         if (claimed.has(row.sourceSha256) && !refresh) throw new Error(`Source bytes already assigned: ${row.sourceSha256}`);
         const source = candidates.find(file => sha(file) === row.sourceSha256);
@@ -101,7 +101,7 @@ function run() {
           if (!slot || slot.missing || slot.generationMissing || slot.staleTargets.length) throw new Error("Applied original failed slot audit; backup retained");
         }
       }
-      results.push({ id, applied: Boolean(flag), backup, assignments: rows.map(({ row, section }) => ({ ...row, imageIntent: section.imageIntent })),
+      results.push({ id, applied: Boolean(flag), backup, assignments: rows.map(({ row, section }) => ({ ...row, imageIntent: section.imageIntent, imageSource: section.imageSource })),
         before: before.imageSlots.filter(slot => slot.missing || slot.generationMissing),
         after: after.imageSlots.filter(slot => slot.missing || slot.generationMissing), canApprove: after.canApprove });
     } catch (error) {

@@ -69,7 +69,8 @@ assert.equal(classifyPrepareFailure(codedProviderFailure), "CODEX_MODEL_INCOMPAT
 assert.equal(classifyPrepareFailure(new Error("outer", { cause: Object.assign(new Error("inner"), { code: "CODEX_AUTH_REQUIRED" }) })), "CODEX_AUTH_REQUIRED",
   "a provider code must survive nested error causes until result.json");
 assert.match(agentSource, /CODEX_DRAFT_MODEL = draftRuntimePolicy\.CODEX_DRAFT_MODEL/u);
-assert.equal(draftRuntimePolicy.CODEX_DRAFT_MODEL, "gpt-5.5");
+assert.equal(draftRuntimePolicy.CODEX_DRAFT_MODEL, "gpt-6-luna");
+assert.equal(draftRuntimePolicy.CODEX_DRAFT_REASONING_EFFORT, "low");
 // 1.3.8 부터 섹션 문장 수는 공유 필수 작성 계약(writing-prompt-contract)이 정하고 Codex 프롬프트는 그 계약을 참조한다.
 assert.match(agentSource, /문장 수와 출력 구조는 공유 필수 작성 계약을 따릅니다/u);
 assert.match(routeSource, /const useCodex/u);

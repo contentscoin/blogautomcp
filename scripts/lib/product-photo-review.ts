@@ -2,7 +2,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { publicationImageGeometryIssue } from "./publication-image-geometry";
 import { runCodexDraft } from "./codex-draft-provider";
-import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene } from "../../src/lib/brand-post-image-evidence";
+import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene, type BrandPostImageSourceHint } from "../../src/lib/brand-post-image-evidence";
 import { auditSectionProposals } from "./product-section-proposal-audit";
 
 // Cache by bytes and subject, not temporary filenames or claimed provenance.
@@ -54,7 +54,11 @@ const sectionBatchReviews = new Map<string, {
 
 const selectedProductPixelRules = "선택 상품의 브랜드·식별 가능한 디자인·라인·보이는 옵션이 실제 픽셀과 일치하는지 확인하세요. 모든 모델번호·용량·향·구매 묶음 수량의 OCR 인증 검사가 아닙니다. 작은 규격 글자가 안 읽힌다는 이유만으로 거부하지 말고, 보이지 않는 규격을 픽셀로 검증했다고 주장하지 마세요. 브랜드와 일반적인 제품 종류만 같아 식별 불확실하거나 보이는 디자인·옵션·구성이 모순되면 거부하세요. 같은 옵션의 용기 한 개를 보여주는 근접 사진은 허용하되 구매 묶음과 다른 구성을 암시하면 거부하세요. 다른 후보를 정품 기준으로 삼아 상품 디자인을 추정하지 마세요. 파일명이나 생성 출처는 근거가 아닙니다. 주내용이 유통기한/소비기한 공지표나 배송·쿠폰·이벤트·저작권 안내인 이미지는 거부하세요. 상품 사양표나 기능 설명이 주내용인 이미지의 작은 하단 저작권 표기만으로 공지 이미지라고 판정하지 마세요. 라벤더 Stress Relief와 무향 Skin Relief처럼 다른 옵션이 섞인 사진은 해당 파트가 보이는 옵션들을 이름으로 명시해 비교하고 이미지도 각 옵션을 명확히 구분할 때만 허용합니다. 단순 비교 언급은 부족합니다. 길게 이어 붙인 상세페이지 스트립과 식별 불확실한 상품은 거부하세요.";
 
-type ProductSectionImageTarget = { sectionTitle: string; imageIntent: string; sectionBody?: string[]; sectionId?: string; excludedSourceSha256?: string[] };
+type ProductSectionImageTarget = {
+  sectionTitle: string; imageIntent: string; sectionBody?: string[]; sectionId?: string; excludedSourceSha256?: string[];
+  /** 상품 유형 템플릿의 이미지 출처. 있으면 문구 패턴보다 우선해 원본 장면·일반 사진 허용을 정한다. */
+  imageSource?: BrandPostImageSourceHint;
+};
 const publishedSectionPixelRules = "sectionTitle과 sectionBody는 실제 발행 문장입니다. imageIntent는 계획 메타데이터이며 기능 근거를 대신하지 않습니다. 실제 발행 문장이 주장하는 특정 기능·작동·사용 가치와 픽셀이 직접 일치해야 합니다. 같은 상품의 다른 효능·질감·구조 설명을 비슷한 주제라는 이유로 배정하지 마세요. 보이는 기능과 본문의 기능이 다르거나 모순되면 거절하세요. 일반 상품 사진이 허용된 목적이어도 발행 문장의 기능 주장을 입증하는 사진으로 오인되면 거절하세요. 본문에 보이지 않는 기능을 이미지에서 추정하지 마세요.";
 
 /** Generic packshots are evidence only for identity/overview slots. */

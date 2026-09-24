@@ -44,6 +44,7 @@ import {
 } from "@/lib/post-composition-contract";
 import { readCodexLocalStatus } from "@/lib/codex-local";
 import { readProductSnapshot } from "@/lib/draft-context-snapshot";
+import { resolveDraftExperience, resolveStoredExperienceNotes } from "@/lib/experience-notes";
 import { planQualityConvergence } from "../../../../../../scripts/lib/quality-convergence";
 
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
@@ -574,13 +575,6 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     return NextResponse.json({ success: false, code: "INVALID_INPUT", error: "지원하지 않는 초안 생성 작업입니다." }, { status: 400 });
   }
   const qualityPreset = body.qualityPreset === "standard" ? "STANDARD" : "PREMIUM";
-  const experienceMode = body.experienceMode === "verified_experience"
-    ? "VERIFIED_EXPERIENCE"
-    : "AI_ASSISTED_INFORMATION";
-  const experienceNotes = typeof body.experienceNotes === "string" ? body.experienceNotes.trim().slice(0, 4000) : "";
-  if (experienceMode === "VERIFIED_EXPERIENCE" && experienceNotes.length < 20) {
-    return NextResponse.json({ success: false, code: "INVALID_INPUT", error: "실제 체험형 문체를 사용하려면 구체적인 체험 사실 메모가 필요합니다." }, { status: 400 });
-  }
   const requestMemo = typeof body.memo === "string" ? body.memo.trim().slice(0, 1000) : "";
   const mcpOrigin = body.origin === "mcp" || request.headers.get("x-blogautomcp-origin") === "mcp";
   const link = await prisma.brandLink.findUnique({
@@ -588,9 +582,20 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     select: {
       id: true, status: true, connectKind: true, productName: true, memo: true,
       externalItemId: true, finalUrl: true, sourceUrl: true, url: true,
+      experienceNotes: true, parentBrandLinkId: true,
     },
   });
   if (!link) return NextResponse.json({ success: false, code: "PRODUCT_NOT_FOUND", error: "상품을 찾을 수 없습니다." }, { status: 404 });
+  const storedExperienceNotes = await resolveStoredExperienceNotes(link, (parentId) =>
+    prisma.brandLink.findUnique({ where: { id: parentId }, select: { experienceNotes: true } }));
+  // 명시한 모드가 있으면 그대로 쓰고, 없으면 상품에 저장된 체험 메모로 정한다.
+  const experience = resolveDraftExperience({
+    requestedMode: body.experienceMode, requestedNotes: body.experienceNotes, storedNotes: storedExperienceNotes,
+  });
+  if ("error" in experience) {
+    return NextResponse.json({ success: false, code: "INVALID_INPUT", error: experience.error }, { status: 400 });
+  }
+  const { mode: experienceMode, notes: experienceNotes } = experience;
   if (link.status === "OUTCOME_UNKNOWN" || link.status === "PUBLISHED" || link.status === "SCHEDULED") return NextResponse.json({ success: false, code: "NOT_READY", error: "게시됐거나 게시 여부를 확인 중인 소재는 다시 작성할 수 없습니다." }, { status: 409 });
   if (link.status === "PUBLISHING") return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "현재 발행 중인 상품입니다." }, { status: 409 });
   if (link.status === "DRAFTING") return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "현재 초안을 작성 중인 상품입니다." }, { status: 409 });

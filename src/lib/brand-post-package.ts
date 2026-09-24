@@ -514,7 +514,7 @@ function auditBrandPostImages(manifest: BrandPostPackageManifest) {
         } else if (generated && manifest.connectKind === "SHOPPING" &&
             asset.creationMethod === "source-with-generated-background" &&
             !isShoppingLifestyleImage(section) &&
-            !allowsGenericBrandPostProductPhoto({ sectionTitle: section.title, imageIntent: section.imageIntent })) {
+            !allowsGenericBrandPostProductPhoto({ sectionTitle: section.title, imageIntent: section.imageIntent, imageSource: section.imageSource })) {
           const review = asset.sourceReview;
           const source = readProductPhotoSource(asset.path);
           const validFeatureSource = review?.version === "product-photo-source-review/v1" &&
@@ -532,6 +532,7 @@ function auditBrandPostImages(manifest: BrandPostPackageManifest) {
             (review?.reviewClass === "product-photo" && allowsGenericBrandPostProductPhoto({
               sectionTitle: section.title,
               imageIntent: section.imageIntent,
+              imageSource: section.imageSource,
             }));
           const validReview = review?.version === "product-photo-source-review/v1" &&
             review.usage === "section-matched-product-evidence" && review.sourceSha256 === asset.sha256 &&

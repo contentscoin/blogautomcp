@@ -1440,7 +1440,8 @@ async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient
   );
 
   const existingBrandLinks = await prisma.brandLink.findMany({
-    where: { connectKind: toStoredConnectKind("travel") },
+    // 주제 글(자식 행)은 동기화 대상이 아니다. 원본 행만 비교한다.
+    where: { connectKind: toStoredConnectKind("travel"), parentBrandLinkId: null },
     orderBy: { updatedAt: "asc" },
     select: {
       id: true,
@@ -1578,7 +1579,7 @@ async function registerTravelItemsFlow(options: CliOptions, prisma: PrismaClient
       continue;
     }
     const existing = await prisma.brandLink.findFirst({
-      where: { url: linkUrl },
+      where: { url: linkUrl, parentBrandLinkId: null },
       orderBy: { updatedAt: "desc" },
     });
     if (existing?.status === "FAILED") {
@@ -1853,6 +1854,7 @@ async function main() {
   );
 
   const existingBrandLinks = await prisma.brandLink.findMany({
+    where: { parentBrandLinkId: null },
     select: {
       id: true,
       productName: true,
@@ -1976,7 +1978,7 @@ async function main() {
     }
 
     const existing = await prisma.brandLink.findFirst({
-      where: { url: shortUrl },
+      where: { url: shortUrl, parentBrandLinkId: null },
       orderBy: { updatedAt: "desc" },
     });
     if (existing?.status === "FAILED") {

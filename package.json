@@ -1,6 +1,6 @@
 {
   "name": "brandconnect-automation",
-  "version": "1.3.79",
+  "version": "1.3.80",
   "description": "네이버 쇼핑 커넥트(브랜드커넥트) 자동 블로그 포스팅 도구",
   "private": true,
   "scripts": {
@@ -37,6 +37,13 @@
     "test:publish-image-cleanup": "npx ts-node --project tsconfig.scripts.json scripts/verify-publish-image-cleanup.ts",
     "test:image-batch-progress": "npx ts-node --project tsconfig.scripts.json scripts/verify-image-batch-progress.ts",
     "test:product-section-image-review": "npx ts-node --project tsconfig.scripts.json scripts/verify-product-section-image-review.ts",
+    "test:topic-templates": "tsx scripts/verify-topic-templates.ts",
+    "test:post-angles": "tsx scripts/verify-post-angles.ts",
+    "test:detail-vision": "tsx scripts/verify-detail-vision-and-research.ts",
+    "test:title-planner": "tsx scripts/verify-title-planner.ts",
+    "test:experience-notes": "tsx scripts/verify-experience-notes.ts",
+    "test:photoreal": "tsx scripts/verify-photoreal-prompts.ts",
+    "test:codex-image": "tsx scripts/verify-codex-image-generation.ts",
     "test:writing-harness": "npx ts-node --project tsconfig.scripts.json scripts/verify-writing-prompt-contract.ts",
     "test:writing-timeouts": "npx ts-node --project tsconfig.scripts.json scripts/verify-writing-timeouts.ts",
     "test:image-timeouts": "npx ts-node --project tsconfig.scripts.json scripts/verify-image-timeout-policy.ts",
@@ -99,7 +106,7 @@
   },
   "main": "scripts/electron/main.cjs",
   "dependencies": {
-    "@openai/codex-sdk": "^0.154.0",
+    "@openai/codex-sdk": "^0.156.1",
     "@prisma/client": "^5.22.0",
     "date-fns": "^4.1.0",
     "dotenv": "^17.2.3",

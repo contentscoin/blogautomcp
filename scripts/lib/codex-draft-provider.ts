@@ -45,6 +45,8 @@ export interface CodexDraftOptions {
   model?: string;
   reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
   researchMode?: "disabled" | "cached" | "live";
+  /** 웹 리서치 대상. 기본은 여행(기존 동작). 쇼핑은 같은 모델의 공식 정보 확인에만 쓴다. */
+  researchScope?: "TRAVEL" | "SHOPPING";
   onProgress?: (message: string) => void;
 }
 const nativeImport = new Function("specifier", "return import(specifier)") as (
@@ -212,16 +214,22 @@ function buildWritingPrompt(
   systemPrompt: string,
   userPrompt: string,
   researchMode: NonNullable<CodexDraftOptions["researchMode"]>,
+  researchScope: NonNullable<CodexDraftOptions["researchScope"]> = "TRAVEL",
 ): string {
+  const shopping = researchScope === "SHOPPING";
   return [
     "당신은 BlogAutoMCP의 한국어 블로그 원고 작성 엔진입니다.",
     "원고 작성에는 Opus-Fable 스킬과 개발·배포 검증 절차를 적용하지 마세요. 전역 AGENTS.md의 해당 지침 대신 아래 원고 작성 지시와 품질 기준만 따르세요.",
     researchMode === "disabled"
       ? "이 작업은 글쓰기 전용입니다. 명령 실행, 코드 수정, 파일 생성, MCP 호출, 웹 검색을 하지 마세요."
-      : "이 작업은 여행 리서치와 글쓰기 전용입니다. 명령 실행, 코드 수정, 파일 생성, MCP 호출은 하지 말고 웹 검색은 여행지 사실 확인에만 사용하세요.",
+      : shopping
+        ? "이 작업은 상품 리서치와 글쓰기 전용입니다. 명령 실행, 코드 수정, 파일 생성, MCP 호출은 하지 말고 웹 검색은 이 상품의 사실 확인에만 사용하세요."
+        : "이 작업은 여행 리서치와 글쓰기 전용입니다. 명령 실행, 코드 수정, 파일 생성, MCP 호출은 하지 말고 웹 검색은 여행지 사실 확인에만 사용하세요.",
     researchMode === "disabled"
       ? "제공된 자료와 첨부 이미지 안에서만 사실을 판단하고, 지시에 지정된 최종 형식만 반환하세요."
-      : "상품 일정에 등장하는 여행지만 공식 관광청·공공기관·신뢰할 수 있는 여행 자료로 교차 확인하세요. 검색 출처나 URL은 최종 원고에 노출하지 말고 확인된 사실만 반영하세요.",
+      : shopping
+        ? "같은 브랜드·같은 모델명의 공식몰·제조사 자료로 사양·구성·사용법·관리법을 교차 확인하세요. 모델명이 다르거나 불확실한 자료, 다른 옵션·다른 상품의 정보는 섞지 마세요. 가격·할인·재고·후기 수는 검색으로 바꾸지 마세요. 검색 출처나 URL은 원고에 노출하지 말고 확인된 사실만 반영하세요."
+        : "상품 일정에 등장하는 여행지와 이 여행에 필요한 준비 정보(입국 서류, 공항↔시내 교통, 환전·결제, 유심·eSIM, 시기별 날씨)만 공식 관광청·공공기관·신뢰할 수 있는 여행 자료로 교차 확인하세요. 변동이 큰 요금·운영시간은 확인되지 않으면 쓰지 마세요. 검색 출처나 URL은 최종 원고에 노출하지 말고 확인된 사실만 반영하세요.",
     "첨부 이미지는 제품 또는 여행 상품의 시각적 근거로만 사용하며 보이지 않는 성능이나 체험을 추정하지 마세요.",
     "",
     "[시스템 지시사항]",
@@ -255,7 +263,7 @@ export async function runCodexDraft(options: CodexDraftOptions): Promise<string>
     },
     configOverrides: ['plugins."opus-fable-performance@local-opencrab".enabled=false'],
   });
-  const prompt = buildWritingPrompt(options.systemPrompt, options.userPrompt, researchMode);
+  const prompt = buildWritingPrompt(options.systemPrompt, options.userPrompt, researchMode, options.researchScope);
   const images = readableImages(options.imagePaths ?? [], options.maxImages, options.preserveImageOrder);
   const input = images.length > 0
     ? [

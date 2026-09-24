@@ -2,7 +2,7 @@ import { preparedPostsFirst } from "../src/lib/prepared-post-priority";
 import "dotenv/config";
 import { runScheduledDraftWorkflow } from "./lib/scheduled-draft-workflow";
 import { PrismaClient } from "../src/generated/prisma";
-import { addDaysToYmd, compactedScheduleDate } from "../src/lib/bulk-schedule-plan";
+import { addDaysToYmd, compactedScheduleDate, familySafeScheduleDate, SIBLING_POST_MIN_GAP_DAYS } from "../src/lib/bulk-schedule-plan";
 import {
   buildAppUrl,
   notifyAndLogCompletion,
@@ -242,6 +242,7 @@ async function main() {
         id: true,
         productName: true,
         scheduledPublishAt: true,
+        parentBrandLinkId: true,
       },
     }), process.env.BULK_TARGET_IDS_JSON ? Number.MAX_SAFE_INTEGER : options.limit);
     const targetIds: string[] | null = process.env.BULK_TARGET_IDS_JSON ? JSON.parse(process.env.BULK_TARGET_IDS_JSON) : null;
@@ -256,23 +257,32 @@ async function main() {
       return;
     }
 
-    const occupiedScheduleDates = shouldReassignScheduleDates
-      ? new Set(
-          (
-            await prisma.brandLink.findMany({
-              where: {
-                connectKind: options.connectKind,
-                status: "SCHEDULED",
-                scheduledPublishAt: { not: null },
-              },
-              select: { scheduledPublishAt: true },
-            })
-          )
-            .map((row) => row.scheduledPublishAt)
-            .filter((value): value is Date => Boolean(value))
-            .map((value) => formatYmdInTimeZone(value, NAVER_SCHEDULE_TIMEZONE))
-        )
-      : new Set<string>();
+    const scheduledRows = shouldReassignScheduleDates
+      ? await prisma.brandLink.findMany({
+          where: {
+            connectKind: options.connectKind,
+            status: "SCHEDULED",
+            scheduledPublishAt: { not: null },
+          },
+          select: { id: true, parentBrandLinkId: true, scheduledPublishAt: true },
+        })
+      : [];
+    const occupiedScheduleDates = new Set(
+      scheduledRows
+        .map((row) => row.scheduledPublishAt)
+        .filter((value): value is Date => Boolean(value))
+        .map((value) => formatYmdInTimeZone(value, NAVER_SCHEDULE_TIMEZONE)),
+    );
+    // 같은 상품(전체 리뷰 + 주제 글)끼리는 최소 간격을 둔다. 키는 원본 상품 ID.
+    const familyScheduleDates = new Map<string, string[]>();
+    for (const row of scheduledRows) {
+      if (!row.scheduledPublishAt) continue;
+      const familyId = row.parentBrandLinkId || row.id;
+      familyScheduleDates.set(familyId, [
+        ...(familyScheduleDates.get(familyId) || []),
+        formatYmdInTimeZone(row.scheduledPublishAt, NAVER_SCHEDULE_TIMEZONE),
+      ]);
+    }
 
     console.log(
       `예약발행 일괄 실행 시작: ${pending.length}건 / ${
@@ -320,6 +330,19 @@ async function main() {
           options.intervalDays,
           occupiedScheduleDates
         );
+        const familyId = link.parentBrandLinkId || link.id;
+        const familySafeDate = familySafeScheduleDate(
+          scheduledDate,
+          options.intervalDays,
+          familyScheduleDates.get(familyId) || [],
+          occupiedScheduleDates,
+        );
+        if (familySafeDate !== scheduledDate) {
+          console.log(`같은 상품 글과 ${SIBLING_POST_MIN_GAP_DAYS}일 간격을 두려고 ${scheduledDate} → ${familySafeDate}로 조정했습니다.`);
+          // 밀린 날짜는 다음 상품의 압축 배치가 다시 고르지 않도록 점유로 표시한다.
+          occupiedScheduleDates.add(familySafeDate);
+          scheduledDate = familySafeDate;
+        }
         scheduledPublishAt = createScheduledPublishAt(scheduledDate);
       } else if (!isScheduleDateTimeSchedulable(scheduledDate)) {
         const normalizedStoredDate = normalizeStartDate(scheduledDate);
@@ -400,6 +423,8 @@ async function main() {
 
         if (refreshed?.status === "SCHEDULED") {
           successCount += 1;
+          const scheduledFamilyId = link.parentBrandLinkId || link.id;
+          familyScheduleDates.set(scheduledFamilyId, [...(familyScheduleDates.get(scheduledFamilyId) || []), scheduledDate]);
           completedLinks.push({
             label: refreshed.productName || link.productName || link.id,
             url: buildAppUrl(`/?brandLinkId=${link.id}`),

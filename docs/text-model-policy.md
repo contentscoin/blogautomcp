@@ -1,29 +1,31 @@
 # Automated text and vision model policy
 
 The existing `scripts/lib/draft-runtime-policy.json` is the source of the
-`gpt-5.5` model ID. `scripts/lib/text-model-policy.ts` applies it to API writing,
+`gpt-6-luna` model ID and the fixed `low` reasoning effort. `scripts/lib/text-model-policy.ts` applies it to API writing,
 style analysis, reviews, image understanding/QC, structured PostSpec output,
 humanizing, Codex SDK writing/photo review, and both topic candidate/editorial callers.
 Legacy `OPENAI_MODEL`, `OPENAI_VISION_MODEL`, and `TOPIC_PIPELINE_OPENAI_MODEL`
 environment values no longer change the model. Explicit conflicting model
 arguments fail before provider execution. There is no smaller-model fallback.
 
-## Request compatibility evidence (2026-09-20)
+## Request compatibility evidence (2026-09-24)
 
-- [Official GPT-5.5 model page](https://developers.openai.com/api/docs/models/gpt-5.5)
-  lists text/image input, Chat Completions, structured output, a 128K output cap,
-  and reasoning efforts `none`, `low`, `medium`, `high`, `xhigh`.
-- [Official GPT-5.5 guidance](https://developers.openai.com/api/docs/guides/latest-model?model=gpt-5.5)
-  states that the model defaults to medium reasoning.
+- The Codex CLI 0.156.1 model catalog (bundled in the `@openai/codex` linux-x64
+  binary) lists `gpt-6-luna` ("GPT-6-Luna") with text/image input,
+  `supported_in_api: true`, and reasoning levels `low`, `medium`, `high`,
+  `xhigh`, `max`. There is no `none` level. The catalog's
+  `minimal_client_version` is 0.155.0, so `@openai/codex-sdk` is pinned to
+  `^0.156.1` (older bundled CLIs report `CODEX_MODEL_INCOMPATIBLE`).
 - The installed `openai/resources/chat/completions/completions.d.ts` documents
   `max_completion_tokens` as including reasoning and visible tokens; `max_tokens`
   is deprecated. The installed Codex SDK declares a string `model` option and
   forwards it as CLI `--model`.
-- API requests omit `temperature` and `max_tokens`. Small targets (up to 1024,
-  including QC 600 and title 400) use `reasoning_effort: none`. Longer targets
-  use `low`, adding 4096 reasoning tokens to the total cap, bounded by 128K.
-  This is headroom, not a guarantee of visible output; truncated output is rejected.
-- Codex SDK requests use explicit medium reasoning by default. Unsupported SDK
+- API requests omit `temperature` and `max_tokens` and always send
+  `reasoning_effort: low`. Small targets (up to 1024, including QC 600 and
+  title 400) add 1024 reasoning tokens to the total cap; longer targets add
+  4096, bounded by 128K. This is headroom, not a guarantee of visible output;
+  truncated output is rejected.
+- Codex SDK requests use the policy effort (`low`) by default. Unsupported SDK
   effort overrides fail before starting the provider.
 
 ## Browser and external generation boundaries
@@ -37,7 +39,7 @@ same candidate envelope through pinned Codex using supplied source summaries.
 
 Browser image generation and OpenAI image models are unchanged. Manual ChatGPT
 handoffs, UI session status, and external user-written drafts cannot guarantee
-GPT-5.5 and are not covered by this automated request policy. Legacy browser
+GPT-6 Luna and are not covered by this automated request policy. Legacy browser
 writing helpers remain in simple-agent but have no automatic writing callers.
 
 Both former topic CLI callers now use the shared `runCodexDraft` SDK provider:

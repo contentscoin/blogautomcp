@@ -187,10 +187,10 @@ import {
 } from "./lib/product-thumbnail-settings";
 import { HUMANIZE_RULES, scanAiTells } from "./lib/humanize-korean";
 import { buildHumanizeSectionsPrompt, parseHumanizeSections } from "./lib/humanize-response-contract";
-import { createLockedProductThumbnail, createOriginalProductPhotoThumbnail, type ShoppingThumbnailStyle } from "./lib/product-image-lock";
+import { createLockedProductThumbnail, createLockedProductThumbnailOnBackground, createOriginalProductPhotoThumbnail, type ShoppingThumbnailStyle } from "./lib/product-image-lock";
 import { copyProductPhotoSource } from "./lib/product-photo-provenance";
 import { codexDraftTerminalFailureCode, runCodexDraft } from "./lib/codex-draft-provider";
-import { TEXT_MODEL, textCompletionParameters } from "./lib/text-model-policy";
+import { TEXT_MODEL, TEXT_REASONING_EFFORT, textCompletionParameters } from "./lib/text-model-policy";
 import { deduplicateImagePaths } from "./lib/image-dedup";
 import { createThreeImageCollage } from "./lib/image-collage";
 import { createProductDetailImageSegments } from "./lib/product-detail-image";
@@ -201,6 +201,19 @@ import {
   shouldRefreshStoredImages,
 } from "./lib/brandlink-image-readiness";
 import { createEditorialSelection, formatEditorialTemplate } from "./lib/editorial-templates";
+import { formatTopicTemplateForPrompt } from "./lib/topic-templates";
+import { readDetailImagesWithVision } from "./lib/detail-vision-reader";
+import { buildSearchDemandQueries, collectSearchDemand, formatSearchDemandForPrompt } from "./lib/search-demand";
+import { formatTitleCandidatesForPrompt, planTitle, type TitlePlanContext } from "./lib/topic-templates/title-planner";
+import {
+  assessSiblingOverlap,
+  formatPostAngleForPrompt,
+  formatPostAngleSummary,
+  getPostAngle,
+  isTitleTooSimilarToSiblings,
+  type SiblingPostSummary,
+} from "./lib/topic-templates/angles";
+import { loadPostAngleFamily, siblingSummaries } from "../src/lib/post-angle-family";
 import { applyEditorialEditorStyle } from "./lib/naver-editorial-style";
 import {
   createEditorialBodyStyleState,
@@ -242,9 +255,8 @@ const AI_PROVIDER: "openai" | "codex" = REQUESTED_AI_PROVIDER === "codex" ? "cod
 const CODEX_DRAFT_MODEL = draftRuntimePolicy.CODEX_DRAFT_MODEL;
 const writingTimeoutPolicy = getWritingTimeoutPolicy();
 const CODEX_DRAFT_TIMEOUT_MS = writingTimeoutPolicy.codexMs;
-const CODEX_DRAFT_REASONING_EFFORT = (
-  process.env.CODEX_DRAFT_REASONING_EFFORT || "medium"
-) as "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+// Effort is part of the fixed product policy; legacy .env values cannot raise it.
+const CODEX_DRAFT_REASONING_EFFORT = TEXT_REASONING_EFFORT;
 const CODEX_BROWSER_FALLBACK_ENABLED =
   (process.env.CODEX_BROWSER_FALLBACK_ENABLED || "false").toLowerCase() === "true";
 
@@ -405,6 +417,13 @@ const BRANDLINK_EXPERIENCE_MODE: PostExperienceMode =
     ? "VERIFIED_EXPERIENCE"
     : "AI_ASSISTED_INFORMATION";
 const BRANDLINK_EXPERIENCE_NOTES = (process.env.BRANDLINK_EXPERIENCE_NOTES || "").trim().slice(0, 4000);
+// 이미지로만 된 상세페이지는 OCR 다음 단계로 비전 판독을 한다. 끄려면 DETAIL_VISION_READ_ENABLED=false.
+// 네이버 자동완성 검색 수요 수집. 끄려면 SEARCH_DEMAND_ENABLED=false.
+const SEARCH_DEMAND_ENABLED = (process.env.SEARCH_DEMAND_ENABLED || "true").toLowerCase() !== "false";
+// 쇼핑 원고의 공식 정보 교차 확인용 웹 리서치. 끄려면 SHOPPING_WEB_RESEARCH_ENABLED=false.
+const SHOPPING_WEB_RESEARCH_ENABLED = (process.env.SHOPPING_WEB_RESEARCH_ENABLED || "true").toLowerCase() !== "false";
+const DETAIL_VISION_READ_ENABLED = (process.env.DETAIL_VISION_READ_ENABLED || "true").toLowerCase() !== "false";
+const DETAIL_VISION_MAX_IMAGES = parseBoundedInteger(process.env.DETAIL_VISION_MAX_IMAGES, 8, 1, 16);
 // MCP OAuth 경로에서는 ChatGPT 대화가 원고를 생성하고 PC는 검증·패키징만 한다.
 // context 출력과 generated draft 입력은 파일로 전달해 Windows 환경변수 길이 제한과
 // 원고가 프로세스 목록/로그에 노출되는 문제를 피한다.
@@ -531,6 +550,21 @@ interface SpecStep2Input {
   imageCandidates: ImageCandidateInput[];
   tempDir: string;
   memo?: string | null;
+  /** 포스팅 각도(전체 리뷰/주제 글)와 같은 상품의 형제 글 요약 */
+  angleContext?: { angle: string; siblings: SiblingPostSummary[] } | null;
+}
+
+/** 이 행의 포스팅 각도와 형제 글 요약. 조회 실패는 전체 리뷰·형제 없음으로 처리한다. */
+async function loadPostAngleContext(linkId: string, postAngle: string | null): Promise<SpecStep2Input["angleContext"]> {
+  try {
+    const family = await loadPostAngleFamily(prisma, linkId);
+    const siblings = family ? siblingSummaries(family.members, linkId) : [];
+    if (!postAngle && siblings.length === 0) return null;
+    return { angle: postAngle || "full-review", siblings };
+  } catch (error) {
+    console.log(`   ⚠️ 포스팅 주제 정보를 읽지 못했습니다: ${getErrorMessage(error)}`);
+    return null;
+  }
 }
 
 interface McpGeneratedDraftFile {
@@ -682,8 +716,40 @@ async function enrichShoppingSourceFeatures(name: string, description: string, f
     const ocr = await readSellerDetailOcrFacts(sellerDetailImagePaths);
     collected.push(...ocr.facts);
     console.log(`   🔎 판매자 상세 OCR: ${ocr.status}, ${ocr.scannedImageCount}구간 검사, 근거 ${ocr.facts.length}개 (${ocr.imagePaths.length}구간에서 확인)`);
+    // 상세페이지가 이미지로만 되어 있어 OCR로도 근거가 부족하면 비전 모델로 이미지 속 글자를 읽는다.
+    const afterOcr = sanitizeSellerEvidenceFeatures(collected, name);
+    if (DETAIL_VISION_READ_ENABLED &&
+        !hasSufficientProductReviewEvidence({ productName: name, description, features: afterOcr, targetSectionCount: 11 })) {
+      collected.push(...await readDetailFactsWithVision("SHOPPING", name, sellerDetailImagePaths));
+    }
   }
   return sanitizeSellerEvidenceFeatures(collected, name);
+}
+
+/**
+ * 상세 이미지 비전 판독. 전사에 근거한 줄만 채택하고, 기존 추출기로 형식화한 사실을 함께 돌려준다.
+ * 실패해도 원고 작성을 막지 않는다(기존 근거 게이트가 최종 판단).
+ */
+async function readDetailFactsWithVision(kind: "SHOPPING" | "TRAVEL", name: string, imagePaths: string[]): Promise<string[]> {
+  const report = await readDetailImagesWithVision({
+    kind,
+    productName: name,
+    imagePaths,
+    maxImages: DETAIL_VISION_MAX_IMAGES,
+    run: (options) => runCodexDraft({
+      systemPrompt: options.systemPrompt,
+      userPrompt: options.userPrompt,
+      imagePaths: options.imagePaths,
+      maxImages: options.maxImages,
+      preserveImageOrder: options.preserveImageOrder,
+    }),
+  });
+  console.log(`   👁️ 상세 이미지 판독: ${report.status}, ${report.imageCount}구간, 채택 ${report.acceptedFacts.length}줄 / 제외 ${report.rejectedFacts.length}줄${report.error ? ` (${report.error})` : ""}`);
+  if (report.acceptedFacts.length === 0) return [];
+  const accepted = report.acceptedFacts.map((line) => isolateSellerEvidenceText(line, 200)).filter(Boolean);
+  return kind === "SHOPPING"
+    ? [...extractExplicitProductFacts(accepted.join("\n"), "ocr"), ...accepted]
+    : accepted.map((line) => `상세 이미지 확인: ${line}`);
 }
 
 function sanitizeTravelPageResearch(research: TravelPageResearch | null | undefined): TravelPageResearch | null {
@@ -1318,10 +1384,10 @@ async function generateTopTextCutoutThumbnail(
   }
 
   if (PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_PATH) {
-    const codexImagegenPath = generateProductThumbnailWithCodexImagegenFallback(
-      promptInfo.prompt,
+    const codexImagegenPath = await generateProductThumbnailWithCodexImagegenFallback(
+      promptInfo,
       product.representativeImagePath,
-      promptInfo.productNameLabel
+      product.name,
     );
     if (codexImagegenPath) {
       console.log(`   ✅ Codex imagegen 썸네일 사용: ${path.basename(codexImagegenPath)}`);
@@ -1344,10 +1410,10 @@ async function generateTopTextCutoutThumbnail(
     return { path: generatedPath, source: "chatgpt" };
   }
 
-  const codexImagegenPath = generateProductThumbnailWithCodexImagegenFallback(
-    promptInfo.prompt,
+  const codexImagegenPath = await generateProductThumbnailWithCodexImagegenFallback(
+    promptInfo,
     product.representativeImagePath,
-    promptInfo.productNameLabel
+    product.name,
   );
   if (codexImagegenPath) {
     console.log(`   OK Codex imagegen thumbnail selected: ${path.basename(codexImagegenPath)}`);
@@ -1397,12 +1463,17 @@ async function generateCompositeThumbnailFallback(
   }
 }
 
-function generateProductThumbnailWithCodexImagegenFallback(
-  prompt: string,
+/**
+ * API 키 없이 Codex 로그인(gpt-image-2)으로 썸네일 배경을 만들고, 실제 상품 누끼와 한글 제목은 로컬에서 합성한다.
+ * PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_PATH 로 직접 만든 이미지를 넘기면 그 파일을 그대로 쓴다(수동 경로).
+ */
+async function generateProductThumbnailWithCodexImagegenFallback(
+  promptInfo: { prompt: string; productNameLabel: string; headline: string; subline: string },
   referenceImagePath: string,
-  productNameLabel: string
-): string | null {
+  productName: string,
+): Promise<string | null> {
   if (!PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_FALLBACK_ENABLED) return null;
+  const productNameLabel = promptInfo.productNameLabel;
 
   if (PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_PATH) {
     const resolved = path.resolve(PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_PATH);
@@ -1420,41 +1491,42 @@ function generateProductThumbnailWithCodexImagegenFallback(
     return finalPath;
   }
 
-  fs.mkdirSync(PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_REQUEST_DIR, { recursive: true });
-  const requestedOutputPath = path.join(
-    TEMP_PATH,
-    `product_thumbnail_codex_imagegen_${Date.now()}_${sanitizeFileNameForPath(productNameLabel)}.png`
-  );
-  const requestPath = path.join(
-    PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_REQUEST_DIR,
-    `product_thumbnail_codex_imagegen_request_${Date.now()}_${sanitizeFileNameForPath(productNameLabel)}.md`
-  );
-
-  const requestBody = [
-    "# Codex Imagegen Product Thumbnail Request",
-    "",
-    `Product name: ${productNameLabel}`,
-    `Reference image: ${referenceImagePath}`,
-    `Desired output path: ${requestedOutputPath}`,
-    "",
-    "Use Codex built-in imagegen. Use the reference product image as the strict product reference.",
-    "After generation, copy the selected image to the desired output path and rerun with:",
-    "",
-    "```powershell",
-    `$env:PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_PATH="${requestedOutputPath}"`,
-    "```",
-    "",
-    "Prompt:",
-    "",
-    "```text",
-    prompt,
-    "```",
-    "",
-  ].join("\n");
-
-  fs.writeFileSync(requestPath, requestBody, "utf8");
-  console.log(`   Codex imagegen request saved: ${requestPath}`);
-  return null;
+  if (!referenceImagePath || !fs.existsSync(referenceImagePath)) return null;
+  const workDir = path.join(PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_REQUEST_DIR, `thumb-${Date.now()}-${sanitizeFileNameForPath(productNameLabel)}`);
+  fs.mkdirSync(workDir, { recursive: true });
+  try {
+    const { runCodexImageBatch } = await import("../src/lib/codex-image-generation");
+    const { buildBrandPostImagePrompt } = await import("../src/lib/brand-post-image-generation");
+    // 상품은 그리지 않고 배경만 만든다. 실제 상품은 검증된 원본에서 잘라 합성한다(상품 모양 변형 방지).
+    const prompt = buildBrandPostImagePrompt({
+      connectKind: "SHOPPING",
+      productName,
+      sectionTitle: promptInfo.headline,
+      imageIntent: "대표 썸네일 배경",
+      role: "hero",
+    });
+    const [result] = await runCodexImageBatch(
+      [{ id: "thumbnail", prompt, outStem: path.join(workDir, "background"), referenceImagePaths: [] }],
+      { onResult: async () => {} },
+    );
+    if (!result?.localPath) {
+      console.log(`   Warning: Codex imagegen thumbnail background failed: ${result?.error || "empty result"}`);
+      return null;
+    }
+    const composed = await createLockedProductThumbnailOnBackground({
+      sourcePath: referenceImagePath,
+      backgroundPath: result.localPath,
+      outputDir: TEMP_PATH,
+      productName: productNameLabel,
+      headline: promptInfo.headline,
+      subline: promptInfo.subline,
+      style: "shopping-color-block",
+    });
+    return fs.existsSync(composed.outputPath) ? composed.outputPath : null;
+  } catch (error) {
+    console.log(`   Warning: Codex imagegen thumbnail failed: ${getErrorMessage(error)}`);
+    return null;
+  }
 }
 
 async function generateProductThumbnailWithChatGPT(
@@ -4618,6 +4690,10 @@ async function step1_getProductInfo(
     connectKind === "TRAVEL" ? TRAVEL_BODY_IMAGE_MAX : SHOPPING_BODY_IMAGE_MAX,
   );
 
+  if (connectKind === "TRAVEL" && DETAIL_VISION_READ_ENABLED && detailImagePaths.length > 0) {
+    // 여행 상세의 일정표·포함/불포함·유의사항 이미지를 판독해 보조 근거로 붙인다(일정 순서는 __NEXT_DATA__가 우선).
+    sanitizedFeatures.push(...await readDetailFactsWithVision("TRAVEL", productName, detailImagePaths));
+  }
   if (connectKind === "SHOPPING") {
     sanitizedFeatures = await enrichShoppingSourceFeatures(productName, description, sanitizedFeatures, sellerDetailImagePaths);
     if (!hasSufficientProductReviewEvidence({ productName, description, features: sanitizedFeatures, targetSectionCount: 11 })) {
@@ -4758,7 +4834,10 @@ async function generateWithAI(
         timeoutMs: CODEX_DRAFT_TIMEOUT_MS,
         model: CODEX_DRAFT_MODEL || undefined,
         reasoningEffort: CODEX_DRAFT_REASONING_EFFORT,
-        researchMode: chatgptContext?.connectKind === "TRAVEL" ? "cached" : "disabled",
+        // 원고 작성 호출(상품 컨텍스트가 있을 때)만 웹 리서치를 쓴다. 쇼핑은 같은 모델의 공식 정보 확인으로 제한.
+        researchMode: chatgptContext?.connectKind === "TRAVEL" || (chatgptContext?.connectKind === "SHOPPING" && SHOPPING_WEB_RESEARCH_ENABLED)
+          ? "cached" : "disabled",
+        researchScope: chatgptContext?.connectKind === "SHOPPING" ? "SHOPPING" : "TRAVEL",
         onProgress: (message) => console.log(`   ✦ ${message}`),
       });
     } catch (error) {
@@ -4837,7 +4916,6 @@ async function step2_generatePost(
     maximumBodySectionCount,
     Math.max(minimumBodySectionCount, adaptiveEditorialProfile.sectionRange.preferred),
   );
-  const compositionPromptBlock = formatPostContractForPrompt(compositionContract);
   const adaptiveEditorialPromptBlock = formatAdaptiveEditorialHarnessForPrompt(connectKind);
   const writingContract = createWritingPromptContract({
     kind: connectKind,
@@ -4849,8 +4927,41 @@ async function step2_generatePost(
     draftMemo: specInput?.memo ?? process.env.BRANDLINK_DRAFT_MEMO,
     verifiedExperienceNotes: BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE"
       ? BRANDLINK_EXPERIENCE_NOTES : "",
+    postAngleBlock: formatPostAngleForPrompt(connectKind, specInput?.angleContext?.angle, specInput?.angleContext?.siblings),
+    postAngleSummary: formatPostAngleSummary(connectKind, specInput?.angleContext?.angle),
   });
   const mandatoryWritingPromptBlock = formatWritingPromptContract(writingContract);
+  if (specInput?.angleContext) {
+    console.log(`   🧭 포스팅 주제: ${getPostAngle(connectKind, specInput.angleContext.angle).label} · 형제 글 ${specInput.angleContext.siblings.length}편`);
+  }
+  // 상품 유형 템플릿: 같은 섹션 ID 위에 유형별 목적·이미지 의도·이미지 출처를 덮어쓴 역할 팔레트.
+  const topicSelection = writingContract.editorial?.topic;
+  if (topicSelection) console.log(`   🧩 상품 유형 템플릿: ${topicSelection.id} (${topicSelection.reason})`);
+  // SEO 제목 기획: 템플릿·각도 제목 공식으로 후보를 만들고, 모델 제목이 필수 규칙을 어기면 후보로 바꾼다.
+  const titlePlanContext: TitlePlanContext | null = topicSelection ? {
+    kind: connectKind,
+    productName: product.name,
+    topicId: topicSelection.id,
+    angleId: specInput?.angleContext?.angle,
+    verifiedExperience: BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE",
+    siblingTitles: specInput?.angleContext?.siblings.map((sibling) => sibling.title),
+    minChars: writingContract.title.min,
+    maxChars: writingContract.title.max,
+  } : null;
+  // 검색 수요(네이버 자동완성): FAQ·질문형 소제목 후보. 제출 원고 검증 모드에서는 호출하지 않는다.
+  const searchDemand = SEARCH_DEMAND_ENABLED && !BRANDLINK_GENERATED_DRAFT_PATH
+    ? await collectSearchDemand(buildSearchDemandQueries(connectKind, product.name)).catch(() => [])
+    : [];
+  if (searchDemand.length) console.log(`   🔍 검색 수요: ${searchDemand.slice(0, 5).join(", ")}${searchDemand.length > 5 ? " …" : ""}`);
+  const compositionPromptBlock = [
+    formatPostContractForPrompt(getPostCompositionContract(connectKind, topicSelection?.id)),
+    formatSearchDemandForPrompt(connectKind, searchDemand),
+    titlePlanContext ? formatTitleCandidatesForPrompt(titlePlanContext) : "",
+    // Codex/API 경로는 브라우저 예산 제한이 없으므로 섹션 흐름·체험 문장 자리까지 담은 전체 블록을 넣는다.
+    topicSelection
+      ? formatTopicTemplateForPrompt(topicSelection, { experienceMode: BRANDLINK_EXPERIENCE_MODE })
+      : "",
+  ].filter(Boolean).join("\n\n");
   const experiencePromptBlock =
     BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE"
       ? `[검증된 실제 체험 메모]\n${BRANDLINK_EXPERIENCE_NOTES}\n- 위 메모에 명시된 체험 사실만 1인칭으로 표현하고 나머지는 정보형으로 씁니다.`
@@ -4897,9 +5008,10 @@ async function step2_generatePost(
       imageCandidates: specInput.imageCandidates,
       tempDir: specInput.tempDir,
       brandLink,
-      memo: specInput.memo,
+      // 주제 글이면 각도 블록을 작성 요구로 함께 넘긴다(spec 경로는 섹션 구성이 고정돼 목표·검색어·형제 글 회피만 반영).
+      memo: [specInput.memo, writingContract.postAngleBlock].filter(Boolean).join("\n\n") || null,
       options: {
-        maxRepairRounds: 2,
+        maxRepairRounds: 1,
         allowLocalFallback: PRODUCT_POST_LOCAL_FALLBACK_ENABLED,
         quotationHeaders: NAVER_EDITOR_QUOTATION_ENABLED,
         requireRepresentativeImage: BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE,
@@ -5154,7 +5266,7 @@ ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일
    ${BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE"
      ? "- 제목의 체험 표현은 제공된 실제 체험 메모로 증명되는 범위에서만 사용하세요."
      : "- 실제 체험 증빙이 없으므로 제목에 후기, 내돈내산, 실사용, 직접 써본, 직접 다녀온 표현을 넣지 마세요."}
-   - "완벽 가이드", "총정리", "꿀팁" 같은 낚시성 문구 금지 (네이버 스팸 기준).
+   - ${isTravel ? '"완벽 가이드", "총정리", "핵꿀팁", "꿀팁 Zip" 같은 낚시성 문구 금지. 여행 글은 근거 있는 현지 팁을 담을 때 "꿀팁" 한 단어는 사용할 수 있습니다.' : '"완벽 가이드", "총정리", "꿀팁" 같은 낚시성 문구 금지 (네이버 스팸 기준).'}
    예: ${isTravel ? '"타이베이 단수이 여행, 노을과 골목을 걷는 4일"' : '"아기비데 추천 | 해피달링 워터탭 선택 기준"'}
 
 2. 본문은 공유 필수 작성 계약의 섹션·분량 범위 안에서 근거 밀도에 따라 자유롭게 구성
@@ -5461,6 +5573,13 @@ ${mandatoryWritingPromptBlock}`;
   let normalizedTitle = resolveWritingDraftTitle(
     json.title, product.name, writingContract, sanitizeTitle,
   );
+  if (titlePlanContext && !writingContract.requestedTitle) {
+    const plannedTitle = planTitle(normalizedTitle, titlePlanContext);
+    if (plannedTitle.replaced) {
+      console.log(`   🏷️ 제목 교체(${plannedTitle.reason}): ${normalizedTitle} → ${plannedTitle.title}`);
+      normalizedTitle = sanitizeTitle(plannedTitle.title, normalizedTitle);
+    }
+  }
 
   const qualitySource = buildBrandPostQualitySource({
     productName: product.name,
@@ -5483,6 +5602,7 @@ ${mandatoryWritingPromptBlock}`;
     thumbnailGenerated: true,
     connectKind,
     experienceMode: BRANDLINK_EXPERIENCE_MODE,
+    experienceNotes: BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE" ? BRANDLINK_EXPERIENCE_NOTES : "",
     compositionQualityReport: null,
     sourceDescription: qualitySource.sourceDescription,
     sourceFeatures: qualitySource.sourceFeatures,
@@ -5579,7 +5699,8 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
     try {
       qualityRepair.attempted = true;
       let lastRepairScore = editorialQuality.score;
-      const maximumRepairAttempts = 3;
+      // 2026-09-24 보정: 경고만 남은 원고는 통과하므로 보강은 1회로 끝낸다.
+      const maximumRepairAttempts = 1;
       for (let repairAttempt = 1; repairAttempt <= maximumRepairAttempts && !editorialQuality.canPublish; repairAttempt += 1) {
         reportDraftProgress("qc", `원고 보강 ${repairAttempt}/${maximumRepairAttempts} · ${editorialQuality.reason || editorialQuality.code}`);
         const repairedText = await generateWithAI(
@@ -5654,6 +5775,59 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
         ? `여행 원고가 자동 재작성 후에도 품질 기준을 통과하지 못했습니다: ${editorialQuality.reason || editorialQuality.summary}`
         : `여행 원고 품질 기준을 통과하지 못했습니다: ${editorialQuality.reason || editorialQuality.summary}`,
     );
+  }
+
+  // 포스팅 각도: 같은 상품의 형제 글과 문장이 겹치면(유사문서 위험) 겹친 섹션만 1회 재작성한다.
+  // 결과는 겹침이 줄고 발행 게이트가 나빠지지 않을 때만 채택하며, 남은 겹침은 경고로만 둔다.
+  const siblingPosts = specInput?.angleContext?.siblings ?? [];
+  const siblingSectionSets = siblingPosts.map((sibling) => [...(sibling.sections || [])]).filter((set) => set.length > 0);
+  if (siblingSectionSets.length > 0 && !BRANDLINK_GENERATED_DRAFT_PATH) {
+    const overlap = assessSiblingOverlap(bodySections, siblingSectionSets);
+    if (overlap.needsRewrite) {
+      const targets = overlap.overlappingSectionIndexes;
+      console.log(`   🪞 형제 글과 겹치는 문장 ${overlap.overlappingSentenceCount}개 · 섹션 ${targets.map((index) => index + 1).join(", ")} 재작성`);
+      try {
+        const rewritePrompt = [
+          "같은 상품의 다른 블로그 글과 문장이 겹쳐 유사문서로 보일 수 있습니다. 아래 섹션만 새 문장으로 다시 써 주세요.",
+          "- 확인된 사실·수치·소제목의 뜻은 유지하고, 겹치는 문장의 구조·어휘·예시를 바꿉니다. 새 사실을 만들지 않습니다.",
+          "- 섹션마다 첫 줄 소제목, 빈 줄, 본문 형식을 유지합니다.",
+          `- 겹친 문장 예: ${overlap.samples.slice(0, 3).join(" / ")}`,
+          "",
+          ...targets.map((index, order) => `[섹션 ${order + 1}]\n${bodySections[index]}`),
+          "",
+          `JSON 하나만 출력: {"sections": [섹션 ${targets.length}개 문자열]}`,
+        ].join("\n");
+        const rewrittenJson = parseJsonObjectFromText(await generateWithAI(systemPrompt, rewritePrompt, chatgptContext, []));
+        const rewritten = Array.isArray(rewrittenJson.sections) ? rewrittenJson.sections : null;
+        if (rewritten && rewritten.length === targets.length && rewritten.every((item) => typeof item === "string" && item.trim())) {
+          const candidateBody = bodySections.map((section, index) => {
+            const order = targets.indexOf(index);
+            if (order < 0) return section;
+            const text = String(rewritten[order]).trim();
+            return HUMAN_MOBILE_POLISH_ENABLED ? applyHumanMobilePolishToSection(text, index, connectKind) : text;
+          });
+          const after = assessSiblingOverlap(candidateBody, siblingSectionSets);
+          const candidateSections = [...candidateBody, disclosureSection];
+          const candidateQuality = assessEditorialQuality(normalizedTitle, candidateSections, hashtags);
+          const newSafetyBlocker = candidateQuality.blockers.some((blocker) =>
+            blocker.tier === "safety" && !editorialQuality.blockers.some((existing) => existing.code === blocker.code));
+          if (after.overlappingSentenceCount < overlap.overlappingSentenceCount && !newSafetyBlocker
+            && (candidateQuality.canPublish || !editorialQuality.canPublish)) {
+            bodySections = candidateBody;
+            sections = candidateSections;
+            editorialQuality = candidateQuality;
+            console.log(`   ✅ 형제 글 겹침 ${overlap.overlappingSentenceCount}→${after.overlappingSentenceCount}문장`);
+          } else {
+            console.log(`   ⚠️ 형제 글 겹침 재작성 결과를 채택하지 않았습니다(겹침 ${after.overlappingSentenceCount}문장). 경고로 남깁니다.`);
+          }
+        }
+      } catch (error) {
+        console.log(`   ⚠️ 형제 글 겹침 재작성 실패, 원문 유지: ${getErrorMessage(error)}`);
+      }
+    }
+    if (isTitleTooSimilarToSiblings(normalizedTitle, siblingPosts.map((sibling) => sibling.title))) {
+      console.log(`   ⚠️ 제목이 같은 상품의 다른 글 제목과 비슷합니다: ${normalizedTitle}`);
+    }
   }
 
   console.log(`   🔎 원고 품질검사: ${editorialQuality.summary}`);
@@ -10222,7 +10396,12 @@ async function main() {
       link.url,
       link.id,
       link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
-      { imageCandidates: specImageCandidates, tempDir: TEMP_PATH, memo: process.env.BRANDLINK_DRAFT_MEMO?.trim() || null },
+      {
+        imageCandidates: specImageCandidates,
+        tempDir: TEMP_PATH,
+        memo: process.env.BRANDLINK_DRAFT_MEMO?.trim() || null,
+        angleContext: await loadPostAngleContext(link.id, link.postAngle),
+      },
       // Facts are collected from the resolved sales/travel detail page. Keep
       // that page in the snapshot instead of the BrandConnect category URL.
       { externalProductId: link.externalItemId, sourceUrl: product.finalUrl || link.finalUrl || link.sourceUrl || link.url },
@@ -10393,6 +10572,7 @@ async function main() {
           Boolean(generatedThumbnailPath) && generatedThumbnail?.source !== "composite",
         connectKind: runtimeConnectKind,
         experienceMode: BRANDLINK_EXPERIENCE_MODE,
+        experienceNotes: BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE" ? BRANDLINK_EXPERIENCE_NOTES : "",
         compositionQualityReport: composition.qualityReport,
         sourceDescription: finalQualitySource.sourceDescription,
         sourceFeatures: finalQualitySource.sourceFeatures,

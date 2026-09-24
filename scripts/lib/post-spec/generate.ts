@@ -9,6 +9,7 @@ import { formatOpenCrabSeoBriefForPrompt } from "../opencrab-seo-brief";
 import { formatTravelFactsForPrompt } from "../travel-content";
 import { formatWritingStructureGuide } from "../writing-structure-guide";
 import { formatEditorialTemplate, selectEditorialTemplate } from "../editorial-templates";
+import { formatTopicTemplateForPrompt } from "../topic-templates";
 import { otherSectionsEvidence } from "./evidence-ledger";
 import { generateStructured } from "./llm-client";
 import { buildDraftJsonSchema, sectionKey } from "./schema";
@@ -35,6 +36,9 @@ export function renderSystemPrompt(spec: PostSpec, ctx: GenerateContext): string
     formatEditorialTemplate(spec.connectKind, spec.editorial?.id ?? selectEditorialTemplate(spec.connectKind, {
       name: spec.productName, features: spec.facts.lines,
     })),
+    spec.editorial?.topic
+      ? formatTopicTemplateForPrompt(spec.editorial.topic, { includeFlow: false })
+      : "",
     "- 위 구성 가이드는 지정된 섹션 안의 전개와 문장에 적용합니다. 섹션 ID·순서·제목과 JSON 스키마는 유지하고, 지정된 목록·접두사 형식은 해당 섹션에서만 지킵니다.",
     "- 각 섹션의 제목은 지시된 그대로 사용하고 바꾸지 마세요.",
     "- 섹션마다 지정된 형식(줄 수·글자 수·접두사)을 정확히 지키세요.",
@@ -66,7 +70,9 @@ export function renderTitleRules(spec: PostSpec): string {
     "## 제목 규칙",
     `- ${t.minChars}~${t.maxChars}자, 핵심 키워드 "${spec.seo.primaryKeyword}"를 제목 앞쪽에 배치`,
     t.mustIncludeTokens.length ? `- 제목에 반드시 포함: ${t.mustIncludeTokens.join(", ")}` : "",
-    "- 이모지·특수기호·낚시성 문구(완벽 가이드/총정리/꿀팁) 금지",
+    spec.connectKind === "TRAVEL"
+      ? "- 이모지·특수기호·낚시성 문구(완벽 가이드/총정리/핵꿀팁/꿀팁 Zip) 금지. 근거 있는 현지 팁을 담으면 \"꿀팁\" 한 단어는 사용 가능"
+      : "- 이모지·특수기호·낚시성 문구(완벽 가이드/총정리/꿀팁) 금지",
     spec.connectKind === "TRAVEL"
       ? '- 예: "대만 3박4일 패키지 일정과 포함사항 정리" 처럼 검색어를 자연스럽게 나열'
       : '- 예: "아기비데 추천 | 해피달링 시그니처 워터탭 구성과 가격" 처럼 키워드 + 상품명',

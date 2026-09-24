@@ -8,7 +8,7 @@ import {
   assessTravelReviewSubstance,
   type TravelSourceCoverage,
 } from "./travel-content";
-import { assessGenericLanguage, assessRepetition } from "./draft-quality-signals";
+import { assessGenericLanguage, assessRepetition, sentenceTokens } from "./draft-quality-signals";
 import type {
   BrandConnectKind,
   PostExperienceMode,
@@ -34,6 +34,8 @@ export interface BrandLinkContentReadinessInput {
   thumbnailGenerated?: boolean;
   connectKind?: BrandConnectKind;
   experienceMode?: PostExperienceMode;
+  /** 체험 모드에서 체험 문장이 메모에 근거하는지 경고용으로만 비교한다. */
+  experienceNotes?: string | null;
   compositionQualityReport?: PostQualityReportV1 | null;
   sourceDescription?: string | null;
   sourceFeatures?: string[];
@@ -149,7 +151,16 @@ export interface BrandLinkContentReadiness {
   quality: BrandLinkQualityReport;
 }
 
-export const BRANDLINK_QUALITY_PASS_SCORE = 70;
+/** 2026-09-24 보정: 과도한 재작성 루프를 줄이기 위해 70 → 62. 안전 차단은 그대로 유지한다. */
+export const BRANDLINK_QUALITY_PASS_SCORE = 62;
+
+/**
+ * 총점이 기준 이상일 때도 발행을 막는 품질 카테고리. 상품/여행지 고유 근거가 없으면
+ * 허위 정보 위험이 있으므로 필수로 남기고, 나머지 카테고리 실패는 권고(경고)로 낮춘다.
+ */
+export const BRANDLINK_MANDATORY_QUALITY_CATEGORIES: readonly BrandLinkQualityCategoryKey[] = ["productEvidence"];
+/** 거의 같은 틀의 문장이 이만큼 반복되면 유사문서·저품질 위험이 커서 총점과 무관하게 막는다. */
+export const BRANDLINK_SEVERE_REPETITION_COUNT = 5;
 
 const GENERIC_PRODUCT_TOKENS = new Set([
   "추천",
@@ -180,6 +191,19 @@ export const UNSUPPORTED_EXPERIENCE_PATTERNS = [
 ] as const;
 
 const UNSUPPORTED_EXPERIENCE_TITLE_PATTERN = /(?:내돈내산|실사용|직접\s*(?:써본|다녀온)|솔직\s*후기|체험\s*후기)/u;
+
+/**
+ * 체험 모드에서, 체험 단정 문장 중 체험 메모와 겹치는 단어가 하나도 없는 문장 수.
+ * 메모에 없는 체험을 지어냈을 가능성을 알리는 권고 신호에만 쓴다.
+ */
+export function countUngroundedExperienceSentences(body: string, notes: string): number {
+  const noteTokens = new Set(sentenceTokens(notes));
+  if (noteTokens.size === 0) return 0;
+  const sentences = body.split(/(?<=[.!?。])\s+|\n+/u).map((sentence) => sentence.trim()).filter(Boolean);
+  return sentences.filter((sentence) => detectUnsupportedExperience(sentence).length > 0)
+    .filter((sentence) => !sentenceTokens(sentence).some((token) => noteTokens.has(token)))
+    .length;
+}
 
 /** Return exact claim candidates; exemptions must attach to that candidate, not its sentence. */
 export function detectUnsupportedExperience(text: string): string[] {
@@ -444,7 +468,7 @@ function buildQualityReport(input: {
   };
 
   // 4. 문단 다양성 (반복)
-  const repeatLimit = 2;
+  const repeatLimit = 3;
   const diversityFail = repetition.nearDuplicateCount > repeatLimit;
   const diversity: BrandLinkQualityCategory = {
     key: "diversity",
@@ -493,8 +517,17 @@ function buildQualityReport(input: {
     ],
   };
 
-  const categories = [productEvidence, sceneLinkage, specificity, diversity, usefulness, clarity];
-  const score = Math.max(0, Math.min(100, categories.reduce((sum, item) => sum + item.score, 0)));
+  const rawCategories = [productEvidence, sceneLinkage, specificity, diversity, usefulness, clarity];
+  const score = Math.max(0, Math.min(100, rawCategories.reduce((sum, item) => sum + item.score, 0)));
+  // 총점이 기준 이상이면 필수가 아닌 카테고리 실패는 권고로 낮춘다. 점수는 그대로 보고한다.
+  const categories = score >= BRANDLINK_QUALITY_PASS_SCORE
+    ? rawCategories.map((item): BrandLinkQualityCategory =>
+      item.status === "fail"
+        && !BRANDLINK_MANDATORY_QUALITY_CATEGORIES.includes(item.key)
+        && !(item.key === "diversity" && repetition.nearDuplicateCount >= BRANDLINK_SEVERE_REPETITION_COUNT)
+        ? { ...item, status: "warn", notes: [...item.notes, "총점 기준 충족으로 권고 사항으로 처리"] }
+        : item)
+    : rawCategories;
   return {
     quality: {
       score,
@@ -633,6 +666,9 @@ export function getBrandLinkContentReadiness(
       ? 0
       : unsupportedExperienceMatches.length +
         (UNSUPPORTED_EXPERIENCE_TITLE_PATTERN.test(title) ? 1 : 0);
+  const ungroundedExperienceCount = experienceMode === "VERIFIED_EXPERIENCE"
+    ? countUngroundedExperienceSentences(fullBody, input.experienceNotes || "")
+    : 0;
   const commissionRateCount = countPatternHits(fullBody, COMMISSION_RATE_PATTERNS);
   const internalGuidanceCount = countPatternHits(fullBody, INTERNAL_GUIDANCE_PATTERNS);
   // 편집(초안) 단계에서는 이미지가 아직 확정되지 않았으므로 대표 이미지는 발행 단계에서만 요구한다.
@@ -777,6 +813,14 @@ export function getBrandLinkContentReadiness(
       label: "허위 체험 단정",
       status: unsupportedExperienceCount > 0 ? "fail" : "pass",
     },
+    ...(experienceMode === "VERIFIED_EXPERIENCE" ? [{
+      key: "experience-grounding",
+      label: ungroundedExperienceCount > 0
+        ? `체험 메모에 없는 체험 표현 ${ungroundedExperienceCount}건 (확인 권장)`
+        : "체험 표현이 메모에 근거",
+      // 차단하지 않는 권고 신호. 메모와 겹치는 단어가 전혀 없는 체험 문장만 센다.
+      status: ungroundedExperienceCount > 0 ? "warn" as const : "pass" as const,
+    }] : []),
     {
       key: "commission-rate",
       label: "수수료율/커미션 노출",
@@ -834,11 +878,13 @@ export function getBrandLinkContentReadiness(
       reason: `상품명이 제목/본문에 충분히 반영되지 않았습니다. 확인 토큰: ${coveredProductTokens.join(", ") || "-"}`,
     });
   }
-  if (mainSectionCount < sectionMinimum) {
+  // 템플릿 범위의 80%까지 허용한다(최소 3개).
+  const sectionFloor = Math.max(3, Math.ceil(sectionMinimum * 0.8));
+  if (mainSectionCount < sectionFloor) {
     blockers.push({
       code: "too-few-sections",
       tier: "structure",
-      reason: `본문 섹션이 부족합니다. 현재 ${mainSectionCount}개, 최소 ${sectionMinimum}개가 필요합니다.`,
+      reason: `본문 섹션이 부족합니다. 현재 ${mainSectionCount}개, 최소 ${sectionFloor}개가 필요합니다.`,
     });
   }
   if (totalLength < Math.round(characterMinimum * 0.8)) {
@@ -848,7 +894,8 @@ export function getBrandLinkContentReadiness(
       reason: `본문 분량이 너무 짧습니다. 현재 ${totalLength}자입니다.`,
     });
   }
-  if (input.hashtags.length < 3) {
+  // 해시태그 1~2개는 경고 신호로만 남기고, 하나도 없을 때만 차단한다.
+  if (input.hashtags.length < 1) {
     blockers.push({
       code: "too-few-hashtags",
       tier: "structure",
