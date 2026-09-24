@@ -4,9 +4,14 @@ import crypto from "node:crypto";
 import { getBrandPostPackageDir } from "../../src/lib/brand-post-package";
 import { atomicWriteTextFile } from "../../src/lib/atomic-text-file";
 
+/** 1.3.83: replan gained generated-lifestyle and coverage-relaxation phases. */
+export const IMAGE_RECOVERY_POLICY_VERSION = 2;
+
 export type ImageRecoveryStage = "refresh-source" | "replan-images";
 type Entry = { stage: ImageRecoveryStage; input: string; output?: string; status: "running" | "complete" | "failed"; at: string; reason?: string; externalFailure?: boolean };
-const recoverable = new Set(["IMAGE_SOURCE_BINDING_REQUIRED", "PRODUCT_SOURCE_REQUIRED", "PRODUCT_SOURCE_DOWNLOAD_FAILED", "PRODUCT_CUTOUT_REQUIRED"]);
+// IMAGE_GENERATION_REQUIRED is what a source-only pass reports for an AI-scene slot; the next
+// generation or replan pass can still fill it, so it does not end recovery.
+const recoverable = new Set(["IMAGE_SOURCE_BINDING_REQUIRED", "PRODUCT_SOURCE_REQUIRED", "PRODUCT_SOURCE_DOWNLOAD_FAILED", "PRODUCT_CUTOUT_REQUIRED", "IMAGE_GENERATION_REQUIRED"]);
 export const isRecoverableImageEvidenceFailure = (code?: string) => recoverable.has(code || "");
 export function isRecoverableImageEvidenceResult(value: { code?: string; errors?: string[]; error?: string } | null | undefined): boolean {
   if (!isRecoverableImageEvidenceFailure(value?.code)) return false;
@@ -30,7 +35,9 @@ export function imageRecoverySignature(root: string): string | null {
       .map(name => read(`product-sources/${name}`)?.sha256).filter((sha): sha is string => typeof sha === "string").sort();
   } catch { /* No sources yet is a meaningful input state. */ }
   return crypto.createHash("sha256").update(JSON.stringify({
-    version: 1, product: manifest.sourceSnapshot?.product,
+    // Bump when the recovery algorithm itself changes, so drafts that failed under the
+    // old logic get one attempt with the new logic instead of being suppressed forever.
+    version: 1, policy: IMAGE_RECOVERY_POLICY_VERSION, product: manifest.sourceSnapshot?.product,
     refreshedProduct: context?.product,
     sections: manifest.composition?.sections?.map((section: Record<string, unknown>) => ({
       id: section.id, title: section.title, body: section.body, imageIntent: section.imageIntent,

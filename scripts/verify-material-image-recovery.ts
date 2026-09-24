@@ -88,6 +88,29 @@ async function main() {
       }
       assert.equal(approved, ["refresh", "replan", "partial"].includes(scenario));
     }
+    // AI-scene slots left empty after a source refresh get exactly one more generation pass;
+    // a source-only pass reports IMAGE_GENERATION_REQUIRED for them, which is recoverable.
+    {
+      const actions: string[] = [];
+      let generated = 0; let approved = false;
+      const call: Call = async (url, method, body) => {
+        const action = (body as { action?: string })?.action || method;
+        actions.push(action);
+        if (url.endsWith("/images")) {
+          if (action === "generate_missing") generated++;
+          if (action === "bind_sources") return { success: true, code: "IMAGE_GENERATION_REQUIRED", errors: ["shopping-fit: IMAGE_GENERATION_REQUIRED: AI 연출 이미지 파트입니다."] };
+          if (generated < 2) return { success: true, code: "IMAGE_SOURCE_BINDING_REQUIRED", errors: ["IMAGE_SOURCE_BINDING_REQUIRED: transient generation miss"] };
+          return { success: true, code: "IMAGE_REPAIR_COMPLETE", errors: [] };
+        }
+        if (action === "approve") approved = true;
+        const done = generated >= 2;
+        return { success: true, data: { approvedAt: approved ? "yes" : null, approval: { canApprove: done },
+          imageSlots: [{ missing: 0, generationMissing: done ? 0 : 1 }], contentQuality: { signals: [] } } };
+      };
+      await runMaterialPreparation("fixture-ai-scene-retry", { call, pause: async () => {} });
+      assert.equal(actions.filter(a => a === "generate_missing").length, 2, "one extra generation pass for AI-scene slots only");
+      assert.ok(approved);
+    }
     const dir = getBrandPostPackageDir("persistent-fixture");
     fs.mkdirSync(dir, { recursive: true });
     const manifest = { sourceSnapshot: { product: { name: "vacuum", features: ["사용시간: 45분"] } },

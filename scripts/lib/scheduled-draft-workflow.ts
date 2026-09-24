@@ -225,12 +225,21 @@ function qualityPlanForDraft(
   return { plan: completeFallbackPlan(), readiness: null };
 }
 
+/** Half or more quality categories failing (or a safety/internal-leak blocker plus a failing category). */
+export function isSeverelyFailingDraft(readiness: BrandLinkContentReadiness | null): boolean {
+  if (!readiness || readiness.canPublish) return false;
+  const categories = readiness.quality?.categories || [];
+  const failing = categories.filter((category) => category.status === "fail").length;
+  return categories.length > 0 && failing * 2 >= categories.length;
+}
+
 // Stage 1. Repairs are bounded and only take place while preparing materials.
 export async function runMaterialPreparation(id: string, deps: WorkflowDeps = defaults) {
   const base = `/api/brandlinks/${encodeURIComponent(id)}`;
   const check = bounded(deps, 90 * 60_000);
   deps.onStage?.("저장 소재 확인");
   let draft = await deps.call(`${base}/draft`, "GET");
+  const reusedSavedDraft = Boolean(draft.data);
   if (!draft.data) {
     deps.onStage?.("원고·기본 이미지 작성");
     // New and existing materials converge through the same saved-draft repair
@@ -318,6 +327,16 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
   deps.onStage?.("저장 원고 품질검사");
   await waitForImagesIdle();
   let plan = await recheck();
+  // A saved draft from an older run that fails most quality categories converges poorly by
+  // section patches. Write it once from scratch with the current writer, then continue as usual.
+  if (reusedSavedDraft && isSeverelyFailingDraft(previousReadiness) && !["complete", "refresh-source"].includes(plan.action)) {
+    check();
+    deps.onStage?.("오래된 원고 품질 미달 · 현재 기준으로 새로 작성");
+    draft = await deps.call(`${base}/draft`, "POST", { autoApprove: false, autoSectionImages: false, autoQualityRepair: false });
+    await waitForImagesIdle();
+    previousReadiness = null;
+    plan = await recheck();
+  }
   if (plan.action === "refresh-source") {
     plan = await refreshSource();
     if (plan.action === "refresh-source") throw sourceEvidenceError(plan);
@@ -394,6 +413,9 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
           // Image URLs refresh independently of textual snapshot promotion.
           // Keep the manuscript frozen; the final recheck still verifies it.
           await attemptImages("bind_sources");
+          // bind_sources places seller originals only. Only AI-scene slots (generationMissing) that are
+          // still empty get one more generation pass; source-evidence gaps never re-trigger generation.
+          if (draft.data?.imageSlots?.some(slot => slot.generationMissing > 0)) await attemptImages("generate_missing");
         });
         if (!refreshed.attempted) deps.onStage?.("같은 근거 재수집은 반복하지 않음 · 대체 구성 검토");
         if (missing() && isRecoverableImageEvidenceResult(latestImageRepair)) {
