@@ -5,7 +5,13 @@ import { normalizeDraftSections, sectionEntryToString, splitMergedSection } from
 import { parseVisualReviews } from "./lib/publish-image-audit";
 import { auditSectionProposals } from "./lib/product-section-proposal-audit";
 import { assessProductReviewSubstance, productEvidenceRequirement, productSignalAnchor } from "./lib/product-editorial-plan";
-import { getBrandLinkContentReadiness } from "./lib/brandlink-content-readiness";
+import { getBrandLinkContentReadiness, stripInternalGuidanceSentences } from "./lib/brandlink-content-readiness";
+import { ensureStaticDecodableImage } from "./lib/product-photo-source";
+import { replanShoppingImageCoverage, type ImageReplanDependencies } from "../src/lib/brand-post-image-replan";
+import type { BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
+import os from "node:os";
+import path from "node:path";
+import sharp from "sharp";
 import { createWritingPromptContract, formatWritingPromptContract, getWritingOutputExample } from "./lib/writing-prompt-contract";
 
 async function main() {
@@ -70,7 +76,67 @@ async function main() {
   assert.match(auditSource, /outputSchema: VISUAL_REVIEW_SCHEMA/u);
   assert.match(auditSource, /형식이 깨진 판정만 한 번 더 묻는다/u);
 
-  console.log("PASS: draft structure normalization + retry, shared evidence requirement + named missing facts, tolerant visual verdicts + non-fatal proposal INVALID_REVIEW");
+  // 4. Internal guidance sentences are removed deterministically; headings and other sentences stay.
+  const leaked = "자외선 차단\n\nSPF50+ PA++++ 표기예요. 작성 지침에 따라 정리했어요. 덕분에 외출 전에 편해요.";
+  assert.equal(stripInternalGuidanceSentences(leaked), "자외선 차단\n\nSPF50+ PA++++ 표기예요. 덕분에 외출 전에 편해요.");
+  assert.equal(stripInternalGuidanceSentences("무게\n\n2.4kg이에요."), "무게\n\n2.4kg이에요.");
+  assert.match(agent, /severe\s*\n?\s*\? defaultSectionIndexes/u, "badly failing saved drafts are repaired as a whole");
+
+  // 5. Animated or warning-laden seller images get a static sibling; undecodable ones are skipped.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "draft-reliability-"));
+  try {
+    const frames = await Promise.all(["#f00", "#00f"].map((background) =>
+      sharp({ create: { width: 8, height: 8, channels: 3, background } }).png().toBuffer()));
+    const animated = path.join(dir, "banner.gif");
+    await sharp(frames, { join: { animated: true } }).gif({ loop: 0 }).toFile(animated);
+    assert.equal((await sharp(fs.readFileSync(animated)).metadata()).pages, 2, "fixture is a real animated GIF");
+    const staticPath = await ensureStaticDecodableImage(animated);
+    assert.ok(staticPath && staticPath !== animated && staticPath.endsWith(".static.png"));
+    const meta = await sharp(fs.readFileSync(staticPath!), { failOn: "warning" }).metadata();
+    assert.equal(meta.pages ?? 1, 1, "static sibling is single-frame and passes the audit decode");
+    const png = path.join(dir, "clean.png");
+    await sharp({ create: { width: 8, height: 8, channels: 3, background: "#fff" } }).png().toFile(png);
+    assert.equal(await ensureStaticDecodableImage(png), png, "clean images are used as-is");
+    const junk = path.join(dir, "junk.jpg");
+    fs.writeFileSync(junk, Buffer.from("not an image"));
+    assert.equal(await ensureStaticDecodableImage(junk), null);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // 6. Replan: when no seller photo proves the feature, coverage moves to an optional lifestyle slot filled by generation.
+  let stored = { version: "brand-post-package/v2", brandLinkId: "fx", connectKind: "SHOPPING", imagePolicy: "LOCKED_PRODUCT_OR_ORIGINAL",
+    approvedAt: "old", title: "청소기", createdAt: "c", imageRequirements: { policy: "verified-source-first" },
+    composition: { sections: [
+      { id: "feature", title: "흡입 구조", body: ["흡입 구조"], imageIntent: "흡입 구조 기능 근거", imageMin: 1, imageMax: 1, imagePaths: [] },
+      { id: "fit", title: "잘 맞는 공간", body: ["원룸"], imageIntent: "AI 연출 이미지: 추천 환경의 공간 배치. 실제 사용이나 성능 증명이 아님", imageMin: 0, imageMax: 1, imagePaths: [] },
+    ], renderNodes: [] }, imageAssets: [] } as unknown as BrandPostPackageManifestV2;
+  const repairCalls: boolean[] = [];
+  const deps = {
+    read: () => structuredClone(stored),
+    write: (value: BrandPostPackageManifestV2) => { stored = value; return value; },
+    reconcile: (value: BrandPostPackageManifestV2) => value,
+    lock: () => ({ assertOwner() {}, release() {} }),
+    slots: (value: BrandPostPackageManifestV2) => value.composition.sections.map((section) => ({
+      sectionId: section.id, minimum: section.imageMin!, maximum: section.imageMax!, count: section.imagePaths.length,
+      missing: Math.max(0, section.imageMin! - section.imagePaths.length), generatedMinimum: 0, generationMissing: 0, staleTargets: [],
+      assets: section.imagePaths.map((file) => ({ path: file, creationMethod: "source-with-generated-background" })),
+    })),
+    repair: async (options: { sourceOnly?: boolean }) => {
+      repairCalls.push(Boolean(options.sourceOnly));
+      if (!options.sourceOnly) stored.composition.sections[1].imagePaths = ["generated-fit.png"];
+      return { errors: options.sourceOnly ? ["IMAGE_SOURCE_BINDING_REQUIRED: 원본 부족"] : [] };
+    },
+  } as unknown as ImageReplanDependencies;
+  const replanned = await replanShoppingImageCoverage({ brandLinkId: "fx" }, deps);
+  assert.deepEqual(repairCalls, [true, false], "source review first, then generation for the lifestyle slot");
+  assert.equal(replanned.changed, true);
+  assert.equal(replanned.after.missing, 0);
+  assert.equal(stored.composition.sections[0].imageMin, 0, "the feature section keeps its text but no longer needs a proof image");
+  assert.equal(stored.composition.sections[0].imageIntent, "흡입 구조 기능 근거", "intent is never relabelled");
+  assert.equal(stored.composition.sections[1].imageMin, 1);
+
+  console.log("PASS: draft structure normalization + retry, shared evidence requirement + named missing facts, tolerant visual verdicts + non-fatal per-image proposal failures, leak stripping, static seller images, generated lifestyle replan");
 }
 
 main().catch((error) => {

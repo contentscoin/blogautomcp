@@ -82,6 +82,40 @@ export async function downloadProductSourcePhoto(url: string, outputDir: string)
 }
 
 /**
+ * Final publication audit accepts only a single, fully decodable static frame. Seller galleries
+ * often contain animated GIF/WebP banners or JPEGs with harmless decoder warnings. Keep a clean
+ * static sibling (first frame, re-encoded PNG) so those photos can still be reviewed and used.
+ * Returns null when the file cannot be decoded at all.
+ */
+export async function ensureStaticDecodableImage(file: string): Promise<string | null> {
+  let bytes: Buffer;
+  try { bytes = fs.readFileSync(file); } catch { return null; }
+  try {
+    const metadata = await sharp(bytes, { failOn: "warning" }).metadata();
+    if ((metadata.pages ?? 1) === 1) {
+      await sharp(bytes, { failOn: "warning" }).rotate().raw().toBuffer();
+      return file;
+    }
+  } catch { /* fall through to a tolerant re-encode */ }
+  const hash = crypto.createHash("sha256").update(bytes).digest("hex");
+  const target = path.join(path.dirname(file), `${hash}.static.png`);
+  try {
+    if (!fs.existsSync(target)) {
+      const png = await sharp(bytes, { failOn: "error", page: 0, pages: 1 }).rotate().png().toBuffer();
+      const check = await sharp(png, { failOn: "warning" }).metadata();
+      if (!check.width || !check.height) return null;
+      fs.writeFileSync(target, png);
+      if (fs.existsSync(`${file}.retrieval.json`) && !fs.existsSync(`${target}.retrieval.json`)) {
+        fs.copyFileSync(`${file}.retrieval.json`, `${target}.retrieval.json`);
+      }
+    }
+    return target;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Collect intact seller-gallery files without deciding whether they are plain
  * product photos. A later section-intent review may legitimately accept an
  * official feature panel that the generic packshot filter must reject.
@@ -91,26 +125,29 @@ export async function collectShoppingProductSourceCandidates(options: {
   sourceImageUrls?: string[];
   outputDir: string;
   maximum?: number;
-}, dependencies = { download: downloadProductSourcePhoto }): Promise<string[]> {
+}, dependencies: { download: typeof downloadProductSourcePhoto; normalize?: (file: string) => Promise<string | null> } = { download: downloadProductSourcePhoto }): Promise<string[]> {
   const maximum = Math.max(1, Math.min(20, Math.floor(options.maximum || 16)));
   const byHash = new Map<string, string>();
-  const add = (file: string) => {
+  const add = async (file: string) => {
     if (byHash.size >= maximum) return;
     try {
       const stat = fs.statSync(file);
       if (!stat.isFile() || stat.size < 1 || stat.size > MAX_IMAGE_BYTES) return;
-      const resolved = path.resolve(file);
+      // Animated or warning-laden files are swapped for their static sibling; undecodable ones are skipped.
+      const usable = await (dependencies.normalize ?? ensureStaticDecodableImage)(path.resolve(file));
+      if (!usable) return;
+      const resolved = path.resolve(usable);
       const hash = crypto.createHash("sha256").update(fs.readFileSync(resolved)).digest("hex");
       if (!byHash.has(hash)) byHash.set(hash, resolved);
     } catch { /* A missing local candidate is retried from saved URLs. */ }
   };
-  for (const file of options.localCandidates) add(file);
+  for (const file of options.localCandidates) await add(file);
   const sources = [...new Set(options.sourceImageUrls || [])].filter(isAllowedProductPhotoUrl).slice(0, 20);
   let downloaded = 0;
   for (const url of sources) {
     if (byHash.size >= maximum) break;
     try {
-      add(await dependencies.download(url, options.outputDir));
+      await add(await dependencies.download(url, options.outputDir));
       downloaded += 1;
     } catch { /* One unavailable seller image does not block the rest. */ }
   }

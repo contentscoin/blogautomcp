@@ -35,11 +35,15 @@ export async function auditSectionProposals<T extends SectionProposal>(options: 
     }
     const result = await (options.audit || auditPublishImages)({ productName: options.productName,
       selectedProduct: options.selectedProduct || options.productName, composition: { sections, renderNodes } });
-    // 판정 형식이 깨진 제안은 그 제안만 탈락시킨다(다른 제안·전체 재배치를 막지 않는다).
-    const fatal = result.failures.find(failure => failure.code !== "SEMANTIC_REJECTION" && failure.code !== "INVALID_REVIEW");
+    // 이미지 한 장의 문제(판정 형식 오류, 디코딩 불가, 누락, 과도한 세로 비율)는 그 제안만 탈락시킨다.
+    // 다른 제안과 전체 재배치는 계속한다. 문맥 오류·검사 중 파일 변경만 전체를 멈춘다.
+    const PER_IMAGE = new Set(["SEMANTIC_REJECTION", "INVALID_REVIEW", "INVALID_IMAGE", "MISSING_IMAGE", "LONG_IMAGE"]);
+    const fatal = result.failures.find(failure => !PER_IMAGE.has(failure.code));
     if (fatal) throw new Error(`SOURCE_PROPOSAL_AUDIT_FAILED: ${fatal.code}: ${fatal.reason}`);
     for (const [nodeIndex, row] of byNode) {
       const snapshot = result.images.find(image => image.nodeIndex === nodeIndex);
+      // An image rejected before hashing (undecodable/missing) has no snapshot; it is handled as a rejection below.
+      if (!snapshot && result.failures.some(failure => failure.nodeIndex === nodeIndex && PER_IMAGE.has(failure.code))) continue;
       if (!snapshot || snapshot.sha256 !== row.sourceSha256)
         throw new Error("SOURCE_PROPOSAL_AUDIT_FAILED: IMAGE_CHANGED: Proposal bytes changed before final-rule audit");
     }
