@@ -49,7 +49,8 @@ export async function GET(request: NextRequest) {
       allowDiscovery: false,
     });
     const existing = await prisma.brandLink.findMany({
-      where: { connectKind: "TRAVEL" },
+      // 주제 글(자식 행)은 같은 상품 ID를 공유하므로 원본 행만 목록 매핑에 쓴다.
+      where: { connectKind: "TRAVEL", parentBrandLinkId: null },
       select: { id: true, externalItemId: true, url: true, productName: true, storeName: true, productPrice: true, status: true, postUrl: true, errorMessage: true },
     });
     const byExternalId = new Map(existing.filter((row) => row.externalItemId).map((row) => [row.externalItemId as string, row]));

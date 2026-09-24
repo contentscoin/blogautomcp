@@ -202,6 +202,15 @@ import {
 } from "./lib/brandlink-image-readiness";
 import { createEditorialSelection, formatEditorialTemplate } from "./lib/editorial-templates";
 import { formatTopicTemplateForPrompt } from "./lib/topic-templates";
+import {
+  assessSiblingOverlap,
+  formatPostAngleForPrompt,
+  formatPostAngleSummary,
+  getPostAngle,
+  isTitleTooSimilarToSiblings,
+  type SiblingPostSummary,
+} from "./lib/topic-templates/angles";
+import { loadPostAngleFamily, siblingSummaries } from "../src/lib/post-angle-family";
 import { applyEditorialEditorStyle } from "./lib/naver-editorial-style";
 import {
   createEditorialBodyStyleState,
@@ -531,6 +540,21 @@ interface SpecStep2Input {
   imageCandidates: ImageCandidateInput[];
   tempDir: string;
   memo?: string | null;
+  /** 포스팅 각도(전체 리뷰/주제 글)와 같은 상품의 형제 글 요약 */
+  angleContext?: { angle: string; siblings: SiblingPostSummary[] } | null;
+}
+
+/** 이 행의 포스팅 각도와 형제 글 요약. 조회 실패는 전체 리뷰·형제 없음으로 처리한다. */
+async function loadPostAngleContext(linkId: string, postAngle: string | null): Promise<SpecStep2Input["angleContext"]> {
+  try {
+    const family = await loadPostAngleFamily(prisma, linkId);
+    const siblings = family ? siblingSummaries(family.members, linkId) : [];
+    if (!postAngle && siblings.length === 0) return null;
+    return { angle: postAngle || "full-review", siblings };
+  } catch (error) {
+    console.log(`   ⚠️ 포스팅 주제 정보를 읽지 못했습니다: ${getErrorMessage(error)}`);
+    return null;
+  }
 }
 
 interface McpGeneratedDraftFile {
@@ -4848,8 +4872,13 @@ async function step2_generatePost(
     draftMemo: specInput?.memo ?? process.env.BRANDLINK_DRAFT_MEMO,
     verifiedExperienceNotes: BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE"
       ? BRANDLINK_EXPERIENCE_NOTES : "",
+    postAngleBlock: formatPostAngleForPrompt(connectKind, specInput?.angleContext?.angle, specInput?.angleContext?.siblings),
+    postAngleSummary: formatPostAngleSummary(connectKind, specInput?.angleContext?.angle),
   });
   const mandatoryWritingPromptBlock = formatWritingPromptContract(writingContract);
+  if (specInput?.angleContext) {
+    console.log(`   🧭 포스팅 주제: ${getPostAngle(connectKind, specInput.angleContext.angle).label} · 형제 글 ${specInput.angleContext.siblings.length}편`);
+  }
   // 상품 유형 템플릿: 같은 섹션 ID 위에 유형별 목적·이미지 의도·이미지 출처를 덮어쓴 역할 팔레트.
   const topicSelection = writingContract.editorial?.topic;
   if (topicSelection) console.log(`   🧩 상품 유형 템플릿: ${topicSelection.id} (${topicSelection.reason})`);
@@ -4906,7 +4935,8 @@ async function step2_generatePost(
       imageCandidates: specInput.imageCandidates,
       tempDir: specInput.tempDir,
       brandLink,
-      memo: specInput.memo,
+      // 주제 글이면 각도 블록을 작성 요구로 함께 넘긴다(spec 경로는 섹션 구성이 고정돼 목표·검색어·형제 글 회피만 반영).
+      memo: [specInput.memo, writingContract.postAngleBlock].filter(Boolean).join("\n\n") || null,
       options: {
         maxRepairRounds: 1,
         allowLocalFallback: PRODUCT_POST_LOCAL_FALLBACK_ENABLED,
@@ -5664,6 +5694,59 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
         ? `여행 원고가 자동 재작성 후에도 품질 기준을 통과하지 못했습니다: ${editorialQuality.reason || editorialQuality.summary}`
         : `여행 원고 품질 기준을 통과하지 못했습니다: ${editorialQuality.reason || editorialQuality.summary}`,
     );
+  }
+
+  // 포스팅 각도: 같은 상품의 형제 글과 문장이 겹치면(유사문서 위험) 겹친 섹션만 1회 재작성한다.
+  // 결과는 겹침이 줄고 발행 게이트가 나빠지지 않을 때만 채택하며, 남은 겹침은 경고로만 둔다.
+  const siblingPosts = specInput?.angleContext?.siblings ?? [];
+  const siblingSectionSets = siblingPosts.map((sibling) => [...(sibling.sections || [])]).filter((set) => set.length > 0);
+  if (siblingSectionSets.length > 0 && !BRANDLINK_GENERATED_DRAFT_PATH) {
+    const overlap = assessSiblingOverlap(bodySections, siblingSectionSets);
+    if (overlap.needsRewrite) {
+      const targets = overlap.overlappingSectionIndexes;
+      console.log(`   🪞 형제 글과 겹치는 문장 ${overlap.overlappingSentenceCount}개 · 섹션 ${targets.map((index) => index + 1).join(", ")} 재작성`);
+      try {
+        const rewritePrompt = [
+          "같은 상품의 다른 블로그 글과 문장이 겹쳐 유사문서로 보일 수 있습니다. 아래 섹션만 새 문장으로 다시 써 주세요.",
+          "- 확인된 사실·수치·소제목의 뜻은 유지하고, 겹치는 문장의 구조·어휘·예시를 바꿉니다. 새 사실을 만들지 않습니다.",
+          "- 섹션마다 첫 줄 소제목, 빈 줄, 본문 형식을 유지합니다.",
+          `- 겹친 문장 예: ${overlap.samples.slice(0, 3).join(" / ")}`,
+          "",
+          ...targets.map((index, order) => `[섹션 ${order + 1}]\n${bodySections[index]}`),
+          "",
+          `JSON 하나만 출력: {"sections": [섹션 ${targets.length}개 문자열]}`,
+        ].join("\n");
+        const rewrittenJson = parseJsonObjectFromText(await generateWithAI(systemPrompt, rewritePrompt, chatgptContext, []));
+        const rewritten = Array.isArray(rewrittenJson.sections) ? rewrittenJson.sections : null;
+        if (rewritten && rewritten.length === targets.length && rewritten.every((item) => typeof item === "string" && item.trim())) {
+          const candidateBody = bodySections.map((section, index) => {
+            const order = targets.indexOf(index);
+            if (order < 0) return section;
+            const text = String(rewritten[order]).trim();
+            return HUMAN_MOBILE_POLISH_ENABLED ? applyHumanMobilePolishToSection(text, index, connectKind) : text;
+          });
+          const after = assessSiblingOverlap(candidateBody, siblingSectionSets);
+          const candidateSections = [...candidateBody, disclosureSection];
+          const candidateQuality = assessEditorialQuality(normalizedTitle, candidateSections, hashtags);
+          const newSafetyBlocker = candidateQuality.blockers.some((blocker) =>
+            blocker.tier === "safety" && !editorialQuality.blockers.some((existing) => existing.code === blocker.code));
+          if (after.overlappingSentenceCount < overlap.overlappingSentenceCount && !newSafetyBlocker
+            && (candidateQuality.canPublish || !editorialQuality.canPublish)) {
+            bodySections = candidateBody;
+            sections = candidateSections;
+            editorialQuality = candidateQuality;
+            console.log(`   ✅ 형제 글 겹침 ${overlap.overlappingSentenceCount}→${after.overlappingSentenceCount}문장`);
+          } else {
+            console.log(`   ⚠️ 형제 글 겹침 재작성 결과를 채택하지 않았습니다(겹침 ${after.overlappingSentenceCount}문장). 경고로 남깁니다.`);
+          }
+        }
+      } catch (error) {
+        console.log(`   ⚠️ 형제 글 겹침 재작성 실패, 원문 유지: ${getErrorMessage(error)}`);
+      }
+    }
+    if (isTitleTooSimilarToSiblings(normalizedTitle, siblingPosts.map((sibling) => sibling.title))) {
+      console.log(`   ⚠️ 제목이 같은 상품의 다른 글 제목과 비슷합니다: ${normalizedTitle}`);
+    }
   }
 
   console.log(`   🔎 원고 품질검사: ${editorialQuality.summary}`);
@@ -10232,7 +10315,12 @@ async function main() {
       link.url,
       link.id,
       link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
-      { imageCandidates: specImageCandidates, tempDir: TEMP_PATH, memo: process.env.BRANDLINK_DRAFT_MEMO?.trim() || null },
+      {
+        imageCandidates: specImageCandidates,
+        tempDir: TEMP_PATH,
+        memo: process.env.BRANDLINK_DRAFT_MEMO?.trim() || null,
+        angleContext: await loadPostAngleContext(link.id, link.postAngle),
+      },
       // Facts are collected from the resolved sales/travel detail page. Keep
       // that page in the snapshot instead of the BrandConnect category URL.
       { externalProductId: link.externalItemId, sourceUrl: product.finalUrl || link.finalUrl || link.sourceUrl || link.url },

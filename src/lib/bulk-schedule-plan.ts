@@ -43,3 +43,33 @@ export function normalizeBulkScheduleStartDate(
   const today = ymdInTimeZone(now, timeZone);
   return requestedDate <= today ? addDaysToYmd(today, 1) : requestedDate;
 }
+
+function ymdToUtcDays(ymd: string): number {
+  const [year, month, day] = ymd.split("-").map((part) => Number.parseInt(part, 10));
+  return Math.round(Date.UTC(year, month - 1, day) / 86_400_000);
+}
+
+/** 같은 상품의 전체 리뷰·주제 글끼리 둘 최소 예약 간격(일). 유사문서·도배 인상을 줄인다. */
+export const SIBLING_POST_MIN_GAP_DAYS = 2;
+
+/**
+ * 같은 상품(형제 글)의 예약일과 최소 간격을 지키는 날짜를 고른다. 후보가 충돌하면 간격 단위로
+ * 뒤로 밀되 이미 예약된 날짜는 건너뛴다. 밀린 날짜는 호출자가 점유 목록에 추가해야 한다.
+ */
+export function familySafeScheduleDate(
+  candidate: string,
+  intervalDays: number,
+  familyDates: Iterable<string>,
+  occupiedDates: ReadonlySet<string> = new Set(),
+  minGapDays = SIBLING_POST_MIN_GAP_DAYS,
+): string {
+  const family = [...familyDates].map(ymdToUtcDays);
+  const step = Math.max(1, Math.trunc(intervalDays) || 1);
+  for (let offset = 0; offset < 10_000; offset += 1) {
+    const date = addDaysToYmd(candidate, offset * step);
+    if (offset > 0 && occupiedDates.has(date)) continue;
+    const day = ymdToUtcDays(date);
+    if (family.every((other) => Math.abs(day - other) >= minGapDays)) return date;
+  }
+  throw new Error("같은 상품 글 간격을 지키는 예약 날짜를 계산하지 못했습니다.");
+}

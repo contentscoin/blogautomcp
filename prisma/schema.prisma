@@ -190,12 +190,18 @@ model BrandLink {
   categoryNo  String?  // 네이버 블로그 게시판(카테고리) 번호
   useSectionHeading Boolean @default(true) // 본문 소제목을 제목 스타일로 적용할지 여부
 
+  // 포스팅 각도: 한 상품으로 전체 리뷰 1편 + 주제 글 여러 편을 쓴다.
+  // 주제 글은 원본(부모) 상품을 복제한 자식 행이며, 원고·발행·예약 파이프라인은 행 단위로 그대로 동작한다.
+  parentBrandLinkId String? // 원본 상품 행 ID (null이면 원본 = 전체 리뷰)
+  postAngle   String?  // full-review, how-to, prep-tips ... (null = full-review)
+
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   @@index([status])
   @@index([connectKind])
   @@index([connectKind, externalItemId])
+  @@index([parentBrandLinkId])
   @@index([createdAt])
 }
 

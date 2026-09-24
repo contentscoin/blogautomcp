@@ -8,6 +8,7 @@ import {
   CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS,
   compactChatGptEvidence,
 } from "./lib/chatgpt-direct-prompt";
+import { formatPostAngleForPrompt, formatPostAngleSummary } from "./lib/topic-templates/angles";
 import {
   composeBudgetedWritingPrompt,
   createWritingPromptContract,
@@ -60,7 +61,7 @@ assert.equal(extractRequestedDraftTitle(memo), exactTitle);
 assert.equal(extractRequestedDraftTitle('제목은 정확히 “오사카 여행”으로 작성.'), "오사카 여행");
 assert.equal(extractRequestedDraftTitle("온천호텔 선택 기준을 다뤄주세요."), undefined);
 const memoContractContext = {
-  createWritingPromptContract, connectKind: "TRAVEL", minimumBodySectionCount: 8,
+  createWritingPromptContract, formatPostAngleForPrompt, formatPostAngleSummary, connectKind: "TRAVEL", minimumBodySectionCount: 8,
   maximumBodySectionCount: 11, compositionContract: { targetCharacters: { min: 2400, max: 4200 } },
   NAVER_BLOG_HASHTAG_COUNT: 4, BRANDLINK_EXPERIENCE_MODE: "AI_INFORMATION",
   process: { env: { BRANDLINK_DRAFT_MEMO: memo } },

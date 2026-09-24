@@ -17,6 +17,10 @@ export interface WritingPromptContract {
   requestedTitle?: string;
   editorialTemplateId?: EditorialTemplateId;
   editorial?: EditorialSelection;
+  /** 포스팅 각도(주제 글) 블록. 전체 리뷰이고 형제 글이 없으면 비어 있다. */
+  postAngleBlock?: string;
+  /** 예산이 빡빡한 브라우저 프롬프트용 한 줄 요약 */
+  postAngleSummary?: string;
 }
 
 /** Only extract an explicit title command, never infer a title from a topic memo. */
@@ -63,6 +67,8 @@ export function createWritingPromptContract(input: {
   verifiedExperienceNotes?: string;
   draftMemo?: string | null;
   product?: EditorialProduct;
+  postAngleBlock?: string;
+  postAngleSummary?: string;
 }): WritingPromptContract {
   for (const [min, max] of [
     [input.minimumSections, input.maximumSections],
@@ -89,6 +95,8 @@ export function createWritingPromptContract(input: {
     verifiedExperienceNotes: input.verifiedExperienceNotes?.trim() || "",
     draftMemo: input.draftMemo?.trim() || "",
     requestedTitle: extractRequestedDraftTitle(input.draftMemo?.trim() || ""),
+    ...(input.postAngleBlock?.trim() ? { postAngleBlock: input.postAngleBlock.trim() } : {}),
+    ...(input.postAngleSummary?.trim() ? { postAngleSummary: input.postAngleSummary.trim() } : {}),
   };
 }
 
@@ -147,6 +155,7 @@ export function formatWritingPromptContract(
         minimal: options.topicDetail === "minimal",
       })
       : "",
+    options.topicDetail === "minimal" ? contract.postAngleSummary || "" : contract.postAngleBlock || "",
     formatDraftMemoRequirements(contract),
     "- 다음은 필드와 섹션 한 개의 형식 예시입니다. 실제 sections 개수와 전체 분량은 위 기준을 따릅니다.",
     JSON.stringify(getWritingOutputExample(contract)),
