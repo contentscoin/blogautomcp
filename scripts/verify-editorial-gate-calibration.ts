@@ -64,11 +64,18 @@ assert.equal(declarations.length, 3);
 const code = ts.transpileModule(declarations.map(n => n.getText(source)).join("\n"), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText;
-const run = vm.runInNewContext(`${code}; buildQualityReport`, {
-  BRANDLINK_QUALITY_PASS_SCORE: 70,
-  assessRepetition: () => ({ nearDuplicateCount: 0, exactDuplicateCount: 0, duplicateOpeningCount: 0, samples: [] }),
+const passScoreMatch = fs.readFileSync(filename, "utf8").match(/export const BRANDLINK_QUALITY_PASS_SCORE = (\d+);/u);
+assert.equal(passScoreMatch?.[1], "62", "calibrated pass score");
+const sandbox = (nearDuplicateCount = 0) => ({
+  BRANDLINK_QUALITY_PASS_SCORE: 62,
+  BRANDLINK_MANDATORY_QUALITY_CATEGORIES: ["productEvidence"],
+  BRANDLINK_SEVERE_REPETITION_COUNT: 5,
+  assessRepetition: () => ({ nearDuplicateCount, exactDuplicateCount: 0, duplicateOpeningCount: 0, samples: [] }),
   assessGenericLanguage: () => ({ sentenceCount: 10, guidanceCount: 0, generalStatementCount: 0, guidanceRatio: 0, generalRatio: 0 }),
 });
+const run = vm.runInNewContext(`${code}; buildQualityReport`, sandbox());
+const runRepetitive = vm.runInNewContext(`${code}; buildQualityReport`, sandbox(4));
+const runSevereRepetition = vm.runInNewContext(`${code}; buildQualityReport`, sandbox(6));
 const input = { isTravel: false, bodySections: [], sourceEvidenceCoveragePass: true,
   editorialMissingCoreRoles: [], evidenceTokens: [], sourceEvidenceLevel: "usable",
   reviewSubstance: { coveredSignals: ["532ml", "라벤더향"], requiredSignalCount: 2,
@@ -81,6 +88,16 @@ assert.equal(scored.quality.categories.find((c: {key: string}) => c.key === "spe
 assert.equal(scored.failingCategories.length, 0, "no invented care instructions required to satisfy a quota");
 assert.ok(scored.quality.score < 100, "advisory weaknesses still reduce score");
 assert.ok(run({ ...input, sourceEvidenceCoveragePass: false }).failingCategories.some((c: {key: string}) => c.key === "productEvidence"));
+// Calibration (2026-09-24): above the total pass score, only product evidence stays mandatory.
+const repetitive = runRepetitive(input);
+assert.ok(repetitive.quality.score >= 62, `repetition alone keeps the score above the bar: ${repetitive.quality.score}`);
+assert.equal(repetitive.quality.categories.find((c: {key: string}) => c.key === "diversity").status, "warn",
+  "a warning-only draft passes instead of looping through repairs");
+assert.equal(repetitive.failingCategories.length, 0);
+const noEvidence = runRepetitive({ ...input, sourceEvidenceCoveragePass: false });
+assert.ok(noEvidence.failingCategories.some((c: {key: string}) => c.key === "productEvidence"), "missing source evidence still fails");
+assert.ok(runSevereRepetition(input).failingCategories.some((c: {key: string}) => c.key === "diversity"),
+  "templated repetition across most sections stays blocking (similar-document risk)");
 
 async function main() {
   const saved = process.env.PRODUCT_THUMBNAIL_IMAGE_QC_ENABLED;

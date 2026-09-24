@@ -84,8 +84,14 @@ assert.equal(naturalTravel.canPublish, true, naturalTravel.reason || naturalTrav
 const vagueTravel = assess(naturalTravelSections.map((section, index) =>
   index === 0 ? `${section}\n\n조용한 섬인 것 같아요. 항구가 인상적으로 보입니다.` : section
 ));
-assert.equal(vagueTravel.canPublish, false, "모호한 추정형 말투가 포함된 여행 원고는 차단해야 합니다.");
-assert.match(vagueTravel.reason || "", /모호한 말투/u);
+// 2026-09-24 보정: 모호한 말투는 안전 문제가 아니므로 총점이 기준 이상이면 권고로 남긴다.
+const vagueNotes = vagueTravel.quality.categories.flatMap((category) => category.notes).join(" ");
+assert.match(`${vagueTravel.reason || ""} ${vagueNotes}`, /모호한 말투/u, "모호한 말투는 경고로 계속 보고한다.");
+if (vagueTravel.quality.score >= vagueTravel.quality.passScore) {
+  assert.equal(vagueTravel.canPublish, true, "경고만 남은 여행 원고는 통과한다.");
+} else {
+  assert.equal(vagueTravel.canPublish, false);
+}
 assert.equal(
   naturalTravel.reason?.includes("편집 역할 preparation") ?? false,
   false,
@@ -447,7 +453,7 @@ assert.match(formatDraftSubmissionNextAction(), /contentQuality\.canPublish가 f
 assert.match(formatDraftSubmissionNextAction(), /이미지·배치 실패만 있으면 원고를 재작성하거나 재제출하지 마세요/u);
 // The deployed repair policy was raised to three attempts; retain the bounded
 // loop assertion rather than assuming the obsolete two-attempt constant.
-assert.match(simpleAgentSource, /maximumRepairAttempts = 3/u);
+assert.match(simpleAgentSource, /maximumRepairAttempts = 1;/u, "2026-09-24 보정: 보강은 1회로 끝낸다");
 assert.match(simpleAgentSource, /repairAttempt <= maximumRepairAttempts && !editorialQuality.canPublish/u);
 assert.match(simpleAgentSource, /shouldAcceptQualityRepair\(editorialQuality, repairedQuality\)/u);
 assert.doesNotMatch(simpleAgentSource, /편집 역할 \$\{role\}/u);

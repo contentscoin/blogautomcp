@@ -149,7 +149,16 @@ export interface BrandLinkContentReadiness {
   quality: BrandLinkQualityReport;
 }
 
-export const BRANDLINK_QUALITY_PASS_SCORE = 70;
+/** 2026-09-24 보정: 과도한 재작성 루프를 줄이기 위해 70 → 62. 안전 차단은 그대로 유지한다. */
+export const BRANDLINK_QUALITY_PASS_SCORE = 62;
+
+/**
+ * 총점이 기준 이상일 때도 발행을 막는 품질 카테고리. 상품/여행지 고유 근거가 없으면
+ * 허위 정보 위험이 있으므로 필수로 남기고, 나머지 카테고리 실패는 권고(경고)로 낮춘다.
+ */
+export const BRANDLINK_MANDATORY_QUALITY_CATEGORIES: readonly BrandLinkQualityCategoryKey[] = ["productEvidence"];
+/** 거의 같은 틀의 문장이 이만큼 반복되면 유사문서·저품질 위험이 커서 총점과 무관하게 막는다. */
+export const BRANDLINK_SEVERE_REPETITION_COUNT = 5;
 
 const GENERIC_PRODUCT_TOKENS = new Set([
   "추천",
@@ -444,7 +453,7 @@ function buildQualityReport(input: {
   };
 
   // 4. 문단 다양성 (반복)
-  const repeatLimit = 2;
+  const repeatLimit = 3;
   const diversityFail = repetition.nearDuplicateCount > repeatLimit;
   const diversity: BrandLinkQualityCategory = {
     key: "diversity",
@@ -493,8 +502,17 @@ function buildQualityReport(input: {
     ],
   };
 
-  const categories = [productEvidence, sceneLinkage, specificity, diversity, usefulness, clarity];
-  const score = Math.max(0, Math.min(100, categories.reduce((sum, item) => sum + item.score, 0)));
+  const rawCategories = [productEvidence, sceneLinkage, specificity, diversity, usefulness, clarity];
+  const score = Math.max(0, Math.min(100, rawCategories.reduce((sum, item) => sum + item.score, 0)));
+  // 총점이 기준 이상이면 필수가 아닌 카테고리 실패는 권고로 낮춘다. 점수는 그대로 보고한다.
+  const categories = score >= BRANDLINK_QUALITY_PASS_SCORE
+    ? rawCategories.map((item): BrandLinkQualityCategory =>
+      item.status === "fail"
+        && !BRANDLINK_MANDATORY_QUALITY_CATEGORIES.includes(item.key)
+        && !(item.key === "diversity" && repetition.nearDuplicateCount >= BRANDLINK_SEVERE_REPETITION_COUNT)
+        ? { ...item, status: "warn", notes: [...item.notes, "총점 기준 충족으로 권고 사항으로 처리"] }
+        : item)
+    : rawCategories;
   return {
     quality: {
       score,
@@ -834,11 +852,13 @@ export function getBrandLinkContentReadiness(
       reason: `상품명이 제목/본문에 충분히 반영되지 않았습니다. 확인 토큰: ${coveredProductTokens.join(", ") || "-"}`,
     });
   }
-  if (mainSectionCount < sectionMinimum) {
+  // 템플릿 범위의 80%까지 허용한다(최소 3개).
+  const sectionFloor = Math.max(3, Math.ceil(sectionMinimum * 0.8));
+  if (mainSectionCount < sectionFloor) {
     blockers.push({
       code: "too-few-sections",
       tier: "structure",
-      reason: `본문 섹션이 부족합니다. 현재 ${mainSectionCount}개, 최소 ${sectionMinimum}개가 필요합니다.`,
+      reason: `본문 섹션이 부족합니다. 현재 ${mainSectionCount}개, 최소 ${sectionFloor}개가 필요합니다.`,
     });
   }
   if (totalLength < Math.round(characterMinimum * 0.8)) {
@@ -848,7 +868,8 @@ export function getBrandLinkContentReadiness(
       reason: `본문 분량이 너무 짧습니다. 현재 ${totalLength}자입니다.`,
     });
   }
-  if (input.hashtags.length < 3) {
+  // 해시태그 1~2개는 경고 신호로만 남기고, 하나도 없을 때만 차단한다.
+  if (input.hashtags.length < 1) {
     blockers.push({
       code: "too-few-hashtags",
       tier: "structure",

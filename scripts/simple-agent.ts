@@ -4898,7 +4898,7 @@ async function step2_generatePost(
       brandLink,
       memo: specInput.memo,
       options: {
-        maxRepairRounds: 2,
+        maxRepairRounds: 1,
         allowLocalFallback: PRODUCT_POST_LOCAL_FALLBACK_ENABLED,
         quotationHeaders: NAVER_EDITOR_QUOTATION_ENABLED,
         requireRepresentativeImage: BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE,
@@ -5578,7 +5578,8 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
     try {
       qualityRepair.attempted = true;
       let lastRepairScore = editorialQuality.score;
-      const maximumRepairAttempts = 3;
+      // 2026-09-24 보정: 경고만 남은 원고는 통과하므로 보강은 1회로 끝낸다.
+      const maximumRepairAttempts = 1;
       for (let repairAttempt = 1; repairAttempt <= maximumRepairAttempts && !editorialQuality.canPublish; repairAttempt += 1) {
         reportDraftProgress("qc", `원고 보강 ${repairAttempt}/${maximumRepairAttempts} · ${editorialQuality.reason || editorialQuality.code}`);
         const repairedText = await generateWithAI(

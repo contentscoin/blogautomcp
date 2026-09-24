@@ -27,7 +27,7 @@ export interface ValidateOptions {
 const EMOJI_IN_TITLE = /[\p{Extended_Pictographic}️]/u;
 /** 하드 차단 코드: 허위 체험, URL 노출, 내부 지침 유출, 수수료율, 카테고리 혼입, 제목 상품명, 이미지 부족 */
 const P0_CODES = new Set(["FORBIDDEN_CLAIM", "RAW_LINK", "INTERNAL_LEAK", "COMMISSION_RATE", "CATEGORY_MISMATCH", "TITLE_PRODUCT_TOKEN", "IMAGE_SHORTFALL"]);
-const NEAR_DUPLICATE_THRESHOLD = 0.72;
+const NEAR_DUPLICATE_THRESHOLD = 0.8;
 
 function matchesAny(text: string, patterns: readonly RegExp[]): boolean {
   return patterns.some((pattern) => pattern.test(text));
@@ -243,7 +243,8 @@ export function validateDraft(spec: PostSpec, draft: GeneratedDraft, options: Va
   const qualityFail = gate.quality.categories.some((category) => category.status === "fail") || qualityScore < gate.quality.passScore;
   const hasP0 = targets.some((t) => P0_CODES.has(t.code));
   const hasP1 = targets.some((t) => t.priority === "P1");
-  const status: ValidationReport["status"] = hasP0 ? "BLOCKED" : hasP1 || qualityFail || warns >= 5 ? "NEEDS_REVIEW" : "READY";
+  // 경고 개수만으로는 검토 대기로 보내지 않는다. 판정 기준은 커넥트 게이트와 같다.
+  const status: ValidationReport["status"] = hasP0 ? "BLOCKED" : hasP1 || qualityFail ? "NEEDS_REVIEW" : "READY";
   const failingCategories = gate.quality.categories.filter((category) => category.status === "fail").map((category) => category.label);
   const summary =
     status === "READY"
@@ -263,7 +264,7 @@ export function validateDraft(spec: PostSpec, draft: GeneratedDraft, options: Va
     },
     signals,
     metrics: { totalChars, keywordMentions, keywordMentionsPer1000: Number(per1000.toFixed(2)), imageCount, aiTellScore: aiTellTotal },
-    repair: { strategy: "targeted", maxAttempts: options.maxRepairAttempts ?? 2, targets },
+    repair: { strategy: "targeted", maxAttempts: options.maxRepairAttempts ?? 1, targets },
     summary,
   };
 }

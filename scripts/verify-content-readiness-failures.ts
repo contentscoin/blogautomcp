@@ -47,37 +47,31 @@ try {
   }) });
   const audited = assess(strongerSections);
   assert.equal(audited.score, 91);
-  assert.equal(audited.canPublish, false);
-  assert.equal(audited.code, "low-evidence-density");
+  // 2026-09-24 보정: 총점이 기준 이상이면 장면 연결 부족(2/3)은 권고로 남기고 통과시킨다.
+  assert.equal(audited.canPublish, true, audited.summary);
   assert.deepEqual(audited.blockers, []);
-  assert.deepEqual(audited.qualityFailures!.map((item) => item.key), ["sceneLinkage"]);
-  assert.match(audited.reason || "", /2\/3/);
-  assert.match(audited.summary, /필수 품질 조건 미충족/);
+  assert.deepEqual(audited.qualityFailures, []);
+  assert.equal(audited.quality.categories.find((item) => item.key === "sceneLinkage")?.status, "warn");
 } finally {
   Object.assign(travelContent, { assessTravelReviewSubstance: originalAssess });
 }
 
-// A mandatory language condition must fail even when the aggregate score passes.
+// A language weakness is advisory once the aggregate score passes (2026-09-24 calibration).
 const unlinked = strongerSections.map((section, index) => index === 0
   ? `${section} 조용한 섬인 것 같아요. 항구가 인상적으로 보입니다.` : section);
-const mandatory = assess(unlinked);
-assert.ok(mandatory.score >= mandatory.quality.passScore, mandatory.summary);
-assert.equal(mandatory.canPublish, false);
-assert.equal(mandatory.verdict, "quality");
-assert.notEqual(mandatory.code, "quality-score-below-threshold");
-assert.ok(mandatory.qualityFailures!.length > 0);
-assert.deepEqual(mandatory.qualityFailures, mandatory.quality.categories.filter((item) => item.status === "fail"));
-assert.deepEqual(mandatory.blockers, []);
-assert.match(mandatory.reason || "", /필수 품질 조건 미충족/);
-assert.match(mandatory.summary, /필수 품질 조건 미충족/);
+const advisory = assess(unlinked);
+assert.ok(advisory.score >= advisory.quality.passScore, advisory.summary);
+assert.equal(advisory.canPublish, true, advisory.summary);
+assert.deepEqual(advisory.qualityFailures, []);
+assert.deepEqual(advisory.blockers, []);
+assert.ok(advisory.quality.categories.some((item) => item.status === "warn"), "the weakness is still reported");
 
 // Safety takes precedence even when mandatory quality conditions also fail.
 const unsafe = assess(unlinked.map((section, index) => index === 0 ? section + " 직접 다녀왔습니다." : section));
 assert.equal(unsafe.verdict, "blocked");
 assert.equal(unsafe.code, "unsupported-experience-claim");
 assert.ok(unsafe.blockers.some((item) => item.tier === "safety"));
-assert.ok(unsafe.qualityFailures!.length > 0);
 const short = assess(["대마도 여행", disclosure]);
 assert.equal(short.verdict, "blocked");
 assert.ok(short.blockers.some((item) => item.code === "too-few-sections"));
-console.log("Content readiness: pass, high-score mandatory failure, safety and structural gates passed", mandatory.score);
+console.log("Content readiness: pass, high-score advisory weakness, safety and structural gates passed", advisory.score);
