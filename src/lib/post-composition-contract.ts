@@ -1,3 +1,10 @@
+import {
+  applyTopicTemplateToSections,
+  resolveTopicTemplateId,
+  topicImageSourceLabel,
+  type TopicImageSource,
+} from "../../scripts/lib/topic-templates";
+
 export type BrandConnectKind = "SHOPPING" | "TRAVEL";
 
 export type PostQualityPreset = "STANDARD" | "PREMIUM";
@@ -25,6 +32,10 @@ export interface PostSectionContractV1 {
   minChars: number;
   maxChars: number;
   image: PostImageSlotContract;
+  /** 상품 유형 템플릿이 지정한 이미지 출처(원본·원본 크롭·연출컷). 없으면 기존 판단을 따른다. */
+  imageSource?: TopicImageSource;
+  /** 연출컷 배경 지시. 상품 형태는 잠금 합성으로 보존된다. */
+  promptRecipe?: string;
 }
 
 export interface PostCompositionContractV1 {
@@ -432,10 +443,18 @@ export const TRAVEL_POST_CONTRACT_V1: PostCompositionContractV1 = {
   sections: travelSections,
 };
 
+/**
+ * 커넥트 종류의 렌더 계약. 상품 유형 템플릿 ID를 주면 같은 섹션 ID·글자수·이미지 개수 위에
+ * 유형별 제목 방향·목적·이미지 의도·이미지 출처를 덮어쓴다(검수·이미지 배치 호환 유지).
+ */
 export function getPostCompositionContract(
   connectKind: BrandConnectKind,
+  topicTemplateId?: string | null,
 ): PostCompositionContractV1 {
-  return connectKind === "TRAVEL" ? TRAVEL_POST_CONTRACT_V1 : SHOPPING_POST_CONTRACT_V1;
+  const base = connectKind === "TRAVEL" ? TRAVEL_POST_CONTRACT_V1 : SHOPPING_POST_CONTRACT_V1;
+  const topicId = resolveTopicTemplateId(connectKind, topicTemplateId);
+  if (!topicId) return base;
+  return { ...base, sections: applyTopicTemplateToSections(base.sections, topicId) };
 }
 
 function clean(value: string): string {
@@ -687,7 +706,7 @@ export function resolvePostDocument(options: {
   /** Spec-first 섹션 플랜. 본문 섹션 수와 길이가 같을 때만 적용된다. */
   sectionPlan?: PostSectionPlanV1[] | null;
 }): ResolvedPostDocumentV1 {
-  const contract = getPostCompositionContract(options.connectKind);
+  const contract = getPostCompositionContract(options.connectKind, options.editorial?.topic?.id);
   const qualityPreset = options.qualityPreset || "PREMIUM";
   const experienceMode = options.experienceMode || "AI_ASSISTED_INFORMATION";
   const separated = options.sections.map(value => {
@@ -1020,7 +1039,9 @@ export function formatPostContractForPrompt(contract: PostCompositionContractV1)
     "- 아래 항목은 에디터 이미지 배치를 위한 역할 팔레트입니다. 모든 제목·순서를 복사하지 말고, 분석 결과에 맞춰 필요한 역할을 선택·병합·재배열하세요.",
     ...contract.sections.map(
       (section, index) =>
-        `${index + 1}. 역할=${section.id} | 목적=${section.purpose} | 근거=${section.evidenceRule} | 이미지=${section.image.intent}`,
+        `${index + 1}. 역할=${section.id} | 목적=${section.purpose} | 근거=${section.evidenceRule} | 이미지=${
+          section.imageSource ? `${topicImageSourceLabel(section.imageSource)}: ` : ""
+        }${section.image.intent}${section.imageSource === "staged-ai" && section.promptRecipe ? ` (연출: ${section.promptRecipe})` : ""}`,
     ),
   ].join("\n");
 }

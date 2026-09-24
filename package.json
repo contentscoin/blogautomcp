@@ -37,6 +37,7 @@
     "test:publish-image-cleanup": "npx ts-node --project tsconfig.scripts.json scripts/verify-publish-image-cleanup.ts",
     "test:image-batch-progress": "npx ts-node --project tsconfig.scripts.json scripts/verify-image-batch-progress.ts",
     "test:product-section-image-review": "npx ts-node --project tsconfig.scripts.json scripts/verify-product-section-image-review.ts",
+    "test:topic-templates": "tsx scripts/verify-topic-templates.ts",
     "test:writing-harness": "npx ts-node --project tsconfig.scripts.json scripts/verify-writing-prompt-contract.ts",
     "test:writing-timeouts": "npx ts-node --project tsconfig.scripts.json scripts/verify-writing-timeouts.ts",
     "test:image-timeouts": "npx ts-node --project tsconfig.scripts.json scripts/verify-image-timeout-policy.ts",

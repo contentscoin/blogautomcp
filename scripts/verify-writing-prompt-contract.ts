@@ -162,7 +162,7 @@ for (const kind of ["SHOPPING", "TRAVEL"] as const) {
     const prompt = buildBrowserPrompt("system", "user", context, 8, mode);
     const limit = mode === "primary" ? CHATGPT_DIRECT_PRIMARY_PROMPT_MAX_CHARS : CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS;
     assert.ok(prompt.length <= limit, `${kind}/${mode}: ${prompt.length}/${limit}`);
-    assert.ok(prompt.endsWith(mandatory), "Budgeting must retain the entire shared contract and JSON example");
+    assert.ok(prompt.endsWith(formatWritingPromptContract(contract, { topicDetail: "minimal" })), "Budgeting must retain the entire shared contract and JSON example");
     assert.equal(prompt.split(contract.version).length - 1, 1, "Mandatory rules should appear once");
     browserCases += 1;
   }

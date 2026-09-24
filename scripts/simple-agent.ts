@@ -201,6 +201,7 @@ import {
   shouldRefreshStoredImages,
 } from "./lib/brandlink-image-readiness";
 import { createEditorialSelection, formatEditorialTemplate } from "./lib/editorial-templates";
+import { formatTopicTemplateForPrompt } from "./lib/topic-templates";
 import { applyEditorialEditorStyle } from "./lib/naver-editorial-style";
 import {
   createEditorialBodyStyleState,
@@ -4836,7 +4837,6 @@ async function step2_generatePost(
     maximumBodySectionCount,
     Math.max(minimumBodySectionCount, adaptiveEditorialProfile.sectionRange.preferred),
   );
-  const compositionPromptBlock = formatPostContractForPrompt(compositionContract);
   const adaptiveEditorialPromptBlock = formatAdaptiveEditorialHarnessForPrompt(connectKind);
   const writingContract = createWritingPromptContract({
     kind: connectKind,
@@ -4850,6 +4850,16 @@ async function step2_generatePost(
       ? BRANDLINK_EXPERIENCE_NOTES : "",
   });
   const mandatoryWritingPromptBlock = formatWritingPromptContract(writingContract);
+  // 상품 유형 템플릿: 같은 섹션 ID 위에 유형별 목적·이미지 의도·이미지 출처를 덮어쓴 역할 팔레트.
+  const topicSelection = writingContract.editorial?.topic;
+  if (topicSelection) console.log(`   🧩 상품 유형 템플릿: ${topicSelection.id} (${topicSelection.reason})`);
+  const compositionPromptBlock = [
+    formatPostContractForPrompt(getPostCompositionContract(connectKind, topicSelection?.id)),
+    // Codex/API 경로는 브라우저 예산 제한이 없으므로 섹션 흐름·체험 문장 자리까지 담은 전체 블록을 넣는다.
+    topicSelection
+      ? formatTopicTemplateForPrompt(topicSelection, { experienceMode: BRANDLINK_EXPERIENCE_MODE })
+      : "",
+  ].filter(Boolean).join("\n\n");
   const experiencePromptBlock =
     BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE"
       ? `[검증된 실제 체험 메모]\n${BRANDLINK_EXPERIENCE_NOTES}\n- 위 메모에 명시된 체험 사실만 1인칭으로 표현하고 나머지는 정보형으로 씁니다.`
@@ -5153,7 +5163,7 @@ ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일
    ${BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE"
      ? "- 제목의 체험 표현은 제공된 실제 체험 메모로 증명되는 범위에서만 사용하세요."
      : "- 실제 체험 증빙이 없으므로 제목에 후기, 내돈내산, 실사용, 직접 써본, 직접 다녀온 표현을 넣지 마세요."}
-   - "완벽 가이드", "총정리", "꿀팁" 같은 낚시성 문구 금지 (네이버 스팸 기준).
+   - ${isTravel ? '"완벽 가이드", "총정리", "핵꿀팁", "꿀팁 Zip" 같은 낚시성 문구 금지. 여행 글은 근거 있는 현지 팁을 담을 때 "꿀팁" 한 단어는 사용할 수 있습니다.' : '"완벽 가이드", "총정리", "꿀팁" 같은 낚시성 문구 금지 (네이버 스팸 기준).'}
    예: ${isTravel ? '"타이베이 단수이 여행, 노을과 골목을 걷는 4일"' : '"아기비데 추천 | 해피달링 워터탭 선택 기준"'}
 
 2. 본문은 공유 필수 작성 계약의 섹션·분량 범위 안에서 근거 밀도에 따라 자유롭게 구성

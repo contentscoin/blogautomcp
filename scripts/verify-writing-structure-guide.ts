@@ -90,7 +90,7 @@ for (const kind of ["SHOPPING", "TRAVEL"] as const) {
   const prompt = composeBudgetedWritingPrompt({ contract, prefix: "작성 요청", suffix: "수정에도 적용",
     evidence, maxChars: 6000 });
   assert.ok(prompt.length <= 6000);
-  assert.ok(prompt.endsWith(mandatory), "Evidence truncation retains style, memo, and JSON contract");
+  assert.ok(prompt.endsWith(formatWritingPromptContract(contract, { topicDetail: "minimal" })), "Evidence truncation retains style, memo, and JSON contract");
   assert.ok(prompt.includes("확인된 원본 근거"), "Guidance must not crowd out all evidence");
   const actualUserPrompt = vm.runInNewContext(ts.transpileModule(`(${userInitializer.getText(ast)})`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },

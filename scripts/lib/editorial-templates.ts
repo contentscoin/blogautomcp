@@ -1,3 +1,5 @@
+import { getTopicTemplate, selectTopicTemplate, type TopicTemplateSelection } from "./topic-templates";
+
 export type EditorialKind = "SHOPPING" | "TRAVEL";
 export const EDITORIAL_TEMPLATES = {
   "shopping-problem": { kind: "SHOPPING", persona: "생활 문제를 짚는 실용 편집자", flow: "불편과 사용 조건 → 관련 기능의 근거 → 한계와 맞는 사용자", color: "#365744" },
@@ -120,6 +122,28 @@ const sectionDesignByTemplate: Record<EditorialTemplateId, Record<string, Editor
   },
 };
 
+/**
+ * 이 편집 템플릿들은 상세 근거(일차별 일정·포함/불포함 조건·옵션 비교)가 있어야만 고른다.
+ * 상품명만으로 추정한 유형 기본값으로는 선택하지 않는다(홍보 문구 오인 방지).
+ */
+const EVIDENCE_REQUIRED_EDITORIAL_TEMPLATES = new Set<EditorialTemplateId>([
+  "travel-itinerary",
+  "travel-conditions",
+  "shopping-comparison",
+]);
+
+/** 상세 근거가 특정 편집 템플릿을 가리키지 않으면 상품 유형 템플릿의 기본 편집 템플릿을 쓴다. */
+function topicDefaultEditorialTemplate(kind: EditorialKind, product: EditorialProduct): EditorialTemplateId | null {
+  if (!product.name && !product.description && !product.features?.length) return null;
+  const candidate = getTopicTemplate(selectEditorialTopic(kind, product).id).editorialTemplateId;
+  if (EDITORIAL_TEMPLATES[candidate]?.kind !== kind || EVIDENCE_REQUIRED_EDITORIAL_TEMPLATES.has(candidate)) return null;
+  return candidate;
+}
+
+export function selectEditorialTopic(kind: EditorialKind, product: EditorialProduct = {}): TopicTemplateSelection {
+  return selectTopicTemplate(kind, { name: product.name, description: product.description, features: product.features });
+}
+
 function matchedSelection(kind: EditorialKind, product: EditorialProduct) {
   const text = [product.description, ...(product.features || [])].filter(Boolean).join("\n");
   const match = (re: RegExp) => text.match(re)?.[0];
@@ -128,13 +152,13 @@ function matchedSelection(kind: EditorialKind, product: EditorialProduct) {
   if (kind === "TRAVEL") {
     if ((signal = match(/\d+\s*일차[^\n]{0,60}/u))) id = "travel-itinerary";
     else if ((signal = match(/불포함|호텔\s*미확정|숙박\s*미확정|취소\s*(?:수수료|규정)|선택관광|동반자|어린이\s*요금/u))) id = "travel-conditions";
-    else id = "travel-scenic";
+    else id = topicDefaultEditorialTemplate(kind, product) || "travel-scenic";
   } else {
     if ((signal = match(/(?:옵션|규격|구성)[^\n]{0,30}(?:\d|차이|선택)/u))) id = "shopping-comparison";
     else if ((signal = match(/소재|작동|구조|관리|세척/u))) id = "shopping-detail";
-    else id = "shopping-problem";
+    else id = topicDefaultEditorialTemplate(kind, product) || "shopping-problem";
   }
-  return { id, reason: signal ? `상세 근거 일치: ${signal}` : "구체적인 상세 선택 근거 부족: 보수적 기본값" };
+  return { id, reason: signal ? `상세 근거 일치: ${signal}` : "구체적인 상세 선택 근거 부족: 상품 유형 템플릿 기본값" };
 }
 
 /** Deterministic product-evidence selection, never based on invented experience or randomness. */
@@ -215,6 +239,8 @@ export function editorialEditorPolicy(id: EditorialTemplateId) {
 export function createEditorialSelection(kind: EditorialKind, product: EditorialProduct = {}) {
   const { id, reason } = matchedSelection(kind, product);
   return { id, reason,
+    /** 상품 유형 템플릿. 렌더 계약 오버레이와 작성 프롬프트가 같은 값을 쓴다. */
+    topic: selectEditorialTopic(kind, product),
     policy: editorialEditorPolicy(id), application: "pending" as "pending" | "partial",
     observedControls: [] as string[],
     failures: {} as Record<string, string>,

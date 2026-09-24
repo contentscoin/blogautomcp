@@ -1,7 +1,8 @@
 import { composeBudgetedChatGptPrompt } from "./chatgpt-direct-prompt";
 import { isMeaningfulProductEvidenceFeature } from "./product-editorial-plan";
 import { formatWritingStructureGuide } from "./writing-structure-guide";
-import { EditorialProduct, EditorialTemplateId, EditorialSelection, createEditorialSelection, formatEditorialTemplate, selectEditorialTemplate } from "./editorial-templates";
+import { EditorialProduct, EditorialTemplateId, EditorialSelection, createEditorialSelection, formatEditorialTemplate } from "./editorial-templates";
+import { formatTopicTemplateForPrompt } from "./topic-templates";
 
 export interface WritingPromptContract {
   version: "writing-prompt-contract/v1";
@@ -74,11 +75,12 @@ export function createWritingPromptContract(input: {
   if (!Number.isInteger(input.hashtagCount) || input.hashtagCount < 3 || input.hashtagCount > 10) {
     throw new Error("Invalid writing contract hashtag count");
   }
+  const editorial = createEditorialSelection(input.kind, input.product);
   return {
     version: "writing-prompt-contract/v1",
     kind: input.kind,
-    editorialTemplateId: selectEditorialTemplate(input.kind, input.product),
-    editorial: createEditorialSelection(input.kind, input.product),
+    editorialTemplateId: editorial.id,
+    editorial,
     sections: { min: input.minimumSections, max: input.maximumSections },
     characters: { ...input.targetCharacters },
     sentences: { min: input.kind === "TRAVEL" ? 5 : 4, max: 6 },
@@ -105,7 +107,10 @@ export function getWritingOutputExample(contract: WritingPromptContract) {
 }
 
 /** Mandatory rules are shared by API/Codex, exported context, and browser recovery. */
-export function formatWritingPromptContract(contract: WritingPromptContract): string {
+export function formatWritingPromptContract(
+  contract: WritingPromptContract,
+  options: { topicDetail?: "summary" | "minimal" } = {},
+): string {
   return [
     `[공유 필수 작성 계약 · ${contract.version}]`,
     "- 관측 분포와 선택 렌즈는 아래 필수 기준을 완화하지 않습니다. 기존 제목·사실성·품질 정책도 지킵니다.",
@@ -134,6 +139,14 @@ export function formatWritingPromptContract(contract: WritingPromptContract): st
     "- title, evidenceFacts, sections, hashtags 필드를 가진 JSON 하나만 출력합니다. 코드블록·작업 설명은 넣지 않습니다.",
     formatWritingStructureGuide(contract.kind),
     formatEditorialTemplate(contract.kind, contract.editorialTemplateId),
+    contract.editorial?.topic
+      // 섹션별 흐름·이미지 출처는 렌더 계약 팔레트(오버레이 적용)가 담는다. 여기서는 예산 안의 요약만 넣는다.
+      ? formatTopicTemplateForPrompt(contract.editorial.topic, {
+        experienceMode: contract.verifiedExperienceNotes ? "VERIFIED_EXPERIENCE" : "AI_ASSISTED_INFORMATION",
+        includeFlow: false,
+        minimal: options.topicDetail === "minimal",
+      })
+      : "",
     formatDraftMemoRequirements(contract),
     "- 다음은 필드와 섹션 한 개의 형식 예시입니다. 실제 sections 개수와 전체 분량은 위 기준을 따릅니다.",
     JSON.stringify(getWritingOutputExample(contract)),
@@ -150,7 +163,8 @@ export function composeBudgetedWritingPrompt(input: {
 }): string {
   return composeBudgetedChatGptPrompt({
     ...input,
-    suffix: [input.suffix, formatWritingPromptContract(input.contract)].filter(Boolean).join("\n\n"),
+    // 브라우저 직접 프롬프트는 글자 예산이 빡빡하므로 상품 유형 템플릿은 최소 요약만 넣는다.
+    suffix: [input.suffix, formatWritingPromptContract(input.contract, { topicDetail: "minimal" })].filter(Boolean).join("\n\n"),
   });
 }
 
