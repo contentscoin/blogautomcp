@@ -12,14 +12,23 @@ export function brandPostSectionSlotId(sectionId: string, ordinal: number): stri
   return `${sectionId}:image:${Math.max(1, Math.floor(ordinal))}`;
 }
 
+/**
+ * 상품 유형 템플릿이 정한 섹션 이미지 출처. 값이 있으면 문구 패턴 대신 이 값으로 판단한다.
+ * (seller-original: 원본 대표·구성 사진, seller-crop: 상세페이지 근거 구간, staged-ai: 연출컷)
+ */
+export type BrandPostImageSourceHint = "seller-original" | "seller-crop" | "staged-ai" | "editorial-card" | "none";
+
 /** Scene illustration is not evidence of a feature, measurement or actual use. */
-export function isShoppingLifestyleImage(target: { imageIntent: string }): boolean {
+export function isShoppingLifestyleImage(target: { imageIntent: string; imageSource?: BrandPostImageSourceHint }): boolean {
+  if (target.imageSource) return target.imageSource === "staged-ai";
   const intent = normalizeBrandPostImageIntent(target.imageIntent);
   return /AI 연출 이미지/iu.test(intent) || allowsOriginalShoppingScene(target) || /추천 사용 장면/u.test(intent);
 }
 
 /** An original must show the requested scene, not merely a generic packshot. */
-export function allowsOriginalShoppingScene(target: { imageIntent: string }): boolean {
+export function allowsOriginalShoppingScene(target: { imageIntent: string; imageSource?: BrandPostImageSourceHint }): boolean {
+  // A staged-cut slot also accepts a verified original that shows the same scene.
+  if (target.imageSource) return target.imageSource === "staged-ai";
   return /제품 원형을 보존한 연출컷 또는 원본 사용 장면/u.test(normalizeBrandPostImageIntent(target.imageIntent));
 }
 
@@ -27,7 +36,12 @@ export function allowsOriginalShoppingScene(target: { imageIntent: string }): bo
 export function allowsGenericBrandPostProductPhoto(target: {
   sectionTitle: string;
   imageIntent: string;
+  imageSource?: BrandPostImageSourceHint;
 }): boolean {
+  // Template-designated original slots (overview, package, representative photo)
+  // accept a plain product photo; detail-crop slots require feature evidence.
+  if (target.imageSource === "seller-original") return true;
+  if (target.imageSource === "seller-crop") return false;
   const title = normalizeBrandPostImageIntent(target.sectionTitle);
   const intent = normalizeBrandPostImageIntent(target.imageIntent);
   // Measurements can identify a product in an overview title ("532ml 전체 구성").

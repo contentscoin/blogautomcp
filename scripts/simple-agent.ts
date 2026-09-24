@@ -202,6 +202,8 @@ import {
 } from "./lib/brandlink-image-readiness";
 import { createEditorialSelection, formatEditorialTemplate } from "./lib/editorial-templates";
 import { formatTopicTemplateForPrompt } from "./lib/topic-templates";
+import { readDetailImagesWithVision } from "./lib/detail-vision-reader";
+import { buildSearchDemandQueries, collectSearchDemand, formatSearchDemandForPrompt } from "./lib/search-demand";
 import {
   assessSiblingOverlap,
   formatPostAngleForPrompt,
@@ -414,6 +416,13 @@ const BRANDLINK_EXPERIENCE_MODE: PostExperienceMode =
     ? "VERIFIED_EXPERIENCE"
     : "AI_ASSISTED_INFORMATION";
 const BRANDLINK_EXPERIENCE_NOTES = (process.env.BRANDLINK_EXPERIENCE_NOTES || "").trim().slice(0, 4000);
+// 이미지로만 된 상세페이지는 OCR 다음 단계로 비전 판독을 한다. 끄려면 DETAIL_VISION_READ_ENABLED=false.
+// 네이버 자동완성 검색 수요 수집. 끄려면 SEARCH_DEMAND_ENABLED=false.
+const SEARCH_DEMAND_ENABLED = (process.env.SEARCH_DEMAND_ENABLED || "true").toLowerCase() !== "false";
+// 쇼핑 원고의 공식 정보 교차 확인용 웹 리서치. 끄려면 SHOPPING_WEB_RESEARCH_ENABLED=false.
+const SHOPPING_WEB_RESEARCH_ENABLED = (process.env.SHOPPING_WEB_RESEARCH_ENABLED || "true").toLowerCase() !== "false";
+const DETAIL_VISION_READ_ENABLED = (process.env.DETAIL_VISION_READ_ENABLED || "true").toLowerCase() !== "false";
+const DETAIL_VISION_MAX_IMAGES = parseBoundedInteger(process.env.DETAIL_VISION_MAX_IMAGES, 8, 1, 16);
 // MCP OAuth 경로에서는 ChatGPT 대화가 원고를 생성하고 PC는 검증·패키징만 한다.
 // context 출력과 generated draft 입력은 파일로 전달해 Windows 환경변수 길이 제한과
 // 원고가 프로세스 목록/로그에 노출되는 문제를 피한다.
@@ -706,8 +715,40 @@ async function enrichShoppingSourceFeatures(name: string, description: string, f
     const ocr = await readSellerDetailOcrFacts(sellerDetailImagePaths);
     collected.push(...ocr.facts);
     console.log(`   🔎 판매자 상세 OCR: ${ocr.status}, ${ocr.scannedImageCount}구간 검사, 근거 ${ocr.facts.length}개 (${ocr.imagePaths.length}구간에서 확인)`);
+    // 상세페이지가 이미지로만 되어 있어 OCR로도 근거가 부족하면 비전 모델로 이미지 속 글자를 읽는다.
+    const afterOcr = sanitizeSellerEvidenceFeatures(collected, name);
+    if (DETAIL_VISION_READ_ENABLED &&
+        !hasSufficientProductReviewEvidence({ productName: name, description, features: afterOcr, targetSectionCount: 11 })) {
+      collected.push(...await readDetailFactsWithVision("SHOPPING", name, sellerDetailImagePaths));
+    }
   }
   return sanitizeSellerEvidenceFeatures(collected, name);
+}
+
+/**
+ * 상세 이미지 비전 판독. 전사에 근거한 줄만 채택하고, 기존 추출기로 형식화한 사실을 함께 돌려준다.
+ * 실패해도 원고 작성을 막지 않는다(기존 근거 게이트가 최종 판단).
+ */
+async function readDetailFactsWithVision(kind: "SHOPPING" | "TRAVEL", name: string, imagePaths: string[]): Promise<string[]> {
+  const report = await readDetailImagesWithVision({
+    kind,
+    productName: name,
+    imagePaths,
+    maxImages: DETAIL_VISION_MAX_IMAGES,
+    run: (options) => runCodexDraft({
+      systemPrompt: options.systemPrompt,
+      userPrompt: options.userPrompt,
+      imagePaths: options.imagePaths,
+      maxImages: options.maxImages,
+      preserveImageOrder: options.preserveImageOrder,
+    }),
+  });
+  console.log(`   👁️ 상세 이미지 판독: ${report.status}, ${report.imageCount}구간, 채택 ${report.acceptedFacts.length}줄 / 제외 ${report.rejectedFacts.length}줄${report.error ? ` (${report.error})` : ""}`);
+  if (report.acceptedFacts.length === 0) return [];
+  const accepted = report.acceptedFacts.map((line) => isolateSellerEvidenceText(line, 200)).filter(Boolean);
+  return kind === "SHOPPING"
+    ? [...extractExplicitProductFacts(accepted.join("\n"), "ocr"), ...accepted]
+    : accepted.map((line) => `상세 이미지 확인: ${line}`);
 }
 
 function sanitizeTravelPageResearch(research: TravelPageResearch | null | undefined): TravelPageResearch | null {
@@ -4642,6 +4683,10 @@ async function step1_getProductInfo(
     connectKind === "TRAVEL" ? TRAVEL_BODY_IMAGE_MAX : SHOPPING_BODY_IMAGE_MAX,
   );
 
+  if (connectKind === "TRAVEL" && DETAIL_VISION_READ_ENABLED && detailImagePaths.length > 0) {
+    // 여행 상세의 일정표·포함/불포함·유의사항 이미지를 판독해 보조 근거로 붙인다(일정 순서는 __NEXT_DATA__가 우선).
+    sanitizedFeatures.push(...await readDetailFactsWithVision("TRAVEL", productName, detailImagePaths));
+  }
   if (connectKind === "SHOPPING") {
     sanitizedFeatures = await enrichShoppingSourceFeatures(productName, description, sanitizedFeatures, sellerDetailImagePaths);
     if (!hasSufficientProductReviewEvidence({ productName, description, features: sanitizedFeatures, targetSectionCount: 11 })) {
@@ -4782,7 +4827,10 @@ async function generateWithAI(
         timeoutMs: CODEX_DRAFT_TIMEOUT_MS,
         model: CODEX_DRAFT_MODEL || undefined,
         reasoningEffort: CODEX_DRAFT_REASONING_EFFORT,
-        researchMode: chatgptContext?.connectKind === "TRAVEL" ? "cached" : "disabled",
+        // 원고 작성 호출(상품 컨텍스트가 있을 때)만 웹 리서치를 쓴다. 쇼핑은 같은 모델의 공식 정보 확인으로 제한.
+        researchMode: chatgptContext?.connectKind === "TRAVEL" || (chatgptContext?.connectKind === "SHOPPING" && SHOPPING_WEB_RESEARCH_ENABLED)
+          ? "cached" : "disabled",
+        researchScope: chatgptContext?.connectKind === "SHOPPING" ? "SHOPPING" : "TRAVEL",
         onProgress: (message) => console.log(`   ✦ ${message}`),
       });
     } catch (error) {
@@ -4882,8 +4930,14 @@ async function step2_generatePost(
   // 상품 유형 템플릿: 같은 섹션 ID 위에 유형별 목적·이미지 의도·이미지 출처를 덮어쓴 역할 팔레트.
   const topicSelection = writingContract.editorial?.topic;
   if (topicSelection) console.log(`   🧩 상품 유형 템플릿: ${topicSelection.id} (${topicSelection.reason})`);
+  // 검색 수요(네이버 자동완성): FAQ·질문형 소제목 후보. 제출 원고 검증 모드에서는 호출하지 않는다.
+  const searchDemand = SEARCH_DEMAND_ENABLED && !BRANDLINK_GENERATED_DRAFT_PATH
+    ? await collectSearchDemand(buildSearchDemandQueries(connectKind, product.name)).catch(() => [])
+    : [];
+  if (searchDemand.length) console.log(`   🔍 검색 수요: ${searchDemand.slice(0, 5).join(", ")}${searchDemand.length > 5 ? " …" : ""}`);
   const compositionPromptBlock = [
     formatPostContractForPrompt(getPostCompositionContract(connectKind, topicSelection?.id)),
+    formatSearchDemandForPrompt(connectKind, searchDemand),
     // Codex/API 경로는 브라우저 예산 제한이 없으므로 섹션 흐름·체험 문장 자리까지 담은 전체 블록을 넣는다.
     topicSelection
       ? formatTopicTemplateForPrompt(topicSelection, { experienceMode: BRANDLINK_EXPERIENCE_MODE })

@@ -39,6 +39,7 @@
     "test:product-section-image-review": "npx ts-node --project tsconfig.scripts.json scripts/verify-product-section-image-review.ts",
     "test:topic-templates": "tsx scripts/verify-topic-templates.ts",
     "test:post-angles": "tsx scripts/verify-post-angles.ts",
+    "test:detail-vision": "tsx scripts/verify-detail-vision-and-research.ts",
     "test:writing-harness": "npx ts-node --project tsconfig.scripts.json scripts/verify-writing-prompt-contract.ts",
     "test:writing-timeouts": "npx ts-node --project tsconfig.scripts.json scripts/verify-writing-timeouts.ts",
     "test:image-timeouts": "npx ts-node --project tsconfig.scripts.json scripts/verify-image-timeout-policy.ts",

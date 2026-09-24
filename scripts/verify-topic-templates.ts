@@ -7,6 +7,8 @@ import {
   resolvePostDocument,
 } from "../src/lib/post-composition-contract";
 import { createEditorialSelection } from "./lib/editorial-templates";
+import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene, isShoppingLifestyleImage } from "../src/lib/brand-post-image-evidence";
+import { buildBrandPostImagePrompt } from "../src/lib/brand-post-image-generation";
 import {
   SHOPPING_SECTION_ORDER,
   TOPIC_TEMPLATES,
@@ -122,5 +124,29 @@ assert.ok(document.sections.some((section) => section.imageIntent.endsWith(TOPIC
 for (const node of document.renderNodes) {
   if (node.kind === "image") assert.doesNotMatch(node.altText, /연출:|상세페이지 근거 구간\(|\[/u, "alt text carries no internal directions");
 }
+
+// 7. Image classifiers honour the template's explicit image source before intent wording.
+const staged = { imageIntent: "추천 사용 환경 연출컷", imageSource: "staged-ai" as const };
+assert.equal(isShoppingLifestyleImage(staged), true, "staged cut is a lifestyle slot even without legacy wording");
+assert.equal(allowsOriginalShoppingScene(staged), true, "a verified original scene may fill a staged slot");
+assert.equal(allowsGenericBrandPostProductPhoto({ sectionTitle: "성분에서 확인한 것", imageIntent: "성분표 근거 구간", imageSource: "seller-crop" }), false,
+  "detail-crop slots need feature evidence, not a packshot");
+assert.equal(isShoppingLifestyleImage({ imageIntent: "성분표 근거 구간", imageSource: "seller-crop" }), false);
+assert.equal(allowsGenericBrandPostProductPhoto({ sectionTitle: "어떤 제품인지부터", imageIntent: "전체 구성 원본 사진", imageSource: "seller-original" }), true);
+assert.equal(isShoppingLifestyleImage({ imageIntent: "AI 연출 이미지: 추천 환경의 공간 배치" }), true, "legacy packages keep wording rules");
+const staged7 = resolvePostDocument({
+  editorial: createEditorialSelection("SHOPPING", { name: "브리즈온 BLDC 헤어 드라이기" }),
+  connectKind: "SHOPPING", title: "헤어 드라이기 브리즈온 정리",
+  sections: Array.from({ length: 7 }, (_, index) => `소제목 ${index + 1}\n\n브리즈온 드라이기 설명 ${index + 1}입니다.`),
+  hashtags: ["드라이기"], imagePaths: [], connectUrl: "https://naver.me/fixture",
+});
+assert.equal(staged7.sections[0]!.imageSource, "staged-ai");
+assert.ok(staged7.sections[0]!.promptRecipe, "staging recipe persists for image generation");
+assert.equal(staged7.sections.at(-1)!.imageSource, "seller-original", "the verdict slot maps to the last contract section");
+assert.ok(staged7.sections.every((section) => !/연출:/u.test(section.imageIntent)));
+const stagingPrompt = buildBrandPostImagePrompt({ connectKind: "SHOPPING", productName: "브리즈온", sectionTitle: "사용감",
+  imageIntent: staged7.sections[0]!.imageIntent, role: "body", stagingRecipe: staged7.sections[0]!.promptRecipe });
+assert.match(stagingPrompt, /Staging direction/u);
+assert.match(stagingPrompt, /Generate the environment only/u, "staging never overrides the locked-product rule");
 
 console.log(`PASS: topic templates (${Object.keys(TOPIC_TEMPLATES).length}), selection, contract overlay, editorial fallback, prompts, render document`);

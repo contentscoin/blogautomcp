@@ -88,6 +88,10 @@ export interface ResolvedPostSectionV1 {
   /** 명시적 플랜 또는 자유형 섹션의 이미지 하한·상한. 둘 다 없는 레거시는 읽을 때 정규화한다. */
   imageMin?: number;
   imageMax?: number;
+  /** 상품 유형 템플릿이 정한 이미지 출처. 이미지 분류기는 문구 패턴보다 이 값을 우선한다. */
+  imageSource?: TopicImageSource;
+  /** 연출컷 배경 지시(생성 프롬프트 전용, 대체텍스트에 쓰지 않음) */
+  promptRecipe?: string;
 }
 
 /**
@@ -570,6 +574,15 @@ function freeformImageRules(
     // to the section's semantic role so a text-only revision is a cache hit.
     imageIntent: `${section.title}: ${contractSection?.image.intent || "본문 주제를 설명하는 서로 다른 실사 장면"}`,
     headingStyle: contractSection?.headingStyle || ("sectionTitle" as const),
+    ...topicImageFields(contractSection),
+  };
+}
+
+/** 템플릿 오버레이가 붙인 이미지 출처·연출 지시를 렌더 문서 섹션에 보존한다(없으면 생략). */
+function topicImageFields(contractSection?: PostSectionContractV1): Pick<ResolvedPostSectionV1, "imageSource" | "promptRecipe"> {
+  return {
+    ...(contractSection?.imageSource ? { imageSource: contractSection.imageSource } : {}),
+    ...(contractSection?.promptRecipe ? { promptRecipe: contractSection.promptRecipe } : {}),
   };
 }
 
@@ -756,6 +769,8 @@ export function resolvePostDocument(options: {
         headingStyle: planned.headingStyle || "sectionTitle",
         imageMin: Math.max(0, planned.imageMin),
         imageMax: Math.max(planned.imageMin, planned.imageMax),
+        // Spec-first plans carry their own role-specific intents; positional
+        // template sources would mislabel them, so none are attached here.
       };
     }
     return {

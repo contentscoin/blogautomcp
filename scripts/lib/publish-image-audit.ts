@@ -132,7 +132,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
       candidates.push({ nodeIndex, sectionId: node.sectionId, assetPath: node.assetPath, snapshot, sha256, role: node.role,
         sectionTitle: thumbnail ? "Thumbnail" : sectionTitle, sectionBody,
         imageIntent: section?.imageIntent || "Selected product overview with title overlay",
-        allowProductPhoto: thumbnail || isShoppingLifestyleImage(section!) || allowsGenericBrandPostProductPhoto({ sectionTitle, imageIntent: section!.imageIntent }),
+        allowProductPhoto: thumbnail || isShoppingLifestyleImage(section!) || allowsGenericBrandPostProductPhoto({ sectionTitle, imageIntent: section!.imageIntent, imageSource: section!.imageSource }),
       });
       result.images.push({ nodeIndex, assetPath: node.assetPath, sha256 });
     }

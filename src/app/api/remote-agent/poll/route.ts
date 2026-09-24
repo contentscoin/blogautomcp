@@ -499,6 +499,7 @@ function safeImageSlots(preview: DraftPreview, manifest: DraftManifest): Array<R
             bodyExcerpt: section ? section.body.join(" ").slice(0, 480) : "",
             adjacentSectionTitles: v2?.composition.sections.filter((candidate) => candidate.id !== sectionId).map((candidate) => candidate.title),
             role: "body",
+            stagingRecipe: section?.promptRecipe,
           })
         : null,
     };
