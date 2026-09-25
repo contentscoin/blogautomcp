@@ -16,8 +16,11 @@ import { spawn } from "node:child_process";
 import {
   createLockedProductEditorialScene,
   createLockedProductThumbnailOnBackground,
+  createOriginalProductPhotoThumbnail,
   extractLockedProductPng,
 } from "../../scripts/lib/product-image-lock";
+import { createShoppingFactCard, selectShoppingFactCardFacts, SHOPPING_FACT_CARD_LIMIT } from "../../scripts/lib/shopping-fact-card";
+import { brandPostQualitySourceFromSnapshot } from "./brand-post-quality-source";
 import { buildProductThumbnailCopy } from "../../scripts/lib/product-thumbnail";
 import { buildTravelThumbnailCopy } from "../../scripts/lib/travel-content";
 import { createTravelEditorialThumbnail } from "../../scripts/lib/travel-thumbnail";
@@ -1053,6 +1056,38 @@ export async function generateBrandPostImages(options: {
       }
       return safe;
     };
+    // No separable cutout means no staged scene. Instead of leaving the slot empty, frame the whole
+    // verified seller photo on a flat card beside verified facts (never on a generated background).
+    const factCardDir = path.join(getBrandPostPackageDir(options.manifest.brandLinkId), "image-generation-work", "fact-cards");
+    const factCardFacts = options.manifest.sourceSnapshot
+      ? brandPostQualitySourceFromSnapshot(options.manifest.sourceSnapshot).sourceFeatures : [];
+    const usedCardFacts = new Set<string>();
+    let factCardCount = (options.manifest.imageAssets || [])
+      .filter(asset => asset.provenance === "EDITORIAL_CARD" && asset.creationMethod === "local-composite").length;
+    const publishFactCard = async (index: number, target: ResolvedImageTarget, sources: string[]): Promise<boolean> => {
+      if (generatedRequired || sources.length === 0) return false;
+      try {
+        let outputPath: string;
+        if (target.role === "hero") {
+          const copy = buildProductThumbnailCopy(options.manifest.title, options.productName);
+          outputPath = (await createOriginalProductPhotoThumbnail({ sourcePath: sources[0], outputDir: factCardDir,
+            productName: copy.productNameLabel, headline: copy.headline, subline: copy.subline, style: "shopping-bold" })).outputPath;
+        } else {
+          if (factCardCount >= SHOPPING_FACT_CARD_LIMIT) return false;
+          const facts = selectShoppingFactCardFacts({ facts: factCardFacts, sectionText: `${target.sectionTitle}\n${target.bodyExcerpt}`, used: usedCardFacts });
+          if (facts.length < 2) return false;
+          outputPath = (await createShoppingFactCard({ sourcePath: sources[factCardCount % sources.length], title: target.sectionTitle,
+            facts, variant: factCardCount, outputDir: factCardDir })).outputPath;
+          facts.forEach(fact => usedCardFacts.add(fact));
+          factCardCount += 1;
+        }
+        await publish(index, { ...baseResult(index), sectionId: target.sectionId, imageIntent: target.imageIntent,
+          generatedPath: outputPath, provenance: "EDITORIAL_CARD", creationMethod: "local-composite", remoteGenerated: false });
+        return true;
+      } catch {
+        return false;
+      }
+    };
     const targetSources = [...new Set(targets.flatMap(target => target.sourcePath ? [target.sourcePath] : []))];
     const safeTargetSources = new Set(await segmentable(targetSources));
     const unsafeTargetIndexes: number[] = [];
@@ -1061,7 +1096,7 @@ export async function generateBrandPostImages(options: {
     }
     for (const index of [...unsafeTargetIndexes].reverse()) {
       const requestIndex = requestIndexes[index];
-      await publish(requestIndex, {
+      if (!await publishFactCard(requestIndex, targets[index], [targets[index].sourcePath!])) await publish(requestIndex, {
         ...baseResult(requestIndex),
         error: "PRODUCT_CUTOUT_REQUIRED: 현재 기능 파트에 검증된 상품 원본은 있으나 안전하게 분리할 수 없습니다.",
       });
@@ -1078,10 +1113,13 @@ export async function generateBrandPostImages(options: {
       const error = sourceError || (sourcePalette.verifiedCount > 0
         ? "PRODUCT_CUTOUT_REQUIRED: 검증된 상품 사진은 있으나 안전하게 분리 가능한 원본이 없습니다. 전체 사각형 사진은 생성 배경에 합성하지 않았습니다."
         : "PRODUCT_SOURCE_REQUIRED: 공지·안내판을 제외한 검증 가능한 상품 원본 사진을 찾지 못했습니다.");
+      const verifiedWholePhotos = [...sourcePalette.fresh, ...sourcePalette.reusable];
       for (let index = targets.length - 1; index >= 0; index -= 1) {
         if (targets[index].sourcePath) continue;
         const requestIndex = requestIndexes[index];
-        await publish(requestIndex, { ...baseResult(requestIndex), error });
+        if (sourcePalette.verifiedCount === 0 || !await publishFactCard(requestIndex, targets[index], verifiedWholePhotos)) {
+          await publish(requestIndex, { ...baseResult(requestIndex), error });
+        }
         targets.splice(index, 1);
         requestIndexes.splice(index, 1);
       }

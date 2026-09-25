@@ -111,6 +111,11 @@ export function planQualityConvergence(input: {
   }
 
   const categories = failedCategories(current);
+  // Nothing text-repairable: no blocker, no failed category and a passing score.
+  // A lone failing signal must not start a rewrite that has nothing to fix.
+  if (current.blockers.length === 0 && categories.length === 0 && current.quality.score >= current.quality.passScore) {
+    return { action: "complete", shouldGenerateText: false, failureSignature, reason: "차단 항목과 실패 품질 항목이 없어 원고 품질 게이트를 통과했습니다.", targets: [] };
+  }
   const evidence = current.quality.sourceEvidence;
   const sourceInsufficient = (evidence?.level === "sparse" || evidence?.level === "travel") && evidence.sufficient === false &&
     categories.some((category) => category.key === "productEvidence");

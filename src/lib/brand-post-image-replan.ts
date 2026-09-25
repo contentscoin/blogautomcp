@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { allowsGenericBrandPostProductPhoto, isShoppingLifestyleImage } from "./brand-post-image-evidence";
+import { allowsGenericBrandPostProductPhoto, isShoppingFactCardAsset, isShoppingLifestyleImage } from "./brand-post-image-evidence";
 import { acquireBrandPostImageRepairLock } from "./brand-post-image-repair-lock";
 import { SHOPPING_POST_CONTRACT_V1 } from "./post-composition-contract";
 import { repairBrandPostImages } from "./brand-post-image-repair";
@@ -34,7 +34,7 @@ const verifiedAlternative = (slot: Slots[number], allowProductPhoto = false) => 
 const generatedLifestyleAlternative = (slot: Slots[number], manifest: Manifest) => {
   const section = manifest.composition.sections.find(section => section.id === slot.sectionId);
   return Boolean(section) && isShoppingLifestyleImage(section!) && slot.count > 0 && !slot.missing && !slot.generationMissing &&
-    !slot.staleTargets.length && slot.assets.some(asset => asset.creationMethod === "source-with-generated-background");
+    !slot.staleTargets.length && slot.assets.some(asset => asset.creationMethod === "source-with-generated-background" || isShoppingFactCardAsset(asset));
 };
 function permitsGenericReplacement(slot: Slots[number], manifest: Manifest): boolean {
   const section = manifest.composition.sections.find(section => section.id === slot.sectionId)!;

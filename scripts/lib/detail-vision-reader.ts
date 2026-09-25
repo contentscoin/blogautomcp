@@ -123,3 +123,14 @@ export async function readDetailImagesWithVision(input: {
     };
   }
 }
+
+/**
+ * 판독 묶음: 1차는 긴 상세 이미지의 구간, 2차는 아직 읽지 않은 판매자 이미지다.
+ * 보통 비율 이미지 여러 장으로 된 상세페이지는 구간이 없으므로 2차가 첫 묶음이 된다.
+ */
+export function planSellerVisionBatches(detailPaths: string[], sellerPaths: string[], maxPerBatch = 8): string[][] {
+  const first = [...new Set(detailPaths)].slice(0, maxPerBatch);
+  const seen = new Set(first);
+  const second = [...new Set(sellerPaths)].filter((file) => !seen.has(file)).slice(0, maxPerBatch);
+  return [first, second].filter((batch) => batch.length > 0);
+}
