@@ -143,9 +143,33 @@ export function productEvidenceRequirement(input: {
   };
 }
 
-/** 검사가 사실을 인정하는 방식(숫자 토큰 + 설명 단어 하나)을 작성자에게 보여줄 핵심 표기. */
+/** 검사가 사실을 인정하는 방식과 같은 기준의 핵심 표기(항목 라벨 제외 값). */
 export function productSignalAnchor(signal: string): string {
   return signal.replace(/^[^:：\n]{1,24}[:：]\s*/u, "").replace(/\s+/gu, " ").trim();
+}
+
+const SIGNAL_STOP_TOKEN = /(?:상품|제품|기능|표기|판매페이지|카테고리|방식|구조|기준)/u;
+const withoutSpaces = (value: string) => value.replace(/\s+/gu, "");
+
+/**
+ * 확인 사실이 문장에 쓰였는지 판단한다.
+ * - 항목 라벨("무게:")은 빼고 값만 본다. 소수점·± 기호는 토큰에 남긴다("30.1g", "±3m").
+ * - 띄어쓰기는 무시한다("내장배터리" = "내장 배터리").
+ * - 숫자 토큰이 있는 사실은 숫자 토큰 하나만 맞으면 인정한다(부수 단어 "가로·밴드 미포함"까지 요구하지 않는다).
+ * - 숫자가 없는 사실은 설명 단어 두 개(단어가 하나뿐이면 하나)가 있어야 인정한다.
+ */
+export function productSignalCoveredBySentence(signal: string, sentence: string): boolean {
+  const value = productSignalAnchor(signal);
+  const tokens = unique(value.split(/[^\p{L}\p{N}.±]+/u).map((token) => token.replace(/^\.+|\.+$/gu, "")), 12)
+    .filter((token) => token.replace(/[.±]/gu, "").length >= 2 && !SIGNAL_STOP_TOKEN.test(token));
+  if (tokens.length === 0) return false;
+  const compactSentence = withoutSpaces(sentence);
+  const has = (token: string) => compactSentence.includes(withoutSpaces(token)) ||
+    (token.startsWith("±") && compactSentence.includes(token.slice(1)));
+  const numericTokens = tokens.filter((token) => /\d/u.test(token));
+  if (numericTokens.length > 0) return numericTokens.some(has);
+  const required = Math.min(2, tokens.length);
+  return tokens.filter(has).length >= required;
 }
 
 const SECTION_LIBRARY: ProductEditorialSection[] = [
@@ -920,22 +944,8 @@ export function assessProductReviewSubstance(input: {
   const sentenceCount = Math.max(1, sentences.length);
   const genericGuidanceCount = countMatches(body, /(?:확인(?:해|하|해야|하세요)|살펴보|비교해보|보는\s*게\s*좋|안전해요)/u);
   const categoryMismatchTerms = analysis.forbiddenCategoryTerms.filter((term) => body.includes(term));
-  const signalCoveredBySentence = (signal: string, sentence: string): boolean => {
-    // Field labels are metadata, not words the review must repeat verbatim.
-    // Retain the complete value (including numeric units) as the evidence anchor.
-    const value = signal.replace(/^[^:：\n]{1,24}[:：]\s*/u, "");
-    const tokens = unique(value.split(/[^\p{L}\p{N}]+/u), 12)
-      .filter((token) => token.length >= 2 && !/(?:상품|제품|기능|표기|판매페이지|카테고리|방식|구조|기준)/u.test(token));
-    if (tokens.length === 0) return false;
-    const numericTokens = tokens.filter((token) => /\d/u.test(token));
-    const descriptiveTokens = tokens.filter((token) => !/\d/u.test(token));
-    if (numericTokens.length > 0) {
-      return numericTokens.some((token) => sentence.includes(token)) &&
-        (descriptiveTokens.length === 0 || descriptiveTokens.some((token) => sentence.includes(token)));
-    }
-    const required = Math.min(2, tokens.length);
-    return tokens.filter((token) => sentence.includes(token)).length >= required;
-  };
+  const signalCoveredBySentence = (signal: string, sentence: string): boolean =>
+    productSignalCoveredBySentence(signal, sentence);
   const coveredSignals = analysis.verifiedSignals.filter((signal) =>
     sentences.some((sentence) => signalCoveredBySentence(signal, sentence))
   );

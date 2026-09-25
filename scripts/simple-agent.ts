@@ -236,7 +236,7 @@ import {
   type PostQualityPreset,
   type ResolvedPostDocumentV1,
 } from "../src/lib/post-composition-contract";
-import { buildSelectedProductImageAuditContext, assertPublishImagesSafe } from "./lib/publish-image-audit";
+import { buildSelectedProductImageAuditContext, assertPublishImagesSafe, PublishImageAuditError } from "./lib/publish-image-audit";
 import { assertPublishedEditorText, publishedReadinessSections } from "./lib/published-editor-audit";
 
 // Stealth 플러그인 적용 (봇 감지 우회)
@@ -10545,17 +10545,26 @@ async function main() {
           onCreated: (file) => { publishImageCleanup.track([file]); downloadedProductImagePaths.push(file); },
         });
       }
-      if (!product.representativeImagePath) throw new Error("상품 사진 검사 실패: 판매자 원본과 상품 영역 재검사에서도 해당 상품의 사진을 확보하지 못했습니다.");
+      if (!product.representativeImagePath) {
+        // 소재 준비에서는 원고를 버리지 않는다. 대표 이미지는 이미지 보충 단계(bind_sources·generate_missing)가 채운다.
+        if (process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim()) {
+          console.log("   ⚠️ 대표 상품 사진을 확보하지 못해 썸네일 없이 원고를 저장합니다. 대표 이미지는 이미지 보충 단계에서 다시 시도합니다.");
+        } else {
+          throw new Error("상품 사진 검사 실패: 판매자 원본과 상품 영역 재검사에서도 해당 상품의 사진을 확보하지 못했습니다.");
+        }
+      }
     }
-    const generatedThumbnail: GeneratedProductThumbnail | null = preparedPostOverride
+    let generatedThumbnail: GeneratedProductThumbnail | null = preparedPostOverride
       ? { path: preparedPostOverride.heroImagePath, source: "saved-studio" }
-      : await generateTopTextCutoutThumbnail(
+      : link.connectKind !== "TRAVEL" && !product.representativeImagePath
+        ? null
+        : await generateTopTextCutoutThumbnail(
           product,
           post.title,
           link.id,
           link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
         );
-    const generatedThumbnailPath = generatedThumbnail?.path || null;
+    let generatedThumbnailPath = generatedThumbnail?.path || null;
     const collectedImagePaths = Array.from(new Set(preparedPostOverride
       ? [preparedPostOverride.heroImagePath, ...preparedPostOverride.bodyImagePaths]
       : [
@@ -10623,12 +10632,58 @@ async function main() {
     post.composition = composition;
     if (runtimeConnectKind === "SHOPPING") {
       setStage("STEP2.6 최종 이미지 검증");
-      await assertPublishImagesSafe({
-        brandLinkId: link.id,
-        productName: product.name,
-        selectedProduct: buildSelectedProductImageAuditContext(product.name, product.features),
-        composition,
-      });
+      // 썸네일 한 장만 거절되면(옵션 격자·식별 불가 원본 등) 원고를 버리지 않고 다음 검증 원본으로 썸네일을 다시 만든다.
+      const rejectedThumbnailSources = new Set<string>();
+      for (let thumbnailRetry = 0; ; thumbnailRetry += 1) {
+        try {
+          await assertPublishImagesSafe({
+            brandLinkId: link.id,
+            productName: product.name,
+            selectedProduct: buildSelectedProductImageAuditContext(product.name, product.features),
+            composition,
+          });
+          break;
+        } catch (error) {
+          const failures = error instanceof PublishImageAuditError ? error.audit.failures : [];
+          const thumbnailOnly = !preparedPostOverride && failures.length > 0 && failures.every((failure) => {
+            const node = composition.renderNodes[failure.nodeIndex];
+            return failure.code === "SEMANTIC_REJECTION" && node?.kind === "image" && node.role === "thumbnail";
+          });
+          if (!thumbnailOnly || !generatedThumbnailPath) throw error;
+          if (thumbnailRetry >= 2) {
+            // 준비 모드: 원고는 저장하고 대표 이미지만 이후 이미지 보충·승인 재검사에 맡긴다. 발행 모드는 그대로 멈춘다.
+            if (!prepareOutputDir) throw error;
+            console.log(`   ⚠️ 썸네일 재생성 ${thumbnailRetry}회 후에도 감사 거절 · 원고는 저장하고 대표 이미지는 보충 단계에서 다시 만듭니다.`);
+            break;
+          }
+          if (product.representativeImagePath) rejectedThumbnailSources.add(path.resolve(product.representativeImagePath));
+          const nextSource = await selectVerifiedProductPhoto(
+            [...product.imagePaths, ...downloadedProductImagePaths]
+              .filter((file) => file && fs.existsSync(file) && !rejectedThumbnailSources.has(path.resolve(file)) &&
+                path.resolve(file) !== path.resolve(generatedThumbnailPath!)),
+            product.name,
+          );
+          if (!nextSource) {
+            if (!prepareOutputDir) throw error;
+            console.log("   ⚠️ 썸네일로 쓸 다른 검증 원본이 없어 원고만 저장합니다. 대표 이미지는 보충 단계에서 다시 만듭니다.");
+            break;
+          }
+          product.representativeImagePath = nextSource;
+          const regenerated = await generateTopTextCutoutThumbnail(product, post.title, link.id, "SHOPPING");
+          if (!regenerated?.path || !fs.existsSync(regenerated.path)) throw error;
+          const previous = path.resolve(generatedThumbnailPath);
+          console.log(`   ↻ 썸네일 감사 거절 · 다른 검증 원본으로 재생성 (${thumbnailRetry + 1}/2)`);
+          for (const node of composition.renderNodes) {
+            if (node.kind === "image" && path.resolve(node.assetPath) === previous) node.assetPath = regenerated.path;
+          }
+          for (const section of composition.sections) {
+            section.imagePaths = section.imagePaths.map((file) => path.resolve(file) === previous ? regenerated.path : file);
+          }
+          product.imagePaths = product.imagePaths.map((file) => path.resolve(file) === previous ? regenerated.path : file);
+          generatedThumbnail = regenerated;
+          generatedThumbnailPath = regenerated.path;
+        }
+      }
     }
     console.log(
       composition.editorial ? `   편집 선택 유지: ${composition.editorial.id}` : "   기존 승인 문서: 저장된 편집 템플릿 없음. 기존 배치 보존, 신규 스타일 적용 안 함.",

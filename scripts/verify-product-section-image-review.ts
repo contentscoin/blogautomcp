@@ -1,4 +1,5 @@
 import { publicationImageGeometryIssue } from "./lib/publication-image-geometry";
+import * as unbrandedProduct from "./lib/unbranded-product";
 import { testPngFixture } from "./lib/test-png-fixture";
 /** Offline section-image evidence gate regression checks. */
 import assert from "node:assert/strict";
@@ -69,6 +70,7 @@ function loadReview(answer: string | ((options: ReviewCall, callIndex: number) =
       if (name === "../../src/lib/brand-post-image-evidence") return {
         allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene,
       };
+      if (name === "./unbranded-product") return unbrandedProduct;
       throw new Error(`Unexpected dependency: ${name}`);
     },
     process,

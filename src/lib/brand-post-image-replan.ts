@@ -10,6 +10,7 @@ import { getBrandPostImageSlots, readBrandPostPackage, reconcileBrandPostPackage
 type Manifest = BrandPostPackageManifestV2;
 /** Shopping contract floor (post-composition-contract targetImages.min). */
 const MINIMUM_POST_IMAGES = SHOPPING_POST_CONTRACT_V1.targetImages.min;
+const MINIMUM_POST_IMAGES_WHEN_GALLERY_EXHAUSTED = 3;
 type Slots = ReturnType<typeof getBrandPostImageSlots>;
 export interface ImageReplanDependencies {
   read: typeof readBrandPostPackage;
@@ -167,9 +168,14 @@ export async function replanShoppingImageCoverage(options: {
     // Its text and image intent stay unchanged; nothing is relabelled as evidence.
     const totalImages = audited.reduce((n, slot) => n + slot.count, 0) + (current.heroImagePath ? 1 : 0);
     const relaxed = !alternatives;
-    if (relaxed && totalImages < MINIMUM_POST_IMAGES) {
+    // When the seller gallery cannot supply a clean product cutout or any usable source, neither
+    // evidence nor generated scenes can add images. Then the post keeps what verified images it has,
+    // down to a floor of three (hero + two), instead of blocking forever.
+    const galleryExhausted = generationErrors.some(error => /\b(?:PRODUCT_CUTOUT_REQUIRED|PRODUCT_SOURCE_REQUIRED)\b/u.test(error));
+    const floor = galleryExhausted ? MINIMUM_POST_IMAGES_WHEN_GALLERY_EXHAUSTED : MINIMUM_POST_IMAGES;
+    if (relaxed && totalImages < floor) {
       const detail = generationErrors.length ? ` 생활 장면 생성: ${generationErrors.slice(0, 2).join(" / ").slice(0, 300)}` : "";
-      return { ...unchanged(`REPLAN_INSUFFICIENT_VERIFIED_ALTERNATIVES · 전체 이미지 ${totalImages}/${MINIMUM_POST_IMAGES}장${detail}`), after: summary(audited) };
+      return { ...unchanged(`REPLAN_INSUFFICIENT_VERIFIED_ALTERNATIVES · 전체 이미지 ${totalImages}/${floor}장${detail}`), after: summary(audited) };
     }
     const minima = new Map<string, number>();
     const history: Array<{ from: string; to: string; at: string }> = [];
@@ -209,6 +215,7 @@ export async function replanShoppingImageCoverage(options: {
       bodyImagePaths: current.bodyImagePaths?.filter(file => !rejected.has(path.resolve(file))),
       imageAssets: current.imageAssets?.filter(asset => !rejected.has(path.resolve(asset.path))),
       composition: { ...current.composition,
+        ...(relaxed && totalImages < MINIMUM_POST_IMAGES ? { imageFloor: floor } : {}),
         renderNodes: current.composition.renderNodes.filter(node => node.kind !== "image" || !rejected.has(path.resolve(node.assetPath))),
         sections: current.composition.sections.map(section => ({ ...section,
           ...(minima.has(section.id) ? { imageMin: minima.get(section.id)! } : {}),
@@ -223,6 +230,8 @@ export async function replanShoppingImageCoverage(options: {
         `${slot.sectionId}: IMAGE_COVERAGE_REQUIRED: 검증 이미지 ${Math.max(slot.missing, slot.generationMissing)}장 필요`) };
     lock.assertOwner();
     deps.write(proposed);
-    return { changed: true, before, after, reason: relaxed ? "COVERAGE_RELAXED_POST_HAS_ENOUGH_IMAGES" : "VERIFIED_ALTERNATIVE_COVERAGE", history };
+    return { changed: true, before, after, reason: relaxed
+      ? totalImages >= MINIMUM_POST_IMAGES ? "COVERAGE_RELAXED_POST_HAS_ENOUGH_IMAGES" : "COVERAGE_RELAXED_SELLER_GALLERY_EXHAUSTED"
+      : "VERIFIED_ALTERNATIVE_COVERAGE", history };
   } finally { lock.release(); }
 }

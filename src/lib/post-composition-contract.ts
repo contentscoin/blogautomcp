@@ -158,6 +158,11 @@ export interface ResolvedPostDocumentV1 {
   sections: ResolvedPostSectionV1[];
   renderNodes: PostRenderNode[];
   qualityReport: PostQualityReportV1;
+  /**
+   * 판매자 갤러리에서 더 확보할 이미지가 없다고 재배치가 확인한 경우의 최소 이미지 수.
+   * 계약 최소보다 작을 때만 의미가 있으며, 재배치(`brand-post-image-replan`)만 기록한다.
+   */
+  imageFloor?: number;
 }
 
 const shoppingSections: PostSectionContractV1[] = [
@@ -615,6 +620,8 @@ export function buildPostQualityReport(options: {
   preset: PostQualityPreset;
   sections: ResolvedPostSectionV1[];
   imageCount: number;
+  /** A replan-recorded floor below the contract minimum (seller gallery exhausted). */
+  imageFloor?: number;
 }): PostQualityReportV1 {
   const characterCount = options.sections.reduce((sum, section) => sum + section.characterCount, 0);
   const actual = {
@@ -627,7 +634,9 @@ export function buildPostQualityReport(options: {
   const target = {
     characters: options.contract.targetCharacters,
     sections: options.contract.targetSections,
-    images: options.contract.targetImages,
+    images: options.imageFloor !== undefined && options.imageFloor >= 1 && options.imageFloor < options.contract.targetImages.min
+      ? { ...options.contract.targetImages, min: Math.floor(options.imageFloor) }
+      : options.contract.targetImages,
   };
   const minimumOf = (section: ResolvedPostSectionV1) => sectionImageBounds(options.contract, section).min;
   const missingSectionIds = options.sections
@@ -1042,6 +1051,7 @@ export function refreshPostDocumentQuality(
       preset: document.qualityPreset,
       sections: document.sections,
       imageCount,
+      imageFloor: document.imageFloor,
     }),
   };
 }
