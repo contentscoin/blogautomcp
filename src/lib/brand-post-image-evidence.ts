@@ -121,3 +121,8 @@ export function brandPostImageIntentMatches(options: {
   // Initial package assembly historically stored render-node alt text here.
   return actual === normalizeBrandPostImageIntent(`${options.sectionTitle} - ${options.sectionIntent}`);
 }
+
+/** Local information card that frames a whole verified seller photo (no cutout, no generated scene). */
+export function isShoppingFactCardAsset(asset: BrandPostImageEvidenceLike): boolean {
+  return asset.provenance === "EDITORIAL_CARD" && asset.creationMethod === "local-composite" && asset.remoteGenerated !== true;
+}

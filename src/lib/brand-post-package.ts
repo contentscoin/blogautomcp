@@ -29,6 +29,7 @@ import {
   brandPostImageIntentMatches,
   brandPostSectionSlotId,
   classifyBrandPostImageEvidence,
+  isShoppingFactCardAsset,
   normalizeBrandPostImageIntent,
 } from "./brand-post-image-evidence";
 
@@ -526,6 +527,13 @@ function auditBrandPostImages(manifest: BrandPostPackageManifest) {
             code: "image-source-review-missing",
             reason: `이미지 · ${section.title}: 생성 배경에 합성한 상품 원본이 현재 기능 목적과 일치한다는 검증 기록이 없습니다.`,
           };
+        } else if (!generated && manifest.connectKind === "SHOPPING" && isShoppingFactCardAsset(asset)) {
+          // A fact card frames a whole verified seller photo; it proves no scene or feature by itself.
+          if (manifest.imageRequirements?.policy === "generated-required" || !readProductPhotoSource(asset.path) ||
+              asset.slotId !== expectedSlotId || !brandPostImageIntentMatches({
+                assetIntent: asset.imageIntent, sectionTitle: section.title, sectionIntent: section.imageIntent })) {
+            stale = { code: "image-intent-stale", reason: `이미지 · ${section.title}: 정보 카드의 원본 사진 기록 또는 파트 결속이 올바르지 않습니다.` };
+          }
         } else if (!generated && manifest.connectKind === "SHOPPING") {
           const review = asset.sourceReview;
           const reviewClassAllowed = allowsOriginalShoppingScene(section) ? review?.reviewClass === "scene-evidence" : review?.reviewClass === "feature-evidence" ||
@@ -569,7 +577,8 @@ function auditBrandPostImages(manifest: BrandPostPackageManifest) {
       claimedHashes.add(asset.sha256);
       const previewAsset = { ...packageImagePreviewAsset(manifest, asset), expectedSlotId };
       sectionAssets.push(previewAsset);
-      if (generated) generatedAssets.add(asset.sha256);
+      // Cards carry lifestyle coverage when no cutout exists; they satisfy the staged-scene minimum.
+      if (generated || (manifest.connectKind === "SHOPPING" && isShoppingFactCardAsset(asset))) generatedAssets.add(asset.sha256);
     }
     const originalCount = sectionAssets.length - generatedAssets.size;
     const generatedCount = generatedAssets.size;
@@ -803,7 +812,7 @@ export function writeBrandPostPackageManifest(
   return manifest;
 }
 
-function refreshStoredContentQuality(
+export function refreshStoredContentQuality(
   quality: BrandLinkContentReadiness | null | undefined,
   report: ResolvedPostDocumentV1["qualityReport"],
 ): BrandLinkContentReadiness | null | undefined {
@@ -817,7 +826,10 @@ function refreshStoredContentQuality(
   if (!signals.some((signal) => signal.key === "composition-quality")) {
     signals.push({ key: "composition-quality", label: "포스트 계약 품질", status: compositionCanPublish ? "pass" : "fail" });
   }
-  const failures = signals.filter((signal) => signal.status === "fail");
+  // Text signals were already folded into the stored verdict (a warn-level
+  // editorial-flow signal can be "fail" on a passing draft). Only the signal
+  // refreshed here may flip publishability.
+  const failures = signals.filter((signal) => signal.key === "composition-quality" && signal.status === "fail");
   // Older image repair wrote a generic 82 over an independently passing editorial 100.
   const score = quality.quality?.score ?? quality.score;
   const blockers = (quality.blockers || []).filter((blocker) => blocker.code !== "composition-quality");

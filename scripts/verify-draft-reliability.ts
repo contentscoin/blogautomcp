@@ -12,7 +12,14 @@ import { IMAGE_RECOVERY_POLICY_VERSION } from "./lib/material-image-recovery";
 import { isSeverelyFailingDraft } from "./lib/scheduled-draft-workflow";
 import { ensureStaticDecodableImage } from "./lib/product-photo-source";
 import { replanShoppingImageCoverage, type ImageReplanDependencies } from "../src/lib/brand-post-image-replan";
-import type { BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
+import { refreshStoredContentQuality, type BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
+import { planQualityConvergence } from "./lib/quality-convergence";
+import type { BrandLinkContentReadiness } from "./lib/brandlink-content-readiness";
+import { createShoppingFactCard, selectShoppingFactCardFacts, wrapCardText } from "./lib/shopping-fact-card";
+import { isShoppingFactCardPath } from "./lib/shopping-fact-card-rule";
+import { readProductPhotoSource } from "./lib/product-photo-provenance";
+import { classifyBrandPostImageEvidence, isShoppingFactCardAsset } from "../src/lib/brand-post-image-evidence";
+import { planSellerVisionBatches } from "./lib/detail-vision-reader";
 import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
@@ -249,7 +256,80 @@ async function main() {
   assert.ok(!floorReport(3).blockers.some((blocker) => blocker.includes("이미지가")), "the gate honours the recorded floor");
   assert.ok(floorReport().blockers.some((blocker) => blocker.includes("이미지가 5장보다 적습니다")), "without a floor the contract minimum still applies");
 
-  console.log("PASS: draft structure normalization + retry, shared evidence requirement + named missing facts, tolerant visual verdicts + non-fatal per-image proposal failures, leak stripping, static seller images, generated lifestyle replan, advice-not-claim, recovery policy version, severe-draft rewrite, coverage relaxation, grader fact matching, unbranded identity, prepare-mode thumbnail recovery, exhausted-gallery floor");
+
+  // 12. (1.3.85) A passing draft with a warn-level flow signal is not sent to text repair.
+  const passing = {
+    canPublish: true, verdict: "pass", code: "ok", reason: null, score: 97, summary: "통과",
+    signals: [{ key: "editorial-flow", label: "제품정체-기능원리-사용법-장단점-결론 흐름", status: "fail" }],
+    blockers: [], qualityFailures: [],
+    quality: { score: 97, passScore: 62, categories: [{ key: "usefulness", label: "구매 판단", score: 12, maxScore: 15, status: "warn", notes: ["총점 기준 충족으로 권고 사항으로 처리"] }] },
+  } as unknown as BrandLinkContentReadiness;
+  const refreshed = refreshStoredContentQuality(passing, { canAutoPublish: true, blockers: [] } as never)!;
+  assert.equal(refreshed.canPublish, true, "a text signal already judged by the gate does not block after image refresh");
+  assert.equal(refreshStoredContentQuality(passing, { canAutoPublish: false, blockers: ["이미지 부족"] } as never)!.canPublish, false,
+    "a composition failure still blocks");
+  assert.equal(planQualityConvergence({ current: { ...passing, canPublish: false, verdict: "quality", code: "quality-score-below-threshold" } as BrandLinkContentReadiness,
+    attempt: 0, maximumAttempts: 1 }).action, "complete", "no blocker, no failed category, passing score: nothing to rewrite");
+  assert.match(agent, /if \(!applied && !\(qualityConvergence && selectedQuality\.canPublish\)\)/u, "an already passing draft is kept, not rejected");
+
+  // 13. (1.3.85) Image-only detail pages: the second vision batch reaches ordinary seller images.
+  assert.deepEqual(planSellerVisionBatches([], ["a.jpg", "b.jpg"], 8), [["a.jpg", "b.jpg"]], "no tall crops: seller images are read first");
+  assert.deepEqual(planSellerVisionBatches(["c1", "c2"], ["c1", "c2", "g1", "g2"], 8), [["c1", "c2"], ["g1", "g2"]]);
+  assert.equal(planSellerVisionBatches(["c"], Array.from({ length: 20 }, (_, i) => `g${i}`), 8)[1].length, 8);
+  assert.match(agent, /SOURCE_EVIDENCE_REQUIRED: 제품 자체의 확인 가능한 구성·중량·기능·규격 텍스트 근거가 부족합니다\. \(상세 구간/u,
+    "the failure names what was read");
+
+  // 14. (1.3.85) No separable cutout: a flat information card frames the whole verified photo.
+  const cardDir = fs.mkdtempSync(path.join(os.tmpdir(), "fact-card-"));
+  try {
+    const photo = path.join(cardDir, "photo.jpg");
+    await sharp({ create: { width: 800, height: 1000, channels: 3, background: "#8aa4c8" } }).jpeg().toFile(photo);
+    const facts = ["용량: 4.5L", "소비전력: 300W", "가열식 살균 방식", "연속 사용: 최대 12시간", "무게: 2.1kg"];
+    const chosen = selectShoppingFactCardFacts({ facts, sectionText: "가열식 살균 방식이라 물을 끓여 내보내요. 4.5L라 하루 종일 써요." });
+    assert.deepEqual(chosen.slice(0, 2).sort(), ["가열식 살균 방식", "용량: 4.5L"].sort(), "facts the section mentions come first");
+    assert.deepEqual(wrapCardText("아주아주아주아주 긴 한 줄짜리 사실 문장입니다 계속 길어집니다 끝없이", 10, 2), [], "overlong facts are skipped, not truncated");
+    const hashes = new Set<string>();
+    for (let variant = 0; variant < 3; variant += 1) {
+      const card = await createShoppingFactCard({ sourcePath: photo, title: "가열식이라 위생적인가", facts: chosen, variant, outputDir: cardDir });
+      const meta = await sharp(card.outputPath).metadata();
+      assert.equal(`${meta.width}x${meta.height}`, "1200x900");
+      assert.ok(isShoppingFactCardPath(card.outputPath));
+      assert.equal(readProductPhotoSource(card.outputPath)?.segmented, false, "the whole photo is recorded as unsegmented");
+      hashes.add(fs.readFileSync(card.outputPath).toString("base64"));
+    }
+    assert.equal(hashes.size, 3, "variants differ so duplicates are not rejected");
+    await assert.rejects(createShoppingFactCard({ sourcePath: photo, title: "t", facts: ["하나"], variant: 0, outputDir: cardDir }), /SHOPPING_FACT_CARD_FACTS_REQUIRED/u);
+  } finally {
+    fs.rmSync(cardDir, { recursive: true, force: true });
+  }
+  const cardAsset = { provenance: "EDITORIAL_CARD", creationMethod: "local-composite", remoteGenerated: false } as const;
+  assert.ok(isShoppingFactCardAsset(cardAsset));
+  assert.deepEqual(classifyBrandPostImageEvidence(cardAsset), { coherent: true, generated: false, reason: null });
+  const imageSource = fs.readFileSync("src/lib/brand-post-image-generation.ts", "utf8");
+  assert.equal((imageSource.match(/publishFactCard\(requestIndex/gu) || []).length, 2, "both cutout-failure branches try a card first");
+  assert.ok(!imageSource.includes("createOriginalProductPhotoOnBackground"), "whole photos are still never put on generated backgrounds");
+  let cardStore = structuredClone(stored);
+  cardStore.composition.sections[0].imageMin = 1;
+  cardStore.composition.sections[1].imageMin = 0;
+  cardStore.composition.sections[1].imagePaths = [];
+  const cardDeps = { ...deps,
+    read: () => structuredClone(cardStore),
+    write: (value: BrandPostPackageManifestV2) => { cardStore = value; return value; },
+    slots: (value: BrandPostPackageManifestV2) => value.composition.sections.map((section) => ({
+      sectionId: section.id, minimum: section.imageMin!, maximum: section.imageMax!, count: section.imagePaths.length,
+      missing: Math.max(0, section.imageMin! - section.imagePaths.length), generatedMinimum: 0, generationMissing: 0, staleTargets: [],
+      assets: section.imagePaths.map((file) => ({ path: file, ...cardAsset })),
+    })),
+    repair: async (options: { sourceOnly?: boolean }) => {
+      if (!options.sourceOnly) cardStore.composition.sections[1].imagePaths = ["shopping-fact-card-fit.png"];
+      return { errors: options.sourceOnly ? ["IMAGE_SOURCE_BINDING_REQUIRED: 원본 부족"] : [] };
+    },
+  } as unknown as ImageReplanDependencies;
+  const cardReplan = await replanShoppingImageCoverage({ brandLinkId: "fx" }, cardDeps);
+  assert.equal(cardReplan.reason, "VERIFIED_ALTERNATIVE_COVERAGE", "a fact card carries the moved coverage");
+  assert.equal(cardReplan.after.missing, 0);
+
+  console.log("PASS: draft structure normalization + retry, shared evidence requirement + named missing facts, tolerant visual verdicts + non-fatal per-image proposal failures, leak stripping, static seller images, generated lifestyle replan, advice-not-claim, recovery policy version, severe-draft rewrite, coverage relaxation, grader fact matching, unbranded identity, prepare-mode thumbnail recovery, exhausted-gallery floor, recheck/revise agreement, seller-image vision batch, fact cards");
 }
 
 main().catch((error) => {

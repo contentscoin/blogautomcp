@@ -56,6 +56,15 @@
 - CLI(`simple-agent.ts`)의 썸네일 대체 경로도 같은 Codex 이미지 경로로 배경을 만든 뒤 `createLockedProductThumbnailOnBackground`로 합성한다. 예전처럼 요청 파일을 남기고 수동으로 경로를 넘기는 방식(`PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_PATH`)도 계속 쓸 수 있다.
 - API 키가 있는 사용자의 Images API 썸네일 경로(`scripts/lib/openai-image.ts`)는 바꾸지 않았다.
 
+## 누끼 불가 상품의 정보 카드 (1.3.85)
+
+- 검증된 판매자 사진은 있지만 분리 가능한 원본이 하나도 없으면, 연출컷 대신 로컬 정보 카드로 슬롯을 채운다(`scripts/lib/shopping-fact-card.ts`).
+  - 크기는 1200x900이고 단색 배경을 쓴다.
+  - 원본 사진 전체를 흰 액자에 넣고, 옆에 섹션 제목과 확인된 사실 2~4줄을 적는다.
+  - 출처는 `EDITORIAL_CARD` + `local-composite`로 기록한다.
+- 대표 슬롯은 `createOriginalProductPhotoThumbnail`을 쓴다. 두 경우 모두 생성 배경 합성은 여전히 하지 않는다.
+- 글 하나에 최대 3장만 쓴다. 사실이 2개 미만이거나 `generated-required` 정책이면 기존 `PRODUCT_CUTOUT_REQUIRED`를 그대로 보고한다.
+
 ## 검증
 
 - `npm run test:photoreal`: 원본 스크립트와의 출력 일치(골든 38건, python3가 있으면 실시간 비교도 함), 사람 없는 컷의 층 규칙, 변형, 장면 선택, 블로그 프롬프트 연결, 점검표.

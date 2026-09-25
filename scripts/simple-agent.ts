@@ -206,7 +206,7 @@ import {
 } from "./lib/brandlink-image-readiness";
 import { createEditorialSelection, formatEditorialTemplate } from "./lib/editorial-templates";
 import { formatTopicTemplateForPrompt } from "./lib/topic-templates";
-import { readDetailImagesWithVision } from "./lib/detail-vision-reader";
+import { planSellerVisionBatches, readDetailImagesWithVision } from "./lib/detail-vision-reader";
 import { buildSearchDemandQueries, collectSearchDemand, formatSearchDemandForPrompt } from "./lib/search-demand";
 import { formatTitleCandidatesForPrompt, planTitle, type TitlePlanContext } from "./lib/topic-templates/title-planner";
 import {
@@ -710,21 +710,39 @@ function sanitizeSellerEvidenceFeatures(values: string[], productName = ""): str
   }))).slice(0, 40);
 }
 
-async function enrichShoppingSourceFeatures(name: string, description: string, features: string[], sellerDetailImagePaths: string[]): Promise<string[]> {
+interface SellerEvidenceReadingReport { ocrFacts: number; visionFacts: number; visionImages: number }
+
+async function enrichShoppingSourceFeatures(
+  name: string,
+  description: string,
+  features: string[],
+  sellerDetailImagePaths: string[],
+  sellerImagePaths: string[] = sellerDetailImagePaths,
+  report: SellerEvidenceReadingReport = { ocrFacts: 0, visionFacts: 0, visionImages: 0 },
+): Promise<string[]> {
   const collected = sanitizeSellerEvidenceFeatures([
     ...features,
     ...extractExplicitProductFacts(isolateSellerEvidenceText(name, 500), "title"),
     ...extractExplicitProductFacts(isolateSellerEvidenceText(description, 12_000), "description"),
   ], name);
-  if (!hasSufficientProductReviewEvidence({ productName: name, description, features: collected, targetSectionCount: 11 }) && sellerDetailImagePaths.length) {
+  const sparse = () => !hasSufficientProductReviewEvidence({ productName: name, description,
+    features: sanitizeSellerEvidenceFeatures(collected, name), targetSectionCount: 11 });
+  if (sparse() && sellerDetailImagePaths.length) {
     const ocr = await readSellerDetailOcrFacts(sellerDetailImagePaths);
     collected.push(...ocr.facts);
+    report.ocrFacts += ocr.facts.length;
     console.log(`   🔎 판매자 상세 OCR: ${ocr.status}, ${ocr.scannedImageCount}구간 검사, 근거 ${ocr.facts.length}개 (${ocr.imagePaths.length}구간에서 확인)`);
-    // 상세페이지가 이미지로만 되어 있어 OCR로도 근거가 부족하면 비전 모델로 이미지 속 글자를 읽는다.
-    const afterOcr = sanitizeSellerEvidenceFeatures(collected, name);
-    if (DETAIL_VISION_READ_ENABLED &&
-        !hasSufficientProductReviewEvidence({ productName: name, description, features: afterOcr, targetSectionCount: 11 })) {
-      collected.push(...await readDetailFactsWithVision("SHOPPING", name, sellerDetailImagePaths));
+  }
+  // 상세페이지가 이미지로만 되어 있어 OCR로도 근거가 부족하면 비전 모델로 이미지 속 글자를 읽는다.
+  // 1차는 긴 상세 이미지의 구간, 2차는 아직 읽지 않은 판매자 이미지(보통 비율 상세 이미지 포함)다.
+  if (DETAIL_VISION_READ_ENABLED) {
+    const batches = planSellerVisionBatches(sellerDetailImagePaths, sellerImagePaths, DETAIL_VISION_MAX_IMAGES);
+    for (const batch of batches) {
+      if (!sparse()) break;
+      const facts = await readDetailFactsWithVision("SHOPPING", name, batch);
+      collected.push(...facts);
+      report.visionImages += batch.length;
+      report.visionFacts += facts.length;
     }
   }
   return sanitizeSellerEvidenceFeatures(collected, name);
@@ -4046,7 +4064,7 @@ async function materializeProductImages(
   imageUrls: string[],
   filePrefix: string,
   targetImageCount = SHOPPING_BODY_IMAGE_MAX,
-): Promise<{ representativeImagePath: string | null; imagePaths: string[]; detailImagePaths: string[]; sellerDetailImagePaths: string[] }> {
+): Promise<{ representativeImagePath: string | null; imagePaths: string[]; detailImagePaths: string[]; sellerDetailImagePaths: string[]; sellerImagePaths: string[] }> {
   const candidateLimit = Math.max(targetImageCount + 12, 24);
   // Collection already ranked semantic gallery provenance. URL-only re-ranking
   // loses it and can move unrelated JPEG recommendations ahead of gallery PNGs.
@@ -4177,6 +4195,12 @@ async function materializeProductImages(
     imagePaths,
     detailImagePaths: downloaded.filter((item) => item.detailCrop).map((item) => item.path),
     sellerDetailImagePaths: downloaded.filter((item) => item.detailCrop && isSalesPageProductImageUrl(item.url) && !isReviewImageUrl(item.url)).map((item) => item.path),
+    // Every seller image, detail crops first. Many detail pages are a run of
+    // ordinary-ratio images that never become crops; reading must reach them too.
+    sellerImagePaths: [
+      ...downloaded.filter((item) => item.detailCrop && !isReviewImageUrl(item.url)),
+      ...downloaded.filter((item) => !item.detailCrop && !isReviewImageUrl(item.url)),
+    ].map((item) => item.path),
   };
 }
 
@@ -4205,10 +4229,10 @@ async function buildProductInfoFromStoredBrandLink(
           "stored_product",
           connectKind === "TRAVEL" ? TRAVEL_BODY_IMAGE_MAX : SHOPPING_BODY_IMAGE_MAX,
         )
-      : { representativeImagePath: null, imagePaths: [], detailImagePaths: [], sellerDetailImagePaths: [] };
+      : { representativeImagePath: null, imagePaths: [], detailImagePaths: [], sellerDetailImagePaths: [], sellerImagePaths: [] };
 
   if (connectKind === "SHOPPING" && enrichSource) {
-    features = await enrichShoppingSourceFeatures(name, description, features, materializedImages.sellerDetailImagePaths);
+    features = await enrichShoppingSourceFeatures(name, description, features, materializedImages.sellerDetailImagePaths, materializedImages.sellerImagePaths);
   }
 
   return {
@@ -4697,7 +4721,7 @@ async function step1_getProductInfo(
     console.log(`   🖼️ 대표 이미지 후보: ${imageUrls[0]}`);
     console.log(`   🖼️ 썸네일 원본 적합: ${isPreferredThumbnailImageUrl(imageUrls[0]) ? "예" : "아니오"}`);
   }
-  const { representativeImagePath, imagePaths, detailImagePaths, sellerDetailImagePaths } = await materializeProductImages(
+  const { representativeImagePath, imagePaths, detailImagePaths, sellerDetailImagePaths, sellerImagePaths } = await materializeProductImages(
     // Preserve gallery/thumbnail order; append newly retained detail evidence.
     [...new Set([...imageUrls, ...evidenceSourceImageUrls])],
     "product",
@@ -4709,9 +4733,10 @@ async function step1_getProductInfo(
     sanitizedFeatures.push(...await readDetailFactsWithVision("TRAVEL", productName, detailImagePaths));
   }
   if (connectKind === "SHOPPING") {
-    sanitizedFeatures = await enrichShoppingSourceFeatures(productName, description, sanitizedFeatures, sellerDetailImagePaths);
+    const readingReport: SellerEvidenceReadingReport = { ocrFacts: 0, visionFacts: 0, visionImages: 0 };
+    sanitizedFeatures = await enrichShoppingSourceFeatures(productName, description, sanitizedFeatures, sellerDetailImagePaths, sellerImagePaths, readingReport);
     if (!hasSufficientProductReviewEvidence({ productName, description, features: sanitizedFeatures, targetSectionCount: 11 })) {
-      throw new Error("SOURCE_EVIDENCE_REQUIRED: 제품 자체의 확인 가능한 구성·중량·기능·규격 텍스트 근거가 부족합니다.");
+      throw new Error(`SOURCE_EVIDENCE_REQUIRED: 제품 자체의 확인 가능한 구성·중량·기능·규격 텍스트 근거가 부족합니다. (상세 구간 ${sellerDetailImagePaths.length} · 판매자 이미지 ${sellerImagePaths.length} · OCR 근거 ${readingReport.ocrFacts} · 이미지 판독 ${readingReport.visionImages}장 채택 ${readingReport.visionFacts}줄 · 확인 근거 ${sanitizedFeatures.length})`);
     }
   }
   
@@ -10084,7 +10109,8 @@ async function runPreparedPostRevision(
       console.log(`   자동 보강 후보 ${attempt}/${maximumAttempts} 형식 오류: ${previousFeedback}`);
     }
   }
-  if (!applied) {
+  // A draft that already passes needs no candidate; keep it instead of calling that a rejection.
+  if (!applied && !(qualityConvergence && selectedQuality.canPublish)) {
     throw new Error(`QUALITY_REPAIR_REJECTED: ${maximumAttempts}개 후보가 기존 원고보다 나아지지 않아 원문을 보존했습니다. ${feedbackFor(lastCandidateQuality)}`);
   }
   if (qualityConvergence && !selectedQuality.canPublish) {
@@ -10096,7 +10122,9 @@ async function runPreparedPostRevision(
     hashtags: selected.hashtags, generationSource: "AI", rawResponse: "saved-material:revise", assembled: selectedResult,
     qualityRepair: { attempted: true, applied, beforeScore: beforeQuality.score, afterScore: selectedQuality.score,
       beforeCode: beforeQuality.code, afterCode: selectedQuality.code,
-      note: selectedQuality.canPublish
+      note: !applied
+        ? `저장 원고가 이미 품질 기준을 통과해 변경하지 않음 (${selectedQuality.score}점)`
+        : selectedQuality.canPublish
         ? `저장 원고 자동 보강 완료 (${beforeQuality.score}→${selectedQuality.score}점, 최대 ${maximumAttempts}회 후보 검수)`
         : `저장 원고 보강 후 추가 근거 또는 수정 필요 (${beforeQuality.score}→${selectedQuality.score}점)` },
     notes: [`저장 출처와 문단 식별자를 유지한 수정 · ${maximumAttempts}회 이내 후보 비교`] };

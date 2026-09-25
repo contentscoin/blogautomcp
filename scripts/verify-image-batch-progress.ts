@@ -53,7 +53,7 @@ class FakeChild extends EventEmitter {
 type Job = { id: string; outStem: string; prompt: string };
 function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lockFails?: boolean; automation?: boolean; sourceMissing?: boolean; sourceError?: string;
   sourcePaths?: string[]; segmentablePaths?: string[]; lockedUsesBackground?: boolean;
-  sectionMatchedPaths?: string[]; sectionReviewError?: string; reviewClass?: "feature-evidence" | "scene-evidence";
+  sectionMatchedPaths?: string[]; sectionReviewError?: string; reviewClass?: "feature-evidence" | "scene-evidence"; cardFacts?: string[];
   worker?: (args: string[], child: FakeChild) => void } = {}) {
   const packageDir = fs.mkdtempSync(path.join(root, "package-"));
   let child = new FakeChild();
@@ -113,6 +113,16 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
         },
       },
       "../../scripts/lib/product-thumbnail": { buildProductThumbnailCopy: () => ({}) },
+      "../../scripts/lib/shopping-fact-card": {
+        SHOPPING_FACT_CARD_LIMIT: 3,
+        selectShoppingFactCardFacts: () => settings.cardFacts || [],
+        createShoppingFactCard: async () => {
+          const outputPath = path.join(packageDir, `shopping-fact-card-${crypto.randomUUID()}.png`);
+          fs.writeFileSync(outputPath, crypto.randomUUID());
+          return { outputPath, sourceSha256: "fixture" };
+        },
+      },
+      "./brand-post-quality-source": { brandPostQualitySourceFromSnapshot: () => ({ sourceFeatures: settings.cardFacts || [] }) },
       "../../scripts/lib/product-photo-provenance": photoProvenance,
       "../../scripts/lib/product-photo-source": {
         readSavedProductSourceCandidates: () => [],
@@ -793,6 +803,27 @@ async function verifyGenerator() {
     assert.ok(results.every(result => result.provenance === "LOCKED_PRODUCT" && !result.error));
     assert.deepEqual(h.lockedSourcePaths, [sourcePath, sourcePath, sourcePath], "safe cutout is reused only after distinct slot jobs finish");
     assert.equal(new Set(h.jobs.map(job => job.outStem)).size, 3, "slot identity keeps reused-source outputs distinct");
+  });
+
+  await check("no separable cutout: verified whole photos become local fact cards, never generated scenes", async () => {
+    const h = harness({ lockFails: true, cardFacts: ["용량: 4.5L", "가열식 살균 방식"] });
+    h.manifest.connectKind = "SHOPPING";
+    h.manifest.imageRequirements = { policy: "verified-source-first" };
+    h.manifest.composition.sections[0].title = "어떤 제품인지부터 보면";
+    h.manifest.composition.sections[0].imageIntent = "제품 전체 모습과 구성을 한눈에 보여주는 이미지";
+    const results = await h.generate(0, { requests: [
+      { requestId: "body", sectionId: "section" }, { requestId: "hero", replaceAssetKey: "hero" },
+    ] });
+    assert.equal(h.spawns, 0, "no background generation is started");
+    assert.ok(results.every(result => !result.error && result.provenance === "EDITORIAL_CARD" &&
+      result.creationMethod === "local-composite" && result.remoteGenerated === false), JSON.stringify(results));
+    const noFacts = harness({ lockFails: true });
+    noFacts.manifest.connectKind = "SHOPPING";
+    noFacts.manifest.imageRequirements = { policy: "verified-source-first" };
+    noFacts.manifest.composition.sections[0].title = "어떤 제품인지부터 보면";
+    noFacts.manifest.composition.sections[0].imageIntent = "제품 전체 모습과 구성을 한눈에 보여주는 이미지";
+    const [body] = await noFacts.generate(0, { requests: [{ requestId: "body", sectionId: "section" }] });
+    assert.match(body.error || "", /PRODUCT_CUTOUT_REQUIRED/u, "without two verified facts the original error stays");
   });
 
   for (const lockFails of [false, true]) {
