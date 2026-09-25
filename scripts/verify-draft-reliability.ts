@@ -4,7 +4,9 @@ import fs from "node:fs";
 import { normalizeDraftSections, sectionEntryToString, splitMergedSection } from "./lib/draft-sections";
 import { parseVisualReviews } from "./lib/publish-image-audit";
 import { auditSectionProposals } from "./lib/product-section-proposal-audit";
-import { assessProductReviewSubstance, productEvidenceRequirement, productSignalAnchor } from "./lib/product-editorial-plan";
+import { assessProductReviewSubstance, productEvidenceRequirement, productSignalAnchor, productSignalCoveredBySentence } from "./lib/product-editorial-plan";
+import { isUnbrandedCommodityProduct } from "./lib/unbranded-product";
+import { buildPostQualityReport, SHOPPING_POST_CONTRACT_V1 } from "../src/lib/post-composition-contract";
 import { detectUnsupportedExperience, getBrandLinkContentReadiness, stripInternalGuidanceSentences } from "./lib/brandlink-content-readiness";
 import { IMAGE_RECOVERY_POLICY_VERSION } from "./lib/material-image-recovery";
 import { isSeverelyFailingDraft } from "./lib/scheduled-draft-workflow";
@@ -191,7 +193,63 @@ async function main() {
   const thin = await replanShoppingImageCoverage({ brandLinkId: "rx" }, relaxDeps);
   assert.match(thin.reason, /^REPLAN_INSUFFICIENT_VERIFIED_ALTERNATIVES · 전체 이미지 3\/5장/u, "too few images overall still asks for more");
 
-  console.log("PASS: draft structure normalization + retry, shared evidence requirement + named missing facts, tolerant visual verdicts + non-fatal per-image proposal failures, leak stripping, static seller images, generated lifestyle replan, advice-not-claim, recovery policy version, severe-draft rewrite, coverage relaxation");
+  // 11. Grader fact matching: decimals kept, spacing ignored, a numeric token alone suffices (golf-watch case).
+  const golf = ["무선 방식", "배터리: 내장배터리", "방수: 생활방수", "사이즈/무게: 가로 47.8mm × 47.8mm × 13.73mm / 30.1g (밴드 미포함)", "오차 범위: ±3m"];
+  assert.ok(productSignalCoveredBySentence(golf[3]!, "무게가 30.1g라 손목 부담이 적어요."), "30.1g without incidental words");
+  assert.ok(productSignalCoveredBySentence(golf[1]!, "내장 배터리라 건전지가 필요 없어요."), "spacing ignored");
+  assert.ok(productSignalCoveredBySentence(golf[4]!, "오차 범위는 ±3m예요."));
+  assert.ok(!productSignalCoveredBySentence(golf[3]!, "무게가 30g대라 가벼워요."), "a different number is not the fact");
+  const golfReview = assessProductReviewSubstance({ productName: "보이스캐디 T13 PRO", sourceDescription: "시계형 골프거리측정기", sourceFeatures: golf, sections: [
+    "가벼운 착용감\n\n무게가 30.1g이에요. 덕분에 18홀 내내 손목 부담이 적어 편해요.\n내장 배터리 방식이에요. 그래서 라운드 전 충전만 해 두면 편해요.",
+    "거리 정확도\n\n오차 범위는 ±3m예요. 그래서 그린 공략 거리 판단에 실용적이에요.",
+  ] });
+  assert.ok(golfReview.evidenceJudgementCount >= golfReview.requiredEvidenceJudgementCount, "judgements now count");
+  assert.ok(golfReview.groundedSignalCount >= golfReview.requiredGroundedSignalCount);
+
+  // 12. Unbranded commodity products (fresh food, gift sets without model numbers) use item/packaging identity.
+  assert.equal(isUnbrandedCommodityProduct("예다움 상주곶감 반건시 추석 명절 상견례 선물세트"), true);
+  assert.equal(isUnbrandedCommodityProduct("운림가 55년전통 국산 전라도 포기 김장 배추 김치 2kg"), true);
+  assert.equal(isUnbrandedCommodityProduct("[추석선물 EVENT] 2026 보이스캐디 T13 PRO 시계형 골프거리측정기"), false, "model numbers keep brand identity rules");
+  assert.equal(isUnbrandedCommodityProduct("아토케어 듀얼스톰 침구침대청소기"), false);
+  assert.match(fs.readFileSync("scripts/lib/publish-image-audit.ts", "utf8"), /isUnbrandedCommodityProduct\(options\.productName\) \? \[UNBRANDED_COMMODITY_IDENTITY_RULE_EN\]/u);
+  assert.match(fs.readFileSync("scripts/lib/product-photo-review.ts", "utf8"), /pixelRulesFor\(productName\)/u);
+
+  // 13. Prepare mode keeps the manuscript: no verified hero photo, or a rejected thumbnail, no longer aborts the draft.
+  assert.match(agent, /대표 상품 사진을 확보하지 못해 썸네일 없이 원고를 저장합니다/u);
+  assert.match(agent, /썸네일 감사 거절 · 다른 검증 원본으로 재생성/u);
+  assert.match(agent, /failure\.code === "SEMANTIC_REJECTION" && node\?\.kind === "image" && node\.role === "thumbnail"/u);
+
+  // 14. Seller gallery exhausted (no cutout, no more sources): floor 3, recorded on the composition and honoured by the gate.
+  let exhaustedStore = { version: "brand-post-package/v2", brandLinkId: "gx", connectKind: "SHOPPING", imagePolicy: "LOCKED_PRODUCT_OR_ORIGINAL",
+    approvedAt: "old", title: "침구청소기", createdAt: "c", heroImagePath: "hero.png", imageRequirements: { policy: "verified-source-first" },
+    composition: { sections: [
+      { id: "feature", title: "열풍 건조", body: ["열풍 건조"], imageIntent: "열풍 건조 기능 근거", imageMin: 1, imageMax: 1, imagePaths: [] },
+      { id: "fit", title: "잘 맞는 집", body: ["원룸"], imageIntent: "AI 연출 이미지: 추천 환경의 공간 배치. 실제 사용이나 성능 증명이 아님", imageMin: 0, imageMax: 1, imagePaths: [] },
+      { id: "done", title: "구성", body: ["구성"], imageIntent: "전체 구성 원본", imageMin: 2, imageMax: 2, imagePaths: ["a", "b"] },
+    ], renderNodes: [] }, imageAssets: [] } as unknown as BrandPostPackageManifestV2;
+  const exhaustedDeps = {
+    read: () => structuredClone(exhaustedStore),
+    write: (value: BrandPostPackageManifestV2) => { exhaustedStore = value; return value; },
+    reconcile: (value: BrandPostPackageManifestV2) => value,
+    lock: () => ({ assertOwner() {}, release() {} }),
+    slots: (value: BrandPostPackageManifestV2) => value.composition.sections.map((section) => ({
+      sectionId: section.id, minimum: section.imageMin!, maximum: section.imageMax!, count: section.imagePaths.length,
+      missing: Math.max(0, section.imageMin! - section.imagePaths.length), generatedMinimum: 0, generationMissing: 0, staleTargets: [],
+      assets: section.imagePaths.map((file) => ({ path: file, creationMethod: "source", sourceReview: { usage: "section-matched-product-evidence", reviewClass: "product-photo" } })),
+    })),
+    repair: async (options: { sourceOnly?: boolean }) => ({ errors: options.sourceOnly
+      ? ["IMAGE_SOURCE_BINDING_REQUIRED: 원본 부족"]
+      : ["shopping-fit: PRODUCT_CUTOUT_REQUIRED: 검증된 상품 사진은 있으나 안전하게 분리 가능한 원본이 없습니다."] }),
+  } as unknown as ImageReplanDependencies;
+  const exhausted = await replanShoppingImageCoverage({ brandLinkId: "gx" }, exhaustedDeps);
+  assert.equal(exhausted.reason, "COVERAGE_RELAXED_SELLER_GALLERY_EXHAUSTED", "2 images + hero = 3 meets the exhausted-gallery floor");
+  assert.equal(exhaustedStore.composition.imageFloor, 3);
+  const floorReport = (imageFloor?: number) => buildPostQualityReport({ contract: SHOPPING_POST_CONTRACT_V1, preset: "PREMIUM",
+    sections: [], imageCount: 3, imageFloor });
+  assert.ok(!floorReport(3).blockers.some((blocker) => blocker.includes("이미지가")), "the gate honours the recorded floor");
+  assert.ok(floorReport().blockers.some((blocker) => blocker.includes("이미지가 5장보다 적습니다")), "without a floor the contract minimum still applies");
+
+  console.log("PASS: draft structure normalization + retry, shared evidence requirement + named missing facts, tolerant visual verdicts + non-fatal per-image proposal failures, leak stripping, static seller images, generated lifestyle replan, advice-not-claim, recovery policy version, severe-draft rewrite, coverage relaxation, grader fact matching, unbranded identity, prepare-mode thumbnail recovery, exhausted-gallery floor");
 }
 
 main().catch((error) => {

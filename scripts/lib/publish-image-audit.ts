@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { isUnbrandedCommodityProduct, UNBRANDED_COMMODITY_IDENTITY_RULE_EN } from "./unbranded-product";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -146,6 +147,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           `Selected product: ${JSON.stringify(selectedProduct)}. Product name: ${JSON.stringify(options.productName)}.`,
           `Each attached image belongs ONLY to its corresponding slot: ${JSON.stringify(batch.map((c, i) => ({ index: i + 1, role: c.role, sectionTitle: c.sectionTitle, sectionBody: c.sectionBody, imageIntent: c.imageIntent, allowProductPhoto: c.allowProductPhoto })))}`,
           "Inspect actual pixels of EVERY attached final image. Never infer safety from filename, generated provenance, previous approvals, caption, or alt text.",
+          ...(isUnbrandedCommodityProduct(options.productName) ? [UNBRANDED_COMMODITY_IDENTITY_RULE_EN] : []),
           "Check visible product identity against the selected product context: brand, distinctive design, product line and visible variant details. This is visual compatibility review, not OCR certification of every selected specification. Do not require the complete model number, capacity, scent or purchase quantity to be printed and legible on the body/package. Missing or small specification text alone must not cause rejection. Do not claim those hidden specifications were verified from pixels.",
           "Reject visible contradictions: wrong brand, distinguishable wrong model/design, scent/variant mismatch or conflicting bundle. Reject when there is no identifiable product or its visible distinguishing characteristics genuinely cannot resolve which product is shown; brand plus a generic category alone is not sufficient. A lavender Stress Relief 532ml 2pack must not become fragrance-free Skin Relief or a mixed pair. A single-item detail may illustrate a multi-pack without depicting every purchased unit, provided it does not claim a conflicting bundle.",
           "Reject announcement/expiry-date tables, shipping/coupon/event/copyright/review notices, text-only announcements, unrelated panels and wrong products. Classify the image by its main content: a legible product-specific specification table or feature panel is not a notice merely because a small copyright, warranty or contact footer is present. Such a footer neither proves product identity nor invalidates otherwise direct specification evidence. An announcement-only panel still rejects. A small printed expiry marking on the actual package is not an expiry notice table.",
