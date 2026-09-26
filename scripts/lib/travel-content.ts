@@ -352,6 +352,30 @@ function formatFlight(value: unknown, direction: "출국" | "귀국"): string {
 }
 
 /** 네이버 패키지 페이지의 __NEXT_DATA__에서 일정·항공·식사·쇼핑 근거를 추출한다. */
+const NON_VISIT_PLACE_PATTERN = /(?:공항|터미널|호텔|숙소|리조트\s*(?:체크|투숙)|체크\s*(?:인|아웃)|자유\s*(?:일정|시간)|조식|중식|석식|식사|미팅|집결|이동|출발|도착|귀국|출국|휴식|가이드|면세점|쇼핑센터)/u;
+
+/**
+ * 상세 이미지 판독 줄("N일차: …")로 비어 있는 일차 일정만 채운다. 이미 있는 일차는 바꾸지 않는다.
+ */
+export function mergeTravelVisionSchedules(research: TravelPageResearch | null, lines: string[]): TravelPageResearch | null {
+  if (!research) return research;
+  const schedules = research.schedules.map((schedule) => ({ ...schedule, activities: [...schedule.activities] }));
+  for (const line of lines) {
+    const match = clean(line).match(/(?:^|[:：]\s*)(\d{1,2})\s*일차\s*(?:일정)?\s*[:：]\s*(.+)$/u);
+    if (!match) continue;
+    const day = Number(match[1]);
+    if (day < 1 || (research.durationDays && day > research.durationDays)) continue;
+    const activities = unique(match[2].split(/\s*(?:→|->|,|\/|·)\s*/u).map(clean).filter(Boolean), 24);
+    if (!activities.length) continue;
+    const existing = schedules.find((schedule) => schedule.day === day);
+    if (existing && existing.activities.some((activity) => clean(activity))) continue;
+    if (existing) existing.activities = activities;
+    else schedules.push({ day, activities, meals: [], transport: null });
+  }
+  schedules.sort((a, b) => a.day - b.day);
+  return { ...research, schedules };
+}
+
 export function extractTravelPageResearch(nextData: unknown): TravelPageResearch | null {
   const product = findNaverPackageProduct(nextData);
   if (!product) return null;
@@ -387,6 +411,22 @@ export function extractTravelPageResearch(nextData: unknown): TravelPageResearch
     return [{ day, activities: unique([...tripPlaces, ...activities], 24), meals, transport }];
   });
 
+  // Hotel/free-time packages often carry no mustSeeTours. The itinerary's own trip places are
+  // real visit evidence, so use them to reach the required visit count (never airports, hotels,
+  // meals, transfers or free time).
+  const durationDays = typeof product.dayPeriod === "number" ? product.dayPeriod : schedules.length || null;
+  const requiredVisits = requiredTravelSourceCoverage(durationDays).requiredVisitCount;
+  if (highlights.length < requiredVisits) {
+    const known = new Set(highlights.map((item) => clean(item.name)));
+    for (const place of schedules.flatMap((schedule) => schedule.activities)) {
+      if (highlights.length >= Math.max(requiredVisits, 6)) break;
+      const name = clean(place);
+      if (!name || known.has(name) || NON_VISIT_PLACE_PATTERN.test(name)) continue;
+      known.add(name);
+      highlights.push({ name, description: "" });
+    }
+  }
+
   const flightDetail = record(record(product.trafficAir)?.detail);
   const flights = flightDetail
     ? [formatFlight(flightDetail.departure, "출국"), formatFlight(flightDetail.return, "귀국")].filter(Boolean)
@@ -402,7 +442,7 @@ export function extractTravelPageResearch(nextData: unknown): TravelPageResearch
 
   return {
     source: "naver-package-next-data",
-    durationDays: typeof product.dayPeriod === "number" ? product.dayPeriod : schedules.length || null,
+    durationDays,
     destinations,
     highlights,
     schedules,

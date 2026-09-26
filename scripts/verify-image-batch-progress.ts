@@ -53,7 +53,7 @@ class FakeChild extends EventEmitter {
 type Job = { id: string; outStem: string; prompt: string };
 function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lockFails?: boolean; automation?: boolean; sourceMissing?: boolean; sourceError?: string;
   sourcePaths?: string[]; segmentablePaths?: string[]; lockedUsesBackground?: boolean;
-  sectionMatchedPaths?: string[]; sectionReviewError?: string; reviewClass?: "feature-evidence" | "scene-evidence"; cardFacts?: string[];
+  sectionMatchedPaths?: string[]; sectionReviewError?: string; reviewClass?: "feature-evidence" | "scene-evidence"; cardFacts?: string[]; cardMatches?: number;
   worker?: (args: string[], child: FakeChild) => void } = {}) {
   const packageDir = fs.mkdtempSync(path.join(root, "package-"));
   let child = new FakeChild();
@@ -116,6 +116,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       "../../scripts/lib/shopping-fact-card": {
         SHOPPING_FACT_CARD_LIMIT: 3,
         selectShoppingFactCardFacts: () => settings.cardFacts || [],
+        countSectionMatchedFacts: () => settings.cardMatches ?? 0,
         createShoppingFactCard: async () => {
           const outputPath = path.join(packageDir, `shopping-fact-card-${crypto.randomUUID()}.png`);
           fs.writeFileSync(outputPath, crypto.randomUUID());
@@ -571,6 +572,21 @@ async function verifyGenerator() {
     assert.equal(h.spawns, 0);
     assert.ok(results.every(result => !result.generatedPath));
     assert.ok(results.every(result => result.error?.includes("IMAGE_SOURCE_BINDING_REQUIRED")));
+  });
+
+  await check("feature section without a matching seller photo gets a fact card only when its facts match the text", async () => {
+    const run = async (settings: { cardMatches: number; sourceOnly?: boolean }) => {
+      const h = harness({ sourcePaths: [sourcePath], sectionMatchedPaths: [], cardFacts: ["흡입력: 18,000Pa", "무게: 1.2kg"], cardMatches: settings.cardMatches });
+      h.manifest.connectKind = "SHOPPING";
+      h.manifest.imageRequirements = { policy: "verified-source-first" };
+      const [result] = await h.generate(0, { sourceOnly: settings.sourceOnly, requests: [{ requestId: "feature", sectionId: "section" }] });
+      assert.equal(h.spawns, 0);
+      return result;
+    };
+    const carded = await run({ cardMatches: 1 });
+    assert.ok(!carded.error && carded.provenance === "EDITORIAL_CARD" && carded.creationMethod === "local-composite", JSON.stringify(carded));
+    assert.match((await run({ cardMatches: 0 })).error || "", /IMAGE_SOURCE_BINDING_REQUIRED/u, "unrelated facts never stand in for a feature");
+    assert.match((await run({ cardMatches: 1, sourceOnly: true })).error || "", /IMAGE_SOURCE_BINDING_REQUIRED/u, "source-only binding still reports the gap");
   });
 
   await check("one reviewed feature source is never reused as generic evidence for another feature", async () => {

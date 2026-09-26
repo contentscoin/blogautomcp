@@ -27,14 +27,29 @@ const HEADING_LINE = /^(?!.*[.!?。…]$)(?![-*•·▸💡#]).{2,42}$/u;
  * 문자열 하나에 여러 섹션이 들어 있으면 "짧은 소제목 줄 + 빈 줄 + 본문" 경계로 나눈다.
  * 경계가 분명하지 않으면 그대로 둔다.
  */
+/** 본문과 붙어 있어도 제목으로 보는 줄: 마크다운 제목, 한 줄 굵게, "N일차 …", 기호로 시작하는 짧은 줄. */
+const EXPLICIT_HEADING_LINE = /^(?:#{1,6}\s+\S.{0,60}|\*\*[^*\n]{2,60}\*\*|\d{1,2}\s*일차(?:\s.{0,40})?|[■▶◆●◇□▣【].{1,40})$/u;
+
+/** 문장부호로 끝나는 줄은 본문 문장이다(마크다운·굵게 제목은 예외). */
+function isExplicitHeading(line: string): boolean {
+  return EXPLICIT_HEADING_LINE.test(line) && (/^(?:#|\*\*)/u.test(line) || !/[.!?。…]$/u.test(line));
+}
+
+/** 제목 줄 앞뒤에 빈 줄을 넣어, 제목 바로 아래 본문이 붙은 형태도 블록 경계가 생기게 한다. */
+function isolateExplicitHeadings(section: string): string {
+  return section.replace(/\r\n?/gu, "\n").split("\n")
+    .map((line) => isExplicitHeading(line.trim()) ? `\n${line.trim().replace(/^[■▶◆●◇□▣]\s*/u, "")}\n` : line)
+    .join("\n");
+}
+
 export function splitMergedSection(section: string): string[] {
-  const blocks = section.replace(/\r\n?/gu, "\n").split(/\n\s*\n/u).map((block) => block.trim()).filter(Boolean);
+  const blocks = isolateExplicitHeadings(section).split(/\n\s*\n/u).map((block) => block.trim()).filter(Boolean);
   if (blocks.length < 4) return [section];
   const parts: string[] = [];
   let current: string[] = [];
   for (const block of blocks) {
     const singleLine = !block.includes("\n");
-    const cleaned = block.replace(/^#{1,6}\s*/u, "").replace(/^\*\*(.+)\*\*$/u, "$1").trim();
+    const cleaned = block.replace(/^#{1,6}\s*/u, "").replace(/^\*\*(.+)\*\*$/u, "$1").replace(/^【(.+)】$/u, "$1").trim();
     if (singleLine && HEADING_LINE.test(cleaned) && current.length > 0) {
       parts.push(current.join("\n\n"));
       current = [cleaned];

@@ -452,7 +452,9 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     plan = await recheck(false, 1);
   }
   if (plan.action === "repair-composition") {
-    throw unresolvedCompositionError(plan.reason);
+    // Name the actual composition blocker instead of the generic plan summary.
+    const detail = plan.targets.flatMap((target) => target.evidence).filter(Boolean).join(" ");
+    throw unresolvedCompositionError(detail ? `${plan.reason} ${detail}` : plan.reason);
   }
   if (plan.action !== "complete") {
     const error = plan.action === "refresh-source" ? sourceEvidenceError(plan) : unresolvedQualityError(plan);

@@ -412,6 +412,9 @@ function buildQualityReport(input: {
           : input.sourceEvidenceLevel === "sparse"
             ? "저장 출처의 상품 고유 기능·구조·규격이 부족합니다. 원고 재작성 전에 상세 정보를 다시 수집해야 합니다."
             : `확인된 기능·수치 ${coveredEvidence}/${requiredEvidence}개만 본문에 등장합니다.`,
+        ...(isTravel && input.sourceEvidenceCoveragePass && "uncoveredPlaces" in reviewSubstance && reviewSubstance.uncoveredPlaces.length > 0
+          ? [`본문에 아직 없는 핵심 방문지(이름을 그대로 쓰고 그곳의 풍경·즐길 거리와 한 문장으로 연결하기): ${reviewSubstance.uncoveredPlaces.slice(0, 6).join(" / ")}`]
+          : []),
         ...(!isTravel && "missingSignals" in reviewSubstance && reviewSubstance.missingSignals.length > 0
           ? [`본문에 아직 없는 확인 사실(숫자·핵심 단어를 그대로 한 문장에 쓰기): ${reviewSubstance.missingSignals.slice(0, 6).join(" / ")}`]
           : [])]
@@ -769,12 +772,14 @@ export function getBrandLinkContentReadiness(
     {
       key: "sections",
       label: "본문 섹션",
-      status: mainSectionCount >= sectionMinimum ? "pass" : "fail",
+      // Below the blocking floor fails; between the floor and the template minimum is advisory.
+      status: mainSectionCount >= sectionMinimum ? "pass" : mainSectionCount >= Math.max(3, Math.ceil(sectionMinimum * 0.8)) ? "warn" : "fail",
     },
     {
       key: "editorial-flow",
       label: isTravel ? "여행지 배경-장면-체험-팁 흐름" : "제품정체-기능원리-사용법-장단점-결론 흐름",
-      status: editorialCoverage.missingCoreRoles.length <= 1 ? "pass" : "fail",
+      // Flow gaps are already scored in the quality categories; with a passing score they are advice.
+      status: editorialCoverage.missingCoreRoles.length <= 1 ? "pass" : quality.score >= quality.passScore ? "warn" : "fail",
     },
     {
       key: "review-substance",
@@ -819,7 +824,7 @@ export function getBrandLinkContentReadiness(
       status:
         input.hashtags.length >= 3 && input.hashtags.length <= 10
           ? "pass"
-          : input.hashtags.length >= 2
+          : input.hashtags.length >= 1
             ? "warn"
             : "fail",
     },

@@ -135,7 +135,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
       candidates.push({ nodeIndex, sectionId: node.sectionId, assetPath: node.assetPath, snapshot, sha256, role: node.role,
         sectionTitle: thumbnail ? "Thumbnail" : sectionTitle, sectionBody,
         imageIntent: section?.imageIntent || "Selected product overview with title overlay",
-        allowProductPhoto: thumbnail || isShoppingLifestyleImage(section!) || allowsGenericBrandPostProductPhoto({ sectionTitle, imageIntent: section!.imageIntent, imageSource: section!.imageSource }),
+        allowProductPhoto: thumbnail || isShoppingFactCardPath(node.assetPath) || isShoppingLifestyleImage(section!) || allowsGenericBrandPostProductPhoto({ sectionTitle, imageIntent: section!.imageIntent, imageSource: section!.imageSource }),
         ...(isShoppingFactCardPath(node.assetPath) ? { editorialFactCard: true } : {}),
       });
       result.images.push({ nodeIndex, assetPath: node.assetPath, sha256 });

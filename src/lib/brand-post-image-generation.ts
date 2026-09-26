@@ -19,7 +19,7 @@ import {
   createOriginalProductPhotoThumbnail,
   extractLockedProductPng,
 } from "../../scripts/lib/product-image-lock";
-import { createShoppingFactCard, selectShoppingFactCardFacts, SHOPPING_FACT_CARD_LIMIT } from "../../scripts/lib/shopping-fact-card";
+import { countSectionMatchedFacts, createShoppingFactCard, selectShoppingFactCardFacts, SHOPPING_FACT_CARD_LIMIT } from "../../scripts/lib/shopping-fact-card";
 import { brandPostQualitySourceFromSnapshot } from "./brand-post-quality-source";
 import { buildProductThumbnailCopy } from "../../scripts/lib/product-thumbnail";
 import { buildTravelThumbnailCopy } from "../../scripts/lib/travel-content";
@@ -1010,19 +1010,18 @@ export async function generateBrandPostImages(options: {
     targets.splice(0, targets.length, ...pendingTargets);
     requestIndexes.splice(0, requestIndexes.length, ...pendingIndexes);
 
-    for (const { index, target } of failedFeatureTargets) {
-      await publish(index, {
-        ...baseResult(index),
-        sectionId: target.sectionId,
-        imageIntent: target.imageIntent,
-        error: sourceError || (semanticCandidateCount > 0
-          ? "IMAGE_SOURCE_BINDING_REQUIRED: 이 기능 파트와 직접 일치하는 서로 다른 검증 상품 원본이 필요합니다."
-          : "PRODUCT_SOURCE_REQUIRED: 공지·안내판을 제외한 검증 가능한 상품 원본 사진을 찾지 못했습니다."),
-      });
-    }
-    if (targets.length === 0) return results;
+    const failFeatureTarget = async ({ index, target }: { index: number; target: ResolvedImageTarget }) => publish(index, {
+      ...baseResult(index),
+      sectionId: target.sectionId,
+      imageIntent: target.imageIntent,
+      error: sourceError || (semanticCandidateCount > 0
+        ? "IMAGE_SOURCE_BINDING_REQUIRED: 이 기능 파트와 직접 일치하는 서로 다른 검증 상품 원본이 필요합니다."
+        : "PRODUCT_SOURCE_REQUIRED: 공지·안내판을 제외한 검증 가능한 상품 원본 사진을 찾지 못했습니다."),
+    });
 
     if (options.sourceOnly) {
+      for (const failed of failedFeatureTargets) await failFeatureTarget(failed);
+      if (targets.length === 0) return results;
       const error = sourceError || (semanticCandidateCount > 0
         ? "IMAGE_SOURCE_BINDING_REQUIRED: 검증된 서로 다른 상품 원본이 필수 이미지 슬롯 수보다 적습니다. 남은 슬롯만 생성 또는 수동 검토가 필요합니다."
         : "PRODUCT_SOURCE_REQUIRED: 공지·안내판을 제외한 검증 가능한 상품 원본 사진을 찾지 못했습니다.");
@@ -1030,12 +1029,13 @@ export async function generateBrandPostImages(options: {
       return results;
     }
 
+    if (targets.length === 0 && failedFeatureTargets.length === 0) return results;
     let sourcePalette = { fresh: [] as string[], reusable: [] as string[], verifiedCount: 0 };
     try {
-      sourcePalette = await existingShoppingSources(options.manifest, targets, {
+      sourcePalette = await existingShoppingSources(options.manifest, [...targets, ...failedFeatureTargets.map(failed => failed.target)], {
         productName: options.productName,
         sourceImageUrls: options.sourceImageUrls,
-      }, targets.length);
+      }, Math.max(1, targets.length + failedFeatureTargets.length));
     }
     catch (error) { sourceError = error instanceof Error ? error.message : String(error); }
 
@@ -1064,7 +1064,8 @@ export async function generateBrandPostImages(options: {
     const usedCardFacts = new Set<string>();
     let factCardCount = (options.manifest.imageAssets || [])
       .filter(asset => asset.provenance === "EDITORIAL_CARD" && asset.creationMethod === "local-composite").length;
-    const publishFactCard = async (index: number, target: ResolvedImageTarget, sources: string[]): Promise<boolean> => {
+    const publishFactCard = async (index: number, target: ResolvedImageTarget, sources: string[],
+      options_: { requireSectionFact?: boolean } = {}): Promise<boolean> => {
       if (generatedRequired || sources.length === 0) return false;
       try {
         let outputPath: string;
@@ -1076,6 +1077,8 @@ export async function generateBrandPostImages(options: {
           if (factCardCount >= SHOPPING_FACT_CARD_LIMIT) return false;
           const facts = selectShoppingFactCardFacts({ facts: factCardFacts, sectionText: `${target.sectionTitle}\n${target.bodyExcerpt}`, used: usedCardFacts });
           if (facts.length < 2) return false;
+          // A feature section may only use a card whose facts are the ones its text discusses.
+          if (options_.requireSectionFact && countSectionMatchedFacts(facts, `${target.sectionTitle}\n${target.bodyExcerpt}`) === 0) return false;
           outputPath = (await createShoppingFactCard({ sourcePath: sources[factCardCount % sources.length], title: target.sectionTitle,
             facts, variant: factCardCount, outputDir: factCardDir })).outputPath;
           facts.forEach(fact => usedCardFacts.add(fact));
@@ -1088,6 +1091,12 @@ export async function generateBrandPostImages(options: {
         return false;
       }
     };
+    // Feature sections without a matching seller photo: a card with the facts the section discusses.
+    for (const failed of failedFeatureTargets) {
+      const wholePhotos = [...sourcePalette.fresh, ...sourcePalette.reusable];
+      if (!await publishFactCard(failed.index, failed.target, wholePhotos, { requireSectionFact: true })) await failFeatureTarget(failed);
+    }
+    if (targets.length === 0) return results;
     const targetSources = [...new Set(targets.flatMap(target => target.sourcePath ? [target.sourcePath] : []))];
     const safeTargetSources = new Set(await segmentable(targetSources));
     const unsafeTargetIndexes: number[] = [];
