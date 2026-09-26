@@ -1091,9 +1091,17 @@ export async function generateBrandPostImages(options: {
         return false;
       }
     };
+    // Cards may reuse seller photos the post already shows: each card is a distinct output.
+    const packagePhotos = () => [...new Set([
+      ...normalizePackageImageAssets(options.manifest)
+        .filter(asset => asset.provenance === "ORIGINAL")
+        .map(asset => asset.sourcePath || asset.path),
+      readProductPhotoSource(options.manifest.heroImagePath)?.sourcePath || "",
+    ].filter(file => Boolean(file) && fs.existsSync(file)))];
+    const cardSources = (primary: string[]) => primary.length ? primary : packagePhotos();
     // Feature sections without a matching seller photo: a card with the facts the section discusses.
     for (const failed of failedFeatureTargets) {
-      const wholePhotos = [...sourcePalette.fresh, ...sourcePalette.reusable];
+      const wholePhotos = cardSources([...sourcePalette.fresh, ...sourcePalette.reusable]);
       if (!await publishFactCard(failed.index, failed.target, wholePhotos, { requireSectionFact: true })) await failFeatureTarget(failed);
     }
     if (targets.length === 0) return results;
@@ -1122,11 +1130,11 @@ export async function generateBrandPostImages(options: {
       const error = sourceError || (sourcePalette.verifiedCount > 0
         ? "PRODUCT_CUTOUT_REQUIRED: 검증된 상품 사진은 있으나 안전하게 분리 가능한 원본이 없습니다. 전체 사각형 사진은 생성 배경에 합성하지 않았습니다."
         : "PRODUCT_SOURCE_REQUIRED: 공지·안내판을 제외한 검증 가능한 상품 원본 사진을 찾지 못했습니다.");
-      const verifiedWholePhotos = [...sourcePalette.fresh, ...sourcePalette.reusable];
+      const verifiedWholePhotos = cardSources([...sourcePalette.fresh, ...sourcePalette.reusable]);
       for (let index = targets.length - 1; index >= 0; index -= 1) {
         if (targets[index].sourcePath) continue;
         const requestIndex = requestIndexes[index];
-        if (sourcePalette.verifiedCount === 0 || !await publishFactCard(requestIndex, targets[index], verifiedWholePhotos)) {
+        if (verifiedWholePhotos.length === 0 || !await publishFactCard(requestIndex, targets[index], verifiedWholePhotos)) {
           await publish(requestIndex, { ...baseResult(requestIndex), error });
         }
         targets.splice(index, 1);

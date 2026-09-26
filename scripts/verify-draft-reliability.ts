@@ -198,10 +198,27 @@ async function main() {
   assert.equal(relaxedStore.composition.sections[0].imageIntent, "6중 날 기능 근거", "intent is not relabelled");
   assert.ok(relaxedStore.pipelineNotes?.some((note) => note.startsWith("IMAGE_COVERAGE_RELAXED")));
   relaxedStore.composition.sections[0].imageMin = 1;
-  relaxedStore.composition.sections[2].imagePaths = ["a", "b"];
-  relaxedStore.composition.sections[2].imageMin = 2;
+  relaxedStore.composition.sections[2].imagePaths = ["a", "b", "c"];
+  relaxedStore.composition.sections[2].imageMin = 3;
+  const fourImages = await replanShoppingImageCoverage({ brandLinkId: "rx" }, relaxDeps);
+  assert.equal(fourImages.reason, "COVERAGE_RELAXED_SELLER_GALLERY_EXHAUSTED", "(1.3.87) 3 section images + hero = 4 meets the three-image floor");
+  relaxedStore.composition.sections[0].imageMin = 1;
+  relaxedStore.composition.sections[2].imagePaths = ["a"];
+  relaxedStore.composition.sections[2].imageMin = 1;
   const thin = await replanShoppingImageCoverage({ brandLinkId: "rx" }, relaxDeps);
-  assert.match(thin.reason, /^REPLAN_INSUFFICIENT_VERIFIED_ALTERNATIVES · 전체 이미지 3\/5장/u, "too few images overall still asks for more");
+  assert.match(thin.reason, /^REPLAN_INSUFFICIENT_VERIFIED_ALTERNATIVES · 전체 이미지 2\/3장/u, "too few images overall still asks for more");
+  // (1.3.87) No optional section to move coverage into: relax on the same floor instead of stopping.
+  relaxedStore.composition.sections = relaxedStore.composition.sections.filter((section) => section.id !== "spec");
+  relaxedStore.composition.sections.find((section) => section.id === "done")!.imagePaths = ["a", "b", "c"];
+  relaxedStore.composition.sections.find((section) => section.id === "done")!.imageMin = 3;
+  relaxedStore.composition.sections[0].imageMin = 2;
+  const noCapacity = await replanShoppingImageCoverage({ brandLinkId: "rx" }, relaxDeps);
+  assert.equal(noCapacity.changed, true, noCapacity.reason);
+  assert.equal(relaxedStore.composition.sections[0].imageMin, 0);
+  relaxedStore.composition.sections[0].imageMin = 2;
+  relaxedStore.composition.sections.find((section) => section.id === "done")!.imagePaths = ["a"];
+  relaxedStore.composition.sections.find((section) => section.id === "done")!.imageMin = 1;
+  assert.match((await replanShoppingImageCoverage({ brandLinkId: "rx" }, relaxDeps)).reason, /^REPLAN_NO_ALTERNATIVE_CAPACITY · 전체 이미지 2\/3장/u);
 
   // 11. Grader fact matching: decimals kept, spacing ignored, a numeric token alone suffices (golf-watch case).
   const golf = ["무선 방식", "배터리: 내장배터리", "방수: 생활방수", "사이즈/무게: 가로 47.8mm × 47.8mm × 13.73mm / 30.1g (밴드 미포함)", "오차 범위: ±3m"];
@@ -407,7 +424,7 @@ async function main() {
   assert.equal(travelEvidence.status, "fail");
   assert.ok(travelEvidence.notes.some((note) => note.includes("디몰")), JSON.stringify(travelEvidence.notes));
 
-  console.log("PASS: draft structure normalization + retry, shared evidence requirement + named missing facts, tolerant visual verdicts + non-fatal per-image proposal failures, leak stripping, static seller images, generated lifestyle replan, advice-not-claim, recovery policy version, severe-draft rewrite, coverage relaxation, grader fact matching, unbranded identity, prepare-mode thumbnail recovery, exhausted-gallery floor, recheck/revise agreement, seller-image vision batch, fact cards, card approval, advisory signals, digital facts, travel trip-place visits, heading splits, named missing places");
+  console.log("PASS: draft structure normalization + retry, shared evidence requirement + named missing facts, tolerant visual verdicts + non-fatal per-image proposal failures, leak stripping, static seller images, generated lifestyle replan, advice-not-claim, recovery policy version, severe-draft rewrite, coverage relaxation, grader fact matching, unbranded identity, prepare-mode thumbnail recovery, exhausted-gallery floor, recheck/revise agreement, seller-image vision batch, fact cards, card approval, advisory signals, digital facts, travel trip-place visits, heading splits, named missing places, three-image replan floor, no-capacity relaxation");
 }
 
 main().catch((error) => {
