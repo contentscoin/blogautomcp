@@ -20,6 +20,9 @@ import { isShoppingFactCardPath } from "./lib/shopping-fact-card-rule";
 import { readProductPhotoSource } from "./lib/product-photo-provenance";
 import { classifyBrandPostImageEvidence, isShoppingFactCardAsset } from "../src/lib/brand-post-image-evidence";
 import { planSellerVisionBatches } from "./lib/detail-vision-reader";
+import { isDraftEditorialQualityPassed } from "../src/lib/brand-post-quality-display";
+import { buildProductReviewAnalysis } from "./lib/product-editorial-plan";
+import { extractTravelPageResearch, mergeTravelVisionSchedules, assessTravelPageResearchCoverage } from "./lib/travel-content";
 import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
@@ -254,7 +257,12 @@ async function main() {
   const floorReport = (imageFloor?: number) => buildPostQualityReport({ contract: SHOPPING_POST_CONTRACT_V1, preset: "PREMIUM",
     sections: [], imageCount: 3, imageFloor });
   assert.ok(!floorReport(3).blockers.some((blocker) => blocker.includes("이미지가")), "the gate honours the recorded floor");
-  assert.ok(floorReport().blockers.some((blocker) => blocker.includes("이미지가 5장보다 적습니다")), "without a floor the contract minimum still applies");
+  const unfilled = { id: "feature", title: "기능", body: ["본문"], characterCount: 0, imagePaths: [], imageIntent: "기능 근거",
+    headingStyle: "sectionTitle", imageMin: 1, imageMax: 1 } as never;
+  assert.ok(buildPostQualityReport({ contract: SHOPPING_POST_CONTRACT_V1, preset: "PREMIUM", sections: [unfilled], imageCount: 3 })
+    .blockers.some((blocker) => blocker.includes("이미지가 5장보다 적습니다")), "with a required slot still empty the contract minimum applies");
+  assert.ok(floorReport().warnings.some((warning) => warning.includes("이미지가 5장보다 적습니다")) &&
+    !floorReport().blockers.some((blocker) => blocker.includes("이미지가")), "all required slots filled: three images block no longer, the gap is advice");
 
 
   // 12. (1.3.85) A passing draft with a warn-level flow signal is not sent to text repair.
@@ -329,7 +337,77 @@ async function main() {
   assert.equal(cardReplan.reason, "VERIFIED_ALTERNATIVE_COVERAGE", "a fact card carries the moved coverage");
   assert.equal(cardReplan.after.missing, 0);
 
-  console.log("PASS: draft structure normalization + retry, shared evidence requirement + named missing facts, tolerant visual verdicts + non-fatal per-image proposal failures, leak stripping, static seller images, generated lifestyle replan, advice-not-claim, recovery policy version, severe-draft rewrite, coverage relaxation, grader fact matching, unbranded identity, prepare-mode thumbnail recovery, exhausted-gallery floor, recheck/revise agreement, seller-image vision batch, fact cards");
+
+  // 15. (1.3.86) Fact cards pass approval; advisory signals never read as failures.
+  const pkgSource = fs.readFileSync("src/lib/brand-post-package.ts", "utf8");
+  assert.match(pkgSource, /!source\.segmented && asset\.creationMethod !== "source" && !isShoppingFactCardAsset\(asset\)/u,
+    "the full-frame overlay block exempts flat information cards");
+  const flowReadiness = getBrandLinkContentReadiness({
+    productName: product.productName, title: `${product.productName} 사용법`, brandLink: "https://naver.me/x", generationSource: "AI",
+    hasRepresentativeImage: true, requireRepresentativeImage: false, connectKind: "SHOPPING", experienceMode: "AI_ASSISTED_INFORMATION",
+    compositionQualityReport: null, sourceDescription: product.sourceDescription, sourceFeatures: product.sourceFeatures, mode: "editorial",
+    hashtags: ["청소기"], sections: ["흡입력\n\n18,000Pa 흡입력이에요.", "고지\n\n이 포스팅은 쇼핑 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받습니다."],
+  });
+  const flow = flowReadiness.signals.find((signal) => signal.key === "editorial-flow");
+  if (flowReadiness.quality.score >= flowReadiness.quality.passScore) assert.notEqual(flow?.status, "fail", "a passing score keeps flow gaps advisory");
+  assert.notEqual(flowReadiness.signals.find((signal) => signal.key === "hashtags")?.status, "fail", "one hashtag warns, never fails");
+  assert.equal(isDraftEditorialQualityPassed({ canPublish: true, code: "ok", blockers: [], signals: [{ key: "editorial-flow", status: "warn" }],
+    quality: { score: 90, passScore: 62, categories: [] } }), true);
+
+  // 16. (1.3.86) Digital/appliance facts read from detail images count as evidence.
+  const monitor = buildProductReviewAnalysis({ productName: "삼탠바이미 무빙큐빅스 화이트에디션 X2", description: "", targetSectionCount: 11,
+    features: ["화면 크기: 27형", "해상도: 1920x1080 FHD", "주사율: 60Hz", "배터리: 최대 3시간 사용", "무게: 7.9kg", "터치: 10포인트 멀티터치"] });
+  assert.notEqual(monitor.evidenceLevel, "sparse");
+  assert.ok(monitor.verifiedSignals.some((signal) => signal.includes("27형")) && monitor.verifiedSignals.some((signal) => signal.includes("60Hz")));
+  const laptop = buildProductReviewAnalysis({ productName: "베이직북 16", description: "", targetSectionCount: 11,
+    features: ["프로세서: 인텔 N100", "메모리: 8GB", "저장용량: 256GB SSD", "무게: 1.6kg"] });
+  assert.notEqual(laptop.evidenceLevel, "sparse");
+
+  // 17. (1.3.86) Hotel/free-time packages: itinerary trip places count as visits; vision fills only empty days.
+  const nextData = { props: { pageProps: { product: { productName: "동경 4일 시내호텔 3연박", dayPeriod: 4, visitAreas: [{ countryName: "일본", cityName: "도쿄" }], mustSeeTours: { tours: [] },
+    schedules: [
+      { dayOfSchedule: 1, tripPlaces: [{ placeName: "나리타 공항" }, { placeName: "시부야" }], info: { editors: ["호텔 체크인"] } },
+      { dayOfSchedule: 2, tripPlaces: [{ placeName: "하코네" }, { placeName: "오와쿠다니" }], info: { editors: [] } },
+      { dayOfSchedule: 3, tripPlaces: [], info: { editors: [] } },
+      { dayOfSchedule: 4, tripPlaces: [{ placeName: "하라주쿠" }], info: { editors: ["귀국"] } },
+    ] } } } };
+  const research = extractTravelPageResearch(nextData);
+  if (research) {
+    assert.ok(research.highlights.some((item) => item.name === "시부야") && !research.highlights.some((item) => /공항|호텔/u.test(item.name)),
+      "trip places fill visits without airports or hotels");
+    const before = assessTravelPageResearchCoverage(research);
+    assert.ok(before.visitCount >= before.requiredVisitCount);
+    const merged = mergeTravelVisionSchedules(research, ["상세 이미지 확인: 3일차: 요코하마 → 미나토미라이", "상세 이미지 확인: 2일차: 다른 일정"]);
+    assert.deepEqual(merged!.schedules.find((schedule) => schedule.day === 3)!.activities, ["요코하마", "미나토미라이"]);
+    assert.deepEqual(merged!.schedules.find((schedule) => schedule.day === 2)!.activities, research.schedules.find((schedule) => schedule.day === 2)!.activities,
+      "vision never overwrites a day the structured data already has");
+    assert.equal(assessTravelPageResearchCoverage(merged).sufficient, true);
+  } else {
+    assert.fail("the fixture NEXT_DATA shape must parse");
+  }
+  assert.match(agent, /방문지 \$\{coverage\.visitCount\}\/\$\{coverage\.requiredVisitCount\}/u, "the travel failure names the coverage");
+
+  // 18. (1.3.86) Merged travel sections split on markdown, bold, day and symbol headings.
+  const mdMerged = Array.from({ length: 7 }, (_, i) => `## ${i + 1}일차 후쿠오카 코스\n나카스 강변을 걸어요. 저녁엔 포장마차가 열려요.`).join("\n");
+  assert.equal(normalizeDraftSections([mdMerged], 7).length, 7);
+  assert.equal(splitMergedSection(Array.from({ length: 4 }, (_, i) => `${i + 1}일차 타이페이\n고궁 박물관을 둘러봐요.\n지우펀 야경도 좋아요.`).join("\n")).length, 4);
+  assert.equal(splitMergedSection(Array.from({ length: 5 }, (_, i) => `■ 포인트 ${i + 1}\n설명 문장입니다.`).join("\n")).length, 5);
+  assert.deepEqual(splitMergedSection("1일차 오전에는 공항에서 시내로 이동해요.\n점심은 라멘이에요."), ["1일차 오전에는 공항에서 시내로 이동해요.\n점심은 라멘이에요."],
+    "a sentence that starts with a day number is body text");
+
+  // 19. (1.3.86) The travel repair note names the missing places.
+  const travelReadiness = getBrandLinkContentReadiness({
+    productName: "보라카이 3박4일", title: "보라카이 3박4일 여행", brandLink: "https://naver.me/x", generationSource: "AI",
+    hasRepresentativeImage: true, requireRepresentativeImage: false, connectKind: "TRAVEL", experienceMode: "AI_ASSISTED_INFORMATION",
+    compositionQualityReport: null, sourceDescription: "", mode: "editorial", hashtags: ["보라카이"],
+    sourceFeatures: ["여행 기간: 4일", "핵심 방문지: 화이트비치, 디몰", "1일차 일정: 화이트비치", "2일차 일정: 디몰", "3일차 일정: 호핑투어"],
+    sections: ["화이트비치\n\n화이트비치 모래가 고와요. 노을이 예뻐요.", "고지\n\n이 포스팅은 네이버 여행 커넥트 활동의 일환으로, 예약 발생 시 수수료를 제공받습니다."],
+  });
+  const travelEvidence = travelReadiness.quality.categories.find((category) => category.key === "productEvidence")!;
+  assert.equal(travelEvidence.status, "fail");
+  assert.ok(travelEvidence.notes.some((note) => note.includes("디몰")), JSON.stringify(travelEvidence.notes));
+
+  console.log("PASS: draft structure normalization + retry, shared evidence requirement + named missing facts, tolerant visual verdicts + non-fatal per-image proposal failures, leak stripping, static seller images, generated lifestyle replan, advice-not-claim, recovery policy version, severe-draft rewrite, coverage relaxation, grader fact matching, unbranded identity, prepare-mode thumbnail recovery, exhausted-gallery floor, recheck/revise agreement, seller-image vision batch, fact cards, card approval, advisory signals, digital facts, travel trip-place visits, heading splits, named missing places");
 }
 
 main().catch((error) => {

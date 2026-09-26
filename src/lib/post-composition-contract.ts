@@ -656,9 +656,20 @@ export function buildPostQualityReport(options: {
     if (ok) return;
     (options.preset === "PREMIUM" ? blockers : warnings).push(message);
   };
-  register(actual.characters >= target.characters.min, `본문이 ${target.characters.min}자보다 짧습니다 (${actual.characters}자).`);
-  register(actual.sections >= target.sections.min, `본문 섹션이 ${target.sections.min}개보다 적습니다 (${actual.sections}개).`);
-  register(actual.images >= target.images.min, `이미지가 ${target.images.min}장보다 적습니다 (${actual.images}장).`);
+  // Same floors as the editorial gate: 80% of the length/section minimum blocks, the rest is advice.
+  // With every required section slot filled, three images (hero + two) are the blocking floor.
+  const floors = {
+    characters: Math.round(target.characters.min * 0.8),
+    sections: Math.max(3, Math.ceil(target.sections.min * 0.8)),
+    images: missingSectionIds.length === 0 ? Math.min(target.images.min, 3) : target.images.min,
+  };
+  const graded = (value: number, floor: number, minimum: number, message: string) => {
+    if (value < floor) register(false, message);
+    else if (value < minimum) warnings.push(message);
+  };
+  graded(actual.characters, floors.characters, target.characters.min, `본문이 ${target.characters.min}자보다 짧습니다 (${actual.characters}자).`);
+  graded(actual.sections, floors.sections, target.sections.min, `본문 섹션이 ${target.sections.min}개보다 적습니다 (${actual.sections}개).`);
+  graded(actual.images, floors.images, target.images.min, `이미지가 ${target.images.min}장보다 적습니다 (${actual.images}장).`);
   register(
     missingSectionIds.length === 0,
     `이미지 최소 장수를 못 채운 파트가 있습니다: ${missingSectionIds.join(", ")}.`,

@@ -19,11 +19,11 @@ const LABEL_ALIASES: Record<string, string> = {
   "정격전압": "전압", "정격전압,소비전력": "전원규격", "정격전압및소비전력": "전원규격",
   "배터리용량": "배터리", "흡입력": "흡입력", "흡입압력": "흡입력",
 };
-const LABELS = new Set(("용량 규격 표시규격 크기 사이즈 가로 세로 높이 폭 깊이 두께 지름 직경 면적 무게 중량 소재 재질 원재료 성분 함량 구성품 구성 수량 개수 색상 전압 정격 소비전력 출력 배터리 충전시간 사용시간 작동시간 풍량 온도 모드 단계 회전각도 방수 방진 호환 원산지 제조국 보관조건 유통기한 소비기한 알레르기 세탁방법 세척방법 기능 식품유형 부위 영양정보 효율등급 전원규격 흡입력").split(" "));
+const LABELS = new Set(("용량 규격 표시규격 크기 사이즈 가로 세로 높이 폭 깊이 두께 지름 직경 면적 무게 중량 소재 재질 원재료 성분 함량 구성품 구성 수량 개수 색상 전압 정격 소비전력 출력 배터리 충전시간 사용시간 작동시간 풍량 온도 모드 단계 회전각도 방수 방진 호환 원산지 제조국 보관조건 유통기한 소비기한 알레르기 세탁방법 세척방법 기능 식품유형 부위 영양정보 효율등급 전원규격 흡입력 해상도 화면 화면크기 디스플레이 패널 밝기 주사율 프로세서 CPU 메모리 RAM 저장장치 저장용량 SSD 운영체제 스피커 포트 단자 인터페이스 블루투스 무선 카메라 시야각 방식 인증").split(" "));
 
 export function normalizeProductFactLabel(label: string): string {
   const key = clean(label).replace(/\s+/gu, "");
-  return LABEL_ALIASES[key] || (LABELS.has(key) ? key : "");
+  return LABEL_ALIASES[key] || (LABELS.has(key) ? key : LABELS.has(key.toUpperCase()) ? key.toUpperCase() : "");
 }
 
 export function isUnusableProductFactValue(value: string): boolean {
@@ -49,7 +49,7 @@ export function normalizeTypedProductFact(value: string): string {
 
 // One unit policy for feature recognition and evidence scoring. Word boundaries
 // prevent a model number (e.g. 16LCD) being treated as a measured capacity.
-export const PRODUCT_MEASUREMENT_PATTERN = /\d[\d,.]*\s*(?:mAh|rpm|mL|L|mm|cm|kg|g|kW|mW|W|kPa|Pa|V|m|시간|분|단|도|개|엽|%)(?![a-z])/iu;
+export const PRODUCT_MEASUREMENT_PATTERN = /\d[\d,.]*\s*(?:mAh|rpm|mL|L|mm|cm|kg|g|kW|mW|Wh|W|kPa|Pa|V|m|Hz|GB|TB|MB|nit|ms|인치|형|시간|분|단|도|개|엽|℃|°|%)(?![a-z])/iu;
 
 const FOOD_NAME_PATTERN = /(?:소갈비살|갈비살|늑간살|소갈비|LA\s*갈비|소곱창|통대창|곱창|막창|대창|특양|소고기|돼지고기|닭고기|김치|밀키트|볶음밥|냉동만두)/iu;
 const APPLIANCE_PATTERN = /(?:청소기|에어프라이어|오븐|그릴|냄비|프라이팬|보관함|용기|가습기|건조기|음식물\s*처리기|선풍기|서큘레이터|써큘레이터|드라이기|드라이어|고데기)/u;

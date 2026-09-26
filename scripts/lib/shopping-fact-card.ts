@@ -65,6 +65,11 @@ export function selectShoppingFactCardFacts(options: {
     .map((item) => item.fact);
 }
 
+/** How many of the card's facts the section text actually mentions. */
+export function countSectionMatchedFacts(facts: string[], sectionText: string): number {
+  return facts.filter((fact) => productSignalCoveredBySentence(fact, sectionText)).length;
+}
+
 export async function createShoppingFactCard(options: {
   sourcePath: string;
   title: string;

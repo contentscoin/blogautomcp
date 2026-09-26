@@ -653,7 +653,8 @@ export function evaluateBrandPostPackageReadiness(manifest: BrandPostPackageMani
   for (const asset of assets) {
     if (!imageAudit.usedPaths.has(path.resolve(asset.path))) continue;
     const source = readProductPhotoSource(asset.path);
-    if (source && !source.segmented && asset.creationMethod !== "source") blockers.push({
+    // A flat information card frames the whole photo without any generated background.
+    if (source && !source.segmented && asset.creationMethod !== "source" && !isShoppingFactCardAsset(asset)) blockers.push({
       code: "image-full-frame-overlay",
       sectionId: asset.sectionId || undefined,
       reason: "이미지 · 상품 전체 사각형 사진을 생성 배경 위에 카드처럼 합성한 이미지는 승인할 수 없습니다.",

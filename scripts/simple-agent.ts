@@ -82,6 +82,7 @@ import {
   extractTravelPageResearch,
   extractTravelProductFacts,
   formatTravelEditorialPlanForPrompt,
+  mergeTravelVisionSchedules,
   formatTravelFactsForPrompt,
   formatTravelPageResearchForPrompt,
   formatTravelReviewAnalysisForPrompt,
@@ -4698,10 +4699,6 @@ async function step1_getProductInfo(
     }
   }
 
-  if (connectKind === "TRAVEL" && !hasCompleteTravelSourceResearch(travelPageResearch)) {
-    throw new Error("SOURCE_EVIDENCE_REQUIRED: 여행상품 상세에서 핵심 방문지와 일차별 일정을 모두 확보하지 못했습니다.");
-  }
-  
   // 5. 상품 이미지 URL 추출
   console.log("   🖼️ 이미지 URL 추출 중...");
   const imageCandidateMax = connectKind === "TRAVEL" ? 32 : 20;
@@ -4728,9 +4725,22 @@ async function step1_getProductInfo(
     connectKind === "TRAVEL" ? TRAVEL_BODY_IMAGE_MAX : SHOPPING_BODY_IMAGE_MAX,
   );
 
-  if (connectKind === "TRAVEL" && DETAIL_VISION_READ_ENABLED && detailImagePaths.length > 0) {
+  if (connectKind === "TRAVEL" && DETAIL_VISION_READ_ENABLED) {
     // 여행 상세의 일정표·포함/불포함·유의사항 이미지를 판독해 보조 근거로 붙인다(일정 순서는 __NEXT_DATA__가 우선).
-    sanitizedFeatures.push(...await readDetailFactsWithVision("TRAVEL", productName, detailImagePaths));
+    // 구조화 일정이 부족하면 상세 구간 다음으로 일반 판매 이미지까지 읽고, "N일차" 줄로 빈 일차만 채운다.
+    const batches = hasCompleteTravelSourceResearch(travelPageResearch)
+      ? (detailImagePaths.length ? [detailImagePaths.slice(0, DETAIL_VISION_MAX_IMAGES)] : [])
+      : planSellerVisionBatches(detailImagePaths, sellerImagePaths, DETAIL_VISION_MAX_IMAGES);
+    for (const batch of batches) {
+      const lines = await readDetailFactsWithVision("TRAVEL", productName, batch);
+      sanitizedFeatures.push(...lines);
+      travelPageResearch = mergeTravelVisionSchedules(travelPageResearch, lines);
+      if (hasCompleteTravelSourceResearch(travelPageResearch)) break;
+    }
+  }
+  if (connectKind === "TRAVEL" && !hasCompleteTravelSourceResearch(travelPageResearch)) {
+    const coverage = assessTravelPageResearchCoverage(sanitizeTravelPageResearch(travelPageResearch));
+    throw new Error(`SOURCE_EVIDENCE_REQUIRED: 여행상품 상세에서 핵심 방문지와 일차별 일정을 모두 확보하지 못했습니다. (방문지 ${coverage.visitCount}/${coverage.requiredVisitCount} · 일정 ${coverage.itineraryDayCount}/${coverage.requiredItineraryDayCount}일)`);
   }
   if (connectKind === "SHOPPING") {
     const readingReport: SellerEvidenceReadingReport = { ocrFacts: 0, visionFacts: 0, visionImages: 0 };
