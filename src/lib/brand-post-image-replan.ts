@@ -107,11 +107,14 @@ export async function replanShoppingImageCoverage(options: {
   const needed = missing.reduce((n, slot) => n + slot.minimum - slot.count, 0);
   const candidates = slots.filter(slot => slot.minimum === 0 && slot.maximum > 0 && !slot.staleTargets.length &&
     (verifiedAlternative(slot, true) || (slot.count === 0 && !initial.composition.sections.find(s => s.id === slot.sectionId)!.imagePaths.length)));
-  if (!needed || candidates.length < needed) return unchanged("REPLAN_NO_ALTERNATIVE_CAPACITY");
+  if (!needed) return unchanged("REPLAN_NO_ALTERNATIVE_CAPACITY");
+  // Without enough optional sections there is nothing to probe, but the post may still carry
+  // enough images for the feature requirement to be relaxed below.
+  const noCapacity = candidates.length < needed;
   const identity = imageReplanDraftIdentity(initial);
   // Normal repair owns the lock while it reviews and applies seller originals.
   // The number of attempts is bounded by the number of empty optional sections.
-  if (!matchAlternatives(missing, candidates, initial)) {
+  if (!noCapacity && !matchAlternatives(missing, candidates, initial)) {
     const repair = await deps.repair({ ...options, sourceOnly: true, requests: candidates.filter(slot => slot.count === 0).map(slot => ({
       requestId: randomUUID(), sectionId: slot.sectionId, slotId: `${slot.sectionId}:image:1`,
     })) });
@@ -136,7 +139,7 @@ export async function replanShoppingImageCoverage(options: {
   let allowGenerated = false;
   let generationErrors: string[] = [];
   const afterSource = deps.read(options.brandLinkId, { migrate: false });
-  if (afterSource && afterSource.version === "brand-post-package/v2" && imageReplanDraftIdentity(afterSource) === identity) {
+  if (!noCapacity && afterSource && afterSource.version === "brand-post-package/v2" && imageReplanDraftIdentity(afterSource) === identity) {
     const probed = deps.slots(afterSource);
     const probedCandidates = candidates.map(c => probed.find(s => s.sectionId === c.sectionId)!).filter(Boolean);
     if (!matchAlternatives(missing, probedCandidates, afterSource)) {
@@ -162,7 +165,8 @@ export async function replanShoppingImageCoverage(options: {
       return unchanged("REPLAN_DRAFT_CHANGED");
     if (current.imageGeneration?.status === "running") return unchanged("REPLAN_BUSY");
     const audited = deps.slots(current);
-    const alternatives = matchAlternatives(missing, candidates.map(c => audited.find(s => s.sectionId === c.sectionId)!), current, allowGenerated);
+    const alternatives = noCapacity ? null
+      : matchAlternatives(missing, candidates.map(c => audited.find(s => s.sectionId === c.sectionId)!), current, allowGenerated);
     // Last resort: no section can take the coverage. When the post already carries enough images
     // overall, a feature section may go without a proof photo rather than blocking the whole post.
     // Its text and image intent stay unchanged; nothing is relabelled as evidence.
@@ -171,11 +175,12 @@ export async function replanShoppingImageCoverage(options: {
     // When the seller gallery cannot supply a clean product cutout or any usable source, neither
     // evidence nor generated scenes can add images. Then the post keeps what verified images it has,
     // down to a floor of three (hero + two), instead of blocking forever.
-    const galleryExhausted = generationErrors.some(error => /\b(?:PRODUCT_CUTOUT_REQUIRED|PRODUCT_SOURCE_REQUIRED)\b/u.test(error));
-    const floor = galleryExhausted ? MINIMUM_POST_IMAGES_WHEN_GALLERY_EXHAUSTED : MINIMUM_POST_IMAGES;
+    // Same floor as the composition gate once every required slot is filled: hero + two.
+    const floor = MINIMUM_POST_IMAGES_WHEN_GALLERY_EXHAUSTED;
     if (relaxed && totalImages < floor) {
       const detail = generationErrors.length ? ` 생활 장면 생성: ${generationErrors.slice(0, 2).join(" / ").slice(0, 300)}` : "";
-      return { ...unchanged(`REPLAN_INSUFFICIENT_VERIFIED_ALTERNATIVES · 전체 이미지 ${totalImages}/${floor}장${detail}`), after: summary(audited) };
+      const code = noCapacity ? "REPLAN_NO_ALTERNATIVE_CAPACITY" : "REPLAN_INSUFFICIENT_VERIFIED_ALTERNATIVES";
+      return { ...unchanged(`${code} · 전체 이미지 ${totalImages}/${floor}장${detail}`), after: summary(audited) };
     }
     const minima = new Map<string, number>();
     const history: Array<{ from: string; to: string; at: string }> = [];

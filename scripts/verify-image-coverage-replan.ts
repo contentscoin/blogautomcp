@@ -10,7 +10,7 @@ async function scenario(mode: "semantic" | "geometry" | "success" | "insufficien
     composition: { sections: [
       { id: "runtime", title: "사용시간", body: ["45분 사용시간은 판매자가 확인한 정보다."], imageIntent: "45분 사용시간 기능 근거", imageMin: 1, imageMax: 1, imagePaths: [] },
       { id: "filter", title: "필터 구조", body: ["필터 구조를 확인한다."], imageIntent: "필터 구조 원본", imageMin: 0, imageMax: 1, imagePaths: [] },
-      { id: "keep", title: "기존 근거", body: ["원문 유지"], imageIntent: "기존 기능 근거", imageMin: 3, imageMax: 3, imagePaths: ["a", "b", "c"] },
+      { id: "keep", title: "기존 근거", body: ["원문 유지"], imageIntent: "기존 기능 근거", imageMin: 1, imageMax: 1, imagePaths: ["a"] },
     ], renderNodes: [{ kind: "paragraph", text: "원문 유지" }] }, imageAssets: [{ path: "a", sha256: "original" }],
   } as unknown as BrandPostPackageManifestV2;
   stored.imageGeneration = { status: "incomplete", requested: 1, applied: 0, remaining: 1, errors: ["old optional failure"], updatedAt: "old" };

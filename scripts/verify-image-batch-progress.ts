@@ -589,6 +589,15 @@ async function verifyGenerator() {
     assert.match((await run({ cardMatches: 1, sourceOnly: true })).error || "", /IMAGE_SOURCE_BINDING_REQUIRED/u, "source-only binding still reports the gap");
   });
 
+  await check("fact cards reuse the post's own verified originals when no new source remains", async () => {
+    const h = harness({ sourceMissing: true, sectionMatchedPaths: [], cardFacts: ["흡입력: 18,000Pa", "무게: 1.2kg"], cardMatches: 1 });
+    h.manifest.connectKind = "SHOPPING";
+    h.manifest.imageRequirements = { policy: "verified-source-first" };
+    h.manifest.imageAssets = [{ sha256: "orig", role: "body", sectionId: "other", path: sourcePath, provenance: "ORIGINAL", creationMethod: "source" }] as never;
+    const [result] = await h.generate(0, { requests: [{ requestId: "feature", sectionId: "section" }] });
+    assert.ok(!result.error && result.provenance === "EDITORIAL_CARD", JSON.stringify(result));
+  });
+
   await check("one reviewed feature source is never reused as generic evidence for another feature", async () => {
     const h = harness({
       sourcePaths: [sourcePath],
