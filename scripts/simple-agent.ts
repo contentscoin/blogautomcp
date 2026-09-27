@@ -3984,6 +3984,31 @@ function parseStoredBrandLinkImageUrls(raw: string | null | undefined): string[]
   }
 }
 
+/**
+ * 상세 이미지는 스크롤해야 로드되거나 "상세정보 펼쳐보기" 뒤에 숨어 있는 경우가 많다.
+ * 수집 전에 펼침 버튼을 누르고 페이지를 끝까지 한 번 내려 지연 로딩 이미지를 DOM에 올린다.
+ */
+async function revealProductDetailImages(page: Page): Promise<void> {
+  const expand = page.locator('button, a, [role="button"]').filter({
+    hasText: /상세\s*정보\s*(?:펼쳐\s*보기|더\s*보기|펼치기)|상품\s*정보\s*더\s*보기|상세\s*설명\s*더\s*보기/u,
+  }).first();
+  if (await expand.isVisible({ timeout: 800 }).catch(() => false)) {
+    await expand.click({ timeout: 1500 }).catch(() => undefined);
+    await page.waitForTimeout(600);
+  }
+  const deadline = Date.now() + 8000;
+  for (let step = 0; step < 40 && Date.now() < deadline; step += 1) {
+    const atBottom = await page.evaluate(() => {
+      window.scrollBy(0, Math.max(600, Math.round(window.innerHeight * 0.9)));
+      return window.innerHeight + window.scrollY >= document.body.scrollHeight - 4;
+    }).catch(() => true);
+    await page.waitForTimeout(220);
+    if (atBottom) break;
+  }
+  await page.evaluate(() => window.scrollTo(0, 0)).catch(() => undefined);
+  await page.waitForTimeout(200);
+}
+
 async function collectProductImageUrlsFromPage(page: Page): Promise<string[]> {
   const candidates: ProductImageCandidate[] = [];
 
@@ -4037,6 +4062,19 @@ async function collectProductImageUrlsFromPage(page: Page): Promise<string[]> {
       });
     })
     .catch(() => [] as ProductImageCandidate[]);
+
+  // Some stores render the detail body inside an iframe; its images are seller detail too.
+  for (const frame of page.frames()) {
+    if (frame === page.mainFrame()) continue;
+    const frameUrls = await frame.evaluate(() => Array.from(document.images).flatMap((img) =>
+      [img.currentSrc, img.getAttribute("data-src"), img.getAttribute("src")].filter((url): url is string => Boolean(url))
+        .map((url) => ({ url, width: img.naturalWidth || 0, height: img.naturalHeight || 0 }))))
+      .catch(() => [] as Array<{ url: string; width: number; height: number }>);
+    for (const [offset, item] of frameUrls.entries()) {
+      domCandidates.push({ url: item.url, index: domCandidates.length + offset, width: item.width, height: item.height,
+        top: Number.MAX_SAFE_INTEGER, alt: "", className: "", parentClassName: "detail", source: "dom" });
+    }
+  }
 
   for (const candidate of domCandidates) {
     if (!isCandidateProductImageUrl(candidate.url)) continue;
@@ -4658,6 +4696,7 @@ async function step1_getProductInfo(
 
   // 후기 탭을 열기 전에 판매페이지 이미지를 먼저 보존한다. 일부 스토어는 탭 전환 시
   // 상세 이미지 DOM을 제거하므로 후기 수집 때문에 제품 이미지가 사라지면 안 된다.
+  if (connectKind === "SHOPPING") await revealProductDetailImages(page);
   const preReviewImageUrls = connectKind === "SHOPPING"
     ? await collectProductImageUrlsFromPage(page)
     : [];

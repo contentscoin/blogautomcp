@@ -43,7 +43,8 @@ async function main() {
       if (["recovered", "replan-success"].includes(outcome)) await run; else await assert.rejects(run);
       assert.equal(accepted, ["recovered", "replan-success"].includes(outcome));
       assert.equal(approvals, ["replan-success", "third-rejection"].includes(outcome) ? 3 : ["recovered", "second-rejection", "replan-incomplete"].includes(outcome) ? 2 : 1);
-      assert.equal(actions.filter(action => action === "replan_sources").length, ["second-rejection", "replan-success", "third-rejection", "replan-incomplete"].includes(outcome) ? 1 : 0);
+      // (1.3.88) A rejection with no empty slot left still gets one drop-and-relax replan.
+      assert.equal(actions.filter(action => action === "replan_sources").length, ["second-rejection", "replan-success", "third-rejection", "replan-incomplete", "unstale"].includes(outcome) ? 1 : 0);
       assert.equal(actions.filter(action => action === "bind_sources").length, ["recovered", "second-rejection", "replan-success", "third-rejection", "replan-incomplete"].includes(outcome) ? 1 : 0);
       assert(!actions.includes("generate_missing"), "final audit recovery must not generate another background");
     }

@@ -100,17 +100,22 @@ export async function replanShoppingImageCoverage(options: {
     const publicationRejected = slot.staleTargets.some(target => target.code === "image-publication-rejected");
     const featureSection = !isShoppingLifestyleImage(section) &&
       !allowsGenericBrandPostProductPhoto({ sectionTitle: section.title, imageIntent: section.imageIntent, imageSource: section.imageSource });
-    return slot.missing > 0 && slot.minimum > slot.count && slot.generatedMinimum === 0 &&
+    // A rejected staged scene may move/relax too: generation already produced it once.
+    return slot.missing > 0 && slot.minimum > slot.count && (slot.generatedMinimum === 0 || publicationRejected) &&
       slot.staleTargets.every(target => ["image-geometry-invalid", "image-publication-rejected"].includes(target.code)) &&
       (featureSection || publicationRejected);
   });
   const needed = missing.reduce((n, slot) => n + slot.minimum - slot.count, 0);
   const candidates = slots.filter(slot => slot.minimum === 0 && slot.maximum > 0 && !slot.staleTargets.length &&
     (verifiedAlternative(slot, true) || (slot.count === 0 && !initial.composition.sections.find(s => s.id === slot.sectionId)!.imagePaths.length)));
-  if (!needed) return unchanged("REPLAN_NO_ALTERNATIVE_CAPACITY");
+  // Final-audit rejections in slots that need no replacement (optional, or already at their
+  // minimum) are simply removed; they never count toward the coverage that must move.
+  const dropOnly = slots.filter(slot => !missing.includes(slot) && slot.staleTargets.length > 0 &&
+    slot.staleTargets.every(target => target.code === "image-publication-rejected"));
+  if (!needed && !dropOnly.length) return unchanged("REPLAN_NO_ALTERNATIVE_CAPACITY");
   // Without enough optional sections there is nothing to probe, but the post may still carry
   // enough images for the feature requirement to be relaxed below.
-  const noCapacity = candidates.length < needed;
+  const noCapacity = !needed || candidates.length < needed;
   const identity = imageReplanDraftIdentity(initial);
   // Normal repair owns the lock while it reviews and applies seller originals.
   // The number of attempts is bounded by the number of empty optional sections.
@@ -165,7 +170,7 @@ export async function replanShoppingImageCoverage(options: {
       return unchanged("REPLAN_DRAFT_CHANGED");
     if (current.imageGeneration?.status === "running") return unchanged("REPLAN_BUSY");
     const audited = deps.slots(current);
-    const alternatives = noCapacity ? null
+    const alternatives = !needed ? new Map<string, Slots>() : noCapacity ? null
       : matchAlternatives(missing, candidates.map(c => audited.find(s => s.sectionId === c.sectionId)!), current, allowGenerated);
     // Last resort: no section can take the coverage. When the post already carries enough images
     // overall, a feature section may go without a proof photo rather than blocking the whole post.
@@ -202,6 +207,10 @@ export async function replanShoppingImageCoverage(options: {
     // Remove rejected geometry only after equivalent verified coverage exists.
     // Never crop its pixels, silently drop an unfilled requirement, or touch text.
     const rejected = new Set(missing.flatMap(slot => slot.staleTargets.map(target => path.resolve(target.path))));
+    for (const slot of dropOnly) {
+      for (const target of slot.staleTargets) rejected.add(path.resolve(target.path));
+      history.push({ from: slot.sectionId, to: "dropped:publication-rejected", at: new Date().toISOString() });
+    }
     const selectedSections = new Set(history.map(item => item.to));
     const preservedPaths = new Set([
       ...initial.composition.sections.flatMap(section => section.imagePaths),
@@ -237,6 +246,6 @@ export async function replanShoppingImageCoverage(options: {
     deps.write(proposed);
     return { changed: true, before, after, reason: relaxed
       ? totalImages >= MINIMUM_POST_IMAGES ? "COVERAGE_RELAXED_POST_HAS_ENOUGH_IMAGES" : "COVERAGE_RELAXED_SELLER_GALLERY_EXHAUSTED"
-      : "VERIFIED_ALTERNATIVE_COVERAGE", history };
+      : needed ? "VERIFIED_ALTERNATIVE_COVERAGE" : "REJECTED_IMAGES_DROPPED", history };
   } finally { lock.release(); }
 }
