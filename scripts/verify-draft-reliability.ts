@@ -9,7 +9,7 @@ import { isUnbrandedCommodityProduct } from "./lib/unbranded-product";
 import { buildPostQualityReport, SHOPPING_POST_CONTRACT_V1 } from "../src/lib/post-composition-contract";
 import { detectUnsupportedExperience, getBrandLinkContentReadiness, stripInternalGuidanceSentences } from "./lib/brandlink-content-readiness";
 import { IMAGE_RECOVERY_POLICY_VERSION } from "./lib/material-image-recovery";
-import { isSeverelyFailingDraft } from "./lib/scheduled-draft-workflow";
+import { isSeverelyFailingDraft, runMaterialPreparation, type Call } from "./lib/scheduled-draft-workflow";
 import { ensureStaticDecodableImage } from "./lib/product-photo-source";
 import { replanShoppingImageCoverage, type ImageReplanDependencies } from "../src/lib/brand-post-image-replan";
 import { refreshStoredContentQuality, type BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
@@ -424,7 +424,78 @@ async function main() {
   assert.equal(travelEvidence.status, "fail");
   assert.ok(travelEvidence.notes.some((note) => note.includes("디몰")), JSON.stringify(travelEvidence.notes));
 
-  console.log("PASS: draft structure normalization + retry, shared evidence requirement + named missing facts, tolerant visual verdicts + non-fatal per-image proposal failures, leak stripping, static seller images, generated lifestyle replan, advice-not-claim, recovery policy version, severe-draft rewrite, coverage relaxation, grader fact matching, unbranded identity, prepare-mode thumbnail recovery, exhausted-gallery floor, recheck/revise agreement, seller-image vision batch, fact cards, card approval, advisory signals, digital facts, travel trip-place visits, heading splits, named missing places, three-image replan floor, no-capacity relaxation");
+
+  // 20. (1.3.88) Final-audit rejections in slots that need no replacement are dropped, not fatal.
+  let dropStore = { version: "brand-post-package/v2", brandLinkId: "dx", connectKind: "SHOPPING", imagePolicy: "LOCKED_PRODUCT_OR_ORIGINAL",
+    approvedAt: "old", title: "웨건", createdAt: "c", heroImagePath: "hero.png", imageRequirements: { policy: "verified-source-first" },
+    composition: { sections: [
+      { id: "package", title: "가득패키지 구성", body: ["구성"], imageIntent: "구성 원본", imageMin: 0, imageMax: 1, imagePaths: ["options.png"] },
+      { id: "shape", title: "형태", body: ["형태"], imageIntent: "형태 원본", imageMin: 1, imageMax: 2, imagePaths: ["a.png", "closed-box.png"] },
+      { id: "keep", title: "구성", body: ["구성"], imageIntent: "원본", imageMin: 2, imageMax: 2, imagePaths: ["b.png", "c.png"] },
+    ], renderNodes: [{ kind: "image", sectionId: "package", assetPath: "options.png" }, { kind: "image", sectionId: "shape", assetPath: "closed-box.png" }] },
+    imageAssets: [{ path: "options.png" }, { path: "closed-box.png" }, { path: "a.png" }] } as unknown as BrandPostPackageManifestV2;
+  const rejectedFiles = new Set(["options.png", "closed-box.png"]);
+  const dropDeps = {
+    read: () => structuredClone(dropStore),
+    write: (value: BrandPostPackageManifestV2) => { dropStore = value; return value; },
+    reconcile: (value: BrandPostPackageManifestV2) => value,
+    lock: () => ({ assertOwner() {}, release() {} }),
+    slots: (value: BrandPostPackageManifestV2) => value.composition.sections.map((section) => {
+      const stale = section.imagePaths.filter((file) => rejectedFiles.has(file));
+      const count = section.imagePaths.length - stale.length;
+      return { sectionId: section.id, minimum: section.imageMin!, maximum: section.imageMax!, count,
+        missing: Math.max(Math.max(0, section.imageMin! - count), stale.length), generatedMinimum: 0, generationMissing: 0,
+        staleTargets: stale.map((file) => ({ path: file, code: "image-publication-rejected" })),
+        assets: section.imagePaths.filter((file) => !rejectedFiles.has(file)).map((file) => ({ path: file, creationMethod: "source",
+          sourceReview: { usage: "section-matched-product-evidence", reviewClass: "product-photo" } })) };
+    }),
+    repair: async () => ({ errors: [] }),
+  } as unknown as ImageReplanDependencies;
+  const dropped = await replanShoppingImageCoverage({ brandLinkId: "dx" }, dropDeps);
+  assert.equal(dropped.reason, "REJECTED_IMAGES_DROPPED");
+  assert.equal(dropped.after.missing, 0);
+  assert.deepEqual(dropStore.composition.sections.map((section) => section.imagePaths), [[], ["a.png"], ["b.png", "c.png"]]);
+  assert.ok(!dropStore.composition.renderNodes.some((node) => node.kind === "image"), "rejected images leave the rendered post");
+
+  // 21. (1.3.88) Workflow: a failed replacement falls through to one drop-and-relax replan; a status race is retried.
+  const approvalRun = async (options: { replacementFails: boolean; raceOnce: boolean }) => {
+    const actions: string[] = [];
+    let approvals = 0; let accepted = false; let missing = false; let raced = false;
+    const call: Call = async (url, method, body) => {
+      const action = (body as { action?: string })?.action || method; actions.push(action);
+      if (action === "recheck" && options.raceOnce && !raced) {
+        raced = true;
+        throw Object.assign(new Error("상품 상태가 변경되었습니다."), { code: "ALREADY_PUBLISHING" });
+      }
+      if (action === "approve") {
+        approvals += 1;
+        if (approvals === 1) {
+          missing = true;
+          throw Object.assign(new Error("final pixel rejection"), { code: "PUBLISH_IMAGE_AUDIT_FAILED", errors: ["SEMANTIC_REJECTION: mixed options"] });
+        }
+        accepted = true;
+      }
+      if (url.endsWith("/images")) {
+        if (action === "bind_sources" && options.replacementFails) {
+          return { success: false, code: "SOURCE_REVIEW_UNAVAILABLE", errors: ["SOURCE_REVIEW_UNAVAILABLE: reviewer returned nothing"] };
+        }
+        if (action === "replan_sources") { missing = false; return { success: true, recovery: { changed: true }, remainingMissing: 0 }; }
+        missing = false;
+      }
+      return { success: true, data: { approvedAt: accepted ? "yes" : null, approval: { canApprove: !missing },
+        imageSlots: [{ missing: missing ? 1 : 0, generationMissing: 0 }], contentQuality: { signals: [] } } };
+    };
+    await runMaterialPreparation(`drop-${options.replacementFails}-${options.raceOnce}`, { call, pause: async () => {} });
+    return { actions, approvals, accepted };
+  };
+  const fellThrough = await approvalRun({ replacementFails: true, raceOnce: false });
+  assert.equal(fellThrough.accepted, true, "a rejected image the post can do without no longer fails the material");
+  assert.equal(fellThrough.actions.filter((action) => action === "replan_sources").length, 1);
+  assert.ok(!fellThrough.actions.includes("prepare_context"), "the drop path runs instead of another source refresh");
+  const raced = await approvalRun({ replacementFails: false, raceOnce: true });
+  assert.equal(raced.accepted, true, "a concurrent status change is retried, not reported");
+
+  console.log("PASS: draft structure normalization + retry, shared evidence requirement + named missing facts, tolerant visual verdicts + non-fatal per-image proposal failures, leak stripping, static seller images, generated lifestyle replan, advice-not-claim, recovery policy version, severe-draft rewrite, coverage relaxation, grader fact matching, unbranded identity, prepare-mode thumbnail recovery, exhausted-gallery floor, recheck/revise agreement, seller-image vision batch, fact cards, card approval, advisory signals, digital facts, travel trip-place visits, heading splits, named missing places, three-image replan floor, no-capacity relaxation, rejected-image drop, rejection fall-through, recheck race retry");
 }
 
 main().catch((error) => {

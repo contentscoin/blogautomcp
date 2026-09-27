@@ -261,10 +261,20 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
   let previousReadiness: BrandLinkContentReadiness | null = null;
   const recheck = async (refreshSource = false, attempt = 0) => {
     check();
-    draft = await deps.call(`${base}/draft`, "PATCH", {
-      action: "recheck",
-      ...(refreshSource ? { refreshSource: true } : {}),
-    });
+    // A concurrent status change (for example a manual action on the same item) is transient.
+    for (let retry = 0; ; retry += 1) {
+      try {
+        draft = await deps.call(`${base}/draft`, "PATCH", {
+          action: "recheck",
+          ...(refreshSource ? { refreshSource: true } : {}),
+        });
+        break;
+      } catch (error) {
+        if ((error as { code?: string }).code !== "ALREADY_PUBLISHING" || retry >= 3) throw error;
+        await deps.pause();
+        check();
+      }
+    }
     const decision = qualityPlanForDraft(draft, attempt, previousReadiness);
     previousReadiness = decision.readiness;
     return decision.plan;
@@ -462,36 +472,53 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
   }
   // Approval executes the same final pixel audit as publication, even for a
   // previously READY package. Only definitive image findings allow one repair.
+  // A rejected image the post can do without is dropped (and its section requirement relaxed
+  // when three images remain) instead of failing an otherwise publishable material.
+  // It has its own recovery key so an earlier image-stage replan cannot use it up.
+  const dropRejectedAndApprove = async (cause: unknown) => {
+    deps.onStage?.("반복 거절 이미지 제외 · 남은 이미지로 구성 재확인");
+    const replanned = await runRecordedImageRecovery(id, "replan-after-rejection", () =>
+      deps.call(`${base}/draft/images`, "POST", { action: "replan_sources" }));
+    if (!replanned.attempted || !replanned.result?.recovery?.changed ||
+        replanned.result.remainingMissing !== 0 || replanned.result.errors?.length) throw cause;
+    draft = await deps.call(`${base}/draft`, "GET");
+    if (!draft.data || draft.data.imageGeneration?.status === "running" ||
+        draft.data.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) throw cause;
+    plan = await recheck(false, revised ? 1 : 0);
+    if (plan.action !== "complete") throw unresolvedCompositionError(plan.reason);
+    deps.onStage?.("변경된 배치 최종 재검사·승인");
+    await deps.call(`${base}/draft`, "PATCH", { action: "approve" });
+  };
   try {
     await deps.call(`${base}/draft`, "PATCH", { action: "approve" });
   } catch (error) {
     if (!isDefinitivePublishImageFailure(error)) throw error;
     deps.onStage?.("최종 이미지 검사 실패 · 해당 원본 자동 교체");
     draft = await deps.call(`${base}/draft`, "GET");
-    if (!draft.data?.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) throw error;
-    await images(true);
-    plan = await recheck(false, revised ? 1 : 0);
-    if (plan.action !== "complete") throw unresolvedCompositionError(plan.reason);
-    deps.onStage?.("교체 이미지 최종 재검사·승인");
-    try {
-      await deps.call(`${base}/draft`, "PATCH", { action: "approve" });
-    } catch (secondError) {
-      if (!isDefinitivePublishImageFailure(secondError)) throw secondError;
-      deps.onStage?.("반복 거절 원인 확인 · 검증된 다른 문단으로 배치 변경");
-      // A second pixel rejection does not buy another replacement attempt.
-      // One source-only structural change may justify a final audit, provided
-      // it actually changed coverage and closed every required slot.
-      const replanned = await runRecordedImageRecovery(id, "replan-images", () =>
-        deps.call(`${base}/draft/images`, "POST", { action: "replan_sources" }));
-      if (!replanned.attempted || !replanned.result?.recovery?.changed ||
-          replanned.result.remainingMissing !== 0 || replanned.result.errors?.length) throw secondError;
-      draft = await deps.call(`${base}/draft`, "GET");
-      if (!draft.data || draft.data.imageGeneration?.status === "running" ||
-          draft.data.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) throw secondError;
-      plan = await recheck(false, revised ? 1 : 0);
-      if (plan.action !== "complete") throw unresolvedCompositionError(plan.reason);
-      deps.onStage?.("변경된 배치 최종 재검사·승인");
-      await deps.call(`${base}/draft`, "PATCH", { action: "approve" });
+    if (!draft.data?.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) {
+      await dropRejectedAndApprove(error);
+    } else {
+      let replaced = true;
+      try {
+        await images(true);
+        plan = await recheck(false, revised ? 1 : 0);
+        if (plan.action !== "complete") throw unresolvedCompositionError(plan.reason);
+      } catch (replaceError) {
+        if (isSessionWidePreparationFailureCode((replaceError as { code?: string }).code)) throw replaceError;
+        replaced = false;
+      }
+      if (!replaced) {
+        await dropRejectedAndApprove(error);
+      } else {
+        deps.onStage?.("교체 이미지 최종 재검사·승인");
+        try {
+          await deps.call(`${base}/draft`, "PATCH", { action: "approve" });
+        } catch (secondError) {
+          if (!isDefinitivePublishImageFailure(secondError)) throw secondError;
+          // A second pixel rejection does not buy another replacement attempt.
+          await dropRejectedAndApprove(secondError);
+        }
+      }
     }
   }
   // HTTP success only means the handler ran. Verify persisted approval and all
