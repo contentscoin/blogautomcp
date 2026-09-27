@@ -18,7 +18,11 @@ export async function validateBrandPostPublishImages(id: string, productName?: s
     const product = manifest.sourceSnapshot?.product || {};
     const name = String(product.name || productName || manifest.title);
     const audit = await assertPublishImagesSafe({ brandLinkId: id, productName: name,
-      selectedProduct: buildSelectedProductImageAuditContext(name, (Array.isArray(product.features) ? product.features : []).filter((value): value is string => typeof value === "string")),
+      selectedProduct: buildSelectedProductImageAuditContext(
+        name,
+        (Array.isArray(product.features) ? product.features : []).filter((value): value is string => typeof value === "string"),
+        manifest.productUnderstanding,
+      ),
       composition: normalizePublishedPostText(manifest.composition), ...options });
     lock.assertOwner();
     const current = readBrandPostPackage(id, { migrate: false });

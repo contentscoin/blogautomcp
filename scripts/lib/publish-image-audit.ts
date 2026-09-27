@@ -7,11 +7,15 @@ import crypto from "node:crypto";
 import sharp from "sharp";
 import { resolveTextReasoningEffort } from "./text-model-policy";
 import { readSuccessfulImageAuditReceipt, writeSuccessfulImageAuditReceipt, invalidateSuccessfulImageAuditReceipt, withSuccessfulImageAuditLock } from "./publish-image-audit-receipt";
+import { buildProduct9Canvas, selectedProductContextFrom9Canvas, type Product9Canvas } from "./product-9canvas";
 
-export function buildSelectedProductImageAuditContext(productName: string, features: readonly string[]): string {
-  const optionFacts = features.filter(value => /^(?:선택\s*옵션|선택\s*상품|구성|수량|개수|용량|중량|향|색상|사이즈)\s*[:：]/u.test(value));
-  return JSON.stringify({ selectedTitle: productName, optionFacts,
-    rule: "선택 상품명에 명시된 향·라인·용량·수량이 우선입니다. 공통 카탈로그 옵션으로 대체하지 마세요. 충돌하거나 식별할 수 없으면 거부하세요." });
+export function buildSelectedProductImageAuditContext(
+  productName: string,
+  features: readonly string[],
+  productUnderstanding?: Product9Canvas,
+): string {
+  const understanding = productUnderstanding || buildProduct9Canvas({ name: productName, features });
+  return selectedProductContextFrom9Canvas(understanding);
 }
 
 import { isPublicationImageAspectAllowed } from "./publication-image-geometry";

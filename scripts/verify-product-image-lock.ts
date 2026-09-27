@@ -7,6 +7,7 @@ import {
   createLockedProductEditorialScene,
   createLockedProductThumbnail,
   extractLockedProductPng,
+  resolveProductCompositionProfile,
 } from "./lib/product-image-lock";
 
 async function main() {
@@ -48,6 +49,33 @@ async function main() {
   const sceneMetadata = await sharp(scene.outputPath).metadata();
   assert.equal(sceneMetadata.width, 1200);
   assert.equal(sceneMetadata.height, 900);
+  const wearable = resolveProductCompositionProfile("보이스캐디 T13 PRO 시계형 골프거리측정기");
+  const floor = resolveProductCompositionProfile("삼성 대형 건조기");
+  assert.ok(wearable.maxWidth < floor.maxWidth && wearable.maxHeight < floor.maxHeight);
+  const largeSourcePath = path.join(dir, "large-source.png");
+  await sharp(sourcePath).resize(1200, 1000, { kernel: "nearest" }).png().toFile(largeSourcePath);
+  const wearableScene = await createLockedProductEditorialScene({
+    sourcePath: largeSourcePath, backgroundPath, outputDir: dir, productName: "보이스캐디 T13 PRO 시계형 골프거리측정기", variant: 0,
+  });
+  const floorScene = await createLockedProductEditorialScene({
+    sourcePath: largeSourcePath, backgroundPath, outputDir: dir, productName: "삼성 대형 건조기", variant: 0,
+  });
+  const blueBounds = async (file: string) => {
+    const pixels = await sharp(file).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    let left = pixels.info.width, right = -1, top = pixels.info.height, bottom = -1;
+    for (let y = 0; y < pixels.info.height; y += 1) for (let x = 0; x < pixels.info.width; x += 1) {
+      const offset = (y * pixels.info.width + x) * pixels.info.channels;
+      if (pixels.data[offset] === 17 && pixels.data[offset + 1] === 99 && pixels.data[offset + 2] === 181) {
+        left = Math.min(left, x); right = Math.max(right, x); top = Math.min(top, y); bottom = Math.max(bottom, y);
+      }
+    }
+    assert.ok(right >= left && bottom >= top);
+    return { width: right - left + 1, height: bottom - top + 1 };
+  };
+  const wearableBounds = await blueBounds(wearableScene.outputPath);
+  const floorBounds = await blueBounds(floorScene.outputPath);
+  assert.ok(wearableBounds.width < floorBounds.width && wearableBounds.height < floorBounds.height,
+    "실제 합성 결과에서도 손목형 제품이 바닥형 가전보다 작아야 한다");
   console.log(JSON.stringify({ ok: true, rgbPreserved: true, confidence: manifest.confidence, thumbnail: thumbnail.outputPath, scene: scene.outputPath }));
 }
 

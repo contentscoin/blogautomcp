@@ -9,6 +9,7 @@ import {
   generateThumbnailCropPreviews,
   type ThumbnailV2Style,
 } from "./thumbnail-layout-v2";
+import { inferProductPhysicalScale, type ProductPhysicalScale } from "./product-9canvas";
 
 export interface ProductImageLockManifest {
   version: "product-image-lock/v1";
@@ -27,6 +28,31 @@ export interface ProductImageLockManifest {
 export interface LockedProductThumbnailResult {
   outputPath: string;
   lock: ProductImageLockManifest;
+}
+
+export interface ProductCompositionProfile {
+  physicalScale: ProductPhysicalScale;
+  maxWidth: number;
+  maxHeight: number;
+  bottomOffset: number;
+  minimumShadowRadius: number;
+  shadowHeight: number;
+}
+
+const COMPOSITION_PROFILES: Record<ProductPhysicalScale, Omit<ProductCompositionProfile, "physicalScale">> = {
+  wearable: { maxWidth: 260, maxHeight: 360, bottomOffset: 150, minimumShadowRadius: 45, shadowHeight: 14 },
+  handheld: { maxWidth: 340, maxHeight: 520, bottomOffset: 105, minimumShadowRadius: 60, shadowHeight: 18 },
+  desktop: { maxWidth: 430, maxHeight: 610, bottomOffset: 85, minimumShadowRadius: 78, shadowHeight: 22 },
+  floor: { maxWidth: 500, maxHeight: 700, bottomOffset: 80, minimumShadowRadius: 100, shadowHeight: 26 },
+  package: { maxWidth: 400, maxHeight: 540, bottomOffset: 95, minimumShadowRadius: 72, shadowHeight: 20 },
+};
+
+export function resolveProductCompositionProfile(
+  productName = "",
+  physicalScale?: ProductPhysicalScale,
+): ProductCompositionProfile {
+  const resolvedScale = physicalScale || inferProductPhysicalScale(productName);
+  return { physicalScale: resolvedScale, ...COMPOSITION_PROFILES[resolvedScale] };
 }
 
 export type ShoppingThumbnailStyle = "shopping-clean" | "shopping-bold" | "shopping-soft";
@@ -200,11 +226,14 @@ export async function createLockedProductEditorialScene(options: {
   backgroundPath: string;
   outputDir: string;
   variant?: number;
+  productName?: string;
+  physicalScale?: ProductPhysicalScale;
 }): Promise<LockedProductThumbnailResult> {
   if (!fs.existsSync(options.backgroundPath)) throw new Error("GPT 생성 배경 이미지를 찾을 수 없습니다.");
   const lock = await extractLockedProductPng(options.sourcePath, options.outputDir);
   const canvasWidth = 1200;
   const canvasHeight = 900;
+  const profile = resolveProductCompositionProfile(options.productName, options.physicalScale);
   const placeOnLeft = (options.variant || 0) % 2 === 1;
   const background = await sharp(options.backgroundPath)
     .resize(canvasWidth, canvasHeight, { fit: "cover", position: "attention" })
@@ -213,7 +242,7 @@ export async function createLockedProductEditorialScene(options: {
     .toBuffer();
   const product = await sharp(lock.lockedPngPath)
     .trim({ background: { r: 255, g: 255, b: 255, alpha: 0 } })
-    .resize(500, 700, {
+    .resize(profile.maxWidth, profile.maxHeight, {
       fit: "contain",
       withoutEnlargement: true,
       background: { r: 255, g: 255, b: 255, alpha: 0 },
@@ -221,12 +250,12 @@ export async function createLockedProductEditorialScene(options: {
     .png()
     .toBuffer();
   const metadata = await sharp(product).metadata();
-  const productWidth = metadata.width || 500;
-  const productHeight = metadata.height || 700;
+  const productWidth = metadata.width || profile.maxWidth;
+  const productHeight = metadata.height || profile.maxHeight;
   const left = placeOnLeft ? 90 : canvasWidth - productWidth - 90;
-  const top = Math.max(80, canvasHeight - productHeight - 80);
+  const top = Math.max(80, canvasHeight - productHeight - profile.bottomOffset);
   const shadow = Buffer.from(
-    `<svg width="${canvasWidth}" height="${canvasHeight}" xmlns="http://www.w3.org/2000/svg"><ellipse cx="${left + productWidth / 2}" cy="${Math.min(canvasHeight - 35, top + productHeight - 5)}" rx="${Math.max(100, productWidth * 0.34)}" ry="26" fill="#111827" opacity=".18" filter="blur(12px)"/></svg>`,
+    `<svg width="${canvasWidth}" height="${canvasHeight}" xmlns="http://www.w3.org/2000/svg"><ellipse cx="${left + productWidth / 2}" cy="${Math.min(canvasHeight - 35, top + productHeight - 5)}" rx="${Math.max(profile.minimumShadowRadius, productWidth * 0.34)}" ry="${profile.shadowHeight}" fill="#111827" opacity=".18" filter="blur(12px)"/></svg>`,
   );
   fs.mkdirSync(options.outputDir, { recursive: true });
   const outputPath = path.join(options.outputDir, `locked-product-scene-${Date.now()}.png`);

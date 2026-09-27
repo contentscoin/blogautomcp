@@ -67,7 +67,12 @@ import {
   scoreProductImageDimensions,
   type ProductImageCandidate,
 } from "./lib/product-image-selection";
-import { buildProductThumbnailGenerationPrompt, generateProductThumbnail } from "./lib/product-thumbnail";
+import {
+  buildProductThumbnailGenerationPrompt,
+  generateProductThumbnail,
+  isProductThumbnailCopyCompatible,
+} from "./lib/product-thumbnail";
+import { buildProduct9Canvas, type Product9Canvas } from "./lib/product-9canvas";
 import {
   buildTravelContractEditorialPlan,
   buildTravelReviewAnalysis,
@@ -500,6 +505,7 @@ function classifyProductSourceFailure(error: unknown): ProductSourceFailureClass
 
 interface GeneratedPostPreview {
   editorial?: import("./lib/editorial-templates").EditorialSelection;
+  productUnderstanding?: Product9Canvas;
   title: string;
   sections: string[];
   hashtags: string[];
@@ -1229,6 +1235,7 @@ async function generateTopTextCutoutThumbnail(
   postTitle: string,
   brandLinkId?: string,
   contentKind: "SHOPPING" | "TRAVEL" = "SHOPPING",
+  productUnderstanding?: Product9Canvas,
 ): Promise<GeneratedProductThumbnail | null> {
   if (!THUMBNAIL_AUTOGEN_ENABLED) return null;
   const savedSetting = brandLinkId
@@ -1239,11 +1246,35 @@ async function generateTopTextCutoutThumbnail(
         }))?.value,
       )
     : null;
-  if (savedSetting?.generatedPath && fs.existsSync(savedSetting.generatedPath)) {
-    const savedMetadata = await sharp(savedSetting.generatedPath).metadata().catch(() => null);
+  const shoppingUnderstanding = contentKind === "SHOPPING"
+    ? productUnderstanding || buildProduct9Canvas({
+        name: product.name,
+        description: product.description,
+        features: product.features,
+      })
+    : undefined;
+  const suggestedShoppingCopy = contentKind === "SHOPPING"
+    ? buildProductThumbnailGenerationPrompt({
+        postTitle,
+        productName: product.name,
+        categoryName: inferCategoryKeyword(product.name),
+        description: product.description,
+        features: product.features,
+        price: product.price,
+        productUnderstanding: shoppingUnderstanding,
+      })
+    : null;
+  const savedCopyCompatible = !savedSetting || !shoppingUnderstanding ||
+    isProductThumbnailCopyCompatible(savedSetting.copy, shoppingUnderstanding);
+  const reusableSavedSetting = savedCopyCompatible ? savedSetting : null;
+  if (savedSetting && !savedCopyCompatible) {
+    console.log("   ♻️ 이전 썸네일 문구가 Product 9Canvas와 충돌해 다시 생성합니다.");
+  }
+  if (reusableSavedSetting?.generatedPath && fs.existsSync(reusableSavedSetting.generatedPath)) {
+    const savedMetadata = await sharp(reusableSavedSetting.generatedPath).metadata().catch(() => null);
     if (savedMetadata?.width === 1080 && savedMetadata?.height === 1080) {
-      console.log(`   ✅ 저장된 정사각 썸네일 사용: ${path.basename(savedSetting.generatedPath)}`);
-      return { path: savedSetting.generatedPath, source: "saved-studio" };
+      console.log(`   ✅ 저장된 정사각 썸네일 사용: ${path.basename(reusableSavedSetting.generatedPath)}`);
+      return { path: reusableSavedSetting.generatedPath, source: "saved-studio" };
     }
     console.log("   ♻️ 이전 16:9 썸네일은 사용하지 않고 1080×1080 규격으로 다시 만듭니다.");
   }
@@ -1257,21 +1288,15 @@ async function generateTopTextCutoutThumbnail(
   // 투명 PNG를 로컬에서 만든 뒤 배경과 카피만 합성한다. 분리가 불확실하면
   // 원본 상세 이미지가 본문 대표 이미지로 유지되도록 썸네일 생성을 중단한다.
   if (contentKind === "SHOPPING") {
-    const suggestedCopy = buildProductThumbnailGenerationPrompt({
-      postTitle,
-      productName: product.name,
-      categoryName: inferCategoryKeyword(product.name),
-      description: product.description,
-      features: product.features,
-      price: product.price,
-    });
+    const suggestedCopy = suggestedShoppingCopy!;
+    const savedCopy = reusableSavedSetting?.copy;
     try {
       const locked = await createLockedProductThumbnail({
         sourcePath: product.representativeImagePath,
         outputDir: TEMP_PATH,
-        productName: savedSetting?.copy.productNameLabel || suggestedCopy.productNameLabel,
-        headline: savedSetting?.copy.headline || suggestedCopy.headline,
-        subline: savedSetting?.copy.subline || suggestedCopy.subline,
+        productName: savedCopy?.productNameLabel || suggestedCopy.productNameLabel,
+        headline: savedCopy?.headline || suggestedCopy.headline,
+        subline: savedCopy?.subline || suggestedCopy.subline,
         style: (savedSetting?.style || "shopping-clean") as ShoppingThumbnailStyle,
       });
       console.log(`   🔒 상품 원본 잠금 썸네일: ${path.basename(locked.outputPath)}`);
@@ -1282,9 +1307,9 @@ async function generateTopTextCutoutThumbnail(
       const original = await createOriginalProductPhotoThumbnail({
         sourcePath: product.representativeImagePath,
         outputDir: TEMP_PATH,
-        productName: savedSetting?.copy.productNameLabel || suggestedCopy.productNameLabel,
-        headline: savedSetting?.copy.headline || suggestedCopy.headline,
-        subline: savedSetting?.copy.subline || suggestedCopy.subline,
+        productName: savedCopy?.productNameLabel || suggestedCopy.productNameLabel,
+        headline: savedCopy?.headline || suggestedCopy.headline,
+        subline: savedCopy?.subline || suggestedCopy.subline,
         style: (savedSetting?.style || "shopping-clean") as ShoppingThumbnailStyle,
       }).catch(() => null);
       if (original) {
@@ -1336,6 +1361,7 @@ async function generateTopTextCutoutThumbnail(
     description: product.description,
     features: product.features,
     price: product.price,
+    productUnderstanding,
   });
 
   const localSharpPath = await generateProductThumbnailWithSharpLocal(product, promptInfo);
@@ -4888,10 +4914,27 @@ async function step2_generatePost(
     maximumBodySectionCount,
     Math.max(minimumBodySectionCount, adaptiveEditorialProfile.sectionRange.preferred),
   );
+  const productUnderstanding = isTravel ? undefined : buildProduct9Canvas({
+    name: product.name,
+    description: product.description,
+    features: product.features,
+    sourceUrl: product.finalUrl || productIdentity?.sourceUrl || brandLink || null,
+    externalProductId: productIdentity?.externalProductId || null,
+  });
+  if (productUnderstanding) {
+    console.log(
+      `   🧠 Product 9Canvas: ${productUnderstanding.concept.productKind} · ` +
+      `${productUnderstanding.concept.categoryId} · ${productUnderstanding.concept.physicalScale}`,
+    );
+    if (productUnderstanding.policy.blockers.length > 0) {
+      console.log(`   🛡️ 옵션 보호: ${productUnderstanding.policy.writingDirective}`);
+    }
+  }
   const adaptiveEditorialPromptBlock = formatAdaptiveEditorialHarnessForPrompt(connectKind);
   const writingContract = createWritingPromptContract({
     kind: connectKind,
     product: { name: product.name, description: product.description, features: product.features },
+    productUnderstanding,
     minimumSections: minimumBodySectionCount,
     maximumSections: maximumBodySectionCount,
     targetCharacters: compositionContract.targetCharacters,
@@ -5385,6 +5428,7 @@ ${mandatoryWritingPromptBlock}`;
     return {
       title: product.name,
       editorial: writingContract.editorial,
+      productUnderstanding,
       sections: [],
       hashtags: [],
       generationSource: "AI",
@@ -5806,6 +5850,7 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
   return {
     title: normalizedTitle,
     editorial: writingContract.editorial,
+    productUnderstanding,
     sections: sections,
     hashtags,
     generationSource: "AI",
@@ -6761,6 +6806,7 @@ function writePreparedBrandPostPackage(params: {
         composition: packagedComposition,
         contentQuality: params.contentReadiness,
         sourceSnapshot: params.sourceSnapshot || undefined,
+        productUnderstanding: params.post.productUnderstanding,
         qualityRepair: params.post.qualityRepair || null,
         postSpec: params.assembled ? remapSpecImagePaths(params.assembled.spec, packagedPathBySource) : null,
         specDraft: params.assembled?.draft ?? null,
@@ -6820,6 +6866,7 @@ function loadPreparedBrandLinkPostOverride(
     postSpec?: unknown;
     specDraft?: unknown;
     sourceSnapshot?: unknown;
+    productUnderstanding?: Product9Canvas;
     imageAssets?: BrandPostPackageImageAsset[];
   };
   if (options.requireApproval !== false && (typeof manifest.approvedAt !== "string" || !manifest.approvedAt.trim())) {
@@ -6871,9 +6918,21 @@ function loadPreparedBrandLinkPostOverride(
     ? (manifest as unknown as BrandPostPackageManifestV2)
     : null;
 
+  const sourceSnapshot = readProductSnapshot(manifest.sourceSnapshot);
+  const productUnderstanding = manifest.productUnderstanding || (
+    sourceSnapshot?.connectKind === "SHOPPING" && typeof sourceSnapshot.product.name === "string"
+      ? buildProduct9Canvas({
+          name: sourceSnapshot.product.name,
+          description: typeof sourceSnapshot.product.description === "string" ? sourceSnapshot.product.description : "",
+          features: Array.isArray(sourceSnapshot.product.features) ? sourceSnapshot.product.features.map(String) : [],
+          sourceUrl: sourceSnapshot.sourceUrl,
+          externalProductId: sourceSnapshot.externalProductId,
+        })
+      : undefined
+  );
   return {
     manifest: preservedManifest,
-    sourceSnapshot: readProductSnapshot(manifest.sourceSnapshot),
+    sourceSnapshot,
     imageAssets: Array.isArray(manifest.imageAssets) ? manifest.imageAssets : [],
     post: {
       title: composition?.title.trim() || titleMatch[1].trim(),
@@ -6882,6 +6941,7 @@ function loadPreparedBrandLinkPostOverride(
       generationSource: "PREPARED_APPROVED",
       rawResponse: `prepared:${markdownPath}`,
       composition,
+      productUnderstanding,
     },
     heroImagePath,
     bodyImagePaths,
@@ -10445,6 +10505,7 @@ async function main() {
           post.title,
           link.id,
           link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING",
+          post.productUnderstanding,
         );
     let generatedThumbnailPath = generatedThumbnail?.path || null;
     const collectedImagePaths = Array.from(new Set(preparedPostOverride
@@ -10521,7 +10582,11 @@ async function main() {
           await assertPublishImagesSafe({
             brandLinkId: link.id,
             productName: product.name,
-            selectedProduct: buildSelectedProductImageAuditContext(product.name, product.features),
+            selectedProduct: buildSelectedProductImageAuditContext(
+              product.name,
+              product.features,
+              post.productUnderstanding,
+            ),
             composition,
           });
           break;
@@ -10551,7 +10616,13 @@ async function main() {
             break;
           }
           product.representativeImagePath = nextSource;
-          const regenerated = await generateTopTextCutoutThumbnail(product, post.title, link.id, "SHOPPING");
+          const regenerated = await generateTopTextCutoutThumbnail(
+            product,
+            post.title,
+            link.id,
+            "SHOPPING",
+            post.productUnderstanding,
+          );
           if (!regenerated?.path || !fs.existsSync(regenerated.path)) throw error;
           const previous = path.resolve(generatedThumbnailPath);
           console.log(`   ↻ 썸네일 감사 거절 · 다른 검증 원본으로 재생성 (${thumbnailRetry + 1}/2)`);

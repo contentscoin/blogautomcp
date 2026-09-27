@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import sharp, { type OverlayOptions } from "sharp";
 import { buildTravelThumbnailCopy } from "./travel-content";
+import { buildProduct9Canvas, type Product9Canvas } from "./product-9canvas";
 
 const CANVAS_WIDTH = 1600;
 const CANVAS_HEIGHT = 900;
@@ -33,6 +34,7 @@ export interface GenerateProductThumbnailOptions {
   copy?: Partial<ProductThumbnailCopy>;
   preferredImagePath?: string;
   contentKind?: "SHOPPING" | "TRAVEL";
+  productUnderstanding?: Product9Canvas;
 }
 
 export interface ProductThumbnailResult {
@@ -52,6 +54,7 @@ export interface BuildProductThumbnailGenerationPromptOptions {
   description?: string;
   features?: string[];
   price?: string;
+  productUnderstanding?: Product9Canvas;
 }
 
 export interface ProductThumbnailGenerationPrompt {
@@ -140,6 +143,31 @@ const DEFAULT_COPY: Omit<ProductThumbnailCopy, "productNameLabel"> = {
   cta: "리뷰 보기",
 };
 
+const ONTOLOGY_THEMES: Record<string, Omit<ProductThumbnailCopy, "productNameLabel" | "badge">> = {
+  humidifier: { headline: "가습 방식 체크", subline: "용량·세척·사용 공간", cta: "사용 조건 확인" },
+  "golf-rangefinder": { headline: "거리 확인 방식", subline: "코스 기능·배터리 체크", cta: "필드 포인트" },
+  "food-gift": { headline: "구성·보관 확인", subline: "옵션·중량·보관법", cta: "선택 기준" },
+  "hair-dryer": { headline: "제품 사양 체크", subline: "바람·무게·구성 확인", cta: "장단점 확인" },
+  "beauty-body": { headline: "향·용량 구성", subline: "상품 정보로 구매 전 확인", cta: "구성 확인" },
+  cooler: { headline: "보냉력 체크", subline: "용량·수납·휴대성", cta: "사용 포인트" },
+  food_supplement: { headline: "구성 확인", subline: "원료·용량·섭취 조건", cta: "선택 기준" },
+  home_appliance: { headline: "제품 사양 체크", subline: "용량·관리·사용 공간", cta: "구매 전 확인" },
+  sports_leisure: { headline: "활용도 체크", subline: "기능·휴대·사용 조건", cta: "포인트 확인" },
+  digital_it: { headline: "기능 체크", subline: "사양·연결·호환성", cta: "스펙 확인" },
+  beauty_body: { headline: "구성·사용법 확인", subline: "용량·성분·사용 조건", cta: "구성 확인" },
+};
+
+// A saved studio thumbnail predates the current product understanding contract.
+// Reject only clear cross-domain copy so harmless editorial wording can survive.
+const ONTOLOGY_COPY_CONFLICTS: Record<string, RegExp> = {
+  humidifier: /보냉|쿨러|아이스박스|흡입|청소|골프|거리\s*측정|드라이|풍량|피부/u,
+  "golf-rangefinder": /보냉|쿨러|가습|분무|수조|흡입|청소|드라이|풍량|피부/u,
+  "food-gift": /보냉|쿨러|가습|분무|흡입|청소|골프|거리\s*측정|드라이|풍량/u,
+  "hair-dryer": /보냉|쿨러|가습|분무|수조|흡입|청소|골프|거리\s*측정/u,
+  "beauty-body": /보냉|쿨러|가습|분무|수조|흡입|청소|골프|거리\s*측정/u,
+  cooler: /가습|분무|수조|흡입|청소|골프|거리\s*측정|드라이|풍량|피부/u,
+};
+
 function sanitizeText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
@@ -207,6 +235,26 @@ export function inferCategoryName(categoryName: string, productName: string): st
   const given = sanitizeText(categoryName);
   if (given && given !== "상품리뷰") return given;
 
+  if (productName.trim()) {
+    const canvas = buildProduct9Canvas({ name: productName });
+    if (canvas.concept.productKind === "바디·헤어케어") {
+      return /샴푸|린스|트리트먼트|컨디셔너/u.test(productName) ? "헤어케어" : "바디케어";
+    }
+    if (canvas.concept.productKind === "헤어드라이기") return "헤어드라이기";
+    if (canvas.concept.productKind === "보냉용품") return "보냉백";
+    const labels: Record<string, string> = {
+      food_supplement: "식품·건강",
+      home_appliance: canvas.concept.productKind === "가습기" ? "가습기" : "생활가전",
+      sports_leisure: canvas.concept.productKind === "시계형 골프 거리측정기" ? "골프 거리측정기" : "스포츠·레저",
+      digital_it: "디지털 기기",
+      beauty_body: "뷰티·바디",
+      baby_pet: "유아·반려동물",
+      fashion_goods: "패션·잡화",
+      living_health: "생활·건강",
+    };
+    if (labels[canvas.concept.categoryId]) return labels[canvas.concept.categoryId];
+  }
+
   const target = productName;
   if (/바디\s*(워시|로션|크림|클렌저)|보디|샤워\s*젤/.test(target)) return "바디케어";
   if (/샴푸|린스|트리트먼트|컨디셔너/.test(target)) return "헤어케어";
@@ -232,18 +280,34 @@ export function buildProductThumbnailCopy(
   postTitle: string,
   productName: string,
   contentKind: "SHOPPING" | "TRAVEL" = "SHOPPING",
+  productUnderstanding?: Product9Canvas,
 ): ProductThumbnailCopy {
   if (contentKind === "TRAVEL") return buildTravelThumbnailCopy(productName);
   const productNameLabel = compactProductDisplayName(productName) || "추천 상품";
-  const theme = pickTheme(productName, postTitle);
+  const understanding = productUnderstanding || (productName.trim()
+    ? buildProduct9Canvas({ name: productName })
+    : null);
+  const ontologyTheme = understanding
+    ? ONTOLOGY_THEMES[understanding.lever.thumbnailThemeId] || ONTOLOGY_THEMES[understanding.concept.categoryId]
+    : null;
+  const theme = ontologyTheme ? null : pickTheme(productName, postTitle);
 
   return {
     productNameLabel,
-    headline: theme?.headline || DEFAULT_COPY.headline,
-    subline: theme?.subline || DEFAULT_COPY.subline,
+    headline: ontologyTheme?.headline || theme?.headline || DEFAULT_COPY.headline,
+    subline: ontologyTheme?.subline || theme?.subline || DEFAULT_COPY.subline,
     badge: DEFAULT_COPY.badge,
-    cta: theme?.cta || DEFAULT_COPY.cta,
+    cta: ontologyTheme?.cta || theme?.cta || DEFAULT_COPY.cta,
   };
+}
+
+export function isProductThumbnailCopyCompatible(
+  copy: Pick<ProductThumbnailCopy, "headline" | "subline" | "cta">,
+  productUnderstanding: Product9Canvas,
+): boolean {
+  const conflictPattern = ONTOLOGY_COPY_CONFLICTS[productUnderstanding.lever.thumbnailThemeId];
+  if (!conflictPattern) return true;
+  return !conflictPattern.test(sanitizeText(`${copy.headline} ${copy.subline} ${copy.cta}`));
 }
 
 async function buildTravelAccentPng(): Promise<Buffer> {
@@ -287,7 +351,7 @@ export function inferScenePrompt(categoryName: string, productName: string): str
 export function buildProductThumbnailGenerationPrompt(
   options: BuildProductThumbnailGenerationPromptOptions
 ): ProductThumbnailGenerationPrompt {
-  const copy = buildProductThumbnailCopy(options.postTitle, options.productName);
+  const copy = buildProductThumbnailCopy(options.postTitle, options.productName, "SHOPPING", options.productUnderstanding);
   const categoryName = inferCategoryName(options.categoryName || "", options.productName);
   const features = (options.features || [])
     .map((item) => sanitizeText(item))
@@ -712,7 +776,12 @@ export async function generateProductThumbnail(
     : await resolveThumbnailImages(options.imagePaths);
   if (!resolvedImages) return null;
 
-  const suggestedCopy = buildProductThumbnailCopy(options.postTitle, options.productName, options.contentKind);
+  const suggestedCopy = buildProductThumbnailCopy(
+    options.postTitle,
+    options.productName,
+    options.contentKind,
+    options.productUnderstanding,
+  );
   const copy: ProductThumbnailCopy = {
     productNameLabel: sanitizeText(options.copy?.productNameLabel || suggestedCopy.productNameLabel),
     headline: sanitizeText(options.copy?.headline || suggestedCopy.headline),

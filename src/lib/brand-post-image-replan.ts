@@ -71,6 +71,7 @@ export function imageReplanDraftIdentity(manifest: Manifest): string {
   return JSON.stringify({ createdAt: manifest.createdAt, title: manifest.title, markdownSha256: manifest.markdownSha256,
     markdownPath: manifest.markdownPath, connectKind: manifest.connectKind, imagePolicy: manifest.imagePolicy,
     sourceSnapshot: manifest.sourceSnapshot, hashtags: manifest.hashtags, imageRequirements: manifest.imageRequirements,
+    productUnderstanding: manifest.productUnderstanding,
     postSpec: manifest.postSpec, specDraft: manifest.specDraft,
     textNodes: manifest.composition.renderNodes.filter(node => node.kind !== "image"),
     sections: manifest.composition.sections.map(({ imagePaths: _paths, ...section }) => section) });

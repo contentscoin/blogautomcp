@@ -7,6 +7,7 @@ import { copyProductPhotoSource, readProductPhotoSource } from "../../scripts/li
 import { getAppDataDir } from "../../scripts/lib/app-paths";
 import type { BrandLinkContentReadiness } from "../../scripts/lib/brandlink-content-readiness";
 import type { ProductSnapshot } from "./draft-context-snapshot";
+import type { Product9Canvas } from "../../scripts/lib/product-9canvas";
 import { SAVED_TEXT_QC_VERSION, type SavedTextQcMetadata } from "./brand-post-revalidation";
 import { atomicWriteTextFile } from "./atomic-text-file";
 import { isDraftEditorialQualityPassed } from "./brand-post-quality-display";
@@ -104,6 +105,8 @@ interface BrandPostPackageManifestBase {
   approvedAt: string | null;
   contentQuality?: BrandLinkContentReadiness | null;
   sourceSnapshot?: ProductSnapshot;
+  /** 원고 작성 전에 확정한 상품 정체성·옵션·이미지 정책. */
+  productUnderstanding?: Product9Canvas;
   textQualityRevalidation?: SavedTextQcMetadata;
   qualityRepair?: BrandPostQualityRepairSummary | null;
   imageGeneration?: {
@@ -747,8 +750,15 @@ export function packagePreview(manifest: BrandPostPackageManifest) {
   const approval = evaluateBrandPostPackageReadiness(manifest);
   const imageSlots = approval.imageSlots;
   // 스펙/초안 원본은 크고(MCP 결과 900KB 제한) 화면에 필요 없어 미리보기에서는 뺀다.
-  const { postSpec: _postSpec, specDraft: _specDraft, sourceSnapshot: _sourceSnapshot, ...rest } = manifest;
+  const {
+    postSpec: _postSpec,
+    specDraft: _specDraft,
+    sourceSnapshot: _sourceSnapshot,
+    productUnderstanding: _productUnderstanding,
+    ...rest
+  } = manifest;
   void _sourceSnapshot;
+  void _productUnderstanding;
   void _postSpec;
   void _specDraft;
   const sectionOutline = manifest.version === "brand-post-package/v2"

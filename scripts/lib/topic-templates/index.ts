@@ -8,6 +8,7 @@
 
 import { SHOPPING_SECTION_ORDER, SHOPPING_TOPIC_TEMPLATES } from "./shopping";
 import { TRAVEL_SECTION_ORDER, TRAVEL_TOPIC_TEMPLATES } from "./travel";
+import { buildProduct9Canvas, type Product9Canvas } from "../product-9canvas";
 import type {
   ShoppingTopicTemplateId,
   TopicConnectKind,
@@ -52,6 +53,8 @@ export interface TopicTemplateInput {
   ocrLines?: readonly string[] | null;
   /** 스토어 카테고리 경로가 있으면 가장 강한 신호로 쓴다 */
   categoryPath?: string | null;
+  /** 원고 전에 확정한 상품 의미 계약. 있으면 문자열 재분류보다 우선한다. */
+  productUnderstanding?: Product9Canvas | null;
 }
 
 /** 같은 점수일 때 더 구체적인 유형을 먼저 고른다(예: 골프 거리측정기 → 스포츠). */
@@ -72,6 +75,24 @@ function uniqueHits(text: string, keywords: readonly string[]): string[] {
 }
 
 function selectShopping(input: TopicTemplateInput): TopicTemplateSelection {
+  if (input.productUnderstanding?.version === "product-9canvas/v1") {
+    return {
+      id: input.productUnderstanding.lever.topicTemplateId,
+      reason: `Product 9Canvas: ${input.productUnderstanding.concept.categorySignals.join(", ") || input.productUnderstanding.concept.productKind}`,
+    };
+  }
+  if (input.name?.trim()) {
+    const productUnderstanding = buildProduct9Canvas({
+      name: input.name,
+      description: input.description,
+      features: input.features,
+      categoryPath: input.categoryPath,
+    });
+    return {
+      id: productUnderstanding.lever.topicTemplateId,
+      reason: `Product 9Canvas: ${productUnderstanding.concept.categorySignals.join(", ") || productUnderstanding.concept.productKind}`,
+    };
+  }
   const name = input.name || "";
   const category = input.categoryPath || "";
   const detail = [input.description || "", ...(input.features || []), ...(input.ocrLines || [])].join("\n");

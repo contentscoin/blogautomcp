@@ -1,4 +1,5 @@
 import { getTopicTemplate, selectTopicTemplate, type TopicTemplateSelection } from "./topic-templates";
+import type { Product9Canvas } from "./product-9canvas";
 
 export type EditorialKind = "SHOPPING" | "TRAVEL";
 export const EDITORIAL_TEMPLATES = {
@@ -10,7 +11,13 @@ export const EDITORIAL_TEMPLATES = {
   "travel-conditions": { kind: "TRAVEL", persona: "예약 조건을 풀어주는 꼼꼼한 안내 편집자", flow: "동반자와 선택 조건 → 포함·불포함·선택 사항 → 숙박 확정 여부와 예약 제약", color: "#655078" },
 } as const;
 export type EditorialTemplateId = keyof typeof EDITORIAL_TEMPLATES;
-export interface EditorialProduct { name?: string; description?: string | null; features?: readonly string[] }
+export interface EditorialProduct {
+  name?: string;
+  description?: string | null;
+  features?: readonly string[];
+  categoryPath?: string | null;
+  productUnderstanding?: Product9Canvas | null;
+}
 
 export type EditorialSectionRole =
   | "hook"
@@ -141,7 +148,13 @@ function topicDefaultEditorialTemplate(kind: EditorialKind, product: EditorialPr
 }
 
 export function selectEditorialTopic(kind: EditorialKind, product: EditorialProduct = {}): TopicTemplateSelection {
-  return selectTopicTemplate(kind, { name: product.name, description: product.description, features: product.features });
+  return selectTopicTemplate(kind, {
+    name: product.name,
+    description: product.description,
+    features: product.features,
+    categoryPath: product.categoryPath,
+    productUnderstanding: product.productUnderstanding,
+  });
 }
 
 function matchedSelection(kind: EditorialKind, product: EditorialProduct) {

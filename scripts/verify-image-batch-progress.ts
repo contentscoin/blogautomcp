@@ -14,6 +14,7 @@ import * as photoProvenance from "./lib/product-photo-provenance";
 import * as imageEvidence from "../src/lib/brand-post-image-evidence";
 import * as atomicTextFile from "../src/lib/atomic-text-file";
 import * as photorealBuild from "./lib/photoreal/build";
+import * as product9Canvas from "./lib/product-9canvas";
 import type { ProductSectionImageReviewOptions } from "./lib/product-photo-review";
 import type { generateBrandPostImages as Generate, BrandPostImageGenerationResult } from "../src/lib/brand-post-image-generation";
 
@@ -113,6 +114,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
         },
       },
       "../../scripts/lib/product-thumbnail": { buildProductThumbnailCopy: () => ({}) },
+      "../../scripts/lib/product-9canvas": product9Canvas,
       "../../scripts/lib/shopping-fact-card": {
         SHOPPING_FACT_CARD_LIMIT: 3,
         selectShoppingFactCardFacts: () => settings.cardFacts || [],

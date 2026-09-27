@@ -7,6 +7,7 @@ import {
   planQualityConvergence,
   type QualityConvergencePlan,
 } from "./quality-convergence";
+import { productRecoveryStageForFailure } from "./product-9canvas";
 
 export interface Result {
   success: boolean; code?: string; error?: string; errors?: string[]; message?: string;
@@ -493,7 +494,16 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     await deps.call(`${base}/draft`, "PATCH", { action: "approve" });
   } catch (error) {
     if (!isDefinitivePublishImageFailure(error)) throw error;
-    deps.onStage?.("최종 이미지 검사 실패 · 해당 거절 이미지 자동 교체");
+    const recoveryStage = productRecoveryStageForFailure(error);
+    const recoveryLabel = {
+      source: "상품 근거 재수집",
+      understanding: "상품 정체성·옵션 재판정",
+      writing: "본문-이미지 의미 재정렬",
+      "image-plan": "이미지 배치 재계획",
+      "image-source": "기능 근거 이미지 재탐색",
+      composition: "제품 크기·접지 합성 교정",
+    }[recoveryStage];
+    deps.onStage?.(`최종 이미지 검사 실패 · 원인=${recoveryLabel} · 해당 단계부터 자동 복구`);
     draft = await deps.call(`${base}/draft`, "GET");
     if (!draft.data?.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) {
       await dropRejectedAndApprove(error);

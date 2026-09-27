@@ -4,8 +4,8 @@ import crypto from "node:crypto";
 import { getBrandPostPackageDir } from "../../src/lib/brand-post-package";
 import { atomicWriteTextFile } from "../../src/lib/atomic-text-file";
 
-/** 1.3.83: replan gained generated-lifestyle and coverage-relaxation phases. */
-export const IMAGE_RECOVERY_POLICY_VERSION = 2;
+/** Product 9Canvas changes category, option and physical-scale recovery inputs. */
+export const IMAGE_RECOVERY_POLICY_VERSION = 3;
 
 export type ImageRecoveryStage = "refresh-source" | "repair-rejected" | "replan-images" | "replan-after-rejection";
 type Entry = { stage: ImageRecoveryStage; input: string; output?: string; status: "running" | "complete" | "failed"; at: string; reason?: string; externalFailure?: boolean };
@@ -38,6 +38,7 @@ export function imageRecoverySignature(root: string): string | null {
     // Bump when the recovery algorithm itself changes, so drafts that failed under the
     // old logic get one attempt with the new logic instead of being suppressed forever.
     version: 1, policy: IMAGE_RECOVERY_POLICY_VERSION, product: manifest.sourceSnapshot?.product,
+    productUnderstanding: manifest.productUnderstanding,
     refreshedProduct: context?.product,
     sections: manifest.composition?.sections?.map((section: Record<string, unknown>) => ({
       id: section.id, title: section.title, body: section.body, imageIntent: section.imageIntent,

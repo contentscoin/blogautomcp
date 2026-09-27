@@ -3,9 +3,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
-import { buildProductThumbnailCopy, compactProductDisplayName, inferCategoryName } from "./lib/product-thumbnail";
+import {
+  buildProductThumbnailCopy,
+  compactProductDisplayName,
+  inferCategoryName,
+  isProductThumbnailCopyCompatible,
+} from "./lib/product-thumbnail";
 import { createOriginalProductPhotoThumbnail } from "./lib/product-image-lock";
 import { readProductPhotoSource } from "./lib/product-photo-provenance";
+import { buildProduct9Canvas } from "./lib/product-9canvas";
 import { fitThumbnailHeadline } from "./lib/thumbnail-layout-v2";
 
 async function main() {
@@ -19,6 +25,22 @@ async function main() {
     assert.equal(buildProductThumbnailCopy("", name).headline, "향·용량 구성");
   }
   assert.match(buildProductThumbnailCopy("", "헤어드라이기").subline, /바람/);
+  const humidifier = buildProductThumbnailCopy("캠핑 차량용 제품", "풀라스 UV 살균 초음파 미니 가습기 캠핑 차량용");
+  assert.equal(humidifier.headline, "가습 방식 체크");
+  assert.doesNotMatch(JSON.stringify(humidifier), /보냉|흡입/u);
+  const humidifierUnderstanding = buildProduct9Canvas({ name: "풀라스 UV 살균 초음파 미니 가습기 캠핑 차량용" });
+  assert.equal(isProductThumbnailCopyCompatible({
+    headline: "보냉력 체크",
+    subline: "용량·수납·휴대성",
+    cta: "사용 포인트",
+  }, humidifierUnderstanding), false, "A saved cooler thumbnail must not override a humidifier contract");
+  assert.equal(isProductThumbnailCopyCompatible({
+    headline: humidifier.headline,
+    subline: humidifier.subline,
+    cta: humidifier.cta,
+  }, humidifierUnderstanding), true);
+  const persimmon = buildProductThumbnailCopy("선물세트 기준", "상주곶감 건시 반건시 호두말이 크림치즈 선물세트");
+  assert.equal(persimmon.headline, "구성·보관 확인");
   assert.equal(inferCategoryName("", "헤어 샴푸"), "헤어케어");
   assert.equal(compactProductDisplayName("브랜드X 미확인변형 ABC-123 바디워시"), "브랜드X 미확인변형 ABC-123 바디워시");
   assert.equal(compactProductDisplayName("아비노 바디워시"), "아비노 바디워시");

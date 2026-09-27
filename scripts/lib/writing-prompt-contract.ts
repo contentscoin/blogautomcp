@@ -3,6 +3,7 @@ import { isMeaningfulProductEvidenceFeature } from "./product-editorial-plan";
 import { formatWritingStructureGuide } from "./writing-structure-guide";
 import { EditorialProduct, EditorialTemplateId, EditorialSelection, createEditorialSelection, formatEditorialTemplate } from "./editorial-templates";
 import { formatTopicTemplateForPrompt } from "./topic-templates";
+import { formatProduct9CanvasForPrompt, type Product9Canvas } from "./product-9canvas";
 
 export interface WritingPromptContract {
   version: "writing-prompt-contract/v1";
@@ -17,6 +18,8 @@ export interface WritingPromptContract {
   requestedTitle?: string;
   editorialTemplateId?: EditorialTemplateId;
   editorial?: EditorialSelection;
+  /** 원고·썸네일·이미지 계획이 공유하는 상품 의미 계약. */
+  productUnderstanding?: Product9Canvas;
   /** 포스팅 각도(주제 글) 블록. 전체 리뷰이고 형제 글이 없으면 비어 있다. */
   postAngleBlock?: string;
   /** 예산이 빡빡한 브라우저 프롬프트용 한 줄 요약 */
@@ -67,6 +70,7 @@ export function createWritingPromptContract(input: {
   verifiedExperienceNotes?: string;
   draftMemo?: string | null;
   product?: EditorialProduct;
+  productUnderstanding?: Product9Canvas;
   postAngleBlock?: string;
   postAngleSummary?: string;
 }): WritingPromptContract {
@@ -81,12 +85,16 @@ export function createWritingPromptContract(input: {
   if (!Number.isInteger(input.hashtagCount) || input.hashtagCount < 3 || input.hashtagCount > 10) {
     throw new Error("Invalid writing contract hashtag count");
   }
-  const editorial = createEditorialSelection(input.kind, input.product);
+  const editorialProduct = input.productUnderstanding
+    ? { ...(input.product || {}), productUnderstanding: input.productUnderstanding }
+    : input.product;
+  const editorial = createEditorialSelection(input.kind, editorialProduct);
   return {
     version: "writing-prompt-contract/v1",
     kind: input.kind,
     editorialTemplateId: editorial.id,
     editorial,
+    ...(input.productUnderstanding ? { productUnderstanding: input.productUnderstanding } : {}),
     sections: { min: input.minimumSections, max: input.maximumSections },
     characters: { ...input.targetCharacters },
     sentences: { min: input.kind === "TRAVEL" ? 5 : 4, max: 6 },
@@ -137,6 +145,7 @@ export function formatWritingPromptContract(
     "- 같은 규격·펌프 사용성을 여러 절에서 반복해 분량을 채우지 않습니다. 바디워시·로션 같은 비전기 제품에는 전원·충전·조작부 설명을 넣지 않습니다.",
     "- 제공된 출처 또는 실제 열어 확인한 자료의 사실만 사용합니다. 검색 도구가 없으면 제공된 근거 안에서 작성합니다.",
     "- 출처 없는 운영시간·입장료·호텔 등급·날씨 등 변동 정보와 불확실한 주장은 생략합니다. 추정형 표현을 확정형으로 바꿔 사실처럼 만들지 않습니다.",
+    contract.productUnderstanding ? formatProduct9CanvasForPrompt(contract.productUnderstanding) : "",
     contract.verifiedExperienceNotes
       ? `- 실제 체험 표현은 다음 검증 메모에 명시된 사실에만 한정합니다: ${contract.verifiedExperienceNotes}`
       : "- 실제 구매·사용·방문·탑승·숙박·식사 경험을 만들지 않습니다. 제목에 후기·내돈내산·실사용·직접 써본·직접 다녀온 표현을 넣지 않습니다.",
