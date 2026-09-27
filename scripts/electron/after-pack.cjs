@@ -1,5 +1,5 @@
 const { assertPackagedApp } = require('./assert-packaged-app.cjs');
 
 module.exports = async context => {
-  assertPackagedApp(context.appOutDir);
+  assertPackagedApp(context.appOutDir, context.packager.projectDir);
 };
