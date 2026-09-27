@@ -1,6 +1,6 @@
 {
   "name": "brandconnect-automation",
-  "version": "1.3.89",
+  "version": "1.3.90",
   "description": "네이버 쇼핑 커넥트(브랜드커넥트) 자동 블로그 포스팅 도구",
   "private": true,
   "scripts": {
@@ -195,10 +195,22 @@
       {
         "from": "resources/tesseract",
         "to": "tesseract"
+      },
+      {
+        "from": "scripts/electron/main.cjs",
+        "to": "electron-runtime/main.cjs"
+      },
+      {
+        "from": "scripts/electron/auto-update.cjs",
+        "to": "electron-runtime/auto-update.cjs"
+      },
+      {
+        "from": "scripts/lib/draft-runtime-policy.json",
+        "to": "lib/draft-runtime-policy.json"
       }
     ],
     "extraMetadata": {
-      "main": "scripts/electron/main.cjs"
+      "main": "../electron-runtime/main.cjs"
     },
     "publish": [
       {

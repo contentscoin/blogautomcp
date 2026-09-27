@@ -6,6 +6,8 @@ const {
   assertPackagedApp,
   resolvePackagedAppRoot,
   REQUIRED_RELATIVE_PATHS,
+  EXTERNAL_MAIN_RELATIVE_PATH,
+  MIRRORED_RUNTIME_FILES,
 } = require('./electron/assert-packaged-app.cjs');
 
 const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'packaged-app-layout-'));
@@ -20,10 +22,26 @@ try {
       'utf8',
     );
   }
+  fs.writeFileSync(
+    path.join(macAppRoot, 'package.json'),
+    JSON.stringify({ name: 'fixture', version: '1.0.0', main: EXTERNAL_MAIN_RELATIVE_PATH }),
+    'utf8',
+  );
+  for (const [appRelativePath, resourceRelativePath] of MIRRORED_RUNTIME_FILES) {
+    const source = path.join(macAppRoot, appRelativePath);
+    const target = path.resolve(macAppRoot, resourceRelativePath);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(source, target);
+  }
   assert.equal(resolvePackagedAppRoot(fixtureRoot), macAppRoot);
   assertPackagedApp(fixtureRoot);
-  assertPackagedApp(path.resolve('out/release-1.3.77/win-unpacked'));
-  console.log('Packaged Windows and macOS layout checks passed.');
+  const externalMain = path.resolve(macAppRoot, EXTERNAL_MAIN_RELATIVE_PATH);
+  fs.rmSync(externalMain);
+  assert.throws(() => assertPackagedApp(fixtureRoot), /PACKAGING_MAIN_ENTRY_MISSING/);
+
+  const packagedRoot = process.argv[2];
+  if (packagedRoot) assertPackagedApp(path.resolve(packagedRoot));
+  console.log('Packaged entrypoint layout checks passed.');
 } finally {
   fs.rmSync(fixtureRoot, { recursive: true, force: true });
 }
