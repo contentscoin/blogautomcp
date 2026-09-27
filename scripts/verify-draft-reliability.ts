@@ -457,7 +457,7 @@ async function main() {
   assert.deepEqual(dropStore.composition.sections.map((section) => section.imagePaths), [[], ["a.png"], ["b.png", "c.png"]]);
   assert.ok(!dropStore.composition.renderNodes.some((node) => node.kind === "image"), "rejected images leave the rendered post");
 
-  // 21. (1.3.88) Workflow: a failed replacement falls through to one drop-and-relax replan; a status race is retried.
+  // 21. (1.3.89) Workflow: rejected slots get one targeted repair, then fall through to drop-and-relax; a status race is retried.
   const approvalRun = async (options: { replacementFails: boolean; raceOnce: boolean }) => {
     const actions: string[] = [];
     let approvals = 0; let accepted = false; let missing = false; let raced = false;
@@ -476,7 +476,7 @@ async function main() {
         accepted = true;
       }
       if (url.endsWith("/images")) {
-        if (action === "bind_sources" && options.replacementFails) {
+        if (action === "repair_rejected" && options.replacementFails) {
           return { success: false, code: "SOURCE_REVIEW_UNAVAILABLE", errors: ["SOURCE_REVIEW_UNAVAILABLE: reviewer returned nothing"] };
         }
         if (action === "replan_sources") { missing = false; return { success: true, recovery: { changed: true }, remainingMissing: 0 }; }
@@ -490,10 +490,12 @@ async function main() {
   };
   const fellThrough = await approvalRun({ replacementFails: true, raceOnce: false });
   assert.equal(fellThrough.accepted, true, "a rejected image the post can do without no longer fails the material");
+  assert.equal(fellThrough.actions.filter((action) => action === "repair_rejected").length, 1);
   assert.equal(fellThrough.actions.filter((action) => action === "replan_sources").length, 1);
   assert.ok(!fellThrough.actions.includes("prepare_context"), "the drop path runs instead of another source refresh");
   const raced = await approvalRun({ replacementFails: false, raceOnce: true });
   assert.equal(raced.accepted, true, "a concurrent status change is retried, not reported");
+  assert.equal(raced.actions.filter((action) => action === "repair_rejected").length, 1);
 
   console.log("PASS: draft structure normalization + retry, shared evidence requirement + named missing facts, tolerant visual verdicts + non-fatal per-image proposal failures, leak stripping, static seller images, generated lifestyle replan, advice-not-claim, recovery policy version, severe-draft rewrite, coverage relaxation, grader fact matching, unbranded identity, prepare-mode thumbnail recovery, exhausted-gallery floor, recheck/revise agreement, seller-image vision batch, fact cards, card approval, advisory signals, digital facts, travel trip-place visits, heading splits, named missing places, three-image replan floor, no-capacity relaxation, rejected-image drop, rejection fall-through, recheck race retry");
 }

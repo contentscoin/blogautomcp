@@ -7,7 +7,7 @@ import { atomicWriteTextFile } from "../../src/lib/atomic-text-file";
 /** 1.3.83: replan gained generated-lifestyle and coverage-relaxation phases. */
 export const IMAGE_RECOVERY_POLICY_VERSION = 2;
 
-export type ImageRecoveryStage = "refresh-source" | "replan-images" | "replan-after-rejection";
+export type ImageRecoveryStage = "refresh-source" | "repair-rejected" | "replan-images" | "replan-after-rejection";
 type Entry = { stage: ImageRecoveryStage; input: string; output?: string; status: "running" | "complete" | "failed"; at: string; reason?: string; externalFailure?: boolean };
 // IMAGE_GENERATION_REQUIRED is what a source-only pass reports for an AI-scene slot; the next
 // generation or replan pass can still fill it, so it does not end recovery.
@@ -44,7 +44,7 @@ export function imageRecoverySignature(root: string): string | null {
       imageMin: section.imageMin, imageMax: section.imageMax,
     })),
     assets: manifest.imageAssets?.map((asset: Record<string, unknown>) => [asset.sha256, asset.sectionId]), receipts,
-    rejected: Array.isArray(rejected) ? [...new Set(rejected.map(row => JSON.stringify([row.sha256, row.sectionId, row.context])))].sort() : [],
+    rejected: Array.isArray(rejected) ? [...new Set(rejected.map(row => JSON.stringify([row.sha256, row.sectionId, row.context, row.scope || "section"])))].sort() : [],
   })).digest("hex");
 }
 

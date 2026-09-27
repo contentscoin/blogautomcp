@@ -28,7 +28,7 @@ async function main() {
           accepted = true;
         }
         if (url.endsWith("/images")) {
-          assert(["bind_sources", "replan_sources"].includes(action));
+          assert(["repair_rejected", "replan_sources"].includes(action));
           if (action === "replan_sources") {
             const changed = ["replan-success", "third-rejection", "replan-incomplete"].includes(outcome);
             missing = !changed || outcome === "replan-incomplete";
@@ -45,8 +45,8 @@ async function main() {
       assert.equal(approvals, ["replan-success", "third-rejection"].includes(outcome) ? 3 : ["recovered", "second-rejection", "replan-incomplete"].includes(outcome) ? 2 : 1);
       // (1.3.88) A rejection with no empty slot left still gets one drop-and-relax replan.
       assert.equal(actions.filter(action => action === "replan_sources").length, ["second-rejection", "replan-success", "third-rejection", "replan-incomplete", "unstale"].includes(outcome) ? 1 : 0);
-      assert.equal(actions.filter(action => action === "bind_sources").length, ["recovered", "second-rejection", "replan-success", "third-rejection", "replan-incomplete"].includes(outcome) ? 1 : 0);
-      assert(!actions.includes("generate_missing"), "final audit recovery must not generate another background");
+      assert.equal(actions.filter(action => action === "repair_rejected").length, ["recovered", "second-rejection", "replan-success", "third-rejection", "replan-incomplete"].includes(outcome) ? 1 : 0);
+      assert(!actions.includes("generate_missing"), "final audit recovery targets rejected slots instead of restarting every image");
     }
     for (const tail of ["REQUEST_TIMEOUT: response lost", "unclassified reviewer failure", "CODEX_MODEL_INCOMPATIBLE: model"]) {
       assert.equal(isRecoverableImageEvidenceResult({ code: "IMAGE_SOURCE_BINDING_REQUIRED", errors: ["IMAGE_SOURCE_BINDING_REQUIRED: missing", tail] }), false);

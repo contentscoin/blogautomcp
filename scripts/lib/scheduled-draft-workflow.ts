@@ -388,7 +388,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     }
   };
 
-  const images = async (sourceOnly = false) => {
+  const images = async (mode: "normal" | "source-only" | "repair-rejected" = "normal") => {
     deps.onStage?.("이미지 준비");
     await waitForImagesIdle();
     if (!draft.data) throw new Error("준비 중 소재가 사라졌습니다.");
@@ -414,7 +414,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
         await waitForImagesIdle();
       };
       const missing = () => draft.data?.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0);
-      await attemptImages(sourceOnly ? "bind_sources" : "generate_missing");
+      await attemptImages(mode === "source-only" ? "bind_sources" : mode === "repair-rejected" ? "repair_rejected" : "generate_missing");
       if (missing() && isRecoverableImageEvidenceResult(latestImageRepair)) {
         deps.onStage?.("이미지 실패 원인 확인 · 상품 상세 원본 재수집");
         const refreshed = await runRecordedImageRecovery(id, "refresh-source", async () => {
@@ -493,14 +493,15 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     await deps.call(`${base}/draft`, "PATCH", { action: "approve" });
   } catch (error) {
     if (!isDefinitivePublishImageFailure(error)) throw error;
-    deps.onStage?.("최종 이미지 검사 실패 · 해당 원본 자동 교체");
+    deps.onStage?.("최종 이미지 검사 실패 · 해당 거절 이미지 자동 교체");
     draft = await deps.call(`${base}/draft`, "GET");
     if (!draft.data?.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) {
       await dropRejectedAndApprove(error);
     } else {
       let replaced = true;
       try {
-        await images(true);
+        const repaired = await runRecordedImageRecovery(id, "repair-rejected", () => images("repair-rejected"));
+        if (!repaired.attempted) replaced = false;
         plan = await recheck(false, revised ? 1 : 0);
         if (plan.action !== "complete") throw unresolvedCompositionError(plan.reason);
       } catch (replaceError) {

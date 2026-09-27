@@ -243,7 +243,7 @@ async function main() {
     "ChatGPT 링크는 Electron 내부 팝업이 아니라 기본 브라우저에서 열려야 합니다.",
   );
   assert.equal(
-    ["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources", "replan_sources"].every(action => draftImageRouteSource.includes(`"${action}"`)) &&
+    ["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources", "repair_rejected", "replan_sources"].every(action => draftImageRouteSource.includes(`"${action}"`)) &&
       draftImageRouteSource.includes("repairBrandPostImages") &&
       draftImageRouteSource.includes("applyExternalGeneratedBrandPostImage") &&
       draftImageRouteSource.includes("sourceOnly: body.action === \"bind_sources\"") &&

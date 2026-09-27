@@ -18,7 +18,10 @@ async function main() {
   const photo = path.join(dir, "photo.png");
   await sharp({ create: { width: 300, height: 300, channels: 3, background: "white" } }).png().toFile(photo);
   const hash = crypto.createHash("sha256").update(fs.readFileSync(photo)).digest("hex");
-  const composition = { sections: [{ id: "body", title: "공식 보습 기능", body: ["수분 공급"], imageIntent: "기능 근거", imagePaths: [photo], imageMin: 1, imageMax: 1 }],
+  const composition = { sections: [
+    { id: "body", title: "공식 보습 기능", body: ["수분 공급"], imageIntent: "기능 근거", imagePaths: [photo], imageMin: 1, imageMax: 1 },
+    { id: "other", title: "다른 문단", body: ["전체 모습"], imageIntent: "제품 대표 원본 사진 재노출", imagePaths: [], imageMin: 0, imageMax: 1 },
+  ],
     renderNodes: [{ kind: "heading", sectionId: "body", text: "공식 보습 기능" }, { kind: "paragraph", sectionId: "body", text: "수분 공급" },
       { kind: "image", sectionId: "body", assetPath: photo, role: "scene" }] } as unknown as ResolvedPostDocumentV1;
   const manifest = { brandLinkId: id, version: "brand-post-package/v2", composition, connectKind: "SHOPPING", heroImagePath: photo,
@@ -38,6 +41,7 @@ async function main() {
     const before = imageRecoverySignature(dir);
     await assert.rejects(assertPublishImagesSafe(opts), /SEMANTIC_REJECTION/);
     assert.deepEqual(rejectedPublicationImageHashes(id, composition, "body"), [hash]);
+    assert.deepEqual(rejectedPublicationImageHashes(id, composition, "other"), [], "feature-context rejection stays local");
     assert.notEqual(imageRecoverySignature(dir), before, "new rejection unlocks one bounded recovery");
     const after = imageRecoverySignature(dir);
     await assert.rejects(assertPublishImagesSafe(opts));
@@ -45,6 +49,11 @@ async function main() {
     assert.equal(store.getBrandPostImageSlots(manifest)[0].staleTargets[0].code, "image-publication-rejected");
     await assertPublishImagesSafe({ ...opts, review: async () => JSON.stringify({ reviews: [{ ...verdict, accepted: true }] }) });
     assert.deepEqual(rejectedPublicationImageHashes(id, composition, "body"), [], "fresh exact-byte pixel review resolves prior false positive");
+    const mixed = { ...verdict, mixedOptions: true, reason: "8GB/256GB와 16GB/512GB 옵션이 한 이미지에 함께 표시됨" };
+    await assert.rejects(assertPublishImagesSafe({ ...opts, review: async () => JSON.stringify({ reviews: [mixed] }) }), /혼합 옵션/);
+    assert.deepEqual(rejectedPublicationImageHashes(id, composition, "other"), [hash], "mixed-option bytes are blocked product-wide");
+    await assertPublishImagesSafe({ ...opts, review: async () => JSON.stringify({ reviews: [{ ...verdict, accepted: true }] }) });
+    assert.deepEqual(rejectedPublicationImageHashes(id, composition, "other"), [], "a fresh accepted pixel verdict clears product-wide rejection");
     await assert.rejects(assertPublishImagesSafe(opts));
     const changed = structuredClone(composition); (changed.renderNodes[1] as { text: string }).text = "새로운 본문";
     assert.deepEqual(rejectedPublicationImageHashes(id, changed, "body"), []);

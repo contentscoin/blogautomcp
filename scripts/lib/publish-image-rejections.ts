@@ -7,7 +7,15 @@ import { normalizePublishedRenderNodes, type ResolvedPostDocumentV1 } from "../.
 import { invalidateSuccessfulImageAuditReceipt } from "./publish-image-audit-receipt";
 
 type Composition = Pick<ResolvedPostDocumentV1, "renderNodes" | "sections">;
-interface Rejection { sha256: string; sectionId: string | null; context: string; rejectedAt: string }
+export type PublicationImageRejectionScope = "section" | "product";
+interface Rejection {
+  sha256: string;
+  sectionId: string | null;
+  context: string;
+  rejectedAt: string;
+  /** Old records omitted this field and remain section-scoped. */
+  scope?: PublicationImageRejectionScope;
+}
 function location(id: string): string {
   if (!/^[a-zA-Z0-9_-]{8,80}$/.test(id)) throw new Error("Invalid package ID");
   return path.join(getAppDataDir(), "prepared-brand-posts", id, "publish-image-rejections.json");
@@ -24,12 +32,14 @@ function read(id: string): Rejection[] {
     const records: unknown = JSON.parse(fs.readFileSync(location(id), "utf8"));
     return Array.isArray(records) ? records.filter((row): row is Rejection => row &&
       /^[a-f0-9]{64}$/.test(row.sha256) && /^[a-f0-9]{64}$/.test(row.context) &&
-      (row.sectionId === null || typeof row.sectionId === "string")) : [];
+      (row.sectionId === null || typeof row.sectionId === "string") &&
+      (row.scope === undefined || row.scope === "section" || row.scope === "product")) : [];
   } catch { return []; }
 }
 export function rejectedPublicationImageHashes(id: string, composition: Composition, sectionId: string | null): string[] {
   const context = publicationImageContext(composition, sectionId);
-  return read(id).filter(row => row.sectionId === sectionId && row.context === context).map(row => row.sha256);
+  return [...new Set(read(id).filter(row => row.scope === "product" ||
+    (row.sectionId === sectionId && row.context === context)).map(row => row.sha256))];
 }
 /** A fresh complete pixel verdict can resolve a previous false positive, but
  * only for those exact bytes and unchanged publication context. */
@@ -38,13 +48,14 @@ export function clearReviewedPublicationImageRejections(id: string, composition:
   if (!accepted.length) return;
   const records = read(id);
   const remaining = records.filter(row => !accepted.some(item => item.sha256 === row.sha256 &&
-    item.sectionId === row.sectionId && publicationImageContext(composition, item.sectionId) === row.context));
+    (row.scope === "product" || (item.sectionId === row.sectionId &&
+      publicationImageContext(composition, item.sectionId) === row.context))));
   if (remaining.length !== records.length) atomicWriteTextFile(location(id), JSON.stringify(remaining, null, 2));
 }
 /** Only definitive pixel rejections, tied to unchanged actual publication text.
  * No raw prompt, image path, credentials, or model response is persisted. */
 export function recordPublicationImageRejections(id: string, composition: Composition,
-  rejected: Array<{ sha256: string; sectionId: string | null }>): void {
+  rejected: Array<{ sha256: string; sectionId: string | null; scope?: PublicationImageRejectionScope }>): void {
   if (!rejected.length) return;
   const file = location(id);
   // A first, unsaved draft has no package to invalidate yet; preserve the
@@ -58,9 +69,11 @@ export function recordPublicationImageRejections(id: string, composition: Compos
   for (const item of rejected) {
     const context = publicationImageContext(composition, item.sectionId);
     if (!/^[a-f0-9]{64}$/.test(item.sha256) || context !== publicationImageContext(manifest.composition, item.sectionId)) continue;
-    const duplicate = records.findIndex(row => row.sha256 === item.sha256 && row.sectionId === item.sectionId && row.context === context);
+    const scope = item.scope || "section";
+    const duplicate = records.findIndex(row => row.sha256 === item.sha256 && (row.scope || "section") === scope &&
+      (scope === "product" || (row.sectionId === item.sectionId && row.context === context)));
     if (duplicate >= 0) records.splice(duplicate, 1);
-    records.push({ ...item, context, rejectedAt: new Date().toISOString() });
+    records.push({ ...item, scope, context, rejectedAt: new Date().toISOString() });
     added = true;
   }
   if (added) invalidateSuccessfulImageAuditReceipt(id);

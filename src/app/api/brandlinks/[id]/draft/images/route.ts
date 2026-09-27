@@ -20,7 +20,7 @@ import {
 import { isBrandPostImageRepairActive, planSectionImageRequests, repairBrandPostImages } from "@/lib/brand-post-image-repair";
 import { replanShoppingImageCoverage } from "@/lib/brand-post-image-replan";
 
-const IMAGE_ACTIONS = ["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources", "replan_sources"] as const;
+const IMAGE_ACTIONS = ["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources", "repair_rejected", "replan_sources"] as const;
 type ImageAction = (typeof IMAGE_ACTIONS)[number];
 const IMAGE_REPAIR_CONFLICT_CODES = ["IMAGE_REPAIR_BUSY", "IMAGE_REPAIR_OWNERSHIP_LOST"] as const;
 
@@ -167,7 +167,7 @@ export async function POST(
       return NextResponse.json({ success: true, data, recovery, remainingMissing,
         code: remainingMissing ? "IMAGE_SOURCE_BINDING_REQUIRED" : "IMAGE_REPAIR_COMPLETE",
         errors: remainingMissing ? [`IMAGE_SOURCE_BINDING_REQUIRED: 상세 원본 재수집과 대체 문단 검토 후에도 검증 이미지 ${remainingMissing}장이 부족합니다. (${recovery.reason})`] : [],
-        message: recovery.changed ? "검증된 원본이 있는 문단으로 필수 이미지 배치를 변경했습니다." : "검증 기준을 유지한 채 대체 가능 여부를 확인했습니다." });
+        message: recovery.changed ? "검증 가능한 대체 문단으로 필수 이미지 배치를 변경했습니다." : "검증 기준을 유지한 채 대체 가능 여부를 확인했습니다." });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const code = (error as { code?: string }).code || imageFailureCode([message]) || "IMAGE_REPLAN_FAILED";
@@ -243,6 +243,14 @@ export async function POST(
   const generationRequests: BrandPostImageGenerationRequest[] = [];
   if (body.action === "generate_missing" || body.action === "bind_sources") {
     generationRequests.push(...planSectionImageRequests(preview.imageSlots));
+  } else if (body.action === "repair_rejected") {
+    const rejectedSlots = preview.imageSlots.map(slot => ({
+      ...slot,
+      staleTargets: slot.staleTargets.filter(target => target.code === "image-publication-rejected"),
+      missing: slot.staleTargets.some(target => target.code === "image-publication-rejected") ? slot.missing : 0,
+      generationMissing: slot.staleTargets.some(target => target.code === "image-publication-rejected") ? slot.generationMissing : 0,
+    }));
+    generationRequests.push(...planSectionImageRequests(rejectedSlots));
   } else if (body.action === "generate_section") {
     const sectionId = body.sectionId?.trim() || "";
     const slot = preview.imageSlots.find((candidate) => candidate.sectionId === sectionId);

@@ -16,6 +16,7 @@ export function buildSelectedProductImageAuditContext(productName: string, featu
 
 import { isPublicationImageAspectAllowed } from "./publication-image-geometry";
 import { clearReviewedPublicationImageRejections, recordPublicationImageRejections } from "./publish-image-rejections";
+import type { PublicationImageRejectionScope } from "./publish-image-rejections";
 import { runCodexDraft, type CodexDraftOptions } from "./codex-draft-provider";
 import { allowsGenericBrandPostProductPhoto, isShoppingLifestyleImage } from "../../src/lib/brand-post-image-evidence";
 import type { ResolvedPostDocumentV1 } from "../../src/lib/post-composition-contract";
@@ -25,6 +26,8 @@ export interface PublishImageAuditFailure {
   assetPath: string;
   code: "INVALID_CONTEXT" | "MISSING_IMAGE" | "INVALID_IMAGE" | "LONG_IMAGE" | "SEMANTIC_REJECTION" | "INVALID_REVIEW" | "IMAGE_CHANGED";
   reason: string;
+  /** Wrong product, mixed variants and notice panels are unsafe in every section. */
+  rejectionScope?: PublicationImageRejectionScope;
 }
 export interface PublishImageAuditResult {
   ok: boolean;
@@ -67,8 +70,9 @@ export async function auditPublishImages(options: PublishImageAuditOptions): Pro
 
 async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Promise<PublishImageAuditResult> {
   const result: PublishImageAuditResult = { ok: false, checked: 0, failures: [], images: [] };
-  const fail = (nodeIndex: number, assetPath: string, code: PublishImageAuditFailure["code"], reason: string) => {
-    result.failures.push({ nodeIndex, assetPath, code, reason });
+  const fail = (nodeIndex: number, assetPath: string, code: PublishImageAuditFailure["code"], reason: string,
+    rejectionScope?: PublicationImageRejectionScope) => {
+    result.failures.push({ nodeIndex, assetPath, code, reason, ...(rejectionScope ? { rejectionScope } : {}) });
   };
   const receiptId = !options.review ? options.brandLinkId : undefined;
   if (receiptId && options.forceReview) invalidateSuccessfulImageAuditReceipt(receiptId);
@@ -215,8 +219,11 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
               ? ["기능 근거 부족: 일반 상품 사진으로 판정되어 이 문단의 기능 설명을 뒷받침하지 못합니다"] : []),
             ...(row.accepted !== true ? ["시각 검토에서 부적합 판정"] : []),
           ];
+          const rejectionScope: PublicationImageRejectionScope = row.identityMatches !== true || row.notice !== false ||
+            (row.mixedOptions === true && !comparisonAllowed) ? "product" : "section";
           fail(candidate.nodeIndex, candidate.assetPath, "SEMANTIC_REJECTION",
-            `${reasons.join(" / ")}. 문단: ${candidate.sectionTitle.slice(0, 120)}. 픽셀 관찰: ${row.reason.slice(0, 280)}`.slice(0, 500));
+            `${reasons.join(" / ")}. 문단: ${candidate.sectionTitle.slice(0, 120)}. 픽셀 관찰: ${row.reason.slice(0, 280)}`.slice(0, 500),
+            rejectionScope);
         }
       }
     }
@@ -320,7 +327,8 @@ async function assertPublishImagesSafeUnlocked(options: PublishImageAuditOptions
       .flatMap(failure => {
         const image = audit.images.find(item => item.nodeIndex === failure.nodeIndex);
         const node = options.composition.renderNodes[failure.nodeIndex];
-        return image && node?.kind === "image" ? [{ sha256: image.sha256, sectionId: node.sectionId }] : [];
+        return image && node?.kind === "image" ? [{ sha256: image.sha256, sectionId: node.sectionId,
+          scope: failure.rejectionScope }] : [];
       }));
   if (!audit.ok) throw new PublishImageAuditError(audit);
   return audit;
