@@ -163,7 +163,6 @@ async function buildStatusSnapshot(): Promise<Record<string, unknown>> {
     naverBlogIdConfigured: Boolean(process.env.NAVER_BLOG_ID?.trim()),
     travelContractReady: hasStoredConnectContract("travel"),
     updatePending: process.env.DESKTOP_UPDATE_INSTALL_PENDING === "1",
-    openaiConfigured: Boolean(process.env.OPENAI_API_KEY?.trim()),
     generativeThumbnail: isGenerativeThumbnailAvailable(),
     pipelineVersion: PIPELINE_VERSION,
     appVersion: appVersionString(),
@@ -816,7 +815,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
   }
 
   if (job.type === "POST_CREATE_DRAFT") {
-    // post_generate_draft_local: PC 의 OpenAI 키로 전량 생성. 이미지 배치는 돌지 않는다(origin:"mcp").
+    // post_generate_draft_local: PC의 로그인된 Codex로 전량 생성. 이미지 배치는 돌지 않는다(origin:"mcp").
     const productId = readString(input, "productId");
     const product = await requireProduct(productId, kind);
     const memo = readString(input, "memo").slice(0, 1000);
@@ -1047,7 +1046,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     const metaData = (meta.data || {}) as Record<string, unknown>;
     const imageUrls = Array.isArray(metaData.imageUrls) ? metaData.imageUrls.filter((value): value is string => typeof value === "string") : [];
     if (imageUrls.length === 0) throw new LocalAutomationError("IMAGE_SHORTFALL", "썸네일 원본으로 쓸 제품 사진이 없습니다. 상품을 먼저 동기화하세요.");
-    if (metaData.engine === "local") ctx.warnings.push("이 PC 에는 OpenAI 키가 없어 로컬 합성 썸네일만 만들 수 있습니다. ChatGPT 이미지 생성이 필요하면 thumbnail_prepare 를 사용하세요.");
+    if (metaData.engine === "local") ctx.warnings.push("제품 원본을 보존하는 로컬 합성 썸네일을 만들었습니다. ChatGPT 이미지 생성이 필요하면 thumbnail_prepare를 사용하세요.");
     const suggested = (metaData.suggestedCopy || {}) as Record<string, unknown>;
     const headline = readString(input, "headline") || (typeof suggested.headline === "string" ? suggested.headline : product.productName || "");
     const subline = readString(input, "subline") || (typeof suggested.subline === "string" ? suggested.subline : "");

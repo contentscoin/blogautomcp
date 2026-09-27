@@ -1,10 +1,9 @@
 /**
- * gpt-image 썸네일 파이프라인 회귀 검증 (API 호출 없음 — 생성기/QC 를 주입).
+ * 썸네일 파이프라인 회귀 검증 (외부 호출 없음 — 생성기/QC 를 주입).
  *   - 프롬프트: 1:1 레이아웃, 정확한 한글 문구, 무드 장면, 금지 항목
  *   - QC 배점: §10 100점, 자동 탈락, 95점 컷
  *   - 교정 프롬프트: 실패 코드 → §11 지시
  *   - 루프: 불합격 → 교정 재생성 → 통과 / 전부 실패 → null / 생성 실패 → 중단
- *   - 옵트인 E2E: THUMBNAIL_GEN_E2E=1 + OPENAI_API_KEY 가 있을 때만 실제 1장 생성
  */
 
 import assert from "node:assert/strict";
@@ -143,17 +142,6 @@ async function main() {
   });
   assert.equal(unchecked, null, "unchecked is never an approved image, even with a legacy pass flag");
   assert.equal(uncheckedCalls, 1, "an unavailable judge must not trigger paid regeneration loops");
-
-  if (process.env.THUMBNAIL_GEN_E2E === "1" && process.env.OPENAI_API_KEY) {
-    const { generateThumbnail } = await import("./lib/thumbnail-gen");
-    const reference = await makeImage("reference.png");
-    const real = await generateThumbnail({ kind: "SHOPPING", productName: "테스트 텀블러", copy: { ...copy, productNameLabel: "테스트 텀블러", headline: "보온 텀블러 체크" }, referenceImagePath: reference, outputDir: dir, maxAttempts: 2 });
-    assert.ok(real, "E2E: gpt-image 생성 + QC 통과");
-    const meta = await sharp(real!.path).metadata();
-    assert.equal(meta.width, 1024);
-    assert.equal(meta.height, 1024);
-    console.log(JSON.stringify({ e2e: true, score: real!.qc.score, attempts: real!.attempts }));
-  }
 
   console.log(JSON.stringify({ ok: true, loopPassAttempts: passed!.attempts, moods: listThumbnailMoods("SHOPPING").map((m) => m.id) }));
 }

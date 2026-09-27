@@ -40,7 +40,7 @@ assert.match(productPhotoReviewSource, /maxImages: batch\.length/u,
 assert.match(productPhotoReviewSource, /preserveImageOrder: true/u,
   "numbered product-photo candidates must not be silently reordered by filename");
 assert.match(providerSource, /runStreamed/u);
-assert.match(agentSource, /AI_PROVIDER === "codex"/u);
+assert.match(agentSource, /const AI_PROVIDER = "codex" as const/u);
 assert.doesNotMatch(agentSource, /return (?:await )?runChatGPTBrowserDirect\(/u,
   "automated writing must never fall back to an unpinned browser model");
 assert.match(agentSource, /if \(codexDraftTerminalFailureCode\(error\)\) throw error;/u,
@@ -68,15 +68,17 @@ assert.equal(classifyPrepareFailure(codedProviderFailure), "CODEX_MODEL_INCOMPAT
   "structured provider code must win over misleading message heuristics");
 assert.equal(classifyPrepareFailure(new Error("outer", { cause: Object.assign(new Error("inner"), { code: "CODEX_AUTH_REQUIRED" }) })), "CODEX_AUTH_REQUIRED",
   "a provider code must survive nested error causes until result.json");
-assert.match(agentSource, /CODEX_DRAFT_MODEL = draftRuntimePolicy\.CODEX_DRAFT_MODEL/u);
-assert.equal(draftRuntimePolicy.CODEX_DRAFT_MODEL, "gpt-6-luna");
+assert.match(agentSource, /CODEX_DRAFT_MODEL = CODEX_TEXT_MODEL/u);
+assert.equal(draftRuntimePolicy.CODEX_DRAFT_MODEL, "default");
+assert.equal("OPENAI_TEXT_MODEL" in draftRuntimePolicy, false);
 assert.equal(draftRuntimePolicy.CODEX_DRAFT_REASONING_EFFORT, "low");
 // 1.3.8 부터 섹션 문장 수는 공유 필수 작성 계약(writing-prompt-contract)이 정하고 Codex 프롬프트는 그 계약을 참조한다.
 assert.match(agentSource, /문장 수와 출력 구조는 공유 필수 작성 계약을 따릅니다/u);
 assert.match(routeSource, /const useCodex/u);
-assert.match(routeSource, /AI_PROVIDER: useCodex \? "codex" : provider/u);
+assert.match(routeSource, /AI_PROVIDER:\s*"codex"/u);
 assert.match(routeSource, /CODEX_BROWSER_FALLBACK_ENABLED:\s*"false"/u);
-assert.match(routeSource, /ALLOW_CHATGPT_BROWSER_MODE:\s*useBrowserChatGpt \? "true" : "false"/u);
+assert.match(routeSource, /ALLOW_CHATGPT_BROWSER_MODE:\s*"false"/u);
+assert.doesNotMatch(routeSource, /hasProviderKey|localFallbackEnabled|useBrowserChatGpt|OPENAI_API_KEY/u);
 assert.doesNotMatch(routeSource, /CODEX_BROWSER_FALLBACK_ENABLED:[\s\S]{0,160}browserSession\?\.isValid/u);
 assert.match(settingsSource, /draftCreationMode: codexDraftEnabled && codexDraft\.authenticated/u);
 assert.equal(draftRuntimePolicy.AI_PROVIDER, "codex");
@@ -124,6 +126,7 @@ async function verifyRetryPolicy(): Promise<void> {
     [new Error('{"type":"error","status":401,"error":{"message":"Forbidden"}}'), "authentication", "CODEX_AUTH_REQUIRED"],
     [new Error('{"status":500,"error":{"status":401,"message":"Forbidden"}}'), "authentication", "CODEX_AUTH_REQUIRED"],
     [new Error('{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The gpt-6-astra model requires a newer version of Codex."}}'), "model-version", "CODEX_MODEL_INCOMPATIBLE"],
+    [new Error('{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The gpt-6-luna model is not supported when using Codex with a ChatGPT account."}}'), "model-version", "CODEX_MODEL_INCOMPATIBLE"],
     [Object.assign(new Error("operation timed out"), { name: "AbortError" }), "timeout", "CODEX_TIMEOUT"],
     [Object.assign(new Error("invalid request"), { status: 400 }), "non-retryable", null],
   ];
@@ -163,7 +166,7 @@ verifyRetryPolicy().then(() => {
     bundledCodex: getBundledCodexEntrypoint(),
     bundledNativeCodex: getBundledCodexExecutable(),
     localStatus: readCodexLocalStatus(),
-    safety: ["read-only", "network-disabled", "travel-web-search-cached", "approval-never", "bounded-same-codex-retry", "browser-fallback-disabled"],
+    safety: ["read-only", "network-disabled", "travel-web-search-cached", "approval-never", "chatgpt-account-default-model", "bounded-same-codex-retry", "browser-fallback-disabled"],
   }, null, 2));
 }).catch((error) => {
   console.error(error);

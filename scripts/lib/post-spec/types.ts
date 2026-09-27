@@ -164,7 +164,7 @@ export interface GeneratedDraft {
   title: string;
   sections: GeneratedSection[];
   hashtags: string[];
-  source: "openai" | "local-template";
+  source: "codex" | "local-template";
   model: string | null;
   attempts: number;
 }

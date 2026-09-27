@@ -16,7 +16,6 @@ import { readPublishAttempt, updatePublishAttempt, interruptedPublishStatus, pub
 import "dotenv/config";
 import { thumbnailImageWaitPolicy, waitForThumbnailArtifacts } from "./lib/thumbnail-image-wait";
 import { getWritingTimeoutPolicy } from "./lib/writing-timeout-policy";
-import draftRuntimePolicy from "./lib/draft-runtime-policy.json";
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { Page } from "playwright";
@@ -68,11 +67,7 @@ import {
   scoreProductImageDimensions,
   type ProductImageCandidate,
 } from "./lib/product-image-selection";
-import {
-  buildProductThumbnailCopy,
-  buildProductThumbnailGenerationPrompt,
-  generateProductThumbnail,
-} from "./lib/product-thumbnail";
+import { buildProductThumbnailGenerationPrompt, generateProductThumbnail } from "./lib/product-thumbnail";
 import {
   buildTravelContractEditorialPlan,
   buildTravelReviewAnalysis,
@@ -131,10 +126,8 @@ import { mergeProductInfo } from "./lib/product-info-merge";
 import { commitPreparedPackageTransaction } from "./lib/prepared-package-transaction";
 import { writeDraftProgressFile } from "../src/lib/draft-progress";
 import { generateTravelEditorialSummaryCard } from "./lib/travel-editorial-card";
-import { generateThumbnail, isGenerativeThumbnailAvailable } from "./lib/thumbnail-gen";
 import {
   reviseAssembledPost,
-  runSpecFirstPipeline,
   type AssembledPost,
   type GeneratedDraft as SpecGeneratedDraft,
   type ImageCandidateInput,
@@ -195,7 +188,7 @@ import { buildHumanizeSectionsPrompt, parseHumanizeSections } from "./lib/humani
 import { createLockedProductThumbnail, createLockedProductThumbnailOnBackground, createOriginalProductPhotoThumbnail, type ShoppingThumbnailStyle } from "./lib/product-image-lock";
 import { copyProductPhotoSource } from "./lib/product-photo-provenance";
 import { codexDraftTerminalFailureCode, runCodexDraft } from "./lib/codex-draft-provider";
-import { TEXT_MODEL, TEXT_REASONING_EFFORT, textCompletionParameters } from "./lib/text-model-policy";
+import { CODEX_TEXT_MODEL, TEXT_REASONING_EFFORT } from "./lib/text-model-policy";
 import { deduplicateImagePaths } from "./lib/image-dedup";
 import { createThreeImageCollage } from "./lib/image-collage";
 import { createProductDetailImageSegments } from "./lib/product-detail-image";
@@ -245,25 +238,13 @@ chromium.use(StealthPlugin());
 
 const prisma = new PrismaClient();
 
-// 기본 원고는 Codex. 라우터의 명시적인 API/웹 복구 선택은 유지한다.
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim() || "";
-const OPENAI_MODEL = TEXT_MODEL;
-const OPENAI_MAX_OUTPUT_TOKENS = parseBoundedInteger(
-  process.env.OPENAI_MAX_OUTPUT_TOKENS,
-  8192,
-  1024,
-  32768
-);
-const OPENAI_TIMEOUT_MS = Number(process.env.OPENAI_TIMEOUT_MS || "120000");
-const REQUESTED_AI_PROVIDER = (process.env.AI_PROVIDER || draftRuntimePolicy.AI_PROVIDER).toLowerCase();
-const AI_PROVIDER: "openai" | "codex" = REQUESTED_AI_PROVIDER === "codex" ? "codex" : "openai";
-const CODEX_DRAFT_MODEL = draftRuntimePolicy.CODEX_DRAFT_MODEL;
+// Text generation uses only the signed-in ChatGPT Codex account.
+const AI_PROVIDER = "codex" as const;
+const CODEX_DRAFT_MODEL = CODEX_TEXT_MODEL;
 const writingTimeoutPolicy = getWritingTimeoutPolicy();
 const CODEX_DRAFT_TIMEOUT_MS = writingTimeoutPolicy.codexMs;
 // Effort is part of the fixed product policy; legacy .env values cannot raise it.
 const CODEX_DRAFT_REASONING_EFFORT = TEXT_REASONING_EFFORT;
-const CODEX_BROWSER_FALLBACK_ENABLED =
-  (process.env.CODEX_BROWSER_FALLBACK_ENABLED || "false").toLowerCase() === "true";
 
 const SESSION_FILE = getNaverSessionFile();
 const CHATGPT_SESSION_FILE = getChatgptSessionFile();
@@ -441,13 +422,6 @@ function reportDraftProgress(stage: string, message: string, progress?: number):
   if (!BRANDLINK_DRAFT_PROGRESS_PATH) return;
   writeDraftProgressFile(BRANDLINK_DRAFT_PROGRESS_PATH, { stage, message, progress });
 }
-// OpenAI 생성 실패/키 누락 시 Spec-first 로컬 템플릿 초안으로 대체(검증은 NEEDS_REVIEW). 하네스 복사 폴백은 없다.
-const PRODUCT_POST_LOCAL_FALLBACK_ENABLED =
-  (process.env.PRODUCT_POST_LOCAL_FALLBACK_ENABLED || "true").toLowerCase() !== "false";
-// Spec-first 파이프라인: 이미지 플랜 → 스펙 → 구조화 생성 → 검증/타깃 수리 → 조립.
-// false 로 내리면 단발 생성 + 사후 품질 보강 경로로 돌아간다.
-const POST_SPEC_PIPELINE_ENABLED =
-  (process.env.POST_SPEC_PIPELINE_ENABLED || "true").toLowerCase() !== "false";
 // 인용구 섹션 헤더는 에디터 셀렉터 실측 전까지 기본 OFF (소제목으로 강등).
 const NAVER_EDITOR_QUOTATION_ENABLED =
   (process.env.NAVER_EDITOR_QUOTATION_ENABLED || "false").toLowerCase() === "true";
@@ -1277,40 +1251,8 @@ async function generateTopTextCutoutThumbnail(
     console.log("   ⚠️ 판매페이지 대표 이미지가 없어 썸네일 생성을 건너뜁니다.");
     return null;
   }
-  // 1순위: gpt-image 가 문구까지 한 번에 그리고 OpenAI 비전 QC(95점)로 검수한다.
-  // 최대 시도 안에 통과하지 못하면 아래 로컬 합성으로 강등한다(오탈자 썸네일 방지).
-  if (isGenerativeThumbnailAvailable()) {
-    const generativeCopy =
-      savedSetting?.copy ??
-      (contentKind === "TRAVEL"
-        ? buildTravelThumbnailCopy(product.name)
-        : buildProductThumbnailCopy(postTitle, product.name, "SHOPPING"));
-    const generated = await generateThumbnail({
-      kind: contentKind,
-      productName: product.name,
-      categoryName: inferCategoryKeyword(product.name),
-      description: product.description,
-      features: product.features,
-      price: product.price,
-      copy: generativeCopy,
-      moodId: savedSetting?.style || undefined,
-      referenceImagePath: product.representativeImagePath,
-      outputDir: TEMP_PATH,
-      onLog: (line) => console.log(`   🎨 ${line}`),
-    }).catch((error) => {
-      console.log(`   ⚠️ gpt-image 썸네일 생성 오류: ${getErrorMessage(error)}`);
-      return null;
-    });
-    if (generated) {
-      console.log(
-        `   ✅ gpt-image 썸네일 사용: ${path.basename(generated.path)} (QC ${generated.qc.checked ? `${generated.qc.score}점` : "생략"}, ${generated.attempts}회 시도)`
-      );
-      return { path: generated.path, source: "image-api" };
-    }
-    console.log("   ⚠️ gpt-image 썸네일이 QC 를 통과하지 못해 로컬 합성으로 강등합니다.");
-  } else {
-    console.log("   ℹ️ OPENAI_API_KEY 가 없어 생성형 썸네일을 건너뛰고 로컬 합성을 사용합니다.");
-  }
+  // Product pixels and thumbnail copy are composed locally. Paid/API image
+  // models are not part of the desktop runtime.
   // 쇼핑 상품은 생성형 모델에 상품 픽셀을 넘기지 않는다. 원본 RGB를 보존한
   // 투명 PNG를 로컬에서 만든 뒤 배경과 카피만 합성한다. 분리가 불확실하면
   // 원본 상세 이미지가 본문 대표 이미지로 유지되도록 썸네일 생성을 중단한다.
@@ -2152,71 +2094,6 @@ async function screenshotProductThumbnailImages(
   }
 
   return savedPaths;
-}
-
-async function runOpenAiApi(systemPrompt: string, userPrompt: string): Promise<string> {
-  if (!OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY가 비어 있어 OpenAI API로 글을 생성할 수 없습니다.");
-  }
-
-  // 출력 토큰 상한을 명시하고, 상한에 걸려 잘린 응답(finish_reason=length)은
-  // 조용히 파싱 폴백으로 흘리지 않고 한 번 더 간결하게 재요청한다.
-  let lastError: Error | null = null;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
-    try {
-      const system =
-        attempt === 0
-          ? systemPrompt
-          : `${systemPrompt}\n\n[출력 길이 주의] 직전 응답이 출력 한도에서 잘렸습니다. 섹션 수와 구조는 유지하되 각 섹션을 더 간결하게 써서 JSON을 반드시 완결하세요.`;
-      const response = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          ...textCompletionParameters(OPENAI_MAX_OUTPUT_TOKENS, OPENAI_MODEL),
-          messages: [
-            { role: "system", content: system },
-            { role: "user", content: userPrompt },
-          ],
-          response_format: { type: "json_object" },
-        }),
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        const detail = await response.text().catch(() => "");
-        throw new Error(`OpenAI API 호출 실패 (${response.status}): ${detail.slice(0, 400)}`);
-      }
-
-      const payload = (await response.json()) as {
-        choices?: Array<{
-          message?: { content?: string | null };
-          finish_reason?: string | null;
-        }>;
-      };
-      const choice = payload.choices?.[0];
-      const output = choice?.message?.content?.trim();
-      if (!output) {
-        throw new Error("OpenAI API 응답에서 본문을 찾지 못했습니다.");
-      }
-      if (choice?.finish_reason === "length") {
-        lastError = new Error(
-          `OpenAI API 응답이 출력 토큰 상한(${OPENAI_MAX_OUTPUT_TOKENS})에서 잘렸습니다.`
-        );
-        console.log(`   ⚠️ ${lastError.message}${attempt === 0 ? " 간결하게 재요청합니다." : ""}`);
-        continue;
-      }
-
-      return output;
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-  throw lastError || new Error("OpenAI API 응답이 잘렸습니다.");
 }
 
 const CHATGPT_COMPOSER_SELECTORS = [
@@ -4856,7 +4733,7 @@ async function downloadImage(url: string, filePath: string): Promise<void> {
 }
 
 // ============================================
-// AI 공통 호출 함수 (OpenAI / Gemini)
+// ChatGPT 계정 Codex 공통 호출 함수
 // ============================================
 
 /**
@@ -4872,14 +4749,13 @@ async function rewriteSectionsForHumanTone(
 
   let rewritten = "";
   try {
-    if (OPENAI_API_KEY) {
-      rewritten = await runOpenAiApi(
-        "당신은 한국어 문장을 자연스럽게 다듬는 편집자입니다. 지시받은 형식 규칙을 정확히 지키세요.",
-        prompt
-      );
-    } else {
-      return sections;
-    }
+    rewritten = await runCodexDraft({
+      systemPrompt: "당신은 한국어 문장을 자연스럽게 다듬는 편집자입니다. 지시받은 JSON 형식 규칙을 정확히 지키세요.",
+      userPrompt: prompt,
+      timeoutMs: CODEX_DRAFT_TIMEOUT_MS,
+      reasoningEffort: CODEX_DRAFT_REASONING_EFFORT,
+      researchMode: "disabled",
+    });
   } catch (error) {
     console.log(`   ⚠️ 휴머나이징 재작성 실패, 원문 유지: ${getErrorMessage(error)}`);
     return sections;
@@ -4924,12 +4800,11 @@ async function generateWithAI(
   outputSchema?: unknown,
 ): Promise<string> {
   if (BROWSER_GPT_MODE) {
-    console.log(`   ✦ 브라우저 모델을 확인할 수 없어 ${TEXT_MODEL} Codex로 작성합니다.`);
+    console.log("   ✦ 브라우저 모델을 확인할 수 없어 ChatGPT 계정의 Codex 기본 모델로 작성합니다.");
   }
 
-  if (AI_PROVIDER === "codex" || BROWSER_GPT_MODE) {
-    try {
-      return await runCodexDraft({
+  try {
+    return await runCodexDraft({
         systemPrompt,
         userPrompt,
         imagePaths: chatgptImagePaths,
@@ -4942,18 +4817,15 @@ async function generateWithAI(
         researchScope: chatgptContext?.connectKind === "SHOPPING" ? "SHOPPING" : "TRAVEL",
         outputSchema,
         onProgress: (message) => console.log(`   ✦ ${message}`),
-      });
-    } catch (error) {
-      const reason = getErrorMessage(error);
-      const providerCode = codexDraftTerminalFailureCode(error);
-      throw Object.assign(
-        new Error(`Codex 작성 실패: ${reason}`, { cause: error }),
-        providerCode ? { code: providerCode } : {},
-      );
-    }
+    });
+  } catch (error) {
+    const reason = getErrorMessage(error);
+    const providerCode = codexDraftTerminalFailureCode(error);
+    throw Object.assign(
+      new Error(`Codex 작성 실패: ${reason}`, { cause: error }),
+      providerCode ? { code: providerCode } : {},
+    );
   }
-
-  return runOpenAiApi(systemPrompt, userPrompt);
 }
 
 // ============================================
@@ -4994,9 +4866,6 @@ async function step2_generatePost(
   }
   console.log(`\n📝 STEP 2: SEO 최적화 블로그 글 생성 (확장판${isTravel ? " · 여행" : ""})`);
   console.log(`   🤖 AI Provider: ${AI_PROVIDER.toUpperCase()}`);
-  if (REQUESTED_AI_PROVIDER !== AI_PROVIDER) {
-    console.log(`      - 요청 Provider ${REQUESTED_AI_PROVIDER.toUpperCase()} 대신 ${AI_PROVIDER.toUpperCase()} API로 진행합니다.`);
-  }
   if (REQUESTED_BROWSER_GPT_MODE && !ALLOW_CHATGPT_BROWSER_MODE) {
     console.log("   🌐 Browser ChatGPT Mode: OFF (ChatGPT/opencode 미사용 설정)");
   }
@@ -5060,7 +4929,7 @@ async function step2_generatePost(
     formatPostContractForPrompt(getPostCompositionContract(connectKind, topicSelection?.id)),
     formatSearchDemandForPrompt(connectKind, searchDemand),
     titlePlanContext ? formatTitleCandidatesForPrompt(titlePlanContext) : "",
-    // Codex/API 경로는 브라우저 예산 제한이 없으므로 섹션 흐름·체험 문장 자리까지 담은 전체 블록을 넣는다.
+    // Codex 경로는 브라우저 예산 제한이 없으므로 섹션 흐름·체험 문장 자리까지 담은 전체 블록을 넣는다.
     topicSelection
       ? formatTopicTemplateForPrompt(topicSelection, { experienceMode: BRANDLINK_EXPERIENCE_MODE })
       : "",
@@ -5077,70 +4946,6 @@ async function step2_generatePost(
     features: product.features,
     targetSectionCount: bodySectionCount,
   });
-  const openCrabPromptBlock = formatOpenCrabSeoBriefForPrompt(openCrabSeoBrief);
-
-  // Spec-first 파이프라인(기본 경로): 이미지 플랜을 먼저 확정하고 섹션 수를 그로부터 파생한 뒤
-  // json_schema 구조화 생성 → 전 신호 검증 → 섹션 단위 타깃 수리 순으로 진행한다.
-  // ChatGPT 2단계(context/제출) 모드, 브라우저 모드, Codex 모드에서는 기존 경로를 쓴다.
-  if (
-    POST_SPEC_PIPELINE_ENABLED &&
-    specInput &&
-    !BROWSER_GPT_MODE &&
-    AI_PROVIDER === "openai" &&
-    !BRANDLINK_GENERATED_DRAFT_PATH &&
-    !BRANDLINK_DRAFT_CONTEXT_OUTPUT
-  ) {
-    console.log("   🧭 Spec-first: 이미지 플랜 → 스펙 → 구조화 생성 → 검증/타깃 수리 → 조립");
-    const result = await runSpecFirstPipeline({
-      kind: connectKind,
-      productId: productId || null,
-      product: {
-        name: product.name,
-        description: product.description,
-        features: product.features,
-        price: product.price,
-        originalPrice: product.originalPrice,
-        discountRate: product.discountRate,
-        couponInfo: product.couponInfo,
-        deliveryInfo: product.deliveryInfo,
-        reviewCount: product.reviewCount,
-        rating: product.rating,
-        storeName: product.storeName,
-      },
-      brief: openCrabSeoBrief,
-      imageCandidates: specInput.imageCandidates,
-      tempDir: specInput.tempDir,
-      brandLink,
-      // 주제 글이면 각도 블록을 작성 요구로 함께 넘긴다(spec 경로는 섹션 구성이 고정돼 목표·검색어·형제 글 회피만 반영).
-      memo: [specInput.memo, writingContract.postAngleBlock].filter(Boolean).join("\n\n") || null,
-      options: {
-        maxRepairRounds: 1,
-        allowLocalFallback: PRODUCT_POST_LOCAL_FALLBACK_ENABLED,
-        quotationHeaders: NAVER_EDITOR_QUOTATION_ENABLED,
-        requireRepresentativeImage: BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE,
-        thumbnailGenerated: THUMBNAIL_AUTOGEN_ENABLED,
-      },
-    });
-    for (const note of result.notes) console.log(`   · ${note}`);
-    console.log(`   📌 제목: ${result.title}`);
-    console.log(`   📝 섹션: ${result.sections.length}개 (${result.generationSource}, 호출 ${result.attempts}회)`);
-    console.log(`   🖼️ 이미지 플랜: 본문 ${result.spec.imagePlan.resolvedBody}장 / 목표 ${result.spec.imagePlan.targetBody}장`);
-    console.log(`   🧪 검증: ${result.validation.summary}`);
-    return {
-      title: result.title,
-      editorial: result.spec.editorial,
-      sections: result.sections,
-      hashtags: result.hashtags,
-      generationSource: "AI",
-      rawResponse: `spec-first:${result.generationSource}`,
-      openCrabSeoBrief,
-      productEditorialPlan: null,
-      editorialQuality: null,
-      qualityRepair: null,
-      assembled: result,
-      notes: result.notes,
-    };
-  }
   const productEditorialPlan = isTravel
     ? null
     : buildProductEditorialPlan({
@@ -9924,7 +9729,7 @@ function classifyFailureCode(error: unknown): string {
   if (/세션|로그인/u.test(message)) return "NAVER_SESSION_EXPIRED";
   if (/본문 이미지|이미지 부족|IMAGE_SHORTFALL|이미지가 부족/u.test(message)) return "IMAGE_SHORTFALL";
   if (/발행 보류|BLOCKED|게이트|품질 기준/u.test(message)) return "CONTENT_BLOCKED";
-  if (/OPENAI_API_KEY|OpenAI API|Codex 로그인|Codex 작성 실패/u.test(message)) return "LLM_UNAVAILABLE";
+  if (/Codex 로그인|Codex 작성 실패/u.test(message)) return "LLM_UNAVAILABLE";
   if (/찾을 수 없|상품 정보를 확보/u.test(message)) return "PRODUCT_NOT_FOUND";
   if (/여행커넥트|계약/u.test(message)) return "TRAVEL_CONTRACT_LOCKED";
   return "LOCAL_AUTOMATION_FAILED";

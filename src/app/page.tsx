@@ -167,7 +167,7 @@ interface ChatGptDraftHandoff {
   prompt: string;
 }
 
-type DraftCreationMode = "checking" | "codex" | "local-ai" | "browser-chatgpt" | "chatgpt";
+type DraftCreationMode = "checking" | "codex" | "chatgpt";
 
 export interface TopicPostTask {
   id: string;
@@ -678,17 +678,12 @@ export default function Dashboard() {
       if (!response.ok || !payload.success) throw new Error("AI 설정을 확인하지 못했습니다.");
       const mode = payload.data?.draftCreationMode;
       setDraftCreationMode(
-        mode === "codex" || mode === "local-ai" || mode === "browser-chatgpt" || mode === "chatgpt"
+        mode === "codex" || mode === "chatgpt"
           ? mode
-          : payload.data?.desktopDraftProviderConfigured
-            ? "local-ai"
-            : payload.data?.browserDraftAutomationEnabled !== false
-              ? "browser-chatgpt"
-              : "chatgpt",
+          : "chatgpt",
       );
     } catch {
-      // 앱 기본값과 동일하게 로그인된 ChatGPT 웹 자동작성 경로를 우선 표시한다.
-      setDraftCreationMode("browser-chatgpt");
+      setDraftCreationMode("chatgpt");
     }
   }, []);
 
@@ -1003,8 +998,6 @@ export default function Dashboard() {
         ? "ChatGPT에서 사용할 상품별 요청문을 준비하고 있습니다."
         : draftCreationMode === "codex"
           ? "GPT가 백그라운드에서 상품을 분석하고 고품질 원고를 작성하고 있습니다."
-        : draftCreationMode === "browser-chatgpt"
-          ? "ChatGPT 백그라운드 작업으로 고품질 글과 이미지 패키지를 자동 작성하고 있습니다."
           : "고품질 글과 이미지 패키지를 만들고 있습니다. 잠시만 기다려 주세요.",
     });
     try {

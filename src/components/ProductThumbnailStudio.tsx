@@ -186,7 +186,7 @@ export default function ProductThumbnailStudio({
             <p className="mt-1 text-sm text-slate-500">
               {isGenerative
                 ? `gpt-image 가 문구까지 한 번에 그리고, 비전 검수(${data?.qcMinScore ?? 95}점 이상)를 통과한 결과만 사용합니다. 최대 ${data?.maxAttempts ?? 4}회 자동 재생성.`
-                : "OpenAI API 키가 없어 로컬 합성 방식으로 만듭니다. 설정에서 키를 넣으면 생성형 썸네일을 쓸 수 있어요."}
+                : "제품 원본을 보존하는 로컬 합성 방식으로 썸네일을 만듭니다."}
             </p>
           </div>
           <button type="button" onClick={onClose} className="rounded-lg px-3 py-2 text-slate-500 hover:bg-slate-100" aria-label="닫기">✕</button>

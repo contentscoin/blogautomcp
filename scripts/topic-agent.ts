@@ -15,8 +15,7 @@ import { getTopicTaskPublishReadiness, parseTopicSourceUrls, isTopicPublishedUrl
 import { getTopicTaskContentReadiness } from "../src/lib/topic-task-content-readiness";
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import { Locator, Page, Response } from "playwright";
-import { spawnSync } from "child_process";
+import { Locator, Page } from "playwright";
 import { PrismaClient } from "../src/generated/prisma";
 import * as path from "path";
 import * as fs from "fs";
@@ -49,20 +48,6 @@ const NAVER_BLOG_ID = process.env.NAVER_BLOG_ID || "";
 const IMAGE_WORK_DIR = path.join(process.cwd(), "temp_images", "topic-agent");
 const ALLOW_CHATGPT_BROWSER_MODE =
     (process.env.ALLOW_CHATGPT_BROWSER_MODE || "false").toLowerCase() === "true";
-const TOPIC_DAEDAL_IMAGE_ENABLED =
-    process.env.TOPIC_PIPELINE_DAEDAL_ENABLED?.toLowerCase() === "true";
-const HAS_OPENAI_API_KEY = /^sk-[A-Za-z0-9_-]+/.test(process.env.OPENAI_API_KEY?.trim() || "");
-const TOPIC_DAEDAL_BIN =
-    process.env.TOPIC_PIPELINE_DAEDAL_BIN?.trim() ||
-    process.env.DAEDAL_BIN?.trim() ||
-    (process.env.HOME && fs.existsSync(path.join(process.env.HOME, ".cargo", "bin", "daedal"))
-        ? path.join(process.env.HOME, ".cargo", "bin", "daedal")
-        : "daedal");
-const TOPIC_DAEDAL_PRESET = process.env.TOPIC_PIPELINE_DAEDAL_PRESET?.trim() || "slide";
-const TOPIC_DAEDAL_SIZE = process.env.TOPIC_PIPELINE_DAEDAL_SIZE?.trim() || "";
-const TOPIC_DAEDAL_QUALITY = process.env.TOPIC_PIPELINE_DAEDAL_QUALITY?.trim() || "";
-const TOPIC_DAEDAL_MODEL = process.env.TOPIC_PIPELINE_DAEDAL_MODEL?.trim() || "";
-const TOPIC_DAEDAL_IMAGE_TIMEOUT_MS = Number(process.env.TOPIC_PIPELINE_DAEDAL_IMAGE_TIMEOUT_MS || 180000);
 
 type PublishMode = "draft" | "now" | "schedule";
 
@@ -282,12 +267,6 @@ function normalizeText(value: string): string {
     return value.replace(/\s+/g, " ").trim();
 }
 
-function addDaedalOption(args: string[], flag: string, value: string) {
-    const normalized = normalizeText(value || "");
-    if (!normalized || normalized.toLowerCase() === "none") return;
-    args.push(flag, normalized);
-}
-
 function stringifyTopicSectionForImage(section: string | PreparedTopicSection): string {
     if (typeof section === "string") return section;
     return [
@@ -299,41 +278,6 @@ function stringifyTopicSectionForImage(section: string | PreparedTopicSection): 
         .map((value) => normalizeText(value))
         .filter(Boolean)
         .join("\n");
-}
-
-function generateDaedalTopicImages(sections: Array<string | PreparedTopicSection>, outDir: string): string[] {
-    if (!TOPIC_DAEDAL_IMAGE_ENABLED || !HAS_OPENAI_API_KEY) return [];
-
-    const prompt = [
-        "다음 블로그 글 내용을 바탕으로 관련 있고 세련된 고품질 블로그 이미지를 3장 생성해줘.",
-        "글자, 캡션, 로고, 워터마크, 브랜드 UI, 콜라주 느낌은 금지.",
-        "모바일에서 한눈에 들어오는 자연스러운 에디토리얼 이미지로 만들어줘.",
-        "",
-        sections.map((section) => stringifyTopicSectionForImage(section)).join("\n\n").slice(0, 1500),
-    ].join("\n");
-    const outPath = path.join(outDir, "daedal.png");
-    const args = [prompt, "--quiet", "-o", outPath, "-n", "3"];
-    addDaedalOption(args, "--preset", TOPIC_DAEDAL_PRESET);
-    addDaedalOption(args, "--size", TOPIC_DAEDAL_SIZE);
-    addDaedalOption(args, "--quality", TOPIC_DAEDAL_QUALITY);
-    addDaedalOption(args, "--model", TOPIC_DAEDAL_MODEL);
-
-    const result = spawnSync(TOPIC_DAEDAL_BIN, args, {
-        encoding: "utf8",
-        env: process.env,
-        maxBuffer: 64 * 1024 * 1024,
-        timeout: TOPIC_DAEDAL_IMAGE_TIMEOUT_MS,
-    });
-    if (result.status !== 0) {
-        const message = normalizeText(result.stderr || result.error?.message || "unknown error");
-        console.warn(`   ⚠️ Daedal 이미지 생성 실패: ${message}`);
-        return [];
-    }
-
-    return (result.stdout || "")
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter((line) => line && fs.existsSync(line));
 }
 
 function sectionTextForQuality(section: string | PreparedTopicSection): string {
@@ -1779,7 +1723,7 @@ ${style.sampleSentences.map((s, i) => `${i + 1}. "${s}"`).join('\n')}
 // ============================================
 // LLM으로 글 생성 (에이전틱 다단계 고도화 파이프라인 - V2)
 // ============================================
-import { createChatGPTContext, openFreshChatGPTTarget, openChatGPTTarget, sendPromptToChatGPT, ChatGPTContextHandle, downloadChatGPTImages, isChatGPTGenerating } from "./lib/chatgpt-browser";
+import { createChatGPTContext, openChatGPTTarget, sendPromptToChatGPT, downloadChatGPTImages, isChatGPTGenerating } from "./lib/chatgpt-browser";
 import { runCodexDraft } from "./lib/codex-draft-provider";
 
 
@@ -2713,17 +2657,11 @@ async function main() {
             hashtags: advancedContent.hashtags,
         };
 
-        console.log(`\n📷 Daedal(gpt-image-2)를 활용한 이미지 생성 시작`);
+        console.log(`\n📷 ChatGPT 계정 이미지 생성 준비`);
 
         const autoImageDir = path.join(IMAGE_WORK_DIR, `auto-${Date.now()}`);
         if (!fs.existsSync(autoImageDir)) {
             fs.mkdirSync(autoImageDir, { recursive: true });
-        }
-
-        const daedalPaths = generateDaedalTopicImages(content.sections, autoImageDir);
-        if (daedalPaths.length > 0) {
-            imagePaths = daedalPaths;
-            console.log(`   ✅ Daedal 이미지 ${daedalPaths.length}장 생성 완료`);
         }
 
         const CHATGPT_BASE_URL = "https://chatgpt.com/";
@@ -2731,7 +2669,7 @@ async function main() {
         let imageGptHandle = null;
         if (imagePaths.length === 0 && ALLOW_CHATGPT_BROWSER_MODE) {
             try {
-                console.log(`   🌐 Daedal 실패/비활성화로 ChatGPT 이미지 생성 폴백 실행`);
+                console.log(`   🌐 ChatGPT 이미지 생성 실행`);
                 console.log("   🌐 이미지 생성 GPT 브라우저 세션 초기화...");
                 imageGptHandle = await createChatGPTContext(true);
                 const imagePage = await imageGptHandle.context.newPage();

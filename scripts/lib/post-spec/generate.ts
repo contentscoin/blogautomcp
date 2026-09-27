@@ -147,7 +147,7 @@ function toGeneratedSection(section: SectionSpec, raw: RawSection | undefined): 
   return { index: section.index, role: section.role, title: section.title, lines };
 }
 
-export async function generateDraftWithOpenAi(spec: PostSpec, ctx: GenerateContext): Promise<GeneratedDraft> {
+export async function generateDraftWithCodex(spec: PostSpec, ctx: GenerateContext): Promise<GeneratedDraft> {
   const system = renderSystemPrompt(spec, ctx);
   const generated: GeneratedSection[] = [];
   let title = "";
@@ -200,5 +200,5 @@ export async function generateDraftWithOpenAi(spec: PostSpec, ctx: GenerateConte
     }
   }
 
-  return { title, sections: generated, hashtags, source: "openai", model, attempts };
+  return { title, sections: generated, hashtags, source: "codex", model, attempts };
 }

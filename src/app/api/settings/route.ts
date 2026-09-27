@@ -28,7 +28,6 @@ interface FieldDef {
 
 // 편집 허용 키 화이트리스트(임의 env 노출/주입 방지).
 const FIELDS: FieldDef[] = [
-  { key: "OPENAI_API_KEY", label: "OpenAI API 키 (선택)", type: "password", secret: true, hint: "API 기반 보조 기능에 사용합니다. 기본 원고는 로그인된 Codex/GPT로 작성하므로 API 키는 필수가 아닙니다." },
   { key: "UNSPLASH_ACCESS_KEY", label: "Unsplash 액세스 키", type: "password", secret: true, hint: "스톡 이미지(선택)" },
   { key: "NAVER_BLOG_ID", label: "네이버 블로그 ID", type: "text", hint: "blog.naver.com/<여기>" },
   { key: "ADMIN_API_KEY", label: "관리자 API 키", type: "password", secret: true, hint: "설정하면 발행·설정 같은 관리자 API 가 이 키를 요구합니다(선택). 외부 스크립트는 x-admin-api-key 헤더, 브라우저 대시보드는 첫 화면에서 키를 한 번 입력하고, 데스크톱 앱은 자동으로 붙입니다. 일반 로컬 사용에는 비워 두세요.", advanced: true },
@@ -96,7 +95,6 @@ export async function GET(request: NextRequest) {
     values[f.key] = f.secret ? (configured[f.key] ? MASK : "") : current;
   }
 
-  const desktopDraftProviderConfigured = Boolean((process.env.OPENAI_API_KEY ?? fileEnv.OPENAI_API_KEY ?? "").trim());
   const browserDraftAutomationEnabled = isChatGptBrowserAutomationEnabled({
     ...fileEnv,
     ...process.env,
@@ -111,17 +109,12 @@ export async function GET(request: NextRequest) {
       values,
       configured,
       fixedDraftSettings: draftRuntimePolicy,
-      desktopDraftProviderConfigured,
       browserDraftAutomationEnabled,
       codexDraftEnabled,
       codexDraft,
       draftCreationMode: codexDraftEnabled && codexDraft.authenticated
         ? "codex"
-        : desktopDraftProviderConfigured
-        ? "local-ai"
-        : browserDraftAutomationEnabled
-          ? "browser-chatgpt"
-          : "chatgpt",
+        : "chatgpt",
       envPath: getEnvFilePath(),
     },
   });

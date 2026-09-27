@@ -121,9 +121,9 @@ async function main() {
   );
   assert.equal(
     draftRouteSource.includes('BRANDLINK_GENERATED_DRAFT_PATH: action === "submit_generated"') &&
-      draftRouteSource.includes('{ OPENAI_API_KEY: "" }'),
+      !draftRouteSource.includes("OPENAI_API_KEY"),
     true,
-    "MCP 제출 원고 패키징은 PC의 OpenAI API 키를 사용하면 안 됩니다.",
+    "MCP 제출 원고 패키징에는 API 모델 또는 API 키 경로가 없어야 합니다.",
   );
   assert.equal(
     draftRouteSource.includes('status: link.status === "FAILED" ? "READY" : link.status') &&
@@ -206,11 +206,10 @@ async function main() {
     "MCP 제출 경로가 쇼핑 상세이미지 근거를 보존해야 합니다.",
   );
   assert.equal(
-    draftRouteSource.includes('"CHATGPT_MCP_DRAFT_REQUIRED"') &&
-      draftRouteSource.includes('"CODEX_LOGIN_REQUIRED"') &&
+    draftRouteSource.includes('"CODEX_LOGIN_REQUIRED"') &&
       draftRouteSource.includes("buildChatGptDraftHandoff"),
     true,
-    "Codex/API 인증이 없을 때 연결 안내와 상품별 ChatGPT 핸드오프를 제공해야 합니다.",
+    "Codex 인증이 없을 때 연결 안내와 상품별 ChatGPT 핸드오프를 제공해야 합니다.",
   );
   assert.equal(
     dashboardSource.includes('response.status === 409') &&
@@ -221,12 +220,12 @@ async function main() {
     "데스크톱 UI는 GPT 자동작성과 ChatGPT 핸드오프를 모두 지원해야 합니다.",
   );
   assert.equal(
-    draftRouteSource.includes('"CHATGPT_BROWSER_LOGIN_REQUIRED"') &&
-      draftRouteSource.includes('"CHATGPT_BROWSER_FALLBACK_REQUIRED"') &&
-      draftRouteSource.includes("isChatGptBrowserAuthenticationError") &&
-      draftRouteSource.includes("buildChatGptBrowserAutomationEnv(useBrowserChatGpt)"),
+    !draftRouteSource.includes('"CHATGPT_BROWSER_LOGIN_REQUIRED"') &&
+      !draftRouteSource.includes('"CHATGPT_BROWSER_FALLBACK_REQUIRED"') &&
+      draftRouteSource.includes('AI_PROVIDER: "codex"') &&
+      draftRouteSource.includes('ALLOW_CHATGPT_BROWSER_MODE: "false"'),
     true,
-    "API 키가 없을 때 로그인된 ChatGPT 웹 자동작성과 안전한 핸드오프 폴백을 모두 지원해야 합니다.",
+    "자동 원고 작성은 로그인된 Codex만 사용하고 브라우저 모델 폴백을 실행하지 않아야 합니다.",
   );
   assert.equal(
     dashboardSource.includes('<MaterialLibrary connectKind={brandConnectKind}') &&

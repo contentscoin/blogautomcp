@@ -62,7 +62,7 @@ export const LOCAL_AUTOMATION_ERROR_HINTS: Record<LocalAutomationErrorCode, stri
   CONNECT_KIND_MISMATCH: "상품의 커넥트 종류(쇼핑/여행)가 요청과 다릅니다.",
   CONTENT_BLOCKED: "생성된 글이 발행 기준(네이버 정책·근거 규칙)을 통과하지 못해 발행을 보류했습니다.",
   IMAGE_SHORTFALL: "본문에 넣을 이미지가 부족합니다. 상품 이미지를 다시 동기화하거나 다른 상품을 선택하세요.",
-  LLM_UNAVAILABLE: "OpenAI API 키가 없거나 호출에 실패했습니다. PC 앱 설정에서 키를 확인하세요.",
+  LLM_UNAVAILABLE: "ChatGPT 계정 Codex 연결을 확인한 뒤 다시 시도하세요.",
   CODEX_AUTH_REQUIRED: "Codex 로그인이 필요합니다. PC 앱에서 Codex 연결 상태를 확인하세요.",
   CODEX_MODEL_INCOMPATIBLE: "현재 Codex 실행 환경에서 선택한 모델을 지원하지 않습니다. PC 앱을 최신 버전으로 업데이트하세요.",
   CODEX_TIMEOUT: "Codex 원고 작성이 제한 시간 안에 끝나지 않았습니다.",
@@ -126,7 +126,6 @@ export function classifyLocalFailure(input: { status?: number | null; code?: str
   if (/커넥트 종류/u.test(message)) return "CONNECT_KIND_MISMATCH";
   if (/여행커넥트.*(계약|캡처)|CAPTURE_REQUIRED/u.test(message)) return "TRAVEL_CONTRACT_LOCKED";
   if (status === 401 || /세션.*(만료|없)|로그인을 다시|로그인 세션/u.test(message)) return "NAVER_SESSION_EXPIRED";
-  if (/OPENAI_API_KEY|OpenAI API/u.test(message)) return "LLM_UNAVAILABLE";
   if (/이미지 부족|본문 이미지|IMAGE_SHORTFALL/u.test(message)) return "IMAGE_SHORTFALL";
   if (/발행 보류|BLOCKED|게이트|정책/u.test(message)) return "CONTENT_BLOCKED";
   if (status === 404 || /찾을 수 없|상품 정보를 확보/u.test(message)) return "PRODUCT_NOT_FOUND";

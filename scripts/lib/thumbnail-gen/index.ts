@@ -1,8 +1,7 @@
 /**
- * 썸네일 생성 진입점 — 쇼핑/여행 공통. 문구까지 gpt-image 가 그리고 비전 QC 로 검수한다.
+ * 썸네일 생성 진입점 — 외부 API 이미지 모델은 사용하지 않는다.
  */
 
-import { isImageApiThumbnailAvailable } from "../openai-image";
 import { extractTravelProductFacts } from "../travel-content";
 import { generateThumbnailWithQc, type ThumbnailGenerationResult } from "./generate";
 import { buildShoppingThumbnailPrompt, buildTravelThumbnailPrompt, listThumbnailMoods, type ThumbnailCopy, type ThumbnailKind } from "./prompt";
@@ -28,7 +27,7 @@ export interface GenerateThumbnailInput {
 }
 
 export function isGenerativeThumbnailAvailable(): boolean {
-  return isImageApiThumbnailAvailable();
+  return false;
 }
 
 /** 생성형 한글 문구는 짧을수록 정확하다. 헤드라인을 10자 안팎으로 압축한다. */
@@ -63,6 +62,7 @@ export function buildThumbnailPrompt(input: GenerateThumbnailInput): string {
 }
 
 export async function generateThumbnail(input: GenerateThumbnailInput): Promise<ThumbnailGenerationResult | null> {
+  if (!isGenerativeThumbnailAvailable()) return null;
   const prompt = buildThumbnailPrompt(input);
   const headline = condenseHeadline(input.copy.headline);
   const log = input.onLog || (() => undefined);

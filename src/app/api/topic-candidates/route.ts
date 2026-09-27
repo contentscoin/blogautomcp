@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runCodexDraft, codexDraftTerminalFailureCode } from "../../../../scripts/lib/codex-draft-provider";
-import { extractJsonObject } from "../../../../scripts/lib/openai-text";
-import { TEXT_MODEL } from "../../../../scripts/lib/text-model-policy";
+import { extractJsonObject } from "../../../../scripts/lib/codex-text";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { beginDesktopActivity } from "@/lib/desktop-activity";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
@@ -191,7 +190,6 @@ async function runCodex(prompt: string): Promise<CodexRunResult> {
     const stdout = await runCodexDraft({
       systemPrompt: "한국어 블로그 후보를 요청된 JSON 객체로만 반환하세요.",
       userPrompt: prompt,
-      model: TEXT_MODEL,
       timeoutMs: getCodexTimeoutMs(),
     });
     return { stdout, stderr: "", exitCode: 0 };

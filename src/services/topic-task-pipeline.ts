@@ -1,7 +1,6 @@
 import "server-only";
-import { TEXT_MODEL } from "../../scripts/lib/text-model-policy";
 import { runCodexDraft } from "../../scripts/lib/codex-draft-provider";
-import { extractJsonObject, openaiChatText } from "../../scripts/lib/openai-text";
+import { extractJsonObject } from "../../scripts/lib/codex-text";
 
 import fs from "fs";
 import path from "path";
@@ -46,7 +45,6 @@ const TOPIC_CRAFT_GENERATE_IMAGE_URL =
 const PEXELS_API_KEY = process.env.PEXELS_API_KEY?.trim() || "";
 const TOPIC_PIPELINE_ALLOW_GENERIC_IMAGE_FALLBACK =
   process.env.TOPIC_PIPELINE_ALLOW_GENERIC_IMAGE_FALLBACK?.toLowerCase() === "true";
-const OPENAI_MODEL = TEXT_MODEL;
 const CHATGPT_BASE_URL = process.env.CHATGPT_BASE_URL || "https://chatgpt.com/";
 const BROWSER_TOPIC_GPT_URL = CHATGPT_BASE_URL;
 const CHATGPT_IMAGE_GPT_URL = CHATGPT_BASE_URL;
@@ -54,19 +52,6 @@ const ALLOW_CHATGPT_BROWSER_MODE =
   (process.env.ALLOW_CHATGPT_BROWSER_MODE || "false").toLowerCase() === "true";
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
 const IMAGE_ROOT = path.join(process.cwd(), "temp_images", "topic-pipeline");
-const TOPIC_DAEDAL_IMAGE_ENABLED =
-  process.env.TOPIC_PIPELINE_DAEDAL_ENABLED?.toLowerCase() === "true";
-const HAS_OPENAI_API_KEY = /^sk-[A-Za-z0-9_-]+/.test(process.env.OPENAI_API_KEY?.trim() || "");
-const TOPIC_DAEDAL_BIN =
-  process.env.TOPIC_PIPELINE_DAEDAL_BIN?.trim() ||
-  process.env.DAEDAL_BIN?.trim() ||
-  (process.env.HOME && fs.existsSync(path.join(process.env.HOME, ".cargo", "bin", "daedal"))
-    ? path.join(process.env.HOME, ".cargo", "bin", "daedal")
-    : "daedal");
-const TOPIC_DAEDAL_PRESET = process.env.TOPIC_PIPELINE_DAEDAL_PRESET?.trim() || "slide";
-const TOPIC_DAEDAL_SIZE = process.env.TOPIC_PIPELINE_DAEDAL_SIZE?.trim() || "";
-const TOPIC_DAEDAL_QUALITY = process.env.TOPIC_PIPELINE_DAEDAL_QUALITY?.trim() || "";
-const TOPIC_DAEDAL_MODEL = process.env.TOPIC_PIPELINE_DAEDAL_MODEL?.trim() || "";
 const PREPARE_LOCK_ROOT = path.join(IMAGE_ROOT, "_locks");
 const PREPARE_LOCK_STALE_MS = 20 * 60 * 1000;
 const TOPIC_CRAFT_TIMEOUT_MS = Number(process.env.TOPIC_CRAFT_TIMEOUT_MS || 300_000);
@@ -96,9 +81,6 @@ const TOPIC_BROWSER_FALLBACK_TIMEOUT_MS = Number(
 );
 const TOPIC_CHATGPT_IMAGE_BATCH_TIMEOUT_MS = Number(
   process.env.TOPIC_PIPELINE_CHATGPT_IMAGE_BATCH_TIMEOUT_MS || 120_000,
-);
-const TOPIC_DAEDAL_IMAGE_TIMEOUT_MS = Number(
-  process.env.TOPIC_PIPELINE_DAEDAL_IMAGE_TIMEOUT_MS || 180_000,
 );
 const CURL_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 const IMAGE_FETCH_TIMEOUT_MS = Number(process.env.TOPIC_PIPELINE_IMAGE_FETCH_TIMEOUT_MS || 15_000);
@@ -2325,7 +2307,6 @@ async function requestTopicCraftCandidates(params: {
       "후보마다 서로 다른 관점을 사용하고 제공되지 않은 수치나 체험을 만들지 마세요.",
       JSON.stringify({ sources: params.sourceSummaries, briefs: params.narrativeBriefs }),
     ].join("\n"),
-    model: TEXT_MODEL,
     timeoutMs: TOPIC_CRAFT_TIMEOUT_MS,
   });
   const payload = extractJsonObject<TopicCraftResponse>(stdout);
@@ -2571,25 +2552,6 @@ function buildSelectionPrompt(
   ].join("\n");
 }
 
-async function runOpenAiStructured<T>(schemaName: string, _schema: Record<string, unknown>, prompt: string) {
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
-  if (!apiKey) return null;
-
-  const outputText = await openaiChatText({
-    system: "요청된 JSON 객체만 반환하세요.",
-    user: prompt,
-    model: OPENAI_MODEL,
-    json: true,
-    maxOutputTokens: 8192,
-    timeoutMs: STRUCTURED_MODEL_TIMEOUT_MS,
-  });
-  const parsed = parseJsonObject<T>(outputText);
-  if (!parsed) {
-    throw new Error(`OpenAI 응답을 JSON으로 해석하지 못했습니다 (${schemaName})`);
-  }
-  return parsed;
-}
-
 async function runBrowserStructured<T>(prompt: string): Promise<T> {
   const enabled = process.env.BROWSER_GPT_MODE?.toLowerCase() === "true" && ALLOW_CHATGPT_BROWSER_MODE;
   if (!enabled) {
@@ -2601,7 +2563,6 @@ async function runBrowserStructured<T>(prompt: string): Promise<T> {
   const raw = await runCodexDraft({
     systemPrompt: "요청된 JSON 객체만 반환하세요.",
     userPrompt: prompt,
-    model: TEXT_MODEL,
     timeoutMs: STRUCTURED_MODEL_TIMEOUT_MS,
   });
   const parsed = parseJsonObject<T>(raw);
@@ -2616,7 +2577,6 @@ async function runCodexStructured<T>(prompt: string): Promise<T | null> {
     const output = await runCodexDraft({
       systemPrompt: "요청된 JSON 객체만 반환하세요.",
       userPrompt: prompt,
-      model: TEXT_MODEL,
       timeoutMs: TOPIC_CODEX_TIMEOUT_MS,
     });
     return parseJsonObject<T>(output);
@@ -2688,23 +2648,15 @@ async function runStructuredPrompt<T>(options: {
   prompt: string;
   allowBrowserFallback?: boolean;
 }): Promise<T> {
-  let lastError: unknown = null;
-
-  try {
-    const openAi = await runOpenAiStructured<T>(options.schemaName, options.schema, options.prompt);
-    if (openAi) return openAi;
-  } catch (error) {
-    lastError = error;
-  }
-
-  if (!options.allowBrowserFallback) {
-    if (lastError instanceof Error) {
-      throw lastError;
-    }
-    throw new Error("구조화 모델(OpenAI GPT)을 사용할 수 없습니다.");
-  }
-
-  return runBrowserStructured<T>(options.prompt);
+  const raw = await runCodexDraft({
+    systemPrompt: "요청된 JSON 객체만 반환하세요.",
+    userPrompt: options.prompt,
+    timeoutMs: STRUCTURED_MODEL_TIMEOUT_MS,
+    outputSchema: options.schema,
+  });
+  const parsed = parseJsonObject<T>(raw);
+  if (!parsed) throw new Error(`Codex 응답을 JSON으로 해석하지 못했습니다 (${options.schemaName})`);
+  return parsed;
 }
 
 async function decideSelectedCandidate(
@@ -3653,70 +3605,6 @@ async function generateTopicCraftImage(query: string, destStem: string): Promise
   return localPath;
 }
 
-function addDaedalOption(args: string[], flag: string, value: string) {
-  const normalized = normalizeText(value);
-  if (!normalized || normalized.toLowerCase() === "none") return;
-  args.push(flag, normalized);
-}
-
-async function generateDaedalImage(prompt: string, destStem: string): Promise<string | null> {
-  if (!TOPIC_DAEDAL_IMAGE_ENABLED || !HAS_OPENAI_API_KEY) return null;
-
-  const outPath = `${destStem}.png`;
-  ensureDir(path.dirname(outPath));
-
-  const args = [prompt, "--quiet", "-o", outPath];
-  addDaedalOption(args, "--preset", TOPIC_DAEDAL_PRESET);
-  addDaedalOption(args, "--size", TOPIC_DAEDAL_SIZE);
-  addDaedalOption(args, "--quality", TOPIC_DAEDAL_QUALITY);
-  addDaedalOption(args, "--model", TOPIC_DAEDAL_MODEL);
-
-  try {
-    const { stdout } = await withTimeout(
-      execFileAsync(TOPIC_DAEDAL_BIN, args, {
-        maxBuffer: CURL_MAX_BUFFER_BYTES,
-        timeout: TOPIC_DAEDAL_IMAGE_TIMEOUT_MS,
-      }),
-      TOPIC_DAEDAL_IMAGE_TIMEOUT_MS,
-      "Daedal image generation",
-    );
-    const printedPath = stdout
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .at(-1);
-    const localPath = printedPath || outPath;
-    if (fs.existsSync(localPath)) return localPath;
-    if (fs.existsSync(outPath)) return outPath;
-    return null;
-  } catch (error) {
-    console.warn("[topic-task-pipeline] Daedal image generation failed:", error);
-    return null;
-  }
-}
-
-async function generateDaedalImagesBatch(
-  jobs: ChatGPTImageBatchJob[],
-): Promise<Map<string, PreGeneratedImageAsset>> {
-  const result = new Map<string, PreGeneratedImageAsset>();
-  if (!TOPIC_DAEDAL_IMAGE_ENABLED || !HAS_OPENAI_API_KEY || jobs.length === 0) return result;
-
-  for (const job of jobs) {
-    const localPath = await generateDaedalImage(job.prompt, job.outStem);
-    if (localPath) {
-      result.set(job.id, {
-        localPath,
-        provider: "daedal",
-        creditName: "Daedal",
-        creditUrl: "https://github.com/Hostingglobal-Tech/daedal",
-        sourcePrefix: "daedal",
-      });
-    }
-  }
-
-  return result;
-}
-
 async function generateChatGPTBrowserImage(
   item: TopicVisualPlanItem,
   query: string,
@@ -4081,22 +3969,6 @@ async function resolveImageAsset(
       };
     }
     for (const generatedQuery of stockQueries) {
-      const daedalDownloaded = await generateDaedalImage(
-        buildChatGPTImagePrompt(item, generatedQuery),
-        fileStem,
-      );
-      if (daedalDownloaded) {
-        return {
-          sourceUrl: `daedal:${generatedQuery}`,
-          localPath: daedalDownloaded,
-          creditName: "Daedal",
-          creditUrl: "https://github.com/Hostingglobal-Tech/daedal",
-          role,
-          query: generatedQuery,
-          provider: "daedal",
-        };
-      }
-
       if (!skipChatGPTBrowser) {
         const chatgptDownloaded = await generateChatGPTBrowserImage(item, generatedQuery, fileStem);
         if (chatgptDownloaded) {
@@ -4247,9 +4119,8 @@ async function resolveDraftImages(
       prompt: buildChatGPTImagePrompt(entry.item, entry.item.query),
       outStem: path.join(IMAGE_ROOT, draftId, `${entry.role}-${entry.index + 1}`),
     }));
-    const preGeneratedMap = await generateDaedalImagesBatch(batchJobs);
-    const remainingJobs = batchJobs.filter((job) => !preGeneratedMap.has(job.id));
-    const chatgptGeneratedMap = await generateChatGPTBrowserImagesBatch(remainingJobs);
+    const preGeneratedMap = new Map<string, PreGeneratedImageAsset>();
+    const chatgptGeneratedMap = await generateChatGPTBrowserImagesBatch(batchJobs);
     for (const [id, localPath] of chatgptGeneratedMap.entries()) {
       preGeneratedMap.set(id, {
         localPath,

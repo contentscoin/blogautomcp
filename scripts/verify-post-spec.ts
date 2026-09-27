@@ -1,5 +1,5 @@
 /**
- * Spec-first 파이프라인 회귀 검증 (API 키 없이 로컬 템플릿 경로로 실행).
+ * Spec-first 파이프라인 회귀 검증 (주입된 로컬 픽스처로 실행).
  *   - 이미지 풀 → 섹션 수 파생 → 슬롯 경로 확정
  *   - 쇼핑/여행 구성표(GEO 블록 포함)
  *   - 검증기가 망가진 초안에서 정확한 섹션 타깃을 잡는지
@@ -17,7 +17,6 @@ import type { ImageCandidateInput } from "./lib/post-spec";
 import { assessTravelFeatureCoverage } from "./lib/travel-content";
 import { sourceFeaturesForValidation } from "./lib/post-spec/validate";
 
-process.env.OPENAI_API_KEY = "";
 process.env.UNSPLASH_ACCESS_KEY = "";
 
 async function makeImage(dir: string, name: string, width: number, height: number, color: string): Promise<string> {

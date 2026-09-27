@@ -46,7 +46,7 @@ const server = http.createServer(async (request,response) => {
  const proxy=http.request({hostname:'127.0.0.1',port:43139,path:request.url,method:'GET',headers:{...request.headers,host:'127.0.0.1:43139'}}, upstream=>{response.writeHead(upstream.statusCode,upstream.headers);upstream.pipe(response);});
  proxy.on('error',()=>{response.writeHead(503);response.end('Starting fixture');});proxy.end();
 });
-const child=spawn(process.execPath,[require.resolve('next/dist/bin/next'),'start','-H','127.0.0.1','-p','43139'],{windowsHide:true,stdio:'inherit',env:{...process.env,DESKTOP_USER_DATA:isolated,DATABASE_URL:`file:${path.join(isolated,'fixture.db').replaceAll('\\','/')}`,OPENAI_API_KEY:'',REMOTE_DEVICE_TOKEN:'',REMOTE_DEVICE_ID:'',REMOTE_SITE_URL:'http://127.0.0.1:43138',ADMIN_API_KEY:'',CHATGPT_BROWSER_AUTOMATION_ENABLED:'false'}});
+const child=spawn(process.execPath,[require.resolve('next/dist/bin/next'),'start','-H','127.0.0.1','-p','43139'],{windowsHide:true,stdio:'inherit',env:{...process.env,DESKTOP_USER_DATA:isolated,DATABASE_URL:`file:${path.join(isolated,'fixture.db').replaceAll('\\','/')}`,REMOTE_DEVICE_TOKEN:'',REMOTE_DEVICE_ID:'',REMOTE_SITE_URL:'http://127.0.0.1:43138',ADMIN_API_KEY:'',CHATGPT_BROWSER_AUTOMATION_ENABLED:'false'}});
 server.listen(43138,'127.0.0.1',()=>console.log('UI fixture http://127.0.0.1:43138 (API proxy blocked, fixture only)'));
 process.on('SIGINT',()=>{server.close();child.kill();process.exit();});
 process.on('SIGTERM',()=>{server.close();child.kill();process.exit();});

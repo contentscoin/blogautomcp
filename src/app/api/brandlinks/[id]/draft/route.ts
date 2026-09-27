@@ -10,11 +10,7 @@ import { requireAdminApiKey } from "@/lib/api-auth";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 import { buildChatGptDraftHandoff } from "@/lib/chatgpt-draft-handoff";
 import {
-  buildChatGptBrowserAutomationEnv,
-  isChatGptBrowserAuthenticationError,
   isChatGptBrowserAutomationEnabled,
-  isChatGptBrowserUnreachableError,
-  readChatGptBrowserSessionSummary,
 } from "@/lib/chatgpt-browser-automation";
 import { beginDesktopActivity } from "@/lib/desktop-activity";
 import { classifyLocalFailure } from "@/lib/local-automation-error";
@@ -600,18 +596,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   if (link.status === "PUBLISHING") return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "현재 발행 중인 상품입니다." }, { status: 409 });
   if (link.status === "DRAFTING") return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "현재 초안을 작성 중인 상품입니다." }, { status: 409 });
   const connectKind = link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING";
-  // 로그인된 Codex가 항상 우선한다. 사용할 수 없으면 기존 API/웹 복구 경로를 사용한다.
-  const provider = "openai";
-  const hasProviderKey = Boolean(process.env.OPENAI_API_KEY?.trim());
-  const localFallbackEnabled = (process.env.PRODUCT_POST_LOCAL_FALLBACK_ENABLED || "false").toLowerCase() === "true";
-  const browserAutomationEnabled = isChatGptBrowserAutomationEnabled();
+  // Automatic writing uses only the signed-in ChatGPT Codex account.
   const codexEnabled = draftRuntimePolicy.CODEX_DRAFT_ENABLED === "true";
   const codexStatus = !action && codexEnabled ? readCodexLocalStatus() : null;
   const useCodex = !action && codexEnabled && Boolean(codexStatus?.authenticated);
-  // 로그인된 일반 ChatGPT 자동작성이 켜져 있으면 저품질 로컬 템플릿보다 우선한다.
-  // 글 작성은 일반 ChatGPT 경로만 사용한다.
-  const useBrowserChatGpt = !action && !useCodex && !hasProviderKey && browserAutomationEnabled;
-  const browserSession = browserAutomationEnabled ? readChatGptBrowserSessionSummary() : null;
   const handoff = () => buildChatGptDraftHandoff({
     productId: link.id,
     productName: link.productName,
@@ -632,30 +620,16 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   }
 
   if (!action) {
-    if (!useCodex && !hasProviderKey && !localFallbackEnabled && !browserAutomationEnabled) {
-      // 데스크톱 UI 는 이 두 코드로 Codex 연결/ChatGPT 핸드오프 안내를 분기한다. MCP 경로는 LLM_UNAVAILABLE 로 분류한다.
+    if (!useCodex) {
       return NextResponse.json({
         success: false,
-        code: codexEnabled ? "CODEX_LOGIN_REQUIRED" : "CHATGPT_MCP_DRAFT_REQUIRED",
-        error: codexEnabled
-          ? "Codex 로그인이 필요합니다. 로컬 프로그램 제어에서 Codex를 연결하거나 설정에 OpenAI API 키를 입력하세요."
-          : "이 PC에는 OpenAI API 키가 없습니다. 설정에 키를 입력하거나 ChatGPT 2단계 초안(post_prepare_draft → post_submit_draft)으로 이어서 만들 수 있습니다.",
+        code: "CODEX_LOGIN_REQUIRED",
+        error: "자동 원고 작성에는 ChatGPT 계정으로 연결된 Codex 로그인이 필요합니다.",
         data: {
           handoff: handoff(),
           codex: codexStatus,
         },
       }, { status: 409 });
-    }
-    if (useBrowserChatGpt) {
-      const session = browserSession || readChatGptBrowserSessionSummary();
-      if (!session.isValid) {
-        return NextResponse.json({
-          success: false,
-          code: "CHATGPT_BROWSER_LOGIN_REQUIRED",
-          error: session.error || "ChatGPT 웹 자동작성을 사용하려면 로그인이 필요합니다.",
-          data: { handoff: handoff(), session },
-        }, { status: 409 });
-      }
     }
   }
 
@@ -673,13 +647,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const finishDraftActivity = beginDesktopActivity(
     action === "prepare_context"
       ? "mcp-draft-context"
-      : action === "submit_generated"
-        ? "mcp-draft-submit"
-        : useCodex
-          ? "codex-draft"
-          : useBrowserChatGpt
-          ? "chatgpt-browser-draft"
-          : "api-draft",
+        : action === "submit_generated"
+          ? "mcp-draft-submit"
+        : "codex-draft",
   );
   const draftClaim = await prisma.brandLink.updateMany({
     where: { id, status: link.status },
@@ -770,28 +740,25 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           BRANDLINK_SUBMITTED_CONTEXT_PATH: action === "submit_generated" ? submittedContextPath : "",
           BRANDLINK_DRAFT_MEMO: requestMemo,
           BRANDLINK_DRAFT_PROGRESS_PATH: progressPath,
-          ...buildChatGptBrowserAutomationEnv(useBrowserChatGpt),
-          AI_PROVIDER: useCodex ? "codex" : provider,
+          AI_PROVIDER: "codex",
           CODEX_DRAFT_ENABLED: useCodex ? "true" : "false",
           CODEX_DRAFT_MODEL: draftRuntimePolicy.CODEX_DRAFT_MODEL,
           // A Codex failure is classified and handled on the Codex path. Never
           // resubmit an ambiguous/auth/model failure through ChatGPT browser automation.
           CODEX_BROWSER_FALLBACK_ENABLED: "false",
-          ALLOW_CHATGPT_BROWSER_MODE: useBrowserChatGpt ? "true" : "false",
-          BROWSER_GPT_MODE: useBrowserChatGpt ? "true" : "false",
+          ALLOW_CHATGPT_BROWSER_MODE: "false",
+          BROWSER_GPT_MODE: "false",
           HUMAN_MOBILE_POLISH_ENABLED: "true",
           BLOG_HUMANIZE_REWRITE_ENABLED: action === "submit_generated" ? "false" : "true",
-          PRODUCT_POST_LOCAL_FALLBACK_ENABLED: localFallbackEnabled ? "true" : "false",
+          PRODUCT_POST_LOCAL_FALLBACK_ENABLED: "false",
           PRODUCT_THUMBNAIL_CHATGPT_ENABLED: "false",
-          PRODUCT_THUMBNAIL_IMAGE_API_ENABLED: action ? "false" : process.env.PRODUCT_THUMBNAIL_IMAGE_API_ENABLED,
+          PRODUCT_THUMBNAIL_IMAGE_API_ENABLED: "false",
           PRODUCT_THUMBNAIL_CODEX_IMAGEGEN_FALLBACK_ENABLED: "false",
           BRANDLINK_QUALITY_PRESET: qualityPreset,
           BRANDLINK_EXPERIENCE_MODE: experienceMode,
           BRANDLINK_EXPERIENCE_NOTES: experienceNotes,
           BRANDLINK_FORCE_QUALITY_REPAIR: body.forceQualityRepair === true ? "true" : "false",
           BRANDLINK_AUTO_QUALITY_REPAIR_ENABLED: body.autoQualityRepair === false ? "false" : "true",
-          // OAuth MCP 제출 모드에서는 PC가 OpenAI API를 절대 호출하지 않도록 강제로 비운다.
-          ...(action ? { OPENAI_API_KEY: "" } : {}),
         },
       });
       child.once("error", reject);
@@ -886,30 +853,6 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         errorMessage: message,
       },
     }).catch(() => undefined);
-    if (useBrowserChatGpt) {
-      const authenticationRequired = isChatGptBrowserAuthenticationError(message);
-      // 사이트에 도달하지 못한 실패는 로그인 창을 열어도 풀리지 않는다. 네트워크·프록시 확인과
-      // MCP 요청문 경로를 안내한다.
-      const unreachable = !authenticationRequired && isChatGptBrowserUnreachableError(message);
-      return NextResponse.json({
-        success: false,
-        code: authenticationRequired
-          ? "CHATGPT_BROWSER_LOGIN_REQUIRED"
-          : unreachable
-            ? "CHATGPT_BROWSER_UNREACHABLE"
-            : "CHATGPT_BROWSER_FALLBACK_REQUIRED",
-        error: authenticationRequired
-          ? `ChatGPT 로그인 또는 보안 확인이 필요합니다: ${message}`
-          : unreachable
-            ? `ChatGPT 웹 페이지에 연결하지 못했습니다. 네트워크·프록시를 확인하거나 "웹 GPT 재로그인"으로 창을 열어 상태를 확인하세요. 상품별 요청문으로 ChatGPT에서 바로 이어서 작성할 수도 있습니다: ${message}`
-            : `ChatGPT 웹 자동작성에 실패했습니다: ${message}`,
-        data: {
-          handoff: handoff(),
-          browserError: message,
-        },
-        logPath,
-      }, { status: 409 });
-    }
     if (useCodex) {
       const code = error instanceof PrepareProcessError
         ? error.code

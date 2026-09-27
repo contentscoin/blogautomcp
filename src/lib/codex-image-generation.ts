@@ -18,7 +18,7 @@ import {
 } from "../../scripts/lib/codex-draft-provider";
 import { imageJobBudgetMs } from "../../scripts/lib/image-timeout-policy";
 import { buildPhotorealQcPrompt, parsePhotorealQc, reinforcePhotorealPrompt } from "../../scripts/lib/photoreal/checklist";
-import { resolveTextModel, resolveTextReasoningEffort } from "../../scripts/lib/text-model-policy";
+import { resolveCodexTextModel, resolveTextReasoningEffort } from "../../scripts/lib/text-model-policy";
 
 export const CODEX_IMAGE_MODEL_LABEL = "gpt-image-2";
 export const CODEX_IMAGE_CONCURRENCY = 3;
@@ -211,8 +211,9 @@ async function generateOnce(
   const startedAtMs = Date.now();
   let threadId: string | null = null;
   try {
+    const model = resolveCodexTextModel();
     const thread = codex.startThread({
-      model: resolveTextModel(),
+      ...(model ? { model } : {}),
       modelReasoningEffort: resolveTextReasoningEffort(),
       sandboxMode: "workspace-write",
       workingDirectory: workspace,

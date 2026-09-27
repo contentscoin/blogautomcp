@@ -17,10 +17,10 @@ async function main() {
     process.env.REMOTE_DEVICE_ID = "fixture";
     process.env.REMOTE_DEVICE_TOKEN = "fixture-not-a-live-token";
     delete process.env.ADMIN_API_KEY;
-    const legacy = Object.fromEntries(Object.keys(policy).map((key) => [key, key === "AI_PROVIDER" ? "openai" : "false"]));
+    const legacy = Object.fromEntries(Object.keys(policy).map((key) => [key, key === "AI_PROVIDER" ? "legacy-provider" : "false"]));
     Object.assign(process.env, legacy);
     const envPath = path.join(testRoot, ".env");
-    fs.writeFileSync(envPath, Object.entries({ ...legacy, OPENAI_API_KEY: "fixture-secret", NAVER_BLOG_ID: "fixture-blog", UNRELATED: "keep" }).map(([k, v]) => `${k}="${v}"`).join("\n"));
+    fs.writeFileSync(envPath, Object.entries({ ...legacy, NAVER_BLOG_ID: "fixture-blog", UNRELATED: "keep" }).map(([k, v]) => `${k}="${v}"`).join("\n"));
     const before = await (await GET(new NextRequest("http://localhost/api/settings"))).json();
     assert.equal(before.success, true);
     assert.deepEqual(before.data.fixedDraftSettings, policy);
@@ -29,10 +29,11 @@ async function main() {
     for (const key of Object.keys(policy)) {
       assert.equal(before.data.fields.some((field: { key: string }) => field.key === key), false, key);
     }
-    assert.equal(before.data.values.OPENAI_API_KEY, "********");
+    assert.equal(before.data.fields.some((field: { key: string }) => field.key === "OPENAI_API_KEY"), false);
+    assert.equal("OPENAI_API_KEY" in before.data.values, false);
     const saved = await POST(new NextRequest("http://localhost/api/settings", {
       method: "POST", headers: { "content-type": "application/json", origin: "http://localhost" },
-      body: JSON.stringify({ values: { ...legacy, OPENAI_API_KEY: "********", NAVER_BLOG_ID: "new-blog", UNAUTHORIZED_KEY: "not-allowed" } }),
+      body: JSON.stringify({ values: { ...legacy, NAVER_BLOG_ID: "new-blog", UNAUTHORIZED_KEY: "not-allowed" } }),
     }));
     assert.equal(saved.status, 200);
     const injected = await POST(new NextRequest("http://localhost/api/settings", {
@@ -45,7 +46,6 @@ async function main() {
       assert.equal(process.env[key], value);
       assert.ok(content.includes(`${key}="${value}"`));
     }
-    assert.ok(content.includes('OPENAI_API_KEY="fixture-secret"'));
     assert.ok(content.includes('UNRELATED="keep"'));
     assert.ok(content.includes('NAVER_BLOG_ID="new-blog"'));
     assert.equal(content.includes("UNAUTHORIZED_KEY"), false);
@@ -76,7 +76,7 @@ async function main() {
       });
       assert.equal(registrations, testMode === "1" ? 0 : 1);
     }
-    console.log("PASS: fixed settings API, legacy migration, secret preservation, desktop bootstrap, Codex-first routing");
+    console.log("PASS: fixed settings API, API-model field removal, desktop bootstrap, Codex-only routing");
   } finally {
     for (const key of Object.keys(process.env)) if (!(key in previousEnv)) delete process.env[key];
     Object.assign(process.env, previousEnv);

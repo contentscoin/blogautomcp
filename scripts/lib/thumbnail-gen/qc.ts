@@ -1,10 +1,9 @@
 /**
- * OpenAI 비전 QC — ProductThumbnail.md §10 배점(100점, 95점 미만 불합격) + 자동 탈락 조건.
+ * ChatGPT 계정 Codex 비전 QC — ProductThumbnail.md §10 배점 + 자동 탈락 조건.
  */
 
 import fs from "fs";
-import path from "path";
-import { getOpenAiApiKey, openaiChatJson } from "../openai-text";
+import { codexJson } from "../codex-text";
 import type { ThumbnailKind } from "./prompt";
 
 export type QcFailureCode =
@@ -95,13 +94,6 @@ export function scoreQcReport(raw: RawQc, minScore = qcMinScore()): ThumbnailQcR
   };
 }
 
-function mimeTypeForPath(filePath: string): string {
-  const ext = path.extname(filePath).toLowerCase();
-  if (ext === ".png") return "image/png";
-  if (ext === ".webp") return "image/webp";
-  return "image/jpeg";
-}
-
 export async function qcThumbnail(imagePath: string, expected: ThumbnailQcExpectation): Promise<ThumbnailQcReport> {
   const enabled = (process.env.PRODUCT_THUMBNAIL_IMAGE_QC_ENABLED || "true").toLowerCase() !== "false";
   const skipped = (reason: string): ThumbnailQcReport => ({
@@ -114,16 +106,10 @@ export async function qcThumbnail(imagePath: string, expected: ThumbnailQcExpect
     note: reason,
   });
   if (!enabled) return skipped("QC 비활성화");
-  if (!getOpenAiApiKey()) return skipped("OPENAI_API_KEY 없음 — QC 생략");
-
-  const images = [{ base64: fs.readFileSync(imagePath).toString("base64"), mimeType: mimeTypeForPath(imagePath), detail: "high" as const }];
+  const images = [imagePath];
   const hasReference = Boolean(expected.referenceImagePath && fs.existsSync(expected.referenceImagePath));
   if (hasReference) {
-    images.push({
-      base64: fs.readFileSync(expected.referenceImagePath as string).toString("base64"),
-      mimeType: mimeTypeForPath(expected.referenceImagePath as string),
-      detail: "high" as const,
-    });
+    images.push(expected.referenceImagePath as string);
   }
   const isTravel = expected.kind === "TRAVEL";
   const prompt = [
@@ -153,7 +139,7 @@ export async function qcThumbnail(imagePath: string, expected: ThumbnailQcExpect
     .join("\n");
 
   try {
-    const raw = await openaiChatJson<RawQc>({ user: prompt, images, temperature: 0, maxOutputTokens: 600 });
+    const raw = await codexJson<RawQc>({ user: prompt, imagePaths: images, timeoutMs: 120_000 });
     return scoreQcReport(raw);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

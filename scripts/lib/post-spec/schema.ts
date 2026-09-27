@@ -1,5 +1,5 @@
 /**
- * 스펙 → OpenAI structured output(json_schema, strict) 변환.
+ * 스펙 → Codex structured output(JSON schema) 변환.
  * 섹션 수를 고정하기 위해 배열 대신 고정 키 객체(s00, s01, …)를 쓴다.
  * strict 모드는 minItems 같은 배열 길이 키워드를 지원하지 않기 때문이다.
  */

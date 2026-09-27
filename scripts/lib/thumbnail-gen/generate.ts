@@ -5,7 +5,6 @@
 
 import fs from "fs";
 import path from "path";
-import { generateProductThumbnailViaImageApi } from "../openai-image";
 import { buildCorrectivePrompt } from "./corrective";
 import { qcThumbnail, type ThumbnailQcExpectation, type ThumbnailQcReport } from "./qc";
 
@@ -47,17 +46,8 @@ export function maxThumbnailAttempts(): number {
 
 export async function generateThumbnailWithQc(input: GenerateThumbnailWithQcInput): Promise<ThumbnailGenerationResult | null> {
   const maxAttempts = input.maxAttempts ?? maxThumbnailAttempts();
-  const generate =
-    input.deps?.generate ||
-    ((prompt: string) =>
-      generateProductThumbnailViaImageApi({
-        prompt,
-        referenceImagePath: input.referenceImagePath,
-        outputDir: input.outputDir,
-        fileLabel: input.fileLabel,
-        size: input.size,
-        quality: input.quality,
-      }));
+  const generate = input.deps?.generate;
+  if (!generate) return null;
   const qc = input.deps?.qc || ((imagePath: string) => qcThumbnail(imagePath, input.expected));
 
   const history: ThumbnailAttempt[] = [];

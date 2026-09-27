@@ -1,5 +1,5 @@
 import { HUMANIZE_RULES } from "./humanize-korean";
-import { extractJsonObject } from "./openai-text";
+import { extractJsonObject } from "./codex-text";
 
 export function buildHumanizeSectionsPrompt(sections: string[], requirements = ""): string {
   return [

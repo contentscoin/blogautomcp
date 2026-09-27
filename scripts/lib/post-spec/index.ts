@@ -2,7 +2,7 @@
  * Spec-first 파이프라인 진입점.
  *
  *   A. 이미지 풀 준비(보강 포함) → 섹션 수 파생 → PostSpec 확정 (LLM 없음)
- *   B. 구조화 생성 (OpenAI json_schema) 또는 로컬 템플릿
+ *   B. ChatGPT 계정 Codex 구조화 생성 또는 로컬 템플릿
  *   C. 검증(전체 신호) → 타깃 수리 ≤ N 회
  *   D. 조립 (composition + 기존 preview 형식)
  */
@@ -11,11 +11,10 @@ import { buildProductEditorialPlan } from "../product-editorial-plan";
 import { createEditorialSelection } from "../editorial-templates";
 import type { OpenCrabSeoBrief } from "../opencrab-seo-brief";
 import { getProductTokens } from "../brandlink-content-readiness";
-import { isOpenAiAvailable } from "../openai-text";
 import { extractTravelProductFacts, type TravelProductFacts } from "../travel-content";
 import { assemblePost, normalizeDraft } from "./assemble";
 import { buildEvidenceLedger } from "./evidence-ledger";
-import { generateDraftWithOpenAi, type GenerateContext } from "./generate";
+import { generateDraftWithCodex, type GenerateContext } from "./generate";
 import { assignImageSlots, prepareImagePool } from "./image-plan";
 import { buildLocalDraft } from "./local-template";
 import { repairableTargets, repairDraft } from "./repair";
@@ -287,24 +286,24 @@ export async function runSpecFirstPipeline(input: SpecFirstPipelineInput): Promi
   };
 
   let draft: GeneratedDraft;
-  const useOpenAi = !input.options?.forceLocal && isOpenAiAvailable();
-  if (useOpenAi) {
+  const useCodex = !input.options?.forceLocal;
+  if (useCodex) {
     try {
-      draft = normalizeDraft(spec, await generateDraftWithOpenAi(spec, ctx));
+      draft = normalizeDraft(spec, await generateDraftWithCodex(spec, ctx));
     } catch (error) {
       if (!(input.options?.allowLocalFallback ?? true)) throw error;
-      notes.push(`OpenAI 생성 실패, 로컬 템플릿으로 대체: ${error instanceof Error ? error.message : String(error)}`);
+      notes.push(`Codex 생성 실패, 로컬 템플릿으로 대체: ${error instanceof Error ? error.message : String(error)}`);
       draft = normalizeDraft(spec, buildLocalDraft(spec, templates, shortName));
     }
   } else {
-    if (!(input.options?.allowLocalFallback ?? true)) throw new Error("OPENAI_API_KEY가 없어 글을 생성할 수 없습니다.");
-    notes.push("OPENAI_API_KEY 없음 — 로컬 템플릿 초안");
+    if (!(input.options?.allowLocalFallback ?? true)) throw new Error("Codex 생성을 사용할 수 없습니다.");
+    notes.push("Codex 생성 비활성화 — 로컬 템플릿 초안");
     draft = normalizeDraft(spec, buildLocalDraft(spec, templates, shortName));
   }
 
   let report = validateDraft(spec, draft, validateOptions);
   const maxRounds = validateOptions.maxRepairAttempts;
-  for (let round = 0; round < maxRounds && draft.source === "openai"; round += 1) {
+  for (let round = 0; round < maxRounds && draft.source === "codex"; round += 1) {
     if (repairableTargets(report).length === 0) break;
     notes.push(`수리 라운드 ${round + 1}: ${repairableTargets(report).map((t) => `${t.sectionIndex ?? "title"}:${t.code}`).join(", ")}`);
     const repaired = normalizeDraft(spec, await repairDraft(spec, draft, report, ctx));

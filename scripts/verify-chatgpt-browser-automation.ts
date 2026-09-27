@@ -350,14 +350,12 @@ async function main(): Promise<void> {
   assert.match(loginRoute, /chatgpt-login\.ts/u);
 
   const draftRoute = source("src/app/api/brandlinks/[id]/draft/route.ts");
-  assert.match(draftRoute, /CHATGPT_BROWSER_LOGIN_REQUIRED/u);
-  assert.match(draftRoute, /CHATGPT_BROWSER_FALLBACK_REQUIRED/u);
-  assert.match(draftRoute, /isChatGptBrowserAuthenticationError/u);
-  assert.match(draftRoute, /CHATGPT_BROWSER_UNREACHABLE/u);
-  assert.match(draftRoute, /isChatGptBrowserUnreachableError/u);
-  assert.match(draftRoute, /buildChatGptBrowserAutomationEnv\(useBrowserChatGpt\)/u);
+  assert.match(draftRoute, /CODEX_LOGIN_REQUIRED/u);
+  assert.doesNotMatch(draftRoute, /CHATGPT_BROWSER_LOGIN_REQUIRED|CHATGPT_BROWSER_FALLBACK_REQUIRED/u);
+  assert.doesNotMatch(draftRoute, /isChatGptBrowserAuthenticationError|isChatGptBrowserUnreachableError/u);
+  assert.doesNotMatch(draftRoute, /buildChatGptBrowserAutomationEnv\(useBrowserChatGpt\)/u);
   assert.match(draftRoute, /CODEX_BROWSER_FALLBACK_ENABLED:\s*"false"/u);
-  assert.match(draftRoute, /ALLOW_CHATGPT_BROWSER_MODE:\s*useBrowserChatGpt \? "true" : "false"/u);
+  assert.match(draftRoute, /ALLOW_CHATGPT_BROWSER_MODE:\s*"false"/u);
   assert.match(draftRoute, /status: "DRAFTING"/u);
   assert.match(draftRoute, /status:[^\n]+"FAILED",[\s\S]{0,80}errorMessage: message/u);
   assert.match(draftRoute, /updateMany\(\{[\s\S]*?where: \{ id, status: link\.status \}/u);

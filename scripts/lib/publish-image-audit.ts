@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import sharp from "sharp";
-import { resolveTextModel, resolveTextReasoningEffort } from "./text-model-policy";
+import { resolveTextReasoningEffort } from "./text-model-policy";
 import { readSuccessfulImageAuditReceipt, writeSuccessfulImageAuditReceipt, invalidateSuccessfulImageAuditReceipt, withSuccessfulImageAuditLock } from "./publish-image-audit-receipt";
 
 export function buildSelectedProductImageAuditContext(productName: string, features: readonly string[]): string {
@@ -168,7 +168,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           'Return exactly one review per attached image, with 1-based index: {"reviews":[{"index":1,"accepted":true,"identityMatches":true,"notice":false,"mixedOptions":false,"explicitNamedComparison":false,"optionsClearlyLabeled":false,"reviewClass":"product-photo" or "feature-evidence","reason":"specific pixel evidence"}]}. All boolean fields required. For an allowed named comparison identityMatches means the selected item is clearly identified among the explicitly named alternatives.',
         ].join("\n"),
         imagePaths: batch.map(c => c.snapshot), maxImages: batch.length, preserveImageOrder: true, researchMode: "disabled",
-        model: resolveTextModel(), reasoningEffort: resolveTextReasoningEffort(),
+        reasoningEffort: resolveTextReasoningEffort(),
         outputSchema: VISUAL_REVIEW_SCHEMA,
     });
     for (let offset = 0; offset < candidates.length; offset += 8) {

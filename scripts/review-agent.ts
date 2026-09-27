@@ -19,7 +19,7 @@ import {
     generateReviewHashtags,
 } from "./lib/review-prompt";
 import { createTaskLogger } from "./lib/logger";
-import { openaiChatText } from "./lib/openai-text";
+import { codexText } from "./lib/codex-text";
 import { getNaverSessionFile } from "./lib/app-paths";
 
 const log = createTaskLogger("ReviewAgent");
@@ -131,7 +131,7 @@ async function generateReviewContent(
 
     log.debug("프롬프트 생성 완료", { length: prompt.length });
 
-    const text = await openaiChatText({ user: prompt, json: true, temperature: 0.7, maxOutputTokens: 8192 });
+    const text = await codexText({ user: prompt, system: "리뷰 콘텐츠를 요청된 JSON 객체로만 반환하세요." });
 
     try {
         const json = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || "{}") as Partial<ReviewOutput>;

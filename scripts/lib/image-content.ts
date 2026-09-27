@@ -1,13 +1,13 @@
 /**
  * 이미지 기반 콘텐츠 생성 (멀티모달)
- * V4 Phase 9: OpenAI 비전으로 이미지 분석 → 스토리 생성
+ * V4 Phase 9: ChatGPT 계정 Codex 비전으로 이미지 분석 → 스토리 생성
  */
 
 import "dotenv/config";
 import * as fs from "fs";
 import * as path from "path";
 import { createTaskLogger } from "./logger";
-import { isOpenAiAvailable, openaiChatJson, openaiChatText } from "./openai-text";
+import { codexJson, codexText } from "./codex-text";
 
 const log = createTaskLogger("ImageContent");
 
@@ -85,21 +85,10 @@ export function loadImages(folderPath: string): ImageInfo[] {
 }
 
 /**
- * OpenAI 비전으로 이미지 분석
+ * ChatGPT 계정 Codex로 이미지 분석
  */
 export async function analyzeImage(image: ImageInfo): Promise<ImageAnalysis> {
     log.debug(`이미지 분석: ${image.filename}`);
-
-    if (!isOpenAiAvailable()) {
-        console.warn("⚠️ OPENAI_API_KEY_MISSING: 이미지를 분석하지 않고 기본 정보만 반환합니다.");
-        return {
-            description: "제공된 이미지입니다.",
-            tags: ["이미지"],
-            mood: "일반적인",
-            suggestedCaption: "사진입니다.",
-            visualComposition: "기본값"
-        };
-    }
 
     const prompt = `이 이미지를 분석해주세요. 단순한 사물 묘사를 넘어, 사진 속 상황에 스토리를 부여하여 매우 구체적으로 분석해주세요. 
 JSON 형식으로 반환:
@@ -112,10 +101,9 @@ JSON 형식으로 반환:
 }`;
 
     try {
-        const json = await openaiChatJson<ImageAnalysis>({
+        const json = await codexJson<ImageAnalysis>({
             user: prompt,
-            images: [{ base64: image.base64, mimeType: image.mimeType }],
-            temperature: 0.5,
+            imagePaths: [image.path],
         });
         return json;
     } catch (e: unknown) {
@@ -140,10 +128,6 @@ export async function generateContentFromImages(
     styleGuide: string = ""
 ): Promise<ImageBasedContent> {
     log.info(`이미지 기반 콘텐츠 생성 시작: ${images.length}장`);
-
-    if (!isOpenAiAvailable()) {
-        throw new Error("OPENAI_API_KEY가 없어 이미지 기반 콘텐츠를 생성할 수 없습니다.");
-    }
 
     // 1. 각 이미지 분석
     const analyses: ImageAnalysis[] = [];
@@ -196,9 +180,9 @@ JSON 형식으로 반환:
 }`;
 
         try {
-            text = await openaiChatText({ user: prompt, json: true, temperature: 0.7, maxOutputTokens: 8192 });
+            text = await codexText({ user: prompt, system: "이미지 기반 블로그 콘텐츠를 요청된 JSON 객체로만 반환하세요." });
         } catch (e: unknown) {
-            log.error("OpenAI 전체 스토리 생성 실패", e instanceof Error ? e : { error: String(e) });
+            log.error("Codex 전체 스토리 생성 실패", e instanceof Error ? e : { error: String(e) });
             throw new Error("이미지 기반 스토리 생성 실패");
         }
     }

@@ -6,7 +6,7 @@
 import "dotenv/config";
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import { openaiChatText } from "./lib/openai-text";
+import { codexText } from "./lib/codex-text";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -139,7 +139,7 @@ ${content}
 
 JSON만 반환하세요.`;
 
-    const text = await openaiChatText({ user: prompt, json: true, temperature: 0.4 });
+    const text = await codexText({ user: prompt, system: "블로그 문체 분석 결과를 JSON 객체로만 반환하세요." });
 
     try {
         const json = JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || "{}");

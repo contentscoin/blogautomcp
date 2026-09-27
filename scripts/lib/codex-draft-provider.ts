@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getWritingTimeoutPolicy, writingTimeoutMs } from "./writing-timeout-policy";
-import { resolveTextModel, resolveTextReasoningEffort } from "./text-model-policy";
+import { resolveCodexTextModel, resolveTextReasoningEffort } from "./text-model-policy";
 
 type CodexSdkModule = typeof import("@openai/codex-sdk");
 
@@ -243,7 +243,7 @@ function buildWritingPrompt(
 }
 
 export async function runCodexDraft(options: CodexDraftOptions): Promise<string> {
-  const model = resolveTextModel(options.model);
+  const model = resolveCodexTextModel(options.model);
   const reasoningEffort = resolveTextReasoningEffort(options.reasoningEffort);
   const { Codex } = await nativeImport("@openai/codex-sdk");
   const timeoutMs = writingTimeoutMs(options.timeoutMs, getWritingTimeoutPolicy().codexMs);
@@ -279,8 +279,9 @@ export async function runCodexDraft(options: CodexDraftOptions): Promise<string>
     return await runCodexDraftWithRetry(async () => {
       const thread = codex.startThread({
         // Auxiliary callers (including photo review) must not inherit the user's
-        // desktop model, which may require a newer CLI than our bundled runtime.
-        model,
+        // desktop model. Omitting model lets ChatGPT-account authentication choose
+        // a supported Codex default instead of sending an API-only model name.
+        ...(model ? { model } : {}),
         modelReasoningEffort: reasoningEffort,
         sandboxMode: "read-only",
         workingDirectory,
