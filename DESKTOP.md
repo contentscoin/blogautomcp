@@ -90,8 +90,8 @@ Windows 환경에서 빌드**해야 신뢰성이 높다. macOS에서 `--win` 빌
 2. 연결 후 설정 화면의 `네이버 로그인` 버튼으로 네이버 세션을 저장한다.
 3. 같은 MCP 주소를 ChatGPT 개발자 모드에도 별도로 등록한다. 로컬 앱의 로그인과
    ChatGPT의 MCP 등록은 서로 자동 연동되지 않는다.
-4. 필요한 경우 `userData/brandconnect-automation/.env`에 `OPENAI_API_KEY`,
-   `NAVER_BLOG_ID`, `ADMIN_API_KEY` 등의 실행 설정을 넣는다.
+4. 필요한 경우 `userData/brandconnect-automation/.env`에 `NAVER_BLOG_ID`,
+   `ADMIN_API_KEY` 등의 실행 설정을 넣는다. OpenAI API 키는 사용하지 않는다.
 
 MCP 주소가 재발급되거나, 관리자가 계정을 정지하거나, 다른 PC가 같은 주소로
 인증하면 기존 장치 토큰은 폐기된다. 로컬 앱은 다음 폴링에서 인증 실패를 확인하고

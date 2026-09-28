@@ -61,12 +61,6 @@ node --version
 
 ### 2. AI 설정
 
-**OpenAI API 사용 시**
-1. [OpenAI Platform](https://platform.openai.com/api-keys) 접속
-2. 구글/마이크로소프트 계정으로 로그인
-3. **"Create new secret key"** 클릭
-4. 생성된 키 복사 (sk-xxx... 형태)
-
 **ChatGPT와 MCP로 연결할 때**
 로컬 프로그램에서는 ChatGPT에 로그인하지 않습니다. 인증은 네 단계뿐입니다.
 
@@ -76,14 +70,12 @@ node --version
    (앱이 열리지 않으면 화면에 표시된 8자 코드를 앱 첫 화면에 입력합니다. MCP 주소를 앱에 붙여넣을 필요는 없습니다.)
 4. PC 앱에서 네이버 로그인을 합니다.
 
-OpenAI API 키는 선택 사항이며 ChatGPT 구독과 별개입니다. 없으면 로컬 초안 모드로 동작하지만 글·썸네일 품질이 낮아집니다.
+OpenAI API 키는 사용하지 않습니다. 자동 원고·검토·이미지 제어는 로그인된 Codex 계정의 `gpt-6-luna`/`low` 정책을 따르고, ChatGPT 브라우저 작업은 계정의 기본 모델을 사용합니다.
 
 ChatGPT 커넥터는 OAuth 고정 주소(`/api/mcp`)로도 연결할 수 있습니다(대시보드 안내 참고). 두 방식 모두 같은 도구를 제공합니다.
 
 초안은 ChatGPT 가 씁니다. `post_create_draft` 로 PC 가 상품 사실·상세이미지·하네스·프롬프트(verifiedFacts / sourceImages / harness / systemPrompt / userPrompt)를 수십 초 안에 준비하고, ChatGPT 대화가 원고 JSON 을 작성해 `post_submit_draft` 로 제출하면 PC 는 품질검사와 저장만 합니다. 섹션 이미지는 ChatGPT 내장 이미지 생성으로 만들어 `post_apply_section_image` 로 붙입니다(PC 가 ChatGPT 브라우저를 열지 않습니다).
-PC 에 OpenAI API 키가 있고 PC 전량 생성을 원할 때만 `post_generate_draft_local`(Spec-first 파이프라인, 수 분)을 씁니다.
-
-> ⚠️ API 키는 한 번만 보여주므로 반드시 복사해서 안전한 곳에 저장하세요!
+PC 단독 자동작성도 API 모델이 아니라 로그인된 Codex 계정을 사용합니다.
 
 ### 3. 네이버 블로그 ID 확인
 
@@ -145,9 +137,6 @@ cp .env.example .env
 메모장 또는 VS Code로 `.env` 파일을 열고 아래 내용을 입력:
 
 ```env
-# OpenAI API 키 (글 생성·썸네일 생성·QC 모두 OpenAI 사용)
-OPENAI_API_KEY=sk-여기에_발급받은_키_붙여넣기
-
 # 원고는 ChatGPT MCP 경로(post_create_draft → post_submit_draft)가 기본입니다.
 # 아래를 true 로 켜면 PC 가 로그인된 ChatGPT 웹을 열어 초안을 쓰는 선택 경로가 됩니다.
 CHATGPT_BROWSER_AUTOMATION_ENABLED=true
@@ -176,7 +165,7 @@ DATABASE_URL="file:./dev.db"
 
 > `TELEGRAM_CHAT_ID`를 비워두면 봇의 최근 대화에서 자동으로 찾습니다. 먼저 텔레그램에서 해당 봇에게 아무 메시지나 한 번 보내두세요.
 
-> 💡 주제글/이미지 발행 파이프라인은 GPT만 사용합니다.
+> 💡 주제글/이미지 발행 파이프라인도 API 키 없이 로그인된 ChatGPT/Codex 계정을 사용합니다.
 
 ### 3. 운영 보안 설정 (권장)
 
@@ -230,7 +219,7 @@ npm run login
 ### AI 작성 설정
 
 - 브라우저 자동화는 특정 공유 GPT에 의존하지 않고 일반 ChatGPT에서 단일 프롬프트로 글을 생성합니다.
-- OpenAI API가 실패하거나 키가 없으면 기본 설정상 자동 승인을 받을 수 없는 로컬 템플릿으로 덮어쓰지 않고 `LLM_UNAVAILABLE`로 중단합니다.
+- Codex 또는 ChatGPT 계정 연결이 없으면 품질이 낮은 로컬 템플릿으로 덮어쓰지 않고 명시적 연결 오류로 중단합니다.
 - ChatGPT MCP 초안은 `상품 근거 준비(post_create_draft = post_prepare_draft) → ChatGPT 원고 생성 → PC 품질검사·저장(post_submit_draft) → ChatGPT 내장 이미지 생성 → post_apply_section_image` 순서로 처리하며 API 키가 필요하지 않습니다. 제출 단계는 이미지를 생성하지 않습니다.
 - 원고·분석·이미지 검수는 로그인된 Codex의 `gpt-6-luna`와 reasoning `low`만 사용합니다. `gpt-6-astra`와 다른 effort는 실행 전에 거부합니다. ChatGPT 브라우저는 일반 새 대화의 `default` 모델만 사용합니다. 웹 자동작성과 PC 초안의 섹션 이미지 자동 보충은 기본 고정이며 설정 선택지는 없습니다. 기존 `.env`의 꺼짐 값도 앱 정책으로 대체됩니다. 초안 미리보기의 `이미지` 탭에서 결과를 확인할 수 있고, 자동 보충은 초안 응답을 기다리게 하지 않습니다. MCP 제출은 대화에서 만든 이미지를 `post_apply_section_image`로 적용하는 경로를 유지합니다. 배치는 첫 실패에서 중단(fail-fast)하고 장당 3분 예산을 씁니다. 쇼핑 이미지는 원본 상품을 다시 그리지 않고 잠금 합성하며, 안전한 분리가 불가능하면 수집 원본을 유지합니다.
 - 이미지 수는 쇼핑 `최소 5/권장 8`, 여행 `최소 7/권장 10`으로 검사합니다. `품질검사` 탭은 확인 안내 반복·상품 고유 장단점 부족·허위 체험 표현을 별도로 검사하고 자동 보강 결과를 표시합니다.
@@ -238,7 +227,7 @@ npm run login
 - 문장은 짧게 끊고, AI처럼 보이는 반복 표현/과한 광고 문구/허위 체험 단정을 줄입니다.
 - 상품 리뷰 글은 발행 전 상품명 반영, 본문 분량, 고지문, URL 직접 노출, 허위 체험 단정, 수수료율 노출, 판매페이지 대표 이미지 확보 여부를 검사합니다.
   필요 시 `BRANDLINK_CONTENT_READINESS_ENABLED=false`로 게이트를 끄거나 `BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE=false`로 대표 이미지 필수 조건만 완화할 수 있습니다.
-- 주제글 AI 이미지 생성은 API 방식(`TOPIC_PIPELINE_DAEDAL_ENABLED=true`와 `OPENAI_API_KEY`)이나 준비된 이미지 자산을 사용합니다.
+- 주제글 이미지는 ChatGPT 내장 이미지 생성 결과나 준비된 검증 이미지 자산을 사용합니다.
 - 주제글 prepare 단계는 `TOPIC_AUTO_RESEARCH_ENABLED=true`일 때 입력 주제/키워드로 참고 URL을 자동 탐색합니다. `NAVER_SEARCH_CLIENT_ID`/`NAVER_SEARCH_CLIENT_SECRET`이 있으면 네이버 검색 OpenAPI를 먼저 쓰고, 없으면 DuckDuckGo HTML 검색을 best-effort로 사용합니다.
 - 준비된 주제글은 발행 전에 도입부, 하이라이트, 섹션 구조, 본문 자연스러움, 이미지 확보 상태와 함께 SEO 키워드 커버리지를 검사합니다. 명시 키워드가 본문/제목/태그에 거의 반영되지 않으면 재준비가 필요합니다.
 
@@ -342,10 +331,10 @@ npm run login
 온라인인지 확인하세요. 미연결이면 대시보드에서 **PC 앱 연결**을 다시 누르고, 앱이 실행 중인지
 확인합니다. MCP 주소를 재발급했다면 PC 인증도 함께 폐기되므로 PC 앱 연결을 다시 해야 합니다.
 
-### Q: "OpenAI API 오류가 나요"
+### Q: "AI 작성 연결 오류가 나요"
 **A:** 
-- ChatGPT MCP에서 초안을 요청했다면 별도 API 키가 필요하지 않습니다. 앱을 최신 버전으로 업데이트한 뒤 ChatGPT에서 다시 요청하세요.
-- 데스크톱의 단독 초안 버튼을 사용한다면 API 키, API 계정 크레딧, `.env` 또는 설정 저장 상태를 확인하세요.
+- ChatGPT MCP 초안은 별도 API 키가 필요하지 않습니다. 사이트의 ChatGPT 로그인과 MCP 연결을 확인하세요.
+- 데스크톱 단독 자동작성은 Codex 로그인 상태를 확인하고, 앱을 최신 버전으로 업데이트한 뒤 다시 요청하세요.
 
 ### Q: "이미지가 안 올라가요"
 **A:** 네트워크 문제일 수 있습니다. 잠시 후 다시 시도하거나, 상품 페이지의 이미지가 정상인지 확인해보세요.
