@@ -79,12 +79,17 @@ async function main() {
   class SavedTextRevalidationError extends Error {
     constructor(message, code = 'QC_SOURCE_REQUIRED') { super(message); this.code = code; }
   }
+  class PublishImageAuditError extends Error {
+    constructor(message) { super(message); this.audit = { failures: [] }; }
+  }
   vm.runInNewContext(ts.transpileModule(patch.getText(draftSource), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText, {
     module: patchModule, exports: patchModule.exports,
     requireAdminApiKey: () => null, isBrandPostImageRepairActive: () => false,
     NextResponse: mocks['next/server'].NextResponse, classifyLocalFailure: () => 'FAILED',
     prisma: { brandLink: { findUnique: async () => ({ status }), updateMany: async value => { approveUpdates.push(value); return { count: claimCount }; } } },
     SavedTextRevalidationError,
+    PublishImageAuditError,
+    validateBrandPostPublishImages: async () => ({ passed: true, failures: [] }),
     revalidatePackageForApproval: () => { revalidations++; assert.equal(approveUpdates.at(-1).data.status, 'DRAFTING'); },
     approveBrandPostPackage: () => { approvals++; assert.equal(approveUpdates.at(-1).data.status, 'DRAFTING'); if (approvalThrows) throw Error('fixture'); return { approvedAt: 'fixture' }; },
     packagePreview: value => value,

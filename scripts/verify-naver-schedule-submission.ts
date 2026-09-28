@@ -3,8 +3,34 @@ import { EventEmitter } from "node:events";
 import type { Page } from "playwright";
 import { inspectNaverScheduleSubmissionSignal } from "../src/lib/naver-schedule-submission";
 import { createScheduleSubmissionTracker, waitForConfirmedScheduleSubmission } from "./lib/naver-schedule-tracker";
+import { reservationIdFromPrePostReadUrl, scheduleListEntryMatches } from "./lib/naver-schedule-list-verifier";
 
 const targetYmd = "2026-09-03";
+
+assert.equal(
+  scheduleListEntryMatches(
+    "드라이기 JMW 케어부스터 BLDC 사양과 선택 기준 2026.09.03 09:00",
+    "드라이기 JMW 케어부스터 BLDC 사양과 선택 기준",
+    targetYmd,
+    "09:00"
+  ),
+  true
+);
+assert.equal(scheduleListEntryMatches("다른 제목 2026.09.03 09:00", "기대 제목", targetYmd, "09:00"), false);
+assert.equal(scheduleListEntryMatches("기대 제목 2026.09.04 09:00", "기대 제목", targetYmd, "09:00"), false);
+assert.equal(scheduleListEntryMatches("기대 제목 2026.09.03 10:00", "기대 제목", targetYmd, "09:00"), false);
+assert.equal(
+  reservationIdFromPrePostReadUrl(
+    "https://blog.naver.com/RabbitPrePostRead.naver?blogId=test-blog&logNo=123456789012",
+    "test-blog"
+  ),
+  "123456789012"
+);
+for (const url of [
+  "https://naver.com.evil.example/RabbitPrePostRead.naver?blogId=test-blog&logNo=1",
+  "https://blog.naver.com/RabbitPrePostRead.naver?blogId=other&logNo=1",
+  "https://blog.naver.com/RabbitPrePostRead.naver?blogId=test-blog&logNo=0",
+]) assert.equal(reservationIdFromPrePostReadUrl(url, "test-blog"), null);
 
 assert.equal(
   inspectNaverScheduleSubmissionSignal({
@@ -169,6 +195,7 @@ async function main() {
   await flush();
   assert.match(unavailable.getRecentEvents().join(" "), /"body":"unavailable"/);
   assert.match(unavailable.getRecentEvents().join(" "), /"bodyError":"Response body is unavailable for <url>"/);
+  assert.equal(unavailable.hasSuccessfulScheduleTransport(), true, "2xx schedule request/date transport is retained for list verification");
   unavailable.stop();
 
   const emptyEvents = new EventEmitter();
@@ -181,6 +208,7 @@ async function main() {
   await flush();
   assert.equal(irrelevantReads, 0, "ignore unrelated responses and requests that predate tracking");
   assert.equal(empty.hasAnyPublishRequest(), false);
+  assert.equal(empty.hasSuccessfulScheduleTransport(), false);
 
   const failed = fakeRequest();
   emptyEvents.emit("request", failed);

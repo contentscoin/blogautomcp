@@ -4,6 +4,7 @@ import { inspectNaverScheduleSubmissionSignal, isNaverPublishingEndpoint } from 
 export interface ScheduleSubmissionTracker {
   stop: () => void;
   hasAnyPublishRequest: () => boolean;
+  hasSuccessfulScheduleTransport: () => boolean;
   hasConfirmedScheduleRequest: () => boolean;
   getReservationId: () => string | null;
   getRecentEvents: () => string[];
@@ -55,6 +56,7 @@ export function createScheduleSubmissionTracker(
   const cancelPending = new Set<() => void>();
   let stopped = false;
   let hasRequest = false;
+  let successfulScheduleTransport = false;
   let reservationId: string | null = null;
   const pushEvent = (entry: Record<string, unknown>) => {
     if (stopped) return;
@@ -80,6 +82,13 @@ export function createScheduleSubmissionTracker(
     if (stopped || !observedRequests.has(request) || responsesSeen.has(request)) return;
     responsesSeen.add(request);
     const input = { url: response.url(), postData: request.postData() || "", status: response.status(), targetYmd };
+    const transportSignal = inspectNaverScheduleSubmissionSignal(input);
+    if (
+      transportSignal.relevant &&
+      transportSignal.successfulResponse &&
+      transportSignal.hasScheduleMode &&
+      transportSignal.hasTargetDate
+    ) successfulScheduleTransport = true;
     const base = { event: "response", operation: endpointKind(input.url), http: input.status };
     pushEvent({ ...base, body: "pending" });
     if (cancelPending.size >= 8) {
@@ -152,6 +161,7 @@ export function createScheduleSubmissionTracker(
       for (const cancel of cancelPending) cancel();
     },
     hasAnyPublishRequest: () => hasRequest,
+    hasSuccessfulScheduleTransport: () => successfulScheduleTransport,
     hasConfirmedScheduleRequest: () => Boolean(reservationId),
     getReservationId: () => reservationId,
     getRecentEvents: () => [...recentEvents],

@@ -8,6 +8,7 @@ import { reconcileBrandPostImageContinuity } from "../src/lib/brand-post-image-c
 import { isDraftEditorialQualityPassed } from "../src/lib/brand-post-quality-display";
 import { parseNaverPublishedUrl } from "../src/lib/naver-published-url";
 import { readPublishAttempt, updatePublishAttempt, interruptedPublishStatus, publicationMaterialHash } from "../src/lib/publish-attempt";
+import { verifyReservedPostInNaverList } from "./lib/naver-schedule-list-verifier";
 /**
  * 심플 에이전트 - 단순하게 동작하는 버전
  * 한 단계씩 확인하며 진행
@@ -8128,6 +8129,7 @@ type PublishMode = "now" | "schedule";
 
 interface PublishExecutionOptions {
   mode: PublishMode;
+  expectedTitle?: string | null;
   scheduledDate?: Date | null;
   scheduledTimeLabel?: string | null;
   reservationId?: string | null;
@@ -8794,8 +8796,10 @@ async function verifyScheduleDateApplied(page: Page, scheduledDate: Date): Promi
 async function verifyScheduleSubmission(
   page: Page,
   scheduledDate: Date,
-  tracker?: ScheduleSubmissionTracker
-): Promise<void> {
+  tracker?: ScheduleSubmissionTracker,
+  expectedTitle?: string | null,
+  expectedTimeLabel?: string | null
+): Promise<string> {
   const targetYmd = formatDateYmd(scheduledDate);
 
   // Navigation and success-looking text are not receipts. In particular, page.textContent
@@ -8803,7 +8807,20 @@ async function verifyScheduleSubmission(
   // deadline. Only poll the request tracker, which waits for response bodies with a bound.
   if (await waitForConfirmedScheduleSubmission(tracker)) {
     console.log("      - 목표 날짜가 포함된 예약 요청 성공 확인");
-    return;
+    return tracker?.getReservationId() || "";
+  }
+
+  if (tracker?.hasSuccessfulScheduleTransport() && expectedTitle && NAVER_BLOG_ID) {
+    const listEvidence = await verifyReservedPostInNaverList(page, {
+      blogId: NAVER_BLOG_ID,
+      expectedTitle,
+      targetYmd,
+      expectedTimeLabel,
+    });
+    if (listEvidence) {
+      console.log("      - 네이버 예약 목록의 제목·날짜·예약 식별자 교차 확인");
+      return listEvidence.reservationId;
+    }
   }
 
   const recentEvents = tracker?.getRecentEvents() ?? [];
@@ -9625,8 +9642,13 @@ async function step7_publish(
 
     console.log(`   🎉 최종 ${mode === "schedule" ? "예약 " : ""}발행 클릭!`);
     if (mode === "schedule" && options.scheduledDate) {
-      await verifyScheduleSubmission(page, options.scheduledDate, scheduleTracker ?? undefined);
-      options.reservationId = scheduleTracker?.getReservationId() || null;
+      options.reservationId = await verifyScheduleSubmission(
+        page,
+        options.scheduledDate,
+        scheduleTracker ?? undefined,
+        options.expectedTitle,
+        options.scheduledTimeLabel
+      );
       console.log("   ✅ 예약 발행 제출 검증 완료");
     }
     await page.waitForTimeout(5000);
@@ -10787,6 +10809,7 @@ async function main() {
     // STEP 7: 발행
     const publishOptions: PublishExecutionOptions = {
       mode: runtimePublishOptions.mode,
+      expectedTitle: post.title,
       scheduledDate: runtimePublishOptions.scheduledDate,
       beforeSubmit: async () => {
         const current = await prisma.brandLink.findUnique({ where: { id: linkId }, select: { status: true } });
