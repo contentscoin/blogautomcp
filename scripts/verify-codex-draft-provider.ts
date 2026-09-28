@@ -69,7 +69,8 @@ assert.equal(classifyPrepareFailure(codedProviderFailure), "CODEX_MODEL_INCOMPAT
 assert.equal(classifyPrepareFailure(new Error("outer", { cause: Object.assign(new Error("inner"), { code: "CODEX_AUTH_REQUIRED" }) })), "CODEX_AUTH_REQUIRED",
   "a provider code must survive nested error causes until result.json");
 assert.match(agentSource, /CODEX_DRAFT_MODEL = CODEX_TEXT_MODEL/u);
-assert.equal(draftRuntimePolicy.CODEX_DRAFT_MODEL, "default");
+assert.equal(draftRuntimePolicy.CODEX_DRAFT_MODEL, "gpt-6-luna");
+assert.equal(draftRuntimePolicy.CHATGPT_BROWSER_MODEL, "default");
 assert.equal("OPENAI_TEXT_MODEL" in draftRuntimePolicy, false);
 assert.equal(draftRuntimePolicy.CODEX_DRAFT_REASONING_EFFORT, "low");
 // 1.3.8 부터 섹션 문장 수는 공유 필수 작성 계약(writing-prompt-contract)이 정하고 Codex 프롬프트는 그 계약을 참조한다.
@@ -166,7 +167,7 @@ verifyRetryPolicy().then(() => {
     bundledCodex: getBundledCodexEntrypoint(),
     bundledNativeCodex: getBundledCodexExecutable(),
     localStatus: readCodexLocalStatus(),
-    safety: ["read-only", "network-disabled", "travel-web-search-cached", "approval-never", "chatgpt-account-default-model", "bounded-same-codex-retry", "browser-fallback-disabled"],
+    safety: ["read-only", "network-disabled", "travel-web-search-cached", "approval-never", "codex-gpt-6-luna-low", "chatgpt-browser-default", "astra-forbidden", "bounded-same-codex-retry", "browser-fallback-disabled"],
   }, null, 2));
 }).catch((error) => {
   console.error(error);

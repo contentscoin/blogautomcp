@@ -1,5 +1,10 @@
 # 2026-09-28 ChatGPT 계정 Codex 기본 모델 전환 (1.3.92)
 
+> 후속 정책으로 대체됨: Codex는 `gpt-6-luna`/`low`로 고정하고,
+> ChatGPT 브라우저만 `default`를 사용한다. `gpt-6-astra`는 금지한다.
+> 현재 정본은 `scripts/lib/draft-runtime-policy.json`과
+> `scripts/lib/text-model-policy.ts`이다.
+
 ## 원인과 수정
 
 원고 작성 경로는 ChatGPT 계정으로 인증된 Codex SDK를 사용하면서 `gpt-6-luna`를 강제로 전달했다. 해당 인증 경로가 이 모델 이름을 지원하지 않아 STEP2가 HTTP 400 `invalid_request_error`로 중단됐다. 인증 방식과 호환되지 않는 모델 고정이 직접 원인이었다.

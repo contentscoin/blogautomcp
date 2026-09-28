@@ -3,7 +3,13 @@ import fs from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
 import policy from "./lib/draft-runtime-policy.json";
-import { CODEX_TEXT_MODEL, resolveCodexTextModel, resolveTextReasoningEffort } from "./lib/text-model-policy";
+import {
+  CHATGPT_BROWSER_MODEL,
+  CODEX_TEXT_MODEL,
+  resolveChatGptBrowserModel,
+  resolveCodexTextModel,
+  resolveTextReasoningEffort,
+} from "./lib/text-model-policy";
 import { buildHumanizeSectionsPrompt, parseHumanizeSections } from "./lib/humanize-response-contract";
 
 function functionsFrom(file: string, names: string[], bindings: Record<string, unknown>) {
@@ -21,15 +27,26 @@ function functionsFrom(file: string, names: string[], bindings: Record<string, u
 
 async function main() {
   assert.equal(policy.AI_PROVIDER, "codex");
-  assert.equal(policy.CODEX_DRAFT_MODEL, "default");
+  assert.equal(policy.CODEX_DRAFT_MODEL, "gpt-6-luna");
+  assert.equal(policy.CHATGPT_BROWSER_MODEL, "default");
   assert.equal("OPENAI_TEXT_MODEL" in policy, false);
-  assert.equal(CODEX_TEXT_MODEL, undefined);
-  for (const value of [undefined, "", "   ", "default"]) assert.equal(resolveCodexTextModel(value), undefined);
-  for (const value of ["gpt-6-luna", "gpt-5.5", "gpt-4o-mini"]) {
+  assert.equal(CODEX_TEXT_MODEL, "gpt-6-luna");
+  assert.equal(CHATGPT_BROWSER_MODEL, "default");
+  for (const value of [undefined, "", "   ", "default", "gpt-6-luna"]) {
+    assert.equal(resolveCodexTextModel(value), "gpt-6-luna");
+  }
+  for (const value of ["gpt-6-astra", "gpt-5.5", "gpt-4o-mini"]) {
     assert.throws(() => resolveCodexTextModel(value), /TEXT_MODEL_POLICY/);
   }
+  for (const value of [undefined, "", "   ", "default"]) assert.equal(resolveChatGptBrowserModel(value), "default");
+  for (const value of ["gpt-6-astra", "gpt-6-luna", "gpt-5.5"]) {
+    assert.throws(() => resolveChatGptBrowserModel(value), /TEXT_MODEL_POLICY/);
+  }
   assert.equal(resolveTextReasoningEffort(), "low");
-  assert.throws(() => resolveTextReasoningEffort("ultra"), /TEXT_MODEL_POLICY/);
+  assert.equal(resolveTextReasoningEffort("low"), "low");
+  for (const value of ["medium", "high", "xhigh", "max", "ultra"]) {
+    assert.throws(() => resolveTextReasoningEffort(value), /TEXT_MODEL_POLICY/);
+  }
 
   const runtimeFiles = [
     "scripts/simple-agent.ts",
@@ -54,13 +71,13 @@ async function main() {
     CODEX_DRAFT_REASONING_EFFORT: "low",
     runCodexDraft: async (options: Record<string, unknown>) => {
       codexCalls += 1;
-      assert.equal(options.model, undefined);
-      return "account-default";
+      assert.equal(options.model, "gpt-6-luna");
+      return "luna";
     },
     getErrorMessage: (error: Error) => error.message,
     codexDraftTerminalFailureCode: () => null,
   });
-  assert.equal(await generate.generateWithAI("sys", "user"), "account-default");
+  assert.equal(await generate.generateWithAI("sys", "user"), "luna");
   assert.equal(codexCalls, 1);
 
   const sections = ["소제목\n첫 문단", "다음 문단\n끝"];
@@ -102,7 +119,7 @@ async function main() {
   assert.equal((await route.runCodex("test")).exitCode, 0);
   assert.equal(finished, 1);
 
-  console.log("PASS: ChatGPT-account Codex default is the only text/vision model route; API model paths are absent");
+  console.log("PASS: Codex is pinned to GPT-6 Luna/low, ChatGPT browser is default-only, Astra and API model paths are blocked");
 }
 
 void main().catch((error) => {

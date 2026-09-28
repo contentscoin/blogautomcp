@@ -77,6 +77,7 @@ async function main(): Promise<void> {
   assert.equal(enabledEnv.BROWSER_GPT_MODE, "true");
   assert.equal(enabledEnv.ALLOW_CHATGPT_BROWSER_MODE, "true");
   assert.equal(enabledEnv.CHATGPT_BASE_URL, "https://chatgpt.com/");
+  assert.equal(enabledEnv.CHATGPT_BROWSER_MODEL, "default");
   assert.equal(enabledEnv.CHATGPT_RUN_ISOLATED_CONTEXT, "false");
   assert.equal(enabledEnv.CHATGPT_BROWSER_VISIBILITY, "background");
   for (const runtimePath of [

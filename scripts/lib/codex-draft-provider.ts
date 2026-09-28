@@ -278,10 +278,8 @@ export async function runCodexDraft(options: CodexDraftOptions): Promise<string>
     options.onProgress?.(`Codex 원고 작성 시작${images.length ? ` · 이미지 ${images.length}장` : ""}`);
     return await runCodexDraftWithRetry(async () => {
       const thread = codex.startThread({
-        // Auxiliary callers (including photo review) must not inherit the user's
-        // desktop model. Omitting model lets ChatGPT-account authentication choose
-        // a supported Codex default instead of sending an API-only model name.
-        ...(model ? { model } : {}),
+        // Every Codex writer, reviewer and vision helper uses the same approved model.
+        model,
         modelReasoningEffort: reasoningEffort,
         sandboxMode: "read-only",
         workingDirectory,

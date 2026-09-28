@@ -8,7 +8,7 @@ export interface CodexTextOptions {
   timeoutMs?: number;
 }
 
-/** All model-backed text and vision work uses the signed-in ChatGPT Codex account. */
+/** All Codex text and vision work uses the signed-in account with GPT-6 Luna/low. */
 export async function codexText(options: CodexTextOptions): Promise<string> {
   return runCodexDraft({
     systemPrompt: options.system || "요청을 정확히 수행하세요.",

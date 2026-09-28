@@ -3,6 +3,8 @@
 2026-09-03 사용자 요청: Codex, Codex 작성 true, gpt-5.5, 웹 자동작성 true, 섹션 이미지 자동생성 true를 기본 고정하고 선택 UI를 제거한다.
 
 - 2026-09-24 변경: 모델을 `gpt-6-luna`, reasoning effort를 `low`로 고정했다(`CODEX_DRAFT_REASONING_EFFORT`). `.env`로 더 높은 effort를 지정할 수 없다.
+- 2026-09-28 정책 명확화: Codex의 원고·분석·OCR·이미지 검수·이미지 생성 제어는 `gpt-6-luna`와 `low`만 허용한다. `gpt-6-astra`와 다른 Codex 모델, `medium` 이상의 effort는 실행 전에 거부한다.
+- ChatGPT 브라우저 자동화는 일반 `https://chatgpt.com/` 새 대화의 `default` 모델만 사용한다. 특정 모델이나 커스텀 GPT를 선택하지 않는다.
 - 공통 정책: `scripts/lib/draft-runtime-policy.json`.
 - Electron 시작 시 이전 사용자 설정보다 정책을 우선 적용한다. 설정 API도 오래된 UI의 비활성화 요청을 무시하고 고정값을 저장한다. API 키·블로그 ID 등 별도 사용자 값은 보존한다.
 - 설정 화면의 공급자·Codex 활성화·모델·웹 자동작성·섹션 이미지 선택 필드 및 메인 화면의 웹 자동작성 스위치를 제거한다.

@@ -29,7 +29,7 @@ export async function generateStructured<T>(request: StructuredRequest): Promise
   });
   return {
     json: extractJsonObject<T>(text),
-    model: "chatgpt-account-default",
+    model: "gpt-6-luna",
     usedSchema: true,
   };
 }

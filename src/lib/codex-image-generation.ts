@@ -213,7 +213,7 @@ async function generateOnce(
   try {
     const model = resolveCodexTextModel();
     const thread = codex.startThread({
-      ...(model ? { model } : {}),
+      model,
       modelReasoningEffort: resolveTextReasoningEffort(),
       sandboxMode: "workspace-write",
       workingDirectory: workspace,

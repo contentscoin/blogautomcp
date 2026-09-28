@@ -1,12 +1,13 @@
 # Automated text and vision model policy
 
 The existing `scripts/lib/draft-runtime-policy.json` is the source of the
-`gpt-6-luna` model ID and the fixed `low` reasoning effort. `scripts/lib/text-model-policy.ts` applies it to API writing,
+`gpt-6-luna` Codex model ID, the fixed `low` reasoning effort and the ChatGPT browser `default` policy. `scripts/lib/text-model-policy.ts` applies the Codex policy to
 style analysis, reviews, image understanding/QC, structured PostSpec output,
 humanizing, Codex SDK writing/photo review, and both topic candidate/editorial callers.
 Legacy `OPENAI_MODEL`, `OPENAI_VISION_MODEL`, and `TOPIC_PIPELINE_OPENAI_MODEL`
 environment values no longer change the model. Explicit conflicting model
-arguments fail before provider execution. There is no smaller-model fallback.
+arguments fail before provider execution. `gpt-6-astra` is explicitly forbidden.
+There is no smaller-model fallback.
 
 ## Request compatibility evidence (2026-09-24)
 
@@ -20,27 +21,20 @@ arguments fail before provider execution. There is no smaller-model fallback.
   `max_completion_tokens` as including reasoning and visible tokens; `max_tokens`
   is deprecated. The installed Codex SDK declares a string `model` option and
   forwards it as CLI `--model`.
-- API requests omit `temperature` and `max_tokens` and always send
-  `reasoning_effort: low`. Small targets (up to 1024, including QC 600 and
-  title 400) add 1024 reasoning tokens to the total cap; longer targets add
-  4096, bounded by 128K. This is headroom, not a guarantee of visible output;
-  truncated output is rejected.
-- Codex SDK requests use the policy effort (`low`) by default. Unsupported SDK
+- Codex SDK requests always send `model: gpt-6-luna` and
+  `modelReasoningEffort: low`. `medium`, `high`, `xhigh`, `max` and unknown
   effort overrides fail before starting the provider.
 
 ## Browser and external generation boundaries
 
-A ChatGPT browser session does not reliably attest the selected model. The
-automated simple-agent and topic-agent writing calls now use the pinned Codex
-provider; Codex errors do not fall back to browser writing. Topic structured
-browser fallback executes on pinned Codex as well. The remote topic-craft text
-candidate call, whose server model cannot be verified here, now produces the
-same candidate envelope through pinned Codex using supplied source summaries.
+A ChatGPT browser session opens only `https://chatgpt.com/` and uses the normal
+`default` model selection. It never selects a named model or custom GPT. The
+automated simple-agent and topic-agent writing calls use the pinned Codex
+provider; Codex errors do not switch to another text model.
 
-Browser image generation and OpenAI image models are unchanged. Manual ChatGPT
-handoffs, UI session status, and external user-written drafts cannot guarantee
-GPT-6 Luna and are not covered by this automated request policy. Legacy browser
-writing helpers remain in simple-agent but have no automatic writing callers.
+Browser image generation keeps ChatGPT `default`. Manual ChatGPT handoffs and
+external user-written drafts follow the same general-chat URL. Codex-only work
+remains pinned to GPT-6 Luna/low.
 
 Both former topic CLI callers now use the shared `runCodexDraft` SDK provider:
 bundled runtime resolution, read-only sandbox, approval never, network disabled,

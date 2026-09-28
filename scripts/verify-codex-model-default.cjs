@@ -11,16 +11,20 @@ vm.runInNewContext(code,{exports:moduleObj.exports,require:s=>s.startsWith('.')?
 (async()=>{
   for(const model of [undefined,'','   ','default']) {
     const result=await moduleObj.exports.runCodexDraft({systemPrompt:'check',userPrompt:'check',model});
-    assert.equal(Object.hasOwn(captured,'model'),false,'ChatGPT-account Codex must omit the model field');
+    assert.equal(captured.model,'gpt-6-luna','Codex must pin every default request to GPT-6 Luna');
     assert.equal(captured.modelReasoningEffort,'low','blank effort resolves to the fixed low policy');
     assert.equal(result,'{"productPhoto":true}');
     assert.equal(captured.sandboxMode,'read-only');
   }
+  await moduleObj.exports.runCodexDraft({systemPrompt:'check',userPrompt:'check',model:'gpt-6-luna',reasoningEffort:'low'});
+  assert.equal(captured.model,'gpt-6-luna');
   captured=undefined;
-  await assert.rejects(moduleObj.exports.runCodexDraft({systemPrompt:'check',userPrompt:'check',model:'gpt-6-luna'}), /TEXT_MODEL_POLICY/);
+  await assert.rejects(moduleObj.exports.runCodexDraft({systemPrompt:'check',userPrompt:'check',model:'gpt-6-astra'}), /사용 금지 모델|TEXT_MODEL_POLICY/);
   await assert.rejects(moduleObj.exports.runCodexDraft({systemPrompt:'check',userPrompt:'check',model:'gpt-4o-mini'}), /TEXT_MODEL_POLICY/);
   await assert.rejects(moduleObj.exports.runCodexDraft({systemPrompt:'check',userPrompt:'check',model:'gpt-5.5'}), /TEXT_MODEL_POLICY/);
-  await assert.rejects(moduleObj.exports.runCodexDraft({systemPrompt:'check',userPrompt:'check',reasoningEffort:'ultra'}), /TEXT_MODEL_POLICY/);
+  for(const effort of ['medium','high','xhigh','max','ultra']) {
+    await assert.rejects(moduleObj.exports.runCodexDraft({systemPrompt:'check',userPrompt:'check',reasoningEffort:effort}), /TEXT_MODEL_POLICY/);
+  }
   assert.equal(captured,undefined,'invalid model/effort must fail before starting a thread');
-  console.log('PASS: ChatGPT-account Codex default model; every explicit model and unsupported effort rejected before execution');
+  console.log('PASS: Codex GPT-6 Luna/low pin; Astra, other models and higher effort rejected before execution');
 })().catch(e=>{console.error(e);process.exitCode=1});

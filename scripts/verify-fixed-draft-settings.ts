@@ -51,6 +51,7 @@ async function main() {
     assert.equal(content.includes("UNAUTHORIZED_KEY"), false);
     assert.equal(isChatGptBrowserAutomationEnabled(legacy), true);
     assert.equal(buildChatGptBrowserAutomationEnv(false).BROWSER_GPT_MODE, "false", "Codex routing must not be preempted by web mode");
+    assert.equal(buildChatGptBrowserAutomationEnv(false).CHATGPT_BROWSER_MODEL, "default");
 
     // Execute the real desktop bootstrap with legacy settings, without launching Electron.
     const source = fs.readFileSync("scripts/electron/main.cjs", "utf8").replace(/\r\n/g, "\n");

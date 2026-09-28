@@ -96,10 +96,10 @@ try {
   }
 
   $readiness = $null
-  Wait-Until -TimeoutSeconds 120 -FailureMessage "패키지 앱이 $detectedVersion 업데이트를 감지하지 못했습니다." -Condition {
+  Wait-Until -TimeoutSeconds 120 -FailureMessage "패키지 앱이 $detectedVersion 업데이트를 내려받고 유휴 상태가 되지 못했습니다." -Condition {
     try {
       $script:readiness = Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:$AppPort/api/system/update-readiness" -TimeoutSec 3
-      return $script:readiness.success -and $script:readiness.data.update.status -eq 'downloaded' -and $script:readiness.data.update.version -eq $detectedVersion
+      return $script:readiness.success -and $script:readiness.data.ready -and $script:readiness.data.update.status -eq 'downloaded' -and $script:readiness.data.update.version -eq $detectedVersion
     } catch {
       return $false
     }

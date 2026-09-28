@@ -5,6 +5,7 @@ import {
   getChatgptSessionFile,
 } from "../../scripts/lib/app-paths";
 import { resolveChatGptBrowserVisibility } from "../../scripts/lib/chatgpt-browser-visibility";
+import { resolveChatGptBrowserModel } from "../../scripts/lib/text-model-policy";
 import {
   CHATGPT_BROWSER_AUTH_REQUIRED_CODE,
   CHATGPT_BROWSER_UNREACHABLE_CODE,
@@ -47,6 +48,7 @@ export function buildChatGptBrowserAutomationEnv(
     BROWSER_GPT_MODE: value,
     ALLOW_CHATGPT_BROWSER_MODE: value,
     CHATGPT_BASE_URL: "https://chatgpt.com/",
+    CHATGPT_BROWSER_MODEL: resolveChatGptBrowserModel(),
     CHATGPT_RUN_ISOLATED_CONTEXT: "false",
     CHATGPT_BROWSER_VISIBILITY: resolveChatGptBrowserVisibility(env),
   };

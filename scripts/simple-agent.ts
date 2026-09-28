@@ -243,7 +243,7 @@ chromium.use(StealthPlugin());
 
 const prisma = new PrismaClient();
 
-// Text generation uses only the signed-in ChatGPT Codex account.
+// Codex text, vision and review work is pinned to GPT-6 Luna/low.
 const AI_PROVIDER = "codex" as const;
 const CODEX_DRAFT_MODEL = CODEX_TEXT_MODEL;
 const writingTimeoutPolicy = getWritingTimeoutPolicy();
@@ -4826,7 +4826,7 @@ async function generateWithAI(
   outputSchema?: unknown,
 ): Promise<string> {
   if (BROWSER_GPT_MODE) {
-    console.log("   ✦ 브라우저 모델을 확인할 수 없어 ChatGPT 계정의 Codex 기본 모델로 작성합니다.");
+    console.log("   ✦ 자동 원고는 Codex GPT-6 Luna(low) 고정 정책으로 작성합니다.");
   }
 
   try {
