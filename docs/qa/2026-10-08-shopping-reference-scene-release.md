@@ -22,6 +22,8 @@
 - 변경된 CI 린트 대상(PC 24개·Sites 2개 파일): PASS.
 - Windows 설치 패키지 검사: PASS. ASAR 16,622개 항목을 확인하고 핵심 모듈 8개의 소스·패키지·unpacked 해시 일치를 확인했습니다. 금지된 환경 파일·사용자 데이터 경로는 없었으며, 앱 텍스트 785개에서 실제 환경 비밀값 노출이 없었습니다.
 - Windows 설치 파일·blockmap·manifest 무결성 검사: PASS. 설치 파일 크기와 SHA-512가 manifest와 일치합니다. 첫 패키징에서 일시적 파일 읽기 오류가 발생했지만 원본 파일의 반복 읽기·해시를 확인한 뒤 동일 빌드의 패키징 재시도가 성공했습니다.
+- CI와 동일한 단위 검사 명령 25개를 로컬에서 순서대로 실행: 25/25 PASS.
+- 최초 GitHub CI(`37648078771`)에서는 `test:brand-post-quality`의 이전 이미지 8장·배경 전용 프롬프트 기대값이 새 전략과 충돌했습니다. 해당 회귀 테스트만 5장·실제 상품 참조 연출 조건으로 보정하고 전체 단위 검사를 통과했습니다. 런타임은 변경하지 않았으며, 핵심 모듈 8개의 해시가 게시한 설치본과 계속 일치함을 확인했습니다.
 
 위 결과는 로컬 코드·모의 전송·오프라인 검증입니다. 이번 릴리스에서 유료 이미지 생성이나 실제 네이버 게시를 검증했다는 의미가 아닙니다.
 
@@ -35,7 +37,8 @@
 - 설치 파일: `BrandConnect-Automation-Setup-1.3.96.exe`, 345,138,554 bytes.
 - 설치 파일 SHA-256: `b1923d792f0ba5b0488025b610d17a80be3f80bbc0183768a100b348f3521530`.
 - Blockmap: 352,377 bytes, SHA-256 `0380ac352b2c954ea5ee9a96116ee9ec86b3434e81bb8f06646e0b028a8dc1c8`.
+- GitHub [v1.3.96 릴리스](https://github.com/contentscoin/blogautomcp/releases/tag/v1.3.96): 게시 완료. 태그는 `bbef9fbe67b84296fb61e85f16fe1dd3df019c88`을 가리킵니다. 업로드한 설치 파일·blockmap·manifest 3개의 GitHub SHA-256·크기가 로컬 검증본과 일치했습니다.
 - 연결 PC의 실제 설치 완료는 확인하지 않았습니다. 공개 업데이트 피드는 기기 인증이 필요하며, 위 게시 확인에는 전용 관리자 인증 경로를 사용했습니다.
 - Windows 업데이트는 기존 운영 사이트의 전용 업로드 인증 경로를 사용할 수 있습니다. 이 권한은 Sites 소스 배포 권한과 별개입니다.
 
-로컬 패키징 검증 결과는 `out/release-1.3.96/package-verification.json`, 중앙 게시 후 검증 결과는 `out/release-1.3.96/central-publication-verification.json`에 보관했습니다.
+로컬 패키징 검증 결과는 `out/release-1.3.96/package-verification.json`, 중앙 게시 후 검증 결과는 `out/release-1.3.96/central-publication-verification.json`, GitHub 산출물 검증은 `out/release-1.3.96/github-asset-verification.json`, CI 단위 검사 로그는 `out/ci-unit-checks-1.3.96/`에 보관했습니다.

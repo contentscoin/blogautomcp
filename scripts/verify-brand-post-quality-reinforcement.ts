@@ -414,7 +414,7 @@ assert.equal(
   "쇼핑 발행 품질 사유에 여행 전용 역할명이 노출되면 안 됩니다.",
 );
 assert.equal(SHOPPING_POST_CONTRACT_V1.targetImages.min, 5);
-assert.equal(SHOPPING_POST_CONTRACT_V1.targetImages.recommended, 8);
+assert.equal(SHOPPING_POST_CONTRACT_V1.targetImages.recommended, 5);
 assert.equal(TRAVEL_POST_CONTRACT_V1.targetImages.min, 7);
 assert.equal(TRAVEL_POST_CONTRACT_V1.targetImages.recommended, 10);
 
@@ -425,8 +425,12 @@ const shoppingPrompt = buildBrandPostImagePrompt({
   imageIntent: "여름 책상 위 사용 장면",
   role: "body",
 });
-assert.match(shoppingPrompt, /environment only/u);
-assert.match(shoppingPrompt, /Do not draw, imitate, redesign, recolor/u);
+assert.match(shoppingPrompt, /product scene using the attached seller reference/u);
+assert.match(shoppingPrompt, /INPUT 1 is authoritative for product identity, front-facing geometry, proportions, color and original printing/u);
+assert.match(shoppingPrompt, /Preserve the reference's actual height-to-width ratio and front-facing silhouette/u);
+assert.match(shoppingPrompt, /Preserve the original label hierarchy/u);
+assert.match(shoppingPrompt, /AI illustrative scene, not actual use/u);
+assert.doesNotMatch(shoppingPrompt, /Generate the environment only|Use a distinct viewpoint/u);
 assert.doesNotMatch(shoppingPrompt, /must generate (?:nine|eighteen)|18 images/iu);
 
 const travelPrompt = buildBrandPostImagePrompt({
