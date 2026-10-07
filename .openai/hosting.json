@@ -1,3 +1,6 @@
 {
-  "project_id": "appgprj_6a8ee59a97b4819199c3ba961436581c"
+  "project_id": "appgprj_6a8ee59a97b4819199c3ba961436581c",
+  "d1": "DB",
+  "r2": "INSTALLERS",
+  "capabilities": ["mcp"]
 }

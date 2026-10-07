@@ -49,6 +49,7 @@ jobs:
         run: |
           npm run test:connect-detection
           npm run test:material-regression
+          npm run test:failed-material-rewrite
           npm run test:connect-store
           npm run test:title-rules
           npm run test:post-spec
@@ -104,3 +105,6 @@ jobs:
 
       - name: Lint
         run: npm run lint
+
+      - name: Sites regression checks
+        run: node --test tests/*.test.cjs

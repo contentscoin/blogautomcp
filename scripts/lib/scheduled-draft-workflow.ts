@@ -235,13 +235,29 @@ export function isSeverelyFailingDraft(readiness: BrandLinkContentReadiness | nu
 }
 
 // Stage 1. Repairs are bounded and only take place while preparing materials.
-export async function runMaterialPreparation(id: string, deps: WorkflowDeps = defaults) {
+export async function runMaterialPreparation(id: string, deps: WorkflowDeps = defaults, options: {
+  rewriteFailed?: boolean;
+  beforeRewrite?: () => Promise<void>;
+} = {}) {
   const base = `/api/brandlinks/${encodeURIComponent(id)}`;
   const check = bounded(deps, 90 * 60_000);
+  let rewritePrepared = false;
+  const ensureRewritePrepared = async () => {
+    if (!options.rewriteFailed || rewritePrepared) return;
+    await options.beforeRewrite?.();
+    // Failed snapshots must not count as successful preparation. Later text
+    // mutation paths share this marker only after the callback succeeds.
+    rewritePrepared = true;
+  };
   deps.onStage?.("저장 소재 확인");
   let draft = await deps.call(`${base}/draft`, "GET");
   const reusedSavedDraft = Boolean(draft.data);
   if (!draft.data) {
+    if (options.rewriteFailed) {
+      deps.onStage?.("실패 원고의 최신 상품 근거 수집");
+      await deps.call(`${base}/draft`, "POST", { action: "prepare_context" });
+      await ensureRewritePrepared();
+    }
     deps.onStage?.("원고·기본 이미지 작성");
     // New and existing materials converge through the same saved-draft repair
     // engine below. Avoid spending a separate hidden repair budget during POST.
@@ -300,6 +316,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
       throw Object.assign(new Error(`원고 재작성 대상이 아닙니다: ${plan.reason}`), { code: "CONTENT_BLOCKED" });
     }
     check();
+    await ensureRewritePrepared();
     revised = true;
     deps.onStage?.("근거 기반 원고 자동 보강 (최대 3회 후보 검수)");
     const targets = formatQualityConvergenceInstructions(plan);
@@ -340,7 +357,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
   let plan = await recheck();
   // A saved draft from an older run that fails most quality categories converges poorly by
   // section patches. Write it once from scratch with the current writer, then continue as usual.
-  if (reusedSavedDraft && isSeverelyFailingDraft(previousReadiness) && !["complete", "refresh-source"].includes(plan.action)) {
+  if (!options.rewriteFailed && reusedSavedDraft && isSeverelyFailingDraft(previousReadiness) && !["complete", "refresh-source"].includes(plan.action)) {
     check();
     deps.onStage?.("오래된 원고 품질 미달 · 현재 기준으로 새로 작성");
     draft = await deps.call(`${base}/draft`, "POST", { autoApprove: false, autoSectionImages: false, autoQualityRepair: false });
@@ -351,6 +368,21 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
   if (plan.action === "refresh-source") {
     plan = await refreshSource();
     if (plan.action === "refresh-source") throw sourceEvidenceError(plan);
+  }
+  // Failed-writing recovery writes once from current facts. A passing manuscript
+  // with missing images follows the normal image repair path without rewriting.
+  if (options.rewriteFailed && reusedSavedDraft && ["repair-text", "stop"].includes(plan.action)) {
+    if (!sourceRefreshAttempted) plan = await refreshSource();
+    if (plan.action === "refresh-source") throw sourceEvidenceError(plan);
+    if (["repair-text", "stop"].includes(plan.action)) {
+      check();
+      await ensureRewritePrepared();
+      deps.onStage?.("기존 원고 백업 완료 · 최신 근거로 한 번 재작성");
+      draft = await deps.call(`${base}/draft`, "POST", { autoApprove: false, autoSectionImages: false, autoQualityRepair: false });
+      await waitForImagesIdle();
+      previousReadiness = null;
+      plan = await recheck();
+    }
   }
   // The manuscript and verified source binding are independently repairable.
   // When text repair cannot close, still place reviewed seller originals so the

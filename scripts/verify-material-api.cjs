@@ -33,7 +33,7 @@ const json = (body, options = {}) => ({ status: options.status || 200, body: clo
 function harness() {
   const state = { now: '2026-09-07T03:00:00.000Z', authorized: true, updateBlocked: false,
     products: new Map(), manifests: new Map(), jobs: new Map(), runs: [], saves: 0,
-    locks: 0, activities: 0, productReads: 0, countReads: 0, runnerError: null };
+    locks: 0, activities: 0, productReads: 0, countReads: 0, runnerError: null, progress: new Map() };
   class FakeDate extends Date {
     constructor(...args) { super(...(args.length ? args : [state.now])); }
     static now() { return Date.parse(state.now); }
@@ -53,6 +53,12 @@ function harness() {
     },
   });
   const dates = load('src/lib/bulk-schedule-plan.ts', {}, { Date: FakeDate });
+  const failures = load('src/lib/material-failed-candidates.ts', {
+    './db': { prisma: { brandLink: { findMany: async ({ where }) => [...state.products.values()].filter(p => !where || p.connectKind === where.connectKind) } } },
+    './material-library': library,
+    './material-job-store': { listMaterialJobs: () => [...state.jobs.values()].map(clone) },
+    './draft-progress': { readDraftProgress: id => state.progress.get(id) || null },
+  });
   const api = load('src/lib/material-api.ts', {
     'node:crypto': crypto,
     'next/server': { NextResponse: { json } },
@@ -84,6 +90,7 @@ function harness() {
     },
     './material-job-runner': { runMaterialJob: async job => { state.runs.push(clone(job)); if (state.runnerError) throw state.runnerError; } },
     './bulk-schedule-plan': dates,
+    './material-failed-candidates': failures,
   }, { Date: FakeDate });
   function product(index = 0, status = 'READY') {
     const id = `product_${String(index).padStart(4, '0')}`;
@@ -94,7 +101,7 @@ function harness() {
     return { productId: id, revision: library.getMaterial(id).revision };
   }
   function request(body, query = '') { return { nextUrl: new URL(`http://fixture.invalid/api/materials${query}`), json: async () => body }; }
-  return { state, api, product, request, library,
+  return { state, api, product, request, library, failures,
     post: (body, kind = 'publish') => api.materialsPost(request(body), kind),
     async settle() { await new Promise(resolve => setImmediate(resolve)); },
   };
@@ -204,6 +211,86 @@ test('prepare dispatch is a separate job and contains no publication selection o
   assert.equal(response.status, 202); assert.equal(h.state.runs[0].kind, 'prepare');
   assert.equal(h.state.runs[0].publishMode, undefined); assert.equal(h.state.runs[0].items[0].revision, undefined);
   await h.settle();
+});
+
+function failed(h, index = 0, options = {}) {
+  const item = h.product(index, options.productStatus || 'FAILED');
+  if (options.missing) h.state.manifests.delete(item.productId);
+  else h.state.manifests.get(item.productId).approvedAt = null;
+  const id = `failure-${index}`;
+  h.state.jobs.set(id, { jobId: id, kind: options.kind || 'prepare', status: 'failed', ownerPid: 1,
+    startedAt: '2026-09-06T03:00:00.000Z', updatedAt: '2026-09-06T03:10:00.000Z',
+    items: [{ productId: item.productId, status: options.itemStatus || 'failed', stage: '확인 필요', error: '원고 품질 실패', errorCode: options.code || 'CONTENT_BLOCKED' }] });
+  return item;
+}
+
+test('failed candidates include failed writing/missing drafts and exclude ready, published and publish failures', async () => {
+  const h = harness(); const recover = failed(h, 0); const missing = failed(h, 2, { missing: true });
+  h.product(4); failed(h, 6, { kind: 'publish', missing: true });
+  failed(h, 8, { productStatus: 'OUTCOME_UNKNOWN' }); failed(h, 10, { productStatus: 'SCHEDULED' });
+  failed(h, 12, { itemStatus: 'ready' }); failed(h, 14, { code: 'PREPARATION_RESULT_UNCERTAIN' });
+  const response = await h.api.materialsGet(h.request(null));
+  assert.equal(response.body.data.failedCandidateCount, 2);
+  assert.deepEqual(response.body.data.failedCandidates.map(item => item.productId), [recover.productId, missing.productId]);
+  assert.equal(response.body.data.failedCandidates[1].verificationStatus, 'DRAFT_MISSING');
+});
+
+test('entire failed rewrite includes more than fifty targets without truncation and cannot publish', async () => {
+  const h = harness(); for (let i = 0; i < 60; i++) failed(h, i);
+  const response = await h.api.materialsRewriteFailedPost(h.request({ sourceJobId: 'rewrite-all' }));
+  assert.equal(response.status, 202); assert.equal(response.body.data.items.length, 60);
+  assert.equal(response.body.data.acceptedCount, 60); assert.equal(h.state.runs[0].kind, 'rewrite');
+  assert.equal(response.body.data.publishMode, undefined);
+  assert.ok(response.body.data.items.every(item => item.previousErrorCode === 'CONTENT_BLOCKED'));
+  await h.settle(); assert.equal(h.state.locks, 0);
+});
+
+test('rewrite source identity hashes original intent and replays after old targets recover and new failures appear', async () => {
+  const h = harness(); const old = failed(h);
+  const body = { connectKind: 'shopping', sourceJobId: 'recover-once' };
+  const response = await h.api.materialsRewriteFailedPost(h.request(body)); await h.settle();
+  h.state.manifests.get(old.productId).approvedAt = h.state.now;
+  const stored = h.state.jobs.get(response.body.data.jobId); stored.status = 'completed'; stored.items[0].status = 'ready';
+  failed(h, 2);
+  const replay = await h.api.materialsRewriteFailedPost(h.request({ ...body, connectKind: 'SHOPPING' }));
+  assert.equal(replay.status, 200); assert.equal(replay.body.data.jobId, response.body.data.jobId);
+  assert.deepEqual(replay.body.data.items.map(item => item.productId), [old.productId]);
+  assert.equal(h.state.runs.length, 1);
+  const changed = await h.api.materialsRewriteFailedPost(h.request({ ...body, productIds: ['product_0002'] }));
+  assert.equal(changed.status, 409); assert.equal(changed.body.code, 'REQUEST_ID_CONFLICT');
+});
+
+test('rewrite double click cannot start two local jobs', async () => {
+  const h = harness(); failed(h);
+  const requests = await Promise.all([0, 1].map(() => h.api.materialsRewriteFailedPost(h.request({ sourceJobId: 'double-click' }))));
+  assert.ok(requests.some(response => response.status === 202));
+  assert.equal(h.state.runs.length, 1); assert.equal(h.state.saves, 1); await h.settle();
+});
+
+test('rewrite explicitly selected restored/nonfailed products reject before a runner starts', async () => {
+  const h = harness(); const healthy = h.product();
+  const response = await h.api.materialsRewriteFailedPost(h.request({ productIds: [healthy.productId] }));
+  assert.equal(response.status, 409); assert.equal(response.body.code, 'FAILED_MATERIAL_SELECTION_CHANGED'); assertNoDispatch(h);
+});
+
+test('rewrite no-target identity persists a completed empty result rather than selecting later failures on replay', async () => {
+  const h = harness();
+  const initial = await h.api.materialsRewriteFailedPost(h.request({ sourceJobId: 'no-failures' }));
+  assert.equal(initial.status, 200); assert.equal(initial.body.data.acceptedCount, 0);
+  failed(h);
+  const replay = await h.api.materialsRewriteFailedPost(h.request({ sourceJobId: 'no-failures' }));
+  assert.equal(replay.body.data.jobId, initial.body.data.jobId); assert.equal(replay.body.data.items.length, 0);
+  assert.equal(h.state.runs.length, 0); assert.equal(h.state.locks, 0);
+});
+
+test('rewrite authentication, update, malformed ids and busy product gates block mutations', async () => {
+  for (const body of [[], 'unsafe-default-all', { publishMode: 'now' }, { connectKind: 'unknown' }, { productIds: [] }, { productIds: ['../unsafe'] }, { sourceJobId: '' }]) {
+    const h = harness(); assert.equal((await h.api.materialsRewriteFailedPost(h.request(body))).status, 409); assertNoDispatch(h);
+  }
+  const h = harness(); failed(h); h.product(2, 'DRAFTING');
+  assert.equal((await h.api.materialsRewriteFailedPost(h.request({}))).status, 409); assertNoDispatch(h);
+  h.state.authorized = false; assert.equal((await h.api.materialsRewriteFailedPost(h.request({}))).status, 401);
+  h.state.authorized = true; h.state.updateBlocked = true; assert.equal((await h.api.materialsRewriteFailedPost(h.request({}))).status, 423);
 });
 
 test('unexpected runner failure stores only legacy text and safe structured codes', async () => {

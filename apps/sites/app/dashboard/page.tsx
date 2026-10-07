@@ -8,6 +8,8 @@ import { agentJobs, devices, mcpConnections } from '@/db/schema';
 import { DashboardActions } from './dashboard-actions';
 import { WINDOWS_INSTALLER_VERSION } from '@/lib/installer';
 import { readWindowsRelease } from '@/lib/update-release';
+import { FailedMaterialActions } from './failed-material-actions';
+import { parseStatusJson } from '@/lib/jobs';
 
 export const dynamic = 'force-dynamic';
 
@@ -24,6 +26,8 @@ export default async function DashboardPage() {
   ]);
   const approved = account.status === 'APPROVED';
   const online = Boolean(device?.lastSeenAt && Number(clock?.now || 0) - device.lastSeenAt < 90_000);
+  const background = parseStatusJson(device?.statusJson || null)?.backgroundWork as Record<string, unknown> | undefined;
+  const activeWork = jobs.some(job => ['QUEUED', 'RUNNING'].includes(job.status)) || background?.busy === true;
 
   return (
     <main className="app-shell">
@@ -73,6 +77,7 @@ export default async function DashboardPage() {
               <article><span>최근 작업</span><strong>{jobs.length}건</strong><small>대기 {jobs.filter((job) => job.status === 'QUEUED').length} · 실행 {jobs.filter((job) => job.status === 'RUNNING').length}</small></article>
             </section>
             <DashboardActions hasConnection={Boolean(connection)} generation={connection?.generation || 0} />
+            <FailedMaterialActions accountId={account.id} online={online} appVersion={device?.appVersion || null} hasConnection={Boolean(connection)} activeWork={activeWork} />
             <section className="data-card">
               <div className="card-title"><div><span className="card-kicker">JOB LEDGER</span><h2>최근 작업</h2></div><span className={`agent-dot ${online ? 'online' : ''}`}>{online ? 'PC ONLINE' : 'PC OFFLINE'}</span></div>
               {jobs.length ? <div className="job-list">{jobs.map((job) => <div className="job-row" key={job.id}><div><strong>{jobTitle(job.type)}</strong><small>{new Date(job.createdAt).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })} KST</small><details><summary>작업 상세</summary><p>작업번호: {job.id}</p><p>단계: {job.stageMessage || job.stage || '대기'} · {job.progress}%</p>{materialJobId(job.resultJson) && <p>소재 작업번호: {materialJobId(job.resultJson)} · ChatGPT에서 이 번호의 소재 작업 결과를 조회할 수 있습니다.</p>}{job.errorCode && <p>원인: {job.errorCode} · {job.errorMessage}</p>}<p>이 기록은 MCP 하위 요청 상태입니다. 소재 준비·발행의 최종 결과는 같은 소재 작업번호로 확인하세요.</p></details></div><span>{job.connectKind || '—'}</span><b className={`job-status job-${job.status.toLowerCase()}`}>{job.status}</b></div>)}</div> : <p className="empty-copy">아직 전달된 작업이 없습니다. MCP 연결 후 ChatGPT에서 요청해보세요.</p>}
@@ -88,7 +93,7 @@ function statusLabel(status: string) {
   return ({ APPROVED: '승인됨', PENDING_APPROVAL: '승인 대기', REJECTED: '승인 거절', SUSPENDED: '사용 정지' } as Record<string, string>)[status] || status;
 }
 function jobTitle(type: string) {
-  return ({ BRANDCONNECT_LIST_PRODUCTS: '상품 목록 조회', BRANDCONNECT_SYNC_PRODUCTS: '상품 가져오기', POST_CREATE_DRAFT: '초안 근거 준비(구버전)', POST_PREPARE_DRAFT: '초안 근거 준비', POST_SUBMIT_DRAFT: 'ChatGPT 원고 제출', POST_PUBLISH: '즉시 발행', POST_SCHEDULE: '예약 소재 선택 안내', MATERIALS_LIST: '소재·진행 조회', MATERIALS_PREPARE: '소재 준비 접수', MATERIALS_PUBLISH: '선택 소재 발행 접수' } as Record<string, string>)[type] || type;
+  return ({ BRANDCONNECT_LIST_PRODUCTS: '상품 목록 조회', BRANDCONNECT_SYNC_PRODUCTS: '상품 가져오기', POST_CREATE_DRAFT: '초안 근거 준비(구버전)', POST_PREPARE_DRAFT: '초안 근거 준비', POST_SUBMIT_DRAFT: 'ChatGPT 원고 제출', POST_PUBLISH: '즉시 발행', POST_SCHEDULE: '예약 소재 선택 안내', MATERIALS_LIST: '소재·진행 조회', MATERIALS_PREPARE: '소재 준비 접수', MATERIALS_REWRITE_FAILED: '실패 소재 재작성·검증', MATERIALS_PUBLISH: '선택 소재 발행 접수' } as Record<string, string>)[type] || type;
 }
 
 function materialJobId(resultJson: string | null): string | null {

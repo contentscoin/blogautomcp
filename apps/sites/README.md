@@ -63,11 +63,15 @@ pwsh -NoProfile -File scripts/verify-oauth-e2e.ps1 -BaseUrl http://localhost:300
 
 D1 테이블 정의는 `db/schema.ts`, 런타임 안전 초기화는 `db/init.ts`, 배포 마이그레이션은 `drizzle/`에 있습니다. 별도의 PostgreSQL 서버는 필요하지 않습니다.
 
-## MCP 도구 (서버 1.3.11, 27개)
+## MCP 도구 (서버 1.3.12)
 
-`agent_get_status`, `brandconnect_list_categories`, `brandconnect_list_products`, `brandconnect_sync_products`, `post_create_draft`, `post_prepare_draft`, `post_generate_draft_local`, `post_submit_draft`, `post_apply_section_image`, `post_get_draft`, `post_revise_draft`, `post_approve_draft`, `post_set_thumbnail`, `thumbnail_prepare`, `thumbnail_apply_generated`, `blog_profile_get`, `blog_profile_prepare_update`, `blog_profile_apply_update`, `blog_design_get`, `post_publish`, `post_schedule`, `post_bulk_schedule`, `post_verify_published`, `travel_capture_contract`, `settings_get`, `job_get`, `job_cancel`.
+`bug_report_create`, `bug_report_get`, `agent_get_status`, `brandconnect_list_categories`, `brandconnect_list_products`, `brandconnect_sync_products`, `post_create_draft`, `post_prepare_draft`, `post_generate_draft_local`, `post_submit_draft`, `post_apply_section_image`, `post_get_draft`, `post_revise_draft`, `post_approve_draft`, `post_set_thumbnail`, `thumbnail_prepare`, `thumbnail_apply_generated`, `blog_profile_get`, `blog_profile_prepare_update`, `blog_profile_apply_update`, `blog_design_get`, `materials_list`, `materials_prepare`, `materials_rewrite_failed`, `materials_publish`, `post_publish`, `post_schedule`, `post_bulk_schedule`, `post_bulk_publish`, `post_verify_published`, `travel_capture_contract`, `settings_get`, `job_get`, `job_result_read`, `job_cancel`.
 
 - ChatGPT 커넥터는 OAuth 고정 주소(`/api/mcp`)와 MCP URL(`/api/mcp/{credential}`) 두 경로로 연결할 수 있으며 같은 도구를 제공합니다.
+- `materials_rewrite_failed`는 PC 앱 1.3.98 이상에서 실패한 소재 글을 일괄 재작성하고 현재 원고·이미지 품질검사를 통과한 항목만 준비 완료로 저장합니다. `productIds` 생략 시 현재 실패 소재 전체를 선정하며 `connectKind`로 쇼핑·여행을 제한합니다. 준비만 수행하므로 발행 확인이나 예약일을 받지 않습니다. 같은 요청에는 같은 `idempotencyKey`를 유지합니다.
+- `/dashboard`의 **실패 소재 전체 재작성·검증** 버튼은 로그인한 승인 계정의 온라인·유휴 PC에 동일한 큐 작업을 전달합니다. 웹 요청과 MCP 요청은 스키마·멱등성·최소 버전·활성 PC·연결 세대·진행 작업 검사를 공유합니다. 접수 직전 승인 취소, PC 교체, MCP 주소 회전, 동시 다른 작업이 발생하면 조건부 INSERT가 작업 접수를 막습니다.
+- 웹 복구 요청번호와 대상은 계정별 브라우저 저장소에 보관됩니다. 응답을 확인하지 못했거나 페이지를 새로고침해도 같은 대상·키로 재확인하며, 이미 접수한 작업은 같은 작업번호로 조회를 이어갑니다. 브라우저 저장소를 사용할 수 없으면 복구 작업을 시작하지 않습니다.
+- 웹 API는 `POST /api/materials/rewrite-failed`로 접수하고 `GET ?jobId=...`로 본인 작업만 조회합니다. MCP 접수 작업이 성공해도 `workflowPending=true`이면 PC에서 재작성·검증이 계속 중입니다. **최종 소재 결과 조회**는 원래 재작성 작업번호를 기준으로 `PATCH`하여 `MATERIALS_LIST` 읽기 작업을 한 번 접수합니다. GET은 큐 작업을 생성하지 않으며 검증 결과의 준비·실패·중단 개수만 표시합니다. ChatGPT에서는 `workflowJobId`를 `materials_list(jobId)`로 전달해 최종 상태를 확인합니다.
 - 초안은 ChatGPT 가 씁니다. `post_create_draft`(= `post_prepare_draft`, 큐 작업 `POST_PREPARE_DRAFT`)는 PC 에서 상품 사실·상세이미지·하네스·프롬프트만 준비하고, ChatGPT 가 쓴 원고를 `post_submit_draft` 로 제출하면 PC 는 품질검사·저장만 합니다(이미지 생성 없음). 섹션 이미지는 결과 `imageSlots[].imagePrompt` 로 ChatGPT 내장 이미지 생성을 실행해 `post_apply_section_image` 로 붙입니다. 제출은 `contextJobId`의 상품 스냅샷을 고정해 목록 재조회 중 상품명·URL이 바뀌어도 다른 상품 데이터와 섞이지 않습니다.
 - `post_submit_draft` 는 준비 작업 결과에서 상품 스냅샷을 최상위(`snapshot`)와 1.3.10 형태(`context.snapshot`) 양쪽에서 찾고, PC 에는 검증에 필요한 슬림 컨텍스트만 전달합니다.
 - `post_generate_draft_local`(큐 작업 `POST_CREATE_DRAFT`, PC 1.3.10 이상)은 OpenAI 키가 있는 PC 의 전량 생성 경로입니다. `post_apply_section_image`는 여행에 PC 1.3.10 이상, 쇼핑 자연사진에 PC 1.3.97 이상이 필요합니다. 쇼핑은 실제 상품 참조 이미지와 순서가 일치하는 `referenceHashes`를 사용하며 본문 텍스트·정보 카드·프레임·콜라주를 허용하지 않습니다. 구버전 PC의 초안 조회와 기존 승인은 유지하며, 지원 여부는 `agent_get_status.capabilities.shoppingReferenceScenes`로 확인합니다.

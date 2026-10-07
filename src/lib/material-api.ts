@@ -8,6 +8,7 @@ import { getMaterial, validateMaterialSelection } from "./material-library";
 import { acquireMaterialJobLock, listMaterialJobs, materialJobErrorMessage, materialJobFailureCodes, readMaterialJob, saveMaterialJob, type MaterialJob } from "./material-job-store";
 import { runMaterialJob } from "./material-job-runner";
 import { addDaysToYmd, ymdInTimeZone } from "./bulk-schedule-plan";
+import { listFailedMaterialCandidates, normalizeMaterialConnectKind } from "./material-failed-candidates";
 
 type MaterialStatus = "PREPARING" | "BLOCKED" | "READY" | "PUBLISHING" | "SCHEDULED" | "PUBLISHED" | "OUTCOME_UNKNOWN";
 type MaterialProduct = { id: string; productName: string | null; status: string; connectKind: string };
@@ -55,7 +56,10 @@ async function materialJobView(job: MaterialJob): Promise<Record<string, unknown
     return material ? [material] : [];
   });
   const workflowPending = ["running", "queued"].includes(job.status) || materials.some(material => material.materialStatus === "PREPARING");
-  return { ...job, materials, workflowPending };
+  return { ...job, materials, workflowPending, acceptedCount: job.items.length,
+    readyCount: job.items.filter(item => item.status === "ready").length,
+    failedCount: job.items.filter(item => item.status === "failed").length,
+    interruptedCount: job.items.filter(item => item.status === "interrupted").length };
 }
 
 export async function materialsGet(request: NextRequest) {
@@ -81,8 +85,74 @@ export async function materialsGet(request: NextRequest) {
       const material = readMaterialView(product);
       return material ? [material] : [];
     });
-    return NextResponse.json({ success: true, data: { materials, jobs: listMaterialJobs().slice(0, 50) } });
+    const failedCandidates = await listFailedMaterialCandidates(kind === "SHOPPING" || kind === "TRAVEL" ? kind : undefined);
+    return NextResponse.json({ success: true, data: { materials, jobs: listMaterialJobs().slice(0, 50), failedCandidates, failedCandidateCount: failedCandidates.length } });
   } catch (error) { return NextResponse.json({ success: false, error: (error as Error).message }, { status: 400 }); }
+}
+
+/** Failed writing recovery never accepts a publication mode or bypasses final approval. */
+export async function materialsRewriteFailedPost(request: NextRequest, override?: Record<string, unknown>) {
+  const auth = requireAdminApiKey(request); if (auth) return auth;
+  const update = requireNoPendingDesktopUpdate(); if (update) return update;
+  let release: (() => void) | undefined;
+  let finish: (() => void) | undefined;
+  try {
+    const body = override ?? await request.json();
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw Object.assign(new Error("재작성 요청은 JSON 객체여야 합니다."), { code: "INVALID_INPUT" });
+    if (body.publishMode !== undefined || body.materials !== undefined || body.scheduledAt !== undefined) throw Object.assign(new Error("실패 소재 재작성은 검증·준비 작업입니다. 발행 입력을 함께 보낼 수 없습니다."), { code: "INVALID_INPUT" });
+    const connectKind = normalizeMaterialConnectKind(body.connectKind);
+    const requestedIds = body.productIds;
+    if (requestedIds !== undefined && (!Array.isArray(requestedIds) || !requestedIds.length || requestedIds.length > 500 ||
+      requestedIds.some((id: unknown) => typeof id !== "string" || !/^[a-zA-Z0-9_-]{8,80}$/.test(id)) || new Set(requestedIds).size !== requestedIds.length)) {
+      throw Object.assign(new Error("재작성할 실패 상품 ID는 중복 없이 1~500개를 선택하세요. 전체 실패 소재는 productIds를 생략하세요."), { code: "INVALID_INPUT" });
+    }
+    if (body.sourceJobId !== undefined && (typeof body.sourceJobId !== "string" || !body.sourceJobId.trim() || body.sourceJobId.length > 160)) {
+      throw Object.assign(new Error("요청 ID는 1~160자 문자열이어야 합니다."), { code: "INVALID_INPUT" });
+    }
+    const sourceJobId = body.sourceJobId as string | undefined;
+    // Hash the original selection intent, before reading dynamic failed candidates.
+    const requestHash = crypto.createHash("sha256").update(JSON.stringify({ kind: "rewrite", connectKind: connectKind || null,
+      productIds: requestedIds ? [...requestedIds].sort() : null })).digest("hex");
+    const existingRequest = () => {
+      const existing = sourceJobId ? listMaterialJobs().find(job => job.sourceJobId === sourceJobId) : undefined;
+      if (existing && existing.requestHash !== requestHash) throw Object.assign(new Error("같은 요청 ID에 다른 재작성 대상을 보낼 수 없습니다."), { code: "REQUEST_ID_CONFLICT" });
+      return existing;
+    };
+    const existing = existingRequest();
+    if (existing) return NextResponse.json({ success: true, data: await materialJobView(existing) });
+    const jobId = crypto.randomUUID();
+    release = acquireMaterialJobLock(jobId);
+    // A concurrent request may have persisted its identity while we waited for the lock.
+    const lockedExisting = existingRequest();
+    if (lockedExisting) { release(); release = undefined; return NextResponse.json({ success: true, data: await materialJobView(lockedExisting) }); }
+    if (await prisma.brandLink.count({ where: { status: { in: ["PUBLISHING", "DRAFTING"] } } })) throw new Error("현재 실행 중인 작업이 있습니다. 완료 후 실행하세요.");
+    const candidates = await listFailedMaterialCandidates(connectKind);
+    const selected = requestedIds ? candidates.filter(candidate => requestedIds.includes(candidate.productId)) : candidates;
+    if (requestedIds && selected.length !== requestedIds.length) throw Object.assign(new Error("선택 후 복구되었거나 현재 재작성할 수 없는 소재가 있습니다. 실패 목록을 새로 조회하세요."), { code: "FAILED_MATERIAL_SELECTION_CHANGED" });
+    const now = new Date().toISOString();
+    const job: MaterialJob = { jobId, kind: "rewrite", status: selected.length ? "running" : "completed", ownerPid: process.pid,
+      startedAt: now, updatedAt: now, ...(selected.length ? {} : { completedAt: now }), sourceJobId, requestHash, connectKind, events: [],
+      items: selected.map(candidate => ({ productId: candidate.productId, status: "queued", stage: "실패 소재 복구·검증 대기",
+        previousError: candidate.reason, previousErrorCode: candidate.errorCode, verificationStatus: candidate.verificationStatus })),
+    };
+    if (job.items.length) finish = beginAutomaticPublishing("automatic-post");
+    saveMaterialJob(job);
+    if (!job.items.length) { release(); release = undefined; return NextResponse.json({ success: true, data: { ...await materialJobView(job), message: "현재 재작성할 실패 소재가 없습니다." } }); }
+    const unlock = release; const finishActivity = finish!;
+    void runMaterialJob(job).catch(error => {
+      job.status = "failed"; job.completedAt = new Date().toISOString();
+      const failureCodes = materialJobFailureCodes(error);
+      for (const item of job.items) if (["queued", "preparing"].includes(item.status)) {
+        item.status = "interrupted"; item.error = materialJobErrorMessage(error); Object.assign(item, failureCodes);
+      }
+      saveMaterialJob(job);
+    }).finally(() => { finishActivity(); unlock(); });
+    release = undefined; finish = undefined;
+    return NextResponse.json({ success: true, data: { ...job, acceptedCount: job.items.length, workflowPending: true } }, { status: 202 });
+  } catch (error) {
+    finish?.(); release?.();
+    return NextResponse.json({ success: false, code: materialJobFailureCodes(error).errorCode || "MATERIAL_REWRITE_FAILED", error: materialJobErrorMessage(error) }, { status: 409 });
+  }
 }
 
 export async function materialsPost(request: NextRequest, kind: "prepare" | "publish", override?: Record<string, unknown>) {

@@ -17,10 +17,14 @@ export interface MaterialJobItem {
   causeCode?: string;
   scheduledDate?: string;
   result?: unknown;
+  previousError?: string;
+  previousErrorCode?: string;
+  verificationStatus?: "BLOCKED" | "DRAFT_MISSING" | "READY";
+  backupCreated?: boolean;
 }
 export interface MaterialJob {
   jobId: string;
-  kind: "prepare" | "publish";
+  kind: "prepare" | "publish" | "rewrite";
   status: "running" | "completed" | "partial" | "failed" | "interrupted";
   ownerPid: number;
   startedAt: string;
@@ -28,6 +32,7 @@ export interface MaterialJob {
   completedAt?: string;
   sourceJobId?: string;
   requestHash?: string;
+  connectKind?: "SHOPPING" | "TRAVEL";
   events?: Array<{ at: string; productId: string; stage: string; status: MaterialItemStatus }>;
   publishMode?: "now" | "schedule";
   items: MaterialJobItem[];
@@ -71,8 +76,10 @@ function normalizeStoredFailureCodes(job: MaterialJob): MaterialJob {
   for (const item of job.items) {
     const errorCode = safeMaterialErrorCode(item.errorCode);
     const causeCode = safeMaterialErrorCode(item.causeCode);
+    const previousErrorCode = safeMaterialErrorCode(item.previousErrorCode);
     if (errorCode) item.errorCode = errorCode; else delete item.errorCode;
     if (causeCode) item.causeCode = causeCode; else delete item.causeCode;
+    if (previousErrorCode) item.previousErrorCode = previousErrorCode; else delete item.previousErrorCode;
   }
   return job;
 }

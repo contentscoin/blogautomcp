@@ -2,7 +2,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 type Material = { productId: string; revision: string; title: string; productName?: string; connectKind: string; status: string; ready: boolean; blockers: string[]; score: number | null; imageCount: number; approvedAt: string | null };
-type Job = { jobId: string; kind: string; status: string; startedAt: string; items: { productId: string; status: string; stage: string; error?: string; scheduledDate?: string }[] };
+type Job = { jobId: string; kind: string; status: string; startedAt: string; sourceJobId?: string; connectKind?: string; items: { productId: string; status: string; stage: string; error?: string; errorCode?: string; scheduledDate?: string }[] };
+type FailedCandidate = { productId: string; productName: string | null; reason: string; errorCode?: string };
+const jobLabel = (job: Job) => job.kind === "rewrite" ? "실패 소재 재작성·검증" : job.kind === "prepare" ? "소재 미리작성" : "선택 소재 발행";
+const jobStatusLabel = (job: Job) => job.kind === "rewrite" && job.status === "completed"
+  ? job.items.length === 0 ? "재작성 대상 없음" : job.items.every(item => item.status === "ready" && !item.error) ? "검증 완료" : "검증 확인 필요"
+  : ({ running: "진행 중", queued: "대기 중", completed: "완료", partial: job.kind === "rewrite" ? job.items.some(item => item.status === "ready" && !item.error) ? "일부 검증 완료" : "검증 실패 · 확인 필요" : "일부 완료", failed: "실패 · 확인 필요", interrupted: "중단됨" } as Record<string, string>)[job.status] || job.status;
 export type MaterialSelectionRequest = { productId?: string; mode: "now" | "schedule" | "prepare"; nonce: number };
 export function MaterialLibrary({ connectKind, candidates, selectionRequest, onPreview, onChanged }: {
   connectKind: string; candidates: { id: string; productName: string | null }[];
@@ -11,6 +16,12 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
 }) {
   const [materials, setMaterials] = useState<Material[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [failedCandidates, setFailedCandidates] = useState<FailedCandidate[]>([]);
+  const [failedCandidateCount, setFailedCandidateCount] = useState(0);
+  const [rewriteMessage, setRewriteMessage] = useState("");
+  const [rewriteRequestId, setRewriteRequestId] = useState("");
+  const pendingRewrite = useRef<{ sourceJobId: string; storageKey: string } | null>(null);
+  const currentConnectKind = useRef(connectKind); currentConnectKind.current = connectKind;
   const [selection, setSelection] = useState<Record<string, string>>({});
   const [prepareSelection, setPrepareSelection] = useState<string[]>([]);
   const [prepareOpen, setPrepareOpen] = useState(false);
@@ -26,10 +37,18 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
   const previousJobs = useRef("");
   const changeRef = useRef(onChanged); changeRef.current = onChanged;
   const storageKey = `material-selection-v1:${connectKind}`;
+  const rewriteStorageKey = `material-failed-rewrite-v1:${connectKind}`;
   useEffect(() => {
     try { setSelection(JSON.parse(localStorage.getItem(storageKey) || "{}")); } catch { setSelection({}); }
     setPrepareSelection([]);
-  }, [storageKey]);
+    setFailedCandidates([]); setFailedCandidateCount(0); setLoading(true); setRewriteMessage("");
+    try {
+      const sourceJobId = localStorage.getItem(rewriteStorageKey) || "";
+      pendingRewrite.current = sourceJobId ? { sourceJobId, storageKey: rewriteStorageKey } : null;
+      setRewriteRequestId(sourceJobId);
+      if (sourceJobId) setRewriteMessage("접수 결과가 확인되지 않은 재작성 요청이 있습니다. 이전 요청을 확인·재시도하세요.");
+    } catch { pendingRewrite.current = null; setRewriteRequestId(""); }
+  }, [storageKey, rewriteStorageKey]);
   const select = (next: Record<string, string>) => {
     setSelection(next); localStorage.setItem(storageKey, JSON.stringify(next));
   };
@@ -37,7 +56,16 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
     const response = await fetch(`/api/materials?connectKind=${encodeURIComponent(connectKind)}`, { cache: "no-store" });
     const result = await response.json();
     if (!response.ok || !result.success) throw new Error(result.error || "소재 목록을 읽지 못했습니다.");
+    if (currentConnectKind.current !== connectKind) return;
     setMaterials(result.data.materials); setJobs(result.data.jobs); setLoading(false);
+    setFailedCandidates(result.data.failedCandidates || []);
+    setFailedCandidateCount(result.data.failedCandidateCount ?? 0);
+    const pending = pendingRewrite.current;
+    if (pending && result.data.jobs.some((job: Job) => job.sourceJobId === pending.sourceJobId && job.kind === "rewrite")) {
+      try { localStorage.removeItem(pending.storageKey); } catch { /* The stable ID remains safe to replay. */ }
+      pendingRewrite.current = null; setRewriteRequestId("");
+      setRewriteMessage("실패 소재 재작성 요청이 접수되었습니다. 검증을 통과한 소재만 준비완료로 저장됩니다.");
+    }
     const signature = JSON.stringify(result.data.jobs.map((job: Job) => [job.jobId, job.status, job.items.map(item => item.status)]));
     if (previousJobs.current && signature !== previousJobs.current) changeRef.current();
     previousJobs.current = signature;
@@ -71,9 +99,61 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
   }, [selectionRequest?.nonce]);
   const selected = materials.filter(item => selection[item.productId]);
   const valid = selected.length > 0 && selected.length === Object.keys(selection).length && selected.every(item => item.ready && selection[item.productId] === item.revision);
-  const active = jobs.some(job => job.status === "running");
+  const active = jobs.some(job => ["running", "queued"].includes(job.status));
   const readyCount = materials.filter(item => item.ready).length;
-  const preparationJob = jobs.find(job => job.kind === "prepare");
+  const matchesConnectKind = (job: Job) => !job.connectKind || job.connectKind.toUpperCase() === connectKind.toUpperCase();
+  const preparationJob = jobs.find(job => job.kind === "prepare" || (job.kind === "rewrite" && matchesConnectKind(job)));
+  const rewriteJob = jobs.find(job => job.kind === "rewrite" && matchesConnectKind(job));
+  const acceptRewrite = (job: Job, sourceJobId: string) => {
+    setJobs(current => [job, ...current.filter(item => item.jobId !== job.jobId)]);
+    if (pendingRewrite.current?.sourceJobId === sourceJobId) {
+      try { localStorage.removeItem(pendingRewrite.current.storageKey); } catch { /* Replaying this ID will resolve the saved job. */ }
+      pendingRewrite.current = null; setRewriteRequestId("");
+    }
+    if (currentConnectKind.current === connectKind) setRewriteMessage(["running", "queued"].includes(job.status)
+      ? "실패 소재 재작성·검증을 시작했습니다. 검증을 통과한 소재만 준비완료로 저장됩니다."
+      : `기존 재작성 요청의 결과를 확인했습니다: ${jobStatusLabel(job)}. 아래에서 소재별 검증 결과를 확인하세요.`);
+    changeRef.current();
+  };
+  const rewriteFailed = async () => {
+    if (requestInFlight.current || active) return;
+    requestInFlight.current = true; setBusy(true);
+    const previousId = pendingRewrite.current?.storageKey === rewriteStorageKey ? pendingRewrite.current.sourceJobId : "";
+    let sourceJobId = previousId;
+    const lookup = async () => {
+      const response = await fetch(`/api/materials?sourceJobId=${encodeURIComponent(sourceJobId)}`, { cache: "no-store" });
+      if (response.status === 404) return null;
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.error || "이전 재작성 요청을 확인하지 못했습니다.");
+      if (!result.data?.jobId || result.data.kind !== "rewrite") throw new Error("이전 재작성 작업 응답을 확인하지 못했습니다.");
+      return result.data as Job;
+    };
+    try {
+      if (sourceJobId) {
+        setRewriteMessage("이전 재작성 요청의 접수 결과를 확인하고 있습니다…");
+        const existing = await lookup();
+        if (existing) { acceptRewrite(existing, sourceJobId); await refresh(); return; }
+      } else {
+        sourceJobId = crypto.randomUUID();
+        // Persist before submission so a lost response or reload cannot create a second job.
+        localStorage.setItem(rewriteStorageKey, sourceJobId);
+        pendingRewrite.current = { sourceJobId, storageKey: rewriteStorageKey }; setRewriteRequestId(sourceJobId);
+      }
+      setRewriteMessage("실패 소재 전체 재작성·검증 요청을 보내고 있습니다…");
+      const response = await fetch("/api/materials/rewrite-failed", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ connectKind, sourceJobId }) });
+      const result = await response.json();
+      if (!response.ok || !result.success) throw new Error(result.error || "실패 소재 재작성 요청을 접수하지 못했습니다.");
+      if (!result.data?.jobId || result.data.kind !== "rewrite") throw new Error("재작성 요청의 접수 결과를 확인하지 못했습니다.");
+      acceptRewrite(result.data, sourceJobId);
+      await refresh().catch(() => setRewriteMessage("재작성 요청은 접수됐습니다. 진행상태 조회가 지연되고 있습니다. 새로고침으로 확인하세요."));
+    } catch (error) {
+      let recovered = false;
+      if (sourceJobId && pendingRewrite.current?.sourceJobId === sourceJobId) {
+        try { const existing = await lookup(); if (existing) { acceptRewrite(existing, sourceJobId); recovered = true; } } catch { /* Keep the same ID until the outcome is known. */ }
+      }
+      if (!recovered && currentConnectKind.current === connectKind) setRewriteMessage(`${error instanceof Error ? error.message : String(error)}${pendingRewrite.current?.sourceJobId === sourceJobId ? " 이전 요청을 확인·재시도하면 같은 요청 ID로 이어집니다." : ""}`);
+    } finally { requestInFlight.current = false; setBusy(false); }
+  };
   const request = async (path: string, payload: object) => {
     if (requestInFlight.current) return;
     requestInFlight.current = true;
@@ -99,6 +179,17 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
   const tomorrow = new Date(Date.now() + 86400000).toLocaleDateString("sv-SE", { timeZone: "Asia/Seoul" });
   return <section id="material-library" className="my-5 space-y-4 rounded-xl border border-violet-200 bg-white p-5">
     <div><h2 className="text-lg font-bold text-slate-900">소재 보관함</h2><p className="mt-1 text-sm text-slate-600">1. 원고·이미지 미리작성 → 2. 준비된 소재 선택 → 3. 바로 또는 예약 발행</p></div>
+    <div className="space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="font-semibold text-amber-950">실패 소재 복구</h3><p className="mt-1 text-sm text-amber-900">대상 {failedCandidateCount}개를 재작성하고 원고·이미지 검증과 승인까지 진행해 발행 준비를 마칩니다.</p></div>
+        <button type="button" disabled={loading || failedCandidateCount === 0 || active || busy || Boolean(rewriteRequestId)} onClick={() => void rewriteFailed()} className="rounded-lg bg-amber-800 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">실패 소재 전체 재작성·검증 ({failedCandidateCount}개)</button>
+        {rewriteRequestId && <button type="button" disabled={busy || active} onClick={() => void rewriteFailed()} className="rounded-lg border border-amber-800 px-4 py-2 text-sm font-semibold text-amber-950 disabled:opacity-40">이전 재작성 요청 확인·재시도</button>}
+      </div>
+      <p className="text-xs text-amber-900">검증 통과 후 준비완료로 저장되며, 발행은 아래에서 별도로 선택합니다.</p>
+      {active && <p className="text-xs text-amber-900">다른 소재 작업이 진행 중입니다. 완료 후 재작성할 수 있습니다.</p>}
+      {rewriteMessage && <p role="status" className="rounded bg-white p-3 text-sm text-amber-950">{rewriteMessage}</p>}
+      {rewriteJob && <div role="status" className="rounded bg-white p-3 text-sm"><p className="font-semibold">재작성: 검증 통과 {rewriteJob.items.filter(item => item.status === "ready" && !item.error).length}/{rewriteJob.items.length}개 · 실패 {rewriteJob.items.filter(item => ["failed", "interrupted", "outcome_unknown"].includes(item.status) || item.error).length}개 · {jobStatusLabel(rewriteJob)}</p>{rewriteJob.items.filter(item => item.status !== "ready" || item.error).map(item => <p key={item.productId} className="mt-1 break-words">{candidates.find(candidate => candidate.id === item.productId)?.productName || failedCandidates.find(candidate => candidate.productId === item.productId)?.productName || item.productId}: {item.error || item.stage}{item.errorCode ? ` (${item.errorCode})` : ""}</p>)}</div>}
+      {failedCandidates.length > 0 && <details><summary className="cursor-pointer text-sm font-semibold text-amber-950">재작성 대상과 실패 원인 보기</summary><div className="mt-2 max-h-48 space-y-1 overflow-auto">{failedCandidates.map(item => <p key={item.productId} className="break-words text-sm text-amber-950">{item.productName || item.productId} — {item.reason}{item.errorCode ? ` (${item.errorCode})` : ""}</p>)}</div></details>}
+    </div>
     <details className="rounded-lg bg-violet-50 p-3" open={prepareOpen || materials.length === 0 || undefined}>
       <summary className="cursor-pointer font-semibold text-violet-900">1. 소재 미리작성 · 준비할 상품 선택</summary>
       <div className="mt-3 flex flex-wrap gap-2">
@@ -106,7 +197,7 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
         <button type="button" disabled={!prepareSelection.length || busy || active} onClick={() => void request("/api/materials/prepare", { productIds: prepareSelection })} className="rounded bg-violet-700 px-4 py-2 text-sm text-white disabled:opacity-40">{busy ? "요청 접수 중…" : `선택 ${prepareSelection.length}개 소재 미리작성 시작`}</button>
       </div>
       {prepareMessage && <p role="status" className="mt-3 rounded bg-white p-3 text-sm text-violet-900">{prepareMessage}</p>}
-      {preparationJob && <div role="status" className="mt-3 rounded bg-white p-3 text-sm"><p>소재 준비: {preparationJob.items.filter(item => item.status === "ready").length}/{preparationJob.items.length}개 완료 · {preparationJob.status === "running" ? "진행 중" : preparationJob.status === "completed" ? "완료" : "확인 필요"}</p>{preparationJob.items.filter(item => item.status === "preparing" || item.error).map(item => <p key={item.productId}>{candidates.find(candidate => candidate.id === item.productId)?.productName || item.productId}: {item.error || item.stage}</p>)}</div>}
+      {preparationJob && <div role="status" className="mt-3 rounded bg-white p-3 text-sm"><p>{jobLabel(preparationJob)}: {preparationJob.items.filter(item => item.status === "ready" && !item.error).length}/{preparationJob.items.length}개 {preparationJob.kind === "rewrite" ? "검증 통과" : "완료"} · {jobStatusLabel(preparationJob)}</p>{preparationJob.items.filter(item => item.status === "preparing" || item.error).map(item => <p key={item.productId}>{candidates.find(candidate => candidate.id === item.productId)?.productName || item.productId}: {item.error || item.stage}</p>)}</div>}
       <div className="mt-3 max-h-48 space-y-2 overflow-auto">{candidates.map(item => <label key={item.id} className="flex items-center gap-2 text-sm"><input type="checkbox" aria-label={`${item.productName || item.id} 소재 준비`} checked={prepareSelection.includes(item.id)} onChange={event => setPrepareSelection(current => event.target.checked ? [...current, item.id].slice(0, 50) : current.filter(id => id !== item.id))} />{item.productName || item.id}</label>)}</div>
       {!candidates.length && <p className="mt-2 text-sm">상품을 먼저 동기화해 주세요.</p>}
     </details>
@@ -133,7 +224,7 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
       <p className="w-full text-xs text-slate-500">발행에는 저장된 원고와 이미지만 사용합니다. 미완성 소재는 선택할 수 없습니다.</p>
     </div>
     {message && <p role="status" className="rounded bg-blue-50 p-3 text-sm text-blue-900">{message}</p>}
-    {jobs.length > 0 && <details open={active || undefined} className="rounded-lg border p-3"><summary className="cursor-pointer font-semibold">작업 기록 {active ? "· 진행 중" : ""}</summary><div className="mt-2 max-h-72 space-y-3 overflow-auto">{jobs.slice(0, 10).map(job => <div key={job.jobId} className="rounded bg-slate-50 p-3 text-sm"><p className="font-semibold">{job.kind === "prepare" ? "소재 미리작성" : "선택 소재 발행"} · {({ running: "진행 중", completed: "완료", partial: "일부 완료", failed: "확인 필요", interrupted: "중단됨" } as Record<string, string>)[job.status] || job.status} · {job.items.length}개</p><p className="text-xs text-slate-500">{new Date(job.startedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}</p>{job.items.map(item => <p key={item.productId} className="mt-1 break-words">{materials.find(material => material.productId === item.productId)?.title || candidates.find(candidate => candidate.id === item.productId)?.productName || item.productId} — {item.stage}{item.scheduledDate ? ` (${item.scheduledDate})` : ""}{item.error ? `: ${item.error}` : ""}</p>)}</div>)}</div></details>}
+    {jobs.length > 0 && <details open={active || undefined} className="rounded-lg border p-3"><summary className="cursor-pointer font-semibold">작업 기록 {active ? "· 진행 중" : ""}</summary><div className="mt-2 max-h-72 space-y-3 overflow-auto">{jobs.slice(0, 10).map(job => <div key={job.jobId} className="rounded bg-slate-50 p-3 text-sm"><p className="font-semibold">{jobLabel(job)} · {jobStatusLabel(job)} · {job.items.length}개{job.kind === "rewrite" ? ` · 검증 통과 ${job.items.filter(item => item.status === "ready" && !item.error).length}개` : ""}</p><p className="text-xs text-slate-500">{new Date(job.startedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}</p>{job.items.map(item => <p key={item.productId} className="mt-1 break-words">{materials.find(material => material.productId === item.productId)?.title || candidates.find(candidate => candidate.id === item.productId)?.productName || item.productId} — {item.stage}{item.scheduledDate ? ` (${item.scheduledDate})` : ""}{item.error ? `: ${item.error}` : ""}{item.errorCode ? ` (${item.errorCode})` : ""}</p>)}</div>)}</div></details>}
     {scheduleOpen && <div role="dialog" aria-modal="true" aria-labelledby="material-schedule-title" className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4"><div className="w-full max-w-md space-y-4 rounded-xl bg-white p-6">
       <h3 id="material-schedule-title" className="text-lg font-bold">선택 {selected.length}개 예약발행</h3>
       <label className="block text-sm">예약 시작일 (한국시간)<input autoFocus type="date" min={tomorrow} value={date} onChange={event => setDate(event.target.value)} className="mt-1 w-full rounded border p-2" /></label>
