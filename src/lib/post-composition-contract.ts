@@ -4,7 +4,7 @@ import {
   topicImageSourceLabel,
   type TopicImageSource,
 } from "../../scripts/lib/topic-templates";
-import { SHOPPING_POST_STRATEGY, type ShoppingPostStrategyVersion } from "./shopping-post-strategy";
+import { SHOPPING_POST_STRATEGY, SHOPPING_NATURAL_PHOTO_RULE, shoppingPhotoRoleAt, type ShoppingPostStrategyVersion } from "./shopping-post-strategy";
 
 export type BrandConnectKind = "SHOPPING" | "TRAVEL";
 
@@ -37,6 +37,7 @@ export interface PostSectionContractV1 {
   imageSource?: TopicImageSource;
   /** 연출컷 배경 지시. 상품 형태는 잠금 합성으로 보존된다. */
   promptRecipe?: string;
+  imagePlacement?: "before-heading" | "after-body";
 }
 
 export interface PostCompositionContractV1 {
@@ -96,6 +97,8 @@ export interface ResolvedPostSectionV1 {
   imageSource?: TopicImageSource;
   /** 연출컷 배경 지시(생성 프롬프트 전용, 대체텍스트에 쓰지 않음) */
   promptRecipe?: string;
+  /** Shopping originals precede the first heading; lifestyle photos follow their related prose. */
+  imagePlacement?: "before-heading" | "after-body";
 }
 
 /**
@@ -444,7 +447,15 @@ export const SHOPPING_POST_CONTRACT_V1: PostCompositionContractV1 = {
   targetSections: { min: SHOPPING_POST_STRATEGY.sections.min, max: SHOPPING_POST_STRATEGY.sections.max },
   earlyConnectAfterSectionId: "shopping-summary",
   finalConnectBeforeDisclosure: true,
-  sections: shoppingSections,
+  sections: shoppingSections.map((section, index) => {
+    const role = shoppingPhotoRoleAt(index, shoppingSections.length);
+    return { ...section,
+      imageSource: index === 0 ? "seller-original" as const : "staged-ai" as const,
+      image: { ...section.image, min: role === "none" ? 0 : 1, max: role === "none" ? 0 : 1,
+        intent: index === 0 ? "판매페이지 원본 상품 사진: 선택한 상품·옵션의 외형 확인"
+          : "AI 연출 이미지: 제품의 자연스러운 생활 맥락. 실제 사용 후기나 기능·수치·성능의 증거가 아님" },
+    };
+  }),
 };
 
 export const TRAVEL_POST_CONTRACT_V1: PostCompositionContractV1 = {
@@ -589,6 +600,30 @@ function freeformImageRules(
   };
 }
 
+/** Explicit planning step only: callers must invalidate approval when applying this to a saved draft. */
+export function applyShoppingNaturalPhotoPlan(sections: ResolvedPostSectionV1[]): ResolvedPostSectionV1[] {
+  return sections.map((section, index) => {
+    const role = shoppingPhotoRoleAt(index, sections.length);
+    const sceneIndex = sections.slice(0, index + 1).filter((_, candidate) => shoppingPhotoRoleAt(candidate, sections.length) === "scene").length;
+    const sceneDirection = [
+      "전체 상품과 코디가 선명한 일상 장면, 자연스러운 자세와 넓은 구도",
+      "첫 컷과 다른 장소·자세의 생활 장면, 앉거나 쉬는 자연스러운 구도",
+      "앞 컷과 다른 사선 또는 측면 구도, 참조에서 보이는 상품 구조를 유지",
+    ][Math.max(0, sceneIndex - 1)] || "서로 다른 자연스러운 생활 장면";
+    return {
+      ...section,
+      imageMin: role === "none" ? 0 : 1,
+      imageMax: role === "none" ? 0 : 1,
+      imageSource: role === "original" ? "seller-original" : role === "scene" ? "staged-ai" : "none",
+      imageIntent: role === "original" ? "판매페이지 원본 상품 사진: 선택한 상품·옵션의 외형 확인" : role === "scene"
+        ? `AI 연출 이미지: ${section.title}의 생활 맥락을 보여주는 자연스러운 사진. 실제 사용 후기나 기능·수치·성능의 증거가 아님`
+        : "이미지 없음: 사양·가격·치수는 확인한 판매정보를 본문 텍스트로 설명",
+      imagePlacement: role === "original" ? "before-heading" : "after-body",
+      promptRecipe: role === "scene" ? `${sceneDirection}. 상품의 색상·핏·비율·기장·보이는 구조를 보존. 사진 한 장, 설명문·정보 카드·프레임·콜라주 없음.` : undefined,
+    };
+  });
+}
+
 /** 템플릿 오버레이가 붙인 이미지 출처·연출 지시를 렌더 문서 섹션에 보존한다(없으면 생략). */
 function topicImageFields(contractSection?: PostSectionContractV1): Pick<ResolvedPostSectionV1, "imageSource" | "promptRecipe"> {
   return {
@@ -640,7 +675,7 @@ export function buildPostQualityReport(options: {
   const target = {
     characters: options.contract.targetCharacters,
     sections: options.contract.targetSections,
-    images: options.imageFloor !== undefined && options.imageFloor >= 1 && options.imageFloor < options.contract.targetImages.min
+    images: options.contract.connectKind !== "SHOPPING" && options.imageFloor !== undefined && options.imageFloor >= 1 && options.imageFloor < options.contract.targetImages.min
       ? { ...options.contract.targetImages, min: Math.floor(options.imageFloor) }
       : options.contract.targetImages,
   };
@@ -663,11 +698,11 @@ export function buildPostQualityReport(options: {
     (options.preset === "PREMIUM" ? blockers : warnings).push(message);
   };
   // Same floors as the editorial gate: 80% of the length/section minimum blocks, the rest is advice.
-  // With every required section slot filled, three images (hero + two) are the blocking floor.
+  // Shopping keeps all five photographic slots. Travel retains its historical advisory floor.
   const floors = {
     characters: Math.round(target.characters.min * 0.8),
     sections: Math.max(3, Math.ceil(target.sections.min * 0.8)),
-    images: missingSectionIds.length === 0 ? Math.min(target.images.min, 3) : target.images.min,
+    images: options.contract.connectKind === "SHOPPING" ? target.images.min : missingSectionIds.length === 0 ? Math.min(target.images.min, 3) : target.images.min,
   };
   const graded = (value: number, floor: number, minimum: number, message: string) => {
     if (value < floor) register(false, message);
@@ -776,7 +811,7 @@ export function resolvePostDocument(options: {
       ? allocatePlannedImages(plan, bodyImagePaths)
       : allocateFreeformImages(contentSections.length, bodyImagePaths);
   const planIds = plan ? planSectionIds(options.connectKind, plan) : [];
-  const sections = contentSections.map((section, index): ResolvedPostSectionV1 => {
+  const resolvedSections = contentSections.map((section, index): ResolvedPostSectionV1 => {
     const parsed = parseGeneratedSection(section);
     if (plan) {
       const planned = plan[index];
@@ -808,6 +843,7 @@ export function resolvePostDocument(options: {
       ...freeformImageRules({ ...parsed, imagePaths: allocations[index] || [] }, sectionContracts[index]),
     };
   });
+  const sections = options.connectKind === "SHOPPING" ? applyShoppingNaturalPhotoPlan(resolvedSections) : resolvedSections;
   const earlyConnectSectionId = plan
     ? planIds[plan.findIndex((section) => section.earlyConnectCard)] ?? null
     : sections[Math.max(0, sectionContracts.findIndex(section => section.id === contract.earlyConnectAfterSectionId))]?.id;
@@ -842,6 +878,7 @@ export function resolvePostDocument(options: {
       sectionId: section.id,
       role: summaryRole ? "summary" : index === 0 ? "detail" : "scene",
       altText: `${section.title} - ${section.imageIntent}`,
+      ...(options.connectKind === "SHOPPING" && section.imageSource === "seller-original" ? { caption: "판매페이지 원본 상품 사진" } : {}),
       layout: section.imagePaths.length > 1 ? "sequence" : "single",
       sourcePolicy:
         options.connectKind === "SHOPPING" ? "LOCKED_PRODUCT_OR_ORIGINAL" : "TRAVEL_EDITORIAL",
@@ -855,7 +892,7 @@ export function resolvePostDocument(options: {
       ? (options.editorial.policy.sectionDesigns?.[section.id]
         ?? Object.entries(options.editorial.policy.sectionDesigns || {}).find(([key]) => section.id.startsWith(key))?.[1])
       : undefined;
-    const imageLayout = sectionDesign?.image ?? layout?.image ?? "after-lead";
+    const imageLayout = section.imagePlacement ?? sectionDesign?.image ?? layout?.image ?? "after-lead";
     const sentencesPerParagraph = sectionDesign?.sentences ?? layout?.sentences ?? 1;
     const pushSectionImages = () => section.imagePaths.forEach((imagePath, index) => pushImage(section, imagePath, index));
     if (imageLayout === "before-heading") pushSectionImages();
@@ -1077,6 +1114,7 @@ export function formatPostContractForPrompt(contract: PostCompositionContractV1)
   return [
     `[유연한 렌더링 계약 ${contract.version}]`,
     `- 권장 범위: 섹션 ${contract.targetSections.min}~${contract.targetSections.max}개, 본문 ${contract.targetCharacters.min}~${contract.targetCharacters.max}자, 이미지 최소 ${contract.targetImages.min}장·권장 ${contract.targetImages.recommended}장·상한 ${contract.targetImages.max}장`,
+    ...(contract.connectKind === "SHOPPING" ? [`- ${SHOPPING_NATURAL_PHOTO_RULE}`] : []),
     "- 위 숫자는 품질 점검 범위이며 정확한 할당량이 아닙니다. 정보가 빈약한 섹션을 만들거나 같은 내용을 반복하지 마세요.",
     "- 아래 항목은 에디터 이미지 배치를 위한 역할 팔레트입니다. 모든 제목·순서를 복사하지 말고, 분석 결과에 맞춰 필요한 역할을 선택·병합·재배열하세요.",
     ...contract.sections.map(

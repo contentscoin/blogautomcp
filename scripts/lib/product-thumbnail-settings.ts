@@ -1,3 +1,8 @@
+import crypto from "node:crypto";
+import fs from "node:fs";
+import { readProductPhotoSource } from "./product-photo-provenance";
+import { SHOPPING_THUMBNAIL_LAYOUT_VERSION } from "./thumbnail-layout-v2";
+
 export interface ProductThumbnailCopySettings {
   productNameLabel: string;
   headline: string;
@@ -13,6 +18,8 @@ export interface ProductThumbnailSettings {
   copy: ProductThumbnailCopySettings;
   updatedAt: string;
   style?: string;
+  layoutVersion?: typeof SHOPPING_THUMBNAIL_LAYOUT_VERSION;
+  generatedSha256?: string;
 }
 
 export const PRODUCT_THUMBNAIL_SETTING_PREFIX = "brandlink.thumbnail.";
@@ -70,8 +77,23 @@ export function parseProductThumbnailSettings(value: string | null | undefined):
       copy: normalizeProductThumbnailCopy(parsed.copy, parsed.copy.productNameLabel || "추천 상품"),
       updatedAt: clean(parsed.updatedAt) || new Date(0).toISOString(),
       style: clean(parsed.style),
+      layoutVersion: parsed.layoutVersion === SHOPPING_THUMBNAIL_LAYOUT_VERSION ? SHOPPING_THUMBNAIL_LAYOUT_VERSION : undefined,
+      generatedSha256: /^[a-f0-9]{64}$/u.test(clean(parsed.generatedSha256)) ? clean(parsed.generatedSha256) : undefined,
     };
   } catch {
     return null;
   }
+}
+
+/** Require an output-bound receipt; a square size or a version string alone cannot approve an old card. */
+export function isReusableShoppingThumbnail(setting: ProductThumbnailSettings): boolean {
+  const source = readProductPhotoSource(setting.generatedPath);
+  if (source?.provenance === "PHOTO_TEXT_THUMBNAIL") return true;
+  if (setting.layoutVersion !== SHOPPING_THUMBNAIL_LAYOUT_VERSION || !setting.generatedSha256) return false;
+  try {
+    const stat = fs.statSync(setting.generatedPath);
+    if (!stat.isFile() || stat.size < 1 || stat.size > 24 * 1024 * 1024) return false;
+    const sha256 = crypto.createHash("sha256").update(fs.readFileSync(setting.generatedPath)).digest("hex");
+    return sha256 === setting.generatedSha256;
+  } catch { return false; }
 }

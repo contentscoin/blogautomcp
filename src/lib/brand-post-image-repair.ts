@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
-  applyGeneratedBrandPostImage, packagePreview, readBrandPostPackage,
+  applyGeneratedBrandPostImage, packagePreview, readBrandPostPackage, normalizePackageImageAssets,
   writeBrandPostPackageManifest, type BrandPostPackageManifestV2,
 } from "./brand-post-package";
 import {
@@ -11,6 +11,7 @@ import {
   acquireBrandPostImageRepairLock,
   isBrandPostImageRepairLocked,
 } from "./brand-post-image-repair-lock";
+import { migrateShoppingNaturalPhotoPlan, requiresShoppingNaturalPhotoPlan } from "./brand-post-natural-photo-migration";
 
 type ImageSlot = ReturnType<typeof packagePreview>["imageSlots"][number];
 
@@ -66,6 +67,16 @@ export function planSectionImageRequests(slots: ImageSlot[]): BrandPostImageGene
   return requests;
 }
 
+/** Full preparation also replaces an old framed/card thumbnail, without changing a single-slot request. */
+export function planWholeBrandPostImageRequests(manifest: BrandPostPackageManifestV2): BrandPostImageGenerationRequest[] {
+  const requests = planSectionImageRequests(packagePreview(manifest).imageSlots);
+  if (manifest.connectKind === "SHOPPING") {
+    const hero = normalizePackageImageAssets(manifest).find(asset => asset.role === "hero" && asset.path === manifest.heroImagePath);
+    if (hero && hero.provenance !== "PHOTO_TEXT_THUMBNAIL") requests.unshift({ requestId: randomUUID(), replaceAssetKey: hero.sha256 });
+  }
+  return requests;
+}
+
 const shared = globalThis as typeof globalThis & { brandPostImageJobs?: Set<string>; brandPostImageAbort?: Map<string, AbortController> };
 const activeJobs = shared.brandPostImageJobs ??= new Set<string>();
 const controllers = shared.brandPostImageAbort ??= new Map<string, AbortController>();
@@ -80,6 +91,8 @@ export interface ImageRepairDependencies {
   write: typeof writeBrandPostPackageManifest;
   apply: typeof applyGeneratedBrandPostImage;
   generate: typeof generateBrandPostImages;
+  /** Omitted by in-memory test adapters: never migrate unrelated real files through an injected store. */
+  migrateNaturalPhotoPlan?: typeof migrateShoppingNaturalPhotoPlan;
 }
 
 function recordedImageOwnerIsRecoverable(state: BrandPostPackageManifestV2["imageGeneration"]): boolean {
@@ -107,8 +120,16 @@ export async function repairBrandPostImages(options: {
 }, dependencies: ImageRepairDependencies = {
   read: readBrandPostPackage, write: writeBrandPostPackageManifest,
   apply: applyGeneratedBrandPostImage, generate: generateBrandPostImages,
+  migrateNaturalPhotoPlan: migrateShoppingNaturalPhotoPlan,
 }) {
   if (activeJobs.has(options.brandLinkId)) throw new Error("이 초안의 이미지 생성이 이미 진행 중입니다.");
+  if (dependencies.migrateNaturalPhotoPlan) {
+    const initial = dependencies.read(options.brandLinkId, { migrate: false });
+    if (requiresShoppingNaturalPhotoPlan(initial)) {
+      if (options.requests !== undefined) throw new Error("NATURAL_IMAGE_PLAN_REQUIRED: 전체 이미지 준비에서 자연스러운 사진 계획으로 변경한 뒤 개별 이미지를 수정하세요.");
+      dependencies.migrateNaturalPhotoPlan(options.brandLinkId);
+    }
+  }
   const processLock = acquireBrandPostImageRepairLock(options.brandLinkId);
   activeJobs.add(options.brandLinkId);
   const controller = new AbortController();
@@ -169,7 +190,8 @@ export async function repairBrandPostImages(options: {
   };
   try {
     const manifest = read();
-    const requests = options.requests ?? planSectionImageRequests(packagePreview(manifest).imageSlots);
+    const requests = options.requests ?? (dependencies.migrateNaturalPhotoPlan
+      ? planWholeBrandPostImageRequests(manifest) : planSectionImageRequests(packagePreview(manifest).imageSlots));
     requested = requests.length;
     if (requested === 0) {
       const remaining = packagePreview(manifest).imageSlots.reduce((sum, slot) => sum + Math.max(slot.missing, slot.generationMissing), 0);

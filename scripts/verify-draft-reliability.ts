@@ -15,9 +15,8 @@ import { replanShoppingImageCoverage, type ImageReplanDependencies } from "../sr
 import { refreshStoredContentQuality, type BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
 import { planQualityConvergence } from "./lib/quality-convergence";
 import type { BrandLinkContentReadiness } from "./lib/brandlink-content-readiness";
-import { createShoppingFactCard, selectShoppingFactCardFacts, wrapCardText } from "./lib/shopping-fact-card";
-import { isShoppingFactCardPath } from "./lib/shopping-fact-card-rule";
-import { readProductPhotoSource } from "./lib/product-photo-provenance";
+import { isShoppingFactCardPath, SHOPPING_FACT_CARD_AUDIT_RULE_EN } from "./lib/shopping-fact-card-rule";
+import { SHOPPING_POST_STRATEGY_VERSION } from "../src/lib/shopping-post-strategy";
 import { classifyBrandPostImageEvidence, isShoppingFactCardAsset } from "../src/lib/brand-post-image-evidence";
 import { planSellerVisionBatches } from "./lib/detail-vision-reader";
 import { isDraftEditorialQualityPassed } from "../src/lib/brand-post-quality-display";
@@ -66,7 +65,7 @@ async function main() {
   assert.match(agent, /\[필수 상품 근거 · 원고 품질검사가 그대로 확인함\]/u, "first-draft prompt lists the graded facts");
 
   // 3. Visual audit: tolerant parsing, strict on missing fields; malformed proposals are dropped, not fatal.
-  const ok = { accepted: true, identityMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, reviewClass: "product-photo", reason: "보풀제거기 본체가 보임" };
+  const ok = { singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, accepted: true, identityMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, reviewClass: "product-photo", reason: "보풀제거기 본체가 보임" };
   assert.ok(parseVisualReviews(`검토 결과입니다.\n{"reviews":[${JSON.stringify({ ...ok, index: "1" })}]}\n끝`, 1)[0], "prose around JSON and string index are accepted");
   assert.ok(parseVisualReviews(JSON.stringify({ reviews: [{ ...ok, index: 1, notice: "false" }] }), 1)[0]);
   assert.equal(parseVisualReviews(JSON.stringify({ reviews: [{ ...ok, index: 1, notice: undefined }] }), 1)[0], null, "missing safety fields are never guessed");
@@ -118,10 +117,10 @@ async function main() {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 
-  // 6. Replan: when no seller photo proves the feature, coverage moves to an optional lifestyle slot filled by generation.
+  // 6. Natural-photo planning keeps missing slots and never lowers coverage through legacy replan.
   let stored = { version: "brand-post-package/v2", brandLinkId: "fx", connectKind: "SHOPPING", imagePolicy: "LOCKED_PRODUCT_OR_ORIGINAL",
     approvedAt: "old", title: "청소기", createdAt: "c", imageRequirements: { policy: "verified-source-first" },
-    composition: { sections: [
+    composition: { strategyVersion: SHOPPING_POST_STRATEGY_VERSION, sections: [
       { id: "feature", title: "흡입 구조", body: ["흡입 구조"], imageIntent: "흡입 구조 기능 근거", imageMin: 1, imageMax: 1, imagePaths: [] },
       { id: "fit", title: "잘 맞는 공간", body: ["원룸"], imageIntent: "AI 연출 이미지: 추천 환경의 공간 배치. 실제 사용이나 성능 증명이 아님", imageMin: 0, imageMax: 1, imagePaths: [] },
     ], renderNodes: [] }, imageAssets: [] } as unknown as BrandPostPackageManifestV2;
@@ -143,12 +142,13 @@ async function main() {
     },
   } as unknown as ImageReplanDependencies;
   const replanned = await replanShoppingImageCoverage({ brandLinkId: "fx" }, deps);
-  assert.deepEqual(repairCalls, [true, false], "source review first, then generation for the lifestyle slot");
-  assert.equal(replanned.changed, true);
-  assert.equal(replanned.after.missing, 0);
-  assert.equal(stored.composition.sections[0].imageMin, 0, "the feature section keeps its text but no longer needs a proof image");
+  assert.deepEqual(repairCalls, [], "v2 coverage cannot be moved or weakened by legacy recovery");
+  assert.equal(replanned.changed, false);
+  assert.equal(replanned.reason, "REPLAN_NATURAL_PHOTOS_REQUIRED");
+  assert.equal(replanned.after.missing, 1);
+  assert.equal(stored.composition.sections[0].imageMin, 1, "the missing required slot remains required");
   assert.equal(stored.composition.sections[0].imageIntent, "흡입 구조 기능 근거", "intent is never relabelled");
-  assert.equal(stored.composition.sections[1].imageMin, 1);
+  assert.equal(stored.composition.sections[1].imageMin, 0);
 
   // 7. Advice about using the product is not an experience claim; real claims still are.
   for (const advice of ["직접 사용 전에는 팔 안쪽에 먼저 발라 보세요.", "직접 사용할 때는 소량부터 바르는 게 좋아요.",
@@ -174,7 +174,7 @@ async function main() {
   // 10. Replan relaxation: nothing can take the coverage, but the post already has enough images.
   let relaxedStore = { version: "brand-post-package/v2", brandLinkId: "rx", connectKind: "SHOPPING", imagePolicy: "LOCKED_PRODUCT_OR_ORIGINAL",
     approvedAt: "old", title: "보풀제거기", createdAt: "c", heroImagePath: "hero.png", imageRequirements: { policy: "verified-source-first" },
-    composition: { sections: [
+    composition: { strategyVersion: SHOPPING_POST_STRATEGY_VERSION, sections: [
       { id: "feature", title: "6중 날", body: ["6중 날"], imageIntent: "6중 날 기능 근거", imageMin: 1, imageMax: 1, imagePaths: [] },
       { id: "spec", title: "규격", body: ["규격"], imageIntent: "크기 비교 또는 스펙 이미지", imageMin: 0, imageMax: 1, imagePaths: [] },
       { id: "done", title: "구성", body: ["구성"], imageIntent: "전체 구성 원본", imageMin: 4, imageMax: 4, imagePaths: ["a", "b", "c", "d"] },
@@ -192,33 +192,33 @@ async function main() {
     repair: async () => ({ errors: ["IMAGE_SOURCE_BINDING_REQUIRED: 원본 부족"] }),
   } as unknown as ImageReplanDependencies;
   const relaxedResult = await replanShoppingImageCoverage({ brandLinkId: "rx" }, relaxDeps);
-  assert.equal(relaxedResult.reason, "COVERAGE_RELAXED_POST_HAS_ENOUGH_IMAGES", "4 section images + hero = 5 meets the floor");
-  assert.equal(relaxedResult.after.missing, 0);
-  assert.equal(relaxedStore.composition.sections[0].imageMin, 0);
+  assert.equal(relaxedResult.reason, "REPLAN_NATURAL_PHOTOS_REQUIRED", "overall image count never relaxes an unfilled natural-photo slot");
+  assert.equal(relaxedResult.after.missing, 1);
+  assert.equal(relaxedStore.composition.sections[0].imageMin, 1);
   assert.equal(relaxedStore.composition.sections[0].imageIntent, "6중 날 기능 근거", "intent is not relabelled");
-  assert.ok(relaxedStore.pipelineNotes?.some((note) => note.startsWith("IMAGE_COVERAGE_RELAXED")));
+  assert.ok(!relaxedStore.pipelineNotes?.some((note) => note.startsWith("IMAGE_COVERAGE_RELAXED")));
   relaxedStore.composition.sections[0].imageMin = 1;
   relaxedStore.composition.sections[2].imagePaths = ["a", "b", "c"];
   relaxedStore.composition.sections[2].imageMin = 3;
   const fourImages = await replanShoppingImageCoverage({ brandLinkId: "rx" }, relaxDeps);
-  assert.equal(fourImages.reason, "COVERAGE_RELAXED_SELLER_GALLERY_EXHAUSTED", "(1.3.87) 3 section images + hero = 4 meets the three-image floor");
+  assert.equal(fourImages.reason, "REPLAN_NATURAL_PHOTOS_REQUIRED", "four images cannot lower the five-image plan");
   relaxedStore.composition.sections[0].imageMin = 1;
   relaxedStore.composition.sections[2].imagePaths = ["a"];
   relaxedStore.composition.sections[2].imageMin = 1;
   const thin = await replanShoppingImageCoverage({ brandLinkId: "rx" }, relaxDeps);
-  assert.match(thin.reason, /^REPLAN_INSUFFICIENT_VERIFIED_ALTERNATIVES · 전체 이미지 2\/3장/u, "too few images overall still asks for more");
-  // (1.3.87) No optional section to move coverage into: relax on the same floor instead of stopping.
+  assert.equal(thin.reason, "REPLAN_NATURAL_PHOTOS_REQUIRED", "missing references retain the natural-photo requirement");
+  // No optional capacity: the missing slot remains required.
   relaxedStore.composition.sections = relaxedStore.composition.sections.filter((section) => section.id !== "spec");
   relaxedStore.composition.sections.find((section) => section.id === "done")!.imagePaths = ["a", "b", "c"];
   relaxedStore.composition.sections.find((section) => section.id === "done")!.imageMin = 3;
   relaxedStore.composition.sections[0].imageMin = 2;
   const noCapacity = await replanShoppingImageCoverage({ brandLinkId: "rx" }, relaxDeps);
-  assert.equal(noCapacity.changed, true, noCapacity.reason);
-  assert.equal(relaxedStore.composition.sections[0].imageMin, 0);
+  assert.equal(noCapacity.changed, false, noCapacity.reason);
+  assert.equal(relaxedStore.composition.sections[0].imageMin, 2);
   relaxedStore.composition.sections[0].imageMin = 2;
   relaxedStore.composition.sections.find((section) => section.id === "done")!.imagePaths = ["a"];
   relaxedStore.composition.sections.find((section) => section.id === "done")!.imageMin = 1;
-  assert.match((await replanShoppingImageCoverage({ brandLinkId: "rx" }, relaxDeps)).reason, /^REPLAN_NO_ALTERNATIVE_CAPACITY · 전체 이미지 2\/3장/u);
+  assert.equal((await replanShoppingImageCoverage({ brandLinkId: "rx" }, relaxDeps)).reason, "REPLAN_NATURAL_PHOTOS_REQUIRED");
 
   // 11. Grader fact matching: decimals kept, spacing ignored, a numeric token alone suffices (golf-watch case).
   const golf = ["무선 방식", "배터리: 내장배터리", "방수: 생활방수", "사이즈/무게: 가로 47.8mm × 47.8mm × 13.73mm / 30.1g (밴드 미포함)", "오차 범위: ±3m"];
@@ -246,10 +246,10 @@ async function main() {
   assert.match(agent, /썸네일 감사 거절 · 다른 검증 원본으로 재생성/u);
   assert.match(agent, /failure\.code === "SEMANTIC_REJECTION" && node\?\.kind === "image" && node\.role === "thumbnail"/u);
 
-  // 14. Seller gallery exhausted (no cutout, no more sources): floor 3, recorded on the composition and honoured by the gate.
+  // 14. Missing references never lower the five-photo floor, even with legacy imageFloor metadata.
   let exhaustedStore = { version: "brand-post-package/v2", brandLinkId: "gx", connectKind: "SHOPPING", imagePolicy: "LOCKED_PRODUCT_OR_ORIGINAL",
     approvedAt: "old", title: "침구청소기", createdAt: "c", heroImagePath: "hero.png", imageRequirements: { policy: "verified-source-first" },
-    composition: { sections: [
+    composition: { strategyVersion: SHOPPING_POST_STRATEGY_VERSION, sections: [
       { id: "feature", title: "열풍 건조", body: ["열풍 건조"], imageIntent: "열풍 건조 기능 근거", imageMin: 1, imageMax: 1, imagePaths: [] },
       { id: "fit", title: "잘 맞는 집", body: ["원룸"], imageIntent: "AI 연출 이미지: 추천 환경의 공간 배치. 실제 사용이나 성능 증명이 아님", imageMin: 0, imageMax: 1, imagePaths: [] },
       { id: "done", title: "구성", body: ["구성"], imageIntent: "전체 구성 원본", imageMin: 2, imageMax: 2, imagePaths: ["a", "b"] },
@@ -269,17 +269,17 @@ async function main() {
       : ["shopping-fit: PRODUCT_CUTOUT_REQUIRED: 검증된 상품 사진은 있으나 안전하게 분리 가능한 원본이 없습니다."] }),
   } as unknown as ImageReplanDependencies;
   const exhausted = await replanShoppingImageCoverage({ brandLinkId: "gx" }, exhaustedDeps);
-  assert.equal(exhausted.reason, "COVERAGE_RELAXED_SELLER_GALLERY_EXHAUSTED", "2 images + hero = 3 meets the exhausted-gallery floor");
-  assert.equal(exhaustedStore.composition.imageFloor, 3);
+  assert.equal(exhausted.reason, "REPLAN_NATURAL_PHOTOS_REQUIRED");
+  assert.equal(exhausted.changed, false);
+  assert.equal(exhaustedStore.composition.imageFloor, undefined);
   const floorReport = (imageFloor?: number) => buildPostQualityReport({ contract: SHOPPING_POST_CONTRACT_V1, preset: "PREMIUM",
     sections: [], imageCount: 3, imageFloor });
-  assert.ok(!floorReport(3).blockers.some((blocker) => blocker.includes("이미지가")), "the gate honours the recorded floor");
+  assert.ok(floorReport(3).blockers.some((blocker) => blocker.includes("이미지가 5장보다 적습니다")), "a stale floor override cannot bypass the natural-photo contract");
   const unfilled = { id: "feature", title: "기능", body: ["본문"], characterCount: 0, imagePaths: [], imageIntent: "기능 근거",
     headingStyle: "sectionTitle", imageMin: 1, imageMax: 1 } as never;
   assert.ok(buildPostQualityReport({ contract: SHOPPING_POST_CONTRACT_V1, preset: "PREMIUM", sections: [unfilled], imageCount: 3 })
     .blockers.some((blocker) => blocker.includes("이미지가 5장보다 적습니다")), "with a required slot still empty the contract minimum applies");
-  assert.ok(floorReport().warnings.some((warning) => warning.includes("이미지가 5장보다 적습니다")) &&
-    !floorReport().blockers.some((blocker) => blocker.includes("이미지가")), "all required slots filled: three images block no longer, the gap is advice");
+  assert.ok(floorReport().blockers.some((blocker) => blocker.includes("이미지가 5장보다 적습니다")), "three images remain incomplete even when no optional section requires a photo");
 
 
   // 12. (1.3.85) A passing draft with a warn-level flow signal is not sent to text repair.
@@ -304,35 +304,15 @@ async function main() {
   assert.match(agent, /SOURCE_EVIDENCE_REQUIRED: 제품 자체의 확인 가능한 구성·중량·기능·규격 텍스트 근거가 부족합니다\. \(상세 구간/u,
     "the failure names what was read");
 
-  // 14. (1.3.85) No separable cutout: a flat information card frames the whole verified photo.
-  const cardDir = fs.mkdtempSync(path.join(os.tmpdir(), "fact-card-"));
-  try {
-    const photo = path.join(cardDir, "photo.jpg");
-    await sharp({ create: { width: 800, height: 1000, channels: 3, background: "#8aa4c8" } }).jpeg().toFile(photo);
-    const facts = ["용량: 4.5L", "소비전력: 300W", "가열식 살균 방식", "연속 사용: 최대 12시간", "무게: 2.1kg"];
-    const chosen = selectShoppingFactCardFacts({ facts, sectionText: "가열식 살균 방식이라 물을 끓여 내보내요. 4.5L라 하루 종일 써요." });
-    assert.deepEqual(chosen.slice(0, 2).sort(), ["가열식 살균 방식", "용량: 4.5L"].sort(), "facts the section mentions come first");
-    assert.deepEqual(wrapCardText("아주아주아주아주 긴 한 줄짜리 사실 문장입니다 계속 길어집니다 끝없이", 10, 2), [], "overlong facts are skipped, not truncated");
-    const hashes = new Set<string>();
-    for (let variant = 0; variant < 3; variant += 1) {
-      const card = await createShoppingFactCard({ sourcePath: photo, title: "가열식이라 위생적인가", facts: chosen, variant, outputDir: cardDir });
-      const meta = await sharp(card.outputPath).metadata();
-      assert.equal(`${meta.width}x${meta.height}`, "1200x900");
-      assert.ok(isShoppingFactCardPath(card.outputPath));
-      assert.equal(readProductPhotoSource(card.outputPath)?.segmented, false, "the whole photo is recorded as unsegmented");
-      hashes.add(fs.readFileSync(card.outputPath).toString("base64"));
-    }
-    assert.equal(hashes.size, 3, "variants differ so duplicates are not rejected");
-    await assert.rejects(createShoppingFactCard({ sourcePath: photo, title: "t", facts: ["하나"], variant: 0, outputDir: cardDir }), /SHOPPING_FACT_CARD_FACTS_REQUIRED/u);
-  } finally {
-    fs.rmSync(cardDir, { recursive: true, force: true });
-  }
+  // 14. Old information cards remain detectable solely for rejection/migration.
+  assert.ok(isShoppingFactCardPath("shopping-fact-card-legacy.png"));
+  assert.ok(!isShoppingFactCardPath("natural-lifestyle-scene.png"));
+  assert.match(SHOPPING_FACT_CARD_AUDIT_RULE_EN, /forbidden legacy information card/);
   const cardAsset = { provenance: "EDITORIAL_CARD", creationMethod: "local-composite", remoteGenerated: false } as const;
   assert.ok(isShoppingFactCardAsset(cardAsset));
   assert.deepEqual(classifyBrandPostImageEvidence(cardAsset), { coherent: true, generated: false, reason: null });
   const imageSource = fs.readFileSync("src/lib/brand-post-image-generation.ts", "utf8");
-  assert.match(imageSource, /publishFactCard\(failed\.index, failed\.target, wholePhotos, \{ requireSectionFact: true \}\)/u,
-    "only source-missing evidence sections may use a fact card, with a matching verified section fact");
+  assert.doesNotMatch(imageSource, /createShoppingFactCard|publishFactCard/u, "missing source photographs cannot be filled by framed information cards");
   assert.doesNotMatch(imageSource, /createLockedProductEditorialScene|createLockedProductThumbnailOnBackground/u,
     "reference-scene failure cannot silently become the old framed product composite");
   assert.ok(!imageSource.includes("createOriginalProductPhotoOnBackground"), "whole photos are still never put on generated backgrounds");
@@ -354,14 +334,14 @@ async function main() {
     },
   } as unknown as ImageReplanDependencies;
   const cardReplan = await replanShoppingImageCoverage({ brandLinkId: "fx" }, cardDeps);
-  assert.equal(cardReplan.reason, "VERIFIED_ALTERNATIVE_COVERAGE", "a fact card carries the moved coverage");
-  assert.equal(cardReplan.after.missing, 0);
+  assert.equal(cardReplan.reason, "REPLAN_NATURAL_PHOTOS_REQUIRED", "a legacy card cannot carry missing natural-photo coverage");
+  assert.equal(cardReplan.changed, false);
+  assert.equal(cardReplan.after.missing, 1);
 
 
-  // 15. (1.3.86) Fact cards pass approval; advisory signals never read as failures.
+  // 15. Card approval exceptions are removed; advisory text signals still stay advisory.
   const pkgSource = fs.readFileSync("src/lib/brand-post-package.ts", "utf8");
-  assert.match(pkgSource, /!source\.segmented && !isReferenceGuidedScene\(asset\) && asset\.creationMethod !== "source" && !isShoppingFactCardAsset\(asset\)/u,
-    "the full-frame overlay block exempts flat information cards");
+  assert.doesNotMatch(pkgSource, /!isShoppingFactCardAsset\(asset\)/u, "no card exemption can approve a framed original in body coverage");
   const flowReadiness = getBrandLinkContentReadiness({
     productName: product.productName, title: `${product.productName} 사용법`, brandLink: "https://naver.me/x", generationSource: "AI",
     hasRepresentativeImage: true, requireRepresentativeImage: false, connectKind: "SHOPPING", experienceMode: "AI_ASSISTED_INFORMATION",
@@ -500,7 +480,7 @@ async function main() {
   assert.equal(raced.accepted, true, "a concurrent status change is retried, not reported");
   assert.equal(raced.actions.filter((action) => action === "repair_rejected").length, 1);
 
-  console.log("PASS: draft structure normalization + retry, shared evidence requirement + named missing facts, tolerant visual verdicts + non-fatal per-image proposal failures, leak stripping, static seller images, generated lifestyle replan, advice-not-claim, recovery policy version, severe-draft rewrite, coverage relaxation, grader fact matching, unbranded identity, prepare-mode thumbnail recovery, exhausted-gallery floor, recheck/revise agreement, seller-image vision batch, fact cards, card approval, advisory signals, digital facts, travel trip-place visits, heading splits, named missing places, three-image replan floor, no-capacity relaxation, rejected-image drop, rejection fall-through, recheck race retry");
+  console.log("PASS: draft structure normalization + retry, shared evidence requirement + named missing facts, tolerant visual verdicts + non-fatal per-image proposal failures, leak stripping, static seller images, natural-photo replan preservation, advice-not-claim, recovery policy version, severe-draft rewrite, required coverage preservation, grader fact matching, unbranded identity, prepare-mode thumbnail recovery, five-photo floor despite missing seller references, recheck/revise agreement, seller-image vision batch, legacy card rejection, no card approval exemption, advisory signals, digital facts, travel trip-place visits, heading splits, named missing places, stale image-floor rejection, no-capacity preservation, rejected-image drop, rejection fall-through, recheck race retry");
 }
 
 main().catch((error) => {

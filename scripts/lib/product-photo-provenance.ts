@@ -18,7 +18,7 @@ export interface ProductPhotoSourceRecord {
   sourcePath: string;
   sourceSha256: string;
   outputSha256: string;
-  provenance: "LOCKED_PRODUCT" | "EDITORIAL_CARD";
+  provenance: "LOCKED_PRODUCT" | "EDITORIAL_CARD" | "PHOTO_TEXT_THUMBNAIL";
   segmented: boolean;
 }
 
@@ -27,6 +27,7 @@ export function preserveProductPhotoSource(options: {
   sourcePath: string;
   outputPath: string;
   segmented: boolean;
+  provenance?: ProductPhotoSourceRecord["provenance"];
 }): ProductPhotoSourceRecord {
   const bytes = photoBytes(options.sourcePath);
   const sourceSha256 = digest(bytes);
@@ -42,7 +43,7 @@ export function preserveProductPhotoSource(options: {
   }
   const record: ProductPhotoSourceRecord = {
     version: "product-photo-source/v1", sourcePath, sourceSha256, outputSha256,
-    provenance: options.segmented ? "LOCKED_PRODUCT" : "EDITORIAL_CARD",
+    provenance: options.provenance || (options.segmented ? "LOCKED_PRODUCT" : "EDITORIAL_CARD"),
     segmented: options.segmented,
   };
   fs.writeFileSync(`${options.outputPath}.source.json`, JSON.stringify(record, null, 2), "utf8");
@@ -72,6 +73,6 @@ export function copyProductPhotoSource(sourceOutputPath: string, destinationOutp
   if (digest(photoBytes(destinationOutputPath)) !== record.outputSha256) {
     throw new Error("상품 이미지 복사본이 원본 출처 기록과 일치하지 않습니다.");
   }
-  preserveProductPhotoSource({ sourcePath: record.sourcePath, outputPath: destinationOutputPath, segmented: record.segmented });
+  preserveProductPhotoSource({ sourcePath: record.sourcePath, outputPath: destinationOutputPath, segmented: record.segmented, provenance: record.provenance });
   return true;
 }

@@ -6,14 +6,16 @@ import { QC_MAX, type QcFailureCode, type ThumbnailQcReport } from "./qc";
 
 const CORRECTIONS: Record<QcFailureCode, string> = {
   productDistorted: "Make the product more faithful to the provided reference image: same shape, color, material, and package impression.",
-  productNameMissing: "Render the exact product name label exactly as provided. Do not replace it with a category name or generic product name.",
+  productNameMissing: "Preserve the correct product or destination identity from the reference. Render only the exact text strings required in the base prompt, never add a secondary label when the headline is the only required text.",
   koreanTypo: "Korean text must be exactly copied, fewer text strings, larger text, no extra text.",
   textCut: "Increase safe margins, keep all text fully inside the safe zone away from the edges.",
   productSmall: "Make the product much larger and sharper as the main hero object.",
   notPhotoreal: "More photorealistic real-world product scene, camera/lens realism, no vector or cartoon style.",
   mockup: "Remove the phone, laptop, or shopping screen. Focus on the product hero scene and exact product name label.",
   forbiddenInfo: "Remove all affiliate commission, commission rate, internal seller data, and unverified claims.",
-  lowContrast: "Increase contrast between the headline and its background: put a clean panel or gradient behind the text.",
+  lowContrast: "Increase contrast with a restrained text shadow or soft photographic gradient. Keep the photograph continuous; never add a panel, card or frame.",
+  headlineSmall: "Use a very large heavy headline, 132-170 px on a 1080 px square, no more than two short lines. The words must remain immediately readable at 120 px and 240 px.",
+  editorialCard: "Remove every inset image, explanatory frame, split panel, bullet list, badge and CTA. Fill the canvas with one continuous natural photograph and one large headline in negative space.",
   extraText: "Remove every text element that is not in the required list. Only the required Korean strings may appear.",
 };
 

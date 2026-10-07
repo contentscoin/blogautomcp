@@ -106,7 +106,7 @@ export async function selectVerifiedProductSectionImages(
     allowScene: allowsOriginalShoppingScene(target),
   }));
   const reviewKey = crypto.createHash("sha256").update(JSON.stringify({
-    version: 8,
+    version: 9,
     selectedProduct: options.selectedProduct || productName,
     productName: productName.normalize("NFKC").replace(/\s+/gu, " ").trim(),
     targets: normalizedTargets,
@@ -142,7 +142,7 @@ export async function selectVerifiedProductSectionImages(
           sectionTitle: target.sectionTitle,
           sectionBody: target.sectionBody,
           imageIntent: target.imageIntent,
-          allowedReviewClasses: target.allowScene ? ["scene-evidence"] : target.allowProductPhoto ? ["product-photo", "feature-evidence"] : ["feature-evidence"],
+          allowedReviewClasses: target.allowScene ? (target.allowProductPhoto ? ["product-photo", "scene-evidence"] : ["scene-evidence"]) : target.allowProductPhoto ? ["product-photo", "feature-evidence"] : ["feature-evidence"],
         })))}`,
         `전체 후보 ${candidates.length}장 중 이번 첨부 ${offset + 1}~${offset + batch.length}번을 검사합니다. 응답 selectedIndex는 이번 첨부 안의 1번부터 ${batch.length}번까지입니다.`,
         "scene-evidence는 원본 사용 장면 목적에서만 허용합니다. 해당 상품이 요청한 생활 공간이나 사용 환경에 실제로 놓여 있는 원본 사진만 인정합니다. 흰 배경 단독 상품, 글자 설명판, 합성 연출 이미지는 scene-evidence가 아닙니다. 실제 후기나 성능을 추정하지 마세요.",
@@ -183,7 +183,8 @@ export async function selectVerifiedProductSectionImages(
       if (targetIndex < 0 || targetIndex >= normalizedTargets.length || selectedIndex < 0 ||
           selectedIndex >= batch.length || !reviewClass || usedPairs.has(`${targetIndex}:${selectedIndex}`) ||
           (reviewClass === "product-photo" && !normalizedTargets[targetIndex].allowProductPhoto) ||
-          (reviewClass === "scene-evidence" ? !normalizedTargets[targetIndex].allowScene : normalizedTargets[targetIndex].allowScene)) continue;
+          (reviewClass === "scene-evidence" && !normalizedTargets[targetIndex].allowScene) ||
+          (reviewClass === "feature-evidence" && normalizedTargets[targetIndex].allowScene)) continue;
       usedPairs.add(`${targetIndex}:${selectedIndex}`);
       const candidate = batch[selectedIndex];
       if (normalizedTargets[targetIndex].excludedSourceSha256.includes(candidate.sha256)) continue;

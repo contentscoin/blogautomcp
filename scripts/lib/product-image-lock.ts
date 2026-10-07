@@ -7,6 +7,7 @@ import { compactProductDisplayName } from "./product-thumbnail";
 import {
   buildThumbnailOverlayV2,
   generateThumbnailCropPreviews,
+  renderShoppingPhotoThumbnail,
   type ThumbnailV2Style,
 } from "./thumbnail-layout-v2";
 import { inferProductPhysicalScale, type ProductPhysicalScale } from "./product-9canvas";
@@ -157,25 +158,11 @@ export async function createLockedProductThumbnail(options: {
   style?: ShoppingThumbnailStyle;
 }): Promise<LockedProductThumbnailResult> {
   const lock = await extractLockedProductPng(options.sourcePath, options.outputDir);
-  const product = await sharp(lock.lockedPngPath)
-    .trim({ background: { r: 255, g: 255, b: 255, alpha: 0 } })
-    .resize(430, 720, { fit: "contain", withoutEnlargement: true, background: { r: 255, g: 255, b: 255, alpha: 0 } })
-    .png()
-    .toBuffer();
-  const svg = await buildThumbnailOverlayV2({
-    eyebrow: compactProductDisplayName(options.productName),
-    headline: options.headline || options.subline,
-    subline: options.subline,
-    style: thumbnailV2Style(options.style),
-    subjectSide: "right",
-  });
   const outputPath = path.join(options.outputDir, `locked-product-thumbnail-${Date.now()}.png`);
-  await sharp(svg)
-    .composite([{ input: product, left: 620, top: 190 }])
-    .png({ compressionLevel: 9 })
-    .toFile(outputPath);
+  await renderShoppingPhotoThumbnail({ sourcePath: options.sourcePath, outputPath,
+    headline: options.headline || options.subline, style: thumbnailV2Style(options.style) });
   await generateThumbnailCropPreviews(outputPath, options.outputDir);
-  preserveProductPhotoSource({ sourcePath: options.sourcePath, outputPath, segmented: true });
+  preserveProductPhotoSource({ sourcePath: options.sourcePath, outputPath, segmented: false, provenance: "PHOTO_TEXT_THUMBNAIL" });
   return { outputPath, lock };
 }
 
@@ -198,7 +185,7 @@ export async function createLockedProductThumbnailOnBackground(options: {
     .toBuffer();
   const product = await sharp(lock.lockedPngPath)
     .trim({ background: { r: 255, g: 255, b: 255, alpha: 0 } })
-    .resize(430, 720, { fit: "contain", withoutEnlargement: true, background: { r: 255, g: 255, b: 255, alpha: 0 } })
+    .resize(740, 900, { fit: "inside", background: { r: 255, g: 255, b: 255, alpha: 0 } })
     .png()
     .toBuffer();
   const overlay = await buildThumbnailOverlayV2({
@@ -211,8 +198,9 @@ export async function createLockedProductThumbnailOnBackground(options: {
   });
   fs.mkdirSync(options.outputDir, { recursive: true });
   const outputPath = path.join(options.outputDir, `gpt-background-product-thumbnail-${Date.now()}.png`);
+  const productSize = await sharp(product).metadata();
   await sharp(background)
-    .composite([{ input: overlay }, { input: product, left: 620, top: 190 }])
+    .composite([{ input: product, left: Math.floor((1080 - productSize.width!) / 2), top: 50 }, { input: overlay }])
     .png({ compressionLevel: 9 })
     .toFile(outputPath);
   await generateThumbnailCropPreviews(outputPath, options.outputDir);
@@ -300,7 +288,7 @@ export async function createOriginalProductPhotoOnBackground(options: {
   return { outputPath, sourceSha256 };
 }
 
-/** 배경 분리가 불확실할 때 상세페이지 원본 사진을 그대로 카드에 배치한다. */
+/** Thumbnail-only fallback: a large complete original photo and a prominent title, never a card. */
 export async function createOriginalProductPhotoThumbnail(options: {
   sourcePath: string;
   outputDir: string;
@@ -310,30 +298,10 @@ export async function createOriginalProductPhotoThumbnail(options: {
   style?: ShoppingThumbnailStyle;
 }): Promise<{ outputPath: string; sourceSha256: string }> {
   fs.mkdirSync(options.outputDir, { recursive: true });
-  const photo = await sharp(options.sourcePath)
-    .rotate()
-    // V2 text ends at x=562. Use the remaining subject area without cropping
-    // or recoloring the original photograph, including low-resolution sources.
-    .resize(470, 900, { fit: "inside" })
-    .png()
-    .toBuffer();
-  const svg = await buildThumbnailOverlayV2({
-    eyebrow: compactProductDisplayName(options.productName),
-    headline: options.headline || options.subline,
-    subline: options.subline,
-    style: thumbnailV2Style(options.style),
-    subjectSide: "right",
-  });
   const outputPath = path.join(options.outputDir, `original-product-thumbnail-${Date.now()}.png`);
-  // The V2 ground shadow is intended for a cutout, not a rectangular photo.
-  // Keep this adaptation local: the shared overlay and segmented path are unchanged.
-  const photoOverlay = Buffer.from(svg.toString().replace(/<ellipse\b[^>]*\/>/g, ""));
-  const dimensions = await sharp(photo).metadata();
-  await sharp(photoOverlay)
-    .composite([{ input: photo, left: 570 + Math.floor((470 - dimensions.width!) / 2), top: Math.floor((1080 - dimensions.height!) / 2) }])
-    .png({ compressionLevel: 9 })
-    .toFile(outputPath);
+  await renderShoppingPhotoThumbnail({ sourcePath: options.sourcePath, outputPath,
+    headline: options.headline || options.subline, style: thumbnailV2Style(options.style) });
   await generateThumbnailCropPreviews(outputPath, options.outputDir);
-  preserveProductPhotoSource({ sourcePath: options.sourcePath, outputPath, segmented: false });
+  preserveProductPhotoSource({ sourcePath: options.sourcePath, outputPath, segmented: false, provenance: "PHOTO_TEXT_THUMBNAIL" });
   return { outputPath, sourceSha256: sha256File(options.sourcePath) };
 }

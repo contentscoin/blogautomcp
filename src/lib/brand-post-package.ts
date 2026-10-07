@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { publicationImageGeometryIssue } from "../../scripts/lib/publication-image-geometry";
 import { rejectedPublicationImageHashes } from "../../scripts/lib/publish-image-rejections";
 import { copyProductPhotoSource, readProductPhotoSource } from "../../scripts/lib/product-photo-provenance";
+import { shoppingImageFormatIssue } from "../../scripts/lib/shopping-image-format";
 import { getAppDataDir } from "../../scripts/lib/app-paths";
 import type { BrandLinkContentReadiness } from "../../scripts/lib/brandlink-content-readiness";
 import type { ProductSnapshot } from "./draft-context-snapshot";
@@ -31,7 +32,6 @@ import {
   brandPostImageIntentMatches,
   brandPostSectionSlotId,
   classifyBrandPostImageEvidence,
-  isShoppingFactCardAsset,
   isReferenceGuidedScene,
   referenceSceneReviewIssue,
   REFERENCE_SCENE_CAPTION,
@@ -49,7 +49,7 @@ export interface BrandPostPackageImageAsset {
   slotId?: string;
   creationMethod?: "source" | "local-composite" | "remote-generated" | "source-with-generated-background" | "reference-guided-scene";
   remoteGenerated?: boolean;
-  provenance?: "ORIGINAL" | "LOCKED_PRODUCT" | "GENERATED_BACKGROUND" | "EDITORIAL_CARD" | "GENERATED_SCENE";
+  provenance?: "ORIGINAL" | "LOCKED_PRODUCT" | "GENERATED_BACKGROUND" | "EDITORIAL_CARD" | "GENERATED_SCENE" | "PHOTO_TEXT_THUMBNAIL";
   referenceScene?: ReferenceSceneReview;
   /** Audit trail for seller bytes used directly or as a locked composite foreground. */
   sourceReview?: {
@@ -439,6 +439,8 @@ function packageImagePreviewAsset(manifest: BrandPostPackageManifest, asset: Bra
 }
 
 function auditBrandPostImages(manifest: BrandPostPackageManifest) {
+  const naturalPhotoPlan = manifest.version === "brand-post-package/v2" && manifest.connectKind === "SHOPPING" &&
+    manifest.composition.strategyVersion === SHOPPING_POST_STRATEGY_VERSION;
   const assets = normalizePackageImageAssets(manifest);
   const assetsByPath = new Map<string, BrandPostPackageImageAsset[]>();
   for (const asset of assets) {
@@ -461,6 +463,8 @@ function auditBrandPostImages(manifest: BrandPostPackageManifest) {
     }
   };
   const heroResolved = path.resolve(manifest.heroImagePath);
+  if (manifest.connectKind === "SHOPPING" && !naturalPhotoPlan) addIssue({ code: "image-plan-obsolete",
+    reason: "이전 쇼핑 이미지 계획입니다. 이미지 다시 준비에서 원본 1장과 자연스러운 AI 장면 3장 계획으로 전환하세요." });
   const heroCandidates = assetsByPath.get(heroResolved) || [];
   const heroFileAsset = heroCandidates.find(isValidPackageImage);
   const heroAsset = heroCandidates.find(asset => asset.role === "hero" && !asset.sectionId && isValidPackageImage(asset));
@@ -469,6 +473,10 @@ function auditBrandPostImages(manifest: BrandPostPackageManifest) {
   if (!heroAsset) {
     addIssue({ code: "hero-image-invalid", reason: "대표 이미지 파일·역할·저장 해시가 올바르지 않습니다." });
   } else {
+    if (naturalPhotoPlan && heroAsset.provenance !== "PHOTO_TEXT_THUMBNAIL") addIssue({ code: "image-thumbnail-format-required",
+      reason: "대표 이미지는 자연스러운 전체 사진 위에 큰 제목을 적용한 새 썸네일로 준비하세요." });
+    const formatIssue = manifest.connectKind === "SHOPPING" ? shoppingImageFormatIssue(heroAsset, true) : null;
+    if (formatIssue) addIssue({ code: "image-format-obsolete", reason: `대표 이미지 · ${formatIssue}` });
     const geometry = publicationImageGeometryIssue(heroAsset.path);
     if (geometry) addIssue({ code: "image-geometry-invalid", reason: `대표 이미지 · ${geometry}` });
     if (manifest.version === "brand-post-package/v2" && rejectedPublicationImageHashes(manifest.brandLinkId, manifest.composition, null).includes(heroAsset.sha256))
@@ -483,6 +491,13 @@ function auditBrandPostImages(manifest: BrandPostPackageManifest) {
   }
 
   if (manifest.version !== "brand-post-package/v2") {
+    if (manifest.connectKind === "SHOPPING") {
+      for (const file of manifest.bodyImagePaths) {
+        const asset = assetsByPath.get(path.resolve(file))?.[0] || { path: file };
+        const formatIssue = shoppingImageFormatIssue(asset, false);
+        if (formatIssue) addIssue({ code: "image-format-obsolete", reason: `본문 이미지 · ${formatIssue}` });
+      }
+    }
     return {
       slots: [] as Array<never>,
       issues,
@@ -516,6 +531,13 @@ function auditBrandPostImages(manifest: BrandPostPackageManifest) {
         stale = { code: "image-asset-invalid", reason: `이미지 · ${section.title}: 파일이 없거나 저장된 해시와 일치하지 않습니다.` };
       } else if (asset.role !== "body" || asset.sectionId !== section.id) {
         stale = { code: "image-asset-binding", reason: `이미지 · ${section.title}: 본문 이미지의 역할 또는 파트 결속이 올바르지 않습니다.` };
+      } else if (manifest.connectKind === "SHOPPING" && shoppingImageFormatIssue(asset, false)) {
+        stale = { code: "image-format-obsolete", reason: `이미지 · ${section.title}: ${shoppingImageFormatIssue(asset, false)}` };
+      } else if (naturalPhotoPlan && (maximum === 0 ||
+          (section.imageSource === "seller-original" && (asset.provenance !== "ORIGINAL" || asset.creationMethod !== "source" || asset.remoteGenerated === true)) ||
+          (section.imageSource === "staged-ai" && !isReferenceGuidedScene(asset)) ||
+          (section.imageSource !== "seller-original" && section.imageSource !== "staged-ai"))) {
+        stale = { code: "image-natural-photo-role", reason: `이미지 · ${section.title}: 원본 슬롯에는 원본 1장, AI 슬롯에는 참조 검수를 통과한 자연스러운 생성 장면만 배치할 수 있습니다.` };
       } else if (publicationImageGeometryIssue(asset.path)) {
         stale = { code: "image-geometry-invalid", reason: `이미지 · ${section.title}: ${publicationImageGeometryIssue(asset.path)}` };
       } else if (rejectedPublicationImageHashes(manifest.brandLinkId, manifest.composition, section.id).includes(asset.sha256)) {
@@ -533,7 +555,8 @@ function auditBrandPostImages(manifest: BrandPostPackageManifest) {
           stale = { code: "image-intent-stale", reason: `이미지 · ${section.title}: 생성 이미지의 현재 파트 목적 또는 슬롯 결속이 오래되었습니다.` };
         } else if (isReferenceGuidedScene(asset) && brandPostReferenceSceneIssue(manifest, asset)) {
           stale = { code: "image-reference-review-invalid", reason: `이미지 · ${section.title}: ${brandPostReferenceSceneIssue(manifest, asset)}` };
-        } else if (isReferenceGuidedScene(asset) && (manifest.connectKind !== "SHOPPING" || section.imageSource === "seller-crop" ||
+        } else if (isReferenceGuidedScene(asset) && (manifest.connectKind !== "SHOPPING" ||
+            (section.imageSource !== undefined && section.imageSource !== "staged-ai") ||
             !(isShoppingLifestyleImage(section) || allowsGenericBrandPostProductPhoto({ sectionTitle: section.title, imageIntent: section.imageIntent, imageSource: section.imageSource })))) {
           stale = { code: "image-scene-not-evidence", reason: `이미지 · ${section.title}: 상품 참조 연출컷은 기능·효능·실측 근거로 사용할 수 없습니다.` };
         } else if (generated && !isReferenceGuidedScene(asset) && manifest.connectKind === "SHOPPING" && isShoppingLifestyleImage(section) &&
@@ -554,16 +577,9 @@ function auditBrandPostImages(manifest: BrandPostPackageManifest) {
             code: "image-source-review-missing",
             reason: `이미지 · ${section.title}: 생성 배경에 합성한 상품 원본이 현재 기능 목적과 일치한다는 검증 기록이 없습니다.`,
           };
-        } else if (!generated && manifest.connectKind === "SHOPPING" && isShoppingFactCardAsset(asset)) {
-          // A fact card frames a whole verified seller photo; it proves no scene or feature by itself.
-          if (manifest.imageRequirements?.policy === "generated-required" || !readProductPhotoSource(asset.path) ||
-              asset.slotId !== expectedSlotId || !brandPostImageIntentMatches({
-                assetIntent: asset.imageIntent, sectionTitle: section.title, sectionIntent: section.imageIntent })) {
-            stale = { code: "image-intent-stale", reason: `이미지 · ${section.title}: 정보 카드의 원본 사진 기록 또는 파트 결속이 올바르지 않습니다.` };
-          }
         } else if (!generated && manifest.connectKind === "SHOPPING") {
           const review = asset.sourceReview;
-          const reviewClassAllowed = allowsOriginalShoppingScene(section) ? review?.reviewClass === "scene-evidence" : review?.reviewClass === "feature-evidence" ||
+          const reviewClassAllowed = allowsOriginalShoppingScene(section) ? review?.reviewClass === "scene-evidence" || review?.reviewClass === "product-photo" : review?.reviewClass === "feature-evidence" ||
             (review?.reviewClass === "product-photo" && allowsGenericBrandPostProductPhoto({
               sectionTitle: section.title,
               imageIntent: section.imageIntent,
@@ -604,13 +620,14 @@ function auditBrandPostImages(manifest: BrandPostPackageManifest) {
       claimedHashes.add(asset.sha256);
       const previewAsset = { ...packageImagePreviewAsset(manifest, asset), expectedSlotId };
       sectionAssets.push(previewAsset);
-      // Cards carry lifestyle coverage when no cutout exists; they satisfy the staged-scene minimum.
-      if (generated || (manifest.connectKind === "SHOPPING" && isShoppingFactCardAsset(asset))) generatedAssets.add(asset.sha256);
+      if (generated) generatedAssets.add(asset.sha256);
     }
     const originalCount = sectionAssets.length - generatedAssets.size;
     const generatedCount = generatedAssets.size;
-    const generatedMinimum = (manifest.imageRequirements?.policy === "generated-required" ||
-      (manifest.connectKind === "SHOPPING" && isShoppingLifestyleImage(section) && !allowsOriginalShoppingScene(section))) && maximum > 0 ? minimum : 0;
+    const generatedMinimum = maximum > 0 &&
+      !(manifest.connectKind === "SHOPPING" && section.imageSource === "seller-original") &&
+      (manifest.imageRequirements?.policy === "generated-required" ||
+      (manifest.connectKind === "SHOPPING" && isShoppingLifestyleImage(section))) ? minimum : 0;
     const coverageMissing = Math.max(0, minimum - sectionAssets.length);
     return {
       sectionId: section.id, title: section.title, intent: section.imageIntent,
@@ -621,6 +638,17 @@ function auditBrandPostImages(manifest: BrandPostPackageManifest) {
       staleTargets,
     };
   });
+  if (naturalPhotoPlan) {
+    const originalSections = manifest.composition.sections.filter(section => section.imageSource === "seller-original");
+    const originalSlots = slots.filter(slot => originalSections.some(section => section.id === slot.sectionId));
+    const sceneSlots = slots.filter(slot => manifest.composition.sections.find(section => section.id === slot.sectionId)?.imageSource === "staged-ai");
+    const plannedOriginals = originalSlots.reduce((sum, slot) => sum + slot.minimum, 0);
+    const plannedScenes = sceneSlots.reduce((sum, slot) => sum + slot.minimum, 0);
+    if (originalSections.length !== 1 || plannedOriginals !== 1 || originalSlots.some(slot => slot.maximum !== 1) || plannedScenes < 3)
+      addIssue({ code: "image-natural-photo-plan", reason: "본문 이미지 계획은 기본 원본 1장과 서로 다른 자연스러운 AI 장면 3장이 필요합니다. 추가 장면은 허용하며 이미지 다시 준비에서 계획을 갱신할 수 있습니다." });
+    if (slots.reduce((sum, slot) => sum + slot.originalCount, 0) > 1)
+      addIssue({ code: "image-original-count", reason: "본문 원본 사진은 1장만 사용할 수 있습니다. 추가 원본으로 AI 장면 수를 채울 수 없습니다." });
+  }
   return { slots, issues, heroAsset, usedPaths };
 }
 
@@ -697,8 +725,8 @@ export function evaluateBrandPostPackageReadiness(manifest: BrandPostPackageMani
   for (const asset of assets) {
     if (!imageAudit.usedPaths.has(path.resolve(asset.path))) continue;
     const source = readProductPhotoSource(asset.path);
-    // A flat information card frames the whole photo without any generated background.
-    if (source && !source.segmented && !isReferenceGuidedScene(asset) && asset.creationMethod !== "source" && !isShoppingFactCardAsset(asset)) blockers.push({
+    const photoThumbnail = asset.role === "hero" && asset.provenance === "PHOTO_TEXT_THUMBNAIL" && source?.provenance === "PHOTO_TEXT_THUMBNAIL";
+    if (source && !source.segmented && !isReferenceGuidedScene(asset) && asset.creationMethod !== "source" && !photoThumbnail) blockers.push({
       code: "image-full-frame-overlay",
       sectionId: asset.sectionId || undefined,
       reason: "이미지 · 상품 전체 사각형 사진을 생성 배경 위에 카드처럼 합성한 이미지는 승인할 수 없습니다.",
@@ -1028,16 +1056,24 @@ function bindBodyImageInComposition(options: {
     altText: `${section.title} - ${options.imageIntent}`,
     layout,
     sourcePolicy: options.imagePolicy,
+    ...(options.connectKind === "SHOPPING" && section.imageSource === "seller-original"
+      ? { caption: "판매페이지 원본 상품 사진" } : {}),
   };
   const renderNodes = composition.renderNodes.map(node =>
     node.kind === "image" && node.sectionId === options.sectionId
       ? { ...node, layout }
       : node);
-  let insertionIndex = -1;
-  renderNodes.forEach((node, index) => {
-    if ("sectionId" in node && node.sectionId === options.sectionId) insertionIndex = index;
-  });
-  renderNodes.splice(insertionIndex >= 0 ? insertionIndex + 1 : renderNodes.length, 0, imageNode);
+  const firstSectionIndex = renderNodes.findIndex(node => "sectionId" in node && node.sectionId === options.sectionId);
+  let insertionIndex = renderNodes.length;
+  if (firstSectionIndex >= 0) {
+    insertionIndex = firstSectionIndex;
+    if (section.imagePlacement !== "before-heading") {
+      renderNodes.forEach((node, index) => {
+        if ("sectionId" in node && node.sectionId === options.sectionId) insertionIndex = index + 1;
+      });
+    }
+  }
+  renderNodes.splice(insertionIndex, 0, imageNode);
   composition = {
     ...composition,
     sections: composition.sections.map(candidate => candidate.id === options.sectionId
@@ -1073,6 +1109,21 @@ export function applyGeneratedBrandPostImage(options: {
   const geometryIssue = publicationImageGeometryIssue(options.generatedPath);
   if (geometryIssue) throw new Error(geometryIssue);
   const assets = normalizePackageImageAssets(manifest);
+  if (manifest.connectKind === "SHOPPING") {
+    const replacement = options.replaceAssetKey ? assets.find(asset => asset.sha256 === options.replaceAssetKey) : undefined;
+    const formatIssue = shoppingImageFormatIssue({ path: options.generatedPath, provenance: options.provenance,
+      creationMethod: options.creationMethod }, replacement?.role === "hero" && !options.sectionId);
+    if (formatIssue) throw new Error(`IMAGE_FORMAT_OBSOLETE: ${formatIssue}`);
+    const targetSectionId = options.sectionId || replacement?.sectionId;
+    if (targetSectionId && manifest.composition.strategyVersion === SHOPPING_POST_STRATEGY_VERSION) {
+      const targetSection = manifest.composition.sections.find(section => section.id === targetSectionId);
+      const original = options.provenance === "ORIGINAL" && options.creationMethod === "source" && options.remoteGenerated !== true;
+      if (!targetSection || (targetSection.imageSource === "seller-original" ? !original :
+        targetSection.imageSource !== "staged-ai" || !isReferenceGuidedScene(options))) {
+        throw new Error("IMAGE_NATURAL_PHOTO_ROLE: 원본 슬롯에는 상품 원본, AI 슬롯에는 자연스러운 참조 연출 사진을 적용하세요.");
+      }
+    }
+  }
   const generatedHash = sha256File(options.generatedPath);
   let referenceScene = options.referenceScene;
   if (isReferenceGuidedScene(options)) {
@@ -1324,7 +1375,10 @@ export function applyGeneratedBrandPostImage(options: {
   composition = { ...composition, renderNodes: composition.renderNodes.map(node => {
     if (node.kind !== "image") return node;
     const asset = nextAssets.find(candidate => path.resolve(candidate.path) === path.resolve(node.assetPath));
-    return { ...node, caption: asset && isReferenceGuidedScene(asset) ? REFERENCE_SCENE_CAPTION : undefined };
+    const section = composition.sections.find(candidate => candidate.id === node.sectionId);
+    return { ...node, caption: asset && isReferenceGuidedScene(asset) ? REFERENCE_SCENE_CAPTION :
+      manifest.connectKind === "SHOPPING" && asset?.provenance === "ORIGINAL" && section?.imageSource === "seller-original"
+        ? "판매페이지 원본 상품 사진" : undefined };
   }) };
   composition = refreshPostDocumentQuality(composition);
   const updated: BrandPostPackageManifestV2 = {

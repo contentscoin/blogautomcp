@@ -66,10 +66,10 @@ assert.equal(selectPhotorealScene({ connectKind: "TRAVEL", sectionTitle: "산넨
 // 5. Blog image prompt carries the photoreal block without weakening the safety rules.
 const shopping = buildBrandPostImagePrompt({ connectKind: "SHOPPING", productName: "닥터지 수딩 크림", sectionTitle: "제형과 향",
   imageIntent: "제형 텍스처 클로즈업 연출컷", role: "body", stagingRecipe: "욕실 선반·화장대 위 자연광 클로즈업", variantIndex: 2 });
-assert.match(shopping, /photorealistic editorial product scene/u);
+assert.match(shopping, /natural, believable lifestyle photograph/u);
 assert.match(shopping, /욕실 선반/u, "actual template setting is forwarded");
 assert.match(shopping, /INPUT 1 is authoritative/u, "actual seller reference governs product geometry");
-assert.match(shopping, /Preserve the original label hierarchy/u);
+assert.match(shopping, /Preserve any actual visible label hierarchy/u);
 assert.doesNotMatch(shopping, /Generate the environment only|distinct viewpoint/u);
 assert.doesNotMatch(shopping, /pores|pupils|likeable/u, "no face layers on a background cut");
 const travel = buildBrandPostImagePrompt({ connectKind: "TRAVEL", productName: "대마도 2일", sectionTitle: "히타카츠 항구", imageIntent: "항구 풍경", role: "body", variantIndex: 1 });

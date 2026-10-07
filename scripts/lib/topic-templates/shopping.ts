@@ -109,7 +109,14 @@ function template(
     ...spec,
     id,
     kind: "SHOPPING",
-    sections: SHOPPING_SECTION_ORDER.map((sectionId) => [sectionId, merged[sectionId]!] as const),
+    // Product facts remain prose; a photographic slot must never request a specification panel or framed card.
+    sections: SHOPPING_SECTION_ORDER.map((sectionId, index) => [sectionId, {
+      ...merged[sectionId]!,
+      imageSource: index === 0 ? "seller-original" as const : "staged-ai" as const,
+      imageIntent: index === 0 ? "판매페이지 원본 상품 사진: 선택한 상품·옵션의 외형 확인"
+        : "AI 연출 이미지: 제품이 잘 보이는 자연스러운 생활 사진. 실제 사용 후기나 기능·수치·성능의 증거가 아님",
+      promptRecipe: index === 0 ? undefined : `${merged[sectionId]!.promptRecipe || "상품과 어울리는 일상 공간, 다른 자세와 구도"}. 한 파일에 자연스러운 사진 한 장. 설명문·정보 카드·장식 프레임·콜라주 없음.`,
+    }] as const),
   };
 }
 

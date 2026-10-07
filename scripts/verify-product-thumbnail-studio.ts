@@ -44,8 +44,8 @@ async function main() {
   });
   assert.ok(result?.outputPath && fs.existsSync(result.outputPath), "완성 썸네일이 생성되어야 합니다.");
   const metadata = await sharp(result.outputPath).metadata();
-  assert.equal(metadata.width, 1600);
-  assert.equal(metadata.height, 900);
+  assert.equal(metadata.width, 1080);
+  assert.equal(metadata.height, 1080);
   assert.ok((await fs.promises.stat(result.outputPath)).size > 100_000, "완성 이미지가 비정상적으로 작습니다.");
   assert.equal(result.backgroundPath, sourcePath);
 

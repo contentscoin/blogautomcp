@@ -31,9 +31,12 @@ const copy = { productNameLabel: "해피달링 워터탭 아기비데", headline
 const shoppingPrompt = buildShoppingThumbnailPrompt({ productName: "해피달링 시그니처 워터탭 아기비데 온수형", copy, moodId: "studio-clean", features: ["온수 조절"] });
 assert.ok(shoppingPrompt.includes("1:1 square"), "정사각 레이아웃 지시");
 assert.ok(shoppingPrompt.includes(`"${copy.headline}"`), "헤드라인 정확 문자열");
-assert.ok(shoppingPrompt.includes(`"${copy.productNameLabel}"`), "제품명 라벨");
+assert.ok(shoppingPrompt.includes("ONLY added text"), "쇼핑은 핵심 헤드라인 하나만 표시");
 assert.ok(shoppingPrompt.includes("bright studio"), "무드 장면 반영");
-assert.ok(shoppingPrompt.includes("safe zone 10%"), "세이프존");
+assert.ok(shoppingPrompt.includes("safe zone 6%"), "세이프존");
+assert.ok(shoppingPrompt.includes("132-170 px") && shoppingPrompt.includes("120 x 120"), "축소 썸네일 큰 글씨 규격");
+assert.ok(shoppingPrompt.includes("No editorial card") && shoppingPrompt.includes("full-bleed"), "프레임 없는 전면 실사사진");
+assert.ok(!shoppingPrompt.includes("Top ~40%") && !shoppingPrompt.includes("clean panel behind"), "기존 설명 패널 지시 제거");
 assert.ok(shoppingPrompt.includes("No misspelled Korean"), "한글 오탈자 금지");
 const autoPrompt = buildShoppingThumbnailPrompt({ productName: "무선 청소기 초경량", copy, moodId: "auto" });
 assert.ok(/cleaning scene/i.test(autoPrompt), "auto 무드는 카테고리 장면");
@@ -64,6 +67,12 @@ assert.equal(under.pass, false, "94점은 불합격");
 const typo = scoreQcReport({ breakdown: { productName: 25, fidelity: 20, korean: 15, readability: 15, photoreal: 15, layout: 5, forbidden: 5 }, failures: ["koreanTypo"] });
 assert.equal(typo.pass, false, "오탈자는 점수와 무관하게 자동 탈락");
 assert.equal(typo.autoFail, true);
+for (const failure of ["editorialCard", "headlineSmall"]) {
+  const rejected = scoreQcReport({ breakdown: perfect.breakdown, failures: [failure] });
+  assert.equal(rejected.pass, false, `${failure} must fail even with a nominal score of 100`);
+  assert.equal(rejected.autoFail, true);
+  assert.ok(correctionsFor(rejected).length > 0);
+}
 const clamped = scoreQcReport({ breakdown: { productName: 99, fidelity: -3 }, failures: ["unknownCode", "textCut"] });
 assert.equal(clamped.breakdown.productName, 25);
 assert.equal(clamped.breakdown.fidelity, 0);

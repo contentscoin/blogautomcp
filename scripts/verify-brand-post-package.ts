@@ -364,13 +364,13 @@ async function main() {
   fs.writeFileSync(store.getBrandPostPackageManifestPath(id), JSON.stringify({
     version: "brand-post-package/v1",
     brandLinkId: id,
-    connectKind: "SHOPPING",
+    connectKind: "TRAVEL",
     title: "테스트 초안",
     markdownPath,
     heroImagePath,
     bodyImagePaths,
     hashtags: ["테스트"],
-    imagePolicy: "LOCKED_PRODUCT_OR_ORIGINAL",
+    imagePolicy: "TRAVEL_EDITORIAL",
     createdAt: new Date().toISOString(),
     approvedAt: null,
   }, null, 2));
@@ -545,7 +545,7 @@ async function main() {
         connectKind === "SHOPPING" ? 10 : 0,
         "unreviewed shopping originals are stale; travel originals still satisfy ordinary coverage",
       );
-      const expectedGeneratedMinimum = slots.reduce((sum, slot) => sum + slot.minimum, 0);
+      const expectedGeneratedMinimum = slots.reduce((sum, slot) => sum + slot.generatedMinimum, 0);
       assert.equal(slots.reduce((sum, slot) => sum + slot.generationMissing, 0), expectedGeneratedMinimum);
       assert.throws(() => store.approveBrandPostPackage(coverageId), /이미지/u,
         `${coverageId}: originals without execution metadata must not be approved`);
@@ -592,6 +592,20 @@ async function main() {
         }),
       };
       store.writeBrandPostPackageManifest(generated);
+      if (String(connectKind) === "SHOPPING") {
+        const rejectedComposites = store.packagePreview(store.readBrandPostPackage(coverageId)!);
+        assert(rejectedComposites.imageSlots.every(slot => slot.generatedCount === 0),
+          "legacy locked-product/background composites cannot count as natural generated photos");
+        assert(rejectedComposites.imageSlots.some(slot => slot.staleTargets.some(target => target.code === "image-format-obsolete")));
+        assert.throws(() => store.approveBrandPostPackage(coverageId), /이미지|썸네일/u,
+          "old shopping composite approval fixtures now require explicit natural-photo migration");
+        const replacement = generated.imageAssets.find(asset => asset.sectionId)!;
+        assert.throws(() => store.applyGeneratedBrandPostImage({ brandLinkId: coverageId, generatedPath: replacement.path,
+          sectionId: replacement.sectionId!, replaceAssetKey: replacement.sha256, provenance: "LOCKED_PRODUCT",
+          creationMethod: "source-with-generated-background", remoteGenerated: true }), /SHOPPING_NATURAL_PHOTO_REQUIRED|합성|사진/u,
+          "the apply boundary rejects the same legacy composition even when its source receipt exists");
+        continue;
+      }
       assert.equal(store.packagePreview(store.readBrandPostPackage(coverageId)!).imageSlots.every((slot) => slot.generationMissing === 0), true);
       assert.ok(store.approveBrandPostPackage(coverageId).approvedAt,
         `${coverageId}: fully generated coverage without execution metadata can be approved`);

@@ -82,7 +82,14 @@ export function reconcileBrandPostImageContinuity(
   const sameProductFacts = previous.sourceSnapshot?.snapshotId === next.sourceSnapshot?.snapshotId;
   const reusableScene = (asset: BrandPostPackageImageAsset) => !isReferenceGuidedScene(asset) ||
     (sameProductFacts && brandPostReferenceSceneIssue(next, asset) === null);
-  const preservePreviousHero = previousHero && reusableScene(previousHero);
+  const reusableBodyPhoto = (asset: BrandPostPackageImageAsset | undefined, section: ResolvedPostSectionV1) => {
+    if (next.connectKind !== "SHOPPING") return !asset || reusableScene(asset);
+    if (!asset || !reusableScene(asset)) return false;
+    if (isReferenceGuidedScene(asset)) return section.imageSource !== "seller-original" && section.imageSource !== "seller-crop" && section.imageSource !== "editorial-card";
+    return asset.provenance === "ORIGINAL" && asset.creationMethod === "source" && section.imageSource !== "staged-ai";
+  };
+  const preservePreviousHero = previousHero && reusableScene(previousHero) &&
+    (next.connectKind !== "SHOPPING" || previousHero.provenance === "PHOTO_TEXT_THUMBNAIL");
   const selectedHero = preservePreviousHero ? previousHero : nextAssets.get(path.resolve(next.heroImagePath)) || previousHero;
   if (selectedHero) chooseAsset(selectedHero);
 
@@ -110,12 +117,13 @@ export function reconcileBrandPostImageContinuity(
       const resolved = path.resolve(file);
       // A path already present in the old package is stale when its intent
       // changed. A truly new reviewed image remains eligible.
-      return !allPreviousPaths.has(resolved);
+      return !allPreviousPaths.has(resolved) && reusableBodyPhoto(nextAssets.get(resolved), section);
     });
-    const imagePaths = uniquePaths(sameIntent ? prior.imagePaths.filter(file => {
+    const preservedPaths = sameIntent ? prior.imagePaths.filter(file => {
       const asset = previousAssets.get(path.resolve(file));
-      return !asset || reusableScene(asset);
-    }) : nextPaths);
+      return reusableBodyPhoto(asset, section);
+    }) : [];
+    const imagePaths = uniquePaths(preservedPaths.length ? preservedPaths : nextPaths);
     for (const imagePath of imagePaths) {
       const resolved = path.resolve(imagePath);
       const asset = previousAssets.get(resolved) || nextAssets.get(resolved);
@@ -184,11 +192,13 @@ export function reconcileBrandPostImageContinuity(
       const evidence = classifyBrandPostImageEvidence(asset);
       return evidence.coherent && evidence.generated && reusableScene(asset);
     }).map(asset => path.resolve(asset.path)));
+    const generatedSections = next.connectKind === "SHOPPING"
+      ? sections.filter(section => section.imageSource === "staged-ai") : sections;
     const requested = generatedRequired
-      ? sections.reduce((sum, section) => sum + Math.max(0, section.imageMin || 0), 0)
+      ? generatedSections.reduce((sum, section) => sum + Math.max(0, section.imageMin || 0), 0)
       : imageGeneration.requested;
     const applied = generatedRequired
-      ? sections.reduce((sum, section) => sum + Math.min(Math.max(0, section.imageMin || 0),
+      ? generatedSections.reduce((sum, section) => sum + Math.min(Math.max(0, section.imageMin || 0),
           section.imagePaths.filter(file => generatedPaths.has(path.resolve(file))).length), 0)
       : Math.min(imageGeneration.applied, imageAssets.length);
     const remaining = Math.max(0, requested - applied);

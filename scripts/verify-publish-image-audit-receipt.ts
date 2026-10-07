@@ -66,7 +66,7 @@ async function main() {
     calls++;
     if (verdict === "auth") throw new Error("CODEX_AUTH_REQUIRED");
     return JSON.stringify({ reviews: request.imagePaths.map((_, index) => ({ index: index + 1, accepted: verdict === "accept", identityMatches: true,
-      notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, reviewClass: "product-photo", reason: "fixture selected product" })) });
+      notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "fixture selected product" })) });
   };
   const ledgerProbes: Array<Promise<string>> = [];
   const probeLedgerLock = () => {
@@ -97,9 +97,9 @@ async function main() {
   assert.equal((await audit(options)).receiptReused, true); assert.equal(calls, 1);
   await audit({ ...options, selectedProduct: "different option" }); assert.equal(calls, 2);
   await makeImage("black"); await audit(options); assert.equal(calls, 3);
-  const changedPolicy = load(source.replace("final-publication-image-audit/v1", "final-publication-image-audit/v2"));
+  const changedPolicy = load(source.replace("final-publication-image-audit/v2-natural-photo", "final-publication-image-audit/v3-test-policy"));
   await changedPolicy(options); assert.equal(calls, 4);
-  const changedPrompt = load(source.replace("Reject announcement/expiry-date tables", "Reject announcement/expiry-date tables with a changed review policy"));
+  const changedPrompt = load(source.replace("Every body image must be ONE natural photograph.", "Every body image must be ONE natural photograph with a changed review policy."));
   await changedPrompt(options); assert.equal(calls, 5);
   await audit(options); assert.equal(calls, 6);
   verdict = "reject";

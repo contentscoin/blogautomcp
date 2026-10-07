@@ -25,9 +25,10 @@ assert.equal(hasConditionalProductVerdict(['사람에게 배송됩니다. 선택
 for (const kind of ['SHOPPING', 'TRAVEL'] as const) {
   const prompt = buildBrandPostImagePrompt({ connectKind: kind, productName: '대상', sectionTitle: '핵심', imageIntent: 'watercolor illustration', role: 'body' });
   if (kind === 'SHOPPING') {
-    assert.ok(prompt.includes('photorealistic editorial product scene'));
-    assert.ok(prompt.includes('reference must be attached before generation'));
-    assert.ok(prompt.includes('No CGI/plastic render appearance, watercolor, vector art'));
+    assert.ok(prompt.includes('natural, believable lifestyle photograph'));
+    assert.ok(prompt.includes('reference image pixels must be attached before generation'));
+    assert.ok(prompt.includes('CGI/plastic render, illustration'));
+    assert.ok(prompt.includes('No information cards, slides, editorial layouts'));
   } else {
     assert.ok(prompt.includes('Photographic style is mandatory'));
     assert.ok(prompt.includes('never a style override'));
@@ -43,5 +44,5 @@ const imageSource = fs.readFileSync('src/lib/brand-post-image-generation.ts', 'u
 assert.ok(!imageSource.includes('createOriginalProductPhotoOnBackground'), 'unsegmented full-frame photos must not be composited as a product cutout');
 assert.ok(imageSource.includes('prepareBrandPostImageReferenceContext'));
 assert.ok(imageSource.includes('reviewShoppingReferenceScene'), 'product scenes must compare the reference and generated pixels');
-assert.ok(imageSource.includes('provenance: "EDITORIAL_CARD"'), 'feature fact cards must not claim segmented product provenance');
+assert.ok(!imageSource.includes('createShoppingFactCard'), 'shopping feature sections must not create fact cards');
 console.log('PASS: connect routing, switch race, natural verdict and reference-photo/evidence boundaries');

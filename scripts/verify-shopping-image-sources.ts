@@ -42,8 +42,8 @@ async function main() {
       const record = readProductPhotoSource(composite.outputPath);
       assert.ok(record, `every output retains source provenance (${index})`);
       assert.deepEqual(fs.readFileSync(record.sourcePath), originalBytes);
-      assert.equal(record.segmented, index < 3);
-      assert.equal(record.provenance, index < 3 ? "LOCKED_PRODUCT" : "EDITORIAL_CARD");
+      assert.equal(record.segmented, index === 1 || index === 2);
+      assert.equal(record.provenance, index === 0 || index === 3 ? "PHOTO_TEXT_THUMBNAIL" : index < 3 ? "LOCKED_PRODUCT" : "EDITORIAL_CARD");
     }
     const packaged = path.join(dir, "package", "hero.png");
     fs.mkdirSync(path.dirname(packaged), { recursive: true });
@@ -56,14 +56,23 @@ async function main() {
     assert.ok(recovered.sourcePath.startsWith(path.dirname(packaged) + path.sep));
     assert.deepEqual(fs.readFileSync(recovered.sourcePath), originalBytes);
     // Exercise the real generation preflight on the former failure shape:
-    // a sole LOCKED_PRODUCT hero, no ORIGINAL assets, and deleted worker paths.
-    const generationModule = { exports: {} as { resolveSource: (manifest: unknown, target: unknown) => Promise<string | null> } };
+    // a sole photo thumbnail, no ORIGINAL assets, and deleted worker paths.
+    const generationModule = { exports: {} as { prepareBrandPostImageReferenceContext: (options: unknown) => Promise<{ reference: { path: string } }> } };
     const generationDependencies: Record<string, unknown> = {
       "../../scripts/lib/product-photo-provenance": provenance,
-      "../../scripts/lib/product-photo-source": { selectShoppingProductSource: (input: Parameters<typeof selectShoppingProductSource>[0]) => selectShoppingProductSource(input, {
-        verify: async files => files.find(file => fs.readFileSync(file).equals(originalBytes)) || null,
-        download: async () => { throw new Error("retained source must avoid download"); },
-      }) },
+      "../../scripts/lib/product-photo-source": {
+        readSavedProductSourceCandidates: () => [],
+        collectShoppingProductSourceCandidates: async (input: { localCandidates: string[] }) => input.localCandidates.filter(file => fs.readFileSync(file).equals(originalBytes)),
+      },
+      "../../scripts/lib/shopping-reference-scene": {
+        SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION: "shopping-reference-scene/v2",
+        selectShoppingSceneReference: async (input: { paths: string[] }) => {
+          assert.equal(input.paths.length, 1, "only retained original pixels are collected; the headline thumbnail is not a scene reference");
+          return { path: input.paths[0], sha256: crypto.createHash("sha256").update(fs.readFileSync(input.paths[0])).digest("hex"),
+            subject: "selected product", geometry: "intact product", labels: "none visible", reviewedAt: "fixture" };
+        },
+        buildShoppingReferenceScenePrompt: () => "natural photo with attached original",
+      },
       "../../scripts/lib/product-photo-review": { selectVerifiedProductSectionImages: async () => [] },
       "../../scripts/lib/product-image-lock": {}, "../../scripts/lib/product-thumbnail": {},
       "../../scripts/lib/travel-content": {}, "../../scripts/lib/travel-thumbnail": {},
@@ -73,13 +82,16 @@ async function main() {
     };
     vm.runInNewContext(ts.transpileModule(fs.readFileSync("src/lib/brand-post-image-generation.ts", "utf8"), {
       compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
-    }).outputText + "\nmodule.exports.resolveSource = existingShoppingSource;", {
+    }).outputText, {
       module: generationModule, exports: generationModule.exports, process,
       require: (name: string) => name in generationDependencies ? generationDependencies[name] : createRequire(path.resolve("src/lib/brand-post-image-generation.ts"))(name),
     });
-    assert.equal(await generationModule.exports.resolveSource({ brandLinkId: "hero-only", title: "미닉스 상품", connectKind: "SHOPPING",
-      imageAssets: [{ path: packaged, sourcePath: composites[0].outputPath, provenance: "LOCKED_PRODUCT" }],
-    }, { role: "body" }), recovered.sourcePath);
+    const referenceContext = await generationModule.exports.prepareBrandPostImageReferenceContext({
+      manifest: { brandLinkId: "hero-only", title: "미닉스 상품", connectKind: "SHOPPING", sourceSnapshot: { snapshotId: "fixture", product: { name: "미닉스 상품", features: [] } },
+        imageAssets: [{ path: packaged, sourcePath: composites[0].outputPath, provenance: "PHOTO_TEXT_THUMBNAIL" }] },
+      productName: "미닉스 상품", target: { role: "body", imageSource: "staged-ai", imageIntent: "자연스러운 AI 연출 이미지", request: { slotId: "scene:image:1" } },
+    });
+    assert.equal(referenceContext.reference.path, recovered.sourcePath);
     // A record cannot bless edited output bytes or edited source bytes.
     const outputBytes = fs.readFileSync(packaged);
     fs.writeFileSync(packaged, "changed output");
@@ -153,19 +165,20 @@ async function main() {
 
     // Offline provider response fixture exercises real QC candidate deduplication.
     const copies = Array.from({ length: 13 }, (_, i) => path.join(dir, `notice-${i}.png`));
-    copies.forEach(file => fs.writeFileSync(file, "same notice pixels"));
-    const actual = path.join(dir, "actual.png"); fs.writeFileSync(actual, "actual product pixels");
+    copies.forEach(file => fs.writeFileSync(file, originalBytes));
+    const actual = path.join(dir, "actual.png");
+    await sharp({ create: { width: 640, height: 640, channels: 3, background: "#c5ad99" } }).png().toFile(actual);
     const code = ts.transpileModule(fs.readFileSync("scripts/lib/product-photo-review.ts", "utf8"), {
       compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
     }).outputText;
-    const module = { exports: {} as typeof import("./lib/product-photo-review") };
+    const photoReviewModule = { exports: {} as typeof import("./lib/product-photo-review") };
     let reviews = 0;
-    vm.runInNewContext(code, { exports: module.exports, module, require: (name: string) => name === "./codex-draft-provider" ? {
+    vm.runInNewContext(code, { exports: photoReviewModule.exports, module: photoReviewModule, require: (name: string) => name === "./codex-draft-provider" ? {
       runCodexDraft: async (input: { imagePaths: string[] }) => { reviews++; return JSON.stringify({ productPhoto: input.imagePaths[0] === actual }); },
     } : createRequire(path.resolve("scripts/lib/product-photo-review.ts"))(name) });
-    assert.equal(await module.exports.selectVerifiedProductPhoto([dir, "missing.png", ...copies, actual], "상품"), actual);
+    assert.equal(await photoReviewModule.exports.selectVerifiedProductPhoto([dir, "missing.png", ...copies, actual], "상품"), actual);
     assert.equal(reviews, 2, "13 copies of one notice consume only one review, preserving the true-photo candidate");
-    assert.equal(await module.exports.selectVerifiedProductPhoto(copies, "상품"), null);
+    assert.equal(await photoReviewModule.exports.selectVerifiedProductPhoto(copies, "상품"), null);
     assert.equal(reviews, 2, "negative byte reviews remain cached");
     console.log("PASS shopping source recovery: all 5 composites retain originals; package survives temp cleanup; hashes, strict QC, duplicate notices, seller fallback, URL and streaming bounds verified offline");
   } finally {

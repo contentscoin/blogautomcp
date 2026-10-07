@@ -74,45 +74,6 @@ async function probe(candidate: ImageCandidateInput, kind: ConnectKind): Promise
   }
 }
 
-/** 남는 상세 이미지 2~4장을 1:1 한 장으로 합성한다 (쇼핑 보강 전략). */
-export async function buildCollageImage(sources: string[], outputPath: string): Promise<string | null> {
-  const inputs = sources.slice(0, 4);
-  if (inputs.length < 2) return null;
-  try {
-    const size = 1080;
-    const gap = 16;
-    const cells =
-      inputs.length === 2
-        ? [
-            { left: gap, top: gap, width: (size - gap * 3) / 2, height: size - gap * 2 },
-            { left: gap * 2 + (size - gap * 3) / 2, top: gap, width: (size - gap * 3) / 2, height: size - gap * 2 },
-          ]
-        : [0, 1, 2, 3].slice(0, inputs.length).map((index) => ({
-            left: gap + (index % 2) * ((size - gap * 3) / 2 + gap),
-            top: gap + Math.floor(index / 2) * ((size - gap * 3) / 2 + gap),
-            width: (size - gap * 3) / 2,
-            height: (size - gap * 3) / 2,
-          }));
-    const composites = await Promise.all(
-      inputs.map(async (source, index) => {
-        const cell = cells[index];
-        const buffer = await sharp(source)
-          .resize(Math.round(cell.width), Math.round(cell.height), { fit: "contain", background: "#ffffff" })
-          .jpeg({ quality: 90 })
-          .toBuffer();
-        return { input: buffer, left: Math.round(cell.left), top: Math.round(cell.top) };
-      }),
-    );
-    await sharp({ create: { width: size, height: size, channels: 3, background: "#ffffff" } })
-      .composite(composites)
-      .jpeg({ quality: 92 })
-      .toFile(outputPath);
-    return outputPath;
-  } catch {
-    return null;
-  }
-}
-
 /** Unsplash API 로 여행지 사진을 내려받는다 (키가 있을 때만, 스크래핑 없음). */
 export async function fetchStockImages(keywords: string[], count: number, outputDir: string): Promise<string[]> {
   const enabled = (process.env.TRAVEL_STOCK_IMAGES_ENABLED || "true").toLowerCase() !== "false";
@@ -165,7 +126,7 @@ export async function prepareImagePool(input: PrepareImagePoolInput): Promise<Im
 
   const heroCandidate = probed.find((image) => image.kind === "hero") ?? null;
   const usableBody = probed
-    .filter((image) => image.usable && image.kind !== "hero")
+    .filter((image) => image.usable && image.kind !== "hero" && (input.kind !== "SHOPPING" || image.kind === "source"))
     .sort((a, b) => {
       if (a.kind === "card" && b.kind !== "card") return -1;
       if (b.kind === "card" && a.kind !== "card") return 1;
@@ -176,6 +137,13 @@ export async function prepareImagePool(input: PrepareImagePoolInput): Promise<Im
   // 대표 이미지는 썸네일 재료이면서 본문 첫 상품컷으로도 쓰인다(샘플 글 관행).
   if (heroCandidate && heroCandidate.usable && !usableBody.some((image) => image.path === heroCandidate.path)) {
     usableBody.unshift({ ...heroCandidate, strategy: "source", kind: "source" });
+  }
+  if (input.kind === "SHOPPING") {
+    // Source candidates supply the single original only. AI scenes are separate pending work,
+    // never filled by more originals, cropped specification panels, cards or collages.
+    return { hero: heroCandidate, body: usableBody.slice(0, 1), spare: [],
+      notes: [usableBody.length ? "원본 상품 사진 1장 확보. 서로 다른 자연스러운 AI 연출 사진 3장 생성·검수 필요"
+        : "needs_reference: 선택한 상품·옵션을 확인할 원본 사진 필요"] };
   }
   const spare = probed.filter((image) => !image.usable && image.kind !== "hero" && image.width >= 300 && image.height >= 300);
 
@@ -188,20 +156,6 @@ export async function prepareImagePool(input: PrepareImagePoolInput): Promise<Im
         body.push({ path: stockPath, kind: "source", strategy: "stock", score: -100, width: 0, height: 0, usable: true });
       }
       notes.push(stock.length > 0 ? `여행 스톡 이미지 ${stock.length}장 보강` : "여행 스톡 이미지 보강 불가(키 없음 또는 결과 없음)");
-    } else {
-      const material = [...spare, ...usableBody.filter((image) => image.kind === "crop")].map((image) => image.path);
-      let built = 0;
-      for (let index = 0; built < shortfall && material.length >= 2; index += 1) {
-        const chunk = material.splice(0, Math.min(4, Math.max(2, material.length)));
-        const output = path.join(input.tempDir, `collage_${Date.now()}_${index + 1}.jpg`);
-        fs.mkdirSync(input.tempDir, { recursive: true });
-        const collage = await buildCollageImage(chunk, output);
-        if (collage) {
-          body.push({ path: collage, kind: "source", strategy: "collage", score: -50, width: 1080, height: 1080, usable: true });
-          built += 1;
-        }
-      }
-      notes.push(built > 0 ? `상세 이미지 콜라주 ${built}장 보강` : "콜라주 보강 재료 부족");
     }
   }
   if (body.length < input.minBody) {

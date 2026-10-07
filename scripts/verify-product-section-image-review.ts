@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import vm from "node:vm";
 import ts from "typescript";
-import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene } from "../src/lib/brand-post-image-evidence";
+import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene, type BrandPostImageSourceHint } from "../src/lib/brand-post-image-evidence";
 import type { ProductSectionImageDiagnostics, ProductSectionImageReviewOptions } from "./lib/product-photo-review";
 import { auditSectionProposals } from "./lib/product-section-proposal-audit";
 
@@ -18,7 +18,7 @@ interface ReviewModule {
   selectVerifiedProductSectionImages(
     paths: string[],
     productName: string,
-    targets: Array<{ sectionTitle: string; imageIntent: string; sectionBody?: string[]; excludedSourceSha256?: string[] }>,
+    targets: Array<{ sectionTitle: string; imageIntent: string; imageSource?: BrandPostImageSourceHint; sectionBody?: string[]; excludedSourceSha256?: string[] }>,
     options?: ProductSectionImageReviewOptions,
   ): Promise<Array<{ targetIndex: number; sourceSha256: string; reviewClass: string }>>;
   selectVerifiedProductSectionImage(
@@ -218,14 +218,18 @@ async function main() {
       crypto.createHash("sha256").update(fs.readFileSync(lateEvidence)).digest("hex"),
       "a relevant late seller URL must remain eligible after sixteen generic local files");
 
-    const sceneTarget = { sectionTitle: "집에서 활용", imageIntent: "집에서 활용: 제품 원형을 보존한 연출컷 또는 원본 사용 장면" };
+    const sceneTarget = { sectionTitle: "집에서 활용", imageIntent: "상품을 식별할 수 있는 판매자 원본 사진", imageSource: "seller-original" as const };
     const scene = loadReview('{"assignments":[{"targetIndex":1,"selectedIndex":1,"reviewClass":"scene-evidence","reason":"상품이 주방 작업대에 놓인 원본 사진"}]}');
     assert.equal((await scene.review.selectVerifiedProductSectionImages([candidate], "꽃게", [sceneTarget])).length, 1);
-    assert.match(scene.prompt, /"allowedReviewClasses":\["scene-evidence"\]/u);
-    for (const reviewClass of ["product-photo", "feature-evidence"]) {
-      const wrong = loadReview(JSON.stringify({ assignments: [{ targetIndex: 1, selectedIndex: 1, reviewClass, reason: "not a scene" }] }));
-      assert.equal((await wrong.review.selectVerifiedProductSectionImages([candidate], "꽃게", [sceneTarget])).length, 0);
-    }
+    assert.match(scene.prompt, /"allowedReviewClasses":\["product-photo","scene-evidence"\]/u);
+    const originalPackshot = loadReview('{"assignments":[{"targetIndex":1,"selectedIndex":1,"reviewClass":"product-photo","reason":"흰 배경에 전체 상품이 보이는 원본 사진"}]}');
+    assert.equal((await originalPackshot.review.selectVerifiedProductSectionImages([candidate], "꽃게", [sceneTarget])).length, 1,
+      "an explicit original slot accepts a plain seller photo as well as an original lifestyle scene");
+    const originalFeature = loadReview('{"assignments":[{"targetIndex":1,"selectedIndex":1,"reviewClass":"feature-evidence","reason":"설명 카드"}]}');
+    assert.equal((await originalFeature.review.selectVerifiedProductSectionImages([candidate], "꽃게", [sceneTarget])).length, 0,
+      "an original photography slot must not be filled by a feature card");
+    assert.equal((await scene.review.selectVerifiedProductSectionImages([candidate], "꽃게", [{ ...sceneTarget, imageSource: "staged-ai" }])).length, 0,
+      "an original scene cannot silently fill a slot reserved for an AI lifestyle photo");
     assert.equal((await scene.review.selectVerifiedProductSectionImages([candidate], "꽃게", [featureTarget])).length, 0,
       "scene photos cannot stand in for direct feature evidence");
     const alternatives = loadReview(JSON.stringify({ assignments: [

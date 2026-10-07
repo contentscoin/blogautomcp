@@ -62,7 +62,7 @@ type Job = { id: string; outStem: string; prompt: string; referenceMode?: string
 function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lockFails?: boolean; automation?: boolean; sourceMissing?: boolean; sourceError?: string;
   sourcePaths?: string[]; segmentablePaths?: string[]; lockedUsesBackground?: boolean;
   referenceRejected?: boolean; sceneReviewError?: string;
-  sectionMatchedPaths?: string[]; sectionReviewError?: string; reviewClass?: "feature-evidence" | "scene-evidence"; cardFacts?: string[]; cardMatches?: number;
+  sectionMatchedPaths?: string[]; sectionReviewError?: string; reviewClass?: "feature-evidence" | "scene-evidence" | "product-photo"; cardFacts?: string[]; cardMatches?: number;
   worker?: (args: string[], child: FakeChild) => void } = {}) {
   const packageDir = fs.mkdtempSync(path.join(root, "package-"));
   let child = new FakeChild();
@@ -128,7 +128,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
         buildShoppingReferenceScenePrompt: referenceSceneModule.buildShoppingReferenceScenePrompt,
         selectShoppingSceneReference: async (options: { paths: string[] }) => {
           const file = options.paths.find(candidate => fs.existsSync(candidate));
-          if (!file || settings.referenceRejected) throw new Error("PRODUCT_FRONT_REFERENCE_REQUIRED: no intact front reference");
+          if (!file || settings.referenceRejected) throw new Error("PRODUCT_REFERENCE_REQUIRED: needs_reference");
           return { path: file, sha256: hashFile(file), subject: "selected product", geometry: "intact front view", labels: "original label hierarchy", reviewedAt: "2026-10-07T00:00:00.000Z" };
         },
         reviewShoppingReferenceScene: async (options: { reference: { path: string; sha256: string }; outputPath: string; anchorSha256?: string }) => {
@@ -326,7 +326,7 @@ async function verifyGenerator() {
       assert.ok(imageEvidence.REFERENCE_SCENE_REVIEW_CHECKS.every(key => result.referenceScene?.checks?.[key] === true));
     });
     assert.notEqual(results[0].generatedPath, results[1].generatedPath);
-    assert.ok(h.jobs.every(job => job.prompt.includes("No people, hands, operation")));
+    assert.ok(h.jobs.every(job => job.prompt.includes("People wearing clothing") && job.prompt.includes("No information cards")));
   });
   await check("source-only lifestyle requests report generation required, not source binding success", async () => {
     const h = harness({ sectionMatchedPaths: [sourcePath] });
@@ -340,7 +340,8 @@ async function verifyGenerator() {
   await check("verified original scenes bypass impossible cutout without claiming generation", async () => {
     const h = harness({ sectionMatchedPaths: [sourcePath], reviewClass: "scene-evidence", lockFails: true });
     h.manifest.connectKind = "SHOPPING";
-    h.manifest.composition.sections[0].imageIntent = "제품 원형을 보존한 연출컷 또는 원본 사용 장면";
+    h.manifest.composition.sections[0].imageIntent = "원본 사용 장면";
+    h.manifest.composition.sections[0].imageSource = "seller-original";
     const results = await h.generate(1, { sourceOnly: true });
     assert.equal(h.spawns, 0);
     assert.equal(h.lockCalls, 0);
@@ -350,7 +351,10 @@ async function verifyGenerator() {
     assert.equal(results[0].sourceReview?.reviewClass, "scene-evidence");
     h.manifest.imageRequirements = { policy: "generated-required" } as typeof h.manifest.imageRequirements;
     const required = await h.generate(1, { sourceOnly: true });
-    assert.match(required[0].error || "", /IMAGE_GENERATION_REQUIRED/);
+    assert.equal(required[0].provenance, "ORIGINAL", "the one explicitly planned original is still allowed under mixed source/scene policy");
+    h.manifest.composition.sections[0].imageSource = "staged-ai";
+    const staged = await h.generate(1, { sourceOnly: true });
+    assert.match(staged[0].error || "", /IMAGE_GENERATION_REQUIRED/);
   });
   await check("photo verifier provider failure retains its cause and never starts image generation", async () => {
     const h = harness({ sourceError: "CODEX_MODEL_INCOMPATIBLE: newer CLI required" });
@@ -521,23 +525,25 @@ async function verifyGenerator() {
     assert.equal(results[1].error, undefined);
   });
 
-  await check("verified shopping originals fill body slots without browser generation or cutout", async () => {
+  await check("only one reviewed original fills the body; additional slots stay missing", async () => {
     const originals = Array.from({ length: 4 }, (_, index) => {
       const file = path.join(root, `verified-original-${index}.jpg`);
       fs.writeFileSync(file, `distinct verified seller photo ${index}`);
       return file;
     });
-    const h = harness({ sourcePaths: originals, sectionMatchedPaths: originals, lockFails: true });
+    const h = harness({ reviewClass: "product-photo", sourcePaths: originals, sectionMatchedPaths: originals, lockFails: true });
     h.manifest.connectKind = "SHOPPING";
+    h.manifest.composition.sections[0].imageSource = "seller-original";
     const results = await h.generate(0, { requests: originals.map((_, index) => ({
       requestId: `source-${index}`,
       sectionId: "section",
     })) });
     assert.equal(h.spawns, 0, "source-first coverage must not launch paid/browser generation");
     assert.equal(h.lockCalls, 0, "an untouched original photo does not require foreground extraction");
-    assert.deepEqual(new Set(results.map(result => result.generatedPath)), new Set(originals));
-    assert.equal(new Set(results.map(result => result.generatedPath)).size, 4);
-    results.forEach((result) => {
+    assert.equal(results.filter(result => result.generatedPath).length, 1);
+    assert.equal(results.filter(result => result.error?.includes("SHOPPING_ORIGINAL_LIMIT")).length, 3);
+    assert.ok(originals.includes(results.find(result => result.generatedPath)!.generatedPath!));
+    results.filter(result => result.generatedPath).forEach((result) => {
       assert.equal(result.provenance, "ORIGINAL");
       assert.equal(result.creationMethod, "source");
       assert.equal(result.remoteGenerated, false);
@@ -553,8 +559,9 @@ async function verifyGenerator() {
     fs.writeFileSync(existing, "existing package original");
     fs.writeFileSync(fresh, "fresh recovered seller original");
     const existingHash = crypto.createHash("sha256").update(fs.readFileSync(existing)).digest("hex");
-    const h = harness({ sourcePaths: [fresh], sectionMatchedPaths: [existing, fresh] });
+    const h = harness({ reviewClass: "product-photo", sourcePaths: [fresh], sectionMatchedPaths: [existing, fresh] });
     h.manifest.connectKind = "SHOPPING";
+    h.manifest.composition.sections[0].imageSource = "seller-original";
     h.manifest.imageAssets = [
       { sha256: "hero", role: "hero", path: sourcePath, provenance: "LOCKED_PRODUCT" },
       { sha256: existingHash, role: "body", path: existing, sourcePath: existing,
@@ -579,8 +586,9 @@ async function verifyGenerator() {
     });
     const lateRelevant = path.join(root, "late-feature-evidence.jpg");
     fs.writeFileSync(lateRelevant, "late relevant seller feature panel");
-    const h = harness({ sourcePaths: [lateRelevant], sectionMatchedPaths: [lateRelevant] });
+    const h = harness({ reviewClass: "product-photo", sourcePaths: [lateRelevant], sectionMatchedPaths: [lateRelevant] });
     h.manifest.connectKind = "SHOPPING";
+    h.manifest.composition.sections[0].imageSource = "seller-original";
     h.manifest.imageAssets = [
       { sha256: "hero", role: "hero", path: sourcePath, provenance: "LOCKED_PRODUCT" },
       ...local.map(file => ({
@@ -617,7 +625,7 @@ async function verifyGenerator() {
     assert.ok(results.every(result => result.error?.includes("IMAGE_SOURCE_BINDING_REQUIRED")));
   });
 
-  await check("feature section without a matching seller photo gets a fact card only when its facts match the text", async () => {
+  await check("feature section without a matching photo stays missing even if matching card facts are available", async () => {
     const run = async (settings: { cardMatches: number; sourceOnly?: boolean }) => {
       const h = harness({ sourcePaths: [sourcePath], sectionMatchedPaths: [], cardFacts: ["흡입력: 18,000Pa", "무게: 1.2kg"], cardMatches: settings.cardMatches });
       h.manifest.connectKind = "SHOPPING";
@@ -627,40 +635,44 @@ async function verifyGenerator() {
       return result;
     };
     const carded = await run({ cardMatches: 1 });
-    assert.ok(!carded.error && carded.provenance === "EDITORIAL_CARD" && carded.creationMethod === "local-composite", JSON.stringify(carded));
+    assert.match(carded.error || "", /IMAGE_SOURCE_BINDING_REQUIRED/u);
+    assert.equal(carded.generatedPath, null);
     assert.match((await run({ cardMatches: 0 })).error || "", /IMAGE_SOURCE_BINDING_REQUIRED/u, "unrelated facts never stand in for a feature");
     assert.match((await run({ cardMatches: 1, sourceOnly: true })).error || "", /IMAGE_SOURCE_BINDING_REQUIRED/u, "source-only binding still reports the gap");
   });
 
-  await check("fact cards reuse the post's own verified originals when no new source remains", async () => {
+  await check("bound originals cannot become fact cards to fill another body slot", async () => {
     const h = harness({ sourceMissing: true, sectionMatchedPaths: [], cardFacts: ["흡입력: 18,000Pa", "무게: 1.2kg"], cardMatches: 1 });
     h.manifest.connectKind = "SHOPPING";
     h.manifest.imageRequirements = { policy: "verified-source-first" };
     h.manifest.imageAssets = [{ sha256: "orig", role: "body", sectionId: "other", path: sourcePath, provenance: "ORIGINAL", creationMethod: "source" }] as never;
     const [result] = await h.generate(0, { requests: [{ requestId: "feature", sectionId: "section" }] });
-    assert.ok(!result.error && result.provenance === "EDITORIAL_CARD", JSON.stringify(result));
+    assert.match(result.error || "", /SHOPPING_ORIGINAL_LIMIT/u);
+    assert.equal(result.generatedPath, null);
   });
 
   await check("one reviewed feature source is never reused as generic evidence for another feature", async () => {
-    const h = harness({
+    const h = harness({ reviewClass: "product-photo",
       sourcePaths: [sourcePath],
       sectionMatchedPaths: [sourcePath],
       segmentablePaths: [sourcePath],
     });
     h.manifest.connectKind = "SHOPPING";
+    h.manifest.composition.sections[0].imageSource = "seller-original";
     const results = await h.generate(0, { requests: [
       { requestId: "feature-one", sectionId: "section" },
       { requestId: "feature-two", sectionId: "section" },
     ] });
     assert.equal(h.spawns, 0);
     assert.equal(results.filter(result => result.generatedPath === sourcePath).length, 1);
-    assert.equal(results.filter(result => result.error?.includes("IMAGE_SOURCE_BINDING_REQUIRED")).length, 1);
+    assert.equal(results.filter(result => result.error?.includes("SHOPPING_ORIGINAL_LIMIT")).length, 1);
   });
 
-  await check("reviewed package originals bind atomically to distinct section slots", async () => {
+  await check("reviewed package originals bind only one body original slot", async () => {
     const existing = [sourcePath, rawPath];
-    const h = harness({ sectionMatchedPaths: existing, sourceMissing: true });
+    const h = harness({ reviewClass: "product-photo", sectionMatchedPaths: existing, sourceMissing: true });
     h.manifest.connectKind = "SHOPPING";
+    h.manifest.composition.sections[0].imageSource = "seller-original";
     h.manifest.imageAssets = [
       { sha256: "hero", role: "hero", path: sourcePath, provenance: "LOCKED_PRODUCT" },
       ...existing.map(file => ({
@@ -677,10 +689,11 @@ async function verifyGenerator() {
       sectionId: "section",
     })) });
     assert.equal(h.spawns, 0);
-    assert.equal(new Set(results.map(result => result.bindExistingAssetKey)).size, 2);
-    results.forEach(result => {
+    assert.equal(results.filter(result => result.bindExistingAssetKey).length, 1);
+    assert.equal(results.filter(result => result.error?.includes("SHOPPING_ORIGINAL_LIMIT")).length, 1);
+    results.filter(result => result.generatedPath).forEach(result => {
       assert.equal(result.sourceReview?.usage, "section-matched-product-evidence");
-      assert.equal(result.sourceReview?.reviewClass, "feature-evidence");
+      assert.equal(result.sourceReview?.reviewClass, "product-photo");
     });
   });
 
@@ -691,15 +704,17 @@ async function verifyGenerator() {
     fs.copyFileSync(rawPath, heroCopy); fs.copyFileSync(sourcePath, bodyCopy);
     fs.writeFileSync(fresh, "unique evidence not used by any package image");
     const bodyHash = crypto.createHash("sha256").update(fs.readFileSync(sourcePath)).digest("hex");
-    const h = harness({ sourcePaths: [heroCopy, bodyCopy, fresh], sectionMatchedPaths: [heroCopy, bodyCopy, sourcePath, fresh] });
+    const h = harness({ reviewClass: "product-photo", sourcePaths: [heroCopy, bodyCopy, fresh], sectionMatchedPaths: [heroCopy, bodyCopy, sourcePath, fresh] });
     h.manifest.connectKind = "SHOPPING";
+    h.manifest.composition.sections[0].imageSource = "seller-original";
     h.manifest.imageAssets = [
       { path: rawPath, sourcePath: rawPath, role: "hero", sha256: crypto.createHash("sha256").update(fs.readFileSync(rawPath)).digest("hex"), provenance: "ORIGINAL", creationMethod: "source" },
       { path: sourcePath, sourcePath, role: "body", sectionId: "already-bound", sha256: bodyHash, provenance: "ORIGINAL", creationMethod: "source" },
     ];
     const results = await h.generate(1, { sourceOnly: true });
     assert.deepEqual(h.sectionReviewCandidatePaths[0], [fresh]);
-    assert.equal(results[0].generatedPath, fresh);
+    assert.equal(results[0].generatedPath, null);
+    assert.match(results[0].error || "", /SHOPPING_ORIGINAL_LIMIT/);
     assert.equal(h.spawns, 0);
     // An explicit replacement may still inspect its own source; other slots
     // and the hero remain reserved. This preserves legitimate repair behavior.
@@ -710,8 +725,9 @@ async function verifyGenerator() {
   });
 
   await check("source-only shopping repair preserves partial originals and never starts generation", async () => {
-    const h = harness({ sourcePaths: [sourcePath], sectionMatchedPaths: [sourcePath], lockFails: false });
+    const h = harness({ reviewClass: "product-photo", sourcePaths: [sourcePath], sectionMatchedPaths: [sourcePath], lockFails: false });
     h.manifest.connectKind = "SHOPPING";
+    h.manifest.composition.sections[0].imageSource = "seller-original";
     const results = await h.generate(0, {
       sourceOnly: true,
       requests: Array.from({ length: 3 }, (_, index) => ({ requestId: `source-only-${index}`, sectionId: "section" })),
@@ -719,7 +735,7 @@ async function verifyGenerator() {
     assert.equal(h.spawns, 0);
     assert.equal(h.lockCalls, 0);
     assert.equal(results.filter(result => result.provenance === "ORIGINAL" && result.generatedPath).length, 1);
-    assert.equal(results.filter(result => result.error?.includes("IMAGE_SOURCE_BINDING_REQUIRED")).length, 2);
+    assert.equal(results.filter(result => result.error?.includes("SHOPPING_ORIGINAL_LIMIT")).length, 2);
   });
 
   await check("source-only overview slots reject unreviewed originals when section review is unavailable", async () => {
@@ -754,7 +770,7 @@ async function verifyGenerator() {
       results.find(result => result.sectionId === "feature")?.error?.includes("usage limit"));
   });
 
-  await check("source-only replaces four stale feature slots with four distinct reviewed originals", async () => {
+  await check("source-only replaces the one original slot and refuses original fillers for three AI slots", async () => {
     const stale = Array.from({ length: 4 }, (_, index) => {
       const file = path.join(root, `stale-feature-${index}.png`);
       fs.writeFileSync(file, `stale-feature-${index}`);
@@ -765,14 +781,16 @@ async function verifyGenerator() {
       fs.writeFileSync(file, `fresh-feature-source-${index}`);
       return file;
     });
-    const h = harness({ sourcePaths: sources, sectionMatchedPaths: sources });
+    const h = harness({ reviewClass: "product-photo", sourcePaths: sources, sectionMatchedPaths: sources });
     h.manifest.connectKind = "SHOPPING";
+    h.manifest.composition.sections[0].imageSource = "seller-original";
     h.manifest.composition.sections = stale.map((_, index) => ({
       id: `feature-${index}`,
       title: `기능 ${index + 1}`,
       imageIntent: `기능 ${index + 1} 작동 장면`,
       body: ["기능 근거"],
       imagePaths: [stale[index]],
+      imageSource: index === 0 ? "seller-original" : "staged-ai",
     })) as typeof h.manifest.composition.sections;
     h.manifest.imageAssets = [
       { sha256: "hero", role: "hero", path: sourcePath, provenance: "LOCKED_PRODUCT" },
@@ -796,14 +814,14 @@ async function verifyGenerator() {
     }));
     const results = await h.generate(0, { sourceOnly: true, requests });
     assert.equal(h.spawns, 0);
-    assert.equal(new Set(results.map(result => result.generatedPath)).size, 4);
-    assert.deepEqual(new Set(results.map(result => result.generatedPath)), new Set(sources));
+    assert.equal(results.filter(result => result.generatedPath).length, 1);
+    assert.equal(results.filter(result => result.error?.includes("IMAGE_GENERATION_REQUIRED")).length, 3);
     results.forEach((result, index) => {
       assert.equal(result.sectionId, `feature-${index}`);
       assert.equal(result.slotId, `feature-${index}:image:1`);
       assert.equal(result.imageIntent, `기능 ${index + 1} 작동 장면`);
       assert.equal(result.replaceAssetKey, requests[index].replaceAssetKey);
-      assert.equal(result.sourceReview?.reviewClass, "feature-evidence");
+      if (index === 0) assert.equal(result.sourceReview?.reviewClass, "product-photo");
     });
   });
 
@@ -884,14 +902,14 @@ async function verifyGenerator() {
       { requestId: "body", sectionId: "section" }, { requestId: "hero", replaceAssetKey: "hero" },
     ] });
     assert.equal(h.spawns, 0, "no generation is started without an intact reference");
-    assert.ok(results.every(result => result.error?.includes("PRODUCT_FRONT_REFERENCE_REQUIRED") && !result.generatedPath && result.provenance !== "EDITORIAL_CARD"), JSON.stringify(results));
+    assert.ok(results.every(result => result.error?.includes("PRODUCT_REFERENCE_REQUIRED") && !result.generatedPath && result.provenance !== "EDITORIAL_CARD"), JSON.stringify(results));
     const noFacts = harness({ referenceRejected: true });
     noFacts.manifest.connectKind = "SHOPPING";
     noFacts.manifest.imageRequirements = { policy: "verified-source-first" };
     noFacts.manifest.composition.sections[0].title = "어떤 제품인지부터 보면";
     noFacts.manifest.composition.sections[0].imageIntent = "제품 전체 모습과 구성을 한눈에 보여주는 이미지";
     const [body] = await noFacts.generate(0, { requests: [{ requestId: "body", sectionId: "section" }] });
-    assert.match(body.error || "", /PRODUCT_FRONT_REFERENCE_REQUIRED/u, "the same reference gate applies without facts");
+    assert.match(body.error || "", /PRODUCT_REFERENCE_REQUIRED/u, "the same reference gate applies without facts");
   });
 
   for (const sceneReviewError of [undefined, "REFERENCE_SCENE_REVIEW_FAILED: distorted geometry"]) {
@@ -910,20 +928,22 @@ async function verifyGenerator() {
         { requestId: "body", sectionId: "section" }, { requestId: "hero", replaceAssetKey: "hero" },
       ] });
       await tick(); // Shopping source preflight finishes before the worker is spawned.
-      assert.equal(h.jobs.length, 2);
+      assert.equal(h.jobs.length, 1, "thumbnail uses original source locally, only body is generated");
       h.child.stderr.write(`${prefix}${JSON.stringify(h.result(0, outputs[0]))}\n`);
       await tick();
-      assert.equal(h.callbacks[0].generatedPath, sceneReviewError ? null : outputs[0]);
-      h.close(0, { ok: true, jobs: outputs.map((file, index) => h.result(index, file)) });
+      assert.equal(h.callbacks.find(result => result.requestId === "body")!.generatedPath, sceneReviewError ? null : outputs[0]);
+      h.close(0, { ok: true, jobs: [h.result(0, outputs[0])] });
       const results = await pending;
       assert.equal(h.lockCalls, 0, "no source cutout/composition participates in reference-guided scenes");
-      results.forEach((r, index) => {
+      assert.equal(results[1].provenance, "PHOTO_TEXT_THUMBNAIL");
+      assert.equal(results[1].remoteGenerated, false);
+      results.slice(0, 1).forEach((r, index) => {
         assert.equal(r.generatedPath, sceneReviewError ? null : outputs[index]);
         assert.equal(r.error, sceneReviewError);
         assert.equal(r.provenance, "GENERATED_SCENE");
         assert.equal(r.referenceScene?.reviewStatus, sceneReviewError ? undefined : "passed", "failed review must not retain approval evidence");
       });
-      assert.match(h.jobs[0].prompt, /product scene using the attached seller reference/);
+      assert.match(h.jobs[0].prompt, /lifestyle photograph using the attached seller reference/);
       assert.doesNotMatch(h.jobs[0].prompt, /Generate the environment only/);
       assert.ok(h.jobs.every(job => JSON.stringify(job.referenceImagePaths) === JSON.stringify([sourcePath])));
     });

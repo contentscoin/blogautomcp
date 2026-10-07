@@ -17,12 +17,13 @@ import {
   applyExternalGeneratedBrandPostImage,
   type BrandPostImageGenerationRequest,
 } from "@/lib/brand-post-image-generation";
-import { isBrandPostImageRepairActive, planSectionImageRequests, repairBrandPostImages } from "@/lib/brand-post-image-repair";
+import { isBrandPostImageRepairActive, planSectionImageRequests, planWholeBrandPostImageRequests, repairBrandPostImages } from "@/lib/brand-post-image-repair";
 import { replanShoppingImageCoverage } from "@/lib/brand-post-image-replan";
+import { migrateShoppingNaturalPhotoPlan, requiresShoppingNaturalPhotoPlan } from "@/lib/brand-post-natural-photo-migration";
 
 const IMAGE_ACTIONS = ["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources", "repair_rejected", "replan_sources"] as const;
 type ImageAction = (typeof IMAGE_ACTIONS)[number];
-const IMAGE_REPAIR_CONFLICT_CODES = ["IMAGE_REPAIR_BUSY", "IMAGE_REPAIR_OWNERSHIP_LOST"] as const;
+const IMAGE_REPAIR_CONFLICT_CODES = ["IMAGE_REPAIR_BUSY", "IMAGE_REPAIR_OWNERSHIP_LOST", "NATURAL_IMAGE_PLAN_REQUIRED"] as const;
 
 function imageFailureCode(errors: string[]): string | undefined {
   const text = errors.join("\n");
@@ -154,9 +155,24 @@ export async function POST(
   const claim = await prisma.brandLink.updateMany({ where: { id, status: link.status }, data: { status: "DRAFTING" } });
   if (claim.count !== 1) return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "상품 상태가 변경되었습니다." }, { status: 409 });
   try {
-  const manifest = readBrandPostPackage(id, { migrate: false });
+  let manifest = readBrandPostPackage(id, { migrate: false });
   if (!manifest || manifest.version !== "brand-post-package/v2") {
     return NextResponse.json({ success: false, error: "이미지를 편집할 v2 초안 패키지가 없습니다. 초안을 다시 만들어 주세요." }, { status: 404 });
+  }
+  if (requiresShoppingNaturalPhotoPlan(manifest)) {
+    if (body.action !== "generate_missing" && body.action !== "bind_sources") {
+      return NextResponse.json({ success: false, code: "NATURAL_IMAGE_PLAN_REQUIRED",
+        error: "기존 이미지 계획입니다. 전체 이미지 준비에서 원본 1장과 자연스러운 연출 사진 3장으로 변경한 뒤 개별 이미지를 수정하세요." }, { status: 409 });
+    }
+    try {
+      const migrated = migrateShoppingNaturalPhotoPlan(id).manifest;
+      if (!migrated || migrated.version !== "brand-post-package/v2") throw new Error("NATURAL_IMAGE_PLAN_REQUIRED: 변경할 초안이 없습니다.");
+      manifest = migrated;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const code = imageFailureCode([message]) || "NATURAL_IMAGE_PLAN_REQUIRED";
+      return NextResponse.json({ success: false, code, error: message }, { status: imageFailureStatus(code, 409) });
+    }
   }
 
   const preview = packagePreview(manifest);
@@ -251,7 +267,7 @@ export async function POST(
   }
   const generationRequests: BrandPostImageGenerationRequest[] = [];
   if (body.action === "generate_missing" || body.action === "bind_sources") {
-    generationRequests.push(...planSectionImageRequests(preview.imageSlots));
+    generationRequests.push(...planWholeBrandPostImageRequests(manifest));
   } else if (body.action === "repair_rejected") {
     const rejectedSlots = preview.imageSlots.map(slot => ({
       ...slot,

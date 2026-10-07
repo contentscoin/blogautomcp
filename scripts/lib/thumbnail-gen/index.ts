@@ -5,6 +5,7 @@
 import { extractTravelProductFacts } from "../travel-content";
 import { generateThumbnailWithQc, type ThumbnailGenerationResult } from "./generate";
 import { buildShoppingThumbnailPrompt, buildTravelThumbnailPrompt, listThumbnailMoods, type ThumbnailCopy, type ThumbnailKind } from "./prompt";
+import { normalizeShoppingThumbnailHeadline } from "../thumbnail-layout-v2";
 
 export * from "./prompt";
 export * from "./qc";
@@ -40,7 +41,7 @@ export function condenseHeadline(headline: string, max = 12): string {
 }
 
 export function buildThumbnailPrompt(input: GenerateThumbnailInput): string {
-  const copy: ThumbnailCopy = { ...input.copy, headline: condenseHeadline(input.copy.headline) };
+  const copy: ThumbnailCopy = { ...input.copy, headline: input.kind === "SHOPPING" ? normalizeShoppingThumbnailHeadline(input.copy.headline) : condenseHeadline(input.copy.headline) };
   if (input.kind === "TRAVEL") {
     return buildTravelThumbnailPrompt({
       productName: input.productName,
@@ -64,7 +65,7 @@ export function buildThumbnailPrompt(input: GenerateThumbnailInput): string {
 export async function generateThumbnail(input: GenerateThumbnailInput): Promise<ThumbnailGenerationResult | null> {
   if (!isGenerativeThumbnailAvailable()) return null;
   const prompt = buildThumbnailPrompt(input);
-  const headline = condenseHeadline(input.copy.headline);
+  const headline = input.kind === "SHOPPING" ? normalizeShoppingThumbnailHeadline(input.copy.headline) : condenseHeadline(input.copy.headline);
   const log = input.onLog || (() => undefined);
   const mood = listThumbnailMoods(input.kind).find((item) => item.id === input.moodId);
   log(`gpt-image 썸네일 생성 시작 (${input.kind}, 무드: ${mood?.label || "자동"}, 헤드라인: "${headline}")`);
@@ -78,8 +79,8 @@ export async function generateThumbnail(input: GenerateThumbnailInput): Promise<
       kind: input.kind,
       productName: input.copy.productNameLabel || input.productName,
       headline,
-      subline: input.copy.subline,
-      badge: input.copy.badge,
+      subline: input.kind === "TRAVEL" ? input.copy.subline : undefined,
+      badge: input.kind === "TRAVEL" ? input.copy.badge : undefined,
       referenceImagePath: input.referenceImagePath,
     },
     onAttempt: (attempt) => {

@@ -200,7 +200,7 @@ export function formatDraftSubmissionNextAction(): string {
     "qualityChecklist를 내부 검수한 JSON 원고를 post_submit_draft로 제출하고 작업을 job_get으로 확인하세요.",
     "contentQuality.canPublish가 false이면 score만 보지 말고 code, blockers, 실패 signals와 compositionQualityReport를 구분하세요.",
     "본문 사실성·분량·섹션·반복·고지 등 텍스트 실패가 명시된 경우에만 해당 원인을 고쳐 새 idempotencyKey로 원고를 다시 제출하세요.",
-    "composition-quality, representative-image, thumbnail 등 이미지·배치 실패만 있으면 원고를 재작성하거나 재제출하지 마세요. post_get_draft 의 imageSlots에서 부족한 파트의 생성 가능 여부를 확인하세요. 쇼핑은 참조 연출이 허용된 파트만 준비된 referenceImages를 실제로 첨부하고 imagePrompt로 생성한 뒤, 같은 작업의 referenceHashes를 순서대로 post_apply_section_image에 전달합니다. 참조가 없거나 기능·수치 근거용 파트이면 임의 생성하지 말고 검증된 원본이나 근거 자료 카드로 보완하세요. 여행은 해당 파트의 imagePrompt를 따릅니다.",
+    "composition-quality, representative-image, thumbnail 등 이미지·배치 실패만 있으면 원고를 재작성하거나 재제출하지 마세요. post_get_draft 의 imageSlots에서 부족한 파트의 생성 가능 여부를 확인하세요. 쇼핑은 준비된 referenceImages를 실제로 첨부하고 imagePrompt로 자연스러운 사진 한 장을 생성한 뒤, 같은 작업의 referenceHashes를 순서대로 post_apply_section_image에 전달합니다. 본문은 원본 1장과 서로 다른 AI 연출 사진 3장을 기본으로 하며 설명 프레임·정보 카드·콜라주·원본 반복으로 대신하지 않습니다. 참조가 없으면 needs_reference로 남기고 보강합니다. 기능·수치는 확인된 판매정보만 본문에 쓰고 AI 사진을 검증 근거로 삼지 않습니다. 썸네일만 큰 제목 텍스트를 허용합니다. 여행은 해당 파트의 imagePrompt를 따릅니다.",
     "composition-quality 안에 본문 분량·섹션 실패도 있으면 그 텍스트 항목만 보강합니다. 원인이 불명확하면 실패 상세를 조회하고 재작성을 추측하지 마세요.",
     "텍스트 QC 통과나 100점은 이미지 준비·전체 발행 가능을 의미하지 않습니다. 원고를 사용자에게 먼저 보여주고 발행은 별도 확인을 받으세요.",
   ].join(" ");

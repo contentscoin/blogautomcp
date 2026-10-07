@@ -70,6 +70,8 @@ const FAILURE_LABELS: Record<string, string> = {
   forbiddenInfo: "금지 정보",
   lowContrast: "대비 부족",
   extraText: "불필요한 문구",
+  editorialCard: "설명 카드·프레임 구성",
+  headlineSmall: "핵심 제목이 작음",
 };
 
 export default function ProductThumbnailStudio({
@@ -95,7 +97,6 @@ export default function ProductThumbnailStudio({
   const [savedMessage, setSavedMessage] = useState<string | null>(null);
   const [syncingImages, setSyncingImages] = useState(false);
   const [mood, setMood] = useState("");
-  const [showAdvancedCopy, setShowAdvancedCopy] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -148,9 +149,10 @@ export default function ProductThumbnailStudio({
     return () => clearInterval(timer);
   }, [generating]);
 
+  const isShopping = data?.connectKind === "SHOPPING";
   const canGenerate = useMemo(
-    () => Boolean(sourceImageUrl && copy.productNameLabel.trim() && copy.headline.trim()),
-    [copy.headline, copy.productNameLabel, sourceImageUrl],
+    () => Boolean(sourceImageUrl && copy.productNameLabel.trim() && copy.headline.trim() && (!isShopping || copy.headline.length <= 14)),
+    [copy.headline, copy.productNameLabel, sourceImageUrl, isShopping],
   );
   const isGenerative = data?.engine === "gpt-image";
 
@@ -186,7 +188,7 @@ export default function ProductThumbnailStudio({
             <p className="mt-1 text-sm text-slate-500">
               {isGenerative
                 ? `gpt-image 가 문구까지 한 번에 그리고, 비전 검수(${data?.qcMinScore ?? 95}점 이상)를 통과한 결과만 사용합니다. 최대 ${data?.maxAttempts ?? 4}회 자동 재생성.`
-                : "제품 원본을 보존하는 로컬 합성 방식으로 썸네일을 만듭니다."}
+                : isShopping ? "상품 사진을 크게 쓰고 핵심 제목을 두 줄 이내로 강조합니다." : "제품 원본을 보존하는 로컬 합성 방식으로 썸네일을 만듭니다."}
             </p>
           </div>
           <button type="button" onClick={onClose} className="rounded-lg px-3 py-2 text-slate-500 hover:bg-slate-100" aria-label="닫기">✕</button>
@@ -199,7 +201,7 @@ export default function ProductThumbnailStudio({
             <div className="space-y-6">
               <section className="rounded-2xl border border-slate-200 p-4">
                 <div className="flex items-center gap-2"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-slate-900 text-xs font-bold text-white">1</span><h3 className="font-semibold text-slate-900">참조 사진 선택</h3></div>
-                <p className="mt-2 text-xs text-slate-500">{data?.connectKind === "TRAVEL" ? "여행지가 잘 드러나는 장면을 고르세요. 이 사진의 장소·분위기를 기준으로 그립니다." : "상품 형태와 색상이 정확히 보이는 원본을 고르세요. 이 사진을 기준으로 상품을 충실하게 그립니다."}</p>
+                <p className="mt-2 text-xs text-slate-500">{data?.connectKind === "TRAVEL" ? "여행지가 잘 드러나는 장면을 고르세요. 이 사진의 장소·분위기를 기준으로 그립니다." : "상품 전체가 크고 선명하게 보이는 사진을 고르세요. 긴 상세페이지나 설명 카드 사진은 제외하세요."}</p>
                 {data?.imageUrls.length ? (
                   <div className="mt-3 grid grid-cols-4 gap-2">
                     {data.imageUrls.map((imageUrl, index) => (
@@ -219,7 +221,7 @@ export default function ProductThumbnailStudio({
                 )}
               </section>
 
-              <section className="rounded-2xl border border-slate-200 p-4">
+              {(!isShopping || isGenerative) && <section className="rounded-2xl border border-slate-200 p-4">
                 <div className="flex items-center gap-2"><span className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-bold text-white ${data?.connectKind === "TRAVEL" ? "bg-amber-500" : "bg-blue-600"}`}>2</span><h3 className="font-semibold text-slate-900">장면·무드</h3></div>
                 <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
                   {(data?.moods || []).map((option) => (
@@ -228,15 +230,16 @@ export default function ProductThumbnailStudio({
                     </button>
                   ))}
                 </div>
-              </section>
+              </section>}
 
               <section className="rounded-2xl border border-slate-200 p-4">
-                <div className="flex items-center gap-2"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-violet-600 text-xs font-bold text-white">3</span><h3 className="font-semibold text-slate-900">핵심 문구</h3></div>
+                <div className="flex items-center gap-2"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-violet-600 text-xs font-bold text-white">{isShopping && !isGenerative ? 2 : 3}</span><h3 className="font-semibold text-slate-900">핵심 문구</h3></div>
                 <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                  {COPY_FIELDS.filter((field) => showAdvancedCopy || field.key === "headline" || field.key === "subline").map((field) => {
+                  {COPY_FIELDS.filter((field) => field.key === "headline" || (!isShopping && field.key === "subline")).map((originalField) => {
+                    const field = isShopping ? { ...originalField, label: "큰 제목", hint: "예: 바지 핏 고르는 법", maxLength: 14, recommended: 14 } : originalField;
                     const overRecommended = field.recommended !== undefined && copy[field.key].length > field.recommended;
                     return (
-                      <label key={field.key} className={field.key === "subline" ? "sm:col-span-2" : ""}>
+                      <label key={field.key} className={isShopping || field.key === "subline" ? "sm:col-span-2" : ""}>
                         <span className="flex items-center justify-between text-sm font-medium text-slate-700">
                           {field.label}
                           <span className={`text-xs ${overRecommended ? "text-amber-600" : "text-slate-400"}`}>
@@ -254,7 +257,7 @@ export default function ProductThumbnailStudio({
                     );
                   })}
                 </div>
-                <p className="mt-3 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-800">검증되지 않은 최저가·1위·직접 체험 문구는 자동 차단됩니다. 한글 문구는 짧을수록 정확하게 그려집니다.</p>
+                <p className="mt-3 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-800">{isShopping ? "14자 이내의 핵심 문구를 크게 표시합니다. 보조 설명은 본문에 쓰세요. 검증되지 않은 최저가·1위·직접 체험 문구는 사용할 수 없습니다." : "검증되지 않은 최저가·1위·직접 체험 문구는 자동 차단됩니다. 한글 문구는 짧을수록 정확하게 그려집니다."}</p>
               </section>
             </div>
 
@@ -262,7 +265,7 @@ export default function ProductThumbnailStudio({
               <div className="flex items-center justify-between">
                 <div>
                   <h3 className="font-semibold text-white">완성 미리보기</h3>
-                  <p className="text-xs text-slate-400">1024×1024 · 네이버 첫 이미지용 (검색 결과 1:1 크롭 대응)</p>
+                  <p className="text-xs text-slate-400">{isShopping ? "1080×1080 · 큰 제목 최대 두 줄 · 검색 결과에서도 선명하게" : "1024×1024 · 네이버 첫 이미지용 (검색 결과 1:1 크롭 대응)"}</p>
                 </div>
                 {result && (
                   <span className={`rounded-full px-3 py-1 text-xs font-semibold ${result.engine === "gpt-image" ? "bg-emerald-900 text-emerald-200" : "bg-slate-800 text-slate-300"}`}>

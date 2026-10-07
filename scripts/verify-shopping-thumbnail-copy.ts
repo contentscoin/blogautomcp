@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,9 +11,10 @@ import {
   isProductThumbnailCopyCompatible,
 } from "./lib/product-thumbnail";
 import { createOriginalProductPhotoThumbnail } from "./lib/product-image-lock";
-import { readProductPhotoSource } from "./lib/product-photo-provenance";
+import { copyProductPhotoSource, readProductPhotoSource } from "./lib/product-photo-provenance";
 import { buildProduct9Canvas } from "./lib/product-9canvas";
-import { fitThumbnailHeadline } from "./lib/thumbnail-layout-v2";
+import { buildShoppingPhotoHeadlineOverlay, fitThumbnailHeadline, normalizeShoppingThumbnailHeadline, SHOPPING_THUMBNAIL_MIN_FONT_SIZE } from "./lib/thumbnail-layout-v2";
+import { isReusableShoppingThumbnail, parseProductThumbnailSettings } from "./lib/product-thumbnail-settings";
 
 async function main() {
   const sellerName = "향좋은 아비노 고보습 민감피부 저자극 스트레스릴리프 바디워시";
@@ -45,10 +47,18 @@ async function main() {
   assert.equal(compactProductDisplayName("브랜드X 미확인변형 ABC-123 바디워시"), "브랜드X 미확인변형 ABC-123 바디워시");
   assert.equal(compactProductDisplayName("아비노 바디워시"), "아비노 바디워시");
   assert.equal(compactProductDisplayName("고보습"), "고보습");
+  assert.equal(buildProductThumbnailCopy("", "남성 와이드 슬랙스 바지").headline, "핏·디테일 체크");
   const fitted = await fitThumbnailHeadline({ text: copy.productNameLabel, maxWidth: 500, maxHeight: 40, minFontSize: 24, maxFontSize: 30, maxLines: 1 });
   assert.equal(fitted.truncated, false, "Brand, variant and category must remain visible");
   const heading = await fitThumbnailHeadline({ text: copy.headline, maxWidth: 500, maxHeight: 286, minFontSize: 58, maxFontSize: 96 });
   assert.ok(heading.lines.some((line) => line.includes("구성")), "Do not split the category label inside a word");
+  for (const headline of [copy.headline, "핏·디테일 체크", "아주 길고 긴 상품 제목을 그대로 쓰면 작은 글씨가 됩니다"]) {
+    const overlay = (await buildShoppingPhotoHeadlineOverlay({ headline })).toString();
+    assert.ok(Number(overlay.match(/data-font-size="(\d+)"/u)?.[1]) >= SHOPPING_THUMBNAIL_MIN_FONT_SIZE);
+    assert.ok((overlay.match(/<text /gu) || []).length <= 2, "Only a short headline, not product label, badge and explanation");
+    assert.doesNotMatch(overlay, /<ellipse|<rect x=|<image|rx=/u, "No inset frame, floating shadow or card panel");
+    assert.ok(Array.from(normalizeShoppingThumbnailHeadline(headline)).length <= 14);
+  }
 
   const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), "shopping-thumbnail-copy-"));
   // Synthetic offline photo fixture: asymmetric corner markers expose crops or flips.
@@ -60,21 +70,43 @@ async function main() {
   for (const style of ["shopping-clean", "shopping-bold", "shopping-soft"] as const) {
     const result = await createOriginalProductPhotoThumbnail({ sourcePath, outputDir, productName: sellerName, headline: copy.headline, subline: copy.subline, style });
     artifacts.push(result.outputPath);
-    const expected = await sharp(sourcePath).rotate().resize(470, 900, { fit: "inside" }).removeAlpha().raw().toBuffer({ resolveWithObject: true });
-    assert.equal(expected.info.width, 470, "Small source should fill the available photo width");
-    const actual = await sharp(result.outputPath).extract({ left: 570, top: Math.floor((1080 - expected.info.height) / 2), width: expected.info.width, height: expected.info.height }).removeAlpha().raw().toBuffer();
-    assert.deepEqual(actual, expected.data, "Entire photo must survive layout without recoloring or cropping");
+    const expected = await sharp(sourcePath).rotate().resize(1080, 1080, { fit: "inside" }).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    assert.equal(expected.info.width, 810, "Portrait photo occupies 75% of the square width, not a small inset");
+    assert.equal(expected.info.height, 1080, "Entire original portrait reaches the canvas edges without cropping");
+    const expectedUpper = await sharp(expected.data, { raw: { width: expected.info.width, height: expected.info.height, channels: expected.info.channels } }).extract({ left: 0, top: 0, width: 810, height: 400 }).raw().toBuffer();
+    const actualUpper = await sharp(result.outputPath).extract({ left: 135, top: 0, width: 810, height: 400 }).removeAlpha().raw().toBuffer();
+    assert.equal(actualUpper.equals(expectedUpper), true, "Original photograph geometry and colors survive outside the headline shade");
     const record = readProductPhotoSource(result.outputPath);
     assert.ok(record);
     assert.equal(record.segmented, false);
-    assert.equal(record.provenance, "EDITORIAL_CARD");
+    assert.equal(record.provenance, "PHOTO_TEXT_THUMBNAIL");
+    const saved = parseProductThumbnailSettings(JSON.stringify({ version: 1, generatedPath: result.outputPath, copy }));
+    assert.ok(saved);
+    assert.equal(isReusableShoppingThumbnail(saved), true, "Verified source/output receipt approves the new photo thumbnail");
     assert.deepEqual(fs.readFileSync(record.sourcePath), sourceBefore);
-    // Below the rectangular photo the panel must have no detached ellipse.
-    const pixels = await sharp(result.outputPath).removeAlpha().raw().toBuffer({ resolveWithObject: true });
-    const sample = (x: number, y: number) => Array.from(pixels.data.subarray((y * 1080 + x) * 3, (y * 1080 + x) * 3 + 3));
-    const a = sample(815, 900), b = sample(815, 950);
-    assert.ok(a.every((value, i) => Math.abs(value - b[i]) <= 3), "No fake ground shadow under an unsegmented photo");
+    const copied = path.join(outputDir, `copy-${style}.png`);
+    fs.copyFileSync(result.outputPath, copied);
+    assert.equal(copyProductPhotoSource(result.outputPath, copied), true);
+    assert.equal(readProductPhotoSource(copied)?.provenance, "PHOTO_TEXT_THUMBNAIL", "Package copies preserve honest thumbnail provenance");
   }
+  const previews = fs.readdirSync(outputDir);
+  assert.ok(previews.some((file) => file.endsWith("-120.jpg")));
+  assert.ok(previews.some((file) => file.endsWith("-240.jpg")));
+  const versionedOutput = path.join(outputDir, "versioned-thumbnail.png");
+  fs.copyFileSync(artifacts[0], versionedOutput);
+  const makeSettings = (extra: Record<string, unknown> = {}) => parseProductThumbnailSettings(JSON.stringify({ version: 1, generatedPath: versionedOutput, copy, ...extra }))!;
+  assert.equal(isReusableShoppingThumbnail(makeSettings()), false, "Old square cards cannot be approved merely by their size");
+  assert.equal(isReusableShoppingThumbnail(makeSettings({ layoutVersion: "shopping-photo-headline/v1" })), false, "A version label alone is not evidence");
+  const versioned = makeSettings({ layoutVersion: "shopping-photo-headline/v1", generatedSha256: crypto.createHash("sha256").update(fs.readFileSync(versionedOutput)).digest("hex") });
+  assert.equal(versioned.layoutVersion, "shopping-photo-headline/v1", "Parser preserves current layout version");
+  assert.equal(isReusableShoppingThumbnail(versioned), true, "Server-saved current version must bind the exact output bytes");
+  assert.equal(makeSettings({ layoutVersion: "shopping-photo-headline/v0", generatedSha256: "invalid" }).layoutVersion, undefined);
+  fs.appendFileSync(versionedOutput, "changed");
+  assert.equal(isReusableShoppingThumbnail(versioned), false, "Replacing a saved file invalidates its layout approval");
+  const banner = path.join(outputDir, "long-detail-page.png");
+  await sharp({ create: { width: 120, height: 900, channels: 3, background: "#fff" } }).png().toFile(banner);
+  await assert.rejects(createOriginalProductPhotoThumbnail({ sourcePath: banner, outputDir, productName: sellerName, headline: copy.headline, subline: "" }), /긴 상세페이지/u,
+    "A long seller banner must not return as a tiny inset photo");
   assert.deepEqual(fs.readFileSync(sourcePath), sourceBefore);
   console.log(JSON.stringify({ ok: true, outputDir, artifacts, copy }, null, 2));
 }

@@ -433,9 +433,10 @@ const waitForMilliseconds = (milliseconds: number) => new Promise<void>((resolve
 function brandImageProvenanceLabel(value?: string): string {
   if (value === "LOCKED_PRODUCT") return "원본 상품 잠금 합성";
   if (value === "ORIGINAL") return "수집 원본";
-  if (value === "EDITORIAL_CARD") return "에디토리얼 합성";
+  if (value === "EDITORIAL_CARD") return "이전 정보 카드 · 재생성 필요";
+  if (value === "PHOTO_TEXT_THUMBNAIL") return "사진·큰 제목 썸네일";
   if (value === "GENERATED_BACKGROUND") return "AI 생성 배경 이미지";
-  if (value === "GENERATED_SCENE") return "상품 원본 참조 AI 연출";
+  if (value === "GENERATED_SCENE") return "상품 원본 참조 자연스러운 AI 사진";
   return "이미지";
 }
 

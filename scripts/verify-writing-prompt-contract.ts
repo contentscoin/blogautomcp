@@ -298,7 +298,8 @@ assert.match(nextAction, /원인이 불명확하면 실패 상세를 조회/u);
 assert.match(nextAction, /발행은 별도 확인/u);
 assert.match(nextAction, /referenceImages를 실제로 첨부/u);
 assert.match(nextAction, /같은 작업의 referenceHashes를 순서대로 post_apply_section_image에 전달/u);
-assert.match(nextAction, /참조가 없거나 기능·수치 근거용 파트이면 임의 생성하지/u);
+assert.match(nextAction, /참조가 없으면 needs_reference로 남기고 보강/u);
+assert.match(nextAction, /설명 프레임·정보 카드·콜라주·원본 반복으로 대신하지/u);
 
 console.log(JSON.stringify({ ok: true, browserCases, unsupportedCandidates: unsupported.length, groundingCases: groundingCases.length,
   groundedCandidates: groundingCases.reduce((sum, testCase) => sum + testCase.grounded.length, 0),

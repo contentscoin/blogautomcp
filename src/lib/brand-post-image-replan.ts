@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { allowsGenericBrandPostProductPhoto, isShoppingFactCardAsset, isShoppingLifestyleImage, isReferenceGuidedScene } from "./brand-post-image-evidence";
+import { allowsGenericBrandPostProductPhoto, isShoppingLifestyleImage, isReferenceGuidedScene } from "./brand-post-image-evidence";
+import { SHOPPING_POST_STRATEGY_VERSION } from "./shopping-post-strategy";
 import { acquireBrandPostImageRepairLock } from "./brand-post-image-repair-lock";
 import { SHOPPING_POST_CONTRACT_V1 } from "./post-composition-contract";
 import { repairBrandPostImages } from "./brand-post-image-repair";
@@ -10,7 +11,6 @@ import { getBrandPostImageSlots, readBrandPostPackage, reconcileBrandPostPackage
 type Manifest = BrandPostPackageManifestV2;
 /** Shopping contract floor (post-composition-contract targetImages.min). */
 const MINIMUM_POST_IMAGES = SHOPPING_POST_CONTRACT_V1.targetImages.min;
-const MINIMUM_POST_IMAGES_WHEN_GALLERY_EXHAUSTED = 3;
 type Slots = ReturnType<typeof getBrandPostImageSlots>;
 export interface ImageReplanDependencies {
   read: typeof readBrandPostPackage;
@@ -34,7 +34,7 @@ const verifiedAlternative = (slot: Slots[number], allowProductPhoto = false) => 
 const generatedLifestyleAlternative = (slot: Slots[number], manifest: Manifest) => {
   const section = manifest.composition.sections.find(section => section.id === slot.sectionId);
   return Boolean(section) && isShoppingLifestyleImage(section!) && slot.count > 0 && !slot.missing && !slot.generationMissing &&
-    !slot.staleTargets.length && slot.assets.some(asset => asset.creationMethod === "source-with-generated-background" || isReferenceGuidedScene(asset) || isShoppingFactCardAsset(asset));
+    !slot.staleTargets.length && slot.assets.some(asset => isReferenceGuidedScene(asset));
 };
 function permitsGenericReplacement(slot: Slots[number], manifest: Manifest): boolean {
   const section = manifest.composition.sections.find(section => section.id === slot.sectionId)!;
@@ -92,6 +92,10 @@ export async function replanShoppingImageCoverage(options: {
       initial.imagePolicy !== "LOCKED_PRODUCT_OR_ORIGINAL" || initial.imageRequirements?.policy === "generated-required")
     return unchanged("REPLAN_NOT_APPLICABLE");
   if (initial.imageGeneration?.status === "running") return unchanged("REPLAN_BUSY");
+  // The approved photo policy preserves one original and three distinct scene slots.
+  // Missing references or failed scenes remain missing; they cannot reduce the floor or swap in extra originals.
+  if (initial.composition.strategyVersion === SHOPPING_POST_STRATEGY_VERSION)
+    return unchanged("REPLAN_NATURAL_PHOTOS_REQUIRED");
   const slots = deps.slots(initial);
   const missing = slots.filter(slot => {
     const section = initial.composition.sections.find(s => s.id === slot.sectionId)!;
@@ -181,11 +185,8 @@ export async function replanShoppingImageCoverage(options: {
     // Its text and image intent stay unchanged; nothing is relabelled as evidence.
     const totalImages = audited.reduce((n, slot) => n + slot.count, 0) + (current.heroImagePath ? 1 : 0);
     const relaxed = !alternatives;
-    // When the seller gallery cannot supply a clean product cutout or any usable source, neither
-    // evidence nor generated scenes can add images. Then the post keeps what verified images it has,
-    // down to a floor of three (hero + two), instead of blocking forever.
-    // Same floor as the composition gate once every required slot is filled: hero + two.
-    const floor = MINIMUM_POST_IMAGES_WHEN_GALLERY_EXHAUSTED;
+    // Legacy drafts must also retain the five-image floor until their photo plan is repaired.
+    const floor = MINIMUM_POST_IMAGES;
     if (relaxed && totalImages < floor) {
       const detail = generationErrors.length ? ` 생활 장면 생성: ${generationErrors.slice(0, 2).join(" / ").slice(0, 300)}` : "";
       const code = noCapacity ? "REPLAN_NO_ALTERNATIVE_CAPACITY" : "REPLAN_INSUFFICIENT_VERIFIED_ALTERNATIVES";

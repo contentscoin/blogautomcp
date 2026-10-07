@@ -5,6 +5,7 @@
 
 import { inferCategoryName, inferScenePrompt } from "../product-thumbnail";
 import type { TravelProductFacts } from "../travel-content";
+import { normalizeShoppingThumbnailHeadline, SHOPPING_THUMBNAIL_LAYOUT_RULES } from "../thumbnail-layout-v2";
 
 export type ThumbnailKind = "SHOPPING" | "TRAVEL";
 
@@ -94,7 +95,7 @@ export function buildShoppingThumbnailPrompt(input: ShoppingPromptInput): string
   const features = (input.features || []).map(clean).filter(Boolean).slice(0, 4);
   return [
     "Generate ONE finished premium Korean Naver blog product thumbnail in a single generation.",
-    "Everything is created inside the image: photorealistic product scene, the exact Korean headline, the exact product name label, and layout. No separate compositing will happen afterward.",
+    "Create one natural photographic scene with an exceptionally large, readable Korean headline integrated into the negative space. The headline is the only added text; this is a photograph-first cover, not an explanation slide.",
     "Use the attached product photo as the strict visual reference for shape, color, material, and package impression. Keep the product recognizable and faithful; do not invent a different model, color, logo, or package.",
     "",
     "Product:",
@@ -103,14 +104,16 @@ export function buildShoppingThumbnailPrompt(input: ShoppingPromptInput): string
     input.description ? `- Description: ${clean(input.description).slice(0, 220)}` : "",
     features.length ? `- Key features: ${features.join(", ")}` : "",
     "",
-    ...COMMON_LAYOUT,
+    "Canvas and layout:",
+    ...SHOPPING_THUMBNAIL_LAYOUT_RULES,
+    "Korean text must match the supplied headline exactly, with clean heavy sans-serif Hangul and no broken glyphs.",
     "",
     "Visible text, exactly these Korean strings and nothing else:",
-    ...textLines(input.copy, true),
+    `- Main headline, the ONLY added text: "${normalizeShoppingThumbnailHeadline(input.copy.headline)}"`,
     "",
     "Photorealistic product scene:",
     `- ${scene}`,
-    "- Product is the large, sharp hero object occupying most of the lower area.",
+    "- Product is the large, sharp hero object in one continuous full-frame photo. For clothing preserve waistband, pockets, fabric drape and hem lengths; leave text space around the garment without obscuring its fit.",
     "- The scene looks like a real photo taken for a blog with a good camera: natural light, one consistent shadow direction, contact shadow under the product, subtle grain, no CG-perfect gloss.",
     "",
     ...HARD_NEGATIVES,

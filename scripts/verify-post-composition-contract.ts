@@ -10,7 +10,7 @@ import {
   resolvePostDocument,
   type ResolvedPostDocumentV1,
 } from "../src/lib/post-composition-contract";
-import { SHOPPING_POST_STRATEGY } from "../src/lib/shopping-post-strategy";
+import { SHOPPING_POST_STRATEGY, shoppingPhotoRoleAt } from "../src/lib/shopping-post-strategy";
 
 function buildSections(prefix: string, count: number, paragraphLength: number): string[] {
   return Array.from({ length: count }, (_, index) => {
@@ -22,7 +22,8 @@ function buildSections(prefix: string, count: number, paragraphLength: number): 
 function reviewedBindings(kind: "SHOPPING" | "TRAVEL", sections: string[], images: string[]) {
   const bindings: Record<string, string[]> = Object.fromEntries(sections.map(section => [stableFreeformSectionId(kind, section.split("\n")[0]), []]));
   const keys = Object.keys(bindings);
-  images.slice(1).forEach((image, index) => bindings[keys[index % keys.length]].push(image));
+  const photographicKeys = kind === "SHOPPING" ? keys.filter((_, index) => shoppingPhotoRoleAt(index, keys.length) !== "none") : keys;
+  images.slice(1).forEach((image, index) => bindings[photographicKeys[index % photographicKeys.length]].push(image));
   return bindings;
 }
 const shoppingImages = Array.from({ length: 12 }, (_, index) => `C:/fixture/shopping-${index}.png`);
@@ -65,8 +66,8 @@ assert.deepEqual(SHOPPING_POST_CONTRACT_V1.targetImages, { min: 5, recommended: 
 assert.deepEqual(SHOPPING_POST_CONTRACT_V1.targetSections, { min: 5, max: 8 });
 const shoppingPackageRole = SHOPPING_POST_CONTRACT_V1.sections.find(section => section.id === "shopping-package")!;
 const shoppingDesignRole = SHOPPING_POST_CONTRACT_V1.sections.find(section => section.id === "shopping-design")!;
-assert.match(shoppingPackageRole.image.intent, /핵심 기능·작동 방식·조작부/u);
-assert.match(shoppingDesignRole.image.intent, /특장점·작동 방식·조작부/u);
+assert.match(shoppingPackageRole.image.intent, /AI 연출 이미지.*증거가 아님/u);
+assert.match(shoppingDesignRole.image.intent, /AI 연출 이미지.*증거가 아님/u);
 assert.doesNotMatch(shoppingPackageRole.image.intent, /구성품·패키지/u,
   "feature sections must not inherit a positional package-photo intent");
 assert.doesNotMatch(shoppingDesignRole.image.intent, /재질·마감·크기/u,
@@ -82,16 +83,15 @@ legacyShoppingIntents.renderNodes = legacyShoppingIntents.renderNodes.map((node)
   return section ? { ...node, altText: `${section.title} - ${section.imageIntent}` } : node;
 });
 const currentShoppingIntents = normalizeLegacyPostImageIntents(legacyShoppingIntents);
-assert.match(currentShoppingIntents.sections[2].imageIntent, /핵심 기능·작동 방식·조작부/u);
-assert.match(currentShoppingIntents.sections[3].imageIntent, /특장점·작동 방식·조작부/u);
+assert.match(currentShoppingIntents.sections[2].imageIntent, /AI 연출 이미지.*증거가 아님/u);
+assert.match(currentShoppingIntents.sections[3].imageIntent, /AI 연출 이미지.*증거가 아님/u);
 assert.equal(currentShoppingIntents.sections[4].imageIntent, "구성품·패키지 원본 사진",
   "an identical phrase in a different semantic role must not be migrated");
 assert.equal(normalizeLegacyPostImageIntents(currentShoppingIntents), currentShoppingIntents,
   "the exact role-intent migration is idempotent");
 for (const section of currentShoppingIntents.sections.slice(2, 4)) {
   const imageNode = currentShoppingIntents.renderNodes.find(node => node.kind === "image" && node.sectionId === section.id);
-  assert.ok(imageNode?.kind === "image");
-  assert.equal(imageNode.altText, `${section.title} - ${section.imageIntent}`);
+  if (imageNode?.kind === "image") assert.equal(imageNode.altText, `${section.title} - ${section.imageIntent}`);
 }
 
 const revisedShoppingWithLegacyPlan = resolvePostDocument({
@@ -113,10 +113,8 @@ const revisedShoppingWithLegacyPlan = resolvePostDocument({
   connectUrl: "https://brandconnect.naver.com/shopping-fixture",
   qualityPreset: "STANDARD",
 });
-assert.match(revisedShoppingWithLegacyPlan.sections[2].imageIntent, /핵심 기능·작동 방식·조작부/u,
-  "text-only revision must refresh an obsolete feature intent");
-assert.match(revisedShoppingWithLegacyPlan.sections[3].imageIntent, /특장점·작동 방식·조작부/u,
-  "text-only revision must refresh an obsolete feature intent");
+assert.equal(revisedShoppingWithLegacyPlan.sections[2].imageSource, "none", "new shopping drafts leave prose-only sections without fake evidence images");
+assert.equal(revisedShoppingWithLegacyPlan.sections[3].imageSource, "none");
 
 const travelImages = Array.from({ length: 20 }, (_, index) => `C:/fixture/travel-${index}.jpg`);
 const travel = resolvePostDocument({
@@ -166,6 +164,15 @@ assert.equal(conciseShopping.qualityReport.target.images.recommended, 5);
 assert.equal(conciseShopping.qualityReport.imageCoverage.missingSectionIds.length, 0);
 assert.equal(conciseShopping.qualityReport.canAutoPublish, true);
 assert.equal(conciseShopping.renderNodes.filter(node => node.kind === "connectCard").length, 2);
+assert.deepEqual(conciseShopping.sections.map(section => section.imageSource), ["seller-original", "staged-ai", "none", "staged-ai", "none", "staged-ai"]);
+const originalSection = conciseShopping.sections[0];
+assert.ok(conciseShopping.renderNodes.findIndex(node => node.kind === "image" && node.sectionId === originalSection.id) <
+  conciseShopping.renderNodes.findIndex(node => node.kind === "heading" && node.sectionId === originalSection.id), "original photo precedes the opening heading");
+for (const section of conciseShopping.sections.filter(section => section.imageSource === "staged-ai")) {
+  const imageIndex = conciseShopping.renderNodes.findIndex(node => node.kind === "image" && node.sectionId === section.id);
+  const lastParagraphIndex = conciseShopping.renderNodes.findLastIndex(node => node.kind === "paragraph" && node.sectionId === section.id);
+  assert.ok(imageIndex > lastParagraphIndex, "three lifestyle scenes follow related early/middle/late prose");
+}
 const conciseInsufficientImages = resolvePostDocument({
   connectKind: "SHOPPING", title: conciseShopping.title, sections: conciseSections, hashtags: ["생활용품", "선택기준"],
   imagePaths: conciseImages.slice(0, 4),
@@ -173,6 +180,9 @@ const conciseInsufficientImages = resolvePostDocument({
   connectUrl: "https://brandconnect.naver.com/concise-fixture", qualityPreset: "PREMIUM",
 });
 assert.equal(conciseInsufficientImages.qualityReport.canAutoPublish, false, "Five-image default does not waive evidence slots");
+const exhaustedGallery = refreshPostDocumentQuality({ ...conciseInsufficientImages, imageFloor: 3 });
+assert.equal(exhaustedGallery.qualityReport.canAutoPublish, false, "gallery exhaustion cannot lower the shopping image floor");
+assert.equal(exhaustedGallery.qualityReport.target.images.min, 5);
 
 assert.equal(
   shopping.title,

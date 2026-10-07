@@ -3,6 +3,8 @@ import path from "path";
 import sharp, { type OverlayOptions } from "sharp";
 import { buildTravelThumbnailCopy } from "./travel-content";
 import { buildProduct9Canvas, type Product9Canvas } from "./product-9canvas";
+import { normalizeShoppingThumbnailHeadline, renderShoppingPhotoThumbnail, SHOPPING_THUMBNAIL_LAYOUT_RULES } from "./thumbnail-layout-v2";
+import { preserveProductPhotoSource } from "./product-photo-provenance";
 
 const CANVAS_WIDTH = 1600;
 const CANVAS_HEIGHT = 900;
@@ -74,6 +76,12 @@ type ThumbnailTheme = {
 };
 
 const THUMBNAIL_THEMES: ThumbnailTheme[] = [
+  {
+    keywords: [/바지|팬츠|슬랙스|데님|청바지|셔츠|재킷|자켓|원피스/],
+    headline: "핏·디테일 체크",
+    subline: "색상·치수·소재 확인",
+    cta: "옵션 확인",
+  },
   {
     keywords: [/바디\s*(워시|로션|크림|클렌저)|샤워\s*젤|핸드\s*(워시|크림)|샴푸|린스|트리트먼트|컨디셔너|보디|바디케어/],
     headline: "향·용량 구성",
@@ -155,6 +163,7 @@ const ONTOLOGY_THEMES: Record<string, Omit<ProductThumbnailCopy, "productNameLab
   sports_leisure: { headline: "활용도 체크", subline: "기능·휴대·사용 조건", cta: "포인트 확인" },
   digital_it: { headline: "기능 체크", subline: "사양·연결·호환성", cta: "스펙 확인" },
   beauty_body: { headline: "구성·사용법 확인", subline: "용량·성분·사용 조건", cta: "구성 확인" },
+  fashion_goods: { headline: "핏·디테일 체크", subline: "색상·치수·소재 확인", cta: "옵션 확인" },
 };
 
 // A saved studio thumbnail predates the current product understanding contract.
@@ -321,6 +330,9 @@ async function buildTravelAccentPng(): Promise<Buffer> {
 
 export function inferScenePrompt(categoryName: string, productName: string): string {
   const target = normalizeForMatch(`${categoryName} ${productName}`);
+  if (/바지|팬츠|슬랙스|데님|청바지|패션|의류|셔츠|재킷|자켓|원피스/.test(target)) {
+    return "Natural clothing photograph in soft window light or a quiet everyday street, a relaxed believable wearing scene, full garment silhouette visible, faithful waistband, seams, pockets, drape and hems, no fashion magazine frame or catalog card.";
+  }
   if (/드라이기|헤어|고데기|뷰티|바디|트리머|면도기/.test(target)) {
     return "Photorealistic vanity or clean bathroom counter scene, product as the hero object, premium beauty review mood, realistic shadow and material texture.";
   }
@@ -361,32 +373,21 @@ export function buildProductThumbnailGenerationPrompt(
 
   const prompt = [
     "Generate ONE finished premium Korean Naver blog product thumbnail image in a single generation.",
-    "Everything must be created inside the image: photorealistic product scene, exact product name text, large Korean headline, badge, CTA, product-focused layout, and border.",
+    "Create one continuous natural product photograph and one exceptionally large Korean headline. The headline is the only added text.",
     "Use the attached product image as the strict visual reference for shape, color, material, and package impression.",
     "Keep the product recognizable and faithful. Do not invent a different model, color, logo, or unrelated package.",
     "",
     "Product:",
     `- Product name: ${copy.productNameLabel}`,
-    `- Exact visible product name label: ${copy.productNameLabel}`,
     `- Category: ${categoryName}`,
     options.description ? `- Product description: ${sanitizeText(options.description).slice(0, 220)}` : "",
     features.length > 0 ? `- Key features: ${features.join(", ")}` : "",
-    options.price ? `- Price only if useful and clearly readable: ${sanitizeText(options.price)}` : "",
     "",
     "Canvas and layout:",
-    "- 16:9 landscape Korean Naver blog thumbnail.",
-    "- Layout A: left dark editorial text panel, right large photorealistic product hero scene.",
-    "- Product must be large, sharp, and immediately recognizable.",
-    "- Do not trap the product inside a small card, shopping screen, phone, laptop, or mockup.",
-    "- Thin white rounded inner border, top red badge, bottom yellow CTA.",
-    "- Safe margins around all text. Text must not cover the product body.",
+    ...SHOPPING_THUMBNAIL_LAYOUT_RULES,
     "",
     "Visible text, exactly these Korean strings:",
-    `- Product name label: \"${copy.productNameLabel}\"`,
-    `- Main headline: \"${copy.headline}\"`,
-    `- Subline: \"${copy.subline}\"`,
-    `- Badge: \"${copy.badge}\"`,
-    `- CTA: \"${copy.cta}\"`,
+    `- Main headline only: \"${normalizeShoppingThumbnailHeadline(copy.headline)}\"`,
     "",
     "Photorealistic product scene:",
     `- ${scenePrompt}`,
@@ -796,6 +797,12 @@ export async function generateProductThumbnail(
   );
 
   const isTravel = options.contentKind === "TRAVEL";
+  if (!isTravel) {
+    const shoppingPath = outputPath.replace(/\.jpg$/u, ".png");
+    await renderShoppingPhotoThumbnail({ sourcePath: resolvedImages.heroPath, outputPath: shoppingPath, headline: copy.headline });
+    preserveProductPhotoSource({ sourcePath: resolvedImages.heroPath, outputPath: shoppingPath, segmented: false, provenance: "PHOTO_TEXT_THUMBNAIL" });
+    return { outputPath: shoppingPath, backgroundPath: resolvedImages.backgroundPath, ...copy };
+  }
   const fullBackground = await sharp(resolvedImages.backgroundPath)
     .rotate()
     .resize(CANVAS_WIDTH, CANVAS_HEIGHT, { fit: "cover", position: "centre" })

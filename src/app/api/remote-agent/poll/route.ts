@@ -107,10 +107,10 @@ const SECTION_IMAGE_APPLY_WAIT_MS = 5 * 60_000;
 const SECTION_IMAGE_NEXT_ACTION =
   "완료된 초안 작업은 job_get(includeResult=true)로 참조 이미지 입력과 job.imageAttachments를 확인하세요. 원고 페이지 조회만으로 참조 픽셀이 첨부되지는 않습니다. " +
   "post_get_draft 결과의 imageSlots 에서 missing 또는 generationMissing 이 0보다 큰 쇼핑 연출 파트는 referenceReady=true를 확인하고, " +
-  "referenceImages의 실제 이미지를 순서대로 내장 이미지 도구에 첨부해 imagePrompt로 생성하세요. 쇼핑은 원본 정면 제품의 형상·비율·라벨을 보존합니다. " +
+  "referenceImages의 실제 이미지를 순서대로 내장 이미지 도구에 첨부해 imagePrompt로 생성하세요. 쇼핑 본문은 상품 형상·비율·색상·봉제선·라벨을 보존한 자연스러운 단일 사진입니다. 텍스트·설명 패널·프레임·콜라주는 금지하며, 의류는 확인된 외형을 유지하면서 자세·배경·구도를 다르게 합니다. " +
   "완성 이미지의 HTTPS 주소와 해당 슬롯의 referenceHashes를 post_apply_section_image(sectionId, generatedImageUrl, referenceHashes)로 보내세요. " +
   "여행은 기존 imagePrompt로 내장 이미지 생성을 실행하고 sectionId, generatedImageUrl만 전달합니다. 여행에는 쇼핑 참조/해시 조건을 적용하지 않습니다. " +
-  "참조 전송이 실패하거나 기능 근거·정보 카드 파트이면 PC materials_prepare로 원본/카드를 보강하세요. 이미지 부족만으로는 원고를 다시 작성하거나 재제출하지 마세요. " +
+  "참조 전송이 실패하면 needs_reference 상태로 두고 PC materials_prepare로 원본을 보강하세요. 본문은 원본 1장과 서로 다른 연출 사진 3장을 기본으로 분산하며, 원본 반복·정보 카드로 수량을 채우지 않습니다. 사양·치수 설명은 본문 텍스트로 작성하고 큰 제목은 썸네일에만 허용합니다. 이미지 부족만으로는 원고를 다시 작성하거나 재제출하지 마세요. " +
   "모든 파트가 채워지면 post_approve_draft 로 승인합니다. " +
   "PC 자동 보강은 materials_prepare(productIds)로 별도 접수하고 materials_list로 완료를 확인할 수 있습니다. " +
   "필요한 도구가 대화에 없으면 연결 도구 목록을 갱신하거나 PC 소재 보관함의 미리작성을 사용하세요. drafted는 발행 준비완료가 아닙니다.";

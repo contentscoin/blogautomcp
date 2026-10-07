@@ -21,6 +21,7 @@ import { repairableTargets, repairDraft } from "./repair";
 import { buildSectionTemplates, SHAPE_RULES, type LibraryContext, type SectionTemplate } from "./section-library";
 import { validateDraft } from "./validate";
 import type { AssembledPost, ConnectKind, GeneratedDraft, ImageCandidateInput, PostSpec, SectionSpec } from "./types";
+import { SHOPPING_POST_STRATEGY, shoppingPhotoRoleAt } from "../../../src/lib/shopping-post-strategy";
 
 export * from "./types";
 export { validateDraft } from "./validate";
@@ -158,8 +159,8 @@ export async function buildPostSpec(input: SpecFirstPipelineInput): Promise<Buil
   const destination = travel?.destinations.slice(0, 2).join("·") || "";
 
   // A′. 이미지 풀을 먼저 확정한다.
-  const minBody = kind === "TRAVEL" ? 5 : 4;
-  const targetBody = kind === "TRAVEL" ? 10 : 8;
+  const minBody = kind === "TRAVEL" ? 5 : SHOPPING_POST_STRATEGY.bodyPhotos.total;
+  const targetBody = kind === "TRAVEL" ? 10 : SHOPPING_POST_STRATEGY.bodyPhotos.total;
   const pool = await prepareImagePool({
     kind,
     candidates: input.imageCandidates,
@@ -173,7 +174,7 @@ export async function buildPostSpec(input: SpecFirstPipelineInput): Promise<Buil
   // A. 확보된 이미지 수에서 섹션 수를 파생한다 (이미지를 못 채우는 섹션을 만들지 않는다).
   let sectionCount: number;
   if (kind === "SHOPPING") {
-    sectionCount = resolved >= 7 ? 10 : resolved >= 5 ? 9 : 8;
+    sectionCount = SHOPPING_POST_STRATEGY.sections.max;
   } else {
     const highlightCount = travel?.highlights.length || 0;
     let dayCourses = Math.max(1, Math.min(3, highlightCount || 1));
@@ -195,10 +196,18 @@ export async function buildPostSpec(input: SpecFirstPipelineInput): Promise<Buil
     hasReviewProof: Boolean(product.reviewCount || product.rating),
     collectedAt: todayLabel(),
   };
-  const templates = buildSectionTemplates(ctx, sectionCount).map((template): SectionTemplate => ({
-    ...template,
-    imageCount: [template.imageCount[1] > 0 ? Math.max(1, template.imageCount[0]) : template.imageCount[0], template.imageCount[1]],
-  }));
+  const selectedTemplates = buildSectionTemplates(ctx, sectionCount);
+  const templates = selectedTemplates.map((template, index): SectionTemplate => {
+    if (kind !== "SHOPPING") return { ...template,
+      imageCount: [template.imageCount[1] > 0 ? Math.max(1, template.imageCount[0]) : template.imageCount[0], template.imageCount[1]],
+    };
+    const role = shoppingPhotoRoleAt(index, selectedTemplates.length);
+    return { ...template, imageCount: role === "none" ? [0, 0] : [1, 1],
+      imageIntent: role === "original" ? "판매페이지 원본 상품 사진: 선택한 상품·옵션의 외형 확인" : role === "scene"
+        ? "AI 연출 이미지: 제품이 잘 보이는 자연스러운 생활 사진. 실제 사용 후기나 기능·수치·성능의 증거가 아님"
+        : "이미지 없음: 확인된 사양은 본문 텍스트로 설명",
+    };
+  });
   // A″. 섹션별 근거표: 본문 섹션마다 전용 근거를 1개 이상 배정하고 재사용을 막는다.
   const evidenceLedger = buildEvidenceLedger({
     kind,

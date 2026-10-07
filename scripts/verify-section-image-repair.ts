@@ -6,6 +6,8 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { isDraftEditorialQualityPassed } from "../src/lib/brand-post-quality-display";
 import { preserveProductPhotoSource } from "./lib/product-photo-provenance";
+import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
+import { REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 
 async function main() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "section-image-repair-"));
@@ -34,6 +36,25 @@ async function main() {
         createdAt: new Date().toISOString(), approvedAt: null, contractVersion: "post-composition-contract/v1", composition,
         contentQuality: { canPublish: false, code: "composition-quality", reason: "이미지 부족", score: 100, summary: "이미지 준비 필요", signals: [{ key: "composition-quality", label: "구성", status: "fail" }] } as never,
         thumbnailSpec: { version: "thumbnail-spec/v2", canvas: { width: 1000, height: 1000, aspect: "1:1" }, style: "test", sourcePolicy: "TRAVEL_EDITORIAL", sourceImagePath: paths[0] },
+      };
+      const referencePath = path.join(dir, "verified-original-reference.png");
+      fs.writeFileSync(referencePath, testPngFixture("actual-verified-reference"));
+      const hash = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+      if (connectKind === "SHOPPING") {
+        fixture.sourceSnapshot = createProductSnapshot({ productId: id, externalProductId: id, connectKind, sourceUrl: "https://example.test/product", product: { name: fixture.title } });
+        preserveProductPhotoSource({ sourcePath: referencePath, outputPath: paths[0], segmented: false, provenance: "PHOTO_TEXT_THUMBNAIL" });
+        fixture.imageAssets = [{ path: paths[0], sourcePath: paths[0], sha256: hash(paths[0]), role: "hero",
+          provenance: "PHOTO_TEXT_THUMBNAIL", creationMethod: "local-composite", remoteGenerated: false }];
+      }
+      const generatedResult = (request: import("../src/lib/brand-post-image-generation").BrandPostImageGenerationRequest, file: string): import("../src/lib/brand-post-image-generation").BrandPostImageGenerationResult => {
+        const section = composition.sections.find(section => section.id === request.sectionId)!;
+        if (connectKind === "TRAVEL") return { ...request, generatedPath: file, provenance: "GENERATED_BACKGROUND", creationMethod: "remote-generated", remoteGenerated: true, imageIntent: section.imageIntent };
+        if (section.imageSource === "seller-original") return { ...request, generatedPath: file, provenance: "ORIGINAL", creationMethod: "source", remoteGenerated: false, imageIntent: section.imageIntent,
+          sourceReview: { version: "product-photo-source-review/v1", usage: "section-matched-product-evidence", sourceSha256: hash(file), sectionIntent: section.imageIntent,
+            reviewClass: "product-photo", reason: "whole product photo", reviewedAt: "fixture" } };
+        return { ...request, generatedPath: file, provenance: "GENERATED_SCENE", creationMethod: "reference-guided-scene", remoteGenerated: true, imageIntent: section.imageIntent,
+          referenceScene: { strategyVersion: REFERENCE_SCENE_STRATEGY_VERSION, referencePath, referenceSha256: hash(referencePath), sourceSnapshotId: fixture.sourceSnapshot!.snapshotId,
+            reviewStatus: "passed", reviewedOutputSha256: hash(file), checks: Object.fromEntries(REFERENCE_SCENE_REVIEW_CHECKS.map(key => [key, true])), reviewedAt: "fixture" } };
       };
       if (connectKind === "SHOPPING") {
         const legacy = structuredClone(fixture);
@@ -67,32 +88,8 @@ async function main() {
           for (const [i, request] of options.requests.entries()) {
             const file = path.join(dir, `new-${request.requestId}.png`);
             fs.writeFileSync(file, testPngFixture(`generated-${request.requestId}`));
-            const sectionIntent = composition.sections.find(section => section.id === request.sectionId)?.imageIntent || "해당 섹션 장면";
-            let sourceReview: import("../src/lib/brand-post-package").BrandPostPackageImageAsset["sourceReview"];
-            if (connectKind === "SHOPPING" && i > 0) {
-              const source = path.join(dir, `source-${request.requestId}.png`);
-              fs.writeFileSync(source, testPngFixture(`feature-source-${request.requestId}`));
-              const receipt = preserveProductPhotoSource({ sourcePath: source, outputPath: file, segmented: true });
-              sourceReview = {
-                version: "product-photo-source-review/v1",
-                sourceSha256: receipt.sourceSha256,
-                usage: "section-matched-product-evidence",
-                sectionIntent,
-                reviewClass: "feature-evidence",
-                reason: "fixture feature evidence",
-                reviewedAt: "2026-09-15T00:00:00.000Z",
-              };
-            }
-            const result = {
-              ...request,
-              generatedPath: i === 0 ? null : file,
-              error: i === 0 ? "fixture timeout" : undefined,
-              provenance: connectKind === "SHOPPING" ? "LOCKED_PRODUCT" as const : "GENERATED_BACKGROUND" as const,
-              creationMethod: connectKind === "SHOPPING" ? "source-with-generated-background" as const : "remote-generated" as const,
-              remoteGenerated: true,
-              imageIntent: sectionIntent,
-              sourceReview,
-            };
+            const result = { ...generatedResult(request, file), generatedPath: i === 0 ? null : file,
+              error: i === 0 ? "fixture timeout" : undefined };
             results.push(result);
             await options.onResult?.(result);
             if (i === 1) assert.equal(store.readBrandPostPackage(id)?.imageGeneration?.applied, 1, "A success must be persisted before batch completion");
@@ -111,31 +108,7 @@ async function main() {
       deps.generate = async (options) => {
         const request = options.requests[0];
          const file = path.join(dir, "last.png"); fs.writeFileSync(file, testPngFixture("last-generated"));
-         const sectionIntent = composition.sections.find(section => section.id === request.sectionId)?.imageIntent || "장면";
-         let sourceReview: import("../src/lib/brand-post-package").BrandPostPackageImageAsset["sourceReview"];
-         if (connectKind === "SHOPPING") {
-           const source = path.join(dir, "last-source.png");
-           fs.writeFileSync(source, testPngFixture("last-feature-source"));
-           const receipt = preserveProductPhotoSource({ sourcePath: source, outputPath: file, segmented: true });
-           sourceReview = {
-             version: "product-photo-source-review/v1",
-             sourceSha256: receipt.sourceSha256,
-             usage: "section-matched-product-evidence",
-             sectionIntent,
-             reviewClass: "feature-evidence",
-             reason: "fixture feature evidence",
-             reviewedAt: "2026-09-15T00:00:00.000Z",
-           };
-         }
-         return [{
-          ...request,
-          generatedPath: file,
-          provenance: connectKind === "SHOPPING" ? "LOCKED_PRODUCT" as const : "GENERATED_BACKGROUND" as const,
-          creationMethod: connectKind === "SHOPPING" ? "source-with-generated-background" as const : "remote-generated" as const,
-           remoteGenerated: true,
-           imageIntent: sectionIntent,
-           sourceReview,
-        }];
+         return [generatedResult(request, file)];
       };
       const final = await repairBrandPostImages({ brandLinkId: id }, deps);
       assert.equal(final.remaining, 0);
@@ -144,9 +117,9 @@ async function main() {
       assert.equal(fs.readFileSync(markdown, "utf8"), "검증된 본문은 이미지 보강 중 바뀌지 않습니다.");
       assert.ok(final.manifest.composition.sections.every((s) => s.imagePaths.length >= (s.imageMin || 0)));
       assert.throws(() => store.applyGeneratedBrandPostImage({
-        brandLinkId: id, sectionId: final.manifest.composition.sections[0].id,
+        ...generatedResult({ requestId: "duplicate", sectionId: final.manifest.composition.sections[0].id }, final.manifest.composition.sections[0].imagePaths[0]),
+        brandLinkId: id,
         generatedPath: final.manifest.composition.sections[0].imagePaths[0],
-        provenance: "GENERATED_BACKGROUND",
       }), /동일한 파일/u, "Copied images must not masquerade as new section generation");
       store.writeBrandPostPackageManifest({ ...final.manifest, approvedAt: "fixture-approved" });
       const noop = await repairBrandPostImages({ brandLinkId: id }, { ...deps, generate: async () => { throw new Error("No-op must not generate"); } });
@@ -274,18 +247,18 @@ async function main() {
       imageIntent: target.imageIntent,
       sourceReview: { version: "product-photo-source-review/v1", sourceSha256: sourceHash,
         usage: "section-matched-product-evidence", sectionIntent: target.imageIntent,
-        reviewClass: "feature-evidence", reason: "fixture re-review", reviewedAt: new Date().toISOString() },
+        reviewClass: "scene-evidence", reason: "fixture re-review", reviewedAt: new Date().toISOString() },
     });
     assert.equal(refreshed.imageAssets?.length, 2, "same-SHA re-review updates metadata without copying an asset");
     assert.equal(refreshed.imageAssets?.find(asset => asset.sha256 === sourceHash)?.path, bindSource);
-    assert.equal(refreshed.imageAssets?.find(asset => asset.sha256 === sourceHash)?.sourceReview?.reviewClass, "feature-evidence");
+    assert.equal(refreshed.imageAssets?.find(asset => asset.sha256 === sourceHash)?.sourceReview?.reviewClass, "scene-evidence");
     assert.equal(refreshed.imageAssets?.find(asset => asset.sha256 === sourceHash)?.slotId, `${target.id}:image:1`);
     assert.throws(() => store.applyGeneratedBrandPostImage({
       brandLinkId: bindId, sectionId: bindComposition.sections[1].id, generatedPath: bindSource,
       bindExistingAssetKey: sourceHash, provenance: "ORIGINAL", creationMethod: "source",
       sourceReview: { version: "product-photo-source-review/v1", sourceSha256: sourceHash,
         usage: "general-product-context", sectionIntent: bindComposition.sections[1].imageIntent, reviewedAt: new Date().toISOString() },
-    }), /미배정/u, "one reviewed source cannot satisfy multiple section slots");
+    }), /미배정|IMAGE_NATURAL_PHOTO_ROLE/u, "one reviewed source cannot satisfy multiple section slots");
 
     assert.equal(isDraftEditorialQualityPassed({ canPublish: false, signals: [{ key: "composition-quality", status: "fail" }] }), true);
     assert.equal(isDraftEditorialQualityPassed({ canPublish: false, signals: [{ key: "fact-grounding", status: "fail" }] }), false);

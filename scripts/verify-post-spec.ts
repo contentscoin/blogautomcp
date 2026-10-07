@@ -11,7 +11,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
-import { buildCollageImage } from "./lib/post-spec/image-plan";
 import { buildPostSpec, runSpecFirstPipeline, validateDraft, normalizeDraft } from "./lib/post-spec";
 import type { ImageCandidateInput } from "./lib/post-spec";
 import { assessTravelFeatureCoverage } from "./lib/travel-content";
@@ -68,14 +67,14 @@ async function main() {
   for (const role of ["summary-glance", "key-facts", "faq", "fit-checklist", "product-reveal"]) {
     assert.ok(spec.sections.some((section) => section.role === role), `쇼핑 구성표에 ${role} 필요`);
   }
-  assert.ok(spec.imagePlan.resolvedBody >= 4, `본문 이미지 ${spec.imagePlan.resolvedBody}장`);
-  assert.equal(spec.imagePlan.shortfall, 0);
+  assert.equal(spec.imagePlan.resolvedBody, 1, "원본은 한 장만 확보하고 AI 연출 3장은 생성·검수까지 미완료로 둔다");
+  assert.equal(spec.imagePlan.shortfall, 3);
   assert.ok(spec.imagePlan.slots.every((slot) => fs.existsSync(slot.path)), "슬롯 경로는 생성 전에 확정되어야 함");
-  assert.ok(spec.imagePlan.slots.some((slot) => slot.path.includes("_detail_crop_")), "상세 크롭이 본문 후보로 채택되어야 함");
+  assert.ok(!spec.imagePlan.slots.some((slot) => slot.path.includes("_detail_crop_")), "사양표 크롭은 본문 자연사진을 대체하지 못한다");
   assert.ok(!spec.imagePlan.slots.some((slot) => slot.path.includes("tiny") || slot.path.includes("wide_banner")), "작은/배너 이미지는 제외");
   const imageSections = spec.sections.filter((section) => section.imageSlotIds.length > 0);
-  assert.ok(imageSections.length >= 4, "이미지가 붙은 섹션이 4개 이상");
-  assert.equal(spec.sections[0].imageSlotIds.length, 0, "요약 섹션 앞에는 hero 만 온다");
+  assert.equal(imageSections.length, 1, "원본 반복으로 빈 연출 슬롯을 채우지 않는다");
+  assert.equal(spec.sections[0].imageSlotIds.length, 1, "첫 섹션은 원본 상품 사진");
 
   // --- 섹션별 근거표: 본문 섹션마다 전용 근거 1개 이상, 전용 근거는 한 섹션에만 ---
   assert.equal(spec.evidenceLedger.length, spec.sections.length, "근거표는 섹션 수와 같아야 함");
@@ -99,9 +98,9 @@ async function main() {
   assert.equal(shopping.sections.length, spec.sections.length + 1, "마지막은 고지 섹션");
   assert.equal(shopping.composition.sections.length, spec.sections.length);
   assert.ok(shopping.sections.at(-1)?.includes("쇼핑 커넥트"));
-  assert.notEqual(shopping.validation.status, "BLOCKED", shopping.validation.summary);
+  assert.equal(shopping.validation.status, "BLOCKED", "연출 사진이 생성되지 않았으므로 글 생성만으로 발행 가능해지지 않는다");
   assert.ok(shopping.uploadImagePaths[0] === shopping.heroImagePath, "업로드 첫 장은 hero");
-  assert.ok(shopping.uploadImagePaths.length >= 5);
+  assert.equal(new Set(shopping.uploadImagePaths).size, 1);
   assert.ok(!shopping.hashtags.some((tag) => ["추천", "후기", "일상", "쇼핑"].includes(tag)), `일반 태그 금지: ${shopping.hashtags.join(",")}`);
   const fitSection = shopping.sections.find((section) => section.startsWith("이런 분께 잘 맞아요"));
   assert.ok(fitSection && fitSection.includes("판매 페이지 정보 기준"), "추천 섹션 끝에 근거 라인");
@@ -280,12 +279,7 @@ async function main() {
   assert.equal(banaGate.canPublish, true, `${banaGate.code}: ${banaGate.reason || banaGate.summary}`);
   assert.ok(banaGate.score >= 90, `발행 게이트 점수 ${banaGate.score}`);
 
-  // --- 콜라주 ---
-  const collage = await buildCollageImage([candidates[1].path, candidates[2].path, candidates[3].path], path.join(dir, "collage.jpg"));
-  assert.ok(collage && fs.existsSync(collage));
-  const meta = await sharp(collage!).metadata();
-  assert.equal(meta.width, 1080);
-  assert.equal(meta.height, 1080);
+  assert.ok(!fs.readdirSync(dir).some(file => file.startsWith("collage_")), "콜라주로 부족한 연출 사진을 대신하지 않는다");
 
   // --- 이미지 부족 시 BLOCKED (콜라주 재료도 없을 때) ---
   const scarce = await runSpecFirstPipeline({ ...shoppingInput, imageCandidates: candidates.slice(0, 2) });

@@ -14,7 +14,7 @@ async function main() {
     const tall = path.join(root, "detail.png");
     await sharp({ create: { width: 320, height: 240, channels: 3, background: "white" } }).png().toFile(photo);
     await sharp({ create: { width: 860, height: 5880, channels: 3, background: "white" } }).png().toFile(tall);
-    const good = { index: 1, accepted: true, identityMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, reviewClass: "product-photo", reason: "Visible lavender Stress Relief 532ml pair" };
+    const good = { index: 1, accepted: true, identityMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "Visible lavender Stress Relief 532ml pair" };
     const options = (assetPath = photo, count = 1): PublishImageAuditOptions => ({
       productName: "Aveeno lavender Stress Relief 532ml 2pack",
       composition: {
@@ -32,6 +32,19 @@ async function main() {
       assert.equal((await auditPublishImages(input)).ok, expected); assertions++;
     };
     await check({}, true);
+    for (const key of ["singlePhotograph", "noGraphicLayout", "textPolicyMatches"]) {
+      await check({ [key]: false, reason: "Product matches but body output is a framed explanation layout" }, false);
+      await check({ [key]: undefined }, false);
+    }
+    const legacyCard = options();
+    legacyCard.imageAssets = [{ path: photo, sourcePath: photo, sha256: "a".repeat(64), role: "body", sectionId: "overview", provenance: "EDITORIAL_CARD", creationMethod: "local-composite", remoteGenerated: false }];
+    legacyCard.review = async () => { throw new Error("Stored editorial cards must be rejected before remote review"); };
+    assert.equal((await auditPublishImages(legacyCard)).failures[0].code, "SEMANTIC_REJECTION"); assertions++;
+    const hiddenCardPath = path.join(root, "shopping-fact-card-old.png");
+    fs.copyFileSync(photo, hiddenCardPath);
+    const hiddenCard = options(hiddenCardPath);
+    hiddenCard.review = async () => { throw new Error("A card filename cannot pass by omitting metadata"); };
+    assert.equal((await auditPublishImages(hiddenCard)).failures[0].code, "SEMANTIC_REJECTION"); assertions++;
     await check({ notice: true, reason: "Expiry notice table" }, false);
     await check({ identityMatches: false, reason: "Wrong fragrance-free Skin Relief" }, false);
     await check({ mixedOptions: true, reason: "Unlabeled mixed Skin Relief and Stress Relief" }, false);
@@ -50,13 +63,14 @@ async function main() {
     assert.match(featureFailure.reason, /픽셀 관찰/);
     assert.match(featureFailure.reason, /상충하는 다른 브랜드/);
     assertions++;
-    await check({ reviewClass: "feature-evidence", reason: "Legible official explanation of this feature" }, true, feature);
+    await check({ reviewClass: "feature-evidence", reason: "Photograph directly shows the visible seam and closure" }, true, feature);
+    await check({ reviewClass: "feature-evidence", noGraphicLayout: false, reason: "Official explanatory feature panel" }, false, feature);
     const lifestyle = options();
     lifestyle.composition.sections[0].imageIntent = "AI 연출 이미지: 생활 공간 배치";
     await check({}, true, lifestyle);
     await check({ identityMatches: false }, false, lifestyle);
     lifestyle.review = async call => {
-      assert.match(call.userPrompt, /require the visible AI 연출 이미지 disclosure/);
+      assert.match(call.userPrompt, /Never require or allow AI disclosure burned into body-image pixels/);
       return JSON.stringify({ reviews: [good] });
     };
     assert.equal((await auditPublishImages(lifestyle)).ok, true);
@@ -64,6 +78,8 @@ async function main() {
     const thumbnail = options();
     Object.assign(thumbnail.composition.renderNodes[0], { role: "thumbnail", sectionId: null });
     await check({ reason: "Correct product with title overlay" }, true, thumbnail);
+    await check({ thumbnailHeadlineLegible: false, reason: "Headline is too small at preview size" }, false, thumbnail);
+    await check({ noGraphicLayout: false, reason: "Tiny product photo inside a blue explanation panel" }, false, thumbnail);
     await check({ notice: true }, false, thumbnail);
     await check({ mixedOptions: true, explicitNamedComparison: true, optionsClearlyLabeled: true }, false, thumbnail);
     // Reproduce the Cuckoo over-strict policy without pretending a mock is a
@@ -73,11 +89,11 @@ async function main() {
     Object.assign(cuckoo.composition.renderNodes[0], { role: "thumbnail", sectionId: null });
     cuckoo.review = async call => {
       assert.match(call.userPrompt, /not OCR certification/);
-      assert.match(call.userPrompt, /Classify the image by its main content/);
+      assert.match(call.userPrompt, /Every body image must be ONE natural photograph/);
       assert.match(call.userPrompt, /Other attached candidates are also unverified/);
       assert.match(call.userPrompt, /Missing or small specification text alone must not cause rejection/);
       assert.match(call.userPrompt, /brand plus a generic category alone is not sufficient/);
-      assert.match(call.userPrompt, /truncate essential copy so its meaning is materially misleading/);
+      assert.match(call.userPrompt, /clipped essential words/);
       assert.doesNotMatch(call.userPrompt, /Unreadable\/uncertain identity rejects|correct complete product/);
       assert.doesNotMatch(call.systemPrompt || "", /When uncertain reject\./);
       return JSON.stringify({ reviews: [{ ...good, reason: "Distinctive selected design is visible; tiny model/capacity print absent, not verified from pixels" }] });

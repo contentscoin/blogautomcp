@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
+import { REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 import type {
   BrandPostPackageImageAsset,
   BrandPostPackageManifestV2,
@@ -57,6 +58,14 @@ async function main() {
     capturedAt: iso(0),
   });
 
+  const sceneReferencePath = path.join(packageDir, "scene-reference.png");
+  writeFixture(sceneReferencePath, "verified-scene-reference");
+  const sceneReview = (file: string, referencePath = sceneReferencePath) => ({
+    strategyVersion: REFERENCE_SCENE_STRATEGY_VERSION, referencePath, referenceSha256: digest(referencePath),
+    sourceSnapshotId: sourceSnapshot.snapshotId, reviewStatus: "passed" as const, reviewedOutputSha256: digest(file),
+    checks: Object.fromEntries(REFERENCE_SCENE_REVIEW_CHECKS.map(check => [check, true])), reviewedAt: iso(1),
+  });
+
   function buildManifest(options: {
     createdAt: string;
     title?: string;
@@ -94,6 +103,12 @@ async function main() {
       connectUrl: "https://example.test/product",
       qualityPreset: "PREMIUM",
     });
+    // This stress fixture isolates nine scene slots; the production mixed 1+3
+    // layout and its approval rules are covered in verify-reference-scene-gates.
+    composition.sections.forEach((section, index) => {
+      section.imageSource = "staged-ai"; section.imageMin = section.imageMax = 1;
+      section.imageIntent = imageIntents[index];
+    });
     const defaultAssets: BrandPostPackageImageAsset[] = [
       {
         path: heroPath,
@@ -101,8 +116,9 @@ async function main() {
         sha256: digest(heroPath),
         role: "hero",
         slotId: "hero:image:1",
-        creationMethod: "source",
-        provenance: "ORIGINAL",
+        creationMethod: "local-composite",
+        provenance: "PHOTO_TEXT_THUMBNAIL",
+        remoteGenerated: false,
       },
       ...attached.map((file, index): BrandPostPackageImageAsset => ({
         path: file,
@@ -112,9 +128,10 @@ async function main() {
         sectionId: `shopping-fixture-${index + 1}`,
         slotId: `shopping-fixture-${index + 1}:image:1`,
         imageIntent: imageIntents[index],
-        creationMethod: "remote-generated",
+        creationMethod: "reference-guided-scene",
         remoteGenerated: true,
-        provenance: "GENERATED_BACKGROUND",
+        provenance: "GENERATED_SCENE",
+        referenceScene: sceneReview(file),
       })),
     ];
     return {
@@ -165,22 +182,7 @@ async function main() {
     const receipt = provenance.preserveProductPhotoSource({ sourcePath: source, outputPath: bodyPath, segmented: true });
     return { source, receipt };
   });
-  const resumeSources = resumeRecords.map(record => record.source);
-  let reviewedBodyIndex = 0;
-  previous.imageAssets = previous.imageAssets!.map(asset => asset.role === "body" ? {
-    ...asset,
-    creationMethod: "source-with-generated-background" as const,
-    provenance: "LOCKED_PRODUCT" as const,
-    sourceReview: {
-      version: "product-photo-source-review/v1" as const,
-      sourceSha256: resumeRecords[reviewedBodyIndex++].receipt.sourceSha256,
-      usage: "section-matched-product-evidence" as const,
-      sectionIntent: asset.imageIntent || "",
-      reviewClass: "feature-evidence" as const,
-      reason: "fixture feature evidence",
-      reviewedAt: iso(1),
-    },
-  } : asset);
+  assert.equal(resumeRecords.length, 4);
   const previousBodyAssets = previous.imageAssets!.filter((asset) => asset.role === "body");
 
   const assertExactPreservation = (actual: BrandPostPackageManifestV2, label: string) => {
@@ -270,8 +272,8 @@ async function main() {
   assert.equal(repair.planSectionImageRequests(slotsAfterResume).length, 5, "resume queues only the five absent slots");
   assert.deepEqual(
     generation.getUsedShoppingProductSources(bodyOnly).map(record => record.sourceSha256).sort(),
-    resumeSources.map(file => digest(file)).sort(),
-    "4/9 resume identifies all four already-used cutout sources before seeking fresh candidates",
+    [],
+    "reference-guided scenes never trigger obsolete segmented-source palette reuse",
   );
 
   const baseIdentity = generation.buildBrandPostImageJobIdentity({
@@ -332,9 +334,10 @@ async function main() {
         sectionId: `shopping-fixture-${index + 1}`,
         slotId: `shopping-fixture-${index + 1}:image:1`,
         imageIntent: intents[index],
-        creationMethod: "source-with-generated-background",
+        creationMethod: "reference-guided-scene",
         remoteGenerated: true,
-        provenance: "EDITORIAL_CARD",
+        provenance: "GENERATED_SCENE",
+        referenceScene: sceneReview(file, sellerSource),
         sourceReview: {
           version: "product-photo-source-review/v1",
           sourceSha256: digest(sellerSource),
@@ -351,7 +354,7 @@ async function main() {
   assert.equal(
     reusedSourceBlockers.some((blocker) => blocker.code === "image-source-duplicate" || blocker.code === "image-output-duplicate"),
     false,
-    "one safe segmented product source may be reused when final outputs and slot intents differ",
+    "one verified reference may be reused when final scene outputs and slot intents differ",
   );
 
   const duplicateOutputA = path.join(packageDir, "duplicate-output-a.png");
@@ -376,9 +379,10 @@ async function main() {
         sectionId: `shopping-fixture-${index + 1}`,
         slotId: `shopping-fixture-${index + 1}:image:1`,
         imageIntent: intents[index],
-        creationMethod: "source-with-generated-background",
+        creationMethod: "reference-guided-scene",
         remoteGenerated: true,
-        provenance: "LOCKED_PRODUCT",
+        provenance: "GENERATED_SCENE",
+        referenceScene: sceneReview(file, sellerSource),
         sourceReview: {
           version: "product-photo-source-review/v1",
           sourceSha256: digest(sellerSource),
@@ -426,7 +430,7 @@ async function main() {
     "segmented:false whole-photo foreground composites must block approval",
   );
 
-  console.log("PASS: image continuity, 4/9 used-source resume, stable cache identity, safe source reuse, identical-output and full-frame blockers");
+  console.log("PASS: image continuity, 4/9 reference-scene resume, stable cache identity, safe source reuse, identical-output and full-frame blockers");
 }
 
 main().catch((error) => {

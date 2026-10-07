@@ -187,12 +187,13 @@ import {
 } from "./lib/chatgpt-reply-progress";
 import {
   parseProductThumbnailSettings,
+  isReusableShoppingThumbnail,
   productThumbnailSettingKey,
 } from "./lib/product-thumbnail-settings";
 import { HUMANIZE_RULES, scanAiTells } from "./lib/humanize-korean";
 import { buildHumanizeSectionsPrompt, parseHumanizeSections } from "./lib/humanize-response-contract";
-import { createLockedProductThumbnail, createLockedProductThumbnailOnBackground, createOriginalProductPhotoThumbnail, type ShoppingThumbnailStyle } from "./lib/product-image-lock";
-import { copyProductPhotoSource } from "./lib/product-photo-provenance";
+import { createLockedProductThumbnailOnBackground, createOriginalProductPhotoThumbnail, type ShoppingThumbnailStyle } from "./lib/product-image-lock";
+import { copyProductPhotoSource, readProductPhotoSource } from "./lib/product-photo-provenance";
 import { codexDraftTerminalFailureCode, runCodexDraft } from "./lib/codex-draft-provider";
 import { CODEX_TEXT_MODEL, TEXT_REASONING_EFFORT } from "./lib/text-model-policy";
 import { deduplicateImagePaths } from "./lib/image-dedup";
@@ -1273,11 +1274,14 @@ async function generateTopTextCutoutThumbnail(
   }
   if (reusableSavedSetting?.generatedPath && fs.existsSync(reusableSavedSetting.generatedPath)) {
     const savedMetadata = await sharp(reusableSavedSetting.generatedPath).metadata().catch(() => null);
-    if (savedMetadata?.width === 1080 && savedMetadata?.height === 1080) {
+    const layoutCurrent = contentKind !== "SHOPPING" || isReusableShoppingThumbnail(reusableSavedSetting);
+    if (savedMetadata?.width === 1080 && savedMetadata?.height === 1080 && layoutCurrent) {
       console.log(`   ✅ 저장된 정사각 썸네일 사용: ${path.basename(reusableSavedSetting.generatedPath)}`);
       return { path: reusableSavedSetting.generatedPath, source: "saved-studio" };
     }
-    console.log("   ♻️ 이전 16:9 썸네일은 사용하지 않고 1080×1080 규격으로 다시 만듭니다.");
+    console.log(layoutCurrent
+      ? "   ♻️ 썸네일을 1080×1080 규격으로 다시 만듭니다."
+      : "   ♻️ 이전 썸네일의 사진·큰 제목 규격을 확인할 수 없어 새 규칙으로 다시 만듭니다.");
   }
   if (!product.representativeImagePath || !fs.existsSync(product.representativeImagePath)) {
     console.log("   ⚠️ 판매페이지 대표 이미지가 없어 썸네일 생성을 건너뜁니다.");
@@ -1285,26 +1289,12 @@ async function generateTopTextCutoutThumbnail(
   }
   // Product pixels and thumbnail copy are composed locally. Paid/API image
   // models are not part of the desktop runtime.
-  // 쇼핑 상품은 생성형 모델에 상품 픽셀을 넘기지 않는다. 원본 RGB를 보존한
-  // 투명 PNG를 로컬에서 만든 뒤 배경과 카피만 합성한다. 분리가 불확실하면
-  // 원본 상세 이미지가 본문 대표 이미지로 유지되도록 썸네일 생성을 중단한다.
+  // Shopping thumbnails use the complete original photo and one large title.
+  // This local fallback never creates an explanatory card or a small inset.
   if (contentKind === "SHOPPING") {
     const suggestedCopy = suggestedShoppingCopy!;
     const savedCopy = reusableSavedSetting?.copy;
     try {
-      const locked = await createLockedProductThumbnail({
-        sourcePath: product.representativeImagePath,
-        outputDir: TEMP_PATH,
-        productName: savedCopy?.productNameLabel || suggestedCopy.productNameLabel,
-        headline: savedCopy?.headline || suggestedCopy.headline,
-        subline: savedCopy?.subline || suggestedCopy.subline,
-        style: (savedSetting?.style || "shopping-clean") as ShoppingThumbnailStyle,
-      });
-      console.log(`   🔒 상품 원본 잠금 썸네일: ${path.basename(locked.outputPath)}`);
-      console.log(`   🔒 원본 SHA-256: ${locked.lock.sourceSha256}`);
-      return { path: locked.outputPath, source: "locked-product" };
-    } catch (error) {
-      console.log(`   🔒 상품 분리 중단: ${getErrorMessage(error)}`);
       const original = await createOriginalProductPhotoThumbnail({
         sourcePath: product.representativeImagePath,
         outputDir: TEMP_PATH,
@@ -1312,12 +1302,11 @@ async function generateTopTextCutoutThumbnail(
         headline: savedCopy?.headline || suggestedCopy.headline,
         subline: savedCopy?.subline || suggestedCopy.subline,
         style: (savedSetting?.style || "shopping-clean") as ShoppingThumbnailStyle,
-      }).catch(() => null);
-      if (original) {
-        console.log("   ✅ 상품 분리 대신 상세페이지 원본 사진을 변형 없이 카드에 배치합니다.");
-        return { path: original.outputPath, source: "locked-product" };
-      }
-      console.log("   ✅ 생성형 변형 없이 원본 상세페이지 이미지를 그대로 사용합니다.");
+      });
+      console.log(`   ✅ 원본 사진 + 큰 제목 썸네일: ${path.basename(original.outputPath)}`);
+      return { path: original.outputPath, source: "saved-studio" };
+    } catch (error) {
+      console.log(`   ⚠️ 원본 사진 썸네일 생성 중단: ${getErrorMessage(error)}`);
       return null;
     }
   }
@@ -6781,6 +6770,9 @@ function writePreparedBrandPostPackage(params: {
       imageIntent: existing?.imageIntent || renderImage?.altText || "",
       ...(() => {
         if (existing) return { provenance: existing.provenance, creationMethod: existing.creationMethod, remoteGenerated: existing.remoteGenerated };
+        if (image.role === "hero" && readProductPhotoSource(image.path)?.provenance === "PHOTO_TEXT_THUMBNAIL") {
+          return { provenance: "PHOTO_TEXT_THUMBNAIL" as const, creationMethod: "local-composite" as const, remoteGenerated: false };
+        }
         const source = image.role === "hero" ? params.thumbnailSource : undefined;
         const remote = source === "image-api" || source === "chatgpt" || source === "codex-imagegen";
         const local = source === "local-script" || source === "composite";

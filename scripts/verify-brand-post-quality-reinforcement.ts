@@ -425,11 +425,12 @@ const shoppingPrompt = buildBrandPostImagePrompt({
   imageIntent: "여름 책상 위 사용 장면",
   role: "body",
 });
-assert.match(shoppingPrompt, /product scene using the attached seller reference/u);
-assert.match(shoppingPrompt, /INPUT 1 is authoritative for product identity, front-facing geometry, proportions, color and original printing/u);
-assert.match(shoppingPrompt, /Preserve the reference's actual height-to-width ratio and front-facing silhouette/u);
-assert.match(shoppingPrompt, /Preserve the original label hierarchy/u);
-assert.match(shoppingPrompt, /AI illustrative scene, not actual use/u);
+assert.match(shoppingPrompt, /lifestyle photograph using the attached seller reference/u);
+assert.match(shoppingPrompt, /INPUT 1 is authoritative for product identity, proportions, selected option, color, material and visible features/u);
+assert.match(shoppingPrompt, /Preserve the product's real proportions and identifying structure/u);
+assert.match(shoppingPrompt, /Preserve any actual visible label hierarchy/u);
+assert.match(shoppingPrompt, /AI illustrative scene, not actual-use/u);
+assert.match(shoppingPrompt, /No information cards, slides, editorial layouts/u);
 assert.doesNotMatch(shoppingPrompt, /Generate the environment only|Use a distinct viewpoint/u);
 assert.doesNotMatch(shoppingPrompt, /must generate (?:nine|eighteen)|18 images/iu);
 

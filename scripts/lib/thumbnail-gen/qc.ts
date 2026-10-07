@@ -16,6 +16,8 @@ export type QcFailureCode =
   | "mockup"
   | "forbiddenInfo"
   | "lowContrast"
+  | "headlineSmall"
+  | "editorialCard"
   | "extraText";
 
 export interface ThumbnailQcBreakdown {
@@ -59,7 +61,7 @@ function clamp(value: unknown, max: number): number {
   return Math.max(0, Math.min(max, Math.round(n)));
 }
 
-const AUTO_FAIL: QcFailureCode[] = ["productDistorted", "productNameMissing", "koreanTypo", "textCut", "forbiddenInfo", "mockup"];
+const AUTO_FAIL: QcFailureCode[] = ["productDistorted", "productNameMissing", "koreanTypo", "textCut", "forbiddenInfo", "mockup", "headlineSmall", "editorialCard"];
 
 interface RawQc {
   breakdown?: Partial<Record<keyof ThumbnailQcBreakdown, unknown>>;
@@ -122,16 +124,16 @@ export async function qcThumbnail(imagePath: string, expected: ThumbnailQcExpect
     expected.badge ? `기대 배지: "${expected.badge}"` : "",
     "",
     "채점 항목(최대점):",
-    `- productName(${QC_MAX.productName}): 기대 ${isTravel ? "여행지/상품" : "제품"}명이 정확히 보이고 다른 이름으로 바뀌지 않음`,
+    `- productName(${QC_MAX.productName}): ${isTravel ? "기대 여행지/상품명이 정확히 보이고 다른 이름으로 바뀌지 않음" : "원본과 동일한 제품·옵션임을 식별할 수 있음. 별도 작은 제품명 텍스트는 요구하지 않으며 헤드라인만 허용"}`,
     `- fidelity(${QC_MAX.fidelity}): ${hasReference ? "참조 사진과 형태·색상·용도가 크게 다르지 않음" : "실제 존재하는 장면/제품처럼 보이고 왜곡이 없음"}`,
     `- korean(${QC_MAX.korean}): 한글 오탈자·깨진 글자·가짜 글자·잘림 없음, 기대 문구와 일치`,
-    `- readability(${QC_MAX.readability}): 20% 축소에서도 헤드라인이 읽힘(크기·대비)`,
+    `- readability(${QC_MAX.readability}): ${isTravel ? "20% 축소에서도 헤드라인이 읽힘(크기·대비)" : "120px와 240px 정사각 축소에서 모두 핵심 문구를 바로 읽을 수 있음. 1080px 기준 132px 이상 굵은 1~2줄 헤드라인; 작거나 흐리면 headlineSmall"}`,
     `- photoreal(${QC_MAX.photoreal}): 실제 사진 같은 조명·재질·그림자(벡터/카툰/플랫 아님)`,
-    `- layout(${QC_MAX.layout}): 텍스트가 피사체를 가리지 않고 가장자리 10% 안에서 잘리지 않음`,
+    `- layout(${QC_MAX.layout}): ${isTravel ? "텍스트가 피사체를 가리지 않고 가장자리 10% 안에서 잘리지 않음" : "한 장의 자연스러운 전면 사진, 큰 제품과 6% 여백의 헤드라인. 작은 삽입사진, 설명 프레임, 카드·분할패널·불릿이 있으면 editorialCard. 허리선·밑단·라벨을 가리거나 자르면 productDistorted"}`,
     `- forbidden(${QC_MAX.forbidden}): 수수료/최저가/1위/워터마크/가짜 로고 같은 금지 정보 없음`,
     "",
     "failures 배열에는 해당하는 코드만 넣으세요:",
-    "productDistorted, productNameMissing, koreanTypo, textCut, productSmall, notPhotoreal, mockup, forbiddenInfo, lowContrast, extraText",
+    "productDistorted, productNameMissing, koreanTypo, textCut, productSmall, notPhotoreal, mockup, forbiddenInfo, lowContrast, extraText, headlineSmall, editorialCard",
     "",
     '응답 형식: {"breakdown": {"productName": n, "fidelity": n, "korean": n, "readability": n, "photoreal": n, "layout": n, "forbidden": n}, "failures": ["..."], "note": "한 줄 설명"}',
   ]

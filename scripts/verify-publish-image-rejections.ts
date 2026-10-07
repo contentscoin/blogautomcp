@@ -28,7 +28,7 @@ async function main() {
     imageAssets: [{ role: "body", sectionId: "body", path: photo, sourcePath: photo, sha256: hash }] } as unknown as import("../src/lib/brand-post-package").BrandPostPackageManifestV2;
   const save = () => fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(manifest)); save();
   const verdict = { index: 1, accepted: false, identityMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false,
-    optionsClearlyLabeled: false, reviewClass: "feature-evidence", reason: "보습이 아니라 보송한 마무리 설명" };
+    optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "feature-evidence", reason: "보습이 아니라 보송한 마무리 설명" };
   const opts = { brandLinkId: id, productName: "fixture", composition,
     review: async () => JSON.stringify({ reviews: [verdict] }) };
   try {

@@ -1,6 +1,6 @@
-export const REFERENCE_SCENE_STRATEGY_VERSION = "shopping-reference-scene/v1";
+export const REFERENCE_SCENE_STRATEGY_VERSION = "shopping-reference-scene/v2";
 export const REFERENCE_SCENE_CAPTION = "상품 원본을 참조한 AI 연출 이미지입니다. 소품은 연출용이며 실제 촬영·사용 결과나 기능·효과를 입증하는 자료가 아닙니다.";
-export const REFERENCE_SCENE_REVIEW_CHECKS = ["silhouette", "proportions", "topSeal", "capAlignment", "labelHierarchy", "color", "surface"] as const;
+export const REFERENCE_SCENE_REVIEW_CHECKS = ["silhouette", "proportions", "topSeal", "capAlignment", "labelHierarchy", "color", "surface", "naturalScene", "noAddedText", "noFramesOrPanels", "singleScene"] as const;
 export interface ReferenceSceneReview {
   strategyVersion: string;
   referenceSha256: string;
@@ -15,7 +15,7 @@ export interface ReferenceSceneReview {
 }
 
 export interface BrandPostImageEvidenceLike {
-  provenance?: "ORIGINAL" | "LOCKED_PRODUCT" | "GENERATED_BACKGROUND" | "EDITORIAL_CARD" | "GENERATED_SCENE";
+  provenance?: "ORIGINAL" | "LOCKED_PRODUCT" | "GENERATED_BACKGROUND" | "EDITORIAL_CARD" | "GENERATED_SCENE" | "PHOTO_TEXT_THUMBNAIL";
   creationMethod?: "source" | "local-composite" | "remote-generated" | "source-with-generated-background" | "reference-guided-scene";
   remoteGenerated?: boolean;
   referenceScene?: ReferenceSceneReview;
@@ -44,9 +44,9 @@ export function isShoppingLifestyleImage(target: { imageIntent: string; imageSou
 
 /** An original must show the requested scene, not merely a generic packshot. */
 export function allowsOriginalShoppingScene(target: { imageIntent: string; imageSource?: BrandPostImageSourceHint }): boolean {
-  // A staged-cut slot also accepts a verified original that shows the same scene.
-  if (target.imageSource) return target.imageSource === "staged-ai";
-  return /제품 원형을 보존한 연출컷 또는 원본 사용 장면/u.test(normalizeBrandPostImageIntent(target.imageIntent));
+  // A lifestyle generation slot must not silently become another seller photo.
+  // Only explicitly designated original photography can use source pixels.
+  return target.imageSource === "seller-original";
 }
 
 /** Generic packshots are evidence only when the requested visual is an overview. */
@@ -108,7 +108,8 @@ export function classifyBrandPostImageEvidence(
       : valid(false);
   }
   if (method === "local-composite") {
-    return remote === true || (provenance !== "EDITORIAL_CARD" && provenance !== "LOCKED_PRODUCT")
+    return remote === true || (provenance !== "EDITORIAL_CARD" && provenance !== "LOCKED_PRODUCT" && provenance !== "PHOTO_TEXT_THUMBNAIL") ||
+      (provenance === "PHOTO_TEXT_THUMBNAIL" && remote !== false)
       ? invalid()
       : valid(false);
   }
@@ -125,7 +126,7 @@ export function classifyBrandPostImageEvidence(
 
   // Missing generation metadata is legacy source evidence at most. Generated
   // provenance or a positive remote flag without its creation method is stale.
-  if (remote === true || provenance === "GENERATED_BACKGROUND" || provenance === "EDITORIAL_CARD" || provenance === "GENERATED_SCENE") return invalid();
+  if (remote === true || provenance === "GENERATED_BACKGROUND" || provenance === "EDITORIAL_CARD" || provenance === "GENERATED_SCENE" || provenance === "PHOTO_TEXT_THUMBNAIL") return invalid();
   return valid(false);
 }
 
@@ -142,7 +143,7 @@ export function brandPostImageIntentMatches(options: {
   return actual === normalizeBrandPostImageIntent(`${options.sectionTitle} - ${options.sectionIntent}`);
 }
 
-/** Local information card that frames a whole verified seller photo (no cutout, no generated scene). */
+/** Legacy recognition only. These cards are forbidden in shopping body slots. */
 export function isShoppingFactCardAsset(asset: BrandPostImageEvidenceLike): boolean {
   return asset.provenance === "EDITORIAL_CARD" && asset.creationMethod === "local-composite" && asset.remoteGenerated !== true;
 }
@@ -167,6 +168,6 @@ export function referenceSceneReviewIssue(asset: BrandPostImageEvidenceLike & { 
   if (!/^[a-f0-9]{64}$/u.test(review.referenceSha256) || context.referenceSha256 !== review.referenceSha256) return "연출 이미지의 상품 원본 참조 파일이 없거나 변경되었습니다.";
   if (!asset.sha256 || review.reviewedOutputSha256 !== asset.sha256) return "원본 대조 검토가 현재 연출 이미지 픽셀과 일치하지 않습니다.";
   if (review.anchorSha256 && review.anchorSha256 !== context.anchorSha256) return "연출 이미지의 승인된 대표 장면 참조가 변경되었습니다.";
-  if (!REFERENCE_SCENE_REVIEW_CHECKS.every(check => review.checks?.[check] === true)) return "상품 윤곽·비율·상단·뚜껑·라벨·색상·표면 대조 검토가 모두 통과하지 않았습니다.";
+  if (!REFERENCE_SCENE_REVIEW_CHECKS.every(check => review.checks?.[check] === true)) return "상품 형태 대조와 자연스러운 단일 사진·추가 문구 없음·프레임/패널 없음 검토가 모두 통과하지 않았습니다.";
   return null;
 }

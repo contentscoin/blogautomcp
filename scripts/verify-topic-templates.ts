@@ -75,8 +75,8 @@ beauty.sections.forEach((section, index) => {
   assert.ok(section.imageSource, `${section.id} has an image source`);
 });
 const ingredient = beauty.sections.find((section) => section.id === "shopping-package")!;
-assert.equal(ingredient.imageSource, "seller-crop");
-assert.match(ingredient.image.intent, /성분/u);
+assert.equal(ingredient.imageSource, "staged-ai");
+assert.match(ingredient.image.intent, /자연스러운 생활 사진.*증거가 아님/u);
 const texture = beauty.sections.find((section) => section.id === "shopping-design")!;
 assert.equal(texture.imageSource, "staged-ai");
 assert.doesNotMatch(texture.image.intent, /연출:|\[/u, "image intent becomes published alt text: no internal directions");
@@ -132,7 +132,7 @@ for (const node of document.renderNodes) {
 // 7. Image classifiers honour the template's explicit image source before intent wording.
 const staged = { imageIntent: "추천 사용 환경 연출컷", imageSource: "staged-ai" as const };
 assert.equal(isShoppingLifestyleImage(staged), true, "staged cut is a lifestyle slot even without legacy wording");
-assert.equal(allowsOriginalShoppingScene(staged), true, "a verified original scene may fill a staged slot");
+assert.equal(allowsOriginalShoppingScene(staged), false, "a staged slot cannot be filled by another original photo");
 assert.equal(allowsGenericBrandPostProductPhoto({ sectionTitle: "성분에서 확인한 것", imageIntent: "성분표 근거 구간", imageSource: "seller-crop" }), false,
   "detail-crop slots need feature evidence, not a packshot");
 assert.equal(isShoppingLifestyleImage({ imageIntent: "성분표 근거 구간", imageSource: "seller-crop" }), false);
@@ -144,14 +144,14 @@ const staged7 = resolvePostDocument({
   sections: Array.from({ length: 7 }, (_, index) => `소제목 ${index + 1}\n\n브리즈온 드라이기 설명 ${index + 1}입니다.`),
   hashtags: ["드라이기"], imagePaths: [], connectUrl: "https://naver.me/fixture",
 });
-assert.equal(staged7.sections[0]!.imageSource, "staged-ai");
-assert.ok(staged7.sections[0]!.promptRecipe, "staging recipe persists for image generation");
-assert.equal(staged7.sections.at(-1)!.imageSource, "seller-original", "the verdict slot maps to the last contract section");
+assert.equal(staged7.sections[0]!.imageSource, "seller-original");
+assert.ok(staged7.sections[1]!.promptRecipe, "staging recipe persists for image generation");
+assert.equal(staged7.sections.at(-1)!.imageSource, "staged-ai", "the last lifestyle photo differs from the single opening original");
 assert.ok(staged7.sections.every((section) => !/연출:/u.test(section.imageIntent)));
 const stagingPrompt = buildBrandPostImagePrompt({ connectKind: "SHOPPING", productName: "브리즈온", sectionTitle: "사용감",
-  imageIntent: staged7.sections[0]!.imageIntent, role: "body", stagingRecipe: staged7.sections[0]!.promptRecipe });
-assert.ok(stagingPrompt.includes(staged7.sections[0]!.promptRecipe!), "template scene recipe reaches the reference-scene prompt");
+  imageIntent: staged7.sections[1]!.imageIntent, role: "body", stagingRecipe: staged7.sections[1]!.promptRecipe });
+assert.ok(stagingPrompt.includes(staged7.sections[1]!.promptRecipe!), "template scene recipe reaches the reference-scene prompt");
 assert.match(stagingPrompt, /INPUT 1 is authoritative/u, "staging preserves actual product-reference authority");
-assert.match(stagingPrompt, /never the product viewpoint|altered viewpoint/u, "scene variety cannot deform the product view");
+assert.match(stagingPrompt, /pose.*camera distance or angle/u, "natural pose and angle changes preserve product identity");
 
 console.log(`PASS: topic templates (${Object.keys(TOPIC_TEMPLATES).length}), selection, contract overlay, editorial fallback, prompts, render document`);

@@ -4,6 +4,9 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+import sharp from "sharp";
 import { testPngFixture } from "./lib/test-png-fixture";
 import { buildShoppingReferenceScenePrompt, reviewShoppingReferenceScene, selectShoppingSceneReference,
   SCENE_FIDELITY_CHECKS, SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION, type ShoppingSceneReference } from "./lib/shopping-reference-scene";
@@ -28,17 +31,28 @@ async function main() {
       verify: async paths => paths,
       review: async call => {
         reviewed.push(call.imagePaths!);
-        return JSON.stringify({ identityMatches: true, frontFacing: call.imagePaths![0] === front,
+        return JSON.stringify({ identityMatches: true, geometryReadable: call.imagePaths![0] === front,
           completeShape: true, notDeformed: true, unobstructed: true,
           subject: "right-hand intact front-facing instance", geometry: "level seal; centered short cap; 2.3:1 ratio", labels: "brand above original product line", reason: "visible whole front" });
       },
     });
-    assert.equal(reference.path, front, "an angled original must not become the geometry reference");
+    assert.equal(reference.path, front, "an unreadable severely foreshortened original must not become the geometry reference");
     assert.deepEqual(reviewed, [[angled], [front]]);
     await assert.rejects(selectShoppingSceneReference({ paths: [file("deformed")], productName: "different", selectedProduct: "other" }, {
       verify: async paths => paths,
-      review: async () => JSON.stringify({ identityMatches: true, frontFacing: true, completeShape: true, notDeformed: false, unobstructed: true }),
-    }), /PRODUCT_FRONT_REFERENCE_REQUIRED/);
+      review: async () => JSON.stringify({ identityMatches: true, geometryReadable: true, completeShape: true, notDeformed: false, unobstructed: true }),
+    }), /PRODUCT_REFERENCE_REQUIRED/);
+    const walkingGarment = file("walking-garment");
+    const garment = await selectShoppingSceneReference({ paths: [walkingGarment], productName: "와이드 팬츠", selectedProduct: "차콜 와이드 팬츠" }, {
+      verify: async paths => paths,
+      review: async call => {
+        assert.match(call.userPrompt, /normal pose, fabric folds or a moderate oblique view is allowed/u);
+        return JSON.stringify({ identityMatches: true, geometryReadable: true, frontFacing: false,
+          completeShape: true, notDeformed: true, unobstructed: true, subject: "person walking in charcoal trousers",
+          geometry: "wide legs, elastic waist, hems and pockets visible with natural folds", labels: "none visible" });
+      },
+    });
+    assert.equal(garment.path, walkingGarment, "natural garment poses do not need a packaging front view");
 
     const allChecks = Object.fromEntries(SCENE_FIDELITY_CHECKS.map(key => [key, true]));
     const good = { accepted: true, identityMatches: true, illustrativeOnly: true, checks: allChecks, reason: "both images show the same intact straight front and cap" };
@@ -91,7 +105,8 @@ async function main() {
     assert.deepEqual(jobs[0].referenceImagePaths, [front, anchor]);
     assert.equal(jobs[0].referenceMode, "product");
     assert.deepEqual(jobs[0].requiredReferenceHashes, first.referenceHashes);
-    assert.doesNotMatch(jobs[0].prompt, /Generate the environment only|Use a distinct viewpoint/);
+    assert.doesNotMatch(jobs[0].prompt, /Generate the environment only|never the product viewpoint/);
+    assert.match(jobs[0].prompt, /distinct natural location, pose or camera framing/);
     assertProductImageReferences(jobs[0]);
     assert.throws(() => assertProductImageReferences({ ...jobs[0], referenceImagePaths: [front] }), /PRODUCT_REFERENCE_REQUIRED/);
     assert.throws(() => assertProductImageReferences({ ...jobs[0], requiredReferenceHashes: [...first.referenceHashes].reverse() }), /PRODUCT_REFERENCE_CHANGED/);
@@ -120,7 +135,7 @@ async function main() {
     manifest.imageAssets!.push({ path: oldBody, sourcePath: oldBody, sha256: oldBodyHash, role: "body", sectionId: "second",
       slotId: "second:image:1", provenance: "ORIGINAL", creationMethod: "source", remoteGenerated: false,
       imageIntent: secondTarget.imageIntent } as NonNullable<typeof manifest.imageAssets>[number]);
-    let current = manifest;
+    const current = manifest;
     let qaCalls = 0;
     const external = { brandLinkId: manifest.brandLinkId, manifest: current, productName: "상품", sectionId: "second",
       replaceAssetKey: oldBodyHash, rawPath: output, referenceHashes: first.referenceHashes,
@@ -156,8 +171,47 @@ async function main() {
     await assert.rejects(generation.prepareBrandPostImageReferenceContext({ manifest, productName: "상품",
       target: { ...target("feature"), imageSource: "seller-crop", imageIntent: "작동 성능 공식 근거" } }, deps), /REFERENCE_SCENE_NOT_EVIDENCE/);
     const prompt = buildShoppingReferenceScenePrompt({ productName: "shoe", sectionTitle: "대표", imageIntent: "전체", role: "hero", reference });
-    assert.match(prompt, /For other products preserve their own observed closure\/base/u, "tube geometry is never imposed on every category");
+    assert.match(prompt, /Do not impose a tube, cap, upright packshot, fixed front view/u, "tube geometry is never imposed on every category");
     assert.doesNotMatch(prompt, /d'Alba|2\.3:1 cap height about one fifth/u, "no product-specific template is hardcoded");
+    const bodyPrompt = buildShoppingReferenceScenePrompt({ productName: "와이드 팬츠", sectionTitle: "출근 코디", imageIntent: "AI 코디 연출 이미지", role: "body", reference: garment });
+    assert.match(bodyPrompt, /Square 1:1 photograph/);
+    assert.match(bodyPrompt, /People wearing clothing/);
+    assert.match(bodyPrompt, /No information cards, slides, editorial layouts, split panels, collage/);
+    assert.doesNotMatch(bodyPrompt, /Create ONE photorealistic editorial|No people, hands|keep the product front view/);
+    assert(SCENE_FIDELITY_CHECKS.includes("noAddedText") && SCENE_FIDELITY_CHECKS.includes("noFramesOrPanels") && SCENE_FIDELITY_CHECKS.includes("singleScene"));
+    // Exercise the actual module and renderer, not the transport VM harness.
+    // The existing checkpoint contains the already reviewed original pixels.
+    const decodedOriginal = path.join(root, "actual-thumbnail-source.png");
+    await sharp({ create: { width: 1080, height: 1080, channels: 3, background: "#b8afa1" } }).png().toFile(decodedOriginal);
+    const thumbnailManifest = { ...manifest, brandLinkId: `${manifest.brandLinkId}-actual-thumbnail`, heroImagePath: decodedOriginal,
+      imageAssets: [{ path: decodedOriginal, sourcePath: decodedOriginal, sha256: hash(decodedOriginal), role: "hero", provenance: "ORIGINAL", creationMethod: "source" }] } as BrandPostPackageManifestV2;
+    const actualHeroRequest = { requestId: "actual-hero", replaceAssetKey: hash(decodedOriginal) };
+    await generation.prepareBrandPostImageReferenceContext({ manifest: thumbnailManifest, productName: "와이드 팬츠",
+      target: generation.resolveBrandPostImageTarget(thumbnailManifest, actualHeroRequest) }, {
+      collect: async () => [decodedOriginal],
+      select: async () => ({ ...reference, path: decodedOriginal, sha256: hash(decodedOriginal) }),
+    });
+    const originalSpawn = childProcess.spawn;
+    let spawnedProviders = 0;
+    childProcess.spawn = (() => { spawnedProviders += 1; throw new Error("Remote generation forbidden for a local photo thumbnail"); }) as typeof childProcess.spawn;
+    syncBuiltinESMExports();
+    try {
+      for (const sourceOnly of [false, true]) {
+        const [thumbnail] = await generation.generateBrandPostImages({ manifest: thumbnailManifest, productName: "와이드 팬츠", sourceOnly,
+          requests: [{ ...actualHeroRequest, requestId: `actual-local-hero-${sourceOnly}` }] });
+        assert.equal(thumbnail.error, undefined);
+        assert.equal(thumbnail.provenance, "PHOTO_TEXT_THUMBNAIL");
+        assert.equal(thumbnail.creationMethod, "local-composite");
+        assert.equal(thumbnail.remoteGenerated, false);
+        assert(thumbnail.generatedPath && fs.existsSync(thumbnail.generatedPath));
+        const size = await sharp(thumbnail.generatedPath!).metadata();
+        assert.deepEqual([size.width, size.height], [1080, 1080]);
+      }
+      assert.equal(spawnedProviders, 0, "production hero path must bypass both Codex and browser providers");
+    } finally {
+      childProcess.spawn = originalSpawn;
+      syncBuiltinESMExports();
+    }
     console.log("PASS: reference choice, two-image fail-closed shape QA, ordered attachments, stable original/approved anchor, stale anchor rejection, recipe invalidation, evidence boundary");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }

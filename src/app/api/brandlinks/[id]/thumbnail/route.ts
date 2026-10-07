@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
@@ -8,7 +8,8 @@ import { buildProductThumbnailCopy } from "../../../../../../scripts/lib/product
 import { buildTravelThumbnailCopy } from "../../../../../../scripts/lib/travel-content";
 import { getProductThumbnailStorageDir } from "../../../../../../scripts/lib/app-paths";
 import { normalizeCandidateImageUrl } from "../../../../../../scripts/lib/product-image-selection";
-import { createLockedProductThumbnail, createOriginalProductPhotoThumbnail } from "../../../../../../scripts/lib/product-image-lock";
+import { createOriginalProductPhotoThumbnail } from "../../../../../../scripts/lib/product-image-lock";
+import { normalizeShoppingThumbnailHeadline, SHOPPING_THUMBNAIL_LAYOUT_VERSION } from "../../../../../../scripts/lib/thumbnail-layout-v2";
 import { createTravelEditorialThumbnail } from "../../../../../../scripts/lib/travel-thumbnail";
 import {
   generateThumbnail,
@@ -163,6 +164,7 @@ export async function POST(
       return NextResponse.json({ success: false, error: "이 상품에서 수집된 제품 사진을 선택하세요." }, { status: 422 });
     }
     const copy = normalizeProductThumbnailCopy(body.copy || {}, payload.productName);
+    if (payload.connectKind === "SHOPPING") copy.headline = normalizeShoppingThumbnailHeadline(copy.headline);
     const requestedMood = typeof body.mood === "string" ? body.mood : typeof body.style === "string" ? body.style : "";
     const mood = payload.moods.some((item) => item.id === requestedMood) ? requestedMood : payload.moods[0].id;
     const wantLocal = body.engine === "local";
@@ -195,14 +197,14 @@ export async function POST(
           qc = generated.qc;
           attempts = generated.attempts;
         } else {
-          logs.push("gpt-image 결과가 QC 를 통과하지 못해 로컬 합성으로 강등합니다.");
+          logs.push("생성 이미지가 검증을 통과하지 못해 원본 사진과 큰 제목으로 썸네일을 만듭니다.");
         }
       }
       if (!outputPath) {
         if (payload.connectKind === "SHOPPING") {
-          const result = await createLockedProductThumbnail({ sourcePath, outputDir: storageDir, productName: payload.productName, headline: copy.headline, subline: copy.subline, style: "shopping-clean" })
-            .catch(() => createOriginalProductPhotoThumbnail({ sourcePath, outputDir: storageDir, productName: payload.productName, headline: copy.headline, subline: copy.subline, style: "shopping-clean" }));
+          const result = await createOriginalProductPhotoThumbnail({ sourcePath, outputDir: storageDir, productName: payload.productName, headline: copy.headline, subline: copy.subline, style: "shopping-clean" });
           outputPath = result.outputPath;
+          logs.push("원본 사진 전체를 크게 사용하고 핵심 제목만 추가했습니다. AI 연출 사진이 아닙니다.");
         } else {
           const result = await createTravelEditorialThumbnail({ sourcePath, outputDir: storageDir, destination: payload.productName, headline: copy.headline, subline: copy.subline, badge: copy.badge, style: "travel-editorial" });
           outputPath = result.outputPath;
@@ -216,7 +218,9 @@ export async function POST(
 
     const updatedAt = new Date().toISOString();
     if (body.save === true) {
-      const value = JSON.stringify({ version: 1, sourceImageUrl, generatedPath: outputPath, copy, style: mood, updatedAt });
+      const value = JSON.stringify({ version: 1, sourceImageUrl, generatedPath: outputPath, copy, style: mood, updatedAt,
+        layoutVersion: payload.connectKind === "SHOPPING" ? SHOPPING_THUMBNAIL_LAYOUT_VERSION : undefined,
+        generatedSha256: payload.connectKind === "SHOPPING" ? createHash("sha256").update(await fs.promises.readFile(outputPath)).digest("hex") : undefined });
       await prisma.setting.upsert({
         where: { key: productThumbnailSettingKey(id) },
         update: { value },
@@ -231,6 +235,8 @@ export async function POST(
         copy,
         mood,
         engine,
+        provenance: payload.connectKind === "SHOPPING" && engine === "local" ? "PHOTO_TEXT_THUMBNAIL" : undefined,
+        layoutVersion: payload.connectKind === "SHOPPING" ? SHOPPING_THUMBNAIL_LAYOUT_VERSION : undefined,
         qc,
         attempts,
         logs,

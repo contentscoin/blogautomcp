@@ -4,8 +4,6 @@ import { readProductPhotoSource } from "../../scripts/lib/product-photo-provenan
 import {
   collectShoppingProductSourceCandidates,
   readSavedProductSourceCandidates,
-  selectShoppingProductSource,
-  selectShoppingProductSources,
 } from "../../scripts/lib/product-photo-source";
 import { selectVerifiedProductSectionImages } from "../../scripts/lib/product-photo-review";
 import { buildSelectedProductImageAuditContext } from "../../scripts/lib/publish-image-audit";
@@ -16,8 +14,6 @@ import { spawn } from "node:child_process";
 import {
   createOriginalProductPhotoThumbnail,
 } from "../../scripts/lib/product-image-lock";
-import { countSectionMatchedFacts, createShoppingFactCard, selectShoppingFactCardFacts, SHOPPING_FACT_CARD_LIMIT } from "../../scripts/lib/shopping-fact-card";
-import { brandPostQualitySourceFromSnapshot } from "./brand-post-quality-source";
 import { buildProductThumbnailCopy } from "../../scripts/lib/product-thumbnail";
 import { buildTravelThumbnailCopy } from "../../scripts/lib/travel-content";
 import { createTravelEditorialThumbnail } from "../../scripts/lib/travel-thumbnail";
@@ -32,7 +28,7 @@ import { isChatGptBrowserAutomationEnabled } from "./chatgpt-browser-automation"
 import { imageBatchBudgetMs, imageJobBudgetMs, IMAGE_TIMER_MAX_MS } from "../../scripts/lib/image-timeout-policy";
 import { buildBlogPhotorealDirection } from "../../scripts/lib/photoreal/build";
 import { assertProductImageReferences, existingJobResult, hasBrowserSubmission, hasUnresolvedCodexSubmission, resolveBrandPostImageEngine, runCodexImageBatch, type ImageBatchJob } from "./codex-image-generation";
-import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene, brandPostSectionSlotId, isShoppingLifestyleImage, type BrandPostImageSourceHint } from "./brand-post-image-evidence";
+import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene, brandPostSectionSlotId, isShoppingLifestyleImage, REFERENCE_SCENE_REVIEW_CHECKS, type BrandPostImageSourceHint } from "./brand-post-image-evidence";
 import { buildProduct9Canvas, type Product9Canvas, type ProductPhysicalScale } from "../../scripts/lib/product-9canvas";
 import { buildShoppingReferenceScenePrompt, reviewShoppingReferenceScene, selectShoppingSceneReference,
   SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION, type ShoppingSceneReference } from "../../scripts/lib/shopping-reference-scene";
@@ -309,36 +305,6 @@ export function buildBrandPostImageJobIdentity(options: {
   })).digest("hex");
 }
 
-async function existingShoppingSource(
-  manifest: BrandPostPackageManifestV2,
-  target: ResolvedImageTarget,
-  options: { productName?: string; sourceImageUrls?: string[] } = {},
-): Promise<string | null> {
-  const assets = normalizePackageImageAssets(manifest);
-  // Every composite (including the sole locked hero) may retain a verified
-  // source chain. Prefer package-local records so temp cleanup cannot erase it.
-  const preservedSources = assets.flatMap(asset => [asset.path, asset.sourcePath]
-    .filter((file): file is string => Boolean(file))
-    .flatMap(file => {
-      const record = readProductPhotoSource(file);
-      return record ? [record.sourcePath] : [];
-    }));
-  const candidates = [
-    ...preservedSources,
-    target.existingAsset?.provenance === "ORIGINAL" ? target.existingAsset.path : "",
-    target.existingAsset?.provenance === "ORIGINAL" ? target.existingAsset.sourcePath : "",
-    ...assets
-      .filter((asset) => asset.provenance === "ORIGINAL")
-      .flatMap((asset) => [asset.path, asset.sourcePath]),
-  ];
-  return selectShoppingProductSource({
-    localCandidates: candidates.filter((file): file is string => Boolean(file)),
-    productName: String(manifest.sourceSnapshot?.product.name || options.productName || manifest.title),
-    sourceImageUrls: options.sourceImageUrls,
-    outputDir: path.join(getBrandPostPackageDir(manifest.brandLinkId), "product-sources"),
-  });
-}
-
 /** Integrity-checked product sources already used by successful composites. */
 export function getUsedShoppingProductSources(
   manifest: BrandPostPackageManifestV2,
@@ -357,68 +323,6 @@ export function getUsedShoppingProductSources(
   return [...byHash.values()];
 }
 
-async function existingShoppingSources(
-  manifest: BrandPostPackageManifestV2,
-  targets: ResolvedImageTarget[],
-  options: { productName?: string; sourceImageUrls?: string[]; excludeSha256?: string[] } = {},
-  maximum = 1,
-): Promise<{ fresh: string[]; reusable: string[]; verifiedCount: number }> {
-  const assets = normalizePackageImageAssets(manifest);
-  const replacedAssetKeys = new Set(targets.flatMap(target =>
-    target.request.replaceAssetKey ? [target.request.replaceAssetKey] : []));
-  const usedRecords = getUsedShoppingProductSources(manifest, replacedAssetKeys);
-  const explicitlyExcluded = new Set(options.excludeSha256 || []);
-  const usedSourceHashes = new Set([
-    ...usedRecords.map(record => record.sourceSha256),
-    ...explicitlyExcluded,
-  ]);
-  const preservedSources = assets.flatMap(asset => [asset.path, asset.sourcePath]
-    .filter((file): file is string => Boolean(file))
-    .flatMap(file => {
-      const record = readProductPhotoSource(file);
-      return record ? [record.sourcePath] : [];
-    }));
-  const candidates = [
-    ...preservedSources,
-    ...targets.flatMap(target => target.existingAsset?.provenance === "ORIGINAL"
-      ? [target.existingAsset.path, target.existingAsset.sourcePath]
-      : []),
-    ...assets.filter(asset => asset.provenance === "ORIGINAL").flatMap(asset => [asset.path, asset.sourcePath]),
-  ].filter((file): file is string => Boolean(file));
-  // Inspect more than the immediate slot count: seller galleries often put
-  // lifestyle/full-frame photos before a clean, segmentable packshot.
-  const reusableByHash = new Map(usedRecords
-    .filter(record => !explicitlyExcluded.has(record.sourceSha256))
-    .map(record => [record.sourceSha256, record.sourcePath]));
-  let fresh: string[] = [];
-  try {
-    fresh = await selectShoppingProductSources({
-      localCandidates: candidates,
-      productName: String(manifest.sourceSnapshot?.product.name || options.productName || manifest.title),
-      sourceImageUrls: options.sourceImageUrls,
-      outputDir: path.join(getBrandPostPackageDir(manifest.brandLinkId), "product-sources"),
-      maximum: Math.min(12, Math.max(maximum * 3, maximum + 4)),
-      excludeSha256: [...usedSourceHashes],
-    });
-  } catch (error) {
-    // An intact, already verified+segmented package source is sufficient for
-    // deterministic resume even when a fresh QC provider is temporarily down.
-    if (reusableByHash.size === 0) throw error;
-  }
-  const freshByHash = new Map<string, string>();
-  for (const file of fresh) {
-    try {
-      const hash = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
-      if (!usedSourceHashes.has(hash)) freshByHash.set(hash, file);
-    } catch { /* A vanished candidate is ignored. */ }
-  }
-  return {
-    fresh: [...freshByHash.values()],
-    reusable: [...reusableByHash.values()],
-    verifiedCount: freshByHash.size + reusableByHash.size,
-  };
-}
-
 /** 같은 글 안에서 슬롯마다 다른 photoreal 변형을 쓰도록 섹션 순서와 슬롯 번호로 정한다. */
 function photorealVariantIndex(manifest: BrandPostPackageManifestV2, target: ResolvedImageTarget): number {
   const sectionIndex = manifest.composition.sections.findIndex(section => section.id === target.sectionId);
@@ -427,8 +331,10 @@ function photorealVariantIndex(manifest: BrandPostPackageManifestV2, target: Res
 }
 
 export function allowsShoppingReferenceScene(target: ResolvedImageTarget): boolean {
-  return target.role === "hero" || isShoppingLifestyleImage(target) ||
-    allowsGenericBrandPostProductPhoto({ sectionTitle: target.sectionTitle, imageIntent: target.imageIntent, imageSource: target.imageSource });
+  if (target.role === "hero") return true;
+  if (target.imageSource) return target.imageSource === "staged-ai";
+  return isShoppingLifestyleImage(target) ||
+    allowsGenericBrandPostProductPhoto({ sectionTitle: target.sectionTitle, imageIntent: target.imageIntent });
 }
 
 /** Shared by native ChatGPT jobs, desktop transports, and final external-result comparison. */
@@ -481,6 +387,9 @@ export async function prepareBrandPostImageReferenceContext(options: {
     try {
       const approvedAnchor = options.manifest.approvedAt || (checkpointCurrent && checkpoint.anchorSha256 === hero?.sha256);
       if (approvedAnchor && hero?.referenceScene?.reviewStatus === "passed" && hero.referenceScene.referenceSha256 === reference.sha256 &&
+          hero.provenance === "GENERATED_SCENE" && hero.creationMethod === "reference-guided-scene" &&
+          hero.referenceScene.strategyVersion === SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION &&
+          REFERENCE_SCENE_REVIEW_CHECKS.every(key => hero.referenceScene?.checks?.[key] === true) &&
           hero.referenceScene.sourceSnapshotId === options.manifest.sourceSnapshot.snapshotId &&
           hero.referenceScene.reviewedOutputSha256 === hero.sha256 && sha256File(hero.path) === hero.sha256) {
         anchorPath = hero.path;
@@ -505,6 +414,85 @@ export async function prepareBrandPostImageReferenceContext(options: {
   return context;
 }
 
+const IMAGE_JOB_RECORD_SUFFIXES = [".checkpoint.jsonl", ".codex-submission.json", ".lock", ".lock.recovery", ".png", ".jpg", ".jpeg", ".webp"];
+
+function recordedImageJobStems(workDir: string): string[] {
+  if (!fs.existsSync(workDir)) return [];
+  return [...new Set(fs.readdirSync(workDir).flatMap(name => {
+    const match = /^(raw-[a-f0-9]+)(?:\.checkpoint\.jsonl|\.codex-submission\.json|\.lock(?:\.recovery)?|\.(?:png|jpe?g|webp))$/iu.exec(name);
+    return match ? [path.join(workDir, match[1])] : [];
+  }))];
+}
+
+function imageJobSceneStrategy(outStem: string): string | undefined {
+  try { return JSON.parse(fs.readFileSync(`${outStem}.reference-scene.json`, "utf8"))?.strategyVersion; }
+  catch { return undefined; }
+}
+
+/** A raw file alone never proves that an earlier paid request has finished. */
+function retiredImageJobIsSettled(outStem: string): boolean {
+  if ([".lock", ".lock.recovery"].some(extension => fs.existsSync(`${outStem}${extension}`))) return false;
+  let terminalReceipt = false;
+  const journalPath = `${outStem}.checkpoint.jsonl`;
+  if (fs.existsSync(journalPath)) {
+    try {
+      const records = fs.readFileSync(journalPath, "utf8").split("\n").filter(line => line.trim()).map(line => JSON.parse(line));
+      const last = records[records.length - 1];
+      if (!last || records.some(record => !record || record.id !== "slot" ||
+          !/^[a-f0-9]{64}$/iu.test(record.fingerprint || "") || record.fingerprint !== last.fingerprint)) return false;
+      // An attempted/submitted tail is uncertain even if an earlier record finished.
+      if (last.state || typeof last.localPath !== "string" && last.localPath !== null) return false;
+      if (typeof last.localPath === "string") {
+        const bytes = fs.readFileSync(last.localPath);
+        if (!bytes.length || crypto.createHash("sha256").update(bytes).digest("hex") !== last.sha256) return false;
+      } else if (typeof last.error !== "string" || !(last.error.startsWith("IMAGE_PROVIDER_REFUSED:") ||
+          last.retryable === true && !records.some(record => record.state === "submitted"))) return false;
+      terminalReceipt = true;
+    } catch { return false; }
+  }
+  const submissionPath = `${outStem}.codex-submission.json`;
+  if (fs.existsSync(submissionPath)) {
+    try {
+      const receipt = JSON.parse(fs.readFileSync(submissionPath, "utf8"));
+      if (!receipt || typeof receipt.workspace !== "string" || !Number.isFinite(receipt.startedAtMs) ||
+          !(receipt.threadId === null || typeof receipt.threadId === "string")) return false;
+      if (receipt.state === "completed") {
+        const output = existingJobResult(outStem);
+        if (!output) return false;
+        const bytes = fs.readFileSync(output);
+        const png = bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+        const jpeg = bytes[0] === 0xff && bytes[1] === 0xd8;
+        const webp = bytes.subarray(0, 4).toString("latin1") === "RIFF" && bytes.subarray(8, 12).toString("latin1") === "WEBP";
+        if (!png && !jpeg && !webp) return false;
+      } else if (receipt.state !== "not-submitted") return false;
+      terminalReceipt = true;
+    } catch { return false; }
+  }
+  return terminalReceipt;
+}
+
+function assertRetiredImageJobsSettled(workDir: string): void {
+  for (const outStem of recordedImageJobStems(workDir)) {
+    if (imageJobSceneStrategy(outStem) !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION && !retiredImageJobIsSettled(outStem))
+      throw new Error("IMAGE_RESUME_REQUIRED: 이전 이미지 요청의 완료 또는 미전송 여부를 확인할 수 없습니다. 기존 요청을 복구한 뒤 자연스러운 사진 생성으로 전환해야 합니다. 자동 재전송하지 않았습니다.");
+  }
+}
+
+/** Keep retired policy evidence intact; only settled jobs permit a new policy namespace. */
+export function resolveBrandPostImageBatchWorkDir(connectKind: BrandPostPackageManifestV2["connectKind"], workRoot: string): string {
+  const previousDir = path.join(workRoot, "resume-v1");
+  if (connectKind !== "SHOPPING") return previousDir;
+  assertRetiredImageJobsSettled(previousDir);
+  // Unexpected current-policy work in the old namespace must be resumed there,
+  // never duplicated in a new directory merely because the code was updated.
+  if (recordedImageJobStems(previousDir).some(stem => imageJobSceneStrategy(stem) === SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION)) {
+    if (recordedImageJobStems(path.join(workRoot, "resume-v2")).length)
+      throw new Error("IMAGE_RESUME_REQUIRED: 두 이미지 작업 폴더에 현재 전략의 기록이 있습니다. 기존 요청을 확인하기 전에는 새 요청을 보내지 않습니다.");
+    return previousDir;
+  }
+  return path.join(workRoot, "resume-v2");
+}
+
 /** Transport-neutral jobs: the same prompt and outStem serve the Codex and browser paths. */
 export function prepareImageBatchJobs(
   targets: ResolvedImageTarget[],
@@ -512,18 +500,7 @@ export function prepareImageBatchJobs(
   productName: string,
   workDir: string,
 ): ImageBatchJob[] {
-  if (manifest.connectKind === "SHOPPING" && fs.existsSync(workDir)) {
-    // Earlier background-only journals cannot be mapped safely to the new recipe.
-    // Retain them for explicit recovery instead of silently paying for another request.
-    for (const name of fs.readdirSync(workDir)) {
-      const match = /^(raw-[a-f0-9]+)(?:\.checkpoint\.jsonl|\.codex-submission\.json|\.lock|\.(?:png|jpe?g|webp))$/iu.exec(name);
-      if (!match) continue;
-      let receipt: { strategyVersion?: string } = {};
-      try { receipt = JSON.parse(fs.readFileSync(path.join(workDir, `${match[1]}.reference-scene.json`), "utf8")); } catch { /* Legacy or damaged receipt. */ }
-      if (receipt.strategyVersion !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION)
-        throw new Error("IMAGE_RESUME_REQUIRED: 이전 배경 생성 기록이 남아 있습니다. 기존 요청을 복구·정리한 뒤 상품 참조 생성으로 전환해야 합니다. 자동 재전송하지 않았습니다.");
-    }
-  }
+  if (manifest.connectKind === "SHOPPING") assertRetiredImageJobsSettled(workDir);
   const productUnderstanding = manifest.connectKind === "SHOPPING"
     ? resolveManifestProductUnderstanding(manifest, productName)
     : null;
@@ -555,9 +532,9 @@ export function prepareImageBatchJobs(
   })).map((job, index) => {
     const target = targets[index];
     if (manifest.connectKind === "SHOPPING" && (!target.referenceContext || job.referenceImagePaths.length === 0))
-      throw new Error("PRODUCT_REFERENCE_NOT_PREPARED: 검증된 상품 정면 참조 없이 이미지를 생성할 수 없습니다.");
+      throw new Error("PRODUCT_REFERENCE_NOT_PREPARED: needs_reference — 선택 상품의 형태와 옵션을 확인할 수 있는 원본 참조가 필요합니다.");
     job.prompt += manifest.connectKind === "SHOPPING"
-      ? `\nImage slot: ${target.request.slotId}. Vary only the surroundings, never the product viewpoint.`
+      ? `\nImage slot: ${target.request.slotId}. Use a distinct natural location, pose or camera framing for this slot; preserve product identity and real proportions. No added text, frames, panels, collage or inset.`
       : `\nImage slot: ${target.request.slotId}. Use a distinct viewpoint and subject detail for this slot.`;
     const references = job.referenceImagePaths.map(file => ({ file,
       sha256: crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"),
@@ -573,7 +550,8 @@ export function prepareImageBatchJobs(
       prompt: job.prompt.slice(0, job.prompt.lastIndexOf("\nImage slot: ")), references,
     })).digest("hex");
     const legacyStem = path.join(workDir, `raw-${legacyIdentity}`);
-    if ([".checkpoint.jsonl", ".lock", ".png", ".jpg", ".jpeg", ".webp"].some(extension => fs.existsSync(`${legacyStem}${extension}`))) {
+    if (IMAGE_JOB_RECORD_SUFFIXES.some(extension => fs.existsSync(`${legacyStem}${extension}`)) &&
+        !(manifest.connectKind === "SHOPPING" && imageJobSceneStrategy(legacyStem) !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION && retiredImageJobIsSettled(legacyStem))) {
       throw new Error("IMAGE_RESUME_REQUIRED: 구버전 이미지 요청 기록이 있습니다. 기존 생성 결과를 확인해 올바른 슬롯에 복구해야 합니다. 중복 생성하지 않았습니다.");
     }
     const sourceHash = target.sourcePath && fs.existsSync(target.sourcePath)
@@ -594,6 +572,7 @@ export function prepareImageBatchJobs(
       for (const name of fs.readdirSync(workDir).filter(name => /^raw-[a-f0-9]+\.reference-scene\.json$/iu.test(name))) {
         const priorStem = path.join(workDir, name.replace(/\.reference-scene\.json$/u, ""));
         if (priorStem === outStem) continue;
+        if (imageJobSceneStrategy(priorStem) !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION && retiredImageJobIsSettled(priorStem)) continue;
         const prior = JSON.parse(fs.readFileSync(path.join(workDir, name), "utf8")) as { slotId?: string };
         if (prior.slotId !== target.request.slotId) continue;
         const submitted = [".checkpoint.jsonl", ".codex-submission.json", ".lock", ".png", ".jpg", ".jpeg", ".webp"]
@@ -871,6 +850,12 @@ async function finishGeneratedImage(options: {
     if (sha256File(file) !== context.referenceHashes[index])
       throw new Error("REFERENCE_SCENE_CHANGED: 생성 전후 참조 이미지 해시가 달라졌습니다.");
   }
+  if (options.target.role === "hero") {
+    const copy = buildProductThumbnailCopy(options.manifest.title, options.productName, "SHOPPING", options.manifest.productUnderstanding);
+    const thumbnail = await createOriginalProductPhotoThumbnail({ sourcePath: context.reference.path, outputDir: options.workDir,
+      productName: copy.productNameLabel, headline: copy.headline, subline: copy.subline, style: "shopping-bold" });
+    return { generatedPath: thumbnail.outputPath, provenance: "PHOTO_TEXT_THUMBNAIL" };
+  }
   const referenceScene = await (options.reviewReferenceScene ?? reviewShoppingReferenceScene)({ reference: context.reference, outputPath: options.rawPath,
     productName: options.productName, imageIntent: options.target.imageIntent, anchorSha256: context.anchorSha256 });
   return { generatedPath: options.rawPath, provenance: "GENERATED_SCENE",
@@ -938,6 +923,26 @@ export async function generateBrandPostImages(options: {
 
   // Source validation is a prerequisite, never a post-generation surprise.
   if (options.manifest.connectKind === "SHOPPING") {
+    // A thumbnail is a separate large-headline treatment of verified source
+    // photography. Never pay for a scene only to discard it in a local layout.
+    for (let targetIndex = targets.length - 1; targetIndex >= 0; targetIndex -= 1) {
+      const target = targets[targetIndex];
+      if (target.role !== "hero") continue;
+      const index = requestIndexes[targetIndex];
+      try {
+        const finished = await finishGeneratedImage({ manifest: options.manifest, productName: options.productName,
+          sourceImageUrls: options.sourceImageUrls, target, rawPath: "", index,
+          workDir: path.join(getBrandPostPackageDir(options.manifest.brandLinkId), "image-generation-work", "thumbnails") });
+        await publish(index, { ...baseResult(index), ...finished, imageIntent: target.imageIntent,
+          creationMethod: "local-composite", remoteGenerated: false });
+      } catch (error) {
+        await publish(index, { ...baseResult(index), imageIntent: target.imageIntent,
+          error: error instanceof Error ? error.message : String(error) });
+      }
+      targets.splice(targetIndex, 1);
+      requestIndexes.splice(targetIndex, 1);
+    }
+    if (targets.length === 0) return results;
     const sourceAssignedAssetHashes = new Set<string>();
     let sourceError: string | undefined;
     let semanticCandidateCount = 0;
@@ -945,6 +950,8 @@ export async function generateBrandPostImages(options: {
     const packageAssets = normalizePackageImageAssets(options.manifest);
     const replaceAssetKeys = new Set(targets.flatMap(target =>
       target.request.replaceAssetKey ? [target.request.replaceAssetKey] : []));
+    const existingOriginalBodyCount = packageAssets.filter(asset => asset.role === "body" && asset.sectionId &&
+      asset.provenance === "ORIGINAL" && asset.creationMethod === "source" && !replaceAssetKeys.has(asset.sha256)).length;
     const usedSourceHashes = new Set(getUsedShoppingProductSources(options.manifest, replaceAssetKeys)
       .map(record => record.sourceSha256));
     // A saved seller URL may download the exact bytes already bound elsewhere.
@@ -1017,7 +1024,8 @@ export async function generateBrandPostImages(options: {
     const directSources = [...directByHash.values()].sort((left, right) => left.sha256.localeCompare(right.sha256));
     semanticCandidateCount = directSources.length;
     const eligibleTargets = targets.flatMap((target, targetIndex) =>
-      target.role === "body" && (options.sourceOnly || !allowsShoppingReferenceScene(target)) ? [{ target, targetIndex }] : []);
+      target.role === "body" && ((!allowsShoppingReferenceScene(target)) || (options.sourceOnly && !isShoppingLifestyleImage(target))) && target.imageSource !== "seller-crop" &&
+        target.imageSource !== "editorial-card" && target.imageSource !== "none" ? [{ target, targetIndex }] : []);
     const reviewedByTarget = new Map<number, Awaited<ReturnType<typeof selectVerifiedProductSectionImages>>[number]>();
     if (directSources.length > 0 && eligibleTargets.length > 0) {
       try {
@@ -1084,6 +1092,11 @@ export async function generateBrandPostImages(options: {
     for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
       const target = targets[targetIndex];
       const index = requestIndexes[targetIndex];
+      if (target.imageSource === "seller-crop" || target.imageSource === "editorial-card" || target.imageSource === "none") {
+        await publish(index, { ...baseResult(index), sectionId: target.sectionId, imageIntent: target.imageIntent,
+          error: "SHOPPING_NATURAL_PHOTO_REQUIRED: 본문은 원본 사진 1장과 서로 다른 자연스러운 AI 장면만 사용합니다. 크롭·설명 카드·프레임으로 채우지 않습니다. 이미지 계획을 갱신하세요." });
+        continue;
+      }
       if (!options.sourceOnly && allowsShoppingReferenceScene(target)) {
         pendingTargets.push(target);
         pendingIndexes.push(index);
@@ -1093,11 +1106,16 @@ export async function generateBrandPostImages(options: {
           !(allowsOriginalShoppingScene(target) && reviewedByTarget.get(targetIndex)?.reviewClass === "scene-evidence" && !generatedRequired)) {
         if (options.sourceOnly) {
           await publish(index, { ...baseResult(index), sectionId: target.sectionId, imageIntent: target.imageIntent,
-            error: "IMAGE_GENERATION_REQUIRED: AI 연출 이미지 파트입니다. 검증 원본을 참조한 배경 생성이 필요하며 원본 연결만으로 완료하지 않습니다." });
+            error: "IMAGE_GENERATION_REQUIRED: AI 연출 이미지 파트입니다. 검증 원본을 참조한 자연스러운 단일 장면 생성이 필요하며 원본·크롭·카드로 채우지 않습니다." });
         } else {
           pendingTargets.push(target);
           pendingIndexes.push(index);
         }
+        continue;
+      }
+      if (existingOriginalBodyCount + sourceAssignedAssetHashes.size >= 1) {
+        await publish(index, { ...baseResult(index), sectionId: target.sectionId, imageIntent: target.imageIntent,
+          error: "SHOPPING_ORIGINAL_LIMIT: 본문 원본은 1장만 사용합니다. 추가 슬롯은 서로 다른 자연스러운 AI 장면으로 계획하세요." });
         continue;
       }
       const reviewed = reviewedByTarget.get(targetIndex);
@@ -1107,7 +1125,7 @@ export async function generateBrandPostImages(options: {
         imageIntent: target.imageIntent,
         imageSource: target.imageSource,
       });
-      const reviewClassAllowed = (reviewed?.reviewClass === "scene-evidence" && allowsOriginalShoppingScene(target)) || reviewed?.reviewClass === "feature-evidence" ||
+      const reviewClassAllowed = (reviewed?.reviewClass === "scene-evidence" && allowsOriginalShoppingScene(target)) ||
         (reviewed?.reviewClass === "product-photo" && genericAllowed);
       const ownsBoundSource = !directSource?.boundSectionId ||
         directSource.bindExistingAssetKey === target.request.replaceAssetKey;
@@ -1168,70 +1186,9 @@ export async function generateBrandPostImages(options: {
       return results;
     }
 
-    if (targets.length === 0 && failedFeatureTargets.length === 0) return results;
-    let sourcePalette = { fresh: [] as string[], reusable: [] as string[], verifiedCount: 0 };
-    try {
-      if (failedFeatureTargets.length > 0) {
-      sourcePalette = await existingShoppingSources(options.manifest, [...targets, ...failedFeatureTargets.map(failed => failed.target)], {
-        productName: options.productName,
-        sourceImageUrls: options.sourceImageUrls,
-      }, Math.max(1, targets.length + failedFeatureTargets.length));
-      }
-    }
-    catch (error) { sourceError = error instanceof Error ? error.message : String(error); }
-
-    // Information cards remain available only for evidence sections, never as a scene fallback.
-    const factCardDir = path.join(getBrandPostPackageDir(options.manifest.brandLinkId), "image-generation-work", "fact-cards");
-    const factCardFacts = options.manifest.sourceSnapshot
-      ? brandPostQualitySourceFromSnapshot(options.manifest.sourceSnapshot).sourceFeatures : [];
-    const usedCardFacts = new Set<string>();
-    let factCardCount = (options.manifest.imageAssets || [])
-      .filter(asset => asset.provenance === "EDITORIAL_CARD" && asset.creationMethod === "local-composite").length;
-    const publishFactCard = async (index: number, target: ResolvedImageTarget, sources: string[],
-      options_: { requireSectionFact?: boolean } = {}): Promise<boolean> => {
-      if (generatedRequired || sources.length === 0) return false;
-      try {
-        let outputPath: string;
-        if (target.role === "hero") {
-          const copy = buildProductThumbnailCopy(
-            options.manifest.title,
-            options.productName,
-            "SHOPPING",
-            options.manifest.productUnderstanding,
-          );
-          outputPath = (await createOriginalProductPhotoThumbnail({ sourcePath: sources[0], outputDir: factCardDir,
-            productName: copy.productNameLabel, headline: copy.headline, subline: copy.subline, style: "shopping-bold" })).outputPath;
-        } else {
-          if (factCardCount >= SHOPPING_FACT_CARD_LIMIT) return false;
-          const facts = selectShoppingFactCardFacts({ facts: factCardFacts, sectionText: `${target.sectionTitle}\n${target.bodyExcerpt}`, used: usedCardFacts });
-          if (facts.length < 2) return false;
-          // A feature section may only use a card whose facts are the ones its text discusses.
-          if (options_.requireSectionFact && countSectionMatchedFacts(facts, `${target.sectionTitle}\n${target.bodyExcerpt}`) === 0) return false;
-          outputPath = (await createShoppingFactCard({ sourcePath: sources[factCardCount % sources.length], title: target.sectionTitle,
-            facts, variant: factCardCount, outputDir: factCardDir })).outputPath;
-          facts.forEach(fact => usedCardFacts.add(fact));
-          factCardCount += 1;
-        }
-        await publish(index, { ...baseResult(index), sectionId: target.sectionId, imageIntent: target.imageIntent,
-          generatedPath: outputPath, provenance: "EDITORIAL_CARD", creationMethod: "local-composite", remoteGenerated: false });
-        return true;
-      } catch {
-        return false;
-      }
-    };
-    // Cards may reuse seller photos the post already shows: each card is a distinct output.
-    const packagePhotos = () => [...new Set([
-      ...normalizePackageImageAssets(options.manifest)
-        .filter(asset => asset.provenance === "ORIGINAL")
-        .map(asset => asset.sourcePath || asset.path),
-      readProductPhotoSource(options.manifest.heroImagePath)?.sourcePath || "",
-    ].filter(file => Boolean(file) && fs.existsSync(file)))];
-    const cardSources = (primary: string[]) => primary.length ? primary : packagePhotos();
-    // Feature sections without a matching seller photo: a card with the facts the section discusses.
-    for (const failed of failedFeatureTargets) {
-      const wholePhotos = cardSources([...sourcePalette.fresh, ...sourcePalette.reusable]);
-      if (!await publishFactCard(failed.index, failed.target, wholePhotos, { requireSectionFact: true })) await failFeatureTarget(failed);
-    }
+    // Missing matching photography stays missing. A fact card, framed seller
+    // photo or crop is never a substitute for a natural body scene.
+    for (const failed of failedFeatureTargets) await failFeatureTarget(failed);
     if (targets.length === 0) return results;
     for (let index = targets.length - 1; index >= 0; index -= 1) {
       try {
@@ -1250,7 +1207,7 @@ export async function generateBrandPostImages(options: {
   try {
     const workRoot = path.join(getBrandPostPackageDir(options.manifest.brandLinkId), "image-generation-work");
     fs.mkdirSync(workRoot, { recursive: true });
-    const workDir = path.join(workRoot, "resume-v1");
+    const workDir = resolveBrandPostImageBatchWorkDir(options.manifest.connectKind, workRoot);
     fs.mkdirSync(workDir, { recursive: true });
     const jobs = prepareImageBatchJobs(targets, options.manifest, options.productName, workDir);
     await runImageBatch(jobs, workDir, async (browserResult, targetIndex) => {
@@ -1271,8 +1228,8 @@ export async function generateBrandPostImages(options: {
           index,
         });
         result = { ...base, ...finished,
-          remoteGenerated: finished.provenance !== "ORIGINAL",
-          creationMethod: finished.provenance === "ORIGINAL" ? "local-composite"
+          remoteGenerated: finished.provenance !== "ORIGINAL" && finished.provenance !== "PHOTO_TEXT_THUMBNAIL",
+          creationMethod: finished.provenance === "ORIGINAL" || finished.provenance === "PHOTO_TEXT_THUMBNAIL" ? "local-composite"
             : options.manifest.connectKind === "SHOPPING" ? "reference-guided-scene" : "remote-generated",
           sourceReview: target.sourceReview,
         };
@@ -1456,8 +1413,8 @@ export async function applyExternalGeneratedBrandPostImage(
     provenance: finished.provenance,
     imageIntent: target.imageIntent,
     slotId: resolveBrandPostImageSlots(options.manifest, [target.request])[0].slotId,
-    remoteGenerated: finished.provenance !== "ORIGINAL",
-    creationMethod: finished.provenance === "ORIGINAL" ? "local-composite" : options.manifest.connectKind === "SHOPPING" ? "reference-guided-scene" : "remote-generated",
+    remoteGenerated: finished.provenance !== "ORIGINAL" && finished.provenance !== "PHOTO_TEXT_THUMBNAIL",
+    creationMethod: finished.provenance === "ORIGINAL" || finished.provenance === "PHOTO_TEXT_THUMBNAIL" ? "local-composite" : options.manifest.connectKind === "SHOPPING" ? "reference-guided-scene" : "remote-generated",
     referenceScene: finished.referenceScene,
   });
   const generatedResolved = path.resolve(finishedPath);

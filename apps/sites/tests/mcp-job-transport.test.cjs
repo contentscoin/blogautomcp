@@ -146,7 +146,7 @@ test('shopping scene tool requires ordered references; travel keeps its existing
   assert.equal((await (await replayRoute.handleMcpRequest(request, 'owner', 'mcp:write')).json()).result.structuredContent.reused, true, 'Reference order must survive schema validation and queue serialization.');
 });
 
-test('shopping scene apply requires PC 1.3.96 while travel and draft reading keep their prior versions', async () => {
+test('shopping natural-photo apply requires PC 1.3.97 while travel and draft reading keep their prior versions', async () => {
   let version = '1.3.95';
   const queued = [];
   const versionRoute = load('app/api/mcp/[credential]/route.ts', { ...mocks,
@@ -164,22 +164,22 @@ test('shopping scene apply requires PC 1.3.96 while travel and draft reading kee
   };
   const apply = { connectKind: 'shopping', productId: 'product-1', sectionId: 'scene', generatedImageUrl: 'https://example.test/result.png',
     referenceHashes: ['b'.repeat(64), 'a'.repeat(64)], idempotencyKey: 'version-scene-fixture' };
-  for (const outdated of ['1.3.95', null]) {
+  for (const outdated of ['1.3.95', '1.3.96', null]) {
     version = outdated;
     const rejected = await invoke('post_apply_section_image', apply);
     assert.equal(rejected.code, 'APP_UPDATE_REQUIRED');
-    assert.equal(rejected.required, '1.3.96');
+    assert.equal(rejected.required, '1.3.97');
     assert.equal(queued.length, 0, 'old PCs never receive the new scene contract');
   }
   version = '1.3.95';
   assert.equal((await invoke('agent_get_status', {})).capabilities.shoppingReferenceScenes.supported, false);
   assert.equal((await invoke('post_apply_section_image', { ...apply, connectKind: 'travel', referenceHashes: undefined })).status, 'QUEUED');
   assert.equal((await invoke('post_get_draft', { connectKind: 'shopping', draftId: 'approved-draft' })).status, 'QUEUED');
-  version = '1.3.96';
+  version = '1.3.97';
   assert.equal((await invoke('post_apply_section_image', apply)).status, 'QUEUED');
   assert.deepEqual(queued.at(-1).referenceHashes, apply.referenceHashes);
   const capabilities = (await invoke('agent_get_status', {})).capabilities;
-  assert.equal(capabilities.shoppingReferenceScenes.minimumAppVersion, '1.3.96');
+  assert.equal(capabilities.shoppingReferenceScenes.minimumAppVersion, '1.3.97');
   assert.equal(capabilities.shoppingReferenceScenes.supported, true);
 });
 
@@ -208,7 +208,7 @@ test('legacy shopping draft reads preserve approval and text but suppress obsole
       assert.deepEqual(projected.data.imageSlots[0].assets, saved.data.imageSlots[0].assets);
       assert.equal(projected.data.imageSlots[0].imagePrompt, null);
       assert.equal(projected.data.imageSlots[0].referenceReady, false);
-      assert.equal(projected.data.imageGenerationCompatibility.required, '1.3.96');
+      assert.equal(projected.data.imageGenerationCompatibility.required, '1.3.97');
       assert.match(projected.nextAction, /업데이트/u);
       assert.equal(storedResult, JSON.stringify(saved), 'a compatibility view never rewrites saved approval or content');
     }

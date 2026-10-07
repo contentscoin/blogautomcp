@@ -4,6 +4,29 @@ import sharp from "sharp";
 
 export const THUMBNAIL_V2_WIDTH = 1080;
 export const THUMBNAIL_V2_HEIGHT = 1080;
+export const SHOPPING_THUMBNAIL_MIN_FONT_SIZE = 132;
+export const SHOPPING_THUMBNAIL_MAX_FONT_SIZE = 170;
+export const SHOPPING_THUMBNAIL_LAYOUT_VERSION = "shopping-photo-headline/v1";
+
+/** Shopping thumbnails have one photographic scene and one short, prominent title. */
+export const SHOPPING_THUMBNAIL_LAYOUT_RULES = [
+  "- 1080 x 1080, 1:1 square Korean Naver blog thumbnail; one continuous full-bleed natural photograph.",
+  "- A YouTube-thumbnail-size Korean headline is the only added text: at most two lines, about 6-14 Korean characters, 132-170 px bold lettering on the 1080 px canvas. It must be immediately readable at BOTH 120 x 120 and 240 x 240 previews.",
+  "- Keep headline glyphs inside a safe zone 6% away from every edge. Place them in real negative space, with a restrained dark shadow/outline or soft photographic gradient for contrast.",
+  "- The product is large, sharp and naturally present in the same photograph, occupying roughly 55-75% of the frame height. Preserve its full silhouette, garment waistband and hems, packaging, proportions and identifying details.",
+  "- No editorial card, explanatory frame, white border, inset product photo, split panel, color-block layout, badge, bullet list, CTA button or floating mockup. Do not shrink the photograph to make room for text.",
+  "- Text and the product must both be prominent; use light and camera composition to find space, never cover distinguishing product features or fabricate claims.",
+] as const;
+
+export function normalizeShoppingThumbnailHeadline(text: string): string {
+  const cleaned = text.replace(/\s+/gu, " ").trim();
+  if (!cleaned) return "구매 전 확인";
+  const characters = Array.from(cleaned);
+  if (characters.length <= 14) return cleaned;
+  const candidate = characters.slice(0, 14).join("");
+  const lastSpace = candidate.lastIndexOf(" ");
+  return (lastSpace >= 6 ? candidate.slice(0, lastSpace) : candidate).trim();
+}
 
 export type ThumbnailV2Style =
   | "shopping-clean-editorial"
@@ -182,6 +205,7 @@ export async function buildThumbnailOverlayV2(options: {
   subjectSide?: "left" | "right" | "full";
   transparentBackground?: boolean;
 }): Promise<Buffer> {
+  if (options.style.startsWith("shopping-")) return buildShoppingPhotoHeadlineOverlay(options);
   const tokens = styleTokens(options.style);
   const isTravel = options.style.startsWith("travel-");
   const subjectSide = options.subjectSide || (isTravel ? "full" : "right");
@@ -221,21 +245,65 @@ export async function buildThumbnailOverlayV2(options: {
   return Buffer.from(`<svg width="${THUMBNAIL_V2_WIDTH}" height="${THUMBNAIL_V2_HEIGHT}" xmlns="http://www.w3.org/2000/svg"><defs><style>${embeddedFontCss()}</style>${shade}${readableShade}<filter id="textShadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="5" stdDeviation="7" flood-color="#000" flood-opacity=".26"/></filter></defs>${backgroundRect}${subjectGuide}${route}<rect x="${textBox.x}" y="${subjectSide === "full" ? 490 : 126}" width="86" height="8" rx="4" fill="${tokens.accent}"/><text x="${textBox.x}" y="${subjectSide === "full" ? 554 : 198}" font-family="${FONT_FAMILY}" font-size="${eyebrow.fontSize}" font-weight="800" fill="${tokens.eyebrow}" letter-spacing="1">${escapeXml(eyebrow.lines[0])}</text>${textElements}</svg>`);
 }
 
+export async function buildShoppingPhotoHeadlineOverlay(options: {
+  headline: string;
+  style?: ThumbnailV2Style;
+}): Promise<Buffer> {
+  const headline = normalizeShoppingThumbnailHeadline(options.headline);
+  const fitted = await fitThumbnailHeadline({
+    text: headline, maxWidth: 948, maxHeight: 398,
+    minFontSize: SHOPPING_THUMBNAIL_MIN_FONT_SIZE,
+    maxFontSize: SHOPPING_THUMBNAIL_MAX_FONT_SIZE,
+  });
+  const accent = options.style === "shopping-soft-lifestyle" ? "#fff2c2" : "#ffe75a";
+  const firstBaseline = 960 - (fitted.lines.length - 1) * fitted.lineHeight;
+  const words = fitted.lines.map((line, index) => `<text x="66" y="${firstBaseline + index * fitted.lineHeight}" font-family="${FONT_FAMILY}" font-size="${fitted.fontSize}" font-weight="900" fill="${index === fitted.lines.length - 1 ? accent : "#ffffff"}" stroke="#111827" stroke-opacity=".84" stroke-width="5" stroke-linejoin="round" paint-order="stroke fill">${escapeXml(line)}</text>`).join("");
+  return Buffer.from(`<svg width="1080" height="1080" xmlns="http://www.w3.org/2000/svg" data-layout="${SHOPPING_THUMBNAIL_LAYOUT_VERSION}" data-font-size="${fitted.fontSize}"><defs><style>${embeddedFontCss()}</style><linearGradient id="photoShade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#07111f" stop-opacity="0"/><stop offset=".45" stop-color="#07111f" stop-opacity="0"/><stop offset=".72" stop-color="#07111f" stop-opacity=".5"/><stop offset="1" stop-color="#07111f" stop-opacity=".76"/></linearGradient></defs><rect width="1080" height="1080" fill="url(#photoShade)"/>${words}</svg>`);
+}
+
+/** Preserve the complete photo; extend only its surroundings to fill a square. */
+export async function renderShoppingPhotoThumbnail(options: {
+  sourcePath: string;
+  outputPath: string;
+  headline: string;
+  style?: ThumbnailV2Style;
+}): Promise<void> {
+  const source = fs.readFileSync(options.sourcePath);
+  const metadata = await sharp(source).metadata();
+  const sourceRatio = (metadata.width || 0) / (metadata.height || 1);
+  if (!metadata.width || !metadata.height || sourceRatio < 0.55 || sourceRatio > 1.85) {
+    throw new Error("썸네일에는 긴 상세페이지나 가로 배너 대신 상품 전체가 크게 보이는 사진을 선택하세요.");
+  }
+  const { data: photo, info } = await sharp(source).rotate()
+    .resize(1080, 1080, { fit: "inside" }).png().toBuffer({ resolveWithObject: true });
+  const background = await sharp(source).rotate()
+    .resize(1080, 1080, { fit: "cover", position: "centre" }).blur(28).png().toBuffer();
+  const overlay = await buildShoppingPhotoHeadlineOverlay(options);
+  const bytes = await sharp(background).composite([
+    { input: photo, left: Math.floor((1080 - info.width) / 2), top: Math.floor((1080 - info.height) / 2) },
+    { input: overlay },
+  ]).png({ compressionLevel: 9 }).toBuffer();
+  fs.mkdirSync(path.dirname(options.outputPath), { recursive: true });
+  fs.writeFileSync(options.outputPath, bytes);
+}
+
 export async function generateThumbnailCropPreviews(
   sourcePath: string,
   outputDir: string,
-): Promise<{ square: string; fourThree: string; wide: string; tiny: string }> {
+): Promise<{ square: string; fourThree: string; wide: string; tiny: string; small: string }> {
   fs.mkdirSync(outputDir, { recursive: true });
   const stamp = Date.now();
   const square = path.join(outputDir, `thumbnail-preview-${stamp}-1x1.jpg`);
   const fourThree = path.join(outputDir, `thumbnail-preview-${stamp}-4x3.jpg`);
   const wide = path.join(outputDir, `thumbnail-preview-${stamp}-16x9.jpg`);
   const tiny = path.join(outputDir, `thumbnail-preview-${stamp}-120.jpg`);
+  const small = path.join(outputDir, `thumbnail-preview-${stamp}-240.jpg`);
   await Promise.all([
     sharp(sourcePath).resize(540, 540, { fit: "cover", position: "attention" }).jpeg({ quality: 88 }).toFile(square),
     sharp(sourcePath).resize(540, 405, { fit: "cover", position: "attention" }).jpeg({ quality: 88 }).toFile(fourThree),
     sharp(sourcePath).resize(540, 304, { fit: "cover", position: "attention" }).jpeg({ quality: 88 }).toFile(wide),
     sharp(sourcePath).resize(120, 120, { fit: "cover", position: "attention" }).jpeg({ quality: 86 }).toFile(tiny),
+    sharp(sourcePath).resize(240, 240, { fit: "cover", position: "attention" }).jpeg({ quality: 88 }).toFile(small),
   ]);
-  return { square, fourThree, wide, tiny };
+  return { square, fourThree, wide, tiny, small };
 }

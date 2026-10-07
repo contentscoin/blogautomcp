@@ -1,6 +1,6 @@
 import path from "node:path";
 
-/** Output file prefix of `createShoppingFactCard`; the audit uses it to label the slot. */
+/** Legacy output prefix retained only to detect and reject old body cards. */
 export const SHOPPING_FACT_CARD_FILE_PREFIX = "shopping-fact-card-";
 
 export function isShoppingFactCardPath(file: string): boolean {
@@ -8,8 +8,7 @@ export function isShoppingFactCardPath(file: string): boolean {
 }
 
 export const SHOPPING_FACT_CARD_AUDIT_RULE_EN = [
-  "A slot marked editorialFactCard=true is an information card: a whole seller photo in a white frame beside a short list of facts on a flat background.",
-  "Judge product identity from the framed photo only. The fact list is a summary, not an announcement, coupon, shipping or option notice, so do not reject it as a notice or text-only panel.",
-  "When the listed facts state the feature the section text claims, the card is feature-evidence (legible seller facts beside the real product); it need not show the feature in operation.",
-  "Do not require an actual usage scene for such a card. Reject it if the framed photo is the wrong product or mixed options, or if a listed fact contradicts the published section text.",
+  "A shopping body slot marked editorialFactCard=true is a forbidden legacy information card. Reject it even when its seller photograph and facts are accurate.",
+  "Shopping body images must be natural single-scene photographs. Reject explanatory frames around seller photos, captions burned into photos, fact lists, colored panels, cards, diagrams, collages, insets and presentation layouts.",
+  "Only the explicitly identified representative thumbnail may contain its large headline overlay. This exception never permits a text panel, thumbnail or old editorial card to fill a body-photo slot.",
 ].join(" ");
