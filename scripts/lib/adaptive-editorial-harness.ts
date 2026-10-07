@@ -1,3 +1,5 @@
+import { SHOPPING_POST_STRATEGY } from "../../src/lib/shopping-post-strategy";
+
 export type AdaptiveEditorialKind = "SHOPPING" | "TRAVEL";
 
 export interface AdaptiveEditorialProfile {
@@ -20,29 +22,26 @@ export const ADAPTIVE_EDITORIAL_PROFILES: Record<AdaptiveEditorialKind, Adaptive
     collectedAt: "2026-08-30",
     observedBodyChars: { p25: 1220, median: 1843, p75: 2398 },
     observedImages: { p25: 9, median: 15, p75: 21 },
-    sectionRange: { min: 5, preferred: 7, max: 10 },
+    sectionRange: { ...SHOPPING_POST_STRATEGY.sections },
     essentialDecisionLenses: [
-      "제품이 해결하려는 문제와 정확한 제품 정체",
-      "핵심 기능이 어떤 구조로 작동하고 무엇을 더 편하게 만드는지",
-      "설치·조작·충전·세척·보관을 포함한 구체적인 사용 방법",
-      "기능과 규격이 실제 사용 장면에서 주는 이점",
-      "실제 구매후기 원문이 있을 때 반복되는 좋은 점과 사용 맥락",
-      "제품 자체의 장점과 구조상 제약 또는 미확인 핵심 성능",
-      "잘 맞는 사용자·맞지 않는 사용자·대안 선택 기준",
-      "기능·사용성·한계를 종합한 조건부 최종 판단",
+      "독자가 겪는 생활 문제 또는 선택 기준과 정확한 상품 정체",
+      "선택 옵션에서 확인된 용량·수량·구성과 사용 대상",
+      "서로 다른 확인 특징이 어떤 구매 판단에 도움이 되는지, 판매자 설명과 실측·체험 근거의 차이",
+      "확인된 주의사항·사용기간·관리 조건에 맞춘 사용 계획; 없는 사용법이나 작동 원리를 만들지 않기",
+      "어떤 조건의 독자에게 맞는지와 구매 전 확인할 핵심 항목",
     ],
     optionalNarrativeMoves: [
-      "처음 개봉한 뒤 설치하고 사용하는 실제 순서",
-      "기존 제품 또는 대안 카테고리와의 비교",
+      "설명서로 확인되는 개봉·설치·사용 순서",
+      "근거가 있는 옵션 또는 대안 비교",
       "사용 빈도와 환경에 따른 기능 조합 추천",
-      "이미지에서 직접 확인되는 디테일 해석",
+      "수집된 후기 원문이나 검증된 체험 메모가 있을 때만 실제 사용 맥락",
     ],
     styleSignals: [
       "짧은 모바일 문단과 사진·설명의 교차 배치",
       "부드러운 요체와 근거가 보이는 조건부 판단",
       "제품명·카테고리 키워드는 제목과 초반에 자연스럽게 한 번씩",
       "정보 나열보다 사실이 독자에게 주는 의미를 설명",
-      "스펙을 말한 직후 실제 사용법과 체감 가능한 이점을 연결",
+      "확인된 특징을 선택 조건과 연결하되 사용감·효능을 추정하지 않기",
     ],
     avoidPatterns: [
       "고정된 소제목 수와 순서를 맞추기 위한 빈 문단",
@@ -51,6 +50,8 @@ export const ADAPTIVE_EDITORIAL_PROFILES: Record<AdaptiveEditorialKind, Adaptive
       "상품 설명에는·상세페이지에 적혀 있다는 문장을 반복하는 낭독형 전개",
       "후기 수·평점만 보고 실제 후기 내용을 만들어내는 문장",
       "검증되지 않은 직접 구매·사용 경험과 성능 수치",
+      "직접 써보지 않았다는 고백·검증 작업 보고·같은 미확인 안내를 절마다 반복",
+      "주어 없는 선동·근거 없는 고민 과장·모든 독자에게 필요한 것처럼 구매 압박",
       "키워드 반복·가격 나열·강추 문구 중심의 자동홍보형 전개",
     ],
   },
@@ -111,6 +112,10 @@ export function formatAdaptiveEditorialHarnessForPrompt(kind: AdaptiveEditorialK
     "- 먼저 상품 사실·이미지·미확인 정보를 분석한 뒤, 한 문장짜리 편집 논지를 스스로 정하세요.",
     `- 본문은 근거 밀도에 따라 대략 ${profile.sectionRange.min}~${profile.sectionRange.max}개 흐름으로 자유롭게 묶습니다. 정확한 개수·제목·순서는 강제하지 않습니다.`,
     `- 관측 분포 참고: 본문 ${profile.observedBodyChars.p25}~${profile.observedBodyChars.p75}자(중앙 ${profile.observedBodyChars.median}), 이미지 ${profile.observedImages.p25}~${profile.observedImages.p75}장(중앙 ${profile.observedImages.median}). 목표 할당량이 아니라 정보 밀도 점검용입니다.`,
+    ...(kind === "SHOPPING" ? [
+      `- 현재 쇼핑 전략 ${SHOPPING_POST_STRATEGY.version}: 글 중심 ${SHOPPING_POST_STRATEGY.sections.min}~${SHOPPING_POST_STRATEGY.sections.max}절, 이미지 ${SHOPPING_POST_STRATEGY.images.recommended}장 중심입니다. 과거 관측 이미지 수를 채우려고 슬롯이나 내용을 늘리지 않습니다.`,
+      "- 대표·구성·생활 맥락은 참조 연출 또는 원본으로, 기능·수치·비교 근거는 검증된 원본 구간이나 그 사실을 옮긴 자료 카드로 설명합니다. 연출 이미지는 효능·실측·실제 체험의 증거가 아닙니다.",
+    ] : []),
     "",
     "[반드시 답해야 할 독자 판단 질문 · 여러 질문을 한 섹션에 합쳐도 됨]",
     ...profile.essentialDecisionLenses.map((item) => `- ${item}`),

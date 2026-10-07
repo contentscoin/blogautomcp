@@ -15,6 +15,7 @@ export interface SavedTextQcMetadata {
   checkedAt: string;
   inputFingerprint: string;
   sourceSnapshotId: string;
+  strategyVersion?: string;
   sourceOrigin: "package" | "saved-context" | "legacy-post-spec";
 }
 export type RecheckIdentity = ProductSnapshotIdentity & { productName: string; brandLink: string };
@@ -276,7 +277,8 @@ export function revalidateSavedBrandPostText(manifest: BrandPostPackageManifestV
     textQualityRevalidation: {
       version: SAVED_TEXT_QC_VERSION, checkedAt: new Date().toISOString(), sourceOrigin: origin,
       sourceSnapshotId: snapshot.snapshotId,
-      inputFingerprint: createHash("sha256").update(JSON.stringify({ input, snapshotId: snapshot.snapshotId,
+      ...(manifest.composition.strategyVersion ? { strategyVersion: manifest.composition.strategyVersion } : {}),
+      inputFingerprint: createHash("sha256").update(JSON.stringify({ input, snapshotId: snapshot.snapshotId, strategyVersion: manifest.composition.strategyVersion || null,
         qualitySourceVersion: BRAND_POST_QUALITY_SOURCE_VERSION, qualitySourceFingerprint: qualitySource.fingerprint })).digest("hex"),
     },
   };

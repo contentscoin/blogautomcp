@@ -4,6 +4,7 @@ import {
   topicImageSourceLabel,
   type TopicImageSource,
 } from "../../scripts/lib/topic-templates";
+import { SHOPPING_POST_STRATEGY, type ShoppingPostStrategyVersion } from "./shopping-post-strategy";
 
 export type BrandConnectKind = "SHOPPING" | "TRAVEL";
 
@@ -40,6 +41,7 @@ export interface PostSectionContractV1 {
 
 export interface PostCompositionContractV1 {
   version: "post-composition-contract/v1";
+  strategyVersion?: ShoppingPostStrategyVersion;
   connectKind: BrandConnectKind;
   targetCharacters: { min: number; max: number };
   targetImages: { min: number; recommended: number; max: number };
@@ -62,6 +64,8 @@ export type PostRenderNode =
       sectionId: string | null;
       role: "thumbnail" | "hero" | "detail" | "scene" | "summary";
       altText: string;
+      /** System-owned visible image notice; never becomes factual section prose. */
+      caption?: string;
       layout: "single" | "sequence" | "collage-3";
       sourcePolicy: "LOCKED_PRODUCT_OR_ORIGINAL" | "TRAVEL_EDITORIAL";
     }
@@ -151,6 +155,7 @@ export interface ResolvedPostDocumentV1 {
   editorial?: import("../../scripts/lib/editorial-templates").EditorialSelection;
   version: "resolved-post-document/v1";
   contractVersion: "post-composition-contract/v1";
+  strategyVersion?: ShoppingPostStrategyVersion;
   connectKind: BrandConnectKind;
   qualityPreset: PostQualityPreset;
   experienceMode: PostExperienceMode;
@@ -432,10 +437,11 @@ const travelSections: PostSectionContractV1[] = [
 
 export const SHOPPING_POST_CONTRACT_V1: PostCompositionContractV1 = {
   version: "post-composition-contract/v1",
+  strategyVersion: SHOPPING_POST_STRATEGY.version,
   connectKind: "SHOPPING",
-  targetCharacters: { min: 1200, max: 2800 },
-  targetImages: { min: 5, recommended: 8, max: 14 },
-  targetSections: { min: 5, max: 10 },
+  targetCharacters: { ...SHOPPING_POST_STRATEGY.characters },
+  targetImages: { ...SHOPPING_POST_STRATEGY.images },
+  targetSections: { min: SHOPPING_POST_STRATEGY.sections.min, max: SHOPPING_POST_STRATEGY.sections.max },
   earlyConnectAfterSectionId: "shopping-summary",
   finalConnectBeforeDisclosure: true,
   sections: shoppingSections,
@@ -806,7 +812,15 @@ export function resolvePostDocument(options: {
     ? planIds[plan.findIndex((section) => section.earlyConnectCard)] ?? null
     : sections[Math.max(0, sectionContracts.findIndex(section => section.id === contract.earlyConnectAfterSectionId))]?.id;
 
-  const renderNodes: PostRenderNode[] = [];
+  const affiliateDisclosure: PostRenderNode = {
+    kind: "disclosure",
+    disclosureType: "affiliate",
+    placement: options.connectKind === "SHOPPING" ? SHOPPING_POST_STRATEGY.affiliateDisclosurePlacement : "bottom",
+    text: clean(disclosureSection || "") || (options.connectKind === "TRAVEL"
+      ? "이 글은 네이버 여행 커넥트 활동의 일환으로, 예약 발생 시 수수료를 제공받을 수 있습니다."
+      : "이 글은 네이버 쇼핑 커넥트 활동의 일환으로, 구매 발생 시 수수료를 제공받을 수 있습니다."),
+  };
+  const renderNodes: PostRenderNode[] = affiliateDisclosure.placement === "top" ? [affiliateDisclosure] : [];
   if (thumbnailPath) {
     renderNodes.push({
       kind: "image",
@@ -910,21 +924,13 @@ export function resolvePostDocument(options: {
     });
   }
   renderNodes.push({ kind: "hashtags", values: normalizeSystemHashtags(options.hashtags) });
-  renderNodes.push({
-    kind: "disclosure",
-    disclosureType: "affiliate",
-    placement: "bottom",
-    text:
-      clean(disclosureSection || "") ||
-      (options.connectKind === "TRAVEL"
-        ? "이 글은 네이버 여행 커넥트 활동의 일환으로, 예약 발생 시 수수료를 제공받을 수 있습니다."
-        : "이 글은 네이버 쇼핑 커넥트 활동의 일환으로, 구매 발생 시 수수료를 제공받을 수 있습니다."),
-  });
+  if (affiliateDisclosure.placement === "bottom") renderNodes.push(affiliateDisclosure);
 
   return {
     version: "resolved-post-document/v1",
     editorial: options.editorial,
     contractVersion: contract.version,
+    ...(contract.strategyVersion ? { strategyVersion: contract.strategyVersion } : {}),
     connectKind: options.connectKind,
     qualityPreset,
     experienceMode,

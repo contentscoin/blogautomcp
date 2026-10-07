@@ -267,11 +267,11 @@ async function main() {
     "이미지 배치 실행기는 spawn 전에 브라우저 자동화 게이트를 검사해야 합니다.",
   );
   assert.equal(
-    draftImageGenerationSource.includes("Generate the environment only") &&
-      draftImageGenerationSource.includes("createLockedProductEditorialScene") &&
+    draftImageGenerationSource.includes("reviewShoppingReferenceScene") &&
+      draftImageGenerationSource.includes("reference-guided-scene") &&
       draftImageGenerationSource.includes("do not invent a named hotel"),
     true,
-    "쇼핑은 상품을 다시 그리지 않고, 여행은 확인되지 않은 장소를 만들지 않아야 합니다.",
+    "쇼핑 연출은 상품 참조 대조 검토를 거치고, 여행은 확인되지 않은 장소를 만들지 않아야 합니다.",
   );
   assert.equal(
     dashboardSource.includes("섹션별 이미지 자동 생성") &&

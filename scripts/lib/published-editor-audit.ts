@@ -18,8 +18,10 @@ export function assertPublishedEditorText(document: ResolvedPostDocumentV1, actu
   if (!actual) throw new Error("EDITOR_CONTENT_MISSING: 발행 전 편집기 본문을 확인할 수 없습니다.");
   let cursor = 0;
   for (const node of document.renderNodes) {
-    if (node.kind !== "paragraph" && node.kind !== "disclosure" && node.kind !== "heading" && node.kind !== "quotation") continue;
-    const expected = compact(node.text);
+    const text = node.kind === "image" ? node.caption :
+      node.kind === "paragraph" || node.kind === "disclosure" || node.kind === "heading" || node.kind === "quotation" ? node.text : undefined;
+    if (!text) continue;
+    const expected = compact(text);
     if (!expected) continue;
     const found = actual.indexOf(expected, cursor);
     if (found < 0) throw new Error(`EDITOR_CONTENT_MISMATCH: 본문 누락 또는 순서 변경 (${node.kind})`);

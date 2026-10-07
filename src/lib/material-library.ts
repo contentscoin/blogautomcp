@@ -9,6 +9,7 @@ export function materialRevision(manifest: BrandPostPackageManifest): string {
   void _progress;
   hash.update(JSON.stringify(content));
   const files = new Set([manifest.markdownPath, manifest.heroImagePath, ...manifest.bodyImagePaths,
+    ...(manifest.imageAssets || []).flatMap(asset => asset.referenceScene?.referencePath ? [asset.referenceScene.referencePath] : []),
     ...(manifest.version === "brand-post-package/v2" ? manifest.composition.sections.flatMap(section => section.imagePaths) : [])]);
   for (const file of [...files].sort()) {
     hash.update(file || "missing-path");

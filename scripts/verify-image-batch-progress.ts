@@ -51,9 +51,17 @@ class FakeChild extends EventEmitter {
   kill() { this.kills += 1; return true; }
 }
 
-type Job = { id: string; outStem: string; prompt: string };
+const referenceSceneModule = load<typeof import("./lib/shopping-reference-scene")>("scripts/lib/shopping-reference-scene.ts", {
+  "node:crypto": crypto, "node:fs": fs,
+  "./codex-draft-provider": { runCodexDraft: () => { throw new Error("live review is forbidden in this offline harness"); } },
+  "./product-photo-review": { selectVerifiedProductPhotos: () => { throw new Error("live review is forbidden in this offline harness"); } },
+  "../../src/lib/brand-post-image-evidence": imageEvidence,
+});
+const hashFile = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+type Job = { id: string; outStem: string; prompt: string; referenceMode?: string; referenceImagePaths?: string[]; requiredReferenceHashes?: string[] };
 function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lockFails?: boolean; automation?: boolean; sourceMissing?: boolean; sourceError?: string;
   sourcePaths?: string[]; segmentablePaths?: string[]; lockedUsesBackground?: boolean;
+  referenceRejected?: boolean; sceneReviewError?: string;
   sectionMatchedPaths?: string[]; sectionReviewError?: string; reviewClass?: "feature-evidence" | "scene-evidence"; cardFacts?: string[]; cardMatches?: number;
   worker?: (args: string[], child: FakeChild) => void } = {}) {
   const packageDir = fs.mkdtempSync(path.join(root, "package-"));
@@ -115,6 +123,25 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       },
       "../../scripts/lib/product-thumbnail": { buildProductThumbnailCopy: () => ({}) },
       "../../scripts/lib/product-9canvas": product9Canvas,
+      "../../scripts/lib/shopping-reference-scene": {
+        SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION: imageEvidence.REFERENCE_SCENE_STRATEGY_VERSION,
+        buildShoppingReferenceScenePrompt: referenceSceneModule.buildShoppingReferenceScenePrompt,
+        selectShoppingSceneReference: async (options: { paths: string[] }) => {
+          const file = options.paths.find(candidate => fs.existsSync(candidate));
+          if (!file || settings.referenceRejected) throw new Error("PRODUCT_FRONT_REFERENCE_REQUIRED: no intact front reference");
+          return { path: file, sha256: hashFile(file), subject: "selected product", geometry: "intact front view", labels: "original label hierarchy", reviewedAt: "2026-10-07T00:00:00.000Z" };
+        },
+        reviewShoppingReferenceScene: async (options: { reference: { path: string; sha256: string }; outputPath: string; anchorSha256?: string }) => {
+          if (settings.sceneReviewError) throw new Error(settings.sceneReviewError);
+          assert.equal(hashFile(options.reference.path), options.reference.sha256, "review uses the original attached reference bytes");
+          assert.notEqual(hashFile(options.outputPath), options.reference.sha256, "a source copy is not a generated scene");
+          return { strategyVersion: imageEvidence.REFERENCE_SCENE_STRATEGY_VERSION,
+            referenceSha256: options.reference.sha256, referencePath: options.reference.path,
+            anchorSha256: options.anchorSha256, reviewStatus: "passed", reviewedOutputSha256: hashFile(options.outputPath),
+            reviewedAt: "2026-10-07T00:00:00.000Z", reason: "fixture visual fidelity review",
+            checks: Object.fromEntries(imageEvidence.REFERENCE_SCENE_REVIEW_CHECKS.map(key => [key, true])) };
+        },
+      },
       "../../scripts/lib/shopping-fact-card": {
         SHOPPING_FACT_CARD_LIMIT: 3,
         selectShoppingFactCardFacts: () => settings.cardFacts || [],
@@ -193,9 +220,15 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       "../../scripts/lib/photoreal/build": photorealBuild,
       // This harness covers the browser transport; the Codex transport has its own test (verify-codex-image-generation).
       "./codex-image-generation": {
+        assertProductImageReferences: (job: Job) => {
+          if (job.referenceMode !== "product") return;
+          assert.ok(job.referenceImagePaths?.length, "product jobs must attach actual references");
+          assert.equal(JSON.stringify(job.requiredReferenceHashes), JSON.stringify(job.referenceImagePaths?.map(hashFile)), "hashes bind the ordered attached reference bytes");
+        },
         resolveBrandPostImageEngine: () => "browser",
         existingJobResult: () => null,
         hasBrowserSubmission: () => false,
+        hasUnresolvedCodexSubmission: () => false,
         runCodexImageBatch: async () => { throw new Error("codex transport is not used by this harness"); },
       },
       "node:crypto": crypto,
@@ -205,6 +238,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
   );
   const manifest = {
     brandLinkId: "fixture", connectKind: "TRAVEL", title: "Fixture",
+    sourceSnapshot: { snapshotId: "fixture-snapshot", product: { name: "Fixture", features: [] } },
     composition: { renderNodes: [], sections: [{ id: "section", title: "제주", imageIntent: "해변", body: ["문맥"] }] },
     imageAssets: [{ sha256: "hero", role: "hero", path: sourcePath, provenance: "ORIGINAL" }],
   } as unknown as Parameters<typeof Generate>[0]["manifest"];
@@ -282,10 +316,17 @@ async function verifyGenerator() {
     assert.equal(h.jobs.length, 2);
     h.close(0, { ok: true, jobs: outputs.map((file, index) => h.result(index, file)) });
     const results = await pending;
-    assert.ok(results.every(result => result.remoteGenerated && result.creationMethod === "source-with-generated-background" && !result.error));
-    assert.deepEqual(h.lockedSourcePaths, [sourcePath, sourcePath]);
+    assert.ok(results.every(result => result.remoteGenerated && result.creationMethod === "reference-guided-scene" && result.provenance === "GENERATED_SCENE" && !result.error));
+    assert.equal(h.lockCalls, 0, "whole-scene edits must not claim pixel-locked compositing");
+    assert.ok(h.jobs.every(job => job.referenceMode === "product" && JSON.stringify(job.referenceImagePaths) === JSON.stringify([sourcePath])));
+    results.forEach(result => {
+      assert.equal(result.referenceScene?.referenceSha256, hashFile(sourcePath));
+      assert.equal(result.referenceScene?.sourceSnapshotId, "fixture-snapshot");
+      assert.equal(result.referenceScene?.reviewedOutputSha256, hashFile(result.generatedPath!));
+      assert.ok(imageEvidence.REFERENCE_SCENE_REVIEW_CHECKS.every(key => result.referenceScene?.checks?.[key] === true));
+    });
     assert.notEqual(results[0].generatedPath, results[1].generatedPath);
-    assert.ok(h.jobs.every(job => job.prompt.includes("Never depict operation")));
+    assert.ok(h.jobs.every(job => job.prompt.includes("No people, hands, operation")));
   });
   await check("source-only lifestyle requests report generation required, not source binding success", async () => {
     const h = harness({ sectionMatchedPaths: [sourcePath] });
@@ -774,10 +815,10 @@ async function verifyGenerator() {
     assert.ok(results.every(result => result.error?.includes("TRAVEL_SOURCE_ONLY_UNAVAILABLE")));
   });
 
-  await check("a section-matched original remains reusable as a safe cutout for later generated slots", async () => {
-    const outputs = Array.from({ length: 2 }, (_, index) => {
+  await check("a reviewed overview original remains the actual reference across distinct scene jobs", async () => {
+    const outputs = Array.from({ length: 3 }, (_, index) => {
       const file = path.join(root, `mixed-output-${index}.png`);
-      fs.writeFileSync(file, `mixed generated background ${index}`);
+      fs.writeFileSync(file, `mixed reference scene ${index}`);
       return file;
     });
     const h = harness({
@@ -794,18 +835,18 @@ async function verifyGenerator() {
       sectionId: "section",
     })) });
     await tick();
-    assert.equal(h.jobs.length, 2, "one reviewed original fills one slot and only two backgrounds are requested");
+    assert.equal(h.jobs.length, 3, "scene generation keeps each requested slot as a distinct generation job");
     h.close(0, { ok: true, jobs: outputs.map((file, index) => h.result(index, file)) });
     const results = await pending;
-    assert.equal(results.filter(result => result.provenance === "ORIGINAL").length, 1);
-    assert.equal(results.filter(result => result.provenance === "LOCKED_PRODUCT").length, 2);
-    assert.deepEqual(h.lockedSourcePaths, [sourcePath, sourcePath]);
+    assert.equal(results.filter(result => result.provenance === "GENERATED_SCENE" && !result.error).length, 3);
+    assert.ok(h.jobs.every(job => JSON.stringify(job.referenceImagePaths) === JSON.stringify([sourcePath])));
+    assert.equal(h.lockCalls, 0);
   });
 
   await check("one overview product source completes three generated overview slots with distinct outputs", async () => {
     const outputs = Array.from({ length: 3 }, (_, index) => {
       const file = path.join(root, `scarce-output-${index}.png`);
-      fs.writeFileSync(file, `distinct generated background ${index}`);
+      fs.writeFileSync(file, `distinct reference scene ${index}`);
       return file;
     });
     const h = harness({
@@ -827,13 +868,14 @@ async function verifyGenerator() {
     h.close(0, { ok: true, jobs: outputs.map((file, index) => h.result(index, file)) });
     const results = await pending;
     assert.equal(JSON.stringify(results.map(result => result.generatedPath)), JSON.stringify(outputs));
-    assert.ok(results.every(result => result.provenance === "LOCKED_PRODUCT" && !result.error));
-    assert.deepEqual(h.lockedSourcePaths, [sourcePath, sourcePath, sourcePath], "safe cutout is reused only after distinct slot jobs finish");
+    assert.ok(results.every(result => result.provenance === "GENERATED_SCENE" && !result.error));
+    assert.equal(h.lockCalls, 0);
+    assert.ok(h.jobs.every(job => JSON.stringify(job.requiredReferenceHashes) === JSON.stringify([hashFile(sourcePath)])), "each distinct scene job binds the same verified original");
     assert.equal(new Set(h.jobs.map(job => job.outStem)).size, 3, "slot identity keeps reused-source outputs distinct");
   });
 
-  await check("no separable cutout: verified whole photos become local fact cards, never generated scenes", async () => {
-    const h = harness({ lockFails: true, cardFacts: ["용량: 4.5L", "가열식 살균 방식"] });
+  await check("missing intact front reference blocks scenes without falling back to fact cards", async () => {
+    const h = harness({ referenceRejected: true, cardFacts: ["용량: 4.5L", "가열식 살균 방식"] });
     h.manifest.connectKind = "SHOPPING";
     h.manifest.imageRequirements = { policy: "verified-source-first" };
     h.manifest.composition.sections[0].title = "어떤 제품인지부터 보면";
@@ -841,45 +883,49 @@ async function verifyGenerator() {
     const results = await h.generate(0, { requests: [
       { requestId: "body", sectionId: "section" }, { requestId: "hero", replaceAssetKey: "hero" },
     ] });
-    assert.equal(h.spawns, 0, "no background generation is started");
-    assert.ok(results.every(result => !result.error && result.provenance === "EDITORIAL_CARD" &&
-      result.creationMethod === "local-composite" && result.remoteGenerated === false), JSON.stringify(results));
-    const noFacts = harness({ lockFails: true });
+    assert.equal(h.spawns, 0, "no generation is started without an intact reference");
+    assert.ok(results.every(result => result.error?.includes("PRODUCT_FRONT_REFERENCE_REQUIRED") && !result.generatedPath && result.provenance !== "EDITORIAL_CARD"), JSON.stringify(results));
+    const noFacts = harness({ referenceRejected: true });
     noFacts.manifest.connectKind = "SHOPPING";
     noFacts.manifest.imageRequirements = { policy: "verified-source-first" };
     noFacts.manifest.composition.sections[0].title = "어떤 제품인지부터 보면";
     noFacts.manifest.composition.sections[0].imageIntent = "제품 전체 모습과 구성을 한눈에 보여주는 이미지";
     const [body] = await noFacts.generate(0, { requests: [{ requestId: "body", sectionId: "section" }] });
-    assert.match(body.error || "", /PRODUCT_CUTOUT_REQUIRED/u, "without two verified facts the original error stays");
+    assert.match(body.error || "", /PRODUCT_FRONT_REFERENCE_REQUIRED/u, "the same reference gate applies without facts");
   });
 
-  for (const lockFails of [false, true]) {
-    await check(`shopping never overlays a full-frame source (lockFails=${lockFails})`, async () => {
-      const h = harness({ lockFails, sectionMatchedPaths: [sourcePath] });
+  for (const sceneReviewError of [undefined, "REFERENCE_SCENE_REVIEW_FAILED: distorted geometry"]) {
+    await check(`shopping scene review fails closed without cutout or card fallback (reviewFails=${Boolean(sceneReviewError)})`, async () => {
+      const h = harness({ lockFails: true, sceneReviewError, sectionMatchedPaths: [sourcePath], cardFacts: ["용량: 4.5L", "가열식 살균 방식"] });
       h.manifest.connectKind = "SHOPPING";
       h.manifest.imageRequirements = { policy: "generated-required" };
+      h.manifest.composition.sections[0].title = "어떤 제품인지부터 보면";
+      h.manifest.composition.sections[0].imageIntent = "제품 전체 모습과 구성을 한눈에 보여주는 이미지";
+      const outputs = Array.from({ length: 2 }, (_, index) => {
+        const file = path.join(root, `scene-review-${Boolean(sceneReviewError)}-${index}.png`);
+        fs.writeFileSync(file, `scene review output ${Boolean(sceneReviewError)} ${index}`);
+        return file;
+      });
       const pending = h.generate(0, { requests: [
         { requestId: "body", sectionId: "section" }, { requestId: "hero", replaceAssetKey: "hero" },
       ] });
       await tick(); // Shopping source preflight finishes before the worker is spawned.
-      if (lockFails) {
-        const results = await pending;
-        assert.equal(h.spawns, 0);
-        assert.ok(results.every(result => result.error?.includes("PRODUCT_CUTOUT_REQUIRED")));
-        return;
-      }
-      h.progress(0);
+      assert.equal(h.jobs.length, 2);
+      h.child.stderr.write(`${prefix}${JSON.stringify(h.result(0, outputs[0]))}\n`);
       await tick();
-      assert.equal(h.callbacks[0].generatedPath, sourcePath);
-      h.close(0, { ok: true, jobs: [h.result(0), h.result(1)] });
+      assert.equal(h.callbacks[0].generatedPath, sceneReviewError ? null : outputs[0]);
+      h.close(0, { ok: true, jobs: outputs.map((file, index) => h.result(index, file)) });
       const results = await pending;
-      assert.equal(h.lockCalls, 2);
+      assert.equal(h.lockCalls, 0, "no source cutout/composition participates in reference-guided scenes");
       results.forEach((r, index) => {
-        assert.equal(r.generatedPath, sourcePath);
-        assert.equal(r.error, undefined);
-        assert.equal(r.provenance, "LOCKED_PRODUCT");
+        assert.equal(r.generatedPath, sceneReviewError ? null : outputs[index]);
+        assert.equal(r.error, sceneReviewError);
+        assert.equal(r.provenance, "GENERATED_SCENE");
+        assert.equal(r.referenceScene?.reviewStatus, sceneReviewError ? undefined : "passed", "failed review must not retain approval evidence");
       });
-      assert.match(h.jobs[0].prompt, /Generate the environment only/);
+      assert.match(h.jobs[0].prompt, /product scene using the attached seller reference/);
+      assert.doesNotMatch(h.jobs[0].prompt, /Generate the environment only/);
+      assert.ok(h.jobs.every(job => JSON.stringify(job.referenceImagePaths) === JSON.stringify([sourcePath])));
     });
   }
 

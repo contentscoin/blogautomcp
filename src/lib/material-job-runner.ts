@@ -66,19 +66,11 @@ export async function runMaterialJob(job: MaterialJob, deps = {
           throw Object.assign(new Error("선택 후 소재가 변경되었습니다. 최신 소재를 다시 선택하세요."), { code: "MATERIAL_CHANGED" });
         }
         if (!selected.ready) {
-          item.stage = "발행 전 품질 원인 확인 · 자동 복구";
-          deps.save(job);
-          await runMaterialPreparation(item.productId, workflow);
-          const repaired = deps.material(item.productId);
-          if (!repaired?.ready) {
-            throw Object.assign(new Error(repaired?.blockers.join(" ") || "발행 전 자동 복구 후에도 소재 검증을 통과하지 못했습니다."), {
-              code: "MATERIAL_NOT_READY",
-            });
-          }
-          // The bounded repair transaction intentionally creates a new content
-          // revision. Continue only with that exact verified revision.
-          item.revision = repaired.revision;
-          deps.save(job);
+          // Selected publication is immutable. Preparation may change text, assets
+          // and approval; a publish job must never adopt that new revision silently.
+          throw Object.assign(new Error(`선택한 소재는 다시 검토해야 합니다. 소재 준비에서 검사를 완료한 뒤 다시 선택하세요. ${selected.blockers.join(" ")}`), {
+            code: "MATERIAL_NOT_READY",
+          });
         }
         const result = await runAutomaticDraftWorkflow(item.productId, {
           publishMode: job.publishMode!, scheduledDate: item.scheduledDate, materialRevision: item.revision,
@@ -93,7 +85,7 @@ export async function runMaterialJob(job: MaterialJob, deps = {
       item.status = submissionRequested && !definitiveFailure ? "outcome_unknown" : "failed";
       item.error = materialJobErrorMessage(error);
       Object.assign(item, failureCodes);
-      item.stage = item.status === "outcome_unknown" ? "발행 결과 확인 필요 · 자동 재시도 중지" : "확인 필요";
+      item.stage = item.status === "outcome_unknown" ? "발행 결과 확인 필요 · 자동 재시도 중지" : code === "MATERIAL_NOT_READY" || code === "MATERIAL_CHANGED" ? "소재 준비·검토에서 다시 선택 필요" : "확인 필요";
       if (code === "PREPARATION_RESULT_UNCERTAIN") {
         item.status = "interrupted"; item.stage = "소재 준비 결과 확인 필요 · 다음 상품 중지"; stopped = true;
       }

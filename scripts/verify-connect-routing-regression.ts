@@ -24,8 +24,14 @@ assert.equal(hasConditionalProductVerdict(['모든 제품은 좋습니다. 확�
 assert.equal(hasConditionalProductVerdict(['사람에게 배송됩니다. 선택은 자유입니다.']), false);
 for (const kind of ['SHOPPING', 'TRAVEL'] as const) {
   const prompt = buildBrandPostImagePrompt({ connectKind: kind, productName: '대상', sectionTitle: '핵심', imageIntent: 'watercolor illustration', role: 'body' });
-  assert.ok(prompt.includes('Photographic style is mandatory'));
-  assert.ok(prompt.includes('never a style override'));
+  if (kind === 'SHOPPING') {
+    assert.ok(prompt.includes('photorealistic editorial product scene'));
+    assert.ok(prompt.includes('reference must be attached before generation'));
+    assert.ok(prompt.includes('No CGI/plastic render appearance, watercolor, vector art'));
+  } else {
+    assert.ok(prompt.includes('Photographic style is mandatory'));
+    assert.ok(prompt.includes('never a style override'));
+  }
 }
 const ui = fs.readFileSync('src/app/page.tsx', 'utf8');
 const selection = ui.slice(ui.indexOf('const selectBrandConnectKind'), ui.indexOf('const fetchLinks'));
@@ -35,6 +41,7 @@ const route = fs.readFileSync('src/app/api/brandlinks/bulk-seasonal/route.ts', '
 assert.ok(route.includes('const categoryUrl = contract.configuredUrl'));
 const imageSource = fs.readFileSync('src/lib/brand-post-image-generation.ts', 'utf8');
 assert.ok(!imageSource.includes('createOriginalProductPhotoOnBackground'), 'unsegmented full-frame photos must not be composited as a product cutout');
-assert.ok(imageSource.includes('createLockedProductEditorialScene'));
-assert.ok(imageSource.includes('provenance: "EDITORIAL_CARD"'), 'whole-photo fallback must not claim segmented product provenance');
-console.log('PASS: connect routing, switch race, natural verdict and photographic prompts/fallback');
+assert.ok(imageSource.includes('prepareBrandPostImageReferenceContext'));
+assert.ok(imageSource.includes('reviewShoppingReferenceScene'), 'product scenes must compare the reference and generated pixels');
+assert.ok(imageSource.includes('provenance: "EDITORIAL_CARD"'), 'feature fact cards must not claim segmented product provenance');
+console.log('PASS: connect routing, switch race, natural verdict and reference-photo/evidence boundaries');

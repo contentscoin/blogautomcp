@@ -97,8 +97,11 @@ async function main() {
       pause: async () => {},
       checkCancelled: () => {},
     });
-    assert.equal(selfHealing.items[0].status, "published");
-    assert.equal(submittedRevision, "b".repeat(64), "a bounded pre-publication repair must submit the newly verified revision");
+    assert.equal(selfHealing.items[0].status, "failed");
+    assert.equal(healed, false, "publishing a selected material must not repair or approve a different revision");
+    assert.equal(submittedRevision, "", "an unready selected revision must never be submitted");
+    assert.equal(selfHealing.items[0].revision, revision, "the selected revision remains unchanged for review");
+    assert.equal(selfHealing.items[0].errorCode, "MATERIAL_NOT_READY");
 
     for (const unready of [null, { approvedAt: null }, { approvedAt: "yes", imageSlots: [{ missing: 1, generationMissing: 0 }] }, { approvedAt: "yes", approval: { canApprove: false } }]) {
       let submitted = 0;

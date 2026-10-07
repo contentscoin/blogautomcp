@@ -23,7 +23,8 @@ export async function validateBrandPostPublishImages(id: string, productName?: s
         (Array.isArray(product.features) ? product.features : []).filter((value): value is string => typeof value === "string"),
         manifest.productUnderstanding,
       ),
-      composition: normalizePublishedPostText(manifest.composition), ...options });
+      composition: normalizePublishedPostText(manifest.composition), imageAssets: manifest.imageAssets,
+      sourceSnapshotId: manifest.sourceSnapshot?.snapshotId, ...options });
     lock.assertOwner();
     const current = readBrandPostPackage(id, { migrate: false });
     if (!current || materialRevision(current) !== revision)

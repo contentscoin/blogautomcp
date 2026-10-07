@@ -5,10 +5,12 @@ import {
   TRAVEL_POST_CONTRACT_V1,
   normalizeLegacyFreeformImageRules,
   normalizeLegacyPostImageIntents,
+  normalizePublishedPostText,
   refreshPostDocumentQuality,
   resolvePostDocument,
   type ResolvedPostDocumentV1,
 } from "../src/lib/post-composition-contract";
+import { SHOPPING_POST_STRATEGY } from "../src/lib/shopping-post-strategy";
 
 function buildSections(prefix: string, count: number, paragraphLength: number): string[] {
   return Array.from({ length: count }, (_, index) => {
@@ -41,9 +43,14 @@ const shopping = resolvePostDocument({
 assert.equal(shopping.sections.length, SHOPPING_POST_CONTRACT_V1.sections.length);
 assert.equal(shopping.renderNodes.filter((node) => node.kind === "connectCard").length, 2);
 assert.equal(shopping.renderNodes.filter((node) => node.kind === "image").length, shoppingImages.length);
-assert.notEqual(shopping.renderNodes[0].kind, "disclosure");
-assert.equal(shopping.renderNodes.at(-2)?.kind, "hashtags");
-assert.equal(shopping.renderNodes.at(-1)?.kind, "disclosure");
+assert.equal(shopping.renderNodes[0].kind, "disclosure");
+assert.ok(shopping.renderNodes[0].kind === "disclosure" && shopping.renderNodes[0].placement === "top");
+assert.equal(shopping.renderNodes.at(-1)?.kind, "hashtags");
+assert.equal(shopping.renderNodes.filter(node => node.kind === "disclosure").length, 1);
+assert.equal(shopping.strategyVersion, SHOPPING_POST_STRATEGY.version);
+assert.equal(normalizePublishedPostText(shopping).strategyVersion, shopping.strategyVersion);
+assert.equal(normalizeLegacyFreeformImageRules(shopping).strategyVersion, shopping.strategyVersion);
+assert.equal(refreshPostDocumentQuality(shopping).strategyVersion, shopping.strategyVersion);
 assert.equal(
   shopping.renderNodes.filter((node) => node.kind === "disclosure" && node.disclosureType === "ai").length,
   0,
@@ -54,7 +61,8 @@ assert.equal(
   0,
   "네이버 에디터에 빈 인용구가 생기지 않도록 모든 소제목은 heading 노드여야 합니다.",
 );
-assert.deepEqual(SHOPPING_POST_CONTRACT_V1.targetImages, { min: 5, recommended: 8, max: 14 });
+assert.deepEqual(SHOPPING_POST_CONTRACT_V1.targetImages, { min: 5, recommended: 5, max: 14 });
+assert.deepEqual(SHOPPING_POST_CONTRACT_V1.targetSections, { min: 5, max: 8 });
 const shoppingPackageRole = SHOPPING_POST_CONTRACT_V1.sections.find(section => section.id === "shopping-package")!;
 const shoppingDesignRole = SHOPPING_POST_CONTRACT_V1.sections.find(section => section.id === "shopping-design")!;
 assert.match(shoppingPackageRole.image.intent, /핵심 기능·작동 방식·조작부/u);
@@ -132,6 +140,8 @@ assert.equal(travel.qualityReport.actual.images, 20);
 assert.equal(travel.qualityReport.canAutoPublish, true);
 assert.equal(travel.renderNodes.filter((node) => node.kind === "quotation").length, 0);
 assert.deepEqual(TRAVEL_POST_CONTRACT_V1.targetImages, { min: 7, recommended: 10, max: 18 });
+assert.equal(travel.strategyVersion, undefined, "Shopping strategy does not relabel travel documents");
+assert.ok(travel.renderNodes.at(-1)?.kind === "disclosure", "Travel disclosure order is unchanged");
 assert.ok(
   !travel.renderNodes.some(
     (node) => node.kind === "image" && node.layout === "collage-3",
@@ -139,6 +149,30 @@ assert.ok(
   "자유형 섹션에는 위치 기반 하이라이트 콜라주를 강제하지 않습니다.",
 );
 assert.ok(travel.renderNodes.some((node) => node.kind === "image" && node.layout === "sequence"));
+
+// Six natural sections with five reviewed image placements must not fan out
+// into extra sections or image jobs just to match a historical image median.
+const conciseSections = buildSections("구매 판단", 6, 8);
+const conciseImages = shoppingImages.slice(0, 5);
+const conciseShopping = resolvePostDocument({
+  connectKind: "SHOPPING", title: "확인한 구성으로 고르는 생활용품",
+  sections: conciseSections, hashtags: ["생활용품", "구성비교", "선택기준"],
+  imagePaths: conciseImages, sectionImageBindings: reviewedBindings("SHOPPING", conciseSections, conciseImages),
+  connectUrl: "https://brandconnect.naver.com/concise-fixture", qualityPreset: "PREMIUM",
+});
+assert.equal(conciseShopping.sections.length, 6);
+assert.equal(conciseShopping.qualityReport.actual.images, 5);
+assert.equal(conciseShopping.qualityReport.target.images.recommended, 5);
+assert.equal(conciseShopping.qualityReport.imageCoverage.missingSectionIds.length, 0);
+assert.equal(conciseShopping.qualityReport.canAutoPublish, true);
+assert.equal(conciseShopping.renderNodes.filter(node => node.kind === "connectCard").length, 2);
+const conciseInsufficientImages = resolvePostDocument({
+  connectKind: "SHOPPING", title: conciseShopping.title, sections: conciseSections, hashtags: ["생활용품", "선택기준"],
+  imagePaths: conciseImages.slice(0, 4),
+  sectionImageBindings: reviewedBindings("SHOPPING", conciseSections, conciseImages.slice(0, 4)),
+  connectUrl: "https://brandconnect.naver.com/concise-fixture", qualityPreset: "PREMIUM",
+});
+assert.equal(conciseInsufficientImages.qualityReport.canAutoPublish, false, "Five-image default does not waive evidence slots");
 
 assert.equal(
   shopping.title,

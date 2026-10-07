@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 import path from "node:path";
+import { classifyBrandPostImageEvidence, isReferenceGuidedScene, REFERENCE_SCENE_CAPTION } from "./brand-post-image-evidence";
+import { brandPostReferenceSceneIssue } from "./brand-post-package";
 import { refreshPostDocumentQuality, type PostRenderNode, type ResolvedPostSectionV1 } from "./post-composition-contract";
 import type {
   BrandPostPackageImageAsset,
@@ -38,6 +40,7 @@ function imageNodeFor(
   ordinal: number,
   previousNodes: PostRenderNode[],
   sourcePolicy: BrandPostPackageManifestV2["imagePolicy"],
+  caption?: string,
 ): Extract<PostRenderNode, { kind: "image" }> {
   const previous = previousNodes.find(node => node.kind === "image" && path.resolve(node.assetPath) === path.resolve(assetPath));
   return {
@@ -50,6 +53,7 @@ function imageNodeFor(
     altText: `${section.title} - ${section.imageIntent}`,
     layout: section.imagePaths.length > 1 ? "sequence" : "single",
     sourcePolicy,
+    ...(caption ? { caption } : {}),
   };
 }
 
@@ -75,7 +79,12 @@ export function reconcileBrandPostImageContinuity(
   };
   const hasAsset = (asset: BrandPostPackageImageAsset) => chosenAssets.has(assetIdentity(asset));
   const previousHero = previousAssets.get(path.resolve(previous.heroImagePath));
-  if (previousHero) chooseAsset(previousHero);
+  const sameProductFacts = previous.sourceSnapshot?.snapshotId === next.sourceSnapshot?.snapshotId;
+  const reusableScene = (asset: BrandPostPackageImageAsset) => !isReferenceGuidedScene(asset) ||
+    (sameProductFacts && brandPostReferenceSceneIssue(next, asset) === null);
+  const preservePreviousHero = previousHero && reusableScene(previousHero);
+  const selectedHero = preservePreviousHero ? previousHero : nextAssets.get(path.resolve(next.heroImagePath)) || previousHero;
+  if (selectedHero) chooseAsset(selectedHero);
 
   const sectionMatches = next.composition.sections.map((section, index) => {
     const byId = previous.composition.sections.find(candidate => candidate.id === section.id);
@@ -103,7 +112,10 @@ export function reconcileBrandPostImageContinuity(
       // changed. A truly new reviewed image remains eligible.
       return !allPreviousPaths.has(resolved);
     });
-    const imagePaths = uniquePaths(sameIntent ? prior.imagePaths : nextPaths);
+    const imagePaths = uniquePaths(sameIntent ? prior.imagePaths.filter(file => {
+      const asset = previousAssets.get(path.resolve(file));
+      return !asset || reusableScene(asset);
+    }) : nextPaths);
     for (const imagePath of imagePaths) {
       const resolved = path.resolve(imagePath);
       const asset = previousAssets.get(resolved) || nextAssets.get(resolved);
@@ -127,16 +139,17 @@ export function reconcileBrandPostImageContinuity(
     }
   }
 
-  const heroImagePath = previousHero ? previous.heroImagePath : next.heroImagePath;
+  const heroImagePath = preservePreviousHero ? previous.heroImagePath : next.heroImagePath;
   const baseNodes = next.composition.renderNodes.flatMap((node): PostRenderNode[] => {
     if (node.kind !== "image") return [node];
     if (node.sectionId !== null) return [];
-    return [{ ...node, assetPath: heroImagePath }];
+    return [{ ...node, assetPath: heroImagePath, caption: selectedHero && isReferenceGuidedScene(selectedHero) ? REFERENCE_SCENE_CAPTION : undefined }];
   });
   const renderNodes = [...baseNodes];
   for (const section of sections) {
     const nodes = section.imagePaths.map((assetPath, index) =>
-      imageNodeFor(section, assetPath, index, previous.composition.renderNodes, next.imagePolicy));
+      imageNodeFor(section, assetPath, index, previous.composition.renderNodes, next.imagePolicy,
+        isReferenceGuidedScene(previousAssets.get(path.resolve(assetPath)) || nextAssets.get(path.resolve(assetPath)) || {}) ? REFERENCE_SCENE_CAPTION : undefined));
     if (!nodes.length) continue;
     let insertAt = -1;
     renderNodes.forEach((node, index) => {
@@ -164,12 +177,13 @@ export function reconcileBrandPostImageContinuity(
       brandPostVisualIntentFingerprint(section.imageIntent);
   });
   let imageGeneration = previous.imageGeneration;
-  if (imageGeneration && !allVisualIntentsPreserved) {
+  const slotCoverageChanged = sections.some((section, index) => section.imagePaths.length !== sectionMatches[index]?.imagePaths.length);
+  if (imageGeneration && (!allVisualIntentsPreserved || !sameProductFacts || slotCoverageChanged)) {
     const generatedRequired = (previous.imageRequirements || next.imageRequirements)?.policy === "generated-required";
-    const generatedPaths = new Set(imageAssets.filter(asset =>
-      asset.remoteGenerated === true || asset.creationMethod === "remote-generated" ||
-      asset.creationMethod === "source-with-generated-background",
-    ).map(asset => path.resolve(asset.path)));
+    const generatedPaths = new Set(imageAssets.filter(asset => {
+      const evidence = classifyBrandPostImageEvidence(asset);
+      return evidence.coherent && evidence.generated && reusableScene(asset);
+    }).map(asset => path.resolve(asset.path)));
     const requested = generatedRequired
       ? sections.reduce((sum, section) => sum + Math.max(0, section.imageMin || 0), 0)
       : imageGeneration.requested;

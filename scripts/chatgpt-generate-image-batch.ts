@@ -26,6 +26,8 @@ interface BatchJob {
   prompt: string;
   outStem: string;
   referenceImagePaths?: string[];
+  referenceMode?: "product";
+  requiredReferenceHashes?: string[];
 }
 
 interface CliArgs {
@@ -179,8 +181,11 @@ const CHATGPT_PLUS_BUTTON_SELECTORS = [
   'button[aria-label*="Attach"]',
 ];
 
-async function attachReferenceImages(page: import("playwright").Page, paths: string[]) {
+async function attachReferenceImages(page: import("playwright").Page, paths: string[], requiredHashes?: string[]) {
   const references = paths.filter((value) => value && fs.existsSync(value)).slice(0, 3);
+  if (requiredHashes && (references.length === 0 || references.length !== paths.length || references.length !== requiredHashes.length ||
+    references.some((file, index) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== requiredHashes[index])))
+    throw new Error("PRODUCT_REFERENCE_CHANGED: 검증된 상품 참조를 모두 첨부할 수 없습니다.");
   if (references.length === 0) return;
   let input = page.locator(CHATGPT_IMAGE_INPUT_SELECTORS.join(", ")).first();
   if (!(await input.count())) {
@@ -317,7 +322,7 @@ async function runJob(
       await openFreshChatGPTTarget(page, gptUrl, "주제 이미지 생성 GPT");
       await trace("navigation-complete");
 
-      await attachReferenceImages(page, job.referenceImagePaths || []);
+      await attachReferenceImages(page, job.referenceImagePaths || [], job.referenceMode === "product" ? job.requiredReferenceHashes || [] : undefined);
       await trace("references-ready");
       await trace("before-submit");
       const previousUserMessages = (await imagePageSignals(page)).userMessages;

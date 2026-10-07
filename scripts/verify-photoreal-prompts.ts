@@ -26,7 +26,7 @@ assert.equal(Object.keys(ORIGINAL_SCENES).length, 8, "all original scenes ported
 // 1b. Live parity when python3 is available (skips quietly otherwise).
 try {
   const script = path.join(__dirname, "..", "skills", "photoreal", "scripts", "build_prompt.py");
-  const live = execFileSync("python3", [script, "--subject", "20대 후반 한국인 여성", "--scene", "cafe", "--n", "2", "--lang", "ko"], { encoding: "utf8" });
+  const live = execFileSync(process.platform === "win32" ? "python" : "python3", [script, "--subject", "20대 후반 한국인 여성", "--scene", "cafe", "--n", "2", "--lang", "ko"], { encoding: "utf8", env: { ...process.env, PYTHONUTF8: "1" } });
   const blocks = live.split(/^--- \d+ ---$/mu).map((block) => block.trim()).filter(Boolean);
   blocks.forEach((block, index) => assert.equal(buildPhotorealPrompt({ subject: "20대 후반 한국인 여성", scene: "cafe", variantIndex: index }), block));
 } catch (error) {
@@ -66,10 +66,11 @@ assert.equal(selectPhotorealScene({ connectKind: "TRAVEL", sectionTitle: "산넨
 // 5. Blog image prompt carries the photoreal block without weakening the safety rules.
 const shopping = buildBrandPostImagePrompt({ connectKind: "SHOPPING", productName: "닥터지 수딩 크림", sectionTitle: "제형과 향",
   imageIntent: "제형 텍스처 클로즈업 연출컷", role: "body", stagingRecipe: "욕실 선반·화장대 위 자연광 클로즈업", variantIndex: 2 });
-assert.match(shopping, /Photoreal direction \(phone snapshot/u);
-assert.match(shopping, /on a bathroom shelf/u);
-assert.match(shopping, /Generate the environment only/u, "locked-product rule kept");
-assert.match(shopping, /No text, letters, logos/u);
+assert.match(shopping, /photorealistic editorial product scene/u);
+assert.match(shopping, /욕실 선반/u, "actual template setting is forwarded");
+assert.match(shopping, /INPUT 1 is authoritative/u, "actual seller reference governs product geometry");
+assert.match(shopping, /Preserve the original label hierarchy/u);
+assert.doesNotMatch(shopping, /Generate the environment only|distinct viewpoint/u);
 assert.doesNotMatch(shopping, /pores|pupils|likeable/u, "no face layers on a background cut");
 const travel = buildBrandPostImagePrompt({ connectKind: "TRAVEL", productName: "대마도 2일", sectionTitle: "히타카츠 항구", imageIntent: "항구 풍경", role: "body", variantIndex: 1 });
 assert.match(travel, /at a harbor/u);

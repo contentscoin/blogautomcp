@@ -5,6 +5,8 @@ import vm from "node:vm";
 import ts from "typescript";
 import { buildPreparedDraftView } from "../src/lib/draft-context-view";
 import { formatWritingStructureGuide } from "./lib/writing-structure-guide";
+import { SHOPPING_POST_STRATEGY } from "../src/lib/shopping-post-strategy";
+import { getAdaptiveEditorialProfile, formatAdaptiveEditorialHarnessForPrompt } from "./lib/adaptive-editorial-harness";
 import { renderSystemPrompt } from "./lib/post-spec/generate";
 import type { PostSpec } from "./lib/post-spec/types";
 import {
@@ -83,6 +85,17 @@ for (const kind of ["SHOPPING", "TRAVEL"] as const) {
     assert.doesNotMatch(guide, /오사카|도톤보리|고베|USJ|40~60|3~4/u);
   } else {
     assert.doesNotMatch(guide, /호텔 미확정|실제 일정은 원본/u);
+    assert.match(guide, /생활 문제·선택 기준.*상품 사실·구성.*구매 판단.*사용 계획.*체크리스트/u);
+    assert.match(guide, /판매자의 사용감·효능 설명.*검증된 직접 체험을 구분/u);
+    assert.match(guide, /작업 보고를 절마다 반복하지/u);
+    assert.match(guide, /제휴 고지와 상품 카드는 시스템이 배치/u);
+    assert.equal(contract.strategyVersion, SHOPPING_POST_STRATEGY.version);
+    assert.deepEqual(getAdaptiveEditorialProfile(kind).sectionRange, SHOPPING_POST_STRATEGY.sections);
+    const harness = formatAdaptiveEditorialHarnessForPrompt(kind);
+    assert.match(harness, /5~8절, 이미지 5장 중심/u);
+    assert.match(harness, /연출 이미지는 효능·실측·실제 체험의 증거가 아닙니다/u);
+    assert.doesNotMatch(harness, /핵심 기능이 어떤 구조로 작동|스펙을 말한 직후 실제 사용법과 체감 가능한/u);
+    assert.doesNotMatch(guide + harness, /달바|SPF50|50ml|퍼플 톤업/u, "Strategy must not encode the sample product");
   }
   assert.ok(guide.includes(kind === "SHOPPING" ? "[쇼핑 전개 선택]" : "[여행 전개 선택]"));
   assert.ok(!guide.includes(kind === "SHOPPING" ? "[여행 전개 선택]" : "[쇼핑 전개 선택]"));

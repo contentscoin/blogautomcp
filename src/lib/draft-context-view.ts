@@ -1,4 +1,5 @@
 import { buildProductVerifiedFactLines } from "../../scripts/lib/product-editorial-plan";
+import { SHOPPING_POST_STRATEGY } from "./shopping-post-strategy";
 
 /**
  * post_create_draft(= POST_PREPARE_DRAFT) 작업 결과.
@@ -21,6 +22,10 @@ function stringOrEmpty(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function positiveInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
+}
+
 export function buildPreparedDraftView(
   data: Record<string, unknown>,
   productId: string,
@@ -29,6 +34,16 @@ export function buildPreparedDraftView(
 ): Record<string, unknown> {
   const product = asRecord(data.product);
   const generation = asRecord(data.generation);
+  const writingContract = asRecord(generation.writingContract);
+  const contractSections = asRecord(writingContract.sections);
+  const shopping = data.connectKind === "SHOPPING" || writingContract.kind === "SHOPPING";
+  const minimumSectionCount = positiveInteger(generation.minimumSectionCount) ?? positiveInteger(contractSections.min)
+    ?? (shopping ? SHOPPING_POST_STRATEGY.sections.min : null);
+  const maximumSectionCount = positiveInteger(generation.maximumSectionCount) ?? positiveInteger(contractSections.max)
+    ?? (shopping ? SHOPPING_POST_STRATEGY.sections.max : null);
+  const preferredSectionCount = shopping ? SHOPPING_POST_STRATEGY.sections.preferred : 11;
+  const targetSectionCount = positiveInteger(generation.targetSectionCount)
+    ?? Math.min(maximumSectionCount ?? preferredSectionCount, Math.max(minimumSectionCount ?? preferredSectionCount, preferredSectionCount));
   const features = Array.isArray(product.features) ? product.features.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
   const factLines = buildProductVerifiedFactLines({
     productName: stringOrEmpty(product.name),
@@ -41,7 +56,7 @@ export function buildPreparedDraftView(
     deliveryInfo: stringOrEmpty(product.deliveryInfo),
     reviewCount: stringOrEmpty(product.reviewCount),
     rating: stringOrEmpty(product.rating),
-    targetSectionCount: 11,
+    targetSectionCount,
   });
   const storeName = stringOrEmpty(product.storeName);
   const verifiedFacts = Array.from(new Set([
@@ -54,10 +69,13 @@ export function buildPreparedDraftView(
     : [];
   const harness: Record<string, unknown> = {
     writingContract: generation.writingContract ?? null,
+    // Never relabel a legacy prepared context as generated with the new strategy.
+    strategyVersion: writingContract.strategyVersion ?? null,
     qualityChecklist: generation.qualityChecklist ?? null,
     outputSchema: generation.outputSchema ?? null,
-    minimumSectionCount: generation.minimumSectionCount ?? null,
-    maximumSectionCount: generation.maximumSectionCount ?? null,
+    minimumSectionCount,
+    maximumSectionCount,
+    targetSectionCount,
     targetCharacters: generation.targetCharacters ?? null,
     qualityPreset: generation.qualityPreset ?? null,
     experienceMode: generation.experienceMode ?? null,

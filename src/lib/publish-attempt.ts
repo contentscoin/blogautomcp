@@ -34,9 +34,9 @@ function persist(attempt: PublishAttempt) {
 }
 export function publicationMaterialHash(manifestPath: string): string {
   const bytes = fs.readFileSync(manifestPath);
-  const manifest = JSON.parse(bytes.toString('utf8')) as { markdownPath?: string; heroImagePath?: string; bodyImagePaths?: string[]; composition?: { sections?: Array<{ imagePaths?: string[] }> } };
+  const manifest = JSON.parse(bytes.toString('utf8')) as { imageAssets?: Array<{ referenceScene?: { referencePath?: string } }>; markdownPath?: string; heroImagePath?: string; bodyImagePaths?: string[]; composition?: { sections?: Array<{ imagePaths?: string[] }> } };
   const hash = crypto.createHash('sha256').update(bytes);
-  const files = new Set([manifest.markdownPath, manifest.heroImagePath, ...(manifest.bodyImagePaths || []), ...(manifest.composition?.sections || []).flatMap(section => section.imagePaths || [])].filter((file): file is string => Boolean(file)));
+  const files = new Set([manifest.markdownPath, manifest.heroImagePath, ...(manifest.bodyImagePaths || []), ...(manifest.imageAssets || []).flatMap(asset => asset.referenceScene?.referencePath ? [asset.referenceScene.referencePath] : []), ...(manifest.composition?.sections || []).flatMap(section => section.imagePaths || [])].filter((file): file is string => Boolean(file)));
   for (const file of [...files].sort()) {
     const resolved = path.isAbsolute(file) ? file : path.resolve(path.dirname(manifestPath), file);
     hash.update(resolved).update(fs.readFileSync(resolved));
@@ -60,6 +60,7 @@ export function createPublishAttempt(productId: string, mode: 'now' | 'schedule'
   fs.mkdirSync(snapshotDir, { recursive: true });
   const source = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   const files = new Set<string>([source.markdownPath, source.heroImagePath, ...(source.bodyImagePaths || []),
+    ...(source.imageAssets || []).flatMap((asset: { referenceScene?: { referencePath?: string } }) => asset.referenceScene?.referencePath ? [asset.referenceScene.referencePath] : []),
     ...(source.composition?.sections || []).flatMap((section: { imagePaths?: string[] }) => section.imagePaths || [])].filter(Boolean));
   const mapped = new Map<string, string>();
   for (const file of files) {

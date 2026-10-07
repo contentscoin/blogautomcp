@@ -331,7 +331,10 @@ async function main() {
   assert.ok(isShoppingFactCardAsset(cardAsset));
   assert.deepEqual(classifyBrandPostImageEvidence(cardAsset), { coherent: true, generated: false, reason: null });
   const imageSource = fs.readFileSync("src/lib/brand-post-image-generation.ts", "utf8");
-  assert.equal((imageSource.match(/publishFactCard\(requestIndex/gu) || []).length, 2, "both cutout-failure branches try a card first");
+  assert.match(imageSource, /publishFactCard\(failed\.index, failed\.target, wholePhotos, \{ requireSectionFact: true \}\)/u,
+    "only source-missing evidence sections may use a fact card, with a matching verified section fact");
+  assert.doesNotMatch(imageSource, /createLockedProductEditorialScene|createLockedProductThumbnailOnBackground/u,
+    "reference-scene failure cannot silently become the old framed product composite");
   assert.ok(!imageSource.includes("createOriginalProductPhotoOnBackground"), "whole photos are still never put on generated backgrounds");
   let cardStore = structuredClone(stored);
   cardStore.composition.sections[0].imageMin = 1;
@@ -357,7 +360,7 @@ async function main() {
 
   // 15. (1.3.86) Fact cards pass approval; advisory signals never read as failures.
   const pkgSource = fs.readFileSync("src/lib/brand-post-package.ts", "utf8");
-  assert.match(pkgSource, /!source\.segmented && asset\.creationMethod !== "source" && !isShoppingFactCardAsset\(asset\)/u,
+  assert.match(pkgSource, /!source\.segmented && !isReferenceGuidedScene\(asset\) && asset\.creationMethod !== "source" && !isShoppingFactCardAsset\(asset\)/u,
     "the full-frame overlay block exempts flat information cards");
   const flowReadiness = getBrandLinkContentReadiness({
     productName: product.productName, title: `${product.productName} 사용법`, brandLink: "https://naver.me/x", generationSource: "AI",

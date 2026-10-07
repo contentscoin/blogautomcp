@@ -11,6 +11,7 @@ import type { Product9Canvas } from "../../scripts/lib/product-9canvas";
 import { SAVED_TEXT_QC_VERSION, type SavedTextQcMetadata } from "./brand-post-revalidation";
 import { atomicWriteTextFile } from "./atomic-text-file";
 import { isDraftEditorialQualityPassed } from "./brand-post-quality-display";
+import { SHOPPING_POST_STRATEGY_VERSION } from "./shopping-post-strategy";
 import {
   getPostCompositionContract,
   refreshPostDocumentQuality,
@@ -31,6 +32,10 @@ import {
   brandPostSectionSlotId,
   classifyBrandPostImageEvidence,
   isShoppingFactCardAsset,
+  isReferenceGuidedScene,
+  referenceSceneReviewIssue,
+  REFERENCE_SCENE_CAPTION,
+  type ReferenceSceneReview,
   normalizeBrandPostImageIntent,
 } from "./brand-post-image-evidence";
 
@@ -42,9 +47,10 @@ export interface BrandPostPackageImageAsset {
   sectionId?: string | null;
   imageIntent?: string;
   slotId?: string;
-  creationMethod?: "source" | "local-composite" | "remote-generated" | "source-with-generated-background";
+  creationMethod?: "source" | "local-composite" | "remote-generated" | "source-with-generated-background" | "reference-guided-scene";
   remoteGenerated?: boolean;
-  provenance?: "ORIGINAL" | "LOCKED_PRODUCT" | "GENERATED_BACKGROUND" | "EDITORIAL_CARD";
+  provenance?: "ORIGINAL" | "LOCKED_PRODUCT" | "GENERATED_BACKGROUND" | "EDITORIAL_CARD" | "GENERATED_SCENE";
+  referenceScene?: ReferenceSceneReview;
   /** Audit trail for seller bytes used directly or as a locked composite foreground. */
   sourceReview?: {
     version: "product-photo-source-review/v1";
@@ -393,6 +399,17 @@ function isValidPackageImage(asset: BrandPostPackageImageAsset): boolean {
   } catch { return false; }
 }
 
+export function brandPostReferenceSceneIssue(manifest: BrandPostPackageManifest, asset: BrandPostPackageImageAsset): string | null {
+  if (!isReferenceGuidedScene(asset)) return null;
+  let referenceSha256: string | undefined;
+  try { if (asset.referenceScene?.referencePath) referenceSha256 = sha256File(asset.referenceScene.referencePath); } catch { /* Missing references fail below. */ }
+  return referenceSceneReviewIssue(asset, {
+    referenceSha256,
+    sourceSnapshotId: manifest.sourceSnapshot?.snapshotId,
+    anchorSha256: manifest.imageAssets?.find(candidate => candidate.role === "hero" && candidate.path === manifest.heroImagePath)?.sha256,
+  });
+}
+
 type PreviewImageAsset = BrandPostPackageImageAsset & {
   assetKey: string;
   previewUrl: string;
@@ -456,6 +473,8 @@ function auditBrandPostImages(manifest: BrandPostPackageManifest) {
     if (geometry) addIssue({ code: "image-geometry-invalid", reason: `대표 이미지 · ${geometry}` });
     if (manifest.version === "brand-post-package/v2" && rejectedPublicationImageHashes(manifest.brandLinkId, manifest.composition, null).includes(heroAsset.sha256))
       addIssue({ code: "image-publication-rejected", reason: "대표 이미지 · SEMANTIC_REJECTION: 최종 픽셀 검사에서 거부한 이미지입니다. 교체해야 합니다." });
+    const sceneIssue = brandPostReferenceSceneIssue(manifest, heroAsset);
+    if (sceneIssue) addIssue({ code: "image-reference-review-invalid", reason: `대표 이미지 · ${sceneIssue}` });
     const evidence = classifyBrandPostImageEvidence(heroAsset);
     if (!evidence.coherent) addIssue({
       code: "image-provenance-invalid",
@@ -512,7 +531,12 @@ function auditBrandPostImages(manifest: BrandPostPackageManifest) {
           sectionIntent: section.imageIntent,
         }) || asset.slotId !== expectedSlotId)) {
           stale = { code: "image-intent-stale", reason: `이미지 · ${section.title}: 생성 이미지의 현재 파트 목적 또는 슬롯 결속이 오래되었습니다.` };
-        } else if (generated && manifest.connectKind === "SHOPPING" && isShoppingLifestyleImage(section) &&
+        } else if (isReferenceGuidedScene(asset) && brandPostReferenceSceneIssue(manifest, asset)) {
+          stale = { code: "image-reference-review-invalid", reason: `이미지 · ${section.title}: ${brandPostReferenceSceneIssue(manifest, asset)}` };
+        } else if (isReferenceGuidedScene(asset) && (manifest.connectKind !== "SHOPPING" || section.imageSource === "seller-crop" ||
+            !(isShoppingLifestyleImage(section) || allowsGenericBrandPostProductPhoto({ sectionTitle: section.title, imageIntent: section.imageIntent, imageSource: section.imageSource })))) {
+          stale = { code: "image-scene-not-evidence", reason: `이미지 · ${section.title}: 상품 참조 연출컷은 기능·효능·실측 근거로 사용할 수 없습니다.` };
+        } else if (generated && !isReferenceGuidedScene(asset) && manifest.connectKind === "SHOPPING" && isShoppingLifestyleImage(section) &&
             (asset.creationMethod !== "source-with-generated-background" || !readProductPhotoSource(asset.path)?.segmented)) {
           stale = { code: "image-source-review-missing", reason: `이미지 · ${section.title}: 연출 이미지의 원본 제품 보존 기록이 없습니다.` };
         } else if (generated && manifest.connectKind === "SHOPPING" &&
@@ -614,6 +638,14 @@ export function evaluateBrandPostPackageReadiness(manifest: BrandPostPackageMani
     if (manifest.markdownSha256 && sha256File(manifest.markdownPath) !== manifest.markdownSha256) throw new Error("changed");
   } catch { blockers.push({ code: "markdown-invalid", reason: "저장 본문 파일이 없거나 검수한 본문과 일치하지 않습니다." }); }
   if (manifest.version === "brand-post-package/v2") {
+    if (manifest.connectKind === "SHOPPING" && manifest.composition.strategyVersion === SHOPPING_POST_STRATEGY_VERSION) {
+      const disclosures = manifest.composition.renderNodes.filter(node => node.kind === "disclosure" && node.disclosureType === "affiliate");
+      const first = manifest.composition.renderNodes[0];
+      if (disclosures.length !== 1 || first?.kind !== "disclosure" || first.disclosureType !== "affiliate" ||
+          first.placement !== "top" || !first.text.trim()) {
+        blockers.push({ code: "affiliate-disclosure-position", reason: "신규 쇼핑 글의 제휴 고지는 본문 맨 위에 한 번 표시해야 합니다." });
+      }
+    }
     const normalize = (text: string) => text.replace(/\s+/gu, " ").trim();
     const inconsistent = manifest.title !== manifest.composition.title || manifest.composition.sections.some(section => {
       const rendered = manifest.composition.renderNodes.filter(node => (node.kind === "heading" || node.kind === "quotation" || node.kind === "paragraph") && node.sectionId === section.id)
@@ -621,7 +653,8 @@ export function evaluateBrandPostPackageReadiness(manifest: BrandPostPackageMani
       return normalize(rendered) !== normalize([section.title, ...section.body].join("\n"));
     });
     if (inconsistent) blockers.push({ code: "content-render-mismatch", reason: "검수 본문과 발행할 렌더 문서가 일치하지 않습니다." });
-    if (manifest.approvedAt && manifest.textQualityRevalidation?.version !== SAVED_TEXT_QC_VERSION) {
+    if (manifest.approvedAt && (manifest.textQualityRevalidation?.version !== SAVED_TEXT_QC_VERSION ||
+        (manifest.composition.strategyVersion && manifest.textQualityRevalidation?.strategyVersion !== manifest.composition.strategyVersion))) {
       blockers.push({
         code: "text-qc-stale",
         reason: "발행 문서 기준 원고 재검사가 필요합니다. 저장된 원고와 이미지를 유지한 채 품질검사를 다시 실행하세요.",
@@ -631,6 +664,14 @@ export function evaluateBrandPostPackageReadiness(manifest: BrandPostPackageMani
   const imageAudit = auditBrandPostImages(manifest);
   const imageSlots = imageAudit.slots;
   blockers.push(...imageAudit.issues);
+  if (manifest.version === "brand-post-package/v2") {
+    for (const node of manifest.composition.renderNodes) {
+      if (node.kind !== "image") continue;
+      const asset = manifest.imageAssets?.find(candidate => path.resolve(candidate.path) === path.resolve(node.assetPath));
+      if (asset && isReferenceGuidedScene(asset) && !node.caption?.includes("상품 원본을 참조한 AI 연출 이미지"))
+        blockers.push({ code: "image-scene-disclosure-missing", sectionId: node.sectionId || undefined, reason: "상품 참조 연출 이미지의 인접 AI 설명이 없습니다." });
+    }
+  }
   if (manifest.version === "brand-post-package/v2") {
     const renderedHeroPaths = manifest.composition.renderNodes
       .filter(node => node.kind === "image" && node.sectionId === null)
@@ -657,7 +698,7 @@ export function evaluateBrandPostPackageReadiness(manifest: BrandPostPackageMani
     if (!imageAudit.usedPaths.has(path.resolve(asset.path))) continue;
     const source = readProductPhotoSource(asset.path);
     // A flat information card frames the whole photo without any generated background.
-    if (source && !source.segmented && asset.creationMethod !== "source" && !isShoppingFactCardAsset(asset)) blockers.push({
+    if (source && !source.segmented && !isReferenceGuidedScene(asset) && asset.creationMethod !== "source" && !isShoppingFactCardAsset(asset)) blockers.push({
       code: "image-full-frame-overlay",
       sectionId: asset.sectionId || undefined,
       reason: "이미지 · 상품 전체 사각형 사진을 생성 배경 위에 카드처럼 합성한 이미지는 승인할 수 없습니다.",
@@ -1019,6 +1060,7 @@ export function applyGeneratedBrandPostImage(options: {
   creationMethod?: BrandPostPackageImageAsset["creationMethod"];
   remoteGenerated?: boolean;
   sourceReview?: BrandPostPackageImageAsset["sourceReview"];
+  referenceScene?: ReferenceSceneReview;
 }): BrandPostPackageManifestV2 {
   const manifest = readBrandPostPackage(options.brandLinkId);
   if (!manifest || manifest.version !== "brand-post-package/v2") {
@@ -1032,6 +1074,19 @@ export function applyGeneratedBrandPostImage(options: {
   if (geometryIssue) throw new Error(geometryIssue);
   const assets = normalizePackageImageAssets(manifest);
   const generatedHash = sha256File(options.generatedPath);
+  let referenceScene = options.referenceScene;
+  if (isReferenceGuidedScene(options)) {
+    const issue = brandPostReferenceSceneIssue(manifest, { ...options, path: options.generatedPath, sourcePath: options.generatedPath,
+      role: options.sectionId ? "body" : "hero", sha256: generatedHash });
+    if (issue) throw new Error(`IMAGE_REFERENCE_REVIEW_REQUIRED: ${issue}`);
+    const referenceDir = path.join(getBrandPostPackageDir(options.brandLinkId), "references");
+    fs.mkdirSync(referenceDir, { recursive: true });
+    const extension = path.extname(referenceScene!.referencePath).toLowerCase() || ".png";
+    const referencePath = path.join(referenceDir, `${referenceScene!.referenceSha256}${extension}`);
+    if (path.resolve(referenceScene!.referencePath) !== path.resolve(referencePath)) fs.copyFileSync(referenceScene!.referencePath, referencePath);
+    if (sha256File(referencePath) !== referenceScene!.referenceSha256) throw new Error("IMAGE_REFERENCE_CHANGED: 상품 참조 파일이 저장 중 변경되었습니다.");
+    referenceScene = { ...referenceScene!, referencePath };
+  }
   if (options.bindExistingAssetKey) {
     const sourceAsset = assets.find(asset => asset.sha256 === options.bindExistingAssetKey);
     const replacedAsset = options.replaceAssetKey
@@ -1068,6 +1123,7 @@ export function applyGeneratedBrandPostImage(options: {
       creationMethod: "source",
       remoteGenerated: false,
       sourceReview: options.sourceReview,
+      referenceScene,
     };
     const removePaths = [sourceAsset.path];
     if (replacedAsset && replacedAsset !== sourceAsset) removePaths.push(replacedAsset.path);
@@ -1149,9 +1205,10 @@ export function applyGeneratedBrandPostImage(options: {
         provenance: options.provenance,
         slotId: options.slotId || existing.slotId,
         creationMethod: options.creationMethod,
-        remoteGenerated: options.remoteGenerated ?? options.provenance === "GENERATED_BACKGROUND",
+        remoteGenerated: options.remoteGenerated ?? (options.provenance === "GENERATED_BACKGROUND" || options.provenance === "GENERATED_SCENE"),
         imageIntent: options.imageIntent || existing.imageIntent,
         sourceReview: options.sourceReview,
+        referenceScene,
       };
       nextAssets = assets.map((asset) => asset === existing ? replacement : asset);
       heroImagePath = destinationPath;
@@ -1189,11 +1246,12 @@ export function applyGeneratedBrandPostImage(options: {
         provenance: options.provenance,
         slotId,
         creationMethod: options.creationMethod,
-        remoteGenerated: options.remoteGenerated ?? options.provenance === "GENERATED_BACKGROUND",
+        remoteGenerated: options.remoteGenerated ?? (options.provenance === "GENERATED_BACKGROUND" || options.provenance === "GENERATED_SCENE"),
         imageIntent,
         // A replacement is new evidence. Never carry a review signed for the
         // previous bytes/intent across it.
         sourceReview: options.sourceReview,
+        referenceScene,
       };
       nextAssets = assets.map((asset) => asset === existing ? replacement : asset);
       composition = bindBodyImageInComposition({
@@ -1245,8 +1303,9 @@ export function applyGeneratedBrandPostImage(options: {
       provenance: options.provenance,
       slotId,
       creationMethod: options.creationMethod,
-      remoteGenerated: options.remoteGenerated ?? options.provenance === "GENERATED_BACKGROUND",
+      remoteGenerated: options.remoteGenerated ?? (options.provenance === "GENERATED_BACKGROUND" || options.provenance === "GENERATED_SCENE"),
       sourceReview: options.sourceReview,
+      referenceScene,
     };
     nextAssets = [...assets, asset];
     bodyImagePaths = [...bodyImagePaths, destinationPath];
@@ -1262,6 +1321,11 @@ export function applyGeneratedBrandPostImage(options: {
     });
   }
 
+  composition = { ...composition, renderNodes: composition.renderNodes.map(node => {
+    if (node.kind !== "image") return node;
+    const asset = nextAssets.find(candidate => path.resolve(candidate.path) === path.resolve(node.assetPath));
+    return { ...node, caption: asset && isReferenceGuidedScene(asset) ? REFERENCE_SCENE_CAPTION : undefined };
+  }) };
   composition = refreshPostDocumentQuality(composition);
   const updated: BrandPostPackageManifestV2 = {
     ...manifest,

@@ -150,7 +150,8 @@ assert.equal(staged7.sections.at(-1)!.imageSource, "seller-original", "the verdi
 assert.ok(staged7.sections.every((section) => !/연출:/u.test(section.imageIntent)));
 const stagingPrompt = buildBrandPostImagePrompt({ connectKind: "SHOPPING", productName: "브리즈온", sectionTitle: "사용감",
   imageIntent: staged7.sections[0]!.imageIntent, role: "body", stagingRecipe: staged7.sections[0]!.promptRecipe });
-assert.match(stagingPrompt, /Staging direction/u);
-assert.match(stagingPrompt, /Generate the environment only/u, "staging never overrides the locked-product rule");
+assert.ok(stagingPrompt.includes(staged7.sections[0]!.promptRecipe!), "template scene recipe reaches the reference-scene prompt");
+assert.match(stagingPrompt, /INPUT 1 is authoritative/u, "staging preserves actual product-reference authority");
+assert.match(stagingPrompt, /never the product viewpoint|altered viewpoint/u, "scene variety cannot deform the product view");
 
 console.log(`PASS: topic templates (${Object.keys(TOPIC_TEMPLATES).length}), selection, contract overlay, editorial fallback, prompts, render document`);

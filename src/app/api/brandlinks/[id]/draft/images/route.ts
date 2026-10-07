@@ -30,7 +30,10 @@ function imageFailureCode(errors: string[]): string | undefined {
     "CODEX_AUTH_REQUIRED", "CODEX_LOGIN_REQUIRED", "CODEX_MODEL_INCOMPATIBLE", "LLM_UNAVAILABLE",
     "CHATGPT_BROWSER_AUTH_REQUIRED", "CHATGPT_BROWSER_AUTOMATION_DISABLED", "CHATGPT_BROWSER_UNREACHABLE",
     "CHATGPT_BROWSER_BUSY", "IMAGE_RESUME_REQUIRED", "IMAGE_PROVIDER_REFUSED", "PRODUCT_CUTOUT_REQUIRED",
-    "IMAGE_SOURCE_BINDING_REQUIRED", "PRODUCT_SOURCE_REQUIRED", "PRODUCT_SOURCE_DOWNLOAD_FAILED"]
+    "IMAGE_SOURCE_BINDING_REQUIRED", "PRODUCT_SOURCE_REQUIRED", "PRODUCT_SOURCE_DOWNLOAD_FAILED",
+    "PRODUCT_SNAPSHOT_REQUIRED", "PRODUCT_FRONT_REFERENCE_REQUIRED", "PRODUCT_REFERENCE_REQUIRED", "PRODUCT_REFERENCE_CHANGED", "PRODUCT_REFERENCE_NOT_PREPARED",
+    "EXTERNAL_IMAGE_LEDGER_INVALID", "PRODUCT_REFERENCE_SCENE_NOT_ALLOWED", "REFERENCE_SCENE_NOT_EVIDENCE", "REFERENCE_SCENE_REVIEW_INVALID", "REFERENCE_SCENE_CHANGED",
+    "REFERENCE_SCENE_OUTPUT_REQUIRED", "REFERENCE_SCENE_FIDELITY_FAILED"]
     .find(code => text.includes(code));
 }
 
@@ -114,6 +117,7 @@ export async function POST(
     assetKey?: string;
     replaceAssetKey?: string;
     generatedPath?: string;
+    referenceHashes?: string[];
     batchSize?: number;
   };
   if (!body.action || !IMAGE_ACTIONS.includes(body.action)) {
@@ -185,9 +189,11 @@ export async function POST(
     }
     const sectionId = typeof body.sectionId === "string" ? body.sectionId.trim() : "";
     const replaceAssetKey = typeof body.replaceAssetKey === "string" ? body.replaceAssetKey.trim() : "";
-    if (replaceAssetKey && (!/^[a-f0-9]{64}$/u.test(replaceAssetKey) || !preview.imageAssets.some((asset) => asset.assetKey === replaceAssetKey))) {
-      return NextResponse.json({ success: false, code: "INVALID_INPUT", error: "교체할 이미지 항목을 찾을 수 없습니다." }, { status: 404 });
+    if (replaceAssetKey && !/^[a-f0-9]{64}$/u.test(replaceAssetKey)) {
+      return NextResponse.json({ success: false, code: "INVALID_INPUT", error: "교체할 이미지 항목 키가 올바르지 않습니다." }, { status: 400 });
     }
+    // A successful replacement removes its old key. The shared apply helper
+    // checks completed requests before resolving that key, so retries remain safe.
     if (!replaceAssetKey) {
       const slot = preview.imageSlots.find((candidate) => candidate.sectionId === sectionId);
       if (!slot) {
@@ -211,6 +217,9 @@ export async function POST(
         sectionId: sectionId || undefined,
         replaceAssetKey: replaceAssetKey || undefined,
         rawPath: generatedPath,
+        referenceHashes: Array.isArray(body.referenceHashes) && body.referenceHashes.length <= 2 &&
+          body.referenceHashes.every(hash => typeof hash === "string" && /^[a-f0-9]{64}$/u.test(hash))
+          ? body.referenceHashes : undefined,
       });
       const updatedPreview = packagePreview(applied.manifest);
       const remainingMissing = updatedPreview.imageSlots.reduce((sum, slot) => sum + Math.max(slot.missing, slot.generationMissing), 0);

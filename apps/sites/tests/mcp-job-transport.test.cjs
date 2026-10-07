@@ -130,6 +130,94 @@ test('draft repair tool guidance preserves images and reruns current approval qu
   assert.match(approve.description, /현재 품질평가기로 다시 검사/u);
 });
 
+test('shopping scene tool requires ordered references; travel keeps its existing input contract', async () => {
+  const args = { connectKind: 'shopping', productId: 'product-1', sectionId: 'scene', generatedImageUrl: 'https://example.test/generated.png', idempotencyKey: 'reference-scene-fixture' };
+  assert.equal((await call('owner', 'mcp:write', 'post_apply_section_image', args)).result.structuredContent.code, 'PRODUCT_REFERENCE_REQUIRED');
+  for (const referenceHashes of [[], ['bad'], ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64)]])
+    assert.equal((await call('owner', 'mcp:write', 'post_apply_section_image', { ...args, referenceHashes })).result.structuredContent.code, 'INVALID_ARGUMENT');
+  const { validateToolArguments } = load('lib/tool-schema.ts');
+  const listing = await route.handleMcpRequest(new Request('https://example.test/api/mcp', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }) }), 'owner', 'mcp:read mcp:write');
+  const tool = (await listing.json()).result.tools.find(tool => tool.name === 'post_apply_section_image');
+  assert.match(tool.description, /실제 원본/u);
+  assert.equal(validateToolArguments(tool.inputSchema, { ...args, connectKind: 'travel' }).ok, true);
+  const valid = { ...args, referenceHashes: ['b'.repeat(64), 'a'.repeat(64)] };
+  const replayRoute = load('app/api/mcp/[credential]/route.ts', { ...mocks, '@/db': { getD1: () => ({ prepare: () => ({ bind: () => ({ first: async () => ({ id: 'job_reference', type: 'POST_APPLY_SECTION_IMAGE', inputJson: JSON.stringify(valid), status: 'SUCCEEDED' }) }) }) }) } });
+  const request = new Request('https://example.test/api/mcp', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'post_apply_section_image', arguments: valid } }) });
+  assert.equal((await (await replayRoute.handleMcpRequest(request, 'owner', 'mcp:write')).json()).result.structuredContent.reused, true, 'Reference order must survive schema validation and queue serialization.');
+});
+
+test('shopping scene apply requires PC 1.3.96 while travel and draft reading keep their prior versions', async () => {
+  let version = '1.3.95';
+  const queued = [];
+  const versionRoute = load('app/api/mcp/[credential]/route.ts', { ...mocks,
+    '@/lib/crypto': { newId: () => 'job_version_fixture' },
+    '@/lib/jobs': { sweepExpiredLeases: async () => {}, findActiveDevice: async () => ({ appVersion: version }), isAgentOnline: async () => true, parseStatusJson: () => null },
+    '@/db': { getD1: () => ({ prepare(sql) { return { bind(...values) { return {
+      first: async () => sql.includes('COUNT(*)') ? { count: 0 } : null,
+      run: async () => { if (sql.includes('INSERT OR IGNORE INTO agent_jobs')) queued.push(JSON.parse(values[4])); return { meta: { changes: 1 } }; },
+    }; } }; } }) },
+  });
+  const invoke = async (name, args) => {
+    const request = new Request('https://example.test/api/mcp', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }) });
+    return (await (await versionRoute.handleMcpRequest(request, 'owner', 'mcp:read mcp:write')).json()).result.structuredContent;
+  };
+  const apply = { connectKind: 'shopping', productId: 'product-1', sectionId: 'scene', generatedImageUrl: 'https://example.test/result.png',
+    referenceHashes: ['b'.repeat(64), 'a'.repeat(64)], idempotencyKey: 'version-scene-fixture' };
+  for (const outdated of ['1.3.95', null]) {
+    version = outdated;
+    const rejected = await invoke('post_apply_section_image', apply);
+    assert.equal(rejected.code, 'APP_UPDATE_REQUIRED');
+    assert.equal(rejected.required, '1.3.96');
+    assert.equal(queued.length, 0, 'old PCs never receive the new scene contract');
+  }
+  version = '1.3.95';
+  assert.equal((await invoke('agent_get_status', {})).capabilities.shoppingReferenceScenes.supported, false);
+  assert.equal((await invoke('post_apply_section_image', { ...apply, connectKind: 'travel', referenceHashes: undefined })).status, 'QUEUED');
+  assert.equal((await invoke('post_get_draft', { connectKind: 'shopping', draftId: 'approved-draft' })).status, 'QUEUED');
+  version = '1.3.96';
+  assert.equal((await invoke('post_apply_section_image', apply)).status, 'QUEUED');
+  assert.deepEqual(queued.at(-1).referenceHashes, apply.referenceHashes);
+  const capabilities = (await invoke('agent_get_status', {})).capabilities;
+  assert.equal(capabilities.shoppingReferenceScenes.minimumAppVersion, '1.3.96');
+  assert.equal(capabilities.shoppingReferenceScenes.supported, true);
+});
+
+test('legacy shopping draft reads preserve approval and text but suppress obsolete paid-generation instructions', async () => {
+  const previous = storedResult;
+  try {
+    for (const approved of [false, true]) {
+      const saved = { kind: 'draft', nextAction: 'ChatGPT 내장 이미지 생성으로 배경을 만드세요.', data: {
+        connectKind: 'shopping', approved, approvedAt: approved ? '2026-10-01T00:00:00Z' : null,
+        markdown: '보존할 원문😀'.repeat(6000), imageSlots: [{ sectionId: 'scene', imagePrompt: 'Generate environment only', assets: [{ assetKey: 'a'.repeat(64) }], generationMissing: 1 }],
+      } };
+      storedResult = JSON.stringify(saved);
+      const job = (await call('owner', 'mcp:read', 'job_get', { jobId: 'job_owned' })).result.structuredContent.job;
+      let args = job.resultRead.arguments, joined = '';
+      while (true) {
+        const page = (await call('owner', 'mcp:read', 'job_result_read', args)).result.structuredContent;
+        assert.equal(page.totalChars, job.resultChars);
+        joined += page.text;
+        if (page.nextOffset === null) break;
+        args = { ...args, offset: page.nextOffset };
+      }
+      const projected = JSON.parse(joined);
+      assert.equal(projected.data.approved, approved);
+      assert.equal(projected.data.approvedAt, saved.data.approvedAt);
+      assert.equal(projected.data.markdown, saved.data.markdown);
+      assert.deepEqual(projected.data.imageSlots[0].assets, saved.data.imageSlots[0].assets);
+      assert.equal(projected.data.imageSlots[0].imagePrompt, null);
+      assert.equal(projected.data.imageSlots[0].referenceReady, false);
+      assert.equal(projected.data.imageGenerationCompatibility.required, '1.3.96');
+      assert.match(projected.nextAction, /업데이트/u);
+      assert.equal(storedResult, JSON.stringify(saved), 'a compatibility view never rewrites saved approval or content');
+    }
+    const travel = { data: { connectKind: 'travel', imageSlots: [{ imagePrompt: 'Travel scene' }] } };
+    storedResult = JSON.stringify(travel, null, 2);
+    assert.equal((await call('owner', 'mcp:read', 'job_result_read', { jobId: 'job_owned' })).result.structuredContent.text, storedResult);
+  } finally { storedResult = previous; }
+});
+
 test('bug report tool requires write scope and explicit consent; lookup requires read scope', async () => {
   const args = { summary: '동기화 오류', idempotencyKey: 'report-test', confirmed: true };
   assert.equal((await call('owner', 'mcp:read', 'bug_report_create', args)).result.structuredContent.code, 'INSUFFICIENT_SCOPE');
@@ -185,6 +273,111 @@ test('large job_get is bounded and advertised pages reconstruct stored draft', a
       args = { ...args, offset: page.nextOffset };
     }
     assert.equal(joined, storedResult);
+  } finally { storedResult = previous; }
+});
+
+function nativeReferenceFixture(role, base64) {
+  return { role, base64, mimeType: 'image/png', url: `https://example.test/${role}.png`,
+    sha256: require('node:crypto').createHash('sha256').update(Buffer.from(base64, 'base64')).digest('hex') };
+}
+const nativeReferenceFixtures = [
+  nativeReferenceFixture('product-identity', 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN0sAAAAASUVORK5CYII='),
+  nativeReferenceFixture('approved-scene-continuity', 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='),
+];
+
+test('job_get attaches exact ordered native reference pixels even when the result is paged', async () => {
+  const previous = storedResult;
+  try {
+    for (const paged of [false, true]) {
+      const references = nativeReferenceFixtures.map(image => ({ ...image, path: 'C:\\private\\seller.png' }));
+      storedResult = JSON.stringify({ data: { markdown: paged ? '원문😀'.repeat(12000) : '짧은 원문', nativeReferenceImages: references,
+        heroImage: { base64: references[1].base64, mimeType: 'image/png' } } });
+      const response = (await call('owner', 'mcp:read', 'job_get', { jobId: 'job_owned' })).result;
+      const job = response.structuredContent.job;
+      assert.equal(Boolean(job.resultPaged), paged);
+      assert.equal(job.resultIncluded, !paged);
+      assert.deepEqual(response.content.filter(block => block.type === 'image').map(block => block.data),
+        [...references.map(image => image.base64), references[1].base64], 'actual source and approved anchor precede the optional hero');
+      for (const [index, reference] of references.entries()) {
+        const metadata = job.imageAttachments[index];
+        assert.equal(metadata.role, reference.role);
+        assert.equal(metadata.sha256, reference.sha256);
+        assert.equal(metadata.attachmentIndex, index + 1);
+        assert.equal(response.content[metadata.contentIndex].data, reference.base64);
+      }
+      assert.ok(!JSON.stringify(job).includes('base64'));
+      assert.ok(!JSON.stringify(job).includes('C:\\private'));
+      if (paged) {
+        assert.equal(job.result, null);
+        let args = job.resultRead.arguments, joined = '';
+        while (true) {
+          const page = (await call('owner', 'mcp:read', 'job_result_read', args)).result.structuredContent;
+          assert.equal(page.totalChars, job.resultChars);
+          assert.equal(page.offset, joined.length);
+          joined += page.text;
+          if (page.nextOffset === null) break;
+          args = { ...args, offset: page.nextOffset };
+        }
+        const projected = JSON.parse(joined);
+        assert.equal(projected.data.markdown, JSON.parse(storedResult).data.markdown, 'the complete manuscript survives native projection');
+        assert.deepEqual(projected.data.nativeReferenceImages, job.imageAttachments);
+        assert.equal(projected.data.heroImageAttached, true);
+        assert.ok(!joined.includes('base64'));
+        assert.ok(!joined.includes('C:\\private'));
+        assert.equal(joined.length, job.resultChars, 'job_get length and page offsets use the same public serialization');
+        assert.equal((await call('owner', 'mcp:read', 'job_result_read', { jobId: 'job_owned', offset: joined.length + 1 })).result.structuredContent.code, 'INVALID_OFFSET');
+      } else {
+        assert.deepEqual(job.result.data.nativeReferenceImages, job.imageAttachments);
+      }
+      const statusOnly = (await call('owner', 'mcp:read', 'job_get', { jobId: 'job_owned', includeResult: false })).result;
+      assert.equal(statusOnly.content.length, 1);
+      assert.equal(statusOnly.structuredContent.job.result, null);
+    }
+  } finally { storedResult = previous; }
+});
+
+test('native reference wire bytes do not force paging of a small public draft', async () => {
+  const previous = storedResult;
+  const references = nativeReferenceFixtures.map(image => nativeReferenceFixture(image.role,
+    Buffer.concat([Buffer.from(image.base64, 'base64'), Buffer.alloc(100 * 1024)]).toString('base64')));
+  try {
+    storedResult = JSON.stringify({ data: { markdown: '한글과 emoji😀를 포함한 원고입니다.', nativeReferenceImages: references } });
+    assert.ok(storedResult.length > 32000);
+    const response = (await call('owner', 'mcp:read', 'job_get', { jobId: 'job_owned' })).result;
+    const job = response.structuredContent.job;
+    assert.equal(job.resultIncluded, true);
+    assert.equal(job.resultPaged, undefined);
+    assert.equal(job.resultRead, undefined);
+    assert.deepEqual(response.content.filter(block => block.type === 'image').map(block => block.data), references.map(image => image.base64));
+    const page = (await call('owner', 'mcp:read', 'job_result_read', { jobId: 'job_owned' })).result.structuredContent;
+    assert.equal(page.nextOffset, null);
+    assert.deepEqual(JSON.parse(page.text), job.result);
+    assert.ok(page.text.length < 2000);
+    assert.ok(!page.text.includes('base64'));
+    assert.deepEqual(JSON.parse(storedResult).data.nativeReferenceImages, references, 'stored native pixels are not mutated');
+  } finally { storedResult = previous; }
+});
+
+test('native reference attachment validation fails the whole collection on malformed or oversized pixels', async () => {
+  const previous = storedResult;
+  const source = nativeReferenceFixtures[0], anchor = nativeReferenceFixtures[1];
+  const oversized = nativeReferenceFixture('product-identity', Buffer.concat([Buffer.from(source.base64, 'base64'), Buffer.alloc(5 * 1024 * 1024)]).toString('base64'));
+  const large = role => nativeReferenceFixture(role, Buffer.concat([Buffer.from(role === 'product-identity' ? source.base64 : anchor.base64, 'base64'), Buffer.alloc(2 * 1024 * 1024)]).toString('base64'));
+  try {
+    const invalid = [
+      [{ ...source, mimeType: 'image/svg+xml' }], [{ ...source, mimeType: 'image/jpeg' }],
+      [{ ...source, base64: 'invalid***' }], [{ ...source, base64: source.base64 + '\n' }],
+      [{ ...source, sha256: '0'.repeat(64) }], [{ ...source, url: 'file:///C:/private/seller.png' }],
+      [source, { ...source, role: 'approved-scene-continuity' }], [anchor, source], [source, anchor, anchor],
+      [oversized], [large('product-identity'), large('approved-scene-continuity')], [source, { ...anchor, sha256: '0'.repeat(64) }],
+    ];
+    for (const references of invalid) {
+      storedResult = JSON.stringify({ data: { nativeReferenceImages: references } });
+      const response = (await call('owner', 'mcp:read', 'job_get', { jobId: 'job_owned' })).result;
+      assert.equal(response.structuredContent.code, 'IMAGE_REFERENCE_INVALID');
+      assert.equal(response.isError, true);
+      assert.equal(response.content.filter(block => block.type === 'image').length, 0);
+    }
   } finally { storedResult = previous; }
 });
 

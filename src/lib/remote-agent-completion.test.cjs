@@ -130,7 +130,7 @@ for (const jobType of ['SETTINGS_GET', 'POST_PUBLISH']) test(`${jobType}: actual
     assert.equal(new Set(bodies).size, 1);
     assert.equal(JSON.parse(bodies[0]).status, 'SUCCEEDED');
     const markdown = '한글😀'.repeat(20000);
-    const view = route.testDraftView('draft', { markdown }, true);
+    const view = await route.testDraftView('draft', { markdown }, true);
     assert.equal(view.markdown, markdown);
     assert.equal(view.markdownTruncated, false);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }

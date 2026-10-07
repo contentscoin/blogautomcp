@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import sharp from "sharp";
 import type {
   BrandPostPackageImageAsset,
   BrandPostPackageManifestV2,
@@ -16,6 +17,17 @@ const digest = (file: string) => crypto.createHash("sha256").update(fs.readFileS
 const iso = (minute: number) => `2026-09-14T10:${String(minute).padStart(2, "0")}:00.000Z`;
 
 async function main() {
+  // Package geometry gates inspect bytes. Use real PNGs, retaining deterministic
+  // equality for duplicate-output tests instead of text files with a .png suffix.
+  const pngs = await Promise.all(Array.from({ length: 40 }, (_, index) => sharp({ create: {
+    width: 64, height: 64, channels: 3, background: { r: index * 5, g: 210 - index * 3, b: 80 + index * 4 },
+  } }).png().toBuffer()));
+  const fixtureBySeed = new Map<string, Buffer>();
+  const writeFixture = (file: string, value: string) => {
+    if (path.extname(file) !== ".png") return fs.writeFileSync(file, value);
+    if (!fixtureBySeed.has(value)) fixtureBySeed.set(value, pngs[fixtureBySeed.size]);
+    return fs.writeFileSync(file, fixtureBySeed.get(value)!);
+  };
   const continuity = await import("../src/lib/brand-post-image-continuity");
   const generation = await import("../src/lib/brand-post-image-generation");
   const repair = await import("../src/lib/brand-post-image-repair");
@@ -27,12 +39,12 @@ async function main() {
   const packageDir = path.join(temp, "fixture-package");
   fs.mkdirSync(packageDir, { recursive: true });
   const markdownPath = path.join(packageDir, "post.md");
-  fs.writeFileSync(markdownPath, "이미지 연속성 검증용 본문입니다.");
+  writeFixture(markdownPath, "이미지 연속성 검증용 본문입니다.");
   const heroPath = path.join(packageDir, "hero.png");
-  fs.writeFileSync(heroPath, "unique-hero");
+  writeFixture(heroPath, "unique-hero");
   const bodyPaths = Array.from({ length: 9 }, (_, index) => {
     const file = path.join(packageDir, `body-${index + 1}.png`);
-    fs.writeFileSync(file, `unique-body-${index + 1}`);
+    writeFixture(file, `unique-body-${index + 1}`);
     return file;
   });
   const intents = Array.from({ length: 9 }, (_, index) => `장면 의도 ${index + 1}`);
@@ -149,7 +161,7 @@ async function main() {
   });
   const resumeRecords = bodyPaths.slice(0, 4).map((bodyPath, index) => {
     const source = path.join(packageDir, `resume-source-${index + 1}.png`);
-    fs.writeFileSync(source, `unique-resume-source-${index + 1}`);
+    writeFixture(source, `unique-resume-source-${index + 1}`);
     const receipt = provenance.preserveProductPhotoSource({ sourcePath: source, outputPath: bodyPath, segmented: true });
     return { source, receipt };
   });
@@ -297,11 +309,11 @@ async function main() {
   }), baseIdentity, "reference bytes change cache identity");
 
   const sellerSource = path.join(packageDir, "seller-source.png");
-  fs.writeFileSync(sellerSource, "one-verified-seller-photo");
+  writeFixture(sellerSource, "one-verified-seller-photo");
   const compositeA = path.join(packageDir, "composite-a.png");
   const compositeB = path.join(packageDir, "composite-b.png");
-  fs.writeFileSync(compositeA, "unique-composite-a");
-  fs.writeFileSync(compositeB, "unique-composite-b");
+  writeFixture(compositeA, "unique-composite-a");
+  writeFixture(compositeB, "unique-composite-b");
   provenance.preserveProductPhotoSource({ sourcePath: sellerSource, outputPath: compositeA, segmented: true });
   provenance.preserveProductPhotoSource({ sourcePath: sellerSource, outputPath: compositeB, segmented: true });
   const duplicateSourceManifest = buildManifest({
@@ -344,7 +356,7 @@ async function main() {
 
   const duplicateOutputA = path.join(packageDir, "duplicate-output-a.png");
   const duplicateOutputB = path.join(packageDir, "duplicate-output-b.png");
-  fs.writeFileSync(duplicateOutputA, "identical-final-output");
+  writeFixture(duplicateOutputA, "identical-final-output");
   fs.copyFileSync(duplicateOutputA, duplicateOutputB);
   provenance.preserveProductPhotoSource({ sourcePath: sellerSource, outputPath: duplicateOutputA, segmented: true });
   provenance.preserveProductPhotoSource({ sourcePath: sellerSource, outputPath: duplicateOutputB, segmented: true });
@@ -385,7 +397,7 @@ async function main() {
   );
 
   const fullFrame = path.join(packageDir, "full-frame-on-background.png");
-  fs.writeFileSync(fullFrame, "whole-rectangular-source-over-generated-background");
+  writeFixture(fullFrame, "whole-rectangular-source-over-generated-background");
   provenance.preserveProductPhotoSource({ sourcePath: sellerSource, outputPath: fullFrame, segmented: false });
   const fullFrameManifest = buildManifest({
     createdAt: iso(11),

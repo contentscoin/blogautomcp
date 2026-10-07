@@ -296,6 +296,9 @@ assert.match(nextAction, /이미지·배치 실패만 있으면 원고를 재작
 assert.match(nextAction, /composition-quality 안에 본문 분량·섹션 실패도 있으면 그 텍스트 항목만/u);
 assert.match(nextAction, /원인이 불명확하면 실패 상세를 조회/u);
 assert.match(nextAction, /발행은 별도 확인/u);
+assert.match(nextAction, /referenceImages를 실제로 첨부/u);
+assert.match(nextAction, /같은 작업의 referenceHashes를 순서대로 post_apply_section_image에 전달/u);
+assert.match(nextAction, /참조가 없거나 기능·수치 근거용 파트이면 임의 생성하지/u);
 
 console.log(JSON.stringify({ ok: true, browserCases, unsupportedCandidates: unsupported.length, groundingCases: groundingCases.length,
   groundedCandidates: groundingCases.reduce((sum, testCase) => sum + testCase.grounded.length, 0),

@@ -6727,11 +6727,16 @@ function writePreparedBrandPostPackage(params: {
     const [heading = "본문", ...body] = content.split(/\r?\n/);
     return `## ${heading.trim() || "본문"}\n\n${body.join("\n").trim()}`;
   });
+  const topDisclosure = params.composition.renderNodes.find(
+    (node) => node.kind === "disclosure" && node.placement === "top",
+  );
   const bottomDisclosure = params.composition.renderNodes.find(
     (node) => node.kind === "disclosure" && node.placement === "bottom",
   );
   const markdown = [
     `# ${params.composition.title}`,
+    "",
+    topDisclosure?.kind === "disclosure" ? topDisclosure.text : "",
     "",
     ...sections,
     "",
@@ -7901,6 +7906,10 @@ async function renderResolvedPostDocument(
         throw new Error(`발행 이미지 업로드 확인 실패: ${path.basename(node.assetPath)}`);
       }
       invalidateBodyStyle(bodyStyleState);
+      if (node.caption?.trim()) {
+        await inputPlainParagraph(page, node.caption, document.editorial, { applyStyle: true });
+        invalidateBodyStyle(bodyStyleState);
+      }
       continue;
     }
     if (node.kind === "connectCard") {
@@ -10610,6 +10619,8 @@ async function main() {
               post.productUnderstanding,
             ),
             composition,
+            imageAssets: preparedPostOverride?.imageAssets,
+            sourceSnapshotId: preparedPostOverride?.sourceSnapshot?.snapshotId,
           });
           break;
         } catch (error) {

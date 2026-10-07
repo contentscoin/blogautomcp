@@ -13,4 +13,15 @@ assert.throws(() => assertPublishedEditorText(document, text.replace("라벤더�
 assert.throws(() => assertPublishedEditorText(document, text.replace("#아비노\n이", "#아비노이")), /HASHTAG_MISMATCH/);
 assert.throws(() => assertPublishedEditorText(document, text + " #아비노"), /HASHTAG_MISMATCH/);
 assert.deepEqual(publishedReadinessSections(document), ["Q. 향은 무엇인가요?\nA. 라벤더향입니다. 선택 옵션을 확인하세요.", "이 포스팅은 수수료를 제공받습니다."]);
-console.log("Published editor audit: 6 cases passed (actual body + final disclosure handoff)");
+const sceneCaption = "상품 원본을 참조한 AI 연출 이미지입니다. 실제 사용 사진이 아닙니다.";
+const sceneDocument = { ...document, renderNodes: [
+  { kind: "disclosure", placement: "top", text: "이 포스팅은 수수료를 제공받습니다." },
+  { kind: "image", role: "hero", assetPath: "scene.png", caption: sceneCaption },
+  document.renderNodes[0],
+  document.renderNodes[1],
+] } as ResolvedPostDocumentV1;
+const sceneText = `이 포스팅은 수수료를 제공받습니다.\n${sceneCaption}\nQ. 향은 무엇인가요?\nA. 라벤더향입니다. 선택 옵션을 확인하세요.\n#바디워시 #아비노`;
+assert.doesNotThrow(() => assertPublishedEditorText(sceneDocument, sceneText));
+assert.throws(() => assertPublishedEditorText(sceneDocument, sceneText.replace(sceneCaption, "")), /CONTENT_MISMATCH/);
+assert.throws(() => assertPublishedEditorText(sceneDocument, `${sceneCaption}\n${sceneText.replace(`${sceneCaption}\n`, "")}`), /CONTENT_MISMATCH/);
+console.log("Published editor audit: 9 cases passed (actual body, top disclosure, adjacent scene caption)");

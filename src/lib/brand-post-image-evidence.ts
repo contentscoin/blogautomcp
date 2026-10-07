@@ -1,7 +1,24 @@
+export const REFERENCE_SCENE_STRATEGY_VERSION = "shopping-reference-scene/v1";
+export const REFERENCE_SCENE_CAPTION = "상품 원본을 참조한 AI 연출 이미지입니다. 소품은 연출용이며 실제 촬영·사용 결과나 기능·효과를 입증하는 자료가 아닙니다.";
+export const REFERENCE_SCENE_REVIEW_CHECKS = ["silhouette", "proportions", "topSeal", "capAlignment", "labelHierarchy", "color", "surface"] as const;
+export interface ReferenceSceneReview {
+  strategyVersion: string;
+  referenceSha256: string;
+  referencePath: string;
+  sourceSnapshotId?: string;
+  anchorSha256?: string;
+  reviewStatus: "passed" | "failed" | "pending";
+  reviewedOutputSha256: string;
+  reviewedAt?: string;
+  reason?: string;
+  checks?: Partial<Record<typeof REFERENCE_SCENE_REVIEW_CHECKS[number], boolean>>;
+}
+
 export interface BrandPostImageEvidenceLike {
-  provenance?: "ORIGINAL" | "LOCKED_PRODUCT" | "GENERATED_BACKGROUND" | "EDITORIAL_CARD";
-  creationMethod?: "source" | "local-composite" | "remote-generated" | "source-with-generated-background";
+  provenance?: "ORIGINAL" | "LOCKED_PRODUCT" | "GENERATED_BACKGROUND" | "EDITORIAL_CARD" | "GENERATED_SCENE";
+  creationMethod?: "source" | "local-composite" | "remote-generated" | "source-with-generated-background" | "reference-guided-scene";
   remoteGenerated?: boolean;
+  referenceScene?: ReferenceSceneReview;
 }
 
 export function normalizeBrandPostImageIntent(value: string | undefined): string {
@@ -82,6 +99,9 @@ export function classifyBrandPostImageEvidence(
     reason: "이미지 생성 출처 메타데이터가 서로 모순됩니다.",
   });
 
+  if (method === "reference-guided-scene") {
+    return remote === true && provenance === "GENERATED_SCENE" ? valid(true) : invalid();
+  }
   if (method === "source") {
     return remote === true || (provenance !== undefined && provenance !== "ORIGINAL" && provenance !== "LOCKED_PRODUCT")
       ? invalid()
@@ -105,7 +125,7 @@ export function classifyBrandPostImageEvidence(
 
   // Missing generation metadata is legacy source evidence at most. Generated
   // provenance or a positive remote flag without its creation method is stale.
-  if (remote === true || provenance === "GENERATED_BACKGROUND" || provenance === "EDITORIAL_CARD") return invalid();
+  if (remote === true || provenance === "GENERATED_BACKGROUND" || provenance === "EDITORIAL_CARD" || provenance === "GENERATED_SCENE") return invalid();
   return valid(false);
 }
 
@@ -125,4 +145,28 @@ export function brandPostImageIntentMatches(options: {
 /** Local information card that frames a whole verified seller photo (no cutout, no generated scene). */
 export function isShoppingFactCardAsset(asset: BrandPostImageEvidenceLike): boolean {
   return asset.provenance === "EDITORIAL_CARD" && asset.creationMethod === "local-composite" && asset.remoteGenerated !== true;
+}
+
+/** Full-scene generation is illustration, never source photography or feature evidence. */
+export function isReferenceGuidedScene(asset: BrandPostImageEvidenceLike): boolean {
+  return asset.provenance === "GENERATED_SCENE" || asset.creationMethod === "reference-guided-scene";
+}
+
+/** Review is bound to product facts, original-reference bytes and the exact final output. */
+export function referenceSceneReviewIssue(asset: BrandPostImageEvidenceLike & { sha256?: string }, context: {
+  referenceSha256?: string;
+  sourceSnapshotId?: string;
+  anchorSha256?: string;
+}): string | null {
+  if (!isReferenceGuidedScene(asset)) return null;
+  const review = asset.referenceScene;
+  if (!classifyBrandPostImageEvidence(asset).coherent) return "연출 이미지 출처가 원본/잠금 합성으로 잘못 표시되었습니다.";
+  if (!review || review.reviewStatus !== "passed") return "상품 참조 연출 이미지의 원본 대조 검토가 완료되지 않았습니다.";
+  if (review.strategyVersion !== REFERENCE_SCENE_STRATEGY_VERSION) return "연출 이미지의 검토 전략 버전을 확인할 수 없습니다.";
+  if (!context.sourceSnapshotId || review.sourceSnapshotId !== context.sourceSnapshotId) return "연출 이미지 검토 당시 상품 근거와 현재 상품 근거가 다릅니다.";
+  if (!/^[a-f0-9]{64}$/u.test(review.referenceSha256) || context.referenceSha256 !== review.referenceSha256) return "연출 이미지의 상품 원본 참조 파일이 없거나 변경되었습니다.";
+  if (!asset.sha256 || review.reviewedOutputSha256 !== asset.sha256) return "원본 대조 검토가 현재 연출 이미지 픽셀과 일치하지 않습니다.";
+  if (review.anchorSha256 && review.anchorSha256 !== context.anchorSha256) return "연출 이미지의 승인된 대표 장면 참조가 변경되었습니다.";
+  if (!REFERENCE_SCENE_REVIEW_CHECKS.every(check => review.checks?.[check] === true)) return "상품 윤곽·비율·상단·뚜껑·라벨·색상·표면 대조 검토가 모두 통과하지 않았습니다.";
+  return null;
 }

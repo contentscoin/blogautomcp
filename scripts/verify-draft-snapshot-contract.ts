@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createProductSnapshot, readProductSnapshot } from "../src/lib/draft-context-snapshot";
 import { buildPreparedDraftView } from "../src/lib/draft-context-view";
+import { SHOPPING_POST_STRATEGY } from "../src/lib/shopping-post-strategy";
 import { resolvePreparedDraftContext } from "../apps/sites/lib/draft-context";
 
 const productId = "2800ccf0-980c-45be-89bb-7cb64744232f";
@@ -79,6 +80,22 @@ assert.ok(!("context" in view), "the v2 context must not be nested under context
 assert.ok(Array.isArray(view.verifiedFacts) && (view.verifiedFacts as string[]).some((line) => line.startsWith("상품명:")), "ChatGPT reads verifiedFacts from the top level");
 assert.equal(view.systemPrompt, "system");
 assert.deepEqual(warnings, []);
+
+const shoppingView = buildPreparedDraftView({ connectKind: "SHOPPING", product: detached.product,
+  generation: { writingContract: { kind: "SHOPPING", strategyVersion: SHOPPING_POST_STRATEGY.version } },
+}, productId, "shopping_prepare", []);
+assert.deepEqual(
+  ["minimumSectionCount", "targetSectionCount", "maximumSectionCount"].map(key => (shoppingView.harness as Record<string, unknown>)[key]),
+  [5, 6, 8], "Missing shopping display bounds follow the same strategy as generation");
+assert.equal((shoppingView.harness as Record<string, unknown>).strategyVersion, SHOPPING_POST_STRATEGY.version);
+const explicitShoppingView = buildPreparedDraftView({ connectKind: "SHOPPING", product: detached.product,
+  generation: { minimumSectionCount: 8, maximumSectionCount: 11, targetSectionCount: 9 },
+}, productId, "legacy_shopping_prepare", []);
+assert.deepEqual(
+  ["minimumSectionCount", "targetSectionCount", "maximumSectionCount"].map(key => (explicitShoppingView.harness as Record<string, unknown>)[key]),
+  [8, 9, 11], "Explicit prepared contracts are preserved rather than silently narrowed");
+assert.equal((explicitShoppingView.harness as Record<string, unknown>).strategyVersion, null,
+  "Legacy context is not relabelled as the new strategy");
 
 const expectation = { productId, connectKind: "travel" };
 const legacyV1 = resolvePreparedDraftContext({ data: { version: "brand-draft-context/v1", productId } }, expectation);

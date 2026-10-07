@@ -4,10 +4,13 @@ import { formatWritingStructureGuide } from "./writing-structure-guide";
 import { EditorialProduct, EditorialTemplateId, EditorialSelection, createEditorialSelection, formatEditorialTemplate } from "./editorial-templates";
 import { formatTopicTemplateForPrompt } from "./topic-templates";
 import { formatProduct9CanvasForPrompt, type Product9Canvas } from "./product-9canvas";
+import { SHOPPING_POST_STRATEGY_VERSION, type ShoppingPostStrategyVersion } from "../../src/lib/shopping-post-strategy";
 
 export interface WritingPromptContract {
   version: "writing-prompt-contract/v1";
   kind: "SHOPPING" | "TRAVEL";
+  /** Shared with composition and approval; absent on legacy/travel contracts. */
+  strategyVersion?: ShoppingPostStrategyVersion;
   sections: { min: number; max: number };
   characters: { min: number; max: number };
   sentences: { min: number; max: number };
@@ -92,6 +95,7 @@ export function createWritingPromptContract(input: {
   return {
     version: "writing-prompt-contract/v1",
     kind: input.kind,
+    ...(input.kind === "SHOPPING" ? { strategyVersion: SHOPPING_POST_STRATEGY_VERSION } : {}),
     editorialTemplateId: editorial.id,
     editorial,
     ...(input.productUnderstanding ? { productUnderstanding: input.productUnderstanding } : {}),
@@ -131,6 +135,7 @@ export function formatWritingPromptContract(
 ): string {
   return [
     `[공유 필수 작성 계약 · ${contract.version}]`,
+    ...(contract.kind === "SHOPPING" ? [`[쇼핑 글 중심 혼합형 전략 · ${contract.strategyVersion || SHOPPING_POST_STRATEGY_VERSION}]`] : []),
     "- 관측 분포와 선택 렌즈는 아래 필수 기준을 완화하지 않습니다. 기존 제목·사실성·품질 정책도 지킵니다.",
     `- 제목 ${contract.title.min}~${contract.title.max}자, 핵심 검색어를 앞에 배치합니다. 제목·소제목에 이모지를 넣지 않습니다.`,
     `- 본문 sections는 ${contract.sections.min}~${contract.sections.max}개이며 섹션마다 원소 하나("소제목\\n\\n본문")입니다. 소제목·순서는 근거에 맞춥니다.`,
@@ -195,7 +200,7 @@ export function formatDraftSubmissionNextAction(): string {
     "qualityChecklist를 내부 검수한 JSON 원고를 post_submit_draft로 제출하고 작업을 job_get으로 확인하세요.",
     "contentQuality.canPublish가 false이면 score만 보지 말고 code, blockers, 실패 signals와 compositionQualityReport를 구분하세요.",
     "본문 사실성·분량·섹션·반복·고지 등 텍스트 실패가 명시된 경우에만 해당 원인을 고쳐 새 idempotencyKey로 원고를 다시 제출하세요.",
-    "composition-quality, representative-image, thumbnail 등 이미지·배치 실패만 있으면 원고를 재작성하거나 재제출하지 마세요. 기존 원고를 유지하고 이미지·구성 보완 단계로 넘기세요: post_get_draft 의 imageSlots 에서 missing 또는 generationMissing 이 0보다 큰 파트의 imagePrompt 로 ChatGPT 내장 이미지 생성을 실행하고 post_apply_section_image 로 붙입니다. PC 는 이미지를 생성하지 않습니다.",
+    "composition-quality, representative-image, thumbnail 등 이미지·배치 실패만 있으면 원고를 재작성하거나 재제출하지 마세요. post_get_draft 의 imageSlots에서 부족한 파트의 생성 가능 여부를 확인하세요. 쇼핑은 참조 연출이 허용된 파트만 준비된 referenceImages를 실제로 첨부하고 imagePrompt로 생성한 뒤, 같은 작업의 referenceHashes를 순서대로 post_apply_section_image에 전달합니다. 참조가 없거나 기능·수치 근거용 파트이면 임의 생성하지 말고 검증된 원본이나 근거 자료 카드로 보완하세요. 여행은 해당 파트의 imagePrompt를 따릅니다.",
     "composition-quality 안에 본문 분량·섹션 실패도 있으면 그 텍스트 항목만 보강합니다. 원인이 불명확하면 실패 상세를 조회하고 재작성을 추측하지 마세요.",
     "텍스트 QC 통과나 100점은 이미지 준비·전체 발행 가능을 의미하지 않습니다. 원고를 사용자에게 먼저 보여주고 발행은 별도 확인을 받으세요.",
   ].join(" ");

@@ -15,6 +15,7 @@ import { getDraftApprovalBlockers, getRepairStatus, getDraftRecheckError } from 
 import PostAnglePanel from "@/components/PostAnglePanel";
 import ExperienceNotesPanel from "@/components/ExperienceNotesPanel";
 import { getPostAngle } from "../../scripts/lib/topic-templates/angles";
+import { REFERENCE_SCENE_CAPTION, type BrandPostImageEvidenceLike } from "@/lib/brand-post-image-evidence";
 
 type ContentMode = "product" | "topic" | "review";
 type ReviewCategory = "place" | "food" | "travel" | "parenting" | "product";
@@ -75,7 +76,7 @@ interface BrandPostDraftPreview {
     role: "hero" | "body";
     sectionId?: string | null;
     imageIntent?: string;
-    provenance?: "ORIGINAL" | "LOCKED_PRODUCT" | "GENERATED_BACKGROUND" | "EDITORIAL_CARD";
+    provenance?: BrandPostImageEvidenceLike["provenance"];
   }>;
   imageSlots?: Array<{
     sectionId: string;
@@ -98,7 +99,7 @@ interface BrandPostDraftPreview {
       role: "hero" | "body";
       sectionId?: string | null;
       imageIntent?: string;
-      provenance?: "ORIGINAL" | "LOCKED_PRODUCT" | "GENERATED_BACKGROUND" | "EDITORIAL_CARD";
+      provenance?: BrandPostImageEvidenceLike["provenance"];
     }>;
   }>;
   contentQuality?: {
@@ -430,11 +431,21 @@ const waitForMilliseconds = (milliseconds: number) => new Promise<void>((resolve
 });
 
 function brandImageProvenanceLabel(value?: string): string {
-  if (value === "LOCKED_PRODUCT") return "원본 상품 잠금";
+  if (value === "LOCKED_PRODUCT") return "원본 상품 잠금 합성";
   if (value === "ORIGINAL") return "수집 원본";
   if (value === "EDITORIAL_CARD") return "에디토리얼 합성";
   if (value === "GENERATED_BACKGROUND") return "AI 생성 배경 이미지";
+  if (value === "GENERATED_SCENE") return "상품 원본 참조 AI 연출";
   return "이미지";
+}
+
+function brandImagePolicySummary(preview: BrandPostDraftPreview): string {
+  if (preview.connectKind === "TRAVEL") return "여행 전용 에디토리얼 이미지";
+  const provenances = [...new Set([
+    ...(preview.imageAssets || []).map(asset => asset.provenance),
+    ...(preview.imageSlots || []).flatMap(slot => slot.assets.map(asset => asset.provenance)),
+  ].filter((value): value is NonNullable<BrandPostImageEvidenceLike["provenance"]> => Boolean(value)))];
+  return provenances.length ? provenances.map(brandImageProvenanceLabel).join(" · ") : "쇼핑 이미지 · 출처 확인 필요";
 }
 
 export default function Dashboard() {
@@ -2898,7 +2909,7 @@ export default function Dashboard() {
               <div>
                 <p className="text-xs font-semibold text-violet-600">{draftPreview.connectKind === "SHOPPING" ? "쇼핑커넥트" : "여행커넥트"} 고품질 패키지</p>
                 <h2 className="mt-1 text-xl font-bold text-slate-900">{draftPreview.title}</h2>
-                <p className="mt-1 text-xs text-slate-500">{draftPreview.imagePolicy === "LOCKED_PRODUCT_OR_ORIGINAL" ? "상품 원본 잠금 적용 · 변형 금지" : "여행 전용 에디토리얼 이미지"} · {draftPreview.composition?.contractVersion || "호환 초안"}</p>
+                <p className="mt-1 text-xs text-slate-500">{brandImagePolicySummary(draftPreview)} · {draftPreview.composition?.contractVersion || "호환 초안"}</p>
               </div>
               <button onClick={() => setDraftPreview(null)} className="rounded-lg px-3 py-1 text-slate-500 hover:bg-slate-100">닫기</button>
             </div>
@@ -2967,6 +2978,7 @@ export default function Dashboard() {
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img src={asset.previewUrl} alt={`${draftPreview.title} 대표 썸네일`} className="aspect-square w-full object-cover" />
                       </div>
+                      {asset.provenance === "GENERATED_SCENE" && <p className="mt-2 text-xs leading-5 text-slate-600">{REFERENCE_SCENE_CAPTION}</p>}
                     </div>
                   ))}
 
@@ -3011,6 +3023,7 @@ export default function Dashboard() {
                                   {draftImageActionKey === `asset:${asset.assetKey}` ? "생성 중…" : "다시 생성"}
                                 </button>
                               </figcaption>
+                              {asset.provenance === "GENERATED_SCENE" && <p className="px-3 pb-3 text-xs leading-5 text-slate-600">{REFERENCE_SCENE_CAPTION}</p>}
                             </figure>
                           ))}
                         </div>
@@ -3025,17 +3038,21 @@ export default function Dashboard() {
               )}
               {draftPreviewTab === "thumbnail" && (
                 <div className="grid gap-6 md:grid-cols-[minmax(0,520px)_1fr]">
-                  <div className="aspect-square overflow-hidden rounded-2xl bg-slate-950">
+                  <div>
+                    <div className="aspect-square overflow-hidden rounded-2xl bg-slate-950">
                     {draftPreview.heroPreviewDataUrl ? (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img src={draftPreview.heroPreviewDataUrl} alt="초안 대표 썸네일" className="h-full w-full object-contain" />
                     ) : <div className="flex h-full items-center justify-center p-8 text-center text-sm text-slate-400">대표 이미지 미리보기를 불러올 수 없습니다.</div>}
+                    </div>
+                    {(draftPreview.imageAssets || []).find(asset => asset.role === "hero")?.provenance === "GENERATED_SCENE" &&
+                      <p className="mt-2 text-xs leading-5 text-slate-600">{REFERENCE_SCENE_CAPTION}</p>}
                   </div>
                   <div className="space-y-3">
                     <div className="rounded-xl border border-slate-200 p-4"><p className="text-xs text-slate-500">캔버스</p><p className="mt-1 font-bold text-slate-900">{draftPreview.thumbnailSpec ? `${draftPreview.thumbnailSpec.canvas.width}×${draftPreview.thumbnailSpec.canvas.height} · ${draftPreview.thumbnailSpec.canvas.aspect}` : "기존 비율"}</p></div>
                     <div className="rounded-xl border border-slate-200 p-4"><p className="text-xs text-slate-500">스타일</p><p className="mt-1 font-bold text-slate-900">{draftPreview.thumbnailSpec?.style || "호환 스타일"}</p></div>
-                    <div className="rounded-xl border border-slate-200 p-4"><p className="text-xs text-slate-500">소스 정책</p><p className="mt-1 text-sm font-semibold text-slate-900">{draftPreview.thumbnailSpec?.sourcePolicy || draftPreview.imagePolicy}</p></div>
-                    <p className="rounded-xl bg-blue-50 p-4 text-sm text-blue-800">작은 라벨·메인 카피·실사 피사체 3요소만 사용합니다. 쇼핑 상품은 원본 RGB와 비율을 잠그고 배경만 연출합니다.</p>
+                    <div className="rounded-xl border border-slate-200 p-4"><p className="text-xs text-slate-500">이미지 출처</p><p className="mt-1 text-sm font-semibold text-slate-900">{brandImageProvenanceLabel((draftPreview.imageAssets || []).find(asset => asset.role === "hero")?.provenance)}</p></div>
+                    <p className="rounded-xl bg-blue-50 p-4 text-sm text-blue-800">저장된 대표 이미지의 구성과 문구를 확인해 주세요.</p>
                     {(draftPreview.imageAssets || []).some((asset) => asset.role === "hero") && (
                       <button
                         type="button"

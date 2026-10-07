@@ -34,7 +34,10 @@ for (const connectKind of ["SHOPPING", "TRAVEL"] as const) {
   const tags = document.renderNodes.filter(node => node.kind === "hashtags");
   assert.equal(tags.length, 1);
   assert.deepEqual(tags[0].values, ["서울", "안내"]);
-  assert.equal(document.renderNodes.at(-1)?.kind, "disclosure");
+  const disclosureNode = connectKind === "SHOPPING" ? document.renderNodes[0] : document.renderNodes.at(-1);
+  assert.equal(disclosureNode?.kind, "disclosure");
+  assert.ok(disclosureNode?.kind === "disclosure" && disclosureNode.placement === (connectKind === "SHOPPING" ? "top" : "bottom"));
+  assert.equal(document.renderNodes.filter(node => node.kind === "disclosure").length, 1);
   assert.equal(document.renderNodes.filter(node => node.kind === "connectCard").length, 2);
   for (const node of document.renderNodes) {
     if (node.kind === "paragraph") assert.doesNotMatch(node.text, /(?:^|\n)[QA]\.\s*(?:\n|$)/);

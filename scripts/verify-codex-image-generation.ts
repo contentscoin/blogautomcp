@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import {
   CODEX_IMAGE_MODEL_LABEL,
   buildCodexImageInstruction,
@@ -20,16 +21,18 @@ type Behaviour = "workspace" | "generated" | "nothing" | "auth";
 function mockCodex(behaviour: (prompt: string, call: number) => Behaviour, codexHome: string) {
   const threads: Array<Record<string, unknown>> = [];
   const prompts: string[] = [];
+  const inputs: unknown[] = [];
   let active = 0;
   let peak = 0;
   return {
-    threads, prompts, peak: () => peak,
+    threads, prompts, inputs, peak: () => peak,
     create: async () => ({
       startThread(options: Record<string, unknown>) {
         threads.push(options);
         const call = threads.length;
         return {
           async runStreamed(input: unknown) {
+            inputs.push(input);
             const text = typeof input === "string" ? input : (input as Array<{ type: string; text?: string }>).find((part) => part.type === "text")!.text!;
             prompts.push(text);
             const mode = behaviour(text, call);
@@ -74,6 +77,30 @@ async function main() {
     assert.equal(CODEX_IMAGE_MODEL_LABEL, "gpt-image-2");
     assert.match(buildCodexImageInstruction("P", 0), /이미지 생성 도구\(image_generation\)/u);
     assert.match(buildCodexImageInstruction("P", 2), /첨부한 2장은 장소 분위기 참고용/u);
+    assert.match(buildCodexImageInstruction("P", 2, "product"), /실제 참조 이미지로 모두 전달/u);
+    assert.doesNotMatch(buildCodexImageInstruction("P", 2, "product"), /글자·로고를 옮기지/u);
+
+    // Product references reach the SDK as actual ordered local_image attachments.
+    const source = path.join(root, "source.png"), acceptedAnchor = path.join(root, "anchor.png");
+    fs.writeFileSync(source, PNG); fs.writeFileSync(acceptedAnchor, Buffer.concat([PNG, Buffer.from("anchor")]));
+    const refs = [source, acceptedAnchor];
+    const productJob = job("product", { referenceMode: "product", referenceImagePaths: refs,
+      requiredReferenceHashes: refs.map(file => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")) });
+    const productCodex = mockCodex(() => "workspace", codexHome);
+    let generatedOnlyQc = 0;
+    const productResults = await runCodexImageBatch([productJob], { createCodex: productCodex.create, codexHome,
+      runQc: async () => { generatedOnlyQc += 1; return ["text"]; }, onResult: async () => {} });
+    assert.ok(productResults[0].localPath);
+    assert.deepEqual((productCodex.inputs[0] as Array<{ type: string; path?: string }>).filter(item => item.type === "local_image").map(item => item.path), refs);
+    assert.equal(generatedOnlyQc, 0, "a generated-only checklist cannot approve/regenerate reference product scenes");
+    fs.writeFileSync(source, Buffer.concat([PNG, Buffer.from("changed")]));
+    const changedReference = await runCodexImageBatch([productJob], { createCodex: productCodex.create, codexHome, onResult: async () => {} });
+    assert.equal(changedReference[0].localPath, null, "even a cached output cannot hide changed required references");
+    assert.match(changedReference[0].error!, /PRODUCT_REFERENCE_CHANGED/);
+    assert.equal(productCodex.threads.length, 1, "reference mutation never triggers another generation");
+    const offlineReference = await runCodexImageBatch([productJob], { createCodex: async () => { throw new Error("SDK unavailable"); },
+      codexHome, onResult: async () => {} });
+    assert.match(offlineReference[0].error!, /PRODUCT_REFERENCE_CHANGED/, "SDK setup failure cannot bypass reference integrity on cached outputs");
 
     // 1. Thread isolation + result collection (workspace out.png, then generated_images/<threadId>).
     const codex = mockCodex((_, call) => (call === 1 ? "workspace" : "generated"), codexHome);
@@ -115,6 +142,10 @@ async function main() {
     const empty = mockCodex(() => "nothing", codexHome);
     const [none] = await runCodexImageBatch([job("e")], { createCodex: empty.create, codexHome, qc: false, onResult: async () => {} });
     assert.match(none!.error!, /생성 이미지를 찾지 못했습니다/u);
+    assert.equal(none.submissionState, "uncertain");
+    const [uncertainRetry] = await runCodexImageBatch([job("e")], { createCodex: empty.create, codexHome, qc: false, onResult: async () => {} });
+    assert.match(uncertainRetry.error!, /IMAGE_RESUME_REQUIRED/);
+    assert.equal(empty.threads.length, 1, "missing provider output never silently submits another paid request");
 
     // 5. QC: a failed checklist item triggers exactly one reinforced regeneration; leftovers become warnings.
     const qcCodex = mockCodex(() => "workspace", codexHome);
@@ -173,6 +204,22 @@ async function main() {
       { runCodex: fakeCodex, runBrowser: fakeBrowser, browserEnabled: false });
     assert.equal(browserSeen.length, 0, "no browser fallback when browser automation is off");
     assert.match(final.get(0)!.error!, /^CODEX_IMAGE_FAILED/u);
+    browserSeen.length = 0;
+    final.clear();
+    const uncertainCodex: typeof runCodexImageBatch = async (subset, options) => {
+      const results: ImageBatchResult[] = subset.map(item => ({ id: item.id, localPath: null, submissionState: "uncertain", error: "Codex response timed out" }));
+      for (const [index, result] of results.entries()) await options.onResult(result, index);
+      return results;
+    };
+    await runImageBatch([job("uncertain")], root, async (result, index) => { final.set(index, result); }, undefined,
+      { runCodex: uncertainCodex, runBrowser: fakeBrowser, browserEnabled: true });
+    assert.equal(browserSeen.length, 0, "ambiguous Codex submission cannot fall back into a duplicate browser request");
+    assert.match(final.get(0)!.error!, /IMAGE_RESUME_REQUIRED/);
+    const late = path.join(root, "raw-e.codex-1", "out.png");
+    fs.writeFileSync(late, PNG);
+    const [recovered] = await runCodexImageBatch([job("e")], { createCodex: empty.create, codexHome, qc: false, onResult: async () => {} });
+    assert.ok(recovered.localPath, "late output from the original request is recovered without regeneration");
+    assert.equal(empty.threads.length, 1);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
