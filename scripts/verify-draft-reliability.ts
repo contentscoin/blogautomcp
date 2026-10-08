@@ -14,6 +14,7 @@ import { ensureStaticDecodableImage } from "./lib/product-photo-source";
 import { replanShoppingImageCoverage, type ImageReplanDependencies } from "../src/lib/brand-post-image-replan";
 import { refreshStoredContentQuality, type BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
 import { planQualityConvergence } from "./lib/quality-convergence";
+import { selectPreparedRevisionSectionIndexes } from "./lib/prepared-revision-policy";
 import type { BrandLinkContentReadiness } from "./lib/brandlink-content-readiness";
 import { isShoppingFactCardPath, SHOPPING_FACT_CARD_AUDIT_RULE_EN } from "./lib/shopping-fact-card-rule";
 import { SHOPPING_POST_STRATEGY_VERSION } from "../src/lib/shopping-post-strategy";
@@ -93,7 +94,39 @@ async function main() {
   const leaked = "자외선 차단\n\nSPF50+ PA++++ 표기예요. 작성 지침에 따라 정리했어요. 덕분에 외출 전에 편해요.";
   assert.equal(stripInternalGuidanceSentences(leaked), "자외선 차단\n\nSPF50+ PA++++ 표기예요. 덕분에 외출 전에 편해요.");
   assert.equal(stripInternalGuidanceSentences("무게\n\n2.4kg이에요."), "무게\n\n2.4kg이에요.");
-  assert.match(agent, /severe\s*\n?\s*\? defaultSectionIndexes/u, "badly failing saved drafts are repaired as a whole");
+  const revisionReadiness = {
+    canPublish: false, verdict: "quality", code: "quality-score-below-threshold", score: 30, blockers: [], signals: [],
+    qualityFailures: [], quality: { score: 30, passScore: 70, sourceEvidence: { level: "rich", sufficient: true },
+      repetition: { samples: [], duplicateOpeningCount: 0 }, categories: [
+        { key: "clarity", status: "fail", label: "명확한 표현", notes: ["상세페이지 확인 안내 과다"], score: 0, maxScore: 10 },
+        { key: "usefulness", status: "fail", label: "추천 근거", notes: ["추천 대상 근거 부족"], score: 0, maxScore: 10 },
+        { key: "productEvidence", status: "pass", label: "확인 근거", notes: [], score: 10, maxScore: 10 },
+      ] },
+  } as unknown as BrandLinkContentReadiness;
+  const revisionSections = ["확인한 용량\n\n저장 상세의 500 ml 용량을 반영한 정상 문단입니다.",
+    "추천 대상\n\n상세 페이지를 확인하세요. 구매 대상을 확인하고 추천해요. 옵션을 확인하세요.",
+    "구성품\n\n본품 한 개와 설명서가 포함됩니다.", "커넥트 고지\n\n판매 발생 시 수수료를 받습니다."];
+  const revisionPolicy = { current: revisionReadiness, sections: revisionSections,
+    plan: planQualityConvergence({ current: revisionReadiness, attempt: 0, maximumAttempts: 3 }),
+    requestedIndexes: [], qualityConvergence: true };
+  assert.deepEqual(selectPreparedRevisionSectionIndexes({ ...revisionPolicy, incrementalOnly: false }), [0, 1, 2],
+    "default/rewrite severe convergence keeps the full body scope and excludes disclosure");
+  assert.deepEqual(selectPreparedRevisionSectionIndexes({ ...revisionPolicy, incrementalOnly: true }), [1],
+    "incremental repair targets only the paragraph linked to observed failures");
+  assert.deepEqual(selectPreparedRevisionSectionIndexes({ ...revisionPolicy, requestedIndexes: [0], incrementalOnly: true }), [],
+    "requesting a healthy paragraph cannot bypass failure-linked scope");
+  const globalReadiness = { ...revisionReadiness, code: "too-short-content",
+    blockers: [{ code: "too-short-content", tier: "structure", reason: "전체 분량 부족" }],
+    quality: { ...revisionReadiness.quality, categories: revisionReadiness.quality.categories.map(category => ({
+      ...category, key: `unmapped-${category.key}`,
+    })) },
+  } as unknown as BrandLinkContentReadiness;
+  const globalPolicy = { ...revisionPolicy, current: globalReadiness,
+    plan: planQualityConvergence({ current: globalReadiness, attempt: 0, maximumAttempts: 3 }) };
+  assert.deepEqual(selectPreparedRevisionSectionIndexes({ ...globalPolicy, incrementalOnly: true }), [],
+    "global failures without a reliable paragraph target fail closed instead of guessing");
+  assert.deepEqual(selectPreparedRevisionSectionIndexes({ ...globalPolicy, requestedIndexes: [0, 1, 2], incrementalOnly: true }), [],
+    "explicit full scope cannot bypass missing failure-linked targets");
 
   // 5. Animated or warning-laden seller images get a static sibling; undecodable ones are skipped.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "draft-reliability-"));
