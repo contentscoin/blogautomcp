@@ -33,7 +33,7 @@ const json = (body, options = {}) => ({ status: options.status || 200, body: clo
 function harness() {
   const state = { now: '2026-09-07T03:00:00.000Z', authorized: true, updateBlocked: false,
     products: new Map(), manifests: new Map(), jobs: new Map(), runs: [], saves: 0,
-    locks: 0, activities: 0, productReads: 0, countReads: 0, runnerError: null, progress: new Map() };
+    locks: 0, activities: 0, productReads: 0, countReads: 0, runnerError: null, progress: new Map(), publicationAttempts: new Map(), missingDraftFiles: new Set() };
   class FakeDate extends Date {
     constructor(...args) { super(...(args.length ? args : [state.now])); }
     static now() { return Date.parse(state.now); }
@@ -58,6 +58,17 @@ function harness() {
     './material-library': library,
     './material-job-store': { listMaterialJobs: () => [...state.jobs.values()].map(clone) },
     './draft-progress': { readDraftProgress: id => state.progress.get(id) || null },
+  });
+  const repairs = load('src/lib/material-repair-candidates.ts', {
+    'node:fs': {
+      statSync: filename => { if (state.missingDraftFiles.has(filename)) throw new Error('missing manuscript'); return { isFile: () => true }; },
+      readFileSync: () => 'saved manuscript',
+    },
+    './db': { prisma: { brandLink: { findMany: async ({ where }) => [...state.products.values()].filter(p => !where || p.connectKind === where.connectKind) } } },
+    './material-library': library,
+    './brand-post-package': { readBrandPostPackage: id => state.manifests.get(id) || null },
+    './publish-attempt': { readPublishAttempt: id => state.publicationAttempts.get(id) || null },
+    './material-job-store': { listMaterialJobs: () => [...state.jobs.values()].map(clone) },
   });
   const api = load('src/lib/material-api.ts', {
     'node:crypto': crypto,
@@ -91,6 +102,7 @@ function harness() {
     './material-job-runner': { runMaterialJob: async job => { state.runs.push(clone(job)); if (state.runnerError) throw state.runnerError; } },
     './bulk-schedule-plan': dates,
     './material-failed-candidates': failures,
+    './material-repair-candidates': repairs,
   }, { Date: FakeDate });
   function product(index = 0, status = 'READY') {
     const id = `product_${String(index).padStart(4, '0')}`;
@@ -101,7 +113,7 @@ function harness() {
     return { productId: id, revision: library.getMaterial(id).revision };
   }
   function request(body, query = '') { return { nextUrl: new URL(`http://fixture.invalid/api/materials${query}`), json: async () => body }; }
-  return { state, api, product, request, library, failures,
+  return { state, api, product, request, library, failures, repairs,
     post: (body, kind = 'publish') => api.materialsPost(request(body), kind),
     async settle() { await new Promise(resolve => setImmediate(resolve)); },
   };
@@ -369,4 +381,79 @@ test('terminal material job remains workflow-pending while detached image work i
   const settled = await h.api.materialsGet(h.request(null, '?jobId=terminal-job'));
   assert.equal(settled.body.data.workflowPending, false);
   assert.equal(settled.body.data.materials[0].status, 'READY');
+});
+
+function blocked(h, index = 0) {
+  const item = h.product(index);
+  h.state.manifests.get(item.productId).approvedAt = null;
+  return item;
+}
+
+test('repair listing selects saved unready manuscripts, including approval-only items, without requiring previous failures', async () => {
+  const h = harness(); const needs = blocked(h, 0); h.product(2); h.product(4, 'PUBLISHED');
+  const missing = blocked(h, 6); h.state.manifests.delete(missing.productId);
+  const absentFile = blocked(h, 8); h.state.missingDraftFiles.add(h.state.manifests.get(absentFile.productId).markdownPath);
+  const running = blocked(h, 10); h.state.manifests.get(running.productId).imageGeneration = { status: 'running' };
+  const response = await h.api.materialsGet(h.request(null));
+  assert.equal(response.body.data.repairCandidateCount, 1);
+  assert.deepEqual(response.body.data.repairCandidates.map(item => item.productId), [needs.productId]);
+  assert.equal(response.body.data.failedCandidateCount, 0, 'repair and failed-writing selection serve different requirements');
+});
+
+test('entire repair handles sixty saved blocked items and dispatches no publication/full-rewrite mode', async () => {
+  const h = harness(); for (let i = 0; i < 60; i++) blocked(h, i);
+  const result = await h.api.materialsRepairBlockedPost(h.request({ sourceJobId: 'repair-all' }));
+  assert.equal(result.status, 202); assert.equal(result.body.data.acceptedCount, 60);
+  assert.equal(h.state.runs[0].kind, 'repair'); assert.equal(h.state.runs[0].publishMode, undefined);
+  assert.ok(result.body.data.items.every(item => item.verificationStatus === 'BLOCKED'));
+  await h.settle(); assert.equal(h.state.locks, 0); assert.equal(h.state.activities, 0);
+});
+
+test('repair intent identity replays original targets after completion rather than selecting later blocked drafts', async () => {
+  const h = harness(); const item = blocked(h, 0);
+  const input = { connectKind: 'shopping', sourceJobId: 'repair-identity' };
+  const first = await h.api.materialsRepairBlockedPost(h.request(input)); await h.settle();
+  h.state.manifests.get(item.productId).approvedAt = h.state.now;
+  const saved = h.state.jobs.get(first.body.data.jobId); saved.status = 'completed'; saved.items[0].status = 'ready';
+  blocked(h, 2);
+  const replay = await h.api.materialsRepairBlockedPost(h.request({ ...input, connectKind: 'SHOPPING' }));
+  assert.equal(replay.status, 200); assert.equal(replay.body.data.jobId, first.body.data.jobId);
+  assert.deepEqual(replay.body.data.items.map(item => item.productId), [item.productId]); assert.equal(h.state.runs.length, 1);
+  const conflict = await h.api.materialsRewriteFailedPost(h.request(input));
+  assert.equal(conflict.status, 409); assert.equal(conflict.body.code, 'REQUEST_ID_CONFLICT');
+});
+
+test('double repair clicks are serialized through the same exclusive material lock', async () => {
+  const h = harness(); blocked(h);
+  const results = await Promise.all([0, 1].map(() => h.api.materialsRepairBlockedPost(h.request({ sourceJobId: 'repair-double' }))));
+  assert.ok(results.some(result => result.status === 202)); assert.equal(h.state.runs.length, 1); assert.equal(h.state.saves, 1);
+  await h.settle();
+});
+
+test('explicit repair rejects restored, missing and uncertain items before saving a job', async () => {
+  for (const change of [h => { h.state.manifests.get('product_0000').approvedAt = h.state.now; },
+    h => { h.state.manifests.delete('product_0000'); },
+    h => { h.state.publicationAttempts.set('product_0000', { stage: 'OUTCOME_UNKNOWN' }); }]) {
+    const h = harness(); const item = blocked(h); change(h);
+    const response = await h.api.materialsRepairBlockedPost(h.request({ productIds: [item.productId] }));
+    assert.equal(response.status, 409); assert.equal(response.body.code, 'MATERIAL_REPAIR_SELECTION_CHANGED'); assertNoDispatch(h);
+  }
+});
+
+test('repair empty identity stays empty on replay even when new blocked manuscripts appear', async () => {
+  const h = harness(); const input = { sourceJobId: 'repair-empty' };
+  const first = await h.api.materialsRepairBlockedPost(h.request(input)); blocked(h);
+  const replay = await h.api.materialsRepairBlockedPost(h.request(input));
+  assert.equal(replay.body.data.jobId, first.body.data.jobId); assert.equal(replay.body.data.items.length, 0); assert.equal(h.state.runs.length, 0);
+});
+
+test('repair malformed/auth/update/busy requests cannot mutate', async () => {
+  for (const input of [[], 'unsafe', null, { connectKind: 'wrong' }, { productIds: [] }, { productIds: ['../unsafe'] }, { sourceJobId: '' }, { publishMode: 'now' }]) {
+    const h = harness(); const response = await h.api.materialsRepairBlockedPost(h.request(input));
+    assert.equal(response.status, 409); assertNoDispatch(h);
+  }
+  const h = harness(); blocked(h); h.product(2, 'DRAFTING');
+  assert.equal((await h.api.materialsRepairBlockedPost(h.request({}))).status, 409); assertNoDispatch(h);
+  h.state.authorized = false; assert.equal((await h.api.materialsRepairBlockedPost(h.request({}))).status, 401);
+  h.state.authorized = true; h.state.updateBlocked = true; assert.equal((await h.api.materialsRepairBlockedPost(h.request({}))).status, 423);
 });

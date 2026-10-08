@@ -121,8 +121,8 @@ import { shouldAcceptQualityRepair } from "./lib/quality-repair-policy";
 import {
   formatQualityConvergenceInstructions,
   planQualityConvergence,
-  selectQualityRepairSectionIndexes,
 } from "./lib/quality-convergence";
+import { selectPreparedRevisionSectionIndexes } from "./lib/prepared-revision-policy";
 import { selectVerifiedProductPhoto } from "./lib/product-photo-review";
 import { recoverProductPhotoRegion } from "./lib/product-photo-region";
 import { chooseProductName } from "./lib/product-name-identity";
@@ -9865,13 +9865,14 @@ async function runPreparedPostRevision(
 ): Promise<void> {
   const outputDir = process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim();
   if (!outputDir) throw new Error("BRANDLINK_PREPARE_OUTPUT_DIR 이 필요합니다.");
-  const request = JSON.parse(fs.readFileSync(requestPath, "utf8")) as { instructions?: unknown; sectionIndexes?: unknown; qualityConvergence?: unknown };
+  const request = JSON.parse(fs.readFileSync(requestPath, "utf8")) as { instructions?: unknown; sectionIndexes?: unknown; qualityConvergence?: unknown; incrementalOnly?: unknown };
   const instructions = typeof request.instructions === "string" ? request.instructions.trim() : "";
   if (!instructions) throw new Error("수정 지시가 비어 있습니다.");
   const requestedSectionIndexes = Array.isArray(request.sectionIndexes)
     ? request.sectionIndexes.filter((value): value is number => Number.isInteger(value))
     : [];
   const qualityConvergence = request.qualityConvergence === true;
+  const incrementalOnly = request.incrementalOnly === true;
   const prepared = loadPreparedBrandLinkPostOverride({ requireApproval: false });
   if (!prepared?.composition || !prepared.manifest) throw new Error("수정할 저장 원고가 없습니다.");
   const snapshot = prepared.sourceSnapshot;
@@ -9908,7 +9909,6 @@ async function runPreparedPostRevision(
   // The last section is the statutory disclosure and is never a model-edit target.
   const defaultSectionIndexes = prepared.post.sections.slice(0, -1).map((_, index) => index);
   const sectionIndexes = requestedSectionIndexes.filter((index) => defaultSectionIndexes.includes(index));
-  const manualAllowedIndexes = sectionIndexes.length ? sectionIndexes : defaultSectionIndexes;
   const assessCandidate = (candidate: { title: string; sections: string[]; hashtags: string[] }) => {
     const candidateComposition = resolveRevisedComposition(candidate);
     return getBrandLinkContentReadiness({
@@ -9931,7 +9931,7 @@ async function runPreparedPostRevision(
   // 저장 원고에 남은 내부 지침 문장은 후보 비교 전에 규칙으로 지운다. 지운 것 자체가 적용된 수정이다.
   const withoutInternalGuidance = (sections: string[]) => sections.map((section, index) =>
     index === sections.length - 1 ? section : stripInternalGuidanceSentences(section));
-  const startSections = withoutInternalGuidance(prepared.post.sections);
+  const startSections = incrementalOnly ? [...prepared.post.sections] : withoutInternalGuidance(prepared.post.sections);
   let selected = { title: prepared.post.title, sections: startSections, hashtags: prepared.post.hashtags };
   const beforeQuality = assessCandidate({ ...selected, sections: prepared.post.sections });
   let selectedQuality = assessCandidate(selected);
@@ -9941,6 +9941,7 @@ async function runPreparedPostRevision(
   let previousFeedback = "";
   const maximumAttempts = qualityConvergence ? 3 : 1;
   const allowTitleChange = requestsFreeformTitleRevision(instructions);
+  const acceptedIncrementalIndexes = new Set<number>();
   const writingContract = createWritingPromptContract({ kind: connectKind, product: { name, description, features },
     minimumSections: selected.sections.length, maximumSections: selected.sections.length,
     targetCharacters: getPostCompositionContract(connectKind).targetCharacters,
@@ -9962,22 +9963,12 @@ async function runPreparedPostRevision(
     if (convergencePlan && convergencePlan.action !== "repair-text") {
       throw new Error(`QUALITY_REPAIR_EXHAUSTED: ${convergencePlan.reason} ${diagnostic}`);
     }
-    // 품질 항목 절반 이상이 실패한 원고는 문단 몇 개만 고쳐서는 수렴하지 않는다. 본문 전체를 한 번에 보강 대상으로 둔다.
-    const failingCategoryCount = selectedQuality.quality.categories.filter((category) => category.status === "fail").length;
-    const severe = qualityConvergence && sectionIndexes.length === 0 &&
-      failingCategoryCount * 2 >= Math.max(1, selectedQuality.quality.categories.length);
-    const allowedIndexes = severe
-      ? defaultSectionIndexes
-      : qualityConvergence
-      ? selectQualityRepairSectionIndexes({
-          current: selectedQuality,
-          sections: selected.sections,
-          plan: convergencePlan,
-          requestedIndexes: sectionIndexes,
-        })
-      : manualAllowedIndexes;
+    const allowedIndexes = selectPreparedRevisionSectionIndexes({ current: selectedQuality, sections: selected.sections,
+      plan: convergencePlan, requestedIndexes: sectionIndexes, qualityConvergence, incrementalOnly });
     if (allowedIndexes.length === 0) {
-      throw new Error("QUALITY_REPAIR_EXHAUSTED: 품질 실패와 연결된 수정 대상 문단을 찾지 못했습니다.");
+      throw new Error(incrementalOnly
+        ? "QUALITY_REPAIR_EXHAUSTED: 소재 보완에서 실패와 연결된 문단을 확인하지 못해 기존 원고를 보존했습니다. 전체 글 교체가 필요하면 실패 소재 재작성 버튼을 사용하세요."
+        : "QUALITY_REPAIR_EXHAUSTED: 품질 실패와 연결된 수정 대상 문단을 찾지 못했습니다.");
     }
     const convergenceTargets = convergencePlan ? formatQualityConvergenceInstructions(convergencePlan) : "";
     const attemptInstructions = qualityConvergence
@@ -10016,7 +10007,10 @@ async function runPreparedPostRevision(
           allowedIndexes,
           { allowTitleChange: allowCandidateTitleChange },
         );
-        candidate = { title: revision.title, sections: withoutInternalGuidance(revision.sections), hashtags: selected.hashtags };
+        const candidateSections = incrementalOnly
+          ? revision.sections.map((section, index) => allowedIndexes.includes(index) ? stripInternalGuidanceSentences(section) : section)
+          : withoutInternalGuidance(revision.sections);
+        candidate = { title: revision.title, sections: candidateSections, hashtags: selected.hashtags };
       }
       assertUntargetedSectionHashesUnchanged(selected.sections, candidate.sections, allowedIndexes);
       lastCandidateQuality = assessCandidate(candidate);
@@ -10030,6 +10024,7 @@ async function runPreparedPostRevision(
         selected = candidate;
         selectedQuality = lastCandidateQuality;
         selectedResult = candidateResult;
+        if (incrementalOnly) allowedIndexes.forEach(index => acceptedIncrementalIndexes.add(index));
         applied = true;
         console.log(`   자동 보강 후보 ${attempt}/${maximumAttempts} 채택: ${beforeQuality.score}→${selectedQuality.score}점 (${selectedQuality.code})`);
       } else {
@@ -10055,6 +10050,7 @@ async function runPreparedPostRevision(
       `QUALITY_REPAIR_EXHAUSTED: ${maximumAttempts}개 후보를 검사했지만 승인 기준을 모두 통과하지 못해 기존 원고를 보존했습니다. ${feedbackFor(selectedQuality)}`,
     );
   }
+  if (incrementalOnly) assertUntargetedSectionHashesUnchanged(prepared.post.sections, selected.sections, [...acceptedIncrementalIndexes]);
   const post: GeneratedPostPreview = { ...prepared.post, title: selected.title, sections: selected.sections,
     hashtags: selected.hashtags, generationSource: "AI", rawResponse: "saved-material:revise", assembled: selectedResult,
     qualityRepair: { attempted: true, applied, beforeScore: beforeQuality.score, afterScore: selectedQuality.score,

@@ -238,9 +238,12 @@ export function isSeverelyFailingDraft(readiness: BrandLinkContentReadiness | nu
 export async function runMaterialPreparation(id: string, deps: WorkflowDeps = defaults, options: {
   rewriteFailed?: boolean;
   beforeRewrite?: () => Promise<void>;
+  incrementalOnly?: boolean;
+  beforeRepair?: () => Promise<void>;
 } = {}) {
   const base = `/api/brandlinks/${encodeURIComponent(id)}`;
   const check = bounded(deps, 90 * 60_000);
+  if (options.incrementalOnly && options.rewriteFailed) throw Object.assign(new Error("소재 보완과 전체 재작성 옵션을 함께 실행할 수 없습니다."), { code: "INVALID_INPUT" });
   let rewritePrepared = false;
   const ensureRewritePrepared = async () => {
     if (!options.rewriteFailed || rewritePrepared) return;
@@ -252,6 +255,16 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
   deps.onStage?.("저장 소재 확인");
   let draft = await deps.call(`${base}/draft`, "GET");
   const reusedSavedDraft = Boolean(draft.data);
+  if (options.incrementalOnly) {
+    if (!draft.data) throw Object.assign(new Error("보완할 저장 원고가 없습니다. 실패 소재 재작성에서 먼저 원고를 생성하세요."), { code: "DRAFT_REQUIRED" });
+    if (draft.data.imageGeneration?.status === "running" || draft.data.imageGeneration?.recoveryState === "owner-unknown") {
+      throw Object.assign(new Error("기존 이미지 작업의 결과를 확인한 뒤 소재를 보완하세요."), { code: "IMAGE_RESUME_REQUIRED" });
+    }
+    if (!options.beforeRepair) throw Object.assign(new Error("변경 전 패키지 백업 절차가 없어 소재를 보완하지 않았습니다."), { code: "MATERIAL_REPAIR_BACKUP_REQUIRED" });
+    // Recheck also writes quality/approval metadata. Snapshot before the first
+    // mutation, including image-only and approval-only repairs.
+    await options.beforeRepair();
+  }
   if (!draft.data) {
     if (options.rewriteFailed) {
       deps.onStage?.("실패 원고의 최신 상품 근거 수집");
@@ -323,6 +336,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     draft = await deps.call(`${base}/draft`, "PATCH", {
       action: "revise",
       qualityConvergence: true,
+      ...(options.incrementalOnly ? { incrementalOnly: true } : {}),
       instructions: [
         "[자동 품질 수렴 계획]",
         plan.reason,
@@ -357,7 +371,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
   let plan = await recheck();
   // A saved draft from an older run that fails most quality categories converges poorly by
   // section patches. Write it once from scratch with the current writer, then continue as usual.
-  if (!options.rewriteFailed && reusedSavedDraft && isSeverelyFailingDraft(previousReadiness) && !["complete", "refresh-source"].includes(plan.action)) {
+  if (!options.rewriteFailed && !options.incrementalOnly && reusedSavedDraft && isSeverelyFailingDraft(previousReadiness) && !["complete", "refresh-source"].includes(plan.action)) {
     check();
     deps.onStage?.("오래된 원고 품질 미달 · 현재 기준으로 새로 작성");
     draft = await deps.call(`${base}/draft`, "POST", { autoApprove: false, autoSectionImages: false, autoQualityRepair: false });

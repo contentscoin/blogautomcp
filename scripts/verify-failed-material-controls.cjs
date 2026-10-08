@@ -8,7 +8,7 @@ const nodes = value => value == null || typeof value !== 'object' ? [] : Array.i
 const text = value => value == null ? '' : typeof value !== 'object' ? String(value) : Array.isArray(value) ? value.map(text).join('') : text(value.props?.children);
 const response = (data, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => data });
 const job = (overrides = {}) => ({ jobId: 'rewrite-fixture', kind: 'rewrite', status: 'running', startedAt: '2026-10-08T00:00:00.000Z', sourceJobId: '00000000-0000-4000-8000-000000000001', items: [{ productId: 'failed_product', status: 'preparing', stage: '원고 재작성 중' }], ...overrides });
-const list = (overrides = {}) => ({ success: true, data: { materials: [], jobs: [], failedCandidateCount: 1, failedCandidates: [{ productId: 'failed_product', productName: '실패 상품', reason: '내용 검증 실패', errorCode: 'CONTENT_READINESS_FAILED' }], ...overrides } });
+const list = (overrides = {}) => ({ success: true, data: { materials: [], jobs: [], failedCandidateCount: 1, failedCandidates: [{ productId: 'failed_product', productName: '실패 상품', reason: '내용 검증 실패', errorCode: 'CONTENT_READINESS_FAILED' }], repairCandidateCount: 1, repairCandidates: [{ productId: 'repair_product', productName: '보완 상품', reason: '문단 상품 근거 보완 필요', errorCode: 'CONTENT_BLOCKED' }], ...overrides } });
 const settle = () => new Promise(resolve => setTimeout(resolve, 20));
 
 function harness({ source = 'MaterialLibrary', storage = new Map(), onFetch, initialList = list(), history = false } = {}) {
@@ -37,6 +37,8 @@ function harness({ source = 'MaterialLibrary', storage = new Map(), onFetch, ini
 }
 const rewriteButton = tree => nodes(tree).find(node => node.type === 'button' && text(node).startsWith('실패 소재 전체 재작성·검증'));
 const retryButton = tree => nodes(tree).find(node => node.type === 'button' && text(node) === '이전 재작성 요청 확인·재시도');
+const repairButton = tree => nodes(tree).find(node => node.type === 'button' && text(node).startsWith('보완 필요 소재 전체 보완·검증'));
+const repairRetryButton = tree => nodes(tree).find(node => node.type === 'button' && text(node) === '이전 보완 요청 확인·재시도');
 
 (async () => {
   for (const initialList of [list({ failedCandidateCount: 0, failedCandidates: [] }), list({ jobs: [job({ kind: 'prepare' })] })]) {
@@ -113,5 +115,70 @@ const retryButton = tree => nodes(tree).find(node => node.type === 'button' && t
       assert(!text(tree).includes('일부 검증 완료'));
     }
   }
-  console.log('PASS: failed-material button eligibility, server targets, stable request and reload recovery, double-click guard, truthful verification counts/history; no provider or publication calls');
+  for (const initialList of [list({ repairCandidateCount: 0, repairCandidates: [] }), list({ jobs: [job({ kind: 'rewrite' })] })]) {
+    const h = harness({ initialList }); const tree = await h.mount();
+    assert.equal(repairButton(tree).props.disabled, true, 'zero targets or another running job disables repair');
+  }
+  {
+    const h = harness({ initialList: list({ repairCandidateCount: 7 }) }); const tree = await h.mount();
+    assert(text(repairButton(tree)).includes('(7개)'), 'repair count comes from the server');
+    assert(text(tree).includes('보완 상품 — 문단 상품 근거 보완 필요 (CONTENT_BLOCKED)'));
+    assert(text(tree).includes('기존 원고와 검증 통과 이미지를 보존'));
+  }
+  {
+    let savedJob;
+    const h = harness({ onFetch: async (url, init) => {
+      if (init?.method === 'POST') { savedJob = job({ kind: 'repair', sourceJobId: JSON.parse(init.body).sourceJobId }); return response({ success: true, data: savedJob }, 202); }
+      return response(list({ jobs: savedJob ? [savedJob] : [] }));
+    } });
+    const tree = await h.mount(); repairButton(tree).props.onClick(); repairButton(tree).props.onClick(); rewriteButton(tree).props.onClick(); await settle();
+    const posts = h.requests.filter(item => item.init?.method === 'POST');
+    assert.equal(posts.length, 1, 'repair double click and simultaneous rewrite submit one request');
+    assert.equal(posts[0].url, '/api/materials/repair-blocked');
+    assert.deepEqual(JSON.parse(posts[0].init.body), { connectKind: 'SHOPPING', sourceJobId: savedJob.sourceJobId });
+    assert.equal(h.storage.size, 0); assert(text(h.render()).includes('보완 필요 소재 보완·검증'));
+    assert(!h.requests.some(item => item.url.endsWith('/publish')));
+  }
+  for (const kind of ['rewrite', 'repair']) {
+    let postCount = 0;
+    const h = harness({ onFetch: async (url, init) => {
+      if (url.includes('sourceJobId=')) return response({ success: false, error: 'not found' }, 404);
+      if (init?.method === 'POST') {
+        postCount++; if (postCount === 1) throw new Error('응답 유실');
+        return response({ success: true, data: job({ kind, sourceJobId: JSON.parse(init.body).sourceJobId }) }, 202);
+      }
+      return response(list());
+    } });
+    const tree = await h.mount(); (kind === 'repair' ? repairButton(tree) : rewriteButton(tree)).props.onClick(); await settle();
+    const next = h.render(); assert.equal(rewriteButton(next).props.disabled, true); assert.equal(repairButton(next).props.disabled, true);
+    assert(text(next).includes('다음 준비·보완·재작성·발행 작업'));
+    // Even an event queued from the prior render cannot start the other action.
+    (kind === 'repair' ? rewriteButton(tree) : repairButton(tree)).props.onClick();
+    nodes(next).find(node => node.type === 'button' && text(node).includes('소재 미리작성 시작')).props.onClick();
+    nodes(next).find(node => node.type === 'button' && text(node).includes('바로 발행')).props.onClick();
+    await settle(); assert.equal(postCount, 1, 'an unresolved request blocks other mutations');
+    (kind === 'repair' ? repairRetryButton(next) : retryButton(next)).props.onClick(); await settle();
+    const payloads = h.requests.filter(item => item.init?.method === 'POST').map(item => JSON.parse(item.init.body));
+    assert.equal(payloads.length, 2); assert.equal(payloads[0].sourceJobId, payloads[1].sourceJobId); assert.equal(h.uuidCount(), 1);
+  }
+  for (const wrongKind of [false, true]) {
+    const storage = new Map([['material-blocked-repair-v1:SHOPPING', job().sourceJobId]]);
+    const h = harness({ storage, onFetch: async url => url.includes('sourceJobId=')
+      ? response({ success: true, data: job({ kind: wrongKind ? 'rewrite' : 'repair', status: 'completed', items: [] }) })
+      : response(list({ repairCandidateCount: 0, repairCandidates: [] })) });
+    const tree = await h.mount(); assert(repairRetryButton(tree)); repairRetryButton(tree).props.onClick(); await settle();
+    assert.equal(h.requests.filter(item => item.init?.method === 'POST').length, 0);
+    assert.equal(h.uuidCount(), 0); assert.equal(storage.size, wrongKind ? 1 : 0);
+    assert(text(h.render()).includes(wrongKind ? '이전 보완 작업 응답을 확인하지 못했습니다' : '보완 대상 없음'));
+  }
+  for (const source of ['MaterialLibrary', 'MaterialJobProgress']) {
+    for (const status of ['running', 'partial', 'completed', 'empty']) {
+      const repair = { ...inconsistent, kind: 'repair', status: status === 'empty' ? 'completed' : status, ...(status === 'empty' ? { items: [] } : {}) };
+      const h = harness({ source, history: true, initialList: list({ jobs: [repair] }) }); const tree = await h.mount();
+      assert(text(tree).includes('보완 필요 소재 보완·검증'));
+      assert(text(tree).includes(status === 'empty' ? '보완 대상 없음' : status === 'partial' ? '일부 검증 완료' : status === 'completed' ? '검증 확인 필요' : '진행 중'));
+      if (status !== 'empty') assert(text(tree).includes('검증 통과 1'));
+    }
+  }
+  console.log('PASS: rewrite and repair buttons, server targets, stable request/reload recovery, shared mutation guard, truthful verification counts/history; no provider or publication calls');
 })().catch(error => { console.error(error); process.exitCode = 1; });

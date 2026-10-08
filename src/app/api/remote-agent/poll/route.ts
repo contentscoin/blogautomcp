@@ -1295,24 +1295,25 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     }, ctx);
   }
 
-  if (job.type === "MATERIALS_LIST" || job.type === "MATERIALS_PREPARE" || job.type === "MATERIALS_PUBLISH" || job.type === "MATERIALS_REWRITE_FAILED") {
+  if (job.type === "MATERIALS_LIST" || job.type === "MATERIALS_PREPARE" || job.type === "MATERIALS_PUBLISH" || job.type === "MATERIALS_REWRITE_FAILED" || job.type === "MATERIALS_REPAIR_BLOCKED") {
     const localJobId = readString(input, "jobId");
     const sourceJobId = readString(input, "sourceJobId");
     const listing = job.type === "MATERIALS_LIST";
     const preparing = job.type === "MATERIALS_PREPARE";
     const rewriting = job.type === "MATERIALS_REWRITE_FAILED";
-    if (!listing && !rewriting && (!Array.isArray(preparing ? input.productIds : input.materials) ||
+    const repairing = job.type === "MATERIALS_REPAIR_BLOCKED";
+    if (!listing && !rewriting && !repairing && (!Array.isArray(preparing ? input.productIds : input.materials) ||
         (preparing ? input.productIds as unknown[] : input.materials as unknown[]).length === 0)) {
       throw new LocalAutomationError("INVALID_INPUT", "준비할 상품 또는 발행할 소재의 ID와 revision을 선택하세요.");
     }
     if (job.type === "MATERIALS_PUBLISH" && input.confirmed !== true) throw new LocalAutomationError("INVALID_INPUT", "선택한 소재의 발행 지시 확인이 필요합니다.");
-    ctx.setStage("materials", listing ? "소재와 작업 상태 조회" : rewriting ? "실패 소재 일괄 재작성·검증 접수" : preparing ? "선택 상품 소재 준비 접수" : "선택 소재 발행 접수", 30);
+    ctx.setStage("materials", listing ? "소재와 작업 상태 조회" : repairing ? "부족한 소재 일괄 보완·검증 접수" : rewriting ? "실패 소재 일괄 재작성·검증 접수" : preparing ? "선택 상품 소재 준비 접수" : "선택 소재 발행 접수", 30);
     const listQuery = localJobId ? `?jobId=${encodeURIComponent(localJobId)}` : sourceJobId ? `?sourceJobId=${encodeURIComponent(sourceJobId)}` : input.connectKind ? `?connectKind=${encodeURIComponent(String(input.connectKind))}` : "";
-    const endpoint = listing ? `/api/materials${listQuery}` : `/api/materials/${rewriting ? "rewrite-failed" : preparing ? "prepare" : "publish"}`;
+    const endpoint = listing ? `/api/materials${listQuery}` : `/api/materials/${repairing ? "repair-blocked" : rewriting ? "rewrite-failed" : preparing ? "prepare" : "publish"}`;
     let payload: Record<string, unknown>;
     try {
       payload = await localApi(request, endpoint, listing ? undefined : {
-        method: "POST", body: JSON.stringify(rewriting ? { ...(input.productIds !== undefined ? { productIds: input.productIds } : {}),
+        method: "POST", body: JSON.stringify(rewriting || repairing ? { ...(input.productIds !== undefined ? { productIds: input.productIds } : {}),
           ...(input.connectKind !== undefined ? { connectKind: input.connectKind } : {}), sourceJobId: job.id } : preparing ? { productIds: input.productIds, sourceJobId: job.id } : {
           materials: input.materials, publishMode: input.publishMode, scheduledAt: input.scheduledAt, intervalDays: input.intervalDays, sourceJobId: job.id,
         }),

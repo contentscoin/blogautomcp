@@ -313,13 +313,15 @@ export function selectQualityRepairSectionIndexes(input: {
   sections: string[];
   plan?: QualityConvergencePlan | null;
   requestedIndexes?: number[];
+  /** Incremental repair must never guess a paragraph when no failure maps to it. */
+  requireFailureLinkedTargets?: boolean;
 }): number[] {
   const bodySections = input.sections.slice(0, -1);
   if (bodySections.length === 0) return [];
   const validRequested = [...new Set(input.requestedIndexes || [])]
     .filter((index) => Number.isInteger(index) && index >= 0 && index < bodySections.length)
     .sort((a, b) => a - b);
-  if (validRequested.length > 0) return validRequested;
+  if (validRequested.length > 0 && !input.requireFailureLinkedTargets) return validRequested;
 
   const selected = new Set<number>();
   const addBest = (patterns: RegExp[]) => {
@@ -347,11 +349,11 @@ export function selectQualityRepairSectionIndexes(input: {
       continue;
     }
     if (key === "missing-product-name") {
-      selected.add(0);
+      if (!input.requireFailureLinkedTargets) selected.add(0);
       continue;
     }
     if (key === "too-short-content") {
-      selected.add(shortestSectionIndex(bodySections));
+      if (!input.requireFailureLinkedTargets) selected.add(shortestSectionIndex(bodySections));
       continue;
     }
     if (key === "diversity" || key === "repetitive-content") {
@@ -378,7 +380,7 @@ export function selectQualityRepairSectionIndexes(input: {
 
   // A low aggregate score can have only warn categories. Target its weakest
   // measured category, never every section as an implicit fallback.
-  if (selected.size === 0 && input.current.code === "quality-score-below-threshold") {
+  if (selected.size === 0 && input.current.code === "quality-score-below-threshold" && !input.requireFailureLinkedTargets) {
     const weakest = [...input.current.quality.categories]
       .sort((a, b) => a.score / Math.max(1, a.maxScore) - b.score / Math.max(1, b.maxScore))[0];
     if (weakest) {
@@ -388,8 +390,9 @@ export function selectQualityRepairSectionIndexes(input: {
       if (patterns) addBest(patterns);
     }
   }
-  if (selected.size === 0) selected.add(shortestSectionIndex(bodySections));
-  return [...selected].filter((index) => index >= 0).sort((a, b) => a - b);
+  if (selected.size === 0 && !input.requireFailureLinkedTargets) selected.add(shortestSectionIndex(bodySections));
+  return [...selected].filter((index) => index >= 0 && (!input.requireFailureLinkedTargets || !validRequested.length || validRequested.includes(index)))
+    .sort((a, b) => a - b);
 }
 
 export function formatQualityConvergenceInstructions(plan: QualityConvergencePlan): string {

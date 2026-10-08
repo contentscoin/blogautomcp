@@ -1,6 +1,6 @@
 {
   "name": "brandconnect-automation",
-  "version": "1.3.98",
+  "version": "1.3.99",
   "description": "네이버 쇼핑 커넥트(브랜드커넥트) 자동 블로그 포스팅 도구",
   "private": true,
   "scripts": {
@@ -16,6 +16,7 @@
     "typecheck": "tsc --noEmit",
     "test:material-regression": "node scripts/verify-material-regression.mjs",
     "test:failed-material-rewrite": "tsx scripts/verify-failed-material-rewrite.ts && node --test scripts/verify-material-api.cjs && node scripts/verify-material-controls.cjs && node scripts/verify-failed-material-controls.cjs",
+    "test:blocked-material-repair": "tsx scripts/verify-blocked-material-repair.ts && node --test scripts/verify-material-api.cjs && node scripts/verify-material-controls.cjs && node scripts/verify-failed-material-controls.cjs",
     "test:mcp-activation": "node scripts/verify-mcp-activation-e2e.mjs",
     "test:mcp-delivery": "node --test src/lib/remote-agent-completion.test.cjs apps/sites/tests/*.test.cjs",
     "test:draft-ui": "tsx --test src/app/draft-approval-ui.test.ts",

@@ -24,7 +24,7 @@ export interface MaterialJobItem {
 }
 export interface MaterialJob {
   jobId: string;
-  kind: "prepare" | "publish" | "rewrite";
+  kind: "prepare" | "publish" | "rewrite" | "repair";
   status: "running" | "completed" | "partial" | "failed" | "interrupted";
   ownerPid: number;
   startedAt: string;

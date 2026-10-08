@@ -311,9 +311,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 }
 
 /** 초안 부분 수정: simple-agent 를 수정 모드(BRANDLINK_REVISE_REQUEST)로 실행한다. 네이버 세션은 필요 없다. */
-async function runRevision(id: string, packageDir: string, instructions: string, sectionIndexes: number[], qualityConvergence = false): Promise<BrandPostPackageResult | null> {
+async function runRevision(id: string, packageDir: string, instructions: string, sectionIndexes: number[], qualityConvergence = false, incrementalOnly = false): Promise<BrandPostPackageResult | null> {
   const requestPath = path.join(packageDir, "revise-request.json");
-  fs.writeFileSync(requestPath, JSON.stringify({ instructions, sectionIndexes, qualityConvergence, requestedAt: new Date().toISOString() }, null, 2), "utf8");
+  fs.writeFileSync(requestPath, JSON.stringify({ instructions, sectionIndexes, qualityConvergence, incrementalOnly, requestedAt: new Date().toISOString() }, null, 2), "utf8");
   const logPath = path.join(packageDir, "prepare.log");
   const logFd = fs.openSync(logPath, "a");
   const scriptPath = path.join(process.cwd(), "scripts", "simple-agent.ts");
@@ -390,6 +390,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     instructions?: unknown;
     sectionIndexes?: unknown;
     qualityConvergence?: unknown;
+    incrementalOnly?: unknown;
     refreshSource?: unknown;
   };
   if (body.action === "recheck") {
@@ -519,7 +520,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       return NextResponse.json({ success: false, code: "ALREADY_PUBLISHING", error: "상품 상태가 변경되어 초안 수정을 시작하지 못했습니다." }, { status: 409 });
     }
     try {
-      const revisionResult = await runRevision(id, packageDir, instructions, sectionIndexes, body.qualityConvergence === true);
+      const revisionResult = await runRevision(id, packageDir, instructions, sectionIndexes, body.qualityConvergence === true, body.incrementalOnly === true);
       const manifest = readBrandPostPackage(id);
       if (!manifest) throw new PrepareProcessError("LOCAL_AUTOMATION_FAILED", "수정된 초안 매니페스트를 찾지 못했습니다.");
       await prisma.brandLink.update({ where: { id }, data: { status: "READY", errorMessage: null } });

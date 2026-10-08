@@ -5,6 +5,7 @@ import { automaticPublishingCancellationCheck } from "./desktop-activity";
 import { listFailedMaterialCandidates } from "./material-failed-candidates";
 import { backupMaterialBeforeRewrite } from "./material-rewrite-backup";
 import { prisma } from "./db";
+import { listMaterialRepairCandidates } from "./material-repair-candidates";
 
 async function canStillRewriteProduct(id: string): Promise<boolean> {
   const product = await prisma.brandLink.findUnique({ where: { id }, select: { status: true, postUrl: true, publishedAt: true, scheduledPublishAt: true } });
@@ -16,6 +17,7 @@ async function canStillRewriteProduct(id: string): Promise<boolean> {
 export async function runMaterialJob(job: MaterialJob, deps: {
   call: Call; material: typeof getMaterial; save: typeof saveMaterialJob; pause: () => Promise<void>; checkCancelled: () => void;
   validateFailed?: (id: string, job: MaterialJob) => Promise<boolean>;
+  validateRepair?: (id: string, job: MaterialJob) => Promise<boolean>;
   backup?: (id: string, jobId: string) => string | null;
 } = {
   call: localScheduleCall as Call,
@@ -40,12 +42,21 @@ export async function runMaterialJob(job: MaterialJob, deps: {
           (await listFailedMaterialCandidates(currentJob.connectKind, currentJob.jobId)).some(candidate => candidate.productId === id)))(item.productId, job);
         if (!eligible) throw Object.assign(new Error("실행 전에 소재 상태가 변경되어 재작성하지 않았습니다. 최신 실패 목록을 확인하세요."), { code: "FAILED_MATERIAL_SELECTION_CHANGED" });
       }
+      if (job.kind === "repair") {
+        const eligible = await (deps.validateRepair || (async (id, currentJob) =>
+          (await listMaterialRepairCandidates(currentJob.connectKind, currentJob.jobId)).some(candidate => candidate.productId === id)))(item.productId, job);
+        if (!eligible) throw Object.assign(new Error("실행 전에 소재 상태가 변경되어 보완하지 않았습니다. 최신 보완 목록을 확인하세요."), { code: "MATERIAL_REPAIR_SELECTION_CHANGED" });
+      }
       item.status = job.kind === "publish" ? "publishing" : "preparing";
       deps.save(job);
       const workflow = {
         pause: deps.pause,
         call: async (url: string, method: string, body?: object) => {
           deps.checkCancelled();
+          if (job.kind === "repair" && method === "POST" && url.endsWith("/draft") &&
+              (body as { action?: string } | undefined)?.action !== "prepare_context") {
+            throw Object.assign(new Error("소재 보완에서는 기존 원고 전체를 다시 작성하지 않습니다."), { code: "MATERIAL_REPAIR_REWRITE_FORBIDDEN" });
+          }
           if (job.kind === "publish" && url.endsWith("/publish") && method === "POST") {
             const current = deps.material(item.productId);
             if (!current?.ready) throw Object.assign(new Error("소재가 더 이상 발행 준비 상태가 아닙니다."), { code: "MATERIAL_NOT_READY" });
@@ -83,11 +94,23 @@ export async function runMaterialJob(job: MaterialJob, deps: {
             item.backupCreated = Boolean((deps.backup || backupMaterialBeforeRewrite)(item.productId, job.jobId));
             deps.save(job);
           },
+        } : job.kind === "repair" ? {
+          incrementalOnly: true,
+          beforeRepair: async () => {
+            deps.checkCancelled();
+            const eligible = await (deps.validateRepair || (async (id, currentJob) =>
+              (await listMaterialRepairCandidates(currentJob.connectKind, currentJob.jobId)).some(candidate => candidate.productId === id)))(item.productId, job);
+            if (!eligible) throw Object.assign(new Error("변경 직전에 소재 상태가 바뀌어 기존 원고를 보존했습니다."), { code: "MATERIAL_REPAIR_SELECTION_CHANGED" });
+            const backup = (deps.backup || backupMaterialBeforeRewrite)(item.productId, job.jobId);
+            if (!backup) throw Object.assign(new Error("저장 패키지를 백업하지 못해 소재 보완을 시작하지 않았습니다."), { code: "MATERIAL_REPAIR_BACKUP_FAILED" });
+            item.backupCreated = true;
+            deps.save(job);
+          },
         } : {});
         const current = deps.material(item.productId);
         if (!current?.ready) throw new Error(current?.blockers.join(" ") || "소재 준비 결과를 확인할 수 없습니다.");
         item.revision = current.revision; item.status = "ready"; item.stage = "소재 준비 완료 · 발행할 항목을 선택하세요";
-        if (job.kind === "rewrite") item.verificationStatus = "READY";
+        if (job.kind === "rewrite" || job.kind === "repair") item.verificationStatus = "READY";
       } else {
         const selected = deps.material(item.productId);
         if (!selected) {
@@ -115,9 +138,10 @@ export async function runMaterialJob(job: MaterialJob, deps: {
       const definitiveFailure = ["MATERIAL_NOT_READY", "MATERIAL_CHANGED", "PUBLISH_FAILED", "INVALID_INPUT", "CONTENT_BLOCKED", "DRAFT_REQUIRED"].includes(code || "");
       item.status = submissionRequested && !definitiveFailure ? "outcome_unknown" : "failed";
       if (job.kind === "rewrite" && code === "FAILED_MATERIAL_SELECTION_CHANGED") item.status = "interrupted";
+      if (job.kind === "repair" && code === "MATERIAL_REPAIR_SELECTION_CHANGED") item.status = "interrupted";
       item.error = materialJobErrorMessage(error);
       Object.assign(item, failureCodes);
-      if (job.kind === "rewrite") {
+      if (job.kind === "rewrite" || job.kind === "repair") {
         try {
           const current = deps.material(item.productId);
           item.verificationStatus = current?.ready ? "READY" : current ? "BLOCKED" : "DRAFT_MISSING";
