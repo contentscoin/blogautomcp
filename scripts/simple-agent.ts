@@ -164,6 +164,13 @@ import {
 } from "./lib/product-editorial-plan";
 import { normalizeDraftSections } from "./lib/draft-sections";
 import {
+  assertDraftSectionCount,
+  expandDraftSectionEntries,
+  isDraftSectionTitleLine,
+  validateSubmittedDraftSectionCount,
+} from "./lib/draft-section-contract";
+import { getConnectAffiliateDisclosure } from "../src/lib/connect-disclosure";
+import {
   getChatgptProfileDir,
   getChatgptSessionFile,
   getNaverSessionFile,
@@ -232,6 +239,7 @@ import {
   formatPostContractForPrompt,
   normalizePublishedPostText,
   getPostCompositionContract,
+  hasCanonicalAffiliateDisclosure,
   resolvePostDocument,
   splitAffiliateDisclosure,
   stripAffiliateDisclosureFromTitle,
@@ -541,6 +549,8 @@ interface SpecStep2Input {
   memo?: string | null;
   /** 포스팅 각도(전체 리뷰/주제 글)와 같은 상품의 형제 글 요약 */
   angleContext?: { angle: string; siblings: SiblingPostSummary[] } | null;
+  /** Validated before starting a browser; reuse those exact submitted bytes. */
+  submittedDraftText?: string;
 }
 
 /** 이 행의 포스팅 각도와 형제 글 요약. 조회 실패는 전체 리뷰·형제 없음으로 처리한다. */
@@ -564,7 +574,7 @@ interface McpGeneratedDraftFile {
   hashtags?: unknown;
 }
 
-function readMcpGeneratedDraft(filePath: string): string {
+function readMcpGeneratedDraft(filePath: string, connectKind: "SHOPPING" | "TRAVEL"): string {
   const resolved = path.resolve(filePath);
   const stat = fs.statSync(resolved);
   if (!stat.isFile() || stat.size < 2 || stat.size > 96 * 1024) {
@@ -600,9 +610,7 @@ function readMcpGeneratedDraft(filePath: string): string {
   if (title.length < 8 || title.length > 100) {
     throw new Error("ChatGPT 원고 제목은 8~100자여야 합니다.");
   }
-  if (sections.length < 5 || sections.length > 12) {
-    throw new Error("ChatGPT 원고 본문은 5~12개 섹션이어야 합니다.");
-  }
+  validateSubmittedDraftSectionCount(sections, connectKind);
   if (sections.some((section) => section.length < 80 || section.length > 8000)) {
     throw new Error("ChatGPT 원고의 각 섹션은 80~8000자여야 합니다.");
   }
@@ -798,8 +806,6 @@ function hasCompleteTravelSourceResearch(research: TravelPageResearch | null | u
   return assessTravelPageResearchCoverage(sanitizeTravelPageResearch(research)).sufficient;
 }
 
-const SECTION_TITLE_MATCHER = /^(?:구매하게 된 계기|구매 전 확인 포인트|택배 도착\s*&\s*개봉기|구성 및 패키지 확인|첫인상\s*\/\s*디자인|크기\s*&\s*스펙 정보|주요 기능\s*[①1]|주요 기능\s*[②2]|실제 사용 후기|사용 장면별 체크|장점 정리|장점으로 보이는 부분|아쉬운 점|확인하면 좋을 아쉬운 점|이런 분께 추천해요|이런 분께 잘 맞아요)\s*$/i;
-
 function stripSectionPrefix(text: string): string {
   return stripEmoji(text)
     .replace(/^[\s\-*#>]+/, "")
@@ -808,8 +814,7 @@ function stripSectionPrefix(text: string): string {
 }
 
 function isSectionTitleLine(text: string): boolean {
-  const normalized = stripSectionPrefix(text);
-  return SECTION_TITLE_MATCHER.test(normalized);
+  return isDraftSectionTitleLine(text);
 }
 
 function sanitizeTitle(rawTitle: string, fallback: string): string {
@@ -3487,30 +3492,6 @@ function parseJsonObjectFromText(text: string): Record<string, unknown> {
   return fallback;
 }
 
-function splitSectionCandidates(text: string): string[] {
-  const normalized = text.replace(/\r/g, "").trim();
-  if (!normalized) return [];
-
-  const lines = normalized.split("\n");
-  const parts: string[] = [];
-  let current: string[] = [];
-
-  for (const line of lines) {
-    if (isSectionTitleLine(line) && current.length > 0) {
-      parts.push(current.join("\n").trim());
-      current = [line];
-      continue;
-    }
-    current.push(line);
-  }
-
-  if (current.length > 0) {
-    parts.push(current.join("\n").trim());
-  }
-
-  return parts.length > 0 ? parts : [normalized];
-}
-
 function toProductSourceEvidenceInput(product: ProductInfo, targetSectionCount: number) {
   return {
     // Identity selects the category; only extracted, stored facts enter evidence.
@@ -3583,28 +3564,25 @@ function normalizeSections(
     ? rawSections.filter((item): item is string => typeof item === "string")
     : [];
 
-  const expanded: string[] = [];
-  for (const section of rawList) {
-    expanded.push(...splitSectionCandidates(section));
+  const bounds = { min: minimumCount, max: maximumCount };
+  // Reject excess array entries before normalization, then check heading expansion.
+  if (rawList.length > maximumCount) {
+    assertDraftSectionCount(rawList.map((text, sourceSectionIndex) => ({ text, sourceSectionIndex })), connectKind, "submitted", bounds);
   }
-
-  if (expanded.length < minimumCount) {
-    throw new Error(
-      `GPT 원고의 본문 흐름이 부족합니다. 현재 ${expanded.length}개, 최소 ${minimumCount}개입니다. ` +
-      "완성 문장형 로컬 폴백은 품질 보호를 위해 사용하지 않습니다.",
-    );
-  }
+  const expanded = expandDraftSectionEntries(rawList);
+  assertDraftSectionCount(expanded, connectKind, "expanded", bounds);
 
   const minimumBodyLines = 2;
-  const normalized = expanded.map((section, index) =>
+  const normalized = expanded.map((entry, index) =>
     normalizeSectionText(
-      section,
+      entry.text,
       defaultTitles[index % defaultTitles.length],
       minimumBodyLines,
     )
   );
 
-  return normalized.slice(0, maximumCount);
+  assertDraftSectionCount(normalized.map((text, index) => ({ text, sourceSectionIndex: expanded[index].sourceSectionIndex })), connectKind, "normalized", bounds);
+  return normalized;
 }
 
 function normalizeHashtags(
@@ -3756,8 +3734,8 @@ function applyHumanMobilePolishToSection(
 }
 
 function applyHumanMobilePolishToDisclosure(section: string): string {
-  const polishedLines = buildMobilePolishLines(section).slice(0, 4);
-  return `\n${polishedLines.join("\n")}\n`;
+  // The system disclosure is canonical; stylistic polishing must not qualify it.
+  return `\n${section.trim()}\n`;
 }
 
 function saveGeneratedPostPreview(
@@ -5437,7 +5415,7 @@ ${mandatoryWritingPromptBlock}`;
       BRANDLINK_GENERATED_DRAFT_PATH ? "ChatGPT 제출 원고 불러오기" : "원고 생성",
     );
     text = BRANDLINK_GENERATED_DRAFT_PATH
-      ? readMcpGeneratedDraft(BRANDLINK_GENERATED_DRAFT_PATH)
+      ? specInput?.submittedDraftText ?? readMcpGeneratedDraft(BRANDLINK_GENERATED_DRAFT_PATH, connectKind)
       : await generateWithAI(
           systemPrompt,
           userPrompt,
@@ -5521,18 +5499,8 @@ ${mandatoryWritingPromptBlock}`;
     );
   }
   
-  // 마지막에 필수 고지 문구만 추가하고, 링크는 에디터의 커넥트 컴포넌트로 별도 삽입한다.
-  const lastSection = isTravel
-    ? `
-
-이 포스팅은 네이버 여행 커넥트 활동의 일환으로, 예약 발생 시 수수료를 제공받습니다.
-
-자세한 일정과 예약 정보는 아래 여행커넥트에서 확인해보세요.`
-    : `
-
-이 포스팅은 네이버 쇼핑 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받습니다.
-
-자세한 상품 정보는 아래 쇼핑커넥트에서 확인해보세요.`;
+  // The renderer places the shared disclosure independently from the connect card.
+  const lastSection = getConnectAffiliateDisclosure(connectKind);
 
   let bodySections = normalizeSections(
     json.sections,
@@ -6844,7 +6812,7 @@ function resolvePreparedOverridePath(manifestPath: string, value: unknown): stri
 }
 
 function loadPreparedBrandLinkPostOverride(
-  options: { requireApproval?: boolean } = {},
+  options: { requireApproval?: boolean; connectKind?: "SHOPPING" | "TRAVEL" } = {},
 ): PreparedBrandLinkPostOverride | null {
   const configuredPath = process.env.BRANDLINK_PREPARED_POST_MANIFEST?.trim();
   if (!configuredPath) return null;
@@ -6863,12 +6831,16 @@ function loadPreparedBrandLinkPostOverride(
     composition?: unknown;
     approvedAt?: unknown;
     generationSource?: unknown;
+    connectKind?: unknown;
     postSpec?: unknown;
     specDraft?: unknown;
     sourceSnapshot?: unknown;
     productUnderstanding?: Product9Canvas;
     imageAssets?: BrandPostPackageImageAsset[];
   };
+  if (options.requireApproval !== false && manifest.version !== "brand-post-package/v2") {
+    throw Object.assign(new Error("DRAFT_RECHECK_REQUIRED: 이전 소재의 고지 배치를 확인할 수 없습니다. 소재를 재검증하고 상단 고지를 확인한 뒤 다시 승인하세요. 저장된 원고는 유지됩니다."), { code: "DRAFT_RECHECK_REQUIRED" });
+  }
   if (options.requireApproval !== false && (typeof manifest.approvedAt !== "string" || !manifest.approvedAt.trim())) {
     throw new Error("준비된 원고는 승인 완료 후에만 발행할 수 있습니다.");
   }
@@ -6900,6 +6872,11 @@ function loadPreparedBrandLinkPostOverride(
   // Re-parsing an export without ## headings collapses a valid eight-part draft.
   if (manifest.version === "brand-post-package/v2" && !composition) {
     throw new Error("준비된 v2 원고의 승인 렌더 문서를 확인할 수 없습니다.");
+  }
+  if (options.requireApproval !== false && composition &&
+      (!['SHOPPING', 'TRAVEL'].includes(String(manifest.connectKind)) || manifest.connectKind !== composition.connectKind ||
+       (options.connectKind && options.connectKind !== manifest.connectKind) || !hasCanonicalAffiliateDisclosure(composition))) {
+    throw Object.assign(new Error("DRAFT_RECHECK_REQUIRED: 승인된 소재의 상단 고지가 현재 기준과 다릅니다. 소재를 재검증해 고지를 확인하고 다시 승인하세요. 발행하면서 승인 내용을 자동 변경하지 않습니다."), { code: "DRAFT_RECHECK_REQUIRED" });
   }
   const sections = composition
     ? readPreparedCompositionSections(composition)
@@ -9803,7 +9780,7 @@ function classifyFailureCode(error: unknown): string {
       messages.push(current);
     }
   }
-  const explicitCode = codes.find((code) => /^(?:SOURCE_EVIDENCE_REQUIRED|QUALITY_REPAIR_EXHAUSTED|QUALITY_REPAIR_REJECTED|CHATGPT_BROWSER_UNREACHABLE)$/u.test(code));
+  const explicitCode = codes.find((code) => /^(?:SOURCE_EVIDENCE_REQUIRED|QUALITY_REPAIR_EXHAUSTED|QUALITY_REPAIR_REJECTED|CHATGPT_BROWSER_UNREACHABLE|DRAFT_SECTION_COUNT_OUT_OF_RANGE|DRAFT_RECHECK_REQUIRED)$/u.test(code));
   if (explicitCode === "QUALITY_REPAIR_REJECTED") return "QUALITY_REPAIR_EXHAUSTED";
   if (explicitCode) return explicitCode;
   const message = messages.join(" ") || getErrorMessage(error);
@@ -10146,6 +10123,20 @@ async function main() {
     }
     return;
   }
+  let submittedDraftText: string | undefined;
+  if (BRANDLINK_GENERATED_DRAFT_PATH) {
+    try {
+      submittedDraftText = readMcpGeneratedDraft(BRANDLINK_GENERATED_DRAFT_PATH, link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING");
+    } catch (error) {
+      const message = getErrorMessage(error);
+      console.error("\n❌ 제출 원고 거절:", message);
+      const outputDir = process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim();
+      if (outputDir) writePrepareResult(path.resolve(outputDir), { ok: false, code: classifyFailureCode(error), message });
+      process.exitCode = 1;
+      await prisma.$disconnect();
+      return;
+    }
+  }
   console.log(`\n📎 URL: ${link.url}`);
   console.log(`📂 게시판 번호: ${link.categoryNo || "기본"}`);
   console.log(`🧩 소제목 스타일: ${link.useSectionHeading ? "ON" : "OFF"}`);
@@ -10202,7 +10193,7 @@ async function main() {
 
     // 승인된 준비 원고는 상품 페이지를 다시 읽을 이유가 없다. 발행 시작 전에
     // 먼저 불러와 STEP1의 라이브 상세페이지 재수집을 건너뛰고 곧바로 에디터로 간다.
-    const preparedPostOverride = loadPreparedBrandLinkPostOverride();
+    const preparedPostOverride = loadPreparedBrandLinkPostOverride({ connectKind: link.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING" });
     if (!isPreparation) {
       if (!preparedPostOverride || !attemptId) throw new Error("발행에는 저장·승인된 소재와 발행 시도 ID가 필요합니다. 소재 준비를 먼저 완료하세요.");
       const receipt = readPublishAttempt(linkId);
@@ -10463,6 +10454,7 @@ async function main() {
         tempDir: TEMP_PATH,
         memo: process.env.BRANDLINK_DRAFT_MEMO?.trim() || null,
         angleContext: await loadPostAngleContext(link.id, link.postAngle),
+        submittedDraftText,
       },
       // Facts are collected from the resolved sales/travel detail page. Keep
       // that page in the snapshot instead of the BrandConnect category URL.

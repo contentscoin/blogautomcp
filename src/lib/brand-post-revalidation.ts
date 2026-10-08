@@ -6,6 +6,7 @@ import type { BrandPostPackageManifestV2 } from "./brand-post-package";
 import { brandPostQualitySourceFromSnapshot, BRAND_POST_QUALITY_SOURCE_VERSION } from "./brand-post-quality-source";
 import { buildProductReviewAnalysis } from "../../scripts/lib/product-editorial-plan";
 import { buildTravelReviewAnalysis } from "../../scripts/lib/travel-content";
+import { normalizePublishedPostText } from "./post-composition-contract";
 
 // Bump when the revalidation input contract changes. Every explicit recheck still
 // runs the current evaluator; this is audit metadata, never a cached pass token.
@@ -258,7 +259,12 @@ export function savedBrandPostTextSections(manifest: BrandPostPackageManifestV2)
 
 export function revalidateSavedBrandPostText(manifest: BrandPostPackageManifestV2, identity: RecheckIdentity, savedContext?: unknown): BrandPostPackageManifestV2 {
   const { snapshot, origin } = resolveSavedQcSource(manifest, identity, savedContext);
-  const sections = savedBrandPostTextSections(manifest);
+  if (manifest.composition.connectKind !== manifest.connectKind) fail("저장 상품 종류와 렌더 문서가 달라 안전하게 재검사할 수 없습니다.");
+  // Validate the stored body before changing only system-owned notice text/order.
+  // Callers persist this result only in explicit recheck/approval actions; reads stay inert.
+  savedBrandPostTextSections(manifest);
+  const composition = normalizePublishedPostText(manifest.composition);
+  const sections = savedBrandPostTextSections({ ...manifest, composition });
   const qualitySource = brandPostQualitySourceFromSnapshot(snapshot);
   const input = {
     productName: qualitySource.productName, title: manifest.title, sections, hashtags: manifest.hashtags,
@@ -268,10 +274,10 @@ export function revalidateSavedBrandPostText(manifest: BrandPostPackageManifestV
     connectKind: manifest.connectKind,
     sourceDescription: qualitySource.sourceDescription, sourceFeatures: qualitySource.sourceFeatures,
     hasRepresentativeImage: (() => { try { return fs.statSync(manifest.heroImagePath).isFile(); } catch { return false; } })(),
-    compositionQualityReport: manifest.composition.qualityReport,
+    compositionQualityReport: composition.qualityReport,
   };
   const contentQuality = getBrandLinkContentReadiness(input);
-  return { ...manifest, sourceSnapshot: snapshot, contentQuality, approvedAt: null,
+  return { ...manifest, composition, sourceSnapshot: snapshot, contentQuality, approvedAt: null,
     // Old specValidation describes generation-time text; preview must show this evaluation.
     specValidation: null,
     textQualityRevalidation: {

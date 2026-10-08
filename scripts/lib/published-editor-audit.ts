@@ -16,6 +16,13 @@ export function publishedReadinessSections(document: ResolvedPostDocumentV1): st
 export function assertPublishedEditorText(document: ResolvedPostDocumentV1, actualText: string): void {
   const actual = compact(actualText);
   if (!actual) throw new Error("EDITOR_CONTENT_MISSING: 발행 전 편집기 본문을 확인할 수 없습니다.");
+  const first = document.renderNodes[0];
+  if (first?.kind === "disclosure" && first.placement === "top") {
+    const notice = compact(first.text);
+    if (!notice || !actual.startsWith(notice) || actual.split(notice).length !== 2) {
+      throw new Error("EDITOR_DISCLOSURE_MISMATCH: 제휴 고지는 실제 편집기 본문 맨 위에 한 번 표시해야 합니다.");
+    }
+  }
   let cursor = 0;
   for (const node of document.renderNodes) {
     const text = node.kind === "image" ? node.caption :

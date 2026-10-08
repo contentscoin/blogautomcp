@@ -133,7 +133,7 @@ async function main() {
   );
   assert.equal(
     simpleAgentSource.includes("text = BRANDLINK_GENERATED_DRAFT_PATH") &&
-      simpleAgentSource.includes("readMcpGeneratedDraft(BRANDLINK_GENERATED_DRAFT_PATH)") &&
+      simpleAgentSource.includes("readMcpGeneratedDraft(BRANDLINK_GENERATED_DRAFT_PATH, connectKind)") &&
       simpleAgentSource.includes("!BRANDLINK_GENERATED_DRAFT_PATH"),
     true,
     "ChatGPT 제출 원고는 API 생성 및 API 기반 재작성 경로를 건너뛰어야 합니다.",
@@ -375,15 +375,22 @@ async function main() {
     approvedAt: null,
   }, null, 2));
   assert.equal(store.readBrandPostPackage(id)?.approvedAt, null);
-  const approvedLegacy = store.approveBrandPostPackage(id);
-  assert.ok(store.packagePreview(approvedLegacy).markdown.includes("승인 전에는"));
-  assert.equal(approvedLegacy.generationSource, "PREPARED_APPROVED");
-  assert.ok(store.readBrandPostPackage(id)?.approvedAt);
-  assert.equal(store.readBrandPostPackage(id)?.generationSource, "PREPARED_APPROVED");
   const legacyManifestPath = store.getBrandPostPackageManifestPath(id);
+  const oldLegacyBytes = fs.readFileSync(legacyManifestPath, "utf8");
+  const legacy = store.readBrandPostPackage(id, { migrate: false })!;
+  assert.ok(store.packagePreview(legacy).markdown.includes("승인 전에는"));
+  assert.ok(store.evaluateBrandPostPackageReadiness(legacy).blockers.some(blocker => blocker.code === "draft-recheck-required"));
+  assert.throws(() => store.approveBrandPostPackage(id), /이전 형식.*소재 준비/u);
+  assert.equal(fs.readFileSync(legacyManifestPath, "utf8"), oldLegacyBytes, "A failed legacy approval/read cannot rewrite or delete the stored material");
   const alreadyApprovedLegacy = JSON.parse(fs.readFileSync(legacyManifestPath, "utf8"));
+  alreadyApprovedLegacy.approvedAt = "2026-09-01T00:00:00.000Z";
   delete alreadyApprovedLegacy.generationSource;
   fs.writeFileSync(legacyManifestPath, JSON.stringify(alreadyApprovedLegacy, null, 2), "utf8");
+  const oldApprovedBytes = fs.readFileSync(legacyManifestPath, "utf8");
+  const oldApproved = store.readBrandPostPackage(id, { migrate: false })!;
+  assert.equal(store.evaluateBrandPostPackageReadiness(oldApproved).canApprove, false,
+    "A historical v1 approval cannot authorize the new canonical disclosure/render layout");
+  assert.equal(fs.readFileSync(legacyManifestPath, "utf8"), oldApprovedBytes, "Read-only readiness preserves the historical v1 approval bytes");
   assert.equal(
     store.readBrandPostPackage(id)?.generationSource,
     "PREPARED_APPROVED",
@@ -394,6 +401,8 @@ async function main() {
     "PREPARED_APPROVED",
     "마이그레이션 결과는 실제 매니페스트에 저장돼 발행 자식 프로세스도 읽을 수 있어야 합니다.",
   );
+  assert.equal(store.evaluateBrandPostPackageReadiness(store.readBrandPostPackage(id, { migrate: false })!).canApprove, false,
+    "Existing legacy source migration still cannot bypass the current publication gate");
 
   const v2Id = "fixture-brand-link-v2-001";
   const v2Dir = store.getBrandPostPackageDir(v2Id);

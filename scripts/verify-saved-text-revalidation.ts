@@ -5,6 +5,9 @@ import path from "node:path";
 import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
 import { revalidateSavedBrandPostText, resolveSavedQcSource, savedBrandPostTextSections, SAVED_TEXT_QC_VERSION, type RecheckIdentity } from "../src/lib/brand-post-revalidation";
 import { resolvePostDocument } from "../src/lib/post-composition-contract";
+import { hasCanonicalAffiliateDisclosure } from "../src/lib/post-composition-contract";
+import { getConnectAffiliateDisclosure } from "../src/lib/connect-disclosure";
+import { materialRevision } from "../src/lib/material-library";
 import { evaluateBrandPostPackageReadiness, readBrandPostPackage, writeBrandPostPackageManifest, packagePreview, type BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "saved-text-qc-"));
@@ -25,6 +28,61 @@ try {
   };
   const first = revalidateSavedBrandPostText(fixture, identity);
   assert.equal(first.textQualityRevalidation?.version, SAVED_TEXT_QC_VERSION);
+  for (const connectKind of ["SHOPPING", "TRAVEL"] as const) {
+    const kindIdentity = { ...identity, connectKind };
+    const kindFixture = { ...structuredClone(fixture), connectKind,
+      sourceSnapshot: createProductSnapshot({ ...kindIdentity, product: snapshot.product }),
+      composition: { ...structuredClone(composition), connectKind } };
+    const legacyNotice = kindFixture.composition.renderNodes.shift()!;
+    assert.equal(legacyNotice.kind, "disclosure");
+    if (legacyNotice.kind === "disclosure") {
+      legacyNotice.placement = "bottom";
+      legacyNotice.text = "이 포스팅은 네이버 여행 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받을 수 있습니다.";
+    }
+    kindFixture.composition.renderNodes.push(legacyNotice);
+    const before = JSON.stringify(kindFixture);
+    const oldRevision = materialRevision(kindFixture);
+    const oldGate = evaluateBrandPostPackageReadiness(kindFixture);
+    assert.ok(oldGate.blockers.some(blocker => blocker.code === "affiliate-disclosure-position"));
+    assert.equal(oldGate.canApprove, false, "An old approved bottom/vague/wrong-kind notice cannot authorize publication");
+    assert.equal(JSON.stringify(kindFixture), before, "Read-only readiness cannot change the old approval or render nodes");
+    const recovered = revalidateSavedBrandPostText(kindFixture, kindIdentity);
+    assert.ok(hasCanonicalAffiliateDisclosure(recovered.composition));
+    assert.equal(recovered.composition.renderNodes[0].kind === "disclosure" && recovered.composition.renderNodes[0].text,
+      getConnectAffiliateDisclosure(connectKind));
+    assert.deepEqual(recovered.composition.renderNodes.filter(node => node.kind !== "disclosure"),
+      kindFixture.composition.renderNodes.filter(node => node.kind !== "disclosure"));
+    assert.equal(recovered.approvedAt, null, "Explicit notice repair requires a fresh approval");
+    assert.notEqual(materialRevision(recovered), oldRevision, "A changed reviewed notice invalidates the old selected material revision");
+    assert.equal(JSON.stringify(kindFixture), before, "Explicit pure evaluator returns a new manifest without mutating old data");
+    assert.ok(!evaluateBrandPostPackageReadiness(recovered).blockers.some(blocker => blocker.code === "affiliate-disclosure-position"),
+      "The explicit recheck repairs the disclosure gate rather than permanently blocking a legacy draft");
+    const vague = structuredClone(recovered);
+    const firstNotice = vague.composition.renderNodes[0];
+    if (firstNotice.kind === "disclosure") firstNotice.text = firstNotice.text.replace("제공받습니다", "제공받을 수 있습니다");
+    assert.ok(evaluateBrandPostPackageReadiness(vague).blockers.some(blocker => blocker.code === "affiliate-disclosure-position"));
+    const duplicate = structuredClone(recovered);
+    duplicate.composition.renderNodes.push({ ...duplicate.composition.renderNodes[0] });
+    assert.ok(evaluateBrandPostPackageReadiness(duplicate).blockers.some(blocker => blocker.code === "affiliate-disclosure-position"));
+    const mixedHeading = structuredClone(recovered);
+    const headingSection = mixedHeading.composition.sections[0];
+    const originalHeading = headingSection.title;
+    const embeddedNotice = "이 글은 네이버 여행 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받을 수 있습니다.";
+    headingSection.title += ` ${embeddedNotice}`;
+    const headingNode = mixedHeading.composition.renderNodes.find(node => (node.kind === "heading" || node.kind === "quotation") && node.sectionId === headingSection.id);
+    if (headingNode?.kind === "heading" || headingNode?.kind === "quotation") {
+      headingNode.kind = connectKind === "TRAVEL" ? "quotation" : "heading";
+      headingNode.text = headingSection.title;
+    }
+    assert.ok(evaluateBrandPostPackageReadiness(mixedHeading).blockers.some(blocker => blocker.code === "affiliate-disclosure-position"));
+    const headingRecovered = revalidateSavedBrandPostText(mixedHeading, kindIdentity);
+    assert.ok(hasCanonicalAffiliateDisclosure(headingRecovered.composition));
+    assert.equal(headingRecovered.composition.sections[0].title, originalHeading);
+    assert.equal(headingRecovered.composition.sections[0].id, headingSection.id, "Notice cleanup preserves stable section/image identities");
+    assert.deepEqual(headingRecovered.composition.sections[0].body, headingSection.body);
+    assert.equal(headingRecovered.composition.renderNodes.find(node => (node.kind === "heading" || node.kind === "quotation") && node.sectionId === headingSection.id)?.kind,
+      headingNode?.kind, "Heading and quotation styles survive notice cleanup");
+  }
   assert.deepEqual(savedBrandPostTextSections(fixture).slice(0, -1), composition.sections.map((section) =>
     composition.renderNodes.filter((node) => (node.kind === "heading" || node.kind === "quotation" || node.kind === "paragraph") && node.sectionId === section.id)
       .map((node) => "text" in node ? node.text : "").join("\n")),

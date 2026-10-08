@@ -13,8 +13,10 @@ import { SAVED_TEXT_QC_VERSION, type SavedTextQcMetadata } from "./brand-post-re
 import { atomicWriteTextFile } from "./atomic-text-file";
 import { isDraftEditorialQualityPassed } from "./brand-post-quality-display";
 import { SHOPPING_POST_STRATEGY_VERSION } from "./shopping-post-strategy";
+import { getConnectAffiliateDisclosure } from "./connect-disclosure";
 import {
   getPostCompositionContract,
+  hasCanonicalAffiliateDisclosure,
   refreshPostDocumentQuality,
   normalizeLegacyFreeformImageRules,
   normalizeLegacyPostImageIntents,
@@ -659,6 +661,10 @@ export function getBrandPostImageSlots(manifest: BrandPostPackageManifest) {
 /** One read-only decision used by material selection, preview and approval. */
 export function evaluateBrandPostPackageReadiness(manifest: BrandPostPackageManifest) {
   const blockers: Array<{ code: string; reason: string; sectionId?: string }> = [];
+  if (manifest.version === "brand-post-package/v1") {
+    blockers.push({ code: "draft-recheck-required", reason:
+      "이전 형식의 원고는 현재 제휴 고지와 발행 배치를 검증할 수 없습니다. 기존 원고·이미지는 보존되며 소재 준비를 다시 실행한 뒤 확인·승인하세요." });
+  }
   const imageGeneration = getBrandPostImageGenerationState(manifest);
   try {
     const stat = fs.statSync(manifest.markdownPath);
@@ -666,13 +672,10 @@ export function evaluateBrandPostPackageReadiness(manifest: BrandPostPackageMani
     if (manifest.markdownSha256 && sha256File(manifest.markdownPath) !== manifest.markdownSha256) throw new Error("changed");
   } catch { blockers.push({ code: "markdown-invalid", reason: "저장 본문 파일이 없거나 검수한 본문과 일치하지 않습니다." }); }
   if (manifest.version === "brand-post-package/v2") {
-    if (manifest.connectKind === "SHOPPING" && manifest.composition.strategyVersion === SHOPPING_POST_STRATEGY_VERSION) {
-      const disclosures = manifest.composition.renderNodes.filter(node => node.kind === "disclosure" && node.disclosureType === "affiliate");
-      const first = manifest.composition.renderNodes[0];
-      if (disclosures.length !== 1 || first?.kind !== "disclosure" || first.disclosureType !== "affiliate" ||
-          first.placement !== "top" || !first.text.trim()) {
-        blockers.push({ code: "affiliate-disclosure-position", reason: "신규 쇼핑 글의 제휴 고지는 본문 맨 위에 한 번 표시해야 합니다." });
-      }
+    if (manifest.composition.connectKind !== manifest.connectKind || !hasCanonicalAffiliateDisclosure(manifest.composition)) {
+      blockers.push({ code: "affiliate-disclosure-position", reason:
+        `제휴 고지는 본문 맨 위에 한 번 표시해야 합니다: ${getConnectAffiliateDisclosure(manifest.connectKind)} ` +
+        "저장 원고 재검사를 실행해 고지 문구·위치를 갱신한 뒤 다시 승인하세요." });
     }
     const normalize = (text: string) => text.replace(/\s+/gu, " ").trim();
     const inconsistent = manifest.title !== manifest.composition.title || manifest.composition.sections.some(section => {
@@ -759,7 +762,7 @@ export function evaluateBrandPostPackageReadiness(manifest: BrandPostPackageMani
     }),
   }) : null;
   const editorialPassed = manifest.version === "brand-post-package/v1" ? manifest.contentQuality?.canPublish !== false : isDraftEditorialQualityPassed(manifest.contentQuality);
-  const contentPassed = editorialPassed && !blockers.some(blocker => blocker.code === "markdown-invalid" || blocker.code === "content-render-mismatch" || blocker.code === "text-qc-stale");
+  const contentPassed = editorialPassed && !blockers.some(blocker => blocker.code === "markdown-invalid" || blocker.code === "content-render-mismatch" || blocker.code === "text-qc-stale" || blocker.code === "affiliate-disclosure-position" || blocker.code === "draft-recheck-required");
   const contentScore = manifest.contentQuality?.quality?.score ?? manifest.contentQuality?.score ?? 0;
   const compositionPassed = !composition || composition.qualityReport.canAutoPublish;
   if (manifest.version === "brand-post-package/v2" && manifest.generationSource !== "AI") blockers.push({ code: "generation-source", reason: "AI 원고 출처가 확인되지 않았습니다." });

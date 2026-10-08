@@ -15,6 +15,8 @@ import { buildPostSpec, runSpecFirstPipeline, validateDraft, normalizeDraft } fr
 import type { ImageCandidateInput } from "./lib/post-spec";
 import { assessTravelFeatureCoverage } from "./lib/travel-content";
 import { sourceFeaturesForValidation } from "./lib/post-spec/validate";
+import { getConnectAffiliateDisclosure } from "../src/lib/connect-disclosure";
+import { hasCanonicalAffiliateDisclosure, resolvePostDocument } from "../src/lib/post-composition-contract";
 
 process.env.UNSPLASH_ACCESS_KEY = "";
 
@@ -63,6 +65,7 @@ async function main() {
     options: { forceLocal: true, quotationHeaders: false },
   };
   const { spec } = await buildPostSpec(shoppingInput);
+  assert.equal(spec.disclosure, getConnectAffiliateDisclosure("SHOPPING"));
   assert.ok(spec.sections.length >= 8 && spec.sections.length <= 10, `쇼핑 섹션 수 ${spec.sections.length}`);
   for (const role of ["summary-glance", "key-facts", "faq", "fit-checklist", "product-reveal"]) {
     assert.ok(spec.sections.some((section) => section.role === role), `쇼핑 구성표에 ${role} 필요`);
@@ -98,6 +101,7 @@ async function main() {
   assert.equal(shopping.sections.length, spec.sections.length + 1, "마지막은 고지 섹션");
   assert.equal(shopping.composition.sections.length, spec.sections.length);
   assert.ok(shopping.sections.at(-1)?.includes("쇼핑 커넥트"));
+  assert.equal(shopping.sections.at(-1), getConnectAffiliateDisclosure("SHOPPING"));
   assert.equal(shopping.validation.status, "BLOCKED", "연출 사진이 생성되지 않았으므로 글 생성만으로 발행 가능해지지 않는다");
   assert.ok(shopping.uploadImagePaths[0] === shopping.heroImagePath, "업로드 첫 장은 hero");
   assert.equal(new Set(shopping.uploadImagePaths).size, 1);
@@ -167,6 +171,17 @@ async function main() {
     options: { forceLocal: true },
   };
   const travel = await runSpecFirstPipeline(travelInput);
+  assert.equal(travel.spec.disclosure, getConnectAffiliateDisclosure("TRAVEL"));
+  assert.equal(travel.sections.at(-1), getConnectAffiliateDisclosure("TRAVEL"));
+  for (const [connectKind, assembled, brandLink] of [["SHOPPING", shopping, shoppingInput.brandLink], ["TRAVEL", travel, travelInput.brandLink]] as const) {
+    const document = resolvePostDocument({ connectKind, title: assembled.title, sections: assembled.sections,
+      hashtags: assembled.hashtags, imagePaths: assembled.uploadImagePaths,
+      sectionImagePaths: assembled.composition.sections.map(section => section.imagePaths),
+      sectionPlan: assembled.sectionPlan, connectUrl: brandLink });
+    assert.ok(hasCanonicalAffiliateDisclosure(document), `${connectKind} Spec-first publishes its clear notice first`);
+    assert.deepEqual(document.renderNodes.filter(node => node.kind === "image").map(node => node.assetPath),
+      assembled.uploadImagePaths, "Moving the notice must not shuffle the assigned photographs");
+  }
   const travelTitles = travel.spec.sections.map((section) => section.title);
   assert.ok(travel.spec.sections.length >= 10 && travel.spec.sections.length <= 12, `여행 섹션 수 ${travel.spec.sections.length}`);
   assert.match(travelTitles[0], /결론부터/u);
@@ -243,7 +258,6 @@ async function main() {
   assert.ok((banaBody.match(/바나힐 패키지/gu) || []).length >= 2, "핵심 키워드가 본문에 2회 이상");
   // 실제 발행 게이트(simple-agent 가 쓰는 비-편집 모드)도 통과해야 승인 버튼이 열린다.
   const { getBrandLinkContentReadiness } = await import("./lib/brandlink-content-readiness");
-  const { resolvePostDocument } = await import("../src/lib/post-composition-contract");
   const banaComposition = resolvePostDocument({
     connectKind: "TRAVEL",
     title: bana.title,

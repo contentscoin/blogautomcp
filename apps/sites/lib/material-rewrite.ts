@@ -13,6 +13,8 @@ export const MATERIALS_REWRITE_INPUT_SCHEMA: JsonSchema = { type: 'object', prop
 export const MATERIALS_LIST_INPUT_SCHEMA: JsonSchema = { type: 'object', properties: { connectKind: CONNECT_KIND, jobId: ID, sourceJobId: ID, idempotencyKey: IDEMPOTENCY }, additionalProperties: false };
 export const MATERIALS_REWRITE_QUEUE_TOOL = { jobType: 'MATERIALS_REWRITE_FAILED', minAppVersion: MATERIALS_REWRITE_MIN_APP };
 export const MATERIALS_LIST_QUEUE_TOOL = { jobType: 'MATERIALS_LIST', minAppVersion: '1.3.26' };
+/** Source-id forwarding in MATERIALS_LIST was introduced in the 1.3.98 PC workflow. */
+export const MATERIALS_SOURCE_READ_MIN_APP = '1.3.98';
 
 async function queue(userId: string, schema: JsonSchema, tool: { jobType: string; minAppVersion: string }, args: Record<string, unknown>) {
   const validation = validateToolArguments(schema, args);
@@ -23,4 +25,7 @@ async function queue(userId: string, schema: JsonSchema, tool: { jobType: string
 }
 /** Caller provides a server-authenticated account id, never an id from the request body. */
 export function queueFailedMaterialRewrite(userId: string, args: Record<string, unknown>) { return queue(userId, MATERIALS_REWRITE_INPUT_SCHEMA, MATERIALS_REWRITE_QUEUE_TOOL, args); }
-export function queueMaterialWorkflowRead(userId: string, args: Record<string, unknown>) { return queue(userId, MATERIALS_LIST_INPUT_SCHEMA, MATERIALS_LIST_QUEUE_TOOL, args); }
+export function queueMaterialWorkflowRead(userId: string, args: Record<string, unknown>) {
+  return queue(userId, MATERIALS_LIST_INPUT_SCHEMA,
+    !args.jobId && args.sourceJobId ? { ...MATERIALS_LIST_QUEUE_TOOL, minAppVersion: MATERIALS_SOURCE_READ_MIN_APP } : MATERIALS_LIST_QUEUE_TOOL, args);
+}
