@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { chromium, type BrowserContext, type Page } from "playwright";
 import { getAppDataDir, getEnvFilePath, getNaverSessionFile } from "./app-paths";
+import { maintainNaverSession, readNaverSessionSnapshot } from "./naver-session-state";
+import { verifyNaverPublishingContext } from "../../src/lib/naver-session";
 
 export interface NaverBlogProfileSnapshot {
   blogId: string;
@@ -56,14 +58,16 @@ function validateChanges(changes: NaverBlogProfileChanges): NaverBlogProfileChan
   return desired;
 }
 
-async function openAdminContext(): Promise<{ context: BrowserContext; page: Page; blogId: string }> {
+async function openAdminContext(): Promise<{ context: BrowserContext; page: Page; blogId: string; sessionMaintenance: ReturnType<typeof maintainNaverSession> }> {
   const sessionPath = getNaverSessionFile();
   if (!fs.existsSync(sessionPath)) throw new Error("저장된 네이버 로그인 세션이 없습니다. 네이버 재로그인을 먼저 실행하세요.");
   const blogId = readBlogId();
+  const snapshot = readNaverSessionSnapshot(sessionPath);
   const browser = await chromium.launch({ channel: process.env.BROWSER_CHANNEL?.trim() || "chrome", headless: true });
-  const context = await browser.newContext({ storageState: sessionPath, locale: "ko-KR", viewport: { width: 1440, height: 1100 } });
+  const context = await browser.newContext({ storageState: snapshot.state, locale: "ko-KR", viewport: { width: 1440, height: 1100 } });
   const page = await context.newPage();
-  return { context, page, blogId };
+  const sessionMaintenance = maintainNaverSession(context, snapshot, () => verifyNaverPublishingContext(context, blogId));
+  return { context, page, blogId, sessionMaintenance };
 }
 
 async function waitForBlogInfoFrame(page: Page) {
@@ -110,10 +114,11 @@ async function readSnapshot(page: Page, blogId: string, screenshotLabel: string)
 }
 
 export async function inspectNaverBlogProfile(): Promise<NaverBlogProfileSnapshot> {
-  const { context, page, blogId } = await openAdminContext();
+  const { context, page, blogId, sessionMaintenance } = await openAdminContext();
   try {
     return await readSnapshot(page, blogId, "profile-inspect");
   } finally {
+    await sessionMaintenance.stop();
     await context.browser()?.close().catch(() => undefined);
   }
 }
@@ -123,7 +128,7 @@ export async function applyNaverBlogProfile(
   expected: Pick<NaverBlogProfileSnapshot, "nickname" | "blogName" | "introduction">,
 ): Promise<{ before: NaverBlogProfileSnapshot; after: NaverBlogProfileSnapshot }> {
   const desired = validateChanges(changes);
-  const { context, page, blogId } = await openAdminContext();
+  const { context, page, blogId, sessionMaintenance } = await openAdminContext();
   try {
     const before = await readSnapshot(page, blogId, "profile-before");
     if (before.nickname !== expected.nickname || before.blogName !== expected.blogName || before.introduction !== expected.introduction) {
@@ -157,6 +162,7 @@ export async function applyNaverBlogProfile(
     if (desired.introduction !== undefined && after.introduction !== desired.introduction) throw new Error("소개글 저장 결과가 요청과 일치하지 않습니다.");
     return { before, after };
   } finally {
+    await sessionMaintenance.stop();
     await context.browser()?.close().catch(() => undefined);
   }
 }

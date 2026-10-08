@@ -6,6 +6,7 @@ import { requireTrustedLocalMutation } from "@/lib/local-request-auth";
 import { getNaverSessionFile } from "@/lib/naver-session";
 import {
   ConnectContractNotFoundError,
+  ConnectAccessDeniedError,
   ConnectSessionExpiredError,
   discoverConnectContract,
   isValidConnectUrl,
@@ -92,6 +93,9 @@ export async function POST(request: NextRequest) {
       },
     });
   } catch (error) {
+    if (error instanceof ConnectAccessDeniedError) {
+      return NextResponse.json({ success: false, error: error.message, code: error.code, authRequired: false }, { status: 403 });
+    }
     if (error instanceof ConnectSessionExpiredError) {
       return NextResponse.json({ success: false, error: error.message }, { status: 401 });
     }

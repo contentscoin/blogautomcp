@@ -18,6 +18,10 @@ interface SessionSummary {
   savedAt?: string;
   checkedAt?: string;
   mode?: string;
+  status?: "valid" | "auth-required" | "forbidden" | "unknown" | "configuration";
+  authRequired?: boolean;
+  code?: string;
+  warning?: string;
   error?: string;
 }
 
@@ -45,23 +49,30 @@ async function readNaverSessionSummary(): Promise<SessionSummary> {
   };
 
   if (!hasSession) {
-    return { ...base, error: "네이버 세션 파일이 없습니다. `npm run login`을 실행하세요." };
+    return { ...base, status: "auth-required", authRequired: true, code: "NAVER_SESSION_EXPIRED", error: "저장된 네이버 세션이 없습니다. 네이버 로그인을 진행해 주세요." };
   }
 
   const blogId = process.env.NAVER_BLOG_ID?.trim();
   if (!blogId) {
-    return { ...base, error: "NAVER_BLOG_ID가 설정되어 있지 않습니다." };
+    return { ...base, status: "configuration", authRequired: false, code: "NAVER_SESSION_CONFIGURATION_REQUIRED", error: "네이버 블로그 ID를 먼저 설정해 주세요." };
   }
 
   try {
     const validation = await validateNaverPublishingSession(NAVER_SESSION_FILE, blogId);
-    return validation.valid
-      ? { ...base, isValid: true, error: undefined }
-      : { ...base, error: `${validation.error} \`npm run login\`을 다시 실행하세요.` };
-  } catch (error) {
     return {
       ...base,
-      error: `네이버 세션 확인 실패: ${getErrorMessage(error)}. \`npm run login\`을 다시 실행하세요.`,
+      isValid: validation.valid,
+      status: validation.status,
+      authRequired: validation.authRequired,
+      code: validation.code,
+      error: validation.error,
+      warning: validation.warning,
+    };
+  } catch {
+    return {
+      ...base,
+      status: "unknown", authRequired: false, code: "NAVER_SESSION_CHECK_FAILED",
+      error: "네이버 상태 확인 중 오류가 발생했습니다. 저장된 세션은 유지됩니다. 잠시 후 다시 확인해 주세요.",
     };
   }
 }

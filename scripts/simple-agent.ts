@@ -31,6 +31,8 @@ import * as path from "path";
 import * as fs from "fs";
 import * as crypto from "crypto";
 import { createPublishImageCleanup } from "./lib/publish-image-cleanup";
+import { maintainNaverSession, readNaverSessionSnapshot } from "./lib/naver-session-state";
+import { verifyNaverPublishingContext } from "../src/lib/naver-session";
 import sharp from "sharp";
 import {
   buildHumanMobileStyleGuide,
@@ -10098,6 +10100,7 @@ async function main() {
     console.log(`\n🔎 현재 단계: ${stage}`);
   };
   let browser: Browser | null = null;
+  let naverSessionMaintenance: ReturnType<typeof maintainNaverSession> | null = null;
   let timeoutHandle: NodeJS.Timeout | null = null;
   const attemptId = process.env.BRANDLINK_PUBLISH_ATTEMPT_ID?.trim() || "";
   let publicationConfirmed = false;
@@ -10180,6 +10183,7 @@ async function main() {
 
         try {
           if (browser?.isConnected()) {
+            await naverSessionMaintenance?.stop();
             await browser.close();
           }
         } catch {
@@ -10220,13 +10224,15 @@ async function main() {
       ],
     });
     
+    const naverSessionSnapshot = readNaverSessionSnapshot(SESSION_FILE);
     const context = await browser.newContext({
-      storageState: SESSION_FILE,
+      storageState: naverSessionSnapshot.state,
       viewport: { width: 1280, height: 900 },
       locale: "ko-KR",
       timezoneId: NAVER_SCHEDULE_TIMEZONE,
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     });
+    naverSessionMaintenance = maintainNaverSession(context, naverSessionSnapshot, () => verifyNaverPublishingContext(context, NAVER_BLOG_ID));
 
     // 봇 감지 우회 스크립트 (문자열로 전달)
     await context.addInitScript(`
@@ -10960,6 +10966,7 @@ async function main() {
     publishImageCleanup.cleanup(downloadedProductImagePaths);
     
     // 자동 종료 (백그라운드 실행에서도 프로세스가 남지 않도록)
+    await naverSessionMaintenance.stop();
     await browser.close();
     
   } catch (error: unknown) {
@@ -10992,6 +10999,7 @@ async function main() {
         clearTimeout(timeoutHandle);
       }
       if (browser?.isConnected()) {
+        await naverSessionMaintenance?.stop();
         await browser.close();
       }
     } catch {

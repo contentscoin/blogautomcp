@@ -1,6 +1,7 @@
 import { getConfiguredConnectUrl, getShoppingCategoryIdFromUrl, getSpaceIdFromConnectUrl } from "./brandconnect-kind";
 import { buildCookieHeaderForHost } from "./naver-session";
 import type { APIRequestContext, Browser } from "playwright";
+import { maintainNaverSession, readNaverSessionSnapshot, saveRefreshedNaverSession } from "../../scripts/lib/naver-session-state";
 
 const BRANDCONNECT_ORIGIN = "https://brandconnect.naver.com";
 const BRANDCONNECT_GATEWAY = "https://gw-brandconnect.naver.com";
@@ -141,8 +142,22 @@ async function discoverShoppingCategoryFromRequest(requestJson: ShoppingJsonRequ
 /** Discover only IDs returned by the signed-in account and category APIs. */
 export async function probeShoppingCategoryFromSession(
   storageStatePath: string,
-  fetcher: typeof fetch = fetch,
+  fetcher?: typeof fetch,
 ): Promise<string | null> {
+  if (!fetcher) {
+    const snapshot = readNaverSessionSnapshot(storageStatePath);
+    const { request } = await import("playwright");
+    const api = await request.newContext({ storageState: snapshot.state });
+    try {
+      const category = await probeShoppingCategoryFromApiRequest(api);
+      if (category) {
+        const saved = await saveRefreshedNaverSession(api, snapshot, async () => true, 10_000, { preserveOrigins: true });
+        if (saved === "superseded") throw new ShoppingConnectAccessError("SHOPPING_SESSION_CHANGED", "조회 중 네이버 로그인 세션이 변경되었습니다. 새 계정의 상품 공간을 다시 확인하세요.");
+        if (saved === "unavailable") console.warn("쇼핑 계정은 확인됐지만 갱신 세션을 저장하지 못했습니다. 저장 권한을 확인하세요.");
+      }
+      return category;
+    } finally { await api.dispose().catch(() => {}); }
+  }
   const cookieHeader = buildCookieHeaderForHost(storageStatePath, "gw-brandconnect.naver.com");
   if (!cookieHeader) {
     throw new ShoppingConnectAccessError("NAVER_SESSION_EXPIRED", "네이버 로그인 세션을 다시 연결하세요.", 401);
@@ -172,10 +187,11 @@ export async function probeShoppingCategoryFromSession(
   });
 }
 
-async function probeShoppingCategoryFromApiRequest(request: APIRequestContext): Promise<string | null> {
+export async function probeShoppingCategoryFromApiRequest(request: APIRequestContext): Promise<string | null> {
   return discoverShoppingCategoryFromRequest(async (url, spaceId) => {
     const response = await request.get(url, {
       timeout: SHOPPING_DISCOVERY_REQUEST_TIMEOUT_MS,
+      maxRedirects: 0,
       headers: {
         accept: "application/json, text/plain, */*",
         origin: BRANDCONNECT_ORIGIN,
@@ -203,10 +219,18 @@ export async function discoverShoppingCategory(
   if (directlyObserved) return directlyObserved;
   // Dedicated read-only context: cleanup must never close a material worker's browser.
   const browser = await launch();
+  let sessionMaintenance: ReturnType<typeof maintainNaverSession> | null = null;
+  let observedSpaceId: string | null = null;
   try {
-    const context = await browser.newContext({ storageState: storageStatePath });
+    const snapshot = readNaverSessionSnapshot(storageStatePath);
+    const context = await browser.newContext({ storageState: snapshot.state });
+    sessionMaintenance = maintainNaverSession(context, snapshot, async () => {
+      if (!observedSpaceId) return false;
+      const verifiedCategory = await probeShoppingCategoryFromApiRequest(context.request);
+      return Boolean(verifiedCategory && getSpaceIdFromConnectUrl(verifiedCategory) === observedSpaceId);
+    });
     const initialApiCategory = await probeShoppingCategoryFromApiRequest(context.request);
-    if (initialApiCategory) return initialApiCategory;
+    if (initialApiCategory) { observedSpaceId = getSpaceIdFromConnectUrl(initialApiCategory); return initialApiCategory; }
 
     const loginResponse = await context.request.get(BRANDCONNECT_LOGIN_URL, {
       maxRedirects: 10,
@@ -218,7 +242,7 @@ export async function discoverShoppingCategory(
         assertShoppingAccess(401);
       }
       const authenticatedApiCategory = await probeShoppingCategoryFromApiRequest(context.request);
-      if (authenticatedApiCategory) return authenticatedApiCategory;
+      if (authenticatedApiCategory) { observedSpaceId = getSpaceIdFromConnectUrl(authenticatedApiCategory); return authenticatedApiCategory; }
     }
 
     const page = await context.newPage();
@@ -234,7 +258,7 @@ export async function discoverShoppingCategory(
         throw error;
       });
       const selected = selectShoppingCategory([page.url(), ...hrefs]);
-      if (selected) return selected;
+      if (selected) { observedSpaceId = getSpaceIdFromConnectUrl(selected); return selected; }
       // The public home redirects to /about even with Naver cookies. Follow its
       // observed SSO entry once; never enter credentials or guess an account URL.
       const loginHref = hrefs.find(href => {
@@ -265,7 +289,10 @@ export async function discoverShoppingCategory(
     if (error instanceof Error && error.name === "TimeoutError")
       throw new ShoppingConnectAccessError("SHOPPING_DISCOVERY_TIMEOUT", "쇼핑 공간 탐색 응답이 지연되었습니다. 네이버 접속 상태를 확인하거나 상품 목록 주소를 지정하세요.", 504);
     throw error;
-  } finally { await browser.close().catch(() => {}); }
+  } finally {
+    await sessionMaintenance?.stop();
+    await browser.close().catch(() => {});
+  }
 }
 
 /** Both list and registration use this resolver. No cross-account fallback/cache. */

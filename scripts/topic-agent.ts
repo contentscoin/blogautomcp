@@ -28,6 +28,8 @@ import { buildHumanMobileStyleGuide } from "./lib/blog-writing-style";
 import { loadImages } from "./lib/image-content";
 import { createTaskLogger } from "./lib/logger";
 import { getNaverSessionFile } from "./lib/app-paths";
+import { maintainNaverSession, readNaverSessionSnapshot } from "./lib/naver-session-state";
+import { verifyNaverPublishingContext } from "../src/lib/naver-session";
 import {
     parsePreparedTopicContent,
     preparedSectionsToPublishBlocks,
@@ -2741,11 +2743,13 @@ async function main() {
         channel: process.env.BROWSER_CHANNEL?.trim() || undefined,
         headless: (process.env.HEADLESS || "false").toLowerCase() === "true",
     });
+    const naverSessionSnapshot = readNaverSessionSnapshot(SESSION_FILE);
     const context = await browser.newContext({
-        storageState: SESSION_FILE,
+        storageState: naverSessionSnapshot.state,
         viewport: { width: 1280, height: 900 },
         locale: "ko-KR",
     });
+    const naverSessionMaintenance = maintainNaverSession(context, naverSessionSnapshot, () => verifyNaverPublishingContext(context, NAVER_BLOG_ID));
 
     const page = await context.newPage();
     let submissionStarted = false;
@@ -2874,6 +2878,7 @@ async function main() {
         }
         throw error;
     } finally {
+        await naverSessionMaintenance.stop();
         await browser.close();
     }
 }

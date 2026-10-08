@@ -10,6 +10,8 @@ import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { PrismaClient } from "../src/generated/prisma";
 import { buildAppUrl, notifyAndLogCompletion } from "./lib/chatbot-notifier";
 import { getNaverSessionFile } from "./lib/app-paths";
+import { maintainNaverSession, readNaverSessionSnapshot } from "./lib/naver-session-state";
+import { fetchNaverPublishingOptions, verifyNaverPublishingContext } from "../src/lib/naver-session";
 import {
   buildCaptureRequiredPayload,
   getSpaceIdFromConnectUrl,
@@ -1157,30 +1159,9 @@ async function fetchBlogCategoryMap(
   storageStatePath: string,
   blogId: string
 ): Promise<Map<string, string>> {
-  const header = buildCookieHeaderForHost(storageStatePath, "blog.naver.com");
-  if (!header) {
-    throw new Error("blog.naver.com 쿠키를 찾지 못했습니다. npm run login 후 재시도하세요.");
-  }
-
-  const endpoint = `https://blog.naver.com/PostWriteFormManagerOptions.naver?blogId=${encodeURIComponent(
-    blogId
-  )}`;
-
-  const res = await fetch(endpoint, {
-    headers: {
-      cookie: header,
-      accept: "application/json, text/plain, */*",
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    },
-  });
-
-  if (!res.ok) {
-    throw new Error(`네이버 게시판 조회 실패 (HTTP ${res.status})`);
-  }
-
-  const text = await res.text();
-  const data = JSON.parse(text) as {
+  const options = await fetchNaverPublishingOptions(storageStatePath, blogId);
+  if (!options.validation.valid) throw new Error(options.validation.error || "네이버 게시판을 확인하지 못했습니다.");
+  const data = options.data as {
     isSuccess?: boolean;
     result?: {
       formView?: {
@@ -1748,10 +1729,13 @@ async function main() {
         ? ["--start-minimized", "--window-position=-32000,-32000"]
         : [],
   });
+  const sessionSnapshot = readNaverSessionSnapshot(options.storageStatePath);
   const context = await browser.newContext({
-    storageState: options.storageStatePath,
+    storageState: sessionSnapshot.state,
     viewport: { width: 1600, height: 1100 },
   });
+  const sessionMaintenance = maintainNaverSession(context, sessionSnapshot, () => verifyNaverPublishingContext(context, blogId));
+  try {
 
   await context.addInitScript({
     content: `
@@ -2179,9 +2163,12 @@ async function main() {
     });
   }
 
-  await context.close();
-  await browser.close();
-  await prisma.$disconnect();
+  } finally {
+    await sessionMaintenance.stop();
+    await context.close().catch(() => {});
+    await browser.close().catch(() => {});
+    await prisma.$disconnect();
+  }
 }
 
 main().catch(async (error: unknown) => {

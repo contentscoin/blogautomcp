@@ -25,7 +25,9 @@ import {
   type StoredConnectContract,
   type StoredConnectFeed,
 } from "./connect-contract-store";
-import { buildCookieHeaderForHost, getNaverSessionFile } from "./naver-session";
+import { getNaverSessionFile, verifyNaverPublishingContext } from "./naver-session";
+import { maintainNaverSession, readNaverSessionSnapshot, saveRefreshedNaverSession } from "../../scripts/lib/naver-session-state";
+import type { APIRequestContext } from "playwright";
 
 export const TRAVEL_CONNECT_HOME = "https://brandconnect.naver.com/";
 
@@ -130,6 +132,15 @@ function buildContractRequestUrl(feed: StoredConnectFeed, limit: number): string
   return url.toString();
 }
 
+export class ConnectAccessDeniedError extends Error {
+  readonly code = "NAVER_SESSION_FORBIDDEN";
+  readonly status = 403;
+  constructor() {
+    super("NAVER_SESSION_FORBIDDEN: 여행커넥트 접근이 거부되었습니다(HTTP 403). 계정 권한과 보안 제한을 확인하세요.");
+    this.name = "ConnectAccessDeniedError";
+  }
+}
+
 function toLegacyFeed(contract: StoredConnectContract): StoredConnectFeed {
   return {
     listEndpoint: contract.listEndpoint,
@@ -203,36 +214,27 @@ export function mergeConnectItems(groups: ConnectItem[][]): ConnectItem[] {
 async function fetchContractFeed(
   contract: StoredConnectContract,
   feed: StoredConnectFeed,
-  storageStatePath: string,
+  api: APIRequestContext,
   limit: number
 ): Promise<ConnectItem[] | null> {
   const requestUrl = buildContractRequestUrl(feed, limit);
-  const endpointHost = new URL(requestUrl).hostname;
-
-  let cookieHeader = "";
-  try {
-    cookieHeader = buildCookieHeaderForHost(storageStatePath, endpointHost);
-  } catch {
-    return null;
-  }
-  if (!cookieHeader) return null;
-
   const spaceId = getSpaceIdFromConnectUrl(contract.sourceUrl);
-  const response = await fetch(requestUrl, {
+  const response = await api.get(requestUrl, {
     headers: {
       accept: "application/json, text/plain, */*",
-      cookie: cookieHeader,
       origin: "https://brandconnect.naver.com",
       referer: contract.sourceUrl,
       ...(spaceId ? { "x-space-id": spaceId } : {}),
     },
-    cache: "no-store",
-    signal: AbortSignal.timeout(CONTRACT_FETCH_TIMEOUT_MS),
+    timeout: CONTRACT_FETCH_TIMEOUT_MS,
+    maxRedirects: 0,
+    maxRetries: 0,
   }).catch(() => null);
 
   if (!response) return null;
-  if (response.status === 401 || response.status === 403) throw new ConnectSessionExpiredError();
-  if (!response.ok) return null;
+  if (response.status() === 401) throw new ConnectSessionExpiredError();
+  if (response.status() === 403) throw new ConnectAccessDeniedError();
+  if (!response.ok()) return null;
 
   const payload: unknown = await response.json().catch(() => null);
   if (payload === null) return null;
@@ -252,12 +254,17 @@ export async function listItemsViaContract(
   const feeds = contractFeeds(contract);
   const groups: ConnectItem[][] = [];
   const limit = options.limit ?? 60;
+  let snapshot;
+  try { snapshot = readNaverSessionSnapshot(storageStatePath); } catch { return null; }
+  const { request } = await import("playwright");
+  const api = await request.newContext({ storageState: snapshot.state });
+  try {
 
   // 한 피드 실패 때문에 나머지 정상 추천 구간까지 버리지 않는다. 인증 만료만 즉시 전파한다.
   for (let index = 0; index < feeds.length; index += CONTRACT_FETCH_CONCURRENCY) {
     const batch = feeds.slice(index, index + CONTRACT_FETCH_CONCURRENCY);
     const results = await Promise.all(
-      batch.map((feed) => fetchContractFeed(contract, feed, storageStatePath, limit))
+      batch.map((feed) => fetchContractFeed(contract, feed, api, limit))
     );
     for (const items of results) {
       if (items?.length) groups.push(items);
@@ -265,7 +272,14 @@ export async function listItemsViaContract(
   }
 
   const items = mergeConnectItems(groups);
+  if (items.length > 0) {
+    const saved = await saveRefreshedNaverSession(api, snapshot,
+      () => verifyNaverPublishingContext({ request: api }, process.env.NAVER_BLOG_ID?.trim() || ""), 10_000, { preserveOrigins: true });
+    if (saved === "superseded") throw new Error("CONNECT_SESSION_CHANGED: 목록 조회 중 네이버 세션이 변경되었습니다. 새 계정으로 목록을 다시 확인하세요.");
+    if (saved === "unavailable") console.warn("여행 상품 목록은 조회했지만 갱신 세션을 저장하지 못했습니다. 저장 권한을 확인하세요.");
+  }
   return items.length > 0 ? items : null;
+  } finally { await api.dispose().catch(() => {}); }
 }
 
 interface DiscoveryOptions {
@@ -302,8 +316,11 @@ export async function discoverConnectContract(options: DiscoveryOptions): Promis
     headless: options.headless ?? process.env.BRANDCONNECT_CAPTURE_HEADLESS?.trim().toLowerCase() === "true",
   });
 
+  let sessionMaintenance: ReturnType<typeof maintainNaverSession> | null = null;
   try {
-    const context = await browser.newContext({ storageState: storageStatePath });
+    const snapshot = readNaverSessionSnapshot(storageStatePath);
+    const context = await browser.newContext({ storageState: snapshot.state });
+    sessionMaintenance = maintainNaverSession(context, snapshot, () => verifyNaverPublishingContext(context, process.env.NAVER_BLOG_ID?.trim() || ""));
     const page = await context.newPage();
 
     page.on("response", (response) => {
@@ -375,6 +392,7 @@ export async function discoverConnectContract(options: DiscoveryOptions): Promis
       throw new ConnectSessionExpiredError();
     }
   } finally {
+    await sessionMaintenance?.stop();
     await browser.close().catch(() => {});
   }
 
@@ -406,7 +424,7 @@ export async function discoverConnectContract(options: DiscoveryOptions): Promis
     limit: options.limit,
     storageStatePath,
   }).catch((error) => {
-    if (error instanceof ConnectSessionExpiredError) throw error;
+    if (error instanceof ConnectSessionExpiredError || error instanceof ConnectAccessDeniedError) throw error;
     return null;
   });
   const items = expandedItems?.length ? expandedItems : discoveredFeeds.items;

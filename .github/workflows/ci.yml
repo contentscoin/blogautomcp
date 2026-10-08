@@ -52,6 +52,7 @@ jobs:
           npm run test:failed-material-rewrite
           npm run test:blocked-material-repair
           npm run test:operational-safety
+          npm run test:naver-session
           npm run test:connect-store
           npm run test:title-rules
           npm run test:post-spec

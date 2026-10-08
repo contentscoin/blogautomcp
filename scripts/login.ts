@@ -8,17 +8,17 @@
 import { chromium, type BrowserContext } from "playwright";
 import * as fs from "fs";
 import * as path from "path";
-import { validateNaverPublishingSession } from "../src/lib/naver-session";
-import { probeShoppingCategoryFromSession, ShoppingConnectAccessError } from "../src/lib/shopping-connect-access";
-import { getSessionStorageDir } from "./lib/app-paths";
+import { verifyNaverPublishingContext } from "../src/lib/naver-session";
+import { probeShoppingCategoryFromApiRequest, ShoppingConnectAccessError } from "../src/lib/shopping-connect-access";
+import { getNaverSessionFile, getSessionStorageDir } from "./lib/app-paths";
+import { commitNaverLoginSession, readNaverManualSessionBaseline } from "./lib/naver-session-state";
 import {
-  replaceSessionFileWithRollback,
   waitForNaverAuthentication,
 } from "./lib/naver-login-flow";
 
 const STORAGE_PATH = getSessionStorageDir();
-const SESSION_FILE = path.join(STORAGE_PATH, "naver-session.json");
-const TEMP_SESSION_FILE = path.join(STORAGE_PATH, `naver-session.pending-${process.pid}.json`);
+const SESSION_FILE = getNaverSessionFile();
+const TEMP_SESSION_FILE = path.join(path.dirname(SESSION_FILE), `naver-session.pending-${process.pid}.json`);
 const LOGIN_PROFILE_PATH = path.join(STORAGE_PATH, "naver-login-profile");
 const BROWSER_CHANNEL = process.env.BROWSER_CHANNEL?.trim() || "chrome";
 const FORCE_LOGIN = process.argv.includes("--force-login");
@@ -29,7 +29,11 @@ if (!fs.existsSync(STORAGE_PATH)) {
   fs.mkdirSync(STORAGE_PATH, { recursive: true });
 }
 
+fs.mkdirSync(path.dirname(SESSION_FILE), { recursive: true });
+
 async function mainV2() {
+  const initialSessionBaseline = readNaverManualSessionBaseline(SESSION_FILE);
+  console.log("오래 유지하려면 네이버 로그인 화면에서 '로그인 상태 유지'를 선택하세요.");
   console.log("=".repeat(50));
   console.log("네이버 블로그 자동화 - 로그인 설정");
   console.log("=".repeat(50));
@@ -41,6 +45,7 @@ async function mainV2() {
   console.log("");
 
   let context: BrowserContext | null = null;
+  let serverAuthenticationConfirmed = false;
   try {
     // 수동 로그인에는 페이지 동작을 바꾸는 스텔스 플러그인과 오래된 고정 UA를 쓰지 않습니다.
     // 실제 설치된 Chrome과 전용 영구 프로필을 사용해 로그인 화면의 반복 초기화를 피합니다.
@@ -89,7 +94,7 @@ async function mainV2() {
       return;
     }
 
-    console.log("🔍 네이버 계정 로그인이 확인되었습니다.");
+    console.log("네이버 인증 쿠키를 감지했습니다. 서버에서 계정 상태를 확인합니다.");
 
     // A fresh PC has Naver cookies but no BrandConnect account handshake yet.
     // Complete the same first-party SSO used by BrandConnect, then persist the
@@ -101,31 +106,38 @@ async function mainV2() {
       });
       await page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => {});
       await context.storageState({ path: TEMP_SESSION_FILE });
-      const shoppingCategoryUrl = await probeShoppingCategoryFromSession(TEMP_SESSION_FILE);
+      const shoppingCategoryUrl = await probeShoppingCategoryFromApiRequest(context.request);
       if (shoppingCategoryUrl) {
+        serverAuthenticationConfirmed = true;
         console.log("✅ 쇼핑커넥트 계정 공간과 상품 카테고리도 확인되었습니다.");
       } else {
-        console.warn("⚠️ 네이버 로그인은 저장하지만 쇼핑커넥트 공간은 확인되지 않았습니다. 쇼핑커넥트 가입·권한을 확인하세요.");
+        console.warn("쇼핑커넥트 공간은 확인되지 않았습니다. 쇼핑커넥트 가입·권한을 확인하세요.");
       }
     } catch (error) {
       await context.storageState({ path: TEMP_SESSION_FILE }).catch(() => {});
       const detail = error instanceof ShoppingConnectAccessError ? error.message : "브랜드커넥트 연결 응답 없음";
-      console.warn(`⚠️ 네이버 로그인은 저장하지만 쇼핑커넥트 연결은 완료되지 않았습니다: ${detail}`);
+      console.warn(`쇼핑커넥트 연결 확인은 완료되지 않았습니다: ${detail}`);
     }
 
     const blogId = process.env.NAVER_BLOG_ID?.trim();
     if (blogId) {
-      const validation = await validateNaverPublishingSession(TEMP_SESSION_FILE, blogId);
-      if (validation.valid) {
+      const publishingConfirmed = await verifyNaverPublishingContext(context, blogId).catch(() => false);
+      if (publishingConfirmed) {
+        serverAuthenticationConfirmed = true;
         console.log("✅ 네이버 블로그 글쓰기 권한도 확인되었습니다.");
       } else {
-        console.warn(`⚠️ 로그인은 저장하지만 블로그 권한 확인은 완료되지 않았습니다: ${validation.error || "확인 실패"}`);
+        console.warn("블로그 권한 확인 응답을 받지 못했습니다. 기존 로그인 인증을 만료로 단정하지 않습니다.");
       }
     } else {
-      console.warn("⚠️ 네이버 로그인은 저장합니다. 블로그 ID는 프로그램 설정에서 나중에 입력할 수 있습니다.");
+      console.warn("블로그 ID가 없어 글쓰기 권한은 확인하지 않았습니다. 프로그램 설정에서 입력할 수 있습니다.");
     }
 
-    replaceSessionFileWithRollback(TEMP_SESSION_FILE, SESSION_FILE);
+    if (!serverAuthenticationConfirmed && fs.existsSync(SESSION_FILE)) {
+      throw new Error("네이버 서버에서 계정 확인 응답을 받지 못해 기존 로그인 세션을 보존했습니다. 네이버 접속 상태와 블로그 ID를 확인한 뒤 다시 시도하세요.");
+    }
+    await context.storageState({ path: TEMP_SESSION_FILE, indexedDB: true });
+    commitNaverLoginSession(TEMP_SESSION_FILE, SESSION_FILE, initialSessionBaseline, serverAuthenticationConfirmed);
+    if (!serverAuthenticationConfirmed) console.warn("로그인 후보를 저장했습니다. 서버 인증 확인은 아직 완료되지 않았으며 블로그 ID 설정 후 확인합니다.");
     console.log("\n✅ 네이버 로그인 세션이 저장되었습니다.");
     console.log("🎉 이제 프로그램 설정에서 블로그 ID를 입력하면 발행 권한을 확인합니다.");
     process.exitCode = 0;

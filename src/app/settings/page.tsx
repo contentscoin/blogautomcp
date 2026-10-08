@@ -18,6 +18,8 @@ interface SessionState {
   isValid: boolean;
   lastChecked?: string;
   error?: string;
+  status?: "valid" | "auth-required" | "forbidden" | "unknown" | "configuration";
+  authRequired?: boolean;
 }
 
 interface RemoteAgentState {
@@ -66,16 +68,22 @@ export default function SettingsPage() {
     try {
       const res = await fetch("/api/session");
       const data = await res.json();
-      if (data.success) {
+      if (res.ok && data.success) {
         setSession({
           hasSession: data.data.naver?.hasSession ?? data.data.hasSession,
           isValid: data.data.naver?.isValid ?? data.data.isValid,
           lastChecked: data.data.naver?.checkedAt,
           error: data.data.naver?.error,
+          status: data.data.naver?.status,
+          authRequired: data.data.naver?.authRequired,
         });
-      }
+      } else throw new Error("Session status unavailable");
     } catch {
-      /* ignore */
+      setSession((previous) => ({
+        ...(previous || { hasSession: false }),
+        isValid: false, status: "unknown", authRequired: false,
+        error: "네이버 연결 상태를 확인하지 못했습니다. 저장된 세션은 유지됩니다. 잠시 후 다시 확인해 주세요.",
+      }));
     }
   }, []);
 
@@ -247,12 +255,14 @@ export default function SettingsPage() {
           <div className="flex items-center gap-3 mb-3">
             <span
               className={`inline-block w-2.5 h-2.5 rounded-full ${
-                session?.hasSession ? "bg-green-500" : "bg-gray-600"
+                session?.isValid ? "bg-green-500" : session?.hasSession ? "bg-amber-500" : "bg-gray-600"
               }`}
             />
             <span className="text-sm text-gray-300">
-              {session?.hasSession
-                ? `세션 있음${session.lastChecked ? ` · ${new Date(session.lastChecked).toLocaleString("ko-KR")}` : ""}`
+              {session?.status === "unknown" && !session.hasSession
+                ? "네이버 연결 상태 확인 보류"
+                : session?.hasSession
+                ? `${session.status === "unknown" ? "저장된 세션 · 연결 확인 보류" : session.status === "forbidden" ? "저장된 세션 · 접근 권한 확인 필요" : session.status === "configuration" ? "블로그 ID 설정 필요" : session.authRequired ? "로그인 필요" : session.isValid ? "로그인 확인됨" : "저장된 세션 확인 필요"}${session.lastChecked ? ` · ${new Date(session.lastChecked).toLocaleString("ko-KR")}` : ""}`
                 : "세션 없음 — 로그인이 필요합니다"}
             </span>
           </div>

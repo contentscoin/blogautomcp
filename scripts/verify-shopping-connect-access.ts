@@ -63,24 +63,24 @@ async function main() {
       null,
       "an unsigned BrandConnect response falls through to SSO discovery",
     );
-    fs.rmSync(tempDir, { recursive: true, force: true });
     let closed = 0;
     let currentUrl = "https://brandconnect.naver.com/";
     const visited: string[] = [];
     const page = { goto: async (url: string) => { visited.push(url); currentUrl = url; }, url: () => currentUrl,
       waitForURL: async () => { currentUrl = "https://brandconnect.naver.com/111/affiliate"; },
       locator: () => ({ evaluateAll: async () => currentUrl.endsWith("/111/affiliate") ? [first] : ["https://brandconnect.naver.com/111/affiliate"] }) };
-    const browser = { newContext: async (options: { storageState: string }) => { assert.equal(options.storageState, "account-a"); return { request: { get: async () => null }, newPage: async () => page }; }, close: async () => { closed++; } } as unknown as Browser;
+    const browser = { newContext: async (options: { storageState: { cookies: Array<{ name: string }> } }) => { assert.equal(options.storageState.cookies[0].name, "NID_SES"); return { request: { get: async () => null }, newPage: async () => page }; }, close: async () => { closed++; } } as unknown as Browser;
     const noApiCategory = async () => null;
-    assert.equal(await discoverShoppingCategory("account-a", async () => browser, noApiCategory), first);
+    assert.equal(await discoverShoppingCategory(sessionPath, async () => browser, noApiCategory), first);
     assert.equal(visited.length, 2, "discovery follows only the observed shopping link");
     assert.equal(closed, 1, "owned browser is closed after discovery");
     page.locator = () => ({ evaluateAll: async () => currentUrl.endsWith("/111/affiliate") ? [first] : ["https://nid.naver.com/nidlogin.login?url=observed-sso"] });
-    assert.equal(await discoverShoppingCategory("account-a", async () => browser, noApiCategory), first, "public landing page follows observed Naver SSO link without credentials");
+    assert.equal(await discoverShoppingCategory(sessionPath, async () => browser, noApiCategory), first, "public landing page follows observed Naver SSO link without credentials");
     assert.equal(closed, 2);
     page.goto = async () => { currentUrl = "https://nid.naver.com/nidlogin.login"; };
-    await assert.rejects(discoverShoppingCategory("account-a", async () => browser, noApiCategory), /NAVER_SESSION_EXPIRED/);
+    await assert.rejects(discoverShoppingCategory(sessionPath, async () => browser, noApiCategory), /NAVER_SESSION_EXPIRED/);
     assert.equal(closed, 3, "owned browser is closed on auth failure too");
+    fs.rmSync(tempDir, { recursive: true, force: true });
     console.log("PASS: account-isolated shopping discovery, URL safety, explicit config, 401/403 separation");
   } finally {
     if (prior === undefined) delete process.env.BRANDCONNECT_SHOPPING_CATEGORY_URL;

@@ -8,6 +8,9 @@
 
 export const LOCAL_AUTOMATION_ERROR_CODES = [
   "NAVER_SESSION_EXPIRED",
+  "NAVER_SESSION_FORBIDDEN",
+  "NAVER_SESSION_CHECK_FAILED",
+  "NAVER_SESSION_CONFIGURATION_REQUIRED",
   "PRODUCT_NOT_FOUND",
   "CONNECT_KIND_MISMATCH",
   "CONTENT_BLOCKED",
@@ -58,6 +61,9 @@ export class LocalAutomationError extends Error {
 /** 사용자에게 보여줄 코드별 기본 안내. 메시지가 비어 있을 때만 쓴다. */
 export const LOCAL_AUTOMATION_ERROR_HINTS: Record<LocalAutomationErrorCode, string> = {
   NAVER_SESSION_EXPIRED: "네이버 로그인 세션이 만료되었습니다. PC 앱에서 네이버 로그인을 다시 진행하세요.",
+  NAVER_SESSION_FORBIDDEN: "네이버 접근이 거부되었습니다. 블로그 ID·계정 권한·보안 제한을 확인하세요.",
+  NAVER_SESSION_CHECK_FAILED: "네이버 상태를 확인하지 못했습니다. 저장된 세션은 유지됩니다. 잠시 후 다시 확인하세요.",
+  NAVER_SESSION_CONFIGURATION_REQUIRED: "PC 앱에서 네이버 블로그 ID를 설정하세요.",
   PRODUCT_NOT_FOUND: "상품(초안 대상)을 찾을 수 없습니다. brandconnect_list_products 로 ID를 다시 확인하세요.",
   CONNECT_KIND_MISMATCH: "상품의 커넥트 종류(쇼핑/여행)가 요청과 다릅니다.",
   CONTENT_BLOCKED: "생성된 글이 발행 기준(네이버 정책·근거 규칙)을 통과하지 못해 발행을 보류했습니다.",
@@ -109,6 +115,8 @@ export function classifyLocalFailure(input: { status?: number | null; code?: str
   const message = input.message || "";
   const status = input.status ?? null;
   if (isLocalAutomationErrorCode(code)) return code;
+  const naverCode = message.match(/\b(NAVER_SESSION_(?:EXPIRED|FORBIDDEN|CHECK_FAILED|CONFIGURATION_REQUIRED))\b/u)?.[1];
+  if (isLocalAutomationErrorCode(naverCode)) return naverCode;
   if (/\bCODEX_AUTH_REQUIRED\b/u.test(message)) return "CODEX_AUTH_REQUIRED";
   if (/\bCODEX_MODEL_INCOMPATIBLE\b|requires?\s+(?:a\s+)?newer\s+version\s+of\s+Codex/iu.test(message)) return "CODEX_MODEL_INCOMPATIBLE";
   if (/\bCODEX_TIMEOUT\b/u.test(message)) return "CODEX_TIMEOUT";
@@ -125,11 +133,11 @@ export function classifyLocalFailure(input: { status?: number | null; code?: str
   if (/발행이 진행 중|발행 중인 상품/u.test(message)) return "ALREADY_PUBLISHING";
   if (/커넥트 종류/u.test(message)) return "CONNECT_KIND_MISMATCH";
   if (/여행커넥트.*(계약|캡처)|CAPTURE_REQUIRED/u.test(message)) return "TRAVEL_CONTRACT_LOCKED";
-  if (status === 401 || /세션.*(만료|없)|로그인을 다시|로그인 세션/u.test(message)) return "NAVER_SESSION_EXPIRED";
+  if (/(?:네이버\s*)?(?:로그인\s*)?세션(?:이|은|\s)*(?:만료되|없(?:습니다|음))|네이버\s*로그인(?:이|을)?\s*(?:필요|다시)/u.test(message)) return "NAVER_SESSION_EXPIRED";
   if (/이미지 부족|본문 이미지|IMAGE_SHORTFALL/u.test(message)) return "IMAGE_SHORTFALL";
   if (/발행 보류|BLOCKED|게이트|정책/u.test(message)) return "CONTENT_BLOCKED";
   if (status === 404 || /찾을 수 없|상품 정보를 확보/u.test(message)) return "PRODUCT_NOT_FOUND";
-  if (status === 503 || /업데이트 설치/u.test(message)) return "UPDATE_PENDING";
+  if (/업데이트 설치/u.test(message)) return "UPDATE_PENDING";
   if (status === 400 || status === 422) return "INVALID_INPUT";
   if (/에디터|SmartEditor|업로드 실패|발행 프로세스/u.test(message)) return "EDITOR_FAILED";
   return "LOCAL_AUTOMATION_FAILED";

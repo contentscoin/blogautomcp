@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
-import type { Browser } from "playwright";
+import { request as playwrightRequest, type APIRequestContext, type Browser } from "playwright";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import {
   buildCaptureRequiredPayload,
@@ -10,14 +10,16 @@ import {
   type ConnectKind,
 } from "@/lib/brandconnect-kind";
 import { resolveConnectContract } from "@/lib/connect-contract-store";
-import { buildCookieHeaderForHost, getNaverSessionFile } from "@/lib/naver-session";
+import { getNaverSessionFile } from "@/lib/naver-session";
+import { readNaverSessionSnapshot, saveRefreshedNaverSession } from "../../../../../scripts/lib/naver-session-state";
 import {
   ConnectContractNotFoundError,
+  ConnectAccessDeniedError,
   ConnectSessionExpiredError,
   listTravelItems,
 } from "@/lib/travel-connect-adapter";
 import { buildTravelSelectionOptions } from "@/lib/travel-selection-options";
-import { assertShoppingAccess, resolveShoppingCategoryUrl, ShoppingConnectAccessError } from "@/lib/shopping-connect-access";
+import { assertShoppingAccess, probeShoppingCategoryFromApiRequest, resolveShoppingCategoryUrl, ShoppingConnectAccessError } from "@/lib/shopping-connect-access";
 
 export const runtime = "nodejs";
 
@@ -147,51 +149,47 @@ type JsonResult =
 async function fetchBrandConnectJson(
   url: string,
   spaceId: string,
-  cookieHeader: string,
+  api: APIRequestContext,
   referer: string,
   timeoutMs: number
 ): Promise<JsonResult> {
-  const response = await fetch(url, {
+  const response = await api.get(url, {
     headers: {
       accept: "application/json, text/plain, */*",
-      cookie: cookieHeader,
       origin: "https://brandconnect.naver.com",
       referer,
       "x-space-id": spaceId,
     },
-    cache: "no-store",
-    signal: AbortSignal.timeout(timeoutMs),
+    timeout: timeoutMs, maxRedirects: 0, failOnStatusCode: false, maxRetries: 0,
   }).catch(() => null);
 
   if (!response) return { ok: false, status: null };
-  if (!response.ok) {
-    return { ok: false, status: response.status };
+  if (!response.ok()) {
+    return { ok: false, status: response.status() };
   }
 
   const payload = await response.json().catch(() => null);
-  if (payload === null) return { ok: false, status: response.status };
+  if (payload === null) return { ok: false, status: response.status() };
   return { ok: true, payload };
 }
 
 async function fetchBrandConnectText(
   url: string,
   spaceId: string,
-  cookieHeader: string,
+  api: APIRequestContext,
   referer: string,
   timeoutMs: number
 ): Promise<string | null> {
-  const response = await fetch(url, {
+  const response = await api.get(url, {
     headers: {
       accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      cookie: cookieHeader,
       referer,
       "x-space-id": spaceId,
     },
-    cache: "no-store",
-    signal: AbortSignal.timeout(timeoutMs),
+    timeout: timeoutMs, maxRedirects: 0, failOnStatusCode: false, maxRetries: 0,
   }).catch(() => null);
 
-  if (!response?.ok) return null;
+  if (!response?.ok()) return null;
   return response.text().catch(() => null);
 }
 
@@ -515,7 +513,7 @@ async function loadShoppingOptions(
   categoryUrl: string,
   spaceId: string,
   rootCategoryId: string,
-  cookieHeader: string,
+  api: APIRequestContext,
   storageStatePath: string,
   deadline: Deadline
 ): Promise<ShoppingOptions> {
@@ -528,7 +526,7 @@ async function loadShoppingOptions(
       truncated = true;
       return null;
     }
-    const result = await fetchBrandConnectJson(url, spaceId, cookieHeader, categoryUrl, timeout);
+    const result = await fetchBrandConnectJson(url, spaceId, api, categoryUrl, timeout);
     if (result.ok) return result.payload;
     if (result.status === 401 || result.status === 403) accessFailure = result.status;
     return null;
@@ -598,7 +596,7 @@ async function loadShoppingOptions(
     const categoryPageHtml = await fetchBrandConnectText(
       categoryUrl,
       spaceId,
-      cookieHeader,
+      api,
       categoryUrl,
       Math.min(BRANDCONNECT_REQUEST_TIMEOUT_MS, deadline.remaining())
     ).catch(() => null);
@@ -641,6 +639,7 @@ async function loadShoppingOptions(
 
 export async function GET(request: NextRequest) {
   let connectKind: ConnectKind = "shopping";
+  let shoppingApi: APIRequestContext | undefined;
 
   try {
     const authError = requireAdminApiKey(request);
@@ -655,7 +654,7 @@ export async function GET(request: NextRequest) {
     const storageStatePath = getNaverSessionFile();
     if (!fs.existsSync(storageStatePath)) {
       return NextResponse.json(
-        { success: false, error: `네이버 로그인 세션 파일이 없습니다: ${storageStatePath}` },
+        { success: false, error: "저장된 네이버 세션이 없습니다. 네이버 로그인을 진행해 주세요.", code: "NAVER_SESSION_EXPIRED", authRequired: true },
         { status: 400 }
       );
     }
@@ -697,33 +696,36 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    let cookieHeader = "";
+    let snapshot;
     try {
-      cookieHeader = buildCookieHeaderForHost(storageStatePath, "gw-brandconnect.naver.com");
-    } catch (error: unknown) {
+      snapshot = readNaverSessionSnapshot(storageStatePath);
+    } catch {
       return NextResponse.json(
-        { success: false, error: `네이버 세션 파일을 읽지 못했습니다: ${getErrorMessage(error)}` },
-        { status: 400 }
+        { success: false, error: "저장된 네이버 세션을 읽지 못했습니다. PC 저장소 상태를 확인해 주세요.", code: "NAVER_SESSION_CHECK_FAILED" },
+        { status: 503 }
       );
     }
-    if (!cookieHeader) {
-      return NextResponse.json(
-        { success: false, error: "BrandConnect에 사용할 네이버 세션 쿠키가 없습니다. 다시 로그인하세요." },
-        { status: 400 }
-      );
-    }
+    shoppingApi = await playwrightRequest.newContext({ storageState: snapshot.state, timeout: BRANDCONNECT_REQUEST_TIMEOUT_MS });
 
     const { categories, promotions, truncated, accessFailure } = await loadShoppingOptions(
       categoryUrl,
       spaceId,
       rootCategoryId,
-      cookieHeader,
+      shoppingApi,
       storageStatePath,
       deadline
     );
     // Optional feeds may have different permissions. Keep a usable list, while
     // preserving 401 vs 403 when no usable category set was obtained.
     if (accessFailure && categories.length <= 1) assertShoppingAccess(accessFailure);
+    const saveResult = await saveRefreshedNaverSession(shoppingApi, snapshot, async () => {
+      const verifiedCategory = await probeShoppingCategoryFromApiRequest(shoppingApi!);
+      return Boolean(verifiedCategory && getSpaceIdFromConnectUrl(verifiedCategory) === spaceId);
+    }, Math.min(10_000, Math.max(1, deadline.remaining())), { preserveOrigins: true });
+    if (saveResult === "superseded") return NextResponse.json({
+      success: false, code: "NAVER_SESSION_CHECK_FAILED",
+      error: "확인 중 저장된 네이버 세션이 변경되었습니다. 새 세션으로 상품 분류를 다시 확인해 주세요.",
+    }, { status: 503 });
 
     return NextResponse.json({
       success: true,
@@ -743,6 +745,9 @@ export async function GET(request: NextRequest) {
     if (error instanceof ConnectSessionExpiredError) {
       return NextResponse.json({ success: false, error: error.message }, { status: 401 });
     }
+    if (error instanceof ConnectAccessDeniedError) {
+      return NextResponse.json({ success: false, error: error.message, code: error.code, authRequired: false }, { status: 403 });
+    }
     if (error instanceof ConnectContractNotFoundError) {
       return NextResponse.json(
         {
@@ -759,5 +764,7 @@ export async function GET(request: NextRequest) {
     }
     console.error("BrandConnect selection options load failed:", error);
     return NextResponse.json({ success: false, error: getErrorMessage(error) }, { status: 500 });
+  } finally {
+    try { await shoppingApi?.dispose(); } catch { /* Cleanup must not replace a usable options response. */ }
   }
 }

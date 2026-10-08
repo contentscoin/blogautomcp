@@ -10,6 +10,9 @@ interface SessionData {
   checkedAt?: string;
   error?: string;
   mode?: string;
+  status?: "valid" | "auth-required" | "forbidden" | "unknown" | "configuration";
+  authRequired?: boolean;
+  warning?: string;
 }
 
 interface SessionApiData extends SessionData {
@@ -45,12 +48,17 @@ type ControlAction = "restart" | "update" | null;
 const wait = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 
 function getStatusText(value: SessionData | undefined): string {
+  if (value?.status === "configuration") return "블로그 ID 설정 필요";
+  if (value?.status === "unknown") return "연결 상태 확인 보류";
+  if (value?.status === "forbidden") return "접근 권한 확인 필요";
+  if (value?.authRequired) return "로그인 필요";
   if (!value?.hasSession) return "로그인 필요";
   if (value.isValid) return "로그인 확인됨";
   return "저장된 세션 확인 필요";
 }
 
 function getStatusDotClass(value: SessionData | undefined): string {
+  if (value?.status === "unknown" || value?.status === "forbidden" || value?.status === "configuration") return "bg-amber-500";
   if (!value?.hasSession) return "bg-red-500";
   if (value.isValid) return "bg-emerald-500";
   return "bg-amber-500";
@@ -106,9 +114,18 @@ export default function SessionStatus() {
         if (typeof payload.data?.chatgpt?.automationEnabled === "boolean") {
           setBrowserAutomationEnabled(payload.data.chatgpt.automationEnabled);
         }
-      }
+      } else throw new Error("Session status unavailable");
     } catch (error) {
       console.error("세션 조회 실패:", error);
+      setSession((previous) => ({
+        ...(previous || { hasSession: false, isValid: false, chatgpt: { hasSession: false, isValid: false } }),
+        isValid: false,
+        naver: {
+          ...(previous?.naver || { hasSession: false }),
+          isValid: false, status: "unknown", authRequired: false,
+          error: "네이버 연결 상태를 확인하지 못했습니다. 저장된 세션은 유지됩니다. 상태 확인을 다시 눌러 주세요.",
+        },
+      }));
     } finally {
       setLoading(false);
     }
@@ -242,7 +259,7 @@ export default function SessionStatus() {
     await fetchSession();
   }
 
-  async function startLogin(provider: "naver" | "chatgpt") {
+  async function startLogin(provider: "naver" | "chatgpt", force = provider === "chatgpt") {
     const providerLabel = provider === "chatgpt" ? "ChatGPT" : "네이버";
     const setProviderLoggingIn = provider === "chatgpt" ? setChatGptLoggingIn : setNaverLoggingIn;
     try {
@@ -251,7 +268,7 @@ export default function SessionStatus() {
       const response = await fetch("/api/session/login", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ provider, force: true }),
+        body: JSON.stringify({ provider, force }),
       });
       const payload = await response.json();
       if (!response.ok || !payload.success) throw new Error(payload.error || `${providerLabel} 로그인을 시작하지 못했습니다.`);
@@ -388,8 +405,8 @@ export default function SessionStatus() {
           className="min-h-32 rounded-xl border border-slate-200 bg-slate-50 p-4 text-left transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-wait disabled:opacity-60"
         >
           <span className="text-xl" aria-hidden="true">N</span>
-          <span className="mt-2 block text-sm font-semibold text-slate-900">{naverLoggingIn ? "로그인 대기 중…" : "네이버 재로그인"}</span>
-          <span className="mt-1 block text-xs leading-5 text-slate-500">전용 창을 열고 저장된 네이버 세션 교체</span>
+          <span className="mt-2 block text-sm font-semibold text-slate-900">{naverLoggingIn ? "로그인 대기 중…" : "네이버 로그인"}</span>
+          <span className="mt-1 block text-xs leading-5 text-slate-500">전용 창에서 기존 로그인을 이어 확인</span>
         </button>
         <button
           type="button"
@@ -495,6 +512,8 @@ export default function SessionStatus() {
               <p className="text-sm text-slate-600">{loading ? "상태 확인 중" : getStatusText(naver)}</p>
               <p className="mt-1 text-xs text-slate-400">브랜드커넥트 조회와 블로그 발행에 사용</p>
               {naver?.error ? <p className="mt-1 text-xs text-amber-700">{naver.error}</p> : null}
+              {naver?.warning ? <p className="mt-1 text-xs text-amber-700">{naver.warning}</p> : null}
+              <button type="button" onClick={() => void startLogin("naver", true)} disabled={naverLoggingIn} className="mt-2 text-xs text-slate-500 underline underline-offset-2 disabled:opacity-50">다른 네이버 계정으로 로그인</button>
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 <label className="sr-only" htmlFor="naver-blog-id">네이버 블로그 ID</label>
                 <input
@@ -563,7 +582,7 @@ export default function SessionStatus() {
           <button type="button" onClick={() => void fetchUpdate()} className="shrink-0 text-xs font-medium text-slate-600 underline underline-offset-2">상태 확인</button>
         </div>
       </div>
-      {session?.error ? <p className="mt-3 text-xs text-red-600">{session.error}</p> : null}
+      {session?.error && session.error !== naver?.error ? <p className={`mt-3 text-xs ${naver?.authRequired ? "text-red-600" : "text-amber-700"}`}>{session.error}</p> : null}
     </section>
   );
 }

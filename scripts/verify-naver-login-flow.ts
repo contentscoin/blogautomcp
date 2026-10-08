@@ -50,8 +50,14 @@ async function main(): Promise<void> {
 const loginSource = fs.readFileSync(path.join(__dirname, "login.ts"), "utf8");
 assert.match(loginSource, /nidlogin\.login\?url=https:\/\/brandconnect\.naver\.com/u,
   "fresh-PC login must complete the first-party BrandConnect SSO handshake");
-assert.match(loginSource, /probeShoppingCategoryFromSession\(TEMP_SESSION_FILE\)/u,
-  "login must verify the persisted shopping space/category before reporting setup");
+assert.match(loginSource, /probeShoppingCategoryFromApiRequest\(context\.request\)/u,
+  "login verification must share the browser cookie jar before final capture");
+assert.match(loginSource, /commitNaverLoginSession\(TEMP_SESSION_FILE, SESSION_FILE, initialSessionBaseline, serverAuthenticationConfirmed\)/u,
+  "manual login must bind proof and initial account generation before replacing authentication");
+assert.match(loginSource, /const SESSION_FILE = getNaverSessionFile\(\)/u,
+  "manual login and workers must use the same configured destination");
+assert.match(loginSource, /path\.dirname\(SESSION_FILE\)/u,
+  "manual pending state must stay in the destination directory");
 let clock = 0;
 const authenticatedContext = new FakeLoginContext([[], authCookies, authCookies]);
 const authenticated = await waitForNaverAuthentication(authenticatedContext, {

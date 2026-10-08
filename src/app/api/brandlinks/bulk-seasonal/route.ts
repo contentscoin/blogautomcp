@@ -9,7 +9,7 @@ import { buildCaptureRequiredPayload, parseConnectKind, toStoredConnectKind } fr
 import { resolveConnectContract } from "@/lib/connect-contract-store";
 import { getLogsDir } from "../../../../../scripts/lib/app-paths";
 import { recoverExitedPublications } from '@/lib/publication-recovery';
-import { validateNaverPublishingSession } from "@/lib/naver-session";
+import { getNaverSessionFile, validateNaverPublishingSession } from "@/lib/naver-session";
 
 interface BulkSeasonalBody {
   connectKind?: string;
@@ -171,14 +171,7 @@ function normalizeCsvFilter(value: unknown): string | null {
 }
 
 function resolveStorageStatePath(): string {
-  const configured = process.env.NAVER_STORAGE_STATE_PATH?.trim();
-  if (configured) {
-    return path.isAbsolute(configured)
-      ? configured
-      : path.join(process.cwd(), configured);
-  }
-  const storageDir = process.env.SESSION_STORAGE_DIR?.trim();
-  return path.join(storageDir || path.join(process.cwd(), "playwright", "storage"), "naver-session.json");
+  return getNaverSessionFile();
 }
 
 export async function POST(request: NextRequest) {
@@ -280,19 +273,18 @@ export async function POST(request: NextRequest) {
     }
 
     const blogId = process.env.NAVER_BLOG_ID?.trim() || "";
-    if (blogId) {
-      const session = await validateNaverPublishingSession(storageStatePath, blogId);
-      if (!session.valid) {
-        return NextResponse.json(
-          {
-            success: false,
-            error:
-              `네이버 로그인 세션이 유효하지 않습니다${session.error ? ` (${session.error})` : ""}. ` +
-              "앱에서 네이버 재로그인(또는 npm run login) 후 다시 시도하세요.",
-          },
-          { status: 401 }
-        );
-      }
+    const session = await validateNaverPublishingSession(storageStatePath, blogId);
+    if (!session.valid) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: session.error || "네이버 상태를 확인하지 못했습니다. 잠시 후 다시 확인해 주세요.",
+          code: session.code || "NAVER_SESSION_CHECK_FAILED",
+          authRequired: session.authRequired === true,
+          sessionStatus: session.status,
+        },
+        { status: session.authRequired ? 401 : session.status === "forbidden" ? 403 : session.status === "configuration" ? 400 : 503 }
+      );
     }
 
     const scriptArgs = [

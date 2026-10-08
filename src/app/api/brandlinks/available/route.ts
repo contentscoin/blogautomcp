@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { requireAdminApiKey } from "@/lib/api-auth";
-import { ConnectSessionExpiredError, ConnectContractNotFoundError, listTravelItems } from "@/lib/travel-connect-adapter";
+import { ConnectSessionExpiredError, ConnectAccessDeniedError, ConnectContractNotFoundError, listTravelItems } from "@/lib/travel-connect-adapter";
 import { getNaverSessionFile } from "../../../../../scripts/lib/app-paths";
 import { readBrandPostPackage } from "@/lib/brand-post-package";
 import { getWritingStatus, matchesWritingStatusFilter } from "@/lib/brandlink-product-list";
@@ -105,6 +105,7 @@ export async function GET(request: NextRequest) {
       },
     });
   } catch (error: unknown) {
+    if (error instanceof ConnectAccessDeniedError) return NextResponse.json({ success: false, error: error.message, code: error.code, authRequired: false }, { status: 403 });
     if (error instanceof ConnectSessionExpiredError) return NextResponse.json({ success: false, error: error.message }, { status: 401 });
     if (error instanceof ConnectContractNotFoundError) return NextResponse.json({ success: false, error: error.message }, { status: 501 });
     console.error("Available travel product load failed:", error);
