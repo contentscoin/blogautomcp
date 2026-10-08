@@ -162,7 +162,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'post_submit_draft',
     title: 'ChatGPT 원고를 PC 초안으로 제출 (2단계)',
-    description: 'ChatGPT가 쓴 최초 원고를 품질검사 후 승인 대기 초안으로 저장합니다. 쇼핑은 본문 5~8개, 여행은 7~12개 섹션이며 고지는 PC가 별도로 붙입니다. 한 섹션 안에 여러 소제목을 넣으면 재분할되어 상한을 초과할 수 있습니다. DRAFT_SECTION_COUNT_OUT_OF_RANGE로 거절되면 원문을 보존하고 구조를 정리해 새 idempotencyKey로 최초 원고를 재제출하세요. 부분 수정인 post_revise_draft는 섹션 수를 바꾸지 않습니다. 제출이 성공한 원고의 텍스트 보완은 post_revise_draft를 사용하며 전체 패키지를 교체하지 마세요. 쇼핑 evidenceFacts는 직접 확인한 상품 근거만 보냅니다. 이미지는 생성하지 않으며 imageSlots의 부족 파트에 ChatGPT 생성 이미지를 적용합니다. 이미지 부족만으로 원고를 재제출하지 않습니다. 발행하지는 않습니다.',
+    description: 'ChatGPT가 쓴 최초 원고를 품질검사 후 승인 대기 초안으로 저장합니다. 쇼핑은 본문 5~8개, 여행은 7~12개 섹션이며 고지는 PC가 별도로 붙입니다. 한 섹션 안에 여러 소제목을 넣으면 재분할되어 상한을 초과할 수 있습니다. DRAFT_SECTION_COUNT_OUT_OF_RANGE로 거절되면 원문을 보존하고 구조를 정리해 새 idempotencyKey로 최초 원고를 재제출하세요. 부분 수정인 post_revise_draft는 섹션 수를 바꾸지 않습니다. 제출이 성공한 뒤 실제 원고 내용 실패(텍스트 signals)는 새 idempotencyKey로 post_revise_draft를 호출해 필요한 문단만 보완하세요. 전체 패키지를 교체하지 마세요. 쇼핑 evidenceFacts는 직접 확인한 상품 근거만 보냅니다. 이미지는 생성하지 않으며 imageSlots의 부족 파트에 ChatGPT 생성 이미지를 적용합니다. 이미지 부족만으로는 원고를 다시 제출하지 않습니다. 발행하지는 않습니다.',
     inputSchema: {
       type: 'object',
       properties: {
