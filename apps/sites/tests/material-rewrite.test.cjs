@@ -7,9 +7,9 @@ const ts = require('typescript');
 const { DatabaseSync } = require('node:sqlite');
 const root = path.resolve(__dirname, '..');
 
-function load(file, mocks = {}) {
+function load(file, mocks = {}, tail = '') {
   const filename = path.join(root, file);
-  const source = ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const source = ts.transpileModule(fs.readFileSync(filename, 'utf8') + tail, { fileName: filename, compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const module = { exports: {} };
   const localRequire = name => name in mocks ? mocks[name] : name.startsWith('@/') ? load(`${name.slice(2)}.ts`, mocks) : require(name);
   vm.runInThisContext(`(function(require,module,exports){${source}\n})`, { filename })(localRequire, module, module.exports);
@@ -214,4 +214,38 @@ test('lost browser response survives reload without changing request scope or id
     assert.equal((await (await f.read(restored.queryJobId)).json()).data.jobId, recovered.jobId);
     assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM agent_jobs').get().n, 1);
   } finally { f.db.close(); }
+});
+
+test('React external-store recovery keeps stable snapshots, notifies writes and restores a lost request', () => {
+  const descriptors = Object.fromEntries(['window', 'localStorage'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  const values = new Map();
+  const storage = { getItem: key => values.get(key) || null, setItem: (key, value) => values.set(key, value) };
+  const fakeWindow = new EventTarget();
+  Object.defineProperty(globalThis, 'window', { value: fakeWindow, configurable: true });
+  Object.defineProperty(globalThis, 'localStorage', { value: storage, configurable: true });
+  try {
+    const { recoveryTest } = load('app/dashboard/failed-material-actions.tsx', {}, '\nexport const recoveryTest = { subscribeRecovery, browserRecoverySnapshot, persistRecovery };');
+    assert.equal(recoveryTest.browserRecoverySnapshot('owner'), 'null');
+    let notifications = 0;
+    const unsubscribe = recoveryTest.subscribeRecovery(() => { notifications++; });
+    const request = { version: 1, connectKind: 'travel', idempotencyKey: 'external-store-lost-request' };
+    recoveryTest.persistRecovery('owner', request);
+    assert.equal(notifications, 1);
+    const snapshot = recoveryTest.browserRecoverySnapshot('owner');
+    assert.equal(recoveryTest.browserRecoverySnapshot('owner'), snapshot, 'getSnapshot returns the identical primitive without allocating a new store snapshot');
+    assert.deepEqual(JSON.parse(snapshot), request);
+    assert.equal(recoveryTest.browserRecoverySnapshot('other'), 'null');
+    const reloaded = load('app/dashboard/failed-material-actions.tsx', {}, '\nexport const recoveryTest = { browserRecoverySnapshot };').recoveryTest;
+    assert.equal(reloaded.browserRecoverySnapshot('owner'), snapshot);
+    unsubscribe();
+    recoveryTest.persistRecovery('owner', { ...request, rewriteJobId: 'job_saved' });
+    assert.equal(notifications, 1, 'unmount removes the actual browser event subscription');
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, get() { throw new Error('storage blocked'); } });
+    assert.equal(recoveryTest.browserRecoverySnapshot('owner'), 'unavailable');
+  } finally {
+    for (const [key, descriptor] of Object.entries(descriptors)) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    }
+  }
 });
