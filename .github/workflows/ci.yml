@@ -56,6 +56,9 @@ jobs:
           npm run test:connect-store
           npm run test:title-rules
           npm run test:post-spec
+          npm run test:post-composition
+          npm run test:saved-text-revalidation
+          npm run test:shopping-workflow
           npm run test:thumbnail-gen
           npm run test:brand-post-package
           npm run test:package-qc-reconcile
@@ -65,6 +68,7 @@ jobs:
           npm run test:section-images
           npm run test:image-batch-progress
           npm run test:draft-snapshot
+          npm run test:draft-integrity
           npm run test:local-json-fetch
           npm run test:product-detail-image
           npm run test:repository-techniques

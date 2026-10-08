@@ -2,7 +2,9 @@ import { NextResponse } from 'next/server';
 import { getChatGPTUser } from '@/app/chatgpt-auth';
 import { ensureAccount, canUseMcp } from '@/lib/account';
 import { getD1 } from '@/db';
-import { apiError, hasTrustedBrowserOrigin, jsonValue, readObject } from '@/lib/http';
+import { hasTrustedBrowserOrigin, jsonValue, readObject } from '@/lib/http';
+import { materialRecoveryRejection as apiError } from '@/lib/material-recovery-http';
+import { materialRecoveryStatus } from '@/lib/material-recovery-status';
 import { enforceRateLimit } from '@/lib/rate-limit';
 import { queueFailedMaterialRewrite, queueMaterialWorkflowRead } from '@/lib/material-rewrite';
 import { readCompletionResult } from '@/lib/completion-result';
@@ -10,13 +12,12 @@ import { sweepExpiredLeases } from '@/lib/jobs';
 
 const HEADERS = { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff' };
 type JsonObject = Record<string, unknown>;
-function object(value: unknown): JsonObject { return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : {}; }
-type OwnedJob = { id: string; type: string; status: string; progress: number; stage: string | null; stageMessage: string | null; errorCode: string | null; errorMessage: string | null; resultJson: string | null };
+type OwnedJob = { id: string; type: string; status: string; progress: number; stage: string | null; stageMessage: string | null; errorCode: string | null; errorMessage: string | null; resultJson: string | null; claimedAt: number | null; claimedDeviceId: string | null };
 
 async function readOwnedJob(userId: string, jobId: string): Promise<(OwnedJob & { result: unknown }) | null> {
   const d1 = getD1();
   await sweepExpiredLeases(d1, userId);
-  const job = await d1.prepare(`SELECT id,type,status,progress,stage,stage_message AS stageMessage,error_code AS errorCode,error_message AS errorMessage,result_json AS resultJson FROM agent_jobs WHERE id=? AND user_id=? LIMIT 1`).bind(jobId, userId).first<OwnedJob>();
+  const job = await d1.prepare(`SELECT id,type,status,progress,stage,stage_message AS stageMessage,error_code AS errorCode,error_message AS errorMessage,result_json AS resultJson,claimed_at AS claimedAt,claimed_by_device_id AS claimedDeviceId FROM agent_jobs WHERE id=? AND user_id=? LIMIT 1`).bind(jobId, userId).first<OwnedJob>();
   if (!job || !['MATERIALS_REWRITE_FAILED', 'MATERIALS_LIST'].includes(job.type)) return null;
   return { ...job, result: jsonValue(await readCompletionResult(d1, userId, jobId, job.resultJson)) };
 }
@@ -60,23 +61,10 @@ export async function GET(request: Request) {
   catch { return apiError('RESULT_INTEGRITY_FAILED', '저장 결과를 확인하지 못했습니다. 원 작업을 다시 실행하지 말고 전달 상태를 확인하세요.', 409); }
   if (!job) return apiError('JOB_NOT_FOUND', '작업을 찾을 수 없습니다.', 404);
   // Avoid returning a manuscript, image payload or large material list to the progress widget.
-  const envelope = object(job.result);
-  const data = object(envelope.data);
-  const localJob = object(data.job);
-  const items = Array.isArray(localJob.items) ? localJob.items : Array.isArray(data.items) ? data.items : [];
-  const count = (state: string) => items.filter(item => object(item).status === state).length;
-  const workflowJobId = data.workflowJobId || localJob.id || data.jobId || envelope.workflowJobId;
-  const workflowKnown = typeof data.workflowPending === 'boolean' || typeof localJob.status === 'string';
-  const workflowPending = !workflowKnown || data.workflowPending === true || (typeof localJob.status === 'string' && ['queued', 'running'].includes(localJob.status.toLowerCase()));
   return NextResponse.json({ success: true, data: {
     jobId, status: job.status, progress: job.progress, stage: job.stage, stageMessage: job.stageMessage,
     errorCode: job.errorCode, errorMessage: job.errorMessage,
-    workflowPending,
-    workflowJobId: typeof workflowJobId === 'string' ? workflowJobId : null,
-    readyCount: typeof data.readyCount === 'number' ? data.readyCount : count('ready'),
-    failedCount: typeof data.failedCount === 'number' ? data.failedCount : count('failed'),
-    interruptedCount: typeof data.interruptedCount === 'number' ? data.interruptedCount : count('interrupted'),
-    summary: typeof envelope.summary === 'string' ? envelope.summary : null,
+    ...materialRecoveryStatus(job),
   } }, { headers: HEADERS });
 }
 
@@ -86,7 +74,7 @@ export async function PATCH(request: Request) {
   const auth = await authenticatedAccount();
   if (auth.error) return auth.error;
   const body = await readObject(request, 4096);
-  if (!body || Object.keys(body).some(key => !['rewriteJobId', 'idempotencyKey'].includes(key)) || typeof body.rewriteJobId !== 'string' || !/^[A-Za-z0-9._:-]{1,80}$/.test(body.rewriteJobId))
+  if (!body || Object.keys(body).some(key => !['rewriteJobId', 'idempotencyKey'].includes(key)) || typeof body.rewriteJobId !== 'string' || !/^[A-Za-z0-9._:-]{1,80}$/.test(body.rewriteJobId) || typeof body.idempotencyKey !== 'string' || !/^[A-Za-z0-9._:-]{8,120}$/.test(body.idempotencyKey))
     return apiError('INVALID_ARGUMENT', '원래 재작성 작업번호를 확인하세요.', 422);
   const limit = await enforceRateLimit(getD1(), `materials-rewrite-read:user:${auth.account!.id}`, 12, 60_000);
   if (!limit.allowed) return apiError('RATE_LIMITED', '요청이 너무 잦습니다. 잠시 후 다시 시도하세요.', 429);
@@ -94,10 +82,13 @@ export async function PATCH(request: Request) {
   try { job = await readOwnedJob(auth.account!.id, body.rewriteJobId); }
   catch { return apiError('RESULT_INTEGRITY_FAILED', '저장 결과를 확인하지 못했습니다.', 409); }
   if (!job) return apiError('JOB_NOT_FOUND', '작업을 찾을 수 없습니다.', 404);
-  if (job.type !== 'MATERIALS_REWRITE_FAILED' || job.status !== 'SUCCEEDED') return apiError('JOB_NOT_FINISHED', '재작성 접수 결과가 아직 준비되지 않았습니다.', 409);
-  const envelope = object(job.result);
-  const data = object(envelope.data);
-  const workflowJobId = data.workflowJobId || data.jobId || envelope.workflowJobId;
-  if (typeof workflowJobId !== 'string') return apiError('WORKFLOW_RESULT_UNAVAILABLE', '소재 작업번호를 확인하지 못했습니다. ChatGPT의 job_get으로 원 작업 결과를 확인하세요.', 409);
-  return response(await queueMaterialWorkflowRead(auth.account!.id, { jobId: workflowJobId, sourceJobId: body.rewriteJobId, idempotencyKey: body.idempotencyKey }));
+  if (job.type !== 'MATERIALS_REWRITE_FAILED' || !['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(job.status)) return apiError('JOB_NOT_FINISHED', '재작성 접수 결과가 아직 준비되지 않았습니다.', 409);
+  const status = materialRecoveryStatus(job);
+  if (status.executionNotAdmitted) return NextResponse.json({ success: true, data: { jobId: job.id, status: job.status, ...status } }, { headers: HEADERS });
+  // A transport failure may still have started a PC workflow. Reconcile by the
+  // owned source id when its reply was lost; this queues only a read, never a rewrite.
+  return response(await queueMaterialWorkflowRead(auth.account!.id, {
+    ...(status.workflowJobId ? { jobId: status.workflowJobId } : {}),
+    sourceJobId: job.id, idempotencyKey: body.idempotencyKey,
+  }));
 }

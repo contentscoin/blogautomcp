@@ -6,11 +6,14 @@ import {
   normalizeLegacyFreeformImageRules,
   normalizeLegacyPostImageIntents,
   normalizePublishedPostText,
+  hasCanonicalAffiliateDisclosure,
+  splitAffiliateDisclosure,
   refreshPostDocumentQuality,
   resolvePostDocument,
   type ResolvedPostDocumentV1,
 } from "../src/lib/post-composition-contract";
 import { SHOPPING_POST_STRATEGY, shoppingPhotoRoleAt } from "../src/lib/shopping-post-strategy";
+import { getConnectAffiliateDisclosure } from "../src/lib/connect-disclosure";
 
 function buildSections(prefix: string, count: number, paragraphLength: number): string[] {
   return Array.from({ length: count }, (_, index) => {
@@ -48,6 +51,7 @@ assert.equal(shopping.renderNodes[0].kind, "disclosure");
 assert.ok(shopping.renderNodes[0].kind === "disclosure" && shopping.renderNodes[0].placement === "top");
 assert.equal(shopping.renderNodes.at(-1)?.kind, "hashtags");
 assert.equal(shopping.renderNodes.filter(node => node.kind === "disclosure").length, 1);
+assert.ok(hasCanonicalAffiliateDisclosure(shopping));
 assert.equal(shopping.strategyVersion, SHOPPING_POST_STRATEGY.version);
 assert.equal(normalizePublishedPostText(shopping).strategyVersion, shopping.strategyVersion);
 assert.equal(normalizeLegacyFreeformImageRules(shopping).strategyVersion, shopping.strategyVersion);
@@ -117,6 +121,36 @@ assert.equal(revisedShoppingWithLegacyPlan.sections[2].imageSource, "none", "new
 assert.equal(revisedShoppingWithLegacyPlan.sections[3].imageSource, "none");
 
 const travelImages = Array.from({ length: 20 }, (_, index) => `C:/fixture/travel-${index}.jpg`);
+const explanatoryCommissionProse = "네이버 여행 커넥트 활동의 수수료 구조를 설명합니다. 예약 조건은 판매 페이지에서 확인하세요.";
+assert.equal(splitAffiliateDisclosure(explanatoryCommissionProse).content, explanatoryCommissionProse,
+  "Discussion of commissions is not a system notice and must survive unchanged");
+assert.equal(splitAffiliateDisclosure(explanatoryCommissionProse).disclosure, "");
+for (const connectKind of ["SHOPPING", "TRAVEL"] as const) {
+  const oldNotice = "이 포스팅은 네이버 여행 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받을 수 있습니다.";
+  const mixed = resolvePostDocument({ connectKind, title: "확인한 선택 조건", imagePaths: ["C:/fixture/thumbnail.png"],
+    sections: [`선택 기준\n의미 있는 앞 설명입니다.\n${oldNotice}\n뒤 설명도 그대로 보존합니다.\n${oldNotice}`, explanatoryCommissionProse],
+    hashtags: ["선택조건"], connectUrl: "https://example.test/connect" });
+  assert.equal(mixed.renderNodes[0].kind === "disclosure" && mixed.renderNodes[0].text, getConnectAffiliateDisclosure(connectKind));
+  assert.equal(mixed.renderNodes[1].kind, "image", "Both kinds disclose before the thumbnail");
+  assert.deepEqual(mixed.sections[0].body, ["의미 있는 앞 설명입니다.", "뒤 설명도 그대로 보존합니다."]);
+  assert.ok(mixed.sections.some(section => [section.title, ...section.body].join(" ").includes(explanatoryCommissionProse)));
+  assert.ok(hasCanonicalAffiliateDisclosure(mixed));
+  const bottom = structuredClone(mixed);
+  const notice = bottom.renderNodes.shift()!;
+  if (notice.kind === "disclosure") { notice.placement = "bottom"; notice.text = oldNotice; }
+  bottom.renderNodes.push(notice);
+  assert.equal(hasCanonicalAffiliateDisclosure(bottom), false);
+  const nonAffiliateOrder = bottom.renderNodes.filter(node => node.kind !== "disclosure");
+  const normalized = normalizePublishedPostText(bottom);
+  assert.ok(hasCanonicalAffiliateDisclosure(normalized));
+  assert.deepEqual(normalized.renderNodes.filter(node => node.kind !== "disclosure"), nonAffiliateOrder,
+    "Canonicalizing the affiliate notice keeps photographs, cards and body in the same order");
+  assert.deepEqual(normalizePublishedPostText(normalized), normalized);
+  assert.equal(bottom.renderNodes.at(-1)?.kind, "disclosure", "Pure normalization must not mutate the saved document");
+  const missing = { ...mixed, renderNodes: mixed.renderNodes.filter(node => node.kind !== "disclosure") };
+  assert.equal(hasCanonicalAffiliateDisclosure(normalizePublishedPostText(missing)), false,
+    "A read-time normalization must not invent a missing affiliate notice");
+}
 const travel = resolvePostDocument({
   connectKind: "TRAVEL",
   title: "타이베이 3박 4일 코스",
@@ -139,7 +173,8 @@ assert.equal(travel.qualityReport.canAutoPublish, true);
 assert.equal(travel.renderNodes.filter((node) => node.kind === "quotation").length, 0);
 assert.deepEqual(TRAVEL_POST_CONTRACT_V1.targetImages, { min: 7, recommended: 10, max: 18 });
 assert.equal(travel.strategyVersion, undefined, "Shopping strategy does not relabel travel documents");
-assert.ok(travel.renderNodes.at(-1)?.kind === "disclosure", "Travel disclosure order is unchanged");
+assert.ok(hasCanonicalAffiliateDisclosure(travel), "Travel uses one clear booking disclosure before its thumbnail");
+assert.equal(travel.renderNodes.at(-1)?.kind, "hashtags");
 assert.ok(
   !travel.renderNodes.some(
     (node) => node.kind === "image" && node.layout === "collage-3",
@@ -278,6 +313,7 @@ assert.deepEqual(planned.sections[0].imagePaths, [], "요약 섹션 앞에는 �
 assert.deepEqual(planned.sections[3].imagePaths.slice(0, 2), [planImages[2], planImages[3]], "코스 포인트는 플랜이 배정한 두 장을 그대로 받는다");
 assert.equal(planned.sections[3].imageIntent, "야시장 풍경", "이미지 의도는 실제 섹션 것을 쓴다");
 assert.equal(planned.sections[3].imageMin, 1);
+assert.ok(hasCanonicalAffiliateDisclosure(planned), "Spec-first travel uses the same canonical top notice");
 assert.equal(planned.sections[3].imageMax, 2);
 // 의미가 검증되지 않은 여분(planImages[7], [8])은 임의 섹션에 배치하지 않는다.
 assert.equal(planned.renderNodes.filter((node) => node.kind === "image").length, 7, "플랜으로 연결한 이미지만 실제 렌더한다");

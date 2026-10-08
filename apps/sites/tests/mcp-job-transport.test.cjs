@@ -126,8 +126,79 @@ test('draft repair tool guidance preserves images and reruns current approval qu
   const approve = tools.find(tool => tool.name === 'post_approve_draft');
   assert.match(submit.description, /post_revise_draft/u);
   assert.match(submit.description, /전체 패키지를 교체하지 마세요/u);
+  assert.match(submit.description, /쇼핑은 본문 5~8개/u);
+  assert.match(submit.description, /여행은 7~12개/u);
+  assert.match(submit.description, /DRAFT_SECTION_COUNT_OUT_OF_RANGE/u);
   assert.match(revise.description, /기존 검수 이미지·슬롯·생성 진행 상태는 유지/u);
   assert.match(approve.description, /현재 품질평가기로 다시 검사/u);
+});
+
+test('MCP advertises the actual Codex and local thumbnail paths without requiring external image keys', async () => {
+  const request = new Request('https://example.test/api/mcp', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }) });
+  const tools = (await (await route.handleMcpRequest(request, 'owner', 'mcp:read mcp:write')).json()).result.tools;
+  const byName = name => tools.find(tool => tool.name === name);
+  assert.match(byName('post_generate_draft_local').title, /Codex/u);
+  assert.doesNotMatch(byName('post_generate_draft_local').title, /OpenAI.*키/u);
+  assert.match(byName('post_generate_draft_local').description, /API 키는 사용하지 않습니다/u);
+  assert.match(byName('post_set_thumbnail').description, /원본 상품 사진과 제목/u);
+  assert.match(byName('post_set_thumbnail').description, /외부 gpt-image API는 호출하지 않습니다/u);
+  assert.match(byName('thumbnail_prepare').description, /API 키 설정 여부와 관계없이/u);
+  assert.match(byName('settings_get').description, /시크릿 값은 반환하지 않습니다/u);
+});
+
+function submissionFixture(connectKind, appVersion = '1.3.102') {
+  const queued = [];
+  const snapshotId = 'a'.repeat(64);
+  const prepared = { data: { productId: 'original-product', connectKind, snapshotId,
+    snapshot: { productId: 'original-product', connectKind: connectKind.toUpperCase(), snapshotId } } };
+  const submissionRoute = load('app/api/mcp/[credential]/route.ts', {
+    ...mocks,
+    '@/lib/crypto': { newId: () => 'job_submission_fixture' },
+    '@/lib/jobs': { sweepExpiredLeases: async () => {}, findActiveDevice: async () => ({ appVersion }), isAgentOnline: async () => true },
+    '@/db': { getD1: () => ({ prepare(sql) { return { bind(...values) { return {
+      async first() {
+        if (sql.includes('WHERE id=? AND user_id=?')) {
+          assert.equal(values[1], 'owner');
+          return { type: 'POST_PREPARE_DRAFT', status: 'SUCCEEDED', finishedAt: Date.now(),
+            inputJson: JSON.stringify({ productId: 'original-product', connectKind }), resultJson: JSON.stringify(prepared) };
+        }
+        return sql.includes('COUNT(*)') ? { count: 0 } : null;
+      },
+      async run() { if (sql.includes('INSERT OR IGNORE INTO agent_jobs')) queued.push(JSON.parse(values[4])); return { meta: { changes: 1 } }; },
+    }; } }; } }) },
+  });
+  return { queued, async submit(count, requestedKind = connectKind) {
+    const draft = { title: '상품 판단을 위한 테스트 제목',
+      sections: Array.from({ length: count }, (_, index) => `${index + 1}. 확인할 내용\n\n${'제품 근거와 선택 조건을 설명합니다. '.repeat(15)}`),
+      hashtags: ['제품정보', '선택기준', '사용방법'] };
+    const request = new Request('https://example.test/api/mcp', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'post_submit_draft',
+        arguments: { contextJobId: 'job_context_fixture', connectKind: requestedKind, draft, idempotencyKey: `submission-${connectKind}-${count}` } } }) });
+    return (await (await submissionRoute.handleMcpRequest(request, 'owner', 'mcp:write')).json()).result.structuredContent;
+  } };
+}
+
+test('shopping section overflow is rejected before queuing using the owned context kind', async () => {
+  const f = submissionFixture('shopping');
+  const rejected = await f.submit(9, 'travel');
+  assert.equal(rejected.code, 'DRAFT_SECTION_COUNT_OUT_OF_RANGE');
+  assert.equal(rejected.sectionCount, 9);
+  assert.deepEqual(rejected.sectionIndexes, [8]);
+  assert.equal(rejected.recovery.preservesExistingDraft, true);
+  assert.equal(rejected.recovery.action, 'resubmit_initial_draft');
+  assert.equal(f.queued.length, 0);
+  assert.equal((await f.submit(8)).ok, true);
+  assert.equal(f.queued[0].draft.sections.length, 8);
+});
+
+test('travel keeps twelve sections while older PCs cannot accept submitted drafts without the integrity guard', async () => {
+  const current = submissionFixture('travel');
+  assert.equal((await current.submit(12)).ok, true);
+  assert.equal(current.queued[0].draft.sections.length, 12);
+  const old = submissionFixture('shopping', '1.3.101');
+  assert.equal((await old.submit(8)).code, 'APP_UPDATE_REQUIRED');
+  assert.equal(old.queued.length, 0);
 });
 
 test('shopping scene tool requires ordered references; travel keeps its existing input contract', async () => {

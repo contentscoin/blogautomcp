@@ -22,6 +22,7 @@ import { buildSectionTemplates, SHAPE_RULES, type LibraryContext, type SectionTe
 import { validateDraft } from "./validate";
 import type { AssembledPost, ConnectKind, GeneratedDraft, ImageCandidateInput, PostSpec, SectionSpec } from "./types";
 import { SHOPPING_POST_STRATEGY, shoppingPhotoRoleAt } from "../../../src/lib/shopping-post-strategy";
+import { getConnectAffiliateDisclosure } from "../../../src/lib/connect-disclosure";
 
 export * from "./types";
 export { validateDraft } from "./validate";
@@ -65,17 +66,6 @@ const GENERIC_HASHTAGS = [
   "추천", "후기", "리뷰", "비교", "순위", "가격", "장단점", "일상", "가성비", "생활용품", "쇼핑", "쇼핑추천",
   "구매전확인", "상품정보", "옵션확인", "구성확인", "가격비교", "할인정보", "실속쇼핑", "네이버쇼핑", "여행", "여행스타그램",
 ];
-
-const SHOPPING_DISCLOSURE = `
-
-이 포스팅은 네이버 쇼핑 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받습니다.
-
-자세한 상품 정보는 아래 쇼핑커넥트에서 확인해보세요.`;
-const TRAVEL_DISCLOSURE = `
-
-이 포스팅은 네이버 여행 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받습니다.
-
-자세한 일정과 예약 정보는 아래 여행커넥트에서 확인해보세요.`;
 
 export function shortProductName(name: string): string {
   const cleaned = name
@@ -270,7 +260,7 @@ export async function buildPostSpec(input: SpecFirstPipelineInput): Promise<Buil
       sourceLine: kind === "TRAVEL" ? `※ 상품 페이지 정보 기준 (${ctx.collectedAt} 확인), 가격·일정은 예약 시점에 따라 달라질 수 있어요.` : `※ 판매 페이지 정보 기준 (${ctx.collectedAt} 확인), 가격·구성은 변동될 수 있어요.`,
     },
     totalChars: kind === "TRAVEL" ? [2200, 3600] : [1300, 2400],
-    disclosure: kind === "TRAVEL" ? TRAVEL_DISCLOSURE : SHOPPING_DISCLOSURE,
+    disclosure: getConnectAffiliateDisclosure(kind),
     generation: { mode: kind === "TRAVEL" ? "chunked" : "single", chunks, maxOutputTokens: 8192, temperature: 0.7 },
   };
   return { spec, templates, shortName };

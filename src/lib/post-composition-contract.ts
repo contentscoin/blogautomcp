@@ -5,6 +5,7 @@ import {
   type TopicImageSource,
 } from "../../scripts/lib/topic-templates";
 import { SHOPPING_POST_STRATEGY, SHOPPING_NATURAL_PHOTO_RULE, shoppingPhotoRoleAt, type ShoppingPostStrategyVersion } from "./shopping-post-strategy";
+import { getConnectAffiliateDisclosure } from "./connect-disclosure";
 
 export type BrandConnectKind = "SHOPPING" | "TRAVEL";
 
@@ -538,10 +539,11 @@ function parseGeneratedSection(value: string): { title: string; body: string[] }
 /** Remove only the standard disclosure sentence, never a whole mixed section. */
 export function splitAffiliateDisclosure(value: string): { content: string; disclosure: string } {
   const notices: string[] = [];
-  const content = value.replace(/(?:(?:이\s*(?:글|포스팅)은|본\s*글은)\s*(?:네이버\s*)?|네이버\s*)(?:쇼핑|여행)\s*커넥트\s*활동[^.!?\n#]*수수료[^.!?\n#]*(?:[.!?]|(?=#|\n|$))/gu, sentence => {
-    notices.push(sentence.trim());
-    return "";
-  }).replace(/자세한 (?:일정과 예약|상품) 정보는 아래 (?:여행|쇼핑)커넥트에서 확인해보세요\./gu, "").trim();
+  const extractNotice = (sentence: string) => { notices.push(sentence.trim()); return ""; };
+  // Match known notice grammar, not explanatory prose about Connect commissions.
+  const content = value.replace(/(?:(?:이\s*(?:글|포스팅)은|본\s*글은)\s*(?:네이버\s*)?|네이버\s*)(?:쇼핑|여행)\s*커넥트\s*활동\s*(?:의\s*일환으로|을\s*통해|으로)?\s*[,，]?\s*(?:(?:구매|판매|예약)\s*발생\s*시\s*)?수수료를\s*(?:제공|지급)\s*받(?:습니다|을\s*수\s*있습니다)\s*(?:[.!?]|(?=#|\n|$))/gu, extractNotice)
+    .replace(/(?:이\s*(?:글|포스팅)은|본\s*글은)\s*수수료를\s*(?:제공|지급)\s*받(?:습니다|을\s*수\s*있습니다)\s*(?:[.!?]|(?=#|\n|$))/gu, extractNotice)
+    .replace(/자세한 (?:일정과 예약|상품) 정보는 아래 (?:여행|쇼핑)커넥트에서 확인해보세요\./gu, "").trim();
   return { content, disclosure: notices[0] || "" };
 }
 
@@ -787,7 +789,6 @@ export function resolvePostDocument(options: {
     const separated = splitAffiliateDisclosure(value);
     return { ...separated, content: stripHashtagOnlyLines(separated.content) };
   });
-  const disclosureSection = separated.find(section => section.disclosure)?.disclosure;
   const contentSections = separated.flatMap(section => section.content ? [section.content] : []);
   const plan =
     options.sectionPlan && options.sectionPlan.length === contentSections.length ? options.sectionPlan : null;
@@ -851,12 +852,10 @@ export function resolvePostDocument(options: {
   const affiliateDisclosure: PostRenderNode = {
     kind: "disclosure",
     disclosureType: "affiliate",
-    placement: options.connectKind === "SHOPPING" ? SHOPPING_POST_STRATEGY.affiliateDisclosurePlacement : "bottom",
-    text: clean(disclosureSection || "") || (options.connectKind === "TRAVEL"
-      ? "이 글은 네이버 여행 커넥트 활동의 일환으로, 예약 발생 시 수수료를 제공받을 수 있습니다."
-      : "이 글은 네이버 쇼핑 커넥트 활동의 일환으로, 구매 발생 시 수수료를 제공받을 수 있습니다."),
+    placement: "top",
+    text: getConnectAffiliateDisclosure(options.connectKind),
   };
-  const renderNodes: PostRenderNode[] = affiliateDisclosure.placement === "top" ? [affiliateDisclosure] : [];
+  const renderNodes: PostRenderNode[] = [affiliateDisclosure];
   if (thumbnailPath) {
     renderNodes.push({
       kind: "image",
@@ -961,7 +960,6 @@ export function resolvePostDocument(options: {
     });
   }
   renderNodes.push({ kind: "hashtags", values: normalizeSystemHashtags(options.hashtags) });
-  if (affiliateDisclosure.placement === "bottom") renderNodes.push(affiliateDisclosure);
 
   return {
     version: "resolved-post-document/v1",
@@ -987,27 +985,36 @@ export function resolvePostDocument(options: {
 export function normalizePublishedPostText(document: ResolvedPostDocumentV1): ResolvedPostDocumentV1 {
   const sections = document.sections.map(section => {
     const body = normalizePublishedBodyLines(section.body.map(value => splitAffiliateDisclosure(value).content));
-    return { ...section, body, characterCount: body.join("").length };
+    return { ...section, title: clean(splitAffiliateDisclosure(section.title).content), body, characterCount: body.join("").length };
   });
-  return refreshPostDocumentQuality({ ...document, sections, renderNodes: normalizePublishedRenderNodes(document.renderNodes) });
+  return refreshPostDocumentQuality({ ...document, sections, renderNodes: normalizePublishedRenderNodes(document.renderNodes, document.connectKind) });
 }
 
 /** Shared published text view for renderers and image-review context fingerprints. */
-export function normalizePublishedRenderNodes(nodes: PostRenderNode[]): PostRenderNode[] {
+export function normalizePublishedRenderNodes(nodes: PostRenderNode[], connectKind?: BrandConnectKind): PostRenderNode[] {
   const renderNodes: PostRenderNode[] = [];
   const tags = normalizeSystemHashtags(nodes.flatMap(node => node.kind === "hashtags" ? node.values : []));
   let tagsWritten = false;
+  let hasAffiliateNotice = false;
   for (let i = 0; i < nodes.length; i++) {
     const node = nodes[i];
     if (node.kind === "hashtags") {
       if (!tagsWritten) renderNodes.push({ kind: "hashtags", values: tags });
       tagsWritten = true;
+    } else if (node.kind === "heading" || node.kind === "quotation") {
+      const separated = splitAffiliateDisclosure(node.text);
+      hasAffiliateNotice ||= Boolean(separated.disclosure);
+      if (separated.content.trim()) renderNodes.push({ ...node, text: clean(separated.content) });
     } else if (node.kind === "paragraph") {
-      const text = [splitAffiliateDisclosure(node.text).content];
+      const separated = splitAffiliateDisclosure(node.text);
+      hasAffiliateNotice ||= Boolean(separated.disclosure);
+      const text = [separated.content];
       while (i + 1 < nodes.length) {
         const next = nodes[i + 1];
         if (next.kind !== "paragraph" || next.sectionId !== node.sectionId) break;
-        text.push(splitAffiliateDisclosure(next.text).content);
+        const nextSeparated = splitAffiliateDisclosure(next.text);
+        hasAffiliateNotice ||= Boolean(nextSeparated.disclosure);
+        text.push(nextSeparated.content);
         i++;
       }
       if (text.some(value => /(?:^|\n)\s*(?:Q|A|질문|답변)\s*[.:：)](?:\s|$)/iu.test(value))) {
@@ -1021,10 +1028,32 @@ export function normalizePublishedRenderNodes(nodes: PostRenderNode[]): PostRend
         }
       }
     } else if (node.kind === "disclosure") {
-      renderNodes.push({ ...node, text: splitAffiliateDisclosure(node.text).disclosure || stripHashtagOnlyLines(node.text) });
+      if (connectKind && node.disclosureType === "affiliate") {
+        hasAffiliateNotice = true;
+        const separated = splitAffiliateDisclosure(node.text);
+        // Preserve mixed prose in its old relative position while moving only the notice.
+        if (stripHashtagOnlyLines(separated.content)) {
+          renderNodes.push({ kind: "paragraph", sectionId: null, text: stripHashtagOnlyLines(separated.content) });
+        }
+      } else {
+        renderNodes.push({ ...node, text: splitAffiliateDisclosure(node.text).disclosure || stripHashtagOnlyLines(node.text) });
+      }
     } else renderNodes.push(node);
   }
+  if (connectKind && hasAffiliateNotice) {
+    renderNodes.unshift({ kind: "disclosure", disclosureType: "affiliate", placement: "top", text: getConnectAffiliateDisclosure(connectKind) });
+  }
   return renderNodes;
+}
+
+/** Read-only gate: publication must use the reviewed, canonical notice without a hidden migration. */
+export function hasCanonicalAffiliateDisclosure(document: Pick<ResolvedPostDocumentV1, "connectKind" | "renderNodes">): boolean {
+  const affiliateNodes = document.renderNodes.filter(node => node.kind === "disclosure" && node.disclosureType === "affiliate");
+  const first = document.renderNodes[0];
+  if (affiliateNodes.length !== 1 || first?.kind !== "disclosure" || first.disclosureType !== "affiliate" ||
+      first.placement !== "top" || clean(first.text) !== getConnectAffiliateDisclosure(document.connectKind)) return false;
+  return !document.renderNodes.some(node =>
+    (node.kind === "paragraph" || node.kind === "heading" || node.kind === "quotation") && Boolean(splitAffiliateDisclosure(node.text).disclosure));
 }
 
 /** Pure migration for bounded/spec-first documents created with stale role intents. */

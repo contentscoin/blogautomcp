@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { normalizePublishedBodyLines, normalizePublishedPostText, resolvePostDocument } from "../src/lib/post-composition-contract";
 import { normalizeLines } from "./lib/post-spec/render";
+import { getConnectAffiliateDisclosure } from "../src/lib/connect-disclosure";
 
 const disclosure = "이 글은 네이버 쇼핑 커넥트 활동의 일환으로, 구매 발생 시 수수료를 제공받을 수 있습니다.";
 const faq = Array.from({ length: 3 }, (_, i) =>
@@ -12,6 +13,7 @@ assert.deepEqual(normalizePublishedBodyLines(normalizedFaq), normalizedFaq);
 assert.deepEqual(normalizeLines(["질문1?", "답1.\n보충1.", "질문2?", "답2.\n보충2.", "질문3?", "답3.\n보충3."], "qa-3"),
   ["Q. 질문1?", "A. 답1. 보충1.", "Q. 질문2?", "A. 답2. 보충2.", "Q. 질문3?", "A. 답3. 보충3."]);
 for (const connectKind of ["SHOPPING", "TRAVEL"] as const) {
+  const canonicalDisclosure = getConnectAffiliateDisclosure(connectKind);
   const document = resolvePostDocument({
     connectKind, title: "선택 안내", imagePaths: [], connectUrl: "https://example.com/product",
     sections: ["장소와 기능\n#서울 골목을 따라 걸어요.\nC# 예제도 설명해요.",
@@ -34,14 +36,14 @@ for (const connectKind of ["SHOPPING", "TRAVEL"] as const) {
   const tags = document.renderNodes.filter(node => node.kind === "hashtags");
   assert.equal(tags.length, 1);
   assert.deepEqual(tags[0].values, ["서울", "안내"]);
-  const disclosureNode = connectKind === "SHOPPING" ? document.renderNodes[0] : document.renderNodes.at(-1);
+  const disclosureNode = document.renderNodes[0];
   assert.equal(disclosureNode?.kind, "disclosure");
-  assert.ok(disclosureNode?.kind === "disclosure" && disclosureNode.placement === (connectKind === "SHOPPING" ? "top" : "bottom"));
+  assert.ok(disclosureNode?.kind === "disclosure" && disclosureNode.placement === "top");
   assert.equal(document.renderNodes.filter(node => node.kind === "disclosure").length, 1);
   assert.equal(document.renderNodes.filter(node => node.kind === "connectCard").length, 2);
   for (const node of document.renderNodes) {
     if (node.kind === "paragraph") assert.doesNotMatch(node.text, /(?:^|\n)[QA]\.\s*(?:\n|$)/);
-    if (node.kind === "disclosure") assert.equal(node.text, disclosure);
+    if (node.kind === "disclosure") assert.equal(node.text, canonicalDisclosure);
   }
   const sectionId = document.sections[1].id;
   const legacy = { ...document, sections: document.sections.map(section => section.id === sectionId
@@ -56,8 +58,9 @@ for (const connectKind of ["SHOPPING", "TRAVEL"] as const) {
   const repaired = normalizePublishedPostText(legacy);
   assert.deepEqual(repaired.sections[1].body, normalizedFaq);
   assert.equal(repaired.renderNodes.filter(node => node.kind === "hashtags").length, 1);
-  assert.equal(repaired.renderNodes[0].kind === "paragraph" && repaired.renderNodes[0].text, normalizedFaq.join("\n"));
-  assert.equal(repaired.renderNodes.at(-1)?.kind === "disclosure" && (repaired.renderNodes.at(-1) as { text: string }).text, disclosure);
+  assert.equal(repaired.renderNodes[0].kind === "disclosure" && repaired.renderNodes[0].text, canonicalDisclosure);
+  assert.equal(repaired.renderNodes[1].kind === "paragraph" && repaired.renderNodes[1].text, normalizedFaq.join("\n"));
+  assert.equal(repaired.renderNodes.at(-1)?.kind, "hashtags");
   assert.deepEqual(normalizePublishedPostText(repaired), repaired, "read-time migration is idempotent");
 }
 console.log("published text layout regression passed");

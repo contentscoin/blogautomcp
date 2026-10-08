@@ -4,10 +4,11 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
 import { compareVersions } from '@/lib/version';
 import { browserRecoveryGuardSnapshot, canStartNewRecovery, notifyMaterialRecovery, observedRecoveryState, subscribeMaterialRecovery } from '@/lib/material-recovery-guard';
 import { readSavedRewrite, saveRewrite, type SavedRewriteRequest } from '@/lib/material-rewrite-request';
+import { rejectRecoveryRead, requestMaterialRecoveryJson as requestJson, sameRecoveryRead } from '@/lib/material-recovery-client';
 
 type JobState = {
   jobId: string; status: string; progress?: number; stageMessage?: string | null;
-  errorCode?: string | null; errorMessage?: string | null; workflowPending?: boolean;
+  errorCode?: string | null; errorMessage?: string | null; workflowPending?: boolean; workflowUncertain?: boolean; executionNotAdmitted?: boolean;
   workflowJobId?: string | null; readyCount?: number; failedCount?: number; interruptedCount?: number;
 };
 const ENDPOINT = '/api/materials/rewrite-failed';
@@ -26,13 +27,6 @@ function persistRecovery(accountId: string, request: SavedRewriteRequest) {
   saveRewrite(localStorage, accountId, request);
   window.dispatchEvent(new Event(RECOVERY_CHANGED));
   notifyMaterialRecovery();
-}
-function record(value: unknown): Record<string, unknown> { return value && typeof value === 'object' ? value as Record<string, unknown> : {}; }
-async function requestJson(url: string, init?: RequestInit) {
-  const response = await fetch(url, { ...init, cache: 'no-store' });
-  const payload = record(await response.json());
-  if (!response.ok || !payload.success) throw new Error(String(record(payload.error).message || '작업 응답을 확인하지 못했습니다.'));
-  return record(payload.data);
 }
 function queuedJob(data: Record<string, unknown>): JobState {
   if (typeof data.jobId !== 'string' || !/^[A-Za-z0-9._:-]{1,80}$/.test(data.jobId) || !['QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED'].includes(String(data.status)))
@@ -75,11 +69,11 @@ export function FailedMaterialActions({ accountId, online, appVersion, hasConnec
         setObservation(next as JobState);
         setMessage('');
         if (['QUEUED', 'RUNNING'].includes(String(next.status))) timer = setTimeout(poll, 5000);
-        else if (next.workflowPending === true) setMessage('PC에서 재작성·검증을 계속하고 있습니다. 아래 버튼으로 최종 소재 결과를 조회하세요.');
+        else if (next.workflowPending === true) setMessage(next.workflowUncertain === true ? '원 소재 작업의 종료를 확인하지 못했습니다. 같은 작업의 최종 결과를 조회하세요.' : 'PC에서 재작성·검증을 계속하고 있습니다. 아래 버튼으로 최종 소재 결과를 조회하세요.');
         {
           const current = readSavedRewrite(localStorage, accountId);
           if (current && (current.queryJobId || current.rewriteJobId) === observedJobId)
-            persistRecovery(accountId, { ...current, recoveryState: observedRecoveryState(next.status, next.workflowPending), ...(current.readIdempotencyKey && !current.readRequestUnconfirmed && !['QUEUED', 'RUNNING'].includes(String(next.status)) ? { readIdempotencyKey: undefined } : {}) });
+            persistRecovery(accountId, { ...current, recoveryState: observedRecoveryState(next.status, next.workflowPending), ...(current.readIdempotencyKey && current.readRequestJobId === observedJobId && !current.readRequestUnconfirmed && !['QUEUED', 'RUNNING'].includes(String(next.status)) ? { readIdempotencyKey: undefined, readRequestJobId: undefined } : {}) });
         }
       } catch (error) {
         if (stopped) return;
@@ -102,7 +96,12 @@ export function FailedMaterialActions({ accountId, online, appVersion, hasConnec
       persistRecovery(accountId, request);
       const data = await requestJson(ENDPOINT, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...(request.connectKind !== 'all' ? { connectKind: request.connectKind } : {}), idempotencyKey: request.idempotencyKey }) });
       const accepted = queuedJob(data);
-      persistRecovery(accountId, { ...request, rewriteJobId: accepted.jobId, queryJobId: accepted.jobId, recoveryState: 'pending' });
+      const latest = readSavedRewrite(localStorage, accountId);
+      if (!latest || latest.idempotencyKey !== request.idempotencyKey || (latest.rewriteJobId && latest.rewriteJobId !== accepted.jobId)) return;
+      // Another tab may have finished this root or started a read before this
+      // POST acknowledgement arrived. Its newer state is already authoritative.
+      if (latest.rewriteJobId || latest.queryJobId || latest.readIdempotencyKey || latest.readRequestJobId || latest.readRequestUnconfirmed) return;
+      persistRecovery(accountId, { ...latest, rewriteJobId: accepted.jobId, queryJobId: accepted.jobId, recoveryState: 'pending' });
       setObservation(accepted);
       setMessage('실패 소재 재작성·검증 요청을 접수했습니다. PC가 현재 실패 소재를 확인해 처리합니다.');
     } catch (error) { setMessage(error instanceof Error ? error.message : '접수하지 못했습니다.'); }
@@ -111,17 +110,29 @@ export function FailedMaterialActions({ accountId, online, appVersion, hasConnec
 
   async function readWorkflow() {
     setBusy(true); setMessage('');
+    let attempted: SavedRewriteRequest | null = null;
     try {
       const current = readSavedRewrite(localStorage, accountId);
       if (!current?.rewriteJobId) throw new Error('저장된 재작성 작업번호를 확인하지 못했습니다.');
       const request = { ...current, readRequestUnconfirmed: true, readIdempotencyKey: current.readIdempotencyKey || `rewrite-read-${crypto.randomUUID()}` };
+      attempted = request;
       persistRecovery(accountId, request);
       const data = await requestJson(ENDPOINT, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ rewriteJobId: request.rewriteJobId, idempotencyKey: request.readIdempotencyKey }) });
       const accepted = queuedJob(data);
-      persistRecovery(accountId, { ...request, queryJobId: accepted.jobId, readRequestUnconfirmed: false, recoveryState: 'pending' });
+      const latest = readSavedRewrite(localStorage, accountId);
+      if (!latest || !sameRecoveryRead(latest, request) || latest.rewriteJobId !== request.rewriteJobId) return;
+      persistRecovery(accountId, { ...latest, queryJobId: accepted.jobId, readRequestJobId: accepted.jobId, readRequestUnconfirmed: false, recoveryState: observedRecoveryState(accepted.status, accepted.workflowPending) });
       setObservation(accepted);
       setMessage('같은 소재 작업의 최신 검증 결과를 조회하고 있습니다.');
-    } catch (error) { setMessage(error instanceof Error ? error.message : '조회하지 못했습니다.'); }
+    } catch (error) {
+      try {
+        if (attempted) {
+          const resolved = rejectRecoveryRead(readSavedRewrite(localStorage, accountId), attempted, error);
+          if (resolved) persistRecovery(accountId, resolved);
+        }
+      } catch { /* Unreadable storage preserves the unknown intent and shared lock. */ }
+      setMessage(error instanceof Error ? error.message : '조회하지 못했습니다.');
+    }
     finally { setBusy(false); }
   }
 
@@ -130,13 +141,13 @@ export function FailedMaterialActions({ accountId, online, appVersion, hasConnec
     <div className="card-title"><div><span className="card-kicker">MATERIAL RECOVERY</span><h2>실패 소재 일괄 복구</h2></div><span className="number-chip">재작성 → 검증 → 준비</span></div>
     <p>작성에 실패한 소재 글을 다시 쓰고 원고·이미지를 검증합니다. 검증을 통과한 글만 준비 완료 목록에 저장됩니다.</p>
     <div className="material-recovery-controls">
-      <label htmlFor="failed-material-kind">대상 <select id="failed-material-kind" value={connectKind} disabled={busy || unconfirmed || pending || job?.workflowPending === true} onChange={event => setSelectedKind(event.target.value as SavedRewriteRequest['connectKind'])}><option value="all">쇼핑·여행 전체</option><option value="shopping">쇼핑커넥트</option><option value="travel">여행커넥트</option></select></label>
-      <button className="button button-primary action-button" disabled={!storageReady || Boolean(blocked && !unconfirmed) || busy || pending || job?.workflowPending === true} onClick={rewrite}>{busy && !job ? '접수 중…' : pending ? 'PC 작업 진행 중…' : unconfirmed ? '같은 요청 접수 상태 확인' : '실패 소재 전체 재작성·검증'}</button>
+      <label htmlFor="failed-material-kind">대상 <select id="failed-material-kind" value={connectKind} disabled={busy || unconfirmed || pending || saved?.readRequestUnconfirmed || job?.workflowPending === true} onChange={event => setSelectedKind(event.target.value as SavedRewriteRequest['connectKind'])}><option value="all">쇼핑·여행 전체</option><option value="shopping">쇼핑커넥트</option><option value="travel">여행커넥트</option></select></label>
+      <button className="button button-primary action-button" disabled={!storageReady || Boolean(blocked && !unconfirmed) || busy || pending || saved?.readRequestUnconfirmed || job?.workflowPending === true} onClick={rewrite}>{busy && !job ? '접수 중…' : pending ? 'PC 작업 진행 중…' : unconfirmed ? '같은 요청 접수 상태 확인' : '실패 소재 전체 재작성·검증'}</button>
     </div>
     {blocked && <p className="inline-message">{blocked} <button type="button" className="muted-button" disabled={busy} onClick={() => window.location.reload()}>연결 상태 새로고침</button></p>}
     {job && <div className="material-recovery-status" aria-live="polite">
-      <strong>{pending ? `${job.stageMessage || 'PC에서 처리 중'} · ${job.progress || 0}%` : completed ? `검증 결과: 준비 완료 ${job.readyCount || 0}개 · 실패 ${job.failedCount || 0}개 · 중단 ${job.interruptedCount || 0}개` : job.status === 'SUCCEEDED' ? '재작성 접수 완료 · 최종 검증 결과 확인 필요' : `${job.status}: ${job.errorMessage || job.errorCode || '작업 상세를 확인하세요.'}`}</strong>
-      {job.workflowPending && <button type="button" className="muted-button" disabled={busy || pending} onClick={readWorkflow}>{busy ? '조회 접수 중…' : '최종 소재 결과 조회'}</button>}
+      <strong>{pending ? `${job.stageMessage || 'PC에서 처리 중'} · ${job.progress || 0}%` : job.executionNotAdmitted ? 'PC에 전달되기 전에 취소됐습니다. 새 복구 작업을 시작할 수 있습니다.' : completed ? `검증 결과: 준비 완료 ${job.readyCount || 0}개 · 실패 ${job.failedCount || 0}개 · 중단 ${job.interruptedCount || 0}개` : job.status === 'SUCCEEDED' ? '재작성 접수 완료 · 최종 검증 결과 확인 필요' : `${job.status}: ${job.errorMessage || job.errorCode || '작업 상세를 확인하세요.'}`}</strong>
+      {(job.workflowPending || saved?.readRequestUnconfirmed) && <button type="button" className="muted-button" disabled={busy || pending} onClick={readWorkflow}>{busy ? '조회 접수 중…' : '최종 소재 결과 조회'}</button>}
       <small>작업번호: {rewriteJobId}{job.workflowJobId ? ` · 소재 작업: ${job.workflowJobId}` : ''}</small>
     </div>}
     {(message || unconfirmed || recoverySnapshot === 'unavailable' || job?.status === 'RESTORING') && <p className="inline-message" role="status">{message || (unconfirmed ? '응답을 확인하지 못한 요청이 있습니다. 같은 대상·요청번호로 접수 상태를 확인하세요.' : recoverySnapshot === 'unavailable' ? '브라우저 요청번호 저장소를 사용할 수 없습니다. 저장소 사용을 허용한 뒤 다시 여세요.' : '저장된 재작성 요청의 상태를 다시 확인하고 있습니다.')}</p>}

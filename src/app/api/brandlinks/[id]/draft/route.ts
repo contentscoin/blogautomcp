@@ -42,6 +42,7 @@ import { readCodexLocalStatus } from "@/lib/codex-local";
 import { readProductSnapshot } from "@/lib/draft-context-snapshot";
 import { resolveDraftExperience, resolveStoredExperienceNotes } from "@/lib/experience-notes";
 import { planQualityConvergence } from "../../../../../../scripts/lib/quality-convergence";
+import { DraftSectionCountError, validateSubmittedDraftSectionCount } from "../../../../../../scripts/lib/draft-section-contract";
 
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
 const REVISION_PROCESS_TIMEOUT_MS = (() => {
@@ -142,16 +143,15 @@ function normalizeSubmittedDraft(
       .slice(0, 12)
     : [];
   const contract = getPostCompositionContract(connectKind);
-  const requiredSections = contract.targetSections.min;
   const requiredCharacters = contract.targetCharacters.min;
   const totalCharacters = sections.reduce((sum, section) => sum + section.length, 0);
 
   if (title.length < 8 || title.length > 100) {
     throw new Error("ChatGPT 원고 제목은 8~100자여야 합니다.");
   }
-  if (sections.length < requiredSections || sections.length > 12) {
-    throw new Error(`${connectKind === "TRAVEL" ? "여행" : "쇼핑"} 원고는 ${requiredSections}~12개 섹션이어야 합니다.`);
-  }
+  // Validate both the submitted array and the writer's heading expansion before
+  // claiming DRAFTING, touching a package, or launching any PC/browser work.
+  validateSubmittedDraftSectionCount(sections, connectKind);
   if (sections.some((section) => section.length < 80 || section.length > 8000)) {
     throw new Error("각 본문 섹션은 소제목을 포함해 80~8000자여야 합니다.");
   }
@@ -614,8 +614,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     } catch (error) {
       return NextResponse.json({
         success: false,
-        code: "INVALID_GENERATED_DRAFT",
+        code: error instanceof DraftSectionCountError ? error.code : "INVALID_GENERATED_DRAFT",
         error: error instanceof Error ? error.message : "ChatGPT 원고 형식을 확인하세요.",
+        ...(error instanceof DraftSectionCountError ? {
+          data: { sectionCountValidation: error.details, nextAction: error.nextAction },
+        } : {}),
       }, { status: 422 });
     }
   }
