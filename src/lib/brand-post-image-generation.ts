@@ -1161,6 +1161,12 @@ export async function generateBrandPostImages(options: {
         failedFeatureTargets.push({ index, target });
         continue;
       }
+      // The explicitly planned seller original cannot become an AI scene when
+      // collection or section review did not yield an assignable photograph.
+      if (target.imageSource === "seller-original") {
+        failedFeatureTargets.push({ index, target });
+        continue;
+      }
       pendingTargets.push(target);
       pendingIndexes.push(index);
     }
@@ -1171,9 +1177,11 @@ export async function generateBrandPostImages(options: {
       ...baseResult(index),
       sectionId: target.sectionId,
       imageIntent: target.imageIntent,
-      error: sourceError || (semanticCandidateCount > 0
-        ? "IMAGE_SOURCE_BINDING_REQUIRED: 이 기능 파트와 직접 일치하는 서로 다른 검증 상품 원본이 필요합니다."
-        : "PRODUCT_SOURCE_REQUIRED: 공지·안내판을 제외한 검증 가능한 상품 원본 사진을 찾지 못했습니다."),
+      error: sourceError || (target.imageSource === "seller-original"
+        ? "IMAGE_SOURCE_BINDING_REQUIRED: 선택한 상품·옵션과 이 원본 사진 슬롯에 맞는 검증 판매자 사진을 배정하지 못했습니다. AI 연출 사진으로 대체하지 않았습니다."
+        : semanticCandidateCount > 0
+          ? "IMAGE_SOURCE_BINDING_REQUIRED: 이 기능 파트와 직접 일치하는 서로 다른 검증 상품 원본이 필요합니다."
+          : "PRODUCT_SOURCE_REQUIRED: 공지·안내판을 제외한 검증 가능한 상품 원본 사진을 찾지 못했습니다."),
     });
 
     if (options.sourceOnly) {

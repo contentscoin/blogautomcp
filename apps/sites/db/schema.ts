@@ -79,6 +79,7 @@ export const agentJobs = sqliteTable('agent_jobs', {
   progress: integer('progress').notNull().default(0),
   idempotencyKey: text('idempotency_key'),
   claimedByDeviceId: text('claimed_by_device_id'),
+  claimRequestId: text('claim_request_id'),
   errorCode: text('error_code'),
   errorMessage: text('error_message'),
   createdAt: integer('created_at').notNull(),
@@ -90,7 +91,7 @@ export const agentJobs = sqliteTable('agent_jobs', {
   stage: text('stage'),
   stageMessage: text('stage_message'),
   cancelRequested: integer('cancel_requested').notNull().default(0),
-}, (table) => [index('idx_agent_jobs_user_status_created').on(table.userId, table.status, table.createdAt), uniqueIndex('idx_agent_jobs_user_idempotency').on(table.userId, table.idempotencyKey)]);
+}, (table) => [index('idx_agent_jobs_user_status_created').on(table.userId, table.status, table.createdAt), uniqueIndex('idx_agent_jobs_user_idempotency').on(table.userId, table.idempotencyKey), uniqueIndex('idx_agent_jobs_device_claim').on(table.userId, table.claimedByDeviceId, table.claimRequestId)]);
 
 export const agentJobResultChunks = sqliteTable('agent_job_result_chunks', {
   jobId: text('job_id').notNull().references(() => agentJobs.id, { onDelete: 'cascade' }),
@@ -100,6 +101,15 @@ export const agentJobResultChunks = sqliteTable('agent_job_result_chunks', {
   content: text('content').notNull(),
   createdAt: integer('created_at').notNull(),
 }, table => [primaryKey({ columns: [table.jobId, table.resultHash, table.chunkIndex] })]);
+
+/** NULL jobId is an immutable, committed empty claim; retain missing assignments. */
+export const agentClaimIntents = sqliteTable('agent_claim_intents', {
+  userId: text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  deviceId: text('device_id').notNull().references(() => devices.id, { onDelete: 'cascade' }),
+  requestId: text('request_id').notNull(),
+  jobId: text('job_id'),
+  createdAt: integer('created_at').notNull(),
+}, table => [primaryKey({ columns: [table.userId, table.deviceId, table.requestId] })]);
 
 export const auditEvents = sqliteTable('audit_events', {
   id: text('id').primaryKey(),

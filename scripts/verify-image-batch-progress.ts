@@ -363,6 +363,34 @@ async function verifyGenerator() {
     assert.ok(results.every(result => result.error === "CODEX_MODEL_INCOMPATIBLE: newer CLI required"));
     assert.equal(h.spawns, 0);
   });
+  await check("unassigned seller-original slots retain source failure and never enter scene generation", async () => {
+    for (const sourceOnly of [false, true]) {
+      for (const settings of [
+        { sourceMissing: true },
+        { sectionMatchedPaths: [] },
+        { sectionMatchedPaths: [sourcePath], reviewClass: "feature-evidence" as const },
+        { sourceError: "CODEX_MODEL_INCOMPATIBLE: newer CLI required" },
+        { sectionReviewError: "CODEX_TIMEOUT: original review interrupted" },
+      ]) {
+        const h = harness(settings);
+        h.manifest.connectKind = "SHOPPING";
+        Object.assign(h.manifest.composition.sections[0], {
+          imageSource: "seller-original",
+          imageIntent: "판매페이지 원본 상품 사진: 선택한 상품·옵션의 외형 확인",
+        });
+        const [result] = await h.generate(1, { sourceOnly });
+        assert.equal(result.error, "sourceError" in settings ? settings.sourceError
+          : "sectionReviewError" in settings ? settings.sectionReviewError
+            : "IMAGE_SOURCE_BINDING_REQUIRED: 선택한 상품·옵션과 이 원본 사진 슬롯에 맞는 검증 판매자 사진을 배정하지 못했습니다. AI 연출 사진으로 대체하지 않았습니다.");
+        assert.equal(result.generatedPath, null);
+        assert.equal(h.spawns, 0, "missing/rejected original never submits a scene request");
+        assert.equal(h.jobs.length, 0);
+        assert.equal(h.lockCalls, 0, "missing original never enters a framed/composite fallback");
+        assert.equal(fs.existsSync(path.join(h.packageDir, "image-generation-work", "scene-reference-context.json")), false,
+          "original assignment failure never prepares a scene reference");
+      }
+    }
+  });
   await check("shopping missing source rejects before any provider worker starts", async () => {
     const h = harness({ sourceMissing: true });
     h.manifest.connectKind = "SHOPPING";

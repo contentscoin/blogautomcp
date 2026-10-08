@@ -14,6 +14,7 @@ function load(file, mocks = {}, globals = {}, tail = '') {
 }
 const helperPath = path.join(__dirname, 'remote-agent-completion.ts');
 const helper = load(helperPath);
+const claimHelper = load(path.join(__dirname, 'remote-agent-claim.ts'));
 test('outbox survives reload, isolates activation and retains exact large result', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'remote-completion-'));
   try {
@@ -52,6 +53,25 @@ test('status snapshot exposes detached image generation without an active remote
   const status = await route.testBuildStatusSnapshot();
   assert.deepEqual(JSON.parse(JSON.stringify(status.backgroundWork)), { publishing: 0, drafting: 0, processes: 1, imageGeneration: 1, busy: true });
 });
+
+test('idle poll bookkeeping does not mark the PC business state busy', async () => {
+  const routePath = path.join(__dirname, '../app/api/remote-agent/poll/route.ts');
+  const source = fs.readFileSync(routePath, 'utf8');
+  const mocks = {};
+  for (const match of source.matchAll(/from\s+["']([^"']+)["']/g)) if (!match[1].startsWith('node:')) mocks[match[1]] = {};
+  Object.assign(mocks, {
+    '@/lib/db': { prisma: { brandLink: { count: async () => 0 } } },
+    '@/lib/desktop-activity': { getDesktopActivitySnapshot: () => ({ count: 1, activities: [{ label: 'remote-agent-poll' }] }) },
+    '@/lib/naver-session': { getNaverSessionFile: () => 'absent-status-fixture' },
+    '@/lib/connect-contract-store': { hasStoredConnectContract: () => false },
+    '../../../../../scripts/lib/writing-timeout-policy': { getWritingTimeoutPolicy: () => ({}) },
+    '../../../../../scripts/lib/thumbnail-gen': { isGenerativeThumbnailAvailable: () => false },
+  });
+  const route = load(routePath, mocks, {}, '\nexport const testBuildStatusSnapshot = buildStatusSnapshot;');
+  const status = await route.testBuildStatusSnapshot();
+  assert.equal(status.backgroundWork.busy, false);
+  assert.equal(status.backgroundWork.processes, 0);
+});
 for (const jobType of ['SETTINGS_GET', 'POST_PUBLISH']) test(`${jobType}: actual poll timeout and late heartbeat never replay execution`, async () => {
   const activity = load(path.join(__dirname, 'desktop-activity.ts'));
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'remote-poll-'));
@@ -66,6 +86,7 @@ for (const jobType of ['SETTINGS_GET', 'POST_PUBLISH']) test(`${jobType}: actual
     'next/server': { NextResponse: Response },
     '@/lib/desktop-activity': activity,
     '@/lib/remote-agent-completion': { ...helper, deliverCompletion: (send) => helper.deliverCompletion(send, async () => {}) },
+    '@/lib/remote-agent-claim': claimHelper,
     '@/lib/api-auth': { requireAdminApiKey: () => null },
     '@/lib/local-request-auth': { requireTrustedLocalMutation: () => null },
     '@/lib/remote-activation': { readRemoteActivation: () => ({ siteUrl: 'https://site', deviceToken: 'token' }) },
@@ -90,8 +111,9 @@ for (const jobType of ['SETTINGS_GET', 'POST_PUBLISH']) test(`${jobType}: actual
     fetch: async (url, init) => {
       assert.ok(init.signal, 'site calls must have a finite deadline');
       assert.ok(activity.getDesktopActivitySnapshot().count > 0, 'claim, heartbeat and completion delivery must block updater readiness');
-      if (url.endsWith('/claim')) { claims++; return Response.json({ data: { id: 'job_1', type: jobType, input: { draftId: 'draft1', confirmed: true } } }); }
-      if (url.endsWith('/heartbeat')) { heartbeats++; return Response.json({ data: { active: bodies.length === 0, cancelRequested: bodies.length > 0 } }); }
+      if (url.endsWith('/claim') && !init.method) return new Response(null, { status: 405 });
+      if (url.endsWith('/claim')) { claims++; return Response.json({ success: true, data: { id: 'job_1', type: jobType, input: { draftId: 'draft1', confirmed: true } } }); }
+      if (url.endsWith('/heartbeat')) { heartbeats++; return Response.json({ success: true, data: { id: 'job_1', active: bodies.length === 0, cancelRequested: bodies.length > 0 } }); }
       assert.ok(url.endsWith('/complete'));
       bodies.push(init.body);
       if (!recover) {
@@ -167,14 +189,16 @@ for (const status of [409, 413, 401]) test(`permanent ${status} delivery is pres
   let configured = true, claims = 0, sends = 0;
   Object.assign(mocks, {
     'next/server': { NextResponse: Response }, '@/lib/remote-agent-completion': helper,
+    '@/lib/remote-agent-claim': claimHelper,
     '@/lib/api-auth': { requireAdminApiKey: () => null }, '@/lib/local-request-auth': { requireTrustedLocalMutation: () => null },
     '@/lib/remote-activation': { readRemoteActivation: () => configured ? { siteUrl: 'https://site', deviceToken: 'private-credential' } : {}, clearRemoteActivation: () => { configured = false; } },
     '@/lib/connect-contract-store': { hasStoredConnectContract: () => false }, '@/lib/naver-session': { getNaverSessionFile: () => path.join(root, 'absent') },
     '../../../../../scripts/lib/writing-timeout-policy': { getWritingTimeoutPolicy: () => ({}) },
     '../../../../../scripts/lib/app-paths': { getUserDataRoot: () => root }, '../../../../../scripts/lib/thumbnail-gen': { isGenerativeThumbnailAvailable: () => false },
   });
-  const route = load(routePath, mocks, { fetch: async url => {
+  const route = load(routePath, mocks, { fetch: async (url, init) => {
     if (url.endsWith('/heartbeat')) return Response.json({ success: true, data: { active: false } });
+    if (url.endsWith('/claim') && !init.method) return new Response(null, { status: 405 });
     if (url.endsWith('/claim')) { claims++; return Response.json({ success: true, data: null }); }
     sends++;
     return Response.json({ success: false, error: { code: 'REJECTED', message: 'fixture' } }, { status });

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { selectVerifiedProductPhoto } from "../../../../../scripts/lib/product-photo-review";
 import { completionOutbox, CompletionDeliveryError, deliverCompletion, isPermanentCompletionError, completionWireBody, type PendingCompletion } from "@/lib/remote-agent-completion";
+import { remoteClaimStore, type RemoteClaimIntent } from "@/lib/remote-agent-claim";
 import { getWritingTimeoutPolicy } from "../../../../../scripts/lib/writing-timeout-policy";
 import fs from "node:fs";
 import path from "node:path";
@@ -54,6 +55,13 @@ import {
 
 type Job = { id: string; type: string; input: Record<string, unknown> };
 
+function hasRemoteJobIdentity(value: unknown): value is { id: string; type: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.id === "string" && /^job_[A-Za-z0-9_-]{1,80}$/.test(record.id) &&
+    typeof record.type === "string" && /^[A-Z][A-Z0-9_]{0,99}$/.test(record.type);
+}
+
 type JobResultEnvelope = {
   schema: "blogautomcp.job-result/v1";
   jobType: string;
@@ -85,6 +93,7 @@ type JobContext = {
   /** 초안 작업 중이면 하트비트가 패키지의 progress.json 을 읽어 단계·진행률을 올린다. */
   draftProgress?: DraftProgressWatch | null;
   executionFinished?: boolean;
+  executionStarted?: boolean;
 };
 
 type ProfilePlan = {
@@ -142,8 +151,9 @@ function appVersionString(): string {
 async function buildStatusSnapshot(): Promise<Record<string, unknown>> {
   let backgroundWork: Record<string, unknown>;
   try {
-    const desktopActivities = getDesktopActivitySnapshot();
-    const imageGeneration = desktopActivities.activities.filter(activity => activity.label === "brand-post-image-generation").length;
+    // Poll bookkeeping protects updater readiness, but is not user work.
+    const activities = getDesktopActivitySnapshot().activities.filter(activity => activity.label !== "remote-agent-poll");
+    const imageGeneration = activities.filter(activity => activity.label === "brand-post-image-generation").length;
     const [publishing, drafting] = await Promise.all([
       prisma.brandLink.count({ where: { status: 'PUBLISHING' } }),
       prisma.brandLink.count({ where: { status: 'DRAFTING' } }),
@@ -151,9 +161,9 @@ async function buildStatusSnapshot(): Promise<Record<string, unknown>> {
     backgroundWork = {
       publishing,
       drafting,
-      processes: desktopActivities.count,
+      processes: activities.length,
       imageGeneration,
-      busy: publishing + drafting + desktopActivities.count > 0,
+      busy: publishing + drafting + activities.length > 0,
     };
   } catch { backgroundWork = { busy: null, error: 'BACKGROUND_STATUS_UNAVAILABLE' }; }
   let naverSessionSavedAt: string | null = null;
@@ -175,6 +185,22 @@ async function buildStatusSnapshot(): Promise<Record<string, unknown>> {
     backgroundWork,
     checkedAt: new Date().toISOString(),
   };
+}
+
+// Lease renewal must not wait for optional local DB diagnostics. A blocked
+// count query previously held every heartbeat before the network request.
+let lastStatusSnapshot: Record<string, unknown> | undefined;
+let lastStatusSnapshotAt = 0;
+let statusSnapshotRefreshing = false;
+function leaseStatusSnapshot(): Record<string, unknown> | undefined {
+  if (!statusSnapshotRefreshing) {
+    statusSnapshotRefreshing = true;
+    void buildStatusSnapshot().then(snapshot => { lastStatusSnapshot = snapshot; lastStatusSnapshotAt = Date.now(); })
+      .catch(() => undefined).finally(() => { statusSnapshotRefreshing = false; });
+  }
+  if (lastStatusSnapshot && Date.now() - lastStatusSnapshotAt < 60_000) return lastStatusSnapshot;
+  return { appVersion: appVersionString(), platform: process.platform, checkedAt: new Date().toISOString(),
+    backgroundWork: { busy: null, error: "BACKGROUND_STATUS_UNAVAILABLE" } };
 }
 
 function isAllowedGeneratedImageUrl(rawUrl: string): boolean {
@@ -1449,11 +1475,35 @@ async function siteFetch(siteUrl: string, token: string, apiPath: string, body: 
   return { ok: response.ok, status: response.status, payload };
 }
 
+let claimCapability: { identity: string; checkedAt: number; protocol: RemoteClaimIntent["protocol"] } | undefined;
+class ClaimProtocolAuthorizationError extends Error {
+  constructor(public status: 401 | 403) { super("PC authentication revoked during claim capability lookup"); }
+}
+async function claimProtocol(siteUrl: string, token: string): Promise<RemoteClaimIntent["protocol"]> {
+  const identity = createHash("sha256").update(`${siteUrl}\0${token}`).digest("hex");
+  if (claimCapability?.identity === identity && Date.now() - claimCapability.checkedAt < 60_000) return claimCapability.protocol;
+  // Old Sites responds 405 to this read-only request. Never probe capabilities
+  // with a POST, which an old server could interpret as a real claim.
+  const response = await fetch(`${siteUrl}/api/agent/jobs/claim`, {
+    headers: { authorization: `Bearer ${token}` }, cache: "no-store", signal: AbortSignal.timeout(20_000),
+  });
+  if (response.status === 401 || response.status === 403) {
+    clearRemoteActivation();
+    throw new ClaimProtocolAuthorizationError(response.status);
+  }
+  const payload = await response.json().catch(() => null) as { success?: boolean; data?: { claimProtocol?: string } } | null;
+  const protocol = response.status === 405 ? "legacy" : response.ok && payload?.success === true &&
+    payload.data?.claimProtocol === "blogautomcp.claim/v2" ? "keyed" : null;
+  if (!protocol) throw new Error("Claim protocol could not be verified");
+  claimCapability = { identity, checkedAt: Date.now(), protocol };
+  return protocol;
+}
+
 /**
  * 작업 실행 중 PC 생존 신호 + 임대 연장 + 진행 단계 + 취소 감지.
  * 예전에는 claim 이 유일한 하트비트라 몇 분 걸리는 작업 동안 PC가 오프라인으로 판정됐다.
  */
-function startJobHeartbeat(request: NextRequest, siteUrl: string, token: string, ctx: JobContext, stageRef: { stage: string; message: string; progress: number }): () => void {
+function startJobHeartbeat(request: NextRequest, siteUrl: string, token: string, ctx: JobContext, stageRef: { stage: string; message: string; progress: number }): (() => void) & { ready: Promise<boolean> } {
   let stopping = false;
   let cancelHandled = false;
   const refreshDraftProgress = () => {
@@ -1474,36 +1524,41 @@ function startJobHeartbeat(request: NextRequest, siteUrl: string, token: string,
     );
   };
   const send = async () => {
-    if (stopping) return;
+    if (stopping) return false;
     refreshDraftProgress();
     const { ok, status, payload } = await siteFetch(siteUrl, token, `/api/agent/jobs/${encodeURIComponent(ctx.job.id)}/heartbeat`, {
       appVersion: appVersionString(),
       progress: stageRef.progress,
       stage: stageRef.stage,
       message: stageRef.message,
-      status: await buildStatusSnapshot(),
+      status: leaseStatusSnapshot(),
     }).catch(() => ({ ok: false, status: 0, payload: null }));
-    if (stopping || ctx.executionFinished) return;
+    if (stopping || ctx.executionFinished) return false;
     const revoked = status === 401 || status === 403;
     if (revoked) clearRemoteActivation();
-    if (!revoked && (!ok || !payload)) return;
+    if (!revoked && (!ok || !payload)) return false;
     const data = (payload?.data || {}) as Record<string, unknown>;
     if ((revoked || data.active === false || data.cancelRequested === true) && !cancelHandled) {
       cancelHandled = true;
       ctx.cancelled = true;
       ctx.cancelReason = data.cancelRequested === true ? "USER_CANCELLED" : "LEASE_LOST";
       // 발행/초안 프로세스를 실제로 멈춘다(simple-agent 등 우리 스크립트만 종료).
-      await localApi(request, "/api/posting/stop", { method: "POST", body: "{}" }).catch(() => { cancelHandled = false; });
+      if (ctx.executionStarted !== false) {
+        await localApi(request, "/api/posting/stop", { method: "POST", body: "{}" }).catch(() => { cancelHandled = false; });
+      }
     }
+    return !ctx.cancelled && ok && payload?.success === true && data.id === ctx.job.id && data.active === true && data.cancelRequested !== true;
   };
-  void send();
+  const ready = send();
   const timer = setInterval(() => void send(), JOB_HEARTBEAT_INTERVAL_MS);
   // Node 타이머가 프로세스 종료를 막지 않도록 한다(데스크톱 in-process 서버).
   (timer as { unref?: () => void }).unref?.();
-  return () => {
+  const stop = (() => {
     stopping = true;
     clearInterval(timer);
-  };
+  }) as (() => void) & { ready: Promise<boolean> };
+  stop.ready = ready;
+  return stop;
 }
 
 async function completeRemoteJob(siteUrl: string, token: string, jobId: string, body: Record<string, unknown>): Promise<void> {
@@ -1536,6 +1591,11 @@ async function poll(request: NextRequest) {
   const remote = config();
   if (!remote.siteUrl || !remote.token) return NextResponse.json({ success: true, data: { configured: false, job: null } });
   const outbox = completionOutbox(getUserDataRoot(), remote.siteUrl, remote.token);
+  const claimStore = remoteClaimStore(getUserDataRoot(), remote.siteUrl, remote.token);
+  const clearCompletedClaim = (jobId: string) => {
+    const intent = claimStore.read();
+    if (intent?.state === "started" && intent.job?.id === jobId) claimStore.clear(intent.requestId);
+  };
   if (activeJob) {
     return NextResponse.json({ success: true, data: { configured: true, job: null, busy: { id: activeJob.id, type: activeJob.type, startedAt: new Date(activeJob.startedAt).toISOString() } } });
   }
@@ -1549,18 +1609,20 @@ async function poll(request: NextRequest) {
     return NextResponse.json({ success: false, code: 'COMPLETION_OUTBOX_UNREADABLE', error: '완료 보관함을 읽을 수 없어 새 작업을 시작하지 않습니다. PC 저장소를 확인하세요.' }, { status: 503 });
   }
   if (pending) {
-    const renew = async () => { await siteFetch(remote.siteUrl, remote.token, `/api/agent/jobs/${encodeURIComponent(pending!.job.id)}/heartbeat`, { stage: 'completion_pending', message: '실행 완료 · 저장된 결과 재전송 중', progress: 99, appVersion: appVersionString(), status: await buildStatusSnapshot() }).catch(() => undefined); };
+    const renew = async () => { await siteFetch(remote.siteUrl, remote.token, `/api/agent/jobs/${encodeURIComponent(pending!.job.id)}/heartbeat`, { stage: 'completion_pending', message: '실행 완료 · 저장된 결과 재전송 중', progress: 99, appVersion: appVersionString(), status: leaseStatusSnapshot() }).catch(() => undefined); };
     renew();
     const deliveryHeartbeat = setInterval(renew, JOB_HEARTBEAT_INTERVAL_MS);
     try {
       // Re-save a memory-only result if an earlier disk write failed.
       outbox.save(pending);
       await deliverCompletion(() => completeRemoteJob(remote.siteUrl, remote.token, pending!.job.id, pending!.body));
+      clearCompletedClaim(pending.job.id);
       outbox.clear();
       const success = pending.body.status === 'SUCCEEDED';
       return NextResponse.json({ success, ...(success ? {} : { error: pending.body.errorMessage, code: pending.body.errorCode }), data: { configured: true, job: { ...pending.job, status: pending.body.status }, completionRecovered: true } }, { status: success ? 200 : 500 });
     } catch (error) {
       if (isPermanentCompletionError(error)) {
+        clearCompletedClaim(pending.job.id);
         outbox.quarantine(error.code);
         if (error.status === 401 || error.status === 403) clearRemoteActivation();
         return NextResponse.json({ success: false, code: 'COMPLETION_DELIVERY_REJECTED', deliveryCode: error.code,
@@ -1575,21 +1637,72 @@ async function poll(request: NextRequest) {
     return NextResponse.json({ success: true, data: { configured: true, job: null, updatePending: true } });
   }
   let claim: Awaited<ReturnType<typeof siteFetch>> | null;
+  let claimIntent: RemoteClaimIntent;
   try {
-    claim = await siteFetch(remote.siteUrl, remote.token, "/api/agent/jobs/claim", { appVersion: appVersionString(), status: await buildStatusSnapshot() }).catch(() => null);
-    const claimedJob = claim?.ok ? ((claim.payload?.data as Job | null) || null) : null;
-    if (claimedJob) activeJob = { id: claimedJob.id, type: claimedJob.type, startedAt: Date.now() };
+    let saved: RemoteClaimIntent | null;
+    try { saved = claimStore.read(); }
+    catch { return NextResponse.json({ success: false, code: "CLAIM_RECEIPT_UNREADABLE", error: "작업 수신 기록을 읽을 수 없어 새 작업을 실행하지 않습니다. PC 저장소를 확인하세요." }, { status: 503 }); }
+    if (saved?.state === "started" || saved?.protocol === "legacy") {
+      return NextResponse.json({ success: false, code: saved.state === "started" ? "REMOTE_EXECUTION_UNCERTAIN" : "CLAIM_DELIVERY_UNCERTAIN",
+        error: saved.state === "started" ? "이전 원격 작업의 실행 결과가 불명확합니다. 자동으로 다시 실행하지 않습니다. 기존 작업 결과를 먼저 대조하세요." : "작업 수신 응답이 유실되었습니다. 이전 Sites는 동일 요청을 복구할 수 없어 새 작업을 받지 않습니다. 기존 작업 상태를 먼저 대조하세요.",
+        data: { ...(saved.job ? { job: saved.job } : {}), claimRequestId: saved.requestId, executionReplayAllowed: false } }, { status: 503 });
+    }
+    if (saved) claimIntent = saved;
+    else {
+      let protocol: RemoteClaimIntent["protocol"];
+      try { protocol = await claimProtocol(remote.siteUrl, remote.token); }
+      catch (error) {
+        if (error instanceof ClaimProtocolAuthorizationError) {
+          return NextResponse.json({ success: false, code: "DEVICE_REVOKED", error: "PC 인증이 유효하지 않아 작업을 받지 않습니다. PC 앱을 다시 연결하세요.", data: { reconnectRequired: true } }, { status: error.status });
+        }
+        return NextResponse.json({ success: false, code: "CLAIM_PROTOCOL_UNAVAILABLE", error: "사이트 작업 채널을 확인하지 못해 새 작업을 받지 않습니다. 연결을 복구한 뒤 다시 조회하세요." }, { status: 502 });
+      }
+      try { claimIntent = claimStore.begin(protocol); }
+      catch { return NextResponse.json({ success: false, code: "CLAIM_RECEIPT_UNWRITABLE", error: "작업 수신 기록을 저장하지 못해 새 작업을 받지 않습니다. PC 저장소를 확인하세요." }, { status: 503 }); }
+    }
+    claim = await siteFetch(remote.siteUrl, remote.token, "/api/agent/jobs/claim", { appVersion: appVersionString(), status: leaseStatusSnapshot(),
+      ...(claimIntent.protocol === "keyed" ? { claimRequestId: claimIntent.requestId } : {}),
+    }).catch(() => null);
+    if (claim?.ok && claimIntent.protocol === "keyed" && (claim.payload?.success !== true || claim.payload.claimRequestId !== claimIntent.requestId)) {
+      return NextResponse.json({ success: false, code: "CLAIM_ACKNOWLEDGEMENT_UNCERTAIN", error: "작업 수신 확인이 원 요청과 일치하지 않아 실행하지 않습니다. 같은 요청 ID로 연결을 복구합니다.", data: { claimRequestId: claimIntent.requestId } }, { status: 503 });
+    }
+    const data = claim?.payload?.data;
+    const validJob = hasRemoteJobIdentity(data) &&
+      (data as Job).input && typeof (data as Job).input === "object" && !Array.isArray((data as Job).input);
+    if (claim?.ok && (claim.payload?.success !== true || (data !== null && !validJob))) {
+      return NextResponse.json({ success: false, code: "CLAIM_DELIVERY_UNCERTAIN", error: "작업 수신 응답이 불완전하여 실행하지 않습니다. 원 수신 기록을 보존하고 새 요청으로 대체하지 않습니다.",
+        data: { claimRequestId: claimIntent.requestId, claimRecoverySupported: claimIntent.protocol === "keyed" } }, { status: 503 });
+    }
+    const claimedJob = claim?.ok && validJob ? data as Job : null;
+    const committedEmpty = claim?.payload?.claimResolved === true && claim.payload.claimOutcome === "empty" && claim.payload.claimedJob === undefined;
+    if (claim?.ok && claimIntent.protocol === "keyed" && (claimedJob ? claim.payload?.claimOutcome !== "job" || claim.payload.claimResolved === true || claim.payload.claimedJob !== undefined :
+      !committedEmpty && !(claim.payload?.claimResolved === true && claim.payload.claimOutcome === "job"))) {
+      return NextResponse.json({ success: false, code: "CLAIM_ACKNOWLEDGEMENT_UNCERTAIN", error: "사이트가 작업 수신 결과를 확정하지 않아 원 요청 기록을 보존합니다. 같은 요청 ID로 확인합니다.",
+        data: { claimRequestId: claimIntent.requestId } }, { status: 503 });
+    }
+    if (claim?.ok && !claimedJob && claim.payload?.claimResolved === true && !committedEmpty) {
+      const previous = claim.payload.claimedJob as { id?: string; type?: string; status?: string } | undefined;
+      const previousStatus = previous?.status;
+      if (!hasRemoteJobIdentity(previous) || !["SUCCEEDED", "FAILED", "CANCELLED"].includes(previousStatus || "")) {
+        return NextResponse.json({ success: false, code: "CLAIM_RECONCILIATION_REQUIRED", error: "원 작업이 아직 실행 상태여서 새 작업을 받지 않습니다. 취소 또는 최종 상태를 먼저 확인하세요.",
+          data: { claimRequestId: claimIntent.requestId, claimedJob: claim.payload.claimedJob, executionReplayAllowed: false } }, { status: 503 });
+      }
+    }
+    if (claimedJob) {
+      activeJob = { id: claimedJob.id, type: claimedJob.type, startedAt: Date.now() };
+    } else if (claim?.ok) claimStore.clear(claimIntent.requestId);
   } finally {
     claiming = false;
   }
-  if (!claim) return NextResponse.json({ success: false, error: "사이트 작업 채널에 연결할 수 없습니다." }, { status: 502 });
+  if (!claim) return NextResponse.json({ success: false, code: "CLAIM_DELIVERY_UNCERTAIN", error: "작업 수신 응답을 확인하지 못했습니다. 새 요청으로 대체하지 않고 원 수신 기록을 보존합니다.", data: { claimRequestId: claimIntent.requestId, claimRecoverySupported: claimIntent.protocol === "keyed" } }, { status: 502 });
   if (!claim.ok) {
     if (claim.status === 401 || claim.status === 403) clearRemoteActivation();
     const error = claim.payload?.error as { message?: string; code?: string } | undefined;
     return NextResponse.json({ success: false, error: error?.message || "PC 인증이 폐기되었습니다.", code: error?.code }, { status: claim.status });
   }
   const job = (claim.payload?.data as Job | null) || null;
-  if (!job) return NextResponse.json({ success: true, data: { configured: true, job: null } });
+  if (!job) return NextResponse.json({ success: true, data: { configured: true, job: null,
+    ...(claim.payload?.claimResolved === true ? { claimResolved: true, claimedJob: claim.payload.claimedJob } : {}) } });
 
   const stageRef = { stage: "claimed", message: "작업 시작", progress: 1 };
   const ctx: JobContext = {
@@ -1599,6 +1712,7 @@ async function poll(request: NextRequest) {
     cancelled: false,
     cancelReason: null,
     draftProgress: null,
+    executionStarted: false,
     setStage: (stage, message, progress) => {
       stageRef.stage = stage;
       if (message) stageRef.message = message;
@@ -1608,6 +1722,15 @@ async function poll(request: NextRequest) {
   jobContexts.set(request, ctx);
   const stopHeartbeat = startJobHeartbeat(request, remote.siteUrl, remote.token, ctx, stageRef);
   try {
+    // A received claim may already have been cancelled or reclaimed. Confirm
+    // its exact lease before recording execution-start and dispatching locally.
+    if (!await stopHeartbeat.ready) {
+      return NextResponse.json({ success: false, code: "JOB_LEASE_UNCONFIRMED", error: "작업 임대 또는 취소 상태를 확인하지 못해 실행하지 않습니다. 원 작업부터 확인하세요.",
+        data: { job: { id: job.id, type: job.type }, claimRequestId: claimIntent.requestId, executionReplayAllowed: false } }, { status: 503 });
+    }
+    try { claimStore.started(claimIntent, job); }
+    catch { return NextResponse.json({ success: false, code: "CLAIM_RECEIPT_UNWRITABLE", error: "실행 시작 기록을 저장하지 못해 작업을 실행하지 않습니다. 원 요청의 상태를 확인하세요." }, { status: 503 }); }
+    ctx.executionStarted = true;
     let completion: Record<string, unknown>;
     try {
       const result = await executeJob(ctx);
@@ -1625,9 +1748,11 @@ async function poll(request: NextRequest) {
     try {
       outbox.save({ job: { id: job.id, type: job.type }, body: completion });
       await deliverCompletion(() => completeRemoteJob(remote.siteUrl, remote.token, job.id, completion));
+      clearCompletedClaim(job.id);
       outbox.clear();
     } catch (error) {
       if (isPermanentCompletionError(error)) {
+        clearCompletedClaim(job.id);
         outbox.quarantine(error.code);
         if (error.status === 401 || error.status === 403) clearRemoteActivation();
         return NextResponse.json({ success: false, code: 'COMPLETION_DELIVERY_REJECTED', deliveryCode: error.code,

@@ -19,6 +19,7 @@ const statements = [
   `CREATE INDEX IF NOT EXISTS idx_devices_user_status ON devices(user_id, status)`,
   `CREATE TABLE IF NOT EXISTS agent_jobs (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, type TEXT NOT NULL, connect_kind TEXT, input_json TEXT NOT NULL, result_json TEXT, status TEXT NOT NULL DEFAULT 'QUEUED', progress INTEGER NOT NULL DEFAULT 0, idempotency_key TEXT, claimed_by_device_id TEXT, error_code TEXT, error_message TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, claimed_at INTEGER, finished_at INTEGER)`,
   `CREATE INDEX IF NOT EXISTS idx_agent_jobs_user_status_created ON agent_jobs(user_id, status, created_at)`,
+  `CREATE TABLE IF NOT EXISTS agent_claim_intents (user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,request_id TEXT NOT NULL,job_id TEXT,created_at INTEGER NOT NULL,PRIMARY KEY(user_id,device_id,request_id))`,
   `CREATE TABLE IF NOT EXISTS agent_job_result_chunks (job_id TEXT NOT NULL REFERENCES agent_jobs(id) ON DELETE CASCADE,user_id TEXT NOT NULL,result_hash TEXT NOT NULL,chunk_index INTEGER NOT NULL,content TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(job_id,result_hash,chunk_index))`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_jobs_user_idempotency ON agent_jobs(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL`,
   `CREATE TABLE IF NOT EXISTS audit_events (id TEXT PRIMARY KEY NOT NULL, actor_user_id TEXT, target_user_id TEXT, action TEXT NOT NULL, metadata_json TEXT, created_at INTEGER NOT NULL)`,
@@ -41,6 +42,7 @@ const columnMigrations: Array<{ table: string; column: string; ddl: string }> = 
   { table: 'agent_jobs', column: 'stage', ddl: 'TEXT' },
   { table: 'agent_jobs', column: 'stage_message', ddl: 'TEXT' },
   { table: 'agent_jobs', column: 'cancel_requested', ddl: 'INTEGER NOT NULL DEFAULT 0' },
+  { table: 'agent_jobs', column: 'claim_request_id', ddl: 'TEXT' },
   { table: 'devices', column: 'status_json', ddl: 'TEXT' },
 ];
 
@@ -61,6 +63,13 @@ export async function ensureDatabase(): Promise<void> {
     const d1 = getD1();
     await d1.batch(statements.map((statement) => d1.prepare(statement)));
     await ensureColumns(d1);
+    // Added after the nullable column migration so already-deployed databases remain compatible.
+    await d1.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_jobs_device_claim ON agent_jobs(user_id,claimed_by_device_id,claim_request_id) WHERE claim_request_id IS NOT NULL').run();
+    // Preserve any v1 assignment when upgrading. A missing job never becomes a
+    // new EMPTY result: the ledger intentionally keeps job_id without a job FK.
+    await d1.prepare(`INSERT OR IGNORE INTO agent_claim_intents(user_id,device_id,request_id,job_id,created_at)
+      SELECT user_id,claimed_by_device_id,claim_request_id,id,COALESCE(claimed_at,created_at)
+        FROM agent_jobs WHERE claim_request_id IS NOT NULL AND claimed_by_device_id IS NOT NULL`).run();
     await d1.prepare('PRAGMA optimize').run();
   })().catch((error) => { initialization = null; throw error; });
   return initialization;

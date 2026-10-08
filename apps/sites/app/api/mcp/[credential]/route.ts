@@ -25,7 +25,7 @@ const LEGACY_PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26'] as const;
 const SUPPORTED_PROTOCOLS = [MODERN_PROTOCOL, ...LEGACY_PROTOCOLS] as const;
 const RESPONSE_HEADERS = { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff' };
 const CONNECT_KINDS = ['shopping', 'travel'];
-const SERVER_INFO = { name: 'BlogAutoMCP', version: '1.3.13' };
+const SERVER_INFO = { name: 'BlogAutoMCP', version: '1.3.14' };
 const SERVER_INSTRUCTIONS = [
   '요청이 완료되거나 실제 진행 불가 사유가 확인될 때까지 수행하세요. QUEUED/RUNNING, 동일 진행률, 긴 소요 시간은 중단 사유가 아닙니다. 같은 jobId로 job_get(waitMs=20000)을 반복하세요. 통신 시간 초과는 작업 실패가 아닙니다. 성공 결과를 읽고 요청 범위 안의 다음 단계를 이어가세요. 사용자 취소·필수 승인 대기는 존중하고 불확실한 발행을 중복 실행하거나 검수를 우회하지 마세요.',
   '진행 확인은 job_get(includeResult=false)로 조회하고 pollAfterMs만큼 기다리세요. 완료된 큰 결과가 잘리면 job_result_read를 offset=0부터 nextOffset까지 이어서 읽으세요. AGENT_LOST_UNCERTAIN은 자동 재실행하지 말고 발행 여부부터 확인하세요.',

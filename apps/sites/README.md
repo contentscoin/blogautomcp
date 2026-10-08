@@ -80,6 +80,7 @@ D1 테이블 정의는 `db/schema.ts`, 런타임 안전 초기화는 `db/init.ts
 - `post_generate_draft_local`(큐 작업 `POST_CREATE_DRAFT`, PC 1.3.10 이상)은 OpenAI 키가 있는 PC 의 전량 생성 경로입니다. `post_apply_section_image`는 여행에 PC 1.3.10 이상, 쇼핑 자연사진에 PC 1.3.97 이상이 필요합니다. 쇼핑은 실제 상품 참조 이미지와 순서가 일치하는 `referenceHashes`를 사용하며 본문 텍스트·정보 카드·프레임·콜라주를 허용하지 않습니다. 구버전 PC의 초안 조회와 기존 승인은 유지하며, 지원 여부는 `agent_get_status.capabilities.shoppingReferenceScenes`로 확인합니다.
 
 - 큐 작업은 claim 시 120초 임대를 받고, PC 가 30초마다 하트비트로 임대를 연장하며 진행 단계(`stage`)를 올립니다. 임대가 끊기면 `AGENT_LOST` 로 회수됩니다.
+- PC 1.3.100은 인증된 읽기 전용 `GET /api/agent/jobs/claim`으로 `blogautomcp.claim/v2` 지원을 확인합니다. 지원 서버에서는 PC에 먼저 저장한 `claimRequestId`와 동일한 기기·요청의 작업 배정만 복구하므로 claim 응답이 유실되어도 다른 작업을 추가로 가져오지 않습니다. 배정과 빈 큐 결과는 변경 불가능한 요청 기록에 하나의 트랜잭션으로 저장하며, 빈 큐 응답 뒤 도착한 지연 요청도 나중에 추가된 상품 작업을 가져오지 않습니다. PC는 실행 시작 기록을 저장한 뒤 작업을 수행하며, 시작 기록만 남은 작업은 자동 재실행하지 않습니다. 취소·만료·완료된 배정도 실행 대상으로 돌려주지 않습니다. 구버전 Sites에서는 기존 claim 형식을 유지하되 응답 유실 시 새 claim을 중단하므로, 같은 요청의 자동 배정 복구에는 Sites 업데이트도 필요합니다.
 - 결과는 `blogautomcp.job-result/v1` 봉투(`summary`, `data`, `readiness`, `warnings`)이며 PC 파일 경로를 포함하지 않습니다. 실패 코드는 `docs/mcp-saas-local-agent-product-plan.md` 상단 표를 참고하세요.
 - 도구 인자는 선언한 JSON 스키마로 서버에서 검증하고, 새 도구는 데스크톱 최소 버전(`minAppVersion`, 1.3.0)을 요구합니다. 미달 PC 에는 `APP_UPDATE_REQUIRED` 를 돌려줍니다.
 - 레이트리밋: MCP IP 600회/분, 호출 120회/분, 페어링 10회/분/IP, MCP URL 발급 5회/분/사용자.
