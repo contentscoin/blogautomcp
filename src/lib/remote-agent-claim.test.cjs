@@ -66,7 +66,8 @@ function fixture(options = {}) {
     },
   });
   const request = () => { const value = new Request('http://localhost/api/remote-agent/poll', { method: 'POST' }); value.nextUrl = new URL(value.url); return value; };
-  return { directory, route, calls, ticks, localCalls, poll: async () => (await route.POST(request())).json(),
+  const pollResponse = () => route.POST(request());
+  return { directory, route, calls, ticks, localCalls, pollResponse, poll: async () => (await pollResponse()).json(),
     executes: () => executions, counts: () => countQueries, revoked: () => revocations, store: claims.remoteClaimStore(directory, 'https://site', 'fixture-private-token'),
     clean: () => fs.rmSync(directory, { recursive: true, force: true }) };
 }
@@ -150,10 +151,37 @@ test('actual poll: started receipt after restart never reclaims or executes an u
 test('actual poll: unpersistable pending receipt prevents even the remote claim', async () => {
   const f = fixture();
   try {
-    fs.writeFileSync(path.join(f.directory, 'remote-agent-claims'), 'not-directory');
-    assert.equal((await f.poll()).code, 'CLAIM_RECEIPT_UNWRITABLE');
+    const invalidParent = path.join(f.directory, 'remote-agent-claims');
+    fs.writeFileSync(invalidParent, 'not-directory');
+    const response = await f.pollResponse();
+    const result = await response.json();
+    assert.equal(response.status, 503);
+    // Windows can report ENOENT for the child lookup; Linux reports ENOTDIR.
+    // Both must preserve the file and stop before any remote claim.
+    assert.ok(['CLAIM_RECEIPT_UNREADABLE', 'CLAIM_RECEIPT_UNWRITABLE'].includes(result.code));
     assert.equal(f.calls.every(call => call.method === 'GET'), true);
+    assert.equal(f.calls.some(call => call.method === 'POST'), false);
     assert.equal(f.executes(), 0);
+    assert.equal(f.localCalls.length, 0);
+    assert.equal(fs.readFileSync(invalidParent, 'utf8'), 'not-directory');
+  } finally { f.clean(); }
+});
+
+test('actual poll: deterministic pending receipt write failure is unwritable after read-only capability lookup', async () => {
+  const f = fixture({ claimHelper: { remoteClaimStore: (...args) => {
+    const real = claims.remoteClaimStore(...args);
+    return { ...real, begin: () => { throw Error('injected pending receipt disk write failure'); } };
+  } } });
+  try {
+    const response = await f.pollResponse();
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).code, 'CLAIM_RECEIPT_UNWRITABLE');
+    assert.equal(f.calls.length, 1);
+    assert.equal(f.calls[0].method, 'GET');
+    assert.equal(f.calls.some(call => call.method === 'POST'), false);
+    assert.equal(f.executes(), 0);
+    assert.equal(f.localCalls.length, 0);
+    assert.equal(f.store.read(), null);
   } finally { f.clean(); }
 });
 
