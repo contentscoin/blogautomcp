@@ -108,3 +108,6 @@ jobs:
 
       - name: Sites regression checks
         run: node --test tests/*.test.cjs
+
+      - name: Sites production build
+        run: npm run build
