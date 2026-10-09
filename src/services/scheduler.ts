@@ -96,7 +96,7 @@ export async function executeScheduledPost(
   options: { forceRun?: boolean } = {},
 ): Promise<boolean> {
   const { forceRun = false } = options;
-  if (process.env.DESKTOP_UPDATE_INSTALL_PENDING === "1") return false;
+  if (process.env.DESKTOP_UPDATE_INSTALL_PENDING === "1" || process.env.DESKTOP_RESTART_PENDING === "1") return false;
   const finish = beginDesktopActivity("legacy-post-scheduler");
 
   log.info(`예약 발행 시작: ${postId}`);

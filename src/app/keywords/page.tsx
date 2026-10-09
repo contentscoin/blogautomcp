@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 
 interface KeywordData {
@@ -33,13 +33,37 @@ const CATEGORY_LABELS: Record<Category, string> = {
     product: "🛍️ 제품",
 };
 
+const isStringList = (value: unknown): value is string[] =>
+    Array.isArray(value) && value.every(item => typeof item === "string");
+
+function isKeywordData(value: unknown): value is KeywordData {
+    if (!value || typeof value !== "object") return false;
+    const data = value as Record<string, unknown>;
+    return [data.trending, data.seasonal, data.combinations, data.tips].every(isStringList);
+}
+
+function isQualityData(value: unknown): value is QualityData {
+    if (!value || typeof value !== "object") return false;
+    const data = value as Record<string, unknown>;
+    return typeof data.score === "number" && Number.isFinite(data.score) && typeof data.grade === "string"
+        && isStringList(data.tips) && Array.isArray(data.feedback) && data.feedback.every(item =>
+            item && typeof item.item === "string" && ["pass", "warn", "fail"].includes(item.status) && typeof item.message === "string");
+}
+
 export default function KeywordsPage() {
     const [category, setCategory] = useState<Category>("place");
     const [location, setLocation] = useState("");
     const [baseKeyword, setBaseKeyword] = useState("");
     const [keywordData, setKeywordData] = useState<KeywordData | null>(null);
     const [qualityData, setQualityData] = useState<QualityData | null>(null);
-    const [loading, setLoading] = useState(false);
+    const [keywordLoading, setKeywordLoading] = useState(false);
+    const [qualityLoading, setQualityLoading] = useState(false);
+    const [keywordError, setKeywordError] = useState<string | null>(null);
+    const [qualityError, setQualityError] = useState<string | null>(null);
+    const [copyMessage, setCopyMessage] = useState("");
+    const keywordRequest = useRef(0);
+    const pendingKeyword = useRef<string | null>(null);
+    const qualityInFlight = useRef(false);
 
     // 품질 체크용 상태
     const [checkTitle, setCheckTitle] = useState("");
@@ -48,8 +72,15 @@ export default function KeywordsPage() {
     const [checkHashtagCount, setCheckHashtagCount] = useState(15);
 
     const fetchKeywords = async () => {
+        const inputKey = JSON.stringify([category, location, baseKeyword]);
+        if (pendingKeyword.current === inputKey) return;
+        pendingKeyword.current = inputKey;
+        const requestId = ++keywordRequest.current;
+        setKeywordLoading(true);
+        setKeywordData(null);
+        setKeywordError(null);
+        setCopyMessage("");
         try {
-            setLoading(true);
             const res = await fetch("/api/keywords", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -61,19 +92,23 @@ export default function KeywordsPage() {
                 }),
             });
             const data = await res.json();
-            if (data.success) {
-                setKeywordData(data.data);
-            }
+            if (!res.ok || !data.success) throw new Error(data.error || "키워드를 조회하지 못했습니다. 다시 시도하세요.");
+            if (!isKeywordData(data.data)) throw new Error("키워드 응답 형식이 올바르지 않습니다. 다시 시도하세요.");
+            if (keywordRequest.current === requestId) setKeywordData(data.data);
         } catch (error) {
-            console.error("키워드 조회 실패:", error);
+            if (keywordRequest.current === requestId) setKeywordError(error instanceof Error ? error.message : "키워드 조회에 실패했습니다.");
         } finally {
-            setLoading(false);
+            if (keywordRequest.current === requestId) { setKeywordLoading(false); pendingKeyword.current = null; }
         }
     };
 
     const checkQuality = async () => {
+        if (qualityInFlight.current) return;
+        qualityInFlight.current = true;
+        setQualityLoading(true);
+        setQualityData(null);
+        setQualityError(null);
         try {
-            setLoading(true);
             const res = await fetch("/api/keywords", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -88,13 +123,14 @@ export default function KeywordsPage() {
                 }),
             });
             const data = await res.json();
-            if (data.success) {
-                setQualityData(data.data);
-            }
+            if (!res.ok || !data.success) throw new Error(data.error || "품질 분석에 실패했습니다. 다시 시도하세요.");
+            if (!isQualityData(data.data)) throw new Error("품질 분석 응답 형식이 올바르지 않습니다. 다시 시도하세요.");
+            setQualityData(data.data);
         } catch (error) {
-            console.error("품질 분석 실패:", error);
+            setQualityError(error instanceof Error ? error.message : "품질 분석에 실패했습니다.");
         } finally {
-            setLoading(false);
+            setQualityLoading(false);
+            qualityInFlight.current = false;
         }
     };
 
@@ -104,9 +140,14 @@ export default function KeywordsPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [category]);
 
-    const copyToClipboard = (text: string) => {
-        navigator.clipboard.writeText(text);
-        alert("클립보드에 복사되었습니다!");
+    const copyToClipboard = async (text: string) => {
+        setCopyMessage("");
+        try {
+            await navigator.clipboard.writeText(text);
+            setCopyMessage("클립보드에 복사했습니다.");
+        } catch {
+            setCopyMessage("복사하지 못했습니다. 키워드를 직접 선택해 복사하세요.");
+        }
     };
 
     return (
@@ -159,6 +200,7 @@ export default function KeywordsPage() {
                             type="text"
                             placeholder="지역명 (예: 강남, 부산)"
                             value={location}
+                            disabled={keywordLoading}
                             onChange={(e) => setLocation(e.target.value)}
                             className="flex-1 min-w-[150px] px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                         />
@@ -166,17 +208,20 @@ export default function KeywordsPage() {
                             type="text"
                             placeholder="기본 키워드 (예: 카페, 펜션)"
                             value={baseKeyword}
+                            disabled={keywordLoading}
                             onChange={(e) => setBaseKeyword(e.target.value)}
                             className="flex-1 min-w-[150px] px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                         />
                         <button
                             onClick={fetchKeywords}
-                            disabled={loading}
+                            disabled={keywordLoading}
                             className="px-6 py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
                         >
-                            {loading ? "분석 중..." : "🔍 분석"}
+                            {keywordLoading ? "분석 중..." : "🔍 분석"}
                         </button>
                     </div>
+                    {keywordError && <p role="alert" className="mt-3 text-sm text-red-600">{keywordError}</p>}
+                    {copyMessage && <p role="status" className="mt-3 text-sm text-slate-700">{copyMessage}</p>}
                 </div>
 
                 {/* 키워드 결과 */}
@@ -256,6 +301,7 @@ export default function KeywordsPage() {
                                 type="text"
                                 placeholder="블로그 제목 입력"
                                 value={checkTitle}
+                                disabled={qualityLoading}
                                 onChange={(e) => setCheckTitle(e.target.value)}
                                 className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                             />
@@ -266,6 +312,7 @@ export default function KeywordsPage() {
                                 <input
                                     type="number"
                                     value={checkImageCount}
+                                    disabled={qualityLoading}
                                     onChange={(e) => setCheckImageCount(parseInt(e.target.value) || 0)}
                                     className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                 />
@@ -275,6 +322,7 @@ export default function KeywordsPage() {
                                 <input
                                     type="number"
                                     value={checkHashtagCount}
+                                    disabled={qualityLoading}
                                     onChange={(e) => setCheckHashtagCount(parseInt(e.target.value) || 0)}
                                     className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                 />
@@ -285,6 +333,7 @@ export default function KeywordsPage() {
                             <textarea
                                 placeholder="본문 내용을 붙여넣거나 예상 글자수를 입력하세요"
                                 value={checkBody}
+                                disabled={qualityLoading}
                                 onChange={(e) => setCheckBody(e.target.value)}
                                 rows={3}
                                 className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -294,11 +343,12 @@ export default function KeywordsPage() {
                     </div>
                     <button
                         onClick={checkQuality}
-                        disabled={loading}
+                        disabled={qualityLoading}
                         className="px-6 py-2 bg-purple-600 text-white font-medium rounded-lg hover:bg-purple-700 disabled:opacity-50 transition-colors"
                     >
-                        {loading ? "분석 중..." : "📊 품질 분석"}
+                        {qualityLoading ? "분석 중..." : "📊 품질 분석"}
                     </button>
+                    {qualityError && <p role="alert" className="mt-3 text-sm text-red-600">{qualityError}</p>}
                 </div>
 
                 {/* 품질 결과 */}

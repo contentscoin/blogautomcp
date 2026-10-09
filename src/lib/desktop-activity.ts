@@ -16,6 +16,14 @@ const state = shared.__desktopActivityState ?? (shared.__desktopActivityState = 
 });
 
 export function beginDesktopActivity(label: string): () => void {
+  // A late request may have passed its route's guard before restart began.
+  // Existing activities can finish their nested work; they make restart fail
+  // busy. Polls must still deliver persisted results and renew their leases.
+  if (process.env.DESKTOP_RESTART_PENDING === "1" && state.active.size === 0 && label !== "remote-agent-poll") {
+    const error = new Error("프로그램 재시작 준비 중에는 새 자동화 작업을 시작할 수 없습니다.");
+    Object.assign(error, { code: "DESKTOP_RESTART_PENDING" });
+    throw error;
+  }
   state.sequence += 1;
   const id = state.sequence;
   state.active.set(id, { label, startedAt: Date.now() });

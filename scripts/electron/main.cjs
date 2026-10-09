@@ -82,7 +82,11 @@ function ensureTray(projectRoot) {
   tray.setToolTip("BrandConnect Automation");
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: "BrandConnect 열기", click: showMainWindow },
-    { label: "로컬 서버 재시작", click: () => void restartLocalServer() },
+    { label: "로컬 서버 재시작", click: () => {
+      void restartLocalServer().catch((error) => {
+        dialog.showErrorBox("로컬 서버 재시작 보류", error instanceof Error ? error.message : "작업 상태를 확인하지 못했습니다.");
+      });
+    } },
     { label: "업데이트 확인", click: () => void desktopUpdater?.checkNow("manual") },
     { type: "separator" },
     {
@@ -108,6 +112,9 @@ function configureRuntimePaths(projectRoot) {
   process.env.DESKTOP_PROJECT_ROOT = projectRoot;
   process.env.BROWSER_CHANNEL = process.env.BROWSER_CHANNEL || "chrome";
   require("dotenv").config({ path: path.join(userData, ".env"), override: false, quiet: true });
+  // relaunch inherits the old process environment; this fence belongs only
+  // to that process and must never disable work in the replacement app.
+  delete process.env.DESKTOP_RESTART_PENDING;
   process.env.CHATGPT_BROWSER_VISIBILITY =
     process.env.CHATGPT_BROWSER_VISIBILITY ||
     ((process.env.CHATGPT_HEADLESS || "").trim().toLowerCase() === "true"
@@ -353,27 +360,41 @@ function getRelaunchArgs() {
 }
 
 async function restartLocalServer() {
-  if (isQuitting) {
-    throw new Error("프로그램이 종료 중이라 서버를 다시 시작할 수 없습니다.");
-  }
   if (serverRestartPromise) {
     return serverRestartPromise;
   }
+  if (isQuitting) {
+    throw new Error("프로그램이 종료 중이라 서버를 다시 시작할 수 없습니다.");
+  }
 
-  serverRestartPromise = (async () => {
+  // Fence new automation before the asynchronous readiness probe, including
+  // requests which already passed their route's initial admission check.
+  process.env.DESKTOP_RESTART_PENDING = "1";
+  serverRestartPromise = Promise.resolve().then(async () => {
+    const readiness = await getUpdateReadiness();
+    if (!readiness.ready) {
+      throw new Error(`현재 ${readiness.activeCount}개의 자동화 작업이 실행 중입니다. 작업이 끝난 뒤 다시 시작하세요.`);
+    }
+    // A poll or an admitted activity may have arrived after the API snapshot.
+    // Keep this final check and the relaunch in one synchronous turn.
+    if (globalThis.__desktopActivityState?.active?.size > 0) {
+      throw new Error("자동화 작업이 새로 시작되었습니다. 작업이 끝난 뒤 다시 시작하세요.");
+    }
+    if (isQuitting) throw new Error("프로그램이 종료 중이라 서버를 다시 시작할 수 없습니다.");
     // A prepared production Next instance cannot always be initialized twice
     // in the same process. Relaunching Electron reliably replaces both the
     // embedded web/MCP server and its renderer while preserving user data.
+    app.relaunch({ args: getRelaunchArgs() });
     desktopUpdater?.stop();
     isQuitting = true;
-    app.relaunch({ args: getRelaunchArgs() });
     app.exit(0);
-  })();
+  });
 
   try {
     await serverRestartPromise;
   } finally {
     serverRestartPromise = null;
+    if (!isQuitting) delete process.env.DESKTOP_RESTART_PENDING;
   }
 }
 
@@ -411,7 +432,12 @@ async function getUpdateReadiness() {
     if (!response.ok || !payload?.success) {
       throw new Error(payload?.error || `업데이트 준비 상태 확인 실패 (${response.status})`);
     }
-    return payload.data;
+    const readiness = payload.data;
+    if (typeof readiness?.ready !== "boolean" || !Number.isInteger(readiness.activeCount)
+      || readiness.activeCount < 0 || readiness.ready !== (readiness.activeCount === 0)) {
+      throw new Error("프로그램 작업 상태를 확인하지 못했습니다. 잠시 후 다시 시도하세요.");
+    }
+    return readiness;
   } finally {
     clearTimeout(timeout);
   }

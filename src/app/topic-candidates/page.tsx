@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
+import { isTopicCandidateList, type TopicCandidate } from "@/lib/topic-candidate-contract";
 
 const CATEGORIES = [
   { id: "tech", label: "기술 / IT", icon: "💻" },
@@ -16,18 +17,7 @@ const CATEGORIES = [
   { id: "ai", label: "AI / 미래기술", icon: "✨" },
 ];
 
-interface Subtopic {
-  subtitle: string;
-  summary: string;
-}
-
-interface Topic {
-  title: string;
-  subtopics: Subtopic[];
-  content: string;
-  image_prompt: string;
-  hashtags: string[];
-}
+type Topic = TopicCandidate;
 
 export default function TopicCandidatesPage() {
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
@@ -38,11 +28,25 @@ export default function TopicCandidatesPage() {
   const [error, setError] = useState<string | null>(null);
   const [addingIndex, setAddingIndex] = useState<number | null>(null);
   const [addedIndices, setAddedIndices] = useState<Set<number>>(new Set());
+  const [warning, setWarning] = useState<string | null>(null);
+  const [copyMessage, setCopyMessage] = useState("");
+  const [generatedInput, setGeneratedInput] = useState<{ category: string; keyword: string } | null>(null);
+  const generationInFlight = useRef(false);
+  const queueInFlight = useRef(false);
+  const requestSequence = useRef(0);
+
+  useEffect(() => () => { requestSequence.current++; }, []);
 
   async function handleGenerate() {
-    if (!selectedCategory || !keyword.trim()) return;
+    if (!selectedCategory || !keyword.trim() || generationInFlight.current || queueInFlight.current) return;
+    generationInFlight.current = true;
+    const requestId = ++requestSequence.current;
+    const input = { category: selectedCategory, keyword: keyword.trim() };
     setLoading(true);
     setError(null);
+    setWarning(null);
+    setCopyMessage("");
+    setGeneratedInput(null);
     setTopics([]);
     setExpandedIndex(null);
     setAddedIndices(new Set());
@@ -51,23 +55,30 @@ export default function TopicCandidatesPage() {
       const res = await fetch("/api/topic-candidates", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ category: selectedCategory, keyword: keyword.trim() }),
+        body: JSON.stringify(input),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "생성 실패");
-      setTopics(data.topics || []);
+      if (!isTopicCandidateList(data.topics)) throw new Error("소재 응답 형식이 올바르지 않습니다. 다시 생성하세요.");
+      if (requestSequence.current !== requestId) return;
+      setTopics(data.topics);
+      setGeneratedInput(input);
+      if (data.fallback === true) setWarning(typeof data.warning === "string" && data.warning.trim()
+        ? data.warning : "GPT 생성이 실패해 로컬 규칙으로 만든 후보입니다. 내용과 사실 근거를 검토한 뒤 사용하세요.");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "오류가 발생했습니다");
+      if (requestSequence.current === requestId) setError(e instanceof Error ? e.message : "오류가 발생했습니다");
     } finally {
-      setLoading(false);
+      if (requestSequence.current === requestId) { setLoading(false); generationInFlight.current = false; }
     }
   }
 
   async function handleAddToQueue(topic: Topic, index: number) {
+    if (queueInFlight.current || generationInFlight.current || addedIndices.has(index) || !generatedInput) return;
+    queueInFlight.current = true;
     setAddingIndex(index);
     try {
       const categoryLabel =
-        CATEGORIES.find((c) => c.id === selectedCategory)?.label || selectedCategory || "";
+        CATEGORIES.find((c) => c.id === generatedInput.category)?.label || generatedInput.category;
 
       const res = await fetch("/api/topic", {
         method: "POST",
@@ -75,7 +86,7 @@ export default function TopicCandidatesPage() {
         body: JSON.stringify({
           action: "prepare",
           topic: topic.title,
-          keywords: keyword,
+          keywords: generatedInput.keyword,
           type: "blog",
           topicCraftCategory: categoryLabel,
           intent: topic.subtopics.map((s) => s.subtitle).join(", "),
@@ -90,6 +101,17 @@ export default function TopicCandidatesPage() {
       alert(e instanceof Error ? e.message : "큐 추가 실패");
     } finally {
       setAddingIndex(null);
+      queueInFlight.current = false;
+    }
+  }
+
+  async function copyTopic(topic: Topic) {
+    setCopyMessage("");
+    try {
+      await navigator.clipboard.writeText(`제목: ${topic.title}\n\n${topic.content}\n\n${topic.hashtags.join(" ")}`);
+      setCopyMessage("소재를 클립보드에 복사했습니다.");
+    } catch {
+      setCopyMessage("복사하지 못했습니다. 펼쳐진 소재 내용을 직접 선택해 복사하세요.");
     }
   }
 
@@ -125,6 +147,7 @@ export default function TopicCandidatesPage() {
               <button
                 key={cat.id}
                 onClick={() => setSelectedCategory(cat.id)}
+                disabled={loading || addingIndex !== null}
                 className={`p-2 rounded-lg text-xs font-medium text-center transition-all border ${
                   selectedCategory === cat.id
                     ? "bg-blue-500 text-white border-blue-500"
@@ -143,6 +166,7 @@ export default function TopicCandidatesPage() {
               <input
                 type="text"
                 value={keyword}
+                disabled={loading || addingIndex !== null}
                 onChange={(e) => setKeyword(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleGenerate()}
                 placeholder="키워드 입력 (예: 재택근무 생산성, 서울 카페 추천)"
@@ -150,7 +174,7 @@ export default function TopicCandidatesPage() {
               />
               <button
                 onClick={handleGenerate}
-                disabled={!keyword.trim() || loading}
+                disabled={!keyword.trim() || loading || addingIndex !== null}
                 className="px-4 py-2 text-sm font-semibold rounded-lg bg-blue-500 text-white hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
               >
                 {loading ? "생성 중..." : "소재 생성 (10개)"}
@@ -161,10 +185,12 @@ export default function TopicCandidatesPage() {
 
         {/* 오류 */}
         {error && (
-          <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl p-3 mb-4 text-sm text-red-600 dark:text-red-400">
+          <div role="alert" className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-xl p-3 mb-4 text-sm text-red-600 dark:text-red-400">
             ⚠️ {error}
           </div>
         )}
+        {warning && <div role="status" className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">⚠️ {warning}</div>}
+        {copyMessage && <p role="status" className="mb-4 text-sm text-gray-700 dark:text-gray-300">{copyMessage}</p>}
 
         {/* 로딩 */}
         {loading && (
@@ -287,7 +313,7 @@ export default function TopicCandidatesPage() {
                     <div className="flex gap-2 pt-1">
                       <button
                         onClick={() => handleAddToQueue(topic, i)}
-                        disabled={addingIndex === i || addedIndices.has(i)}
+                        disabled={addingIndex !== null || loading || addedIndices.has(i)}
                         className="flex-1 py-2 text-sm font-semibold rounded-lg bg-green-500 text-white hover:bg-green-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                       >
                         {addedIndices.has(i)
@@ -297,10 +323,7 @@ export default function TopicCandidatesPage() {
                           : "발행 큐에 추가"}
                       </button>
                       <button
-                        onClick={() => {
-                          const text = `제목: ${topic.title}\n\n${topic.content}\n\n${topic.hashtags.join(" ")}`;
-                          navigator.clipboard.writeText(text);
-                        }}
+                        onClick={() => void copyTopic(topic)}
                         className="px-3 py-2 text-sm font-semibold rounded-lg border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
                       >
                         복사
