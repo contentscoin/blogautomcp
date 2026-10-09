@@ -7,14 +7,16 @@ ChatGPT와 한 대의 Windows 로컬 에이전트를 연결해 네이버 브랜�
 - Sites의 ChatGPT 로그인으로 계정을 식별합니다.
 - `hiway@kakao.com` 계정만 관리자로 자동 지정됩니다.
 - 일반 사용자는 D1에 승인 대기로 등록되고 관리자가 승인합니다.
-- `/dashboard`의 **ChatGPT 플러그인 설치·연결** 버튼은 기존 Sites 플러그인의 공식 설치 화면 `https://chatgpt.com/plugins/plugin_asdk_app_sites_a4ba33aa14088191b648c875a67bb5ea`를 엽니다. 설치 확인과 OAuth 인증은 사용자가 ChatGPT에서 마무리합니다. 이미 설치했다면 같은 화면에서 플러그인 연결을 확인합니다.
-- 버튼은 공개 플러그인 ID만 전달하며 PC 연결 주소나 토큰을 포함하지 않습니다. PC 채널 발급 여부를 플러그인 설치 완료 상태로 표시하지 않습니다. 사용 권한이 없으면 관리자·워크스페이스 연결을 확인하며, 소유자는 ChatGPT의 `Plugins → Personal → Created by you`에서도 찾을 수 있습니다.
-- 수동 연결이 필요한 경우 **직접 MCP 주소로 연결하기**에서 고정 주소 `/api/mcp`를 복사하고, Site에서 로그인한 GPT 계정으로 OAuth 2.1 인증합니다.
+- `/dashboard`는 **로그인·승인 → PC 앱 연결 → ChatGPT 연결 → 실제 호출 확인** 순서로 안내합니다. 일반 사용자는 본인 ChatGPT 계정을 사용합니다.
+- **PC 앱 연결**은 채널이 없을 때만 자동 생성합니다. 코드 발급은 기존 PC·작업·채널 세대를 보존합니다. 코드로 새 PC 연결을 완료하는 경우에만 기존 PC를 교체합니다. 두 탭에서 발급한 코드는 각각 90초간 유효하며 한 번씩만 사용할 수 있습니다.
+- 기존 Sites 비공개 플러그인 URL은 일반 사용자에게 표시하지 않습니다. 공개 심사·게시가 완료된 설치 URL을 설정하기 전에는 `Plugins → + → Add custom MCP server`와 OAuth 고정 주소 `/api/mcp`를 안내합니다. 메뉴 사용 가능 여부는 ChatGPT 계정·워크스페이스 정책에 따릅니다.
+- 공개 설치 버튼은 운영자가 검증한 `BLOGAUTO_PUBLIC_PLUGIN_INSTALL_URL`과 `BLOGAUTO_PUBLIC_PLUGIN_APPROVED=true`가 모두 있어야 표시됩니다. URL은 `https://chatgpt.com/plugins/plugin_...`만 허용하고 기존 비공개 ID·쿼리·토큰을 거부합니다. 이 설정이 플랫폼 공개 심사를 대신하지 않습니다.
+- **연결 상태 다시 확인**은 본인 계정의 확인 결과만 조회합니다. 최근 15분 내 OAuth 읽기 도구 호출과 현재 활성 PC의 성공한 조회 응답, 현재 온라인 상태를 모두 확인해야 연결 확인 완료입니다. 로그인·토큰 발급·버튼 클릭만으로 완료 표시하지 않습니다. 저장된 네이버 세션과 실제 로그인 유효성도 구분합니다.
 - OAuth는 authorization code + PKCE(S256), 짧은 access token, 회전되는 refresh token을 사용합니다.
 - API 키 없는 초안은 PC가 상품 사실·이미지·하네스를 준비하고 현재 ChatGPT가 원고 JSON을 만든 뒤, PC가 검증·이미지 배치·승인 대기 패키지를 만드는 2단계 MCP 흐름으로 처리합니다.
 - ChatGPT OAuth는 OpenAI API 과금 자격 증명을 PC에 전달하지 않으며, 이 MCP 흐름은 PC의 `OPENAI_API_KEY`를 읽거나 호출하지 않습니다.
-- Windows 앱은 별도의 일회성 PC 연결 주소로 인증합니다.
-- PC 연결 주소를 다시 발급하면 기존 주소, PC 토큰, 대기·진행 작업이 폐기됩니다.
+- Windows 앱은 짧은 연결 코드와 장치별 자격증명으로 인증합니다. 새 클라이언트는 요청 전에 임의의 재시도 증명을 로컬에 보존해 응답 유실 후 같은 장치 연결을 복구합니다. 서버에는 해시만 저장하며, 코드만으로 영구 토큰을 복구하지 않습니다. 구버전의 MCP 주소 입력도 지원합니다.
+- 고급 메뉴에서 PC 연결 주소를 명시적으로 재발급하면 기존 주소, PC 토큰, 미사용 연결 코드, 대기·진행 작업이 폐기됩니다. `action: issue`는 기존 연결이 있으면 409로 거절하며 재발급으로 바뀌지 않습니다.
 - 새 PC가 연결되면 기존 PC 인증과 기존 PC의 진행 작업이 폐기됩니다.
 - 실제 즉시 발행과 예약 발행은 MCP 도구에 `confirmed=true`가 있어야 큐에 들어갑니다.
 - 활성 PC는 중앙 업데이트 채널을 주기적으로 확인하고, 진행 중 작업이 끝난 뒤 새 버전을 자동 설치합니다.
@@ -65,9 +67,9 @@ pwsh -NoProfile -File scripts/verify-oauth-e2e.ps1 -BaseUrl http://localhost:300
 
 D1 테이블 정의는 `db/schema.ts`, 런타임 안전 초기화는 `db/init.ts`, 배포 마이그레이션은 `drizzle/`에 있습니다. 별도의 PostgreSQL 서버는 필요하지 않습니다.
 
-## MCP 도구 (서버 1.3.13 · 36개)
+## MCP 도구 (서버 1.3.16 · 37개)
 
-`bug_report_create`, `bug_report_get`, `agent_get_status`, `brandconnect_list_categories`, `brandconnect_list_products`, `brandconnect_sync_products`, `post_create_draft`, `post_prepare_draft`, `post_generate_draft_local`, `post_submit_draft`, `post_apply_section_image`, `post_get_draft`, `post_revise_draft`, `post_approve_draft`, `post_set_thumbnail`, `thumbnail_prepare`, `thumbnail_apply_generated`, `blog_profile_get`, `blog_profile_prepare_update`, `blog_profile_apply_update`, `blog_design_get`, `materials_list`, `materials_prepare`, `materials_rewrite_failed`, `materials_repair_blocked`, `materials_publish`, `post_publish`, `post_schedule`, `post_bulk_schedule`, `post_bulk_publish`, `post_verify_published`, `travel_capture_contract`, `settings_get`, `job_get`, `job_result_read`, `job_cancel`.
+`account_get_profile`, `bug_report_create`, `bug_report_get`, `agent_get_status`, `brandconnect_list_categories`, `brandconnect_list_products`, `brandconnect_sync_products`, `post_create_draft`, `post_prepare_draft`, `post_generate_draft_local`, `post_submit_draft`, `post_apply_section_image`, `post_get_draft`, `post_revise_draft`, `post_approve_draft`, `post_set_thumbnail`, `thumbnail_prepare`, `thumbnail_apply_generated`, `blog_profile_get`, `blog_profile_prepare_update`, `blog_profile_apply_update`, `blog_design_get`, `materials_list`, `materials_prepare`, `materials_rewrite_failed`, `materials_repair_blocked`, `materials_publish`, `post_publish`, `post_schedule`, `post_bulk_schedule`, `post_bulk_publish`, `post_verify_published`, `travel_capture_contract`, `settings_get`, `job_get`, `job_result_read`, `job_cancel`.
 
 - ChatGPT 커넥터는 OAuth 고정 주소(`/api/mcp`)와 MCP URL(`/api/mcp/{credential}`) 두 경로로 연결할 수 있으며 같은 도구를 제공합니다.
 - `materials_rewrite_failed`는 PC 앱 1.3.98 이상에서 실패한 소재 글을 일괄 재작성하고 현재 원고·이미지 품질검사를 통과한 항목만 준비 완료로 저장합니다. `productIds` 생략 시 현재 실패 소재 전체를 선정하며 `connectKind`로 쇼핑·여행을 제한합니다. 준비만 수행하므로 발행 확인이나 예약일을 받지 않습니다. 같은 요청에는 같은 `idempotencyKey`를 유지합니다.
@@ -86,3 +88,7 @@ D1 테이블 정의는 `db/schema.ts`, 런타임 안전 초기화는 `db/init.ts
 - 결과는 `blogautomcp.job-result/v1` 봉투(`summary`, `data`, `readiness`, `warnings`)이며 PC 파일 경로를 포함하지 않습니다. 실패 코드는 `docs/mcp-saas-local-agent-product-plan.md` 상단 표를 참고하세요.
 - 도구 인자는 선언한 JSON 스키마로 서버에서 검증하고, 새 도구는 데스크톱 최소 버전(`minAppVersion`, 1.3.0)을 요구합니다. 미달 PC 에는 `APP_UPDATE_REQUIRED` 를 돌려줍니다.
 - 레이트리밋: MCP IP 600회/분, 호출 120회/분, 페어링 10회/분/IP, MCP URL 발급 5회/분/사용자.
+
+## 공개 플러그인 준비
+
+공개 제출 준비와 실제 배포는 별도입니다. [공개 제출 준비 문서](../../docs/public-plugin-submission.md)에 검증 시나리오·데모 대본·미확인 요건을 정리합니다. 제출 포털이 발급한 도메인 확인 값은 전용 환경 변수 OPENAI_APPS_DOMAIN_CHALLENGE에 설정하면 /.well-known/openai-apps-challenge에서 그대로 제공합니다. 값이 없으면 404입니다. 원래 Sites 프로젝트·정본 App의 소유권과 게시 경로를 먼저 확인하고, 복제 비공개 플러그인을 만들지 않습니다.

@@ -11,6 +11,8 @@ import { readWindowsRelease } from '@/lib/update-release';
 import { FailedMaterialActions } from './failed-material-actions';
 import { BlockedMaterialActions } from './blocked-material-actions';
 import { parseStatusJson } from '@/lib/jobs';
+import { readConnectionStatus } from '@/lib/connection-status';
+import { resolvePublicPluginInstallUrl } from '@/lib/plugin-install';
 
 export const dynamic = 'force-dynamic';
 
@@ -26,6 +28,8 @@ export default async function DashboardPage() {
     readWindowsRelease(env.INSTALLERS),
   ]);
   const approved = account.status === 'APPROVED';
+  const connectionStatus = approved ? await readConnectionStatus(account.id) : null;
+  const publicPluginInstallUrl = resolvePublicPluginInstallUrl(env.BLOGAUTO_PUBLIC_PLUGIN_INSTALL_URL, env.BLOGAUTO_PUBLIC_PLUGIN_APPROVED === 'true');
   const online = Boolean(device?.lastSeenAt && Number(clock?.now || 0) - device.lastSeenAt < 90_000);
   const background = parseStatusJson(device?.statusJson || null)?.backgroundWork as Record<string, unknown> | undefined;
   const activeWork = jobs.some(job => ['QUEUED', 'RUNNING'].includes(job.status)) || background?.busy === true || ['publishing', 'drafting', 'processes', 'imageGeneration'].some(key => Number(background?.[key] || 0) > 0);
@@ -68,16 +72,21 @@ export default async function DashboardPage() {
 
         {!approved ? (
           <section className="notice-card">
-            <span className="notice-icon">⌛</span><div><h2>{account.status === 'PENDING_APPROVAL' ? '관리자 승인을 기다리고 있습니다' : '현재 사용할 수 없는 계정입니다'}</h2><p>관리자 hiway@kakao.com이 승인하면 MCP 주소 발급과 PC 연결 메뉴가 자동으로 열립니다.</p></div>
+            <span className="notice-icon">⌛</span><div><h2>{account.status === 'PENDING_APPROVAL' ? '관리자 승인을 기다리고 있습니다' : '현재 사용할 수 없는 계정입니다'}</h2><p>관리자 hiway@kakao.com이 승인하면 PC 연결과 ChatGPT 연결 메뉴가 열립니다. 이용자는 본인 계정을 그대로 사용합니다.</p></div>
           </section>
         ) : (
           <>
             <section className="metric-grid">
-              <article><span>ChatGPT 플러그인</span><strong>설치·연결</strong><small>아래 버튼으로 ChatGPT에서 확인</small></article>
-              <article><span>로컬 PC</span><strong>{online ? '온라인' : device ? '오프라인' : '미연결'}</strong><small>{device?.name || 'MCP 주소를 앱에 입력하세요'}</small></article>
-              <article><span>최근 작업</span><strong>{jobs.length}건</strong><small>대기 {jobs.filter((job) => job.status === 'QUEUED').length} · 실행 {jobs.filter((job) => job.status === 'RUNNING').length}</small></article>
+              <article><span>사이트 계정</span><strong>로그인·승인됨</strong><small>{account.email}</small></article>
+              <article><span>ChatGPT MCP</span><strong>{connectionStatus?.mcp.readVerified ? '호출 확인됨' : connectionStatus?.mcp.authorized ? '호출 확인 필요' : '계정 인증 필요'}</strong><small>설치 버튼 클릭과 실제 도구 호출은 별도로 확인합니다.</small></article>
+              <article><span>내 PC 작업 응답</span><strong>{connectionStatus?.pc.roundTripVerified ? '응답 확인됨' : connectionStatus?.pc.online ? '온라인 · 응답 확인 필요' : device ? '오프라인' : '미연결'}</strong><small>{device?.name || '아래 PC 앱 연결 버튼으로 시작하세요'}</small></article>
             </section>
-            <DashboardActions hasConnection={Boolean(connection)} generation={connection?.generation || 0} />
+            <section className="data-card connection-summary">
+              <h2>{connectionStatus?.ready ? 'MCP와 PC 연결 확인 완료' : '연결 확인이 필요합니다'}</h2>
+              <p>최근 15분의 MCP 읽기 호출과 현재 PC의 작업 응답을 확인합니다. {connectionStatus?.pc.lastVerifiedAt ? `마지막 PC 응답: ${new Date(connectionStatus.pc.lastVerifiedAt).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })} KST.` : '아직 확인된 PC 작업 응답이 없습니다.'}</p>
+              <p>네이버 세션: {connectionStatus?.naver.sessionSaved === true ? 'PC에 저장됨 · 로그인 유효 여부는 실제 네이버 작업에서 확인합니다.' : connectionStatus?.naver.sessionSaved === false ? '저장된 세션 없음 · PC 앱에서 네이버에 로그인하세요.' : '현재 상태를 확인하지 못했습니다.'}</p>
+            </section>
+            <DashboardActions hasConnection={Boolean(connection)} generation={connection?.generation || 0} publicPluginInstallUrl={publicPluginInstallUrl} />
             <FailedMaterialActions accountId={account.id} online={online} appVersion={device?.appVersion || null} hasConnection={Boolean(connection)} activeWork={activeWork} />
             <BlockedMaterialActions accountId={account.id} online={online} appVersion={device?.appVersion || null} hasConnection={Boolean(connection)} activeWork={activeWork} />
             <section className="data-card">
