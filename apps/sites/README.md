@@ -7,7 +7,9 @@ ChatGPT와 한 대의 Windows 로컬 에이전트를 연결해 네이버 브랜�
 - Sites의 ChatGPT 로그인으로 계정을 식별합니다.
 - `hiway@kakao.com` 계정만 관리자로 자동 지정됩니다.
 - 일반 사용자는 D1에 승인 대기로 등록되고 관리자가 승인합니다.
-- ChatGPT에는 고정 주소 `/api/mcp`를 등록하고, Site에서 로그인한 GPT 계정으로 OAuth 2.1 인증합니다.
+- `/dashboard`의 **ChatGPT 플러그인 설치·연결** 버튼은 기존 Sites 플러그인의 공식 설치 화면 `https://chatgpt.com/plugins/plugin_asdk_app_sites_a4ba33aa14088191b648c875a67bb5ea`를 엽니다. 설치 확인과 OAuth 인증은 사용자가 ChatGPT에서 마무리합니다. 이미 설치했다면 같은 화면에서 플러그인 연결을 확인합니다.
+- 버튼은 공개 플러그인 ID만 전달하며 PC 연결 주소나 토큰을 포함하지 않습니다. PC 채널 발급 여부를 플러그인 설치 완료 상태로 표시하지 않습니다. 사용 권한이 없으면 관리자·워크스페이스 연결을 확인하며, 소유자는 ChatGPT의 `Plugins → Personal → Created by you`에서도 찾을 수 있습니다.
+- 수동 연결이 필요한 경우 **직접 MCP 주소로 연결하기**에서 고정 주소 `/api/mcp`를 복사하고, Site에서 로그인한 GPT 계정으로 OAuth 2.1 인증합니다.
 - OAuth는 authorization code + PKCE(S256), 짧은 access token, 회전되는 refresh token을 사용합니다.
 - API 키 없는 초안은 PC가 상품 사실·이미지·하네스를 준비하고 현재 ChatGPT가 원고 JSON을 만든 뒤, PC가 검증·이미지 배치·승인 대기 패키지를 만드는 2단계 MCP 흐름으로 처리합니다.
 - ChatGPT OAuth는 OpenAI API 과금 자격 증명을 PC에 전달하지 않으며, 이 MCP 흐름은 PC의 `OPENAI_API_KEY`를 읽거나 호출하지 않습니다.
