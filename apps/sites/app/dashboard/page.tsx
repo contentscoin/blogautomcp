@@ -46,7 +46,7 @@ export default async function DashboardPage() {
           <div className="download-copy">
             <span className="card-kicker">DESKTOP AGENT</span>
             <h2>데스크톱 프로그램 설치</h2>
-            <p>운영체제에 맞는 프로그램을 설치한 뒤 PC 연결 주소로 이 기기를 인증하세요. ChatGPT MCP는 Site의 GPT 로그인 계정으로 별도 인증됩니다.</p>
+            <p>운영체제에 맞는 프로그램을 설치한 뒤 아래에서 PC 앱을 연결하세요. ChatGPT 플러그인 설치·연결은 별도로 진행합니다.</p>
           </div>
           <div className="download-actions">
             <div className="download-action">
@@ -73,7 +73,7 @@ export default async function DashboardPage() {
         ) : (
           <>
             <section className="metric-grid">
-              <article><span>ChatGPT MCP</span><strong>OAuth 인증</strong><small>GPT 로그인 계정과 연결</small></article>
+              <article><span>ChatGPT 플러그인</span><strong>설치·연결</strong><small>아래 버튼으로 ChatGPT에서 확인</small></article>
               <article><span>로컬 PC</span><strong>{online ? '온라인' : device ? '오프라인' : '미연결'}</strong><small>{device?.name || 'MCP 주소를 앱에 입력하세요'}</small></article>
               <article><span>최근 작업</span><strong>{jobs.length}건</strong><small>대기 {jobs.filter((job) => job.status === 'QUEUED').length} · 실행 {jobs.filter((job) => job.status === 'RUNNING').length}</small></article>
             </section>

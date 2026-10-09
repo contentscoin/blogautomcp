@@ -1,8 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-
-const OAUTH_MCP_URL = 'https://blogautomcp.hiway350051.chatgpt.site/api/mcp';
+import { BLOGAUTO_OAUTH_MCP_URL, BLOGAUTO_PLUGIN_INSTALL_URL } from '@/lib/plugin-install';
 
 type PairCode = { code: string; expiresAt: string; deepLink: string; siteUrl: string };
 
@@ -16,6 +15,7 @@ export function DashboardActions({ hasConnection, generation }: { hasConnection:
   const [url, setUrl] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
+  const [oauthMessage, setOAuthMessage] = useState('');
   const [connectionExists, setConnectionExists] = useState(hasConnection);
   const [currentGeneration, setCurrentGeneration] = useState(generation);
   const [pairCode, setPairCode] = useState<PairCode | null>(null);
@@ -64,10 +64,10 @@ export function DashboardActions({ hasConnection, generation }: { hasConnection:
 
   async function copyOAuthUrl() {
     try {
-      await navigator.clipboard.writeText(OAUTH_MCP_URL);
-      setMessage('ChatGPT용 MCP 주소를 복사했습니다. 연결할 때 Site의 GPT 계정으로 인증하세요.');
+      await navigator.clipboard.writeText(BLOGAUTO_OAUTH_MCP_URL);
+      setOAuthMessage('ChatGPT용 MCP 주소를 복사했습니다. 연결할 때 이 사이트에 로그인한 ChatGPT 계정으로 인증하세요.');
     } catch {
-      setMessage('자동 복사가 차단되었습니다. 주소를 선택해 직접 복사하세요.');
+      setOAuthMessage('자동 복사가 차단되었습니다. 주소를 선택해 직접 복사하세요.');
     }
   }
 
@@ -97,9 +97,20 @@ export function DashboardActions({ hasConnection, generation }: { hasConnection:
   return (
     <section className="connection-grid">
       <article className="data-card connection-card">
-        <div className="card-title"><div><span className="card-kicker">CHATGPT OAUTH</span><h2>ChatGPT MCP 연결</h2></div><span className="number-chip">SECURE</span></div>
-        <p>이 고정 주소를 ChatGPT 커넥터에 등록하면 Site에서 로그인한 GPT 계정으로 인증됩니다.</p>
-        <div className="secret-reveal oauth-reveal"><div><span>OAUTH MCP URL</span><code>{OAUTH_MCP_URL}</code></div><button onClick={copyOAuthUrl}>복사</button></div>
+        <div className="card-title"><div><span className="card-kicker">CHATGPT PLUGIN</span><h2>ChatGPT 플러그인 연결</h2></div><span className="number-chip">1단계</span></div>
+        <p>BlogAutoMCP 설치 화면을 바로 엽니다. MCP 주소를 직접 입력하지 않고 ChatGPT에서 설치 확인과 계정 인증을 마무리하세요.</p>
+        <a className="button button-primary plugin-connect-button" href={BLOGAUTO_PLUGIN_INSTALL_URL} target="_blank" rel="noopener noreferrer">ChatGPT 플러그인 설치·연결 <span aria-hidden="true">↗</span></a>
+        <p className="plugin-connect-note">이미 설치했다면 같은 화면에서 플러그인을 열거나 연결을 확인하세요. 이 사이트에 로그인한 ChatGPT 계정으로 진행합니다.</p>
+        <details className="plugin-connect-help">
+          <summary>설치 화면이 열리지 않나요?</summary>
+          <p>사이트 관리자에게 플러그인 사용 권한 또는 워크스페이스 연결을 확인하세요. 플러그인을 만든 계정은 ChatGPT의 <b>Plugins → Personal → Created by you</b>에서도 찾을 수 있습니다.</p>
+        </details>
+        <details className="plugin-connect-help">
+          <summary>직접 MCP 주소로 연결하기</summary>
+          <p>기존 MCP 연결 방식이 필요한 경우 아래 고정 주소를 사용하고, 이 사이트에 로그인한 ChatGPT 계정으로 OAuth 인증하세요.</p>
+          <div className="secret-reveal oauth-reveal"><div><span>OAUTH MCP URL</span><code>{BLOGAUTO_OAUTH_MCP_URL}</code></div><button type="button" onClick={copyOAuthUrl}>주소 복사</button></div>
+          {oauthMessage && <p className="inline-message" role="status">{oauthMessage}</p>}
+        </details>
       </article>
       <article className="data-card connection-card">
         <div className="card-title"><div><span className="card-kicker">DESKTOP PAIRING</span><h2>PC 앱 연결</h2></div><span className="number-chip">{pairCode ? `${secondsLeft}s` : connectionExists ? `G${currentGeneration}` : 'NEW'}</span></div>
@@ -131,7 +142,7 @@ export function DashboardActions({ hasConnection, generation }: { hasConnection:
       </article>
       <article className="data-card steps-card">
         <span className="card-kicker">PAIRING GUIDE</span><h2>연결 순서</h2>
-        <ol><li><b>1</b><span>ChatGPT 커넥터에 OAuth MCP 주소를 등록하고 GPT 계정으로 인증합니다.</span></li><li><b>2</b><span>처음이면 PC 연결 주소를 한 번 발급한 뒤 「PC 앱 연결」을 눌러 PC 앱을 이 계정에 연결합니다.</span></li><li><b>3</b><span>PC 앱에서 네이버 로그인을 마치면 ChatGPT 에서 바로 요청할 수 있습니다.</span></li></ol>
+        <ol><li><b>1</b><span>「ChatGPT 플러그인 설치·연결」을 눌러 ChatGPT에서 설치 확인과 계정 인증을 마칩니다.</span></li><li><b>2</b><span>처음이면 PC 연결 주소를 한 번 발급한 뒤 「PC 앱 연결」을 눌러 PC 앱을 이 계정에 연결합니다.</span></li><li><b>3</b><span>PC 앱에서 네이버 로그인을 마치면 ChatGPT 에서 바로 요청할 수 있습니다.</span></li></ol>
       </article>
     </section>
   );
