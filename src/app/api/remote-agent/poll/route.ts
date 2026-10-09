@@ -1632,9 +1632,11 @@ async function poll(request: NextRequest) {
       return NextResponse.json({ success: false, code: 'COMPLETION_DELIVERY_UNCERTAIN', error: '저장된 완료 결과를 전송하지 못했습니다. 작업을 다시 실행하지 마세요. 연결을 복구하고 job_get으로 확인하세요.', deliveryCode: error instanceof CompletionDeliveryError ? error.code : 'NETWORK_ERROR', data: { job: pending.job, executionStatus: pending.body.status, completionPending: true } }, { status: 503 });
     } finally { clearInterval(deliveryHeartbeat); claiming = false; }
   }
-  if (process.env.DESKTOP_UPDATE_INSTALL_PENDING === "1") {
+  if (process.env.DESKTOP_UPDATE_INSTALL_PENDING === "1" || process.env.DESKTOP_RESTART_PENDING === "1") {
     claiming = false;
-    return NextResponse.json({ success: true, data: { configured: true, job: null, updatePending: true } });
+    return NextResponse.json({ success: true, data: { configured: true, job: null,
+      updatePending: process.env.DESKTOP_UPDATE_INSTALL_PENDING === "1",
+      restartPending: process.env.DESKTOP_RESTART_PENDING === "1" } });
   }
   let claim: Awaited<ReturnType<typeof siteFetch>> | null;
   let claimIntent: RemoteClaimIntent;

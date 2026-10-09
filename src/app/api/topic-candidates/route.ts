@@ -4,6 +4,7 @@ import { extractJsonObject } from "../../../../scripts/lib/codex-text";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { beginDesktopActivity } from "@/lib/desktop-activity";
 import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
+import { isTopicCandidateList, type TopicCandidate } from "@/lib/topic-candidate-contract";
 
 const CATEGORIES: Record<string, string> = {
   tech: "기술/IT",
@@ -17,19 +18,6 @@ const CATEGORIES: Record<string, string> = {
   education: "교육/자기계발",
   ai: "AI/미래기술",
 };
-
-interface Subtopic {
-  subtitle: string;
-  summary: string;
-}
-
-interface TopicCandidate {
-  title: string;
-  subtopics: Subtopic[];
-  content: string;
-  image_prompt: string;
-  hashtags: string[];
-}
 
 interface CodexRunResult {
   stdout: string;
@@ -211,8 +199,19 @@ export async function POST(req: NextRequest) {
   const updateError = requireNoPendingDesktopUpdate();
   if (updateError) return updateError;
 
-  const body = await req.json();
-  const { category, keyword } = body as { category: string; keyword: string };
+  let body: unknown;
+  try { body = await req.json(); } catch {
+    return NextResponse.json({ error: "올바른 JSON 요청이 필요합니다." }, { status: 400 });
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return NextResponse.json({ error: "category와 keyword는 문자열이어야 합니다." }, { status: 400 });
+  }
+  const input = body as Record<string, unknown>;
+  if (typeof input.category !== "string" || typeof input.keyword !== "string") {
+    return NextResponse.json({ error: "category와 keyword는 문자열이어야 합니다." }, { status: 400 });
+  }
+  const category = input.category.trim();
+  const keyword = input.keyword.trim();
 
   if (!category || !keyword) {
     return NextResponse.json({ error: "category와 keyword는 필수입니다" }, { status: 400 });
@@ -220,7 +219,7 @@ export async function POST(req: NextRequest) {
 
   // 입력 검증: 한글, 영숫자, 공백, 하이픈, 슬래시만 허용
   const SAFE_INPUT = /^[가-힣a-zA-Z0-9\s\-_/.,]+$/;
-  if (!SAFE_INPUT.test(category) || !SAFE_INPUT.test(keyword)) {
+  if (category.length > 80 || keyword.length > 200 || !SAFE_INPUT.test(category) || !SAFE_INPUT.test(keyword)) {
     return NextResponse.json({ error: "유효하지 않은 입력입니다" }, { status: 400 });
   }
 
@@ -236,13 +235,16 @@ export async function POST(req: NextRequest) {
 
 위 형식으로 서로 다른 각도의 소재 10개를 담은 JSON을 출력하세요. 문체 예시보다 사실성이 우선입니다. 정보형으로 작성하고, 제공된 체험 증빙이 없으므로 1인칭 구매·사용·방문·후기나 고객 반응을 만들지 마세요. 출처 없는 숫자·성능은 생략하세요. JSON만 출력, 다른 텍스트 없음.`;
 
+  let invalidResponse = false;
   try {
     const result = await runCodex(prompt);
     if (result.timedOut) throw new Error(summarizeCodexFailure(result, "생성 시간 초과"));
     if (result.exitCode !== 0) throw new Error(summarizeCodexFailure(result, "생성 실패"));
-    const data = extractJsonObject<{ topics: unknown[] }>(result.stdout);
-    if (!data || !Array.isArray(data.topics) || data.topics.length === 0) {
-      throw new Error("주제 후보 응답에 topics 배열이 없습니다.");
+    invalidResponse = true;
+    const data = extractJsonObject<{ topics: unknown }>(result.stdout);
+    if (!data || !isTopicCandidateList(data.topics)) {
+      invalidResponse = true;
+      throw new Error("주제 후보 응답의 필수 필드 또는 배열 형식이 올바르지 않습니다.");
     }
     return NextResponse.json(data);
   } catch (e) {
@@ -251,7 +253,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       topics: buildFallbackTopics(categoryLabel, keyword),
       fallback: true,
-      warning: "Codex 생성이 실패해 로컬 후보 생성으로 대체했습니다.",
+      warning: `${invalidResponse ? "Codex 응답 형식이 올바르지 않아" : "Codex 생성이 실패해"} 로컬 규칙으로 만든 후보로 대체했습니다. 내용과 사실 근거를 검토한 뒤 사용하세요.`,
     });
   }
 }

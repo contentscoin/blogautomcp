@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { MaterialJobProgress } from "@/components/MaterialJobProgress";
 
@@ -30,10 +30,16 @@ export default function HistoryPage() {
     const [loading, setLoading] = useState(true);
     const [filter, setFilter] = useState<StatusFilter>("ALL");
     const [page, setPage] = useState(1);
+    const [error, setError] = useState<string | null>(null);
+    const requestSequence = useRef(0);
 
     const fetchHistory = useCallback(async () => {
+        const requestId = ++requestSequence.current;
+        setLoading(true);
+        setItems([]);
+        setPagination(null);
+        setError(null);
         try {
-            setLoading(true);
             const params = new URLSearchParams({
                 page: page.toString(),
                 limit: "10",
@@ -43,14 +49,16 @@ export default function HistoryPage() {
             const res = await fetch(`/api/history?${params}`);
             const data = await res.json();
 
-            if (data.success) {
+            if (!res.ok || !data.success) throw new Error(data.error || "발행 기록을 읽지 못했습니다. 다시 시도하세요.");
+            if (!Array.isArray(data.data?.items) || !data.data?.pagination) throw new Error("발행 기록 응답 형식이 올바르지 않습니다.");
+            if (requestSequence.current === requestId) {
                 setItems(data.data.items);
                 setPagination(data.data.pagination);
             }
         } catch (error) {
-            console.error("히스토리 로딩 실패:", error);
+            if (requestSequence.current === requestId) setError(error instanceof Error ? error.message : "발행 기록을 읽지 못했습니다.");
         } finally {
-            setLoading(false);
+            if (requestSequence.current === requestId) setLoading(false);
         }
     }, [page, filter]);
 
@@ -125,6 +133,11 @@ export default function HistoryPage() {
                 <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
                     {loading ? (
                         <div className="p-8 text-center text-slate-500">로딩 중...</div>
+                    ) : error ? (
+                        <div role="alert" className="p-8 text-center text-red-600">
+                            <p>{error}</p>
+                            <button type="button" onClick={() => void fetchHistory()} className="mt-3 rounded-lg border border-red-200 px-4 py-2 text-sm">다시 불러오기</button>
+                        </div>
                     ) : items.length === 0 ? (
                         <div className="p-8 text-center text-slate-500">
                             발행 기록이 없습니다.

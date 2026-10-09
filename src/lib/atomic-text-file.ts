@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 export interface AtomicWriteTextFileOptions {
+  /** File permissions for the replacement (for example, private settings). */
+  mode?: number;
   /** Fault injection hook for regression tests; production callers omit it. */
   replaceForTest?: (temporaryPath: string, targetPath: string) => void;
 }
@@ -27,7 +29,7 @@ export function atomicWriteTextFile(
 
   let descriptor: number | null = null;
   try {
-    descriptor = fs.openSync(temporaryPath, "wx");
+    descriptor = fs.openSync(temporaryPath, "wx", options.mode);
     fs.writeFileSync(descriptor, content, "utf8");
     fs.fsyncSync(descriptor);
     fs.closeSync(descriptor);

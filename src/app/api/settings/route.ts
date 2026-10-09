@@ -6,7 +6,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import * as fs from "fs";
-import * as path from "path";
+import { atomicWriteTextFile } from "@/lib/atomic-text-file";
 import { requireAdminApiKey } from "@/lib/api-auth";
 import { isChatGptBrowserAutomationEnabled } from "@/lib/chatgpt-browser-automation";
 import { requireTrustedLocalMutation } from "@/lib/local-request-auth";
@@ -133,6 +133,10 @@ export async function POST(request: NextRequest) {
   } catch {
     return NextResponse.json({ success: false, error: "잘못된 요청 본문" }, { status: 400 });
   }
+  if (!body || typeof body !== "object" || Array.isArray(body)
+    || (body.values !== undefined && (!body.values || typeof body.values !== "object" || Array.isArray(body.values)))) {
+    return NextResponse.json({ success: false, error: "설정 values는 객체여야 합니다." }, { status: 400 });
+  }
   const incoming = body.values || {};
 
   const merged = readEnvFile();
@@ -141,15 +145,16 @@ export async function POST(request: NextRequest) {
     if (!EDITABLE_KEYS.has(key)) continue;
     // 시크릿 마스크 값은 "변경 없음"이므로 건너뛴다.
     if (value === MASK) continue;
-    const trimmed = typeof value === "string" ? value.trim() : "";
+    if (typeof value !== "string") {
+      return NextResponse.json({ success: false, error: `${key} 값은 문자열이어야 합니다.` }, { status: 400 });
+    }
+    const trimmed = value.trim();
     const invalid = validateEnvValue(key, trimmed);
     if (invalid) return invalid;
     if (trimmed === "") {
       delete merged[key];
-      delete process.env[key];
     } else {
       merged[key] = trimmed;
-      process.env[key] = trimmed; // 새로 spawn되는 스크립트에 즉시 반영
     }
     applied.push(key);
   }
@@ -159,8 +164,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const p = getEnvFilePath();
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, serializeEnv(merged), { mode: 0o600 });
+    atomicWriteTextFile(p, serializeEnv(merged), { mode: 0o600 });
   } catch (error) {
     return NextResponse.json(
       { success: false, error: error instanceof Error ? error.message : "설정 저장 실패" },
@@ -168,6 +172,11 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // Publish runtime changes only after the entire settings file was committed.
+  for (const key of applied) {
+    if (key in merged) process.env[key] = merged[key];
+    else delete process.env[key];
+  }
   Object.assign(process.env, draftRuntimePolicy);
   process.env.BROWSER_GPT_MODE = "false";
   process.env.ALLOW_CHATGPT_BROWSER_MODE = "true";
