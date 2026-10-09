@@ -42,11 +42,13 @@ export default async function DashboardPage() {
       </header>
       <div className="shell dashboard-wrap">
         <section className="dashboard-head">
-          <div><p className="eyebrow">CONTROL CENTER</p><h1>{account.displayName || account.email}님의 연결</h1><p>ChatGPT 명령과 이 PC의 네이버 자동화를 연결합니다.</p></div>
+          <div><p className="eyebrow">MY CHATGPT · MY PC</p><h1>내 ChatGPT와 PC 연결</h1><p>본인 계정과 PC를 연결하고, ChatGPT에서 블로그 작업을 시작하세요.</p></div>
           <span className={`status-pill status-${account.status.toLowerCase()}`}>{statusLabel(account.status)}</span>
         </section>
 
-        <section className="download-card">
+        <details className="download-details">
+          <summary>데스크톱 앱이 없나요? 다운로드·설치 안내</summary>
+          <section className="download-card">
           <div className="download-copy">
             <span className="card-kicker">DESKTOP AGENT</span>
             <h2>데스크톱 프로그램 설치</h2>
@@ -68,25 +70,16 @@ export default async function DashboardPage() {
               <small>버전 {release?.version || WINDOWS_INSTALLER_VERSION} · Apple Silicon용 DMG</small>
             </div>
           </div>
-        </section>
+          </section>
+        </details>
 
         {!approved ? (
           <section className="notice-card">
-            <span className="notice-icon">⌛</span><div><h2>{account.status === 'PENDING_APPROVAL' ? '관리자 승인을 기다리고 있습니다' : '현재 사용할 수 없는 계정입니다'}</h2><p>관리자 hiway@kakao.com이 승인하면 PC 연결과 ChatGPT 연결 메뉴가 열립니다. 이용자는 본인 계정을 그대로 사용합니다.</p></div>
+            <span className="notice-icon">⌛</span><div><h2>{account.status === 'PENDING_APPROVAL' ? '로그인 완료 · 이용 승인을 기다리고 있습니다' : '현재 사용할 수 없는 계정입니다'}</h2><p>{account.email} 계정으로 로그인했습니다. 관리자가 승인하면 PC와 ChatGPT를 연결할 수 있습니다. 다른 계정으로 바꿀 필요는 없습니다.</p><form action="/dashboard" method="get"><button className="button button-ghost" type="submit">승인 상태 다시 확인</button></form></div>
           </section>
         ) : (
           <>
-            <section className="metric-grid">
-              <article><span>사이트 계정</span><strong>로그인·승인됨</strong><small>{account.email}</small></article>
-              <article><span>ChatGPT MCP</span><strong>{connectionStatus?.mcp.readVerified ? '호출 확인됨' : connectionStatus?.mcp.authorized ? '호출 확인 필요' : '계정 인증 필요'}</strong><small>설치 버튼 클릭과 실제 도구 호출은 별도로 확인합니다.</small></article>
-              <article><span>내 PC 작업 응답</span><strong>{connectionStatus?.pc.roundTripVerified ? '응답 확인됨' : connectionStatus?.pc.online ? '온라인 · 응답 확인 필요' : device ? '오프라인' : '미연결'}</strong><small>{device?.name || '아래 PC 앱 연결 버튼으로 시작하세요'}</small></article>
-            </section>
-            <section className="data-card connection-summary">
-              <h2>{connectionStatus?.ready ? 'MCP와 PC 연결 확인 완료' : '연결 확인이 필요합니다'}</h2>
-              <p>최근 15분의 MCP 읽기 호출과 현재 PC의 작업 응답을 확인합니다. {connectionStatus?.pc.lastVerifiedAt ? `마지막 PC 응답: ${new Date(connectionStatus.pc.lastVerifiedAt).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })} KST.` : '아직 확인된 PC 작업 응답이 없습니다.'}</p>
-              <p>네이버 세션: {connectionStatus?.naver.sessionSaved === true ? 'PC에 저장됨 · 로그인 유효 여부는 실제 네이버 작업에서 확인합니다.' : connectionStatus?.naver.sessionSaved === false ? '저장된 세션 없음 · PC 앱에서 네이버에 로그인하세요.' : '현재 상태를 확인하지 못했습니다.'}</p>
-            </section>
-            <DashboardActions hasConnection={Boolean(connection)} generation={connection?.generation || 0} publicPluginInstallUrl={publicPluginInstallUrl} />
+            {connectionStatus && <DashboardActions key={account.id} accountId={account.id} accountEmail={account.email} initialStatus={connectionStatus} hasConnection={connectionStatus.channel.exists} generation={connectionStatus.channel.generation} publicPluginInstallUrl={publicPluginInstallUrl} />}
             <FailedMaterialActions accountId={account.id} online={online} appVersion={device?.appVersion || null} hasConnection={Boolean(connection)} activeWork={activeWork} />
             <BlockedMaterialActions accountId={account.id} online={online} appVersion={device?.appVersion || null} hasConnection={Boolean(connection)} activeWork={activeWork} />
             <section className="data-card">

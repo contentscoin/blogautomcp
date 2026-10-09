@@ -58,7 +58,7 @@ async function fixture() {
   await init.ensureDatabase();
   for (const id of ['user-a', 'user-b']) db.prepare('INSERT INTO users(id,email,role,status,created_at,updated_at) VALUES(?,?,?,?,?,?)').run(id, `${id}@example.test`, 'USER', 'APPROVED', 1, 1);
   const codeRoute = load('app/api/device/pair-code/route.ts'), pairRoute = load('app/api/device/pair/route.ts');
-  const send = async (route, body, url) => { const response = await route.POST(new Request(`${origin}${url}`, { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: JSON.stringify(body) })); return { status: response.status, ...(await response.json()) }; };
+  const send = async (route, body, url, headers = {}) => { const response = await route.POST(new Request(`${origin}${url}`, { method: 'POST', headers: { origin, 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) })); return { status: response.status, ...(await response.json()) }; };
   const code = () => send(codeRoute, {}, '/api/device/pair-code');
   const pair = (value, proof = proofA) => send(pairRoute, { pairCode: value, deviceName: 'Fixture PC', ...(proof === null ? {} : { deviceToken: proof }) }, '/api/device/pair');
   const seedActive = async () => {
@@ -251,4 +251,26 @@ test('MCP rotation rechecks approval atomically and preserves codes, devices and
     assert.equal(r.status, 403); assert.equal(r.data, undefined);
     assert.deepEqual(f.db.prepare('SELECT * FROM mcp_connections').get(), channel); assert.deepEqual(f.snapshot(), before);
   } finally { f.db.close(); }
+});
+
+test('stale account tabs cannot issue codes or rotate a different signed-in account', async t => {
+  for (const [file, url, body] of [
+    ['app/api/device/pair-code/route.ts', '/api/device/pair-code', {}],
+    ['app/api/mcp-connections/route.ts', '/api/mcp-connections', { action: 'issue' }],
+    ['app/api/mcp-connections/route.ts', '/api/mcp-connections', { action: 'rotate' }],
+  ]) await t.test(`${url}:${body.action || 'code'}`, async () => {
+    const f = await fixture();
+    try {
+      await f.code(); await f.seedActive();
+      const before = f.snapshot(), channels = f.db.prepare('SELECT * FROM mcp_connections').all();
+      const audits = f.db.prepare('SELECT * FROM audit_events').all();
+      f.identity({ userId: 'user-b' });
+      const response = await f.send(f.load(file), body, url, { 'x-blogauto-account-id': 'user-a' });
+      assert.equal(response.status, 409); assert.equal(response.error.code, 'ACCOUNT_CHANGED');
+      assert.equal(response.data, undefined);
+      assert.deepEqual(f.snapshot(), before);
+      assert.deepEqual(f.db.prepare('SELECT * FROM mcp_connections').all(), channels);
+      assert.deepEqual(f.db.prepare('SELECT * FROM audit_events').all(), audits);
+    } finally { f.db.close(); }
+  });
 });

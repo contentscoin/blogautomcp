@@ -191,12 +191,33 @@ test('status GET reads only the signed-in account, requires approval, and does n
     const route = f.load('app/api/connection-status/route.ts');
     const response = await route.GET(new Request('https://example.test/api/connection-status?userId=user-b'));
     assert.equal(response.headers.get('cache-control'), 'no-store');
-    assert.equal((await response.json()).data.pc.name, 'PC user-a');
+    const payload = await response.json();
+    assert.equal(payload.accountId, 'user-a');
+    assert.equal(payload.data.pc.name, 'PC user-a');
     assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM agent_jobs').get().n, 0);
     f.setIdentity(null);
-    assert.equal((await route.GET()).status, 401);
+    assert.equal((await route.GET(new Request('https://example.test/api/connection-status'))).status, 401);
     f.setIdentity({ userId: 'user-b' });
     f.db.prepare("UPDATE users SET status='PENDING_APPROVAL' WHERE id='user-b'").run();
-    assert.equal((await route.GET()).status, 403);
+    assert.equal((await route.GET(new Request('https://example.test/api/connection-status'))).status, 403);
+  } finally { f.db.close(); }
+});
+
+test('a stale tab cannot read a different signed-in account using the account affinity header', async () => {
+  const f = fixture();
+  try {
+    f.connect();
+    const route = f.load('app/api/connection-status/route.ts');
+    const request = expected => new Request('https://example.test/api/connection-status', { headers: { 'x-blogauto-account-id': expected } });
+    assert.equal((await route.GET(request('user-a'))).status, 200);
+    f.setIdentity({ userId: 'user-b' });
+    const denied = await route.GET(request('user-a'));
+    assert.equal(denied.status, 409);
+    const payload = await denied.json();
+    assert.equal(payload.error.code, 'ACCOUNT_CHANGED');
+    assert.equal(payload.data, undefined);
+    assert.equal(payload.accountId, undefined);
+    assert.equal((await route.GET(request('user-b'))).status, 200);
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM agent_jobs').get().n, 0);
   } finally { f.db.close(); }
 });
