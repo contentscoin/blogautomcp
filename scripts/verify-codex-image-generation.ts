@@ -7,6 +7,7 @@ import crypto from "node:crypto";
 import {
   CODEX_IMAGE_MODEL_LABEL,
   buildCodexImageInstruction,
+  collectCompletedProductCandidates,
   locateCodexImage,
   resolveBrandPostImageEngine,
   runCodexImageBatch,
@@ -18,7 +19,7 @@ import draftRuntimePolicy from "./lib/draft-runtime-policy.json";
 
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(2048, 7)]);
 
-type Behaviour = "workspace" | "generated" | "nothing" | "auth" | "ambiguous" | "duplicate";
+type Behaviour = "workspace" | "generated" | "nothing" | "auth" | "ambiguous" | "duplicate" | "eof" | "failed" | "timeout" | "late-auth" | "late-model";
 function mockCodex(behaviour: (prompt: string, call: number) => Behaviour, codexHome: string) {
   const threads: Array<Record<string, unknown>> = [];
   const prompts: string[] = [];
@@ -43,11 +44,11 @@ function mockCodex(behaviour: (prompt: string, call: number) => Behaviour, codex
                 active += 1;
                 peak = Math.max(peak, active);
                 try {
+                  if (mode === "auth") { yield { type: "turn.failed", error: { message: "401 Unauthorized: login required" } }; return; }
                   yield { type: "thread.started", thread_id: threadId };
                   await new Promise((resolve) => setTimeout(resolve, 15));
-                  if (mode === "auth") { yield { type: "turn.failed", error: { message: "401 Unauthorized: login required" } }; return; }
                   if (mode === "workspace") fs.writeFileSync(path.join(String(options.workingDirectory), "out.png"), PNG);
-                  if (mode === "generated" || mode === "ambiguous" || mode === "duplicate") {
+                  if (["generated", "ambiguous", "duplicate", "eof", "failed", "timeout", "late-auth", "late-model"].includes(mode)) {
                     const dir = path.join(codexHome, "generated_images", threadId);
                     fs.mkdirSync(dir, { recursive: true });
                     fs.writeFileSync(path.join(dir, "ig_1.png"), PNG);
@@ -58,6 +59,11 @@ function mockCodex(behaviour: (prompt: string, call: number) => Behaviour, codex
                     }
                   }
                   yield { type: "item.completed", item: { type: "agent_message", text: "./out.png" } };
+                  if (mode === "eof") return;
+                  if (mode === "failed") { yield { type: "turn.failed", error: { message: "review transport failure" } }; return; }
+                  if (mode === "late-auth" || mode === "late-model") {
+                    yield { type: "turn.failed", error: { message: mode === "late-auth" ? "401 Unauthorized: login required" : "The requested model is not supported by this Codex version" } }; return;
+                  }
                   yield { type: "turn.completed", usage: {} };
                 } finally {
                   active -= 1;
@@ -123,7 +129,11 @@ async function main() {
     assert.match(ambiguous.error!, /IMAGE_OUTPUT_AMBIGUOUS/);
     assert.equal(ambiguous.submissionState, "uncertain");
     assert.equal(fs.existsSync(`${ambiguousJob.outStem}.png`), false, "an ambiguous second output is never adopted");
-    assert.equal(JSON.parse(fs.readFileSync(`${ambiguousJob.outStem}.codex-submission.json`, "utf8")).state, "submitting");
+    const observedReceipt = JSON.parse(fs.readFileSync(`${ambiguousJob.outStem}.codex-submission.json`, "utf8"));
+    assert.equal(observedReceipt.state, "completed", "the actual completion event persists even when output selection is ambiguous");
+    assert.ok(observedReceipt.completedAtMs >= observedReceipt.startedAtMs);
+    const observedSet = collectCompletedProductCandidates(ambiguousJob, { codexHome: ambiguousHome });
+    assert.equal(observedSet?.candidates.length, 2, "both real outputs remain available for strict coordinator QA");
     const ambiguousOut = path.join(`${ambiguousJob.outStem}.codex-1`, "out.png");
     assert.ok(fs.existsSync(ambiguousOut), "preserve the provider's files for reconciliation");
     const [ambiguousResume] = await runCodexImageBatch([ambiguousJob], { createCodex: ambiguousCodex.create, codexHome: ambiguousHome, onResult: async () => {} });
@@ -187,6 +197,65 @@ async function main() {
     const [deduplicatedResume] = await runCodexImageBatch([duplicateJob], { createCodex: duplicateCodex.create, codexHome: duplicateHome, onResult: async () => {} });
     assert.equal(deduplicatedResume.localPath, deduplicated.localPath);
     assert.equal(duplicateCodex.threads.length, 1, "same-byte copies remain safely reusable");
+    const duplicateNative = path.dirname(oldFile);
+    fs.copyFileSync(acceptedAnchor, path.join(duplicateNative, "reference-copy.png"));
+    const future = path.join(duplicateNative, "after-request.png");
+    fs.writeFileSync(future, Buffer.concat([PNG, Buffer.from("future unrelated output")]));
+    fs.utimesSync(future, new Date(duplicateReceipt.completedAtMs + 5000), new Date(duplicateReceipt.completedAtMs + 5000));
+    fs.writeFileSync(path.join(`${duplicateJob.outStem}.codex-1`, "qc-helper.png"), Buffer.concat([PNG, Buffer.from("workspace helper")]));
+    const oneNative = collectCompletedProductCandidates(duplicateJob, { codexHome: duplicateHome });
+    assert.equal(oneNative?.candidates.length, 1, "reference copies, workspace helpers, prior/future outputs and unrelated threads are excluded");
+    assert.equal(oneNative?.candidates[0].sha256, crypto.createHash("sha256").update(PNG).digest("hex"));
+    assert.throws(() => collectCompletedProductCandidates({ ...duplicateJob, requiredReferenceHashes: ["0".repeat(64)] }, { codexHome: duplicateHome }), /PRODUCT_REFERENCE_CHANGED/);
+
+    // A terminal event is evidence; EOF, failure, or timeout after files appear is not.
+    for (const mode of ["eof", "failed", "timeout"] as const) {
+      const pendingHome = path.join(root, `${mode}-home`), pendingJob = strictProductJob(`${mode}-product`);
+      const pendingCodex = mockCodex(() => mode, pendingHome);
+      const [first] = await runCodexImageBatch([pendingJob], { createCodex: pendingCodex.create, codexHome: pendingHome,
+        ...(mode === "timeout" ? { jobTimeoutMs: 1 } : {}), onResult: async () => {} });
+      assert.equal(first.localPath, null); assert.equal(first.submissionState, "uncertain");
+      const receipt = JSON.parse(fs.readFileSync(`${pendingJob.outStem}.codex-submission.json`, "utf8"));
+      assert.equal(receipt.state, "submitting"); assert.equal(receipt.completedAtMs, undefined);
+      assert.throws(() => collectCompletedProductCandidates(pendingJob, { codexHome: pendingHome }), /IMAGE_RESUME_REQUIRED/);
+      const [retry] = await runCodexImageBatch([pendingJob], { createCodex: pendingCodex.create, codexHome: pendingHome, onResult: async () => {} });
+      assert.equal(retry.localPath, null); assert.match(retry.error!, /IMAGE_RESUME_REQUIRED/);
+      assert.equal(pendingCodex.threads.length, 1, `${mode}: no adoption and no extra generation`);
+      const native = path.join(pendingHome, "generated_images", receipt.threadId, "ig_1.png");
+      fs.copyFileSync(native, `${pendingJob.outStem}.png`);
+      const [cached] = await runCodexImageBatch([pendingJob], { createCodex: async () => { throw new Error("SDK offline"); }, codexHome: pendingHome, onResult: async () => {} });
+      assert.equal(cached.localPath, null); assert.match(cached.error!, /IMAGE_RESUME_REQUIRED/);
+      assert.equal(cached.submissionState, "uncertain");
+    }
+    for (const mode of ["late-auth", "late-model"] as const) {
+      const lateHome = path.join(root, `${mode}-home`), lateJob = strictProductJob(`${mode}-product`);
+      const lateCodex = mockCodex(() => mode, lateHome);
+      const [first] = await runCodexImageBatch([lateJob], { createCodex: lateCodex.create, codexHome: lateHome, onResult: async () => {} });
+      assert.equal(first.localPath, null); assert.equal(first.submissionState, "uncertain");
+      assert.equal(JSON.parse(fs.readFileSync(`${lateJob.outStem}.codex-submission.json`, "utf8")).state, "submitting");
+      let browserCalls = 0;
+      await runImageBatch([lateJob], root, async result => { assert.equal(result.localPath, null); }, undefined, {
+        runCodex: (jobs, options) => runCodexImageBatch(jobs, { ...options, createCodex: lateCodex.create, codexHome: lateHome }),
+        runBrowser: async () => { browserCalls++; throw new Error("late provider failure cannot authorize new generation"); }, browserEnabled: true,
+      });
+      assert.equal(browserCalls, 0); assert.equal(lateCodex.threads.length, 1);
+    }
+    for (const submissionState of [undefined, "uncertain", "not-submitted"] as const) {
+      const guardedProduct = strictProductJob(`fallback-${submissionState}`); let browserCalls = 0;
+      const outputs: Array<{ localPath: string | null }> = [];
+      await runImageBatch([guardedProduct], root, async result => { outputs.push(result); }, undefined, {
+        runCodex: async (jobs, options) => {
+          const result = { id: jobs[0].id, localPath: null, submissionState, error: "CODEX_AUTH_REQUIRED: login interrupted" };
+          await options.onResult(result, 0); return [result];
+        },
+        runBrowser: async (jobs, _workDir, onResult) => {
+          browserCalls++; const result = { id: jobs[0].id, localPath: null, error: "offline fixture browser" };
+          await onResult(result, 0); return [result];
+        }, browserEnabled: true,
+      });
+      assert.equal(browserCalls, submissionState === "not-submitted" ? 1 : 0, "product fallback requires explicit pre-admission proof, not an auth error label");
+      assert.equal(outputs.length, 1); assert.equal(outputs[0].localPath, null);
+    }
 
     // Review-only recovery belongs to the coordinator, never to this generation transport.
     const reviewOnlyJob: ImageBatchJob = { ...duplicateJob, reviewOnly: {

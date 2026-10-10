@@ -5,7 +5,8 @@ import {
   collectShoppingProductSourceCandidates,
   readSavedProductSourceCandidates,
 } from "../../scripts/lib/product-photo-source";
-import { selectVerifiedProductSectionImages } from "../../scripts/lib/product-photo-review";
+import { selectVerifiedProductSectionImages, type ProductSectionImageDiagnostics } from "../../scripts/lib/product-photo-review";
+import { buildSellerOriginalRepairTarget } from "../../scripts/lib/seller-original-repair-target";
 import { buildSelectedProductImageAuditContext } from "../../scripts/lib/publish-image-audit";
 import { rejectedPublicationImageHashes } from "../../scripts/lib/publish-image-rejections";
 import fs from "node:fs";
@@ -27,7 +28,7 @@ import {
 import { isChatGptBrowserAutomationEnabled } from "./chatgpt-browser-automation";
 import { imageBatchBudgetMs, imageJobBudgetMs, IMAGE_TIMER_MAX_MS } from "../../scripts/lib/image-timeout-policy";
 import { buildBlogPhotorealDirection } from "../../scripts/lib/photoreal/build";
-import { assertProductImageReferences, checkedExistingJobResult, existingJobResult, hasBrowserSubmission, hasUnresolvedCodexSubmission, resolveBrandPostImageEngine, runCodexImageBatch, type ImageBatchJob } from "./codex-image-generation";
+import { assertProductImageReferences, checkedExistingJobResult, collectCompletedProductCandidates, existingJobResult, hasBrowserSubmission, hasUnresolvedCodexSubmission, resolveBrandPostImageEngine, runCodexImageBatch, type ImageBatchJob } from "./codex-image-generation";
 import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene, brandPostSectionSlotId, isShoppingLifestyleImage, REFERENCE_SCENE_REVIEW_CHECKS, type BrandPostImageSourceHint } from "./brand-post-image-evidence";
 import { buildProduct9Canvas, type Product9Canvas, type ProductPhysicalScale } from "../../scripts/lib/product-9canvas";
 import { buildShoppingReferenceScenePrompt, reviewShoppingReferenceScene, selectShoppingSceneReference,
@@ -105,6 +106,8 @@ interface BrowserImageBatchResult {
   id: string;
   localPath: string | null;
   error?: string;
+  /** Coordinator-owned recovery; no candidate is selected before current-context fidelity review. */
+  recoveryJob?: ImageBatchJob;
 }
 
 function clean(value: string): string {
@@ -429,6 +432,69 @@ function imageJobSceneStrategy(outStem: string): string | undefined {
   catch { return undefined; }
 }
 
+function resolutionOwner(lockPath: string): { ownerPid: number; ownerToken: string } | null {
+  try {
+    const owner = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+    return owner.version === "product-image-resolution-lock/v1" && Number.isSafeInteger(owner.ownerPid) && owner.ownerPid > 0 &&
+      typeof owner.ownerToken === "string" && Boolean(owner.ownerToken) ? owner : null;
+  } catch { return null; }
+}
+
+function resolutionOwnerIsDead(owner: ReturnType<typeof resolutionOwner>): boolean {
+  if (!owner) return false;
+  try { process.kill(owner.ownerPid, 0); }
+  catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+  return false;
+}
+
+/** Recovery is serialized and requires proof of a dead process, never just an old timestamp. */
+function acquireResolutionLock(outStem: string) {
+  const lockPath = `${outStem}.resolution.lock`, guardPath = `${lockPath}.recovery`;
+  const ownerToken = crypto.randomUUID();
+  const payload = JSON.stringify({ version: "product-image-resolution-lock/v1", ownerPid: process.pid, ownerToken });
+  const refused = () => new Error("IMAGE_RESUME_REQUIRED: 이미지 복구 검수의 소유자를 확인할 수 없습니다. 실행 중이거나 불확실한 잠금을 덮어쓰지 않았습니다.");
+  try { fs.writeFileSync(guardPath, payload, { flag: "wx" }); } catch { throw refused(); }
+  try {
+    if (fs.existsSync(lockPath)) {
+      const prior = fs.readFileSync(lockPath, "utf8");
+      if (!resolutionOwnerIsDead(resolutionOwner(lockPath)) || fs.readFileSync(lockPath, "utf8") !== prior) throw refused();
+      fs.unlinkSync(lockPath);
+    }
+    fs.writeFileSync(lockPath, payload, { flag: "wx" });
+  } finally { if (fs.readFileSync(guardPath, "utf8") === payload) fs.unlinkSync(guardPath); }
+  return { ownerToken, release: () => {
+    // A recovering successor cannot be removed by the former owner's delayed cleanup.
+    try { fs.writeFileSync(guardPath, payload, { flag: "wx" }); } catch { return; }
+    try { if (fs.existsSync(lockPath) && fs.readFileSync(lockPath, "utf8") === payload) fs.unlinkSync(lockPath); }
+    finally { if (fs.readFileSync(guardPath, "utf8") === payload) fs.unlinkSync(guardPath); }
+  } };
+}
+
+function validatedReviewCandidateSet(job: ImageBatchJob, resolutionToken?: string) {
+  const binding = job.reviewOnly;
+  const refused = () => new Error("IMAGE_RESUME_REQUIRED: 복구 후보의 슬롯·참조·완료 기록이 변경됐습니다. 기존 결과를 보존했으며 재전송하지 않았습니다.");
+  if (!binding?.candidateSet || job.referenceMode !== "product" || !binding.sourceSnapshotId ||
+      [".lock", ".lock.recovery", ".checkpoint.jsonl"].some(extension => fs.existsSync(`${job.outStem}${extension}`))) throw refused();
+  if (fs.existsSync(`${job.outStem}.resolution.lock.recovery`)) throw refused();
+  if (fs.existsSync(`${job.outStem}.resolution.lock`)) {
+    const owner = resolutionOwner(`${job.outStem}.resolution.lock`);
+    if (resolutionToken ? owner?.ownerToken !== resolutionToken || owner?.ownerPid !== process.pid : !resolutionOwnerIsDead(owner)) throw refused();
+  }
+  try {
+    const metadata = JSON.parse(fs.readFileSync(`${job.outStem}.reference-scene.json`, "utf8"));
+    if (metadata.strategyVersion !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION || metadata.slotId !== binding.slotId ||
+        metadata.sourceSnapshotId !== binding.sourceSnapshotId ||
+        JSON.stringify(metadata.referenceHashes) !== JSON.stringify(binding.referenceHashes) ||
+        JSON.stringify(job.requiredReferenceHashes) !== JSON.stringify(binding.referenceHashes)) throw refused();
+    const current = collectCompletedProductCandidates(job);
+    if (!current || JSON.stringify(current) !== JSON.stringify(binding.candidateSet)) throw refused();
+    return current;
+  } catch (error) {
+    if (error instanceof Error && /^(?:IMAGE_RESUME_REQUIRED|PRODUCT_REFERENCE_)/u.test(error.message)) throw error;
+    throw refused();
+  }
+}
+
 /** Re-reviewing saved bytes never authorizes another provider request. */
 function reviewOnlyImageResult(job: ImageBatchJob): string {
   const binding = job.reviewOnly;
@@ -436,6 +502,8 @@ function reviewOnlyImageResult(job: ImageBatchJob): string {
   if (!binding || job.referenceMode !== "product" || !binding.sourceSnapshotId ||
       !/^[a-f0-9]{64}$/iu.test(binding.outputSha256) ||
       [".lock", ".lock.recovery"].some(extension => fs.existsSync(`${job.outStem}${extension}`))) throw refused();
+  if (fs.existsSync(`${job.outStem}.resolution.lock.recovery`) || fs.existsSync(`${job.outStem}.resolution.lock`) &&
+      !resolutionOwnerIsDead(resolutionOwner(`${job.outStem}.resolution.lock`))) throw refused();
   try {
     const metadata = JSON.parse(fs.readFileSync(`${job.outStem}.reference-scene.json`, "utf8"));
     if (metadata.strategyVersion !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION || metadata.slotId !== binding.slotId ||
@@ -625,7 +693,13 @@ export function prepareImageBatchJobs(
     if (manifest.connectKind === "SHOPPING" && fs.existsSync(workDir)) {
       for (const name of fs.readdirSync(workDir).filter(name => /^raw-[a-f0-9]+\.reference-scene\.json$/iu.test(name))) {
         const priorStem = path.join(workDir, name.replace(/\.reference-scene\.json$/u, ""));
-        if (priorStem === outStem) continue;
+        if (priorStem === outStem) {
+          // The identical pending request must still reach its original transport's resume guard.
+          let completedCodex = false;
+          try { completedCodex = JSON.parse(fs.readFileSync(`${priorStem}.codex-submission.json`, "utf8")).state === "completed"; }
+          catch { /* A missing or uncertain receipt never authorizes coordinator recovery. */ }
+          if (!completedCodex) continue;
+        }
         if (imageJobSceneStrategy(priorStem) !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION && retiredImageJobIsSettled(priorStem)) continue;
         const prior = JSON.parse(fs.readFileSync(path.join(workDir, name), "utf8")) as {
           strategyVersion?: string; slotId?: string; sourceSnapshotId?: string; referenceHashes?: string[] };
@@ -638,20 +712,35 @@ export function prepareImageBatchJobs(
         if (!submitted) continue;
         if (replacingCompleted && retiredImageJobIsSettled(priorStem)) continue;
         const output = existingJobResult(priorStem);
-        if (reviewOnlyJob || !output || prior.strategyVersion !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION ||
+        if (reviewOnlyJob || prior.strategyVersion !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION ||
             prior.sourceSnapshotId !== manifest.sourceSnapshot?.snapshotId ||
             JSON.stringify(prior.referenceHashes) !== JSON.stringify(references.map(reference => reference.sha256)))
           throw new Error("IMAGE_RESUME_REQUIRED: 같은 슬롯에 이전 이미지 요청이 있습니다. 본문·연출·참조 변경으로 기존 요청을 건너뛰어 재전송할 수 없습니다.");
+        const candidateSet = fs.existsSync(`${priorStem}.codex-submission.json`)
+          ? collectCompletedProductCandidates({ ...job, outStem: priorStem, referenceMode: "product",
+            requiredReferenceHashes: references.map(reference => reference.sha256) }) : null;
+        if (!output && !candidateSet) throw new Error("IMAGE_RESUME_REQUIRED: 완료된 생성 결과를 찾을 수 없습니다. 재전송하지 않았습니다.");
         const candidate: ImageBatchJob = { ...job, outStem: priorStem, referenceMode: "product",
           requiredReferenceHashes: references.map(reference => reference.sha256),
-          reviewOnly: { outputSha256: sha256File(output), slotId: target.request.slotId!,
-            sourceSnapshotId: manifest.sourceSnapshot!.snapshotId, referenceHashes: references.map(reference => reference.sha256) } };
-        reviewOnlyImageResult(candidate);
+          reviewOnly: { outputSha256: output ? sha256File(output) : candidateSet!.candidates[0].sha256, slotId: target.request.slotId!,
+            sourceSnapshotId: manifest.sourceSnapshot!.snapshotId, referenceHashes: references.map(reference => reference.sha256),
+            ...(candidateSet ? { candidateSet } : {}) } };
+        if (candidateSet) {
+          validatedReviewCandidateSet(candidate);
+          // Preserve the existing single-result route when every saved copy agrees.
+          if (output) {
+            const single = { ...candidate, reviewOnly: { ...candidate.reviewOnly!, candidateSet: undefined } };
+            try { reviewOnlyImageResult(single); candidate.reviewOnly = single.reviewOnly; }
+            catch (error) {
+              if (!(error instanceof Error && error.message.startsWith("IMAGE_OUTPUT_AMBIGUOUS:"))) throw error;
+            }
+          }
+        } else reviewOnlyImageResult(candidate);
         reviewOnlyJob = candidate;
       }
     }
     if (reviewOnlyJob) {
-      if (IMAGE_JOB_RECORD_SUFFIXES.some(extension => fs.existsSync(`${outStem}${extension}`)))
+      if (reviewOnlyJob.outStem !== outStem && IMAGE_JOB_RECORD_SUFFIXES.some(extension => fs.existsSync(`${outStem}${extension}`)))
         throw new Error("IMAGE_RESUME_REQUIRED: 같은 슬롯의 다른 요청 기록이 남아 있습니다. 이전 후보의 재검수로 미확인 요청을 건너뛰지 않았습니다.");
       return reviewOnlyJob;
     }
@@ -663,6 +752,108 @@ export function prepareImageBatchJobs(
     return { ...job, outStem,
       ...(manifest.connectKind === "SHOPPING" ? { referenceMode: "product" as const, requiredReferenceHashes: references.map(reference => reference.sha256) } : {}) };
   });
+}
+
+/** A broken saved request must not assign its error to unrelated image slots. */
+export function prepareImageBatchJobsIsolated(targets: ResolvedImageTarget[], manifest: BrandPostPackageManifestV2,
+  productName: string, workDir: string) {
+  const jobs: ImageBatchJob[] = [], targetIndexes: number[] = [], errors: Array<{ targetIndex: number; error: string }> = [];
+  for (const [targetIndex, target] of targets.entries()) {
+    try {
+      const [job] = prepareImageBatchJobs([target], manifest, productName, workDir);
+      job.id = String(targetIndex);
+      jobs.push(job); targetIndexes.push(targetIndex);
+    } catch (error) { errors.push({ targetIndex, error: error instanceof Error ? error.message : String(error) }); }
+  }
+  return { jobs, targetIndexes, errors };
+}
+
+/** Reconcile only proven outputs; neither a recent file nor a provider failure authorizes a selection. */
+export async function resolveCompletedProductImage(options: {
+  job: ImageBatchJob; manifest: BrandPostPackageManifestV2; target: ResolvedImageTarget; productName: string; workDir: string;
+  signal?: AbortSignal;
+  reviewReferenceScene?: typeof reviewShoppingReferenceScene;
+}): Promise<Pick<BrandPostImageGenerationResult, "generatedPath" | "provenance" | "referenceScene">> {
+  const refused = () => new Error("IMAGE_RESUME_REQUIRED: 복구 검수 중 요청·참조·본문·후보가 변경됐습니다. 원본 결과와 기록을 보존했습니다.");
+  const context = options.target.referenceContext;
+  const initialSet = validatedReviewCandidateSet(options.job);
+  const fingerprint = () => {
+    const binding = options.job.reviewOnly;
+    if (!context || options.target.referenceContext !== context || !binding || options.manifest.connectKind !== "SHOPPING" || options.target.role !== "body" || !allowsShoppingReferenceScene(options.target) ||
+        binding.slotId !== options.target.request.slotId || binding.sourceSnapshotId !== options.manifest.sourceSnapshot?.snapshotId ||
+        JSON.stringify(context.referenceHashes) !== JSON.stringify(binding.referenceHashes) ||
+        JSON.stringify(context.referenceImagePaths.map(file => path.resolve(file))) !== JSON.stringify(options.job.referenceImagePaths.map(file => path.resolve(file))) ||
+        context.reference.sha256 !== context.referenceHashes[0] || sha256File(context.reference.path) !== context.reference.sha256) throw refused();
+    const nodes = options.manifest.composition.renderNodes.filter(node => "sectionId" in node && node.sectionId === options.target.sectionId);
+    const sectionTitle = nodes.flatMap(node => node.kind === "heading" || node.kind === "quotation" ? [node.text] : []).join("\n");
+    const sectionBody = nodes.flatMap(node => node.kind === "paragraph" ? [node.text] : []).join("\n\n");
+    if (!sectionBody.trim() && !sectionTitle.trim()) throw new Error("IMAGE_RESUME_REQUIRED: 복구 검수에 필요한 최종 게시 본문 또는 소제목이 없습니다. 이전 계획 문구로 승인하지 않았습니다.");
+    const data = { version: "product-image-resolution/v1", slotId: binding.slotId, sourceSnapshotId: binding.sourceSnapshotId,
+      sourceSnapshot: options.manifest.sourceSnapshot, referencePaths: context.referenceImagePaths, referenceHashes: binding.referenceHashes,
+      reference: context.reference, anchorSha256: context.anchorSha256 || null, productName: options.productName,
+      sectionId: options.target.sectionId, sectionTitle, sectionBody, role: options.target.role, imageSource: options.target.imageSource,
+      imageIntent: options.target.imageIntent, promptRecipe: options.target.promptRecipe, referencePrompt: context.prompt,
+      scenePrompt: options.job.prompt, candidateSet: initialSet };
+    return { data, hash: crypto.createHash("sha256").update(JSON.stringify(data)).digest("hex"), sectionTitle, sectionBody };
+  };
+  const initial = fingerprint();
+  if (options.signal?.aborted) throw new Error("IMAGE_RESUME_REQUIRED: 사용자가 이미지 재검수를 중지했습니다.");
+  const lock = acquireResolutionLock(options.job.outStem), resolutionToken = lock.ownerToken;
+  try {
+  const assertCurrent = () => {
+    if (options.signal?.aborted) throw new Error("IMAGE_RESUME_REQUIRED: 사용자가 이미지 재검수를 중지했습니다.");
+    if (JSON.stringify(validatedReviewCandidateSet(options.job, resolutionToken)) !== JSON.stringify(initialSet) || fingerprint().hash !== initial.hash) throw refused();
+  };
+  const accepted: Array<{ candidate: typeof initialSet.candidates[number]; review: Awaited<ReturnType<typeof reviewShoppingReferenceScene>> }> = [];
+  const outcomes: Array<{ path: string; sha256: string; accepted: boolean; reason: string }> = [];
+  for (const candidate of initialSet.candidates) {
+    assertCurrent();
+    try {
+      const review = await (options.reviewReferenceScene ?? reviewShoppingReferenceScene)({ reference: context!.reference,
+        outputPath: candidate.path, productName: options.productName, imageIntent: options.target.imageIntent,
+        sectionTitle: initial.sectionTitle, bodyExcerpt: initial.sectionBody, anchorSha256: context!.anchorSha256 });
+      assertCurrent();
+      if (review.reviewStatus !== "passed" || review.strategyVersion !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION ||
+          review.referenceSha256 !== context!.reference.sha256 || typeof review.referencePath !== "string" || path.resolve(review.referencePath) !== path.resolve(context!.reference.path) ||
+          review.reviewedOutputSha256 !== candidate.sha256 || (review.anchorSha256 || null) !== (context!.anchorSha256 || null) ||
+          typeof review.reason !== "string" || !review.reason.trim() || typeof review.reviewedAt !== "string" || !Number.isFinite(Date.parse(review.reviewedAt)) ||
+          !REFERENCE_SCENE_REVIEW_CHECKS.every(key => review.checks?.[key] === true))
+        throw new Error("REFERENCE_SCENE_REVIEW_INVALID: 후보 검수의 필수 비교 판정 또는 이미지 바인딩이 누락됐습니다.");
+      accepted.push({ candidate, review });
+      outcomes.push({ ...candidate, accepted: true, reason: review.reason });
+    } catch (error) {
+      assertCurrent();
+      if (!(error instanceof Error && error.message.startsWith("REFERENCE_SCENE_FIDELITY_FAILED:"))) throw error;
+      outcomes.push({ ...candidate, accepted: false, reason: error.message });
+    }
+  }
+  assertCurrent();
+  if (accepted.length !== 1) throw new Error(`IMAGE_OUTPUT_AMBIGUOUS: 기존 생성 후보 ${initialSet.candidates.length}개 중 현재 원본·본문 검수 통과 ${accepted.length}개입니다. 유일한 통과 후보를 확인하지 못해 채택하지 않았습니다. ${outcomes.map(item => item.reason).join("; ")}`);
+  const chosen = accepted[0];
+  const directory = path.join(options.workDir, "resolutions", initial.hash);
+  const outputPath = path.join(directory, `selected-${chosen.candidate.sha256}${path.extname(chosen.candidate.path).toLowerCase()}`);
+  const recordPath = path.join(directory, "resolution.json");
+  if (fs.existsSync(recordPath)) {
+    let record: { bindingHash?: string; binding?: unknown; chosen?: { sha256?: string; outputPath?: string } };
+    try { record = JSON.parse(fs.readFileSync(recordPath, "utf8")); } catch { throw refused(); }
+    if (record.bindingHash !== initial.hash || JSON.stringify(record.binding) !== JSON.stringify(initial.data) ||
+        record.chosen?.sha256 !== chosen.candidate.sha256 || record.chosen.outputPath !== outputPath) throw refused();
+  }
+  fs.mkdirSync(directory, { recursive: true });
+  if (!fs.existsSync(outputPath)) {
+    try { fs.copyFileSync(chosen.candidate.path, outputPath, fs.constants.COPYFILE_EXCL); }
+    catch (error) { if (!fs.existsSync(outputPath)) throw error; }
+  }
+  if (sha256File(outputPath) !== chosen.candidate.sha256) throw refused();
+  assertCurrent();
+  if (!fs.existsSync(recordPath)) atomicWriteTextFile(recordPath, JSON.stringify({ version: "product-image-resolution/v1",
+    bindingHash: initial.hash, binding: initial.data, chosen: { ...chosen.candidate, outputPath }, review: chosen.review, candidateReviews: outcomes }));
+  assertCurrent();
+  return { generatedPath: outputPath, provenance: "GENERATED_SCENE",
+    referenceScene: { ...chosen.review, sourceSnapshotId: options.manifest.sourceSnapshot!.snapshotId } };
+  } finally {
+    lock.release();
+  }
 }
 
 async function runBrowserImageBatch(
@@ -841,14 +1032,23 @@ export async function runImageBatch(
   /** Test hooks: replace the transports. */
   deps: { runCodex?: typeof runCodexImageBatch; runBrowser?: typeof runBrowserImageBatch; browserEnabled?: boolean } = {},
 ): Promise<void> {
-  jobs.forEach(assertProductImageReferences);
   const indexOf = new Map(jobs.map((job, index) => [job, index]));
   const transportJobs: ImageBatchJob[] = [];
   for (const job of jobs) {
+    try { assertProductImageReferences(job); }
+    catch (error) {
+      await onResult({ id: job.id, localPath: null, error: error instanceof Error ? error.message : String(error) }, indexOf.get(job)!);
+      continue;
+    }
     if (!job.reviewOnly) { transportJobs.push(job); continue; }
     let result: BrowserImageBatchResult;
-    try { result = signal?.aborted ? { id: job.id, localPath: null, error: "사용자가 이미지 재검수를 중지했습니다." }
-      : { id: job.id, localPath: reviewOnlyImageResult(job) }; }
+    try {
+      if (signal?.aborted) result = { id: job.id, localPath: null, error: "사용자가 이미지 재검수를 중지했습니다." };
+      else if (job.reviewOnly.candidateSet) {
+        validatedReviewCandidateSet(job);
+        result = { id: job.id, localPath: null, recoveryJob: job };
+      } else result = { id: job.id, localPath: reviewOnlyImageResult(job) };
+    }
     catch (error) { result = { id: job.id, localPath: null, error: error instanceof Error ? error.message : String(error) }; }
     await onResult(result, indexOf.get(job)!);
   }
@@ -892,7 +1092,8 @@ export async function runImageBatch(
         return;
       }
       // 사용자가 멈췄거나 브라우저가 꺼져 있으면 대체하지 않고 Codex 오류를 그대로 보고한다.
-      const safeFallback = result.submissionState === "not-submitted" || /CODEX_AUTH_REQUIRED|CODEX_MODEL_UNSUPPORTED/u.test(result.error || "");
+      const safeFallback = result.submissionState === "not-submitted" || job.referenceMode !== "product" &&
+        result.submissionState !== "uncertain" && /CODEX_AUTH_REQUIRED|CODEX_MODEL_UNSUPPORTED/u.test(result.error || "");
       if (signal?.aborted || !(deps.browserEnabled ?? isChatGptBrowserAutomationEnabled()) || !safeFallback) {
         await onResult({ id: job.id, localPath: null, error: !safeFallback && result.submissionState === "uncertain"
           ? `IMAGE_RESUME_REQUIRED: 생성 요청이 이미 접수됐을 수 있어 자동 재전송하지 않았습니다. ${result.error || ""}` : result.error }, indexOf.get(job)!);
@@ -961,6 +1162,7 @@ export async function generateBrandPostImages(options: {
   signal?: AbortSignal;
   /** Fill only reviewed seller photos; never start background generation. */
   sourceOnly?: boolean;
+  forceSourceRefresh?: boolean;
 }): Promise<BrandPostImageGenerationResult[]> {
   const requests = resolveBrandPostImageSlots(options.manifest, options.requests);
   if (requests.length === 0) return [];
@@ -1088,7 +1290,7 @@ export async function generateBrandPostImages(options: {
       { localCandidates: [] as string[], sourceImageUrls: options.sourceImageUrls, maximum: 20 },
     ]) {
       try {
-        rawCandidates.push(...await collectShoppingProductSourceCandidates({ ...collection, outputDir }));
+        rawCandidates.push(...await collectShoppingProductSourceCandidates({ ...collection, outputDir, forceRefresh: options.forceSourceRefresh === true }));
       } catch (error) {
         collectionErrors.push(error instanceof Error ? error.message : String(error));
       }
@@ -1116,6 +1318,7 @@ export async function generateBrandPostImages(options: {
       target.role === "body" && ((!allowsShoppingReferenceScene(target)) || (options.sourceOnly && !isShoppingLifestyleImage(target))) && target.imageSource !== "seller-crop" &&
         target.imageSource !== "editorial-card" && target.imageSource !== "none" ? [{ target, targetIndex }] : []);
     const reviewedByTarget = new Map<number, Awaited<ReturnType<typeof selectVerifiedProductSectionImages>>[number]>();
+    let sourceDiagnostics: ProductSectionImageDiagnostics | undefined;
     if (directSources.length > 0 && eligibleTargets.length > 0) {
       try {
         const reviewed = await selectVerifiedProductSectionImages(
@@ -1142,6 +1345,7 @@ export async function generateBrandPostImages(options: {
               ? options.manifest.sourceSnapshot.product.features.map(String) : [],
             options.manifest.productUnderstanding,
           ), onDiagnostics: report => {
+            sourceDiagnostics = report;
             const packageDir = getBrandPostPackageDir(options.manifest.brandLinkId);
             atomicWriteTextFile(path.join(packageDir, "image-source-diagnostics.json"), JSON.stringify({
               ...report,
@@ -1156,7 +1360,7 @@ export async function generateBrandPostImages(options: {
                     ? path.basename(entry.path) : relativePath,
                   sectionId: eligibleTargets[entry.targetIndex]?.target.sectionId,
                   imageIntent: eligibleTargets[entry.targetIndex]?.target.imageIntent,
-                  reason: entry.reason.slice(0, 180),
+                  reason: entry.reason,
                 };
               }),
             }, null, 2));
@@ -1267,7 +1471,9 @@ export async function generateBrandPostImages(options: {
       sectionId: target.sectionId,
       imageIntent: target.imageIntent,
       error: sourceError || (target.imageSource === "seller-original"
-        ? "IMAGE_SOURCE_BINDING_REQUIRED: 선택한 상품·옵션과 이 원본 사진 슬롯에 맞는 검증 판매자 사진을 배정하지 못했습니다. AI 연출 사진으로 대체하지 않았습니다."
+        ? buildSellerOriginalRepairTarget({ sectionId: target.sectionId || "unknown",
+          targetIndex: eligibleTargets.findIndex(eligible => eligible.target === target), diagnostics: sourceDiagnostics })?.message ||
+          "IMAGE_SOURCE_BINDING_REQUIRED: 선택한 상품·옵션과 이 원본 사진 슬롯에 맞는 검증 판매자 사진을 배정하지 못했습니다. AI 연출 사진으로 대체하지 않았습니다."
         : semanticCandidateCount > 0
           ? "IMAGE_SOURCE_BINDING_REQUIRED: 이 기능 파트와 직접 일치하는 서로 다른 검증 상품 원본이 필요합니다."
           : "PRODUCT_SOURCE_REQUIRED: 공지·안내판을 제외한 검증 가능한 상품 원본 사진을 찾지 못했습니다."),
@@ -1306,21 +1512,28 @@ export async function generateBrandPostImages(options: {
     fs.mkdirSync(workRoot, { recursive: true });
     const workDir = resolveBrandPostImageBatchWorkDir(options.manifest.connectKind, workRoot);
     fs.mkdirSync(workDir, { recursive: true });
-    const jobs = prepareImageBatchJobs(targets, options.manifest, options.productName, workDir);
-    await runImageBatch(jobs, workDir, async (browserResult, targetIndex) => {
+    const prepared = prepareImageBatchJobsIsolated(targets, options.manifest, options.productName, workDir);
+    for (const failure of prepared.errors) {
+      const index = requestIndexes[failure.targetIndex];
+      await publish(index, { ...baseResult(index), sectionId: targets[failure.targetIndex].sectionId,
+        imageIntent: targets[failure.targetIndex].imageIntent, error: failure.error });
+    }
+    await runImageBatch(prepared.jobs, workDir, async (browserResult, batchIndex) => {
+      const targetIndex = prepared.targetIndexes[batchIndex];
       const target = targets[targetIndex];
       const index = requestIndexes[targetIndex];
       const base = { ...baseResult(index), sectionId: target.sectionId, imageIntent: target.imageIntent };
       let result: BrandPostImageGenerationResult;
       try {
-        if (!browserResult.localPath || !fs.existsSync(browserResult.localPath)) {
+        if (!browserResult.recoveryJob && (!browserResult.localPath || !fs.existsSync(browserResult.localPath))) {
           throw new Error(clean(browserResult.error || "이미지 생성 결과가 비어 있습니다."));
         }
-        const finished = await finishGeneratedImage({
+        const finished = browserResult.recoveryJob ? await resolveCompletedProductImage({ job: browserResult.recoveryJob,
+          manifest: options.manifest, productName: options.productName, target, workDir, signal: options.signal }) : await finishGeneratedImage({
           manifest: options.manifest,
           productName: options.productName,
           target,
-          rawPath: browserResult.localPath,
+          rawPath: browserResult.localPath!,
           workDir,
           index,
         });

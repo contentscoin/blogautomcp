@@ -37,7 +37,14 @@ export interface ImageBatchJob {
   referenceMode?: "product";
   requiredReferenceHashes?: string[];
   /** Only the coordinator may verify and consume an existing result; transports cannot generate it. */
-  reviewOnly?: { outputSha256: string; slotId: string; sourceSnapshotId: string; referenceHashes: string[] };
+  reviewOnly?: { outputSha256: string; slotId: string; sourceSnapshotId: string; referenceHashes: string[];
+    candidateSet?: CompletedProductCandidateSet };
+}
+
+export interface CompletedProductCandidateSet {
+  receiptSha256: string;
+  completion: { source: "receipt" | "rollout"; completedAtMs: number; rolloutPath?: string; rolloutSha256?: string };
+  candidates: Array<{ path: string; sha256: string }>;
 }
 
 export interface ImageBatchResult {
@@ -157,12 +164,13 @@ export function buildCodexImageInstruction(prompt: string, referenceCount: numbe
   ].filter(Boolean).join("\n");
 }
 
-interface CodexImageSubmission { state: "submitting" | "completed" | "not-submitted"; workspace: string; startedAtMs: number; threadId: string | null }
+interface CodexImageSubmission { state: "submitting" | "completed" | "not-submitted"; workspace: string; startedAtMs: number; threadId: string | null; completedAtMs?: number }
 function readCodexSubmission(outStem: string): CodexImageSubmission | null {
   try {
     const receipt = JSON.parse(fs.readFileSync(`${outStem}.codex-submission.json`, "utf8")) as CodexImageSubmission;
     return ["submitting", "completed", "not-submitted"].includes(receipt.state) && typeof receipt.workspace === "string" &&
-      Number.isFinite(receipt.startedAtMs) && (receipt.threadId === null || typeof receipt.threadId === "string") ? receipt : null;
+      Number.isFinite(receipt.startedAtMs) && (receipt.threadId === null || typeof receipt.threadId === "string") &&
+      (receipt.completedAtMs === undefined || Number.isFinite(receipt.completedAtMs) && receipt.completedAtMs >= receipt.startedAtMs) ? receipt : null;
   } catch { return null; }
 }
 export function hasUnresolvedCodexSubmission(outStem: string): boolean {
@@ -250,7 +258,78 @@ export function checkedExistingJobResult(job: ImageBatchJob, options: CodexImage
   const found = locateCodexImage(prior.workspace, codexHomeDir(options.codexHome), prior.threadId, prior.startedAtMs,
     { referenceMode: "product", existingOutput: existing });
   if (!found) throw new Error("IMAGE_RESUME_REQUIRED: 이전 상품 이미지 요청의 유효한 결과를 확인할 수 없습니다. 기존 결과를 보존했으며 재전송하지 않았습니다.");
+  if (prior.state !== "completed") throw new Error("IMAGE_RESUME_REQUIRED: 이전 상품 이미지 요청의 완료를 확인할 수 없습니다. 기존 결과를 보존했으며 채택하거나 재전송하지 않았습니다.");
   return existing;
+}
+
+/** Native outputs of one proven completed request. Workspace helpers and references are never candidates. */
+function completedProductRollout(prior: CodexImageSubmission, codexHome: string): CompletedProductCandidateSet["completion"] | null {
+  const matching: string[] = [];
+  for (const offset of [-1, 0, 1]) {
+    const date = new Date(prior.startedAtMs + offset * 86_400_000).toISOString().slice(0, 10).split("-");
+    const directory = path.join(codexHome, "sessions", ...date);
+    matching.push(...safeList(directory).filter(file => path.basename(file).startsWith("rollout-") && path.basename(file).endsWith(`-${prior.threadId}.jsonl`)));
+  }
+  if (!matching.length) return null;
+  const refused = () => new Error("IMAGE_RESUME_REQUIRED: 기존 이미지 요청의 실제 완료 기록을 확인할 수 없습니다. 기록을 보존했으며 후보를 채택하지 않았습니다.");
+  if (matching.length !== 1) throw refused();
+  const rolloutPath = matching[0];
+  if (path.resolve(fs.realpathSync(rolloutPath)) !== path.resolve(rolloutPath) || fs.statSync(rolloutPath).size > 32 * 1024 * 1024) throw refused();
+  const bytes = fs.readFileSync(rolloutPath);
+  try {
+    const records = bytes.toString("utf8").split("\n").filter(line => line.trim()).map(line => JSON.parse(line));
+    const metadata = records.filter(record => record.type === "session_meta");
+    if (metadata.length !== 1 || metadata[0].payload?.id !== prior.threadId || metadata[0].payload?.thread_source !== "blogautomcp-image" ||
+        typeof metadata[0].payload?.cwd !== "string" || path.resolve(metadata[0].payload.cwd) !== path.resolve(prior.workspace) ||
+        Date.parse(metadata[0].timestamp) < prior.startedAtMs - 1000 || !Number.isFinite(Date.parse(metadata[0].timestamp))) throw refused();
+    const lifecycle = records.filter(record => record.type === "event_msg" &&
+      /^(?:task_started|task_complete|task_failed|task_cancelled|turn_failed|turn_aborted)$/u.test(record.payload?.type || ""));
+    if (lifecycle.length !== 2 || lifecycle[0].payload.type !== "task_started" || lifecycle[1].payload.type !== "task_complete" ||
+        typeof lifecycle[0].payload.turn_id !== "string" || !lifecycle[0].payload.turn_id ||
+        lifecycle[0].payload.turn_id !== lifecycle[1].payload.turn_id) throw refused();
+    const startedAtMs = Date.parse(lifecycle[0].timestamp), completedAtMs = Date.parse(lifecycle[1].timestamp);
+    if (!Number.isFinite(startedAtMs) || !Number.isFinite(completedAtMs) || startedAtMs < prior.startedAtMs - 1000 || completedAtMs < startedAtMs) throw refused();
+    return { source: "rollout", completedAtMs, rolloutPath, rolloutSha256: crypto.createHash("sha256").update(bytes).digest("hex") };
+  } catch { throw refused(); }
+}
+
+export function collectCompletedProductCandidates(job: ImageBatchJob, options: { codexHome?: string } = {}): CompletedProductCandidateSet | null {
+  assertProductImageReferences(job);
+  const refused = () => new Error("IMAGE_RESUME_REQUIRED: 완료된 상품 이미지 요청과 실제 생성 후보를 확인할 수 없습니다. 기존 기록을 보존했으며 새 생성 요청을 보내지 않았습니다.");
+  if (job.referenceMode !== "product") throw refused();
+  const prior = readCodexSubmission(job.outStem);
+  if (!prior || prior.state !== "completed" || !prior.threadId || !/^[a-z0-9_-]+$/iu.test(prior.threadId) || prior.startedAtMs <= 0 ||
+      !path.resolve(prior.workspace).startsWith(`${path.resolve(job.outStem)}.codex-`) ||
+      !/^\d+$/u.test(path.resolve(prior.workspace).slice(`${path.resolve(job.outStem)}.codex-`.length))) throw refused();
+  const codexHome = codexHomeDir(options.codexHome);
+  const completion = prior.completedAtMs !== undefined ? { source: "receipt" as const, completedAtMs: prior.completedAtMs }
+    : completedProductRollout(prior, codexHome);
+  const directory = path.join(codexHome, "generated_images", prior.threadId);
+  const files = safeList(directory).filter(file => RESULT_EXTENSIONS.includes(path.extname(file).toLowerCase()) && isImageFile(file) &&
+    fs.statSync(file).mtimeMs >= prior.startedAtMs - 1000 &&
+    (!completion || fs.statSync(file).mtimeMs <= completion.completedAtMs + 1000));
+  const unique = new Map<string, { path: string; sha256: string }>();
+  if (files.length && path.resolve(fs.realpathSync(directory)) !== path.resolve(directory)) throw refused();
+  for (const file of files.sort()) {
+    if (path.dirname(fs.realpathSync(file)) !== fs.realpathSync(directory)) throw refused();
+    const sha256 = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+    if (job.requiredReferenceHashes?.includes(sha256)) continue;
+    if (!unique.has(sha256)) unique.set(sha256, { path: file, sha256 });
+  }
+  if (!unique.size) {
+    if (files.length) throw refused(); // A native reference copy is not a generated artifact.
+    return null; // Legacy single-file transports retain their existing fail-closed checks.
+  }
+  if (!completion) {
+    if (unique.size > 1) throw refused();
+    return null; // Preserve the old proven-single raw route; it cannot resolve native alternatives.
+  }
+  if (unique.size > 8) throw refused();
+  for (const file of RESULT_EXTENSIONS.map(extension => `${job.outStem}${extension}`).filter(file => fs.existsSync(file))) {
+    if (!isImageFile(file) || !unique.has(crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"))) throw refused();
+  }
+  return { receiptSha256: crypto.createHash("sha256").update(fs.readFileSync(`${job.outStem}.codex-submission.json`)).digest("hex"),
+    completion, candidates: [...unique.values()] };
 }
 
 function codexImageError(error: unknown): string {
@@ -286,6 +365,7 @@ async function generateOnce(
   const timer = setTimeout(abort, options.timeoutMs);
   const startedAtMs = Date.now();
   let threadId: string | null = null;
+  let providerCompleted = false;
   const submission: CodexImageSubmission = { state: "submitting", workspace, startedAtMs, threadId };
   const saveSubmission = () => atomicWriteTextFile(`${job.outStem}.codex-submission.json`, JSON.stringify(submission));
   try {
@@ -313,14 +393,20 @@ async function generateOnce(
         const error = event.error as { message?: string } | undefined;
         throw new Error(error?.message || "Codex 이미지 생성이 실패했습니다.");
       } else if (event.type === "error") throw new Error(String(event.message || "Codex 실행 중 오류가 발생했습니다."));
+      else if (event.type === "turn.completed") providerCompleted = true;
     }
+    if (providerCompleted && !controller.signal.aborted) {
+      submission.state = "completed";
+      submission.completedAtMs = Date.now();
+      saveSubmission();
+    } else if (job.referenceMode === "product") throw new Error("IMAGE_RESUME_REQUIRED: 상품 이미지 요청의 완료 이벤트를 확인하지 못했습니다. 파일을 보존했으며 채택하거나 재전송하지 않았습니다.");
     const found = locateCodexImage(workspace, options.codexHome, threadId, startedAtMs, { referenceMode: job.referenceMode });
     if (!found) throw new Error("Codex 응답에서 생성 이미지를 찾지 못했습니다(image_generation 기능이 꺼져 있을 수 있습니다).");
     submission.state = "completed";
     saveSubmission();
     return found;
   } catch (error) {
-    if (["authentication", "model-version"].includes(classifyCodexDraftFailure(error))) {
+    if (!threadId && !safeList(workspace).some(isImageFile) && ["authentication", "model-version"].includes(classifyCodexDraftFailure(error))) {
       submission.state = "not-submitted";
       saveSubmission();
     }
@@ -356,7 +442,7 @@ async function runJob(codex: CodexLike, job: ImageBatchJob, options: CodexImageB
       const prior = readCodexSubmission(job.outStem);
       const recovered = prior && locateCodexImage(prior.workspace, codexHomeDir(options.codexHome), prior.threadId, prior.startedAtMs,
         { referenceMode: job.referenceMode });
-      if (recovered) return { id: job.id, localPath: adopt(recovered, job.outStem) };
+      if (recovered && (job.referenceMode !== "product" || prior?.state === "completed")) return { id: job.id, localPath: adopt(recovered, job.outStem) };
       return { id: job.id, localPath: null, submissionState: "uncertain",
         error: "IMAGE_RESUME_REQUIRED: 이전 Codex 이미지 요청의 완료 여부를 확인해야 합니다. 기존 결과를 보존했으며 재전송하지 않았습니다." };
     }

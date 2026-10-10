@@ -84,6 +84,7 @@ async function main() {
       const deps: import("../src/lib/brand-post-image-repair").ImageRepairDependencies = {
         read: store.readBrandPostPackage, write: store.writeBrandPostPackageManifest, apply: store.applyGeneratedBrandPostImage,
         generate: async (options) => {
+          assert.equal(options.forceSourceRefresh, true, "explicit seller refresh must reach collection");
           const results: import("../src/lib/brand-post-image-generation").BrandPostImageGenerationResult[] = [];
           for (const [i, request] of options.requests.entries()) {
             const file = path.join(dir, `new-${request.requestId}.png`);
@@ -97,7 +98,7 @@ async function main() {
           return results;
         },
       };
-      const first = await repairBrandPostImages({ brandLinkId: id }, deps);
+      const first = await repairBrandPostImages({ brandLinkId: id, forceSourceRefresh: true }, deps);
       assert.equal(first.generatedCount, plan.length - 1, "Early failure must not starve later sections or double apply callbacks");
       assert.equal(first.remaining, 1);
       assert.equal(first.manifest.imageGeneration?.status, "incomplete");

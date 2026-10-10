@@ -5,21 +5,27 @@ import sharp from "sharp";
 import { selectVerifiedProductPhoto, selectVerifiedProductPhotos } from "./product-photo-review";
 
 const MAX_IMAGE_BYTES = 24 * 1024 * 1024;
+export const PRODUCT_SOURCE_RECEIPT_TTL_MS = 24 * 60 * 60 * 1000;
 
-/** Resume from an intact download receipt; cached pixels still require visual review. */
-export function readSavedProductSourceCandidates(outputDir: string): string[] {
+function validProductSourceReceipts(outputDir: string): Array<{ file: string; sourceUrl: string; sha256: string; retrievedAt: number }> {
   try {
     return fs.readdirSync(outputDir).filter(name => name.endsWith(".retrieval.json")).flatMap(name => {
       try {
         const receipt = JSON.parse(fs.readFileSync(path.join(outputDir, name), "utf8"));
         const file = path.join(outputDir, name.slice(0, -".retrieval.json".length));
+        const stat = fs.statSync(file);
         if (receipt.version !== "product-image-retrieval/v1" || !isAllowedProductPhotoUrl(receipt.sourceUrl) ||
-            !fs.statSync(file).isFile() || fs.statSync(file).size > MAX_IMAGE_BYTES ||
+            !/^[a-f0-9]{64}$/u.test(receipt.sha256 || "") || !stat.isFile() || stat.size < 1 || stat.size > MAX_IMAGE_BYTES ||
             crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== receipt.sha256) return [];
-        return [file];
+        return [{ file, sourceUrl: receipt.sourceUrl, sha256: receipt.sha256, retrievedAt: Date.parse(receipt.retrievedAt || "") }];
       } catch { return []; }
     });
   } catch { return []; }
+}
+
+/** Resume from an intact download receipt; cached pixels still require visual review. */
+export function readSavedProductSourceCandidates(outputDir: string): string[] {
+  return validProductSourceReceipts(outputDir).map(receipt => receipt.file);
 }
 
 export function isAllowedProductPhotoUrl(raw: string): boolean {
@@ -100,13 +106,22 @@ export async function ensureStaticDecodableImage(file: string): Promise<string |
   const hash = crypto.createHash("sha256").update(bytes).digest("hex");
   const target = path.join(path.dirname(file), `${hash}.static.png`);
   try {
-    if (!fs.existsSync(target)) {
-      const png = await sharp(bytes, { failOn: "error", page: 0, pages: 1 }).rotate().png().toBuffer();
-      const check = await sharp(png, { failOn: "warning" }).metadata();
-      if (!check.width || !check.height) return null;
-      fs.writeFileSync(target, png);
-      if (fs.existsSync(`${file}.retrieval.json`) && !fs.existsSync(`${target}.retrieval.json`)) {
-        fs.copyFileSync(`${file}.retrieval.json`, `${target}.retrieval.json`);
+    const png = await sharp(bytes, { failOn: "error", page: 0, pages: 1 }).rotate().png().toBuffer();
+    const check = await sharp(png, { failOn: "warning" }).metadata();
+    if (!check.width || !check.height) return null;
+    if (fs.existsSync(target)) {
+      // Legacy static receipts contain the original SHA, not this re-encode's
+      // SHA. Recompute lineage from the intact original; never bless or replace
+      // a changed sibling merely because its content-derived filename matches.
+      if (!fs.readFileSync(target).equals(png)) return null;
+    } else {
+      let created = false;
+      try { fs.writeFileSync(target, png, { flag: "wx" }); created = true; }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || !fs.readFileSync(target).equals(png)) return null;
+      }
+      if (created && fs.existsSync(`${file}.retrieval.json`) && !fs.existsSync(`${target}.retrieval.json`)) {
+        fs.copyFileSync(`${file}.retrieval.json`, `${target}.retrieval.json`, fs.constants.COPYFILE_EXCL);
       }
     }
     return target;
@@ -125,32 +140,54 @@ export async function collectShoppingProductSourceCandidates(options: {
   sourceImageUrls?: string[];
   outputDir: string;
   maximum?: number;
-}, dependencies: { download: typeof downloadProductSourcePhoto; normalize?: (file: string) => Promise<string | null> } = { download: downloadProductSourcePhoto }): Promise<string[]> {
+  /** A deliberate seller-source refresh bypasses recent retrieval reuse. */
+  forceRefresh?: boolean;
+}, dependencies: { download: typeof downloadProductSourcePhoto; normalize?: (file: string) => Promise<string | null>;
+  now?: () => number } = { download: downloadProductSourcePhoto }): Promise<string[]> {
   const maximum = Math.max(1, Math.min(20, Math.floor(options.maximum || 16)));
   const byHash = new Map<string, string>();
-  const add = async (file: string) => {
-    if (byHash.size >= maximum) return;
+  const add = async (file: string, expectedSourceHash?: string) => {
+    if (byHash.size >= maximum) return false;
     try {
       const stat = fs.statSync(file);
-      if (!stat.isFile() || stat.size < 1 || stat.size > MAX_IMAGE_BYTES) return;
+      if (!stat.isFile() || stat.size < 1 || stat.size > MAX_IMAGE_BYTES) return false;
+      if (expectedSourceHash && crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== expectedSourceHash) return false;
       // Animated or warning-laden files are swapped for their static sibling; undecodable ones are skipped.
       const usable = await (dependencies.normalize ?? ensureStaticDecodableImage)(path.resolve(file));
-      if (!usable) return;
+      if (!usable) return false;
+      if (expectedSourceHash && crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== expectedSourceHash) return false;
       const resolved = path.resolve(usable);
       const hash = crypto.createHash("sha256").update(fs.readFileSync(resolved)).digest("hex");
       if (!byHash.has(hash)) byHash.set(hash, resolved);
-    } catch { /* A missing local candidate is retried from saved URLs. */ }
+      return true;
+    } catch { return false; /* A missing local candidate is retried from saved URLs. */ }
   };
-  for (const file of options.localCandidates) await add(file);
+  // A deliberate refresh must reach the seller even when saved local files
+  // already fill the candidate quota. Keep the default preserved-source order.
+  if (!options.forceRefresh) for (const file of options.localCandidates) await add(file);
   const sources = [...new Set(options.sourceImageUrls || [])].filter(isAllowedProductPhotoUrl).slice(0, 20);
+  const now = (dependencies.now ?? Date.now)();
+  // Reusing a receipt is retrieval only, never approval or a negative QA cache.
+  // Expiry and explicit refresh allow a seller to replace pixels at the same URL.
+  const recentReceipts = options.forceRefresh ? [] : validProductSourceReceipts(options.outputDir)
+    .filter(receipt => Number.isFinite(receipt.retrievedAt) && receipt.retrievedAt <= now && now - receipt.retrievedAt < PRODUCT_SOURCE_RECEIPT_TTL_MS)
+    .sort((left, right) => right.retrievedAt - left.retrievedAt);
   let downloaded = 0;
   for (const url of sources) {
     if (byHash.size >= maximum) break;
+    const recent = recentReceipts.filter(receipt => receipt.sourceUrl === url);
+    // Equal-time receipts for different pixels are ambiguous; refresh instead.
+    const latest = recent.filter(receipt => receipt.retrievedAt === recent[0]?.retrievedAt);
+    if (recent.length && new Set(latest.map(receipt => receipt.sha256)).size === 1 && await add(recent[0].file, recent[0].sha256)) {
+      downloaded += 1;
+      continue;
+    }
     try {
       await add(await dependencies.download(url, options.outputDir));
       downloaded += 1;
     } catch { /* One unavailable seller image does not block the rest. */ }
   }
+  if (options.forceRefresh) for (const file of options.localCandidates) await add(file);
   if (byHash.size === 0 && sources.length > 0 && downloaded === 0) {
     throw new Error("PRODUCT_SOURCE_DOWNLOAD_FAILED: 저장된 판매페이지 상품 이미지를 내려받지 못했습니다.");
   }

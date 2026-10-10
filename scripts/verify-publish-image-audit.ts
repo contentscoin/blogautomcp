@@ -36,6 +36,22 @@ async function main() {
       await check({ [key]: false, reason: "Product matches but body output is a framed explanation layout" }, false);
       await check({ [key]: undefined }, false);
     }
+    // A repair must expose the actual failed format check and preserve the
+    // pixel observation, including decisive evidence near its end.
+    for (const [key, expectedReason] of [
+      ["singlePhotograph", "단일 자연스러운 사진이 아님"],
+      ["noGraphicLayout", "설명판·프레임·인셋 등 그래픽 배치 포함"],
+      ["textPolicyMatches", "본문 사진에 추가 설명 텍스트 포함"],
+    ]) {
+      const detailed = options();
+      const observation = `${"상품의 외형과 라벨은 일치합니다. ".repeat(40)}사진 하단에 배송 안내 문구가 추가되어 있습니다.`;
+      detailed.review = async () => JSON.stringify({ reviews: [{ ...good, [key]: false, reason: observation }] });
+      const failure = (await auditPublishImages(detailed)).failures[0];
+      assert.equal(failure.code, "SEMANTIC_REJECTION");
+      assert.ok(failure.reason.includes(expectedReason));
+      assert.ok(failure.reason.endsWith(observation));
+      assertions++;
+    }
     const legacyCard = options();
     legacyCard.imageAssets = [{ path: photo, sourcePath: photo, sha256: "a".repeat(64), role: "body", sectionId: "overview", provenance: "EDITORIAL_CARD", creationMethod: "local-composite", remoteGenerated: false }];
     legacyCard.review = async () => { throw new Error("Stored editorial cards must be rejected before remote review"); };

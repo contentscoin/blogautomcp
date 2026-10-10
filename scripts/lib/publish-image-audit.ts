@@ -250,7 +250,12 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           const reasons = [
             ...(row.identityMatches !== true ? ["선택 상품과 시각적 일치 확인 실패"] : []),
             ...(row.notice !== false ? ["상품 근거가 아닌 공지·안내 이미지"] : []),
-            ...(!formatMatches ? [candidate.role === "thumbnail" ? "자연스러운 전체 사진·큰 제목 가독성 기준 미달" : "본문 단일 사진·텍스트 없음·프레임/정보 카드 없음 기준 미달"] : []),
+            ...(row.singlePhotograph !== true ? ["단일 자연스러운 사진이 아님"] : []),
+            ...(row.noGraphicLayout !== true ? ["설명판·프레임·인셋 등 그래픽 배치 포함"] : []),
+            ...(row.textPolicyMatches !== true ? [candidate.role === "thumbnail"
+              ? "썸네일 제목 이외의 추가 문구 포함" : "본문 사진에 추가 설명 텍스트 포함"] : []),
+            ...(candidate.role === "thumbnail" && row.thumbnailHeadlineLegible !== true
+              ? ["썸네일 큰 제목 가독성 기준 미달"] : []),
             ...(row.mixedOptions && !comparisonAllowed ? ["본문에서 허용하지 않은 혼합 옵션"] : []),
             ...(row.reviewClass === "product-photo" && !candidate.allowProductPhoto
               ? ["기능 근거 부족: 일반 상품 사진으로 판정되어 이 문단의 기능 설명을 뒷받침하지 못합니다"] : []),
@@ -259,7 +264,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           const rejectionScope: PublicationImageRejectionScope = row.identityMatches !== true || row.notice !== false || !formatMatches ||
             (row.mixedOptions === true && !comparisonAllowed) ? "product" : "section";
           fail(candidate.nodeIndex, candidate.assetPath, "SEMANTIC_REJECTION",
-            `${reasons.join(" / ")}. 문단: ${candidate.sectionTitle.slice(0, 120)}. 픽셀 관찰: ${row.reason.slice(0, 280)}`.slice(0, 500),
+            `${reasons.join(" / ")}. 문단: ${candidate.sectionTitle.slice(0, 120)}. 픽셀 관찰: ${row.reason}`,
             rejectionScope);
         }
       }
