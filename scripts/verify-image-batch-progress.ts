@@ -137,6 +137,12 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
         },
       },
       "../../scripts/lib/product-thumbnail": { buildProductThumbnailCopy: () => ({}) },
+      // These transport fixtures deliberately use placeholder image bytes.
+      // Real metadata/aspect rejection and hero provider=0 are covered by
+      // verify-reference-scene-gates and verify-shopping-reference-scene.
+      "../../scripts/lib/thumbnail-layout-v2": {
+        isShoppingThumbnailSourceEligible: async (file: string) => fs.existsSync(file),
+      },
       "../../scripts/lib/product-9canvas": product9Canvas,
       "../../scripts/lib/shopping-reference-scene": {
         SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION: imageEvidence.REFERENCE_SCENE_STRATEGY_VERSION,
