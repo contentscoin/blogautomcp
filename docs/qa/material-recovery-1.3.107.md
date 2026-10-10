@@ -27,5 +27,14 @@ Five of those failures were malformed comparison pairs rather than a completed n
 - Material controls and failed rewrite/repair controls passed.
 - Independent read-only VM review: planned-only draft included; older confirmed publication followed by a failure excluded; contradictory pre-submit receipt excluded.
 - Provider-emitted comparison schema: 216 offline Ajv cases passed. The exact observed invalid pairs are rejected by both schema and parser; dimension-specific allowed pairs, real contradictions, required observations, unknown fields and existing passed-v2 compatibility remain covered. Scoped ESLint passed.
+- [CI 38042967968](https://github.com/contentscoin/blogautomcp/actions/runs/38042967968), code head `9f3f7b7`: root and Sites typecheck, lint, complete regression/unit checks and production builds passed. Local full TypeScript also passed.
+- Before the next release, all 72 existing asset files retained identical bytes and all 5 previously ready materials retained title, manuscript hash, approval and asset metadata.
 
-Release metadata and actual recovery outcomes are recorded after packaging, installation and final verification. Historical job failures are retained; no blog publication or reservation is authorized by these repairs.
+## Release
+
+- Windows production build and NSIS packaging completed. Packaged metadata is 1.3.107; twelve changed runtime files match source SHA. Temporary diagnostics and root secret configuration are excluded.
+- Installer `BrandConnect-Automation-Setup-1.3.107.exe`: 345502540 bytes, SHA256 `95a85168c2e588cc844ed815804ed241c370d3d879034ff59406914b70e1977c`. Blockmap: 352548 bytes. Local manifest/SHA512 validation passed.
+- Existing Sites Windows update feed activated 1.3.107 at `2026-10-10T10:01:49.252Z`; publication re-queried central metadata and matched the expected release. The PC detected and downloaded 1.3.107 through its normal update path.
+- Normal installation/restart completed. The local API reports 1.3.107 and all twelve installed runtime files match source SHA. No direct installed-file patches were used.
+
+Actual recovery outcomes are recorded after final verification. Historical job failures are retained; no blog publication or reservation is authorized by these repairs.

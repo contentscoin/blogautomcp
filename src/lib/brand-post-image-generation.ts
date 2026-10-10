@@ -17,6 +17,7 @@ import {
 } from "../../scripts/lib/product-image-lock";
 import { buildProductThumbnailCopy } from "../../scripts/lib/product-thumbnail";
 import { buildTravelThumbnailCopy } from "../../scripts/lib/travel-content";
+import { isShoppingThumbnailSourceEligible } from "../../scripts/lib/thumbnail-layout-v2";
 import { createTravelEditorialThumbnail } from "../../scripts/lib/travel-thumbnail";
 import {
   applyGeneratedBrandPostImage,
@@ -352,10 +353,16 @@ export async function prepareBrandPostImageReferenceContext(options: {
   if (!options.manifest.sourceSnapshot?.snapshotId)
     throw new Error("PRODUCT_SNAPSHOT_REQUIRED: 상품 사실과 선택 옵션 스냅샷을 먼저 준비하세요.");
   const assets = normalizePackageImageAssets(options.manifest);
+  const thumbnail = options.target.role === "hero";
   const outputDir = path.join(getBrandPostPackageDir(options.manifest.brandLinkId), "product-sources");
   const checkpointPath = path.join(getBrandPostPackageDir(options.manifest.brandLinkId), "image-generation-work", "scene-reference-context.json");
+  const thumbnailCheckpointPath = path.join(path.dirname(checkpointPath), "thumbnail-reference-context.json");
   let checkpoint: { strategyVersion?: string; snapshotId?: string; reference?: ShoppingSceneReference; anchorPath?: string; anchorSha256?: string } = {};
   try { checkpoint = JSON.parse(fs.readFileSync(checkpointPath, "utf8")); } catch { /* New strategy or package. */ }
+  let thumbnailCheckpoint: typeof checkpoint = {};
+  if (thumbnail) {
+    try { thumbnailCheckpoint = JSON.parse(fs.readFileSync(thumbnailCheckpointPath, "utf8")); } catch { /* First thumbnail source review. */ }
+  }
   const checkpointCurrent = checkpoint.strategyVersion === SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION &&
     checkpoint.snapshotId === options.manifest.sourceSnapshot.snapshotId;
   const reviewedReferences = assets.flatMap(asset => {
@@ -374,14 +381,30 @@ export async function prepareBrandPostImageReferenceContext(options: {
   const selectedProduct = buildSelectedProductImageAuditContext(options.productName,
     Array.isArray(options.manifest.sourceSnapshot.product.features) ? options.manifest.sourceSnapshot.product.features.map(String) : [], options.manifest.productUnderstanding);
   let reference: ShoppingSceneReference | undefined;
-  try {
-    const prior = checkpoint.reference;
-    if (checkpointCurrent && prior?.subject && prior.geometry && prior.labels && prior.reviewedAt && sha256File(prior.path) === prior.sha256)
-      reference = prior;
-  } catch { /* A modified source requires fresh seller identity and shape review. */ }
+  for (const candidate of thumbnail ? [thumbnailCheckpoint, checkpoint] : [checkpoint]) {
+    try {
+      const prior = candidate.reference;
+      const current = candidate.strategyVersion === SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION &&
+        candidate.snapshotId === options.manifest.sourceSnapshot.snapshotId;
+      if (current && prior?.subject && prior.geometry && prior.labels && prior.reviewedAt && sha256File(prior.path) === prior.sha256 &&
+          (!thumbnail || await isShoppingThumbnailSourceEligible(prior.path))) {
+        reference = prior;
+        break;
+      }
+    } catch { /* A modified source requires fresh seller identity and shape review. */ }
+  }
   if (!reference) {
     const paths = await (dependencies.collect ?? collectShoppingProductSourceCandidates)({ localCandidates, sourceImageUrls: options.sourceImageUrls, outputDir, maximum: 20 });
-    reference = await (dependencies.select ?? selectShoppingSceneReference)({ paths, productName: options.productName, selectedProduct });
+    const candidates = thumbnail
+      ? (await Promise.all(paths.map(async file => await isShoppingThumbnailSourceEligible(file) ? file : null)))
+        .filter((file): file is string => Boolean(file))
+      : paths;
+    if (thumbnail && candidates.length === 0)
+      throw new Error("PRODUCT_REFERENCE_REQUIRED: needs_reference — 썸네일에 사용할 온전한 상품 사진이 없습니다. 긴 상세페이지·가로 배너를 제외하고 기존 허용 비율(0.55~1.85)의 동일 상품·옵션 판매자 실사 사진을 보완하세요. 본문 참조와 이전 생성 기록은 보존했습니다.");
+    reference = await (dependencies.select ?? selectShoppingSceneReference)({ paths: candidates, productName: options.productName, selectedProduct });
+    if (thumbnail && (!candidates.some(file => path.resolve(file) === path.resolve(reference!.path)) ||
+        sha256File(reference.path) !== reference.sha256 || !await isShoppingThumbnailSourceEligible(reference.path)))
+      throw new Error("REFERENCE_SCENE_CHANGED: 검수한 썸네일 원본이 후보·해시·허용 비율과 일치하지 않습니다. 본문 참조와 이전 생성 기록은 보존했습니다.");
   }
   let anchorPath: string | undefined;
   let anchorSha256: string | undefined;
@@ -401,10 +424,11 @@ export async function prepareBrandPostImageReferenceContext(options: {
     } catch { /* A missing or modified anchor never enters generation. */ }
   }
   // Keep a prepared approved anchor stable while sibling image updates clear manuscript approval.
-  atomicWriteTextFile(checkpointPath, JSON.stringify({ strategyVersion: SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION,
+  // A hero-specific alternative must not replace the source bound to existing body jobs.
+  atomicWriteTextFile(thumbnail ? thumbnailCheckpointPath : checkpointPath, JSON.stringify({ strategyVersion: SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION,
     snapshotId: options.manifest.sourceSnapshot.snapshotId, reference,
-    anchorPath: anchorPath || (checkpointCurrent ? checkpoint.anchorPath : undefined),
-    anchorSha256: anchorSha256 || (checkpointCurrent ? checkpoint.anchorSha256 : undefined) }));
+    anchorPath: thumbnail ? undefined : anchorPath || (checkpointCurrent ? checkpoint.anchorPath : undefined),
+    anchorSha256: thumbnail ? undefined : anchorSha256 || (checkpointCurrent ? checkpoint.anchorSha256 : undefined) }));
   const context: BrandPostImageReferenceContext = {
     generationMode: "reference-guided-scene", reference, anchorPath, anchorSha256,
     referenceImagePaths: [reference.path, ...(anchorPath ? [anchorPath] : [])],

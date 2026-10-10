@@ -46,6 +46,14 @@ export function isLocalAutomationErrorCode(value: unknown): value is LocalAutoma
   return typeof value === "string" && CODE_SET.has(value);
 }
 
+/** Exact Codex exec transport diagnostic; generic disconnect/request text is not evidence. */
+export function isCodexStreamCompletionLoss(message: string): boolean {
+  const diagnostic = "stream disconnected before completion: websocket closed by server before response.completed";
+  const trimmed = message.trim();
+  return trimmed === diagnostic
+    || /^Reconnecting\.\.\. [1-9]\d*\/[1-9]\d* \(stream disconnected before completion: websocket closed by server before response\.completed\)$/u.test(trimmed);
+}
+
 export class LocalAutomationError extends Error {
   readonly code: LocalAutomationErrorCode;
   readonly httpStatus: number | null;
@@ -125,6 +133,7 @@ export function classifyLocalFailure(input: { status?: number | null; code?: str
   if (/\bCODEX_MODEL_INCOMPATIBLE\b|requires?\s+(?:a\s+)?newer\s+version\s+of\s+Codex/iu.test(message)) return "CODEX_MODEL_INCOMPATIBLE";
   if (/\bCODEX_TIMEOUT\b/u.test(message)) return "CODEX_TIMEOUT";
   if (/\bCODEX_TRANSIENT_FAILURE\b/u.test(message)) return "CODEX_TRANSIENT_FAILURE";
+  if (isCodexStreamCompletionLoss(message)) return "CODEX_TRANSIENT_FAILURE";
   if (/\bCHATGPT_BROWSER_AUTH_REQUIRED\b/u.test(message)) return "CHATGPT_BROWSER_AUTH_REQUIRED";
   if (/\bCHATGPT_BROWSER_UNREACHABLE\b/u.test(message)) return "CHATGPT_BROWSER_UNREACHABLE";
   if (/\bCHATGPT_BROWSER_BUSY\b/u.test(message)) return "CHATGPT_BROWSER_BUSY";

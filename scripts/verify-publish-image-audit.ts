@@ -1,10 +1,13 @@
 /** Offline only: real local raster decoding, stubbed visual provider. */
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import Ajv from "ajv";
 import sharp from "sharp";
 import { auditPublishImages, assertPublishImagesSafe, parseVisualReviews, PublishImageAuditError, type PublishImageAuditOptions } from "./lib/publish-image-audit";
+import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-publish-audit-"));
@@ -70,6 +73,78 @@ async function main() {
     hiddenCard.review = async () => { throw new Error("A card filename cannot pass by omitting metadata"); };
     assert.equal((await auditPublishImages(hiddenCard)).failures[0].code, "SEMANTIC_REJECTION"); assertions++;
     await check({ notice: true, reason: "Expiry notice table" }, false);
+    // A notice describes announcement pixels, never AI provenance or the
+    // disclosure outside a correctly bound reference-guided body photograph.
+    // These are provider-contract fixtures, not live pixel verdicts.
+    const original = path.join(root, "seller-reference.png");
+    await sharp({ create: { width: 320, height: 240, channels: 3, background: "#dddddd" } }).png().toFile(original);
+    const hash = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+    const scene = options();
+    Object.assign(scene.composition.sections[0], { imageSource: "staged-ai", imageIntent: "AI 연출 이미지: 생활 공간 배치" });
+    Object.assign(scene.composition.renderNodes[0], { caption: REFERENCE_SCENE_CAPTION });
+    scene.sourceSnapshotId = "offline-selected-product";
+    scene.imageAssets = [{ path: photo, sourcePath: photo, sha256: hash(photo), role: "body", sectionId: "overview",
+      creationMethod: "reference-guided-scene", provenance: "GENERATED_SCENE", remoteGenerated: true,
+      referenceScene: { strategyVersion: REFERENCE_SCENE_STRATEGY_VERSION, sourceSnapshotId: scene.sourceSnapshotId,
+        referencePath: original, referenceSha256: hash(original), reviewedOutputSha256: hash(photo), reviewStatus: "passed",
+        checks: Object.fromEntries(REFERENCE_SCENE_REVIEW_CHECKS.map(key => [key, true])) } }];
+    scene.review = async call => {
+      const line = call.userPrompt.split("\n").find(value => value.startsWith("Each attached image"))!;
+      const slots = JSON.parse(line.slice(line.indexOf("[")));
+      assert.equal(slots[0].referenceGuidedScene, true);
+      assert.equal(slots[0].originalComparisonPassed, true);
+      assert.equal(slots[0].adjacentCaption, REFERENCE_SCENE_CAPTION);
+      const schema = call.outputSchema as { properties: { reviews: { items: { required: string[]; properties: Record<string, { type: string; description?: string }> } } } };
+      for (const text of [call.userPrompt, schema.properties.reviews.items.properties.notice.description!]) {
+        assert.match(text, /notice=true ONLY means a shipping, service or seller announcement visible in the attached IMAGE PIXELS/);
+        assert.match(text, /never means AI-generated provenance, an illustrative image intent, the need for AI disclosure, or an adjacentCaption\/article disclosure outside the image/);
+        assert.match(text, /Set notice=false for those contexts/);
+        assert.match(text, /burned into a body photo, reject it using textPolicyMatches\/noGraphicLayout/);
+      }
+      for (const text of [call.userPrompt, schema.properties.reviews.items.properties.singlePhotograph.description!]) {
+        assert.match(text, /ONE physical product and its optically consistent reflection/);
+        assert.match(text, /ordinary mirror and its physical frame are scene props, not a graphic photo frame/);
+        assert.match(text, /Reject independent duplicate physical products/);
+        assert.match(text, /physically inconsistent\/impossible reflections/);
+      }
+      assert.match(call.userPrompt, /noGraphicLayout means no graphic frame around a seller photo/);
+      assert.ok(schema.properties.reviews.items.required.includes("notice"));
+      assert.equal(schema.properties.reviews.items.properties.notice.type, "boolean");
+      const validate = new Ajv({ allErrors: true }).compile(call.outputSchema as object);
+      assert.equal(validate({ reviews: [good] }), true);
+      // True adverse findings are schema-valid and still blocked downstream.
+      assert.equal(validate({ reviews: [{ ...good, notice: true }] }), true);
+      for (const notice of [undefined, null, "true", "false", "yes", 1, [], {}])
+        assert.equal(validate({ reviews: [{ ...good, notice }] }), false, "the emitted schema requires an actual boolean notice verdict");
+      return JSON.stringify({ reviews: [{ ...good, reason: "One selected product in a natural illustrative scene; AI disclosure is an adjacent caption, no announcement pixels" }] });
+    };
+    assert.equal((await auditPublishImages(scene)).ok, true); assertions++;
+    for (const reason of ["배송 중단·반품 안내 표지가 이미지 픽셀에 보임", "AAWireless 제품 외형은 맞지만 AI 연출 이미지 고지 대상"]) {
+      const rejected = await auditPublishImages({ ...scene, review: async () => JSON.stringify({ reviews: [{ ...good, notice: true, reason }] }) });
+      assert.equal(rejected.ok, false);
+      assert.equal(rejected.failures[0].code, "SEMANTIC_REJECTION");
+      assert.equal(rejected.failures[0].rejectionScope, "product");
+      assert.match(rejected.failures[0].reason, /공지·안내 이미지/);
+      assert.ok(rejected.failures[0].reason.endsWith(reason), "notice=true is never normalized away because its reason mentions AI");
+      assertions++;
+    }
+    for (const notice of [undefined, null, "yes", 1, [], {}]) {
+      const invalid = await auditPublishImages({ ...scene, review: async () => JSON.stringify({ reviews: [{ ...good, notice }] }) });
+      assert.equal(invalid.failures[0].code, "INVALID_REVIEW"); assertions++;
+    }
+    const addedDisclosure = await auditPublishImages({ ...scene, review: async () => JSON.stringify({ reviews: [{ ...good,
+      notice: false, textPolicyMatches: false, reason: "AI 연출 설명 문구가 본문 사진의 픽셀 위에 추가되어 있음" }] }) });
+    assert.equal(addedDisclosure.failures[0].code, "SEMANTIC_REJECTION");
+    assert.match(addedDisclosure.failures[0].reason, /본문 사진에 추가 설명 텍스트/); assertions++;
+    await check({ reason: "One physical selected dryer and its geometrically consistent mirror reflection in a single bathroom photograph" }, true, scene);
+    for (const patch of [
+      { singlePhotograph: false, reason: "Two independent physical dryers are staged as one selected unit" },
+      { singlePhotograph: false, reason: "A second product has been pasted into an inset panel" },
+      { singlePhotograph: false, reason: "Reflected pose and perspective cannot be explained by the mirror surface" },
+      { identityMatches: false, reason: "The reflected product has a contradictory model silhouette" },
+      { noGraphicLayout: false, reason: "A seller photograph is pasted inside a graphic explanation frame" },
+      { accepted: false, reason: "All checks true but the model still rejects the mirrored product" },
+    ]) await check(patch, false, scene);
     await check({ identityMatches: false, reason: "Wrong fragrance-free Skin Relief" }, false);
     await check({ mixedOptions: true, reason: "Unlabeled mixed Skin Relief and Stress Relief" }, false);
     await check({ mixedOptions: true, explicitNamedComparison: true }, false);

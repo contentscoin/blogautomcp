@@ -43,6 +43,7 @@ import { readProductSnapshot } from "@/lib/draft-context-snapshot";
 import { resolveDraftExperience, resolveStoredExperienceNotes } from "@/lib/experience-notes";
 import { planQualityConvergence } from "../../../../../../scripts/lib/quality-convergence";
 import { DraftSectionCountError, validateSubmittedDraftSectionCount } from "../../../../../../scripts/lib/draft-section-contract";
+import { codexDraftStructuredFailureCode } from "../../../../../../scripts/lib/codex-draft-provider";
 
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
 const REVISION_PROCESS_TIMEOUT_MS = (() => {
@@ -183,7 +184,7 @@ function readPrepareFailure(logPath: string, brandLinkId?: string): PrepareFailu
 
 function failureResponse(error: unknown, fallbackMessage: string, status: number, extra: Record<string, unknown> = {}) {
   const message = error instanceof Error ? error.message : fallbackMessage;
-  const code = error instanceof PrepareProcessError ? error.code : classifyLocalFailure({ message, status });
+  const code = error instanceof PrepareProcessError ? error.code : codexDraftStructuredFailureCode(error) || classifyLocalFailure({ message, status });
   return NextResponse.json({ success: false, code, error: message, ...extra }, { status });
 }
 
@@ -485,11 +486,12 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
         error: message, errors: error.audit.failures.map(failure => `${failure.code}: ${failure.reason}`) }, { status: 422 });
       const code = error instanceof SavedTextRevalidationError
         ? error.code
-        : /승인할 고품질 초안이 없/u.test(message)
-          ? "DRAFT_NOT_FOUND"
-          : /품질|게이트|검사/u.test(message)
-            ? "CONTENT_BLOCKED"
-            : classifyLocalFailure({ message, status: 400 });
+        : codexDraftStructuredFailureCode(error)
+          || (/승인할 고품질 초안이 없/u.test(message)
+            ? "DRAFT_NOT_FOUND"
+            : /품질|게이트|검사/u.test(message)
+              ? "CONTENT_BLOCKED"
+              : classifyLocalFailure({ message, status: 400 }));
       return NextResponse.json({ success: false, code, error: message }, { status: 400 });
     }
   }

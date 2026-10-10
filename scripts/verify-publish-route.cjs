@@ -86,6 +86,7 @@ async function main() {
     module: patchModule, exports: patchModule.exports,
     requireAdminApiKey: () => null, isBrandPostImageRepairActive: () => false,
     NextResponse: mocks['next/server'].NextResponse, classifyLocalFailure: () => 'FAILED',
+    codexDraftStructuredFailureCode: () => null,
     prisma: { brandLink: { findUnique: async () => ({ status }), updateMany: async value => { approveUpdates.push(value); return { count: claimCount }; } } },
     SavedTextRevalidationError,
     PublishImageAuditError,

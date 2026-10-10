@@ -163,6 +163,14 @@ async function main() {
         assert.match(call.userPrompt, /Relative spacing between independent items in different scenes is not a product dimension/u);
         assert.match(call.userPrompt, /Use only correlated result\/variation pairs/u);
         assert.match(call.userPrompt, /consistent, contradiction and unverifiable MUST have variation="none"/u);
+        assert.match(call.userPrompt, /singleScene permits ONE physical product plus its optically consistent reflection/u);
+        assert.match(call.userPrompt, /ordinary mirror and its physical frame are scene props, not a graphic photo frame/u);
+        assert.match(call.userPrompt, /Reject independent duplicate physical items/u);
+        assert.match(call.userPrompt, /physically inconsistent\/impossible reflections/u);
+        const schema = call.outputSchema as { properties: { checks: { properties: { singleScene: { type: string; description: string } } } } };
+        assert.equal(schema.properties.checks.properties.singleScene.type, "boolean");
+        assert.match(schema.properties.checks.properties.singleScene.description, /ONE physical product plus its optically consistent reflection/u);
+        assert.match(schema.properties.checks.properties.singleScene.description, /genuine failed check must still make accepted=false/u);
         for (const [dimension, variation] of [["intrinsicPrinting", "nonessential-print-legibility"], ["productShape", "viewpoint-or-pose"], ["visibleOption", "main-item-only"]])
           assert.ok(call.userPrompt.includes(`${dimension} {"result":"allowed-variation","variation":"${variation}"}`), "provider examples must use the same correlated pairs as its schema and parser");
         assert.ok(call.outputSchema, "the visual provider is required to produce structured comparison evidence");
@@ -257,6 +265,46 @@ async function main() {
       assert.equal(approved.reviewStatus, "passed");
       for (const [dimension, variation] of Object.entries(reported.variations))
         assert.ok(approved.reason!.includes(`${dimension}=allowed-variation(${variation})`));
+    }
+    // JMW's reported response rejected a reflected dryer while all checks,
+    // including singleScene, were true. Clarify optical reflections in the
+    // provider contract without turning accepted=false into approval.
+    const reflected = { ...good, reason: "One physical selected JMW dryer on a counter; its matching pose and perspective are optically consistent with the visible bathroom mirror",
+      comparisons: { ...comparisons, sceneContext: { ...comparisons.sceneContext, result: "allowed-variation",
+        variation: "lighting-or-context", referenceObservation: "one selected dryer in the seller photograph",
+        candidateObservation: "one physical matching dryer with a coherent reflection in the bathroom mirror",
+        basis: "the second visible appearance is explained by the optical surface, not a duplicate physical unit or pasted image" } } };
+    const mirrorPassed = await reviewShoppingReferenceScene({ reference, outputPath: output, productName: "JMW selected dryer",
+      imageIntent: "AI illustrative bathroom scene", bodyExcerpt: "생활 공간에 놓은 동일 제품 연출이며 성능의 증거 사진은 아닙니다." }, {
+      review: async call => {
+        assert.equal(new Ajv({ allErrors: true }).compile(call.outputSchema as object)(reflected), true);
+        return JSON.stringify(reflected);
+      },
+    });
+    assert.equal(mirrorPassed.reviewStatus, "passed");
+    assert.equal(mirrorPassed.strategyVersion, SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION, "clarified review policy does not invalidate previous passed receipt versions");
+    await assert.rejects(reviewShoppingReferenceScene({ reference, outputPath: output, productName: "JMW selected dryer", imageIntent: "AI illustrative bathroom scene" }, {
+      review: async () => JSON.stringify({ ...reflected, accepted: false,
+        reason: "거울에 두 번째 드라이어가 보여 singleScene 실패로 판단했지만 모든 체크를 true로 반환한 실제 보고 형식" }),
+    }), /REFERENCE_SCENE_FIDELITY_FAILED/, "the reported contradictory all-true-checks/accepted=false verdict remains rejected without parser normalization");
+    let reflectionCases = 2;
+    for (const [key, reason] of [
+      ["singleScene", "two independent physical selected dryers presented as a one-item scene"],
+      ["singleScene", "a copied second dryer pasted into a split panel or inset"],
+      ["naturalScene", "the supposed reflection is positioned and posed impossibly for the visible mirror"],
+      ["silhouette", "the reflected dryer has a visibly different motor head and contradictory model silhouette"],
+      ["noFramesOrPanels", "the seller photo is inside a graphic explanatory frame rather than a physical mirror"],
+    ]) {
+      await assert.rejects(reviewShoppingReferenceScene({ reference, outputPath: output, productName: "JMW selected dryer", imageIntent: "AI illustrative bathroom scene" }, {
+        review: async () => JSON.stringify({ ...reflected, checks: { ...allChecks, [key]: false }, reason }),
+      }), new RegExp(`REFERENCE_SCENE_FIDELITY_FAILED:.*${key}`, "u"), "a reflection claim cannot excuse a real failed scene, identity or format check");
+      reflectionCases += 1;
+    }
+    for (const singleScene of [undefined, null, "true", 1]) {
+      await assert.rejects(reviewShoppingReferenceScene({ reference, outputPath: output, productName: "JMW selected dryer", imageIntent: "AI illustrative bathroom scene" }, {
+        review: async () => JSON.stringify({ ...reflected, checks: { ...allChecks, singleScene } }),
+      }), /REFERENCE_SCENE_REVIEW_INVALID/, "reflection clarification does not accept missing or non-boolean checks");
+      reflectionCases += 1;
     }
     const fullBody = `${"제품을 생활 공간에 배치한 연출입니다. ".repeat(120)}마지막 문단은 실제 기능 입증 여부를 검수해야 합니다.`;
     await reviewShoppingReferenceScene({ reference, outputPath: output, productName: "상품", imageIntent: "연출", bodyExcerpt: fullBody }, {
@@ -433,7 +481,8 @@ async function main() {
     assert.doesNotMatch(bodyPrompt, /Create ONE photorealistic editorial|No people, hands|keep the product front view/);
     assert(SCENE_FIDELITY_CHECKS.includes("noAddedText") && SCENE_FIDELITY_CHECKS.includes("noFramesOrPanels") && SCENE_FIDELITY_CHECKS.includes("singleScene"));
     // Exercise the actual module and renderer, not the transport VM harness.
-    // The existing checkpoint contains the already reviewed original pixels.
+    // The dedicated hero checkpoint contains the reviewed original pixels;
+    // the subsequent local thumbnail must not invoke a remote provider.
     const decodedOriginal = path.join(root, "actual-thumbnail-source.png");
     await sharp({ create: { width: 1080, height: 1080, channels: 3, background: "#b8afa1" } }).png().toFile(decodedOriginal);
     const thumbnailManifest = { ...manifest, brandLinkId: `${manifest.brandLinkId}-actual-thumbnail`, heroImagePath: decodedOriginal,
@@ -465,7 +514,7 @@ async function main() {
       childProcess.spawn = originalSpawn;
       syncBuiltinESMExports();
     }
-    console.log(`PASS: correlated provider comparison schema (${schemaCases} cases; exact Cuckoo/Aveeno invalid pairs rejected and correctly paired allowed variations approved), strict reference selection (47 invalid boolean/observation responses, uncached retry, stage/SHA/reason diagnostics), structured intrinsic/photographic difference QA (6 allowed variations, 7 real contradictions), two-image fail-closed checks, ordered attachments, existing passed-v2 compatibility, stable original/approved anchor, stale anchor rejection, recipe invalidation, evidence boundary`);
+    console.log(`PASS: correlated provider comparison schema (${schemaCases} cases; exact Cuckoo/Aveeno invalid pairs rejected and correctly paired allowed variations approved), strict reference selection (47 invalid boolean/observation responses, uncached retry, stage/SHA/reason diagnostics), optical reflection contract (${reflectionCases} cases, accepted=false still rejected), structured intrinsic/photographic difference QA (6 allowed variations, 7 real contradictions), two-image fail-closed checks, ordered attachments, existing passed-v2 compatibility, stable original/approved anchor, stale anchor rejection, recipe invalidation, evidence boundary`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
 void main().catch(error => { console.error(error); process.exitCode = 1; });

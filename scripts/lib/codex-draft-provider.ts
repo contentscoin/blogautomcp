@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getWritingTimeoutPolicy, writingTimeoutMs } from "./writing-timeout-policy";
 import { resolveCodexTextModel, resolveTextReasoningEffort } from "./text-model-policy";
+import { isCodexStreamCompletionLoss } from "../../src/lib/local-automation-error";
 
 type CodexSdkModule = typeof import("@openai/codex-sdk");
 
@@ -18,13 +19,6 @@ export type CodexDraftTerminalFailureCode =
   | "CODEX_MODEL_INCOMPATIBLE"
   | "CODEX_TIMEOUT"
   | "CODEX_TRANSIENT_FAILURE";
-
-const CODEX_TERMINAL_FAILURE_CODES = new Set<CodexDraftTerminalFailureCode>([
-  "CODEX_AUTH_REQUIRED",
-  "CODEX_MODEL_INCOMPATIBLE",
-  "CODEX_TIMEOUT",
-  "CODEX_TRANSIENT_FAILURE",
-]);
 
 interface CodexDraftRetryOptions {
   /** Test hook. Production retries use a short backoff. */
@@ -70,7 +64,7 @@ function errorChain(error: unknown): Array<Record<string, unknown>> {
   return records;
 }
 
-function codexFailureEvidence(error: unknown): { message: string; statuses: number[]; codes: string[]; names: string[] } {
+function codexFailureEvidence(error: unknown): { message: string; messages: string[]; statuses: number[]; codes: string[]; names: string[] } {
   const records = errorChain(error);
   const messages = [error instanceof Error ? error.message : String(error)];
   const statuses: number[] = [];
@@ -87,6 +81,7 @@ function codexFailureEvidence(error: unknown): { message: string; statuses: numb
   }
   return {
     message: Array.from(new Set(messages)).join(" ").replace(/["']/gu, ""),
+    messages,
     statuses,
     codes,
     names,
@@ -111,6 +106,11 @@ export function classifyCodexDraftFailure(error: unknown): CodexDraftFailureKind
   const normalized = evidence.message.toLowerCase();
   const statuses = [...evidence.statuses, ...messageHttpStatuses(evidence.message)];
 
+  // Explicit terminal codes from any cause outrank text in an outer wrapper.
+  if (evidence.codes.includes("CODEX_TIMEOUT")) return "timeout";
+  if (evidence.codes.includes("CODEX_MODEL_INCOMPATIBLE")) return "model-version";
+  if (evidence.codes.includes("CODEX_AUTH_REQUIRED")) return "authentication";
+
   if (
     evidence.names.some((name) => name === "AbortError")
     || evidence.codes.some((code) => code === "ETIMEDOUT" || code === "ABORT_ERR")
@@ -132,6 +132,8 @@ export function classifyCodexDraftFailure(error: unknown): CodexDraftFailureKind
     statuses.some((status) => status === 429 || (status >= 500 && status <= 599))
     || evidence.codes.some((code) => code === "ECONNRESET")
     || /\beconnreset\b/iu.test(normalized)
+    || evidence.codes.includes("CODEX_TRANSIENT_FAILURE")
+    || evidence.messages.some(isCodexStreamCompletionLoss)
   ) return "retryable-transient";
 
   if (/\b(?:timed?\s*out|timeout)\b|시간[^.\n]{0,30}초과/iu.test(normalized)) return "timeout";
@@ -141,18 +143,21 @@ export function classifyCodexDraftFailure(error: unknown): CodexDraftFailureKind
 
 /** Stable public code for a terminal provider failure. */
 export function codexDraftTerminalFailureCode(error: unknown): CodexDraftTerminalFailureCode | null {
-  for (const record of errorChain(error)) {
-    const code = typeof record.code === "string" ? record.code.toUpperCase() : "";
-    if (CODEX_TERMINAL_FAILURE_CODES.has(code as CodexDraftTerminalFailureCode)) {
-      return code as CodexDraftTerminalFailureCode;
-    }
-  }
+  // The classifier gives definitive nested codes precedence over a transient wrapper.
   const kind = classifyCodexDraftFailure(error);
   if (kind === "authentication") return "CODEX_AUTH_REQUIRED";
   if (kind === "model-version") return "CODEX_MODEL_INCOMPATIBLE";
   if (kind === "timeout") return "CODEX_TIMEOUT";
   if (kind === "retryable-transient") return "CODEX_TRANSIENT_FAILURE";
   return null;
+}
+
+/** For mixed API error boundaries, do not infer a provider failure from arbitrary input text. */
+export function codexDraftStructuredFailureCode(error: unknown): CodexDraftTerminalFailureCode | null {
+  const hasProviderCode = errorChain(error).some((record) =>
+    typeof record.code === "string"
+    && /^(?:CODEX_AUTH_REQUIRED|CODEX_MODEL_INCOMPATIBLE|CODEX_TIMEOUT|CODEX_TRANSIENT_FAILURE)$/u.test(record.code.toUpperCase()));
+  return hasProviderCode ? codexDraftTerminalFailureCode(error) : null;
 }
 
 function terminalCodexDraftError(

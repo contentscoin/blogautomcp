@@ -14,6 +14,7 @@ const ALLOWED_VARIATIONS = {
   visibleOption: ["main-item-only", "viewpoint-or-pose"],
   sceneContext: ["lighting-or-context", "external-seller-artwork", "detached-styling-props", "viewpoint-or-pose", "camera-distance"],
 } as const;
+const SCENE_REFLECTION_RULE = "singleScene permits ONE physical product plus its optically consistent reflection in a visible mirror or reflective surface within the same coherent photograph. A mirror reflection is not an independent second unit, repeated-original image, collage or inset panel; an ordinary mirror and its physical frame are scene props, not a graphic photo frame. Verify that the reflected item, pose, placement and perspective are physically explainable by that surface. Reject independent duplicate physical items when one item is required, pasted duplicates, split panels, contradictory reflected identity/design or physically inconsistent/impossible reflections. A plausible reflection does not excuse an actual product-shape or identity failure, and a genuine failed check must still make accepted=false.";
 const comparisonBranch = (results: readonly string[], variations: readonly string[]) => ({
   type: "object",
   properties: {
@@ -192,6 +193,7 @@ export async function reviewShoppingReferenceScene(options: {
       "Use actual sectionTitle/publicationText to decide whether the photo claims a COMPLETE set. A bundle product name or a paragraph discussing purchase quantity alone does not require every bought item in an illustrative main-item view. Allow one correctly identified component when the text does not present the photo as the complete included set. Never guess a component, substitute another volume/scent/model, or approve a visible contradiction with the selected product. A photo explicitly showing the complete set must preserve its verified contents; background props must not be presented as included.",
       "Compare category-appropriate silhouette, proportions, closures/base/seals when present, label hierarchy/spelling, selected color/option and material. For garments verify cut, waist, seams, hems, pockets, pattern and fabric; normal pose-dependent folds and camera angle are allowed, changing the garment design is not. Reject dents, stretching, wrong packaging, wrong option, invented printing, obscured identifying details or impossible placement. Checks for absent components pass only when the output does not invent them.",
       "Identity recognition is not shape fidelity. Do not treat a polished render as realism or certify exact pixel identity. Natural wearing/holding/ordinary lifestyle activity may pass; performance demonstrations, unsupported effects or invented included accessories fail. Inspect naturalScene for a believable camera photo with plausible anatomy/material/contact; singleScene must reject collage, repeated original, duplicate panels or inset photos.",
+      SCENE_REFLECTION_RULE,
       "noAddedText must reject every added headline, explanation, annotation, caption, arrow, label or banner (actual product branding is allowed). noFramesOrPanels must reject a framed seller photo, border, colored fact panel, explanatory layout, editorial card, slide or diagram. A recognizable correct product inside a card still fails. All disclosure and explanations must be outside the photo.",
       `Before the final checks, supply comparisons for ${COMPARISON_DIMENSIONS.join(", ")}. Each contains result=consistent|allowed-variation|contradiction|unverifiable, variation=none except an allowed-variation, referenceObservation, candidateObservation and basis. Allowed variation types by dimension: ${JSON.stringify(ALLOWED_VARIATIONS)}. Explain observed landmarks, what actually differs and why it is allowed or contradicts design. Never mark a contradiction/unverifiable dimension accepted. Do not turn a genuine failed check into true based on an allowed difference elsewhere.`,
       'Use only correlated result/variation pairs: consistent, contradiction and unverifiable MUST have variation="none". If there is an allowed photographic or contextual difference, use result="allowed-variation" and that dimension\'s allowed variation, even when product identity is consistent. The result classifies the comparison, not merely whether it is the same product. Never return consistent with a non-none variation, or allowed-variation with none.',
@@ -202,7 +204,10 @@ export async function reviewShoppingReferenceScene(options: {
     outputSchema: {
       type: "object", properties: {
         accepted: { type: "boolean" }, identityMatches: { type: "boolean" }, illustrativeOnly: { type: "boolean" },
-        comparisons: COMPARISON_SCHEMA, checks: { type: "object", properties: Object.fromEntries(SCENE_FIDELITY_CHECKS.map(key => [key, { type: "boolean" }])), required: SCENE_FIDELITY_CHECKS, additionalProperties: false },
+        comparisons: COMPARISON_SCHEMA, checks: { type: "object", properties: {
+          ...Object.fromEntries(SCENE_FIDELITY_CHECKS.map(key => [key, { type: "boolean" }])),
+          singleScene: { type: "boolean", description: SCENE_REFLECTION_RULE },
+        }, required: SCENE_FIDELITY_CHECKS, additionalProperties: false },
         reason: { type: "string" },
       }, required: ["accepted", "identityMatches", "illustrativeOnly", "comparisons", "checks", "reason"], additionalProperties: false,
     },
