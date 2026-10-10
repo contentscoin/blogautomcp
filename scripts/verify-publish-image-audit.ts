@@ -119,6 +119,62 @@ async function main() {
       return JSON.stringify({ reviews: [{ ...good, reason: "One selected product in a natural illustrative scene; AI disclosure is an adjacent caption, no announcement pixels" }] });
     };
     assert.equal((await auditPublishImages(scene)).ok, true); assertions++;
+    // Contract regressions for the real Cuckoo rejection: all identity/format
+    // findings were true, yet accepted=false because the product filled the
+    // foreground. Synthetic pixels below test prompt/schema and gate behavior,
+    // never claim that a live candidate has passed a new visual audit.
+    const cuckooContext: PublishImageAuditOptions = { ...scene, productName: "쿠쿠 에코웨일 큐브 음식물처리기",
+      selectedProduct: "쿠쿠 에코웨일 큐브 화이트 2L", composition: structuredClone(scene.composition) };
+    const kitchenTitle = "주방에서 어떤 장면에 잘 맞을까";
+    const kitchenBody = "화이트 큐브형 본체를 주방 조리대에 배치한 모습을 보여줍니다. 사진은 처리 방식이나 성능을 입증하는 자료가 아닙니다.";
+    Object.assign(cuckooContext.composition.sections[0], { title: kitchenTitle, body: [kitchenBody],
+      imageIntent: "AI 연출 이미지: 주방 생활 맥락을 보여주는 자연스러운 사진. 실제 사용 후기나 기능·수치·성능의 증거가 아님" });
+    Object.assign(cuckooContext.composition.renderNodes[0], { role: "scene" });
+    Object.assign(cuckooContext.composition.renderNodes[1], { text: kitchenTitle });
+    Object.assign(cuckooContext.composition.renderNodes[2], { text: kitchenBody });
+    cuckooContext.review = async call => {
+      const schema = call.outputSchema as { properties: { reviews: { items: { required: string[]; properties: Record<string, { type: string; description?: string }> } } } };
+      const line = call.userPrompt.split("\n").find(value => value.startsWith("Each attached image"))!;
+      const [slot] = JSON.parse(line.slice(line.indexOf("[")));
+      assert.equal(slot.role, "scene");
+      assert.equal(slot.referenceGuidedScene, true);
+      assert.equal(slot.visualContract.purpose, "lifestyle-illustration");
+      assert.deepEqual(slot.sectionBody, [kitchenBody]);
+      for (const text of [call.userPrompt, schema.properties.reviews.items.properties.accepted.description!]) {
+        assert.match(text, /natural photograph.*not a drawn illustration, diagram or information card/u);
+        assert.match(text, /Product-focused close-up photography is allowed when coherent setting cues remain visibly present/u);
+        assert.match(text, /large foreground product alone is not an intent mismatch/u);
+        assert.match(text, /No person, hands, wearing, use action, wide room view or staged price\/payment action is required/u);
+        assert.match(text, /a kitchen intent needs coherent kitchen cues/u);
+        assert.match(text, /isolated white-background catalog photo cannot satisfy that setting/u);
+        assert.match(text, /still reject implausible real-world scale, contact or placement, wrong identity\/options, distorted structure/u);
+        assert.match(text, /without overriding the separate identity, format and photoClaim verdicts/u);
+      }
+      assert.match(call.userPrompt, /Use ONLY the role assigned to this exact index/u);
+      assert.match(call.userPrompt, /role=scene is a body image, never a thumbnail/u);
+      assert.match(call.userPrompt, /Seller-added product-name typography outside the physical product is added body-image text/u);
+      assert.equal(schema.properties.reviews.items.properties.accepted.type, "boolean");
+      assert.ok(schema.properties.reviews.items.required.includes("accepted"));
+      const validate = new Ajv({ allErrors: true }).compile(call.outputSchema as object);
+      assert.equal(validate({ reviews: [{ ...good, accepted: false }] }), true, "a real adverse verdict remains schema-valid and must block downstream");
+      for (const accepted of [undefined, null, "yes", 1]) assert.equal(validate({ reviews: [{ ...good, accepted }] }), false);
+      return JSON.stringify({ reviews: [{ ...good, reason: "Correct white CUCKOO foreground product on a kitchen counter; coherent cabinets and utensils are visible, no people or use action, no proof claim" }] });
+    };
+    assert.equal((await auditPublishImages(cuckooContext)).ok, true); assertions++;
+    for (const patch of [
+      { accepted: false, reason: "쿠쿠 외형과 단일 주방 사진은 맞지만 전경 상품이 커 생활 맥락 일러스트 의도와 맞지 않습니다." },
+      { accepted: false, reason: "No kitchen setting is visible; this is an isolated white-background catalog photo" },
+      { accepted: false, reason: "Physically implausible product scale or unsupported contact with the counter" },
+      { identityMatches: false, reason: "The kitchen setting is correct but a distinguishable wrong product model is shown" },
+      { singlePhotograph: false, reason: "Product-focused kitchen layout is a collage, not one natural photograph" },
+      { noGraphicLayout: false, reason: "The compatible foreground product is pasted inside a graphic frame" },
+      { textPolicyMatches: false, reason: "Seller-added product-name typography is burned into this scene/body photo" },
+      { photoClaimMatches: false, reason: "The body claims the scene proves price or processing performance that pixels cannot establish" },
+    ]) await check(patch, false, cuckooContext);
+    for (const accepted of [undefined, null, "yes", 1]) {
+      const malformed = await auditPublishImages({ ...cuckooContext, review: async () => JSON.stringify({ reviews: [{ ...good, accepted }] }) });
+      assert.equal(malformed.failures[0].code, "INVALID_REVIEW"); assertions++;
+    }
     for (const reason of ["배송 중단·반품 안내 표지가 이미지 픽셀에 보임", "AAWireless 제품 외형은 맞지만 AI 연출 이미지 고지 대상"]) {
       const rejected = await auditPublishImages({ ...scene, review: async () => JSON.stringify({ reviews: [{ ...good, notice: true, reason }] }) });
       assert.equal(rejected.ok, false);

@@ -142,6 +142,10 @@ export async function collectShoppingProductSourceCandidates(options: {
   maximum?: number;
   /** A deliberate seller-source refresh bypasses recent retrieval reuse. */
   forceRefresh?: boolean;
+  /** Fresh reference preparation reviews the current gallery before unreviewed saved files. */
+  preferSourceImageUrls?: boolean;
+  /** Ordering only, never photo approval; callers must validate any prior review. */
+  priorityLocalCandidates?: string[];
 }, dependencies: { download: typeof downloadProductSourcePhoto; normalize?: (file: string) => Promise<string | null>;
   now?: () => number } = { download: downloadProductSourcePhoto }): Promise<string[]> {
   const maximum = Math.max(1, Math.min(20, Math.floor(options.maximum || 16)));
@@ -164,7 +168,10 @@ export async function collectShoppingProductSourceCandidates(options: {
   };
   // A deliberate refresh must reach the seller even when saved local files
   // already fill the candidate quota. Keep the default preserved-source order.
-  if (!options.forceRefresh) for (const file of options.localCandidates) await add(file);
+  if (!options.forceRefresh) {
+    if (options.preferSourceImageUrls) for (const file of options.priorityLocalCandidates || []) await add(file);
+    else for (const file of options.localCandidates) await add(file);
+  }
   const sources = [...new Set(options.sourceImageUrls || [])].filter(isAllowedProductPhotoUrl).slice(0, 20);
   const now = (dependencies.now ?? Date.now)();
   // Reusing a receipt is retrieval only, never approval or a negative QA cache.
@@ -187,7 +194,7 @@ export async function collectShoppingProductSourceCandidates(options: {
       downloaded += 1;
     } catch { /* One unavailable seller image does not block the rest. */ }
   }
-  if (options.forceRefresh) for (const file of options.localCandidates) await add(file);
+  if (options.forceRefresh || options.preferSourceImageUrls) for (const file of options.localCandidates) await add(file);
   if (byHash.size === 0 && sources.length > 0 && downloaded === 0) {
     throw new Error("PRODUCT_SOURCE_DOWNLOAD_FAILED: 저장된 판매페이지 상품 이미지를 내려받지 못했습니다.");
   }

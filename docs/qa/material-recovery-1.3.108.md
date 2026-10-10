@@ -27,6 +27,14 @@ Before these corrections, all 72 baseline image files retained identical bytes. 
 
 These checks establish implementation behavior. Actual model reviews and material readiness are verified separately after installation.
 
-## Completion evidence
+## Release and completion evidence
 
-Implementation, regression results, release hashes, installed-runtime verification and actual material outcomes are recorded after verification. A complete implementation or a passing manuscript score alone does not establish material readiness.
+- [CI 38045382105](https://github.com/contentscoin/blogautomcp/actions/runs/38045382105), implementation head `5f7ace9`: root and Sites typecheck, lint, regression/unit checks and production builds passed. Local full TypeScript and scoped lint also passed.
+- Windows production build and NSIS packaging passed. Packaged metadata is 1.3.108; all sixteen checked runtime files match source SHA. Root secrets and temporary diagnostics are excluded.
+- Installer `BrandConnect-Automation-Setup-1.3.108.exe`: 345504463 bytes, SHA256 `82401dbf1457a8c45b2a5809fec56e3801ee49fcd19a61b95fc92c5e6299f099`; SHA512 `m9TBBZKZ+IwCKcCyX1dj7nu7De7la4JmpFfnjIohNAsqAH15uuyr18YxW4vycgfcqerbSWSZzXlh7+V5zKe1ag==`.
+- Blockmap: 352562 bytes, SHA256 `098252027eac9204e29f3b7286277e1338700c4ff27d7f6e8d0fc39164f81f7a`. Local update manifest/integrity verification passed.
+- The existing Sites Windows update feed activated and re-queried 1.3.108 at `2026-10-10T10:43:05.693Z`. Installation is verified separately after the normal PC update.
+- Normal installation/restart completed at approximately `10:47:40Z`. The local API reports 1.3.108 and all sixteen installed runtime files match source SHA. AAWireless and Shark passed final approval, increasing current scoped readiness to 11/19. Three completed five-image packages still hit the request-specific Codex stream failure; follow-up evidence and corrections are recorded in the 1.3.109 report.
+- The single eight-material job terminated with one ready (AirMade), raising current scoped readiness to 9/19. Zylek saved all five images before its final text review hit the same completion-loss error. OpenRun saved two of its three new missing photos; its remaining candidate failed actual visible-product fidelity. AirPods remains blocked on exact-model reference identification.
+
+Actual installed-runtime and subsequent material recovery results are recorded after verification. A complete implementation or a passing manuscript score alone does not establish material readiness.

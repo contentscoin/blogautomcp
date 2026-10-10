@@ -9,6 +9,8 @@ import { collectShoppingProductSourceCandidates, ensureStaticDecodableImage, PRO
   readSavedProductSourceCandidates } from "./lib/product-photo-source";
 import { buildSellerOriginalRepairTarget } from "./lib/seller-original-repair-target";
 import type { ProductSectionImageDiagnostics } from "./lib/product-photo-review";
+import { selectVerifiedProductPhotos } from "./lib/product-photo-review";
+import { selectShoppingSceneReference } from "./lib/shopping-reference-scene";
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "seller-original-recovery-"));
@@ -43,7 +45,8 @@ async function main() {
         sha256: sha(bytes), retrievedAt, identityVerified: false, rightsGranted: false }));
       return file;
     };
-    const collect = async (dir: string, options: { localCandidates?: string[]; sourceImageUrls?: string[]; forceRefresh?: boolean; maximum?: number } = {}) => {
+    const collect = async (dir: string, options: { localCandidates?: string[]; sourceImageUrls?: string[]; forceRefresh?: boolean;
+      maximum?: number; preferSourceImageUrls?: boolean; priorityLocalCandidates?: string[] } = {}) => {
       const downloads: string[] = [];
       const candidates = await collectShoppingProductSourceCandidates({ localCandidates: [], sourceImageUrls: [url], outputDir: dir, ...options }, {
         now: () => now, download: async sourceUrl => { downloads.push(sourceUrl); return fresh; },
@@ -106,6 +109,81 @@ async function main() {
       const dir = fixture();
       const file = saved(dir, "seller.png");
       assert.deepEqual(await collect(dir, { localCandidates: [file], maximum: 1 }), { candidates: [file], downloads: [] });
+    });
+    await test("current gallery reaches real twelve-candidate review ahead of twenty distinct saved locals", async () => {
+      const dir = fixture();
+      const locals: string[] = [];
+      for (let index = 0; index < 20; index++) {
+        const bytes = await sharp({ create: { width: 24, height: 24, channels: 3, background: { r: index, g: 100, b: 200 } } }).png().toBuffer();
+        locals.push(saved(dir, `local-${index}.png`, bytes, `https://shop-phinf.pstatic.net/other-${index}.png`));
+      }
+      const selected = saved(dir, "zz-selected.png", blue);
+      const before = snapshot(dir);
+      const ordinary = await collect(dir, { localCandidates: locals, maximum: 20 });
+      assert.deepEqual(ordinary.candidates, locals, "other collector flows preserve local priority");
+      assert.deepEqual(ordinary.downloads, []);
+      const current = await collect(dir, { localCandidates: locals, maximum: 20, preferSourceImageUrls: true });
+      assert.equal(current.candidates.length, 20, "collector budget is unchanged");
+      assert.equal(current.candidates[0], selected);
+      assert.deepEqual(current.downloads, [], "intact current URL receipt is reused, not fetched again");
+      const reviewed: string[] = [];
+      let geometryCalls = 0;
+      const reference = await selectShoppingSceneReference({ paths: current.candidates, productName: "selected gallery fixture", selectedProduct: "selected exact option" }, {
+        verify: (files, name, maximum, options) => selectVerifiedProductPhotos(files, name, maximum, { ...options,
+          review: async request => {
+            const file = request.imagePaths![0];
+            reviewed.push(file);
+            return JSON.stringify({ productPhoto: file === selected, reason: file === selected ? "Exact selected product pixels" : "Different model" });
+          } }),
+        review: async request => {
+          geometryCalls++;
+          assert.deepEqual(request.imagePaths, [selected]);
+          return JSON.stringify({ identityMatches: true, geometryReadable: true, completeShape: true, notDeformed: true, unobstructed: true,
+            subject: "exact selected product", geometry: "complete observed silhouette", labels: "none visible", reason: "observed complete product" });
+        },
+      });
+      assert.equal(reference.path, selected);
+      assert.equal(reviewed[0], selected);
+      assert.equal(reviewed.length, 12, "existing photo-review budget is unchanged");
+      assert.equal(geometryCalls, 1, "URL lineage does not replace geometry/identity review");
+      const denied = await selectVerifiedProductPhotos(current.candidates, "current URL rejected fixture", 12, {
+        review: async () => JSON.stringify({ productPhoto: false, reason: "Not the exact selected model" }),
+      });
+      assert.deepEqual(denied, [], "current URL candidates still fail closed on a real negative photo verdict");
+      assert.deepEqual(snapshot(dir), before, "ordering never overwrites files or records");
+    });
+    await test("explicit local review ordering is opt-in and byte-deduplicated", async () => {
+      const dir = fixture();
+      const selected = saved(dir, "selected.png");
+      const prior = saved(dir, "prior.png", red, "https://shop-phinf.pstatic.net/prior.png");
+      const current = await collect(dir, { localCandidates: [selected, prior], priorityLocalCandidates: [prior, prior], preferSourceImageUrls: true });
+      assert.deepEqual(current, { candidates: [prior, selected], downloads: [] });
+      assert.deepEqual(await collect(dir, { localCandidates: [selected, prior], priorityLocalCandidates: [prior] }),
+        { candidates: [selected, prior], downloads: [] }, "default collection ignores the optional reference-specific ordering");
+    });
+    for (const mutation of ["expired", "missing", "changed", "ambiguous"]) {
+      await test(`source-priority ${mutation} receipt cannot avoid fresh retrieval behind a full local quota`, async () => {
+        const dir = fixture();
+        const file = saved(dir, "source.png");
+        if (mutation === "missing") fs.unlinkSync(file);
+        else if (mutation === "changed") fs.writeFileSync(file, red);
+        else if (mutation === "ambiguous") saved(dir, "different.png", red);
+        else saved(dir, "source.png", blue, url, new Date(now - PRODUCT_SOURCE_RECEIPT_TTL_MS).toISOString());
+        const local = saved(dir, "local.png", red, "https://shop-phinf.pstatic.net/local.png");
+        const result = await collect(dir, { localCandidates: [local], maximum: 1, preferSourceImageUrls: true });
+        assert.deepEqual(result, { candidates: [fresh], downloads: [url] });
+      });
+    }
+    await test("source-priority preserves explicit force-refresh and unavailable-source fallback", async () => {
+      const dir = fixture();
+      const file = saved(dir, "source.png");
+      assert.deepEqual(await collect(dir, { localCandidates: [file], priorityLocalCandidates: [file], maximum: 1,
+        preferSourceImageUrls: true, forceRefresh: true }), { candidates: [fresh], downloads: [url] });
+      let attempts = 0;
+      const result = await collectShoppingProductSourceCandidates({ localCandidates: [file], sourceImageUrls: [url], outputDir: dir,
+        preferSourceImageUrls: true }, { now: () => now + PRODUCT_SOURCE_RECEIPT_TTL_MS, download: async () => { attempts++; throw new Error("HTTP429 fixture"); } });
+      assert.equal(attempts, 1);
+      assert.deepEqual(result, [file], "an unavailable source preserves old pixels for actual QA rather than approving or overwriting them");
     });
     for (const mutation of ["changed", "deleted", "corrupt receipt", "wrong receipt SHA", "wrong receipt version", "empty image"]) {
       await test(`${mutation} cannot be trusted as cached seller pixels`, async () => {

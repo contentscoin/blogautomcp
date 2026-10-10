@@ -603,15 +603,28 @@ function freeformImageRules(
 }
 
 /** Explicit planning step only: callers must invalidate approval when applying this to a saved draft. */
-export function applyShoppingNaturalPhotoPlan(sections: ResolvedPostSectionV1[]): ResolvedPostSectionV1[] {
+export function applyShoppingNaturalPhotoPlan(sections: ResolvedPostSectionV1[], options: { productName?: string } = {}): ResolvedPostSectionV1[] {
+  // A wearable or fashion accessory is not necessarily clothing. Classify only
+  // the selected product name, never paragraph mentions of outfits or fit.
+  const name = String(options.productName || "").normalize("NFKC");
+  const nonClothing = /이어폰|헤드폰|스마트워치|시계|가방|백팩|지갑|파우치|선글라스|세탁기|건조기|의류\s*관리기|다리미|옷걸이|행거|세제|세탁망|집게|니트릴|프린터|프레스|스티커|인형|바디\s*워시|샴푸|\b(?:earphones?|headphones?|smartwatch|backpack|detergent|dryer|printer)\b/iu.test(name);
+  const clothing = !nonClothing && /티셔츠|셔츠|블라우스|바지|팬츠|반바지|원피스|스커트|치마|재킷|자켓|점퍼|패딩|코트|니트|가디건|조끼|양말|속옷|레깅스|\b(?:t[-\s]?shirts?|shirts?|blouses?|pants|trousers|shorts|dresses|skirts?|jackets?|coats?|cardigans?|leggings)\b/iu.test(name);
+  const sceneDirections = clothing ? [
+    "전체 의류와 코디가 선명한 일상 장면, 자연스러운 자세와 넓은 구도",
+    "첫 컷과 다른 장소·자세의 의류 착용 장면, 앉거나 쉬어도 상품 윤곽이 선명한 구도",
+    "앞 컷과 다른 사선 또는 측면 구도, 참조에서 보이는 의류 구조를 유지",
+  ] : [
+    "상품에 맞는 일상 공간에서 전체 제품과 식별 구조가 크게 보이는 자연스러운 사진",
+    "첫 컷과 다른 생활 공간이나 배치에서 제품 전체 윤곽과 연결 구조가 선명한 자연스러운 사진",
+    "앞 컷과 다른 사선 또는 측면에서 참조의 제품 전체 형상과 식별 특징이 보이는 자연스러운 사진",
+  ];
+  const preservation = clothing
+    ? "의류의 색상·핏·비율·기장·봉제·보이는 구조를 보존"
+    : "상품의 색상·비율·재질·식별 특징과 참조에 보이는 전체 연결 구조를 보존. 손·신체·머리카락·소품이 핵심 구조를 가리지 않게 배치하고, 착용이나 사용 동작은 필요하지 않음";
   return sections.map((section, index) => {
     const role = shoppingPhotoRoleAt(index, sections.length);
     const sceneIndex = sections.slice(0, index + 1).filter((_, candidate) => shoppingPhotoRoleAt(candidate, sections.length) === "scene").length;
-    const sceneDirection = [
-      "전체 상품과 코디가 선명한 일상 장면, 자연스러운 자세와 넓은 구도",
-      "첫 컷과 다른 장소·자세의 생활 장면, 앉거나 쉬는 자연스러운 구도",
-      "앞 컷과 다른 사선 또는 측면 구도, 참조에서 보이는 상품 구조를 유지",
-    ][Math.max(0, sceneIndex - 1)] || "서로 다른 자연스러운 생활 장면";
+    const sceneDirection = sceneDirections[Math.max(0, sceneIndex - 1)] || "서로 다른 자연스러운 생활 장면";
     return {
       ...section,
       imageMin: role === "none" ? 0 : 1,
@@ -621,7 +634,7 @@ export function applyShoppingNaturalPhotoPlan(sections: ResolvedPostSectionV1[])
         ? `AI 연출 이미지: ${section.title}의 생활 맥락을 보여주는 자연스러운 사진. 실제 사용 후기나 기능·수치·성능의 증거가 아님`
         : "이미지 없음: 사양·가격·치수는 확인한 판매정보를 본문 텍스트로 설명",
       imagePlacement: role === "original" ? "before-heading" : "after-body",
-      promptRecipe: role === "scene" ? `${sceneDirection}. 상품의 색상·핏·비율·기장·보이는 구조를 보존. 사진 한 장, 설명문·정보 카드·프레임·콜라주 없음.` : undefined,
+      promptRecipe: role === "scene" ? `${sceneDirection}. ${preservation}. 기능·수치·성능·효과의 증거 또는 실제 사용 후기 장면이 아님. 사진 한 장, 설명문·정보 카드·프레임·콜라주 없음.` : undefined,
     };
   });
 }
@@ -769,6 +782,8 @@ export function resolvePostDocument(options: {
   editorial?: import("../../scripts/lib/editorial-templates").EditorialSelection;
   connectKind: BrandConnectKind;
   title: string;
+  /** Selected product identity for category-specific scene recipes; title is a legacy fallback. */
+  productName?: string;
   sections: string[];
   hashtags: string[];
   imagePaths: string[];
@@ -844,7 +859,7 @@ export function resolvePostDocument(options: {
       ...freeformImageRules({ ...parsed, imagePaths: allocations[index] || [] }, sectionContracts[index]),
     };
   });
-  const sections = options.connectKind === "SHOPPING" ? applyShoppingNaturalPhotoPlan(resolvedSections) : resolvedSections;
+  const sections = options.connectKind === "SHOPPING" ? applyShoppingNaturalPhotoPlan(resolvedSections, { productName: options.productName || options.title }) : resolvedSections;
   const earlyConnectSectionId = plan
     ? planIds[plan.findIndex((section) => section.earlyConnectCard)] ?? null
     : sections[Math.max(0, sectionContracts.findIndex(section => section.id === contract.earlyConnectAfterSectionId))]?.id;

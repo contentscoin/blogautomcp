@@ -9866,6 +9866,7 @@ async function runPreparedPostRevision(
   const resolveRevisedComposition = (candidate: { title: string; sections: string[]; hashtags: string[] }) =>
     normalizePublishedPostText(resolvePostDocument({
       connectKind,
+      productName: name,
       editorial: prepared.composition!.editorial,
       title: candidate.title,
       sections: candidate.sections,
@@ -10577,6 +10578,7 @@ async function main() {
       preparedPostOverride?.composition ||
       resolvePostDocument({
         connectKind: runtimeConnectKind,
+        productName: product.name,
         editorial: assembled?.spec.editorial ?? post.editorial ?? createEditorialSelection(runtimeConnectKind, product),
         title: post.title,
         sections: post.sections,

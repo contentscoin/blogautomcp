@@ -29,11 +29,12 @@ import { buildProductImageVisualContract, PRODUCT_IMAGE_VISUAL_CONTRACT_RULES_EN
 
 const NOTICE_PIXELS_RULE = "notice=true ONLY means a shipping, service or seller announcement visible in the attached IMAGE PIXELS, such as a delivery-closure notice, returns/customer-service announcement or seller notice board. It never means AI-generated provenance, an illustrative image intent, the need for AI disclosure, or an adjacentCaption/article disclosure outside the image. Set notice=false for those contexts; they do not turn a product photograph into a notice. If AI disclosure or other explanatory copy is burned into a body photo, reject it using textPolicyMatches/noGraphicLayout, not notice merely because it mentions AI.";
 const SINGLE_PHOTOGRAPH_RULE = "ONE physical product and its optically consistent reflection in a visible mirror or reflective surface may belong to one coherent natural photograph. Such a reflection is not a second included unit, repeated-original image, collage or inset panel. An ordinary mirror and its physical frame are scene props, not a graphic photo frame. Check that the reflected item, pose, placement and perspective can be explained by that surface. Reject independent duplicate physical products when the slot requires one item, pasted duplicates, split panels, contradictory reflected identity/design, or physically inconsistent/impossible reflections; do not excuse genuine distortion.";
+const NATURAL_SCENE_INTENT_RULE = "A referenceGuidedScene or lifestyle-illustration means a natural photograph in a plausible daily setting, not a drawn illustration, diagram or information card. Product-focused close-up photography is allowed when coherent setting cues remain visibly present; a large foreground product alone is not an intent mismatch. No person, hands, wearing, use action, wide room view or staged price/payment action is required. A price or technical discussion does not require the photo to demonstrate price or performance unless the published text explicitly claims that photographic evidence. Any explicitly required setting must actually be visible: a kitchen intent needs coherent kitchen cues; an isolated white-background catalog photo cannot satisfy that setting. Foreground image occupancy is not physical scale: still reject implausible real-world scale, contact or placement, wrong identity/options, distorted structure, hidden identifying features, added text/graphic layouts, or unsupported photographic proof claims. Apply these rules to accepted without overriding the separate identity, format and photoClaim verdicts.";
 
 export interface PublishImageAuditFailure {
   nodeIndex: number;
   assetPath: string;
-  code: "INVALID_CONTEXT" | "MISSING_IMAGE" | "INVALID_IMAGE" | "LONG_IMAGE" | "SEMANTIC_REJECTION" | "INVALID_REVIEW" | "IMAGE_CHANGED";
+  code: "INVALID_CONTEXT" | "MISSING_IMAGE" | "INVALID_IMAGE" | "LONG_IMAGE" | "SEMANTIC_REJECTION" | "INVALID_REVIEW" | "IMAGE_CHANGED" | "IMAGE_PAYLOAD_TOO_LARGE";
   reason: string;
   /** Wrong product, mixed variants and notice panels are unsafe in every section. */
   rejectionScope?: PublicationImageRejectionScope;
@@ -57,6 +58,29 @@ export interface PublishImageAuditOptions {
   sourceSnapshotId?: string;
   /** Offline tests only. Production uses the visual draft provider. */
   review?: (options: CodexDraftOptions) => Promise<string>;
+}
+
+// Full decoded PNGs are embedded as base64 by Codex. Keep ample space below
+// the observed ~16 MB WebSocket request boundary without changing image pixels.
+export const PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES = 8 * 1024 * 1024;
+export const PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT = 8;
+export function planPublishImageAuditBatches<T extends { snapshotBytes: number }>(candidates: readonly T[]): { batches: T[][]; oversized: T[] } {
+  const batches: T[][] = [];
+  const oversized: T[] = [];
+  let batch: T[] = [], bytes = 0;
+  for (const candidate of candidates) {
+    if (!Number.isSafeInteger(candidate.snapshotBytes) || candidate.snapshotBytes < 1 || candidate.snapshotBytes > PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES) {
+      oversized.push(candidate);
+      continue;
+    }
+    if (batch.length && (batch.length >= PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT || bytes + candidate.snapshotBytes > PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES)) {
+      batches.push(batch);
+      batch = []; bytes = 0;
+    }
+    batch.push(candidate); bytes += candidate.snapshotBytes;
+  }
+  if (batch.length) batches.push(batch);
+  return { batches, oversized };
 }
 
 export class PublishImageAuditError extends Error {
@@ -95,7 +119,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
   }
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "publish-image-audit-"));
   const candidates: Array<{
-    nodeIndex: number; sectionId: string | null; assetPath: string; snapshot: string; sha256: string;
+    nodeIndex: number; sectionId: string | null; assetPath: string; snapshot: string; snapshotBytes: number; sha256: string;
     role: string; sectionTitle: string; sectionBody: string[]; imageIntent: string; allowProductPhoto: boolean;
     visualContract: ReturnType<typeof buildProductImageVisualContract>;
     referenceScene?: { referencePath: string; referenceSha256: string; strategyVersion: string; sourceSnapshotId: string; caption: string };
@@ -175,7 +199,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
         fail(nodeIndex, node.assetPath, "INVALID_IMAGE", "Final image cannot be fully decoded as a static image.");
         continue;
       }
-      candidates.push({ nodeIndex, sectionId: node.sectionId, assetPath: node.assetPath, snapshot, sha256, role: node.role,
+      candidates.push({ nodeIndex, sectionId: node.sectionId, assetPath: node.assetPath, snapshot, snapshotBytes: fs.statSync(snapshot).size, sha256, role: node.role,
         sectionTitle: thumbnail ? "Thumbnail" : sectionTitle, sectionBody,
         imageIntent: section?.imageIntent || "Selected product overview with title overlay",
         allowProductPhoto: thumbnail || isShoppingLifestyleImage(section!) || allowsGenericBrandPostProductPhoto({ sectionTitle, imageIntent: section!.imageIntent, imageSource: section!.imageSource }),
@@ -198,8 +222,10 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           "Check visible product identity against the selected product context: brand, distinctive design, product line and visible variant details. This is visual compatibility review, not OCR certification of every selected specification. Do not require the complete model number, capacity, scent or purchase quantity to be printed and legible on the body/package. Missing or small specification text alone must not cause rejection. Do not claim those hidden specifications were verified from pixels.",
           "Reject visible contradictions: wrong brand, distinguishable wrong model/design, scent/variant mismatch or conflicting bundle. Reject when there is no identifiable product or its visible distinguishing characteristics genuinely cannot resolve which product is shown; brand plus a generic category alone is not sufficient. A lavender Stress Relief 532ml 2pack must not become fragrance-free Skin Relief or a mixed pair. A single-item detail may illustrate a multi-pack without depicting every purchased unit, provided it does not claim a conflicting bundle.",
           "Every body image must be ONE natural photograph. Reject information cards, specification tables, explanatory text panels, frames around a seller photo, pasted inset photos, collage, split screen, slides, banners, charts, labels, arrows and graphic layouts, even when all their facts are true. A complete unchanged photograph of the product is allowed. Printed text physically present on the real product or package is allowed; added labels and captions are not. Product specifications belong in article text, never an image card.",
+          "Use ONLY the role assigned to this exact index. role=scene is a body image, never a thumbnail. A thumbnail elsewhere in the batch never grants title-overlay permission to a body image. Seller-added product-name typography outside the physical product is added body-image text, even if the source is an official seller photograph.",
           NOTICE_PIXELS_RULE,
           SINGLE_PHOTOGRAPH_RULE,
+          NATURAL_SCENE_INTENT_RULE,
           "Assess each candidate independently. Other attached candidates are also unverified and must not become the reference for the selected model. For a claimed design/variant contradiction, name the concrete visible conflicting characteristic and the selected-product fact it contradicts; do not invent a model-specific design from memory or assume another candidate is correct.",
           "Only a slot with role=thumbnail may contain a large headline over one natural full-photo composition. Its core headline must remain large, high contrast, complete and readable at small preview size. Reject tiny text, tiny product photos pasted inside a frame or panel, cluttered fact-card layouts, clipped essential words, and overlays hiding distinguishing product features. No invented claims. A title overlay is permitted here and nowhere else.",
           "Mixed options reject unless this specific section explicitly compares the named visible options AND the image clearly labels/distinguishes each option without implying a mixed purchase bundle. Merely mentioning comparison, other scents or alternatives is insufficient. Thumbnail mixed options always reject.",
@@ -214,14 +240,24 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
         reasoningEffort: resolveTextReasoningEffort(),
         outputSchema: VISUAL_REVIEW_SCHEMA,
     });
-    for (let offset = 0; offset < candidates.length; offset += 8) {
-      const batch = candidates.slice(offset, offset + 8);
+    const plan = planPublishImageAuditBatches(candidates);
+    if (plan.oversized.length) {
+      for (const candidate of plan.oversized) fail(candidate.nodeIndex, candidate.assetPath, "IMAGE_PAYLOAD_TOO_LARGE",
+        `Final image review snapshot is ${candidate.snapshotBytes} bytes, above the ${PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES}-byte transport budget. The original file was preserved; provide an individually reviewable image or resolve the provider payload limit before approval. No partial approval or downsampling was performed.`);
+      // No pixels were reviewed. In particular the assertion wrapper must not
+      // clear prior rejection records for other, unreviewed candidates.
+      result.images.length = 0;
+      if (receiptId) invalidateSuccessfulImageAuditReceipt(receiptId);
+      return result;
+    }
+    for (const batch of plan.batches) {
       requests.push({ batch, call: buildCall(batch) });
     }
     // Hash the actual requests, not a manually maintained description of the
     // prompt. Temporary snapshot paths are replaced by the original byte hashes.
     const receiptKey = crypto.createHash("sha256").update(JSON.stringify({
       policy: "final-publication-image-audit/v2-natural-photo",
+      transport: { maximumImageBytes: PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES, maximumImages: PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT },
       images: candidates.map(candidate => ({ nodeIndex: candidate.nodeIndex, sha256: candidate.sha256,
         sectionId: candidate.sectionId, role: candidate.role, referenceScene: candidate.referenceScene ? { ...candidate.referenceScene, referencePath: undefined } : undefined })),
       requests: requests.map(({ batch, call }) => ({ ...call, imagePaths: batch.map(candidate => candidate.sha256) })),
@@ -310,6 +346,7 @@ const VISUAL_REVIEW_SCHEMA = {
         properties: {
           index: { type: "integer" },
           ...Object.fromEntries(VISUAL_REVIEW_BOOLEAN_KEYS.map(key => [key, { type: "boolean" }])),
+          accepted: { type: "boolean", description: NATURAL_SCENE_INTENT_RULE },
           notice: { type: "boolean", description: NOTICE_PIXELS_RULE },
           singlePhotograph: { type: "boolean", description: SINGLE_PHOTOGRAPH_RULE },
           reviewClass: { type: "string", enum: ["product-photo", "feature-evidence"] },

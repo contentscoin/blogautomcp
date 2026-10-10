@@ -368,8 +368,12 @@ export async function prepareBrandPostImageReferenceContext(options: {
   const reviewedReferences = assets.flatMap(asset => {
     const reference = asset.referenceScene;
     try {
-      return reference?.reviewStatus === "passed" && reference.sourceSnapshotId === options.manifest.sourceSnapshot?.snapshotId &&
-        reference.strategyVersion === SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION && sha256File(reference.referencePath) === reference.referenceSha256
+      return asset.provenance === "GENERATED_SCENE" && asset.creationMethod === "reference-guided-scene" && asset.remoteGenerated === true &&
+        reference?.reviewStatus === "passed" && reference.sourceSnapshotId === options.manifest.sourceSnapshot?.snapshotId &&
+        reference.strategyVersion === SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION &&
+        REFERENCE_SCENE_REVIEW_CHECKS.every(key => reference.checks?.[key] === true) &&
+        reference.reviewedOutputSha256 === asset.sha256 && sha256File(asset.path) === asset.sha256 &&
+        sha256File(reference.referencePath) === reference.referenceSha256
         ? [reference.referencePath] : [];
     } catch { return []; }
   });
@@ -394,7 +398,16 @@ export async function prepareBrandPostImageReferenceContext(options: {
     } catch { /* A modified source requires fresh seller identity and shape review. */ }
   }
   if (!reference) {
-    const paths = await (dependencies.collect ?? collectShoppingProductSourceCandidates)({ localCandidates, sourceImageUrls: options.sourceImageUrls, outputDir, maximum: 20 });
+    const snapshotUrls = options.manifest.sourceSnapshot.product.referenceImageUrls;
+    // The selected snapshot gallery must reach the bounded visual review before
+    // unrelated hash-sorted saved files. Prior coherent reviewed references stay
+    // first; URL/receipt lineage itself never grants identity or shape approval.
+    const sourceImageUrls = [...new Set([
+      ...(Array.isArray(snapshotUrls) ? snapshotUrls.filter((url): url is string => typeof url === "string") : []),
+      ...(options.sourceImageUrls || []),
+    ])];
+    const paths = await (dependencies.collect ?? collectShoppingProductSourceCandidates)({ localCandidates, sourceImageUrls,
+      outputDir, maximum: 20, preferSourceImageUrls: true, priorityLocalCandidates: reviewedReferences });
     const candidates = thumbnail
       ? (await Promise.all(paths.map(async file => await isShoppingThumbnailSourceEligible(file) ? file : null)))
         .filter((file): file is string => Boolean(file))

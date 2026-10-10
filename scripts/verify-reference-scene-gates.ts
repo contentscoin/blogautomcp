@@ -8,6 +8,7 @@ import sharp from "sharp";
 import { classifyBrandPostImageEvidence, referenceSceneReviewIssue, REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 import type { BrandPostPackageManifestV2, BrandPostPackageImageAsset } from "../src/lib/brand-post-package";
 import { isShoppingThumbnailSourceAspectAllowed, isShoppingThumbnailSourceEligible } from "./lib/thumbnail-layout-v2";
+import { collectShoppingProductSourceCandidates } from "./lib/product-photo-source";
 
 const hash = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 async function main() {
@@ -119,6 +120,62 @@ async function main() {
     for (const dimensions of [{ width: 54, height: 100 }, { width: 186, height: 100 }, { width: 0, height: 100 }, { width: Number.NaN, height: 100 }, {}]) assert.equal(isShoppingThumbnailSourceAspectAllowed(dimensions), false);
     const review = { strategyVersion: REFERENCE_SCENE_STRATEGY_VERSION, referencePath: source, referenceSha256: hash(source), sourceSnapshotId: snapshot.snapshotId, reviewStatus: "passed" as const, reviewedOutputSha256: hash(generated), checks: Object.fromEntries(REFERENCE_SCENE_REVIEW_CHECKS.map(key => [key, true])) };
     const asset: BrandPostPackageImageAsset = { path: generated, sourcePath: generated, sha256: hash(generated), role: "body", sectionId, slotId: `${sectionId}:image:1`, imageIntent: composition.sections[0].imageIntent, provenance: "GENERATED_SCENE", creationMethod: "reference-guided-scene", remoteGenerated: true, referenceScene: review };
+    // Fresh references prioritize the selected snapshot gallery over the entire
+    // saved hash-name pool, while preserving coherent reviewed-source priority.
+    const selectedUrl = "https://shop-phinf.pstatic.net/current-selected-product.png";
+    const fallbackUrl = "https://shop-phinf.pstatic.net/older-collected-product.png";
+    const freshSnapshot = createProductSnapshot({ productId: "fresh-gallery", connectKind: "SHOPPING", externalProductId: "selected",
+      sourceUrl: "https://example.test/selected", product: { name: "선택 상품", referenceImageUrls: [selectedUrl] } });
+    const freshManifest: BrandPostPackageManifestV2 = { ...manifest, brandLinkId: "fresh-gallery", sourceSnapshot: freshSnapshot,
+      imageAssets: [{ path: source, sourcePath: source, sha256: hash(source), role: "body", provenance: "ORIGINAL", creationMethod: "source" }] };
+    const freshDir = path.join(store.getBrandPostPackageDir(freshManifest.brandLinkId), "product-sources");
+    fs.mkdirSync(freshDir, { recursive: true });
+    for (let index = 0; index < 20; index++) {
+      const file = path.join(freshDir, `old-${index}.png`);
+      await sharp({ create: { width: 24, height: 24, channels: 3, background: { r: index, g: 50, b: 150 } } }).png().toFile(file);
+      fs.writeFileSync(`${file}.retrieval.json`, JSON.stringify({ version: "product-image-retrieval/v1", sourceUrl: `https://shop-phinf.pstatic.net/old-${index}.png`,
+        sha256: hash(file), retrievedAt: new Date().toISOString() }));
+    }
+    const selectedFile = path.join(freshDir, "zz-current-selected.png");
+    fs.copyFileSync(hero, selectedFile);
+    fs.writeFileSync(`${selectedFile}.retrieval.json`, JSON.stringify({ version: "product-image-retrieval/v1", sourceUrl: selectedUrl,
+      sha256: hash(selectedFile), retrievedAt: new Date().toISOString(), identityVerified: false }));
+    let freshReviews = 0;
+    const freshContext = await prepareBrandPostImageReferenceContext({ manifest: freshManifest, productName: "선택 상품",
+      target: heroTarget(), sourceImageUrls: [fallbackUrl] }, {
+      collect: options => {
+        assert.equal(options.preferSourceImageUrls, true);
+        assert.deepEqual(options.priorityLocalCandidates, [], "an ORIGINAL section review alone is not a reference-geometry approval");
+        assert.deepEqual(options.sourceImageUrls, [selectedUrl, fallbackUrl]);
+        return collectShoppingProductSourceCandidates(options, { download: async url => {
+          assert.equal(url, fallbackUrl, "current selected URL should reuse its intact receipt");
+          throw new Error("offline removed fallback");
+        } });
+      },
+      select: async options => {
+        freshReviews++;
+        assert.equal(options.paths[0], selectedFile, "the current seller photo remains within the first twelve reviewed candidates");
+        assert.equal(options.paths.length, 20);
+        return sourceReference(selectedFile);
+      },
+    });
+    assert.equal(freshContext.reference.path, selectedFile);
+    assert.equal(freshReviews, 1, "receipt lineage always reaches actual reference selection");
+    assert.equal(fs.readFileSync(checkpointPath, "utf8"), eligibleCheckpoint, "other existing body checkpoints are preserved");
+    assert.equal(hash(bodyBindingPath), bodyBindingHash, "existing raw-job bindings are preserved");
+    for (const [index, mutation] of [{}, { reviewStatus: "pending" }, { sourceSnapshotId: "old" },
+      { reviewedOutputSha256: "0".repeat(64) }, { checks: { ...review.checks, noAddedText: false } },
+      { referenceSha256: "0".repeat(64) }, { strategyVersion: "old" }].entries()) {
+      const prior = { ...asset, referenceScene: { ...review, sourceSnapshotId: freshSnapshot.snapshotId, ...mutation } } as BrandPostPackageImageAsset;
+      const withPrior = { ...freshManifest, brandLinkId: `prior-reference-${index}`, imageAssets: [prior] };
+      await prepareBrandPostImageReferenceContext({ manifest: withPrior, productName: "선택 상품", target: heroTarget() }, {
+        collect: async options => {
+          assert.deepEqual(options.priorityLocalCandidates, index === 0 ? [source] : [], "only a coherent current byte-bound passed reference receives priority");
+          return [selectedFile];
+        },
+        select: async () => sourceReference(selectedFile),
+      });
+    }
     const context = { referenceSha256: hash(source), sourceSnapshotId: snapshot.snapshotId, anchorSha256: hash(hero) };
     assert.deepEqual(classifyBrandPostImageEvidence(asset), { coherent: true, generated: true, reason: null });
     for (const mutation of [{ provenance: "ORIGINAL" }, { provenance: "LOCKED_PRODUCT" }, { remoteGenerated: false }, { creationMethod: "source" }]) assert.equal(classifyBrandPostImageEvidence({ ...asset, ...mutation } as BrandPostPackageImageAsset).coherent, false);

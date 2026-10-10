@@ -9,6 +9,7 @@ import {
   codexDraftTerminalFailureCode,
   codexDraftStructuredFailureCode,
   runCodexDraftWithRetry,
+  collectCodexDraftResponse,
 } from "./lib/codex-draft-provider";
 import { getBundledCodexEntrypoint, getBundledCodexExecutable, readCodexLocalStatus } from "../src/lib/codex-local";
 import { classifyLocalFailure, toLocalAutomationError } from "../src/lib/local-automation-error";
@@ -144,6 +145,23 @@ assert.equal(classifyLocalFailure({ status: 400, code: "INVALID_INPUT", message:
   "an explicit invalid-input response is not reclassified from its message");
 
 async function verifyRetryPolicy(): Promise<void> {
+  const events = async function* (items: Array<import("@openai/codex-sdk").ThreadEvent>) { yield* items; };
+  const progress = { type: "error" as const, message: completionLoss };
+  const response = { type: "item.completed" as const, item: { type: "agent_message" as const, id: "response", text: "completed JSON" } };
+  const completed = { type: "turn.completed" as const, usage: { input_tokens: 1, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0 } };
+  assert.equal(await collectCodexDraftResponse(events([progress, response, completed])), "completed JSON",
+    "native recovery progress must not cancel its still-running turn");
+  await assert.rejects(collectCodexDraftResponse(events([progress, { type: "turn.failed", error: { message: completionLoss } }])), /Reconnecting/);
+  await assert.rejects(collectCodexDraftResponse(events([progress, response])), /Reconnecting/,
+    "a partial response without turn.completed cannot count as successful QC");
+  await assert.rejects(collectCodexDraftResponse(events([response])), /turn.completed/);
+  await assert.rejects(collectCodexDraftResponse(events([{ type: "error", message: "authentication required" }, response, completed])), /authentication required/);
+  await assert.rejects(collectCodexDraftResponse(events([{ type: "error", message: completionLoss.replace("2/5", "9/5") }, response, completed])), /Reconnecting/);
+  async function* abortedEvents(): AsyncIterable<import("@openai/codex-sdk").ThreadEvent> {
+    yield progress;
+    throw Object.assign(new Error("cancelled"), { name: "AbortError" });
+  }
+  await assert.rejects(collectCodexDraftResponse(abortedEvents()), (error: unknown) => (error as Error).name === "AbortError");
   const transientErrors = [
     Object.assign(new Error("rate limited"), { status: 429 }),
     new Error('{"type":"error","status":429,"error":{"message":"rate limit"}}'),
