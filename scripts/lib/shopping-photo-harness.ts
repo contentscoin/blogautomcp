@@ -94,7 +94,7 @@ export function buildShoppingPhotoHarness(options: ShoppingPhotoHarnessOptions):
   const briefing = {
     referenceLock: options.reference ? { input: 1, sha256: options.reference.sha256, observedSubject: options.reference.subject,
       observedGeometry: options.reference.geometry, observedIntrinsicLabels: options.reference.labels }
-      : { input: 1, status: "Actual seller-reference pixels required; no text-only product reconstruction" },
+      : { input: 1, status: "Actual reference image pixels must be attached before generation; no text-only product reconstruction" },
     slot: { role: options.role, category, variantIndex: index, shot },
     context: { product: contextText(options.productName, 1200), title: contextText(options.sectionTitle, 1200),
       intent: contextText(options.imageIntent, 1200), body: contextText(options.bodyExcerpt, 800), stagingRecipe: contextText(options.stagingRecipe, 600),

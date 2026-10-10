@@ -100,8 +100,8 @@ assert.match(body, /ROLE=BODY:.*Add NO headline, explanatory text, frame, card, 
 assert.doesNotMatch(body, /ROLE=HERO|Big typography/u); checks++;
 
 const noReference = buildShoppingReferenceScenePrompt({ productName: "상품", sectionTitle: "제목", imageIntent: "연출", role: "body" });
-assert.match(noReference, /Actual seller-reference pixels required; no text-only product reconstruction/u);
-assert.equal(payload(noReference).referenceLock.status, "Actual seller-reference pixels required; no text-only product reconstruction"); checks++;
+assert.match(noReference, /Actual reference image pixels must be attached before generation; no text-only product reconstruction/u);
+assert.equal(payload(noReference).referenceLock.status, "Actual reference image pixels must be attached before generation; no text-only product reconstruction"); checks++;
 for (const variantIndex of [-3, Number.NaN, Number.POSITIVE_INFINITY, 0.9]) {
   assert.equal(plan(buildShoppingPhotoHarness({ ...base, variantIndex })).variantIndex, 0); checks++;
 }
