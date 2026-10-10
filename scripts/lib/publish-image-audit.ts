@@ -26,13 +26,15 @@ import { runCodexDraft, type CodexDraftOptions } from "./codex-draft-provider";
 import { allowsGenericBrandPostProductPhoto, isShoppingLifestyleImage, isReferenceGuidedScene, referenceSceneReviewIssue } from "../../src/lib/brand-post-image-evidence";
 import type { ResolvedPostDocumentV1 } from "../../src/lib/post-composition-contract";
 import { buildProductImageVisualContract, PRODUCT_IMAGE_VISUAL_CONTRACT_RULES_EN } from "./product-image-visual-contract";
+import { readProductSnapshot, type ProductSnapshot } from "../../src/lib/draft-context-snapshot";
+import { readSelectedGalleryComparisons, type SelectedGalleryComparisonImage } from "./selected-gallery-comparison";
 
 const NOTICE_PIXELS_RULE = "notice=true ONLY means a shipping, service or seller announcement visible in the attached IMAGE PIXELS, such as a delivery-closure notice, returns/customer-service announcement or seller notice board. It never means AI-generated provenance, an illustrative image intent, the need for AI disclosure, or an adjacentCaption/article disclosure outside the image. Set notice=false for those contexts; they do not turn a product photograph into a notice. If AI disclosure or other explanatory copy is burned into a body photo, reject it using textPolicyMatches/noGraphicLayout, not notice merely because it mentions AI.";
 const SINGLE_PHOTOGRAPH_RULE = "ONE physical product and its optically consistent reflection in a visible mirror or reflective surface may belong to one coherent natural photograph. Such a reflection is not a second included unit, repeated-original image, collage or inset panel. An ordinary mirror and its physical frame are scene props, not a graphic photo frame. Check that the reflected item, pose, placement and perspective can be explained by that surface. Reject independent duplicate physical products when the slot requires one item, pasted duplicates, split panels, contradictory reflected identity/design, or physically inconsistent/impossible reflections; do not excuse genuine distortion.";
-const NATURAL_SCENE_INTENT_RULE = "A referenceGuidedScene or lifestyle-illustration means a natural photograph in a plausible daily setting, not a drawn illustration, diagram or information card. Product-focused close-up photography is allowed when coherent setting cues remain visibly present; a large foreground product alone is not an intent mismatch. No person, hands, wearing, use action, wide room view or staged price/payment action is required. A price or technical discussion does not require the photo to demonstrate price or performance unless the published text explicitly claims that photographic evidence. Any explicitly required setting must actually be visible: a kitchen intent needs coherent kitchen cues; an isolated white-background catalog photo cannot satisfy that setting. Foreground image occupancy is not physical scale: still reject implausible real-world scale, contact or placement, wrong identity/options, distorted structure, hidden identifying features, added text/graphic layouts, or unsupported photographic proof claims. Apply these rules to accepted without overriding the separate identity, format and photoClaim verdicts.";
-const COMPONENT_APPEARANCE_RULE = "For product-appearance, lifestyle-illustration or role=thumbnail, a photograph may show one identifiable selected kit component or one selected unit rather than the whole purchased set. Compare the visible component's actual brand, product line, design and variant against its explicitly mapped reference and selected product facts. Missing other kit components or purchased units alone is not an identity mismatch when the actual published text and visible thumbnail headline do not claim this is a complete-set photo or photographic proof of the package/quantity. A selected kit name in product context does not itself claim all components are pictured. A component-only thumbnail headline such as '토너 외형 확인' may describe that identifiable selected toner; do not require it to advertise every kit member. A disclaimer is not a full-set claim and cannot excuse a conflicting visible headline. Do not assume an unidentified bottle belongs to the set: a wrong visible component, swapped scent/model, contradictory included bundle, or published complete-set/quantity claim unsupported by the pixels still rejects. Do not certify hidden components or quantities from one component's photo.";
+const NATURAL_SCENE_INTENT_RULE = "A referenceGuidedScene or lifestyle-illustration means a natural photograph in a plausible daily setting, not a drawn illustration, diagram or information card. A reference-guided lifestyle edit intentionally changes the reference's background, props, lighting, camera viewpoint and product pose. A matching upright seller bottle may be photographed laid diagonally on a counter: different pose and a new bathroom background instead of the seller's white splash background alone are not a rejection. Compare the actual product's identifying geometry, intrinsic printing and selected variant, not scene sameness. Product-focused close-up photography is allowed when coherent setting cues remain visibly present; a large foreground product alone is not an intent mismatch. No person, hands, wearing, use action, wide room view or staged price/payment action is required. A price or technical discussion does not require the photo to demonstrate price or performance unless the published text explicitly claims that photographic evidence. Any explicitly required setting must actually be visible: a kitchen intent needs coherent kitchen cues; an isolated white-background catalog photo cannot satisfy that setting. Foreground image occupancy is not physical scale: still reject implausible real-world scale, contact or placement, wrong identity/options, distorted structure, hidden identifying features, added text/graphic layouts, or unsupported photographic proof claims. Pose/viewpoint variation cannot excuse a warped cap, omitted identifying part, swapped readable identifier, wrong variant or impossible geometry. Apply these rules to accepted without overriding the separate identity, format and photoClaim verdicts.";
+const COMPONENT_APPEARANCE_RULE = "For product-appearance, lifestyle-illustration or role=thumbnail, a photograph may show one identifiable selected kit component or one selected unit rather than the whole purchased set. Compare the visible component's actual brand, product line, design and variant against its explicitly mapped reference and selected product facts. Missing other kit components or purchased units alone is not an identity mismatch when the actual published text and visible thumbnail headline do not claim this is a complete-set photo or photographic proof of the package/quantity. A selected kit name in product context does not itself claim all components are pictured. '선택 세트 구성품 외형' / 'selected kit component exterior' names a component category, not a promise to show the complete kit; an identifiable component visibly matched to selected-gallery membership evidence may illustrate that text. Reject an actual claim such as '이 사진에 세트 전 구성품이 보입니다' or '3종 전체 구성 사진' if the photo omits the other named components. A component-only thumbnail headline such as '토너 외형 확인' may describe that identifiable selected toner; do not require it to advertise every kit member. A disclaimer is not a full-set claim and cannot excuse a conflicting visible headline. Do not assume an unidentified bottle belongs to the set: a wrong visible component, swapped scent/model, contradictory included bundle, or published complete-set/quantity claim unsupported by the pixels still rejects. Do not certify hidden components or quantities from one component's photo.";
 const THUMBNAIL_PHOTOGRAPH_RULE = "Only a slot with role=thumbnail may contain a large headline over one natural full-photo composition. A restrained soft photographic gradient, headline shadow or outline used only for contrast over the same continuous full-bleed photograph is allowed for that thumbnail; it is not an explanatory panel or a frame and alone does not make noGraphicLayout false. Its core headline must remain large, high contrast, complete and readable at small preview size. Reject a separate color-block text panel, white border, frame around a reduced seller photo, inset photograph, split layout, table, badge or bullet list, tiny product photos, clipped essential words, and overlays hiding distinguishing product features. No invented or unsupported headline claims. A title overlay is permitted here and nowhere else: body roles never inherit headline/gradient-layout permission from a thumbnail. Judge the actual pixels against these conditions; no thumbnail is automatically approved.";
-const MIXED_OPTIONS_RULE = "mixedOptions means visibly different models, colors, scents or other variants presented together without an allowed explicit named comparison. Multiple views or physical units of the same identifiable model/variant alone are not mixedOptions. Evaluate repeated physical products, pasted duplicates, impossible reflections, misleading bundle/quantity claims and the exact slot's single-item requirement separately with accepted, singlePhotograph and photoClaimMatches; same-design items are not automatically approved. Set mixedOptions=true for genuine distinguishable option mixtures, including thumbnails, and name the conflicting options.";
+const MIXED_OPTIONS_RULE = "mixedOptions means visibly different models, colors, scents or other variants presented together without an allowed explicit named comparison. Only when BOTH canonical selected facts and indexed selected-gallery pixels establish inclusion, distinct identifiable components of that SAME selected kit (such as its toner, serum and cream) are included components, not alternative purchase options requiring a named comparison. Do not infer inclusion from a generic brand match or every gallery item: cross-sells, gift badges and unselected models/variants remain unverified or conflicting and must reject when presented as the selected purchase. Missing kit members, duplicate quantities and an unsupported complete-kit claim must still be judged separately with accepted, identityMatches and photoClaimMatches; proven component membership is not automatic approval. Multiple views or physical units of the same identifiable model/variant alone are not mixedOptions. Evaluate repeated physical products, pasted duplicates, impossible reflections, misleading bundle/quantity claims and the exact slot's single-item requirement separately with accepted, singlePhotograph and photoClaimMatches; same-design items are not automatically approved. Set mixedOptions=true for genuine distinguishable option mixtures, including thumbnails, and name the conflicting options.";
 
 export interface PublishImageAuditFailure {
   nodeIndex: number;
@@ -59,6 +61,10 @@ export interface PublishImageAuditOptions {
   composition: Pick<ResolvedPostDocumentV1, "renderNodes" | "sections">;
   imageAssets?: BrandPostPackageImageAsset[];
   sourceSnapshotId?: string;
+  /** Canonical server-owned selected gallery, never a request body's evidence. */
+  selectedSourceSnapshot?: ProductSnapshot;
+  selectedSourceProductId?: string;
+  selectedSourceDirectory?: string;
   /** Offline tests only. Production uses the visual draft provider. */
   review?: (options: CodexDraftOptions) => Promise<string>;
 }
@@ -67,34 +73,37 @@ export interface PublishImageAuditOptions {
 // the observed ~16 MB WebSocket request boundary without changing image pixels.
 export const PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES = 8 * 1024 * 1024;
 export const PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT = 8;
-export function planPublishImageAuditBatches<T extends { snapshotBytes: number; referenceScene?: { referenceSha256: string; snapshotBytes: number } }>(candidates: readonly T[]): { batches: T[][]; oversized: T[] } {
+export function planPublishImageAuditBatches<T extends { snapshotBytes: number; referenceScene?: { referenceSha256: string; snapshotBytes: number };
+  comparisonReferences?: readonly { referenceSha256: string; snapshotBytes: number }[] }>(candidates: readonly T[]): { batches: T[][]; oversized: T[] } {
   const batches: T[][] = [];
   const oversized: T[] = [];
   let batch: T[] = [], bytes = 0;
   let references = new Map<string, number>();
   const validSize = (size: number) => Number.isSafeInteger(size) && size >= 1 && size <= PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES;
   for (const candidate of candidates) {
-    const reference = candidate.referenceScene;
-    if (!validSize(candidate.snapshotBytes) || (reference &&
-        (!/^[a-f0-9]{64}$/u.test(reference.referenceSha256) || !validSize(reference.snapshotBytes))) ||
-        candidate.snapshotBytes + (reference?.snapshotBytes || 0) > PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES) {
+    const candidateReferences = new Map<string, number>();
+    let invalidReference = false;
+    for (const reference of [...(candidate.referenceScene ? [candidate.referenceScene] : []), ...(candidate.comparisonReferences ?? [])]) {
+      if (!/^[a-f0-9]{64}$/u.test(reference.referenceSha256) || !validSize(reference.snapshotBytes) ||
+          (candidateReferences.has(reference.referenceSha256) && candidateReferences.get(reference.referenceSha256) !== reference.snapshotBytes) ||
+          (references.has(reference.referenceSha256) && references.get(reference.referenceSha256) !== reference.snapshotBytes)) invalidReference = true;
+      candidateReferences.set(reference.referenceSha256, reference.snapshotBytes);
+    }
+    if (!validSize(candidate.snapshotBytes) || invalidReference || candidateReferences.size + 1 > PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT ||
+        candidate.snapshotBytes + [...candidateReferences.values()].reduce((sum, size) => sum + size, 0) > PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES) {
       oversized.push(candidate);
       continue;
     }
-    const newReference = reference && !references.has(reference.referenceSha256);
-    if (reference && references.has(reference.referenceSha256) && references.get(reference.referenceSha256) !== reference.snapshotBytes) {
-      oversized.push(candidate);
-      continue;
-    }
-    if (batch.length && (batch.length + 1 + references.size + (newReference ? 1 : 0) > PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT ||
-        bytes + candidate.snapshotBytes + (newReference ? reference!.snapshotBytes : 0) > PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES)) {
+    const additionalReferences = [...candidateReferences].filter(([hash]) => !references.has(hash));
+    if (batch.length && (batch.length + 1 + references.size + additionalReferences.length > PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT ||
+        bytes + candidate.snapshotBytes + additionalReferences.reduce((sum, [, size]) => sum + size, 0) > PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES)) {
       batches.push(batch);
       batch = []; bytes = 0; references = new Map();
     }
     batch.push(candidate); bytes += candidate.snapshotBytes;
-    if (reference && !references.has(reference.referenceSha256)) {
-      references.set(reference.referenceSha256, reference.snapshotBytes);
-      bytes += reference.snapshotBytes;
+    for (const [hash, size] of candidateReferences) if (!references.has(hash)) {
+      references.set(hash, size);
+      bytes += size;
     }
   }
   if (batch.length) batches.push(batch);
@@ -142,9 +151,38 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
     visualContract: ReturnType<typeof buildProductImageVisualContract>;
     referenceScene?: { referencePath: string; referenceSha256: string; strategyVersion: string; sourceSnapshotId: string; caption: string;
       snapshot: string; snapshotBytes: number; snapshotSha256: string };
+    comparisonReferences?: Array<{ referenceSha256: string; snapshotBytes: number }>;
   }> = [];
   const referenceSnapshots = new Map<string, { snapshot: string; snapshotBytes: number; snapshotSha256: string }>();
+  const gallerySnapshots: Array<SelectedGalleryComparisonImage & { referenceSha256: string; snapshot: string; snapshotBytes: number; snapshotSha256: string }> = [];
+  const selectedSourceDirectory = options.selectedSourceDirectory;
+  const selectedSourceProductId = options.selectedSourceProductId;
+  let selectedSourceIdentity: { snapshotId: string; productId: string; sourceUrl: string | null } | undefined;
   try {
+    if (options.selectedSourceSnapshot || selectedSourceDirectory || selectedSourceProductId) {
+      try {
+        const snapshot = readProductSnapshot(options.selectedSourceSnapshot, { productId: selectedSourceProductId, connectKind: "SHOPPING" });
+        if (!snapshot || !selectedSourceProductId || !selectedSourceDirectory || snapshot.snapshotId !== options.sourceSnapshotId)
+          throw new Error("Selected gallery does not match the current product snapshot.");
+        selectedSourceIdentity = { snapshotId: snapshot.snapshotId, productId: snapshot.productId, sourceUrl: snapshot.sourceUrl };
+        const gallery = await readSelectedGalleryComparisons({ snapshot, productId: selectedSourceProductId, sourceDirectory: selectedSourceDirectory });
+        for (const reference of gallery) {
+          const bytes = fs.readFileSync(reference.path), metadata = await sharp(bytes, { animated: true, failOn: "warning" }).metadata();
+          if (crypto.createHash("sha256").update(bytes).digest("hex") !== reference.sha256) throw new Error("Selected gallery original changed after binding.");
+          if (!metadata.width || !metadata.height || (metadata.pages ?? 1) !== 1) throw new Error("Selected gallery original is not a static decodable image.");
+          const decodedPath = path.join(root, `reference-${reference.sha256}.png`);
+          await sharp(bytes, { failOn: "warning" }).rotate().png().toFile(decodedPath);
+          const decoded = { snapshot: decodedPath, snapshotBytes: fs.statSync(decodedPath).size,
+            snapshotSha256: crypto.createHash("sha256").update(fs.readFileSync(decodedPath)).digest("hex") };
+          referenceSnapshots.set(reference.sha256, decoded);
+          gallerySnapshots.push({ ...reference, ...decoded, referenceSha256: reference.sha256 });
+        }
+      } catch (error) {
+        fail(-1, "", "INVALID_CONTEXT", `Selected-source comparison context is invalid: ${error instanceof Error ? error.message : String(error)}`);
+        if (receiptId) invalidateSuccessfulImageAuditReceipt(receiptId);
+        return result;
+      }
+    }
     for (const [nodeIndex, node] of options.composition.renderNodes.entries()) {
       if (node.kind !== "image") continue;
       const section = options.composition.sections.find(s => s.id === node.sectionId);
@@ -254,6 +292,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
         allowProductPhoto: thumbnail || isShoppingLifestyleImage(section!) || allowsGenericBrandPostProductPhoto({ sectionTitle, imageIntent: section!.imageIntent, imageSource: section!.imageSource }),
         visualContract: buildProductImageVisualContract({ sectionTitle, imageIntent, imageSource: section?.imageSource }, thumbnail),
         ...(referenceScene ? { referenceScene } : {}),
+        ...(gallerySnapshots.length ? { comparisonReferences: gallerySnapshots } : {}),
       });
       result.images.push({ nodeIndex, assetPath: node.assetPath, sha256 });
     }
@@ -262,8 +301,10 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
     }
     const requests: Array<{ batch: typeof candidates; call: CodexDraftOptions }> = [];
     const buildCall = (batch: typeof candidates): CodexDraftOptions => {
-      const references = [...new Map(batch.flatMap(candidate => candidate.referenceScene
-        ? [[candidate.referenceScene.referenceSha256, candidate.referenceScene] as const] : [])).values()];
+      const references = [...new Map<string, { referenceSha256: string; sourceSnapshotId: string; snapshot: string }>([...batch.flatMap(candidate => candidate.referenceScene
+        ? [[candidate.referenceScene.referenceSha256, candidate.referenceScene] as const] : []),
+      ...gallerySnapshots.map(reference => [reference.referenceSha256, reference] as const)]).values()];
+      const galleryIndexes = gallerySnapshots.map(reference => batch.length + references.findIndex(item => item.referenceSha256 === reference.sha256) + 1);
       const referenceIndex = (candidate: typeof candidates[number]) => candidate.referenceScene
         ? batch.length + references.findIndex(reference => reference.referenceSha256 === candidate.referenceScene!.referenceSha256) + 1
         : undefined;
@@ -272,11 +313,16 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
         userPrompt: [
           `Selected product: ${JSON.stringify(selectedProduct)}. Product name: ${JSON.stringify(options.productName)}.`,
           `Each attached image belongs ONLY to its corresponding slot: ${JSON.stringify(batch.map((c, i) => ({ index: i + 1, role: c.role, sectionTitle: c.sectionTitle, sectionBody: c.sectionBody, imageIntent: c.imageIntent, visualContract: c.visualContract, allowProductPhoto: c.allowProductPhoto, ...(c.referenceScene ? { referenceGuidedScene: true, originalComparisonPassed: true, adjacentCaption: c.referenceScene.caption,
-            comparisonReferenceImageIndex: referenceIndex(c), referenceSha256: c.referenceScene.referenceSha256, sourceSnapshotId: c.referenceScene.sourceSnapshotId } : {}) })))}`,
+            comparisonReferenceImageIndex: referenceIndex(c), referenceSha256: c.referenceScene.referenceSha256, sourceSnapshotId: c.referenceScene.sourceSnapshotId } : {}),
+          ...(galleryIndexes.length ? { selectedGalleryComparisonImageIndexes: galleryIndexes } : {}) })))}`,
           `Final publication attachments are images 1 through ${batch.length}. Comparison references appended AFTER them are not publication candidates: ${JSON.stringify(references.map((reference, index) => ({ imageIndex: batch.length + index + 1, referenceSha256: reference.referenceSha256, sourceSnapshotId: reference.sourceSnapshotId,
-            forFinalImageIndexes: batch.flatMap((candidate, candidateIndex) => candidate.referenceScene?.referenceSha256 === reference.referenceSha256 ? [candidateIndex + 1] : []) })))}`,
+            forFinalImageIndexes: gallerySnapshots.some(item => item.sha256 === reference.referenceSha256) ? batch.map((_, candidateIndex) => candidateIndex + 1)
+              : batch.flatMap((candidate, candidateIndex) => candidate.referenceScene?.referenceSha256 === reference.referenceSha256 ? [candidateIndex + 1] : []) })))}`,
+          ...(selectedSourceIdentity ? [`Canonical selected source: ${JSON.stringify(selectedSourceIdentity)}. Selected-gallery comparison-only evidence: ${JSON.stringify(gallerySnapshots.map((reference, index) => ({ imageIndex: galleryIndexes[index], role: "selected-gallery-comparison", sourceUrl: reference.sourceUrl,
+            sourceSnapshotId: reference.sourceSnapshotId, sha256: reference.sha256, receiptSha256: reference.receiptSha256 })))}`,
+          "Selected-gallery comparison images are intact cached seller-gallery pixels bound to the selected source URL/snapshot; they are UNVERIFIED comparison context, not identity approval or publication candidates. Compare the visible component's distinctive structure and intrinsic brand/product printing against the selected facts and these indexed gallery pixels to determine whether it is a member of the selected kit. A gallery may show gifts, cross-sells or other variants: do not assume every depicted item is selected/included, infer hidden capacity/quantity, or let a promotional badge authorize a gift, effect or bundle claim. Keep rejecting wrong components/variants and unsupported whole-set claims. External seller advertising/artwork in these comparison-only inputs cannot give final photos text/panel permission; inspect publication-format checks ONLY on final attachments. Never output a verdict for a comparison-only image."] : []),
           "For a referenceGuidedScene, inspect the actual attached comparisonReferenceImageIndex pixels against that final image's visible structure, intrinsic brand/product printing and selected variant. It is the exact bound reference for the listed slot only, not a final image to approve. Reference-only advertising/background styling is not part of the published candidate. Do not output a review for reference attachments, use another final candidate as a reference, infer model design from memory, or treat a prior passed comparison as automatic approval. A readable altered brand/product identifier or distinctive structural contradiction must still reject; absent tiny specifications alone do not establish a contradiction.",
-          "Inspect actual pixels of EVERY attached final image. Never infer safety from filename, generated provenance, previous approvals, caption, or alt text.",
+          "Inspect actual pixels of EVERY attached final image. Never infer safety from filename, generated provenance, previous approvals, caption, or alt text. A quantity in a comparison filename only selected a possible context image; it is not evidence of identity or capacity. Read any actual product-information table pixels as comparison-only selected facts, then match the visible product identifier and structure. Never publish that table as a body photo or require an invisible specification to appear on the product.",
           ...(isUnbrandedCommodityProduct(options.productName) ? [UNBRANDED_COMMODITY_IDENTITY_RULE_EN] : []),
           "Check visible product identity against the selected product context: brand, distinctive design, product line and visible variant details. This is visual compatibility review, not OCR certification of every selected specification. Do not require the complete model number, capacity, scent or purchase quantity to be printed and legible on the body/package. Missing or small specification text alone must not cause rejection. Do not claim those hidden specifications were verified from pixels.",
           "Reject visible contradictions: wrong brand, distinguishable wrong model/design, scent/variant mismatch or conflicting bundle. Reject when there is no identifiable product or its visible distinguishing characteristics genuinely cannot resolve which product is shown; brand plus a generic category alone is not sufficient. A lavender Stress Relief 532ml 2pack must not become fragrance-free Skin Relief or a mixed pair. A single-item detail may illustrate a multi-pack without depicting every purchased unit, provided it does not claim a conflicting bundle.",
@@ -308,14 +354,18 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
     const plan = planPublishImageAuditBatches(candidates);
     if (plan.oversized.length) {
       for (const candidate of plan.oversized) fail(candidate.nodeIndex, candidate.assetPath, "IMAGE_PAYLOAD_TOO_LARGE",
-        `Final image and required comparison reference review snapshots total ${candidate.snapshotBytes + (candidate.referenceScene?.snapshotBytes || 0)} bytes, above the ${PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES}-byte transport budget. The original file was preserved; provide an individually reviewable image or resolve the provider payload limit before approval. No partial approval or downsampling was performed.`);
+        `Final image and all required unique comparison reference snapshots exceed the ${PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES}-byte/${PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT}-attachment transport budget. The original file was preserved; provide an individually reviewable image or resolve the provider payload limit before approval. No partial approval or downsampling was performed.`);
       // No pixels were reviewed. In particular the assertion wrapper must not
       // clear prior rejection records for other, unreviewed candidates.
       result.images.length = 0;
       if (receiptId) invalidateSuccessfulImageAuditReceipt(receiptId);
       return result;
     }
-    for (const batch of plan.batches) {
+    // Rich selected-gallery evidence can be confused with another final photo.
+    // Review one publication candidate with its mapped comparisons at a time;
+    // retain legacy batching when no optional gallery evidence is available.
+    const reviewBatches = gallerySnapshots.length ? plan.batches.flatMap(batch => batch.map(candidate => [candidate])) : plan.batches;
+    for (const batch of reviewBatches) {
       requests.push({ batch, call: buildCall(batch) });
     }
     // Hash the actual requests, not a manually maintained description of the
@@ -323,6 +373,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
     const receiptKey = crypto.createHash("sha256").update(JSON.stringify({
       policy: "final-publication-image-audit/v2-natural-photo",
       transport: { maximumImageBytes: PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES, maximumImages: PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT },
+      selectedSource: selectedSourceIdentity,
       images: candidates.map(candidate => ({ nodeIndex: candidate.nodeIndex, sha256: candidate.sha256,
         sectionId: candidate.sectionId, role: candidate.role, referenceScene: candidate.referenceScene ? {
           referenceSha256: candidate.referenceScene.referenceSha256, strategyVersion: candidate.referenceScene.strategyVersion,
@@ -337,7 +388,32 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
       console.log("      - 최종 이미지 감사: 동일 이미지·발행 문맥의 검증 결과 재사용");
     } else if (receiptId) invalidateSuccessfulImageAuditReceipt(receiptId);
     const review = options.review ?? runCodexDraft;
-    const inputsStillBound = (batch: typeof candidates): boolean => batch.every(candidate => {
+    const selectedSourceSnapshotsStillBound = (): boolean => {
+      if (!selectedSourceIdentity) return true;
+      try {
+        const snapshot = readProductSnapshot(options.selectedSourceSnapshot, { productId: selectedSourceProductId, connectKind: "SHOPPING" });
+        if (!snapshot || snapshot.snapshotId !== selectedSourceIdentity.snapshotId || options.sourceSnapshotId !== selectedSourceIdentity.snapshotId ||
+            options.selectedSourceProductId !== selectedSourceProductId || options.selectedSourceDirectory !== selectedSourceDirectory) return false;
+        // The helper decodes asynchronously one source at a time. Recheck ALL
+        // captured originals/receipts synchronously after that await, including
+        // an earlier source changed while a later reference was decoding.
+        const hash = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+        return gallerySnapshots.every(reference => hash(reference.path) === reference.sha256 &&
+          hash(reference.receiptPath) === reference.receiptSha256 && hash(reference.snapshot) === reference.snapshotSha256);
+      } catch { return false; }
+    };
+    const selectedSourceStillBound = async (): Promise<boolean> => {
+      if (!selectedSourceIdentity) return true;
+      if (!selectedSourceSnapshotsStillBound()) return false;
+      try {
+        const current = await readSelectedGalleryComparisons({ snapshot: options.selectedSourceSnapshot,
+          productId: selectedSourceProductId!, sourceDirectory: selectedSourceDirectory! });
+        if (JSON.stringify(current) !== JSON.stringify(gallerySnapshots.map(({ path, sha256, sourceUrl, sourceSnapshotId, receiptPath, receiptSha256 }) =>
+          ({ path, sha256, sourceUrl, sourceSnapshotId, receiptPath, receiptSha256 })))) return false;
+        return selectedSourceSnapshotsStillBound();
+      } catch { return false; }
+    };
+    const candidateStillBound = (candidate: typeof candidates[number]): boolean => {
       try {
         const hash = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
         if (hash(candidate.assetPath) !== candidate.sha256 || hash(candidate.snapshot) !== candidate.snapshotSha256) return false;
@@ -356,23 +432,25 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
         }
         return true;
       } catch { return false; }
-    });
+    };
+    const inputsStillBound = async (batch: typeof candidates): Promise<boolean> =>
+      await selectedSourceStillBound() && batch.every(candidateStillBound);
     const failChangedBatch = (batch: typeof candidates) => {
       // No slot in a skipped/interrupted request can clear its old rejection.
       for (const candidate of batch) fail(candidate.nodeIndex, candidate.assetPath, "IMAGE_CHANGED",
         "Final image or its exact bound comparison reference changed/disappeared during the audit; re-audit final composition.");
     };
     for (const { batch, call } of reused ? [] : requests) {
-      if (!inputsStillBound(batch)) { failChangedBatch(batch); continue; }
+      if (!await inputsStillBound(batch)) { failChangedBatch(batch); continue; }
       result.checked += batch.length;
       let verdicts = parseVisualReviews(await review(call), batch.length);
-      if (!inputsStillBound(batch)) { failChangedBatch(batch); continue; }
+      if (!await inputsStillBound(batch)) { failChangedBatch(batch); continue; }
       // 형식이 깨진 판정만 한 번 더 묻는다. 두 번째도 깨지면 그 이미지만 실패로 닫는다(fail closed).
       const malformed = batch.flatMap((_, i) => verdicts[i] ? [] : [i]);
       if (malformed.length > 0) {
         const retryBatch = malformed.map(i => batch[i]);
         const retried = parseVisualReviews(await review(buildCall(retryBatch)).catch(() => ""), retryBatch.length);
-        if (!inputsStillBound(batch)) { failChangedBatch(batch); continue; }
+        if (!await inputsStillBound(batch)) { failChangedBatch(batch); continue; }
         verdicts = verdicts.slice();
         malformed.forEach((batchIndex, retryIndex) => { verdicts[batchIndex] = retried[retryIndex] ?? null; });
       }
@@ -412,8 +490,9 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
     }
     // A later batch must not mutate an earlier slot's bytes or bound context.
     // Repeat the same checks for all candidates, including receipt reuse.
+    const finalSourceBound = await selectedSourceStillBound() && selectedSourceSnapshotsStillBound();
     for (const candidate of candidates) {
-      if (!inputsStillBound([candidate])) fail(candidate.nodeIndex, candidate.assetPath, "IMAGE_CHANGED",
+      if (!finalSourceBound || !candidateStillBound(candidate)) fail(candidate.nodeIndex, candidate.assetPath, "IMAGE_CHANGED",
         "Image or bound review context changed/disappeared during the audit; re-audit final composition.");
     }
     result.ok = result.failures.length === 0;

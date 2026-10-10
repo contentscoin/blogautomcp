@@ -12,6 +12,7 @@ import sharp from "sharp";
 import { readSuccessfulImageAuditReceipt as read, writeSuccessfulImageAuditReceipt as write, invalidateSuccessfulImageAuditReceipt as invalidate, withSuccessfulImageAuditLock } from "./lib/publish-image-audit-receipt";
 import type { PublishImageAuditOptions, PublishImageAuditResult } from "./lib/publish-image-audit";
 import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
+import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
 
 const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "image-audit-receipt-"));
 const priorRoot = process.env.DESKTOP_USER_DATA;
@@ -65,6 +66,7 @@ async function main() {
   let verdict = "accept";
   let photoClaimMatches = true;
   let inspectRequest: ((request: { imagePaths: string[]; userPrompt: string }) => void) | undefined;
+  let inspectGalleryRead: (() => void) | undefined;
   const provider = async (request: { imagePaths: string[]; userPrompt?: string }) => {
     calls++;
     if (verdict === "auth") throw new Error("CODEX_AUTH_REQUIRED");
@@ -91,6 +93,10 @@ async function main() {
     const exports: Record<string, unknown> = {};
     vm.runInNewContext(ts.transpileModule(text, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText,
       { exports, Buffer, console, setTimeout, process, require: (id: string) => id === "./codex-draft-provider" ? { runCodexDraft: provider } :
+        id === "./selected-gallery-comparison" ? { ...moduleRequire(id), readSelectedGalleryComparisons: async (options: unknown) => {
+          const gallery = await moduleRequire(id).readSelectedGalleryComparisons(options);
+          inspectGalleryRead?.(); return gallery;
+        } } :
         probeLedger && id === "./publish-image-rejections" ? { clearReviewedPublicationImageRejections: probeLedgerLock, recordPublicationImageRejections: probeLedgerLock } : moduleRequire(id) });
     return (probeLedger ? exports.assertPublishImagesSafe : exports.auditPublishImages) as (options: PublishImageAuditOptions) => Promise<PublishImageAuditResult>;
   };
@@ -209,6 +215,57 @@ async function main() {
   bodyIntentOptions.imageAssets![0].imageIntent = "Changed irrelevant body asset intent";
   assert.equal((await audit(bodyIntentOptions)).receiptReused, true); assert.equal(calls, beforeBodyIntent + 1,
     "body asset intent is not publication context and cannot replace the actual section intent");
+  const galleryUrl = "https://shop-phinf.pstatic.net/selected/whole-kit.png?type=w860";
+  const galleryReceipt = `${referenceA}.retrieval.json`;
+  fs.writeFileSync(galleryReceipt, JSON.stringify({ version: "product-image-retrieval/v1", sourceUrl: galleryUrl,
+    sha256: hash(referenceA), retrievedAt: "2025-01-01T00:00:00.000Z", identityVerified: false }));
+  const gallerySnapshot = createProductSnapshot({ productId: "gallery-receipt", connectKind: "SHOPPING", externalProductId: "kit-123",
+    sourceUrl: "https://brand.naver.com/seller/products/123", product: { name: "selected toner/serum/cream kit", referenceImageUrls: [galleryUrl] } });
+  const galleryOptions = { ...options, brandLinkId: "gallery-context", sourceSnapshotId: gallerySnapshot.snapshotId,
+    selectedSourceSnapshot: gallerySnapshot, selectedSourceProductId: "gallery-receipt", selectedSourceDirectory: fixtureRoot };
+  inspectRequest = request => {
+    assert.equal(request.imagePaths.length, 2, "exact cached whole-kit pixels are comparison-only alongside the final thumbnail");
+    assert.match(request.userPrompt, /role":"selected-gallery-comparison"/u);
+    assert.match(request.userPrompt, /"selectedGalleryComparisonImageIndexes":\[2\]/u);
+  };
+  const beforeGallery = calls;
+  assert.equal((await audit(galleryOptions)).ok, true); assert.equal(calls, beforeGallery + 1);
+  const galleryKey = JSON.parse(fs.readFileSync(receiptFile(galleryOptions.brandLinkId!), "utf8")).key;
+  assert.equal((await audit(galleryOptions)).receiptReused, true); assert.equal(calls, beforeGallery + 1);
+  fs.appendFileSync(galleryReceipt, "\n");
+  assert.equal((await audit(galleryOptions)).receiptReused, false); assert.equal(calls, beforeGallery + 2);
+  assert.notEqual(JSON.parse(fs.readFileSync(receiptFile(galleryOptions.brandLinkId!), "utf8")).key, galleryKey,
+    "unchanged published and comparison pixels cannot reuse a request with different actual retrieval receipt bytes");
+  const savedGalleryBytes = fs.readFileSync(referenceA);
+  fs.writeFileSync(referenceA, fs.readFileSync(referenceB));
+  const modifiedGalleryReceipt = JSON.parse(fs.readFileSync(galleryReceipt, "utf8"));
+  modifiedGalleryReceipt.sha256 = hash(referenceA);
+  fs.writeFileSync(galleryReceipt, JSON.stringify(modifiedGalleryReceipt));
+  assert.equal((await audit(galleryOptions)).receiptReused, false); assert.equal(calls, beforeGallery + 3,
+    "new intact source pixels require a fresh final visual verdict, never inherit the old membership verdict");
+  fs.writeFileSync(referenceA, savedGalleryBytes);
+  modifiedGalleryReceipt.sha256 = hash(referenceA);
+  fs.writeFileSync(galleryReceipt, JSON.stringify(modifiedGalleryReceipt));
+  for (const changed of ["source", "receipt"] as const) {
+    const preservedSource = fs.readFileSync(referenceA), preservedReceipt = fs.readFileSync(galleryReceipt);
+    let galleryReads = 0;
+    inspectGalleryRead = () => {
+      if (++galleryReads !== 4) return; // Final async discovery already returned captured descriptors.
+      if (changed === "source") fs.writeFileSync(referenceA, fs.readFileSync(referenceB));
+      else fs.appendFileSync(galleryReceipt, "\n");
+    };
+    try {
+      const late = await audit({ ...galleryOptions, brandLinkId: `gallery-final-race-${changed}`, forceReview: true });
+      assert.equal(galleryReads, 4); assert.equal(late.ok, false);
+      assert.equal(late.failures[0].code, "IMAGE_CHANGED",
+        "a stale descriptor returned after await cannot hide a later mutation of an earlier gallery original/receipt");
+      assert.equal(fs.existsSync(receiptFile(`gallery-final-race-${changed}`)), false, "late source changes never write approval receipts");
+    } finally {
+      inspectGalleryRead = undefined;
+      fs.writeFileSync(referenceA, preservedSource); fs.writeFileSync(galleryReceipt, preservedReceipt);
+    }
+  }
+  fs.unlinkSync(galleryReceipt);
   inspectRequest = undefined;
   console.log("image audit receipts: signed/tamper/wrong-id/concurrent key/lock, exact bytes/options/prompts/policy, force failure/auth/missing invalidation and injected reviewer isolation PASS");
 }

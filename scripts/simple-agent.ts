@@ -3,7 +3,7 @@ import {
   assertUntargetedSectionHashesUnchanged,
   requestsFreeformTitleRevision,
 } from "./lib/freeform-draft-revision";
-import { readBrandPostPackage, type BrandPostPackageImageAsset, type BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
+import { getBrandPostPackageDir, readBrandPostPackage, type BrandPostPackageImageAsset, type BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
 import { reconcileBrandPostImageContinuity } from "../src/lib/brand-post-image-continuity";
 import { isDraftEditorialQualityPassed } from "../src/lib/brand-post-quality-display";
 import { parseNaverPublishedUrl } from "../src/lib/naver-published-url";
@@ -10609,6 +10609,8 @@ async function main() {
             composition,
             imageAssets: preparedPostOverride?.imageAssets,
             sourceSnapshotId: preparedPostOverride?.sourceSnapshot?.snapshotId,
+            ...(preparedPostOverride?.sourceSnapshot ? { selectedSourceSnapshot: preparedPostOverride.sourceSnapshot,
+              selectedSourceProductId: link.id, selectedSourceDirectory: path.join(getBrandPostPackageDir(link.id), "product-sources") } : {}),
           });
           break;
         } catch (error) {

@@ -9,6 +9,7 @@ import sharp from "sharp";
 import { auditPublishImages, planPublishImageAuditBatches, PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES, PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT, type PublishImageAuditOptions } from "./lib/publish-image-audit";
 import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 import type { CodexDraftOptions } from "./lib/codex-draft-provider";
+import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
 
 const hash = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 const slots = (call: CodexDraftOptions): Array<{ index: number; comparisonReferenceImageIndex: number; referenceSha256: string; sourceSnapshotId: string; sectionBody: string[] }> => {
@@ -80,6 +81,126 @@ async function main() {
     };
     const mappedResult = await auditPublishImages(mapped);
     assert.equal(mappedResult.ok, true); assert.equal(mappedResult.checked, 3); assert.equal(calls, 1); checks++;
+    const galleryUrls = ["https://shop-phinf.pstatic.net/selected/toner.png?type=w860", "https://shop-phinf.pstatic.net/selected/kit.png?type=w860"];
+    const selectedSnapshot = createProductSnapshot({ productId: "selected-kit", connectKind: "SHOPPING", externalProductId: "kit-123",
+      sourceUrl: "https://brand.naver.com/seller/products/123", product: { name: "selected toner/serum/cream kit", description: "selected kit",
+        features: ["toner, serum, cream"], referenceImageUrls: galleryUrls } });
+    const receiptPaths = [references[0], references[1]].map(file => `${file}.retrieval.json`);
+    receiptPaths.forEach((file, index) => fs.writeFileSync(file, JSON.stringify({ version: "product-image-retrieval/v1", sourceUrl: galleryUrls[index],
+      sha256: hash(references[index]), retrievedAt: new Date(Date.now() - 1000).toISOString(), identityVerified: false })));
+    const galleryOptions = (): PublishImageAuditOptions => {
+      const options = fixture(pairs);
+      options.sourceSnapshotId = selectedSnapshot.snapshotId;
+      options.imageAssets!.forEach(asset => { asset.referenceScene!.sourceSnapshotId = selectedSnapshot.snapshotId; });
+      return { ...options, selectedSourceSnapshot: structuredClone(selectedSnapshot), selectedSourceProductId: "selected-kit", selectedSourceDirectory: root };
+    };
+    const galleryMapped = galleryOptions();
+    let galleryCalls = 0;
+    galleryMapped.review = async call => {
+      const pair = pairs[galleryCalls++];
+      const rows = slots(call) as Array<ReturnType<typeof slots>[number] & { selectedGalleryComparisonImageIndexes: number[] }>;
+      assert.equal(rows.length, 1, "rich gallery evidence is reviewed against exactly one final publication candidate");
+      assert.equal(call.imagePaths!.length, 3, "gallery and per-scene references sharing SHA use one actual attachment");
+      assert.equal(rows[0].comparisonReferenceImageIndex, 2);
+      assert.deepEqual(rows[0].selectedGalleryComparisonImageIndexes, pair.reference === references[1] ? [3, 2] : [2, 3]);
+      const schema = call.outputSchema as { properties: { reviews: { minItems: number; maxItems: number; items: { properties: { index: { enum: number[] } } } } } };
+      assert.equal(schema.properties.reviews.minItems, 1); assert.equal(schema.properties.reviews.maxItems, 1);
+      assert.deepEqual(schema.properties.reviews.items.properties.index.enum, [1]);
+      assert.deepEqual(await sharp(call.imagePaths![0]).raw().toBuffer(), await sharp(pair.final).raw().toBuffer());
+      assert.match(call.userPrompt, /role":"selected-gallery-comparison"/u);
+      assert.match(call.userPrompt, /UNVERIFIED comparison context, not identity approval or publication candidates/u);
+      assert.match(call.userPrompt, /gifts, cross-sells or other variants/u);
+      assert.match(call.userPrompt, /inspect publication-format checks ONLY on final attachments/u);
+      assert.match(call.userPrompt, /selected kit component exterior.*names a component category, not a promise to show the complete kit/u);
+      assert.match(call.userPrompt, /identifiable component visibly matched to selected-gallery membership evidence/u);
+      assert.match(call.userPrompt, /Reject an actual claim such as '이 사진에 세트 전 구성품이 보입니다'/u);
+      assert.match(call.userPrompt, /intentionally changes the reference's background, props, lighting, camera viewpoint and product pose/u);
+      assert.match(call.userPrompt, /Compare the actual product's identifying geometry, intrinsic printing and selected variant, not scene sameness/u);
+      assert.match(call.userPrompt, /Pose\/viewpoint variation cannot excuse a warped cap.*wrong variant or impossible geometry/u);
+      assert.match(call.userPrompt, /Only when BOTH canonical selected facts and indexed selected-gallery pixels establish inclusion/u);
+      assert.match(call.userPrompt, /not alternative purchase options requiring a named comparison/u);
+      assert.match(call.userPrompt, /cross-sells, gift badges and unselected models\/variants remain unverified or conflicting/u);
+      for (const [index, reference] of references.slice(0, 2).entries())
+        assert.deepEqual(await sharp(call.imagePaths![rows[0].selectedGalleryComparisonImageIndexes[index] - 1]).raw().toBuffer(), await sharp(reference).raw().toBuffer());
+      return answer(call);
+    };
+    assert.equal((await auditPublishImages(galleryMapped)).ok, true); assert.equal(galleryCalls, 3); checks++;
+    for (const patch of [
+      { identityMatches: false, reason: "The selected gallery actually shows a different component/variant" },
+      { noGraphicLayout: false, reason: "Final publication photo contains a gift badge; comparison artwork does not grant body permission" },
+      { photoClaimMatches: false, reason: "One component cannot prove the headline's whole-set claim" },
+      { identityMatches: false, reason: "Changed background cannot excuse the warped cap and missing distinctive identifying part" },
+      { accepted: false, reason: "The photo has no visible kitchen cues despite an explicit kitchen setting" },
+      { accepted: false, reason: "All individual boolean checks true but actual overall verdict is adverse; it remains a rejection" },
+      { mixedOptions: true, reason: "An unselected scented variant or cross-sell cannot become a selected kit member from the gallery alone" },
+    ]) {
+      const options = galleryOptions(); options.review = async call => JSON.stringify({ reviews: slots(call).map(row => ({ ...good(row.index), ...patch })) });
+      assert.equal((await auditPublishImages(options)).ok, false); checks++;
+    }
+    for (const invalid of ["product-id", "snapshot-digest", "snapshot-binding", "relative-directory"] as const) {
+      const options = galleryOptions();
+      if (invalid === "product-id") options.selectedSourceProductId = "different-product";
+      if (invalid === "snapshot-digest") options.selectedSourceSnapshot!.product.name = "modified kit";
+      if (invalid === "snapshot-binding") options.sourceSnapshotId = "changed-source";
+      if (invalid === "relative-directory") options.selectedSourceDirectory = "relative-cache";
+      options.review = async () => { throw new Error("Invalid declared selected source must not reach provider"); };
+      assert.equal((await auditPublishImages(options)).failures[0].code, "INVALID_CONTEXT"); checks++;
+    }
+    for (const changed of ["source", "receipt", "decoded", "snapshot", "product-id", "directory"] as const) {
+      const options = galleryOptions(), savedSource = fs.readFileSync(references[1]), savedReceipt = fs.readFileSync(receiptPaths[1]);
+      options.review = async call => {
+        if (changed === "source") fs.writeFileSync(references[1], fs.readFileSync(references[2]));
+        if (changed === "receipt") fs.appendFileSync(receiptPaths[1], "\n");
+        if (changed === "decoded") fs.writeFileSync(call.imagePaths![2], fs.readFileSync(references[2]));
+        if (changed === "snapshot") options.selectedSourceSnapshot!.product.name = "modified while reviewing";
+        if (changed === "product-id") options.selectedSourceProductId = "other-kit";
+        if (changed === "directory") options.selectedSourceDirectory = path.join(root, "other-cache");
+        return answer(call);
+      };
+      try { assert.equal((await auditPublishImages(options)).failures[0].code, "IMAGE_CHANGED"); checks++; }
+      finally { fs.writeFileSync(references[1], savedSource); fs.writeFileSync(receiptPaths[1], savedReceipt); }
+    }
+    const legacyGallery = galleryOptions(); legacyGallery.selectedSourceDirectory = path.join(root, "missing-legacy-cache");
+    legacyGallery.review = async call => { assert.equal(call.imagePaths!.length, 5, "missing gallery preserves the existing exact scene references"); return answer(call); };
+    assert.equal((await auditPublishImages(legacyGallery)).ok, true); checks++;
+    const brokenGalleryPath = path.join(root, "broken-optional-gallery.png"), brokenGalleryUrl = "https://shop-phinf.pstatic.net/selected/broken.png?type=w860";
+    fs.writeFileSync(brokenGalleryPath, "not decodable raster bytes");
+    fs.writeFileSync(`${brokenGalleryPath}.retrieval.json`, JSON.stringify({ version: "product-image-retrieval/v1", sourceUrl: brokenGalleryUrl,
+      sha256: hash(brokenGalleryPath), retrievedAt: new Date(Date.now() - 1000).toISOString() }));
+    const skipOptional = galleryOptions();
+    skipOptional.selectedSourceSnapshot = createProductSnapshot({ ...selectedSnapshot,
+      product: { ...selectedSnapshot.product, referenceImageUrls: [brokenGalleryUrl, ...galleryUrls] } });
+    skipOptional.sourceSnapshotId = skipOptional.selectedSourceSnapshot.snapshotId;
+    skipOptional.imageAssets!.forEach(asset => { asset.referenceScene!.sourceSnapshotId = skipOptional.sourceSnapshotId!; });
+    skipOptional.review = async call => {
+      assert.equal(call.imagePaths!.length, 3, "optional broken first gallery entry is skipped in favor of two useful intact static references");
+      assert(!call.userPrompt.includes(brokenGalleryUrl), "invalid cache bytes cannot enter declared comparison context");
+      return answer(call);
+    };
+    assert.equal((await auditPublishImages(skipOptional)).ok, true); checks++;
+    const sevenPairs = Array.from({ length: 7 }, (_, index) => ({ final: finals[index % finals.length], reference: references[0] }));
+    const laterGallery = { ...fixture(sevenPairs), ...Object.fromEntries(Object.entries(galleryOptions()).filter(([key]) =>
+      ["selectedSourceSnapshot", "selectedSourceProductId", "selectedSourceDirectory", "sourceSnapshotId"].includes(key))) } as PublishImageAuditOptions;
+    laterGallery.imageAssets!.forEach(asset => { asset.referenceScene!.sourceSnapshotId = selectedSnapshot.snapshotId; });
+    const beforeLaterReceipt = fs.readFileSync(receiptPaths[1]); let laterCalls = 0;
+    laterGallery.review = async call => {
+      laterCalls++;
+      if (laterCalls === 7) fs.appendFileSync(receiptPaths[1], "\n");
+      return answer(call);
+    };
+    try {
+      const laterResult = await auditPublishImages(laterGallery);
+      assert.equal(laterCalls, 7); assert.equal(laterResult.ok, false);
+      assert(laterResult.failures.some(failure => failure.nodeIndex === 0 && failure.code === "IMAGE_CHANGED"),
+        "a later batch receipt mutation also invalidates the already reviewed first final slot"); checks++;
+    } finally { fs.writeFileSync(receiptPaths[1], beforeLaterReceipt); }
+    const sevenShared = Array.from({ length: 7 }, () => ({ snapshotBytes: 1,
+      referenceScene: { referenceSha256: "a".repeat(64), snapshotBytes: 1 },
+      comparisonReferences: [{ referenceSha256: "a".repeat(64), snapshotBytes: 1 }, { referenceSha256: "b".repeat(64), snapshotBytes: 1 }] }));
+    assert.deepEqual(planPublishImageAuditBatches(sevenShared).batches.map(batch => batch.length), [6, 1]); checks++;
+    const third = Math.floor(PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES / 3);
+    assert.equal(planPublishImageAuditBatches([{ snapshotBytes: third + 3,
+      comparisonReferences: [{ referenceSha256: "a".repeat(64), snapshotBytes: third }, { referenceSha256: "b".repeat(64), snapshotBytes: third }] }]).oversized.length, 1); checks++;
 
     for (const patch of [
       { identityMatches: false, reason: "Readable changed product badge Zylex conflicts with the exact seller reference" },
