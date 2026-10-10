@@ -11,7 +11,7 @@ import { buildProductEditorialPlan } from "../product-editorial-plan";
 import { createEditorialSelection } from "../editorial-templates";
 import type { OpenCrabSeoBrief } from "../opencrab-seo-brief";
 import { getProductTokens } from "../brandlink-content-readiness";
-import { extractTravelProductFacts, type TravelProductFacts } from "../travel-content";
+import { extractTravelProductFacts } from "../travel-content";
 import { assemblePost, normalizeDraft } from "./assemble";
 import { buildEvidenceLedger } from "./evidence-ledger";
 import { generateDraftWithCodex, type GenerateContext } from "./generate";
@@ -23,6 +23,8 @@ import { validateDraft } from "./validate";
 import type { AssembledPost, ConnectKind, GeneratedDraft, ImageCandidateInput, PostSpec, SectionSpec } from "./types";
 import { SHOPPING_POST_STRATEGY, shoppingPhotoRoleAt } from "../../../src/lib/shopping-post-strategy";
 import { getConnectAffiliateDisclosure } from "../../../src/lib/connect-disclosure";
+import { buildTitleKeywordBrief, cleanTitleProductIdentity } from "../title-keyword-brief";
+import { extractRequestedDraftTitle } from "../writing-prompt-contract";
 
 export * from "./types";
 export { validateDraft } from "./validate";
@@ -68,8 +70,8 @@ const GENERIC_HASHTAGS = [
 ];
 
 export function shortProductName(name: string): string {
-  const cleaned = name
-    .replace(/\[[^\]]*\]|[<〈][^>〉]*[>〉]|\([^)]*\)/gu, " ")
+  const cleaned = cleanTitleProductIdentity(name)
+    .replace(/[<〈][^>〉]*[>〉]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
   const tokens = cleaned.split(" ").filter(Boolean);
@@ -87,15 +89,12 @@ function todayLabel(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-function choosePrimaryKeyword(kind: ConnectKind, product: SpecFirstProductInput, brief: OpenCrabSeoBrief | null, travel: TravelProductFacts | null): string {
-  if (kind === "TRAVEL") {
-    const destination = travel?.destinations.slice(0, 1).join("") || "";
-    if (destination) return `${destination} 패키지`;
-  }
-  const fromBrief = brief?.searchQueries?.[0]?.trim() || brief?.categoryLabel?.trim() || "";
-  if (fromBrief) return fromBrief;
-  const tokens = getProductTokens(product.name);
-  return tokens[0] || shortProductName(product.name);
+function choosePrimaryKeyword(kind: ConnectKind, product: SpecFirstProductInput, brief: OpenCrabSeoBrief | null): string {
+  const keyword = buildTitleKeywordBrief({ kind, productName: product.name, sourceDescription: product.description,
+    sourceFeatures: product.features,
+    categoryKeywords: brief?.categoryLabel ? [brief.categoryLabel] : [],
+  }).primaryKeyword;
+  return kind === "TRAVEL" ? keyword ? `${keyword} 패키지` : "패키지 여행" : keyword;
 }
 
 function sectionSpecFromTemplate(template: SectionTemplate, index: number, evidence: string[], mustUseEvidence: string[]): SectionSpec {
@@ -145,7 +144,7 @@ export async function buildPostSpec(input: SpecFirstPipelineInput): Promise<Buil
   });
   const travel = kind === "TRAVEL" ? extractTravelProductFacts(product.name, product.description, product.features) : null;
   const shortName = shortProductName(product.name);
-  const primaryKeyword = choosePrimaryKeyword(kind, product, input.brief, travel);
+  const primaryKeyword = choosePrimaryKeyword(kind, product, input.brief);
   const destination = travel?.destinations.slice(0, 2).join("·") || "";
 
   // A′. 이미지 풀을 먼저 확정한다.
@@ -285,6 +284,7 @@ export async function runSpecFirstPipeline(input: SpecFirstPipelineInput): Promi
   };
 
   let draft: GeneratedDraft;
+  const requestedTitle = extractRequestedDraftTitle(input.memo || "");
   const useCodex = !input.options?.forceLocal;
   if (useCodex) {
     try {
@@ -300,12 +300,14 @@ export async function runSpecFirstPipeline(input: SpecFirstPipelineInput): Promi
     draft = normalizeDraft(spec, buildLocalDraft(spec, templates, shortName));
   }
 
+  if (requestedTitle) draft = { ...draft, title: requestedTitle };
   let report = validateDraft(spec, draft, validateOptions);
   const maxRounds = validateOptions.maxRepairAttempts;
   for (let round = 0; round < maxRounds && draft.source === "codex"; round += 1) {
     if (repairableTargets(report).length === 0) break;
     notes.push(`수리 라운드 ${round + 1}: ${repairableTargets(report).map((t) => `${t.sectionIndex ?? "title"}:${t.code}`).join(", ")}`);
     const repaired = normalizeDraft(spec, await repairDraft(spec, draft, report, ctx));
+    if (requestedTitle) repaired.title = requestedTitle;
     const nextReport = validateDraft(spec, repaired, validateOptions);
     if (nextReport.score >= report.score) {
       draft = repaired;

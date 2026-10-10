@@ -2,7 +2,8 @@ import { composeBudgetedChatGptPrompt } from "./chatgpt-direct-prompt";
 import { isMeaningfulProductEvidenceFeature } from "./product-editorial-plan";
 import { formatWritingStructureGuide } from "./writing-structure-guide";
 import { EditorialProduct, EditorialTemplateId, EditorialSelection, createEditorialSelection, formatEditorialTemplate } from "./editorial-templates";
-import { formatTopicTemplateForPrompt } from "./topic-templates";
+import { defaultTopicTemplateId, formatTopicTemplateForPrompt } from "./topic-templates";
+import { formatTitleCandidatesForPrompt, type TitlePlanContext } from "./topic-templates/title-planner";
 import { formatProduct9CanvasForPrompt, type Product9Canvas } from "./product-9canvas";
 import { SHOPPING_POST_STRATEGY_VERSION, type ShoppingPostStrategyVersion } from "../../src/lib/shopping-post-strategy";
 
@@ -19,6 +20,8 @@ export interface WritingPromptContract {
   verifiedExperienceNotes: string;
   draftMemo?: string;
   requestedTitle?: string;
+  /** Internal title planning only; public draft JSON fields remain unchanged. */
+  titlePlanContext?: TitlePlanContext;
   editorialTemplateId?: EditorialTemplateId;
   editorial?: EditorialSelection;
   /** 원고·썸네일·이미지 계획이 공유하는 상품 의미 계약. */
@@ -74,6 +77,7 @@ export function createWritingPromptContract(input: {
   draftMemo?: string | null;
   product?: EditorialProduct;
   productUnderstanding?: Product9Canvas;
+  titlePlanContext?: TitlePlanContext;
   postAngleBlock?: string;
   postAngleSummary?: string;
 }): WritingPromptContract {
@@ -92,6 +96,20 @@ export function createWritingPromptContract(input: {
     ? { ...(input.product || {}), productUnderstanding: input.productUnderstanding }
     : input.product;
   const editorial = createEditorialSelection(input.kind, editorialProduct);
+  const titleContext = input.titlePlanContext;
+  const productName = input.product?.name || titleContext?.productName;
+  const verifiedExperienceNotes = input.verifiedExperienceNotes?.trim() || "";
+  const titlePlanContext: TitlePlanContext | undefined = productName ? {
+    ...titleContext,
+    kind: input.kind,
+    productName,
+    topicId: (input.product ? editorial.topic?.id : titleContext?.topicId || editorial.topic?.id) || defaultTopicTemplateId(input.kind),
+    verifiedExperience: Boolean(verifiedExperienceNotes),
+    sourceDescription: input.product ? input.product.description : titleContext?.sourceDescription,
+    sourceFeatures: [...(input.product ? input.product.features || [] : titleContext?.sourceFeatures || [])],
+    minChars: 25,
+    maxChars: 35,
+  } : undefined;
   return {
     version: "writing-prompt-contract/v1",
     kind: input.kind,
@@ -103,8 +121,9 @@ export function createWritingPromptContract(input: {
     characters: { ...input.targetCharacters },
     sentences: { min: input.kind === "TRAVEL" ? 5 : 4, max: 6 },
     title: { min: 25, max: 35 },
+    ...(titlePlanContext ? { titlePlanContext } : {}),
     hashtagCount: input.hashtagCount,
-    verifiedExperienceNotes: input.verifiedExperienceNotes?.trim() || "",
+    verifiedExperienceNotes,
     draftMemo: input.draftMemo?.trim() || "",
     requestedTitle: extractRequestedDraftTitle(input.draftMemo?.trim() || ""),
     ...(input.postAngleBlock?.trim() ? { postAngleBlock: input.postAngleBlock.trim() } : {}),
@@ -115,7 +134,7 @@ export function createWritingPromptContract(input: {
 /** Shape example, not a factual draft. The prose requirements still apply. */
 export function getWritingOutputExample(contract: WritingPromptContract) {
   return {
-    title: contract.requestedTitle || `${contract.title.min}~${contract.title.max}자 SEO 제목`,
+    title: contract.requestedTitle || "검색 의도와 독자 질문을 담은 제목",
     evidenceFacts: [] as string[],
     // 섹션 두 개(두 번째는 줄임)를 보여줘 "섹션마다 배열 원소 하나"를 분명히 한다. 하나만 보여주면 모델이 전체를 한 원소에 몰아 쓴다.
     sections: [
@@ -136,8 +155,19 @@ export function formatWritingPromptContract(
   return [
     `[공유 필수 작성 계약 · ${contract.version}]`,
     ...(contract.kind === "SHOPPING" ? [`[쇼핑 글 중심 혼합형 전략 · ${contract.strategyVersion || SHOPPING_POST_STRATEGY_VERSION}]`] : []),
-    "- 관측 분포와 선택 렌즈는 아래 필수 기준을 완화하지 않습니다. 기존 제목·사실성·품질 정책도 지킵니다.",
-    `- 제목 ${contract.title.min}~${contract.title.max}자, 핵심 검색어를 앞에 배치합니다. 제목·소제목에 이모지를 넣지 않습니다.`,
+    options.topicDetail === "minimal"
+      ? ""
+      : "- 관측 분포와 선택 렌즈는 아래 필수 기준을 완화하지 않습니다. 기존 제목·사실성·품질 정책도 지킵니다.",
+    options.topicDetail === "minimal"
+      ? contract.titlePlanContext
+        ? `- 제목 ${contract.title.min}~${contract.title.max}자·앞 검색어는 권장. 나열·이모지 금지.`
+        : `- 제목 ${contract.title.min}~${contract.title.max}자·검색어 앞 배치는 권장. 정체·본문 근거·독자 질문 우선. 나열·과장·허위체험·이모지 금지.`
+      : `- 제목 ${contract.title.min}~${contract.title.max}자는 권장 범위입니다. 상품·모델과 카테고리 검색어는 앞쪽에 자연스럽게 두되 길이·앞 15자만 맞추려고 자르거나 단어를 나열하지 않습니다. 제목·소제목에 이모지를 넣지 않습니다.`,
+    contract.requestedTitle
+      ? `- 명시 요청 제목 ${JSON.stringify(contract.requestedTitle)}을 공백·문장부호까지 그대로 유지합니다. 내부 제목 후보 선택이나 SEO 권장 길이로 바꾸지 않습니다.`
+      : contract.titlePlanContext ? formatTitleCandidatesForPrompt(contract.titlePlanContext, options.topicDetail === "minimal")
+        : options.topicDetail === "minimal" ? "- 서로 다른 제목 후보 3개를 내부 비교해 하나만 출력. 후보·평가·새 필드 금지."
+          : "- 제목은 내부에서 검색 의도와 독자가 궁금해할 질문이 서로 다른 후보 3개를 비교한 뒤 본문 근거에 맞는 하나만 고릅니다. 후보·평가·새 필드는 출력하지 않습니다. 상품 정체를 유지하고 상투적인 후미, 빈 자리표시자, 과장과 없는 체험은 쓰지 않습니다.",
     `- 본문 sections는 ${contract.sections.min}~${contract.sections.max}개이며 섹션마다 원소 하나("소제목\\n\\n본문")입니다. 소제목·순서는 근거에 맞춥니다.`,
     `- 소제목·고지 문구를 제외하고 본문 문단을 구분자 없이 이은 문자열 길이(문단 내부 공백 포함)로 최소 ${contract.characters.min}자를 충족하고, 권장 상한 ${contract.characters.max}자 안에서 작성합니다.`,
     `- 각 섹션은 소제목, 빈 줄, 핵심 답부터 시작하는 ${contract.sentences.min}~${contract.sentences.max}개의 완결된 문장을 권장하며 문장마다 줄바꿈합니다. 첫 ${Math.min(2, contract.sentences.min)}문장의 답도 이 문장 수에 포함합니다.`,
@@ -173,7 +203,9 @@ export function formatWritingPromptContract(
       : "",
     options.topicDetail === "minimal" ? contract.postAngleSummary || "" : contract.postAngleBlock || "",
     formatDraftMemoRequirements(contract),
-    "- 다음은 필드와 섹션 두 개의 형식 예시입니다. 실제 sections 개수와 전체 분량은 위 기준을 따릅니다.",
+    options.topicDetail === "minimal"
+      ? "- 아래는 필드·두 섹션의 형식 예시. 실제 sections 수·분량은 위 기준을 따릅니다."
+      : "- 다음은 필드와 섹션 두 개의 형식 예시입니다. 실제 sections 개수와 전체 분량은 위 기준을 따릅니다.",
     JSON.stringify(getWritingOutputExample(contract)),
   ].join("\n");
 }

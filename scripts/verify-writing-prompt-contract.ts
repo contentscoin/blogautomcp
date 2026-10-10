@@ -9,6 +9,7 @@ import {
   compactChatGptEvidence,
 } from "./lib/chatgpt-direct-prompt";
 import { formatPostAngleForPrompt, formatPostAngleSummary } from "./lib/topic-templates/angles";
+import { defaultTopicTemplateId } from "./lib/topic-templates";
 import {
   composeBudgetedWritingPrompt,
   createWritingPromptContract,
@@ -65,6 +66,7 @@ const memoContractContext = {
   maximumBodySectionCount: 11, compositionContract: { targetCharacters: { min: 2400, max: 4200 } },
   NAVER_BLOG_HASHTAG_COUNT: 4, BRANDLINK_EXPERIENCE_MODE: "AI_INFORMATION",
   process: { env: { BRANDLINK_DRAFT_MEMO: memo } },
+  product: { name: "오사카 3일 교토·고베 여행", description: "숙박 호텔 미정", features: ["교토·고베 일정"] },
 };
 const memoContract = evaluateInitializer<ReturnType<typeof createWritingPromptContract>>("writingContract", { ...memoContractContext, specInput: undefined });
 assert.equal(memoContract.draftMemo, memo, "Codex must receive the environment memo even without spec-first input");
@@ -99,6 +101,81 @@ const budgetedMemoPrompt = composeBudgetedWritingPrompt({ contract: memoContract
   evidence: "원본 근거".repeat(10000), maxChars: 6000 });
 assert.ok(budgetedMemoPrompt.includes(memo), "Evidence truncation cannot remove requirements");
 assert.ok(budgetedMemoPrompt.length <= 6000);
+
+const canonicalProduct = { name: "로보락 S8 로봇청소기", description: "자동 먼지 비움 기능과 물걸레 패드",
+  features: ["물걸레 패드 분리 세척", "자동 먼지 비움"] };
+const titleContract = createWritingPromptContract({ kind: "SHOPPING", minimumSections: 8, maximumSections: 10,
+  targetCharacters: { min: 1300, max: 2400 }, hashtagCount: 5, product: canonicalProduct,
+  titlePlanContext: { kind: "TRAVEL", productName: "다른 상품", topicId: "generic_travel", verifiedExperience: true,
+    sourceDescription: "없는 다른 제품 사실", sourceFeatures: ["잘못된 옵션"], searchSuggestions: ["로봇청소기 물걸레"],
+    siblingTitles: ["로보락 S8 물걸레 패드 관리"], angleId: "deep-dive" },
+});
+assert.equal(titleContract.titlePlanContext?.kind, "SHOPPING");
+assert.equal(titleContract.titlePlanContext?.productName, canonicalProduct.name);
+assert.equal(titleContract.titlePlanContext?.sourceDescription, canonicalProduct.description);
+assert.deepEqual(titleContract.titlePlanContext?.sourceFeatures, canonicalProduct.features);
+assert.equal(titleContract.titlePlanContext?.verifiedExperience, false, "a stale context cannot invent verified experience");
+assert.deepEqual(titleContract.titlePlanContext?.searchSuggestions, ["로봇청소기 물걸레"]);
+const nameOnlyContract = createWritingPromptContract({ kind: "SHOPPING", minimumSections: 8, maximumSections: 10,
+  targetCharacters: { min: 1300, max: 2400 }, hashtagCount: 5, product: { name: canonicalProduct.name },
+  titlePlanContext: titleContract.titlePlanContext,
+});
+assert.equal(nameOnlyContract.titlePlanContext?.sourceDescription, undefined,
+  "absent canonical description cannot inherit stale caller evidence");
+assert.deepEqual(nameOnlyContract.titlePlanContext?.sourceFeatures, [],
+  "absent canonical features cannot inherit stale caller evidence");
+assert.deepEqual(Object.keys(getWritingOutputExample(titleContract)), ["title", "evidenceFacts", "sections", "hashtags"],
+  "internal title planning adds no public draft output fields");
+const titleBlock = formatWritingPromptContract(titleContract);
+assert.match(titleBlock, /제목 25~35자는 권장 범위/u);
+assert.match(titleBlock, /길이·앞 15자만 맞추려고 자르거나 단어를 나열하지/u);
+assert.match(titleBlock, /3개/u, "shared mandatory prompts include the internal candidate comparison");
+const exactProductTitle = createWritingPromptContract({ kind: "SHOPPING", minimumSections: 8, maximumSections: 10,
+  targetCharacters: { min: 1300, max: 2400 }, hashtagCount: 5, product: canonicalProduct,
+  draftMemo: '제목은 정확히 "로보락 S8, 물걸레를 고를 때"로 작성.',
+});
+assert.equal(getWritingOutputExample(exactProductTitle).title, "로보락 S8, 물걸레를 고를 때");
+assert.match(formatWritingPromptContract(exactProductTitle), /내부 제목 후보 선택이나 SEO 권장 길이로 바꾸지/u);
+
+// Run the actual simple-agent initializer and post-collection assignment block,
+// without importing its operational entrypoint or invoking search/providers.
+const wiredContract = evaluateInitializer<ReturnType<typeof createWritingPromptContract>>("writingContract", {
+  ...memoContractContext, connectKind: "SHOPPING", product: canonicalProduct,
+  specInput: { memo: "제품 선택 기준" }, productUnderstanding: undefined,
+});
+const wiredTitleContext = evaluateInitializer("titlePlanContext", { product: canonicalProduct, connectKind: "SHOPPING",
+  topicSelection: wiredContract.editorial?.topic, writingContract: wiredContract,
+  BRANDLINK_EXPERIENCE_MODE: "AI_ASSISTED_INFORMATION", specInput: { angleContext: { angle: "deep-dive", siblings: [{ title: "형제 글 제목" }] } },
+});
+const titleContextAssignment = generationFunction.body.statements.find((node): node is ts.IfStatement =>
+  ts.isIfStatement(node) && node.expression.getText(source) === "titlePlanContext" &&
+  node.thenStatement.getText(source).includes("titlePlanContext.searchSuggestions = searchDemand"));
+assert.ok(titleContextAssignment, "actual collected suggestions update the shared mandatory contract");
+const wiredPrompt = vm.runInNewContext(ts.transpileModule(`${titleContextAssignment.getText(source)}\nmandatoryWritingPromptBlock;`, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText, { titlePlanContext: wiredTitleContext, searchDemand: ["로보락 S8 물걸레 패드", "로봇청소기 자동 먼지 비움"],
+  writingContract: wiredContract, mandatoryWritingPromptBlock: "before collection", formatWritingPromptContract });
+assert.equal(wiredContract.titlePlanContext?.productName, canonicalProduct.name);
+assert.equal(wiredContract.titlePlanContext?.sourceDescription, canonicalProduct.description);
+assert.deepEqual(wiredContract.titlePlanContext?.sourceFeatures, canonicalProduct.features);
+assert.deepEqual(wiredContract.titlePlanContext?.searchSuggestions, ["로보락 S8 물걸레 패드", "로봇청소기 자동 먼지 비움"]);
+assert.equal(wiredPrompt, formatWritingPromptContract(wiredContract));
+const plannerCalls: ts.CallExpression[] = [];
+function collectPlannerCalls(node: ts.Node): void {
+  if (ts.isCallExpression(node) && node.expression.getText(source) === "planTitle") plannerCalls.push(node);
+  ts.forEachChild(node, collectPlannerCalls);
+}
+collectPlannerCalls(generationFunction.body);
+for (const [variable, actualBody] of [["normalizedTitle", "bodySections"], ["repairedTitle", "repairedBodySections"]]) {
+  const call = plannerCalls.find(value => value.arguments[0].getText(source) === variable);
+  assert.ok(call, `production ${variable} uses title planning`);
+  const options = vm.runInNewContext(ts.transpileModule(`(${call.arguments[1].getText(source)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText, { titlePlanContext: wiredContract.titlePlanContext,
+    bodySections: ["원래 본문 근거"], repairedBodySections: ["수정된 실제 본문 근거"] });
+  assert.deepEqual(Array.from(options.bodySections), actualBody === "bodySections" ? ["원래 본문 근거"] : ["수정된 실제 본문 근거"]);
+  assert.equal(options.sourceDescription, canonicalProduct.description);
+}
 const repairBuilder = declarations.get("buildRepairPrompt")?.initializer;
 assert.ok(repairBuilder && ts.isArrowFunction(repairBuilder) && ts.isBlock(repairBuilder.body));
 const repairReturn = repairBuilder.body.statements.find(ts.isReturnStatement);
@@ -169,6 +246,21 @@ for (const kind of ["SHOPPING", "TRAVEL"] as const) {
   }
   const raisedMinimum = buildBrowserPrompt("", "", context, 9, "recovery");
   assert.match(raisedMinimum, /sections는 9~11개/u);
+  const plannedContract = createWritingPromptContract({
+    kind, minimumSections: 8, maximumSections: 11,
+    targetCharacters: { min: 2400, max: 4200 }, hashtagCount: 4,
+    titlePlanContext: { kind, productName: kind === "TRAVEL" ? "튀르키예 9일 이스탄불 패키지" : "로보락 S8 로봇청소기",
+      topicId: defaultTopicTemplateId(kind), verifiedExperience: false,
+      sourceFeatures: kind === "TRAVEL" ? ["이스탄불·카파도키아 방문"] : ["물걸레 구성"],
+      searchSuggestions: kind === "TRAVEL" ? ["튀르키예 여행 준비"] : ["로봇청소기 물걸레"],
+    },
+  });
+  const plannedPrompt = buildBrowserPrompt("", "", { ...context, writingContract: plannedContract }, 8, "recovery");
+  assert.ok(plannedPrompt.length <= CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS);
+  assert.ok(plannedPrompt.endsWith(formatWritingPromptContract(plannedContract, { topicDetail: "minimal" })),
+    "compact title planning remains inside the unchanged browser recovery budget");
+  assert.match(plannedPrompt, /후보 3개/u);
+  browserCases += 1;
 
   const verified = createWritingPromptContract({
     kind, minimumSections: 8, maximumSections: 11,

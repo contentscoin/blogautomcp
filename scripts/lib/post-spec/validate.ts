@@ -13,6 +13,8 @@ import {
 } from "../brandlink-content-readiness";
 import { assessGenericLanguage, evidenceUsedIn, sentenceTokens, tokenSimilarity } from "../draft-quality-signals";
 import { scanAiTells } from "../humanize-korean";
+import { defaultTopicTemplateId } from "../topic-templates";
+import { hasUnsupportedTitleExperience, scoreTitle } from "../topic-templates/title-planner";
 import { countChars, looseText, renderSectionText } from "./render";
 import type { GeneratedDraft, PostSpec, RepairTarget, ValidationReport, ValidationSignal } from "./types";
 
@@ -114,16 +116,35 @@ export function validateDraft(spec: PostSpec, draft: GeneratedDraft, options: Va
   const { minChars, maxChars } = spec.seo.title;
   const titleFar = titleLength < minChars - 5 || titleLength > maxChars + 5;
   const titleNear = !titleFar && (titleLength < minChars || titleLength > maxChars);
-  push({ key: "title-length", label: `제목 길이 ${minChars}~${maxChars}자`, status: titleFar ? "fail" : titleNear ? "warn" : "pass", detail: `${titleLength}자` });
-  if (titleFar) target({ sectionIndex: null, code: "TITLE_LENGTH", priority: "P1", reason: `제목 ${titleLength}자`, instruction: `제목을 ${minChars}~${maxChars}자로 다시 쓰세요.` });
+  push({ key: "title-length", label: `권장 제목 길이 ${minChars}~${maxChars}자`, status: titleFar || titleNear ? "warn" : "pass", detail: `${titleLength}자 · 자연스러운 식별과 독자 질문을 우선` });
   const keywordPos = looseText(title).indexOf(looseText(spec.seo.primaryKeyword));
   const keywordFirst = keywordPos >= 0 && keywordPos <= 12;
-  push({ key: "title-keyword-first", label: "제목 앞쪽 핵심 키워드", status: keywordFirst ? "pass" : keywordPos >= 0 ? "warn" : "fail", detail: spec.seo.primaryKeyword });
-  if (keywordPos < 0) target({ sectionIndex: null, code: "TITLE_KEYWORD", priority: "P1", reason: "제목에 핵심 키워드 없음", instruction: `제목 앞쪽에 "${spec.seo.primaryKeyword}"를 넣으세요.` });
+  push({ key: "title-keyword-first", label: "제목 앞쪽 검색 표현 권장", status: keywordFirst ? "pass" : "warn", detail: `${spec.seo.primaryKeyword} · 전체 문자열 일치나 앞 15자 배치를 강제하지 않음` });
+  if (hasUnsupportedTitleExperience(title)) {
+    target({ sectionIndex: null, code: "FORBIDDEN_CLAIM", priority: "P0", reason: "제목에 근거 없는 직접 체험·후기 표현", instruction: "확인된 상품·일정 근거에 맞는 제목을 쓰고 실제 구매·사용·방문 체험을 만들지 않습니다." });
+  }
   const clickbaitStripped = stripClickbaitFromTitle(title) !== title;
   const titleEmoji = EMOJI_IN_TITLE.test(title);
   push({ key: "title-clean", label: "낚시성 문구·이모지 없는 제목", status: clickbaitStripped || titleEmoji ? "fail" : "pass" });
   if (clickbaitStripped || titleEmoji) target({ sectionIndex: null, code: "TITLE_CLEAN", priority: "P1", reason: clickbaitStripped ? "낚시성 문구" : "이모지 포함", instruction: "낚시성 문구와 이모지를 빼고 정보형 제목으로 다시 쓰세요." });
+  const titleScore = scoreTitle(title, {
+    kind: spec.connectKind, productName: spec.productName,
+    topicId: spec.editorial?.topic?.id || defaultTopicTemplateId(spec.connectKind),
+    verifiedExperience: false, primaryKeyword: spec.seo.primaryKeyword,
+    sourceDescription: spec.facts.lines.join("\n"), sourceFeatures: sourceFeaturesForValidation(spec),
+    bodySections: sectionTexts, minChars, maxChars,
+  });
+  push({ key: "title-content", label: "제목의 상품 식별·확인 사실", status: titleScore.hardFailures.length ? "fail" : "pass",
+    detail: titleScore.hardFailures.join(" / ") || "길이·검색어 위치는 권장 신호만 사용" });
+  const uncoveredTitleFailures = titleScore.hardFailures.filter((failure) => {
+    if (failure.startsWith("상품·여행지 식별어 누락:") && !titleHasProduct) return false;
+    if (failure === "체험 메모 없는 체험 표현" && targets.some(t => t.sectionIndex === null && t.code === "FORBIDDEN_CLAIM")) return false;
+    if (failure === "낚시성 문구·이모지" && (clickbaitStripped || titleEmoji)) return false;
+    return true;
+  });
+  if (uncoveredTitleFailures.length) target({ sectionIndex: null, code: "TITLE_CONTENT", priority: "P1",
+    reason: uncoveredTitleFailures.join(" / "),
+    instruction: "상품·모델 식별과 확인된 출처·본문 사실에 맞는 자연스러운 제목으로 고치세요. 다른 브랜드·모델, 근거 없는 수치·효능·비교·체험은 빼고 길이·검색어 위치만으로 재작성하지 않습니다." });
 
   // 섹션 규칙
   const seenLines = new Map<string, { sectionIndex: number; tokens: string[] }>();

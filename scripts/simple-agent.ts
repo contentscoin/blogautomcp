@@ -218,7 +218,7 @@ import { createEditorialSelection, formatEditorialTemplate } from "./lib/editori
 import { formatTopicTemplateForPrompt } from "./lib/topic-templates";
 import { planSellerVisionBatches, readDetailImagesWithVision } from "./lib/detail-vision-reader";
 import { buildSearchDemandQueries, collectSearchDemand, formatSearchDemandForPrompt } from "./lib/search-demand";
-import { formatTitleCandidatesForPrompt, planTitle, type TitlePlanContext } from "./lib/topic-templates/title-planner";
+import { planTitle, type TitlePlanContext } from "./lib/topic-templates/title-planner";
 import {
   assessSiblingOverlap,
   formatPostAngleForPrompt,
@@ -4915,33 +4915,39 @@ async function step2_generatePost(
     postAngleBlock: formatPostAngleForPrompt(connectKind, specInput?.angleContext?.angle, specInput?.angleContext?.siblings),
     postAngleSummary: formatPostAngleSummary(connectKind, specInput?.angleContext?.angle),
   });
-  const mandatoryWritingPromptBlock = formatWritingPromptContract(writingContract);
+  let mandatoryWritingPromptBlock = formatWritingPromptContract(writingContract);
   if (specInput?.angleContext) {
     console.log(`   🧭 포스팅 주제: ${getPostAngle(connectKind, specInput.angleContext.angle).label} · 형제 글 ${specInput.angleContext.siblings.length}편`);
   }
   // 상품 유형 템플릿: 같은 섹션 ID 위에 유형별 목적·이미지 의도·이미지 출처를 덮어쓴 역할 팔레트.
   const topicSelection = writingContract.editorial?.topic;
   if (topicSelection) console.log(`   🧩 상품 유형 템플릿: ${topicSelection.id} (${topicSelection.reason})`);
-  // SEO 제목 기획: 템플릿·각도 제목 공식으로 후보를 만들고, 모델 제목이 필수 규칙을 어기면 후보로 바꾼다.
+  // 제목 기획: 상품 근거·관측 표현·독자 의도를 공유 계약에 전달하고 명확한 실패만 교정한다.
   const titlePlanContext: TitlePlanContext | null = topicSelection ? {
     kind: connectKind,
     productName: product.name,
+    sourceDescription: product.description,
+    sourceFeatures: product.features,
     topicId: topicSelection.id,
     angleId: specInput?.angleContext?.angle,
     verifiedExperience: BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE",
     siblingTitles: specInput?.angleContext?.siblings.map((sibling) => sibling.title),
     minChars: writingContract.title.min,
     maxChars: writingContract.title.max,
-  } : null;
-  // 검색 수요(네이버 자동완성): FAQ·질문형 소제목 후보. 제출 원고 검증 모드에서는 호출하지 않는다.
+  } : writingContract.titlePlanContext || null;
+  // 관측 검색 표현(네이버 자동완성): 제목·질문형 소제목 참고. 제출 검증에서는 호출하지 않는다.
   const searchDemand = SEARCH_DEMAND_ENABLED && !BRANDLINK_GENERATED_DRAFT_PATH
     ? await collectSearchDemand(buildSearchDemandQueries(connectKind, product.name)).catch(() => [])
     : [];
-  if (searchDemand.length) console.log(`   🔍 검색 수요: ${searchDemand.slice(0, 5).join(", ")}${searchDemand.length > 5 ? " …" : ""}`);
+  if (searchDemand.length) console.log(`   🔍 자동완성 표현 참고: ${searchDemand.slice(0, 5).join(", ")}${searchDemand.length > 5 ? " …" : ""}`);
+  if (titlePlanContext) {
+    titlePlanContext.searchSuggestions = searchDemand;
+    writingContract.titlePlanContext = titlePlanContext;
+    mandatoryWritingPromptBlock = formatWritingPromptContract(writingContract);
+  }
   const compositionPromptBlock = [
     formatPostContractForPrompt(getPostCompositionContract(connectKind, topicSelection?.id)),
     formatSearchDemandForPrompt(connectKind, searchDemand),
-    titlePlanContext ? formatTitleCandidatesForPrompt(titlePlanContext) : "",
     // Codex 경로는 브라우저 예산 제한이 없으므로 섹션 흐름·체험 문장 자리까지 담은 전체 블록을 넣는다.
     topicSelection
       ? formatTopicTemplateForPrompt(topicSelection, { experienceMode: BRANDLINK_EXPERIENCE_MODE })
@@ -5200,7 +5206,7 @@ ${serverGuidancePrompt}
 ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일 버전 고정" : ""}
 
 ## 작성 규칙
-1. 제목: ${isTravel ? "핵심 여행지 검색 키워드를 맨 앞에 + 상품명" : "핵심 검색 키워드(상품 카테고리)를 맨 앞에 + 상품명"}, 25-35자
+1. 제목: ${isTravel ? "실제 여행지·여행 의도" : "선택 상품·모델과 검색 의도"}를 자연스럽게 드러내고 독자가 읽을 이유를 한 가지 담습니다. 길이와 키워드 앞쪽 배치는 권장사항이며, 단어 나열·같은 정형 접미사·억지 길이 맞추기는 피합니다. 공유 제목 하네스와 명시 요청 제목을 우선합니다.
    - 제목에는 이모지를 절대 넣지 마세요.
    ${BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE"
      ? "- 제목의 체험 표현은 제공된 실제 체험 메모로 증명되는 범위에서만 사용하세요."
@@ -5542,7 +5548,7 @@ ${mandatoryWritingPromptBlock}`;
     json.title, product.name, writingContract, sanitizeTitle,
   );
   if (titlePlanContext && !writingContract.requestedTitle) {
-    const plannedTitle = planTitle(normalizedTitle, titlePlanContext);
+    const plannedTitle = planTitle(normalizedTitle, { ...titlePlanContext, bodySections });
     if (plannedTitle.replaced) {
       console.log(`   🏷️ 제목 교체(${plannedTitle.reason}): ${normalizedTitle} → ${plannedTitle.title}`);
       normalizedTitle = sanitizeTitle(plannedTitle.title, normalizedTitle);
@@ -5689,10 +5695,14 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
             applyHumanMobilePolishToSection(section, index, connectKind)
           );
         }
-        const repairedTitle = resolveWritingDraftTitle(
+        let repairedTitle = resolveWritingDraftTitle(
           typeof repairedJson.title === "string" ? repairedJson.title : normalizedTitle,
           product.name, writingContract, sanitizeTitle,
         );
+        if (titlePlanContext && !writingContract.requestedTitle) {
+          const plannedRepairTitle = planTitle(repairedTitle, { ...titlePlanContext, bodySections: repairedBodySections });
+          if (plannedRepairTitle.replaced) repairedTitle = sanitizeTitle(plannedRepairTitle.title, repairedTitle);
+        }
         const repairedHashtags = normalizeHashtags(
           repairedJson.hashtags,
           product,
@@ -9991,6 +10001,13 @@ async function runPreparedPostRevision(
           ? revision.sections.map((section, index) => allowedIndexes.includes(index) ? stripInternalGuidanceSentences(section) : section)
           : withoutInternalGuidance(revision.sections);
         candidate = { title: revision.title, sections: candidateSections, hashtags: selected.hashtags };
+      }
+      if (allowCandidateTitleChange) {
+        candidate = { ...candidate, title: resolveWritingDraftTitle(candidate.title, name, writingContract, sanitizeTitle) };
+        if (writingContract.titlePlanContext && !writingContract.requestedTitle) {
+          const plannedRevisionTitle = planTitle(candidate.title, { ...writingContract.titlePlanContext, bodySections: candidate.sections });
+          if (plannedRevisionTitle.replaced) candidate.title = sanitizeTitle(plannedRevisionTitle.title, candidate.title);
+        }
       }
       assertUntargetedSectionHashesUnchanged(selected.sections, candidate.sections, allowedIndexes);
       lastCandidateQuality = assessCandidate(candidate);

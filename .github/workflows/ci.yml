@@ -56,6 +56,8 @@ jobs:
           npm run test:naver-session
           npm run test:connect-store
           npm run test:title-rules
+          npm run test:title-planner
+          npm run test:detail-vision
           npm run test:post-spec
           npm run test:post-composition
           npm run test:saved-text-revalidation

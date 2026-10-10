@@ -6,13 +6,17 @@
 import { getProductTokens } from "../brandlink-content-readiness";
 import type { SectionTemplate } from "./section-library";
 import type { GeneratedDraft, PostSpec } from "./types";
+import { defaultTopicTemplateId } from "../topic-templates";
+import { buildTitleCandidates, planTitle } from "../topic-templates/title-planner";
 
 export function buildLocalTitle(spec: PostSpec, shortName: string): string {
-  const keyword = spec.seo.primaryKeyword;
-  const base = spec.connectKind === "TRAVEL" ? `${keyword} ${shortName} 일정과 포함사항` : `${keyword} ${shortName} 구성과 가격 확인`;
-  const cleaned = base.replace(/\s+/g, " ").trim();
-  if (cleaned.length <= spec.seo.title.maxChars) return cleaned;
-  return cleaned.slice(0, spec.seo.title.maxChars).trim();
+  const context = { kind: spec.connectKind, productName: spec.productName,
+    topicId: spec.editorial?.topic?.id || defaultTopicTemplateId(spec.connectKind), verifiedExperience: false,
+    primaryKeyword: spec.seo.primaryKeyword, sourceDescription: spec.facts.lines.join("\n"),
+    sourceFeatures: spec.facts.lines, minChars: spec.seo.title.minChars, maxChars: spec.seo.title.maxChars,
+  };
+  const planned = planTitle("", context);
+  return planned.title || buildTitleCandidates(context)[0] || shortName;
 }
 
 export function buildLocalDraft(spec: PostSpec, templates: SectionTemplate[], shortName: string): GeneratedDraft {
