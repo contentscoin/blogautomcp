@@ -12,6 +12,7 @@ import ts from "typescript";
 import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene, type BrandPostImageSourceHint } from "../src/lib/brand-post-image-evidence";
 import type { ProductSectionImageDiagnostics, ProductSectionImageReviewOptions } from "./lib/product-photo-review";
 import { auditSectionProposals } from "./lib/product-section-proposal-audit";
+import type { PublishImageAuditOptions } from "./lib/publish-image-audit";
 
 interface ReviewModule {
   allowsGenericProductPhoto(target: { sectionTitle: string; imageIntent: string }): boolean;
@@ -35,6 +36,7 @@ type ReviewCall = { userPrompt: string; imagePaths: string[]; maxImages?: number
 function loadReview(answer: string | ((options: ReviewCall, callIndex: number) => string)) {
   let prompt = "";
   const calls: ReviewCall[] = [];
+  const auditCalls: PublishImageAuditOptions[] = [];
   const source = fs.readFileSync(path.resolve("scripts/lib/product-photo-review.ts"), "utf8");
   const code = ts.transpileModule(source, {
     compilerOptions: {
@@ -53,9 +55,9 @@ function loadReview(answer: string | ((options: ReviewCall, callIndex: number) =
       // Semantic failures/auth/round bounds are covered by verify-product-proposal-audit.
       if (name === "./product-section-proposal-audit") return {
         auditSectionProposals: (options: Parameters<typeof auditSectionProposals>[0]) => auditSectionProposals({ ...options,
-          audit: async ({ composition }) => ({ ok: true, checked: composition.sections.length, failures: [],
+          audit: async (input) => { auditCalls.push(input); const { composition } = input; return { ok: true, checked: composition.sections.length, failures: [],
             images: composition.renderNodes.flatMap((node, nodeIndex) => node.kind === "image" ? [{ nodeIndex,
-              assetPath: node.assetPath, sha256: crypto.createHash("sha256").update(fs.readFileSync(node.assetPath)).digest("hex") }] : []) }),
+              assetPath: node.assetPath, sha256: crypto.createHash("sha256").update(fs.readFileSync(node.assetPath)).digest("hex") }] : []) }; },
         }),
       };
       if (name === "node:fs") return fs;
@@ -76,7 +78,7 @@ function loadReview(answer: string | ((options: ReviewCall, callIndex: number) =
     process,
     Buffer,
   }, { filename: "scripts/lib/product-photo-review.ts" });
-  return { review: loadedModule.exports as ReviewModule, calls, get prompt() { return prompt; } };
+  return { review: loadedModule.exports as ReviewModule, calls, auditCalls, get prompt() { return prompt; } };
 }
 
 async function main() {
@@ -225,6 +227,8 @@ async function main() {
     const originalPackshot = loadReview('{"assignments":[{"targetIndex":1,"selectedIndex":1,"reviewClass":"product-photo","reason":"흰 배경에 전체 상품이 보이는 원본 사진"}]}');
     assert.equal((await originalPackshot.review.selectVerifiedProductSectionImages([candidate], "꽃게", [sceneTarget])).length, 1,
       "an explicit original slot accepts a plain seller photo as well as an original lifestyle scene");
+    assert.equal(originalPackshot.auditCalls[0].composition.sections[0].imageSource, "seller-original",
+      "source review normalization and proposal assembly preserve the explicit original policy for the final pixel gate");
     const originalFeature = loadReview('{"assignments":[{"targetIndex":1,"selectedIndex":1,"reviewClass":"feature-evidence","reason":"설명 카드"}]}');
     assert.equal((await originalFeature.review.selectVerifiedProductSectionImages([candidate], "꽃게", [sceneTarget])).length, 0,
       "an original photography slot must not be filled by a feature card");

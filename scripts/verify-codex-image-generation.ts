@@ -7,6 +7,7 @@ import crypto from "node:crypto";
 import {
   CODEX_IMAGE_MODEL_LABEL,
   buildCodexImageInstruction,
+  locateCodexImage,
   resolveBrandPostImageEngine,
   runCodexImageBatch,
   type ImageBatchJob,
@@ -17,7 +18,7 @@ import draftRuntimePolicy from "./lib/draft-runtime-policy.json";
 
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(2048, 7)]);
 
-type Behaviour = "workspace" | "generated" | "nothing" | "auth";
+type Behaviour = "workspace" | "generated" | "nothing" | "auth" | "ambiguous" | "duplicate";
 function mockCodex(behaviour: (prompt: string, call: number) => Behaviour, codexHome: string) {
   const threads: Array<Record<string, unknown>> = [];
   const prompts: string[] = [];
@@ -46,10 +47,15 @@ function mockCodex(behaviour: (prompt: string, call: number) => Behaviour, codex
                   await new Promise((resolve) => setTimeout(resolve, 15));
                   if (mode === "auth") { yield { type: "turn.failed", error: { message: "401 Unauthorized: login required" } }; return; }
                   if (mode === "workspace") fs.writeFileSync(path.join(String(options.workingDirectory), "out.png"), PNG);
-                  if (mode === "generated") {
+                  if (mode === "generated" || mode === "ambiguous" || mode === "duplicate") {
                     const dir = path.join(codexHome, "generated_images", threadId);
                     fs.mkdirSync(dir, { recursive: true });
                     fs.writeFileSync(path.join(dir, "ig_1.png"), PNG);
+                    if (mode === "ambiguous" || mode === "duplicate") {
+                      const lastOutput = mode === "ambiguous" ? Buffer.concat([PNG, Buffer.from("unrelated second output")]) : PNG;
+                      fs.writeFileSync(path.join(dir, "ig_2.png"), lastOutput);
+                      fs.writeFileSync(path.join(String(options.workingDirectory), "out.png"), lastOutput);
+                    }
                   }
                   yield { type: "item.completed", item: { type: "agent_message", text: "./out.png" } };
                   yield { type: "turn.completed", usage: {} };
@@ -79,6 +85,11 @@ async function main() {
     assert.match(buildCodexImageInstruction("P", 2), /첨부한 2장은 장소 분위기 참고용/u);
     assert.match(buildCodexImageInstruction("P", 2, "product"), /실제 참조 이미지로 모두 전달/u);
     assert.doesNotMatch(buildCodexImageInstruction("P", 2, "product"), /글자·로고를 옮기지/u);
+    assert.match(buildCodexImageInstruction("P", 1, "product"), /정확히 1회만 호출/u);
+    assert.match(buildCodexImageInstruction("P", 1, "product"), /content\[\].*가정하지/u);
+    assert.match(buildCodexImageInstruction("P", 1, "product"), /image_url, output_hint/u);
+    assert.match(buildCodexImageInstruction("P", 1, "product"), /추가 생성 없이 실패/u);
+    assert.match(buildCodexImageInstruction("P", 1, "product"), /기존 생성 결과의 파일 경로 확인과 out.png로의 파일 복사/u);
 
     // Product references reach the SDK as actual ordered local_image attachments.
     const source = path.join(root, "source.png"), acceptedAnchor = path.join(root, "anchor.png");
@@ -101,6 +112,125 @@ async function main() {
     const offlineReference = await runCodexImageBatch([productJob], { createCodex: async () => { throw new Error("SDK unavailable"); },
       codexHome, onResult: async () => {} });
     assert.match(offlineReference[0].error!, /PRODUCT_REFERENCE_CHANGED/, "SDK setup failure cannot bypass reference integrity on cached outputs");
+
+    // A path-only second generation must not replace the requested product image, even via out.png.
+    const strictProductJob = (id: string) => job(id, { referenceMode: "product", referenceImagePaths: [acceptedAnchor],
+      requiredReferenceHashes: [crypto.createHash("sha256").update(fs.readFileSync(acceptedAnchor)).digest("hex")] });
+    const ambiguousHome = path.join(root, "ambiguous-home"), ambiguousJob = strictProductJob("ambiguous-product");
+    const ambiguousCodex = mockCodex(() => "ambiguous", ambiguousHome);
+    const [ambiguous] = await runCodexImageBatch([ambiguousJob], { createCodex: ambiguousCodex.create, codexHome: ambiguousHome, onResult: async () => {} });
+    assert.equal(ambiguous.localPath, null);
+    assert.match(ambiguous.error!, /IMAGE_OUTPUT_AMBIGUOUS/);
+    assert.equal(ambiguous.submissionState, "uncertain");
+    assert.equal(fs.existsSync(`${ambiguousJob.outStem}.png`), false, "an ambiguous second output is never adopted");
+    assert.equal(JSON.parse(fs.readFileSync(`${ambiguousJob.outStem}.codex-submission.json`, "utf8")).state, "submitting");
+    const ambiguousOut = path.join(`${ambiguousJob.outStem}.codex-1`, "out.png");
+    assert.ok(fs.existsSync(ambiguousOut), "preserve the provider's files for reconciliation");
+    const [ambiguousResume] = await runCodexImageBatch([ambiguousJob], { createCodex: ambiguousCodex.create, codexHome: ambiguousHome, onResult: async () => {} });
+    assert.match(ambiguousResume.error!, /IMAGE_OUTPUT_AMBIGUOUS/);
+    assert.equal(ambiguousResume.submissionState, "uncertain");
+    assert.equal(ambiguousCodex.threads.length, 1, "uncertain recovery never invokes generation again");
+
+    // Previously adopted bad raw output is also checked against its original receipt, including offline reuse.
+    fs.copyFileSync(ambiguousOut, `${ambiguousJob.outStem}.png`);
+    const cachedHash = crypto.createHash("sha256").update(fs.readFileSync(`${ambiguousJob.outStem}.png`)).digest("hex");
+    const [cachedAmbiguous] = await runCodexImageBatch([ambiguousJob], { createCodex: ambiguousCodex.create, codexHome: ambiguousHome, onResult: async () => {} });
+    assert.equal(cachedAmbiguous.localPath, null);
+    assert.match(cachedAmbiguous.error!, /IMAGE_OUTPUT_AMBIGUOUS/);
+    assert.equal(cachedAmbiguous.submissionState, "uncertain");
+    assert.equal(ambiguousCodex.threads.length, 1);
+    const [offlineAmbiguous] = await runCodexImageBatch([ambiguousJob], { createCodex: async () => { throw new Error("SDK unavailable"); },
+      codexHome: ambiguousHome, onResult: async () => {} });
+    assert.equal(offlineAmbiguous.localPath, null);
+    assert.match(offlineAmbiguous.error!, /IMAGE_OUTPUT_AMBIGUOUS/);
+    assert.equal(offlineAmbiguous.submissionState, "uncertain");
+    assert.equal(crypto.createHash("sha256").update(fs.readFileSync(`${ambiguousJob.outStem}.png`)).digest("hex"), cachedHash, "do not discard or overwrite an ambiguous cached raw");
+
+    // An explicit engine switch cannot turn the same ambiguous raw into an accepted browser result.
+    const savedImageEngine = process.env.BRAND_POST_IMAGE_ENGINE, savedCodexHome = process.env.CODEX_HOME;
+    let explicitBrowserCalls = 0, explicitCodexCalls = 0;
+    const explicitBrowserResults: Array<{ localPath: string | null; error?: string }> = [];
+    try {
+      process.env.BRAND_POST_IMAGE_ENGINE = "browser";
+      process.env.CODEX_HOME = ambiguousHome;
+      await runImageBatch([ambiguousJob], root, async (result) => { explicitBrowserResults.push(result); }, undefined, {
+        browserEnabled: true,
+        runBrowser: async () => { explicitBrowserCalls += 1; throw new Error("ambiguous raw must never reach the browser"); },
+        runCodex: async () => { explicitCodexCalls += 1; throw new Error("an explicit browser engine must not invoke Codex"); },
+      });
+    } finally {
+      if (savedImageEngine === undefined) delete process.env.BRAND_POST_IMAGE_ENGINE;
+      else process.env.BRAND_POST_IMAGE_ENGINE = savedImageEngine;
+      if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = savedCodexHome;
+    }
+    assert.equal(explicitBrowserCalls, 0);
+    assert.equal(explicitCodexCalls, 0);
+    assert.equal(explicitBrowserResults.length, 1);
+    assert.equal(explicitBrowserResults[0].localPath, null);
+    assert.match(explicitBrowserResults[0].error!, /IMAGE_OUTPUT_AMBIGUOUS/);
+    assert.equal(crypto.createHash("sha256").update(fs.readFileSync(`${ambiguousJob.outStem}.png`)).digest("hex"), cachedHash);
+
+    // Copies of one generated image are one result; other threads and pre-request outputs are excluded.
+    const duplicateHome = path.join(root, "duplicate-home"), duplicateJob = strictProductJob("duplicate-product");
+    const otherThread = path.join(duplicateHome, "generated_images", "unrelated-thread");
+    fs.mkdirSync(otherThread, { recursive: true });
+    fs.writeFileSync(path.join(otherThread, "foreign.png"), Buffer.concat([PNG, Buffer.from("different product")]));
+    const duplicateCodex = mockCodex(() => "duplicate", duplicateHome);
+    const [deduplicated] = await runCodexImageBatch([duplicateJob], { createCodex: duplicateCodex.create, codexHome: duplicateHome, onResult: async () => {} });
+    assert.equal(deduplicated.localPath, `${duplicateJob.outStem}.png`);
+    assert.ok(fs.readFileSync(deduplicated.localPath!).equals(PNG));
+    const duplicateReceipt = JSON.parse(fs.readFileSync(`${duplicateJob.outStem}.codex-submission.json`, "utf8"));
+    const oldFile = path.join(duplicateHome, "generated_images", duplicateReceipt.threadId, "pre-request.png");
+    fs.writeFileSync(oldFile, Buffer.concat([PNG, Buffer.from("old image")]));
+    fs.utimesSync(oldFile, new Date(duplicateReceipt.startedAtMs - 5000), new Date(duplicateReceipt.startedAtMs - 5000));
+    const [deduplicatedResume] = await runCodexImageBatch([duplicateJob], { createCodex: duplicateCodex.create, codexHome: duplicateHome, onResult: async () => {} });
+    assert.equal(deduplicatedResume.localPath, deduplicated.localPath);
+    assert.equal(duplicateCodex.threads.length, 1, "same-byte copies remain safely reusable");
+
+    // Review-only recovery belongs to the coordinator, never to this generation transport.
+    const reviewOnlyJob: ImageBatchJob = { ...duplicateJob, reviewOnly: {
+      outputSha256: crypto.createHash("sha256").update(PNG).digest("hex"), slotId: "section:image:1",
+      sourceSnapshotId: "verified-snapshot", referenceHashes: duplicateJob.requiredReferenceHashes!,
+    } };
+    const guardedCodex = mockCodex(() => "workspace", path.join(root, "review-only-home"));
+    let guardedSdkSetups = 0, guardedDeliveries = 0;
+    const guardedCreate = async () => { guardedSdkSetups += 1; return guardedCodex.create(); };
+    const [reviewOnlyDirect] = await runCodexImageBatch([reviewOnlyJob], { createCodex: guardedCreate,
+      onResult: async () => { guardedDeliveries += 1; } });
+    assert.equal(reviewOnlyDirect.localPath, null);
+    assert.match(reviewOnlyDirect.error!, /IMAGE_RESUME_REQUIRED/);
+    assert.equal(reviewOnlyDirect.submissionState, "uncertain");
+    assert.equal(guardedSdkSetups, 0, "review-only input must not initialize the generation SDK");
+    assert.equal(guardedCodex.threads.length, 0);
+    assert.equal(guardedDeliveries, 1);
+    const mixedRecovery = await runCodexImageBatch([reviewOnlyJob, job("fresh-beside-review-only")], { createCodex: guardedCreate,
+      qc: false, onResult: async () => {} });
+    assert.equal(mixedRecovery[0].localPath, null);
+    assert.match(mixedRecovery[0].error!, /IMAGE_RESUME_REQUIRED/);
+    assert.ok(mixedRecovery[1].localPath);
+    assert.equal(guardedSdkSetups, 1);
+    assert.equal(guardedCodex.threads.length, 1, "a mixed batch may generate only its fresh job");
+
+    // A restored partial submission with multiple provider images cannot take the last file or start a new thread.
+    const partialHome = path.join(root, "partial-home"), partialJob = strictProductJob("partial-product");
+    const partialWorkspace = `${partialJob.outStem}.codex-1`, partialThread = "partial-thread", partialStartedAt = Date.now();
+    fs.mkdirSync(partialWorkspace, { recursive: true });
+    const partialGenerated = path.join(partialHome, "generated_images", partialThread);
+    fs.mkdirSync(partialGenerated, { recursive: true });
+    fs.writeFileSync(path.join(partialGenerated, "first.png"), PNG);
+    fs.writeFileSync(path.join(partialGenerated, "last.png"), Buffer.concat([PNG, Buffer.from("second image")]));
+    fs.writeFileSync(`${partialJob.outStem}.codex-submission.json`, JSON.stringify({ state: "submitting", workspace: partialWorkspace,
+      threadId: partialThread, startedAtMs: partialStartedAt }));
+    const partialCodex = mockCodex(() => "workspace", partialHome);
+    const [partialResume] = await runCodexImageBatch([partialJob], { createCodex: partialCodex.create, codexHome: partialHome, onResult: async () => {} });
+    assert.equal(partialResume.localPath, null);
+    assert.match(partialResume.error!, /IMAGE_OUTPUT_AMBIGUOUS/);
+    assert.equal(partialResume.submissionState, "uncertain");
+    assert.equal(partialCodex.threads.length, 0, "partial ambiguity is resolved only by reading original artifacts");
+    assert.equal(fs.existsSync(`${partialJob.outStem}.png`), false);
+    assert.throws(() => locateCodexImage(partialWorkspace, partialHome, partialThread, partialStartedAt, { referenceMode: "product" }), /IMAGE_OUTPUT_AMBIGUOUS/);
+    assert.ok(locateCodexImage(partialWorkspace, partialHome, partialThread, partialStartedAt), "generic transport retains its existing latest-file fallback");
 
     // 1. Thread isolation + result collection (workspace out.png, then generated_images/<threadId>).
     const codex = mockCodex((_, call) => (call === 1 ? "workspace" : "generated"), codexHome);
@@ -223,7 +353,7 @@ async function main() {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
-  console.log("PASS: codex image engine policy, thread isolation, result collection, resume, concurrency 3, auth classification, QC single retry, browser fallback");
+  console.log("PASS: codex image policy, product output ambiguity/cache/recovery guards, thread isolation, result collection, resume, concurrency 3, auth classification, QC single retry, browser fallback");
 }
 
 main().catch((error) => {

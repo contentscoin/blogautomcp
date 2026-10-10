@@ -102,6 +102,7 @@ export async function selectVerifiedProductSectionImages(
     sectionBody: (target.sectionBody || []).map(text => text.normalize("NFKC").replace(/\s+/gu, " ").trim()),
     excludedSourceSha256: [...new Set(target.excludedSourceSha256 || [])].sort(),
     imageIntent: target.imageIntent.normalize("NFKC").replace(/\s+/gu, " ").trim(),
+    imageSource: target.imageSource,
     allowProductPhoto: allowsGenericProductPhoto(target),
     allowScene: allowsOriginalShoppingScene(target),
   }));

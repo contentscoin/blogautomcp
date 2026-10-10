@@ -1,8 +1,9 @@
 import { auditPublishImages, type PublishImageAuditOptions } from "./publish-image-audit";
 import type { PostRenderNode, ResolvedPostSectionV1 } from "../../src/lib/post-composition-contract";
+import type { BrandPostImageSourceHint } from "../../src/lib/brand-post-image-evidence";
 
 export interface SectionProposal { targetIndex: number; path: string; sourceSha256: string }
-export interface SectionProposalTarget { sectionTitle: string; sectionBody?: string[]; imageIntent: string; sectionId?: string }
+export interface SectionProposalTarget { sectionTitle: string; sectionBody?: string[]; imageIntent: string; sectionId?: string; imageSource?: BrandPostImageSourceHint }
 
 /** Bounded selection/verification: only selected pairs are audited, using exactly
  * the final publication rules. Rejected pairs cannot re-enter subsequent rounds. */
@@ -26,7 +27,9 @@ export async function auditSectionProposals<T extends SectionProposal>(options: 
       const target = options.targets[row.targetIndex];
       const id = target.sectionId || `source-proposal-${row.targetIndex}`;
       sections.push({ id, title: target.sectionTitle, body: target.sectionBody || [], imageIntent: target.imageIntent,
-        imagePaths: [row.path], characterCount: 0, headingStyle: "sectionTitle" });
+        // The final audit uses the same explicit slot policy as the proposal
+        // review; losing it would reclassify an overview as feature evidence.
+        imageSource: target.imageSource, imagePaths: [row.path], characterCount: 0, headingStyle: "sectionTitle" });
       renderNodes.push({ kind: "heading", sectionId: id, text: target.sectionTitle });
       for (const text of target.sectionBody || []) renderNodes.push({ kind: "paragraph", sectionId: id, text });
       byNode.set(renderNodes.length, row);

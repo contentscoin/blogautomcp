@@ -3,7 +3,7 @@
  * Codex CLI 내장 image_generation 도구의 서버 모델은 gpt-image-2 다(모델을 따로 지정할 수 없다).
  *
  * 작업마다 독립 Codex 스레드를 연다. 스레드는 작업 전용 폴더에서만 쓰기가 가능하고 네트워크 명령은 꺼져 있다.
- * 결과는 작업 폴더의 out.png 를 먼저 보고, 없으면 CODEX_HOME/generated_images/<threadId>/ 에서 찾는다.
+ * 결과는 작업 폴더와 CODEX_HOME/generated_images/<threadId>/ 에서 찾는다. 상품은 서로 다른 결과가 있으면 채택하지 않는다.
  * 찾은 파일은 브라우저 경로와 같은 `${outStem}.png` 로 옮겨, 이어서 생성·중복 방지 규칙을 그대로 쓴다.
  * 생성 뒤 photoreal 점검표로 1회 확인하고, 걸린 항목만 긍정문으로 보강해 1회만 다시 만든다.
  */
@@ -36,6 +36,8 @@ export interface ImageBatchJob {
   referenceImagePaths: string[];
   referenceMode?: "product";
   requiredReferenceHashes?: string[];
+  /** Only the coordinator may verify and consume an existing result; transports cannot generate it. */
+  reviewOnly?: { outputSha256: string; slotId: string; sourceSnapshotId: string; referenceHashes: string[] };
 }
 
 export interface ImageBatchResult {
@@ -134,7 +136,15 @@ export async function defaultPhotorealQc(imagePath: string, people: boolean): Pr
 export function buildCodexImageInstruction(prompt: string, referenceCount: number, referenceMode?: "product"): string {
   return [
     "이미지 생성 도구(image_generation)로 아래 장면의 사진을 정확히 1장 생성하고, 현재 작업 폴더에 ./out.png 로 저장하세요.",
-    "이미지 저장에 필요한 파일 복사 외에는 명령 실행·코드 수정·웹 검색을 하지 마세요. 다른 파일을 만들지 마세요.",
+    referenceMode === "product"
+      ? "기존 생성 결과의 파일 경로 확인과 out.png로의 파일 복사에 필요한 명령만 허용합니다. 경로 조회를 위해 이미지 생성 도구를 호출하지 마세요. 추가 생성·코드 수정·웹 검색을 하지 마세요. 다른 파일을 만들지 마세요."
+      : "이미지 저장에 필요한 파일 복사 외에는 명령 실행·코드 수정·웹 검색을 하지 마세요. 다른 파일을 만들지 마세요.",
+    referenceMode === "product"
+      ? "이 작업 전체에서 이미지 생성 도구는 정확히 1회만 호출하세요. 이미 생성한 파일의 경로나 저장 방법을 알아내기 위해 이미지 생성 도구를 다시 호출하지 마세요. 두 번째 호출은 조회가 아니라 새로운 이미지 생성입니다."
+      : "",
+    referenceMode === "product"
+      ? "도구의 실제 반환값(image_url, output_hint 등)을 읽으세요. 반환값을 MCP content[] 배열이라고 가정하지 마세요. 이미지가 이미 저장됐다면 반환 힌트나 이 생성 스레드의 generated_images 폴더에서 그 파일만 찾아 out.png로 복사하세요. image_url의 base64 데이터나 전체 반환값을 텍스트로 출력하지 마세요. 기존 파일을 찾지 못하면 추가 생성 없이 실패를 보고하세요."
+      : "",
     referenceCount > 0
       ? referenceMode === "product"
         ? `첨부한 ${referenceCount}장을 이미지 생성 도구의 실제 참조 이미지로 모두 전달하세요. 첫 사진은 상품의 형상·비율·원래 라벨의 기준이고 두 번째가 있으면 승인된 동일 글의 장면 기준입니다. 참조 없이 새 상품을 그리지 마세요.`
@@ -187,8 +197,27 @@ function isImageFile(file: string): boolean {
   }
 }
 
-/** 작업 폴더 out.png → generated_images/<threadId>/ 최신 이미지 순으로 찾는다. */
-export function locateCodexImage(workspace: string, codexHome: string, threadId: string | null, startedAtMs: number): string | null {
+/** Product jobs require one unique result across the exact thread, workspace and any saved raw output. */
+export function locateCodexImage(workspace: string, codexHome: string, threadId: string | null, startedAtMs: number,
+  options: { referenceMode?: "product"; existingOutput?: string } = {}): string | null {
+  if (options.referenceMode === "product") {
+    const generated = threadId ? safeList(path.join(codexHome, "generated_images", threadId))
+      .filter((file) => RESULT_EXTENSIONS.includes(path.extname(file).toLowerCase()) && isImageFile(file))
+      .filter((file) => fs.statSync(file).mtimeMs >= startedAtMs - 1000) : [];
+    const candidates = [
+      ...RESULT_EXTENSIONS.map((extension) => path.join(workspace, `out${extension}`)),
+      ...safeList(workspace),
+      ...generated,
+      ...(options.existingOutput ? [options.existingOutput] : []),
+    ].filter(isImageFile);
+    const unique = new Map<string, string>();
+    for (const file of new Set(candidates)) {
+      const hash = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+      if (!unique.has(hash)) unique.set(hash, file);
+    }
+    if (unique.size > 1) throw new Error("IMAGE_OUTPUT_AMBIGUOUS: 같은 상품 이미지 요청에서 서로 다른 생성 결과가 발견됐습니다. 기존 파일을 보존했으며 채택하거나 재전송하지 않았습니다.");
+    return unique.values().next().value ?? null;
+  }
   const direct = RESULT_EXTENSIONS.map((extension) => path.join(workspace, `out${extension}`)).find(isImageFile);
   if (direct) return direct;
   const inWorkspace = safeList(workspace).filter(isImageFile);
@@ -208,6 +237,20 @@ function safeList(directory: string): string[] {
   } catch {
     return [];
   }
+}
+
+/** Read-only cache guard shared by every transport, including an explicit switch to browser. */
+export function checkedExistingJobResult(job: ImageBatchJob, options: CodexImageBatchOptions): string | null {
+  const existing = existingJobResult(job.outStem);
+  if (!existing || job.referenceMode !== "product") return existing;
+  const receiptPath = `${job.outStem}.codex-submission.json`;
+  if (!fs.existsSync(receiptPath)) return existing;
+  const prior = readCodexSubmission(job.outStem);
+  if (!prior) throw new Error("IMAGE_RESUME_REQUIRED: 이전 상품 이미지 요청 기록을 읽을 수 없습니다. 기존 결과를 보존했으며 재전송하지 않았습니다.");
+  const found = locateCodexImage(prior.workspace, codexHomeDir(options.codexHome), prior.threadId, prior.startedAtMs,
+    { referenceMode: "product", existingOutput: existing });
+  if (!found) throw new Error("IMAGE_RESUME_REQUIRED: 이전 상품 이미지 요청의 유효한 결과를 확인할 수 없습니다. 기존 결과를 보존했으며 재전송하지 않았습니다.");
+  return existing;
 }
 
 function codexImageError(error: unknown): string {
@@ -271,7 +314,7 @@ async function generateOnce(
         throw new Error(error?.message || "Codex 이미지 생성이 실패했습니다.");
       } else if (event.type === "error") throw new Error(String(event.message || "Codex 실행 중 오류가 발생했습니다."));
     }
-    const found = locateCodexImage(workspace, options.codexHome, threadId, startedAtMs);
+    const found = locateCodexImage(workspace, options.codexHome, threadId, startedAtMs, { referenceMode: job.referenceMode });
     if (!found) throw new Error("Codex 응답에서 생성 이미지를 찾지 못했습니다(image_generation 기능이 꺼져 있을 수 있습니다).");
     submission.state = "completed";
     saveSubmission();
@@ -306,14 +349,19 @@ function adopt(found: string, outStem: string): string {
 async function runJob(codex: CodexLike, job: ImageBatchJob, options: CodexImageBatchOptions): Promise<ImageBatchResult> {
   try { assertProductImageReferences(job); }
   catch (error) { return { id: job.id, localPath: null, error: codexImageError(error) }; }
-  const existing = existingJobResult(job.outStem);
-  if (existing) return { id: job.id, localPath: existing };
-  if (hasUnresolvedCodexSubmission(job.outStem)) {
-    const prior = readCodexSubmission(job.outStem);
-    const recovered = prior && locateCodexImage(prior.workspace, codexHomeDir(options.codexHome), prior.threadId, prior.startedAtMs);
-    if (recovered) return { id: job.id, localPath: adopt(recovered, job.outStem) };
-    return { id: job.id, localPath: null, submissionState: "uncertain",
-      error: "IMAGE_RESUME_REQUIRED: 이전 Codex 이미지 요청의 완료 여부를 확인해야 합니다. 기존 결과를 보존했으며 재전송하지 않았습니다." };
+  try {
+    const existing = checkedExistingJobResult(job, options);
+    if (existing) return { id: job.id, localPath: existing };
+    if (hasUnresolvedCodexSubmission(job.outStem)) {
+      const prior = readCodexSubmission(job.outStem);
+      const recovered = prior && locateCodexImage(prior.workspace, codexHomeDir(options.codexHome), prior.threadId, prior.startedAtMs,
+        { referenceMode: job.referenceMode });
+      if (recovered) return { id: job.id, localPath: adopt(recovered, job.outStem) };
+      return { id: job.id, localPath: null, submissionState: "uncertain",
+        error: "IMAGE_RESUME_REQUIRED: 이전 Codex 이미지 요청의 완료 여부를 확인해야 합니다. 기존 결과를 보존했으며 재전송하지 않았습니다." };
+    }
+  } catch (error) {
+    return { id: job.id, localPath: null, submissionState: "uncertain", error: codexImageError(error) };
   }
   const context = {
     codexHome: codexHomeDir(options.codexHome),
@@ -354,10 +402,12 @@ export async function runCodexImageBatch(jobs: ImageBatchJob[], options: CodexIm
   const results: ImageBatchResult[] = new Array(jobs.length);
   let codex: CodexLike | null = null;
   let setupError: string | null = null;
-  try {
-    codex = await (options.createCodex ?? defaultCreateCodex)();
-  } catch (error) {
-    setupError = codexImageError(error);
+  if (jobs.some((job) => !job.reviewOnly)) {
+    try {
+      codex = await (options.createCodex ?? defaultCreateCodex)();
+    } catch (error) {
+      setupError = codexImageError(error);
+    }
   }
   const limit = Math.max(1, Math.min(5, options.concurrency ?? CODEX_IMAGE_CONCURRENCY));
   let next = 0;
@@ -368,15 +418,18 @@ export async function runCodexImageBatch(jobs: ImageBatchJob[], options: CodexIm
       next += 1;
       const job = jobs[index]!;
       let result: ImageBatchResult;
-      if (options.signal?.aborted) result = { id: job.id, localPath: null, error: "사용자가 이미지 생성을 중지했습니다." };
+      if (job.reviewOnly) result = { id: job.id, localPath: null, submissionState: "uncertain",
+        error: "IMAGE_RESUME_REQUIRED: 검수 전용 이미지 결과는 조립 단계에서 확인해야 합니다. 이미지 생성 전송 경로에서는 채택하거나 재전송하지 않았습니다." };
+      else if (options.signal?.aborted) result = { id: job.id, localPath: null, error: "사용자가 이미지 생성을 중지했습니다." };
       else if (codex) result = await runJob(codex, job, options);
       else {
         try {
           assertProductImageReferences(job);
-          const existing = existingJobResult(job.outStem);
+          const existing = checkedExistingJobResult(job, options);
           result = existing ? { id: job.id, localPath: existing } : { id: job.id, localPath: null,
             submissionState: hasUnresolvedCodexSubmission(job.outStem) ? "uncertain" : "not-submitted", error: setupError || "Codex를 시작하지 못했습니다." };
-        } catch (error) { result = { id: job.id, localPath: null, error: codexImageError(error) }; }
+        } catch (error) { result = { id: job.id, localPath: null, error: codexImageError(error),
+          ...(job.referenceMode === "product" && fs.existsSync(`${job.outStem}.codex-submission.json`) ? { submissionState: "uncertain" as const } : {}) }; }
       }
       results[index] = result;
       deliveries = deliveries.then(() => options.onResult(result, index)).catch(() => { /* The caller records its own failure. */ });

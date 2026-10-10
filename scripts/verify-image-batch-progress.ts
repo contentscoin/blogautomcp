@@ -17,6 +17,7 @@ import * as photorealBuild from "./lib/photoreal/build";
 import * as product9Canvas from "./lib/product-9canvas";
 import type { ProductSectionImageReviewOptions } from "./lib/product-photo-review";
 import type { generateBrandPostImages as Generate, BrandPostImageGenerationResult } from "../src/lib/brand-post-image-generation";
+import { checkedExistingJobResult, existingJobResult, type ImageBatchJob } from "../src/lib/codex-image-generation";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-image-batch-"));
 const rawPath = path.join(root, "raw.png");
@@ -38,7 +39,7 @@ function load<T>(file: string, dependencies: Record<string, unknown>, overrides:
       assert.ok(Object.prototype.hasOwnProperty.call(dependencies, name), `Unexpected dependency: ${name}`);
       return dependencies[name];
     },
-    process, Error, console: { log() {}, error() {} }, setTimeout, clearTimeout, setInterval, clearInterval,
+    process, Buffer, Error, console: { log() {}, error() {} }, setTimeout, clearTimeout, setInterval, clearInterval,
     ...overrides,
   }, { filename: file });
   return loadedModule.exports as T;
@@ -60,6 +61,7 @@ const referenceSceneModule = load<typeof import("./lib/shopping-reference-scene"
 const hashFile = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 type Job = { id: string; outStem: string; prompt: string; referenceMode?: string; referenceImagePaths?: string[]; requiredReferenceHashes?: string[] };
 function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lockFails?: boolean; automation?: boolean; sourceMissing?: boolean; sourceError?: string;
+  engine?: "codex" | "browser"; realCache?: boolean;
   sourcePaths?: string[]; segmentablePaths?: string[]; lockedUsesBackground?: boolean;
   referenceRejected?: boolean; sceneReviewError?: string;
   sectionMatchedPaths?: string[]; sectionReviewError?: string; reviewClass?: "feature-evidence" | "scene-evidence" | "product-photo"; cardFacts?: string[]; cardMatches?: number;
@@ -83,7 +85,10 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
   const api = load<{
     generateBrandPostImages: typeof Generate;
     imageBatchTimeoutMs: (n: number) => number;
-    prepareImageBatchJobs: (targets: unknown[], manifest: unknown, productName: string, workDir: string) => unknown[];
+    prepareImageBatchJobs: (targets: unknown[], manifest: unknown, productName: string, workDir: string) => ImageBatchJob[];
+    runImageBatch: typeof import("../src/lib/brand-post-image-generation").runImageBatch;
+    finishGeneratedImage: (options: { manifest: unknown; productName: string; target: unknown; rawPath: string; workDir: string; index: number;
+      reviewReferenceScene?: (options: Record<string, unknown>) => Promise<unknown> }) => Promise<{ generatedPath: string; referenceScene: unknown }>;
     runBrowserImageBatch: (
       jobs: unknown[], workDir: string,
       onResult: () => Promise<void>,
@@ -225,8 +230,11 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
           assert.ok(job.referenceImagePaths?.length, "product jobs must attach actual references");
           assert.equal(JSON.stringify(job.requiredReferenceHashes), JSON.stringify(job.referenceImagePaths?.map(hashFile)), "hashes bind the ordered attached reference bytes");
         },
-        resolveBrandPostImageEngine: () => "browser",
-        existingJobResult: () => null,
+        resolveBrandPostImageEngine: () => settings.engine ?? "browser",
+        existingJobResult: settings.realCache ? existingJobResult : () => null,
+        checkedExistingJobResult: settings.realCache
+          ? (job: ImageBatchJob) => checkedExistingJobResult(job, { codexHome: root, onResult: async () => {} })
+          : () => null,
         hasBrowserSubmission: () => false,
         hasUnresolvedCodexSubmission: () => false,
         runCodexImageBatch: async () => { throw new Error("codex transport is not used by this harness"); },
@@ -234,7 +242,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       "node:crypto": crypto,
     },
     { process: { ...process, env: { ...process.env, BRAND_POST_IMAGE_BATCH_TIMEOUT_MS: settings.timeout?.toString() || "", BRAND_POST_IMAGE_JOB_TIMEOUT_MS: "" } } },
-    "\nmodule.exports.runBrowserImageBatch = runBrowserImageBatch; module.exports.prepareImageBatchJobs = prepareImageBatchJobs;",
+    "\nmodule.exports.runBrowserImageBatch = runBrowserImageBatch; module.exports.prepareImageBatchJobs = prepareImageBatchJobs; module.exports.finishGeneratedImage = finishGeneratedImage;",
   );
   const manifest = {
     brandLinkId: "fixture", connectKind: "TRAVEL", title: "Fixture",
@@ -269,6 +277,184 @@ async function check(name: string, run: () => Promise<void>) {
   await run();
   checks += 1;
   console.log(`PASS ${name}`);
+}
+
+async function verifyReviewOnlyRecovery() {
+  const bytes = (marker: number) => {
+    const image = Buffer.alloc(2048, marker);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(image);
+    return image;
+  };
+  const tree = (dir: string): Record<string, string> => Object.fromEntries(fs.readdirSync(dir, { recursive: true }).flatMap(entry => {
+    const file = path.join(dir, String(entry));
+    return fs.statSync(file).isFile() ? [[String(entry), hashFile(file)]] : [];
+  }));
+  function fixture(engine: "codex" | "browser", transport: "codex" | "browser" = "codex") {
+    const h = harness({ engine, realCache: true });
+    h.manifest.connectKind = "SHOPPING";
+    const workDir = fs.mkdtempSync(path.join(root, "review-only-"));
+    const refs = [1, 2].map(marker => {
+      const file = path.join(h.packageDir, `ref-${marker}.png`);
+      fs.writeFileSync(file, bytes(marker));
+      return file;
+    });
+    const hashes = refs.map(hashFile);
+    const target = { request: { requestId: "fixture", slotId: "section:image:1", sectionId: "section" }, sectionId: "section",
+      role: "body", sectionTitle: "이전 본문 제목", imageIntent: "이전 연출 의도", bodyExcerpt: "이전 본문",
+      referenceContext: { prompt: "previous generation recipe", referenceImagePaths: refs, referenceHashes: hashes,
+        reference: { path: refs[0], sha256: hashes[0], subject: "product", geometry: "intact", labels: "original" }, anchorSha256: hashes[1] } };
+    const [original] = h.prepareImageBatchJobs([target], h.manifest, "상품", workDir);
+    fs.writeFileSync(`${original.outStem}.png`, bytes(3));
+    const workspace = `${original.outStem}.codex-1`;
+    if (transport === "codex") {
+      fs.mkdirSync(workspace);
+      fs.copyFileSync(`${original.outStem}.png`, path.join(workspace, "out.png"));
+      fs.writeFileSync(`${original.outStem}.codex-submission.json`, JSON.stringify({ state: "completed", workspace,
+        startedAtMs: Date.now() - 100, threadId: `fixture-${crypto.randomUUID()}` }));
+    } else fs.writeFileSync(`${original.outStem}.checkpoint.jsonl`, JSON.stringify({ id: "slot", fingerprint: "f".repeat(64),
+      localPath: `${original.outStem}.png`, sha256: hashFile(`${original.outStem}.png`) }) + "\n");
+    target.sectionTitle = "현재 본문 제목";
+    target.imageIntent = "현재 자연스러운 연출 의도";
+    target.bodyExcerpt = "현재 본문의 기능 증거 사용 여부까지 다시 확인";
+    target.referenceContext.prompt = "current generation recipe";
+    const prepare = () => h.prepareImageBatchJobs([target], h.manifest, "상품", workDir);
+    return { h, workDir, original, target, prepare, workspace };
+  }
+  const deliver = async (f: ReturnType<typeof fixture>, jobs: ImageBatchJob[], signal?: AbortSignal) => {
+    let transports = 0;
+    const results: { localPath: string | null; error?: string }[] = [];
+    try {
+      await f.h.runImageBatch(jobs, f.workDir, async result => { results.push(result); }, signal, {
+        runCodex: async () => { transports++; throw new Error("review-only must never call Codex"); },
+        runBrowser: async () => { transports++; throw new Error("review-only must never call browser"); }, browserEnabled: true,
+      });
+    } finally {
+      assert.equal(transports, 0);
+      assert.equal(f.h.spawns, 0);
+    }
+    return results;
+  };
+  await check("settled same-slot raw is re-reviewed with the current body and no transport in both engines", async () => {
+    for (const engine of ["codex", "browser"] as const) for (const transport of ["codex", "browser"] as const) {
+      const f = fixture(engine, transport);
+      // Identical copies of one artifact are allowed, including another extension.
+      fs.copyFileSync(`${f.original.outStem}.png`, `${f.original.outStem}.jpg`);
+      if (transport === "codex") {
+        const receipt = JSON.parse(fs.readFileSync(`${f.original.outStem}.codex-submission.json`, "utf8"));
+        const generatedDir = path.join(root, "generated_images", receipt.threadId);
+        fs.mkdirSync(generatedDir, { recursive: true });
+        fs.copyFileSync(`${f.original.outStem}.png`, path.join(generatedDir, "original-generated.png"));
+      }
+      const before = tree(f.workDir);
+      const jobs = f.prepare();
+      assert.equal(jobs[0].outStem, f.original.outStem);
+      assert.equal(jobs[0].reviewOnly?.outputSha256, hashFile(`${f.original.outStem}.png`));
+      const [result] = await deliver(f, jobs);
+      assert.equal(result.localPath, `${f.original.outStem}.png`);
+      const finish = () => f.h.finishGeneratedImage({ manifest: f.h.manifest, productName: "상품", target: f.target,
+        rawPath: result.localPath!, workDir: f.workDir, index: 0, reviewReferenceScene: async input => {
+          assert.equal(input.sectionTitle, f.target.sectionTitle);
+          assert.equal(input.bodyExcerpt, f.target.bodyExcerpt);
+          assert.equal(input.imageIntent, f.target.imageIntent);
+          return { reviewStatus: "passed", reviewedOutputSha256: hashFile(result.localPath!) };
+        } });
+      assert.equal((await finish()).generatedPath, result.localPath);
+      await assert.rejects(() => f.h.finishGeneratedImage({ manifest: f.h.manifest, productName: "상품", target: f.target,
+        rawPath: result.localPath!, workDir: f.workDir, index: 0,
+        reviewReferenceScene: async () => { throw new Error("REFERENCE_SCENE_FIDELITY_FAILED: current body is incompatible"); } }), /REFERENCE_SCENE_FIDELITY_FAILED/);
+      assert.deepEqual(tree(f.workDir), before, "review-only does not change old metadata, receipts or raw bytes");
+      assert.equal(f.prepare()[0].outStem, f.original.outStem, "later attempts safely re-review the same candidate");
+    }
+  });
+  await check("review-only preparation rejects uncertain, mismatched or multiple saved requests", async () => {
+    for (const kind of ["snapshot", "refs-order", "raw-only", "not-submitted", "submitting", "missing-thread", "lock",
+      "raw-distinct", "workspace-distinct", "thread-distinct", "browser-uncertain", "browser-hash", "other-same-slot", "current-identity-uncertain"] as const) {
+      const f = fixture("codex", kind.startsWith("browser") ? "browser" : "codex");
+      const sidecar = `${f.original.outStem}.reference-scene.json`;
+      const metadata = JSON.parse(fs.readFileSync(sidecar, "utf8"));
+      if (kind === "snapshot") metadata.sourceSnapshotId = "other-snapshot";
+      if (kind === "refs-order") metadata.referenceHashes.reverse();
+      if (["snapshot", "refs-order"].includes(kind)) fs.writeFileSync(sidecar, JSON.stringify(metadata));
+      const receiptPath = `${f.original.outStem}.codex-submission.json`;
+      if (kind === "raw-only") fs.unlinkSync(receiptPath);
+      if (["not-submitted", "submitting", "missing-thread"].includes(kind)) {
+        const receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+        if (kind === "missing-thread") receipt.threadId = null; else receipt.state = kind;
+        fs.writeFileSync(receiptPath, JSON.stringify(receipt));
+      }
+      if (kind === "lock") fs.writeFileSync(`${f.original.outStem}.lock`, "locked");
+      if (kind === "raw-distinct") fs.writeFileSync(`${f.original.outStem}.jpg`, bytes(4));
+      if (kind === "workspace-distinct") fs.writeFileSync(path.join(f.workspace, "dog.png"), bytes(4));
+      if (kind === "thread-distinct") {
+        const receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+        const dir = path.join(root, "generated_images", receipt.threadId);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, "dog.png"), bytes(4));
+      }
+      if (kind === "browser-uncertain") fs.appendFileSync(`${f.original.outStem}.checkpoint.jsonl`, JSON.stringify({ id: "slot", fingerprint: "f".repeat(64), state: "submitted" }) + "\n");
+      if (kind === "browser-hash") fs.appendFileSync(`${f.original.outStem}.png`, "changed");
+      if (kind === "other-same-slot") {
+        const stem = path.join(f.workDir, `raw-${"d".repeat(64)}`);
+        fs.copyFileSync(sidecar, `${stem}.reference-scene.json`);
+        fs.writeFileSync(`${stem}.checkpoint.jsonl`, "{}");
+      }
+      if (kind === "current-identity-uncertain") {
+        const freshDir = fs.mkdtempSync(path.join(root, "current-identity-"));
+        const [freshJob] = f.h.prepareImageBatchJobs([f.target], f.h.manifest, "상품", freshDir);
+        const stem = path.join(f.workDir, path.basename(freshJob.outStem));
+        fs.copyFileSync(`${freshJob.outStem}.reference-scene.json`, `${stem}.reference-scene.json`);
+        fs.writeFileSync(`${stem}.codex-submission.json`, JSON.stringify({ state: "submitting", workspace: `${stem}.codex-1`,
+          startedAtMs: Date.now(), threadId: null }));
+      }
+      const before = tree(f.workDir);
+      assert.throws(f.prepare, /IMAGE_RESUME_REQUIRED|IMAGE_OUTPUT_AMBIGUOUS/, kind);
+      assert.deepEqual(tree(f.workDir), before, `${kind}: refusal preserves evidence without a new identity`);
+      assert.equal(f.h.spawns, 0);
+    }
+  });
+  await check("settled retired strategy remains a migration and cannot be reused for current-strategy review", async () => {
+    const f = fixture("codex");
+    const sidecar = `${f.original.outStem}.reference-scene.json`;
+    const metadata = JSON.parse(fs.readFileSync(sidecar, "utf8"));
+    metadata.strategyVersion = "shopping-reference-scene/v1";
+    fs.writeFileSync(sidecar, JSON.stringify(metadata));
+    const before = fs.readFileSync(sidecar);
+    const [job] = f.prepare();
+    assert.equal(job.reviewOnly, undefined);
+    assert.notEqual(job.outStem, f.original.outStem);
+    assert.deepEqual(fs.readFileSync(sidecar), before);
+    assert.equal(f.h.spawns, 0);
+  });
+  await check("review-only SHA and completion are rechecked at delivery and never fall back on damage or cancellation", async () => {
+    for (const engine of ["codex", "browser"] as const) for (const kind of ["deleted", "replaced", "snapshot", "refs-order", "reference-bytes", "receipt", "checkpoint", "ambiguous", "cancelled"] as const) {
+      const f = fixture(engine);
+      const jobs = f.prepare();
+      if (kind === "deleted") fs.unlinkSync(`${f.original.outStem}.png`);
+      if (kind === "replaced") fs.writeFileSync(`${f.original.outStem}.png`, bytes(4));
+      if (kind === "reference-bytes") fs.appendFileSync(f.target.referenceContext.referenceImagePaths[0], "changed");
+      if (kind === "snapshot" || kind === "refs-order") {
+        const sidecar = `${f.original.outStem}.reference-scene.json`;
+        const metadata = JSON.parse(fs.readFileSync(sidecar, "utf8"));
+        if (kind === "snapshot") metadata.sourceSnapshotId = "changed"; else metadata.referenceHashes.reverse();
+        fs.writeFileSync(sidecar, JSON.stringify(metadata));
+      }
+      if (kind === "receipt") fs.unlinkSync(`${f.original.outStem}.codex-submission.json`);
+      if (kind === "checkpoint") fs.writeFileSync(`${f.original.outStem}.checkpoint.jsonl`, "{partial");
+      if (kind === "ambiguous") fs.writeFileSync(path.join(f.workspace, "second.png"), bytes(4));
+      const controller = new AbortController();
+      if (kind === "cancelled") controller.abort();
+      const before = tree(f.workDir);
+      if (kind === "reference-bytes") {
+        await assert.rejects(() => deliver(f, jobs, controller.signal), /ordered attached reference bytes/);
+        assert.deepEqual(tree(f.workDir), before);
+        continue;
+      }
+      const [result] = await deliver(f, jobs, controller.signal);
+      assert.equal(result.localPath, null, kind);
+      assert.match(result.error || "", /IMAGE_RESUME_REQUIRED|IMAGE_OUTPUT_AMBIGUOUS|중지/, kind);
+      assert.deepEqual(tree(f.workDir), before, `${kind}: delivery never mutates or regenerates`);
+    }
+  });
 }
 
 async function verifyGenerator() {
@@ -1236,6 +1422,7 @@ async function verifyIntegratedResume() {
 
 async function main() {
   try {
+    await verifyReviewOnlyRecovery();
     await verifyGenerator();
     await check("caller and actual worker: stable draft/section/prompt identity, subset resume, login retry, uncertain-send protection", verifyIntegratedResume);
     await check("producer checkpoints each job, streams stderr, preserves legacy stdout (fail-fast off)", () => verifyProducer());
