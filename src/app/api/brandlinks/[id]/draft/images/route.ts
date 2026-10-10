@@ -120,6 +120,7 @@ export async function POST(
     generatedPath?: string;
     referenceHashes?: string[];
     batchSize?: number;
+    refreshSourcePhotos?: boolean;
   };
   if (!body.action || !IMAGE_ACTIONS.includes(body.action)) {
     return NextResponse.json({ success: false, error: "지원하지 않는 이미지 작업입니다." }, { status: 400 });
@@ -319,6 +320,7 @@ export async function POST(
       requests: generationRequests,
       // bind_sources never opens ChatGPT; it only places reviewed seller photos.
       sourceOnly: body.action === "bind_sources",
+      forceSourceRefresh: body.refreshSourcePhotos === true,
     });
     const { errors, generatedCount, appliedCount, manifest: updated } = repaired;
     const updatedPreview = packagePreview(updated);

@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { env } from 'cloudflare:workers';
 import { DEFAULT_OAUTH_SCOPE, mcpResource, oauthIssuer, trustedSiteOrigin } from '@/lib/oauth';
 
 export async function GET(request: Request, context: { params: Promise<{ wellKnown: string[] }> }) {
@@ -6,6 +7,12 @@ export async function GET(request: Request, context: { params: Promise<{ wellKno
   const path = `/${wellKnown.join('/')}`;
   const origin = trustedSiteOrigin(request);
   if (!origin) return NextResponse.json({ error: 'invalid_origin' }, { status: 400 });
+  if (path === '/.well-known/openai-apps-challenge') {
+    // Set only the exact public domain-verification value issued by the portal.
+    const challenge = env.OPENAI_APPS_DOMAIN_CHALLENGE;
+    if (typeof challenge !== 'string' || !challenge.trim() || challenge.length > 4096) return new NextResponse(null, { status: 404 });
+    return new NextResponse(challenge, { headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
+  }
   if (path === '/.well-known/oauth-protected-resource' || path === '/.well-known/oauth-protected-resource/api/mcp') {
     return NextResponse.json({
       resource: mcpResource(origin),

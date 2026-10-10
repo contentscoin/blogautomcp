@@ -3,7 +3,7 @@ import { getChatGPTUser } from '@/app/chatgpt-auth';
 import { ensureAccount, canUseMcp } from '@/lib/account';
 import { ensureDatabase } from '@/db/init';
 import { getD1 } from '@/db';
-import { newId } from '@/lib/crypto';
+import { hashToken, newId, randomToken } from '@/lib/crypto';
 import { apiError, hasTrustedBrowserOrigin } from '@/lib/http';
 import { buildPairDeepLink, generatePairCode, hashPairCode, PAIR_CODE_TTL_MS } from '@/lib/pairing';
 import { enforceRateLimit } from '@/lib/rate-limit';
@@ -20,30 +20,40 @@ export async function POST(request: Request) {
   const identity = await getChatGPTUser();
   if (!identity) return apiError('UNAUTHENTICATED', 'ChatGPT 로그인이 필요합니다.', 401);
   const account = await ensureAccount(identity);
+  const expectedAccount = request.headers.get('x-blogauto-account-id');
+  if (expectedAccount !== null && expectedAccount !== account.id) return apiError('ACCOUNT_CHANGED', '로그인 계정이 변경되었습니다. 페이지를 새로 열어 본인 계정을 확인하세요.', 409);
   if (!canUseMcp(account)) return apiError('NOT_APPROVED', '관리자 승인이 필요합니다.', 403);
 
   await ensureDatabase();
   const d1 = getD1();
   const limit = await enforceRateLimit(d1, `pair-code:user:${account.id}`, 5, 60_000);
   if (!limit.allowed) return apiError('RATE_LIMITED', '연결 코드 발급이 너무 잦습니다. 잠시 후 다시 시도하세요.', 429);
-  const connection = await d1.prepare(`SELECT id FROM mcp_connections WHERE user_id=? AND status='ACTIVE' LIMIT 1`).bind(account.id).first<{ id: string }>();
-  if (!connection) return apiError('MCP_NOT_ISSUED', '먼저 MCP 주소를 발급하세요. PC 는 MCP 연결에 묶여 동작합니다.', 409);
-
   const code = generatePairCode();
   const codeHash = await hashPairCode(code);
   const now = Date.now();
   const expiresAt = now + PAIR_CODE_TTL_MS;
-  await d1.batch([
-    // 사용자당 살아 있는 코드는 하나만 둔다(이전 미사용 코드 만료 처리).
-    d1.prepare(`UPDATE pair_codes SET used_at=? WHERE user_id=? AND used_at IS NULL`).bind(now, account.id),
-    d1.prepare(`INSERT INTO pair_codes (id,user_id,code_hash,expires_at,used_at,created_at) VALUES (?,?,?,?,NULL,?)`).bind(newId('pair'), account.id, codeHash, expiresAt, now),
+  const secretHash = await hashToken(randomToken(32));
+  const issued = await d1.batch([
+    // Prepare only an absent PC channel. Never rotate or reactivate an existing one.
+    d1.prepare(`INSERT INTO mcp_connections(id,user_id,endpoint_id,secret_hash,generation,status,created_at)
+      SELECT ?,?,?,?,1,'ACTIVE',? WHERE EXISTS (SELECT 1 FROM users WHERE id=? AND status='APPROVED' AND role IN ('USER','ADMIN'))
+      ON CONFLICT(user_id) DO NOTHING`).bind(newId('mcp'), account.id, randomToken(15), secretHash, now, account.id),
+    d1.prepare(`INSERT INTO pair_codes (id,user_id,code_hash,expires_at,used_at,created_at)
+      SELECT ?,?,?,?,NULL,? WHERE EXISTS (SELECT 1 FROM users u JOIN mcp_connections m ON m.user_id=u.id
+        WHERE u.id=? AND u.status='APPROVED' AND u.role IN ('USER','ADMIN') AND m.status='ACTIVE')`)
+      .bind(newId('pair'), account.id, codeHash, expiresAt, now, account.id),
     d1.prepare(`DELETE FROM pair_codes WHERE expires_at < ?`).bind(now - 24 * 60 * 60 * 1000),
-    d1.prepare(`INSERT INTO audit_events (id,actor_user_id,target_user_id,action,metadata_json,created_at) VALUES (?,?,?,?,?,?)`).bind(newId('audit'), account.id, account.id, 'PAIR_CODE_ISSUED', JSON.stringify({ expiresAt }), now),
+    d1.prepare(`INSERT INTO audit_events (id,actor_user_id,target_user_id,action,metadata_json,created_at)
+      SELECT ?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM pair_codes WHERE user_id=? AND code_hash=?)`)
+      .bind(newId('audit'), account.id, account.id, 'PAIR_CODE_ISSUED', JSON.stringify({ expiresAt }), now, account.id, codeHash),
   ]);
+  if (Number(issued[1]?.meta.changes || 0) !== 1) return apiError('PC_CHANNEL_UNAVAILABLE', '승인 계정의 활성 PC 연결을 확인할 수 없습니다. 정지된 연결은 관리자가 확인해야 합니다.', 403);
+  const channel = await d1.prepare('SELECT generation FROM mcp_connections WHERE user_id=? AND status=\'ACTIVE\'').bind(account.id).first<{ generation: number }>();
+  if (!channel) return apiError('PC_CHANNEL_UNAVAILABLE', '활성 PC 연결을 확인할 수 없습니다.', 403);
   const origin = new URL(request.url).origin;
   return NextResponse.json({
     success: true,
-    data: { code, expiresAt: new Date(expiresAt).toISOString(), ttlSeconds: Math.round(PAIR_CODE_TTL_MS / 1000), deepLink: buildPairDeepLink(origin, code), siteUrl: origin },
+    data: { code, expiresAt: new Date(expiresAt).toISOString(), ttlSeconds: Math.round(PAIR_CODE_TTL_MS / 1000), deepLink: buildPairDeepLink(origin, code), siteUrl: origin, generation: channel.generation },
     message: '90초 안에 PC 앱에서 이 코드를 사용하세요.',
   }, { headers: { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' } });
 }

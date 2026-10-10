@@ -440,10 +440,10 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     await waitForImagesIdle();
     if (!draft.data) throw new Error("준비 중 소재가 사라졌습니다.");
     if (draft.data.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) {
-      const attemptImages = async (action: string) => {
+      const attemptImages = async (action: string, refreshSourcePhotos = false) => {
         check();
         try {
-          latestImageRepair = await deps.call(`${base}/draft/images`, "POST", { action });
+          latestImageRepair = await deps.call(`${base}/draft/images`, "POST", { action, ...(refreshSourcePhotos ? { refreshSourcePhotos: true } : {}) });
         } catch (error) {
           const failure = { code: (error as { code?: string }).code, errors: (error as { errors?: string[] }).errors, error: (error as Error).message };
           if (!isRecoverableImageEvidenceResult(failure)) throw error;
@@ -469,7 +469,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
           await deps.call(`${base}/draft`, "POST", { action: "prepare_context" });
           // Image URLs refresh independently of textual snapshot promotion.
           // Keep the manuscript frozen; the final recheck still verifies it.
-          await attemptImages("bind_sources");
+          await attemptImages("bind_sources", true);
           // bind_sources places seller originals only. Only AI-scene slots (generationMissing) that are
           // still empty get one more generation pass; source-evidence gaps never re-trigger generation.
           if (draft.data?.imageSlots?.some(slot => slot.generationMissing > 0)) await attemptImages("generate_missing");

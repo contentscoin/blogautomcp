@@ -65,6 +65,9 @@ async function main() {
           }
           if (scenario === "auth") throw Object.assign(new Error("login required"), { code: "CODEX_AUTH_REQUIRED" });
           if (scenario === "transport") throw Object.assign(new Error("lost response"), { code: "ECONNRESET" });
+          assert.equal((body as { refreshSourcePhotos?: boolean }).refreshSourcePhotos,
+            action === "bind_sources" ? true : undefined,
+            "only the recorded source-refresh pass bypasses the seller URL cache");
           done = (scenario === "refresh" && action === "bind_sources") ||
             (["replan", "partial"].includes(scenario) && action === "replan_sources");
           if (!done && scenario !== "partial") throw Object.assign(new Error("feature evidence missing"), { code: "IMAGE_SOURCE_BINDING_REQUIRED" });

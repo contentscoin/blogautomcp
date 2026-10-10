@@ -1,0 +1,37 @@
+# Material recovery 1.3.109
+
+## Confirmed failures after normal 1.3.108 installation
+
+The normal updater installed 1.3.108. Its local API reported that version and all sixteen checked runtime files matched source SHA. AAWireless and Shark passed normal final pixel review and approval, increasing scoped readiness to 11/19. Dalba, the second Hanwoo draft and Zylek still failed in final review despite retaining complete five-image packages.
+
+- Failed final-review requests embedded approximately 16.7–18.3 MB of image base64. The successful Cuckoo and AAWireless requests were smaller. Independent source review also found that Codex exec emits its internal `Reconnecting... N/M` progress as a top-level error while the operation is still running. The existing reader cancelled it before native recovery could complete. This is distinct from an MCP-to-PC agent-loss failure.
+- Cuckoo's fresh review rejected three coherent natural kitchen scenes solely because the product dominated the foreground. The input allowed a reference-guided natural product scene. It also treated an original body slot as a thumbnail when considering external text. Exact index roles and permitted framing must be explicit, without converting rejected verdicts into passes.
+- Earphones inherited clothing recipes mentioning outfits, fit and garment length. Product structure became obscured in the rejected OpenRun wearing scene. Current recipes must use selected product identity, independently of paragraph clothing mentions.
+- AirPods' top selected-snapshot image was collected but starved behind twenty hash-sorted local candidates before the twelve-candidate reference review. A normal seller-original replacement reviewed the full source pool but reselected the previous original. Repeating that same action is not a solution. Fresh reference preparation must prioritize current selected seller-source URLs, after genuinely valid prior reviewed references, within the unchanged budgets.
+
+## Corrections
+
+- Limit each final-audit request to eight images and 8 MiB of full-resolution decoded PNGs. Preserve asset order, exact pixels, original hashes and every review row. A single oversized image blocks the complete operation before provider calls and never clears prior rejection records. Actual batching policy and requests enter the success-receipt hash.
+- Wait through only the exact internal reconnect progress signature; require a real `turn.completed` and nonempty response. Terminal failure, unrelated error, aborted iterator and EOF without completion still fail. Existing native/provider retries and image submission guards are unchanged.
+- Clarify that a large foreground product in a visible, coherent appropriate setting is a natural scene; no person or use action is required. Pure studio/background-only images still do not establish a requested setting. Each image's own role governs added text, independently of other thumbnails in the request. Existing identity, fidelity, claim, format and acceptance checks remain mandatory.
+- Generate clothing recipes only for clothing products. Other products preserve full identifying structures, joins and contours without requiring body contact or occlusion. Existing saved manifests are not silently replanned.
+- Fresh reference collection prefers the selected snapshot gallery to unreviewed saved candidates. Only prior reference/output bytes, snapshot, strategy and all passed fidelity checks may establish a priority reference. URL lineage is retrieval evidence, never photo approval. Default collection behavior, forced refresh, deduplication, twenty collected candidates and twelve visually reviewed candidates remain bounded.
+
+## Actual photograph recovery
+
+One new OpenRun bench photo and one mirror-free JMW countertop photo were generated with the exact current seller references. Each passed normal comparison and was applied through the normal image API under 1.3.108. Both packages now contain five images; final approval is verified separately. Their previous failed candidates, receipts and original files were retained. The old JMW reflection candidate was not forced through after its fresh review still rejected the physical reflection.
+
+## Verification and release
+
+Offline verification, release integrity, installed runtime, actual material outcomes and preservation evidence are added after verification. No blog publication or reservation is part of this recovery.
+
+- Offline: full TypeScript, changed-file lint, final audit 94 cases, exact reconnect progress/completion/terminal/abort/EOF cases, full-resolution payload batching, source recovery 38 cases, recipe/migration and reference-source order/budget/provenance checks passed. The whole natural-photo regression suite passed. The two selected-product call-site additions in simple-agent have no lint errors; that existing file has three unrelated pre-existing unused-function warnings.
+- Independent read-only review found no blocker in source ordering, existing checkpoint/job preservation or strict identity/geometry gates. All 72 baseline files, five initially ready materials and nineteen planned-date/publication records remained unchanged.
+- OpenSwim's normal local-thumbnail regeneration under 1.3.108 also completed successfully with five saved images. Final approval is still separate.
+- [CI 38046995325](https://github.com/contentscoin/blogautomcp/actions/runs/38046995325), code head `24f98f9`: root and Sites typecheck, lint, all unit/regression checks and production builds passed. Windows production compilation and NSIS packaging also passed.
+- Packaged metadata is 1.3.109. All twenty checked runtime files match source SHA; secrets and temporary diagnostics are excluded.
+- Installer: 345516793 bytes; SHA256 `781c9d6591df2af57a01db0babb45bf24470324beb596eea9a346ff8a4a27f82`; SHA512 `EQb5pgxgYLns49MO2eokdFmBuACnw9rV5/3R4ncOXKz7/vHxvWaTkbUAX1U+Wgo9cRf8onWv4kN2UOLmxtZKUA==`. Blockmap: 352559 bytes, SHA256 `0c90ea171313deab6d5f4cc60d1d4dc918f36614b2373ab1f93e44b3e629007c`. Local update-manifest integrity validation passed.
+- The existing Sites Windows update feed activated and re-queried the exact release at `2026-10-10T11:17:04.964Z`. The PC detected 1.3.109 through normal update controls and began installation. Installed-runtime and material approval results are verified separately.
+- Installed version 1.3.109 and all twenty runtime source hashes were verified. Fresh normal final approvals finished for Dalba (3+2 images), Cuckoo (4+1), Hanwoo, Zylek, JMW, OpenRun and OpenSwim without the previous stream-loss failure. The actual Dalba native calls completed at 11:25:16Z and 11:25:32Z; transport recovery is confirmed independently of semantic acceptance.
+- OpenRun and OpenSwim passed final review and approval, increasing current readiness to 13/19. Dalba, Cuckoo, Hanwoo, Zylek and JMW retained genuine final-review rejection records; AirPods remained incomplete. No rejected verdict was converted to acceptance. Dalba's component-versus-complete-kit reasoning and Cuckoo's inferred generic model require an actual validated reference in the final audit, which currently receives only a prior-comparison boolean. Zylek's altered candidate logos and Hanwoo's banner require actual photo correction.
+- Preservation after these operations: all 72 baseline files, the five initially ready materials, and all nineteen planned-date/publication records were unchanged. These are material preparation/approval operations, with no Naver publication or scheduling.

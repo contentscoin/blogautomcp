@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import sharp from "sharp";
 import { auditSectionProposals, type SectionProposal } from "./lib/product-section-proposal-audit";
-import type { PublishImageAuditOptions, PublishImageAuditResult } from "./lib/publish-image-audit";
+import { auditPublishImages, type PublishImageAuditOptions, type PublishImageAuditResult } from "./lib/publish-image-audit";
 
 const proposals = Array.from({ length: 5 }, (_, i) => ({ targetIndex: 0, sourceSha256: `sha-${i}`, path: `photo-${i}` }));
 const targets = [{ sectionId: "actual-section", sectionTitle: "AI 기능", sectionBody: ["AI 기능의 실제 설명"], imageIntent: "AI 기능 근거" }];
@@ -45,6 +50,67 @@ async function main() {
   const selectedProduct = JSON.stringify({ name: "삼성", optionFacts: ["색상: 화이트"] });
   await auditSectionProposals({ productName: "삼성", selectedProduct, targets, proposals, select, onRejected() {},
     audit: async input => { assert.equal(input.selectedProduct, selectedProduct); return result(input); } });
+  // Exercise the real final pixel gate with an offline reviewer. The source hint
+  // must survive proposal assembly without relaxing the actual published text.
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "proposal-source-hint-"));
+  try {
+    const file = path.join(fixtureDir, "seller-photo.png");
+    await sharp({ create: { width: 320, height: 240, channels: 3, background: "white" } }).png().toFile(file);
+    const bytes = fs.readFileSync(file);
+    const originalProposal = [{ targetIndex: 0, path: file, sourceSha256: crypto.createHash("sha256").update(bytes).digest("hex") }];
+    const originalTarget = { sectionId: "selected-original", sectionTitle: "음식물처리기가 줄여주는 불편",
+      sectionBody: ["선택한 상품의 외형을 보여주는 판매자 원본 사진입니다."],
+      imageIntent: "판매페이지 원본 상품 사진: 선택한 상품·옵션의 외형 확인", imageSource: "seller-original" as const };
+    const verdict = (accepted: boolean, reason: string, photoClaimMatches = true) => JSON.stringify({ reviews: [{ index: 1, accepted, identityMatches: true, photoClaimMatches,
+      notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false,
+      singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true,
+      reviewClass: "product-photo", reason }] });
+    const seen: PublishImageAuditResult[] = [];
+    const approved = await auditSectionProposals({ productName: "쿠쿠 음식물처리기", targets: [originalTarget], proposals: originalProposal,
+      select, onRejected() {}, audit: async input => {
+        assert.equal(input.composition.sections[0].imageSource, "seller-original", "the explicit source policy reaches the final audit");
+        const audited = await auditPublishImages({ ...input, review: async call => {
+          assert.match(call.userPrompt, /"allowProductPhoto":true/u, "an overview original is allowed beside prose");
+          assert.match(call.userPrompt, /Even when allowProductPhoto=true, reject generic photos used as proof of a feature claim/u);
+          return verdict(true, "A single unchanged photograph identifies the selected product without proving a function.");
+        } });
+        seen.push(audited); return audited;
+      } });
+    assert.equal(approved.length, 1, JSON.stringify(seen)); assert.equal(seen[0].ok, true);
+    const shokzBody = ["수영에서는 MP3 모드를 사용하고, 지상에서는 블루투스로 연결할 수 있습니다."];
+    const shokzProduct = JSON.stringify({ name: "샥즈 오픈스윔 프로", optionFacts: ["색상: 오렌지", "저장공간: 32GB"] });
+    const shokz = await auditSectionProposals({ productName: "샥즈 오픈스윔 프로", selectedProduct: shokzProduct,
+      targets: [{ ...originalTarget, sectionTitle: "수영과 지상에서 쓰는 MP3·블루투스 기준", sectionBody: shokzBody }],
+      proposals: originalProposal, select, onRejected() {}, audit: input => auditPublishImages({ ...input, review: async call => {
+        assert.equal(input.selectedProduct, shokzProduct);
+        assert.deepEqual(input.composition.sections[0].body, shokzBody);
+        const line = call.userPrompt.split("\n").find(value => value.startsWith("Each attached image"))!;
+        const slots = JSON.parse(line.slice(line.indexOf("[")));
+        assert.equal(slots[0].visualContract.purpose, "product-appearance");
+        assert.deepEqual(slots[0].sectionBody, shokzBody);
+        return verdict(true, "The selected orange exterior matches; technical prose alone does not demand every use scene.");
+      } }) });
+    assert.equal(shokz.length, 1, "proposal assembly and final gate accept an exterior original alongside swimming, land, MP3 and Bluetooth prose");
+    const featureBody = "이 사진이 소음 감소 효과를 증명합니다.";
+    const rejectedReasons: string[] = [];
+    const unsupported = await auditSectionProposals({ productName: "쿠쿠 음식물처리기",
+      targets: [{ ...originalTarget, sectionBody: [featureBody] }], proposals: originalProposal, select,
+      onRejected: (_row, reason) => rejectedReasons.push(reason), audit: input => auditPublishImages({ ...input, review: async call => {
+        assert.match(call.userPrompt, /"allowProductPhoto":true/u);
+        assert.ok(call.userPrompt.includes(featureBody), "the actual feature-evidence claim is retained for pixel review");
+        assert.match(call.userPrompt, /Even when allowProductPhoto=true, reject generic photos used as proof of a feature claim/u);
+        return verdict(true, "A static product photograph cannot prove the published noise-reduction assertion.", false);
+      } }) });
+    assert.deepEqual(unsupported, [], "a source hint cannot override a failed feature-claim pixel verdict");
+    assert.match(rejectedReasons[0], /사진을 기능·성능·결과의 증거/u);
+    assert.match(rejectedReasons[0], /noise-reduction assertion/u);
+    assert.deepEqual(fs.readFileSync(file), bytes, "source pixels remain unchanged");
+    assert.deepEqual(originalTarget.sectionBody, ["선택한 상품의 외형을 보여주는 판매자 원본 사진입니다."], "the accepted manuscript context remains unchanged");
+  } finally {
+    // The only recursive removal is this verified OS-temp test directory.
+    assert.ok(path.resolve(fixtureDir).startsWith(path.resolve(os.tmpdir()) + path.sep));
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+  }
   console.log("PASS proposal final-rule audit: mismatched feature rejected, alternate accepted, bounded exhaustion, exact context, per-image failures drop only that proposal, auth and context errors stop");
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

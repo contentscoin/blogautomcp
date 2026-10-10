@@ -26,10 +26,38 @@ async function main() {
   assert.equal(doc.qualityReport.imageCoverage.missingSectionIds.length, 4);
   assert.equal(doc.qualityReport.canAutoPublish, false);
   assert.equal(refreshPostDocumentQuality({ ...doc, imageFloor: 3 }).qualityReport.target.images.min, 5);
-  const planned = applyShoppingNaturalPhotoPlan(doc.sections);
+  const planned = applyShoppingNaturalPhotoPlan(doc.sections, { productName: "와이드 팬츠" });
   assert.deepEqual(planned.map(section => section.imageSource), ["seller-original", "staged-ai", "none", "staged-ai", "none", "staged-ai"]);
   assert.equal(planned[0].imagePlacement, "before-heading");
   assert(planned.filter(section => section.imageSource === "staged-ai").every(section => section.imagePlacement === "after-body"));
+  const unchangedSections = JSON.stringify(doc.sections);
+  const sceneRecipes = (sections: typeof doc.sections) => sections.filter(section => section.imageSource === "staged-ai").map(section => section.promptRecipe!);
+  assert(sceneRecipes(planned).every(recipe => /의류|핏|기장/u.test(recipe)), "real clothing retains its complete outfit, fit and garment-length direction");
+  const earphones = applyShoppingNaturalPhotoPlan(doc.sections, { productName: "[샥즈] 오픈런 프로 2 미니 S821 골전도 스포츠 런닝 이어폰" });
+  for (const recipe of sceneRecipes(earphones)) {
+    assert.doesNotMatch(recipe, /코디|핏|기장|앉거나 쉬/u, "an earphone cannot inherit apparel scene/fit instructions even when section prose mentions clothing");
+    assert.match(recipe, /전체.*(?:제품|형상|윤곽)/u);
+    assert.match(recipe, /전체 연결 구조/u);
+    assert.match(recipe, /핵심 구조를 가리지/u);
+    assert.match(recipe, /착용이나 사용 동작은 필요하지 않음/u);
+    assert.match(recipe, /기능·수치·성능·효과의 증거 또는 실제 사용 후기 장면이 아님/u);
+  }
+  assert.equal(new Set(sceneRecipes(earphones)).size, 3, "non-apparel scenes retain three distinct photographic directions");
+  for (const productName of ["셔츠용 옷걸이", "니트 세탁 세제", "스포츠 이어폰과 티셔츠 코디", "의류 관리기", "패딩 가방", "패딩 파우치", "레깅스 세탁망", "바지 집게", "니트릴 장갑", "쿠쿠 음식물처리기", "선택 상품"]) {
+    assert(sceneRecipes(applyShoppingNaturalPhotoPlan(doc.sections, { productName })).every(recipe => !/코디|핏|기장/u.test(recipe)),
+      `only a clothing product receives the garment recipe: ${productName}`);
+  }
+  for (const productName of ["차콜 와이드 팬츠", "반팔 티셔츠", "롱 원피스", "바람막이 재킷", "cotton T-shirt"]) {
+    assert(sceneRecipes(applyShoppingNaturalPhotoPlan(doc.sections, { productName })).every(recipe => /의류|핏|기장/u.test(recipe)),
+      `selected apparel retains clothing-specific preservation: ${productName}`);
+  }
+  assert(sceneRecipes(applyShoppingNaturalPhotoPlan(doc.sections)).every(recipe => !/코디|핏|기장/u.test(recipe)), "missing selected identity defaults to neutral whole-product photography");
+  assert.equal(JSON.stringify(doc.sections), unchangedSections, "the recipe producer never mutates its source sections or an existing saved plan");
+  const namedEarphoneDoc = resolvePostDocument({ connectKind: "SHOPPING", title: "티셔츠 코디와 함께 생각해볼 선택 기준",
+    productName: "샥즈 오픈런 프로 2 미니 S821 이어폰", sections: ["외형\n전체 구조를 확인합니다.", "선택\n코디와 함께 사용할 수 있습니다.", "장면\n생활 공간에 배치합니다.", "조건\n판매 조건을 확인합니다.", "정리\n확인된 정보로 고릅니다."],
+    hashtags: ["샥즈"], imagePaths: ["thumbnail.png"], connectUrl: "https://naver.me/fixture" });
+  assert(sceneRecipes(namedEarphoneDoc.sections).every(recipe => !/코디|핏|기장/u.test(recipe)), "the selected product overrides a clothing mention in the article title");
+  assert(sceneRecipes(doc.sections).every(recipe => /의류|핏|기장/u.test(recipe)), "the normal resolve path classifies an explicit clothing title when no separate product name exists");
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shopping-photo-plan-"));
   try {

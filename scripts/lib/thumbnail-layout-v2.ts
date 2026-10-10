@@ -7,6 +7,22 @@ export const THUMBNAIL_V2_HEIGHT = 1080;
 export const SHOPPING_THUMBNAIL_MIN_FONT_SIZE = 132;
 export const SHOPPING_THUMBNAIL_MAX_FONT_SIZE = 170;
 export const SHOPPING_THUMBNAIL_LAYOUT_VERSION = "shopping-photo-headline/v1";
+export const SHOPPING_THUMBNAIL_SOURCE_MIN_ASPECT = 0.55;
+export const SHOPPING_THUMBNAIL_SOURCE_MAX_ASPECT = 1.85;
+
+/** The same intact-photo aspect requirement applies before selection and rendering. */
+export function isShoppingThumbnailSourceAspectAllowed(metadata: { width?: number; height?: number }): boolean {
+  const { width, height } = metadata;
+  return typeof width === "number" && typeof height === "number" && Number.isFinite(width) && Number.isFinite(height) &&
+    width > 0 && height > 0 && width / height >= SHOPPING_THUMBNAIL_SOURCE_MIN_ASPECT &&
+    width / height <= SHOPPING_THUMBNAIL_SOURCE_MAX_ASPECT;
+}
+
+/** Read metadata only; an unreadable source never becomes a thumbnail candidate. */
+export async function isShoppingThumbnailSourceEligible(sourcePath: string): Promise<boolean> {
+  try { return isShoppingThumbnailSourceAspectAllowed(await sharp(fs.readFileSync(sourcePath)).metadata()); }
+  catch { return false; }
+}
 
 /** Shopping thumbnails have one photographic scene and one short, prominent title. */
 export const SHOPPING_THUMBNAIL_LAYOUT_RULES = [
@@ -270,8 +286,7 @@ export async function renderShoppingPhotoThumbnail(options: {
 }): Promise<void> {
   const source = fs.readFileSync(options.sourcePath);
   const metadata = await sharp(source).metadata();
-  const sourceRatio = (metadata.width || 0) / (metadata.height || 1);
-  if (!metadata.width || !metadata.height || sourceRatio < 0.55 || sourceRatio > 1.85) {
+  if (!isShoppingThumbnailSourceAspectAllowed(metadata)) {
     throw new Error("썸네일에는 긴 상세페이지나 가로 배너 대신 상품 전체가 크게 보이는 사진을 선택하세요.");
   }
   const { data: photo, info } = await sharp(source).rotate()

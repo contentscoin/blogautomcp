@@ -11,12 +11,16 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
-import { buildPostSpec, runSpecFirstPipeline, validateDraft, normalizeDraft } from "./lib/post-spec";
+import { buildPostSpec, runSpecFirstPipeline, validateDraft, normalizeDraft, shortProductName } from "./lib/post-spec";
 import type { ImageCandidateInput } from "./lib/post-spec";
 import { assessTravelFeatureCoverage } from "./lib/travel-content";
 import { sourceFeaturesForValidation } from "./lib/post-spec/validate";
 import { getConnectAffiliateDisclosure } from "../src/lib/connect-disclosure";
 import { hasCanonicalAffiliateDisclosure, resolvePostDocument } from "../src/lib/post-composition-contract";
+import { renderTitleRules } from "./lib/post-spec/generate";
+import { buildLocalTitle } from "./lib/post-spec/local-template";
+import { buildDraftJsonSchema } from "./lib/post-spec/schema";
+import type { OpenCrabSeoBrief } from "./lib/opencrab-seo-brief";
 
 process.env.UNSPLASH_ACCESS_KEY = "";
 
@@ -115,6 +119,83 @@ async function main() {
   assert.doesNotMatch(shoppingBody, /써봤|받아봤|직접 사용/u, "체험 단정 금지");
   assert.doesNotMatch(shoppingBody, /https?:\/\//u, "본문 URL 금지");
 
+  // Title planning is source-grounded and advisory on length/exact placement.
+  // These local fixtures do not call a model or manufacture search-demand data.
+  const staleBrief: OpenCrabSeoBrief = { source: "opencrab-local-pack", packName: "offline", workflowName: "offline",
+    workflowVersion: null, packVersion: null, sourceDate: "2026-10-11", sourcePath: null, productId: null,
+    anchor: null, evidenceNote: [], guardRule: null, guardStatus: null, confidence: 1, matchType: "category",
+    matchedProductName: "다른 상품", categoryLabel: "무선이어폰", searchQueries: [shoppingInput.product.name, "무선이어폰 배터리"],
+    competitors: [], titleCandidates: [], recommendedSectionTitles: [], mediaTargetImageCount: 4,
+    thumbnailGuidance: [], writingGuidance: [], qaChecklist: [], hashtags: [],
+  };
+  const groundedSpec = (await buildPostSpec({ ...shoppingInput, brief: staleBrief })).spec;
+  assert.notEqual(groundedSpec.seo.primaryKeyword, shoppingInput.product.name, "the entire first search query is not the primary keyword");
+  assert.match(groundedSpec.seo.primaryKeyword, /비데/u);
+  assert.doesNotMatch(groundedSpec.seo.primaryKeyword, /이어폰/u, "a stale brief cannot change the selected product category");
+  assert.match(shortProductName("[샥즈] 오픈스윔 골전도 이어폰 [특가 20%]"), /^\[샥즈\]/u,
+    "short product identity retains an actual short bracketed brand");
+  assert.doesNotMatch(shortProductName("[샥즈] 오픈스윔 골전도 이어폰 [특가 20%]"), /특가|20%/u);
+  assert.deepEqual(groundedSpec.seo.title, spec.seo.title, "existing numeric API targets remain unchanged");
+  const titleRules = renderTitleRules(groundedSpec);
+  assert.match(titleRules, /25~35자는 권장 범위/u);
+  assert.match(titleRules, /나열이나 절단은 하지/u);
+  assert.match(titleRules, /3개/u);
+  assert.doesNotMatch(titleRules, /제목에 반드시 포함/u);
+  const requestedRules = renderTitleRules(groundedSpec, { memo: '제목은 정확히 "해피달링 아기비데"로 작성.' });
+  assert.match(requestedRules, /공백·문장부호까지 그대로/u);
+  assert.match(requestedRules, /후보 선택이나 SEO 권장값으로 변경하지/u);
+  const outputSchema = buildDraftJsonSchema(groundedSpec, [0], true);
+  assert.deepEqual(Object.keys(outputSchema.properties).sort(), ["hashtags", "sections", "title"],
+    "title candidate planning does not add JSON output fields");
+  const titleOnlySpec = { ...spec, seo: { ...spec.seo, primaryKeyword: `${shoppingInput.product.name} 구매 선택 정보` } };
+  const titleOptions = { brandLink: shoppingInput.brandLink, hasRepresentativeImage: true,
+    requireRepresentativeImage: true, thumbnailGenerated: true };
+  for (const title of ["아기비데 온수, 꼭 필요할까?", "온수로 돌볼 때 따져볼 질문, 해피달링 아기비데"]) {
+    const report = validateDraft(titleOnlySpec, { ...shopping.draft, title }, titleOptions);
+    assert.ok(!report.repair.targets.some(target => ["TITLE_LENGTH", "TITLE_KEYWORD", "TITLE_PRODUCT_TOKEN"].includes(target.code)),
+      `a recognizable natural title is not rewritten for length or exact full keyword: ${title}`);
+    assert.equal(report.signals.find(signal => signal.key === "title-keyword-first")?.status, "warn");
+  }
+  for (const title of ["해피달링 아기비데, 후기만 보고 골라도 될까?", "해피달링 아기비데, 내돈내산 후기 없이 사양 확인하기"]) {
+    const report = validateDraft(spec, { ...shopping.draft, title }, titleOptions);
+    assert.ok(!report.repair.targets.some(target => target.code === "FORBIDDEN_CLAIM" && target.sectionIndex === null),
+      `a question/denial about reviews does not assert experience: ${title}`);
+  }
+  const offProductTitle = validateDraft(spec, { ...shopping.draft, title: "무선이어폰 배터리와 연결을 고르는 질문" }, titleOptions);
+  assert.ok(offProductTitle.repair.targets.some(target => target.code === "TITLE_PRODUCT_TOKEN" && target.priority === "P0"));
+  const fakeExperienceTitle = validateDraft(spec, { ...shopping.draft, title: "해피달링 아기비데 직접 써본 후기" }, titleOptions);
+  assert.ok(fakeExperienceTitle.repair.targets.some(target => target.code === "FORBIDDEN_CLAIM" && target.sectionIndex === null));
+  assert.equal(fakeExperienceTitle.repair.targets.filter(target => target.sectionIndex === null && (target.code.startsWith("TITLE_") || target.code === "FORBIDDEN_CLAIM")).length, 1,
+    "shared title truth checks do not duplicate the existing experience repair target");
+  const exaggeratedTitle = validateDraft(spec, { ...shopping.draft, title: "해피달링 아기비데 역대급 완벽 가이드" }, titleOptions);
+  assert.ok(exaggeratedTitle.repair.targets.some(target => target.code === "TITLE_CLEAN"));
+  for (const title of ["삼성 해피달링 아기비데", "해피달링 아기비데 S99", "해피달링 아기비데 999ml"]) {
+    const report = validateDraft({ ...spec, brief: staleBrief }, { ...shopping.draft, title }, titleOptions);
+    assert.equal(report.signals.find(signal => signal.key === "title-content")?.status, "fail", title);
+    assert.ok(report.repair.targets.some(target => target.code === "TITLE_CONTENT" && target.priority === "P1"), title);
+    assert.equal(report.canPublish, false, "other brands/models and unsupported numeric specs cannot pass a structured draft");
+  }
+  const sourcedNumericTitle = validateDraft({ ...spec, facts: { ...spec.facts, lines: [...spec.facts.lines, "세척 물 용량: 500ml"] } },
+    { ...shopping.draft, title: "해피달링 아기비데 500ml, 세척 전에 볼 점" }, titleOptions);
+  assert.equal(sourcedNumericTitle.signals.find(signal => signal.key === "title-content")?.status, "pass");
+  const bodyNumericTitle = validateDraft(spec, { ...shopping.draft, title: "해피달링 아기비데 500ml, 세척 전에 볼 점",
+    sections: shopping.draft.sections.map((section, index) => index ? section : { ...section, lines: [...section.lines, "세척 물 용량은 500ml입니다."] }),
+  }, titleOptions);
+  assert.equal(bodyNumericTitle.signals.find(signal => signal.key === "title-content")?.status, "fail",
+    "generated body text cannot authorize a numerical fact absent from canonical source facts");
+  assert.ok(buildLocalTitle({ ...spec, seo: { ...spec.seo, title: { ...spec.seo.title, maxChars: 6 } } }, "해피달링").length > 6,
+    "local fallback titles are never mechanically sliced to the preferred maximum");
+  const explicitShortTitle = await runSpecFirstPipeline({ ...shoppingInput, memo: '제목은 정확히 "해피달링 아기비데"로 작성.' });
+  assert.equal(explicitShortTitle.title, "해피달링 아기비데", "local generation retains exact requested short titles");
+  const explicitFalseTitle = await runSpecFirstPipeline({ ...shoppingInput, memo: '제목은 정확히 "해피달링 아기비데 직접 써본 후기"로 작성.' });
+  assert.equal(explicitFalseTitle.title, "해피달링 아기비데 직접 써본 후기", "an unsafe explicit title is not silently rewritten");
+  assert.equal(explicitFalseTitle.validation.status, "BLOCKED");
+  assert.ok(explicitFalseTitle.validation.repair.targets.some(target => target.code === "FORBIDDEN_CLAIM"));
+  const explicitWrongModelTitle = await runSpecFirstPipeline({ ...shoppingInput, memo: '제목은 정확히 "해피달링 아기비데 S99"로 작성.' });
+  assert.equal(explicitWrongModelTitle.title, "해피달링 아기비데 S99", "a requested title still has exact precedence over repair");
+  assert.equal(explicitWrongModelTitle.validation.canPublish, false);
+  assert.ok(explicitWrongModelTitle.validation.repair.targets.some(target => target.code === "TITLE_CONTENT"));
+
   // --- 검증기: 망가진 초안에서 섹션 타깃 ---
   const broken = normalizeDraft(spec, shopping.draft);
   broken.sections[2].lines = [...broken.sections[2].lines, "제가 직접 써봤더니 정말 좋았어요."];
@@ -171,6 +252,12 @@ async function main() {
     options: { forceLocal: true },
   };
   const travel = await runSpecFirstPipeline(travelInput);
+  const turkey = await buildPostSpec({ ...travelInput, product: { ...travelInput.product,
+    name: "월드체인 튀르키예 9일 <이스탄불/카파도키아>", description: "튀르키예 여행 상품", features: [],
+  } });
+  assert.equal(turkey.spec.seo.primaryKeyword, "튀르키예 패키지", "a source-present country precedes the retailer token");
+  assert.doesNotMatch(buildLocalTitle(turkey.spec, turkey.shortName), /^월드체인/u,
+    "a retailer token does not become the title's destination");
   assert.equal(travel.spec.disclosure, getConnectAffiliateDisclosure("TRAVEL"));
   assert.equal(travel.sections.at(-1), getConnectAffiliateDisclosure("TRAVEL"));
   for (const [connectKind, assembled, brandLink] of [["SHOPPING", shopping, shoppingInput.brandLink], ["TRAVEL", travel, travelInput.brandLink]] as const) {

@@ -15,6 +15,8 @@ export interface ReferenceSceneReview {
 }
 
 export interface BrandPostImageEvidenceLike {
+  role?: "hero" | "body";
+  sectionId?: string | null;
   provenance?: "ORIGINAL" | "LOCKED_PRODUCT" | "GENERATED_BACKGROUND" | "EDITORIAL_CARD" | "GENERATED_SCENE" | "PHOTO_TEXT_THUMBNAIL";
   creationMethod?: "source" | "local-composite" | "remote-generated" | "source-with-generated-background" | "reference-guided-scene";
   remoteGenerated?: boolean;
@@ -114,7 +116,10 @@ export function classifyBrandPostImageEvidence(
       : valid(false);
   }
   if (method === "remote-generated") {
-    return remote === true && (provenance === "GENERATED_BACKGROUND" || provenance === "EDITORIAL_CARD")
+    // A generated photo with a thumbnail headline must retain its truthful
+    // generation metadata. This does not grant body-image or pixel permission.
+    const generatedThumbnail = provenance === "PHOTO_TEXT_THUMBNAIL" && asset.role === "hero" && asset.sectionId == null;
+    return remote === true && (provenance === "GENERATED_BACKGROUND" || provenance === "EDITORIAL_CARD" || generatedThumbnail)
       ? valid(true)
       : invalid();
   }

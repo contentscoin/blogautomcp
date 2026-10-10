@@ -1,6 +1,7 @@
 import { buildSelectedProductImageAuditContext, assertPublishImagesSafe, type PublishImageAuditOptions } from "../../scripts/lib/publish-image-audit";
 import { acquireBrandPostImageRepairLock } from "./brand-post-image-repair-lock";
-import { readBrandPostPackage } from "./brand-post-package";
+import { getBrandPostPackageDir, readBrandPostPackage } from "./brand-post-package";
+import path from "node:path";
 import { materialRevision } from "./material-library";
 import { normalizePublishedPostText } from "./post-composition-contract";
 
@@ -24,7 +25,9 @@ export async function validateBrandPostPublishImages(id: string, productName?: s
         manifest.productUnderstanding,
       ),
       composition: normalizePublishedPostText(manifest.composition), imageAssets: manifest.imageAssets,
-      sourceSnapshotId: manifest.sourceSnapshot?.snapshotId, ...options });
+      sourceSnapshotId: manifest.sourceSnapshot?.snapshotId,
+      ...(manifest.sourceSnapshot ? { selectedSourceSnapshot: manifest.sourceSnapshot, selectedSourceProductId: id,
+        selectedSourceDirectory: path.join(getBrandPostPackageDir(id), "product-sources") } : {}), ...options });
     lock.assertOwner();
     const current = readBrandPostPackage(id, { migrate: false });
     if (!current || materialRevision(current) !== revision)

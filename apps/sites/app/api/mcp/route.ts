@@ -1,13 +1,15 @@
 import { NextResponse } from 'next/server';
 import { handleMcpRequest } from './[credential]/route';
 import { authenticateMcpOAuth, mcpResource, trustedSiteOrigin } from '@/lib/oauth';
+import { recordMcpRead } from '@/lib/connection-status';
 
 const RESPONSE_HEADERS = { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff' };
 
 export async function POST(request: Request) {
   const identity = await authenticateMcpOAuth(request);
   if (!identity) return oauthChallenge(request);
-  return handleMcpRequest(request, identity.userId, identity.scope);
+  return handleMcpRequest(request, identity.userId, identity.scope, undefined,
+    (tool, jobId) => recordMcpRead(identity.userId, tool, jobId));
 }
 
 export function GET(request: Request) {

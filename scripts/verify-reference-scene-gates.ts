@@ -7,6 +7,8 @@ import crypto from "node:crypto";
 import sharp from "sharp";
 import { classifyBrandPostImageEvidence, referenceSceneReviewIssue, REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 import type { BrandPostPackageManifestV2, BrandPostPackageImageAsset } from "../src/lib/brand-post-package";
+import { isShoppingThumbnailSourceAspectAllowed, isShoppingThumbnailSourceEligible } from "./lib/thumbnail-layout-v2";
+import { collectShoppingProductSourceCandidates } from "./lib/product-photo-source";
 
 const hash = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 async function main() {
@@ -21,6 +23,7 @@ async function main() {
     const { materialRevision } = await import("../src/lib/material-library");
     const { createPublishAttempt, publicationMaterialHash } = await import("../src/lib/publish-attempt");
     const { auditPublishImages } = await import("./lib/publish-image-audit");
+    const { prepareBrandPostImageReferenceContext } = await import("../src/lib/brand-post-image-generation");
     const image = async (name: string, color: string) => {
       const file = path.join(temporary, name);
       await sharp({ create: { width: 640, height: 640, channels: 3, background: color } }).png().toFile(file);
@@ -42,8 +45,137 @@ async function main() {
       heroImagePath: hero, bodyImagePaths: [], imageAssets: [{ path: hero, sourcePath: hero, sha256: hash(hero), role: "hero", creationMethod: "local-composite", provenance: "PHOTO_TEXT_THUMBNAIL", remoteGenerated: false }], hashtags: ["제품"], imagePolicy: "LOCKED_PRODUCT_OR_ORIGINAL", imageRequirements: { policy: "generated-required" }, sourceSnapshot: snapshot,
       createdAt: new Date().toISOString(), approvedAt: "previous-approval", contractVersion: "post-composition-contract/v1", composition,
       thumbnailSpec: { version: "thumbnail-spec/v2", canvas: { width: 1080, height: 1080, aspect: "1:1" }, style: "fixture", sourcePolicy: "LOCKED_PRODUCT_OR_ORIGINAL", sourceImagePath: hero } };
+    // A valid geometry reference can still be too wide for an intact thumbnail.
+    // Hero selection must neither mutate the shared body binding nor ask a model
+    // to review sources that the renderer will inevitably reject.
+    const wideSource = path.join(temporary, "wide-reference.png");
+    const tallSource = path.join(temporary, "tall-reference.png");
+    const unreadableSource = path.join(temporary, "unreadable-reference.png");
+    await sharp({ create: { width: 747, height: 344, channels: 3, background: "#ddd5cc" } }).png().toFile(wideSource);
+    await sharp({ create: { width: 344, height: 900, channels: 3, background: "#ddd5cc" } }).png().toFile(tallSource);
+    fs.writeFileSync(unreadableSource, "not an image");
+    const checkpointPath = path.join(store.getBrandPostPackageDir(manifest.brandLinkId), "image-generation-work", "scene-reference-context.json");
+    const thumbnailCheckpointPath = path.join(path.dirname(checkpointPath), "thumbnail-reference-context.json");
+    fs.mkdirSync(path.dirname(checkpointPath), { recursive: true });
+    const sourceReference = (file: string) => ({ path: file, sha256: hash(file), subject: "selected product", geometry: "complete shape", labels: "visible intrinsic logo", reviewedAt: "2026-10-10T10:00:00.000Z" });
+    const writeCheckpoint = (file: string) => {
+      fs.writeFileSync(checkpointPath, JSON.stringify({ strategyVersion: REFERENCE_SCENE_STRATEGY_VERSION, snapshotId: snapshot.snapshotId, reference: sourceReference(file) }));
+      return fs.readFileSync(checkpointPath, "utf8");
+    };
+    const heroTarget = () => ({ role: "hero" as const, request: { requestId: "thumbnail", slotId: "hero:image:1" }, sectionTitle: manifest.title, imageIntent: "대표 상품 사진", bodyExcerpt: manifest.title });
+    const wideCheckpoint = writeCheckpoint(wideSource);
+    const bodyBindingPath = path.join(path.dirname(checkpointPath), "current-body.reference-scene.json");
+    fs.writeFileSync(bodyBindingPath, JSON.stringify({ slotId: `${sectionId}:image:1`, referenceHashes: [hash(wideSource)], sourceSnapshotId: snapshot.snapshotId }));
+    const bodyBindingHash = hash(bodyBindingPath);
+    let collectCount = 0, selectCount = 0;
+    const recoveredThumbnail = await prepareBrandPostImageReferenceContext({ manifest, productName: "선택 상품", target: heroTarget() }, {
+      collect: async options => { collectCount += 1; assert.equal(options.maximum, 20); return [wideSource, tallSource, unreadableSource, source]; },
+      select: async options => { selectCount += 1; assert.deepEqual(options.paths, [source]); return sourceReference(source); },
+    });
+    assert.equal(recoveredThumbnail.reference.path, source);
+    assert.deepEqual(recoveredThumbnail.referenceHashes, [hash(source)]);
+    assert.equal(collectCount, 1);
+    assert.equal(selectCount, 1);
+    assert.equal(fs.readFileSync(checkpointPath, "utf8"), wideCheckpoint, "hero alternative must not overwrite the body checkpoint");
+    assert.equal(hash(bodyBindingPath), bodyBindingHash, "hero alternative must not invalidate a body job binding");
+    const cachedAlternative = await prepareBrandPostImageReferenceContext({ manifest, productName: "선택 상품", target: heroTarget() }, {
+      collect: async () => { throw new Error("reviewed hero alternative unexpectedly recollected"); },
+      select: async () => { throw new Error("reviewed hero alternative unexpectedly reviewed"); },
+    });
+    assert.equal(cachedAlternative.reference.path, source, "hero-specific source remains reusable without a provider request");
+    assert.equal(fs.readFileSync(checkpointPath, "utf8"), wideCheckpoint);
+    const retainedBody = await prepareBrandPostImageReferenceContext({ manifest, productName: "선택 상품", target: { ...heroTarget(), role: "body", sectionId, imageSource: "staged-ai" } }, {
+      collect: async () => { throw new Error("cached body reference unexpectedly recollected"); },
+      select: async () => { throw new Error("cached body reference unexpectedly reviewed"); },
+    });
+    assert.equal(retainedBody.reference.path, wideSource);
+    assert.deepEqual(retainedBody.referenceHashes, [hash(wideSource)]);
+    assert.equal(fs.readFileSync(checkpointPath, "utf8"), wideCheckpoint);
+    fs.rmSync(thumbnailCheckpointPath);
+    let badSelectCount = 0;
+    await assert.rejects(prepareBrandPostImageReferenceContext({ manifest, productName: "선택 상품", target: heroTarget() }, {
+      collect: async () => [wideSource, tallSource, unreadableSource],
+      select: async () => { badSelectCount += 1; throw new Error("ineligible sources must not consume a model request"); },
+    }), /PRODUCT_REFERENCE_REQUIRED: needs_reference.*0\.55~1\.85/u);
+    assert.equal(badSelectCount, 0);
+    assert.equal(fs.readFileSync(checkpointPath, "utf8"), wideCheckpoint);
+    await assert.rejects(prepareBrandPostImageReferenceContext({ manifest, productName: "선택 상품", target: heroTarget() }, {
+      collect: async () => [source], select: async () => ({ ...sourceReference(source), sha256: "0".repeat(64) }),
+    }), /REFERENCE_SCENE_CHANGED/u);
+    await assert.rejects(prepareBrandPostImageReferenceContext({ manifest, productName: "선택 상품", target: heroTarget() }, {
+      collect: async () => [source], select: async () => sourceReference(wideSource),
+    }), /REFERENCE_SCENE_CHANGED/u);
+    assert.equal(fs.readFileSync(checkpointPath, "utf8"), wideCheckpoint);
+    const eligibleCheckpoint = writeCheckpoint(source);
+    const cachedThumbnail = await prepareBrandPostImageReferenceContext({ manifest, productName: "선택 상품", target: heroTarget() }, {
+      collect: async () => { throw new Error("eligible cached thumbnail unexpectedly recollected"); },
+      select: async () => { throw new Error("eligible cached thumbnail unexpectedly reviewed"); },
+    });
+    assert.equal(cachedThumbnail.reference.path, source);
+    assert.equal(fs.readFileSync(checkpointPath, "utf8"), eligibleCheckpoint);
+    assert.equal(await isShoppingThumbnailSourceEligible(wideSource), false);
+    assert.equal(await isShoppingThumbnailSourceEligible(unreadableSource), false);
+    assert.equal(await isShoppingThumbnailSourceEligible(source), true);
+    for (const dimensions of [{ width: 55, height: 100 }, { width: 185, height: 100 }]) assert.equal(isShoppingThumbnailSourceAspectAllowed(dimensions), true);
+    for (const dimensions of [{ width: 54, height: 100 }, { width: 186, height: 100 }, { width: 0, height: 100 }, { width: Number.NaN, height: 100 }, {}]) assert.equal(isShoppingThumbnailSourceAspectAllowed(dimensions), false);
     const review = { strategyVersion: REFERENCE_SCENE_STRATEGY_VERSION, referencePath: source, referenceSha256: hash(source), sourceSnapshotId: snapshot.snapshotId, reviewStatus: "passed" as const, reviewedOutputSha256: hash(generated), checks: Object.fromEntries(REFERENCE_SCENE_REVIEW_CHECKS.map(key => [key, true])) };
     const asset: BrandPostPackageImageAsset = { path: generated, sourcePath: generated, sha256: hash(generated), role: "body", sectionId, slotId: `${sectionId}:image:1`, imageIntent: composition.sections[0].imageIntent, provenance: "GENERATED_SCENE", creationMethod: "reference-guided-scene", remoteGenerated: true, referenceScene: review };
+    // Fresh references prioritize the selected snapshot gallery over the entire
+    // saved hash-name pool, while preserving coherent reviewed-source priority.
+    const selectedUrl = "https://shop-phinf.pstatic.net/current-selected-product.png";
+    const fallbackUrl = "https://shop-phinf.pstatic.net/older-collected-product.png";
+    const freshSnapshot = createProductSnapshot({ productId: "fresh-gallery", connectKind: "SHOPPING", externalProductId: "selected",
+      sourceUrl: "https://example.test/selected", product: { name: "선택 상품", referenceImageUrls: [selectedUrl] } });
+    const freshManifest: BrandPostPackageManifestV2 = { ...manifest, brandLinkId: "fresh-gallery", sourceSnapshot: freshSnapshot,
+      imageAssets: [{ path: source, sourcePath: source, sha256: hash(source), role: "body", provenance: "ORIGINAL", creationMethod: "source" }] };
+    const freshDir = path.join(store.getBrandPostPackageDir(freshManifest.brandLinkId), "product-sources");
+    fs.mkdirSync(freshDir, { recursive: true });
+    for (let index = 0; index < 20; index++) {
+      const file = path.join(freshDir, `old-${index}.png`);
+      await sharp({ create: { width: 24, height: 24, channels: 3, background: { r: index, g: 50, b: 150 } } }).png().toFile(file);
+      fs.writeFileSync(`${file}.retrieval.json`, JSON.stringify({ version: "product-image-retrieval/v1", sourceUrl: `https://shop-phinf.pstatic.net/old-${index}.png`,
+        sha256: hash(file), retrievedAt: new Date().toISOString() }));
+    }
+    const selectedFile = path.join(freshDir, "zz-current-selected.png");
+    fs.copyFileSync(hero, selectedFile);
+    fs.writeFileSync(`${selectedFile}.retrieval.json`, JSON.stringify({ version: "product-image-retrieval/v1", sourceUrl: selectedUrl,
+      sha256: hash(selectedFile), retrievedAt: new Date().toISOString(), identityVerified: false }));
+    let freshReviews = 0;
+    const freshContext = await prepareBrandPostImageReferenceContext({ manifest: freshManifest, productName: "선택 상품",
+      target: heroTarget(), sourceImageUrls: [fallbackUrl] }, {
+      collect: options => {
+        assert.equal(options.preferSourceImageUrls, true);
+        assert.deepEqual(options.priorityLocalCandidates, [], "an ORIGINAL section review alone is not a reference-geometry approval");
+        assert.deepEqual(options.sourceImageUrls, [selectedUrl, fallbackUrl]);
+        return collectShoppingProductSourceCandidates(options, { download: async url => {
+          assert.equal(url, fallbackUrl, "current selected URL should reuse its intact receipt");
+          throw new Error("offline removed fallback");
+        } });
+      },
+      select: async options => {
+        freshReviews++;
+        assert.equal(options.paths[0], selectedFile, "the current seller photo remains within the first twelve reviewed candidates");
+        assert.equal(options.paths.length, 20);
+        return sourceReference(selectedFile);
+      },
+    });
+    assert.equal(freshContext.reference.path, selectedFile);
+    assert.equal(freshReviews, 1, "receipt lineage always reaches actual reference selection");
+    assert.equal(fs.readFileSync(checkpointPath, "utf8"), eligibleCheckpoint, "other existing body checkpoints are preserved");
+    assert.equal(hash(bodyBindingPath), bodyBindingHash, "existing raw-job bindings are preserved");
+    for (const [index, mutation] of [{}, { reviewStatus: "pending" }, { sourceSnapshotId: "old" },
+      { reviewedOutputSha256: "0".repeat(64) }, { checks: { ...review.checks, noAddedText: false } },
+      { referenceSha256: "0".repeat(64) }, { strategyVersion: "old" }].entries()) {
+      const prior = { ...asset, referenceScene: { ...review, sourceSnapshotId: freshSnapshot.snapshotId, ...mutation } } as BrandPostPackageImageAsset;
+      const withPrior = { ...freshManifest, brandLinkId: `prior-reference-${index}`, imageAssets: [prior] };
+      await prepareBrandPostImageReferenceContext({ manifest: withPrior, productName: "선택 상품", target: heroTarget() }, {
+        collect: async options => {
+          assert.deepEqual(options.priorityLocalCandidates, index === 0 ? [source] : [], "only a coherent current byte-bound passed reference receives priority");
+          return [selectedFile];
+        },
+        select: async () => sourceReference(selectedFile),
+      });
+    }
     const context = { referenceSha256: hash(source), sourceSnapshotId: snapshot.snapshotId, anchorSha256: hash(hero) };
     assert.deepEqual(classifyBrandPostImageEvidence(asset), { coherent: true, generated: true, reason: null });
     for (const mutation of [{ provenance: "ORIGINAL" }, { provenance: "LOCKED_PRODUCT" }, { remoteGenerated: false }, { creationMethod: "source" }]) assert.equal(classifyBrandPostImageEvidence({ ...asset, ...mutation } as BrandPostPackageImageAsset).coherent, false);
@@ -53,10 +185,27 @@ async function main() {
     assert.equal(REFERENCE_SCENE_REVIEW_CHECKS.length, 11);
     assert.equal(classifyBrandPostImageEvidence(manifest.imageAssets![0]).coherent, true);
     assert.equal(classifyBrandPostImageEvidence({ ...manifest.imageAssets![0], remoteGenerated: true }).coherent, false);
+    const generatedThumbnail: BrandPostPackageImageAsset = { ...manifest.imageAssets![0],
+      creationMethod: "remote-generated", remoteGenerated: true };
+    assert.deepEqual(classifyBrandPostImageEvidence(generatedThumbnail), { coherent: true, generated: true, reason: null });
+    for (const mutation of [{ role: "body" }, { role: undefined }, { sectionId }, { remoteGenerated: false },
+      { remoteGenerated: undefined }, { provenance: "ORIGINAL" }, { provenance: "LOCKED_PRODUCT" },
+      { creationMethod: "source" }, { creationMethod: "local-composite" }]) {
+      assert.equal(classifyBrandPostImageEvidence({ ...generatedThumbnail, ...mutation } as BrandPostPackageImageAsset).coherent, false,
+        "remote photo/text metadata is valid only for an explicitly bound generated hero, never a body/source/ambiguous record");
+    }
     store.writeBrandPostPackageManifest(manifest);
     assert.throws(() => store.applyGeneratedBrandPostImage({ brandLinkId: manifest.brandLinkId, generatedPath: generated, sectionId, provenance: "GENERATED_SCENE", creationMethod: "reference-guided-scene", remoteGenerated: true }), /REFERENCE_REVIEW_REQUIRED/);
     const updated = store.applyGeneratedBrandPostImage({ brandLinkId: manifest.brandLinkId, generatedPath: generated, sectionId, slotId: asset.slotId, imageIntent: asset.imageIntent, provenance: "GENERATED_SCENE", creationMethod: "reference-guided-scene", remoteGenerated: true, referenceScene: review });
     assert.equal(updated.approvedAt, null);
+    const withGeneratedHero = structuredClone(updated);
+    withGeneratedHero.imageAssets![0] = generatedThumbnail;
+    assert(!store.evaluateBrandPostPackageReadiness(withGeneratedHero).blockers.some(item => item.code === "image-provenance-invalid"),
+      "truthful generated thumbnail metadata must not block package readiness");
+    const sourceThumbnail = structuredClone(withGeneratedHero);
+    sourceThumbnail.imageAssets![0].creationMethod = "source";
+    assert(store.evaluateBrandPostPackageReadiness(sourceThumbnail).blockers.some(item => item.code === "image-provenance-invalid"),
+      "marking that same generated thumbnail as a seller source must still block readiness");
     const savedAsset = updated.imageAssets!.find(item => item.provenance === "GENERATED_SCENE")!;
     assert.notEqual(savedAsset.referenceScene!.referencePath, source);
     assert.equal(hash(savedAsset.referenceScene!.referencePath), hash(source));
@@ -107,7 +256,13 @@ async function main() {
       "legacy framed originals must not be carried into the new natural-photo draft");
     const visualReview = async (request: { userPrompt: string; imagePaths?: string[] }) => {
       assert(request.userPrompt.includes("adjacentCaption"));
-      return JSON.stringify({ reviews: request.imagePaths!.map((_, index) => ({ index: index + 1, accepted: true, identityMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "offline fixture" })) });
+      const line = request.userPrompt.split("\n").find(value => value.startsWith("Each attached image"))!;
+      const slots = JSON.parse(line.slice(line.indexOf("["))) as Array<{ role: string; visualContract: { purpose: string; claimPolicy: string } }>;
+      for (const slot of slots) {
+        assert.equal(slot.visualContract.purpose, slot.role === "thumbnail" ? "thumbnail" : "lifestyle-illustration");
+        assert.equal(slot.visualContract.claimPolicy, "visual-compatibility-and-explicit-photo-claims");
+      }
+      return JSON.stringify({ reviews: request.imagePaths!.map((_, index) => ({ index: index + 1, accepted: true, identityMatches: true, photoClaimMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "offline fixture" })) });
     };
     const audited = await auditPublishImages({ productName: "선택 상품", composition: updated.composition, imageAssets: updated.imageAssets, sourceSnapshotId: snapshot.snapshotId, review: visualReview });
     assert.equal(audited.ok, true);

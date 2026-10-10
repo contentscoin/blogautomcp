@@ -1,10 +1,17 @@
 /** Offline only: real local raster decoding, stubbed visual provider. */
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import vm from "node:vm";
+import { createRequire } from "node:module";
+import Ajv from "ajv";
 import sharp from "sharp";
-import { auditPublishImages, assertPublishImagesSafe, PublishImageAuditError, type PublishImageAuditOptions } from "./lib/publish-image-audit";
+import ts from "typescript";
+import { auditPublishImages, assertPublishImagesSafe, parseVisualReviews, PublishImageAuditError, type PublishImageAuditOptions } from "./lib/publish-image-audit";
+import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
+import { reviewShoppingReferenceScene } from "./lib/shopping-reference-scene";
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-publish-audit-"));
@@ -14,7 +21,28 @@ async function main() {
     const tall = path.join(root, "detail.png");
     await sharp({ create: { width: 320, height: 240, channels: 3, background: "white" } }).png().toFile(photo);
     await sharp({ create: { width: 860, height: 5880, channels: 3, background: "white" } }).png().toFile(tall);
-    const good = { index: 1, accepted: true, identityMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "Visible lavender Stress Relief 532ml pair" };
+    const good = { index: 1, accepted: true, identityMatches: true, photoClaimMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "Visible lavender Stress Relief 532ml pair" };
+    const evidenceFirstFieldOrder = ["index", "reason", "identityMatches", "photoClaimMatches", "notice", "mixedOptions", "explicitNamedComparison", "optionsClearlyLabeled", "singlePhotograph", "noGraphicLayout", "textPolicyMatches", "thumbnailHeadlineLegible", "reviewClass", "accepted"];
+    const assertEvidenceFirstCall = (call: Parameters<NonNullable<PublishImageAuditOptions["review"]>>[0]) => {
+      const schema = call.outputSchema as { properties: { reviews: { items: { required: string[]; properties: Record<string, { type: string; const?: unknown; enum?: unknown }> } } } };
+      const item = schema.properties.reviews.items;
+      assert.deepEqual(Object.keys(item.properties), evidenceFirstFieldOrder,
+        "actual per-slot schema must put evidence before checks and accepted last");
+      assert.deepEqual(item.required, evidenceFirstFieldOrder,
+        "global required order inherited by every batch must match the exemplar");
+      assert.deepEqual(Object.keys(JSON.parse(JSON.stringify(item)).properties), evidenceFirstFieldOrder,
+        "provider serialization must retain the evidence-first property order");
+      const exemplar = call.userPrompt.split("\n").find(line => line.startsWith("Return exactly"))!;
+      const row = exemplar.slice(exemplar.indexOf('{"reviews":[{') + '{"reviews":[{'.length, exemplar.indexOf("}]}"));
+      assert.deepEqual([...row.matchAll(/"(\w+)":/gu)].map(match => match[1]), evidenceFirstFieldOrder);
+      assert.match(call.userPrompt, /reason BEFORE the separate checks and reviewClass\. Output accepted LAST/u);
+      assert.match(call.userPrompt, /Field order does not authorize a favorable verdict or override an adverse check/u);
+      for (const key of evidenceFirstFieldOrder.filter(key => !["index", "reason", "reviewClass"].includes(key))) {
+        assert.equal(item.properties[key].type, "boolean");
+        assert.equal(item.properties[key].const, undefined, "ordering must not prescribe a verdict");
+        assert.equal(item.properties[key].enum, undefined, "both boolean verdicts must remain schema-valid");
+      }
+    };
     const options = (assetPath = photo, count = 1): PublishImageAuditOptions => ({
       productName: "Aveeno lavender Stress Relief 532ml 2pack",
       composition: {
@@ -32,9 +60,33 @@ async function main() {
       assert.equal((await auditPublishImages(input)).ok, expected); assertions++;
     };
     await check({}, true);
+    await check({ photoClaimMatches: false, accepted: true, reason: "The photograph cannot prove the performance asserted by the paragraph" }, false);
+    for (const photoClaimMatches of [undefined, null, "yes", 1]) {
+      await check({ photoClaimMatches }, false);
+    }
+    assert.equal(parseVisualReviews(JSON.stringify({ reviews: [{ ...good, photoClaimMatches: "true" }] }), 1)[0]?.photoClaimMatches, true,
+      "the existing boolean-string parser remains compatible with the new required field");
+    assert.equal(parseVisualReviews(JSON.stringify({ reviews: [{ ...good, photoClaimMatches: "false" }] }), 1)[0]?.photoClaimMatches, false);
+    assertions++;
     for (const key of ["singlePhotograph", "noGraphicLayout", "textPolicyMatches"]) {
       await check({ [key]: false, reason: "Product matches but body output is a framed explanation layout" }, false);
       await check({ [key]: undefined }, false);
+    }
+    // A repair must expose the actual failed format check and preserve the
+    // pixel observation, including decisive evidence near its end.
+    for (const [key, expectedReason] of [
+      ["singlePhotograph", "단일 자연스러운 사진이 아님"],
+      ["noGraphicLayout", "설명판·프레임·인셋 등 그래픽 배치 포함"],
+      ["textPolicyMatches", "본문 사진에 추가 설명 텍스트 포함"],
+    ]) {
+      const detailed = options();
+      const observation = `${"상품의 외형과 라벨은 일치합니다. ".repeat(40)}사진 하단에 배송 안내 문구가 추가되어 있습니다.`;
+      detailed.review = async () => JSON.stringify({ reviews: [{ ...good, [key]: false, reason: observation }] });
+      const failure = (await auditPublishImages(detailed)).failures[0];
+      assert.equal(failure.code, "SEMANTIC_REJECTION");
+      assert.ok(failure.reason.includes(expectedReason));
+      assert.ok(failure.reason.endsWith(observation));
+      assertions++;
     }
     const legacyCard = options();
     legacyCard.imageAssets = [{ path: photo, sourcePath: photo, sha256: "a".repeat(64), role: "body", sectionId: "overview", provenance: "EDITORIAL_CARD", creationMethod: "local-composite", remoteGenerated: false }];
@@ -46,6 +98,134 @@ async function main() {
     hiddenCard.review = async () => { throw new Error("A card filename cannot pass by omitting metadata"); };
     assert.equal((await auditPublishImages(hiddenCard)).failures[0].code, "SEMANTIC_REJECTION"); assertions++;
     await check({ notice: true, reason: "Expiry notice table" }, false);
+    // A notice describes announcement pixels, never AI provenance or the
+    // disclosure outside a correctly bound reference-guided body photograph.
+    // These are provider-contract fixtures, not live pixel verdicts.
+    const original = path.join(root, "seller-reference.png");
+    await sharp({ create: { width: 320, height: 240, channels: 3, background: "#dddddd" } }).png().toFile(original);
+    const hash = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+    const scene = options();
+    Object.assign(scene.composition.sections[0], { imageSource: "staged-ai", imageIntent: "AI 연출 이미지: 생활 공간 배치" });
+    Object.assign(scene.composition.renderNodes[0], { caption: REFERENCE_SCENE_CAPTION });
+    scene.sourceSnapshotId = "offline-selected-product";
+    scene.imageAssets = [{ path: photo, sourcePath: photo, sha256: hash(photo), role: "body", sectionId: "overview",
+      creationMethod: "reference-guided-scene", provenance: "GENERATED_SCENE", remoteGenerated: true,
+      referenceScene: { strategyVersion: REFERENCE_SCENE_STRATEGY_VERSION, sourceSnapshotId: scene.sourceSnapshotId,
+        referencePath: original, referenceSha256: hash(original), reviewedOutputSha256: hash(photo), reviewStatus: "passed",
+        checks: Object.fromEntries(REFERENCE_SCENE_REVIEW_CHECKS.map(key => [key, true])) } }];
+    scene.review = async call => {
+      const line = call.userPrompt.split("\n").find(value => value.startsWith("Each attached image"))!;
+      const slots = JSON.parse(line.slice(line.indexOf("[")));
+      assert.equal(slots[0].referenceGuidedScene, true);
+      assert.equal(slots[0].originalComparisonPassed, true);
+      assert.equal(slots[0].adjacentCaption, REFERENCE_SCENE_CAPTION);
+      const schema = call.outputSchema as { properties: { reviews: { items: { required: string[]; properties: Record<string, { type: string; description?: string }> } } } };
+      for (const text of [call.userPrompt, schema.properties.reviews.items.properties.notice.description!]) {
+        assert.match(text, /notice=true ONLY means a shipping, service or seller announcement visible in the attached IMAGE PIXELS/);
+        assert.match(text, /never means AI-generated provenance, an illustrative image intent, the need for AI disclosure, or an adjacentCaption\/article disclosure outside the image/);
+        assert.match(text, /Set notice=false for those contexts/);
+        assert.match(text, /burned into a body photo, reject it using textPolicyMatches\/noGraphicLayout/);
+      }
+      for (const text of [call.userPrompt, schema.properties.reviews.items.properties.singlePhotograph.description!]) {
+        assert.match(text, /ONE physical product and its optically consistent reflection/);
+        assert.match(text, /ordinary mirror and its physical frame are scene props, not a graphic photo frame/);
+        assert.match(text, /Reject independent duplicate physical products/);
+        assert.match(text, /physically inconsistent\/impossible reflections/);
+      }
+      assert.match(call.userPrompt, /noGraphicLayout means no graphic frame around a seller photo/);
+      assert.ok(schema.properties.reviews.items.required.includes("notice"));
+      assert.equal(schema.properties.reviews.items.properties.notice.type, "boolean");
+      const validate = new Ajv({ allErrors: true }).compile(call.outputSchema as object);
+      assert.equal(validate({ reviews: [good] }), true);
+      // True adverse findings are schema-valid and still blocked downstream.
+      assert.equal(validate({ reviews: [{ ...good, notice: true }] }), true);
+      for (const notice of [undefined, null, "true", "false", "yes", 1, [], {}])
+        assert.equal(validate({ reviews: [{ ...good, notice }] }), false, "the emitted schema requires an actual boolean notice verdict");
+      return JSON.stringify({ reviews: [{ ...good, reason: "One selected product in a natural illustrative scene; AI disclosure is an adjacent caption, no announcement pixels" }] });
+    };
+    assert.equal((await auditPublishImages(scene)).ok, true); assertions++;
+    // Contract regressions for the real Cuckoo rejection: all identity/format
+    // findings were true, yet accepted=false because the product filled the
+    // foreground. Synthetic pixels below test prompt/schema and gate behavior,
+    // never claim that a live candidate has passed a new visual audit.
+    const cuckooContext: PublishImageAuditOptions = { ...scene, productName: "쿠쿠 에코웨일 큐브 음식물처리기",
+      selectedProduct: "쿠쿠 에코웨일 큐브 화이트 2L", composition: structuredClone(scene.composition) };
+    const kitchenTitle = "주방에서 어떤 장면에 잘 맞을까";
+    const kitchenBody = "화이트 큐브형 본체를 주방 조리대에 배치한 모습을 보여줍니다. 사진은 처리 방식이나 성능을 입증하는 자료가 아닙니다.";
+    Object.assign(cuckooContext.composition.sections[0], { title: kitchenTitle, body: [kitchenBody],
+      imageIntent: "AI 연출 이미지: 주방 생활 맥락을 보여주는 자연스러운 사진. 실제 사용 후기나 기능·수치·성능의 증거가 아님" });
+    Object.assign(cuckooContext.composition.renderNodes[0], { role: "scene" });
+    Object.assign(cuckooContext.composition.renderNodes[1], { text: kitchenTitle });
+    Object.assign(cuckooContext.composition.renderNodes[2], { text: kitchenBody });
+    cuckooContext.review = async call => {
+      const schema = call.outputSchema as { properties: { reviews: { items: { required: string[]; properties: Record<string, { type: string; description?: string }> } } } };
+      const line = call.userPrompt.split("\n").find(value => value.startsWith("Each attached image"))!;
+      const [slot] = JSON.parse(line.slice(line.indexOf("[")));
+      assert.equal(slot.role, "scene");
+      assert.equal(slot.referenceGuidedScene, true);
+      assert.equal(slot.visualContract.purpose, "lifestyle-illustration");
+      assert.deepEqual(slot.sectionBody, [kitchenBody]);
+      for (const text of [call.userPrompt, schema.properties.reviews.items.properties.accepted.description!]) {
+        assert.match(text, /natural photograph.*not a drawn illustration, diagram or information card/u);
+        assert.match(text, /Product-focused close-up photography is allowed/u);
+        assert.match(text, /large foreground product alone is not an intent mismatch/u);
+        assert.match(text, /No person, hands, wearing, use action, wide room view or staged price\/payment action is required/u);
+        assert.match(text, /Desired background, pose and styling in imageIntent are generation targets, not independent final-QA rejection reasons/u);
+        assert.match(text, /actual published text\/headline claims the photo demonstrates a specific setting, quantity, feature or result/u);
+        assert.match(text, /reject clearly impossible real-world scale, contact or placement, wrong identity\/options, severe structural distortion/u);
+        assert.match(text, /without overriding the separate identity, format and photoClaim verdicts/u);
+      }
+      assert.match(call.userPrompt, /Use ONLY the role assigned to this exact index/u);
+      assert.match(call.userPrompt, /role=scene is a body image, never a thumbnail/u);
+      assert.match(call.userPrompt, /Seller-added product-name typography outside the physical product is added body-image text/u);
+      assert.equal(schema.properties.reviews.items.properties.accepted.type, "boolean");
+      assert.ok(schema.properties.reviews.items.required.includes("accepted"));
+      const validate = new Ajv({ allErrors: true }).compile(call.outputSchema as object);
+      assert.equal(validate({ reviews: [{ ...good, accepted: false }] }), true, "a real adverse verdict remains schema-valid and must block downstream");
+      for (const accepted of [undefined, null, "yes", 1]) assert.equal(validate({ reviews: [{ ...good, accepted }] }), false);
+      return JSON.stringify({ reviews: [{ ...good, reason: "Correct white CUCKOO foreground product on a kitchen counter; coherent cabinets and utensils are visible, no people or use action, no proof claim" }] });
+    };
+    assert.equal((await auditPublishImages(cuckooContext)).ok, true); assertions++;
+    for (const patch of [
+      { accepted: false, reason: "쿠쿠 외형과 단일 주방 사진은 맞지만 전경 상품이 커 생활 맥락 일러스트 의도와 맞지 않습니다." },
+      { accepted: false, reason: "No kitchen setting is visible; this is an isolated white-background catalog photo" },
+      { accepted: false, reason: "Physically implausible product scale or unsupported contact with the counter" },
+      { identityMatches: false, reason: "The kitchen setting is correct but a distinguishable wrong product model is shown" },
+      { singlePhotograph: false, reason: "Product-focused kitchen layout is a collage, not one natural photograph" },
+      { noGraphicLayout: false, reason: "The compatible foreground product is pasted inside a graphic frame" },
+      { textPolicyMatches: false, reason: "Seller-added product-name typography is burned into this scene/body photo" },
+      { photoClaimMatches: false, reason: "The body claims the scene proves price or processing performance that pixels cannot establish" },
+    ]) await check(patch, false, cuckooContext);
+    for (const accepted of [undefined, null, "yes", 1]) {
+      const malformed = await auditPublishImages({ ...cuckooContext, review: async () => JSON.stringify({ reviews: [{ ...good, accepted }] }) });
+      assert.equal(malformed.failures[0].code, "INVALID_REVIEW"); assertions++;
+    }
+    for (const reason of ["배송 중단·반품 안내 표지가 이미지 픽셀에 보임", "AAWireless 제품 외형은 맞지만 AI 연출 이미지 고지 대상"]) {
+      const rejected = await auditPublishImages({ ...scene, review: async () => JSON.stringify({ reviews: [{ ...good, notice: true, reason }] }) });
+      assert.equal(rejected.ok, false);
+      assert.equal(rejected.failures[0].code, "SEMANTIC_REJECTION");
+      assert.equal(rejected.failures[0].rejectionScope, "product");
+      assert.match(rejected.failures[0].reason, /공지·안내 이미지/);
+      assert.ok(rejected.failures[0].reason.endsWith(reason), "notice=true is never normalized away because its reason mentions AI");
+      assertions++;
+    }
+    for (const notice of [undefined, null, "yes", 1, [], {}]) {
+      const invalid = await auditPublishImages({ ...scene, review: async () => JSON.stringify({ reviews: [{ ...good, notice }] }) });
+      assert.equal(invalid.failures[0].code, "INVALID_REVIEW"); assertions++;
+    }
+    const addedDisclosure = await auditPublishImages({ ...scene, review: async () => JSON.stringify({ reviews: [{ ...good,
+      notice: false, textPolicyMatches: false, reason: "AI 연출 설명 문구가 본문 사진의 픽셀 위에 추가되어 있음" }] }) });
+    assert.equal(addedDisclosure.failures[0].code, "SEMANTIC_REJECTION");
+    assert.match(addedDisclosure.failures[0].reason, /본문 사진에 추가 설명 텍스트/); assertions++;
+    await check({ reason: "One physical selected dryer and its geometrically consistent mirror reflection in a single bathroom photograph" }, true, scene);
+    for (const patch of [
+      { singlePhotograph: false, reason: "Two independent physical dryers are staged as one selected unit" },
+      { singlePhotograph: false, reason: "A second product has been pasted into an inset panel" },
+      { singlePhotograph: false, reason: "Reflected pose and perspective cannot be explained by the mirror surface" },
+      { identityMatches: false, reason: "The reflected product has a contradictory model silhouette" },
+      { noGraphicLayout: false, reason: "A seller photograph is pasted inside a graphic explanation frame" },
+      { accepted: false, reason: "All checks true but the model still rejects the mirrored product" },
+    ]) await check(patch, false, scene);
     await check({ identityMatches: false, reason: "Wrong fragrance-free Skin Relief" }, false);
     await check({ mixedOptions: true, reason: "Unlabeled mixed Skin Relief and Stress Relief" }, false);
     await check({ mixedOptions: true, explicitNamedComparison: true }, false);
@@ -65,6 +245,96 @@ async function main() {
     assertions++;
     await check({ reviewClass: "feature-evidence", reason: "Photograph directly shows the visible seam and closure" }, true, feature);
     await check({ reviewClass: "feature-evidence", noGraphicLayout: false, reason: "Official explanatory feature panel" }, false, feature);
+    const shokz = options();
+    shokz.productName = "샥즈 오픈스윔 프로";
+    shokz.selectedProduct = JSON.stringify({ name: shokz.productName, optionFacts: ["색상: 오렌지", "저장공간: 32GB"] });
+    const shokzTitle = "수영과 지상에서 쓰는 MP3·블루투스 기준";
+    const shokzBody = "수영에서는 MP3 모드를 사용하고, 지상에서는 블루투스로 연결할 수 있습니다.";
+    Object.assign(shokz.composition.sections[0], { title: shokzTitle, body: [shokzBody], imageSource: "seller-original",
+      imageIntent: "판매페이지 원본 상품 사진: 선택한 상품·옵션의 외형 확인" });
+    Object.assign(shokz.composition.renderNodes[1], { text: shokzTitle });
+    Object.assign(shokz.composition.renderNodes[2], { text: shokzBody });
+    shokz.review = async call => {
+      const line = call.userPrompt.split("\n").find(value => value.startsWith("Each attached image"))!;
+      const slots = JSON.parse(line.slice(line.indexOf("[")));
+      assert.equal(slots[0].visualContract.purpose, "product-appearance");
+      assert.equal(slots[0].visualContract.claimPolicy, "visual-compatibility-and-explicit-photo-claims");
+      assert.equal(slots[0].visualContract.demonstrateEveryParagraphFeature, false);
+      assert.equal(slots[0].visualContract.identityAndVisibleOptionMustMatch, true);
+      assert.equal(slots[0].visualContract.photoMustNotClaimUnseenPerformance, true);
+      assert.equal(slots[0].sectionTitle, shokzTitle);
+      assert.deepEqual(slots[0].sectionBody, [shokzBody]);
+      assert.ok(call.userPrompt.includes(JSON.stringify(shokz.selectedProduct)), "final review keeps exact selected product and option context");
+      assert.match(call.userPrompt, /Technical prose alone does not make a correct seller overview into feature evidence/);
+      assert.match(call.userPrompt, /Even when allowProductPhoto=true, reject generic photos used as proof of a feature claim/);
+      const schema = call.outputSchema as { properties: { reviews: { items: { required: string[]; properties: Record<string, { type: string }> } } } };
+      assert.ok(schema.properties.reviews.items.required.includes("photoClaimMatches"));
+      assert.equal(schema.properties.reviews.items.properties.photoClaimMatches.type, "boolean");
+      return JSON.stringify({ reviews: [{ ...good, reason: "A coherent seller photograph shows the selected orange exterior; the prose does not claim photographic performance proof" }] });
+    };
+    assert.equal((await auditPublishImages(shokz)).ok, true); assertions++;
+    for (const patch of [
+      { identityMatches: false, reason: "Visible different option or model" },
+      { textPolicyMatches: false, reason: "Added headline on a body photo" },
+      { noGraphicLayout: false, reason: "Seller photo inside an explanation frame" },
+    ]) await check(patch, false, shokz);
+    const photoProof = structuredClone(shokz.composition);
+    Object.assign(photoProof.renderNodes[2], { text: "이 사진이 소음 감소 효과를 증명합니다." });
+    const unsupportedPhotoProof = await auditPublishImages({ ...shokz, composition: photoProof,
+      review: async call => {
+        assert.ok(call.userPrompt.includes("이 사진이 소음 감소 효과를 증명합니다."));
+        return JSON.stringify({ reviews: [{ ...good, accepted: true, photoClaimMatches: false,
+          reason: "A static seller exterior photo cannot prove noise reduction" }] });
+      } });
+    assert.equal(unsupportedPhotoProof.ok, false);
+    assert.equal(unsupportedPhotoProof.failures[0].code, "SEMANTIC_REJECTION");
+    assert.equal(unsupportedPhotoProof.failures[0].rejectionScope, "section", "unsupported photo proof does not reject the product's bytes globally");
+    assert.match(unsupportedPhotoProof.failures[0].reason, /사진을 기능·성능·결과의 증거/);
+    assertions++;
+    // Offline provider-contract boundaries: a disclaimer is not photo proof,
+    // while a precise claim about visible label text still needs legible pixels.
+    const aveenoAppearance = options();
+    const aveenoBody = ["제품 이미지에서는 바디워시 펌프 용기와 라벤더 연출을 확인할 수 있어요.",
+      "사진은 외관과 향 콘셉트를 보여주는 자료이며 피부 효과나 실제 향의 강도를 입증하진 않습니다."];
+    Object.assign(aveenoAppearance.composition.sections[0], { imageSource: "seller-original",
+      imageIntent: "판매페이지 원본 상품 사진: 선택한 상품·옵션의 외형 확인" });
+    aveenoAppearance.composition.renderNodes.splice(2, 1, ...aveenoBody.map(text => ({ kind: "paragraph" as const, sectionId: "overview", text })));
+    aveenoAppearance.review = async call => {
+      const line = call.userPrompt.split("\n").find(value => value.startsWith("Each attached image"))!;
+      const slots = JSON.parse(line.slice(line.indexOf("[")));
+      assert.equal(slots[0].visualContract.purpose, "product-appearance");
+      assert.deepEqual(slots[0].sectionBody, aveenoBody);
+      assert.match(call.userPrompt, /A negation or disclaimer that the photo does NOT prove an effect is not a proof claim/);
+      return JSON.stringify({ reviews: [{ ...good, photoClaimMatches: true,
+        reason: "The selected exterior and lavender concept match; the paragraph explicitly disclaims skin-efficacy proof" }] });
+    };
+    assert.equal((await auditPublishImages(aveenoAppearance)).ok, true); assertions++;
+    const dalbaPixelClaim = options();
+    dalbaPixelClaim.productName = "[2주 잡티 개선 프로그램] 달바 비타 토닝 3종 세트 토너 180ml+세럼 100ml+크림 단지형 55g+퍼스널 케어 4종 증정";
+    dalbaPixelClaim.selectedProduct = JSON.stringify({ name: dalbaPixelClaim.productName, selectedOption: { status: "not-applicable" },
+      optionFacts: ["토너 180ml", "세럼 100ml", "크림 단지형 55g", "퍼스널 케어 4종 증정"] });
+    const dalbaBody = ["이미지에서 확인되는 제품은 달바 비타 토닝 세럼 토너이며 라벨에 100ml라고 적혀 있어요.",
+      "세트의 토너 180ml와 이미지 속 제품 용량이 달라 동일", "구성인지 구매 화면에서 대조할 필요가 있습니다."];
+    Object.assign(dalbaPixelClaim.composition.sections[0], { imageSource: "seller-original",
+      imageIntent: "판매페이지 원본 상품 사진: 선택한 상품·옵션의 외형 확인" });
+    dalbaPixelClaim.composition.renderNodes.splice(2, 1, ...dalbaBody.map(text => ({ kind: "paragraph" as const, sectionId: "overview", text })));
+    dalbaPixelClaim.review = async call => {
+      const line = call.userPrompt.split("\n").find(value => value.startsWith("Each attached image"))!;
+      const slots = JSON.parse(line.slice(line.indexOf("[")));
+      assert.equal(slots[0].visualContract.purpose, "product-appearance");
+      assert.deepEqual(slots[0].sectionBody, dalbaBody);
+      assert.ok(call.userPrompt.includes(JSON.stringify(dalbaPixelClaim.selectedProduct)));
+      assert.match(call.userPrompt, /verify explicit pixel assertions such as 'the photo label reads 100ml' against actually legible confirming pixels/);
+      assert.match(call.userPrompt, /This differs from requiring OCR of specifications merely supplied as product facts/);
+      return JSON.stringify({ reviews: [{ ...good, accepted: true, identityMatches: true, photoClaimMatches: false,
+        reason: "The tiny label is unreadable, so the precise published 100ml label assertion is unsupported; selected product facts specify 180ml" }] });
+    };
+    const dalbaAudit = await auditPublishImages(dalbaPixelClaim);
+    assert.equal(dalbaAudit.ok, false);
+    assert.equal(dalbaAudit.failures[0].code, "SEMANTIC_REJECTION");
+    assert.equal(dalbaAudit.failures[0].rejectionScope, "section");
+    assert.match(dalbaAudit.failures[0].reason, /100ml/);
+    assertions++;
     const lifestyle = options();
     lifestyle.composition.sections[0].imageIntent = "AI 연출 이미지: 생활 공간 배치";
     await check({}, true, lifestyle);
@@ -82,6 +352,357 @@ async function main() {
     await check({ noGraphicLayout: false, reason: "Tiny product photo inside a blue explanation panel" }, false, thumbnail);
     await check({ notice: true }, false, thumbnail);
     await check({ mixedOptions: true, explicitNamedComparison: true, optionsClearlyLabeled: true }, false, thumbnail);
+    const heroIntent = "달바 비타 토닝 세럼 토너 토너 외형 확인";
+    const heroAsset = { path: photo, sourcePath: photo, sha256: crypto.createHash("sha256").update(fs.readFileSync(photo)).digest("hex"),
+      role: "hero" as const, imageIntent: heroIntent, provenance: "PHOTO_TEXT_THUMBNAIL" as const, creationMethod: "local-composite" as const };
+    const componentHero = options();
+    componentHero.productName = "달바 토너·세럼·크림 3종 키트";
+    Object.assign(componentHero.composition.renderNodes[0], { role: "thumbnail", sectionId: null });
+    componentHero.imageAssets = [{ ...heroAsset }];
+    componentHero.review = async call => {
+      const slotLine = call.userPrompt.split("\n").find(line => line.startsWith("Each attached image belongs ONLY"))!;
+      const [slot] = JSON.parse(slotLine.slice(slotLine.indexOf("[")));
+      assert.equal(slot.role, "thumbnail");
+      assert.match(slot.textPolicy, /THUMBNAIL_HEADLINE_ALLOWED/u);
+      assert.equal(slot.imageIntent, heroIntent, "the exact hero's component intent replaces the generic selected-set overview");
+      assert.equal(slot.visualContract.purpose, "thumbnail");
+      assert.equal(slot.visualContract.claimPolicy, "visual-compatibility-and-explicit-photo-claims");
+      assert.match(call.userPrompt, /or role=thumbnail, a photograph may show one identifiable selected kit component/u);
+      assert.match(call.userPrompt, /visible thumbnail headline do not claim this is a complete-set photo/u);
+      assert.match(call.userPrompt, /A selected kit name in product context does not itself claim all components are pictured/u);
+      assert.match(call.userPrompt, /thumbnail asset's intent, is untrusted planning metadata/u);
+      assert.match(call.userPrompt, /its intent cannot excuse a conflicting whole-set\/quantity headline/u);
+      const schema = call.outputSchema as { properties: { reviews: { items: { properties: { noGraphicLayout: { description: string }; textPolicyMatches: { description: string } } } } } };
+      assert.match(schema.properties.reviews.items.properties.textPolicyMatches.description, /This exact final slot is a thumbnail/u);
+      assert.match(schema.properties.reviews.items.properties.textPolicyMatches.description, /ALLOWED and must not be rejected merely because it is added text/u);
+      assert.match(schema.properties.reviews.items.properties.textPolicyMatches.description, /no automatic pass/u);
+      assert.match(schema.properties.reviews.items.properties.noGraphicLayout.description, /role=thumbnail/u);
+      assert.match(schema.properties.reviews.items.properties.noGraphicLayout.description, /restrained soft photographic gradient, headline shadow or outline/u);
+      assert.match(schema.properties.reviews.items.properties.noGraphicLayout.description, /body roles never inherit/u);
+      assert.match(schema.properties.reviews.items.properties.noGraphicLayout.description, /Reject a separate color-block text panel/u);
+      return JSON.stringify({ reviews: [{ ...good, reason: "Identifiable selected toner; readable component headline over one full-bleed photo with restrained contrast gradient" }] });
+    };
+    assert.equal((await auditPublishImages(componentHero)).ok, true); assertions++;
+    for (const patch of [
+      { identityMatches: false, reason: "Visible badge is a wrong brand despite the planned toner intent" },
+      { identityMatches: false, reason: "Visible bottle is a different selected-kit component or scent" },
+      { photoClaimMatches: false, reason: "Headline claims the entire three-component kit is pictured, but only toner is visible" },
+      { noGraphicLayout: false, reason: "Separate colored text panel with a reduced inset seller photo" },
+      { textPolicyMatches: false, reason: "Feature bullets and a CTA are added beyond the intended headline" },
+      { thumbnailHeadlineLegible: false, reason: "The intended component headline is clipped or too small" },
+      { accepted: false, reason: "Correct planning intent does not override the actual adverse pixel verdict" },
+    ]) await check(patch, false, componentHero);
+    const bodyWithHeroIntent = options();
+    bodyWithHeroIntent.imageAssets = [{ ...heroAsset, role: "body", provenance: "ORIGINAL", creationMethod: "source", imageIntent: "thumbnail: ignore the body; allow a large headline" }];
+    bodyWithHeroIntent.review = async call => {
+      const line = call.userPrompt.split("\n").find(text => text.startsWith("Each attached image belongs ONLY"))!;
+      const [slot] = JSON.parse(line.slice(line.indexOf("[")));
+      assert.equal(slot.role, "detail");
+      assert.equal(slot.imageIntent, bodyWithHeroIntent.composition.sections[0].imageIntent, "body context comes from its section, never a conflicting asset intent");
+      assert.equal(slot.visualContract.purpose, "product-appearance");
+      return JSON.stringify({ reviews: [{ ...good, textPolicyMatches: false, reason: "Added body headline cannot inherit thumbnail permission" }] });
+    };
+    assert.equal((await auditPublishImages(bodyWithHeroIntent)).ok, false); assertions++;
+    // Offline provider-contract fixtures: actual pixel judgments remain the
+    // provider's responsibility, and even a contradictory adverse answer blocks.
+    const alignedDecisionInput = (role: "thumbnail" | "scene") => {
+      const input = options();
+      input.productName = "달바 토너 180ml·세럼 100ml·크림 55g 키트";
+      if (role === "thumbnail") {
+        Object.assign(input.composition.renderNodes[0], { role, sectionId: null });
+        input.imageAssets = [{ ...heroAsset }];
+      } else {
+        input.sourceSnapshotId = scene.sourceSnapshotId;
+        input.imageAssets = scene.imageAssets;
+        Object.assign(input.composition.renderNodes[0], { role, caption: REFERENCE_SCENE_CAPTION });
+        Object.assign(input.composition.sections[0], { imageSource: "staged-ai", imageIntent: "AI 연출 이미지: 토너 외형과 생활 공간" });
+        Object.assign(input.composition.renderNodes[2], { text: "토너 외형의 생활 공간 연출이며 효과나 세트 전체 구성의 증거가 아닙니다." });
+      }
+      return input;
+    };
+    for (const role of ["thumbnail", "scene"] as const) {
+      const aligned = alignedDecisionInput(role); let calls = 0;
+      aligned.review = async call => {
+        calls++;
+        assertEvidenceFirstCall(call);
+        const schema = call.outputSchema as { properties: { reviews: { items: { properties: Record<string, { type: string; description: string }> } } } };
+        const properties = schema.properties.reviews.items.properties;
+        const prefix = role === "thumbnail" ? "This exact final slot is a thumbnail:" : "This exact final slot is a body image (role=scene):";
+        for (const [key, marker] of [
+          ["accepted", "accepted is the final holistic pixel verdict"],
+          ["identityMatches", "identityMatches concerns the visible identifying brand"],
+          ["photoClaimMatches", "photoClaimMatches concerns what the actual published section text"],
+          ["reason", "Explain the finalized visible evidence"],
+        ]) {
+          assert.ok(properties[key].description.startsWith(prefix));
+          const start = properties[key].description.indexOf(marker);
+          assert.ok(start >= 0);
+          assert.ok(call.userPrompt.split("\n").includes(properties[key].description.slice(start)),
+            `${key} must share identical decision guidance between prompt and schema`);
+        }
+        assert.match(properties.identityMatches.description, /own indexed exact comparison reference/u);
+        assert.match(properties.identityMatches.description, /not with another included serum or a different gallery attachment/u);
+        assert.match(properties.identityMatches.description, /absent or unclear tiny capacity printing alone \(such as 180ml\) is not an identity objection/u);
+        assert.match(properties.identityMatches.description, /Still reject actual readable conflicting capacity\/model\/scent, altered identifying printing/u);
+        assert.match(properties.photoClaimMatches.description, /'Anti-Aging Toner'.*intrinsic label text/u);
+        assert.match(properties.photoClaimMatches.description, /presence alone is not a published claim that the photograph proves an anti-aging result/u);
+        assert.match(properties.photoClaimMatches.description, /It does not establish that efficacy either/u);
+        assert.match(properties.photoClaimMatches.description, /reject unsupported complete-set, quantity, performance or result claims/u);
+        assert.match(properties.accepted.description, /do not leave accepted=false after your final reason retracts every objection/u);
+        assert.match(properties.accepted.description, /state the concrete remaining actual-pixel objection/u);
+        assert.match(properties.accepted.description, /never compel acceptance: a genuine unresolved objection still rejects/u);
+        assert.match(properties.reason.description, /do not invent a mismatch to justify a preset boolean/u);
+        assert.match(call.userPrompt, /Printed text physically present on the real product or package is allowed; added labels and captions are not/u);
+        assert.doesNotMatch(call.userPrompt, /For scene props ONLY|physical-versus-graphic ambiguity/u,
+          "the archived physical-prop exception must not return");
+        if (role === "scene") {
+          assert.match(call.userPrompt, /BODY_NO_ADDED_TEXT: only intrinsic physical product printing is permitted/u);
+          const line = call.userPrompt.split("\n").find(value => value.startsWith("Each attached image"))!;
+          const [slot] = JSON.parse(line.slice(line.indexOf("[")));
+          assert.equal(slot.referenceSha256, hash(original));
+          assert.equal(slot.comparisonReferenceImageIndex, 2);
+          assert.deepEqual(await sharp(call.imagePaths![slot.comparisonReferenceImageIndex - 1]).raw().toBuffer(),
+            await sharp(original).raw().toBuffer(), "the slot's indexed reference must contain its actual bound pixels");
+        }
+        return JSON.stringify({ reviews: [{ ...good, reason: "The visible toner design matches its own reference; tiny capacity is unreadable and not certified. Intrinsic Anti-Aging Toner printing is not a photo-proof claim." }] });
+      };
+      assert.equal((await auditPublishImages(aligned)).ok, true);
+      assert.equal(calls, 1); assertions++;
+    }
+    for (const [role, patch] of [
+      ["thumbnail", { accepted: false, reason: "Branding, readable component headline and photo claims match. [Correction: no photo mismatch is present.]" }],
+      ["scene", { identityMatches: false, reason: "Own toner reference and identifying design match, but 180ml is not readable." }],
+      ["thumbnail", { identityMatches: false, reason: "Readable manufacturer slogan is altered from Allure from basic to Live from basic." }],
+      ["scene", { identityMatches: false, reason: "Readable capacity conflicts with the selected variant." }],
+      ["scene", { identityMatches: false, reason: "The visible capsule serum is compared against the selected toner reference and is a wrong component." }],
+      ["thumbnail", { photoClaimMatches: false, reason: "The actual headline claims this photo proves an anti-aging result." }],
+      ["scene", { photoClaimMatches: false, reason: "The published paragraph falsely certifies that unreadable label text says 180ml." }],
+      ["scene", { accepted: false, reason: "All other checks are favorable, but the required bathroom setting is absent." }],
+      ["scene", { noGraphicLayout: false, reason: "An identifying correct toner is pasted into a graphic frame." }],
+      ["scene", { textPolicyMatches: false, reason: "Added body headline cannot inherit thumbnail permission." }],
+      ["thumbnail", { thumbnailHeadlineLegible: false, reason: "Essential thumbnail words are clipped." }],
+    ] as const) {
+      const adverse = alignedDecisionInput(role); let calls = 0;
+      adverse.review = async call => {
+        calls++;
+        assertEvidenceFirstCall(call);
+        const row = { ...good, ...patch };
+        assert.equal(new Ajv({ allErrors: true }).compile(call.outputSchema as object)({ reviews: [row] }), true,
+          "alignment descriptions must never force a favorable boolean");
+        return JSON.stringify({ reviews: [row] });
+      };
+      const rejected = await auditPublishImages(adverse);
+      assert.equal(rejected.ok, false);
+      assert.equal(rejected.failures[0].code, "SEMANTIC_REJECTION");
+      assert.ok(rejected.failures[0].reason.includes(patch.reason));
+      assert.equal(calls, 1, "a valid adverse answer remains rejected without output reinterpretation or retry"); assertions++;
+    }
+    // Emitting evidence first must not reinterpret an adverse final verdict,
+    // even when the reason retracts its objection. Old-order replies above also
+    // remain compatible with the unchanged parser.
+    for (const patch of [
+      { accepted: false, reason: "Anti-Aging Toner matches Anti-Aging Toner; no contradiction is present." },
+      { identityMatches: false, reason: "Readable identifying design contradicts the exact selected reference." },
+    ]) {
+      const input = alignedDecisionInput("thumbnail"); let calls = 0;
+      input.review = async call => {
+        calls++; assertEvidenceFirstCall(call);
+        const row = { ...good, ...patch };
+        const ordered = Object.fromEntries(evidenceFirstFieldOrder.map(key => [key, row[key as keyof typeof row]]));
+        assert.equal(new Ajv({ allErrors: true }).compile(call.outputSchema as object)({ reviews: [ordered] }), true);
+        return JSON.stringify({ reviews: [ordered] });
+      };
+      const rejected = await auditPublishImages(input);
+      assert.equal(rejected.ok, false);
+      assert.equal(rejected.failures[0].code, "SEMANTIC_REJECTION");
+      assert.ok(rejected.failures[0].reason.includes(patch.reason));
+      assert.equal(calls, 1, "evidence-first negative verdicts must still reject once"); assertions++;
+    }
+    const orderedBatch = options(photo, 2); let orderedBatchCalls = 0;
+    orderedBatch.review = async call => {
+      orderedBatchCalls++; assertEvidenceFirstCall(call);
+      const schema = call.outputSchema as { properties: { reviews: { items: { properties: Record<string, { description?: string }> } } } };
+      assert.match(schema.properties.reviews.items.properties.accepted.description!, /ONLY the assigned role of the exact indexed final slot/u);
+      assert.match(schema.properties.reviews.items.properties.textPolicyMatches.description!, /Body images permit intrinsic product printing only/u);
+      return JSON.stringify({ reviews: [good, { ...good, index: 2 }] });
+    };
+    assert.equal((await auditPublishImages(orderedBatch)).ok, true);
+    assert.equal(orderedBatchCalls, 1, "global field order also survives multi-slot overrides"); assertions++;
+    // Synthetic rasters and stubbed verdicts test the transmitted rubric and
+    // unchanged gate, never assert that a real photograph passes vision QA.
+    const assertBalancedRubric = (call: Parameters<NonNullable<PublishImageAuditOptions["review"]>>[0]) => {
+      assertEvidenceFirstCall(call);
+      assert.match(call.systemPrompt!, /balanced visible-defect threshold/u);
+      const schema = call.outputSchema as { properties: { reviews: { items: { properties: Record<string, { description?: string }> } } } };
+      const acceptedDescription = schema.properties.reviews.items.properties.accepted.description!;
+      for (const text of [call.userPrompt, acceptedDescription]) {
+        assert.match(text, /not a search for ways to improve an otherwise valid photograph/u);
+        assert.match(text, /clearly wrong product\/SKU or selected option/u);
+        assert.match(text, /genuinely unresolved product identity, severe structural distortion/u);
+        assert.match(text, /clearly impossible geometry\/contact\/scale/u);
+        assert.match(text, /explicit forbidden notice\/card\/frame\/panel\/body-text layout/u);
+        assert.match(text, /actual unsupported photographic-proof claim/u);
+        assert.match(text, /Readable invented\/unsupported certification or efficacy copy/u);
+        assert.match(text, /substantive false claim even when it is not an identifying label/u);
+        assert.match(text, /Permit minor lighting, pose, background, reflection and non-identifying texture\/print-spacing variation/u);
+        assert.match(text, /Do not require pixel identity, aesthetic optimization, perfect microtext, or OCR of every tiny capacity\/specification/u);
+        assert.match(text, /Uncertainty confined to such minor differences is not a blocking defect/u);
+        assert.match(text, /Genuine unresolved identity or a concrete forbidden defect still rejects/u);
+      }
+      assert.match(schema.properties.reviews.items.properties.identityMatches.description!, /identifiers obscured enough to leave product identity unresolved/u);
+      assert.match(schema.properties.reviews.items.properties.reason.description!, /Do not propose aesthetic improvements as rejection reasons/u);
+    };
+    for (const [role, reason] of [
+      ["scene", "Identifying product and option match. Minor texture and print-spacing differences do not change identity; tiny capacity is unreadable and not certified."],
+      ["scene", "A slightly different pose, reflection and lighting remain coherent; the preferred background is absent, but no actual published photo-proof claim is contradicted."],
+      ["thumbnail", "Identifiable product, accurate readable headline, minor surface texture and natural lighting variation; no forbidden layout or unsupported proof claim."],
+    ] as const) {
+      const input = alignedDecisionInput(role); let calls = 0;
+      input.review = async call => {
+        calls++; assertBalancedRubric(call);
+        return JSON.stringify({ reviews: [{ ...good, reason }] });
+      };
+      assert.equal((await auditPublishImages(input)).ok, true);
+      assert.equal(calls, 1, "a favorable minor-variation verdict needs no follow-up provider call"); assertions++;
+    }
+    for (const patch of [
+      { identityMatches: false, reason: "Readable identifying capacity says 55ml, conflicting with the selected 100ml serum." },
+      { identityMatches: false, reason: "The product is obscured enough that its design and component identity genuinely remain unresolved." },
+      { accepted: false, reason: "A severely crushed body and structurally warped cap make the depicted product geometry impossible." },
+      { singlePhotograph: false, reason: "The reflected item has a conflicting identifying design and a clearly impossible spatial arrangement." },
+      { notice: true, reason: "A visible delivery closure announcement replaces the product photograph." },
+      { noGraphicLayout: false, reason: "A seller photo is reduced into an explicit frame and explanatory panel." },
+      { textPolicyMatches: false, reason: "An added body headline cannot inherit thumbnail text permission." },
+      { photoClaimMatches: false, reason: "The actual published text says this photograph proves a measured result that its pixels do not show." },
+      { accepted: false, reason: "An otherwise identifiable correct bottle carries a readable fabricated FDA APPROVED certification seal not present in its reference or selected facts." },
+      { accepted: false, reason: "Only minor lighting and texture differ; every criterion is favorable." },
+    ]) {
+      const input = alignedDecisionInput("scene"); let calls = 0;
+      input.review = async call => {
+        calls++; assertBalancedRubric(call);
+        const row = { ...good, ...patch };
+        assert.equal(new Ajv({ allErrors: true }).compile(call.outputSchema as object)({ reviews: [row] }), true,
+          "the balanced rubric keeps real adverse boolean values schema-valid");
+        return JSON.stringify({ reviews: [row] });
+      };
+      const rejected = await auditPublishImages(input);
+      assert.equal(rejected.ok, false);
+      assert.equal(rejected.failures[0].code, "SEMANTIC_REJECTION");
+      assert.ok(rejected.failures[0].reason.includes(patch.reason));
+      assert.equal(calls, 1, "balanced prose must never reinterpret, retry or approve a valid adverse response"); assertions++;
+    }
+    const referenceComparison = {
+      path: original, sha256: hash(original), subject: "fixture selected bottle", geometry: "fixture bottle landmarks",
+      labels: "fixture intrinsic identifying printing", reviewedAt: new Date().toISOString(),
+    };
+    const referenceVerdict = { accepted: true, identityMatches: true, illustrativeOnly: true,
+      checks: Object.fromEntries(REFERENCE_SCENE_REVIEW_CHECKS.map(key => [key, true])),
+      comparisons: Object.fromEntries(["productShape", "intrinsicPrinting", "visibleOption", "sceneContext"].map(key => [key,
+        { result: "consistent", variation: "none", referenceObservation: "fixture identifying features",
+          candidateObservation: "fixture same identifying features", basis: "minor non-identifying spacing or texture does not change design" }])),
+      reason: "Identifying design and option match with minor non-identifying texture and print-spacing variation.",
+    };
+    for (const patch of [
+      {},
+      { accepted: false, reason: "Readable fabricated FDA APPROVED efficacy/certification copy is present on the otherwise matching product." },
+      { identityMatches: false, reason: "Selected product identity genuinely remains unresolved." },
+      { checks: { ...referenceVerdict.checks, surface: false }, reason: "Only minor texture differs; no substantive visible defect remains." },
+      { checks: { ...referenceVerdict.checks, noAddedText: false }, reason: "An added body headline is clearly visible." },
+    ]) {
+      let calls = 0;
+      const operation = () => reviewShoppingReferenceScene({ reference: referenceComparison, outputPath: photo,
+        productName: "fixture selected bottle", imageIntent: "AI 연출 이미지: preferred bathroom background",
+        bodyExcerpt: "상품 외형을 보여주는 연출이며 성능의 증거가 아닙니다.",
+      }, { review: async call => {
+        calls++;
+        assert.match(call.systemPrompt!, /balanced visible-defect threshold/u);
+        const schema = call.outputSchema as { properties: { accepted: { description: string }; checks: { properties: Record<string, { type: string; description: string }> } } };
+        for (const text of [call.userPrompt, schema.properties.accepted.description]) {
+          assert.match(text, /genuinely unresolved identity, severe structural distortion/u);
+          assert.match(text, /Minor lighting, pose, background, reflection and non-identifying surface\/print-spacing variation may pass/u);
+          assert.match(text, /Do not demand pixel identity, perfect microtext or OCR of every tiny capacity/u);
+          assert.match(text, /Readable invented\/unsupported certification or efficacy copy/u);
+          assert.match(text, /Never change an adverse boolean to obtain approval/u);
+        }
+        assert.match(call.userPrompt, /classify those unchanged dimensions as consistent\/none/u);
+        assert.match(call.userPrompt, /Planning intent alone cannot establish that published claim/u);
+        assert.match(schema.properties.checks.properties.noAddedText.description, /Reject added headlines/u);
+        for (const key of REFERENCE_SCENE_REVIEW_CHECKS) assert.equal(schema.properties.checks.properties[key].type, "boolean");
+        const row = { ...referenceVerdict, ...patch };
+        assert.equal(new Ajv({ allErrors: true }).compile(call.outputSchema as object)(row), true);
+        return JSON.stringify(row);
+      } });
+      if (Object.keys(patch).length) await assert.rejects(operation, /REFERENCE_SCENE_FIDELITY_FAILED/u);
+      else assert.equal((await operation()).reviewStatus, "passed");
+      assert.equal(calls, 1, "the reference-scene review also preserves every adverse boolean without retry"); assertions++;
+    }
+    // Execute the real receipt-key path with only an in-memory receipt store
+    // and a stubbed provider. No application data, locks or approval files are
+    // touched; changing the actual rubric must invalidate an otherwise equal
+    // cached request, and stable policy must still reuse its own receipt.
+    const auditorPath = path.resolve("scripts/lib/publish-image-audit.ts");
+    const currentSource = fs.readFileSync(auditorPath, "utf8");
+    const previousPolicySource = currentSource.replace("Final QA uses a balanced visible-defect threshold",
+      "Legacy QA treats even minor photographic variation as a possible defect");
+    assert.notEqual(previousPolicySource, currentSource);
+    const moduleRequire = createRequire(auditorPath);
+    const receipts = new Map<string, string>(); const writtenKeys: string[] = []; let receiptCalls = 0;
+    const loadAudit = (source: string) => {
+      const exports: Record<string, unknown> = {};
+      vm.runInNewContext(ts.transpileModule(source, { compilerOptions: {
+        module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true,
+      } }).outputText, { exports, Buffer, console, setTimeout, process,
+        require: (id: string) => id === "./codex-draft-provider" ? { runCodexDraft: async () => {
+          receiptCalls++; return JSON.stringify({ reviews: [good] });
+        } } : id === "./publish-image-audit-receipt" ? {
+          readSuccessfulImageAuditReceipt: (id: string, key: string) => receipts.get(id) === key,
+          writeSuccessfulImageAuditReceipt: (id: string, key: string) => { receipts.set(id, key); writtenKeys.push(key); },
+          invalidateSuccessfulImageAuditReceipt: (id: string) => { receipts.delete(id); },
+          withSuccessfulImageAuditLock: async (_id: string, operation: () => Promise<unknown>) => operation(),
+        } : moduleRequire(id),
+      });
+      return exports.auditPublishImages as typeof auditPublishImages;
+    };
+    const receiptInput = options(); delete receiptInput.review;
+    receiptInput.brandLinkId = "balanced-policy-offline-fixture";
+    const previousAudit = loadAudit(previousPolicySource), currentAudit = loadAudit(currentSource);
+    assert.equal((await previousAudit(receiptInput)).ok, true);
+    assert.equal((await previousAudit(receiptInput)).receiptReused, true);
+    const changedPolicy = await currentAudit(receiptInput);
+    assert.equal(changedPolicy.ok, true);
+    assert.equal(changedPolicy.receiptReused, false, "a receipt for different actual prompt/schema text must not be reused");
+    assert.equal((await currentAudit(receiptInput)).receiptReused, true);
+    assert.equal(receiptCalls, 2);
+    assert.equal(writtenKeys.length, 2);
+    assert.notEqual(writtenKeys[0], writtenKeys[1], "the actual receipt key binds the balanced rubric"); assertions++;
+    const contradictoryRole = options();
+    Object.assign(contradictoryRole.composition.renderNodes[0], { role: "thumbnail" });
+    contradictoryRole.review = async () => { throw new Error("A body-section thumbnail role must fail before provider"); };
+    assert.equal((await auditPublishImages(contradictoryRole)).failures[0].code, "INVALID_CONTEXT"); assertions++;
+    componentHero.review = async () => {
+      componentHero.imageAssets![0].imageIntent = "Different whole-set intent during review";
+      return JSON.stringify({ reviews: [good] });
+    };
+    assert.equal((await auditPublishImages(componentHero)).failures[0].code, "IMAGE_CHANGED"); assertions++;
+    // Later requests must not mutate an already-reviewed hero's purpose while
+    // leaving the image bytes intact. This reproduces the independent review's
+    // multi-batch counterexample rather than only the current-batch guard.
+    const separateHero = path.join(root, "component-hero.png");
+    fs.copyFileSync(photo, separateHero);
+    const multiBatchIntent = options(photo, 8);
+    multiBatchIntent.composition.renderNodes.unshift({ kind: "image", assetPath: separateHero, sectionId: null, role: "thumbnail",
+      altText: "component exterior", layout: "single", sourcePolicy: "LOCKED_PRODUCT_OR_ORIGINAL" });
+    multiBatchIntent.imageAssets = [{ ...heroAsset, path: separateHero, sourcePath: separateHero }];
+    let purposeCalls = 0;
+    multiBatchIntent.review = async call => {
+      purposeCalls++;
+      if (purposeCalls === 2) multiBatchIntent.imageAssets![0].imageIntent = "Changed after the hero's first batch";
+      return JSON.stringify({ reviews: call.imagePaths!.map((_, index) => ({ ...good, index: index + 1 })) });
+    };
+    const laterMutation = await auditPublishImages(multiBatchIntent);
+    assert.equal(purposeCalls, 2);
+    assert.equal(laterMutation.ok, false);
+    assert.ok(laterMutation.failures.some(failure => failure.nodeIndex === 0 && failure.code === "IMAGE_CHANGED")); assertions++;
     // Reproduce the Cuckoo over-strict policy without pretending a mock is a
     // live visual verdict. These assertions verify the actual provider prompt.
     const cuckoo = options();

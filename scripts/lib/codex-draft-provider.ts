@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getWritingTimeoutPolicy, writingTimeoutMs } from "./writing-timeout-policy";
 import { resolveCodexTextModel, resolveTextReasoningEffort } from "./text-model-policy";
+import { isCodexStreamCompletionLoss } from "../../src/lib/local-automation-error";
 
 type CodexSdkModule = typeof import("@openai/codex-sdk");
 
@@ -18,13 +19,6 @@ export type CodexDraftTerminalFailureCode =
   | "CODEX_MODEL_INCOMPATIBLE"
   | "CODEX_TIMEOUT"
   | "CODEX_TRANSIENT_FAILURE";
-
-const CODEX_TERMINAL_FAILURE_CODES = new Set<CodexDraftTerminalFailureCode>([
-  "CODEX_AUTH_REQUIRED",
-  "CODEX_MODEL_INCOMPATIBLE",
-  "CODEX_TIMEOUT",
-  "CODEX_TRANSIENT_FAILURE",
-]);
 
 interface CodexDraftRetryOptions {
   /** Test hook. Production retries use a short backoff. */
@@ -70,7 +64,7 @@ function errorChain(error: unknown): Array<Record<string, unknown>> {
   return records;
 }
 
-function codexFailureEvidence(error: unknown): { message: string; statuses: number[]; codes: string[]; names: string[] } {
+function codexFailureEvidence(error: unknown): { message: string; messages: string[]; statuses: number[]; codes: string[]; names: string[] } {
   const records = errorChain(error);
   const messages = [error instanceof Error ? error.message : String(error)];
   const statuses: number[] = [];
@@ -87,6 +81,7 @@ function codexFailureEvidence(error: unknown): { message: string; statuses: numb
   }
   return {
     message: Array.from(new Set(messages)).join(" ").replace(/["']/gu, ""),
+    messages,
     statuses,
     codes,
     names,
@@ -111,6 +106,11 @@ export function classifyCodexDraftFailure(error: unknown): CodexDraftFailureKind
   const normalized = evidence.message.toLowerCase();
   const statuses = [...evidence.statuses, ...messageHttpStatuses(evidence.message)];
 
+  // Explicit terminal codes from any cause outrank text in an outer wrapper.
+  if (evidence.codes.includes("CODEX_TIMEOUT")) return "timeout";
+  if (evidence.codes.includes("CODEX_MODEL_INCOMPATIBLE")) return "model-version";
+  if (evidence.codes.includes("CODEX_AUTH_REQUIRED")) return "authentication";
+
   if (
     evidence.names.some((name) => name === "AbortError")
     || evidence.codes.some((code) => code === "ETIMEDOUT" || code === "ABORT_ERR")
@@ -132,6 +132,8 @@ export function classifyCodexDraftFailure(error: unknown): CodexDraftFailureKind
     statuses.some((status) => status === 429 || (status >= 500 && status <= 599))
     || evidence.codes.some((code) => code === "ECONNRESET")
     || /\beconnreset\b/iu.test(normalized)
+    || evidence.codes.includes("CODEX_TRANSIENT_FAILURE")
+    || evidence.messages.some(isCodexStreamCompletionLoss)
   ) return "retryable-transient";
 
   if (/\b(?:timed?\s*out|timeout)\b|시간[^.\n]{0,30}초과/iu.test(normalized)) return "timeout";
@@ -141,18 +143,21 @@ export function classifyCodexDraftFailure(error: unknown): CodexDraftFailureKind
 
 /** Stable public code for a terminal provider failure. */
 export function codexDraftTerminalFailureCode(error: unknown): CodexDraftTerminalFailureCode | null {
-  for (const record of errorChain(error)) {
-    const code = typeof record.code === "string" ? record.code.toUpperCase() : "";
-    if (CODEX_TERMINAL_FAILURE_CODES.has(code as CodexDraftTerminalFailureCode)) {
-      return code as CodexDraftTerminalFailureCode;
-    }
-  }
+  // The classifier gives definitive nested codes precedence over a transient wrapper.
   const kind = classifyCodexDraftFailure(error);
   if (kind === "authentication") return "CODEX_AUTH_REQUIRED";
   if (kind === "model-version") return "CODEX_MODEL_INCOMPATIBLE";
   if (kind === "timeout") return "CODEX_TIMEOUT";
   if (kind === "retryable-transient") return "CODEX_TRANSIENT_FAILURE";
   return null;
+}
+
+/** For mixed API error boundaries, do not infer a provider failure from arbitrary input text. */
+export function codexDraftStructuredFailureCode(error: unknown): CodexDraftTerminalFailureCode | null {
+  const hasProviderCode = errorChain(error).some((record) =>
+    typeof record.code === "string"
+    && /^(?:CODEX_AUTH_REQUIRED|CODEX_MODEL_INCOMPATIBLE|CODEX_TIMEOUT|CODEX_TRANSIENT_FAILURE)$/u.test(record.code.toUpperCase()));
+  return hasProviderCode ? codexDraftTerminalFailureCode(error) : null;
 }
 
 function terminalCodexDraftError(
@@ -189,6 +194,38 @@ export async function runCodexDraftWithRetry<T>(
     }
   }
   throw new Error("Codex retry loop ended unexpectedly.");
+}
+
+/** Exec may emit its internal reconnect progress as a top-level error while the turn still runs. */
+export async function collectCodexDraftResponse(
+  events: AsyncIterable<import("@openai/codex-sdk").ThreadEvent>,
+  onProgress?: (message: string) => void,
+): Promise<string> {
+  let finalResponse = "";
+  let completed = false;
+  let reconnectError: Error | undefined;
+  for await (const event of events) {
+    if (event.type === "item.completed" && event.item.type === "agent_message") {
+      finalResponse = event.item.text.trim() || finalResponse;
+      onProgress?.("Codex 원고 응답 수신");
+    } else if (event.type === "turn.completed") {
+      completed = true;
+    } else if (event.type === "turn.failed") {
+      throw new Error(event.error.message || "Codex 원고 작성이 실패했습니다.");
+    } else if (event.type === "error") {
+      const message = event.message || "Codex 실행 중 오류가 발생했습니다.";
+      const progress = /^Reconnecting\.\.\. ([1-9]\d*)\/([1-9]\d*) \(/u.exec(message);
+      if (progress && Number(progress[1]) <= Number(progress[2]) && isCodexStreamCompletionLoss(message)) {
+        reconnectError = new Error(message);
+        onProgress?.("Codex 내부 연결 복구 중 · 현재 요청의 완료를 기다립니다.");
+        continue;
+      }
+      throw new Error(message);
+    }
+  }
+  if (!completed) throw reconnectError || new Error("Codex 스트림이 turn.completed 없이 종료되었습니다.");
+  if (!finalResponse) throw new Error("Codex 응답에서 원고 본문을 찾지 못했습니다.");
+  return finalResponse;
 }
 
 function readableImages(imagePaths: string[], requestedMaximum = 4, preserveOrder = false): string[] {
@@ -289,23 +326,11 @@ export async function runCodexDraft(options: CodexDraftOptions): Promise<string>
         webSearchMode: researchMode,
         threadSource: "blogautomcp-draft",
       });
-      let finalResponse = "";
       const { events } = await thread.runStreamed(input, {
         signal: controller.signal,
         ...(options.outputSchema ? { outputSchema: options.outputSchema } : {}),
       });
-      for await (const event of events) {
-        if (event.type === "item.completed" && event.item.type === "agent_message") {
-          finalResponse = event.item.text.trim() || finalResponse;
-          options.onProgress?.("Codex 원고 응답 수신");
-        } else if (event.type === "turn.failed") {
-          throw new Error(event.error.message || "Codex 원고 작성이 실패했습니다.");
-        } else if (event.type === "error") {
-          throw new Error(event.message || "Codex 실행 중 오류가 발생했습니다.");
-        }
-      }
-      if (!finalResponse) throw new Error("Codex 응답에서 원고 본문을 찾지 못했습니다.");
-      return finalResponse;
+      return collectCodexDraftResponse(events, options.onProgress);
     }, {
       canRetry: () => !controller.signal.aborted,
       onRetry: () => options.onProgress?.("Codex 일시 오류 감지 · 동일 Codex 경로로 1회 재시도"),

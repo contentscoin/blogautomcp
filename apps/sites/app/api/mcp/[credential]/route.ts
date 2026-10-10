@@ -25,7 +25,7 @@ const LEGACY_PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26'] as const;
 const SUPPORTED_PROTOCOLS = [MODERN_PROTOCOL, ...LEGACY_PROTOCOLS] as const;
 const RESPONSE_HEADERS = { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff' };
 const CONNECT_KINDS = ['shopping', 'travel'];
-const SERVER_INFO = { name: 'BlogAutoMCP', version: '1.3.15' };
+const SERVER_INFO = { name: 'BlogAutoMCP', version: '1.3.16' };
 const SERVER_INSTRUCTIONS = [
   '요청이 완료되거나 실제 진행 불가 사유가 확인될 때까지 수행하세요. QUEUED/RUNNING, 동일 진행률, 긴 소요 시간은 중단 사유가 아닙니다. 같은 jobId로 job_get(waitMs=20000)을 반복하세요. 통신 시간 초과는 작업 실패가 아닙니다. 성공 결과를 읽고 요청 범위 안의 다음 단계를 이어가세요. 사용자 취소·필수 승인 대기는 존중하고 불확실한 발행을 중복 실행하거나 검수를 우회하지 마세요.',
   '진행 확인은 job_get(includeResult=false)로 조회하고 pollAfterMs만큼 기다리세요. 완료된 큰 결과가 잘리면 job_result_read를 offset=0부터 nextOffset까지 이어서 읽으세요. AGENT_LOST_UNCERTAIN은 자동 재실행하지 말고 발행 여부부터 확인하세요.',
@@ -57,6 +57,7 @@ interface ToolDefinition {
   description: string;
   inputSchema: JsonSchema;
   outputSchema?: JsonSchema;
+  _meta?: Record<string, unknown>;
   annotations: { readOnlyHint: boolean; destructiveHint: boolean; idempotentHint: boolean; openWorldHint: boolean };
   /** 큐 작업 타입. 없으면 사이트가 동기 처리한다. */
   jobType?: string;
@@ -78,6 +79,14 @@ const DRAFT_CONTEXT_INPUT: JsonSchema = { type: 'object', properties: { connectK
 const THUMBNAIL_LAYOUTS = ['auto', 'clean-editorial', 'color-block', 'soft-lifestyle', 'cinematic', 'emotional-record', 'route'];
 
 const TOOLS: ToolDefinition[] = [
+  {
+    name: 'account_get_profile', title: '연결된 내 계정 확인',
+    description: '현재 인증된 연결의 계정을 확인합니다. 반환 ID는 재로그인·토큰 갱신에도 유지되는 계정 식별자입니다. 다른 계정이나 PC를 선택하지 않습니다.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    outputSchema: { type: 'object', properties: { id: { type: 'string', minLength: 1, pattern: '\\S' }, name: { type: 'string' }, email: { type: 'string' } }, required: ['id'], additionalProperties: false },
+    _meta: { 'openai/profile': true },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
   {
     name: 'bug_report_create', title: '오류 리포트 접수',
     description: '사용자가 오류 신고를 요청할 때 관리자에게 리포트를 저장하고 텔레그램으로 전달합니다. 전송 내용에 동의한 경우에만 confirmed=true. jobId가 있으면 본인 작업의 오류 요약과 앱 버전을 첨부합니다. PC 파일은 자동 수집하지 않습니다. details에는 필요한 오류 부분만 넣고 토큰, 쿠키, 개인정보, 원고 전문은 넣지 마세요. 같은 신고 재시도는 같은 idempotencyKey를 사용하세요.',
@@ -475,6 +484,7 @@ function publicTool(tool: ToolDefinition) {
     inputSchema: tool.inputSchema,
     ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
     annotations: tool.annotations,
+    ...(tool._meta ? { _meta: tool._meta } : {}),
     securitySchemes: [{ type: 'oauth2', scopes: [requiredScope(tool)] }],
   };
 }
@@ -683,6 +693,11 @@ async function callTool(userId: string, name: string, rawArgs: JsonObject) {
     return toolPayload(result, !result.ok);
   }
 
+  if (name === 'account_get_profile') {
+    const profile = await d1.prepare(`SELECT id,email,display_name AS name FROM users WHERE id=? AND status='APPROVED' AND role IN ('USER','ADMIN') LIMIT 1`).bind(userId).first<{ id: string; email: string; name: string | null }>();
+    if (!profile) return toolPayload({ ok: false, code: 'NOT_APPROVED', message: '승인된 연결 계정을 확인할 수 없습니다.' }, true);
+    return toolPayload({ id: profile.id, email: profile.email, ...(profile.name ? { name: profile.name } : {}) });
+  }
   if (name === 'agent_get_status') {
     const now = Date.now();
     await sweepExpiredLeases(d1, userId, now);
@@ -931,7 +946,7 @@ export async function POST(request: Request, context: { params: Promise<{ creden
   return handleMcpRequest(request, connection.userId, 'mcp:read mcp:write', `mcp:call:${split.endpointId}`);
 }
 
-export async function handleMcpRequest(request: Request, userId: string, oauthScope: string, rateLimitKey = `mcp:call:user:${userId}`) {
+export async function handleMcpRequest(request: Request, userId: string, oauthScope: string, rateLimitKey = `mcp:call:user:${userId}`, onOAuthRead?: (tool: string, jobId: string | null) => Promise<void>) {
   if (!validOrigin(request)) return rpcError(null, -32000, 'Invalid Origin.', 403);
   const contentType = request.headers.get('content-type') || '';
   if (!contentType.toLowerCase().includes('application/json')) return rpcError(null, -32700, 'Content-Type must be application/json.', 415);
@@ -1007,6 +1022,14 @@ export async function handleMcpRequest(request: Request, userId: string, oauthSc
         return rpcError(id, -32602, 'Tool arguments must be an object.');
       }
       const result = await callTool(userId, name, asObject(params.arguments));
+      if (onOAuthRead && tool.annotations.readOnlyHint && !result.isError && !['FAILED', 'CANCELLED'].includes(String(result.structuredContent.status))) {
+        try {
+          await onOAuthRead(name, tool.jobType && typeof result.structuredContent.jobId === 'string' ? result.structuredContent.jobId : null);
+        } catch {
+          // Verification telemetry must not turn an accepted job into a retry.
+          console.error('MCP connection verification evidence unavailable');
+        }
+      }
       return rpcResult(id, modern ? completeResult(result) : result);
     }
     return rpcError(id, -32601, 'Method not found', modern ? 404 : 200);

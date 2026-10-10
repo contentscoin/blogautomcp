@@ -69,7 +69,11 @@ const shopping = buildBrandPostImagePrompt({ connectKind: "SHOPPING", productNam
 assert.match(shopping, /natural, believable lifestyle photograph/u);
 assert.match(shopping, /욕실 선반/u, "actual template setting is forwarded");
 assert.match(shopping, /INPUT 1 is authoritative/u, "actual seller reference governs product geometry");
-assert.match(shopping, /Preserve any actual visible label hierarchy/u);
+assert.match(shopping, /Preserve actual intrinsic label hierarchy/u, "visible product identity and intrinsic print remain authoritative");
+assert.match(shopping, /not seller artwork around the product/u, "seller badges must not become invented product labels");
+assert.match(shopping, /Tiny non-identifying lower print may be naturally unreadable/u, "ordinary camera legibility is not a product mismatch");
+assert.match(shopping, /never invent or sharpen unreadable text, numbers, volume, certifications or extra brands/u,
+  "unreadable print must not be replaced with invented product facts");
 assert.doesNotMatch(shopping, /Generate the environment only|distinct viewpoint/u);
 assert.doesNotMatch(shopping, /pores|pupils|likeable/u, "no face layers on a background cut");
 const travel = buildBrandPostImagePrompt({ connectKind: "TRAVEL", productName: "대마도 2일", sectionTitle: "히타카츠 항구", imageIntent: "항구 풍경", role: "body", variantIndex: 1 });

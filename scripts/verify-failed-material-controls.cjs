@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const ts = require('typescript');
+const { loadClientDisplay } = require('./lib/client-display-fixture.cjs');
 
 const nodes = value => value == null || typeof value !== 'object' ? [] : Array.isArray(value) ? value.flatMap(nodes) : [value, ...nodes(value.props?.children)];
 const text = value => value == null ? '' : typeof value !== 'object' ? String(value) : Array.isArray(value) ? value.map(text).join('') : text(value.props?.children);
@@ -20,10 +21,10 @@ function harness({ source = 'MaterialLibrary', storage = new Map(), onFetch, ini
     useCallback(callback) { cursor++; return callback; },
     useEffect(effect, deps) { const index = cursor++; const previous = effectDeps[index]; if (!previous || !deps || deps.some((value, n) => !Object.is(value, previous[n]))) { effectDeps[index] = deps; effects.push(effect); } },
   };
-  const jsx = (type, props) => ({ type, props: props || {} });
+  const jsx = (type, props) => typeof type === 'function' ? type(props || {}) : ({ type, props: props || {} });
   const testModule = { exports: {} };
   const context = vm.createContext({
-    module: testModule, exports: testModule.exports, require: name => name === 'react' ? react : name === 'next/link' ? { default: 'a' } : { jsx, jsxs: jsx },
+    module: testModule, exports: testModule.exports, require: name => name === 'react' ? react : name === 'next/link' ? { default: 'a' } : name === '../lib/material-job-display' ? loadClientDisplay('src/lib/material-job-display.ts', () => ({ jsx, jsxs: jsx })) : name === './MaterialJobItemResult' ? loadClientDisplay('src/components/MaterialJobItemResult.tsx', () => ({ jsx, jsxs: jsx })) : { jsx, jsxs: jsx },
     localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
     crypto: { randomUUID: () => { uuidCount++; return `00000000-0000-4000-8000-${String(uuidCount).padStart(12, '0')}`; } },
     Date, console, setInterval: () => 1, clearInterval() {},
@@ -97,7 +98,8 @@ const repairRetryButton = tree => nodes(tree).find(node => node.type === 'button
   {
     const h = harness({ initialList: list({ jobs: [inconsistent] }) }); const tree = await h.mount();
     assert(text(tree).includes('검증 통과 1/2개 · 실패 1개 · 검증 확인 필요'));
-    assert(text(tree).includes('검증 실패 (CONTENT_READINESS_FAILED)'));
+    assert(text(tree).includes('이 작업 당시 실패 사유 · CONTENT_READINESS_FAILED'));
+    assert(text(tree).includes('검증 실패'));
   }
   for (const history of [false, true]) {
     const shown = history ? inconsistent : { ...inconsistent, status: 'running' };
@@ -179,6 +181,20 @@ const repairRetryButton = tree => nodes(tree).find(node => node.type === 'button
       assert(text(tree).includes(status === 'empty' ? '보완 대상 없음' : status === 'partial' ? '일부 검증 완료' : status === 'completed' ? '검증 확인 필요' : '진행 중'));
       if (status !== 'empty') assert(text(tree).includes('검증 통과 1'));
     }
+  }
+  for (const source of ['MaterialLibrary', 'MaterialJobProgress']) {
+    const restored = { productId: 'failed_product', title: '복구한 한우', revision: 'current', status: 'READY', ready: true, approvedAt: 'approved', score: 100, imageCount: 5, blockers: [] };
+    const historical = job({ status: 'failed', items: [{ productId: 'failed_product', status: 'failed', stage: '확인 필요', error: 'previous failed image', errorCode: 'IMAGE_OUTPUT_AMBIGUOUS' }] });
+    const h = harness({ source, history: true, initialList: list({ jobs: [historical], materials: [restored] }) });
+    const tree = await h.mount();
+    assert(text(tree).includes('현재 준비완료 1/1'));
+    assert(text(tree).includes('현재 준비완료 · 검증·승인 완료'));
+    assert(text(tree).includes('이후 복구 완료'));
+    assert(text(tree).includes('previous failed image'), 'prior audit evidence is retained');
+    const priorFailure = nodes(tree).find(node => node.type === 'details' && text(node).includes('이 작업 당시 실패 사유'));
+    assert(priorFailure); assert(!priorFailure.props.open, 'old failure is collapsed instead of presented as current blocker');
+    assert.equal(h.requests.filter(item => item.init?.method === 'POST').length, 0);
+    assert.equal(historical.status, 'failed');
   }
   console.log('PASS: rewrite and repair buttons, server targets, stable request/reload recovery, shared mutation guard, truthful verification counts/history; no provider or publication calls');
 })().catch(error => { console.error(error); process.exitCode = 1; });

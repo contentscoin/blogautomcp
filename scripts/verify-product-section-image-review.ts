@@ -1,5 +1,6 @@
 import { publicationImageGeometryIssue } from "./lib/publication-image-geometry";
 import * as unbrandedProduct from "./lib/unbranded-product";
+import * as productImageVisualContract from "./lib/product-image-visual-contract";
 import { testPngFixture } from "./lib/test-png-fixture";
 /** Offline section-image evidence gate regression checks. */
 import assert from "node:assert/strict";
@@ -12,6 +13,7 @@ import ts from "typescript";
 import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene, type BrandPostImageSourceHint } from "../src/lib/brand-post-image-evidence";
 import type { ProductSectionImageDiagnostics, ProductSectionImageReviewOptions } from "./lib/product-photo-review";
 import { auditSectionProposals } from "./lib/product-section-proposal-audit";
+import type { PublishImageAuditOptions } from "./lib/publish-image-audit";
 
 interface ReviewModule {
   allowsGenericProductPhoto(target: { sectionTitle: string; imageIntent: string }): boolean;
@@ -35,6 +37,7 @@ type ReviewCall = { userPrompt: string; imagePaths: string[]; maxImages?: number
 function loadReview(answer: string | ((options: ReviewCall, callIndex: number) => string)) {
   let prompt = "";
   const calls: ReviewCall[] = [];
+  const auditCalls: PublishImageAuditOptions[] = [];
   const source = fs.readFileSync(path.resolve("scripts/lib/product-photo-review.ts"), "utf8");
   const code = ts.transpileModule(source, {
     compilerOptions: {
@@ -53,9 +56,9 @@ function loadReview(answer: string | ((options: ReviewCall, callIndex: number) =
       // Semantic failures/auth/round bounds are covered by verify-product-proposal-audit.
       if (name === "./product-section-proposal-audit") return {
         auditSectionProposals: (options: Parameters<typeof auditSectionProposals>[0]) => auditSectionProposals({ ...options,
-          audit: async ({ composition }) => ({ ok: true, checked: composition.sections.length, failures: [],
+          audit: async (input) => { auditCalls.push(input); const { composition } = input; return { ok: true, checked: composition.sections.length, failures: [],
             images: composition.renderNodes.flatMap((node, nodeIndex) => node.kind === "image" ? [{ nodeIndex,
-              assetPath: node.assetPath, sha256: crypto.createHash("sha256").update(fs.readFileSync(node.assetPath)).digest("hex") }] : []) }),
+              assetPath: node.assetPath, sha256: crypto.createHash("sha256").update(fs.readFileSync(node.assetPath)).digest("hex") }] : []) }; },
         }),
       };
       if (name === "node:fs") return fs;
@@ -71,12 +74,13 @@ function loadReview(answer: string | ((options: ReviewCall, callIndex: number) =
         allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene,
       };
       if (name === "./unbranded-product") return unbrandedProduct;
+      if (name === "./product-image-visual-contract") return productImageVisualContract;
       throw new Error(`Unexpected dependency: ${name}`);
     },
     process,
     Buffer,
   }, { filename: "scripts/lib/product-photo-review.ts" });
-  return { review: loadedModule.exports as ReviewModule, calls, get prompt() { return prompt; } };
+  return { review: loadedModule.exports as ReviewModule, calls, auditCalls, get prompt() { return prompt; } };
 }
 
 async function main() {
@@ -101,7 +105,9 @@ async function main() {
     await bodyAware.review.selectVerifiedProductSectionImages([candidate], "fixture", [{ ...featureTarget, sectionBody: body }]);
     assert.match(bodyAware.prompt, /촉촉한 수분 공급/);
     assert.match(bodyAware.prompt, /실제 발행 문장/);
-    assert.match(bodyAware.prompt, /같은 상품의 다른 효능/);
+    assert.match(bodyAware.prompt, /실제 발행 문장의 기능과 다른 효능/);
+    assert.match(bodyAware.prompt, /"purpose":"feature-evidence"/);
+    assert.match(bodyAware.prompt, /"claimPolicy":"direct-requested-feature"/);
     await bodyAware.review.selectVerifiedProductSectionImages([candidate], "fixture", [{ ...featureTarget, sectionBody: ["보송한 마무리 기준입니다."] }]);
     assert.equal(bodyAware.calls.length, 2, "body edits invalidate section review cache");
     const selected = JSON.stringify({ name: "fixture", optionFacts: ["색상: 화이트"] });
@@ -225,6 +231,27 @@ async function main() {
     const originalPackshot = loadReview('{"assignments":[{"targetIndex":1,"selectedIndex":1,"reviewClass":"product-photo","reason":"흰 배경에 전체 상품이 보이는 원본 사진"}]}');
     assert.equal((await originalPackshot.review.selectVerifiedProductSectionImages([candidate], "꽃게", [sceneTarget])).length, 1,
       "an explicit original slot accepts a plain seller photo as well as an original lifestyle scene");
+    assert.equal(originalPackshot.auditCalls[0].composition.sections[0].imageSource, "seller-original",
+      "source review normalization and proposal assembly preserve the explicit original policy for the final pixel gate");
+    const shokzBody = ["수영에서는 MP3 모드를 사용하고, 지상에서는 블루투스로 연결할 수 있습니다."];
+    const shokzProduct = JSON.stringify({ name: "샥즈 오픈스윔 프로", optionFacts: ["색상: 오렌지", "저장공간: 32GB"] });
+    const shokzTarget = { sectionTitle: "수영과 지상에서 쓰는 MP3·블루투스 기준", sectionBody: shokzBody,
+      imageIntent: "판매페이지 원본 상품 사진: 선택한 상품·옵션의 외형 확인", imageSource: "seller-original" as const };
+    const shokzOriginal = loadReview('{"assignments":[{"targetIndex":1,"selectedIndex":1,"reviewClass":"product-photo","reason":"선택한 오렌지 상품 외형이 보이는 자연스러운 사진"}]}');
+    assert.equal((await shokzOriginal.review.selectVerifiedProductSectionImages([candidate], "샥즈 오픈스윔 프로", [shokzTarget], { selectedProduct: shokzProduct })).length, 1,
+      "a seller exterior photo beside technical prose need not depict every swimming, land, MP3 and Bluetooth use");
+    const shokzLine = shokzOriginal.prompt.split("\n").find(line => line.startsWith("본문 파트 목록:"))!;
+    const shokzSlots = JSON.parse(shokzLine.slice(shokzLine.indexOf("[")));
+    assert.equal(shokzSlots[0].visualContract.purpose, "product-appearance");
+    assert.equal(shokzSlots[0].visualContract.claimPolicy, "visual-compatibility-and-explicit-photo-claims");
+    assert.equal(shokzSlots[0].visualContract.demonstrateEveryParagraphFeature, false);
+    assert.equal(shokzSlots[0].visualContract.identityAndVisibleOptionMustMatch, true);
+    assert.equal(shokzSlots[0].visualContract.photoMustNotClaimUnseenPerformance, true);
+    assert.deepEqual(shokzSlots[0].sectionBody, shokzBody);
+    assert.ok(shokzOriginal.prompt.includes(shokzProduct), "the exact selected option remains part of source review");
+    assert.deepEqual(shokzOriginal.auditCalls[0].composition.sections[0].body, shokzBody,
+      "source proposal passes the unchanged technical paragraph to the final pixel gate");
+    assert.equal(shokzOriginal.auditCalls[0].selectedProduct, shokzProduct);
     const originalFeature = loadReview('{"assignments":[{"targetIndex":1,"selectedIndex":1,"reviewClass":"feature-evidence","reason":"설명 카드"}]}');
     assert.equal((await originalFeature.review.selectVerifiedProductSectionImages([candidate], "꽃게", [sceneTarget])).length, 0,
       "an original photography slot must not be filled by a feature card");
