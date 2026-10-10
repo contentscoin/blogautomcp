@@ -19,4 +19,12 @@ The October 10 report contains four historical prepare/repair jobs and 19 distin
 - Strict reference responses: 17 malformed first-stage and 47 malformed second-stage cases, uncached invalid retries, valid negative cache and bounded candidate selection passed. Source recovery, natural reference selection/gates and Codex structured-output provider checks passed without paid calls.
 - Read-only checks of 6 actual legacy jobs verified exact completed thread/native/raw output identity without changing files. Three affected products can enter resume-v2.
 
-Release and live repair results will be recorded after installer integrity checks and the normal desktop update complete. No blog publication or reservation is part of this repair.
+## Release verification
+
+- [CI 38041306996](https://github.com/contentscoin/blogautomcp/actions/runs/38041306996), code head `69547cd`: root and Sites typecheck, lint, complete unit checks and production builds passed. The initial CI detected two outdated prompt-string fixtures; their assertions now cover intrinsic product printing, seller-artwork exclusion and the no-invented-print rule, and the rerun passed.
+- Final Windows production build and NSIS packaging completed. Eleven modified runtime files in the unpacked package match source SHA exactly. Electron's packaged metadata has the expected version/main after normal dependency/script pruning. Root `.env` and temporary diagnostic scripts are excluded.
+- Isolated packaged-app update test passed: authenticated metadata and installer download, isolated cache, Prisma engine, local UI, manual check and relaunch. Fixture installation was disabled.
+- Installer: `BrandConnect-Automation-Setup-1.3.106.exe`, 345496939 bytes; SHA256 `e85af8305a8af795f8d5866e70e03d14ae89b87393016f9085994c64f55e30db`. Blockmap: 352592 bytes. Local SHA512/manifest and central metadata match.
+- Existing Sites Windows update channel activated 1.3.106 at `2026-10-10T09:30:26.069Z`; authenticated re-query confirmed the release. This change does not require redeploying the Sites server runtime.
+
+Normal automatic installation completed: the running PC reported 1.3.106 and all eleven changed runtime files matched the released package. The explicit six-item repair job terminated with six failures. Five were comparison schema/parser mismatches diagnosed in [the 1.3.107 follow-up](material-recovery-1.3.107.md); Dalba additionally required correcting an unverified photo-label assertion and resolving its source coverage. No blog publication or reservation is part of this repair.

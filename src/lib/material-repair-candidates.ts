@@ -2,7 +2,7 @@ import fs from "node:fs";
 import { prisma } from "./db";
 import { getMaterial } from "./material-library";
 import { readBrandPostPackage } from "./brand-post-package";
-import { readPublishAttempt } from "./publish-attempt";
+import { readPublishAttempt, type PublishAttempt } from "./publish-attempt";
 import { listMaterialJobs, type MaterialJob } from "./material-job-store";
 import type { FailedMaterialProduct, MaterialConnectKind } from "./material-failed-candidates";
 
@@ -20,33 +20,41 @@ export function hasSavedMaterialDraft(productId: string): boolean {
 
 const definitivePublicationFailures = new Set(["MATERIAL_NOT_READY", "MATERIAL_CHANGED", "PUBLISH_FAILED", "INVALID_INPUT", "CONTENT_BLOCKED", "DRAFT_REQUIRED"]);
 const uncertainFailure = (value?: string) => Boolean(value && /(?:UNKNOWN|UNCERTAIN)/u.test(value));
+type RepairPublicationAttempt = { stage: string } & Pick<PublishAttempt, "submittedAt" | "confirmedAt" | "evidence">;
+const hasSubmissionEvidence = (attempt: RepairPublicationAttempt) => attempt.submittedAt !== undefined || attempt.confirmedAt !== undefined ||
+  (attempt.evidence !== undefined && (!attempt.evidence || typeof attempt.evidence !== "object" || Array.isArray(attempt.evidence) ||
+    ["postUrl", "reservationId", "scheduledDate"].some(key => Object.hasOwn(attempt.evidence!, key))));
 
 export function selectMaterialRepairCandidates(products: FailedMaterialProduct[], jobs: MaterialJob[], deps: {
   material: (id: string) => { ready: boolean; revision: string; blockers: string[]; imageGeneration?: { status: string; recoveryState?: string } | null } | null;
   savedDraft: (id: string) => boolean;
-  publicationAttempt: (id: string) => { stage: string } | null;
+  publicationAttempt: (id: string) => RepairPublicationAttempt | null;
 }, connectKind?: MaterialConnectKind): MaterialRepairCandidate[] {
   const latest = new Map<string, { job: MaterialJob; item: MaterialJob["items"][number] }>();
-  const publication = new Map<string, MaterialJob["items"][number]>();
+  const unsafePublication = new Set<string>();
   for (const job of [...jobs].sort((a, b) => b.startedAt.localeCompare(a.startedAt))) {
     for (const item of job.items) {
       if (!latest.has(item.productId)) latest.set(item.productId, { job, item });
-      if (job.kind === "publish" && !publication.has(item.productId)) publication.set(item.productId, item);
+      // A later failed publication does not undo an older reservation or
+      // establish that an earlier uncertain submission never reached Naver.
+      if (job.kind === "publish" && (item.status !== "failed" || !definitivePublicationFailures.has(item.errorCode || "") ||
+        uncertainFailure(item.errorCode) || uncertainFailure(item.causeCode))) unsafePublication.add(item.productId);
     }
   }
   return products.flatMap(product => {
     if (connectKind && product.connectKind !== connectKind) return [];
-    if (!["READY", "FAILED"].includes(product.status) || product.postUrl || product.publishedAt || product.scheduledPublishAt) return [];
+    // scheduledPublishAt also stores a plan before Naver submission. Preserve
+    // that date; status, publication history and the attempt receipt below
+    // determine whether an actual or uncertain reservation blocks repair.
+    if (!["READY", "FAILED"].includes(product.status) || product.postUrl || product.publishedAt) return [];
     const previous = latest.get(product.id);
     if (previous && (["queued", "preparing", "publishing", "outcome_unknown"].includes(previous.item.status) ||
       uncertainFailure(previous.item.errorCode) || uncertainFailure(previous.item.causeCode) ||
       ["APP_INTERRUPTED", "WORKFLOW_TIMEOUT"].includes(previous.item.errorCode || ""))) return [];
-    const published = publication.get(product.id);
-    if (published && (published.status !== "failed" || !definitivePublicationFailures.has(published.errorCode || "") ||
-      uncertainFailure(published.errorCode) || uncertainFailure(published.causeCode))) return [];
+    if (unsafePublication.has(product.id)) return [];
     try {
       const attempt = deps.publicationAttempt(product.id);
-      if (attempt && attempt.stage !== "FAILED_BEFORE_SUBMIT") return [];
+      if (attempt && (attempt.stage !== "FAILED_BEFORE_SUBMIT" || hasSubmissionEvidence(attempt))) return [];
       if (!deps.savedDraft(product.id)) return [];
       const material = deps.material(product.id);
       if (!material || material.ready || !material.blockers.length || !/^[a-f0-9]{64}$/.test(material.revision) ||

@@ -14,16 +14,22 @@ const ALLOWED_VARIATIONS = {
   visibleOption: ["main-item-only", "viewpoint-or-pose"],
   sceneContext: ["lighting-or-context", "external-seller-artwork", "detached-styling-props", "viewpoint-or-pose", "camera-distance"],
 } as const;
+const comparisonBranch = (results: readonly string[], variations: readonly string[]) => ({
+  type: "object",
+  properties: {
+    result: { type: "string", enum: results }, variation: { type: "string", enum: variations },
+    referenceObservation: { type: "string" }, candidateObservation: { type: "string" }, basis: { type: "string" },
+  },
+  required: ["result", "variation", "referenceObservation", "candidateObservation", "basis"], additionalProperties: false,
+});
 const COMPARISON_SCHEMA = {
   type: "object",
+  // Independent enums allowed consistent+viewpoint-or-pose on the wire even
+  // though the strict parser rejected it. Nested anyOf enforces the same pairs.
+  // https://developers.openai.com/api/docs/guides/structured-outputs
   properties: Object.fromEntries(COMPARISON_DIMENSIONS.map(key => [key, {
-    type: "object",
-    properties: {
-      result: { type: "string", enum: ["consistent", "allowed-variation", "contradiction", "unverifiable"] },
-      variation: { type: "string", enum: ["none", ...ALLOWED_VARIATIONS[key]] },
-      referenceObservation: { type: "string" }, candidateObservation: { type: "string" }, basis: { type: "string" },
-    },
-    required: ["result", "variation", "referenceObservation", "candidateObservation", "basis"], additionalProperties: false,
+    anyOf: [comparisonBranch(["consistent", "contradiction", "unverifiable"], ["none"]),
+      comparisonBranch(["allowed-variation"], ALLOWED_VARIATIONS[key])],
   }])),
   required: COMPARISON_DIMENSIONS, additionalProperties: false,
 };
@@ -188,6 +194,8 @@ export async function reviewShoppingReferenceScene(options: {
       "Identity recognition is not shape fidelity. Do not treat a polished render as realism or certify exact pixel identity. Natural wearing/holding/ordinary lifestyle activity may pass; performance demonstrations, unsupported effects or invented included accessories fail. Inspect naturalScene for a believable camera photo with plausible anatomy/material/contact; singleScene must reject collage, repeated original, duplicate panels or inset photos.",
       "noAddedText must reject every added headline, explanation, annotation, caption, arrow, label or banner (actual product branding is allowed). noFramesOrPanels must reject a framed seller photo, border, colored fact panel, explanatory layout, editorial card, slide or diagram. A recognizable correct product inside a card still fails. All disclosure and explanations must be outside the photo.",
       `Before the final checks, supply comparisons for ${COMPARISON_DIMENSIONS.join(", ")}. Each contains result=consistent|allowed-variation|contradiction|unverifiable, variation=none except an allowed-variation, referenceObservation, candidateObservation and basis. Allowed variation types by dimension: ${JSON.stringify(ALLOWED_VARIATIONS)}. Explain observed landmarks, what actually differs and why it is allowed or contradicts design. Never mark a contradiction/unverifiable dimension accepted. Do not turn a genuine failed check into true based on an allowed difference elsewhere.`,
+      'Use only correlated result/variation pairs: consistent, contradiction and unverifiable MUST have variation="none". If there is an allowed photographic or contextual difference, use result="allowed-variation" and that dimension\'s allowed variation, even when product identity is consistent. The result classifies the comparison, not merely whether it is the same product. Never return consistent with a non-none variation, or allowed-variation with none.',
+      'Examples: same intrinsic print with naturally unreadable tiny non-identifying copy → intrinsicPrinting {"result":"allowed-variation","variation":"nonessential-print-legibility"}; same physical shape seen in another pose → productShape {"result":"allowed-variation","variation":"viewpoint-or-pose"}; one verified main component when the section does not claim the complete set → visibleOption {"result":"allowed-variation","variation":"main-item-only"}. If no relevant difference exists, use {"result":"consistent","variation":"none"}. A real design/label/option contradiction must use {"result":"contradiction","variation":"none"}, not an allowed variation. Every example still requires all three nonempty observed-evidence strings.',
       `Return {"accepted":true,"identityMatches":true,"illustrativeOnly":true,"comparisons":{${COMPARISON_DIMENSIONS.map(key => `"${key}":{"result":"consistent","variation":"none","referenceObservation":"specific observed features","candidateObservation":"specific observed features","basis":"comparison and any uncertainty"}`).join(",")}},"checks":{${SCENE_FIDELITY_CHECKS.map(key => `"${key}":true`).join(",")}},"reason":"specific comparison including remaining differences"}. Every boolean, every comparison and all ${SCENE_FIDELITY_CHECKS.length} checks are required.`,
     ].join("\n"),
     imagePaths: [options.reference.path, options.outputPath], maxImages: 2, preserveImageOrder: true, researchMode: "disabled",

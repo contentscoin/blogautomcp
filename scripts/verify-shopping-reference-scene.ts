@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
+import Ajv from "ajv";
 import sharp from "sharp";
 import { testPngFixture } from "./lib/test-png-fixture";
 import { buildShoppingReferenceScenePrompt, reviewShoppingReferenceScene, selectShoppingSceneReference,
@@ -143,6 +144,7 @@ async function main() {
         candidateObservation: `same ${key} visible`, basis: "intrinsic identifying features agree without a visible contradiction" }]));
     const good = { accepted: true, identityMatches: true, illustrativeOnly: true, checks: allChecks, comparisons,
       reason: "both images show the same intact straight front and cap" };
+    let fidelitySchema: unknown;
     const result = await reviewShoppingReferenceScene({ reference, outputPath: output, productName: "상품", imageIntent: "연출", sectionTitle: "본체를 놓는 공간",
       bodyExcerpt: "본체만 보여주는 생활 연출이며 전체 구성품 사진은 아닙니다.", anchorSha256: hash(anchor) }, {
       review: async call => {
@@ -159,13 +161,103 @@ async function main() {
         assert.match(call.userPrompt, /necessary items must be shown correctly/u);
         assert.match(call.userPrompt, /Distinguish UNREADABLE from CONTRADICTORY printing/u);
         assert.match(call.userPrompt, /Relative spacing between independent items in different scenes is not a product dimension/u);
+        assert.match(call.userPrompt, /Use only correlated result\/variation pairs/u);
+        assert.match(call.userPrompt, /consistent, contradiction and unverifiable MUST have variation="none"/u);
+        for (const [dimension, variation] of [["intrinsicPrinting", "nonessential-print-legibility"], ["productShape", "viewpoint-or-pose"], ["visibleOption", "main-item-only"]])
+          assert.ok(call.userPrompt.includes(`${dimension} {"result":"allowed-variation","variation":"${variation}"}`), "provider examples must use the same correlated pairs as its schema and parser");
         assert.ok(call.outputSchema, "the visual provider is required to produce structured comparison evidence");
+        fidelitySchema = call.outputSchema;
         return JSON.stringify(good);
       },
     });
     assert.equal(result.referenceSha256, hash(front));
     assert.equal(result.reviewedOutputSha256, hash(output));
     assert.equal(result.strategyVersion, SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION);
+    assert.ok(fidelitySchema && typeof fidelitySchema === "object" && !Array.isArray(fidelitySchema));
+    assert.equal((fidelitySchema as { type: string }).type, "object", "the provider schema root remains an object");
+    assert.equal(Object.hasOwn(fidelitySchema, "anyOf"), false, "correlated alternatives belong to comparison rows, not the schema root");
+    const validateFidelity = new Ajv({ allErrors: true }).compile(fidelitySchema);
+    const schemaVerdict = (answer: unknown, expected: boolean, label: string) => {
+      assert.equal(validateFidelity(answer), expected, `${label}: ${JSON.stringify(validateFidelity.errors)}`);
+    };
+    const expectedVariations = {
+      productShape: ["viewpoint-or-pose", "camera-distance"],
+      intrinsicPrinting: ["viewpoint-or-pose", "nonessential-print-legibility"],
+      visibleOption: ["main-item-only", "viewpoint-or-pose"],
+      sceneContext: ["lighting-or-context", "external-seller-artwork", "detached-styling-props", "viewpoint-or-pose", "camera-distance"],
+    };
+    const allVariations = [...new Set(Object.values(expectedVariations).flat())];
+    const answerFor = (dimension: string, row: unknown) => ({ ...good, comparisons: { ...comparisons, [dimension]: row } });
+    let schemaCases = 0;
+    for (const [dimension, allowedVariations] of Object.entries(expectedVariations)) {
+      const row = comparisons[dimension];
+      for (const result of ["consistent", "contradiction", "unverifiable"]) {
+        const valid = answerFor(dimension, { ...row, result, variation: "none" });
+        schemaVerdict(valid, true, `${dimension}/${result}/none`); schemaCases += 1;
+        const reviewed = reviewShoppingReferenceScene({ reference, outputPath: output, productName: "schema-only fixture", imageIntent: "AI illustrative scene" }, {
+          review: async () => JSON.stringify(valid),
+        });
+        if (result === "consistent") assert.equal((await reviewed).reviewStatus, "passed");
+        else await assert.rejects(reviewed, /REFERENCE_SCENE_FIDELITY_FAILED/, "schema-valid adverse findings remain rejected by the fidelity gate");
+        for (const variation of allVariations) {
+          schemaVerdict(answerFor(dimension, { ...row, result, variation }), false, `${dimension}/${result}/${variation}`); schemaCases += 1;
+        }
+      }
+      for (const variation of ["none", ...allVariations, "unknown-variation"]) {
+        const expected = allowedVariations.includes(variation);
+        const answer = answerFor(dimension, { ...row, result: "allowed-variation", variation });
+        schemaVerdict(answer, expected, `${dimension}/allowed-variation/${variation}`); schemaCases += 1;
+        if (expected) {
+          const approved = await reviewShoppingReferenceScene({ reference, outputPath: output, productName: "schema-only fixture", imageIntent: "AI illustrative scene" }, {
+            review: async () => JSON.stringify(answer),
+          });
+          assert.equal(approved.reviewStatus, "passed");
+        }
+      }
+      for (const field of ["referenceObservation", "candidateObservation", "basis"]) for (const invalid of [undefined, null, 1, [], {}]) {
+        schemaVerdict(answerFor(dimension, { ...row, [field]: invalid }), false, `${dimension}/${field}/${JSON.stringify(invalid)}`); schemaCases += 1;
+      }
+      schemaVerdict(answerFor(dimension, { ...row, extraField: "unrequested" }), false, `${dimension}/extraField`); schemaCases += 1;
+      schemaVerdict(answerFor(dimension, { ...row, result: "unknown", variation: "none" }), false, `${dimension}/unknown-result`); schemaCases += 1;
+      for (const invalid of [null, [], "not a comparison"]) {
+        schemaVerdict(answerFor(dimension, invalid), false, `${dimension}/invalid-row`); schemaCases += 1;
+      }
+    }
+    for (const invalid of [null, [], { ...good, extraField: "unrequested" }, { ...good, comparisons: { ...comparisons, extraDimension: comparisons.productShape } }]) {
+      schemaVerdict(invalid, false, "invalid root/comparison structure"); schemaCases += 1;
+    }
+    const reportedPairFailures = [
+      { productName: "쿠쿠 에어프라이어", variations: { intrinsicPrinting: "nonessential-print-legibility" },
+        reason: "the same identifying print remains visible while tiny lower printing is naturally unreadable" },
+      { productName: "아비노 바디워시", variations: { productShape: "viewpoint-or-pose", visibleOption: "main-item-only" },
+        reason: "the same selected pump bottle is upright in a main-item-only illustrative photograph" },
+    ];
+    for (const reported of reportedPairFailures) {
+      const incidentComparisons = { ...comparisons };
+      for (const [dimension, variation] of Object.entries(reported.variations))
+        incidentComparisons[dimension] = { ...comparisons[dimension], result: "consistent", variation, basis: reported.reason };
+      const invalid = { ...good, reason: reported.reason, comparisons: incidentComparisons };
+      await assert.rejects(reviewShoppingReferenceScene({ reference, outputPath: output, productName: reported.productName, imageIntent: "AI illustrative main-item photograph" }, {
+        review: async call => {
+          const actualProviderSchema = new Ajv({ allErrors: true }).compile(call.outputSchema as object);
+          assert.equal(actualProviderSchema(invalid), false, "the exact reported inconsistent pair must be rejected by the provider schema");
+          return JSON.stringify(invalid);
+        },
+      }), /REFERENCE_SCENE_REVIEW_INVALID/, "the parser must not silently reinterpret the reported invalid pair");
+      const correctedComparisons = { ...incidentComparisons };
+      for (const dimension of Object.keys(reported.variations)) correctedComparisons[dimension] = { ...incidentComparisons[dimension], result: "allowed-variation" };
+      const corrected = { ...invalid, comparisons: correctedComparisons };
+      const approved = await reviewShoppingReferenceScene({ reference, outputPath: output, productName: reported.productName, imageIntent: "AI illustrative main-item photograph" }, {
+        review: async call => {
+          const actualProviderSchema = new Ajv({ allErrors: true }).compile(call.outputSchema as object);
+          assert.equal(actualProviderSchema(corrected), true, "a well-formed allowed variation must be representable in the actual provider schema");
+          return JSON.stringify(corrected);
+        },
+      });
+      assert.equal(approved.reviewStatus, "passed");
+      for (const [dimension, variation] of Object.entries(reported.variations))
+        assert.ok(approved.reason!.includes(`${dimension}=allowed-variation(${variation})`));
+    }
     const fullBody = `${"제품을 생활 공간에 배치한 연출입니다. ".repeat(120)}마지막 문단은 실제 기능 입증 여부를 검수해야 합니다.`;
     await reviewShoppingReferenceScene({ reference, outputPath: output, productName: "상품", imageIntent: "연출", bodyExcerpt: fullBody }, {
       review: async call => {
@@ -373,7 +465,7 @@ async function main() {
       childProcess.spawn = originalSpawn;
       syncBuiltinESMExports();
     }
-    console.log("PASS: strict reference selection (47 invalid boolean/observation responses, uncached retry, stage/SHA/reason diagnostics), structured intrinsic/photographic difference QA (6 allowed variations, 7 real contradictions), two-image fail-closed checks, ordered attachments, existing passed-v2 compatibility, stable original/approved anchor, stale anchor rejection, recipe invalidation, evidence boundary");
+    console.log(`PASS: correlated provider comparison schema (${schemaCases} cases; exact Cuckoo/Aveeno invalid pairs rejected and correctly paired allowed variations approved), strict reference selection (47 invalid boolean/observation responses, uncached retry, stage/SHA/reason diagnostics), structured intrinsic/photographic difference QA (6 allowed variations, 7 real contradictions), two-image fail-closed checks, ordered attachments, existing passed-v2 compatibility, stable original/approved anchor, stale anchor rejection, recipe invalidation, evidence boundary`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
 void main().catch(error => { console.error(error); process.exitCode = 1; });

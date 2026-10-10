@@ -33,14 +33,14 @@ const json = (body, options = {}) => ({ status: options.status || 200, body: clo
 function harness() {
   const state = { now: '2026-09-07T03:00:00.000Z', authorized: true, updateBlocked: false,
     products: new Map(), manifests: new Map(), jobs: new Map(), runs: [], saves: 0,
-    locks: 0, activities: 0, productReads: 0, countReads: 0, runnerError: null, progress: new Map(), publicationAttempts: new Map(), missingDraftFiles: new Set() };
+    locks: 0, activities: 0, productReads: 0, countReads: 0, runnerError: null, progress: new Map(), publicationAttempts: new Map(), missingDraftFiles: new Set(), manuscripts: new Map() };
   class FakeDate extends Date {
     constructor(...args) { super(...(args.length ? args : [state.now])); }
     static now() { return Date.parse(state.now); }
   }
   const library = load('src/lib/material-library.ts', {
     'node:crypto': crypto,
-    'node:fs': { readFileSync: file => Buffer.from(`fixture bytes: ${file}`) },
+    'node:fs': { readFileSync: file => Buffer.from(state.manuscripts.get(file) ?? `fixture bytes: ${file}`) },
     './brand-post-package': {
       readBrandPostPackage: id => state.manifests.get(id) || null,
       evaluateBrandPostPackageReadiness: manifest => ({
@@ -62,7 +62,7 @@ function harness() {
   const repairs = load('src/lib/material-repair-candidates.ts', {
     'node:fs': {
       statSync: filename => { if (state.missingDraftFiles.has(filename)) throw new Error('missing manuscript'); return { isFile: () => true }; },
-      readFileSync: () => 'saved manuscript',
+      readFileSync: filename => state.manuscripts.get(filename) ?? 'saved manuscript',
     },
     './db': { prisma: { brandLink: { findMany: async ({ where }) => [...state.products.values()].filter(p => !where || p.connectKind === where.connectKind) } } },
     './material-library': library,
@@ -398,6 +398,133 @@ test('repair listing selects saved unready manuscripts, including approval-only 
   assert.equal(response.body.data.repairCandidateCount, 1);
   assert.deepEqual(response.body.data.repairCandidates.map(item => item.productId), [needs.productId]);
   assert.equal(response.body.data.failedCandidateCount, 0, 'repair and failed-writing selection serve different requirements');
+});
+
+function plannedBlocked(h, index = 0, status = 'READY') {
+  const item = failed(h, index, { productStatus: status });
+  h.state.products.get(item.productId).scheduledPublishAt = '2026-09-08T00:00:00.000Z';
+  return item;
+}
+
+function publicationJob(h, item, jobId, status, startedAt, errorCode, causeCode) {
+  h.state.jobs.set(jobId, { jobId, kind: 'publish', status: status === 'failed' || status === 'outcome_unknown' ? 'failed' : 'completed',
+    startedAt, updatedAt: startedAt, items: [{ productId: item.productId, status,
+      ...(errorCode ? { errorCode } : {}), ...(causeCode ? { causeCode } : {}) }] });
+}
+
+test('repair lists and accepts six unplanned plus eight planned saved READY/FAILED drafts without changing source inputs', async () => {
+  const h = harness();
+  const items = Array.from({ length: 14 }, (_, index) => index < 6 ? blocked(h, index) : plannedBlocked(h, index, index % 2 ? 'FAILED' : 'READY'));
+  for (const [index, item] of items.entries()) {
+    const manifest = h.state.manifests.get(item.productId);
+    h.state.manuscripts.set(manifest.markdownPath, `# 원본 원고 ${index}\n\n수정하지 않은 저장 본문 ${item.productId}\n`);
+    if (index >= 6) h.state.products.get(item.productId).scheduledPublishAt = index % 2 ? '2026-09-06T00:00:00.000Z' : '2026-09-08T00:00:00.000Z';
+  }
+  const originalInputs = clone({ products: [...h.state.products], manifests: [...h.state.manifests], manuscripts: [...h.state.manuscripts] });
+  const listing = await h.api.materialsGet(h.request(null));
+  assert.equal(listing.body.data.repairCandidateCount, 14);
+  assert.deepEqual(listing.body.data.repairCandidates.map(item => item.productId), items.map(item => item.productId));
+  const result = await h.api.materialsRepairBlockedPost(h.request({ sourceJobId: 'repair-planned-drafts' }));
+  assert.equal(result.status, 202); assert.equal(result.body.data.acceptedCount, 14);
+  assert.deepEqual(result.body.data.items.map(item => item.productId), items.map(item => item.productId));
+  assert.equal(h.state.runs.length, 1); assert.equal(h.state.runs[0].kind, 'repair');
+  assert.equal(h.state.runs[0].items.length, 14); assert.equal(h.state.runs[0].publishMode, undefined);
+  await h.settle();
+  assert.deepEqual(clone({ products: [...h.state.products], manifests: [...h.state.manifests], manuscripts: [...h.state.manuscripts] }), originalInputs,
+    'listing and job acceptance preserve all planned dates, manifests and original manuscript bytes');
+  assert.equal(h.state.locks, 0); assert.equal(h.state.activities, 0);
+});
+
+test('planned dates never override publication, uncertain execution or active image exclusions, including explicit repair selections', async () => {
+  const cases = [
+    ...['SCHEDULED', 'PUBLISHED', 'OUTCOME_UNKNOWN', 'PUBLISHING', 'DRAFTING', 'COLLECTED'].map(status => [status, h => { h.state.products.get('product_0000').status = status; }]),
+    ['published URL', h => { h.state.products.get('product_0000').postUrl = 'https://blog.naver.com/fixture/1'; }],
+    ['published time', h => { h.state.products.get('product_0000').publishedAt = '2026-09-06T03:00:00.000Z'; }],
+    ...['CONFIRMED', 'SUBMITTING', 'OUTCOME_UNKNOWN'].map(stage => [`attempt ${stage}`, h => { h.state.publicationAttempts.set('product_0000', { stage }); }]),
+    ...['queued', 'preparing', 'publishing', 'outcome_unknown'].map(status => [`latest prepare ${status}`, h => { h.state.jobs.get('failure-0').items[0].status = status; }]),
+    ...['PREPARATION_RESULT_UNCERTAIN', 'APP_INTERRUPTED', 'WORKFLOW_TIMEOUT'].map(errorCode => [`latest prepare ${errorCode}`, h => { h.state.jobs.get('failure-0').items[0].errorCode = errorCode; }]),
+    ['latest cause unknown', h => { h.state.jobs.get('failure-0').items[0].causeCode = 'OUTCOME_UNKNOWN'; }],
+    ['publish scheduled', (h, item) => publicationJob(h, item, 'publish-unsafe', 'scheduled', h.state.now)],
+    ['publish outcome unknown', (h, item) => publicationJob(h, item, 'publish-unsafe', 'outcome_unknown', h.state.now)],
+    ['publish uncertain cause', (h, item) => publicationJob(h, item, 'publish-unsafe', 'failed', h.state.now, 'PUBLISH_FAILED', 'OUTCOME_UNKNOWN')],
+    ['publish nondefinitive failure', (h, item) => publicationJob(h, item, 'publish-unsafe', 'failed', h.state.now, 'UNKNOWN_PUBLISH_FAILURE')],
+    ['images running', h => { h.state.manifests.get('product_0000').imageGeneration = { status: 'running' }; }],
+    ['image owner unknown', h => { h.state.manifests.get('product_0000').imageGeneration = { status: 'interrupted', recoveryState: 'owner-unknown' }; }],
+  ];
+  for (const [label, change] of cases) {
+    const h = harness(); const item = plannedBlocked(h); change(h, item);
+    const originalInputs = clone({ products: [...h.state.products], manifests: [...h.state.manifests] });
+    const listing = await h.api.materialsGet(h.request(null));
+    assert.equal(listing.body.data.repairCandidateCount, 0, label);
+    const response = await h.api.materialsRepairBlockedPost(h.request({ productIds: [item.productId] }));
+    assert.equal(response.status, 409, label); assertNoDispatch(h);
+    assert.deepEqual(clone({ products: [...h.state.products], manifests: [...h.state.manifests] }), originalInputs, label);
+  }
+});
+
+test('older publication evidence blocks planned repair despite newer definitive failure, independent of job insertion order', async () => {
+  const historicalPublications = [
+    ['scheduled', 'scheduled'], ['published', 'published'], ['outcome unknown', 'outcome_unknown'],
+    ['nondefinitive failure', 'failed', 'UNKNOWN_PUBLISH_FAILURE'],
+    ['uncertain failure cause', 'failed', 'PUBLISH_FAILED', 'OUTCOME_UNKNOWN'],
+  ];
+  for (const productStatus of ['READY', 'FAILED']) for (const [historyLabel, oldStatus, errorCode, causeCode] of historicalPublications) for (const reverse of [false, true]) {
+    const h = harness(); const item = plannedBlocked(h, 0, productStatus);
+    publicationJob(h, item, 'older-publication', oldStatus, '2026-09-04T03:00:00.000Z', errorCode, causeCode);
+    publicationJob(h, item, 'latest-publication-failure', 'failed', '2026-09-05T03:00:00.000Z', 'PUBLISH_FAILED');
+    if (reverse) h.state.jobs = new Map([...h.state.jobs].reverse());
+    const label = `${productStatus}/${historyLabel}/reverse=${reverse}`;
+    const listing = await h.api.materialsGet(h.request(null));
+    assert.equal(listing.body.data.repairCandidateCount, 0, label);
+    const response = await h.api.materialsRepairBlockedPost(h.request({ productIds: [item.productId] }));
+    assert.equal(response.status, 409, label); assertNoDispatch(h);
+  }
+});
+
+test('planned repair remains allowed when every publication failed definitively before submission', async () => {
+  for (const productStatus of ['READY', 'FAILED']) for (const reverse of [false, true]) for (const emptyEvidence of [false, true]) {
+    const h = harness(); const item = plannedBlocked(h, 0, productStatus);
+    publicationJob(h, item, 'older-publication-failure', 'failed', '2026-09-04T03:00:00.000Z', 'MATERIAL_CHANGED');
+    publicationJob(h, item, 'latest-publication-failure', 'failed', '2026-09-05T03:00:00.000Z', 'PUBLISH_FAILED');
+    h.state.publicationAttempts.set(item.productId, { stage: 'FAILED_BEFORE_SUBMIT', ...(emptyEvidence ? { evidence: {} } : {}) });
+    if (reverse) h.state.jobs = new Map([...h.state.jobs].reverse());
+    const originalInputs = clone({ products: [...h.state.products], manifests: [...h.state.manifests] });
+    const listing = await h.api.materialsGet(h.request(null));
+    assert.deepEqual(listing.body.data.repairCandidates.map(candidate => candidate.productId), [item.productId]);
+    const response = await h.api.materialsRepairBlockedPost(h.request({ productIds: [item.productId] }));
+    assert.equal(response.status, 202); assert.equal(response.body.data.acceptedCount, 1);
+    assert.equal(h.state.runs.length, 1); assert.equal(h.state.runs[0].kind, 'repair');
+    await h.settle();
+    assert.deepEqual(clone({ products: [...h.state.products], manifests: [...h.state.manifests] }), originalInputs,
+      'a safe pre-submit failure does not erase the saved publication plan or draft');
+  }
+});
+
+test('pre-submit stage cannot override submission receipts, including empty markers or contradictory publication proof', async () => {
+  const receiptMarkers = [
+    ['submittedAt', value => ({ submittedAt: value })],
+    ['confirmedAt', value => ({ confirmedAt: value })],
+    ['postUrl', value => ({ evidence: { postUrl: value } })],
+    ['reservationId', value => ({ evidence: { reservationId: value } })],
+    ['scheduledDate', value => ({ evidence: { scheduledDate: value } })],
+  ];
+  const cases = receiptMarkers.flatMap(([label, receipt]) => [
+    [`${label} recorded`, receipt('recorded')], [`${label} empty`, receipt('')],
+  ]);
+  cases.push(['contradictory receipt', { submittedAt: '', confirmedAt: '2026-09-05T03:00:00.000Z',
+    evidence: { postUrl: 'https://blog.naver.com/fixture/1', reservationId: 'reserved-fixture', scheduledDate: '2026-09-08' } }]);
+  for (const productStatus of ['READY', 'FAILED']) for (const [receiptLabel, receipt] of cases) {
+    const h = harness(); const item = plannedBlocked(h, 0, productStatus);
+    publicationJob(h, item, 'latest-publication-failure', 'failed', '2026-09-05T03:00:00.000Z', 'PUBLISH_FAILED');
+    h.state.publicationAttempts.set(item.productId, { stage: 'FAILED_BEFORE_SUBMIT', ...receipt });
+    const originalInputs = clone({ products: [...h.state.products], manifests: [...h.state.manifests], attempts: [...h.state.publicationAttempts] });
+    const label = `${productStatus}/${receiptLabel}`;
+    const listing = await h.api.materialsGet(h.request(null));
+    assert.equal(listing.body.data.repairCandidateCount, 0, label);
+    const response = await h.api.materialsRepairBlockedPost(h.request({ productIds: [item.productId] }));
+    assert.equal(response.status, 409, label); assertNoDispatch(h);
+    assert.deepEqual(clone({ products: [...h.state.products], manifests: [...h.state.manifests], attempts: [...h.state.publicationAttempts] }), originalInputs, label);
+  }
 });
 
 test('entire repair handles sixty saved blocked items and dispatches no publication/full-rewrite mode', async () => {
