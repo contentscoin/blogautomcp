@@ -15,6 +15,7 @@ import * as imageEvidence from "../src/lib/brand-post-image-evidence";
 import * as atomicTextFile from "../src/lib/atomic-text-file";
 import * as photorealBuild from "./lib/photoreal/build";
 import * as product9Canvas from "./lib/product-9canvas";
+import * as shoppingPhotoHarness from "./lib/shopping-photo-harness";
 import type { ProductSectionImageReviewOptions } from "./lib/product-photo-review";
 import type { generateBrandPostImages as Generate, BrandPostImageGenerationResult } from "../src/lib/brand-post-image-generation";
 import { checkedExistingJobResult, collectCompletedProductCandidates, existingJobResult, readLegacyCodexImageCompletion, type ImageBatchJob } from "../src/lib/codex-image-generation";
@@ -57,6 +58,7 @@ const referenceSceneModule = load<typeof import("./lib/shopping-reference-scene"
   "node:crypto": crypto, "node:fs": fs,
   "./codex-draft-provider": { runCodexDraft: () => { throw new Error("live review is forbidden in this offline harness"); } },
   "./product-photo-review": { selectVerifiedProductPhotos: () => { throw new Error("live review is forbidden in this offline harness"); } },
+  "./shopping-photo-harness": shoppingPhotoHarness,
   "../../src/lib/brand-post-image-evidence": imageEvidence,
 });
 const hashFile = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");

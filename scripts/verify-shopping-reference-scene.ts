@@ -14,6 +14,7 @@ import { buildShoppingReferenceScenePrompt, reviewShoppingReferenceScene, select
 import { assertProductImageReferences } from "../src/lib/codex-image-generation";
 import type { BrandPostPackageManifestV2, applyGeneratedBrandPostImage } from "../src/lib/brand-post-package";
 import type { ResolvedImageTarget } from "../src/lib/brand-post-image-generation";
+import { buildProduct9Canvas } from "./lib/product-9canvas";
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shopping-reference-scene-"));
@@ -402,6 +403,23 @@ async function main() {
     const second = await generation.prepareBrandPostImageReferenceContext({ manifest, productName: "상품", target: secondTarget }, deps);
     assert.deepEqual(second.referenceHashes, first.referenceHashes, "sibling updates clearing approval retain the prepared approved anchor");
     assert.equal(selectionCalls, 1, "the same post keeps one reviewed original across calls");
+    const photographyProduct = buildProduct9Canvas({ name: "달바 비타 토닝 토너 180ml" });
+    const photographyTarget = { ...target("shoot"), sectionTitle: "세면대 옆에 놓는 토너", promptRecipe: "quiet neutral bathroom" };
+    const photographyManifest = { ...manifest, brandLinkId: "photography-harness-offline", productUnderstanding: photographyProduct,
+      composition: { ...manifest.composition, sections: [
+        { id: "before", title: "아침 준비 공간" }, { id: "shoot", title: photographyTarget.sectionTitle }, { id: "after", title: "보관할 자리" },
+      ] as BrandPostPackageManifestV2["composition"]["sections"] } };
+    const photography = await generation.prepareBrandPostImageReferenceContext({ manifest: photographyManifest,
+      productName: "달바 비타 토닝 토너 180ml", target: photographyTarget }, deps);
+    assert.equal(photography.prompt, buildShoppingReferenceScenePrompt({ productName: "달바 비타 토닝 토너 180ml",
+      sectionTitle: photographyTarget.sectionTitle, imageIntent: photographyTarget.imageIntent,
+      bodyExcerpt: photographyTarget.bodyExcerpt, stagingRecipe: photographyTarget.promptRecipe, role: "body",
+      reference, hasAnchor: false, variantIndex: 2, adjacentSectionTitles: ["아침 준비 공간", "보관할 자리"],
+      physicalScale: photographyProduct.concept.physicalScale, productImageDirective: photographyProduct.policy.imageDirective }),
+    "actual context must retain slot framing, neighboring sections, physical scale and selected product policy");
+    assert.deepEqual(photography.referenceHashes, [hash(front)], "new photography instructions do not replace authoritative seller pixels");
+    const photographyJobs = generation.prepareImageBatchJobs([photographyTarget], photographyManifest, "달바 비타 토닝 토너 180ml", path.join(root, "photography-jobs"));
+    assert.ok(photographyJobs[0].prompt.startsWith(photography.prompt + "\nImage slot: "), "the real transport batch must use the prepared harness verbatim");
     const jobs = generation.prepareImageBatchJobs([secondTarget], manifest, "상품", root);
     assert.deepEqual(jobs[0].referenceImagePaths, [front, anchor]);
     assert.equal(jobs[0].referenceMode, "product");

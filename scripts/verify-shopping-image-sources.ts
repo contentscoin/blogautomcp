@@ -88,6 +88,7 @@ async function main() {
     });
     const referenceContext = await generationModule.exports.prepareBrandPostImageReferenceContext({
       manifest: { brandLinkId: "hero-only", title: "미닉스 상품", connectKind: "SHOPPING", sourceSnapshot: { snapshotId: "fixture", product: { name: "미닉스 상품", features: [] } },
+        composition: { sections: [], renderNodes: [] },
         imageAssets: [{ path: packaged, sourcePath: composites[0].outputPath, provenance: "PHOTO_TEXT_THUMBNAIL" }] },
       productName: "미닉스 상품", target: { role: "body", imageSource: "staged-ai", imageIntent: "자연스러운 AI 연출 이미지", request: { slotId: "scene:image:1" } },
     });

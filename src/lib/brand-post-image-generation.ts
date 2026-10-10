@@ -442,13 +442,20 @@ export async function prepareBrandPostImageReferenceContext(options: {
     snapshotId: options.manifest.sourceSnapshot.snapshotId, reference,
     anchorPath: thumbnail ? undefined : anchorPath || (checkpointCurrent ? checkpoint.anchorPath : undefined),
     anchorSha256: thumbnail ? undefined : anchorSha256 || (checkpointCurrent ? checkpoint.anchorSha256 : undefined) }));
+  const productUnderstanding = resolveManifestProductUnderstanding(options.manifest, options.productName);
+  const sectionIndex = options.manifest.composition.sections.findIndex(section => section.id === options.target.sectionId);
   const context: BrandPostImageReferenceContext = {
     generationMode: "reference-guided-scene", reference, anchorPath, anchorSha256,
     referenceImagePaths: [reference.path, ...(anchorPath ? [anchorPath] : [])],
     referenceHashes: [reference.sha256, ...(anchorSha256 ? [anchorSha256] : [])],
     prompt: buildShoppingReferenceScenePrompt({ productName: options.productName, sectionTitle: options.target.sectionTitle,
       imageIntent: options.target.imageIntent, bodyExcerpt: options.target.bodyExcerpt, stagingRecipe: options.target.promptRecipe,
-      role: options.target.role, reference, hasAnchor: Boolean(anchorPath) }),
+      role: options.target.role, reference, hasAnchor: Boolean(anchorPath),
+      variantIndex: photorealVariantIndex(options.manifest, options.target),
+      adjacentSectionTitles: sectionIndex < 0 ? [] : [sectionIndex - 1, sectionIndex + 1]
+        .flatMap(i => options.manifest.composition.sections[i] ? [options.manifest.composition.sections[i].title] : []),
+      physicalScale: productUnderstanding?.concept.physicalScale,
+      productImageDirective: productUnderstanding?.policy.imageDirective }),
   };
   options.target.referenceContext = context;
   return context;

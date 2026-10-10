@@ -4,10 +4,14 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import vm from "node:vm";
+import { createRequire } from "node:module";
 import Ajv from "ajv";
 import sharp from "sharp";
+import ts from "typescript";
 import { auditPublishImages, assertPublishImagesSafe, parseVisualReviews, PublishImageAuditError, type PublishImageAuditOptions } from "./lib/publish-image-audit";
 import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
+import { reviewShoppingReferenceScene } from "./lib/shopping-reference-scene";
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-publish-audit-"));
@@ -163,12 +167,12 @@ async function main() {
       assert.deepEqual(slot.sectionBody, [kitchenBody]);
       for (const text of [call.userPrompt, schema.properties.reviews.items.properties.accepted.description!]) {
         assert.match(text, /natural photograph.*not a drawn illustration, diagram or information card/u);
-        assert.match(text, /Product-focused close-up photography is allowed when coherent setting cues remain visibly present/u);
+        assert.match(text, /Product-focused close-up photography is allowed/u);
         assert.match(text, /large foreground product alone is not an intent mismatch/u);
         assert.match(text, /No person, hands, wearing, use action, wide room view or staged price\/payment action is required/u);
-        assert.match(text, /a kitchen intent needs coherent kitchen cues/u);
-        assert.match(text, /isolated white-background catalog photo cannot satisfy that setting/u);
-        assert.match(text, /still reject implausible real-world scale, contact or placement, wrong identity\/options, distorted structure/u);
+        assert.match(text, /Desired background, pose and styling in imageIntent are generation targets, not independent final-QA rejection reasons/u);
+        assert.match(text, /actual published text\/headline claims the photo demonstrates a specific setting, quantity, feature or result/u);
+        assert.match(text, /reject clearly impossible real-world scale, contact or placement, wrong identity\/options, severe structural distortion/u);
         assert.match(text, /without overriding the separate identity, format and photoClaim verdicts/u);
       }
       assert.match(call.userPrompt, /Use ONLY the role assigned to this exact index/u);
@@ -524,6 +528,153 @@ async function main() {
     };
     assert.equal((await auditPublishImages(orderedBatch)).ok, true);
     assert.equal(orderedBatchCalls, 1, "global field order also survives multi-slot overrides"); assertions++;
+    // Synthetic rasters and stubbed verdicts test the transmitted rubric and
+    // unchanged gate, never assert that a real photograph passes vision QA.
+    const assertBalancedRubric = (call: Parameters<NonNullable<PublishImageAuditOptions["review"]>>[0]) => {
+      assertEvidenceFirstCall(call);
+      assert.match(call.systemPrompt!, /balanced visible-defect threshold/u);
+      const schema = call.outputSchema as { properties: { reviews: { items: { properties: Record<string, { description?: string }> } } } };
+      const acceptedDescription = schema.properties.reviews.items.properties.accepted.description!;
+      for (const text of [call.userPrompt, acceptedDescription]) {
+        assert.match(text, /not a search for ways to improve an otherwise valid photograph/u);
+        assert.match(text, /clearly wrong product\/SKU or selected option/u);
+        assert.match(text, /genuinely unresolved product identity, severe structural distortion/u);
+        assert.match(text, /clearly impossible geometry\/contact\/scale/u);
+        assert.match(text, /explicit forbidden notice\/card\/frame\/panel\/body-text layout/u);
+        assert.match(text, /actual unsupported photographic-proof claim/u);
+        assert.match(text, /Readable invented\/unsupported certification or efficacy copy/u);
+        assert.match(text, /substantive false claim even when it is not an identifying label/u);
+        assert.match(text, /Permit minor lighting, pose, background, reflection and non-identifying texture\/print-spacing variation/u);
+        assert.match(text, /Do not require pixel identity, aesthetic optimization, perfect microtext, or OCR of every tiny capacity\/specification/u);
+        assert.match(text, /Uncertainty confined to such minor differences is not a blocking defect/u);
+        assert.match(text, /Genuine unresolved identity or a concrete forbidden defect still rejects/u);
+      }
+      assert.match(schema.properties.reviews.items.properties.identityMatches.description!, /identifiers obscured enough to leave product identity unresolved/u);
+      assert.match(schema.properties.reviews.items.properties.reason.description!, /Do not propose aesthetic improvements as rejection reasons/u);
+    };
+    for (const [role, reason] of [
+      ["scene", "Identifying product and option match. Minor texture and print-spacing differences do not change identity; tiny capacity is unreadable and not certified."],
+      ["scene", "A slightly different pose, reflection and lighting remain coherent; the preferred background is absent, but no actual published photo-proof claim is contradicted."],
+      ["thumbnail", "Identifiable product, accurate readable headline, minor surface texture and natural lighting variation; no forbidden layout or unsupported proof claim."],
+    ] as const) {
+      const input = alignedDecisionInput(role); let calls = 0;
+      input.review = async call => {
+        calls++; assertBalancedRubric(call);
+        return JSON.stringify({ reviews: [{ ...good, reason }] });
+      };
+      assert.equal((await auditPublishImages(input)).ok, true);
+      assert.equal(calls, 1, "a favorable minor-variation verdict needs no follow-up provider call"); assertions++;
+    }
+    for (const patch of [
+      { identityMatches: false, reason: "Readable identifying capacity says 55ml, conflicting with the selected 100ml serum." },
+      { identityMatches: false, reason: "The product is obscured enough that its design and component identity genuinely remain unresolved." },
+      { accepted: false, reason: "A severely crushed body and structurally warped cap make the depicted product geometry impossible." },
+      { singlePhotograph: false, reason: "The reflected item has a conflicting identifying design and a clearly impossible spatial arrangement." },
+      { notice: true, reason: "A visible delivery closure announcement replaces the product photograph." },
+      { noGraphicLayout: false, reason: "A seller photo is reduced into an explicit frame and explanatory panel." },
+      { textPolicyMatches: false, reason: "An added body headline cannot inherit thumbnail text permission." },
+      { photoClaimMatches: false, reason: "The actual published text says this photograph proves a measured result that its pixels do not show." },
+      { accepted: false, reason: "An otherwise identifiable correct bottle carries a readable fabricated FDA APPROVED certification seal not present in its reference or selected facts." },
+      { accepted: false, reason: "Only minor lighting and texture differ; every criterion is favorable." },
+    ]) {
+      const input = alignedDecisionInput("scene"); let calls = 0;
+      input.review = async call => {
+        calls++; assertBalancedRubric(call);
+        const row = { ...good, ...patch };
+        assert.equal(new Ajv({ allErrors: true }).compile(call.outputSchema as object)({ reviews: [row] }), true,
+          "the balanced rubric keeps real adverse boolean values schema-valid");
+        return JSON.stringify({ reviews: [row] });
+      };
+      const rejected = await auditPublishImages(input);
+      assert.equal(rejected.ok, false);
+      assert.equal(rejected.failures[0].code, "SEMANTIC_REJECTION");
+      assert.ok(rejected.failures[0].reason.includes(patch.reason));
+      assert.equal(calls, 1, "balanced prose must never reinterpret, retry or approve a valid adverse response"); assertions++;
+    }
+    const referenceComparison = {
+      path: original, sha256: hash(original), subject: "fixture selected bottle", geometry: "fixture bottle landmarks",
+      labels: "fixture intrinsic identifying printing", reviewedAt: new Date().toISOString(),
+    };
+    const referenceVerdict = { accepted: true, identityMatches: true, illustrativeOnly: true,
+      checks: Object.fromEntries(REFERENCE_SCENE_REVIEW_CHECKS.map(key => [key, true])),
+      comparisons: Object.fromEntries(["productShape", "intrinsicPrinting", "visibleOption", "sceneContext"].map(key => [key,
+        { result: "consistent", variation: "none", referenceObservation: "fixture identifying features",
+          candidateObservation: "fixture same identifying features", basis: "minor non-identifying spacing or texture does not change design" }])),
+      reason: "Identifying design and option match with minor non-identifying texture and print-spacing variation.",
+    };
+    for (const patch of [
+      {},
+      { accepted: false, reason: "Readable fabricated FDA APPROVED efficacy/certification copy is present on the otherwise matching product." },
+      { identityMatches: false, reason: "Selected product identity genuinely remains unresolved." },
+      { checks: { ...referenceVerdict.checks, surface: false }, reason: "Only minor texture differs; no substantive visible defect remains." },
+      { checks: { ...referenceVerdict.checks, noAddedText: false }, reason: "An added body headline is clearly visible." },
+    ]) {
+      let calls = 0;
+      const operation = () => reviewShoppingReferenceScene({ reference: referenceComparison, outputPath: photo,
+        productName: "fixture selected bottle", imageIntent: "AI 연출 이미지: preferred bathroom background",
+        bodyExcerpt: "상품 외형을 보여주는 연출이며 성능의 증거가 아닙니다.",
+      }, { review: async call => {
+        calls++;
+        assert.match(call.systemPrompt!, /balanced visible-defect threshold/u);
+        const schema = call.outputSchema as { properties: { accepted: { description: string }; checks: { properties: Record<string, { type: string; description: string }> } } };
+        for (const text of [call.userPrompt, schema.properties.accepted.description]) {
+          assert.match(text, /genuinely unresolved identity, severe structural distortion/u);
+          assert.match(text, /Minor lighting, pose, background, reflection and non-identifying surface\/print-spacing variation may pass/u);
+          assert.match(text, /Do not demand pixel identity, perfect microtext or OCR of every tiny capacity/u);
+          assert.match(text, /Readable invented\/unsupported certification or efficacy copy/u);
+          assert.match(text, /Never change an adverse boolean to obtain approval/u);
+        }
+        assert.match(call.userPrompt, /classify those unchanged dimensions as consistent\/none/u);
+        assert.match(call.userPrompt, /Planning intent alone cannot establish that published claim/u);
+        assert.match(schema.properties.checks.properties.noAddedText.description, /Reject added headlines/u);
+        for (const key of REFERENCE_SCENE_REVIEW_CHECKS) assert.equal(schema.properties.checks.properties[key].type, "boolean");
+        const row = { ...referenceVerdict, ...patch };
+        assert.equal(new Ajv({ allErrors: true }).compile(call.outputSchema as object)(row), true);
+        return JSON.stringify(row);
+      } });
+      if (Object.keys(patch).length) await assert.rejects(operation, /REFERENCE_SCENE_FIDELITY_FAILED/u);
+      else assert.equal((await operation()).reviewStatus, "passed");
+      assert.equal(calls, 1, "the reference-scene review also preserves every adverse boolean without retry"); assertions++;
+    }
+    // Execute the real receipt-key path with only an in-memory receipt store
+    // and a stubbed provider. No application data, locks or approval files are
+    // touched; changing the actual rubric must invalidate an otherwise equal
+    // cached request, and stable policy must still reuse its own receipt.
+    const auditorPath = path.resolve("scripts/lib/publish-image-audit.ts");
+    const currentSource = fs.readFileSync(auditorPath, "utf8");
+    const previousPolicySource = currentSource.replace("Final QA uses a balanced visible-defect threshold",
+      "Legacy QA treats even minor photographic variation as a possible defect");
+    assert.notEqual(previousPolicySource, currentSource);
+    const moduleRequire = createRequire(auditorPath);
+    const receipts = new Map<string, string>(); const writtenKeys: string[] = []; let receiptCalls = 0;
+    const loadAudit = (source: string) => {
+      const exports: Record<string, unknown> = {};
+      vm.runInNewContext(ts.transpileModule(source, { compilerOptions: {
+        module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true,
+      } }).outputText, { exports, Buffer, console, setTimeout, process,
+        require: (id: string) => id === "./codex-draft-provider" ? { runCodexDraft: async () => {
+          receiptCalls++; return JSON.stringify({ reviews: [good] });
+        } } : id === "./publish-image-audit-receipt" ? {
+          readSuccessfulImageAuditReceipt: (id: string, key: string) => receipts.get(id) === key,
+          writeSuccessfulImageAuditReceipt: (id: string, key: string) => { receipts.set(id, key); writtenKeys.push(key); },
+          invalidateSuccessfulImageAuditReceipt: (id: string) => { receipts.delete(id); },
+          withSuccessfulImageAuditLock: async (_id: string, operation: () => Promise<unknown>) => operation(),
+        } : moduleRequire(id),
+      });
+      return exports.auditPublishImages as typeof auditPublishImages;
+    };
+    const receiptInput = options(); delete receiptInput.review;
+    receiptInput.brandLinkId = "balanced-policy-offline-fixture";
+    const previousAudit = loadAudit(previousPolicySource), currentAudit = loadAudit(currentSource);
+    assert.equal((await previousAudit(receiptInput)).ok, true);
+    assert.equal((await previousAudit(receiptInput)).receiptReused, true);
+    const changedPolicy = await currentAudit(receiptInput);
+    assert.equal(changedPolicy.ok, true);
+    assert.equal(changedPolicy.receiptReused, false, "a receipt for different actual prompt/schema text must not be reused");
+    assert.equal((await currentAudit(receiptInput)).receiptReused, true);
+    assert.equal(receiptCalls, 2);
+    assert.equal(writtenKeys.length, 2);
+    assert.notEqual(writtenKeys[0], writtenKeys[1], "the actual receipt key binds the balanced rubric"); assertions++;
     const contradictoryRole = options();
     Object.assign(contradictoryRole.composition.renderNodes[0], { role: "thumbnail" });
     contradictoryRole.review = async () => { throw new Error("A body-section thumbnail role must fail before provider"); };
