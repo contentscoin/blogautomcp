@@ -38,10 +38,92 @@ async function main() {
     });
     assert.equal(reference.path, front, "an unreadable severely foreshortened original must not become the geometry reference");
     assert.deepEqual(reviewed, [[angled], [front]]);
-    await assert.rejects(selectShoppingSceneReference({ paths: [file("deformed")], productName: "different", selectedProduct: "other" }, {
+    const referenceVerdict = { identityMatches: true, geometryReadable: true, completeShape: true,
+      notDeformed: true, unobstructed: true, subject: "complete exact selected item",
+      geometry: "intact identifying silhouette and real proportions", labels: "none visible", reason: "specific visible item observations" };
+    const deformed = file("deformed");
+    const sourceRejection = { stage: "seller-product-photo" as const, candidateSha256: hash(angled),
+      failedChecks: ["productPhoto"], reason: "a seller notice instead of the selected product" };
+    const geometryRejection = { stage: "reference-geometry" as const, candidateSha256: hash(deformed),
+      failedChecks: ["notDeformed"], reason: "the selected item is visibly crushed" };
+    const receivedRejections: unknown[] = [];
+    await assert.rejects(selectShoppingSceneReference({ paths: [angled, deformed], productName: "different", selectedProduct: "other" }, {
+      verify: async (_paths, _product, _maximum, selectionOptions) => {
+        selectionOptions?.onRejection?.(sourceRejection);
+        return [deformed];
+      },
+      onRejection: diagnostic => receivedRejections.push(diagnostic),
+      review: async () => JSON.stringify({ ...referenceVerdict, notDeformed: false, reason: geometryRejection.reason }),
+    }), error => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /PRODUCT_REFERENCE_REQUIRED/);
+      assert.match(error.message, /seller-product-photo/);
+      assert.match(error.message, /reference-geometry/);
+      assert.ok(error.message.includes(hash(deformed)));
+      assert.match(error.message, /notDeformed/);
+      assert.match(error.message, /visibly crushed/);
+      assert.deepEqual((error as Error & { diagnostics: unknown[] }).diagnostics, [sourceRejection, geometryRejection],
+        "both valid rejection stages retain candidate SHA, failed checks and observed reasons");
+      return true;
+    });
+    assert.deepEqual(receivedRejections, [sourceRejection, geometryRejection]);
+    const malformedReferenceAnswers: unknown[] = [null, [], {}, { ...referenceVerdict, reason: " " }, { ...referenceVerdict, subject: 1 }];
+    for (const check of ["identityMatches", "geometryReadable", "completeShape", "notDeformed", "unobstructed"])
+      for (const invalid of [undefined, "true", "false", null, 1]) malformedReferenceAnswers.push({ ...referenceVerdict, [check]: invalid });
+    for (const field of ["subject", "geometry", "labels", "reason"])
+      for (const invalid of [undefined, " ", null, 1]) malformedReferenceAnswers.push({ ...referenceVerdict, [field]: invalid });
+    // An incomplete false verdict is a QA failure, not evidence that this
+    // seller has no suitable reference. Invalid answers must never be cached.
+    malformedReferenceAnswers.push({ ...referenceVerdict, notDeformed: false, geometry: undefined });
+    for (const [index, malformed] of malformedReferenceAnswers.entries()) {
+      const candidate = file(`reference-selector-invalid-${index}`);
+      const selection = { paths: [candidate, front], productName: "offline selected item", selectedProduct: `invalid-context-${index}` };
+      let selectorCalls = 0;
+      let rejectCallbacks = 0;
+      await assert.rejects(selectShoppingSceneReference(selection, {
+        verify: async paths => paths,
+        onRejection: () => { rejectCallbacks += 1; },
+        review: async call => { selectorCalls += 1; assert.equal(call.imagePaths![0], candidate); return JSON.stringify(malformed); },
+      }), error => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /^REFERENCE_SCENE_REVIEW_INVALID: stage=reference-geometry/);
+        assert.ok(error.message.includes(hash(candidate)));
+        return true;
+      });
+      assert.equal(selectorCalls, 1, "invalid evidence must stop rather than approve a competing candidate");
+      assert.equal(rejectCallbacks, 0, "malformed responses are not product/geometry rejections");
+      const retried = await selectShoppingSceneReference(selection, {
+        verify: async paths => paths,
+        review: async call => {
+          selectorCalls += 1;
+          assert.deepEqual(call.imagePaths, [candidate]);
+          assert.ok(call.outputSchema, "reference selection requires the provider's structured boolean/observation schema");
+          return JSON.stringify(referenceVerdict);
+        },
+      });
+      assert.equal(retried.path, candidate);
+      assert.equal(selectorCalls, 2, "invalid response leaves no cached selection or cached rejection");
+    }
+    await assert.rejects(selectShoppingSceneReference({ paths: [file("reference-invalid-json")], productName: "invalid-json", selectedProduct: "invalid-json" }, {
       verify: async paths => paths,
-      review: async () => JSON.stringify({ identityMatches: true, geometryReadable: true, completeShape: true, notDeformed: false, unobstructed: true }),
-    }), /PRODUCT_REFERENCE_REQUIRED/);
+      review: async () => "not json",
+    }), /REFERENCE_SCENE_REVIEW_INVALID: stage=reference-geometry/);
+    let geometryCalls = 0;
+    await assert.rejects(selectShoppingSceneReference({ paths: [angled], productName: "no-first-stage", selectedProduct: "no-first-stage" }, {
+      verify: async (_paths, _product, _maximum, selectionOptions) => { selectionOptions?.onRejection?.(sourceRejection); return []; },
+      review: async () => { geometryCalls += 1; throw new Error("unexpected second-stage review"); },
+    }), error => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /PRODUCT_REFERENCE_REQUIRED/);
+      assert.deepEqual((error as Error & { diagnostics: unknown[] }).diagnostics, [sourceRejection]);
+      return true;
+    });
+    assert.equal(geometryCalls, 0, "first-stage valid rejection alone needs no geometry review");
+    const providerError = new Error("offline provider interrupted");
+    await assert.rejects(selectShoppingSceneReference({ paths: [file("reference-provider-error"), front], productName: "provider-error", selectedProduct: "provider-error" }, {
+      verify: async paths => paths,
+      review: async () => { throw providerError; },
+    }), error => error === providerError, "transport errors must not become needs_reference or a false pixel verdict");
     const walkingGarment = file("walking-garment");
     const garment = await selectShoppingSceneReference({ paths: [walkingGarment], productName: "와이드 팬츠", selectedProduct: "차콜 와이드 팬츠" }, {
       verify: async paths => paths,
@@ -49,13 +131,18 @@ async function main() {
         assert.match(call.userPrompt, /normal pose, fabric folds or a moderate oblique view is allowed/u);
         return JSON.stringify({ identityMatches: true, geometryReadable: true, frontFacing: false,
           completeShape: true, notDeformed: true, unobstructed: true, subject: "person walking in charcoal trousers",
-          geometry: "wide legs, elastic waist, hems and pockets visible with natural folds", labels: "none visible" });
+          geometry: "wide legs, elastic waist, hems and pockets visible with natural folds", labels: "none visible",
+          reason: "the selected garment has an intact silhouette in a natural walking pose" });
       },
     });
     assert.equal(garment.path, walkingGarment, "natural garment poses do not need a packaging front view");
 
     const allChecks = Object.fromEntries(SCENE_FIDELITY_CHECKS.map(key => [key, true]));
-    const good = { accepted: true, identityMatches: true, illustrativeOnly: true, checks: allChecks, reason: "both images show the same intact straight front and cap" };
+    const comparisons = Object.fromEntries(["productShape", "intrinsicPrinting", "visibleOption", "sceneContext"].map(key => [key,
+      { result: "consistent", variation: "none", referenceObservation: `reference ${key} visible`,
+        candidateObservation: `same ${key} visible`, basis: "intrinsic identifying features agree without a visible contradiction" }]));
+    const good = { accepted: true, identityMatches: true, illustrativeOnly: true, checks: allChecks, comparisons,
+      reason: "both images show the same intact straight front and cap" };
     const result = await reviewShoppingReferenceScene({ reference, outputPath: output, productName: "상품", imageIntent: "연출", sectionTitle: "본체를 놓는 공간",
       bodyExcerpt: "본체만 보여주는 생활 연출이며 전체 구성품 사진은 아닙니다.", anchorSha256: hash(anchor) }, {
       review: async call => {
@@ -70,6 +157,9 @@ async function main() {
         assert.match(call.userPrompt, /does not require pixel identity/u);
         assert.match(call.userPrompt, /artwork outside the product must NOT be treated as product labels/u);
         assert.match(call.userPrompt, /necessary items must be shown correctly/u);
+        assert.match(call.userPrompt, /Distinguish UNREADABLE from CONTRADICTORY printing/u);
+        assert.match(call.userPrompt, /Relative spacing between independent items in different scenes is not a product dimension/u);
+        assert.ok(call.outputSchema, "the visual provider is required to produce structured comparison evidence");
         return JSON.stringify(good);
       },
     });
@@ -88,6 +178,42 @@ async function main() {
     await assert.rejects(reviewShoppingReferenceScene({ reference, outputPath: output, productName: "상품", imageIntent: "연출" }, {
       review: async () => JSON.stringify({ ...good, identityMatches: false, reason: "candidate is a dog at a lake, with no selected product" }),
     }), /REFERENCE_SCENE_FIDELITY_FAILED/, "natural scenery and all other checks cannot substitute for the selected product");
+    // Reproduce the reported false-rejection categories as offline provider
+    // contracts. These fixtures test policy/parsing, not a paid pixel verdict.
+    for (const [dimension, variation, reason] of [
+      ["sceneContext", "lighting-or-context", "same Aveeno pump bottle; bathroom towels replace seller splash background"],
+      ["sceneContext", "external-seller-artwork", "store badge and seller shipping notice omitted, intrinsic print preserved"],
+      ["intrinsicPrinting", "nonessential-print-legibility", "same d'Alba label blocks and readable brand; tiny lower copy is naturally unreadable"],
+      ["productShape", "viewpoint-or-pose", "same toner shoulder and base; reference tilted, candidate upright"],
+      ["productShape", "camera-distance", "same box dimensions; camera distance makes it larger than separate detached props"],
+      ["visibleOption", "main-item-only", "one exact selected main component shown, article does not call the photo a complete set"],
+    ]) {
+      const allowed = { ...good, reason, comparisons: { ...comparisons, [dimension]: { ...comparisons[dimension],
+        result: "allowed-variation", variation, basis: reason } } };
+      const approved = await reviewShoppingReferenceScene({ reference, outputPath: output,
+        productName: "selected product", imageIntent: "AI illustrative main-item scene", bodyExcerpt: "This photo shows the main product, not the complete purchased kit." }, {
+        review: async call => {
+          assert.match(call.userPrompt, /bundle product name or a paragraph discussing purchase quantity alone does not require every bought item/u);
+          return JSON.stringify(allowed);
+        },
+      });
+      assert.equal(approved.reviewStatus, "passed");
+      assert.ok(approved.reason!.includes(`${dimension}=allowed-variation(${variation})`), "retained evidence identifies the precise allowed photographic difference");
+    }
+    for (const [dimension, result, reason] of [
+      ["productShape", "contradiction", "selected Shokz broad ear unit and continuous rear band replaced by a different structure"],
+      ["productShape", "contradiction", "basket handle physically wider and appliance body crushed, not projection"],
+      ["intrinsicPrinting", "contradiction", "readable identifying brand or product line changed"],
+      ["visibleOption", "contradiction", "visible 100ml toner contradicts selected 180ml toner, no explicit named comparison"],
+      ["visibleOption", "contradiction", "photo claims complete verified set but omits required included component"],
+      ["intrinsicPrinting", "unverifiable", "identifying print and distinctive design genuinely obscured; cannot resolve selected model"],
+      ["sceneContext", "contradiction", "extra graphic headline over product photograph"],
+    ]) {
+      await assert.rejects(reviewShoppingReferenceScene({ reference, outputPath: output, productName: "selected product", imageIntent: "AI scene" }, {
+        review: async () => JSON.stringify({ ...good, reason, comparisons: { ...comparisons, [dimension]: {
+          ...comparisons[dimension], result, variation: "none", basis: reason } } }),
+      }), new RegExp(`REFERENCE_SCENE_FIDELITY_FAILED:.*${dimension}`, "u"), "all true booleans cannot override a concrete design, print or option contradiction");
+    }
     for (const key of SCENE_FIDELITY_CHECKS) {
       await assert.rejects(reviewShoppingReferenceScene({ reference, outputPath: output, productName: "상품", imageIntent: "연출" }, {
         review: async () => JSON.stringify({ ...good, checks: { ...allChecks, [key]: false } }),
@@ -101,6 +227,11 @@ async function main() {
       { ...good, illustrativeOnly: undefined },
       { ...good, checks: { ...allChecks, [SCENE_FIDELITY_CHECKS[0]]: "false" } },
       { ...good, reason: " " },
+      { ...good, comparisons: undefined },
+      { ...good, comparisons: { ...comparisons, intrinsicPrinting: undefined } },
+      { ...good, comparisons: { ...comparisons, productShape: { ...comparisons.productShape, result: "allowed-variation", variation: "external-seller-artwork" } } },
+      { ...good, comparisons: { ...comparisons, intrinsicPrinting: { ...comparisons.intrinsicPrinting, basis: " " } } },
+      { ...good, comparisons: { ...comparisons, visibleOption: { ...comparisons.visibleOption, result: "consistent", variation: "main-item-only" } } },
     ]) {
       await assert.rejects(reviewShoppingReferenceScene({ reference, outputPath: output, productName: "상품", imageIntent: "연출" }, {
         review: async () => JSON.stringify(malformed),
@@ -242,7 +373,7 @@ async function main() {
       childProcess.spawn = originalSpawn;
       syncBuiltinESMExports();
     }
-    console.log("PASS: reference choice, two-image fail-closed shape QA, ordered attachments, stable original/approved anchor, stale anchor rejection, recipe invalidation, evidence boundary");
+    console.log("PASS: strict reference selection (47 invalid boolean/observation responses, uncached retry, stage/SHA/reason diagnostics), structured intrinsic/photographic difference QA (6 allowed variations, 7 real contradictions), two-image fail-closed checks, ordered attachments, existing passed-v2 compatibility, stable original/approved anchor, stale anchor rejection, recipe invalidation, evidence boundary");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
 void main().catch(error => { console.error(error); process.exitCode = 1; });

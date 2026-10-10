@@ -17,7 +17,7 @@ import * as photorealBuild from "./lib/photoreal/build";
 import * as product9Canvas from "./lib/product-9canvas";
 import type { ProductSectionImageReviewOptions } from "./lib/product-photo-review";
 import type { generateBrandPostImages as Generate, BrandPostImageGenerationResult } from "../src/lib/brand-post-image-generation";
-import { checkedExistingJobResult, collectCompletedProductCandidates, existingJobResult, type ImageBatchJob } from "../src/lib/codex-image-generation";
+import { checkedExistingJobResult, collectCompletedProductCandidates, existingJobResult, readLegacyCodexImageCompletion, type ImageBatchJob } from "../src/lib/codex-image-generation";
 import { buildSellerOriginalRepairTarget } from "./lib/seller-original-repair-target";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-image-batch-"));
@@ -87,6 +87,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
   };
   const api = load<{
     generateBrandPostImages: typeof Generate;
+    resolveBrandPostImageBatchWorkDir: (connectKind: "SHOPPING" | "TRAVEL", workRoot: string) => string;
     imageBatchTimeoutMs: (n: number) => number;
     prepareImageBatchJobs: (targets: unknown[], manifest: unknown, productName: string, workDir: string) => ImageBatchJob[];
     prepareImageBatchJobsIsolated: (targets: unknown[], manifest: unknown, productName: string, workDir: string) => {
@@ -247,6 +248,8 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
           : () => null,
         collectCompletedProductCandidates: settings.realCache
           ? (job: ImageBatchJob) => collectCompletedProductCandidates(job, { codexHome: root }) : () => null,
+        readLegacyCodexImageCompletion: settings.realCache
+          ? (outStem: string) => readLegacyCodexImageCompletion(outStem, { codexHome: root }) : () => null,
         hasBrowserSubmission: () => false,
         hasUnresolvedCodexSubmission: () => false,
         runCodexImageBatch: async () => { throw new Error("codex transport is not used by this harness"); },
@@ -302,6 +305,66 @@ async function verifyReviewOnlyRecovery() {
     const file = path.join(dir, String(entry));
     return fs.statSync(file).isFile() ? [[String(entry), hashFile(file)]] : [];
   }));
+  function legacy(workRoot: string, completed = true) {
+    const previousDir = path.join(workRoot, "resume-v1");
+    fs.mkdirSync(previousDir, { recursive: true });
+    const outStem = path.join(previousDir, `raw-${crypto.randomBytes(32).toString("hex")}`);
+    const workspace = `${outStem}.codex-1`, threadId = crypto.randomUUID();
+    fs.mkdirSync(workspace);
+    fs.writeFileSync(`${outStem}.png`, bytes(3));
+    fs.writeFileSync(path.join(workspace, "out.png"), bytes(3));
+    const birth = fs.statSync(workspace).birthtimeMs, date = new Date(birth);
+    const directory = path.join(root, "sessions", ...date.toISOString().slice(0, 10).split("-"));
+    fs.mkdirSync(directory, { recursive: true });
+    const records = [
+      { timestamp: date.toISOString(), type: "session_meta", payload: { id: threadId, cwd: workspace, thread_source: "blogautomcp-image" } },
+      { timestamp: date.toISOString(), type: "event_msg", payload: { type: "task_started", turn_id: "legacy-turn" } },
+    ];
+    const native = path.join(root, "generated_images", threadId);
+    fs.mkdirSync(native, { recursive: true });
+    fs.writeFileSync(path.join(native, "exec.png"), bytes(3));
+    if (completed) records.push({ timestamp: new Date().toISOString(), type: "event_msg", payload: { type: "task_complete", turn_id: "legacy-turn" } });
+    fs.writeFileSync(path.join(directory, `rollout-${date.toISOString().slice(0, 19).replace(/:/gu, "-")}-${threadId}.jsonl`),
+      records.map(record => JSON.stringify(record)).join("\n") + "\n");
+    return { outStem, previousDir };
+  }
+  await check("receipt-less legacy threads proven complete permit policy migration without adopting or changing old outputs", async () => {
+    const h = harness({ realCache: true });
+    const workRoot = path.join(h.packageDir, "image-generation-work");
+    const first = legacy(workRoot), second = legacy(workRoot);
+    const before = tree(first.previousDir);
+    assert.equal(h.resolveBrandPostImageBatchWorkDir("SHOPPING", workRoot), path.join(workRoot, "resume-v2"));
+    assert.deepEqual(tree(first.previousDir), before, "read-only retirement does not create receipts or copy raw output into v2");
+    assert.equal(fs.existsSync(path.join(workRoot, "resume-v2")), false);
+    assert.equal(h.spawns, 0);
+    const target = { request: { requestId: "fixture", slotId: "section:image:1", sectionId: "section" }, sectionId: "section",
+      role: "body", imageSource: "staged-ai", sectionTitle: "현재 제목", imageIntent: "자연스러운 새 연출", bodyExcerpt: "현재 본문",
+      referenceContext: { prompt: "current recipe", referenceImagePaths: [sourcePath], referenceHashes: [hashFile(sourcePath)],
+        reference: { path: sourcePath, sha256: hashFile(sourcePath), subject: "product", geometry: "intact", labels: "original" }, anchorSha256: "" } };
+    h.manifest.connectKind = "SHOPPING";
+    const [job] = h.prepareImageBatchJobs([target], h.manifest, "상품", path.join(workRoot, "resume-v2"));
+    assert.ok(job.outStem.startsWith(path.join(workRoot, "resume-v2")));
+    assert.equal(job.reviewOnly, undefined, "old composite outputs are never silently approved under the new strategy");
+    assert.notEqual(job.outStem, first.outStem);
+    assert.notEqual(job.outStem, second.outStem);
+    assert.equal(fs.existsSync(`${job.outStem}.png`), false);
+    assert.deepEqual(tree(first.previousDir), before);
+    assert.equal(h.spawns, 0);
+  });
+  await check("one completed legacy slot cannot clear an unfinished or explicitly uncertain sibling request", async () => {
+    for (const kind of ["unfinished", "pending-receipt", "corrupt-checkpoint", "active-lock"] as const) {
+      const h = harness({ realCache: true }), workRoot = path.join(h.packageDir, "image-generation-work");
+      const first = legacy(workRoot), uncertain = legacy(workRoot, kind !== "unfinished");
+      if (kind === "pending-receipt") fs.writeFileSync(`${uncertain.outStem}.codex-submission.json`, JSON.stringify({ state: "submitting", workspace: `${uncertain.outStem}.codex-1`, startedAtMs: Date.now(), threadId: null }));
+      if (kind === "corrupt-checkpoint") fs.writeFileSync(`${uncertain.outStem}.checkpoint.jsonl`, "{partial");
+      if (kind === "active-lock") fs.writeFileSync(`${uncertain.outStem}.lock`, JSON.stringify({ pid: process.pid, token: "existing-owner" }));
+      const before = tree(first.previousDir);
+      assert.throws(() => h.resolveBrandPostImageBatchWorkDir("SHOPPING", workRoot), /IMAGE_RESUME_REQUIRED/, kind);
+      assert.deepEqual(tree(first.previousDir), before, `${kind}: uncertain evidence survives intact`);
+      assert.equal(fs.existsSync(path.join(workRoot, "resume-v2")), false);
+      assert.equal(h.spawns, 0);
+    }
+  });
   function fixture(engine: "codex" | "browser", transport: "codex" | "browser" = "codex") {
     const h = harness({ engine, realCache: true });
     h.manifest.connectKind = "SHOPPING";

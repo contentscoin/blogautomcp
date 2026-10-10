@@ -9,6 +9,7 @@ import {
   buildCodexImageInstruction,
   collectCompletedProductCandidates,
   locateCodexImage,
+  readLegacyCodexImageCompletion,
   resolveBrandPostImageEngine,
   runCodexImageBatch,
   type ImageBatchJob,
@@ -82,6 +83,84 @@ async function main() {
   const codexHome = path.join(root, "codex-home");
   const job = (id: string, extra: Partial<ImageBatchJob> = {}): ImageBatchJob => ({ id, prompt: `PROMPT-${id}`, outStem: path.join(root, `raw-${id}`), referenceImagePaths: [], ...extra });
   try {
+    // Receipt-less pre-v1 requests can retire only with one exact, genuinely completed native thread.
+    const legacyFixture = () => {
+      const home = fs.mkdtempSync(path.join(root, "legacy-home-"));
+      const outStem = path.join(home, `raw-${crypto.randomBytes(32).toString("hex")}`);
+      const workspace = `${outStem}.codex-1`, threadId = crypto.randomUUID();
+      fs.mkdirSync(workspace);
+      fs.writeFileSync(`${outStem}.png`, PNG);
+      const out = path.join(workspace, "out.png");
+      fs.writeFileSync(out, PNG);
+      const createdAtMs = fs.statSync(workspace).birthtimeMs;
+      const nativeDirectory = path.join(home, "generated_images", threadId);
+      fs.mkdirSync(nativeDirectory, { recursive: true });
+      const native = path.join(nativeDirectory, "exec.png");
+      fs.writeFileSync(native, PNG);
+      const stamp = new Date(createdAtMs).toISOString().slice(0, 19).replace(/:/gu, "-");
+      const sessions = path.join(home, "sessions", ...new Date(createdAtMs).toISOString().slice(0, 10).split("-"));
+      fs.mkdirSync(sessions, { recursive: true });
+      const rollout = path.join(sessions, `rollout-${stamp}-${threadId}.jsonl`);
+      const records = [
+        { timestamp: new Date(createdAtMs).toISOString(), type: "session_meta", payload: { id: threadId, cwd: workspace, thread_source: "blogautomcp-image" } },
+        { timestamp: new Date(createdAtMs).toISOString(), type: "event_msg", payload: { type: "task_started", turn_id: "exact-turn" } },
+        { timestamp: new Date(Date.now()).toISOString(), type: "event_msg", payload: { type: "task_complete", turn_id: "exact-turn" } },
+      ];
+      const save = () => fs.writeFileSync(rollout, records.map(record => JSON.stringify(record)).join("\n") + "\n");
+      save();
+      const probe = () => readLegacyCodexImageCompletion(outStem, { codexHome: home });
+      return { home, outStem, workspace, threadId, nativeDirectory, native, out, sessions, rollout, records, save, probe, stamp, createdAtMs };
+    };
+    {
+      const f = legacyFixture(), files = [`${f.outStem}.png`, f.out, f.native, f.rollout];
+      const before = files.map(file => fs.readFileSync(file));
+      const proof = f.probe();
+      assert.equal(proof?.outputSha256, crypto.createHash("sha256").update(PNG).digest("hex"));
+      assert.equal(proof?.workspaces.length, 1);
+      assert.equal(proof?.workspaces[0].threadId, f.threadId);
+      assert.equal(proof?.workspaces[0].completion.source, "rollout");
+      assert.deepEqual(files.map(file => fs.readFileSync(file)), before, "completion lookup never changes runtime output/rollout bytes");
+      fs.copyFileSync(f.native, path.join(f.nativeDirectory, "duplicate.png"));
+      assert.ok(f.probe(), "same-byte native copies remain a single output");
+      const unrelated = path.join(f.sessions, `rollout-${f.stamp}-${crypto.randomUUID()}.jsonl`);
+      fs.writeFileSync(unrelated, JSON.stringify({ type: "session_meta", payload: { id: "unrelated", cwd: root, thread_source: "desktop" } }) + "\n{unparseable unrelated conversation");
+      assert.ok(f.probe(), "nearby unrelated session conversations are not inspected");
+    }
+    const uncertainLegacy: Array<[string, (f: ReturnType<typeof legacyFixture>) => void]> = [
+      ["no actual completion", f => { f.records.pop(); f.save(); }],
+      ["failed request", f => { f.records[2].payload.type = "task_failed"; f.save(); }],
+      ["turn identity mismatch", f => { f.records[2].payload.turn_id = "other-turn"; f.save(); }],
+      ["wrong exact cwd", f => { f.records[0].payload.cwd = root; f.save(); }],
+      ["wrong source", f => { f.records[0].payload.thread_source = "desktop"; f.save(); }],
+      ["wrong thread id", f => { f.records[0].payload.id = crypto.randomUUID(); f.save(); }],
+      ["reused thread unfinished turn", f => { f.records.push({ ...f.records[1], payload: { type: "task_started", turn_id: "reused-turn" } }); f.save(); }],
+      ["second same-workspace thread", f => {
+        const otherId = crypto.randomUUID(), records = f.records.map(record => ({ ...record, payload: { ...record.payload } }));
+        records[0].payload.id = otherId;
+        fs.writeFileSync(path.join(f.sessions, `rollout-${f.stamp}-${otherId}.jsonl`), records.map(record => JSON.stringify(record)).join("\n") + "\n");
+      }],
+      ["filename outside creation scope", f => { fs.renameSync(f.rollout, path.join(f.sessions, `rollout-2000-01-01T00-00-00-${f.threadId}.jsonl`)); }],
+      ["metadata outside creation scope", f => { f.records[0].timestamp = new Date(f.createdAtMs + 61_000).toISOString(); f.save(); }],
+      ["future completion", f => { f.records[2].timestamp = new Date(Date.now() + 120_000).toISOString(); f.save(); }],
+      ["workspace reused after completion", f => { const future = new Date(Date.now() + 120_000); fs.utimesSync(f.workspace, future, future); }],
+      ["native modified after completion", f => { const future = new Date(Date.now() + 120_000); fs.utimesSync(f.native, future, future); }],
+      ["out modified after completion", f => { const future = new Date(Date.now() + 120_000); fs.utimesSync(f.out, future, future); }],
+      ["raw hash differs", f => { fs.appendFileSync(`${f.outStem}.png`, "changed"); }],
+      ["workspace hash differs", f => { fs.appendFileSync(f.out, "changed"); }],
+      ["native hash differs", f => { fs.appendFileSync(f.native, "changed"); }],
+      ["native missing in exact thread", f => { fs.renameSync(f.nativeDirectory, `${f.nativeDirectory}-other-thread`); }],
+      ["multiple actual outputs", f => { fs.writeFileSync(path.join(f.nativeDirectory, "second.png"), Buffer.concat([PNG, Buffer.from("second")])); }],
+      ["incomplete native copy", f => { fs.writeFileSync(path.join(f.nativeDirectory, "partial.png"), "partial"); }],
+      ["raw-only unknown second attempt", f => { fs.mkdirSync(`${f.outStem}.codex-2`); }],
+      ...[".codex-submission.json", ".checkpoint.jsonl", ".lock", ".lock.recovery", ".resolution.lock", ".resolution.lock.recovery"].map(extension =>
+        [extension, (f: ReturnType<typeof legacyFixture>) => fs.writeFileSync(`${f.outStem}${extension}`, "uncertain")] as [string, (f: ReturnType<typeof legacyFixture>) => void]),
+    ];
+    for (const [name, mutate] of uncertainLegacy) {
+      const f = legacyFixture();
+      assert.ok(f.probe(), `${name}: starts from a proven completed fixture`);
+      mutate(f);
+      assert.equal(f.probe(), null, `${name}: absence/ambiguity remains uncertain and preserves existing requests`);
+    }
     // 0. Policy: default engine is Codex, model label is gpt-image-2, env can switch back to browser.
     assert.equal((draftRuntimePolicy as Record<string, string>).BRAND_POST_IMAGE_ENGINE, "codex");
     assert.equal(resolveBrandPostImageEngine({}), "codex");

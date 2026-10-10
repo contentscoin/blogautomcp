@@ -457,3 +457,36 @@ test('repair malformed/auth/update/busy requests cannot mutate', async () => {
   h.state.authorized = false; assert.equal((await h.api.materialsRepairBlockedPost(h.request({}))).status, 401);
   h.state.authorized = true; h.state.updateBlocked = true; assert.equal((await h.api.materialsRepairBlockedPost(h.request({}))).status, 423);
 });
+
+
+test('job views distinguish restored current materials from immutable failed execution history', async () => {
+  const h = harness(); const selected = h.product(0);
+  const oldJob = { jobId: 'old-failure', kind: 'prepare', status: 'failed', startedAt: h.state.now,
+    items: [{ productId: selected.productId, status: 'failed', stage: '확인 필요', error: 'old ambiguity', errorCode: 'IMAGE_OUTPUT_AMBIGUOUS' }] };
+  h.state.jobs.set(oldJob.jobId, oldJob);
+  const result = await h.api.materialsGet(h.request(undefined, '?jobId=old-failure'));
+  assert.equal(result.body.data.currentReadyCount, 1);
+  assert.equal(result.body.data.readyCount, 0);
+  assert.equal(result.body.data.items[0].error, 'old ambiguity');
+  assert.equal(result.body.data.status, 'failed');
+  const history = await h.api.materialsGet(h.request(undefined, '?jobsOnly=1'));
+  assert.equal(history.body.data.materials[0].ready, true);
+  assert.equal(history.body.data.materials[0].status, 'READY');
+  assert.deepEqual(history.body.data.jobs[0], oldJob);
+  assert.equal(h.state.saves, 0); assert.equal(h.state.runs.length, 0);
+});
+
+test('old ready execution cannot certify a currently blocked or uncertain material', async () => {
+  const h = harness(); const selected = h.product(0);
+  h.state.manifests.get(selected.productId).fixtureBlockers = [{ reason: 'source mismatch' }];
+  h.state.jobs.set('past-ready', { jobId: 'past-ready', kind: 'repair', status: 'completed', startedAt: h.state.now,
+    items: [{ productId: selected.productId, status: 'ready', stage: '준비완료' }] });
+  const result = await h.api.materialsGet(h.request(undefined, '?jobId=past-ready'));
+  assert.equal(result.body.data.readyCount, 1); assert.equal(result.body.data.currentReadyCount, 0);
+  assert.equal(result.body.data.currentBlockedCount, 1);
+  h.state.products.get(selected.productId).status = 'OUTCOME_UNKNOWN';
+  const history = await h.api.materialsGet(h.request(undefined, '?jobsOnly=1'));
+  assert.equal(history.body.data.materials[0].ready, false);
+  assert.equal(history.body.data.materials[0].status, 'OUTCOME_UNKNOWN');
+  assert.equal(h.state.saves, 0);
+});

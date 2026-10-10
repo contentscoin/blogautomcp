@@ -58,6 +58,9 @@ async function materialJobView(job: MaterialJob): Promise<Record<string, unknown
   });
   const workflowPending = ["running", "queued"].includes(job.status) || materials.some(material => material.materialStatus === "PREPARING");
   return { ...job, materials, workflowPending, acceptedCount: job.items.length,
+    // These describe the current saved material without rewriting job history.
+    currentReadyCount: materials.filter(material => material.ready === true && material.materialStatus === "READY").length,
+    currentBlockedCount: materials.filter(material => material.materialStatus === "BLOCKED").length,
     readyCount: job.items.filter(item => item.status === "ready").length,
     failedCount: job.items.filter(item => item.status === "failed").length,
     interruptedCount: job.items.filter(item => item.status === "interrupted").length };
@@ -76,7 +79,19 @@ export async function materialsGet(request: NextRequest) {
       const job = listMaterialJobs().find(item => item.sourceJobId === sourceJobId);
       return NextResponse.json(job ? { success: true, data: await materialJobView(job) } : { success: false, error: "요청에 연결된 소재 작업이 없습니다." }, { status: job ? 200 : 404 });
     }
-    if (request.nextUrl.searchParams.get("jobsOnly") === "1") return NextResponse.json({ success: true, data: { jobs: listMaterialJobs().slice(0, 50) } });
+    if (request.nextUrl.searchParams.get("jobsOnly") === "1") {
+      const jobs = listMaterialJobs().slice(0, 50);
+      const productIds = [...new Set(jobs.flatMap(job => job.items.map(item => item.productId)))];
+      const products = productIds.length ? await prisma.brandLink.findMany({
+        where: { id: { in: productIds } },
+        select: { id: true, productName: true, status: true, connectKind: true },
+      }) : [];
+      const materials = products.flatMap(product => {
+        const current = readMaterialView(product);
+        return current ? [{ productId: current.productId, ready: current.ready, status: current.materialStatus, blockers: current.blockers }] : [];
+      });
+      return NextResponse.json({ success: true, data: { jobs, materials } });
+    }
     const kind = request.nextUrl.searchParams.get("connectKind")?.toUpperCase();
     const products = await prisma.brandLink.findMany({ orderBy: { createdAt: "desc" },
       ...(kind === "SHOPPING" || kind === "TRAVEL" ? { where: { connectKind: kind } } : {}),

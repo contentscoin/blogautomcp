@@ -162,6 +162,7 @@ async function main() {
     globalThis.fetch = async () => new Response(new ReadableStream<Uint8Array>({ pull(controller) { controller.enqueue(new Uint8Array(13 * 1024 * 1024)); }, cancel() { cancelled = true; } }), { headers: { "content-type": "image/png" } });
     await assert.rejects(downloadProductSourcePhoto(urls[2], dir), /크기를 초과/);
     assert.equal(cancelled, true);
+    globalThis.fetch = async () => { throw new Error("Network forbidden in this fixture"); };
 
     // Offline provider response fixture exercises real QC candidate deduplication.
     const copies = Array.from({ length: 13 }, (_, i) => path.join(dir, `notice-${i}.png`));
@@ -174,12 +175,69 @@ async function main() {
     const photoReviewModule = { exports: {} as typeof import("./lib/product-photo-review") };
     let reviews = 0;
     vm.runInNewContext(code, { exports: photoReviewModule.exports, module: photoReviewModule, require: (name: string) => name === "./codex-draft-provider" ? {
-      runCodexDraft: async (input: { imagePaths: string[] }) => { reviews++; return JSON.stringify({ productPhoto: input.imagePaths[0] === actual }); },
+      runCodexDraft: async (input: { imagePaths: string[] }) => { reviews++; return JSON.stringify({ productPhoto: input.imagePaths[0] === actual,
+        reason: input.imagePaths[0] === actual ? "Selected product is visible" : "Notice, not the selected product" }); },
     } : createRequire(path.resolve("scripts/lib/product-photo-review.ts"))(name) });
     assert.equal(await photoReviewModule.exports.selectVerifiedProductPhoto([dir, "missing.png", ...copies, actual], "상품"), actual);
     assert.equal(reviews, 2, "13 copies of one notice consume only one review, preserving the true-photo candidate");
     assert.equal(await photoReviewModule.exports.selectVerifiedProductPhoto(copies, "상품"), null);
     assert.equal(reviews, 2, "negative byte reviews remain cached");
+    const malformedAnswers = [
+      JSON.stringify({ reason: "Missing decision" }),
+      ...["true", "false", null, 1].map(productPhoto => JSON.stringify({ productPhoto, reason: "Wrong decision type" })),
+      JSON.stringify({ productPhoto: true }), JSON.stringify({ productPhoto: false }),
+      ...["", "   ", null, 1, {}].map(reason => JSON.stringify({ productPhoto: false, reason })),
+      "broken JSON", "[]", "null", "true", JSON.stringify([{ productPhoto: true, reason: "Wrong top-level array" }]),
+    ];
+    for (const [index, malformed] of malformedAnswers.entries()) {
+      let calls = 0;
+      const rejected: unknown[] = [];
+      const name = `malformed-photo-${index}`;
+      const dependencies = { review: async () => {
+        calls++;
+        return calls === 1 ? malformed : JSON.stringify({ productPhoto: true, reason: "Valid complete selected product" });
+      }, onRejection: (diagnostic: unknown) => rejected.push(diagnostic) };
+      await assert.rejects(photoReviewModule.exports.selectVerifiedProductPhotos([actual], name, 1, dependencies), /REFERENCE_SCENE_REVIEW_INVALID/,
+        `malformed response must not become a semantic photo rejection (${index})`);
+      assert.equal(rejected.length, 0, "invalid response has no semantic rejection diagnostic");
+      assert.deepEqual([...await photoReviewModule.exports.selectVerifiedProductPhotos([actual], name, 1, dependencies)], [actual],
+        "a corrected response for the same bytes reaches fresh review instead of a malformed negative cache");
+      assert.equal(calls, 2);
+    }
+    const candidateSha256 = crypto.createHash("sha256").update(fs.readFileSync(actual)).digest("hex");
+    const diagnostics: Array<{ stage: string; candidateSha256: string; failedChecks: string[]; reason: string }> = [];
+    let rejectionCalls = 0;
+    const rejectedPhoto = { review: async () => { rejectionCalls++; return JSON.stringify({ productPhoto: false, reason: "Visible product is a different model" }); },
+      onRejection: (diagnostic: unknown) => diagnostics.push(JSON.parse(JSON.stringify(diagnostic))) };
+    assert.deepEqual([...await photoReviewModule.exports.selectVerifiedProductPhotos([actual, actual], "valid-rejection", 12, rejectedPhoto)], []);
+    assert.equal(rejectionCalls, 1);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0].stage, "seller-product-photo");
+    assert.equal(diagnostics[0].candidateSha256, candidateSha256);
+    assert.deepEqual(diagnostics[0].failedChecks, ["productPhoto"]);
+    assert.equal(diagnostics[0].reason, "Visible product is a different model");
+    assert.deepEqual([...await photoReviewModule.exports.selectVerifiedProductPhotos([actual], "valid-rejection", 12, rejectedPhoto)], []);
+    assert.equal(rejectionCalls, 1, "valid false verdict reuses the negative byte cache");
+    assert.equal(diagnostics.length, 2, "cached rejection still reports the candidate and reason");
+    assert.deepEqual(diagnostics[1], diagnostics[0], "reusing a valid rejection preserves its exact diagnostic");
+    const distinct = await Promise.all(Array.from({ length: 13 }, async (_, index) => {
+      const file = path.join(dir, `distinct-${index}.png`);
+      await sharp({ create: { width: 320, height: 240, channels: 3, background: { r: index + 1, g: 22, b: 33 } } }).png().toFile(file);
+      return file;
+    }));
+    let budgetCalls = 0;
+    const acceptedPhoto = { review: async () => { budgetCalls++; return JSON.stringify({ productPhoto: true, reason: "Selected product is intact and identifiable" }); } };
+    assert.deepEqual([...await photoReviewModule.exports.selectVerifiedProductPhotos(distinct, "review-budget", 20, acceptedPhoto)], distinct.slice(0, 12));
+    assert.equal(budgetCalls, 12, "the existing twelve distinct-candidate review budget remains bounded");
+    budgetCalls = 0;
+    assert.deepEqual([...await photoReviewModule.exports.selectVerifiedProductPhotos(distinct, "accepted-maximum", 2, acceptedPhoto)], distinct.slice(0, 2));
+    assert.equal(budgetCalls, 2, "the accepted-photo maximum stops review once filled");
+    const longPhoto = path.join(dir, "long-photo.png");
+    await sharp({ create: { width: 320, height: 1000, channels: 3, background: "white" } }).png().toFile(longPhoto);
+    budgetCalls = 0;
+    assert.deepEqual([...await photoReviewModule.exports.selectVerifiedProductPhotos([dir, "missing.png", badCopy, longPhoto, actual], "geometry-filter", 12, acceptedPhoto)], [actual]);
+    assert.equal(budgetCalls, 1, "directories, missing, invalid and overly long files never reach photo review");
+    console.log(`PASS strict seller photo verdicts: ${malformedAnswers.length} invalid responses fail closed without negative caching; valid true/false, cached SHA diagnostics, geometry, twelve-candidate budget and accepted maximum preserved`);
     console.log("PASS shopping source recovery: all 5 composites retain originals; package survives temp cleanup; hashes, strict QC, duplicate notices, seller fallback, URL and streaming bounds verified offline");
   } finally {
     globalThis.fetch = originalFetch;

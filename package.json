@@ -1,6 +1,6 @@
 {
   "name": "brandconnect-automation",
-  "version": "1.3.105",
+  "version": "1.3.106",
   "description": "네이버 쇼핑 커넥트(브랜드커넥트) 자동 블로그 포스팅 도구",
   "private": true,
   "scripts": {
@@ -15,7 +15,7 @@
     "build": "prisma generate && node scripts/cleanup-prisma-generated-temp.mjs && next build --webpack",
     "typecheck": "tsc --noEmit",
     "test:material-regression": "node scripts/verify-material-regression.mjs",
-    "test:failed-material-rewrite": "tsx scripts/verify-failed-material-rewrite.ts && node --test scripts/verify-material-api.cjs && node scripts/verify-material-controls.cjs && node scripts/verify-failed-material-controls.cjs",
+    "test:failed-material-rewrite": "tsx --test src/lib/material-job-display.test.tsx && tsx scripts/verify-failed-material-rewrite.ts && node --test scripts/verify-material-api.cjs && node scripts/verify-material-controls.cjs && node scripts/verify-failed-material-controls.cjs",
     "test:blocked-material-repair": "tsx scripts/verify-blocked-material-repair.ts && node --test scripts/verify-material-api.cjs && node scripts/verify-material-controls.cjs && node scripts/verify-failed-material-controls.cjs",
     "test:mcp-activation": "node scripts/verify-mcp-activation-e2e.mjs",
     "test:mcp-delivery": "node --test src/lib/remote-agent-completion.test.cjs src/lib/remote-agent-claim.test.cjs src/lib/remote-device-pairing.test.cjs apps/sites/tests/*.test.cjs",
@@ -50,7 +50,7 @@
     "test:codex-image": "tsx scripts/verify-codex-image-generation.ts",
     "test:remote-product-references": "tsx scripts/verify-remote-product-reference-inputs.ts",
     "test:shopping-reference-scenes": "tsx scripts/verify-shopping-reference-scene.ts && tsx scripts/verify-reference-scene-gates.ts && npm run test:remote-product-references",
-    "test:shopping-natural-photos": "tsx scripts/verify-shopping-photo-plan.ts && tsx scripts/verify-natural-photo-migration.ts && tsx scripts/verify-natural-photo-actions.ts && tsx scripts/verify-natural-photo-application.ts && tsx scripts/verify-image-policy-resume.ts && tsx scripts/verify-shopping-reference-scene.ts && tsx scripts/verify-reference-scene-gates.ts && tsx scripts/verify-publish-image-audit.ts && tsx scripts/verify-shopping-thumbnail-copy.ts",
+    "test:shopping-natural-photos": "tsx scripts/verify-shopping-image-sources.ts && tsx scripts/verify-shopping-photo-plan.ts && tsx scripts/verify-natural-photo-migration.ts && tsx scripts/verify-natural-photo-actions.ts && tsx scripts/verify-natural-photo-application.ts && tsx scripts/verify-image-policy-resume.ts && tsx scripts/verify-shopping-reference-scene.ts && tsx scripts/verify-reference-scene-gates.ts && tsx scripts/verify-publish-image-audit.ts && tsx scripts/verify-shopping-thumbnail-copy.ts",
     "test:draft-reliability": "tsx scripts/verify-draft-reliability.ts",
     "test:proposal-audit": "tsx scripts/verify-product-proposal-audit.ts",
     "test:image-replan": "tsx scripts/verify-image-coverage-replan.ts",

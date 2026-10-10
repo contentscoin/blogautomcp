@@ -28,7 +28,7 @@ import {
 import { isChatGptBrowserAutomationEnabled } from "./chatgpt-browser-automation";
 import { imageBatchBudgetMs, imageJobBudgetMs, IMAGE_TIMER_MAX_MS } from "../../scripts/lib/image-timeout-policy";
 import { buildBlogPhotorealDirection } from "../../scripts/lib/photoreal/build";
-import { assertProductImageReferences, checkedExistingJobResult, collectCompletedProductCandidates, existingJobResult, hasBrowserSubmission, hasUnresolvedCodexSubmission, resolveBrandPostImageEngine, runCodexImageBatch, type ImageBatchJob } from "./codex-image-generation";
+import { assertProductImageReferences, checkedExistingJobResult, collectCompletedProductCandidates, existingJobResult, hasBrowserSubmission, hasUnresolvedCodexSubmission, readLegacyCodexImageCompletion, resolveBrandPostImageEngine, runCodexImageBatch, type ImageBatchJob } from "./codex-image-generation";
 import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene, brandPostSectionSlotId, isShoppingLifestyleImage, REFERENCE_SCENE_REVIEW_CHECKS, type BrandPostImageSourceHint } from "./brand-post-image-evidence";
 import { buildProduct9Canvas, type Product9Canvas, type ProductPhysicalScale } from "../../scripts/lib/product-9canvas";
 import { buildShoppingReferenceScenePrompt, reviewShoppingReferenceScene, selectShoppingSceneReference,
@@ -589,7 +589,7 @@ function retiredImageJobIsSettled(outStem: string): boolean {
       terminalReceipt = true;
     } catch { return false; }
   }
-  return terminalReceipt;
+  return terminalReceipt || Boolean(readLegacyCodexImageCompletion(outStem));
 }
 
 function assertRetiredImageJobsSettled(workDir: string): void {

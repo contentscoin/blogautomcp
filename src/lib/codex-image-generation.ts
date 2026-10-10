@@ -263,9 +263,10 @@ export function checkedExistingJobResult(job: ImageBatchJob, options: CodexImage
 }
 
 /** Native outputs of one proven completed request. Workspace helpers and references are never candidates. */
-function completedProductRollout(prior: CodexImageSubmission, codexHome: string): CompletedProductCandidateSet["completion"] | null {
+function completedProductRollout(prior: CodexImageSubmission, codexHome: string, exactRolloutPath?: string): CompletedProductCandidateSet["completion"] | null {
   const matching: string[] = [];
-  for (const offset of [-1, 0, 1]) {
+  if (exactRolloutPath) matching.push(exactRolloutPath);
+  else for (const offset of [-1, 0, 1]) {
     const date = new Date(prior.startedAtMs + offset * 86_400_000).toISOString().slice(0, 10).split("-");
     const directory = path.join(codexHome, "sessions", ...date);
     matching.push(...safeList(directory).filter(file => path.basename(file).startsWith("rollout-") && path.basename(file).endsWith(`-${prior.threadId}.jsonl`)));
@@ -281,7 +282,8 @@ function completedProductRollout(prior: CodexImageSubmission, codexHome: string)
     const metadata = records.filter(record => record.type === "session_meta");
     if (metadata.length !== 1 || metadata[0].payload?.id !== prior.threadId || metadata[0].payload?.thread_source !== "blogautomcp-image" ||
         typeof metadata[0].payload?.cwd !== "string" || path.resolve(metadata[0].payload.cwd) !== path.resolve(prior.workspace) ||
-        Date.parse(metadata[0].timestamp) < prior.startedAtMs - 1000 || !Number.isFinite(Date.parse(metadata[0].timestamp))) throw refused();
+        Date.parse(metadata[0].timestamp) < prior.startedAtMs - 1000 || !Number.isFinite(Date.parse(metadata[0].timestamp)) ||
+        (exactRolloutPath && Date.parse(metadata[0].timestamp) > prior.startedAtMs + 60_000)) throw refused();
     const lifecycle = records.filter(record => record.type === "event_msg" &&
       /^(?:task_started|task_complete|task_failed|task_cancelled|turn_failed|turn_aborted)$/u.test(record.payload?.type || ""));
     if (lifecycle.length !== 2 || lifecycle[0].payload.type !== "task_started" || lifecycle[1].payload.type !== "task_complete" ||
@@ -291,6 +293,94 @@ function completedProductRollout(prior: CodexImageSubmission, codexHome: string)
     if (!Number.isFinite(startedAtMs) || !Number.isFinite(completedAtMs) || startedAtMs < prior.startedAtMs - 1000 || completedAtMs < startedAtMs) throw refused();
     return { source: "rollout", completedAtMs, rolloutPath, rolloutSha256: crypto.createHash("sha256").update(bytes).digest("hex") };
   } catch { throw refused(); }
+}
+
+export interface LegacyCodexImageCompletionProof {
+  outputSha256: string;
+  workspaces: Array<{ workspace: string; threadId: string; completion: CompletedProductCandidateSet["completion"]; nativePath: string; nativeSha256: string }>;
+}
+
+function firstRolloutMetadata(file: string): { id?: string; cwd?: string; thread_source?: string } | null {
+  let descriptor: number | undefined;
+  try {
+    descriptor = fs.openSync(file, "r");
+    const chunks: Buffer[] = [];
+    // Only inspect the first metadata line of nearby filenames, never another session's conversation.
+    for (let offset = 0; offset < 128 * 1024; offset += 4096) {
+      const chunk = Buffer.alloc(4096), count = fs.readSync(descriptor, chunk, 0, chunk.length, offset);
+      if (!count) break;
+      const newline = chunk.subarray(0, count).indexOf(10);
+      chunks.push(chunk.subarray(0, newline >= 0 ? newline : count));
+      if (newline >= 0) {
+        const record = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        return record.type === "session_meta" ? record.payload : null;
+      }
+    }
+  } catch { /* Metadata absence or corruption never proves completion. */ }
+  finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
+  return null;
+}
+
+/** Read-only retirement proof for versions which saved raw bytes before durable submission receipts existed. */
+export function readLegacyCodexImageCompletion(outStem: string, options: { codexHome?: string } = {}): LegacyCodexImageCompletionProof | null {
+  try {
+    // A real receipt, checkpoint or lock must retain its own stricter admission/resume semantics.
+    if ([".codex-submission.json", ".checkpoint.jsonl", ".lock", ".lock.recovery", ".resolution.lock", ".resolution.lock.recovery"]
+      .some(extension => fs.existsSync(`${outStem}${extension}`))) return null;
+    const rawPaths = RESULT_EXTENSIONS.map(extension => `${outStem}${extension}`).filter(file => fs.existsSync(file));
+    if (!rawPaths.length || rawPaths.some(file => !isImageFile(file) || path.resolve(fs.realpathSync(file)) !== path.resolve(file))) return null;
+    const hashes = new Set(rawPaths.map(file => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")));
+    if (hashes.size !== 1) return null;
+    const outputSha256 = [...hashes][0], codexHome = codexHomeDir(options.codexHome);
+    const parent = path.dirname(outStem), name = path.basename(outStem);
+    const workspaces = fs.readdirSync(parent).filter(entry => entry.startsWith(`${name}.codex-`) && /^\d+$/u.test(entry.slice(`${name}.codex-`.length)))
+      .map(entry => path.join(parent, entry));
+    if (!workspaces.length) return null;
+    const proofs: LegacyCodexImageCompletionProof["workspaces"] = [];
+    for (const workspace of workspaces) {
+      const createdAtMs = fs.statSync(workspace).birthtimeMs;
+      if (!fs.statSync(workspace).isDirectory() || !Number.isFinite(createdAtMs) || createdAtMs <= 0 ||
+          path.resolve(fs.realpathSync(workspace)) !== path.resolve(workspace)) return null;
+      const dayDirectories = new Set<string>();
+      for (const offset of [-1, 0, 1]) {
+        const date = new Date(createdAtMs + offset * 86_400_000);
+        dayDirectories.add(path.join(codexHome, "sessions", ...date.toISOString().slice(0, 10).split("-")));
+        dayDirectories.add(path.join(codexHome, "sessions", String(date.getFullYear()), String(date.getMonth() + 1).padStart(2, "0"), String(date.getDate()).padStart(2, "0")));
+      }
+      const matching: Array<{ path: string; threadId: string }> = [];
+      for (const directory of dayDirectories) for (const file of safeList(directory)) {
+        const match = /^rollout-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})-([a-z0-9_-]+)\.jsonl$/iu.exec(path.basename(file));
+        if (!match) continue;
+        const stamp = `${match[1].slice(0, 13)}:${match[1].slice(14, 16)}:${match[1].slice(17, 19)}`;
+        if (![Date.parse(stamp), Date.parse(`${stamp}Z`)].some(value => Number.isFinite(value) && Math.abs(value - createdAtMs) <= 30_000) ||
+            path.resolve(fs.realpathSync(file)) !== path.resolve(file)) continue;
+        const metadata = firstRolloutMetadata(file);
+        if (metadata?.cwd && path.resolve(metadata.cwd) === path.resolve(workspace) && metadata.id === match[2] && metadata.thread_source === "blogautomcp-image")
+          matching.push({ path: file, threadId: match[2] });
+      }
+      if (matching.length !== 1) return null;
+      const match = matching[0];
+      const completion = completedProductRollout({ state: "completed", workspace, startedAtMs: createdAtMs, threadId: match.threadId }, codexHome, match.path);
+      if (!completion || completion.completedAtMs > Date.now() + 1000 || fs.statSync(workspace).mtimeMs > completion.completedAtMs + 1000) return null;
+      const nativeDirectory = path.join(codexHome, "generated_images", match.threadId);
+      if (path.resolve(fs.realpathSync(nativeDirectory)) !== path.resolve(nativeDirectory)) return null;
+      const native = safeList(nativeDirectory).filter(file => RESULT_EXTENSIONS.includes(path.extname(file).toLowerCase()));
+      if (native.some(file => !isImageFile(file) || fs.statSync(file).mtimeMs < createdAtMs - 1000 ||
+          fs.statSync(file).mtimeMs > completion.completedAtMs + 1000)) return null;
+      const nativeHashes = new Map<string, string>();
+      for (const file of native) {
+        if (path.dirname(fs.realpathSync(file)) !== fs.realpathSync(nativeDirectory)) return null;
+        nativeHashes.set(crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"), file);
+      }
+      const out = path.join(workspace, "out.png");
+      if (nativeHashes.size !== 1 || !isImageFile(out) || path.dirname(fs.realpathSync(out)) !== fs.realpathSync(workspace) ||
+          fs.statSync(out).mtimeMs < createdAtMs - 1000 || fs.statSync(out).mtimeMs > completion.completedAtMs + 1000) return null;
+      const nativeSha256 = [...nativeHashes.keys()][0];
+      if (crypto.createHash("sha256").update(fs.readFileSync(out)).digest("hex") !== nativeSha256) return null;
+      proofs.push({ workspace, threadId: match.threadId, completion, nativePath: nativeHashes.get(nativeSha256)!, nativeSha256 });
+    }
+    return proofs.some(proof => proof.nativeSha256 === outputSha256) ? { outputSha256, workspaces: proofs } : null;
+  } catch { return null; }
 }
 
 export function collectCompletedProductCandidates(job: ImageBatchJob, options: { codexHome?: string } = {}): CompletedProductCandidateSet | null {

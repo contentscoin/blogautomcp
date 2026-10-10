@@ -62,10 +62,11 @@ async function main() {
   const moduleRequire = createRequire(sourcePath);
   let calls = 0;
   let verdict = "accept";
+  let photoClaimMatches = true;
   const provider = async (request: { imagePaths: string[] }) => {
     calls++;
     if (verdict === "auth") throw new Error("CODEX_AUTH_REQUIRED");
-    return JSON.stringify({ reviews: request.imagePaths.map((_, index) => ({ index: index + 1, accepted: verdict === "accept", identityMatches: true,
+    return JSON.stringify({ reviews: request.imagePaths.map((_, index) => ({ index: index + 1, accepted: verdict === "accept", identityMatches: true, photoClaimMatches,
       notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "fixture selected product" })) });
   };
   const ledgerProbes: Array<Promise<string>> = [];
@@ -127,6 +128,14 @@ async function main() {
   await audit(bodyOptions); assert.equal(calls, beforeBody + 1);
   bodyOptions.composition.renderNodes.reverse();
   await audit(bodyOptions); assert.equal(calls, beforeBody + 2, "render node ordering invalidates");
+  photoClaimMatches = false;
+  assert.equal((await audit({ ...bodyOptions, forceReview: true })).ok, false,
+    "a positive overall verdict with unsupported photo proof cannot write a success receipt");
+  const afterPhotoClaimFailure = calls;
+  assert.equal((await audit(bodyOptions)).ok, false);
+  assert.equal(calls, afterPhotoClaimFailure + 1, "failed photo-claim check revokes an older receipt and rechecks unchanged bytes");
+  photoClaimMatches = true;
+  assert.equal((await audit(bodyOptions)).ok, true);
   await audit({ ...options, brandLinkId: "injected-only", review: async request => provider({ imagePaths: request.imagePaths! }) });
   assert.equal(fs.existsSync(receiptFile("injected-only")), false, "injected reviewer never writes receipts");
   const assertWithLedgerProbe = load(source, true);

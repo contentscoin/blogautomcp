@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
-import { auditPublishImages, assertPublishImagesSafe, PublishImageAuditError, type PublishImageAuditOptions } from "./lib/publish-image-audit";
+import { auditPublishImages, assertPublishImagesSafe, parseVisualReviews, PublishImageAuditError, type PublishImageAuditOptions } from "./lib/publish-image-audit";
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-publish-audit-"));
@@ -14,7 +14,7 @@ async function main() {
     const tall = path.join(root, "detail.png");
     await sharp({ create: { width: 320, height: 240, channels: 3, background: "white" } }).png().toFile(photo);
     await sharp({ create: { width: 860, height: 5880, channels: 3, background: "white" } }).png().toFile(tall);
-    const good = { index: 1, accepted: true, identityMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "Visible lavender Stress Relief 532ml pair" };
+    const good = { index: 1, accepted: true, identityMatches: true, photoClaimMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "Visible lavender Stress Relief 532ml pair" };
     const options = (assetPath = photo, count = 1): PublishImageAuditOptions => ({
       productName: "Aveeno lavender Stress Relief 532ml 2pack",
       composition: {
@@ -32,6 +32,14 @@ async function main() {
       assert.equal((await auditPublishImages(input)).ok, expected); assertions++;
     };
     await check({}, true);
+    await check({ photoClaimMatches: false, accepted: true, reason: "The photograph cannot prove the performance asserted by the paragraph" }, false);
+    for (const photoClaimMatches of [undefined, null, "yes", 1]) {
+      await check({ photoClaimMatches }, false);
+    }
+    assert.equal(parseVisualReviews(JSON.stringify({ reviews: [{ ...good, photoClaimMatches: "true" }] }), 1)[0]?.photoClaimMatches, true,
+      "the existing boolean-string parser remains compatible with the new required field");
+    assert.equal(parseVisualReviews(JSON.stringify({ reviews: [{ ...good, photoClaimMatches: "false" }] }), 1)[0]?.photoClaimMatches, false);
+    assertions++;
     for (const key of ["singlePhotograph", "noGraphicLayout", "textPolicyMatches"]) {
       await check({ [key]: false, reason: "Product matches but body output is a framed explanation layout" }, false);
       await check({ [key]: undefined }, false);
@@ -81,6 +89,96 @@ async function main() {
     assertions++;
     await check({ reviewClass: "feature-evidence", reason: "Photograph directly shows the visible seam and closure" }, true, feature);
     await check({ reviewClass: "feature-evidence", noGraphicLayout: false, reason: "Official explanatory feature panel" }, false, feature);
+    const shokz = options();
+    shokz.productName = "샥즈 오픈스윔 프로";
+    shokz.selectedProduct = JSON.stringify({ name: shokz.productName, optionFacts: ["색상: 오렌지", "저장공간: 32GB"] });
+    const shokzTitle = "수영과 지상에서 쓰는 MP3·블루투스 기준";
+    const shokzBody = "수영에서는 MP3 모드를 사용하고, 지상에서는 블루투스로 연결할 수 있습니다.";
+    Object.assign(shokz.composition.sections[0], { title: shokzTitle, body: [shokzBody], imageSource: "seller-original",
+      imageIntent: "판매페이지 원본 상품 사진: 선택한 상품·옵션의 외형 확인" });
+    Object.assign(shokz.composition.renderNodes[1], { text: shokzTitle });
+    Object.assign(shokz.composition.renderNodes[2], { text: shokzBody });
+    shokz.review = async call => {
+      const line = call.userPrompt.split("\n").find(value => value.startsWith("Each attached image"))!;
+      const slots = JSON.parse(line.slice(line.indexOf("[")));
+      assert.equal(slots[0].visualContract.purpose, "product-appearance");
+      assert.equal(slots[0].visualContract.claimPolicy, "visual-compatibility-and-explicit-photo-claims");
+      assert.equal(slots[0].visualContract.demonstrateEveryParagraphFeature, false);
+      assert.equal(slots[0].visualContract.identityAndVisibleOptionMustMatch, true);
+      assert.equal(slots[0].visualContract.photoMustNotClaimUnseenPerformance, true);
+      assert.equal(slots[0].sectionTitle, shokzTitle);
+      assert.deepEqual(slots[0].sectionBody, [shokzBody]);
+      assert.ok(call.userPrompt.includes(JSON.stringify(shokz.selectedProduct)), "final review keeps exact selected product and option context");
+      assert.match(call.userPrompt, /Technical prose alone does not make a correct seller overview into feature evidence/);
+      assert.match(call.userPrompt, /Even when allowProductPhoto=true, reject generic photos used as proof of a feature claim/);
+      const schema = call.outputSchema as { properties: { reviews: { items: { required: string[]; properties: Record<string, { type: string }> } } } };
+      assert.ok(schema.properties.reviews.items.required.includes("photoClaimMatches"));
+      assert.equal(schema.properties.reviews.items.properties.photoClaimMatches.type, "boolean");
+      return JSON.stringify({ reviews: [{ ...good, reason: "A coherent seller photograph shows the selected orange exterior; the prose does not claim photographic performance proof" }] });
+    };
+    assert.equal((await auditPublishImages(shokz)).ok, true); assertions++;
+    for (const patch of [
+      { identityMatches: false, reason: "Visible different option or model" },
+      { textPolicyMatches: false, reason: "Added headline on a body photo" },
+      { noGraphicLayout: false, reason: "Seller photo inside an explanation frame" },
+    ]) await check(patch, false, shokz);
+    const photoProof = structuredClone(shokz.composition);
+    Object.assign(photoProof.renderNodes[2], { text: "이 사진이 소음 감소 효과를 증명합니다." });
+    const unsupportedPhotoProof = await auditPublishImages({ ...shokz, composition: photoProof,
+      review: async call => {
+        assert.ok(call.userPrompt.includes("이 사진이 소음 감소 효과를 증명합니다."));
+        return JSON.stringify({ reviews: [{ ...good, accepted: true, photoClaimMatches: false,
+          reason: "A static seller exterior photo cannot prove noise reduction" }] });
+      } });
+    assert.equal(unsupportedPhotoProof.ok, false);
+    assert.equal(unsupportedPhotoProof.failures[0].code, "SEMANTIC_REJECTION");
+    assert.equal(unsupportedPhotoProof.failures[0].rejectionScope, "section", "unsupported photo proof does not reject the product's bytes globally");
+    assert.match(unsupportedPhotoProof.failures[0].reason, /사진을 기능·성능·결과의 증거/);
+    assertions++;
+    // Offline provider-contract boundaries: a disclaimer is not photo proof,
+    // while a precise claim about visible label text still needs legible pixels.
+    const aveenoAppearance = options();
+    const aveenoBody = ["제품 이미지에서는 바디워시 펌프 용기와 라벤더 연출을 확인할 수 있어요.",
+      "사진은 외관과 향 콘셉트를 보여주는 자료이며 피부 효과나 실제 향의 강도를 입증하진 않습니다."];
+    Object.assign(aveenoAppearance.composition.sections[0], { imageSource: "seller-original",
+      imageIntent: "판매페이지 원본 상품 사진: 선택한 상품·옵션의 외형 확인" });
+    aveenoAppearance.composition.renderNodes.splice(2, 1, ...aveenoBody.map(text => ({ kind: "paragraph" as const, sectionId: "overview", text })));
+    aveenoAppearance.review = async call => {
+      const line = call.userPrompt.split("\n").find(value => value.startsWith("Each attached image"))!;
+      const slots = JSON.parse(line.slice(line.indexOf("[")));
+      assert.equal(slots[0].visualContract.purpose, "product-appearance");
+      assert.deepEqual(slots[0].sectionBody, aveenoBody);
+      assert.match(call.userPrompt, /A negation or disclaimer that the photo does NOT prove an effect is not a proof claim/);
+      return JSON.stringify({ reviews: [{ ...good, photoClaimMatches: true,
+        reason: "The selected exterior and lavender concept match; the paragraph explicitly disclaims skin-efficacy proof" }] });
+    };
+    assert.equal((await auditPublishImages(aveenoAppearance)).ok, true); assertions++;
+    const dalbaPixelClaim = options();
+    dalbaPixelClaim.productName = "[2주 잡티 개선 프로그램] 달바 비타 토닝 3종 세트 토너 180ml+세럼 100ml+크림 단지형 55g+퍼스널 케어 4종 증정";
+    dalbaPixelClaim.selectedProduct = JSON.stringify({ name: dalbaPixelClaim.productName, selectedOption: { status: "not-applicable" },
+      optionFacts: ["토너 180ml", "세럼 100ml", "크림 단지형 55g", "퍼스널 케어 4종 증정"] });
+    const dalbaBody = ["이미지에서 확인되는 제품은 달바 비타 토닝 세럼 토너이며 라벨에 100ml라고 적혀 있어요.",
+      "세트의 토너 180ml와 이미지 속 제품 용량이 달라 동일", "구성인지 구매 화면에서 대조할 필요가 있습니다."];
+    Object.assign(dalbaPixelClaim.composition.sections[0], { imageSource: "seller-original",
+      imageIntent: "판매페이지 원본 상품 사진: 선택한 상품·옵션의 외형 확인" });
+    dalbaPixelClaim.composition.renderNodes.splice(2, 1, ...dalbaBody.map(text => ({ kind: "paragraph" as const, sectionId: "overview", text })));
+    dalbaPixelClaim.review = async call => {
+      const line = call.userPrompt.split("\n").find(value => value.startsWith("Each attached image"))!;
+      const slots = JSON.parse(line.slice(line.indexOf("[")));
+      assert.equal(slots[0].visualContract.purpose, "product-appearance");
+      assert.deepEqual(slots[0].sectionBody, dalbaBody);
+      assert.ok(call.userPrompt.includes(JSON.stringify(dalbaPixelClaim.selectedProduct)));
+      assert.match(call.userPrompt, /verify explicit pixel assertions such as 'the photo label reads 100ml' against actually legible confirming pixels/);
+      assert.match(call.userPrompt, /This differs from requiring OCR of specifications merely supplied as product facts/);
+      return JSON.stringify({ reviews: [{ ...good, accepted: true, identityMatches: true, photoClaimMatches: false,
+        reason: "The tiny label is unreadable, so the precise published 100ml label assertion is unsupported; selected product facts specify 180ml" }] });
+    };
+    const dalbaAudit = await auditPublishImages(dalbaPixelClaim);
+    assert.equal(dalbaAudit.ok, false);
+    assert.equal(dalbaAudit.failures[0].code, "SEMANTIC_REJECTION");
+    assert.equal(dalbaAudit.failures[0].rejectionScope, "section");
+    assert.match(dalbaAudit.failures[0].reason, /100ml/);
+    assertions++;
     const lifestyle = options();
     lifestyle.composition.sections[0].imageIntent = "AI 연출 이미지: 생활 공간 배치";
     await check({}, true, lifestyle);

@@ -107,7 +107,13 @@ async function main() {
       "legacy framed originals must not be carried into the new natural-photo draft");
     const visualReview = async (request: { userPrompt: string; imagePaths?: string[] }) => {
       assert(request.userPrompt.includes("adjacentCaption"));
-      return JSON.stringify({ reviews: request.imagePaths!.map((_, index) => ({ index: index + 1, accepted: true, identityMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "offline fixture" })) });
+      const line = request.userPrompt.split("\n").find(value => value.startsWith("Each attached image"))!;
+      const slots = JSON.parse(line.slice(line.indexOf("["))) as Array<{ role: string; visualContract: { purpose: string; claimPolicy: string } }>;
+      for (const slot of slots) {
+        assert.equal(slot.visualContract.purpose, slot.role === "thumbnail" ? "thumbnail" : "lifestyle-illustration");
+        assert.equal(slot.visualContract.claimPolicy, "visual-compatibility-and-explicit-photo-claims");
+      }
+      return JSON.stringify({ reviews: request.imagePaths!.map((_, index) => ({ index: index + 1, accepted: true, identityMatches: true, photoClaimMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "offline fixture" })) });
     };
     const audited = await auditPublishImages({ productName: "선택 상품", composition: updated.composition, imageAssets: updated.imageAssets, sourceSnapshotId: snapshot.snapshotId, review: visualReview });
     assert.equal(audited.ok, true);
