@@ -11,6 +11,7 @@ import ts from "typescript";
 import sharp from "sharp";
 import { readSuccessfulImageAuditReceipt as read, writeSuccessfulImageAuditReceipt as write, invalidateSuccessfulImageAuditReceipt as invalidate, withSuccessfulImageAuditLock } from "./lib/publish-image-audit-receipt";
 import type { PublishImageAuditOptions, PublishImageAuditResult } from "./lib/publish-image-audit";
+import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 
 const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "image-audit-receipt-"));
 const priorRoot = process.env.DESKTOP_USER_DATA;
@@ -63,10 +64,14 @@ async function main() {
   let calls = 0;
   let verdict = "accept";
   let photoClaimMatches = true;
-  const provider = async (request: { imagePaths: string[] }) => {
+  let inspectRequest: ((request: { imagePaths: string[]; userPrompt: string }) => void) | undefined;
+  const provider = async (request: { imagePaths: string[]; userPrompt?: string }) => {
     calls++;
     if (verdict === "auth") throw new Error("CODEX_AUTH_REQUIRED");
-    return JSON.stringify({ reviews: request.imagePaths.map((_, index) => ({ index: index + 1, accepted: verdict === "accept", identityMatches: true, photoClaimMatches,
+    const slotLine = request.userPrompt?.split("\n").find(line => line.startsWith("Each attached image belongs ONLY"));
+    const finalCount = slotLine ? JSON.parse(slotLine.slice(slotLine.indexOf("["))).length : request.imagePaths.length;
+    if (request.userPrompt) inspectRequest?.({ imagePaths: request.imagePaths, userPrompt: request.userPrompt });
+    return JSON.stringify({ reviews: request.imagePaths.slice(0, finalCount).map((_, index) => ({ index: index + 1, accepted: verdict === "accept", identityMatches: true, photoClaimMatches,
       notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "fixture selected product" })) });
   };
   const ledgerProbes: Array<Promise<string>> = [];
@@ -141,6 +146,42 @@ async function main() {
   const assertWithLedgerProbe = load(source, true);
   await assertWithLedgerProbe({ ...options, brandLinkId: "ledger-boundary" });
   assert.deepEqual(await Promise.all(ledgerProbes), ["EADDRINUSE", "EADDRINUSE"], "success clearing and rejection recording both remain inside audit lock");
+  const referenceA = path.join(fixtureRoot, "bound-reference-a.png"), referenceB = path.join(fixtureRoot, "bound-reference-b.png");
+  await sharp({ create: { width: 220, height: 180, channels: 3, background: "#bbddcc" } }).png().toFile(referenceA);
+  await sharp({ create: { width: 220, height: 180, channels: 3, background: "#aabbcc" } }).png().toFile(referenceB);
+  const hash = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  const referenced = { ...bodyOptions, brandLinkId: "bound-reference-receipt", composition: structuredClone(bodyOptions.composition),
+    sourceSnapshotId: "selected-receipt-snapshot", imageAssets: [{ path: image, sourcePath: image, sha256: hash(image), role: "body", sectionId: "body",
+      provenance: "GENERATED_SCENE", creationMethod: "reference-guided-scene", remoteGenerated: true,
+      referenceScene: { strategyVersion: REFERENCE_SCENE_STRATEGY_VERSION, sourceSnapshotId: "selected-receipt-snapshot", referencePath: referenceA,
+        referenceSha256: hash(referenceA), reviewedOutputSha256: hash(image), reviewStatus: "passed",
+        checks: Object.fromEntries(REFERENCE_SCENE_REVIEW_CHECKS.map(check => [check, true])) } }] } as unknown as PublishImageAuditOptions;
+  Object.assign(referenced.composition.sections[0], { imageSource: "staged-ai", imageIntent: "AI 연출 이미지: 생활 공간" });
+  const referencedNode = referenced.composition.renderNodes.find(node => node.kind === "image")!;
+  Object.assign(referencedNode, { caption: REFERENCE_SCENE_CAPTION, role: "scene" });
+  inspectRequest = request => {
+    const slotLine = request.userPrompt.split("\n").find(line => line.startsWith("Each attached image belongs ONLY"))!;
+    const [slot] = JSON.parse(slotLine.slice(slotLine.indexOf("[")));
+    assert.equal(slot.comparisonReferenceImageIndex, 2);
+    assert.equal(slot.referenceSha256, referenced.imageAssets![0].referenceScene!.referenceSha256);
+    assert.equal(request.imagePaths.length, 2, "receipt protects a request containing the actual final and reference bytes");
+  };
+  const referenceBeforeCalls = calls;
+  assert.equal((await audit(referenced)).ok, true); assert.equal(calls, referenceBeforeCalls + 1);
+  const referenceKeyA = JSON.parse(fs.readFileSync(receiptFile(referenced.brandLinkId!), "utf8")).key;
+  assert.equal((await audit(referenced)).receiptReused, true); assert.equal(calls, referenceBeforeCalls + 1, "new temporary snapshot paths do not invalidate the exact reference request");
+  Object.assign(referenced.imageAssets![0].referenceScene!, { referencePath: referenceB, referenceSha256: hash(referenceB) });
+  assert.equal((await audit(referenced)).receiptReused, false); assert.equal(calls, referenceBeforeCalls + 2);
+  assert.notEqual(JSON.parse(fs.readFileSync(receiptFile(referenced.brandLinkId!), "utf8")).key, referenceKeyA, "changed bound reference bytes/mapping cannot reuse an older final-image approval");
+  const intactReference = fs.readFileSync(referenceB);
+  fs.writeFileSync(referenceB, fs.readFileSync(referenceA));
+  assert.equal((await audit(referenced)).ok, false); assert.equal(calls, referenceBeforeCalls + 2, "reference byte change without matching proof is rejected before provider");
+  assert.equal(fs.existsSync(receiptFile(referenced.brandLinkId!)), false, "a broken reference revokes prior successful receipt");
+  fs.writeFileSync(referenceB, intactReference);
+  assert.equal((await audit(referenced)).receiptReused, false); assert.equal(calls, referenceBeforeCalls + 3);
+  referenced.imageAssets![0].referenceScene!.reviewedOutputSha256 = "f".repeat(64);
+  assert.equal((await audit(referenced)).ok, false); assert.equal(calls, referenceBeforeCalls + 3, "an output-proof mismatch cannot pass via a matching old reference receipt");
+  inspectRequest = undefined;
   console.log("image audit receipts: signed/tamper/wrong-id/concurrent key/lock, exact bytes/options/prompts/policy, force failure/auth/missing invalidation and injected reviewer isolation PASS");
 }
 main().finally(() => { if (priorRoot === undefined) delete process.env.DESKTOP_USER_DATA; else process.env.DESKTOP_USER_DATA = priorRoot; fs.rmSync(fixtureRoot, { recursive: true, force: true }); }).catch(error => { console.error(error); process.exitCode = 1; });
