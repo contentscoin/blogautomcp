@@ -185,10 +185,27 @@ async function main() {
     assert.equal(REFERENCE_SCENE_REVIEW_CHECKS.length, 11);
     assert.equal(classifyBrandPostImageEvidence(manifest.imageAssets![0]).coherent, true);
     assert.equal(classifyBrandPostImageEvidence({ ...manifest.imageAssets![0], remoteGenerated: true }).coherent, false);
+    const generatedThumbnail: BrandPostPackageImageAsset = { ...manifest.imageAssets![0],
+      creationMethod: "remote-generated", remoteGenerated: true };
+    assert.deepEqual(classifyBrandPostImageEvidence(generatedThumbnail), { coherent: true, generated: true, reason: null });
+    for (const mutation of [{ role: "body" }, { role: undefined }, { sectionId }, { remoteGenerated: false },
+      { remoteGenerated: undefined }, { provenance: "ORIGINAL" }, { provenance: "LOCKED_PRODUCT" },
+      { creationMethod: "source" }, { creationMethod: "local-composite" }]) {
+      assert.equal(classifyBrandPostImageEvidence({ ...generatedThumbnail, ...mutation } as BrandPostPackageImageAsset).coherent, false,
+        "remote photo/text metadata is valid only for an explicitly bound generated hero, never a body/source/ambiguous record");
+    }
     store.writeBrandPostPackageManifest(manifest);
     assert.throws(() => store.applyGeneratedBrandPostImage({ brandLinkId: manifest.brandLinkId, generatedPath: generated, sectionId, provenance: "GENERATED_SCENE", creationMethod: "reference-guided-scene", remoteGenerated: true }), /REFERENCE_REVIEW_REQUIRED/);
     const updated = store.applyGeneratedBrandPostImage({ brandLinkId: manifest.brandLinkId, generatedPath: generated, sectionId, slotId: asset.slotId, imageIntent: asset.imageIntent, provenance: "GENERATED_SCENE", creationMethod: "reference-guided-scene", remoteGenerated: true, referenceScene: review });
     assert.equal(updated.approvedAt, null);
+    const withGeneratedHero = structuredClone(updated);
+    withGeneratedHero.imageAssets![0] = generatedThumbnail;
+    assert(!store.evaluateBrandPostPackageReadiness(withGeneratedHero).blockers.some(item => item.code === "image-provenance-invalid"),
+      "truthful generated thumbnail metadata must not block package readiness");
+    const sourceThumbnail = structuredClone(withGeneratedHero);
+    sourceThumbnail.imageAssets![0].creationMethod = "source";
+    assert(store.evaluateBrandPostPackageReadiness(sourceThumbnail).blockers.some(item => item.code === "image-provenance-invalid"),
+      "marking that same generated thumbnail as a seller source must still block readiness");
     const savedAsset = updated.imageAssets!.find(item => item.provenance === "GENERATED_SCENE")!;
     assert.notEqual(savedAsset.referenceScene!.referencePath, source);
     assert.equal(hash(savedAsset.referenceScene!.referencePath), hash(source));

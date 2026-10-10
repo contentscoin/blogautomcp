@@ -36,6 +36,11 @@ const COMPONENT_APPEARANCE_RULE = "For product-appearance, lifestyle-illustratio
 const THUMBNAIL_PHOTOGRAPH_RULE = "Only a slot with role=thumbnail may contain a large headline over one natural full-photo composition. A restrained soft photographic gradient, headline shadow or outline used only for contrast over the same continuous full-bleed photograph is allowed for that thumbnail; it is not an explanatory panel or a frame and alone does not make noGraphicLayout false. Its core headline must remain large, high contrast, complete and readable at small preview size. Reject a separate color-block text panel, white border, frame around a reduced seller photo, inset photograph, split layout, table, badge or bullet list, tiny product photos, clipped essential words, and overlays hiding distinguishing product features. No invented or unsupported headline claims. A title overlay is permitted here and nowhere else: body roles never inherit headline/gradient-layout permission from a thumbnail. Judge the actual pixels against these conditions; no thumbnail is automatically approved.";
 const MIXED_OPTIONS_RULE = "mixedOptions means visibly different models, colors, scents or other variants presented together without an allowed explicit named comparison. Only when BOTH canonical selected facts and indexed selected-gallery pixels establish inclusion, distinct identifiable components of that SAME selected kit (such as its toner, serum and cream) are included components, not alternative purchase options requiring a named comparison. Do not infer inclusion from a generic brand match or every gallery item: cross-sells, gift badges and unselected models/variants remain unverified or conflicting and must reject when presented as the selected purchase. Missing kit members, duplicate quantities and an unsupported complete-kit claim must still be judged separately with accepted, identityMatches and photoClaimMatches; proven component membership is not automatic approval. Multiple views or physical units of the same identifiable model/variant alone are not mixedOptions. Evaluate repeated physical products, pasted duplicates, impossible reflections, misleading bundle/quantity claims and the exact slot's single-item requirement separately with accepted, singlePhotograph and photoClaimMatches; same-design items are not automatically approved. Set mixedOptions=true for genuine distinguishable option mixtures, including thumbnails, and name the conflicting options.";
 
+const VISIBLE_IDENTITY_DECISION_RULE = "identityMatches concerns the visible identifying brand, product line, design and variant of THIS final slot's product/component against its own indexed exact comparison reference and selected facts. A toner must be compared with its mapped toner reference, not with another included serum or a different gallery attachment. When the visible identifying design and printing match that own reference/component, absent or unclear tiny capacity printing alone (such as 180ml) is not an identity objection; never claim that hidden capacity was verified from pixels. Still reject actual readable conflicting capacity/model/scent, altered identifying printing, wrong component, wrong design, genuinely obscured identifiers or unresolved component membership. A source match or seller fact alone is not identity approval.";
+const PHOTO_CLAIM_DECISION_RULE = "photoClaimMatches concerns what the actual published section text or visible thumbnail headline claims this photograph shows or proves. Ordinary manufacturer printing physically on the product/package, such as 'Anti-Aging Toner', is intrinsic label text: its presence alone is not a published claim that the photograph proves an anti-aging result. It does not establish that efficacy either. Judge any actual photographic-proof claim in published text/headline independently; reject unsupported complete-set, quantity, performance or result claims. Keep rejecting altered intrinsic labels and added explanatory/marketing text under identity and format checks. Body images never gain thumbnail headline permission, and a component-only exterior headline does not itself promise a full-kit photo.";
+const ACCEPTED_DECISION_RULE = "accepted is the final holistic pixel verdict for the exact assigned role, consistent with your finalized reason and separate identity, photoClaim and format verdicts. Resolve your own tentative objections before returning the structured verdict; do not leave accepted=false after your final reason retracts every objection and concludes that no mismatch is present. If the separate checks are favorable but accepted=false, state the concrete remaining actual-pixel objection not addressed by those checks, such as an implausible scene, required setting missing or identifying features obscured. Favorable booleans, an exact source match, seller authority and prior approval never compel acceptance: a genuine unresolved objection still rejects. Never excuse an adverse identity, photoClaim or format verdict with a favorable holistic reason.";
+const FINAL_REASON_RULE = "Explain the finalized visible evidence for this exact slot and any unresolved concrete objection. The reason and every boolean must describe the same final judgment, not a tentative rejection followed by a correction that retracts it. Preserve genuine uncertainty and adverse findings; do not invent a mismatch to justify a preset boolean or infer approval from reference provenance.";
+
 export interface PublishImageAuditFailure {
   nodeIndex: number;
   assetPath: string;
@@ -315,6 +320,11 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
         ? [[candidate.referenceScene.referenceSha256, candidate.referenceScene] as const] : []),
       ...gallerySnapshots.map(reference => [reference.referenceSha256, reference] as const)]).values()];
       const galleryIndexes = gallerySnapshots.map(reference => batch.length + references.findIndex(item => item.referenceSha256 === reference.sha256) + 1);
+      const decisionRole = batch.length === 1
+        ? batch[0].role === "thumbnail"
+          ? "This exact final slot is a thumbnail: judge its actual visible headline and product pixels under the existing thumbnail rules."
+          : `This exact final slot is a body image (role=${batch[0].role}): judge its actual published section and product pixels; no added headline or editorial layout is permitted.`
+        : "Apply ONLY the assigned role of the exact indexed final slot; a thumbnail elsewhere grants no body-image text or layout permission.";
       const referenceIndex = (candidate: typeof candidates[number]) => candidate.referenceScene
         ? batch.length + references.findIndex(reference => reference.referenceSha256 === candidate.referenceScene!.referenceSha256) + 1
         : undefined;
@@ -344,6 +354,10 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           SINGLE_PHOTOGRAPH_RULE,
           NATURAL_SCENE_INTENT_RULE,
           COMPONENT_APPEARANCE_RULE,
+          VISIBLE_IDENTITY_DECISION_RULE,
+          PHOTO_CLAIM_DECISION_RULE,
+          ACCEPTED_DECISION_RULE,
+          FINAL_REASON_RULE,
           MIXED_OPTIONS_RULE,
           "Assess each candidate independently. Other attached candidates are also unverified and must not become the reference for the selected model. For a claimed design/variant contradiction, name the concrete visible conflicting characteristic and the selected-product fact it contradicts; do not invent a model-specific design from memory or assume another candidate is correct.",
           THUMBNAIL_PHOTOGRAPH_RULE,
@@ -353,7 +367,8 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           "Generic packshots are product-photo, permitted only when allowProductPhoto=true. A photographic detail may show an actual visible structure, but information cards and explanatory panels are forbidden even when labelled feature-evidence. Do not infer performance from a photo. A referenceGuidedScene illustrates styling or a plausible setting alongside the paragraph; it is not offered as photographic proof of its technical claims.",
           "For an AI 연출 이미지 intent, judge product identity, credible anatomy/fabric/contact and believable placement, never feature demonstration. Reject invented included accessories, operation or performance claims. A referenceGuidedScene has a separately validated comparison against original-reference bytes and a required adjacentCaption rendered immediately after its image. Never require or allow AI disclosure burned into body-image pixels. Background styling props do not imply included accessories. A styling scene is not a claim of actual personal use or efficacy. The prior comparison does not authorize visible contradictions in the final pixels.",
           "Report format checks separately: singlePhotograph means exactly one coherent photographic scene; noGraphicLayout means no graphic frame around a seller photo, pasted inset, table or explanatory panel (an ordinary physical mirror and its frame remain scene props); textPolicyMatches means no added text in body images, or only the intended headline in a thumbnail; thumbnailHeadlineLegible must be true for a large clear thumbnail headline (set true as not applicable for body photos). A false format check must reject even if identityMatches=true.",
-          `Return exactly ${batch.length} reviews, ONLY for final publication images 1 through ${batch.length}, never for appended references, with 1-based index: {"reviews":[{"index":1,"accepted":true,"identityMatches":true,"photoClaimMatches":true,"notice":false,"mixedOptions":false,"explicitNamedComparison":false,"optionsClearlyLabeled":false,"singlePhotograph":true,"noGraphicLayout":true,"textPolicyMatches":true,"thumbnailHeadlineLegible":true,"reviewClass":"product-photo" or "feature-evidence","reason":"specific final/reference pixel evidence and whether published text uses the photo as proof"}]}. All boolean fields required. For an allowed named comparison identityMatches means the selected item is clearly identified among the explicitly named alternatives.`,
+          "For each review, output the index, then explain the final/reference pixel evidence in reason BEFORE the separate checks and reviewClass. Output accepted LAST, after those findings; resolve tentative objections before emitting the final verdict. Field order does not authorize a favorable verdict or override an adverse check.",
+          `Return exactly ${batch.length} reviews, ONLY for final publication images 1 through ${batch.length}, never for appended references, with 1-based index: {"reviews":[{"index":1,"reason":"specific final/reference pixel evidence and whether published text uses the photo as proof","identityMatches":true,"photoClaimMatches":true,"notice":false,"mixedOptions":false,"explicitNamedComparison":false,"optionsClearlyLabeled":false,"singlePhotograph":true,"noGraphicLayout":true,"textPolicyMatches":true,"thumbnailHeadlineLegible":true,"reviewClass":"product-photo" or "feature-evidence","accepted":true}]}. All boolean fields required. For an allowed named comparison identityMatches means the selected item is clearly identified among the explicitly named alternatives.`,
         ].join("\n"),
         imagePaths: [...batch.map(c => c.snapshot), ...references.map(reference => reference.snapshot)],
         maxImages: batch.length + references.length, preserveImageOrder: true, researchMode: "disabled",
@@ -361,9 +376,13 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
         outputSchema: { ...VISUAL_REVIEW_SCHEMA, properties: { reviews: { ...VISUAL_REVIEW_SCHEMA.properties.reviews,
           minItems: batch.length, maxItems: batch.length, items: { ...VISUAL_REVIEW_SCHEMA.properties.reviews.items,
             properties: { ...VISUAL_REVIEW_SCHEMA.properties.reviews.items.properties, index: { type: "integer", enum: batch.map((_, index) => index + 1) },
+              reason: { type: "string", description: `${decisionRole} ${FINAL_REASON_RULE}` },
+              identityMatches: { type: "boolean", description: `${decisionRole} ${COMPONENT_APPEARANCE_RULE} ${VISIBLE_IDENTITY_DECISION_RULE}` },
+              photoClaimMatches: { type: "boolean", description: `${decisionRole} ${PHOTO_CLAIM_DECISION_RULE}` },
               textPolicyMatches: { type: "boolean", description: batch.length === 1 && batch[0].role === "thumbnail"
                 ? "This exact final slot is a thumbnail. One large accurate headline over the same natural photograph is ALLOWED and must not be rejected merely because it is added text. Reject extra badges/bullets/panels, unsupported headline claims or overlays hiding product identifiers. Judge actual pixels; no automatic pass."
-                : "Apply the textPolicy of the exact indexed final slot. Body images permit intrinsic product printing only; a thumbnail headline elsewhere never grants body-image overlay permission." } } } } } },
+                 : "Apply the textPolicy of the exact indexed final slot. Body images permit intrinsic product printing only; a thumbnail headline elsewhere never grants body-image overlay permission." },
+              accepted: { type: "boolean", description: `${decisionRole} ${NATURAL_SCENE_INTENT_RULE} ${ACCEPTED_DECISION_RULE}` } } } } } },
       };
     };
     const plan = planPublishImageAuditBatches(candidates);
@@ -534,17 +553,18 @@ const VISUAL_REVIEW_SCHEMA = {
         type: "object",
         properties: {
           index: { type: "integer" },
-          ...Object.fromEntries(VISUAL_REVIEW_BOOLEAN_KEYS.map(key => [key, { type: "boolean" }])),
-          accepted: { type: "boolean", description: NATURAL_SCENE_INTENT_RULE },
-          identityMatches: { type: "boolean", description: COMPONENT_APPEARANCE_RULE },
+          reason: { type: "string", description: FINAL_REASON_RULE },
+          ...Object.fromEntries(VISUAL_REVIEW_BOOLEAN_KEYS.filter(key => key !== "accepted").map(key => [key, { type: "boolean" }])),
+          identityMatches: { type: "boolean", description: `${COMPONENT_APPEARANCE_RULE} ${VISIBLE_IDENTITY_DECISION_RULE}` },
+          photoClaimMatches: { type: "boolean", description: PHOTO_CLAIM_DECISION_RULE },
           mixedOptions: { type: "boolean", description: MIXED_OPTIONS_RULE },
           notice: { type: "boolean", description: NOTICE_PIXELS_RULE },
           singlePhotograph: { type: "boolean", description: SINGLE_PHOTOGRAPH_RULE },
           noGraphicLayout: { type: "boolean", description: THUMBNAIL_PHOTOGRAPH_RULE },
           reviewClass: { type: "string", enum: ["product-photo", "feature-evidence"] },
-          reason: { type: "string" },
+          accepted: { type: "boolean", description: `${NATURAL_SCENE_INTENT_RULE} ${ACCEPTED_DECISION_RULE}` },
         },
-        required: ["index", ...VISUAL_REVIEW_BOOLEAN_KEYS, "reviewClass", "reason"],
+        required: ["index", "reason", ...VISUAL_REVIEW_BOOLEAN_KEYS.filter(key => key !== "accepted"), "reviewClass", "accepted"],
         additionalProperties: false,
       },
     },

@@ -18,6 +18,27 @@ async function main() {
     await sharp({ create: { width: 320, height: 240, channels: 3, background: "white" } }).png().toFile(photo);
     await sharp({ create: { width: 860, height: 5880, channels: 3, background: "white" } }).png().toFile(tall);
     const good = { index: 1, accepted: true, identityMatches: true, photoClaimMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "Visible lavender Stress Relief 532ml pair" };
+    const evidenceFirstFieldOrder = ["index", "reason", "identityMatches", "photoClaimMatches", "notice", "mixedOptions", "explicitNamedComparison", "optionsClearlyLabeled", "singlePhotograph", "noGraphicLayout", "textPolicyMatches", "thumbnailHeadlineLegible", "reviewClass", "accepted"];
+    const assertEvidenceFirstCall = (call: Parameters<NonNullable<PublishImageAuditOptions["review"]>>[0]) => {
+      const schema = call.outputSchema as { properties: { reviews: { items: { required: string[]; properties: Record<string, { type: string; const?: unknown; enum?: unknown }> } } } };
+      const item = schema.properties.reviews.items;
+      assert.deepEqual(Object.keys(item.properties), evidenceFirstFieldOrder,
+        "actual per-slot schema must put evidence before checks and accepted last");
+      assert.deepEqual(item.required, evidenceFirstFieldOrder,
+        "global required order inherited by every batch must match the exemplar");
+      assert.deepEqual(Object.keys(JSON.parse(JSON.stringify(item)).properties), evidenceFirstFieldOrder,
+        "provider serialization must retain the evidence-first property order");
+      const exemplar = call.userPrompt.split("\n").find(line => line.startsWith("Return exactly"))!;
+      const row = exemplar.slice(exemplar.indexOf('{"reviews":[{') + '{"reviews":[{'.length, exemplar.indexOf("}]}"));
+      assert.deepEqual([...row.matchAll(/"(\w+)":/gu)].map(match => match[1]), evidenceFirstFieldOrder);
+      assert.match(call.userPrompt, /reason BEFORE the separate checks and reviewClass\. Output accepted LAST/u);
+      assert.match(call.userPrompt, /Field order does not authorize a favorable verdict or override an adverse check/u);
+      for (const key of evidenceFirstFieldOrder.filter(key => !["index", "reason", "reviewClass"].includes(key))) {
+        assert.equal(item.properties[key].type, "boolean");
+        assert.equal(item.properties[key].const, undefined, "ordering must not prescribe a verdict");
+        assert.equal(item.properties[key].enum, undefined, "both boolean verdicts must remain schema-valid");
+      }
+    };
     const options = (assetPath = photo, count = 1): PublishImageAuditOptions => ({
       productName: "Aveeno lavender Stress Relief 532ml 2pack",
       composition: {
@@ -378,6 +399,131 @@ async function main() {
       return JSON.stringify({ reviews: [{ ...good, textPolicyMatches: false, reason: "Added body headline cannot inherit thumbnail permission" }] });
     };
     assert.equal((await auditPublishImages(bodyWithHeroIntent)).ok, false); assertions++;
+    // Offline provider-contract fixtures: actual pixel judgments remain the
+    // provider's responsibility, and even a contradictory adverse answer blocks.
+    const alignedDecisionInput = (role: "thumbnail" | "scene") => {
+      const input = options();
+      input.productName = "달바 토너 180ml·세럼 100ml·크림 55g 키트";
+      if (role === "thumbnail") {
+        Object.assign(input.composition.renderNodes[0], { role, sectionId: null });
+        input.imageAssets = [{ ...heroAsset }];
+      } else {
+        input.sourceSnapshotId = scene.sourceSnapshotId;
+        input.imageAssets = scene.imageAssets;
+        Object.assign(input.composition.renderNodes[0], { role, caption: REFERENCE_SCENE_CAPTION });
+        Object.assign(input.composition.sections[0], { imageSource: "staged-ai", imageIntent: "AI 연출 이미지: 토너 외형과 생활 공간" });
+        Object.assign(input.composition.renderNodes[2], { text: "토너 외형의 생활 공간 연출이며 효과나 세트 전체 구성의 증거가 아닙니다." });
+      }
+      return input;
+    };
+    for (const role of ["thumbnail", "scene"] as const) {
+      const aligned = alignedDecisionInput(role); let calls = 0;
+      aligned.review = async call => {
+        calls++;
+        assertEvidenceFirstCall(call);
+        const schema = call.outputSchema as { properties: { reviews: { items: { properties: Record<string, { type: string; description: string }> } } } };
+        const properties = schema.properties.reviews.items.properties;
+        const prefix = role === "thumbnail" ? "This exact final slot is a thumbnail:" : "This exact final slot is a body image (role=scene):";
+        for (const [key, marker] of [
+          ["accepted", "accepted is the final holistic pixel verdict"],
+          ["identityMatches", "identityMatches concerns the visible identifying brand"],
+          ["photoClaimMatches", "photoClaimMatches concerns what the actual published section text"],
+          ["reason", "Explain the finalized visible evidence"],
+        ]) {
+          assert.ok(properties[key].description.startsWith(prefix));
+          const start = properties[key].description.indexOf(marker);
+          assert.ok(start >= 0);
+          assert.ok(call.userPrompt.split("\n").includes(properties[key].description.slice(start)),
+            `${key} must share identical decision guidance between prompt and schema`);
+        }
+        assert.match(properties.identityMatches.description, /own indexed exact comparison reference/u);
+        assert.match(properties.identityMatches.description, /not with another included serum or a different gallery attachment/u);
+        assert.match(properties.identityMatches.description, /absent or unclear tiny capacity printing alone \(such as 180ml\) is not an identity objection/u);
+        assert.match(properties.identityMatches.description, /Still reject actual readable conflicting capacity\/model\/scent, altered identifying printing/u);
+        assert.match(properties.photoClaimMatches.description, /'Anti-Aging Toner'.*intrinsic label text/u);
+        assert.match(properties.photoClaimMatches.description, /presence alone is not a published claim that the photograph proves an anti-aging result/u);
+        assert.match(properties.photoClaimMatches.description, /It does not establish that efficacy either/u);
+        assert.match(properties.photoClaimMatches.description, /reject unsupported complete-set, quantity, performance or result claims/u);
+        assert.match(properties.accepted.description, /do not leave accepted=false after your final reason retracts every objection/u);
+        assert.match(properties.accepted.description, /state the concrete remaining actual-pixel objection/u);
+        assert.match(properties.accepted.description, /never compel acceptance: a genuine unresolved objection still rejects/u);
+        assert.match(properties.reason.description, /do not invent a mismatch to justify a preset boolean/u);
+        assert.match(call.userPrompt, /Printed text physically present on the real product or package is allowed; added labels and captions are not/u);
+        assert.doesNotMatch(call.userPrompt, /For scene props ONLY|physical-versus-graphic ambiguity/u,
+          "the archived physical-prop exception must not return");
+        if (role === "scene") {
+          assert.match(call.userPrompt, /BODY_NO_ADDED_TEXT: only intrinsic physical product printing is permitted/u);
+          const line = call.userPrompt.split("\n").find(value => value.startsWith("Each attached image"))!;
+          const [slot] = JSON.parse(line.slice(line.indexOf("[")));
+          assert.equal(slot.referenceSha256, hash(original));
+          assert.equal(slot.comparisonReferenceImageIndex, 2);
+          assert.deepEqual(await sharp(call.imagePaths![slot.comparisonReferenceImageIndex - 1]).raw().toBuffer(),
+            await sharp(original).raw().toBuffer(), "the slot's indexed reference must contain its actual bound pixels");
+        }
+        return JSON.stringify({ reviews: [{ ...good, reason: "The visible toner design matches its own reference; tiny capacity is unreadable and not certified. Intrinsic Anti-Aging Toner printing is not a photo-proof claim." }] });
+      };
+      assert.equal((await auditPublishImages(aligned)).ok, true);
+      assert.equal(calls, 1); assertions++;
+    }
+    for (const [role, patch] of [
+      ["thumbnail", { accepted: false, reason: "Branding, readable component headline and photo claims match. [Correction: no photo mismatch is present.]" }],
+      ["scene", { identityMatches: false, reason: "Own toner reference and identifying design match, but 180ml is not readable." }],
+      ["thumbnail", { identityMatches: false, reason: "Readable manufacturer slogan is altered from Allure from basic to Live from basic." }],
+      ["scene", { identityMatches: false, reason: "Readable capacity conflicts with the selected variant." }],
+      ["scene", { identityMatches: false, reason: "The visible capsule serum is compared against the selected toner reference and is a wrong component." }],
+      ["thumbnail", { photoClaimMatches: false, reason: "The actual headline claims this photo proves an anti-aging result." }],
+      ["scene", { photoClaimMatches: false, reason: "The published paragraph falsely certifies that unreadable label text says 180ml." }],
+      ["scene", { accepted: false, reason: "All other checks are favorable, but the required bathroom setting is absent." }],
+      ["scene", { noGraphicLayout: false, reason: "An identifying correct toner is pasted into a graphic frame." }],
+      ["scene", { textPolicyMatches: false, reason: "Added body headline cannot inherit thumbnail permission." }],
+      ["thumbnail", { thumbnailHeadlineLegible: false, reason: "Essential thumbnail words are clipped." }],
+    ] as const) {
+      const adverse = alignedDecisionInput(role); let calls = 0;
+      adverse.review = async call => {
+        calls++;
+        assertEvidenceFirstCall(call);
+        const row = { ...good, ...patch };
+        assert.equal(new Ajv({ allErrors: true }).compile(call.outputSchema as object)({ reviews: [row] }), true,
+          "alignment descriptions must never force a favorable boolean");
+        return JSON.stringify({ reviews: [row] });
+      };
+      const rejected = await auditPublishImages(adverse);
+      assert.equal(rejected.ok, false);
+      assert.equal(rejected.failures[0].code, "SEMANTIC_REJECTION");
+      assert.ok(rejected.failures[0].reason.includes(patch.reason));
+      assert.equal(calls, 1, "a valid adverse answer remains rejected without output reinterpretation or retry"); assertions++;
+    }
+    // Emitting evidence first must not reinterpret an adverse final verdict,
+    // even when the reason retracts its objection. Old-order replies above also
+    // remain compatible with the unchanged parser.
+    for (const patch of [
+      { accepted: false, reason: "Anti-Aging Toner matches Anti-Aging Toner; no contradiction is present." },
+      { identityMatches: false, reason: "Readable identifying design contradicts the exact selected reference." },
+    ]) {
+      const input = alignedDecisionInput("thumbnail"); let calls = 0;
+      input.review = async call => {
+        calls++; assertEvidenceFirstCall(call);
+        const row = { ...good, ...patch };
+        const ordered = Object.fromEntries(evidenceFirstFieldOrder.map(key => [key, row[key as keyof typeof row]]));
+        assert.equal(new Ajv({ allErrors: true }).compile(call.outputSchema as object)({ reviews: [ordered] }), true);
+        return JSON.stringify({ reviews: [ordered] });
+      };
+      const rejected = await auditPublishImages(input);
+      assert.equal(rejected.ok, false);
+      assert.equal(rejected.failures[0].code, "SEMANTIC_REJECTION");
+      assert.ok(rejected.failures[0].reason.includes(patch.reason));
+      assert.equal(calls, 1, "evidence-first negative verdicts must still reject once"); assertions++;
+    }
+    const orderedBatch = options(photo, 2); let orderedBatchCalls = 0;
+    orderedBatch.review = async call => {
+      orderedBatchCalls++; assertEvidenceFirstCall(call);
+      const schema = call.outputSchema as { properties: { reviews: { items: { properties: Record<string, { description?: string }> } } } };
+      assert.match(schema.properties.reviews.items.properties.accepted.description!, /ONLY the assigned role of the exact indexed final slot/u);
+      assert.match(schema.properties.reviews.items.properties.textPolicyMatches.description!, /Body images permit intrinsic product printing only/u);
+      return JSON.stringify({ reviews: [good, { ...good, index: 2 }] });
+    };
+    assert.equal((await auditPublishImages(orderedBatch)).ok, true);
+    assert.equal(orderedBatchCalls, 1, "global field order also survives multi-slot overrides"); assertions++;
     const contradictoryRole = options();
     Object.assign(contradictoryRole.composition.renderNodes[0], { role: "thumbnail" });
     contradictoryRole.review = async () => { throw new Error("A body-section thumbnail role must fail before provider"); };
