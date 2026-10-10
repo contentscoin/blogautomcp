@@ -82,7 +82,7 @@ async function fixture(options = {}) {
   const load = loader(mocks, async (url, init) => {
     fetchCalls++;
     assert.equal(String(url), clientId);
-    assert.equal(init.redirect, 'error');
+    assert.equal(init.redirect, 'manual');
     assert.equal(init.headers.accept, 'application/json');
     if (options.fetchError) throw Error('injected metadata network failure');
     return options.response ? options.response() : Response.json(options.metadata ?? metadata);

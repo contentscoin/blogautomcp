@@ -69,21 +69,41 @@ export async function validateChatGPTClientMetadata(): Promise<boolean> {
   clientMetadataPending ??= (async () => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
+    let stage = 'fetch';
+    let status: number | null = null;
+    const fail = (reason: string) => {
+      // Never log OAuth requests, response bodies, account data or credentials.
+      console.warn('[oauth-client-metadata]', JSON.stringify({ stage, status, reason }));
+      return false;
+    };
     try {
-      const response = await fetch(CHATGPT_CLIENT_ID, { redirect: 'error', signal: controller.signal, headers: { accept: 'application/json' } });
-      if (!response.ok || !(response.headers.get('content-type') || '').toLowerCase().includes('application/json')) return false;
+      // Inspect redirects without following them; this also works in Workers
+      // runtimes whose Request constructor rejects redirect: 'error'.
+      const response = await fetch(CHATGPT_CLIENT_ID, { redirect: 'manual', signal: controller.signal, headers: { accept: 'application/json' } });
+      status = response.status;
+      stage = 'headers';
+      if (!response.ok) return fail('http-status');
+      if (!(response.headers.get('content-type') || '').toLowerCase().includes('application/json')) return fail('content-type');
+      stage = 'body';
       const text = await readBoundedOAuthText(response);
-      if (text === null) return false;
+      if (text === null) return fail('bounded-body');
+      stage = 'json';
       const value: unknown = JSON.parse(text);
-      if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return fail('document-shape');
+      stage = 'contract';
       const metadata = value as Record<string, unknown>;
       const includes = (field: unknown, expected: string) => Array.isArray(field) && field.every(item => typeof item === 'string') && field.includes(expected);
       const authMethods = metadata.token_endpoint_auth_methods_supported ?? [metadata.token_endpoint_auth_method];
       if (metadata.client_id !== CHATGPT_CLIENT_ID || !includes(metadata.redirect_uris, CHATGPT_REDIRECT_URI)
-        || !includes(metadata.grant_types, 'authorization_code') || !includes(metadata.response_types, 'code') || !includes(authMethods, 'none')) return false;
+        || !includes(metadata.grant_types, 'authorization_code') || !includes(metadata.response_types, 'code') || !includes(authMethods, 'none')) return fail('client-contract');
       clientMetadataValidUntil = Date.now() + CLIENT_METADATA_TTL_MS;
       return true;
-    } catch { return false; } finally { clearTimeout(timeout); }
+    } catch (error) {
+      const reason = controller.signal.aborted ? 'timeout'
+        : error instanceof TypeError ? 'type-error'
+        : error instanceof SyntaxError ? 'invalid-json' : 'request-error';
+      return fail(reason);
+    } finally { clearTimeout(timeout); }
   })();
   try { return await clientMetadataPending; } finally { clientMetadataPending = null; }
 }
