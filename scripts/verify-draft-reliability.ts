@@ -87,7 +87,14 @@ async function main() {
   assert.deepEqual(rejected, ["a"]);
   assert.deepEqual(accepted.map((row) => row.sourceSha256), ["b"], "a malformed verdict drops only that proposal");
   const auditSource = fs.readFileSync("scripts/lib/publish-image-audit.ts", "utf8");
-  assert.match(auditSource, /outputSchema: VISUAL_REVIEW_SCHEMA/u);
+  // Exact schema behavior, including rejecting reference rows, is exercised by
+  // verify-publish-image-audit-references.ts; this guard keeps the base contract
+  // and the final-slot bounds wired into the provider call.
+  assert.match(auditSource, /outputSchema:\s*\{\s*\.\.\.VISUAL_REVIEW_SCHEMA/u);
+  assert.match(auditSource, /minItems:\s*batch\.length,\s*maxItems:\s*batch\.length/u,
+    "only final publication slots receive verdicts, excluding attached comparison references");
+  assert.match(auditSource, /index:\s*\{\s*type:\s*"integer",\s*enum:\s*batch\.map\(\(_, index\) => index \+ 1\)/u,
+    "output indices are restricted to the current final publication batch");
   assert.match(auditSource, /형식이 깨진 판정만 한 번 더 묻는다/u);
 
   // 4. Internal guidance sentences are removed deterministically; headings and other sentences stay.
