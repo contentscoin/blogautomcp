@@ -354,6 +354,29 @@ async function main() {
       assert.deepEqual(directoryBytes(directory), before);
     });
 
+    await test("exact publication source adds one canonical original without granting identity or borrowing arbitrary bytes", async () => {
+      const directory = fixture(), originalUrl = urls[2], extra1 = capacityUrl("selected-100ml-first.png"), extra2 = capacityUrl("selected-100ml-second.png");
+      const fifthBytes = await sharp({ create: { width: 24, height: 24, channels: 3, background: "#993388" } }).png().toBuffer();
+      const first = saved(directory, "first", blue, urls[0]), second = saved(directory, "second", green, urls[1]);
+      const original = saved(directory, "actual-original", red, originalUrl);
+      const qty1 = saved(directory, "qty1", gold, extra1), qty2 = saved(directory, "qty2", fifthBytes, extra2);
+      const selectedSnapshot = snapshot([urls[0], urls[1], originalUrl, extra1, extra2], { name: "selected 100ml" });
+      const bound = (maximum?: number, publicationOriginalSha256 = digest(red), selected = selectedSnapshot) =>
+        readSelectedGalleryComparisons({ snapshot: selected, productId, sourceDirectory: directory, maximum, publicationOriginalSha256 });
+      assert.deepEqual((await bound()).map(row => row.path), [first.file, second.file, original.file, qty1.file, qty2.file]);
+      for (const maximum of [1, 2, 3, 4, 5, 99]) assert.equal((await bound(maximum)).length, Math.min(maximum, 5));
+      assert.deepEqual((await bound(undefined, digest(blue))).map(row => row.path), [first.file, second.file, qty1.file, qty2.file]);
+      assert.deepEqual((await bound(undefined, "f".repeat(64))).map(row => row.path), [first.file, second.file, qty1.file, qty2.file]);
+      const thirdQtyUrl = capacityUrl("selected-100ml-third.png");
+      saved(directory, "third-qty", red, thirdQtyUrl);
+      const overlapSnapshot = snapshot([urls[0], urls[1], originalUrl, extra1, extra2, thirdQtyUrl], { name: "selected 100ml" });
+      assert.deepEqual((await bound(undefined, digest(gold), overlapSnapshot)).map(row => row.path), [first.file, second.file, qty1.file, qty2.file],
+        "an ORIGINAL already in the two quantity contexts must not add a third quantity attachment");
+      assert.deepEqual((await bound(undefined, digest(red), snapshot([urls[0], urls[1], extra1, extra2], { name: "selected 100ml" }))).map(row => row.path), [first.file, second.file, qty1.file, qty2.file]);
+      saved(directory, "conflicting-original", fifthBytes, originalUrl);
+      assert.deepEqual((await bound()).map(row => row.path), [first.file, second.file, qty1.file, qty2.file]);
+    });
+
     assert.equal(networkCalls, 0);
     console.log(`Selected gallery comparison: ${checks} offline cases passed; no network or provider calls.`);
   } finally {

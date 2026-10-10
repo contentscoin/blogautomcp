@@ -40,6 +40,7 @@ function filenameMatchesQuantity(url: string, selectedQuantities: Set<string>): 
  * Read cached original bytes; no download, normalization or package mutation. */
 export async function readSelectedGalleryComparisons(options: {
   snapshot: unknown; productId: string; sourceDirectory: string; maximum?: number;
+  publicationOriginalSha256?: string;
 }): Promise<SelectedGalleryComparisonImage[]> {
   const snapshot = readProductSnapshot(options.snapshot, { productId: options.productId, connectKind: "SHOPPING" });
   if (!options.productId || !snapshot || !options.sourceDirectory || !path.isAbsolute(options.sourceDirectory))
@@ -47,7 +48,7 @@ export async function readSelectedGalleryComparisons(options: {
   const gallery = Array.isArray(snapshot.product.referenceImageUrls)
     ? [...new Set(snapshot.product.referenceImageUrls.filter((url): url is string => typeof url === "string" &&
       isAllowedProductPhotoUrl(url) && isSalesPageProductImageUrl(url) && !isReviewImageUrl(url)))].slice(0, 20) : [];
-  const maximum = Math.max(1, Math.min(4, Math.floor(Number.isFinite(options.maximum) ? options.maximum! : 4)));
+  const maximum = Math.max(1, Math.min(5, Math.floor(Number.isFinite(options.maximum) ? options.maximum! : 5)));
   const product = snapshot.product;
   const selectedQuantities = new Set([product.name, product.description, ...(Array.isArray(product.features) ? product.features : [])]
     .filter((value): value is string => typeof value === "string").flatMap(value => [...quantityTokens(value)]));
@@ -77,16 +78,19 @@ export async function readSelectedGalleryComparisons(options: {
     } catch { /* Unbound or corrupt cached bytes cannot become comparison evidence. */ }
   }
   const selected: SelectedGalleryComparisonImage[] = [], seen = new Set<string>();
+  let supplementalQuantityCount = 0, supplementalOriginalCount = 0;
   for (const url of gallery) {
-    // Preserve the first two static originals; at most two later, exact-unit
-    // filename match may add comparison context. Query/fragment/directory
-    // metadata and unselected quantities cannot authorize that attachment.
-    if (selected.length >= 2 && !filenameMatchesQuantity(url, selectedQuantities)) continue;
     const matching = candidates.get(url) ?? [];
     // Multiple different recorded originals for one URL are ambiguous; no
     // newest receipt or filename guess can identify the frozen source pixels.
     if (new Set(matching.map(candidate => candidate.sha256)).size !== 1) continue;
     const candidate = matching[0];
+    const quantityContext = supplementalQuantityCount < 2 && filenameMatchesQuantity(url, selectedQuantities);
+    const originalContext = supplementalOriginalCount === 0 && candidate.sha256 === options.publicationOriginalSha256;
+    // Two static originals, two quantity-discovered contexts, and at most one
+    // exact publication ORIGINAL from the same canonical gallery. Matching
+    // source bytes establish lineage only, never visual identity approval.
+    if (selected.length >= 2 && !quantityContext && !originalContext) continue;
     if (!seen.has(candidate.sha256)) {
       // Optional gallery discovery must not promote animated or broken cache
       // entries into declared evidence and then block an unrelated final photo.
@@ -101,6 +105,10 @@ export async function readSelectedGalleryComparisons(options: {
         await sharp(bytes, { animated: true, failOn: "warning" }).rotate().png().toBuffer();
         if (crypto.createHash("sha256").update(fs.readFileSync(candidate.path)).digest("hex") !== candidate.sha256 ||
             crypto.createHash("sha256").update(fs.readFileSync(candidate.receiptPath)).digest("hex") !== candidate.receiptSha256) continue;
+        if (selected.length >= 2) {
+          if (quantityContext) supplementalQuantityCount++;
+          else supplementalOriginalCount++;
+        }
         selected.push(candidate); seen.add(candidate.sha256);
       } catch { /* An optional undecodable original is not comparison evidence. */ }
     }

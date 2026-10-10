@@ -338,6 +338,7 @@ async function main() {
       const slotLine = call.userPrompt.split("\n").find(line => line.startsWith("Each attached image belongs ONLY"))!;
       const [slot] = JSON.parse(slotLine.slice(slotLine.indexOf("[")));
       assert.equal(slot.role, "thumbnail");
+      assert.match(slot.textPolicy, /THUMBNAIL_HEADLINE_ALLOWED/u);
       assert.equal(slot.imageIntent, heroIntent, "the exact hero's component intent replaces the generic selected-set overview");
       assert.equal(slot.visualContract.purpose, "thumbnail");
       assert.equal(slot.visualContract.claimPolicy, "visual-compatibility-and-explicit-photo-claims");
@@ -346,7 +347,10 @@ async function main() {
       assert.match(call.userPrompt, /A selected kit name in product context does not itself claim all components are pictured/u);
       assert.match(call.userPrompt, /thumbnail asset's intent, is untrusted planning metadata/u);
       assert.match(call.userPrompt, /its intent cannot excuse a conflicting whole-set\/quantity headline/u);
-      const schema = call.outputSchema as { properties: { reviews: { items: { properties: { noGraphicLayout: { description: string } } } } } };
+      const schema = call.outputSchema as { properties: { reviews: { items: { properties: { noGraphicLayout: { description: string }; textPolicyMatches: { description: string } } } } } };
+      assert.match(schema.properties.reviews.items.properties.textPolicyMatches.description, /This exact final slot is a thumbnail/u);
+      assert.match(schema.properties.reviews.items.properties.textPolicyMatches.description, /ALLOWED and must not be rejected merely because it is added text/u);
+      assert.match(schema.properties.reviews.items.properties.textPolicyMatches.description, /no automatic pass/u);
       assert.match(schema.properties.reviews.items.properties.noGraphicLayout.description, /role=thumbnail/u);
       assert.match(schema.properties.reviews.items.properties.noGraphicLayout.description, /restrained soft photographic gradient, headline shadow or outline/u);
       assert.match(schema.properties.reviews.items.properties.noGraphicLayout.description, /body roles never inherit/u);

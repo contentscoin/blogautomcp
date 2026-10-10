@@ -178,6 +178,48 @@ async function main() {
       return answer(call);
     };
     assert.equal((await auditPublishImages(skipOptional)).ok, true); checks++;
+    const sourceUrl = "https://shop-phinf.pstatic.net/selected/exact-original.png?type=w860";
+    fs.writeFileSync(`${references[2]}.retrieval.json`, JSON.stringify({ version: "product-image-retrieval/v1", sourceUrl,
+      sha256: hash(references[2]), retrievedAt: new Date(Date.now() - 1000).toISOString() }));
+    const originalSnapshot = createProductSnapshot({ productId: "selected-kit", connectKind: "SHOPPING", externalProductId: "selected-external",
+      sourceUrl: selectedSnapshot.sourceUrl, product: { ...selectedSnapshot.product, referenceImageUrls: [...galleryUrls, sourceUrl] } });
+    const exactOriginalOptions = (): PublishImageAuditOptions => {
+      const options = fixture([{ final: references[2], reference: references[0] }]);
+      options.sourceSnapshotId = originalSnapshot.snapshotId;
+      Object.assign(options.imageAssets![0], { provenance: "ORIGINAL", creationMethod: "source", remoteGenerated: false });
+      delete options.imageAssets![0].referenceScene;
+      Object.assign(options.composition.renderNodes[0], { caption: "판매자 제공 상품 원본 사진" });
+      Object.assign(options.composition.sections[0], { imageSource: "seller-original", imageIntent: "판매자 원본 사진: 선택 구성품 외형" });
+      return { ...options, selectedSourceSnapshot: structuredClone(originalSnapshot), selectedSourceProductId: "selected-kit", selectedSourceDirectory: root };
+    };
+    const originalMapped = exactOriginalOptions();
+    originalMapped.review = async call => {
+      assert.equal(call.imagePaths!.length, 4);
+      assert.match(call.userPrompt, /"exactCanonicalSourceForFinalImageIndexes":\[1\]/u);
+      assert.match(call.userPrompt, /seller-gallery bytes, not automatic identity approval/u);
+      assert.match(call.userPrompt, /Do not compare a pictured serum to a different included toner/u);
+      assert.match(call.userPrompt, /BODY_NO_ADDED_TEXT/u);
+      assert.deepEqual(await sharp(call.imagePaths![0]).raw().toBuffer(), await sharp(call.imagePaths![3]).raw().toBuffer());
+      return answer(call);
+    };
+    const originalResult = await auditPublishImages(originalMapped);
+    assert.equal(originalResult.ok, true, JSON.stringify(originalResult.failures)); checks++;
+    for (const patch of [{ identityMatches: false }, { textPolicyMatches: false }, { accepted: false }]) {
+      const options = exactOriginalOptions(); let calls = 0;
+      options.review = async () => { calls++; return JSON.stringify({ reviews: [{ ...good(1), ...patch, reason: "Canonical source lineage does not approve an unselected component or body overlay" }] }); };
+      assert.equal((await auditPublishImages(options)).ok, false); assert.equal(calls, 1); checks++;
+    }
+    const oversizedOriginal = path.join(root, "oversized-original.png");
+    const oversizedDescriptor = fs.openSync(oversizedOriginal, "w");
+    fs.ftruncateSync(oversizedDescriptor, 24 * 1024 * 1024 + 1); fs.closeSync(oversizedDescriptor);
+    for (const invalidPath of [root, path.join(root, "missing-original.png"), oversizedOriginal]) {
+      const options = exactOriginalOptions();
+      options.imageAssets![0].path = invalidPath;
+      Object.assign(options.composition.renderNodes[0], { assetPath: invalidPath });
+      options.review = async () => { throw new Error("Invalid ORIGINAL must reject before provider"); };
+      const invalid = await auditPublishImages(options);
+      assert.equal(invalid.ok, false); assert.equal(invalid.failures[0].code, "MISSING_IMAGE"); checks++;
+    }
     const sevenPairs = Array.from({ length: 7 }, (_, index) => ({ final: finals[index % finals.length], reference: references[0] }));
     const laterGallery = { ...fixture(sevenPairs), ...Object.fromEntries(Object.entries(galleryOptions()).filter(([key]) =>
       ["selectedSourceSnapshot", "selectedSourceProductId", "selectedSourceDirectory", "sourceSnapshotId"].includes(key))) } as PublishImageAuditOptions;

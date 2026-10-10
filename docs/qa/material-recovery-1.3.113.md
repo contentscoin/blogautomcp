@@ -1,0 +1,15 @@
+# Material recovery 1.3.113
+
+Installed1.3.112 normal review exposed two remaining interpretation failures: an allowed large thumbnail headline was rejected merely as added text, and a capsule serum was compared against the different toner component. The returned failures were preserved. Three natural scenes passed; Dalba remained blocked.
+
+Each final slot now carries its server-resolved text policy, and the structured `textPolicyMatches` field explicitly describes the thumbnail-only headline permission. Body images never inherit that permission. Extra badges, bullets, panels, unsupported claims and overlays hiding identifying features still reject. No boolean is forced and no valid negative verdict is retried unchanged.
+
+The gallery helper can add one exact publication ORIGINAL beyond its existing first2 and quantity-context2 sources. The hint is computed from the actual rendered ORIGINAL's bytes, never its claimed manifest SHA; it must match a static, intact receipt-bound source at an exact canonical gallery URL. It is recalled unchanged, checked after awaits and included through the actual-call input/receipt binding. A source already in the baseline four does not add an extra quantity attachment. This is source lineage, never automatic identity approval: the model must inspect the same component and selected facts rather than another kit member. Gifts, cross-sells and wrong variants remain rejectable.
+
+Dalba's read-only selection includes five actual canonical sources. Full decoded PNG bytes for its five primary requests are7,418,915 /5,379,742 /7,526,661 /7,980,444 /8,094,933 with six attachments each, below the unchanged8,388,608-byte/eight-attachment limits. These figures include decoded PNG conversion, not just original JPEG size. No user files or provider calls were used by that size probe.
+
+Offline checks include exact-original source selection, deduplication, lower maximums, noncanonical/missing/ambiguous source rejection, quantity/ORIGINAL overlap, strict adverse-verdict preservation and role-specific schema policy. Delivery and actual installed approval results will be recorded after verification.
+
+Full TypeScript and changed-file lint pass. The complete natural-photo suite, auditor106, gallery helper61, success receipts and reference input57 regressions pass. The57 include directory/missing/oversized ORIGINAL files retaining structured rejection before provider. Independent final source review found no remaining blocker after quantity-overlap and bounded-read counterexamples were fixed.
+
+A changed-input read-only live Dalba diagnostic made five calls with six attachments each and accepted all five publication photos. Its exact original is mapped to the corresponding raw canonical source; the thumbnail-only structured text policy was applied. Every captured manifest/photo/source/receipt SHA remained unchanged. No brandLinkId was supplied, so no approval, rejection-ledger or success-receipt write occurred. This demonstrates the input correction's benefit, not that the installed material is approved; that still requires normal installed113 QA.
