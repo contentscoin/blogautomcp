@@ -181,6 +181,34 @@ async function main() {
   assert.equal((await audit(referenced)).receiptReused, false); assert.equal(calls, referenceBeforeCalls + 3);
   referenced.imageAssets![0].referenceScene!.reviewedOutputSha256 = "f".repeat(64);
   assert.equal((await audit(referenced)).ok, false); assert.equal(calls, referenceBeforeCalls + 3, "an output-proof mismatch cannot pass via a matching old reference receipt");
+  const heroIntentOptions = { ...options, brandLinkId: "hero-intent-context", imageAssets: [{ path: image, sourcePath: image,
+    sha256: hash(image), role: "hero", imageIntent: "토너 외형 확인", provenance: "PHOTO_TEXT_THUMBNAIL", creationMethod: "local-composite" }] } as PublishImageAuditOptions;
+  inspectRequest = request => {
+    const line = request.userPrompt.split("\n").find(text => text.startsWith("Each attached image belongs ONLY"))!;
+    const [slot] = JSON.parse(line.slice(line.indexOf("[")));
+    assert.equal(slot.role, "thumbnail");
+    assert.equal(slot.imageIntent, heroIntentOptions.imageAssets![0].imageIntent);
+  };
+  const beforeHeroIntent = calls;
+  assert.equal((await audit(heroIntentOptions)).ok, true); assert.equal(calls, beforeHeroIntent + 1);
+  const heroIntentKey = JSON.parse(fs.readFileSync(receiptFile(heroIntentOptions.brandLinkId!), "utf8")).key;
+  assert.equal((await audit(heroIntentOptions)).receiptReused, true); assert.equal(calls, beforeHeroIntent + 1);
+  heroIntentOptions.imageAssets![0].imageIntent = "유리 바스켓 보기";
+  assert.equal((await audit(heroIntentOptions)).receiptReused, false); assert.equal(calls, beforeHeroIntent + 2,
+    "unchanged thumbnail bytes cannot reuse approval for a different actual asset intent");
+  assert.notEqual(JSON.parse(fs.readFileSync(receiptFile(heroIntentOptions.brandLinkId!), "utf8")).key, heroIntentKey);
+  const bodyIntentOptions = { ...bodyOptions, brandLinkId: "body-asset-intent-context", imageAssets: [{ path: image, sourcePath: image,
+    sha256: hash(image), role: "body", imageIntent: "Untrusted thumbnail-like asset intent", provenance: "ORIGINAL", creationMethod: "source" }] } as PublishImageAuditOptions;
+  inspectRequest = request => {
+    const line = request.userPrompt.split("\n").find(text => text.startsWith("Each attached image belongs ONLY"))!;
+    const [slot] = JSON.parse(line.slice(line.indexOf("[")));
+    assert.equal(slot.imageIntent, bodyIntentOptions.composition.sections[0].imageIntent);
+  };
+  const beforeBodyIntent = calls;
+  assert.equal((await audit(bodyIntentOptions)).ok, true); assert.equal(calls, beforeBodyIntent + 1);
+  bodyIntentOptions.imageAssets![0].imageIntent = "Changed irrelevant body asset intent";
+  assert.equal((await audit(bodyIntentOptions)).receiptReused, true); assert.equal(calls, beforeBodyIntent + 1,
+    "body asset intent is not publication context and cannot replace the actual section intent");
   inspectRequest = undefined;
   console.log("image audit receipts: signed/tamper/wrong-id/concurrent key/lock, exact bytes/options/prompts/policy, force failure/auth/missing invalidation and injected reviewer isolation PASS");
 }

@@ -30,7 +30,8 @@ import { buildProductImageVisualContract, PRODUCT_IMAGE_VISUAL_CONTRACT_RULES_EN
 const NOTICE_PIXELS_RULE = "notice=true ONLY means a shipping, service or seller announcement visible in the attached IMAGE PIXELS, such as a delivery-closure notice, returns/customer-service announcement or seller notice board. It never means AI-generated provenance, an illustrative image intent, the need for AI disclosure, or an adjacentCaption/article disclosure outside the image. Set notice=false for those contexts; they do not turn a product photograph into a notice. If AI disclosure or other explanatory copy is burned into a body photo, reject it using textPolicyMatches/noGraphicLayout, not notice merely because it mentions AI.";
 const SINGLE_PHOTOGRAPH_RULE = "ONE physical product and its optically consistent reflection in a visible mirror or reflective surface may belong to one coherent natural photograph. Such a reflection is not a second included unit, repeated-original image, collage or inset panel. An ordinary mirror and its physical frame are scene props, not a graphic photo frame. Check that the reflected item, pose, placement and perspective can be explained by that surface. Reject independent duplicate physical products when the slot requires one item, pasted duplicates, split panels, contradictory reflected identity/design, or physically inconsistent/impossible reflections; do not excuse genuine distortion.";
 const NATURAL_SCENE_INTENT_RULE = "A referenceGuidedScene or lifestyle-illustration means a natural photograph in a plausible daily setting, not a drawn illustration, diagram or information card. Product-focused close-up photography is allowed when coherent setting cues remain visibly present; a large foreground product alone is not an intent mismatch. No person, hands, wearing, use action, wide room view or staged price/payment action is required. A price or technical discussion does not require the photo to demonstrate price or performance unless the published text explicitly claims that photographic evidence. Any explicitly required setting must actually be visible: a kitchen intent needs coherent kitchen cues; an isolated white-background catalog photo cannot satisfy that setting. Foreground image occupancy is not physical scale: still reject implausible real-world scale, contact or placement, wrong identity/options, distorted structure, hidden identifying features, added text/graphic layouts, or unsupported photographic proof claims. Apply these rules to accepted without overriding the separate identity, format and photoClaim verdicts.";
-const COMPONENT_APPEARANCE_RULE = "For product-appearance or lifestyle-illustration, a photograph may show one identifiable selected kit component or one selected unit rather than the whole purchased set. Compare the visible component's actual brand, product line, design and variant against its explicitly mapped reference and selected product facts. Missing other kit components or purchased units alone is not an identity mismatch when the published text does not claim this is a complete-set photo or photographic proof of the package/quantity. A disclaimer is not a full-set claim. Do not assume an unidentified bottle belongs to the set: a wrong visible component, swapped scent/model, contradictory included bundle, or published complete-set/quantity claim unsupported by the pixels still rejects. Do not certify hidden components or quantities from one component's photo.";
+const COMPONENT_APPEARANCE_RULE = "For product-appearance, lifestyle-illustration or role=thumbnail, a photograph may show one identifiable selected kit component or one selected unit rather than the whole purchased set. Compare the visible component's actual brand, product line, design and variant against its explicitly mapped reference and selected product facts. Missing other kit components or purchased units alone is not an identity mismatch when the actual published text and visible thumbnail headline do not claim this is a complete-set photo or photographic proof of the package/quantity. A selected kit name in product context does not itself claim all components are pictured. A component-only thumbnail headline such as '토너 외형 확인' may describe that identifiable selected toner; do not require it to advertise every kit member. A disclaimer is not a full-set claim and cannot excuse a conflicting visible headline. Do not assume an unidentified bottle belongs to the set: a wrong visible component, swapped scent/model, contradictory included bundle, or published complete-set/quantity claim unsupported by the pixels still rejects. Do not certify hidden components or quantities from one component's photo.";
+const THUMBNAIL_PHOTOGRAPH_RULE = "Only a slot with role=thumbnail may contain a large headline over one natural full-photo composition. A restrained soft photographic gradient, headline shadow or outline used only for contrast over the same continuous full-bleed photograph is allowed for that thumbnail; it is not an explanatory panel or a frame and alone does not make noGraphicLayout false. Its core headline must remain large, high contrast, complete and readable at small preview size. Reject a separate color-block text panel, white border, frame around a reduced seller photo, inset photograph, split layout, table, badge or bullet list, tiny product photos, clipped essential words, and overlays hiding distinguishing product features. No invented or unsupported headline claims. A title overlay is permitted here and nowhere else: body roles never inherit headline/gradient-layout permission from a thumbnail. Judge the actual pixels against these conditions; no thumbnail is automatically approved.";
 const MIXED_OPTIONS_RULE = "mixedOptions means visibly different models, colors, scents or other variants presented together without an allowed explicit named comparison. Multiple views or physical units of the same identifiable model/variant alone are not mixedOptions. Evaluate repeated physical products, pasted duplicates, impossible reflections, misleading bundle/quantity claims and the exact slot's single-item requirement separately with accepted, singlePhotograph and photoClaimMatches; same-design items are not automatically approved. Set mixedOptions=true for genuine distinguishable option mixtures, including thumbnails, and name the conflicting options.";
 
 export interface PublishImageAuditFailure {
@@ -148,6 +149,10 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
       if (node.kind !== "image") continue;
       const section = options.composition.sections.find(s => s.id === node.sectionId);
       const thumbnail = node.role === "thumbnail" && node.sectionId === null;
+      if (node.role === "thumbnail" && !thumbnail) {
+        fail(nodeIndex, node.assetPath, "INVALID_CONTEXT", "Thumbnail role requires a representative image outside body sections.");
+        continue;
+      }
       if (!thumbnail && (!section || !section.imageIntent?.trim())) {
         fail(nodeIndex, node.assetPath, "INVALID_CONTEXT", "Image has no resolved section intent.");
         continue;
@@ -239,12 +244,15 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
         fail(nodeIndex, node.assetPath, "INVALID_IMAGE", "Final image cannot be fully decoded as a static image.");
         continue;
       }
+      // Hero metadata describes this exact asset's intended exterior view. It
+      // remains untrusted planning context, never proof of a visible claim.
+      const imageIntent = thumbnail ? asset?.imageIntent?.trim() || "Selected product overview with title overlay" : section!.imageIntent!;
       candidates.push({ nodeIndex, sectionId: node.sectionId, assetPath: node.assetPath, snapshot, snapshotBytes: fs.statSync(snapshot).size,
         snapshotSha256: crypto.createHash("sha256").update(fs.readFileSync(snapshot)).digest("hex"), sha256, role: node.role,
         sectionTitle: thumbnail ? "Thumbnail" : sectionTitle, sectionBody,
-        imageIntent: section?.imageIntent || "Selected product overview with title overlay",
+        imageIntent,
         allowProductPhoto: thumbnail || isShoppingLifestyleImage(section!) || allowsGenericBrandPostProductPhoto({ sectionTitle, imageIntent: section!.imageIntent, imageSource: section!.imageSource }),
-        visualContract: buildProductImageVisualContract({ sectionTitle, imageIntent: section?.imageIntent || "Selected product overview", imageSource: section?.imageSource }, thumbnail),
+        visualContract: buildProductImageVisualContract({ sectionTitle, imageIntent, imageSource: section?.imageSource }, thumbnail),
         ...(referenceScene ? { referenceScene } : {}),
       });
       result.images.push({ nodeIndex, assetPath: node.assetPath, sha256 });
@@ -280,9 +288,9 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           COMPONENT_APPEARANCE_RULE,
           MIXED_OPTIONS_RULE,
           "Assess each candidate independently. Other attached candidates are also unverified and must not become the reference for the selected model. For a claimed design/variant contradiction, name the concrete visible conflicting characteristic and the selected-product fact it contradicts; do not invent a model-specific design from memory or assume another candidate is correct.",
-          "Only a slot with role=thumbnail may contain a large headline over one natural full-photo composition. Its core headline must remain large, high contrast, complete and readable at small preview size. Reject tiny text, tiny product photos pasted inside a frame or panel, cluttered fact-card layouts, clipped essential words, and overlays hiding distinguishing product features. No invented claims. A title overlay is permitted here and nowhere else.",
+          THUMBNAIL_PHOTOGRAPH_RULE,
           "Mixed options reject unless this specific section explicitly compares the named visible options AND the image clearly labels/distinguishes each option without implying a mixed purchase bundle. Merely mentioning comparison, other scents or alternatives is insufficient. Thumbnail mixed options always reject.",
-          "sectionTitle and sectionBody are actual published render-node text. Only that text can establish explicitNamedComparison. imageIntent is planning metadata, never proof that a comparison is published. Even when allowProductPhoto=true, reject generic photos used as proof of a feature claim in the published text.",
+          "sectionTitle and sectionBody are actual published render-node text. Only that text can establish explicitNamedComparison. imageIntent, including a thumbnail asset's intent, is untrusted planning metadata: it identifies the intended visual role, never proves product identity, visible headline accuracy, a complete set, a feature or a published comparison. Inspect the actual thumbnail headline pixels for claims; its intent cannot excuse a conflicting whole-set/quantity headline. Even when allowProductPhoto=true, reject generic photos used as proof of a feature claim in the published text.",
           PRODUCT_IMAGE_VISUAL_CONTRACT_RULES_EN,
           "Generic packshots are product-photo, permitted only when allowProductPhoto=true. A photographic detail may show an actual visible structure, but information cards and explanatory panels are forbidden even when labelled feature-evidence. Do not infer performance from a photo. A referenceGuidedScene illustrates styling or a plausible setting alongside the paragraph; it is not offered as photographic proof of its technical claims.",
           "For an AI 연출 이미지 intent, judge product identity, credible anatomy/fabric/contact and believable placement, never feature demonstration. Reject invented included accessories, operation or performance claims. A referenceGuidedScene has a separately validated comparison against original-reference bytes and a required adjacentCaption rendered immediately after its image. Never require or allow AI disclosure burned into body-image pixels. Background styling props do not imply included accessories. A styling scene is not a claim of actual personal use or efficacy. The prior comparison does not authorize visible contradictions in the final pixels.",
@@ -333,6 +341,10 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
       try {
         const hash = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
         if (hash(candidate.assetPath) !== candidate.sha256 || hash(candidate.snapshot) !== candidate.snapshotSha256) return false;
+        if (candidate.role === "thumbnail") {
+          const currentAsset = options.imageAssets?.find(item => path.resolve(item.path) === path.resolve(candidate.assetPath));
+          if ((currentAsset?.imageIntent?.trim() || "Selected product overview with title overlay") !== candidate.imageIntent) return false;
+        }
         if (candidate.referenceScene) {
           const reference = candidate.referenceScene;
           const asset = options.imageAssets?.find(item => path.resolve(item.path) === path.resolve(candidate.assetPath));
@@ -398,12 +410,11 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
         }
       }
     }
-    // Also catch file replacement while the remote review was in flight.
+    // A later batch must not mutate an earlier slot's bytes or bound context.
+    // Repeat the same checks for all candidates, including receipt reuse.
     for (const candidate of candidates) {
-      try {
-        if (crypto.createHash("sha256").update(fs.readFileSync(candidate.assetPath)).digest("hex") !== candidate.sha256) throw new Error("changed");
-        if (candidate.referenceScene && crypto.createHash("sha256").update(fs.readFileSync(candidate.referenceScene.referencePath)).digest("hex") !== candidate.referenceScene.referenceSha256) throw new Error("reference changed");
-      } catch { fail(candidate.nodeIndex, candidate.assetPath, "IMAGE_CHANGED", "Image changed/disappeared during the audit; re-audit final composition."); }
+      if (!inputsStillBound([candidate])) fail(candidate.nodeIndex, candidate.assetPath, "IMAGE_CHANGED",
+        "Image or bound review context changed/disappeared during the audit; re-audit final composition.");
     }
     result.ok = result.failures.length === 0;
     if (receiptId) {
@@ -434,6 +445,7 @@ const VISUAL_REVIEW_SCHEMA = {
           mixedOptions: { type: "boolean", description: MIXED_OPTIONS_RULE },
           notice: { type: "boolean", description: NOTICE_PIXELS_RULE },
           singlePhotograph: { type: "boolean", description: SINGLE_PHOTOGRAPH_RULE },
+          noGraphicLayout: { type: "boolean", description: THUMBNAIL_PHOTOGRAPH_RULE },
           reviewClass: { type: "string", enum: ["product-photo", "feature-evidence"] },
           reason: { type: "string" },
         },
