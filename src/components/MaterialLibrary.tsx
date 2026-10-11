@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MaterialJobItemResult } from "./MaterialJobItemResult";
 import { currentJobReadyCount } from "../lib/material-job-display";
+import { startMaterialPolling } from "../lib/material-polling";
 
 type Material = { productId: string; revision: string; title: string; productName?: string; connectKind: string; status: string; ready: boolean; blockers: string[]; score: number | null; imageCount: number; approvedAt: string | null };
 type Job = { jobId: string; kind: string; status: string; startedAt: string; sourceJobId?: string; connectKind?: string; items: { productId: string; status: string; stage: string; error?: string; errorCode?: string; scheduledDate?: string }[] };
@@ -44,6 +45,7 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
   const [date, setDate] = useState("");
   const [intervalDays, setIntervalDays] = useState(1);
   const previousJobs = useRef("");
+  const polling = useRef<ReturnType<typeof startMaterialPolling> | null>(null);
   const changeRef = useRef(onChanged); changeRef.current = onChanged;
   const storageKey = `material-selection-v1:${connectKind}`;
   const rewriteStorageKey = `material-failed-rewrite-v1:${connectKind}`;
@@ -69,11 +71,11 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
   const select = (next: Record<string, string>) => {
     setSelection(next); localStorage.setItem(storageKey, JSON.stringify(next));
   };
-  const refresh = useCallback(async () => {
-    const response = await fetch(`/api/materials?connectKind=${encodeURIComponent(connectKind)}`, { cache: "no-store" });
+  const loadMaterials = useCallback(async (signal: AbortSignal) => {
+    const response = await fetch(`/api/materials?connectKind=${encodeURIComponent(connectKind)}`, { cache: "no-store", signal });
     const result = await response.json();
     if (!response.ok || !result.success) throw new Error(result.error || "소재 목록을 읽지 못했습니다.");
-    if (currentConnectKind.current !== connectKind) return;
+    if (signal.aborted || currentConnectKind.current !== connectKind) return false;
     setMaterials(result.data.materials); setJobs(result.data.jobs); setLoading(false);
     setFailedCandidates(result.data.failedCandidates || []);
     setFailedCandidateCount(result.data.failedCandidateCount ?? 0);
@@ -94,13 +96,18 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
     const signature = JSON.stringify([result.data.jobs.map((job: Job) => [job.jobId, job.status, job.items.map(item => item.status)]), result.data.materials.map((material: Material) => [material.productId, material.revision, material.ready, material.status])]);
     if (previousJobs.current && signature !== previousJobs.current) changeRef.current();
     previousJobs.current = signature;
+    return result.data.jobs.some((job: Job) => ["running", "queued"].includes(job.status)) ||
+      result.data.materials.some((material: Material) => material.status === "PREPARING" || material.status === "PUBLISHING");
   }, [connectKind]);
+  const refresh = useCallback(() => currentConnectKind.current === connectKind
+    ? polling.current?.refresh() ?? Promise.resolve() : Promise.resolve(), [connectKind]);
   useEffect(() => {
-    let disposed = false;
-    const update = () => { if (!disposed) void refresh().catch(error => { if (!disposed) setMessage(error.message); }); };
-    update(); const timer = setInterval(update, 4000);
-    return () => { disposed = true; clearInterval(timer); };
-  }, [refresh]);
+    const current = startMaterialPolling({ poll: loadMaterials, visibility: document, desktopVisibility: window,
+      requireDesktopVisibility: /Electron\//u.test(navigator.userAgent), activeIntervalMs: 4000,
+      onError: error => setMessage(error instanceof Error ? error.message : String(error)) });
+    polling.current = current;
+    return () => { current.stop(); if (polling.current === current) polling.current = null; };
+  }, [loadMaterials]);
   useEffect(() => {
     if (!selectionRequest) return;
     if (selectionRequest.mode === "prepare") {

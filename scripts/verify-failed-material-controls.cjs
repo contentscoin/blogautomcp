@@ -14,7 +14,7 @@ const list = (overrides = {}) => ({ success: true, data: { materials: [], jobs: 
 const settle = () => new Promise(resolve => setTimeout(resolve, 20));
 
 function harness({ source = 'MaterialLibrary', storage = new Map(), onFetch, initialList = list(), history = false } = {}) {
-  const states = [], effectDeps = [], requests = [];
+  const states = [], effectDeps = [], requests = [], cleanups = [];
   let cursor = 0, effects = [], uuidCount = 0;
   const react = {
     useState(initial) { const index = cursor++; if (!(index in states)) states[index] = typeof initial === 'function' ? initial() : initial; return [states[index], value => { states[index] = typeof value === 'function' ? value(states[index]) : value; }]; },
@@ -23,19 +23,24 @@ function harness({ source = 'MaterialLibrary', storage = new Map(), onFetch, ini
     useEffect(effect, deps) { const index = cursor++; const previous = effectDeps[index]; if (!previous || !deps || deps.some((value, n) => !Object.is(value, previous[n]))) { effectDeps[index] = deps; effects.push(effect); } },
   };
   const jsx = (type, props) => typeof type === 'function' ? type(props || {}) : ({ type, props: props || {} });
+  const polling = loadClientDisplay('src/lib/material-polling.ts', () => { throw new Error('Unexpected polling dependency'); },
+    { AbortController, setTimeout: () => 1, clearTimeout() {} });
   const testModule = { exports: {} };
   const context = vm.createContext({
-    module: testModule, exports: testModule.exports, require: name => name === 'react' ? react : name === 'next/link' ? { default: 'a' } : name === '../lib/material-job-display' ? loadClientDisplay('src/lib/material-job-display.ts', () => ({ jsx, jsxs: jsx })) : name === './MaterialJobItemResult' ? loadClientDisplay('src/components/MaterialJobItemResult.tsx', () => ({ jsx, jsxs: jsx })) : { jsx, jsxs: jsx },
+    module: testModule, exports: testModule.exports, require: name => name === 'react' ? react : name === 'next/link' ? { default: 'a' } : name === '../lib/material-polling' ? polling : name === '../lib/material-job-display' ? loadClientDisplay('src/lib/material-job-display.ts', () => ({ jsx, jsxs: jsx })) : name === './MaterialJobItemResult' ? loadClientDisplay('src/components/MaterialJobItemResult.tsx', () => ({ jsx, jsxs: jsx })) : { jsx, jsxs: jsx },
     localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
     crypto: { randomUUID: () => { uuidCount++; return `00000000-0000-4000-8000-${String(uuidCount).padStart(12, '0')}`; } },
-    Date, console, setInterval: () => 1, clearInterval() {},
+    Date, console, document: { hidden: false, addEventListener() {}, removeEventListener() {} },
+    window: { addEventListener() {}, removeEventListener() {} }, navigator: { userAgent: 'offline browser' },
     fetch: async (url, init) => { requests.push({ url, init }); return onFetch ? onFetch(url, init) : response(initialList); },
   });
   const code = ts.transpileModule(fs.readFileSync(`src/components/${source}.tsx`, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 } }).outputText;
   new vm.Script(code).runInContext(context);
   const props = source === 'MaterialLibrary' ? { connectKind: 'SHOPPING', candidates: [{ id: 'ready_product', productName: '준비완료 상품' }, { id: 'failed_product', productName: '실패 상품' }], onPreview() {}, onChanged() {} } : { history };
   const render = () => { cursor = 0; effects = []; return testModule.exports[source](props); };
-  return { requests, storage, render, uuidCount: () => uuidCount, async mount() { render(); effects.forEach(effect => effect()); await settle(); return render(); } };
+  return { requests, storage, render, uuidCount: () => uuidCount,
+    unmount() { cleanups.forEach(cleanup => cleanup()); },
+    async mount() { render(); effects.forEach(effect => { const cleanup = effect(); if (typeof cleanup === 'function') cleanups.push(cleanup); }); await settle(); return render(); } };
 }
 const rewriteButton = tree => nodes(tree).find(node => node.type === 'button' && text(node).startsWith('실패 소재 전체 재작성·검증'));
 const retryButton = tree => nodes(tree).find(node => node.type === 'button' && text(node) === '이전 재작성 요청 확인·재시도');
@@ -43,6 +48,15 @@ const repairButton = tree => nodes(tree).find(node => node.type === 'button' && 
 const repairRetryButton = tree => nodes(tree).find(node => node.type === 'button' && text(node) === '이전 보완 요청 확인·재시도');
 
 (async () => {
+  {
+    let acknowledge;
+    const h = harness({ onFetch: (url, init) => init?.method === 'POST' ? new Promise(resolve => { acknowledge = resolve; }) : response(list()) });
+    const tree = await h.mount(); rewriteButton(tree).props.onClick(); await settle();
+    const before = h.requests.filter(request => request.init?.method !== 'POST').length;
+    h.unmount(); acknowledge(response({ success: true, data: job() })); await settle();
+    assert.equal(h.requests.filter(request => request.init?.method !== 'POST').length, before,
+      'late accepted action after cleanup never starts unmanaged material GET');
+  }
   for (const initialList of [list({ failedCandidateCount: 0, failedCandidates: [] }), list({ jobs: [job({ kind: 'prepare' })] })]) {
     const h = harness({ initialList }); const tree = await h.mount();
     assert.equal(rewriteButton(tree).props.disabled, true, 'zero targets or another running job disables rewrite');

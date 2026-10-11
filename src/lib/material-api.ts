@@ -28,9 +28,9 @@ function materialStatus(productStatus: string, ready: boolean, imageStatus?: str
   return ready ? "READY" : "BLOCKED";
 }
 
-function readMaterialView(product: MaterialProduct): Record<string, unknown> | null {
+function readMaterialView(product: MaterialProduct, material = getMaterial): Record<string, unknown> | null {
   try {
-    const saved = getMaterial(product.id);
+    const saved = material(product.id);
     if (!saved) return null;
     const statusAllowsPublish = ["READY", "FAILED"].includes(product.status);
     const ready = saved.ready && statusAllowsPublish;
@@ -69,6 +69,15 @@ async function materialJobView(job: MaterialJob): Promise<Record<string, unknown
 export async function materialsGet(request: NextRequest) {
   const auth = requireAdminApiKey(request); if (auth) return auth;
   try {
+    // Share expensive file verification only within this one GET snapshot.
+    // Every later GET and all mutation/publication paths read fresh bytes.
+    const cache = new Map<string, { value: ReturnType<typeof getMaterial> } | { error: unknown }>();
+    const material = (id: string): ReturnType<typeof getMaterial> => {
+      const cached = cache.get(id);
+      if (cached) { if ("error" in cached) throw cached.error; return cached.value; }
+      try { const value = getMaterial(id); cache.set(id, { value }); return value; }
+      catch (error) { cache.set(id, { error }); throw error; }
+    };
     const jobId = request.nextUrl.searchParams.get("jobId");
     if (jobId) {
       const job = readMaterialJob(jobId);
@@ -87,7 +96,7 @@ export async function materialsGet(request: NextRequest) {
         select: { id: true, productName: true, status: true, connectKind: true },
       }) : [];
       const materials = products.flatMap(product => {
-        const current = readMaterialView(product);
+        const current = readMaterialView(product, material);
         return current ? [{ productId: current.productId, ready: current.ready, status: current.materialStatus, blockers: current.blockers }] : [];
       });
       return NextResponse.json({ success: true, data: { jobs, materials } });
@@ -98,11 +107,11 @@ export async function materialsGet(request: NextRequest) {
       select: { id: true, productName: true, status: true, connectKind: true },
     });
     const materials = products.flatMap(product => {
-      const material = readMaterialView(product);
-      return material ? [material] : [];
+      const view = readMaterialView(product, material);
+      return view ? [view] : [];
     });
-    const failedCandidates = await listFailedMaterialCandidates(kind === "SHOPPING" || kind === "TRAVEL" ? kind : undefined);
-    const repairCandidates = await listMaterialRepairCandidates(kind === "SHOPPING" || kind === "TRAVEL" ? kind : undefined);
+    const failedCandidates = await listFailedMaterialCandidates(kind === "SHOPPING" || kind === "TRAVEL" ? kind : undefined, undefined, material);
+    const repairCandidates = await listMaterialRepairCandidates(kind === "SHOPPING" || kind === "TRAVEL" ? kind : undefined, undefined, material);
     return NextResponse.json({ success: true, data: { materials, jobs: listMaterialJobs().slice(0, 50), failedCandidates, failedCandidateCount: failedCandidates.length,
       repairCandidates, repairCandidateCount: repairCandidates.length } });
   } catch (error) { return NextResponse.json({ success: false, error: (error as Error).message }, { status: 400 }); }

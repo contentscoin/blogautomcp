@@ -4,12 +4,12 @@ const path = require('node:path');
 const vm = require('node:vm');
 const ts = require('typescript');
 
-exports.loadClientDisplay = function loadClientDisplay(relative, runtimeRequire) {
+exports.loadClientDisplay = function loadClientDisplay(relative, runtimeRequire, globals = {}) {
   const filename = path.resolve(relative);
   const fixtureModule = { exports: {} };
-  const context = vm.createContext({ module: fixtureModule, exports: fixtureModule.exports,
+  const context = vm.createContext({ module: fixtureModule, exports: fixtureModule.exports, ...globals,
     require(name) {
-      if (name.startsWith('.')) return loadClientDisplay(path.resolve(path.dirname(filename), `${name}.ts`), runtimeRequire);
+      if (name.startsWith('.')) return loadClientDisplay(path.resolve(path.dirname(filename), `${name}.ts`), runtimeRequire, globals);
       return runtimeRequire(name);
     },
   });

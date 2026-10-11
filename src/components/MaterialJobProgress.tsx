@@ -3,6 +3,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { MaterialJobItemResult } from "./MaterialJobItemResult";
 import { currentJobReadyCount, type CurrentMaterialDisplay } from "../lib/material-job-display";
+import { startMaterialPolling } from "../lib/material-polling";
 type Job = { jobId: string; kind: string; status: string; startedAt: string; sourceJobId?: string; items: Array<{ productId: string; stage: string; status: string; error?: string; errorCode?: string }> };
 const isRecoveryJob = (job: Job) => job.kind === "rewrite" || job.kind === "repair";
 const jobLabel = (job: Job) => job.kind === "repair" ? "보완 필요 소재 보완·검증" : job.kind === "rewrite" ? "실패 소재 재작성·검증" : job.kind === "prepare" ? "소재 미리작성" : "선택 소재 발행";
@@ -14,12 +15,17 @@ export function MaterialJobProgress({ history = false }: { history?: boolean }) 
   const [jobs, setJobs] = useState<Job[]>([]);
   const [materials, setMaterials] = useState<CurrentMaterialDisplay[]>([]);
   useEffect(() => {
-    let alive = true;
-    const poll = () => { void fetch("/api/materials?jobsOnly=1", { cache: "no-store" }).then(response => response.json()).then(result => {
-      if (alive && result.success) { setJobs(result.data.jobs); setMaterials(result.data.materials || []); }
-    }).catch(() => undefined); };
-    poll(); const timer = setInterval(poll, 5000);
-    return () => { alive = false; clearInterval(timer); };
+    const polling = startMaterialPolling({ visibility: document, desktopVisibility: window,
+      requireDesktopVisibility: /Electron\//u.test(navigator.userAgent), activeIntervalMs: 5000, poll: async signal => {
+      const response = await fetch("/api/materials?jobsOnly=1", { cache: "no-store", signal });
+      const result = await response.json();
+      if (signal.aborted) return false;
+      if (!response.ok || !result.success) throw new Error(result.error || "소재 작업 목록을 읽지 못했습니다.");
+      setJobs(result.data.jobs); setMaterials(result.data.materials || []);
+      return result.data.jobs.some((job: Job) => ["running", "queued"].includes(job.status)) ||
+        (result.data.materials || []).some((material: CurrentMaterialDisplay) => material.status === "PREPARING" || material.status === "PUBLISHING");
+    } });
+    return () => polling.stop();
   }, []);
   const active = jobs.find(job => ["running", "queued"].includes(job.status));
   if (!history) return active ? <div role="status" className="border-b border-violet-200 bg-violet-50 px-4 py-2 text-sm text-violet-900">

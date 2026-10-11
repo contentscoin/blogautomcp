@@ -65,10 +65,10 @@ export function selectMaterialRepairCandidates(products: FailedMaterialProduct[]
   });
 }
 
-export async function listMaterialRepairCandidates(connectKind?: MaterialConnectKind, excludeJobId?: string): Promise<MaterialRepairCandidate[]> {
+export async function listMaterialRepairCandidates(connectKind?: MaterialConnectKind, excludeJobId?: string, material = getMaterial): Promise<MaterialRepairCandidate[]> {
   const products = await prisma.brandLink.findMany({ orderBy: { createdAt: "desc" }, ...(connectKind ? { where: { connectKind } } : {}),
     select: { id: true, productName: true, status: true, connectKind: true, postUrl: true, publishedAt: true, scheduledPublishAt: true, errorMessage: true },
   });
   return selectMaterialRepairCandidates(products, listMaterialJobs().filter(job => job.jobId !== excludeJobId),
-    { material: getMaterial, savedDraft: hasSavedMaterialDraft, publicationAttempt: readPublishAttempt }, connectKind);
+    { material, savedDraft: hasSavedMaterialDraft, publicationAttempt: readPublishAttempt }, connectKind);
 }

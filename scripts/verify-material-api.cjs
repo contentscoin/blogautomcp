@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports -- CommonJS offline VM fixture loads transpiled sources. */
 /** Offline regression fixture: actual material API/library/date code, mocked boundaries.
  * Run: node --test scripts/verify-material-api.cjs
  * No production database, filesystem writes, network, generation or publication.
@@ -16,8 +17,8 @@ function load(relative, dependencies, globals = {}) {
   const source = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
   }).outputText;
-  const module = { exports: {} };
-  const context = vm.createContext({ module, exports: module.exports, Buffer, Date, Intl,
+  const fixtureModule = { exports: {} };
+  const context = vm.createContext({ module: fixtureModule, exports: fixtureModule.exports, Buffer, Date, Intl,
     process: { pid: 12345 }, ...globals,
     require(name) {
       if (!Object.hasOwn(dependencies, name)) throw new Error(`Unexpected dependency: ${name}`);
@@ -25,7 +26,7 @@ function load(relative, dependencies, globals = {}) {
     },
   });
   new vm.Script(source, { filename }).runInContext(context);
-  return module.exports;
+  return fixtureModule.exports;
 }
 const clone = value => JSON.parse(JSON.stringify(value));
 const json = (body, options = {}) => ({ status: options.status || 200, body: clone(body) });
@@ -33,7 +34,7 @@ const json = (body, options = {}) => ({ status: options.status || 200, body: clo
 function harness() {
   const state = { now: '2026-09-07T03:00:00.000Z', authorized: true, updateBlocked: false,
     products: new Map(), manifests: new Map(), jobs: new Map(), runs: [], saves: 0,
-    locks: 0, activities: 0, productReads: 0, countReads: 0, runnerError: null, progress: new Map(), publicationAttempts: new Map(), missingDraftFiles: new Set(), manuscripts: new Map() };
+    locks: 0, activities: 0, productReads: 0, countReads: 0, materialReads: new Map(), runnerError: null, progress: new Map(), publicationAttempts: new Map(), missingDraftFiles: new Set(), manuscripts: new Map() };
   class FakeDate extends Date {
     constructor(...args) { super(...(args.length ? args : [state.now])); }
     static now() { return Date.parse(state.now); }
@@ -43,13 +44,15 @@ function harness() {
     'node:fs': { readFileSync: file => Buffer.from(state.manuscripts.get(file) ?? `fixture bytes: ${file}`) },
     './brand-post-package': {
       readBrandPostPackage: id => state.manifests.get(id) || null,
-      evaluateBrandPostPackageReadiness: manifest => ({
+      evaluateBrandPostPackageReadiness: manifest => {
+        state.materialReads.set(manifest.productId, (state.materialReads.get(manifest.productId) || 0) + 1);
+        return {
         contentScore: 100, composition: null,
         // The real shared evaluator owns generation liveness (tested in the
         // image integrity suite); API must consume its blockers, not raw flags.
         blockers: [...(manifest.fixtureBlockers || []), ...(manifest.imageGeneration?.status === 'running' ? [{ code: 'images-running', reason: 'Image worker is running' }] : [])],
         imageGeneration: manifest.imageGeneration || null,
-      }),
+      }; },
     },
   });
   const dates = load('src/lib/bulk-schedule-plan.ts', {}, { Date: FakeDate });
@@ -125,6 +128,28 @@ function assertNoDispatch(h) {
   assert.equal(h.state.locks, 0, 'lock released');
   assert.equal(h.state.activities, 0, 'activity released');
 }
+
+test('one materials GET verifies each package once across list and both candidate selectors; the next GET reads fresh', async () => {
+  const h = harness(), ready = h.product(0), blocked = h.product(2, 'FAILED');
+  h.state.manifests.get(blocked.productId).fixtureBlockers = [{ reason: 'Image validation failed' }];
+  h.state.jobs.set('failed-writing', { jobId: 'failed-writing', kind: 'prepare', status: 'failed', startedAt: h.state.now,
+    items: [{ productId: blocked.productId, status: 'failed', stage: 'failed', error: 'Image validation failed' }] });
+  h.state.materialReads.clear();
+  const first = await h.api.materialsGet(h.request(null, '?connectKind=SHOPPING'));
+  assert.equal(first.status, 200);
+  assert.equal(first.body.data.materials.find(item => item.productId === ready.productId).ready, true);
+  assert.equal(first.body.data.failedCandidates.length, 1); assert.equal(first.body.data.repairCandidates.length, 1);
+  assert.equal(h.state.materialReads.get(ready.productId), 1); assert.equal(h.state.materialReads.get(blocked.productId), 1);
+  const revision = first.body.data.materials.find(item => item.productId === ready.productId).revision;
+  h.state.manuscripts.set(`${ready.productId}.md`, 'manuscript edited after previous GET');
+  h.state.manifests.get(blocked.productId).fixtureBlockers = [];
+  const next = await h.api.materialsGet(h.request(null, '?connectKind=SHOPPING'));
+  assert.notEqual(next.body.data.materials.find(item => item.productId === ready.productId).revision, revision);
+  assert.equal(next.body.data.materials.find(item => item.productId === blocked.productId).ready, true);
+  assert.equal(next.body.data.failedCandidates.length, 0); assert.equal(next.body.data.repairCandidates.length, 0);
+  assert.equal(h.state.materialReads.get(ready.productId), 2); assert.equal(h.state.materialReads.get(blocked.productId), 2);
+  assertNoDispatch(h);
+});
 
 test('missing, empty, duplicate and malformed selections cannot dispatch', async () => {
   for (const make of [() => undefined, () => [], item => [item, item],
