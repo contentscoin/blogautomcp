@@ -744,7 +744,8 @@ async function main() {
           assert.match(text, /Minor lighting, pose, background, reflection and non-identifying surface\/print-spacing variation may pass/u);
           assert.match(text, /Do not demand pixel identity, perfect microtext or OCR of every tiny capacity/u);
           assert.match(text, /Readable invented\/unsupported certification or efficacy copy/u);
-          assert.match(text, /Never change an adverse boolean to obtain approval/u);
+          assert.match(text, /Independently evaluate the CURRENT attached reference\/candidate pair and CURRENT publication text/u);
+          assert.match(text, /Preserve every actually observed blocking defect/u);
         }
         assert.match(call.userPrompt, /classify those unchanged dimensions as consistent\/none/u);
         assert.match(call.userPrompt, /Planning intent alone cannot establish that published claim/u);

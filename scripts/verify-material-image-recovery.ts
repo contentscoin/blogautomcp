@@ -229,7 +229,7 @@ async function main() {
       composition: { sections: [{ id: "feature", body: ["45분"], imageMin: 1 }] }, imageAssets: [] };
     const save = () => fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(manifest));
     save();
-    assert.equal(IMAGE_RECOVERY_POLICY_VERSION, 5);
+    assert.equal(IMAGE_RECOVERY_POLICY_VERSION, 6);
     const policy3Signature = crypto.createHash("sha256").update(JSON.stringify({
       version: 1, policy: 3, product: manifest.sourceSnapshot.product,
       sections: [{ id: "feature", body: ["45분"], imageMin: 1 }], assets: [], receipts: [], rejected: [],
