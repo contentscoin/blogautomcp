@@ -110,7 +110,7 @@ async function main() {
       const file = saved(dir, "seller.png");
       assert.deepEqual(await collect(dir, { localCandidates: [file], maximum: 1 }), { candidates: [file], downloads: [] });
     });
-    await test("current gallery reaches real twelve-candidate review ahead of twenty distinct saved locals", async () => {
+    await test("current gallery leads bounded generation-reference review while publication keeps its twelve-candidate budget", async () => {
       const dir = fixture();
       const locals: string[] = [];
       for (let index = 0; index < 20; index++) {
@@ -144,11 +144,14 @@ async function main() {
       });
       assert.equal(reference.path, selected);
       assert.equal(reviewed[0], selected);
-      assert.equal(reviewed.length, 12, "existing photo-review budget is unchanged");
+      assert.equal(reviewed.length, current.candidates.length, "generation-reference selection inspects all 20 collected candidates within its bounded search");
+      assert.ok(reviewed.length <= 24, "generation-reference review remains capped at 24 candidates");
       assert.equal(geometryCalls, 1, "URL lineage does not replace geometry/identity review");
+      let publicationReviewCalls = 0;
       const denied = await selectVerifiedProductPhotos(current.candidates, "current URL rejected fixture", 12, {
-        review: async () => JSON.stringify({ productPhoto: false, reason: "Not the exact selected model" }),
+        review: async () => { publicationReviewCalls++; return JSON.stringify({ productPhoto: false, reason: "Not the exact selected model" }); },
       });
+      assert.equal(publicationReviewCalls, 12, "default publication review retains its existing 12-candidate budget");
       assert.deepEqual(denied, [], "current URL candidates still fail closed on a real negative photo verdict");
       assert.deepEqual(snapshot(dir), before, "ordering never overwrites files or records");
     });
