@@ -12,6 +12,39 @@ async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "material-image-recovery-"));
   process.env.DESKTOP_USER_DATA = root;
   try {
+    for (const outcome of ["recovered", "second-rejection", "cancelled", "uncertain", "auth", "missing", "ambiguous", "unknown-key"] as const) {
+      let blocked = ["missing", "ambiguous", "unknown-key"].includes(outcome); let approvals = 0; let accepted = false; let regenerated = false;
+      const actions: string[] = [];
+      const call: Call = async (url, method, body) => {
+        const payload = body as { action?: string; assetKey?: string }; const action = payload?.action || method; actions.push(action);
+        if (url.endsWith("/images")) {
+          assert.equal(action, outcome === "missing" ? "generate_missing" : "regenerate", "thumbnail-only recovery never mutates completed body slots");
+          assert.equal(payload.assetKey, outcome === "missing" ? undefined : "a".repeat(64));
+          if (["cancelled", "uncertain", "auth"].includes(outcome)) throw Object.assign(new Error("generation stopped or response unavailable"),
+            { code: outcome === "cancelled" ? "IMAGE_REPAIR_FAILED" : outcome === "auth" ? "CODEX_AUTH_REQUIRED" : "OUTCOME_UNKNOWN" });
+          blocked = false; regenerated = true;
+        }
+        if (action === "approve") {
+          approvals++;
+          if (outcome !== "missing" && (approvals === 1 || outcome === "second-rejection")) {
+            blocked = true;
+            throw Object.assign(new Error("thumbnail circular gift inset/+ promotion"), { code: "PUBLISH_IMAGE_AUDIT_FAILED", errors: ["SEMANTIC_REJECTION: forbidden circular inset and gift graphic"] });
+          }
+          accepted = true;
+        }
+        const hero = { role: "hero", sectionId: null, sha256: (regenerated ? "b" : "a").repeat(64) };
+        return { success: true, data: { approvedAt: accepted ? "yes" : null, approval: { canApprove: !blocked, blockers: blocked
+          ? [{ code: outcome === "missing" ? "hero-image-invalid" : "image-publication-rejected", reason: "대표 이미지 · forbidden gift inset", sectionId: null }] : [] },
+          imageAssets: outcome === "missing" && !regenerated ? [] : outcome === "ambiguous" ? [hero, { ...hero, sha256: "c".repeat(64) }] : outcome === "unknown-key" ? [{ ...hero, sha256: "unknown" }] : [hero],
+          imageSlots: [{ missing: 0, generationMissing: 0 }], contentQuality: { signals: [] } } };
+      };
+      const run = runMaterialPreparation(`thumbnail-${outcome}`, { call, pause: async () => {} });
+      if (["recovered", "missing"].includes(outcome)) await run; else await assert.rejects(run);
+      assert.equal(accepted, ["recovered", "missing"].includes(outcome));
+      assert.equal(actions.filter(action => ["regenerate", "generate_missing"].includes(action)).length, ["ambiguous", "unknown-key"].includes(outcome) ? 0 : 1);
+      assert(!actions.includes("repair_rejected") && !actions.includes("replan_sources") && !actions.includes("prepare_context"));
+      assert.equal(approvals, ["recovered", "second-rejection"].includes(outcome) ? 2 : ["ambiguous", "unknown-key"].includes(outcome) ? 0 : 1);
+    }
     for (const outcome of ["recovered", "second-rejection", "replan-success", "third-rejection", "replan-incomplete", "auth", "mixed", "unstale"] as const) {
       let approvals = 0; let missing = false; let accepted = false;
       const actions: string[] = [];
@@ -196,7 +229,7 @@ async function main() {
       composition: { sections: [{ id: "feature", body: ["45분"], imageMin: 1 }] }, imageAssets: [] };
     const save = () => fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(manifest));
     save();
-    assert.equal(IMAGE_RECOVERY_POLICY_VERSION, 4);
+    assert.equal(IMAGE_RECOVERY_POLICY_VERSION, 5);
     const policy3Signature = crypto.createHash("sha256").update(JSON.stringify({
       version: 1, policy: 3, product: manifest.sourceSnapshot.product,
       sections: [{ id: "feature", body: ["45분"], imageMin: 1 }], assets: [], receipts: [], rejected: [],

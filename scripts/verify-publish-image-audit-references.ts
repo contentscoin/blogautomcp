@@ -81,6 +81,29 @@ async function main() {
     };
     const mappedResult = await auditPublishImages(mapped);
     assert.equal(mappedResult.ok, true); assert.equal(mappedResult.checked, 3); assert.equal(calls, 1); checks++;
+    const derivedThumbnail = (): PublishImageAuditOptions => ({ productName: "selected product", sourceSnapshotId: "offline-snapshot",
+      composition: { sections: [], renderNodes: [{ kind: "image", assetPath: finals[0], sectionId: null, role: "thumbnail", altText: "large title", layout: "single", sourcePolicy: "LOCKED_PRODUCT_OR_ORIGINAL" }] },
+      imageAssets: [{ path: finals[0], sourcePath: finals[0], sha256: hash(finals[0]), role: "hero", sectionId: null,
+        provenance: "PHOTO_TEXT_THUMBNAIL", creationMethod: "remote-generated", remoteGenerated: true,
+        referenceScene: { strategyVersion: REFERENCE_SCENE_STRATEGY_VERSION, sourceSnapshotId: "offline-snapshot",
+          referencePath: references[0], referenceSha256: hash(references[0]), thumbnailRawPath: finals[1], reviewedOutputSha256: hash(finals[1]),
+          thumbnailOutputSha256: hash(finals[0]), reviewStatus: "passed", checks: Object.fromEntries(REFERENCE_SCENE_REVIEW_CHECKS.map(key => [key, true])) } }],
+      review: async call => { assert.equal(slots(call)[0].comparisonReferenceImageIndex, 2);
+        assert.deepEqual(await sharp(call.imagePaths![1]).raw().toBuffer(), await sharp(references[0]).raw().toBuffer()); return answer(call); } });
+    assert.equal((await auditPublishImages(derivedThumbnail())).ok, true); checks++;
+    const headlineRejected = derivedThumbnail(); headlineRejected.review = async () => JSON.stringify({ reviews: [{ ...good(1), thumbnailHeadlineLegible: false }] });
+    assert.equal((await auditPublishImages(headlineRejected)).ok, false, "passed noAddedText raw review never approves an unreadable final headline"); checks++;
+    for (const field of ["thumbnailRawPath", "thumbnailOutputSha256", "reviewedOutputSha256"] as const) {
+      const invalid = derivedThumbnail(); Object.assign(invalid.imageAssets![0].referenceScene!, { [field]: field === "thumbnailRawPath" ? path.join(root, "missing.png") : "0".repeat(64) });
+      invalid.review = async () => { throw new Error("bad raw/final lineage must never reach provider"); };
+      assert.equal((await auditPublishImages(invalid)).ok, false); checks++;
+    }
+    for (const changedFile of [finals[0], finals[1], references[0]]) {
+      const bytes = fs.readFileSync(changedFile); const options = derivedThumbnail();
+      options.review = async call => { fs.writeFileSync(changedFile, "changed during final audit"); return answer(call); };
+      const changed = await auditPublishImages(options); fs.writeFileSync(changedFile, bytes);
+      assert.equal(changed.ok, false); assert(changed.failures.some(item => item.code === "IMAGE_CHANGED")); checks++;
+    }
     const galleryUrls = ["https://shop-phinf.pstatic.net/selected/toner.png?type=w860", "https://shop-phinf.pstatic.net/selected/kit.png?type=w860"];
     const selectedSnapshot = createProductSnapshot({ productId: "selected-kit", connectKind: "SHOPPING", externalProductId: "kit-123",
       sourceUrl: "https://brand.naver.com/seller/products/123", product: { name: "selected toner/serum/cream kit", description: "selected kit",

@@ -21,6 +21,7 @@ import { isShoppingThumbnailSourceEligible } from "../../scripts/lib/thumbnail-l
 import { createTravelEditorialThumbnail } from "../../scripts/lib/travel-thumbnail";
 import {
   applyGeneratedBrandPostImage,
+  brandPostReferenceSceneIssue,
   getBrandPostPackageDir,
   normalizePackageImageAssets,
   type BrandPostPackageImageAsset,
@@ -198,6 +199,13 @@ function resolveTarget(
   }
 
   const sectionId = request.sectionId?.trim();
+  if (!sectionId && request.slotId === "hero:image:1" && !fs.existsSync(manifest.heroImagePath) &&
+      !assets.some(asset => asset.role === "hero" && !asset.sectionId)) {
+    const oldHeroes = manifest.imageAssets?.filter(asset => asset.role === "hero" && !asset.sectionId) || [];
+    if (oldHeroes.length > 1 || oldHeroes.some(asset => path.resolve(asset.path) !== path.resolve(manifest.heroImagePath)))
+      throw new Error("IMAGE_RESUME_REQUIRED: 소실된 대표 이미지의 원래 대상을 확인할 수 없습니다.");
+    return { request, role: "hero", sectionTitle: manifest.title, imageIntent: "글의 내용을 한눈에 보여주는 대표 이미지", bodyExcerpt: manifest.title };
+  }
   const section = manifest.composition.sections.find((candidate) => candidate.id === sectionId);
   if (!sectionId || !section) throw new Error("이미지를 추가할 본문 파트를 찾을 수 없습니다.");
   return {
@@ -823,14 +831,14 @@ export async function resolveCompletedProductImage(options: {
   const initialSet = validatedReviewCandidateSet(options.job);
   const fingerprint = () => {
     const binding = options.job.reviewOnly;
-    if (!context || options.target.referenceContext !== context || !binding || options.manifest.connectKind !== "SHOPPING" || options.target.role !== "body" || !allowsShoppingReferenceScene(options.target) ||
+    if (!context || options.target.referenceContext !== context || !binding || options.manifest.connectKind !== "SHOPPING" || !allowsShoppingReferenceScene(options.target) ||
         binding.slotId !== options.target.request.slotId || binding.sourceSnapshotId !== options.manifest.sourceSnapshot?.snapshotId ||
         JSON.stringify(context.referenceHashes) !== JSON.stringify(binding.referenceHashes) ||
         JSON.stringify(context.referenceImagePaths.map(file => path.resolve(file))) !== JSON.stringify(options.job.referenceImagePaths.map(file => path.resolve(file))) ||
         context.reference.sha256 !== context.referenceHashes[0] || sha256File(context.reference.path) !== context.reference.sha256) throw refused();
     const nodes = options.manifest.composition.renderNodes.filter(node => "sectionId" in node && node.sectionId === options.target.sectionId);
-    const sectionTitle = nodes.flatMap(node => node.kind === "heading" || node.kind === "quotation" ? [node.text] : []).join("\n");
-    const sectionBody = nodes.flatMap(node => node.kind === "paragraph" ? [node.text] : []).join("\n\n");
+    const sectionTitle = options.target.role === "hero" ? options.manifest.title : nodes.flatMap(node => node.kind === "heading" || node.kind === "quotation" ? [node.text] : []).join("\n");
+    const sectionBody = options.target.role === "hero" ? "" : nodes.flatMap(node => node.kind === "paragraph" ? [node.text] : []).join("\n\n");
     if (!sectionBody.trim() && !sectionTitle.trim()) throw new Error("IMAGE_RESUME_REQUIRED: 복구 검수에 필요한 최종 게시 본문 또는 소제목이 없습니다. 이전 계획 문구로 승인하지 않았습니다.");
     const data = { version: "product-image-resolution/v1", slotId: binding.slotId, sourceSnapshotId: binding.sourceSnapshotId,
       sourceSnapshot: options.manifest.sourceSnapshot, referencePaths: context.referenceImagePaths, referenceHashes: binding.referenceHashes,
@@ -893,8 +901,7 @@ export async function resolveCompletedProductImage(options: {
   if (!fs.existsSync(recordPath)) atomicWriteTextFile(recordPath, JSON.stringify({ version: "product-image-resolution/v1",
     bindingHash: initial.hash, binding: initial.data, chosen: { ...chosen.candidate, outputPath }, review: chosen.review, candidateReviews: outcomes }));
   assertCurrent();
-  return { generatedPath: outputPath, provenance: "GENERATED_SCENE",
-    referenceScene: { ...chosen.review, sourceSnapshotId: options.manifest.sourceSnapshot!.snapshotId } };
+  return await finishReviewedShoppingScene({ ...options, rawPath: outputPath, review: chosen.review });
   } finally {
     lock.release();
   }
@@ -1183,17 +1190,36 @@ async function finishGeneratedImage(options: {
     if (sha256File(file) !== context.referenceHashes[index])
       throw new Error("REFERENCE_SCENE_CHANGED: 생성 전후 참조 이미지 해시가 달라졌습니다.");
   }
-  if (options.target.role === "hero") {
-    const copy = buildProductThumbnailCopy(options.manifest.title, options.productName, "SHOPPING", options.manifest.productUnderstanding);
-    const thumbnail = await createOriginalProductPhotoThumbnail({ sourcePath: context.reference.path, outputDir: options.workDir,
-      productName: copy.productNameLabel, headline: copy.headline, subline: copy.subline, style: "shopping-bold" });
-    return { generatedPath: thumbnail.outputPath, provenance: "PHOTO_TEXT_THUMBNAIL" };
-  }
   const referenceScene = await (options.reviewReferenceScene ?? reviewShoppingReferenceScene)({ reference: context.reference, outputPath: options.rawPath,
     productName: options.productName, imageIntent: options.target.imageIntent, sectionTitle: options.target.sectionTitle,
     bodyExcerpt: options.target.bodyExcerpt, anchorSha256: context.anchorSha256 });
-  return { generatedPath: options.rawPath, provenance: "GENERATED_SCENE",
-    referenceScene: { ...referenceScene, sourceSnapshotId: options.manifest.sourceSnapshot!.snapshotId } };
+  return finishReviewedShoppingScene({ ...options, review: referenceScene });
+}
+
+/** Review the natural raw photograph before adding the permitted headline.
+ * Reference-only seller artwork is never used as publication pixels. */
+async function finishReviewedShoppingScene(options: {
+  manifest: BrandPostPackageManifestV2; productName: string; target: ResolvedImageTarget;
+  rawPath: string; workDir: string; review: NonNullable<BrandPostImageGenerationResult["referenceScene"]>;
+}): Promise<Pick<BrandPostImageGenerationResult, "generatedPath" | "provenance" | "referenceScene">> {
+  const rawHash = sha256File(options.rawPath);
+  const referenceScene = { ...options.review, sourceSnapshotId: options.manifest.sourceSnapshot!.snapshotId };
+  const context = options.target.referenceContext;
+  if (!context || referenceScene.reviewStatus !== "passed" || referenceScene.reviewedOutputSha256 !== rawHash ||
+      typeof referenceScene.referencePath !== "string" || path.resolve(referenceScene.referencePath) !== path.resolve(context.reference.path) ||
+      referenceScene.referenceSha256 !== context.reference.sha256 || sha256File(context.reference.path) !== context.reference.sha256 ||
+      referenceScene.strategyVersion !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION ||
+      !REFERENCE_SCENE_REVIEW_CHECKS.every(key => referenceScene.checks?.[key] === true))
+    throw new Error("REFERENCE_SCENE_REVIEW_INVALID: 검수한 원본·생성 사진·필수 비교 판정이 일치하지 않습니다.");
+  if (options.target.role !== "hero") return { generatedPath: options.rawPath, provenance: "GENERATED_SCENE", referenceScene };
+  const copy = buildProductThumbnailCopy(options.manifest.title, options.productName, "SHOPPING", options.manifest.productUnderstanding);
+  const thumbnail = await createOriginalProductPhotoThumbnail({ sourcePath: options.rawPath, outputDir: options.workDir,
+    productName: copy.productNameLabel, headline: copy.headline, subline: copy.subline, style: "shopping-bold" });
+  if (sha256File(options.rawPath) !== rawHash || sha256File(context.reference.path) !== context.reference.sha256)
+    throw new Error("REFERENCE_SCENE_CHANGED: 제목 합성 중 검수한 생성 사진 또는 상품 참조가 변경되었습니다.");
+  return { generatedPath: thumbnail.outputPath, provenance: "PHOTO_TEXT_THUMBNAIL",
+    referenceScene: { ...referenceScene, thumbnailRawPath: options.rawPath,
+      thumbnailOutputSha256: sha256File(thumbnail.outputPath) } };
 }
 
 export async function generateBrandPostImages(options: {
@@ -1258,22 +1284,14 @@ export async function generateBrandPostImages(options: {
 
   // Source validation is a prerequisite, never a post-generation surprise.
   if (options.manifest.connectKind === "SHOPPING") {
-    // A thumbnail is a separate large-headline treatment of verified source
-    // photography. Never pay for a scene only to discard it in a local layout.
+    // Source binding never starts a hero generation or relabels seller artwork
+    // as a finished photo/text thumbnail. Generation shares the scene transport.
     for (let targetIndex = targets.length - 1; targetIndex >= 0; targetIndex -= 1) {
       const target = targets[targetIndex];
-      if (target.role !== "hero") continue;
+      if (target.role !== "hero" || !options.sourceOnly) continue;
       const index = requestIndexes[targetIndex];
-      try {
-        const finished = await finishGeneratedImage({ manifest: options.manifest, productName: options.productName,
-          sourceImageUrls: options.sourceImageUrls, target, rawPath: "", index,
-          workDir: path.join(getBrandPostPackageDir(options.manifest.brandLinkId), "image-generation-work", "thumbnails") });
-        await publish(index, { ...baseResult(index), ...finished, imageIntent: target.imageIntent,
-          creationMethod: "local-composite", remoteGenerated: false });
-      } catch (error) {
-        await publish(index, { ...baseResult(index), imageIntent: target.imageIntent,
-          error: error instanceof Error ? error.message : String(error) });
-      }
+      await publish(index, { ...baseResult(index), imageIntent: target.imageIntent,
+        error: "IMAGE_GENERATION_REQUIRED: 대표 이미지는 상품 참조로 새 자연스러운 장면을 생성·검수한 뒤 큰 제목을 합성해야 합니다. 원본 배정에서는 생성 요청을 시작하지 않습니다." });
       targets.splice(targetIndex, 1);
       requestIndexes.splice(targetIndex, 1);
     }
@@ -1582,8 +1600,8 @@ export async function generateBrandPostImages(options: {
           index,
         });
         result = { ...base, ...finished,
-          remoteGenerated: finished.provenance !== "ORIGINAL" && finished.provenance !== "PHOTO_TEXT_THUMBNAIL",
-          creationMethod: finished.provenance === "ORIGINAL" || finished.provenance === "PHOTO_TEXT_THUMBNAIL" ? "local-composite"
+          remoteGenerated: finished.provenance !== "ORIGINAL",
+          creationMethod: finished.provenance === "ORIGINAL" ? "local-composite" : finished.provenance === "PHOTO_TEXT_THUMBNAIL" ? "remote-generated"
             : options.manifest.connectKind === "SHOPPING" ? "reference-guided-scene" : "remote-generated",
           sourceReview: target.sourceReview,
         };
@@ -1682,10 +1700,13 @@ export function findAppliedExternalGeneratedBrandPostImage(options: ExternalGene
       if (sha256File(asset.path) !== asset.sha256) continue;
       if (options.manifest.connectKind === "SHOPPING") {
         const review = asset.referenceScene;
-        if (!allowsShoppingReferenceScene(target) || review?.reviewStatus !== "passed" ||
+        if (brandPostReferenceSceneIssue(options.manifest, asset) || !allowsShoppingReferenceScene(target) || review?.reviewStatus !== "passed" ||
             review.strategyVersion !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION ||
             review.sourceSnapshotId !== options.manifest.sourceSnapshot?.snapshotId ||
-            review.reviewedOutputSha256 !== asset.sha256 || review.referenceSha256 !== sha256File(review.referencePath) ||
+            (asset.provenance === "PHOTO_TEXT_THUMBNAIL"
+              ? review.thumbnailOutputSha256 !== asset.sha256 || !review.thumbnailRawPath ||
+                sha256File(review.thumbnailRawPath) !== review.reviewedOutputSha256
+              : review.reviewedOutputSha256 !== asset.sha256) || review.referenceSha256 !== sha256File(review.referencePath) ||
             (review.anchorSha256 && review.anchorSha256 !== sha256File(options.manifest.heroImagePath))) continue;
       }
       return { manifest: options.manifest, alreadyApplied: true, assetKey: asset.sha256, sectionId: target.sectionId,
@@ -1767,8 +1788,8 @@ export async function applyExternalGeneratedBrandPostImage(
     provenance: finished.provenance,
     imageIntent: target.imageIntent,
     slotId: resolveBrandPostImageSlots(options.manifest, [target.request])[0].slotId,
-    remoteGenerated: finished.provenance !== "ORIGINAL" && finished.provenance !== "PHOTO_TEXT_THUMBNAIL",
-    creationMethod: finished.provenance === "ORIGINAL" || finished.provenance === "PHOTO_TEXT_THUMBNAIL" ? "local-composite" : options.manifest.connectKind === "SHOPPING" ? "reference-guided-scene" : "remote-generated",
+    remoteGenerated: finished.provenance !== "ORIGINAL",
+    creationMethod: finished.provenance === "ORIGINAL" ? "local-composite" : finished.provenance === "PHOTO_TEXT_THUMBNAIL" ? "remote-generated" : options.manifest.connectKind === "SHOPPING" ? "reference-guided-scene" : "remote-generated",
     referenceScene: finished.referenceScene,
   });
   const generatedResolved = path.resolve(finishedPath);

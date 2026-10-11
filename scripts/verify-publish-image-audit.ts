@@ -9,7 +9,7 @@ import { createRequire } from "node:module";
 import Ajv from "ajv";
 import sharp from "sharp";
 import ts from "typescript";
-import { auditPublishImages, assertPublishImagesSafe, parseVisualReviews, PublishImageAuditError, type PublishImageAuditOptions } from "./lib/publish-image-audit";
+import { auditPublishImages, assertPublishImagesSafe, buildSelectedProductImageAuditContext, parseVisualReviews, PublishImageAuditError, type PublishImageAuditOptions } from "./lib/publish-image-audit";
 import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 import { reviewShoppingReferenceScene } from "./lib/shopping-reference-scene";
 
@@ -420,6 +420,95 @@ async function main() {
       }
       return input;
     };
+    // Yedaum repeated trays: synthetic pixels exercise the prompt/schema and
+    // gate only. Catalog ambiguity cannot invent a purchase selection; every
+    // valid adverse verdict remains blocking, including apparently same trays.
+    const persimmonCases: Array<{ role: "thumbnail" | "scene"; features?: string[]; body?: string; patch: Partial<typeof good> }> = [
+      { role: "thumbnail", patch: {} },
+      { role: "scene", patch: {} },
+      { role: "scene", features: ["선택 옵션: 크림치즈호두말이"], patch: { identityMatches: false, reason: "Whole persimmons contradict the supplied confirmed cream-cheese walnut option" } },
+      { role: "scene", patch: { mixedOptions: true, reason: "Whole persimmons and a visibly distinct unselected stuffed option are mixed" } },
+      { role: "scene", body: "칸마다 서로 다른 형태의 곶감이 담겨 있어요.", patch: { photoClaimMatches: false, reason: "Precise visible description says different forms, but the photo repeats same-form persimmons" } },
+      { role: "scene", body: "이 사진은 구매한 크림치즈호두말이 구성과 같습니다.", patch: { identityMatches: false, reason: "Input requires exact purchased-bundle identity, which is unresolved" } },
+      { role: "scene", body: "사진 속 구성은 56,000원에 구매하는 24개 세트입니다.", patch: { photoClaimMatches: false, reason: "Source lineage and repeated trays do not establish the asserted price or quantity" } },
+      { role: "scene", patch: { identityMatches: false, reason: "Source/component membership genuinely remains unresolved" } },
+      { role: "scene", patch: { accepted: false, reason: "Matching repeated trays do not override the model's adverse final verdict" } },
+    ];
+    for (const test of persimmonCases) {
+      const input = alignedDecisionInput(test.role);
+      input.productName = "예다움 상주곶감 반건시 선물세트 크림치즈호두말이";
+      input.selectedProduct = buildSelectedProductImageAuditContext(input.productName, test.features || ["무게: 1.65kg", "보관조건: 냉동보관"]);
+      if (test.role === "scene") {
+        Object.assign(input.composition.renderNodes[1], { text: "곶감 포장 외형" });
+        Object.assign(input.composition.renderNodes[2], { text: test.body || "곶감 포장의 외형을 참고하는 사진이며 구매 옵션의 수량이나 가격을 입증하지 않습니다." });
+      }
+      let calls = 0;
+      input.review = async call => {
+        calls++;
+        const properties = (call.outputSchema as { properties: { reviews: { items: { properties: Record<string, { description: string }> } } } }).properties.reviews.items.properties;
+        assert(call.userPrompt.includes(JSON.stringify(input.selectedProduct)), "actual option resolution reaches the provider unchanged");
+        for (const text of [call.userPrompt, properties.identityMatches.description]) {
+          assert.match(text, /Title-derived catalog candidates are not confirmed purchase selections/u);
+          assert.match(text, /absence of a confirmed purchase option alone is not a pixel identity defect/u);
+          assert.match(text, /visible contradiction with a confirmed option/u);
+          assert.match(text, /specific purchased SKU or bundle/u);
+          assert.match(text, /genuinely unresolved product identity or uncertain source\/component membership/u);
+          assert.match(text, /Never infer hidden quantities, contents or price/u);
+          assert.match(text, /never changes an adverse boolean/u);
+        }
+        for (const text of [call.userPrompt, properties.mixedOptions.description]) {
+          assert.match(text, /repeated compartments inside one gift box/u);
+          assert.match(text, /One option means one variant, not one fruit, tray, package or physical unit/u);
+          assert.match(text, /same-design items are not automatically approved/u);
+        }
+        for (const text of [call.userPrompt, properties.photoClaimMatches.description]) {
+          assert.match(text, /appearance or scene descriptions are ALSO pixel assertions/u);
+          assert.match(text, /칸마다 서로 다른 형태의 곶감이 담겨 있어요/u);
+          assert.match(text, /must fail photoClaimMatches/u);
+          assert.match(text, /no claim of tested efficacy is needed/u);
+        }
+        const verdict = { ...good, reason: "One identifiable option in several matching trays; catalog title candidates alone do not resolve a purchased SKU", ...test.patch };
+        assert.equal(new Ajv().compile(call.outputSchema as object)({ reviews: [verdict] }), true);
+        return JSON.stringify({ reviews: [verdict] });
+      };
+      const audited = await auditPublishImages(input);
+      assert.equal(audited.ok, Object.keys(test.patch).length === 0);
+      assert.equal(calls, 1, "option-context clarification never reinterprets or retries a valid adverse verdict");
+      if (!audited.ok) assert(audited.failures[0].reason.includes(test.patch.reason!));
+      assertions++;
+    }
+    // Included-cut facts are comparison context, never whole-set certification.
+    for (const patch of [{},
+      { identityMatches: false, reason: "The pictured cut is not one of the canonical included cuts" },
+      { photoClaimMatches: false, reason: "One 200g component cannot prove the published complete 1200g set photograph claim" },
+      { accepted: false, reason: "The 200g component's actual kit membership remains unresolved" },
+    ] as const) {
+      const input = alignedDecisionInput("scene");
+      input.productName = "한우 선물세트";
+      input.selectedProduct = buildSelectedProductImageAuditContext(input.productName,
+        ["부위: 등심, 채끝, 차돌박이, 앞다리, 설도", "중량: 1200g"]);
+      Object.assign(input.composition.renderNodes[1], { text: "구성품 외형" });
+      Object.assign(input.composition.renderNodes[2], { text: "photoClaimMatches" in patch
+        ? "이 사진에 구매할 1200g 세트의 전 구성품이 보입니다."
+        : "확인된 세트 구성품의 외형 참고용이며 전체 구성과 총중량을 증명하지 않습니다." });
+      let calls = 0;
+      input.review = async call => {
+        calls++;
+        const context = JSON.parse(input.selectedProduct!);
+        assert.deepEqual(context.validatedSellerFeatures.map((claim: { text: string }) => claim.text),
+          ["부위: 등심, 채끝, 차돌박이, 앞다리, 설도", "중량: 1200g"]);
+        assert(context.validatedSellerFeatures.every((claim: { evidenceIds: string[] }) => claim.evidenceIds.length > 0));
+        assert(call.userPrompt.includes(JSON.stringify(input.selectedProduct)), "included-cut facts and evidence IDs reach the actual audit input");
+        assert.match(call.userPrompt, /Missing other kit components or purchased units alone is not an identity mismatch/u);
+        assert.match(call.userPrompt, /published complete-set\/quantity claim unsupported by the pixels still rejects/u);
+        assert.match(call.userPrompt, /Do not certify hidden components or quantities/u);
+        return JSON.stringify({ reviews: [{ ...good, reason: "A verified included component may illustrate exterior appearance; total weight is not photo-certified", ...patch }] });
+      };
+      const audited = await auditPublishImages(input);
+      assert.equal(audited.ok, Object.keys(patch).length === 0);
+      assert.equal(calls, 1, "provided membership facts never override an adverse verdict");
+      assertions++;
+    }
     // Reported Homelea/Dibea false positives: keep actual rendered technical
     // discussion intact, require literal proof/headline grounding, and retain
     // any real adverse response. These fixtures do not certify live pixels.

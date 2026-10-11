@@ -16,7 +16,8 @@ export interface Result {
     status?: string; postUrl?: string; scheduledPublishAt?: string; errorMessage?: string;
     published?: boolean; scheduled?: boolean; verificationBasis?: string;
     attemptStage?: string | null;
-    approvedAt?: string | null; approval?: { canApprove: boolean };
+    approvedAt?: string | null; approval?: { canApprove: boolean; blockers?: { code: string; reason: string; sectionId?: string | null }[] };
+    imageAssets?: { assetKey?: string; sha256?: string; role?: string; sectionId?: string | null }[];
     imageGeneration?: { status: string; recoveryState?: string };
     imageSlots?: { missing: number; generationMissing: number }[];
     qualityConvergence?: QualityConvergencePlan | null;
@@ -138,6 +139,7 @@ const IMAGE_QUALITY_SIGNALS = new Set(["composition-quality", "representative-im
 const UNRESOLVED_IMAGE_OPERATION_CODES = new Set([
   "IMAGE_RESUME_REQUIRED", "IMAGE_OUTPUT_AMBIGUOUS", "PREPARATION_RESULT_UNCERTAIN",
   "OUTCOME_UNKNOWN", "ALREADY_PUBLISHING", "CODEX_TIMEOUT",
+  "IMAGE_REPAIR_FAILED", "USER_CANCELLED", "IMAGE_GENERATION_CANCELLED",
 ]);
 function isDefinitivePublishImageFailure(error: unknown): boolean {
   const failure = error as { code?: string; errors?: string[] };
@@ -453,15 +455,29 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     }
   };
 
+  const thumbnailRepairKey = (): string | null => {
+    const blocked = draft.data?.approval?.blockers?.some(blocker => !blocker.sectionId &&
+      (["hero-image-invalid", "image-thumbnail-format-required"].includes(blocker.code) ||
+        ["image-publication-rejected", "image-format-obsolete", "image-geometry-invalid", "image-reference-review-invalid", "image-provenance-invalid"].includes(blocker.code) && blocker.reason.startsWith("대표 이미지")));
+    if (!blocked) return null;
+    const heroes = draft.data?.imageAssets?.filter(asset => asset.role === "hero" && !asset.sectionId) || [];
+    if (heroes.length === 0 && draft.data?.approval?.blockers?.some(blocker => blocker.code === "hero-image-invalid")) return null;
+    const key = heroes.length === 1 ? heroes[0].assetKey || heroes[0].sha256 : undefined;
+    if (!key || !/^[a-f0-9]{64}$/u.test(key)) throw Object.assign(new Error("거절된 대표 이미지의 정확한 교체 대상을 확인할 수 없습니다. 기존 이미지를 보존했습니다."), { code: "IMAGE_RESUME_REQUIRED" });
+    return key;
+  };
+  const thumbnailMissing = (): boolean => Boolean(draft.data?.approval?.blockers?.some(blocker => blocker.code === "hero-image-invalid") &&
+    !draft.data?.imageAssets?.some(asset => asset.role === "hero" && !asset.sectionId));
+
   const images = async (mode: "normal" | "source-only" | "repair-rejected" = "normal") => {
     deps.onStage?.("이미지 준비");
     await waitForImagesIdle();
     if (!draft.data) throw new Error("준비 중 소재가 사라졌습니다.");
-    if (draft.data.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) {
-      const attemptImages = async (action: string, refreshSourcePhotos = false) => {
+    if (draft.data.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0) || thumbnailMissing() || thumbnailRepairKey()) {
+      const attemptImages = async (action: string, refreshSourcePhotos = false, assetKey?: string) => {
         check();
         try {
-          latestImageRepair = await claimedCall(`${base}/draft/images`, "POST", { action, ...(refreshSourcePhotos ? { refreshSourcePhotos: true } : {}) });
+          latestImageRepair = await claimedCall(`${base}/draft/images`, "POST", { action, ...(assetKey ? { assetKey } : {}), ...(refreshSourcePhotos ? { refreshSourcePhotos: true } : {}) });
         } catch (error) {
           const failure = { code: (error as { code?: string }).code, errors: (error as { errors?: string[] }).errors, error: (error as Error).message };
           if (!isRecoverableImageEvidenceResult(failure)) throw error;
@@ -479,18 +495,26 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
         await waitForImagesIdle();
       };
       const missing = () => draft.data?.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0);
-      await attemptImages(mode === "source-only" ? "bind_sources" : mode === "repair-rejected" ? "repair_rejected" : "generate_missing");
-      if (missing() && isRecoverableImageEvidenceResult(latestImageRepair)) {
+      if (missing() || thumbnailMissing()) await attemptImages(mode === "source-only" ? "bind_sources" : thumbnailMissing() ? "generate_missing" : mode === "repair-rejected" ? "repair_rejected" : "generate_missing");
+      const heroKey = thumbnailRepairKey();
+      if (heroKey && mode !== "source-only") {
+        deps.onStage?.("실패 대표 이미지만 참조 장면 생성·교체");
+        if (mode === "repair-rejected") await attemptImages("regenerate", false, heroKey);
+        else await runRecordedImageRecovery(id, "repair-rejected", () => attemptImages("regenerate", false, heroKey));
+      }
+      if ((missing() || thumbnailMissing() || thumbnailRepairKey()) && isRecoverableImageEvidenceResult(latestImageRepair)) {
         deps.onStage?.("이미지 실패 원인 확인 · 상품 상세 원본 재수집");
         const refreshed = await runRecordedImageRecovery(id, "refresh-source", async () => {
           check();
           await deps.call(`${base}/draft`, "POST", { action: "prepare_context" });
           // Image URLs refresh independently of textual snapshot promotion.
           // Keep the manuscript frozen; the final recheck still verifies it.
-          await attemptImages("bind_sources", true);
+          if (missing() || thumbnailMissing()) await attemptImages("bind_sources", true);
           // bind_sources places seller originals only. Only AI-scene slots (generationMissing) that are
           // still empty get one more generation pass; source-evidence gaps never re-trigger generation.
-          if (draft.data?.imageSlots?.some(slot => slot.generationMissing > 0)) await attemptImages("generate_missing");
+          if (mode !== "source-only" && (thumbnailMissing() || draft.data?.imageSlots?.some(slot => slot.generationMissing > 0))) await attemptImages("generate_missing");
+          const refreshedHeroKey = thumbnailRepairKey();
+          if (mode !== "source-only" && refreshedHeroKey) await attemptImages("regenerate", true, refreshedHeroKey);
         });
         if (!refreshed.attempted) deps.onStage?.("같은 근거 재수집은 반복하지 않음 · 대체 구성 검토");
         if (missing() && isRecoverableImageEvidenceResult(latestImageRepair)) {
@@ -499,7 +523,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
         }
       }
     }
-    if (draft.data?.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) {
+    if (draft.data?.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0) || thumbnailMissing() || thumbnailRepairKey()) {
       throw unresolvedCompositionError("이미지 준비가 미완료입니다. 저장된 소재에서 실패한 이미지만 보충하세요.");
     }
   };
@@ -569,7 +593,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     }[recoveryStage];
     deps.onStage?.(`최종 이미지 검사 실패 · 원인=${recoveryLabel} · 해당 단계부터 자동 복구`);
     draft = await deps.call(`${base}/draft`, "GET");
-    if (!draft.data?.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) {
+    if (!draft.data?.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0) && !thumbnailMissing() && !thumbnailRepairKey()) {
       await dropRejectedAndApprove(error);
     } else {
       let replaced = true;
@@ -582,6 +606,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
         const code = (replaceError as { code?: string }).code;
         if (isSessionWidePreparationFailureCode(code) || isUncertainLocalTransportError(replaceError) ||
             UNRESOLVED_IMAGE_OPERATION_CODES.has(code || "")) throw replaceError;
+        if (thumbnailMissing() || thumbnailRepairKey()) throw replaceError;
         replaced = false;
       }
       if (!replaced) {
@@ -592,6 +617,8 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
           await deps.call(`${base}/draft`, "PATCH", { action: "approve" });
         } catch (secondError) {
           if (!isDefinitivePublishImageFailure(secondError)) throw secondError;
+          draft = await deps.call(`${base}/draft`, "GET");
+          if (thumbnailMissing() || thumbnailRepairKey()) throw secondError;
           // A second pixel rejection does not buy another replacement attempt.
           await dropRejectedAndApprove(secondError);
         }

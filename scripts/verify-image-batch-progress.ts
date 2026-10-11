@@ -81,6 +81,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
   const sectionReviewTargets: unknown[][] = [];
   const collectionRefreshFlags: boolean[] = [];
   const lockedSourcePaths: string[] = [];
+  const thumbnailSourcePaths: string[] = [];
   const locked = async (options: { sourcePath?: string; backgroundPath?: string } = {}) => {
     lockCalls += 1;
     if (options.sourcePath) lockedSourcePaths.push(options.sourcePath);
@@ -132,7 +133,12 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       "../../scripts/lib/product-image-lock": {
         createLockedProductEditorialScene: locked,
         createLockedProductThumbnailOnBackground: locked,
-        createOriginalProductPhotoThumbnail: async () => ({ outputPath: sourcePath }),
+        createOriginalProductPhotoThumbnail: async (options: { sourcePath: string }) => {
+          thumbnailSourcePaths.push(options.sourcePath);
+          const outputPath = path.join(packageDir, `headline-${crypto.randomUUID()}.png`);
+          fs.writeFileSync(outputPath, Buffer.concat([fs.readFileSync(options.sourcePath), Buffer.from(" headline overlay")]));
+          return { outputPath };
+        },
         extractLockedProductPng: async (source: string) => {
           if (settings.lockFails || (settings.segmentablePaths && !settings.segmentablePaths.includes(source))) throw new Error("cutout failed");
           return { lockedPngPath: sourcePath };
@@ -140,7 +146,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       },
       "../../scripts/lib/product-thumbnail": { buildProductThumbnailCopy: () => ({}) },
       // These transport fixtures deliberately use placeholder image bytes.
-      // Real metadata/aspect rejection and hero provider=0 are covered by
+      // Real metadata/aspect rejection and source-only hero provider=0 are covered by
       // verify-reference-scene-gates and verify-shopping-reference-scene.
       "../../scripts/lib/thumbnail-layout-v2": {
         isShoppingThumbnailSourceEligible: async (file: string) => fs.existsSync(file),
@@ -238,6 +244,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
         getBrandPostPackageDir: () => packageDir,
         normalizePackageImageAssets: (manifest: { imageAssets?: unknown[] }) => manifest.imageAssets || [],
         applyGeneratedBrandPostImage: () => { throw new Error("not used by the transport harness"); },
+        brandPostReferenceSceneIssue: () => null,
       },
       "./chatgpt-browser-automation": { isChatGptBrowserAutomationEnabled: () => settings.automation ?? true },
       "./brand-post-image-evidence": imageEvidence,
@@ -293,7 +300,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
     get jobs() { return jobs; }, get checkpoint() { return checkpoint; },
     get spawns() { return spawns; }, get lockCalls() { return lockCalls; }, get lockedSourcePaths() { return lockedSourcePaths; },
     get sectionReviewTargets() { return sectionReviewTargets; }, get sectionReviewCalls() { return sectionReviewCalls; }, get sectionReviewCandidatePaths() { return sectionReviewCandidatePaths; },
-    get collectionRefreshFlags() { return collectionRefreshFlags; } };
+    get collectionRefreshFlags() { return collectionRefreshFlags; }, get thumbnailSourcePaths() { return thumbnailSourcePaths; } };
 }
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -440,7 +447,11 @@ async function verifyReviewOnlyRecovery() {
           assert.equal(input.sectionTitle, f.target.sectionTitle);
           assert.equal(input.bodyExcerpt, f.target.bodyExcerpt);
           assert.equal(input.imageIntent, f.target.imageIntent);
-          return { reviewStatus: "passed", reviewedOutputSha256: hashFile(result.localPath!) };
+          return { strategyVersion: imageEvidence.REFERENCE_SCENE_STRATEGY_VERSION,
+            referencePath: f.target.referenceContext.reference.path, referenceSha256: f.target.referenceContext.reference.sha256,
+            anchorSha256: f.target.referenceContext.anchorSha256, reviewStatus: "passed", reviewedOutputSha256: hashFile(result.localPath!),
+            reviewedAt: new Date().toISOString(), reason: "current context compared with source",
+            checks: Object.fromEntries(imageEvidence.REFERENCE_SCENE_REVIEW_CHECKS.map(key => [key, true])) };
         } });
       assert.equal((await finish()).generatedPath, result.localPath);
       await assert.rejects(() => f.h.finishGeneratedImage({ manifest: f.h.manifest, productName: "상품", target: f.target,
@@ -723,6 +734,26 @@ async function verifyReviewOnlyRecovery() {
 }
 
 async function verifyGenerator() {
+  await check("source-only hero requests never generate, composite seller artwork or promote ORIGINAL", async () => {
+    const h = harness(); h.manifest.connectKind = "SHOPPING";
+    const [result] = await h.generate(0, { sourceOnly: true, requests: [{ requestId: "hero-only", replaceAssetKey: "hero" }] });
+    assert.equal(result.generatedPath, null); assert.match(result.error || "", /IMAGE_GENERATION_REQUIRED/);
+    assert.notEqual(result.provenance, "ORIGINAL"); assert.equal(h.spawns, 0); assert.equal(h.thumbnailSourcePaths.length, 0);
+  });
+  await check("missing hero is generated alone from the seller reference while completed body metadata stays unchanged", async () => {
+    const h = harness({ sourcePaths: [sourcePath] }); h.manifest.connectKind = "SHOPPING";
+    Object.assign(h.manifest, { heroImagePath: path.join(h.packageDir, "missing.png") });
+    h.manifest.imageAssets = [];
+    const before = JSON.stringify(h.manifest.composition);
+    const raw = path.join(h.packageDir, "hero-raw.png"); fs.writeFileSync(raw, "natural new product photograph");
+    const pending = h.generate(0, { sourceImageUrls: ["https://example.test/selected-product.png"], requests: [{ requestId: "missing-hero", slotId: "hero:image:1" }] });
+    for (let attempt = 0; attempt < 10 && !h.jobs.length && !h.callbacks.length; attempt++) await tick();
+    assert.equal(h.jobs.length, 1, JSON.stringify(h.callbacks)); assert.deepEqual(h.jobs[0].referenceImagePaths, [sourcePath]);
+    h.close(0, { ok: true, jobs: [h.result(0, raw)] });
+    const [result] = await pending;
+    assert.equal(result.error, undefined); assert.equal(result.provenance, "PHOTO_TEXT_THUMBNAIL");
+    assert.equal(h.thumbnailSourcePaths[0], raw); assert.equal(JSON.stringify(h.manifest.composition), before);
+  });
   await check("section review receives full published render text instead of stale planning context", async () => {
     const h = harness({ sectionMatchedPaths: [sourcePath] });
     h.manifest.connectKind = "SHOPPING";
@@ -1434,15 +1465,24 @@ async function verifyGenerator() {
         { requestId: "body", sectionId: "section" }, { requestId: "hero", replaceAssetKey: "hero" },
       ] });
       await tick(); // Shopping source preflight finishes before the worker is spawned.
-      assert.equal(h.jobs.length, 1, "thumbnail uses original source locally, only body is generated");
+      assert.equal(h.jobs.length, 2, "hero and body both generate distinct natural raw scenes from the actual reference");
       h.child.stderr.write(`${prefix}${JSON.stringify(h.result(0, outputs[0]))}\n`);
       await tick();
       assert.equal(h.callbacks.find(result => result.requestId === "body")!.generatedPath, sceneReviewError ? null : outputs[0]);
-      h.close(0, { ok: true, jobs: [h.result(0, outputs[0])] });
+      h.close(0, { ok: true, jobs: [h.result(0, outputs[0]), h.result(1, outputs[1])] });
       const results = await pending;
       assert.equal(h.lockCalls, 0, "no source cutout/composition participates in reference-guided scenes");
-      assert.equal(results[1].provenance, "PHOTO_TEXT_THUMBNAIL");
-      assert.equal(results[1].remoteGenerated, false);
+      assert.equal(results[1].provenance, sceneReviewError ? "GENERATED_SCENE" : "PHOTO_TEXT_THUMBNAIL");
+      assert.equal(results[1].remoteGenerated, sceneReviewError ? undefined : true);
+      assert.equal(results[1].creationMethod, sceneReviewError ? undefined : "remote-generated");
+      assert.equal(h.thumbnailSourcePaths.includes(sourcePath), false, "reference-only seller artwork never supplies final thumbnail pixels");
+      if (sceneReviewError) assert.equal(h.thumbnailSourcePaths.length, 0, "adverse raw QA must prevent the headline composite");
+      else {
+        assert.equal(h.thumbnailSourcePaths[0], outputs[1]);
+        assert.equal(results[1].referenceScene!.reviewedOutputSha256, hashFile(outputs[1]));
+        assert.equal(results[1].referenceScene!.thumbnailOutputSha256, hashFile(results[1].generatedPath!));
+        assert.notEqual(results[1].referenceScene!.thumbnailOutputSha256, results[1].referenceScene!.reviewedOutputSha256);
+      }
       results.slice(0, 1).forEach((r, index) => {
         assert.equal(r.generatedPath, sceneReviewError ? null : outputs[index]);
         assert.equal(r.error, sceneReviewError);

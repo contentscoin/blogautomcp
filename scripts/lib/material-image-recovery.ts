@@ -5,7 +5,7 @@ import { getBrandPostPackageDir } from "../../src/lib/brand-post-package";
 import { atomicWriteTextFile } from "../../src/lib/atomic-text-file";
 
 /** Recover missing product references and rejected scenes from fresh seller evidence. */
-export const IMAGE_RECOVERY_POLICY_VERSION = 4;
+export const IMAGE_RECOVERY_POLICY_VERSION = 5;
 
 export type ImageRecoveryStage = "refresh-source" | "repair-rejected" | "replan-images" | "replan-after-rejection";
 type Entry = { stage: ImageRecoveryStage; input: string; output?: string; status: "running" | "complete" | "failed"; at: string; reason?: string; externalFailure?: boolean };

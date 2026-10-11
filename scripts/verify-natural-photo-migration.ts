@@ -99,6 +99,18 @@ async function main() {
     const photoThumbnail = structuredClone(next);
     photoThumbnail.imageAssets![0].provenance = "PHOTO_TEXT_THUMBNAIL";
     assert.equal(planWholeBrandPostImageRequests(photoThumbnail).length, 4, "a current photo thumbnail is retained");
+    const missingHero = structuredClone(photoThumbnail);
+    missingHero.heroImagePath = path.join(root, "missing-hero.png");
+    missingHero.imageAssets![0].path = missingHero.heroImagePath;
+    const missingPlan = planWholeBrandPostImageRequests(missingHero);
+    assert.equal(missingPlan[0].slotId, "hero:image:1", "a missing hero is a creation target, never an unbound replacement");
+    assert.equal(missingPlan[0].replaceAssetKey, undefined);
+    const damagedHero = structuredClone(photoThumbnail);
+    damagedHero.imageAssets![0].sha256 = "0".repeat(64);
+    assert.equal(planWholeBrandPostImageRequests(damagedHero)[0].replaceAssetKey, "0".repeat(64));
+    const ambiguousHero = structuredClone(photoThumbnail);
+    ambiguousHero.imageAssets!.push({ ...ambiguousHero.imageAssets![0] });
+    assert.throws(() => planWholeBrandPostImageRequests(ambiguousHero), /IMAGE_RESUME_REQUIRED/);
     let migrateCalls = 0;
     let generationCalls = 0;
     const deps = {

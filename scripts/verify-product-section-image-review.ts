@@ -14,6 +14,7 @@ import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene, type B
 import type { ProductSectionImageDiagnostics, ProductSectionImageReviewOptions } from "./lib/product-photo-review";
 import { auditSectionProposals } from "./lib/product-section-proposal-audit";
 import type { PublishImageAuditOptions } from "./lib/publish-image-audit";
+import { buildProduct9Canvas, selectedProductContextFrom9Canvas } from "./lib/product-9canvas";
 
 interface ReviewModule {
   allowsGenericProductPhoto(target: { sectionTitle: string; imageIntent: string }): boolean;
@@ -252,6 +253,26 @@ async function main() {
     assert.deepEqual(shokzOriginal.auditCalls[0].composition.sections[0].body, shokzBody,
       "source proposal passes the unchanged technical paragraph to the final pixel gate");
     assert.equal(shokzOriginal.auditCalls[0].selectedProduct, shokzProduct);
+    const beefProduct = selectedProductContextFrom9Canvas(buildProduct9Canvas({ name: "한우 선물세트",
+      description: "미검증 원시 설명", features: ["부위: 등심, 채끝, 차돌박이, 앞다리, 설도", "중량: 1200g"] }));
+    const beefTarget = { ...shokzTarget, sectionTitle: "세트에 포함된 차돌박이 외형", sectionBody: ["세트에 포함된 차돌박이의 외형을 보여주는 사진입니다."] };
+    const componentProposal = loadReview(call => {
+      assert.ok(call.userPrompt.includes(beefProduct), "validated seller-feature membership reaches the first proposal review");
+      assert.match(call.userPrompt, /검증된 선택 상품 사실과 실제 픽셀 모두로 같은 세트에 포함됨이 확인/u);
+      assert.match(call.userPrompt, /전체 묶음·총중량이 보이지 않는 사유만으로 거부하지/u);
+      assert.match(call.userPrompt, /갤러리 출처·파일명만으로 포함을 추정하거나 전체 구성·중량을 인증하지/u);
+      assert.match(call.userPrompt, /명시적 전체 사진 약속의 불일치·다른 부위나 옵션·추가 설명판은 거부/u);
+      assert.ok(!call.userPrompt.includes("미검증 원시 설명"));
+      return JSON.stringify({ assignments: [{ targetIndex: 1, selectedIndex: 1, reviewClass: "product-photo", reason: "검증된 포함 부위와 보이는 차돌박이 외형이 일치하며 전체 세트 사진을 약속하지 않음" }] });
+    });
+    assert.equal((await componentProposal.review.selectVerifiedProductSectionImages([candidate], "한우 선물세트", [beefTarget], { selectedProduct: beefProduct })).length, 1);
+    assert.equal(componentProposal.auditCalls[0].selectedProduct, beefProduct, "the same facts also reach the final proposal audit");
+    for (const reason of ["갤러리 출처만 있어 포함 부위가 미확정", "명시한 전체 1200g 세트가 보이지 않음", "다른 부위나 옵션", "추가 설명판"]) {
+      const rejectedComponent = loadReview(JSON.stringify({ assignments: [], rejections: [{ targetIndex: 1, selectedIndex: 1, reason }] }));
+      assert.equal((await rejectedComponent.review.selectVerifiedProductSectionImages([candidate], "한우 선물세트", [beefTarget], { selectedProduct: beefProduct })).length, 0,
+        `component membership guidance never restores a rejected proposal: ${reason}`);
+      assert.equal(rejectedComponent.auditCalls.length, 0, "a first-review rejection is never promoted to a final audit");
+    }
     const originalFeature = loadReview('{"assignments":[{"targetIndex":1,"selectedIndex":1,"reviewClass":"feature-evidence","reason":"설명 카드"}]}');
     assert.equal((await originalFeature.review.selectVerifiedProductSectionImages([candidate], "꽃게", [sceneTarget])).length, 0,
       "an original photography slot must not be filled by a feature card");

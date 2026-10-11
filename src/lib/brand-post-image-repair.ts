@@ -1,4 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import {
   applyGeneratedBrandPostImage, packagePreview, readBrandPostPackage, normalizePackageImageAssets,
   writeBrandPostPackageManifest, type BrandPostPackageManifestV2,
@@ -71,8 +73,30 @@ export function planSectionImageRequests(slots: ImageSlot[]): BrandPostImageGene
 export function planWholeBrandPostImageRequests(manifest: BrandPostPackageManifestV2): BrandPostImageGenerationRequest[] {
   const requests = planSectionImageRequests(packagePreview(manifest).imageSlots);
   if (manifest.connectKind === "SHOPPING") {
-    const hero = normalizePackageImageAssets(manifest).find(asset => asset.role === "hero" && asset.path === manifest.heroImagePath);
-    if (hero && hero.provenance !== "PHOTO_TEXT_THUMBNAIL") requests.unshift({ requestId: randomUUID(), replaceAssetKey: hero.sha256 });
+    const recordedHeroes = manifest.imageAssets?.filter(asset => asset.role === "hero" && !asset.sectionId) || [];
+    if (recordedHeroes.length > 1 || recordedHeroes.some(asset => path.resolve(asset.path) !== path.resolve(manifest.heroImagePath)))
+      throw new Error("IMAGE_RESUME_REQUIRED: 대표 이미지 교체 대상이 모호합니다.");
+    const heroes = normalizePackageImageAssets(manifest).filter(asset => asset.role === "hero" && !asset.sectionId);
+    if (heroes.length > 1 || heroes.some(asset => path.resolve(asset.path) !== path.resolve(manifest.heroImagePath)))
+      throw new Error("IMAGE_RESUME_REQUIRED: 대표 이미지 교체 대상이 모호합니다.");
+    const hero = heroes[0];
+    if (!hero) requests.unshift({ requestId: randomUUID(), slotId: "hero:image:1" });
+    else {
+      let damaged: boolean;
+      try {
+        const stat = fs.statSync(hero.path);
+        damaged = !stat.isFile() || stat.size === 0 || stat.size > 24 * 1024 * 1024 ||
+          createHash("sha256").update(fs.readFileSync(hero.path)).digest("hex") !== hero.sha256;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        requests.unshift({ requestId: randomUUID(), slotId: "hero:image:1" });
+        return requests;
+      }
+      if (hero.provenance !== "PHOTO_TEXT_THUMBNAIL" || damaged) {
+        if (!/^[a-f0-9]{64}$/u.test(hero.sha256)) throw new Error("IMAGE_RESUME_REQUIRED: 대표 이미지 교체 키를 확인할 수 없습니다.");
+        requests.unshift({ requestId: randomUUID(), replaceAssetKey: hero.sha256 });
+      }
+    }
   }
   return requests;
 }

@@ -280,7 +280,7 @@ export function buildProduct9Canvas(input: Product9CanvasInput): Product9Canvas 
         ? `선택 옵션 ${selectedOption.label}만 현재 상품 구성으로 설명합니다.`
         : "확인된 단일 상품 정체성과 공통 사양만 설명합니다.",
     imageDirective: ambiguous
-      ? `한 이미지에는 식별 가능한 한 옵션만 사용합니다. ${optionNames}을 한 상자나 한 장면에 섞지 않습니다.`
+      ? `한 이미지에는 식별 가능한 한 옵션만 사용합니다. ${optionNames}을 한 상자나 한 장면에 섞지 않습니다. 동일한 한 옵션의 과일·제품 여러 개체나 동일 트레이·포장이 여러 개 보이는 것 자체는 옵션 혼합 또는 한 옵션 조건 위반이 아닙니다.`
       : "선택 상품과 일치하는 단일 제품 또는 확인된 구성만 사용합니다.",
     blockers: ambiguous ? ["SELECTED_OPTION_UNRESOLVED"] : [],
   };
@@ -324,8 +324,20 @@ export function selectedProductContextFrom9Canvas(canvas: Product9Canvas): strin
   return JSON.stringify({
     selectedTitle: canvas.subject.productName,
     selectedOption: canvas.subject.selectedOption,
+    optionResolution: {
+      confirmedOptionLabel: canvas.subject.selectedOption.status === "confirmed" ? canvas.subject.selectedOption.label : null,
+      resolutionBasis: canvas.subject.selectedOption.status === "confirmed" ? "existing-explicit-feature-label" :
+        canvas.subject.selectedOption.candidates.length ? "catalog-title-candidates-only" : "no-option-evidence",
+      catalogCandidatesFromTitle: canvas.subject.selectedOption.candidates,
+      catalogCandidatesAreConfirmedPurchaseSelection: false,
+      rule: "상품명에서 추출한 카탈로그 후보는 구매 옵션 선택 확인 사실이 아닙니다. confirmed는 기존 features 기반 옵션 해석 상태이며 실제 주문·구매 완료를 증명하지 않습니다. confirmed 옵션이 있으면 그 옵션과 일치해야 합니다. 후보만 있고 구매 옵션이 미확정이면 식별 가능한 참조 상품의 외형을 보여주는 사진을 옵션 선택 미확정만으로 거절하지 않습니다. 입력·실제 발행 문구가 특정 구매 옵션이나 구매 구성과의 동일성을 요구하면 그 동일성은 별도로 확인해야 합니다. 출처 연결만으로 정체성을 승인하거나 숨겨진 구성·수량·가격을 추정하지 않습니다.",
+    },
     category: canvas.concept.categoryId,
     productKind: canvas.concept.productKind,
+    validatedSellerFeatures: canvas.claim.filter(claim => claim.status === "validated" && claim.evidenceIds.length > 0 &&
+      claim.evidenceIds.every(id => canvas.evidence.some(evidence => evidence.id === id &&
+        canvas.resource.some(resource => resource.id === evidence.resourceId && resource.kind === "seller-feature"))))
+      .map(claim => ({ text: claim.text, evidenceIds: claim.evidenceIds })),
     optionPolicy: {
       forbidMixedOptionVisuals: canvas.policy.forbidMixedOptionVisuals,
       requireSingleOptionVisual: canvas.policy.requireSingleOptionVisual,

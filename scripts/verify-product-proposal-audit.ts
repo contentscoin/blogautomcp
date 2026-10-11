@@ -6,6 +6,7 @@ import path from "node:path";
 import sharp from "sharp";
 import { auditSectionProposals, type SectionProposal } from "./lib/product-section-proposal-audit";
 import { auditPublishImages, type PublishImageAuditOptions, type PublishImageAuditResult } from "./lib/publish-image-audit";
+import { buildProduct9Canvas, selectedProductContextFrom9Canvas } from "./lib/product-9canvas";
 
 const proposals = Array.from({ length: 5 }, (_, i) => ({ targetIndex: 0, sourceSha256: `sha-${i}`, path: `photo-${i}` }));
 const targets = [{ sectionId: "actual-section", sectionTitle: "AI 기능", sectionBody: ["AI 기능의 실제 설명"], imageIntent: "AI 기능 근거" }];
@@ -104,6 +105,32 @@ async function main() {
     assert.deepEqual(unsupported, [], "a source hint cannot override a failed feature-claim pixel verdict");
     assert.match(rejectedReasons[0], /사진을 기능·성능·결과의 증거/u);
     assert.match(rejectedReasons[0], /noise-reduction assertion/u);
+    const beefProduct = selectedProductContextFrom9Canvas(buildProduct9Canvas({ name: "한우 선물세트",
+      description: "미검증 원시 설명", features: ["부위: 등심, 채끝, 차돌박이, 앞다리, 설도", "중량: 1200g"] }));
+    for (const fixture of [
+      { name: "included exterior", body: "세트에 포함된 차돌박이의 외형을 보여줍니다.", accepted: true, identityMatches: true, photoClaimMatches: true, noGraphicLayout: true },
+      { name: "wrong cut", body: "세트에 포함된 차돌박이의 외형을 보여줍니다.", accepted: true, identityMatches: false, photoClaimMatches: true, noGraphicLayout: true },
+      { name: "unresolved membership", body: "세트에 포함된 차돌박이의 외형을 보여줍니다.", accepted: false, identityMatches: false, photoClaimMatches: true, noGraphicLayout: true },
+      { name: "unsupported whole-set promise", body: "이 사진에 구매할 1200g 세트의 전 구성품이 보입니다.", accepted: true, identityMatches: true, photoClaimMatches: false, noGraphicLayout: true },
+      { name: "added explanatory panel", body: "세트에 포함된 차돌박이의 외형을 보여줍니다.", accepted: true, identityMatches: true, photoClaimMatches: true, noGraphicLayout: false },
+    ]) {
+      let pixelCalls = 0;
+      const outcome = await auditSectionProposals({ productName: "한우 선물세트", selectedProduct: beefProduct,
+        targets: [{ ...originalTarget, sectionTitle: "포함 부위의 외형", sectionBody: [fixture.body] }], proposals: originalProposal,
+        select, onRejected() {}, audit: input => auditPublishImages({ ...input, review: async call => {
+          pixelCalls++;
+          assert.equal(input.selectedProduct, beefProduct);
+          assert.ok(call.userPrompt.includes("부위: 등심, 채끝, 차돌박이, 앞다리, 설도"));
+          assert.ok(call.userPrompt.includes(fixture.body));
+          assert.ok(!call.userPrompt.includes("미검증 원시 설명"));
+          const answer = JSON.parse(verdict(fixture.accepted, fixture.name, fixture.photoClaimMatches));
+          answer.reviews[0].identityMatches = fixture.identityMatches;
+          answer.reviews[0].noGraphicLayout = fixture.noGraphicLayout;
+          return JSON.stringify(answer);
+        } }) });
+      assert.equal(outcome.length, fixture.name === "included exterior" ? 1 : 0, fixture.name);
+      assert.equal(pixelCalls, 1, "an adverse final verdict cannot be automatically reversed");
+    }
     assert.deepEqual(fs.readFileSync(file), bytes, "source pixels remain unchanged");
     assert.deepEqual(originalTarget.sectionBody, ["선택한 상품의 외형을 보여주는 판매자 원본 사진입니다."], "the accepted manuscript context remains unchanged");
   } finally {

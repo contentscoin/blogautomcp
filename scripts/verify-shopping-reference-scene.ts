@@ -512,8 +512,8 @@ async function main() {
     assert.doesNotMatch(bodyPrompt, /Create ONE photorealistic editorial|No people, hands|keep the product front view/);
     assert(SCENE_FIDELITY_CHECKS.includes("noAddedText") && SCENE_FIDELITY_CHECKS.includes("noFramesOrPanels") && SCENE_FIDELITY_CHECKS.includes("singleScene"));
     // Exercise the actual module and renderer, not the transport VM harness.
-    // The dedicated hero checkpoint contains the reviewed original pixels;
-    // the subsequent local thumbnail must not invoke a remote provider.
+    // Source-only hero preparation keeps the seller artwork as input evidence,
+    // never as final thumbnail pixels and never dispatches paid generation.
     const decodedOriginal = path.join(root, "actual-thumbnail-source.png");
     await sharp({ create: { width: 1080, height: 1080, channels: 3, background: "#b8afa1" } }).png().toFile(decodedOriginal);
     const thumbnailManifest = { ...manifest, brandLinkId: `${manifest.brandLinkId}-actual-thumbnail`, heroImagePath: decodedOriginal,
@@ -529,18 +529,40 @@ async function main() {
     childProcess.spawn = (() => { spawnedProviders += 1; throw new Error("Remote generation forbidden for a local photo thumbnail"); }) as typeof childProcess.spawn;
     syncBuiltinESMExports();
     try {
-      for (const sourceOnly of [false, true]) {
+      for (const sourceOnly of [true]) {
         const [thumbnail] = await generation.generateBrandPostImages({ manifest: thumbnailManifest, productName: "와이드 팬츠", sourceOnly,
           requests: [{ ...actualHeroRequest, requestId: `actual-local-hero-${sourceOnly}` }] });
-        assert.equal(thumbnail.error, undefined);
-        assert.equal(thumbnail.provenance, "PHOTO_TEXT_THUMBNAIL");
-        assert.equal(thumbnail.creationMethod, "local-composite");
-        assert.equal(thumbnail.remoteGenerated, false);
-        assert(thumbnail.generatedPath && fs.existsSync(thumbnail.generatedPath));
-        const size = await sharp(thumbnail.generatedPath!).metadata();
-        assert.deepEqual([size.width, size.height], [1080, 1080]);
+        assert.match(thumbnail.error || "", /IMAGE_GENERATION_REQUIRED/);
+        assert.notEqual(thumbnail.provenance, "ORIGINAL");
+        assert.equal(thumbnail.generatedPath, null);
+        assert.notEqual(thumbnail.remoteGenerated, true);
       }
       assert.equal(spawnedProviders, 0, "production hero path must bypass both Codex and browser providers");
+      const naturalRaw = path.join(root, "actual-natural-hero.png");
+      await sharp({ create: { width: 1080, height: 1080, channels: 3, background: "#8caabb" } }).png().toFile(naturalRaw);
+      let heroReviews = 0;
+      const externalHero = { brandLinkId: thumbnailManifest.brandLinkId, manifest: thumbnailManifest, productName: "와이드 팬츠",
+        replaceAssetKey: hash(decodedOriginal), rawPath: naturalRaw, referenceHashes: [hash(decodedOriginal)],
+        reviewReferenceScene: async () => { heroReviews++; return { ...result, referencePath: decodedOriginal,
+          referenceSha256: hash(decodedOriginal), reviewedOutputSha256: hash(naturalRaw), anchorSha256: undefined }; },
+        apply: ((applied: Parameters<typeof applyGeneratedBrandPostImage>[0]) => {
+          thumbnailManifest.heroImagePath = applied.generatedPath;
+          thumbnailManifest.imageAssets = [{ ...applied, path: applied.generatedPath, sourcePath: applied.generatedPath,
+            sha256: hash(applied.generatedPath), role: "hero", sectionId: null }];
+          throw new Error("hero apply acknowledgement lost");
+        }) as NonNullable<Parameters<typeof generation.applyExternalGeneratedBrandPostImage>[0]["apply"]> };
+      await assert.rejects(generation.applyExternalGeneratedBrandPostImage(externalHero), /hero apply acknowledgement lost/);
+      const derivedHero = thumbnailManifest.imageAssets![0];
+      assert.equal(derivedHero.referenceScene!.reviewedOutputSha256, hash(naturalRaw));
+      assert.equal(derivedHero.referenceScene!.thumbnailOutputSha256, derivedHero.sha256);
+      assert.notEqual(derivedHero.sha256, hash(decodedOriginal)); assert.notEqual(derivedHero.sha256, hash(naturalRaw));
+      const finalDimensions = await sharp(derivedHero.path).metadata();
+      assert.deepEqual([finalDimensions.width, finalDimensions.height], [1080, 1080]);
+      const heroReplay = await generation.applyExternalGeneratedBrandPostImage({ ...externalHero,
+        reviewReferenceScene: async () => { throw new Error("duplicate hero QA"); } });
+      assert.equal(heroReplay.alreadyApplied, true); assert.equal(heroReviews, 1); assert.equal(spawnedProviders, 0);
+      derivedHero.referenceScene!.thumbnailOutputSha256 = "0".repeat(64);
+      assert.equal(generation.findAppliedExternalGeneratedBrandPostImage(externalHero), null, "untruthful final lineage cannot authorize idempotent reuse");
     } finally {
       childProcess.spawn = originalSpawn;
       syncBuiltinESMExports();

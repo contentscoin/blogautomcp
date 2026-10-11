@@ -209,6 +209,35 @@ async function main() {
     const savedAsset = updated.imageAssets!.find(item => item.provenance === "GENERATED_SCENE")!;
     assert.notEqual(savedAsset.referenceScene!.referencePath, source);
     assert.equal(hash(savedAsset.referenceScene!.referencePath), hash(source));
+    // A derived hero has a strict text-free raw review plus a separately audited final headline image.
+    const thumbnailFinal = await image("derived-thumbnail.png", "#725979");
+    const thumbnailReview = { ...review, anchorSha256: undefined, reviewedOutputSha256: hash(generated),
+      thumbnailRawPath: generated, thumbnailOutputSha256: hash(thumbnailFinal) };
+    const bodyBefore = JSON.stringify(savedAsset); const markdownBefore = fs.readFileSync(markdownPath, "utf8");
+    const derived = store.applyGeneratedBrandPostImage({ brandLinkId: manifest.brandLinkId, generatedPath: thumbnailFinal,
+      replaceAssetKey: hash(hero), slotId: "hero:image:1", provenance: "PHOTO_TEXT_THUMBNAIL", creationMethod: "remote-generated",
+      remoteGenerated: true, referenceScene: thumbnailReview });
+    const derivedAsset = derived.imageAssets!.find(item => item.role === "hero")!;
+    assert.equal(derivedAsset.referenceScene!.reviewedOutputSha256, hash(generated));
+    assert.equal(derivedAsset.referenceScene!.thumbnailOutputSha256, derivedAsset.sha256);
+    assert.notEqual(derivedAsset.referenceScene!.thumbnailRawPath, generated, "raw photograph is durably persisted separately from final headline pixels");
+    assert.equal(store.brandPostReferenceSceneIssue(derived, derivedAsset), null);
+    assert.equal(JSON.stringify(derived.imageAssets!.find(item => item.provenance === "GENERATED_SCENE")), bodyBefore);
+    assert.equal(fs.readFileSync(markdownPath, "utf8"), markdownBefore);
+    const rawFile = derivedAsset.referenceScene!.thumbnailRawPath!; const rawBytes = fs.readFileSync(rawFile);
+    fs.writeFileSync(rawFile, "changed raw"); assert(store.brandPostReferenceSceneIssue(derived, derivedAsset)); fs.writeFileSync(rawFile, rawBytes);
+    assert(store.brandPostReferenceSceneIssue(derived, { ...derivedAsset, referenceScene: { ...derivedAsset.referenceScene!, thumbnailOutputSha256: "0".repeat(64) } }));
+    const missingHeroManifest = structuredClone(derived); missingHeroManifest.brandLinkId = "missing-derived-hero";
+    missingHeroManifest.heroImagePath = path.join(temporary, "missing-old-hero.png");
+    missingHeroManifest.imageAssets = missingHeroManifest.imageAssets!.filter(item => item.role !== "hero");
+    missingHeroManifest.composition.renderNodes.forEach(node => { if (node.kind === "image" && node.role === "thumbnail") node.assetPath = missingHeroManifest.heroImagePath; });
+    store.writeBrandPostPackageManifest(missingHeroManifest);
+    const createdHero = store.applyGeneratedBrandPostImage({ brandLinkId: missingHeroManifest.brandLinkId, generatedPath: thumbnailFinal,
+      slotId: "hero:image:1", provenance: "PHOTO_TEXT_THUMBNAIL", creationMethod: "remote-generated", remoteGenerated: true, referenceScene: thumbnailReview });
+    assert.equal(createdHero.composition.renderNodes.filter(node => node.kind === "image" && node.role === "thumbnail").length, 1);
+    assert(!createdHero.composition.renderNodes.some(node => node.kind === "image" && node.assetPath === missingHeroManifest.heroImagePath));
+    assert.equal(JSON.stringify(createdHero.imageAssets!.find(item => item.provenance === "GENERATED_SCENE")), bodyBefore);
+    store.writeBrandPostPackageManifest(updated);
     assert.equal(store.getBrandPostImageSlots(updated)[0].generatedCount, 1);
     assert.equal(store.getBrandPostImageSlots(updated)[0].generationMissing, 0);
     assert.equal(store.getBrandPostImageSlots(updated)[0].staleTargets.length, 0);
