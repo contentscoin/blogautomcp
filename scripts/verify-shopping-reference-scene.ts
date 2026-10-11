@@ -241,6 +241,60 @@ async function main() {
       assert.equal(calls, 1, "the gate never retries or reinterprets an adverse returned review");
       currentPairCases++;
     }
+    // IMAGE 1 seller artwork is comparison input. Only IMAGE 2 and the actual
+    // publication can supply candidate text/layout or photographic-proof defects.
+    const inputArtworkComparisons = { ...comparisons, sceneContext: { ...comparisons.sceneContext,
+      result: "allowed-variation", variation: "external-seller-artwork",
+      referenceObservation: "IMAGE 1 seller panel says 보관, 처리, 절전 완전자동 outside the physical product",
+      candidateObservation: "IMAGE 2 is one natural product photograph without added captions or panels",
+      basis: "reference-only marketing artwork is omitted from the candidate; physical product identity remains consistent" } };
+    const illustrativeBody = "처리 기능과 보관 방법을 살펴봅니다. 이 사진은 선택 제품 외형을 보여주는 연출입니다.";
+    let attachmentScopeCases = 0;
+    for (const fixture of [
+      { patch: {}, body: illustrativeBody },
+      { patch: { accepted: false }, body: illustrativeBody },
+      { patch: { illustrativeOnly: false }, body: illustrativeBody },
+      { patch: { checks: { ...allChecks, noAddedText: false }, reason: "IMAGE 2 copies the external seller caption 보관, 처리, 절전 완전자동 as an added banner" }, body: illustrativeBody },
+      { patch: { checks: { ...allChecks, noFramesOrPanels: false }, reason: "IMAGE 2 places the correct product in a graphic seller-panel composite" }, body: illustrativeBody },
+      { patch: { illustrativeOnly: false, reason: "The actual publication says 이 사진으로 보관·처리·절전 완전자동 성능을 확인할 수 있습니다; IMAGE 2 cannot prove it" }, body: "이 사진으로 보관·처리·절전 완전자동 성능을 확인할 수 있습니다." },
+      { patch: { accepted: false, reason: "IMAGE 2 carries a readable fabricated FDA APPROVED seal on the product" }, body: illustrativeBody },
+      { patch: { identityMatches: false }, body: illustrativeBody },
+      { patch: { comparisons: { ...inputArtworkComparisons, visibleOption: { ...comparisons.visibleOption, result: "contradiction", variation: "none" } } }, body: illustrativeBody },
+    ]) {
+      let calls = 0;
+      const operation = reviewShoppingReferenceScene({ reference, outputPath: output, productName: "synthetic reference-artwork fixture",
+        imageIntent: "AI exterior illustration", sectionTitle: "제품 외형과 사양", bodyExcerpt: fixture.body }, {
+        review: async call => {
+          calls++;
+          assert.deepEqual(call.imagePaths, [front, output]);
+          assert.equal(call.preserveImageOrder, true);
+          assert.match(call.userPrompt, /IMAGE 1 \(attachment 1\).*REFERENCE/u);
+          assert.match(call.userPrompt, /IMAGE 2 \(attachment 2\).*CANDIDATE/u);
+          assert.match(call.userPrompt, /Compare IMAGE 2's physical product against IMAGE 1/u);
+          const schema = call.outputSchema as { properties: Record<string, { description?: string; properties?: Record<string, { description: string }> }> };
+          for (const text of [call.userPrompt, ...["accepted", "illustrativeOnly", "reason"].map(key => schema.properties[key].description!)]) {
+            assert.match(text, /Evaluate illustrativeOnly and candidate text\/layout\/scene checks ONLY on IMAGE 2 and the actual sectionTitle\/publicationText/u);
+            assert.match(text, /visible ONLY in IMAGE 1 are neither IMAGE 2 defects nor actual published photographic-proof claims/u);
+            assert.match(text, /reference-only '보관, 처리, 절전 완전자동'/u);
+            assert.match(text, /If copied into IMAGE 2, such added captions\/panels must fail/u);
+            assert.match(text, /readable fabricated certification\/efficacy copy on IMAGE 2 or an unsupported actual publication claim still blocks/u);
+          }
+          assert.match(schema.properties.identityMatches.description!, /IMAGE 2 \(candidate\) against IMAGE 1 \(reference\)/u);
+          const checkSchema = schema.properties.checks.properties!;
+          assert.match(checkSchema.noAddedText.description, /in IMAGE 2 candidate only/u);
+          assert.match(checkSchema.noFramesOrPanels.description, /in IMAGE 2 candidate only/u);
+          assert.match(checkSchema.singleScene.description, /scene in IMAGE 2 candidate only/u);
+          assert.match(schema.properties.reason.description!, /Identify the attachment number for each text\/layout observation/u);
+          assert.ok(call.userPrompt.includes(fixture.body));
+          return JSON.stringify({ ...good, comparisons: inputArtworkComparisons,
+            reason: "IMAGE 1 has seller marketing captions; IMAGE 2 has no added text or panels, matches the product and is illustrative. Current publication makes no unsupported photographic-proof claim.", ...fixture.patch });
+        },
+      });
+      if (Object.keys(fixture.patch).length === 0) assert.equal((await operation).reviewStatus, "passed");
+      else await assert.rejects(operation, /REFERENCE_SCENE_FIDELITY_FAILED/, "attachment scope guidance never reverses a returned adverse verdict, actual candidate defect or unsupported publication claim");
+      assert.equal(calls, 1, "candidate-only scope adds no review loop or automatic approval");
+      attachmentScopeCases++;
+    }
     assert.ok(fidelitySchema && typeof fidelitySchema === "object" && !Array.isArray(fidelitySchema));
     assert.equal((fidelitySchema as { type: string }).type, "object", "the provider schema root remains an object");
     assert.equal(Object.hasOwn(fidelitySchema, "anyOf"), false, "correlated alternatives belong to comparison rows, not the schema root");
@@ -613,7 +667,7 @@ async function main() {
       childProcess.spawn = originalSpawn;
       syncBuiltinESMExports();
     }
-    console.log(`PASS: current-pair finalization (${currentPairCases} offline cases, adverse booleans/comparisons still block), correlated provider comparison schema (${schemaCases} cases; exact Cuckoo/Aveeno invalid pairs rejected and correctly paired allowed variations approved), strict reference selection (47 invalid boolean/observation responses, uncached retry, stage/SHA/reason diagnostics), optical reflection contract (${reflectionCases} cases, accepted=false still rejected), structured intrinsic/photographic difference QA (6 allowed variations, 7 real contradictions), two-image fail-closed checks, ordered attachments, existing passed-v2 compatibility, stable original/approved anchor, stale anchor rejection, recipe invalidation, evidence boundary`);
+    console.log(`PASS: numbered attachment scope (${attachmentScopeCases} offline cases, candidate defects/adverse verdicts still block), current-pair finalization (${currentPairCases} offline cases, adverse booleans/comparisons still block), correlated provider comparison schema (${schemaCases} cases; exact Cuckoo/Aveeno invalid pairs rejected and correctly paired allowed variations approved), strict reference selection (47 invalid boolean/observation responses, uncached retry, stage/SHA/reason diagnostics), optical reflection contract (${reflectionCases} cases, accepted=false still rejected), structured intrinsic/photographic difference QA (6 allowed variations, 7 real contradictions), two-image fail-closed checks, ordered attachments, existing passed-v2 compatibility, stable original/approved anchor, stale anchor rejection, recipe invalidation, evidence boundary`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
 void main().catch(error => { console.error(error); process.exitCode = 1; });

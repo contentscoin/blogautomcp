@@ -522,7 +522,13 @@ function acquireResolutionLock(outStem: string) {
   } };
 }
 
-function validatedReviewCandidateSet(job: ImageBatchJob, resolutionToken?: string) {
+function assertSavedSceneRecipe(job: ImageBatchJob, metadata: { sceneRecipeSha256?: string }, requireMatch = true): void {
+  if (metadata.sceneRecipeSha256 !== undefined && (!/^[a-f0-9]{64}$/u.test(metadata.sceneRecipeSha256) ||
+      requireMatch && metadata.sceneRecipeSha256 !== crypto.createHash("sha256").update(job.prompt).digest("hex")))
+    throw new Error("IMAGE_RESUME_REQUIRED: 저장된 생성 프롬프트가 변경되었습니다. 이전 결과를 새 장면으로 채택하거나 재전송하지 않았습니다.");
+}
+
+function validatedReviewCandidateSet(job: ImageBatchJob, resolutionToken?: string, verifyRecipe = true) {
   const binding = job.reviewOnly;
   const refused = () => new Error("IMAGE_RESUME_REQUIRED: 복구 후보의 슬롯·참조·완료 기록이 변경됐습니다. 기존 결과를 보존했으며 재전송하지 않았습니다.");
   if (!binding?.candidateSet || job.referenceMode !== "product" || !binding.sourceSnapshotId ||
@@ -534,6 +540,7 @@ function validatedReviewCandidateSet(job: ImageBatchJob, resolutionToken?: strin
   }
   try {
     const metadata = JSON.parse(fs.readFileSync(`${job.outStem}.reference-scene.json`, "utf8"));
+    assertSavedSceneRecipe(job, metadata, verifyRecipe);
     if (metadata.strategyVersion !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION || metadata.slotId !== binding.slotId ||
         metadata.sourceSnapshotId !== binding.sourceSnapshotId ||
         JSON.stringify(metadata.referenceHashes) !== JSON.stringify(binding.referenceHashes) ||
@@ -548,7 +555,7 @@ function validatedReviewCandidateSet(job: ImageBatchJob, resolutionToken?: strin
 }
 
 /** Re-reviewing saved bytes never authorizes another provider request. */
-function reviewOnlyImageResult(job: ImageBatchJob): string {
+function reviewOnlyImageResult(job: ImageBatchJob, verifyRecipe = true): string {
   const binding = job.reviewOnly;
   const refused = () => new Error("IMAGE_RESUME_REQUIRED: 이전 이미지의 완료·단일 산출물·참조 일치를 확인할 수 없습니다. 기존 파일을 보존했으며 재검수 전용 작업을 새 생성으로 전환하지 않았습니다.");
   if (!binding || job.referenceMode !== "product" || !binding.sourceSnapshotId ||
@@ -558,6 +565,7 @@ function reviewOnlyImageResult(job: ImageBatchJob): string {
       !resolutionOwnerIsDead(resolutionOwner(`${job.outStem}.resolution.lock`))) throw refused();
   try {
     const metadata = JSON.parse(fs.readFileSync(`${job.outStem}.reference-scene.json`, "utf8"));
+    assertSavedSceneRecipe(job, metadata, verifyRecipe);
     if (metadata.strategyVersion !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION || metadata.slotId !== binding.slotId ||
         metadata.sourceSnapshotId !== binding.sourceSnapshotId ||
         JSON.stringify(metadata.referenceHashes) !== JSON.stringify(binding.referenceHashes) ||
@@ -746,6 +754,11 @@ export function prepareImageBatchJobs(
       for (const name of fs.readdirSync(workDir).filter(name => /^raw-[a-f0-9]+\.reference-scene\.json$/iu.test(name))) {
         const priorStem = path.join(workDir, name.replace(/\.reference-scene\.json$/u, ""));
         if (priorStem === outStem) {
+          const metadata = JSON.parse(fs.readFileSync(path.join(workDir, name), "utf8"));
+          assertSavedSceneRecipe(job, metadata);
+          if (metadata.slotId !== target.request.slotId || metadata.sourceSnapshotId !== manifest.sourceSnapshot?.snapshotId ||
+              JSON.stringify(metadata.referenceHashes) !== JSON.stringify(references.map(reference => reference.sha256)))
+            throw new Error("IMAGE_RESUME_REQUIRED: 같은 요청의 슬롯·참조 기록이 변경되었습니다. 기존 요청을 보존했으며 재전송하지 않았습니다.");
           // The identical pending request must still reach its original transport's resume guard.
           let completedCodex = false;
           try { completedCodex = JSON.parse(fs.readFileSync(`${priorStem}.codex-submission.json`, "utf8")).state === "completed"; }
@@ -754,8 +767,10 @@ export function prepareImageBatchJobs(
         }
         if (imageJobSceneStrategy(priorStem) !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION && retiredImageJobIsSettled(priorStem)) continue;
         const prior = JSON.parse(fs.readFileSync(path.join(workDir, name), "utf8")) as {
-          strategyVersion?: string; slotId?: string; sourceSnapshotId?: string; referenceHashes?: string[] };
+          strategyVersion?: string; slotId?: string; sourceSnapshotId?: string; referenceHashes?: string[]; sceneRecipeSha256?: string };
         if (prior.slotId !== target.request.slotId) continue;
+        if (prior.sceneRecipeSha256 !== undefined && !/^[a-f0-9]{64}$/u.test(prior.sceneRecipeSha256))
+          throw new Error("IMAGE_RESUME_REQUIRED: 이전 생성 프롬프트 기록이 손상되었습니다. 기존 결과를 보존했으며 재전송하지 않았습니다.");
         const submitted = IMAGE_JOB_RECORD_SUFFIXES
           .some(extension => fs.existsSync(`${priorStem}${extension}`));
         const replacingCompleted = target.request.replaceAssetKey && normalizePackageImageAssets(manifest).some(asset =>
@@ -764,7 +779,7 @@ export function prepareImageBatchJobs(
         if (!submitted) continue;
         if (replacingCompleted && retiredImageJobIsSettled(priorStem)) continue;
         const output = existingJobResult(priorStem);
-        if (reviewOnlyJob || prior.strategyVersion !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION ||
+        if (prior.strategyVersion !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION ||
             prior.sourceSnapshotId !== manifest.sourceSnapshot?.snapshotId ||
             JSON.stringify(prior.referenceHashes) !== JSON.stringify(references.map(reference => reference.sha256)))
           throw new Error("IMAGE_RESUME_REQUIRED: 같은 슬롯에 이전 이미지 요청이 있습니다. 본문·연출·참조 변경으로 기존 요청을 건너뛰어 재전송할 수 없습니다.");
@@ -777,6 +792,19 @@ export function prepareImageBatchJobs(
           reviewOnly: { outputSha256: output ? sha256File(output) : candidateSet!.candidates[0].sha256, slotId: target.request.slotId!,
             sourceSnapshotId: manifest.sourceSnapshot!.snapshotId, referenceHashes: references.map(reference => reference.sha256),
             ...(candidateSet ? { candidateSet } : {}) } };
+        const recipeSha256 = crypto.createHash("sha256").update(job.prompt).digest("hex");
+        // Legacy v5 identities already bind the exact recipe, but different legacy
+        // identities have no evidence that their scene matches this request.
+        const sameRecipe = prior.sceneRecipeSha256 === undefined ? priorStem === outStem : prior.sceneRecipeSha256 === recipeSha256;
+        if (priorStem === outStem && !sameRecipe) assertSavedSceneRecipe(job, prior);
+        if (!sameRecipe) {
+          // Verify completion, references and immutable outputs solely to retire
+          // this old recipe. This path never returns/adopts its pixels or QA.
+          if (candidateSet) validatedReviewCandidateSet(candidate, undefined, false);
+          else reviewOnlyImageResult(candidate, false);
+          continue;
+        }
+        if (reviewOnlyJob) throw new Error("IMAGE_RESUME_REQUIRED: 같은 슬롯에 호환되는 이전 요청이 여러 개 있습니다. 기존 결과를 보존했으며 재전송하지 않았습니다.");
         if (candidateSet) {
           validatedReviewCandidateSet(candidate);
           // Preserve the existing single-result route when every saved copy agrees.
@@ -798,6 +826,7 @@ export function prepareImageBatchJobs(
     }
     if (manifest.connectKind === "SHOPPING") atomicWriteTextFile(`${outStem}.reference-scene.json`, JSON.stringify({
       strategyVersion: SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION,
+      sceneRecipeSha256: crypto.createHash("sha256").update(job.prompt).digest("hex"),
       slotId: target.request.slotId,
       referenceHashes: references.map(reference => reference.sha256), sourceSnapshotId: manifest.sourceSnapshot?.snapshotId,
     }));

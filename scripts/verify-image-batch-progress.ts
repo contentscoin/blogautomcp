@@ -407,7 +407,6 @@ async function verifyReviewOnlyRecovery() {
     target.sectionTitle = "현재 본문 제목";
     target.imageIntent = "현재 자연스러운 연출 의도";
     target.bodyExcerpt = "현재 본문의 기능 증거 사용 여부까지 다시 확인";
-    target.referenceContext.prompt = "current generation recipe";
     const prepare = () => h.prepareImageBatchJobs([target], h.manifest, "상품", workDir);
     return { h, workDir, original, target, prepare, workspace };
   }
@@ -459,6 +458,112 @@ async function verifyReviewOnlyRecovery() {
         reviewReferenceScene: async () => { throw new Error("REFERENCE_SCENE_FIDELITY_FAILED: current body is incompatible"); } }), /REFERENCE_SCENE_FIDELITY_FAILED/);
       assert.deepEqual(tree(f.workDir), before, "review-only does not change old metadata, receipts or raw bytes");
       assert.equal(f.prepare()[0].outStem, f.original.outStem, "later attempts safely re-review the same candidate");
+    }
+  });
+  await check("a changed scene recipe creates a fresh request only after the prior exact outputs have settled", async () => {
+    for (const engine of ["codex", "browser"] as const) for (const transport of ["codex", "browser"] as const)
+      for (const legacyMetadata of [false, true]) {
+        const f = fixture(engine, transport);
+        const sidecar = `${f.original.outStem}.reference-scene.json`;
+        if (legacyMetadata) {
+          const metadata = JSON.parse(fs.readFileSync(sidecar, "utf8"));
+          delete metadata.sceneRecipeSha256;
+          fs.writeFileSync(sidecar, JSON.stringify(metadata));
+        }
+        fs.copyFileSync(`${f.original.outStem}.png`, `${f.original.outStem}.jpg`);
+        const before = tree(f.workDir);
+        f.target.referenceContext.prompt = "new food-waste processor recipe: kitchen worktop, no laundry or floor";
+        const [job] = f.prepare();
+        assert.notEqual(job.outStem, f.original.outStem);
+        assert.equal(job.reviewOnly, undefined, "a revised setting must generate, never relabel the old raw");
+        assert.equal(JSON.parse(fs.readFileSync(`${job.outStem}.reference-scene.json`, "utf8")).sceneRecipeSha256,
+          crypto.createHash("sha256").update(job.prompt).digest("hex"));
+        for (const [file, sha] of Object.entries(before)) assert.equal(tree(f.workDir)[file], sha, "old evidence is unchanged");
+        let calls = 0;
+        const results: Array<{ localPath: string | null }> = [];
+        const newRaw = `${job.outStem}.png`;
+        const generate = () => {
+          calls++;
+          assert.match(job.prompt, /kitchen worktop/);
+          fs.writeFileSync(newRaw, bytes(5));
+          return { id: job.id, localPath: newRaw };
+        };
+        await f.h.runImageBatch([job], f.workDir, async result => { results.push(result); }, undefined, {
+          runCodex: async (jobs, options) => { assert.equal(engine, "codex"); assert.equal(jobs[0].outStem, job.outStem);
+            const result = generate(); await options.onResult(result, 0); return [result]; },
+          runBrowser: async (jobs, _workDir, onResult) => { assert.equal(engine, "browser"); assert.equal((jobs[0] as ImageBatchJob).outStem, job.outStem);
+            const result = generate(); await onResult(result, 0); return [result]; },
+          browserEnabled: true,
+        });
+        assert.equal(calls, 1);
+        assert.deepEqual(results.map(result => result.localPath), [newRaw]);
+        assert.notEqual(hashFile(newRaw), hashFile(`${f.original.outStem}.png`));
+        await assert.rejects(() => f.h.finishGeneratedImage({ manifest: f.h.manifest, productName: "상품", target: f.target,
+          rawPath: newRaw, workDir: f.workDir, index: 0, reviewReferenceScene: async () => {
+            throw new Error("REFERENCE_SCENE_FIDELITY_FAILED: wrong variant is still forbidden");
+          } }), /REFERENCE_SCENE_FIDELITY_FAILED/);
+        assert.equal(f.h.spawns, 0);
+      }
+  });
+  await check("legacy exact-identity completion remains recoverable without guessing a different recipe", async () => {
+    const f = fixture("browser");
+    f.target.sectionTitle = "이전 본문 제목";
+    f.target.imageIntent = "이전 연출 의도";
+    f.target.bodyExcerpt = "이전 본문";
+    const sidecar = `${f.original.outStem}.reference-scene.json`;
+    const metadata = JSON.parse(fs.readFileSync(sidecar, "utf8"));
+    delete metadata.sceneRecipeSha256;
+    fs.writeFileSync(sidecar, JSON.stringify(metadata));
+    const before = tree(f.workDir);
+    const jobs = f.prepare();
+    assert.equal(jobs[0].outStem, f.original.outStem);
+    assert.ok(jobs[0].reviewOnly);
+    assert.equal((await deliver(f, jobs))[0].localPath, `${f.original.outStem}.png`);
+    assert.deepEqual(tree(f.workDir), before);
+  });
+  await check("changed recipes cannot clear submitted, cancelled, ambiguous or incorrectly bound prior evidence", async () => {
+    for (const kind of ["submitting", "missing-thread", "raw-only", "lock", "resolution-lock", "cancelled", "browser-submitted",
+      "snapshot", "references", "ambiguous", "corrupt-recipe"] as const) {
+      const f = fixture("codex", kind.startsWith("browser") || kind === "cancelled" ? "browser" : "codex");
+      f.target.referenceContext.prompt = "new kitchen recipe";
+      const receiptPath = `${f.original.outStem}.codex-submission.json`;
+      if (kind === "raw-only") fs.unlinkSync(receiptPath);
+      if (kind === "submitting" || kind === "missing-thread") {
+        const receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+        if (kind === "submitting") receipt.state = "submitting"; else receipt.threadId = null;
+        fs.writeFileSync(receiptPath, JSON.stringify(receipt));
+      }
+      if (kind === "lock" || kind === "resolution-lock") fs.writeFileSync(`${f.original.outStem}.${kind === "lock" ? "lock" : "resolution.lock"}`, "unknown owner");
+      if (kind === "cancelled" || kind === "browser-submitted") fs.appendFileSync(`${f.original.outStem}.checkpoint.jsonl`, JSON.stringify({ id: "slot", fingerprint: "f".repeat(64),
+        ...(kind === "cancelled" ? { localPath: null, error: "사용자가 이미지 생성을 중지했습니다." } : { state: "submitted" }) }) + "\n");
+      if (kind === "snapshot" || kind === "references" || kind === "corrupt-recipe") {
+        const sidecar = `${f.original.outStem}.reference-scene.json`, metadata = JSON.parse(fs.readFileSync(sidecar, "utf8"));
+        if (kind === "snapshot") metadata.sourceSnapshotId = "other";
+        else if (kind === "references") metadata.referenceHashes.reverse();
+        else metadata.sceneRecipeSha256 = "malformed";
+        fs.writeFileSync(sidecar, JSON.stringify(metadata));
+      }
+      if (kind === "ambiguous") fs.writeFileSync(path.join(f.workspace, "second.png"), bytes(4));
+      const before = tree(f.workDir);
+      assert.throws(f.prepare, /IMAGE_RESUME_REQUIRED|IMAGE_OUTPUT_AMBIGUOUS/, kind);
+      assert.deepEqual(tree(f.workDir), before);
+      assert.equal(f.h.spawns, 0);
+    }
+  });
+  await check("an identical pending identity cannot overwrite corrupted recipe or reference metadata", async () => {
+    for (const kind of ["recipe", "references"] as const) {
+      const f = fixture("codex");
+      f.target.imageIntent = "이전 연출 의도";
+      const sidecar = `${f.original.outStem}.reference-scene.json`, metadata = JSON.parse(fs.readFileSync(sidecar, "utf8"));
+      if (kind === "recipe") metadata.sceneRecipeSha256 = "0".repeat(64); else metadata.referenceHashes.reverse();
+      fs.writeFileSync(sidecar, JSON.stringify(metadata));
+      const receiptPath = `${f.original.outStem}.codex-submission.json`, receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+      receipt.state = "submitting";
+      fs.writeFileSync(receiptPath, JSON.stringify(receipt));
+      const before = tree(f.workDir);
+      assert.throws(f.prepare, /IMAGE_RESUME_REQUIRED/);
+      assert.deepEqual(tree(f.workDir), before);
+      assert.equal(f.h.spawns, 0);
     }
   });
   await check("review-only preparation rejects uncertain, mismatched or multiple saved requests", async () => {
@@ -521,16 +626,18 @@ async function verifyReviewOnlyRecovery() {
     assert.equal(f.h.spawns, 0);
   });
   await check("review-only SHA and completion are rechecked at delivery and never fall back on damage or cancellation", async () => {
-    for (const engine of ["codex", "browser"] as const) for (const kind of ["deleted", "replaced", "snapshot", "refs-order", "reference-bytes", "receipt", "checkpoint", "ambiguous", "cancelled"] as const) {
+    for (const engine of ["codex", "browser"] as const) for (const kind of ["deleted", "replaced", "snapshot", "refs-order", "recipe", "reference-bytes", "receipt", "checkpoint", "ambiguous", "cancelled"] as const) {
       const f = fixture(engine);
       const jobs = f.prepare();
       if (kind === "deleted") fs.unlinkSync(`${f.original.outStem}.png`);
       if (kind === "replaced") fs.writeFileSync(`${f.original.outStem}.png`, bytes(4));
       if (kind === "reference-bytes") fs.appendFileSync(f.target.referenceContext.referenceImagePaths[0], "changed");
-      if (kind === "snapshot" || kind === "refs-order") {
+      if (kind === "snapshot" || kind === "refs-order" || kind === "recipe") {
         const sidecar = `${f.original.outStem}.reference-scene.json`;
         const metadata = JSON.parse(fs.readFileSync(sidecar, "utf8"));
-        if (kind === "snapshot") metadata.sourceSnapshotId = "changed"; else metadata.referenceHashes.reverse();
+        if (kind === "snapshot") metadata.sourceSnapshotId = "changed";
+        else if (kind === "recipe") metadata.sceneRecipeSha256 = "0".repeat(64);
+        else metadata.referenceHashes.reverse();
         fs.writeFileSync(sidecar, JSON.stringify(metadata));
       }
       if (kind === "receipt") fs.unlinkSync(`${f.original.outStem}.codex-submission.json`);
