@@ -229,15 +229,15 @@ async function main() {
       composition: { sections: [{ id: "feature", body: ["45분"], imageMin: 1 }] }, imageAssets: [] };
     const save = () => fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(manifest));
     save();
-    assert.equal(IMAGE_RECOVERY_POLICY_VERSION, 6);
-    const policy3Signature = crypto.createHash("sha256").update(JSON.stringify({
-      version: 1, policy: 3, product: manifest.sourceSnapshot.product,
+    assert.equal(IMAGE_RECOVERY_POLICY_VERSION, 7);
+    const policy6Signature = crypto.createHash("sha256").update(JSON.stringify({
+      version: 1, policy: 6, product: manifest.sourceSnapshot.product,
       sections: [{ id: "feature", body: ["45분"], imageMin: 1 }], assets: [], receipts: [], rejected: [],
     })).digest("hex");
     fs.writeFileSync(path.join(dir, "image-recovery-history.json"), JSON.stringify({ version: 1, entries: [
-      { stage: "refresh-source", input: policy3Signature, output: policy3Signature, status: "failed", at: "earlier" },
+      { stage: "refresh-source", input: policy6Signature, output: policy6Signature, status: "failed", at: "earlier" },
     ] }));
-    assert.notEqual(imageRecoverySignature(dir), policy3Signature, "new policy receives one fresh attempt for an exhausted old draft");
+    assert.notEqual(imageRecoverySignature(dir), policy6Signature, "recipe-bound recovery receives one fresh attempt for a draft exhausted under policy 6");
     let calls = 0;
     await runRecordedImageRecovery("persistent-fixture", "refresh-source", async () => { calls++; });
     const skipped = await runRecordedImageRecovery("persistent-fixture", "refresh-source", async () => { calls++; });
