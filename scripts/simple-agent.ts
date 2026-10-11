@@ -124,7 +124,7 @@ import {
   formatQualityConvergenceInstructions,
   planQualityConvergence,
 } from "./lib/quality-convergence";
-import { selectPreparedRevisionSectionIndexes } from "./lib/prepared-revision-policy";
+import { isPreparedTitleOnlyRepair, selectPreparedRevisionSectionIndexes } from "./lib/prepared-revision-policy";
 import { selectVerifiedProductPhoto } from "./lib/product-photo-review";
 import { recoverProductPhotoRegion } from "./lib/product-photo-region";
 import { chooseProductName } from "./lib/product-name-identity";
@@ -9955,7 +9955,9 @@ async function runPreparedPostRevision(
     }
     const allowedIndexes = selectPreparedRevisionSectionIndexes({ current: selectedQuality, sections: selected.sections,
       plan: convergencePlan, requestedIndexes: sectionIndexes, qualityConvergence, incrementalOnly });
-    if (allowedIndexes.length === 0) {
+    const titleOnlyRepair = allowedIndexes.length === 0 &&
+      isPreparedTitleOnlyRepair({ current: selectedQuality, plan: convergencePlan, qualityConvergence });
+    if (allowedIndexes.length === 0 && !titleOnlyRepair) {
       throw new Error(incrementalOnly
         ? "QUALITY_REPAIR_EXHAUSTED: 소재 보완에서 실패와 연결된 문단을 확인하지 못해 기존 원고를 보존했습니다. 전체 글 교체가 필요하면 실패 소재 재작성 버튼을 사용하세요."
         : "QUALITY_REPAIR_EXHAUSTED: 품질 실패와 연결된 수정 대상 문단을 찾지 못했습니다.");
@@ -9983,8 +9985,8 @@ async function runPreparedPostRevision(
           "저장된 사실만 사용해 품질 문제를 해결하는 한국어 편집자입니다. JSON만 반환하세요.",
           JSON.stringify({ instructions: attemptInstructions, qualityFeedback: diagnostic, sourceSnapshot: snapshot,
             title: selected.title, sections: selected.sections.map((text, index) => ({ index, text })), allowedIndexes,
-            rules: `${allowCandidateTitleChange ? "요청된 범위에서 글 제목을 수정할 수 있습니다. 제목만 고칠 때 updates는 빈 배열로 반환하세요." : "글 제목을 변경하지 마세요."} allowedIndexes에 든 문단만 수정하세요. 문단 소제목·순서·이미지 의미와 마지막 커넥트 고지는 유지하세요. 상품명이나 검색 키워드만 보고 성분·성능·체험을 추정하지 마세요. 수정 문단은 본문만 반환하세요.`,
-            output: { ...(allowCandidateTitleChange ? { title: "수정한 글 제목" } : {}), updates: [{ index: allowedIndexes[0], body: "수정 본문(소제목 제외)" }] } }), {
+            rules: `${allowCandidateTitleChange ? "요청된 범위에서 글 제목을 수정할 수 있습니다. 제목만 고칠 때 updates는 빈 배열로 반환하세요." : "글 제목을 변경하지 마세요."}${titleOnlyRepair ? " 이번 요청은 제목만 보완합니다. 본문은 통과했으므로 모든 문단과 고지를 그대로 보존하고 updates는 반드시 빈 배열로 반환하세요." : ""} allowedIndexes에 든 문단만 수정하세요. 문단 소제목·순서·이미지 의미와 마지막 커넥트 고지는 유지하세요. 상품명이나 검색 키워드만 보고 성분·성능·체험을 추정하지 마세요. 수정 문단은 본문만 반환하세요.`,
+            output: { ...(allowCandidateTitleChange ? { title: "수정한 글 제목" } : {}), updates: titleOnlyRepair ? [] : [{ index: allowedIndexes[0], body: "수정 본문(소제목 제외)" }] } }), {
             connectKind, productName: name, description, features, price, originalPrice: "", discountRate: "", couponInfo: "", deliveryInfo: "", reviewCount: "", rating: "",
             brandLink: link.url, targetSectionCount: selected.sections.length, minimumSectionCount: selected.sections.length,
             maximumSectionCount: selected.sections.length, writingContract,
@@ -9995,7 +9997,7 @@ async function runPreparedPostRevision(
           { title: selected.title, sections: selected.sections },
           response,
           allowedIndexes,
-          { allowTitleChange: allowCandidateTitleChange },
+          { allowTitleChange: allowCandidateTitleChange, allowEmptyBodyScope: titleOnlyRepair },
         );
         const candidateSections = incrementalOnly
           ? revision.sections.map((section, index) => allowedIndexes.includes(index) ? stripInternalGuidanceSentences(section) : section)

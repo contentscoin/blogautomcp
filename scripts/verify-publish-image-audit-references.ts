@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import Ajv from "ajv";
 import sharp from "sharp";
-import { auditPublishImages, planPublishImageAuditBatches, PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES, PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT, type PublishImageAuditOptions } from "./lib/publish-image-audit";
+import { auditPublishImages, planPublishImageAuditBatches, planPublishImageComparisonGroups, PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES, PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT, type PublishImageAuditOptions } from "./lib/publish-image-audit";
 import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 import type { CodexDraftOptions } from "./lib/codex-draft-provider";
 import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
@@ -322,6 +322,81 @@ async function main() {
     await sharp(crypto.randomBytes(1024 * 1024 * 3), { raw: { width: 1024, height: 1024, channels: 3 } }).png().toFile(largeFinal);
     await sharp(crypto.randomBytes(1450 * 1450 * 3), { raw: { width: 1450, height: 1450, channels: 3 } }).png().toFile(largeReference);
     const largeHashes = [hash(largeFinal), hash(largeReference)];
+    // Real decoded final + 3 selected-gallery PNGs exceed one request, while
+    // each bounded group can retain the exact direct reference unchanged.
+    const splitGallery: string[] = [];
+    const splitUrls = ["gallery-a.png", "gallery-b.png", "context-180ml.png"].map(name => `https://shop-phinf.pstatic.net/selected/${name}?type=w860`);
+    for (let index = 0; index < 3; index++) {
+      const file = path.join(root, `split-gallery-${index}.png`);
+      await sharp(crypto.randomBytes(850 * 850 * 3), { raw: { width: 850, height: 850, channels: 3 } }).png().toFile(file);
+      fs.writeFileSync(`${file}.retrieval.json`, JSON.stringify({ version: "product-image-retrieval/v1", sourceUrl: splitUrls[index],
+        sha256: hash(file), retrievedAt: new Date(Date.now() - 1000).toISOString() }));
+      splitGallery.push(file);
+    }
+    const splitSnapshot = createProductSnapshot({ productId: "split-kit", connectKind: "SHOPPING", externalProductId: "split-kit-id",
+      sourceUrl: selectedSnapshot.sourceUrl, product: { name: "selected toner 180ml/serum/cream kit", features: ["180ml toner"], referenceImageUrls: splitUrls } });
+    const splitFixture = (): PublishImageAuditOptions => {
+      const options = fixture([{ final: largeFinal, reference: references[0] }]);
+      options.sourceSnapshotId = splitSnapshot.snapshotId;
+      options.imageAssets![0].referenceScene!.sourceSnapshotId = splitSnapshot.snapshotId;
+      return { ...options, selectedSourceSnapshot: structuredClone(splitSnapshot), selectedSourceProductId: "split-kit", selectedSourceDirectory: root };
+    };
+    const allSplitHashes = [largeFinal, references[0], ...splitGallery].map(hash);
+    assert([largeFinal, references[0], ...splitGallery].reduce((sum, file) => sum + fs.statSync(file).size, 0) > PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES,
+      "this regression actually exceeds the single-request byte limit");
+    const groupsSeen: string[][] = [];
+    const splitOptions = splitFixture();
+    splitOptions.review = async call => {
+      assert.equal(slots(call).length, 1);
+      assert.equal(slots(call)[0].comparisonReferenceImageIndex, 2);
+      assert(call.imagePaths!.length <= PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT);
+      assert(call.imagePaths!.reduce((sum, file) => sum + fs.statSync(file).size, 0) <= PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES);
+      assert.deepEqual(await sharp(call.imagePaths![0]).raw().toBuffer(), await sharp(largeFinal).raw().toBuffer());
+      assert.deepEqual(await sharp(call.imagePaths![1]).raw().toBuffer(), await sharp(references[0]).raw().toBuffer());
+      const hashes = call.imagePaths!.slice(2).map(hash);
+      groupsSeen.push(hashes);
+      for (const [index, file] of call.imagePaths!.slice(2).entries()) {
+        const original = splitGallery.find(reference => hash(reference) === hashes[index])!;
+        assert.deepEqual(await sharp(file).raw().toBuffer(), await sharp(original).raw().toBuffer());
+      }
+      assert.match(call.userPrompt, /EVERY complete verdict must pass/u);
+      return answer(call);
+    };
+    const splitResult = await auditPublishImages(splitOptions);
+    assert.equal(splitResult.ok, true, JSON.stringify(splitResult.failures));
+    assert.equal(splitResult.checked, 1, "multiple comparison groups still count one publication candidate");
+    assert.deepEqual(groupsSeen.map(group => group.length), [2, 1]);
+    assert.deepEqual(groupsSeen.flat(), splitGallery.map(hash), "all selected comparison evidence is reviewed in stable order");
+    assert.equal(splitResult.comparisonReviews!.length, 2);
+    assert(splitResult.comparisonReviews!.every(row => row.referenceSha256s.includes(hash(references[0]))));
+    assert.deepEqual([largeFinal, references[0], ...splitGallery].map(hash), allSplitHashes); checks++;
+    for (const patch of [{ identityMatches: false }, { photoClaimMatches: false }, { mixedOptions: true },
+      { noGraphicLayout: false }, { textPolicyMatches: false }, { accepted: false }]) {
+      const options = splitFixture(); let groupCalls = 0;
+      options.review = async call => { groupCalls++;
+        return JSON.stringify({ reviews: [{ ...good(1), ...(groupCalls === 1 ? patch : {}), reason: "First group adverse; later matching gallery cannot cancel it" }] }); };
+      const blocked = await auditPublishImages(options);
+      assert.equal(groupCalls, 2, "every evidence group is inspected even after an adverse verdict");
+      assert.equal(blocked.ok, false); assert.equal(blocked.checked, 1);
+      assert.equal(blocked.comparisonReviews!.length, 2);
+      for (const [key, value] of Object.entries(patch)) assert.equal(blocked.comparisonReviews![0].verdict![key], value);
+      assert(blocked.failures.some(failure => failure.code === "SEMANTIC_REJECTION")); checks++;
+    }
+    const invalidSplit = splitFixture(); let splitCalls = 0;
+    invalidSplit.review = async call => {
+      splitCalls++;
+      if (splitCalls <= 2) { assert.equal(call.imagePaths!.length, 4, "malformed retry retains the same bounded group"); return "{}"; }
+      assert.equal(call.imagePaths!.length, 3, "remaining comparison group is still reviewed"); return answer(call);
+    };
+    const invalidSplitResult = await auditPublishImages(invalidSplit);
+    assert.equal(splitCalls, 3); assert.equal(invalidSplitResult.ok, false);
+    assert.equal(invalidSplitResult.comparisonReviews![0].verdict, null);
+    assert(invalidSplitResult.failures.some(failure => failure.code === "INVALID_REVIEW")); checks++;
+    const bytesHalf = PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES / 2;
+    assert.equal(planPublishImageComparisonGroups(bytesHalf, [{ referenceSha256: "a".repeat(64), snapshotBytes: bytesHalf }],
+      [{ referenceSha256: "b".repeat(64), snapshotBytes: 1 }]), null, "an optional reference cannot displace the mandatory identity reference");
+    assert.equal(planPublishImageComparisonGroups(1, [], [{ referenceSha256: "a".repeat(64), snapshotBytes: 1 },
+      { referenceSha256: "a".repeat(64), snapshotBytes: 2 }]), null, "conflicting duplicate reference sizes fail closed"); checks++;
     const byteReference = path.join(root, "byte-reference.png");
     await sharp(crypto.randomBytes(1024 * 1024 * 3), { raw: { width: 1024, height: 1024, channels: 3 } }).png().toFile(byteReference);
     const byteBound = fixture([{ final: largeFinal, reference: byteReference }, { final: largeFinal, reference: byteReference }]);

@@ -30,8 +30,16 @@ async function main() {
     const angled = file("angled"), front = file("front"), output = file("output"), anchor = file("approved-anchor");
     const reviewed: string[][] = [];
     const reference = await selectShoppingSceneReference({ paths: [angled, front], productName: "정면 테스트 상품", selectedProduct: "선택 옵션 A" }, {
-      verify: async paths => paths,
+      verify: async (paths, _product, _maximum, options) => {
+        assert.equal(options?.purpose, "generation-reference", "only the input-reference selector receives artwork permission");
+        return paths;
+      },
       review: async call => {
+        assert.match(call.userPrompt, /generation-reference INPUT ONLY, never approved for publication/u);
+        assert.match(call.userPrompt, /one whole exact selected product is clearly identifiable, unobstructed, geometrically readable/u);
+        assert.match(call.userPrompt, /This input exception never permits added text, graphic frames or panels in generated\/published outputs/u);
+        const schema = call.outputSchema as { properties: Record<string, { description?: string }> };
+        assert.match(schema.properties.geometryReadable.description!, /generation-reference INPUT ONLY/u);
         reviewed.push(call.imagePaths!);
         return JSON.stringify({ identityMatches: true, geometryReadable: call.imagePaths![0] === front,
           completeShape: true, notDeformed: true, unobstructed: true,
@@ -168,6 +176,11 @@ async function main() {
         assert.match(call.userPrompt, /ordinary mirror and its physical frame are scene props, not a graphic photo frame/u);
         assert.match(call.userPrompt, /Reject independent duplicate physical items/u);
         assert.match(call.userPrompt, /physically inconsistent\/impossible reflections/u);
+        assert.match(call.userPrompt, /VERBATIM actual sectionTitle\/publicationText/u);
+        assert.match(call.userPrompt, /4~5 hour charging or price alone is not a claim/u);
+        const claimSchema = call.outputSchema as { properties: Record<string, { description?: string }> };
+        for (const key of ["reason", "accepted", "illustrativeOnly"])
+          assert.match(claimSchema.properties[key].description!, /VERBATIM actual sectionTitle\/publicationText/u);
         const schema = call.outputSchema as { properties: { checks: { properties: { singleScene: { type: string; description: string } } } } };
         assert.equal(schema.properties.checks.properties.singleScene.type, "boolean");
         assert.match(schema.properties.checks.properties.singleScene.description, /ONE physical product plus its optically consistent reflection/u);

@@ -34,3 +34,21 @@ test("unknown publication outcome remains visible; missing snapshot retains hist
   assert.match(html, /중단됨/);
   assert.doesNotMatch(html, /복구 완료|현재 준비완료/);
 });
+test("current blockers and old errors share closed native failure details", () => {
+  const html = renderToStaticMarkup(React.createElement(MaterialJobItemResult, {
+    title: "상품", item: { stage: "검증 실패", error: "예전 이미지 오류", errorCode: "IMAGE_ERROR" },
+    current: { productId: "p", status: "BLOCKED", ready: false, blockers: ["현재 제목 상품명 누락"] },
+  }));
+  assert.match(html, /상품 — 현재 보완 필요/);
+  assert.match(html, /<details[^>]*><summary[^>]*>실패 상세 보기<\/summary>[\s\S]*현재 제목 상품명 누락[\s\S]*예전 이미지 오류[\s\S]*<\/details>/);
+  assert.doesNotMatch(html, /<details[^>]*\bopen(?:=|\s|>)/);
+  assert.doesNotMatch(html.slice(0, html.indexOf("<details")), /IMAGE_ERROR|현재 제목 상품명 누락|예전 이미지 오류/);
+});
+test("a current blocker without any old error still provides closed details", () => {
+  const html = renderToStaticMarkup(React.createElement(MaterialJobItemResult, {
+    title: "상품", item: { stage: "진행 중" },
+    current: { productId: "p", status: "BLOCKED", ready: false, blockers: ["품질 검증 필요"] },
+  }));
+  assert.match(html, /<details[^>]*><summary[^>]*>실패 상세 보기<\/summary>[\s\S]*품질 검증 필요/);
+  assert.doesNotMatch(html, /<details[^>]*\bopen(?:=|\s|>)/);
+});

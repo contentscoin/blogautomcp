@@ -420,6 +420,39 @@ async function main() {
       }
       return input;
     };
+    // Reported Homelea/Dibea false positives: keep actual rendered technical
+    // discussion intact, require literal proof/headline grounding, and retain
+    // any real adverse response. These fixtures do not certify live pixels.
+    for (const [role, patch] of [
+      ["scene", {}], ["thumbnail", {}],
+      ["scene", { photoClaimMatches: false, reason: "이 사진으로 충전 시간을 확인할 수 있습니다: unsupported explicit photo proof" }],
+      ["thumbnail", { textPolicyMatches: false, reason: "An extra detached DIBEA logo is a forbidden added graphic" }],
+      ["thumbnail", { accepted: false, reason: "Observed headline remains genuinely unresolved" }],
+    ] as const) {
+      const input = alignedDecisionInput(role);
+      if (role === "scene") {
+        Object.assign(input.composition.renderNodes[1], { text: "제품 사양은 어떻게 확인할까" });
+        Object.assign(input.composition.renderNodes[2], { text: "전압과 배터리 사양을 살펴보세요. 충전에는 4~5시간이 필요합니다. 사진은 제품 외형 참고용입니다." });
+        if ("photoClaimMatches" in patch) Object.assign(input.composition.renderNodes[2], { text: "이 사진으로 충전 시간을 확인할 수 있습니다." });
+      }
+      let calls = 0;
+      input.review = async call => {
+        calls++;
+        const schema = call.outputSchema as { properties: { reviews: { items: { properties: Record<string, { description: string }> } } } };
+        for (const text of [call.userPrompt, ...["reason", "photoClaimMatches", "accepted"].map(key => schema.properties.reviews.items.properties[key].description)]) {
+          assert.match(text, /VERBATIM quotation/u);
+          assert.match(text, /never replace '제품 사양 체크' with '사용 체크'/u);
+          assert.match(text, /4~5 hour charging.*does not by itself claim/u);
+          assert.match(text, /이 사진으로 충전 시간을 확인할 수 있습니다/u);
+          assert.match(text, /never overrides an adverse verdict/u);
+        }
+        assert.equal(new Ajv().compile(call.outputSchema as object)({ reviews: [{ ...good, ...patch }] }), true);
+        return JSON.stringify({ reviews: [{ ...good, reason: "Actual technical discussion and 제품 사양 체크 do not claim photographic usage proof", ...patch }] });
+      };
+      const audited = await auditPublishImages(input);
+      assert.equal(audited.ok, Object.keys(patch).length === 0);
+      assert.equal(calls, 1, "literal grounding never retries or overrides a valid adverse boolean"); assertions++;
+    }
     for (const role of ["thumbnail", "scene"] as const) {
       const aligned = alignedDecisionInput(role); let calls = 0;
       aligned.review = async call => {

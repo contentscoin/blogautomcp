@@ -111,7 +111,7 @@ function localScheduleCallOnce(pathname: string, method: string, body: object | 
       response.on("end", () => {
         try {
           const result = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Result;
-          if (!result.success || (response.statusCode || 500) >= 400) reject(Object.assign(new Error(result.error || result.errors?.join("\n") || result.message || `작업 실패 (HTTP ${response.statusCode})`), { code: result.code || "HTTP_ERROR", errors: result.errors }));
+          if (!result.success || (response.statusCode || 500) >= 400) reject(Object.assign(new Error(result.error || result.errors?.join("\n") || result.message || `작업 실패 (HTTP ${response.statusCode})`), { code: result.code || "HTTP_ERROR", errors: result.errors, httpStatus: response.statusCode }));
           else resolve(result);
         } catch (error) { reject(error); }
       });
@@ -135,6 +135,10 @@ function bounded(deps: WorkflowDeps, fallback: number) {
 }
 
 const IMAGE_QUALITY_SIGNALS = new Set(["composition-quality", "representative-image", "thumbnail"]);
+const UNRESOLVED_IMAGE_OPERATION_CODES = new Set([
+  "IMAGE_RESUME_REQUIRED", "IMAGE_OUTPUT_AMBIGUOUS", "PREPARATION_RESULT_UNCERTAIN",
+  "OUTCOME_UNKNOWN", "ALREADY_PUBLISHING", "CODEX_TIMEOUT",
+]);
 function isDefinitivePublishImageFailure(error: unknown): boolean {
   const failure = error as { code?: string; errors?: string[] };
   return failure.code === "PUBLISH_IMAGE_AUDIT_FAILED" && Boolean(failure.errors?.length) &&
@@ -243,6 +247,29 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
 } = {}) {
   const base = `/api/brandlinks/${encodeURIComponent(id)}`;
   const check = bounded(deps, 90 * 60_000);
+  // These exact 409 responses occur before a handler obtains its DB claim.
+  // An auth/transport failure or an active/unknown owner never permits replay.
+  const claimedCall: Call = async (pathname, method, body) => {
+    const action = (body as { action?: string } | undefined)?.action;
+    const eligible = (pathname === `${base}/draft/images` && method === "POST") ||
+      (pathname === `${base}/draft` && method === "PATCH" && action === "recheck");
+    for (let attempt = 0; ; attempt++) {
+      try { return await deps.call(pathname, method, body); }
+      catch (error) {
+        const failure = error as { code?: string; httpStatus?: number; message?: string };
+        if (!eligible || attempt >= 2 || failure.code !== "ALREADY_PUBLISHING" || failure.httpStatus !== 409 ||
+            failure.message !== "상품 상태가 변경되었습니다.") throw error;
+        check();
+        const link = await deps.call(base, "GET");
+        if (!link.success || !["READY", "FAILED"].includes(link.data?.status || "")) throw error;
+        const saved = await deps.call(`${base}/draft`, "GET");
+        if (!saved.success || !saved.data || !["complete", "incomplete"].includes(saved.data.imageGeneration?.status || "") ||
+            saved.data.imageGeneration?.recoveryState === "owner-unknown") throw error;
+        deps.onStage?.("상품 상태 충돌 확인 · 유휴 소재만 다시 시도");
+        await deps.pause();
+      }
+    }
+  };
   if (options.incrementalOnly && options.rewriteFailed) throw Object.assign(new Error("소재 보완과 전체 재작성 옵션을 함께 실행할 수 없습니다."), { code: "INVALID_INPUT" });
   let rewritePrepared = false;
   const ensureRewritePrepared = async () => {
@@ -277,6 +304,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     draft = await deps.call(`${base}/draft`, "POST", { autoApprove: false, autoSectionImages: false, autoQualityRepair: false });
   }
   const waitForImagesIdle = async () => {
+    if (draft.data?.imageGeneration?.recoveryState === "owner-unknown") throw Object.assign(new Error("이전 이미지 작업의 실행 여부를 확인할 수 없습니다. 기존 결과를 확인한 뒤 복구하세요."), { code: "IMAGE_RESUME_REQUIRED" });
     while (draft.data?.imageGeneration?.status === "running") {
       if (draft.data.imageGeneration.recoveryState === "owner-unknown") throw Object.assign(new Error("이전 이미지 작업의 실행 여부를 확인할 수 없습니다. 저장 소재의 이미지 탭에서 기존 결과를 확인한 뒤 복구하세요."), { code: "IMAGE_RESUME_REQUIRED" });
       deps.onStage?.("이미지 준비 대기");
@@ -291,20 +319,10 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
   let previousReadiness: BrandLinkContentReadiness | null = null;
   const recheck = async (refreshSource = false, attempt = 0) => {
     check();
-    // A concurrent status change (for example a manual action on the same item) is transient.
-    for (let retry = 0; ; retry += 1) {
-      try {
-        draft = await deps.call(`${base}/draft`, "PATCH", {
-          action: "recheck",
-          ...(refreshSource ? { refreshSource: true } : {}),
-        });
-        break;
-      } catch (error) {
-        if ((error as { code?: string }).code !== "ALREADY_PUBLISHING" || retry >= 3) throw error;
-        await deps.pause();
-        check();
-      }
-    }
+    draft = await claimedCall(`${base}/draft`, "PATCH", {
+      action: "recheck",
+      ...(refreshSource ? { refreshSource: true } : {}),
+    });
     const decision = qualityPlanForDraft(draft, attempt, previousReadiness);
     previousReadiness = decision.readiness;
     return decision.plan;
@@ -425,7 +443,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     await waitForImagesIdle();
     if (!draft.data) throw new Error("준비 중 소재가 사라졌습니다.");
     if (draft.data.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) {
-      const bound = await deps.call(`${base}/draft/images`, "POST", { action: "bind_sources" });
+      const bound = await claimedCall(`${base}/draft/images`, "POST", { action: "bind_sources" });
       latestImageRepair = bound;
       if (isSessionWidePreparationFailureCode(bound.code)) {
         throw Object.assign(new Error(bound.errors?.join(" ") || bound.message || "이미지 엔진 확인이 필요합니다."), { code: bound.code });
@@ -443,7 +461,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
       const attemptImages = async (action: string, refreshSourcePhotos = false) => {
         check();
         try {
-          latestImageRepair = await deps.call(`${base}/draft/images`, "POST", { action, ...(refreshSourcePhotos ? { refreshSourcePhotos: true } : {}) });
+          latestImageRepair = await claimedCall(`${base}/draft/images`, "POST", { action, ...(refreshSourcePhotos ? { refreshSourcePhotos: true } : {}) });
         } catch (error) {
           const failure = { code: (error as { code?: string }).code, errors: (error as { errors?: string[] }).errors, error: (error as Error).message };
           if (!isRecoverableImageEvidenceResult(failure)) throw error;
@@ -525,7 +543,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
   const dropRejectedAndApprove = async (cause: unknown) => {
     deps.onStage?.("반복 거절 이미지 제외 · 남은 이미지로 구성 재확인");
     const replanned = await runRecordedImageRecovery(id, "replan-after-rejection", () =>
-      deps.call(`${base}/draft/images`, "POST", { action: "replan_sources" }));
+      claimedCall(`${base}/draft/images`, "POST", { action: "replan_sources" }));
     if (!replanned.attempted || !replanned.result?.recovery?.changed ||
         replanned.result.remainingMissing !== 0 || replanned.result.errors?.length) throw cause;
     draft = await deps.call(`${base}/draft`, "GET");
@@ -561,7 +579,9 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
         plan = await recheck(false, revised ? 1 : 0);
         if (plan.action !== "complete") throw unresolvedCompositionError(plan.reason);
       } catch (replaceError) {
-        if (isSessionWidePreparationFailureCode((replaceError as { code?: string }).code)) throw replaceError;
+        const code = (replaceError as { code?: string }).code;
+        if (isSessionWidePreparationFailureCode(code) || isUncertainLocalTransportError(replaceError) ||
+            UNRESOLVED_IMAGE_OPERATION_CODES.has(code || "")) throw replaceError;
         replaced = false;
       }
       if (!replaced) {

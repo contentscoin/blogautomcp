@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import { runMaterialPreparation, type Call } from "./lib/scheduled-draft-workflow";
-import { runRecordedImageRecovery, imageRecoverySignature, isRecoverableImageEvidenceResult } from "./lib/material-image-recovery";
+import { runRecordedImageRecovery, imageRecoverySignature, isRecoverableImageEvidenceResult, IMAGE_RECOVERY_POLICY_VERSION } from "./lib/material-image-recovery";
 import { getBrandPostPackageDir } from "../src/lib/brand-post-package";
 
 async function main() {
@@ -50,6 +51,7 @@ async function main() {
     }
     for (const tail of ["REQUEST_TIMEOUT: response lost", "unclassified reviewer failure", "CODEX_MODEL_INCOMPATIBLE: model"]) {
       assert.equal(isRecoverableImageEvidenceResult({ code: "IMAGE_SOURCE_BINDING_REQUIRED", errors: ["IMAGE_SOURCE_BINDING_REQUIRED: missing", tail] }), false);
+      assert.equal(isRecoverableImageEvidenceResult({ code: "REFERENCE_SCENE_FIDELITY_FAILED", errors: ["REFERENCE_SCENE_FIDELITY_FAILED: wrong product", tail] }), false);
     }
     for (const scenario of ["refresh", "replan", "exhausted", "auth", "transport", "partial", "mixed200", "mixed422"]) {
       const actions: string[] = [];
@@ -115,12 +117,94 @@ async function main() {
       assert.equal(actions.filter(a => a === "generate_missing").length, 2, "one extra generation pass for AI-scene slots only");
       assert.ok(approved);
     }
+    // Actual reference failures formerly escaped before source recovery. Fresh references
+    // buy one bounded generation attempt; an adverse semantic verdict still blocks approval.
+    for (const code of ["PRODUCT_REFERENCE_REQUIRED", "REFERENCE_SCENE_FIDELITY_FAILED"]) {
+      for (const exhausted of [false, true]) {
+        const actions: string[] = [];
+        let generated = 0; let approved = false;
+        const call: Call = async (url, method, body) => {
+          const action = (body as { action?: string })?.action || method;
+          actions.push(action);
+          if (url.endsWith("/images")) {
+            if (action === "generate_missing") generated++;
+            if (action === "bind_sources") return { success: true, code: "IMAGE_GENERATION_REQUIRED", errors: ["IMAGE_GENERATION_REQUIRED: scene still needed"] };
+            if (!exhausted && generated >= 2) return { success: true, code: "IMAGE_REPAIR_COMPLETE", errors: [] };
+            throw Object.assign(new Error(`${code}: selected product evidence failed`), { code, errors: [`${code}: selected product evidence failed`] });
+          }
+          if (action === "approve") approved = true;
+          const done = !exhausted && generated >= 2;
+          return { success: true, data: { approvedAt: approved ? "yes" : null, approval: { canApprove: done },
+            imageSlots: [{ missing: done ? 0 : 1, generationMissing: done ? 0 : 1 }], contentQuality: { signals: [] } } };
+        };
+        const run = runMaterialPreparation(`reference-${code}-${exhausted}`, { call, pause: async () => {} });
+        if (exhausted) await assert.rejects(run, (error: { code?: string }) => error.code === code); else await run;
+        assert.equal(actions.filter(a => a === "prepare_context").length, 1);
+        assert.equal(actions.filter(a => a === "bind_sources").length, 1);
+        assert.equal(actions.filter(a => a === "generate_missing").length, 2);
+        assert.equal(actions.filter(a => a === "replan_sources").length, exhausted ? 1 : 0);
+        assert.equal(approved, !exhausted, "wrong product/fidelity findings never become accepted via recovery");
+      }
+    }
+    for (const code of ["ECONNRESET", "REQUEST_TIMEOUT", "CODEX_AUTH_REQUIRED", "CODEX_TIMEOUT", "PREPARATION_RESULT_UNCERTAIN", "IMAGE_RESUME_REQUIRED", "IMAGE_OUTPUT_AMBIGUOUS", "ALREADY_PUBLISHING", "OUTCOME_UNKNOWN"]) {
+      const actions: string[] = []; let missing = false;
+      const call: Call = async (url, method, body) => {
+        const action = (body as { action?: string })?.action || method; actions.push(action);
+        if (action === "approve") {
+          missing = true;
+          throw Object.assign(new Error("pixel rejection"), { code: "PUBLISH_IMAGE_AUDIT_FAILED", errors: ["SEMANTIC_REJECTION: wrong product"] });
+        }
+        if (url.endsWith("/images")) throw Object.assign(new Error("repair response unavailable"), { code });
+        return { success: true, data: { imageSlots: [{ missing: missing ? 1 : 0, generationMissing: 0 }], contentQuality: { signals: [] } } };
+      };
+      await assert.rejects(runMaterialPreparation(`repair-stop-${code}`, { call, pause: async () => {} }), (error: { code?: string }) => error.code === code);
+      assert.equal(actions.filter(a => a === "repair_rejected").length, 1);
+      assert.equal(actions.filter(a => a === "approve").length, 1);
+      assert(!actions.includes("replan_sources"), "uncertain replacement must not fall through to another image mutation");
+    }
+    for (const target of ["recheck", "generate_missing"]) {
+      for (const scenario of ["recovered", "exhausted", "drafting", "publishing", "unknown-link", "unknown-images", "missing-image-state", "unknown-owner", "running", "no-http", "other-message", "transport", "auth"]) {
+        const actions: string[] = []; let attempts = 0; let approved = false; let done = target === "recheck";
+        const call: Call = async (url, method, body) => {
+          const action = (body as { action?: string })?.action || method; actions.push(action);
+          if (url === `/api/brandlinks/cas-${target}-${scenario}`) return { success: true, data: { status: ({ drafting: "DRAFTING", publishing: "PUBLISHING", "unknown-link": "MISSING" } as Record<string, string>)[scenario] || "READY" } };
+          if (action === target) {
+            attempts++;
+            if (scenario !== "recovered" || attempts < 3) throw Object.assign(new Error(scenario === "other-message" ? "현재 발행 중인 상품입니다." : "상품 상태가 변경되었습니다."), {
+              code: scenario === "transport" ? "ECONNRESET" : scenario === "auth" ? "CODEX_AUTH_REQUIRED" : "ALREADY_PUBLISHING",
+              ...(scenario === "no-http" ? {} : { httpStatus: 409 }),
+            });
+            done = true;
+          }
+          if (action === "approve") approved = true;
+          return { success: true, data: { approvedAt: approved ? "yes" : null, approval: { canApprove: done },
+            ...(attempts && scenario === "missing-image-state" ? {} : { imageGeneration: { status: attempts && scenario === "running" ? "running" : attempts && scenario === "unknown-images" ? "unknown" : "complete",
+              ...(attempts && scenario === "unknown-owner" ? { recoveryState: "owner-unknown" } : {}) } }),
+            imageSlots: [{ missing: done ? 0 : 1, generationMissing: 0 }], contentQuality: { signals: [] } } };
+        };
+        const run = runMaterialPreparation(`cas-${target}-${scenario}`, { call, pause: async () => {} });
+        if (scenario === "recovered") await run; else await assert.rejects(run);
+        const expectedAttempts = scenario === "recovered" && target === "recheck" ? 4 : ["recovered", "exhausted"].includes(scenario) ? 3 : 1;
+        assert.equal(attempts, expectedAttempts, "CAS replay has three attempts maximum; successful preparation also performs its normal final recheck");
+        assert.equal(approved, scenario === "recovered");
+        assert(!actions.includes("prepare_context") && !actions.includes("replan_sources"));
+      }
+    }
     const dir = getBrandPostPackageDir("persistent-fixture");
     fs.mkdirSync(dir, { recursive: true });
     const manifest = { sourceSnapshot: { product: { name: "vacuum", features: ["사용시간: 45분"] } },
       composition: { sections: [{ id: "feature", body: ["45분"], imageMin: 1 }] }, imageAssets: [] };
     const save = () => fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(manifest));
     save();
+    assert.equal(IMAGE_RECOVERY_POLICY_VERSION, 4);
+    const policy3Signature = crypto.createHash("sha256").update(JSON.stringify({
+      version: 1, policy: 3, product: manifest.sourceSnapshot.product,
+      sections: [{ id: "feature", body: ["45분"], imageMin: 1 }], assets: [], receipts: [], rejected: [],
+    })).digest("hex");
+    fs.writeFileSync(path.join(dir, "image-recovery-history.json"), JSON.stringify({ version: 1, entries: [
+      { stage: "refresh-source", input: policy3Signature, output: policy3Signature, status: "failed", at: "earlier" },
+    ] }));
+    assert.notEqual(imageRecoverySignature(dir), policy3Signature, "new policy receives one fresh attempt for an exhausted old draft");
     let calls = 0;
     await runRecordedImageRecovery("persistent-fixture", "refresh-source", async () => { calls++; });
     const skipped = await runRecordedImageRecovery("persistent-fixture", "refresh-source", async () => { calls++; });
@@ -143,7 +227,7 @@ async function main() {
     }));
     assert.equal((await runRecordedImageRecovery("external-fixture", "refresh-source", async () => {})).attempted, true,
       "an explicit retry after external runtime repair remains possible");
-    console.log("PASS material image recovery: HTTP failure/partial success, source refresh, replan, bounded exhaustion, auth/transport stop, persistent no-progress budget and changed evidence");
+    console.log("PASS material image recovery: reference/fidelity source recovery, bounded early CAS conflicts, auth/uncertain stop, persistent policy upgrade and no-progress budgets");
   } finally {
     process.env.DESKTOP_USER_DATA = previous;
     fs.rmSync(root, { recursive: true, force: true });

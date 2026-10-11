@@ -39,6 +39,7 @@ const MIXED_OPTIONS_RULE = "mixedOptions means visibly different models, colors,
 
 const VISIBLE_IDENTITY_DECISION_RULE = "identityMatches concerns the visible identifying brand, product line, design and variant of THIS final slot's product/component against its own indexed exact comparison reference and selected facts. A toner must be compared with its mapped toner reference, not with another included serum or a different gallery attachment. When the visible identifying design and printing match that own reference/component, absent or unclear tiny capacity printing alone (such as 180ml) is not an identity objection; never claim that hidden capacity was verified from pixels. Do not require pixel-identical proportions, print spacing, texture or perfect tiny spelling when ordinary photographic variation leaves the identifying design intact. Still reject actual readable conflicting capacity/model/scent, altered identifying printing, wrong component, wrong design, identifiers obscured enough to leave product identity unresolved or unresolved component membership. Brand-only category recognition is insufficient. A source match or seller fact alone is not identity approval.";
 const PHOTO_CLAIM_DECISION_RULE = "photoClaimMatches concerns what the actual published section text or visible thumbnail headline claims this photograph shows or proves. Ordinary unchanged manufacturer printing physically on the product/package, such as 'Anti-Aging Toner', is intrinsic label text: its presence alone is not a published claim that the photograph proves an anti-aging result. It does not establish that efficacy either. Judge any actual photographic-proof claim in published text/headline independently; reject unsupported complete-set, quantity, performance or result claims. Readable fabricated certification/efficacy copy remains a substantive false claim under accepted even when not identifying; it is not permitted minor print variation. Keep rejecting altered identifying labels and forbidden added explanatory/marketing text under identity and format checks. Body images never gain thumbnail headline permission, and a component-only exterior headline does not itself promise a full-kit photo.";
+const LITERAL_PHOTO_CLAIM_RULE = "Ground a photographic-proof objection in a VERBATIM quotation of the actual sectionTitle/sectionBody or the actual readable thumbnail headline, then explain which visible fact the quotation says this photograph shows or proves. Quote the observed headline literally before interpreting it; never replace '제품 사양 체크' with '사용 체크' or infer a usage/efficacy promise from a specs/check heading. A paragraph discussing voltage, battery life, 4~5 hour charging, price or how to use the product does not by itself claim the adjacent photograph measures/demonstrates those facts. Ordinary technical discussion may accompany an illustrative product photo; actual wording such as '이 사진으로 충전 시간을 확인할 수 있습니다' explicitly makes a proof claim and must be supported. Do not invent a quoted claim from imageIntent, product facts or an OCR guess. If no actual photo-proof wording exists, say so in reason and judge visible identity, format and any other concrete defects independently. This rule never overrides an adverse verdict or permits a false visible headline, fabricated certification, forbidden logo/text layout or wrong product.";
 const ACCEPTED_DECISION_RULE = "accepted is the final holistic pixel verdict for the exact assigned role, consistent with your finalized reason and separate identity, photoClaim and format verdicts under the balanced visible-defect threshold. Resolve your own tentative objections before returning the structured verdict; do not leave accepted=false after your final reason retracts every objection and concludes that no mismatch is present. If the separate checks are favorable but accepted=false, state the concrete remaining actual-pixel objection not addressed by those checks, such as severe structural distortion, clearly impossible geometry or genuinely unresolved identity. Do not reject for an improvement wish list, minor photographic variation, unreadable non-identifying microtext or a preferred background alone. Favorable booleans, an exact source match, seller authority and prior approval never compel acceptance: a genuine unresolved objection still rejects. Never excuse an adverse identity, photoClaim or format verdict with a favorable holistic reason.";
 const FINAL_REASON_RULE = "Explain the finalized visible evidence for this exact slot and any unresolved concrete blocking defect, using the balanced visible-defect threshold. The reason and every boolean must describe the same final judgment, not a tentative rejection followed by a correction that retracts it. Preserve genuine identity uncertainty and adverse findings; distinguish these from permitted minor photographic variation or unreadable non-identifying print. Do not propose aesthetic improvements as rejection reasons, do not invent a mismatch to justify a preset boolean or infer approval from reference provenance.";
 
@@ -56,6 +57,8 @@ export interface PublishImageAuditResult {
   receiptReused?: boolean;
   failures: PublishImageAuditFailure[];
   images: Array<{ nodeIndex: number; assetPath: string; sha256: string }>;
+  /** All bounded comparison verdicts, including adverse flags; never majority-voted. */
+  comparisonReviews?: Array<{ nodeIndex: number; referenceSha256s: string[]; verdict: VisualReviewRow | null }>;
 }
 export interface PublishImageAuditOptions {
   brandLinkId?: string;
@@ -79,6 +82,32 @@ export interface PublishImageAuditOptions {
 // the observed ~16 MB WebSocket request boundary without changing image pixels.
 export const PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES = 8 * 1024 * 1024;
 export const PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT = 8;
+
+/** Keep the direct identity reference in every group; inspect every optional
+ * gallery reference without resizing, dropping evidence or raising the budget. */
+export function planPublishImageComparisonGroups<T extends { referenceSha256: string; snapshotBytes: number }>(
+  snapshotBytes: number, required: readonly T[], gallery: readonly T[],
+): T[][] | null {
+  const unique = (items: readonly T[]) => [...new Map(items.map(item => [item.referenceSha256, item])).values()];
+  const all = [...required, ...gallery];
+  if (!Number.isSafeInteger(snapshotBytes) || snapshotBytes < 1 || all.some(item =>
+    !/^[a-f0-9]{64}$/u.test(item.referenceSha256) || !Number.isSafeInteger(item.snapshotBytes) || item.snapshotBytes < 1 ||
+    all.some(other => other.referenceSha256 === item.referenceSha256 && other.snapshotBytes !== item.snapshotBytes))) return null;
+  const base = unique(required);
+  const fits = (items: readonly T[]) => items.length + 1 <= PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT &&
+    snapshotBytes + items.reduce((sum, item) => sum + item.snapshotBytes, 0) <= PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES;
+  if (!fits(base)) return null;
+  const extras = unique(gallery).filter(item => !base.some(reference => reference.referenceSha256 === item.referenceSha256));
+  const groups: T[][] = [];
+  let group = [...base];
+  for (const reference of extras) {
+    if (!fits([...base, reference])) return null;
+    if (!fits([...group, reference])) { groups.push(group); group = [...base]; }
+    group.push(reference);
+  }
+  if (group.length || !groups.length) groups.push(group);
+  return groups;
+}
 export function planPublishImageAuditBatches<T extends { snapshotBytes: number; referenceScene?: { referenceSha256: string; snapshotBytes: number };
   comparisonReferences?: readonly { referenceSha256: string; snapshotBytes: number }[] }>(candidates: readonly T[]): { batches: T[][]; oversized: T[] } {
   const batches: T[][] = [];
@@ -315,12 +344,13 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
     if (!options.composition.renderNodes.some(n => n.kind === "image")) {
       fail(-1, "", "MISSING_IMAGE", "Final composition has no images to audit.");
     }
-    const requests: Array<{ batch: typeof candidates; call: CodexDraftOptions }> = [];
-    const buildCall = (batch: typeof candidates): CodexDraftOptions => {
+    type GalleryGroup = typeof gallerySnapshots;
+    const requests: Array<{ batch: typeof candidates; call: CodexDraftOptions; gallery: GalleryGroup; split?: boolean }> = [];
+    const buildCall = (batch: typeof candidates, gallery: GalleryGroup = gallerySnapshots, split = false): CodexDraftOptions => {
       const references = [...new Map<string, { referenceSha256: string; sourceSnapshotId: string; snapshot: string }>([...batch.flatMap(candidate => candidate.referenceScene
         ? [[candidate.referenceScene.referenceSha256, candidate.referenceScene] as const] : []),
-      ...gallerySnapshots.map(reference => [reference.referenceSha256, reference] as const)]).values()];
-      const galleryIndexes = gallerySnapshots.map(reference => batch.length + references.findIndex(item => item.referenceSha256 === reference.sha256) + 1);
+      ...gallery.map(reference => [reference.referenceSha256, reference] as const)]).values()];
+      const galleryIndexes = gallery.map(reference => batch.length + references.findIndex(item => item.referenceSha256 === reference.sha256) + 1);
       const decisionRole = batch.length === 1
         ? batch[0].role === "thumbnail"
           ? "This exact final slot is a thumbnail: judge its actual visible headline and product pixels under the existing thumbnail rules."
@@ -337,15 +367,16 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
             comparisonReferenceImageIndex: referenceIndex(c), referenceSha256: c.referenceScene.referenceSha256, sourceSnapshotId: c.referenceScene.sourceSnapshotId } : {}),
           ...(galleryIndexes.length ? { selectedGalleryComparisonImageIndexes: galleryIndexes } : {}) })))}`,
           `Final publication attachments are images 1 through ${batch.length}. Comparison references appended AFTER them are not publication candidates: ${JSON.stringify(references.map((reference, index) => ({ imageIndex: batch.length + index + 1, referenceSha256: reference.referenceSha256, sourceSnapshotId: reference.sourceSnapshotId,
-            forFinalImageIndexes: gallerySnapshots.some(item => item.sha256 === reference.referenceSha256) ? batch.map((_, candidateIndex) => candidateIndex + 1)
+            forFinalImageIndexes: gallery.some(item => item.sha256 === reference.referenceSha256) ? batch.map((_, candidateIndex) => candidateIndex + 1)
               : batch.flatMap((candidate, candidateIndex) => candidate.referenceScene?.referenceSha256 === reference.referenceSha256 ? [candidateIndex + 1] : []) })))}`,
-          ...(selectedSourceIdentity ? [`Canonical selected source: ${JSON.stringify(selectedSourceIdentity)}. Selected-gallery comparison-only evidence: ${JSON.stringify(gallerySnapshots.map((reference, index) => ({ imageIndex: galleryIndexes[index], role: "selected-gallery-comparison", sourceUrl: reference.sourceUrl,
+          ...(selectedSourceIdentity ? [`Canonical selected source: ${JSON.stringify(selectedSourceIdentity)}. Selected-gallery comparison-only evidence: ${JSON.stringify(gallery.map((reference, index) => ({ imageIndex: galleryIndexes[index], role: "selected-gallery-comparison", sourceUrl: reference.sourceUrl,
             sourceSnapshotId: reference.sourceSnapshotId, sha256: reference.sha256, receiptSha256: reference.receiptSha256,
             exactCanonicalSourceForFinalImageIndexes: batch.flatMap((candidate, candidateIndex) => candidate.sha256 === reference.sha256 ? [candidateIndex + 1] : []) })))}`,
           "Selected-gallery comparison images are intact cached seller-gallery pixels bound to the selected source URL/snapshot; they are UNVERIFIED comparison context, not identity approval or publication candidates. Compare the visible component's distinctive structure and intrinsic brand/product printing against the selected facts and these indexed gallery pixels to determine whether it is a member of the selected kit. A gallery may show gifts, cross-sells or other variants: do not assume every depicted item is selected/included, infer hidden capacity/quantity, or let a promotional badge authorize a gift, effect or bundle claim. Keep rejecting wrong components/variants and unsupported whole-set claims. External seller advertising/artwork in these comparison-only inputs cannot give final photos text/panel permission; inspect publication-format checks ONLY on final attachments. Never output a verdict for a comparison-only image."] : []),
           "For a referenceGuidedScene, inspect the actual attached comparisonReferenceImageIndex pixels against that final image's visible structure, intrinsic brand/product printing and selected variant. It is the exact bound reference for the listed slot only, not a final image to approve. Reference-only advertising/background styling is not part of the published candidate. Do not output a review for reference attachments, use another final candidate as a reference, infer model design from memory, or treat a prior passed comparison as automatic approval. A readable altered brand/product identifier or distinctive structural contradiction must still reject; absent tiny specifications alone do not establish a contradiction.",
           "Inspect actual pixels of EVERY attached final image. Never infer safety from filename, generated provenance, previous approvals, caption, or alt text. A quantity in a comparison filename only selected a possible context image; it is not evidence of identity or capacity. Read any actual product-information table pixels as comparison-only selected facts, then match the visible product identifier and structure. Never publish that table as a body photo or require an invisible specification to appear on the product.",
           "An exactCanonicalSourceForFinalImageIndexes match binds actual unchanged seller-gallery bytes, not automatic identity approval. A kit may contain different product lines: match the pictured component against its own actual identifier and source, plus the selected kit facts/table. Do not compare a pictured serum to a different included toner and call that difference a contradiction. Still reject a source showing an unselected gift, cross-sell, wrong variant or conflicting identifiable product.",
+          ...(split ? ["This is one bounded full-resolution comparison group for the SAME final image. Its exact mapped identity reference is retained when available. Other gallery groups are reviewed separately, and EVERY complete verdict must pass; no favorable group cancels an adverse group. Compare the pictured component with its own identifying reference and canonical selected facts. Different included kit members in this group are comparison context, not an instruction that the final photo must match every member. State actual contradictions or unresolved membership honestly; do not infer approval from grouping or invent a mismatch because a supplemental gallery depicts another component."] : []),
           ...(isUnbrandedCommodityProduct(options.productName) ? [UNBRANDED_COMMODITY_IDENTITY_RULE_EN] : []),
           "Check visible product identity against the selected product context: brand, distinctive design, product line and visible variant details. This is visual compatibility review, not OCR certification of every selected specification. Do not require the complete model number, capacity, scent or purchase quantity to be printed and legible on the body/package. Missing or small specification text alone must not cause rejection. Do not claim those hidden specifications were verified from pixels.",
           "Reject visible contradictions: wrong brand, distinguishable wrong model/design, scent/variant mismatch or conflicting bundle. Reject when there is no identifiable product or its visible distinguishing characteristics genuinely cannot resolve which product is shown; brand plus a generic category alone is not sufficient. A lavender Stress Relief 532ml 2pack must not become fragrance-free Skin Relief or a mixed pair. A single-item detail may illustrate a multi-pack without depicting every purchased unit, provided it does not claim a conflicting bundle.",
@@ -357,9 +388,9 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           NATURAL_SCENE_INTENT_RULE,
           COMPONENT_APPEARANCE_RULE,
           VISIBLE_IDENTITY_DECISION_RULE,
-          PHOTO_CLAIM_DECISION_RULE,
-          ACCEPTED_DECISION_RULE,
-          FINAL_REASON_RULE,
+          `${PHOTO_CLAIM_DECISION_RULE} ${LITERAL_PHOTO_CLAIM_RULE}`,
+          `${ACCEPTED_DECISION_RULE} ${LITERAL_PHOTO_CLAIM_RULE}`,
+          `${FINAL_REASON_RULE} ${LITERAL_PHOTO_CLAIM_RULE}`,
           MIXED_OPTIONS_RULE,
           "Assess each candidate independently. Other attached candidates are also unverified and must not become the reference for the selected model. For a claimed design/variant contradiction, name the concrete visible conflicting characteristic and the selected-product fact it contradicts; do not invent a model-specific design from memory or assume another candidate is correct.",
           THUMBNAIL_PHOTOGRAPH_RULE,
@@ -378,18 +409,32 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
         outputSchema: { ...VISUAL_REVIEW_SCHEMA, properties: { reviews: { ...VISUAL_REVIEW_SCHEMA.properties.reviews,
           minItems: batch.length, maxItems: batch.length, items: { ...VISUAL_REVIEW_SCHEMA.properties.reviews.items,
             properties: { ...VISUAL_REVIEW_SCHEMA.properties.reviews.items.properties, index: { type: "integer", enum: batch.map((_, index) => index + 1) },
-              reason: { type: "string", description: `${decisionRole} ${FINAL_REASON_RULE}` },
+              reason: { type: "string", description: `${decisionRole} ${FINAL_REASON_RULE} ${LITERAL_PHOTO_CLAIM_RULE}` },
               identityMatches: { type: "boolean", description: `${decisionRole} ${COMPONENT_APPEARANCE_RULE} ${VISIBLE_IDENTITY_DECISION_RULE}` },
-              photoClaimMatches: { type: "boolean", description: `${decisionRole} ${PHOTO_CLAIM_DECISION_RULE}` },
+              photoClaimMatches: { type: "boolean", description: `${decisionRole} ${PHOTO_CLAIM_DECISION_RULE} ${LITERAL_PHOTO_CLAIM_RULE}` },
               textPolicyMatches: { type: "boolean", description: batch.length === 1 && batch[0].role === "thumbnail"
                 ? "This exact final slot is a thumbnail. One large accurate headline over the same natural photograph is ALLOWED and must not be rejected merely because it is added text. Reject extra badges/bullets/panels, unsupported headline claims or overlays hiding product identifiers. Judge actual pixels; no automatic pass."
                  : "Apply the textPolicy of the exact indexed final slot. Body images permit intrinsic product printing only; a thumbnail headline elsewhere never grants body-image overlay permission." },
-              accepted: { type: "boolean", description: `${decisionRole} ${BALANCED_VISIBLE_DEFECT_RULE} ${NATURAL_SCENE_INTENT_RULE} ${ACCEPTED_DECISION_RULE}` } } } } } },
+              accepted: { type: "boolean", description: `${decisionRole} ${BALANCED_VISIBLE_DEFECT_RULE} ${NATURAL_SCENE_INTENT_RULE} ${ACCEPTED_DECISION_RULE} ${LITERAL_PHOTO_CLAIM_RULE}` } } } } } },
       };
     };
     const plan = planPublishImageAuditBatches(candidates);
-    if (plan.oversized.length) {
-      for (const candidate of plan.oversized) fail(candidate.nodeIndex, candidate.assetPath, "IMAGE_PAYLOAD_TOO_LARGE",
+    const splitGroups = new Map<typeof candidates[number], GalleryGroup[]>();
+    // Only optional-gallery aggregate overflow is repairable by grouping.
+    // A final photo or its mandatory mapped reference that cannot fit still
+    // fails closed; every selected comparison remains part of the review.
+    const oversized = plan.oversized.filter(candidate => {
+      if (!gallerySnapshots.length) return true;
+      const required = [...(candidate.referenceScene ? [candidate.referenceScene] : []),
+        ...gallerySnapshots.filter(reference => reference.sha256 === candidate.sha256)];
+      const groups = planPublishImageComparisonGroups(candidate.snapshotBytes, required, gallerySnapshots);
+      if (!groups) return true;
+      splitGroups.set(candidate, groups.map(group => gallerySnapshots.filter(reference =>
+        group.some(item => item.referenceSha256 === reference.referenceSha256))));
+      return false;
+    });
+    if (oversized.length) {
+      for (const candidate of oversized) fail(candidate.nodeIndex, candidate.assetPath, "IMAGE_PAYLOAD_TOO_LARGE",
         `Final image and all required unique comparison reference snapshots exceed the ${PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES}-byte/${PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT}-attachment transport budget. The original file was preserved; provide an individually reviewable image or resolve the provider payload limit before approval. No partial approval or downsampling was performed.`);
       // No pixels were reviewed. In particular the assertion wrapper must not
       // clear prior rejection records for other, unreviewed candidates.
@@ -400,10 +445,16 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
     // Rich selected-gallery evidence can be confused with another final photo.
     // Review one publication candidate with its mapped comparisons at a time;
     // retain legacy batching when no optional gallery evidence is available.
-    const reviewBatches = gallerySnapshots.length ? plan.batches.flatMap(batch => batch.map(candidate => [candidate])) : plan.batches;
-    for (const batch of reviewBatches) {
-      requests.push({ batch, call: buildCall(batch) });
-    }
+    if (gallerySnapshots.length) {
+      for (const candidate of candidates) {
+        const groups = splitGroups.get(candidate);
+        if (groups) for (const gallery of groups)
+          requests.push({ batch: [candidate], gallery, split: true, call: buildCall([candidate], gallery, true) });
+        else requests.push({ batch: [candidate], gallery: gallerySnapshots, call: buildCall([candidate]) });
+      }
+    } else for (const batch of plan.batches)
+      requests.push({ batch, gallery: gallerySnapshots, call: buildCall(batch) });
+    if (splitGroups.size) result.comparisonReviews = [];
     // Hash the actual requests, not a manually maintained description of the
     // prompt. Temporary snapshot paths are replaced by the original byte hashes.
     const receiptKey = crypto.createHash("sha256").update(JSON.stringify({
@@ -477,22 +528,27 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
       for (const candidate of batch) fail(candidate.nodeIndex, candidate.assetPath, "IMAGE_CHANGED",
         "Final image or its exact bound comparison reference changed/disappeared during the audit; re-audit final composition.");
     };
-    for (const { batch, call } of reused ? [] : requests) {
+    const checkedNodes = new Set<number>();
+    for (const { batch, call, gallery, split } of reused ? [] : requests) {
       if (!await inputsStillBound(batch)) { failChangedBatch(batch); continue; }
-      result.checked += batch.length;
+      for (const candidate of batch) checkedNodes.add(candidate.nodeIndex);
+      result.checked = checkedNodes.size;
       let verdicts = parseVisualReviews(await review(call), batch.length);
       if (!await inputsStillBound(batch)) { failChangedBatch(batch); continue; }
       // 형식이 깨진 판정만 한 번 더 묻는다. 두 번째도 깨지면 그 이미지만 실패로 닫는다(fail closed).
       const malformed = batch.flatMap((_, i) => verdicts[i] ? [] : [i]);
       if (malformed.length > 0) {
         const retryBatch = malformed.map(i => batch[i]);
-        const retried = parseVisualReviews(await review(buildCall(retryBatch)).catch(() => ""), retryBatch.length);
+        const retried = parseVisualReviews(await review(buildCall(retryBatch, gallery, split)).catch(() => ""), retryBatch.length);
         if (!await inputsStillBound(batch)) { failChangedBatch(batch); continue; }
         verdicts = verdicts.slice();
         malformed.forEach((batchIndex, retryIndex) => { verdicts[batchIndex] = retried[retryIndex] ?? null; });
       }
       for (const [i, candidate] of batch.entries()) {
         const row = verdicts[i];
+        if (split) result.comparisonReviews!.push({ nodeIndex: candidate.nodeIndex,
+          referenceSha256s: [...new Set([...(candidate.referenceScene ? [candidate.referenceScene.referenceSha256] : []),
+            ...gallery.map(reference => reference.referenceSha256)])], verdict: row });
         if (!row) {
           fail(candidate.nodeIndex, candidate.assetPath, "INVALID_REVIEW", "Missing, duplicate, or malformed visual verdict.");
           continue;

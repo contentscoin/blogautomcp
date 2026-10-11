@@ -7,6 +7,7 @@ const { loadClientDisplay } = require('./lib/client-display-fixture.cjs');
 
 const nodes = value => value == null || typeof value !== 'object' ? [] : Array.isArray(value) ? value.flatMap(nodes) : [value, ...nodes(value.props?.children)];
 const text = value => value == null ? '' : typeof value !== 'object' ? String(value) : Array.isArray(value) ? value.map(text).join('') : text(value.props?.children);
+const collapsedText = value => value == null ? '' : typeof value !== 'object' ? String(value) : Array.isArray(value) ? value.map(collapsedText).join('') : value.type === 'details' && !value.props.open ? collapsedText([value.props.children].flat().find(child => child?.type === 'summary')) : collapsedText(value.props?.children);
 const response = (data, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => data });
 const job = (overrides = {}) => ({ jobId: 'rewrite-fixture', kind: 'rewrite', status: 'running', startedAt: '2026-10-08T00:00:00.000Z', sourceJobId: '00000000-0000-4000-8000-000000000001', items: [{ productId: 'failed_product', status: 'preparing', stage: '원고 재작성 중' }], ...overrides });
 const list = (overrides = {}) => ({ success: true, data: { materials: [], jobs: [], failedCandidateCount: 1, failedCandidates: [{ productId: 'failed_product', productName: '실패 상품', reason: '내용 검증 실패', errorCode: 'CONTENT_READINESS_FAILED' }], repairCandidateCount: 1, repairCandidates: [{ productId: 'repair_product', productName: '보완 상품', reason: '문단 상품 근거 보완 필요', errorCode: 'CONTENT_BLOCKED' }], ...overrides } });
@@ -95,11 +96,38 @@ const repairRetryButton = tree => nodes(tree).find(node => node.type === 'button
     assert.equal(h.uuidCount(), 0); assert.equal(storage.size, 0);
   }
   const inconsistent = job({ status: 'completed', items: [{ productId: 'ready_product', status: 'ready', stage: '검증·승인 완료' }, { productId: 'failed_product', status: 'failed', stage: '원고 검증', error: '검증 실패', errorCode: 'CONTENT_READINESS_FAILED' }] });
+  for (const kind of ['rewrite', 'repair']) {
+    const pendingItems = [{ productId: 'queued_product', status: 'queued', stage: '대기 중' }, { productId: 'preparing_product', status: 'preparing', stage: '검증 진행 중' }];
+    const pending = harness({ initialList: list({ jobs: [job({ kind, items: pendingItems })] }) });
+    const pendingTree = await pending.mount();
+    assert(!nodes(pendingTree).some(node => node.type === 'summary' && text(node).startsWith('실패 상세 보기 ·')), 'queued and preparing items are never labelled as failure details');
+    assert(collapsedText(pendingTree).includes('실패 0개'), 'pending status leaves the failure count at zero');
+    const failedItems = ['failed', 'interrupted', 'outcome_unknown'].map(status => ({ productId: `${status}_product`, status, stage: `${status} 결과` }));
+    const mixed = harness({ initialList: list({ jobs: [job({ kind, items: [...pendingItems, ...failedItems, { productId: 'error_product', status: 'ready', stage: '오류 확인', error: '저장된 오류' }] })] }) });
+    const mixedTree = await mixed.mount();
+    const failureSummary = nodes(mixedTree).find(node => node.type === 'summary' && text(node) === '실패 상세 보기 · 4건');
+    assert(failureSummary, 'failure details count only failed, interrupted, uncertain or explicit-error items');
+    const failureDetail = nodes(mixedTree).find(node => node.type === 'details' && [node.props.children].flat().includes(failureSummary));
+    assert(!text(failureDetail).includes('대기 중') && !text(failureDetail).includes('검증 진행 중'), 'failure rows never include queued/preparing work');
+  }
   {
     const h = harness({ initialList: list({ jobs: [inconsistent] }) }); const tree = await h.mount();
     assert(text(tree).includes('검증 통과 1/2개 · 실패 1개 · 검증 확인 필요'));
-    assert(text(tree).includes('이 작업 당시 실패 사유 · CONTENT_READINESS_FAILED'));
+    assert(text(tree).includes('이 작업 당시: 원고 검증 · CONTENT_READINESS_FAILED'));
     assert(text(tree).includes('검증 실패'));
+    assert(collapsedText(tree).includes('검증 통과 1/2개 · 실패 1개 · 검증 확인 필요'), 'status counts remain visible when logs are closed');
+    assert(!collapsedText(tree).includes('CONTENT_READINESS_FAILED'), 'historical error codes remain inside collapsed details');
+    for (const detail of nodes(tree).filter(node => node.type === 'details' && text(node.props.children?.[0]).includes('실패 상세 보기')))
+      assert.equal(detail.props.open, undefined, 'failure logs never receive controlled open state');
+    assert(!collapsedText(h.render()).includes('CONTENT_READINESS_FAILED'), 'a new render does not force failure logs open');
+  }
+  {
+    const blocked = { productId: 'failed_product', title: '현재 보완 필요 상품', status: 'BLOCKED', ready: false, revision: 'r1', score: 100, imageCount: 5, blockers: ['현재 제목 상품명 누락'], };
+    const h = harness({ initialList: list({ materials: [blocked], jobs: [inconsistent] }) });
+    const tree = await h.mount();
+    assert(text(tree).includes('현재 제목 상품명 누락'), 'current blockers remain available on demand');
+    assert(!collapsedText(tree).includes('현재 제목 상품명 누락'), 'current blockers remain collapsed in material rows and historical logs');
+    assert(collapsedText(tree).includes('내용 100점 · 이미지 5장'), 'material quality and image counts remain visible');
   }
   for (const history of [false, true]) {
     const shown = history ? inconsistent : { ...inconsistent, status: 'running' };
@@ -191,7 +219,7 @@ const repairRetryButton = tree => nodes(tree).find(node => node.type === 'button
     assert(text(tree).includes('현재 준비완료 · 검증·승인 완료'));
     assert(text(tree).includes('이후 복구 완료'));
     assert(text(tree).includes('previous failed image'), 'prior audit evidence is retained');
-    const priorFailure = nodes(tree).find(node => node.type === 'details' && text(node).includes('이 작업 당시 실패 사유'));
+    const priorFailure = nodes(tree).find(node => node.type === 'details' && text(node).includes('이 작업 당시: 확인 필요'));
     assert(priorFailure); assert(!priorFailure.props.open, 'old failure is collapsed instead of presented as current blocker');
     assert.equal(h.requests.filter(item => item.init?.method === 'POST').length, 0);
     assert.equal(historical.status, 'failed');

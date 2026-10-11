@@ -488,7 +488,7 @@ async function main() {
       const action = (body as { action?: string })?.action || method; actions.push(action);
       if (action === "recheck" && options.raceOnce && !raced) {
         raced = true;
-        throw Object.assign(new Error("상품 상태가 변경되었습니다."), { code: "ALREADY_PUBLISHING" });
+        throw Object.assign(new Error("상품 상태가 변경되었습니다."), { code: "ALREADY_PUBLISHING", httpStatus: 409 });
       }
       if (action === "approve") {
         approvals += 1;
@@ -505,7 +505,7 @@ async function main() {
         if (action === "replan_sources") { missing = false; return { success: true, recovery: { changed: true }, remainingMissing: 0 }; }
         missing = false;
       }
-      return { success: true, data: { approvedAt: accepted ? "yes" : null, approval: { canApprove: !missing },
+      return { success: true, data: { status: "READY", imageGeneration: { status: "complete" }, approvedAt: accepted ? "yes" : null, approval: { canApprove: !missing },
         imageSlots: [{ missing: missing ? 1 : 0, generationMissing: 0 }], contentQuality: { signals: [] } } };
     };
     await runMaterialPreparation(`drop-${options.replacementFails}-${options.raceOnce}`, { call, pause: async () => {} });

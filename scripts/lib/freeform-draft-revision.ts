@@ -37,7 +37,7 @@ export function applyFreeformDraftRevision(
   draft: FreeformDraftText,
   response: string,
   requestedIndexes: number[] = [],
-  options: { allowTitleChange?: boolean } = {},
+  options: { allowTitleChange?: boolean; allowEmptyBodyScope?: boolean } = {},
 ): FreeformDraftText {
   const { sections } = draft;
   const text = response.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
@@ -51,7 +51,8 @@ export function applyFreeformDraftRevision(
   }
   const updates = parsed.updates ?? (parsed.title !== undefined ? [] : undefined);
   if (!Array.isArray(updates) || (updates.length === 0 && title === draft.title)) throw new Error('수정된 문단 응답이 없습니다. 기존 원고를 유지합니다.');
-  const allowed = new Set(requestedIndexes.length ? requestedIndexes : sections.map((_, index) => index));
+  const allowed = new Set(requestedIndexes.length || options.allowEmptyBodyScope
+    ? requestedIndexes : sections.map((_, index) => index));
   const updated = [...sections];
   const seen = new Set<number>();
   for (const item of updates) {
