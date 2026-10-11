@@ -1,6 +1,6 @@
 # Material recovery and idle desktop polling 1.3.120
 
-The 1.3.119 generation-recipe and candidate-review fixes are retained. The installed 1.3.118 PC definitively finished its Minix-only repair without applying a new photograph or approval. Its normal 1.3.119 differential download then remained slow. A fresh material retry is withheld until the corrected runtime is actually installed.
+The 1.3.119 generation-recipe and candidate-review fixes are retained. The earlier installed 1.3.118 PC definitively finished its Minix-only repair without applying a new photograph or approval. Its differential download then remained slow. After normal user exit, 1.3.120 was installed and verified; the single protected Minix repair has now finished with persisted approval and current readiness. The checkpoints below distinguish the earlier pending state from the verified live result.
 
 ## Verified source diagnosis
 
@@ -30,4 +30,26 @@ Windows update publication completed at `2026-10-11T13:06:59.014Z`. The installe
 
 At `2026-10-11T13:08:23Z`, the same four 1.3.118 application processes started at 11:41Z were still running. The updater recognized 1.3.120, but retained the slow prior download in progress. A guarded installer check refused to run NSIS against the live app. Normal user exit was requested; no forced termination, cache overwrite or live runtime patch was performed. No 1.3.119/120 material request has been sent. The selected Minix failure is definite, eligible for exactly one fresh protected repair after actual installation; uncertain/authentication/cancelled work and source-blocked other materials remain excluded.
 
-Installation confirmation, installed idle-performance observations, live single-material result and post-repair preservation remain pending. None are inferred from successful CI or publication.
+At that checkpoint, installation confirmation, idle-performance observations and live repair remained pending. The following measurements resolve those pending checks; none were inferred from CI or publication.
+
+## Installed runtime and observed idle behavior
+
+Normal closure was confirmed with zero application processes before launching the verified installer silently. No forced termination, updater-cache overwrite or live runtime patch was used. Installation completed at approximately `2026-10-11T13:53:18Z`. Before/after SHA256 comparison preserved all 595 protected files: 61 manifests, 61 manuscripts and 473 unique images. The installed application reports 1.3.120; all 47 installed runtime source files and all three compiled visibility-consumer chunks match the verified package/build. Secret and temporary files remain excluded.
+
+The installed application was started hidden. Over 65.66 seconds before the material request, its main process used 0.546875 CPU seconds (0.833% of one core), read 180,985 logical bytes and wrote 19,763 logical bytes. The previous continuous full-photo-read behavior was not observed during this interval. These are process counters for a hidden idle start, not physical disk throughput or a real GUI hide/show test. Native visibility transitions are covered separately by the deterministic and component tests described above.
+
+## Live protected Minix repair
+
+Exactly one repair request was admitted at `2026-10-11T13:56:01.155Z`: job `887cd609-9c11-4f6f-98b1-3d89ff9ba4c8`, source intent `a6444860-a164-49d0-919e-b9f98fef8e7b`, selected product `58080463-9735-4066-9958-5ba4f6f266b2`. No other material was selected or resubmitted.
+
+The failed hero used a fresh kitchen recipe SHA256 `0b9b4816032ae9a37742b5f717b933e3135162a5c756d1e0e2df4983a3bee31b`, producing new accepted-reference image SHA256 `aa0b1da964f1a0f97f4617561a20fb94f6cc0ae6fe54a4858070b777577cf961`. The first final publication audit then definitively rejected the existing body image in `shopping-section-bec3aa3e`, rather than rejecting the new hero. Its durable rejection records old SHA256 `a8f1aa28feb06f20d6b6552fececb20554c23279059f1ec977d34fa288fa7e20` at `2026-10-11T13:58:36.283Z`. The bounded same-job recovery replaced only that rejected body binding with a new kitchen photo (recipe SHA256 `02f931bfb02bf1d60e24a4f146cb03fe8a983a808914adbced61e64b54c0e302`, output SHA256 `eba424faf04b36c34e512d75df29667cd2b4635b398b5db4fb19deade04aadb8`). No adverse verdict was overridden and no new recovery job was queued.
+
+Final re-audit and approval completed at `2026-10-11T14:00:50.071Z`; the job finished at `14:00:50.285Z`. A fresh GET reports `READY`, current ready 1, blocked 0, `workflowPending:false`, no blockers and five publication images. The manifest contains seven asset bindings including auxiliary originals; this is distinct from the five-image publication count. A fresh read of the original 14-product job reports seven currently ready and seven blocked. Other source/option, cancellation/uncertainty and content blockers were not bypassed or requeued. Blog publication and scheduling were not executed.
+
+## Post-repair preservation and exact limitation
+
+All 473 existing image files retain their original SHA256, all 61 manuscripts retain their original bytes, all 60 untargeted manifests retain their exact bytes, and the selected title/section text is unchanged. Five of the selected six original body bindings remain unchanged. The sixth was the exact body image definitively rejected during this job; its original file is still preserved alongside the replacement. Both replaced image files remain on disk and in the pre-job backup.
+
+The strict assertion that **every** existing body binding remains unchanged failed for precisely that one SHA256. This failed check is retained in `tmp/release-1.3.120/protected-content.json`; it was not relabeled as passing. A separate scoped check verifies the same-job durable rejection, exact section/SHA, replacement reference verdict, persisted final approval, all old file hashes, untouched manuscript text and the five remaining body bindings. It passed at `2026-10-11T14:05:36.234Z`. Thus the supported preservation claim is unchanged original files and normal bindings, with only the failed hero and newly rejected body binding replaced, not complete manifest or binding equality for the selected material.
+
+Local evidence: `installation-preservation.json`, `installed-runtime.json`, `installed-ui.json`, `idle-performance.json`, `retry-current.json`, `retry-preservation.json`, `protected-content.json`, `scoped-preservation.json`, `final-live-check.json` and `original14-current.json` in `tmp/release-1.3.120/`. These contain local material details and are not committed as public repository artifacts.
