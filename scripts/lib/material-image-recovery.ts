@@ -5,10 +5,11 @@ import { getBrandPostPackageDir } from "../../src/lib/brand-post-package";
 import { atomicWriteTextFile } from "../../src/lib/atomic-text-file";
 
 /** Recover missing product references and rejected scenes from fresh seller evidence. */
-// Policy 8 checks the compulsory original first and replenishes independently
-// suitable source candidates. Earlier exhausted evidence gets one bounded pass
-// through this changed algorithm; uncertain submissions still block upstream.
-export const IMAGE_RECOVERY_POLICY_VERSION = 8;
+// Policy 9 diagnoses retained photo-description rejections before missing-source
+// recovery and uses complete source-candidate coverage. Earlier exhausted inputs
+// get one bounded pass through the changed algorithm; uncertain submissions
+// still block upstream and timestamps cannot renew a consumed budget.
+export const IMAGE_RECOVERY_POLICY_VERSION = 9;
 
 export type ImageRecoveryStage = "refresh-source" | "repair-rejected" | "replan-images" | "replan-after-rejection";
 type Entry = { stage: ImageRecoveryStage; input: string; output?: string; status: "running" | "complete" | "failed"; at: string; reason?: string; externalFailure?: boolean };

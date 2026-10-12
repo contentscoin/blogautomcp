@@ -1,5 +1,5 @@
 import { materialJobErrorMessage, materialJobFailureCodes, readMaterialFailureObservationsForProduct, readMaterialFailureScopeForProduct, type MaterialJob, saveMaterialJob } from "./material-job-store";
-import { formatMaterialFailureReference, materialFailurePhase, normalizeMaterialFailureObservations, type MaterialFailureObservation, type MaterialFailurePhase } from "../../scripts/lib/material-failure-reference";
+import { formatMaterialFailureReference, materialFailurePhase, normalizeMaterialApprovalConflict, normalizeMaterialFailureObservations, type MaterialFailureObservation, type MaterialFailurePhase } from "../../scripts/lib/material-failure-reference";
 import { getMaterial } from "./material-library";
 import { runMaterialPreparation, runAutomaticDraftWorkflow, localScheduleCall, isUncertainLocalTransportError, isSessionWidePreparationFailureCode, type Call } from "../../scripts/lib/scheduled-draft-workflow";
 import { automaticPublishingCancellationCheck } from "./desktop-activity";
@@ -169,6 +169,8 @@ export async function runMaterialJob(job: MaterialJob, deps: {
       if (job.kind === "repair" && code === "MATERIAL_REPAIR_SELECTION_CHANGED") item.status = "interrupted";
       item.error = materialJobErrorMessage(error);
       Object.assign(item, failureCodes);
+      const approvalConflict = code === "NOT_READY" ? normalizeMaterialApprovalConflict((error as { approvalConflict?: unknown })?.approvalConflict) : undefined;
+      if (approvalConflict) item.approvalConflict = approvalConflict; else delete item.approvalConflict;
       const causalCode = failureCodes.causeCode || failureCodes.errorCode;
       if (causalCode === "EDITOR_DISCLOSURE_MISMATCH" || causalCode === "SHOPPING_CARD_INSERT_FAILED") failurePhase = "editor";
       else if (causalCode === "PUBLISH_IMAGE_AUDIT_FAILED") failurePhase = "review";
@@ -197,6 +199,7 @@ export async function runMaterialJob(job: MaterialJob, deps: {
       const observedPhase = failurePhase as MaterialFailurePhase;
       item.failureObservations = normalizeMaterialFailureObservations([...previousObservations, {
         version: 1, productId: item.productId, revision: currentRevision, contextSignature, phase: observedPhase, ...failureCodes,
+        ...(approvalConflict ? { approvalConflict } : {}),
         sectionIds: typedSections.length ? typedSections : observedPhase === "images" ? latestSectionIds : [],
         protectedAssetShas, attempt: Math.max(0, ...previousObservations.map(entry => entry.attempt)) + 1,
         outcome: item.status === "outcome_unknown" || code === "PREPARATION_RESULT_UNCERTAIN" ? "uncertain" : item.status === "interrupted" ? "interrupted" : "failed",

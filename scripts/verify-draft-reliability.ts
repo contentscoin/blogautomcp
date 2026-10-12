@@ -28,6 +28,7 @@ import path from "node:path";
 import sharp from "sharp";
 import { createWritingPromptContract, formatWritingPromptContract, getWritingOutputExample } from "./lib/writing-prompt-contract";
 import { verifyProductSourceIntake } from "./verify-product-source-intake";
+import "./verify-section-normalization";
 
 async function main() {
   await verifyProductSourceIntake();

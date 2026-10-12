@@ -60,8 +60,38 @@ assert.equal(scoreTitle("토너 잡티 개선을 기대하기 전 확인할 구�
 assert.ok(scoreTitle("토너 2주 만에 잡티 개선", toner).hardFailures.includes("의료·효능 단정 표현"));
 assert.equal(planTitle("달바 토너 구성", toner).replaced, false, "good short model title survives soft length preference");
 assert.equal(planTitle("달바 토너 구성품을 하나씩 살펴보며 용량 표기를 읽고 구매 전에 확인할 점", toner).replaced, false, "long readable title is not mechanically replaced");
-assert.equal(planTitle("달바 토너 특징과 선택 기준", toner).replaced, false, "bland suffix is advisory");
+assert.equal(planTitle("달바 토너 특징과 선택 기준", toner).replaced, true, "a generated bland title is improved when an alternative has a supported reader axis");
 assert.ok(scoreTitle("달바 토너 특징과 선택 기준", toner).softSignals?.includes("정형적인 제목 후미"));
+assert.equal(planTitle("JMW 드라이기 특징과 선택 기준", { ...shopping, productName: "JMW 드라이기" }).replaced, false,
+  "no supported axis means no invented angle and no new readiness blocker");
+
+// Actual passed manuscripts kept promotional fragments after dropping their brand/model.
+for (const [productName, oldTitle, expectedIdentity, primaryKeyword] of [
+  ["[슈퍼적립 & 무이자 6개월 EVENT] 쿠첸 음식물처리기 제로핏 가정용 분쇄기 건조기 3L 아이보리",
+    "건조기 슈퍼적립 무이자 6개월 특징과 선택 기준", /쿠첸.*제로핏/u, "건조기"],
+  ["[12차 완판/N배송] 아토케어 듀얼스톰 침구침대청소기 진드기 살균 이불 열풍 건조",
+    "침구침대청소기 12차 완판 N배송 특징과 선택 기준", /아토케어.*듀얼스톰/u, "침구침대청소기"],
+  ["[추석선물 EVENT] 2026 보이스캐디 T13 PRO 시계형 골프거리측정기 (1만 포인트+스트랩 Gift)",
+    "시계형 추석선물 EVENT 2026 특징과 선택 기준", /보이스캐디.*T13/u, "시계형"],
+] as const) {
+  const context: TitlePlanContext = { ...shopping, productName, primaryKeyword };
+  const brief = buildTitleKeywordBrief(context);
+  assert.match(brief.shortIdentity, expectedIdentity);
+  assert.doesNotMatch(brief.cleanIdentity, /EVENT|Gift|슈퍼적립|무이자|완판|N배송|1만 포인트/iu);
+  const planned = planTitle(oldTitle, context);
+  assert.equal(planned.replaced, true);
+  assert.match(planned.title, expectedIdentity);
+  assert.doesNotMatch(planned.title, /EVENT|Gift|슈퍼적립|무이자|완판|N배송|특징과 선택 기준/iu);
+  if (productName.includes("쿠첸")) assert.equal(brief.primaryKeyword, "음식물처리기", "dryer is an auxiliary term of this food-waste processor");
+}
+assert.match(cleanTitleProductIdentity("쿠첸 제로핏 음식물처리기 슈퍼적립 무이자 6개월 EVENT"), /^쿠첸 제로핏 음식물처리기$/u,
+  "unbracketed campaign clauses are removed as complete phrases");
+assert.match(cleanTitleProductIdentity("김치 6개월 숙성 1.5kg"), /6개월 숙성 1\.5kg/u,
+  "a bare month count or decimal weight is a product fact, not a payment offer");
+assert.ok(buildTitleCandidates({ ...shopping, productName: "풀라스 무선 보풀제거기" }).every((title) => !/내 기기|연결/u.test(title)),
+  "cordless operation does not authenticate a device compatibility angle");
+assert.equal(buildTitleKeywordBrief({ productName: "달바 토너 세럼 크림 3종 세트", primaryKeyword: "세럼" }).primaryKeyword, "세럼",
+  "a genuine component-led search intent is retained for a set; only a known auxiliary family term is downgraded");
 
 const shokz = buildTitleKeywordBrief({ productName: "[샥즈] (증정 이벤트) 오픈스윔 프로 수영 이어폰 S710" });
 assert.match(shokz.cleanIdentity, /^\[샥즈\]/u);

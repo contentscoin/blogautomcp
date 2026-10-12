@@ -276,7 +276,7 @@ export function formatWritingPromptContract(
     "- 고지 문구와 원시 URL은 출력하지 않습니다. 커넥트 카드와 고지는 시스템이 별도로 붙입니다.",
     "- title, evidenceFacts, sections, hashtags 필드를 가진 JSON 하나만 출력합니다. 코드블록·작업 설명은 넣지 않습니다.",
     formatWritingStructureGuide(contract.kind),
-    formatEditorialTemplate(contract.kind, contract.editorialTemplateId),
+    formatEditorialTemplate(contract.kind, contract.editorialTemplateId, { minimal: options.topicDetail === "minimal" }),
     contract.editorial?.topic
       // 섹션별 흐름·이미지 출처는 렌더 계약 팔레트(오버레이 적용)가 담는다. 여기서는 예산 안의 요약만 넣는다.
       ? formatTopicTemplateForPrompt(contract.editorial.topic, {

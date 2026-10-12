@@ -1,7 +1,7 @@
 /** Source-grounded title planning. Length and keyword position are preferences, not replacement gates. */
 import { sentenceTokens, tokenSimilarity } from "../draft-quality-signals";
 import { detectUnsupportedExperience } from "../brandlink-content-readiness";
-import { buildTitleKeywordBrief, cleanTitleProductIdentity, titleIdentityTokens, titleModelTokens, type TitleKeywordBrief } from "../title-keyword-brief";
+import { buildTitleKeywordBrief, cleanTitleProductIdentity, hasPromotionalTitleClutter, titleIdentityTokens, titleModelTokens, type TitleKeywordBrief } from "../title-keyword-brief";
 import { DEFAULT_POST_ANGLE, getPostAngle } from "./angles";
 import { SHOPPING_TOPIC_TEMPLATES, getTopicTemplate, type TopicTemplateId } from "./index";
 
@@ -86,9 +86,23 @@ export function buildTitleCandidates(context: TitlePlanContext): string[] {
   if (!brief.shortIdentity) return [];
   if (context.kind === "SHOPPING") {
     const head = brief.shortIdentity;
-    const axisTitles = brief.decisionAxes.map((axis, index) => index % 2 === 0
-      ? `${head}, ${axis.label}에서 확인할 부분`
-      : `${head} ${axis.label}, 구매 전에 무엇을 볼까`);
+    const axisTitles = brief.decisionAxes.flatMap((axis) => {
+      const questions: Record<string, string[]> = {
+        "구성": ["구성품은 어디까지 살펴볼까", "세트와 단품, 내게 필요한 구성은"],
+        "사이즈·핏": ["사이즈와 핏, 어떤 기준으로 고를까"],
+        "소재": ["소재가 내 사용 환경에 맞을까"],
+        "용량": ["용량은 내 사용량에 맞을까"],
+        "규격": ["내게 필요한 크기부터 살펴요"],
+        "연결·호환": ["내 기기와 연결되는지 먼저 볼까요"],
+        "관리": ["사용 후 관리는 어디까지 필요할까"],
+        "제형": ["제형을 고를 때 살펴볼 점"],
+        "원재료": ["원재료와 부위는 취향에 맞을까"],
+      };
+      const tails = questions[axis.label] || [`${axis.label}에서 먼저 볼 점`];
+      // A source-present set does not establish an offered single-item option.
+      return tails.filter((tail) => !/세트와 단품/u.test(tail) || /세트/u.test(axis.evidence) && /단품/u.test(axis.evidence))
+        .map((tail) => `${head}, ${tail}`);
+    });
     return [...new Set([
       ...(context.verifiedExperience ? [`${head} 사용 후기`] : []),
       ...axisTitles,
@@ -157,6 +171,7 @@ export function scoreTitle(title: string, context: TitlePlanContext): TitleScore
   if (identities.some((word) => word && compact(title).includes(compact(word)))) score += 2;
   else hardFailures.push(`상품·여행지 식별어 누락: ${identities.filter(Boolean).join("/") || "원본 식별어 확인 필요"}`);
   if (EMOJI.test(title) || CLICKBAIT.test(title)) hardFailures.push("낚시성 문구·이모지");
+  if (hasPromotionalTitleClutter(title)) hardFailures.push("상품 식별어를 가리는 판매 혜택·캠페인 문구");
   if (hasMedicalPromise(title)) hardFailures.push("의료·효능 단정 표현");
   if (!context.verifiedExperience && hasUnsupportedTitleExperience(title)) hardFailures.push("체험 메모 없는 체험 표현");
   // Generated body text may offer a question/axis, but cannot authorize new brands or numerical facts.
@@ -182,10 +197,14 @@ export function scoreTitle(title: string, context: TitlePlanContext): TitleScore
 export function planTitle(modelTitle: string, context: TitlePlanContext): { title: string; replaced: boolean; reason: string; candidates: TitleScore[] } {
   const current = scoreTitle(modelTitle, context);
   const candidates = buildTitleCandidates(context).map((title) => scoreTitle(title, context)).sort((left, right) => right.score - left.score);
-  if (current.hardFailures.length === 0) return { title: modelTitle, replaced: false, reason: "모델 제목 유지", candidates };
+  // During generation/repair only, a supported reader question can replace the repeated legacy suffix.
+  // This is not a new readiness blocker and never rewrites an approved saved manuscript on its own.
+  const improveBlandTitle = current.hardFailures.length === 0 && BLAND_END.test(modelTitle)
+    && briefFor(context).decisionAxes.length > 0;
+  if (current.hardFailures.length === 0 && !improveBlandTitle) return { title: modelTitle, replaced: false, reason: "모델 제목 유지", candidates };
   const best = candidates.find((candidate) => candidate.hardFailures.length === 0);
   if (!best) return { title: modelTitle, replaced: false, reason: `규칙 위반(${current.hardFailures.join(", ")})이나 통과 후보 없음`, candidates };
-  return { title: best.title, replaced: true, reason: current.hardFailures.join(", "), candidates };
+  return { title: best.title, replaced: true, reason: improveBlandTitle ? "본문 근거가 있는 독자 질문으로 정형 후미 개선" : current.hardFailures.join(", "), candidates };
 }
 export function formatTitleCandidatesForPrompt(context: TitlePlanContext, compactMode = false): string {
   const brief = briefFor(context);

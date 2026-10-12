@@ -9,6 +9,27 @@ export interface MaterialFailureScope {
   revision?: string;
   contextSignature?: string;
 }
+export interface MaterialApprovalConflict {
+  gate: "status" | "compare-and-set";
+  claimAcquired: false;
+  observedStatus: string;
+  expectedStatus?: string;
+  observedUpdatedAt?: string;
+}
+/** Server-owned state evidence only; never persist an arbitrary API payload. */
+export function normalizeMaterialApprovalConflict(value: unknown): MaterialApprovalConflict | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const row = value as Record<string, unknown>;
+  const statuses = new Set(["MISSING", "READY", "FAILED", "DRAFTING", "PUBLISHING", "PUBLISHED", "SCHEDULED", "OUTCOME_UNKNOWN"]);
+  if (!["status", "compare-and-set"].includes(String(row.gate)) || row.claimAcquired !== false ||
+      typeof row.observedStatus !== "string" || !statuses.has(row.observedStatus)) return undefined;
+  const expectedStatus = typeof row.expectedStatus === "string" && statuses.has(row.expectedStatus) ? row.expectedStatus : undefined;
+  const observedUpdatedAt = typeof row.observedUpdatedAt === "string" &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u.test(row.observedUpdatedAt) &&
+    Number.isFinite(Date.parse(row.observedUpdatedAt)) ? row.observedUpdatedAt : undefined;
+  return { gate: row.gate as MaterialApprovalConflict["gate"], claimAcquired: false, observedStatus: row.observedStatus,
+    ...(expectedStatus ? { expectedStatus } : {}), ...(observedUpdatedAt ? { observedUpdatedAt } : {}) };
+}
 export interface MaterialFailureObservation extends MaterialFailureScope {
   version: 1;
   phase: MaterialFailurePhase;
@@ -20,6 +41,7 @@ export interface MaterialFailureObservation extends MaterialFailureScope {
   attempt: number;
   outcome: "failed" | "interrupted" | "uncertain";
   at: string;
+  approvalConflict?: MaterialApprovalConflict;
 }
 const HASH = /^[a-f0-9]{64}$/u;
 const ID = /^[a-zA-Z0-9_-]{8,80}$/u;
@@ -67,12 +89,14 @@ export function normalizeMaterialFailureObservations(value: unknown): MaterialFa
     const contextSignature = typeof row.contextSignature === "string" && HASH.test(row.contextSignature) ? row.contextSignature : undefined;
     const strings = (input: unknown, pattern: RegExp, maximum: number) => Array.isArray(input)
       ? [...new Set(input.filter((entry): entry is string => typeof entry === "string" && pattern.test(entry)))].slice(0, maximum) : [];
+    const approvalConflict = row.phase === "approval" ? normalizeMaterialApprovalConflict(row.approvalConflict) : undefined;
     return [{ version: 1 as const, productId: row.productId, ...(revision ? { revision } : {}),
       ...(contextSignature ? { contextSignature } : {}), phase: row.phase as MaterialFailurePhase,
       ...(codes.errorCode ? { errorCode: codes.errorCode } : {}), ...(codes.causeCode ? { causeCode: codes.causeCode } : {}),
       sectionIds: strings(row.sectionIds, ID, 8), protectedAssetShas: strings(row.protectedAssetShas, HASH, 32),
       attempt: typeof row.attempt === "number" && Number.isSafeInteger(row.attempt) ? Math.max(1, Math.min(1_000_000, row.attempt)) : 1,
-      outcome: row.outcome as MaterialFailureObservation["outcome"], at: row.at }];
+      outcome: row.outcome as MaterialFailureObservation["outcome"], at: row.at,
+      ...(approvalConflict ? { approvalConflict } : {}) }];
   });
 }
 
@@ -90,11 +114,13 @@ export function materialFailurePhase(pathname: string, method: string, action?: 
 const GUIDANCE: Record<string, string> = {
   SOURCE_EVIDENCE_REQUIRED: "확정된 상품 근거가 충분한지 다시 확인하고 부족한 사실을 추정하지 않습니다.",
   IMAGE_SOURCE_BINDING_REQUIRED: "선택 상품·옵션의 원본 사진을 먼저 배정하고 원본 슬롯을 연출 사진으로 대신하지 않습니다.",
+  SOURCE_REVIEW_INCOMPLETE: "원본 후보의 누락된 픽셀 판정을 확인하며 미검토 후보를 원본 부족이나 거절로 처리하지 않습니다. 새 이미지 생성으로 대신하지 않습니다.",
   PRODUCT_SOURCE_REQUIRED: "선택 상품·옵션의 원본 사진 근거를 먼저 확인합니다.",
   PRODUCT_REFERENCE_REQUIRED: "선택 상품의 검증 원본을 생성 레퍼런스로 연결합니다.",
   REFERENCE_SCENE_FIDELITY_FAILED: "실패 슬롯의 제품 형상·옵션·라벨을 원본에 고정하고 장면만 자연스럽게 연출합니다.",
   PUBLISH_IMAGE_AUDIT_FAILED: "사진 묘사는 실제 채택한 사진에 맞추고 기능·성능 증거는 판매자 근거와 구분합니다.",
   PHOTO_DESCRIPTION_REPAIR_REQUIRED: "현재 사진과 다른 묘사만 검토하고 판매자 근거와 정상 사진은 보존합니다.",
+  NOT_READY: "승인 당시 상품 상태와 미진입 증거를 확인하고 정상 원고·사진을 재생성하지 않습니다. 실행 중·게시됨·결과 불명 상태는 재시도하지 않습니다.",
   CONTENT_BLOCKED: "현재 품질 검사의 실패 항목만 보강하고 통과한 사실과 문단 역할은 보존합니다.",
   QUALITY_REPAIR_EXHAUSTED: "같은 보강 지시를 반복하지 않고 현재 근거와 실패 항목의 연결을 다시 확인합니다.",
   IMAGE_OUTPUT_AMBIGUOUS: "기존 요청·출력의 연결을 확인하기 전에는 채택하거나 새로 생성하지 않습니다.",

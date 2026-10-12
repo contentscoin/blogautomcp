@@ -23,8 +23,8 @@ export interface TitleKeywordBrief {
   duration?: string;
 }
 
-const PROMOTION = /특가|핫딜|쿠폰|증정|이벤트|할인|평점|리뷰\s*\d|별점|무료|최저가|최고|1위|베스트셀러|구매혜택|적립|출발확정|무조건출발|출발임박|마감임박|잡티|주름\s*개선|미백\s*효과|치료|완치|예방|특효|\d+\s*(?:주|일)\s*만/iu;
-const PROMOTION_WORD = /^(?:출발확정|무조건출발|여행핫딜|핫딜|특가|단독|최저가|노쇼핑|노옵션|노팁|시내숙박|무료|증정|이벤트|할인|공식|정품|신상|NEW|평점|별점|추천|스테디셀러|베스트셀러|고성능|프리미엄|\d+(?:\.\d+)?(?:점|%|위)?)$/iu;
+const PROMOTION = /특가|핫딜|쿠폰|증정|이벤트|\bevent\b|\bgift\b|사은품|무이자|완판|N\s*배송|할인|평점|리뷰\s*\d|별점|무료|최저가|최고|1위|베스트셀러|구매혜택|적립|출발확정|무조건출발|출발임박|마감임박|잡티|주름\s*개선|미백\s*효과|치료|완치|예방|특효|\d+\s*(?:주|일)\s*만/iu;
+const PROMOTION_WORD = /^(?:출발확정|무조건출발|여행핫딜|핫딜|특가|단독|최저가|노쇼핑|노옵션|노팁|시내숙박|무료|증정|이벤트|EVENT|Gift|N배송|완판|슈퍼적립|무이자|할인|공식|정품|신상|NEW|평점|별점|추천|스테디셀러|베스트셀러|고성능|프리미엄|\d+(?:\.\d+)?(?:점|%|위)?)$/iu;
 const CLAIM_QUERY = /후기|내돈내산|실사용|비교|장단점|효과|효능|개선|치료|완치|예방|특효|부작용|최저가|할인|평점|별점|\d+위|인생템/iu;
 const CATEGORY_WORDS = [
   "음식물처리기", "로봇청소기", "공기청정기", "드라이기", "에어프라이어", "식기세척기", "밥솥", "청소기", "헤어드라이어",
@@ -33,9 +33,15 @@ const CATEGORY_WORDS = [
   "러닝조끼", "반바지", "티셔츠", "원피스", "팬츠", "바지", "조끼", "셔츠", "신발", "운동화", "가방", "레깅스",
   "비데", "가습기", "제습기", "전기포트", "선풍기", "냉장고", "세탁기", "건조기", "면도기", "고데기",
   "한우", "밀키트", "커피", "유산균", "비타민", "영양제", "텀블러", "베개", "매트리스", "수납함",
+  "골프거리측정기", "거리측정기", "침구청소기", "침구침대청소기", "보풀제거기", "구강세정기", "블렌더", "곶감", "포기김치", "김치",
 ] as const;
 
 function compact(value: string): string { return value.toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, ""); }
+
+/** Seller campaign words can describe an offer, but never identify the selected product. */
+export function hasPromotionalTitleClutter(value: string): boolean {
+  return /슈퍼\s*적립|무이자\s*\d+\s*개월|\d+\s*차\s*완판|N\s*배송|\bEVENT\b|\bGift\b/iu.test(value);
+}
 
 export function titleModelTokens(value: string): string[] {
   return [...value.matchAll(/\b[a-z][a-z\d-]*\d[a-z\d-]*\b/giu)].map((match) => match[0].toLocaleLowerCase());
@@ -51,6 +57,7 @@ export function cleanTitleProductIdentity(productName: string): string {
     })
     .replace(/\d+\s*(?:주|일)\s*(?:만에\s*)?(?:잡티|주름|피부|미백|탄력)[^|,]*?(?:개선|효과|완화)/gu, " ")
     .replace(/(?:평점|별점)\s*\d+(?:\.\d+)?(?:점)?|\d+\.\d+\s*(?:평점|별점|점)(?![\p{L}\p{N}])/gu, " ")
+    .replace(/무이자\s*\d+\s*개월|\d+\s*차\s*완판|슈퍼\s*적립|N\s*배송/giu, " ")
     .replace(/[|/,+]/gu, " ")
     .split(/\s+/u).filter((word) => word && !PROMOTION_WORD.test(word))
     .join(" ").trim();
@@ -80,7 +87,7 @@ const AXES: Array<{ label: string; keywords: string[]; pattern: RegExp }> = [
   { label: "소재", keywords: ["소재", "원단"], pattern: /소재|원단|메쉬|면\s*\d|폴리에스터/u },
   { label: "용량", keywords: ["용량"], pattern: /용량|\d+(?:\.\d+)?\s*(?:ml|mL|L|리터)/u },
   { label: "규격", keywords: ["규격", "크기"], pattern: /규격|크기|\d+\s*(?:cm|mm|인치)/u },
-  { label: "연결·호환", keywords: ["연결", "호환"], pattern: /연결|호환|블루투스|USB|무선/u },
+  { label: "연결·호환", keywords: ["연결", "호환"], pattern: /연결|호환|블루투스|USB|안드로이드\s*오토|CarPlay/iu },
   { label: "관리", keywords: ["관리", "세척"], pattern: /세척|청소법|관리법|보관법/u },
   { label: "제형", keywords: ["제형"], pattern: /제형|로션|크림|젤\s*타입/u },
   { label: "원재료", keywords: ["원재료"], pattern: /원재료|부위|등심|안심|갈비/u },
@@ -103,15 +110,21 @@ export function buildTitleKeywordBrief(context: TitleKeywordBriefContext): Title
     duration = travelFacts.duration || undefined;
   }
   const rawPrimary = cleanTitleProductIdentity(context.primaryKeyword || "");
-  const primaryValid = rawPrimary && !CLAIM_QUERY.test(rawPrimary) && titleIdentityTokens(rawPrimary).length > 0
+  const primaryIsSecondaryCategory = context.kind !== "TRAVEL"
+    && (category === "음식물처리기" && /^(?:건조기|분쇄기)$/u.test(rawPrimary)
+      || category === "로봇청소기" && rawPrimary === "청소기");
+  const primaryValid = rawPrimary && !primaryIsSecondaryCategory && !CLAIM_QUERY.test(rawPrimary) && titleIdentityTokens(rawPrimary).length > 0
     && (compact(cleanIdentity).includes(compact(rawPrimary)) || (destination && rawPrimary === destination));
   const primaryKeyword = context.kind === "TRAVEL" ? destination || "" : primaryValid ? rawPrimary : category || tokens[0] || "";
-  const shortTokens = tokens.slice(0, 4);
+  // A household/efficacy descriptor is not the model name. Keep identity nouns on either side of the family noun.
+  const shortTokens = tokens.filter((word) => !/^(?:가정용|진드기|살균|열풍|건조|시계형|수영|이불|단지형)$/u.test(word)
+    && !(category === "음식물처리기" && /^(?:건조기|분쇄기)$/u.test(word))).slice(0, 4);
   // Preserve source-present model codes even when marketing descriptors precede them.
   for (const token of tokens.filter((word) => /^(?=.*[a-z])(?=.*\d)[a-z\d-]{3,24}$/iu.test(word))) {
     if (!shortTokens.includes(token) && shortTokens.length < 6) shortTokens.push(token);
   }
-  if (category && !shortTokens.some((word) => word.includes(category))) shortTokens.push(category);
+  const multiCategorySet = /세트/u.test(cleanIdentity) && CATEGORY_WORDS.filter((word) => cleanIdentity.includes(word)).length >= 2;
+  if (category && !multiCategorySet && !shortTokens.some((word) => word.includes(category))) shortTokens.push(category);
   const shortIdentity = context.kind === "TRAVEL" ? [destination, duration].filter(Boolean).join(" ") : shortTokens.map((word) =>
     cleanIdentity.includes(`[${word}]`) ? `[${word}]` : word).join(" ");
   const allowedQueryWords = /^(?:추천|선택|구매|기준|정보|종류|고르기|사용법|사이즈|핏|용량|구성|소재|호환|연결|관리|세척)$/u;

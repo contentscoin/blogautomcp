@@ -36,7 +36,7 @@ export function locatePhotoDescriptionSentence(bodyInput: string | readonly stri
   }
   const withoutTerminal = (value: string) => value.replace(/[.!?。！？]$/u, "").trim();
   const matches = [...new Set(sentences.filter(sentence => sentence.length <= 260 &&
-    /^(?:(?:이|해당|본문의|첨부한|생성(?:된)?)\s*)?(?:제품\s*)?(?:연출\s*)?(?:사진|이미지)(?:에는|에서는|에서|은|는|에|의|\s*속)/u.test(sentence) &&
+    /^(?:(?:이|해당|본문의|첨부한|제공된|판매자가\s*제공한|생성(?:된)?)\s*)?(?:제품\s*)?(?:(?:연출|원본|참조|판매자)\s*)?(?:사진|이미지)(?:에는|에서는|에서|처럼|은|는|에|의|\s*속)/u.test(sentence) &&
     // A product specification/identifier is not an expendable scene description.
     !/\d|라벨|표기|용량|규격|모델|성분|인증|온도|시간|수치|측정|전압|중량|무게|용적/u.test(sentence) &&
     quotes.some(quote => withoutTerminal(sentence) === withoutTerminal(quote))))];

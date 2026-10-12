@@ -86,6 +86,21 @@ async function main() {
       assert.equal(isRecoverableImageEvidenceResult({ code: "IMAGE_SOURCE_BINDING_REQUIRED", errors: ["IMAGE_SOURCE_BINDING_REQUIRED: missing", tail] }), false);
       assert.equal(isRecoverableImageEvidenceResult({ code: "REFERENCE_SCENE_FIDELITY_FAILED", errors: ["REFERENCE_SCENE_FIDELITY_FAILED: wrong product", tail] }), false);
     }
+    for (const returned of [false, true]) {
+      const actions: string[] = [];
+      await assert.rejects(runMaterialPreparation(`source-review-incomplete-${returned}`, { pause: async () => {}, call: async (_url, method, body) => {
+        const action = (body as { action?: string })?.action || method; actions.push(action);
+        if (action === "bind_sources") {
+          const failure = { code: "SOURCE_REVIEW_INCOMPLETE", errors: ["SOURCE_REVIEW_INCOMPLETE: reviewer omitted unreviewed candidates"] };
+          if (returned) return { success: true, ...failure };
+          throw Object.assign(new Error(failure.errors[0]), failure);
+        }
+        return { success: true, data: { connectKind: "SHOPPING", composition: { sections: [{ id: "original", imageSource: "seller-original" }] },
+          imageSlots: [{ sectionId: "original", missing: 1, generationMissing: 0 }], contentQuality: { signals: [] } } };
+      } }), (value: unknown) => (value as { code?: string }).code === "SOURCE_REVIEW_INCOMPLETE");
+      assert.equal(actions.filter(action => action === "bind_sources").length, 1);
+      assert(!actions.some(action => /generate|prepare_context|replan|approve/u.test(action)), "incomplete review is not evidence of missing source and never buys a generation/recollection retry");
+    }
     for (const scenario of ["refresh", "replan", "exhausted", "auth", "transport", "partial", "mixed200", "mixed422"]) {
       const actions: string[] = [];
       let done = false; let approved = false;
@@ -195,17 +210,21 @@ async function main() {
       assert.equal(actions.filter(a => a === "approve").length, 1);
       assert(!actions.includes("replan_sources"), "uncertain replacement must not fall through to another image mutation");
     }
-    for (const target of ["recheck", "generate_missing"]) {
-      for (const scenario of ["recovered", "exhausted", "drafting", "publishing", "unknown-link", "unknown-images", "missing-image-state", "unknown-owner", "running", "no-http", "other-message", "transport", "auth"]) {
-        const actions: string[] = []; let attempts = 0; let approved = false; let done = target === "recheck";
+    for (const target of ["recheck", "generate_missing", "approve"]) {
+      for (const scenario of ["recovered", "exhausted", "drafting", "publishing", "unknown-link", "unknown-images", "missing-image-state", "unknown-owner", "running", "no-http", "other-message", "transport", "auth", ...(target === "approve" ? ["status-conflict-metadata", "claimed-conflict-metadata", "idle-after-drafting", "still-drafting", "guard-without-metadata", "scheduled", "outcome-unknown"] : [])]) {
+        const actions: string[] = []; let attempts = 0; let approved = false; let done = target !== "generate_missing";
         const call: Call = async (url, method, body) => {
           const action = (body as { action?: string })?.action || method; actions.push(action);
-          if (url === `/api/brandlinks/cas-${target}-${scenario}`) return { success: true, data: { status: ({ drafting: "DRAFTING", publishing: "PUBLISHING", "unknown-link": "MISSING" } as Record<string, string>)[scenario] || "READY" } };
+          if (url === `/api/brandlinks/cas-${target}-${scenario}`) return { success: true, data: { status: ({ drafting: "DRAFTING", "still-drafting": "DRAFTING", publishing: "PUBLISHING", "unknown-link": "MISSING", scheduled: "SCHEDULED", "outcome-unknown": "OUTCOME_UNKNOWN" } as Record<string, string>)[scenario] || "READY" } };
           if (action === target) {
             attempts++;
-            if (scenario !== "recovered" || attempts < 3) throw Object.assign(new Error(scenario === "other-message" ? "현재 발행 중인 상품입니다." : "상품 상태가 변경되었습니다."), {
-              code: scenario === "transport" ? "ECONNRESET" : scenario === "auth" ? "CODEX_AUTH_REQUIRED" : "ALREADY_PUBLISHING",
+            const guard = ["idle-after-drafting", "still-drafting", "guard-without-metadata", "scheduled", "outcome-unknown"].includes(scenario);
+            if ((scenario !== "recovered" || attempts < 3) && (scenario !== "idle-after-drafting" || attempts < 2)) throw Object.assign(new Error(scenario === "other-message" ? "현재 발행 중인 상품입니다." : guard ? "작성·발행 중이거나 게시 여부 확인이 필요한 소재는 승인할 수 없습니다." : target === "approve" ? "소재 상태가 변경되어 승인하지 않았습니다." : "상품 상태가 변경되었습니다."), {
+              code: scenario === "transport" ? "ECONNRESET" : scenario === "auth" ? "CODEX_AUTH_REQUIRED" : target === "approve" ? "NOT_READY" : "ALREADY_PUBLISHING",
               ...(scenario === "no-http" ? {} : { httpStatus: 409 }),
+              ...(scenario === "status-conflict-metadata" ? { approvalConflict: { gate: "status", claimAcquired: false, observedStatus: "PUBLISHING" } } :
+                scenario === "claimed-conflict-metadata" ? { approvalConflict: { gate: "compare-and-set", claimAcquired: true, observedStatus: "READY" } } :
+                  guard && scenario !== "guard-without-metadata" ? { approvalConflict: { gate: "status", claimAcquired: false, observedStatus: "DRAFTING" } } : {}),
             });
             done = true;
           }
@@ -216,10 +235,10 @@ async function main() {
             imageSlots: [{ missing: done ? 0 : 1, generationMissing: 0 }], contentQuality: { signals: [] } } };
         };
         const run = runMaterialPreparation(`cas-${target}-${scenario}`, { call, pause: async () => {} });
-        if (scenario === "recovered") await run; else await assert.rejects(run);
-        const expectedAttempts = scenario === "recovered" && target === "recheck" ? 4 : ["recovered", "exhausted"].includes(scenario) ? 3 : 1;
+        if (["recovered", "idle-after-drafting"].includes(scenario)) await run; else await assert.rejects(run);
+        const expectedAttempts = scenario === "idle-after-drafting" ? 2 : scenario === "recovered" && target === "recheck" ? 4 : ["recovered", "exhausted"].includes(scenario) ? 3 : 1;
         assert.equal(attempts, expectedAttempts, "CAS replay has three attempts maximum; successful preparation also performs its normal final recheck");
-        assert.equal(approved, scenario === "recovered");
+        assert.equal(approved, ["recovered", "idle-after-drafting"].includes(scenario));
         assert(!actions.includes("prepare_context") && !actions.includes("replan_sources"));
       }
     }
@@ -229,8 +248,8 @@ async function main() {
       composition: { sections: [{ id: "feature", body: ["45분"], imageMin: 1 }] }, imageAssets: [] };
     const save = () => fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(manifest));
     save();
-    assert.equal(IMAGE_RECOVERY_POLICY_VERSION, 8);
-    const oldSignatures = [6, 7].map(policy => crypto.createHash("sha256").update(JSON.stringify({
+    assert.equal(IMAGE_RECOVERY_POLICY_VERSION, 9);
+    const oldSignatures = [6, 7, 8].map(policy => crypto.createHash("sha256").update(JSON.stringify({
       version: 1, policy, product: manifest.sourceSnapshot.product,
       sections: [{ id: "feature", body: ["45분"], imageMin: 1 }], assets: [], receipts: [], rejected: [],
     })).digest("hex"));
@@ -238,7 +257,7 @@ async function main() {
       ...oldSignatures.map(signature => ({ stage: "refresh-source", input: signature, output: signature, status: "failed", at: "earlier" })),
     ] }));
     for (const signature of oldSignatures) assert.notEqual(imageRecoverySignature(dir), signature,
-      "original-first source selection receives one shared fresh attempt for drafts exhausted under policies 6/7");
+      "diagnosis-first and complete source review receive one shared fresh attempt for drafts exhausted under policies 6/7/8");
     let calls = 0;
     await runRecordedImageRecovery("persistent-fixture", "refresh-source", async () => { calls++; });
     const skipped = await runRecordedImageRecovery("persistent-fixture", "refresh-source", async () => { calls++; });
@@ -261,6 +280,12 @@ async function main() {
     }));
     assert.equal((await runRecordedImageRecovery("external-fixture", "refresh-source", async () => {})).attempted, true,
       "an explicit retry after external runtime repair remains possible");
+    let unknownMutations = 0;
+    await assert.rejects(runMaterialPreparation("policy-upgrade-unknown-owner", { pause: async () => {}, call: async (_url, method) => {
+      if (method !== "GET") unknownMutations++;
+      return { success: true, data: { imageGeneration: { status: "complete", recoveryState: "owner-unknown" }, imageSlots: [{ missing: 1, generationMissing: 1 }] } };
+    } }), (value: unknown) => (value as { code?: string }).code === "IMAGE_RESUME_REQUIRED");
+    assert.equal(unknownMutations, 0, "a policy upgrade cannot restart or adopt an unknown image submission");
     console.log("PASS material image recovery: reference/fidelity source recovery, bounded early CAS conflicts, auth/uncertain stop, persistent policy upgrade and no-progress budgets");
   } finally {
     process.env.DESKTOP_USER_DATA = previous;

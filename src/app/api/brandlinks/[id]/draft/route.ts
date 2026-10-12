@@ -475,12 +475,18 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   if (body.action === "approve" || body.action === "validate_publish_images" || body.action === "audit_photo_descriptions") {
     try {
       const link = await prisma.brandLink.findUnique({ where: { id }, select: {
-        status: true, productName: true, connectKind: true, externalItemId: true,
+        status: true, updatedAt: true, productName: true, connectKind: true, externalItemId: true,
         finalUrl: true, sourceUrl: true, url: true,
       } });
-      if (!link || !["READY", "FAILED"].includes(link.status)) return NextResponse.json({ success: false, code: "NOT_READY", error: "작성·발행 중이거나 게시 여부 확인이 필요한 소재는 승인할 수 없습니다." }, { status: 409 });
+      if (!link || !["READY", "FAILED"].includes(link.status)) return NextResponse.json({ success: false, code: "NOT_READY", error: "작성·발행 중이거나 게시 여부 확인이 필요한 소재는 승인할 수 없습니다.",
+        approvalConflict: { gate: "status", claimAcquired: false, observedStatus: link?.status || "MISSING", observedUpdatedAt: link?.updatedAt?.toISOString() } }, { status: 409 });
       const claim = await prisma.brandLink.updateMany({ where: { id, status: link.status }, data: { status: "DRAFTING" } });
-      if (claim.count !== 1) return NextResponse.json({ success: false, code: "NOT_READY", error: "소재 상태가 변경되어 승인하지 않았습니다." }, { status: 409 });
+      if (claim.count !== 1) {
+        const current = await prisma.brandLink.findUnique({ where: { id }, select: { status: true, updatedAt: true } });
+        return NextResponse.json({ success: false, code: "NOT_READY", error: "소재 상태가 변경되어 승인하지 않았습니다.",
+          approvalConflict: { gate: "compare-and-set", claimAcquired: false, expectedStatus: link.status,
+            observedStatus: current?.status || "MISSING", observedUpdatedAt: current?.updatedAt?.toISOString() } }, { status: 409 });
+      }
       let approved = false;
       try {
         // A diagnostic-only audit must see retained rejected pixels even when

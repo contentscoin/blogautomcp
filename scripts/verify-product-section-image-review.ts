@@ -112,19 +112,19 @@ async function main() {
     assert.match(bodyAware.prompt, /"purpose":"feature-evidence"/);
     assert.match(bodyAware.prompt, /"claimPolicy":"direct-requested-feature"/);
     await bodyAware.review.selectVerifiedProductSectionImages([candidate], "fixture", [{ ...featureTarget, sectionBody: ["보송한 마무리 기준입니다."] }]);
-    assert.equal(bodyAware.calls.length, 2, "body edits invalidate section review cache");
+    assert.equal(bodyAware.calls.length, 4, "body edits invalidate section review cache; missing verdicts receive one bounded review");
     const selected = JSON.stringify({ name: "fixture", optionFacts: ["색상: 화이트"] });
     await bodyAware.review.selectVerifiedProductSectionImages([candidate], "fixture", [featureTarget], { selectedProduct: selected });
     assert(bodyAware.prompt.includes(selected), "source review receives exact selected variant facts");
     await bodyAware.review.selectVerifiedProductSectionImages([candidate], "fixture", [featureTarget], { selectedProduct: selected.replace("화이트", "블랙") });
-    assert.equal(bodyAware.calls.length, 4, "selected option edits invalidate source review cache");
+    assert.equal(bodyAware.calls.length, 8, "selected option edits invalidate source review cache; incomplete verdicts are not cached");
     const singleBody = loadReview('{"selectedIndex":null}');
     await singleBody.review.selectVerifiedProductSectionImage([candidate], "fixture", "발림", "공식 기능 설명", body);
     assert.match(singleBody.prompt, /촉촉한 수분 공급/);
     await singleBody.review.selectVerifiedProductSectionImage([candidate], "fixture", "발림", "공식 기능 설명", ["보송한 마무리"]);
     assert.equal(singleBody.calls.length, 2, "single review cache includes actual text");
     const diagnosticReports: ProductSectionImageDiagnostics[] = [];
-    const diagnosed = loadReview('{"assignments":[],"rejections":[{"targetIndex":1,"selectedIndex":1,"reason":"45분 표시가 없음"}]}');
+    const diagnosed = loadReview('{"assignments":[],"rejections":[{"targetIndex":1,"selectedIndex":1,"reason":"45분 표시가 없음"},{"targetIndex":2,"selectedIndex":1,"reason":"선택한 상품 외형 불일치"}]}');
     const diagnosticOptions = { onDiagnostics: (report: ProductSectionImageDiagnostics) => diagnosticReports.push(report) };
     await diagnosed.review.selectVerifiedProductSectionImages([candidate], "diagnostic", [featureTarget, overviewTarget], diagnosticOptions);
     assert.equal(diagnosticReports[0].status, "complete");
@@ -132,10 +132,10 @@ async function main() {
     assert.equal(diagnosticReports[0].entries[0].status, "rejected");
     assert.equal(diagnosticReports[0].entries[0].sourceSha256, sha256);
     assert.equal(diagnosticReports[0].entries[0].reason, "45분 표시가 없음");
-    assert.equal(diagnosticReports[0].entries[1].status, "not-proposed");
+    assert.equal(diagnosticReports[0].entries[1].status, "rejected");
     diagnosticReports[0].entries[0].reason = "caller mutation";
     await diagnosed.review.selectVerifiedProductSectionImages([candidate], "diagnostic", [featureTarget, overviewTarget], diagnosticOptions);
-    assert.equal(diagnosed.calls.length, 1, "empty assignment results are cached with diagnostics");
+    assert.equal(diagnosed.calls.length, 1, "complete actual rejections are cached with diagnostics");
     assert.equal(diagnosticReports[1].cacheHit, true);
     assert.equal(diagnosticReports[1].entries[0].reason, "45분 표시가 없음", "callback cannot corrupt cached diagnostics");
     for (const invalid of ["not json", "{}", "null", '{"assignments":null}']) {
@@ -345,6 +345,37 @@ async function main() {
     assert.equal(unknownReserve.auditCalls.length, 0, "unreviewed omissions never become approved pixels");
     assert.equal(unknownReserveReports[0].entries[0].status, "not-selected");
     assert.equal(unknownReserveReports[0].entries[0].suitability, "unreviewed");
+    assert.equal(unknownReserveReports[0].status, "incomplete", "unreviewed is not evidence that no original exists");
+    await unknownReserve.review.selectVerifiedProductSectionImages([candidate], "unreviewed", [overviewTarget]);
+    assert.equal(unknownReserve.calls.length, 4, "incomplete no-assignment results must not seal the cache");
+    const omittedReports: ProductSectionImageDiagnostics[] = [];
+    const omitted = loadReview((_, callIndex) => callIndex === 0
+      ? JSON.stringify({ assignments: [], rejections: [{ targetIndex: 1, selectedIndex: 1, reason: "다른 옵션의 사진" }] })
+      : JSON.stringify({ assignments: [{ targetIndex: 1, selectedIndex: 1, reviewClass: "product-photo", reason: "선택 상품 외형 일치" }] }));
+    const omittedRows = await omitted.review.selectVerifiedProductSectionImages(manyCandidates.slice(0, 2), "omitted", [overviewTarget], {
+      onDiagnostics: report => omittedReports.push(report),
+    });
+    assert.equal(omitted.calls.length, 2);
+    assert.deepEqual(Array.from(omitted.calls[1].imagePaths), [manyCandidates[1]], "only omitted candidate gets a fresh review; genuine rejection stays excluded");
+    assert.equal(omittedRows.length, 1); assert.equal(omitted.auditCalls.length, 1, "an omission requires the same final pixel gate");
+    assert.equal(omittedReports[0].status, "complete");
+    assert.equal(omittedReports[0].entries[1].reviewHistory?.[0].status, "not-proposed");
+    assert.equal(omittedReports[0].entries[1].selection, "assigned");
+    const allOmitted = Array.from({ length: 48 }, (_, index) => {
+      const file = path.join(root, `omitted-${index}.png`);
+      fs.writeFileSync(file, testPngFixture(`unreviewed seller candidate ${index}`));
+      return file;
+    });
+    const lateOmission = loadReview((options, callIndex) => {
+      assert(options.imagePaths.length <= 16, "review transport stays bounded");
+      return JSON.stringify({ assignments: callIndex === 5
+        ? [{ targetIndex: 1, selectedIndex: 16, reviewClass: "product-photo", reason: "마지막 후보의 실제 상품 외형 일치" }] : [] });
+    });
+    const lateOmissionRows = await lateOmission.review.selectVerifiedProductSectionImages(allOmitted, "late-omission", [overviewTarget]);
+    assert.equal(lateOmission.calls.length, 6, "at most three initial and three omission batches");
+    assert.equal(lateOmissionRows.length, 1);
+    assert.equal(lateOmissionRows[0].sourceSha256, crypto.createHash("sha256").update(fs.readFileSync(allOmitted[47])).digest("hex"));
+    assert.equal(lateOmission.auditCalls.length, 1, "later omitted candidate is independently audited before assignment");
     const mutableCandidate = path.join(root, "changed-reference.png");
     fs.writeFileSync(mutableCandidate, testPngFixture("before review"));
     const changedReference = loadReview(() => {

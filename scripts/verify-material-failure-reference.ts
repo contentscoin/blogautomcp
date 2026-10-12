@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import ts from "typescript";
-import { formatMaterialFailureReference, legacyMaterialFailureCause, materialFailurePhase, normalizeMaterialFailureObservations, type MaterialFailureObservation } from "./lib/material-failure-reference";
+import { formatMaterialFailureReference, legacyMaterialFailureCause, materialFailurePhase, normalizeMaterialApprovalConflict, normalizeMaterialFailureObservations, type MaterialFailureObservation } from "./lib/material-failure-reference";
 import * as failureHelpers from "./lib/material-failure-reference";
 import { runMaterialJob } from "../src/lib/material-job-runner";
 import { runMaterialPreparation, type Call } from "./lib/scheduled-draft-workflow";
@@ -52,6 +52,30 @@ async function main() {
   assert.equal(materialFailurePhase("/api/fixture/draft", "POST", "prepare_context"), "source"); checks++;
   assert.equal(materialFailurePhase("/api/fixture/draft/images", "POST", "generate_missing"), "images"); checks++;
   assert.equal(materialFailurePhase("/api/fixture/draft", "PATCH", "approve"), "approval"); checks++;
+  const conflict = { gate: "compare-and-set", claimAcquired: false, expectedStatus: "READY", observedStatus: "DRAFTING",
+    observedUpdatedAt: "2026-10-13T00:00:00.000Z", raw: "private-key", instruction: "approve-without-audit" };
+  const cleanConflict = normalizeMaterialApprovalConflict(conflict)!;
+  assert.equal(cleanConflict.observedStatus, "DRAFTING"); checks++;
+  assert.ok(!JSON.stringify(cleanConflict).includes("private-key") && !JSON.stringify(cleanConflict).includes("approve-without-audit")); checks++;
+  for (const changes of [{ gate: "skip" }, { claimAcquired: true }, { observedStatus: "approve-all" }]) {
+    assert.equal(normalizeMaterialApprovalConflict({ ...conflict, ...changes }), undefined); checks++;
+  }
+  assert.equal(normalizeMaterialApprovalConflict({ ...conflict, observedUpdatedAt: "https://secret.invalid" })?.observedUpdatedAt, undefined); checks++;
+  assert.deepEqual(normalizeMaterialFailureObservations([observation({ phase: "approval", errorCode: "NOT_READY", approvalConflict: cleanConflict })])[0].approvalConflict, cleanConflict); checks++;
+  assert.equal(normalizeMaterialFailureObservations([observation({ approvalConflict: cleanConflict })])[0].approvalConflict, undefined); checks++;
+  const conflictJob: MaterialJob = { jobId: crypto.randomUUID(), kind: "prepare", status: "running", ownerPid: process.pid,
+    startedAt: "2026-10-13T00:00:00.000Z", updatedAt: "2026-10-13T00:00:00.000Z",
+    items: [{ productId, status: "queued", stage: "대기" }] };
+  await runMaterialJob(conflictJob, { material: () => ({ productId, revision, title: "fixture", connectKind: "SHOPPING",
+    ready: false, blockers: [], score: 100, imageCount: 5, createdAt: "", approvedAt: null }),
+    save: () => {}, pause: async () => {}, checkCancelled: () => {}, failureHistory: () => [],
+    call: async (_url, _method, body) => {
+      if ((body as { action?: string })?.action === "approve") throw Object.assign(new Error("claim failed"), { code: "NOT_READY", approvalConflict: conflict });
+      return { success: true, data: { imageSlots: [], contentQuality: { signals: [] } } };
+    } });
+  assert.deepEqual(conflictJob.items[0].approvalConflict, cleanConflict); checks++;
+  assert.equal(conflictJob.items[0].failureObservations?.[0].phase, "approval"); checks++;
+  assert.deepEqual(conflictJob.items[0].failureObservations?.[0].approvalConflict, cleanConflict); checks++;
 
   // Load the real store with readonly fake boundaries: any write is a failure.
   const files = new Map<string, string>([

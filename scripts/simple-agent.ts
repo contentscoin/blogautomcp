@@ -168,7 +168,7 @@ import {
   productEvidenceRequirement,
   productSignalAnchor,
 } from "./lib/product-editorial-plan";
-import { normalizeDraftSections } from "./lib/draft-sections";
+import { normalizeDraftSections, stripDraftListPrefix } from "./lib/draft-sections";
 import {
   assertDraftSectionCount,
   expandDraftSectionEntries,
@@ -836,10 +836,7 @@ function hasCompleteTravelSourceResearch(research: TravelPageResearch | null | u
 }
 
 function stripSectionPrefix(text: string): string {
-  return stripEmoji(text)
-    .replace(/^[\s\-*#>]+/, "")
-    .replace(/^[\d]+\.\s*/, "")
-    .trim();
+  return stripDraftListPrefix(stripEmoji(text).replace(/^[\s*#>]+/u, "")).trim();
 }
 
 function isSectionTitleLine(text: string): boolean {

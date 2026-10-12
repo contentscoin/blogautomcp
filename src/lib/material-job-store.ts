@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { getAppDataDir } from "../../scripts/lib/app-paths";
-import { formatMaterialFailureReference, legacyMaterialFailureCause, normalizeMaterialFailureObservations, safeFailureCode, type MaterialFailureObservation, type MaterialFailureScope } from "../../scripts/lib/material-failure-reference";
+import { formatMaterialFailureReference, legacyMaterialFailureCause, normalizeMaterialApprovalConflict, normalizeMaterialFailureObservations, safeFailureCode, type MaterialApprovalConflict, type MaterialFailureObservation, type MaterialFailureScope } from "../../scripts/lib/material-failure-reference";
 import { readBrandPostPackage } from "./brand-post-package";
 import { materialRevision } from "./material-library";
 
@@ -26,6 +26,7 @@ export interface MaterialJobItem {
   backupCreated?: boolean;
   /** Bounded causal observations bound to exact current content, never raw prompts. */
   failureObservations?: MaterialFailureObservation[];
+  approvalConflict?: MaterialApprovalConflict;
 }
 export interface MaterialJob {
   jobId: string;
@@ -89,6 +90,8 @@ function normalizeStoredFailureCodes(job: MaterialJob): MaterialJob {
     if (errorCode) item.errorCode = errorCode; else delete item.errorCode;
     if (causeCode) item.causeCode = causeCode; else delete item.causeCode;
     if (previousErrorCode) item.previousErrorCode = previousErrorCode; else delete item.previousErrorCode;
+    const approvalConflict = errorCode === "NOT_READY" ? normalizeMaterialApprovalConflict(item.approvalConflict) : undefined;
+    if (approvalConflict) item.approvalConflict = approvalConflict; else delete item.approvalConflict;
     const observations = normalizeMaterialFailureObservations(item.failureObservations).filter(entry => entry.productId === item.productId);
     if (observations.length) item.failureObservations = observations; else delete item.failureObservations;
   }

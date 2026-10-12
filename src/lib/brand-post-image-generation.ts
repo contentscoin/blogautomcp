@@ -1593,7 +1593,9 @@ export async function generateBrandPostImages(options: {
       ...baseResult(index),
       sectionId: target.sectionId,
       imageIntent: target.imageIntent,
-      error: sourceError || (target.imageSource === "seller-original"
+      error: sourceError || (sourceDiagnostics?.status === "incomplete"
+        ? "SOURCE_REVIEW_INCOMPLETE: 판매자 원본 후보 일부의 실제 픽셀 판정이 누락됐습니다. 제한된 추가 검토 후에도 미검토 후보가 남아 원본 부족이나 검증 완료로 처리하지 않았습니다. 기존 원고·사진은 보존했습니다."
+        : target.imageSource === "seller-original"
         ? buildSellerOriginalRepairTarget({ sectionId: target.sectionId || "unknown",
           targetIndex: eligibleTargets.findIndex(eligible => eligible.target === target), diagnostics: sourceDiagnostics })?.message ||
           "IMAGE_SOURCE_BINDING_REQUIRED: 선택한 상품·옵션과 이 원본 사진 슬롯에 맞는 검증 판매자 사진을 배정하지 못했습니다. AI 연출 사진으로 대체하지 않았습니다."

@@ -138,6 +138,14 @@ async function main() {
     const decimalLabel = "사진에는 100.5ml라고 적힌 용기 라벨이 보여요.";
     assert.equal(locatePhotoDescriptionSentence(decimalLabel, `“${decimalLabel}”`), null, "never clip a decimal or erase a product specification");
     assert.equal(locatePhotoDescriptionSentence(body, "“연보라색 제형이 펼쳐져 있고 용기에도 퍼플 코렉팅이 표시돼 있어요.”"), null, "a quote fragment cannot authorize deleting a larger sentence");
+    // Exact assertions from the latest failed LA-rib and Shark materials.
+    // Both are scene-only descriptions, not product facts or performance proof.
+    for (const actualClaim of [
+      "제공된 사진에는 양념한 갈비가 접시에 담긴 모습과 조리 전 고기 모습이 보여요.",
+      "사진처럼 카펫 위를 밀고 지나가는 사용 장면과 잘 맞는 형태예요.",
+    ]) assert.equal(locatePhotoDescriptionSentence(["다른 확인된 근거는 유지합니다.", actualClaim], `본문의 “${actualClaim}”는 실제 사진과 다릅니다.`), actualClaim);
+    for (const factualClaim of ["제공된 사진에는 532ml 용기가 보여요.", "사진처럼 사용시간 45분인 제품을 고르세요."])
+      assert.equal(locatePhotoDescriptionSentence(factualClaim, `“${factualClaim}”`), null, "new photo grammar cannot erase quantities or verified product facts");
     for (const patch of [{ identityMatches: false }, { notice: true }, { mixedOptions: true }, { singlePhotograph: false },
       { noGraphicLayout: false }, { textPolicyMatches: false }, { photoClaimMatches: true }, { reason: "구조가 왜곡됐습니다." }]) {
       const unsafe = await auditPublishImages({ ...input, review: async () => JSON.stringify({ reviews: [{ ...good, ...patch }] }) });
@@ -161,25 +169,121 @@ async function main() {
     assert.equal(events.filter(event => event === "repair_photo_description").length, 1);
     assert.equal(events.filter(event => event === "approve").length, 2);
     assert(!events.some(event => /generate|regenerate|repair_rejected|replan|revise/u.test(event)), "text repair re-audits the SAME image without spending generation");
+    const mixedEvents: string[] = [];
+    let mixedApprovals = 0, mixedMissing = false;
+    await runMaterialPreparation("mixed-badge-photo-description", { pause: async () => {}, call: async (_url, method, data) => {
+      const action = (data as { action?: string })?.action || method; mixedEvents.push(action);
+      if (action === "approve") {
+        mixedApprovals++;
+        if (mixedApprovals === 1) {
+          mixedMissing = true;
+          throw Object.assign(new Error("seller badge and inaccurate photo assertion"), {
+            code: "PUBLISH_IMAGE_AUDIT_FAILED", errors: ["SEMANTIC_REJECTION: added badge", "SEMANTIC_REJECTION: false photo description"],
+            imageAuditFailures: [{ code: "SEMANTIC_REJECTION", rejectionScope: "product" }, { ...failure, findingKey: findingKey(failure.photoDescription!) }],
+          });
+        }
+        if (mixedApprovals === 2) { mixedMissing = true; throw error(); }
+      }
+      if (action === "repair_rejected" || action === "repair_photo_description") mixedMissing = false;
+      return { success: true, data: { approvedAt: mixedApprovals === 3 ? "yes" : null,
+        imageSlots: [{ missing: mixedMissing ? 1 : 0, generationMissing: mixedMissing ? 1 : 0 }], contentQuality: { signals: [] } } };
+    } });
+    assert.equal(mixedApprovals, 3);
+    assert.equal(mixedEvents.filter(event => event === "repair_rejected").length, 1);
+    assert.equal(mixedEvents.filter(event => event === "repair_photo_description").length, 1);
+    assert(!mixedEvents.some(event => /generate_missing|regenerate|replan|revise/u.test(event)), "mixed format/text failure gets one failed-photo replacement and then preserves those exact pixels while fixing prose");
     // The Dalba package already has a durable old rejection before this run.
     // Readiness excludes the retained photograph; diagnosing it must precede
     // any generate_missing call, not wait for the later approve catch.
-    const staleEvents: string[] = [];
-    let staleRepaired = false;
-    await runMaterialPreparation("old-rejected-dalba", { pause: async () => {}, call: async (_url, method, data) => {
-      const action = (data as { action?: string })?.action || method;
-      staleEvents.push(action);
-      if (action === "audit_photo_descriptions") throw error();
-      if (action === "repair_photo_description") staleRepaired = true;
-      if (method === "POST") throw new Error("A retained photo must not be regenerated for a false sentence");
-      return { success: true, data: { connectKind: "SHOPPING", approvedAt: staleEvents.includes("approve") ? "yes" : null,
-        approval: { canApprove: staleRepaired, blockers: staleRepaired ? [] : [{ code: "image-publication-rejected", reason: "본문과 사진 불일치", sectionId: "shopping-section-28267766" }] },
-        imageSlots: [{ sectionId: "shopping-section-28267766", missing: staleRepaired ? 0 : 1, generationMissing: staleRepaired ? 0 : 1 }], contentQuality: { signals: [] } } };
+    for (const imageSource of ["staged-ai", "seller-original"]) {
+      const staleEvents: string[] = [];
+      let staleRepaired = false;
+      await runMaterialPreparation(`old-rejected-${imageSource}`, { pause: async () => {}, call: async (_url, method, data) => {
+        const action = (data as { action?: string })?.action || method;
+        staleEvents.push(action);
+        if (action === "audit_photo_descriptions") throw error();
+        if (action === "repair_photo_description") staleRepaired = true;
+        if (method === "POST") throw new Error("A retained photo must not be regenerated or recollected for a false sentence");
+        return { success: true, data: { connectKind: "SHOPPING", approvedAt: staleEvents.includes("approve") ? "yes" : null,
+          composition: { sections: [{ id: "shopping-section-28267766", imageSource }] },
+          approval: { canApprove: staleRepaired, blockers: staleRepaired ? [] : [{ code: "image-publication-rejected", reason: "본문과 사진 불일치", sectionId: "shopping-section-28267766" }] },
+          imageSlots: [{ sectionId: "shopping-section-28267766", missing: staleRepaired ? 0 : 1, generationMissing: imageSource === "staged-ai" && !staleRepaired ? 1 : 0 }], contentQuality: { signals: [] } } };
+      } });
+      assert(staleEvents.indexOf("audit_photo_descriptions") < staleEvents.indexOf("repair_photo_description"));
+      assert(staleEvents.indexOf("repair_photo_description") < staleEvents.indexOf("approve"));
+      assert.equal(staleEvents.filter(event => event === "repair_photo_description").length, 1);
+      assert(!staleEvents.some(event => /generate|bind_sources|prepare_context/u.test(event)));
+    }
+    // A real badge/layout defect on the retained original is still a source
+    // failure. The earlier diagnostic must never edit prose or spend a scene.
+    for (const scope of ["format", "identity", "unknown"]) {
+      const rejectedEvents: string[] = [];
+      await assert.rejects(runMaterialPreparation(`rejected-original-${scope}`, { pause: async () => {}, call: async (_url, method, data) => {
+        const action = (data as { action?: string })?.action || method; rejectedEvents.push(action);
+        if (action === "audit_photo_descriptions") {
+          if (scope === "unknown") throw Object.assign(new Error("review response lost"), { code: "ECONNRESET" });
+          throw Object.assign(new Error(scope === "format" ? "gold badge outside product" : "wrong model"), {
+            code: "PUBLISH_IMAGE_AUDIT_FAILED", errors: [`SEMANTIC_REJECTION: ${scope}`],
+            imageAuditFailures: [{ code: "SEMANTIC_REJECTION", rejectionScope: "product" }],
+          });
+        }
+        if (action === "bind_sources") return { success: true, code: "IMAGE_SOURCE_BINDING_REQUIRED", errors: ["IMAGE_SOURCE_BINDING_REQUIRED: valid original unavailable"] };
+        return { success: true, data: { connectKind: "SHOPPING", approvedAt: null,
+          composition: { sections: [{ id: "original", imageSource: "seller-original" }] },
+          approval: { canApprove: false, blockers: [{ code: "image-publication-rejected", reason: scope, sectionId: "original" }] },
+          imageSlots: [{ sectionId: "original", missing: 1, generationMissing: 0 }], contentQuality: { signals: [] } } };
+      } }), (value: unknown) => (value as { code?: string }).code === (scope === "unknown" ? "ECONNRESET" : "IMAGE_SOURCE_BINDING_REQUIRED"));
+      assert(!rejectedEvents.some(event => /repair_photo_description|generate|regenerate|repair_rejected|approve/u.test(event)), "format/identity/uncertain failure cannot be repaired by deleting a body sentence");
+      assert.equal(rejectedEvents.filter(event => event === "prepare_context").length, scope === "unknown" ? 0 : 1);
+      if (scope !== "unknown") assert(rejectedEvents.indexOf("audit_photo_descriptions") < rejectedEvents.indexOf("bind_sources"));
+    }
+    // One quoted sentence rejected against two current photos is one text edit.
+    // Use real audit findings and the normal server binding/repair planner.
+    const secondImage = path.join(packageDir, "second-scene.png");
+    await sharp({ create: { width: 320, height: 240, channels: 3, background: "#dddddd" } }).png().toFile(secondImage);
+    const secondSha = crypto.createHash("sha256").update(fs.readFileSync(secondImage)).digest("hex");
+    const firstImageNode = composition.renderNodes[7];
+    const doubleComposition = { ...composition, sections: composition.sections.map(section => section.id === "shopping-section-28267766" ? { ...section, imagePaths: [image, secondImage] } : section),
+      renderNodes: [...composition.renderNodes.slice(0, 8), { ...firstImageNode, assetPath: secondImage }, ...composition.renderNodes.slice(8)] } as BrandPostPackageManifestV2["composition"];
+    const doubleManifest = { ...manifest, composition: doubleComposition, imageAssets: [...manifest.imageAssets!, { ...manifest.imageAssets![0], path: secondImage, sourcePath: secondImage, sha256: secondSha }] };
+    fs.writeFileSync(path.join(packageDir, "manifest.json"), JSON.stringify(doubleManifest));
+    const doubleInput = { ...input, composition: doubleComposition, review: async () => JSON.stringify({ reviews: [good, { ...good, index: 2 }] }) };
+    await assert.rejects(assertPublishImagesSafe(doubleInput), /PUBLISH_IMAGE_AUDIT_FAILED/u);
+    const doubleFindings = readPhotoDescriptionFindings(id);
+    assert.equal(doubleFindings.length, 2);
+    const doubleFailures = doubleFindings.map(finding => ({ code: "SEMANTIC_REJECTION", rejectionScope: "section", photoDescription: finding, findingKey: findingKey(finding) }));
+    let doubleEdits = 0, doubleApprovals = 0;
+    await runMaterialPreparation("double-photo-description", { pause: async () => {}, call: async (_url, method, data) => {
+      const action = (data as { action?: string })?.action;
+      if (action === "approve" && ++doubleApprovals === 1) throw Object.assign(new Error("both photos contradict one assertion"), {
+        code: "PUBLISH_IMAGE_AUDIT_FAILED", errors: doubleFailures.map(() => "SEMANTIC_REJECTION: one false assertion"), imageAuditFailures: doubleFailures,
+      });
+      if (action === "repair_photo_description") {
+        doubleEdits++;
+        const keys = (data as { findingKeys: string[] }).findingKeys;
+        assert.equal(keys.length, 1);
+        const result = planPhotoDescriptionRepair(doubleManifest, markdown, serverPhotoDescriptionFindings(doubleManifest, keys));
+        assert.deepEqual(result.manifest.imageAssets, doubleManifest.imageAssets);
+        assert.equal(result.markdown, markdown.replace(literal, ""));
+      }
+      assert.notEqual(method, "POST", "duplicate photo findings never generate or rewrite");
+      return { success: true, data: { approvedAt: doubleApprovals > 1 ? "yes" : null, imageSlots: [], contentQuality: { signals: [] } } };
     } });
-    assert(staleEvents.indexOf("audit_photo_descriptions") < staleEvents.indexOf("repair_photo_description"));
-    assert(staleEvents.indexOf("repair_photo_description") < staleEvents.indexOf("approve"));
-    assert.equal(staleEvents.filter(event => event === "repair_photo_description").length, 1);
-    assert(!staleEvents.includes("generate_missing"));
+    assert.equal(doubleEdits, 1); assert.equal(doubleApprovals, 2);
+    let conflictingEdits = 0, conflictingGenerations = 0;
+    await assert.rejects(runMaterialPreparation("different-photo-assertions", { pause: async () => {}, call: async (_url, method, data) => {
+      const action = (data as { action?: string })?.action;
+      if (action === "approve") throw Object.assign(new Error("two different false assertions in one section"), {
+        code: "PUBLISH_IMAGE_AUDIT_FAILED", errors: ["SEMANTIC_REJECTION: assertion one", "SEMANTIC_REJECTION: assertion two"],
+        imageAuditFailures: [doubleFailures[0], { ...doubleFailures[1], photoDescription: { ...doubleFindings[1], literalClaim: "사진에는 다른 잘못된 장면이 보여요." } }],
+      });
+      if (action === "repair_photo_description") conflictingEdits++;
+      if (method === "POST") conflictingGenerations++;
+      return { success: true, data: { imageSlots: [], contentQuality: { signals: [] } } };
+    } }), (value: unknown) => (value as { code?: string }).code === "PHOTO_DESCRIPTION_REPAIR_REQUIRED");
+    assert.equal(conflictingEdits, 0); assert.equal(conflictingGenerations, 0, "an unsupported text-only repair must not regenerate correct pixels");
+    assert.deepEqual(fs.readFileSync(image), beforeImage);
+    fs.writeFileSync(path.join(packageDir, "manifest.json"), JSON.stringify(manifest));
     for (const code of ["USER_CANCELLED", "IMAGE_RESUME_REQUIRED", "CODEX_AUTH_REQUIRED", "ECONNRESET"]) {
       let repairs = 0;
       await assert.rejects(runMaterialPreparation(id, { pause: async () => {}, call: async (_url, method, data) => {
@@ -226,7 +330,13 @@ async function main() {
       }
       assert.equal(preflightEvents.filter(event => event === "prepare_context").length, 1, "original refresh is bounded");
     }
-    const server = http.createServer((_request, response) => {
+    const conflict = { gate: "status", claimAcquired: false, observedStatus: "DRAFTING", observedUpdatedAt: "2026-10-12T14:01:43.000Z" };
+    const server = http.createServer((request, response) => {
+      if (request.url === "/approval-conflict") {
+        response.writeHead(409, { "content-type": "application/json" });
+        response.end(JSON.stringify({ success: false, code: "NOT_READY", error: "작성·발행 중이거나 게시 여부 확인이 필요한 소재는 승인할 수 없습니다.", approvalConflict: conflict }));
+        return;
+      }
       response.writeHead(422, { "content-type": "application/json" });
       response.end(JSON.stringify({ success: false, code: "PUBLISH_IMAGE_AUDIT_FAILED", errors: ["SEMANTIC_REJECTION: body mismatch"],
         imageAuditFailures: [{ ...failure, findingKey: findingKey(failure.photoDescription!) }] }));
@@ -236,6 +346,11 @@ async function main() {
     try {
       await assert.rejects(localScheduleCall("/api/brandlinks/test/draft", "PATCH", { action: "approve" }),
         (value: unknown) => (value as { imageAuditFailures?: { findingKey: string }[] }).imageAuditFailures?.[0].findingKey === findingKey(failure.photoDescription!));
+      await assert.rejects(localScheduleCall("/approval-conflict", "PATCH", { action: "approve" }), (value: unknown) => {
+        assert.deepEqual((value as { approvalConflict?: unknown }).approvalConflict, conflict);
+        assert.equal((value as { httpStatus?: number }).httpStatus, 409);
+        return true;
+      });
     } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
     console.log("PASS: exact Dalba photo assertion correction, same-image re-audit, server finding binding, identity/format/unknown guards, bounded original preflight and structured HTTP transport");
   } finally {
