@@ -869,7 +869,8 @@ export async function resolveCompletedProductImage(options: {
     const sectionTitle = options.target.role === "hero" ? options.manifest.title : nodes.flatMap(node => node.kind === "heading" || node.kind === "quotation" ? [node.text] : []).join("\n");
     const sectionBody = options.target.role === "hero" ? "" : nodes.flatMap(node => node.kind === "paragraph" ? [node.text] : []).join("\n\n");
     if (!sectionBody.trim() && !sectionTitle.trim()) throw new Error("IMAGE_RESUME_REQUIRED: 복구 검수에 필요한 최종 게시 본문 또는 소제목이 없습니다. 이전 계획 문구로 승인하지 않았습니다.");
-    const data = { version: "product-image-resolution/v1", slotId: binding.slotId, sourceSnapshotId: binding.sourceSnapshotId,
+    const data = { version: "product-image-resolution/v2", selectionPolicy: "exact-request-passed-sha256/v1",
+      slotId: binding.slotId, sourceSnapshotId: binding.sourceSnapshotId,
       sourceSnapshot: options.manifest.sourceSnapshot, referencePaths: context.referenceImagePaths, referenceHashes: binding.referenceHashes,
       reference: context.reference, anchorSha256: context.anchorSha256 || null, productName: options.productName,
       sectionId: options.target.sectionId, sectionTitle, sectionBody, role: options.target.role, imageSource: options.target.imageSource,
@@ -909,8 +910,12 @@ export async function resolveCompletedProductImage(options: {
     }
   }
   assertCurrent();
-  if (accepted.length !== 1) throw new Error(`IMAGE_OUTPUT_AMBIGUOUS: 기존 생성 후보 ${initialSet.candidates.length}개 중 현재 원본·본문 검수 통과 ${accepted.length}개입니다. 유일한 통과 후보를 확인하지 못해 채택하지 않았습니다. ${outcomes.map(item => item.reason).join("; ")}`);
-  const chosen = accepted[0];
+  if (!accepted.length) throw new Error(`REFERENCE_SCENE_FIDELITY_FAILED: 완료된 생성 후보 ${initialSet.candidates.length}개 모두 현재 원본·본문 검수를 통과하지 못했습니다. 기존 파일을 보존했습니다. ${outcomes.map(item => item.reason).join("; ")}`);
+  // Alternatives of this one proven completed request are not competing requests.
+  // Every candidate still needs current full QA. A stable byte order picks one
+  // passing photograph without spending another generation or deleting outputs.
+  const chosen = [...accepted].sort((a, b) => a.candidate.sha256 < b.candidate.sha256 ? -1 :
+    a.candidate.sha256 > b.candidate.sha256 ? 1 : 0)[0];
   const directory = path.join(options.workDir, "resolutions", initial.hash);
   const outputPath = path.join(directory, `selected-${chosen.candidate.sha256}${path.extname(chosen.candidate.path).toLowerCase()}`);
   const recordPath = path.join(directory, "resolution.json");
@@ -927,7 +932,7 @@ export async function resolveCompletedProductImage(options: {
   }
   if (sha256File(outputPath) !== chosen.candidate.sha256) throw refused();
   assertCurrent();
-  if (!fs.existsSync(recordPath)) atomicWriteTextFile(recordPath, JSON.stringify({ version: "product-image-resolution/v1",
+  if (!fs.existsSync(recordPath)) atomicWriteTextFile(recordPath, JSON.stringify({ version: "product-image-resolution/v2",
     bindingHash: initial.hash, binding: initial.data, chosen: { ...chosen.candidate, outputPath }, review: chosen.review, candidateReviews: outcomes }));
   assertCurrent();
   return await finishReviewedShoppingScene({ ...options, rawPath: outputPath, review: chosen.review });

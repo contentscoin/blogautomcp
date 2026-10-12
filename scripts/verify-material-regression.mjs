@@ -11,8 +11,12 @@ const checks = [
   'verify-product-section-image-review.ts', 'verify-publish-image-audit.ts',
   'verify-image-coverage-replan.ts', 'verify-material-image-recovery.ts',
   'verify-material-approval-semantics.ts', 'verify-scheduled-draft-workflow.ts',
+  'verify-material-publication-receipt.ts',
+  'verify-material-failure-reference.ts',
   'verify-photo-description-recovery.ts',
   'verify-shopping-prewrite-photos.ts',
+  'verify-prepared-draft-reference.ts',
+  'verify-published-editor-audit.ts',
   'verify-travel-draft-resilience.ts', 'verify-naver-schedule-submission.ts',
 ];
 for (const check of checks) {

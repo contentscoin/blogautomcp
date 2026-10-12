@@ -6,6 +6,7 @@ import {
 import { getBrandPostPackageDir, readBrandPostPackage, type BrandPostPackageImageAsset, type BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
 import { reconcileBrandPostImageContinuity } from "../src/lib/brand-post-image-continuity";
 import { isDraftEditorialQualityPassed } from "../src/lib/brand-post-quality-display";
+import { readMaterialFailureReferenceForProduct } from "../src/lib/material-job-store";
 import { parseNaverPublishedUrl } from "../src/lib/naver-published-url";
 import { readPublishAttempt, updatePublishAttempt, interruptedPublishStatus, publicationMaterialHash } from "../src/lib/publish-attempt";
 import { verifyReservedPostInNaverList } from "./lib/naver-schedule-list-verifier";
@@ -253,7 +254,14 @@ import {
   type ResolvedPostDocumentV1,
 } from "../src/lib/post-composition-contract";
 import { buildSelectedProductImageAuditContext, assertPublishImagesSafe, PublishImageAuditError } from "./lib/publish-image-audit";
-import { assertPublishedEditorText, publishedReadinessSections } from "./lib/published-editor-audit";
+import { publishedReadinessSections } from "./lib/published-editor-audit";
+import {
+  assertNaverEditorBody,
+  editorBodyAuditDiagnostic,
+  readNaverEditorBodySnapshot,
+  type NaverEditorAuditPhase,
+  type NaverEditorBodySnapshot,
+} from "./lib/naver-editor-body";
 
 // Stealth 플러그인 적용 (봇 감지 우회)
 chromium.use(StealthPlugin());
@@ -5046,6 +5054,7 @@ async function step2_generatePostAfterPreflight(product: ProductInfo, brandLink:
     product: { name: product.name, description: product.description, features: product.features },
     productUnderstanding,
     publicationPhotoContext: product.publicationPhotoContext,
+    failureReference: productId ? readMaterialFailureReferenceForProduct(productId, product.prewritingPhotoProof?.snapshot.snapshotId) : "",
     minimumSections: minimumBodySectionCount,
     maximumSections: maximumBodySectionCount,
     targetCharacters: compositionContract.targetCharacters,
@@ -7948,6 +7957,40 @@ async function inputNaverHeading(page: Page, text: string, editorial?: import(".
   return headingApplied && bodyApplied;
 }
 
+async function assertCurrentEditorDocument(
+  page: Page,
+  document: ResolvedPostDocumentV1,
+  phase: NaverEditorAuditPhase,
+): Promise<void> {
+  let snapshot: NaverEditorBodySnapshot;
+  try {
+    snapshot = await page.evaluate(readNaverEditorBodySnapshot);
+  } catch {
+    snapshot = {
+      version: "naver-editor-body/v1", scope: "missing", reason: "dom-read-failed",
+      rootSelector: null, rootCount: 0, componentCount: 0, excludedTitleCount: 0,
+      excludedUiCount: 0, leadingContent: "none", text: "", textLength: 0, unscopedTextPrefix: "", components: [],
+    };
+  }
+  try {
+    assertNaverEditorBody(document, snapshot, phase);
+  } catch (error) {
+    const first = document.renderNodes[0];
+    const diagnostic = editorBodyAuditDiagnostic(snapshot, phase, getErrorMessage(error), first?.kind === "disclosure" ? first.text : "");
+    console.error(`   편집기 본문 검증 진단: ${JSON.stringify(diagnostic)}`);
+    try {
+      const directory = path.join(process.cwd(), "logs", "manual", "editor-audit");
+      fs.mkdirSync(directory, { recursive: true });
+      const diagnosticPath = path.join(directory, `${createTimestampLabel()}-${process.pid}-${phase}.json`);
+      fs.writeFileSync(diagnosticPath, JSON.stringify(diagnostic, null, 2), "utf8");
+      console.log(`   편집기 본문 진단 저장: ${path.relative(process.cwd(), diagnosticPath)}`);
+    } catch {
+      console.log("   편집기 본문 진단 파일 저장 실패(발행 차단 유지)");
+    }
+    throw error;
+  }
+}
+
 async function renderResolvedPostDocument(
   page: Page,
   document: ResolvedPostDocumentV1,
@@ -7982,6 +8025,10 @@ async function renderResolvedPostDocument(
       const sectionId = node.kind === "paragraph" ? node.sectionId : null;
       const applyStyle = !batchWrite || shouldApplyBodyStyle(bodyStyleState, sectionId);
       await inputPlainParagraph(page, node.text, document.editorial, { applyStyle });
+      if (renderIndex === 0 && node.kind === "disclosure" && node.placement === "top") {
+        // Confirm the actual body before uploading images or inserting affiliate cards.
+        await assertCurrentEditorDocument(page, document, "disclosure");
+      }
       if (batchWrite && applyStyle) markBodyStyleReady(bodyStyleState, sectionId);
       continue;
     }
@@ -8177,11 +8224,7 @@ async function step5and6_uploadAndWrite(
     if (expectedConnectCardCount > 0 && result.connectCardCount < expectedConnectCardCount && options.shoppingConnectUrl) {
       throw new Error(`커넥트 카드 삽입 결과가 부족합니다: ${result.connectCardCount}/${expectedConnectCardCount}`);
     }
-    const editorText = await page.evaluate(() => {
-      const root = document.querySelector(".se-main-container") || document.querySelector(".se-content");
-      return root ? (root as HTMLElement).innerText : "";
-    });
-    assertPublishedEditorText(options.resolvedDocument, editorText);
+    await assertCurrentEditorDocument(page, options.resolvedDocument, "final");
     return;
   }
   

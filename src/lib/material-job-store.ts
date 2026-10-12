@@ -2,6 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { getAppDataDir } from "../../scripts/lib/app-paths";
+import { formatMaterialFailureReference, legacyMaterialFailureCause, normalizeMaterialFailureObservations, safeFailureCode, type MaterialFailureObservation, type MaterialFailureScope } from "../../scripts/lib/material-failure-reference";
+import { readBrandPostPackage } from "./brand-post-package";
+import { materialRevision } from "./material-library";
 
 export type MaterialItemStatus = "queued" | "preparing" | "ready" | "publishing" | "published" | "scheduled" | "failed" | "outcome_unknown" | "interrupted";
 export interface MaterialJobItem {
@@ -21,6 +24,8 @@ export interface MaterialJobItem {
   previousErrorCode?: string;
   verificationStatus?: "BLOCKED" | "DRAFT_MISSING" | "READY";
   backupCreated?: boolean;
+  /** Bounded causal observations bound to exact current content, never raw prompts. */
+  failureObservations?: MaterialFailureObservation[];
 }
 export interface MaterialJob {
   jobId: string;
@@ -38,12 +43,8 @@ export interface MaterialJob {
   items: MaterialJobItem[];
 }
 
-const SAFE_MATERIAL_ERROR_CODE = /^[A-Z][A-Z0-9_]{1,79}$/u;
-
 export function safeMaterialErrorCode(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const normalized = value.trim().toUpperCase();
-  return SAFE_MATERIAL_ERROR_CODE.test(normalized) ? normalized : undefined;
+  return safeFailureCode(value);
 }
 
 /** Preserve the legacy summary without serializing Error.name, cause or stack. */
@@ -61,10 +62,18 @@ export function materialJobFailureCodes(error: unknown): { errorCode?: string; c
   let current: unknown = error;
   while (current && typeof current === "object" && !seen.has(current) && seen.size < 8) {
     seen.add(current);
-    const record = current as { code?: unknown; cause?: unknown };
+    const record = current as { code?: unknown; causeCode?: unknown; cause?: unknown };
     const code = safeMaterialErrorCode(record.code);
     if (code && !codes.includes(code)) codes.push(code);
+    const causeCode = safeMaterialErrorCode(record.causeCode);
+    if (causeCode && !codes.includes(causeCode)) codes.push(causeCode);
     current = record.cause;
+  }
+  // Legacy detached publication stored the outer PUBLISH_FAILED plus a cause
+  // marker in its summary. Preserve only one unambiguous known cause code.
+  if (codes[0] === "PUBLISH_FAILED" && !codes[1]) {
+    const causeCode = legacyMaterialFailureCause(materialJobErrorMessage(error));
+    if (causeCode && causeCode !== codes[0]) codes.push(causeCode);
   }
   return {
     ...(codes[0] ? { errorCode: codes[0] } : {}),
@@ -80,6 +89,8 @@ function normalizeStoredFailureCodes(job: MaterialJob): MaterialJob {
     if (errorCode) item.errorCode = errorCode; else delete item.errorCode;
     if (causeCode) item.causeCode = causeCode; else delete item.causeCode;
     if (previousErrorCode) item.previousErrorCode = previousErrorCode; else delete item.previousErrorCode;
+    const observations = normalizeMaterialFailureObservations(item.failureObservations).filter(entry => entry.productId === item.productId);
+    if (observations.length) item.failureObservations = observations; else delete item.failureObservations;
   }
   return job;
 }
@@ -128,6 +139,50 @@ export function listMaterialJobs(): MaterialJob[] {
   if (!fs.existsSync(directory())) return [];
   return fs.readdirSync(directory()).filter(file => /^[a-f0-9-]{36}\.json$/.test(file))
     .map(file => readMaterialJob(file.slice(0, -5))!).sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+}
+
+/** Read-only writer hook. Missing/stale/corrupt history never prevents writing. */
+export function readMaterialFailureObservationsForProduct(productId: string): MaterialFailureObservation[] {
+  try {
+    if (!/^[a-zA-Z0-9_-]{8,80}$/u.test(productId) || !fs.existsSync(directory())) return [];
+    // Do not use readMaterialJob: it repairs stale job status on disk. Writing
+    // only reads the newest bounded observations and cannot revive a job.
+    const files = fs.readdirSync(directory()).filter(file => /^[a-f0-9-]{36}\.json$/u.test(file))
+      .map(file => ({ file, modified: fs.statSync(path.join(directory(), file)).mtimeMs }))
+      .sort((a, b) => b.modified - a.modified).slice(0, 48);
+    const observations: MaterialFailureObservation[] = [];
+    for (const { file } of files) {
+      try {
+        const target = path.join(directory(), file);
+        if (fs.statSync(target).size > 2 * 1024 * 1024) continue;
+        const job = JSON.parse(fs.readFileSync(target, "utf8")) as MaterialJob;
+        if (!Array.isArray(job.items)) continue;
+        const matching = job.items.filter(item => item.productId === productId);
+        for (const item of matching) observations.push(...normalizeMaterialFailureObservations(item.failureObservations));
+      } catch { /* One corrupt legacy record does not block current writing. */ }
+    }
+    observations.sort((a, b) => a.at.localeCompare(b.at));
+    return normalizeMaterialFailureObservations(observations).filter(entry => entry.productId === productId);
+  } catch { return []; }
+}
+
+export function readMaterialFailureScopeForProduct(productId: string): MaterialFailureScope | null {
+  try {
+    const manifest = readBrandPostPackage(productId, { migrate: false });
+    if (!manifest) return null;
+    const contextSignature = manifest.sourceSnapshot?.snapshotId;
+    return { productId, revision: materialRevision(manifest),
+      ...(contextSignature && /^[a-f0-9]{64}$/u.test(contextSignature) ? { contextSignature } : {}),
+    };
+  } catch { return null; }
+}
+
+export function readMaterialFailureReferenceForProduct(productId: string, expectedContextSignature?: string): string {
+  try {
+    const current = readMaterialFailureScopeForProduct(productId);
+    if (!current || (expectedContextSignature && expectedContextSignature !== current.contextSignature)) return "";
+    return formatMaterialFailureReference(readMaterialFailureObservationsForProduct(productId), current);
+  } catch { return ""; }
 }
 // OS-exclusive creation also protects separate server workers. A live owner's lock
 // is never stolen just because generation takes longer than expected.

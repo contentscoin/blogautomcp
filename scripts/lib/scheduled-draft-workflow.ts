@@ -9,6 +9,7 @@ import {
 } from "./quality-convergence";
 import { productRecoveryStageForFailure } from "./product-9canvas";
 import type { PhotoDescriptionFinding } from "./photo-description-finding";
+import { legacyMaterialFailureCause, MAX_MATERIAL_FAILURE_REFERENCE_CHARS } from "./material-failure-reference";
 
 export interface Result {
   success: boolean; code?: string; error?: string; errors?: string[]; message?: string;
@@ -250,9 +251,12 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
   beforeRewrite?: () => Promise<void>;
   incrementalOnly?: boolean;
   beforeRepair?: () => Promise<void>;
+  /** Server-owned formatted observations; never raw log/error text. */
+  failureReference?: string;
 } = {}) {
   const base = `/api/brandlinks/${encodeURIComponent(id)}`;
   const check = bounded(deps, 90 * 60_000);
+  let activeFailureReference = options.failureReference || "";
   // These exact 409 responses occur before a handler obtains its DB claim.
   // An auth/transport failure or an active/unknown owner never permits replay.
   const claimedCall: Call = async (pathname, method, body) => {
@@ -308,6 +312,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     // New and existing materials converge through the same saved-draft repair
     // engine below. Avoid spending a separate hidden repair budget during POST.
     draft = await deps.call(`${base}/draft`, "POST", { autoApprove: false, autoSectionImages: false, autoQualityRepair: false });
+    activeFailureReference = "";
   }
   const waitForImagesIdle = async () => {
     if (draft.data?.imageGeneration?.recoveryState === "owner-unknown") throw Object.assign(new Error("이전 이미지 작업의 실행 여부를 확인할 수 없습니다. 기존 결과를 확인한 뒤 복구하세요."), { code: "IMAGE_RESUME_REQUIRED" });
@@ -340,6 +345,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
       });
     }
     sourceRefreshAttempted = true;
+    activeFailureReference = "";
     check();
     deps.onStage?.("상품 상세 근거 다시 수집");
     // The POST writes a server-owned context file. The following PATCH decides
@@ -357,17 +363,22 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     revised = true;
     deps.onStage?.("근거 기반 원고 자동 보강 (최대 3회 후보 검수)");
     const targets = formatQualityConvergenceInstructions(plan);
+    const baseInstructions = [
+      "[자동 품질 수렴 계획]", plan.reason, targets,
+      "저장된 출처 근거만 사용하고 상품명·SEO 키워드·가격·쿠폰만으로 성분·성능·체험을 추정하지 마세요.",
+      "이미 통과한 문단 역할과 이미지 의미는 유지하고 실패 항목만 보강하세요.",
+    ].filter(Boolean).join("\n");
+    if (baseInstructions.length > 2_000) throw Object.assign(new Error("현재 보강 대상 지시가 수정 입력 한도를 초과했습니다. 실패 항목을 구체적인 단위로 나눠 확인하세요."), { code: "QUALITY_REPAIR_TARGETS_OVERSIZED" });
+    let instructions = baseInstructions;
+    for (const line of activeFailureReference.slice(0, MAX_MATERIAL_FAILURE_REFERENCE_CHARS).split("\n")) {
+      if (!line || (instructions + "\n" + line).length > 2_000) break;
+      instructions += "\n" + line;
+    }
     draft = await deps.call(`${base}/draft`, "PATCH", {
       action: "revise",
       qualityConvergence: true,
       ...(options.incrementalOnly ? { incrementalOnly: true } : {}),
-      instructions: [
-        "[자동 품질 수렴 계획]",
-        plan.reason,
-        targets,
-        "저장된 출처 근거만 사용하고 상품명·SEO 키워드·가격·쿠폰만으로 성분·성능·체험을 추정하지 마세요.",
-        "이미 통과한 문단 역할과 이미지 의미는 유지하고 실패 항목만 보강하세요.",
-      ].filter(Boolean).join("\n"),
+      instructions,
     });
   };
   const sourceEvidenceError = (plan: QualityConvergencePlan) => Object.assign(
@@ -399,6 +410,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     check();
     deps.onStage?.("오래된 원고 품질 미달 · 현재 기준으로 새로 작성");
     draft = await deps.call(`${base}/draft`, "POST", { autoApprove: false, autoSectionImages: false, autoQualityRepair: false });
+    activeFailureReference = "";
     await waitForImagesIdle();
     previousReadiness = null;
     plan = await recheck();
@@ -417,6 +429,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
       await ensureRewritePrepared();
       deps.onStage?.("기존 원고 백업 완료 · 최신 근거로 한 번 재작성");
       draft = await deps.call(`${base}/draft`, "POST", { autoApprove: false, autoSectionImages: false, autoQualityRepair: false });
+      activeFailureReference = "";
       await waitForImagesIdle();
       previousReadiness = null;
       plan = await recheck();
@@ -624,8 +637,9 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
   }
   // Approval executes the same final pixel audit as publication, even for a
   // previously READY package. Only definitive image findings allow one repair.
-  // A rejected image the post can do without is dropped (and its section requirement relaxed
-  // when three images remain) instead of failing an otherwise publishable material.
+  // Rejected slots can be replanned only while preserving the shopping contract:
+  // one verified original, three accepted natural scenes and one thumbnail.
+  // Five accepted images and each section's required coverage remain compulsory.
   // It has its own recovery key so an earlier image-stage replan cannot use it up.
   const dropRejectedAndApprove = async (cause: unknown) => {
     deps.onStage?.("반복 거절 이미지 제외 · 남은 이미지로 구성 재확인");
@@ -742,7 +756,9 @@ export async function runAutomaticDraftWorkflow(id: string, publication: { publi
     if (result.data?.status !== "PUBLISHING") {
       const verified = result.data?.status === "FAILED" ? await deps.call(`${base}/verify`, "GET") : null;
       const failedBeforeSubmit = verified?.data?.attemptStage === "FAILED_BEFORE_SUBMIT";
-      throw Object.assign(new Error(result.data?.errorMessage || `발행 결과 미확인: ${result.data?.status || "MISSING"}`), { code: failedBeforeSubmit ? "PUBLISH_FAILED" : "OUTCOME_UNKNOWN" });
+      const message = result.data?.errorMessage || `발행 결과 미확인: ${result.data?.status || "MISSING"}`;
+      const causeCode = failedBeforeSubmit ? legacyMaterialFailureCause(message) : undefined;
+      throw Object.assign(new Error(message), { code: failedBeforeSubmit ? "PUBLISH_FAILED" : "OUTCOME_UNKNOWN", ...(causeCode ? { causeCode } : {}) });
     }
     await deps.pause();
   }

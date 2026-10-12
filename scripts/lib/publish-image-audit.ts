@@ -6,6 +6,7 @@ import path from "node:path";
 import type { BrandPostPackageImageAsset } from "../../src/lib/brand-post-package";
 import crypto from "node:crypto";
 import sharp from "sharp";
+import { getProjectRoot } from "./app-paths";
 import { resolveTextReasoningEffort } from "./text-model-policy";
 import { readSuccessfulImageAuditReceipt, writeSuccessfulImageAuditReceipt, invalidateSuccessfulImageAuditReceipt, withSuccessfulImageAuditLock } from "./publish-image-audit-receipt";
 import { buildProduct9Canvas, selectedProductContextFrom9Canvas, type Product9Canvas } from "./product-9canvas";
@@ -66,6 +67,8 @@ export interface PublishImageAuditResult {
 }
 export interface PublishImageAuditOptions {
   brandLinkId?: string;
+  /** Server-computed saved-material binding; never supplied by a remote client. */
+  readinessBindingKey?: string;
   /** Explicit re-audit revokes the old success before contacting the model. */
   forceReview?: boolean;
   productName: string;
@@ -478,6 +481,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
     // prompt. Temporary snapshot paths are replaced by the original byte hashes.
     const receiptKey = crypto.createHash("sha256").update(JSON.stringify({
       policy: "final-publication-image-audit/v2-natural-photo",
+      policyFingerprint: publicationImageAuditPolicyFingerprint(),
       transport: { maximumImageBytes: PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES, maximumImages: PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT },
       selectedSource: selectedSourceIdentity,
       images: candidates.map(candidate => ({ nodeIndex: candidate.nodeIndex, sha256: candidate.sha256,
@@ -619,7 +623,8 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
     }
     result.ok = result.failures.length === 0;
     if (receiptId) {
-      if (result.ok && !reused) writeSuccessfulImageAuditReceipt(receiptId, receiptKey);
+      if (result.ok && (!reused || options.readinessBindingKey))
+        writeSuccessfulImageAuditReceipt(receiptId, receiptKey, options.readinessBindingKey);
       else if (!result.ok) invalidateSuccessfulImageAuditReceipt(receiptId);
     }
     return result;
@@ -659,6 +664,39 @@ const VISUAL_REVIEW_SCHEMA = {
   required: ["reviews"],
   additionalProperties: false,
 } as const;
+
+export const PUBLICATION_IMAGE_AUDIT_POLICY_FILES = [
+  "scripts/lib/publish-image-audit.ts", "scripts/lib/product-image-visual-contract.ts",
+  "scripts/lib/shopping-image-format.ts", "scripts/lib/product-photo-provenance.ts",
+  "scripts/lib/selected-gallery-comparison.ts", "scripts/lib/product-image-selection.ts",
+  "scripts/lib/product-photo-source.ts", "scripts/lib/product-9canvas.ts",
+  "scripts/lib/unbranded-product.ts", "scripts/lib/publication-image-geometry.ts",
+  "scripts/lib/text-model-policy.ts", "scripts/lib/draft-runtime-policy.json",
+  "src/lib/brand-post-image-evidence.ts", "src/lib/draft-context-snapshot.ts",
+  "src/lib/post-composition-contract.ts",
+] as const;
+
+/** Stable across tsx and separately bundled API consumers. Packaged desktop
+ * runtime includes these canonical source files. Missing source fails closed;
+ * absolute installation paths and compiler-generated function names are not
+ * policy identity. Exact publication request-byte receipts remain independent. */
+export function publicationImageAuditPolicyFingerprint(): string {
+  const hash = crypto.createHash("sha256").update(JSON.stringify({
+    rules: [NOTICE_PIXELS_RULE, BALANCED_VISIBLE_DEFECT_RULE, SINGLE_PHOTOGRAPH_RULE,
+      NATURAL_SCENE_INTENT_RULE, COMPONENT_APPEARANCE_RULE, THUMBNAIL_PHOTOGRAPH_RULE,
+      MIXED_OPTIONS_RULE, CATALOG_OPTION_IDENTITY_RULE, VISIBLE_IDENTITY_DECISION_RULE,
+      PHOTO_CLAIM_DECISION_RULE, LITERAL_PHOTO_CLAIM_RULE, ACCEPTED_DECISION_RULE,
+      FINAL_REASON_RULE, PRODUCT_IMAGE_VISUAL_CONTRACT_RULES_EN, UNBRANDED_COMMODITY_IDENTITY_RULE_EN],
+    schema: VISUAL_REVIEW_SCHEMA,
+    transport: [PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES, PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT],
+    reasoningEffort: resolveTextReasoningEffort(),
+  }));
+  for (const relative of PUBLICATION_IMAGE_AUDIT_POLICY_FILES) {
+    hash.update(JSON.stringify({ relative }));
+    hash.update(fs.readFileSync(path.join(getProjectRoot(), relative)));
+  }
+  return hash.digest("hex");
+}
 
 function booleanValue(value: unknown): boolean | null {
   if (typeof value === "boolean") return value;

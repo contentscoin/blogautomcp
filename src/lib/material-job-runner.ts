@@ -1,4 +1,5 @@
-import { materialJobErrorMessage, materialJobFailureCodes, type MaterialJob, saveMaterialJob } from "./material-job-store";
+import { materialJobErrorMessage, materialJobFailureCodes, readMaterialFailureObservationsForProduct, readMaterialFailureScopeForProduct, type MaterialJob, saveMaterialJob } from "./material-job-store";
+import { formatMaterialFailureReference, materialFailurePhase, normalizeMaterialFailureObservations, type MaterialFailureObservation, type MaterialFailurePhase } from "../../scripts/lib/material-failure-reference";
 import { getMaterial } from "./material-library";
 import { runMaterialPreparation, runAutomaticDraftWorkflow, localScheduleCall, isUncertainLocalTransportError, isSessionWidePreparationFailureCode, type Call } from "../../scripts/lib/scheduled-draft-workflow";
 import { automaticPublishingCancellationCheck } from "./desktop-activity";
@@ -19,6 +20,7 @@ export async function runMaterialJob(job: MaterialJob, deps: {
   validateFailed?: (id: string, job: MaterialJob) => Promise<boolean>;
   validateRepair?: (id: string, job: MaterialJob) => Promise<boolean>;
   backup?: (id: string, jobId: string) => string | null;
+  failureHistory?: (id: string) => MaterialFailureObservation[];
 } = {
   call: localScheduleCall as Call,
   material: getMaterial,
@@ -35,6 +37,19 @@ export async function runMaterialJob(job: MaterialJob, deps: {
       deps.save(job); continue;
     }
     let submissionRequested = false;
+    let failurePhase: MaterialFailurePhase = "planning";
+    let protectedAssetShas: string[] = [];
+    let latestSectionIds: string[] = [];
+    let previousObservations = normalizeMaterialFailureObservations(item.failureObservations).filter(entry => entry.productId === item.productId);
+    let failureReference = "";
+    try {
+      previousObservations = normalizeMaterialFailureObservations([
+        ...(deps.failureHistory || readMaterialFailureObservationsForProduct)(item.productId), ...previousObservations,
+      ]).filter(entry => entry.productId === item.productId);
+      failureReference = formatMaterialFailureReference(previousObservations, {
+        ...readMaterialFailureScopeForProduct(item.productId), productId: item.productId, revision: deps.material(item.productId)?.revision,
+      });
+    } catch { /* Failure history is diagnostic; it never breaks current work. */ }
     try {
       deps.checkCancelled();
       if (job.kind === "rewrite") {
@@ -53,6 +68,9 @@ export async function runMaterialJob(job: MaterialJob, deps: {
         pause: deps.pause,
         call: async (url: string, method: string, body?: object) => {
           deps.checkCancelled();
+          if (method !== "GET" || url.endsWith("/verify")) {
+            failurePhase = materialFailurePhase(url, method, (body as { action?: string } | undefined)?.action);
+          }
           if (job.kind === "repair" && method === "POST" && url.endsWith("/draft") &&
               (body as { action?: string } | undefined)?.action !== "prepare_context") {
             throw Object.assign(new Error("소재 보완에서는 기존 원고 전체를 다시 작성하지 않습니다."), { code: "MATERIAL_REPAIR_REWRITE_FORBIDDEN" });
@@ -64,7 +82,15 @@ export async function runMaterialJob(job: MaterialJob, deps: {
             // A lost response cannot tell us whether the external submission began.
             submissionRequested = true;
           }
-          try { return await deps.call(url, method, body); }
+          try {
+            const result = await deps.call(url, method, body);
+            if (url.endsWith("/draft") && result.data) {
+              protectedAssetShas = (result.data.imageAssets || []).map(asset => asset.sha256 || "");
+              latestSectionIds = (result.data.imageSlots || []).filter(slot => Math.max(slot.missing, slot.generationMissing) > 0)
+                .map(slot => slot.sectionId || "");
+            }
+            return result;
+          }
           catch (error) {
             if (job.kind !== "publish" && method !== "GET" && isUncertainLocalTransportError(error)) {
               throw Object.assign(new Error("소재 준비 요청의 응답이 끊겼습니다. 작성이 계속될 수 있으므로 다음 상품 시작을 중지했습니다. 저장된 소재의 진행상태를 확인하세요.", { cause: error }), { code: "PREPARATION_RESULT_UNCERTAIN" });
@@ -84,6 +110,7 @@ export async function runMaterialJob(job: MaterialJob, deps: {
       };
       if (job.kind !== "publish") {
         await runMaterialPreparation(item.productId, workflow, job.kind === "rewrite" ? {
+          failureReference,
           rewriteFailed: true,
           beforeRewrite: async () => {
             deps.checkCancelled();
@@ -95,6 +122,7 @@ export async function runMaterialJob(job: MaterialJob, deps: {
             deps.save(job);
           },
         } : job.kind === "repair" ? {
+          failureReference,
           incrementalOnly: true,
           beforeRepair: async () => {
             deps.checkCancelled();
@@ -106,7 +134,7 @@ export async function runMaterialJob(job: MaterialJob, deps: {
             item.backupCreated = true;
             deps.save(job);
           },
-        } : {});
+        } : { failureReference });
         const current = deps.material(item.productId);
         if (!current?.ready) throw new Error(current?.blockers.join(" ") || "소재 준비 결과를 확인할 수 없습니다.");
         item.revision = current.revision; item.status = "ready"; item.stage = "소재 준비 완료 · 발행할 항목을 선택하세요";
@@ -141,6 +169,15 @@ export async function runMaterialJob(job: MaterialJob, deps: {
       if (job.kind === "repair" && code === "MATERIAL_REPAIR_SELECTION_CHANGED") item.status = "interrupted";
       item.error = materialJobErrorMessage(error);
       Object.assign(item, failureCodes);
+      const causalCode = failureCodes.causeCode || failureCodes.errorCode;
+      if (causalCode === "EDITOR_DISCLOSURE_MISMATCH" || causalCode === "SHOPPING_CARD_INSERT_FAILED") failurePhase = "editor";
+      else if (causalCode === "PUBLISH_IMAGE_AUDIT_FAILED") failurePhase = "review";
+      let currentRevision: string | undefined;
+      let contextSignature: string | undefined;
+      try { currentRevision = deps.material(item.productId)?.revision; } catch { /* Keep a scope-less observation; never feed it to a writer. */ }
+      try { contextSignature = readMaterialFailureScopeForProduct(item.productId)?.contextSignature; } catch { /* A missing context cannot be inferred. */ }
+      const typedSections = (error as { imageAuditFailures?: Array<{ photoDescription?: { sectionId?: string } }> })?.imageAuditFailures
+        ?.flatMap(finding => finding.photoDescription?.sectionId ? [finding.photoDescription.sectionId] : []) || [];
       if (job.kind === "rewrite" || job.kind === "repair") {
         try {
           const current = deps.material(item.productId);
@@ -155,6 +192,16 @@ export async function runMaterialJob(job: MaterialJob, deps: {
       if (isSessionWidePreparationFailureCode(code)) stopped = true;
       try { deps.checkCancelled(); } catch { stopped = true; }
       if (stopped) stoppedFailureCodes = failureCodes;
+      // The request callback updates this phase; TypeScript does not model
+      // assignments performed by an awaited callback in its control-flow graph.
+      const observedPhase = failurePhase as MaterialFailurePhase;
+      item.failureObservations = normalizeMaterialFailureObservations([...previousObservations, {
+        version: 1, productId: item.productId, revision: currentRevision, contextSignature, phase: observedPhase, ...failureCodes,
+        sectionIds: typedSections.length ? typedSections : observedPhase === "images" ? latestSectionIds : [],
+        protectedAssetShas, attempt: Math.max(0, ...previousObservations.map(entry => entry.attempt)) + 1,
+        outcome: item.status === "outcome_unknown" || code === "PREPARATION_RESULT_UNCERTAIN" ? "uncertain" : item.status === "interrupted" ? "interrupted" : "failed",
+        at: new Date().toISOString(),
+      }]);
     }
     deps.save(job);
     (job.events ??= []).push({ at: new Date().toISOString(), productId: item.productId, stage: item.stage, status: item.status });

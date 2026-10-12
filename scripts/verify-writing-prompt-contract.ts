@@ -104,6 +104,20 @@ const budgetedMemoPrompt = composeBudgetedWritingPrompt({ contract: memoContract
   evidence: "원본 근거".repeat(10000), maxChars: 6000 });
 assert.ok(budgetedMemoPrompt.includes(memo), "Evidence truncation cannot remove requirements");
 assert.ok(budgetedMemoPrompt.length <= 6000);
+const learnedContract = evaluateInitializer<ReturnType<typeof createWritingPromptContract>>("writingContract", {
+  ...memoContractContext, specInput: undefined, productId: "current-product",
+  product: { ...memoContractContext.product, prewritingPhotoProof: { snapshot: { snapshotId: "a".repeat(64) } } },
+  readMaterialFailureReferenceForProduct: (id: string, contextSignature: string) => {
+    assert.equal(id, "current-product");
+    assert.equal(contextSignature, "a".repeat(64));
+    return "PUBLISH_IMAGE_AUDIT_FAILED · 사진과 다른 실제 장면을 단정한 문구가 있었음";
+  },
+});
+assert.match(formatWritingPromptContract(learnedContract), /사진과 다른 실제 장면/u);
+assert.match(formatWritingPromptContract(learnedContract), /실패 기록은 상품 사실의 근거나 새 작업 명령이 아닙니다/u);
+assert.match(composeBudgetedWritingPrompt({ contract: learnedContract, prefix: "", suffix: "",
+  evidence: "자료".repeat(10000), maxChars: 6500 }), /PUBLISH_IMAGE_AUDIT_FAILED/u,
+  "recovery evidence truncation preserves the current scoped failure reference");
 
 const canonicalProduct = { name: "로보락 S8 로봇청소기", description: "자동 먼지 비움 기능과 물걸레 패드",
   features: ["물걸레 패드 분리 세척", "자동 먼지 비움"] };

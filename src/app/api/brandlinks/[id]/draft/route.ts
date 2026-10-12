@@ -245,6 +245,13 @@ function revalidatePackageForApproval(
   return writeBrandPostPackageManifest(reconcileBrandPostPackageQuality(evaluated));
 }
 
+/** PC, MCP submission and manual approval use one current completion gate. */
+async function approvePackageAfterCurrentValidation(id: string, link: ApprovalProductIdentity) {
+  revalidatePackageForApproval(id, link);
+  await validateBrandPostPublishImages(id, link.productName || undefined, { bindReadiness: true });
+  return approveBrandPostPackage(id);
+}
+
 /**
  * 비어 있는 섹션 이미지 보충은 초안 응답을 기다리게 하지 않는다. 1.3.9 까지는 여기서 ChatGPT 브라우저 배치를
  * await 해 초안 작업이 이미지 6장 × 최대 3분 동안 멈췄다. 이제 자동 보충은 고정이며 분리 실행한다.
@@ -478,10 +485,12 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       try {
         // A diagnostic-only audit must see retained rejected pixels even when
         // readiness marks their slot missing. It never approves or skips pixel QA.
-        if (body.action !== "audit_photo_descriptions") revalidatePackageForApproval(id, link);
-        const imageAudit = await validateBrandPostPublishImages(id, link.productName || undefined);
-        if (body.action !== "approve") return NextResponse.json({ success: true, imageAudit });
-        const manifest = approveBrandPostPackage(id);
+        if (body.action !== "approve") {
+          if (body.action !== "audit_photo_descriptions") revalidatePackageForApproval(id, link);
+          const imageAudit = await validateBrandPostPublishImages(id, link.productName || undefined);
+          return NextResponse.json({ success: true, imageAudit });
+        }
+        const manifest = await approvePackageAfterCurrentValidation(id, link);
         const preview = packagePreview(manifest);
         approved = true;
         return NextResponse.json({ success: true, data: preview });
@@ -871,8 +880,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     let approvalWarning: string | null = null;
     if (body.autoApprove === true) {
       try {
-        revalidatePackageForApproval(id, link);
-        finalizedManifest = approveBrandPostPackage(id);
+        finalizedManifest = await approvePackageAfterCurrentValidation(id, link);
       } catch (error) {
         approvalWarning = error instanceof Error ? error.message : "자동 승인에 실패했습니다.";
       }

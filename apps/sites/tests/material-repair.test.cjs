@@ -58,7 +58,14 @@ test('repair discovery is preparation-only and keeps the existing rewrite and pu
   try {
     const response = await f.mcp.handleMcpRequest(new Request('https://site.test/api/mcp', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }) }), 'owner', 'mcp:read mcp:write');
     const tools = (await response.json()).result.tools;
-    assert.equal(tools.length, 37);
+    assert.equal(tools.length, 38);
+    const prepare = tools.find(tool => tool.name === 'post_prepare_material');
+    assert.ok(prepare);
+    assert.match(prepare.description, /원고 작성·필요 이미지 생성·품질검사·이미지 검수·승인/u);
+    assert.match(prepare.description, /workflowJobId/u);
+    assert.match(prepare.description, /1\.3\.123/u);
+    assert.equal(prepare.annotations.readOnlyHint, false);
+    assert.deepEqual(prepare.inputSchema.required, ['productIds', 'idempotencyKey']);
     const repair = tools.find(tool => tool.name === 'materials_repair_blocked');
     assert.ok(repair);
     assert.equal(repair.annotations.readOnlyHint, false);

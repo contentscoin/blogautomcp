@@ -53,6 +53,62 @@ function fixture() {
 }
 const request = { connectKind: 'shopping', idempotencyKey: 'rewrite-fixture-1' };
 
+test('full material preparation alias uses the existing queue, one identity and preparation-only contract', async () => {
+  const f = fixture();
+  try {
+    f.db.prepare("UPDATE devices SET app_version='1.3.123'").run();
+    const args = { productIds: ['product_001'], idempotencyKey: 'prepare-shared-fixture' };
+    const first = await f.call('post_prepare_material', args);
+    assert.equal(first.status, 'QUEUED');
+    const alias = await f.call('materials_prepare', args);
+    assert.equal(alias.jobId, first.jobId);
+    assert.equal(alias.reused, true);
+    assert.equal((await f.call('post_prepare_material', args)).jobId, first.jobId);
+    assert.equal((await f.call('materials_prepare', { ...args, productIds: ['product_002'] })).code, 'IDEMPOTENCY_CONFLICT');
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM agent_jobs').get().n, 1);
+    const saved = f.db.prepare('SELECT * FROM agent_jobs').get();
+    assert.equal(saved.type, 'MATERIALS_PREPARE');
+    assert.deepEqual(JSON.parse(saved.input_json), args);
+    for (const invalid of [{ ...args, publishMode: 'now' }, { ...args, scheduledAt: '2026-10-20' },
+      { ...args, confirmed: true }, { ...args, productIds: ['product_001', 'product_001'] }, { productIds: ['product_001'] }]) {
+      assert.equal((await f.call('post_prepare_material', invalid)).code, 'INVALID_ARGUMENT');
+    }
+    assert.equal((await f.call('post_prepare_material', args, 'mcp:read')).code, 'INSUFFICIENT_SCOPE');
+    f.db.prepare("UPDATE devices SET status='REVOKED'").run();
+    assert.equal((await f.call('post_prepare_material', args)).jobId, first.jobId, 'reconnect reads the existing identity before checking a current PC');
+  } finally { f.db.close(); }
+});
+
+test('job_get exposes local preparation progress even when transport succeeds and large result is omitted', async () => {
+  const f = fixture();
+  try {
+    f.db.prepare("UPDATE devices SET app_version='1.3.123'").run();
+    const args = { productIds: ['product_001'], idempotencyKey: 'prepare-progress-fixture' };
+    const accepted = await f.call('post_prepare_material', args);
+    const result = { data: { jobId: 'local-workflow-1', kind: 'prepare', status: 'running', items: [{ productId: 'product_001', status: 'preparing' }] } };
+    f.db.prepare("UPDATE agent_jobs SET status='SUCCEEDED',result_json=?,finished_at=? WHERE id=?").run(JSON.stringify(result), Date.now(), accepted.jobId);
+    const delivered = (await f.call('job_get', { jobId: accepted.jobId, includeResult: false })).job;
+    assert.equal(delivered.status, 'SUCCEEDED');
+    assert.equal(delivered.result, null);
+    assert.equal(delivered.materialWorkflow.workflowPending, true);
+    assert.equal(delivered.materialWorkflow.transportTerminal, true);
+    assert.equal(delivered.taskOutcome, 'pending');
+    assert.equal(delivered.mustContinue, true);
+    assert.deepEqual(delivered.nextCall, { tool: 'materials_list', arguments: { jobId: 'local-workflow-1' } });
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM agent_jobs').get().n, 1, 'a job read never queues new preparation');
+    result.data.status = 'completed'; result.data.items[0].status = 'ready';
+    result.data.materials = [{ productId: 'product_001', ready: false, blockers: ['stale approval'] }];
+    f.db.prepare('UPDATE agent_jobs SET result_json=? WHERE id=?').run(JSON.stringify(result), accepted.jobId);
+    const stale = (await f.call('job_get', { jobId: accepted.jobId, includeResult: false })).job.materialWorkflow;
+    assert.equal(stale.workflowPending, false);
+    assert.equal(stale.completionState, 'blocked');
+    assert.equal(stale.materialPreparationComplete, false, 'historical ready cannot override current material blockers');
+    result.data.materials[0].ready = true;
+    f.db.prepare('UPDATE agent_jobs SET result_json=? WHERE id=?').run(JSON.stringify(result), accepted.jobId);
+    assert.equal((await f.call('job_get', { jobId: accepted.jobId })).job.materialWorkflow.materialPreparationComplete, true);
+  } finally { f.db.close(); }
+});
+
 test('browser rewrite requires same origin, ChatGPT identity and approved account', async () => {
   const f = fixture();
   try {

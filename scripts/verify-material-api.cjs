@@ -34,16 +34,19 @@ const json = (body, options = {}) => ({ status: options.status || 200, body: clo
 function harness() {
   const state = { now: '2026-09-07T03:00:00.000Z', authorized: true, updateBlocked: false,
     products: new Map(), manifests: new Map(), jobs: new Map(), runs: [], saves: 0,
-    locks: 0, activities: 0, productReads: 0, countReads: 0, materialReads: new Map(), runnerError: null, progress: new Map(), publicationAttempts: new Map(), missingDraftFiles: new Set(), manuscripts: new Map() };
+    locks: 0, activities: 0, productReads: 0, countReads: 0, materialReads: new Map(), runnerError: null, progress: new Map(), publicationAttempts: new Map(), missingDraftFiles: new Set(), manuscripts: new Map(), beforeLock: null };
   class FakeDate extends Date {
     constructor(...args) { super(...(args.length ? args : [state.now])); }
     static now() { return Date.parse(state.now); }
   }
   const library = load('src/lib/material-library.ts', {
     'node:crypto': crypto,
+    'node:path': path,
     'node:fs': { readFileSync: file => Buffer.from(state.manuscripts.get(file) ?? `fixture bytes: ${file}`) },
+    './brand-post-approval-receipt': { hasCurrentBrandPostApprovalReceipt: manifest => manifest.fixtureReceipt !== false },
     './brand-post-package': {
       readBrandPostPackage: id => state.manifests.get(id) || null,
+      getBrandPostPackageDir: id => `${id}.package`,
       evaluateBrandPostPackageReadiness: manifest => {
         state.materialReads.set(manifest.productId, (state.materialReads.get(manifest.productId) || 0) + 1);
         return {
@@ -90,6 +93,7 @@ function harness() {
       acquireMaterialJobLock: () => {
         if (state.locks) throw new Error('Existing material job');
         state.locks++;
+        if (state.beforeLock) { const hook = state.beforeLock; state.beforeLock = null; hook(); }
         return () => { state.locks--; };
       },
       listMaterialJobs: () => [...state.jobs.values()].map(clone),
@@ -148,6 +152,17 @@ test('one materials GET verifies each package once across list and both candidat
   assert.equal(next.body.data.materials.find(item => item.productId === blocked.productId).ready, true);
   assert.equal(next.body.data.failedCandidates.length, 0); assert.equal(next.body.data.repairCandidates.length, 0);
   assert.equal(h.state.materialReads.get(ready.productId), 2); assert.equal(h.state.materialReads.get(blocked.productId), 2);
+  assertNoDispatch(h);
+});
+
+test('an old approval without a current final audit receipt is blocked in both desktop and MCP material views', async () => {
+  const h = harness(), item = h.product();
+  h.state.manifests.get(item.productId).fixtureReceipt = false;
+  const listing = await h.api.materialsGet(h.request(null));
+  const material = listing.body.data.materials.find(value => value.productId === item.productId);
+  assert.equal(material.ready, false);
+  assert.match(material.blockers.join(' '), /최종 이미지 검사/);
+  assert.equal((await h.post({ materials: [item], publishMode: 'now' })).status, 409);
   assertNoDispatch(h);
 });
 
@@ -211,6 +226,33 @@ test('same identity with changed revision, dates, mode or kind returns 409 witho
   }
   assert.equal((await h.post({ productIds: [item.productId], sourceJobId: body.sourceJobId }, 'prepare')).status, 409);
   assert.equal(h.state.runs.length, 1); assert.equal(h.state.saves, 1);
+});
+
+test('preparation rechecks a concurrent saved source identity under the lock without creating work', async () => {
+  for (const changed of [false, true]) {
+    const h = harness(), item = h.product();
+    const input = { productIds: [item.productId], sourceJobId: 'prepare-race' };
+    const items = [{ productId: item.productId, status: 'queued', stage: '소재 준비 대기' }];
+    const requestHash = crypto.createHash('sha256').update(JSON.stringify({ kind: 'prepare', items })).digest('hex');
+    h.state.beforeLock = () => h.state.jobs.set('winner', { jobId: 'winner', kind: 'prepare', status: 'completed',
+      ownerPid: 12345, sourceJobId: input.sourceJobId, requestHash: changed ? 'different' : requestHash,
+      startedAt: h.state.now, updatedAt: h.state.now, items: [{ ...items[0], status: 'ready' }] });
+    const result = await h.post(input, 'prepare');
+    assert.equal(result.status, changed ? 409 : 200);
+    if (!changed) assert.equal(result.body.data.jobId, 'winner');
+    else assert.match(result.body.error, /같은 요청 ID/);
+    assertNoDispatch(h);
+    assert.equal(h.state.jobs.size, 1);
+  }
+});
+
+test('preparation rejects publication fields and malformed source identity without dispatch', async () => {
+  const h = harness(), item = h.product();
+  for (const extra of [{ publishMode: 'now' }, { scheduledAt: '2026-09-10' }, { confirmed: true },
+    { materials: [item] }, { sourceJobId: '' }, { sourceJobId: 'x'.repeat(161) }]) {
+    assert.equal((await h.post({ productIds: [item.productId], ...extra }, 'prepare')).status, 409);
+    assertNoDispatch(h);
+  }
 });
 
 test('malformed JSON and unauthenticated requests cannot dispatch or expose jobs', async () => {

@@ -32,30 +32,41 @@ function signingKey(create: boolean): Buffer | null {
   } finally { fs.rmSync(temporary, { force: true }); }
   return signingKey(false);
 }
-function payload(id: string, key: string, at: string) {
-  return JSON.stringify({ version: VERSION, scope: scope(id), key, at });
+function payload(id: string, key: string, at: string, readinessBindingKey?: string) {
+  return JSON.stringify({ version: VERSION, scope: scope(id), key, at,
+    ...(readinessBindingKey ? { readinessBindingKey } : {}) });
 }
-export function readSuccessfulImageAuditReceipt(id: string, key: string): boolean {
-  if (!validKey(key)) return false;
+function readVerifiedReceipt(id: string): { key: string; readinessBindingKey?: string } | null {
   try {
     const target = file(id);
-    if (fs.statSync(target).size > 2048) return false;
+    if (fs.statSync(target).size > 2048) return null;
     const row = JSON.parse(fs.readFileSync(target, "utf8"));
     const secret = signingKey(false);
-    if (!secret || row.version !== VERSION || row.scope !== scope(id) || row.key !== key ||
+    if (!secret || row.version !== VERSION || row.scope !== scope(id) || !validKey(row.key) ||
+        (row.readinessBindingKey !== undefined && !validKey(row.readinessBindingKey)) ||
         typeof row.at !== "string" || !Number.isFinite(Date.parse(row.at)) ||
-        typeof row.signature !== "string" || !/^[a-f0-9]{64}$/.test(row.signature)) return false;
-    const expected = crypto.createHmac("sha256", secret).update(payload(id, key, row.at)).digest();
-    return crypto.timingSafeEqual(expected, Buffer.from(row.signature, "hex"));
-  } catch { return false; }
+        typeof row.signature !== "string" || !/^[a-f0-9]{64}$/.test(row.signature)) return null;
+    const expected = crypto.createHmac("sha256", secret).update(payload(id, row.key, row.at, row.readinessBindingKey)).digest();
+    return crypto.timingSafeEqual(expected, Buffer.from(row.signature, "hex"))
+      ? { key: row.key, ...(row.readinessBindingKey ? { readinessBindingKey: row.readinessBindingKey } : {}) } : null;
+  } catch { return null; }
 }
-export function writeSuccessfulImageAuditReceipt(id: string, key: string): void {
+export function readSuccessfulImageAuditReceipt(id: string, key: string): boolean {
+  return validKey(key) && readVerifiedReceipt(id)?.key === key;
+}
+/** A historical successful review is not ready until its exact saved material
+ * was bound by the approval preflight. Both bindings share the same HMAC. */
+export function readSuccessfulImageAuditReadinessBinding(id: string, readinessBindingKey: string): boolean {
+  return validKey(readinessBindingKey) && readVerifiedReceipt(id)?.readinessBindingKey === readinessBindingKey;
+}
+export function writeSuccessfulImageAuditReceipt(id: string, key: string, readinessBindingKey?: string): void {
   if (!validKey(key)) throw new Error("IMAGE_AUDIT_RECEIPT_INVALID_KEY");
+  if (readinessBindingKey !== undefined && !validKey(readinessBindingKey)) throw new Error("IMAGE_AUDIT_RECEIPT_INVALID_BINDING");
   scope(id);
   const secret = signingKey(true);
   if (!secret) throw new Error("IMAGE_AUDIT_RECEIPT_KEY_INVALID");
   const at = new Date().toISOString();
-  const serialized = payload(id, key, at);
+  const serialized = payload(id, key, at, readinessBindingKey);
   atomicWriteTextFile(file(id), JSON.stringify({ ...JSON.parse(serialized),
     signature: crypto.createHmac("sha256", secret).update(serialized).digest("hex") }));
 }

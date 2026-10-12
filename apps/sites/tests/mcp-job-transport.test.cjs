@@ -21,6 +21,57 @@ function load(file, mocks = {}, tail = '') {
 }
 
 const { resultPage, jobGuidance, waitForJob } = load('lib/mcp-job-status.ts');
+
+test('material workflow completion projects input, authentication and outcome blockers instead of RPC success', () => {
+  const { materialWorkflowProjection: project } = load('lib/material-workflow-status.ts');
+  for (const [errorCode, causeCode, expected] of [
+    ['IMAGE_SOURCE_BINDING_REQUIRED', undefined, 'needs_input'], ['LLM_UNAVAILABLE', 'CODEX_LOGIN_REQUIRED', 'needs_auth'],
+    ['PREPARATION_RESULT_UNCERTAIN', undefined, 'needs_outcome_check'], ['IMAGE_OUTPUT_AMBIGUOUS', undefined, 'needs_outcome_check'],
+  ]) {
+    const projected = project('MATERIALS_PREPARE', 'job_source', 'SUCCEEDED', { data: { jobId: 'local_workflow', status: 'failed',
+      items: [{ productId: 'product_001', status: 'failed', errorCode, causeCode, localPath: 'must-not-leak' }] } });
+    assert.equal(projected.workflowPending, false);
+    assert.equal(projected.completionState, expected);
+    assert.equal(projected.productStates[0].state, expected);
+    assert.equal(projected.materialPreparationComplete, false);
+    assert.ok(!JSON.stringify(projected).includes('must-not-leak'));
+  }
+  const queued = project('MATERIALS_PREPARE', 'job_source', 'QUEUED', null);
+  assert.deepEqual(queued.nextCall, { tool: 'job_get', arguments: { jobId: 'job_source', waitMs: 20000, includeResult: false } });
+  const unknown = project('MATERIALS_PREPARE', 'job_source', 'FAILED', null);
+  assert.equal(unknown.workflowUncertain, true);
+  assert.deepEqual(unknown.nextCall, { tool: 'materials_list', arguments: { sourceJobId: 'job_source' } });
+  const unclaimed = project('MATERIALS_PREPARE', 'job_source', 'CANCELLED', null, { claimedAt: null, claimedDeviceId: null, errorCode: 'USER_CANCELLED' });
+  assert.equal(unclaimed.executionNotAdmitted, true);
+  assert.equal(unclaimed.workflowPending, false);
+  assert.equal(project('MATERIALS_PREPARE', 'job_source', 'CANCELLED', null, { claimedAt: 1, claimedDeviceId: 'device', errorCode: 'USER_CANCELLED' }).workflowPending, true);
+  assert.equal(project('MATERIALS_LIST', 'job_read', 'SUCCEEDED', { data: { materials: [] } }), null);
+  const valid = { data: { jobId: 'local_workflow', status: 'completed', items: [{ productId: 'product_001', status: 'ready' }],
+    materials: [{ productId: 'product_001', ready: true }] } };
+  assert.equal(project('MATERIALS_PREPARE', 'job_source', 'SUCCEEDED', valid).materialPreparationComplete, true);
+  for (const change of [
+    value => { value.data.items[0].errorCode = 'CODEX_AUTH_REQUIRED'; },
+    value => { value.data.items[0].status = 'preparing'; },
+    value => { value.data.materials[0].productId = 'foreign_product'; },
+    value => { value.data.materials.push({ productId: 'product_001', ready: true }); },
+    value => { value.data.materials = []; },
+    value => { value.data.items[0].errorCode = 'UNKNOWN_ERROR'; },
+  ]) {
+    const altered = structuredClone(valid); change(altered);
+    const state = project('MATERIALS_PREPARE', 'job_source', 'SUCCEEDED', altered);
+    assert.equal(state.materialPreparationComplete, false);
+    assert.equal(state.readyCount, 0, 'blocked, pending or contradictory material identities never inflate ready summary');
+    assert.notEqual(state.completionState, 'ready');
+  }
+  const large = { data: { jobId: 'local_workflow', status: 'completed', items: Array.from({ length: 60 }, (_, i) => ({ productId: `product_${i}`, status: 'ready' })),
+    materials: Array.from({ length: 60 }, (_, i) => ({ productId: `product_${i}`, ready: true })) } };
+  const all = project('MATERIALS_REPAIR_BLOCKED', 'job_source', 'SUCCEEDED', large);
+  assert.equal(all.productStates.length, 50);
+  assert.equal(all.productStatesTruncated, true);
+  assert.equal(all.acceptedCount, 60);
+  assert.equal(all.readyCount, 60);
+  assert.equal(all.materialPreparationComplete, true);
+});
 test('bounded waiting preserves pending jobs across repeated requests', async () => {
   let polls = 0, elapsed = 0;
   const read = async () => ({ status: ++polls > 12 ? 'SUCCEEDED' : 'RUNNING' });
@@ -325,7 +376,7 @@ test('automatic bulk publish requires explicit mode, count and confirmation', as
   for (const change of [{ publishMode: 'invalid' }, { limit: 0 }, { limit: 51 }, { confirmed: false }]) {
     assert.equal((await call('owner', 'mcp:write', 'post_bulk_publish', { ...args, ...change })).result.structuredContent.code, 'INVALID_ARGUMENT');
   }
-  const { publishMode, ...missingMode } = args;
+  const missingMode = { ...args }; delete missingMode.publishMode;
   assert.equal((await call('owner', 'mcp:write', 'post_bulk_publish', missingMode)).result.structuredContent.code, 'INVALID_ARGUMENT');
 });
 test('large job_get is bounded and advertised pages reconstruct stored draft', async () => {
@@ -355,6 +406,23 @@ const nativeReferenceFixtures = [
   nativeReferenceFixture('product-identity', 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN0sAAAAASUVORK5CYII='),
   nativeReferenceFixture('approved-scene-continuity', 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='),
 ];
+
+test('result first-page read delivers exact native pixels after a status-only read; later pages do not repeat them', async () => {
+  const previous = storedResult;
+  try {
+    const reference = nativeReferenceFixtures[0];
+    storedResult = JSON.stringify({ data: { nativeReferenceImages: [reference], publicationPhotoAvailability: { status: 'attached-verified-original' } } });
+    const status = (await call('owner', 'mcp:read', 'job_get', { jobId: 'job_owned', includeResult: false })).result;
+    assert.equal(status.structuredContent.job.result, null);
+    assert.equal(status.content.some(block => block.type === 'image'), false);
+    const first = (await call('owner', 'mcp:read', 'job_result_read', { jobId: 'job_owned', offset: 0, limit: 80 })).result;
+    const attachment = first.structuredContent.imageAttachments[0];
+    assert.equal(attachment.sha256, reference.sha256);
+    assert.equal(first.content[attachment.contentIndex].data, reference.base64);
+    const next = (await call('owner', 'mcp:read', 'job_result_read', { jobId: 'job_owned', offset: first.structuredContent.nextOffset, limit: 80 })).result;
+    assert.equal(next.content.some(block => block.type === 'image'), false);
+  } finally { storedResult = previous; }
+});
 
 test('job_get attaches exact ordered native reference pixels even when the result is paged', async () => {
   const previous = storedResult;

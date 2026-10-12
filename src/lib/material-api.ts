@@ -192,6 +192,11 @@ export async function materialsPost(request: NextRequest, kind: "prepare" | "pub
   let finish: (() => void) | undefined;
   try {
     const body = override ?? await request.json();
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("소재 요청은 JSON 객체여야 합니다.");
+    if (kind === "prepare" && ["publishMode", "materials", "scheduledAt", "confirmed"].some(key => body[key] !== undefined))
+      throw new Error("소재 준비 요청에는 발행·예약 입력을 함께 보낼 수 없습니다.");
+    if (body.sourceJobId !== undefined && (typeof body.sourceJobId !== "string" || !body.sourceJobId.trim() || body.sourceJobId.length > 160))
+      throw new Error("요청 ID는 1~160자 문자열이어야 합니다.");
     const items: MaterialJob["items"] = kind === "publish"
       ? validateMaterialSelection(body.materials).map(item => ({ ...item, status: "queued", stage: "선택 소재 확인 대기" }))
       : (() => {
@@ -213,7 +218,7 @@ export async function materialsPost(request: NextRequest, kind: "prepare" | "pub
         items.forEach((item, index) => { item.scheduledDate = addDaysToYmd(date, index * interval); });
       }
     }
-    const sourceJobId = typeof body.sourceJobId === "string" ? body.sourceJobId.slice(0, 160) : undefined;
+    const sourceJobId = typeof body.sourceJobId === "string" ? body.sourceJobId : undefined;
     const requestHash = crypto.createHash("sha256").update(JSON.stringify({ kind, items, publishMode: body.publishMode })).digest("hex");
     if (sourceJobId) {
       const existing = listMaterialJobs().find(job => job.sourceJobId === sourceJobId);
@@ -229,6 +234,16 @@ export async function materialsPost(request: NextRequest, kind: "prepare" | "pub
       startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), items,
       ...(kind === "publish" ? { publishMode: body.publishMode } : {}) };
     release = acquireMaterialJobLock(job.jobId);
+    // Another request can persist this source identity after the optimistic read.
+    // Inspect again under the same PC material lock before creating any work.
+    if (sourceJobId) {
+      const lockedExisting = listMaterialJobs().find(saved => saved.sourceJobId === sourceJobId);
+      if (lockedExisting) {
+        if (lockedExisting.requestHash !== requestHash) throw new Error("같은 요청 ID에 다른 소재 선택을 보낼 수 없습니다.");
+        release(); release = undefined;
+        return NextResponse.json({ success: true, data: await materialJobView(lockedExisting) });
+      }
+    }
     finish = beginAutomaticPublishing("automatic-post");
     if (await prisma.brandLink.count({ where: { status: { in: ["PUBLISHING", "DRAFTING"] } } })) throw new Error("현재 실행 중인 작업이 있습니다. 완료 후 실행하세요.");
     for (const item of items) {

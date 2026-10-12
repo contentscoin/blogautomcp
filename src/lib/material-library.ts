@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
-import { readBrandPostPackage, evaluateBrandPostPackageReadiness, type BrandPostPackageManifest } from "./brand-post-package";
+import path from "node:path";
+import { readBrandPostPackage, getBrandPostPackageDir, evaluateBrandPostPackageReadiness, type BrandPostPackageManifest } from "./brand-post-package";
+import { hasCurrentBrandPostApprovalReceipt } from "./brand-post-approval-receipt";
 
 // Content-addressed selection: changing a file in place also invalidates selection.
 export function materialRevision(manifest: BrandPostPackageManifest): string {
@@ -24,6 +26,8 @@ export function getMaterial(productId: string) {
   const quality = evaluateBrandPostPackageReadiness(manifest);
   const blockers = quality.blockers.map(item => item.reason);
   if (!manifest.approvedAt) blockers.push("소재 준비 단계에서 품질검사와 승인을 완료하세요.");
+  if (manifest.approvedAt && !hasCurrentBrandPostApprovalReceipt(manifest, path.join(getBrandPostPackageDir(productId), "product-sources")))
+    blockers.push("현재 원고·사진·상품 근거의 최종 이미지 검사를 다시 완료하세요. 이전 승인만으로 준비완료로 표시하지 않습니다.");
   const imageGeneration = quality.imageGeneration ? {
     status: quality.imageGeneration.status,
     requested: Math.max(0, Number(quality.imageGeneration.requested) || 0),

@@ -4,11 +4,12 @@ import { getBrandPostPackageDir, readBrandPostPackage } from "./brand-post-packa
 import path from "node:path";
 import { materialRevision } from "./material-library";
 import { normalizePublishedPostText } from "./post-composition-contract";
+import { brandPostApprovalBinding } from "./brand-post-approval-receipt";
 
 /** Same pixel audit as publication, before a saved shopping material is approved.
  * A DB mutation claim is additionally held by the HTTP caller. */
 export async function validateBrandPostPublishImages(id: string, productName?: string,
-  options: { review?: PublishImageAuditOptions["review"] } = {}) {
+  options: { review?: PublishImageAuditOptions["review"]; bindReadiness?: boolean } = {}) {
   const lock = acquireBrandPostImageRepairLock(id, { purpose: "publication-image-preflight" });
   try {
     const manifest = readBrandPostPackage(id, { migrate: false });
@@ -18,9 +19,12 @@ export async function validateBrandPostPublishImages(id: string, productName?: s
       throw Object.assign(new Error("기존 이미지 작업의 완료 여부를 확인한 뒤 최종 이미지를 검사하세요."), { code: "IMAGE_RESUME_REQUIRED" });
     if (manifest.connectKind !== "SHOPPING") return { checked: 0, skipped: true };
     const revision = materialRevision(manifest);
+    const sourceDirectory = path.join(getBrandPostPackageDir(id), "product-sources");
+    const readinessBindingKey = brandPostApprovalBinding(manifest, sourceDirectory);
     const product = manifest.sourceSnapshot?.product || {};
     const name = String(product.name || productName || manifest.title);
-    const audit = await assertPublishImagesSafe({ brandLinkId: id, productName: name,
+    const audit = await assertPublishImagesSafe({ brandLinkId: id,
+      ...(options.bindReadiness === true ? { readinessBindingKey } : {}), productName: name,
       selectedProduct: buildSelectedProductImageAuditContext(
         name,
         (Array.isArray(product.features) ? product.features : []).filter((value): value is string => typeof value === "string"),
@@ -29,10 +33,10 @@ export async function validateBrandPostPublishImages(id: string, productName?: s
       composition: normalizePublishedPostText(manifest.composition), imageAssets: manifest.imageAssets,
       sourceSnapshotId: manifest.sourceSnapshot?.snapshotId,
       ...(manifest.sourceSnapshot ? { selectedSourceSnapshot: manifest.sourceSnapshot, selectedSourceProductId: id,
-        selectedSourceDirectory: path.join(getBrandPostPackageDir(id), "product-sources") } : {}), ...options });
+        selectedSourceDirectory: sourceDirectory } : {}), ...(options.review ? { review: options.review } : {}) });
     lock.assertOwner();
     const current = readBrandPostPackage(id, { migrate: false });
-    if (!current || materialRevision(current) !== revision)
+    if (!current || materialRevision(current) !== revision || brandPostApprovalBinding(current, sourceDirectory) !== readinessBindingKey)
       throw Object.assign(new Error("이미지 검사 중 소재가 변경되었습니다. 현재 소재를 다시 검사하세요."), { code: "IMAGE_CHANGED" });
     return { checked: audit.checked, skipped: false };
   } finally { lock.release(); }

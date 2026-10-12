@@ -727,8 +727,23 @@ async function verifyReviewOnlyRecovery() {
       assert.equal(reviews, 4, "a cached resolution never substitutes an old verdict for current full QA");
     }
   });
-  await check("zero or multiple fidelity passes and provider/invalid verdict failures never adopt a candidate", async () => {
-    for (const mode of ["zero", "multiple", "provider-after-pass", "invalid-after-pass"] as const) {
+  await check("multiple current QA passes of one proven request select a stable photograph without regeneration", async () => {
+    const f = multipleFixture();
+    const before = tree(f.workDir);
+    const review = async (input: Record<string, unknown>) => f.proof(input);
+    const result = await f.resolve(review);
+    const expectedSha = [hashFile(f.first), hashFile(f.second)].sort()[0];
+    assert.equal(hashFile(result.generatedPath), expectedSha);
+    assert.equal((await f.resolve(review)).generatedPath, result.generatedPath);
+    const record = JSON.parse(fs.readFileSync(path.join(path.dirname(result.generatedPath), "resolution.json"), "utf8"));
+    assert.equal(record.binding.selectionPolicy, "exact-request-passed-sha256/v1");
+    assert.equal(record.candidateReviews.length, 2);
+    assert.ok(record.candidateReviews.every((item: { accepted: boolean }) => item.accepted));
+    for (const [file, hash] of Object.entries(before)) assert.equal(hashFile(path.join(f.workDir, file)), hash,
+      "all request records and candidate bytes remain intact");
+  });
+  await check("zero fidelity passes and provider/invalid verdict failures never adopt a candidate", async () => {
+    for (const mode of ["zero", "provider-after-pass", "invalid-after-pass"] as const) {
       const f = multipleFixture(); let reviews = 0;
       const before = tree(f.workDir);
       await assert.rejects(() => f.resolve(async input => {
@@ -738,7 +753,7 @@ async function verifyReviewOnlyRecovery() {
         const proof = f.proof(input);
         if (reviews === 2 && mode === "invalid-after-pass") return { ...proof, checks: {} };
         return proof;
-      }), mode.startsWith("provider") ? /CODEX_AUTH_REQUIRED/ : mode.startsWith("invalid") ? /REFERENCE_SCENE_REVIEW_INVALID/ : /IMAGE_OUTPUT_AMBIGUOUS/);
+      }), mode.startsWith("provider") ? /CODEX_AUTH_REQUIRED/ : mode.startsWith("invalid") ? /REFERENCE_SCENE_REVIEW_INVALID/ : /REFERENCE_SCENE_FIDELITY_FAILED/);
       assert.equal(reviews, 2);
       assert.deepEqual(tree(f.workDir), before, `${mode}: no new resolution, no evidence modification`);
     }
