@@ -12,6 +12,7 @@ import { runMaterialPreparation, localScheduleCall, type Call, type Result } fro
 import type { BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
 import { validateBrandPostPublishImages } from "../src/lib/brand-post-publish-preflight";
 import { acquireBrandPostImageRepairLock } from "../src/lib/brand-post-image-repair-lock";
+import { publicationImageContext } from "./lib/publish-image-rejections";
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "photo-description-repair-"));
@@ -97,6 +98,31 @@ async function main() {
       specDraft: { sections: [{ lines: [literal] }] } }, markdown, findings);
     assert.equal(cached.manifest.specDraft, null, "later spec revision cannot resurrect the false sentence");
     assert.deepEqual(cached.manifest.postSpec, facts, "verified source facts remain intact");
+    // Actual saved packages coalesce six source paragraphs into two render
+    // nodes. Paragraph topology is layout, not missing manuscript content.
+    const coalescedComposition = { ...composition, renderNodes: [composition.renderNodes[0],
+      { kind: "paragraph" as const, sectionId: "shopping-section-28267766", text: bodyParagraphs[0] },
+      { kind: "paragraph" as const, sectionId: "shopping-section-28267766", text: bodyParagraphs.slice(1).join("\n\n") },
+      ...composition.renderNodes.slice(7)] };
+    const coalescedManifest = { ...manifest, composition: coalescedComposition };
+    const coalescedFailure = (await auditPublishImages({ ...input, composition: coalescedComposition })).failures[0].photoDescription!;
+    assert(coalescedFailure, "coalesced real layout still yields an exact grounded sentence finding");
+    const coalesced = planPhotoDescriptionRepair(coalescedManifest, markdown, [coalescedFailure]);
+    assert.deepEqual(coalesced.manifest.composition.sections[0].body, bodyParagraphs.filter(text => text !== literal));
+    assert.equal(coalesced.manifest.composition.renderNodes.length, coalescedComposition.renderNodes.length,
+      "a coalesced node retaining normal prose must remain in place");
+    assert.deepEqual(coalesced.manifest.composition.renderNodes[2], { ...coalescedComposition.renderNodes[2],
+      text: bodyParagraphs.slice(1).join("\n\n").replace(literal, "").trim() });
+    assert.deepEqual(coalesced.manifest.composition.renderNodes.filter((_node, index) => index !== 2),
+      coalescedComposition.renderNodes.filter((_node, index) => index !== 2), "all unrelated nodes and image styles remain identical");
+    for (const badText of [bodyParagraphs.slice(1).filter(text => text !== bodyParagraphs[4]).join("\n\n"),
+      `${bodyParagraphs.slice(1).join("\n\n")}\n\n렌더에만 추가된 확인되지 않은 문장입니다.`]) {
+      const badComposition = { ...coalescedComposition, renderNodes: coalescedComposition.renderNodes.map((node, index) =>
+        index === 2 ? { ...node, text: badText } : node) };
+      assert.throws(() => planPhotoDescriptionRepair({ ...manifest, composition: badComposition }, markdown,
+        [{ ...coalescedFailure, context: publicationImageContext(badComposition, coalescedFailure.sectionId) }]), /보존/,
+      "missing or extra non-whitespace prose cannot be excused by paragraph coalescing");
+    }
     assert.equal(planned.markdown, markdown.replace(literal, ""));
     assert.deepEqual(fs.readFileSync(image), beforeImage);
     assert.throws(() => serverPhotoDescriptionFindings(manifest, ["a".repeat(64)]), /보존/);
