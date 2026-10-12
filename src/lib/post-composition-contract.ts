@@ -6,6 +6,7 @@ import {
 } from "../../scripts/lib/topic-templates";
 import { SHOPPING_POST_STRATEGY, SHOPPING_NATURAL_PHOTO_RULE, shoppingPhotoRoleAt, type ShoppingPostStrategyVersion } from "./shopping-post-strategy";
 import { getConnectAffiliateDisclosure } from "./connect-disclosure";
+import { isClothingPhotoSubject } from "./product-photo-subject";
 
 export type BrandConnectKind = "SHOPPING" | "TRAVEL";
 
@@ -606,9 +607,7 @@ function freeformImageRules(
 export function applyShoppingNaturalPhotoPlan(sections: ResolvedPostSectionV1[], options: { productName?: string } = {}): ResolvedPostSectionV1[] {
   // A wearable or fashion accessory is not necessarily clothing. Classify only
   // the selected product name, never paragraph mentions of outfits or fit.
-  const name = String(options.productName || "").normalize("NFKC");
-  const nonClothing = /이어폰|헤드폰|스마트워치|시계|가방|백팩|지갑|파우치|선글라스|세탁기|건조기|의류\s*관리기|다리미|옷걸이|행거|세제|세탁망|집게|니트릴|프린터|프레스|스티커|인형|바디\s*워시|샴푸|\b(?:earphones?|headphones?|smartwatch|backpack|detergent|dryer|printer)\b/iu.test(name);
-  const clothing = !nonClothing && /티셔츠|셔츠|블라우스|바지|팬츠|반바지|원피스|스커트|치마|재킷|자켓|점퍼|패딩|코트|니트|가디건|조끼|양말|속옷|레깅스|\b(?:t[-\s]?shirts?|shirts?|blouses?|pants|trousers|shorts|dresses|skirts?|jackets?|coats?|cardigans?|leggings)\b/iu.test(name);
+  const clothing = isClothingPhotoSubject(options.productName || "");
   const sceneDirections = clothing ? [
     "전체 의류와 코디가 선명한 일상 장면, 자연스러운 자세와 넓은 구도",
     "첫 컷과 다른 장소·자세의 의류 착용 장면, 앉거나 쉬어도 상품 윤곽이 선명한 구도",

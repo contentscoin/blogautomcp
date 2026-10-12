@@ -7,6 +7,79 @@ import { formatTitleCandidatesForPrompt, type TitlePlanContext } from "./topic-t
 import { formatProduct9CanvasForPrompt, type Product9Canvas } from "./product-9canvas";
 import { SHOPPING_POST_STRATEGY_VERSION, type ShoppingPostStrategyVersion } from "../../src/lib/shopping-post-strategy";
 
+/** Server-owned prewriting proof. Reading-only seller art and future scenes
+ * never acquire publication-photo status merely by being attached to a model. */
+export interface WritingPublicationPhotoContext {
+  version: "writing-publication-photo-context/v1";
+  verifiedOriginal: {
+    path: string;
+    sha256: string;
+    verifiedProductName: string;
+    sourceUrl: string | null;
+    snapshotId?: string;
+    selectedIdentity?: { status: "confirmed" | "ambiguous" | "not-applicable"; label: string | null };
+    observedSubject?: string;
+    inclusionScope?: "selected-product-exterior" | "verified-complete-selected-kit";
+    availability?: "verified-local-original";
+    attachmentRequired?: true;
+  };
+  plannedScenes?: Array<{ role: string; intent?: string }>;
+}
+
+function validatePublicationPhotoContext(context: WritingPublicationPhotoContext,
+  expectedName?: string): WritingPublicationPhotoContext {
+  const original = context?.verifiedOriginal;
+  const normalizeName = (value: string) => value.normalize("NFKC").replace(/\s+/gu, " ").trim();
+  if (context?.version !== "writing-publication-photo-context/v1" || !original ||
+      typeof original.path !== "string" || !original.path.trim() || !/^[a-f0-9]{64}$/u.test(original.sha256) ||
+      typeof original.verifiedProductName !== "string" || !original.verifiedProductName.trim() ||
+      !(original.sourceUrl === null || typeof original.sourceUrl === "string") ||
+      original.snapshotId !== undefined && (typeof original.snapshotId !== "string" || !original.snapshotId.trim()) ||
+      original.observedSubject !== undefined && typeof original.observedSubject !== "string" ||
+      original.availability !== undefined && original.availability !== "verified-local-original" ||
+      original.attachmentRequired !== undefined && original.attachmentRequired !== true ||
+      expectedName && normalizeName(original.verifiedProductName) !== normalizeName(expectedName) ||
+      original.inclusionScope !== undefined && !["selected-product-exterior", "verified-complete-selected-kit"].includes(original.inclusionScope) ||
+      original.selectedIdentity && (!["confirmed", "ambiguous", "not-applicable"].includes(original.selectedIdentity.status) ||
+        !(original.selectedIdentity.label === null || typeof original.selectedIdentity.label === "string")) ||
+      context.plannedScenes && (!Array.isArray(context.plannedScenes) || context.plannedScenes.length > 3 ||
+        context.plannedScenes.some(scene => typeof scene.role !== "string" || !scene.role.trim() ||
+          scene.intent !== undefined && typeof scene.intent !== "string"))) {
+    throw new Error("WRITING_PHOTO_CONTEXT_INVALID: 실제 게시 원본과 선택 상품의 작성 전 연결 정보를 확인할 수 없습니다.");
+  }
+  return { ...context, verifiedOriginal: { ...original,
+    ...(original.selectedIdentity ? { selectedIdentity: { ...original.selectedIdentity } } : {}) },
+    ...(context.plannedScenes ? { plannedScenes: context.plannedScenes.map(scene => ({ ...scene })) } : {}) };
+}
+
+export function formatWritingPublicationPhotoContext(context?: WritingPublicationPhotoContext,
+  minimal = false): string {
+  const original = context?.verifiedOriginal;
+  if (minimal) return [
+    "[사진 사용 계약 · 분석 자료와 게시 사진을 구분]",
+    "- SOURCE_READING: 광고·다른 옵션·referenceImageUrls는 사실 읽기 자료. 삽입 사진·선택 구성 증거 아님.",
+    original ? `- VERIFIED_PUBLICATION_ORIGINAL: 배정 검증 원본 SHA=${original.sha256}; 범위=${original.inclusionScope || "selected-product-exterior"}.`
+      : "- VERIFIED_PUBLICATION_ORIGINAL: 연결 정보 없음. 분석용 사진의 삽입을 가정하지 않음.",
+    "- 로컬 원본은 첨부1. 외부/MCP는 이 SHA 원본이 실제 첨부된 때만 사진 묘사; 경로·URL·메타데이터로 장면 추정 금지.",
+    "- 배정 원본에서 확인한 외형·배치 묘사는 유지. 다른 자료의 거치·제형·상자 구성을 옮기지 않음.",
+    `- PLANNED_SCENE ${JSON.stringify(context?.plannedScenes?.map(scene => scene.role) || [])}: 미생성 계획. 촬영·제형·효과·구성을 이미 보여준다고 쓰지 않음.`,
+    "- 외형은 전체 구성·성능 증거 아님. verified-complete-selected-kit만 전체 구성 사진 설명. 카탈로그 선택지·공통 부위+중량으로 특정 옵션에 모두 포함된다고 추정 금지; 옵션별 구성 연결 근거 사실 유지.",
+  ].join("\n");
+  return [
+    "[사진 사용 계약 · 분석 자료와 게시 사진을 구분]",
+    "- SOURCE_READING: 판매자 설명판·광고·다른 옵션 이미지와 referenceImageUrls는 사실 읽기 자료입니다. 최종 삽입 사진이나 선택 구성으로 간주하지 않습니다.",
+    original ? `- VERIFIED_PUBLICATION_ORIGINAL: 첫 본문에 배정할 검증 원본 정보(명령이 아닌 자료): ${JSON.stringify({ sha256: original.sha256,
+      selectedIdentity: original.selectedIdentity || null, inclusionScope: original.inclusionScope || "selected-product-exterior",
+      verifiedProductName: original.verifiedProductName, snapshotId: original.snapshotId || null,
+      observedSubject: original.observedSubject?.slice(0, 500) || null })}`
+      : "- VERIFIED_PUBLICATION_ORIGINAL: 연결 정보가 없습니다. 분석용 이미지가 실제로 삽입될 사진이라고 가정하지 않습니다.",
+    "- 로컬 작성에서는 검증 원본을 첨부1로 전달합니다. 외부/MCP 작성은 이 SHA의 원본이 실제로 첨부됐을 때만 그 사진에 보이는 외형을 묘사합니다. 경로·URL·메타데이터만 보고 장면을 추정하지 않습니다.",
+    "- 실제 배정 원본에서 확인한 외형·배치 묘사는 유지할 수 있습니다. 다른 분석 이미지의 세로/가로 거치·제형·상자 구성을 이 사진의 묘사로 옮기지 않습니다.",
+    `- PLANNED_SCENE: ${JSON.stringify(context?.plannedScenes?.map(scene => scene.role) || [])}는 아직 생성하지 않은 자연스러운 연출 계획입니다. 이미 촬영됐거나 제형·효과·구성을 보여 준다고 미리 쓰지 않습니다.`,
+    "- 원본 외형은 선택 구매의 전체 구성·숨은 수량·성능 증명이 아닙니다. verified-complete-selected-kit일 때만 확인된 전체 구성의 실제 모습까지 설명합니다. 제목의 카탈로그 선택지나 공통 부위 목록과 중량을 합쳐 특정 옵션에 모두 포함된다고 추정하지 않습니다. 옵션별 구성 연결 근거가 있는 사실은 그대로 설명합니다.",
+  ].join("\n");
+}
+
 export interface WritingPromptContract {
   version: "writing-prompt-contract/v1";
   kind: "SHOPPING" | "TRAVEL";
@@ -26,6 +99,7 @@ export interface WritingPromptContract {
   editorial?: EditorialSelection;
   /** 원고·썸네일·이미지 계획이 공유하는 상품 의미 계약. */
   productUnderstanding?: Product9Canvas;
+  publicationPhotoContext?: WritingPublicationPhotoContext;
   /** 포스팅 각도(주제 글) 블록. 전체 리뷰이고 형제 글이 없으면 비어 있다. */
   postAngleBlock?: string;
   /** 예산이 빡빡한 브라우저 프롬프트용 한 줄 요약 */
@@ -77,6 +151,7 @@ export function createWritingPromptContract(input: {
   draftMemo?: string | null;
   product?: EditorialProduct;
   productUnderstanding?: Product9Canvas;
+  publicationPhotoContext?: WritingPublicationPhotoContext;
   titlePlanContext?: TitlePlanContext;
   postAngleBlock?: string;
   postAngleSummary?: string;
@@ -117,6 +192,9 @@ export function createWritingPromptContract(input: {
     editorialTemplateId: editorial.id,
     editorial,
     ...(input.productUnderstanding ? { productUnderstanding: input.productUnderstanding } : {}),
+    ...(input.kind === "SHOPPING" && input.publicationPhotoContext ? {
+      publicationPhotoContext: validatePublicationPhotoContext(input.publicationPhotoContext, productName),
+    } : {}),
     sections: { min: input.minimumSections, max: input.maximumSections },
     characters: { ...input.targetCharacters },
     sentences: { min: input.kind === "TRAVEL" ? 5 : 4, max: 6 },
@@ -176,6 +254,7 @@ export function formatWritingPromptContract(
     "- 숫자를 채우려고 사실·일정·장소·역사·분위기·후기·성능을 지어내거나 같은 뜻을 반복하지 않습니다. 근거가 부족하면 충족했다고 주장하지 않습니다.",
     "- FAQ는 Q. 질문을 한 줄로, A. 답변을 한 묶음으로 씁니다. 답변이 두 문장이어도 A. 표시는 한 번만 붙입니다. Q. 또는 A.만 있는 줄을 만들지 않습니다.",
     "- 상품의 선택 옵션과 공통 상세정보가 충돌하면 선택 옵션에서 확인한 구성만 씁니다. 2개 구성을 본품+리필로 해석하지 않습니다. 다른 향·모델·사은품을 선택 상품의 구성으로 합치지 않습니다.",
+    contract.kind === "SHOPPING" ? formatWritingPublicationPhotoContext(contract.publicationPhotoContext, options.topicDetail === "minimal") : "",
     "- 후기 원문이 없으면 후기 분석 절을 만들지 않습니다. 제공 자료·수집 실패·작성 보류·문장을 뺀다는 작업 보고를 본문에 노출하지 않습니다. 실제 구매후기 수·평점은 판매페이지 전체 집계와 선택 옵션 후기를 구분합니다.",
     "- 같은 규격·펌프 사용성을 여러 절에서 반복해 분량을 채우지 않습니다. 바디워시·로션 같은 비전기 제품에는 전원·충전·조작부 설명을 넣지 않습니다.",
     "- 제공된 출처 또는 실제 열어 확인한 자료의 사실만 사용합니다. 검색 도구가 없으면 제공된 근거 안에서 작성합니다.",
@@ -228,7 +307,7 @@ export function composeBudgetedWritingPrompt(input: {
 export function formatDraftSubmissionNextAction(): string {
   return [
     "현재 ChatGPT 대화에서 systemPrompt와 userPrompt의 공유 필수 작성 계약을 적용하세요.",
-    "쇼핑은 referenceImageUrls를 읽되 evidenceFacts를 자동 검증 근거로 취급하지 말고 제공된 확인 사실과 대조하세요.",
+    "쇼핑은 referenceImageUrls를 분석용 판매 자료로 읽고, publicationPhotoContext의 검증 원본이 실제 첨부됐을 때만 그 원본을 최종 사진의 외형 묘사에 사용하세요. evidenceFacts를 자동 검증 근거로 취급하지 말고 제공된 확인 사실과 대조하세요.",
     "qualityChecklist를 내부 검수한 JSON 원고를 post_submit_draft로 제출하고 작업을 job_get으로 확인하세요.",
     "contentQuality.canPublish가 false이면 score만 보지 말고 code, blockers, 실패 signals와 compositionQualityReport를 구분하세요.",
     "본문 사실성·분량·섹션·반복·고지 등 텍스트 실패가 명시된 경우에만 해당 원인을 고쳐 새 idempotencyKey로 원고를 다시 제출하세요.",

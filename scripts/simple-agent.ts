@@ -109,6 +109,7 @@ import {
   getWritingOutputExample,
   reviewGeneratedEvidenceFacts,
   type WritingPromptContract,
+  type WritingPublicationPhotoContext,
   selectGroundedEvidenceFacts,
 } from "./lib/writing-prompt-contract";
 import {
@@ -127,9 +128,13 @@ import {
 import { isPreparedTitleOnlyRepair, selectPreparedRevisionSectionIndexes } from "./lib/prepared-revision-policy";
 import { selectVerifiedProductPhoto } from "./lib/product-photo-review";
 import { recoverProductPhotoRegion } from "./lib/product-photo-region";
+import { assertShoppingPrewritePhoto, persistPrewritePhotoForContext, readSubmittedPrewritePhoto, selectShoppingPrewriteOriginal,
+  withShoppingPrewritePhoto, writingPhotosFromPrewrite, type ShoppingPrewritePhotoProof } from "./lib/shopping-prewrite-photos";
 import { chooseProductName } from "./lib/product-name-identity";
 import { extractExplicitProductFacts, normalizeTypedProductFact } from "./lib/product-source-facts";
 import { readSellerDetailOcrFacts } from "./lib/product-source-ocr";
+import { isProductTitleEcho, isReadableSellerSourceImage, planSellerSourceEvidenceImages, planSellerSourceReadingBatches, SELLER_SOURCE_IMAGE_LIMIT, type SellerSourceEvidenceImage } from "./lib/product-source-intake";
+import { writeInsufficientSourceDiagnostic, type SellerSourceReadingDiagnostic } from "./lib/product-source-intake-diagnostics";
 import { mergeProductInfo } from "./lib/product-info-merge";
 import { commitPreparedPackageTransaction } from "./lib/prepared-package-transaction";
 import { writeDraftProgressFile } from "../src/lib/draft-progress";
@@ -551,6 +556,7 @@ interface SpecStep2Input {
   angleContext?: { angle: string; siblings: SiblingPostSummary[] } | null;
   /** Validated before starting a browser; reuse those exact submitted bytes. */
   submittedDraftText?: string;
+  submittedPrewritingPhotoProof?: ShoppingPrewritePhotoProof | null;
 }
 
 /** 이 행의 포스팅 각도와 형제 글 요약. 조회 실패는 전체 리뷰·형제 없음으로 처리한다. */
@@ -690,20 +696,24 @@ function sanitizeTypedProductFactLine(value: string): string {
 }
 
 function sanitizeSellerEvidenceFeatures(values: string[], productName = ""): string[] {
-  const normalizedProductName = isolateSellerEvidenceText(productName, 300).replace(/\s+/gu, "").toLowerCase();
+  const isolatedProductName = isolateSellerEvidenceText(productName, 300);
   return Array.from(new Set(values.flatMap((value) => {
     const isolated = isolateSellerEvidenceText(value, 500);
     const feature = normalizeTypedProductFact(isolated) || isolated;
     if (!feature) return [];
     if (/^(?:핵심 방문지|\d{1,2}일차 일정|출국|귀국|구매후기 근거)\s*[:：]/u.test(feature)) return [feature];
     if (NON_EVIDENCE_FEATURE_PATTERN.test(feature)) return [];
-    const compact = feature.replace(/\s+/gu, "").toLowerCase();
-    if (normalizedProductName && compact === normalizedProductName) return [];
+    if (isProductTitleEcho(feature, isolatedProductName)) return [];
     return isMeaningfulProductEvidenceFeature(feature) ? [feature] : [];
   }))).slice(0, 40);
 }
 
-interface SellerEvidenceReadingReport { ocrFacts: number; visionFacts: number; visionImages: number }
+interface SellerEvidenceReadingReport {
+  ocrFacts: number;
+  visionFacts: number;
+  visionImages: number;
+  reading?: SellerSourceReadingDiagnostic[];
+}
 
 async function enrichShoppingSourceFeatures(
   name: string,
@@ -713,26 +723,34 @@ async function enrichShoppingSourceFeatures(
   sellerImagePaths: string[] = sellerDetailImagePaths,
   report: SellerEvidenceReadingReport = { ocrFacts: 0, visionFacts: 0, visionImages: 0 },
 ): Promise<string[]> {
+  const independentDescription = isProductTitleEcho(description, name) ? "" : description;
   const collected = sanitizeSellerEvidenceFeatures([
     ...features,
     ...extractExplicitProductFacts(isolateSellerEvidenceText(name, 500), "title"),
-    ...extractExplicitProductFacts(isolateSellerEvidenceText(description, 12_000), "description"),
+    ...extractExplicitProductFacts(isolateSellerEvidenceText(independentDescription, 12_000), "description"),
   ], name);
-  const sparse = () => !hasSufficientProductReviewEvidence({ productName: name, description,
+  const sparse = () => !hasSufficientProductReviewEvidence({ productName: name, description: independentDescription,
     features: sanitizeSellerEvidenceFeatures(collected, name), targetSectionCount: 11 });
-  if (sparse() && sellerDetailImagePaths.length) {
-    const ocr = await readSellerDetailOcrFacts(sellerDetailImagePaths);
+  const readingImages = [...new Set([...sellerImagePaths, ...sellerDetailImagePaths])];
+  if (sparse() && readingImages.length) {
+    const ocrImages = readingImages.slice(0, 8);
+    const ocr = await readSellerDetailOcrFacts(ocrImages);
     collected.push(...ocr.facts);
     report.ocrFacts += ocr.facts.length;
+    (report.reading ||= []).push({ kind: "ocr", status: ocr.status, imagePaths: ocrImages,
+      scannedImageCount: ocr.scannedImageCount, acceptedFacts: ocr.facts });
     console.log(`   🔎 판매자 상세 OCR: ${ocr.status}, ${ocr.scannedImageCount}구간 검사, 근거 ${ocr.facts.length}개 (${ocr.imagePaths.length}구간에서 확인)`);
   }
   // 상세페이지가 이미지로만 되어 있어 OCR로도 근거가 부족하면 비전 모델로 이미지 속 글자를 읽는다.
-  // 1차는 긴 상세 이미지의 구간, 2차는 아직 읽지 않은 판매자 이미지(보통 비율 상세 이미지 포함)다.
+  // 출판용 사진 목록과 별도로 보존한 판매자 상세 근거를 최대 두 묶음만 읽는다.
   if (DETAIL_VISION_READ_ENABLED) {
-    const batches = planSellerVisionBatches(sellerDetailImagePaths, sellerImagePaths, DETAIL_VISION_MAX_IMAGES);
+    const batches = planSellerSourceReadingBatches(readingImages, DETAIL_VISION_MAX_IMAGES);
     for (const batch of batches) {
       if (!sparse()) break;
-      const facts = await readDetailFactsWithVision("SHOPPING", name, batch);
+      const facts = await readDetailFactsWithVision("SHOPPING", name, batch, reading => {
+        (report.reading ||= []).push({ kind: "vision", status: reading.status, imagePaths: batch,
+          scannedImageCount: reading.imageCount, acceptedFacts: reading.acceptedFacts, rejectedFacts: reading.rejectedFacts });
+      });
       collected.push(...facts);
       report.visionImages += batch.length;
       report.visionFacts += facts.length;
@@ -745,7 +763,9 @@ async function enrichShoppingSourceFeatures(
  * 상세 이미지 비전 판독. 전사에 근거한 줄만 채택하고, 기존 추출기로 형식화한 사실을 함께 돌려준다.
  * 실패해도 원고 작성을 막지 않는다(기존 근거 게이트가 최종 판단).
  */
-async function readDetailFactsWithVision(kind: "SHOPPING" | "TRAVEL", name: string, imagePaths: string[]): Promise<string[]> {
+async function readDetailFactsWithVision(kind: "SHOPPING" | "TRAVEL", name: string, imagePaths: string[],
+  onReading?: (report: Awaited<ReturnType<typeof readDetailImagesWithVision>>) => void,
+): Promise<string[]> {
   const report = await readDetailImagesWithVision({
     kind,
     productName: name,
@@ -759,6 +779,7 @@ async function readDetailFactsWithVision(kind: "SHOPPING" | "TRAVEL", name: stri
       preserveImageOrder: options.preserveImageOrder,
     }),
   });
+  onReading?.(report);
   console.log(`   👁️ 상세 이미지 판독: ${report.status}, ${report.imageCount}구간, 채택 ${report.acceptedFacts.length}줄 / 제외 ${report.rejectedFacts.length}줄${report.error ? ` (${report.error})` : ""}`);
   if (report.acceptedFacts.length === 0) return [];
   const accepted = report.acceptedFacts.map((line) => isolateSellerEvidenceText(line, 200)).filter(Boolean);
@@ -3798,6 +3819,8 @@ interface ProductInfo {
   finalUrl?: string | null;
   storeName?: string | null;
   travelPageResearch?: TravelPageResearch | null;
+  prewritingPhotoProof?: ShoppingPrewritePhotoProof;
+  publicationPhotoContext?: WritingPublicationPhotoContext;
 }
 
 interface StoredBrandLinkSeed {
@@ -3972,12 +3995,23 @@ function isTallDetailImageDimension(width: number, height: number): boolean {
   return ratio >= 1.35 && ratio <= 6.5;
 }
 
+interface MaterializedProductSourceImages {
+  representativeImagePath: string | null;
+  imagePaths: string[];
+  detailImagePaths: string[];
+  sellerDetailImagePaths: string[];
+  sellerImagePaths: string[];
+  sellerEvidenceImages: SellerSourceEvidenceImage[];
+  sellerEvidenceOnlyImagePaths: string[];
+}
+
 async function materializeProductImages(
   imageUrls: string[],
   filePrefix: string,
   targetImageCount = SHOPPING_BODY_IMAGE_MAX,
-): Promise<{ representativeImagePath: string | null; imagePaths: string[]; detailImagePaths: string[]; sellerDetailImagePaths: string[]; sellerImagePaths: string[] }> {
-  const candidateLimit = Math.max(targetImageCount + 12, 24);
+  retainSellerEvidence = true,
+): Promise<MaterializedProductSourceImages> {
+  const candidateLimit = Math.max(targetImageCount + 12, SELLER_SOURCE_IMAGE_LIMIT);
   // Collection already ranked semantic gallery provenance. URL-only re-ranking
   // loses it and can move unrelated JPEG recommendations ahead of gallery PNGs.
   const prioritizedUrls = Array.from(new Set(imageUrls)).slice(0, candidateLimit);
@@ -3990,27 +4024,37 @@ async function materializeProductImages(
     height: number;
     detailCrop?: boolean;
   }[] = [];
+  const evidenceImages: SellerSourceEvidenceImage[] = [];
+  const evidenceOnlyPaths = new Set<string>();
   const inspectionCount = Math.min(candidateLimit, prioritizedUrls.length);
   let representativeImagePath: string | null = null;
   let regularImageCount = 0;
   let detailSegmentCount = 0;
 
   for (let i = 0; i < inspectionCount; i++) {
+    const imgPath = path.join(TEMP_PATH, `${filePrefix}_${Date.now()}_${i}.jpg`);
     try {
-      const imgPath = path.join(TEMP_PATH, `${filePrefix}_${Date.now()}_${i}.jpg`);
       publishImageCleanup.track([imgPath]);
       await downloadImage(prioritizedUrls[i], imgPath);
       const stats = fs.statSync(imgPath);
-
-      if (stats.size < 20_000) {
-        publishImageCleanup.cleanup([imgPath]);
-        console.log(`   ⚠️ 이미지 제외(너무 작음) ${i + 1}`);
-        continue;
-      }
-
       const metadata = await sharp(imgPath).metadata();
       const width = metadata.width ?? 0;
       const height = metadata.height ?? 0;
+      const evidenceImage: SellerSourceEvidenceImage = {
+        path: imgPath, url: prioritizedUrls[i], size: stats.size, index: i, width, height, publicationCandidate: false,
+      };
+      const readable = retainSellerEvidence && isReadableSellerSourceImage(evidenceImage);
+      if (readable) {
+        evidenceImages.push(evidenceImage);
+        evidenceOnlyPaths.add(imgPath);
+      }
+
+      if (stats.size < 20_000) {
+        if (!readable) publishImageCleanup.cleanup([imgPath]);
+        console.log(`   ⚠️ 본문 이미지 제외(너무 작음) ${i + 1}${readable ? " · 판매자 상세 판독용 보존" : ""}`);
+        continue;
+      }
+
       if (isTallDetailImageDimension(width, height) || !isUsableBlogProductImageDimension(width, height)) {
         // 스마트스토어 상세페이지는 860x10,000px 이상의 한 장 이미지인 경우가 많다.
         // 중앙 한 컷만 남기지 않고 원문 전체를 최대 8개 구간으로 보존한다.
@@ -4035,24 +4079,40 @@ async function materializeProductImages(
             height: detailCrop.height,
             detailCrop: true,
           })));
+          if (retainSellerEvidence) {
+            evidenceImages.push(...acceptedDetailCrops.map((detailCrop, segmentIndex) => ({
+              path: detailCrop.path, url: prioritizedUrls[i], size: detailCrop.size,
+              index: i * 10 + segmentIndex, width: detailCrop.width, height: detailCrop.height,
+              publicationCandidate: false, detailCrop: true,
+            })));
+          }
           for (const unusedDetailCrop of detailCrops.slice(remainingDetailCapacity)) {
             publishImageCleanup.cleanup([unusedDetailCrop.path]);
           }
           detailSegmentCount += acceptedDetailCrops.length;
-          publishImageCleanup.cleanup([imgPath]);
+          // Complete crops already retain this source. If the crop quota cut
+          // later panels off, keep the original solely in the reading pool.
+          if (acceptedDetailCrops.length === detailCrops.length || !readable) {
+            if (readable) evidenceImages.splice(evidenceImages.indexOf(evidenceImage), 1);
+            evidenceOnlyPaths.delete(imgPath);
+            publishImageCleanup.cleanup([imgPath]);
+          }
           console.log(`   ✅ 이미지 ${i + 1}/${inspectionCount} 상세 원문 ${acceptedDetailCrops.length}구간 생성`);
           continue;
         }
-        publishImageCleanup.cleanup([imgPath]);
-        console.log(`   ⚠️ 이미지 제외(상세/배너 비율 ${width}x${height}) ${i + 1}`);
+        if (!readable) publishImageCleanup.cleanup([imgPath]);
+        console.log(`   ⚠️ 본문 이미지 제외(상세/배너 비율 ${width}x${height}) ${i + 1}${readable ? " · 판매자 상세 판독용 보존" : ""}`);
         continue;
       }
 
       if (regularImageCount >= targetImageCount) {
-        publishImageCleanup.cleanup([imgPath]);
+        if (!readable) publishImageCleanup.cleanup([imgPath]);
+        if (readable) console.log(`   🔎 이미지 ${i + 1}/${inspectionCount} 판매자 상세 판독용 보존(본문 사진 한도와 별도)`);
         continue;
       }
       downloaded.push({ path: imgPath, url: prioritizedUrls[i], size: stats.size, index: i, width, height });
+      evidenceImage.publicationCandidate = true;
+      evidenceOnlyPaths.delete(imgPath);
       regularImageCount += 1;
       if (
         !representativeImagePath &&
@@ -4064,6 +4124,10 @@ async function materializeProductImages(
       }
       console.log(`   ✅ 이미지 ${i + 1}/${inspectionCount} 다운로드`);
     } catch {
+      publishImageCleanup.cleanup([imgPath]);
+      evidenceOnlyPaths.delete(imgPath);
+      const failedEvidenceIndex = evidenceImages.findIndex(image => image.path === imgPath);
+      if (failedEvidenceIndex >= 0) evidenceImages.splice(failedEvidenceIndex, 1);
       console.log(`   ⚠️ 다운로드 실패 ${i + 1}`);
     }
   }
@@ -4113,6 +4177,8 @@ async function materializeProductImages(
       ...downloaded.filter((item) => item.detailCrop && !isReviewImageUrl(item.url)),
       ...downloaded.filter((item) => !item.detailCrop && !isReviewImageUrl(item.url)),
     ].map((item) => item.path),
+    sellerEvidenceImages: planSellerSourceEvidenceImages(evidenceImages),
+    sellerEvidenceOnlyImagePaths: [...evidenceOnlyPaths],
   };
 }
 
@@ -4140,12 +4206,16 @@ async function buildProductInfoFromStoredBrandLink(
           imageUrls,
           "stored_product",
           connectKind === "TRAVEL" ? TRAVEL_BODY_IMAGE_MAX : SHOPPING_BODY_IMAGE_MAX,
+          connectKind === "SHOPPING",
         )
-      : { representativeImagePath: null, imagePaths: [], detailImagePaths: [], sellerDetailImagePaths: [], sellerImagePaths: [] };
+      : { representativeImagePath: null, imagePaths: [], detailImagePaths: [], sellerDetailImagePaths: [], sellerImagePaths: [], sellerEvidenceImages: [], sellerEvidenceOnlyImagePaths: [] };
 
-  if (connectKind === "SHOPPING" && enrichSource) {
-    features = await enrichShoppingSourceFeatures(name, description, features, materializedImages.sellerDetailImagePaths, materializedImages.sellerImagePaths);
-  }
+  try {
+    if (connectKind === "SHOPPING" && enrichSource) {
+      features = await enrichShoppingSourceFeatures(name, description, features, materializedImages.sellerDetailImagePaths,
+        materializedImages.sellerEvidenceImages.map(image => image.path));
+    }
+  } finally { publishImageCleanup.cleanup(materializedImages.sellerEvidenceOnlyImagePaths); }
 
   return {
     name,
@@ -4620,7 +4690,7 @@ async function step1_getProductInfo(
   ]));
   const imageUrls = allImageUrls.slice(0, imageCandidateMax);
   const evidenceSourceImageUrls = connectKind === "SHOPPING"
-    ? preserveSellerDetailSourceUrls(allImageUrls, imageCandidateMax) : imageUrls;
+    ? preserveSellerDetailSourceUrls(allImageUrls, SELLER_SOURCE_IMAGE_LIMIT) : imageUrls;
   const salesPageImageCount = imageUrls.filter((url) => isSalesPageProductImageUrl(url)).length;
   const reviewImageCount = imageUrls.filter((url) => isReviewImageUrl(url)).length;
   console.log(
@@ -4630,11 +4700,13 @@ async function step1_getProductInfo(
     console.log(`   🖼️ 대표 이미지 후보: ${imageUrls[0]}`);
     console.log(`   🖼️ 썸네일 원본 적합: ${isPreferredThumbnailImageUrl(imageUrls[0]) ? "예" : "아니오"}`);
   }
-  const { representativeImagePath, imagePaths, detailImagePaths, sellerDetailImagePaths, sellerImagePaths } = await materializeProductImages(
+  const { representativeImagePath, imagePaths, detailImagePaths, sellerDetailImagePaths, sellerImagePaths,
+    sellerEvidenceImages, sellerEvidenceOnlyImagePaths } = await materializeProductImages(
     // Preserve gallery/thumbnail order; append newly retained detail evidence.
     [...new Set([...imageUrls, ...evidenceSourceImageUrls])],
     "product",
     connectKind === "TRAVEL" ? TRAVEL_BODY_IMAGE_MAX : SHOPPING_BODY_IMAGE_MAX,
+    connectKind === "SHOPPING",
   );
 
   if (connectKind === "TRAVEL" && DETAIL_VISION_READ_ENABLED) {
@@ -4656,10 +4728,25 @@ async function step1_getProductInfo(
   }
   if (connectKind === "SHOPPING") {
     const readingReport: SellerEvidenceReadingReport = { ocrFacts: 0, visionFacts: 0, visionImages: 0 };
-    sanitizedFeatures = await enrichShoppingSourceFeatures(productName, description, sanitizedFeatures, sellerDetailImagePaths, sellerImagePaths, readingReport);
-    if (!hasSufficientProductReviewEvidence({ productName, description, features: sanitizedFeatures, targetSectionCount: 11 })) {
-      throw new Error(`SOURCE_EVIDENCE_REQUIRED: 제품 자체의 확인 가능한 구성·중량·기능·규격 텍스트 근거가 부족합니다. (상세 구간 ${sellerDetailImagePaths.length} · 판매자 이미지 ${sellerImagePaths.length} · OCR 근거 ${readingReport.ocrFacts} · 이미지 판독 ${readingReport.visionImages}장 채택 ${readingReport.visionFacts}줄 · 확인 근거 ${sanitizedFeatures.length})`);
-    }
+    try {
+      sanitizedFeatures = await enrichShoppingSourceFeatures(productName, description, sanitizedFeatures, sellerDetailImagePaths,
+        sellerEvidenceImages.map(image => image.path), readingReport);
+      if (!hasSufficientProductReviewEvidence({ productName, description, features: sanitizedFeatures, targetSectionCount: 11 })) {
+        const evidence = buildProductReviewAnalysis({ productName, description, features: sanitizedFeatures, targetSectionCount: 11 });
+        const diagnosticDirectory = process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim() ||
+          (BRANDLINK_DRAFT_CONTEXT_OUTPUT ? path.dirname(path.resolve(BRANDLINK_DRAFT_CONTEXT_OUTPUT)) : "");
+        const diagnosticPath = writeInsufficientSourceDiagnostic(diagnosticDirectory, {
+          sourceUrl: finalUrl, productName, description, features: sanitizedFeatures,
+          collectedFeatures: [...structuredProduct.features, ...structuredFacts, ...features]
+            .map(value => isolateSellerEvidenceText(value, 500)).filter(Boolean),
+          evidenceLevel: evidence.evidenceLevel, evidenceSignals: evidence.verifiedSignals,
+          candidateImageCount: allImageUrls.length, publicationImageCount: imagePaths.length - detailImagePaths.length,
+          detailImageCount: sellerDetailImagePaths.length, evidenceImages: sellerEvidenceImages, reading: readingReport.reading || [],
+        });
+        if (diagnosticPath) console.log("   🔎 부족한 원본 근거의 수집·판독 진단을 저장했습니다(미검증, 원고 작성용 스냅샷 아님).");
+        throw new Error(`SOURCE_EVIDENCE_REQUIRED: 제품 자체의 확인 가능한 구성·중량·기능·규격 텍스트 근거가 부족합니다. (상세 구간 ${sellerDetailImagePaths.length} · 판매자 이미지 ${sellerEvidenceImages.length} · OCR 근거 ${readingReport.ocrFacts} · 이미지 판독 ${readingReport.visionImages}장 채택 ${readingReport.visionFacts}줄 · 확인 근거 ${sanitizedFeatures.length})`);
+      }
+    } finally { publishImageCleanup.cleanup(sellerEvidenceOnlyImagePaths); }
   }
   
   return {
@@ -4794,16 +4881,21 @@ async function generateWithAI(
   chatgptContext?: ChatGPTGuidanceContext,
   chatgptImagePaths: string[] = [],
   outputSchema?: unknown,
+  prewritingPhotoProof?: ShoppingPrewritePhotoProof,
 ): Promise<string> {
   if (BROWSER_GPT_MODE) {
     console.log("   ✦ 자동 원고는 Codex GPT-6 Luna(low) 고정 정책으로 작성합니다.");
   }
 
   try {
+    if (prewritingPhotoProof) assertShoppingPrewritePhoto(prewritingPhotoProof);
     return await runCodexDraft({
         systemPrompt,
         userPrompt,
         imagePaths: chatgptImagePaths,
+        ...(prewritingPhotoProof ? { publicationPhotoInput: {
+          path: prewritingPhotoProof.original.path, sha256: prewritingPhotoProof.original.sha256,
+        } } : {}),
         timeoutMs: CODEX_DRAFT_TIMEOUT_MS,
         model: CODEX_DRAFT_MODEL || undefined,
         reasoningEffort: CODEX_DRAFT_REASONING_EFFORT,
@@ -4827,15 +4919,7 @@ async function generateWithAI(
 // ============================================
 // STEP 2: LLM으로 SEO 최적화 글 생성 (긴 버전)
 // ============================================
-async function step2_generatePost(
-  product: ProductInfo,
-  brandLink: string,
-  productId?: string | null,
-  connectKind: "SHOPPING" | "TRAVEL" = "SHOPPING",
-  specInput?: SpecStep2Input | null,
-  productIdentity?: { externalProductId?: string | null; sourceUrl?: string | null } | null,
-): Promise<GeneratedPostPreview> {
-  const isTravel = connectKind === "TRAVEL";
+function sanitizeProductForWriting(product: ProductInfo): void {
   // 판매/여행 페이지의 과도한 본문이나 삽입 지시가 모델 컨텍스트를 잠식하지 않도록
   // 사실 필드의 크기를 제한한다. 페이지 텍스트는 어디까지나 데이터로만 취급한다.
   product.name = isolateSellerEvidenceText(product.name, 300)
@@ -4854,6 +4938,62 @@ async function step2_generatePost(
   product.rating = isolateSellerEvidenceText(product.rating, 40);
   product.storeName = isolateSellerEvidenceText(product.storeName, 200) || null;
   product.travelPageResearch = sanitizeTravelPageResearch(product.travelPageResearch);
+}
+
+function writingSourceSnapshot(product: ProductInfo, brandLink: string, productId: string,
+  connectKind: "SHOPPING" | "TRAVEL", identity?: { externalProductId?: string | null; sourceUrl?: string | null } | null): ProductSnapshot {
+  return createProductSnapshot({ productId, connectKind, externalProductId: identity?.externalProductId || null,
+    sourceUrl: product.finalUrl || identity?.sourceUrl || brandLink || null, product: {
+      name: product.name, description: product.description, features: product.features, price: product.price,
+      originalPrice: product.originalPrice, discountRate: product.discountRate, couponInfo: product.couponInfo,
+      deliveryInfo: product.deliveryInfo, reviewCount: product.reviewCount, rating: product.rating,
+      storeName: product.storeName || null, finalUrl: product.finalUrl || null,
+      referenceImageUrls: preserveSellerDetailSourceUrls(product.sourceImageUrls),
+      // Frozen MCP source metadata is not replaced by the number of local download/cache fragments on resubmission.
+      detailImageSegmentCount: product.prewritingPhotoProof?.snapshot.product.detailImageSegmentCount ?? product.detailImagePaths.length,
+      travelPageResearch: product.travelPageResearch || null,
+    } });
+}
+
+async function step2_generatePost(product: ProductInfo, brandLink: string, productId?: string | null,
+  connectKind: "SHOPPING" | "TRAVEL" = "SHOPPING", specInput?: SpecStep2Input | null,
+  productIdentity?: { externalProductId?: string | null; sourceUrl?: string | null } | null): Promise<GeneratedPostPreview> {
+  sanitizeProductForWriting(product);
+  if (connectKind === "TRAVEL") return step2_generatePostAfterPreflight(product, brandLink, productId, connectKind, specInput, productIdentity);
+  if (!hasSufficientProductReviewEvidence(toProductSourceEvidenceInput(product, 11)))
+    throw Object.assign(new Error("SOURCE_EVIDENCE_REQUIRED: 작성에 실제 전달할 상품 고유 근거가 부족합니다. 원고를 생성하지 않았습니다."), { code: "SOURCE_EVIDENCE_REQUIRED" });
+  if (specInput?.submittedPrewritingPhotoProof) product.prewritingPhotoProof = specInput.submittedPrewritingPhotoProof;
+  const snapshot = writingSourceSnapshot(product, brandLink, productId || "", connectKind, productIdentity);
+  reportDraftProgress("facts", "작성 전 필수 원본·선택 상품 검사");
+  console.log("   🔎 원고 작성 전 필수 판매자 원본의 실제 외형·옵션·자연 사진을 검사합니다.");
+  const continueWithPhoto = async (proof: ShoppingPrewritePhotoProof) => {
+    assertShoppingPrewritePhoto(proof, snapshot);
+    product.prewritingPhotoProof = BRANDLINK_DRAFT_CONTEXT_OUTPUT ? persistPrewritePhotoForContext(proof, BRANDLINK_DRAFT_CONTEXT_OUTPUT) : proof;
+    product.representativeImagePath = product.prewritingPhotoProof.original.path;
+    product.publicationPhotoContext = writingPhotosFromPrewrite(product.prewritingPhotoProof);
+    if (specInput) {
+      // Seller panels supplied for fact reading are not already publishable photographs.
+      // The assembly starts with the same verified original shown to the writer; later scene slots remain planned/missing.
+      specInput.imageCandidates = [{ path: product.prewritingPhotoProof.original.path, kind: "source", score: 1000 }];
+    }
+    return step2_generatePostAfterPreflight(product, brandLink, productId, connectKind, specInput, productIdentity);
+  };
+  if (specInput?.submittedPrewritingPhotoProof) return continueWithPhoto(specInput.submittedPrewritingPhotoProof);
+  return withShoppingPrewritePhoto({ snapshot, candidatePaths: [product.representativeImagePath || "", ...product.imagePaths].filter(Boolean) }, continueWithPhoto,
+    { select: selectShoppingPrewriteOriginal, recoverSourcePixels: async () => {
+    const recovered = await recoverProductPhotoRegion({ productName: product.name, localCandidates: product.imagePaths,
+      sourceImageUrls: product.sourceImageUrls, outputDir: TEMP_PATH,
+      onCreated: file => { publishImageCleanup.track([file]); },
+    });
+    if (recovered && !product.imagePaths.includes(recovered)) product.imagePaths.push(recovered);
+    return recovered;
+  } });
+}
+
+async function step2_generatePostAfterPreflight(product: ProductInfo, brandLink: string, productId?: string | null,
+  connectKind: "SHOPPING" | "TRAVEL" = "SHOPPING", specInput?: SpecStep2Input | null,
+  productIdentity?: { externalProductId?: string | null; sourceUrl?: string | null } | null): Promise<GeneratedPostPreview> {
+  const isTravel = connectKind === "TRAVEL";
   if (!product.name) {
     throw new Error("PRODUCT_IDENTITY_UNVERIFIED: 판매 페이지 문자열에 유효한 상품명이 없습니다.");
   }
@@ -4905,6 +5045,7 @@ async function step2_generatePost(
     kind: connectKind,
     product: { name: product.name, description: product.description, features: product.features },
     productUnderstanding,
+    publicationPhotoContext: product.publicationPhotoContext,
     minimumSections: minimumBodySectionCount,
     maximumSections: maximumBodySectionCount,
     targetCharacters: compositionContract.targetCharacters,
@@ -5333,7 +5474,7 @@ ${mandatoryWritingPromptBlock}`;
       detailImageSegmentCount: product.detailImagePaths.length,
       travelPageResearch: product.travelPageResearch || null,
     };
-    const snapshot = createProductSnapshot({
+    const snapshot = product.prewritingPhotoProof?.snapshot || createProductSnapshot({
       productId: productId || "",
       connectKind,
       externalProductId: productIdentity?.externalProductId || null,
@@ -5341,6 +5482,8 @@ ${mandatoryWritingPromptBlock}`;
       product: productPayload,
       capturedAt,
     });
+    if (product.prewritingPhotoProof) assertShoppingPrewritePhoto(product.prewritingPhotoProof,
+      writingSourceSnapshot(product, brandLink, productId || "", connectKind, productIdentity));
     const contextJson = JSON.stringify({
         version: "brand-draft-context/v2",
         productId: productId || null,
@@ -5351,6 +5494,10 @@ ${mandatoryWritingPromptBlock}`;
         generatedAt: capturedAt,
         snapshot,
         product: productPayload,
+        ...(product.publicationPhotoContext ? { publicationPhotoContext: product.publicationPhotoContext,
+          prewritingPhotoProof: product.prewritingPhotoProof,
+          publicationPhotoAvailability: { status: "verified-local-original", attachmentRequiredForExternalWriter: true,
+            listingUrlIsNotPhotoUrl: true, futureScenesGenerated: false } } : {}),
         generation: {
           source: "chatgpt-mcp-oauth",
           qualityPreset: BRANDLINK_QUALITY_PRESET,
@@ -5428,6 +5575,7 @@ ${mandatoryWritingPromptBlock}`;
           chatgptContext,
           product.imagePaths,
           DRAFT_OUTPUT_SCHEMA,
+          product.prewritingPhotoProof,
         );
     if (BRANDLINK_GENERATED_DRAFT_PATH) {
       console.log("   MCP OAuth ChatGPT 원고를 불러왔습니다. 로컬 모델 API 호출은 생략합니다.");
@@ -5473,6 +5621,7 @@ ${mandatoryWritingPromptBlock}`;
       chatgptContext,
       product.imagePaths,
       DRAFT_OUTPUT_SCHEMA,
+      product.prewritingPhotoProof,
     ).catch(() => "");
     const retried = retryText ? shaped(retryText) : {};
     return getStructuredSectionCount(retried) > getStructuredSectionCount(first)
@@ -5682,6 +5831,8 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
           buildRepairPrompt(),
           chatgptContext,
           product.imagePaths,
+          undefined,
+          product.prewritingPhotoProof,
         );
         const repairedJson = parseJsonObjectFromText(repairedText);
         let repairedBodySections = normalizeSections(
@@ -5775,7 +5926,7 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
           "",
           `JSON 하나만 출력: {"sections": [섹션 ${targets.length}개 문자열]}`,
         ].join("\n");
-        const rewrittenJson = parseJsonObjectFromText(await generateWithAI(systemPrompt, rewritePrompt, chatgptContext, []));
+        const rewrittenJson = parseJsonObjectFromText(await generateWithAI(systemPrompt, rewritePrompt, chatgptContext, [], undefined, product.prewritingPhotoProof));
         const rewritten = Array.isArray(rewrittenJson.sections) ? rewrittenJson.sections : null;
         if (rewritten && rewritten.length === targets.length && rewritten.every((item) => typeof item === "string" && item.trim())) {
           const candidateBody = bodySections.map((section, index) => {
@@ -9790,12 +9941,14 @@ function classifyFailureCode(error: unknown): string {
       messages.push(current);
     }
   }
-  const explicitCode = codes.find((code) => /^(?:SOURCE_EVIDENCE_REQUIRED|QUALITY_REPAIR_EXHAUSTED|QUALITY_REPAIR_REJECTED|CHATGPT_BROWSER_UNREACHABLE|DRAFT_SECTION_COUNT_OUT_OF_RANGE|DRAFT_RECHECK_REQUIRED)$/u.test(code));
+  const explicitCode = codes.find((code) => /^(?:SOURCE_EVIDENCE_REQUIRED|IMAGE_SOURCE_BINDING_REQUIRED|PREWRITING_PHOTO_CHANGED|PREWRITING_SOURCE_CHANGED|QUALITY_REPAIR_EXHAUSTED|QUALITY_REPAIR_REJECTED|CHATGPT_BROWSER_UNREACHABLE|DRAFT_SECTION_COUNT_OUT_OF_RANGE|DRAFT_RECHECK_REQUIRED)$/u.test(code));
   if (explicitCode === "QUALITY_REPAIR_REJECTED") return "QUALITY_REPAIR_EXHAUSTED";
   if (explicitCode) return explicitCode;
   const message = messages.join(" ") || getErrorMessage(error);
   const embeddedProviderCode = message.match(/\b(CODEX_(?:AUTH_REQUIRED|MODEL_INCOMPATIBLE|TIMEOUT|TRANSIENT_FAILURE))\b/u)?.[1];
   if (embeddedProviderCode) return embeddedProviderCode;
+  const prewritingCode = message.match(/\b(IMAGE_SOURCE_BINDING_REQUIRED|PREWRITING_PHOTO_CHANGED|PREWRITING_SOURCE_CHANGED):/u)?.[1];
+  if (prewritingCode) return prewritingCode;
   if (/SOURCE_EVIDENCE_REQUIRED/u.test(message)) return "SOURCE_EVIDENCE_REQUIRED";
   if (/QUALITY_REPAIR_(?:EXHAUSTED|REJECTED)/u.test(message)) return "QUALITY_REPAIR_EXHAUSTED";
   if (/세션|로그인/u.test(message)) return "NAVER_SESSION_EXPIRED";
@@ -10475,6 +10628,8 @@ async function main() {
         memo: process.env.BRANDLINK_DRAFT_MEMO?.trim() || null,
         angleContext: await loadPostAngleContext(link.id, link.postAngle),
         submittedDraftText,
+        submittedPrewritingPhotoProof: runtimeConnectKind === "SHOPPING" && submittedSnapshot && BRANDLINK_SUBMITTED_CONTEXT_PATH
+          ? readSubmittedPrewritePhoto(BRANDLINK_SUBMITTED_CONTEXT_PATH, submittedSnapshot) : null,
       },
       // Facts are collected from the resolved sales/travel detail page. Keep
       // that page in the snapshot instead of the BrandConnect category URL.
@@ -10508,6 +10663,11 @@ async function main() {
 
     setStage("STEP2.5 대표 썸네일 생성");
     if (!preparedPostOverride && link.connectKind !== "TRAVEL") {
+      if (product.prewritingPhotoProof) {
+        assertShoppingPrewritePhoto(product.prewritingPhotoProof, writingSourceSnapshot(product, link.url, link.id, runtimeConnectKind,
+          { externalProductId: link.externalItemId, sourceUrl: product.finalUrl || link.finalUrl || link.sourceUrl || link.url }));
+        product.representativeImagePath = product.prewritingPhotoProof.original.path;
+      } else {
       product.representativeImagePath = await selectVerifiedProductPhoto(
         // Detail-page segments may contain the only actual product photograph.
         // Review their pixels with the same strict gate instead of rejecting by filename.
@@ -10531,6 +10691,7 @@ async function main() {
         } else {
           throw new Error("상품 사진 검사 실패: 판매자 원본과 상품 영역 재검사에서도 해당 상품의 사진을 확보하지 못했습니다.");
         }
+      }
       }
     }
     let generatedThumbnail: GeneratedProductThumbnail | null = preparedPostOverride
@@ -10756,7 +10917,7 @@ async function main() {
         assembled,
         imageAssets: preparedPostOverride?.imageAssets,
         thumbnailSource: generatedThumbnail?.source,
-        sourceSnapshot: submittedSnapshot || createProductSnapshot({
+        sourceSnapshot: submittedSnapshot || product.prewritingPhotoProof?.snapshot || createProductSnapshot({
           productId: linkId, connectKind: runtimeConnectKind,
           externalProductId: link.externalItemId || null,
           sourceUrl: product.finalUrl || link.finalUrl || link.sourceUrl || link.url || null,

@@ -1,5 +1,6 @@
 import { assessRepetition } from "./draft-quality-signals";
 import { explicitProductFunctionKey, isUnusableProductFactValue, normalizeTypedProductFact, PRODUCT_MEASUREMENT_PATTERN } from "./product-source-facts";
+import { isProductTitleEcho } from "./product-source-intake";
 
 export type ProductEditorialRole =
   | "review-hook"
@@ -271,7 +272,7 @@ function meaningfulDescription(value: string | null | undefined, productName: st
   const normalized = clean(value);
   if (normalized.length < 12) return "";
   if (/^(?:www\.)?[\w.-]+\.(?:com|co\.kr|kr)$/iu.test(normalized)) return "";
-  if (normalized === clean(productName)) return "";
+  if (isProductTitleEcho(normalized, productName)) return "";
   if (/(?:스마트스토어|공식스토어|공식몰).{0,24}(?:생활|주방|가전|전문|브랜드)/u.test(normalized)) return "";
   return normalized.slice(0, 180);
 }

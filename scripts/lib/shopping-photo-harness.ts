@@ -1,5 +1,6 @@
 /** Pure generation brief. Reference pixels and transport bindings remain authoritative. */
 import type { ProductPhysicalScale } from "./product-9canvas";
+import { isFabricLintRemoverProduct } from "../../src/lib/product-photo-subject";
 export type ShoppingPhotoCategory = "beauty" | "appliance" | "wearable" | "clothing" | "food" | "general";
 
 export interface ShoppingPhotoHarnessOptions {
@@ -36,11 +37,12 @@ export function resolveShoppingPhotoCategory(productName: string): ShoppingPhoto
   const creamColour = /크림\s*(?:색|컬러)|\bcream[-\s]*(?:colored|coloured|color|colour)\b/iu.test(name);
   const headphoneStand = /헤드폰|\bheadphones?\b/iu.test(name) && /스탠드|거치대|\bstand\b/iu.test(name);
   if (printerToner || creamColour || headphoneStand) return "general";
+  const lintRemover = isFabricLintRemoverProduct(name);
   const matches: ShoppingPhotoCategory[] = [];
   if (/토너|로션|세럼|에센스|스킨케어|크림|클렌저|클렌징|샴푸|바디워시|립스틱|화장품|\b(?:toner|lotion|serum|cream|cleanser|shampoo|cosmetic)\b/iu.test(name)) matches.push("beauty");
-  if (/음식물\s*처리기|밥솥|커피머신|믹서기|선풍기|청소기|헤어드라이|드라이어|드라이기|세탁기|건조기|\b(?:appliance|vacuum|blender|hairdryer|rice cooker|coffee machine|washing machine)\b/iu.test(name)) matches.push("appliance");
+  if (lintRemover || /음식물\s*처리기|밥솥|커피머신|믹서기|선풍기|청소기|헤어드라이|드라이어|드라이기|세탁기|건조기|\b(?:appliance|vacuum|blender|hairdryer|rice cooker|coffee machine|washing machine)\b/iu.test(name)) matches.push("appliance");
   if (/이어폰|헤드폰|헤드셋|스마트워치|에어팟|오픈스윔|오픈런|\b(?:earbuds?|earphones?|headphones?|headset|smartwatch|openswim|openrun|airpods)\b/iu.test(name)) matches.push("wearable");
-  if (/팬츠|바지|셔츠|재킷|자켓|코트|니트|스웨터|원피스|스커트|운동화|러닝화|구두|\b(?:pants|trousers|shirt|jacket|coat|sweater|dress|skirt|shoes?|sneakers?)\b/iu.test(name)) matches.push("clothing");
+  if (!lintRemover && /팬츠|바지|셔츠|재킷|자켓|코트|니트|스웨터|원피스|스커트|운동화|러닝화|구두|\b(?:pants|trousers|shirt|jacket|coat|sweater|dress|skirt|shoes?|sneakers?)\b/iu.test(name)) matches.push("clothing");
   if (/한우|등심|안심|갈비|정육|소고기|돼지고기|밀키트|식품|김치|과일|생크림|\b(?:beef|pork|steak|food|fruit|meal kit)\b/iu.test(name)) matches.push("food");
   return matches.length === 1 ? matches[0] : "general";
 }
@@ -87,6 +89,7 @@ const PLANS: Record<ShoppingPhotoCategory, readonly Shot[]> = {
 
 function applianceSetting(name: string): string {
   // Specific appliance types precede generic process words such as 건조기.
+  if (isFabricLintRemoverProduct(name)) return "an ordinary clothing-care tabletop or shelf with the complete handheld fabric shaver at rest; no hands, worn garment, fabric shaving or performance demonstration";
   if (/음식물\s*처리기|밥솥|커피머신|믹서기|\b(?:blender|rice cooker|coffee machine)\b/iu.test(name)) return "a coherent kitchen counter with modest cabinets or utensils in the background; no operation or performance demonstration";
   if (/헤어드라이|드라이어|드라이기|\bhairdryer\b/iu.test(name)) return "a dry bathroom vanity or dressing counter; keep the hairdryer idle, never show wet use, blowing hair or invented attachments";
   if (/청소기|\bvacuum\b/iu.test(name)) return "a real floor and hallway or living-room corner; device idle, grounded, no cleaning demonstration";

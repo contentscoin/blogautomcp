@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type { ShoppingTopicTemplateId } from "./topic-templates/types";
+import { isFabricLintRemoverProduct } from "../../src/lib/product-photo-subject";
 
 export type ProductPhysicalScale = "wearable" | "handheld" | "desktop" | "floor" | "package";
 export type ProductOptionStatus = "not-applicable" | "confirmed" | "ambiguous";
@@ -92,7 +93,7 @@ const CATEGORY_RULES: CategoryRule[] = [
   },
   {
     id: "home_appliance",
-    strong: [/가습기|청소기|건조기|세탁기|냉장고|냉동고|선풍기|서큘레이터|에어컨|공기청정기|제습기|드라이기|드라이어/u],
+    strong: [/가습기|청소기|보[풀플]\s*제거기|건조기|세탁기|냉장고|냉동고|선풍기|서큘레이터|에어컨|공기청정기|제습기|드라이기|드라이어/u],
     broad: [/생활\s*가전|주방\s*가전|가전/u],
   },
   {
@@ -177,6 +178,7 @@ function classifyCategory(input: Product9CanvasInput): Product9Canvas["concept"]
 }
 
 function inferProductKind(name: string): string {
+  if (isFabricLintRemoverProduct(name)) return "보풀제거기";
   const kinds: Array<[RegExp, string]> = [
     [/가습기/u, "가습기"], [/골프\s*거리\s*측정기|보이스캐디/u, "시계형 골프 거리측정기"],
     [/곶감|반건시|건시/u, "곶감 선물세트"], [/청소기/u, "무선청소기"], [/건조기/u, "건조기"],
@@ -191,6 +193,7 @@ function inferProductKind(name: string): string {
 
 export function inferProductPhysicalScale(productName: string, categoryId: ShoppingTopicTemplateId = "generic_shopping"): ProductPhysicalScale {
   const name = clean(productName, 400);
+  if (isFabricLintRemoverProduct(name)) return "handheld";
   if (/시계형|워치|이어폰|헤드폰|반지|팔찌/u.test(name)) return "wearable";
   if (/청소기|건조기|세탁기|냉장고|냉동고|스탠드\s*tv|이동식\s*(?:tv|모니터)|타프|텐트/u.test(name)) return "floor";
   if (/가습기|노트북|태블릿|모니터|키보드|스피커/u.test(name)) return "desktop";

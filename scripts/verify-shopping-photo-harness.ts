@@ -23,6 +23,7 @@ for (const [name, category] of [
   ["아비노", "general"], ["달바", "general"], ["쿠쿠", "general"], ["샥즈", "general"],
   ["세럼·스마트워치", "general"], ["생크림", "general"], ["알 수 없는 신상품", "general"],
   ["프린터 토너 카트리지", "general"], ["크림색 커튼", "general"], ["헤드폰 스탠드", "general"],
+  ["믹서기와 스킨케어 크림", "general"], ["니트용 보풀제거기와 바디크림", "general"],
 ] as const) {
   assert.equal(resolveShoppingPhotoCategory(name), category);
   const shots = [0, 1, 2].map(variantIndex => {
@@ -74,6 +75,21 @@ assert.match(buildShoppingPhotoHarness({ ...base, productName: "쿠쿠 음식물
 const smartcara = buildShoppingPhotoHarness({ ...base, productName: "스마트카라 스톤 음식물처리기 2L 건조분쇄형 건조기 분쇄기 SC-S0201" });
 assert.match(smartcara, /APPLIANCE SETTING: a coherent kitchen counter/u);
 assert.doesNotMatch(smartcara, /APPLIANCE SETTING: a plausible laundry corner/u); checks++;
+const fullasName = "풀라스 프리미엄 니트 세탁소 업소용 보풀제거기 추천 충전식 세탁소용 핸디형 무선 보플제거기";
+for (const productName of [fullasName, "니트 가디건용 보풀 제거기", "knit fabric lint shaver"]) {
+  assert.equal(resolveShoppingPhotoCategory(productName), "appliance", "a specific device wins over its target fabric");
+  for (const role of ["hero", "body"] as const) for (const variantIndex of [0, 1, 2]) {
+    const options = { ...base, productName, role, variantIndex, physicalScale: "handheld" as const };
+    const prompt = buildBrandPostImagePrompt({ ...options, connectKind: "SHOPPING" });
+    assert.equal(plan(buildShoppingPhotoHarness(options)).category, "appliance");
+    assert.equal(plan(prompt).category, "appliance");
+    assert.match(prompt, /APPLIANCE SETTING:.*handheld fabric shaver at rest/u);
+    assert.doesNotMatch(prompt, /CLOTHING: People wearing/u);
+    assert.doesNotMatch(JSON.stringify(plan(prompt).shot), /naturally worn|garment.*hem|waistband|seams|fabric drape/u);
+    assert.match(plan(prompt).shot.placement, /(?:idle|unoperated)/u);
+  }
+  checks++;
+}
 const minixName = "[2L] 미닉스 음식물 처리기 더플렌더 PRO 가정용 분쇄기 건조기 MNFD-120G";
 for (const productName of [minixName, "미닉스 음식물 처리기", "미닉스 음식물\t처리기 건조기", "미닉스 음식물\u00a0처리기 건조기"]) {
   assert.equal(resolveShoppingPhotoCategory(productName), "appliance");

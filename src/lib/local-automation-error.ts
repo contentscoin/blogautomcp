@@ -15,6 +15,10 @@ export const LOCAL_AUTOMATION_ERROR_CODES = [
   "CONNECT_KIND_MISMATCH",
   "CONTENT_BLOCKED",
   "IMAGE_SHORTFALL",
+  "SOURCE_EVIDENCE_REQUIRED",
+  "IMAGE_SOURCE_BINDING_REQUIRED",
+  "PREWRITING_PHOTO_CHANGED",
+  "PREWRITING_SOURCE_CHANGED",
   "LLM_UNAVAILABLE",
   "CODEX_AUTH_REQUIRED",
   "CODEX_MODEL_INCOMPATIBLE",
@@ -78,6 +82,10 @@ export const LOCAL_AUTOMATION_ERROR_HINTS: Record<LocalAutomationErrorCode, stri
   CONNECT_KIND_MISMATCH: "상품의 커넥트 종류(쇼핑/여행)가 요청과 다릅니다.",
   CONTENT_BLOCKED: "생성된 글이 발행 기준(네이버 정책·근거 규칙)을 통과하지 못해 발행을 보류했습니다.",
   IMAGE_SHORTFALL: "본문에 넣을 이미지가 부족합니다. 상품 이미지를 다시 동기화하거나 다른 상품을 선택하세요.",
+  SOURCE_EVIDENCE_REQUIRED: "상품의 확인 가능한 상세 근거가 부족합니다. 수집·판독 기록을 확인하고 상세 정보를 보강하세요.",
+  IMAGE_SOURCE_BINDING_REQUIRED: "작성 전에 선택 상품에 맞는 게시용 판매자 원본을 확보해야 합니다. 수집한 원본 후보와 선택 옵션을 확인하세요.",
+  PREWRITING_PHOTO_CHANGED: "검증한 원본 사진이 변경됐습니다. 현재 사진을 다시 확인한 뒤 작성하세요.",
+  PREWRITING_SOURCE_CHANGED: "작성 전에 고정한 상품 근거가 변경됐습니다. 현재 상품·옵션과 근거를 다시 확인하세요.",
   LLM_UNAVAILABLE: "ChatGPT 계정 Codex 연결을 확인한 뒤 다시 시도하세요.",
   CODEX_AUTH_REQUIRED: "Codex 로그인이 필요합니다. PC 앱에서 Codex 연결 상태를 확인하세요.",
   CODEX_MODEL_INCOMPATIBLE: "현재 Codex 실행 환경에서 선택한 모델을 지원하지 않습니다. PC 앱을 최신 버전으로 업데이트하세요.",
@@ -127,6 +135,10 @@ export function classifyLocalFailure(input: { status?: number | null; code?: str
   const message = input.message || "";
   const status = input.status ?? null;
   if (isLocalAutomationErrorCode(code)) return code;
+  // Context-only preparation has no draft result.json. Preserve its explicit
+  // source/photo diagnostic from the logged error before generic HTTP guesses.
+  const prewritingCode = message.match(/\b(SOURCE_EVIDENCE_REQUIRED|IMAGE_SOURCE_BINDING_REQUIRED|PREWRITING_PHOTO_CHANGED|PREWRITING_SOURCE_CHANGED)\b/u)?.[1];
+  if (isLocalAutomationErrorCode(prewritingCode)) return prewritingCode;
   const naverCode = message.match(/\b(NAVER_SESSION_(?:EXPIRED|FORBIDDEN|CHECK_FAILED|CONFIGURATION_REQUIRED))\b/u)?.[1];
   if (isLocalAutomationErrorCode(naverCode)) return naverCode;
   if (/\bCODEX_AUTH_REQUIRED\b/u.test(message)) return "CODEX_AUTH_REQUIRED";

@@ -27,8 +27,10 @@ import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
 import { createWritingPromptContract, formatWritingPromptContract, getWritingOutputExample } from "./lib/writing-prompt-contract";
+import { verifyProductSourceIntake } from "./verify-product-source-intake";
 
 async function main() {
+  await verifyProductSourceIntake();
   // 1. Structure: object sections, merged sections, and the output example.
   assert.equal(sectionEntryToString({ title: "흡입력", body: "18,000Pa 흡입력이에요.\n덕분에 카펫도 편해요." }), "흡입력\n\n18,000Pa 흡입력이에요.\n덕분에 카펫도 편해요.");
   assert.equal(sectionEntryToString({ heading: "무게", paragraphs: ["1.2kg이에요.", "손목 부담이 적어요."] }), "무게\n\n1.2kg이에요.\n\n손목 부담이 적어요.");
@@ -42,7 +44,11 @@ async function main() {
   assert.match(formatWritingPromptContract(contract), /sections는 7~11개이며 섹션마다 원소 하나\("소제목\\n\\n본문"\)/u);
   const agent = fs.readFileSync("scripts/simple-agent.ts", "utf8");
   assert.match(agent, /const variants = \[\s*candidate,/u, "raw JSON is parsed before curly-quote rewriting");
-  assert.match(agent, /DRAFT_OUTPUT_SCHEMA,\s*\);/u, "the draft call requests structured output");
+  const preflightWriter = agent.slice(agent.indexOf("async function step2_generatePostAfterPreflight("));
+  assert.equal([...preflightWriter.matchAll(/DRAFT_OUTPUT_SCHEMA,\s*product\.prewritingPhotoProof,\s*\);/gu)].length, 1,
+    "the first draft call keeps its strict schema and the inspected original-photo proof");
+  assert.match(preflightWriter, /DRAFT_OUTPUT_SCHEMA,\s*product\.prewritingPhotoProof,\s*\)\.catch/u,
+    "format retries keep the same strict schema and original-photo proof");
   assert.match(agent, /같은 지시로 1회 재작성/u, "a format-only miss gets one retry instead of failing the item");
 
   // 2. Product evidence: the prompt and the grader share the same facts and counts; repair notes name missing facts.

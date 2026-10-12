@@ -47,7 +47,15 @@ async function main() {
     assert(sceneRecipes(applyShoppingNaturalPhotoPlan(doc.sections, { productName })).every(recipe => !/코디|핏|기장/u.test(recipe)),
       `only a clothing product receives the garment recipe: ${productName}`);
   }
-  for (const productName of ["차콜 와이드 팬츠", "반팔 티셔츠", "롱 원피스", "바람막이 재킷", "cotton T-shirt"]) {
+  const fullasName = "풀라스 프리미엄 니트 세탁소 업소용 보풀제거기 추천 충전식 세탁소용 핸디형 무선 보플제거기";
+  for (const productName of [fullasName, "니트 가디건용 보풀 제거기", "니트용 충전식 보플제거기", "knit fabric lint shaver"]) {
+    const device = applyShoppingNaturalPhotoPlan(doc.sections, { productName });
+    assert(sceneRecipes(device).every(recipe => !/의류 착용|봉제|핏|기장|코디/u.test(recipe)),
+      "the specific lint-remover device wins over its clothing/fabric usage context");
+    assert(sceneRecipes(device).every(recipe => /제품 전체|전체 제품|제품 전체 형상/u.test(recipe)));
+    assert.deepEqual(device.map(section => section.body), doc.sections.map(section => section.body), "classification does not delete or rewrite saved prose");
+  }
+  for (const productName of ["차콜 와이드 팬츠", "반팔 티셔츠", "롱 원피스", "바람막이 재킷", "니트 와이드 팬츠", "울 니트 가디건", "cotton T-shirt"]) {
     assert(sceneRecipes(applyShoppingNaturalPhotoPlan(doc.sections, { productName })).every(recipe => /의류|핏|기장/u.test(recipe)),
       `selected apparel retains clothing-specific preservation: ${productName}`);
   }

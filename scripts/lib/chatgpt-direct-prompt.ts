@@ -1,5 +1,6 @@
 export const CHATGPT_DIRECT_PRIMARY_PROMPT_MAX_CHARS = 8_500;
-export const CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS = 5_500;
+// Internal recovery budget: keep mandatory photo roles/evidence without changing the primary path.
+export const CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS = 6_500;
 
 function normalizeLines(value: string): string[] {
   const seen = new Set<string>();

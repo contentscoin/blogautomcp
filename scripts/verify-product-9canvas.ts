@@ -21,6 +21,12 @@ const humidifierCopy = buildProductThumbnailCopy("캠핑에서도 쓰는 미니 
 assert.equal(humidifierCopy.headline, "가습 방식 체크");
 assert.doesNotMatch(JSON.stringify(humidifierCopy), /보냉|흡입/u);
 assert.equal(selectTopicTemplate("SHOPPING", { name: humidifier.subject.productName, productUnderstanding: humidifier }).id, "home_appliance");
+const lintRemover = buildProduct9Canvas({ name: "풀라스 프리미엄 니트 세탁소 업소용 보풀제거기 추천 충전식 세탁소용 핸디형 무선 보플제거기",
+  features: ["사용시간: 210분", "색상: 블랙"] });
+assert.equal(lintRemover.concept.productKind, "보풀제거기");
+assert.equal(lintRemover.concept.categoryId, "home_appliance");
+assert.equal(lintRemover.concept.physicalScale, "handheld");
+assert.equal(lintRemover.subject.selectedOption.label, "블랙", "actual selected-color fact stays intact");
 
 const golfWatch = buildProduct9Canvas({
   name: "[추석선물 EVENT] 2026 보이스캐디 T13 PRO 시계형 골프거리측정기",

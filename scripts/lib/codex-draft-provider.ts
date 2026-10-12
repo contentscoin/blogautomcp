@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import crypto from "node:crypto";
 import { getWritingTimeoutPolicy, writingTimeoutMs } from "./writing-timeout-policy";
 import { resolveCodexTextModel, resolveTextReasoningEffort } from "./text-model-policy";
 import { isCodexStreamCompletionLoss } from "../../src/lib/local-automation-error";
@@ -31,6 +32,8 @@ export interface CodexDraftOptions {
   systemPrompt: string;
   userPrompt: string;
   imagePaths?: string[];
+  /** Server-reviewed publication original. It is always attachment 1 and exact bytes are checked before every provider attempt. */
+  publicationPhotoInput?: { path: string; sha256: string };
   /** Override the conservative writing default for bounded image-review batches. */
   maxImages?: number;
   /** Keep numbered image-review candidates in caller order. */
@@ -249,6 +252,35 @@ function readableImages(imagePaths: string[], requestedMaximum = 4, preserveOrde
   ])).slice(0, maximum);
 }
 
+/** Keep the actual publication original distinct from seller artwork supplied only for source reading. */
+export function resolveCodexWritingImages(options: Pick<CodexDraftOptions, "imagePaths" | "maxImages" | "preserveImageOrder" | "publicationPhotoInput">): string[] {
+  const images = readableImages(options.imagePaths ?? [], options.maxImages, options.preserveImageOrder);
+  const original = options.publicationPhotoInput;
+  if (!original) return images;
+  const file = path.resolve(original.path);
+  let valid = false;
+  try {
+    const real = path.resolve(fs.realpathSync(file));
+    const canonicalMatch = process.platform === "win32" ? real.toLowerCase() === file.toLowerCase() : real === file;
+    valid = /^[a-f0-9]{64}$/u.test(original.sha256) && fs.statSync(file).isFile() && !fs.lstatSync(file).isSymbolicLink() &&
+      canonicalMatch && crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") === original.sha256;
+  } catch { /* Missing, linked or changed originals cannot authorize a writer request. */ }
+  if (!valid)
+    throw new Error("PREWRITING_PHOTO_CHANGED: 작성에 전달할 검증 원본이 검사 후 바뀌었습니다. 원고 요청을 보내지 않았습니다.");
+  const maximum = Math.max(1, Math.min(16, Math.floor(options.maxImages || 4)));
+  return [file, ...images.filter(image => process.platform === "win32" ? image.toLowerCase() !== file.toLowerCase() : image !== file)].slice(0, maximum);
+}
+
+export function codexWritingImageRoles(images: string[], original?: CodexDraftOptions["publicationPhotoInput"]): string {
+  if (!original) return "";
+  return ["[실제 첨부 이미지 역할 · 서버가 이 순서로 전달한 파일]",
+    ...images.map((file, index) => index === 0 && file === path.resolve(original.path)
+      ? `첨부 ${index + 1}: 작성 전 검사한 실제 본문 원본 사진. SHA256=${original.sha256}. 눈에 보이는 외형만 묘사하고 숨겨진 기능·구성·수량은 사진으로 인증하지 마세요.`
+      : `첨부 ${index + 1}: 판매자 상세 근거 읽기용 이미지. 본문에 게시할 사진이 아닙니다. 설명판의 배치·광고·콜라주를 최종 사진 모습이라고 서술하지 마세요.`),
+    "아직 생성하지 않은 연출 사진은 첨부되지 않았습니다. 계획이나 imageIntent를 실제 촬영 장면처럼 묘사하지 마세요."]
+    .join("\n");
+}
+
 function buildWritingPrompt(
   systemPrompt: string,
   userPrompt: string,
@@ -280,6 +312,7 @@ function buildWritingPrompt(
 }
 
 export async function runCodexDraft(options: CodexDraftOptions): Promise<string> {
+  const images = resolveCodexWritingImages(options);
   const model = resolveCodexTextModel(options.model);
   const reasoningEffort = resolveTextReasoningEffort(options.reasoningEffort);
   const { Codex } = await nativeImport("@openai/codex-sdk");
@@ -302,8 +335,8 @@ export async function runCodexDraft(options: CodexDraftOptions): Promise<string>
     },
     configOverrides: ['plugins."opus-fable-performance@local-opencrab".enabled=false'],
   });
-  const prompt = buildWritingPrompt(options.systemPrompt, options.userPrompt, researchMode, options.researchScope);
-  const images = readableImages(options.imagePaths ?? [], options.maxImages, options.preserveImageOrder);
+  const prompt = [buildWritingPrompt(options.systemPrompt, options.userPrompt, researchMode, options.researchScope),
+    codexWritingImageRoles(images, options.publicationPhotoInput)].filter(Boolean).join("\n\n");
   const input = images.length > 0
     ? [
         { type: "text" as const, text: prompt },
@@ -314,6 +347,7 @@ export async function runCodexDraft(options: CodexDraftOptions): Promise<string>
   try {
     options.onProgress?.(`Codex 원고 작성 시작${images.length ? ` · 이미지 ${images.length}장` : ""}`);
     return await runCodexDraftWithRetry(async () => {
+      resolveCodexWritingImages(options); // A provider reconnect must not carry an original changed after input preparation.
       const thread = codex.startThread({
         // Every Codex writer, reviewer and vision helper uses the same approved model.
         model,

@@ -304,7 +304,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
       await deps.call(`${base}/draft`, "POST", { action: "prepare_context" });
       await ensureRewritePrepared();
     }
-    deps.onStage?.("원고·기본 이미지 작성");
+    deps.onStage?.("상품 근거·원본 확인 후 원고 작성");
     // New and existing materials converge through the same saved-draft repair
     // engine below. Avoid spending a separate hidden repair budget during POST.
     draft = await deps.call(`${base}/draft`, "POST", { autoApprove: false, autoSectionImages: false, autoQualityRepair: false });

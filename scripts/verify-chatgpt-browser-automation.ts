@@ -53,6 +53,19 @@ async function main(): Promise<void> {
   });
   assert.ok(budgetedPrompt.length <= CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS);
   assert.match(budgetedPrompt, /\{"title":"제목"\}$/u);
+  const expandedRecoveryPrompt = composeBudgetedChatGptPrompt({
+    prefix: "필수 사진 역할 계약",
+    evidence: Array.from({ length: 200 }, (_, index) => `${index}번째 근거 ${"정확히 확인한 참고 문장 ".repeat(20)}`).join("\n"),
+    suffix: '{"title":"필수 출력 형식"}',
+    maxChars: CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS,
+  });
+  assert.ok(expandedRecoveryPrompt.length > 5_500, "the expanded internal budget actually retains additional evidence");
+  assert.ok(expandedRecoveryPrompt.length <= 6_500, "the recovery path remains bounded at its new policy limit");
+  assert.ok(expandedRecoveryPrompt.startsWith("필수 사진 역할 계약"));
+  assert.ok(expandedRecoveryPrompt.endsWith('{"title":"필수 출력 형식"}'), "budgeting preserves mandatory suffix text");
+  assert.throws(() => composeBudgetedChatGptPrompt({ prefix: "", evidence: "근거", suffix: "필수 계약".repeat(1500),
+    maxChars: CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS }), /고정 프롬프트가 예산을 초과/u,
+  "mandatory instructions must fail rather than be silently clipped when even the expanded budget is exceeded");
 
   const started = createChatGptReplyProgress(1_000);
   assert.equal(isChatGptReplyTextStalled(started, 180_999, 180_000), false);
@@ -402,7 +415,7 @@ async function main(): Promise<void> {
   assert.match(imageSharedBrowser, /openChatGPTTarget[\s\S]{0,500}navigateToChatGpt/u);
   assert.match(imageWorker, /navigateToChatGpt\(page, `https:\/\/chatgpt\.com\$\{recoveryConversationPath\}`/u);
   assert.doesNotMatch(imageWorker, /page\.goto\(/u, "image open/recovery must share classified ChatGPT navigation");
-  assert.equal(CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS, 5_500);
+  assert.equal(CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS, 6_500);
   const directGenerationBlock = simpleAgent.match(
     /async function runDirectChatGPTGeneration[\s\S]*?\n\}\n\nfunction buildClarificationReply/u,
   )?.[0] ?? "";
