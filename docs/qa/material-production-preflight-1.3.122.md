@@ -29,3 +29,23 @@ Root TypeScript passed. Root/source lint returned zero errors and 24 existing un
 Counterexamples include Gompyo's five publication photos plus later/wide reading panels, Bendict's false title credit, Tefal's unchanged independent specifications with zero reader calls, source-only cleanup and untrusted diagnostics, missing/wrong-option originals preventing writer/context entry, source/byte drift, immutable context copies, exact MCP submit binding, actual attachment roles, and Windows case-equivalent paths without symlink acceptance. The first integrated run exposed an obsolete 5,500-character test expectation; it was updated with actual large-evidence/mandatory-overflow checks, then the integrated runner passed.
 
 Independent read-only source/writing review passed the exported source-intake counterexamples and found no blocking regression. Prewrite integration receives separate independent review before publication. At this checkpoint, the immutable full-JSON/manuscript baseline confirms all 72 existing manifests, 72 manuscripts and 565 existing image files unchanged. Deployment, installed-runtime verification and any actual failed-source recheck are recorded below only after observation.
+
+## Published artifact
+
+Separate independent prewrite/MCP integration review found no blocking regression in snapshot/option/SHA guards, exact source reuse, frozen submission metadata, saved-approved publication or existing revision paths. The source-only verification helper was separately reviewed against the real API/export/early-return branches; it can update the two failed rows' source facts/status/context/diagnostics, but does not create a manuscript, generate a product image or publish/schedule a post. A durable intent is saved before each request and forbids replay after an uncertain response.
+
+Source `00e973c4b9e5706c3cb1985f4c294de755da28e3` passed [CI 38220040743](https://github.com/contentscoin/blogautomcp/actions/runs/38220040743) for root and Sites type/lint/unit/production builds. The final local production build and Windows package passed; all 57 packaged execution-source hashes and three compiled visibility-consumer hashes match. Temporary work and environment files are excluded from the package.
+
+Windows 1.3.122 was published to the existing Sites update channel at `2026-10-12T08:01:26.797Z`. Its installer is 345,728,848 bytes, SHA256 `ae2683c21a0b3696ed8d6228eeaf772acc696a96d7bbf5355aec3733aef25649`. Authenticated release metadata, device manifest, blockmap, exact 206 range response and the entire served installer's SHA256/SHA512 match the local verified artifact. Sites application code has no direct or transitive imports of these changed production modules; its public deployment 49 remains while its Windows update channel receives this release.
+
+The live 1.3.121 PC accepted one update check, downloaded 1.3.122 and normally quit. The 1.3.122 installer began at 2026-10-12 17:03:04 KST. Installed-runtime and source-only verification remain pending at this record checkpoint; no forced termination or duplicate installer was used.
+
+## Installed runtime and preservation
+
+The normal installer completed and the restarted readiness endpoint reported 1.3.122 at 2026-10-12 17:08 KST. All 57 installed execution-source hashes and three compiled visibility-consumer hashes match the verified package. No forced termination, duplicate installer or manual secret change was needed.
+
+The immutable baseline includes full copies of all 72 manifests and manuscripts, plus hashes of 565 unique image files. The post-install comparison at `2026-10-12T08:08:52.585Z` passed: every manuscript/image byte, title, source snapshot, product facts/specification, asset path/binding and complete rendered text/style/image node remains unchanged. Fourteen manifests differ only at `textQualityRevalidation`, from the existing automatic saved-text recheck of unapproved rows. This conclusion comes from exact full JSON copies, not an assumption about changed timestamps. The strict entire-manifest-byte difference remains recorded.
+
+## Actual-source verification concurrency boundary
+
+After restart, a separate 10-item scheduled-publication workflow `3e10fce2-362e-43c5-9980-f90f8d73212d` began at `2026-10-12T08:08:47.917Z`. Its first product was already PUBLISHING when this work attempted the source-verification helper. The idle/publication guard rejected the attempt before saving an intent or sending POST, confirmed by the absent intent file and active-workflow inspection. Neither failed source material was resubmitted, and this work did not stop or alter the separate publication workflow. Source-only validation cannot be claimed complete from these offline and installed-runtime checks.
