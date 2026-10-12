@@ -92,6 +92,17 @@ assert.ok(buildTitleCandidates({ ...shopping, productName: "풀라스 무선 보
   "cordless operation does not authenticate a device compatibility angle");
 assert.equal(buildTitleKeywordBrief({ productName: "달바 토너 세럼 크림 3종 세트", primaryKeyword: "세럼" }).primaryKeyword, "세럼",
   "a genuine component-led search intent is retained for a set; only a known auxiliary family term is downgraded");
+const legacyPromoContext: TitlePlanContext = { ...shopping,
+  productName: "[슈퍼적립 & 무이자 6개월 EVENT] 쿠첸 음식물처리기 제로핏 가정용 분쇄기 건조기 3L 아이보리" };
+for (const title of ["건조기 슈퍼적립 무이자 6개월 특징과 선택 기준", "쿠첸 음식물처리기 슈퍼적립 EVENT"]) {
+  const score = scoreTitle(title, legacyPromoContext);
+  assert.deepEqual(score.hardFailures, [], "campaign cleanup is advisory in validation and cannot revoke a legacy ready manuscript");
+  assert.ok(score.softSignals?.includes("상품 식별어를 가리는 판매 혜택·캠페인 문구"));
+  const planned = planTitle(title, legacyPromoContext);
+  assert.equal(planned.replaced, true, "new generation/repair still improves campaign wording, including without a bland suffix");
+  assert.match(planned.title, /쿠첸.*제로핏/u);
+  assert.doesNotMatch(planned.title, /슈퍼적립|무이자|EVENT/u);
+}
 
 const shokz = buildTitleKeywordBrief({ productName: "[샥즈] (증정 이벤트) 오픈스윔 프로 수영 이어폰 S710" });
 assert.match(shokz.cleanIdentity, /^\[샥즈\]/u);

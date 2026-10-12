@@ -171,7 +171,7 @@ export function scoreTitle(title: string, context: TitlePlanContext): TitleScore
   if (identities.some((word) => word && compact(title).includes(compact(word)))) score += 2;
   else hardFailures.push(`상품·여행지 식별어 누락: ${identities.filter(Boolean).join("/") || "원본 식별어 확인 필요"}`);
   if (EMOJI.test(title) || CLICKBAIT.test(title)) hardFailures.push("낚시성 문구·이모지");
-  if (hasPromotionalTitleClutter(title)) hardFailures.push("상품 식별어를 가리는 판매 혜택·캠페인 문구");
+  if (hasPromotionalTitleClutter(title)) softSignals.push("상품 식별어를 가리는 판매 혜택·캠페인 문구");
   if (hasMedicalPromise(title)) hardFailures.push("의료·효능 단정 표현");
   if (!context.verifiedExperience && hasUnsupportedTitleExperience(title)) hardFailures.push("체험 메모 없는 체험 표현");
   // Generated body text may offer a question/axis, but cannot authorize new brands or numerical facts.
@@ -201,10 +201,12 @@ export function planTitle(modelTitle: string, context: TitlePlanContext): { titl
   // This is not a new readiness blocker and never rewrites an approved saved manuscript on its own.
   const improveBlandTitle = current.hardFailures.length === 0 && BLAND_END.test(modelTitle)
     && briefFor(context).decisionAxes.length > 0;
-  if (current.hardFailures.length === 0 && !improveBlandTitle) return { title: modelTitle, replaced: false, reason: "모델 제목 유지", candidates };
+  const improvePromotionalTitle = hasPromotionalTitleClutter(modelTitle);
+  if (current.hardFailures.length === 0 && !improveBlandTitle && !improvePromotionalTitle) return { title: modelTitle, replaced: false, reason: "모델 제목 유지", candidates };
   const best = candidates.find((candidate) => candidate.hardFailures.length === 0);
   if (!best) return { title: modelTitle, replaced: false, reason: `규칙 위반(${current.hardFailures.join(", ")})이나 통과 후보 없음`, candidates };
-  return { title: best.title, replaced: true, reason: improveBlandTitle ? "본문 근거가 있는 독자 질문으로 정형 후미 개선" : current.hardFailures.join(", "), candidates };
+  return { title: best.title, replaced: true, reason: current.hardFailures.length > 0 ? current.hardFailures.join(", ")
+    : improvePromotionalTitle ? "판매 혜택 대신 선택 상품의 브랜드·모델과 독자 질문 반영" : "본문 근거가 있는 독자 질문으로 정형 후미 개선", candidates };
 }
 export function formatTitleCandidatesForPrompt(context: TitlePlanContext, compactMode = false): string {
   const brief = briefFor(context);
