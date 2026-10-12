@@ -333,7 +333,7 @@ async function main() {
     await test("failed provider report and unresolved accepted proposal do not become photo-absence claims", () => {
       const report = diagnostics(["프레임 있음"]);
       assert.equal(buildSellerOriginalRepairTarget({ sectionId: "slot", targetIndex: 0, diagnostics: { ...report, status: "failed", error: "provider unavailable" } }), null);
-      for (const status of ["review-failed", "proposed"] as const) {
+      for (const status of ["review-failed", "proposed", "not-selected", "not-proposed"] as const) {
         assert.equal(buildSellerOriginalRepairTarget({ sectionId: "slot", targetIndex: 0,
           diagnostics: { ...report, entries: [{ ...report.entries[0], status }] } }), null);
       }

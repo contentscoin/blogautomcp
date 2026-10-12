@@ -8,7 +8,7 @@ import { auditSectionProposals, type SectionProposal } from "./lib/product-secti
 import { auditPublishImages, type PublishImageAuditOptions, type PublishImageAuditResult } from "./lib/publish-image-audit";
 import { buildProduct9Canvas, selectedProductContextFrom9Canvas } from "./lib/product-9canvas";
 
-const proposals = Array.from({ length: 5 }, (_, i) => ({ targetIndex: 0, sourceSha256: `sha-${i}`, path: `photo-${i}` }));
+const proposals = Array.from({ length: 8 }, (_, i) => ({ targetIndex: 0, sourceSha256: `sha-${i}`, path: `photo-${i}` }));
 const targets = [{ sectionId: "actual-section", sectionTitle: "AI 기능", sectionBody: ["AI 기능의 실제 설명"], imageIntent: "AI 기능 근거" }];
 const select = (rows: SectionProposal[]) => rows.slice(0, 1);
 function result(input: PublishImageAuditOptions, code?: "SEMANTIC_REJECTION" | "INVALID_REVIEW" | "INVALID_IMAGE" | "INVALID_CONTEXT"): PublishImageAuditResult {
@@ -30,7 +30,23 @@ async function main() {
   calls = 0;
   const exhausted = await auditSectionProposals({ productName: "삼성", targets, proposals, select,
     onRejected() {}, audit: async input => { calls++; return result(input, "SEMANTIC_REJECTION"); } });
-  assert.equal(calls, 3); assert.deepEqual(exhausted, []);
+  assert.equal(calls, 6); assert.deepEqual(exhausted, [], "bounded exhaustion never returns an unaudited reserve");
+  calls = 0;
+  const fourth = await auditSectionProposals({ productName: "삼성", targets, proposals, select,
+    onRejected() {}, audit: async input => result(input, ++calls <= 3 ? "SEMANTIC_REJECTION" : undefined) });
+  assert.equal(calls, 4); assert.equal(fourth[0].path, "photo-3", "fourth independently eligible candidate reaches the same final gate");
+  calls = 0;
+  let refills = 0;
+  const renewed = await auditSectionProposals({ productName: "삼성", targets, proposals: proposals.slice(0, 3), select,
+    replenish: async missing => { refills++; assert.deepEqual(missing, [0]); return [proposals[0], proposals[3]]; },
+    onRejected() {}, audit: async input => result(input, ++calls <= 3 ? "SEMANTIC_REJECTION" : undefined) });
+  assert.equal(refills, 1); assert.equal(calls, 4); assert.equal(renewed[0].path, "photo-3", "refill cannot reinstate rejected pairs");
+  calls = 0;
+  refills = 0;
+  const boundedRenewal = await auditSectionProposals({ productName: "삼성", targets, proposals: proposals.slice(0, 3), select,
+    replenish: async () => { refills++; return proposals.slice(3); }, onRejected() {},
+    audit: async input => { calls++; return result(input, "SEMANTIC_REJECTION"); } });
+  assert.equal(refills, 1); assert.equal(calls, 6); assert.deepEqual(boundedRenewal, [], "initial plus renewed audit calls share one six-round bound");
   calls = 0;
   await assert.rejects(auditSectionProposals({ productName: "삼성", targets, proposals, select,
     onRejected() {}, audit: async () => { calls++; throw new Error("AUTH_REQUIRED: login"); } }), /AUTH_REQUIRED/);
@@ -92,6 +108,14 @@ async function main() {
         return verdict(true, "The selected orange exterior matches; technical prose alone does not demand every use scene.");
       } }) });
     assert.equal(shokz.length, 1, "proposal assembly and final gate accept an exterior original alongside swimming, land, MP3 and Bluetooth prose");
+    const originalAction = await auditSectionProposals({ productName: "샥즈 오픈스윔 프로", selectedProduct: shokzProduct,
+      targets: [{ ...originalTarget, sectionTitle: "원본 수영 사용 장면", sectionBody: ["이 사진에는 선택한 이어폰을 착용하고 수영하는 모습이 보입니다."],
+        imageIntent: "선택 상품을 착용한 실제 수영 장면의 판매자 원본" }], proposals: originalProposal, select, onRejected() {},
+      audit: input => auditPublishImages({ ...input, review: async call => {
+        assert.ok(call.userPrompt.includes("착용하고 수영하는 모습이 보입니다"), "explicit action description must reach the pixel gate unchanged");
+        return verdict(true, "The plain product packshot contains no person or swimming action claimed in the published photograph description.", false);
+      } }) });
+    assert.deepEqual(originalAction, [], "a white packshot cannot satisfy an explicit original action-photo claim");
     const featureBody = "이 사진이 소음 감소 효과를 증명합니다.";
     const rejectedReasons: string[] = [];
     const unsupported = await auditSectionProposals({ productName: "쿠쿠 음식물처리기",

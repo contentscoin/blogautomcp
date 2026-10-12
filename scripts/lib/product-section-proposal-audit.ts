@@ -11,13 +11,31 @@ export async function auditSectionProposals<T extends SectionProposal>(options: 
   productName: string; selectedProduct?: string; targets: SectionProposalTarget[]; proposals: T[];
   select: (proposals: T[]) => T[];
   onRejected: (proposal: T, reason: string) => void;
+  /** Re-review rank-only/unreviewed reserves once after the eligible pool is exhausted. */
+  replenish?: (unfilledTargetIndexes: number[]) => Promise<T[]>;
   audit?: (options: PublishImageAuditOptions) => ReturnType<typeof auditPublishImages>;
 }): Promise<T[]> {
   let remaining = options.proposals;
   const accepted = new Set<string>();
+  const rejectedPairs = new Set<string>();
+  let replenished = false;
   const key = (row: T) => `${row.targetIndex}:${row.sourceSha256}`;
-  for (let round = 0; round < 3; round++) {
-    const selected = options.select(remaining);
+  // Six final-rule calls total, including any renewed shortlist. A fourth
+  // genuinely suitable photo must not be starved behind three rejected ones.
+  for (let round = 0; round < 6; round++) {
+    let selected = options.select(remaining);
+    const unfilled = options.targets.map((_, index) => index).filter(index => !selected.some(row => row.targetIndex === index));
+    if (unfilled.length && options.replenish && !replenished) {
+      replenished = true;
+      const seen = new Set(remaining.map(key));
+      const extra = await options.replenish(unfilled);
+      remaining = [...remaining, ...extra.filter(row => {
+        const pair = key(row);
+        if (!unfilled.includes(row.targetIndex) || seen.has(pair) || rejectedPairs.has(pair)) return false;
+        seen.add(pair); return true;
+      })];
+      selected = options.select(remaining);
+    }
     const pending = selected.filter(row => !accepted.has(key(row)));
     if (!pending.length) return selected;
     const sections: ResolvedPostSectionV1[] = [];
@@ -54,7 +72,7 @@ export async function auditSectionProposals<T extends SectionProposal>(options: 
     for (const failure of result.failures) {
       const row = byNode.get(failure.nodeIndex);
       if (!row) throw new Error("SOURCE_PROPOSAL_AUDIT_FAILED: INVALID_CONTEXT: Unknown verdict target");
-      rejected.add(key(row)); options.onRejected(row, failure.reason);
+      rejected.add(key(row)); rejectedPairs.add(key(row)); options.onRejected(row, failure.reason);
     }
     for (const row of pending) if (!rejected.has(key(row))) accepted.add(key(row));
     remaining = remaining.filter(row => !rejected.has(key(row)));

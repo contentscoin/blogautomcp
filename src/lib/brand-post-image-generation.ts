@@ -193,7 +193,7 @@ function resolveTarget(
         section?.imageIntent ||
         existingAsset.imageIntent ||
         (existingAsset.role === "hero" ? "글의 내용을 한눈에 보여주는 대표 이미지" : "본문 설명 이미지"),
-      bodyExcerpt: clean(section?.body.join(" ") || manifest.title).slice(0, 480),
+      bodyExcerpt: clean(section?.body.join(" ") || manifest.title),
       existingAsset,
     };
   }
@@ -216,7 +216,7 @@ function resolveTarget(
     imageIntent: section.imageIntent,
     imageSource: section.imageSource,
     promptRecipe: section.promptRecipe,
-    bodyExcerpt: clean(section.body.join(" ")).slice(0, 480),
+    bodyExcerpt: clean(section.body.join(" ")),
   };
 }
 
@@ -1169,6 +1169,33 @@ export async function runImageBatch(
       const job = codexJobs[codexIndex];
       if (result.localPath) {
         await onResult({ id: job.id, localPath: result.localPath }, indexOf.get(job)!);
+        return;
+      }
+      // A proven completed request with multiple native artifacts is a review
+      // task, not a reason to buy another image or switch transport engines.
+      if (!signal?.aborted && job.referenceMode === "product" && result.recoveryState === "completed-candidates") {
+        let recoveryJob: ImageBatchJob;
+        try {
+          const metadata = JSON.parse(fs.readFileSync(`${job.outStem}.reference-scene.json`, "utf8"));
+          assertSavedSceneRecipe(job, metadata);
+          if (metadata.strategyVersion !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION ||
+              typeof metadata.slotId !== "string" || !metadata.slotId ||
+              typeof metadata.sourceSnapshotId !== "string" || !/^[a-f0-9]{64}$/u.test(metadata.sourceSnapshotId) ||
+              JSON.stringify(metadata.referenceHashes) !== JSON.stringify(job.requiredReferenceHashes))
+            throw new Error("IMAGE_RESUME_REQUIRED: 완료 후보의 슬롯·선택 상품·참조 기록을 확인할 수 없습니다.");
+          const candidateSet = collectCompletedProductCandidates(job);
+          if (!candidateSet) throw new Error("IMAGE_RESUME_REQUIRED: 실제 완료된 생성 후보를 확인할 수 없습니다.");
+          recoveryJob = { ...job, reviewOnly: {
+            outputSha256: candidateSet.candidates[0].sha256, candidateSet,
+            slotId: metadata.slotId, sourceSnapshotId: metadata.sourceSnapshotId,
+            referenceHashes: metadata.referenceHashes,
+          } };
+          validatedReviewCandidateSet(recoveryJob);
+        } catch (error) {
+          await onResult({ id: job.id, localPath: null, error: error instanceof Error ? error.message : String(error) }, indexOf.get(job)!);
+          return;
+        }
+        await onResult({ id: job.id, localPath: null, recoveryJob }, indexOf.get(job)!);
         return;
       }
       // 사용자가 멈췄거나 브라우저가 꺼져 있으면 대체하지 않고 Codex 오류를 그대로 보고한다.

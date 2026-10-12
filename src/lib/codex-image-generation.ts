@@ -53,6 +53,8 @@ export interface ImageBatchResult {
   error?: string;
   /** Only an explicit failure before provider submission allows another transport. */
   submissionState?: "not-submitted" | "uncertain";
+  /** A completed ambiguous request is recoverable by reading candidates, never by submitting again. */
+  recoveryState?: "completed-candidates" | "uncertain";
   /** 점검표에서 보강 재생성 뒤에도 남은 항목(경고만, 채택은 한다) */
   qcWarnings?: string[];
 }
@@ -142,29 +144,38 @@ export async function defaultPhotorealQc(imagePath: string, people: boolean): Pr
 
 export function buildCodexImageInstruction(prompt: string, referenceCount: number, referenceMode?: "product"): string {
   return [
-    "이미지 생성 도구(image_generation)로 아래 장면의 사진을 정확히 1장 생성하고, 현재 작업 폴더에 ./out.png 로 저장하세요.",
     referenceMode === "product"
-      ? "기존 생성 결과의 파일 경로 확인과 out.png로의 파일 복사에 필요한 명령만 허용합니다. 경로 조회를 위해 이미지 생성 도구를 호출하지 마세요. 추가 생성·코드 수정·웹 검색을 하지 마세요. 다른 파일을 만들지 마세요."
+      ? "이미지 생성 도구(image_generation)로 아래 장면의 사진을 정확히 1장 생성하세요. 생성 도구가 완료되면 즉시 이 작업을 끝내세요. 프로그램이 이 스레드의 실제 생성 파일을 직접 찾습니다."
+      : "이미지 생성 도구(image_generation)로 아래 장면의 사진을 정확히 1장 생성하고, 현재 작업 폴더에 ./out.png 로 저장하세요.",
+    referenceMode === "product"
+      ? "파일 경로 확인과 out.png로의 파일 복사는 프로그램이 수행합니다. 경로 조회·복사 명령을 실행하지 마세요. 추가 생성·코드 수정·웹 검색을 하지 마세요. 다른 파일을 만들지 마세요."
       : "이미지 저장에 필요한 파일 복사 외에는 명령 실행·코드 수정·웹 검색을 하지 마세요. 다른 파일을 만들지 마세요.",
     referenceMode === "product"
       ? "이 작업 전체에서 이미지 생성 도구는 정확히 1회만 호출하세요. 이미 생성한 파일의 경로나 저장 방법을 알아내기 위해 이미지 생성 도구를 다시 호출하지 마세요. 두 번째 호출은 조회가 아니라 새로운 이미지 생성입니다."
       : "",
     referenceMode === "product"
-      ? "도구의 실제 반환값(image_url, output_hint 등)을 읽으세요. 반환값을 MCP content[] 배열이라고 가정하지 마세요. 이미지가 이미 저장됐다면 반환 힌트나 이 생성 스레드의 generated_images 폴더에서 그 파일만 찾아 out.png로 복사하세요. image_url의 base64 데이터나 전체 반환값을 텍스트로 출력하지 마세요. 기존 파일을 찾지 못하면 추가 생성 없이 실패를 보고하세요."
+      ? "도구의 실제 반환값(image_url, output_hint 등)을 읽으세요. 반환값을 MCP content[] 배열이라고 가정하지 마세요. image_url의 base64 데이터나 전체 반환값을 텍스트로 출력하지 마세요. 반환값 해석에 실패하거나 저장 경로를 찾지 못해도 추가 생성 없이 종료하세요. 프로그램이 실제 저장 파일을 확인합니다."
       : "",
     referenceCount > 0
       ? referenceMode === "product"
         ? `첨부한 ${referenceCount}장을 이미지 생성 도구의 실제 참조 이미지로 모두 전달하세요. 첫 사진은 상품의 형상·비율·원래 라벨의 기준이고 두 번째가 있으면 승인된 동일 글의 장면 기준입니다. 참조 없이 새 상품을 그리지 마세요.`
         : `첨부한 ${referenceCount}장은 장소 분위기 참고용입니다. 그대로 복제하지 말고, 글자·로고를 옮기지 마세요.`
       : "",
-    "저장이 끝나면 저장한 파일 경로만 한 줄로 보고하세요.",
+    referenceMode === "product"
+      ? "생성 완료 후 반환값의 저장 경로를 이미 알고 있으면 그 경로만, 모르면 '생성 완료'만 한 줄로 보고하고 종료하세요. 경로를 알아내기 위한 추가 도구 호출은 필요 없습니다."
+      : "저장이 끝나면 저장한 파일 경로만 한 줄로 보고하세요.",
     "",
     "[이미지 프롬프트]",
     prompt,
   ].filter(Boolean).join("\n");
 }
 
-interface CodexImageSubmission { state: "submitting" | "completed" | "not-submitted"; workspace: string; startedAtMs: number; threadId: string | null; completedAtMs?: number }
+interface CodexImageSubmission {
+  state: "submitting" | "completed" | "not-submitted";
+  workspace: string; startedAtMs: number; threadId: string | null; completedAtMs?: number;
+  /** Observed calls are a lower bound: SDK exec does not expose a pre-dispatch hook for nested native tools. */
+  generationBudget?: { limit: 1; observedCalls: number; observation: "none" | "stream" | "rollout"; exceededAtMs?: number };
+}
 function readCodexSubmission(outStem: string): CodexImageSubmission | null {
   try {
     const receipt = JSON.parse(fs.readFileSync(`${outStem}.codex-submission.json`, "utf8")) as CodexImageSubmission;
@@ -172,6 +183,11 @@ function readCodexSubmission(outStem: string): CodexImageSubmission | null {
       Number.isFinite(receipt.startedAtMs) && (receipt.threadId === null || typeof receipt.threadId === "string") &&
       (receipt.completedAtMs === undefined || Number.isFinite(receipt.completedAtMs) && receipt.completedAtMs >= receipt.startedAtMs) ? receipt : null;
   } catch { return null; }
+}
+function usesHostNativeCollection(receipt: CodexImageSubmission): boolean {
+  const budget = receipt.generationBudget;
+  return budget?.limit === 1 && Number.isInteger(budget.observedCalls) && budget.observedCalls >= 0 &&
+    ["none", "stream", "rollout"].includes(budget.observation);
 }
 export function hasUnresolvedCodexSubmission(outStem: string): boolean {
   if (!fs.existsSync(`${outStem}.codex-submission.json`)) return false;
@@ -207,14 +223,15 @@ function isImageFile(file: string): boolean {
 
 /** Product jobs require one unique result across the exact thread, workspace and any saved raw output. */
 export function locateCodexImage(workspace: string, codexHome: string, threadId: string | null, startedAtMs: number,
-  options: { referenceMode?: "product"; existingOutput?: string } = {}): string | null {
+  options: { referenceMode?: "product"; existingOutput?: string; includeLegacyWorkspace?: boolean } = {}): string | null {
   if (options.referenceMode === "product") {
     const generated = threadId ? safeList(path.join(codexHome, "generated_images", threadId))
       .filter((file) => RESULT_EXTENSIONS.includes(path.extname(file).toLowerCase()) && isImageFile(file))
       .filter((file) => fs.statSync(file).mtimeMs >= startedAtMs - 1000) : [];
     const candidates = [
       ...RESULT_EXTENSIONS.map((extension) => path.join(workspace, `out${extension}`)),
-      ...safeList(workspace),
+      // Old copy-based transports could save actual outputs under other names. Unknown images must retain their ambiguity guard.
+      ...(options.includeLegacyWorkspace !== false ? safeList(workspace) : []),
       ...generated,
       ...(options.existingOutput ? [options.existingOutput] : []),
     ].filter(isImageFile);
@@ -247,6 +264,103 @@ function safeList(directory: string): string[] {
   }
 }
 
+/** Count literal tool invocations, ignoring mentions in quoted prompts/comments. This is an observation, not a JS sandbox. */
+function literalImageCalls(code: string): number {
+  const bare = code.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n\r]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/gu, " ");
+  return [...bare.matchAll(/\b(?:tools\s*\.\s*)?(?:image_gen__imagegen|image_generation)\s*\(/gu)].length;
+}
+
+function imageCallsInItem(item: Record<string, unknown>): number {
+  const name = String(item.tool ?? item.name ?? "");
+  if (/^(?:image_generation|image_gen(?:\.|__)imagegen|imagegen)$/u.test(name)) return 1;
+  if (!/^(?:functions\.)?exec$/u.test(name)) return 0;
+  const input = item.input ?? item.arguments;
+  const code = typeof input === "string" ? input : input && typeof input === "object"
+    ? (input as Record<string, unknown>).code ?? (input as Record<string, unknown>).input : "";
+  return typeof code === "string" ? literalImageCalls(code) : 0;
+}
+
+/** SDK item.started is already dispatched. Rollout observation also cannot preempt calls hidden inside one opaque exec. */
+function observeSingleGeneration(submission: CodexImageSubmission, codexHome: string, controller: AbortController,
+  save: () => void): { observe: (event: Record<string, unknown>) => void; flush: () => void; stop: () => void; exceeded: () => boolean } {
+  const calls = { stream: new Map<string, number>(), rollout: new Map<string, number>() };
+  let exceeded = false, rolloutPath: string | null = null, offset = 0, remainder = "", skipLine = false;
+  const observeCall = (source: "stream" | "rollout", id: unknown, item: Record<string, unknown>) => {
+    const count = imageCallsInItem(item);
+    if (!count || typeof id !== "string" || !id || (calls[source].get(id) ?? 0) >= count) return;
+    calls[source].set(id, count);
+    const observedCalls = Math.max(...Object.values(calls).map(entries => [...entries.values()].reduce((sum, value) => sum + value, 0)));
+    if (observedCalls <= (submission.generationBudget?.observedCalls ?? 0)) return;
+    submission.generationBudget = { limit: 1, observedCalls, observation: source,
+      ...(observedCalls > 1 ? { exceededAtMs: Date.now() } : {}) };
+    if (observedCalls > 1) { exceeded = true; controller.abort(); }
+    save(); // A receipt write failure must not disable an already-observed budget interruption.
+  };
+  const scan = () => {
+    if (!submission.threadId || controller.signal.aborted) return;
+    if (!rolloutPath) {
+      const matches = new Set<string>();
+      for (const dayOffset of [-1, 0, 1]) {
+        const date = new Date(submission.startedAtMs + dayOffset * 86_400_000);
+        const days = [date.toISOString().slice(0, 10).split("-"),
+          [String(date.getFullYear()), String(date.getMonth() + 1).padStart(2, "0"), String(date.getDate()).padStart(2, "0")]];
+        for (const day of days) for (const file of safeList(path.join(codexHome, "sessions", ...day))) {
+          if (!path.basename(file).startsWith("rollout-") || !path.basename(file).endsWith(`-${submission.threadId}.jsonl`)) continue;
+          const meta = firstRolloutMetadata(file);
+          if (meta?.id === submission.threadId && meta.thread_source === "blogautomcp-image" && meta.cwd &&
+              path.resolve(meta.cwd) === path.resolve(submission.workspace) && path.resolve(fs.realpathSync(file)) === path.resolve(file)) matches.add(file);
+        }
+      }
+      if (matches.size !== 1) return;
+      rolloutPath = [...matches][0];
+    }
+    // Incremental reads keep generated-image/base64 output from becoming an idle disk-scan loop.
+    const size = fs.statSync(rolloutPath).size;
+    if (size < offset || size > 32 * 1024 * 1024) return;
+    const descriptor = fs.openSync(rolloutPath, "r");
+    try {
+      for (let remaining = Math.min(size - offset, 1024 * 1024); remaining > 0;) {
+        const bytes = Buffer.alloc(Math.min(remaining, 64 * 1024));
+        const read = fs.readSync(descriptor, bytes, 0, bytes.length, offset);
+        if (!read) break;
+        offset += read; remaining -= read;
+        const lines = (remainder + bytes.subarray(0, read).toString("utf8")).split("\n");
+        remainder = lines.pop() ?? "";
+        for (const line of lines) {
+          if (skipLine) { skipLine = false; continue; }
+          if (line.length > 256 * 1024) continue;
+          try {
+            const record = JSON.parse(line);
+            if (record.type === "response_item" && ["function_call", "custom_tool_call"].includes(record.payload?.type))
+              observeCall("rollout", record.payload.call_id, record.payload);
+          } catch { /* Partial or unknown records provide no call evidence. */ }
+        }
+        if (remainder.length > 256 * 1024) { remainder = ""; skipLine = true; }
+        if (exceeded) break;
+      }
+    } finally { fs.closeSync(descriptor); }
+  };
+  const flush = () => { try { scan(); } catch { /* Missing/corrupt observation is not zero-call proof or completion proof. */ } };
+  const timer = setInterval(flush, 250);
+  timer.unref();
+  return { observe: event => {
+    const item = event.item;
+    if (/^item\.(?:started|updated|completed)$/u.test(String(event.type)) && item && typeof item === "object")
+      observeCall("stream", (item as Record<string, unknown>).id, item as Record<string, unknown>);
+    flush();
+  }, flush, stop: () => clearInterval(timer), exceeded: () => exceeded };
+}
+
+async function abortableImageTurn<T>(task: Promise<T>, signal: AbortSignal): Promise<T> {
+  let abort: (() => void) | undefined;
+  const interrupted = new Promise<never>((_resolve, reject) => {
+    abort = () => reject(new Error("Codex image turn interrupted"));
+    if (signal.aborted) abort(); else signal.addEventListener("abort", abort, { once: true });
+  });
+  try { return await Promise.race([task, interrupted]); }
+  finally { if (abort) signal.removeEventListener("abort", abort); }
+}
+
 /** Read-only cache guard shared by every transport, including an explicit switch to browser. */
 export function checkedExistingJobResult(job: ImageBatchJob, options: CodexImageBatchOptions): string | null {
   const existing = existingJobResult(job.outStem);
@@ -256,7 +370,7 @@ export function checkedExistingJobResult(job: ImageBatchJob, options: CodexImage
   const prior = readCodexSubmission(job.outStem);
   if (!prior) throw new Error("IMAGE_RESUME_REQUIRED: 이전 상품 이미지 요청 기록을 읽을 수 없습니다. 기존 결과를 보존했으며 재전송하지 않았습니다.");
   const found = locateCodexImage(prior.workspace, codexHomeDir(options.codexHome), prior.threadId, prior.startedAtMs,
-    { referenceMode: "product", existingOutput: existing });
+    { referenceMode: "product", existingOutput: existing, includeLegacyWorkspace: !usesHostNativeCollection(prior) });
   if (!found) throw new Error("IMAGE_RESUME_REQUIRED: 이전 상품 이미지 요청의 유효한 결과를 확인할 수 없습니다. 기존 결과를 보존했으며 재전송하지 않았습니다.");
   if (prior.state !== "completed") throw new Error("IMAGE_RESUME_REQUIRED: 이전 상품 이미지 요청의 완료를 확인할 수 없습니다. 기존 결과를 보존했으며 채택하거나 재전송하지 않았습니다.");
   return existing;
@@ -452,12 +566,15 @@ async function generateOnce(
   const controller = new AbortController();
   const abort = () => controller.abort();
   options.signal?.addEventListener("abort", abort, { once: true });
+  if (options.signal?.aborted) abort();
   const timer = setTimeout(abort, options.timeoutMs);
   const startedAtMs = Date.now();
   let threadId: string | null = null;
   let providerCompleted = false;
-  const submission: CodexImageSubmission = { state: "submitting", workspace, startedAtMs, threadId };
+  const submission: CodexImageSubmission = { state: "submitting", workspace, startedAtMs, threadId,
+    ...(job.referenceMode === "product" ? { generationBudget: { limit: 1 as const, observedCalls: 0, observation: "none" as const } } : {}) };
   const saveSubmission = () => atomicWriteTextFile(`${job.outStem}.codex-submission.json`, JSON.stringify(submission));
+  let generationGuard: ReturnType<typeof observeSingleGeneration> | undefined;
   try {
     const model = resolveCodexTextModel();
     const thread = codex.startThread({
@@ -472,30 +589,42 @@ async function generateOnce(
       threadSource: "blogautomcp-image",
     });
     saveSubmission(); // Persist before a remote request can be accepted.
-    const { events } = await thread.runStreamed(input, { signal: controller.signal });
-    for await (const event of events) {
-      if (event.type === "thread.started" && typeof event.thread_id === "string") {
-        threadId = event.thread_id;
-        submission.threadId = threadId;
-        saveSubmission();
+    if (job.referenceMode === "product") generationGuard = observeSingleGeneration(submission, options.codexHome, controller, saveSubmission);
+    await abortableImageTurn((async () => {
+      if (controller.signal.aborted) throw new Error("Codex image turn interrupted");
+      const { events } = await thread.runStreamed(input, { signal: controller.signal });
+      for await (const event of events) {
+        if (controller.signal.aborted) throw new Error("Codex image turn interrupted");
+        if (event.type === "thread.started" && typeof event.thread_id === "string") {
+          threadId = event.thread_id;
+          submission.threadId = threadId;
+          saveSubmission();
+        }
+        else if (event.type === "turn.failed") {
+          const error = event.error as { message?: string } | undefined;
+          throw new Error(error?.message || "Codex 이미지 생성이 실패했습니다.");
+        } else if (event.type === "error") throw new Error(String(event.message || "Codex 실행 중 오류가 발생했습니다."));
+        else if (event.type === "turn.completed") providerCompleted = true;
+        generationGuard?.observe(event);
+        if (controller.signal.aborted) throw new Error("Codex image turn interrupted");
       }
-      else if (event.type === "turn.failed") {
-        const error = event.error as { message?: string } | undefined;
-        throw new Error(error?.message || "Codex 이미지 생성이 실패했습니다.");
-      } else if (event.type === "error") throw new Error(String(event.message || "Codex 실행 중 오류가 발생했습니다."));
-      else if (event.type === "turn.completed") providerCompleted = true;
-    }
+    })(), controller.signal);
+    generationGuard?.flush();
     if (providerCompleted && !controller.signal.aborted) {
       submission.state = "completed";
       submission.completedAtMs = Date.now();
       saveSubmission();
     } else if (job.referenceMode === "product") throw new Error("IMAGE_RESUME_REQUIRED: 상품 이미지 요청의 완료 이벤트를 확인하지 못했습니다. 파일을 보존했으며 채택하거나 재전송하지 않았습니다.");
-    const found = locateCodexImage(workspace, options.codexHome, threadId, startedAtMs, { referenceMode: job.referenceMode });
+    const found = locateCodexImage(workspace, options.codexHome, threadId, startedAtMs,
+      { referenceMode: job.referenceMode, includeLegacyWorkspace: !usesHostNativeCollection(submission) });
     if (!found) throw new Error("Codex 응답에서 생성 이미지를 찾지 못했습니다(image_generation 기능이 꺼져 있을 수 있습니다).");
     submission.state = "completed";
     saveSubmission();
     return found;
   } catch (error) {
+    if (generationGuard?.exceeded()) {
+      throw new Error("IMAGE_GENERATION_BUDGET_EXCEEDED: 같은 요청에서 추가 이미지 생성 호출이 관측되어 실행을 중단했습니다. 이미 접수됐을 수 있는 호출과 파일은 보존했으며 채택하거나 재전송하지 않았습니다.", { cause: error });
+    }
     if (!threadId && !safeList(workspace).some(isImageFile) && ["authentication", "model-version"].includes(classifyCodexDraftFailure(error))) {
       submission.state = "not-submitted";
       saveSubmission();
@@ -507,6 +636,7 @@ async function generateOnce(
     }
     throw error;
   } finally {
+    generationGuard?.stop();
     clearTimeout(timer);
     options.signal?.removeEventListener("abort", abort);
   }
@@ -522,6 +652,16 @@ function adopt(found: string, outStem: string): string {
   return finalPath;
 }
 
+function productRecoveryState(job: ImageBatchJob, options: CodexImageBatchOptions, error: unknown): ImageBatchResult["recoveryState"] {
+  if (job.referenceMode !== "product") return undefined;
+  if (/IMAGE_OUTPUT_AMBIGUOUS/u.test(error instanceof Error ? error.message : String(error))) {
+    try {
+      if ((collectCompletedProductCandidates(job, options)?.candidates.length ?? 0) > 1) return "completed-candidates";
+    } catch { /* An ambiguous filename without definitive completion is still uncertain. */ }
+  }
+  return "uncertain";
+}
+
 async function runJob(codex: CodexLike, job: ImageBatchJob, options: CodexImageBatchOptions): Promise<ImageBatchResult> {
   try { assertProductImageReferences(job); }
   catch (error) { return { id: job.id, localPath: null, error: codexImageError(error) }; }
@@ -531,13 +671,14 @@ async function runJob(codex: CodexLike, job: ImageBatchJob, options: CodexImageB
     if (hasUnresolvedCodexSubmission(job.outStem)) {
       const prior = readCodexSubmission(job.outStem);
       const recovered = prior && locateCodexImage(prior.workspace, codexHomeDir(options.codexHome), prior.threadId, prior.startedAtMs,
-        { referenceMode: job.referenceMode });
+        { referenceMode: job.referenceMode, includeLegacyWorkspace: !usesHostNativeCollection(prior) });
       if (recovered && (job.referenceMode !== "product" || prior?.state === "completed")) return { id: job.id, localPath: adopt(recovered, job.outStem) };
       return { id: job.id, localPath: null, submissionState: "uncertain",
         error: "IMAGE_RESUME_REQUIRED: 이전 Codex 이미지 요청의 완료 여부를 확인해야 합니다. 기존 결과를 보존했으며 재전송하지 않았습니다." };
     }
   } catch (error) {
-    return { id: job.id, localPath: null, submissionState: "uncertain", error: codexImageError(error) };
+    return { id: job.id, localPath: null, submissionState: "uncertain", error: codexImageError(error),
+      recoveryState: productRecoveryState(job, options, error) };
   }
   const context = {
     codexHome: codexHomeDir(options.codexHome),
@@ -550,7 +691,8 @@ async function runJob(codex: CodexLike, job: ImageBatchJob, options: CodexImageB
     finalPath = adopt(await generateOnce(codex, job, job.prompt, { ...context, attempt: 1 }), job.outStem);
   } catch (error) {
     return { id: job.id, localPath: null, error: codexImageError(error),
-      submissionState: hasUnresolvedCodexSubmission(job.outStem) ? "uncertain" : "not-submitted" };
+      submissionState: hasUnresolvedCodexSubmission(job.outStem) ? "uncertain" : "not-submitted",
+      recoveryState: productRecoveryState(job, options, error) };
   }
   // Product scenes must pass the separate reference + output fidelity comparison.
   // The permissive generated-only checklist and its auto-regeneration cannot authorize them.
@@ -605,6 +747,7 @@ export async function runCodexImageBatch(jobs: ImageBatchJob[], options: CodexIm
           result = existing ? { id: job.id, localPath: existing } : { id: job.id, localPath: null,
             submissionState: hasUnresolvedCodexSubmission(job.outStem) ? "uncertain" : "not-submitted", error: setupError || "Codex를 시작하지 못했습니다." };
         } catch (error) { result = { id: job.id, localPath: null, error: codexImageError(error),
+          recoveryState: productRecoveryState(job, options, error),
           ...(job.referenceMode === "product" && fs.existsSync(`${job.outStem}.codex-submission.json`) ? { submissionState: "uncertain" as const } : {}) }; }
       }
       results[index] = result;

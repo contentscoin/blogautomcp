@@ -229,15 +229,16 @@ async function main() {
       composition: { sections: [{ id: "feature", body: ["45분"], imageMin: 1 }] }, imageAssets: [] };
     const save = () => fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(manifest));
     save();
-    assert.equal(IMAGE_RECOVERY_POLICY_VERSION, 7);
-    const policy6Signature = crypto.createHash("sha256").update(JSON.stringify({
-      version: 1, policy: 6, product: manifest.sourceSnapshot.product,
+    assert.equal(IMAGE_RECOVERY_POLICY_VERSION, 8);
+    const oldSignatures = [6, 7].map(policy => crypto.createHash("sha256").update(JSON.stringify({
+      version: 1, policy, product: manifest.sourceSnapshot.product,
       sections: [{ id: "feature", body: ["45분"], imageMin: 1 }], assets: [], receipts: [], rejected: [],
-    })).digest("hex");
+    })).digest("hex"));
     fs.writeFileSync(path.join(dir, "image-recovery-history.json"), JSON.stringify({ version: 1, entries: [
-      { stage: "refresh-source", input: policy6Signature, output: policy6Signature, status: "failed", at: "earlier" },
+      ...oldSignatures.map(signature => ({ stage: "refresh-source", input: signature, output: signature, status: "failed", at: "earlier" })),
     ] }));
-    assert.notEqual(imageRecoverySignature(dir), policy6Signature, "recipe-bound recovery receives one fresh attempt for a draft exhausted under policy 6");
+    for (const signature of oldSignatures) assert.notEqual(imageRecoverySignature(dir), signature,
+      "original-first source selection receives one shared fresh attempt for drafts exhausted under policies 6/7");
     let calls = 0;
     await runRecordedImageRecovery("persistent-fixture", "refresh-source", async () => { calls++; });
     const skipped = await runRecordedImageRecovery("persistent-fixture", "refresh-source", async () => { calls++; });

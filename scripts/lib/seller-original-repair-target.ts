@@ -21,7 +21,7 @@ export function buildSellerOriginalRepairTarget(options: {
   if (!report || report.status !== "complete" || !Number.isInteger(options.targetIndex) || options.targetIndex < 0 || options.targetIndex >= report.targetCount) return null;
   const entries = report.entries.filter(entry => entry.targetIndex === options.targetIndex);
   // An accepted proposal may have failed a later binding step; don't diagnose its pixels as rejected.
-  if (entries.some(entry => entry.status === "proposed" || entry.status === "review-failed")) return null;
+  if (entries.some(entry => ["proposed", "review-failed", "not-selected", "not-proposed"].includes(entry.status))) return null;
   const kinds = new Map<SellerOriginalRepairTarget["causes"][number]["kind"], { count: number; example: string }>();
   const rejected = entries.filter(entry => entry.status === "rejected");
   for (const entry of rejected) {

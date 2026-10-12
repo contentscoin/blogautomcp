@@ -14,6 +14,8 @@ export async function validateBrandPostPublishImages(id: string, productName?: s
     const manifest = readBrandPostPackage(id, { migrate: false });
     if (!manifest || manifest.version !== "brand-post-package/v2")
       throw Object.assign(new Error("최종 이미지 검사를 진행할 저장 원고가 없습니다."), { code: "DRAFT_NOT_FOUND" });
+    if (manifest.imageGeneration?.status === "running" || manifest.imageGeneration?.recoveryState === "owner-unknown")
+      throw Object.assign(new Error("기존 이미지 작업의 완료 여부를 확인한 뒤 최종 이미지를 검사하세요."), { code: "IMAGE_RESUME_REQUIRED" });
     if (manifest.connectKind !== "SHOPPING") return { checked: 0, skipped: true };
     const revision = materialRevision(manifest);
     const product = manifest.sourceSnapshot?.product || {};

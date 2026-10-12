@@ -8,18 +8,22 @@ import {
   type QualityConvergencePlan,
 } from "./quality-convergence";
 import { productRecoveryStageForFailure } from "./product-9canvas";
+import type { PhotoDescriptionFinding } from "./photo-description-finding";
 
 export interface Result {
   success: boolean; code?: string; error?: string; errors?: string[]; message?: string;
   recovery?: { changed: boolean }; remainingMissing?: number;
+  imageAuditFailures?: { code: string; rejectionScope?: string; findingKey?: string; photoDescription?: PhotoDescriptionFinding }[];
   data?: {
     status?: string; postUrl?: string; scheduledPublishAt?: string; errorMessage?: string;
+    connectKind?: string;
+    composition?: { sections: { id: string; imageSource?: string }[] };
     published?: boolean; scheduled?: boolean; verificationBasis?: string;
     attemptStage?: string | null;
     approvedAt?: string | null; approval?: { canApprove: boolean; blockers?: { code: string; reason: string; sectionId?: string | null }[] };
     imageAssets?: { assetKey?: string; sha256?: string; role?: string; sectionId?: string | null }[];
     imageGeneration?: { status: string; recoveryState?: string };
-    imageSlots?: { missing: number; generationMissing: number }[];
+    imageSlots?: { sectionId?: string; missing: number; generationMissing: number }[];
     qualityConvergence?: QualityConvergencePlan | null;
     contentQuality?: {
       canPublish?: boolean;
@@ -112,7 +116,7 @@ function localScheduleCallOnce(pathname: string, method: string, body: object | 
       response.on("end", () => {
         try {
           const result = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Result;
-          if (!result.success || (response.statusCode || 500) >= 400) reject(Object.assign(new Error(result.error || result.errors?.join("\n") || result.message || `작업 실패 (HTTP ${response.statusCode})`), { code: result.code || "HTTP_ERROR", errors: result.errors, httpStatus: response.statusCode }));
+          if (!result.success || (response.statusCode || 500) >= 400) reject(Object.assign(new Error(result.error || result.errors?.join("\n") || result.message || `작업 실패 (HTTP ${response.statusCode})`), { code: result.code || "HTTP_ERROR", errors: result.errors, imageAuditFailures: result.imageAuditFailures, httpStatus: response.statusCode }));
           else resolve(result);
         } catch (error) { reject(error); }
       });
@@ -468,6 +472,11 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
   };
   const thumbnailMissing = (): boolean => Boolean(draft.data?.approval?.blockers?.some(blocker => blocker.code === "hero-image-invalid") &&
     !draft.data?.imageAssets?.some(asset => asset.role === "hero" && !asset.sectionId));
+  const originalSourceMissing = (): boolean => draft.data?.connectKind === "SHOPPING" && Boolean(
+    draft.data.composition?.sections.some(section => section.imageSource === "seller-original" &&
+      draft.data?.imageSlots?.some(slot => slot.sectionId === section.id && slot.missing > 0)));
+  let sourcePhotosRefreshAttempted = false;
+  let diagnoseRejectedPhotoDescriptions: (() => Promise<void>) | null = null;
 
   const images = async (mode: "normal" | "source-only" | "repair-rejected" = "normal") => {
     deps.onStage?.("이미지 준비");
@@ -495,6 +504,25 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
         await waitForImagesIdle();
       };
       const missing = () => draft.data?.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0);
+      // A scene never replaces the required real seller original. Resolve this
+      // cheapest dependency before spending a generation request, including a hero.
+      if (mode !== "source-only" && originalSourceMissing()) {
+        deps.onStage?.("생성 전 필수 상품 원본 배정 확인");
+        await attemptImages("bind_sources");
+        if (originalSourceMissing() && isRecoverableImageEvidenceResult(latestImageRepair)) {
+          sourcePhotosRefreshAttempted = true;
+          await runRecordedImageRecovery(id, "refresh-source", async () => {
+            check();
+            deps.onStage?.("생성 전 필수 상품 원본 재수집·검토");
+            await deps.call(`${base}/draft`, "POST", { action: "prepare_context" });
+            await attemptImages("bind_sources", true);
+          });
+        }
+        if (originalSourceMissing()) throw Object.assign(new Error(
+          "필수 상품 원본을 다시 수집·검토했지만 배정하지 못했습니다. 저장 원고와 기존 이미지는 보존했으며 새 연출 사진은 생성하지 않았습니다."),
+          { code: "IMAGE_SOURCE_BINDING_REQUIRED", errors: latestImageRepair?.errors });
+      }
+      if (mode === "normal") await diagnoseRejectedPhotoDescriptions?.();
       if (missing() || thumbnailMissing()) await attemptImages(mode === "source-only" ? "bind_sources" : thumbnailMissing() ? "generate_missing" : mode === "repair-rejected" ? "repair_rejected" : "generate_missing");
       const heroKey = thumbnailRepairKey();
       if (heroKey && mode !== "source-only") {
@@ -504,7 +532,8 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
       }
       if ((missing() || thumbnailMissing() || thumbnailRepairKey()) && isRecoverableImageEvidenceResult(latestImageRepair)) {
         deps.onStage?.("이미지 실패 원인 확인 · 상품 상세 원본 재수집");
-        const refreshed = await runRecordedImageRecovery(id, "refresh-source", async () => {
+        const refreshed = sourcePhotosRefreshAttempted ? { attempted: false } : await runRecordedImageRecovery(id, "refresh-source", async () => {
+          sourcePhotosRefreshAttempted = true;
           check();
           await deps.call(`${base}/draft`, "POST", { action: "prepare_context" });
           // Image URLs refresh independently of textual snapshot promotion.
@@ -512,9 +541,9 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
           if (missing() || thumbnailMissing()) await attemptImages("bind_sources", true);
           // bind_sources places seller originals only. Only AI-scene slots (generationMissing) that are
           // still empty get one more generation pass; source-evidence gaps never re-trigger generation.
-          if (mode !== "source-only" && (thumbnailMissing() || draft.data?.imageSlots?.some(slot => slot.generationMissing > 0))) await attemptImages("generate_missing");
+          if (mode !== "source-only" && !originalSourceMissing() && (thumbnailMissing() || draft.data?.imageSlots?.some(slot => slot.generationMissing > 0))) await attemptImages("generate_missing");
           const refreshedHeroKey = thumbnailRepairKey();
-          if (mode !== "source-only" && refreshedHeroKey) await attemptImages("regenerate", true, refreshedHeroKey);
+          if (mode !== "source-only" && !originalSourceMissing() && refreshedHeroKey) await attemptImages("regenerate", true, refreshedHeroKey);
         });
         if (!refreshed.attempted) deps.onStage?.("같은 근거 재수집은 반복하지 않음 · 대체 구성 검토");
         if (missing() && isRecoverableImageEvidenceResult(latestImageRepair)) {
@@ -538,6 +567,40 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     throw unresolvedText;
   }
 
+  let photoDescriptionRepaired = false;
+  const repairAuditedPhotoDescription = async (error: unknown): Promise<boolean> => {
+    if (!isDefinitivePublishImageFailure(error)) return false;
+    const findings = (error as { imageAuditFailures?: Result["imageAuditFailures"] }).imageAuditFailures;
+    if (!findings || findings.length === 0 || findings.length > 3 || !findings.every(failure =>
+      failure.code === "SEMANTIC_REJECTION" && failure.rejectionScope === "section" &&
+      failure.photoDescription?.category === "photo-description-mismatch" && /^[a-f0-9]{64}$/u.test(failure.findingKey || ""))) return false;
+    if (photoDescriptionRepaired) throw error;
+    photoDescriptionRepaired = true;
+    deps.onStage?.("사진과 다른 본문 묘사 문장만 제외 · 원고·동일 이미지 재검사");
+    // Server-owned keys authorize one exact edit, not a replacement instruction.
+    // Unknown transport/auth/cancelled mutations propagate without replay.
+    draft = await deps.call(`${base}/draft`, "PATCH", { action: "repair_photo_description", findingKeys: findings.map(failure => failure.findingKey) });
+    plan = await recheck(false, revised ? 1 : 0);
+    if (["repair-text", "refresh-source", "stop"].includes(plan.action)) throw unresolvedQualityError(plan);
+    return true;
+  };
+  // Existing packages may already contain a final-audit rejection. Diagnose
+  // those retained pixels before treating their uncounted slot as a new scene.
+  diagnoseRejectedPhotoDescriptions = async () => {
+    if (!draft.data?.approval?.blockers?.some(blocker => blocker.code === "image-publication-rejected" && blocker.sectionId)) return;
+    deps.onStage?.("기존 거절 사진의 실제 픽셀·본문 의미 재검사");
+    try {
+      await deps.call(`${base}/draft`, "PATCH", { action: "audit_photo_descriptions" });
+      draft = await deps.call(`${base}/draft`, "GET");
+    } catch (error) {
+      if (!isDefinitivePublishImageFailure(error)) throw error;
+      await repairAuditedPhotoDescription(error);
+    }
+  };
+  // A diagnostic is also useful when the only blocker is a retained rejection
+  // and no slot is marked missing by a legacy preview.
+  if (!draft.data?.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0) && !thumbnailMissing() && !thumbnailRepairKey())
+    await diagnoseRejectedPhotoDescriptions();
   await images();
   deps.onStage?.("내용·구성 품질검사");
   plan = await recheck(false, revised ? 1 : 0);
@@ -582,6 +645,11 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     await deps.call(`${base}/draft`, "PATCH", { action: "approve" });
   } catch (error) {
     if (!isDefinitivePublishImageFailure(error)) throw error;
+    if (await repairAuditedPhotoDescription(error)) {
+      if (plan.action !== "complete") throw unresolvedCompositionError(plan.reason);
+      deps.onStage?.("동일 이미지·수정 문장 최종 재검사·승인");
+      await deps.call(`${base}/draft`, "PATCH", { action: "approve" });
+    } else {
     const recoveryStage = productRecoveryStageForFailure(error);
     const recoveryLabel = {
       source: "상품 근거 재수집",
@@ -623,6 +691,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
           await dropRejectedAndApprove(secondError);
         }
       }
+    }
     }
   }
   // HTTP success only means the handler ran. Verify persisted approval and all

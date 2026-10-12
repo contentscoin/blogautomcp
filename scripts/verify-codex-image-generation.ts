@@ -17,6 +17,7 @@ import {
 } from "../src/lib/codex-image-generation";
 import { runImageBatch } from "../src/lib/brand-post-image-generation";
 import draftRuntimePolicy from "./lib/draft-runtime-policy.json";
+import { verifyCodexSingleGeneration } from "./verify-codex-single-generation";
 
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(2048, 7)]);
 
@@ -173,8 +174,8 @@ async function main() {
     assert.match(buildCodexImageInstruction("P", 1, "product"), /정확히 1회만 호출/u);
     assert.match(buildCodexImageInstruction("P", 1, "product"), /content\[\].*가정하지/u);
     assert.match(buildCodexImageInstruction("P", 1, "product"), /image_url, output_hint/u);
-    assert.match(buildCodexImageInstruction("P", 1, "product"), /추가 생성 없이 실패/u);
-    assert.match(buildCodexImageInstruction("P", 1, "product"), /기존 생성 결과의 파일 경로 확인과 out.png로의 파일 복사/u);
+    assert.match(buildCodexImageInstruction("P", 1, "product"), /추가 생성 없이 종료/u);
+    assert.match(buildCodexImageInstruction("P", 1, "product"), /파일 경로 확인과 out.png로의 파일 복사는 프로그램/u);
 
     // Product references reach the SDK as actual ordered local_image attachments.
     const source = path.join(root, "source.png"), acceptedAnchor = path.join(root, "anchor.png");
@@ -201,12 +202,14 @@ async function main() {
     // A path-only second generation must not replace the requested product image, even via out.png.
     const strictProductJob = (id: string) => job(id, { referenceMode: "product", referenceImagePaths: [acceptedAnchor],
       requiredReferenceHashes: [crypto.createHash("sha256").update(fs.readFileSync(acceptedAnchor)).digest("hex")] });
+    await verifyCodexSingleGeneration(root, acceptedAnchor);
     const ambiguousHome = path.join(root, "ambiguous-home"), ambiguousJob = strictProductJob("ambiguous-product");
     const ambiguousCodex = mockCodex(() => "ambiguous", ambiguousHome);
     const [ambiguous] = await runCodexImageBatch([ambiguousJob], { createCodex: ambiguousCodex.create, codexHome: ambiguousHome, onResult: async () => {} });
     assert.equal(ambiguous.localPath, null);
     assert.match(ambiguous.error!, /IMAGE_OUTPUT_AMBIGUOUS/);
     assert.equal(ambiguous.submissionState, "uncertain");
+    assert.equal(ambiguous.recoveryState, "completed-candidates");
     assert.equal(fs.existsSync(`${ambiguousJob.outStem}.png`), false, "an ambiguous second output is never adopted");
     const observedReceipt = JSON.parse(fs.readFileSync(`${ambiguousJob.outStem}.codex-submission.json`, "utf8"));
     assert.equal(observedReceipt.state, "completed", "the actual completion event persists even when output selection is ambiguous");
@@ -300,6 +303,7 @@ async function main() {
       const [retry] = await runCodexImageBatch([pendingJob], { createCodex: pendingCodex.create, codexHome: pendingHome, onResult: async () => {} });
       assert.equal(retry.localPath, null); assert.match(retry.error!, /IMAGE_RESUME_REQUIRED/);
       assert.equal(pendingCodex.threads.length, 1, `${mode}: no adoption and no extra generation`);
+      if (mode === "timeout") await new Promise(resolve => setTimeout(resolve, 30)); // The mock ignores abort; late provider bytes remain unapproved.
       const native = path.join(pendingHome, "generated_images", receipt.threadId, "ig_1.png");
       fs.copyFileSync(native, `${pendingJob.outStem}.png`);
       const [cached] = await runCodexImageBatch([pendingJob], { createCodex: async () => { throw new Error("SDK offline"); }, codexHome: pendingHome, onResult: async () => {} });

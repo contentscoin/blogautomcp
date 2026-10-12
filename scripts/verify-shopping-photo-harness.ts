@@ -1,6 +1,6 @@
 /** Offline generation-contract checks; no images, provider calls or approvals. */
 import assert from "node:assert/strict";
-import { buildShoppingPhotoHarness, resolveShoppingPhotoCategory, type ShoppingPhotoHarnessOptions } from "./lib/shopping-photo-harness";
+import { buildShoppingPhotoHarness, publishedPhotoDescriptions, resolveShoppingPhotoCategory, type ShoppingPhotoHarnessOptions } from "./lib/shopping-photo-harness";
 import { buildShoppingReferenceScenePrompt, type ShoppingSceneReference } from "./lib/shopping-reference-scene";
 import { buildBrandPostImagePrompt } from "../src/lib/brand-post-image-generation";
 
@@ -130,4 +130,18 @@ assert.equal(plan(forwarded).variantIndex, 2);
 assert.deepEqual(payload(forwarded).context.adjacentSectionTitles, ["라벨", "크기"]);
 assert.equal(payload(forwarded).context.physicalScale, "handheld");
 assert.equal(payload(forwarded).context.productImageDirective, "verified design only"); checks++;
+const literalBody = "페이스용 선크림이에요. 제품 사진에는 연보라색 제형이 펼쳐져 있고 용기에도 퍼플 코렉팅이 표시돼 있어요. 사진만으로 내 얼굴에서 얼마나 밝아지는지 알 수 없어요.";
+assert.deepEqual(publishedPhotoDescriptions(literalBody), ["제품 사진에는 연보라색 제형이 펼쳐져 있고 용기에도 퍼플 코렉팅이 표시돼 있어요."]);
+assert.deepEqual(publishedPhotoDescriptions("사진에는 효과가 보이지 않습니다. 사진에 표시된 수치를 확인할 수 없어요. 사진에 제형이 보인다면 살펴봐요."), []);
+const literalPrompt = buildShoppingPhotoHarness({ ...base, productName: "달바 퍼플 톤업 선크림", bodyExcerpt: literalBody });
+assert.deepEqual(payload(literalPrompt).context.literalPhotoDescriptions, publishedPhotoDescriptions(literalBody));
+assert.match(literalPrompt, /Never invent cream texture\/color, components, actions or measured results/u);
+assert.match(literalPrompt, /preserve the source-supported subject in the single requested photograph instead of fabricating the asserted detail/u);
+assert.doesNotMatch(literalPrompt, /PHOTO_DESCRIPTION_SOURCE_CONFLICT/u);
+assert.deepEqual(publishedPhotoDescriptions("사진에는 100.5ml라고 적힌 용기 라벨이 보여요."), ["사진에는 100.5ml라고 적힌 용기 라벨이 보여요."]);
+assert.deepEqual(publishedPhotoDescriptions("제품 표면의 질감이 매끈하게 보여요."), []);
+assert.equal(payload(buildShoppingPhotoHarness({ ...base, role: "hero", bodyExcerpt: literalBody })).context.literalPhotoDescriptions.length, 0);
+const lateDescription = `${"확인된 상품 정보예요. ".repeat(50)}사진에는 두 방향으로 세워 둔 모습이 담겼어요.`;
+assert.deepEqual(payload(buildShoppingPhotoHarness({ ...base, bodyExcerpt: lateDescription })).context.literalPhotoDescriptions, ["사진에는 두 방향으로 세워 둔 모습이 담겼어요."]);
+checks += 10;
 console.log(`PASS shopping photographic harness: ${checks} offline contracts; reference/labels, category shots, role, untrusted context and delegated variants (provider calls 0)`);

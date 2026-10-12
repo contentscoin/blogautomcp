@@ -13,7 +13,7 @@ import ts from "typescript";
 import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene, type BrandPostImageSourceHint } from "../src/lib/brand-post-image-evidence";
 import type { ProductSectionImageDiagnostics, ProductSectionImageReviewOptions } from "./lib/product-photo-review";
 import { auditSectionProposals } from "./lib/product-section-proposal-audit";
-import type { PublishImageAuditOptions } from "./lib/publish-image-audit";
+import type { PublishImageAuditOptions, PublishImageAuditResult } from "./lib/publish-image-audit";
 import { buildProduct9Canvas, selectedProductContextFrom9Canvas } from "./lib/product-9canvas";
 
 interface ReviewModule {
@@ -35,7 +35,8 @@ interface ReviewModule {
 
 type ReviewCall = { userPrompt: string; imagePaths: string[]; maxImages?: number; preserveImageOrder?: boolean };
 
-function loadReview(answer: string | ((options: ReviewCall, callIndex: number) => string)) {
+function loadReview(answer: string | ((options: ReviewCall, callIndex: number) => string),
+  finalAudit?: (input: PublishImageAuditOptions, callIndex: number) => PublishImageAuditResult) {
   let prompt = "";
   const calls: ReviewCall[] = [];
   const auditCalls: PublishImageAuditOptions[] = [];
@@ -57,7 +58,8 @@ function loadReview(answer: string | ((options: ReviewCall, callIndex: number) =
       // Semantic failures/auth/round bounds are covered by verify-product-proposal-audit.
       if (name === "./product-section-proposal-audit") return {
         auditSectionProposals: (options: Parameters<typeof auditSectionProposals>[0]) => auditSectionProposals({ ...options,
-          audit: async (input) => { auditCalls.push(input); const { composition } = input; return { ok: true, checked: composition.sections.length, failures: [],
+          audit: async (input) => { auditCalls.push(input); if (finalAudit) return finalAudit(input, auditCalls.length - 1);
+            const { composition } = input; return { ok: true, checked: composition.sections.length, failures: [],
             images: composition.renderNodes.flatMap((node, nodeIndex) => node.kind === "image" ? [{ nodeIndex,
               assetPath: node.assetPath, sha256: crypto.createHash("sha256").update(fs.readFileSync(node.assetPath)).digest("hex") }] : []) }; },
         }),
@@ -248,6 +250,9 @@ async function main() {
     assert.equal(shokzSlots[0].visualContract.demonstrateEveryParagraphFeature, false);
     assert.equal(shokzSlots[0].visualContract.identityAndVisibleOptionMustMatch, true);
     assert.equal(shokzSlots[0].visualContract.photoMustNotClaimUnseenPerformance, true);
+    assert.match(shokzSlots[0].sourcePhotoContract, /흰 배경 팩샷 허용/u);
+    assert.match(shokzSlots[0].sourcePhotoContract, /운동·생활 공간 배경 필수 아님/u);
+    assert.match(shokzOriginal.prompt, /수영·운동·거실·주방 사용 장면이나 생활 배경이 없다는 이유로 거절하지/u);
     assert.deepEqual(shokzSlots[0].sectionBody, shokzBody);
     assert.ok(shokzOriginal.prompt.includes(shokzProduct), "the exact selected option remains part of source review");
     assert.deepEqual(shokzOriginal.auditCalls[0].composition.sections[0].body, shokzBody,
@@ -289,6 +294,65 @@ async function main() {
       manyCandidates.slice(0, 2), "CX PRO", [overviewTarget, featureTarget]);
     assert.equal(matched.length, 2, "flexible overview must leave the only feature source available");
     assert.equal(new Set(matched.map(row => row.sourceSha256)).size, 2, "distinct slots must use distinct bytes");
+    // Reproduce the production shortlist failure: three supposedly suitable
+    // photos fail the real final gate, while the fourth was only ranked lower.
+    const reserveReports: ProductSectionImageDiagnostics[] = [];
+    const reserveReview = loadReview((_call, callIndex) => callIndex === 0 ? JSON.stringify({
+      assignments: [1, 2, 3].map(selectedIndex => ({ targetIndex: 1, selectedIndex, reviewClass: "product-photo", reason: "선택 옵션의 외형 후보" })),
+      rejections: [{ targetIndex: 1, selectedIndex: 4, reason: "선택한 세 장보다 덜 명확합니다" },
+        { targetIndex: 1, selectedIndex: 5, reason: "다른 옵션과 추가 설명판" }],
+    }) : JSON.stringify({ assignments: [{ targetIndex: 1, selectedIndex: 1, reviewClass: "product-photo", reason: "독립적으로 확인한 선택 옵션의 단일 사진" }] }),
+    (input, callIndex) => {
+      const nodeIndex = input.composition.renderNodes.findIndex(node => node.kind === "image");
+      const node = input.composition.renderNodes[nodeIndex]; assert(node.kind === "image");
+      assert.equal(input.selectedProduct, shokzProduct, "renewed shortlist preserves exact selected option");
+      assert.deepEqual(input.composition.sections[0].body, shokzBody, "renewed shortlist preserves published prose");
+      return { ok: callIndex >= 3, checked: 1,
+        images: [{ nodeIndex, assetPath: node.assetPath, sha256: crypto.createHash("sha256").update(fs.readFileSync(node.assetPath)).digest("hex") }],
+        failures: callIndex < 3 ? [{ nodeIndex, assetPath: node.assetPath, code: "SEMANTIC_REJECTION", reason: "선택 옵션 식별 불일치" }] : [] };
+    });
+    const reserveRows = await reserveReview.review.selectVerifiedProductSectionImages(manyCandidates.slice(0, 5), "샥즈 오픈스윔 프로", [shokzTarget], {
+      selectedProduct: shokzProduct, onDiagnostics: report => reserveReports.push(report),
+    });
+    assert.equal(reserveReview.calls.length, 2, "rank-only omission gets one renewed suitability review");
+    assert.deepEqual(Array.from(reserveReview.calls[1].imagePaths), [manyCandidates[3]], "wrong-option/explanatory-panel and real pixel rejections never enter renewal");
+    assert.equal(reserveReview.auditCalls.length, 4, "renewed fourth candidate must pass the final gate");
+    assert.equal(reserveRows.length, 1);
+    assert.equal(reserveRows[0].sourceSha256, crypto.createHash("sha256").update(fs.readFileSync(manyCandidates[3])).digest("hex"));
+    const reserveEntry = reserveReports[0].entries.find(entry => entry.path === manyCandidates[3])!;
+    assert.equal(reserveEntry.status, "proposed"); assert.equal(reserveEntry.suitability, "eligible"); assert.equal(reserveEntry.selection, "assigned");
+    assert.deepEqual(Array.from(reserveEntry.reviewHistory || [], row => row.stage), ["proposal", "renewed-proposal"]);
+    assert.equal(reserveEntry.reviewHistory?.[0].status, "not-selected", "lower ranking never becomes a factual rejection");
+    assert.match(reserveEntry.reviewHistory?.[0].reason || "", /선택한 세 장보다/u, "original observation remains recorded");
+    assert.equal(reserveReports[0].entries.filter(entry => entry.status === "rejected").length, 4);
+    for (const conflict of ["rejections", "notSelected"]) {
+      const contradictory = loadReview(JSON.stringify({ assignments: [{ targetIndex: 1, selectedIndex: 1, reviewClass: "product-photo", reason: "적합" }],
+        [conflict]: [{ targetIndex: 1, selectedIndex: 1, reason: "다른 옵션" }] }));
+      await assert.rejects(contradictory.review.selectVerifiedProductSectionImages([candidate], "conflict", [overviewTarget]), /모순/u);
+      assert.equal(contradictory.auditCalls.length, 0, "contradictory first-stage verdict never gets promoted");
+    }
+    const rankAndAdverse = loadReview(JSON.stringify({ assignments: [],
+      rejections: [{ targetIndex: 1, selectedIndex: 1, reason: "다른 옵션" }],
+      notSelected: [{ targetIndex: 1, selectedIndex: 1, reason: "순위가 낮음" }] }));
+    await assert.rejects(rankAndAdverse.review.selectVerifiedProductSectionImages([candidate], "conflict", [overviewTarget]), /모순/u);
+    assert.equal(rankAndAdverse.calls.length, 1, "a rank omission cannot undo an explicit adverse verdict via renewal");
+    const unknownReserveReports: ProductSectionImageDiagnostics[] = [];
+    const unknownReserve = loadReview(JSON.stringify({ assignments: [], notSelected: [{ targetIndex: 1, selectedIndex: 1, reason: "상위 순위에 들지 않아 미검토" }] }));
+    assert.equal((await unknownReserve.review.selectVerifiedProductSectionImages([candidate], "unreviewed", [overviewTarget], {
+      onDiagnostics: report => unknownReserveReports.push(report),
+    })).length, 0);
+    assert.equal(unknownReserve.calls.length, 2, "renewal is bounded even if the reviewer again omits the candidate");
+    assert.equal(unknownReserve.auditCalls.length, 0, "unreviewed omissions never become approved pixels");
+    assert.equal(unknownReserveReports[0].entries[0].status, "not-selected");
+    assert.equal(unknownReserveReports[0].entries[0].suitability, "unreviewed");
+    const mutableCandidate = path.join(root, "changed-reference.png");
+    fs.writeFileSync(mutableCandidate, testPngFixture("before review"));
+    const changedReference = loadReview(() => {
+      fs.writeFileSync(mutableCandidate, testPngFixture("changed during review"));
+      return JSON.stringify({ assignments: [{ targetIndex: 1, selectedIndex: 1, reviewClass: "product-photo", reason: "외형 후보" }] });
+    });
+    await assert.rejects(changedReference.review.selectVerifiedProductSectionImages([mutableCandidate], "changed", [overviewTarget]), /IMAGE_CHANGED/u);
+    assert.equal(changedReference.auditCalls.length, 0, "changed references stop before allocation");
     console.log("Verified section-image review class and server-side evidence gates.");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
