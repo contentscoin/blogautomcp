@@ -138,6 +138,74 @@ async function main() {
     const decimalLabel = "사진에는 100.5ml라고 적힌 용기 라벨이 보여요.";
     assert.equal(locatePhotoDescriptionSentence(decimalLabel, `“${decimalLabel}”`), null, "never clip a decimal or erase a product specification");
     assert.equal(locatePhotoDescriptionSentence(body, "“연보라색 제형이 펼쳐져 있고 용기에도 퍼플 코렉팅이 표시돼 있어요.”"), null, "a quote fragment cannot authorize deleting a larger sentence");
+    // Exact explicit photo assertion from the final rejected persimmon scene.
+    // A named box photograph is still a photo subject, not generic appearance.
+    const boxLiteral = "상자 사진에는 길게 나뉜 칸마다 서로 다른 형태의 곶감이 담겨 있어요.";
+    assert.equal(locatePhotoDescriptionSentence(boxLiteral, `본문의 “${boxLiteral}”는 실제 사진과 다릅니다.`), boxLiteral);
+    for (const unsafeBoxClaim of [
+      "상자가 길게 나뉜 칸마다 서로 다른 형태의 곶감이 담겨 있어요.",
+      "용기 사진에는 서로 다른 형태의 곶감이 담겨 있어요.",
+      "선반 사진에는 서로 다른 형태의 곶감이 담겨 있어요.",
+      "상자 사진에는 1.65kg이라고 적힌 포장이 보여요.",
+      "상자 사진에는 제품 원산지 표기가 보여요.",
+    ]) assert.equal(locatePhotoDescriptionSentence(unsafeBoxClaim, `“${unsafeBoxClaim}”`), null,
+      "the narrow box-photo subject cannot erase arbitrary nouns, generic appearance or product specifications");
+    assert.equal(locatePhotoDescriptionSentence(boxLiteral, "“길게 나뉜 칸마다 서로 다른 형태의 곶감이 담겨 있어요.”"), null,
+      "a fragment of the box description cannot authorize the whole sentence");
+    const boxId = "offline-box-product-123";
+    const boxDir = path.join(root, "data", "prepared-brand-posts", boxId);
+    fs.mkdirSync(boxDir, { recursive: true });
+    const boxImage = path.join(boxDir, "box-scene.png");
+    fs.copyFileSync(image, boxImage);
+    const boxImageBefore = fs.readFileSync(boxImage);
+    const boxBody = ["곶감 선물세트는 보관 조건과 포장 형태를 함께 살펴볼 필요가 있습니다.",
+      "판매자가 안내하는 무게와 보관 방법은 포장 사진만으로 확인할 수 없습니다.", boxLiteral,
+      "선택 가능한 구성과 실제 구매 옵션은 상품 상세 정보를 통해 확인합니다.",
+      "받는 사람의 취향과 식사 일정에 맞춰 선물을 고르는 편이 좋습니다."];
+    const boxSectionId = "shopping-section-b9815b28";
+    const boxComposition = { ...composition,
+      sections: [{ ...composition.sections[0], id: boxSectionId, body: boxBody, characterCount: boxBody.join("").length,
+        imagePaths: [boxImage] }, composition.sections[1]],
+      renderNodes: [{ ...composition.renderNodes[0], sectionId: boxSectionId },
+        { kind: "paragraph" as const, sectionId: boxSectionId, text: boxBody.join("\n\n") },
+        { ...composition.renderNodes[7], sectionId: boxSectionId, assetPath: boxImage }, ...composition.renderNodes.slice(8)],
+    } as BrandPostPackageManifestV2["composition"];
+    const boxManifest = { ...manifest, brandLinkId: boxId, composition: boxComposition,
+      imageAssets: [{ path: boxImage, sourcePath: boxImage, sha256, role: "body" as const, sectionId: boxSectionId }] };
+    fs.writeFileSync(path.join(boxDir, "manifest.json"), JSON.stringify(boxManifest));
+    const boxVerdict = { ...good, reason: `본문의 “${boxLiteral}”와 달리 사진은 같은 형태의 곶감이 반복된 칸을 보여 줍니다. 상품 외형과 옵션 및 사진 형식에는 다른 문제가 없습니다.` };
+    const boxInput: PublishImageAuditOptions = { brandLinkId: boxId, productName: "예다움 상주곶감 선물세트",
+      composition: boxComposition, review: async () => JSON.stringify({ reviews: [boxVerdict] }) };
+    const boxFailure = (await auditPublishImages(boxInput)).failures[0];
+    assert.equal(boxFailure.photoDescription?.literalClaim, boxLiteral);
+    assert.equal(boxFailure.photoDescription?.nodeIndex, 2);
+    assert.equal(boxFailure.photoDescription?.assetPath, boxImage);
+    assert.equal(boxFailure.photoDescription?.sha256, sha256);
+    assert.equal(boxFailure.photoDescription?.context, publicationImageContext(boxComposition, boxSectionId));
+    await assert.rejects(assertPublishImagesSafe(boxInput), /PUBLISH_IMAGE_AUDIT_FAILED/u);
+    const boxFindings = serverPhotoDescriptionFindings(boxManifest, [findingKey(boxFailure.photoDescription!)]);
+    assert.equal(boxFindings.length, 1, "the actual audit persists the exact box description as a server-owned finding");
+    const boxMarkdown = `# 곶감 선택 기준\n\n${boxBody.join("\n\n")}\n\n${untouchedBody}`;
+    const boxPlanned = planPhotoDescriptionRepair(boxManifest, boxMarkdown, boxFindings);
+    assert.equal(boxPlanned.markdown, boxMarkdown.replace(boxLiteral, ""));
+    assert.deepEqual(boxPlanned.manifest.composition.sections[0].body, boxBody.filter(text => text !== boxLiteral));
+    assert.deepEqual(boxPlanned.manifest.composition.sections[1], boxManifest.composition.sections[1]);
+    assert.deepEqual(boxPlanned.manifest.imageAssets, boxManifest.imageAssets);
+    assert.deepEqual(boxPlanned.manifest.composition.renderNodes.filter(node => node.kind === "image"),
+      boxComposition.renderNodes.filter(node => node.kind === "image"));
+    assert.deepEqual(fs.readFileSync(boxImage), boxImageBefore);
+    for (const changedFinding of [{ ...boxFindings[0], sha256: "b".repeat(64) },
+      { ...boxFindings[0], nodeIndex: 0 }, { ...boxFindings[0], context: "c".repeat(64) }])
+      assert.throws(() => planPhotoDescriptionRepair(boxManifest, boxMarkdown, [changedFinding]), /보존/u,
+        "box-photo repair still requires the exact current node, bytes and section context");
+    assert.throws(() => serverPhotoDescriptionFindings(boxManifest, ["d".repeat(64)]), /보존/u,
+      "a client cannot invent a box-photo finding");
+    for (const patch of [{ identityMatches: false }, { mixedOptions: true }, { noGraphicLayout: false },
+      { photoClaimMatches: true }, { reason: "제품 옵션이 미확정입니다." }]) {
+      const unsafeBox = await auditPublishImages({ ...boxInput, review: async () => JSON.stringify({ reviews: [{ ...boxVerdict, ...patch }] }) });
+      assert.equal(unsafeBox.failures[0].photoDescription, undefined,
+        "a box-photo subject never overrides adverse identity, option, format or incomplete quoted evidence");
+    }
     // Exact assertions from the latest failed LA-rib and Shark materials.
     // Both are scene-only descriptions, not product facts or performance proof.
     for (const actualClaim of [
