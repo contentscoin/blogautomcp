@@ -23,14 +23,14 @@ interface ReviewModule {
     productName: string,
     targets: Array<{ sectionTitle: string; imageIntent: string; imageSource?: BrandPostImageSourceHint; sectionBody?: string[]; excludedSourceSha256?: string[] }>,
     options?: ProductSectionImageReviewOptions,
-  ): Promise<Array<{ targetIndex: number; sourceSha256: string; reviewClass: string }>>;
+  ): Promise<Array<{ targetIndex: number; path: string; sourceSha256: string; reviewClass: string }>>;
   selectVerifiedProductSectionImage(
     paths: string[],
     productName: string,
     sectionTitle: string,
     imageIntent: string,
     sectionBody?: string[],
-  ): Promise<{ sourceSha256: string; reviewClass: string } | null>;
+  ): Promise<{ path: string; sourceSha256: string; reviewClass: string } | null>;
 }
 
 type ReviewCall = { userPrompt: string; imagePaths: string[]; maxImages?: number; preserveImageOrder?: boolean };
@@ -175,6 +175,44 @@ async function main() {
     assert.equal(featureRows[0].sourceSha256, sha256);
     assert.equal(featureRows[0].reviewClass, "feature-evidence");
     assert.equal(acceptedFeature.calls[0].preserveImageOrder, true);
+
+    const exactCopy = path.join(root, "same-reviewed-pixels-new-path.png");
+    fs.copyFileSync(candidate, exactCopy);
+    const copiedReports: ProductSectionImageDiagnostics[] = [];
+    const copiedRows = await acceptedFeature.review.selectVerifiedProductSectionImages([exactCopy], "CRNK 바디드라이어", [featureTarget], {
+      onDiagnostics: report => copiedReports.push(report),
+    });
+    assert.equal(copiedRows[0].path, exactCopy); assert.equal(copiedReports[0].entries[0].path, exactCopy);
+    assert.equal(copiedRows[0].sourceSha256, sha256); assert.equal(copiedReports[0].cacheHit, true);
+    assert.equal(acceptedFeature.calls.length, 1); assert.equal(acceptedFeature.auditCalls.length, 1,
+      "exact reviewed bytes at a new collector path reuse the verdict without a provider or final audit replay");
+    fs.writeFileSync(exactCopy, testPngFixture("modified product option pixels"));
+    const modifiedRows = await acceptedFeature.review.selectVerifiedProductSectionImages([exactCopy], "CRNK 바디드라이어", [featureTarget]);
+    assert.equal(acceptedFeature.calls.length, 2); assert.equal(acceptedFeature.auditCalls.length, 2);
+    assert.notEqual(modifiedRows[0].sourceSha256, sha256, "changed pixels cannot reuse the previous completed review");
+
+    fs.copyFileSync(candidate, exactCopy);
+    const singleCopy = loadReview('{"selectedIndex":1,"reviewClass":"feature-evidence","reason":"visible control"}');
+    const firstSingle = await singleCopy.review.selectVerifiedProductSectionImage([candidate], "fixture", featureTarget.sectionTitle, featureTarget.imageIntent);
+    assert.ok(firstSingle); firstSingle.sourceSha256 = "0".repeat(64); firstSingle.path = "foreign unreviewed path";
+    const cachedSingle = await singleCopy.review.selectVerifiedProductSectionImage([exactCopy], "fixture", featureTarget.sectionTitle, featureTarget.imageIntent);
+    assert.equal(cachedSingle?.path, exactCopy); assert.equal(cachedSingle?.sourceSha256, sha256); assert.equal(singleCopy.calls.length, 1,
+      "a caller cannot change the stored reviewed-byte identity");
+
+    const invalidFinal = loadReview('{"assignments":[{"targetIndex":1,"selectedIndex":1,"reviewClass":"feature-evidence","reason":"visible control"}]}', input => {
+      const nodeIndex = input.composition.renderNodes.findIndex(node => node.kind === "image");
+      return { ok: false, checked: 1, images: [], failures: [{ nodeIndex, assetPath: candidate, code: "INVALID_REVIEW", reason: "missing final verdict" }] };
+    });
+    const incompleteReports: ProductSectionImageDiagnostics[] = [];
+    assert.equal((await invalidFinal.review.selectVerifiedProductSectionImages([candidate], "incomplete-final", [featureTarget], {
+      onDiagnostics: report => incompleteReports.push(report),
+    })).length, 0);
+    assert.equal(invalidFinal.calls.length, 1); assert.equal(invalidFinal.auditCalls.length, 1,
+      "an invalid final verdict cannot renew its proposal or buy another audit in the same operation");
+    assert.equal(incompleteReports[0].status, "incomplete");
+    assert.equal(incompleteReports[0].entries[0].status, "review-failed");
+    assert.equal(incompleteReports[0].entries[0].suitability, "unreviewed",
+      "missing final verdict is not proof of a pixel rejection or absent seller original");
 
     const acceptedOverview = loadReview('{"assignments":[{"targetIndex":1,"selectedIndex":1,"reviewClass":"product-photo","reason":"전체 제품"}]}');
     assert.equal(acceptedOverview.review.allowsGenericProductPhoto(overviewTarget), true);

@@ -3,8 +3,9 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { readProductSnapshot, type ProductSnapshot } from "../../src/lib/draft-context-snapshot";
 import { buildProduct9Canvas, selectedProductContextFrom9Canvas } from "./product-9canvas";
-import { selectVerifiedProductSectionImages, type ProductSectionImageAssignment } from "./product-photo-review";
+import { selectVerifiedProductSectionImages, type ProductSectionImageAssignment, type ProductSectionImageDiagnostics } from "./product-photo-review";
 import type { WritingPublicationPhotoContext } from "./writing-prompt-contract";
+import { SHOPPING_NATURAL_SCENE_ROLES } from "./shopping-scene-roles";
 
 export interface ShoppingPrewritePhotoProof {
   version: "shopping-prewrite-photo-proof/v1";
@@ -27,11 +28,36 @@ function sameLocalPath(left: string, right: string): boolean {
   return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
-export async function selectShoppingPrewriteOriginal(paths: string[], productName: string, selectedProduct: string): Promise<ProductSectionImageAssignment | null> {
-  const assignments = await selectVerifiedProductSectionImages(paths, productName, [{
-    sectionId: "prewriting-original", sectionTitle: "선택 상품 외형",
-    imageIntent: "선택 상품 외형 확인용 실제 판매자 원본 사진", imageSource: "seller-original", sectionBody: [],
-  }], { selectedProduct });
+export async function selectShoppingPrewriteOriginal(paths: string[], productName: string, selectedProduct: string,
+  review: typeof selectVerifiedProductSectionImages = selectVerifiedProductSectionImages): Promise<ProductSectionImageAssignment | null> {
+  let diagnostics: ProductSectionImageDiagnostics | undefined;
+  let assignments: ProductSectionImageAssignment[];
+  try {
+    assignments = await review(paths, productName, [{
+      sectionId: "prewriting-original", sectionTitle: "선택 상품 외형",
+      imageIntent: "선택 상품 외형 확인용 실제 판매자 원본 사진", imageSource: "seller-original", sectionBody: [],
+    }], { selectedProduct, onDiagnostics: report => { diagnostics = report; } });
+  } catch (error) {
+    // Preserve explicit provider/auth/transport errors. An undecodable review
+    // response is neither a pixel rejection nor proof that no source exists.
+    const message = error instanceof Error ? error.message : String(error);
+    if ((error as { code?: string })?.code || /\b(?:CODEX_[A-Z_]+|CHATGPT_BROWSER_[A-Z_]+)\b/u.test(message) || diagnostics?.status !== "failed") throw error;
+    if (/\bIMAGE_CHANGED\b/u.test(message)) throw Object.assign(new Error("PREWRITING_PHOTO_CHANGED: 작성 전 원본 검사 중 상품 사진 바이트가 변경되었습니다.", { cause: error }),
+      { code: "PREWRITING_PHOTO_CHANGED" });
+    throw Object.assign(new Error("SOURCE_REVIEW_INCOMPLETE: 작성 전 판매자 원본 검사 응답이나 최종 판정을 완료하지 못했습니다. 원본 부족으로 처리하거나 새 원고·연출 사진을 생성하지 않았습니다.", { cause: error }),
+      { code: "SOURCE_REVIEW_INCOMPLETE" });
+  }
+  // A shortlist omission is not proof that a product original is absent. The
+  // batch reviewer already spends its bounded renewal on unreviewed candidates;
+  // do not turn that protocol gap into a crop/recollection or generation attempt.
+  if (assignments.length === 0 && diagnostics?.status === "incomplete") {
+    throw Object.assign(new Error("SOURCE_REVIEW_INCOMPLETE: 작성 전 판매자 원본 후보의 픽셀 판정이 누락됐습니다. 원본 없음으로 처리하거나 새 원고·연출 사진을 생성하지 않았습니다. 누락 판정을 확인한 뒤 같은 상품 근거에서 재개하세요."),
+      { code: "SOURCE_REVIEW_INCOMPLETE" });
+  }
+  if (assignments.length === 0 && diagnostics?.status === "failed") {
+    throw Object.assign(new Error("SOURCE_REVIEW_INCOMPLETE: 작성 전 판매자 원본 검토가 완료되지 않았습니다. 기존 근거와 사진을 보존했으며 새 원고·연출 사진을 생성하지 않았습니다."),
+      { code: "SOURCE_REVIEW_INCOMPLETE" });
+  }
   return assignments[0] ?? null;
 }
 
@@ -74,11 +100,7 @@ export function writingPhotosFromPrewrite(proof: ShoppingPrewritePhotoProof): Wr
     sourceUrl: proof.snapshot.sourceUrl, snapshotId: proof.snapshot.snapshotId,
     selectedIdentity: { status: context.selectedOption.status, label: context.selectedOption.label },
     observedSubject: proof.original.observedSubject, inclusionScope: "selected-product-exterior",
-  }, plannedScenes: [
-    { role: "scene-1", intent: "선택 상품 외형의 자연스러운 생활 공간 연출" },
-    { role: "scene-2", intent: "같은 상품의 별도 자연스러운 구도" },
-    { role: "scene-3", intent: "동일 상품 외형의 다른 생활 공간 사진" },
-  ] };
+  }, plannedScenes: SHOPPING_NATURAL_SCENE_ROLES.map(scene => ({ role: scene.role, intent: scene.purpose })) };
 }
 
 /** MCP context survives collector temporary-file cleanup. This copies identical reviewed source bytes, never a generated image. */

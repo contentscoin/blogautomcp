@@ -10,9 +10,11 @@ const code = (value: unknown): string | undefined => typeof value === 'string' &
 type MaterialWorkflowProjection = {
   workflowJobId: string | null; sourceJobId: string; workflowStatus: string; workflowTerminal: boolean; workflowPending: boolean;
   workflowUncertain: boolean; transportTerminal: boolean; completionState: string; executionNotAdmitted?: boolean;
-  productStates: Array<{ productId: string; status: string; state: string; errorCode?: string; causeCode?: string }>;
+  productStates: Array<{ productId: string; status: string; state: string; errorCode?: string; causeCode?: string; executionStatus?: string; executionErrorCode?: string; executionCauseCode?: string }>;
   acceptedCount?: number; productStatesTruncated?: boolean; currentReadinessVerified?: boolean;
+  readinessObservedAt?: string; readinessBasis?: 'recent-pc-query' | 'stored-execution-receipt';
   readyCount: number; failedCount: number; interruptedCount: number; materialPreparationComplete: boolean;
+  historicalReadyCount?: number; historicalFailedCount?: number; historicalInterruptedCount?: number;
   nextCall?: { tool: string; arguments: { jobId?: string; sourceJobId?: string; waitMs?: number; includeResult?: boolean } }; pollAfterMs?: number;
 };
 
@@ -40,7 +42,13 @@ export function materialWorkflowProjection(type: string, sourceJobId: string, tr
   const workflowTerminal = Boolean(workflowJobId) && LOCAL_TERMINAL.has(workflowStatus) && !running;
   const workflowPending = transportPending || !workflowTerminal;
   const materialById = new Map(materials.map(value => [identifier(object(value).productId), object(value)]));
-  const allProductStates = items.flatMap(value => {
+  const observedAt = typeof data.readinessObservedAt === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(data.readinessObservedAt) &&
+    Number.isFinite(Date.parse(data.readinessObservedAt)) ? data.readinessObservedAt : undefined;
+  const age = observedAt ? Date.now() - Date.parse(observedAt) : Number.POSITIVE_INFINITY;
+  // Stored prepare/repair receipts are historical. A fresh inventory query is
+  // required before announcing current readiness or selecting publication.
+  const recentPcQuery = type === 'MATERIALS_LIST' && age >= -30_000 && age <= 120_000;
+  const allProductStates = items.flatMap<MaterialWorkflowProjection['productStates'][number]>(value => {
     const item = object(value), productId = identifier(item.productId);
     const status = String(item.status || 'unknown'), errorCode = code(item.errorCode), causeCode = code(item.causeCode);
     const codes = [errorCode, causeCode].filter((value): value is string => Boolean(value));
@@ -49,15 +57,30 @@ export function materialWorkflowProjection(type: string, sourceJobId: string, tr
         : codes.some(value => SOURCE_REQUIRED.has(value)) ? 'needs_input'
           : ['queued', 'preparing', 'publishing'].includes(status) ? 'pending'
             : status === 'ready' && productId && materialById.has(productId) && materialById.get(productId)?.ready !== true ? 'blocked' : status;
-    return productId ? [{ productId, status, state, ...(errorCode ? { errorCode } : {}), ...(causeCode ? { causeCode } : {}) }] : [];
+    if (!productId) return [];
+    const material = materialById.get(productId);
+    // A later verified recovery does not rewrite the old execution receipt.
+    // Expose the current PC state and retain the earlier outcome separately.
+    const currentStatus = material?.materialStatus ?? material?.status;
+    const resolvedExecution = ['failed', 'interrupted'].includes(status) || (status === 'ready' && !errorCode && !causeCode);
+    if (recentPcQuery && material?.ready === true && currentStatus === 'READY' && resolvedExecution) return [{ productId, status: 'ready', state: 'ready',
+      executionStatus: status, ...(errorCode ? { executionErrorCode: errorCode } : {}), ...(causeCode ? { executionCauseCode: causeCode } : {}) }];
+    if (recentPcQuery && currentStatus === 'BLOCKED' && !['needs_outcome_check', 'needs_auth'].includes(state)) return [{ productId, status: 'failed', state: 'blocked', executionStatus: status,
+      ...(errorCode ? { executionErrorCode: errorCode } : {}), ...(causeCode ? { executionCauseCode: causeCode } : {}) }];
+    return [{ productId, status, state, ...(errorCode ? { errorCode } : {}), ...(causeCode ? { causeCode } : {}) }];
   });
   const productStates = allProductStates.slice(0, 50);
   const selectedIds = new Set(allProductStates.map(item => item.productId));
-  const currentReadinessVerified = allProductStates.length > 0 && allProductStates.length === items.length && selectedIds.size === items.length &&
+  const currentReadinessVerified = recentPcQuery && allProductStates.length > 0 && allProductStates.length === items.length && selectedIds.size === items.length &&
     materials.length === items.length && materialById.size === materials.length && !materialById.has(null) &&
     allProductStates.every(item => materialById.has(item.productId));
-  const allReady = currentReadinessVerified && allProductStates.every(item => item.status === 'ready' && item.state === 'ready' && !item.errorCode && !item.causeCode && materialById.get(item.productId)?.ready === true);
-  const readyCount = currentReadinessVerified ? allProductStates.filter(item => item.status === 'ready' && item.state === 'ready' && !item.errorCode && !item.causeCode && materialById.get(item.productId)?.ready === true).length : 0;
+  const currentReady = (item: typeof allProductStates[number]) => {
+    const material = materialById.get(item.productId);
+    return item.status === 'ready' && item.state === 'ready' && !item.errorCode && !item.causeCode && material?.ready === true &&
+      (material.materialStatus ?? material.status) === 'READY';
+  };
+  const allReady = currentReadinessVerified && allProductStates.every(currentReady);
+  const readyCount = currentReadinessVerified ? allProductStates.filter(currentReady).length : 0;
   const failedCount = allProductStates.filter(item => item.status === 'failed').length;
   const interruptedCount = allProductStates.filter(item => item.status === 'interrupted').length;
   const publishing = type === 'MATERIALS_PUBLISH' || data.kind === 'publish' || local.kind === 'publish';
@@ -65,15 +88,21 @@ export function materialWorkflowProjection(type: string, sourceJobId: string, tr
     : allProductStates.some(item => item.state === 'needs_outcome_check') ? 'needs_outcome_check'
       : allProductStates.some(item => item.state === 'needs_auth') ? 'needs_auth'
         : allProductStates.some(item => item.state === 'needs_input') ? 'needs_input'
-          : workflowStatus === 'completed' && !publishing ? allReady ? 'ready' : 'blocked' : workflowStatus;
+          : !publishing && !recentPcQuery && workflowTerminal ? 'needs_current_readiness'
+            : !publishing && allReady ? 'ready' : workflowStatus === 'completed' && !publishing ? 'blocked' : workflowStatus;
   const nextCall = workflowPending ? transportPending
     ? { tool: 'job_get', arguments: { jobId: sourceJobId, waitMs: 20000, includeResult: false } }
-    : { tool: 'materials_list', arguments: workflowJobId ? { jobId: workflowJobId } : { sourceJobId } } : null;
+    : { tool: 'materials_list', arguments: workflowJobId ? { jobId: workflowJobId } : { sourceJobId } }
+    : !publishing && workflowTerminal && !recentPcQuery ? { tool: 'materials_list', arguments: workflowJobId ? { jobId: workflowJobId } : { sourceJobId } } : null;
   return { workflowJobId, sourceJobId, workflowStatus: workflowStatus || 'unknown', workflowTerminal, workflowPending,
     workflowUncertain: workflowPending && !transportPending && !running,
     transportTerminal: !transportPending, completionState, productStates, acceptedCount: items.length,
     productStatesTruncated: allProductStates.length > productStates.length, currentReadinessVerified, readyCount, failedCount, interruptedCount,
-    materialPreparationComplete: !publishing && workflowTerminal && workflowStatus === 'completed' && allReady,
+    ...(observedAt ? { readinessObservedAt: observedAt } : {}), readinessBasis: recentPcQuery ? 'recent-pc-query' : 'stored-execution-receipt',
+    historicalReadyCount: items.filter(value => object(value).status === 'ready').length,
+    historicalFailedCount: items.filter(value => object(value).status === 'failed').length,
+    historicalInterruptedCount: items.filter(value => object(value).status === 'interrupted').length,
+    materialPreparationComplete: !publishing && workflowTerminal && allReady,
     ...(nextCall ? { nextCall, pollAfterMs: 3000 } : {}),
   };
 }

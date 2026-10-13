@@ -186,7 +186,9 @@ export async function runMaterialJob(job: MaterialJob, deps: {
           item.verificationStatus = current?.ready ? "READY" : current ? "BLOCKED" : "DRAFT_MISSING";
         } catch { item.verificationStatus = "BLOCKED"; }
       }
-      item.stage = item.status === "outcome_unknown" ? "발행 결과 확인 필요 · 자동 재시도 중지" : code === "MATERIAL_NOT_READY" || code === "MATERIAL_CHANGED" ? "소재 준비·검토에서 다시 선택 필요" : "확인 필요";
+      item.stage = code === "OUTCOME_UNKNOWN" && (error as { observedPublished?: unknown })?.observedPublished === true && failureCodes.causeCode === "PUBLISHED_CONTENT_UNVERIFIED"
+        ? "공개 글 확인 · 게시 콘텐츠 추가 확인 필요 · 자동 재발행 중지"
+        : item.status === "outcome_unknown" ? "발행 결과 확인 필요 · 자동 재시도 중지" : code === "MATERIAL_NOT_READY" || code === "MATERIAL_CHANGED" ? "소재 준비·검토에서 다시 선택 필요" : "확인 필요";
       if (code === "PREPARATION_RESULT_UNCERTAIN") {
         item.status = "interrupted"; item.stage = "소재 준비 결과 확인 필요 · 다음 상품 중지"; stopped = true;
       }

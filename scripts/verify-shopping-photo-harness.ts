@@ -159,5 +159,10 @@ assert.deepEqual(publishedPhotoDescriptions("제품 표면의 질감이 매끈�
 assert.equal(payload(buildShoppingPhotoHarness({ ...base, role: "hero", bodyExcerpt: literalBody })).context.literalPhotoDescriptions.length, 0);
 const lateDescription = `${"확인된 상품 정보예요. ".repeat(50)}사진에는 두 방향으로 세워 둔 모습이 담겼어요.`;
 assert.deepEqual(payload(buildShoppingPhotoHarness({ ...base, bodyExcerpt: lateDescription })).context.literalPhotoDescriptions, ["사진에는 두 방향으로 세워 둔 모습이 담겼어요."]);
+const covers = [0, 1, 2].map(variantIndex => buildShoppingPhotoHarness({ ...base, variantIndex }));
+assert.deepEqual(covers.map(prompt => JSON.parse(prompt.split("CATEGORY SHOT PLAN (harness assignment, not product facts): ")[1].split("\n")[0]).sceneCoverage.role),
+  ["scene-1", "scene-2", "scene-3"], "all three photo requests carry the same role IDs as prewriting");
+assert.ok(covers.every(prompt => /keep the exact visible subject count/u.test(prompt) && /does not authorize duplicating a single pictured bottle/u.test(prompt)),
+  "purchase quantity and catalog options cannot multiply or mix visible reference subjects");
 checks += 10;
 console.log(`PASS shopping photographic harness: ${checks} offline contracts; reference/labels, category shots, role, untrusted context and delegated variants (provider calls 0)`);

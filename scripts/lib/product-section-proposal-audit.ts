@@ -10,7 +10,7 @@ export interface SectionProposalTarget { sectionTitle: string; sectionBody?: str
 export async function auditSectionProposals<T extends SectionProposal>(options: {
   productName: string; selectedProduct?: string; targets: SectionProposalTarget[]; proposals: T[];
   select: (proposals: T[]) => T[];
-  onRejected: (proposal: T, reason: string) => void;
+  onRejected: (proposal: T, reason: string, failureCode?: string) => void;
   /** Re-review rank-only/unreviewed reserves once after the eligible pool is exhausted. */
   replenish?: (unfilledTargetIndexes: number[]) => Promise<T[]>;
   audit?: (options: PublishImageAuditOptions) => ReturnType<typeof auditPublishImages>;
@@ -72,7 +72,7 @@ export async function auditSectionProposals<T extends SectionProposal>(options: 
     for (const failure of result.failures) {
       const row = byNode.get(failure.nodeIndex);
       if (!row) throw new Error("SOURCE_PROPOSAL_AUDIT_FAILED: INVALID_CONTEXT: Unknown verdict target");
-      rejected.add(key(row)); rejectedPairs.add(key(row)); options.onRejected(row, failure.reason);
+      rejected.add(key(row)); rejectedPairs.add(key(row)); options.onRejected(row, failure.reason, failure.code);
     }
     for (const row of pending) if (!rejected.has(key(row))) accepted.add(key(row));
     remaining = remaining.filter(row => !rejected.has(key(row)));

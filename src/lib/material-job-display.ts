@@ -1,6 +1,7 @@
 /** A current material is separate from the immutable outcome of an earlier job. */
 export type CurrentMaterialDisplay = {
   productId: string; ready: boolean; status: string; blockers?: string[];
+  preparationDiagnostics?: { nextAction?: { instruction: string }; missingBodyImages?: number; thumbnailRequired?: boolean };
 };
 
 export function currentMaterialLabel(material?: CurrentMaterialDisplay): string | null {

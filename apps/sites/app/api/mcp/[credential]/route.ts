@@ -432,7 +432,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'post_verify_published',
     title: '발행 결과 검증',
-    description: '즉시 발행은 네이버 글 URL 응답, 예약은 저장된 네이버 제출 확인 기록(예약 ID·날짜)으로 검증합니다. 예약 목록을 실시간 조회하는 도구는 아닙니다. scheduled=true만 예약 확인 완료이며 plannedPublishAt은 희망일일 뿐입니다. outcomeUnknown 또는 unverified는 실패 확정이 아니므로 자동 재발행하지 마세요. 시도 단계·제출 시각·프로세스 상태·오류로 중단 원인을 확인합니다.',
+    description: 'PC 1.3.125부터 공개 글의 정확한 제목·상단 고지·본문/사진/상품 링크 순서·현재 소재와 제출 스냅샷을 대조합니다. published=true는 공개 글 존재 확인이며 contentVerified=true와 verificationStatus=verified가 전체 콘텐츠 확인 완료입니다. partial/mismatch는 세부 검사와 다음 조치를 확인하세요. 예약의 scheduled=true는 저장된 제출 기록(예약 ID·날짜) 확인이며 현재 예약 목록 조회·예정 시각 후 실제 게시 확인과 구분합니다. 결과 불명은 기존 제출을 조회하고 자동 재발행하지 마세요.',
     inputSchema: { type: 'object', properties: { connectKind: CONNECT_KIND, draftId: ID_FIELD, idempotencyKey: IDEMPOTENCY }, required: ['connectKind', 'draftId'], additionalProperties: false },
     outputSchema: JOB_RESULT_SCHEMA,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },

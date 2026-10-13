@@ -9981,13 +9981,13 @@ function classifyFailureCode(error: unknown): string {
       messages.push(current);
     }
   }
-  const explicitCode = codes.find((code) => /^(?:SOURCE_EVIDENCE_REQUIRED|IMAGE_SOURCE_BINDING_REQUIRED|PREWRITING_PHOTO_CHANGED|PREWRITING_SOURCE_CHANGED|QUALITY_REPAIR_EXHAUSTED|QUALITY_REPAIR_REJECTED|CHATGPT_BROWSER_UNREACHABLE|DRAFT_SECTION_COUNT_OUT_OF_RANGE|DRAFT_RECHECK_REQUIRED)$/u.test(code));
+  const explicitCode = codes.find((code) => /^(?:SOURCE_EVIDENCE_REQUIRED|SOURCE_REVIEW_INCOMPLETE|IMAGE_SOURCE_BINDING_REQUIRED|PREWRITING_PHOTO_CHANGED|PREWRITING_SOURCE_CHANGED|QUALITY_REPAIR_EXHAUSTED|QUALITY_REPAIR_REJECTED|CHATGPT_BROWSER_UNREACHABLE|DRAFT_SECTION_COUNT_OUT_OF_RANGE|DRAFT_RECHECK_REQUIRED)$/u.test(code));
   if (explicitCode === "QUALITY_REPAIR_REJECTED") return "QUALITY_REPAIR_EXHAUSTED";
   if (explicitCode) return explicitCode;
   const message = messages.join(" ") || getErrorMessage(error);
   const embeddedProviderCode = message.match(/\b(CODEX_(?:AUTH_REQUIRED|MODEL_INCOMPATIBLE|TIMEOUT|TRANSIENT_FAILURE))\b/u)?.[1];
   if (embeddedProviderCode) return embeddedProviderCode;
-  const prewritingCode = message.match(/\b(IMAGE_SOURCE_BINDING_REQUIRED|PREWRITING_PHOTO_CHANGED|PREWRITING_SOURCE_CHANGED):/u)?.[1];
+  const prewritingCode = message.match(/\b(SOURCE_REVIEW_INCOMPLETE|IMAGE_SOURCE_BINDING_REQUIRED|PREWRITING_PHOTO_CHANGED|PREWRITING_SOURCE_CHANGED):/u)?.[1];
   if (prewritingCode) return prewritingCode;
   if (/SOURCE_EVIDENCE_REQUIRED/u.test(message)) return "SOURCE_EVIDENCE_REQUIRED";
   if (/QUALITY_REPAIR_(?:EXHAUSTED|REJECTED)/u.test(message)) return "QUALITY_REPAIR_EXHAUSTED";

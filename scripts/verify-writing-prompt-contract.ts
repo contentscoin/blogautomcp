@@ -11,6 +11,8 @@ import {
 import { formatPostAngleForPrompt, formatPostAngleSummary } from "./lib/topic-templates/angles";
 import { defaultTopicTemplateId } from "./lib/topic-templates";
 import { buildProduct9Canvas } from "./lib/product-9canvas";
+import { buildShoppingWritingSectionPlan } from "./lib/shopping-writing-plan";
+import { shoppingPhotoRoleAt } from "../src/lib/shopping-post-strategy";
 import {
   composeBudgetedWritingPrompt,
   createWritingPromptContract,
@@ -146,7 +148,7 @@ assert.deepEqual(Object.keys(getWritingOutputExample(titleContract)), ["title", 
 const titleBlock = formatWritingPromptContract(titleContract);
 assert.match(titleBlock, /제목 25~35자는 권장 범위/u);
 assert.match(titleBlock, /길이·앞 15자만 맞추려고 자르거나 단어를 나열하지/u);
-assert.match(titleBlock, /3개/u, "shared mandatory prompts include the internal candidate comparison");
+assert.match(titleBlock, /제목 후보 5개/u, "shared mandatory prompts include five internal candidates without changing submitted schema");
 const photoContext: WritingPublicationPhotoContext = {
   version: "writing-publication-photo-context/v1",
   verifiedOriginal: { path: "C:/offline/verified-source.jpg", sha256: "b".repeat(64),
@@ -181,6 +183,35 @@ for (const minimal of [false, true]) {
   assert.doesNotMatch(block, /C:\/offline|seller\.example/u, "private paths and raw reading URLs are not prose facts");
 }
 assert.deepEqual(photoContract.titlePlanContext?.sourceFeatures, canonicalProduct.features, "photo rules do not delete verified specifications");
+assert.ok(photoContract.sectionPlan, "the same local/MCP writing contract carries section, source and photo planning");
+assert.equal(nameOnlyContract.sectionPlan?.facts.length, 0, "a caller's stale facts cannot populate canonical source-free prewriting");
+for (const count of [5, 6, 7, 8]) {
+  const factInput = ["중량: 1.65kg", "소비전력: 500W", "용량: 532ml", "소재: 면 100%"];
+  const originalFacts = [...factInput];
+  const plan = buildShoppingWritingSectionPlan({ productName: "선택 상품 X100", sourceFeatures: factInput,
+    minimumSections: count, maximumSections: count });
+  assert.equal(plan.sections.length, count);
+  assert.deepEqual(plan.sections.map(section => section.photoRole.startsWith("scene-") ? "scene" : section.photoRole),
+    Array.from({ length: count }, (_, index) => shoppingPhotoRoleAt(index, count)), "prewriting uses the real renderer's existing photo positions");
+  assert.deepEqual(plan.sections.filter(section => section.photoRole.startsWith("scene-")).map(section => section.photoRole), ["scene-1", "scene-2", "scene-3"]);
+  const factIndexes = plan.sections.flatMap(section => section.factIndexes);
+  assert.equal(new Set(factIndexes).size, factIndexes.length, "a unique fact is allocated once rather than repeated to fill sections");
+  assert.ok(factIndexes.every(index => index >= 0 && index < plan.facts.length));
+  assert.deepEqual(factInput, originalFacts, "source facts are preserved by planning");
+}
+for (const [fact, question, forbidden] of [
+  ["중량: 1.65kg", /무게/u, /용량|65kg/u],
+  ["중량: 50g", /무게/u, /용량/u],
+  ["소비전력: 500W", /소비전력/u, /요금|효과/u],
+  ["용량: 532ml", /용량/u, /리필|제형/u],
+] as const) {
+  const plan = buildShoppingWritingSectionPlan({ productName: "선택 상품 X100", sourceFeatures: [fact], minimumSections: 5, maximumSections: 8 });
+  assert.deepEqual(plan.facts, [fact], "numeric values, decimal points, property names and units stay intact");
+  const assigned = plan.sections.find(section => section.factIndexes.includes(0))!;
+  assert.match(assigned.readerQuestion, question);
+  assert.doesNotMatch(assigned.readerQuestion, forbidden, "a planning question does not change units or infer an unsupported result");
+}
+assert.match(formatWritingPromptContract(photoContract), /생성 완료 전.*장면 묘사를 쓰지 않습니다/u);
 assert.match(formatWritingPromptContract(photoContract), /SOURCE_READING/u);
 assert.deepEqual(Object.keys(getWritingOutputExample(photoContract)), ["title", "evidenceFacts", "sections", "hashtags"]);
 const absentPhotos = formatWritingPublicationPhotoContext();
@@ -349,7 +380,7 @@ for (const kind of ["SHOPPING", "TRAVEL"] as const) {
   assert.ok(plannedPrompt.length <= CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS);
   assert.ok(plannedPrompt.endsWith(formatWritingPromptContract(plannedContract, { topicDetail: "minimal" })),
     "compact title planning remains inside the unchanged browser recovery budget");
-  assert.match(plannedPrompt, /후보 3개/u);
+  assert.match(plannedPrompt, /후보 5개/u);
   browserCases += 1;
 
   const verified = createWritingPromptContract({

@@ -21,6 +21,8 @@ export interface Result {
     connectKind?: string;
     composition?: { sections: { id: string; imageSource?: string }[] };
     published?: boolean; scheduled?: boolean; verificationBasis?: string;
+    contentVerified?: boolean; verificationStatus?: "verified" | "mismatch" | "partial" | "unverified";
+    reservationVerification?: { receiptAccepted: boolean; liveListChecked: boolean; status: string };
     attemptStage?: string | null;
     approvedAt?: string | null; approval?: { canApprove: boolean; blockers?: { code: string; reason: string; sectionId?: string | null }[] };
     imageAssets?: { assetKey?: string; sha256?: string; role?: string; sectionId?: string | null }[];
@@ -144,9 +146,19 @@ function bounded(deps: WorkflowDeps, fallback: number) {
 const IMAGE_QUALITY_SIGNALS = new Set(["composition-quality", "representative-image", "thumbnail"]);
 const UNRESOLVED_IMAGE_OPERATION_CODES = new Set([
   "IMAGE_RESUME_REQUIRED", "IMAGE_OUTPUT_AMBIGUOUS", "PREPARATION_RESULT_UNCERTAIN",
+  "SOURCE_REVIEW_INCOMPLETE",
   "OUTCOME_UNKNOWN", "ALREADY_PUBLISHING", "CODEX_TIMEOUT",
   "IMAGE_REPAIR_FAILED", "USER_CANCELLED", "IMAGE_GENERATION_CANCELLED",
 ]);
+/** Even HTTP success can report a partial image operation. Missing errors[] or
+ * an already filled slot does not resolve a top-level uncertain operation. */
+function assertKnownImageOperationResult(result: Pick<Result, "code" | "error" | "errors" | "message">): void {
+  const unresolved = UNRESOLVED_IMAGE_OPERATION_CODES.has(result.code || "") ? result.code :
+    (result.errors || []).flatMap(message => message.match(/\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b/gu) || [])
+      .find(code => UNRESOLVED_IMAGE_OPERATION_CODES.has(code));
+  if (unresolved) throw Object.assign(new Error(result.error || result.errors?.join("\n") || result.message ||
+    "이미지 작업의 완료를 확인할 수 없습니다. 기존 원고·사진과 요청을 확인한 뒤 재개하세요."), { code: unresolved, errors: result.errors });
+}
 function isDefinitivePublishImageFailure(error: unknown): boolean {
   const failure = error as { code?: string; errors?: string[] };
   return failure.code === "PUBLISH_IMAGE_AUDIT_FAILED" && Boolean(failure.errors?.length) &&
@@ -475,6 +487,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     if (draft.data.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) {
       const bound = await claimedCall(`${base}/draft/images`, "POST", { action: "bind_sources" });
       latestImageRepair = bound;
+      assertKnownImageOperationResult(bound);
       if (isSessionWidePreparationFailureCode(bound.code)) {
         throw Object.assign(new Error(bound.errors?.join(" ") || bound.message || "이미지 엔진 확인이 필요합니다."), { code: bound.code });
       }
@@ -524,6 +537,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
         if (isSessionWidePreparationFailureCode(latestImageRepair?.code)) {
           throw Object.assign(new Error(latestImageRepair?.error || latestImageRepair?.errors?.join(" ") || "이미지 엔진 확인이 필요합니다."), { code: latestImageRepair?.code });
         }
+        if (latestImageRepair) assertKnownImageOperationResult(latestImageRepair);
         if (latestImageRepair?.errors?.length && !isRecoverableImageEvidenceResult(latestImageRepair)) {
           const cause = latestImageRepair.errors.flatMap(message => message.match(/\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b/gu) || [])
             .find(code => !isRecoverableImageEvidenceFailure(code));
@@ -749,6 +763,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
   draft = await deps.call(`${base}/draft`, "GET");
   if (!draft.data?.approvedAt || draft.data.approval?.canApprove === false ||
       draft.data.imageGeneration?.status === "running" ||
+      draft.data.imageGeneration?.recoveryState === "owner-unknown" ||
       draft.data.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) {
     throw Object.assign(new Error("초안은 저장됐지만 소재 준비·승인이 완료되지 않았습니다. 저장된 품질검사와 이미지 보강 결과를 확인하세요."), { code: "MATERIAL_NOT_READY" });
   }
@@ -762,6 +777,7 @@ export async function runAutomaticDraftWorkflow(id: string, publication: { publi
   const draft = await deps.call(`${base}/draft`, "GET");
   if (!draft.data?.approvedAt || draft.data.approval?.canApprove === false ||
       draft.data.imageGeneration?.status === "running" ||
+      draft.data.imageGeneration?.recoveryState === "owner-unknown" ||
       draft.data.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) {
     throw Object.assign(new Error("선택한 소재의 준비·승인이 완료되지 않았습니다. 소재 미리작성 단계에서 완료하세요."), { code: "MATERIAL_NOT_READY" });
   }
@@ -783,7 +799,17 @@ export async function runAutomaticDraftWorkflow(id: string, publication: { publi
     const expected = publication.publishMode === "schedule" ? "SCHEDULED" : "PUBLISHED";
     if (result.data?.status === expected) {
       const verified = await deps.call(`${base}/verify`, "GET");
-      if (publication.publishMode === "schedule" ? verified.data?.scheduled === true : verified.data?.published === true) return verified.data;
+      if (publication.publishMode === "schedule" && verified.data?.scheduled === true) return verified.data;
+      if (publication.publishMode === "now" && verified.data?.published === true) {
+        if (verified.data.contentVerified === true && verified.data.verificationStatus === "verified") return verified.data;
+        // Publication existence is known. Preserve the persisted submission
+        // receipt and URL; incomplete content comparison never authorizes a
+        // second submission or a success label for the complete document.
+        throw Object.assign(new Error("공개된 글은 확인했지만 제목·고지·본문·사진·상품 링크 전체 대조를 완료하지 못했습니다. 게시된 글을 확인하세요. 자동 재발행하지 않습니다."), {
+          code: "OUTCOME_UNKNOWN", causeCode: "PUBLISHED_CONTENT_UNVERIFIED", observedPublished: true,
+          verificationStatus: verified.data.verificationStatus || "unverified", postUrl: verified.data.postUrl,
+        });
+      }
       throw Object.assign(new Error("완료 상태는 저장됐지만 실제 발행 결과를 검증하지 못했습니다. 확인 후 처리하세요."), { code: "OUTCOME_UNKNOWN" });
     }
     if (submissionError && result.data?.status !== "PUBLISHING") {

@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { readBrandPostPackage, getBrandPostPackageDir, evaluateBrandPostPackageReadiness, type BrandPostPackageManifest } from "./brand-post-package";
 import { hasCurrentBrandPostApprovalReceipt } from "./brand-post-approval-receipt";
+import { materialPreparationDiagnostics } from "./material-preparation-diagnostics";
 
 // Content-addressed selection: changing a file in place also invalidates selection.
 export function materialRevision(manifest: BrandPostPackageManifest): string {
@@ -20,13 +21,14 @@ export function materialRevision(manifest: BrandPostPackageManifest): string {
   return hash.digest("hex");
 }
 
-export function getMaterial(productId: string) {
+function readMaterial(productId: string) {
   const manifest = readBrandPostPackage(productId, { migrate: false });
   if (!manifest) return null;
   const quality = evaluateBrandPostPackageReadiness(manifest);
   const blockers = quality.blockers.map(item => item.reason);
   if (!manifest.approvedAt) blockers.push("소재 준비 단계에서 품질검사와 승인을 완료하세요.");
-  if (manifest.approvedAt && !hasCurrentBrandPostApprovalReceipt(manifest, path.join(getBrandPostPackageDir(productId), "product-sources")))
+  const approvalReceiptCurrent = Boolean(manifest.approvedAt && hasCurrentBrandPostApprovalReceipt(manifest, path.join(getBrandPostPackageDir(productId), "product-sources")));
+  if (manifest.approvedAt && !approvalReceiptCurrent)
     blockers.push("현재 원고·사진·상품 근거의 최종 이미지 검사를 다시 완료하세요. 이전 승인만으로 준비완료로 표시하지 않습니다.");
   const imageGeneration = quality.imageGeneration ? {
     status: quality.imageGeneration.status,
@@ -42,8 +44,23 @@ export function getMaterial(productId: string) {
     connectKind: manifest.connectKind, createdAt: manifest.createdAt, approvedAt: manifest.approvedAt,
     ready: blockers.length === 0, blockers, score: quality.contentScore as number | null,
     imageCount: quality.composition?.renderNodes.filter(node => node.kind === "image").length ?? (1 + manifest.bodyImagePaths.length),
+    preparationDiagnostics: materialPreparationDiagnostics({ ready: blockers.length === 0, approved: Boolean(manifest.approvedAt), approvalReceiptCurrent,
+      blockers: quality.blockers, contentPassed: quality.contentPassed, imageSlots: quality.imageSlots, imageGeneration: quality.imageGeneration,
+      sourceKinds: manifest.version === "brand-post-package/v2" ? Object.fromEntries(manifest.composition.sections.flatMap(section =>
+        section.imageSource === "seller-original" || section.imageSource === "staged-ai" ? [[section.id, section.imageSource]] : [])) : {},
+    }),
     ...(imageGeneration ? { imageGeneration } : {}),
   };
+}
+
+/** Diagnostics are an additive response field. Existing callers and test
+ * adapters may omit them; the production reader always supplies the field. */
+export type MaterialLibraryRecord = Omit<NonNullable<ReturnType<typeof readMaterial>>, "preparationDiagnostics"> & {
+  preparationDiagnostics?: ReturnType<typeof materialPreparationDiagnostics>;
+};
+
+export function getMaterial(productId: string): MaterialLibraryRecord | null {
+  return readMaterial(productId);
 }
 
 export function validateMaterialSelection(value: unknown): Array<{ productId: string; revision: string }> {

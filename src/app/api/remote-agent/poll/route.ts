@@ -15,6 +15,7 @@ import { clearRemoteActivation, readRemoteActivation } from "@/lib/remote-activa
 import { getNaverSessionFile } from "@/lib/naver-session";
 import { hasStoredConnectContract } from "@/lib/connect-contract-store";
 import { getBrandPostPackageDir, readBrandPostPackage } from "@/lib/brand-post-package";
+import { publicationVerificationSummary } from "@/lib/publication-verification-summary";
 import { allowsShoppingReferenceScene, buildBrandPostImagePrompt, prepareBrandPostImageReferenceContext,
   resolveBrandPostImageTarget } from "@/lib/brand-post-image-generation";
 import { attachRemoteProductReferenceInputs, type RemoteProductReferenceImage } from "@/lib/brand-post-remote-image-inputs";
@@ -1438,11 +1439,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     ctx.setStage("verifying", "발행 결과 검증", 40);
     const payload = await localApi(request, `/api/brandlinks/${encodeURIComponent(draftId)}/verify`);
     const data = (payload.data || {}) as Record<string, unknown>;
-    const summary = data.published === true
-      ? `발행 확인됨 — ${data.postUrl}`
-      : data.scheduled === true
-        ? `예약 상태 (${data.scheduledPublishAt || "일시 미상"})`
-        : `발행 확인 실패 (상태 ${data.status}${data.errorMessage ? `: ${data.errorMessage}` : ""})`;
+    const summary = publicationVerificationSummary(data);
     return envelope(job, "verify-result", summary, data, ctx);
   }
 

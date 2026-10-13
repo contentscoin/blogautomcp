@@ -10,9 +10,10 @@ import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
 import { classifyLocalFailure, extractLocalApiError, toLocalAutomationError } from "../src/lib/local-automation-error";
 import { createWritingPromptContract, getWritingOutputExample } from "./lib/writing-prompt-contract";
 import { hasSufficientProductReviewEvidence } from "./lib/product-editorial-plan";
-import { assertShoppingPrewritePhoto, persistPrewritePhotoForContext, readSubmittedPrewritePhoto, withShoppingPrewritePhoto, writingPhotosFromPrewrite,
+import { assertShoppingPrewritePhoto, persistPrewritePhotoForContext, readSubmittedPrewritePhoto, selectShoppingPrewriteOriginal, withShoppingPrewritePhoto, writingPhotosFromPrewrite,
   type ShoppingPrewritePhotoProof } from "./lib/shopping-prewrite-photos";
 import { codexWritingImageRoles, resolveCodexWritingImages, runCodexDraft, codexDraftTerminalFailureCode } from "./lib/codex-draft-provider";
+import { SHOPPING_NATURAL_SCENE_ROLES } from "./lib/shopping-scene-roles";
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "blogautomcp-prewrite-"));
@@ -35,11 +36,45 @@ async function main() {
     }), /IMAGE_SOURCE_BINDING_REQUIRED/);
     assert.equal(writes, 0); assert.equal(crops, 1);
 
+    // Exercise the production selector's diagnostic handling. Missing verdicts
+    // remain distinct from a complete negative review and cannot buy another
+    // source crop, writer call or scene generation.
+    for (const status of ["incomplete", "failed"] as const) {
+      let unknownCrops = 0;
+      await assert.rejects(() => withShoppingPrewritePhoto({ snapshot: snapshot(), candidatePaths: [file] }, operation, {
+        select: (paths, name, selected) => selectShoppingPrewriteOriginal(paths, name, selected, async (_paths, _name, _targets, options) => {
+          options?.onDiagnostics?.({ version: 1, status, cacheHit: false, reviewedAt: new Date().toISOString(),
+            candidateCount: 1, targetCount: 1, entries: [{ targetIndex: 0, path: file, sourceSha256: hash(file),
+              status: "not-proposed", suitability: "unreviewed", reason: "missing verdict", reviewedAt: new Date().toISOString() }] });
+          return [];
+        }),
+        recoverSourcePixels: async () => { unknownCrops++; return null; },
+      }), (error: unknown) => (error as { code?: string }).code === "SOURCE_REVIEW_INCOMPLETE");
+      assert.equal(unknownCrops, 0); assert.equal(writes, 0);
+    }
+    assert.equal(await selectShoppingPrewriteOriginal([file], "fixture", "selected", async (_paths, _name, _targets, options) => {
+      options?.onDiagnostics?.({ version: 1, status: "complete", cacheHit: false, reviewedAt: new Date().toISOString(),
+        candidateCount: 1, targetCount: 1, entries: [] }); return [];
+    }), null, "a complete negative review remains source shortfall, not an unknown outcome");
+    for (const failure of [
+      { error: new Error("상품 섹션 이미지 검사 응답을 해석할 수 없습니다."), expected: "SOURCE_REVIEW_INCOMPLETE" },
+      { error: Object.assign(new Error("sign in"), { code: "CODEX_AUTH_REQUIRED" }), expected: "CODEX_AUTH_REQUIRED" },
+      { error: new Error("SOURCE_PROPOSAL_AUDIT_FAILED: IMAGE_CHANGED: changed bytes"), expected: "PREWRITING_PHOTO_CHANGED" },
+    ]) {
+      await assert.rejects(() => selectShoppingPrewriteOriginal([file], "fixture", "selected", async (_paths, _name, _targets, options) => {
+        options?.onDiagnostics?.({ version: 1, status: "failed", cacheHit: false, reviewedAt: new Date().toISOString(),
+          candidateCount: 1, targetCount: 1, entries: [], error: failure.error.message });
+        throw failure.error;
+      }), (error: unknown) => (error as { code?: string }).code === failure.expected);
+    }
+
     const proof = await withShoppingPrewritePhoto({ snapshot: snapshot(), candidatePaths: [file] }, operation, { select: accepted });
     const context = writingPhotosFromPrewrite(proof);
     assert.equal(writes, 1); assert.equal(context.verifiedOriginal.sha256, hash(file));
     assert.equal(context.verifiedOriginal.inclusionScope, "selected-product-exterior");
     assert.equal(context.plannedScenes?.length, 3);
+    assert.deepEqual(context.plannedScenes, SHOPPING_NATURAL_SCENE_ROLES.map(scene => ({ role: scene.role, intent: scene.purpose })),
+      "the writer and image generator use the same three distinct camera coverage roles");
     if (process.platform === "win32") {
       const lowerProof = { ...proof, original: { ...proof.original, path: proof.original.path.toLowerCase() } };
       assertShoppingPrewritePhoto(lowerProof);
@@ -192,7 +227,7 @@ async function main() {
     assert.throws(() => readSubmittedPrewritePhoto(path.join(root, "export", "mcp-draft-context.json"), exported.snapshot), /PREWRITING_PHOTO_CHANGED/);
     assert.equal(runtime.classify(Object.assign(new Error("new original missing"), { code: "IMAGE_SOURCE_BINDING_REQUIRED" })), "IMAGE_SOURCE_BINDING_REQUIRED");
     assert.equal(runtime.classify(new Error("outer", { cause: new Error("PREWRITING_PHOTO_CHANGED: changed") })), "PREWRITING_PHOTO_CHANGED");
-    for (const code of ["SOURCE_EVIDENCE_REQUIRED", "IMAGE_SOURCE_BINDING_REQUIRED", "PREWRITING_PHOTO_CHANGED", "PREWRITING_SOURCE_CHANGED"] as const) {
+    for (const code of ["SOURCE_EVIDENCE_REQUIRED", "SOURCE_REVIEW_INCOMPLETE", "IMAGE_SOURCE_BINDING_REQUIRED", "PREWRITING_PHOTO_CHANGED", "PREWRITING_SOURCE_CHANGED"] as const) {
       const message = `[STEP1 상품 확인] ${code}: 실제 상품 입력을 다시 확인하세요.`;
       for (const status of [400, 500]) assert.equal(classifyLocalFailure({ message, status }), code,
         "context preparation without result.json retains the real upstream cause from its log");

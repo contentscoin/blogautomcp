@@ -30,6 +30,8 @@ function load(relative, dependencies, globals = {}) {
 }
 const clone = value => JSON.parse(JSON.stringify(value));
 const json = (body, options = {}) => ({ status: options.status || 200, body: clone(body) });
+const preparation = load('src/lib/material-preparation-diagnostics.ts', {});
+
 
 function harness() {
   const state = { now: '2026-09-07T03:00:00.000Z', authorized: true, updateBlocked: false,
@@ -44,13 +46,14 @@ function harness() {
     'node:path': path,
     'node:fs': { readFileSync: file => Buffer.from(state.manuscripts.get(file) ?? `fixture bytes: ${file}`) },
     './brand-post-approval-receipt': { hasCurrentBrandPostApprovalReceipt: manifest => manifest.fixtureReceipt !== false },
+    './material-preparation-diagnostics': preparation,
     './brand-post-package': {
       readBrandPostPackage: id => state.manifests.get(id) || null,
       getBrandPostPackageDir: id => `${id}.package`,
       evaluateBrandPostPackageReadiness: manifest => {
         state.materialReads.set(manifest.productId, (state.materialReads.get(manifest.productId) || 0) + 1);
         return {
-        contentScore: 100, composition: null,
+        contentScore: 100, composition: null, contentPassed: manifest.fixtureContentPassed !== false, imageSlots: manifest.fixtureImageSlots || [],
         // The real shared evaluator owns generation liveness (tested in the
         // image integrity suite); API must consume its blockers, not raw flags.
         blockers: [...(manifest.fixtureBlockers || []), ...(manifest.imageGeneration?.status === 'running' ? [{ code: 'images-running', reason: 'Image worker is running' }] : [])],
@@ -89,6 +92,7 @@ function harness() {
     './update-guard': { requireNoPendingDesktopUpdate: () => state.updateBlocked ? json({ success: false }, { status: 423 }) : null },
     './desktop-activity': { beginAutomaticPublishing: () => { state.activities++; return () => { state.activities--; }; } },
     './material-library': library,
+    './material-preparation-diagnostics': preparation,
     './material-job-store': {
       acquireMaterialJobLock: () => {
         if (state.locks) throw new Error('Existing material job');
@@ -142,6 +146,7 @@ test('one materials GET verifies each package once across list and both candidat
   const first = await h.api.materialsGet(h.request(null, '?connectKind=SHOPPING'));
   assert.equal(first.status, 200);
   assert.equal(first.body.data.materials.find(item => item.productId === ready.productId).ready, true);
+  assert.equal(first.body.data.materials.find(item => item.productId === ready.productId).preparationDiagnostics.state, 'ready');
   assert.equal(first.body.data.failedCandidates.length, 1); assert.equal(first.body.data.repairCandidates.length, 1);
   assert.equal(h.state.materialReads.get(ready.productId), 1); assert.equal(h.state.materialReads.get(blocked.productId), 1);
   const revision = first.body.data.materials.find(item => item.productId === ready.productId).revision;
@@ -161,8 +166,58 @@ test('an old approval without a current final audit receipt is blocked in both d
   const listing = await h.api.materialsGet(h.request(null));
   const material = listing.body.data.materials.find(value => value.productId === item.productId);
   assert.equal(material.ready, false);
+  assert.equal(material.preparationDiagnostics.scope, 'current-package');
+  assert.equal(material.preparationDiagnostics.state, 'needs-review');
   assert.match(material.blockers.join(' '), /최종 이미지 검사/);
   assert.equal((await h.post({ materials: [item], publishMode: 'now' })).status, 409);
+  assertNoDispatch(h);
+});
+
+test('compact jobs-only material views include the same current package diagnostics', async () => {
+  const h = harness(), item = h.product();
+  h.state.jobs.set('ready-history', { jobId: 'ready-history', kind: 'prepare', status: 'completed', startedAt: h.state.now,
+    items: [{ productId: item.productId, status: 'ready', stage: 'ready' }] });
+  h.state.manifests.get(item.productId).fixtureReceipt = false;
+  const listing = await h.api.materialsGet(h.request(null));
+  const compact = await h.api.materialsGet(h.request(null, '?jobsOnly=1'));
+  const expanded = listing.body.data.materials.find(value => value.productId === item.productId);
+  const current = compact.body.data.materials.find(value => value.productId === item.productId);
+  assert.equal(current.ready, false);
+  assert.deepEqual(current.preparationDiagnostics, expanded.preparationDiagnostics);
+  assert.equal(current.preparationDiagnostics.nextAction.action, 'review-publication');
+  assertNoDispatch(h);
+});
+
+test('current product guards replace ready and missing-image actions in full and compact material API views', async () => {
+  for (const missingImage of [false, true]) for (const [status, action] of [
+    ['DRAFTING', 'wait-current-job'], ['PUBLISHING', 'wait-current-job'], ['OUTCOME_UNKNOWN', 'inspect-existing-output'],
+    ['PUBLISHED', 'verify-published-result'], ['SCHEDULED', 'verify-scheduled-result'],
+  ]) {
+    const h = harness(), item = h.product(0, status), manifest = h.state.manifests.get(item.productId);
+    if (missingImage) {
+      Object.assign(manifest, { version: 'brand-post-package/v2', composition: { sections: [{ id: 'shopping-scene', imageSource: 'staged-ai', imagePaths: [] }] },
+        fixtureBlockers: [{ code: 'image-coverage', sectionId: 'shopping-scene', reason: 'Missing photo' }],
+        fixtureImageSlots: [{ sectionId: 'shopping-scene', minimum: 1, count: 0, missing: 1, generationMissing: 1, assets: [] }] });
+    }
+    const saved = h.library.getMaterial(item.productId);
+    assert.equal(saved.preparationDiagnostics.nextAction.action, missingImage ? 'complete-image-slots' : 'ready');
+    h.state.jobs.set('old-ready', { jobId: 'old-ready', kind: 'prepare', status: 'completed', startedAt: h.state.now,
+      items: [{ productId: item.productId, status: 'ready', stage: 'ready' }] });
+    const expanded = await h.api.materialsGet(h.request(null));
+    const compact = await h.api.materialsGet(h.request(null, '?jobsOnly=1'));
+    for (const material of [expanded.body.data.materials[0], compact.body.data.materials[0]]) {
+      assert.equal(material.ready, false);
+      assert.equal(material.preparationDiagnostics.nextAction.action, action);
+      assert.ok(material.preparationDiagnostics.requiredSlots.every(slot => slot.nextAction === action));
+    }
+    assert.deepEqual(h.library.getMaterial(item.productId).preparationDiagnostics, saved.preparationDiagnostics);
+    assertNoDispatch(h);
+  }
+  const h = harness(), item = h.product();
+  h.state.manifests.get(item.productId).imageGeneration = { status: 'running', requested: 1, applied: 0, remaining: 1, errors: [], updatedAt: h.state.now };
+  const running = (await h.api.materialsGet(h.request(null))).body.data.materials[0];
+  assert.equal(running.ready, false);
+  assert.equal(running.preparationDiagnostics.nextAction.action, 'wait-current-job');
   assertNoDispatch(h);
 });
 

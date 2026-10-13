@@ -101,11 +101,19 @@ test('job_get exposes local preparation progress even when transport succeeds an
     f.db.prepare('UPDATE agent_jobs SET result_json=? WHERE id=?').run(JSON.stringify(result), accepted.jobId);
     const stale = (await f.call('job_get', { jobId: accepted.jobId, includeResult: false })).job.materialWorkflow;
     assert.equal(stale.workflowPending, false);
-    assert.equal(stale.completionState, 'blocked');
+    assert.equal(stale.completionState, 'needs_current_readiness');
     assert.equal(stale.materialPreparationComplete, false, 'historical ready cannot override current material blockers');
     result.data.materials[0].ready = true;
     f.db.prepare('UPDATE agent_jobs SET result_json=? WHERE id=?').run(JSON.stringify(result), accepted.jobId);
-    assert.equal((await f.call('job_get', { jobId: accepted.jobId })).job.materialWorkflow.materialPreparationComplete, true);
+    const cached = (await f.call('job_get', { jobId: accepted.jobId })).job.materialWorkflow;
+    assert.equal(cached.materialPreparationComplete, false, 'a stored transport result is not a new PC readiness observation');
+    assert.equal(cached.currentReadinessVerified, false);
+    assert.deepEqual(cached.nextCall, { tool: 'materials_list', arguments: { jobId: 'local-workflow-1' } });
+    const refreshed = await f.call('materials_list', { connectKind: 'shopping', jobId: 'local-workflow-1' });
+    result.data.readinessObservedAt = new Date().toISOString();
+    result.data.materials[0].materialStatus = 'READY';
+    f.db.prepare("UPDATE agent_jobs SET status='SUCCEEDED',result_json=?,finished_at=? WHERE id=?").run(JSON.stringify(result), Date.now(), refreshed.jobId);
+    assert.equal((await f.call('job_get', { jobId: refreshed.jobId })).job.materialWorkflow.materialPreparationComplete, true, 'only the actual inventory read confirms current preparation');
   } finally { f.db.close(); }
 });
 

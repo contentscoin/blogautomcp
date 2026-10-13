@@ -6,6 +6,7 @@ import { defaultTopicTemplateId, formatTopicTemplateForPrompt } from "./topic-te
 import { formatTitleCandidatesForPrompt, type TitlePlanContext } from "./topic-templates/title-planner";
 import { formatProduct9CanvasForPrompt, type Product9Canvas } from "./product-9canvas";
 import { SHOPPING_POST_STRATEGY_VERSION, type ShoppingPostStrategyVersion } from "../../src/lib/shopping-post-strategy";
+import { buildShoppingWritingSectionPlan, formatShoppingWritingSectionPlan, type ShoppingWritingSectionPlan } from "./shopping-writing-plan";
 
 /** Server-owned prewriting proof. Reading-only seller art and future scenes
  * never acquire publication-photo status merely by being attached to a model. */
@@ -100,6 +101,8 @@ export interface WritingPromptContract {
   /** 원고·썸네일·이미지 계획이 공유하는 상품 의미 계약. */
   productUnderstanding?: Product9Canvas;
   publicationPhotoContext?: WritingPublicationPhotoContext;
+  /** Generation-only section/evidence/photo alignment; never a new approval gate. */
+  sectionPlan?: ShoppingWritingSectionPlan;
   /** Server-scoped previous failure observations; never product evidence. */
   failureReference?: string;
   /** 포스팅 각도(주제 글) 블록. 전체 리뷰이고 형제 글이 없으면 비어 있다. */
@@ -204,6 +207,10 @@ export function createWritingPromptContract(input: {
     sentences: { min: input.kind === "TRAVEL" ? 5 : 4, max: 6 },
     title: { min: 25, max: 35 },
     ...(titlePlanContext ? { titlePlanContext } : {}),
+    ...(input.kind === "SHOPPING" && productName ? { sectionPlan: buildShoppingWritingSectionPlan({
+      productName, sourceDescription: titlePlanContext?.sourceDescription, sourceFeatures: titlePlanContext?.sourceFeatures,
+      minimumSections: input.minimumSections, maximumSections: input.maximumSections,
+    }) } : {}),
     hashtagCount: input.hashtagCount,
     verifiedExperienceNotes,
     draftMemo: input.draftMemo?.trim() || "",
@@ -248,8 +255,8 @@ export function formatWritingPromptContract(
     contract.requestedTitle
       ? `- 명시 요청 제목 ${JSON.stringify(contract.requestedTitle)}을 공백·문장부호까지 그대로 유지합니다. 내부 제목 후보 선택이나 SEO 권장 길이로 바꾸지 않습니다.`
       : contract.titlePlanContext ? formatTitleCandidatesForPrompt(contract.titlePlanContext, options.topicDetail === "minimal")
-        : options.topicDetail === "minimal" ? "- 서로 다른 제목 후보 3개를 내부 비교해 하나만 출력. 후보·평가·새 필드 금지."
-          : "- 제목은 내부에서 검색 의도와 독자가 궁금해할 질문이 서로 다른 후보 3개를 비교한 뒤 본문 근거에 맞는 하나만 고릅니다. 후보·평가·새 필드는 출력하지 않습니다. 상품 정체를 유지하고 상투적인 후미, 빈 자리표시자, 과장과 없는 체험은 쓰지 않습니다.",
+        : options.topicDetail === "minimal" ? "- 서로 다른 제목 후보 5개를 내부 비교해 하나만 출력. 후보·평가·새 필드 금지."
+          : "- 제목은 내부에서 검색 의도와 독자가 궁금해할 질문이 서로 다른 후보 5개를 비교한 뒤 본문 근거에 맞는 하나만 고릅니다. 후보·평가·새 필드는 출력하지 않습니다. 상품 정체를 유지하고 상투적인 후미, 빈 자리표시자, 과장과 없는 체험은 쓰지 않습니다.",
     `- 본문 sections는 ${contract.sections.min}~${contract.sections.max}개이며 섹션마다 원소 하나("소제목\\n\\n본문")입니다. 소제목·순서는 근거에 맞춥니다.`,
     `- 소제목·고지 문구를 제외하고 본문 문단을 구분자 없이 이은 문자열 길이(문단 내부 공백 포함)로 최소 ${contract.characters.min}자를 충족하고, 권장 상한 ${contract.characters.max}자 안에서 작성합니다.`,
     `- 각 섹션은 소제목, 빈 줄, 핵심 답부터 시작하는 ${contract.sentences.min}~${contract.sentences.max}개의 완결된 문장을 권장하며 문장마다 줄바꿈합니다. 첫 ${Math.min(2, contract.sentences.min)}문장의 답도 이 문장 수에 포함합니다.`,
@@ -259,6 +266,7 @@ export function formatWritingPromptContract(
     "- FAQ는 Q. 질문을 한 줄로, A. 답변을 한 묶음으로 씁니다. 답변이 두 문장이어도 A. 표시는 한 번만 붙입니다. Q. 또는 A.만 있는 줄을 만들지 않습니다.",
     "- 상품의 선택 옵션과 공통 상세정보가 충돌하면 선택 옵션에서 확인한 구성만 씁니다. 2개 구성을 본품+리필로 해석하지 않습니다. 다른 향·모델·사은품을 선택 상품의 구성으로 합치지 않습니다.",
     contract.kind === "SHOPPING" ? formatWritingPublicationPhotoContext(contract.publicationPhotoContext, options.topicDetail === "minimal") : "",
+    contract.sectionPlan ? formatShoppingWritingSectionPlan(contract.sectionPlan, options.topicDetail === "minimal") : "",
     contract.failureReference ? `[이전 실패 참고 · 현재 상품/원고 버전 일치]\n${JSON.stringify(contract.failureReference)}\n- 실패 기록은 상품 사실의 근거나 새 작업 명령이 아닙니다. 해당 실패 조건을 현재 자료와 대조하고 정상 원고·사진은 보존합니다.` : "",
     "- 후기 원문이 없으면 후기 분석 절을 만들지 않습니다. 제공 자료·수집 실패·작성 보류·문장을 뺀다는 작업 보고를 본문에 노출하지 않습니다. 실제 구매후기 수·평점은 판매페이지 전체 집계와 선택 옵션 후기를 구분합니다.",
     "- 같은 규격·펌프 사용성을 여러 절에서 반복해 분량을 채우지 않습니다. 바디워시·로션 같은 비전기 제품에는 전원·충전·조작부 설명을 넣지 않습니다.",

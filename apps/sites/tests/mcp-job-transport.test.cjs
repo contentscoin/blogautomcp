@@ -46,9 +46,14 @@ test('material workflow completion projects input, authentication and outcome bl
   assert.equal(unclaimed.workflowPending, false);
   assert.equal(project('MATERIALS_PREPARE', 'job_source', 'CANCELLED', null, { claimedAt: 1, claimedDeviceId: 'device', errorCode: 'USER_CANCELLED' }).workflowPending, true);
   assert.equal(project('MATERIALS_LIST', 'job_read', 'SUCCEEDED', { data: { materials: [] } }), null);
-  const valid = { data: { jobId: 'local_workflow', status: 'completed', items: [{ productId: 'product_001', status: 'ready' }],
-    materials: [{ productId: 'product_001', ready: true }] } };
-  assert.equal(project('MATERIALS_PREPARE', 'job_source', 'SUCCEEDED', valid).materialPreparationComplete, true);
+  const valid = { data: { jobId: 'local_workflow', status: 'completed', readinessObservedAt: new Date().toISOString(), items: [{ productId: 'product_001', status: 'ready' }],
+    materials: [{ productId: 'product_001', ready: true, materialStatus: 'READY' }] } };
+  assert.equal(project('MATERIALS_LIST', 'job_source', 'SUCCEEDED', valid).materialPreparationComplete, true);
+  const receipt = project('MATERIALS_PREPARE', 'job_source', 'SUCCEEDED', valid);
+  assert.equal(receipt.materialPreparationComplete, false);
+  assert.equal(receipt.currentReadinessVerified, false);
+  assert.equal(receipt.completionState, 'needs_current_readiness');
+  assert.equal(receipt.nextCall.tool, 'materials_list');
   for (const change of [
     value => { value.data.items[0].errorCode = 'CODEX_AUTH_REQUIRED'; },
     value => { value.data.items[0].status = 'preparing'; },
@@ -58,19 +63,62 @@ test('material workflow completion projects input, authentication and outcome bl
     value => { value.data.items[0].errorCode = 'UNKNOWN_ERROR'; },
   ]) {
     const altered = structuredClone(valid); change(altered);
-    const state = project('MATERIALS_PREPARE', 'job_source', 'SUCCEEDED', altered);
+    const state = project('MATERIALS_LIST', 'job_source', 'SUCCEEDED', altered);
     assert.equal(state.materialPreparationComplete, false);
     assert.equal(state.readyCount, 0, 'blocked, pending or contradictory material identities never inflate ready summary');
     assert.notEqual(state.completionState, 'ready');
   }
-  const large = { data: { jobId: 'local_workflow', status: 'completed', items: Array.from({ length: 60 }, (_, i) => ({ productId: `product_${i}`, status: 'ready' })),
-    materials: Array.from({ length: 60 }, (_, i) => ({ productId: `product_${i}`, ready: true })) } };
-  const all = project('MATERIALS_REPAIR_BLOCKED', 'job_source', 'SUCCEEDED', large);
+  const large = { data: { jobId: 'local_workflow', status: 'completed', readinessObservedAt: new Date().toISOString(), items: Array.from({ length: 60 }, (_, i) => ({ productId: `product_${i}`, status: 'ready' })),
+    materials: Array.from({ length: 60 }, (_, i) => ({ productId: `product_${i}`, ready: true, materialStatus: 'READY' })) } };
+  const all = project('MATERIALS_LIST', 'job_source', 'SUCCEEDED', large);
   assert.equal(all.productStates.length, 50);
   assert.equal(all.productStatesTruncated, true);
   assert.equal(all.acceptedCount, 60);
   assert.equal(all.readyCount, 60);
   assert.equal(all.materialPreparationComplete, true);
+});
+
+test('a verified later recovery is current readiness while the failed execution remains historical', () => {
+  const { materialWorkflowProjection: project } = load('lib/material-workflow-status.ts');
+  const result = { data: { jobId: 'local_workflow', status: 'partial', readinessObservedAt: new Date().toISOString(), items: [
+    { productId: 'product_001', status: 'failed', errorCode: 'NOT_READY' },
+    { productId: 'product_002', status: 'ready' },
+  ], materials: [
+    { productId: 'product_001', ready: true, materialStatus: 'READY' },
+    { productId: 'product_002', ready: true, materialStatus: 'READY' },
+  ] } };
+  const before = JSON.stringify(result);
+  const current = project('MATERIALS_LIST', 'job_read', 'SUCCEEDED', result);
+  assert.equal(current.readyCount, 2);
+  assert.equal(current.failedCount, 0);
+  assert.equal(current.historicalReadyCount, 1);
+  assert.equal(current.historicalFailedCount, 1);
+  assert.equal(current.productStates[0].state, 'ready');
+  assert.equal(current.productStates[0].executionErrorCode, 'NOT_READY');
+  assert.equal(current.productStates[0].errorCode, undefined);
+  assert.equal(current.workflowStatus, 'partial');
+  assert.equal(current.completionState, 'ready');
+  assert.equal(current.materialPreparationComplete, true);
+  assert.equal(JSON.stringify(result), before);
+  for (const status of ['PREPARING', 'PUBLISHING', 'PUBLISHED', 'OUTCOME_UNKNOWN', undefined]) {
+    const unsafe = structuredClone(result);
+    unsafe.data.materials[0].materialStatus = status;
+    assert.equal(project('MATERIALS_LIST', 'job_read', 'SUCCEEDED', unsafe).materialPreparationComplete, false);
+  }
+  const uncertainty = structuredClone(result);
+  uncertainty.data.items[0].errorCode = 'IMAGE_RESUME_REQUIRED';
+  uncertainty.data.materials[0].ready = false;
+  uncertainty.data.materials[0].materialStatus = 'BLOCKED';
+  assert.equal(project('MATERIALS_LIST', 'job_read', 'SUCCEEDED', uncertainty).completionState, 'needs_outcome_check');
+  for (const observedAt of [undefined, 'invalid', new Date(Date.now() - 300_000).toISOString(), new Date(Date.now() + 300_000).toISOString()]) {
+    const stale = structuredClone(result); stale.data.readinessObservedAt = observedAt;
+    const projection = project('MATERIALS_LIST', 'job_read', 'SUCCEEDED', stale);
+    assert.equal(projection.currentReadinessVerified, false);
+    assert.equal(projection.readyCount, 0);
+    assert.equal(projection.materialPreparationComplete, false);
+    assert.equal(projection.nextCall.tool, 'materials_list');
+    assert.equal(projection.productStates[0].errorCode, 'NOT_READY', 'old failures remain historical until the PC has supplied fresh verification');
+  }
 });
 test('bounded waiting preserves pending jobs across repeated requests', async () => {
   let polls = 0, elapsed = 0;

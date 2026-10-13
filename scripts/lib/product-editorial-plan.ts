@@ -193,7 +193,7 @@ const SECTION_LIBRARY: ProductEditorialSection[] = [
     title: "핵심 기능이 실제로 만드는 차이",
     purpose: "기능·구조·수치를 나열하지 않고 작동 방식과 사용자 이점으로 번역",
     evidenceRule: "확인된 기능 → 작동 원리 또는 구조 → 실제로 줄여주는 불편을 연결한다.",
-    imageRole: "기능이 작동하는 방식과 사용 결과를 이해할 수 있는 원본 이미지",
+    imageRole: "검증 원본의 식별 외형 또는 자연 연출; 기능·수치·사용 결과는 사진으로 입증하지 않음",
   },
   {
     role: "primary-strength",
@@ -214,7 +214,7 @@ const SECTION_LIBRARY: ProductEditorialSection[] = [
     title: "어디에서 어떻게 쓰면 좋은지",
     purpose: "설치·조작·충전·세척·보관을 포함해 사용 순서와 활용 장면을 구체화",
     evidenceRule: "직접 써봤다는 표현 없이 구조와 용도에서 이어지는 상황만 제시한다.",
-    imageRole: "제품 원형을 보존한 실제 사용 장면 또는 원본 연출 이미지",
+    imageRole: "제품 원형을 보존한 자연 생활 공간 사진; 사용 동작·성능을 만들지 않음",
   },
   {
     role: "review-evidence",
@@ -256,7 +256,7 @@ const SECTION_LIBRARY: ProductEditorialSection[] = [
     title: "최종 리뷰와 선택 기준",
     purpose: "장점과 제약을 다시 저울질해 명확한 조건부 결론 제시",
     evidenceRule: "강매·최저가·품절 임박 표현 없이 어떤 조건에서 추천하는지 끝맺는다.",
-    imageRole: "제품 대표 원본 이미지 재노출 또는 이미지 없음",
+    imageRole: "배정된 별도 자연 연출 사진 또는 이미지 없음; 원본 반복으로 필수 사진을 채우지 않음",
   },
 ];
 

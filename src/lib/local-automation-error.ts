@@ -16,6 +16,7 @@ export const LOCAL_AUTOMATION_ERROR_CODES = [
   "CONTENT_BLOCKED",
   "IMAGE_SHORTFALL",
   "SOURCE_EVIDENCE_REQUIRED",
+  "SOURCE_REVIEW_INCOMPLETE",
   "IMAGE_SOURCE_BINDING_REQUIRED",
   "PREWRITING_PHOTO_CHANGED",
   "PREWRITING_SOURCE_CHANGED",
@@ -83,6 +84,7 @@ export const LOCAL_AUTOMATION_ERROR_HINTS: Record<LocalAutomationErrorCode, stri
   CONTENT_BLOCKED: "생성된 글이 발행 기준(네이버 정책·근거 규칙)을 통과하지 못해 발행을 보류했습니다.",
   IMAGE_SHORTFALL: "본문에 넣을 이미지가 부족합니다. 상품 이미지를 다시 동기화하거나 다른 상품을 선택하세요.",
   SOURCE_EVIDENCE_REQUIRED: "상품의 확인 가능한 상세 근거가 부족합니다. 수집·판독 기록을 확인하고 상세 정보를 보강하세요.",
+  SOURCE_REVIEW_INCOMPLETE: "판매자 원본 후보의 검토가 완료되지 않았습니다. 누락된 픽셀 판정을 확인한 뒤 기존 상품 근거에서 재개하세요.",
   IMAGE_SOURCE_BINDING_REQUIRED: "작성 전에 선택 상품에 맞는 게시용 판매자 원본을 확보해야 합니다. 수집한 원본 후보와 선택 옵션을 확인하세요.",
   PREWRITING_PHOTO_CHANGED: "검증한 원본 사진이 변경됐습니다. 현재 사진을 다시 확인한 뒤 작성하세요.",
   PREWRITING_SOURCE_CHANGED: "작성 전에 고정한 상품 근거가 변경됐습니다. 현재 상품·옵션과 근거를 다시 확인하세요.",
@@ -137,7 +139,7 @@ export function classifyLocalFailure(input: { status?: number | null; code?: str
   if (isLocalAutomationErrorCode(code)) return code;
   // Context-only preparation has no draft result.json. Preserve its explicit
   // source/photo diagnostic from the logged error before generic HTTP guesses.
-  const prewritingCode = message.match(/\b(SOURCE_EVIDENCE_REQUIRED|IMAGE_SOURCE_BINDING_REQUIRED|PREWRITING_PHOTO_CHANGED|PREWRITING_SOURCE_CHANGED)\b/u)?.[1];
+  const prewritingCode = message.match(/\b(SOURCE_EVIDENCE_REQUIRED|SOURCE_REVIEW_INCOMPLETE|IMAGE_SOURCE_BINDING_REQUIRED|PREWRITING_PHOTO_CHANGED|PREWRITING_SOURCE_CHANGED)\b/u)?.[1];
   if (isLocalAutomationErrorCode(prewritingCode)) return prewritingCode;
   const naverCode = message.match(/\b(NAVER_SESSION_(?:EXPIRED|FORBIDDEN|CHECK_FAILED|CONFIGURATION_REQUIRED))\b/u)?.[1];
   if (isLocalAutomationErrorCode(naverCode)) return naverCode;

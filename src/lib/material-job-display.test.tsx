@@ -52,3 +52,14 @@ test("a current blocker without any old error still provides closed details", ()
   assert.match(html, /<details[^>]*><summary[^>]*>실패 상세 보기<\/summary>[\s\S]*품질 검증 필요/);
   assert.doesNotMatch(html, /<details[^>]*\bopen(?:=|\s|>)/);
 });
+
+test("current recovery guidance stays inside collapsed failure details", () => {
+  const html = renderToStaticMarkup(React.createElement(MaterialJobItemResult, {
+    title: "상품", item: { stage: "예전 실패" },
+    current: { productId: "p", status: "BLOCKED", ready: false, blockers: ["사진 검토 필요"],
+      preparationDiagnostics: { nextAction: { instruction: "이전 요청 결과를 먼저 확인하세요." } } },
+  }));
+  assert.match(html, /<details[^>]*><summary[\s\S]*다음 조치: 이전 요청 결과를 먼저 확인하세요\./u);
+  assert.doesNotMatch(html, /<details[^>]*\bopen(?:=|\s|>)/u);
+  assert.doesNotMatch(html.slice(0, html.indexOf("<details")), /다음 조치/u);
+});

@@ -56,7 +56,7 @@ async function main() {
     const call: Call = async (url, method) => {
       events.push(`${method} ${url}`);
       if (url.endsWith("/draft")) return { success: true, data: { approvedAt: "approved", imageSlots: [] } };
-      return { success: true, data: { status: "PUBLISHED", published: true, postUrl: "https://blog.naver.com/test/1234" } };
+      return { success: true, data: { status: "PUBLISHED", published: true, contentVerified: true, verificationStatus: "verified", postUrl: "https://blog.naver.com/test/1234" } };
     };
     const job = makeJob();
     await runMaterialJob(job, { call, material, save: saveMaterialJob, pause: async () => {}, checkCancelled: () => {} });
@@ -88,8 +88,8 @@ async function main() {
           submittedRevision = (body as { materialRevision?: string }).materialRevision || "";
           return { success: true, data: { status: "PUBLISHING" } };
         }
-        if (url.endsWith("/verify")) return { success: true, data: { published: true, postUrl: "https://blog.naver.com/test/healed" } };
-        return { success: true, data: { status: "PUBLISHED", published: true, postUrl: "https://blog.naver.com/test/healed" } };
+        if (url.endsWith("/verify")) return { success: true, data: { published: true, contentVerified: true, verificationStatus: "verified", postUrl: "https://blog.naver.com/test/healed" } };
+        return { success: true, data: { status: "PUBLISHED", published: true, contentVerified: true, verificationStatus: "verified", postUrl: "https://blog.naver.com/test/healed" } };
       },
       material: id => ({ ...material(id), ready: healed, revision: healed ? "b".repeat(64) : revision,
         blockers: healed ? [] : ["발행 문서 기준 원고 재검사가 필요합니다."] }),
@@ -103,7 +103,9 @@ async function main() {
     assert.equal(selfHealing.items[0].revision, revision, "the selected revision remains unchanged for review");
     assert.equal(selfHealing.items[0].errorCode, "MATERIAL_NOT_READY");
 
-    for (const unready of [null, { approvedAt: null }, { approvedAt: "yes", imageSlots: [{ missing: 1, generationMissing: 0 }] }, { approvedAt: "yes", approval: { canApprove: false } }]) {
+    for (const unready of [null, { approvedAt: null }, { approvedAt: "yes", imageSlots: [{ missing: 1, generationMissing: 0 }] },
+      { approvedAt: "yes", approval: { canApprove: false } },
+      { approvedAt: "yes", imageGeneration: { status: "incomplete", recoveryState: "owner-unknown" }, imageSlots: [] }]) {
       let submitted = 0;
       await assert.rejects(runAutomaticDraftWorkflow("product-0", { publishMode: "now" }, { pause: async () => {}, call: async (url, method) => {
         if (method === "POST") submitted++;
@@ -145,6 +147,34 @@ async function main() {
     assert.equal(unverified.items[0].status, "outcome_unknown", "DB terminal status alone is not verified publication");
     assert.equal(unverified.items[1].status, "interrupted");
 
+    for (const verificationStatus of ["partial", "mismatch", "unverified", undefined] as const) {
+      let sends = 0;
+      await assert.rejects(runAutomaticDraftWorkflow("known-published", { publishMode: "now" }, { pause: async () => {}, call: async (url, method, body) => {
+        if (method === "POST") sends++;
+        if (url.endsWith("/verify")) return { success: true, data: { published: true, contentVerified: false, verificationStatus,
+          postUrl: "https://blog.naver.com/test/known-published" } };
+        return call(url, method, body);
+      } }), (error: unknown) => {
+        const result = error as { code?: string; causeCode?: string; observedPublished?: boolean; postUrl?: string };
+        return result.code === "OUTCOME_UNKNOWN" && result.causeCode === "PUBLISHED_CONTENT_UNVERIFIED" && result.observedPublished === true &&
+          result.postUrl === "https://blog.naver.com/test/known-published";
+      });
+      assert.equal(sends, 1, "known publication with incomplete content proof must not resubmit");
+    }
+
+    let scheduledSends = 0;
+    const receipt = await runAutomaticDraftWorkflow("schedule-receipt", { publishMode: "schedule", scheduledDate: "2026-10-14T12:00:00+09:00" }, {
+      pause: async () => {}, call: async (url, method, body) => {
+        if (method === "POST") scheduledSends++;
+        if (url.endsWith("/verify")) return { success: true, data: { scheduled: true,
+          reservationVerification: { receiptAccepted: true, liveListChecked: false, status: "receipt-accepted-live-list-unverified" } } };
+        if (url.endsWith("/draft")) return call(url, method, body);
+        return { success: true, data: { status: "SCHEDULED" } };
+      },
+    });
+    assert.equal(scheduledSends, 1); assert.equal(receipt?.reservationVerification?.liveListChecked, false,
+      "a schedule submission receipt is returned without claiming a live list or future publication check");
+
     for (const unexpected of ["SCHEDULED", "READY", "FAILED", undefined]) {
       const mismatch = makeJob(2);
       let submissions = 0;
@@ -183,6 +213,21 @@ async function main() {
     assert(!travelEvents.includes("revise"), "image-only failure must preserve manuscript");
     assert(travelEvents.indexOf("recheck") < travelEvents.indexOf("generate_missing"));
     assert(travelEvents.indexOf("generate_missing") < travelEvents.indexOf("approve"));
+
+    for (const code of ["SOURCE_REVIEW_INCOMPLETE", "IMAGE_OUTPUT_AMBIGUOUS", "IMAGE_RESUME_REQUIRED"] as const) {
+      const actions: string[] = [];
+      await assert.rejects(runMaterialPreparation(`uncertain-result-${code}`, { pause: async () => {}, call: async (url, method, body) => {
+        const action = (body as { action?: string } | undefined)?.action || method;
+        actions.push(action);
+        if (url.endsWith("/images")) return { success: true, code, message: "Existing image outcome needs confirmation" };
+        return { success: true, data: { connectKind: "TRAVEL", approvedAt: null,
+          imageGeneration: { status: "incomplete" }, imageSlots: [{ sectionId: "scene", missing: 1, generationMissing: 1 }],
+          contentQuality: { signals: [{ key: "composition-quality", status: "fail" }] } } };
+      } }), (error: unknown) => (error as { code?: string }).code === code);
+      assert.equal(actions.filter(action => action === "generate_missing").length, 1);
+      assert(!actions.includes("prepare_context") && !actions.includes("replan_sources") && !actions.includes("approve") && !actions.includes("revise"),
+        "a partial success with an unresolved code cannot buy a recovery replay or approval even without errors[]");
+    }
 
     let repairedText = false, repairedImages = false, sequentialRevisions = 0, sequentialImageRepairs = 0, sequentialApprovals = 0;
     const sequentialCall: Call = async (url, method, body) => {
@@ -262,7 +307,7 @@ async function main() {
 
     let imageWaitPolls = 0;
     const waiting = makeJob(1, "prepare");
-    await runMaterialJob(waiting, { call: async (_url, _method, body) => ({ success: true, data: {
+    await runMaterialJob(waiting, { call: async () => ({ success: true, data: {
       imageGeneration: { status: imageWaitPolls < 25 ? "running" : "idle" },
       imageSlots: [], approvedAt: "yes",
     } }), material, save: saveMaterialJob, pause: async () => { imageWaitPolls++; }, checkCancelled: () => {} });

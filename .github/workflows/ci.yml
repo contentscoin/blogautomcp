@@ -49,6 +49,7 @@ jobs:
         run: |
           npm run test:connect-detection
           npm run test:material-regression
+          npm run test:material-stability
           npm run test:failed-material-rewrite
           npm run test:blocked-material-repair
           npm run test:operational-safety

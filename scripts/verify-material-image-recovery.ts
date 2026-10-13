@@ -248,8 +248,8 @@ async function main() {
       composition: { sections: [{ id: "feature", body: ["45분"], imageMin: 1 }] }, imageAssets: [] };
     const save = () => fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(manifest));
     save();
-    assert.equal(IMAGE_RECOVERY_POLICY_VERSION, 9);
-    const oldSignatures = [6, 7, 8].map(policy => crypto.createHash("sha256").update(JSON.stringify({
+    assert.equal(IMAGE_RECOVERY_POLICY_VERSION, 10);
+    const oldSignatures = [6, 7, 8, 9].map(policy => crypto.createHash("sha256").update(JSON.stringify({
       version: 1, policy, product: manifest.sourceSnapshot.product,
       sections: [{ id: "feature", body: ["45분"], imageMin: 1 }], assets: [], receipts: [], rejected: [],
     })).digest("hex"));
@@ -257,7 +257,7 @@ async function main() {
       ...oldSignatures.map(signature => ({ stage: "refresh-source", input: signature, output: signature, status: "failed", at: "earlier" })),
     ] }));
     for (const signature of oldSignatures) assert.notEqual(imageRecoverySignature(dir), signature,
-      "diagnosis-first and complete source review receive one shared fresh attempt for drafts exhausted under policies 6/7/8");
+      "the changed prewriting review and shared scene plan allow one bounded new attempt after policies 6/7/8/9");
     let calls = 0;
     await runRecordedImageRecovery("persistent-fixture", "refresh-source", async () => { calls++; });
     const skipped = await runRecordedImageRecovery("persistent-fixture", "refresh-source", async () => { calls++; });

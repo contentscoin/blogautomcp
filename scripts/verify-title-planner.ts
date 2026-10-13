@@ -175,7 +175,7 @@ assert.equal(hotelPromotion.duration, "3박5일");
 assert.doesNotMatch(hotelPromotion.shortIdentity, /신축|인천/u);
 
 const prompt = formatTitleCandidatesForPrompt({ ...toner, sourceDescription: "긴 원본 설명 ".repeat(400), bodySections: ["긴 원고 ".repeat(400)] });
-assert.match(prompt, /후보 3개/u);
+assert.match(prompt, /후보 5개/u);
 assert.match(prompt, /기계적으로 복사하지/u);
 assert.match(prompt, /검색량·수요 수치를 추정하지/u);
 assert.doesNotMatch(prompt, /긴 원본 설명|긴 원고/u, "mandatory suffix exposes brief signals rather than full source content");
@@ -183,7 +183,7 @@ assert.ok(prompt.length < 1200, `full title guidance stays bounded: ${prompt.len
 const compactPrompt = formatTitleCandidatesForPrompt(toner, true);
 assert.ok(compactPrompt.length <= 160, `minimal browser title guidance stays compact: ${compactPrompt.length}`);
 assert.doesNotMatch(compactPrompt, /표현 참고/u);
-assert.match(compactPrompt, /후보 3개/u);
+assert.match(compactPrompt, /후보 5개/u);
 
 // The final material gate must use the same identity instead of the first six promotional tokens.
 function titleIdentityVerdict(kind: "SHOPPING" | "TRAVEL", productName: string, title: string) {

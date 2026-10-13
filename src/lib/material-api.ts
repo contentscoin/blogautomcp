@@ -5,6 +5,7 @@ import { requireAdminApiKey } from "./api-auth";
 import { requireNoPendingDesktopUpdate } from "./update-guard";
 import { beginAutomaticPublishing } from "./desktop-activity";
 import { getMaterial, validateMaterialSelection } from "./material-library";
+import { applyMaterialPreparationWorkflowGuard } from "./material-preparation-diagnostics";
 import { acquireMaterialJobLock, listMaterialJobs, materialJobErrorMessage, materialJobFailureCodes, readMaterialJob, saveMaterialJob, type MaterialJob } from "./material-job-store";
 import { runMaterialJob } from "./material-job-runner";
 import { addDaysToYmd, ymdInTimeZone } from "./bulk-schedule-plan";
@@ -36,11 +37,14 @@ function readMaterialView(product: MaterialProduct, material = getMaterial): Rec
     const ready = saved.ready && statusAllowsPublish;
     const status = materialStatus(product.status, ready, saved.imageGeneration?.status);
     return { ...saved, productName: product.productName, status, materialStatus: status, productStatus: product.status,
+      preparationDiagnostics: applyMaterialPreparationWorkflowGuard(saved.preparationDiagnostics, product.status, saved.imageGeneration?.status),
       ready, blockers: statusAllowsPublish ? saved.blockers : [...saved.blockers, `현재 상태: ${product.status}`] };
   } catch (error) {
     const status = materialStatus(product.status, false);
     return { productId: product.id, productName: product.productName, title: product.productName || "소재 읽기 오류", connectKind: product.connectKind as "SHOPPING" | "TRAVEL",
-      status, materialStatus: status, productStatus: product.status, ready: false, blockers: [(error as Error).message], revision: "", createdAt: "", approvedAt: null, score: null, imageCount: 0 };
+      status, materialStatus: status, productStatus: product.status, ready: false,
+      preparationDiagnostics: applyMaterialPreparationWorkflowGuard(undefined, product.status),
+      blockers: [(error as Error).message], revision: "", createdAt: "", approvedAt: null, score: null, imageCount: 0 };
   }
 }
 
@@ -57,7 +61,7 @@ async function materialJobView(job: MaterialJob): Promise<Record<string, unknown
     return material ? [material] : [];
   });
   const workflowPending = ["running", "queued"].includes(job.status) || materials.some(material => material.materialStatus === "PREPARING");
-  return { ...job, materials, workflowPending, acceptedCount: job.items.length,
+  return { ...job, materials, readinessObservedAt: new Date().toISOString(), workflowPending, acceptedCount: job.items.length,
     // These describe the current saved material without rewriting job history.
     currentReadyCount: materials.filter(material => material.ready === true && material.materialStatus === "READY").length,
     currentBlockedCount: materials.filter(material => material.materialStatus === "BLOCKED").length,
@@ -97,9 +101,10 @@ export async function materialsGet(request: NextRequest) {
       }) : [];
       const materials = products.flatMap(product => {
         const current = readMaterialView(product, material);
-        return current ? [{ productId: current.productId, ready: current.ready, status: current.materialStatus, blockers: current.blockers }] : [];
+        return current ? [{ productId: current.productId, ready: current.ready, status: current.materialStatus, blockers: current.blockers,
+          preparationDiagnostics: current.preparationDiagnostics }] : [];
       });
-      return NextResponse.json({ success: true, data: { jobs, materials } });
+      return NextResponse.json({ success: true, data: { jobs, materials, readinessObservedAt: new Date().toISOString() } });
     }
     const kind = request.nextUrl.searchParams.get("connectKind")?.toUpperCase();
     const products = await prisma.brandLink.findMany({ orderBy: { createdAt: "desc" },
@@ -112,7 +117,7 @@ export async function materialsGet(request: NextRequest) {
     });
     const failedCandidates = await listFailedMaterialCandidates(kind === "SHOPPING" || kind === "TRAVEL" ? kind : undefined, undefined, material);
     const repairCandidates = await listMaterialRepairCandidates(kind === "SHOPPING" || kind === "TRAVEL" ? kind : undefined, undefined, material);
-    return NextResponse.json({ success: true, data: { materials, jobs: listMaterialJobs().slice(0, 50), failedCandidates, failedCandidateCount: failedCandidates.length,
+    return NextResponse.json({ success: true, data: { materials, readinessObservedAt: new Date().toISOString(), jobs: listMaterialJobs().slice(0, 50), failedCandidates, failedCandidateCount: failedCandidates.length,
       repairCandidates, repairCandidateCount: repairCandidates.length } });
   } catch (error) { return NextResponse.json({ success: false, error: (error as Error).message }, { status: 400 }); }
 }
