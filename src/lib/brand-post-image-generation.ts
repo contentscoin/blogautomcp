@@ -9,7 +9,7 @@ import { selectVerifiedProductSectionImages, type ProductSectionImageDiagnostics
 import { sourceReviewFailureForSlot } from "../../scripts/lib/product-source-audit-context";
 import { buildSellerOriginalRepairTarget } from "../../scripts/lib/seller-original-repair-target";
 import { buildSelectedProductImageAuditContext } from "../../scripts/lib/publish-image-audit";
-import { rejectedPublicationImageHashes } from "../../scripts/lib/publish-image-rejections";
+import { publicationImageContext, rejectedPublicationImageHashes } from "../../scripts/lib/publish-image-rejections";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -32,7 +32,7 @@ import { isChatGptBrowserAutomationEnabled } from "./chatgpt-browser-automation"
 import { imageBatchBudgetMs, imageJobBudgetMs, IMAGE_TIMER_MAX_MS } from "../../scripts/lib/image-timeout-policy";
 import { buildBlogPhotorealDirection } from "../../scripts/lib/photoreal/build";
 import { assertProductImageReferences, checkedExistingJobResult, collectCompletedProductCandidates, existingJobResult, hasBrowserSubmission, hasUnresolvedCodexSubmission, readLegacyCodexImageCompletion, resolveBrandPostImageEngine, runCodexImageBatch, type ImageBatchJob } from "./codex-image-generation";
-import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene, brandPostSectionSlotId, isShoppingLifestyleImage, REFERENCE_SCENE_REVIEW_CHECKS, type BrandPostImageSourceHint } from "./brand-post-image-evidence";
+import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene, brandPostSectionSlotId, isReferenceGuidedThumbnail, isShoppingLifestyleImage, REFERENCE_SCENE_REVIEW_CHECKS, type BrandPostImageSourceHint } from "./brand-post-image-evidence";
 import { buildProduct9Canvas, type Product9Canvas, type ProductPhysicalScale } from "../../scripts/lib/product-9canvas";
 import { buildShoppingReferenceScenePrompt, reviewShoppingReferenceScene, selectShoppingSceneReference,
   SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION, type ShoppingSceneReference } from "../../scripts/lib/shopping-reference-scene";
@@ -75,7 +75,7 @@ export interface BrandPostImageGenerationResult {
   referenceScene?: BrandPostPackageImageAsset["referenceScene"];
   imageIntent: string;
   error?: string;
-  errorCode?: "SOURCE_REVIEW_CONFLICT";
+  errorCode?: "SOURCE_REVIEW_CONFLICT" | "IMAGE_OUTPUT_REJECTED";
 }
 
 export interface ResolvedImageTarget {
@@ -84,6 +84,8 @@ export interface ResolvedImageTarget {
   role: "hero" | "body";
   sectionTitle: string;
   imageIntent: string;
+  /** Server-prepared local pixels, never an input from an image/approval client. */
+  thumbnailRecoveryProof?: { rawSha256: string; composedSha256: string; outputPath: string; copyBinding: string; productName: string };
   /** 상품 유형 템플릿의 이미지 출처(원본·크롭·연출컷) */
   imageSource?: BrandPostImageSourceHint;
   /** 연출컷 배경 지시 */
@@ -530,6 +532,87 @@ function assertSavedSceneRecipe(job: ImageBatchJob, metadata: { sceneRecipeSha25
     throw new Error("IMAGE_RESUME_REQUIRED: 저장된 생성 프롬프트가 변경되었습니다. 이전 결과를 새 장면으로 채택하거나 재전송하지 않았습니다.");
 }
 
+function rejectedThumbnailOutputError(): Error & { code: "IMAGE_OUTPUT_REJECTED" } {
+  return Object.assign(new Error("IMAGE_OUTPUT_REJECTED: 현재 썸네일 검수에서 거절된 동일 결과입니다. 같은 완료 요청의 다른 검증 후보가 없어 재합성·재적용하거나 새 생성 요청을 보내지 않았습니다."),
+    { code: "IMAGE_OUTPUT_REJECTED" as const });
+}
+
+/** A rejected composed thumbnail cannot become a fresh result by replaying its
+ * exact completed raw photograph. This does not reject that raw for other uses. */
+function currentRejectedThumbnail(manifest: BrandPostPackageManifestV2, target: ResolvedImageTarget) {
+  if (manifest.connectKind !== "SHOPPING" || target.role !== "hero" || !target.request.replaceAssetKey) return null;
+  const asset = normalizePackageImageAssets(manifest).find(candidate => candidate.role === "hero" && !candidate.sectionId &&
+    candidate.sha256 === target.request.replaceAssetKey && candidate.slotId === target.request.slotId);
+  if (!asset || asset.provenance !== "PHOTO_TEXT_THUMBNAIL" || !isReferenceGuidedThumbnail(asset)) return null;
+  const scene = asset.referenceScene!;
+  const context = target.referenceContext;
+  if (!context || scene.sourceSnapshotId !== manifest.sourceSnapshot?.snapshotId ||
+      scene.referenceSha256 !== context.reference.sha256 || scene.thumbnailOutputSha256 !== asset.sha256) return null;
+  let rejected = false;
+  try {
+    const file = path.join(getBrandPostPackageDir(manifest.brandLinkId), "publish-image-rejections.json");
+    if (fs.statSync(file).size > 128 * 1024) return null;
+    const rows: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
+    const currentContext = publicationImageContext(manifest.composition, null);
+    rejected = Array.isArray(rows) && rows.some(row => row && row.sha256 === asset.sha256 && row.sectionId === null &&
+      (row.scope === undefined || row.scope === "section" || row.scope === "product") && row.context === currentContext);
+  } catch { return null; }
+  if (!rejected) return null;
+  try {
+    if (!/^[a-f0-9]{64}$/u.test(scene.reviewedOutputSha256) || !scene.thumbnailRawPath ||
+        sha256File(asset.path) !== asset.sha256 || sha256File(scene.thumbnailRawPath) !== scene.reviewedOutputSha256 ||
+        sha256File(scene.referencePath) !== context.reference.sha256) throw new Error("changed binding");
+  } catch {
+    throw new Error("IMAGE_RESUME_REQUIRED: 거절된 썸네일의 현재 결과·원본·참조 바인딩을 확인할 수 없습니다. 기존 파일과 요청을 보존했습니다.");
+  }
+  return asset;
+}
+
+function thumbnailCopyBinding(manifest: BrandPostPackageManifestV2, productName: string): string {
+  return crypto.createHash("sha256").update(JSON.stringify({ title: manifest.title, productName,
+    copy: buildProductThumbnailCopy(manifest.title, productName, "SHOPPING", manifest.productUnderstanding), style: "shopping-bold" })).digest("hex");
+}
+
+function rejectedCurrentThumbnailRawHashes(manifest: BrandPostPackageManifestV2, target: ResolvedImageTarget): Set<string> {
+  const excluded = new Set<string>(), proof = target.thumbnailRecoveryProof;
+  // Legacy artifacts have no headline recipe. Raw identity alone cannot prove
+  // that a changed title/copy would reproduce the rejected composed bytes.
+  if (!proof) return excluded;
+  const asset = currentRejectedThumbnail(manifest, target);
+  if (!asset || proof.copyBinding !== thumbnailCopyBinding(manifest, proof.productName)) return excluded;
+  if (sha256File(proof.outputPath) !== proof.composedSha256)
+    throw new Error("IMAGE_RESUME_REQUIRED: 썸네일 재합성 증거가 변경되어 적용을 중단했습니다.");
+  if (proof.rawSha256 === asset.referenceScene!.reviewedOutputSha256 && proof.composedSha256 === asset.sha256)
+    excluded.add(proof.rawSha256);
+  return excluded;
+}
+
+/** Verify legacy copy with the existing local renderer, after exact completion
+ * proof. No original/receipt is changed and this never submits a provider job. */
+async function prepareRejectedThumbnailRecovery(options: {
+  manifest: BrandPostPackageManifestV2; target: ResolvedImageTarget; job: ImageBatchJob; productName: string; workDir: string;
+}): Promise<void> {
+  if (!options.job.reviewOnly) return;
+  const asset = currentRejectedThumbnail(options.manifest, options.target);
+  if (!asset) return;
+  const candidates = options.job.reviewOnly.candidateSet ? validatedReviewCandidateSet(options.job).candidates :
+    [{ path: reviewOnlyImageResult(options.job), sha256: options.job.reviewOnly.outputSha256 }];
+  const scene = asset.referenceScene!;
+  if (!candidates.some(candidate => candidate.sha256 === scene.reviewedOutputSha256)) return;
+  const binding = thumbnailCopyBinding(options.manifest, options.productName);
+  const workDir = fs.mkdtempSync(path.join(options.workDir, "thumbnail-recovery-"));
+  const copy = buildProductThumbnailCopy(options.manifest.title, options.productName, "SHOPPING", options.manifest.productUnderstanding);
+  const thumbnail = await createOriginalProductPhotoThumbnail({ sourcePath: scene.thumbnailRawPath!, outputDir: workDir,
+    productName: copy.productNameLabel, headline: copy.headline, subline: copy.subline, style: "shopping-bold" });
+  const current = currentRejectedThumbnail(options.manifest, options.target);
+  if (!current || current.sha256 !== asset.sha256 || current.referenceScene!.reviewedOutputSha256 !== scene.reviewedOutputSha256 ||
+      binding !== thumbnailCopyBinding(options.manifest, options.productName))
+    throw new Error("IMAGE_RESUME_REQUIRED: 썸네일 재합성 중 원고·카피·원본 또는 거절 근거가 변경됐습니다.");
+  if (options.job.reviewOnly.candidateSet) validatedReviewCandidateSet(options.job); else reviewOnlyImageResult(options.job);
+  options.target.thumbnailRecoveryProof = { rawSha256: scene.reviewedOutputSha256, composedSha256: sha256File(thumbnail.outputPath),
+    outputPath: thumbnail.outputPath, copyBinding: binding, productName: options.productName };
+}
+
 function validatedReviewCandidateSet(job: ImageBatchJob, resolutionToken?: string, verifyRecipe = true) {
   const binding = job.reviewOnly;
   const refused = () => new Error("IMAGE_RESUME_REQUIRED: 복구 후보의 슬롯·참조·완료 기록이 변경됐습니다. 기존 결과를 보존했으며 재전송하지 않았습니다.");
@@ -824,6 +907,10 @@ export function prepareImageBatchJobs(
     if (reviewOnlyJob) {
       if (reviewOnlyJob.outStem !== outStem && IMAGE_JOB_RECORD_SUFFIXES.some(extension => fs.existsSync(`${outStem}${extension}`)))
         throw new Error("IMAGE_RESUME_REQUIRED: 같은 슬롯의 다른 요청 기록이 남아 있습니다. 이전 후보의 재검수로 미확인 요청을 건너뛰지 않았습니다.");
+      const excluded = rejectedCurrentThumbnailRawHashes(manifest, target);
+      const candidates = reviewOnlyJob.reviewOnly!.candidateSet?.candidates;
+      if (candidates ? candidates.every(candidate => excluded.has(candidate.sha256)) : excluded.has(reviewOnlyJob.reviewOnly!.outputSha256))
+        throw rejectedThumbnailOutputError();
       return reviewOnlyJob;
     }
     if (manifest.connectKind === "SHOPPING") atomicWriteTextFile(`${outStem}.reference-scene.json`, JSON.stringify({
@@ -840,13 +927,14 @@ export function prepareImageBatchJobs(
 /** A broken saved request must not assign its error to unrelated image slots. */
 export function prepareImageBatchJobsIsolated(targets: ResolvedImageTarget[], manifest: BrandPostPackageManifestV2,
   productName: string, workDir: string) {
-  const jobs: ImageBatchJob[] = [], targetIndexes: number[] = [], errors: Array<{ targetIndex: number; error: string }> = [];
+  const jobs: ImageBatchJob[] = [], targetIndexes: number[] = [], errors: Array<{ targetIndex: number; error: string; errorCode?: "IMAGE_OUTPUT_REJECTED" }> = [];
   for (const [targetIndex, target] of targets.entries()) {
     try {
       const [job] = prepareImageBatchJobs([target], manifest, productName, workDir);
       job.id = String(targetIndex);
       jobs.push(job); targetIndexes.push(targetIndex);
-    } catch (error) { errors.push({ targetIndex, error: error instanceof Error ? error.message : String(error) }); }
+    } catch (error) { errors.push({ targetIndex, error: error instanceof Error ? error.message : String(error),
+      ...((error as { code?: unknown })?.code === "IMAGE_OUTPUT_REJECTED" ? { errorCode: "IMAGE_OUTPUT_REJECTED" as const } : {}) }); }
   }
   return { jobs, targetIndexes, errors };
 }
@@ -871,16 +959,20 @@ export async function resolveCompletedProductImage(options: {
     const sectionTitle = options.target.role === "hero" ? options.manifest.title : nodes.flatMap(node => node.kind === "heading" || node.kind === "quotation" ? [node.text] : []).join("\n");
     const sectionBody = options.target.role === "hero" ? "" : nodes.flatMap(node => node.kind === "paragraph" ? [node.text] : []).join("\n\n");
     if (!sectionBody.trim() && !sectionTitle.trim()) throw new Error("IMAGE_RESUME_REQUIRED: 복구 검수에 필요한 최종 게시 본문 또는 소제목이 없습니다. 이전 계획 문구로 승인하지 않았습니다.");
+    const excluded = [...rejectedCurrentThumbnailRawHashes(options.manifest, options.target)].sort();
     const data = { version: "product-image-resolution/v2", selectionPolicy: "exact-request-passed-sha256/v1",
       slotId: binding.slotId, sourceSnapshotId: binding.sourceSnapshotId,
       sourceSnapshot: options.manifest.sourceSnapshot, referencePaths: context.referenceImagePaths, referenceHashes: binding.referenceHashes,
       reference: context.reference, anchorSha256: context.anchorSha256 || null, productName: options.productName,
       sectionId: options.target.sectionId, sectionTitle, sectionBody, role: options.target.role, imageSource: options.target.imageSource,
       imageIntent: options.target.imageIntent, promptRecipe: options.target.promptRecipe, referencePrompt: context.prompt,
-      scenePrompt: options.job.prompt, candidateSet: initialSet };
+      scenePrompt: options.job.prompt, candidateSet: initialSet,
+      ...(excluded.length ? { excludedThumbnailRawSha256s: excluded } : {}) };
     return { data, hash: crypto.createHash("sha256").update(JSON.stringify(data)).digest("hex"), sectionTitle, sectionBody };
   };
   const initial = fingerprint();
+  if (initialSet.candidates.every(candidate => (initial.data.excludedThumbnailRawSha256s || []).includes(candidate.sha256)))
+    throw rejectedThumbnailOutputError();
   if (options.signal?.aborted) throw new Error("IMAGE_RESUME_REQUIRED: 사용자가 이미지 재검수를 중지했습니다.");
   const lock = acquireResolutionLock(options.job.outStem), resolutionToken = lock.ownerToken;
   try {
@@ -892,6 +984,7 @@ export async function resolveCompletedProductImage(options: {
   const outcomes: Array<{ path: string; sha256: string; accepted: boolean; reason: string }> = [];
   for (const candidate of initialSet.candidates) {
     assertCurrent();
+    if ((initial.data.excludedThumbnailRawSha256s || []).includes(candidate.sha256)) continue;
     try {
       const review = await (options.reviewReferenceScene ?? reviewShoppingReferenceScene)({ reference: context!.reference,
         outputPath: candidate.path, productName: options.productName, imageIntent: options.target.imageIntent,
@@ -1228,6 +1321,7 @@ async function finishGeneratedImage(options: {
   workDir: string;
   index: number;
   reviewReferenceScene?: typeof reviewShoppingReferenceScene;
+  completedJob?: ImageBatchJob;
 }): Promise<Pick<BrandPostImageGenerationResult, "generatedPath" | "provenance" | "referenceScene">> {
   if (options.manifest.connectKind === "TRAVEL") {
     if (options.target.role === "hero") {
@@ -1249,6 +1343,8 @@ async function finishGeneratedImage(options: {
   const context = options.target.referenceContext || await prepareBrandPostImageReferenceContext({
     manifest: options.manifest, productName: options.productName, target: options.target, sourceImageUrls: options.sourceImageUrls,
   });
+  if (options.completedJob?.reviewOnly && rejectedCurrentThumbnailRawHashes(options.manifest, options.target).has(sha256File(options.rawPath)))
+    throw rejectedThumbnailOutputError();
   for (const [index, file] of context.referenceImagePaths.entries()) {
     if (sha256File(file) !== context.referenceHashes[index])
       throw new Error("REFERENCE_SCENE_CHANGED: 생성 전후 참조 이미지 해시가 달라졌습니다.");
@@ -1276,7 +1372,12 @@ async function finishReviewedShoppingScene(options: {
     throw new Error("REFERENCE_SCENE_REVIEW_INVALID: 검수한 원본·생성 사진·필수 비교 판정이 일치하지 않습니다.");
   if (options.target.role !== "hero") return { generatedPath: options.rawPath, provenance: "GENERATED_SCENE", referenceScene };
   const copy = buildProductThumbnailCopy(options.manifest.title, options.productName, "SHOPPING", options.manifest.productUnderstanding);
-  const thumbnail = await createOriginalProductPhotoThumbnail({ sourcePath: options.rawPath, outputDir: options.workDir,
+  const proof = options.target.thumbnailRecoveryProof;
+  const preparedOutput = proof && proof.rawSha256 === rawHash && proof.copyBinding === thumbnailCopyBinding(options.manifest, options.productName)
+    ? proof.outputPath : null;
+  if (preparedOutput && sha256File(preparedOutput) !== proof!.composedSha256)
+    throw new Error("IMAGE_RESUME_REQUIRED: 썸네일 재합성 증거가 변경되어 적용을 중단했습니다.");
+  const thumbnail = preparedOutput ? { outputPath: preparedOutput } : await createOriginalProductPhotoThumbnail({ sourcePath: options.rawPath, outputDir: options.workDir,
     productName: copy.productNameLabel, headline: copy.headline, subline: copy.subline, style: "shopping-bold" });
   if (sha256File(options.rawPath) !== rawHash || sha256File(context.reference.path) !== context.reference.sha256)
     throw new Error("REFERENCE_SCENE_CHANGED: 제목 합성 중 검수한 생성 사진 또는 상품 참조가 변경되었습니다.");
@@ -1654,10 +1755,27 @@ export async function generateBrandPostImages(options: {
     for (const failure of prepared.errors) {
       const index = requestIndexes[failure.targetIndex];
       await publish(index, { ...baseResult(index), sectionId: targets[failure.targetIndex].sectionId,
-        imageIntent: targets[failure.targetIndex].imageIntent, error: failure.error });
+        imageIntent: targets[failure.targetIndex].imageIntent, error: failure.error, errorCode: failure.errorCode });
     }
-    await runImageBatch(prepared.jobs, workDir, async (browserResult, batchIndex) => {
-      const targetIndex = prepared.targetIndexes[batchIndex];
+    const jobs: ImageBatchJob[] = [], targetIndexes: number[] = [];
+    for (const [batchIndex, job] of prepared.jobs.entries()) {
+      const targetIndex = prepared.targetIndexes[batchIndex], target = targets[targetIndex], index = requestIndexes[targetIndex];
+      try {
+        if (options.manifest.connectKind === "SHOPPING" && target.role === "hero" && job.reviewOnly)
+          await prepareRejectedThumbnailRecovery({ manifest: options.manifest, target, job, productName: options.productName, workDir });
+        const excluded = rejectedCurrentThumbnailRawHashes(options.manifest, target);
+        const candidates = job.reviewOnly?.candidateSet?.candidates;
+        if (job.reviewOnly && (candidates ? candidates.every(candidate => excluded.has(candidate.sha256)) : excluded.has(job.reviewOnly.outputSha256)))
+          throw rejectedThumbnailOutputError();
+        jobs.push(job); targetIndexes.push(targetIndex);
+      } catch (error) {
+        await publish(index, { ...baseResult(index), sectionId: target.sectionId, imageIntent: target.imageIntent,
+          error: error instanceof Error ? error.message : String(error),
+          ...((error as { code?: unknown })?.code === "IMAGE_OUTPUT_REJECTED" ? { errorCode: "IMAGE_OUTPUT_REJECTED" as const } : {}) });
+      }
+    }
+    await runImageBatch(jobs, workDir, async (browserResult, batchIndex) => {
+      const targetIndex = targetIndexes[batchIndex];
       const target = targets[targetIndex];
       const index = requestIndexes[targetIndex];
       const base = { ...baseResult(index), sectionId: target.sectionId, imageIntent: target.imageIntent };
@@ -1674,6 +1792,7 @@ export async function generateBrandPostImages(options: {
           rawPath: browserResult.localPath!,
           workDir,
           index,
+          completedJob: jobs[batchIndex],
         });
         result = { ...base, ...finished,
           remoteGenerated: finished.provenance !== "ORIGINAL",
@@ -1682,7 +1801,8 @@ export async function generateBrandPostImages(options: {
           sourceReview: target.sourceReview,
         };
       } catch (error) {
-        result = { ...base, error: error instanceof Error ? error.message : "생성 이미지를 패키지에 맞게 처리하지 못했습니다." };
+        result = { ...base, error: error instanceof Error ? error.message : "생성 이미지를 패키지에 맞게 처리하지 못했습니다.",
+          ...((error as { code?: unknown })?.code === "IMAGE_OUTPUT_REJECTED" ? { errorCode: "IMAGE_OUTPUT_REJECTED" as const } : {}) };
       }
       await publish(index, result);
     }, options.signal);

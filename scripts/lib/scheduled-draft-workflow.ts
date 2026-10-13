@@ -145,7 +145,7 @@ function bounded(deps: WorkflowDeps, fallback: number) {
 
 const IMAGE_QUALITY_SIGNALS = new Set(["composition-quality", "representative-image", "thumbnail"]);
 const UNRESOLVED_IMAGE_OPERATION_CODES = new Set([
-  "IMAGE_RESUME_REQUIRED", "IMAGE_OUTPUT_AMBIGUOUS", "PREPARATION_RESULT_UNCERTAIN",
+  "IMAGE_RESUME_REQUIRED", "IMAGE_OUTPUT_AMBIGUOUS", "IMAGE_OUTPUT_REJECTED", "PREPARATION_RESULT_UNCERTAIN",
   "SOURCE_REVIEW_INCOMPLETE", "SOURCE_REVIEW_CONFLICT",
   "OUTCOME_UNKNOWN", "ALREADY_PUBLISHING", "CODEX_TIMEOUT",
   "IMAGE_REPAIR_FAILED", "USER_CANCELLED", "IMAGE_GENERATION_CANCELLED",
@@ -768,7 +768,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
         if (plan.action !== "complete") throw unresolvedCompositionError(plan.reason);
       } catch (replaceError) {
         const code = (replaceError as { code?: string }).code;
-        if (code === "SOURCE_REVIEW_CONFLICT") throw withBoundedImageRecoveryCause(error, replaceError);
+        if (code === "SOURCE_REVIEW_CONFLICT" || code === "IMAGE_OUTPUT_REJECTED") throw withBoundedImageRecoveryCause(error, replaceError);
         if (isSessionWidePreparationFailureCode(code) || isUncertainLocalTransportError(replaceError) ||
             UNRESOLVED_IMAGE_OPERATION_CODES.has(code || "")) throw replaceError;
         if (thumbnailMissing() || thumbnailRepairKey()) throw replaceError;

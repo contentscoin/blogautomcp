@@ -125,6 +125,7 @@ const GUIDANCE: Record<string, string> = {
   CONTENT_BLOCKED: "현재 품질 검사의 실패 항목만 보강하고 통과한 사실과 문단 역할은 보존합니다.",
   QUALITY_REPAIR_EXHAUSTED: "같은 보강 지시를 반복하지 않고 현재 근거와 실패 항목의 연결을 다시 확인합니다.",
   IMAGE_OUTPUT_AMBIGUOUS: "기존 요청·출력의 연결을 확인하기 전에는 채택하거나 새로 생성하지 않습니다.",
+  IMAGE_OUTPUT_REJECTED: "현재 카피로 다시 합성한 썸네일이 이전 거절 결과와 동일합니다. 원고·사진·완료 요청과 재시도 한도를 유지하며, 같은 완료 요청의 다른 후보나 실제 검수 판정을 확인합니다. 새 생성을 자동 요청하지 않습니다.",
   IMAGE_RESUME_REQUIRED: "기존 이미지 요청의 결과를 확인하기 전에는 재전송하지 않습니다.",
   EDITOR_DISCLOSURE_MISMATCH: "발행 에디터의 본문 첫 부분 고지를 확인하며 원고나 정상 사진을 재생성하지 않습니다.",
   SHOPPING_CARD_INSERT_FAILED: "상품 카드와 로그인 상태를 확인하며 정상 원고·사진을 재생성하지 않습니다.",

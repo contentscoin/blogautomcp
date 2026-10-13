@@ -87,17 +87,18 @@ async function main() {
   const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "source-route-workflow-"));
   process.env.DESKTOP_USER_DATA = fixtureRoot;
   try {
-    for (const outcome of ["recovered", "auth", "incomplete", "unknown-output", "unknown-code"] as const) {
+    for (const outcome of ["recovered", "auth", "incomplete", "unknown-output", "unknown-code", "output-rejected"] as const) {
       const errors = ["scene: IMAGE_GENERATION_REQUIRED: Staged AI slot still needs its own generated photograph.",
         ...(outcome === "auth" ? ["CODEX_AUTH_REQUIRED: Login is required."]
           : outcome === "incomplete" ? ["SOURCE_REVIEW_INCOMPLETE: Final source verdict is missing."]
             : outcome === "unknown-output" ? ["OUTCOME_UNKNOWN: Prior image outcome is unresolved."]
-              : outcome === "unknown-code" ? ["UNRECOGNIZED_IMAGE_FAILURE: Unsupported image failure."] : [])];
+              : outcome === "unknown-code" ? ["UNRECOGNIZED_IMAGE_FAILURE: Unsupported image failure."]
+                : outcome === "output-rejected" ? ["IMAGE_OUTPUT_REJECTED: The same completed thumbnail pixels were previously rejected."] : [])];
       // Actual route serialization/classification, with an offline repair result:
       // one original placed, AI slots intentionally untouched by bind_sources.
       const response = await scenario("bind_sources", false, false, { errors, appliedCount: 1 });
       assert.equal(response.body.code, outcome === "auth" ? "CODEX_AUTH_REQUIRED" : outcome === "incomplete"
-        ? "SOURCE_REVIEW_INCOMPLETE" : "IMAGE_GENERATION_REQUIRED");
+        ? "SOURCE_REVIEW_INCOMPLETE" : outcome === "output-rejected" ? "IMAGE_OUTPUT_REJECTED" : "IMAGE_GENERATION_REQUIRED");
       assert.equal(response.body.appliedCount, 1); assert.equal(response.body.generatedCount, 0);
       const actions: string[] = [];
       let rejected = outcome !== "recovered", originalBound = false, repaired = false, approved = false;
@@ -128,7 +129,7 @@ async function main() {
       if (outcome === "recovered") await operation;
       else await assert.rejects(operation, (error: unknown) => (error as { code?: string }).code === (
         outcome === "auth" ? "CODEX_AUTH_REQUIRED" : outcome === "incomplete" ? "SOURCE_REVIEW_INCOMPLETE"
-          : outcome === "unknown-output" ? "OUTCOME_UNKNOWN" : "UNRECOGNIZED_IMAGE_FAILURE"));
+          : outcome === "unknown-output" ? "OUTCOME_UNKNOWN" : outcome === "output-rejected" ? "IMAGE_OUTPUT_REJECTED" : "UNRECOGNIZED_IMAGE_FAILURE"));
       assert.equal(actions.filter(action => action === "bind_sources").length, 1);
       assert.equal(actions.filter(action => action === "repair_rejected").length, outcome === "recovered" ? 1 : 0,
         "only the known remaining AI requirement authorizes the bounded next repair");
@@ -145,6 +146,56 @@ async function main() {
     const ast = ts.createSourceFile("brand-post-image-generation.ts", source, ts.ScriptTarget.Latest, true);
     const declaration = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "generateBrandPostImages");
     assert(declaration, "exercise the actual source-generation orchestration, including its catch and failed-slot mapping");
+    const rejectedDeclaration = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "rejectedThumbnailOutputError");
+    assert(rejectedDeclaration);
+    const heroTarget = { request: { requestId: "hero", slotId: "hero:image:1" }, role: "hero", sectionTitle: "Thumbnail", imageIntent: "natural product overview" };
+    let transports = 0;
+    const outputContext = vm.createContext({ exports: {}, fs, path,
+      resolveBrandPostImageSlots: (_manifest: unknown, requests: unknown[]) => requests, resolveTarget: () => heroTarget,
+      getBrandPostPackageDir: () => fixtureRoot, resolveBrandPostImageBatchWorkDir: () => fixtureRoot,
+      prepareImageBatchJobsIsolated: () => { const failure=outputContext.rejectOutput(); return { jobs:[],targetIndexes:[],errors:[{targetIndex:0,error:failure.message,errorCode:failure.code}] }; },
+      runImageBatch: async (jobs: unknown[]) => { transports += jobs.length; assert.equal(jobs.length,0); },
+    });
+    vm.runInContext(ts.transpileModule(rejectedDeclaration.getText(ast) + "\n" + declaration.getText(ast), { compilerOptions: {
+      module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022 } }).outputText.replace(/^exports\.generateBrandPostImages = generateBrandPostImages;$/mu, "") +
+      "\nthis.rejectOutput = rejectedThumbnailOutputError; this.generate = generateBrandPostImages;",outputContext);
+    const outputResults = await outputContext.generate({manifest:{brandLinkId:"fixture-product",connectKind:"TRAVEL",title:"상품",composition:{sections:[],renderNodes:[]}},
+      productName:"상품",requests:[heroTarget.request]}) as BrandPostImageGenerationResult[];
+    assert.equal(outputResults[0].errorCode,"IMAGE_OUTPUT_REJECTED");assert.equal(outputResults[0].generatedPath,null);assert.equal(transports,0);
+    const repairSource=fs.readFileSync("src/lib/brand-post-image-repair.ts","utf8"),repairAst=ts.createSourceFile("repair.ts",repairSource,ts.ScriptTarget.Latest,true);
+    const repairDeclaration=repairAst.statements.find(node=>ts.isFunctionDeclaration(node)&&node.name?.text==="repairBrandPostImages");assert(repairDeclaration);
+    let stored={version:"brand-post-package/v2",brandLinkId:"fixture-product",connectKind:"SHOPPING",title:"상품",composition:{sections:[],renderNodes:[]},imageGeneration:undefined as unknown};
+    let applies=0;
+    const repairContext=vm.createContext({exports:{},activeJobs:new Set(),controllers:new Map(),AbortController,process,setInterval,clearInterval,
+      acquireBrandPostImageRepairLock:()=>({ownerToken:"offline-owner",assertOwner(){},heartbeat(){},release(){}}),
+      packagePreview:()=>({imageSlots:[]})});
+    vm.runInContext(ts.transpileModule(repairDeclaration.getText(repairAst),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText
+      .replace(/^exports\.repairBrandPostImages = repairBrandPostImages;$/mu,"")+"\nthis.repair=repairBrandPostImages;",repairContext);
+    const repaired=await repairContext.repair({brandLinkId:"fixture-product",requests:[heroTarget.request]},
+      {read:()=>stored,write:(value:typeof stored)=>{stored=value;},apply:()=>{applies++;throw new Error("a rejected cached output must never attach");},
+        generate:async (options:{onResult:(result:BrandPostImageGenerationResult)=>Promise<void>})=>{for(const result of outputResults)await options.onResult(result);return outputResults;}});
+    assert.equal(applies,0);assert.equal(repaired.appliedCount,0);assert.match(repaired.errors[0],/IMAGE_OUTPUT_REJECTED:/u);
+    const outputResponse=await scenario("generate_missing",false,false,{errors:repaired.errors,appliedCount:0},422);
+    assert.equal(outputResponse.body.code,"IMAGE_OUTPUT_REJECTED");assert.equal(outputResponse.body.success,false);
+    const previousOutputPort=process.env.APP_PORT,outputServer=http.createServer((_request,reply)=>{reply.writeHead(outputResponse.status,{"content-type":"application/json"});reply.end(JSON.stringify(outputResponse.body));});
+    await new Promise<void>(resolve=>outputServer.listen(0,"127.0.0.1",resolve));process.env.APP_PORT=String((outputServer.address() as {port:number}).port);
+    try{await assert.rejects(localScheduleCall("/api/brandlinks/fixture/draft/images","POST",{action:"regenerate"}),
+      (error:unknown)=>(error as {code?:string;httpStatus?:number}).code==="IMAGE_OUTPUT_REJECTED"&&(error as {httpStatus?:number}).httpStatus===422);}
+    finally{if(previousOutputPort===undefined)delete process.env.APP_PORT;else process.env.APP_PORT=previousOutputPort;await new Promise<void>(resolve=>outputServer.close(()=>resolve()));}
+    for(const finalRecovery of [false,true]){
+      const actions:string[]=[];let rejected=false,approvalCalls=0;
+      const call:Call=async(url,method,body)=>{const action=(body as {action?:string}|undefined)?.action||method;actions.push(action);
+        if(url.endsWith("/images"))return {success:true,code:"IMAGE_OUTPUT_REJECTED",errors:[],remainingMissing:0};
+        if(action==="approve"){approvalCalls++;rejected=true;throw Object.assign(new Error("exact final audit failed"),{code:"PUBLISH_IMAGE_AUDIT_FAILED",errors:["SEMANTIC_REJECTION: unresolved thumbnail verdict"]});}
+        return {success:true,data:{connectKind:"SHOPPING",approvedAt:null,imageGeneration:{status:"complete"},imageAssets:[{assetKey:"b".repeat(64),role:"hero"}],
+          approval:{canApprove:false,blockers:rejected?[{code:"image-publication-rejected",reason:"대표 이미지 검수 실패"}]:[]},composition:{sections:[]},
+          imageSlots:finalRecovery?[]:[{sectionId:"scene",missing:1,generationMissing:1}],contentQuality:{signals:[]}}};};
+      await assert.rejects(runMaterialPreparation(`cached-output-${finalRecovery}`,{call,pause:async()=>{}}),
+        (error:unknown)=>finalRecovery?(error as {code?:string;causeCode?:string}).code==="PUBLISH_IMAGE_AUDIT_FAILED"&&(error as {causeCode?:string}).causeCode==="IMAGE_OUTPUT_REJECTED"
+          :(error as {code?:string}).code==="IMAGE_OUTPUT_REJECTED");
+      assert.equal(approvalCalls,finalRecovery?1:0);assert.equal(actions.filter(action=>action==="regenerate").length,finalRecovery?1:0);
+      assert(!actions.some(action=>["prepare_context","replan_sources","revise"].includes(action)),"typed rejection never grants source refresh, rewriting, or another generation");
+    }
     const conflictingPair = findProductSectionReviewConflicts({ assignments: [{ targetIndex: 1, selectedIndex: 1, reviewClass: "product-photo", reason: "positive" }],
       notSelected: [{ targetIndex: 1, selectedIndex: 1, reason: "identity unresolved" }] }, { targetCount: 1, candidateCount: 1, allowedPairs: new Set(["0:0"]) });
     assert.equal(conflictingPair.size, 1);
