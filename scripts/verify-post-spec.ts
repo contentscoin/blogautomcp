@@ -139,7 +139,7 @@ async function main() {
   const titleRules = renderTitleRules(groundedSpec);
   assert.match(titleRules, /25~35자는 권장 범위/u);
   assert.match(titleRules, /나열이나 절단은 하지/u);
-  assert.match(titleRules, /3개/u);
+  assert.match(titleRules, /제목 후보 5개/u);
   assert.doesNotMatch(titleRules, /제목에 반드시 포함/u);
   const requestedRules = renderTitleRules(groundedSpec, { memo: '제목은 정확히 "해피달링 아기비데"로 작성.' });
   assert.match(requestedRules, /공백·문장부호까지 그대로/u);
