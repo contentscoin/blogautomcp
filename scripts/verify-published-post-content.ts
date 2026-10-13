@@ -75,7 +75,8 @@ assert.equal(readPublishedNaverHtml(html.replace("2L 용량", "2L&nbsp;용량"),
 assert.equal(publishedPostIdentityMatches(pageUrl, "https://m.blog.naver.com/fixture/123"), true);
 assert.equal(publishedPostIdentityMatches(pageUrl, "https://blog.naver.com/fixture/999"), false);
 assert.equal(publishedPostIdentityMatches(pageUrl, "https://nid.naver.com/login"), false);
-assert.equal(publishedImageOriginalCandidate("https://postfiles.pstatic.net/a/file.png?type=w966"), "https://postfiles.pstatic.net/a/file.png");
+assert.equal(publishedImageOriginalCandidate("https://postfiles.pstatic.net/a/file.png?type=w966"), "https://blogfiles.pstatic.net/a/file.png", "Postfiles defaults to a small thumbnail; use the verified native upload host with the same canonical path");
+assert.equal(publishedImageOriginalCandidate("https://blogfiles.pstatic.net/a/file.png?type=w966"), "https://blogfiles.pstatic.net/a/file.png");
 for (const candidate of ["https://postfiles.pstatic.net.attacker.test/file.png", "http://postfiles.pstatic.net/file.png", "https://postfiles.pstatic.net:443/file.png?redirect=http://127.0.0.1", "https://127.0.0.1/file.png", "https://user:password@postfiles.pstatic.net/file.png", "https://postfiles.pstatic.net/file.png?secret=foo"]) assert.equal(publishedImageOriginalCandidate(candidate), null);
 
 const scheduledAt = new Date("2026-10-15T00:00:00Z");

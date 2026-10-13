@@ -151,12 +151,13 @@ export function readPublishedNaverHtml(html: string, pageUrl: string): Published
   return result;
 }
 
-/** Known resize query variants can be read as original candidates; the URL alone never proves image identity. */
+/** Read the canonical upload from blogfiles. Postfiles without type defaults to a thumbnail; bytes still require exact verification. */
 export function publishedImageOriginalCandidate(value: string): string | null {
   try {
     const url = new URL(value);
     if (url.protocol !== "https:" || !/^(?:blogfiles|postfiles)\.pstatic\.net$/iu.test(url.hostname) || url.username || url.password || url.port) return null;
     if (!/\.(?:png|jpe?g|webp)$/iu.test(url.pathname) || [...url.searchParams.keys()].some(key => key !== "type")) return null;
+    if (url.hostname === "postfiles.pstatic.net") url.hostname = "blogfiles.pstatic.net";
     url.searchParams.delete("type"); url.hash = "";
     return url.href;
   } catch { return null; }

@@ -88,7 +88,7 @@ const verify = async () => (await mod.exports.GET({}, { params: Promise.resolve(
   assert.equal(result.verificationBasis, 'live-post-probe');
   assert.equal(result.contentVerified, true);
   assert.equal(result.verificationStatus, 'verified');
-  assert.equal(fetches.at(-1).url, 'https://postfiles.pstatic.net/source/photo.png');
+  assert.equal(fetches.at(-1).url, 'https://blogfiles.pstatic.net/source/photo.png');
   assert.equal(fetches.at(-1).redirect, 'error');
   imageResponseBytes = Buffer.from('Naver reencoded bytes');
   result = await verify(); assert.equal(result.published, true); assert.equal(result.contentVerified, false); assert.equal(result.verificationStatus, 'partial');
