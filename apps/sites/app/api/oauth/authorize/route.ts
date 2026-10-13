@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { getChatGPTUser } from '@/app/chatgpt-auth';
 import { ensureAccount, canUseMcp } from '@/lib/account';
 import { hasTrustedBrowserOrigin } from '@/lib/http';
-import { authorizationErrorCallback, issueAuthorizationCode, oauthIssuer, parseAuthorizationRequest, readOAuthForm, trustedSiteOrigin, validateChatGPTClientMetadata, type AuthorizationError } from '@/lib/oauth';
+import { applyOfflineAccessConsent, authorizationErrorCallback, issueAuthorizationCode, oauthIssuer, parseAuthorizationRequest, readOAuthForm, trustedSiteOrigin, validateChatGPTClientMetadata, type AuthorizationError } from '@/lib/oauth';
 
 const HEADERS = { 'cache-control': 'no-store', pragma: 'no-cache', 'referrer-policy': 'no-referrer' };
 
@@ -20,13 +20,15 @@ export async function POST(request: Request) {
   if (!form) return errorResponse(origin, null, 'invalid_request', 400);
   const parsed = parseAuthorizationRequest(form, origin);
   if (!parsed.ok) return errorResponse(origin, form, parsed.errorCode, 400);
+  const consented = applyOfflineAccessConsent(parsed.value, form);
+  if (!consented.ok) return errorResponse(origin, form, consented.errorCode, 400);
   if (!await validateChatGPTClientMetadata()) return errorResponse(origin, form, 'temporarily_unavailable', 503);
   try {
     const identity = await getChatGPTUser();
     if (!identity) return errorResponse(origin, form, 'access_denied', 401);
     const account = await ensureAccount(identity);
     if (!canUseMcp(account)) return errorResponse(origin, form, 'access_denied', 403);
-    const code = await issueAuthorizationCode(account.id, parsed.value);
+    const code = await issueAuthorizationCode(account.id, consented.value);
     const target = new URL(parsed.value.redirectUri);
     target.searchParams.set('code', code);
     target.searchParams.set('state', parsed.value.state);

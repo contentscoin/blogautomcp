@@ -4,6 +4,7 @@ import { hashToken, randomToken, safeEqualText } from '@/lib/crypto';
 
 export const OAUTH_SCOPES = ['mcp:read', 'mcp:write', 'offline_access'] as const;
 export const DEFAULT_OAUTH_SCOPE = OAUTH_SCOPES.join(' ');
+export const OFFLINE_ACCESS_CONSENT_FIELD = 'allow_offline_access';
 export const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000;
 export const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const AUTHORIZATION_CODE_TTL_MS = 5 * 60 * 1000;
@@ -188,6 +189,15 @@ export function parseAuthorizationRequest(
       state,
     },
   };
+}
+
+/** Resource-owner consent may add only connection renewal, never MCP read/write access. */
+export function applyOfflineAccessConsent(request: AuthorizationRequest, input: URLSearchParams):
+  { ok: true; value: AuthorizationRequest } | { ok: false; errorCode: 'invalid_request' } {
+  const consent = input.getAll(OFFLINE_ACCESS_CONSENT_FIELD);
+  if (consent.length > 1 || consent.length === 1 && consent[0] !== '1') return { ok: false, errorCode: 'invalid_request' };
+  if (consent.length === 0 || hasOAuthScope(request.scope, 'offline_access')) return { ok: true, value: request };
+  return { ok: true, value: { ...request, scope: `${request.scope} offline_access` } };
 }
 
 export async function issueAuthorizationCode(userId: string, request: AuthorizationRequest): Promise<string> {

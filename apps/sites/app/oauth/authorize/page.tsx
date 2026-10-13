@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { requireChatGPTUser } from '@/app/chatgpt-auth';
 import { ensureAccount, canUseMcp } from '@/lib/account';
-import { hasOAuthScope, parseAuthorizationRequest, trustedSiteOriginValue, validateChatGPTClientMetadata } from '@/lib/oauth';
+import { hasOAuthScope, OFFLINE_ACCESS_CONSENT_FIELD, parseAuthorizationRequest, trustedSiteOriginValue, validateChatGPTClientMetadata } from '@/lib/oauth';
 
 export const dynamic = 'force-dynamic';
 
@@ -42,10 +42,17 @@ export default async function OAuthAuthorizePage({ searchParams }: Props) {
               {hasOAuthScope(parsed.value.scope, 'offline_access') && <li><span>✓</span> 연결을 유지하기 위한 토큰 자동 갱신</li>}
             </ul>
             {!hasOAuthScope(parsed.value.scope, 'offline_access') && (
-              <p className="oauth-note">자동 갱신 권한이 없는 연결은 약 1시간 후 다시 연결해야 합니다. 지속적으로 사용하려면 ChatGPT에서 플러그인 정보를 새로고침한 뒤 재연결하세요.</p>
+              <p className="oauth-note">아래에서 자동 갱신을 허용하면 ChatGPT 연결을 유지할 수 있습니다. 선택하지 않으면 약 1시간 후 다시 연결해야 합니다.</p>
             )}
             <form action="/api/oauth/authorize" method="post">
-              {Array.from(query.entries()).map(([key, value]) => <input key={key} type="hidden" name={key} value={value} />)}
+              {Array.from(query.entries()).filter(([key]) => key !== OFFLINE_ACCESS_CONSENT_FIELD)
+                .map(([key, value]) => <input key={key} type="hidden" name={key} value={value} />)}
+              {!hasOAuthScope(parsed.value.scope, 'offline_access') && (
+                <label className="oauth-note">
+                  <input type="checkbox" name={OFFLINE_ACCESS_CONSENT_FIELD} value="1" />{' '}
+                  ChatGPT 연결 유지와 토큰 자동 갱신을 허용합니다
+                </label>
+              )}
               <button className="button button-primary oauth-button" type="submit">이 계정으로 연결</button>
             </form>
             <p className="oauth-note">연결을 해제하거나 계정 승인이 취소되면 MCP 접근도 중단됩니다.</p>

@@ -44,6 +44,15 @@ function validatorWorker() {
     })();
     export default {
       async fetch(request, env) {
+        if (new URL(request.url).pathname === '/consent') {
+          const form = new URL(request.url).searchParams;
+          const parsed = oauth.parseAuthorizationRequest(form, 'https://blogautomcp.hiway350051.chatgpt.site');
+          if (!parsed.ok) return Response.json({ ok: false, error: parsed.errorCode });
+          const consented = oauth.applyOfflineAccessConsent(parsed.value, form);
+          return Response.json(consented.ok ? { ok: true, scope: consented.value.scope,
+            originalScope: parsed.value.scope, unchangedState: consented.value.state === parsed.value.state,
+            unchangedPkce: consented.value.codeChallenge === parsed.value.codeChallenge } : { ok: false, error: consented.errorCode });
+        }
         const valid = await oauth.validateChatGPTClientMetadata();
         const counts = await (await env.FIXTURE.fetch('https://fixture.invalid/counts')).json();
         return Response.json({ valid, ...counts });
@@ -120,6 +129,23 @@ test('the actual CIMD validator works in workerd and never follows metadata redi
           unexpectedRequests: 0,
         });
       });
+    }
+    const worker = await runtime.getWorker('validator-valid');
+    const base = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, response_type: 'code',
+      code_challenge: 'a'.repeat(43), code_challenge_method: 'S256', resource: 'https://blogautomcp.hiway350051.chatgpt.site/api/mcp',
+      scope: 'mcp:read', state: 'preserved-worker-state' });
+    for (const [scope, consent, expected] of [
+      ['mcp:read', [], { ok: true, scope: 'mcp:read', originalScope: 'mcp:read', unchangedState: true, unchangedPkce: true }],
+      ['mcp:read', ['1'], { ok: true, scope: 'mcp:read offline_access', originalScope: 'mcp:read', unchangedState: true, unchangedPkce: true }],
+      ['mcp:read offline_access', ['1'], { ok: true, scope: 'mcp:read offline_access', originalScope: 'mcp:read offline_access', unchangedState: true, unchangedPkce: true }],
+      ['mcp:read', ['1', '1'], { ok: false, error: 'invalid_request' }],
+      ['mcp:read', ['mcp:write'], { ok: false, error: 'invalid_request' }],
+    ]) {
+      const form = new URLSearchParams(base); form.set('scope', scope);
+      for (const value of consent) form.append('allow_offline_access', value);
+      form.set('extra_scope', 'mcp:write');
+      const response = await worker.fetch(`https://validator.invalid/consent?${form}`);
+      assert.deepEqual(await response.json(), expected, 'workerd preserves the same exact opt-in and no-write-escalation contract');
     }
   } finally {
     await runtime.dispose();

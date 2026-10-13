@@ -286,8 +286,10 @@ test('consent reflects read/write/offline scopes and keeps duplicate query value
   try {
     const page = f.load('app/oauth/authorize/page.tsx').default;
     const read = renderToStaticMarkup(await page({ searchParams: Promise.resolve(Object.fromEntries(authorization('mcp:read'))) }));
-    assert.match(read, /상품 및 작업 상태 조회/u); assert.doesNotMatch(read, /초안 생성과 예약 작업 요청|발행 요청|토큰 자동 갱신/u);
-    assert.match(read, /자동 갱신 권한이 없는 연결.*약 1시간.*플러그인 정보를 새로고침.*재연결/u);
+    assert.match(read, /상품 및 작업 상태 조회/u); assert.doesNotMatch(read, /초안 생성과 예약 작업 요청|발행 요청/u);
+    assert.match(read, /선택하지 않으면 약 1시간 후 다시 연결/u);
+    assert.match(read, /type="checkbox" name="allow_offline_access" value="1"/u);
+    assert.doesNotMatch(read, /\bchecked(?:=|\s|>)/u, 'renewal consent is never preselected');
     assert.match(read, /name="scope" value="mcp:read"/u, 'the note cannot silently expand the requested scope');
     const write = renderToStaticMarkup(await page({ searchParams: Promise.resolve(Object.fromEntries(authorization('mcp:write offline_access'))) }));
     assert.match(write, /초안 생성과 예약 작업 요청/u); assert.match(write, /토큰 자동 갱신/u); assert.doesNotMatch(write, /상품 및 작업 상태 조회/u);
@@ -295,5 +297,116 @@ test('consent reflects read/write/offline scopes and keeps duplicate query value
     assert.match(write, /name="scope" value="mcp:write offline_access"/u);
     const invalid = renderToStaticMarkup(await page({ searchParams: Promise.resolve({ ...Object.fromEntries(authorization()), scope: ['mcp:read', 'mcp:write'] }) }));
     assert.match(invalid, /중복된 OAuth 매개변수/u); assert.doesNotMatch(invalid, /이 계정으로 연결/u);
+  } finally { f.db.close(); }
+});
+
+function submittedPageForm(html, checked = false) {
+  const form = new URLSearchParams();
+  const decode = value => value.replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+  for (const [input] of html.matchAll(/<input\b[^>]*>/g)) {
+    if (!/type="hidden"/.test(input) && !(checked && /type="checkbox"/.test(input))) continue;
+    const name = /\bname="([^"]+)"/.exec(input)?.[1];
+    const value = /\bvalue="([^"]*)"/.exec(input)?.[1] || '';
+    if (name) form.append(decode(name), decode(value));
+  }
+  return form;
+}
+
+test('actual consent page to authorization, token and refresh adds only explicitly chosen renewal access', async t => {
+  for (const [name, scope, checked, injectedQuery] of [
+    ['read only opts in despite GET consent injection', 'mcp:read', true, { allow_offline_access: ['1', '1'], extra_scope: 'mcp:write' }],
+    ['write only opts in without acquiring read', 'mcp:write', true, {}],
+    ['read and write opts in', 'mcp:read mcp:write', true, {}],
+    ['unchecked injected consent remains an expiring read only grant', 'mcp:read', false, { allow_offline_access: '1' }],
+    ['already requested renewal remains unchanged', 'mcp:read offline_access', false, { allow_offline_access: '1' }],
+  ]) await t.test(name, async () => {
+    const f = await fixture();
+    try {
+      const page = f.load('app/oauth/authorize/page.tsx').default;
+      const query = { ...Object.fromEntries(authorization(scope)), nonce: 'preserved-test-nonce', ...injectedQuery };
+      const html = renderToStaticMarkup(await page({ searchParams: Promise.resolve(query) }));
+      const inputs = Array.from(html.matchAll(/<input\b[^>]*>/g), match => match[0]);
+      assert.equal(inputs.filter(input => /type="hidden"/.test(input) && /name="allow_offline_access"/.test(input)).length, 0,
+        'a query parameter cannot become hidden user consent');
+      assert.equal(inputs.filter(input => /type="checkbox"/.test(input)).length, scope.includes('offline_access') ? 0 : 1);
+      assert.doesNotMatch(html, /\bchecked(?:=|\s|>)/u);
+      const form = submittedPageForm(html, checked);
+      assert.equal(form.get('scope'), scope, 'the original requested read/write scopes remain immutable hidden inputs');
+      assert.equal(form.get('state'), 'preserved-state'); assert.equal(form.get('nonce'), 'preserved-test-nonce');
+      assert.equal(form.getAll('allow_offline_access').length, checked && !scope.includes('offline_access') ? 1 : 0);
+      const response = await f.authorize.POST(formRequest(form));
+      assert.equal(response.status, 303);
+      const callback = new URL(response.headers.get('location'));
+      assert.equal(callback.origin + callback.pathname, redirectUri);
+      assert.equal(callback.searchParams.get('state'), 'preserved-state'); assert.equal(callback.searchParams.get('iss'), origin);
+      const grantedScope = scope.includes('offline_access') || !checked ? scope : `${scope} offline_access`;
+      assert.equal(f.db.prepare('SELECT scope FROM oauth_authorization_codes').get().scope, grantedScope);
+      const tokenForm = new URLSearchParams({ grant_type: 'authorization_code', code: callback.searchParams.get('code'),
+        client_id: clientId, redirect_uri: redirectUri, resource: `${origin}/api/mcp`, code_verifier: verifier });
+      const issuedResponse = await f.token.POST(formRequest(tokenForm, `${origin}/oauth/token`));
+      assert.equal(issuedResponse.status, 200); assert.equal(issuedResponse.headers.get('cache-control'), 'no-store');
+      const issued = await issuedResponse.json();
+      assert.equal(issued.scope, grantedScope); assert.equal(issued.expires_in, 3600);
+      assert.equal(f.oauth.hasOAuthScope(issued.scope, 'mcp:read'), scope.split(' ').includes('mcp:read'));
+      assert.equal(f.oauth.hasOAuthScope(issued.scope, 'mcp:write'), scope.split(' ').includes('mcp:write'));
+      assert.equal(typeof issued.refresh_token === 'string', grantedScope.includes('offline_access'));
+      const stored = f.db.prepare('SELECT scope,refresh_token_hash,refresh_expires_at FROM oauth_tokens').get();
+      assert.equal(stored.scope, grantedScope); assert.equal(stored.refresh_token_hash !== null, grantedScope.includes('offline_access'));
+      if (issued.refresh_token) {
+        const refreshForm = new URLSearchParams({ grant_type: 'refresh_token', client_id: clientId,
+          resource: `${origin}/api/mcp`, refresh_token: issued.refresh_token });
+        const refreshResponse = await f.token.POST(formRequest(refreshForm, `${origin}/oauth/token`));
+        assert.equal(refreshResponse.status, 200);
+        const refreshed = await refreshResponse.json();
+        assert.equal(refreshed.scope, grantedScope); assert.equal(typeof refreshed.refresh_token, 'string');
+        assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM oauth_tokens WHERE status='ROTATED'").get().n, 1);
+        assert.equal(await f.refresh(issued.refresh_token), null, 'rotation remains single use');
+        const downgraded = await f.refresh(refreshed.refresh_token, { scope: scope.replace(' offline_access', '') });
+        assert.equal(downgraded.refresh_token, undefined, 'an explicit refresh downscope still ends renewal permission');
+      }
+    } finally { f.db.close(); }
+  });
+});
+
+test('renewal consent is bounded and never bypasses existing authorization guards', async t => {
+  for (const [name, mutate, expected] of [
+    ['duplicate opt in', form => { form.set('allow_offline_access', '1'); form.append('allow_offline_access', '1'); }, 'invalid_request'],
+    ['empty consent', form => form.set('allow_offline_access', ''), 'invalid_request'],
+    ['false consent', form => form.set('allow_offline_access', '0'), 'invalid_request'],
+    ['arbitrary extra scope value', form => form.set('allow_offline_access', 'mcp:write offline_access'), 'invalid_request'],
+    ['bad PKCE despite consent', form => { form.set('allow_offline_access', '1'); form.set('code_challenge_method', 'plain'); }, 'invalid_request'],
+    ['bad resource despite consent', form => { form.set('allow_offline_access', '1'); form.set('resource', 'https://untrusted.invalid/api/mcp'); }, 'invalid_request'],
+    ['duplicate state despite consent', form => { form.set('allow_offline_access', '1'); form.append('state', 'untrusted-state'); }, 'invalid_request'],
+    ['scope pollution despite consent', form => { form.set('allow_offline_access', '1'); form.append('scope', 'mcp:write'); }, 'invalid_request'],
+  ]) await t.test(name, async () => {
+    const f = await fixture();
+    try {
+      const form = authorization('mcp:read'); mutate(form);
+      const response = await f.authorize.POST(formRequest(form));
+      assert.equal(response.status, 303);
+      assert.equal(new URL(response.headers.get('location')).searchParams.get('error'), expected);
+      assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM oauth_authorization_codes').get().n, 0);
+      assert.equal(f.fetchCalls(), 0, 'invalid input stops before metadata or account work');
+    } finally { f.db.close(); }
+  });
+  const f = await fixture();
+  try {
+    const parsed = f.oauth.parseAuthorizationRequest(authorization('mcp:read'), origin);
+    const consentForm = new URLSearchParams({ allow_offline_access: '1', extra_scope: 'mcp:write' });
+    const result = f.oauth.applyOfflineAccessConsent(parsed.value, consentForm);
+    assert.deepEqual(result.value, { ...parsed.value, scope: 'mcp:read offline_access' });
+    assert.equal(parsed.value.scope, 'mcp:read', 'the original validated authorization request is not mutated');
+    assert.equal(f.oauth.applyOfflineAccessConsent(parsed.value, new URLSearchParams()).value, parsed.value);
+    for (const mutate of [form => form.set('client_id', 'untrusted'), form => form.set('redirect_uri', 'https://untrusted.invalid/callback')]) {
+      const form = authorization('mcp:read'); form.set('allow_offline_access', '1'); mutate(form);
+      const response = await f.authorize.POST(formRequest(form));
+      assert.equal(response.status, 400); assert.equal(response.headers.has('location'), false);
+    }
+    const form = authorization('mcp:read'); form.set('allow_offline_access', '1');
+    assert.equal((await f.authorize.POST(formRequest(form, undefined, { origin: 'https://untrusted.invalid' }))).status, 403);
+    f.db.prepare('UPDATE users SET status=? WHERE id=?').run('PENDING_APPROVAL', 'user-a');
+    const denied = await f.authorize.POST(formRequest(form));
+    assert.equal(new URL(denied.headers.get('location')).searchParams.get('error'), 'access_denied');
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM oauth_authorization_codes').get().n, 0);
   } finally { f.db.close(); }
 });
