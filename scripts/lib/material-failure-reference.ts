@@ -115,6 +115,7 @@ const GUIDANCE: Record<string, string> = {
   SOURCE_EVIDENCE_REQUIRED: "확정된 상품 근거가 충분한지 다시 확인하고 부족한 사실을 추정하지 않습니다.",
   IMAGE_SOURCE_BINDING_REQUIRED: "선택 상품·옵션의 원본 사진을 먼저 배정하고 원본 슬롯을 연출 사진으로 대신하지 않습니다.",
   SOURCE_REVIEW_INCOMPLETE: "원본 후보의 누락된 픽셀 판정을 확인하며 미검토 후보를 원본 부족이나 거절로 처리하지 않습니다. 새 이미지 생성으로 대신하지 않습니다.",
+  SOURCE_REVIEW_CONFLICT: "동일 입력의 원본 판정 중복을 확인하고 미검토 원본을 부족으로 단정하지 않습니다. 확정 거절과 기존 재시도 한도를 유지합니다.",
   PRODUCT_SOURCE_REQUIRED: "선택 상품·옵션의 원본 사진 근거를 먼저 확인합니다.",
   PRODUCT_REFERENCE_REQUIRED: "선택 상품의 검증 원본을 생성 레퍼런스로 연결합니다.",
   REFERENCE_SCENE_FIDELITY_FAILED: "실패 슬롯의 제품 형상·옵션·라벨을 원본에 고정하고 장면만 자연스럽게 연출합니다.",

@@ -20,6 +20,7 @@ import type { ProductSectionImageReviewOptions } from "./lib/product-photo-revie
 import type { generateBrandPostImages as Generate, BrandPostImageGenerationResult } from "../src/lib/brand-post-image-generation";
 import { checkedExistingJobResult, collectCompletedProductCandidates, existingJobResult, readLegacyCodexImageCompletion, type ImageBatchJob } from "../src/lib/codex-image-generation";
 import { buildSellerOriginalRepairTarget } from "./lib/seller-original-repair-target";
+import * as productSourceAuditContext from "./lib/product-source-audit-context";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-image-batch-"));
 const rawPath = path.join(root, "raw.png");
@@ -112,6 +113,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       "../../scripts/lib/publish-image-rejections": { rejectedPublicationImageHashes: () => [] },
       "../../scripts/lib/publish-image-audit": { buildSelectedProductImageAuditContext },
       "../../scripts/lib/seller-original-repair-target": { buildSellerOriginalRepairTarget },
+      "../../scripts/lib/product-source-audit-context": productSourceAuditContext,
       "../../scripts/lib/image-timeout-policy": imagePolicy,
       "node:child_process": {
         spawn(_command: string, args: string[], options: { windowsHide: boolean; shell: boolean }) {

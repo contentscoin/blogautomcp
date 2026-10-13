@@ -4984,7 +4984,8 @@ async function step2_generatePost(product: ProductInfo, brandLink: string, produ
     return step2_generatePostAfterPreflight(product, brandLink, productId, connectKind, specInput, productIdentity);
   };
   if (specInput?.submittedPrewritingPhotoProof) return continueWithPhoto(specInput.submittedPrewritingPhotoProof);
-  return withShoppingPrewritePhoto({ snapshot, candidatePaths: [product.representativeImagePath || "", ...product.imagePaths].filter(Boolean) }, continueWithPhoto,
+  return withShoppingPrewritePhoto({ snapshot, selectedSourceDirectory: TEMP_PATH,
+    candidatePaths: [product.representativeImagePath || "", ...product.imagePaths].filter(Boolean) }, continueWithPhoto,
     { select: selectShoppingPrewriteOriginal, recoverSourcePixels: async () => {
     const recovered = await recoverProductPhotoRegion({ productName: product.name, localCandidates: product.imagePaths,
       sourceImageUrls: product.sourceImageUrls, outputDir: TEMP_PATH,

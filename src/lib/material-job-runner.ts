@@ -178,8 +178,8 @@ export async function runMaterialJob(job: MaterialJob, deps: {
       let contextSignature: string | undefined;
       try { currentRevision = deps.material(item.productId)?.revision; } catch { /* Keep a scope-less observation; never feed it to a writer. */ }
       try { contextSignature = readMaterialFailureScopeForProduct(item.productId)?.contextSignature; } catch { /* A missing context cannot be inferred. */ }
-      const typedSections = (error as { imageAuditFailures?: Array<{ photoDescription?: { sectionId?: string } }> })?.imageAuditFailures
-        ?.flatMap(finding => finding.photoDescription?.sectionId ? [finding.photoDescription.sectionId] : []) || [];
+      const typedSections = (error as { imageAuditFailures?: Array<{ sectionId?: string | null; photoDescription?: { sectionId?: string } }> })?.imageAuditFailures
+        ?.flatMap(finding => finding.sectionId ? [finding.sectionId] : finding.photoDescription?.sectionId ? [finding.photoDescription.sectionId] : []) || [];
       if (job.kind === "rewrite" || job.kind === "repair") {
         try {
           const current = deps.material(item.productId);

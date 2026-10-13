@@ -6,9 +6,14 @@ import os from "node:os";
 import crypto from "node:crypto";
 import vm from "node:vm";
 import ts from "typescript";
-import { runMaterialPreparation, type Call, type Result } from "./lib/scheduled-draft-workflow";
+import http from "node:http";
+import { runMaterialPreparation, localScheduleCall, type Call, type Result } from "./lib/scheduled-draft-workflow";
+import { sourceReviewFailureForSlot } from "./lib/product-source-audit-context";
+import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
+import { findProductSectionReviewConflicts } from "./lib/product-section-review-conflicts";
+import type { BrandPostImageGenerationResult } from "../src/lib/brand-post-image-generation";
 
-async function scenario(action: string, legacy = true, travel = false, repairResult?: { errors: string[]; appliedCount: number }) {
+async function scenario(action: string, legacy = true, travel = false, repairResult?: { errors: string[]; appliedCount: number }, expectedStatus = 200) {
   let migrations = 0;
   let generations = 0;
   let wholePlans = 0;
@@ -61,7 +66,7 @@ async function scenario(action: string, legacy = true, travel = false, repairRes
     assert.equal(generations, 0);
     assert.equal(wholePlans, 0);
   } else {
-    assert.equal(response.status, 200);
+    assert.equal(response.status, expectedStatus);
     assert.equal(migrations, legacy && !travel ? 1 : 0);
     assert.equal(generations, 1);
     assert.equal(wholePlans, 1);
@@ -132,6 +137,65 @@ async function main() {
       assert(!actions.some(action => ["prepare_context", "generate_missing", "regenerate", "replan_sources", "revise"].includes(action)),
         "source-only continuation never grants a generic retry, source refresh or whole manuscript rewrite");
     }
+    const candidate = path.join(fixtureRoot, "seller-original.png"); fs.writeFileSync(candidate, "intact fixture source bytes");
+    const candidateSha = crypto.createHash("sha256").update(fs.readFileSync(candidate)).digest("hex");
+    const snapshot = createProductSnapshot({ productId: "source-conflict-fixture", connectKind: "SHOPPING", externalProductId: "sku",
+      sourceUrl: "https://brand.naver.com/fixture/products/1", product: { name: "상품", features: ["선택 옵션"], referenceImageUrls: [] } });
+    const source = fs.readFileSync("src/lib/brand-post-image-generation.ts", "utf8");
+    const ast = ts.createSourceFile("brand-post-image-generation.ts", source, ts.ScriptTarget.Latest, true);
+    const declaration = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "generateBrandPostImages");
+    assert(declaration, "exercise the actual source-generation orchestration, including its catch and failed-slot mapping");
+    const conflictingPair = findProductSectionReviewConflicts({ assignments: [{ targetIndex: 1, selectedIndex: 1, reviewClass: "product-photo", reason: "positive" }],
+      notSelected: [{ targetIndex: 1, selectedIndex: 1, reason: "identity unresolved" }] }, { targetCount: 1, candidateCount: 1, allowedPairs: new Set(["0:0"]) });
+    assert.equal(conflictingPair.size, 1);
+    for (const mode of ["typed-error", "unfilled-conflict"] as const) {
+      const target = { request: { requestId: "original", sectionId: "original" }, sectionId: "original", role: "body",
+        sectionTitle: "상품 외형", imageIntent: "판매자 원본 상품 외형", imageSource: "seller-original", bodyExcerpt: "확인된 상품 정보" };
+      const context = vm.createContext({ exports: {}, fs, path, sourceReviewFailureForSlot,
+        resolveBrandPostImageSlots: (_manifest: unknown, requests: unknown[]) => requests, resolveTarget: () => target,
+        normalizePackageImageAssets: () => [], getUsedShoppingProductSources: () => [], readProductPhotoSource: () => null,
+        getBrandPostPackageDir: () => fixtureRoot, readSavedProductSourceCandidates: () => [candidate],
+        collectShoppingProductSourceCandidates: async (input: { localCandidates: string[] }) => input.localCandidates,
+        sha256File: () => candidateSha, allowsShoppingReferenceScene: () => false, isShoppingLifestyleImage: () => false,
+        allowsGenericBrandPostProductPhoto: () => true, allowsOriginalShoppingScene: () => false, rejectedPublicationImageHashes: () => [],
+        buildSelectedProductImageAuditContext: () => "selected exact facts", atomicWriteTextFile: () => {},
+        selectVerifiedProductSectionImages: async (_paths: string[], _name: string, _targets: unknown[], options: {
+          selectedSourceSnapshot: unknown; selectedSourceProductId: string; selectedSourceDirectory: string; sourceSnapshotId: string;
+          onDiagnostics: (report: unknown) => void }) => {
+          assert.equal(options.selectedSourceSnapshot, snapshot); assert.equal(options.selectedSourceProductId, snapshot.productId);
+          assert.equal(options.selectedSourceDirectory, path.join(fixtureRoot, "product-sources")); assert.equal(options.sourceSnapshotId, snapshot.snapshotId);
+          if (mode === "typed-error") throw Object.assign(new Error("server-detected pair conflict"), { code: "SOURCE_REVIEW_CONFLICT" });
+          options.onDiagnostics({ version: 1, status: "incomplete", cacheHit: false, errorCode: "SOURCE_REVIEW_CONFLICT",
+            error: "SOURCE_REVIEW_CONFLICT: the completed response has one unresolved pair", entries: [{ targetIndex: 0,
+              path: candidate, sourceSha256: candidateSha, status: "review-failed", suitability: "unreviewed", failureCode: "SOURCE_REVIEW_CONFLICT" }] });
+          return [];
+        },
+      });
+      vm.runInContext(ts.transpileModule(declaration.getText(ast), { compilerOptions: { module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022 } }).outputText.replace(/^exports\.generateBrandPostImages = generateBrandPostImages;$/mu, "") +
+        "\nthis.generate = generateBrandPostImages;", context);
+      const generated = await context.generate({ sourceOnly: true, manifest: { brandLinkId: snapshot.productId, connectKind: "SHOPPING",
+        title: "상품", sourceSnapshot: snapshot, imageAssets: [], composition: { sections: [], renderNodes: [] } },
+        productName: "상품", requests: [target.request] }) as BrandPostImageGenerationResult[];
+      assert.equal(generated.length, 1); assert.equal(generated[0].generatedPath, null);
+      assert.equal(generated[0].errorCode, "SOURCE_REVIEW_CONFLICT"); assert.match(generated[0].error!, /^SOURCE_REVIEW_CONFLICT:/u);
+      const errors = generated.map(result => `${result.sectionId}: ${result.error}`);
+      const response = await scenario("bind_sources", false, false, { errors, appliedCount: 0 }, 422);
+      assert.equal(response.body.code, "SOURCE_REVIEW_CONFLICT"); assert.equal(response.status, 422);
+      const previousPort = process.env.APP_PORT;
+      const server = http.createServer((_request, reply) => {
+        reply.writeHead(response.status, { "content-type": "application/json" }); reply.end(JSON.stringify(response.body));
+      });
+      await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+      process.env.APP_PORT = String((server.address() as { port: number }).port);
+      try { await assert.rejects(localScheduleCall("/api/brandlinks/fixture/draft/images", "POST", { action: "bind_sources" }),
+        (error: unknown) => (error as { code?: string; httpStatus?: number }).code === "SOURCE_REVIEW_CONFLICT" &&
+          (error as { httpStatus?: number }).httpStatus === 422); }
+      finally { if (previousPort === undefined) delete process.env.APP_PORT; else process.env.APP_PORT = previousPort;
+        await new Promise<void>(resolve => server.close(() => resolve())); }
+    }
+    assert.equal(sourceReviewFailureForSlot(new Error("plain conflicting description")).errorCode, undefined,
+      "the source code is never inferred from untyped model prose");
   } finally {
     if (previousRoot === undefined) delete process.env.DESKTOP_USER_DATA; else process.env.DESKTOP_USER_DATA = previousRoot;
     fs.rmSync(fixtureRoot, { recursive: true, force: true });

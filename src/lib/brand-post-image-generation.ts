@@ -6,6 +6,7 @@ import {
   readSavedProductSourceCandidates,
 } from "../../scripts/lib/product-photo-source";
 import { selectVerifiedProductSectionImages, type ProductSectionImageDiagnostics } from "../../scripts/lib/product-photo-review";
+import { sourceReviewFailureForSlot } from "../../scripts/lib/product-source-audit-context";
 import { buildSellerOriginalRepairTarget } from "../../scripts/lib/seller-original-repair-target";
 import { buildSelectedProductImageAuditContext } from "../../scripts/lib/publish-image-audit";
 import { rejectedPublicationImageHashes } from "../../scripts/lib/publish-image-rejections";
@@ -74,6 +75,7 @@ export interface BrandPostImageGenerationResult {
   referenceScene?: BrandPostPackageImageAsset["referenceScene"];
   imageIntent: string;
   error?: string;
+  errorCode?: "SOURCE_REVIEW_CONFLICT";
 }
 
 export interface ResolvedImageTarget {
@@ -1359,6 +1361,7 @@ export async function generateBrandPostImages(options: {
     if (targets.length === 0) return results;
     const sourceAssignedAssetHashes = new Set<string>();
     let sourceError: string | undefined;
+    let sourceErrorCode: "SOURCE_REVIEW_CONFLICT" | undefined;
     let semanticCandidateCount = 0;
 
     const packageAssets = normalizePackageImageAssets(options.manifest);
@@ -1446,7 +1449,7 @@ export async function generateBrandPostImages(options: {
       try {
         const reviewed = await selectVerifiedProductSectionImages(
           directSources.map(source => source.path),
-          options.productName,
+          String(options.manifest.sourceSnapshot?.product.name || options.productName),
           eligibleTargets.map(({ target }) => {
             // Match final publication audit context exactly, including paragraphs
             // beyond the short prompt excerpt. Planning intent cannot authorize
@@ -1465,9 +1468,11 @@ export async function generateBrandPostImages(options: {
           { selectedProduct: buildSelectedProductImageAuditContext(
             String(options.manifest.sourceSnapshot?.product.name || options.productName),
             Array.isArray(options.manifest.sourceSnapshot?.product.features)
-              ? options.manifest.sourceSnapshot.product.features.map(String) : [],
+              ? options.manifest.sourceSnapshot.product.features.filter((feature): feature is string => typeof feature === "string") : [],
             options.manifest.productUnderstanding,
-          ), onDiagnostics: report => {
+          ), ...(options.manifest.sourceSnapshot ? { selectedSourceSnapshot: options.manifest.sourceSnapshot,
+            selectedSourceProductId: options.manifest.brandLinkId, selectedSourceDirectory: outputDir,
+            sourceSnapshotId: options.manifest.sourceSnapshot.snapshotId } : {}), onDiagnostics: report => {
             sourceDiagnostics = report;
             const packageDir = getBrandPostPackageDir(options.manifest.brandLinkId);
             atomicWriteTextFile(path.join(packageDir, "image-source-diagnostics.json"), JSON.stringify({
@@ -1494,7 +1499,9 @@ export async function generateBrandPostImages(options: {
           if (eligible) reviewedByTarget.set(eligible.targetIndex, assignment);
         }
       } catch (error) {
-        sourceError ||= error instanceof Error ? error.message : String(error);
+        const failure = sourceReviewFailureForSlot(error);
+        if (failure.errorCode) { sourceError = failure.error; sourceErrorCode = failure.errorCode; }
+        else sourceError ||= failure.error;
       }
     }
 
@@ -1593,7 +1600,13 @@ export async function generateBrandPostImages(options: {
       ...baseResult(index),
       sectionId: target.sectionId,
       imageIntent: target.imageIntent,
-      error: sourceError || (sourceDiagnostics?.status === "incomplete"
+      ...(sourceErrorCode || sourceDiagnostics?.errorCode === "SOURCE_REVIEW_CONFLICT" && sourceDiagnostics.entries.some(entry =>
+        entry.targetIndex === eligibleTargets.findIndex(eligible => eligible.target === target) && entry.failureCode === "SOURCE_REVIEW_CONFLICT")
+        ? { errorCode: "SOURCE_REVIEW_CONFLICT" as const } : {}),
+      error: sourceError || (sourceDiagnostics?.errorCode === "SOURCE_REVIEW_CONFLICT" && sourceDiagnostics.entries.some(entry =>
+        entry.targetIndex === eligibleTargets.findIndex(eligible => eligible.target === target) && entry.failureCode === "SOURCE_REVIEW_CONFLICT")
+        ? sourceDiagnostics.error
+        : sourceDiagnostics?.status === "incomplete"
         ? "SOURCE_REVIEW_INCOMPLETE: 판매자 원본 후보 일부의 실제 픽셀 판정이 누락됐습니다. 제한된 추가 검토 후에도 미검토 후보가 남아 원본 부족이나 검증 완료로 처리하지 않았습니다. 기존 원고·사진은 보존했습니다."
         : target.imageSource === "seller-original"
         ? buildSellerOriginalRepairTarget({ sectionId: target.sectionId || "unknown",
@@ -1610,7 +1623,7 @@ export async function generateBrandPostImages(options: {
       const error = sourceError || (semanticCandidateCount > 0
         ? "IMAGE_SOURCE_BINDING_REQUIRED: 검증된 서로 다른 상품 원본이 필수 이미지 슬롯 수보다 적습니다. 남은 슬롯만 생성 또는 수동 검토가 필요합니다."
         : "PRODUCT_SOURCE_REQUIRED: 공지·안내판을 제외한 검증 가능한 상품 원본 사진을 찾지 못했습니다.");
-      for (const index of requestIndexes) await publish(index, { ...baseResult(index), error });
+      for (const index of requestIndexes) await publish(index, { ...baseResult(index), error, ...(sourceErrorCode ? { errorCode: sourceErrorCode } : {}) });
       return results;
     }
 

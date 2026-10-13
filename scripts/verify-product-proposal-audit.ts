@@ -7,6 +7,7 @@ import sharp from "sharp";
 import { auditSectionProposals, type SectionProposal } from "./lib/product-section-proposal-audit";
 import { auditPublishImages, type PublishImageAuditOptions, type PublishImageAuditResult } from "./lib/publish-image-audit";
 import { buildProduct9Canvas, selectedProductContextFrom9Canvas } from "./lib/product-9canvas";
+import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
 
 const proposals = Array.from({ length: 8 }, (_, i) => ({ targetIndex: 0, sourceSha256: `sha-${i}`, path: `photo-${i}` }));
 const targets = [{ sectionId: "actual-section", sectionTitle: "AI 기능", sectionBody: ["AI 기능의 실제 설명"], imageIntent: "AI 기능 근거" }];
@@ -154,6 +155,51 @@ async function main() {
         } }) });
       assert.equal(outcome.length, fixture.name === "included exterior" ? 1 : 0, fixture.name);
       assert.equal(pixelCalls, 1, "an adverse final verdict cannot be automatically reversed");
+    }
+    const sourceDirectory = path.join(fixtureDir, "canonical-gallery"); fs.mkdirSync(sourceDirectory);
+    const urls = [1, 2, 3].map(index => `https://shop-phinf.pstatic.net/fixture/original-${index}.png`);
+    for (let index = 0; index < urls.length; index++) {
+      const comparison = path.join(sourceDirectory, `original-${index + 1}.png`);
+      if (index === 2) fs.copyFileSync(file, comparison);
+      else await sharp({ create: { width: 320, height: 240, channels: 3, background: index ? "#dddddd" : "#bbbbbb" } }).png().toFile(comparison);
+      fs.writeFileSync(`${comparison}.retrieval.json`, JSON.stringify({ version: "product-image-retrieval/v1", sourceUrl: urls[index],
+        sha256: crypto.createHash("sha256").update(fs.readFileSync(comparison)).digest("hex"), retrievedAt: new Date().toISOString() }));
+    }
+    const sourceSnapshot = createProductSnapshot({ productId: "canonical-proposal-fixture", connectKind: "SHOPPING",
+      externalProductId: "selected-sku", sourceUrl: "https://brand.naver.com/fixture/products/1",
+      product: { name: "선택 상품", features: ["선택 옵션 화이트"], referenceImageUrls: urls } });
+    const canonical = { selectedSourceSnapshot: sourceSnapshot, selectedSourceProductId: sourceSnapshot.productId,
+      selectedSourceDirectory: sourceDirectory, sourceSnapshotId: sourceSnapshot.snapshotId };
+    let proposalInput: PublishImageAuditOptions | undefined;
+    let proposalPrompt = "", proposalAttachmentShas: string[] = [];
+    const sameContext = await auditSectionProposals({ ...canonical, productName: "선택 상품", selectedProduct: "same canonical selected facts",
+      targets: [originalTarget], proposals: originalProposal, select, onRejected() {}, audit: async input => {
+        proposalInput = input;
+        assert.equal(input.selectedSourceSnapshot, sourceSnapshot);
+        assert.equal(input.selectedSourceDirectory, sourceDirectory);
+        return auditPublishImages({ ...input, review: async call => {
+          proposalPrompt = call.userPrompt;
+          proposalAttachmentShas = call.imagePaths!.map(image => crypto.createHash("sha256").update(fs.readFileSync(image)).digest("hex"));
+          assert.equal(call.imagePaths!.length, 4, "the exact original outside the first two gallery references is comparison-only evidence");
+          assert.match(call.userPrompt, /Canonical selected source:/u);
+          assert.match(call.userPrompt, /"selectedGalleryComparisonImageIndexes":\[2,3,4\]/u);
+          return verdict(true, "Visible selected component matches its own canonical source; no claim is inferred from source lineage.");
+        } });
+      } });
+    assert.equal(sameContext.length, 1);
+    const publication = await auditPublishImages({ ...proposalInput!, review: async call => {
+      assert.equal(call.userPrompt, proposalPrompt, "source-final and publication-final assemble the same product, text, source and indexed comparison context");
+      assert.deepEqual(call.imagePaths!.map(image => crypto.createHash("sha256").update(fs.readFileSync(image)).digest("hex")), proposalAttachmentShas);
+      return verdict(true, "Same unchanged input.");
+    } });
+    assert.equal(publication.ok, true);
+    for (const badContext of [{ ...canonical, sourceSnapshotId: "f".repeat(64) },
+      { ...canonical, selectedSourceProductId: "another-product" },
+      { ...canonical, selectedSourceSnapshot: { ...sourceSnapshot, product: { ...sourceSnapshot.product, features: ["unbound option"] } } }]) {
+      let modelCalls = 0;
+      await assert.rejects(auditSectionProposals({ ...badContext, productName: "selected", targets: [originalTarget], proposals: originalProposal,
+        select, onRejected() {}, audit: input => auditPublishImages({ ...input, review: async () => { modelCalls++; return verdict(true, "must not execute"); } }) }), /INVALID_CONTEXT/u);
+      assert.equal(modelCalls, 0, "invalid canonical context cannot receive a model approval");
     }
     assert.deepEqual(fs.readFileSync(file), bytes, "source pixels remain unchanged");
     assert.deepEqual(originalTarget.sectionBody, ["선택한 상품의 외형을 보여주는 판매자 원본 사진입니다."], "the accepted manuscript context remains unchanged");

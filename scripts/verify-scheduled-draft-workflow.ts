@@ -486,12 +486,71 @@ async function main() {
     assert.equal(postCount, 1);
 
     const previousPort = process.env.APP_PORT;
-    const server = http.createServer((_request, response) => {
+    const server = http.createServer((request, response) => {
+      if (["/source-conflict", "/source-incomplete", "/final-source-conflict"].includes(request.url || "")) {
+        response.writeHead(request.url === "/final-source-conflict" ? 423 : 200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ success: request.url !== "/final-source-conflict",
+          code: request.url === "/source-incomplete" ? "SOURCE_REVIEW_INCOMPLETE" : "SOURCE_REVIEW_CONFLICT",
+          ...(request.url === "/final-source-conflict" ? { error: "fixture review conflict" } : {}),
+          data: { imageSlots: [] } }));
+        return;
+      }
       response.writeHead(422, { "content-type": "application/json" });
+      if (request.url === "/cause" || request.url === "/unsafe-cause") {
+        response.end(JSON.stringify({ success: false, code: "SOURCE_REVIEW_FAILED",
+          causeCode: request.url === "/cause" ? "SOURCE_REVIEW_CONFLICT" : "https://private.invalid/?token=secret",
+          error: "fixture source response failed", raw: "private model payload", cause: { payload: "private chain" } }));
+        return;
+      }
       response.end(JSON.stringify({ success: false, errors: ["shopping-hook: segmentation failed"] }));
     });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-    try { process.env.APP_PORT = String((server.address() as { port: number }).port); await assert.rejects(localScheduleCall("/draft/images", "POST", {}), /segmentation failed/); }
+    try {
+      process.env.APP_PORT = String((server.address() as { port: number }).port);
+      await assert.rejects(localScheduleCall("/draft/images", "POST", {}), /segmentation failed/);
+      for (const url of ["/cause", "/unsafe-cause"]) await assert.rejects(localScheduleCall(url, "POST", {}), (error: unknown) => {
+        const failure = error as Error & { code?: string; causeCode?: string; httpStatus?: number; raw?: unknown };
+        assert.equal(failure.code, "SOURCE_REVIEW_FAILED");
+        assert.equal(failure.causeCode, url === "/cause" ? "SOURCE_REVIEW_CONFLICT" : undefined);
+        assert.equal(failure.httpStatus, 422);
+        assert.equal(failure.raw, undefined); assert.equal(failure.cause, undefined);
+        return true;
+      });
+      for (const code of ["SOURCE_REVIEW_CONFLICT", "SOURCE_REVIEW_INCOMPLETE"]) {
+        const actions: string[] = [];
+        await assert.rejects(runMaterialPreparation(`http200-${code}`, { pause: async () => {}, call: async (_url, method, body) => {
+          const action = (body as { action?: string })?.action || method; actions.push(action);
+          if (action === "bind_sources") return localScheduleCall(code === "SOURCE_REVIEW_CONFLICT" ? "/source-conflict" : "/source-incomplete", "POST", {});
+          return { success: true, data: { connectKind: "SHOPPING", approvedAt: null,
+            composition: { sections: [{ id: "original", imageSource: "seller-original" }] },
+            imageSlots: [{ sectionId: "original", missing: 1, generationMissing: 0 }], contentQuality: { signals: [] } } };
+        } }), (error: unknown) => (error as { code?: string }).code === code);
+        assert.equal(actions.filter(action => action === "bind_sources").length, 1);
+        assert(!actions.some(action => /generate|approve|replan|prepare_context|revise|repair_photo_description/u.test(action)),
+          "HTTP200 success with a contradictory/incomplete top code cannot authorize generation, approval, replan or text edits");
+      }
+      const finalActions: string[] = [];
+      let finalRejected = false;
+      const originalFailure = Object.assign(new Error("body seller card"), { code: "PUBLISH_IMAGE_AUDIT_FAILED", httpStatus: 422,
+        errors: ["SEMANTIC_REJECTION: body card"], imageAuditFailures: [{ code: "SEMANTIC_REJECTION", sectionId: "shopping-section-exact123", rejectionScope: "product" }] });
+      await assert.rejects(runMaterialPreparation("http423-final-conflict", { pause: async () => {}, call: async (_url, method, body) => {
+        const action = (body as { action?: string })?.action || method; finalActions.push(action);
+        if (action === "approve") { finalRejected = true; throw originalFailure; }
+        if (action === "bind_sources") return localScheduleCall("/final-source-conflict", "POST", {});
+        return { success: true, data: { connectKind: "SHOPPING", approvedAt: null,
+          composition: { sections: [{ id: "original", imageSource: "seller-original" }] },
+          imageSlots: [{ sectionId: "original", missing: finalRejected ? 1 : 0, generationMissing: 0 }], contentQuality: { signals: [] } } };
+      } }), (error: unknown) => {
+        const failure = error as Error & { code?: string; causeCode?: string; httpStatus?: number; imageAuditFailures?: unknown };
+        assert.equal(failure.code, "PUBLISH_IMAGE_AUDIT_FAILED"); assert.equal(failure.causeCode, "SOURCE_REVIEW_CONFLICT");
+        assert.equal(failure.httpStatus, 422); assert.equal(failure.imageAuditFailures, originalFailure.imageAuditFailures);
+        return true;
+      });
+      assert.equal(finalActions.filter(action => action === "approve").length, 1, "the original rejected approval is never repeated");
+      assert.equal(finalActions.filter(action => action === "bind_sources").length, 1);
+      assert(!finalActions.some(action => /generate|replan|prepare_context|revise|repair_photo_description/u.test(action)),
+        "a final replacement conflict retains primary/cause diagnostics and stops without a replan or generation");
+    }
     finally { if (previousPort === undefined) delete process.env.APP_PORT; else process.env.APP_PORT = previousPort; await new Promise<void>(resolve => server.close(() => resolve())); }
 
     let getRequests = 0, postRequests = 0, invalidRequests = 0;

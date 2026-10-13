@@ -5,6 +5,7 @@ import { readProductSnapshot, type ProductSnapshot } from "../../src/lib/draft-c
 import { buildProduct9Canvas, selectedProductContextFrom9Canvas } from "./product-9canvas";
 import { selectVerifiedProductSectionImages, type ProductSectionImageAssignment, type ProductSectionImageDiagnostics } from "./product-photo-review";
 import type { WritingPublicationPhotoContext } from "./writing-prompt-contract";
+import type { ProductSourceAuditContext } from "./product-source-audit-context";
 import { SHOPPING_NATURAL_SCENE_ROLES } from "./shopping-scene-roles";
 
 export interface ShoppingPrewritePhotoProof {
@@ -16,7 +17,7 @@ export interface ShoppingPrewritePhotoProof {
   scope: "selected-product-exterior";
 }
 
-type Select = (paths: string[], productName: string, selectedProduct: string) => Promise<ProductSectionImageAssignment | null>;
+type Select = (paths: string[], productName: string, selectedProduct: string, context?: ProductSourceAuditContext) => Promise<ProductSectionImageAssignment | null>;
 export interface ShoppingPrewritePhotoDependencies {
   select: Select;
   /** Optional deterministic crop of actual seller pixels. It must not generate/edit a product or scene with imagegen. */
@@ -29,14 +30,17 @@ function sameLocalPath(left: string, right: string): boolean {
 }
 
 export async function selectShoppingPrewriteOriginal(paths: string[], productName: string, selectedProduct: string,
-  review: typeof selectVerifiedProductSectionImages = selectVerifiedProductSectionImages): Promise<ProductSectionImageAssignment | null> {
+  reviewOrContext: typeof selectVerifiedProductSectionImages | ProductSourceAuditContext = selectVerifiedProductSectionImages,
+  suppliedContext: ProductSourceAuditContext = {}): Promise<ProductSectionImageAssignment | null> {
+  const review = typeof reviewOrContext === "function" ? reviewOrContext : selectVerifiedProductSectionImages;
+  const sourceContext = typeof reviewOrContext === "function" ? suppliedContext : reviewOrContext;
   let diagnostics: ProductSectionImageDiagnostics | undefined;
   let assignments: ProductSectionImageAssignment[];
   try {
     assignments = await review(paths, productName, [{
       sectionId: "prewriting-original", sectionTitle: "선택 상품 외형",
       imageIntent: "선택 상품 외형 확인용 실제 판매자 원본 사진", imageSource: "seller-original", sectionBody: [],
-    }], { selectedProduct, onDiagnostics: report => { diagnostics = report; } });
+    }], { ...sourceContext, selectedProduct, onDiagnostics: report => { diagnostics = report; } });
   } catch (error) {
     // Preserve explicit provider/auth/transport errors. An undecodable review
     // response is neither a pixel rejection nor proof that no source exists.
@@ -50,6 +54,8 @@ export async function selectShoppingPrewriteOriginal(paths: string[], productNam
   // A shortlist omission is not proof that a product original is absent. The
   // batch reviewer already spends its bounded renewal on unreviewed candidates;
   // do not turn that protocol gap into a crop/recollection or generation attempt.
+  if (assignments.length === 0 && diagnostics?.errorCode === "SOURCE_REVIEW_CONFLICT")
+    throw Object.assign(new Error(diagnostics.error || "SOURCE_REVIEW_CONFLICT: 작성 전 판매자 원본 검사 응답이 충돌했습니다."), { code: "SOURCE_REVIEW_CONFLICT" });
   if (assignments.length === 0 && diagnostics?.status === "incomplete") {
     throw Object.assign(new Error("SOURCE_REVIEW_INCOMPLETE: 작성 전 판매자 원본 후보의 픽셀 판정이 누락됐습니다. 원본 없음으로 처리하거나 새 원고·연출 사진을 생성하지 않았습니다. 누락 판정을 확인한 뒤 같은 상품 근거에서 재개하세요."),
       { code: "SOURCE_REVIEW_INCOMPLETE" });
@@ -146,22 +152,26 @@ export function readSubmittedPrewritePhoto(file: string, expected: ProductSnapsh
 }
 
 /** The operation is reached only after a clean selected-context original survives exact-byte checks. No image generation is involved. */
-export async function withShoppingPrewritePhoto<T>(input: { snapshot: ProductSnapshot; candidatePaths: string[] },
+export async function withShoppingPrewritePhoto<T>(input: { snapshot: ProductSnapshot; candidatePaths: string[]; selectedSourceDirectory?: string },
   operation: (proof: ShoppingPrewritePhotoProof) => Promise<T>, dependencies: ShoppingPrewritePhotoDependencies = { select: selectShoppingPrewriteOriginal }): Promise<T> {
   const selectedProductContext = canonicalContext(input.snapshot);
   const productName = String(input.snapshot.product.name);
   const snapshot = JSON.parse(JSON.stringify(input.snapshot)) as ProductSnapshot;
+  const sourceContext: ProductSourceAuditContext = input.selectedSourceDirectory ? {
+    selectedSourceSnapshot: snapshot, selectedSourceProductId: snapshot.productId,
+    selectedSourceDirectory: input.selectedSourceDirectory, sourceSnapshotId: snapshot.snapshotId,
+  } : {};
   const candidates = [...new Set(input.candidatePaths.map(file => path.resolve(file)))];
   const hashes = new Map<string, string>();
   for (const file of candidates) { try { hashes.set(file, imageHash(file)); } catch { /* Unreadable sources cannot be candidates. */ } }
-  let selected = await dependencies.select([...hashes.keys()], productName, selectedProductContext);
+  let selected = await dependencies.select([...hashes.keys()], productName, selectedProductContext, sourceContext);
   if (!selected && dependencies.recoverSourcePixels) {
     const recovered = await dependencies.recoverSourcePixels();
     if (recovered) {
       const file = path.resolve(recovered);
       hashes.set(file, imageHash(file));
       // A crop proposal does not authorize publication: the same selected-context pixel gate reviews the actual crop.
-      selected = await dependencies.select([file], productName, selectedProductContext);
+      selected = await dependencies.select([file], productName, selectedProductContext, sourceContext);
     }
   }
   if (!selected) throw Object.assign(new Error("IMAGE_SOURCE_BINDING_REQUIRED: 작성 전 필수 판매자 원본의 상품·옵션·자연 사진 검사를 통과하지 못했습니다. 새 원고와 연출 이미지를 생성하지 않았습니다."),

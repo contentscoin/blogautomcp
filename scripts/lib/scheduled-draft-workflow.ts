@@ -9,13 +9,13 @@ import {
 } from "./quality-convergence";
 import { productRecoveryStageForFailure } from "./product-9canvas";
 import type { PhotoDescriptionFinding } from "./photo-description-finding";
-import { legacyMaterialFailureCause, MAX_MATERIAL_FAILURE_REFERENCE_CHARS } from "./material-failure-reference";
+import { legacyMaterialFailureCause, MAX_MATERIAL_FAILURE_REFERENCE_CHARS, safeFailureCode } from "./material-failure-reference";
 
 export interface Result {
-  success: boolean; code?: string; error?: string; errors?: string[]; message?: string;
+  success: boolean; code?: string; causeCode?: string; error?: string; errors?: string[]; message?: string;
   approvalConflict?: { gate: "status" | "compare-and-set"; claimAcquired: false; observedStatus: string; expectedStatus?: string; observedUpdatedAt?: string };
   recovery?: { changed: boolean }; remainingMissing?: number;
-  imageAuditFailures?: { code: string; rejectionScope?: string; findingKey?: string; photoDescription?: PhotoDescriptionFinding }[];
+  imageAuditFailures?: { code: string; sectionId?: string | null; rejectionScope?: string; findingKey?: string; photoDescription?: PhotoDescriptionFinding }[];
   data?: {
     status?: string; postUrl?: string; scheduledPublishAt?: string; errorMessage?: string;
     connectKind?: string;
@@ -120,7 +120,7 @@ function localScheduleCallOnce(pathname: string, method: string, body: object | 
       response.on("end", () => {
         try {
           const result = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Result;
-          if (!result.success || (response.statusCode || 500) >= 400) reject(Object.assign(new Error(result.error || result.errors?.join("\n") || result.message || `작업 실패 (HTTP ${response.statusCode})`), { code: result.code || "HTTP_ERROR", errors: result.errors, imageAuditFailures: result.imageAuditFailures, approvalConflict: result.approvalConflict, httpStatus: response.statusCode }));
+          if (!result.success || (response.statusCode || 500) >= 400) reject(Object.assign(new Error(result.error || result.errors?.join("\n") || result.message || `작업 실패 (HTTP ${response.statusCode})`), { code: result.code || "HTTP_ERROR", causeCode: safeFailureCode(result.causeCode), errors: result.errors, imageAuditFailures: result.imageAuditFailures, approvalConflict: result.approvalConflict, httpStatus: response.statusCode }));
           else resolve(result);
         } catch (error) { reject(error); }
       });
@@ -146,7 +146,7 @@ function bounded(deps: WorkflowDeps, fallback: number) {
 const IMAGE_QUALITY_SIGNALS = new Set(["composition-quality", "representative-image", "thumbnail"]);
 const UNRESOLVED_IMAGE_OPERATION_CODES = new Set([
   "IMAGE_RESUME_REQUIRED", "IMAGE_OUTPUT_AMBIGUOUS", "PREPARATION_RESULT_UNCERTAIN",
-  "SOURCE_REVIEW_INCOMPLETE",
+  "SOURCE_REVIEW_INCOMPLETE", "SOURCE_REVIEW_CONFLICT",
   "OUTCOME_UNKNOWN", "ALREADY_PUBLISHING", "CODEX_TIMEOUT",
   "IMAGE_REPAIR_FAILED", "USER_CANCELLED", "IMAGE_GENERATION_CANCELLED",
 ]);
@@ -163,6 +163,46 @@ function isDefinitivePublishImageFailure(error: unknown): boolean {
   const failure = error as { code?: string; errors?: string[] };
   return failure.code === "PUBLISH_IMAGE_AUDIT_FAILED" && Boolean(failure.errors?.length) &&
     failure.errors!.every(reason => /^(?:SEMANTIC_REJECTION|LONG_IMAGE):/u.test(reason));
+}
+
+/** Preserve a failed replacement's machine code without copying its raw payload. */
+function withBoundedImageRecoveryCause(primary: unknown, replacement: unknown): unknown {
+  if (!(primary instanceof Error)) return primary;
+  const codes: string[] = [];
+  const seen = new Set<unknown>();
+  let current: unknown = replacement;
+  while (current && typeof current === "object" && !seen.has(current) && seen.size < 7 && codes.length < 7) {
+    seen.add(current);
+    const record = current as { code?: unknown; causeCode?: unknown; cause?: unknown };
+    for (const value of [record.code, record.causeCode]) {
+      const code = safeFailureCode(value);
+      if (code && !codes.includes(code) && codes.length < 7) codes.push(code);
+    }
+    current = record.cause;
+  }
+  if (!codes.length) return primary;
+  const priorCauseCode = safeFailureCode((primary as Error & { causeCode?: unknown }).causeCode);
+  if (priorCauseCode && !codes.includes(priorCauseCode) && codes.length < 7) codes.unshift(priorCauseCode);
+  current = (primary as Error & { cause?: unknown }).cause;
+  let priorNodes = 0;
+  while (current && typeof current === "object" && !seen.has(current) && priorNodes++ < 7 && codes.length < 7) {
+    seen.add(current);
+    const record = current as { code?: unknown; causeCode?: unknown; cause?: unknown };
+    for (const value of [record.causeCode, record.code]) {
+      const code = safeFailureCode(value);
+      if (code && !codes.includes(code) && codes.length < 7) codes.unshift(code);
+    }
+    current = record.cause;
+  }
+  // The deeper typed cause is the useful repair diagnosis; outer codes remain
+  // in a bounded chain, without native payloads, messages or stack snapshots.
+  let cause: Error | undefined;
+  for (const code of codes) cause = Object.assign(new Error("이미지 복구 단계에서 실패했습니다.", cause ? { cause } : undefined), { code });
+  const failure = primary as Error & { code?: string; causeCode?: string; httpStatus?: number; errors?: string[]; imageAuditFailures?: Result["imageAuditFailures"] };
+  return Object.assign(new Error(failure.message, { cause }), {
+    code: failure.code, causeCode: (cause as Error & { code: string }).code, httpStatus: failure.httpStatus,
+    errors: failure.errors, imageAuditFailures: failure.imageAuditFailures,
+  });
 }
 
 function legacyTextFailures(draft: Result): string[] {
@@ -680,15 +720,16 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
   // one verified original, three accepted natural scenes and one thumbnail.
   // Five accepted images and each section's required coverage remain compulsory.
   // It has its own recovery key so an earlier image-stage replan cannot use it up.
-  const dropRejectedAndApprove = async (cause: unknown) => {
+  const dropRejectedAndApprove = async (cause: unknown, replacementFailure?: unknown) => {
+    const failure = withBoundedImageRecoveryCause(cause, replacementFailure);
     deps.onStage?.("반복 거절 이미지 제외 · 남은 이미지로 구성 재확인");
     const replanned = await runRecordedImageRecovery(id, "replan-after-rejection", () =>
       claimedCall(`${base}/draft/images`, "POST", { action: "replan_sources" }));
     if (!replanned.attempted || !replanned.result?.recovery?.changed ||
-        replanned.result.remainingMissing !== 0 || replanned.result.errors?.length) throw cause;
+        replanned.result.remainingMissing !== 0 || replanned.result.errors?.length) throw failure;
     draft = await deps.call(`${base}/draft`, "GET");
     if (!draft.data || draft.data.imageGeneration?.status === "running" ||
-        draft.data.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) throw cause;
+        draft.data.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0)) throw failure;
     plan = await recheck(false, revised ? 1 : 0);
     if (plan.action !== "complete") throw unresolvedCompositionError(plan.reason);
     deps.onStage?.("변경된 배치 최종 재검사·승인");
@@ -719,6 +760,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
       await dropRejectedAndApprove(error);
     } else {
       let replaced = true;
+      let replacementFailure: unknown;
       try {
         const repaired = await runRecordedImageRecovery(id, "repair-rejected", () => images("repair-rejected"));
         if (!repaired.attempted) replaced = false;
@@ -726,13 +768,15 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
         if (plan.action !== "complete") throw unresolvedCompositionError(plan.reason);
       } catch (replaceError) {
         const code = (replaceError as { code?: string }).code;
+        if (code === "SOURCE_REVIEW_CONFLICT") throw withBoundedImageRecoveryCause(error, replaceError);
         if (isSessionWidePreparationFailureCode(code) || isUncertainLocalTransportError(replaceError) ||
             UNRESOLVED_IMAGE_OPERATION_CODES.has(code || "")) throw replaceError;
         if (thumbnailMissing() || thumbnailRepairKey()) throw replaceError;
+        replacementFailure = replaceError;
         replaced = false;
       }
       if (!replaced) {
-        await dropRejectedAndApprove(error);
+        await dropRejectedAndApprove(error, replacementFailure);
       } else {
         deps.onStage?.("교체 이미지 최종 재검사·승인");
         try {

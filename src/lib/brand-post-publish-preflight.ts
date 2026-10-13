@@ -1,10 +1,11 @@
-import { buildSelectedProductImageAuditContext, assertPublishImagesSafe, type PublishImageAuditOptions } from "../../scripts/lib/publish-image-audit";
+import { buildSelectedProductImageAuditContext, assertPublishImagesSafe, PublishImageAuditError, type PublishImageAuditOptions, type PublishImageAuditResult } from "../../scripts/lib/publish-image-audit";
 import { acquireBrandPostImageRepairLock } from "./brand-post-image-repair-lock";
 import { getBrandPostPackageDir, readBrandPostPackage } from "./brand-post-package";
 import path from "node:path";
 import { materialRevision } from "./material-library";
 import { normalizePublishedPostText } from "./post-composition-contract";
 import { brandPostApprovalBinding } from "./brand-post-approval-receipt";
+import { imageAuditFailureSections } from "./publish-image-failure-diagnostics";
 
 /** Same pixel audit as publication, before a saved shopping material is approved.
  * A DB mutation claim is additionally held by the HTTP caller. */
@@ -23,17 +24,26 @@ export async function validateBrandPostPublishImages(id: string, productName?: s
     const readinessBindingKey = brandPostApprovalBinding(manifest, sourceDirectory);
     const product = manifest.sourceSnapshot?.product || {};
     const name = String(product.name || productName || manifest.title);
-    const audit = await assertPublishImagesSafe({ brandLinkId: id,
+    const composition = normalizePublishedPostText(manifest.composition);
+    let audit: PublishImageAuditResult;
+    try {
+    audit = await assertPublishImagesSafe({ brandLinkId: id,
       ...(options.bindReadiness === true ? { readinessBindingKey } : {}), productName: name,
       selectedProduct: buildSelectedProductImageAuditContext(
         name,
         (Array.isArray(product.features) ? product.features : []).filter((value): value is string => typeof value === "string"),
         manifest.productUnderstanding,
       ),
-      composition: normalizePublishedPostText(manifest.composition), imageAssets: manifest.imageAssets,
+      composition, imageAssets: manifest.imageAssets,
       sourceSnapshotId: manifest.sourceSnapshot?.snapshotId,
       ...(manifest.sourceSnapshot ? { selectedSourceSnapshot: manifest.sourceSnapshot, selectedSourceProductId: id,
         selectedSourceDirectory: sourceDirectory } : {}), ...(options.review ? { review: options.review } : {}) });
+    } catch (error) {
+      // Preserve the same error class/instance and policy receipt identity.
+      // Section metadata is diagnostic; it never becomes a text-edit finding.
+      if (error instanceof PublishImageAuditError) error.audit.failures = imageAuditFailureSections(composition, error.audit.failures);
+      throw error;
+    }
     lock.assertOwner();
     const current = readBrandPostPackage(id, { migrate: false });
     if (!current || materialRevision(current) !== revision || brandPostApprovalBinding(current, sourceDirectory) !== readinessBindingKey)

@@ -82,6 +82,61 @@ async function main() {
       assert.equal(actions.filter(action => action === "repair_rejected").length, ["recovered", "second-rejection", "replan-success", "third-rejection", "replan-incomplete"].includes(outcome) ? 1 : 0);
       assert(!actions.includes("generate_missing"), "final audit recovery targets rejected slots instead of restarting every image");
     }
+    // A known replacement failure remains diagnostic, without renewing the
+    // generation budget. Auth/transport/incomplete outcomes keep early exits.
+    for (const secondaryCode of ["SOURCE_REVIEW_CONFLICT", "wrapped-cause-code", "wrapped-cause", "cyclic-cause", "CODEX_AUTH_REQUIRED", "ECONNRESET", "SOURCE_REVIEW_INCOMPLETE", undefined]) {
+      const sectionId = "shopping-section-causal123";
+      let rejected = false;
+      const actions: string[] = [];
+      const primary = Object.assign(new Error("final body card rejection"), { code: "PUBLISH_IMAGE_AUDIT_FAILED",
+        httpStatus: 422, errors: ["SEMANTIC_REJECTION: body card"], imageAuditFailures: [{ code: "SEMANTIC_REJECTION", sectionId, rejectionScope: "product" }] });
+      if (secondaryCode?.startsWith("wrapped-")) Object.assign(primary, { causeCode: "PREVIOUS_IMAGE_REVIEW_FAILED",
+        cause: Object.assign(new Error("private original cause"), { code: "PREVIOUS_IMAGE_REVIEW_FAILED" }) });
+      const replacement = Object.assign(new Error("private replacement payload https://private.invalid/?token=hidden"),
+        secondaryCode === "cyclic-cause" ? { code: "SOURCE_REVIEW_CONFLICT" }
+          : secondaryCode === "wrapped-cause-code" ? { code: "SOURCE_REVIEW_FAILED", causeCode: "SOURCE_REVIEW_CONFLICT" }
+          : secondaryCode === "wrapped-cause" ? { code: "SOURCE_REVIEW_FAILED", cause: Object.assign(new Error("private nested response"), { code: "SOURCE_REVIEW_CONFLICT" }) }
+          : secondaryCode ? { code: secondaryCode } : {});
+      if (secondaryCode === "cyclic-cause") Object.assign(replacement, { cause: replacement });
+      const causalFailure = secondaryCode === "SOURCE_REVIEW_CONFLICT" || secondaryCode === "cyclic-cause" || secondaryCode?.startsWith("wrapped-");
+      await assert.rejects(runMaterialPreparation(`causal-${secondaryCode || "unknown"}`, { pause: async () => {}, call: async (_url, method, body) => {
+        const action = (body as { action?: string })?.action || method; actions.push(action);
+        if (action === "approve") { rejected = true; throw primary; }
+        if (action === "bind_sources") throw replacement;
+        if (action === "replan_sources") return { success: true, recovery: { changed: false }, remainingMissing: 1, errors: [] };
+        return { success: true, data: { connectKind: "SHOPPING", approvedAt: null,
+          composition: { sections: [{ id: sectionId, imageSource: "seller-original" }] },
+          imageSlots: [{ sectionId, missing: rejected ? 1 : 0, generationMissing: 0 }], contentQuality: { signals: [] } } };
+      } }), (error: unknown) => {
+        if (!causalFailure) { assert.equal(error, replacement); return true; }
+        const failure = error as Error & { code?: string; causeCode?: string; httpStatus?: number; errors?: string[]; imageAuditFailures?: unknown; cause?: Error & { code?: string } };
+        assert.equal(failure.code, primary.code);
+        assert.equal(failure.httpStatus, 422);
+        assert.deepEqual(failure.errors, primary.errors);
+        assert.deepEqual(failure.imageAuditFailures, primary.imageAuditFailures);
+        assert.equal(failure.cause?.code, "SOURCE_REVIEW_CONFLICT");
+        assert.equal(failure.causeCode, "SOURCE_REVIEW_CONFLICT", "the current replacement diagnosis precedes the old primary cause in storage");
+        assert.equal((primary as Error & { causeCode?: string }).causeCode, secondaryCode?.startsWith("wrapped-") ? "PREVIOUS_IMAGE_REVIEW_FAILED" : undefined,
+          "the original audit error is not mutated");
+        assert.ok(!failure.cause?.message.includes("private") && !failure.cause?.message.includes("token"));
+        assert.deepEqual(Object.keys(failure.cause || {}), ["code"], "only a bounded machine-code cause is attached");
+        const codes: string[] = [];
+        let current: unknown = failure.cause;
+        while (current instanceof Error) {
+          assert.equal(current.message, "이미지 복구 단계에서 실패했습니다.");
+          codes.push((current as Error & { code: string }).code);
+          current = current.cause;
+        }
+        if (secondaryCode?.startsWith("wrapped-")) assert.deepEqual(codes, ["SOURCE_REVIEW_CONFLICT", "SOURCE_REVIEW_FAILED", "PREVIOUS_IMAGE_REVIEW_FAILED"]);
+        return true;
+      });
+      assert.equal(actions.filter(action => action === "approve").length, 1);
+      assert.equal(actions.filter(action => action === "bind_sources").length, 1);
+      assert.equal(actions.filter(action => action === "replan_sources").length, secondaryCode?.startsWith("wrapped-") ? 1 : 0,
+        "a direct contradictory source review stops without an extra replan");
+      assert(!actions.some(action => /generate|regenerate|revise|repair_photo_description|prepare_context/u.test(action)),
+        "diagnostic section/cause metadata grants no generation, source refresh or text edit");
+    }
     for (const tail of ["REQUEST_TIMEOUT: response lost", "unclassified reviewer failure", "CODEX_MODEL_INCOMPATIBLE: model"]) {
       assert.equal(isRecoverableImageEvidenceResult({ code: "IMAGE_SOURCE_BINDING_REQUIRED", errors: ["IMAGE_SOURCE_BINDING_REQUIRED: missing", tail] }), false);
       assert.equal(isRecoverableImageEvidenceResult({ code: "REFERENCE_SCENE_FIDELITY_FAILED", errors: ["REFERENCE_SCENE_FIDELITY_FAILED: wrong product", tail] }), false);

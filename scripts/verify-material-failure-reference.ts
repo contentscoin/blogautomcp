@@ -112,6 +112,61 @@ async function main() {
   const cyclic: { code: string; cause?: unknown } = { code: "PUBLISH_FAILED" }; cyclic.cause = cyclic;
   assert.equal(store.materialJobFailureCodes(cyclic).errorCode, "PUBLISH_FAILED"); checks++;
 
+  const causalJob: MaterialJob = { ...conflictJob, jobId: crypto.randomUUID(), status: "running", items: [{ productId, status: "queued", stage: "대기" }] };
+  const causalActions: string[] = [];
+  let auditRejected = false;
+  await runMaterialJob(causalJob, { material: () => ({ productId, revision, title: "fixture", connectKind: "SHOPPING",
+    ready: false, blockers: [], score: 100, imageCount: 5, createdAt: "", approvedAt: null }),
+    save: () => {}, pause: async () => {}, checkCancelled: () => {}, failureHistory: () => [],
+    call: async (_url, method, body) => {
+      const action = (body as { action?: string })?.action || method; causalActions.push(action);
+      if (action === "approve") {
+        auditRejected = true;
+        throw Object.assign(new Error("final pixel card rejected"), { code: "PUBLISH_IMAGE_AUDIT_FAILED",
+          causeCode: "PREVIOUS_IMAGE_REVIEW_FAILED",
+          errors: ["SEMANTIC_REJECTION: extra body text"], imageAuditFailures: [
+            { code: "SEMANTIC_REJECTION", sectionId: "shopping-section-ab123456", rejectionScope: "product" },
+            { code: "SEMANTIC_REJECTION", sectionId: null, rejectionScope: "product" },
+          ] });
+      }
+      if (action === "bind_sources") throw Object.assign(new Error("secret raw source-selection response"), { code: "SOURCE_REVIEW_CONFLICT" });
+      if (action === "replan_sources") return { success: true, recovery: { changed: false }, remainingMissing: 1 };
+      return { success: true, data: { connectKind: "SHOPPING", approvedAt: null,
+        composition: { sections: [{ id: "shopping-section-ab123456", imageSource: "seller-original" }] },
+        imageAssets: [{ sha256: sha }], imageSlots: [{ sectionId: "shopping-section-ab123456", missing: auditRejected ? 1 : 0, generationMissing: 0 }],
+        contentQuality: { signals: [] } } };
+    } });
+  assert.equal(causalJob.items[0].errorCode, "PUBLISH_IMAGE_AUDIT_FAILED"); checks++;
+  assert.equal(causalJob.items[0].causeCode, "SOURCE_REVIEW_CONFLICT"); checks++;
+  const causalObservation = causalJob.items[0].failureObservations?.at(-1);
+  assert.ok(causalObservation); checks++;
+  assert.deepEqual(causalObservation.sectionIds, ["shopping-section-ab123456"], "a real card defect with no photo-description finding retains its diagnostic section"); checks++;
+  assert.deepEqual(causalObservation.protectedAssetShas, [sha]); checks++;
+  assert.ok(!JSON.stringify(causalObservation).includes("secret")); checks++;
+  assert.equal(causalActions.filter(action => action === "approve").length, 1); checks++;
+  assert.equal(causalActions.filter(action => action === "bind_sources").length, 1); checks++;
+  assert.equal(causalActions.filter(action => action === "replan_sources").length, 0); checks++;
+  files.set("00000000-0000-0000-0000-000000000003.json", JSON.stringify({ items: [{ productId,
+    failureObservations: [{ ...causalObservation, contextSignature: sha }] }] }));
+  currentRevision = revision;
+  const causalReference = store.readMaterialFailureReferenceForProduct(productId, sha);
+  assert.ok(causalReference.includes("SOURCE_REVIEW_CONFLICT") && causalReference.includes("shopping-section-ab123456")); checks++;
+  assert.ok(causalReference.includes("확정 거절과 기존 재시도 한도를 유지")); checks++;
+  currentRevision = "c".repeat(64);
+  assert.equal(store.readMaterialFailureReferenceForProduct(productId, sha), ""); checks++;
+  currentRevision = revision;
+  assert.equal(store.readMaterialFailureReferenceForProduct(productId, "c".repeat(64)), ""); checks++;
+  let causalRevised = false;
+  let causalInstructions = "";
+  await runMaterialPreparation("causal-writer-fixture", { pause: async () => {}, call: async (_url, _method, body) => {
+    const action = (body as { action?: string })?.action;
+    if (action === "revise") { causalRevised = true; causalInstructions = (body as { instructions: string }).instructions; }
+    return { success: true, data: { approvedAt: "approved", approval: { canApprove: true }, imageSlots: [],
+      contentQuality: { signals: [{ key: "review-substance", status: causalRevised ? "pass" : "fail" }] } } };
+  } }, { failureReference: causalReference });
+  assert.ok(causalInstructions.includes("SOURCE_REVIEW_CONFLICT")); checks++;
+  assert.ok(causalInstructions.includes("확정 거절과 기존 재시도 한도를 유지")); checks++;
+
   const material = () => ({ productId, revision, title: "fixture", connectKind: "SHOPPING" as const, ready: true, blockers: [] as string[],
     score: 100, imageCount: 5, createdAt: "", approvedAt: "approved" });
   const job = (): MaterialJob => ({ jobId: crypto.randomUUID(), kind: "publish", publishMode: "schedule", status: "running", ownerPid: process.pid,

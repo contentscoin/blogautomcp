@@ -1,6 +1,7 @@
 import { auditPublishImages, type PublishImageAuditOptions } from "./publish-image-audit";
 import type { PostRenderNode, ResolvedPostSectionV1 } from "../../src/lib/post-composition-contract";
 import type { BrandPostImageSourceHint } from "../../src/lib/brand-post-image-evidence";
+import type { ProductSourceAuditContext } from "./product-source-audit-context";
 
 export interface SectionProposal { targetIndex: number; path: string; sourceSha256: string }
 export interface SectionProposalTarget { sectionTitle: string; sectionBody?: string[]; imageIntent: string; sectionId?: string; imageSource?: BrandPostImageSourceHint }
@@ -14,7 +15,7 @@ export async function auditSectionProposals<T extends SectionProposal>(options: 
   /** Re-review rank-only/unreviewed reserves once after the eligible pool is exhausted. */
   replenish?: (unfilledTargetIndexes: number[]) => Promise<T[]>;
   audit?: (options: PublishImageAuditOptions) => ReturnType<typeof auditPublishImages>;
-}): Promise<T[]> {
+} & ProductSourceAuditContext): Promise<T[]> {
   let remaining = options.proposals;
   const accepted = new Set<string>();
   const rejectedPairs = new Set<string>();
@@ -55,7 +56,15 @@ export async function auditSectionProposals<T extends SectionProposal>(options: 
         altText: target.imageIntent, layout: "single", sourcePolicy: "LOCKED_PRODUCT_OR_ORIGINAL" });
     }
     const result = await (options.audit || auditPublishImages)({ productName: options.productName,
-      selectedProduct: options.selectedProduct || options.productName, composition: { sections, renderNodes } });
+      selectedProduct: options.selectedProduct || options.productName, composition: { sections, renderNodes },
+      selectedSourceSnapshot: options.selectedSourceSnapshot, selectedSourceProductId: options.selectedSourceProductId,
+      selectedSourceDirectory: options.selectedSourceDirectory, sourceSnapshotId: options.sourceSnapshotId,
+      // This is a seller-source proposal, not a visual approval. The same
+      // ORIGINAL hint lets the final audit include its exact canonical gallery
+      // bytes even when that original is beyond the first comparison references.
+      imageAssets: pending.map(row => ({ path: row.path, sourcePath: row.path, sha256: row.sourceSha256,
+        sectionId: options.targets[row.targetIndex].sectionId || `source-proposal-${row.targetIndex}`,
+        role: "body", provenance: "ORIGINAL", creationMethod: "source" })) });
     // 이미지 한 장의 문제(판정 형식 오류, 디코딩 불가, 누락, 과도한 세로 비율)는 그 제안만 탈락시킨다.
     // 다른 제안과 전체 재배치는 계속한다. 문맥 오류·검사 중 파일 변경만 전체를 멈춘다.
     const PER_IMAGE = new Set(["SEMANTIC_REJECTION", "INVALID_REVIEW", "INVALID_IMAGE", "MISSING_IMAGE", "LONG_IMAGE"]);

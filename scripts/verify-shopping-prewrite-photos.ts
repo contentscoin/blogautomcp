@@ -14,6 +14,7 @@ import { assertShoppingPrewritePhoto, persistPrewritePhotoForContext, readSubmit
   type ShoppingPrewritePhotoProof } from "./lib/shopping-prewrite-photos";
 import { codexWritingImageRoles, resolveCodexWritingImages, runCodexDraft, codexDraftTerminalFailureCode } from "./lib/codex-draft-provider";
 import { SHOPPING_NATURAL_SCENE_ROLES } from "./lib/shopping-scene-roles";
+import type { ProductSourceAuditContext } from "./lib/product-source-audit-context";
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "blogautomcp-prewrite-"));
@@ -133,6 +134,7 @@ async function main() {
     });
     let writerCalls = 0, contextExports = 0, mode: "missing" | "valid" | "wrong-option" = "missing", contextOnly = false;
     let canonicalSelected = "";
+    let prewriteSourceContext: ProductSourceAuditContext | undefined;
     let lastPreparedProduct: Record<string, unknown> | undefined;
     const runtime = vm.createContext({ console, createProductSnapshot, hasSufficientProductReviewEvidence,
       isolateSellerEvidenceText: (text: string) => text, sanitizeSellerEvidenceFeatures: (facts: string[]) => facts,
@@ -140,7 +142,8 @@ async function main() {
       toProductSourceEvidenceInput: (product: { name: string; description: string; features: string[] }) => ({ productName: product.name, description: product.description, features: product.features }),
       reportDraftProgress: () => {}, BRANDLINK_DRAFT_CONTEXT_OUTPUT: "", TEMP_PATH: root, publishImageCleanup: { track: () => {} },
       recoverProductPhotoRegion: async () => null,
-      selectShoppingPrewriteOriginal: async (paths: string[], name: string, selected: string) => {
+      selectShoppingPrewriteOriginal: async (paths: string[], name: string, selected: string, context?: ProductSourceAuditContext) => {
+        prewriteSourceContext = context;
         canonicalSelected = selected; return mode === "valid" ? accepted(paths, name, selected) : null;
       },
       withShoppingPrewritePhoto, persistPrewritePhotoForContext, writingPhotosFromPrewrite, assertShoppingPrewritePhoto,
@@ -161,6 +164,9 @@ async function main() {
     for (const failedMode of ["missing", "wrong-option"] as const) {
       mode = failedMode;
       await assert.rejects(() => prepare(product(), "https://seller.example/selected-product", "oa-fixture", "SHOPPING"), /IMAGE_SOURCE_BINDING_REQUIRED/);
+      assert.equal(prewriteSourceContext?.selectedSourceDirectory, root);
+      assert.equal(prewriteSourceContext?.selectedSourceProductId, "oa-fixture");
+      assert.equal(prewriteSourceContext?.selectedSourceSnapshot?.snapshotId, prewriteSourceContext?.sourceSnapshotId);
       assert.equal(writerCalls, 0); assert.equal(contextExports, 0);
     }
     await assert.rejects(() => prepare({ ...product(), description: "", features: [] }, "https://seller.example/selected-product", "oa-fixture", "SHOPPING"), /SOURCE_EVIDENCE_REQUIRED/);
@@ -227,6 +233,30 @@ async function main() {
     assert.throws(() => readSubmittedPrewritePhoto(path.join(root, "export", "mcp-draft-context.json"), exported.snapshot), /PREWRITING_PHOTO_CHANGED/);
     assert.equal(runtime.classify(Object.assign(new Error("new original missing"), { code: "IMAGE_SOURCE_BINDING_REQUIRED" })), "IMAGE_SOURCE_BINDING_REQUIRED");
     assert.equal(runtime.classify(new Error("outer", { cause: new Error("PREWRITING_PHOTO_CHANGED: changed") })), "PREWRITING_PHOTO_CHANGED");
+    const recoveredRegion = path.join(root, "unchanged-source-region.png");
+    fs.writeFileSync(recoveredRegion, Buffer.concat([bytes, Buffer.from("different actual source region")]));
+    const fallbackContexts: ProductSourceAuditContext[] = [];
+    let sourceSelections = 0, regionRecoveries = 0;
+    await withShoppingPrewritePhoto({ snapshot: snapshot(), selectedSourceDirectory: root, candidatePaths: [file] }, async proof => {
+      assert.equal(proof.original.path, recoveredRegion);
+      assert.equal(proof.original.sha256, hash(recoveredRegion));
+    }, {
+      select: async (paths, name, selected, context) => {
+        fallbackContexts.push(context!);
+        assert.equal(context?.selectedSourceDirectory, root);
+        assert.equal(context?.selectedSourceProductId, "oa-fixture");
+        assert.equal(context?.sourceSnapshotId, context?.selectedSourceSnapshot?.snapshotId);
+        if (++sourceSelections === 1) return null;
+        return selectShoppingPrewriteOriginal(paths, name, selected, async (_paths, _name, _targets, options) => {
+          assert.equal(options?.sourceSnapshotId, context?.sourceSnapshotId);
+          assert.equal(options?.selectedSourceSnapshot, context?.selectedSourceSnapshot);
+          return [await accepted(paths, name, selected)].filter((value): value is NonNullable<typeof value> => Boolean(value));
+        }, context);
+      },
+      recoverSourcePixels: async () => { regionRecoveries++; return recoveredRegion; },
+    });
+    assert.equal(regionRecoveries, 1); assert.equal(sourceSelections, 2);
+    assert.equal(fallbackContexts[0], fallbackContexts[1], "the existing source-region fallback preserves the same canonical comparison context");
     for (const code of ["SOURCE_EVIDENCE_REQUIRED", "SOURCE_REVIEW_INCOMPLETE", "IMAGE_SOURCE_BINDING_REQUIRED", "PREWRITING_PHOTO_CHANGED", "PREWRITING_SOURCE_CHANGED"] as const) {
       const message = `[STEP1 상품 확인] ${code}: 실제 상품 입력을 다시 확인하세요.`;
       for (const status of [400, 500]) assert.equal(classifyLocalFailure({ message, status }), code,

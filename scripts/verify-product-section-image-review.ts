@@ -15,6 +15,9 @@ import type { ProductSectionImageAssignment, ProductSectionImageDiagnostics, Pro
 import { auditSectionProposals } from "./lib/product-section-proposal-audit";
 import { selectShoppingPrewriteOriginal } from "./lib/shopping-prewrite-photos";
 import type { PublishImageAuditOptions, PublishImageAuditResult } from "./lib/publish-image-audit";
+import * as productSourceAuditContext from "./lib/product-source-audit-context";
+import * as productSectionReviewConflicts from "./lib/product-section-review-conflicts";
+import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
 import { buildProduct9Canvas, selectedProductContextFrom9Canvas } from "./lib/product-9canvas";
 
 interface ReviewModule {
@@ -79,6 +82,8 @@ function loadReview(answer: string | ((options: ReviewCall, callIndex: number) =
       };
       if (name === "./unbranded-product") return unbrandedProduct;
       if (name === "./product-image-visual-contract") return productImageVisualContract;
+      if (name === "./product-source-audit-context") return productSourceAuditContext;
+      if (name === "./product-section-review-conflicts") return productSectionReviewConflicts;
       throw new Error(`Unexpected dependency: ${name}`);
     },
     process,
@@ -417,13 +422,46 @@ async function main() {
     for (const conflict of ["rejections", "notSelected"]) {
       const contradictory = loadReview(JSON.stringify({ assignments: [{ targetIndex: 1, selectedIndex: 1, reviewClass: "product-photo", reason: "적합" }],
         [conflict]: [{ targetIndex: 1, selectedIndex: 1, reason: "다른 옵션" }] }));
-      await assert.rejects(contradictory.review.selectVerifiedProductSectionImages([candidate], "conflict", [overviewTarget]), /모순/u);
+      const conflictReports: ProductSectionImageDiagnostics[] = [];
+      assert.equal((await contradictory.review.selectVerifiedProductSectionImages([candidate], "conflict", [overviewTarget], {
+        onDiagnostics: report => conflictReports.push(report),
+      })).length, 0);
+      assert.equal(conflictReports[0].status, "incomplete"); assert.equal(conflictReports[0].errorCode, "SOURCE_REVIEW_CONFLICT");
+      assert.equal(conflictReports[0].entries[0].status, "review-failed"); assert.equal(conflictReports[0].entries[0].suitability, "unreviewed");
+      assert.equal(contradictory.calls.length, 1, "an ambiguous pair never buys a renewed pixel call");
       assert.equal(contradictory.auditCalls.length, 0, "contradictory first-stage verdict never gets promoted");
+      assert.equal((await contradictory.review.selectVerifiedProductSectionImages([candidate], "conflict", [overviewTarget], {
+        onDiagnostics: report => conflictReports.push(report),
+      })).length, 0);
+      assert.equal(contradictory.calls.length, 2, "an explicit second caller cannot reuse an incomplete conflict as a completed cache verdict");
+      assert.equal(conflictReports[1].cacheHit, false);
     }
     const rankAndAdverse = loadReview(JSON.stringify({ assignments: [],
       rejections: [{ targetIndex: 1, selectedIndex: 1, reason: "다른 옵션" }],
       notSelected: [{ targetIndex: 1, selectedIndex: 1, reason: "순위가 낮음" }] }));
-    await assert.rejects(rankAndAdverse.review.selectVerifiedProductSectionImages([candidate], "conflict", [overviewTarget]), /모순/u);
+    const rankConflictReports: ProductSectionImageDiagnostics[] = [];
+    assert.equal((await rankAndAdverse.review.selectVerifiedProductSectionImages([candidate], "conflict", [overviewTarget], {
+      onDiagnostics: report => rankConflictReports.push(report),
+    })).length, 0);
+    assert.equal(rankConflictReports[0].errorCode, "SOURCE_REVIEW_CONFLICT");
+    assert.equal(rankAndAdverse.auditCalls.length, 0);
+    const pairResponse = { assignments: Array.from({ length: 11 }, (_, index) => ({ targetIndex: 1, selectedIndex: index + 1,
+      reviewClass: "product-photo", reason: "독립적으로 식별한 상품 외형" })),
+      rejections: Array.from({ length: 5 }, (_, index) => ({ targetIndex: 1, selectedIndex: index + 12, reason: "실제 다른 옵션 또는 설명판" })),
+      notSelected: [{ targetIndex: 1, selectedIndex: 1, reason: "구성과 라벨 식별이 불확실함" }] };
+    const pairIsolated = loadReview(JSON.stringify(pairResponse));
+    const pairReports: ProductSectionImageDiagnostics[] = [];
+    const pairSelected = await pairIsolated.review.selectVerifiedProductSectionImages(manyCandidates.slice(0, 16), "pair-isolation", [overviewTarget], {
+      onDiagnostics: report => pairReports.push(report),
+    });
+    assert.equal(pairIsolated.calls.length, 1); assert.equal(pairIsolated.auditCalls.length, 1);
+    assert.equal(pairSelected.length, 1); assert.equal(pairSelected[0].path, manyCandidates[1], "the conflicting positive row is never adopted");
+    assert.equal(pairReports[0].entries.filter(entry => entry.failureCode === "SOURCE_REVIEW_CONFLICT").length, 1);
+    assert.equal(pairReports[0].entries.filter(entry => entry.status === "rejected").length, 5, "all genuine pixel rejections remain adverse");
+    assert.equal(pairReports[0].status, "complete"); assert.equal(pairReports[0].errorCode, undefined,
+      "an unused conflict cannot block another fully audited assignment for the same target");
+    await pairIsolated.review.selectVerifiedProductSectionImages(manyCandidates.slice(0, 16), "pair-isolation", [overviewTarget]);
+    assert.equal(pairIsolated.calls.length, 1, "the fully audited assignment remains reusable despite an unused ambiguous alternative");
     assert.equal(rankAndAdverse.calls.length, 1, "a rank omission cannot undo an explicit adverse verdict via renewal");
     const unknownReserveReports: ProductSectionImageDiagnostics[] = [];
     const unknownReserve = loadReview(JSON.stringify({ assignments: [], notSelected: [{ targetIndex: 1, selectedIndex: 1, reason: "상위 순위에 들지 않아 미검토" }] }));
@@ -473,7 +511,58 @@ async function main() {
     });
     await assert.rejects(changedReference.review.selectVerifiedProductSectionImages([mutableCandidate], "changed", [overviewTarget]), /IMAGE_CHANGED/u);
     assert.equal(changedReference.auditCalls.length, 0, "changed references stop before allocation");
-    console.log("Verified section-image review class and server-side evidence gates.");
+    const sourceDirectory = path.join(root, "canonical-gallery"); fs.mkdirSync(sourceDirectory);
+    const galleryFile = path.join(sourceDirectory, "canonical.png");
+    fs.writeFileSync(galleryFile, testPngFixture("canonical gallery before"));
+    const sourceUrl = "https://shop-phinf.pstatic.net/fixture/canonical.png";
+    const receiptFile = `${galleryFile}.retrieval.json`;
+    const writeReceipt = () => fs.writeFileSync(receiptFile, JSON.stringify({ version: "product-image-retrieval/v1", sourceUrl,
+      sha256: crypto.createHash("sha256").update(fs.readFileSync(galleryFile)).digest("hex"), retrievedAt: new Date().toISOString() }));
+    writeReceipt();
+    const selectedSnapshot = createProductSnapshot({ productId: "canonical-review-product", connectKind: "SHOPPING",
+      externalProductId: "selected-sku", sourceUrl: "https://brand.naver.com/fixture/products/1",
+      product: { name: "선택 상품", features: ["선택 옵션 화이트"], referenceImageUrls: [sourceUrl] } });
+    const context = { selectedProduct: "same selected facts", selectedSourceSnapshot: selectedSnapshot,
+      selectedSourceProductId: selectedSnapshot.productId, selectedSourceDirectory: sourceDirectory, sourceSnapshotId: selectedSnapshot.snapshotId };
+    const contextReview = loadReview(JSON.stringify({ assignments: [{ targetIndex: 1, selectedIndex: 1, reviewClass: "product-photo", reason: "선택 외형" }] }));
+    const collect = (value = context) => contextReview.review.selectVerifiedProductSectionImages([candidate], "canonical", [overviewTarget], value);
+    await collect();
+    assert.equal(contextReview.auditCalls[0].selectedSourceSnapshot, selectedSnapshot);
+    assert.equal(contextReview.auditCalls[0].selectedSourceProductId, selectedSnapshot.productId);
+    assert.equal(contextReview.auditCalls[0].selectedSourceDirectory, sourceDirectory);
+    assert.equal(contextReview.auditCalls[0].sourceSnapshotId, selectedSnapshot.snapshotId);
+    assert.equal(contextReview.auditCalls[0].imageAssets?.[0].provenance, "ORIGINAL");
+    await collect(); assert.equal(contextReview.calls.length, 1, "unchanged complete source context reuses its final-reviewed result");
+    fs.writeFileSync(galleryFile, testPngFixture("canonical gallery changed"));
+    await collect(); assert.equal(contextReview.calls.length, 2, "changed comparison bytes cannot reuse a prior source-final verdict");
+    writeReceipt();
+    await collect(); assert.equal(contextReview.calls.length, 3, "changed retrieval binding also invalidates the cache");
+    const otherSnapshot = createProductSnapshot({ ...selectedSnapshot, product: { ...selectedSnapshot.product, features: ["선택 옵션 블랙"] } });
+    await collect({ ...context, selectedSourceSnapshot: otherSnapshot, sourceSnapshotId: otherSnapshot.snapshotId });
+    assert.equal(contextReview.calls.length, 4, "changed canonical option facts invalidate even an identical selectedProduct string");
+    await assert.rejects(collect({ ...context, sourceSnapshotId: "f".repeat(64) }), /INVALID_CONTEXT/u);
+    assert.equal(contextReview.calls.length, 4, "invalid snapshot binding stops before proposal/model/cache reuse");
+    await assert.rejects(contextReview.review.selectVerifiedProductSectionImages([candidate], "partial", [overviewTarget], {
+      selectedSourceSnapshot: selectedSnapshot }), /INVALID_CONTEXT/u);
+    const changedGalleryDuringReview = loadReview(() => {
+      fs.writeFileSync(galleryFile, testPngFixture("gallery changed during review"));
+      return JSON.stringify({ assignments: [{ targetIndex: 1, selectedIndex: 1, reviewClass: "product-photo", reason: "외형" }] });
+    });
+    await assert.rejects(changedGalleryDuringReview.review.selectVerifiedProductSectionImages([candidate], "changed-gallery", [overviewTarget], context), /IMAGE_CHANGED/u);
+    const mutableSnapshot = createProductSnapshot({ ...selectedSnapshot, product: { ...selectedSnapshot.product, features: ["화이트"] } });
+    const mutableContext = { ...context, selectedSourceSnapshot: mutableSnapshot, sourceSnapshotId: mutableSnapshot.snapshotId };
+    const changedSnapshotDuringReview = loadReview(() => {
+      mutableSnapshot.product.features = ["검수 중 변경된 블랙"];
+      return JSON.stringify({ assignments: [{ targetIndex: 1, selectedIndex: 1, reviewClass: "product-photo", reason: "외형" }] });
+    });
+    await assert.rejects(changedSnapshotDuringReview.review.selectVerifiedProductSectionImages([candidate], "changed-snapshot", [overviewTarget], mutableContext), /INVALID_CONTEXT/u);
+    assert.equal(changedSnapshotDuringReview.calls.length, 1);
+    const receiptChangedDuringReview = loadReview(() => {
+      fs.appendFileSync(receiptFile, " ");
+      return JSON.stringify({ assignments: [{ targetIndex: 1, selectedIndex: 1, reviewClass: "product-photo", reason: "외형" }] });
+    });
+    await assert.rejects(receiptChangedDuringReview.review.selectVerifiedProductSectionImages([candidate], "changed-receipt", [overviewTarget], context), /IMAGE_CHANGED/u);
+    console.log("Verified section-image review class, canonical source/cache bindings and server-side evidence gates.");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -1,6 +1,6 @@
 {
   "name": "brandconnect-automation",
-  "version": "1.3.126",
+  "version": "1.3.127",
   "description": "네이버 쇼핑 커넥트(브랜드커넥트) 자동 블로그 포스팅 도구",
   "private": true,
   "scripts": {
@@ -41,7 +41,7 @@
     "test:package-qc-reconcile": "npx ts-node --project tsconfig.scripts.json scripts/verify-package-qc-reconcile.ts",
     "test:publish-image-cleanup": "npx ts-node --project tsconfig.scripts.json scripts/verify-publish-image-cleanup.ts",
     "test:image-batch-progress": "npx ts-node --project tsconfig.scripts.json scripts/verify-image-batch-progress.ts",
-    "test:product-section-image-review": "npx ts-node --project tsconfig.scripts.json scripts/verify-product-section-image-review.ts",
+    "test:product-section-image-review": "tsx scripts/verify-product-section-review-conflicts.ts && npx ts-node --project tsconfig.scripts.json scripts/verify-product-section-image-review.ts",
     "test:topic-templates": "tsx scripts/verify-topic-templates.ts",
     "test:post-angles": "tsx scripts/verify-post-angles.ts",
     "test:detail-vision": "tsx scripts/verify-detail-vision-and-research.ts",
