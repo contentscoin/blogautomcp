@@ -287,8 +287,12 @@ test('consent reflects read/write/offline scopes and keeps duplicate query value
     const page = f.load('app/oauth/authorize/page.tsx').default;
     const read = renderToStaticMarkup(await page({ searchParams: Promise.resolve(Object.fromEntries(authorization('mcp:read'))) }));
     assert.match(read, /상품 및 작업 상태 조회/u); assert.doesNotMatch(read, /초안 생성과 예약 작업 요청|발행 요청|토큰 자동 갱신/u);
+    assert.match(read, /자동 갱신 권한이 없는 연결.*약 1시간.*플러그인 정보를 새로고침.*재연결/u);
+    assert.match(read, /name="scope" value="mcp:read"/u, 'the note cannot silently expand the requested scope');
     const write = renderToStaticMarkup(await page({ searchParams: Promise.resolve(Object.fromEntries(authorization('mcp:write offline_access'))) }));
     assert.match(write, /초안 생성과 예약 작업 요청/u); assert.match(write, /토큰 자동 갱신/u); assert.doesNotMatch(write, /상품 및 작업 상태 조회/u);
+    assert.doesNotMatch(write, /자동 갱신 권한이 없는 연결|약 1시간/u);
+    assert.match(write, /name="scope" value="mcp:write offline_access"/u);
     const invalid = renderToStaticMarkup(await page({ searchParams: Promise.resolve({ ...Object.fromEntries(authorization()), scope: ['mcp:read', 'mcp:write'] }) }));
     assert.match(invalid, /중복된 OAuth 매개변수/u); assert.doesNotMatch(invalid, /이 계정으로 연결/u);
   } finally { f.db.close(); }

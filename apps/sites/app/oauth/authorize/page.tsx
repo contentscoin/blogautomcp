@@ -41,6 +41,9 @@ export default async function OAuthAuthorizePage({ searchParams }: Props) {
               {hasOAuthScope(parsed.value.scope, 'mcp:write') && <li><span>✓</span> 명시적으로 확인한 글의 발행 요청</li>}
               {hasOAuthScope(parsed.value.scope, 'offline_access') && <li><span>✓</span> 연결을 유지하기 위한 토큰 자동 갱신</li>}
             </ul>
+            {!hasOAuthScope(parsed.value.scope, 'offline_access') && (
+              <p className="oauth-note">자동 갱신 권한이 없는 연결은 약 1시간 후 다시 연결해야 합니다. 지속적으로 사용하려면 ChatGPT에서 플러그인 정보를 새로고침한 뒤 재연결하세요.</p>
+            )}
             <form action="/api/oauth/authorize" method="post">
               {Array.from(query.entries()).map(([key, value]) => <input key={key} type="hidden" name={key} value={value} />)}
               <button className="button button-primary oauth-button" type="submit">이 계정으로 연결</button>

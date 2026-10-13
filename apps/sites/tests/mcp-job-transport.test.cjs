@@ -212,6 +212,28 @@ async function call(userId, scope, name, args) {
   return (await route.handleMcpRequest(request, userId, scope)).json();
 }
 
+test('all public tools request offline renewal consent while retaining their read/write boundary', async () => {
+  const request = new Request('https://example.com/api/mcp', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+  });
+  const payload = await (await route.handleMcpRequest(request, 'owner', 'mcp:read mcp:write')).json();
+  const initialize = new Request('https://example.com/api/mcp', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'offline-scope-test', version: '1' } } }),
+  });
+  const metadata = await (await route.handleMcpRequest(initialize, 'owner', 'mcp:read mcp:write')).json();
+  assert.equal(metadata.result.serverInfo.version, '1.3.17');
+  const tools = payload.result.tools;
+  assert.ok(tools.length > 0);
+  assert.ok(tools.some(tool => tool.annotations.readOnlyHint));
+  assert.ok(tools.some(tool => !tool.annotations.readOnlyHint));
+  for (const tool of tools) {
+    assert.deepEqual(tool.securitySchemes, [{ type: 'oauth2', scopes: [tool.annotations.readOnlyHint ? 'mcp:read' : 'mcp:write', 'offline_access'] }],
+      `${tool.name} must request renewal consent without adding another tool permission`);
+  }
+});
+
 test('draft repair tool guidance preserves images and reruns current approval quality', async () => {
   const request = new Request('https://example.com/api/mcp', {
     method: 'POST',
