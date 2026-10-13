@@ -11,8 +11,9 @@ import path from "node:path";
 import vm from "node:vm";
 import ts from "typescript";
 import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene, type BrandPostImageSourceHint } from "../src/lib/brand-post-image-evidence";
-import type { ProductSectionImageDiagnostics, ProductSectionImageReviewOptions } from "./lib/product-photo-review";
+import type { ProductSectionImageAssignment, ProductSectionImageDiagnostics, ProductSectionImageReviewOptions } from "./lib/product-photo-review";
 import { auditSectionProposals } from "./lib/product-section-proposal-audit";
+import { selectShoppingPrewriteOriginal } from "./lib/shopping-prewrite-photos";
 import type { PublishImageAuditOptions, PublishImageAuditResult } from "./lib/publish-image-audit";
 import { buildProduct9Canvas, selectedProductContextFrom9Canvas } from "./lib/product-9canvas";
 
@@ -23,7 +24,7 @@ interface ReviewModule {
     productName: string,
     targets: Array<{ sectionTitle: string; imageIntent: string; imageSource?: BrandPostImageSourceHint; sectionBody?: string[]; excludedSourceSha256?: string[] }>,
     options?: ProductSectionImageReviewOptions,
-  ): Promise<Array<{ targetIndex: number; path: string; sourceSha256: string; reviewClass: string }>>;
+  ): Promise<ProductSectionImageAssignment[]>;
   selectVerifiedProductSectionImage(
     paths: string[],
     productName: string,
@@ -243,6 +244,56 @@ async function main() {
       return file;
     });
     const lateEvidence = manyCandidates[16];
+    const budgetCandidates = manyCandidates.slice(0, 7);
+    const eligiblePool = JSON.stringify({ assignments: budgetCandidates.map((_, index) => ({
+      targetIndex: 1, selectedIndex: index + 1, reviewClass: "product-photo", reason: "eligible seller exterior",
+    })), rejections: [], notSelected: [] });
+    const budgetReports: ProductSectionImageDiagnostics[] = [];
+    const exhaustedFinal = loadReview(eligiblePool, (input, callIndex) => {
+      assert.equal(input.composition.sections.length, 1);
+      const nodeIndex = input.composition.renderNodes.findIndex(node => node.kind === "image");
+      const node = input.composition.renderNodes[nodeIndex];
+      assert.equal(node.kind, "image");
+      if (node.kind !== "image") throw new Error("Missing final audit image fixture");
+      assert.equal(node.assetPath, budgetCandidates[callIndex % 6], "a rejected proposal must not re-enter the same audit operation");
+      const image = { nodeIndex, assetPath: node.assetPath,
+        sha256: crypto.createHash("sha256").update(fs.readFileSync(node.assetPath)).digest("hex") };
+      return { ok: false, checked: 1, images: [image], failures: [{ nodeIndex, assetPath: node.assetPath,
+        code: "SEMANTIC_REJECTION", reason: ["wrong visible option", "graphic layout", "wrong product identity"][callIndex % 3] }] };
+    });
+    for (let invocation = 0; invocation < 2; invocation++) {
+      assert.equal((await exhaustedFinal.review.selectVerifiedProductSectionImages(budgetCandidates, "bounded-final", [overviewTarget], {
+        onDiagnostics: report => budgetReports.push(report),
+      })).length, 0, "a seventh proposal without a final verdict must never fill the original slot");
+      const diagnostic = budgetReports[invocation];
+      assert.equal(diagnostic.status, "incomplete", "six rejected final verdicts do not settle an unaudited seventh proposal");
+      assert.equal(diagnostic.cacheHit, false, "incomplete final audit exhaustion must not seal the completed source-review cache");
+      assert.match(diagnostic.error || "", /^SOURCE_REVIEW_INCOMPLETE:/u);
+      assert.equal(diagnostic.entries.filter(entry => entry.status === "rejected").length, 6);
+      const remainingProposal = diagnostic.entries.find(entry => entry.path === budgetCandidates[6])!;
+      assert.equal(remainingProposal.status, "proposed"); assert.equal(remainingProposal.suitability, "eligible");
+      assert.equal(remainingProposal.selection, "reserve");
+      assert.equal(remainingProposal.reviewHistory?.some(entry => entry.stage === "final-audit"), false,
+        "a shortlist proposal is never represented as a completed final audit");
+      assert.equal(exhaustedFinal.auditCalls.length, (invocation + 1) * 6, "the final audit stays bounded to six calls per explicit operation");
+      assert.equal(exhaustedFinal.calls.length, invocation + 1, "a caller receives fresh incomplete diagnostics rather than the old false completion cache");
+    }
+    await assert.rejects(selectShoppingPrewriteOriginal(budgetCandidates, "bounded-prewrite", "selected-variant",
+      exhaustedFinal.review.selectVerifiedProductSectionImages), (error: unknown) =>
+      (error as { code?: string }).code === "SOURCE_REVIEW_INCOMPLETE",
+    "the real prewriting source gate preserves final-audit exhaustion rather than treating it as absent seller photography");
+    assert.equal(exhaustedFinal.auditCalls.length, 18, "prewriting uses the same six-call bound and never audits a seventh proposal");
+    const filledWithReserves = loadReview(eligiblePool);
+    const filledReports: ProductSectionImageDiagnostics[] = [];
+    for (let invocation = 0; invocation < 2; invocation++) {
+      assert.equal((await filledWithReserves.review.selectVerifiedProductSectionImages(budgetCandidates, "filled-with-reserves", [overviewTarget], {
+        onDiagnostics: report => filledReports.push(report),
+      })).length, 1);
+      assert.equal(filledReports[invocation].status, "complete", "unneeded alternatives do not invalidate an audited filled target");
+    }
+    assert.equal(filledReports[1].cacheHit, true);
+    assert.equal(filledWithReserves.calls.length, 1); assert.equal(filledWithReserves.auditCalls.length, 1,
+      "already accepted exact source pixels are reused without renewed provider or final audit calls");
     const partialFailure = loadReview((_options, callIndex) => callIndex === 0 ? '{"assignments":[]}' : 'invalid');
     const partialReports: ProductSectionImageDiagnostics[] = [];
     await assert.rejects(partialFailure.review.selectVerifiedProductSectionImages(

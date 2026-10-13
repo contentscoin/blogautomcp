@@ -135,7 +135,7 @@ export async function selectVerifiedProductSectionImages(
     allowScene: allowsOriginalShoppingScene(target),
   }));
   const reviewKey = crypto.createHash("sha256").update(JSON.stringify({
-    version: 12,
+    version: 13,
     selectedProduct: options.selectedProduct || productName,
     productName: productName.normalize("NFKC").replace(/\s+/gu, " ").trim(),
     targets: normalizedTargets,
@@ -364,11 +364,16 @@ export async function selectVerifiedProductSectionImages(
     entry.selection = verified.some(row => row.targetIndex === entry.targetIndex && row.sourceSha256 === entry.sourceSha256) ? "assigned" : "reserve";
   }
   const unfilled = normalizedTargets.map((_, index) => index).filter(index => !assignments.some(row => row.targetIndex === index));
-  const incomplete = entries.some(entry => unfilled.includes(entry.targetIndex) && entry.suitability === "unreviewed" &&
+  const unauditedReserve = entries.some(entry => unfilled.includes(entry.targetIndex) && entry.status === "proposed" &&
+    entry.selection === "reserve" && !normalizedTargets[entry.targetIndex].excludedSourceSha256.includes(entry.sourceSha256));
+  const incomplete = unauditedReserve || entries.some(entry => unfilled.includes(entry.targetIndex) && entry.suitability === "unreviewed" &&
     !normalizedTargets[entry.targetIndex].excludedSourceSha256.includes(entry.sourceSha256));
-  const diagnostics = report(incomplete ? "incomplete" : "complete");
-  // Missing verdicts are a protocol gap, not a cacheable proof that no seller
-  // original exists. A filled target need not re-review unused alternatives.
+  const diagnostics = report(incomplete ? "incomplete" : "complete", unauditedReserve
+    ? "SOURCE_REVIEW_INCOMPLETE: 최종 픽셀 검사 한도 내에 판정하지 못한 판매자 원본 제안이 남았습니다. 원본 부족으로 처리하거나 미검수 제안을 배정하지 않았습니다."
+    : undefined);
+  // Missing final verdicts, including eligible proposals left by the bounded
+  // final audit, are not a cacheable proof that no seller original exists.
+  // A filled target need not re-review unused alternatives.
   if (!incomplete) sectionBatchReviews.set(reviewKey, { assignments, diagnostics });
   emit(diagnostics);
   return assignments.map(assignment => ({ ...assignment }));

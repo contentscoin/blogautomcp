@@ -229,6 +229,32 @@ async function main() {
         "a partial success with an unresolved code cannot buy a recovery replay or approval even without errors[]");
     }
 
+    for (const responseMode of ["rejected-response", "partial-response", "errors-only"] as const) {
+      const actions: string[] = [];
+      let backups = 0;
+      await assert.rejects(runMaterialPreparation(`unreviewed-seller-${responseMode}`, { pause: async () => {}, call: async (url, method, body) => {
+        const action = (body as { action?: string } | undefined)?.action || method;
+        actions.push(action);
+        if (url.endsWith("/images")) {
+          assert.equal(action, "bind_sources", "an unresolved seller original is inspected before any generation");
+          const errors = ["SOURCE_REVIEW_INCOMPLETE: Eligible seller proposal has no final pixel verdict."];
+          if (responseMode === "rejected-response") throw Object.assign(new Error(errors[0]), {
+            code: "SOURCE_REVIEW_INCOMPLETE", errors, httpStatus: 422,
+          });
+          return { success: true, ...(responseMode === "partial-response" ? { code: "SOURCE_REVIEW_INCOMPLETE" } : { errors }) };
+        }
+        return { success: true, data: { connectKind: "SHOPPING", approvedAt: null,
+          composition: { sections: [{ id: "seller-original", imageSource: "seller-original" }] },
+          imageGeneration: { status: "incomplete" }, imageSlots: [{ sectionId: "seller-original", missing: 1, generationMissing: 0 }],
+          contentQuality: workflowContentQuality(true) } };
+      } }, { incrementalOnly: true, beforeRepair: async () => { backups++; } }), (error: unknown) =>
+        (error as { code?: string }).code === "SOURCE_REVIEW_INCOMPLETE");
+      assert.equal(backups, 1, "incremental repair snapshots before inspection metadata changes");
+      assert.equal(actions.filter(action => action === "bind_sources").length, 1);
+      assert(!actions.some(action => ["prepare_context", "generate_missing", "regenerate", "replan_sources", "approve", "revise"].includes(action)),
+        "unreviewed source candidates must not be relabeled as a shortage, recollected, generated, rewritten or approved");
+    }
+
     let repairedText = false, repairedImages = false, sequentialRevisions = 0, sequentialImageRepairs = 0, sequentialApprovals = 0;
     const sequentialCall: Call = async (url, method, body) => {
       const action = (body as { action?: string } | undefined)?.action;
