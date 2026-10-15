@@ -16,6 +16,7 @@ import PostAnglePanel from "@/components/PostAnglePanel";
 import ExperienceNotesPanel from "@/components/ExperienceNotesPanel";
 import { getPostAngle } from "../../scripts/lib/topic-templates/angles";
 import { REFERENCE_SCENE_CAPTION, type BrandPostImageEvidenceLike } from "@/lib/brand-post-image-evidence";
+import { startDraftImageProgressPolling } from "@/lib/draft-image-progress-polling";
 
 type ContentMode = "product" | "topic" | "review";
 type ReviewCategory = "place" | "food" | "travel" | "parenting" | "product";
@@ -482,21 +483,16 @@ export default function Dashboard() {
   const draftImagesRunning = draftPreview?.imageGeneration?.status === "running";
   useEffect(() => {
     if (!previewId || (!draftImageActionKey && !draftImagesRunning)) return;
-    let cancelled = false;
-    let inFlight = false;
-    const timer = setInterval(async () => {
-      if (inFlight) return;
-      inFlight = true;
-      try {
-        const response = await fetch(`/api/brandlinks/${previewId}/draft`, { cache: "no-store" });
-        const payload = await response.json();
-        if (!cancelled && response.ok && payload.success && payload.data) {
-          setDraftPreview((current) => current?.brandLinkId === previewId ? payload.data : current);
-        }
-      } catch { /* The owning POST reports errors; progress polling is best effort. */ }
-      finally { inFlight = false; }
-    }, 3000);
-    return () => { cancelled = true; clearInterval(timer); };
+    const polling = startDraftImageProgressPolling<BrandPostDraftPreview>({ productId: previewId,
+      wasRunning: draftImagesRunning, waitForOwningRequest: Boolean(draftImageActionKey), fetch, visibility: document, desktopVisibility: window,
+      requireDesktopVisibility: /Electron\//u.test(navigator.userAgent),
+      onProgress: imageGeneration => setDraftPreview(current => {
+        if (current?.brandLinkId !== previewId || JSON.stringify(current.imageGeneration) === JSON.stringify(imageGeneration)) return current;
+        return { ...current, imageGeneration };
+      }),
+      onPreview: preview => setDraftPreview(current => current?.brandLinkId === previewId ? preview : current),
+    });
+    return () => polling.stop();
   }, [previewId, draftImageActionKey, draftImagesRunning]);
   const [draftCreationMode, setDraftCreationMode] = useState<DraftCreationMode>("checking");
   const [chatGptDraftHandoff, setChatGptDraftHandoff] = useState<ChatGptDraftHandoff | null>(null);
@@ -2617,6 +2613,8 @@ export default function Dashboard() {
                                 <img
                                   src={thumbnailUrl}
                                   alt=""
+                                  loading="lazy"
+                                  decoding="async"
                                   className="h-12 w-12 shrink-0 rounded-lg object-cover"
                                 />
                               )}
@@ -2977,7 +2975,7 @@ export default function Dashboard() {
                       </div>
                       <div className="max-w-xs overflow-hidden rounded-xl bg-slate-100">
                         {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={asset.previewUrl} alt={`${draftPreview.title} 대표 썸네일`} className="aspect-square w-full object-cover" />
+                        <img src={asset.previewUrl} alt={`${draftPreview.title} 대표 썸네일`} loading="lazy" decoding="async" className="aspect-square w-full object-cover" />
                       </div>
                       {asset.provenance === "GENERATED_SCENE" && <p className="mt-2 text-xs leading-5 text-slate-600">{REFERENCE_SCENE_CAPTION}</p>}
                     </div>
@@ -3011,7 +3009,7 @@ export default function Dashboard() {
                             <figure key={`${asset.assetKey}-${assetIndex}`} className="overflow-hidden rounded-xl border border-slate-200 bg-white">
                               <div className="aspect-[4/3] overflow-hidden bg-slate-100">
                                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                                <img src={asset.previewUrl} alt={`${slot.title} 이미지 ${assetIndex + 1}`} className="h-full w-full object-cover" />
+                                <img src={asset.previewUrl} alt={`${slot.title} 이미지 ${assetIndex + 1}`} loading="lazy" decoding="async" className="h-full w-full object-cover" />
                               </div>
                               <figcaption className="flex items-center justify-between gap-2 p-3">
                                 <span className="truncate text-xs font-semibold text-slate-500">{brandImageProvenanceLabel(asset.provenance)}</span>

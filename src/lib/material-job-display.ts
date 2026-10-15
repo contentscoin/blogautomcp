@@ -2,6 +2,7 @@
 export type CurrentMaterialDisplay = {
   productId: string; ready: boolean; status: string; blockers?: string[];
   preparationDiagnostics?: { nextAction?: { instruction: string }; missingBodyImages?: number; thumbnailRequired?: boolean };
+  verification?: { mode?: string; contentCheckedAt?: string | null };
 };
 
 export function currentMaterialLabel(material?: CurrentMaterialDisplay): string | null {
@@ -12,7 +13,8 @@ export function currentMaterialLabel(material?: CurrentMaterialDisplay): string 
   if (material.status === "PUBLISHING") return "현재 발행 중";
   if (material.status === "PREPARING") return "현재 소재 보완·검증 중";
   // Publish readiness, rather than a product's READY workflow flag, is authoritative.
-  if (material.ready && material.status === "READY") return "현재 준비완료 · 검증·승인 완료";
+  if (material.ready && material.status === "READY") return material.verification?.mode === "saved-summary"
+    ? "저장된 검사 기준 준비완료 · 발행 전 재확인" : "현재 준비완료 · 검증·승인 완료";
   return "현재 보완 필요";
 }
 

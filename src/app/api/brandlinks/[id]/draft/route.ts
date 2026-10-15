@@ -18,6 +18,7 @@ import {
   approveBrandPostPackage,
   getBrandPostPackageDir,
   getBrandPostPackageManifestPath,
+  getBrandPostImageGenerationState,
   packagePreview,
   readBrandPostPackage,
   readBrandPostPackageResult,
@@ -49,6 +50,7 @@ import { planPhotoDescriptionRepair, serverPhotoDescriptionFindings } from "@/li
 import { atomicWriteTextFile } from "@/lib/atomic-text-file";
 import { isDraftEditorialQualityPassed } from "@/lib/brand-post-quality-display";
 import { acquireBrandPostImageRepairLock, type BrandPostImageRepairLock } from "@/lib/brand-post-image-repair-lock";
+import { brandPostImageProgress } from "@/lib/brand-post-image-progress";
 
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
 const REVISION_PROCESS_TIMEOUT_MS = (() => {
@@ -317,6 +319,12 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   const { id } = await params;
   try {
     const manifest = readBrandPostPackage(id, { migrate: false });
+    if (request.nextUrl.searchParams.get("progressOnly") === "1") {
+      return NextResponse.json({ success: true, data: manifest ? {
+        brandLinkId: id, progressOnly: true,
+        imageGeneration: brandPostImageProgress(getBrandPostImageGenerationState(manifest)),
+      } : null });
+    }
     return NextResponse.json({ success: true, data: manifest ? packagePreview(manifest) : null });
   } catch (error) {
     return NextResponse.json({ success: false, error: error instanceof Error ? error.message : "초안 조회 실패" }, { status: 500 });

@@ -36,7 +36,8 @@ const preparation = load('src/lib/material-preparation-diagnostics.ts', {});
 function harness() {
   const state = { now: '2026-09-07T03:00:00.000Z', authorized: true, updateBlocked: false,
     products: new Map(), manifests: new Map(), jobs: new Map(), runs: [], saves: 0,
-    locks: 0, activities: 0, productReads: 0, countReads: 0, materialReads: new Map(), runnerError: null, progress: new Map(), publicationAttempts: new Map(), missingDraftFiles: new Set(), manuscripts: new Map(), beforeLock: null };
+    locks: 0, activities: 0, productReads: 0, countReads: 0, materialReads: new Map(), runnerError: null, progress: new Map(), publicationAttempts: new Map(), missingDraftFiles: new Set(), manuscripts: new Map(), beforeLock: null,
+    summaryObservations: new Map(), summaryToken: 'a'.repeat(64), summaryReads: 0, beforeSummaryRead: null };
   class FakeDate extends Date {
     constructor(...args) { super(...(args.length ? args : [state.now])); }
     static now() { return Date.parse(state.now); }
@@ -93,6 +94,20 @@ function harness() {
     './desktop-activity': { beginAutomaticPublishing: () => { state.activities++; return () => { state.activities--; }; } },
     './material-library': library,
     './material-preparation-diagnostics': preparation,
+    './material-summary': { getMaterialSummary: async id => {
+      state.summaryReads++; state.beforeSummaryRead?.(state.summaryReads);
+      const manifest = state.manifests.get(id), observation = state.summaryObservations.get(id);
+      const current = observation?.token === state.summaryToken ? observation.material : {};
+      return manifest ? { productId: id, title: manifest.title, connectKind: manifest.connectKind,
+        ready: Boolean(manifest.approvedAt), blockers: [], score: 100, imageCount: 1, approvedAt: manifest.approvedAt,
+        ...current, revision: state.summaryToken,
+        verification: { mode: 'saved-summary', strict: false, requiresFullVerification: true } } : null;
+    }, observeStrictMaterialSummary: (id, token, material) => {
+      if (token !== state.summaryToken) return false;
+      state.summaryObservations.set(id, { token, material: clone(material) }); return true;
+    } },
+    './draft-progress': { readDraftProgress: id => state.progress.get(id) || null },
+    './publish-attempt': { readPublishAttempt: id => state.publicationAttempts.get(id) || null },
     './material-job-store': {
       acquireMaterialJobLock: () => {
         if (state.locks) throw new Error('Existing material job');
@@ -136,6 +151,75 @@ function assertNoDispatch(h) {
   assert.equal(h.state.locks, 0, 'lock released');
   assert.equal(h.state.activities, 0, 'activity released');
 }
+
+test('display summaries never run the strict reader; explicit selection verifies only requested products', async () => {
+  const h = harness();
+  const first = h.product(0); h.product(1); h.product(2);
+  h.state.materialReads.clear();
+  const summary = await h.api.materialsGet(h.request(undefined, '?summary=1'));
+  assert.equal(summary.status, 200);
+  assert.equal(summary.body.data.materials.length, 3);
+  assert.equal(summary.body.data.verificationMode, 'saved-summary');
+  assert.equal(summary.body.data.requiresFullVerification, true);
+  assert.equal(h.state.materialReads.size, 0, 'automatic UI summary cannot trigger pixel/byte readiness');
+  const selected = await h.api.materialsGet(h.request(undefined, `?productIds=${first.productId}`));
+  assert.equal(selected.status, 200);
+  assert.equal(selected.body.data.materials.length, 1);
+  assert.equal(selected.body.data.materials[0].revision, first.revision);
+  assert.equal(selected.body.data.materials[0].summaryRevision, h.state.summaryToken);
+  assert.equal(h.state.materialReads.get(first.productId), 1);
+  assert.equal(h.state.materialReads.size, 1, 'other products are not reverified');
+  const unsafeSummarySelection = await h.post({ materials: [{ productId: first.productId, revision: 'a'.repeat(64) }], publishMode: 'now' });
+  assert.equal(unsafeSummarySelection.status, 409, 'a summary/metadata digest cannot authorize strict publication');
+  assert.match(unsafeSummarySelection.body.error, /변경/);
+  const invalid = await h.api.materialsGet(h.request(undefined, '?productIds=../unsafe'));
+  assert.equal(invalid.status, 400);
+  assertNoDispatch(h);
+});
+
+test('explicit failed selection updates only summary diagnostics and repair candidates, then a successful check restores them', async () => {
+  const h = harness(); const selected = h.product(0);
+  h.state.manifests.get(selected.productId).fixtureBlockers = [{ code: 'image-asset-invalid', reason: 'changed image bytes' }];
+  const staleDisplay = await h.api.materialsGet(h.request(undefined, '?summary=1'));
+  assert.equal(staleDisplay.body.data.materials[0].ready, true, 'saved approval initially has no current-byte observation');
+  const failed = await h.api.materialsGet(h.request(undefined, `?productIds=${selected.productId}`));
+  assert.equal(failed.body.data.materials[0].ready, false);
+  const refreshed = await h.api.materialsGet(h.request(undefined, '?summary=1'));
+  assert.equal(refreshed.body.data.materials[0].ready, false);
+  assert.equal(refreshed.body.data.materials[0].verification.strict, false);
+  assert.equal(refreshed.body.data.repairCandidates.length, 1);
+  assert.match(refreshed.body.data.repairCandidates[0].reason, /changed image bytes/);
+  h.state.manifests.get(selected.productId).fixtureBlockers = [];
+  await h.api.materialsGet(h.request(undefined, `?productIds=${selected.productId}`));
+  const restored = await h.api.materialsGet(h.request(undefined, '?summary=1'));
+  assert.equal(restored.body.data.materials[0].ready, true);
+  assert.equal(restored.body.data.repairCandidates.length, 0);
+  assertNoDispatch(h);
+});
+
+test('metadata changing during strict selection cannot attach its observation to a different summary', async () => {
+  const h = harness(); const selected = h.product(0);
+  h.state.manifests.get(selected.productId).fixtureBlockers = [{ code: 'image-asset-invalid', reason: 'old bytes failed' }];
+  h.state.beforeSummaryRead = count => { if (count === 2) h.state.summaryToken = 'changed-during-read'; };
+  const checked = await h.api.materialsGet(h.request(undefined, `?productIds=${selected.productId}`));
+  assert.equal(checked.body.data.materials[0].summaryRevision, null);
+  assert.equal(h.state.summaryObservations.size, 0);
+  const display = await h.api.materialsGet(h.request(undefined, '?summary=1'));
+  assert.equal(display.body.data.materials[0].ready, true, 'old failed verdict was not attached to new input');
+  assertNoDispatch(h);
+});
+
+test('transient database workflow guards never poison an unchanged material summary observation', async () => {
+  const h = harness(); const selected = h.product(0);
+  h.state.products.get(selected.productId).status = 'PUBLISHING';
+  const guarded = await h.api.materialsGet(h.request(undefined, `?productIds=${selected.productId}`));
+  assert.equal(guarded.body.data.materials[0].ready, false);
+  assert.equal(h.state.summaryObservations.get(selected.productId).material.ready, true, 'only underlying file quality is recorded');
+  h.state.products.get(selected.productId).status = 'READY';
+  const restored = await h.api.materialsGet(h.request(undefined, '?summary=1'));
+  assert.equal(restored.body.data.materials[0].ready, true);
+  assertNoDispatch(h);
+});
 
 test('one materials GET verifies each package once across list and both candidate selectors; the next GET reads fresh', async () => {
   const h = harness(), ready = h.product(0), blocked = h.product(2, 'FAILED');

@@ -154,6 +154,12 @@ assert.throws(() => assertNaverEditorBody(topDoc, readerFor(wrapperWithUnscopedB
 const wrapperWithOutsideUi = new ElementFixture("DIV", "se-content", new ElementFixture("DIV", "se-toolbar", "본문 도구"),
   new ElementFixture("DIV", "se-component se-documentTitle", paragraph("상품")), bodyFixture(topBody).root);
 assert.doesNotThrow(() => assertNaverEditorBody(topDoc, readerFor(wrapperWithOutsideUi)(), "final")); domCases++;
+passBody(topDoc, bodyFixture(topBody, "상품", [new ElementFixture("DIV", "se-insert-menu",
+  new ElementFixture("DIV", "se-insert-point-marker-button", new ElementFixture("SPAN", "se-blind", "추가할 컴포넌트를 선택하세요.")))]));
+const samePhraseArticle = bodyFixture(topBody); samePhraseArticle.root.append("추가할 컴포넌트를 선택하세요.");
+failBody(topDoc, samePhraseArticle, /SCOPE_AMBIGUOUS/); // A matching string outside the real UI is still unknown article content.
+failBody(topDoc, bodyFixture([], "상품", [new ElementFixture("DIV", "se-insert-menu", "추가할 컴포넌트를 선택하세요.")]),
+  /DISCLOSURE_MISMATCH|CONTENT_MISSING/, "disclosure"); // Removing UI noise must never manufacture a body notice.
 for (const tag of ["IMG", "VIDEO", "HR"]) {
   const outsideVisual = new ElementFixture("DIV", "se-content", new ElementFixture(tag), bodyFixture(topBody).root);
   const snapshot = readerFor(outsideVisual)(); assert.equal(snapshot.reason, "unscoped-visible-visual");
@@ -205,8 +211,10 @@ async function verifyProductionEditorOrder() {
     const doc = { ...topDoc, renderNodes: [topDoc.renderNodes[0]!, { kind: "image", role: "scene", assetPath: "fixture.png" },
       ...topDoc.renderNodes.slice(1)] } as ResolvedPostDocumentV1;
     let reads = 0;
+    const typingFocus = () => ({ bodyFocused: true });
     const page = {
-      evaluate: async (fn: () => NaverEditorBodySnapshot) => {
+      evaluate: async (fn: () => unknown) => {
+        if (fn === typingFocus) return typingFocus();
         events.push("read"); reads++;
         if (mode === "reader-error") throw new Error("fixture evaluation failed");
         if (mode === "final-missing-notice" && reads === 2) fixture.bodyComponent.childNodes.shift();
@@ -217,12 +225,15 @@ async function verifyProductionEditorOrder() {
     };
     const sandbox = {
       assertNaverEditorBody, editorBodyAuditDiagnostic, readNaverEditorBodySnapshot: fixture.read,
+      readNaverEditorTypingFocus: typingFocus,
       getErrorMessage: (error: Error) => error.message,
       console: { log: () => {}, error: () => { events.push("diagnostic"); } },
       fs: { mkdirSync: () => {}, writeFileSync: (_file: string, value: string) => { diagnostics.push(value); } },
       path, process: { cwd: () => "fixture-only-no-files-written", pid: 123 }, createTimestampLabel: () => "fixture",
       createEditorialBodyStyleState: () => ({}), shouldApplyBodyStyle: () => false, markBodyStyleReady: () => {}, invalidateBodyStyle: () => {},
       setNaverTextFormat: async () => true,
+      focusFreshNaverEditorBody: async () => { events.push("focus"); },
+      assertCurrentEditorTypingFocus: async () => {},
       inputPlainParagraph: async (_page: unknown, value: string) => {
         events.push("write");
         if (value === notice && mode === "missing-notice") return;
@@ -237,6 +248,7 @@ async function verifyProductionEditorOrder() {
     if (mode === "normal") {
       await write(page, [], [], [], { resolvedDocument: doc });
       assert(events.indexOf("read") < events.indexOf("image"), "the first body notice must be verified before the first upload");
+      assert(events.indexOf("focus") < events.indexOf("write"), "the fresh body must be targeted before any text is typed");
       assert.equal(reads, 2, "the same reader must check both early disclosure and final rendered body");
       assert.equal(diagnostics.length, 0);
     } else {

@@ -5,12 +5,15 @@ import { requireAdminApiKey } from "./api-auth";
 import { requireNoPendingDesktopUpdate } from "./update-guard";
 import { beginAutomaticPublishing } from "./desktop-activity";
 import { getMaterial, validateMaterialSelection } from "./material-library";
+import { getMaterialSummary, observeStrictMaterialSummary, type MaterialSummary } from "./material-summary";
 import { applyMaterialPreparationWorkflowGuard } from "./material-preparation-diagnostics";
 import { acquireMaterialJobLock, listMaterialJobs, materialJobErrorMessage, materialJobFailureCodes, readMaterialJob, saveMaterialJob, type MaterialJob } from "./material-job-store";
 import { runMaterialJob } from "./material-job-runner";
 import { addDaysToYmd, ymdInTimeZone } from "./bulk-schedule-plan";
-import { listFailedMaterialCandidates, normalizeMaterialConnectKind } from "./material-failed-candidates";
-import { listMaterialRepairCandidates } from "./material-repair-candidates";
+import { listFailedMaterialCandidates, normalizeMaterialConnectKind, selectFailedMaterialCandidates } from "./material-failed-candidates";
+import { listMaterialRepairCandidates, selectMaterialRepairCandidates } from "./material-repair-candidates";
+import { readDraftProgress } from "./draft-progress";
+import { readPublishAttempt } from "./publish-attempt";
 
 type MaterialStatus = "PREPARING" | "BLOCKED" | "READY" | "PUBLISHING" | "SCHEDULED" | "PUBLISHED" | "OUTCOME_UNKNOWN";
 type MaterialProduct = { id: string; productName: string | null; status: string; connectKind: string };
@@ -73,6 +76,57 @@ async function materialJobView(job: MaterialJob): Promise<Record<string, unknown
 export async function materialsGet(request: NextRequest) {
   const auth = requireAdminApiKey(request); if (auth) return auth;
   try {
+    const productIdsParam = request.nextUrl.searchParams.get("productIds");
+    if (productIdsParam !== null) {
+      // Explicit selection checks just these materials. A UI observation token
+      // is never accepted by the strict publication endpoint as a revision.
+      const productIds = [...new Set(productIdsParam.split(","))];
+      if (!productIds.length || productIds.length > 50 || productIds.some(id => !/^[a-zA-Z0-9_-]{8,80}$/u.test(id)))
+        throw new Error("검사할 소재를 1~50개 선택하세요.");
+      const products = await prisma.brandLink.findMany({ where: { id: { in: productIds } },
+        select: { id: true, productName: true, status: true, connectKind: true } });
+      const materials = [];
+      for (const product of products) {
+        const before = await getMaterialSummary(product.id);
+        const strictMaterial = getMaterial(product.id);
+        const current = readMaterialView(product, () => strictMaterial);
+        const after = await getMaterialSummary(product.id);
+        const stable = Boolean(before && after && before.revision === after.revision);
+        const observed = Boolean(stable && strictMaterial && observeStrictMaterialSummary(product.id, after!.revision, strictMaterial));
+        if (current) materials.push({ ...current, summaryRevision: observed ? after!.revision : null });
+      }
+      return NextResponse.json({ success: true, data: { materials, readinessObservedAt: new Date().toISOString(), verificationMode: "strict" } });
+    }
+    if (request.nextUrl.searchParams.get("summary") === "1" || request.nextUrl.searchParams.get("view") === "summary") {
+      const kind = normalizeMaterialConnectKind(request.nextUrl.searchParams.get("connectKind"));
+      const products = await prisma.brandLink.findMany({ orderBy: { createdAt: "desc" }, ...(kind ? { where: { connectKind: kind } } : {}),
+        select: { id: true, productName: true, status: true, connectKind: true, postUrl: true, publishedAt: true, scheduledPublishAt: true, errorMessage: true } });
+      const observed = new Map<string, MaterialSummary | null>();
+      const observationErrors = new Map<string, unknown>();
+      // Limit metadata fan-out and yield throughout a cold first load; no
+      // synchronous pixel audit is scheduled by this automatic UI endpoint.
+      for (let offset = 0; offset < products.length; offset += 8) {
+        await Promise.all(products.slice(offset, offset + 8).map(async product => {
+          try { observed.set(product.id, await getMaterialSummary(product.id)); }
+          catch (error) { observed.set(product.id, null); observationErrors.set(product.id, error); }
+        }));
+      }
+      const material = (id: string) => {
+        if (observationErrors.has(id)) throw observationErrors.get(id);
+        return observed.get(id) || null;
+      };
+      const jobs = listMaterialJobs();
+      const materials = products.flatMap(product => {
+        const value = readMaterialView(product, material);
+        return value ? [value] : [];
+      });
+      const failedCandidates = selectFailedMaterialCandidates(products, jobs, { material, progress: readDraftProgress }, kind);
+      const repairCandidates = selectMaterialRepairCandidates(products, jobs,
+        { material, savedDraft: id => observed.has(id) && observed.get(id) !== null, publicationAttempt: readPublishAttempt }, kind);
+      return NextResponse.json({ success: true, data: { materials, jobs: jobs.slice(0, 50), failedCandidates, failedCandidateCount: failedCandidates.length,
+        repairCandidates, repairCandidateCount: repairCandidates.length, readinessObservedAt: new Date().toISOString(), verificationMode: "saved-summary",
+        requiresFullVerification: true } });
+    }
     // Share expensive file verification only within this one GET snapshot.
     // Every later GET and all mutation/publication paths read fresh bytes.
     const cache = new Map<string, { value: ReturnType<typeof getMaterial> } | { error: unknown }>();

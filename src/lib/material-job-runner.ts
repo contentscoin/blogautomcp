@@ -1,4 +1,4 @@
-import { materialJobErrorMessage, materialJobFailureCodes, readMaterialFailureObservationsForProduct, readMaterialFailureScopeForProduct, type MaterialJob, saveMaterialJob } from "./material-job-store";
+import { materialJobErrorMessage, materialJobFailureCodes, readMaterialFailureObservationsForProduct, readMaterialFailureScopeForProduct, type MaterialJob, saveMaterialJob, listMaterialJobs } from "./material-job-store";
 import { formatMaterialFailureReference, materialFailurePhase, normalizeMaterialApprovalConflict, normalizeMaterialFailureObservations, type MaterialFailureObservation, type MaterialFailurePhase } from "../../scripts/lib/material-failure-reference";
 import { getMaterial } from "./material-library";
 import { runMaterialPreparation, runAutomaticDraftWorkflow, localScheduleCall, isUncertainLocalTransportError, isSessionWidePreparationFailureCode, type Call } from "../../scripts/lib/scheduled-draft-workflow";
@@ -6,7 +6,18 @@ import { automaticPublishingCancellationCheck } from "./desktop-activity";
 import { listFailedMaterialCandidates } from "./material-failed-candidates";
 import { backupMaterialBeforeRewrite } from "./material-rewrite-backup";
 import { prisma } from "./db";
-import { listMaterialRepairCandidates } from "./material-repair-candidates";
+import { hasSavedMaterialDraft, selectMaterialRepairCandidates } from "./material-repair-candidates";
+import { readPublishAttempt } from "./publish-attempt";
+
+async function canStillRepairProduct(id: string, job: MaterialJob): Promise<boolean> {
+  const product = await prisma.brandLink.findUnique({ where: { id },
+    select: { id: true, productName: true, status: true, connectKind: true, postUrl: true, publishedAt: true, scheduledPublishAt: true, errorMessage: true } });
+  if (!product) return false;
+  // Keep the exact publication/history/unknown-owner exclusions, but read
+  // current bytes for the one target instead of every other saved product.
+  return selectMaterialRepairCandidates([product], listMaterialJobs().filter(saved => saved.jobId !== job.jobId),
+    { material: getMaterial, savedDraft: hasSavedMaterialDraft, publicationAttempt: readPublishAttempt }, job.connectKind).length === 1;
+}
 
 async function canStillRewriteProduct(id: string): Promise<boolean> {
   const product = await prisma.brandLink.findUnique({ where: { id }, select: { status: true, postUrl: true, publishedAt: true, scheduledPublishAt: true } });
@@ -58,8 +69,7 @@ export async function runMaterialJob(job: MaterialJob, deps: {
         if (!eligible) throw Object.assign(new Error("실행 전에 소재 상태가 변경되어 재작성하지 않았습니다. 최신 실패 목록을 확인하세요."), { code: "FAILED_MATERIAL_SELECTION_CHANGED" });
       }
       if (job.kind === "repair") {
-        const eligible = await (deps.validateRepair || (async (id, currentJob) =>
-          (await listMaterialRepairCandidates(currentJob.connectKind, currentJob.jobId)).some(candidate => candidate.productId === id)))(item.productId, job);
+        const eligible = await (deps.validateRepair || canStillRepairProduct)(item.productId, job);
         if (!eligible) throw Object.assign(new Error("실행 전에 소재 상태가 변경되어 보완하지 않았습니다. 최신 보완 목록을 확인하세요."), { code: "MATERIAL_REPAIR_SELECTION_CHANGED" });
       }
       item.status = job.kind === "publish" ? "publishing" : "preparing";
@@ -126,8 +136,7 @@ export async function runMaterialJob(job: MaterialJob, deps: {
           incrementalOnly: true,
           beforeRepair: async () => {
             deps.checkCancelled();
-            const eligible = await (deps.validateRepair || (async (id, currentJob) =>
-              (await listMaterialRepairCandidates(currentJob.connectKind, currentJob.jobId)).some(candidate => candidate.productId === id)))(item.productId, job);
+            const eligible = await (deps.validateRepair || canStillRepairProduct)(item.productId, job);
             if (!eligible) throw Object.assign(new Error("변경 직전에 소재 상태가 바뀌어 기존 원고를 보존했습니다."), { code: "MATERIAL_REPAIR_SELECTION_CHANGED" });
             const backup = (deps.backup || backupMaterialBeforeRewrite)(item.productId, job.jobId);
             if (!backup) throw Object.assign(new Error("저장 패키지를 백업하지 못해 소재 보완을 시작하지 않았습니다."), { code: "MATERIAL_REPAIR_BACKUP_FAILED" });

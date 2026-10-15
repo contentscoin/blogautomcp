@@ -24,7 +24,10 @@ export function readNaverEditorBodySnapshot(): NaverEditorBodySnapshot {
     rootSelector: null, rootCount: 0, componentCount: 0, excludedTitleCount: 0,
     excludedUiCount: 0, leadingContent: "none", text: "", textLength: 0, unscopedTextPrefix: "", components: [],
   };
-  const uiSelector = '.se-toolbar, .se-toolbar-container, .se-toolbar-option, .se-popup, .se-popup-container, .se-menu, .se-placeholder, [role="toolbar"], [role="menu"], [role="dialog"]';
+  // SmartEditor 1.78.1's insert menu includes a clipped .se-blind label:
+  // "추가할 컴포넌트를 선택하세요." It is editor chrome, not article text.
+  // Exclude its owned menu, never arbitrary body text matching that phrase.
+  const uiSelector = '.se-toolbar, .se-toolbar-container, .se-toolbar-option, .se-popup, .se-popup-container, .se-menu, .se-insert-menu, .se-component-edge-button, .se-placeholder, .__se_placeholder, [role="toolbar"], [role="menu"], [role="dialog"]';
   const maxComponents = 256;
   const maxText = 100_000;
   const maxNodes = 20_000;
@@ -147,6 +150,91 @@ export function readNaverEditorBodySnapshot(): NaverEditorBodySnapshot {
 }
 
 export type NaverEditorAuditPhase = "disclosure" | "final";
+
+export interface NaverEditorTypingFocus {
+  bodyFocused: boolean;
+  reason: string;
+  rootCount: number;
+  selectedBodyCount: number;
+  selectedTextBodyCount: number;
+  selectedTitleCount: number;
+  inputBufferCount: number;
+  selectedBodyId: string | null;
+  inputBufferId: string | null;
+  bufferRestorationAllowed: boolean;
+  activeKind: "input-buffer" | "body-editable" | "title" | "editor-ui" | "outside";
+}
+
+/** Self-contained page reader. SmartEditor types through its input_buffer iframe,
+ * not a contenteditable paragraph. A selected title uses the same buffer, so
+ * buffer focus alone is never sufficient proof of a body insertion target. */
+export function readNaverEditorTypingFocus(): NaverEditorTypingFocus {
+  const result: NaverEditorTypingFocus = { bodyFocused: false, reason: "body-focus-missing", rootCount: 0,
+    selectedBodyCount: 0, selectedTextBodyCount: 0, selectedTitleCount: 0, inputBufferCount: 0, selectedBodyId: null,
+    inputBufferId: null, bufferRestorationAllowed: false, activeKind: "outside" };
+  const uiSelector = '.se-toolbar, .se-toolbar-container, .se-toolbar-option, .se-popup, .se-popup-container, .se-menu, .se-insert-menu, .se-component-edge-button, .se-placeholder, .__se_placeholder, [role="toolbar"], [role="menu"], [role="dialog"]';
+  const visible = (element: Element): boolean => {
+    for (let current: Element | null = element; current; current = current.parentElement) {
+      if (current.hasAttribute("hidden") || current.getAttribute("aria-hidden") === "true") return false;
+      const style = window.getComputedStyle(current);
+      if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || Number.parseFloat(style.opacity) === 0) return false;
+    }
+    return true;
+  };
+  const mainRoots = Array.from(document.querySelectorAll(".se-main-container")).filter(visible);
+  const fallbacks = Array.from(document.querySelectorAll(".se-content")).filter(visible);
+  const roots = mainRoots.length ? [...mainRoots, ...fallbacks.filter(fallback => !mainRoots.some(main =>
+    main === fallback || main.contains(fallback) || fallback.contains(main)))] : fallbacks;
+  result.rootCount = roots.length;
+  if (roots.length !== 1) { result.reason = roots.length ? "multiple-visible-editor-roots" : "editor-root-missing"; return result; }
+  const root = roots[0]!;
+  const selected = Array.from(root.querySelectorAll(".se-component.se-is-selected")).filter(element =>
+    visible(element) && !element.closest(uiSelector) && !element.closest(".se-documentTitle"));
+  const isTextOwner = (element: Element) => element.matches(".se-text, .se-sectionTitle") &&
+    Array.from(element.querySelectorAll(".se-text-paragraph")).some(paragraph =>
+      paragraph.closest(".se-component") === element && visible(paragraph));
+  result.selectedBodyCount = selected.length;
+  result.selectedTextBodyCount = selected.filter(isTextOwner).length;
+  result.selectedBodyId = selected.length === 1 ? selected[0]!.getAttribute("data-compid") || selected[0]!.id || null : null;
+  result.selectedTitleCount = Array.from(document.querySelectorAll(".se-documentTitle.se-is-selected")).filter(visible).length;
+  const active = document.activeElement;
+  const owner = active?.closest(".se-component");
+  if (active?.closest(".se-documentTitle")) result.activeKind = "title";
+  else if (active?.closest(uiSelector)) result.activeKind = "editor-ui";
+  else if (active && (active as HTMLElement).isContentEditable && owner && root.contains(owner) && visible(owner) && isTextOwner(owner) &&
+      active.closest(".se-text-paragraph")?.closest(".se-component") === owner) {
+    result.activeKind = "body-editable";
+    result.bodyFocused = result.selectedTitleCount === 0 && (selected.length === 0 || selected.length === 1 && selected[0] === owner);
+    // Native editable focus identifies its exact owning component even when
+    // the editor has not applied a virtual-selection class.
+    if (!selected.length) result.selectedBodyId = owner.getAttribute("data-compid") || owner.id || null;
+  }
+  // This is SmartEditor's server-owned, offscreen keyboard buffer. Its title
+  // and editable body identify the widget without accepting arbitrary iframes.
+  const buffers = Array.from(document.querySelectorAll('iframe[id^="input_buffer"]')).filter(element => {
+    if (!/스마트\s*에디터/u.test(element.getAttribute("title") || "")) return false;
+    try { return (element as HTMLIFrameElement).contentDocument?.body?.isContentEditable === true; } catch { return false; }
+  });
+  result.inputBufferCount = buffers.length;
+  result.inputBufferId = buffers.length === 1 ? buffers[0]!.id : null;
+  if (active && buffers.includes(active)) {
+    result.activeKind = "input-buffer";
+    result.bodyFocused = buffers.length === 1 && result.selectedBodyCount === 1 && result.selectedTextBodyCount === 1 && result.selectedTitleCount === 0;
+  }
+  const toolbarControl = active?.closest('.se-toolbar, .se-toolbar-container, .se-toolbar-option, [role="toolbar"]');
+  const editableControl = active && (active.matches("input, textarea, select") || (active as HTMLElement).isContentEditable);
+  result.bufferRestorationAllowed = !result.bodyFocused && buffers.length === 1 && result.selectedBodyCount === 1 && result.selectedTextBodyCount === 1 &&
+    result.selectedTitleCount === 0 && Boolean(result.selectedBodyId) &&
+    (active === document.body || active === document.documentElement || Boolean(toolbarControl && !editableControl));
+  result.reason = result.bodyFocused ? "body-typing-focus-confirmed" : result.selectedTitleCount > 0 || result.activeKind === "title"
+    ? "title-selected" : result.selectedBodyCount > 1 || buffers.length > 1 ? "multiple-editor-input-targets"
+      : result.selectedBodyCount === 1 && result.selectedTextBodyCount !== 1 ? "body-selection-not-text" : "body-focus-missing";
+  return result;
+}
+
+export function assertNaverEditorTypingFocus(focus: NaverEditorTypingFocus): void {
+  if (!focus.bodyFocused) throw new Error(`EDITOR_BODY_FOCUS_UNCONFIRMED: 실제 본문 입력 위치를 확인할 수 없어 입력을 중단합니다 (${focus.reason}).`);
+}
 
 export function assertNaverEditorBody(
   document: ResolvedPostDocumentV1,

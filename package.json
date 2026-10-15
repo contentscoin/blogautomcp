@@ -1,6 +1,6 @@
 {
   "name": "brandconnect-automation",
-  "version": "1.3.127",
+  "version": "1.3.128",
   "description": "네이버 쇼핑 커넥트(브랜드커넥트) 자동 블로그 포스팅 도구",
   "private": true,
   "scripts": {
@@ -115,7 +115,9 @@
     "site:typecheck": "npx --prefix apps/sites tsc --noEmit -p apps/sites/tsconfig.json",
     "site:db:generate": "npm run db:generate --prefix apps/sites",
     "site:update:publish": "npm run update:publish --prefix apps/sites",
-    "site:update:verify": "npm run update:verify --prefix apps/sites"
+    "site:update:verify": "npm run update:verify --prefix apps/sites",
+    "test:material-performance": "node --test scripts/verify-material-summary.cjs scripts/verify-material-api.cjs scripts/verify-material-polling.cjs scripts/verify-material-shared-feed.cjs && tsx scripts/verify-draft-progress-read.ts",
+    "test:naver-editor-body-browser": "ts-node --project tsconfig.scripts.json scripts/verify-naver-editor-body-browser.ts"
   },
   "main": "scripts/electron/main.cjs",
   "dependencies": {

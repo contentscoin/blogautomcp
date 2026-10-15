@@ -257,10 +257,13 @@ import { buildSelectedProductImageAuditContext, assertPublishImagesSafe, Publish
 import { publishedReadinessSections } from "./lib/published-editor-audit";
 import {
   assertNaverEditorBody,
+  assertNaverEditorTypingFocus,
   editorBodyAuditDiagnostic,
   readNaverEditorBodySnapshot,
+  readNaverEditorTypingFocus,
   type NaverEditorAuditPhase,
   type NaverEditorBodySnapshot,
+  type NaverEditorTypingFocus,
 } from "./lib/naver-editor-body";
 
 // Stealth 플러그인 적용 (봇 감지 우회)
@@ -7927,10 +7930,12 @@ async function inputPlainParagraph(
 ): Promise<void> {
   const normalized = text.replace(/\r/g, "").trim();
   if (!normalized) return;
+  const beforeFormat = await page.evaluate(readNaverEditorTypingFocus);
   await setNaverTextFormat(page, "text");
   if (editorial && options.applyStyle !== false) {
     await applyEditorialEditorStyle(page, editorial, "body");
   }
+  await assertCurrentEditorTypingFocus(page, beforeFormat);
   // Blank-line separated blocks (\n\n) become empty lines between paragraphs.
   const lines = normalized.split("\n");
   for (let index = 0; index < lines.length; index += 1) {
@@ -7943,9 +7948,11 @@ async function inputPlainParagraph(
 }
 
 async function inputNaverHeading(page: Page, text: string, editorial?: import("./lib/editorial-templates").EditorialSelection): Promise<boolean> {
+  const beforeFormat = await page.evaluate(readNaverEditorTypingFocus);
   const headingApplied = await setNaverTextFormat(page, "sectionTitle");
   if (!headingApplied) console.log("   ⚠️ 소제목 스타일 적용 실패, 본문 스타일로 대체");
   if (editorial) await applyEditorialEditorStyle(page, editorial, "heading");
+  await assertCurrentEditorTypingFocus(page, beforeFormat);
   await page.keyboard.type(text, { delay: 3 });
   await page.keyboard.press("Enter");
   await page.waitForTimeout(80);
@@ -7953,6 +7960,49 @@ async function inputNaverHeading(page: Page, text: string, editorial?: import(".
   // Body style is applied once here; following section paragraphs reuse it.
   if (editorial) await applyEditorialEditorStyle(page, editorial, "body");
   return headingApplied && bodyApplied;
+}
+
+async function assertCurrentEditorTypingFocus(page: Page, beforeFormat?: NaverEditorTypingFocus): Promise<void> {
+  let focus = await page.evaluate(readNaverEditorTypingFocus);
+  if (beforeFormat?.bodyFocused && (focus.selectedBodyId !== beforeFormat.selectedBodyId || focus.inputBufferId !== beforeFormat.inputBufferId)) {
+    focus = { ...focus, bodyFocused: false, bufferRestorationAllowed: false, reason: "body-selection-changed" };
+  }
+  // Toolbar commands can blur the keyboard buffer while retaining the exact
+  // virtual body selection. Restore only the same confirmed buffer/selection;
+  // clicking an arbitrary paragraph here would change the insertion position.
+  if (!focus.bodyFocused && beforeFormat?.bodyFocused && beforeFormat.activeKind === "input-buffer" && focus.bufferRestorationAllowed &&
+      focus.selectedBodyId === beforeFormat.selectedBodyId && focus.inputBufferId === beforeFormat.inputBufferId &&
+      /^input_buffer\d+$/u.test(focus.inputBufferId || "")) {
+    await page.locator(`iframe[id="${focus.inputBufferId}"]`).evaluate(element => {
+      const frame = element as HTMLIFrameElement;
+      frame.contentWindow?.focus(); frame.contentDocument?.body?.focus({ preventScroll: true });
+    });
+    focus = await page.evaluate(readNaverEditorTypingFocus);
+    if (focus.selectedBodyId !== beforeFormat.selectedBodyId || focus.inputBufferId !== beforeFormat.inputBufferId)
+      focus = { ...focus, bodyFocused: false, reason: "body-selection-changed" };
+  }
+  try { assertNaverEditorTypingFocus(focus); }
+  catch (error) {
+    // Structural evidence only: no title/body, cookies, input values or DOM.
+    const { selectedBodyId: _bodyId, inputBufferId: _bufferId, ...diagnostic } = focus;
+    void _bodyId; void _bufferId;
+    console.error(`   편집기 본문 포커스 진단: ${JSON.stringify(diagnostic)}`);
+    throw error;
+  }
+}
+
+async function focusFreshNaverEditorBody(page: Page): Promise<void> {
+  const snapshot = await page.evaluate(readNaverEditorBodySnapshot);
+  if (snapshot.scope !== "confirmed" || snapshot.componentCount !== 1 || snapshot.leadingContent === "visual" ||
+      snapshot.text.replace(/[\s\u200b-\u200d\ufeff]+/gu, "")) {
+    throw new Error("EDITOR_BODY_START_UNCONFIRMED: 비어 있는 유일한 새 본문을 확인하지 못해 입력을 시작하지 않습니다.");
+  }
+  // Tab order can land on the insert-menu button. Click the verified empty
+  // body paragraph explicitly; never use coordinates or a title/text heuristic.
+  const target = page.locator(`${snapshot.rootSelector} .se-component:not(.se-documentTitle) .se-text-paragraph`).filter({ visible: true });
+  if (await target.count() !== 1) throw new Error("EDITOR_BODY_START_UNCONFIRMED: 새 본문 입력 문단이 유일하지 않습니다.");
+  await target.click({ timeout: 5000 });
+  await assertCurrentEditorTypingFocus(page);
 }
 
 async function assertCurrentEditorDocument(
@@ -8106,7 +8156,9 @@ async function renderResolvedPostDocument(
       continue;
     }
     if (node.kind === "hashtags") {
+      const beforeFormat = await page.evaluate(readNaverEditorTypingFocus);
       await setNaverTextFormat(page, "text");
+      await assertCurrentEditorTypingFocus(page, beforeFormat);
       await page.keyboard.press("Enter");
       const hashtagText = node.values
         .map((tag) => `#${tag.replace(/^#+/, "").replace(/\s+/g, "")}`)
@@ -8204,9 +8256,9 @@ async function step5and6_uploadAndWrite(
   const useSectionHeading = options?.useSectionHeading ?? true;
   console.log(`   🧩 소제목 스타일: ${useSectionHeading ? "ON" : "OFF"}`);
   
-  // 본문 영역으로 이동
-  await page.keyboard.press('Tab');
-  await page.waitForTimeout(500);
+  // A toolbar/insert control can be next in tab order. Confirm the empty body
+  // and its real typing target before any disclosure, photo or link is inserted.
+  await focusFreshNaverEditorBody(page);
   await setNaverTextFormat(page, "text");
 
   if (options?.resolvedDocument) {

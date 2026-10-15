@@ -25,20 +25,39 @@ function harness({ source = 'MaterialLibrary', storage = new Map(), onFetch, ini
   const jsx = (type, props) => typeof type === 'function' ? type(props || {}) : ({ type, props: props || {} });
   const polling = loadClientDisplay('src/lib/material-polling.ts', () => { throw new Error('Unexpected polling dependency'); },
     { AbortController, setTimeout: () => 1, clearTimeout() {} });
+  let shared;
   const testModule = { exports: {} };
   const context = vm.createContext({
-    module: testModule, exports: testModule.exports, require: name => name === 'react' ? react : name === 'next/link' ? { default: 'a' } : name === '../lib/material-polling' ? polling : name === '../lib/material-job-display' ? loadClientDisplay('src/lib/material-job-display.ts', () => ({ jsx, jsxs: jsx })) : name === './MaterialJobItemResult' ? loadClientDisplay('src/components/MaterialJobItemResult.tsx', () => ({ jsx, jsxs: jsx })) : { jsx, jsxs: jsx },
+    module: testModule, exports: testModule.exports, require: name => name === 'react' ? react : name === 'next/link' ? { default: 'a' } : name === '../lib/material-polling' ? polling : name === '../lib/material-summary-store' ? { getMaterialSummaryStore: () => shared } : name === '../lib/material-selection' ? loadClientDisplay('src/lib/material-selection.ts', () => {}) : name === '../lib/material-job-display' ? loadClientDisplay('src/lib/material-job-display.ts', () => ({ jsx, jsxs: jsx })) : name === './MaterialJobItemResult' ? loadClientDisplay('src/components/MaterialJobItemResult.tsx', () => ({ jsx, jsxs: jsx })) : { jsx, jsxs: jsx },
     localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
     crypto: { randomUUID: () => { uuidCount++; return `00000000-0000-4000-8000-${String(uuidCount).padStart(12, '0')}`; } },
-    Date, console, document: { hidden: false, addEventListener() {}, removeEventListener() {} },
+    Date, console, AbortController, document: { hidden: false, addEventListener() {}, removeEventListener() {} },
     window: { addEventListener() {}, removeEventListener() {} }, navigator: { userAgent: 'offline browser' },
-    fetch: async (url, init) => { requests.push({ url, init }); return onFetch ? onFetch(url, init) : response(initialList); },
+    fetch: async (url, init) => {
+      requests.push({ url, init });
+      const result = await (onFetch ? onFetch(url, init) : response(initialList));
+      if (!url.includes('summary=1')) return result;
+      return { ...result, json: async () => {
+        const payload = await result.json();
+        const normalize = values => (values || []).map(item => ({ connectKind: 'SHOPPING', ...item }));
+        const candidates = (values, count) => Array.from({ length: count ?? values?.length ?? 0 }, (_value, index) => ({
+          ...normalize(values)[index % values.length], ...(index >= values.length ? { productId: `additional-${index}` } : {}) }));
+        return { ...payload, data: { ...payload.data, materials: normalize(payload.data.materials).map(item => ({ ...item,
+          verification: { mode: 'saved-summary', strict: false, requiresFullVerification: true, contentCheckedAt: '2026-10-08T00:00:00.000Z' } })),
+          failedCandidates: candidates(payload.data.failedCandidates || [], payload.data.failedCandidateCount),
+          repairCandidates: candidates(payload.data.repairCandidates || [], payload.data.repairCandidateCount) } };
+      } };
+    },
   });
+  const { createMaterialSummaryStore } = loadClientDisplay('src/lib/material-summary-store.ts', () => {},
+    { AbortController, setTimeout: () => 1, clearTimeout() {} });
+  shared = createMaterialSummaryStore({ fetch: context.fetch, visibility: context.document, desktopVisibility: context.window });
   const code = ts.transpileModule(fs.readFileSync(`src/components/${source}.tsx`, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 } }).outputText;
   new vm.Script(code).runInContext(context);
   const props = source === 'MaterialLibrary' ? { connectKind: 'SHOPPING', candidates: [{ id: 'ready_product', productName: '준비완료 상품' }, { id: 'failed_product', productName: '실패 상품' }], onPreview() {}, onChanged() {} } : { history };
   const render = () => { cursor = 0; effects = []; return testModule.exports[source](props); };
   return { requests, storage, render, uuidCount: () => uuidCount,
+    openHistory() { const tree = render(); for (const detail of nodes(tree).filter(node => node.type === 'details' && node.props.onToggle)) detail.props.onToggle({ currentTarget: { open: true } }); return render(); },
     unmount() { cleanups.forEach(cleanup => cleanup()); },
     async mount() { render(); effects.forEach(effect => { const cleanup = effect(); if (typeof cleanup === 'function') cleanups.push(cleanup); }); await settle(); return render(); } };
 }
@@ -148,7 +167,7 @@ const repairRetryButton = tree => nodes(tree).find(node => node.type === 'button
     const h = harness({ source: 'MaterialJobProgress', history, initialList: list({ jobs: [shown] }) }); const tree = await h.mount();
     assert(text(tree).includes('실패 소재 재작성·검증'));
     assert(text(tree).includes(history ? '검증 확인 필요' : '검증 통과 1/2 · 실패 1개'));
-    if (history) assert(text(tree).includes('CONTENT_READINESS_FAILED'));
+    if (history) { assert(!text(tree).includes('CONTENT_READINESS_FAILED'), 'closed history does not mount failure rows'); assert(text(h.openHistory()).includes('CONTENT_READINESS_FAILED')); }
   }
   for (const source of ['MaterialLibrary', 'MaterialJobProgress']) {
     for (const empty of [false, true]) {
@@ -228,9 +247,9 @@ const repairRetryButton = tree => nodes(tree).find(node => node.type === 'button
     const restored = { productId: 'failed_product', title: '복구한 한우', revision: 'current', status: 'READY', ready: true, approvedAt: 'approved', score: 100, imageCount: 5, blockers: [] };
     const historical = job({ status: 'failed', items: [{ productId: 'failed_product', status: 'failed', stage: '확인 필요', error: 'previous failed image', errorCode: 'IMAGE_OUTPUT_AMBIGUOUS' }] });
     const h = harness({ source, history: true, initialList: list({ jobs: [historical], materials: [restored] }) });
-    const tree = await h.mount();
-    assert(text(tree).includes('현재 준비완료 1/1'));
-    assert(text(tree).includes('현재 준비완료 · 검증·승인 완료'));
+    await h.mount(); const tree = h.openHistory();
+    assert(text(tree).includes('저장된 검사 기준 준비완료 1/1'));
+    assert(text(tree).includes('저장된 검사 기준 준비완료 · 발행 전 재확인'));
     assert(text(tree).includes('이후 복구 완료'));
     assert(text(tree).includes('previous failed image'), 'prior audit evidence is retained');
     const priorFailure = nodes(tree).find(node => node.type === 'details' && text(node).includes('이 작업 당시: 확인 필요'));
@@ -238,5 +257,54 @@ const repairRetryButton = tree => nodes(tree).find(node => node.type === 'button
     assert.equal(h.requests.filter(item => item.init?.method === 'POST').length, 0);
     assert.equal(historical.status, 'failed');
   }
-  console.log('PASS: rewrite and repair buttons, server targets, stable request/reload recovery, shared mutation guard, truthful verification counts/history; no provider or publication calls');
+  {
+    const material = { productId: 'ready_product', connectKind: 'SHOPPING', title: '검증할 상품', revision: 'summary-revision', status: 'READY', ready: true, score: 100, imageCount: 5, blockers: [] };
+    const h = harness({ initialList: list({ materials: [material] }), onFetch: async url => url.includes('productIds=')
+      ? response({ success: true, data: { materials: [{ ...material, revision: 'a'.repeat(64), summaryRevision: material.revision }] } })
+      : response(list({ materials: [material] })) });
+    let tree = await h.mount();
+    const checkbox = nodes(tree).find(node => node.type === 'input' && node.props['aria-label'] === '검증할 상품 발행 선택');
+    checkbox.props.onChange({ target: { checked: true } }); checkbox.props.onChange({ target: { checked: true } });
+    await settle(); tree = h.render();
+    assert.equal(h.requests.filter(item => item.url.includes('productIds=')).length, 1, 'double click coalesces the explicit strict selection check');
+    assert.equal(nodes(tree).find(node => node.type === 'input' && node.props['aria-label'] === '검증할 상품 발행 선택').props.checked, true);
+    assert.equal(nodes(tree).find(node => node.type === 'button' && text(node) === '선택 1개 바로 발행').props.disabled, false);
+    const persisted = JSON.parse(h.storage.get('material-selection-v2:SHOPPING'));
+    assert.equal(persisted.ready_product.revision, 'a'.repeat(64)); assert.equal(persisted.ready_product.summaryRevision, 'summary-revision');
+    assert(text(tree).includes('저장된 검사 기준 준비완료')); assert(text(tree).includes('선택·발행 전 재확인'));
+    assert.equal(h.requests.filter(item => item.init?.method === 'POST').length, 0, 'checking a selection never publishes or regenerates');
+    h.unmount();
+  }
+  for (const source of ['MaterialLibrary', 'MaterialJobProgress']) {
+    const material = { productId: 'failed_product', title: '발행 실패 한우', revision: 'summary', status: 'READY', ready: true, approvedAt: 'approved', score: 100, imageCount: 5, blockers: [] };
+    const failure = job({ kind: 'publish', status: 'failed', items: [{ productId: 'failed_product', status: 'failed', stage: '발행 실패', errorCode: 'PUBLISH_FAILED', error: 'EDITOR_BODY_SCOPE: 본문 확인 실패' }] });
+    const h = harness({ source, history: true, initialList: list({ materials: [material], jobs: [failure] }) });
+    await h.mount(); const tree = h.openHistory();
+    assert(text(tree).includes('저장된 검사 기준 소재 준비완료 · 발행 재시도 필요'));
+    assert(!text(tree).includes('이후 복구 완료'), 'a ready manuscript cannot turn an earlier publication failure into success');
+    assert(text(tree).includes('EDITOR_BODY_SCOPE'), 'the immutable publication failure remains in details');
+    assert.equal(h.requests.filter(item => item.init?.method === 'POST').length, 0); h.unmount();
+  }
+  {
+    let blocked = false;
+    const material = { productId: 'ready_product', connectKind: 'SHOPPING', title: '재검사 상품', revision: 'summary', status: 'READY', ready: true, score: 100, imageCount: 5, blockers: [] };
+    const h = harness({ onFetch: async url => {
+      if (url.includes('productIds=')) {
+        blocked = true;
+        return response({ success: true, data: { materials: [{ ...material, ready: false, status: 'BLOCKED', revision: 'a'.repeat(64), summaryRevision: 'summary' }] } });
+      }
+      return response(list({ materials: [{ ...material, ...(blocked ? { ready: false, status: 'BLOCKED', blockers: ['사진 검증 필요'] } : {}) }],
+        repairCandidateCount: blocked ? 1 : 0, repairCandidates: blocked ? [{ productId: 'ready_product', productName: '재검사 상품', reason: '사진 검증 필요', errorCode: 'IMAGE_BLOCKED' }] : [] }));
+    } });
+    const initial = await h.mount();
+    const checkbox = nodes(initial).find(node => node.type === 'input' && node.props['aria-label'] === '재검사 상품 발행 선택');
+    checkbox.props.onChange({ target: { checked: true } }); checkbox.props.onChange({ target: { checked: true } }); await settle();
+    const tree = h.render();
+    assert.equal(h.requests.filter(item => item.url.includes('productIds=')).length, 1, 'failed selection never launches another strict scan');
+    assert.equal(h.requests.filter(item => item.url.includes('summary=1')).length, 2, 'one shared metadata refresh reflects the strict failure');
+    assert(text(repairButton(tree)).includes('(1개)')); assert.equal(repairButton(tree).props.disabled, false);
+    assert.equal(nodes(tree).find(node => node.type === 'input' && node.props['aria-label'] === '재검사 상품 발행 선택').props.disabled, true);
+    assert.equal(h.requests.filter(item => item.init?.method === 'POST').length, 0); h.unmount();
+  }
+  console.log('PASS: rewrite and repair buttons, strict selection, stable request/reload recovery, shared mutation guard, saved verification counts/history; no provider or publication calls');
 })().catch(error => { console.error(error); process.exitCode = 1; });
