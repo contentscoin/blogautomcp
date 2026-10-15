@@ -133,7 +133,7 @@ async function main() {
     assert.equal((await page.evaluate(readNaverEditorTypingFocus)).bodyFocused, false, "a toolbar/insert control cannot receive article text"); cases++;
     for (const className of ["se-image", "se-oglink", "se-quotation", "se-horizontalLine", "se-unknown"]) {
       await setupEditing(); await production.focusFreshNaverEditorBody(page);
-      await page.locator("#SE-fixture-body").evaluate((element, type) => { element.className = `se-component ${type} se-is-selected`; }, className);
+      await page.locator("#SE-fixture-body").evaluate((element, type) => { element.setAttribute("class", `se-component ${type} se-is-selected`); }, className);
       const visualFocus = await page.evaluate(readNaverEditorTypingFocus);
       assert.equal(visualFocus.activeKind, "input-buffer"); assert.equal(visualFocus.selectedBodyCount, 1);
       assert.equal(visualFocus.bodyFocused, false, `${className} is not a text insertion target even with a focused buffer`);
@@ -154,7 +154,7 @@ async function main() {
     await page.locator("#SE-fixture-body p").evaluate(element => { element.setAttribute("contenteditable", "true"); (element as HTMLElement).focus(); });
     assert.equal((await page.evaluate(readNaverEditorTypingFocus)).bodyFocused, false, "native editable A cannot disagree with selected component B"); cases++;
     await setupEditing(); await production.focusFreshNaverEditorBody(page);
-    await page.locator("#SE-fixture-body").evaluate(element => { element.className = "se-component se-sectionTitle se-is-selected"; });
+    await page.locator("#SE-fixture-body").evaluate(element => { element.setAttribute("class", "se-component se-sectionTitle se-is-selected"); });
     assert.equal((await page.evaluate(readNaverEditorTypingFocus)).bodyFocused, true, "a real section-title text component remains supported"); cases++;
     console.log(`Naver editor Chromium fixture: ${cases} production reader and typing-focus cases passed`);
   } finally { await browser.close(); }
