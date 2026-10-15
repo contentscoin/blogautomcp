@@ -7964,28 +7964,33 @@ async function inputNaverHeading(page: Page, text: string, editorial?: import(".
 
 async function assertCurrentEditorTypingFocus(page: Page, beforeFormat?: NaverEditorTypingFocus): Promise<void> {
   let focus = await page.evaluate(readNaverEditorTypingFocus);
-  if (beforeFormat?.bodyFocused && (focus.selectedBodyId !== beforeFormat.selectedBodyId || focus.inputBufferId !== beforeFormat.inputBufferId)) {
+  // Naver can rebuild a text/heading component when a format is applied. The
+  // actual paragraph ID and exact buffer remain the insertion target; comparing
+  // component IDs rejects that normal operation while missing paragraph drift.
+  const sameTarget = (current: NaverEditorTypingFocus) => Boolean(beforeFormat?.selectedParagraphId &&
+    current.selectedParagraphId === beforeFormat.selectedParagraphId && current.inputBufferId === beforeFormat.inputBufferId);
+  if (beforeFormat?.bodyFocused && !sameTarget(focus)) {
     focus = { ...focus, bodyFocused: false, bufferRestorationAllowed: false, reason: "body-selection-changed" };
   }
   // Toolbar commands can blur the keyboard buffer while retaining the exact
   // virtual body selection. Restore only the same confirmed buffer/selection;
   // clicking an arbitrary paragraph here would change the insertion position.
   if (!focus.bodyFocused && beforeFormat?.bodyFocused && beforeFormat.activeKind === "input-buffer" && focus.bufferRestorationAllowed &&
-      focus.selectedBodyId === beforeFormat.selectedBodyId && focus.inputBufferId === beforeFormat.inputBufferId &&
+      sameTarget(focus) &&
       /^input_buffer\d+$/u.test(focus.inputBufferId || "")) {
     await page.locator(`iframe[id="${focus.inputBufferId}"]`).evaluate(element => {
       const frame = element as HTMLIFrameElement;
       frame.contentWindow?.focus(); frame.contentDocument?.body?.focus({ preventScroll: true });
     });
     focus = await page.evaluate(readNaverEditorTypingFocus);
-    if (focus.selectedBodyId !== beforeFormat.selectedBodyId || focus.inputBufferId !== beforeFormat.inputBufferId)
+    if (!sameTarget(focus))
       focus = { ...focus, bodyFocused: false, reason: "body-selection-changed" };
   }
   try { assertNaverEditorTypingFocus(focus); }
   catch (error) {
     // Structural evidence only: no title/body, cookies, input values or DOM.
-    const { selectedBodyId: _bodyId, inputBufferId: _bufferId, ...diagnostic } = focus;
-    void _bodyId; void _bufferId;
+    const { selectedBodyId: _bodyId, selectedParagraphId: _paragraphId, inputBufferId: _bufferId, ...diagnostic } = focus;
+    void _bodyId; void _paragraphId; void _bufferId;
     console.error(`   편집기 본문 포커스 진단: ${JSON.stringify(diagnostic)}`);
     throw error;
   }
@@ -11141,7 +11146,7 @@ async function main() {
       console.log("=".repeat(50));
 
       if (!publishOptions.reservationId) throw new Error("예약 등록 식별자를 확인하지 못했습니다. 실제 예약 결과 확인이 필요합니다.");
-      updatePublishAttempt(linkId, attemptId, "CONFIRMED", { reservationId: publishOptions.reservationId, scheduledDate: scheduledDateForDb.toISOString() });
+      updatePublishAttempt(linkId, attemptId, "CONFIRMED", { reservationId: publishOptions.reservationId, scheduledDate: scheduledDateForDb.toISOString().slice(0, 10) });
       publicationConfirmed = true;
       if (timeoutHandle) clearTimeout(timeoutHandle);
       await prisma.brandLink.update({
