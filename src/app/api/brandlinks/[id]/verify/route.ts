@@ -9,6 +9,7 @@ import path from "node:path";
 import type { BrandPostPackageManifestV2 } from "@/lib/brand-post-package";
 import { publishedImageOriginalCandidate, publishedPostIdentityMatches, readPublishedNaverHtml, reservationVerification, verifyPublishedPostContent,
   type PublishedPostSnapshot } from "@/lib/published-post-verification";
+import { resolvePublishedConnectCardAliases } from "@/lib/published-connect-card-verification";
 
 /**
  * 발행 결과 검증. DB 상태와 실제 네이버 글 URL 응답을 함께 확인해
@@ -130,7 +131,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   try { attempt = readPublishAttempt(id); } catch { receiptError = "PUBLISH_RECEIPT_INVALID: 발행 시도 기록을 읽지 못했습니다. 실제 게시 여부부터 확인하세요."; }
   const submitted = readExpectedSubmission(id, attempt);
   const probeResult = link.postUrl ? await probePost(link.postUrl) : null;
-  const snapshot = probeResult && "snapshot" in probeResult ? probeResult.snapshot : null;
+  const rawSnapshot = probeResult && "snapshot" in probeResult ? probeResult.snapshot : null;
+  const snapshot = rawSnapshot ? await resolvePublishedConnectCardAliases(rawSnapshot, submitted.manifest?.composition || null, fetch) : null;
   const recordedPost = attempt?.evidence?.postUrl ? parseNaverPublishedUrl(attempt.evidence.postUrl) : null;
   const savedPost = link.postUrl ? parseNaverPublishedUrl(link.postUrl) : null;
   const receiptPostMatched = Boolean(recordedPost && savedPost && recordedPost.url === savedPost.url);

@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 const path = require('node:path');
 require('tsx/cjs');
 const contentContract = require('../src/lib/published-post-verification.ts');
+const aliasContract = require('../src/lib/published-connect-card-verification.ts');
 const urlContract = require('../src/lib/naver-published-url.ts');
 let link = { id: 'fixture', status: 'READY', postUrl: null, scheduledPublishAt: new Date('2026-09-15T00:00:00Z'), productName: 'fixture' };
 let attempt = null;
@@ -14,7 +15,7 @@ const imageBytes = Buffer.from('fixture image bytes');
 const title = 'fixture 선택한 제목';
 const disclosure = '이 포스팅은 구매 발생 시 수수료를 제공받습니다.';
 const manifest = { version: 'brand-post-package/v2', brandLinkId: 'fixture', title, composition: {
-  version: 'resolved-post-document/v1', title, renderNodes: [
+  version: 'resolved-post-document/v1', connectKind: 'SHOPPING', title, renderNodes: [
     { kind: 'disclosure', placement: 'top', text: disclosure },
     { kind: 'paragraph', text: 'fixture published content' },
     { kind: 'image', assetPath: 'fixture-image.png', sectionId: null },
@@ -25,6 +26,8 @@ const postHtml = `<div class="se-main-container"><div class="se-documentTitle"><
 let pageHtml = postHtml;
 let pageUrl = 'https://blog.naver.com/fixture/123';
 let responseStatus = 200, responseLocation = null, imageResponseBytes = imageBytes, snapshotChanged = false, sourceChanged = false, receiptUnreadable = false;
+const nativeAffiliate = 'https://brandconnect.naver.com/affiliates/22222?channelProductNo=12345';
+let aliasLocation = nativeAffiliate, aliasStatus = 307;
 const fetches = [];
 const mocks = {
   'next/server': { NextResponse: { json: body => body } },
@@ -32,6 +35,7 @@ const mocks = {
   '@/lib/api-auth': { requireAdminApiKey: () => null },
   '@/lib/naver-published-url': urlContract,
   '@/lib/published-post-verification': contentContract,
+  '@/lib/published-connect-card-verification': aliasContract,
   'node:fs': { readFileSync: file => file.endsWith('manifest.json') ? JSON.stringify(manifest) : imageBytes },
   'node:path': path, 'node:crypto': crypto,
   '@/lib/publish-attempt': { readPublishAttempt: () => { if (receiptUnreadable) throw Error('invalid receipt'); return attempt; }, publisherHasExited: () => true,
@@ -44,6 +48,11 @@ vm.runInNewContext(ts.transpileModule(fs.readFileSync('src/app/api/brandlinks/[i
   module: mod, exports: mod.exports, Date, Buffer, URL, setTimeout, clearTimeout, AbortController,
   fetch: async (url, options) => {
     fetches.push({ url, redirect: options.redirect });
+    if (url === 'https://naver.me/fixture') {
+      const response = new Response(null, { status: aliasStatus, headers: { location: aliasLocation } });
+      Object.defineProperty(response, 'url', { value: url }); return response;
+    }
+    assert.notEqual(new URL(url).hostname, 'brandconnect.naver.com', 'Native affiliate destinations must never be fetched');
     const isImage = url.includes('pstatic.net');
     const response = new Response(isImage ? imageResponseBytes : pageHtml, { status: isImage ? 200 : responseStatus,
       headers: isImage ? { 'content-type': 'image/png' } : responseLocation ? { location: responseLocation } : {} });
@@ -114,5 +123,18 @@ const verify = async () => (await mod.exports.GET({}, { params: Promise.resolve(
   pageUrl = 'https://blog.naver.com/fixture/999'; result = await verify(); assert.equal(result.verificationStatus, 'mismatch'); assert.equal(result.contentVerification.checks.postIdentity, 'fail'); pageUrl = link.postUrl;
   pageHtml = 'x'.repeat(800001); assert.equal((await verify()).published, false, 'Oversized responses must not validate a truncated body'); pageHtml = postHtml;
   receiptUnreadable = true; result = await verify(); assert.equal(result.published, false); assert.equal(result.outcomeUnknown, true); assert.equal(result.automaticReplayAllowed, false);
+  receiptUnreadable = false;
+  const nativeId = 'SE-00000000-0000-4000-8000-000000000001';
+  const nativeData = JSON.stringify({ id: nativeId, affiliateUrl: nativeAffiliate, creatorSpaceId: '67890', channelProductNo: '12345', affiliateProductId: '54321' }).replaceAll('"', '&quot;');
+  const nativeCard = `<div class="se-component se-shopping-connect se-l-default" id="${nativeId}"><div class="se-component-content se-component-content-normal"><div class="se-section se-section-shopping-connect se-section-align- se-l-default"><a class="__se_link" data-linktype="shoppingConnect" data-linkdata="${nativeData}" href="${nativeAffiliate}&amp;ac=b_ed"><div class="se-shopping-connect-content"><div class="se-shopping-connect-thumbnail"><img class="se-shopping-connect-thumbnail-resource" src="https://shop-phinf.pstatic.net/fixture/preview.jpg" alt=""></div><div class="se-shopping-connect-detail"><div class="se-shopping-connect-detail-inner"><div class="se-shopping-connect-info"><h2 class="se-shopping-connect-title">판매자 제목</h2><p class="se-shopping-connect-subtitle">미리보기 정보</p><p class="se-shopping-connect-link">상품 확인</p></div></div></div></div></a></div></div></div>`;
+  pageHtml = postHtml.replace('<div class="se-oglink"><a href="https://naver.me/fixture">옵션 확인</a></div>', nativeCard);
+  fetches.length = 0; result = await verify();
+  assert.equal(result.contentVerified, true, 'The real route uses the real native parser/alias helper with its injected offline fetch');
+  assert.equal(result.contentVerification.actualImages, 1); assert.equal(result.contentVerification.checks.connectLinks, 'pass');
+  assert.equal(fetches.length, 3); assert.equal(fetches.filter(row => row.url === 'https://naver.me/fixture').length, 1);
+  aliasLocation = nativeAffiliate.replace('12345', '99999');
+  result = await verify(); assert.equal(result.contentVerified, false); assert.equal(result.contentVerification.checks.connectLinks, 'unverified');
+  aliasLocation = nativeAffiliate; aliasStatus = 302;
+  result = await verify(); assert.equal(result.contentVerified, false); assert.equal(result.contentVerification.checks.connectLinks, 'unverified'); aliasStatus = 307;
   console.log('PASS: receipt vs live reservation, exact public title/content/image/link/revision verification, resize partial, bounded requests and no automatic replay');
 })().catch(error => { console.error(error); process.exitCode = 1; });

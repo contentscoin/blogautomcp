@@ -11,7 +11,7 @@ export interface PublishedPostSnapshot {
   leadingContent: "text" | "visual" | "none";
   images: Array<{ urls: string[]; offset: number; supported: boolean }>;
   links: Array<{ url: string; offset: number }>;
-  connectCards: Array<{ urls: string[]; offset: number }>;
+  connectCards: Array<{ urls: string[]; offset: number; nativeShoppingConnect?: { affiliateUrl: string } }>;
 }
 interface HtmlNode { tag: string; attrs: Record<string, string>; children: Array<HtmlNode | string>; parent?: HtmlNode; closed: boolean }
 const compact = (text: string) => text.normalize("NFKC").replace(/[\s\u200b-\u200d\ufeff]+/gu, "");
@@ -108,14 +108,66 @@ export function readPublishedNaverHtml(html: string, pageUrl: string): Published
   if (titles.length === 1) result.title = textOf(titles[0]).trim();
   else if (titles.length > 1) return { ...result, scope: "ambiguous", reason: "multiple-post-titles" };
   if (malformed || !body.closed || viewer && !viewer.closed || [...invalidNodes].some(node => inside(node, titleBoundary) && visible(node))) return { ...result, scope: "ambiguous", reason: "incomplete-or-malformed-html" };
+  // Public 1.78.1 native shopping cards use se-shopping-connect, not se-oglink.
+  // Recognize the observed closed, visible, directly owned topology before
+  // excluding its seller preview/text from the approved article. A class name
+  // alone must never hide arbitrary article prose or an unexpected body photo.
+  const nativeCards = new Map<HtmlNode, { affiliateUrl: string }>();
+  let unsupportedNativeCard = false;
+  const elements = (node: HtmlNode) => node.children.filter((child): child is HtmlNode => typeof child !== "string");
+  const structural = (node: HtmlNode, tag: string, names: string[], leaf = false) => node.tag === tag && node.closed && visible(node) &&
+    names.every(name => hasClass(node, name)) && classes(node).every(name => names.includes(name)) && (leaf ? node.children.every(child => typeof child === "string") :
+      node.children.every(child => typeof child !== "string" || !compact(child)));
+  const one = (parent: HtmlNode, tag: string, names: string[]): HtmlNode | null => {
+    const children = elements(parent);
+    return children.length === 1 && structural(children[0], tag, names) ? children[0] : null;
+  };
+  for (const component of all.filter(node => inside(node, body) && visible(node) && hasClass(node, "se-shopping-connect"))) {
+    let valid = false;
+    try {
+      const content = component.parent === body && structural(component, "div", ["se-component", "se-shopping-connect", "se-l-default"]) &&
+        one(component, "div", ["se-component-content", "se-component-content-normal"]);
+      const section = content && one(content, "div", ["se-section", "se-section-shopping-connect", "se-section-align-", "se-l-default"]);
+      const link = section && one(section, "a", ["__se_link"]);
+      const card = link && one(link, "div", ["se-shopping-connect-content"]);
+      const parts = card ? elements(card) : [];
+      const thumbnail = parts[0], detail = parts[1];
+      const image = thumbnail && structural(thumbnail, "div", ["se-shopping-connect-thumbnail"]) && one(thumbnail, "img", ["se-shopping-connect-thumbnail-resource"]);
+      const inner = detail && structural(detail, "div", ["se-shopping-connect-detail"]) && one(detail, "div", ["se-shopping-connect-detail-inner"]);
+      const info = inner && one(inner, "div", ["se-shopping-connect-info"]);
+      const labels = info ? elements(info) : [];
+      if (link && card && parts.length === 2 && image && labels.length === 3 &&
+          structural(labels[0], "h2", ["se-shopping-connect-title"], true) && structural(labels[1], "p", ["se-shopping-connect-subtitle"], true) &&
+          structural(labels[2], "p", ["se-shopping-connect-link"], true) && link.attrs["data-linktype"] === "shoppingConnect") {
+        const data = JSON.parse(link.attrs["data-linkdata"] || "null") as Record<string, unknown> | null;
+        const keys = ["id", "affiliateUrl", "creatorSpaceId", "channelProductNo", "affiliateProductId"];
+        if (data && Object.keys(data).length === keys.length && keys.every(key => typeof data[key] === "string") && data.id === component.attrs.id &&
+            all.filter(node => inside(node, body) && node.attrs.id === component.attrs.id).length === 1 &&
+            /^SE-[0-9a-f-]{36}$/iu.test(String(data.id)) && [data.creatorSpaceId, data.channelProductNo, data.affiliateProductId].every(value => /^[1-9]\d{0,19}$/u.test(String(value)))) {
+          const affiliate = new URL(String(data.affiliateUrl));
+          const href = new URL(link.attrs.href || "");
+          const source = new URL(image.attrs.src || "");
+          const safe = (url: URL, hostname: string) => url.protocol === "https:" && url.hostname === hostname && !url.port && !url.username && !url.password && !url.hash;
+          const tagged = new URL(affiliate.href); tagged.searchParams.set("ac", "b_ed");
+          if (safe(affiliate, "brandconnect.naver.com") && affiliate.href === data.affiliateUrl && /^\/affiliates\/[1-9]\d{0,19}$/u.test(affiliate.pathname) &&
+              Array.from(affiliate.searchParams).length === 1 && affiliate.searchParams.get("channelProductNo") === data.channelProductNo &&
+              (href.href === affiliate.href || href.href === tagged.href) && href.href === link.attrs.href && safe(source, "shop-phinf.pstatic.net")) {
+            nativeCards.set(component, { affiliateUrl: affiliate.href }); valid = true;
+          }
+        }
+      }
+    } catch { /* Unknown card metadata/URLs stay visible to the content audit. */ }
+    if (!valid) unsupportedNativeCard = true;
+  }
   let text = "";
   const read = (node: HtmlNode, depth = 0, parentCard?: PublishedPostSnapshot["connectCards"][number]) => {
     if (depth > 128 || excluded(node) || hasClass(node, "se-documentTitle")) return;
-    const isCard = hasClass(node, "se-oglink") || ancestors(node, candidate => hasClass(candidate, "se-oglink"));
+    const nativeCard = nativeCards.get(node);
+    const isCard = hasClass(node, "se-oglink") || ancestors(node, candidate => hasClass(candidate, "se-oglink") || nativeCards.has(candidate));
     const offset = compact(text).length;
     let currentCard = parentCard;
-    if (hasClass(node, "se-oglink") && !currentCard) {
-      currentCard = { urls: [], offset };
+    if ((hasClass(node, "se-oglink") || nativeCard) && !currentCard) {
+      currentCard = { urls: nativeCard ? [nativeCard.affiliateUrl] : [], offset, ...(nativeCard ? { nativeShoppingConnect: nativeCard } : {}) };
       result.connectCards.push(currentCard);
     }
     if (node.tag === "a" && node.attrs.href) {
@@ -146,8 +198,8 @@ export function readPublishedNaverHtml(html: string, pageUrl: string): Published
   };
   read(body);
   result.bodyText = text.trim();
-  result.scope = malformed || result.images.some(image => !image.supported) ? "ambiguous" : "confirmed";
-  result.reason = malformed ? "unsupported-visual-component" : result.scope === "ambiguous" ? "unsupported-image-wrapper" : "smarteditor-post-body";
+  result.scope = malformed || unsupportedNativeCard || result.images.some(image => !image.supported) ? "ambiguous" : "confirmed";
+  result.reason = malformed ? "unsupported-visual-component" : unsupportedNativeCard ? "unsupported-shopping-connect-card" : result.scope === "ambiguous" ? "unsupported-image-wrapper" : "smarteditor-post-body";
   return result;
 }
 

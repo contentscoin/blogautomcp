@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readPublishedNaverHtml, publishedImageOriginalCandidate, publishedPostIdentityMatches, verifyPublishedPostContent, reservationVerification } from "../src/lib/published-post-verification";
 import type { ResolvedPostDocumentV1 } from "../src/lib/post-composition-contract";
+import { resolvePublishedConnectCardAliases } from "../src/lib/published-connect-card-verification";
 
 const pageUrl = "https://blog.naver.com/fixture/123";
 const title = "쿠쿠 2L 음식물처리기, 작은 주방에서 고를 기준";
@@ -91,3 +92,98 @@ assert.equal(reservationVerification({ ...scheduleInput, attempt: { ...scheduleI
 assert.equal(reservationVerification({ ...scheduleInput, attempt: { ...scheduleInput.attempt, evidence: { reservationId: "reserved-123", scheduledDate: "2026-10-16" } } }).receiptAccepted, false);
 assert.equal(reservationVerification({ ...scheduleInput, scheduledAt: new Date("2026-03-02T00:00:00Z"), attempt: { ...scheduleInput.attempt, evidence: { reservationId: "reserved-123", scheduledDate: "2026-02-30" } } }).receiptAccepted, false);
 console.log("PASS: public title, top disclosure, ordered body/photos, bounded supported DOM, connect URLs, immutable revision, resize uncertainty and reservation acceptance/current-state separation");
+
+async function verifyNativeShoppingCards() {
+  const affiliate = "https://brandconnect.naver.com/affiliates/22222?channelProductNo=12345";
+  const nativeCard = (index: number) => {
+    const id = `SE-00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+    const data = JSON.stringify({ id, affiliateUrl: affiliate, creatorSpaceId: "67890", channelProductNo: "12345", affiliateProductId: "54321" }).replace(/"/gu, "&quot;");
+    return `<div class="se-component se-shopping-connect se-l-default" id="${id}"><div class="se-component-content se-component-content-normal"><div class="se-section se-section-shopping-connect se-section-align- se-l-default"><a class="__se_link" data-linktype="shoppingConnect" data-linkdata="${data}" href="${affiliate}&amp;ac=b_ed"><div class="se-shopping-connect-content"><div class="se-shopping-connect-thumbnail"><img class="se-shopping-connect-thumbnail-resource" src="https://shop-phinf.pstatic.net/fixture/preview.jpg" alt=""></div><div class="se-shopping-connect-detail"><div class="se-shopping-connect-detail-inner"><div class="se-shopping-connect-info"><h2 class="se-shopping-connect-title">판매자 상품 제목</h2><p class="se-shopping-connect-subtitle">미리보기 정보</p><p class="se-shopping-connect-link">상품 확인</p></div></div></div></div></a></div></div></div>`;
+  };
+  const nativeHtml = html.replace(card, nativeCard(1)).replace(card, nativeCard(2));
+  const nativeExpected = { ...expected, connectKind: "SHOPPING" as const };
+  const read = (source = nativeHtml) => readPublishedNaverHtml(source, pageUrl);
+  const check = (value: ReturnType<typeof read>) => verifyPublishedPostContent({ snapshot: value, expected: nativeExpected, revisionMatched: true, postIdentityMatched: true,
+    expectedImageHashes: ["hero-hash", "body-hash"], imageHashes: ["hero-hash", "body-hash"] });
+  const native = read();
+  assert.equal(native.scope, "confirmed"); assert.equal(native.images.length, 2); assert.equal(native.connectCards.length, 2);
+  assert.equal(check(native).checks.bodyOrder, "pass"); assert.equal(check(native).checks.connectLinks, "unverified");
+  let calls = 0;
+  const fetcher: typeof fetch = async (input, options) => {
+    calls++; assert.equal(input, connectUrl); assert.equal(options?.method, "GET"); assert.equal(options?.redirect, "manual");
+    return new Response(null, { status: 307, headers: { location: affiliate } });
+  };
+  const resolved = await resolvePublishedConnectCardAliases(native, nativeExpected, fetcher);
+  assert.equal(calls, 1, "The exact approved short URL is deduplicated; the affiliate destination is never fetched");
+  assert.equal(check(resolved).contentVerified, true); assert.equal(native.connectCards.some(value => value.urls.includes(connectUrl)), false, "Alias resolution does not mutate source evidence");
+  let cases = 3;
+  const invalidCards: Array<[string, string]> = [
+    ["class on ordinary prose", nativeHtml.replace(nativeCard(1), '<div class="se-component se-shopping-connect se-l-default"><p>임의의 추가 본문</p></div>')],
+    ["body image hidden in card", nativeHtml.replace('<div class="se-shopping-connect-thumbnail">', `<div class="se-shopping-connect-thumbnail">${image("unapproved")}`)],
+    ["native thumbnail outside a card", nativeHtml.replace(nativeCard(1), '<img class="se-shopping-connect-thumbnail-resource" src="https://shop-phinf.pstatic.net/fixture/preview.jpg">')],
+    ["nested card", nativeHtml.replace('<div class="se-shopping-connect-thumbnail">', `<div class="se-shopping-connect-thumbnail">${nativeCard(3)}`)],
+    ["extra anchor", nativeHtml.replace('<div class="se-shopping-connect-content">', '<a href="https://naver.me/other">추가 링크</a><div class="se-shopping-connect-content">')],
+    ["foreign href", nativeHtml.replace(`href="${affiliate}&amp;ac=b_ed"`, 'href="https://attacker.invalid/affiliate"')],
+    ["another product href", nativeHtml.replace(`href="${affiliate}&amp;ac=b_ed"`, `href="${affiliate.replace("12345", "99999")}&amp;ac=b_ed"`)],
+    ["duplicate query", nativeHtml.replace(`href="${affiliate}&amp;ac=b_ed"`, `href="${affiliate}&amp;channelProductNo=12345&amp;ac=b_ed"`)],
+    ["unknown tracking", nativeHtml.replace("&amp;ac=b_ed", "&amp;ac=other")],
+    ["duplicate metadata attribute", nativeHtml.replace('data-linktype="shoppingConnect"', 'data-linktype="shoppingConnect" data-linktype="other"')],
+    ["truncated card", nativeHtml.replace(nativeCard(1), nativeCard(1).slice(0, -6))],
+    ["body photo disguised as preview", nativeHtml.replace('class="se-shopping-connect-thumbnail-resource"', 'class="se-shopping-connect-thumbnail-resource se-image-resource"')],
+    ["duplicate native ID", nativeHtml.replace(nativeCard(2), nativeCard(1))],
+    ["unexpected card paragraph", nativeHtml.replace('<h2 class="se-shopping-connect-title">', '<p>암을 완치합니다.</p><h2 class="se-shopping-connect-title">')],
+  ];
+  for (const [label, source] of invalidCards) {
+    const invalid = read(source); assert.notEqual(invalid.scope, "confirmed", label);
+    assert.equal(check(invalid).contentVerified, false, label);
+    await resolvePublishedConnectCardAliases(invalid, nativeExpected, async () => { throw new Error("Ambiguous HTML must not trigger alias requests"); }); cases++;
+  }
+  const responseCases: Array<[string, () => Response]> = [
+    ["redirect not manual 307", () => new Response(null, { status: 302, headers: { location: affiliate } })],
+    ["success body is not a redirect", () => new Response(null, { status: 200, headers: { location: affiliate } })],
+    ["foreign redirect", () => new Response(null, { status: 307, headers: { location: "https://attacker.invalid/affiliate" } })],
+    ["relative redirect", () => new Response(null, { status: 307, headers: { location: "/affiliates/22222?channelProductNo=12345" } })],
+    ["different product redirect", () => new Response(null, { status: 307, headers: { location: affiliate.replace("12345", "99999") } })],
+    ["different affiliate redirect", () => new Response(null, { status: 307, headers: { location: affiliate.replace("22222", "99999") } })],
+    ["duplicate destination query", () => new Response(null, { status: 307, headers: { location: affiliate + "&channelProductNo=12345" } })],
+    ["unexpected destination query", () => new Response(null, { status: 307, headers: { location: affiliate + "&ac=b_ed" } })],
+    ["credentials", () => new Response(null, { status: 307, headers: { location: affiliate.replace("https://", "https://user@") } })],
+    ["fragment", () => new Response(null, { status: 307, headers: { location: affiliate + "#fragment" } })],
+    ["oversized redirect", () => new Response(null, { status: 307, headers: { location: affiliate, "content-length": "16385" } })],
+  ];
+  for (const [label, response] of responseCases) {
+    const value = await resolvePublishedConnectCardAliases(native, nativeExpected, async () => response());
+    assert.equal(check(value).checks.connectLinks, "unverified", label); cases++;
+  }
+  for (const short of ["http://naver.me/fixture", "https://naver.me/fixture?query=1", "https://naver.me/fixture#hash", "https://naver.me:443/fixture", "https://user@naver.me/fixture", "https://naver.me.attacker.test/fixture", "https://naver.me/a/b", "https://naver.me/%66ixture"]) {
+    const invalidExpected = { ...nativeExpected, renderNodes: nativeExpected.renderNodes.map(node => node.kind === "connectCard" ? { ...node, url: short } : node) };
+    let requested = false;
+    await resolvePublishedConnectCardAliases(native, invalidExpected, async () => { requested = true; return new Response(null, { status: 307, headers: { location: affiliate } }); });
+    assert.equal(requested, false, "Only the exact approved unadorned HTTPS short URL can be requested"); cases++;
+  }
+  const legacyAffiliate = readPublishedNaverHtml(html.replaceAll(connectUrl, affiliate), pageUrl);
+  const noLegacyAlias = await resolvePublishedConnectCardAliases(legacyAffiliate, nativeExpected, async () => { throw new Error("Legacy card cannot inherit native metadata authority"); });
+  assert.equal(check(noLegacyAlias).checks.connectLinks, "unverified"); cases++;
+  const outsideCard = read(nativeHtml.replace('</div></html>', `</div>${nativeCard(3)}</html>`));
+  assert.equal(outsideCard.connectCards.length, 2); assert.equal(outsideCard.images.length, 2); cases++;
+  const hiddenRequired = read(nativeHtml.replace('class="se-component se-shopping-connect se-l-default"', 'class="se-component se-shopping-connect se-l-default" hidden'));
+  assert.equal(hiddenRequired.scope, "confirmed"); assert.equal(hiddenRequired.connectCards.length, 1);
+  assert.equal(check(await resolvePublishedConnectCardAliases(hiddenRequired, nativeExpected, fetcher)).contentVerified, false, "A hidden required card cannot count as visible approval evidence"); cases++;
+  const hiddenFragment = read(nativeHtml.replace('</div></html>', `<div hidden>${nativeCard(3)}</div><template>${nativeCard(4)}</template></div></html>`));
+  assert.equal(hiddenFragment.scope, "confirmed"); assert.equal(hiddenFragment.connectCards.length, 2);
+  assert.equal(hiddenFragment.bodyText, native.bodyText, "Invisible templates cannot add card or article content"); cases++;
+  let cancelled = 0;
+  await resolvePublishedConnectCardAliases(native, nativeExpected, async () => new Response(new ReadableStream({ cancel() { cancelled++; } }), { status: 307, headers: { location: affiliate } }));
+  assert.equal(cancelled, 1, "Redirect bodies are cancelled without buffering or following their destination"); cases++;
+  const deadlineExpected = { ...nativeExpected, renderNodes: Array.from({ length: 8 }, (_, index) => ({ kind: "connectCard" as const, connectKind: "SHOPPING" as const, placement: "early" as const, url: `https://naver.me/deadline${index}` })) };
+  let deadlineCalls = 0;
+  const began = Date.now();
+  await resolvePublishedConnectCardAliases(native, deadlineExpected, async (_url, options) => {
+    deadlineCalls++; return new Promise((_resolve, reject) => options!.signal!.addEventListener("abort", () => reject(new Error("deadline")), { once: true }));
+  });
+  assert.equal(deadlineCalls, 1); assert(Date.now() - began < 5_500, "All short-link requests share one total four-second deadline"); cases++;
+  assert.equal(check(await resolvePublishedConnectCardAliases(native, nativeExpected, async () => { throw new Error("offline"); })).checks.connectLinks, "unverified"); cases++;
+  console.log(`PASS: ${cases} strict native shopping-card and bounded exact-short-URL alias cases`);
+}
+
+void verifyNativeShoppingCards().catch(error => { console.error(error); process.exitCode = 1; });
