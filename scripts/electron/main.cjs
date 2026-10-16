@@ -261,6 +261,25 @@ async function ensureServerReady() {
   }
 }
 
+// backgroundThrottling=false keeps automation alive, but document.hidden then
+// cannot describe a hidden/minimized window. This hint pauses only material UI.
+function installMaterialUiVisibilityBridge(browserWindow) {
+  let sequence = 0;
+  const publish = () => {
+    if (browserWindow.isDestroyed() || browserWindow.webContents.isDestroyed()) return;
+    const visible = browserWindow.isVisible() && !browserWindow.isMinimized();
+    const current = ++sequence;
+    const script = `if ((window.__brandconnectMaterialUiVisibilitySequence || 0) < ${current}) {
+      window.__brandconnectMaterialUiVisibilitySequence = ${current};
+      window.__brandconnectMaterialUiVisible = ${visible};
+      window.dispatchEvent(new Event("blogautomcp:material-ui-visibility"));
+    } true;`;
+    browserWindow.webContents.executeJavaScript(script).catch(() => undefined);
+  };
+  for (const event of ["show", "hide", "minimize", "restore"]) browserWindow.on(event, publish);
+  browserWindow.webContents.on("did-finish-load", publish);
+}
+
 async function createWindow() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     showMainWindow();
@@ -285,6 +304,7 @@ async function createWindow() {
     show: !startHidden,
   });
   mainWindow = browserWindow;
+  installMaterialUiVisibilityBridge(browserWindow);
 
   // ADMIN_API_KEY 가 설정되면 로컬 서버의 관리자 API 는 실제 자격 증명을 요구한다.
   // 렌더러(대시보드)가 로컬 서버로 보내는 요청에만 키 헤더를 붙여 준다.

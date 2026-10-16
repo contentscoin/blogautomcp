@@ -1,22 +1,42 @@
 import { auditPublishImages, type PublishImageAuditOptions } from "./publish-image-audit";
 import type { PostRenderNode, ResolvedPostSectionV1 } from "../../src/lib/post-composition-contract";
+import type { BrandPostImageSourceHint } from "../../src/lib/brand-post-image-evidence";
+import type { ProductSourceAuditContext } from "./product-source-audit-context";
 
 export interface SectionProposal { targetIndex: number; path: string; sourceSha256: string }
-export interface SectionProposalTarget { sectionTitle: string; sectionBody?: string[]; imageIntent: string; sectionId?: string }
+export interface SectionProposalTarget { sectionTitle: string; sectionBody?: string[]; imageIntent: string; sectionId?: string; imageSource?: BrandPostImageSourceHint }
 
 /** Bounded selection/verification: only selected pairs are audited, using exactly
  * the final publication rules. Rejected pairs cannot re-enter subsequent rounds. */
 export async function auditSectionProposals<T extends SectionProposal>(options: {
   productName: string; selectedProduct?: string; targets: SectionProposalTarget[]; proposals: T[];
   select: (proposals: T[]) => T[];
-  onRejected: (proposal: T, reason: string) => void;
+  onRejected: (proposal: T, reason: string, failureCode?: string) => void;
+  /** Re-review rank-only/unreviewed reserves once after the eligible pool is exhausted. */
+  replenish?: (unfilledTargetIndexes: number[]) => Promise<T[]>;
   audit?: (options: PublishImageAuditOptions) => ReturnType<typeof auditPublishImages>;
-}): Promise<T[]> {
+} & ProductSourceAuditContext): Promise<T[]> {
   let remaining = options.proposals;
   const accepted = new Set<string>();
+  const rejectedPairs = new Set<string>();
+  let replenished = false;
   const key = (row: T) => `${row.targetIndex}:${row.sourceSha256}`;
-  for (let round = 0; round < 3; round++) {
-    const selected = options.select(remaining);
+  // Six final-rule calls total, including any renewed shortlist. A fourth
+  // genuinely suitable photo must not be starved behind three rejected ones.
+  for (let round = 0; round < 6; round++) {
+    let selected = options.select(remaining);
+    const unfilled = options.targets.map((_, index) => index).filter(index => !selected.some(row => row.targetIndex === index));
+    if (unfilled.length && options.replenish && !replenished) {
+      replenished = true;
+      const seen = new Set(remaining.map(key));
+      const extra = await options.replenish(unfilled);
+      remaining = [...remaining, ...extra.filter(row => {
+        const pair = key(row);
+        if (!unfilled.includes(row.targetIndex) || seen.has(pair) || rejectedPairs.has(pair)) return false;
+        seen.add(pair); return true;
+      })];
+      selected = options.select(remaining);
+    }
     const pending = selected.filter(row => !accepted.has(key(row)));
     if (!pending.length) return selected;
     const sections: ResolvedPostSectionV1[] = [];
@@ -26,7 +46,9 @@ export async function auditSectionProposals<T extends SectionProposal>(options: 
       const target = options.targets[row.targetIndex];
       const id = target.sectionId || `source-proposal-${row.targetIndex}`;
       sections.push({ id, title: target.sectionTitle, body: target.sectionBody || [], imageIntent: target.imageIntent,
-        imagePaths: [row.path], characterCount: 0, headingStyle: "sectionTitle" });
+        // The final audit uses the same explicit slot policy as the proposal
+        // review; losing it would reclassify an overview as feature evidence.
+        imageSource: target.imageSource, imagePaths: [row.path], characterCount: 0, headingStyle: "sectionTitle" });
       renderNodes.push({ kind: "heading", sectionId: id, text: target.sectionTitle });
       for (const text of target.sectionBody || []) renderNodes.push({ kind: "paragraph", sectionId: id, text });
       byNode.set(renderNodes.length, row);
@@ -34,7 +56,15 @@ export async function auditSectionProposals<T extends SectionProposal>(options: 
         altText: target.imageIntent, layout: "single", sourcePolicy: "LOCKED_PRODUCT_OR_ORIGINAL" });
     }
     const result = await (options.audit || auditPublishImages)({ productName: options.productName,
-      selectedProduct: options.selectedProduct || options.productName, composition: { sections, renderNodes } });
+      selectedProduct: options.selectedProduct || options.productName, composition: { sections, renderNodes },
+      selectedSourceSnapshot: options.selectedSourceSnapshot, selectedSourceProductId: options.selectedSourceProductId,
+      selectedSourceDirectory: options.selectedSourceDirectory, sourceSnapshotId: options.sourceSnapshotId,
+      // This is a seller-source proposal, not a visual approval. The same
+      // ORIGINAL hint lets the final audit include its exact canonical gallery
+      // bytes even when that original is beyond the first comparison references.
+      imageAssets: pending.map(row => ({ path: row.path, sourcePath: row.path, sha256: row.sourceSha256,
+        sectionId: options.targets[row.targetIndex].sectionId || `source-proposal-${row.targetIndex}`,
+        role: "body", provenance: "ORIGINAL", creationMethod: "source" })) });
     // 이미지 한 장의 문제(판정 형식 오류, 디코딩 불가, 누락, 과도한 세로 비율)는 그 제안만 탈락시킨다.
     // 다른 제안과 전체 재배치는 계속한다. 문맥 오류·검사 중 파일 변경만 전체를 멈춘다.
     const PER_IMAGE = new Set(["SEMANTIC_REJECTION", "INVALID_REVIEW", "INVALID_IMAGE", "MISSING_IMAGE", "LONG_IMAGE"]);
@@ -51,7 +81,7 @@ export async function auditSectionProposals<T extends SectionProposal>(options: 
     for (const failure of result.failures) {
       const row = byNode.get(failure.nodeIndex);
       if (!row) throw new Error("SOURCE_PROPOSAL_AUDIT_FAILED: INVALID_CONTEXT: Unknown verdict target");
-      rejected.add(key(row)); options.onRejected(row, failure.reason);
+      rejected.add(key(row)); rejectedPairs.add(key(row)); options.onRejected(row, failure.reason, failure.code);
     }
     for (const row of pending) if (!rejected.has(key(row))) accepted.add(key(row));
     remaining = remaining.filter(row => !rejected.has(key(row)));

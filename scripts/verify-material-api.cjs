@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports -- CommonJS offline VM fixture loads transpiled sources. */
 /** Offline regression fixture: actual material API/library/date code, mocked boundaries.
  * Run: node --test scripts/verify-material-api.cjs
  * No production database, filesystem writes, network, generation or publication.
@@ -16,8 +17,8 @@ function load(relative, dependencies, globals = {}) {
   const source = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
   }).outputText;
-  const module = { exports: {} };
-  const context = vm.createContext({ module, exports: module.exports, Buffer, Date, Intl,
+  const fixtureModule = { exports: {} };
+  const context = vm.createContext({ module: fixtureModule, exports: fixtureModule.exports, Buffer, Date, Intl,
     process: { pid: 12345 }, ...globals,
     require(name) {
       if (!Object.hasOwn(dependencies, name)) throw new Error(`Unexpected dependency: ${name}`);
@@ -25,31 +26,40 @@ function load(relative, dependencies, globals = {}) {
     },
   });
   new vm.Script(source, { filename }).runInContext(context);
-  return module.exports;
+  return fixtureModule.exports;
 }
 const clone = value => JSON.parse(JSON.stringify(value));
 const json = (body, options = {}) => ({ status: options.status || 200, body: clone(body) });
+const preparation = load('src/lib/material-preparation-diagnostics.ts', {});
+
 
 function harness() {
   const state = { now: '2026-09-07T03:00:00.000Z', authorized: true, updateBlocked: false,
     products: new Map(), manifests: new Map(), jobs: new Map(), runs: [], saves: 0,
-    locks: 0, activities: 0, productReads: 0, countReads: 0, runnerError: null, progress: new Map(), publicationAttempts: new Map(), missingDraftFiles: new Set() };
+    locks: 0, activities: 0, productReads: 0, countReads: 0, materialReads: new Map(), runnerError: null, progress: new Map(), publicationAttempts: new Map(), missingDraftFiles: new Set(), manuscripts: new Map(), beforeLock: null,
+    summaryObservations: new Map(), summaryToken: 'a'.repeat(64), summaryReads: 0, beforeSummaryRead: null };
   class FakeDate extends Date {
     constructor(...args) { super(...(args.length ? args : [state.now])); }
     static now() { return Date.parse(state.now); }
   }
   const library = load('src/lib/material-library.ts', {
     'node:crypto': crypto,
-    'node:fs': { readFileSync: file => Buffer.from(`fixture bytes: ${file}`) },
+    'node:path': path,
+    'node:fs': { readFileSync: file => Buffer.from(state.manuscripts.get(file) ?? `fixture bytes: ${file}`) },
+    './brand-post-approval-receipt': { hasCurrentBrandPostApprovalReceipt: manifest => manifest.fixtureReceipt !== false },
+    './material-preparation-diagnostics': preparation,
     './brand-post-package': {
       readBrandPostPackage: id => state.manifests.get(id) || null,
-      evaluateBrandPostPackageReadiness: manifest => ({
-        contentScore: 100, composition: null,
+      getBrandPostPackageDir: id => `${id}.package`,
+      evaluateBrandPostPackageReadiness: manifest => {
+        state.materialReads.set(manifest.productId, (state.materialReads.get(manifest.productId) || 0) + 1);
+        return {
+        contentScore: 100, composition: null, contentPassed: manifest.fixtureContentPassed !== false, imageSlots: manifest.fixtureImageSlots || [],
         // The real shared evaluator owns generation liveness (tested in the
         // image integrity suite); API must consume its blockers, not raw flags.
         blockers: [...(manifest.fixtureBlockers || []), ...(manifest.imageGeneration?.status === 'running' ? [{ code: 'images-running', reason: 'Image worker is running' }] : [])],
         imageGeneration: manifest.imageGeneration || null,
-      }),
+      }; },
     },
   });
   const dates = load('src/lib/bulk-schedule-plan.ts', {}, { Date: FakeDate });
@@ -62,7 +72,7 @@ function harness() {
   const repairs = load('src/lib/material-repair-candidates.ts', {
     'node:fs': {
       statSync: filename => { if (state.missingDraftFiles.has(filename)) throw new Error('missing manuscript'); return { isFile: () => true }; },
-      readFileSync: () => 'saved manuscript',
+      readFileSync: filename => state.manuscripts.get(filename) ?? 'saved manuscript',
     },
     './db': { prisma: { brandLink: { findMany: async ({ where }) => [...state.products.values()].filter(p => !where || p.connectKind === where.connectKind) } } },
     './material-library': library,
@@ -83,10 +93,26 @@ function harness() {
     './update-guard': { requireNoPendingDesktopUpdate: () => state.updateBlocked ? json({ success: false }, { status: 423 }) : null },
     './desktop-activity': { beginAutomaticPublishing: () => { state.activities++; return () => { state.activities--; }; } },
     './material-library': library,
+    './material-preparation-diagnostics': preparation,
+    './material-summary': { getMaterialSummary: async id => {
+      state.summaryReads++; state.beforeSummaryRead?.(state.summaryReads);
+      const manifest = state.manifests.get(id), observation = state.summaryObservations.get(id);
+      const current = observation?.token === state.summaryToken ? observation.material : {};
+      return manifest ? { productId: id, title: manifest.title, connectKind: manifest.connectKind,
+        ready: Boolean(manifest.approvedAt), blockers: [], score: 100, imageCount: 1, approvedAt: manifest.approvedAt,
+        ...current, revision: state.summaryToken,
+        verification: { mode: 'saved-summary', strict: false, requiresFullVerification: true } } : null;
+    }, observeStrictMaterialSummary: (id, token, material) => {
+      if (token !== state.summaryToken) return false;
+      state.summaryObservations.set(id, { token, material: clone(material) }); return true;
+    } },
+    './draft-progress': { readDraftProgress: id => state.progress.get(id) || null },
+    './publish-attempt': { readPublishAttempt: id => state.publicationAttempts.get(id) || null },
     './material-job-store': {
       acquireMaterialJobLock: () => {
         if (state.locks) throw new Error('Existing material job');
         state.locks++;
+        if (state.beforeLock) { const hook = state.beforeLock; state.beforeLock = null; hook(); }
         return () => { state.locks--; };
       },
       listMaterialJobs: () => [...state.jobs.values()].map(clone),
@@ -125,6 +151,159 @@ function assertNoDispatch(h) {
   assert.equal(h.state.locks, 0, 'lock released');
   assert.equal(h.state.activities, 0, 'activity released');
 }
+
+test('display summaries never run the strict reader; explicit selection verifies only requested products', async () => {
+  const h = harness();
+  const first = h.product(0); h.product(1); h.product(2);
+  h.state.materialReads.clear();
+  const summary = await h.api.materialsGet(h.request(undefined, '?summary=1'));
+  assert.equal(summary.status, 200);
+  assert.equal(summary.body.data.materials.length, 3);
+  assert.equal(summary.body.data.verificationMode, 'saved-summary');
+  assert.equal(summary.body.data.requiresFullVerification, true);
+  assert.equal(h.state.materialReads.size, 0, 'automatic UI summary cannot trigger pixel/byte readiness');
+  const selected = await h.api.materialsGet(h.request(undefined, `?productIds=${first.productId}`));
+  assert.equal(selected.status, 200);
+  assert.equal(selected.body.data.materials.length, 1);
+  assert.equal(selected.body.data.materials[0].revision, first.revision);
+  assert.equal(selected.body.data.materials[0].summaryRevision, h.state.summaryToken);
+  assert.equal(h.state.materialReads.get(first.productId), 1);
+  assert.equal(h.state.materialReads.size, 1, 'other products are not reverified');
+  const unsafeSummarySelection = await h.post({ materials: [{ productId: first.productId, revision: 'a'.repeat(64) }], publishMode: 'now' });
+  assert.equal(unsafeSummarySelection.status, 409, 'a summary/metadata digest cannot authorize strict publication');
+  assert.match(unsafeSummarySelection.body.error, /변경/);
+  const invalid = await h.api.materialsGet(h.request(undefined, '?productIds=../unsafe'));
+  assert.equal(invalid.status, 400);
+  assertNoDispatch(h);
+});
+
+test('explicit failed selection updates only summary diagnostics and repair candidates, then a successful check restores them', async () => {
+  const h = harness(); const selected = h.product(0);
+  h.state.manifests.get(selected.productId).fixtureBlockers = [{ code: 'image-asset-invalid', reason: 'changed image bytes' }];
+  const staleDisplay = await h.api.materialsGet(h.request(undefined, '?summary=1'));
+  assert.equal(staleDisplay.body.data.materials[0].ready, true, 'saved approval initially has no current-byte observation');
+  const failed = await h.api.materialsGet(h.request(undefined, `?productIds=${selected.productId}`));
+  assert.equal(failed.body.data.materials[0].ready, false);
+  const refreshed = await h.api.materialsGet(h.request(undefined, '?summary=1'));
+  assert.equal(refreshed.body.data.materials[0].ready, false);
+  assert.equal(refreshed.body.data.materials[0].verification.strict, false);
+  assert.equal(refreshed.body.data.repairCandidates.length, 1);
+  assert.match(refreshed.body.data.repairCandidates[0].reason, /changed image bytes/);
+  h.state.manifests.get(selected.productId).fixtureBlockers = [];
+  await h.api.materialsGet(h.request(undefined, `?productIds=${selected.productId}`));
+  const restored = await h.api.materialsGet(h.request(undefined, '?summary=1'));
+  assert.equal(restored.body.data.materials[0].ready, true);
+  assert.equal(restored.body.data.repairCandidates.length, 0);
+  assertNoDispatch(h);
+});
+
+test('metadata changing during strict selection cannot attach its observation to a different summary', async () => {
+  const h = harness(); const selected = h.product(0);
+  h.state.manifests.get(selected.productId).fixtureBlockers = [{ code: 'image-asset-invalid', reason: 'old bytes failed' }];
+  h.state.beforeSummaryRead = count => { if (count === 2) h.state.summaryToken = 'changed-during-read'; };
+  const checked = await h.api.materialsGet(h.request(undefined, `?productIds=${selected.productId}`));
+  assert.equal(checked.body.data.materials[0].summaryRevision, null);
+  assert.equal(h.state.summaryObservations.size, 0);
+  const display = await h.api.materialsGet(h.request(undefined, '?summary=1'));
+  assert.equal(display.body.data.materials[0].ready, true, 'old failed verdict was not attached to new input');
+  assertNoDispatch(h);
+});
+
+test('transient database workflow guards never poison an unchanged material summary observation', async () => {
+  const h = harness(); const selected = h.product(0);
+  h.state.products.get(selected.productId).status = 'PUBLISHING';
+  const guarded = await h.api.materialsGet(h.request(undefined, `?productIds=${selected.productId}`));
+  assert.equal(guarded.body.data.materials[0].ready, false);
+  assert.equal(h.state.summaryObservations.get(selected.productId).material.ready, true, 'only underlying file quality is recorded');
+  h.state.products.get(selected.productId).status = 'READY';
+  const restored = await h.api.materialsGet(h.request(undefined, '?summary=1'));
+  assert.equal(restored.body.data.materials[0].ready, true);
+  assertNoDispatch(h);
+});
+
+test('one materials GET verifies each package once across list and both candidate selectors; the next GET reads fresh', async () => {
+  const h = harness(), ready = h.product(0), blocked = h.product(2, 'FAILED');
+  h.state.manifests.get(blocked.productId).fixtureBlockers = [{ reason: 'Image validation failed' }];
+  h.state.jobs.set('failed-writing', { jobId: 'failed-writing', kind: 'prepare', status: 'failed', startedAt: h.state.now,
+    items: [{ productId: blocked.productId, status: 'failed', stage: 'failed', error: 'Image validation failed' }] });
+  h.state.materialReads.clear();
+  const first = await h.api.materialsGet(h.request(null, '?connectKind=SHOPPING'));
+  assert.equal(first.status, 200);
+  assert.equal(first.body.data.materials.find(item => item.productId === ready.productId).ready, true);
+  assert.equal(first.body.data.materials.find(item => item.productId === ready.productId).preparationDiagnostics.state, 'ready');
+  assert.equal(first.body.data.failedCandidates.length, 1); assert.equal(first.body.data.repairCandidates.length, 1);
+  assert.equal(h.state.materialReads.get(ready.productId), 1); assert.equal(h.state.materialReads.get(blocked.productId), 1);
+  const revision = first.body.data.materials.find(item => item.productId === ready.productId).revision;
+  h.state.manuscripts.set(`${ready.productId}.md`, 'manuscript edited after previous GET');
+  h.state.manifests.get(blocked.productId).fixtureBlockers = [];
+  const next = await h.api.materialsGet(h.request(null, '?connectKind=SHOPPING'));
+  assert.notEqual(next.body.data.materials.find(item => item.productId === ready.productId).revision, revision);
+  assert.equal(next.body.data.materials.find(item => item.productId === blocked.productId).ready, true);
+  assert.equal(next.body.data.failedCandidates.length, 0); assert.equal(next.body.data.repairCandidates.length, 0);
+  assert.equal(h.state.materialReads.get(ready.productId), 2); assert.equal(h.state.materialReads.get(blocked.productId), 2);
+  assertNoDispatch(h);
+});
+
+test('an old approval without a current final audit receipt is blocked in both desktop and MCP material views', async () => {
+  const h = harness(), item = h.product();
+  h.state.manifests.get(item.productId).fixtureReceipt = false;
+  const listing = await h.api.materialsGet(h.request(null));
+  const material = listing.body.data.materials.find(value => value.productId === item.productId);
+  assert.equal(material.ready, false);
+  assert.equal(material.preparationDiagnostics.scope, 'current-package');
+  assert.equal(material.preparationDiagnostics.state, 'needs-review');
+  assert.match(material.blockers.join(' '), /최종 이미지 검사/);
+  assert.equal((await h.post({ materials: [item], publishMode: 'now' })).status, 409);
+  assertNoDispatch(h);
+});
+
+test('compact jobs-only material views include the same current package diagnostics', async () => {
+  const h = harness(), item = h.product();
+  h.state.jobs.set('ready-history', { jobId: 'ready-history', kind: 'prepare', status: 'completed', startedAt: h.state.now,
+    items: [{ productId: item.productId, status: 'ready', stage: 'ready' }] });
+  h.state.manifests.get(item.productId).fixtureReceipt = false;
+  const listing = await h.api.materialsGet(h.request(null));
+  const compact = await h.api.materialsGet(h.request(null, '?jobsOnly=1'));
+  const expanded = listing.body.data.materials.find(value => value.productId === item.productId);
+  const current = compact.body.data.materials.find(value => value.productId === item.productId);
+  assert.equal(current.ready, false);
+  assert.deepEqual(current.preparationDiagnostics, expanded.preparationDiagnostics);
+  assert.equal(current.preparationDiagnostics.nextAction.action, 'review-publication');
+  assertNoDispatch(h);
+});
+
+test('current product guards replace ready and missing-image actions in full and compact material API views', async () => {
+  for (const missingImage of [false, true]) for (const [status, action] of [
+    ['DRAFTING', 'wait-current-job'], ['PUBLISHING', 'wait-current-job'], ['OUTCOME_UNKNOWN', 'inspect-existing-output'],
+    ['PUBLISHED', 'verify-published-result'], ['SCHEDULED', 'verify-scheduled-result'],
+  ]) {
+    const h = harness(), item = h.product(0, status), manifest = h.state.manifests.get(item.productId);
+    if (missingImage) {
+      Object.assign(manifest, { version: 'brand-post-package/v2', composition: { sections: [{ id: 'shopping-scene', imageSource: 'staged-ai', imagePaths: [] }] },
+        fixtureBlockers: [{ code: 'image-coverage', sectionId: 'shopping-scene', reason: 'Missing photo' }],
+        fixtureImageSlots: [{ sectionId: 'shopping-scene', minimum: 1, count: 0, missing: 1, generationMissing: 1, assets: [] }] });
+    }
+    const saved = h.library.getMaterial(item.productId);
+    assert.equal(saved.preparationDiagnostics.nextAction.action, missingImage ? 'complete-image-slots' : 'ready');
+    h.state.jobs.set('old-ready', { jobId: 'old-ready', kind: 'prepare', status: 'completed', startedAt: h.state.now,
+      items: [{ productId: item.productId, status: 'ready', stage: 'ready' }] });
+    const expanded = await h.api.materialsGet(h.request(null));
+    const compact = await h.api.materialsGet(h.request(null, '?jobsOnly=1'));
+    for (const material of [expanded.body.data.materials[0], compact.body.data.materials[0]]) {
+      assert.equal(material.ready, false);
+      assert.equal(material.preparationDiagnostics.nextAction.action, action);
+      assert.ok(material.preparationDiagnostics.requiredSlots.every(slot => slot.nextAction === action));
+    }
+    assert.deepEqual(h.library.getMaterial(item.productId).preparationDiagnostics, saved.preparationDiagnostics);
+    assertNoDispatch(h);
+  }
+  const h = harness(), item = h.product();
+  h.state.manifests.get(item.productId).imageGeneration = { status: 'running', requested: 1, applied: 0, remaining: 1, errors: [], updatedAt: h.state.now };
+  const running = (await h.api.materialsGet(h.request(null))).body.data.materials[0];
+  assert.equal(running.ready, false);
+  assert.equal(running.preparationDiagnostics.nextAction.action, 'wait-current-job');
+  assertNoDispatch(h);
+});
 
 test('missing, empty, duplicate and malformed selections cannot dispatch', async () => {
   for (const make of [() => undefined, () => [], item => [item, item],
@@ -186,6 +365,33 @@ test('same identity with changed revision, dates, mode or kind returns 409 witho
   }
   assert.equal((await h.post({ productIds: [item.productId], sourceJobId: body.sourceJobId }, 'prepare')).status, 409);
   assert.equal(h.state.runs.length, 1); assert.equal(h.state.saves, 1);
+});
+
+test('preparation rechecks a concurrent saved source identity under the lock without creating work', async () => {
+  for (const changed of [false, true]) {
+    const h = harness(), item = h.product();
+    const input = { productIds: [item.productId], sourceJobId: 'prepare-race' };
+    const items = [{ productId: item.productId, status: 'queued', stage: '소재 준비 대기' }];
+    const requestHash = crypto.createHash('sha256').update(JSON.stringify({ kind: 'prepare', items })).digest('hex');
+    h.state.beforeLock = () => h.state.jobs.set('winner', { jobId: 'winner', kind: 'prepare', status: 'completed',
+      ownerPid: 12345, sourceJobId: input.sourceJobId, requestHash: changed ? 'different' : requestHash,
+      startedAt: h.state.now, updatedAt: h.state.now, items: [{ ...items[0], status: 'ready' }] });
+    const result = await h.post(input, 'prepare');
+    assert.equal(result.status, changed ? 409 : 200);
+    if (!changed) assert.equal(result.body.data.jobId, 'winner');
+    else assert.match(result.body.error, /같은 요청 ID/);
+    assertNoDispatch(h);
+    assert.equal(h.state.jobs.size, 1);
+  }
+});
+
+test('preparation rejects publication fields and malformed source identity without dispatch', async () => {
+  const h = harness(), item = h.product();
+  for (const extra of [{ publishMode: 'now' }, { scheduledAt: '2026-09-10' }, { confirmed: true },
+    { materials: [item] }, { sourceJobId: '' }, { sourceJobId: 'x'.repeat(161) }]) {
+    assert.equal((await h.post({ productIds: [item.productId], ...extra }, 'prepare')).status, 409);
+    assertNoDispatch(h);
+  }
 });
 
 test('malformed JSON and unauthenticated requests cannot dispatch or expose jobs', async () => {
@@ -400,6 +606,133 @@ test('repair listing selects saved unready manuscripts, including approval-only 
   assert.equal(response.body.data.failedCandidateCount, 0, 'repair and failed-writing selection serve different requirements');
 });
 
+function plannedBlocked(h, index = 0, status = 'READY') {
+  const item = failed(h, index, { productStatus: status });
+  h.state.products.get(item.productId).scheduledPublishAt = '2026-09-08T00:00:00.000Z';
+  return item;
+}
+
+function publicationJob(h, item, jobId, status, startedAt, errorCode, causeCode) {
+  h.state.jobs.set(jobId, { jobId, kind: 'publish', status: status === 'failed' || status === 'outcome_unknown' ? 'failed' : 'completed',
+    startedAt, updatedAt: startedAt, items: [{ productId: item.productId, status,
+      ...(errorCode ? { errorCode } : {}), ...(causeCode ? { causeCode } : {}) }] });
+}
+
+test('repair lists and accepts six unplanned plus eight planned saved READY/FAILED drafts without changing source inputs', async () => {
+  const h = harness();
+  const items = Array.from({ length: 14 }, (_, index) => index < 6 ? blocked(h, index) : plannedBlocked(h, index, index % 2 ? 'FAILED' : 'READY'));
+  for (const [index, item] of items.entries()) {
+    const manifest = h.state.manifests.get(item.productId);
+    h.state.manuscripts.set(manifest.markdownPath, `# 원본 원고 ${index}\n\n수정하지 않은 저장 본문 ${item.productId}\n`);
+    if (index >= 6) h.state.products.get(item.productId).scheduledPublishAt = index % 2 ? '2026-09-06T00:00:00.000Z' : '2026-09-08T00:00:00.000Z';
+  }
+  const originalInputs = clone({ products: [...h.state.products], manifests: [...h.state.manifests], manuscripts: [...h.state.manuscripts] });
+  const listing = await h.api.materialsGet(h.request(null));
+  assert.equal(listing.body.data.repairCandidateCount, 14);
+  assert.deepEqual(listing.body.data.repairCandidates.map(item => item.productId), items.map(item => item.productId));
+  const result = await h.api.materialsRepairBlockedPost(h.request({ sourceJobId: 'repair-planned-drafts' }));
+  assert.equal(result.status, 202); assert.equal(result.body.data.acceptedCount, 14);
+  assert.deepEqual(result.body.data.items.map(item => item.productId), items.map(item => item.productId));
+  assert.equal(h.state.runs.length, 1); assert.equal(h.state.runs[0].kind, 'repair');
+  assert.equal(h.state.runs[0].items.length, 14); assert.equal(h.state.runs[0].publishMode, undefined);
+  await h.settle();
+  assert.deepEqual(clone({ products: [...h.state.products], manifests: [...h.state.manifests], manuscripts: [...h.state.manuscripts] }), originalInputs,
+    'listing and job acceptance preserve all planned dates, manifests and original manuscript bytes');
+  assert.equal(h.state.locks, 0); assert.equal(h.state.activities, 0);
+});
+
+test('planned dates never override publication, uncertain execution or active image exclusions, including explicit repair selections', async () => {
+  const cases = [
+    ...['SCHEDULED', 'PUBLISHED', 'OUTCOME_UNKNOWN', 'PUBLISHING', 'DRAFTING', 'COLLECTED'].map(status => [status, h => { h.state.products.get('product_0000').status = status; }]),
+    ['published URL', h => { h.state.products.get('product_0000').postUrl = 'https://blog.naver.com/fixture/1'; }],
+    ['published time', h => { h.state.products.get('product_0000').publishedAt = '2026-09-06T03:00:00.000Z'; }],
+    ...['CONFIRMED', 'SUBMITTING', 'OUTCOME_UNKNOWN'].map(stage => [`attempt ${stage}`, h => { h.state.publicationAttempts.set('product_0000', { stage }); }]),
+    ...['queued', 'preparing', 'publishing', 'outcome_unknown'].map(status => [`latest prepare ${status}`, h => { h.state.jobs.get('failure-0').items[0].status = status; }]),
+    ...['PREPARATION_RESULT_UNCERTAIN', 'APP_INTERRUPTED', 'WORKFLOW_TIMEOUT'].map(errorCode => [`latest prepare ${errorCode}`, h => { h.state.jobs.get('failure-0').items[0].errorCode = errorCode; }]),
+    ['latest cause unknown', h => { h.state.jobs.get('failure-0').items[0].causeCode = 'OUTCOME_UNKNOWN'; }],
+    ['publish scheduled', (h, item) => publicationJob(h, item, 'publish-unsafe', 'scheduled', h.state.now)],
+    ['publish outcome unknown', (h, item) => publicationJob(h, item, 'publish-unsafe', 'outcome_unknown', h.state.now)],
+    ['publish uncertain cause', (h, item) => publicationJob(h, item, 'publish-unsafe', 'failed', h.state.now, 'PUBLISH_FAILED', 'OUTCOME_UNKNOWN')],
+    ['publish nondefinitive failure', (h, item) => publicationJob(h, item, 'publish-unsafe', 'failed', h.state.now, 'UNKNOWN_PUBLISH_FAILURE')],
+    ['images running', h => { h.state.manifests.get('product_0000').imageGeneration = { status: 'running' }; }],
+    ['image owner unknown', h => { h.state.manifests.get('product_0000').imageGeneration = { status: 'interrupted', recoveryState: 'owner-unknown' }; }],
+  ];
+  for (const [label, change] of cases) {
+    const h = harness(); const item = plannedBlocked(h); change(h, item);
+    const originalInputs = clone({ products: [...h.state.products], manifests: [...h.state.manifests] });
+    const listing = await h.api.materialsGet(h.request(null));
+    assert.equal(listing.body.data.repairCandidateCount, 0, label);
+    const response = await h.api.materialsRepairBlockedPost(h.request({ productIds: [item.productId] }));
+    assert.equal(response.status, 409, label); assertNoDispatch(h);
+    assert.deepEqual(clone({ products: [...h.state.products], manifests: [...h.state.manifests] }), originalInputs, label);
+  }
+});
+
+test('older publication evidence blocks planned repair despite newer definitive failure, independent of job insertion order', async () => {
+  const historicalPublications = [
+    ['scheduled', 'scheduled'], ['published', 'published'], ['outcome unknown', 'outcome_unknown'],
+    ['nondefinitive failure', 'failed', 'UNKNOWN_PUBLISH_FAILURE'],
+    ['uncertain failure cause', 'failed', 'PUBLISH_FAILED', 'OUTCOME_UNKNOWN'],
+  ];
+  for (const productStatus of ['READY', 'FAILED']) for (const [historyLabel, oldStatus, errorCode, causeCode] of historicalPublications) for (const reverse of [false, true]) {
+    const h = harness(); const item = plannedBlocked(h, 0, productStatus);
+    publicationJob(h, item, 'older-publication', oldStatus, '2026-09-04T03:00:00.000Z', errorCode, causeCode);
+    publicationJob(h, item, 'latest-publication-failure', 'failed', '2026-09-05T03:00:00.000Z', 'PUBLISH_FAILED');
+    if (reverse) h.state.jobs = new Map([...h.state.jobs].reverse());
+    const label = `${productStatus}/${historyLabel}/reverse=${reverse}`;
+    const listing = await h.api.materialsGet(h.request(null));
+    assert.equal(listing.body.data.repairCandidateCount, 0, label);
+    const response = await h.api.materialsRepairBlockedPost(h.request({ productIds: [item.productId] }));
+    assert.equal(response.status, 409, label); assertNoDispatch(h);
+  }
+});
+
+test('planned repair remains allowed when every publication failed definitively before submission', async () => {
+  for (const productStatus of ['READY', 'FAILED']) for (const reverse of [false, true]) for (const emptyEvidence of [false, true]) {
+    const h = harness(); const item = plannedBlocked(h, 0, productStatus);
+    publicationJob(h, item, 'older-publication-failure', 'failed', '2026-09-04T03:00:00.000Z', 'MATERIAL_CHANGED');
+    publicationJob(h, item, 'latest-publication-failure', 'failed', '2026-09-05T03:00:00.000Z', 'PUBLISH_FAILED');
+    h.state.publicationAttempts.set(item.productId, { stage: 'FAILED_BEFORE_SUBMIT', ...(emptyEvidence ? { evidence: {} } : {}) });
+    if (reverse) h.state.jobs = new Map([...h.state.jobs].reverse());
+    const originalInputs = clone({ products: [...h.state.products], manifests: [...h.state.manifests] });
+    const listing = await h.api.materialsGet(h.request(null));
+    assert.deepEqual(listing.body.data.repairCandidates.map(candidate => candidate.productId), [item.productId]);
+    const response = await h.api.materialsRepairBlockedPost(h.request({ productIds: [item.productId] }));
+    assert.equal(response.status, 202); assert.equal(response.body.data.acceptedCount, 1);
+    assert.equal(h.state.runs.length, 1); assert.equal(h.state.runs[0].kind, 'repair');
+    await h.settle();
+    assert.deepEqual(clone({ products: [...h.state.products], manifests: [...h.state.manifests] }), originalInputs,
+      'a safe pre-submit failure does not erase the saved publication plan or draft');
+  }
+});
+
+test('pre-submit stage cannot override submission receipts, including empty markers or contradictory publication proof', async () => {
+  const receiptMarkers = [
+    ['submittedAt', value => ({ submittedAt: value })],
+    ['confirmedAt', value => ({ confirmedAt: value })],
+    ['postUrl', value => ({ evidence: { postUrl: value } })],
+    ['reservationId', value => ({ evidence: { reservationId: value } })],
+    ['scheduledDate', value => ({ evidence: { scheduledDate: value } })],
+  ];
+  const cases = receiptMarkers.flatMap(([label, receipt]) => [
+    [`${label} recorded`, receipt('recorded')], [`${label} empty`, receipt('')],
+  ]);
+  cases.push(['contradictory receipt', { submittedAt: '', confirmedAt: '2026-09-05T03:00:00.000Z',
+    evidence: { postUrl: 'https://blog.naver.com/fixture/1', reservationId: 'reserved-fixture', scheduledDate: '2026-09-08' } }]);
+  for (const productStatus of ['READY', 'FAILED']) for (const [receiptLabel, receipt] of cases) {
+    const h = harness(); const item = plannedBlocked(h, 0, productStatus);
+    publicationJob(h, item, 'latest-publication-failure', 'failed', '2026-09-05T03:00:00.000Z', 'PUBLISH_FAILED');
+    h.state.publicationAttempts.set(item.productId, { stage: 'FAILED_BEFORE_SUBMIT', ...receipt });
+    const originalInputs = clone({ products: [...h.state.products], manifests: [...h.state.manifests], attempts: [...h.state.publicationAttempts] });
+    const label = `${productStatus}/${receiptLabel}`;
+    const listing = await h.api.materialsGet(h.request(null));
+    assert.equal(listing.body.data.repairCandidateCount, 0, label);
+    const response = await h.api.materialsRepairBlockedPost(h.request({ productIds: [item.productId] }));
+    assert.equal(response.status, 409, label); assertNoDispatch(h);
+    assert.deepEqual(clone({ products: [...h.state.products], manifests: [...h.state.manifests], attempts: [...h.state.publicationAttempts] }), originalInputs, label);
+  }
+});
+
 test('entire repair handles sixty saved blocked items and dispatches no publication/full-rewrite mode', async () => {
   const h = harness(); for (let i = 0; i < 60; i++) blocked(h, i);
   const result = await h.api.materialsRepairBlockedPost(h.request({ sourceJobId: 'repair-all' }));
@@ -456,4 +789,37 @@ test('repair malformed/auth/update/busy requests cannot mutate', async () => {
   assert.equal((await h.api.materialsRepairBlockedPost(h.request({}))).status, 409); assertNoDispatch(h);
   h.state.authorized = false; assert.equal((await h.api.materialsRepairBlockedPost(h.request({}))).status, 401);
   h.state.authorized = true; h.state.updateBlocked = true; assert.equal((await h.api.materialsRepairBlockedPost(h.request({}))).status, 423);
+});
+
+
+test('job views distinguish restored current materials from immutable failed execution history', async () => {
+  const h = harness(); const selected = h.product(0);
+  const oldJob = { jobId: 'old-failure', kind: 'prepare', status: 'failed', startedAt: h.state.now,
+    items: [{ productId: selected.productId, status: 'failed', stage: '확인 필요', error: 'old ambiguity', errorCode: 'IMAGE_OUTPUT_AMBIGUOUS' }] };
+  h.state.jobs.set(oldJob.jobId, oldJob);
+  const result = await h.api.materialsGet(h.request(undefined, '?jobId=old-failure'));
+  assert.equal(result.body.data.currentReadyCount, 1);
+  assert.equal(result.body.data.readyCount, 0);
+  assert.equal(result.body.data.items[0].error, 'old ambiguity');
+  assert.equal(result.body.data.status, 'failed');
+  const history = await h.api.materialsGet(h.request(undefined, '?jobsOnly=1'));
+  assert.equal(history.body.data.materials[0].ready, true);
+  assert.equal(history.body.data.materials[0].status, 'READY');
+  assert.deepEqual(history.body.data.jobs[0], oldJob);
+  assert.equal(h.state.saves, 0); assert.equal(h.state.runs.length, 0);
+});
+
+test('old ready execution cannot certify a currently blocked or uncertain material', async () => {
+  const h = harness(); const selected = h.product(0);
+  h.state.manifests.get(selected.productId).fixtureBlockers = [{ reason: 'source mismatch' }];
+  h.state.jobs.set('past-ready', { jobId: 'past-ready', kind: 'repair', status: 'completed', startedAt: h.state.now,
+    items: [{ productId: selected.productId, status: 'ready', stage: '준비완료' }] });
+  const result = await h.api.materialsGet(h.request(undefined, '?jobId=past-ready'));
+  assert.equal(result.body.data.readyCount, 1); assert.equal(result.body.data.currentReadyCount, 0);
+  assert.equal(result.body.data.currentBlockedCount, 1);
+  h.state.products.get(selected.productId).status = 'OUTCOME_UNKNOWN';
+  const history = await h.api.materialsGet(h.request(undefined, '?jobsOnly=1'));
+  assert.equal(history.body.data.materials[0].ready, false);
+  assert.equal(history.body.data.materials[0].status, 'OUTCOME_UNKNOWN');
+  assert.equal(h.state.saves, 0);
 });

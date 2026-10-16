@@ -15,11 +15,13 @@ import { clearRemoteActivation, readRemoteActivation } from "@/lib/remote-activa
 import { getNaverSessionFile } from "@/lib/naver-session";
 import { hasStoredConnectContract } from "@/lib/connect-contract-store";
 import { getBrandPostPackageDir, readBrandPostPackage } from "@/lib/brand-post-package";
+import { publicationVerificationSummary } from "@/lib/publication-verification-summary";
 import { allowsShoppingReferenceScene, buildBrandPostImagePrompt, prepareBrandPostImageReferenceContext,
   resolveBrandPostImageTarget } from "@/lib/brand-post-image-generation";
 import { attachRemoteProductReferenceInputs, type RemoteProductReferenceImage } from "@/lib/brand-post-remote-image-inputs";
 import { readDraftProgress } from "@/lib/draft-progress";
 import { buildPreparedDraftView } from "@/lib/draft-context-view";
+import { attachPreparedDraftOriginal } from "@/lib/prepared-draft-reference";
 import { beginDesktopActivity, getDesktopActivitySnapshot } from "@/lib/desktop-activity";
 import { collapseBrandLinkProducts, matchesWritingStatusFilter } from "@/lib/brandlink-product-list";
 import {
@@ -608,11 +610,12 @@ async function heroImagePayload(heroImagePath: unknown): Promise<{ base64: strin
   }
 }
 
-async function uploadRemoteImageAsset(imagePath: string): Promise<string | null> {
+async function uploadRemoteImageAsset(imagePath: string, expectedHash?: string): Promise<string | null> {
   if (!fs.existsSync(imagePath)) return null;
   const remote = config();
   if (!remote.siteUrl || !remote.token) return null;
   const image = fs.readFileSync(imagePath);
+  if (expectedHash && createHash("sha256").update(image).digest("hex") !== expectedHash) return null;
   const contentType = image[0] === 0xff && image[1] === 0xd8 && image[2] === 0xff
     ? "image/jpeg"
     : image.subarray(0, 4).toString("ascii") === "RIFF" && image.subarray(8, 12).toString("ascii") === "WEBP"
@@ -922,9 +925,15 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     }, { timeoutMs: DRAFT_PREPARE_WAIT_MS });
     ctx.draftProgress = null;
     const data = (response.data || response) as Record<string, unknown>;
-    const prepared = buildPreparedDraftView(data, productId, job.id, ctx.warnings);
-    return envelope(job, "draft-context", `초안 근거 준비 완료 (${product.productName || productId}). 이 ChatGPT 가 systemPrompt·userPrompt 로 원고 JSON 을 작성해 post_submit_draft(contextJobId=${job.id}) 로 제출하세요.`, prepared, ctx, {
-      nextAction: `verifiedFacts·sourceImages 만 근거로 systemPrompt 와 userPrompt 에 따라 원고 JSON(title, evidenceFacts, sections, hashtags)을 작성하고 harness.qualityChecklist 로 자체 검수한 뒤 post_submit_draft(contextJobId=${job.id}) 를 호출하세요. PC 는 원고를 쓰지 않습니다.`,
+    const prepared = await attachPreparedDraftOriginal(buildPreparedDraftView(data, productId, job.id, ctx.warnings), productId,
+      path.join(getBrandPostPackageDir(productId), "mcp-draft-context.json"), { upload: uploadRemoteImageAsset, warn: message => ctx.warnings.push(message) });
+    const externalWriterReady = kind !== "SHOPPING" || (prepared.publicationPhotoAvailability as Record<string, unknown> | undefined)?.externalWriterReady === true;
+    return envelope(job, "draft-context", externalWriterReady
+      ? `초안 근거 준비 완료 (${product.productName || productId}). 이 ChatGPT 가 systemPrompt·userPrompt 로 원고 JSON 을 작성해 post_submit_draft(contextJobId=${job.id}) 로 제출하세요.`
+      : `초안 근거는 저장됐지만 검증 원본 픽셀 전달이 필요합니다 (${product.productName || productId}). 참조 전달을 복구하기 전에는 원고 생성을 시작하지 않습니다.`, prepared, ctx, {
+      nextAction: !externalWriterReady
+        ? "실제 검증 원본 픽셀 첨부가 준비되지 않았습니다. sourceImages URL은 픽셀이 아닙니다. 참조 전달 상태를 복구하거나 post_prepare_material로 PC와 같은 전체 소재 준비를 요청하세요."
+        : `${kind === "SHOPPING" ? "verifiedFacts와 job.imageAttachments의 실제 검증 원본" : "verifiedFacts·sourceImages"}을 근거로 systemPrompt 와 userPrompt 에 따라 원고 JSON(title, evidenceFacts, sections, hashtags)을 작성하고 harness.qualityChecklist 로 자체 검수한 뒤 post_submit_draft(contextJobId=${job.id}) 를 호출하세요. PC 는 원고를 쓰지 않습니다. 이후 post_get_draft·post_apply_section_image·post_approve_draft까지 완료해야 준비완료입니다.`,
     });
   }
 
@@ -1328,6 +1337,11 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     const preparing = job.type === "MATERIALS_PREPARE";
     const rewriting = job.type === "MATERIALS_REWRITE_FAILED";
     const repairing = job.type === "MATERIALS_REPAIR_BLOCKED";
+    if (preparing && (input.publishMode !== undefined || input.materials !== undefined || input.scheduledAt !== undefined ||
+        input.confirmed !== undefined || !Array.isArray(input.productIds) || !input.productIds.length || input.productIds.length > 50 ||
+        input.productIds.some(id => typeof id !== "string" || !/^[A-Za-z0-9_-]{8,80}$/.test(id)) || new Set(input.productIds).size !== input.productIds.length)) {
+      throw new LocalAutomationError("INVALID_INPUT", "소재 준비는 중복 없이 상품 ID 1~50개만 선택하며 발행·예약 입력을 함께 받지 않습니다.");
+    }
     if (!listing && !rewriting && !repairing && (!Array.isArray(preparing ? input.productIds : input.materials) ||
         (preparing ? input.productIds as unknown[] : input.materials as unknown[]).length === 0)) {
       throw new LocalAutomationError("INVALID_INPUT", "준비할 상품 또는 발행할 소재의 ID와 revision을 선택하세요.");
@@ -1425,11 +1439,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     ctx.setStage("verifying", "발행 결과 검증", 40);
     const payload = await localApi(request, `/api/brandlinks/${encodeURIComponent(draftId)}/verify`);
     const data = (payload.data || {}) as Record<string, unknown>;
-    const summary = data.published === true
-      ? `발행 확인됨 — ${data.postUrl}`
-      : data.scheduled === true
-        ? `예약 상태 (${data.scheduledPublishAt || "일시 미상"})`
-        : `발행 확인 실패 (상태 ${data.status}${data.errorMessage ? `: ${data.errorMessage}` : ""})`;
+    const summary = publicationVerificationSummary(data);
     return envelope(job, "verify-result", summary, data, ctx);
   }
 

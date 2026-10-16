@@ -30,8 +30,8 @@ function imageFailureCode(errors: string[]): string | undefined {
   return [...IMAGE_REPAIR_CONFLICT_CODES,
     "CODEX_AUTH_REQUIRED", "CODEX_LOGIN_REQUIRED", "CODEX_MODEL_INCOMPATIBLE", "LLM_UNAVAILABLE",
     "CHATGPT_BROWSER_AUTH_REQUIRED", "CHATGPT_BROWSER_AUTOMATION_DISABLED", "CHATGPT_BROWSER_UNREACHABLE",
-    "CHATGPT_BROWSER_BUSY", "IMAGE_RESUME_REQUIRED", "IMAGE_PROVIDER_REFUSED", "PRODUCT_CUTOUT_REQUIRED",
-    "IMAGE_SOURCE_BINDING_REQUIRED", "PRODUCT_SOURCE_REQUIRED", "PRODUCT_SOURCE_DOWNLOAD_FAILED",
+    "CHATGPT_BROWSER_BUSY", "IMAGE_RESUME_REQUIRED", "IMAGE_OUTPUT_REJECTED", "IMAGE_PROVIDER_REFUSED", "PRODUCT_CUTOUT_REQUIRED",
+    "SOURCE_REVIEW_INCOMPLETE", "SOURCE_REVIEW_CONFLICT", "IMAGE_SOURCE_BINDING_REQUIRED", "IMAGE_GENERATION_REQUIRED", "PRODUCT_SOURCE_REQUIRED", "PRODUCT_SOURCE_DOWNLOAD_FAILED",
     "PRODUCT_SNAPSHOT_REQUIRED", "PRODUCT_FRONT_REFERENCE_REQUIRED", "PRODUCT_REFERENCE_REQUIRED", "PRODUCT_REFERENCE_CHANGED", "PRODUCT_REFERENCE_NOT_PREPARED",
     "EXTERNAL_IMAGE_LEDGER_INVALID", "PRODUCT_REFERENCE_SCENE_NOT_ALLOWED", "REFERENCE_SCENE_NOT_EVIDENCE", "REFERENCE_SCENE_REVIEW_INVALID", "REFERENCE_SCENE_CHANGED",
     "REFERENCE_SCENE_OUTPUT_REQUIRED", "REFERENCE_SCENE_FIDELITY_FAILED"]
@@ -120,6 +120,7 @@ export async function POST(
     generatedPath?: string;
     referenceHashes?: string[];
     batchSize?: number;
+    refreshSourcePhotos?: boolean;
   };
   if (!body.action || !IMAGE_ACTIONS.includes(body.action)) {
     return NextResponse.json({ success: false, error: "지원하지 않는 이미지 작업입니다." }, { status: 400 });
@@ -319,6 +320,7 @@ export async function POST(
       requests: generationRequests,
       // bind_sources never opens ChatGPT; it only places reviewed seller photos.
       sourceOnly: body.action === "bind_sources",
+      forceSourceRefresh: body.refreshSourcePhotos === true,
     });
     const { errors, generatedCount, appliedCount, manifest: updated } = repaired;
     const updatedPreview = packagePreview(updated);

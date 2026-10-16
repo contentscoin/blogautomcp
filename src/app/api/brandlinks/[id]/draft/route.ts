@@ -18,6 +18,7 @@ import {
   approveBrandPostPackage,
   getBrandPostPackageDir,
   getBrandPostPackageManifestPath,
+  getBrandPostImageGenerationState,
   packagePreview,
   readBrandPostPackage,
   readBrandPostPackageResult,
@@ -43,6 +44,13 @@ import { readProductSnapshot } from "@/lib/draft-context-snapshot";
 import { resolveDraftExperience, resolveStoredExperienceNotes } from "@/lib/experience-notes";
 import { planQualityConvergence } from "../../../../../../scripts/lib/quality-convergence";
 import { DraftSectionCountError, validateSubmittedDraftSectionCount } from "../../../../../../scripts/lib/draft-section-contract";
+import { codexDraftStructuredFailureCode } from "../../../../../../scripts/lib/codex-draft-provider";
+import { findingKey } from "../../../../../../scripts/lib/photo-description-finding";
+import { planPhotoDescriptionRepair, serverPhotoDescriptionFindings } from "@/lib/brand-post-photo-description-repair";
+import { atomicWriteTextFile } from "@/lib/atomic-text-file";
+import { isDraftEditorialQualityPassed } from "@/lib/brand-post-quality-display";
+import { acquireBrandPostImageRepairLock, type BrandPostImageRepairLock } from "@/lib/brand-post-image-repair-lock";
+import { brandPostImageProgress } from "@/lib/brand-post-image-progress";
 
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
 const REVISION_PROCESS_TIMEOUT_MS = (() => {
@@ -183,7 +191,7 @@ function readPrepareFailure(logPath: string, brandLinkId?: string): PrepareFailu
 
 function failureResponse(error: unknown, fallbackMessage: string, status: number, extra: Record<string, unknown> = {}) {
   const message = error instanceof Error ? error.message : fallbackMessage;
-  const code = error instanceof PrepareProcessError ? error.code : classifyLocalFailure({ message, status });
+  const code = error instanceof PrepareProcessError ? error.code : codexDraftStructuredFailureCode(error) || classifyLocalFailure({ message, status });
   return NextResponse.json({ success: false, code, error: message, ...extra }, { status });
 }
 
@@ -237,6 +245,13 @@ function revalidatePackageForApproval(
     savedContext,
   );
   return writeBrandPostPackageManifest(reconcileBrandPostPackageQuality(evaluated));
+}
+
+/** PC, MCP submission and manual approval use one current completion gate. */
+async function approvePackageAfterCurrentValidation(id: string, link: ApprovalProductIdentity) {
+  revalidatePackageForApproval(id, link);
+  await validateBrandPostPublishImages(id, link.productName || undefined, { bindReadiness: true });
+  return approveBrandPostPackage(id);
 }
 
 /**
@@ -304,6 +319,12 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   const { id } = await params;
   try {
     const manifest = readBrandPostPackage(id, { migrate: false });
+    if (request.nextUrl.searchParams.get("progressOnly") === "1") {
+      return NextResponse.json({ success: true, data: manifest ? {
+        brandLinkId: id, progressOnly: true,
+        imageGeneration: brandPostImageProgress(getBrandPostImageGenerationState(manifest)),
+      } : null });
+    }
     return NextResponse.json({ success: true, data: manifest ? packagePreview(manifest) : null });
   } catch (error) {
     return NextResponse.json({ success: false, error: error instanceof Error ? error.message : "초안 조회 실패" }, { status: 500 });
@@ -392,6 +413,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     qualityConvergence?: unknown;
     incrementalOnly?: unknown;
     refreshSource?: unknown;
+    findingKeys?: unknown;
   };
   if (body.action === "recheck") {
     try {
@@ -458,21 +480,31 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       return NextResponse.json({ success: false, code: error instanceof SavedTextRevalidationError ? error.code : "QC_RECHECK_FAILED", error: error instanceof Error ? error.message : "원고 재검사 실패" }, { status: 409 });
     }
   }
-  if (body.action === "approve" || body.action === "validate_publish_images") {
+  if (body.action === "approve" || body.action === "validate_publish_images" || body.action === "audit_photo_descriptions") {
     try {
       const link = await prisma.brandLink.findUnique({ where: { id }, select: {
-        status: true, productName: true, connectKind: true, externalItemId: true,
+        status: true, updatedAt: true, productName: true, connectKind: true, externalItemId: true,
         finalUrl: true, sourceUrl: true, url: true,
       } });
-      if (!link || !["READY", "FAILED"].includes(link.status)) return NextResponse.json({ success: false, code: "NOT_READY", error: "작성·발행 중이거나 게시 여부 확인이 필요한 소재는 승인할 수 없습니다." }, { status: 409 });
+      if (!link || !["READY", "FAILED"].includes(link.status)) return NextResponse.json({ success: false, code: "NOT_READY", error: "작성·발행 중이거나 게시 여부 확인이 필요한 소재는 승인할 수 없습니다.",
+        approvalConflict: { gate: "status", claimAcquired: false, observedStatus: link?.status || "MISSING", observedUpdatedAt: link?.updatedAt?.toISOString() } }, { status: 409 });
       const claim = await prisma.brandLink.updateMany({ where: { id, status: link.status }, data: { status: "DRAFTING" } });
-      if (claim.count !== 1) return NextResponse.json({ success: false, code: "NOT_READY", error: "소재 상태가 변경되어 승인하지 않았습니다." }, { status: 409 });
+      if (claim.count !== 1) {
+        const current = await prisma.brandLink.findUnique({ where: { id }, select: { status: true, updatedAt: true } });
+        return NextResponse.json({ success: false, code: "NOT_READY", error: "소재 상태가 변경되어 승인하지 않았습니다.",
+          approvalConflict: { gate: "compare-and-set", claimAcquired: false, expectedStatus: link.status,
+            observedStatus: current?.status || "MISSING", observedUpdatedAt: current?.updatedAt?.toISOString() } }, { status: 409 });
+      }
       let approved = false;
       try {
-        revalidatePackageForApproval(id, link);
-        const imageAudit = await validateBrandPostPublishImages(id, link.productName || undefined);
-        if (body.action === "validate_publish_images") return NextResponse.json({ success: true, imageAudit });
-        const manifest = approveBrandPostPackage(id);
+        // A diagnostic-only audit must see retained rejected pixels even when
+        // readiness marks their slot missing. It never approves or skips pixel QA.
+        if (body.action !== "approve") {
+          if (body.action !== "audit_photo_descriptions") revalidatePackageForApproval(id, link);
+          const imageAudit = await validateBrandPostPublishImages(id, link.productName || undefined);
+          return NextResponse.json({ success: true, imageAudit });
+        }
+        const manifest = await approvePackageAfterCurrentValidation(id, link);
         const preview = packagePreview(manifest);
         approved = true;
         return NextResponse.json({ success: true, data: preview });
@@ -482,15 +514,62 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     } catch (error) {
       const message = error instanceof Error ? error.message : "초안 승인 실패";
       if (error instanceof PublishImageAuditError) return NextResponse.json({ success: false, code: "PUBLISH_IMAGE_AUDIT_FAILED",
-        error: message, errors: error.audit.failures.map(failure => `${failure.code}: ${failure.reason}`) }, { status: 422 });
+        error: message, errors: error.audit.failures.map(failure => `${failure.code}: ${failure.reason}`),
+        imageAuditFailures: error.audit.failures.map(failure => ({ ...failure,
+          ...(failure.photoDescription ? { findingKey: findingKey(failure.photoDescription) } : {}) })) }, { status: 422 });
       const code = error instanceof SavedTextRevalidationError
         ? error.code
-        : /승인할 고품질 초안이 없/u.test(message)
-          ? "DRAFT_NOT_FOUND"
-          : /품질|게이트|검사/u.test(message)
-            ? "CONTENT_BLOCKED"
-            : classifyLocalFailure({ message, status: 400 });
+        : codexDraftStructuredFailureCode(error)
+          || (/승인할 고품질 초안이 없/u.test(message)
+            ? "DRAFT_NOT_FOUND"
+            : /품질|게이트|검사/u.test(message)
+              ? "CONTENT_BLOCKED"
+              : classifyLocalFailure({ message, status: 400 }));
       return NextResponse.json({ success: false, code, error: message }, { status: 400 });
+    }
+  }
+  if (body.action === "repair_photo_description") {
+    const updateError = requireNoPendingDesktopUpdate();
+    if (updateError) return updateError;
+    const link = await prisma.brandLink.findUnique({ where: { id }, select: {
+      id: true, status: true, productName: true, connectKind: true, externalItemId: true, finalUrl: true, sourceUrl: true, url: true,
+    } });
+    if (!link || !["READY", "FAILED"].includes(link.status)) return NextResponse.json({ success: false, code: "NOT_READY", error: "작성·발행 중인 소재의 사진 묘사는 수정할 수 없습니다." }, { status: 409 });
+    const claim = await prisma.brandLink.updateMany({ where: { id, status: link.status }, data: { status: "DRAFTING" } });
+    if (claim.count !== 1) return NextResponse.json({ success: false, code: "NOT_READY", error: "소재 상태가 변경되어 사진 묘사를 수정하지 않았습니다." }, { status: 409 });
+    let imageLock: BrandPostImageRepairLock | null = null;
+    try {
+      imageLock = acquireBrandPostImageRepairLock(id, { purpose: "photo-description-repair" });
+      const existing = readBrandPostPackage(id, { migrate: false });
+      if (!existing || existing.version !== "brand-post-package/v2" || existing.connectKind !== "SHOPPING") throw new Error("수정할 쇼핑 소재가 없습니다.");
+      if (existing.imageGeneration?.status === "running" || existing.imageGeneration?.recoveryState === "owner-unknown") throw Object.assign(new Error("기존 이미지 작업의 완료 여부를 확인한 뒤 사진 묘사를 수정하세요."), { code: "IMAGE_RESUME_REQUIRED" });
+      const findings = serverPhotoDescriptionFindings(existing, body.findingKeys);
+      const markdownPath = path.resolve(existing.markdownPath);
+      const relative = path.relative(getBrandPostPackageDir(id), markdownPath);
+      if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("저장 원고 경로를 확인할 수 없습니다.");
+      const originalMarkdown = fs.readFileSync(markdownPath, "utf8");
+      const planned = planPhotoDescriptionRepair(existing, originalMarkdown, findings);
+      const contextPath = path.join(getBrandPostPackageDir(id), "mcp-draft-context.json");
+      const context = fs.existsSync(contextPath) ? JSON.parse(fs.readFileSync(contextPath, "utf8")) : undefined;
+      const evaluated = revalidateSavedBrandPostText(planned.manifest, {
+        productId: id, connectKind: "SHOPPING", externalProductId: link.externalItemId || null,
+        sourceUrl: link.finalUrl || link.sourceUrl || link.url || null, productName: link.productName || "", brandLink: link.url,
+      }, context);
+      if (!isDraftEditorialQualityPassed(evaluated.contentQuality)) throw Object.assign(new Error("사진 묘사를 제외한 후보가 원고 품질 검사를 통과하지 못해 기존 원문을 보존했습니다."), { code: "QUALITY_REPAIR_REJECTED" });
+      // Revalidation may refresh metadata but must never silently change other text.
+      if (JSON.stringify(evaluated.composition.sections.map(section => [section.id, section.title, section.body])) !==
+          JSON.stringify(planned.manifest.composition.sections.map(section => [section.id, section.title, section.body]))) throw new Error("검사 과정에서 수정 범위 밖의 본문이 변경되어 후보를 저장하지 않았습니다.");
+      imageLock.assertOwner();
+      atomicWriteTextFile(markdownPath, planned.markdown);
+      try { writeBrandPostPackageManifest(evaluated); }
+      catch (error) { atomicWriteTextFile(markdownPath, originalMarkdown); throw error; }
+      return NextResponse.json({ success: true, data: packagePreview(evaluated), repair: { applied: true,
+        sectionIds: findings.map(finding => finding.sectionId), imageSha256s: findings.map(finding => finding.sha256) } });
+    } catch (error) {
+      return NextResponse.json({ success: false, code: (error as { code?: string }).code || "PHOTO_DESCRIPTION_REPAIR_REQUIRED", error: error instanceof Error ? error.message : "사진 묘사 수정 실패" }, { status: 409 });
+    } finally {
+      imageLock?.release();
+      await prisma.brandLink.updateMany({ where: { id, status: "DRAFTING" }, data: { status: link.status } });
     }
   }
   if (body.action === "revise") {
@@ -815,8 +894,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     let approvalWarning: string | null = null;
     if (body.autoApprove === true) {
       try {
-        revalidatePackageForApproval(id, link);
-        finalizedManifest = approveBrandPostPackage(id);
+        finalizedManifest = await approvePackageAfterCurrentValidation(id, link);
       } catch (error) {
         approvalWarning = error instanceof Error ? error.message : "자동 승인에 실패했습니다.";
       }

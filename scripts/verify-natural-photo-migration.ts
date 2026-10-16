@@ -37,6 +37,7 @@ async function main() {
     const initial = {
       version: "brand-post-package/v2", contractVersion: "post-composition-contract/v1", brandLinkId: id,
       connectKind: "SHOPPING", title: "바지 핏 확인", createdAt: "2026-10-07T00:00:00Z", approvedAt: "old-approval",
+      sourceSnapshot: { product: { name: "샥즈 오픈런 프로 2 미니 S821 이어폰" } },
       generationSource: "AI", heroImagePath: hero, bodyImagePaths: [body], markdownPath, markdownSha256: hash(markdownPath),
       hashtags: ["바지"], imagePolicy: "LOCKED_PRODUCT_OR_ORIGINAL", imageRequirements: { policy: "generated-required" }, composition,
       imageAssets: [
@@ -67,6 +68,9 @@ async function main() {
     assert.deepEqual(next.bodyImagePaths, []);
     assert(next.composition.sections.every(section => section.imagePaths.length === 0));
     assert.deepEqual(next.composition.sections.map(section => section.imageSource), ["seller-original", "staged-ai", "none", "staged-ai", "none", "staged-ai"]);
+    assert(next.composition.sections.filter(section => section.imageSource === "staged-ai").every(section =>
+      !/코디|핏|기장/u.test(section.promptRecipe!) && /전체 연결 구조/u.test(section.promptRecipe!)),
+    "an explicit legacy migration uses selected source product identity, not a clothing mention in the article title");
     assert.deepEqual(next.composition.sections.map(({ id, title, body }) => ({ id, title, body })), initial.composition.sections.map(({ id, title, body }) => ({ id, title, body })));
     assert.deepEqual(next.composition.renderNodes.filter(node => node.kind !== "image"), initial.composition.renderNodes.filter(node => node.kind !== "image"));
     assert.deepEqual(next.composition.renderNodes.filter(node => node.kind === "image").map(node => node.assetPath), [hero]);
@@ -95,6 +99,18 @@ async function main() {
     const photoThumbnail = structuredClone(next);
     photoThumbnail.imageAssets![0].provenance = "PHOTO_TEXT_THUMBNAIL";
     assert.equal(planWholeBrandPostImageRequests(photoThumbnail).length, 4, "a current photo thumbnail is retained");
+    const missingHero = structuredClone(photoThumbnail);
+    missingHero.heroImagePath = path.join(root, "missing-hero.png");
+    missingHero.imageAssets![0].path = missingHero.heroImagePath;
+    const missingPlan = planWholeBrandPostImageRequests(missingHero);
+    assert.equal(missingPlan[0].slotId, "hero:image:1", "a missing hero is a creation target, never an unbound replacement");
+    assert.equal(missingPlan[0].replaceAssetKey, undefined);
+    const damagedHero = structuredClone(photoThumbnail);
+    damagedHero.imageAssets![0].sha256 = "0".repeat(64);
+    assert.equal(planWholeBrandPostImageRequests(damagedHero)[0].replaceAssetKey, "0".repeat(64));
+    const ambiguousHero = structuredClone(photoThumbnail);
+    ambiguousHero.imageAssets!.push({ ...ambiguousHero.imageAssets![0] });
+    assert.throws(() => planWholeBrandPostImageRequests(ambiguousHero), /IMAGE_RESUME_REQUIRED/);
     let migrateCalls = 0;
     let generationCalls = 0;
     const deps = {
@@ -127,6 +143,14 @@ async function main() {
     assert.equal(repaired.appliedCount, 0, "a missing generation response cannot advance completion");
     assert.equal(repaired.manifest.imageGeneration?.status, "incomplete");
     assert.equal(isBrandPostImageRepairLocked(id), false);
+    const currentApproved = { ...next, approvedAt: "preserved-current-approval", composition: structuredClone(next.composition) };
+    currentApproved.composition.sections[1].promptRecipe = "기존 승인 원고의 저장된 연출 계획";
+    writeBrandPostPackageManifest(currentApproved);
+    const currentApprovedBytes = fs.readFileSync(manifestPath);
+    assert.equal(readBrandPostPackage(id, { migrate: false })?.approvedAt, "preserved-current-approval");
+    assert.equal(migrateShoppingNaturalPhotoPlan(id).changed, false);
+    assert.equal(fs.readFileSync(manifestPath).equals(currentApprovedBytes), true,
+      "a recipe producer fix never replans an approved current-v2 package, changes approval, or rewrites its manifest on read/prepare");
     console.log("PASS natural photo migration: exact backup, preserved text/link/reservation/hero, removed old body paths/captions, approval reset, lock safety, idempotence");
   } finally {
     if (previousRoot === undefined) delete process.env.DESKTOP_USER_DATA;

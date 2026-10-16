@@ -42,6 +42,13 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      # Exercise the serialized SmartEditor reader and keyboard focus guards in a
+      # real browser using offline fixtures. No Naver account or publication.
+      - name: Editor browser regression checks
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:naver-editor-body-browser
+
       - name: Lint
         run: npx eslint src scripts/verify-connect-item-detection.ts scripts/verify-connect-contract-store.ts scripts/verify-title-rules.ts scripts/verify-brand-post-package.ts scripts/verify-brandlink-product-list.ts scripts/verify-chatgpt-browser-automation.ts scripts/verify-chatgpt-browser-mode-ui.mjs scripts/verify-chatgpt-draft-handoff-ui.mjs scripts/verify-codex-draft-provider.ts scripts/verify-image-batch-progress.ts scripts/verify-section-image-repair.ts scripts/verify-writing-prompt-contract.ts scripts/verify-brand-post-quality-reinforcement.ts scripts/chatgpt-generate-image-batch.ts
 
@@ -49,6 +56,8 @@ jobs:
         run: |
           npm run test:connect-detection
           npm run test:material-regression
+          npm run test:material-performance
+          npm run test:material-stability
           npm run test:failed-material-rewrite
           npm run test:blocked-material-repair
           npm run test:operational-safety
@@ -56,6 +65,8 @@ jobs:
           npm run test:naver-session
           npm run test:connect-store
           npm run test:title-rules
+          npm run test:title-planner
+          npm run test:detail-vision
           npm run test:post-spec
           npm run test:post-composition
           npm run test:saved-text-revalidation
@@ -80,6 +91,7 @@ jobs:
           npm run test:codex-image
           npm run test:draft-reliability
           npm run test:proposal-audit
+          npm run test:product-9canvas
           npm run test:image-replan
           npm run test:shopping-natural-photos
 

@@ -56,7 +56,7 @@ async function main() {
     const call: Call = async (url, method) => {
       events.push(`${method} ${url}`);
       if (url.endsWith("/draft")) return { success: true, data: { approvedAt: "approved", imageSlots: [] } };
-      return { success: true, data: { status: "PUBLISHED", published: true, postUrl: "https://blog.naver.com/test/1234" } };
+      return { success: true, data: { status: "PUBLISHED", published: true, contentVerified: true, verificationStatus: "verified", postUrl: "https://blog.naver.com/test/1234" } };
     };
     const job = makeJob();
     await runMaterialJob(job, { call, material, save: saveMaterialJob, pause: async () => {}, checkCancelled: () => {} });
@@ -88,8 +88,8 @@ async function main() {
           submittedRevision = (body as { materialRevision?: string }).materialRevision || "";
           return { success: true, data: { status: "PUBLISHING" } };
         }
-        if (url.endsWith("/verify")) return { success: true, data: { published: true, postUrl: "https://blog.naver.com/test/healed" } };
-        return { success: true, data: { status: "PUBLISHED", published: true, postUrl: "https://blog.naver.com/test/healed" } };
+        if (url.endsWith("/verify")) return { success: true, data: { published: true, contentVerified: true, verificationStatus: "verified", postUrl: "https://blog.naver.com/test/healed" } };
+        return { success: true, data: { status: "PUBLISHED", published: true, contentVerified: true, verificationStatus: "verified", postUrl: "https://blog.naver.com/test/healed" } };
       },
       material: id => ({ ...material(id), ready: healed, revision: healed ? "b".repeat(64) : revision,
         blockers: healed ? [] : ["발행 문서 기준 원고 재검사가 필요합니다."] }),
@@ -103,7 +103,9 @@ async function main() {
     assert.equal(selfHealing.items[0].revision, revision, "the selected revision remains unchanged for review");
     assert.equal(selfHealing.items[0].errorCode, "MATERIAL_NOT_READY");
 
-    for (const unready of [null, { approvedAt: null }, { approvedAt: "yes", imageSlots: [{ missing: 1, generationMissing: 0 }] }, { approvedAt: "yes", approval: { canApprove: false } }]) {
+    for (const unready of [null, { approvedAt: null }, { approvedAt: "yes", imageSlots: [{ missing: 1, generationMissing: 0 }] },
+      { approvedAt: "yes", approval: { canApprove: false } },
+      { approvedAt: "yes", imageGeneration: { status: "incomplete", recoveryState: "owner-unknown" }, imageSlots: [] }]) {
       let submitted = 0;
       await assert.rejects(runAutomaticDraftWorkflow("product-0", { publishMode: "now" }, { pause: async () => {}, call: async (url, method) => {
         if (method === "POST") submitted++;
@@ -145,6 +147,34 @@ async function main() {
     assert.equal(unverified.items[0].status, "outcome_unknown", "DB terminal status alone is not verified publication");
     assert.equal(unverified.items[1].status, "interrupted");
 
+    for (const verificationStatus of ["partial", "mismatch", "unverified", undefined] as const) {
+      let sends = 0;
+      await assert.rejects(runAutomaticDraftWorkflow("known-published", { publishMode: "now" }, { pause: async () => {}, call: async (url, method, body) => {
+        if (method === "POST") sends++;
+        if (url.endsWith("/verify")) return { success: true, data: { published: true, contentVerified: false, verificationStatus,
+          postUrl: "https://blog.naver.com/test/known-published" } };
+        return call(url, method, body);
+      } }), (error: unknown) => {
+        const result = error as { code?: string; causeCode?: string; observedPublished?: boolean; postUrl?: string };
+        return result.code === "OUTCOME_UNKNOWN" && result.causeCode === "PUBLISHED_CONTENT_UNVERIFIED" && result.observedPublished === true &&
+          result.postUrl === "https://blog.naver.com/test/known-published";
+      });
+      assert.equal(sends, 1, "known publication with incomplete content proof must not resubmit");
+    }
+
+    let scheduledSends = 0;
+    const receipt = await runAutomaticDraftWorkflow("schedule-receipt", { publishMode: "schedule", scheduledDate: "2026-10-14T12:00:00+09:00" }, {
+      pause: async () => {}, call: async (url, method, body) => {
+        if (method === "POST") scheduledSends++;
+        if (url.endsWith("/verify")) return { success: true, data: { scheduled: true,
+          reservationVerification: { receiptAccepted: true, liveListChecked: false, status: "receipt-accepted-live-list-unverified" } } };
+        if (url.endsWith("/draft")) return call(url, method, body);
+        return { success: true, data: { status: "SCHEDULED" } };
+      },
+    });
+    assert.equal(scheduledSends, 1); assert.equal(receipt?.reservationVerification?.liveListChecked, false,
+      "a schedule submission receipt is returned without claiming a live list or future publication check");
+
     for (const unexpected of ["SCHEDULED", "READY", "FAILED", undefined]) {
       const mismatch = makeJob(2);
       let submissions = 0;
@@ -183,6 +213,47 @@ async function main() {
     assert(!travelEvents.includes("revise"), "image-only failure must preserve manuscript");
     assert(travelEvents.indexOf("recheck") < travelEvents.indexOf("generate_missing"));
     assert(travelEvents.indexOf("generate_missing") < travelEvents.indexOf("approve"));
+
+    for (const code of ["SOURCE_REVIEW_INCOMPLETE", "IMAGE_OUTPUT_AMBIGUOUS", "IMAGE_RESUME_REQUIRED"] as const) {
+      const actions: string[] = [];
+      await assert.rejects(runMaterialPreparation(`uncertain-result-${code}`, { pause: async () => {}, call: async (url, method, body) => {
+        const action = (body as { action?: string } | undefined)?.action || method;
+        actions.push(action);
+        if (url.endsWith("/images")) return { success: true, code, message: "Existing image outcome needs confirmation" };
+        return { success: true, data: { connectKind: "TRAVEL", approvedAt: null,
+          imageGeneration: { status: "incomplete" }, imageSlots: [{ sectionId: "scene", missing: 1, generationMissing: 1 }],
+          contentQuality: { signals: [{ key: "composition-quality", status: "fail" }] } } };
+      } }), (error: unknown) => (error as { code?: string }).code === code);
+      assert.equal(actions.filter(action => action === "generate_missing").length, 1);
+      assert(!actions.includes("prepare_context") && !actions.includes("replan_sources") && !actions.includes("approve") && !actions.includes("revise"),
+        "a partial success with an unresolved code cannot buy a recovery replay or approval even without errors[]");
+    }
+
+    for (const responseMode of ["rejected-response", "partial-response", "errors-only"] as const) {
+      const actions: string[] = [];
+      let backups = 0;
+      await assert.rejects(runMaterialPreparation(`unreviewed-seller-${responseMode}`, { pause: async () => {}, call: async (url, method, body) => {
+        const action = (body as { action?: string } | undefined)?.action || method;
+        actions.push(action);
+        if (url.endsWith("/images")) {
+          assert.equal(action, "bind_sources", "an unresolved seller original is inspected before any generation");
+          const errors = ["SOURCE_REVIEW_INCOMPLETE: Eligible seller proposal has no final pixel verdict."];
+          if (responseMode === "rejected-response") throw Object.assign(new Error(errors[0]), {
+            code: "SOURCE_REVIEW_INCOMPLETE", errors, httpStatus: 422,
+          });
+          return { success: true, ...(responseMode === "partial-response" ? { code: "SOURCE_REVIEW_INCOMPLETE" } : { errors }) };
+        }
+        return { success: true, data: { connectKind: "SHOPPING", approvedAt: null,
+          composition: { sections: [{ id: "seller-original", imageSource: "seller-original" }] },
+          imageGeneration: { status: "incomplete" }, imageSlots: [{ sectionId: "seller-original", missing: 1, generationMissing: 0 }],
+          contentQuality: workflowContentQuality(true) } };
+      } }, { incrementalOnly: true, beforeRepair: async () => { backups++; } }), (error: unknown) =>
+        (error as { code?: string }).code === "SOURCE_REVIEW_INCOMPLETE");
+      assert.equal(backups, 1, "incremental repair snapshots before inspection metadata changes");
+      assert.equal(actions.filter(action => action === "bind_sources").length, 1);
+      assert(!actions.some(action => ["prepare_context", "generate_missing", "regenerate", "replan_sources", "approve", "revise"].includes(action)),
+        "unreviewed source candidates must not be relabeled as a shortage, recollected, generated, rewritten or approved");
+    }
 
     let repairedText = false, repairedImages = false, sequentialRevisions = 0, sequentialImageRepairs = 0, sequentialApprovals = 0;
     const sequentialCall: Call = async (url, method, body) => {
@@ -262,7 +333,7 @@ async function main() {
 
     let imageWaitPolls = 0;
     const waiting = makeJob(1, "prepare");
-    await runMaterialJob(waiting, { call: async (_url, _method, body) => ({ success: true, data: {
+    await runMaterialJob(waiting, { call: async () => ({ success: true, data: {
       imageGeneration: { status: imageWaitPolls < 25 ? "running" : "idle" },
       imageSlots: [], approvedAt: "yes",
     } }), material, save: saveMaterialJob, pause: async () => { imageWaitPolls++; }, checkCancelled: () => {} });
@@ -415,12 +486,71 @@ async function main() {
     assert.equal(postCount, 1);
 
     const previousPort = process.env.APP_PORT;
-    const server = http.createServer((_request, response) => {
+    const server = http.createServer((request, response) => {
+      if (["/source-conflict", "/source-incomplete", "/final-source-conflict"].includes(request.url || "")) {
+        response.writeHead(request.url === "/final-source-conflict" ? 423 : 200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ success: request.url !== "/final-source-conflict",
+          code: request.url === "/source-incomplete" ? "SOURCE_REVIEW_INCOMPLETE" : "SOURCE_REVIEW_CONFLICT",
+          ...(request.url === "/final-source-conflict" ? { error: "fixture review conflict" } : {}),
+          data: { imageSlots: [] } }));
+        return;
+      }
       response.writeHead(422, { "content-type": "application/json" });
+      if (request.url === "/cause" || request.url === "/unsafe-cause") {
+        response.end(JSON.stringify({ success: false, code: "SOURCE_REVIEW_FAILED",
+          causeCode: request.url === "/cause" ? "SOURCE_REVIEW_CONFLICT" : "https://private.invalid/?token=secret",
+          error: "fixture source response failed", raw: "private model payload", cause: { payload: "private chain" } }));
+        return;
+      }
       response.end(JSON.stringify({ success: false, errors: ["shopping-hook: segmentation failed"] }));
     });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-    try { process.env.APP_PORT = String((server.address() as { port: number }).port); await assert.rejects(localScheduleCall("/draft/images", "POST", {}), /segmentation failed/); }
+    try {
+      process.env.APP_PORT = String((server.address() as { port: number }).port);
+      await assert.rejects(localScheduleCall("/draft/images", "POST", {}), /segmentation failed/);
+      for (const url of ["/cause", "/unsafe-cause"]) await assert.rejects(localScheduleCall(url, "POST", {}), (error: unknown) => {
+        const failure = error as Error & { code?: string; causeCode?: string; httpStatus?: number; raw?: unknown };
+        assert.equal(failure.code, "SOURCE_REVIEW_FAILED");
+        assert.equal(failure.causeCode, url === "/cause" ? "SOURCE_REVIEW_CONFLICT" : undefined);
+        assert.equal(failure.httpStatus, 422);
+        assert.equal(failure.raw, undefined); assert.equal(failure.cause, undefined);
+        return true;
+      });
+      for (const code of ["SOURCE_REVIEW_CONFLICT", "SOURCE_REVIEW_INCOMPLETE"]) {
+        const actions: string[] = [];
+        await assert.rejects(runMaterialPreparation(`http200-${code}`, { pause: async () => {}, call: async (_url, method, body) => {
+          const action = (body as { action?: string })?.action || method; actions.push(action);
+          if (action === "bind_sources") return localScheduleCall(code === "SOURCE_REVIEW_CONFLICT" ? "/source-conflict" : "/source-incomplete", "POST", {});
+          return { success: true, data: { connectKind: "SHOPPING", approvedAt: null,
+            composition: { sections: [{ id: "original", imageSource: "seller-original" }] },
+            imageSlots: [{ sectionId: "original", missing: 1, generationMissing: 0 }], contentQuality: { signals: [] } } };
+        } }), (error: unknown) => (error as { code?: string }).code === code);
+        assert.equal(actions.filter(action => action === "bind_sources").length, 1);
+        assert(!actions.some(action => /generate|approve|replan|prepare_context|revise|repair_photo_description/u.test(action)),
+          "HTTP200 success with a contradictory/incomplete top code cannot authorize generation, approval, replan or text edits");
+      }
+      const finalActions: string[] = [];
+      let finalRejected = false;
+      const originalFailure = Object.assign(new Error("body seller card"), { code: "PUBLISH_IMAGE_AUDIT_FAILED", httpStatus: 422,
+        errors: ["SEMANTIC_REJECTION: body card"], imageAuditFailures: [{ code: "SEMANTIC_REJECTION", sectionId: "shopping-section-exact123", rejectionScope: "product" }] });
+      await assert.rejects(runMaterialPreparation("http423-final-conflict", { pause: async () => {}, call: async (_url, method, body) => {
+        const action = (body as { action?: string })?.action || method; finalActions.push(action);
+        if (action === "approve") { finalRejected = true; throw originalFailure; }
+        if (action === "bind_sources") return localScheduleCall("/final-source-conflict", "POST", {});
+        return { success: true, data: { connectKind: "SHOPPING", approvedAt: null,
+          composition: { sections: [{ id: "original", imageSource: "seller-original" }] },
+          imageSlots: [{ sectionId: "original", missing: finalRejected ? 1 : 0, generationMissing: 0 }], contentQuality: { signals: [] } } };
+      } }), (error: unknown) => {
+        const failure = error as Error & { code?: string; causeCode?: string; httpStatus?: number; imageAuditFailures?: unknown };
+        assert.equal(failure.code, "PUBLISH_IMAGE_AUDIT_FAILED"); assert.equal(failure.causeCode, "SOURCE_REVIEW_CONFLICT");
+        assert.equal(failure.httpStatus, 422); assert.equal(failure.imageAuditFailures, originalFailure.imageAuditFailures);
+        return true;
+      });
+      assert.equal(finalActions.filter(action => action === "approve").length, 1, "the original rejected approval is never repeated");
+      assert.equal(finalActions.filter(action => action === "bind_sources").length, 1);
+      assert(!finalActions.some(action => /generate|replan|prepare_context|revise|repair_photo_description/u.test(action)),
+        "a final replacement conflict retains primary/cause diagnostics and stops without a replan or generation");
+    }
     finally { if (previousPort === undefined) delete process.env.APP_PORT; else process.env.APP_PORT = previousPort; await new Promise<void>(resolve => server.close(() => resolve())); }
 
     let getRequests = 0, postRequests = 0, invalidRequests = 0;

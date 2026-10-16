@@ -4,14 +4,18 @@ import crypto from "node:crypto";
 import { getBrandPostPackageDir } from "../../src/lib/brand-post-package";
 import { atomicWriteTextFile } from "../../src/lib/atomic-text-file";
 
-/** Product 9Canvas changes category, option and physical-scale recovery inputs. */
-export const IMAGE_RECOVERY_POLICY_VERSION = 3;
+/** Recover missing product references and rejected scenes from fresh seller evidence. */
+// Policy 10 uses explicit incomplete-review outcomes, rebinds proven source SHA
+// values to current paths and shares the prewriting scene plan. Earlier exhausted
+// inputs get one bounded pass through this changed algorithm; uncertain requests
+// still block upstream and timestamps cannot renew a consumed budget.
+export const IMAGE_RECOVERY_POLICY_VERSION = 10;
 
 export type ImageRecoveryStage = "refresh-source" | "repair-rejected" | "replan-images" | "replan-after-rejection";
 type Entry = { stage: ImageRecoveryStage; input: string; output?: string; status: "running" | "complete" | "failed"; at: string; reason?: string; externalFailure?: boolean };
 // IMAGE_GENERATION_REQUIRED is what a source-only pass reports for an AI-scene slot; the next
 // generation or replan pass can still fill it, so it does not end recovery.
-const recoverable = new Set(["IMAGE_SOURCE_BINDING_REQUIRED", "PRODUCT_SOURCE_REQUIRED", "PRODUCT_SOURCE_DOWNLOAD_FAILED", "PRODUCT_CUTOUT_REQUIRED", "IMAGE_GENERATION_REQUIRED"]);
+const recoverable = new Set(["IMAGE_SOURCE_BINDING_REQUIRED", "PRODUCT_SOURCE_REQUIRED", "PRODUCT_SOURCE_DOWNLOAD_FAILED", "PRODUCT_CUTOUT_REQUIRED", "IMAGE_GENERATION_REQUIRED", "PRODUCT_REFERENCE_REQUIRED", "REFERENCE_SCENE_FIDELITY_FAILED"]);
 export const isRecoverableImageEvidenceFailure = (code?: string) => recoverable.has(code || "");
 export function isRecoverableImageEvidenceResult(value: { code?: string; errors?: string[]; error?: string } | null | undefined): boolean {
   if (!isRecoverableImageEvidenceFailure(value?.code)) return false;

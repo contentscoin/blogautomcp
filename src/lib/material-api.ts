@@ -5,11 +5,15 @@ import { requireAdminApiKey } from "./api-auth";
 import { requireNoPendingDesktopUpdate } from "./update-guard";
 import { beginAutomaticPublishing } from "./desktop-activity";
 import { getMaterial, validateMaterialSelection } from "./material-library";
+import { getMaterialSummary, observeStrictMaterialSummary, type MaterialSummary } from "./material-summary";
+import { applyMaterialPreparationWorkflowGuard } from "./material-preparation-diagnostics";
 import { acquireMaterialJobLock, listMaterialJobs, materialJobErrorMessage, materialJobFailureCodes, readMaterialJob, saveMaterialJob, type MaterialJob } from "./material-job-store";
 import { runMaterialJob } from "./material-job-runner";
 import { addDaysToYmd, ymdInTimeZone } from "./bulk-schedule-plan";
-import { listFailedMaterialCandidates, normalizeMaterialConnectKind } from "./material-failed-candidates";
-import { listMaterialRepairCandidates } from "./material-repair-candidates";
+import { listFailedMaterialCandidates, normalizeMaterialConnectKind, selectFailedMaterialCandidates } from "./material-failed-candidates";
+import { listMaterialRepairCandidates, selectMaterialRepairCandidates } from "./material-repair-candidates";
+import { readDraftProgress } from "./draft-progress";
+import { readPublishAttempt } from "./publish-attempt";
 
 type MaterialStatus = "PREPARING" | "BLOCKED" | "READY" | "PUBLISHING" | "SCHEDULED" | "PUBLISHED" | "OUTCOME_UNKNOWN";
 type MaterialProduct = { id: string; productName: string | null; status: string; connectKind: string };
@@ -28,19 +32,22 @@ function materialStatus(productStatus: string, ready: boolean, imageStatus?: str
   return ready ? "READY" : "BLOCKED";
 }
 
-function readMaterialView(product: MaterialProduct): Record<string, unknown> | null {
+function readMaterialView(product: MaterialProduct, material = getMaterial): Record<string, unknown> | null {
   try {
-    const saved = getMaterial(product.id);
+    const saved = material(product.id);
     if (!saved) return null;
     const statusAllowsPublish = ["READY", "FAILED"].includes(product.status);
     const ready = saved.ready && statusAllowsPublish;
     const status = materialStatus(product.status, ready, saved.imageGeneration?.status);
     return { ...saved, productName: product.productName, status, materialStatus: status, productStatus: product.status,
+      preparationDiagnostics: applyMaterialPreparationWorkflowGuard(saved.preparationDiagnostics, product.status, saved.imageGeneration?.status),
       ready, blockers: statusAllowsPublish ? saved.blockers : [...saved.blockers, `현재 상태: ${product.status}`] };
   } catch (error) {
     const status = materialStatus(product.status, false);
     return { productId: product.id, productName: product.productName, title: product.productName || "소재 읽기 오류", connectKind: product.connectKind as "SHOPPING" | "TRAVEL",
-      status, materialStatus: status, productStatus: product.status, ready: false, blockers: [(error as Error).message], revision: "", createdAt: "", approvedAt: null, score: null, imageCount: 0 };
+      status, materialStatus: status, productStatus: product.status, ready: false,
+      preparationDiagnostics: applyMaterialPreparationWorkflowGuard(undefined, product.status),
+      blockers: [(error as Error).message], revision: "", createdAt: "", approvedAt: null, score: null, imageCount: 0 };
   }
 }
 
@@ -57,7 +64,10 @@ async function materialJobView(job: MaterialJob): Promise<Record<string, unknown
     return material ? [material] : [];
   });
   const workflowPending = ["running", "queued"].includes(job.status) || materials.some(material => material.materialStatus === "PREPARING");
-  return { ...job, materials, workflowPending, acceptedCount: job.items.length,
+  return { ...job, materials, readinessObservedAt: new Date().toISOString(), workflowPending, acceptedCount: job.items.length,
+    // These describe the current saved material without rewriting job history.
+    currentReadyCount: materials.filter(material => material.ready === true && material.materialStatus === "READY").length,
+    currentBlockedCount: materials.filter(material => material.materialStatus === "BLOCKED").length,
     readyCount: job.items.filter(item => item.status === "ready").length,
     failedCount: job.items.filter(item => item.status === "failed").length,
     interruptedCount: job.items.filter(item => item.status === "interrupted").length };
@@ -66,6 +76,66 @@ async function materialJobView(job: MaterialJob): Promise<Record<string, unknown
 export async function materialsGet(request: NextRequest) {
   const auth = requireAdminApiKey(request); if (auth) return auth;
   try {
+    const productIdsParam = request.nextUrl.searchParams.get("productIds");
+    if (productIdsParam !== null) {
+      // Explicit selection checks just these materials. A UI observation token
+      // is never accepted by the strict publication endpoint as a revision.
+      const productIds = [...new Set(productIdsParam.split(","))];
+      if (!productIds.length || productIds.length > 50 || productIds.some(id => !/^[a-zA-Z0-9_-]{8,80}$/u.test(id)))
+        throw new Error("검사할 소재를 1~50개 선택하세요.");
+      const products = await prisma.brandLink.findMany({ where: { id: { in: productIds } },
+        select: { id: true, productName: true, status: true, connectKind: true } });
+      const materials = [];
+      for (const product of products) {
+        const before = await getMaterialSummary(product.id);
+        const strictMaterial = getMaterial(product.id);
+        const current = readMaterialView(product, () => strictMaterial);
+        const after = await getMaterialSummary(product.id);
+        const stable = Boolean(before && after && before.revision === after.revision);
+        const observed = Boolean(stable && strictMaterial && observeStrictMaterialSummary(product.id, after!.revision, strictMaterial));
+        if (current) materials.push({ ...current, summaryRevision: observed ? after!.revision : null });
+      }
+      return NextResponse.json({ success: true, data: { materials, readinessObservedAt: new Date().toISOString(), verificationMode: "strict" } });
+    }
+    if (request.nextUrl.searchParams.get("summary") === "1" || request.nextUrl.searchParams.get("view") === "summary") {
+      const kind = normalizeMaterialConnectKind(request.nextUrl.searchParams.get("connectKind"));
+      const products = await prisma.brandLink.findMany({ orderBy: { createdAt: "desc" }, ...(kind ? { where: { connectKind: kind } } : {}),
+        select: { id: true, productName: true, status: true, connectKind: true, postUrl: true, publishedAt: true, scheduledPublishAt: true, errorMessage: true } });
+      const observed = new Map<string, MaterialSummary | null>();
+      const observationErrors = new Map<string, unknown>();
+      // Limit metadata fan-out and yield throughout a cold first load; no
+      // synchronous pixel audit is scheduled by this automatic UI endpoint.
+      for (let offset = 0; offset < products.length; offset += 8) {
+        await Promise.all(products.slice(offset, offset + 8).map(async product => {
+          try { observed.set(product.id, await getMaterialSummary(product.id)); }
+          catch (error) { observed.set(product.id, null); observationErrors.set(product.id, error); }
+        }));
+      }
+      const material = (id: string) => {
+        if (observationErrors.has(id)) throw observationErrors.get(id);
+        return observed.get(id) || null;
+      };
+      const jobs = listMaterialJobs();
+      const materials = products.flatMap(product => {
+        const value = readMaterialView(product, material);
+        return value ? [value] : [];
+      });
+      const failedCandidates = selectFailedMaterialCandidates(products, jobs, { material, progress: readDraftProgress }, kind);
+      const repairCandidates = selectMaterialRepairCandidates(products, jobs,
+        { material, savedDraft: id => observed.has(id) && observed.get(id) !== null, publicationAttempt: readPublishAttempt }, kind);
+      return NextResponse.json({ success: true, data: { materials, jobs: jobs.slice(0, 50), failedCandidates, failedCandidateCount: failedCandidates.length,
+        repairCandidates, repairCandidateCount: repairCandidates.length, readinessObservedAt: new Date().toISOString(), verificationMode: "saved-summary",
+        requiresFullVerification: true } });
+    }
+    // Share expensive file verification only within this one GET snapshot.
+    // Every later GET and all mutation/publication paths read fresh bytes.
+    const cache = new Map<string, { value: ReturnType<typeof getMaterial> } | { error: unknown }>();
+    const material = (id: string): ReturnType<typeof getMaterial> => {
+      const cached = cache.get(id);
+      if (cached) { if ("error" in cached) throw cached.error; return cached.value; }
+      try { const value = getMaterial(id); cache.set(id, { value }); return value; }
+      catch (error) { cache.set(id, { error }); throw error; }
+    };
     const jobId = request.nextUrl.searchParams.get("jobId");
     if (jobId) {
       const job = readMaterialJob(jobId);
@@ -76,19 +146,32 @@ export async function materialsGet(request: NextRequest) {
       const job = listMaterialJobs().find(item => item.sourceJobId === sourceJobId);
       return NextResponse.json(job ? { success: true, data: await materialJobView(job) } : { success: false, error: "요청에 연결된 소재 작업이 없습니다." }, { status: job ? 200 : 404 });
     }
-    if (request.nextUrl.searchParams.get("jobsOnly") === "1") return NextResponse.json({ success: true, data: { jobs: listMaterialJobs().slice(0, 50) } });
+    if (request.nextUrl.searchParams.get("jobsOnly") === "1") {
+      const jobs = listMaterialJobs().slice(0, 50);
+      const productIds = [...new Set(jobs.flatMap(job => job.items.map(item => item.productId)))];
+      const products = productIds.length ? await prisma.brandLink.findMany({
+        where: { id: { in: productIds } },
+        select: { id: true, productName: true, status: true, connectKind: true },
+      }) : [];
+      const materials = products.flatMap(product => {
+        const current = readMaterialView(product, material);
+        return current ? [{ productId: current.productId, ready: current.ready, status: current.materialStatus, blockers: current.blockers,
+          preparationDiagnostics: current.preparationDiagnostics }] : [];
+      });
+      return NextResponse.json({ success: true, data: { jobs, materials, readinessObservedAt: new Date().toISOString() } });
+    }
     const kind = request.nextUrl.searchParams.get("connectKind")?.toUpperCase();
     const products = await prisma.brandLink.findMany({ orderBy: { createdAt: "desc" },
       ...(kind === "SHOPPING" || kind === "TRAVEL" ? { where: { connectKind: kind } } : {}),
       select: { id: true, productName: true, status: true, connectKind: true },
     });
     const materials = products.flatMap(product => {
-      const material = readMaterialView(product);
-      return material ? [material] : [];
+      const view = readMaterialView(product, material);
+      return view ? [view] : [];
     });
-    const failedCandidates = await listFailedMaterialCandidates(kind === "SHOPPING" || kind === "TRAVEL" ? kind : undefined);
-    const repairCandidates = await listMaterialRepairCandidates(kind === "SHOPPING" || kind === "TRAVEL" ? kind : undefined);
-    return NextResponse.json({ success: true, data: { materials, jobs: listMaterialJobs().slice(0, 50), failedCandidates, failedCandidateCount: failedCandidates.length,
+    const failedCandidates = await listFailedMaterialCandidates(kind === "SHOPPING" || kind === "TRAVEL" ? kind : undefined, undefined, material);
+    const repairCandidates = await listMaterialRepairCandidates(kind === "SHOPPING" || kind === "TRAVEL" ? kind : undefined, undefined, material);
+    return NextResponse.json({ success: true, data: { materials, readinessObservedAt: new Date().toISOString(), jobs: listMaterialJobs().slice(0, 50), failedCandidates, failedCandidateCount: failedCandidates.length,
       repairCandidates, repairCandidateCount: repairCandidates.length } });
   } catch (error) { return NextResponse.json({ success: false, error: (error as Error).message }, { status: 400 }); }
 }
@@ -168,6 +251,11 @@ export async function materialsPost(request: NextRequest, kind: "prepare" | "pub
   let finish: (() => void) | undefined;
   try {
     const body = override ?? await request.json();
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("소재 요청은 JSON 객체여야 합니다.");
+    if (kind === "prepare" && ["publishMode", "materials", "scheduledAt", "confirmed"].some(key => body[key] !== undefined))
+      throw new Error("소재 준비 요청에는 발행·예약 입력을 함께 보낼 수 없습니다.");
+    if (body.sourceJobId !== undefined && (typeof body.sourceJobId !== "string" || !body.sourceJobId.trim() || body.sourceJobId.length > 160))
+      throw new Error("요청 ID는 1~160자 문자열이어야 합니다.");
     const items: MaterialJob["items"] = kind === "publish"
       ? validateMaterialSelection(body.materials).map(item => ({ ...item, status: "queued", stage: "선택 소재 확인 대기" }))
       : (() => {
@@ -189,7 +277,7 @@ export async function materialsPost(request: NextRequest, kind: "prepare" | "pub
         items.forEach((item, index) => { item.scheduledDate = addDaysToYmd(date, index * interval); });
       }
     }
-    const sourceJobId = typeof body.sourceJobId === "string" ? body.sourceJobId.slice(0, 160) : undefined;
+    const sourceJobId = typeof body.sourceJobId === "string" ? body.sourceJobId : undefined;
     const requestHash = crypto.createHash("sha256").update(JSON.stringify({ kind, items, publishMode: body.publishMode })).digest("hex");
     if (sourceJobId) {
       const existing = listMaterialJobs().find(job => job.sourceJobId === sourceJobId);
@@ -205,6 +293,16 @@ export async function materialsPost(request: NextRequest, kind: "prepare" | "pub
       startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), items,
       ...(kind === "publish" ? { publishMode: body.publishMode } : {}) };
     release = acquireMaterialJobLock(job.jobId);
+    // Another request can persist this source identity after the optimistic read.
+    // Inspect again under the same PC material lock before creating any work.
+    if (sourceJobId) {
+      const lockedExisting = listMaterialJobs().find(saved => saved.sourceJobId === sourceJobId);
+      if (lockedExisting) {
+        if (lockedExisting.requestHash !== requestHash) throw new Error("같은 요청 ID에 다른 소재 선택을 보낼 수 없습니다.");
+        release(); release = undefined;
+        return NextResponse.json({ success: true, data: await materialJobView(lockedExisting) });
+      }
+    }
     finish = beginAutomaticPublishing("automatic-post");
     if (await prisma.brandLink.count({ where: { status: { in: ["PUBLISHING", "DRAFTING"] } } })) throw new Error("현재 실행 중인 작업이 있습니다. 완료 후 실행하세요.");
     for (const item of items) {

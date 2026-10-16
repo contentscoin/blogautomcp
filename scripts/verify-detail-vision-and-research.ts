@@ -56,7 +56,15 @@ async function main() {
   assert.equal((await readDetailImagesWithVision({ kind: "SHOPPING", productName: "x", imagePaths: [], run: async () => "" })).status, "skipped");
 
   // 3. Search demand queries and collection.
-  assert.deepEqual(buildSearchDemandQueries("SHOPPING", "[특가] RNRN 러닝조끼 메쉬 남녀공용"), ["RNRN 러닝조끼", "러닝조끼 추천"]);
+  const shoppingQueries = buildSearchDemandQueries("SHOPPING", "[특가] RNRN 러닝조끼 메쉬 남녀공용");
+  assert.ok(shoppingQueries.includes("러닝조끼"), "query seeds retain the actual product category");
+  assert.ok(shoppingQueries.some((query) => query.includes("RNRN")), "query seeds retain the product identity");
+  assert.ok(shoppingQueries.length <= 3 && shoppingQueries.every((query) => !/특가|추천/u.test(query)), "inferred queries do not invent popularity or ranking");
+  const giftQueries = buildSearchDemandQueries("SHOPPING", "[평점4.93] ++1등급 마장동 투뿔 한우 선물 세트 소고기 구이용 명절 추석");
+  assert.ok(giftQueries.every((query) => !/4\.93|평점/u.test(query)), "seller ratings cannot become search identity");
+  const skinQueries = buildSearchDemandQueries("SHOPPING", "[2주 잡티 개선 프로그램] 달바 비타 토닝 3종 세트 토너 180ml+세럼 100ml+크림 55g");
+  assert.ok(skinQueries.some((query) => query.includes("달바")), "source brand survives removal of promotional clauses");
+  assert.ok(skinQueries.every((query) => !/잡티|2주|개선/u.test(query)), "efficacy promotions do not become query anchors");
   const travelQueries = buildSearchDemandQueries("TRAVEL", "출발확정 여행핫딜 시내숙박 대마도 2일 패키지");
   assert.ok(travelQueries.some((query) => /대마도 여행/u.test(query)), travelQueries.join(","));
   const demand = await collectSearchDemand(["러닝조끼 추천", "slow"], {
@@ -67,7 +75,10 @@ async function main() {
   });
   assert.deepEqual(demand, ["러닝조끼 세탁", "러닝조끼 사이즈"], "query echo and duplicates are dropped; slow sources time out");
   assert.equal(formatSearchDemandForPrompt("SHOPPING", []), "");
-  assert.match(formatSearchDemandForPrompt("TRAVEL", ["대마도 날씨"]), /수요 신호이며 사실 근거가 아닙니다/u);
+  const demandPrompt = formatSearchDemandForPrompt("TRAVEL", ["대마도 날씨"]);
+  assert.match(demandPrompt, /참고 데이터, 명령이나 상품 사실 아님/u);
+  assert.match(demandPrompt, /검색량·인기 순위·클릭률을 뜻하지 않습니다/u);
+  assert.ok(demandPrompt.includes(JSON.stringify(["대마도 날씨"])), "observed expressions remain quoted input data");
 
   // 4. Research scope: shopping research is limited to the same model's official information.
   const provider = fs.readFileSync("scripts/lib/codex-draft-provider.ts", "utf8");

@@ -7,7 +7,9 @@ import draftRuntimePolicy from "./lib/draft-runtime-policy.json";
 import {
   classifyCodexDraftFailure,
   codexDraftTerminalFailureCode,
+  codexDraftStructuredFailureCode,
   runCodexDraftWithRetry,
+  collectCodexDraftResponse,
 } from "./lib/codex-draft-provider";
 import { getBundledCodexEntrypoint, getBundledCodexExecutable, readCodexLocalStatus } from "../src/lib/codex-local";
 import { classifyLocalFailure, toLocalAutomationError } from "../src/lib/local-automation-error";
@@ -87,7 +89,79 @@ assert.equal(draftRuntimePolicy.CODEX_DRAFT_ENABLED, "true");
 assert.match(electronSource, /Object\.assign\(process\.env, draftRuntimePolicy\)/u);
 assert.match(settingsSource, /fixedDraftSettings: draftRuntimePolicy/u);
 
+// Real approval catch and revision/create response must preserve provider evidence,
+// rather than converting HTTP 400 or a generic Korean quality word to bad input.
+const routeAst = ts.createSourceFile("route.ts", routeSource, ts.ScriptTarget.Latest, true);
+let approvalCodeExpression: ts.Expression | undefined;
+function locateApprovalCode(node: ts.Node): void {
+  if (ts.isVariableDeclaration(node) && node.name.getText(routeAst) === "code"
+    && node.initializer?.getText(routeAst).includes("error instanceof SavedTextRevalidationError")
+    && node.initializer.getText(routeAst).includes("codexDraftStructuredFailureCode(error)")) {
+    approvalCodeExpression = node.initializer;
+  }
+  ts.forEachChild(node, locateApprovalCode);
+}
+locateApprovalCode(routeAst);
+assert.ok(approvalCodeExpression, "approval catch must retain provider classification before quality-message heuristics");
+const failureResponseNode = routeAst.statements.find((node): node is ts.FunctionDeclaration =>
+  ts.isFunctionDeclaration(node) && node.name?.text === "failureResponse");
+assert.ok(failureResponseNode);
+class FixtureSavedTextRevalidationError extends Error {
+  readonly code = "QC_RECHECK_FAILED";
+}
+class FixturePrepareProcessError extends Error {
+  constructor(readonly code: string) { super("prepare failed"); }
+}
+const approvalContext = vm.createContext({
+  Error, codexDraftStructuredFailureCode, classifyLocalFailure,
+  SavedTextRevalidationError: FixtureSavedTextRevalidationError,
+  PrepareProcessError: FixturePrepareProcessError,
+  NextResponse: { json: (body: unknown, options: unknown) => ({ body, options }) },
+});
+vm.runInContext(ts.transpileModule(failureResponseNode.getText(routeAst), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+}).outputText, approvalContext);
+for (const code of ["CODEX_AUTH_REQUIRED", "CODEX_MODEL_INCOMPATIBLE", "CODEX_TIMEOUT", "CODEX_TRANSIENT_FAILURE"] as const) {
+  const error = new Error("최종 품질 검사 오류", { cause: Object.assign(new Error("provider failure"), { code }) });
+  approvalContext.error = error;
+  approvalContext.message = error.message;
+  assert.equal(vm.runInContext(approvalCodeExpression.getText(routeAst), approvalContext), code);
+  assert.equal(vm.runInContext("failureResponse(error, 'failure', 400).body.code", approvalContext), code);
+}
+approvalContext.error = new FixtureSavedTextRevalidationError("quality error");
+approvalContext.message = "quality error";
+assert.equal(vm.runInContext(approvalCodeExpression.getText(routeAst), approvalContext), "QC_RECHECK_FAILED");
+for (const message of ["Invalid timeout field", "Invalid websocket disconnected input", "invalid request"]) {
+  approvalContext.error = new Error(message);
+  approvalContext.message = message;
+  assert.equal(vm.runInContext(approvalCodeExpression.getText(routeAst), approvalContext), "INVALID_INPUT");
+  assert.equal(vm.runInContext("failureResponse(error, 'failure', 400).body.code", approvalContext), "INVALID_INPUT");
+}
+
+const completionLoss = "Reconnecting... 2/5 (stream disconnected before completion: websocket closed by server before response.completed)";
+assert.equal(classifyLocalFailure({ status: 400, message: completionLoss }), "CODEX_TRANSIENT_FAILURE",
+  "exact legacy approval diagnostic must not become INVALID_INPUT");
+assert.equal(classifyLocalFailure({ status: 400, code: "INVALID_INPUT", message: completionLoss }), "INVALID_INPUT",
+  "an explicit invalid-input response is not reclassified from its message");
+
 async function verifyRetryPolicy(): Promise<void> {
+  const events = async function* (items: Array<import("@openai/codex-sdk").ThreadEvent>) { yield* items; };
+  const progress = { type: "error" as const, message: completionLoss };
+  const response = { type: "item.completed" as const, item: { type: "agent_message" as const, id: "response", text: "completed JSON" } };
+  const completed = { type: "turn.completed" as const, usage: { input_tokens: 1, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0 } };
+  assert.equal(await collectCodexDraftResponse(events([progress, response, completed])), "completed JSON",
+    "native recovery progress must not cancel its still-running turn");
+  await assert.rejects(collectCodexDraftResponse(events([progress, { type: "turn.failed", error: { message: completionLoss } }])), /Reconnecting/);
+  await assert.rejects(collectCodexDraftResponse(events([progress, response])), /Reconnecting/,
+    "a partial response without turn.completed cannot count as successful QC");
+  await assert.rejects(collectCodexDraftResponse(events([response])), /turn.completed/);
+  await assert.rejects(collectCodexDraftResponse(events([{ type: "error", message: "authentication required" }, response, completed])), /authentication required/);
+  await assert.rejects(collectCodexDraftResponse(events([{ type: "error", message: completionLoss.replace("2/5", "9/5") }, response, completed])), /Reconnecting/);
+  async function* abortedEvents(): AsyncIterable<import("@openai/codex-sdk").ThreadEvent> {
+    yield progress;
+    throw Object.assign(new Error("cancelled"), { name: "AbortError" });
+  }
+  await assert.rejects(collectCodexDraftResponse(abortedEvents()), (error: unknown) => (error as Error).name === "AbortError");
   const transientErrors = [
     Object.assign(new Error("rate limited"), { status: 429 }),
     new Error('{"type":"error","status":429,"error":{"message":"rate limit"}}'),
@@ -95,6 +169,9 @@ async function verifyRetryPolicy(): Promise<void> {
     new Error("HTTP status 504 Gateway Timeout"),
     new Error("Gateway Timeout (504)"),
     Object.assign(new Error("socket reset"), { code: "ECONNRESET" }),
+    new Error(completionLoss),
+    new Error("stream disconnected before completion: websocket closed by server before response.completed"),
+    new Error("review wrapper", { cause: new Error(completionLoss) }),
   ];
   for (const transient of transientErrors) {
     assert.equal(classifyCodexDraftFailure(transient), "retryable-transient");
@@ -105,7 +182,7 @@ async function verifyRetryPolicy(): Promise<void> {
       return "ok";
     }, { retryDelayMs: 0 });
     assert.equal(result, "ok");
-    assert.equal(calls, 2, "429/5xx/ECONNRESET gets exactly one same-Codex retry");
+    assert.equal(calls, 2, "strong provider transport/service evidence gets exactly one same-Codex retry");
   }
 
   let exhaustedCalls = 0;
@@ -121,6 +198,22 @@ async function verifyRetryPolicy(): Promise<void> {
   });
   assert.equal(exhaustedCalls, 2, "a persistent 5xx is never retried more than once");
 
+  let streamFailureCalls = 0;
+  await assert.rejects(runCodexDraftWithRetry(async () => {
+    streamFailureCalls += 1;
+    throw new Error(completionLoss);
+  }, { retryDelayMs: 0 }), (error: unknown) => {
+    assert.equal((error as { code?: string }).code, "CODEX_TRANSIENT_FAILURE");
+    return true;
+  });
+  assert.equal(streamFailureCalls, 2, "completion loss never adds a third SDK operation");
+  let cancelledCalls = 0;
+  await assert.rejects(runCodexDraftWithRetry(async () => {
+    cancelledCalls += 1;
+    throw new Error(completionLoss);
+  }, { retryDelayMs: 0, canRetry: () => false }));
+  assert.equal(cancelledCalls, 1, "the existing abort/budget guard still vetoes transport retry");
+
   const definitiveErrors: Array<[unknown, ReturnType<typeof classifyCodexDraftFailure>, string | null]> = [
     [Object.assign(new Error("authentication required"), { status: 401 }), "authentication", "CODEX_AUTH_REQUIRED"],
     [Object.assign(new Error("provider wrapper"), { status: 500, response: { status: 401, message: "Forbidden" } }), "authentication", "CODEX_AUTH_REQUIRED"],
@@ -130,6 +223,15 @@ async function verifyRetryPolicy(): Promise<void> {
     [new Error('{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The gpt-6-luna model is not supported when using Codex with a ChatGPT account."}}'), "model-version", "CODEX_MODEL_INCOMPATIBLE"],
     [Object.assign(new Error("operation timed out"), { name: "AbortError" }), "timeout", "CODEX_TIMEOUT"],
     [Object.assign(new Error("invalid request"), { status: 400 }), "non-retryable", null],
+    [new Error("websocket disconnected"), "non-retryable", null],
+    [new Error("stream disconnected before completion: invalid user request"), "non-retryable", null],
+    [new Error(`Invalid request text: ${completionLoss}`), "non-retryable", null],
+    [new Error("Reconnecting... 2/5 (stream disconnected before completion: websocket closed by server before response.completed"), "non-retryable", null],
+    [Object.assign(new Error(completionLoss), { code: "CODEX_AUTH_REQUIRED" }), "authentication", "CODEX_AUTH_REQUIRED"],
+    [Object.assign(new Error(completionLoss), { status: 403 }), "authentication", "CODEX_AUTH_REQUIRED"],
+    [Object.assign(new Error(completionLoss), { code: "CODEX_MODEL_INCOMPATIBLE" }), "model-version", "CODEX_MODEL_INCOMPATIBLE"],
+    [Object.assign(new Error(completionLoss), { code: "CODEX_TIMEOUT" }), "timeout", "CODEX_TIMEOUT"],
+    [Object.assign(new Error(completionLoss, { cause: Object.assign(new Error("inner auth failure"), { code: "CODEX_AUTH_REQUIRED" }) }), { code: "CODEX_TRANSIENT_FAILURE" }), "authentication", "CODEX_AUTH_REQUIRED"],
   ];
   for (const [failure, expectedKind, expectedCode] of definitiveErrors) {
     assert.equal(classifyCodexDraftFailure(failure), expectedKind);
@@ -140,7 +242,9 @@ async function verifyRetryPolicy(): Promise<void> {
     }, { retryDelayMs: 0 }), (error: unknown) => {
       assert.equal((error as { code?: string }).code || null, expectedCode);
       assert.equal(codexDraftTerminalFailureCode(error), expectedCode);
-      if (expectedCode) assert.equal((error as Error).cause, failure, "terminal wrapping must preserve the provider cause");
+      if (expectedCode && (failure as { code?: string }).code === expectedCode) {
+        assert.equal(error, failure, "already typed terminal failures are preserved intact");
+      } else if (expectedCode) assert.equal((error as Error).cause, failure, "terminal wrapping must preserve the provider cause");
       else assert.equal(error, failure, "unknown non-retryable failures remain unchanged");
       return true;
     });

@@ -27,8 +27,11 @@ import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
 import { createWritingPromptContract, formatWritingPromptContract, getWritingOutputExample } from "./lib/writing-prompt-contract";
+import { verifyProductSourceIntake } from "./verify-product-source-intake";
+import "./verify-section-normalization";
 
 async function main() {
+  await verifyProductSourceIntake();
   // 1. Structure: object sections, merged sections, and the output example.
   assert.equal(sectionEntryToString({ title: "흡입력", body: "18,000Pa 흡입력이에요.\n덕분에 카펫도 편해요." }), "흡입력\n\n18,000Pa 흡입력이에요.\n덕분에 카펫도 편해요.");
   assert.equal(sectionEntryToString({ heading: "무게", paragraphs: ["1.2kg이에요.", "손목 부담이 적어요."] }), "무게\n\n1.2kg이에요.\n\n손목 부담이 적어요.");
@@ -42,7 +45,11 @@ async function main() {
   assert.match(formatWritingPromptContract(contract), /sections는 7~11개이며 섹션마다 원소 하나\("소제목\\n\\n본문"\)/u);
   const agent = fs.readFileSync("scripts/simple-agent.ts", "utf8");
   assert.match(agent, /const variants = \[\s*candidate,/u, "raw JSON is parsed before curly-quote rewriting");
-  assert.match(agent, /DRAFT_OUTPUT_SCHEMA,\s*\);/u, "the draft call requests structured output");
+  const preflightWriter = agent.slice(agent.indexOf("async function step2_generatePostAfterPreflight("));
+  assert.equal([...preflightWriter.matchAll(/DRAFT_OUTPUT_SCHEMA,\s*product\.prewritingPhotoProof,\s*\);/gu)].length, 1,
+    "the first draft call keeps its strict schema and the inspected original-photo proof");
+  assert.match(preflightWriter, /DRAFT_OUTPUT_SCHEMA,\s*product\.prewritingPhotoProof,\s*\)\.catch/u,
+    "format retries keep the same strict schema and original-photo proof");
   assert.match(agent, /같은 지시로 1회 재작성/u, "a format-only miss gets one retry instead of failing the item");
 
   // 2. Product evidence: the prompt and the grader share the same facts and counts; repair notes name missing facts.
@@ -66,7 +73,7 @@ async function main() {
   assert.match(agent, /\[필수 상품 근거 · 원고 품질검사가 그대로 확인함\]/u, "first-draft prompt lists the graded facts");
 
   // 3. Visual audit: tolerant parsing, strict on missing fields; malformed proposals are dropped, not fatal.
-  const ok = { singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, accepted: true, identityMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, reviewClass: "product-photo", reason: "보풀제거기 본체가 보임" };
+  const ok = { singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, accepted: true, identityMatches: true, photoClaimMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, reviewClass: "product-photo", reason: "보풀제거기 본체가 보임" };
   assert.ok(parseVisualReviews(`검토 결과입니다.\n{"reviews":[${JSON.stringify({ ...ok, index: "1" })}]}\n끝`, 1)[0], "prose around JSON and string index are accepted");
   assert.ok(parseVisualReviews(JSON.stringify({ reviews: [{ ...ok, index: 1, notice: "false" }] }), 1)[0]);
   assert.equal(parseVisualReviews(JSON.stringify({ reviews: [{ ...ok, index: 1, notice: undefined }] }), 1)[0], null, "missing safety fields are never guessed");
@@ -87,7 +94,14 @@ async function main() {
   assert.deepEqual(rejected, ["a"]);
   assert.deepEqual(accepted.map((row) => row.sourceSha256), ["b"], "a malformed verdict drops only that proposal");
   const auditSource = fs.readFileSync("scripts/lib/publish-image-audit.ts", "utf8");
-  assert.match(auditSource, /outputSchema: VISUAL_REVIEW_SCHEMA/u);
+  // Exact schema behavior, including rejecting reference rows, is exercised by
+  // verify-publish-image-audit-references.ts; this guard keeps the base contract
+  // and the final-slot bounds wired into the provider call.
+  assert.match(auditSource, /outputSchema:\s*\{\s*\.\.\.VISUAL_REVIEW_SCHEMA/u);
+  assert.match(auditSource, /minItems:\s*batch\.length,\s*maxItems:\s*batch\.length/u,
+    "only final publication slots receive verdicts, excluding attached comparison references");
+  assert.match(auditSource, /index:\s*\{\s*type:\s*"integer",\s*enum:\s*batch\.map\(\(_, index\) => index \+ 1\)/u,
+    "output indices are restricted to the current final publication batch");
   assert.match(auditSource, /형식이 깨진 판정만 한 번 더 묻는다/u);
 
   // 4. Internal guidance sentences are removed deterministically; headings and other sentences stay.
@@ -481,7 +495,7 @@ async function main() {
       const action = (body as { action?: string })?.action || method; actions.push(action);
       if (action === "recheck" && options.raceOnce && !raced) {
         raced = true;
-        throw Object.assign(new Error("상품 상태가 변경되었습니다."), { code: "ALREADY_PUBLISHING" });
+        throw Object.assign(new Error("상품 상태가 변경되었습니다."), { code: "ALREADY_PUBLISHING", httpStatus: 409 });
       }
       if (action === "approve") {
         approvals += 1;
@@ -498,7 +512,7 @@ async function main() {
         if (action === "replan_sources") { missing = false; return { success: true, recovery: { changed: true }, remainingMissing: 0 }; }
         missing = false;
       }
-      return { success: true, data: { approvedAt: accepted ? "yes" : null, approval: { canApprove: !missing },
+      return { success: true, data: { status: "READY", imageGeneration: { status: "complete" }, approvedAt: accepted ? "yes" : null, approval: { canApprove: !missing },
         imageSlots: [{ missing: missing ? 1 : 0, generationMissing: 0 }], contentQuality: { signals: [] } } };
     };
     await runMaterialPreparation(`drop-${options.replacementFails}-${options.raceOnce}`, { call, pause: async () => {} });

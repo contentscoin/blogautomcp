@@ -4,7 +4,7 @@ import { attachRemoteProductReferenceInputs } from "../src/lib/brand-post-remote
 async function main() {
   const hash = "a".repeat(64);
   let uploadCalls = 0;
-  const slots = [{ sectionId: "hero" }, { sectionId: "daily" }, { sectionId: "facts" }];
+  const slots = [{ sectionId: "hero", imagePrompt: "stale preliminary prompt" }, { sectionId: "daily" }, { sectionId: "facts" }];
   const result = await attachRemoteProductReferenceInputs(slots, {
     prepare: async slot => slot.sectionId === "facts" ? null : { referenceImagePaths: ["C:/private/source.jpg"], referenceHashes: [hash], prompt: "Use the supplied product reference." },
     upload: async () => { uploadCalls++; return "https://assets.example/source.jpg"; },
@@ -12,6 +12,8 @@ async function main() {
   assert.equal(uploadCalls, 1, "Shared identity uploads must be reused within the draft response.");
   assert.equal(result[0].referenceReady, true);
   assert.equal(result[1].referenceReady, true);
+  assert.equal(result[0].imagePrompt, "Use the supplied product reference.", "MCP must replace preliminary prose with the exact prepared generation harness.");
+  assert.equal(result[1].imagePrompt, result[0].imagePrompt);
   assert.equal(result[2].imagePrompt, null, "Fact slots must not be converted into generated product evidence.");
   assert(!JSON.stringify(result).includes("C:/private"), "Local reference paths must not enter the remote payload.");
   assert.deepEqual(result[0].referenceImages, [{ role: "product-identity", url: "https://assets.example/source.jpg", sha256: hash }]);

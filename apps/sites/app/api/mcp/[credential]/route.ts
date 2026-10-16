@@ -16,6 +16,7 @@ import { readCompletionResult } from '@/lib/completion-result';
 import { enqueueAgentJob } from '@/lib/agent-job-queue';
 import { MATERIALS_REWRITE_MIN_APP, MATERIALS_REWRITE_INPUT_SCHEMA, MATERIALS_LIST_INPUT_SCHEMA, queueFailedMaterialRewrite } from '@/lib/material-rewrite';
 import { MATERIALS_REPAIR_MIN_APP, MATERIALS_REPAIR_INPUT_SCHEMA, queueBlockedMaterialRepair } from '@/lib/material-repair';
+import { isMaterialWorkflowJob, materialWorkflowProjection } from '@/lib/material-workflow-status';
 
 type JsonObject = Record<string, unknown>;
 type JsonRpcId = string | number | null;
@@ -25,12 +26,12 @@ const LEGACY_PROTOCOLS = ['2025-11-25', '2025-06-18', '2025-03-26'] as const;
 const SUPPORTED_PROTOCOLS = [MODERN_PROTOCOL, ...LEGACY_PROTOCOLS] as const;
 const RESPONSE_HEADERS = { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff' };
 const CONNECT_KINDS = ['shopping', 'travel'];
-const SERVER_INFO = { name: 'BlogAutoMCP', version: '1.3.15' };
+const SERVER_INFO = { name: 'BlogAutoMCP', version: '1.3.17' };
 const SERVER_INSTRUCTIONS = [
   '요청이 완료되거나 실제 진행 불가 사유가 확인될 때까지 수행하세요. QUEUED/RUNNING, 동일 진행률, 긴 소요 시간은 중단 사유가 아닙니다. 같은 jobId로 job_get(waitMs=20000)을 반복하세요. 통신 시간 초과는 작업 실패가 아닙니다. 성공 결과를 읽고 요청 범위 안의 다음 단계를 이어가세요. 사용자 취소·필수 승인 대기는 존중하고 불확실한 발행을 중복 실행하거나 검수를 우회하지 마세요.',
   '진행 확인은 job_get(includeResult=false)로 조회하고 pollAfterMs만큼 기다리세요. 완료된 큰 결과가 잘리면 job_result_read를 offset=0부터 nextOffset까지 이어서 읽으세요. AGENT_LOST_UNCERTAIN은 자동 재실행하지 말고 발행 여부부터 확인하세요.',
   '승인된 한 대의 Windows PC에서 네이버 쇼핑커넥트·여행커넥트 작업을 수행합니다. 대부분의 도구는 작업(jobId)을 큐에 넣고 즉시 반환하며, job_get 으로 진행 단계(stage)와 결과를 확인합니다.',
-  '소재 준비와 발행은 별도 단계입니다. brandconnect_list_products로 상품을 고른 뒤 materials_prepare(productIds)로 원고·이미지·검수를 준비합니다. materials_list에서 준비 완료된 소재를 확인하고 사용자가 선택한 productId와 revision만 materials_publish로 발행합니다. 발행 요청 안에서 소재 생성·보강이나 임의 대상 선택을 하지 않습니다.',
+  'PC와 동일한 전체 소재 준비를 요청받으면 brandconnect_list_products로 상품을 고른 뒤 post_prepare_material(productIds) 또는 동일 작업인 materials_prepare를 사용하세요. 같은 PC 소재 작업에서 원고·이미지·검수·승인까지 진행합니다. post_prepare_draft는 근거 준비, post_submit_draft는 원고 저장만 수행하므로 둘의 성공을 준비완료로 보고하지 마세요. 소재 준비와 발행은 별도 단계입니다. materials_list에서 준비 완료된 소재를 확인하고 사용자가 선택한 productId와 revision만 materials_publish로 발행합니다. 발행 요청 안에서 소재 생성·보강이나 임의 대상 선택을 하지 않습니다.',
   '자동 발행 경로는 PC의 설정된 원고·이미지 엔진으로 누락 이미지를 보충합니다. 수동 ChatGPT 편집 경로에서는 post_get_draft의 imageSlots를 확인해 이미지를 생성하고 post_apply_section_image로 적용합니다. 쇼핑은 실제 상품 원본을 보존합니다. 품질검사 기준을 우회하지 마세요.',
   '쇼핑 자연사진 생성·적용은 PC 앱 1.3.97 이상에서만 지원합니다. agent_get_status의 shoppingReferenceScenes.supported와 슬롯의 referenceReady=true를 확인하기 전에는 이미지를 생성하지 마세요. 본문 사진에는 텍스트·설명 패널·프레임·콜라주를 넣지 않습니다. 구버전 초안의 본문·승인은 조회할 수 있습니다.',
   '10개 준비 요청은 materials_prepare에 선택 상품 ID 10개를 전달합니다. 발행은 준비 목록 중 선택된 소재 배열을 materials_publish에 전달합니다. MCP job_get 완료 후에도 소재 workflowPending=true이면 반환된 workflowJobId로 materials_list(jobId)를 계속 조회하세요. 이전 소재를 임의로 다시 생성하거나 이미 선택된 발행 지시를 건별로 재확인하지 마세요.',
@@ -45,6 +46,10 @@ const IDEMPOTENCY = { type: 'string', pattern: '^[A-Za-z0-9._:-]{8,120}$', descr
 const CONNECT_KIND = { type: 'string', enum: CONNECT_KINDS } as const;
 const ID_FIELD = { type: 'string', minLength: 1, maxLength: 160 } as const;
 const MATERIAL_PRODUCT_ID = { type: 'string', minLength: 8, maxLength: 80, pattern: '^[A-Za-z0-9_-]{8,80}$' } as const;
+const MATERIAL_PREPARATION_INPUT: JsonSchema = { type: 'object', properties: {
+  productIds: { type: 'array', minItems: 1, maxItems: 50, items: MATERIAL_PRODUCT_ID }, idempotencyKey: IDEMPOTENCY,
+}, required: ['productIds', 'idempotencyKey'], additionalProperties: false };
+const MATERIAL_PREPARATION_DESCRIPTION = '선택 상품을 PC 소재 미리작성과 같은 작업으로 원고 작성·필요 이미지 생성·품질검사·이미지 검수·승인까지 준비합니다. 쇼핑은 검증 판매자 원본 1장·자연 연출 3장·썸네일 1장 기준을 적용하며 모든 검사를 통과한 소재만 ready입니다. 게시·예약은 하지 않습니다. post_prepare_draft의 근거 준비나 post_submit_draft의 원고 저장과 다릅니다. job_get의 SUCCEEDED는 전달 완료일 수 있습니다. materialWorkflow.workflowPending=true이면 workflowJobId로 materials_list(jobId)를 조회하고 productStates·materials의 최종 준비 상태를 확인하세요. 응답이 끊겨 workflowJobId를 모르면 materials_list(sourceJobId=처음 받은 MCP jobId)로 같은 작업을 조회하세요. 재접속 시 새 준비 요청을 만들지 않으며 요청 재시도는 같은 idempotencyKey와 상품 목록을 유지하세요.';
 const JOB_RESULT_SCHEMA: JsonSchema = {
   type: 'object',
   properties: { ok: { type: 'boolean' }, jobId: { type: 'string' }, status: { type: 'string' }, reused: { type: 'boolean' }, code: { type: 'string' }, message: { type: 'string' } },
@@ -57,6 +62,7 @@ interface ToolDefinition {
   description: string;
   inputSchema: JsonSchema;
   outputSchema?: JsonSchema;
+  _meta?: Record<string, unknown>;
   annotations: { readOnlyHint: boolean; destructiveHint: boolean; idempotentHint: boolean; openWorldHint: boolean };
   /** 큐 작업 타입. 없으면 사이트가 동기 처리한다. */
   jobType?: string;
@@ -78,6 +84,14 @@ const DRAFT_CONTEXT_INPUT: JsonSchema = { type: 'object', properties: { connectK
 const THUMBNAIL_LAYOUTS = ['auto', 'clean-editorial', 'color-block', 'soft-lifestyle', 'cinematic', 'emotional-record', 'route'];
 
 const TOOLS: ToolDefinition[] = [
+  {
+    name: 'account_get_profile', title: '연결된 내 계정 확인',
+    description: '현재 인증된 연결의 계정을 확인합니다. 반환 ID는 재로그인·토큰 갱신에도 유지되는 계정 식별자입니다. 다른 계정이나 PC를 선택하지 않습니다.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    outputSchema: { type: 'object', properties: { id: { type: 'string', minLength: 1, pattern: '\\S' }, name: { type: 'string' }, email: { type: 'string' } }, required: ['id'], additionalProperties: false },
+    _meta: { 'openai/profile': true },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
   {
     name: 'bug_report_create', title: '오류 리포트 접수',
     description: '사용자가 오류 신고를 요청할 때 관리자에게 리포트를 저장하고 텔레그램으로 전달합니다. 전송 내용에 동의한 경우에만 confirmed=true. jobId가 있으면 본인 작업의 오류 요약과 앱 버전을 첨부합니다. PC 파일은 자동 수집하지 않습니다. details에는 필요한 오류 부분만 넣고 토큰, 쿠키, 개인정보, 원고 전문은 넣지 마세요. 같은 신고 재시도는 같은 idempotencyKey를 사용하세요.',
@@ -110,7 +124,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'brandconnect_list_products',
     title: '브랜드커넥트 상품 목록',
-    description: '로컬 PC에 가져온 쇼핑커넥트 또는 여행커넥트 상품 목록을 조회합니다. keyword 로 상품명을 검색하고 writingStatus 로 초안 작성 여부를 거를 수 있습니다.',
+    description: '로컬 PC에 가져온 쇼핑커넥트 또는 여행커넥트 상품 목록을 조회합니다. keyword 로 상품명을 검색하고 writingStatus 로 초안 작성 여부를 거를 수 있습니다. draft.canPublish는 저장된 원고 품질검사 결과이며 이미 발행한 상품에서도 true일 수 있습니다. 발행 대상을 고를 때는 상품 status와 materials_list의 현재 ready·materialStatus·revision을 함께 확인하고 PUBLISHED·예약·결과 불확실 소재를 다시 발행하지 마세요.',
     inputSchema: { type: 'object', properties: { connectKind: CONNECT_KIND, status: { type: 'string', enum: ['all', 'ready', 'published', 'failed'], default: 'all' }, writingStatus: { type: 'string', enum: ['all', 'written', 'unwritten'], default: 'all' }, keyword: { type: 'string', maxLength: 80 }, limit: { type: 'integer', minimum: 1, maximum: 200, default: 50 }, sort: { type: 'string', enum: ['newest', 'oldest', 'name'], default: 'newest' }, idempotencyKey: IDEMPOTENCY }, required: ['connectKind'], additionalProperties: false },
     outputSchema: JOB_RESULT_SCHEMA,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -129,7 +143,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'post_create_draft',
     title: '포스팅 초안 근거 준비 (ChatGPT 작성 1단계)',
-    description: '선택한 상품의 초안 컨텍스트를 PC 에서 준비합니다(수십 초). 결과에 verifiedFacts(확인된 상품 사실), sourceImages(상세이미지 주소), harness(작성 계약·품질 체크리스트), systemPrompt, userPrompt, imageIntents 가 들어 있습니다. 원고는 PC 가 쓰지 않습니다: job_get 완료 결과를 받은 뒤 이 ChatGPT 가 systemPrompt·userPrompt 로 원고 JSON 을 작성하고 post_submit_draft(contextJobId=이 작업의 jobId) 로 제출하세요. memo 로 톤이나 강조점을 지시할 수 있습니다.',
+    description: '선택한 상품의 초안 컨텍스트를 PC 에서 준비합니다(수십 초). 결과에 verifiedFacts(확인된 상품 사실), sourceImages(판매자 상세 주소), harness, systemPrompt, userPrompt, imageIntents가 들어 있습니다. sourceImages 주소는 실제 참조 픽셀 첨부가 아닙니다. 쇼핑은 publicationPhotoAvailability.status=attached-verified-original과 job.imageAttachments의 실제 원본을 확인하고 작성하세요. 원고는 PC가 쓰지 않습니다: ChatGPT가 원고 JSON을 작성해 post_submit_draft(contextJobId=이 작업의 jobId)로 제출합니다. 제출 후 post_get_draft → 부족 이미지 생성·post_apply_section_image → post_approve_draft까지 완료해야 준비완료입니다. PC와 같은 전체 자동 준비를 원하면 post_prepare_material 또는 materials_prepare를 사용하세요. memo로 톤이나 강조점을 지시할 수 있습니다.',
     inputSchema: DRAFT_CONTEXT_INPUT,
     outputSchema: JOB_RESULT_SCHEMA,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -140,10 +154,10 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'post_prepare_draft',
     title: '포스팅 초안 근거 준비 (post_create_draft 별칭)',
-    description: 'post_create_draft 와 같은 작업입니다(기존 대화 호환용 별칭). PC 에서 선택 상품의 검증 사실·이미지·전용 하네스·완성 프롬프트를 준비합니다. job_get 완료 결과를 받은 뒤 현재 ChatGPT 가 원고 JSON 을 작성하고 post_submit_draft 를 호출해야 합니다.',
+    description: 'post_create_draft와 같은 근거 준비 작업입니다. PC의 검증 사실·하네스·프롬프트를 받아 ChatGPT가 원고를 쓰고 post_submit_draft를 호출합니다. sourceImages URL은 실제 참조 픽셀과 다릅니다. 쇼핑은 publicationPhotoAvailability.status=attached-verified-original과 job.imageAttachments의 실제 원본을 확인하세요. 이후 post_get_draft → 부족 이미지 생성·post_apply_section_image → post_approve_draft까지 수행해야 준비완료입니다. 전체 자동 소재 준비는 post_prepare_material 또는 materials_prepare를 사용하세요.',
     inputSchema: DRAFT_CONTEXT_INPUT,
     outputSchema: JOB_RESULT_SCHEMA,
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     jobType: 'POST_PREPARE_DRAFT',
     minAppVersion: DRAFT_SNAPSHOT_MIN_APP,
     requiresIdempotency: true,
@@ -162,7 +176,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'post_submit_draft',
     title: 'ChatGPT 원고를 PC 초안으로 제출 (2단계)',
-    description: 'ChatGPT가 쓴 최초 원고를 품질검사 후 승인 대기 초안으로 저장합니다. 쇼핑은 본문 5~8개, 여행은 7~12개 섹션이며 고지는 PC가 별도로 붙입니다. 한 섹션 안에 여러 소제목을 넣으면 재분할되어 상한을 초과할 수 있습니다. DRAFT_SECTION_COUNT_OUT_OF_RANGE로 거절되면 원문을 보존하고 구조를 정리해 새 idempotencyKey로 최초 원고를 재제출하세요. 부분 수정인 post_revise_draft는 섹션 수를 바꾸지 않습니다. 제출이 성공한 뒤 실제 원고 내용 실패(텍스트 signals)는 새 idempotencyKey로 post_revise_draft를 호출해 필요한 문단만 보완하세요. 전체 패키지를 교체하지 마세요. 쇼핑 evidenceFacts는 직접 확인한 상품 근거만 보냅니다. 이미지는 생성하지 않으며 imageSlots의 부족 파트에 ChatGPT 생성 이미지를 적용합니다. 이미지 부족만으로는 원고를 다시 제출하지 않습니다. 발행하지는 않습니다.',
+    description: 'ChatGPT가 쓴 최초 원고를 품질검사 후 승인 대기 초안으로 저장합니다. 쇼핑은 본문 5~8개, 여행은 7~12개 섹션이며 고지는 PC가 별도로 붙입니다. 한 섹션 안에 여러 소제목을 넣으면 재분할되어 상한을 초과할 수 있습니다. DRAFT_SECTION_COUNT_OUT_OF_RANGE로 거절되면 원문을 보존하고 구조를 정리해 새 idempotencyKey로 최초 원고를 재제출하세요. 부분 수정인 post_revise_draft는 섹션 수를 바꾸지 않습니다. 제출이 성공한 뒤 실제 원고 내용 실패(텍스트 signals)는 새 idempotencyKey로 post_revise_draft를 호출해 필요한 문단만 보완하세요. 전체 패키지를 교체하지 마세요. 쇼핑 evidenceFacts는 직접 확인한 상품 근거만 보냅니다. 이미지는 생성하지 않으며 post_get_draft의 imageSlots와 실제 referenceImages를 확인하고 post_apply_section_image로 부족 사진을 채운 뒤 post_approve_draft까지 완료하세요. 원고 저장 성공은 소재 준비완료가 아닙니다. 이미지 부족만으로는 원고를 다시 제출하지 않습니다. PC와 동일한 전체 자동 소재 준비는 post_prepare_material 또는 materials_prepare입니다. 발행하지는 않습니다.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -312,17 +326,26 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'materials_list',
     title: '준비 소재와 작업 상태 조회',
-    description: '저장된 소재의 productId, revision, 준비 상태와 차단 사유를 조회합니다. 준비·발행 시작 결과의 workflowJobId를 jobId로 전달하면 같은 작업의 최종 상태를 확인합니다. 이 도구는 생성하거나 발행하지 않습니다.',
+    description: '저장된 소재의 productId, revision, 준비 상태와 차단 사유를 조회합니다. 발행 대상은 현재 ready=true이며 materialStatus=READY인 소재에서 선택하고 PUBLISHED·예약·결과 불확실 소재를 다시 발행하지 마세요. 준비·발행 시작 결과의 workflowJobId를 jobId로 전달하면 같은 작업의 최종 상태를 확인합니다. 이 도구는 생성하거나 발행하지 않습니다.',
     inputSchema: MATERIALS_LIST_INPUT_SCHEMA,
     outputSchema: JOB_RESULT_SCHEMA,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     jobType: 'MATERIALS_LIST', minAppVersion: '1.3.26',
   },
   {
+    name: 'post_prepare_material',
+    title: '상품 소재 작성·이미지·검수·승인 준비',
+    description: `${MATERIAL_PREPARATION_DESCRIPTION} PC 앱 1.3.123 이상이 필요합니다.`,
+    inputSchema: MATERIAL_PREPARATION_INPUT,
+    outputSchema: JOB_RESULT_SCHEMA,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    jobType: 'MATERIALS_PREPARE', minAppVersion: '1.3.123', requiresIdempotency: true,
+  },
+  {
     name: 'materials_prepare',
     title: '선택 상품 소재 미리 준비',
-    description: '선택한 상품들의 원고·이미지·검수 소재를 미리 준비하고 저장합니다. 실제 게시·예약은 하지 않습니다. 완료 응답의 workflowJobId로 materials_list를 조회해 준비 결과를 확인하세요. 같은 요청 재시도는 같은 idempotencyKey를 유지하세요.',
-    inputSchema: { type: 'object', properties: { productIds: { type: 'array', minItems: 1, maxItems: 50, items: MATERIAL_PRODUCT_ID }, idempotencyKey: IDEMPOTENCY }, required: ['productIds', 'idempotencyKey'], additionalProperties: false },
+    description: MATERIAL_PREPARATION_DESCRIPTION,
+    inputSchema: MATERIAL_PREPARATION_INPUT,
     outputSchema: JOB_RESULT_SCHEMA,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     jobType: 'MATERIALS_PREPARE', minAppVersion: '1.3.26', requiresIdempotency: true,
@@ -361,7 +384,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'post_publish',
     title: '네이버 블로그 즉시 발행',
-    description: '호환용 이전 발행 명령입니다. draftId가 준비 완료 소재의 productId와 일치하면 해당 소재 한 건을 즉시 발행합니다. 생성·자동 보강·임의 선택은 하지 않습니다. 가능하면 materials_list와 materials_publish를 우선 사용하세요.',
+    description: '실제로 네이버 블로그에 게시하는 호환용 즉시 발행 명령입니다. draftId가 준비 완료 소재의 productId와 일치하면 해당 소재 한 건을 즉시 발행합니다. 사용자가 이 소재의 발행을 명시적으로 지시한 경우 confirmed=true를 전달하세요. 생성·자동 보강·임의 선택은 하지 않습니다. 가능하면 materials_list와 materials_publish를 우선 사용하고 이미 발행했거나 결과가 불확실한 소재는 재실행 전에 post_verify_published로 확인하세요.',
     inputSchema: { type: 'object', properties: { connectKind: CONNECT_KIND, draftId: ID_FIELD, confirmed: { type: 'boolean', const: true }, idempotencyKey: IDEMPOTENCY }, required: ['connectKind', 'draftId', 'confirmed', 'idempotencyKey'], additionalProperties: false },
     outputSchema: JOB_RESULT_SCHEMA,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
@@ -373,7 +396,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'post_schedule',
     title: '네이버 블로그 예약 발행',
-    description: '호환용 이전 예약 명령입니다. draftId가 준비 완료 소재의 productId와 일치하면 해당 소재 한 건을 scheduledDate에 예약합니다. 생성·자동 보강·임의 선택은 하지 않습니다. 가능하면 materials_list와 materials_publish를 우선 사용하세요.',
+    description: '실제로 네이버 블로그 예약을 등록하는 호환용 예약 발행 명령입니다. draftId가 준비 완료 소재의 productId와 일치하면 해당 소재 한 건을 scheduledDate(KST, YYYY-MM-DD)에 예약합니다. 사용자가 이 소재와 날짜의 예약을 명시적으로 지시한 경우 confirmed=true를 전달하세요. 생성·자동 보강·임의 선택은 하지 않습니다. 가능하면 materials_list와 materials_publish를 우선 사용하고 이미 예약했거나 결과가 불확실한 소재는 재실행 전에 post_verify_published로 확인하세요.',
     inputSchema: { type: 'object', properties: { connectKind: CONNECT_KIND, draftId: ID_FIELD, scheduledDate: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' }, confirmed: { type: 'boolean', const: true }, idempotencyKey: IDEMPOTENCY }, required: ['connectKind', 'draftId', 'scheduledDate', 'confirmed', 'idempotencyKey'], additionalProperties: false },
     outputSchema: JOB_RESULT_SCHEMA,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
@@ -409,7 +432,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'post_verify_published',
     title: '발행 결과 검증',
-    description: '즉시 발행은 네이버 글 URL 응답, 예약은 저장된 네이버 제출 확인 기록(예약 ID·날짜)으로 검증합니다. 예약 목록을 실시간 조회하는 도구는 아닙니다. scheduled=true만 예약 확인 완료이며 plannedPublishAt은 희망일일 뿐입니다. outcomeUnknown 또는 unverified는 실패 확정이 아니므로 자동 재발행하지 마세요. 시도 단계·제출 시각·프로세스 상태·오류로 중단 원인을 확인합니다.',
+    description: 'PC 1.3.125부터 공개 글의 정확한 제목·상단 고지·본문/사진/상품 링크 순서·현재 소재와 제출 스냅샷을 대조합니다. published=true는 공개 글 존재 확인이며 contentVerified=true와 verificationStatus=verified가 전체 콘텐츠 확인 완료입니다. partial/mismatch는 세부 검사와 다음 조치를 확인하세요. 예약의 scheduled=true는 저장된 제출 기록(예약 ID·날짜) 확인이며 현재 예약 목록 조회·예정 시각 후 실제 게시 확인과 구분합니다. 결과 불명은 기존 제출을 조회하고 자동 재발행하지 마세요.',
     inputSchema: { type: 'object', properties: { connectKind: CONNECT_KIND, draftId: ID_FIELD, idempotencyKey: IDEMPOTENCY }, required: ['connectKind', 'draftId'], additionalProperties: false },
     outputSchema: JOB_RESULT_SCHEMA,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -475,7 +498,8 @@ function publicTool(tool: ToolDefinition) {
     inputSchema: tool.inputSchema,
     ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
     annotations: tool.annotations,
-    securitySchemes: [{ type: 'oauth2', scopes: [requiredScope(tool)] }],
+    ...(tool._meta ? { _meta: tool._meta } : {}),
+    securitySchemes: [{ type: 'oauth2', scopes: [requiredScope(tool), 'offline_access'] }],
   };
 }
 
@@ -668,7 +692,7 @@ async function callTool(userId: string, name: string, rawArgs: JsonObject) {
     if (new Set(selected.map(item => item.productId)).size !== selected.length) return toolPayload({ ok: false, code: 'INVALID_ARGUMENT', message: '같은 소재를 중복 선택할 수 없습니다.' }, true);
     if (args.publishMode === 'schedule' && !validDate(stringArg(args, 'scheduledAt'))) return toolPayload({ ok: false, code: 'INVALID_ARGUMENT', message: '예약일 scheduledAt(YYYY-MM-DD, KST)이 필요합니다.' }, true);
   }
-  if (name === 'materials_prepare' && new Set(args.productIds as string[]).size !== (args.productIds as string[]).length) return toolPayload({ ok: false, code: 'INVALID_ARGUMENT', message: '같은 상품을 중복 준비할 수 없습니다.' }, true);
+  if (tool.jobType === 'MATERIALS_PREPARE' && new Set(args.productIds as string[]).size !== (args.productIds as string[]).length) return toolPayload({ ok: false, code: 'INVALID_ARGUMENT', message: '같은 상품을 중복 준비할 수 없습니다.' }, true);
   if (name === 'materials_rewrite_failed') {
     const queued = await queueFailedMaterialRewrite(userId, args);
     return toolPayload(queued, queued.ok === false);
@@ -683,6 +707,11 @@ async function callTool(userId: string, name: string, rawArgs: JsonObject) {
     return toolPayload(result, !result.ok);
   }
 
+  if (name === 'account_get_profile') {
+    const profile = await d1.prepare(`SELECT id,email,display_name AS name FROM users WHERE id=? AND status='APPROVED' AND role IN ('USER','ADMIN') LIMIT 1`).bind(userId).first<{ id: string; email: string; name: string | null }>();
+    if (!profile) return toolPayload({ ok: false, code: 'NOT_APPROVED', message: '승인된 연결 계정을 확인할 수 없습니다.' }, true);
+    return toolPayload({ id: profile.id, email: profile.email, ...(profile.name ? { name: profile.name } : {}) });
+  }
   if (name === 'agent_get_status') {
     const now = Date.now();
     await sweepExpiredLeases(d1, userId, now);
@@ -701,6 +730,7 @@ async function callTool(userId: string, name: string, rawArgs: JsonObject) {
       capabilities: {
         resultPaging: true,
         materialsWorkflow: Boolean(device?.appVersion && compareVersions(device.appVersion, '1.3.26') >= 0),
+        completeMaterialPreparation: { minimumAppVersion: '1.3.123', supported: Boolean(device?.appVersion && compareVersions(device.appVersion, '1.3.123') >= 0) },
         materialsRewriteFailed: { minimumAppVersion: MATERIALS_REWRITE_MIN_APP, supported: Boolean(device?.appVersion && compareVersions(device.appVersion, MATERIALS_REWRITE_MIN_APP) >= 0) },
         materialsRepairBlocked: { minimumAppVersion: MATERIALS_REPAIR_MIN_APP, supported: Boolean(device?.appVersion && compareVersions(device.appVersion, MATERIALS_REPAIR_MIN_APP) >= 0) },
         completionChunks: true,
@@ -722,15 +752,16 @@ async function callTool(userId: string, name: string, rawArgs: JsonObject) {
   if (name === 'job_get' || name === 'job_result_read') {
     const jobId = stringArg(args, 'jobId');
     await sweepExpiredLeases(d1, userId);
-    const readJob = async () => jobId ? await d1.prepare(`SELECT id,type,status,progress,stage,stage_message AS stageMessage,heartbeat_at AS heartbeatAt,cancel_requested AS cancelRequested,result_json AS resultJson,error_code AS errorCode,error_message AS errorMessage,created_at AS createdAt,finished_at AS finishedAt FROM agent_jobs WHERE id=? AND user_id=? LIMIT 1`).bind(jobId, userId).first<{ id: string; type: string; status: string; progress: number; stage: string | null; stageMessage: string | null; heartbeatAt: number | null; cancelRequested: number; resultJson: string | null; errorCode: string | null; errorMessage: string | null; createdAt: number; finishedAt: number | null }>() : null;
+    const readJob = async () => jobId ? await d1.prepare(`SELECT id,type,status,progress,stage,stage_message AS stageMessage,heartbeat_at AS heartbeatAt,cancel_requested AS cancelRequested,result_json AS resultJson,error_code AS errorCode,error_message AS errorMessage,created_at AS createdAt,finished_at AS finishedAt,claimed_at AS claimedAt,claimed_by_device_id AS claimedDeviceId FROM agent_jobs WHERE id=? AND user_id=? LIMIT 1`).bind(jobId, userId).first<{ id: string; type: string; status: string; progress: number; stage: string | null; stageMessage: string | null; heartbeatAt: number | null; cancelRequested: number; resultJson: string | null; errorCode: string | null; errorMessage: string | null; createdAt: number; finishedAt: number | null; claimedAt: number | null; claimedDeviceId: string | null }>() : null;
     const job = await waitForJob(readJob, name === 'job_get' ? Number(args.waitMs ?? 20000) : 0);
     if (!job) return toolPayload({ ok: false, code: 'JOB_NOT_FOUND', message: '작업을 찾을 수 없습니다.' }, true);
-    if (name === 'job_result_read' || args.includeResult !== false) {
+    if (name === 'job_result_read' || args.includeResult !== false || (isMaterialWorkflowJob(job.type) && ['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(job.status))) {
       try { job.resultJson = await readCompletionResult(d1, userId, job.id, job.resultJson); }
       catch { return toolPayload({ ok: false, code: 'RESULT_INTEGRITY_FAILED', message: '저장 결과의 무결성을 확인하지 못했습니다. 원 작업을 재실행하지 말고 전달 복구를 확인하세요.' }, true); }
     }
     if (name === 'job_result_read' && !['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(job.status))
       return toolPayload({ ok: false, code: 'JOB_NOT_FINISHED', jobId, ...jobGuidance(job.status, job.errorCode) }, true);
+    const materialWorkflow = materialWorkflowProjection(job.type, job.id, job.status, jsonValue(job.resultJson), job);
     const rawResult = args.includeResult === false ? null : jsonValue(job.resultJson);
     const legacyProjection = projectLegacyShoppingImageInstructions(rawResult);
     const rawRecord = asObject(legacyProjection.result);
@@ -746,7 +777,9 @@ async function callTool(userId: string, name: string, rawArgs: JsonObject) {
     if (name === 'job_result_read') {
       const offset = Number(args.offset ?? 0);
       if (offset > (publicResultJson ?? 'null').length) return toolPayload({ ok: false, code: 'INVALID_OFFSET', message: 'offset이 결과 길이를 초과했습니다.' }, true);
-      return toolPayload({ ok: true, jobId, status: job.status, ...resultPage(publicResultJson, offset, Number(args.limit ?? 8000)) });
+      return toolPayload({ ok: true, jobId, status: job.status, ...resultPage(publicResultJson, offset, Number(args.limit ?? 8000)),
+        ...(offset === 0 && extracted.referenceAttachments.length ? { imageAttachments: extracted.referenceAttachments } : {}) },
+      false, offset === 0 ? extracted.blocks : []);
     }
     const paged = args.includeResult !== false && (publicResultJson?.length ?? 0) > 32000;
     const { blocks, referenceAttachments } = extracted;
@@ -757,6 +790,12 @@ async function callTool(userId: string, name: string, rawArgs: JsonObject) {
         type: job.type,
         status: job.status,
         ...jobGuidance(job.status, job.errorCode, Number(job.cancelRequested) === 1),
+        ...(materialWorkflow ? { materialWorkflow,
+          taskOutcome: materialWorkflow.completionState === 'ready' || materialWorkflow.completionState === 'completed' ? 'success'
+            : materialWorkflow.workflowPending ? 'pending' : 'needs_attention', mustContinue: materialWorkflow.workflowPending,
+          ...(materialWorkflow.workflowPending ? {
+            nextCall: materialWorkflow.nextCall, pollAfterMs: materialWorkflow.pollAfterMs,
+            nextAction: '같은 workflowJobId를 materials_list(jobId)로 조회해 소재 작업의 최종 결과를 확인하세요. 새 생성 요청을 만들지 마세요.' } : {}) } : {}),
         resultIncluded: args.includeResult !== false && !paged,
         ...(referenceAttachments.length ? { imageAttachments: referenceAttachments } : {}),
         ...(args.includeResult === false && job.resultJson && ['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(job.status)
@@ -931,7 +970,7 @@ export async function POST(request: Request, context: { params: Promise<{ creden
   return handleMcpRequest(request, connection.userId, 'mcp:read mcp:write', `mcp:call:${split.endpointId}`);
 }
 
-export async function handleMcpRequest(request: Request, userId: string, oauthScope: string, rateLimitKey = `mcp:call:user:${userId}`) {
+export async function handleMcpRequest(request: Request, userId: string, oauthScope: string, rateLimitKey = `mcp:call:user:${userId}`, onOAuthRead?: (tool: string, jobId: string | null) => Promise<void>) {
   if (!validOrigin(request)) return rpcError(null, -32000, 'Invalid Origin.', 403);
   const contentType = request.headers.get('content-type') || '';
   if (!contentType.toLowerCase().includes('application/json')) return rpcError(null, -32700, 'Content-Type must be application/json.', 415);
@@ -1007,6 +1046,14 @@ export async function handleMcpRequest(request: Request, userId: string, oauthSc
         return rpcError(id, -32602, 'Tool arguments must be an object.');
       }
       const result = await callTool(userId, name, asObject(params.arguments));
+      if (onOAuthRead && tool.annotations.readOnlyHint && !result.isError && !['FAILED', 'CANCELLED'].includes(String(result.structuredContent.status))) {
+        try {
+          await onOAuthRead(name, tool.jobType && typeof result.structuredContent.jobId === 'string' ? result.structuredContent.jobId : null);
+        } catch {
+          // Verification telemetry must not turn an accepted job into a retry.
+          console.error('MCP connection verification evidence unavailable');
+        }
+      }
       return rpcResult(id, modern ? completeResult(result) : result);
     }
     return rpcError(id, -32601, 'Method not found', modern ? 404 : 200);

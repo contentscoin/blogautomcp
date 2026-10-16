@@ -6,6 +6,7 @@ import { generateStructured } from "./llm-client";
 import { renderFactsBlock, renderSectionInstruction, renderSystemPrompt, renderTitleRules, type GenerateContext } from "./generate";
 import { buildSingleSectionSchema, TITLE_ONLY_SCHEMA } from "./schema";
 import type { GeneratedDraft, GeneratedSection, PostSpec, RepairTarget, ValidationReport } from "./types";
+import { extractRequestedDraftTitle } from "../writing-prompt-contract";
 
 const UNREPAIRABLE = new Set(["IMAGE_SHORTFALL"]);
 
@@ -17,19 +18,20 @@ export async function repairDraft(spec: PostSpec, draft: GeneratedDraft, report:
   const targets = repairableTargets(report);
   if (targets.length === 0) return draft;
   const system = renderSystemPrompt(spec, ctx);
-  const titleTargets = targets.filter((target) => target.sectionIndex === null);
+  const requestedTitle = extractRequestedDraftTitle(ctx.memo || "");
+  const titleTargets = requestedTitle ? [] : targets.filter((target) => target.sectionIndex === null);
   const bySection = new Map<number, RepairTarget[]>();
   for (const target of targets) {
     if (target.sectionIndex === null) continue;
     bySection.set(target.sectionIndex, [...(bySection.get(target.sectionIndex) || []), target]);
   }
 
-  let title = draft.title;
+  let title = requestedTitle || draft.title;
   let attempts = draft.attempts;
   if (titleTargets.length > 0) {
     const result = await generateStructured<{ title?: string }>({
       system,
-      user: [renderFactsBlock(spec), renderTitleRules(spec), "## 현재 제목", draft.title, "## 문제", ...titleTargets.map((t) => `- ${t.reason}: ${t.instruction}`), "## 출력", 'JSON 객체 {"title": "..."} 만.'].join("\n\n"),
+      user: [renderFactsBlock(spec), renderTitleRules(spec, ctx), "## 현재 제목", draft.title, "## 문제", ...titleTargets.map((t) => `- ${t.reason}: ${t.instruction}`), "## 출력", 'JSON 객체 {"title": "..."} 만.'].join("\n\n"),
       schema: TITLE_ONLY_SCHEMA,
       schemaName: "post_title",
       maxOutputTokens: 400,

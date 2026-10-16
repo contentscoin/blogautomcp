@@ -1,7 +1,10 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { MaterialJobItemResult } from "./MaterialJobItemResult";
+import { currentJobReadyCount } from "../lib/material-job-display";
+import { getMaterialSummaryStore, type MaterialSummary as Material, type MaterialSummarySnapshot } from "../lib/material-summary-store";
+import { materialSelectionMatches, verifyMaterialSelection, type MaterialSelection } from "../lib/material-selection";
 
-type Material = { productId: string; revision: string; title: string; productName?: string; connectKind: string; status: string; ready: boolean; blockers: string[]; score: number | null; imageCount: number; approvedAt: string | null };
 type Job = { jobId: string; kind: string; status: string; startedAt: string; sourceJobId?: string; connectKind?: string; items: { productId: string; status: string; stage: string; error?: string; errorCode?: string; scheduledDate?: string }[] };
 type FailedCandidate = { productId: string; productName: string | null; reason: string; errorCode?: string };
 type RecoveryKind = "rewrite" | "repair";
@@ -29,11 +32,17 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
   const [repairRequestId, setRepairRequestId] = useState("");
   const pendingRepair = useRef<{ sourceJobId: string; storageKey: string } | null>(null);
   const currentConnectKind = useRef(connectKind); currentConnectKind.current = connectKind;
-  const [selection, setSelection] = useState<Record<string, string>>({});
+  const [selection, setSelection] = useState<MaterialSelection>({});
+  const [selecting, setSelecting] = useState(false);
+  const selectingRef = useRef(false);
+  const selectionController = useRef<AbortController | null>(null);
+  const currentMaterials = useRef(materials); currentMaterials.current = materials;
   const [prepareSelection, setPrepareSelection] = useState<string[]>([]);
   const [prepareOpen, setPrepareOpen] = useState(false);
   const [prepareMessage, setPrepareMessage] = useState("");
   const [loading, setLoading] = useState(true);
+  const [visibleMaterialCount, setVisibleMaterialCount] = useState(25);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const requestInFlight = useRef(false);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -42,13 +51,15 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
   const [date, setDate] = useState("");
   const [intervalDays, setIntervalDays] = useState(1);
   const previousJobs = useRef("");
+  const polling = useRef<ReturnType<typeof getMaterialSummaryStore> | null>(null);
   const changeRef = useRef(onChanged); changeRef.current = onChanged;
-  const storageKey = `material-selection-v1:${connectKind}`;
+  const storageKey = `material-selection-v2:${connectKind}`;
   const rewriteStorageKey = `material-failed-rewrite-v1:${connectKind}`;
   const repairStorageKey = `material-blocked-repair-v1:${connectKind}`;
   useEffect(() => {
     try { setSelection(JSON.parse(localStorage.getItem(storageKey) || "{}")); } catch { setSelection({}); }
     setPrepareSelection([]);
+    setVisibleMaterialCount(25);
     setFailedCandidates([]); setFailedCandidateCount(0); setLoading(true); setRewriteMessage("");
     setRepairCandidates([]); setRepairCandidateCount(0); setRepairMessage("");
     try {
@@ -64,41 +75,70 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
       if (sourceJobId) setRepairMessage("접수 결과가 확인되지 않은 보완 요청이 있습니다. 이전 요청을 확인·재시도하세요.");
     } catch { pendingRepair.current = null; setRepairRequestId(""); }
   }, [storageKey, rewriteStorageKey, repairStorageKey]);
-  const select = (next: Record<string, string>) => {
+  const select = (next: MaterialSelection) => {
     setSelection(next); localStorage.setItem(storageKey, JSON.stringify(next));
   };
-  const refresh = useCallback(async () => {
-    const response = await fetch(`/api/materials?connectKind=${encodeURIComponent(connectKind)}`, { cache: "no-store" });
-    const result = await response.json();
-    if (!response.ok || !result.success) throw new Error(result.error || "소재 목록을 읽지 못했습니다.");
+  const receiveMaterials = useCallback((data: MaterialSummarySnapshot) => {
     if (currentConnectKind.current !== connectKind) return;
-    setMaterials(result.data.materials); setJobs(result.data.jobs); setLoading(false);
-    setFailedCandidates(result.data.failedCandidates || []);
-    setFailedCandidateCount(result.data.failedCandidateCount ?? 0);
-    setRepairCandidates(result.data.repairCandidates || []);
-    setRepairCandidateCount(result.data.repairCandidateCount ?? 0);
+    const scopedMaterials = data.materials.filter(material => material.connectKind.toUpperCase() === connectKind.toUpperCase());
+    const materialKinds = new Map(data.materials.map(material => [material.productId, material.connectKind]));
+    const belongs = (item: { productId: string; connectKind?: string }) =>
+      (item.connectKind || materialKinds.get(item.productId))?.toUpperCase() === connectKind.toUpperCase();
+    const failed = (data.failedCandidates || []).filter(belongs);
+    const repair = (data.repairCandidates || []).filter(belongs);
+    setMaterials(scopedMaterials); setJobs(data.jobs); setLoading(false);
+    setFailedCandidates(failed); setFailedCandidateCount(failed.length);
+    setRepairCandidates(repair); setRepairCandidateCount(repair.length);
     const pending = pendingRewrite.current;
-    if (pending && result.data.jobs.some((job: Job) => job.sourceJobId === pending.sourceJobId && job.kind === "rewrite")) {
+    if (pending && data.jobs.some((job: Job) => job.sourceJobId === pending.sourceJobId && job.kind === "rewrite")) {
       try { localStorage.removeItem(pending.storageKey); } catch { /* The stable ID remains safe to replay. */ }
       pendingRewrite.current = null; setRewriteRequestId("");
       setRewriteMessage("실패 소재 재작성 요청이 접수되었습니다. 검증을 통과한 소재만 준비완료로 저장됩니다.");
     }
     const pendingComplement = pendingRepair.current;
-    if (pendingComplement && result.data.jobs.some((job: Job) => job.sourceJobId === pendingComplement.sourceJobId && job.kind === "repair")) {
+    if (pendingComplement && data.jobs.some((job: Job) => job.sourceJobId === pendingComplement.sourceJobId && job.kind === "repair")) {
       try { localStorage.removeItem(pendingComplement.storageKey); } catch { /* The stable ID remains safe to replay. */ }
       pendingRepair.current = null; setRepairRequestId("");
       setRepairMessage("소재 보완 요청이 접수되었습니다. 검증을 통과한 소재만 준비완료로 저장됩니다.");
     }
-    const signature = JSON.stringify(result.data.jobs.map((job: Job) => [job.jobId, job.status, job.items.map(item => item.status)]));
+    const signature = JSON.stringify([data.jobs.map((job: Job) => [job.jobId, job.status, job.items.map(item => item.status)]),
+      scopedMaterials.map(material => [material.productId, material.title, material.approvedAt, material.ready, material.status])]);
     if (previousJobs.current && signature !== previousJobs.current) changeRef.current();
     previousJobs.current = signature;
   }, [connectKind]);
+  const refresh = useCallback(() => currentConnectKind.current === connectKind
+    ? polling.current?.refresh() ?? Promise.resolve() : Promise.resolve(), [connectKind]);
   useEffect(() => {
-    let disposed = false;
-    const update = () => { if (!disposed) void refresh().catch(error => { if (!disposed) setMessage(error.message); }); };
-    update(); const timer = setInterval(update, 4000);
-    return () => { disposed = true; clearInterval(timer); };
-  }, [refresh]);
+    const current = getMaterialSummaryStore();
+    const unsubscribe = current.subscribe({ onData: receiveMaterials,
+      onError: error => setMessage(error instanceof Error ? error.message : String(error)) });
+    polling.current = current;
+    return () => { unsubscribe(); selectionController.current?.abort(); if (polling.current === current) polling.current = null; };
+  }, [receiveMaterials]);
+  const selectVerified = async (products: Material[], replace = false) => {
+    if (selectingRef.current || requestInFlight.current || jobs.some(job => ["running", "queued"].includes(job.status)) || !products.length) return;
+    selectingRef.current = true; setSelecting(true);
+    const controller = new AbortController(); selectionController.current = controller;
+    const kind = connectKind;
+    try {
+      const verified = await verifyMaterialSelection(products, fetch, controller.signal);
+      if (controller.signal.aborted || currentConnectKind.current !== kind) return;
+      if (products.some(product => currentMaterials.current.find(item => item.productId === product.productId)?.revision !== product.revision)) {
+        throw new Error("확인 중 소재가 변경됐습니다. 목록을 새로고침한 뒤 다시 선택하세요.");
+      }
+      const next = replace ? verified : { ...selection, ...verified };
+      select(next); setMessage("선택한 소재의 현재 검사를 통과했습니다. 발행할 때도 최종 상태를 다시 확인합니다.");
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setMessage(error instanceof Error ? error.message : String(error));
+        // A strict selection check can discover a failure hidden by the saved summary.
+        // Refresh only the shared metadata feed so its repair action becomes visible.
+        void refresh().catch(() => {});
+      }
+    } finally {
+      if (selectionController.current === controller) { selectionController.current = null; selectingRef.current = false; setSelecting(false); }
+    }
+  };
   useEffect(() => {
     if (!selectionRequest) return;
     if (selectionRequest.mode === "prepare") {
@@ -112,8 +152,7 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
     if (selectionRequest.productId) {
       const material = materials.find(item => item.productId === selectionRequest.productId);
       if (!material?.ready) { setMessage("이 상품의 소재 준비를 먼저 완료하세요. 아래에서 원고·이미지를 확인할 수 있습니다."); return; }
-      const next = { [material.productId]: material.revision };
-      setSelection(next); localStorage.setItem(storageKey, JSON.stringify(next));
+      void selectVerified([material], true);
     }
     setMode(selectionRequest.mode);
     setMessage("준비된 소재를 선택한 뒤 아래 발행 버튼을 눌러주세요.");
@@ -121,7 +160,7 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectionRequest?.nonce]);
   const selected = materials.filter(item => selection[item.productId]);
-  const valid = selected.length > 0 && selected.length === Object.keys(selection).length && selected.every(item => item.ready && selection[item.productId] === item.revision);
+  const valid = selected.length > 0 && selected.length === Object.keys(selection).length && selected.every(item => materialSelectionMatches(selection, item));
   const active = jobs.some(job => ["running", "queued"].includes(job.status));
   const pendingRecovery = Boolean(rewriteRequestId || repairRequestId);
   const readyCount = materials.filter(item => item.ready).length;
@@ -151,7 +190,7 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
     const notify = kind === "rewrite" ? setRewriteMessage : setRepairMessage;
     const setRequestId = kind === "rewrite" ? setRewriteRequestId : setRepairRequestId;
     const label = kind === "rewrite" ? "재작성" : "보완";
-    if (requestInFlight.current || active || (otherPending.current && !pending.current)) return;
+    if (requestInFlight.current || selectingRef.current || active || (otherPending.current && !pending.current)) return;
     requestInFlight.current = true; setBusy(true);
     const previousId = pending.current?.storageKey === recoveryStorageKey ? pending.current.sourceJobId : "";
     let sourceJobId = previousId;
@@ -191,7 +230,7 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
     } finally { requestInFlight.current = false; setBusy(false); }
   };
   const request = async (path: string, payload: object) => {
-    if (requestInFlight.current || pendingRewrite.current || pendingRepair.current) return;
+    if (requestInFlight.current || selectingRef.current || pendingRewrite.current || pendingRepair.current) return;
     requestInFlight.current = true;
     const preparing = path.endsWith("prepare");
     const notify = preparing ? setPrepareMessage : setMessage;
@@ -209,12 +248,12 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
     finally { requestInFlight.current = false; setBusy(false); }
   };
   const publish = () => request("/api/materials/publish", {
-    materials: selected.map(item => ({ productId: item.productId, revision: selection[item.productId] })),
+    materials: selected.map(item => ({ productId: item.productId, revision: selection[item.productId].revision })),
     publishMode: mode, ...(mode === "schedule" ? { scheduledAt: date, intervalDays } : {}),
   });
   const tomorrow = new Date(Date.now() + 86400000).toLocaleDateString("sv-SE", { timeZone: "Asia/Seoul" });
   return <section id="material-library" className="my-5 space-y-4 rounded-xl border border-violet-200 bg-white p-5">
-    <div><h2 className="text-lg font-bold text-slate-900">소재 보관함</h2><p className="mt-1 text-sm text-slate-600">1. 원고·이미지 미리작성 → 2. 준비된 소재 선택 → 3. 바로 또는 예약 발행</p></div>
+    <div><h2 className="text-lg font-bold text-slate-900">소재 보관함</h2><p className="mt-1 text-sm text-slate-600">목록은 저장된 검사 결과입니다. 소재 선택 시 현재 원고와 사진을 확인하고, 발행 직전에 다시 최종 검사합니다.</p></div>
     <div className="space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
       <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="font-semibold text-amber-950">실패 소재 복구</h3><p className="mt-1 text-sm text-amber-900">대상 {failedCandidateCount}개를 재작성하고 원고·이미지 검증과 승인까지 진행해 발행 준비를 마칩니다.</p></div>
         <button type="button" disabled={loading || failedCandidateCount === 0 || active || busy || pendingRecovery} onClick={() => void recoverMaterials("rewrite")} className="rounded-lg bg-amber-800 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">실패 소재 전체 재작성·검증 ({failedCandidateCount}개)</button>
@@ -223,7 +262,7 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
       <p className="text-xs text-amber-900">검증 통과 후 준비완료로 저장되며, 발행은 아래에서 별도로 선택합니다.</p>
       {active && <p className="text-xs text-amber-900">다른 소재 작업이 진행 중입니다. 완료 후 재작성할 수 있습니다.</p>}
       {rewriteMessage && <p role="status" className="rounded bg-white p-3 text-sm text-amber-950">{rewriteMessage}</p>}
-      {rewriteJob && <div role="status" className="rounded bg-white p-3 text-sm"><p className="font-semibold">재작성: 검증 통과 {rewriteJob.items.filter(item => item.status === "ready" && !item.error).length}/{rewriteJob.items.length}개 · 실패 {rewriteJob.items.filter(item => ["failed", "interrupted", "outcome_unknown"].includes(item.status) || item.error).length}개 · {jobStatusLabel(rewriteJob)}</p>{rewriteJob.items.filter(item => item.status !== "ready" || item.error).map(item => <p key={item.productId} className="mt-1 break-words">{candidates.find(candidate => candidate.id === item.productId)?.productName || failedCandidates.find(candidate => candidate.productId === item.productId)?.productName || item.productId}: {item.error || item.stage}{item.errorCode ? ` (${item.errorCode})` : ""}</p>)}</div>}
+      {rewriteJob && <div role="status" className="rounded bg-white p-3 text-sm"><p className="font-semibold">재작성: 당시 검증 통과 {rewriteJob.items.filter(item => item.status === "ready" && !item.error).length}/{rewriteJob.items.length}개 · 실패 {rewriteJob.items.filter(item => ["failed", "interrupted", "outcome_unknown"].includes(item.status) || item.error).length}개 · {jobStatusLabel(rewriteJob)}</p><p className="mt-1 text-emerald-800">저장된 검사 기준 준비완료 {currentJobReadyCount(rewriteJob.items.map(item => item.productId), materials)}/{rewriteJob.items.length}개</p>{rewriteJob.items.some(item => ["failed", "interrupted", "outcome_unknown"].includes(item.status) || item.error) && <details className="mt-2"><summary className="cursor-pointer font-semibold">실패 상세 보기 · {rewriteJob.items.filter(item => ["failed", "interrupted", "outcome_unknown"].includes(item.status) || item.error).length}건</summary>{rewriteJob.items.filter(item => ["failed", "interrupted", "outcome_unknown"].includes(item.status) || item.error).map(item => <MaterialJobItemResult key={item.productId} jobKind={rewriteJob.kind} item={item} title={materials.find(material => material.productId === item.productId)?.title || candidates.find(candidate => candidate.id === item.productId)?.productName || item.productId} current={materials.find(material => material.productId === item.productId)} />)}</details>}</div>}
       {failedCandidates.length > 0 && <details><summary className="cursor-pointer text-sm font-semibold text-amber-950">재작성 대상과 실패 원인 보기</summary><div className="mt-2 max-h-48 space-y-1 overflow-auto">{failedCandidates.map(item => <p key={item.productId} className="break-words text-sm text-amber-950">{item.productName || item.productId} — {item.reason}{item.errorCode ? ` (${item.errorCode})` : ""}</p>)}</div></details>}
     </div>
     <div className="space-y-3 rounded-lg border border-sky-200 bg-sky-50 p-3">
@@ -234,7 +273,7 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
       <p className="text-xs text-sky-900">기존 원고와 검증 통과 이미지를 보존하며 필요한 부분만 보완합니다. 검증 통과한 소재만 준비완료로 저장되고 발행은 별도로 선택합니다.</p>
       {active && <p className="text-xs text-sky-900">다른 소재 작업이 진행 중입니다. 완료 후 보완할 수 있습니다.</p>}
       {repairMessage && <p role="status" className="rounded bg-white p-3 text-sm text-sky-950">{repairMessage}</p>}
-      {repairJob && <div role="status" className="rounded bg-white p-3 text-sm"><p className="font-semibold">보완: 검증 통과 {repairJob.items.filter(item => item.status === "ready" && !item.error).length}/{repairJob.items.length}개 · 실패 {repairJob.items.filter(item => ["failed", "interrupted", "outcome_unknown"].includes(item.status) || item.error).length}개 · {jobStatusLabel(repairJob)}</p>{repairJob.items.filter(item => item.status !== "ready" || item.error).map(item => <p key={item.productId} className="mt-1 break-words">{candidates.find(candidate => candidate.id === item.productId)?.productName || repairCandidates.find(candidate => candidate.productId === item.productId)?.productName || item.productId}: {item.error || item.stage}{item.errorCode ? ` (${item.errorCode})` : ""}</p>)}</div>}
+      {repairJob && <div role="status" className="rounded bg-white p-3 text-sm"><p className="font-semibold">보완: 당시 검증 통과 {repairJob.items.filter(item => item.status === "ready" && !item.error).length}/{repairJob.items.length}개 · 실패 {repairJob.items.filter(item => ["failed", "interrupted", "outcome_unknown"].includes(item.status) || item.error).length}개 · {jobStatusLabel(repairJob)}</p><p className="mt-1 text-emerald-800">저장된 검사 기준 준비완료 {currentJobReadyCount(repairJob.items.map(item => item.productId), materials)}/{repairJob.items.length}개</p>{repairJob.items.some(item => ["failed", "interrupted", "outcome_unknown"].includes(item.status) || item.error) && <details className="mt-2"><summary className="cursor-pointer font-semibold">실패 상세 보기 · {repairJob.items.filter(item => ["failed", "interrupted", "outcome_unknown"].includes(item.status) || item.error).length}건</summary>{repairJob.items.filter(item => ["failed", "interrupted", "outcome_unknown"].includes(item.status) || item.error).map(item => <MaterialJobItemResult key={item.productId} jobKind={repairJob.kind} item={item} title={materials.find(material => material.productId === item.productId)?.title || candidates.find(candidate => candidate.id === item.productId)?.productName || item.productId} current={materials.find(material => material.productId === item.productId)} />)}</details>}</div>}
       {repairCandidates.length > 0 && <details><summary className="cursor-pointer text-sm font-semibold text-sky-950">보완 대상과 필요한 보완 내용 보기</summary><div className="mt-2 max-h-48 space-y-1 overflow-auto">{repairCandidates.map(item => <p key={item.productId} className="break-words text-sm text-sky-950">{item.productName || item.productId} — {item.reason}{item.errorCode ? ` (${item.errorCode})` : ""}</p>)}</div></details>}
     </div>
     {pendingRecovery && <p role="status" className="rounded bg-slate-100 p-3 text-sm text-slate-700">이전 복구 요청의 접수 결과를 확인해야 합니다. 같은 요청을 확인·재시도한 뒤 다음 준비·보완·재작성·발행 작업을 시작하세요.</p>}
@@ -245,41 +284,44 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
         <button type="button" disabled={!prepareSelection.length || busy || active || pendingRecovery} onClick={() => void request("/api/materials/prepare", { productIds: prepareSelection })} className="rounded bg-violet-700 px-4 py-2 text-sm text-white disabled:opacity-40">{busy ? "요청 접수 중…" : `선택 ${prepareSelection.length}개 소재 미리작성 시작`}</button>
       </div>
       {prepareMessage && <p role="status" className="mt-3 rounded bg-white p-3 text-sm text-violet-900">{prepareMessage}</p>}
-      {preparationJob && <div role="status" className="mt-3 rounded bg-white p-3 text-sm"><p>{jobLabel(preparationJob)}: {preparationJob.items.filter(item => item.status === "ready" && !item.error).length}/{preparationJob.items.length}개 {isRecoveryJob(preparationJob) ? "검증 통과" : "완료"} · {jobStatusLabel(preparationJob)}</p>{preparationJob.items.filter(item => item.status === "preparing" || item.error).map(item => <p key={item.productId}>{candidates.find(candidate => candidate.id === item.productId)?.productName || item.productId}: {item.error || item.stage}</p>)}</div>}
+      {preparationJob && <div role="status" className="mt-3 rounded bg-white p-3 text-sm"><p>{jobLabel(preparationJob)} · 당시 {preparationJob.items.filter(item => item.status === "ready" && !item.error).length}/{preparationJob.items.length}개 완료 · {jobStatusLabel(preparationJob)}</p><p className="mt-1 text-emerald-800">저장된 검사 기준 준비완료 {currentJobReadyCount(preparationJob.items.map(item => item.productId), materials)}/{preparationJob.items.length}개</p>{preparationJob.items.filter(item => item.status === "preparing" || item.error).map(item => <MaterialJobItemResult key={item.productId} jobKind={preparationJob.kind} item={item} title={materials.find(material => material.productId === item.productId)?.title || candidates.find(candidate => candidate.id === item.productId)?.productName || item.productId} current={materials.find(material => material.productId === item.productId)} />)}</div>}
       <div className="mt-3 max-h-48 space-y-2 overflow-auto">{candidates.map(item => <label key={item.id} className="flex items-center gap-2 text-sm"><input type="checkbox" aria-label={`${item.productName || item.id} 소재 준비`} checked={prepareSelection.includes(item.id)} onChange={event => setPrepareSelection(current => event.target.checked ? [...current, item.id].slice(0, 50) : current.filter(id => id !== item.id))} />{item.productName || item.id}</label>)}</div>
       {!candidates.length && <p className="mt-2 text-sm">상품을 먼저 동기화해 주세요.</p>}
     </details>
     <div className="flex flex-wrap items-center gap-2">
       <h3 className="mr-auto font-semibold">2. 준비된 소재 선택</h3>
-      <button type="button" disabled={loading || readyCount === 0 || active || busy} onClick={() => select(Object.fromEntries(materials.filter(item => item.ready).slice(0, 10).map(item => [item.productId, item.revision])))} className="rounded border px-3 py-2 text-sm">준비완료 {Math.min(readyCount, 10)}개 선택</button>
-      <button type="button" onClick={() => select({})} className="rounded border px-3 py-2 text-sm">선택 해제</button>
+      <button type="button" disabled={loading || readyCount === 0 || active || busy || selecting} onClick={() => void selectVerified(materials.filter(item => item.ready).slice(0, 10), true)} className="rounded border px-3 py-2 text-sm">준비완료 {Math.min(readyCount, 10)}개 선택</button>
+      <button type="button" disabled={selecting} onClick={() => select({})} className="rounded border px-3 py-2 text-sm">선택 해제</button>
       <button type="button" onClick={() => void refresh().catch(error => setMessage(error.message))} className="rounded border px-3 py-2 text-sm">새로고침</button>
     </div>
     {loading && <p role="status">소재 목록을 불러오는 중입니다…</p>}
     {!loading && !materials.length && <p className="rounded bg-slate-50 p-5 text-sm text-slate-500">저장된 소재가 없습니다. 위에서 상품을 선택하고 ‘소재 미리작성 시작’을 눌러주세요.</p>}
-    <div className="max-h-[560px] space-y-2 overflow-auto">{materials.map(item => <div key={item.productId} className={`rounded-lg border p-3 ${selection[item.productId] ? "border-violet-400 bg-violet-50" : "border-slate-200"}`}>
-      <div className="flex items-start gap-3"><input type="checkbox" className="mt-1" aria-label={`${item.title} 발행 선택`} disabled={!item.ready || active} checked={Boolean(selection[item.productId])} onChange={event => { const next = { ...selection }; if (event.target.checked) next[item.productId] = item.revision; else delete next[item.productId]; select(next); }} />
-        <div className="min-w-0 flex-1"><p className="font-semibold">{item.title}</p><p className="mt-1 text-xs text-slate-500">{item.ready ? "발행 준비완료" : item.status === "PUBLISHED" ? "발행 완료" : item.status === "SCHEDULED" ? "예약 등록 완료" : "확인 필요"} · 내용 {item.score ?? "미평가"}{item.score !== null ? "점" : ""} · 이미지 {item.imageCount}장</p>
-          {item.blockers.map((reason, index) => <p key={index} className="mt-1 text-xs text-amber-800">{reason}</p>)}
-          {selection[item.productId] && selection[item.productId] !== item.revision && <p className="mt-1 text-xs text-red-700">선택 후 소재가 변경되었습니다. 해제 후 다시 선택하세요.</p>}</div>
+    {selecting && <p role="status" className="text-sm text-violet-700">선택한 소재의 현재 원고와 사진을 확인하고 있습니다…</p>}
+    <div className="max-h-[560px] space-y-2 overflow-auto">{materials.slice(0, visibleMaterialCount).map(item => <div key={item.productId} className={`rounded-lg border p-3 ${selection[item.productId] ? "border-violet-400 bg-violet-50" : "border-slate-200"}`}>
+      <div className="flex items-start gap-3"><input type="checkbox" className="mt-1" aria-label={`${item.title} 발행 선택`} disabled={!item.ready || active || selecting} checked={Boolean(selection[item.productId])} onChange={event => { if (event.target.checked) void selectVerified([item]); else { const next = { ...selection }; delete next[item.productId]; select(next); } }} />
+        <div className="min-w-0 flex-1"><p className="font-semibold">{item.title}</p><p className="mt-1 text-xs text-slate-500">{item.ready ? "저장된 검사 기준 준비완료" : item.status === "PUBLISHED" ? "발행 완료" : item.status === "SCHEDULED" ? "예약 등록 완료" : "확인 필요"} · 내용 {item.score ?? "미평가"}{item.score !== null ? "점" : ""} · 이미지 {item.imageCount}장</p>
+          <p className="mt-1 text-xs text-slate-500">{item.verification?.contentCheckedAt ? `저장된 검사: ${new Date(item.verification.contentCheckedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })} · 선택·발행 전 재확인` : "저장된 검사 시각 확인 필요 · 선택·발행 전 재확인"}</p>
+          {item.blockers.length > 0 && <details className="mt-1 text-xs text-amber-800"><summary className="cursor-pointer">실패 상세 보기 · {item.blockers.length}건</summary>{item.blockers.map((reason, index) => <p key={index} className="mt-1 whitespace-pre-wrap break-words">{reason}</p>)}</details>}
+          {selection[item.productId] && !materialSelectionMatches(selection, item) && <p className="mt-1 text-xs text-red-700">선택 후 소재가 변경되었습니다. 해제 후 다시 선택하세요.</p>}</div>
         <button type="button" onClick={() => onPreview(item.productId)} className="shrink-0 rounded border px-3 py-2 text-sm">원고·이미지 확인</button></div>
     </div>)}</div>
+    {materials.length > visibleMaterialCount && <button type="button" onClick={() => setVisibleMaterialCount(count => count + 25)} className="rounded border px-3 py-2 text-sm">소재 더 보기 ({Math.min(visibleMaterialCount, materials.length)}/{materials.length}개)</button>}
     <div className="flex flex-wrap items-center gap-3 rounded-lg bg-slate-50 p-3">
       <span className="font-semibold">3. 선택 {selected.length}개 발행</span>
       <label className="text-sm"><input type="radio" name="material-publish-mode" checked={mode === "now"} onChange={() => setMode("now")} /> 바로 발행</label>
       <label className="text-sm"><input type="radio" name="material-publish-mode" checked={mode === "schedule"} onChange={() => setMode("schedule")} /> 예약 발행</label>
-      <button type="button" disabled={!valid || active || busy || pendingRecovery} onClick={() => { if (mode === "schedule") { setDate(date || tomorrow); setScheduleOpen(true); } else void publish(); }} className="rounded-lg bg-emerald-700 px-4 py-2 font-semibold text-white disabled:opacity-40">{mode === "schedule" ? "예약일 설정" : `선택 ${selected.length}개 바로 발행`}</button>
+      <button type="button" disabled={!valid || active || busy || selecting || pendingRecovery} onClick={() => { if (mode === "schedule") { setDate(date || tomorrow); setScheduleOpen(true); } else void publish(); }} className="rounded-lg bg-emerald-700 px-4 py-2 font-semibold text-white disabled:opacity-40">{mode === "schedule" ? "예약일 설정" : `선택 ${selected.length}개 바로 발행`}</button>
       <p className="w-full text-xs text-slate-500">발행에는 저장된 원고와 이미지만 사용합니다. 미완성 소재는 선택할 수 없습니다.</p>
     </div>
     {message && <p role="status" className="rounded bg-blue-50 p-3 text-sm text-blue-900">{message}</p>}
-    {jobs.length > 0 && <details open={active || undefined} className="rounded-lg border p-3"><summary className="cursor-pointer font-semibold">작업 기록 {active ? "· 진행 중" : ""}</summary><div className="mt-2 max-h-72 space-y-3 overflow-auto">{jobs.slice(0, 10).map(job => <div key={job.jobId} className="rounded bg-slate-50 p-3 text-sm"><p className="font-semibold">{jobLabel(job)} · {jobStatusLabel(job)} · {job.items.length}개{isRecoveryJob(job) ? ` · 검증 통과 ${job.items.filter(item => item.status === "ready" && !item.error).length}개` : ""}</p><p className="text-xs text-slate-500">{new Date(job.startedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}</p>{job.items.map(item => <p key={item.productId} className="mt-1 break-words">{materials.find(material => material.productId === item.productId)?.title || candidates.find(candidate => candidate.id === item.productId)?.productName || item.productId} — {item.stage}{item.scheduledDate ? ` (${item.scheduledDate})` : ""}{item.error ? `: ${item.error}` : ""}{item.errorCode ? ` (${item.errorCode})` : ""}</p>)}</div>)}</div></details>}
+    {jobs.length > 0 && <details open={active || undefined} onToggle={event => setHistoryOpen(event.currentTarget.open)} className="rounded-lg border p-3"><summary className="cursor-pointer font-semibold">작업 기록 {active ? "· 진행 중" : ""}</summary>{(active || historyOpen) && <><p className="mt-2 text-xs text-slate-500">당시 실행 결과는 보존됩니다. 아래 준비완료 수는 저장된 검사 기준이며 발행 전 다시 확인합니다.</p><div className="mt-2 max-h-72 space-y-3 overflow-auto">{jobs.slice(0, 10).map(job => <div key={job.jobId} className="rounded bg-slate-50 p-3 text-sm"><p className="font-semibold">{jobLabel(job)} · 당시 {jobStatusLabel(job)} · {job.items.length}개{isRecoveryJob(job) ? ` · 당시 검증 통과 ${job.items.filter(item => item.status === "ready" && !item.error).length}개` : ""}</p>{job.kind !== "publish" && <p className="mt-1 text-emerald-800">저장된 검사 기준 준비완료 {currentJobReadyCount(job.items.map(item => item.productId), materials)}/{job.items.length}개</p>}<p className="text-xs text-slate-500">{new Date(job.startedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}</p>{job.items.map(item => <MaterialJobItemResult key={item.productId} jobKind={job.kind} item={item} title={materials.find(material => material.productId === item.productId)?.title || candidates.find(candidate => candidate.id === item.productId)?.productName || item.productId} current={materials.find(material => material.productId === item.productId)} />)}</div>)}</div></>}</details>}
     {scheduleOpen && <div role="dialog" aria-modal="true" aria-labelledby="material-schedule-title" className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4"><div className="w-full max-w-md space-y-4 rounded-xl bg-white p-6">
       <h3 id="material-schedule-title" className="text-lg font-bold">선택 {selected.length}개 예약발행</h3>
       <label className="block text-sm">예약 시작일 (한국시간)<input autoFocus type="date" min={tomorrow} value={date} onChange={event => setDate(event.target.value)} className="mt-1 w-full rounded border p-2" /></label>
       <label className="block text-sm">소재별 예약 간격 (일)<input type="number" min={1} max={30} value={intervalDays} onChange={event => setIntervalDays(Number(event.target.value))} className="mt-1 w-full rounded border p-2" /></label>
       <p className="text-sm text-slate-600">선택 목록 순서대로 하루에 한 소재씩, 지정한 간격으로 예약합니다.</p>
       {message && <p role="alert" className="text-sm text-red-700">{message}</p>}
-      <div className="flex justify-end gap-2"><button type="button" onClick={() => setScheduleOpen(false)} className="rounded border px-4 py-2">취소</button><button type="button" disabled={busy || active || pendingRecovery || !valid || date < tomorrow} onClick={() => void publish()} className="rounded bg-indigo-700 px-4 py-2 text-white disabled:opacity-40">선택 소재 예약발행</button></div>
+      <div className="flex justify-end gap-2"><button type="button" onClick={() => setScheduleOpen(false)} className="rounded border px-4 py-2">취소</button><button type="button" disabled={busy || active || selecting || pendingRecovery || !valid || date < tomorrow} onClick={() => void publish()} className="rounded bg-indigo-700 px-4 py-2 text-white disabled:opacity-40">선택 소재 예약발행</button></div>
     </div></div>}
   </section>;
 }
