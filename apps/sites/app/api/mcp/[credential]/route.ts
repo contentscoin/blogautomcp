@@ -124,7 +124,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'brandconnect_list_products',
     title: '브랜드커넥트 상품 목록',
-    description: '로컬 PC에 가져온 쇼핑커넥트 또는 여행커넥트 상품 목록을 조회합니다. keyword 로 상품명을 검색하고 writingStatus 로 초안 작성 여부를 거를 수 있습니다.',
+    description: '로컬 PC에 가져온 쇼핑커넥트 또는 여행커넥트 상품 목록을 조회합니다. keyword 로 상품명을 검색하고 writingStatus 로 초안 작성 여부를 거를 수 있습니다. draft.canPublish는 저장된 원고 품질검사 결과이며 이미 발행한 상품에서도 true일 수 있습니다. 발행 대상을 고를 때는 상품 status와 materials_list의 현재 ready·materialStatus·revision을 함께 확인하고 PUBLISHED·예약·결과 불확실 소재를 다시 발행하지 마세요.',
     inputSchema: { type: 'object', properties: { connectKind: CONNECT_KIND, status: { type: 'string', enum: ['all', 'ready', 'published', 'failed'], default: 'all' }, writingStatus: { type: 'string', enum: ['all', 'written', 'unwritten'], default: 'all' }, keyword: { type: 'string', maxLength: 80 }, limit: { type: 'integer', minimum: 1, maximum: 200, default: 50 }, sort: { type: 'string', enum: ['newest', 'oldest', 'name'], default: 'newest' }, idempotencyKey: IDEMPOTENCY }, required: ['connectKind'], additionalProperties: false },
     outputSchema: JOB_RESULT_SCHEMA,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -326,7 +326,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'materials_list',
     title: '준비 소재와 작업 상태 조회',
-    description: '저장된 소재의 productId, revision, 준비 상태와 차단 사유를 조회합니다. 준비·발행 시작 결과의 workflowJobId를 jobId로 전달하면 같은 작업의 최종 상태를 확인합니다. 이 도구는 생성하거나 발행하지 않습니다.',
+    description: '저장된 소재의 productId, revision, 준비 상태와 차단 사유를 조회합니다. 발행 대상은 현재 ready=true이며 materialStatus=READY인 소재에서 선택하고 PUBLISHED·예약·결과 불확실 소재를 다시 발행하지 마세요. 준비·발행 시작 결과의 workflowJobId를 jobId로 전달하면 같은 작업의 최종 상태를 확인합니다. 이 도구는 생성하거나 발행하지 않습니다.',
     inputSchema: MATERIALS_LIST_INPUT_SCHEMA,
     outputSchema: JOB_RESULT_SCHEMA,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -384,7 +384,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'post_publish',
     title: '네이버 블로그 즉시 발행',
-    description: '호환용 이전 발행 명령입니다. draftId가 준비 완료 소재의 productId와 일치하면 해당 소재 한 건을 즉시 발행합니다. 생성·자동 보강·임의 선택은 하지 않습니다. 가능하면 materials_list와 materials_publish를 우선 사용하세요.',
+    description: '실제로 네이버 블로그에 게시하는 호환용 즉시 발행 명령입니다. draftId가 준비 완료 소재의 productId와 일치하면 해당 소재 한 건을 즉시 발행합니다. 사용자가 이 소재의 발행을 명시적으로 지시한 경우 confirmed=true를 전달하세요. 생성·자동 보강·임의 선택은 하지 않습니다. 가능하면 materials_list와 materials_publish를 우선 사용하고 이미 발행했거나 결과가 불확실한 소재는 재실행 전에 post_verify_published로 확인하세요.',
     inputSchema: { type: 'object', properties: { connectKind: CONNECT_KIND, draftId: ID_FIELD, confirmed: { type: 'boolean', const: true }, idempotencyKey: IDEMPOTENCY }, required: ['connectKind', 'draftId', 'confirmed', 'idempotencyKey'], additionalProperties: false },
     outputSchema: JOB_RESULT_SCHEMA,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
@@ -396,7 +396,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'post_schedule',
     title: '네이버 블로그 예약 발행',
-    description: '호환용 이전 예약 명령입니다. draftId가 준비 완료 소재의 productId와 일치하면 해당 소재 한 건을 scheduledDate에 예약합니다. 생성·자동 보강·임의 선택은 하지 않습니다. 가능하면 materials_list와 materials_publish를 우선 사용하세요.',
+    description: '실제로 네이버 블로그 예약을 등록하는 호환용 예약 발행 명령입니다. draftId가 준비 완료 소재의 productId와 일치하면 해당 소재 한 건을 scheduledDate(KST, YYYY-MM-DD)에 예약합니다. 사용자가 이 소재와 날짜의 예약을 명시적으로 지시한 경우 confirmed=true를 전달하세요. 생성·자동 보강·임의 선택은 하지 않습니다. 가능하면 materials_list와 materials_publish를 우선 사용하고 이미 예약했거나 결과가 불확실한 소재는 재실행 전에 post_verify_published로 확인하세요.',
     inputSchema: { type: 'object', properties: { connectKind: CONNECT_KIND, draftId: ID_FIELD, scheduledDate: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' }, confirmed: { type: 'boolean', const: true }, idempotencyKey: IDEMPOTENCY }, required: ['connectKind', 'draftId', 'scheduledDate', 'confirmed', 'idempotencyKey'], additionalProperties: false },
     outputSchema: JOB_RESULT_SCHEMA,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },

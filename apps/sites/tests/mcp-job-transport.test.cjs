@@ -234,6 +234,70 @@ test('all public tools request offline renewal consent while retaining their rea
   }
 });
 
+test('both tools/list protocols expose preparation, recovery and shopping reference contracts together', async () => {
+  const listings = [];
+  for (const protocol of ['2025-11-25', '2026-07-28']) {
+    const response = await route.handleMcpRequest(new Request('https://example.test/api/mcp', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'mcp-protocol-version': protocol },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+    }), 'owner', 'mcp:read mcp:write');
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    const tools = payload.result.tools;
+    listings.push(tools);
+    assert.equal(new Set(tools.map(tool => tool.name)).size, tools.length);
+    const byName = name => {
+      const tool = tools.find(tool => tool.name === name);
+      assert.ok(tool, `${protocol} must advertise ${name}, rather than only accepting an unlisted call`);
+      return tool;
+    };
+    const profile = byName('account_get_profile');
+    assert.equal(profile._meta['openai/profile'], true);
+    assert.equal(profile.annotations.readOnlyHint, true);
+    assert.deepEqual(profile.inputSchema.properties, {});
+    for (const name of ['post_prepare_material', 'materials_rewrite_failed', 'materials_repair_blocked']) {
+      const tool = byName(name);
+      assert.equal(tool.annotations.readOnlyHint, false);
+      assert.ok(tool.inputSchema.required.includes('idempotencyKey'));
+      assert.ok(tool.inputSchema.properties.productIds);
+    }
+    assert.deepEqual(byName('post_prepare_material').inputSchema, byName('materials_prepare').inputSchema);
+    const apply = byName('post_apply_section_image');
+    const hashes = apply.inputSchema.properties.referenceHashes;
+    assert.equal(hashes.type, 'array');
+    assert.equal(hashes.minItems, 1);
+    assert.equal(hashes.maxItems, 2);
+    assert.equal(hashes.items.pattern, '^[a-f0-9]{64}$');
+    assert.match(apply.description, /referenceHashes/u);
+    assert.equal(apply.inputSchema.additionalProperties, false);
+    assert.ok(!apply.inputSchema.required.includes('referenceHashes'), 'travel retains its no-reference input; shopping is enforced by the call guard');
+    for (const tool of tools) assert.ok(!('jobType' in tool) && !('minAppVersion' in tool), 'private queue configuration is not a public descriptor');
+  }
+  assert.deepEqual(listings[0], listings[1], 'modern and legacy clients must receive the same complete tool contracts');
+});
+
+test('public guidance separates manuscript quality from readiness and labels compatibility publication as a real write', async () => {
+  const response = await route.handleMcpRequest(new Request('https://example.test/api/mcp', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+  }), 'owner', 'mcp:read mcp:write');
+  const tools = (await response.json()).result.tools;
+  const byName = name => tools.find(tool => tool.name === name);
+  assert.match(byName('brandconnect_list_products').description, /draft\.canPublish는 저장된 원고 품질검사/u);
+  assert.match(byName('brandconnect_list_products').description, /이미 발행한 상품에서도 true/u);
+  assert.match(byName('materials_list').description, /ready=true이며 materialStatus=READY/u);
+  for (const name of ['post_publish', 'post_schedule']) {
+    const tool = byName(name);
+    assert.match(tool.description, /실제로 네이버 블로그/u);
+    assert.match(tool.description, /confirmed=true/u);
+    assert.match(tool.description, /post_verify_published/u);
+    assert.equal(tool.inputSchema.properties.confirmed.const, true);
+    assert.ok(tool.inputSchema.required.includes('confirmed'));
+    assert.ok(tool.inputSchema.required.includes('idempotencyKey'));
+    assert.deepEqual(tool.annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true });
+  }
+});
+
 test('draft repair tool guidance preserves images and reruns current approval quality', async () => {
   const request = new Request('https://example.com/api/mcp', {
     method: 'POST',
