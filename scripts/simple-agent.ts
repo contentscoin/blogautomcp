@@ -1,6 +1,7 @@
 import {
   applyFreeformDraftRevision,
   assertUntargetedSectionHashesUnchanged,
+  requestsFreeformSectionHeadingRevision,
   requestsFreeformTitleRevision,
 } from "./lib/freeform-draft-revision";
 import { getBrandPostPackageDir, readBrandPostPackage, type BrandPostPackageImageAsset, type BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
@@ -4990,9 +4991,10 @@ async function step2_generatePost(product: ProductInfo, brandLink: string, produ
   if (specInput?.submittedPrewritingPhotoProof) return continueWithPhoto(specInput.submittedPrewritingPhotoProof);
   return withShoppingPrewritePhoto({ snapshot, selectedSourceDirectory: TEMP_PATH,
     candidatePaths: [product.representativeImagePath || "", ...product.imagePaths].filter(Boolean) }, continueWithPhoto,
-    { select: selectShoppingPrewriteOriginal, recoverSourcePixels: async () => {
+    { select: selectShoppingPrewriteOriginal, recoverSourcePixels: async (acceptSourcePhoto) => {
     const recovered = await recoverProductPhotoRegion({ productName: product.name, localCandidates: product.imagePaths,
       sourceImageUrls: product.sourceImageUrls, outputDir: TEMP_PATH,
+      acceptSourcePhoto,
       onCreated: file => { publishImageCleanup.track([file]); },
     });
     if (recovered && !product.imagePaths.includes(recovered)) product.imagePaths.push(recovered);
@@ -10042,7 +10044,7 @@ function classifyFailureCode(error: unknown): string {
       messages.push(current);
     }
   }
-  const explicitCode = codes.find((code) => /^(?:SOURCE_EVIDENCE_REQUIRED|SOURCE_REVIEW_INCOMPLETE|IMAGE_SOURCE_BINDING_REQUIRED|PREWRITING_PHOTO_CHANGED|PREWRITING_SOURCE_CHANGED|QUALITY_REPAIR_EXHAUSTED|QUALITY_REPAIR_REJECTED|CHATGPT_BROWSER_UNREACHABLE|DRAFT_SECTION_COUNT_OUT_OF_RANGE|DRAFT_RECHECK_REQUIRED)$/u.test(code));
+  const explicitCode = codes.find((code) => /^(?:SOURCE_EVIDENCE_REQUIRED|SOURCE_REVIEW_INCOMPLETE|IMAGE_SOURCE_BINDING_REQUIRED|PREWRITING_PHOTO_CHANGED|PREWRITING_SOURCE_CHANGED|QUALITY_REPAIR_EXHAUSTED|QUALITY_REPAIR_REJECTED|DRAFT_REVISION_FORMAT_INVALID|REVISION_RENDER_SCOPE_AMBIGUOUS|CHATGPT_BROWSER_UNREACHABLE|DRAFT_SECTION_COUNT_OUT_OF_RANGE|DRAFT_RECHECK_REQUIRED)$/u.test(code));
   if (explicitCode === "QUALITY_REPAIR_REJECTED") return "QUALITY_REPAIR_EXHAUSTED";
   if (explicitCode) return explicitCode;
   const message = messages.join(" ") || getErrorMessage(error);
@@ -10050,6 +10052,8 @@ function classifyFailureCode(error: unknown): string {
   if (embeddedProviderCode) return embeddedProviderCode;
   const prewritingCode = message.match(/\b(SOURCE_REVIEW_INCOMPLETE|IMAGE_SOURCE_BINDING_REQUIRED|PREWRITING_PHOTO_CHANGED|PREWRITING_SOURCE_CHANGED):/u)?.[1];
   if (prewritingCode) return prewritingCode;
+  const revisionCode = message.match(/\b(DRAFT_REVISION_FORMAT_INVALID|REVISION_RENDER_SCOPE_AMBIGUOUS):/u)?.[1];
+  if (revisionCode) return revisionCode;
   if (/SOURCE_EVIDENCE_REQUIRED/u.test(message)) return "SOURCE_EVIDENCE_REQUIRED";
   if (/QUALITY_REPAIR_(?:EXHAUSTED|REJECTED)/u.test(message)) return "QUALITY_REPAIR_EXHAUSTED";
   if (/세션|로그인/u.test(message)) return "NAVER_SESSION_EXPIRED";
@@ -10183,8 +10187,10 @@ async function runPreparedPostRevision(
   let lastCandidateQuality = beforeQuality;
   let previousAttemptQuality: BrandLinkContentReadiness | null = null;
   let previousFeedback = "";
+  let lastCandidateError: Error | null = null;
   const maximumAttempts = qualityConvergence ? 3 : 1;
   const allowTitleChange = requestsFreeformTitleRevision(instructions);
+  const allowCandidateSectionHeadingChange = !qualityConvergence && requestsFreeformSectionHeadingRevision(instructions);
   const acceptedIncrementalIndexes = new Set<number>();
   const writingContract = createWritingPromptContract({ kind: connectKind, product: { name, description, features },
     minimumSections: selected.sections.length, maximumSections: selected.sections.length,
@@ -10226,10 +10232,11 @@ async function runPreparedPostRevision(
     let candidateResult: AssembledPost | null = null;
     let candidate = selected;
     try {
+      lastCandidateError = null;
       // Automated convergence uses one bounded JSON edit call per candidate.
       // The spec repair path calls the model once per section and can outlive
       // the MCP request when every section is selected.
-      if (prepared.spec && prepared.draft && !qualityConvergence) {
+      if (prepared.spec && prepared.draft && !qualityConvergence && !allowCandidateSectionHeadingChange) {
         candidateResult = await reviseAssembledPost({ spec: prepared.spec, draft: prepared.draft,
           instructions: attemptInstructions, sectionIndexes: allowedIndexes,
           brandLink: link.url, options: { quotationHeaders: NAVER_EDITOR_QUOTATION_ENABLED } });
@@ -10238,9 +10245,14 @@ async function runPreparedPostRevision(
         const response = await generateWithAI(
           "저장된 사실만 사용해 품질 문제를 해결하는 한국어 편집자입니다. JSON만 반환하세요.",
           JSON.stringify({ instructions: attemptInstructions, qualityFeedback: diagnostic, sourceSnapshot: snapshot,
-            title: selected.title, sections: selected.sections.map((text, index) => ({ index, text })), allowedIndexes,
-            rules: `${allowCandidateTitleChange ? "요청된 범위에서 글 제목을 수정할 수 있습니다. 제목만 고칠 때 updates는 빈 배열로 반환하세요." : "글 제목을 변경하지 마세요."}${titleOnlyRepair ? " 이번 요청은 제목만 보완합니다. 본문은 통과했으므로 모든 문단과 고지를 그대로 보존하고 updates는 반드시 빈 배열로 반환하세요." : ""} allowedIndexes에 든 문단만 수정하세요. 문단 소제목·순서·이미지 의미와 마지막 커넥트 고지는 유지하세요. 상품명이나 검색 키워드만 보고 성분·성능·체험을 추정하지 마세요. 수정 문단은 본문만 반환하세요.`,
-            output: { ...(allowCandidateTitleChange ? { title: "수정한 글 제목" } : {}), updates: titleOnlyRepair ? [] : [{ index: allowedIndexes[0], body: "수정 본문(소제목 제외)" }] } }), {
+            title: selected.title, sections: selected.sections.map((text, index) => ({ index, text,
+              ...(!qualityConvergence && prepared.composition!.sections[index]
+                ? { bodyParagraphs: prepared.composition!.sections[index].body } : {}) })), allowedIndexes,
+            rules: `${allowCandidateTitleChange ? "요청된 범위에서 글 제목을 수정할 수 있습니다. 제목만 고칠 때 updates는 빈 배열로 반환하세요." : "글 제목을 변경하지 마세요."}${titleOnlyRepair ? " 이번 요청은 제목만 보완합니다. 본문은 통과했으므로 모든 문단과 고지를 그대로 보존하고 updates는 반드시 빈 배열로 반환하세요." : ""} allowedIndexes에 든 문단만 수정하세요. ${allowCandidateSectionHeadingChange ? "명시적으로 교정을 요청한 소제목만 heading으로 반환할 수 있습니다. 소제목만 고칠 때 body/paragraphs를 생략하면 기존 본문을 그대로 보존합니다." : "문단 소제목은 유지하고 heading을 반환하지 마세요."} 순서·이미지 의미와 마지막 커넥트 고지는 유지하세요. 상품명이나 검색 키워드만 보고 성분·성능·체험을 추정하지 마세요. ${qualityConvergence ? "수정 문단은 body 본문만 반환하세요." : "본문 수정은 저장된 bodyParagraphs와 같은 개수의 paragraphs 배열로 반환하세요. 각 원소는 개행 없는 한 문단이며 문단을 합치거나 나누지 마세요. body와 paragraphs를 함께 반환하지 마세요."}`,
+            output: { ...(allowCandidateTitleChange ? { title: "수정한 글 제목" } : {}), updates: titleOnlyRepair ? [] : [{ index: allowedIndexes[0],
+              ...(allowCandidateSectionHeadingChange ? { heading: "명시적으로 교정한 소제목" } : {}),
+              ...(qualityConvergence ? { body: "수정 본문(소제목 제외)" }
+                : { paragraphs: prepared.composition!.sections[allowedIndexes[0]].body.map((_, index) => `수정한 ${index + 1}번 문단`) }) }] } }), {
             connectKind, productName: name, description, features, price, originalPrice: "", discountRate: "", couponInfo: "", deliveryInfo: "", reviewCount: "", rating: "",
             brandLink: link.url, targetSectionCount: selected.sections.length, minimumSectionCount: selected.sections.length,
             maximumSectionCount: selected.sections.length, writingContract,
@@ -10251,7 +10263,9 @@ async function runPreparedPostRevision(
           { title: selected.title, sections: selected.sections },
           response,
           allowedIndexes,
-          { allowTitleChange: allowCandidateTitleChange, allowEmptyBodyScope: titleOnlyRepair },
+          { allowTitleChange: allowCandidateTitleChange, allowEmptyBodyScope: titleOnlyRepair,
+            allowSectionHeadingChange: allowCandidateSectionHeadingChange,
+            ...(!qualityConvergence ? { bodyParagraphs: prepared.composition.sections.map(section => section.body) } : {}) },
         );
         const candidateSections = incrementalOnly
           ? revision.sections.map((section, index) => allowedIndexes.includes(index) ? stripInternalGuidanceSentences(section) : section)
@@ -10291,11 +10305,15 @@ async function runPreparedPostRevision(
       // converting it into an editorial QUALITY_REPAIR_REJECTED result.
       if (codexDraftTerminalFailureCode(error)) throw error;
       previousFeedback = getErrorMessage(error);
+      lastCandidateError = /^[A-Z][A-Z0-9_]+:/u.test(previousFeedback)
+        ? error instanceof Error ? error : new Error(previousFeedback)
+        : Object.assign(new Error(`DRAFT_REVISION_FORMAT_INVALID: ${previousFeedback}`, { cause: error }), { code: "DRAFT_REVISION_FORMAT_INVALID" });
       console.log(`   자동 보강 후보 ${attempt}/${maximumAttempts} 형식 오류: ${previousFeedback}`);
     }
   }
   // A draft that already passes needs no candidate; keep it instead of calling that a rejection.
   if (!applied && !(qualityConvergence && selectedQuality.canPublish)) {
+    if (lastCandidateError) throw lastCandidateError;
     throw new Error(`QUALITY_REPAIR_REJECTED: ${maximumAttempts}개 후보가 기존 원고보다 나아지지 않아 원문을 보존했습니다. ${feedbackFor(lastCandidateQuality)}`);
   }
   if (qualityConvergence && !selectedQuality.canPublish) {

@@ -122,7 +122,7 @@ const emitted = ts.transpileModule(`result = ${writerPrompt.getText(source)};`, 
 }).outputText;
 const sandbox = { result: "", attemptInstructions: "제목 상품명 보완", diagnostic: before.summary,
   snapshot: { fixture: true }, selected: draft, allowedIndexes: scope, allowCandidateTitleChange: true,
-  titleOnlyRepair: true };
+  titleOnlyRepair: true, qualityConvergence: true, allowCandidateSectionHeadingChange: false };
 vm.runInNewContext(emitted, sandbox);
 const actualPrompt = JSON.parse(sandbox.result);
 assert.deepEqual(actualPrompt.allowedIndexes, []);

@@ -15,6 +15,7 @@ import { assertShoppingPrewritePhoto, persistPrewritePhotoForContext, readSubmit
 import { codexWritingImageRoles, resolveCodexWritingImages, runCodexDraft, codexDraftTerminalFailureCode } from "./lib/codex-draft-provider";
 import { SHOPPING_NATURAL_SCENE_ROLES } from "./lib/shopping-scene-roles";
 import type { ProductSourceAuditContext } from "./lib/product-source-audit-context";
+import { recoverProductPhotoRegion } from "./lib/product-photo-region";
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "blogautomcp-prewrite-"));
@@ -265,6 +266,61 @@ async function main() {
     });
     assert.equal(regionRecoveries, 1); assert.equal(sourceSelections, 2);
     assert.equal(fallbackContexts[0], fallbackContexts[1], "the existing source-region fallback preserves the same canonical comparison context");
+    // The actual reported failure: five insertable seller panels fail, while a
+    // sixth clean original already exists in the exact selected seller pool.
+    const sellerUrls = Array.from({ length: 6 }, (_, index) => `https://shop-phinf.pstatic.net/selected-${index}.png`);
+    const sellerFiles = sellerUrls.map((sourceUrl, index) => {
+      const source = path.join(root, `selected-seller-${index}.png`);
+      fs.writeFileSync(source, Buffer.concat([bytes, Buffer.from(`selected seller ${index}`)]));
+      fs.writeFileSync(`${source}.retrieval.json`, JSON.stringify({ version: "product-image-retrieval/v1", sourceUrl,
+        sha256: hash(source), retrievedAt: new Date(Date.now() - 1000).toISOString(), identityVerified: false }));
+      return source;
+    });
+    const sellerSnapshot = createProductSnapshot({ ...snapshot(), product: { ...snapshot().product, referenceImageUrls: sellerUrls } });
+    let sameGateCalls = 0, repeatedInitialReviews = 0, sourceDownloads = 0, regionModelCalls = 0;
+    let originalContext: ProductSourceAuditContext | undefined;
+    const sixthProof = await withShoppingPrewritePhoto({ snapshot: sellerSnapshot, selectedSourceDirectory: root,
+      candidatePaths: sellerFiles.slice(0, 5) }, async proof => proof, {
+      select: async (paths, name, selected, context) => {
+        sameGateCalls++;
+        if (sameGateCalls === 1) {
+          originalContext = context; assert.deepEqual(paths, sellerFiles.slice(0, 5)); return null;
+        }
+        assert.equal(context, originalContext, "recovered full gate uses the same frozen source/option context object");
+        assert.equal(context?.selectedSourceSnapshot?.snapshotId, sellerSnapshot.snapshotId);
+        if (paths.some(candidate => sellerFiles.slice(0, 5).includes(candidate))) repeatedInitialReviews++;
+        assert.deepEqual(paths, [sellerFiles[5]]);
+        return accepted(paths, name, selected);
+      },
+      recoverSourcePixels: async acceptSourcePhoto => recoverProductPhotoRegion({ productName: String(sellerSnapshot.product.name),
+        localCandidates: sellerFiles.slice(0, 5), sourceImageUrls: sellerUrls, outputDir: root, acceptSourcePhoto }, {
+        download: async () => { sourceDownloads++; throw new Error("Existing selected receipts require no network"); },
+        review: async () => { regionModelCalls++; throw new Error("The intact sixth original needs no crop proposal"); },
+        verify: async () => { throw new Error("No crop coarse review is needed"); },
+      }),
+    });
+    assert.equal(sixthProof.original.path, sellerFiles[5]);
+    assert.equal(sixthProof.original.sha256, hash(sellerFiles[5]));
+    assert.equal(sameGateCalls, 2, "one initial batch and one new sixth-photo gate; no duplicate final review after recovery");
+    assert.equal(repeatedInitialReviews + sourceDownloads + regionModelCalls, 0);
+
+    let laterCropChecks = 0;
+    const cropA = path.join(root, "selected-crop-a.png"), cropB = path.join(root, "selected-crop-b.png");
+    fs.writeFileSync(cropA, Buffer.concat([bytes, Buffer.from("crop a")]));
+    fs.writeFileSync(cropB, Buffer.concat([bytes, Buffer.from("crop b")]));
+    const laterProof = await withShoppingPrewritePhoto({ snapshot: snapshot(), candidatePaths: [file], selectedSourceDirectory: root }, async proof => proof, {
+      select: async (paths, name, selected) => {
+        if (paths[0] === file) return null;
+        laterCropChecks++;
+        return paths[0] === cropB ? accepted(paths, name, selected) : null;
+      },
+      recoverSourcePixels: async acceptSourcePhoto => {
+        assert.equal(await acceptSourcePhoto(cropA), false);
+        assert.equal(await acceptSourcePhoto(cropA), false, "the same rejected crop is not reviewed twice");
+        return await acceptSourcePhoto(cropB) ? cropB : null;
+      },
+    });
+    assert.equal(laterProof.original.path, cropB); assert.equal(laterCropChecks, 2);
     for (const code of ["SOURCE_EVIDENCE_REQUIRED", "SOURCE_REVIEW_INCOMPLETE", "IMAGE_SOURCE_BINDING_REQUIRED", "PREWRITING_PHOTO_CHANGED", "PREWRITING_SOURCE_CHANGED"] as const) {
       const message = `[STEP1 상품 확인] ${code}: 실제 상품 입력을 다시 확인하세요.`;
       for (const status of [400, 500]) assert.equal(classifyLocalFailure({ message, status }), code,

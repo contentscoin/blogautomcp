@@ -22,7 +22,7 @@ type Select = (paths: string[], productName: string, selectedProduct: string, co
 export interface ShoppingPrewritePhotoDependencies {
   select: Select;
   /** Optional deterministic crop of actual seller pixels. It must not generate/edit a product or scene with imagegen. */
-  recoverSourcePixels?: () => Promise<string | null>;
+  recoverSourcePixels?: (acceptSourcePhoto: (file: string) => Promise<boolean>) => Promise<string | null>;
 }
 
 function sameLocalPath(left: string, right: string): boolean {
@@ -168,12 +168,30 @@ export async function withShoppingPrewritePhoto<T>(input: { snapshot: ProductSna
   for (const file of candidates) { try { hashes.set(file, imageHash(file)); } catch { /* Unreadable sources cannot be candidates. */ } }
   let selected = await dependencies.select([...hashes.keys()], productName, selectedProductContext, sourceContext);
   if (!selected && dependencies.recoverSourcePixels) {
-    const recovered = await dependencies.recoverSourcePixels();
+    // All initial candidates reached the complete same-context gate. Reusing
+    // their exact bytes during source recovery cannot change that verdict.
+    const rejected = new Set(hashes.values());
+    const accepted = new Map<string, ProductSectionImageAssignment>();
+    const acceptSourcePhoto = async (candidate: string) => {
+      const file = path.resolve(candidate), hash = imageHash(file);
+      if (canonicalContext(input.snapshot) !== selectedProductContext || input.snapshot.snapshotId !== snapshot.snapshotId)
+        throw new Error("PREWRITING_SOURCE_CHANGED: 원본 복구 중 선택 상품 근거가 변경되었습니다.");
+      if (accepted.has(file) && hashes.get(file) === hash) return true;
+      if (rejected.has(hash)) return false;
+      const assignment = await dependencies.select([file], productName, selectedProductContext, sourceContext);
+      if (!assignment) { rejected.add(hash); return false; }
+      if (!sameLocalPath(assignment.path, file) || assignment.sourceSha256 !== hash || imageHash(file) !== hash)
+        throw new Error("PREWRITING_PHOTO_CHANGED: 복구 원본 검사 중 사진이나 배정 결과가 변경되었습니다.");
+      hashes.set(file, hash);
+      accepted.set(file, assignment);
+      return true;
+    };
+    const recovered = await dependencies.recoverSourcePixels(acceptSourcePhoto);
     if (recovered) {
       const file = path.resolve(recovered);
-      hashes.set(file, imageHash(file));
-      // A crop proposal does not authorize publication: the same selected-context pixel gate reviews the actual crop.
-      selected = await dependencies.select([file], productName, selectedProductContext, sourceContext);
+      // Older recovery adapters may not call the supplied gate themselves.
+      // Their returned pixels still require it; a crop proposal is never proof.
+      if (await acceptSourcePhoto(file)) selected = accepted.get(file) || null;
     }
   }
   if (!selected) throw Object.assign(new Error("IMAGE_SOURCE_BINDING_REQUIRED: 작성 전 필수 판매자 원본의 상품·옵션·자연 사진 검사를 통과하지 못했습니다. 새 원고와 연출 이미지를 생성하지 않았습니다."),
