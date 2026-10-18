@@ -75,6 +75,19 @@ type ThumbnailTheme = {
   cta: string;
 };
 
+const COOLER_THEME: ThumbnailTheme = {
+  keywords: [],
+  headline: "보냉력 체크",
+  subline: "용량·수납·휴대성",
+  cta: "사용 포인트",
+};
+
+function isCoolerProduct(value: string): boolean {
+  // Camping/picnic describes a use context shared by speakers, fans and lights.
+  // Require a container noun; bare "쿨러" can also be a PC component or brand.
+  return /보냉\s*(?:백|가방|박스)|쿨러\s*(?:백|박스)|(?:소프트|하드)\s*쿨러|아이스\s*박스/u.test(value);
+}
+
 const THUMBNAIL_THEMES: ThumbnailTheme[] = [
   {
     keywords: [/바지|팬츠|슬랙스|데님|청바지|셔츠|재킷|자켓|원피스/],
@@ -93,12 +106,6 @@ const THUMBNAIL_THEMES: ThumbnailTheme[] = [
     headline: "착석감 체크",
     subline: "두께·좌판·커버 확인",
     cta: "앉는 자리 체크",
-  },
-  {
-    keywords: [/보냉백|쿨러백|아이스박스|소프트쿨러|캠핑|피크닉/],
-    headline: "보냉력 체크",
-    subline: "용량·수납·휴대성",
-    cta: "사용 포인트",
   },
   {
     keywords: [/드라이기|드라이어|고데기|트리머|면도기/],
@@ -137,7 +144,7 @@ const THUMBNAIL_THEMES: ThumbnailTheme[] = [
     cta: "후기 보기",
   },
   {
-    keywords: [/골프|스포츠|운동|캠핑|레저/],
+    keywords: [/골프공|골프백|골프채|텐트|타프|등산화|운동화/],
     headline: "활용도 체크",
     subline: "착용감·수납·내구성",
     cta: "포인트 확인",
@@ -235,8 +242,11 @@ function splitTextLines(text: string, maxChars: number, maxLines = 3): string[] 
   return lines;
 }
 
-function pickTheme(productName: string, postTitle: string): ThumbnailTheme | null {
-  const target = normalizeForMatch(`${productName} ${postTitle}`);
+function pickTheme(productName: string): ThumbnailTheme | null {
+  // An article can mention unrelated products. Only product identity may choose
+  // a fallback theme; validated 9Canvas evidence takes precedence at the caller.
+  const target = normalizeForMatch(productName);
+  if (isCoolerProduct(target)) return COOLER_THEME;
   return THUMBNAIL_THEMES.find((theme) => theme.keywords.some((keyword) => keyword.test(target))) ?? null;
 }
 
@@ -269,7 +279,7 @@ export function inferCategoryName(categoryName: string, productName: string): st
   if (/샴푸|린스|트리트먼트|컨디셔너/.test(target)) return "헤어케어";
   if (/드라이기|드라이어|고데기/.test(target)) return "헤어드라이기";
   if (/꼬리뼈|치질|자세교정|방석|쿠션|의자/.test(target)) return "자세교정 방석";
-  if (/보냉백|쿨러백|아이스박스|소프트쿨러|캠핑|피크닉/.test(target)) return "보냉백";
+  if (isCoolerProduct(target)) return "보냉백";
   if (/청소기|로봇청소기/.test(target)) return "청소기";
   if (/선풍기|서큘레이터|냉각/.test(target)) return "휴대용 선풍기";
   if (/냉장고|냉동고/.test(target)) return "주방가전";
@@ -286,7 +296,7 @@ export function compactProductDisplayName(productName: string): string {
 }
 
 export function buildProductThumbnailCopy(
-  postTitle: string,
+  _postTitle: string,
   productName: string,
   contentKind: "SHOPPING" | "TRAVEL" = "SHOPPING",
   productUnderstanding?: Product9Canvas,
@@ -299,7 +309,7 @@ export function buildProductThumbnailCopy(
   const ontologyTheme = understanding
     ? ONTOLOGY_THEMES[understanding.lever.thumbnailThemeId] || ONTOLOGY_THEMES[understanding.concept.categoryId]
     : null;
-  const theme = ontologyTheme ? null : pickTheme(productName, postTitle);
+  const theme = ontologyTheme ? null : pickTheme(productName);
 
   return {
     productNameLabel,
@@ -314,6 +324,9 @@ export function isProductThumbnailCopyCompatible(
   copy: Pick<ProductThumbnailCopy, "headline" | "subline" | "cta">,
   productUnderstanding: Product9Canvas,
 ): boolean {
+  if (productUnderstanding.concept.categoryId === "generic_shopping" &&
+      !isCoolerProduct(productUnderstanding.subject.productName) &&
+      /보냉|아이스\s*박스|쿨러\s*백/u.test(sanitizeText(`${copy.headline} ${copy.subline} ${copy.cta}`))) return false;
   const conflictPattern = ONTOLOGY_COPY_CONFLICTS[productUnderstanding.lever.thumbnailThemeId];
   if (!conflictPattern) return true;
   return !conflictPattern.test(sanitizeText(`${copy.headline} ${copy.subline} ${copy.cta}`));
@@ -339,7 +352,7 @@ export function inferScenePrompt(categoryName: string, productName: string): str
   if (/꼬리뼈|치질|자세교정|방석|쿠션|의자/.test(target)) {
     return "Photorealistic office chair or desk seating scene, seat cushion clearly visible as the hero object, realistic fabric, thickness, chair scale, clean Korean product review lighting.";
   }
-  if (/보냉백|쿨러백|아이스박스|소프트쿨러|캠핑|피크닉/.test(target)) {
+  if (isCoolerProduct(target)) {
     return "Photorealistic camping picnic or car trunk packing scene, cooler bag clearly visible as the hero object, realistic fabric, handles, storage scale, clean outdoor review lighting.";
   }
   if (/청소기|로봇청소기|침구청소|물걸레|살균/.test(target)) {
