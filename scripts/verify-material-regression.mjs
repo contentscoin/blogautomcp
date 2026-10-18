@@ -17,6 +17,7 @@ const checks = [
   'verify-photo-description-recovery.ts',
   'verify-shopping-prewrite-photos.ts',
   'verify-product-photo-region.ts',
+  'verify-source-selection-fairness.ts',
   'verify-prepared-draft-reference.ts',
   'verify-published-editor-audit.ts',
   'verify-travel-draft-resilience.ts', 'verify-naver-schedule-submission.ts',

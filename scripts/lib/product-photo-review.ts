@@ -326,11 +326,20 @@ export async function selectVerifiedProductSectionImages(
   }
   // Maximum bipartite matching: a flexible scene/overview must not consume
   // the sole direct feature source when it has another reviewed candidate.
+  // An overview may have both packshots and natural seller scenes. After a
+  // real final-rule rejection, try the other allowed class before exhausting
+  // the same class again. This history survives selection rounds only within
+  // this call/target; a proposal class changes order, never grants approval.
+  const lastRejectedClass = new Map<number, ProductSectionImageReview["reviewClass"]>();
   const select = (eligible: typeof proposals): typeof proposals => {
   const optionsByTarget = normalizedTargets.map((target, targetIndex) => eligible
     .filter(row => row.targetIndex === targetIndex && !conflictedPairs.has(`${row.targetIndex}:${row.sourceSha256}`))
-    .sort((a, b) => Number(b.reviewClass === "product-photo" && target.allowProductPhoto) -
-      Number(a.reviewClass === "product-photo" && target.allowProductPhoto) || a.candidateOrder - b.candidateOrder));
+    .sort((a, b) => {
+      const rejectedClass = target.allowProductPhoto && target.allowScene ? lastRejectedClass.get(targetIndex) : undefined;
+      return (rejectedClass ? Number(a.reviewClass === rejectedClass) - Number(b.reviewClass === rejectedClass) : 0) ||
+        Number(b.reviewClass === "product-photo" && target.allowProductPhoto) -
+        Number(a.reviewClass === "product-photo" && target.allowProductPhoto) || a.candidateOrder - b.candidateOrder;
+    }));
   const assigned = new Map<string, typeof proposals[number]>();
   const assign = (targetIndex: number, visited: Set<string>): boolean => {
     for (const row of optionsByTarget[targetIndex]) {
@@ -367,6 +376,8 @@ export async function selectVerifiedProductSectionImages(
         return proposals.slice(previousCount);
       },
       onRejected: (row, reason, failureCode) => {
+        const target = normalizedTargets[row.targetIndex];
+        if (target.allowProductPhoto && target.allowScene) lastRejectedClass.set(row.targetIndex, row.reviewClass);
         const entry = entries.find(entry => entry.targetIndex === row.targetIndex && entry.sourceSha256 === row.sourceSha256);
         if (entry) {
           const reviewIncomplete = failureCode === "INVALID_REVIEW";
