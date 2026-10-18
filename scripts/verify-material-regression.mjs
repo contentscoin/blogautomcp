@@ -15,6 +15,7 @@ const checks = [
   'verify-material-publication-receipt.ts',
   'verify-material-failure-reference.ts',
   'verify-photo-description-recovery.ts',
+  'verify-photo-description-persistence.ts',
   'verify-shopping-prewrite-photos.ts',
   'verify-shopping-thumbnail-copy.ts',
   'verify-product-photo-region.ts',

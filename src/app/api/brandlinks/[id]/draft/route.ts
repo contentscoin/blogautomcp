@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import { validateBrandPostPublishImages } from "@/lib/brand-post-publish-preflight";
 import { PublishImageAuditError } from "../../../../../../scripts/lib/publish-image-audit";
 import draftRuntimePolicy from "../../../../../../scripts/lib/draft-runtime-policy.json";
@@ -48,7 +49,7 @@ import { DraftSectionCountError, validateSubmittedDraftSectionCount } from "../.
 import { codexDraftStructuredFailureCode } from "../../../../../../scripts/lib/codex-draft-provider";
 import { findingKey } from "../../../../../../scripts/lib/photo-description-finding";
 import { planPhotoDescriptionRepair, serverPhotoDescriptionFindings } from "@/lib/brand-post-photo-description-repair";
-import { atomicWriteTextFile } from "@/lib/atomic-text-file";
+import { commitPreparedPackageTransaction } from "../../../../../../scripts/lib/prepared-package-transaction";
 import { isDraftEditorialQualityPassed } from "@/lib/brand-post-quality-display";
 import { acquireBrandPostImageRepairLock, type BrandPostImageRepairLock } from "@/lib/brand-post-image-repair-lock";
 import { brandPostImageProgress } from "@/lib/brand-post-image-progress";
@@ -547,12 +548,18 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       imageLock = acquireBrandPostImageRepairLock(id, { purpose: "photo-description-repair" });
       const existing = readBrandPostPackage(id, { migrate: false });
       if (!existing || existing.version !== "brand-post-package/v2" || existing.connectKind !== "SHOPPING") throw new Error("수정할 쇼핑 소재가 없습니다.");
+      const manifestPath = getBrandPostPackageManifestPath(id);
+      const originalManifestBytes = fs.readFileSync(manifestPath);
+      const changedDraft = () => Object.assign(new Error("저장 원고·지문 또는 수정 작업 소유자가 변경되어 기존 원고를 보존했습니다."), { code: "PHOTO_DESCRIPTION_REPAIR_REQUIRED" });
+      if (JSON.stringify(JSON.parse(originalManifestBytes.toString("utf8"))) !== JSON.stringify(existing)) throw changedDraft();
       if (existing.imageGeneration?.status === "running" || existing.imageGeneration?.recoveryState === "owner-unknown") throw Object.assign(new Error("기존 이미지 작업의 완료 여부를 확인한 뒤 사진 묘사를 수정하세요."), { code: "IMAGE_RESUME_REQUIRED" });
       const findings = serverPhotoDescriptionFindings(existing, body.findingKeys);
       const markdownPath = path.resolve(existing.markdownPath);
       const relative = path.relative(getBrandPostPackageDir(id), markdownPath);
       if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("저장 원고 경로를 확인할 수 없습니다.");
-      const originalMarkdown = fs.readFileSync(markdownPath, "utf8");
+      const originalMarkdownBytes = fs.readFileSync(markdownPath);
+      if (crypto.createHash("sha256").update(originalMarkdownBytes).digest("hex") !== existing.markdownSha256) throw changedDraft();
+      const originalMarkdown = originalMarkdownBytes.toString("utf8");
       const planned = planPhotoDescriptionRepair(existing, originalMarkdown, findings);
       const contextPath = path.join(getBrandPostPackageDir(id), "mcp-draft-context.json");
       const context = fs.existsSync(contextPath) ? JSON.parse(fs.readFileSync(contextPath, "utf8")) : undefined;
@@ -565,10 +572,16 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       if (JSON.stringify(evaluated.composition.sections.map(section => [section.id, section.title, section.body])) !==
           JSON.stringify(planned.manifest.composition.sections.map(section => [section.id, section.title, section.body]))) throw new Error("검사 과정에서 수정 범위 밖의 본문이 변경되어 후보를 저장하지 않았습니다.");
       imageLock.assertOwner();
-      atomicWriteTextFile(markdownPath, planned.markdown);
-      try { writeBrandPostPackageManifest(evaluated); }
-      catch (error) { atomicWriteTextFile(markdownPath, originalMarkdown); throw error; }
-      return NextResponse.json({ success: true, data: packagePreview(evaluated), repair: { applied: true,
+      let committed = evaluated;
+      commitPreparedPackageTransaction({ outputDir: getBrandPostPackageDir(id), markdown: planned.markdown,
+        buildManifest: (nextMarkdownPath, markdownSha256) => (committed = { ...evaluated,
+          markdownPath: nextMarkdownPath, markdownSha256, approvedAt: null }),
+        beforeActivate: () => {
+          imageLock!.assertOwner();
+          if (!fs.readFileSync(manifestPath).equals(originalManifestBytes) || !fs.readFileSync(markdownPath).equals(originalMarkdownBytes)) throw changedDraft();
+        },
+      });
+      return NextResponse.json({ success: true, data: packagePreview(committed), repair: { applied: true,
         sectionIds: findings.map(finding => finding.sectionId), imageSha256s: findings.map(finding => finding.sha256) } });
     } catch (error) {
       return NextResponse.json({ success: false, code: (error as { code?: string }).code || "PHOTO_DESCRIPTION_REPAIR_REQUIRED", error: error instanceof Error ? error.message : "사진 묘사 수정 실패" }, { status: 409 });

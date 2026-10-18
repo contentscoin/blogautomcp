@@ -12,6 +12,9 @@ import ts from "typescript";
 import { auditPublishImages, assertPublishImagesSafe, buildSelectedProductImageAuditContext, parseVisualReviews, PublishImageAuditError, type PublishImageAuditOptions } from "./lib/publish-image-audit";
 import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 import { reviewShoppingReferenceScene } from "./lib/shopping-reference-scene";
+import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
+import { PRODUCT_IMAGE_COMPONENT_OPTION_RULE_EN, PRODUCT_IMAGE_BUYER_CHECK_ADVICE_RULE_EN,
+  PRODUCT_IMAGE_BODY_TEXT_RULE_EN } from "./lib/product-image-visual-contract";
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-publish-audit-"));
@@ -475,6 +478,108 @@ async function main() {
       assert.equal(audited.ok, Object.keys(test.patch).length === 0);
       assert.equal(calls, 1, "option-context clarification never reinterprets or retries a valid adverse verdict");
       if (!audited.ok) assert(audited.failures[0].reason.includes(test.patch.reason!));
+      assertions++;
+    }
+    // Reproduce the actual Yedaum input conflict with real bound gallery bytes.
+    // These offline provider-contract fixtures do not certify any live pixels.
+    const catalogSourceDirectory = path.join(root, "catalog-source");
+    fs.mkdirSync(catalogSourceDirectory);
+    const catalogSourcePhoto = path.join(catalogSourceDirectory, "original.png");
+    fs.copyFileSync(photo, catalogSourcePhoto);
+    const catalogUrl = "https://shop-phinf.pstatic.net/selected-catalog-original.png";
+    const catalogReceipt = `${catalogSourcePhoto}.retrieval.json`;
+    fs.writeFileSync(catalogReceipt, JSON.stringify({ version: "product-image-retrieval/v1", sourceUrl: catalogUrl,
+      sha256: hash(catalogSourcePhoto), retrievedAt: new Date(Date.now()-1000).toISOString() }));
+    const catalogProtected = [catalogSourcePhoto, catalogReceipt].map(file=>[file,hash(file)] as const);
+    const catalogCases: Array<{name: string; body?: string; features?: string[]; patch: Partial<typeof good>}> = [
+      { name: "listing-overview-not-an-unconfirmed-purchased-bundle", patch: {} },
+      { name: "comparison-advice-is-not-an-assertion-of-option-match", body: "사진 속 전체 구성과 구매할 옵션의 종류별 수량이 일치하는지가 핵심이에요.", patch: {} },
+      { name: "imperative-check-is-not-a-certified-photo-count", body: "사진을 보고 구매할 옵션 수량을 확인하고 일치하는지 비교하세요.", patch: {} },
+      { name: "verified-components-are-not-alternative-variants", features: ["구성품: 반건시와 곶감단지", "중량: 1.65kg"], patch: {} },
+      { name: "confirmed-option-contradiction-still-rejects", features: ["선택 옵션: 크림치즈호두말이"],
+        patch: { identityMatches: false, reason: "The visible whole fruit conflicts with the confirmed cream-cheese walnut option" } },
+      { name: "genuine-distinguishable-option-mixture-still-rejects", patch: { mixedOptions: true,
+        reason: "A visibly identifiable selected option is mixed with a distinguishable unselected cross-sell variant" } },
+      { name: "source-match-does-not-establish-component-membership", patch: { identityMatches: false,
+        reason: "Even against its own source, the visible item remains an unresolved cross-sell or selected component" } },
+      { name: "unreadable-identifiers-can-leave-real-identity-unresolved", patch: { identityMatches: false,
+        reason: "The actual identifying product line is obscured; this is not merely unreadable non-identifying capacity microtext" } },
+      { name: "different-sku-still-rejects", patch: { identityMatches: false, reason: "Readable visible identifier is a different SKU" } },
+      { name: "unsupported-purchased-bundle-inclusion-still-rejects", body: "이 구매세트에는 사진 속 크림치즈호두말이가 포함됩니다.",
+        patch: { photoClaimMatches: false, reason: "The source and ambiguous catalog title do not establish the asserted purchased-bundle inclusion" } },
+      { name: "precise-photo-count-still-needs-pixels", body: "사진에 총 30개가 보입니다.",
+        patch: { photoClaimMatches: false, reason: "The precise published photo count of 30 is not established by visible pixels" } },
+      { name: "complete-30-piece-set-proof-still-rejects", body: "이 사진이 30과 세트 구성을 입증합니다.",
+        patch: { photoClaimMatches: false, reason: "A catalog exterior photo cannot prove the selected complete 30-piece purchase set" } },
+      { name: "price-and-quantity-cannot-come-from-catalog-lineage", body: "사진 속 구성은 56,000원에 구매하는 30개 세트입니다.",
+        patch: { photoClaimMatches: false, reason: "Neither the selected facts nor pixels establish this claimed price and quantity" } },
+      { name: "seller-banner-on-body-is-not-intrinsic-package-print", patch: { textPolicyMatches: false, noGraphicLayout: false,
+        reason: "A black premium-30-piece banner and SNS review caption are burned over the seller photograph, not printed on the physical package" } },
+      { name: "contradictory-adverse-mixed-verdict-is-never-reinterpreted", patch: { mixedOptions: true, accepted: false,
+        reason: "No actual selected-variant contradiction or photo-as-proof assertion is established" } },
+      { name: "unresolved-holistic-verdict-still-rejects", patch: { accepted: false, reason: "Actual source/component membership remains genuinely unresolved" } },
+    ];
+    for (const test of catalogCases) {
+      const input = options(catalogSourcePhoto);
+      input.productName = "예다움 상주곶감 반건시 선물세트 크림치즈호두말이";
+      const features = test.features || ["무게: 1.65kg", "보관조건: 냉동보관"];
+      input.selectedProduct = buildSelectedProductImageAuditContext(input.productName, features);
+      const selected = JSON.parse(input.selectedProduct);
+      if (!test.features) {
+        assert.equal(selected.optionResolution.catalogCandidatesAreConfirmedPurchaseSelection, false);
+        assert.match(selected.optionPolicy.directive, /섞/u, "the actual conflicting planning directive remains visible, not silently erased");
+      }
+      const selectedSnapshot = createProductSnapshot({ productId: "catalog-contract-fixture", connectKind: "SHOPPING", externalProductId: null,
+        sourceUrl: "https://smartstore.naver.com/fixture/products/1234567890",
+        product: { name: input.productName, features, referenceImageUrls: [catalogUrl] } });
+      input.selectedSourceSnapshot = selectedSnapshot;
+      input.sourceSnapshotId = selectedSnapshot.snapshotId;
+      input.selectedSourceProductId = "catalog-contract-fixture";
+      input.selectedSourceDirectory = catalogSourceDirectory;
+      input.imageAssets = [{ path: catalogSourcePhoto, sourcePath: catalogSourcePhoto, sha256: hash(catalogSourcePhoto),
+        role: "body", sectionId: "overview", provenance: "ORIGINAL", creationMethod: "source" }];
+      Object.assign(input.composition.sections[0], { imageSource: "seller-original",
+        imageIntent: "판매페이지 원본 상품 사진: 선택 판매목록 외형 확인" });
+      Object.assign(input.composition.renderNodes[1], { text: "판매목록 외형과 주문 옵션을 구분해요" });
+      Object.assign(input.composition.renderNodes[2], { text: test.body || "판매목록 외형을 참고하되 실제 구매할 구성과 수량은 선택한 주문 옵션에서 확인하세요." });
+      let calls = 0;
+      input.review = async call => {
+        calls++;
+        const properties = (call.outputSchema as { properties: { reviews: { items: { properties: Record<string, { type: string; const?: unknown; enum?: unknown; description: string }> } } } }).properties.reviews.items.properties;
+        for (const key of ["identityMatches", "mixedOptions"]) {
+          assert.ok(properties[key].description.includes(PRODUCT_IMAGE_COMPONENT_OPTION_RULE_EN));
+          assert.equal(properties[key].type, "boolean"); assert.equal(properties[key].const, undefined); assert.equal(properties[key].enum, undefined);
+        }
+        assert.match(properties.mixedOptions.description, /not merely different physical forms or verified kit components/u);
+        assert.match(properties.mixedOptions.description, /unsupported mixed bundle actually presented as the purchase/u);
+        assert.match(properties.mixedOptions.description, /Unconfirmed title candidates and their planning directive alone cannot establish/u);
+        assert.doesNotMatch(call.userPrompt, /Mixed options reject unless/u, "the former unconditional definition must not contradict the component/catalog distinction");
+        assert.ok(properties.photoClaimMatches.description.includes(PRODUCT_IMAGE_BUYER_CHECK_ADVICE_RULE_EN));
+        assert.ok(properties.textPolicyMatches.description.includes(PRODUCT_IMAGE_BODY_TEXT_RULE_EN));
+        assert.ok(properties.noGraphicLayout.description.includes(PRODUCT_IMAGE_BODY_TEXT_RULE_EN));
+        assert.ok(call.userPrompt.includes(PRODUCT_IMAGE_COMPONENT_OPTION_RULE_EN));
+        assert.ok(call.userPrompt.includes(PRODUCT_IMAGE_BUYER_CHECK_ADVICE_RULE_EN));
+        assert.ok(call.userPrompt.includes(PRODUCT_IMAGE_BODY_TEXT_RULE_EN));
+        assert.ok(call.userPrompt.includes(JSON.stringify(input.selectedProduct)), "the exact selected option facts/directive remain unchanged");
+        assert.match(call.userPrompt, /exactCanonicalSourceForFinalImageIndexes":\[1\]/u);
+        const metadataLine = call.userPrompt.split("\n").find(line=>line.startsWith("Each attached image belongs ONLY"))!;
+        const [slot] = JSON.parse(metadataLine.slice(metadataLine.indexOf("[")));
+        assert.equal(slot.visualContract.identityAndVisibleOptionMustMatch, true);
+        assert.equal(slot.visualContract.purpose, "product-appearance");
+        assert.ok(slot.selectedGalleryComparisonImageIndexes.length > 0);
+        const referenceIndex = slot.selectedGalleryComparisonImageIndexes[0];
+        assert.deepEqual(await sharp(call.imagePaths![referenceIndex-1]).raw().toBuffer(), await sharp(catalogSourcePhoto).raw().toBuffer(),
+          "the actual indexed comparison contains this exact selected-listing source's pixels");
+        const verdict = { ...good, reason: "A mapped selected-listing appearance is not proof of an unconfirmed purchased complete bundle", ...test.patch };
+        assert.equal(new Ajv().compile(call.outputSchema as object)({reviews: [verdict]}), true,
+          "every adverse answer remains schema-valid; advice/membership guidance cannot force acceptance");
+        return JSON.stringify({reviews: [verdict]});
+      };
+      const audited = await auditPublishImages(input);
+      assert.equal(audited.ok, Object.keys(test.patch).length === 0, test.name);
+      assert.equal(calls, 1, `${test.name}: no retry or reinterpretation of a valid adverse answer`);
+      if (!audited.ok) assert.ok(audited.failures[0].reason.includes(test.patch.reason!), test.name);
+      for (const [file, digest] of catalogProtected) assert.equal(hash(file), digest, "catalog sources/receipts remain unchanged");
       assertions++;
     }
     // Included-cut facts are comparison context, never whole-set certification.
