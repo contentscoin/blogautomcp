@@ -13,7 +13,7 @@ import {
   collectCodexDraftResponse,
 } from "./lib/codex-draft-provider";
 import { getBundledCodexEntrypoint, getBundledCodexExecutable, readCodexLocalStatus } from "../src/lib/codex-local";
-import { classifyLocalFailure, toLocalAutomationError } from "../src/lib/local-automation-error";
+import { classifyLocalFailure, extractLocalApiError, LOCAL_AUTOMATION_ERROR_HINTS, LocalAutomationError, toLocalAutomationError } from "../src/lib/local-automation-error";
 
 const root = process.cwd();
 const providerSource = fs.readFileSync(path.join(root, "scripts/lib/codex-draft-provider.ts"), "utf8");
@@ -146,6 +146,61 @@ assert.equal(classifyLocalFailure({ status: 400, code: "INVALID_INPUT", message:
   "an explicit invalid-input response is not reclassified from its message");
 
 async function verifyRetryPolicy(): Promise<void> {
+  // Reproduce the real MCP approval bridge: explicit image-audit HTTP 422 is
+  // a failed final gate, never an invalid argument or permission to approve.
+  const pollFile = "src/app/api/remote-agent/poll/route.ts";
+  const pollAst = ts.createSourceFile(pollFile, fs.readFileSync(path.join(root, pollFile), "utf8"), ts.ScriptTarget.Latest, true);
+  const localApiNode = pollAst.statements.find((node): node is ts.FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) && node.name?.text === "localApi");
+  assert.ok(localApiNode);
+  const pixelMessage = "PUBLISH_IMAGE_AUDIT_FAILED: [11:SEMANTIC_REJECTION] 현재 사진과 본문 묘사가 일치하지 않습니다.";
+  let localResponse: { success: false; code?: string; error: string };
+  let localCalls = 0;
+  const bridge = vm.createContext({ Error, Headers, URL, process: { env: {} },
+    jobContexts: new WeakMap(), localAppOrigin: () => "http://127.0.0.1:43127",
+    localJsonFetch: async () => { localCalls++; return { ok: false, status: 422, json: async () => localResponse }; },
+    classifyLocalFailure, extractLocalApiError, LOCAL_AUTOMATION_ERROR_HINTS, LocalAutomationError,
+  });
+  vm.runInContext(ts.transpileModule(localApiNode.getText(pollAst), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText + "\nthis.call=localApi;", bridge);
+  for (const [rawCode, message, expected] of [
+    ["PUBLISH_IMAGE_AUDIT_FAILED", pixelMessage, "PUBLISH_IMAGE_AUDIT_FAILED"],
+    ["INVALID_INPUT", pixelMessage, "INVALID_INPUT"],
+    [undefined, "Invalid field format", "INVALID_INPUT"],
+    ["UNKNOWN_VALIDATION_CODE", "Invalid field format", "INVALID_INPUT"],
+    ["CONTENT_BLOCKED", "Current content is blocked", "CONTENT_BLOCKED"],
+  ] as const) {
+    localResponse = { success: false, ...(rawCode ? { code: rawCode } : {}), error: message };
+    const before = localCalls;
+    await assert.rejects(bridge.call({}, "/api/brandlinks/offline-fixture/draft", { method: "PATCH", body: '{"action":"approve"}' }), (error: unknown) => {
+      assert.ok(error instanceof LocalAutomationError);
+      assert.equal(error.code, expected); assert.equal(error.message, message); assert.equal(error.httpStatus, 422);
+      assert.equal(toLocalAutomationError(error), error, "the completion conversion must retain the exact typed cause/message");
+      return true;
+    });
+    assert.equal(localCalls, before + 1, "a definitive approval rejection cannot replay the mutation");
+  }
+  const approveNode = routeAst.statements.find((node): node is ts.FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) && node.name?.text === "approvePackageAfterCurrentValidation");
+  assert.ok(approveNode);
+  const savedDraft = Object.freeze({ approvedAt: null, markdown: "existing manuscript", imageSha256: "a".repeat(64) });
+  const pixelFailure = Object.assign(new Error(pixelMessage), { code: "PUBLISH_IMAGE_AUDIT_FAILED" });
+  let approvalWrites = 0;
+  const gate = vm.createContext({
+    revalidatePackageForApproval: () => savedDraft,
+    validateBrandPostPublishImages: async (_id: string, _name: string, options: { bindReadiness: boolean }) => {
+      assert.equal(options.bindReadiness, true); throw pixelFailure;
+    },
+    approveBrandPostPackage: () => { approvalWrites++; return { ...savedDraft, approvedAt: "must-not-happen" }; },
+  });
+  vm.runInContext(ts.transpileModule(approveNode.getText(routeAst), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText + "\nthis.approve=approvePackageAfterCurrentValidation;", gate);
+  await assert.rejects(gate.approve("offline-fixture", { productName: "fixture" }), error => error === pixelFailure);
+  assert.equal(approvalWrites, 0); assert.equal(savedDraft.approvedAt, null);
+  assert.deepEqual(savedDraft, { approvedAt: null, markdown: "existing manuscript", imageSha256: "a".repeat(64) });
+
   const events = async function* (items: Array<import("@openai/codex-sdk").ThreadEvent>) { yield* items; };
   const progress = { type: "error" as const, message: completionLoss };
   const response = { type: "item.completed" as const, item: { type: "agent_message" as const, id: "response", text: "completed JSON" } };
