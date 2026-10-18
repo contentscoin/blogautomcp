@@ -61,14 +61,19 @@ export function preservePreparedRevisionRenderPlan(
     if (!paragraphs.length || compact(paragraphs.map(item => item.node.text).join("\n")) !== compact(section.body.join("\n"))) return refuse();
 
     if (!sameBody) {
-      if (section.body.length !== updated.body.length) return refuse();
       if (paragraphs.length === 1) {
+        const sameParagraphCount = section.body.length === updated.body.length;
+        // A single saved block owns the complete section body. Its internal
+        // paragraph split may change without moving any image or other node,
+        // but only after every old body literal is mapped to that exact block.
+        if (!sameParagraphCount) replaceBlockText(paragraphs[0].node.text, section.body, section.body);
         replacements.set(paragraphs[0].index, { ...paragraphs[0].node,
-          text: replaceBlockText(paragraphs[0].node.text, section.body, updated.body) });
+          text: sameParagraphCount ? replaceBlockText(paragraphs[0].node.text, section.body, updated.body) : updated.body.join("\n\n") });
       } else {
         // Each saved block may batch several body paragraphs. Retain those
         // exact boundaries and any images/cards between them. A changed body
         // cardinality has no safe mapping across several saved render blocks.
+        if (section.body.length !== updated.body.length) return refuse();
         let cursor = 0;
         for (const { node, index } of paragraphs) {
           const start = cursor;

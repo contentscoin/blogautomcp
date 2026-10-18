@@ -206,4 +206,35 @@ const changedCardinality = structuredClone(preserved);
 changedCardinality.sections[0].body.push("새 문단 경계를 임의로 추정하지 않습니다.");
 assert.throws(() => preservePreparedRevisionRenderPlan(splitBlocks, changedCardinality), /REVISION_RENDER_SCOPE_AMBIGUOUS/);
 
-console.log("Title-only/section material repair: measured title failure, strict JSON scope, actual writer prompt and legacy one-sentence layout/caption/CTA preservation passed");
+// The public revision API fixes section identity/count, not the internal body
+// paragraph count. One exact saved render block can own a safe split or merge.
+const threeParagraphs = ["첫 문단의 확인된 상품 설명입니다.", "두 번째 문단의 확인된 사용 조건입니다.", "세 번째 문단의 확인된 구매 기준입니다."];
+const threeBodySaved = structuredClone(saved);
+threeBodySaved.sections[0] = { ...threeBodySaved.sections[0], body: threeParagraphs, characterCount: threeParagraphs.join("").length };
+threeBodySaved.renderNodes[paragraphIndex] = { ...threeBodySaved.renderNodes[paragraphIndex], kind: "paragraph", sectionId: firstSectionId, text: threeParagraphs.join("\n\n") };
+(revisionSandbox.prepared as { composition: ResolvedPostDocumentV1 }).composition = threeBodySaved;
+for (const revisedBody of [
+  [threeParagraphs[0], "두 번째 문단을 안전하게 나눈 앞부분입니다.", "두 번째 문단을 나눈 뒷부분입니다.", threeParagraphs[2]],
+  [threeParagraphs[0], `${threeParagraphs[1]} ${threeParagraphs[2]}`],
+]) {
+  const revisedSections = [`${threeBodySaved.sections[0].title}\n\n${revisedBody.join("\n\n")}`, ...photoSections.slice(1), disclosure];
+  const result = revisionSandbox.resolve!({ title: threeBodySaved.title, sections: revisedSections, hashtags: ["상품", "구매", "선택"] });
+  assert.deepEqual(result.sections[0].body, revisedBody, `actual writer accepts 3→${revisedBody.length} within one exact owned render block`);
+  assert.deepEqual(result.sections.slice(1), threeBodySaved.sections.slice(1));
+  assert.equal(result.renderNodes.length, threeBodySaved.renderNodes.length);
+  result.renderNodes.forEach((node, index) => {
+    if (index === paragraphIndex) assert.equal(node.kind === "paragraph" && node.text, revisedBody.join("\n\n"));
+    else assert.deepEqual(node, threeBodySaved.renderNodes[index], "all non-target nodes, photo paths/captions and both CTAs stay exact");
+  });
+  const otherBlock = structuredClone(threeBodySaved);
+  otherBlock.renderNodes[paragraphIndex] = { kind: "paragraph", sectionId: firstSectionId,
+    text: "원래 본문 전체에 대응하지 않는 별도 문장이 섞여 있습니다." };
+  assert.throws(() => preservePreparedRevisionRenderPlan(otherBlock, result), /REVISION_RENDER_SCOPE_AMBIGUOUS/);
+  const compactOnly = structuredClone(threeBodySaved);
+  compactOnly.renderNodes[paragraphIndex] = { kind: "paragraph", sectionId: firstSectionId, text: threeParagraphs.join("").replace(/\s/gu, "") };
+  assert.throws(() => preservePreparedRevisionRenderPlan(compactOnly, result), /REVISION_RENDER_SCOPE_AMBIGUOUS/,
+    "compact text equality alone cannot authorize a cardinality-changing rewrite");
+}
+(revisionSandbox.prepared as { composition: ResolvedPostDocumentV1 }).composition = saved;
+
+console.log("Title-only/section material repair: strict JSON scope, legacy exact layout/caption/CTA preservation and actual writer single-block 3→4/3→2 paragraph revisions passed");

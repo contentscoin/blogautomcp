@@ -6951,7 +6951,9 @@ function writePreparedBrandPostPackage(params: {
         postSpec: params.assembled ? remapSpecImagePaths(params.assembled.spec, packagedPathBySource) : null,
         specDraft: params.assembled?.draft ?? null,
         specValidation: params.assembled ? summarizeSpecValidation(params.assembled) : null,
-        pipelineNotes: params.post.notes ?? null,
+        pipelineNotes: params.preserveManifest
+          ? [...new Set([...(params.preserveManifest.pipelineNotes || []), ...(params.post.notes || [])])]
+          : params.post.notes ?? null,
         thumbnailSpec: {
           version: "thumbnail-spec/v2",
           canvas: { width: 1080, height: 1080, aspect: "1:1" },
