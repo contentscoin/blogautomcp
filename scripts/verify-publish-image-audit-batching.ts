@@ -40,7 +40,7 @@ async function main() {
           assert.deepEqual(snapshot, original, "transport splitting must not downsample or alter review pixels");
         }
         return JSON.stringify({ reviews: attached.map((_, index) => ({ index: index + 1, accepted: true, identityMatches: true,
-          photoClaimMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false,
+          photoClaimMatches: true, photoClaimObjection: { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" }, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false,
           singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "fixture exact selected product" })) });
       },
     };

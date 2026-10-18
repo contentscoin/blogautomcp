@@ -47,6 +47,46 @@ const PHOTO_CLAIM_DECISION_RULE = "photoClaimMatches concerns what the actual pu
 const LITERAL_PHOTO_CLAIM_RULE = "Ground a photographic-proof objection in a VERBATIM quotation of the actual sectionTitle/sectionBody or the actual readable thumbnail headline, then explain which visible fact the quotation says this photograph shows or proves. For an erroneous body photo-description, quote its WHOLE exact published sentence, including the explicit photo/image subject and all punctuation/numeric specifications; do not quote a clipped fragment or invent an edit instruction. Quote the observed headline literally before interpreting it; never replace '제품 사양 체크' with '사용 체크' or infer a usage/efficacy promise from a specs/check heading. A paragraph discussing voltage, battery life, 4~5 hour charging, price or how to use the product does not by itself claim the adjacent photograph measures/demonstrates those facts. Ordinary technical discussion may accompany an illustrative product photo; actual wording such as '이 사진으로 충전 시간을 확인할 수 있습니다' explicitly makes a proof claim and must be supported. Do not invent a quoted claim from imageIntent, product facts or an OCR guess. Precise published appearance or scene descriptions are ALSO pixel assertions, independently of performance/efficacy proof. For example, '칸마다 서로 다른 형태의 곶감이 담겨 있어요' must fail photoClaimMatches if the actual photo instead shows repeated same-form persimmons; no claim of tested efficacy is needed. If no actual photo-proof wording exists, say so in reason and judge any explicit appearance/scene assertion, visible identity, format and other concrete defects independently. This rule never overrides an adverse verdict or permits a false visible headline, fabricated certification, forbidden logo/text layout or wrong product.";
 const ACCEPTED_DECISION_RULE = "accepted is the final holistic pixel verdict for the exact assigned role, consistent with your finalized reason and separate identity, photoClaim and format verdicts under the balanced visible-defect threshold. Resolve your own tentative objections before returning the structured verdict; do not leave accepted=false after your final reason retracts every objection and concludes that no mismatch is present. If the separate checks are favorable but accepted=false, state the concrete remaining actual-pixel objection not addressed by those checks, such as severe structural distortion, clearly impossible geometry or genuinely unresolved identity. Do not reject for an improvement wish list, minor photographic variation, unreadable non-identifying microtext or a preferred background alone. Favorable booleans, an exact source match, seller authority and prior approval never compel acceptance: a genuine unresolved objection still rejects. Never excuse an adverse identity, photoClaim or format verdict with a favorable holistic reason.";
 const FINAL_REASON_RULE = "Explain the finalized visible evidence for this exact slot and any unresolved concrete blocking defect, using the balanced visible-defect threshold. The reason and every boolean must describe the same final judgment, not a tentative rejection followed by a correction that retracts it. Preserve genuine identity uncertainty and adverse findings; distinguish these from permitted minor photographic variation or unreadable non-identifying print. Do not propose aesthetic improvements as rejection reasons, do not invent a mismatch to justify a preset boolean or infer approval from reference provenance.";
+const PHOTO_CLAIM_OBJECTION_RULE = "Ground photoClaimMatches in the indexed claimSources, not an invented implication of a product name or adjacent specification. A recipient's tastes, conditional recommendation, purchase-option check, storage/use advice or general product quantity/weight is not by itself a statement about what this photograph contains or proves. Distinguish those from an actual pictured-appearance, pictured-quantity, complete-set, performance or result claim. Return photoClaimObjection BEFORE the boolean verdicts. If photoClaimMatches=true, use exactly origin=none, sourceIndex=null, quote='', scope=none, conflict=''. If false, origin must identify the actual source: section-title with sourceIndex=null and the WHOLE exact title, or section-body with its zero-based claimSources body index and the WHOLE exact paragraph. Copy the source string without trimming, normalization, excerpts or changing numbers; explain the concrete conflicting pixels in conflict and select a non-none scope. A thumbnail-headline objection is allowed only for a thumbnail: sourceIndex=null and transcribe its actual visible headline. No canonical thumbnail OCR is supplied, so that transcription still requires honest pixel review. Do not turn a conditional preference into an assertion that the pictured box contains several kinds. Traceability is not automatic truth or approval: all genuine identity, option, format, notice and holistic defects must still reject.";
+
+export interface PhotoClaimObjectionContext { sectionTitle: string; sectionBody: readonly string[]; role: string }
+const PHOTO_CLAIM_ORIGINS = ["none", "section-title", "section-body", "thumbnail-headline"] as const;
+const PHOTO_CLAIM_SCOPES = ["none", "pictured-appearance", "quantity", "complete-set", "performance", "result"] as const;
+function photoClaimObjectionIssue(review: Record<string, unknown>, context: PhotoClaimObjectionContext): string | null {
+  const value = review.photoClaimObjection;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "photoClaimObjection must be a five-field object";
+  const objection = value as Record<string, unknown>;
+  if (Object.keys(objection).sort().join(",") !== ["origin", "sourceIndex", "quote", "scope", "conflict"].sort().join(","))
+    return "photoClaimObjection fields are missing or unexpected";
+  if (!PHOTO_CLAIM_ORIGINS.some(origin => origin === objection.origin) || !PHOTO_CLAIM_SCOPES.some(scope => scope === objection.scope) ||
+      typeof objection.quote !== "string" || typeof objection.conflict !== "string") return "origin/scope/quote/conflict has an invalid type or value";
+  if (review.photoClaimMatches === true) return objection.origin === "none" && objection.sourceIndex === null && objection.quote === "" &&
+    objection.scope === "none" && objection.conflict === "" ? null : "photoClaimMatches=true requires the exact empty none objection";
+  if (review.photoClaimMatches !== false || objection.origin === "none" || objection.scope === "none" || !objection.quote.trim() || !objection.conflict.trim())
+    return "photoClaimMatches=false requires an identified source, non-none scope, quote and concrete conflict";
+  if (objection.origin === "thumbnail-headline") return context.role === "thumbnail" && objection.sourceIndex === null
+    ? null : "thumbnail-headline requires a thumbnail role and null sourceIndex; no canonical OCR equality is asserted";
+  if (context.role === "thumbnail") return "a thumbnail cannot cite a synthetic section title/body as its published headline";
+  if (objection.origin === "section-title") return objection.sourceIndex === null && objection.quote === context.sectionTitle
+    ? null : "section-title requires sourceIndex=null and the whole exact actual title";
+  return typeof objection.sourceIndex === "number" && Number.isInteger(objection.sourceIndex) && objection.sourceIndex >= 0 &&
+    objection.sourceIndex < context.sectionBody.length && objection.quote === context.sectionBody[objection.sourceIndex]
+    ? null : "section-body requires a valid zero-based sourceIndex and the whole exact actual paragraph";
+}
+/** Strict source tracing only; never changes a verdict or certifies semantic
+ * correctness. Thumbnail text has no canonical OCR literal to compare here. */
+export function validatePhotoClaimObjection(review: Record<string, unknown>, context: PhotoClaimObjectionContext): boolean {
+  return photoClaimObjectionIssue(review, context) === null;
+}
+function invalidPhotoClaimDiagnostic(review: Record<string, unknown>, issue: string): string {
+  const diagnostic = JSON.stringify({ issue, photoClaimObjection: review.photoClaimObjection ?? null,
+    rawReason: review.reason, rawVerdicts: Object.fromEntries(VISUAL_REVIEW_BOOLEAN_KEYS.map(key => [key, review[key]])) });
+  // Diagnostic display only: validation above always compares unmodified input.
+  return `Invalid photo-claim evidence: ${diagnostic}`
+    .replace(/\b[A-Za-z]:[\\/]+[^\s"<>]+|file:\/\/[^\s"<>]+|\/(?:Users|home|tmp|private|var)\/[^\s"<>]+/gu, "[local-path]")
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|Bearer\s+[A-Za-z0-9._~+/-]{12,})/giu, "[credential]")
+    .replace(/((?:access_token|refresh_token|api[_-]?key|token)\s*[=:]\s*)[^\s,"}]+/giu, "$1[credential]");
+}
 
 export interface PublishImageAuditFailure {
   nodeIndex: number;
@@ -399,6 +439,8 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           `Selected product: ${JSON.stringify(selectedProduct)}. Product name: ${JSON.stringify(options.productName)}.`,
           `Each attached image belongs ONLY to its corresponding slot: ${JSON.stringify(batch.map((c, i) => ({ index: i + 1, role: c.role, textPolicy: c.role === "thumbnail" ? "THUMBNAIL_HEADLINE_ALLOWED: one large accurate headline outside distinguishing product features is permitted; reject extra badges, bullets, panels or unsupported claims" : "BODY_NO_ADDED_TEXT: only intrinsic physical product printing is permitted", sectionTitle: c.sectionTitle, sectionBody: c.sectionBody, imageIntent: c.imageIntent, visualContract: c.visualContract, allowProductPhoto: c.allowProductPhoto, ...(c.referenceScene ? { referenceGuidedScene: true, originalComparisonPassed: true, adjacentCaption: c.referenceScene.caption,
             comparisonReferenceImageIndex: referenceIndex(c), referenceSha256: c.referenceScene.referenceSha256, sourceSnapshotId: c.referenceScene.sourceSnapshotId } : {}),
+          claimSources: { sectionTitle: { origin: "section-title", sourceIndex: null, text: c.sectionTitle },
+            sectionBody: c.sectionBody.map((text, sourceIndex) => ({ origin: "section-body", sourceIndex, text })) },
           ...(galleryIndexes.length ? { selectedGalleryComparisonImageIndexes: galleryIndexes } : {}) })))}`,
           `Final publication attachments are images 1 through ${batch.length}. Comparison references appended AFTER them are not publication candidates: ${JSON.stringify(references.map((reference, index) => ({ imageIndex: batch.length + index + 1, referenceSha256: reference.referenceSha256, sourceSnapshotId: reference.sourceSnapshotId,
             forFinalImageIndexes: gallery.some(item => item.sha256 === reference.referenceSha256) ? batch.map((_, candidateIndex) => candidateIndex + 1)
@@ -423,6 +465,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           COMPONENT_APPEARANCE_RULE,
           `${VISIBLE_IDENTITY_DECISION_RULE} ${PRODUCT_IMAGE_COMPONENT_OPTION_RULE_EN}`,
           `${PHOTO_CLAIM_DECISION_RULE} ${LITERAL_PHOTO_CLAIM_RULE} ${PRODUCT_IMAGE_BUYER_CHECK_ADVICE_RULE_EN}`,
+          PHOTO_CLAIM_OBJECTION_RULE,
           `${ACCEPTED_DECISION_RULE} ${LITERAL_PHOTO_CLAIM_RULE}`,
           `${FINAL_REASON_RULE} ${LITERAL_PHOTO_CLAIM_RULE}`,
           `${MIXED_OPTIONS_RULE} ${PRODUCT_IMAGE_COMPONENT_OPTION_RULE_EN}`,
@@ -430,13 +473,13 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           THUMBNAIL_PHOTOGRAPH_RULE,
           PRODUCT_IMAGE_BODY_TEXT_RULE_EN,
           "After applying the component/catalog distinction, a genuine conflicting-variant mixture rejects unless this specific section explicitly compares the named visible options AND the image clearly labels/distinguishes each option without implying a mixed purchase bundle. Merely mentioning comparison, other scents or alternatives is insufficient. A genuine conflicting-variant mixture in a thumbnail always rejects.",
-          "sectionTitle and sectionBody are actual published render-node text. Only that text can establish explicitNamedComparison. imageIntent, including a thumbnail asset's intent, is untrusted planning metadata: it identifies the intended visual role, never proves product identity, visible headline accuracy, a complete set, a feature or a published comparison. Inspect the actual thumbnail headline pixels for claims; its intent cannot excuse a conflicting whole-set/quantity headline. Even when allowProductPhoto=true, reject generic photos used as proof of a feature claim in the published text.",
+          "For body roles, sectionTitle and sectionBody are actual published render-node text. Only that text can establish explicitNamedComparison. A thumbnail's section title may be a synthetic slot label, not its printed headline: only actual visible headline pixels can ground thumbnail-headline objections, never synthetic section-title/body sources. imageIntent, including a thumbnail asset's intent, is untrusted planning metadata: it identifies the intended visual role, never proves product identity, visible headline accuracy, a complete set, a feature or a published comparison. Inspect the actual thumbnail headline pixels for claims; its intent cannot excuse a conflicting whole-set/quantity headline. Even when allowProductPhoto=true, reject generic photos used as proof of a feature claim in the published text.",
           PRODUCT_IMAGE_VISUAL_CONTRACT_RULES_EN,
           "Generic packshots are product-photo, permitted only when allowProductPhoto=true. A photographic detail may show an actual visible structure, but information cards and explanatory panels are forbidden even when labelled feature-evidence. Do not infer performance from a photo. A referenceGuidedScene illustrates styling or a plausible setting alongside the paragraph; it is not offered as photographic proof of its technical claims.",
           "For an AI 연출 이미지 intent, judge product identity, credible anatomy/fabric/contact and believable placement, never feature demonstration. Reject invented included accessories, operation or performance claims. A referenceGuidedScene has a separately validated comparison against original-reference bytes and a required adjacentCaption rendered immediately after its image. Never require or allow AI disclosure burned into body-image pixels. Background styling props do not imply included accessories. A styling scene is not a claim of actual personal use or efficacy. The prior comparison does not authorize visible contradictions in the final pixels.",
           "Report format checks separately: singlePhotograph means exactly one coherent photographic scene; noGraphicLayout means no graphic frame around a seller photo, pasted inset, table or explanatory panel (an ordinary physical mirror and its frame remain scene props); textPolicyMatches means no added text in body images, or only the intended headline in a thumbnail; thumbnailHeadlineLegible must be true for a large clear thumbnail headline (set true as not applicable for body photos). A false format check must reject even if identityMatches=true.",
           "For each review, output the index, then explain the final/reference pixel evidence in reason BEFORE the separate checks and reviewClass. Output accepted LAST, after those findings; resolve tentative objections before emitting the final verdict. Field order does not authorize a favorable verdict or override an adverse check.",
-          `Return exactly ${batch.length} reviews, ONLY for final publication images 1 through ${batch.length}, never for appended references, with 1-based index: {"reviews":[{"index":1,"reason":"specific final/reference pixel evidence and whether published text uses the photo as proof","identityMatches":true,"photoClaimMatches":true,"notice":false,"mixedOptions":false,"explicitNamedComparison":false,"optionsClearlyLabeled":false,"singlePhotograph":true,"noGraphicLayout":true,"textPolicyMatches":true,"thumbnailHeadlineLegible":true,"reviewClass":"product-photo" or "feature-evidence","accepted":true}]}. All boolean fields required. For an allowed named comparison identityMatches means the selected item is clearly identified among the explicitly named alternatives.`,
+          `Return exactly ${batch.length} reviews, ONLY for final publication images 1 through ${batch.length}, never for appended references, with 1-based index: {"reviews":[{"index":1,"reason":"specific final/reference pixel evidence and whether published text uses the photo as proof","photoClaimObjection":{"origin":"none","sourceIndex":null,"quote":"","scope":"none","conflict":""},"identityMatches":true,"photoClaimMatches":true,"notice":false,"mixedOptions":false,"explicitNamedComparison":false,"optionsClearlyLabeled":false,"singlePhotograph":true,"noGraphicLayout":true,"textPolicyMatches":true,"thumbnailHeadlineLegible":true,"reviewClass":"product-photo" or "feature-evidence","accepted":true}]}. All fields required. For an allowed named comparison identityMatches means the selected item is clearly identified among the explicitly named alternatives.`,
         ].join("\n"),
         imagePaths: [...batch.map(c => c.snapshot), ...references.map(reference => reference.snapshot)],
         maxImages: batch.length + references.length, preserveImageOrder: true, researchMode: "disabled",
@@ -601,6 +644,17 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
         const comparisonAllowed = candidate.role !== "thumbnail" && row.explicitNamedComparison === true && row.optionsClearlyLabeled === true;
         const formatMatches = row.singlePhotograph === true && row.noGraphicLayout === true && row.textPolicyMatches === true &&
           (candidate.role !== "thumbnail" || row.thumbnailHeadlineLegible === true);
+        const objectionIssue = photoClaimObjectionIssue(row, candidate);
+        if (objectionIssue) {
+          fail(candidate.nodeIndex, candidate.assetPath, "INVALID_REVIEW", invalidPhotoClaimDiagnostic(row, objectionIssue));
+          // A broken claim citation is never permission to approve or reroll.
+          // Preserve independent adverse checks through the unchanged gate below;
+          // an ungrounded claim alone must not blacklist these image bytes.
+          const independentAdverse = row.identityMatches !== true || row.notice !== false || !formatMatches ||
+            (row.mixedOptions === true && !comparisonAllowed) || (row.reviewClass === "product-photo" && !candidate.allowProductPhoto) ||
+            (row.photoClaimMatches === true && row.accepted !== true);
+          if (!independentAdverse) continue;
+        }
         if (row.accepted !== true || row.identityMatches !== true || row.photoClaimMatches !== true || row.notice !== false || !formatMatches ||
             (row.mixedOptions && !comparisonAllowed) || (row.reviewClass === "product-photo" && !candidate.allowProductPhoto)) {
           const reasons = [
@@ -623,7 +677,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           fail(candidate.nodeIndex, candidate.assetPath, "SEMANTIC_REJECTION",
             `${reasons.join(" / ")}. 문단: ${candidate.sectionTitle.slice(0, 120)}. 픽셀 관찰: ${row.reason}`,
             rejectionScope);
-          const finding = photoDescriptionFinding({ ...candidate, composition: options.composition, verdict: row });
+          const finding = !objectionIssue && photoDescriptionFinding({ ...candidate, composition: options.composition, verdict: row });
           if (finding) result.failures[result.failures.length - 1].photoDescription = finding;
         }
       }
@@ -660,6 +714,10 @@ const VISUAL_REVIEW_SCHEMA = {
         properties: {
           index: { type: "integer" },
           reason: { type: "string", description: FINAL_REASON_RULE },
+          photoClaimObjection: { type: "object", description: PHOTO_CLAIM_OBJECTION_RULE,
+            properties: { origin: { type: "string", enum: PHOTO_CLAIM_ORIGINS }, sourceIndex: { type: ["integer", "null"] },
+              quote: { type: "string" }, scope: { type: "string", enum: PHOTO_CLAIM_SCOPES }, conflict: { type: "string" } },
+            required: ["origin", "sourceIndex", "quote", "scope", "conflict"], additionalProperties: false },
           ...Object.fromEntries(VISUAL_REVIEW_BOOLEAN_KEYS.filter(key => key !== "accepted").map(key => [key, { type: "boolean" }])),
           identityMatches: { type: "boolean", description: `${COMPONENT_APPEARANCE_RULE} ${VISIBLE_IDENTITY_DECISION_RULE} ${PRODUCT_IMAGE_COMPONENT_OPTION_RULE_EN}` },
           photoClaimMatches: { type: "boolean", description: `${PHOTO_CLAIM_DECISION_RULE} ${PRODUCT_IMAGE_BUYER_CHECK_ADVICE_RULE_EN}` },
@@ -670,7 +728,7 @@ const VISUAL_REVIEW_SCHEMA = {
           reviewClass: { type: "string", enum: ["product-photo", "feature-evidence"] },
           accepted: { type: "boolean", description: `${BALANCED_VISIBLE_DEFECT_RULE} ${NATURAL_SCENE_INTENT_RULE} ${ACCEPTED_DECISION_RULE}` },
         },
-        required: ["index", "reason", ...VISUAL_REVIEW_BOOLEAN_KEYS.filter(key => key !== "accepted"), "reviewClass", "accepted"],
+        required: ["index", "reason", "photoClaimObjection", ...VISUAL_REVIEW_BOOLEAN_KEYS.filter(key => key !== "accepted"), "reviewClass", "accepted"],
         additionalProperties: false,
       },
     },
@@ -700,7 +758,7 @@ export function publicationImageAuditPolicyFingerprint(): string {
       NATURAL_SCENE_INTENT_RULE, COMPONENT_APPEARANCE_RULE, THUMBNAIL_PHOTOGRAPH_RULE,
       MIXED_OPTIONS_RULE, CATALOG_OPTION_IDENTITY_RULE, VISIBLE_IDENTITY_DECISION_RULE,
       PHOTO_CLAIM_DECISION_RULE, LITERAL_PHOTO_CLAIM_RULE, ACCEPTED_DECISION_RULE,
-      FINAL_REASON_RULE, PRODUCT_IMAGE_VISUAL_CONTRACT_RULES_EN, UNBRANDED_COMMODITY_IDENTITY_RULE_EN],
+      FINAL_REASON_RULE, PHOTO_CLAIM_OBJECTION_RULE, PRODUCT_IMAGE_VISUAL_CONTRACT_RULES_EN, UNBRANDED_COMMODITY_IDENTITY_RULE_EN],
     schema: VISUAL_REVIEW_SCHEMA,
     transport: [PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES, PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT],
     reasoningEffort: resolveTextReasoningEffort(),

@@ -19,16 +19,17 @@ async function main() {
   await sharp({ create: { width: 300, height: 300, channels: 3, background: "white" } }).png().toFile(photo);
   const hash = crypto.createHash("sha256").update(fs.readFileSync(photo)).digest("hex");
   const composition = { sections: [
-    { id: "body", title: "공식 보습 기능", body: ["수분 공급"], imageIntent: "기능 근거", imagePaths: [photo], imageMin: 1, imageMax: 1 },
+    { id: "body", title: "공식 보습 기능", body: ["사진이 수분 공급 효과를 입증합니다."], imageIntent: "기능 근거", imagePaths: [photo], imageMin: 1, imageMax: 1 },
     { id: "other", title: "다른 문단", body: ["전체 모습"], imageIntent: "제품 대표 원본 사진 재노출", imagePaths: [], imageMin: 0, imageMax: 1 },
   ],
-    renderNodes: [{ kind: "heading", sectionId: "body", text: "공식 보습 기능" }, { kind: "paragraph", sectionId: "body", text: "수분 공급" },
+    renderNodes: [{ kind: "heading", sectionId: "body", text: "공식 보습 기능" }, { kind: "paragraph", sectionId: "body", text: "사진이 수분 공급 효과를 입증합니다." },
       { kind: "image", sectionId: "body", assetPath: photo, role: "scene" }] } as unknown as ResolvedPostDocumentV1;
   const manifest = { brandLinkId: id, version: "brand-post-package/v2", composition, connectKind: "SHOPPING", heroImagePath: photo,
     imageAssets: [{ role: "body", sectionId: "body", path: photo, sourcePath: photo, sha256: hash }] } as unknown as import("../src/lib/brand-post-package").BrandPostPackageManifestV2;
   const save = () => fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(manifest)); save();
   const verdict = { index: 1, accepted: false, identityMatches: true, photoClaimMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false,
-    optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "feature-evidence", reason: "보습이 아니라 보송한 마무리 설명" };
+    optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "feature-evidence", reason: "보습이 아니라 보송한 마무리 설명",
+    photoClaimObjection: { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" } };
   const opts = { brandLinkId: id, productName: "fixture", composition,
     review: async () => JSON.stringify({ reviews: [verdict] }) };
   try {
@@ -50,7 +51,9 @@ async function main() {
     await assertPublishImagesSafe({ ...opts, review: async () => JSON.stringify({ reviews: [{ ...verdict, accepted: true }] }) });
     assert.deepEqual(rejectedPublicationImageHashes(id, composition, "body"), [], "fresh exact-byte pixel review resolves prior false positive");
     await assert.rejects(assertPublishImagesSafe({ ...opts, review: async () => JSON.stringify({ reviews: [{ ...verdict,
-      accepted: true, photoClaimMatches: false, reason: "The photograph cannot prove the paragraph's efficacy claim" }] }) }), /사진을 기능·성능·결과의 증거/);
+      accepted: true, photoClaimMatches: false, reason: "The photograph cannot prove the paragraph's efficacy claim",
+      photoClaimObjection: { origin: "section-body", sourceIndex: 0, quote: "사진이 수분 공급 효과를 입증합니다.",
+        scope: "performance", conflict: "A static container photo does not demonstrate moisture delivery." } }] }) }), /사진을 기능·성능·결과의 증거/);
     assert.deepEqual(rejectedPublicationImageHashes(id, composition, "body"), [hash], "unsupported photo proof is recorded despite overall acceptance");
     assert.deepEqual(rejectedPublicationImageHashes(id, composition, "other"), [], "photo-claim failure is section-specific");
     await assertPublishImagesSafe({ ...opts, review: async () => JSON.stringify({ reviews: [{ ...verdict, accepted: true }] }) });

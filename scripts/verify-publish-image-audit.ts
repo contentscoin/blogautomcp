@@ -9,7 +9,7 @@ import { createRequire } from "node:module";
 import Ajv from "ajv";
 import sharp from "sharp";
 import ts from "typescript";
-import { auditPublishImages, assertPublishImagesSafe, buildSelectedProductImageAuditContext, encodeLosslessAuditSnapshot, parseVisualReviews, PublishImageAuditError, type PublishImageAuditOptions } from "./lib/publish-image-audit";
+import { auditPublishImages, assertPublishImagesSafe, buildSelectedProductImageAuditContext, encodeLosslessAuditSnapshot, parseVisualReviews, validatePhotoClaimObjection, PublishImageAuditError, type PublishImageAuditOptions } from "./lib/publish-image-audit";
 import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 import { reviewShoppingReferenceScene } from "./lib/shopping-reference-scene";
 import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
@@ -48,8 +48,27 @@ async function main() {
       assert.equal((await sharp(encoded).metadata()).isPalette, false, "lossless transport must not quantize to a palette");
       assertions++;
     }
-    const good = { index: 1, accepted: true, identityMatches: true, photoClaimMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "Visible lavender Stress Relief 532ml pair" };
-    const evidenceFirstFieldOrder = ["index", "reason", "identityMatches", "photoClaimMatches", "notice", "mixedOptions", "explicitNamedComparison", "optionsClearlyLabeled", "singlePhotograph", "noGraphicLayout", "textPolicyMatches", "thumbnailHeadlineLegible", "reviewClass", "accepted"];
+    const neutralObjection: { origin: string; sourceIndex: number | null; quote: string; scope: string; conflict: string } = { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" };
+    const good = { index: 1, accepted: true, identityMatches: true, photoClaimMatches: true, photoClaimObjection: neutralObjection, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "Visible lavender Stress Relief 532ml pair" };
+    type AuditCall = Parameters<NonNullable<PublishImageAuditOptions["review"]>>[0];
+    const slotsFor = (call: AuditCall) => {
+      const line = call.userPrompt.split("\n").find(value => value.startsWith("Each attached image belongs ONLY"))!;
+      return JSON.parse(line.slice(line.indexOf("["))) as Array<{ role: string; sectionTitle: string; sectionBody: string[];
+        claimSources: { sectionTitle: { origin: string; sourceIndex: null; text: string }; sectionBody: Array<{origin: string; sourceIndex: number; text: string}> } }>;
+    };
+    // Test-only stubs supply a concrete citation so existing semantic gate
+    // regressions still exercise a valid adverse answer, never INVALID_REVIEW.
+    const fixtureRow = (call: AuditCall, patch: Record<string, unknown>) => {
+      const row = { ...good, ...patch };
+      if (row.photoClaimMatches === false && !("photoClaimObjection" in patch)) {
+        const slot = slotsFor(call)[row.index - 1];
+        row.photoClaimObjection = slot.role === "thumbnail"
+          ? { origin: "thumbnail-headline", sourceIndex: null, quote: "Synthetic pixel headline", scope: "result", conflict: row.reason }
+          : { origin: "section-body", sourceIndex: 0, quote: slot.sectionBody[0], scope: "pictured-appearance", conflict: row.reason };
+      }
+      return row;
+    };
+    const evidenceFirstFieldOrder = ["index", "reason", "photoClaimObjection", "identityMatches", "photoClaimMatches", "notice", "mixedOptions", "explicitNamedComparison", "optionsClearlyLabeled", "singlePhotograph", "noGraphicLayout", "textPolicyMatches", "thumbnailHeadlineLegible", "reviewClass", "accepted"];
     const assertEvidenceFirstCall = (call: Parameters<NonNullable<PublishImageAuditOptions["review"]>>[0]) => {
       const schema = call.outputSchema as { properties: { reviews: { items: { required: string[]; properties: Record<string, { type: string; const?: unknown; enum?: unknown }> } } } };
       const item = schema.properties.reviews.items;
@@ -61,10 +80,10 @@ async function main() {
         "provider serialization must retain the evidence-first property order");
       const exemplar = call.userPrompt.split("\n").find(line => line.startsWith("Return exactly"))!;
       const row = exemplar.slice(exemplar.indexOf('{"reviews":[{') + '{"reviews":[{'.length, exemplar.indexOf("}]}"));
-      assert.deepEqual([...row.matchAll(/"(\w+)":/gu)].map(match => match[1]), evidenceFirstFieldOrder);
+      assert.deepEqual([...row.replace(/"photoClaimObjection":\{[^}]*\}/u, '"photoClaimObjection":null').matchAll(/"(\w+)":/gu)].map(match => match[1]), evidenceFirstFieldOrder);
       assert.match(call.userPrompt, /reason BEFORE the separate checks and reviewClass\. Output accepted LAST/u);
       assert.match(call.userPrompt, /Field order does not authorize a favorable verdict or override an adverse check/u);
-      for (const key of evidenceFirstFieldOrder.filter(key => !["index", "reason", "reviewClass"].includes(key))) {
+      for (const key of evidenceFirstFieldOrder.filter(key => !["index", "reason", "photoClaimObjection", "reviewClass"].includes(key))) {
         assert.equal(item.properties[key].type, "boolean");
         assert.equal(item.properties[key].const, undefined, "ordering must not prescribe a verdict");
         assert.equal(item.properties[key].enum, undefined, "both boolean verdicts must remain schema-valid");
@@ -83,9 +102,80 @@ async function main() {
       review: async call => JSON.stringify({ reviews: call.imagePaths!.map((_, i) => ({ ...good, index: i + 1 })) }),
     });
     const check = async (patch: Record<string, unknown>, expected: boolean, input = options()) => {
-      input.review = async () => JSON.stringify({ reviews: [{ ...good, ...patch }] });
+      input = { ...input, composition: structuredClone(input.composition) };
+      if (patch.photoClaimMatches === false) Object.assign(input.composition.renderNodes[2], { text: "이 사진이 제품의 처리 성능을 입증합니다." });
+      input.review = async call => JSON.stringify({ reviews: [fixtureRow(call, patch)] });
       assert.equal((await auditPublishImages(input)).ok, expected); assertions++;
     };
+    const proofContext = { role: "scene", sectionTitle: "사진으로 본 구성", sectionBody: [
+      "  사진에 총 12개가 보입니다.  ", "사진 속 라벨에 １８０ml라고 적혀 있습니다.",
+      "받는 분이 여러 형태의 곶감을 즐기고 냉동보관을 감수할 수 있을 때 선물 후보에 넣어보세요.",
+      "제품의 전체 중량은 1.65kg이며 주문 옵션을 확인하세요.",
+    ] };
+    const bodyProof = { origin: "section-body", sourceIndex: 0, quote: proofContext.sectionBody[0], scope: "quantity", conflict: "Four trays are visible, not twelve units." };
+    const falseProof = { ...good, accepted: false, photoClaimMatches: false, photoClaimObjection: bodyProof };
+    const proofCopies = JSON.stringify({ falseProof, proofContext });
+    assert.equal(validatePhotoClaimObjection(good, proofContext), true);
+    assert.equal(validatePhotoClaimObjection(falseProof, proofContext), true);
+    assert.equal(validatePhotoClaimObjection({ ...falseProof, photoClaimObjection: { ...bodyProof, origin: "section-title", sourceIndex: null, quote: proofContext.sectionTitle } }, proofContext), true);
+    assert.equal(validatePhotoClaimObjection({ ...falseProof, photoClaimObjection: { ...bodyProof, sourceIndex: 1, quote: proofContext.sectionBody[1] } }, proofContext), true);
+    // The validator checks evidence binding, not semantics; an exact citation
+    // never converts an adverse answer into a favorable one, even for advice.
+    assert.equal(validatePhotoClaimObjection({ ...falseProof, photoClaimObjection: { ...bodyProof, sourceIndex: 2, quote: proofContext.sectionBody[2] } }, proofContext), true);
+    assertions += 5;
+    for (const objection of [undefined, null, [], {}, { ...bodyProof, extra: true },
+      { ...bodyProof, sourceIndex: -1 }, { ...bodyProof, sourceIndex: 4 }, { ...bodyProof, sourceIndex: 0.5 },
+      { ...bodyProof, sourceIndex: "0" }, { ...bodyProof, sourceIndex: null },
+      { ...bodyProof, quote: bodyProof.quote.trim() }, { ...bodyProof, quote: "사진에 총 12개가 보입니다." },
+      { ...bodyProof, quote: bodyProof.quote.replace("12", "4") },
+      { ...bodyProof, sourceIndex: 1, quote: proofContext.sectionBody[1].normalize("NFKC") },
+      { ...bodyProof, origin: "section-title", sourceIndex: 0, quote: proofContext.sectionTitle },
+      { ...bodyProof, origin: "section-title", sourceIndex: null, quote: `${proofContext.sectionTitle} ` },
+      { ...bodyProof, origin: "none" }, { ...bodyProof, scope: "none" }, { ...bodyProof, scope: "weight" },
+      { ...bodyProof, conflict: " \n" }, { ...bodyProof, quote: "" }, { ...bodyProof, origin: "thumbnail-headline", sourceIndex: null },
+    ]) {
+      assert.equal(validatePhotoClaimObjection({ ...falseProof, photoClaimObjection: objection }, proofContext), false);
+      assertions++;
+    }
+    for (const patch of [{ quote: "extraneous" }, { sourceIndex: 0 }, { origin: "section-body" }, { scope: "result" }, { conflict: "extraneous" }]) {
+      assert.equal(validatePhotoClaimObjection({ ...good, photoClaimObjection: { ...neutralObjection, ...patch } }, proofContext), false); assertions++;
+    }
+    const headlineProof = { ...bodyProof, origin: "thumbnail-headline", sourceIndex: null, quote: "실제 픽셀의 큰 제목" };
+    assert.equal(validatePhotoClaimObjection({ ...falseProof, photoClaimObjection: headlineProof }, { ...proofContext, role: "thumbnail" }), true,
+      "thumbnail validation proves role/shape only, not OCR equality against a nonexistent canonical transcript");
+    assert.equal(validatePhotoClaimObjection(falseProof, { ...proofContext, role: "thumbnail" }), false);
+    assert.equal(JSON.stringify({ falseProof, proofContext }), proofCopies, "validation never rewrites verdicts or source text"); assertions += 3;
+    // Invalid evidence is not malformed JSON and must not trigger the existing
+    // malformed-verdict retry. Preserve every raw adverse flag and its reason.
+    for (const patch of [{}, { identityMatches: false }, { singlePhotograph: false }, { notice: true }, { mixedOptions: true },
+      { noGraphicLayout: false }, { textPolicyMatches: false }]) {
+      const input = options(); let calls = 0;
+      const observation = "Uncertain claim; raw accepted stays false. C:\\Users\\private\\secret.json token=topsecret Bearer abcdefghijklmnop";
+      input.review = async call => {
+        calls++; assertEvidenceFirstCall(call);
+        const [slot] = slotsFor(call);
+        assert.deepEqual(slot.claimSources.sectionTitle, { origin: "section-title", sourceIndex: null, text: slot.sectionTitle });
+        assert.deepEqual(slot.claimSources.sectionBody, slot.sectionBody.map((text, sourceIndex) => ({ origin: "section-body", sourceIndex, text })));
+        assert.match(call.userPrompt, /recipient's tastes, conditional recommendation/u);
+        return JSON.stringify({ reviews: [{ ...good, photoClaimMatches: false, accepted: false, photoClaimObjection: { ...bodyProof, quote: "Invented source" }, reason: observation, ...patch }] });
+      };
+      const audited = await auditPublishImages(input);
+      assert.equal(audited.ok, false); assert.equal(calls, 1);
+      assert.equal(audited.failures[0].code, "INVALID_REVIEW");
+      assert.match(audited.failures[0].reason, /whole exact actual paragraph/u);
+      assert.match(audited.failures[0].reason, /"accepted":false/u);
+      assert.match(audited.failures[0].reason, /"photoClaimMatches":false/u);
+      assert.match(audited.failures[0].reason, /raw accepted stays false/u);
+      assert.doesNotMatch(audited.failures[0].reason, /private|secret\.json|topsecret|abcdefghijklmnop/u);
+      assert.equal(audited.failures.some(failure => failure.code === "SEMANTIC_REJECTION"), Object.keys(patch).length > 0,
+        "independent adverse checks still reject semantically; invalid claim alone fails closed without blacklisting image bytes"); assertions++;
+      assert.ok(audited.failures.every(failure => !failure.photoDescription), "an invalid claim citation must never become an automatic text-repair finding");
+    }
+    const holisticInvalid = options(); let holisticCalls = 0;
+    holisticInvalid.review = async () => { holisticCalls++; return JSON.stringify({ reviews: [{ ...good, accepted: false, photoClaimObjection: undefined, reason: "Severe impossible geometry" }] }); };
+    const holisticResult = await auditPublishImages(holisticInvalid);
+    assert.equal(holisticResult.ok, false); assert.equal(holisticCalls, 1);
+    assert.deepEqual(holisticResult.failures.map(failure => failure.code), ["INVALID_REVIEW", "SEMANTIC_REJECTION"]); assertions++;
     await check({}, true);
     await check({ photoClaimMatches: false, accepted: true, reason: "The photograph cannot prove the performance asserted by the paragraph" }, false);
     for (const photoClaimMatches of [undefined, null, "yes", 1]) {
@@ -200,7 +290,7 @@ async function main() {
           assert.match(text, /pasted duplicates, split panels/u);
           assert.match(text, /conflicting identifying printing, genuinely unresolved identity/u);
         }
-        return JSON.stringify({ reviews: [{ ...good, reason: name, ...patch }] });
+        return JSON.stringify({ reviews: [fixtureRow(call, { reason: name, ...patch })] });
       };
       assert.equal((await auditPublishImages(grouped)).ok, Object.keys(patch).length === 0, name);
       assertions++;
@@ -344,8 +434,8 @@ async function main() {
     const unsupportedPhotoProof = await auditPublishImages({ ...shokz, composition: photoProof,
       review: async call => {
         assert.ok(call.userPrompt.includes("이 사진이 소음 감소 효과를 증명합니다."));
-        return JSON.stringify({ reviews: [{ ...good, accepted: true, photoClaimMatches: false,
-          reason: "A static seller exterior photo cannot prove noise reduction" }] });
+        return JSON.stringify({ reviews: [fixtureRow(call, { accepted: true, photoClaimMatches: false,
+          reason: "A static seller exterior photo cannot prove noise reduction" })] });
       } });
     assert.equal(unsupportedPhotoProof.ok, false);
     assert.equal(unsupportedPhotoProof.failures[0].code, "SEMANTIC_REJECTION");
@@ -387,8 +477,8 @@ async function main() {
       assert.ok(call.userPrompt.includes(JSON.stringify(dalbaPixelClaim.selectedProduct)));
       assert.match(call.userPrompt, /verify explicit pixel assertions such as 'the photo label reads 100ml' against actually legible confirming pixels/);
       assert.match(call.userPrompt, /This differs from requiring OCR of specifications merely supplied as product facts/);
-      return JSON.stringify({ reviews: [{ ...good, accepted: true, identityMatches: true, photoClaimMatches: false,
-        reason: "The tiny label is unreadable, so the precise published 100ml label assertion is unsupported; selected product facts specify 180ml" }] });
+      return JSON.stringify({ reviews: [fixtureRow(call, { accepted: true, identityMatches: true, photoClaimMatches: false,
+        reason: "The tiny label is unreadable, so the precise published 100ml label assertion is unsupported; selected product facts specify 180ml" })] });
     };
     const dalbaAudit = await auditPublishImages(dalbaPixelClaim);
     assert.equal(dalbaAudit.ok, false);
@@ -528,7 +618,7 @@ async function main() {
           assert.match(text, /must fail photoClaimMatches/u);
           assert.match(text, /no claim of tested efficacy is needed/u);
         }
-        const verdict = { ...good, reason: "One identifiable option in several matching trays; catalog title candidates alone do not resolve a purchased SKU", ...test.patch };
+        const verdict = fixtureRow(call, { reason: "One identifiable option in several matching trays; catalog title candidates alone do not resolve a purchased SKU", ...test.patch });
         assert.equal(new Ajv().compile(call.outputSchema as object)({ reviews: [verdict] }), true);
         return JSON.stringify({ reviews: [verdict] });
       };
@@ -628,7 +718,7 @@ async function main() {
         const referenceIndex = slot.selectedGalleryComparisonImageIndexes[0];
         assert.deepEqual(await sharp(call.imagePaths![referenceIndex-1]).raw().toBuffer(), await sharp(catalogSourcePhoto).raw().toBuffer(),
           "the actual indexed comparison contains this exact selected-listing source's pixels");
-        const verdict = { ...good, reason: "A mapped selected-listing appearance is not proof of an unconfirmed purchased complete bundle", ...test.patch };
+        const verdict = fixtureRow(call, { reason: "A mapped selected-listing appearance is not proof of an unconfirmed purchased complete bundle", ...test.patch });
         assert.equal(new Ajv().compile(call.outputSchema as object)({reviews: [verdict]}), true,
           "every adverse answer remains schema-valid; advice/membership guidance cannot force acceptance");
         return JSON.stringify({reviews: [verdict]});
@@ -665,7 +755,7 @@ async function main() {
         assert.match(call.userPrompt, /Missing other kit components or purchased units alone is not an identity mismatch/u);
         assert.match(call.userPrompt, /published complete-set\/quantity claim unsupported by the pixels still rejects/u);
         assert.match(call.userPrompt, /Do not certify hidden components or quantities/u);
-        return JSON.stringify({ reviews: [{ ...good, reason: "A verified included component may illustrate exterior appearance; total weight is not photo-certified", ...patch }] });
+        return JSON.stringify({ reviews: [fixtureRow(call, { reason: "A verified included component may illustrate exterior appearance; total weight is not photo-certified", ...patch })] });
       };
       const audited = await auditPublishImages(input);
       assert.equal(audited.ok, Object.keys(patch).length === 0);
@@ -699,7 +789,7 @@ async function main() {
           assert.match(text, /never overrides an adverse verdict/u);
         }
         assert.equal(new Ajv().compile(call.outputSchema as object)({ reviews: [{ ...good, ...patch }] }), true);
-        return JSON.stringify({ reviews: [{ ...good, reason: "Actual technical discussion and 제품 사양 체크 do not claim photographic usage proof", ...patch }] });
+        return JSON.stringify({ reviews: [fixtureRow(call, { reason: "Actual technical discussion and 제품 사양 체크 do not claim photographic usage proof", ...patch })] });
       };
       const audited = await auditPublishImages(input);
       assert.equal(audited.ok, Object.keys(patch).length === 0);
@@ -768,10 +858,11 @@ async function main() {
       ["thumbnail", { thumbnailHeadlineLegible: false, reason: "Essential thumbnail words are clipped." }],
     ] as const) {
       const adverse = alignedDecisionInput(role); let calls = 0;
+      if (role === "scene" && "photoClaimMatches" in patch) Object.assign(adverse.composition.renderNodes[2], { text: "사진 속 라벨에 180ml라고 적혀 있어요." });
       adverse.review = async call => {
         calls++;
         assertEvidenceFirstCall(call);
-        const row = { ...good, ...patch };
+        const row = fixtureRow(call, patch);
         assert.equal(new Ajv({ allErrors: true }).compile(call.outputSchema as object)({ reviews: [row] }), true,
           "alignment descriptions must never force a favorable boolean");
         return JSON.stringify({ reviews: [row] });
@@ -792,7 +883,7 @@ async function main() {
       const input = alignedDecisionInput("thumbnail"); let calls = 0;
       input.review = async call => {
         calls++; assertEvidenceFirstCall(call);
-        const row = { ...good, ...patch };
+        const row = fixtureRow(call, patch);
         const ordered = Object.fromEntries(evidenceFirstFieldOrder.map(key => [key, row[key as keyof typeof row]]));
         assert.equal(new Ajv({ allErrors: true }).compile(call.outputSchema as object)({ reviews: [ordered] }), true);
         return JSON.stringify({ reviews: [ordered] });
@@ -863,9 +954,10 @@ async function main() {
       { accepted: false, reason: "Only minor lighting and texture differ; every criterion is favorable." },
     ]) {
       const input = alignedDecisionInput("scene"); let calls = 0;
+      if ("photoClaimMatches" in patch) Object.assign(input.composition.renderNodes[2], { text: "이 사진은 제품을 사용한 뒤 측정된 개선 결과를 입증합니다." });
       input.review = async call => {
         calls++; assertBalancedRubric(call);
-        const row = { ...good, ...patch };
+        const row = fixtureRow(call, patch);
         assert.equal(new Ajv({ allErrors: true }).compile(call.outputSchema as object)({ reviews: [row] }), true,
           "the balanced rubric keeps real adverse boolean values schema-valid");
         return JSON.stringify({ reviews: [row] });

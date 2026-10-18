@@ -291,7 +291,7 @@ async function main() {
         assert.equal(slot.visualContract.purpose, slot.role === "thumbnail" ? "thumbnail" : "lifestyle-illustration");
         assert.equal(slot.visualContract.claimPolicy, "visual-compatibility-and-explicit-photo-claims");
       }
-      return JSON.stringify({ reviews: request.imagePaths!.map((_, index) => ({ index: index + 1, accepted: true, identityMatches: true, photoClaimMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "offline fixture" })) });
+      return JSON.stringify({ reviews: request.imagePaths!.map((_, index) => ({ index: index + 1, accepted: true, identityMatches: true, photoClaimMatches: true, photoClaimObjection: { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" }, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "offline fixture" })) });
     };
     const audited = await auditPublishImages({ productName: "선택 상품", composition: updated.composition, imageAssets: updated.imageAssets, sourceSnapshotId: snapshot.snapshotId, review: visualReview });
     assert.equal(audited.ok, true);

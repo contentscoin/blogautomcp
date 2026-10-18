@@ -56,7 +56,9 @@ async function main() {
     const good = { index: 1, reason: `본문의 “${literal}”와 달리 사진은 용기 외형만 보여 줍니다. 제품과 옵션은 일치하고 배치와 형상에 다른 문제는 없습니다.`,
       accepted: false, identityMatches: true, photoClaimMatches: false, notice: false, mixedOptions: false,
       explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true,
-      textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo" };
+      textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo",
+      photoClaimObjection: { origin: "section-body", sourceIndex: 2, quote: literal, scope: "pictured-appearance",
+        conflict: "The pixels show the containers but no spread-out purple formula." } };
     const input: PublishImageAuditOptions = { brandLinkId: id, productName: "달바 퍼플 톤업 선크림", composition,
       review: async () => JSON.stringify({ reviews: [good] }) };
     const failure = (await auditPublishImages(input)).failures[0];
@@ -105,7 +107,9 @@ async function main() {
       { kind: "paragraph" as const, sectionId: "shopping-section-28267766", text: bodyParagraphs.slice(1).join("\n\n") },
       ...composition.renderNodes.slice(7)] };
     const coalescedManifest = { ...manifest, composition: coalescedComposition };
-    const coalescedFailure = (await auditPublishImages({ ...input, composition: coalescedComposition })).failures[0].photoDescription!;
+    const coalescedFailure = (await auditPublishImages({ ...input, composition: coalescedComposition,
+      review: async () => JSON.stringify({ reviews: [{ ...good, photoClaimObjection: { ...good.photoClaimObjection,
+        sourceIndex: 1, quote: bodyParagraphs.slice(1).join("\n\n") } }] }) })).failures[0].photoDescription!;
     assert(coalescedFailure, "coalesced real layout still yields an exact grounded sentence finding");
     const coalesced = planPhotoDescriptionRepair(coalescedManifest, markdown, [coalescedFailure]);
     assert.deepEqual(coalesced.manifest.composition.sections[0].body, bodyParagraphs.filter(text => text !== literal));
@@ -173,7 +177,9 @@ async function main() {
     const boxManifest = { ...manifest, brandLinkId: boxId, composition: boxComposition,
       imageAssets: [{ path: boxImage, sourcePath: boxImage, sha256, role: "body" as const, sectionId: boxSectionId }] };
     fs.writeFileSync(path.join(boxDir, "manifest.json"), JSON.stringify(boxManifest));
-    const boxVerdict = { ...good, reason: `본문의 “${boxLiteral}”와 달리 사진은 같은 형태의 곶감이 반복된 칸을 보여 줍니다. 상품 외형과 옵션 및 사진 형식에는 다른 문제가 없습니다.` };
+    const boxVerdict = { ...good, reason: `본문의 “${boxLiteral}”와 달리 사진은 같은 형태의 곶감이 반복된 칸을 보여 줍니다. 상품 외형과 옵션 및 사진 형식에는 다른 문제가 없습니다.`,
+      photoClaimObjection: { ...good.photoClaimObjection, sourceIndex: 0, quote: boxBody.join("\n\n"),
+        conflict: "The pictured compartments repeat the same shape instead of the different shapes asserted in this paragraph." } };
     const boxInput: PublishImageAuditOptions = { brandLinkId: boxId, productName: "예다움 상주곶감 선물세트",
       composition: boxComposition, review: async () => JSON.stringify({ reviews: [boxVerdict] }) };
     const boxFailure = (await auditPublishImages(boxInput)).failures[0];
@@ -201,7 +207,7 @@ async function main() {
     assert.throws(() => serverPhotoDescriptionFindings(boxManifest, ["d".repeat(64)]), /보존/u,
       "a client cannot invent a box-photo finding");
     for (const patch of [{ identityMatches: false }, { mixedOptions: true }, { noGraphicLayout: false },
-      { photoClaimMatches: true }, { reason: "제품 옵션이 미확정입니다." }]) {
+      { photoClaimMatches: true, photoClaimObjection: { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" } }, { reason: "제품 옵션이 미확정입니다." }]) {
       const unsafeBox = await auditPublishImages({ ...boxInput, review: async () => JSON.stringify({ reviews: [{ ...boxVerdict, ...patch }] }) });
       assert.equal(unsafeBox.failures[0].photoDescription, undefined,
         "a box-photo subject never overrides adverse identity, option, format or incomplete quoted evidence");
@@ -215,7 +221,9 @@ async function main() {
     for (const factualClaim of ["제공된 사진에는 532ml 용기가 보여요.", "사진처럼 사용시간 45분인 제품을 고르세요."])
       assert.equal(locatePhotoDescriptionSentence(factualClaim, `“${factualClaim}”`), null, "new photo grammar cannot erase quantities or verified product facts");
     for (const patch of [{ identityMatches: false }, { notice: true }, { mixedOptions: true }, { singlePhotograph: false },
-      { noGraphicLayout: false }, { textPolicyMatches: false }, { photoClaimMatches: true }, { reason: "구조가 왜곡됐습니다." }]) {
+      { noGraphicLayout: false }, { textPolicyMatches: false },
+      { photoClaimMatches: true, photoClaimObjection: { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" } },
+      { reason: "구조가 왜곡됐습니다." }]) {
       const unsafe = await auditPublishImages({ ...input, review: async () => JSON.stringify({ reviews: [{ ...good, ...patch }] }) });
       assert.equal(unsafe.failures[0].photoDescription, undefined, "identity/format/unknown failure cannot authorize text repair");
     }

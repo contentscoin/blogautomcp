@@ -120,6 +120,7 @@ async function main() {
     writeBrandPostPackageManifest(fixture);
     let reviewCalls = 0;
     const good = (index: number) => ({ index, reason: "offline visible product fixture", identityMatches: true, photoClaimMatches: true,
+      photoClaimObjection: { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" },
       notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true,
       noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", accepted: true });
     const review = async (call: { userPrompt: string }) => {
@@ -154,7 +155,16 @@ async function main() {
     if (paragraph?.kind === "paragraph") paragraph.text += " 이 사진은 다른 상품을 보여줍니다.";
     writeBrandPostPackageManifest(changed);
     reviewProvider = async call => {
-      const result = JSON.parse(await review(call)); for (const row of result.reviews) row.photoClaimMatches = false;
+      const result = JSON.parse(await review(call));
+      const line = call.userPrompt.split("\n").find(text => text.startsWith("Each attached image belongs ONLY"))!;
+      const slots = JSON.parse(line.slice(line.indexOf("[")));
+      for (const row of result.reviews) {
+        const slot = slots[row.index - 1];
+        row.photoClaimMatches = false;
+        row.photoClaimObjection = slot.role === "thumbnail"
+          ? { origin: "thumbnail-headline", sourceIndex: null, quote: "Synthetic conflicting headline", scope: "pictured-appearance", conflict: "Offline changed photo claim conflicts with visible product." }
+          : { origin: "section-body", sourceIndex: 0, quote: slot.sectionBody[0], scope: "pictured-appearance", conflict: "The published paragraph claims a different pictured product." };
+      }
       return JSON.stringify(result);
     };
     await assert.rejects(preflight(id, "선택 상품"), (error: unknown) => (error as { name?: string }).name === "PublishImageAuditError");

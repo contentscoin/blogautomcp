@@ -4,25 +4,63 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import vm from "node:vm";
+import { createRequire } from "node:module";
 import Ajv from "ajv";
 import sharp from "sharp";
-import { auditPublishImages, encodeLosslessAuditSnapshot, planPublishImageAuditBatches, planPublishImageComparisonGroups, PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES, PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT, type PublishImageAuditOptions } from "./lib/publish-image-audit";
+import ts from "typescript";
+import { auditPublishImages, encodeLosslessAuditSnapshot, planPublishImageAuditBatches, planPublishImageComparisonGroups, PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES, PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT, type PublishImageAuditOptions, type PublishImageAuditResult } from "./lib/publish-image-audit";
 import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 import type { CodexDraftOptions } from "./lib/codex-draft-provider";
 import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
+import { runMaterialPreparation } from "./lib/scheduled-draft-workflow";
 
 const hash = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
-const slots = (call: CodexDraftOptions): Array<{ index: number; comparisonReferenceImageIndex: number; referenceSha256: string; sourceSnapshotId: string; sectionBody: string[] }> => {
+const slots = (call: CodexDraftOptions): Array<{ index: number; role: string; sectionTitle: string; comparisonReferenceImageIndex: number; referenceSha256: string; sourceSnapshotId: string; sectionBody: string[];
+  claimSources: { sectionTitle: { origin: string; sourceIndex: null; text: string }; sectionBody: Array<{ origin: string; sourceIndex: number; text: string }> } }> => {
   const line = call.userPrompt.split("\n").find(text => text.startsWith("Each attached image belongs ONLY"))!;
   return JSON.parse(line.slice(line.indexOf("[")));
 };
 const good = (index: number) => ({ index, accepted: true, identityMatches: true, photoClaimMatches: true, notice: false,
   mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true,
-  noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "Offline pixel-pair contract fixture" });
+  noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "Offline pixel-pair contract fixture",
+  photoClaimObjection: { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" } });
+const bodyObjection = (quote: string, sourceIndex = 0) => ({ origin: "section-body", sourceIndex, quote,
+  scope: "quantity", conflict: "The fixture reviewer reports that the pictured quantity does not match this exact published assertion." });
 const answer = (call: CodexDraftOptions) => JSON.stringify({ reviews: slots(call).map(slot => good(slot.index)) });
+
+// Source-backed saved-body excerpts copied once for an offline regression. No
+// private IDs/URLs or live data reads. The harness checks the response contract;
+// it never decides a reviewer boolean from keywords or a disclaimer pattern.
+const publishedContextFixtures = [
+  { title: "1.65kg은 어떻게 판단하면 좋을까요?", body: [
+    "상품에 안내된 무게는 1.65kg이에요.",
+    "그만큼 받는 분의 먹는 양과 보관 여유를 함께 따져야 해서 소량 간식만 원하는 경우에는 부담이에요.",
+    "가족이 나눠 먹을 선물이라면 총중량과 함께 종류별 개수도 판단 기준이 돼요.",
+    "같은 무게라도 큰 곶감 위주인지 작은 말이 위주인지에 따라 나누는 방식이 달라지거든요.",
+    "총중량만으로 몇 명이 먹기에 충분한지 정하거나 한 개의 크기를 추정하지는 않는 편이 정확해요.",
+  ] },
+  { title: "상주산과 무게가 알려주는 선택 기준", body: [
+    "원산지는 국산(경상북도 상주시)으로 안내돼 있어요.",
+    "그래서 산지를 분명하게 정해 상주곶감 선물을 찾는 분에게 선택 기준이 돼요.",
+    "표기된 상품 무게는 1.27kg이에요.",
+    "그만큼 소량 간식을 고를 때보다 먹을 사람 수와 보관 공간을 함께 따져야 하는 구성이에요.",
+    "다만 이 수치를 낱개 무게나 확정된 제공 인원으로 바꿔 계산하기는 어려워요.",
+    "산지는 선물을 고르는 근거가 되지만 당도나 식감까지 보장하는 수치는 아니에요.",
+  ] },
+  { title: "여럿이 나눌 선물이라면 구성부터", body: [
+    "천년빛곶감은 건시와 반건시, 호두말이와 크림치즈 옵션을 살펴볼 수 있는 곶감 선물 상품이에요.",
+    "선물할 때는 받는 분이 좋아하는 곶감 종류와 먹을 분량을 먼저 정하는 편이 좋아요.",
+    "다만 냉동 보관이 필요해서 받는 분의 보관 여건까지 맞아야 해요.",
+    "명절 선물은 포장만큼 실제로 꺼내 먹기 좋은지도 중요하죠.",
+    "구매 전에는 판매페이지의 구성 안내와 선택한 주문 옵션이 일치하는지 확인해 보세요.",
+  ] },
+];
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "audit-reference-fixture-"));
+  const previousUserData = process.env.DESKTOP_USER_DATA;
+  process.env.DESKTOP_USER_DATA = root;
   let checks = 0;
   try {
     const finals: string[] = [], references: string[] = [];
@@ -48,6 +86,165 @@ async function main() {
       review: async call => answer(call),
     });
     const pairs = [{ final: finals[0], reference: references[0] }, { final: finals[1], reference: references[1] }, { final: finals[2], reference: references[0] }];
+    const textFixture = (texts: Array<{ title: string; body: string[] }>): PublishImageAuditOptions => {
+      const options = fixture(texts.map((_, index) => pairs[index]));
+      options.composition.sections.forEach((section, index) => {
+        section.title = texts[index].title; section.body = [...texts[index].body];
+        section.characterCount = section.body.join("").length;
+      });
+      options.composition.renderNodes = texts.flatMap((text, index) => [
+        options.composition.renderNodes[index * 3],
+        { kind: "heading" as const, sectionId: `section-${index}`, text: text.title },
+        ...text.body.map(value => ({ kind: "paragraph" as const, sectionId: `section-${index}`, text: value })),
+      ]);
+      return options;
+    };
+    // Execute the real assertion wrapper while replacing only its persistence
+    // boundaries. No saved user package, success receipt or rejection is touched.
+    const auditPath = path.resolve("scripts/lib/publish-image-audit.ts");
+    const auditRequire = createRequire(auditPath);
+    const cleared: Array<{ sha256: string; sectionId: string | null }> = [];
+    const rejected: Array<{ sha256: string; sectionId: string | null }> = [];
+    let defaultProviderCalls = 0;
+    const auditedExports: Record<string, unknown> = {};
+    vm.runInNewContext(ts.transpileModule(fs.readFileSync(auditPath, "utf8"), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
+    }).outputText, { exports: auditedExports, Buffer, console, setTimeout, process, require: (id: string) =>
+      id === "./codex-draft-provider" ? { runCodexDraft: async () => { defaultProviderCalls++; throw new Error("Unexpected paid provider in offline proof fixture"); } } :
+      id === "./publish-image-rejections" ? { ...auditRequire(id),
+        clearReviewedPublicationImageRejections: (_id: string, _composition: unknown, rows: typeof cleared) => { cleared.push(...rows); },
+        recordPublicationImageRejections: (_id: string, _composition: unknown, rows: typeof rejected) => { rejected.push(...rows); } } :
+      id === "./photo-description-finding" ? { ...auditRequire(id), savePhotoDescriptionFindings: () => {} } : auditRequire(id),
+    });
+    const assertAudit = auditedExports.assertPublishImagesSafe as (options: PublishImageAuditOptions) => Promise<PublishImageAuditResult>;
+    const assertBlocked = async (options: PublishImageAuditOptions, codes: string[]) => {
+      cleared.length = 0; rejected.length = 0;
+      let result: PublishImageAuditResult | undefined;
+      try { await assertAudit({ ...options, brandLinkId: "offline-claim-proof" }); }
+      catch (error) { result = (error as { audit?: PublishImageAuditResult }).audit; }
+      assert(result && !result.ok, "a malformed/adverse review must not authorize the assertion wrapper");
+      assert.deepEqual(Array.from(result.failures, failure => failure.code).sort(), [...codes].sort());
+      assert.equal(cleared.length, 0, "invalid/adverse final pixels cannot clear an earlier rejection");
+      return result;
+    };
+    const unchangedPixels = [...finals, ...references].map(hash);
+    for (const text of publishedContextFixtures) {
+      const options = textFixture([text]); let calls = 0;
+      options.review = async call => {
+        calls++;
+        const actual = slots(call)[0];
+        assert.equal(actual.sectionTitle, text.title); assert.deepEqual(actual.sectionBody, text.body);
+        assert.deepEqual(actual.claimSources, { sectionTitle: { origin: "section-title", sourceIndex: null, text: text.title },
+          sectionBody: text.body.map((value, sourceIndex) => ({ origin: "section-body", sourceIndex, text: value })) },
+        "quote sources retain the exact rendered paragraph boundaries and zero-based indexes");
+        const schema = new Ajv({ allErrors: true }).compile(call.outputSchema as object);
+        assert(schema({ reviews: [good(1)] }), "ordinary saved specs/preferences may accompany a neutral structured reviewer verdict");
+        assert(!schema({ reviews: [{ ...good(1), photoClaimObjection: undefined }] }), "the explicit objection contract is required even for favorable decisions");
+        return answer(call);
+      };
+      assert.equal((await auditPublishImages(options)).ok, true); assert.equal(calls, 1); checks++;
+    }
+    const exactBody = publishedContextFixtures[0].body[0];
+    const invalidProofs: Array<[string, unknown, boolean?]> = [
+      ["missing", undefined],
+      ["null-object", null],
+      ["wrong-slot", bodyObjection(publishedContextFixtures[1].body[0])],
+      ["wrong-index", bodyObjection(exactBody, 1)],
+      ["fractional-index", bodyObjection(exactBody, 0.5)],
+      ["string-index", { ...bodyObjection(exactBody), sourceIndex: "0" }],
+      ["clipped-quote", bodyObjection(exactBody.slice(0, -1))],
+      ["decimal-altered", bodyObjection(exactBody.replace("1.65", "65"))],
+      ["nfkc-altered", bodyObjection(exactBody.replace("1.65kg", "１.６５ｋｇ"))],
+      ["whitespace-altered", bodyObjection(exactBody.replace("무게는 ", "무게는  "))],
+      ["empty-conflict", { ...bodyObjection(exactBody), conflict: "  " }],
+      ["none-scope", { ...bodyObjection(exactBody), scope: "none" }],
+      ["none-contradiction", { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" }],
+      ["thumbnail-origin-in-body", { ...bodyObjection(exactBody), origin: "thumbnail-headline", sourceIndex: null }],
+      ["title-with-body-index", { ...bodyObjection(publishedContextFixtures[0].title), origin: "section-title", sourceIndex: 0 }],
+      ["wrong-title", { ...bodyObjection(publishedContextFixtures[1].title), origin: "section-title", sourceIndex: null }],
+      ["true-has-objection", bodyObjection(exactBody), true],
+    ];
+    for (const [label, proof, photoClaimMatches = false] of invalidProofs) {
+      const options = textFixture([publishedContextFixtures[0]]); let calls = 0;
+      options.review = async () => { calls++; return JSON.stringify({ reviews: [{ ...good(1), accepted: photoClaimMatches, photoClaimMatches,
+        photoClaimObjection: proof, reason: `Original reviewer reason preserved: ${label}` }] }); };
+      const blocked = await assertBlocked(options, ["INVALID_REVIEW"]);
+      assert.equal(calls, 1, "a bad objection proof must not cause another reviewer call or semantic pass-fishing");
+      assert.equal(rejected.length, 0, "reviewer contract failure is not evidence for blacklisting or regenerating the image");
+      assert(blocked.failures[0].reason.includes(label), "the original reviewer reason remains available for diagnosis");
+      const details = JSON.parse(blocked.failures[0].reason.slice(blocked.failures[0].reason.indexOf("{"))) as {
+        rawReason: string; rawVerdicts: { accepted: boolean; photoClaimMatches: boolean };
+      };
+      assert.equal(details.rawReason, `Original reviewer reason preserved: ${label}`);
+      assert.equal(details.rawVerdicts.accepted, photoClaimMatches); assert.equal(details.rawVerdicts.photoClaimMatches, photoClaimMatches);
+      assert.deepEqual([...finals, ...references].map(hash), unchangedPixels); checks++;
+    }
+    const staleSectionText = textFixture([publishedContextFixtures[0]]); let staleSectionCalls = 0;
+    const metadataOnlyParagraph = "The saved section metadata is stale and is not published.";
+    staleSectionText.composition.sections[0].body = [metadataOnlyParagraph];
+    staleSectionText.review = async call => { staleSectionCalls++; assert.deepEqual(slots(call)[0].sectionBody, publishedContextFixtures[0].body);
+      return JSON.stringify({ reviews: [{ ...good(1), accepted: false, photoClaimMatches: false,
+        photoClaimObjection: bodyObjection(metadataOnlyParagraph), reason: "Metadata-only quote must not replace actual published render text" }] }); };
+    await assertBlocked(staleSectionText, ["INVALID_REVIEW"]); assert.equal(staleSectionCalls, 1); assert.equal(rejected.length, 0); checks++;
+    const titleProof = textFixture([publishedContextFixtures[0]]); let titleCalls = 0;
+    titleProof.review = async call => { titleCalls++; return JSON.stringify({ reviews: [{ ...good(1), accepted: false, photoClaimMatches: false,
+      photoClaimObjection: { ...bodyObjection(slots(call)[0].sectionTitle), origin: "section-title", sourceIndex: null },
+      reason: "An exact whole-title objection retains the original adverse result" }] }); };
+    await assertBlocked(titleProof, ["SEMANTIC_REJECTION"]); assert.equal(titleCalls, 1); assert.equal(rejected.length, 1); checks++;
+    for (const text of publishedContextFixtures) {
+      const options = textFixture([text]); let calls = 0;
+      options.review = async call => { calls++; return JSON.stringify({ reviews: [{ ...good(1), accepted: false, photoClaimMatches: false,
+        photoClaimObjection: bodyObjection(slots(call)[0].sectionBody[0]), reason: "Structurally grounded adverse reviewer decision remains adverse" }] }); };
+      await assertBlocked(options, ["SEMANTIC_REJECTION"]);
+      assert.equal(calls, 1); assert.equal(rejected.length, 1,
+        "even ordinary specs/preferences cannot be used by deterministic text patterns to override a grounded adverse boolean"); checks++;
+    }
+    for (const [label, patch] of [
+      ["identity", { identityMatches: false }], ["format", { noGraphicLayout: false }], ["notice", { notice: true }],
+      ["options", { mixedOptions: true }], ["geometry", { accepted: false }],
+    ] as const) {
+      const options = textFixture([publishedContextFixtures[0]]); let calls = 0;
+      options.review = async () => { calls++; return JSON.stringify({ reviews: [{ ...good(1), ...patch, photoClaimMatches: label === "geometry",
+        photoClaimObjection: undefined, reason: `Concrete independent ${label} objection is not removed by a missing quote proof` }] }); };
+      const blocked = await assertBlocked(options, ["INVALID_REVIEW", "SEMANTIC_REJECTION"]);
+      assert.equal(calls, 1); assert.equal(rejected.length, 1);
+      assert(blocked.failures.some(failure => failure.reason.includes(label))); checks++;
+    }
+    const crossSlot = textFixture(publishedContextFixtures.slice(0, 2)); let crossSlotCalls = 0;
+    crossSlot.review = async call => { crossSlotCalls++; const actual = slots(call);
+      return JSON.stringify({ reviews: actual.map((slot, index) => index === 0 ? { ...good(slot.index), accepted: false, photoClaimMatches: false,
+        photoClaimObjection: bodyObjection(actual[1].sectionBody[0]), reason: "This quote belongs to the other final slot" } : good(slot.index)) }); };
+    cleared.length = 0; rejected.length = 0;
+    await assert.rejects(assertAudit({ ...crossSlot, brandLinkId: "offline-cross-slot-proof" }));
+    assert.equal(crossSlotCalls, 1); assert(!cleared.some(row => row.sha256 === hash(finals[0])));
+    assert.equal(rejected.length, 0, "another final slot's text cannot create a pixel rejection for this image"); checks++;
+    // Feed an actual INVALID_REVIEW through the existing full preparation
+    // workflow. It must propagate the outer audit code without rewriting text,
+    // dropping/replacing pictures, submitting a generator, or completing approval.
+    const invalidOptions = textFixture([publishedContextFixtures[0]]); let preparationReviewCalls = 0;
+    invalidOptions.review = async () => { preparationReviewCalls++; return JSON.stringify({ reviews: [{ ...good(1), accepted: false,
+      photoClaimMatches: false, photoClaimObjection: undefined, reason: "No source-bound objection was returned" }] }); };
+    let imageMutations = 0, textMutations = 0, approvalAttempts = 0;
+    const savedPreview = { approvedAt: null, imageSlots: [], contentQuality: { signals: [{ key: "review-substance", status: "pass" as const }] } };
+    await assert.rejects(runMaterialPreparation("offline-proof-workflow", { pause: async () => {}, call: async (url, method, body) => {
+      const action = (body as { action?: string } | undefined)?.action;
+      if (url.endsWith("/images")) { imageMutations++; throw new Error("Unexpected image generation after reviewer contract failure"); }
+      if (action === "revise" || action === "repair_photo_description" || method === "POST") { textMutations++; throw new Error("Unexpected creation/correction after reviewer contract failure"); }
+      if (action === "approve") {
+        approvalAttempts++;
+        try { await assertAudit({ ...invalidOptions, brandLinkId: "offline-proof-workflow" }); }
+        catch (error) {
+          const audit = (error as { audit?: PublishImageAuditResult }).audit; assert(audit);
+          throw Object.assign(new Error("PUBLISH_IMAGE_AUDIT_FAILED: original reviewer contract failure"), { code: "PUBLISH_IMAGE_AUDIT_FAILED",
+            errors: audit.failures.map(failure => `${failure.code}: ${failure.reason}`), imageAuditFailures: audit.failures });
+        }
+        throw new Error("An invalid proof unexpectedly passed approval");
+      }
+      return { success: true, data: savedPreview };
+    } }), (error: unknown) => (error as { code?: string }).code === "PUBLISH_IMAGE_AUDIT_FAILED");
+    assert.equal(preparationReviewCalls, 1); assert.equal(approvalAttempts, 1); assert.equal(savedPreview.approvedAt, null);
+    assert.equal(imageMutations, 0); assert.equal(textMutations, 0);
+    assert.equal(defaultProviderCalls, 0); assert.deepEqual([...finals, ...references].map(hash), unchangedPixels); checks++;
     const mapped = fixture(pairs);
     let calls = 0;
     mapped.review = async call => {
@@ -95,6 +292,12 @@ async function main() {
       review: async call => { assert.equal(slots(call)[0].comparisonReferenceImageIndex, 2);
         assert.deepEqual(await sharp(call.imagePaths![1]).raw().toBuffer(), await sharp(references[0]).raw().toBuffer()); return answer(call); } });
     assert.equal((await auditPublishImages(derivedThumbnail())).ok, true); checks++;
+    const headlineProof = derivedThumbnail(); let headlineProofCalls = 0;
+    headlineProof.review = async () => { headlineProofCalls++; return JSON.stringify({ reviews: [{ ...good(1), accepted: false, photoClaimMatches: false,
+      photoClaimObjection: { origin: "thumbnail-headline", sourceIndex: null, quote: "사진으로 성능 입증", scope: "performance",
+        conflict: "The original reviewer reports the headline is unsupported by the pixels." },
+      reason: "Headline proof format is valid; this is not an OCR truth guarantee or an override of the adverse verdict" }] }); };
+    await assertBlocked(headlineProof, ["SEMANTIC_REJECTION"]); assert.equal(headlineProofCalls, 1); assert.equal(rejected.length, 1); checks++;
     const headlineRejected = derivedThumbnail(); headlineRejected.review = async () => JSON.stringify({ reviews: [{ ...good(1), thumbnailHeadlineLegible: false }] });
     assert.equal((await auditPublishImages(headlineRejected)).ok, false, "passed noAddedText raw review never approves an unreadable final headline"); checks++;
     for (const field of ["thumbnailRawPath", "thumbnailOutputSha256", "reviewedOutputSha256"] as const) {
@@ -164,7 +367,8 @@ async function main() {
       { accepted: false, reason: "All individual boolean checks true but actual overall verdict is adverse; it remains a rejection" },
       { mixedOptions: true, reason: "An unselected scented variant or cross-sell cannot become a selected kit member from the gallery alone" },
     ]) {
-      const options = galleryOptions(); options.review = async call => JSON.stringify({ reviews: slots(call).map(row => ({ ...good(row.index), ...patch })) });
+      const options = galleryOptions(); options.review = async call => JSON.stringify({ reviews: slots(call).map(row => ({ ...good(row.index), ...patch,
+        ...("photoClaimMatches" in patch && patch.photoClaimMatches === false ? { photoClaimObjection: bodyObjection(row.sectionBody[0]) } : {}) })) });
       assert.equal((await auditPublishImages(options)).ok, false); checks++;
     }
     for (const invalid of ["product-id", "snapshot-digest", "snapshot-binding", "relative-directory"] as const) {
@@ -284,7 +488,8 @@ async function main() {
       { accepted: false, reason: "Reference metadata is valid but final pixel verdict still rejects" },
     ]) {
       const options = fixture([pairs[0]]);
-      options.review = async () => JSON.stringify({ reviews: [{ ...good(1), ...patch }] });
+      options.review = async call => JSON.stringify({ reviews: [{ ...good(1), ...patch,
+        ...("photoClaimMatches" in patch && patch.photoClaimMatches === false ? { photoClaimObjection: bodyObjection(slots(call)[0].sectionBody[0]) } : {}) }] });
       const result = await auditPublishImages(options);
       assert.equal(result.ok, false); assert.equal(result.failures[0].code, "SEMANTIC_REJECTION");
       assert.ok(result.failures[0].reason.endsWith(patch.reason)); checks++;
@@ -403,8 +608,11 @@ async function main() {
     for (const patch of [{ identityMatches: false }, { photoClaimMatches: false }, { mixedOptions: true },
       { noGraphicLayout: false }, { textPolicyMatches: false }, { accepted: false }]) {
       const options = splitFixture(); let groupCalls = 0;
-      options.review = async () => { groupCalls++;
-        return JSON.stringify({ reviews: [{ ...good(1), ...(groupCalls === 1 ? patch : {}), reason: "First group adverse; later matching gallery cannot cancel it" }] }); };
+      options.review = async call => { groupCalls++;
+        return JSON.stringify({ reviews: [{ ...good(1), ...(groupCalls === 1 ? patch : {}),
+          ...(groupCalls === 1 && "photoClaimMatches" in patch && patch.photoClaimMatches === false
+            ? { photoClaimObjection: bodyObjection(slots(call)[0].sectionBody[0]) } : {}),
+          reason: "First group adverse; later matching gallery cannot cancel it" }] }); };
       const blocked = await auditPublishImages(options);
       assert.equal(groupCalls, 2, "every evidence group is inspected even after an adverse verdict");
       assert.equal(blocked.ok, false); assert.equal(blocked.checked, 1);
@@ -447,6 +655,10 @@ async function main() {
     assert.equal(oversizedResult.checked, 0); assert.equal(oversizedResult.images.length, 0);
     assert.deepEqual([hash(largeFinal), hash(largeReference)], largeHashes); checks++;
     console.log(`PASS publish audit references: ${checks} offline scenarios; mapped exact pixels, unique refs, whole-payload limits, strict proof/hash/format/claim verdicts, bounded retry (paid calls 0)`);
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  } finally {
+    if (previousUserData === undefined) delete process.env.DESKTOP_USER_DATA;
+    else process.env.DESKTOP_USER_DATA = previousUserData;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
