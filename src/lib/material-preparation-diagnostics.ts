@@ -2,11 +2,12 @@
  * historical success counters are returned, and no approval gate is changed. */
 type Action = "ready" | "wait-current-job" | "inspect-existing-output" | "review-source-candidates" |
   "collect-source-photo" | "complete-image-slots" | "repair-text-sections" | "review-publication" |
-  "inspect-current-state" | "approve-material" | "verify-published-result" | "verify-scheduled-result";
-type Category = "source" | "recovery" | "text" | "images" | "review" | "inspection";
+  "inspect-current-state" | "approve-material" | "verify-published-result" | "verify-scheduled-result" | "wait-provider-capacity";
+type Category = "source" | "recovery" | "text" | "images" | "review" | "inspection" | "provider";
 const ACTION_TEXT: Record<Action, string> = {
   ready: "현재 준비완료 상태입니다.",
   "wait-current-job": "진행 중인 작업의 완료와 저장 결과를 조회하세요.",
+  "wait-provider-capacity": "Codex 사용 한도를 확인하세요. 사용 가능 상태가 확인되면 기존 원고와 정상 사진을 보존하고 중단된 단계부터 재개하세요. 한도 초과 상태에서 재작성·재생성을 반복하지 마세요.",
   "inspect-existing-output": "이전 요청의 완료 여부와 기존 생성 파일을 확인해 복구하세요. 결과 확인 전 새 생성 요청을 보내지 마세요.",
   "review-source-candidates": "수집된 선택 상품의 원본 후보 검토를 완료하세요.",
   "collect-source-photo": "선택 상품·옵션에 맞는 판매자 원본 사진을 다시 확보하세요. 원본 슬롯을 AI 연출 사진으로 대체하지 마세요.",
@@ -20,6 +21,7 @@ const ACTION_TEXT: Record<Action, string> = {
 };
 
 const CODES: Record<string, { category: Category; action: Action }> = {
+  CODEX_USAGE_LIMIT_REACHED: { category: "provider", action: "wait-provider-capacity" },
   IMAGE_SOURCE_BINDING_REQUIRED: { category: "source", action: "collect-source-photo" },
   PREWRITING_PUBLICATION_SOURCE_UNAVAILABLE: { category: "source", action: "collect-source-photo" },
   SOURCE_REVIEW_INCOMPLETE: { category: "source", action: "review-source-candidates" },
@@ -120,6 +122,7 @@ export function materialPreparationDiagnostics(input: MaterialPreparationDiagnos
     let nextAction: Action;
     if (recoveryUncertain || relevant.some(cause => cause.category === "recovery")) nextAction = "inspect-existing-output";
     else if (running) nextAction = "wait-current-job";
+    else if (relevant.some(cause => cause.category === "provider")) nextAction = "wait-provider-capacity";
     else if (stateUnclassified) nextAction = "inspect-current-state";
     else if (relevant.some(cause => cause.action === "review-source-candidates")) nextAction = "review-source-candidates";
     else if (relevant.some(cause => cause.category === "review")) nextAction = "review-publication";
@@ -134,6 +137,7 @@ export function materialPreparationDiagnostics(input: MaterialPreparationDiagnos
   if (input.ready) action = "ready";
   else if (recoveryUncertain || causes.some(item => item.category === "recovery")) action = "inspect-existing-output";
   else if (running) action = "wait-current-job";
+  else if (causes.some(item => item.category === "provider")) action = "wait-provider-capacity";
   else if (stateUnclassified) action = "inspect-current-state";
   else if (causes.some(item => item.action === "review-source-candidates")) action = "review-source-candidates";
   else if (causes.some(item => item.category === "source")) action = causes.find(item => item.category === "source")!.action;
@@ -148,7 +152,7 @@ export function materialPreparationDiagnostics(input: MaterialPreparationDiagnos
   const states: Record<Action, string> = { ready: "ready", "wait-current-job": "in-progress", "inspect-existing-output": "needs-recovery",
     "review-source-candidates": "needs-source", "collect-source-photo": "needs-source", "complete-image-slots": "needs-images",
     "repair-text-sections": "needs-text", "review-publication": "needs-review", "inspect-current-state": "needs-inspection", "approve-material": "needs-approval",
-    "verify-published-result": "published", "verify-scheduled-result": "scheduled" };
+    "verify-published-result": "published", "verify-scheduled-result": "scheduled", "wait-provider-capacity": "needs-provider" };
   return { version: "material-preparation-diagnostics/v1" as const, scope: "current-package" as const, state: states[action],
     missingBodyImages: requiredSlots.reduce((sum, slot) => sum + slot.missingUnique, 0),
     thumbnailRequired: !input.ready && (input.blockers || []).some(blocker => blocker.code === "hero-image-invalid" || blocker.code === "image-thumbnail-format-required"),

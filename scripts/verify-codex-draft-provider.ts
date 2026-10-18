@@ -8,6 +8,7 @@ import {
   classifyCodexDraftFailure,
   codexDraftTerminalFailureCode,
   codexDraftStructuredFailureCode,
+  codexUsageLimitDetails,
   runCodexDraftWithRetry,
   collectCodexDraftResponse,
 } from "./lib/codex-draft-provider";
@@ -121,7 +122,7 @@ const approvalContext = vm.createContext({
 vm.runInContext(ts.transpileModule(failureResponseNode.getText(routeAst), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText, approvalContext);
-for (const code of ["CODEX_AUTH_REQUIRED", "CODEX_MODEL_INCOMPATIBLE", "CODEX_TIMEOUT", "CODEX_TRANSIENT_FAILURE"] as const) {
+for (const code of ["CODEX_AUTH_REQUIRED", "CODEX_MODEL_INCOMPATIBLE", "CODEX_TIMEOUT", "CODEX_TRANSIENT_FAILURE", "CODEX_USAGE_LIMIT_REACHED"] as const) {
   const error = new Error("최종 품질 검사 오류", { cause: Object.assign(new Error("provider failure"), { code }) });
   approvalContext.error = error;
   approvalContext.message = error.message;
@@ -215,6 +216,12 @@ async function verifyRetryPolicy(): Promise<void> {
   assert.equal(cancelledCalls, 1, "the existing abort/budget guard still vetoes transport retry");
 
   const definitiveErrors: Array<[unknown, ReturnType<typeof classifyCodexDraftFailure>, string | null]> = [
+    [new Error("You’ve hit your usage limit. Try again at Oct 22 4:17 PM."), "usage-limit", "CODEX_USAGE_LIMIT_REACHED"],
+    [new Error("You've hit your usage limit. Try again at Oct 22 4:17 PM."), "usage-limit", "CODEX_USAGE_LIMIT_REACHED"],
+    [new Error("SOURCE_REVIEW_INCOMPLETE", { cause: new Error("You’ve hit your usage limit.") }), "usage-limit", "CODEX_USAGE_LIMIT_REACHED"],
+    [Object.assign(new Error("Too many requests"), { status: 429, error: { type: "usage_limit_reached" } }), "usage-limit", "CODEX_USAGE_LIMIT_REACHED"],
+    [Object.assign(new Error("Too many requests"), { status: 429, error: { code: "insufficient_quota" } }), "usage-limit", "CODEX_USAGE_LIMIT_REACHED"],
+    [Object.assign(new Error(completionLoss, { cause: Object.assign(new Error("quota"), { code: "CODEX_USAGE_LIMIT_REACHED" }) }), { code: "CODEX_TRANSIENT_FAILURE" }), "usage-limit", "CODEX_USAGE_LIMIT_REACHED"],
     [Object.assign(new Error("authentication required"), { status: 401 }), "authentication", "CODEX_AUTH_REQUIRED"],
     [Object.assign(new Error("provider wrapper"), { status: 500, response: { status: 401, message: "Forbidden" } }), "authentication", "CODEX_AUTH_REQUIRED"],
     [new Error('{"type":"error","status":401,"error":{"message":"Forbidden"}}'), "authentication", "CODEX_AUTH_REQUIRED"],
@@ -251,7 +258,25 @@ async function verifyRetryPolicy(): Promise<void> {
     assert.equal(calls, 1, `${expectedKind} must not retry or switch execution engines`);
   }
 
-  for (const code of ["CODEX_AUTH_REQUIRED", "CODEX_MODEL_INCOMPATIBLE", "CODEX_TIMEOUT", "CODEX_TRANSIENT_FAILURE"] as const) {
+  const timedQuota = new Error("outer", { cause: Object.assign(new Error("You’ve hit your usage limit. Try again at Oct 22 4:17 PM."), {
+    reset_at: "2026-10-22T16:17:00+09:00", headers: { "retry-after": "120" },
+  }) });
+  assert.deepEqual(codexUsageLimitDetails(timedQuota), { retryAfterSeconds: 120, resetAt: "2026-10-22T07:17:00.000Z", resetHint: "Oct 22 4:17 PM." });
+  assert.deepEqual(codexUsageLimitDetails(Object.assign(new Error("You've hit your usage limit. Try again at Oct 22 4:17 PM."), {
+    resetAt: "Oct 22 4:17 PM", retryAfterSeconds: Infinity,
+  })), { resetHint: "Oct 22 4:17 PM." }, "ambiguous local reset text is preserved without inventing a date or time zone");
+  await assert.rejects(runCodexDraftWithRetry(async () => { throw timedQuota; }, { retryDelayMs: 0 }), (error: unknown) => {
+    const typed = error as Error & { code: string; retryAfterSeconds: number; resetAt: string; resetHint: string };
+    assert.equal(typed.code, "CODEX_USAGE_LIMIT_REACHED"); assert.equal(typed.cause, timedQuota);
+    assert.equal(typed.retryAfterSeconds, 120); assert.equal(typed.resetAt, "2026-10-22T07:17:00.000Z");
+    assert.equal(typed.resetHint, "Oct 22 4:17 PM."); return true;
+  });
+  assert.equal(classifyPrepareFailure(new Error("SOURCE_EVIDENCE_REQUIRED", { cause: timedQuota })), "CODEX_USAGE_LIMIT_REACHED",
+    "the actual child result classifier must preserve nested quota before source-evidence heuristics");
+  assert.equal(classifyLocalFailure({ status: 400, message: "You’ve hit your usage limit. Try again at Oct 22 4:17 PM." }), "CODEX_USAGE_LIMIT_REACHED");
+  assert.equal(classifyLocalFailure({ status: 429, message: "rate_limit_exceeded" }), "LOCAL_AUTOMATION_FAILED",
+    "a short-lived HTTP 429 is not an account usage quota");
+  for (const code of ["CODEX_AUTH_REQUIRED", "CODEX_MODEL_INCOMPATIBLE", "CODEX_TIMEOUT", "CODEX_TRANSIENT_FAILURE", "CODEX_USAGE_LIMIT_REACHED"] as const) {
     assert.equal(classifyLocalFailure({ status: 500, code, message: "wrapped provider failure" }), code,
       `${code} must cross the local automation/MCP mapping unchanged`);
     assert.equal(toLocalAutomationError(Object.assign(new Error("wrapped provider failure"), { code })).code, code,

@@ -3,6 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { getBrandPostPackageDir } from "../../src/lib/brand-post-package";
 import { atomicWriteTextFile } from "../../src/lib/atomic-text-file";
+import { isCodexUsageLimitMessage } from "../../src/lib/local-automation-error";
 
 /** Recover missing product references and rejected scenes from fresh seller evidence. */
 // Policy 10 uses explicit incomplete-review outcomes, rebinds proven source SHA
@@ -13,6 +14,20 @@ export const IMAGE_RECOVERY_POLICY_VERSION = 10;
 
 export type ImageRecoveryStage = "refresh-source" | "repair-rejected" | "replan-images" | "replan-after-rejection";
 type Entry = { stage: ImageRecoveryStage; input: string; output?: string; status: "running" | "complete" | "failed"; at: string; reason?: string; externalFailure?: boolean };
+
+function isExternalRecoveryFailure(error: unknown): boolean {
+  const value = error as { code?: string; message?: string } | null;
+  return /^(?:CODEX_(?:AUTH_REQUIRED|LOGIN_REQUIRED|MODEL_INCOMPATIBLE|TIMEOUT|TRANSIENT_FAILURE|USAGE_LIMIT_REACHED)|CHATGPT_BROWSER_(?:AUTH_REQUIRED|LOGIN_REQUIRED|UNREACHABLE|BUSY)|UNAUTHORIZED|LLM_UNAVAILABLE|ECONNRESET|ECONNREFUSED|ETIMEDOUT|REQUEST_TIMEOUT)$/u
+    .test(value?.code || "") || isCodexUsageLimitMessage(value?.message || String(error));
+}
+
+/** Old releases recorded account quotas as INVALID_INPUT (or no code at all).
+ * Reinterpret only failed records with an exact quota diagnostic. Preserve the
+ * original history bytes/fields; running, completed and quality failures retain
+ * their budget even when unrelated text mentions a limit. */
+function consumesRecoveryBudget(entry: Entry): boolean {
+  return !entry.externalFailure && !(entry.status === "failed" && typeof entry.reason === "string" && isCodexUsageLimitMessage(entry.reason));
+}
 // IMAGE_GENERATION_REQUIRED is what a source-only pass reports for an AI-scene slot; the next
 // generation or replan pass can still fill it, so it does not end recovery.
 const recoverable = new Set(["IMAGE_SOURCE_BINDING_REQUIRED", "PRODUCT_SOURCE_REQUIRED", "PRODUCT_SOURCE_DOWNLOAD_FAILED", "PRODUCT_CUTOUT_REQUIRED", "IMAGE_GENERATION_REQUIRED", "PRODUCT_REFERENCE_REQUIRED", "REFERENCE_SCENE_FIDELITY_FAILED"]);
@@ -62,7 +77,7 @@ export async function runRecordedImageRecovery<T>(id: string, stage: ImageRecove
   const file = path.join(root, "image-recovery-history.json");
   let entries: Entry[] = [];
   try { const saved = JSON.parse(fs.readFileSync(file, "utf8")); if (Array.isArray(saved.entries)) entries = saved.entries; } catch { /* first run */ }
-  if (entries.some(entry => !entry.externalFailure && entry.stage === stage && (entry.input === input || entry.output === input))) return { attempted: false };
+  if (entries.some(entry => consumesRecoveryBudget(entry) && entry.stage === stage && (entry.input === input || entry.output === input))) return { attempted: false };
   const entry: Entry = { stage, input, status: "running", at: new Date().toISOString() };
   entries.push(entry);
   const save = () => atomicWriteTextFile(file, JSON.stringify({ version: 1, entries: entries.slice(-32) }, null, 2));
@@ -76,8 +91,7 @@ export async function runRecordedImageRecovery<T>(id: string, stage: ImageRecove
     entry.reason = String((error as Error).message || error).slice(0, 500);
     // Stop this run, but a later explicit preparation after login/runtime repair
     // must not be permanently suppressed by unchanged product bytes.
-    entry.externalFailure = /^(?:CODEX_(?:AUTH_REQUIRED|LOGIN_REQUIRED|MODEL_INCOMPATIBLE|TIMEOUT)|CHATGPT_BROWSER_(?:AUTH_REQUIRED|LOGIN_REQUIRED|UNREACHABLE|BUSY)|UNAUTHORIZED|LLM_UNAVAILABLE|ECONNRESET|ECONNREFUSED|ETIMEDOUT|REQUEST_TIMEOUT)$/u
-      .test((error as { code?: string }).code || "");
+    entry.externalFailure = isExternalRecoveryFailure(error);
     throw error;
   } finally {
     entry.output = imageRecoverySignature(root) || input;

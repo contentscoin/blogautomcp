@@ -335,6 +335,41 @@ async function main() {
     }));
     assert.equal((await runRecordedImageRecovery("external-fixture", "refresh-source", async () => {})).attempted, true,
       "an explicit retry after external runtime repair remains possible");
+    for (const code of ["CODEX_USAGE_LIMIT_REACHED", "CODEX_TRANSIENT_FAILURE"]) {
+      const id = `external-${code}`, fixture = getBrandPostPackageDir(id);
+      fs.mkdirSync(fixture, { recursive: true });
+      fs.writeFileSync(path.join(fixture, "manifest.json"), JSON.stringify(manifest));
+      await assert.rejects(runRecordedImageRecovery(id, "refresh-source", async () => {
+        throw Object.assign(new Error("external provider unavailable"), { code });
+      }));
+      const saved = JSON.parse(fs.readFileSync(path.join(fixture, "image-recovery-history.json"), "utf8"));
+      assert.equal(saved.entries[0].externalFailure, true, `${code} must not consume a product-evidence repair budget`);
+      assert.equal((await runRecordedImageRecovery(id, "refresh-source", async () => {})).attempted, true);
+      assert.equal((await runRecordedImageRecovery(id, "refresh-source", async () => {})).attempted, false,
+        "an actual successful recovery still consumes the unchanged-input budget");
+    }
+    for (const [label, status, reason, retryAllowed] of [
+      ["curly-legacy-quota", "failed", "You’ve hit your usage limit. Try again later.", true],
+      ["ascii-legacy-quota", "failed", "You've hit your usage limit. Try again later.", true],
+      ["legacy-quota-code", "failed", "CODEX_IMAGE_FAILED: usage_limit_reached", true],
+      ["quota-during-running", "running", "You’ve hit your usage limit.", false],
+      ["quota-after-complete", "complete", "You’ve hit your usage limit.", false],
+      ["generic-limit", "failed", "IMAGE_RESUME_REQUIRED: image request limit reached", false],
+      ["quality-limit", "failed", "QUALITY_REPAIR_EXHAUSTED: retry limit reached", false],
+      ["untyped-rate-limit", "failed", "429 rate_limit_exceeded", false],
+    ] as const) {
+      const id = `history-${label}`, fixture = getBrandPostPackageDir(id);
+      fs.mkdirSync(fixture, { recursive: true });
+      fs.writeFileSync(path.join(fixture, "manifest.json"), JSON.stringify(manifest));
+      const previousEntry = { stage: "refresh-source", input: imageRecoverySignature(fixture), status, at: "original", reason };
+      const file = path.join(fixture, "image-recovery-history.json");
+      fs.writeFileSync(file, JSON.stringify({ version: 1, entries: [previousEntry] }));
+      let called = 0;
+      assert.equal((await runRecordedImageRecovery(id, "refresh-source", async () => { called++; })).attempted, retryAllowed);
+      assert.equal(called, Number(retryAllowed));
+      assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).entries[0], previousEntry,
+        "legacy diagnosis preserves the historical record instead of rewriting or deleting it");
+    }
     let unknownMutations = 0;
     await assert.rejects(runMaterialPreparation("policy-upgrade-unknown-owner", { pause: async () => {}, call: async (_url, method) => {
       if (method !== "GET") unknownMutations++;

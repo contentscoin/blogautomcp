@@ -2,6 +2,22 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { applyMaterialPreparationWorkflowGuard, materialPreparationDiagnostics } from "../src/lib/material-preparation-diagnostics";
 
+test('provider quota pauses preparation instead of recommending new source or image generation', () => {
+  const diagnostics = materialPreparationDiagnostics({ ready: false, approved: false, approvalReceiptCurrent: false,
+    contentPassed: true,
+    blockers: [{ code: 'image-coverage', sectionId: 'shopping-source' }],
+    imageSlots: [{ sectionId: 'shopping-source', minimum: 1, count: 0, missing: 1, generationMissing: 0 }],
+    sourceKinds: { 'shopping-source': 'seller-original' },
+    imageGeneration: { status: 'incomplete', errors: ['CODEX_USAGE_LIMIT_REACHED: provider unavailable'] },
+  });
+  assert.equal(diagnostics.state, 'needs-provider');
+  assert.equal(diagnostics.nextAction.action, 'wait-provider-capacity');
+  assert.equal(diagnostics.requiredSlots[0].nextAction, 'wait-provider-capacity');
+  assert.equal(diagnostics.missingBodyImages, 1);
+  assert.equal(applyMaterialPreparationWorkflowGuard(diagnostics, 'PUBLISHED').nextAction.action, 'verify-published-result');
+  assert.equal(applyMaterialPreparationWorkflowGuard(diagnostics, 'OUTCOME_UNKNOWN').nextAction.action, 'inspect-existing-output');
+});
+
 test('current preparation diagnostics count missing slots once and keep source/recovery boundaries', () => {
   const fixture = { ready: false, approved: false, approvalReceiptCurrent: false, contentPassed: true,
     blockers: [{ code: 'image-coverage', sectionId: 'shopping-source' }, { code: 'generation-required', sectionId: 'shopping-scene' }],

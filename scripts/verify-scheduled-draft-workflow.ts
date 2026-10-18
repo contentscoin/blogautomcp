@@ -409,7 +409,7 @@ async function main() {
       material, save: saveMaterialJob, pause: async () => {}, checkCancelled: () => {} });
     assert.equal(authCalls, 1); assert.equal(auth.items.filter(item => item.status === "interrupted").length, 9);
 
-    for (const sessionCode of ["CODEX_MODEL_INCOMPATIBLE", "CODEX_LOGIN_REQUIRED", "CHATGPT_BROWSER_LOGIN_REQUIRED"]) {
+    for (const sessionCode of ["CODEX_MODEL_INCOMPATIBLE", "CODEX_LOGIN_REQUIRED", "CHATGPT_BROWSER_LOGIN_REQUIRED", "CODEX_USAGE_LIMIT_REACHED"]) {
       const sessionFailure = makeJob(10, "prepare"); let sessionCalls = 0;
       await runMaterialJob(sessionFailure, { call: async () => {
         sessionCalls += 1;
@@ -418,6 +418,32 @@ async function main() {
       assert.equal(sessionCalls, 1, `${sessionCode} must stop before the second material`);
       assert.equal(sessionFailure.items.filter(item => item.status === "interrupted").length, 9);
     }
+    const writingQuota = makeJob(10, "prepare");
+    const writingQuotaCalls: string[] = [];
+    await runMaterialJob(writingQuota, { call: async (url, method, body) => {
+      const action = (body as { action?: string } | undefined)?.action || method;
+      writingQuotaCalls.push(`${url}:${action}`);
+      if (action === "revise") throw Object.assign(new Error("You've hit your usage limit. Try again at Oct 22 4:17 PM."), { code: "CODEX_USAGE_LIMIT_REACHED" });
+      return { success: true, data: { approvedAt: null, imageSlots: [{ missing: 1, generationMissing: 1 }], contentQuality: workflowContentQuality(false) } };
+    }, material, save: saveMaterialJob, pause: async () => {}, checkCancelled: () => {} });
+    assert.equal(writingQuotaCalls.filter(call => call.endsWith(":revise")).length, 1);
+    assert.ok(writingQuotaCalls.every(call => call.includes("/product-0/")), "no second product is inspected or changed after the actual writer hits its quota");
+    assert.ok(writingQuotaCalls.every(call => !call.includes("/images") && !call.includes("/publish")), "a provider quota never starts image recovery or publication");
+    assert.equal(writingQuota.items[0].errorCode, "CODEX_USAGE_LIMIT_REACHED");
+    assert.equal(writingQuota.items.slice(1).filter(item => item.status === "interrupted").length, 9);
+
+    const imageQuota = makeJob(10, "prepare"); let imageQuotaCalls = 0;
+    await runMaterialJob(imageQuota, { call: async (url, method) => {
+      assert.ok(url.includes("/product-0/"), "partial image quota must not start the next product");
+      if (url.endsWith("/images") && method === "POST") {
+        imageQuotaCalls++;
+        return { success: true, code: "IMAGE_REPAIR_FAILED", errors: ["section: CODEX_IMAGE_FAILED(CODEX_USAGE_LIMIT_REACHED): You've hit your usage limit."], data: {} };
+      }
+      return { success: true, data: { approvedAt: null, imageSlots: [{ missing: 1, generationMissing: 1 }], contentQuality: workflowContentQuality(true) } };
+    }, material, save: saveMaterialJob, pause: async () => {}, checkCancelled: () => {} });
+    assert.equal(imageQuotaCalls, 1, "HTTP-success partial image repair does not replay the provider request");
+    assert.equal(imageQuota.items[0].errorCode, "CODEX_USAGE_LIMIT_REACHED");
+    assert.equal(imageQuota.items.slice(1).filter(item => item.status === "interrupted").length, 9);
     for (const perItemCode of ["CODEX_TIMEOUT", "CODEX_TRANSIENT_FAILURE"]) {
       const perItemFailure = makeJob(3, "prepare"); let perItemCalls = 0;
       await runMaterialJob(perItemFailure, { call: async () => {

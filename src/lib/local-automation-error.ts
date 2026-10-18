@@ -25,6 +25,7 @@ export const LOCAL_AUTOMATION_ERROR_CODES = [
   "CODEX_MODEL_INCOMPATIBLE",
   "CODEX_TIMEOUT",
   "CODEX_TRANSIENT_FAILURE",
+  "CODEX_USAGE_LIMIT_REACHED",
   "CHATGPT_BROWSER_AUTH_REQUIRED",
   "CHATGPT_BROWSER_UNREACHABLE",
   "CHATGPT_BROWSER_BUSY",
@@ -57,6 +58,11 @@ export function isCodexStreamCompletionLoss(message: string): boolean {
   const trimmed = message.trim();
   return trimmed === diagnostic
     || /^Reconnecting\.\.\. [1-9]\d*\/[1-9]\d* \(stream disconnected before completion: websocket closed by server before response\.completed\)$/u.test(trimmed);
+}
+
+/** Provider quota evidence, not a short-lived HTTP 429 or arbitrary mention of a limit. */
+export function isCodexUsageLimitMessage(message: string): boolean {
+  return /\bCODEX_USAGE_LIMIT_REACHED\b|\byou(?:['’]ve| have) hit your usage limit\b|\busage[ _-]limit[ _-](?:reached|exceeded)\b|\binsufficient_quota\b|\bquota_exceeded\b/iu.test(message);
 }
 
 export class LocalAutomationError extends Error {
@@ -93,6 +99,7 @@ export const LOCAL_AUTOMATION_ERROR_HINTS: Record<LocalAutomationErrorCode, stri
   CODEX_MODEL_INCOMPATIBLE: "현재 Codex 실행 환경에서 선택한 모델을 지원하지 않습니다. PC 앱을 최신 버전으로 업데이트하세요.",
   CODEX_TIMEOUT: "Codex 원고 작성이 제한 시간 안에 끝나지 않았습니다.",
   CODEX_TRANSIENT_FAILURE: "Codex 서비스의 일시 오류가 재시도 후에도 계속됐습니다. 잠시 후 다시 시도하세요.",
+  CODEX_USAGE_LIMIT_REACHED: "Codex 계정의 사용량 한도에 도달해 다음 소재 작업을 보류했습니다. 한도가 회복되면 기존 원고·정상 사진을 유지한 채 부족한 단계부터 재개하세요.",
   CHATGPT_BROWSER_AUTH_REQUIRED: "ChatGPT 웹 세션의 로그인 또는 보안 확인이 필요합니다.",
   CHATGPT_BROWSER_UNREACHABLE: "ChatGPT 웹 페이지에 연결하지 못했습니다. 네트워크와 프록시 상태를 확인하세요.",
   CHATGPT_BROWSER_BUSY: "다른 ChatGPT 웹 자동화 작업이 진행 중입니다. 현재 작업이 끝난 뒤 다시 시도하세요.",
@@ -137,6 +144,8 @@ export function classifyLocalFailure(input: { status?: number | null; code?: str
   const message = input.message || "";
   const status = input.status ?? null;
   if (isLocalAutomationErrorCode(code)) return code;
+  // A provider quota cannot be repaired by changing a manuscript or its source facts.
+  if (isCodexUsageLimitMessage(message) || /\bCODEX_USAGE_LIMIT_REACHED\b/u.test(message)) return "CODEX_USAGE_LIMIT_REACHED";
   // Context-only preparation has no draft result.json. Preserve its explicit
   // source/photo diagnostic from the logged error before generic HTTP guesses.
   const prewritingCode = message.match(/\b(SOURCE_EVIDENCE_REQUIRED|SOURCE_REVIEW_INCOMPLETE|IMAGE_SOURCE_BINDING_REQUIRED|PREWRITING_PHOTO_CHANGED|PREWRITING_SOURCE_CHANGED)\b/u)?.[1];

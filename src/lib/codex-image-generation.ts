@@ -502,12 +502,22 @@ export function collectCompletedProductCandidates(job: ImageBatchJob, options: {
   const refused = () => new Error("IMAGE_RESUME_REQUIRED: 완료된 상품 이미지 요청과 실제 생성 후보를 확인할 수 없습니다. 기존 기록을 보존했으며 새 생성 요청을 보내지 않았습니다.");
   if (job.referenceMode !== "product") throw refused();
   const prior = readCodexSubmission(job.outStem);
-  if (!prior || prior.state !== "completed" || !prior.threadId || !/^[a-z0-9_-]+$/iu.test(prior.threadId) || prior.startedAtMs <= 0 ||
+  if (!prior || !["completed", "submitting"].includes(prior.state) || !prior.threadId || !/^[a-z0-9_-]+$/iu.test(prior.threadId) || prior.startedAtMs <= 0 ||
       !path.resolve(prior.workspace).startsWith(`${path.resolve(job.outStem)}.codex-`) ||
       !/^\d+$/u.test(path.resolve(prior.workspace).slice(`${path.resolve(job.outStem)}.codex-`.length))) throw refused();
   const codexHome = codexHomeDir(options.codexHome);
-  const completion = prior.completedAtMs !== undefined ? { source: "receipt" as const, completedAtMs: prior.completedAtMs }
+  if (prior.state === "submitting") {
+    try {
+      if (path.resolve(fs.realpathSync(prior.workspace)) !== path.resolve(prior.workspace) ||
+          prior.generationBudget && (!usesHostNativeCollection(prior) || prior.generationBudget.observedCalls > 1 || prior.generationBudget.exceededAtMs !== undefined)) throw refused();
+    } catch { throw refused(); }
+  }
+  // A process can exit after the provider completed but before the receipt was
+  // committed. Recover only from the exact immutable session lifecycle; a raw
+  // image, age or a completedAt field in a submitting receipt is not proof.
+  const completion = prior.state === "completed" && prior.completedAtMs !== undefined ? { source: "receipt" as const, completedAtMs: prior.completedAtMs }
     : completedProductRollout(prior, codexHome);
+  if (prior.state === "submitting" && (!completion || completion.completedAtMs > Date.now() + 1000)) throw refused();
   const directory = path.join(codexHome, "generated_images", prior.threadId);
   const files = safeList(directory).filter(file => RESULT_EXTENSIONS.includes(path.extname(file).toLowerCase()) && isImageFile(file) &&
     fs.statSync(file).mtimeMs >= prior.startedAtMs - 1000 &&

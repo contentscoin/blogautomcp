@@ -68,6 +68,14 @@ async function main() {
         throw failure.error;
       }), (error: unknown) => (error as { code?: string }).code === failure.expected);
     }
+    for (const failure of [new Error("You’ve hit your usage limit. Try again at Oct 22 4:17 PM."),
+      new Error("review wrapper", { cause: Object.assign(new Error("account limit"), { code: "CODEX_USAGE_LIMIT_REACHED" }) })]) {
+      await assert.rejects(() => selectShoppingPrewriteOriginal([file], "fixture", "selected", async (_paths, _name, _targets, options) => {
+        options?.onDiagnostics?.({ version: 1, status: "failed", cacheHit: false, reviewedAt: new Date().toISOString(),
+          candidateCount: 1, targetCount: 1, entries: [], error: failure.message });
+        throw failure;
+      }), observed => observed === failure, "quota is preserved even when review diagnostics are failed; it is never SOURCE_REVIEW_INCOMPLETE");
+    }
 
     const proof = await withShoppingPrewritePhoto({ snapshot: snapshot(), candidatePaths: [file] }, operation, { select: accepted });
     const context = writingPhotosFromPrewrite(proof);

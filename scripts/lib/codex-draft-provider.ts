@@ -4,7 +4,7 @@ import * as path from "node:path";
 import crypto from "node:crypto";
 import { getWritingTimeoutPolicy, writingTimeoutMs } from "./writing-timeout-policy";
 import { resolveCodexTextModel, resolveTextReasoningEffort } from "./text-model-policy";
-import { isCodexStreamCompletionLoss } from "../../src/lib/local-automation-error";
+import { isCodexStreamCompletionLoss, isCodexUsageLimitMessage } from "../../src/lib/local-automation-error";
 
 type CodexSdkModule = typeof import("@openai/codex-sdk");
 
@@ -13,13 +13,22 @@ export type CodexDraftFailureKind =
   | "model-version"
   | "timeout"
   | "retryable-transient"
+  | "usage-limit"
   | "non-retryable";
 
 export type CodexDraftTerminalFailureCode =
   | "CODEX_AUTH_REQUIRED"
   | "CODEX_MODEL_INCOMPATIBLE"
   | "CODEX_TIMEOUT"
-  | "CODEX_TRANSIENT_FAILURE";
+  | "CODEX_TRANSIENT_FAILURE"
+  | "CODEX_USAGE_LIMIT_REACHED";
+
+export interface CodexUsageLimitDetails {
+  retryAfterSeconds?: number;
+  resetAt?: string;
+  /** Preserve a provider's local-date hint without guessing its year or time zone. */
+  resetHint?: string;
+}
 
 interface CodexDraftRetryOptions {
   /** Test hook. Production retries use a short backoff. */
@@ -80,6 +89,7 @@ function codexFailureEvidence(error: unknown): { message: string; messages: stri
       if (Number.isInteger(numeric)) statuses.push(numeric);
     }
     if (typeof record.code === "string") codes.push(record.code.toUpperCase());
+    if (typeof record.type === "string") codes.push(record.type.toUpperCase());
     if (typeof record.name === "string") names.push(record.name);
   }
   return {
@@ -89,6 +99,25 @@ function codexFailureEvidence(error: unknown): { message: string; messages: stri
     codes,
     names,
   };
+}
+
+/** Retain bounded provider timing data; a date without a time zone is never invented. */
+export function codexUsageLimitDetails(error: unknown): CodexUsageLimitDetails {
+  const details: CodexUsageLimitDetails = {};
+  for (const record of errorChain(error)) {
+    const headers = record.headers as { get?: (name: string) => unknown; [key: string]: unknown } | undefined;
+    let retryHeader: unknown;
+    try { retryHeader = typeof headers?.get === "function" ? headers.get("retry-after") : headers?.["retry-after"] ?? headers?.["Retry-After"]; } catch { /* Timing metadata cannot hide the provider error. */ }
+    const retry = record.retryAfterSeconds ?? record.retry_after_seconds ?? record.retryAfter ?? record.retry_after ?? retryHeader;
+    const seconds = typeof retry === "number" || typeof retry === "string" && /^\d+(?:\.\d+)?$/u.test(retry) ? Number(retry) : NaN;
+    if (details.retryAfterSeconds === undefined && Number.isFinite(seconds) && seconds >= 0 && seconds <= 366 * 86400) details.retryAfterSeconds = seconds;
+    const reset = record.resetAt ?? record.reset_at ?? record.resetsAt ?? record.resets_at;
+    if (!details.resetAt && typeof reset === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u.test(reset) && Number.isFinite(Date.parse(reset))) details.resetAt = new Date(reset).toISOString();
+    const message = typeof record.message === "string" ? record.message : "";
+    const hint = message.match(/\btry again at\s+([^\r\n]{1,160})/iu)?.[1]?.trim();
+    if (!details.resetHint && hint) details.resetHint = hint;
+  }
+  return details;
 }
 
 function messageHttpStatuses(message: string): number[] {
@@ -113,6 +142,7 @@ export function classifyCodexDraftFailure(error: unknown): CodexDraftFailureKind
   if (evidence.codes.includes("CODEX_TIMEOUT")) return "timeout";
   if (evidence.codes.includes("CODEX_MODEL_INCOMPATIBLE")) return "model-version";
   if (evidence.codes.includes("CODEX_AUTH_REQUIRED")) return "authentication";
+  if (evidence.codes.some((code) => /^(?:CODEX_USAGE_LIMIT_REACHED|USAGE_LIMIT_REACHED|USAGE_LIMIT_EXCEEDED|INSUFFICIENT_QUOTA|QUOTA_EXCEEDED)$/u.test(code)) || evidence.messages.some(isCodexUsageLimitMessage)) return "usage-limit";
 
   if (
     evidence.names.some((name) => name === "AbortError")
@@ -152,6 +182,7 @@ export function codexDraftTerminalFailureCode(error: unknown): CodexDraftTermina
   if (kind === "model-version") return "CODEX_MODEL_INCOMPATIBLE";
   if (kind === "timeout") return "CODEX_TIMEOUT";
   if (kind === "retryable-transient") return "CODEX_TRANSIENT_FAILURE";
+  if (kind === "usage-limit") return "CODEX_USAGE_LIMIT_REACHED";
   return null;
 }
 
@@ -159,7 +190,7 @@ export function codexDraftTerminalFailureCode(error: unknown): CodexDraftTermina
 export function codexDraftStructuredFailureCode(error: unknown): CodexDraftTerminalFailureCode | null {
   const hasProviderCode = errorChain(error).some((record) =>
     typeof record.code === "string"
-    && /^(?:CODEX_AUTH_REQUIRED|CODEX_MODEL_INCOMPATIBLE|CODEX_TIMEOUT|CODEX_TRANSIENT_FAILURE)$/u.test(record.code.toUpperCase()));
+    && /^(?:CODEX_AUTH_REQUIRED|CODEX_MODEL_INCOMPATIBLE|CODEX_TIMEOUT|CODEX_TRANSIENT_FAILURE|CODEX_USAGE_LIMIT_REACHED)$/u.test(record.code.toUpperCase()));
   return hasProviderCode ? codexDraftTerminalFailureCode(error) : null;
 }
 
@@ -171,6 +202,11 @@ function terminalCodexDraftError(
   const code = forcedCode || codexDraftTerminalFailureCode(error);
   const original = error instanceof Error ? error : new Error(String(error));
   if (!code) return original;
+  if (code === "CODEX_USAGE_LIMIT_REACHED") {
+    const details = codexUsageLimitDetails(error);
+    if ((original as Error & { code?: string }).code === code && !forcedMessage) return Object.assign(original, details);
+    return Object.assign(new Error(forcedMessage || original.message, { cause: error }), { code, ...details });
+  }
   if ((original as Error & { code?: string }).code === code && !forcedMessage) return original;
   return Object.assign(new Error(forcedMessage || original.message, { cause: error }), { code });
 }

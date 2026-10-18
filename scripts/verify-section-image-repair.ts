@@ -125,6 +125,29 @@ async function main() {
       store.writeBrandPostPackageManifest({ ...final.manifest, approvedAt: "fixture-approved" });
       const noop = await repairBrandPostImages({ brandLinkId: id }, { ...deps, generate: async () => { throw new Error("No-op must not generate"); } });
       assert.equal(noop.manifest.approvedAt, "fixture-approved");
+      const preservedPhotos = noop.manifest.bodyImagePaths.map(file => [file, hash(file)]);
+      const stale = { ...noop.manifest, imageGeneration: { ...noop.manifest.imageGeneration!, status: "incomplete" as const, remaining: 2, errors: [] } };
+      store.writeBrandPostPackageManifest(stale);
+      const reconciled = await repairBrandPostImages({ brandLinkId: id }, { ...deps, generate: async () => { throw new Error("Satisfied targets must not generate"); } });
+      assert.equal(reconciled.manifest.imageGeneration?.status, "complete");
+      assert.equal(reconciled.manifest.imageGeneration?.remaining, 0);
+      assert.equal(reconciled.manifest.imageGeneration?.requested, stale.imageGeneration.requested);
+      assert.equal(reconciled.manifest.imageGeneration?.applied, stale.imageGeneration.applied);
+      assert.equal(reconciled.manifest.approvedAt, "fixture-approved", "coverage telemetry cannot change approval or its receipt");
+      assert.deepEqual(reconciled.manifest.bodyImagePaths.map(file => [file, hash(file)]), preservedPhotos);
+      for (const state of [
+        { ...stale.imageGeneration, errors: ["IMAGE_OUTPUT_REJECTED: current thumbnail was rejected"] },
+        { ...stale.imageGeneration, recoveryState: "owner-unknown" as const },
+      ]) {
+        store.writeBrandPostPackageManifest({ ...stale, imageGeneration: state });
+        const retained = await repairBrandPostImages({ brandLinkId: id }, { ...deps, generate: async () => { throw new Error("No implicit recovery generation"); } });
+        assert.equal(retained.manifest.imageGeneration?.status, "incomplete", "an error or uncertain owner cannot be cleared by full image counts");
+        assert.deepEqual(retained.manifest.imageGeneration?.errors, state.errors);
+      }
+      store.writeBrandPostPackageManifest(stale);
+      const explicitEmpty = await repairBrandPostImages({ brandLinkId: id, requests: [] }, deps);
+      assert.equal(explicitEmpty.manifest.imageGeneration?.status, "incomplete", "an empty caller selection is not a whole-material coverage proof");
+      store.writeBrandPostPackageManifest(reconciled.manifest);
       const missingPath = final.manifest.composition.sections[0].imagePaths[0];
       fs.unlinkSync(missingPath);
       const missingPreview = store.packagePreview(store.readBrandPostPackage(id)!);

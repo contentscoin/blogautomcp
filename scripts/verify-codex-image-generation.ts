@@ -290,6 +290,44 @@ async function main() {
     assert.equal(oneNative?.candidates[0].sha256, crypto.createHash("sha256").update(PNG).digest("hex"));
     assert.throws(() => collectCompletedProductCandidates({ ...duplicateJob, requiredReferenceHashes: ["0".repeat(64)] }, { codexHome: duplicateHome }), /PRODUCT_REFERENCE_CHANGED/);
 
+    // A lost local completion receipt can use only the original provider's
+    // exact completed lifecycle, without rewriting its receipt or reissuing.
+    {
+      const f = legacyFixture();
+      const pendingJob: ImageBatchJob = { ...strictProductJob("lost-completion-receipt"), outStem: f.outStem };
+      const receiptFile = `${f.outStem}.codex-submission.json`;
+      fs.writeFileSync(receiptFile, JSON.stringify({ state: "submitting", workspace: f.workspace,
+        startedAtMs: f.createdAtMs, threadId: f.threadId }));
+      const originalReceipt = fs.readFileSync(receiptFile), originalRollout = fs.readFileSync(f.rollout), originalOutput = fs.readFileSync(`${f.outStem}.png`);
+      const recovered = collectCompletedProductCandidates(pendingJob, { codexHome: f.home });
+      assert.equal(recovered?.completion.source, "rollout");
+      assert.equal(recovered?.candidates.length, 1);
+      assert.equal(recovered?.candidates[0].sha256, crypto.createHash("sha256").update(fs.readFileSync(`${f.outStem}.png`)).digest("hex"));
+      assert.deepEqual(fs.readFileSync(receiptFile), originalReceipt, "completion recovery preserves the historical submitting receipt");
+      assert.deepEqual(fs.readFileSync(f.rollout), originalRollout);
+      assert.deepEqual(fs.readFileSync(`${f.outStem}.png`), originalOutput);
+      for (const defect of ["unfinished", "wrong-workspace", "wrong-turn", "future-completion", "receipt-timestamp-only"]) {
+        const original = JSON.parse(JSON.stringify(f.records));
+        if (defect === "unfinished" || defect === "receipt-timestamp-only") f.records.pop();
+        else if (defect === "wrong-workspace") f.records[0].payload.cwd = root;
+        else if (defect === "wrong-turn") f.records[2].payload.turn_id = "unrelated-turn";
+        else f.records[2].timestamp = new Date(Date.now() + 60_000).toISOString();
+        if (defect === "receipt-timestamp-only") fs.writeFileSync(receiptFile, JSON.stringify({ state: "submitting", workspace: f.workspace,
+          startedAtMs: f.createdAtMs, threadId: f.threadId, completedAtMs: Date.now() }));
+        f.save();
+        assert.throws(() => collectCompletedProductCandidates(pendingJob, { codexHome: f.home }), /IMAGE_RESUME_REQUIRED/, defect);
+        f.records.splice(0, f.records.length, ...original); fs.writeFileSync(receiptFile, originalReceipt); f.save();
+      }
+      for (const generationBudget of [
+        { limit: 1, observedCalls: 2, observation: "stream" },
+        { limit: 1, observedCalls: 1, observation: "rollout", exceededAtMs: Date.now() },
+      ]) {
+        fs.writeFileSync(receiptFile, JSON.stringify({ ...JSON.parse(originalReceipt.toString("utf8")), generationBudget }));
+        assert.throws(() => collectCompletedProductCandidates(pendingJob, { codexHome: f.home }), /IMAGE_RESUME_REQUIRED/,
+          "completion cannot excuse an explicitly exceeded generation budget");
+      }
+    }
+
     // A terminal event is evidence; EOF, failure, or timeout after files appear is not.
     for (const mode of ["eof", "failed", "timeout"] as const) {
       const pendingHome = path.join(root, `${mode}-home`), pendingJob = strictProductJob(`${mode}-product`);

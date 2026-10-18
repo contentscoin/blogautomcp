@@ -7,6 +7,7 @@ import { selectVerifiedProductSectionImages, type ProductSectionImageAssignment,
 import type { WritingPublicationPhotoContext } from "./writing-prompt-contract";
 import type { ProductSourceAuditContext } from "./product-source-audit-context";
 import { SHOPPING_NATURAL_SCENE_ROLES } from "./shopping-scene-roles";
+import { codexDraftTerminalFailureCode } from "./codex-draft-provider";
 
 export interface ShoppingPrewritePhotoProof {
   version: "shopping-prewrite-photo-proof/v1";
@@ -45,6 +46,7 @@ export async function selectShoppingPrewriteOriginal(paths: string[], productNam
     // Preserve explicit provider/auth/transport errors. An undecodable review
     // response is neither a pixel rejection nor proof that no source exists.
     const message = error instanceof Error ? error.message : String(error);
+    if (codexDraftTerminalFailureCode(error)) throw error;
     if ((error as { code?: string })?.code || /\b(?:CODEX_[A-Z_]+|CHATGPT_BROWSER_[A-Z_]+)\b/u.test(message) || diagnostics?.status !== "failed") throw error;
     if (/\bIMAGE_CHANGED\b/u.test(message)) throw Object.assign(new Error("PREWRITING_PHOTO_CHANGED: 작성 전 원본 검사 중 상품 사진 바이트가 변경되었습니다.", { cause: error }),
       { code: "PREWRITING_PHOTO_CHANGED" });

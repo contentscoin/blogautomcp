@@ -10,6 +10,7 @@ import {
 import { productRecoveryStageForFailure } from "./product-9canvas";
 import type { PhotoDescriptionFinding } from "./photo-description-finding";
 import { legacyMaterialFailureCause, MAX_MATERIAL_FAILURE_REFERENCE_CHARS, safeFailureCode } from "./material-failure-reference";
+import { isCodexUsageLimitMessage } from "../../src/lib/local-automation-error";
 
 export interface Result {
   success: boolean; code?: string; causeCode?: string; error?: string; errors?: string[]; message?: string;
@@ -59,6 +60,7 @@ const SESSION_WIDE_PREPARATION_FAILURE_CODES = new Set([
   "CODEX_AUTH_REQUIRED",
   "CODEX_LOGIN_REQUIRED",
   "CODEX_MODEL_INCOMPATIBLE",
+  "CODEX_USAGE_LIMIT_REACHED",
   "LLM_UNAVAILABLE",
   "UNAUTHORIZED",
 ]);
@@ -153,6 +155,12 @@ const UNRESOLVED_IMAGE_OPERATION_CODES = new Set([
 /** Even HTTP success can report a partial image operation. Missing errors[] or
  * an already filled slot does not resolve a top-level uncertain operation. */
 function assertKnownImageOperationResult(result: Pick<Result, "code" | "error" | "errors" | "message">): void {
+  // A successful HTTP repair can contain a failed section after earlier photos
+  // were saved. Preserve those photos and stop the shared provider session.
+  const quota = [result.error, result.message, ...(result.errors || [])].find(message => typeof message === "string" && isCodexUsageLimitMessage(message));
+  if (result.code === "CODEX_USAGE_LIMIT_REACHED" || quota) throw Object.assign(new Error(quota || "Codex 계정의 사용량 한도에 도달했습니다."), {
+    code: "CODEX_USAGE_LIMIT_REACHED", errors: result.errors,
+  });
   const unresolved = UNRESOLVED_IMAGE_OPERATION_CODES.has(result.code || "") ? result.code :
     (result.errors || []).flatMap(message => message.match(/\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b/gu) || [])
       .find(code => UNRESOLVED_IMAGE_OPERATION_CODES.has(code));

@@ -220,9 +220,21 @@ export async function repairBrandPostImages(options: {
     requested = requests.length;
     if (requested === 0) {
       const remaining = packagePreview(manifest).imageSlots.reduce((sum, slot) => sum + Math.max(slot.missing, slot.generationMissing), 0);
+      // Explicit whole-material repair may discover that later verified asset
+      // application already filled every current target. Reconcile telemetry
+      // only after planning found no target; photo counts alone cannot settle
+      // missing provenance, rejected thumbnails or uncertain provider requests.
+      const prior = manifest.imageGeneration;
+      const staleCoverage = options.requests === undefined && remaining === 0 && prior?.status === "incomplete" &&
+        prior.remaining > 0 && prior.errors.length === 0 && !prior.recoveryState;
+      if (staleCoverage) {
+        processLock.assertOwner();
+        dependencies.write({ ...manifest, imageGeneration: { ...prior, status: "complete", remaining: 0, updatedAt: new Date().toISOString() } });
+        processLock.assertOwner();
+      }
       const recovered = manifest.imageGeneration?.status === "running"
         ? persist(false)
-        : { manifest, remaining };
+        : { manifest: staleCoverage ? read() : manifest, remaining };
       return { ...recovered, generatedCount: 0, appliedCount: 0, errors, warning: remaining ? `섹션 이미지 ${remaining}장 미완료.` : null };
     }
     if (requested > 0) {

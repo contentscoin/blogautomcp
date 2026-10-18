@@ -848,6 +848,12 @@ export function prepareImageBatchJobs(
           let completedCodex = false;
           try { completedCodex = JSON.parse(fs.readFileSync(`${priorStem}.codex-submission.json`, "utf8")).state === "completed"; }
           catch { /* A missing or uncertain receipt never authorizes coordinator recovery. */ }
+          if (!completedCodex) {
+            try {
+              completedCodex = Boolean(collectCompletedProductCandidates({ ...job, outStem: priorStem, referenceMode: "product",
+                requiredReferenceHashes: references.map(reference => reference.sha256) }));
+            } catch { /* An unproven/interrupted request retains its original transport resume guard. */ }
+          }
           if (!completedCodex) continue;
         }
         if (imageJobSceneStrategy(priorStem) !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION && retiredImageJobIsSettled(priorStem)) continue;
@@ -893,7 +899,7 @@ export function prepareImageBatchJobs(
         if (candidateSet) {
           validatedReviewCandidateSet(candidate);
           // Preserve the existing single-result route when every saved copy agrees.
-          if (output) {
+          if (output && candidateSet.completion.source !== "rollout") {
             const single = { ...candidate, reviewOnly: { ...candidate.reviewOnly!, candidateSet: undefined } };
             try { reviewOnlyImageResult(single); candidate.reviewOnly = single.reviewOnly; }
             catch (error) {

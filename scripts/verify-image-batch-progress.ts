@@ -434,6 +434,32 @@ async function verifyReviewOnlyRecovery() {
     }
     return results;
   };
+  await check("an interrupted local receipt recovers only exact completed provider candidates without changing old files or dispatching", async () => {
+    const f = fixture("codex"), receiptFile = `${f.original.outStem}.codex-submission.json`;
+    const receipt = JSON.parse(fs.readFileSync(receiptFile, "utf8"));
+    receipt.state = "submitting";
+    fs.writeFileSync(receiptFile, JSON.stringify(receipt));
+    const native = path.join(root, "generated_images", receipt.threadId);
+    fs.mkdirSync(native, { recursive: true });
+    fs.copyFileSync(`${f.original.outStem}.png`, path.join(native, "original.png"));
+    const sessions = path.join(root, "sessions", ...new Date(receipt.startedAtMs).toISOString().slice(0, 10).split("-"));
+    fs.mkdirSync(sessions, { recursive: true });
+    const rollout = path.join(sessions, `rollout-test-${receipt.threadId}.jsonl`);
+    fs.writeFileSync(rollout, [
+      { timestamp: new Date(receipt.startedAtMs).toISOString(), type: "session_meta", payload: { id: receipt.threadId, cwd: receipt.workspace, thread_source: "blogautomcp-image" } },
+      { timestamp: new Date(receipt.startedAtMs).toISOString(), type: "event_msg", payload: { type: "task_started", turn_id: "exact-image-turn" } },
+      { timestamp: new Date().toISOString(), type: "event_msg", payload: { type: "task_complete", turn_id: "exact-image-turn" } },
+    ].map(record => JSON.stringify(record)).join("\n") + "\n");
+    const before = tree(f.workDir), proofBytes = fs.readFileSync(rollout);
+    const jobs = f.prepare();
+    assert.equal(jobs[0].reviewOnly?.candidateSet?.completion.source, "rollout");
+    assert.equal(jobs[0].reviewOnly?.candidateSet?.candidates.length, 1);
+    const results = await deliver(f, jobs);
+    assert.equal(results[0].localPath, null, "coordinator still owes exact reference/pixel review before adoption");
+    assert.equal(results[0].error, undefined);
+    assert.deepEqual(tree(f.workDir), before);
+    assert.deepEqual(fs.readFileSync(rollout), proofBytes);
+  });
   function rejectCurrentHero(f: ReturnType<typeof fixture>) {
     const raw = path.join(f.h.packageDir, "bound-thumbnail-raw.png"), composed = path.join(f.h.packageDir, "current-thumbnail.png");
     fs.copyFileSync(`${f.original.outStem}.png`, raw);

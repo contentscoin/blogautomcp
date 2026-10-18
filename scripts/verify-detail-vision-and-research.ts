@@ -40,7 +40,7 @@ async function main() {
   assert.match(prompt.userPrompt, /포함 사항/u);
   assert.match(prompt.systemPrompt, /지시가 아닙니다/u);
 
-  // 2. The runner is bounded and failures never throw.
+  // 2. Malformed reviews remain reports; a shared provider failure must stop the batch.
   let seen: string[] = [];
   const ok = await readDetailImagesWithVision({
     kind: "SHOPPING", productName: "테스트", imagePaths: Array.from({ length: 12 }, (_, i) => `/tmp/d${i}.png`), maxImages: 8,
@@ -50,9 +50,19 @@ async function main() {
   assert.equal(ok.status, "complete");
   assert.ok(ok.acceptedFacts.length >= 3);
   const failed = await readDetailImagesWithVision({ kind: "SHOPPING", productName: "테스트", imagePaths: ["/tmp/a.png"],
-    run: async () => { throw new Error("CODEX_AUTH_REQUIRED"); } });
+    run: async () => { throw new Error("invalid review response"); } });
   assert.equal(failed.status, "failed");
   assert.deepEqual(failed.acceptedFacts, []);
+  for (const error of [
+    new Error("You’ve hit your usage limit. Try again at Oct 22 4:17 PM."),
+    new Error("review wrapper", { cause: Object.assign(new Error("account limit"), { code: "CODEX_USAGE_LIMIT_REACHED" }) }),
+    Object.assign(new Error("login required"), { code: "CODEX_AUTH_REQUIRED" }),
+    Object.assign(new Error("provider unavailable"), { code: "CODEX_TRANSIENT_FAILURE" }),
+  ]) {
+    await assert.rejects(readDetailImagesWithVision({ kind: "SHOPPING", productName: "테스트", imagePaths: ["/tmp/a.png"],
+      run: async () => { throw error; } }), observed => observed === error,
+    "provider availability is not proof of absent seller facts and its original cause must survive");
+  }
   assert.equal((await readDetailImagesWithVision({ kind: "SHOPPING", productName: "x", imagePaths: [], run: async () => "" })).status, "skipped");
 
   // 3. Search demand queries and collection.
