@@ -127,6 +127,7 @@ import {
   planQualityConvergence,
 } from "./lib/quality-convergence";
 import { isPreparedTitleOnlyRepair, selectPreparedRevisionSectionIndexes } from "./lib/prepared-revision-policy";
+import { preservePreparedRevisionRenderPlan } from "./lib/prepared-revision-composition";
 import { selectVerifiedProductPhoto } from "./lib/product-photo-review";
 import { recoverProductPhotoRegion } from "./lib/product-photo-region";
 import { assertShoppingPrewritePhoto, persistPrewritePhotoForContext, readSubmittedPrewritePhoto, selectShoppingPrewriteOriginal,
@@ -10125,7 +10126,7 @@ async function runPreparedPostRevision(
   const price = typeof source.price === "string" ? source.price : "";
   const imagePaths = Array.from(new Set([prepared.heroImagePath, ...prepared.bodyImagePaths]));
   const resolveRevisedComposition = (candidate: { title: string; sections: string[]; hashtags: string[] }) =>
-    normalizePublishedPostText(resolvePostDocument({
+    preservePreparedRevisionRenderPlan(prepared.composition!, normalizePublishedPostText(resolvePostDocument({
       connectKind,
       productName: name,
       editorial: prepared.composition!.editorial,
@@ -10146,7 +10147,7 @@ async function runPreparedPostRevision(
         imageMax: section.imageMax ?? 1,
         headingStyle: section.headingStyle,
       })),
-    }));
+    })));
   // The last section is the statutory disclosure and is never a model-edit target.
   const defaultSectionIndexes = prepared.post.sections.slice(0, -1).map((_, index) => index);
   const sectionIndexes = requestedSectionIndexes.filter((index) => defaultSectionIndexes.includes(index));

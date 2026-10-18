@@ -12,6 +12,8 @@ import { planQualityConvergence } from "./lib/quality-convergence";
 import { isPreparedTitleOnlyRepair, selectPreparedRevisionSectionIndexes } from "./lib/prepared-revision-policy";
 import { applyFreeformDraftRevision, assertUntargetedSectionHashesUnchanged } from "./lib/freeform-draft-revision";
 import { shouldAcceptQualityRepair } from "./lib/quality-repair-policy";
+import { preservePreparedRevisionRenderPlan } from "./lib/prepared-revision-composition";
+import { normalizePublishedPostText, resolvePostDocument, type ResolvedPostDocumentV1 } from "../src/lib/post-composition-contract";
 
 const disclosure = "이 포스팅은 네이버 쇼핑 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받습니다.";
 const sections = [
@@ -98,7 +100,10 @@ const sourceText = fs.readFileSync("scripts/simple-agent.ts", "utf8");
 const source = ts.createSourceFile("simple-agent.ts", sourceText, ts.ScriptTarget.Latest, true);
 let writerPrompt: ts.CallExpression | undefined;
 let explicitEmptyScope = false;
+let revisionComposition: ts.ArrowFunction | undefined;
 function inspect(node: ts.Node): void {
+  if (ts.isVariableDeclaration(node) && node.name.getText(source) === "resolveRevisedComposition" &&
+      node.initializer && ts.isArrowFunction(node.initializer)) revisionComposition = node.initializer;
   if (ts.isCallExpression(node) && node.expression.getText(source) === "generateWithAI") {
     const prompt = node.arguments[1];
     if (prompt && ts.isCallExpression(prompt) && prompt.expression.getText(source) === "JSON.stringify" &&
@@ -125,4 +130,80 @@ assert.deepEqual(actualPrompt.output, { title: "수정한 글 제목", updates: 
 assert.match(actualPrompt.rules, /updates는 반드시 빈 배열/u);
 assert.deepEqual(actualPrompt.sections, sections.map((text, index) => ({ index, text })));
 
-console.log("Title-only material repair: measured 100-point failure, mixed/safety refusals, immutable body, strict JSON scope and actual writer prompt passed");
+// Legacy saved layouts have early/final cards, captions and image placement
+// which are not fully represented by the revision caller's partial sectionPlan.
+// Run the actual writer resolver with a one-sentence edit, offline.
+assert.ok(revisionComposition);
+const claim = "사진에는 상품을 세로와 가로 방향으로 세운 모습이 담겼어요.";
+const photoPaths = Array.from({ length: 5 }, (_, index) => `fixture/photo-${index}.png`);
+const photoSections = [
+  `사용 조건\n\n${claim} 책상에서 제품을 고를 때 확인할 정보를 정리합니다.\n\n사양과 호환 범위를 구분해 판단합니다.`,
+  ...Array.from({ length: 4 }, (_, index) => `구매 기준 ${index + 1}\n\n기존에 검증한 본문의 사실과 문단은 그대로 유지합니다.`),
+];
+const saved = normalizePublishedPostText(resolvePostDocument({ connectKind: "SHOPPING", title: "테스트 상품 선택 기준",
+  sections: [...photoSections, disclosure], hashtags: ["상품", "구매", "선택"], imagePaths: photoPaths,
+  sectionImagePaths: [[photoPaths[1]], [photoPaths[2]], [photoPaths[3]], [], [photoPaths[4]]], connectUrl: "https://example.test/affiliate" }));
+const legacyParagraphs = saved.renderNodes.filter(node => node.kind === "paragraph" && node.sectionId === saved.sections[0].id);
+let keptLegacyParagraph = false;
+saved.renderNodes = saved.renderNodes.flatMap(node => {
+  if (node.kind !== "paragraph" || node.sectionId !== saved.sections[0].id) return [node];
+  if (keptLegacyParagraph) return [];
+  keptLegacyParagraph = true;
+  return [{ ...node, text: legacyParagraphs.map(part => part.kind === "paragraph" ? part.text : "").join("\n\n") }];
+});
+assert.equal(saved.renderNodes.filter(node => node.kind === "connectCard").length, 2);
+const firstSectionId = saved.sections[0].id;
+const originalImage = saved.renderNodes.find(node => node.kind === "image" && node.sectionId === firstSectionId)!;
+assert.equal(originalImage.kind === "image" && originalImage.caption, "판매페이지 원본 상품 사진");
+const revisionSandbox: { resolve?: (candidate: { title: string; sections: string[]; hashtags: string[] }) => ResolvedPostDocumentV1; [key: string]: unknown } = {
+  prepared: { composition: saved }, preservePreparedRevisionRenderPlan, normalizePublishedPostText, resolvePostDocument,
+  connectKind: "SHOPPING", name: "테스트 상품", link: { url: "https://example.test/affiliate" }, imagePaths: photoPaths,
+  BRANDLINK_QUALITY_PRESET: "PREMIUM", BRANDLINK_EXPERIENCE_MODE: "AI_ASSISTED_INFORMATION",
+};
+vm.runInNewContext(ts.transpileModule(`this.resolve = ${revisionComposition.getText(source)};`, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+}).outputText, revisionSandbox);
+const updatedText = { title: saved.title, sections: [...photoSections.map((text, index) => index === 0 ? text.replace(claim, "") : text), disclosure], hashtags: ["상품", "구매", "선택"] };
+const preserved = revisionSandbox.resolve!(updatedText);
+assert.deepEqual(preserved.sections.slice(1), saved.sections.slice(1), "all untargeted section fields remain identical");
+assert.deepEqual(preserved.sections[0].imagePaths, saved.sections[0].imagePaths);
+assert.equal(preserved.sections[0].imageIntent, saved.sections[0].imageIntent);
+assert.equal(preserved.sections[0].imageSource, saved.sections[0].imageSource);
+assert.equal(preserved.sections[0].imagePlacement, saved.sections[0].imagePlacement);
+assert.equal(preserved.renderNodes.length, saved.renderNodes.length);
+saved.renderNodes.forEach((node, index) => {
+  const afterNode = preserved.renderNodes[index];
+  if (node.kind === "paragraph" && node.sectionId === firstSectionId) {
+    assert.equal(afterNode.kind, "paragraph");
+    assert.equal(node.text.replace(claim, ""), afterNode.kind === "paragraph" && afterNode.text,
+      "only the quoted literal is removed; old paragraph separators and adjacent spaces are retained");
+  } else assert.deepEqual(afterNode, node, "images, captions, order, early/final CTA, notices and untargeted text are immutable");
+});
+assert.deepEqual(saved.sections[0].body, normalizePublishedPostText(resolvePostDocument({ connectKind: "SHOPPING", title: saved.title,
+  sections: [...photoSections, disclosure], hashtags: ["상품", "구매", "선택"], imagePaths: photoPaths,
+  sectionImagePaths: [[photoPaths[1]], [photoPaths[2]], [photoPaths[3]], [], [photoPaths[4]]], connectUrl: "https://example.test/affiliate" })).sections[0].body,
+"the helper never mutates its saved-layout input");
+const restored = preservePreparedRevisionRenderPlan(saved, preserved);
+assert.deepEqual(restored.renderNodes, preserved.renderNodes, "the same pure helper can restore a saved layout around already corrected section text");
+assert.deepEqual(preservePreparedRevisionRenderPlan(saved, { ...saved, title: "수정된 제목" }).renderNodes, saved.renderNodes,
+  "title-only edits cannot reassemble body, images or CTA");
+assert.throws(() => preservePreparedRevisionRenderPlan(saved, { ...saved, sections: saved.sections.slice(1) }), /REVISION_RENDER_SCOPE_AMBIGUOUS/);
+assert.throws(() => preservePreparedRevisionRenderPlan(saved, { ...saved, sections: [...saved.sections].reverse() }), /REVISION_RENDER_SCOPE_AMBIGUOUS/);
+const unknownRender = structuredClone(saved);
+const paragraphIndex = unknownRender.renderNodes.findIndex(node => node.kind === "paragraph" && node.sectionId === firstSectionId);
+unknownRender.renderNodes[paragraphIndex] = { kind: "paragraph", sectionId: firstSectionId, text: "본문과 대응하지 않는 별도 렌더 문장" };
+assert.throws(() => preservePreparedRevisionRenderPlan(unknownRender, preserved), /REVISION_RENDER_SCOPE_AMBIGUOUS/);
+const splitBlocks = structuredClone(saved);
+splitBlocks.renderNodes.splice(paragraphIndex, 1,
+  { kind: "paragraph", sectionId: firstSectionId, text: splitBlocks.sections[0].body[0] },
+  { kind: "divider", sectionId: null },
+  { kind: "paragraph", sectionId: firstSectionId, text: splitBlocks.sections[0].body.slice(1).join("\n") });
+const splitResult = preservePreparedRevisionRenderPlan(splitBlocks, preserved);
+assert.equal(splitResult.renderNodes.length, splitBlocks.renderNodes.length);
+assert.deepEqual(splitResult.renderNodes[paragraphIndex + 1], splitBlocks.renderNodes[paragraphIndex + 1], "saved block boundaries keep intervening layout nodes");
+assert.deepEqual(splitResult.renderNodes[paragraphIndex + 2], splitBlocks.renderNodes[paragraphIndex + 2], "unchanged text blocks retain exact bytes");
+const changedCardinality = structuredClone(preserved);
+changedCardinality.sections[0].body.push("새 문단 경계를 임의로 추정하지 않습니다.");
+assert.throws(() => preservePreparedRevisionRenderPlan(splitBlocks, changedCardinality), /REVISION_RENDER_SCOPE_AMBIGUOUS/);
+
+console.log("Title-only/section material repair: measured title failure, strict JSON scope, actual writer prompt and legacy one-sentence layout/caption/CTA preservation passed");
