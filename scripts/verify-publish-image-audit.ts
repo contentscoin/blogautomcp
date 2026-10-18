@@ -9,7 +9,7 @@ import { createRequire } from "node:module";
 import Ajv from "ajv";
 import sharp from "sharp";
 import ts from "typescript";
-import { auditPublishImages, assertPublishImagesSafe, buildSelectedProductImageAuditContext, parseVisualReviews, PublishImageAuditError, type PublishImageAuditOptions } from "./lib/publish-image-audit";
+import { auditPublishImages, assertPublishImagesSafe, buildSelectedProductImageAuditContext, encodeLosslessAuditSnapshot, parseVisualReviews, PublishImageAuditError, type PublishImageAuditOptions } from "./lib/publish-image-audit";
 import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 import { reviewShoppingReferenceScene } from "./lib/shopping-reference-scene";
 import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
@@ -24,6 +24,30 @@ async function main() {
     const tall = path.join(root, "detail.png");
     await sharp({ create: { width: 320, height: 240, channels: 3, background: "white" } }).png().toFile(photo);
     await sharp({ create: { width: 860, height: 5880, channels: 3, background: "white" } }).png().toFile(tall);
+    const rgba = crypto.randomBytes(91 * 67 * 4);
+    for (let offset = 3; offset < rgba.length; offset += 4) rgba[offset] = (offset * 29) % 256;
+    const encodingFixtures = [
+      await sharp({ create: { width: 320, height: 240, channels: 3, background: "#ddeeff" } }).png().toBuffer(),
+      await sharp(crypto.randomBytes(91 * 67 * 3), { raw: { width: 91, height: 67, channels: 3 } }).png().toBuffer(),
+      await sharp(rgba, { raw: { width: 91, height: 67, channels: 4 } }).png().toBuffer(),
+      await sharp({ create: { width: 120, height: 80, channels: 3, background: "#996633" } }).jpeg().withMetadata({ orientation: 6 }).toBuffer(),
+    ];
+    for (const input of encodingFixtures) {
+      const beforeSha = crypto.createHash("sha256").update(input).digest("hex");
+      const baseline = await sharp(input, { failOn: "warning" }).rotate().png().toBuffer();
+      const optimized = await sharp(input, { failOn: "warning" }).rotate()
+        .png({ compressionLevel: 9, adaptiveFiltering: true, palette: false }).toBuffer();
+      const encoded = await encodeLosslessAuditSnapshot(input);
+      assert.equal(encoded.length, Math.min(baseline.length, optimized.length), "the actual encoder must select the smaller lossless PNG");
+      assert.deepEqual(encoded, optimized.length < baseline.length ? optimized : baseline);
+      const expected = await sharp(baseline).raw().toBuffer({ resolveWithObject: true });
+      const actual = await sharp(encoded).raw().toBuffer({ resolveWithObject: true });
+      assert.deepEqual(actual.info, expected.info, "full rotated dimensions, alpha and bit depth must match default PNG");
+      assert.deepEqual(actual.data, expected.data, "all raw channels, including transparent RGBA pixels, must remain exact");
+      assert.equal(crypto.createHash("sha256").update(input).digest("hex"), beforeSha, "input bytes remain unchanged");
+      assert.equal((await sharp(encoded).metadata()).isPalette, false, "lossless transport must not quantize to a palette");
+      assertions++;
+    }
     const good = { index: 1, accepted: true, identityMatches: true, photoClaimMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "Visible lavender Stress Relief 532ml pair" };
     const evidenceFirstFieldOrder = ["index", "reason", "identityMatches", "photoClaimMatches", "notice", "mixedOptions", "explicitNamedComparison", "optionsClearlyLabeled", "singlePhotograph", "noGraphicLayout", "textPolicyMatches", "thumbnailHeadlineLegible", "reviewClass", "accepted"];
     const assertEvidenceFirstCall = (call: Parameters<NonNullable<PublishImageAuditOptions["review"]>>[0]) => {
@@ -130,7 +154,8 @@ async function main() {
         assert.match(text, /burned into a body photo, reject it using textPolicyMatches\/noGraphicLayout/);
       }
       for (const text of [call.userPrompt, schema.properties.reviews.items.properties.singlePhotograph.description!]) {
-        assert.match(text, /ONE physical product and its optically consistent reflection/);
+        assert.match(text, /One coherent photographic scene is not a requirement to show exactly one physical product/u);
+        assert.match(text, /A physical product and its optically consistent reflection/u);
         assert.match(text, /ordinary mirror and its physical frame are scene props, not a graphic photo frame/);
         assert.match(text, /Reject independent duplicate physical products/);
         assert.match(text, /physically inconsistent\/impossible reflections/);
@@ -147,6 +172,39 @@ async function main() {
       return JSON.stringify({ reviews: [{ ...good, reason: "One selected product in a natural illustrative scene; AI disclosure is an adjacent caption, no announcement pixels" }] });
     };
     assert.equal((await auditPublishImages(scene)).ok, true); assertions++;
+    // Cardinality is an image-file constraint, not an instruction to invent a
+    // single-product requirement. These stubs prove input/gate contracts only;
+    // they do not claim a live multi-unit photo has passed the visual provider.
+    for (const [name, patch] of [
+      ["matching group in a coherent natural still-life", {}],
+      ["same-brand wrong SKU remains rejected", { identityMatches: false }],
+      ["different selected variants remain rejected", { mixedOptions: true }],
+      ["false visible 7+3 count remains rejected", { photoClaimMatches: false }],
+      ["explicit one-physical-item requirement remains rejected", { singlePhotograph: false }],
+      ["pasted duplicates remain rejected", { noGraphicLayout: false }],
+      ["body banner remains rejected", { textPolicyMatches: false }],
+      ["impossible relative tube scale remains rejected", { accepted: false }],
+      ["unresolved product identity remains rejected", { identityMatches: false, accepted: false }],
+      ["favorable separate checks cannot force accepted", { accepted: false }],
+    ] as Array<[string, Record<string, unknown>]>) {
+      const grouped = { ...scene, productName: "선택 크림 50ml 7개 + 15ml 3개", composition: structuredClone(scene.composition) };
+      Object.assign(grouped.composition.sections[0], { imageMin: 1, imageMax: 1 });
+      grouped.review = async call => {
+        assertEvidenceFirstCall(call);
+        const schema = call.outputSchema as { properties: { reviews: { items: { properties: Record<string, { description?: string }> } } } };
+        for (const text of [call.userPrompt, schema.properties.reviews.items.properties.singlePhotograph.description!]) {
+          assert.match(text, /natural still-life may contain several matching selected physical units supported by the mapped reference and selected facts/u);
+          assert.match(text, /one required image file does not establish or restrict the physical unit count/u);
+          assert.match(text, /Judge actual product identity, selected variants and published quantity\/complete-set claims separately/u);
+          assert.match(text, /when the slot explicitly requires one physical item/u);
+          assert.match(text, /pasted duplicates, split panels/u);
+          assert.match(text, /conflicting identifying printing, genuinely unresolved identity/u);
+        }
+        return JSON.stringify({ reviews: [{ ...good, reason: name, ...patch }] });
+      };
+      assert.equal((await auditPublishImages(grouped)).ok, Object.keys(patch).length === 0, name);
+      assertions++;
+    }
     // Contract regressions for the real Cuckoo rejection: all identity/format
     // findings were true, yet accepted=false because the product filled the
     // foreground. Synthetic pixels below test prompt/schema and gate behavior,

@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import Ajv from "ajv";
 import sharp from "sharp";
-import { auditPublishImages, planPublishImageAuditBatches, planPublishImageComparisonGroups, PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES, PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT, type PublishImageAuditOptions } from "./lib/publish-image-audit";
+import { auditPublishImages, encodeLosslessAuditSnapshot, planPublishImageAuditBatches, planPublishImageComparisonGroups, PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES, PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT, type PublishImageAuditOptions } from "./lib/publish-image-audit";
 import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 import type { CodexDraftOptions } from "./lib/codex-draft-provider";
 import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
@@ -63,6 +63,10 @@ async function main() {
         const attachedReference = await sharp(call.imagePaths![row.comparisonReferenceImageIndex - 1]).raw().toBuffer();
         assert.deepEqual(attachedFinal, await sharp(pairs[index].final).raw().toBuffer());
         assert.deepEqual(attachedReference, await sharp(pairs[index].reference).raw().toBuffer());
+        assert.deepEqual(fs.readFileSync(call.imagePaths![index]), await encodeLosslessAuditSnapshot(fs.readFileSync(pairs[index].final)),
+          "final snapshots use the actual shared lossless encoder");
+        assert.deepEqual(fs.readFileSync(call.imagePaths![row.comparisonReferenceImageIndex - 1]), await encodeLosslessAuditSnapshot(fs.readFileSync(pairs[index].reference)),
+          "own mapped references use the same shared encoder and retain their cache identity");
         assert.equal(row.referenceSha256, hash(pairs[index].reference));
         assert.equal(row.sourceSnapshotId, "offline-snapshot");
       }
@@ -143,8 +147,11 @@ async function main() {
       assert.match(call.userPrompt, /Only when BOTH canonical selected facts and indexed selected-gallery pixels establish inclusion/u);
       assert.match(call.userPrompt, /not alternative purchase options requiring a named comparison/u);
       assert.match(call.userPrompt, /cross-sells, gift badges and unselected models\/variants remain unverified or conflicting/u);
-      for (const [index, reference] of references.slice(0, 2).entries())
+      for (const [index, reference] of references.slice(0, 2).entries()) {
         assert.deepEqual(await sharp(call.imagePaths![rows[0].selectedGalleryComparisonImageIndexes[index] - 1]).raw().toBuffer(), await sharp(reference).raw().toBuffer());
+        assert.deepEqual(fs.readFileSync(call.imagePaths![rows[0].selectedGalleryComparisonImageIndexes[index] - 1]),
+          await encodeLosslessAuditSnapshot(fs.readFileSync(reference)), "gallery snapshots use the same shared encoder");
+      }
       return answer(call);
     };
     assert.equal((await auditPublishImages(galleryMapped)).ok, true); assert.equal(galleryCalls, 3); checks++;
@@ -396,7 +403,7 @@ async function main() {
     for (const patch of [{ identityMatches: false }, { photoClaimMatches: false }, { mixedOptions: true },
       { noGraphicLayout: false }, { textPolicyMatches: false }, { accepted: false }]) {
       const options = splitFixture(); let groupCalls = 0;
-      options.review = async call => { groupCalls++;
+      options.review = async () => { groupCalls++;
         return JSON.stringify({ reviews: [{ ...good(1), ...(groupCalls === 1 ? patch : {}), reason: "First group adverse; later matching gallery cannot cancel it" }] }); };
       const blocked = await auditPublishImages(options);
       assert.equal(groupCalls, 2, "every evidence group is inspected even after an adverse verdict");

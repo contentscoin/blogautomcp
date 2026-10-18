@@ -114,6 +114,43 @@ export async function readSelectedGalleryComparisons(options: {
     }
     if (selected.length >= maximum) break;
   }
+  // Fill only a spare comparison slot, after every existing priority. Geometry
+  // discovers one bounded detail candidate; it cannot certify a catalog, SKU,
+  // included component or quantity. Very long seller documents are not readable
+  // single-image context. Existing references must never be displaced by this.
+  if (selected.length < maximum) {
+    const details: Array<{ candidate: SelectedGalleryComparisonImage; aspect: number }> = [];
+    for (const url of gallery) {
+      const matching = candidates.get(url) ?? [];
+      if (new Set(matching.map(candidate => candidate.sha256)).size !== 1) continue;
+      const candidate = matching[0];
+      if (seen.has(candidate.sha256)) continue;
+      try {
+        const bytes = fs.readFileSync(candidate.path);
+        if (crypto.createHash("sha256").update(bytes).digest("hex") !== candidate.sha256) continue;
+        const metadata = await sharp(bytes, { animated: true, failOn: "warning" }).metadata();
+        if (!metadata.width || !metadata.height || metadata.height <= metadata.width || metadata.height > 4096 ||
+            (metadata.pages ?? 1) !== 1 || !["jpeg", "png", "webp", "gif"].includes(metadata.format ?? "")) continue;
+        details.push({ candidate, aspect: metadata.height / metadata.width });
+      } catch { /* Unreadable optional details are not comparison evidence. */ }
+    }
+    // Stable sort retains canonical gallery order for equal aspect ratios.
+    details.sort((a, b) => b.aspect - a.aspect);
+    for (const { candidate } of details) {
+      try {
+        const bytes = fs.readFileSync(candidate.path);
+        if (crypto.createHash("sha256").update(bytes).digest("hex") !== candidate.sha256) continue;
+        const decoded = await sharp(bytes, { animated: true, failOn: "warning" }).rotate().png().toBuffer();
+        // An optional detail alone must fit the unchanged final-audit transport
+        // ceiling. The audit still enforces its full per-request byte budget.
+        if (decoded.length > 8 * 1024 * 1024 ||
+            crypto.createHash("sha256").update(fs.readFileSync(candidate.path)).digest("hex") !== candidate.sha256 ||
+            crypto.createHash("sha256").update(fs.readFileSync(candidate.receiptPath)).digest("hex") !== candidate.receiptSha256) continue;
+        selected.push(candidate); seen.add(candidate.sha256);
+        break;
+      } catch { /* A broken detail cannot hide the next usable bounded detail. */ }
+    }
+  }
   // Do not return a stale earlier binding if its files changed while a later
   // optional gallery candidate was being decoded.
   return selected.filter(candidate => {

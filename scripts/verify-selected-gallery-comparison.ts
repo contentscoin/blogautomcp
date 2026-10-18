@@ -377,6 +377,107 @@ async function main() {
       assert.deepEqual((await bound()).map(row => row.path), [first.file, second.file, qty1.file, qty2.file]);
     });
 
+    const portrait = (width: number, height: number, background: string) =>
+      sharp({ create: { width, height, channels: 3, background } }).png().toBuffer();
+    await test("one bounded portrait detail fills a spare slot without filename or SKU authority", async () => {
+      const directory = fixture(), detailUrl = capacityUrl("arbitrary-detail.png");
+      const first = saved(directory, "first", blue, urls[0]), second = saved(directory, "second", green, urls[1]);
+      const detail = saved(directory, "detail", await portrait(80, 264, "#925533"), detailUrl);
+      const selectedSnapshot = snapshot([urls[0], urls[1], detailUrl]), before = directoryBytes(directory);
+      const selected = await read(directory, selectedSnapshot);
+      assert.deepEqual(selected.map(row => row.path), [first.file, second.file, detail.file]);
+      assert.equal(selected[2].receiptSha256, digest(fs.readFileSync(detail.receiptPath)));
+      assert.equal(selected[2].sourceSnapshotId, selectedSnapshot.snapshotId);
+      assert(!("identityVerified" in selected[2]) && !("accepted" in selected[2]), "geometry discovers unverified comparison context only");
+      assert.deepEqual(directoryBytes(directory), before);
+    });
+
+    await test("detail ranking uses bounded aspect then canonical order and adds only one", async () => {
+      const directory = fixture(), detailUrls = ["short", "best", "tied", "overlong"].map(name => capacityUrl(`${name}.png`));
+      const first = saved(directory, "first", blue, urls[0]), second = saved(directory, "second", green, urls[1]);
+      saved(directory, "a-short", await portrait(80, 120, "#331122"), detailUrls[0]);
+      const best = saved(directory, "z-best", await portrait(80, 264, "#925533"), detailUrls[1]);
+      saved(directory, "b-tied", await portrait(80, 264, "#119955"), detailUrls[2]);
+      saved(directory, "overlong", await portrait(80, 4097, "#335599"), detailUrls[3]);
+      const selected = await read(directory, snapshot([urls[0], urls[1], ...detailUrls]));
+      assert.deepEqual(selected.map(row => row.path), [first.file, second.file, best.file]);
+      assert.equal((await read(directory, snapshot([urls[0], urls[1], ...detailUrls]), 2)).length, 2);
+    });
+
+    await test("detail never displaces later quantity or exact publication original priorities", async () => {
+      const directory = fixture(), detailUrl = capacityUrl("detail.png"), qty1Url = capacityUrl("one-100ml.png"), qty2Url = capacityUrl("two-100ml.png");
+      const first = saved(directory, "first", blue, urls[0]), second = saved(directory, "second", green, urls[1]);
+      saved(directory, "early-detail", await portrait(80, 264, "#925533"), detailUrl);
+      const qty1 = saved(directory, "qty1", red, qty1Url), qty2 = saved(directory, "qty2", gold, qty2Url);
+      const originalBytes = await portrait(48, 48, "#993388"), original = saved(directory, "last-original", originalBytes, urls[2]);
+      const selectedSnapshot = snapshot([urls[0], urls[1], detailUrl, qty1Url, qty2Url, urls[2]], { name: "selected 100ml" });
+      const selected = await readSelectedGalleryComparisons({ snapshot: selectedSnapshot, productId, sourceDirectory: directory,
+        publicationOriginalSha256: digest(originalBytes) });
+      assert.deepEqual(selected.map(row => row.path), [first.file, second.file, qty1.file, qty2.file, original.file]);
+      assert.equal(selected.length, 5);
+    });
+
+    for (const invalid of ["foreign", "ambiguous", "changed-pixels", "changed-receipt", "animated", "broken"] as const)
+      await test(`detail discovery preserves lineage and decoding rejection: ${invalid}`, async () => {
+        const directory = fixture(), detailUrl = capacityUrl("detail.png"), fallbackUrl = capacityUrl("fallback.png");
+        const first = saved(directory, "first", blue, urls[0]), second = saved(directory, "second", green, urls[1]);
+        const detailBytes = await portrait(80, 264, "#925533");
+        const bytes = invalid === "animated" ? await sharp([detailBytes, await portrait(80, 264, "#119955")], { join: { animated: true } }).gif().toBuffer()
+          : invalid === "broken" ? Buffer.from("not static pixels") : detailBytes;
+        if (invalid === "animated") assert.equal((await sharp(bytes, { animated: true }).metadata()).pages, 2);
+        const detail = saved(directory, invalid === "animated" ? "detail.gif" : "detail", bytes,
+          invalid === "foreign" ? capacityUrl("foreign-not-current.png") : detailUrl);
+        if (invalid === "ambiguous") saved(directory, "another-original", await portrait(80, 264, "#119955"), detailUrl);
+        if (invalid === "changed-pixels") fs.writeFileSync(detail.file, await portrait(80, 264, "#119955"));
+        if (invalid === "changed-receipt") fs.writeFileSync(detail.receiptPath, "{");
+        const fallback = saved(directory, "fallback", await portrait(80, 160, "#112299"), fallbackUrl), before = directoryBytes(directory);
+        assert.deepEqual((await read(directory, snapshot([urls[0], urls[1], detailUrl, fallbackUrl]))).map(row => row.path),
+          [first.file, second.file, fallback.file]);
+        assert.deepEqual(directoryBytes(directory), before);
+      });
+
+    await test("detail byte and receipt changes after discovery cannot inherit the earlier binding", async () => {
+      for (const change of ["pixels", "receipt"] as const) {
+        const directory = fixture(), detailUrl = capacityUrl("detail.png");
+        const first = saved(directory, "first", blue, urls[0]), second = saved(directory, "second", green, urls[1]);
+        const detail = saved(directory, "detail", await portrait(80, 264, "#925533"), detailUrl);
+        const replacement = await portrait(80, 264, "#119955"), originalRead = fs.readFileSync;
+        let detailReads = 0;
+        fs.readFileSync = ((...args: Parameters<typeof fs.readFileSync>) => {
+          const bytes = Reflect.apply(originalRead, fs, args);
+          if (String(args[0]) === detail.file && ++detailReads === 2) {
+            if (change === "pixels") fs.writeFileSync(detail.file, replacement);
+            else fs.writeFileSync(detail.receiptPath, `${originalRead(detail.receiptPath, "utf8")} `);
+          }
+          return bytes;
+        }) as typeof fs.readFileSync;
+        try {
+          assert.deepEqual((await read(directory, snapshot([urls[0], urls[1], detailUrl]))).map(row => row.path), [first.file, second.file]);
+          assert(detailReads >= 3, "mutation must occur after metadata discovery and before adoption");
+        } finally { fs.readFileSync = originalRead; }
+      }
+    });
+
+    await test("detail selection retains canonical twenty-URL cap and accepts the 4096 boundary", async () => {
+      const directory = fixture(), gallery = Array.from({ length: 21 }, (_, index) => capacityUrl(`canonical-${index}.png`));
+      const first = saved(directory, "first", blue, gallery[0]), second = saved(directory, "second", green, gallery[1]);
+      saved(directory, "outside-twenty", await portrait(80, 264, "#925533"), gallery[20]);
+      assert.deepEqual((await read(directory, snapshot(gallery))).map(row => row.path), [first.file, second.file]);
+      const boundary = saved(directory, "boundary", await portrait(80, 4096, "#119955"), gallery[19]);
+      assert.deepEqual((await read(directory, snapshot(gallery))).map(row => row.path), [first.file, second.file, boundary.file]);
+    });
+
+    await test("an individually untransportable detail is not added or allowed to hide a usable detail", async () => {
+      const directory = fixture(), largeUrl = capacityUrl("large.png"), fallbackUrl = capacityUrl("small.png");
+      const first = saved(directory, "first", blue, urls[0]), second = saved(directory, "second", green, urls[1]);
+      const noisy = await sharp(crypto.randomBytes(1600 * 2048 * 3), { raw: { width: 1600, height: 2048, channels: 3 } }).png().toBuffer();
+      assert(noisy.length > 8 * 1024 * 1024);
+      saved(directory, "untransportable", noisy, largeUrl);
+      const fallback = saved(directory, "fallback", await portrait(80, 96, "#112299"), fallbackUrl);
+      assert.deepEqual((await read(directory, snapshot([urls[0], urls[1], largeUrl, fallbackUrl]))).map(row => row.path),
+        [first.file, second.file, fallback.file]);
+    });
+
     assert.equal(networkCalls, 0);
     console.log(`Selected gallery comparison: ${checks} offline cases passed; no network or provider calls.`);
   } finally {
