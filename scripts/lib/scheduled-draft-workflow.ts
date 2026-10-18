@@ -618,7 +618,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
       if (heroKey && mode !== "source-only") {
         deps.onStage?.("실패 대표 이미지만 참조 장면 생성·교체");
         if (mode === "repair-rejected") await attemptImages("regenerate", false, heroKey);
-        else await runRecordedImageRecovery(id, "repair-rejected", () => attemptImages("regenerate", false, heroKey));
+        else await runRecordedImageRecovery(id, "repair-rejected", () => attemptImages("regenerate", false, heroKey), { thumbnailAssetKey: heroKey });
       }
       if ((missing() || thumbnailMissing() || thumbnailRepairKey()) && isRecoverableImageEvidenceResult(latestImageRepair)) {
         deps.onStage?.("이미지 실패 원인 확인 · 상품 상세 원본 재수집");

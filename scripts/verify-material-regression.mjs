@@ -20,6 +20,7 @@ const checks = [
   'verify-product-photo-region.ts',
   'verify-source-selection-fairness.ts',
   'verify-prepared-draft-reference.ts',
+  'verify-mcp-source-repair-coordination.ts',
   'verify-published-editor-audit.ts',
   'verify-travel-draft-resilience.ts', 'verify-naver-schedule-submission.ts',
 ];

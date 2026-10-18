@@ -161,7 +161,9 @@ const DEFAULT_COPY: Omit<ProductThumbnailCopy, "productNameLabel"> = {
 const ONTOLOGY_THEMES: Record<string, Omit<ProductThumbnailCopy, "productNameLabel" | "badge">> = {
   humidifier: { headline: "가습 방식 체크", subline: "용량·세척·사용 공간", cta: "사용 조건 확인" },
   "golf-rangefinder": { headline: "거리 확인 방식", subline: "코스 기능·배터리 체크", cta: "필드 포인트" },
-  "food-gift": { headline: "구성·보관 확인", subline: "옵션·중량·보관법", cta: "선택 기준" },
+  // Keep the photograph an overview: storage instructions belong in the article,
+  // while the thumbnail invites a gift choice without implying a storage test.
+  "food-gift": { headline: "선물 전 체크", subline: "옵션·중량·보관법", cta: "선택 기준" },
   "hair-dryer": { headline: "제품 사양 체크", subline: "바람·무게·구성 확인", cta: "장단점 확인" },
   "beauty-body": { headline: "향·용량 구성", subline: "상품 정보로 구매 전 확인", cta: "구성 확인" },
   cooler: { headline: "보냉력 체크", subline: "용량·수납·휴대성", cta: "사용 포인트" },

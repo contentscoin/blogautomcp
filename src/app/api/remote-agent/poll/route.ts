@@ -14,7 +14,9 @@ import { localJsonFetch } from "@/lib/local-json-fetch";
 import { clearRemoteActivation, readRemoteActivation } from "@/lib/remote-activation";
 import { getNaverSessionFile } from "@/lib/naver-session";
 import { hasStoredConnectContract } from "@/lib/connect-contract-store";
-import { getBrandPostPackageDir, readBrandPostPackage } from "@/lib/brand-post-package";
+import { getBrandPostPackageDir, packagePreview, readBrandPostPackage } from "@/lib/brand-post-package";
+import { isBrandPostImageRepairActive } from "@/lib/brand-post-image-repair";
+import { waitForScheduledSourceImageRepair } from "@/lib/brand-post-source-repair-wait";
 import { publicationVerificationSummary } from "@/lib/publication-verification-summary";
 import { allowsShoppingReferenceScene, buildBrandPostImagePrompt, prepareBrandPostImageReferenceContext,
   resolveBrandPostImageTarget } from "@/lib/brand-post-image-generation";
@@ -488,10 +490,24 @@ function numberField(record: Record<string, unknown>, key: string): number {
  * 경로·previewUrl 은 빼고, 슬롯마다 ChatGPT 내장 이미지 생성에 바로 쓸 imagePrompt(PC 배치와 같은 문구)를 붙인다.
  */
 async function safeImageSlots(preview: DraftPreview, manifest: DraftManifest,
-  onReference?: (image: RemoteProductReferenceImage) => void): Promise<Array<Record<string, unknown>> | null> {
+  onReference?: (image: RemoteProductReferenceImage) => void, context?: JobContext,
+  onPreparedPreview?: (preview: DraftPreview) => void): Promise<Array<Record<string, unknown>> | null> {
   if (!Array.isArray(preview.imageSlots)) return null;
-  const v2 = manifest && manifest.version === "brand-post-package/v2" ? manifest : null;
+  let v2 = manifest && manifest.version === "brand-post-package/v2" ? manifest : null;
   const connectKind: "SHOPPING" | "TRAVEL" = (v2?.connectKind || manifest?.connectKind || preview.connectKind) === "TRAVEL" ? "TRAVEL" : "SHOPPING";
+  const sourceWait = connectKind === "SHOPPING" && v2 ? await waitForScheduledSourceImageRepair(v2.brandLinkId, {
+    isActive: () => isBrandPostImageRepairActive(v2!.brandLinkId),
+    readState: () => readDraftManifestSafe(v2!.brandLinkId)?.imageGeneration,
+    isCancelled: () => context?.cancelled === true,
+    onWaiting: () => context?.setStage("draft-source", "원고 저장 완료 · 검증 원본 배정 마무리 대기", 90),
+  }) : { ready: true, waited: false };
+  if (sourceWait.waited && sourceWait.ready && v2) {
+    const current = readDraftManifestSafe(v2.brandLinkId);
+    if (current?.version === "brand-post-package/v2") {
+      v2 = current; preview = packagePreview(current) as DraftPreview; onPreparedPreview?.(preview);
+    }
+  }
+  if (!Array.isArray(preview.imageSlots)) return null;
   const productName = String(v2?.sourceSnapshot?.product?.name || v2?.title || (typeof preview.title === "string" ? preview.title : ""));
   const slots = preview.imageSlots.map((slot) => {
     const record = slot && typeof slot === "object" && !Array.isArray(slot) ? slot as Record<string, unknown> : {};
@@ -538,9 +554,13 @@ async function safeImageSlots(preview: DraftPreview, manifest: DraftManifest,
     };
   });
   if (connectKind !== "SHOPPING") return slots;
+  if (!sourceWait.ready) return slots.map(slot => ({ ...slot, generationRole: "reference-guided-product-scene",
+    referenceReady: false, referencePreparationPending: true, referenceImages: [], referenceHashes: [], imagePrompt: null,
+    referenceError: "검증 원본 배정이 진행 중이거나 완료를 확인하지 못했습니다. 현재 작업 상태를 확인한 뒤 참조 준비를 다시 조회하세요." }));
   return attachRemoteProductReferenceInputs(slots, {
     prepare: async slot => {
       if (!v2 || !slot.sectionId || numberField(slot, "maximum") === 0) return null;
+      if (context?.cancelled || isBrandPostImageRepairActive(v2.brandLinkId)) throw new Error("SOURCE_REPAIR_PENDING");
       const target = resolveBrandPostImageTarget(v2, { requestId: "remote-reference", sectionId: String(slot.sectionId) });
       if (!allowsShoppingReferenceScene(target)) return null;
       const urls = v2.sourceSnapshot?.product.referenceImageUrls;
@@ -567,11 +587,12 @@ function remainingGenerationMissing(slots: Array<Record<string, unknown>> | null
 }
 
 /** 초안 미리보기에서 PC 파일 경로를 제거하고 ChatGPT 가 검토할 정보만 남긴다. */
-async function draftView(draftId: string, preview: DraftPreview, includeMarkdown: boolean, manifest: DraftManifest = null): Promise<Record<string, unknown>> {
+async function draftView(draftId: string, preview: DraftPreview, includeMarkdown: boolean, manifest: DraftManifest = null, context?: JobContext): Promise<Record<string, unknown>> {
+  const nativeReferences = new Map<string, RemoteProductReferenceImage>();
+  const imageSlots = await safeImageSlots(preview, manifest, image => nativeReferences.set(image.sha256, image), context,
+    prepared => { preview = prepared; });
   const markdown = typeof preview.markdown === "string" ? preview.markdown : "";
   const bodyImageCount = Array.isArray(preview.bodyImagePaths) ? preview.bodyImagePaths.length : 0;
-  const nativeReferences = new Map<string, RemoteProductReferenceImage>();
-  const imageSlots = await safeImageSlots(preview, manifest, image => nativeReferences.set(image.sha256, image));
   return {
     draftId,
     version: preview.version ?? null,
@@ -893,7 +914,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     const preview = (payload.data || {}) as DraftPreview;
     if (typeof payload.imageRepairWarning === "string") ctx.warnings.push(payload.imageRepairWarning);
     const manifest = readDraftManifestSafe(productId);
-    const view = await draftView(productId, preview, true, manifest);
+    const view = await draftView(productId, preview, true, manifest, ctx);
     const remaining = remainingGenerationMissing(view.imageSlots as Array<Record<string, unknown>> | null);
     const imageAssets = await uploadDraftImageAssets(preview, ctx.warnings);
     if (imageAssets.length === 0) ctx.warnings.push("초안 이미지를 HTTPS 미리보기 주소로 업로드하지 못했습니다.");
@@ -975,7 +996,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     const imageOnlyRepair = requiresRepair && failedSignals.length > 0 && failedSignals.every(
       (signal: Record<string, unknown>) => signal.key === "composition-quality",
     );
-    const view = await draftView(productId, preview, false, submittedManifest);
+    const view = await draftView(productId, preview, false, submittedManifest, ctx);
     const remaining = remainingGenerationMissing(view.imageSlots as Array<Record<string, unknown>> | null);
     const imageAssets = await uploadDraftImageAssets(preview, ctx.warnings);
     if (imageAssets.length === 0) ctx.warnings.push("초안 이미지를 HTTPS 미리보기 주소로 업로드하지 못했습니다.");
@@ -997,7 +1018,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     const payload = await localApi(request, `/api/brandlinks/${encodeURIComponent(draftId)}/draft`);
     const preview = payload.data as DraftPreview | null;
     if (!preview) throw new LocalAutomationError("DRAFT_NOT_FOUND", LOCAL_AUTOMATION_ERROR_HINTS.DRAFT_NOT_FOUND);
-    const view = await draftView(draftId, preview, true, readDraftManifestSafe(draftId));
+    const view = await draftView(draftId, preview, true, readDraftManifestSafe(draftId), ctx);
     if (readString(input, "includeImages") === "thumbnail") {
       const hero = await heroImagePayload(preview.heroImagePath);
       if (hero) view.heroImage = hero;
@@ -1060,7 +1081,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
         }),
       }, { timeoutMs: SECTION_IMAGE_APPLY_WAIT_MS });
       const preview = (payload.data || {}) as DraftPreview;
-      const imageView = await draftView(productId, preview, false, readDraftManifestSafe(productId));
+      const imageView = await draftView(productId, preview, false, readDraftManifestSafe(productId), ctx);
       const slots = imageView.imageSlots as Array<Record<string, unknown>> | null;
       const remaining = typeof payload.remainingMissing === "number" ? payload.remainingMissing : remainingGenerationMissing(slots);
       const alreadyApplied = payload.alreadyApplied === true;
@@ -1098,7 +1119,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     ctx.setStage("revising", sectionIndexes.length ? `섹션 ${sectionIndexes.join(",")} 수정` : "초안 전체 수정", 15);
     const payload = await localApi(request, `/api/brandlinks/${encodeURIComponent(draftId)}/draft`, { method: "PATCH", body: JSON.stringify({ action: "revise", instructions, sectionIndexes }) }, { timeoutMs: DRAFT_GENERATE_WAIT_MS });
     const preview = (payload.data || {}) as DraftPreview;
-    const view = await draftView(draftId, preview, true, readDraftManifestSafe(draftId));
+    const view = await draftView(draftId, preview, true, readDraftManifestSafe(draftId), ctx);
     const readiness = draftReadiness(preview);
     return envelope(job, "draft", `초안 수정 완료 — ${readinessSummary(readiness)}. 승인은 다시 필요합니다.`, view, ctx, { readiness });
   }
@@ -1109,7 +1130,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     ctx.setStage("approving", "초안 승인", 40);
     const payload = await localApi(request, `/api/brandlinks/${encodeURIComponent(draftId)}/draft`, { method: "PATCH", body: JSON.stringify({ action: "approve" }) });
     const preview = (payload.data || {}) as DraftPreview;
-    const view = await draftView(draftId, preview, false, readDraftManifestSafe(draftId));
+    const view = await draftView(draftId, preview, false, readDraftManifestSafe(draftId), ctx);
     return envelope(job, "draft", "초안을 승인했습니다. post_publish 또는 post_schedule 로 발행할 수 있습니다.", view, ctx, { readiness: draftReadiness(preview) });
   }
 

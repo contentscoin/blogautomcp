@@ -44,7 +44,14 @@ async function main() {
     cta: humidifier.cta,
   }, humidifierUnderstanding), true);
   const persimmon = buildProductThumbnailCopy("선물세트 기준", "상주곶감 건시 반건시 호두말이 크림치즈 선물세트");
-  assert.equal(persimmon.headline, "구성·보관 확인");
+  assert.equal(persimmon.headline, "선물 전 체크");
+  assert.doesNotMatch(persimmon.headline, /보관|냉동|보냉/u, "A gift overview photograph must not imply a storage-performance demonstration");
+  for (const name of ["예다움 상주곶감 선물세트 1.65kg", "천년빛 반건시 곶감 선물세트"]) {
+    const gift = buildProductThumbnailCopy("구성과 냉동보관 기준", name, "SHOPPING", buildProduct9Canvas({ name }));
+    assert.equal(gift.headline, "선물 전 체크");
+    assert.match(gift.subline, /보관법/u, "The article's purchase/storage advice remains available separately");
+  }
+  assert.equal(buildProductThumbnailCopy("구성과 냉동보관 기준", "마장동 한우 선물세트 1200g").headline, "구성 확인", "Keep the existing category contract for other gift foods");
   const campingSpeaker = "블루필 블루투스 스피커 캠핑 휴대용";
   const speakerUnderstanding = buildProduct9Canvas({ name: campingSpeaker, features: ["블루투스 연결", "충전식"] });
   assert.equal(speakerUnderstanding.concept.categoryId, "generic_shopping");

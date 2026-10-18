@@ -25,6 +25,9 @@ import * as productSourceAuditContext from "./lib/product-source-audit-context";
 import sharp from "sharp";
 import { createOriginalProductPhotoThumbnail } from "./lib/product-image-lock";
 import { buildProductThumbnailCopy } from "./lib/product-thumbnail";
+import { runMaterialPreparation, type Call } from "./lib/scheduled-draft-workflow";
+import { imageRecoverySignature, runRecordedImageRecovery } from "./lib/material-image-recovery";
+import { getBrandPostPackageDir } from "../src/lib/brand-post-package";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-image-batch-"));
 const rawPath = path.join(root, "raw.png");
@@ -70,12 +73,14 @@ const hashFile = (file: string) => crypto.createHash("sha256").update(fs.readFil
 type Job = { id: string; outStem: string; prompt: string; referenceMode?: string; referenceImagePaths?: string[]; requiredReferenceHashes?: string[] };
 function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lockFails?: boolean; automation?: boolean; sourceMissing?: boolean; sourceError?: string;
   engine?: "codex" | "browser"; realCache?: boolean; thumbnailHeadline?: string; realThumbnailRenderer?: boolean; realThumbnailCopy?: boolean;
+  packageDir?: string;
   sourcePaths?: string[]; segmentablePaths?: string[]; lockedUsesBackground?: boolean;
   diagnosticReason?: string; diagnosticStatus?: "rejected";
   referenceRejected?: boolean; sceneReviewError?: string;
   sectionMatchedPaths?: string[]; sectionReviewError?: string; reviewClass?: "feature-evidence" | "scene-evidence" | "product-photo"; cardFacts?: string[]; cardMatches?: number;
   worker?: (args: string[], child: FakeChild) => void } = {}) {
-  const packageDir = fs.mkdtempSync(path.join(root, "package-"));
+  const packageDir = settings.packageDir || fs.mkdtempSync(path.join(root, "package-"));
+  fs.mkdirSync(packageDir, { recursive: true });
   let child = new FakeChild();
   let jobs: Job[] = [];
   let checkpoint = "";
@@ -551,13 +556,22 @@ async function verifyReviewOnlyRecovery() {
     for(const[file,sha]of Object.entries(before))assert.equal(hashFile(path.join(f.workDir,file)),sha);
   });
   await check("public hero recovery reuses proven completed speaker raw only for changed copy and still runs the full fidelity gate", async () => {
-    for (const mode of ["changed-copy", "same-copy", "changed-reference", "uncertain-receipt"] as const) {
-      const seller = path.join(root, `speaker-source-${mode}.png`);
+    for (const entry of ["public", "workflow"] as const) for (const mode of ["changed-copy", "same-copy", "changed-reference", "uncertain-receipt", "blocked-text", "changed-copy-retired-recipes", "same-recipe-conflict", "uncertain-sibling"] as const) {
+      if (entry === "public" && ["blocked-text", "same-recipe-conflict", "uncertain-sibling"].includes(mode)) continue;
+      const successMode = ["changed-copy", "changed-copy-retired-recipes"].includes(mode);
+      const savedUserData = process.env.DESKTOP_USER_DATA;
+      // Keep nested Codex workspace paths below Windows' legacy path limit.
+      const productId = `hero-${entry === "public" ? "p" : "w"}-${crypto.createHash("sha256").update(mode).digest("hex").slice(0, 8)}`;
+      if (entry === "workflow") process.env.DESKTOP_USER_DATA = path.join(root, "isolated-workflow-userdata");
+      try {
+      const seller = path.join(root, `speaker-source-${entry}-${mode}.png`);
       await sharp({ create: { width: 1080, height: 1080, channels: 3, background: "#d9e8e4" } }).png().toFile(seller);
-      const h = harness({ engine: "codex", realCache: true, realThumbnailRenderer: true, realThumbnailCopy: true, sourcePaths: [seller] });
-      const productName = "블루필 블루투스 스피커 캠핑 휴대용";
+      const h = harness({ engine: "codex", realCache: true, realThumbnailRenderer: true, realThumbnailCopy: true, sourcePaths: [seller],
+        ...(entry === "workflow" ? { packageDir: getBrandPostPackageDir(productId) } : {}) });
+      const productName = mode === "changed-copy-retired-recipes" ? "예다움곶감 선물세트 건시 1.65kg" : "블루필 블루투스 스피커 캠핑 휴대용";
+      h.manifest.brandLinkId = productId;
       h.manifest.connectKind = "SHOPPING";
-      h.manifest.title = "블루필 스피커, 캠핑용으로 고를 때 볼 점";
+      h.manifest.title = mode === "changed-copy-retired-recipes" ? "예다움 곶감 선물세트, 선택 전 확인할 점" : "블루필 스피커, 캠핑용으로 고를 때 볼 점";
       h.manifest.productUnderstanding = product9Canvas.buildProduct9Canvas({ name: productName });
       h.manifest.sourceSnapshot!.product.name = productName;
       h.manifest.imageAssets = [{ role: "body", path: seller, sourcePath: seller, sha256: hashFile(seller), provenance: "ORIGINAL", creationMethod: "source" }];
@@ -572,11 +586,26 @@ async function verifyReviewOnlyRecovery() {
       fs.mkdirSync(workspace); fs.copyFileSync(raw, path.join(workspace, "out.png"));
       const receiptFile = `${original.outStem}.codex-submission.json`;
       fs.writeFileSync(receiptFile, JSON.stringify({ state: "completed", workspace, startedAtMs: Date.now() - 100, threadId: `speaker-${crypto.randomUUID()}` }));
+      const siblingFiles: string[] = [];
+      if (["changed-copy-retired-recipes", "same-recipe-conflict", "uncertain-sibling"].includes(mode)) {
+        for (const ordinal of [1, 2]) {
+          const sibling = path.join(workDir, `raw-${String(ordinal).repeat(64)}`), siblingWorkspace = `${sibling}.codex-1`;
+          const metadata = JSON.parse(fs.readFileSync(`${original.outStem}.reference-scene.json`, "utf8"));
+          if (mode !== "same-recipe-conflict" || ordinal !== 1)
+            metadata.sceneRecipeSha256 = crypto.createHash("sha256").update(`older different recipe ${ordinal}`).digest("hex");
+          fs.writeFileSync(`${sibling}.reference-scene.json`, JSON.stringify(metadata));
+          await sharp({ create: { width: 1080, height: 1080, channels: 3, background: ordinal === 1 ? "#cbc2ae" : "#c1c2e8" } }).png().toFile(`${sibling}.png`);
+          fs.mkdirSync(siblingWorkspace); fs.copyFileSync(`${sibling}.png`, path.join(siblingWorkspace, "out.png"));
+          fs.writeFileSync(`${sibling}.codex-submission.json`, JSON.stringify({ state: mode === "uncertain-sibling" && ordinal === 1 ? "submitting" : "completed",
+            workspace: siblingWorkspace, startedAtMs: Date.now() - 100, threadId: `older-${crypto.randomUUID()}` }));
+          siblingFiles.push(`${sibling}.reference-scene.json`, `${sibling}.png`, `${sibling}.codex-submission.json`, path.join(siblingWorkspace, "out.png"));
+        }
+      }
       const boundRaw = path.join(h.packageDir, "bound-raw.png"); fs.copyFileSync(raw, boundRaw);
       const correctedCopy = buildProductThumbnailCopy(h.manifest.title, productName, "SHOPPING", h.manifest.productUnderstanding);
-      assert.equal(correctedCopy.headline, "구매 전 확인");
+      assert.equal(correctedCopy.headline, mode === "changed-copy-retired-recipes" ? "선물 전 체크" : "구매 전 확인");
       const oldThumbnail = await createOriginalProductPhotoThumbnail({ sourcePath: boundRaw, outputDir: path.join(h.packageDir, "prior-hero"),
-        productName, headline: mode === "same-copy" ? correctedCopy.headline : "보냉력 체크", subline: "", style: "shopping-bold" });
+        productName, headline: mode === "same-copy" ? correctedCopy.headline : mode === "changed-copy-retired-recipes" ? "구성·보관 확인" : "보냉력 체크", subline: "", style: "shopping-bold" });
       const heroSha = hashFile(oldThumbnail.outputPath);
       const reference = (target as unknown as { referenceContext: { reference: { path: string; sha256: string } } }).referenceContext.reference;
       h.manifest.heroImagePath = oldThumbnail.outputPath;
@@ -596,15 +625,64 @@ async function verifyReviewOnlyRecovery() {
         const receipt = JSON.parse(fs.readFileSync(receiptFile, "utf8")); receipt.state = "submitting";
         fs.writeFileSync(receiptFile, JSON.stringify(receipt));
       }
-      const preserved = [receiptFile, `${original.outStem}.reference-scene.json`, raw, boundRaw, oldThumbnail.outputPath, oldMarkdown, normalPhoto];
+      const preserved = [receiptFile, `${original.outStem}.reference-scene.json`, raw, boundRaw, oldThumbnail.outputPath, oldMarkdown, normalPhoto, ...siblingFiles];
       const before = new Map(preserved.map(file => [file, hashFile(file)]));
       const manifestBefore = JSON.stringify(h.manifest);
-      const results = await h.generate(1, { productName, requests: [{ requestId: "recover-speaker-hero", slotId: "hero:image:1", replaceAssetKey: heroSha }] });
-      assert.equal(results.length, 1);
+      const generate = () => h.generate(1, { productName, requests: [{ requestId: "recover-speaker-hero", slotId: "hero:image:1", replaceAssetKey: heroSha }] });
+      let results: BrandPostImageGenerationResult[] = [];
+      if (entry === "public") results = await generate();
+      else {
+        const manifestFile = path.join(h.packageDir, "manifest.json"), historyFile = path.join(h.packageDir, "image-recovery-history.json");
+        fs.writeFileSync(manifestFile, manifestBefore);
+        const signature = imageRecoverySignature(h.packageDir);
+        const legacyEntries = [{ stage: "repair-rejected", input: signature, output: signature, status: "failed", at: "original",
+          reason: "대표 이미지: IMAGE_OUTPUT_REJECTED: same composed pixels", externalFailure: false },
+          { stage: "refresh-source", input: signature, output: signature, status: "failed", at: "original", reason: "SOURCE_REVIEW_INCOMPLETE" },
+          { stage: "replan-images", input: signature, output: signature, status: "failed", at: "original", reason: "REFERENCE_SCENE_FIDELITY_FAILED" }];
+        fs.writeFileSync(historyFile, JSON.stringify({ version: 1, entries: legacyEntries }));
+        let imageCalls = 0, snapshots = 0, finished = false, approved = false;
+        const call: Call = async (url, method, body) => {
+          const action = (body as { action?: string })?.action;
+          if (url.endsWith("/images") && method === "POST") {
+            imageCalls++; assert.equal(action, "regenerate");
+            assert.equal((body as { assetKey?: string }).assetKey, heroSha);
+            results = await generate();
+            if (results[0].error) throw Object.assign(new Error(results[0].error), { code: results[0].errorCode || "IMAGE_REPAIR_FAILED" });
+            finished = true;
+          } else if (mode === "blocked-text" && action === "revise") {
+            throw Object.assign(new Error("The manuscript still fails its source-backed text gate"), { code: "QUALITY_REPAIR_REJECTED" });
+          } else if (action === "approve") approved = true;
+          else assert.ok(method === "GET" || action === "recheck", "image-only repair cannot rewrite text or refresh source budgets");
+          return { success: true, data: { approvedAt: approved ? "approved-offline-fixture" : null,
+            imageGeneration: { status: "incomplete", recoveryState: "idle", requested: 1, applied: 0, remaining: 0 },
+            approval: { canApprove: finished, blockers: finished ? [] : [{ code: "image-publication-rejected", sectionId: null, reason: "대표 이미지 · wrong cooler copy" }] },
+            imageAssets: h.manifest.imageAssets, imageSlots: [{ missing: 0, generationMissing: 0 }],
+            contentQuality: { signals: mode === "blocked-text" ? [{ key: "too-short-content", status: "fail", label: "본문 분량 부족" }] : [] } } };
+        };
+        const workflow = runMaterialPreparation(productId, { call, pause: async () => {} }, { incrementalOnly: true, beforeRepair: async () => { snapshots++; } });
+        if (successMode) await workflow;
+        else await assert.rejects(workflow, (error: unknown) => (error as { code?: string }).code === (mode === "same-copy" ? "IMAGE_OUTPUT_REJECTED" : mode === "blocked-text" ? "QUALITY_REPAIR_REJECTED" : "COMPOSITION_REPAIR_REQUIRED"));
+        assert.equal(snapshots, 1); assert.equal(approved, successMode);
+        assert.equal(imageCalls, ["changed-copy", "same-copy", "changed-copy-retired-recipes"].includes(mode) ? 1 : 0);
+        const history = JSON.parse(fs.readFileSync(historyFile, "utf8"));
+        assert.deepEqual(history.entries.slice(0, legacyEntries.length), legacyEntries, "legacy failures are retained verbatim");
+        if (["changed-copy", "same-copy", "changed-copy-retired-recipes"].includes(mode)) assert.match(history.entries.at(-1).thumbnailCopyBinding, /^[a-f0-9]{64}$/u);
+        assert.equal(fs.readFileSync(manifestFile, "utf8"), manifestBefore);
+        assert.equal(imageRecoverySignature(h.packageDir), signature, "copy-specific work cannot reset the base/body/source fingerprint");
+        let forbidden = 0;
+        for (const stage of ["repair-rejected", "refresh-source", "replan-images"] as const)
+          assert.equal((await runRecordedImageRecovery(productId, stage, async () => { forbidden++; })).attempted, false);
+        if (mode !== "blocked-text") assert.equal((await runRecordedImageRecovery(productId, "repair-rejected", async () => { forbidden++; }, { thumbnailAssetKey: heroSha })).attempted, false);
+        assert.equal(forbidden, 0, "the exact same copy has no renewable attempt and body/source/replan budgets stay consumed");
+      }
       assert.equal(h.spawns, 0); assert.equal(h.codexTransportCalls, 0, "completed/uncertain recovery never submits another provider request");
       assert.equal(JSON.stringify(h.manifest), manifestBefore, "image generation returns a candidate without mutating the manuscript/approval/assets");
       for (const [file, digest] of before) assert.equal(hashFile(file), digest, `${mode}: original receipt/recipe/raw/hero/MD/normal photo is immutable`);
-      if (mode === "changed-copy") {
+      if (entry === "workflow" && ["changed-reference", "uncertain-receipt", "blocked-text", "same-recipe-conflict", "uncertain-sibling"].includes(mode)) {
+        assert.equal(results.length, 0); assert.equal(h.referenceSceneReviewCalls, 0);
+      } else {
+      assert.equal(results.length, 1);
+      if (successMode) {
         assert.equal(results[0].error, undefined);
         assert.ok(results[0].generatedPath);
         assert.notEqual(hashFile(results[0].generatedPath!), heroSha);
@@ -618,6 +696,11 @@ async function verifyReviewOnlyRecovery() {
         assert.equal(h.referenceSceneReviewCalls, 0, "rejected same pixels or unproven bindings cannot reach adoption");
         if (mode === "same-copy") assert.equal(results[0].errorCode, "IMAGE_OUTPUT_REJECTED");
         else assert.match(results[0].error || "", /IMAGE_RESUME_REQUIRED|REFERENCE_SCENE_CHANGED/u);
+      }
+      }
+      } finally {
+        if (savedUserData === undefined) delete process.env.DESKTOP_USER_DATA;
+        else process.env.DESKTOP_USER_DATA = savedUserData;
       }
     }
   });

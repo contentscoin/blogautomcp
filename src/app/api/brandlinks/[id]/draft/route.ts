@@ -34,6 +34,7 @@ import {
   SavedTextRevalidationError,
 } from "@/lib/brand-post-revalidation";
 import { isBrandPostImageRepairActive, repairBrandPostImages } from "@/lib/brand-post-image-repair";
+import { trackScheduledSourceImageRepair } from "@/lib/brand-post-source-repair-wait";
 import { getDraftProgressPath, writeDraftProgress } from "@/lib/draft-progress";
 import {
   getPostCompositionContract,
@@ -298,8 +299,12 @@ function scheduleSectionImageRepair(options: {
   }
   const finishActivity = beginDesktopActivity("brand-post-image-generation");
   // Detached on purpose: the draft response returns now; imageGeneration.status="running" is persisted before the first await.
-  void repairBrandPostImages({ brandLinkId: options.brandLinkId, productName: options.productName,
-    sourceOnly: options.sourceOnly })
+  const run = () => repairBrandPostImages({ brandLinkId: options.brandLinkId, productName: options.productName,
+    sourceOnly: options.sourceOnly });
+  void (options.sourceOnly ? trackScheduledSourceImageRepair(options.brandLinkId, run, () => {
+    const current = readBrandPostPackage(options.brandLinkId, { migrate: false });
+    return current?.version === "brand-post-package/v2" ? current.imageGeneration?.ownerToken : undefined;
+  }) : run())
     .catch((error) => {
       console.error(`[draft] 섹션 이미지 자동 생성 실패(${options.brandLinkId}): ${error instanceof Error ? error.message : String(error)}`);
     })
