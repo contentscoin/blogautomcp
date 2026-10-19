@@ -79,9 +79,9 @@ async function main() {
     const originalTarget = { sectionId: "selected-original", sectionTitle: "음식물처리기가 줄여주는 불편",
       sectionBody: ["선택한 상품의 외형을 보여주는 판매자 원본 사진입니다."],
       imageIntent: "판매페이지 원본 상품 사진: 선택한 상품·옵션의 외형 확인", imageSource: "seller-original" as const };
-    const verdict = (accepted: boolean, reason: string, photoClaimMatches = true, exactBodyClaim = "") => JSON.stringify({ reviews: [{ index: 1, accepted, identityMatches: true, photoClaimMatches,
+    const verdict = (accepted: boolean, reason: string, photoClaimMatches = true, exactBodyClaim = "", scope = "pictured-appearance") => JSON.stringify({ reviews: [{ index: 1, accepted, identityMatches: true, photoClaimMatches,
       photoClaimObjection: photoClaimMatches ? { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" }
-        : { origin: "section-body", sourceIndex: 0, quote: exactBodyClaim, scope: "pictured-appearance", conflict: reason },
+        : { origin: "section-body", sourceIndex: 0, quote: exactBodyClaim, scope, conflict: reason },
       notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false,
       singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true,
       reviewClass: "product-photo", reason }] });
@@ -128,7 +128,7 @@ async function main() {
         assert.match(call.userPrompt, /"allowProductPhoto":true/u);
         assert.ok(call.userPrompt.includes(featureBody), "the actual feature-evidence claim is retained for pixel review");
         assert.match(call.userPrompt, /Even when allowProductPhoto=true, reject generic photos used as proof of a feature claim/u);
-        return verdict(true, "A static product photograph cannot prove the published noise-reduction assertion.", false, featureBody);
+        return verdict(true, "A static product photograph cannot prove the published noise-reduction assertion.", false, featureBody, "performance");
       } }) });
     assert.deepEqual(unsupported, [], "a source hint cannot override a failed feature-claim pixel verdict");
     assert.match(rejectedReasons[0], /사진을 기능·성능·결과의 증거/u);
