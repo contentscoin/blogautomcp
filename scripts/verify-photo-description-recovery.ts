@@ -141,6 +141,9 @@ async function main() {
     const genericSurface = "제품 표면의 질감이 매끈하게 보여요.";
     assert.equal(locatePhotoDescriptionSentence(genericSurface, `“${genericSurface}”`), null, "product appearance without an explicit photo assertion must remain intact");
     assert.equal(locatePhotoDescriptionSentence(literal, `«${literal}»`), literal, "guillemets quote an exact explicit photo sentence too");
+    for (const appearance of ["사진에는 투명한 용기가 놓여 있어요.", "사진에는 불투명한 본체가 놓여 있어요."])
+      assert.equal(locatePhotoDescriptionSentence(appearance, `«${appearance}»`), appearance,
+        "a visual adjective ending in 한 is not a bare object count");
     const decimalLabel = "사진에는 100.5ml라고 적힌 용기 라벨이 보여요.";
     assert.equal(locatePhotoDescriptionSentence(decimalLabel, `“${decimalLabel}”`), null, "never clip a decimal or erase a product specification");
     assert.equal(locatePhotoDescriptionSentence(body, "“연보라색 제형이 펼쳐져 있고 용기에도 퍼플 코렉팅이 표시돼 있어요.”"), null, "a quote fragment cannot authorize deleting a larger sentence");
@@ -213,6 +216,14 @@ async function main() {
       "밝은 원목 프레임과 자동온열 장치가 이어진 구조예요.",
       "사진에는 야간모드가 켜진 기기가 보여요.",
       "밝은 원목 프레임과 미등록작동 장치가 이어진 구조예요.",
+      "사진에는 한 상자가 놓여 있어요.",
+      "밝은 원목 프레임과 한 용기가 이어진 구조예요.",
+      "사진에는 한 작은 상자가 놓여 있어요.",
+      "사진에는 한작은상자가 놓여 있어요.",
+      "사진에는 한 투명한 용기가 놓여 있어요.",
+      "사진에는 한투명한용기가 놓여 있어요.",
+      "사진에는 한 검은색 본체가 놓여 있어요.",
+      "사진에는 한 접시가 놓여 있어요.",
     ];
     for (const protectedClaim of protectedClaims) {
       const source = [...moodBody.slice(0, 3), protectedClaim, moodBody[4]].join("\n\n");

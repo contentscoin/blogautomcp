@@ -25,7 +25,7 @@ const explicitPhotoSubject = /^(?:(?:이|해당|본문의|첨부한|제공된|�
 // nouns, count expressions and operating terms require manual text review.
 // Atoms permit normal Hangul spacing/josa; no value is inferred or substituted.
 const visualAtoms = [
-  "밝은", "어두운", "투명", "불투명", "둥근", "각진", "길쭉한", "긴", "짧은", "넓은", "좁은", "작은", "큰",
+  "밝은", "어두운", "투명", "투명한", "불투명", "불투명한", "둥근", "각진", "길쭉한", "긴", "짧은", "넓은", "좁은", "작은", "큰",
   "흰색", "검은색", "검정색", "검정", "갈색", "초록색", "연보라색", "보라색", "베이지색", "아이보리색",
   "원목", "목재", "나무", "금속", "유리", "플라스틱", "천", "상단", "하단", "위", "아래", "옆", "앞", "뒤",
   "프레임", "용기", "조명", "본체", "상품", "제품", "상자", "뚜껑", "받침", "기둥", "손잡이", "고리", "끈", "밴드", "칸",
@@ -38,11 +38,19 @@ function closedVisualSentence(value: string): boolean {
   const description = value.replace(explicitPhotoSubject, "");
   if (!/^[가-힣\s,.!?。！？·]+$/u.test(description)) return false;
   const words = description.match(/[가-힣]+/gu) || [];
-  return words.length > 0 && words.every(word => {
+  return words.length > 0 && words.every((word, wordIndex) => {
     const reachable = new Set([0]);
     for (let offset = 0; offset < word.length; offset++) {
       if (!reachable.has(offset)) continue;
-      for (const atom of visualAtoms) if (word.startsWith(atom, offset)) reachable.add(offset + atom.length);
+      for (const atom of visualAtoms) {
+        if (!word.startsWith(atom, offset)) continue;
+        // Bare "한" may describe the observed unified structure, never count
+        // an object (including "한 작은 상자" and unspaced variants). Adjectives
+        // such as "투명한" are explicit atoms, not this quantity-like token.
+        if (atom === "한" && !word.slice(offset + atom.length).startsWith("구조") &&
+            !(offset + atom.length === word.length && words[wordIndex + 1]?.startsWith("구조"))) continue;
+        reachable.add(offset + atom.length);
+      }
     }
     return reachable.has(word.length);
   });
