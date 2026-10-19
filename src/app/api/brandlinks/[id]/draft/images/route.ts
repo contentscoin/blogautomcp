@@ -18,7 +18,7 @@ import {
   type BrandPostImageGenerationRequest,
 } from "@/lib/brand-post-image-generation";
 import { isBrandPostImageRepairActive, planSectionImageRequests, planWholeBrandPostImageRequests, repairBrandPostImages } from "@/lib/brand-post-image-repair";
-import { replanShoppingImageCoverage } from "@/lib/brand-post-image-replan";
+import { describeShoppingImageReplanFailure, replanShoppingImageCoverage } from "@/lib/brand-post-image-replan";
 import { migrateShoppingNaturalPhotoPlan, requiresShoppingNaturalPhotoPlan } from "@/lib/brand-post-natural-photo-migration";
 
 const IMAGE_ACTIONS = ["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources", "repair_rejected", "replan_sources"] as const;
@@ -185,9 +185,10 @@ export async function POST(
       const current = readBrandPostPackage(id, { migrate: false });
       const data = current ? packagePreview(current) : preview;
       const remainingMissing = data.imageSlots.reduce((sum, slot) => sum + Math.max(slot.missing, slot.generationMissing), 0);
+      const diagnostics = describeShoppingImageReplanFailure({ remainingMissing, reason: recovery.reason,
+        slots: data.imageSlots, previousErrors: current?.imageGeneration?.errors });
       return NextResponse.json({ success: true, data, recovery, remainingMissing,
-        code: remainingMissing ? "IMAGE_SOURCE_BINDING_REQUIRED" : "IMAGE_REPAIR_COMPLETE",
-        errors: remainingMissing ? [`IMAGE_SOURCE_BINDING_REQUIRED: 상세 원본 재수집과 대체 문단 검토 후에도 검증 이미지 ${remainingMissing}장이 부족합니다. (${recovery.reason})`] : [],
+        ...diagnostics,
         message: recovery.changed ? "검증 가능한 대체 문단으로 필수 이미지 배치를 변경했습니다." : "검증 기준을 유지한 채 대체 가능 여부를 확인했습니다." });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

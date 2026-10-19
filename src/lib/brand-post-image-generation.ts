@@ -35,7 +35,8 @@ import { assertProductImageReferences, checkedExistingJobResult, collectComplete
 import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene, brandPostSectionSlotId, isReferenceGuidedThumbnail, isShoppingLifestyleImage, REFERENCE_SCENE_REVIEW_CHECKS, type BrandPostImageSourceHint } from "./brand-post-image-evidence";
 import { buildProduct9Canvas, type Product9Canvas, type ProductPhysicalScale } from "../../scripts/lib/product-9canvas";
 import { buildShoppingReferenceScenePrompt, reviewShoppingReferenceScene, selectShoppingSceneReference,
-  SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION, type ShoppingSceneReference } from "../../scripts/lib/shopping-reference-scene";
+  selectShoppingSceneSupportingReferences, readShoppingSceneSupportingCandidates, SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION,
+  type ShoppingSceneReference, type ShoppingSceneSupportingReference } from "../../scripts/lib/shopping-reference-scene";
 
 const CHATGPT_BASE_URL = "https://chatgpt.com/";
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
@@ -105,6 +106,8 @@ export interface BrandPostImageReferenceContext {
   reference: ShoppingSceneReference;
   anchorPath?: string;
   anchorSha256?: string;
+  supportingReferences?: ShoppingSceneSupportingReference[];
+  preparationBinding?: string;
   prompt: string;
 }
 
@@ -359,7 +362,8 @@ export async function prepareBrandPostImageReferenceContext(options: {
   productName: string;
   target: ResolvedImageTarget;
   sourceImageUrls?: string[];
-}, dependencies: { collect?: typeof collectShoppingProductSourceCandidates; select?: typeof selectShoppingSceneReference } = {}): Promise<BrandPostImageReferenceContext> {
+}, dependencies: { collect?: typeof collectShoppingProductSourceCandidates; select?: typeof selectShoppingSceneReference;
+  selectSupporting?: typeof selectShoppingSceneSupportingReferences } = {}): Promise<BrandPostImageReferenceContext> {
   if (options.manifest.connectKind !== "SHOPPING" || !allowsShoppingReferenceScene(options.target))
     throw new Error("REFERENCE_SCENE_NOT_EVIDENCE: 기능·효능 파트에는 생성 연출사진을 근거로 사용할 수 없습니다.");
   if (!options.manifest.sourceSnapshot?.snapshotId)
@@ -369,11 +373,16 @@ export async function prepareBrandPostImageReferenceContext(options: {
   const outputDir = path.join(getBrandPostPackageDir(options.manifest.brandLinkId), "product-sources");
   const checkpointPath = path.join(getBrandPostPackageDir(options.manifest.brandLinkId), "image-generation-work", "scene-reference-context.json");
   const thumbnailCheckpointPath = path.join(path.dirname(checkpointPath), "thumbnail-reference-context.json");
+  const snapshotKey = crypto.createHash("sha256").update(options.manifest.sourceSnapshot.snapshotId).digest("hex");
+  const snapshotCheckpointPath = checkpointPath.replace(/\.json$/u, `-${snapshotKey}.json`);
+  const snapshotThumbnailCheckpointPath = thumbnailCheckpointPath.replace(/\.json$/u, `-${snapshotKey}.json`);
   let checkpoint: { strategyVersion?: string; snapshotId?: string; reference?: ShoppingSceneReference; anchorPath?: string; anchorSha256?: string } = {};
   try { checkpoint = JSON.parse(fs.readFileSync(checkpointPath, "utf8")); } catch { /* New strategy or package. */ }
+  try { checkpoint = JSON.parse(fs.readFileSync(snapshotCheckpointPath, "utf8")); } catch { /* Legacy checkpoint remains valid. */ }
   let thumbnailCheckpoint: typeof checkpoint = {};
   if (thumbnail) {
     try { thumbnailCheckpoint = JSON.parse(fs.readFileSync(thumbnailCheckpointPath, "utf8")); } catch { /* First thumbnail source review. */ }
+    try { thumbnailCheckpoint = JSON.parse(fs.readFileSync(snapshotThumbnailCheckpointPath, "utf8")); } catch { /* Legacy thumbnail checkpoint. */ }
   }
   const checkpointCurrent = checkpoint.strategyVersion === SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION &&
     checkpoint.snapshotId === options.manifest.sourceSnapshot.snapshotId;
@@ -396,6 +405,61 @@ export async function prepareBrandPostImageReferenceContext(options: {
     }), ...readSavedProductSourceCandidates(outputDir)].filter(Boolean);
   const selectedProduct = buildSelectedProductImageAuditContext(options.productName,
     Array.isArray(options.manifest.sourceSnapshot.product.features) ? options.manifest.sourceSnapshot.product.features.map(String) : [], options.manifest.productUnderstanding);
+  const snapshotImageUrls = Array.isArray(options.manifest.sourceSnapshot.product.referenceImageUrls)
+    ? options.manifest.sourceSnapshot.product.referenceImageUrls.filter((url): url is string => typeof url === "string") : [];
+  const productUnderstanding = resolveManifestProductUnderstanding(options.manifest, options.productName);
+  const sectionIndex = options.manifest.composition.sections.findIndex(section => section.id === options.target.sectionId);
+  const promptOptions = { productName: options.productName, sectionTitle: options.target.sectionTitle,
+    imageIntent: options.target.imageIntent, bodyExcerpt: options.target.bodyExcerpt, stagingRecipe: options.target.promptRecipe,
+    role: options.target.role, variantIndex: photorealVariantIndex(options.manifest, options.target),
+    adjacentSectionTitles: sectionIndex < 0 ? [] : [sectionIndex - 1, sectionIndex + 1]
+      .flatMap(i => options.manifest.composition.sections[i] ? [options.manifest.composition.sections[i].title] : []),
+    physicalScale: productUnderstanding?.concept.physicalScale, productImageDirective: productUnderstanding?.policy.imageDirective };
+  const preparationBinding = crypto.createHash("sha256").update(JSON.stringify({ snapshotId: options.manifest.sourceSnapshot.snapshotId,
+    selectedProduct, promptOptions })).digest("hex");
+  const supportIntact = (support: ShoppingSceneSupportingReference) => {
+    try {
+      return support.sourceSnapshotId === options.manifest.sourceSnapshot!.snapshotId &&
+        snapshotImageUrls.includes(support.sourceUrl) &&
+        ["geometry", "intrinsic-label"].includes(support.purpose) && sha256File(support.path) === support.sha256 &&
+        sha256File(support.receiptPath) === support.receiptSha256;
+    } catch { return false; }
+  };
+  // A slot already prepared/submitted must retain its exact inputs, including
+  // legacy primary-only jobs. Only an explicitly replaced, settled output is a new request.
+  let existingSlotRequest = false;
+  if (options.target.request.slotId && fs.existsSync(path.dirname(checkpointPath))) {
+    const records = [path.dirname(checkpointPath), ...["resume-v1", "resume-v2"].map(name => path.join(path.dirname(checkpointPath), name))]
+      .flatMap(directory => fs.existsSync(directory) ? fs.readdirSync(directory)
+        .filter(name => /^raw-[a-f0-9]+\.reference-scene\.json$/u.test(name)).map(name => path.join(directory, name)) : []);
+    for (const file of records) {
+      const metadata = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (metadata.slotId !== options.target.request.slotId) continue;
+      const stem = file.replace(/\.reference-scene\.json$/u, "");
+      const replaced = options.target.request.replaceAssetKey && assets.some(asset => asset.sha256 === options.target.request.replaceAssetKey &&
+        asset.slotId === options.target.request.slotId && asset.sourcePath && path.resolve(asset.sourcePath).startsWith(path.resolve(stem) + "."));
+      if (replaced && retiredImageJobIsSettled(stem)) continue;
+      existingSlotRequest = true;
+      const saved = metadata.referenceContext as BrandPostImageReferenceContext | undefined;
+      if (!saved) continue;
+      let intact = false;
+      try {
+        const supporting = saved.supportingReferences ?? [];
+        intact = metadata.sourceSnapshotId === options.manifest.sourceSnapshot.snapshotId && saved.preparationBinding === preparationBinding &&
+          Array.isArray(supporting) && supporting.length <= 2 && supporting.every(supportIntact) &&
+          saved.referenceImagePaths.length >= 1 && saved.referenceImagePaths.length <= 3 && saved.referenceImagePaths.length === saved.referenceHashes.length &&
+          saved.reference.sha256 === saved.referenceHashes[0] && typeof saved.prompt === "string" &&
+          saved.referenceImagePaths.every((file, i) => sha256File(file) === saved.referenceHashes[i]) &&
+          JSON.stringify(saved.referenceImagePaths) === JSON.stringify([saved.reference.path, ...supporting.map(item => item.path), ...(saved.anchorPath ? [saved.anchorPath] : [])]) &&
+          JSON.stringify(saved.referenceHashes) === JSON.stringify([saved.reference.sha256, ...supporting.map(item => item.sha256), ...(saved.anchorSha256 ? [saved.anchorSha256] : [])]) &&
+          JSON.stringify(metadata.referenceHashes) === JSON.stringify(saved.referenceHashes);
+      } catch { /* Corrupt optional metadata must not become a new request. */ }
+      if (!intact)
+        throw new Error("IMAGE_RESUME_REQUIRED: 기존 이미지 요청의 상품·문단·참조 기록이 변경되었습니다. 기존 입력을 덮거나 재전송하지 않았습니다.");
+      options.target.referenceContext = saved;
+      return saved;
+    }
+  }
   let reference: ShoppingSceneReference | undefined;
   for (const candidate of thumbnail ? [thumbnailCheckpoint, checkpoint] : [checkpoint]) {
     try {
@@ -450,24 +514,77 @@ export async function prepareBrandPostImageReferenceContext(options: {
   }
   // Keep a prepared approved anchor stable while sibling image updates clear manuscript approval.
   // A hero-specific alternative must not replace the source bound to existing body jobs.
-  atomicWriteTextFile(thumbnail ? thumbnailCheckpointPath : checkpointPath, JSON.stringify({ strategyVersion: SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION,
+  const legacyPrimaryCheckpoint = thumbnail ? thumbnailCheckpointPath : checkpointPath;
+  const primaryCheckpoint = fs.existsSync(legacyPrimaryCheckpoint) &&
+    (thumbnail ? thumbnailCheckpoint.snapshotId : checkpoint.snapshotId) !== options.manifest.sourceSnapshot.snapshotId
+    ? thumbnail ? snapshotThumbnailCheckpointPath : snapshotCheckpointPath : legacyPrimaryCheckpoint;
+  if (!fs.existsSync(primaryCheckpoint)) {
+    fs.mkdirSync(path.dirname(primaryCheckpoint), { recursive: true });
+    try { fs.writeFileSync(primaryCheckpoint, JSON.stringify({ strategyVersion: SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION,
     snapshotId: options.manifest.sourceSnapshot.snapshotId, reference,
     anchorPath: thumbnail ? undefined : anchorPath || (checkpointCurrent ? checkpoint.anchorPath : undefined),
-    anchorSha256: thumbnail ? undefined : anchorSha256 || (checkpointCurrent ? checkpoint.anchorSha256 : undefined) }));
-  const productUnderstanding = resolveManifestProductUnderstanding(options.manifest, options.productName);
-  const sectionIndex = options.manifest.composition.sections.findIndex(section => section.id === options.target.sectionId);
+    anchorSha256: thumbnail ? undefined : anchorSha256 || (checkpointCurrent ? checkpoint.anchorSha256 : undefined) }), { flag: "wx" }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  }
+  let supportingReferences: ShoppingSceneSupportingReference[] = [];
+  if (!existingSlotRequest && snapshotImageUrls.length) {
+    const key = crypto.createHash("sha256").update(JSON.stringify({ snapshotId: options.manifest.sourceSnapshot.snapshotId,
+      referenceSha256: reference.sha256, selectedProduct })).digest("hex");
+    const bundlePath = path.join(path.dirname(checkpointPath), `reference-bundle-${key}.json`);
+    if (fs.existsSync(bundlePath)) {
+      const saved = JSON.parse(fs.readFileSync(bundlePath, "utf8"));
+      if (saved.version === "shopping-reference-bundle/v1" && saved.sourceSnapshotId === options.manifest.sourceSnapshot.snapshotId &&
+          saved.referenceSha256 === reference.sha256 && Array.isArray(saved.supportingReferences)) {
+        if (saved.supportingReferences.length > 2 || saved.supportingReferences.some((support: ShoppingSceneSupportingReference) => !supportIntact(support)))
+          throw new Error("REFERENCE_SCENE_CHANGED: 저장된 보조 참조의 출처 또는 픽셀이 변경되었습니다.");
+        supportingReferences = saved.supportingReferences;
+      }
+    } else {
+      const original = assets.find(asset => asset.provenance === "ORIGINAL" && asset.sourceReview?.sourceSha256);
+      let reviewedHashes: string[] = [];
+      try {
+        const diagnosticsPath = path.join(path.dirname(outputDir), "image-source-diagnostics.json");
+        if (fs.statSync(diagnosticsPath).size <= 128 * 1024) {
+          const diagnostics = JSON.parse(fs.readFileSync(diagnosticsPath, "utf8"));
+          if (Array.isArray(diagnostics.entries)) reviewedHashes = diagnostics.entries.flatMap((entry: Record<string, unknown>) =>
+            entry.status === "proposed" && entry.suitability === "eligible" && typeof entry.sourceSha256 === "string" ? [entry.sourceSha256] : []);
+        }
+      } catch { /* Historical proposal is optional discovery, never current approval. */ }
+      const priorityHashes = Array.from({ length: reviewedHashes.length }, (_, index) =>
+        reviewedHashes[index % 2 === 0 ? index / 2 : reviewedHashes.length - 1 - Math.floor(index / 2)]);
+      const candidates = await readShoppingSceneSupportingCandidates({ snapshot: options.manifest.sourceSnapshot,
+        productId: options.manifest.brandLinkId, sourceDirectory: outputDir,
+        preferredHashes: [original?.sourceReview?.sourceSha256, ...priorityHashes].filter((hash): hash is string => Boolean(hash)) });
+      try {
+        supportingReferences = await (dependencies.selectSupporting ?? selectShoppingSceneSupportingReferences)({ reference, candidates,
+          sourceSnapshotId: options.manifest.sourceSnapshot.snapshotId, sourceImageUrls: snapshotImageUrls,
+          selectedProduct, maximum: 2 });
+      } catch (error) {
+        // An invalid optional observation cannot become verified evidence. Actual
+        // provider failures and changed source bytes remain terminal, not retries.
+        if (!(error instanceof Error && error.message.startsWith("REFERENCE_SCENE_REVIEW_INVALID:"))) throw error;
+      }
+      fs.writeFileSync(bundlePath, JSON.stringify({ version: "shopping-reference-bundle/v1",
+        sourceSnapshotId: options.manifest.sourceSnapshot.snapshotId, referenceSha256: reference.sha256, supportingReferences }), { flag: "wx" });
+    }
+  }
+  if (supportingReferences.some(support => !supportIntact(support))) throw new Error("REFERENCE_SCENE_CHANGED: 보조 참조의 출처 또는 픽셀이 변경되었습니다.");
+  let referenceBytes = fs.statSync(reference.path).size;
+  supportingReferences = supportingReferences.sort((a, b) => Number(a.purpose === "intrinsic-label") - Number(b.purpose === "intrinsic-label"))
+    .filter(support => {
+      const bytes = fs.statSync(support.path).size;
+      if (referenceBytes + bytes > 8 * 1024 * 1024) return false;
+      referenceBytes += bytes; return true;
+    });
+  // Identifying seller details take priority over a generated palette anchor.
+  if (supportingReferences.length) { anchorPath = undefined; anchorSha256 = undefined; }
+  const referenceImagePaths = [reference.path, ...supportingReferences.map(support => support.path), ...(anchorPath ? [anchorPath] : [])];
   const context: BrandPostImageReferenceContext = {
     generationMode: "reference-guided-scene", reference, anchorPath, anchorSha256,
-    referenceImagePaths: [reference.path, ...(anchorPath ? [anchorPath] : [])],
-    referenceHashes: [reference.sha256, ...(anchorSha256 ? [anchorSha256] : [])],
-    prompt: buildShoppingReferenceScenePrompt({ productName: options.productName, sectionTitle: options.target.sectionTitle,
-      imageIntent: options.target.imageIntent, bodyExcerpt: options.target.bodyExcerpt, stagingRecipe: options.target.promptRecipe,
-      role: options.target.role, reference, hasAnchor: Boolean(anchorPath),
-      variantIndex: photorealVariantIndex(options.manifest, options.target),
-      adjacentSectionTitles: sectionIndex < 0 ? [] : [sectionIndex - 1, sectionIndex + 1]
-        .flatMap(i => options.manifest.composition.sections[i] ? [options.manifest.composition.sections[i].title] : []),
-      physicalScale: productUnderstanding?.concept.physicalScale,
-      productImageDirective: productUnderstanding?.policy.imageDirective }),
+    referenceImagePaths,
+    referenceHashes: [reference.sha256, ...supportingReferences.map(support => support.sha256), ...(anchorSha256 ? [anchorSha256] : [])],
+    ...(supportingReferences.length ? { supportingReferences } : {}), preparationBinding,
+    prompt: buildShoppingReferenceScenePrompt({ ...promptOptions, reference, hasAnchor: Boolean(anchorPath), supportingReferences }),
   };
   options.target.referenceContext = context;
   return context;
@@ -919,12 +1036,20 @@ export function prepareImageBatchJobs(
         throw rejectedThumbnailOutputError();
       return reviewOnlyJob;
     }
-    if (manifest.connectKind === "SHOPPING") atomicWriteTextFile(`${outStem}.reference-scene.json`, JSON.stringify({
+    if (manifest.connectKind === "SHOPPING" && !fs.existsSync(`${outStem}.reference-scene.json`)) {
+      fs.mkdirSync(path.dirname(outStem), { recursive: true });
+      const metadata = JSON.stringify({
       strategyVersion: SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION,
       sceneRecipeSha256: crypto.createHash("sha256").update(job.prompt).digest("hex"),
       slotId: target.request.slotId,
       referenceHashes: references.map(reference => reference.sha256), sourceSnapshotId: manifest.sourceSnapshot?.snapshotId,
-    }));
+      ...(target.referenceContext?.preparationBinding ? { referenceContext: target.referenceContext } : {}),
+      });
+      try { fs.writeFileSync(`${outStem}.reference-scene.json`, metadata, { flag: "wx" }); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || fs.readFileSync(`${outStem}.reference-scene.json`, "utf8") !== metadata) throw error;
+      }
+    }
     return { ...job, outStem,
       ...(manifest.connectKind === "SHOPPING" ? { referenceMode: "product" as const, requiredReferenceHashes: references.map(reference => reference.sha256) } : {}) };
   });
@@ -994,7 +1119,8 @@ export async function resolveCompletedProductImage(options: {
     try {
       const review = await (options.reviewReferenceScene ?? reviewShoppingReferenceScene)({ reference: context!.reference,
         outputPath: candidate.path, productName: options.productName, imageIntent: options.target.imageIntent,
-        sectionTitle: initial.sectionTitle, bodyExcerpt: initial.sectionBody, anchorSha256: context!.anchorSha256 });
+        sectionTitle: initial.sectionTitle, bodyExcerpt: initial.sectionBody, anchorSha256: context!.anchorSha256,
+        supportingReferences: context!.supportingReferences });
       assertCurrent();
       if (review.reviewStatus !== "passed" || review.strategyVersion !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION ||
           review.referenceSha256 !== context!.reference.sha256 || typeof review.referencePath !== "string" || path.resolve(review.referencePath) !== path.resolve(context!.reference.path) ||
@@ -1357,7 +1483,7 @@ async function finishGeneratedImage(options: {
   }
   const referenceScene = await (options.reviewReferenceScene ?? reviewShoppingReferenceScene)({ reference: context.reference, outputPath: options.rawPath,
     productName: options.productName, imageIntent: options.target.imageIntent, sectionTitle: options.target.sectionTitle,
-    bodyExcerpt: options.target.bodyExcerpt, anchorSha256: context.anchorSha256 });
+    bodyExcerpt: options.target.bodyExcerpt, anchorSha256: context.anchorSha256, supportingReferences: context.supportingReferences });
   return finishReviewedShoppingScene({ ...options, review: referenceScene });
 }
 

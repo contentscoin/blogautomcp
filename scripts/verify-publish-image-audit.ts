@@ -435,6 +435,8 @@ async function main() {
       review: async call => {
         assert.ok(call.userPrompt.includes("이 사진이 소음 감소 효과를 증명합니다."));
         return JSON.stringify({ reviews: [fixtureRow(call, { accepted: true, photoClaimMatches: false,
+          photoClaimObjection: { origin: "section-body", sourceIndex: 0, quote: slotsFor(call)[0].sectionBody[0],
+            scope: "performance", conflict: "The exterior photograph cannot establish noise-reduction performance." },
           reason: "A static seller exterior photo cannot prove noise reduction" })] });
       } });
     assert.equal(unsupportedPhotoProof.ok, false);

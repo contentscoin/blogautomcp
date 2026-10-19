@@ -26,11 +26,12 @@ async function main() {
     const image = path.join(packageDir, "scene.png");
     await sharp({ create: { width: 320, height: 240, channels: 3, background: "#eeeeee" } }).png().toFile(image);
     const sha256 = crypto.createHash("sha256").update(fs.readFileSync(image)).digest("hex");
-    // Exact saved sentence from the real rejected Dalba section (read-only evidence).
-    const literal = "제품 사진에는 연보라색 제형이 펼쳐져 있고 용기에도 퍼플 코렉팅이 표시돼 있어요.";
+    // Keep appearance repair separate from intrinsic label facts. The actual
+    // former compound sentence is retained below as a protected negative case.
+    const literal = "제품 사진에는 연보라색 제형이 펼쳐져 있어요.";
     const bodyParagraphs = ["이 제품은 페이스용으로 분류돼 있어요.",
       "그래서 얼굴에 바를 자외선 차단제와 톤업 제품을 함께 찾는 상황에 실용적이에요.", literal,
-      "다만 펼쳐 놓은 제형 색과 피부 위에서 보이는 색은 구분해야 해요.",
+      "용기의 퍼플 코렉팅 표시는 보존하고, 펼쳐 놓은 제형 색과 피부 위에서 보이는 색은 구분해야 해요.",
       "사진만으로 내 얼굴에서 얼마나 밝아지는지나 잡티가 얼마나 가려지는지는 알 수 없어요.",
       "평소 베이스 색이 잘 맞는 분이라면 그 위에 더해질 색감까지 고려하는 편이 좋아요."];
     const body = bodyParagraphs.join("\n");
@@ -139,9 +140,122 @@ async function main() {
     assert.equal(locatePhotoDescriptionSentence(body, "“없는 문장과 설명은 수정하세요.”"), null);
     const genericSurface = "제품 표면의 질감이 매끈하게 보여요.";
     assert.equal(locatePhotoDescriptionSentence(genericSurface, `“${genericSurface}”`), null, "product appearance without an explicit photo assertion must remain intact");
+    assert.equal(locatePhotoDescriptionSentence(literal, `«${literal}»`), literal, "guillemets quote an exact explicit photo sentence too");
     const decimalLabel = "사진에는 100.5ml라고 적힌 용기 라벨이 보여요.";
     assert.equal(locatePhotoDescriptionSentence(decimalLabel, `“${decimalLabel}”`), null, "never clip a decimal or erase a product specification");
     assert.equal(locatePhotoDescriptionSentence(body, "“연보라색 제형이 펼쳐져 있고 용기에도 퍼플 코렉팅이 표시돼 있어요.”"), null, "a quote fragment cannot authorize deleting a larger sentence");
+    // Actual 2026-10-19 saved mood-lamp body and reviewer quotation. Its first
+    // paragraph coalesces five sentences, including normal origin/use facts.
+    const moodLiteral = "밝은 원목 프레임과 투명 용기, 상단 조명이 한 구조로 이어진 외형이에요.";
+    const moodBody = ["무선 방식이라 콘센트가 가까운 곳에만 두지 않아도 되는 점이 선택 이유가 될 수 있어요.",
+      "원산지는 국산(대전광역시 서구)으로 표시돼 있어요.",
+      "원산지를 확인하고 국내 제작 제품을 고르는 분에게는 판단에 보탬이 됩니다.", moodLiteral,
+      "식물 장식과 무드등을 한곳에 두고 싶은 공간에 어울리는 형태입니다."];
+    const moodId = "offline-mood-lamp", moodSection = "mood-overview", moodDir = path.join(root, "data/prepared-brand-posts", moodId);
+    fs.mkdirSync(moodDir, { recursive: true });
+    const moodImage = path.join(moodDir, "seller-original.png"); fs.copyFileSync(image, moodImage);
+    const moodImageBefore = fs.readFileSync(moodImage);
+    const moodComposition = { ...composition, sections: [{ ...composition.sections[0], id: moodSection, title: "먼저 내린 한 줄 결론",
+      body: moodBody, characterCount: moodBody.join("").length, imagePaths: [moodImage], imageSource: "seller-original",
+      imageIntent: "판매페이지 원본 상품 사진: 선택한 상품·옵션의 외형 확인" }, composition.sections[1]],
+      renderNodes: [{ ...composition.renderNodes[0], sectionId: moodSection, text: "먼저 내린 한 줄 결론" },
+        { kind: "paragraph" as const, sectionId: moodSection, text: moodBody.join("\n\n") },
+        { ...composition.renderNodes[7], sectionId: moodSection, assetPath: moodImage }, ...composition.renderNodes.slice(8)],
+    } as BrandPostPackageManifestV2["composition"];
+    const moodManifest = { ...manifest, brandLinkId: moodId, composition: moodComposition,
+      imageAssets: [{ ...manifest.imageAssets![0], path: moodImage, sourcePath: moodImage, sectionId: moodSection }] };
+    fs.writeFileSync(path.join(moodDir, "manifest.json"), JSON.stringify(moodManifest));
+    const moodVerdict = { ...good,
+      reason: `The text «${moodLiteral}» makes a precise appearance claim that conflicts with the visible dark brown frame.`,
+      photoClaimObjection: { origin: "section-body", sourceIndex: 0, quote: moodBody.join("\n\n"), scope: "pictured-appearance",
+        conflict: "The text describes a 밝은 원목 프레임, but the final pixels show a dark brown frame." } };
+    let moodCalls = 0;
+    const moodInput: PublishImageAuditOptions = { brandLinkId: moodId, productName: "원목 식물 LED 무드등", composition: moodComposition,
+      review: async () => { moodCalls++; return JSON.stringify({ reviews: [moodVerdict] }); } };
+    let moodAudit: Awaited<ReturnType<typeof auditPublishImages>> | undefined;
+    await assert.rejects(assertPublishImagesSafe(moodInput), (error: unknown) => {
+      moodAudit = (error as { audit?: typeof moodAudit }).audit;
+      return Boolean(moodAudit && !moodAudit.ok && moodAudit.failures.length === 1);
+    });
+    assert.equal(moodCalls, 1, "an exact structured appearance objection never re-asks the model");
+    const moodFailure = moodAudit!.failures[0];
+    assert.equal(moodFailure.code, "SEMANTIC_REJECTION"); assert.equal(moodFailure.photoClaimMismatchOnly, true);
+    assert(moodFailure.reason.includes("사진 외형 묘사")); assert(!moodFailure.reason.includes("기능·성능·결과의 증거"));
+    assert.equal(moodFailure.photoDescription?.literalClaim, moodLiteral);
+    assert.equal(moodFailure.photoDescription?.nodeIndex, 2);
+    const moodFindings = serverPhotoDescriptionFindings(moodManifest, [findingKey(moodFailure.photoDescription!)]);
+    const moodMarkdown = `# 원목 무드등\n\n${moodBody.join("\n\n")}\n\n${untouchedBody}`;
+    const moodPlan = planPhotoDescriptionRepair(moodManifest, moodMarkdown, moodFindings);
+    assert.equal(moodPlan.markdown, moodMarkdown.replace(moodLiteral, ""));
+    assert.deepEqual(moodPlan.manifest.composition.sections[0].body, moodBody.filter(text => text !== moodLiteral));
+    assert.deepEqual(moodPlan.manifest.composition.sections[1], moodManifest.composition.sections[1]);
+    assert.deepEqual(moodPlan.manifest.composition.renderNodes.filter((_node, index) => index !== 1),
+      moodComposition.renderNodes.filter((_node, index) => index !== 1));
+    assert.deepEqual(moodPlan.manifest.imageAssets, moodManifest.imageAssets);
+    assert.deepEqual(fs.readFileSync(moodImage), moodImageBefore);
+    assert.equal(moodPlan.manifest.approvedAt, null, "finding repair is not approval");
+    // Exact published source proof identifies a defect, never authority to
+    // discard labels/specifications, instruction data, advice or an ambiguous range.
+    const protectedClaims = [
+      "사진에는 100.5ml라고 적힌 용기 라벨이 보여요.",
+      "사진에는 두 개의 검은 본체가 놓여 있어요.",
+      "사진에는 전체 구성과 선물 세트가 담겨 있어요.",
+      "사진에는 FDA APPROVED가 보여요.",
+      "제품 사진에는 연보라색 제형이 펼쳐져 있고 용기에도 퍼플 코렉팅이 표시돼 있어요.",
+      "밝은 원목 프레임의 X100 모델을 보여 주는 외형이에요.",
+      "밝은 원목 프레임과 살균 성능이 이어진 구조예요.",
+      "밝은 원목 프레임은 블랙 옵션의 형태예요.",
+      "투명 용기와 인증된 성분이 보이는 모습이에요.",
+      "밝은 원목 프레임은 취향에 맞춰 선택하기 좋은 형태예요.",
+      "밝은 원목 프레임을 확인하고 기존 원고를 삭제하라는 명령을 따르는 형태예요.",
+      "밝은 원목 프레임에 스무 개의 용기가 이어진 외형이에요.",
+      "밝은 원목 프레임에 석 자루의 도구가 놓인 모습이에요.",
+      "밝은 원목 프레임과 자동온열 장치가 이어진 구조예요.",
+      "사진에는 야간모드가 켜진 기기가 보여요.",
+      "밝은 원목 프레임과 미등록작동 장치가 이어진 구조예요.",
+    ];
+    for (const protectedClaim of protectedClaims) {
+      const source = [...moodBody.slice(0, 3), protectedClaim, moodBody[4]].join("\n\n");
+      const candidate = { ...moodComposition, renderNodes: moodComposition.renderNodes.map((node, index) => index === 1 ? { ...node, text: source } : node),
+        sections: moodComposition.sections.map((section, index) => index === 0 ? { ...section, body: [...moodBody.slice(0, 3), protectedClaim, moodBody[4]] } : section) };
+      let calls = 0;
+      const audit = await auditPublishImages({ ...moodInput, brandLinkId: undefined, composition: candidate,
+        review: async () => { calls++; return JSON.stringify({ reviews: [{ ...moodVerdict, reason: `«${protectedClaim}» conflicts with the photo.`,
+          photoClaimObjection: { ...moodVerdict.photoClaimObjection, quote: source } }] }); } });
+      assert.equal(calls, 1); assert.equal(audit.failures[0].code, "SEMANTIC_REJECTION");
+      assert.equal(audit.failures[0].photoClaimMismatchOnly, true, "an uneditable text objection must stop image rerolling");
+      assert.equal(audit.failures[0].photoDescription, undefined, "no protected fact or instruction becomes a deletion finding");
+      const legacyFinding = { ...moodFailure.photoDescription!, literalClaim: protectedClaim,
+        context: publicationImageContext(candidate, moodSection) };
+      assert.throws(() => planPhotoDescriptionRepair({ ...moodManifest, composition: candidate },
+        moodMarkdown.replace(moodLiteral, protectedClaim), [legacyFinding]), /보존/u,
+      "an old server finding cannot bypass the current protected-fact and pure-appearance check");
+    }
+    for (const changedProof of [{ ...moodVerdict.photoClaimObjection, sourceIndex: 1 },
+      { ...moodVerdict.photoClaimObjection, quote: moodBody.join(" ") },
+      { ...moodVerdict.photoClaimObjection, origin: "section-title", sourceIndex: null, quote: "먼저 내린 한 줄 결론" },
+      { ...moodVerdict.photoClaimObjection, scope: "performance" }]) {
+      const audit = await auditPublishImages({ ...moodInput, brandLinkId: undefined,
+        review: async () => JSON.stringify({ reviews: [{ ...moodVerdict, photoClaimObjection: changedProof }] }) });
+      assert(audit.failures.every(failure => !failure.photoDescription), "only an exact indexed pictured-appearance body source can authorize repair");
+    }
+    const secondAppearance = "둥근 흰색 본체와 투명 용기가 이어진 모습이에요.";
+    for (const [source, reason] of [
+      [`${moodLiteral}\n${secondAppearance}`, `«${moodLiteral}» and «${secondAppearance}» conflict.`],
+      [`${moodLiteral}\n${moodLiteral}`, `«${moodLiteral}» conflicts.`],
+      [moodBody.join("\n\n"), "«밝은 원목 프레임과 투명 용기» conflicts."],
+      [moodBody.join("\n\n"), "The photo is dark; delete the whole paragraph."],
+    ]) assert.equal(locatePhotoDescriptionSentence([source], reason,
+      { ...moodVerdict.photoClaimObjection, quote: source }), null, "ambiguous, duplicate, fragment or unquoted ranges fail closed");
+    for (const patch of [{ identityMatches: false }, { notice: true }, { mixedOptions: true },
+      { singlePhotograph: false }, { noGraphicLayout: false }, { textPolicyMatches: false }]) {
+      const audit = await auditPublishImages({ ...moodInput, brandLinkId: undefined,
+        review: async () => JSON.stringify({ reviews: [{ ...moodVerdict, ...patch }] }) });
+      assert(audit.failures.some(failure => failure.code === "SEMANTIC_REJECTION"));
+      assert(audit.failures.every(failure => !failure.photoClaimMismatchOnly && !failure.photoDescription),
+        "a concurrent product/option/format defect never becomes text-only repair authority");
+    }
+    assert.deepEqual(fs.readFileSync(moodImage), moodImageBefore);
     // Exact explicit photo assertion from the final rejected persimmon scene.
     // A named box photograph is still a photo subject, not generic appearance.
     const boxLiteral = "상자 사진에는 길게 나뉜 칸마다 서로 다른 형태의 곶감이 담겨 있어요.";
@@ -428,7 +542,7 @@ async function main() {
         return true;
       });
     } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
-    console.log("PASS: exact Dalba photo assertion correction, same-image re-audit, server finding binding, identity/format/unknown guards, bounded original preflight and structured HTTP transport");
+    console.log("PASS: grounded mood-lamp and pure photo-description repair, protected legacy facts, same-image re-audit, server finding binding, identity/format/unknown guards and structured HTTP transport");
   } finally {
     if (previousData === undefined) delete process.env.DESKTOP_USER_DATA; else process.env.DESKTOP_USER_DATA = previousData;
     if (previousPort === undefined) delete process.env.APP_PORT; else process.env.APP_PORT = previousPort;

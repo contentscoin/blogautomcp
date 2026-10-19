@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { publicationImageContext, rejectedPublicationImageHashes } from "../../scripts/lib/publish-image-rejections";
-import { findingKey, readPhotoDescriptionFindings, type PhotoDescriptionFinding } from "../../scripts/lib/photo-description-finding";
+import { findingKey, isRepairablePhotoDescriptionLiteral, readPhotoDescriptionFindings, type PhotoDescriptionFinding } from "../../scripts/lib/photo-description-finding";
 import type { BrandPostPackageManifestV2 } from "./brand-post-package";
 import { refreshPostDocumentQuality } from "./post-composition-contract";
 
@@ -20,7 +20,7 @@ export function planPhotoDescriptionRepair(manifest: BrandPostPackageManifestV2,
   for (const finding of findings) {
     const node = manifest.composition.renderNodes[finding.nodeIndex];
     const section = composition.sections.find(item => item.id === finding.sectionId);
-    if (finding.category !== "photo-description-mismatch" || !section || node?.kind !== "image" ||
+    if (finding.category !== "photo-description-mismatch" || !isRepairablePhotoDescriptionLiteral(finding.literalClaim) || !section || node?.kind !== "image" ||
         node.sectionId !== finding.sectionId || path.resolve(node.assetPath) !== path.resolve(finding.assetPath) ||
         publicationImageContext(composition, finding.sectionId) !== finding.context ||
         manifest.imageAssets?.filter(asset => path.resolve(asset.path) === path.resolve(finding.assetPath) && asset.sha256 === finding.sha256).length !== 1 ||

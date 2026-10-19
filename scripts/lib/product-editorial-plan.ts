@@ -149,7 +149,7 @@ export function productSignalAnchor(signal: string): string {
   return signal.replace(/^[^:：\n]{1,24}[:：]\s*/u, "").replace(/\s+/gu, " ").trim();
 }
 
-const SIGNAL_STOP_TOKEN = /(?:상품|제품|기능|표기|판매페이지|카테고리|방식|구조|기준)/u;
+const SIGNAL_STOP_TOKEN = /^(?:상품|제품|기능|표기|판매페이지|카테고리|방식|구조|기준)$/u;
 const withoutSpaces = (value: string) => value.replace(/\s+/gu, "");
 
 /**

@@ -97,6 +97,8 @@ export interface PublishImageAuditFailure {
   rejectionScope?: PublicationImageRejectionScope;
   /** Exact server-audited body assertion; absent for image/identity defects. */
   photoDescription?: PhotoDescriptionFinding;
+  /** Valid claim-only objection; never permission to edit ungrounded facts. */
+  photoClaimMismatchOnly?: true;
 }
 export interface PublishImageAuditResult {
   ok: boolean;
@@ -659,7 +661,12 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
             (row.mixedOptions && !comparisonAllowed) || (row.reviewClass === "product-photo" && !candidate.allowProductPhoto)) {
           const reasons = [
             ...(row.identityMatches !== true ? ["선택 상품과 시각적 일치 확인 실패"] : []),
-            ...(row.photoClaimMatches !== true ? ["본문이 사진을 기능·성능·결과의 증거로 사용하지만 사진에서 확인할 수 없음"] : []),
+            ...(row.photoClaimMatches !== true ? [({
+              "pictured-appearance": "본문의 사진 외형 묘사와 실제 사진이 일치하지 않음",
+              quantity: "본문의 사진 수량 묘사와 실제 사진이 일치하지 않음",
+              "complete-set": "본문의 사진 전체 구성 묘사와 실제 사진이 일치하지 않음",
+            } as Record<string, string>)[String((row.photoClaimObjection as Record<string, unknown> | undefined)?.scope)] ||
+              "본문이 사진을 기능·성능·결과의 증거로 사용하지만 사진에서 확인할 수 없음"] : []),
             ...(row.notice !== false ? ["상품 근거가 아닌 공지·안내 이미지"] : []),
             ...(row.singlePhotograph !== true ? ["단일 자연스러운 사진이 아님"] : []),
             ...(row.noGraphicLayout !== true ? ["설명판·프레임·인셋 등 그래픽 배치 포함"] : []),
@@ -677,6 +684,10 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           fail(candidate.nodeIndex, candidate.assetPath, "SEMANTIC_REJECTION",
             `${reasons.join(" / ")}. 문단: ${candidate.sectionTitle.slice(0, 120)}. 픽셀 관찰: ${row.reason}`,
             rejectionScope);
+          if (!objectionIssue && candidate.sectionId && candidate.role !== "thumbnail" && rejectionScope === "section" &&
+              row.photoClaimMatches === false && row.identityMatches === true && row.notice === false && formatMatches &&
+              (!row.mixedOptions || comparisonAllowed) && (row.reviewClass !== "product-photo" || candidate.allowProductPhoto))
+            result.failures[result.failures.length - 1].photoClaimMismatchOnly = true;
           const finding = !objectionIssue && photoDescriptionFinding({ ...candidate, composition: options.composition, verdict: row });
           if (finding) result.failures[result.failures.length - 1].photoDescription = finding;
         }

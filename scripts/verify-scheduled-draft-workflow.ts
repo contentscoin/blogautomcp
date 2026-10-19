@@ -52,6 +52,41 @@ async function main() {
   });
   const material = (id: string) => ({ productId: id, revision, title: id, connectKind: "SHOPPING" as const, ready: true, blockers: [] as string[], score: 100, imageCount: 3, createdAt: "", approvedAt: "approved" });
   try {
+    for (const count of [1, 2, 13]) {
+      const textOnlyActions: string[] = [];
+      await assert.rejects(runMaterialPreparation(`text-claim-only-${count}`, {
+        pause: async () => {}, call: async (_url, method, body) => {
+          const action = (body as { action?: string } | undefined)?.action || method;
+          textOnlyActions.push(action);
+          if (action === "approve") throw Object.assign(new Error("a verified literal claim conflicts with the existing photo"), {
+            code: "PUBLISH_IMAGE_AUDIT_FAILED", errors: ["SEMANTIC_REJECTION: pictured quantity differs"],
+            imageAuditFailures: Array.from({ length: count }, (_, index) => ({ code: "SEMANTIC_REJECTION",
+              sectionId: `shopping-section-${String(index).padStart(8, "0")}`, rejectionScope: "section", photoClaimMismatchOnly: true })),
+          });
+          return { success: true, data: { connectKind: "SHOPPING", status: "READY", approvedAt: null,
+            imageGeneration: { status: "complete" }, imageSlots: [], contentQuality: { signals: [] } } };
+        },
+      }), error => (error as { code?: string }).code === "PHOTO_DESCRIPTION_REPAIR_REQUIRED");
+      assert.equal(textOnlyActions.filter(action => action === "approve").length, 1);
+      assert.ok(!textOnlyActions.some(action => ["generate_missing", "repair_rejected", "regenerate", "replan_sources", "revise", "prepare_context"].includes(action)),
+        "a known text-only conflict with no safe exact edit preserves photos and never buys a replacement");
+    }
+    const sceneId = "shopping-section-a1234567";
+    await assert.rejects(runMaterialPreparation("retained-scene-cause", { pause: async () => {}, call: async (_url, method, body) => {
+      const action = (body as { action?: string } | undefined)?.action || method;
+      if (action === "generate_missing") return { success: true, code: "REFERENCE_SCENE_FIDELITY_FAILED",
+        errors: [`${sceneId}: REFERENCE_SCENE_FIDELITY_FAILED: wrong intrinsic logo`] };
+      if (action === "bind_sources") return { success: true, code: "IMAGE_GENERATION_REQUIRED",
+        errors: [`${sceneId}: IMAGE_GENERATION_REQUIRED: staged photo needed`] };
+      if (action === "replan_sources") return { success: true, code: "REPLAN_NATURAL_PHOTOS_REQUIRED",
+        causeCode: "REFERENCE_SCENE_FIDELITY_FAILED", remainingMissing: 1, recovery: { changed: false },
+        errors: [`${sceneId}: REFERENCE_SCENE_FIDELITY_FAILED: wrong intrinsic logo`, "REPLAN_NATURAL_PHOTOS_REQUIRED: accepted scene still required"] };
+      return { success: true, data: { connectKind: "SHOPPING", status: "READY", approvedAt: null,
+        composition: { sections: [{ id: sceneId, imageSource: "staged-ai" }] },
+        imageGeneration: { status: "complete" }, imageSlots: [{ sectionId: sceneId, missing: 1, generationMissing: 1 }],
+        contentQuality: { signals: [] } } };
+    } }), error => (error as { code?: string; causeCode?: string }).code === "REPLAN_NATURAL_PHOTOS_REQUIRED" &&
+      (error as { causeCode?: string }).causeCode === "REFERENCE_SCENE_FIDELITY_FAILED");
     const events: string[] = [];
     const call: Call = async (url, method) => {
       events.push(`${method} ${url}`);

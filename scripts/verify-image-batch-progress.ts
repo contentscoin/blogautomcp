@@ -28,6 +28,8 @@ import { buildProductThumbnailCopy } from "./lib/product-thumbnail";
 import { runMaterialPreparation, type Call } from "./lib/scheduled-draft-workflow";
 import { imageRecoverySignature, runRecordedImageRecovery } from "./lib/material-image-recovery";
 import { getBrandPostPackageDir } from "../src/lib/brand-post-package";
+import { readProductSnapshot } from "../src/lib/draft-context-snapshot";
+import { isAllowedProductPhotoUrl } from "./lib/product-photo-source";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-image-batch-"));
 const rawPath = path.join(root, "raw.png");
@@ -63,11 +65,13 @@ class FakeChild extends EventEmitter {
 }
 
 const referenceSceneModule = load<typeof import("./lib/shopping-reference-scene")>("scripts/lib/shopping-reference-scene.ts", {
-  "node:crypto": crypto, "node:fs": fs,
+  "node:crypto": crypto, "node:fs": fs, "node:path": path, sharp,
   "./codex-draft-provider": { runCodexDraft: () => { throw new Error("live review is forbidden in this offline harness"); } },
   "./product-photo-review": { selectVerifiedProductPhotos: () => { throw new Error("live review is forbidden in this offline harness"); } },
   "./shopping-photo-harness": shoppingPhotoHarness,
   "../../src/lib/brand-post-image-evidence": imageEvidence,
+  "../../src/lib/draft-context-snapshot": { readProductSnapshot },
+  "./product-photo-source": { isAllowedProductPhotoUrl },
 });
 const hashFile = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 type Job = { id: string; outStem: string; prompt: string; referenceMode?: string; referenceImagePaths?: string[]; requiredReferenceHashes?: string[] };
@@ -173,6 +177,8 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       "../../scripts/lib/shopping-reference-scene": {
         SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION: imageEvidence.REFERENCE_SCENE_STRATEGY_VERSION,
         buildShoppingReferenceScenePrompt: referenceSceneModule.buildShoppingReferenceScenePrompt,
+        readShoppingSceneSupportingCandidates: referenceSceneModule.readShoppingSceneSupportingCandidates,
+        selectShoppingSceneSupportingReferences: referenceSceneModule.selectShoppingSceneSupportingReferences,
         selectShoppingSceneReference: async (options: { paths: string[] }) => {
           const file = options.paths.find(candidate => fs.existsSync(candidate));
           if (!file || settings.referenceRejected) throw new Error("PRODUCT_REFERENCE_REQUIRED: needs_reference");

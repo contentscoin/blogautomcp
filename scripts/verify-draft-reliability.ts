@@ -273,6 +273,33 @@ async function main() {
   assert.ok(productSignalCoveredBySentence(golf[1]!, "내장 배터리라 건전지가 필요 없어요."), "spacing ignored");
   assert.ok(productSignalCoveredBySentence(golf[4]!, "오차 범위는 ±3m예요."));
   assert.ok(!productSignalCoveredBySentence(golf[3]!, "무게가 30g대라 가벼워요."), "a different number is not the fact");
+  // A stopword inside a substantive compound is not a standalone metadata word.
+  for (const sentence of ["디지털방식으로 작동하고", "방식이 디지털방식이며", "디지털방식으로 작동하며"])
+    assert.ok(productSignalCoveredBySentence("방식: 디지털방식", sentence), "the actual digital-method source must remain coverable");
+  assert.ok(productSignalCoveredBySentence("방식: 반사방식", "반사방식을 확인하세요."));
+  assert.ok(productSignalCoveredBySentence("구조: 렌즈구조", "렌즈구조를 살펴보세요."));
+  assert.ok(!productSignalCoveredBySentence("방식: 디지털방식", "광학방식으로 작동합니다."), "a different mode must not cover the selected fact");
+  for (const token of ["상품", "제품", "기능", "표기", "판매페이지", "카테고리", "방식", "구조", "기준"])
+    assert.ok(!productSignalCoveredBySentence(`항목: ${token}`, `${token}을 살펴보세요.`), "standalone metadata remains insufficient");
+  assert.ok(productSignalCoveredBySentence("강약조절: 2단계", "강약을 2단계로 조절해요."));
+  assert.ok(!productSignalCoveredBySentence("강약조절: 2단계", "강약을 3단계로 조절해요."), "a wrong quantity must not cover the source");
+  const digitalSource = { productName: "휴대용 디지털 현미경", sourceDescription: "",
+    sourceFeatures: ["방식: 디지털방식", "기능: 동영상촬영, 사진촬영, 모니터연결, 휴대용, LED램프, 충전식"] };
+  const digitalRequirement = productEvidenceRequirement(digitalSource);
+  const digitalSections = [
+    "작동 방식\n\n디지털방식으로 작동하고 모니터연결 기능이 있어 화면으로 관찰하려는 분에게 맞는 구조예요.",
+    "촬영을 남길 때\n\n동영상촬영과 사진촬영을 지원하므로 관찰 내용을 기록하려는 분에게 선택 이유가 있어요.",
+    "이동과 보관\n\n휴대형 설계여서 다른 책상으로 옮겨 쓰려는 사용자에게 잘 맞아요.",
+  ];
+  const digitalSubstance = assessProductReviewSubstance({ ...digitalSource, sections: digitalSections });
+  assert.equal(digitalRequirement.requiredSignalCount, 3, "the original three-fact requirement is unchanged");
+  assert.equal(digitalSubstance.coveredSignals.length, 3);
+  assert.ok(!digitalSubstance.missingSignals.includes("방식: 디지털방식"), "the actual grounded method is not a perpetually unrepairable missing signal");
+  const opticalMismatch = assessProductReviewSubstance({ ...digitalSource,
+    sections: digitalSections.map(text => text.replace("디지털방식으로", "광학방식으로")) });
+  assert.equal(opticalMismatch.requiredSignalCount, digitalSubstance.requiredSignalCount);
+  assert.equal(opticalMismatch.coveredSignals.length, 2);
+  assert.ok(opticalMismatch.missingSignals.includes("방식: 디지털방식"), "a conflicting method cannot satisfy the same unchanged requirement");
   const golfReview = assessProductReviewSubstance({ productName: "보이스캐디 T13 PRO", sourceDescription: "시계형 골프거리측정기", sourceFeatures: golf, sections: [
     "가벼운 착용감\n\n무게가 30.1g이에요. 덕분에 18홀 내내 손목 부담이 적어 편해요.\n내장 배터리 방식이에요. 그래서 라운드 전 충전만 해 두면 편해요.",
     "거리 정확도\n\n오차 범위는 ±3m예요. 그래서 그린 공략 거리 판단에 실용적이에요.",

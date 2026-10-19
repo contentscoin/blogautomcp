@@ -37,13 +37,14 @@ async function main() {
   const previousData = process.env.DESKTOP_USER_DATA;
   process.env.DESKTOP_USER_DATA = root;
   try {
-    for (const fault of ["none", "before-activate", "atomic-activate", "lost-owner", "changed-manifest", "changed-md", "digest-mismatch", "quality-rejected", "outside-section"] as const) {
+    for (const fault of ["none", "implicit-appearance", "before-activate", "atomic-activate", "lost-owner", "changed-manifest", "changed-md", "digest-mismatch", "quality-rejected", "outside-section"] as const) {
       const id = `persist-${fault}`, directory = getBrandPostPackageDir(id);
       fs.mkdirSync(directory, { recursive: true });
       const image = path.join(directory, "original.png");
       fs.writeFileSync(image, testPngFixture("immutable existing product photo"));
       const imageBytes = fs.readFileSync(image);
-      const literal = "사진에는 초록색 천 위에 상품 상자가 놓여 있어요.";
+      const literal = fault === "implicit-appearance" ? "밝은 원목 프레임과 투명 용기, 상단 조명이 한 구조로 이어진 외형이에요."
+        : "사진에는 초록색 천 위에 상품 상자가 놓여 있어요.";
       const paragraphs = ["선물을 고를 때는 구매할 옵션의 표시와 판매자가 안내한 구성 정보를 먼저 확인하세요.", literal,
         "포장 방식은 받는 사람의 취향과 전달하는 상황에 맞춰 살펴볼 부분이에요.",
         "보관 방법과 배송 조건도 주문 전에 판매 페이지에서 확인하면 선택에 도움이 됩니다."];
@@ -69,10 +70,12 @@ async function main() {
           imageAssets: [{ path: image, sourcePath: image, sha256: sha(imageBytes), role: "body", sectionId: "photo-section" }],
           contentQuality: quality, pipelineNotes: ["기존 검수 이력 보존"] } as unknown as BrandPostPackageManifestV2) });
       const finding = photoDescriptionFinding({ composition, nodeIndex: 0, sectionId: "photo-section", assetPath: image,
-        sha256: sha(imageBytes), sectionBody: paragraphs, allowProductPhoto: true, role: "body",
-        verdict: { reason: `본문의 “${literal}”와 달리 흰색 바닥의 상품 외형만 보입니다.`, photoClaimMatches: false,
+        sha256: sha(imageBytes), sectionBody: [paragraphs.join("\n\n")], allowProductPhoto: true, role: "body",
+        verdict: { reason: `본문의 «${literal}»와 달리 실제 사진의 외형은 어둡습니다.`, photoClaimMatches: false,
           identityMatches: true, notice: false, mixedOptions: false, singlePhotograph: true, noGraphicLayout: true,
-          textPolicyMatches: true, reviewClass: "product-photo" } });
+          textPolicyMatches: true, reviewClass: "product-photo",
+          photoClaimObjection: { origin: "section-body", sourceIndex: 0, quote: paragraphs.join("\n\n"),
+            scope: "pictured-appearance", conflict: "The quoted appearance sentence does not match the current photo." } } });
       assert.ok(finding);
       savePhotoDescriptionFindings(id, [finding]);
       fs.writeFileSync(path.join(directory, "publish-image-rejections.json"), JSON.stringify([{ sha256: sha(imageBytes), sectionId: "photo-section",
@@ -110,7 +113,7 @@ async function main() {
       assert.deepEqual(fs.readFileSync(initial.markdownPath), expectedOldMarkdown, "the route cannot overwrite a prior physical markdown revision");
       assert.deepEqual(fs.readFileSync(revisionManifestPath), revisionBefore, "the old revision manifest is immutable");
       assert.deepEqual(fs.readFileSync(image), imageBytes); assert.equal(status, "READY", "release the row claim after success or failure");
-      if (fault === "none") {
+      if (fault === "none" || fault === "implicit-appearance") {
         assert.equal(response.success, true); assert.equal(response.status, 200); assert.equal(transactions, 1);
         const current = JSON.parse(fs.readFileSync(committed.manifestPath, "utf8"));
         assert.notEqual(current.markdownPath, initial.markdownPath);
@@ -129,7 +132,7 @@ async function main() {
       }
       console.log(`PASS actual photo-description PATCH immutable revision: ${fault}`);
     }
-    console.log("Verified 9 actual-route immutable persistence checks; no live data, model, approval or publication.");
+    console.log("Verified 10 actual-route immutable persistence checks; no live data, model, approval or publication.");
   } finally {
     if (previousData === undefined) delete process.env.DESKTOP_USER_DATA; else process.env.DESKTOP_USER_DATA = previousData;
     const resolved = path.resolve(root);

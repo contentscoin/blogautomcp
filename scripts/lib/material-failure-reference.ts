@@ -60,7 +60,7 @@ const LEGACY_CAUSES = new Set([
   "EDITOR_DISCLOSURE_MISMATCH", "PUBLISH_IMAGE_AUDIT_FAILED", "SHOPPING_CARD_INSERT_FAILED",
   "IMAGE_SOURCE_BINDING_REQUIRED", "PRODUCT_SOURCE_REQUIRED", "PRODUCT_REFERENCE_REQUIRED",
   "SOURCE_EVIDENCE_REQUIRED", "REFERENCE_SCENE_FIDELITY_FAILED", "IMAGE_OUTPUT_AMBIGUOUS",
-  "IMAGE_RESUME_REQUIRED", "PHOTO_DESCRIPTION_REPAIR_REQUIRED", "CONTENT_BLOCKED",
+  "IMAGE_RESUME_REQUIRED", "PHOTO_DESCRIPTION_REPAIR_REQUIRED", "REPLAN_NATURAL_PHOTOS_REQUIRED", "CONTENT_BLOCKED",
   "QUALITY_REPAIR_EXHAUSTED", "CODEX_LOGIN_REQUIRED", "CHATGPT_BROWSER_AUTH_REQUIRED",
 ]);
 export function legacyMaterialFailureCause(message: unknown): string | undefined {
@@ -121,6 +121,7 @@ const GUIDANCE: Record<string, string> = {
   REFERENCE_SCENE_FIDELITY_FAILED: "실패 슬롯의 제품 형상·옵션·라벨을 원본에 고정하고 장면만 자연스럽게 연출합니다.",
   PUBLISH_IMAGE_AUDIT_FAILED: "사진 묘사는 실제 채택한 사진에 맞추고 기능·성능 증거는 판매자 근거와 구분합니다.",
   PHOTO_DESCRIPTION_REPAIR_REQUIRED: "현재 사진과 다른 묘사만 검토하고 판매자 근거와 정상 사진은 보존합니다.",
+  REPLAN_NATURAL_PHOTOS_REQUIRED: "원본 1장·자연 연출 3장·썸네일 기준을 유지하며 실패한 생성 사진의 형상·로고·옵션 참조를 보완합니다. 정상 사진을 다시 만들거나 원본을 더 넣어 연출 사진을 대신하지 않습니다.",
   NOT_READY: "승인 당시 상품 상태와 미진입 증거를 확인하고 정상 원고·사진을 재생성하지 않습니다. 실행 중·게시됨·결과 불명 상태는 재시도하지 않습니다.",
   CONTENT_BLOCKED: "현재 품질 검사의 실패 항목만 보강하고 통과한 사실과 문단 역할은 보존합니다.",
   QUALITY_REPAIR_EXHAUSTED: "같은 보강 지시를 반복하지 않고 현재 근거와 실패 항목의 연결을 다시 확인합니다.",

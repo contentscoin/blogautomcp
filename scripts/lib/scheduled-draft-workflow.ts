@@ -16,7 +16,7 @@ export interface Result {
   success: boolean; code?: string; causeCode?: string; error?: string; errors?: string[]; message?: string;
   approvalConflict?: { gate: "status" | "compare-and-set"; claimAcquired: false; observedStatus: string; expectedStatus?: string; observedUpdatedAt?: string };
   recovery?: { changed: boolean }; remainingMissing?: number;
-  imageAuditFailures?: { code: string; sectionId?: string | null; rejectionScope?: string; findingKey?: string; photoDescription?: PhotoDescriptionFinding }[];
+  imageAuditFailures?: { code: string; sectionId?: string | null; rejectionScope?: string; findingKey?: string; photoDescription?: PhotoDescriptionFinding; photoClaimMismatchOnly?: true }[];
   data?: {
     status?: string; postUrl?: string; scheduledPublishAt?: string; errorMessage?: string;
     connectKind?: string;
@@ -460,7 +460,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     new Error(`원고 보강 후에도 품질 문제가 남았습니다. ${plan.reason}`),
     { code: "QUALITY_REPAIR_EXHAUSTED" },
   );
-  let latestImageRepair: Pick<Result, "code" | "error" | "errors" | "message"> | null = null;
+  let latestImageRepair: Pick<Result, "code" | "causeCode" | "error" | "errors" | "message"> | null = null;
   const unresolvedCompositionError = (reason: string) => {
     const imageFailureCode = latestImageRepair?.code && !["OK", "IMAGE_REPAIR_COMPLETE"].includes(latestImageRepair.code)
       ? latestImageRepair.code
@@ -469,6 +469,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
       (imageFailureCode ? latestImageRepair?.message : undefined) || reason;
     return Object.assign(new Error(message), {
       code: imageFailureCode || "COMPOSITION_REPAIR_REQUIRED",
+      ...(safeFailureCode(latestImageRepair?.causeCode) ? { causeCode: safeFailureCode(latestImageRepair?.causeCode) } : {}),
     });
   };
 
@@ -578,7 +579,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
         try {
           latestImageRepair = await claimedCall(`${base}/draft/images`, "POST", { action, ...(assetKey ? { assetKey } : {}), ...(refreshSourcePhotos ? { refreshSourcePhotos: true } : {}) });
         } catch (error) {
-          const failure = { code: (error as { code?: string }).code, errors: (error as { errors?: string[] }).errors, error: (error as Error).message };
+          const failure = { code: (error as { code?: string }).code, causeCode: safeFailureCode((error as { causeCode?: string }).causeCode), errors: (error as { errors?: string[] }).errors, error: (error as Error).message };
           if (!isRecoverableImageEvidenceResult(failure)) throw error;
           latestImageRepair = failure;
         }
@@ -589,7 +590,8 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
         if (latestImageRepair?.errors?.length && !isRecoverableImageEvidenceResult(latestImageRepair)) {
           const cause = latestImageRepair.errors.flatMap(message => message.match(/\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b/gu) || [])
             .find(code => !isRecoverableImageEvidenceFailure(code));
-          throw Object.assign(new Error(latestImageRepair.errors.join("\n")), { code: cause || latestImageRepair.code || "IMAGE_REPAIR_FAILED", errors: latestImageRepair.errors });
+          throw Object.assign(new Error(latestImageRepair.errors.join("\n")), { code: cause || latestImageRepair.code || "IMAGE_REPAIR_FAILED",
+            ...(safeFailureCode(latestImageRepair.causeCode) ? { causeCode: safeFailureCode(latestImageRepair.causeCode) } : {}), errors: latestImageRepair.errors });
         }
         draft = await deps.call(`${base}/draft`, "GET");
         await waitForImagesIdle();
@@ -661,9 +663,20 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
   const repairAuditedPhotoDescription = async (error: unknown): Promise<boolean> => {
     if (!isDefinitivePublishImageFailure(error)) return false;
     const findings = (error as { imageAuditFailures?: Result["imageAuditFailures"] }).imageAuditFailures;
-    if (!findings || findings.length === 0 || findings.length > 12 || !findings.every(failure =>
+    if (!findings || findings.length === 0) return false;
+    if (findings.length > 12 || !findings.every(failure =>
       failure.code === "SEMANTIC_REJECTION" && failure.rejectionScope === "section" &&
-      failure.photoDescription?.category === "photo-description-mismatch" && /^[a-f0-9]{64}$/u.test(failure.findingKey || ""))) return false;
+      failure.photoDescription?.category === "photo-description-mismatch" && /^[a-f0-9]{64}$/u.test(failure.findingKey || ""))) {
+      // A verified text-only conflict is not permission to buy replacement photos.
+      // Unsafe or ambiguous edits need review, while the original pixels remain intact.
+      if (findings.every(failure => failure.code === "SEMANTIC_REJECTION" && failure.rejectionScope === "section" &&
+          failure.photoClaimMismatchOnly === true)) {
+        throw Object.assign(new Error("사진과 다른 본문 주장은 확인됐지만 안전하게 고칠 한 문장을 확정하지 못했습니다. 기존 원고·사진을 보존했으며 이미지 재생성을 요청하지 않았습니다."), {
+          code: "PHOTO_DESCRIPTION_REPAIR_REQUIRED", causeCode: "PUBLISH_IMAGE_AUDIT_FAILED", imageAuditFailures: findings,
+        });
+      }
+      return false;
+    }
     // The same literal assertion can fail against two images in one section
     // (e.g. a sentence promises cooked AND raw ribs, while both photos show
     // cooked ribs). One server-bound finding authorizes that exact deletion.
