@@ -41,6 +41,7 @@ import type { ShoppingSceneFidelityFailure } from "../../scripts/lib/shopping-re
 import { assertCompletedContextRecovery, recoverCompletedShoppingContext } from "./brand-post-completed-context";
 import { readCanonicalSellerSourceHashes } from "../../scripts/lib/canonical-seller-source";
 import { readProductSnapshot } from "./draft-context-snapshot";
+import { PRODUCT_IMAGE_PRINT_OBSERVABILITY_RULE_EN, PRODUCT_IMAGE_PRINT_OBSERVABILITY_RULE_VERSION } from "../../scripts/lib/product-image-visual-contract";
 
 const CHATGPT_BASE_URL = "https://chatgpt.com/";
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
@@ -1159,6 +1160,7 @@ export function prepareImageBatchJobs(
   manifest: BrandPostPackageManifestV2,
   productName: string,
   workDir: string,
+  options: { completedReviewOnly?: boolean } = {},
 ): ImageBatchJob[] {
   if (manifest.connectKind === "SHOPPING") assertRetiredImageJobsSettled(workDir);
   const productUnderstanding = manifest.connectKind === "SHOPPING"
@@ -1245,6 +1247,7 @@ export function prepareImageBatchJobs(
         sourceSnapshotId: manifest.sourceSnapshot!.snapshotId, referenceHashes: references.map(reference => reference.sha256),
         candidateSet, completedRequestRecovery: recovery.proof };
       validatedReviewCandidateSet(recoveredJob);
+      if (options.completedReviewOnly) completedHeroPolicyRequestProof(recoveredJob);
       return recoveredJob;
     }
     let reviewOnlyJob: ImageBatchJob | undefined;
@@ -1341,10 +1344,13 @@ export function prepareImageBatchJobs(
       const candidates = reviewOnlyJob.reviewOnly!.candidateSet?.candidates;
       if (candidates ? candidates.every(candidate => excluded.has(candidate.sha256)) : excluded.has(reviewOnlyJob.reviewOnly!.outputSha256))
         throw rejectedThumbnailOutputError();
+      if (options.completedReviewOnly) completedHeroPolicyRequestProof(reviewOnlyJob);
       return reviewOnlyJob;
     }
     if (retiredHeroRecipes)
       throw new Error("IMAGE_RESUME_REQUIRED: 현재 촬영 계획과 정확히 일치하는 완료 썸네일 요청이 없습니다. 다른 완료 기록만으로 새 생성 요청을 보내지 않았습니다.");
+    if (options.completedReviewOnly)
+      throw new Error("IMAGE_RESUME_REQUIRED: 검증된 완료 사진만 재검수할 수 있습니다. 새 요청 기록을 만들거나 전송하지 않았습니다.");
     if (manifest.connectKind === "SHOPPING" && !fs.existsSync(`${outStem}.reference-scene.json`)) {
       fs.mkdirSync(path.dirname(outStem), { recursive: true });
       const metadata = JSON.stringify({
@@ -1366,11 +1372,11 @@ export function prepareImageBatchJobs(
 
 /** A broken saved request must not assign its error to unrelated image slots. */
 export function prepareImageBatchJobsIsolated(targets: ResolvedImageTarget[], manifest: BrandPostPackageManifestV2,
-  productName: string, workDir: string) {
+  productName: string, workDir: string, options: { completedReviewOnly?: boolean } = {}) {
   const jobs: ImageBatchJob[] = [], targetIndexes: number[] = [], errors: Array<{ targetIndex: number; error: string; errorCode?: "IMAGE_OUTPUT_REJECTED" }> = [];
   for (const [targetIndex, target] of targets.entries()) {
     try {
-      const [job] = prepareImageBatchJobs([target], manifest, productName, workDir);
+      const [job] = prepareImageBatchJobs([target], manifest, productName, workDir, options);
       job.id = String(targetIndex);
       jobs.push(job); targetIndexes.push(targetIndex);
     } catch (error) { errors.push({ targetIndex, error: error instanceof Error ? error.message : String(error),
@@ -1902,6 +1908,52 @@ export async function repairRejectedCompletedBodyImage(options: {
   return finished;
 }
 
+const completedReviewContextDependencies = {
+  collect: async (): Promise<string[]> => { throw new Error("IMAGE_RESUME_REQUIRED: 완료 사진 재검수에서는 새 원본을 수집하지 않습니다."); },
+  select: async (): Promise<ShoppingSceneReference> => { throw new Error("IMAGE_RESUME_REQUIRED: 완료 사진의 기존 참조 기록이 필요합니다."); },
+  selectSupporting: async (): Promise<ShoppingSceneSupportingReference[]> => { throw new Error("IMAGE_RESUME_REQUIRED: 완료 사진의 기존 보조 참조 기록이 필요합니다."); },
+};
+
+/** A completed receipt alone does not prove what the host actually requested.
+ * This stricter admission is exclusive to policy-driven review-only resumes. */
+function completedHeroPolicyRequestProof(job: ImageBatchJob) {
+  const refused = () => new Error("IMAGE_RESUME_REQUIRED: 완료 대표 사진의 실제 단일 생성 요청·참조·완료 증명이 일치하지 않습니다. 검수 전용 재개를 보류했습니다.");
+  if (!job.reviewOnly || job.reviewOnly.slotId !== "hero:image:1" || job.referenceMode !== "product") throw refused();
+  const proof = readCompletedProductRequest(job.outStem);
+  if (!proof || proof.prompt !== job.prompt ||
+      JSON.stringify(proof.referenceImagePaths.map(file => path.resolve(file))) !== JSON.stringify(job.referenceImagePaths.map(file => path.resolve(file))) ||
+      JSON.stringify(proof.referenceHashes) !== JSON.stringify(job.requiredReferenceHashes) ||
+      JSON.stringify(proof.referenceHashes) !== JSON.stringify(job.reviewOnly.referenceHashes)) throw refused();
+  if (job.reviewOnly.candidateSet) {
+    const candidates = validatedReviewCandidateSet(job);
+    if (candidates.receiptSha256 !== proof.receiptSha256 || candidates.completion.source === "rollout" &&
+        (candidates.completion.rolloutPath !== proof.rolloutPath || candidates.completion.rolloutSha256 !== proof.rolloutSha256)) throw refused();
+  } else reviewOnlyImageResult(job);
+  return proof;
+}
+
+/** Current-policy budget for exact proven hero pixels; never generation authority. */
+export async function completedHeroReviewBinding(manifest: BrandPostPackageManifestV2, productName: string): Promise<string> {
+  if (manifest.connectKind !== "SHOPPING" || !readProductSnapshot(manifest.sourceSnapshot, { productId: manifest.brandLinkId, connectKind: "SHOPPING" }))
+    throw new Error("IMAGE_RESUME_REQUIRED: 완료 대표 사진의 선택 상품 문맥을 확인할 수 없습니다.");
+  const heroes = normalizePackageImageAssets(manifest).filter(asset => asset.role === "hero" && !asset.sectionId);
+  if (heroes.length !== 1 || sha256File(heroes[0].path) !== heroes[0].sha256) throw new Error("IMAGE_RESUME_REQUIRED: 현재 대표 이미지 대상을 확인할 수 없습니다.");
+  const target = resolveTarget(manifest, { requestId: "completed-hero-review", replaceAssetKey: heroes[0].sha256, slotId: "hero:image:1" });
+  await prepareBrandPostImageReferenceContext({ manifest, productName, target }, completedReviewContextDependencies);
+  const root = path.join(getBrandPostPackageDir(manifest.brandLinkId), "image-generation-work");
+  const work = resolveBrandPostImageBatchWorkDir(manifest.connectKind, root);
+  const [job] = prepareImageBatchJobs([target], manifest, productName, work, { completedReviewOnly: true });
+  if (!job.reviewOnly) throw new Error("IMAGE_RESUME_REQUIRED: 증명된 완료 사진만 재검수할 수 있습니다.");
+  if (job.reviewOnly.candidateSet) validatedReviewCandidateSet(job); else reviewOnlyImageResult(job);
+  const actualRequest = completedHeroPolicyRequestProof(job);
+  return crypto.createHash("sha256").update(JSON.stringify({ version: "completed-hero-policy-review/v1",
+    policy: PRODUCT_IMAGE_PRINT_OBSERVABILITY_RULE_VERSION, policySha256: crypto.createHash("sha256").update(PRODUCT_IMAGE_PRINT_OBSERVABILITY_RULE_EN).digest("hex"),
+    snapshot: manifest.sourceSnapshot, currentHeroSha256: heroes[0].sha256,
+    publicationContext: publicationImageContext(manifest.composition, null), copy: thumbnailCopyBinding(manifest, productName),
+    metadataSha256: sha256File(`${job.outStem}.reference-scene.json`), prompt: job.prompt, references: job.requiredReferenceHashes,
+    reviewOnly: job.reviewOnly, actualRequest })).digest("hex");
+}
+
 export async function generateBrandPostImages(options: {
   manifest: BrandPostPackageManifestV2;
   productName: string;
@@ -1914,11 +1966,15 @@ export async function generateBrandPostImages(options: {
   sourceOnly?: boolean;
   /** Server-only rejected-original repair: candidates must belong to the selected gallery. */
   canonicalSourceOnly?: boolean;
+  /** Server-owned policy re-review: one completed hero, no collection or dispatch. */
+  completedReviewOnly?: boolean;
   forceSourceRefresh?: boolean;
 }): Promise<BrandPostImageGenerationResult[]> {
   if (options.canonicalSourceOnly && (!options.sourceOnly || options.manifest.connectKind !== "SHOPPING" || !options.manifest.sourceSnapshot))
     throw new Error("REJECTED_ORIGINAL_REPAIR_INVALID: canonical source-only context required");
   const requests = resolveBrandPostImageSlots(options.manifest, options.requests);
+  if (options.completedReviewOnly && (options.manifest.connectKind !== "SHOPPING" || options.sourceOnly || requests.length !== 1 || requests[0].sectionId))
+    throw new Error("IMAGE_RESUME_REQUIRED: 완료 사진 정책 재검수는 대표 이미지 한 슬롯에만 허용됩니다.");
   if (requests.length === 0) return [];
   const results: BrandPostImageGenerationResult[] = new Array(requests.length);
   const targets: ResolvedImageTarget[] = [];
@@ -2032,7 +2088,7 @@ export async function generateBrandPostImages(options: {
     // local quota must never hide a later URL panel that is the only evidence
     // for a sensor, control or other feature. Replacement targets participate
     // in the same global 1:1 review as empty slots.
-    for (const collection of [
+    for (const collection of options.completedReviewOnly ? [] : [
       { localCandidates, sourceImageUrls: [] as string[], maximum: 20 },
       { localCandidates: [] as string[], sourceImageUrls: options.sourceImageUrls, maximum: 20 },
     ]) {
@@ -2259,7 +2315,7 @@ export async function generateBrandPostImages(options: {
     for (let index = targets.length - 1; index >= 0; index -= 1) {
       try {
         await prepareBrandPostImageReferenceContext({ manifest: options.manifest, productName: options.productName,
-          target: targets[index], sourceImageUrls: options.sourceImageUrls });
+          target: targets[index], sourceImageUrls: options.sourceImageUrls }, options.completedReviewOnly ? completedReviewContextDependencies : undefined);
       } catch (error) {
         await publish(requestIndexes[index], { ...baseResult(requestIndexes[index]), sectionId: targets[index].sectionId,
           imageIntent: targets[index].imageIntent, error: error instanceof Error ? error.message : String(error) });
@@ -2275,17 +2331,20 @@ export async function generateBrandPostImages(options: {
     fs.mkdirSync(workRoot, { recursive: true });
     const workDir = resolveBrandPostImageBatchWorkDir(options.manifest.connectKind, workRoot);
     fs.mkdirSync(workDir, { recursive: true });
-    const prepared = prepareImageBatchJobsIsolated(targets, options.manifest, options.productName, workDir);
+    const prepared = prepareImageBatchJobsIsolated(targets, options.manifest, options.productName, workDir, { completedReviewOnly: options.completedReviewOnly });
     for (const failure of prepared.errors) {
       const index = requestIndexes[failure.targetIndex];
       await publish(index, { ...baseResult(index), sectionId: targets[failure.targetIndex].sectionId,
         imageIntent: targets[failure.targetIndex].imageIntent, error: failure.error, errorCode: failure.errorCode });
     }
-    const jobs: ImageBatchJob[] = [], targetIndexes: number[] = [];
+    const jobs: ImageBatchJob[] = [], targetIndexes: number[] = [], completedPolicyProofs = new Map<ImageBatchJob, string>();
     for (const [batchIndex, job] of prepared.jobs.entries()) {
       const targetIndex = prepared.targetIndexes[batchIndex], target = targets[targetIndex], index = requestIndexes[targetIndex];
       try {
-        if (options.manifest.connectKind === "SHOPPING" && target.role === "hero" && job.reviewOnly)
+        if (options.completedReviewOnly && (target.role !== "hero" || !job.reviewOnly))
+          throw new Error("IMAGE_RESUME_REQUIRED: 완료 사진 재검수를 새 생성으로 전환하지 않았습니다.");
+        if (options.completedReviewOnly) completedPolicyProofs.set(job, JSON.stringify(completedHeroPolicyRequestProof(job)));
+        if (options.manifest.connectKind === "SHOPPING" && target.role === "hero" && job.reviewOnly && !options.completedReviewOnly)
           await prepareRejectedThumbnailRecovery({ manifest: options.manifest, target, job, productName: options.productName, workDir });
         const excluded = rejectedCurrentThumbnailRawHashes(options.manifest, target);
         const candidates = job.reviewOnly?.candidateSet?.candidates;
@@ -2305,6 +2364,11 @@ export async function generateBrandPostImages(options: {
       const base = { ...baseResult(index), sectionId: target.sectionId, imageIntent: target.imageIntent };
       let result: BrandPostImageGenerationResult;
       try {
+        const assertPolicyRequest = () => {
+          if (options.completedReviewOnly && JSON.stringify(completedHeroPolicyRequestProof(jobs[batchIndex])) !== completedPolicyProofs.get(jobs[batchIndex]))
+            throw new Error("IMAGE_RESUME_REQUIRED: 검수 전용 요청 증명이 처리 중 변경됐습니다. 새 생성 없이 보류했습니다.");
+        };
+        assertPolicyRequest();
         if (!browserResult.recoveryJob && (!browserResult.localPath || !fs.existsSync(browserResult.localPath))) {
           throw new Error(clean(browserResult.error || "이미지 생성 결과가 비어 있습니다."));
         }
@@ -2315,11 +2379,13 @@ export async function generateBrandPostImages(options: {
             manifest: options.manifest, productName: options.productName, target, rawPath: browserResult.localPath!, workDir, index,
             completedJob: jobs[batchIndex] });
         } catch (error) {
+          if (options.completedReviewOnly) throw error;
           const improved = await repairRejectedCompletedBodyImage({ manifest: options.manifest, productName: options.productName, target,
             job: browserResult.recoveryJob || jobs[batchIndex], error, workDir, index, sourceImageUrls: options.sourceImageUrls, signal: options.signal });
           if (!improved) throw error;
           finished = improved;
         }
+        assertPolicyRequest();
         result = { ...base, ...finished,
           remoteGenerated: finished.provenance !== "ORIGINAL",
           creationMethod: finished.provenance === "ORIGINAL" ? "local-composite" : finished.provenance === "PHOTO_TEXT_THUMBNAIL" ? "remote-generated"

@@ -22,7 +22,7 @@ import { describeShoppingImageReplanFailure, replanShoppingImageCoverage } from 
 import { migrateShoppingNaturalPhotoPlan, requiresShoppingNaturalPhotoPlan } from "@/lib/brand-post-natural-photo-migration";
 import { planRejectedOriginalRepair } from "@/lib/brand-post-rejected-original-repair";
 
-const IMAGE_ACTIONS = ["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources", "repair_rejected", "repair_rejected_originals", "replan_sources"] as const;
+const IMAGE_ACTIONS = ["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources", "repair_rejected", "repair_rejected_originals", "review_completed_hero", "replan_sources"] as const;
 type ImageAction = (typeof IMAGE_ACTIONS)[number];
 const IMAGE_REPAIR_CONFLICT_CODES = ["IMAGE_REPAIR_BUSY", "IMAGE_REPAIR_OWNERSHIP_LOST", "NATURAL_IMAGE_PLAN_REQUIRED"] as const;
 
@@ -303,7 +303,9 @@ export async function POST(
     if (!/^[a-f0-9]{64}$/u.test(assetKey) || !preview.imageAssets.some((asset) => asset.assetKey === assetKey)) {
       return NextResponse.json({ success: false, error: "다시 만들 이미지 항목을 찾을 수 없습니다." }, { status: 404 });
     }
-    generationRequests.push({ requestId: randomUUID(), replaceAssetKey: assetKey });
+    if (body.action === "review_completed_hero" && !preview.imageAssets.some(asset => asset.assetKey === assetKey && asset.role === "hero" && !asset.sectionId))
+      return NextResponse.json({ success: false, code: "IMAGE_RESUME_REQUIRED", error: "완료 사진 재검수는 현재 대표 이미지 한 슬롯에만 허용됩니다." }, { status: 422 });
+    generationRequests.push({ requestId: randomUUID(), replaceAssetKey: assetKey, ...(body.action === "review_completed_hero" ? { slotId: "hero:image:1" } : {}) });
   }
 
   if (generationRequests.length === 0) {
@@ -327,6 +329,7 @@ export async function POST(
       // bind_sources never opens ChatGPT; it only places reviewed seller photos.
       sourceOnly: body.action === "bind_sources" || body.action === "repair_rejected_originals",
       canonicalSourceOnly: body.action === "repair_rejected_originals",
+      completedReviewOnly: body.action === "review_completed_hero",
       forceSourceRefresh: body.refreshSourcePhotos === true,
     });
     const { errors, generatedCount, appliedCount, manifest: updated } = repaired;

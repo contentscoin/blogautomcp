@@ -142,7 +142,7 @@ export async function selectVerifiedProductSectionImages(
   }));
   const sourceContextKey = productSourceAuditContextKey(options);
   const reviewKey = crypto.createHash("sha256").update(JSON.stringify({
-    version: 15,
+    version: 16,
     sourceContextKey,
     selectedProduct: selectedProduct || productName,
     productName: productName.normalize("NFKC").replace(/\s+/gu, " ").trim(),

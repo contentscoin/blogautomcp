@@ -16,8 +16,8 @@ import { publicationImageContext } from "./publish-image-rejections";
 // still block upstream and timestamps cannot renew a consumed budget.
 export const IMAGE_RECOVERY_POLICY_VERSION = 10;
 
-export type ImageRecoveryStage = "refresh-source" | "repair-rejected" | "repair-rejected-original" | "replan-images" | "replan-after-rejection";
-type Entry = { stage: ImageRecoveryStage; input: string; output?: string; status: "running" | "complete" | "failed"; at: string; reason?: string; externalFailure?: boolean; thumbnailCopyBinding?: string };
+export type ImageRecoveryStage = "refresh-source" | "repair-rejected" | "repair-rejected-original" | "review-completed-hero" | "replan-images" | "replan-after-rejection";
+type Entry = { stage: ImageRecoveryStage; input: string; output?: string; status: "running" | "complete" | "failed"; at: string; reason?: string; externalFailure?: boolean; thumbnailCopyBinding?: string; completedHeroReviewBinding?: string };
 
 /** The raw-photo recipe excludes the locally rendered headline. Only one exact
  * rejected hero with a proven completed raw may renew that headline-only scope;
@@ -132,7 +132,21 @@ export function imageRecoverySignature(root: string): string | null {
 /** Persist the claim before a long operation, including failures and interrupted runs. */
 export async function runRecordedImageRecovery<T>(id: string, stage: ImageRecoveryStage, operation: () => Promise<T>, options?: { thumbnailAssetKey: string }): Promise<{ attempted: boolean; result?: T }> {
   const root = getBrandPostPackageDir(id);
-  const input = imageRecoverySignature(root);
+  const baseInput = imageRecoverySignature(root);
+  let completedHeroReviewBinding: string | undefined;
+  if (stage === "review-completed-hero") {
+    if (!baseInput) return { attempted: false };
+    try {
+      const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
+      if (!options?.thumbnailAssetKey || manifest.imageAssets?.filter((asset: { role?: string; sectionId?: string; sha256?: string }) =>
+        asset.role === "hero" && !asset.sectionId && asset.sha256 === options.thumbnailAssetKey).length !== 1) return { attempted: false };
+      const generation = await import("../../src/lib/brand-post-image-generation");
+      completedHeroReviewBinding = await generation.completedHeroReviewBinding(manifest, String(manifest.sourceSnapshot?.product?.name || manifest.title));
+    } catch { return { attempted: false }; } // Optional read-only admission cannot erase the retained original failure.
+  }
+  const scopedInput = (base: string | null) => completedHeroReviewBinding && base
+    ? crypto.createHash("sha256").update(JSON.stringify({ base, completedHeroReviewBinding })).digest("hex") : base;
+  const input = scopedInput(baseInput);
   // In-memory fixtures/non-persisted drafts still use the bounded workflow loop.
   if (!input) return { attempted: true, result: await operation() };
   const file = path.join(root, "image-recovery-history.json");
@@ -140,9 +154,10 @@ export async function runRecordedImageRecovery<T>(id: string, stage: ImageRecove
   try { const saved = JSON.parse(fs.readFileSync(file, "utf8")); if (Array.isArray(saved.entries)) entries = saved.entries; } catch { /* first run */ }
   const thumbnailCopyBinding = stage === "repair-rejected" && options?.thumbnailAssetKey
     ? rejectedThumbnailCopyBinding(root, options.thumbnailAssetKey) : null;
-  if (entries.some(entry => consumesRecoveryBudget(entry) && entry.stage === stage && (entry.input === input || entry.output === input) &&
+  if (entries.some(entry => (stage === "review-completed-hero" || consumesRecoveryBudget(entry)) && entry.stage === stage && (entry.input === input || entry.output === input) &&
       (!thumbnailCopyBinding || entry.thumbnailCopyBinding === thumbnailCopyBinding || !isOnlyRejectedThumbnailFailure(entry)))) return { attempted: false };
-  const entry: Entry = { stage, input, status: "running", at: new Date().toISOString(), ...(thumbnailCopyBinding ? { thumbnailCopyBinding } : {}) };
+  const entry: Entry = { stage, input, status: "running", at: new Date().toISOString(), ...(thumbnailCopyBinding ? { thumbnailCopyBinding } : {}),
+    ...(completedHeroReviewBinding ? { completedHeroReviewBinding } : {}) };
   entries.push(entry);
   const save = () => atomicWriteTextFile(file, JSON.stringify({ version: 1, entries: entries.slice(-32) }, null, 2));
   save();
@@ -158,7 +173,7 @@ export async function runRecordedImageRecovery<T>(id: string, stage: ImageRecove
     entry.externalFailure = isExternalRecoveryFailure(error);
     throw error;
   } finally {
-    entry.output = imageRecoverySignature(root) || input;
+    entry.output = scopedInput(imageRecoverySignature(root)) || input;
     save();
   }
 }

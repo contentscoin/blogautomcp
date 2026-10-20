@@ -418,7 +418,7 @@ async function main() {
     };
     const expectedVariations = {
       productShape: ["viewpoint-or-pose", "camera-distance"],
-      intrinsicPrinting: ["viewpoint-or-pose", "nonessential-print-legibility"],
+      intrinsicPrinting: ["viewpoint-or-pose", "nonessential-print-legibility", "matched-small-print-unreadable"],
       visibleOption: ["main-item-only", "viewpoint-or-pose"],
       sceneContext: ["lighting-or-context", "external-seller-artwork", "detached-styling-props", "viewpoint-or-pose", "camera-distance"],
     };

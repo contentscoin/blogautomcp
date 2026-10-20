@@ -143,6 +143,7 @@ export async function repairBrandPostImages(options: {
   sourceOnly?: boolean;
   /** Restrict source-only replacement to intact selected-gallery originals. */
   canonicalSourceOnly?: boolean;
+  completedReviewOnly?: boolean;
   forceSourceRefresh?: boolean;
 }, dependencies: ImageRepairDependencies = {
   read: readBrandPostPackage, write: writeBrandPostPackageManifest,
@@ -274,7 +275,8 @@ export async function repairBrandPostImages(options: {
       try {
         const results = await dependencies.generate({ manifest, productName: options.productName || manifest.title,
           sourceImageUrls: options.sourceImageUrls, requests, onResult: accept, signal: controller.signal,
-          sourceOnly: options.sourceOnly, canonicalSourceOnly: options.canonicalSourceOnly, forceSourceRefresh: options.forceSourceRefresh });
+          sourceOnly: options.sourceOnly, canonicalSourceOnly: options.canonicalSourceOnly, completedReviewOnly: options.completedReviewOnly,
+          forceSourceRefresh: options.forceSourceRefresh });
         for (const result of results) await accept(result);
         for (const request of requests) {
           if (!seen.has(request.requestId)) errors.push(`${request.sectionId || "대표 이미지"}: 생성 결과가 반환되지 않았습니다.`);

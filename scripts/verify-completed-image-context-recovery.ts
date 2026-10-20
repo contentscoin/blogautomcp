@@ -13,6 +13,8 @@ import type { BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
 import type { ResolvedImageTarget } from "../src/lib/brand-post-image-generation";
 import { buildCodexImageInstruction, readCompletedProductRequest } from "../src/lib/codex-image-generation";
 import { testPngFixture } from "./lib/test-png-fixture";
+import { runRecordedImageRecovery, imageRecoverySignature, IMAGE_RECOVERY_POLICY_VERSION } from "./lib/material-image-recovery";
+import { runMaterialPreparation, type Call, type Result } from "./lib/scheduled-draft-workflow";
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "completed-image-context-"));
@@ -26,7 +28,7 @@ async function main() {
   try {
     const generation = await import("../src/lib/brand-post-image-generation");
     const { getBrandPostPackageDir } = await import("../src/lib/brand-post-package");
-    async function fixture(mode: "legacy" | "receipt" = "legacy") {
+    async function fixture(mode: "legacy" | "receipt" | "hero" = "legacy") {
       const id = crypto.randomUUID(), dir = getBrandPostPackageDir(id), sources = path.join(dir, "product-sources");
       fs.mkdirSync(sources, { recursive: true });
       const primary = path.join(sources, "primary.png"), geometry = path.join(sources, "geometry.png");
@@ -50,13 +52,18 @@ async function main() {
         imageAssets: [], heroImagePath: "", bodyImagePaths: [], approvedAt: null,
         composition: { sections, renderNodes: [{ kind: "heading", sectionId: "scene", text: sections[1].title },
           { kind: "paragraph", sectionId: "scene", text: sections[1].body[0] }] } } as unknown as BrandPostPackageManifestV2;
+      if (mode === "hero") {
+        manifest.heroImagePath = primary;
+        manifest.imageAssets!.push({ path: primary, sourcePath: primary, sha256: fileHash(primary), role: "hero", sectionId: null, provenance: "PHOTO_TEXT_THUMBNAIL",
+          creationMethod: "local-composite", imageIntent: manifest.title });
+      }
       const target = (): ResolvedImageTarget => generation.resolveBrandPostImageTarget(manifest,
-        { requestId: "fixture", sectionId: "scene", slotId: "scene:image:1" });
+        mode === "hero" ? { requestId: "fixture", replaceAssetKey: fileHash(primary), slotId: "hero:image:1" } : { requestId: "fixture", sectionId: "scene", slotId: "scene:image:1" });
       const deps = { collect: async () => [primary], select: async () => reference, selectSupporting: async () => mode === "receipt" ? [support] : [] };
       const originalTarget = target();
       const context = await generation.prepareBrandPostImageReferenceContext({ manifest, productName: "검정 제품", target: originalTarget }, deps);
-      const oldOptions = { productName: "검정 제품", sectionTitle: sections[1].title, imageIntent: sections[1].imageIntent, bodyExcerpt: sections[1].body[0],
-        stagingRecipe: sections[1].promptRecipe, role: "body" as const, variantIndex: 2, adjacentSectionTitles: [sections[0].title, sections[2].title],
+      const oldOptions = { productName: "검정 제품", sectionTitle: originalTarget.sectionTitle, imageIntent: originalTarget.imageIntent, bodyExcerpt: originalTarget.bodyExcerpt,
+        stagingRecipe: originalTarget.promptRecipe, role: originalTarget.role, variantIndex: mode === "hero" ? 0 : 2, adjacentSectionTitles: mode === "hero" ? [] : [sections[0].title, sections[2].title],
         physicalScale: manifest.productUnderstanding!.concept.physicalScale, productImageDirective: manifest.productUnderstanding!.policy.imageDirective };
       context.prompt = buildShoppingReferenceScenePrompt({ ...oldOptions, reference, hasAnchor: false, supportingReferences: mode === "receipt" ? [support] : [] });
       context.preparationBinding = hash(JSON.stringify({ snapshotId: snapshot.snapshotId,
@@ -225,6 +232,102 @@ async function main() {
     }
     await assert.rejects(generation.generateBrandPostImages({ manifest: legacy.manifest, productName: "검정 제품", requests: [], canonicalSourceOnly: true }), /REJECTED_ORIGINAL_REPAIR_INVALID/);
     checks++;
+    const hero = await fixture("hero"), heroPrepared = await hero.prepare();
+    const heroBinding = await generation.completedHeroReviewBinding(hero.manifest, "검정 제품");
+    assert.match(heroBinding, /^[a-f0-9]{64}$/u); assert.ok(heroPrepared.job.reviewOnly); hero.unchanged(); checks += 2;
+    const manifestPath = path.join(path.dirname(path.dirname(hero.work)), "manifest.json"); fs.writeFileSync(manifestPath, JSON.stringify(hero.manifest));
+    const historyPath = path.join(path.dirname(manifestPath), "image-recovery-history.json");
+    const oldInput = imageRecoverySignature(path.dirname(manifestPath));
+    const historical = { stage: "repair-rejected", input: oldInput, output: oldInput, status: "failed", reason: "REFERENCE_SCENE_FIDELITY_FAILED: old print policy", at: "2026-10-20T16:41:04.848Z" };
+    fs.writeFileSync(historyPath, JSON.stringify({ version: 1, entries: [historical] }));
+    let policyReviews = 0;
+    assert.equal((await runRecordedImageRecovery(hero.manifest.brandLinkId, "repair-rejected", async () => { throw new Error("old budget cannot dispatch"); })).attempted, false);
+    const firstPolicy = await runRecordedImageRecovery(hero.manifest.brandLinkId, "review-completed-hero", async () => { policyReviews++; return true; }, { thumbnailAssetKey: fileHash(hero.primary) });
+    assert.equal(firstPolicy.attempted, true);
+    assert.equal((await runRecordedImageRecovery(hero.manifest.brandLinkId, "review-completed-hero", async () => { policyReviews++; }, { thumbnailAssetKey: fileHash(hero.primary) })).attempted, false);
+    assert.equal(policyReviews, 1); assert.deepEqual(JSON.parse(fs.readFileSync(historyPath, "utf8")).entries[0], historical);
+    assert.equal(IMAGE_RECOVERY_POLICY_VERSION, 10); hero.unchanged(); checks += 6;
+    const jobCount = fs.readdirSync(hero.work).filter(name => name.endsWith(".reference-scene.json")).length;
+    const unrelated = { ...heroPrepared.target, request: { ...heroPrepared.target.request, slotId: "hero:image:2" } };
+    assert.throws(() => generation.prepareImageBatchJobs([unrelated], hero.manifest, "검정 제품", hero.work, { completedReviewOnly: true }), /IMAGE_RESUME_REQUIRED/);
+    assert.equal(fs.readdirSync(hero.work).filter(name => name.endsWith(".reference-scene.json")).length, jobCount); checks += 2;
+    await assert.rejects(generation.generateBrandPostImages({ manifest: hero.manifest, productName: "검정 제품", completedReviewOnly: true,
+      requests: [{ requestId: "body-forbidden", sectionId: "scene" }] }), /IMAGE_RESUME_REQUIRED/); checks++;
+    const pendingHero = await fixture("hero");
+    const pendingReceipt = JSON.parse(fs.readFileSync(pendingHero.receiptPath, "utf8")); pendingReceipt.state = "submitting";
+    fs.writeFileSync(pendingHero.receiptPath, JSON.stringify(pendingReceipt));
+    pendingHero.records.pop(); pendingHero.writeRollout();
+    await assert.rejects(generation.completedHeroReviewBinding(pendingHero.manifest, "검정 제품"), /IMAGE_RESUME_REQUIRED/); checks++;
+    const changedHero = await fixture("hero"); fs.appendFileSync(changedHero.output, "modified candidate");
+    await assert.rejects(generation.completedHeroReviewBinding(changedHero.manifest, "검정 제품"), /IMAGE_RESUME_REQUIRED/); checks++;
+    for (const mutation of ["completed-budget", "host-prompt", "host-reference", "host-timestamp"] as const) {
+      const f = await fixture("hero"), prepared = await f.prepare();
+      if (mutation === "completed-budget") {
+        const receipt = JSON.parse(fs.readFileSync(f.receiptPath, "utf8")); receipt.generationBudget.observedCalls = 2; receipt.generationBudget.exceededAtMs = Date.now();
+        fs.writeFileSync(f.receiptPath, JSON.stringify(receipt));
+      } else if (mutation === "host-prompt") {
+        f.records[2].payload.content!.at(-1)!.text = buildCodexImageInstruction("different actual host prompt", 1, "product"); f.writeRollout();
+      } else if (mutation === "host-reference") {
+        f.records[2].payload.content!.find(item => item.type === "input_image")!.image_url = `data:image/png;base64,${png("foreign reference").toString("base64")}`;
+        f.writeRollout();
+      } else { f.records[2].timestamp = new Date(Date.now() + 60000).toISOString(); f.writeRollout(); }
+      assert.throws(() => generation.prepareImageBatchJobs([prepared.target], f.manifest, "검정 제품", f.work, { completedReviewOnly: true }), /IMAGE_RESUME_REQUIRED/);
+      await assert.rejects(generation.completedHeroReviewBinding(f.manifest, "검정 제품"), /IMAGE_RESUME_REQUIRED/);
+      checks += 2;
+    }
+    // The review-only boundary covers its caller too: a fresh negative, an
+    // unknown request/result or final-QA rejection cannot fall through to the
+    // still-unused source/replan/paid-generation recovery budgets.
+    for (const outcome of ["passed", "negative", "unknown", "transport", "provider", "ineligible", "spent", "final-negative", "final-transport"] as const) {
+      const f = await fixture("hero"), packageDir = path.dirname(path.dirname(f.work));
+      const file = path.join(packageDir, "manifest.json"), ledger = path.join(packageDir, "image-recovery-history.json");
+      fs.writeFileSync(file, JSON.stringify(f.manifest));
+      const signature = imageRecoverySignature(packageDir);
+      const prior = { ...historical, input: signature, output: signature };
+      fs.writeFileSync(ledger, JSON.stringify({ version: 1, entries: [prior] }));
+      if (outcome === "ineligible") { f.records.pop(); f.writeRollout(); }
+      if (outcome === "spent") await runRecordedImageRecovery(f.manifest.brandLinkId, "review-completed-hero", async () => {}, { thumbnailAssetKey: fileHash(f.primary) });
+      const before = fs.readFileSync(file), metadataBefore = fs.readFileSync(f.metadataPath), receiptBefore = fs.readFileSync(f.receiptPath),
+        rawBefore = fs.readFileSync(`${f.original.outStem}.png`), calls: string[] = [];
+      let reviewed = false, approved = false;
+      const response = (): Result => ({ success: true, data: { connectKind: "SHOPPING", approvedAt: approved ? "fixture-approved" : null,
+        composition: { sections: [] }, imageAssets: f.manifest.imageAssets,
+        imageGeneration: { status: "incomplete", recoveryState: "idle" }, imageSlots: [{ missing: 0, generationMissing: 0 }],
+        contentQuality: { signals: [] }, approval: { canApprove: reviewed,
+          blockers: reviewed ? [] : [{ code: "image-format-obsolete", sectionId: null, reason: "대표 이미지: prior retained hero" }] } } });
+      const call: Call = async (_url, method, body) => {
+        const action = (body as { action?: string } | undefined)?.action;
+        if (method === "GET" || action === "recheck") return response();
+        calls.push(String(action));
+        if (action === "review_completed_hero") {
+          assert.equal((body as { assetKey?: string }).assetKey, fileHash(f.primary));
+          if (outcome === "transport") throw Object.assign(new Error("transport unknown"), { code: "ECONNRESET" });
+          if (outcome === "provider") throw Object.assign(new Error("provider authorization missing"), { code: "CODEX_AUTH_REQUIRED" });
+          if (outcome === "unknown") return { success: false, code: "IMAGE_RESUME_REQUIRED", errors: ["IMAGE_RESUME_REQUIRED: uncertain receipt"] };
+          if (outcome === "negative") return { success: false, code: "REFERENCE_SCENE_FIDELITY_FAILED", errors: ["REFERENCE_SCENE_FIDELITY_FAILED: current exact pixels mismatch"] };
+          reviewed = true; return response();
+        }
+        if (action === "approve") {
+          if (outcome === "final-negative") throw Object.assign(new Error("final QA found actual wrong product"), {
+            code: "PUBLISH_IMAGE_AUDIT_FAILED", errors: ["SEMANTIC_REJECTION: actual product mismatch"] });
+          if (outcome === "final-transport") throw Object.assign(new Error("final transport unknown"), { code: "ECONNRESET" });
+          approved = true; return response();
+        }
+        throw new Error(`review-only workflow attempted forbidden ${method} ${action}`);
+      };
+      const workflow = runMaterialPreparation(f.manifest.brandLinkId, { call, pause: async () => {} }, { incrementalOnly: true, beforeRepair: async () => {} });
+      if (outcome === "passed") await workflow;
+      else await assert.rejects(workflow, (error: unknown) => !String(error).includes("forbidden"));
+      assert.deepEqual(calls, ["ineligible", "spent"].includes(outcome) ? [] : ["passed", "final-negative", "final-transport"].includes(outcome)
+        ? ["review_completed_hero", "approve"] : ["review_completed_hero"]);
+      assert.equal(approved, outcome === "passed"); assert.deepEqual(fs.readFileSync(file), before);
+      const entries = JSON.parse(fs.readFileSync(ledger, "utf8")).entries;
+      assert.deepEqual(entries[0], prior); assert.ok(entries.every((entry: { stage: string }) => ["repair-rejected", "review-completed-hero"].includes(entry.stage)));
+      if (outcome !== "ineligible") f.unchanged();
+      else { assert.deepEqual(fs.readFileSync(f.metadataPath), metadataBefore); assert.deepEqual(fs.readFileSync(f.receiptPath), receiptBefore);
+        assert.deepEqual(fs.readFileSync(`${f.original.outStem}.png`), rawBefore); }
+      checks += 5;
+    }
     for (const mutation of ["body", "snapshot", "slot", "recipe", "source-pixels", "source-url", "foreign-workspace", "no-terminal", "second-request", "attachment-pixels", "uncertain", "lock",
       "generation-budget", "request-after-terminal", "request-after-generation", "request-before-turn", "request-future-time", "extra-generation"] as const) {
       const f = await fixture(mutation === "source-url" ? "receipt" : "legacy");

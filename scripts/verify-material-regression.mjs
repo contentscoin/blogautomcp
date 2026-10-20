@@ -22,6 +22,8 @@ const checks = [
   'verify-product-source-receipt-stability.ts',
   'verify-image-reference-context-stability.ts',
   'verify-completed-image-context-recovery.ts',
+  'verify-shopping-reference-scene.ts',
+  'verify-product-print-observability.ts',
   'verify-shopping-reference-view.ts',
   'verify-shopping-reference-bundle.ts',
   'verify-product-9canvas.ts',

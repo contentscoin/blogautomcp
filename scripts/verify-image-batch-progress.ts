@@ -32,6 +32,7 @@ import { getBrandPostPackageDir } from "../src/lib/brand-post-package";
 import { readProductSnapshot } from "../src/lib/draft-context-snapshot";
 import { isAllowedProductPhotoUrl } from "./lib/product-photo-source";
 import { readCanonicalSellerSourceHashes } from "./lib/canonical-seller-source";
+import * as productVisualContract from "./lib/product-image-visual-contract";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-image-batch-"));
 const rawPath = path.join(root, "raw.png");
@@ -75,6 +76,7 @@ const referenceSceneModule = load<typeof import("./lib/shopping-reference-scene"
   "../../src/lib/brand-post-image-evidence": imageEvidence,
   "../../src/lib/draft-context-snapshot": { readProductSnapshot },
   "./product-photo-source": { isAllowedProductPhotoUrl },
+  "./product-image-visual-contract": productVisualContract,
 });
 const hashFile = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 const completedContextModule = load<typeof import("../src/lib/brand-post-completed-context")>("src/lib/brand-post-completed-context.ts", {
@@ -142,6 +144,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       "./brand-post-completed-context": completedContextModule,
       "../../scripts/lib/canonical-seller-source": { readCanonicalSellerSourceHashes },
       "./draft-context-snapshot": { readProductSnapshot },
+      "../../scripts/lib/product-image-visual-contract": productVisualContract,
       "../../scripts/lib/publish-image-rejections": { rejectedPublicationImageHashes: () => [], publicationImageContext },
       "../../scripts/lib/publish-image-audit": { buildSelectedProductImageAuditContext },
       "../../scripts/lib/seller-original-repair-target": { buildSellerOriginalRepairTarget },

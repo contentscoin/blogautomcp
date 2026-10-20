@@ -399,6 +399,9 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
   // owns the next repair and prevents sparse facts from causing hallucinated rewrites.
   let revised = false;
   let sourceRefreshAttempted = false;
+  // A policy refresh can authorize only a fresh review of proven completed
+  // hero pixels. Its outcome must never renew collection/generation authority.
+  let completedHeroPolicyReviewAttempted = false;
   let previousReadiness: BrandLinkContentReadiness | null = null;
   const recheck = async (refreshSource = false, attempt = 0) => {
     check();
@@ -621,7 +624,17 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
       if (heroKey && mode !== "source-only") {
         deps.onStage?.("실패 대표 이미지만 참조 장면 생성·교체");
         if (mode === "repair-rejected") await attemptImages("regenerate", false, heroKey);
-        else await runRecordedImageRecovery(id, "repair-rejected", () => attemptImages("regenerate", false, heroKey), { thumbnailAssetKey: heroKey });
+        else {
+          const previous = await runRecordedImageRecovery(id, "repair-rejected", () => attemptImages("regenerate", false, heroKey), { thumbnailAssetKey: heroKey });
+          if (!previous.attempted) {
+            completedHeroPolicyReviewAttempted = true;
+            deps.onStage?.("현재 검수 정책으로 완료 대표 사진만 재검수 · 새 이미지 생성 없음");
+            await runRecordedImageRecovery(id, "review-completed-hero", () => attemptImages("review_completed_hero", false, heroKey), { thumbnailAssetKey: heroKey });
+          }
+        }
+      }
+      if (completedHeroPolicyReviewAttempted && (missing() || thumbnailMissing() || thumbnailRepairKey())) {
+        throw unresolvedCompositionError("완료 대표 사진의 검수 전용 재개가 통과하지 못했습니다. 기존 사진과 기록을 보존했으며 새 수집·생성은 실행하지 않았습니다.");
       }
       if ((missing() || thumbnailMissing() || thumbnailRepairKey()) && isRecoverableImageEvidenceResult(latestImageRepair)) {
         deps.onStage?.("이미지 실패 원인 확인 · 상품 상세 원본 재수집");
@@ -745,6 +758,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
   await images();
   deps.onStage?.("내용·구성 품질검사");
   plan = await recheck(false, revised ? 1 : 0);
+  if (completedHeroPolicyReviewAttempted && plan.action !== "complete") throw unresolvedCompositionError(plan.reason);
   if (plan.action === "refresh-source") {
     plan = await refreshSource();
     if (plan.action === "refresh-source") throw sourceEvidenceError(plan);
@@ -788,6 +802,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     deps.onStage?.("최종 원고·사진 재검사·승인");
     await claimedCall(`${base}/draft`, "PATCH", { action: "approve" });
   } catch (error) {
+    if (completedHeroPolicyReviewAttempted) throw error;
     if (!isDefinitivePublishImageFailure(error)) throw error;
     if (await repairAuditedPhotoDescription(error)) {
       if (plan.action !== "complete") throw unresolvedCompositionError(plan.reason);
