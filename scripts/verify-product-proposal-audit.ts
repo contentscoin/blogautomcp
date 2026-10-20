@@ -8,6 +8,11 @@ import { auditSectionProposals, type SectionProposal } from "./lib/product-secti
 import { auditPublishImages, type PublishImageAuditOptions, type PublishImageAuditResult } from "./lib/publish-image-audit";
 import { buildProduct9Canvas, selectedProductContextFrom9Canvas } from "./lib/product-9canvas";
 import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
+import { withReferencePlaneFixture } from "./test-fixtures/reference-plane-review";
+
+// Explicit offline observation adapter only; the real coordinator preserves
+// every supplied adverse boolean and exact published photographic assertion.
+const fixtureFinalAudit=(options:PublishImageAuditOptions)=>auditPublishImages(withReferencePlaneFixture(options));
 
 const proposals = Array.from({ length: 8 }, (_, i) => ({ targetIndex: 0, sourceSha256: `sha-${i}`, path: `photo-${i}` }));
 const targets = [{ sectionId: "actual-section", sectionTitle: "AI 기능", sectionBody: ["AI 기능의 실제 설명"], imageIntent: "AI 기능 근거" }];
@@ -89,9 +94,11 @@ async function main() {
     const approved = await auditSectionProposals({ productName: "쿠쿠 음식물처리기", targets: [originalTarget], proposals: originalProposal,
       select, onRejected() {}, audit: async input => {
         assert.equal(input.composition.sections[0].imageSource, "seller-original", "the explicit source policy reaches the final audit");
-        const audited = await auditPublishImages({ ...input, review: async call => {
+        const audited = await fixtureFinalAudit({ ...input, review: async call => {
           assert.match(call.userPrompt, /"allowProductPhoto":true/u, "an overview original is allowed beside prose");
-          assert.match(call.userPrompt, /Even when allowProductPhoto=true, reject generic photos used as proof of a feature claim/u);
+          assert.match(call.userPrompt, /feature-evidence must directly show the requested feature/u);
+          assert.match(call.userPrompt, /Technical facts.*do not alone make a photograph proof/u,
+            "ordinary specifications do not fabricate a photographic performance claim");
           return verdict(true, "A single unchanged photograph identifies the selected product without proving a function.");
         } });
         seen.push(audited); return audited;
@@ -101,7 +108,7 @@ async function main() {
     const shokzProduct = JSON.stringify({ name: "샥즈 오픈스윔 프로", optionFacts: ["색상: 오렌지", "저장공간: 32GB"] });
     const shokz = await auditSectionProposals({ productName: "샥즈 오픈스윔 프로", selectedProduct: shokzProduct,
       targets: [{ ...originalTarget, sectionTitle: "수영과 지상에서 쓰는 MP3·블루투스 기준", sectionBody: shokzBody }],
-      proposals: originalProposal, select, onRejected() {}, audit: input => auditPublishImages({ ...input, review: async call => {
+      proposals: originalProposal, select, onRejected() {}, audit: input => fixtureFinalAudit({ ...input, review: async call => {
         assert.equal(input.selectedProduct, shokzProduct);
         assert.deepEqual(input.composition.sections[0].body, shokzBody);
         const line = call.userPrompt.split("\n").find(value => value.startsWith("Each attached image"))!;
@@ -114,7 +121,7 @@ async function main() {
     const originalAction = await auditSectionProposals({ productName: "샥즈 오픈스윔 프로", selectedProduct: shokzProduct,
       targets: [{ ...originalTarget, sectionTitle: "원본 수영 사용 장면", sectionBody: ["이 사진에는 선택한 이어폰을 착용하고 수영하는 모습이 보입니다."],
         imageIntent: "선택 상품을 착용한 실제 수영 장면의 판매자 원본" }], proposals: originalProposal, select, onRejected() {},
-      audit: input => auditPublishImages({ ...input, review: async call => {
+      audit: input => fixtureFinalAudit({ ...input, review: async call => {
         assert.ok(call.userPrompt.includes("착용하고 수영하는 모습이 보입니다"), "explicit action description must reach the pixel gate unchanged");
         return verdict(true, "The plain product packshot contains no person or swimming action claimed in the published photograph description.", false,
           "이 사진에는 선택한 이어폰을 착용하고 수영하는 모습이 보입니다.");
@@ -124,12 +131,19 @@ async function main() {
     const rejectedReasons: string[] = [];
     const unsupported = await auditSectionProposals({ productName: "쿠쿠 음식물처리기",
       targets: [{ ...originalTarget, sectionBody: [featureBody] }], proposals: originalProposal, select,
-      onRejected: (_row, reason) => rejectedReasons.push(reason), audit: input => auditPublishImages({ ...input, review: async call => {
+      onRejected: (_row, reason) => rejectedReasons.push(reason), audit: async input => {
+        const checked=await fixtureFinalAudit({ ...input, review: async call => {
         assert.match(call.userPrompt, /"allowProductPhoto":true/u);
         assert.ok(call.userPrompt.includes(featureBody), "the actual feature-evidence claim is retained for pixel review");
-        assert.match(call.userPrompt, /Even when allowProductPhoto=true, reject generic photos used as proof of a feature claim/u);
+        assert.match(call.userPrompt, /feature-evidence must directly show the requested feature/u);
+        assert.match(call.userPrompt, /Precise appearance, pictured count and label-reading assertions still need confirming pixels/u,
+          "allowProductPhoto never waives actual published photographic assertions");
         return verdict(true, "A static product photograph cannot prove the published noise-reduction assertion.", false, featureBody, "performance");
-      } }) });
+        } });
+        assert(checked.failures.some(failure=>failure.code==="SEMANTIC_REJECTION"));
+        assert(!checked.failures.some(failure=>failure.code==="INVALID_REVIEW"),"the feature-proof negative is a valid actual claim verdict, not a missing fixture field");
+        return checked;
+      } });
     assert.deepEqual(unsupported, [], "a source hint cannot override a failed feature-claim pixel verdict");
     assert.match(rejectedReasons[0], /사진을 기능·성능·결과의 증거/u);
     assert.match(rejectedReasons[0], /noise-reduction assertion/u);
@@ -145,7 +159,7 @@ async function main() {
       let pixelCalls = 0;
       const outcome = await auditSectionProposals({ productName: "한우 선물세트", selectedProduct: beefProduct,
         targets: [{ ...originalTarget, sectionTitle: "포함 부위의 외형", sectionBody: [fixture.body] }], proposals: originalProposal,
-        select, onRejected() {}, audit: input => auditPublishImages({ ...input, review: async call => {
+        select, onRejected() {}, audit: input => fixtureFinalAudit({ ...input, review: async call => {
           pixelCalls++;
           assert.equal(input.selectedProduct, beefProduct);
           assert.ok(call.userPrompt.includes("부위: 등심, 채끝, 차돌박이, 앞다리, 설도"));
@@ -154,6 +168,9 @@ async function main() {
           const answer = JSON.parse(verdict(fixture.accepted, fixture.name, fixture.photoClaimMatches, fixture.body));
           answer.reviews[0].identityMatches = fixture.identityMatches;
           answer.reviews[0].noGraphicLayout = fixture.noGraphicLayout;
+          if(!fixture.identityMatches) answer.reviews[0].visibleIdentityEvidence={basis:fixture.name==="wrong cut"?"concrete-conflict":"insufficient-visible-structure",
+            landmarks:[{part:"selected meat cut",referenceObservation:"Offline selected cut shape",candidateObservation:fixture.name==="wrong cut"?"Offline opposing cut shape":"Offline insufficient view"}],
+            conflict:fixture.name==="wrong cut"?"The actual visible cut differs from the selected component":"The visible structure does not establish actual component membership"};
           return JSON.stringify(answer);
         } }) });
       assert.equal(outcome.length, fixture.name === "included exterior" ? 1 : 0, fixture.name);
@@ -180,7 +197,7 @@ async function main() {
         proposalInput = input;
         assert.equal(input.selectedSourceSnapshot, sourceSnapshot);
         assert.equal(input.selectedSourceDirectory, sourceDirectory);
-        return auditPublishImages({ ...input, review: async call => {
+        return fixtureFinalAudit({ ...input, review: async call => {
           proposalPrompt = call.userPrompt;
           proposalAttachmentShas = call.imagePaths!.map(image => crypto.createHash("sha256").update(fs.readFileSync(image)).digest("hex"));
           assert.equal(call.imagePaths!.length, 4, "the exact original outside the first two gallery references is comparison-only evidence");
@@ -190,7 +207,7 @@ async function main() {
         } });
       } });
     assert.equal(sameContext.length, 1);
-    const publication = await auditPublishImages({ ...proposalInput!, review: async call => {
+    const publication = await fixtureFinalAudit({ ...proposalInput!, review: async call => {
       assert.equal(call.userPrompt, proposalPrompt, "source-final and publication-final assemble the same product, text, source and indexed comparison context");
       assert.deepEqual(call.imagePaths!.map(image => crypto.createHash("sha256").update(fs.readFileSync(image)).digest("hex")), proposalAttachmentShas);
       return verdict(true, "Same unchanged input.");
@@ -201,7 +218,7 @@ async function main() {
       { ...canonical, selectedSourceSnapshot: { ...sourceSnapshot, product: { ...sourceSnapshot.product, features: ["unbound option"] } } }]) {
       let modelCalls = 0;
       await assert.rejects(auditSectionProposals({ ...badContext, productName: "selected", targets: [originalTarget], proposals: originalProposal,
-        select, onRejected() {}, audit: input => auditPublishImages({ ...input, review: async () => { modelCalls++; return verdict(true, "must not execute"); } }) }), /INVALID_CONTEXT/u);
+        select, onRejected() {}, audit: input => fixtureFinalAudit({ ...input, review: async () => { modelCalls++; return verdict(true, "must not execute"); } }) }), /INVALID_CONTEXT/u);
       assert.equal(modelCalls, 0, "invalid canonical context cannot receive a model approval");
     }
     assert.deepEqual(fs.readFileSync(file), bytes, "source pixels remain unchanged");
