@@ -10130,6 +10130,29 @@ async function runPreparedPostRevision(
   const description = qualitySource.sourceDescription;
   const features = qualitySource.sourceFeatures;
   const price = typeof source.price === "string" ? source.price : "";
+  const productUnderstanding = connectKind === "SHOPPING" ? buildProduct9Canvas({ name, description, features,
+    sourceUrl: snapshot.sourceUrl, externalProductId: snapshot.externalProductId }) : undefined;
+  let prewritingPhotoProof: ShoppingPrewritePhotoProof | undefined;
+  if (connectKind === "SHOPPING") {
+    // Only the seller original actually assigned to this manuscript can ground
+    // a revision. Future scenes and unrelated reading images are not substitutes.
+    const originalPaths = [...new Set(prepared.composition.sections
+      .filter(section => section.imageSource === "seller-original").flatMap(section => section.imagePaths))];
+    if (originalPaths.length) {
+      const contextPath = path.join(outputDir, "mcp-draft-context.json");
+      if (fs.existsSync(contextPath)) {
+        try {
+          const saved = readSubmittedPrewritePhoto(contextPath, snapshot);
+          if (saved && originalPaths.some(file => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") === saved.original.sha256))
+            prewritingPhotoProof = saved;
+        } catch { /* A stale context cannot authorize a revision; inspect the assigned pixels below. */ }
+      }
+      if (!prewritingPhotoProof) prewritingPhotoProof = await withShoppingPrewritePhoto({ snapshot, candidatePaths: originalPaths,
+        selectedSourceDirectory: path.join(getBrandPostPackageDir(linkId), "product-sources") }, async proof => proof);
+      assertShoppingPrewritePhoto(prewritingPhotoProof, snapshot);
+    }
+  }
+  const publicationPhotoContext = prewritingPhotoProof ? writingPhotosFromPrewrite(prewritingPhotoProof) : undefined;
   const imagePaths = Array.from(new Set([prepared.heroImagePath, ...prepared.bodyImagePaths]));
   const resolveRevisedComposition = (candidate: { title: string; sections: string[]; hashtags: string[] }) =>
     preservePreparedRevisionRenderPlan(prepared.composition!, normalizePublishedPostText(resolvePostDocument({
@@ -10193,9 +10216,22 @@ async function runPreparedPostRevision(
   const allowCandidateSectionHeadingChange = !qualityConvergence && requestsFreeformSectionHeadingRevision(instructions);
   const acceptedIncrementalIndexes = new Set<number>();
   const writingContract = createWritingPromptContract({ kind: connectKind, product: { name, description, features },
-    minimumSections: selected.sections.length, maximumSections: selected.sections.length,
+    productUnderstanding, publicationPhotoContext,
+    minimumSections: defaultSectionIndexes.length, maximumSections: defaultSectionIndexes.length,
     targetCharacters: getPostCompositionContract(connectKind).targetCharacters,
     hashtagCount: selected.hashtags.length, draftMemo: instructions, verifiedExperienceNotes: "" });
+  if (writingContract.sectionPlan) {
+    let sceneIndex = 0;
+    writingContract.sectionPlan.sections = writingContract.sectionPlan.sections.map((section, index) => {
+      const source = prepared.composition!.sections[index]?.imageSource;
+      const photoRole = source === "seller-original" ? "original" : source === "staged-ai"
+        ? (["scene-1", "scene-2", "scene-3"] as const)[Math.min(sceneIndex++, 2)] : "none";
+      return { ...section, photoRole };
+    });
+  }
+  const savedPhotoPlan = prepared.composition.sections.slice(0, -1).map(section => ({ sectionId: section.id, title: section.title,
+    imageSource: section.imageSource || "none", imageIntent: section.imageIntent, promptRecipe: section.promptRecipe || null,
+    imageMin: section.imageMin ?? 0, imageMax: section.imageMax ?? 1 }));
 
   for (let attempt = 1; attempt <= maximumAttempts && (!qualityConvergence || !selectedQuality.canPublish); attempt += 1) {
     const diagnostic = feedbackFor(selectedQuality);
@@ -10236,7 +10272,7 @@ async function runPreparedPostRevision(
       // Automated convergence uses one bounded JSON edit call per candidate.
       // The spec repair path calls the model once per section and can outlive
       // the MCP request when every section is selected.
-      if (prepared.spec && prepared.draft && !qualityConvergence && !allowCandidateSectionHeadingChange) {
+      if (connectKind !== "SHOPPING" && prepared.spec && prepared.draft && !qualityConvergence && !allowCandidateSectionHeadingChange) {
         candidateResult = await reviseAssembledPost({ spec: prepared.spec, draft: prepared.draft,
           instructions: attemptInstructions, sectionIndexes: allowedIndexes,
           brandLink: link.url, options: { quotationHeaders: NAVER_EDITOR_QUOTATION_ENABLED } });
@@ -10245,6 +10281,10 @@ async function runPreparedPostRevision(
         const response = await generateWithAI(
           "저장된 사실만 사용해 품질 문제를 해결하는 한국어 편집자입니다. JSON만 반환하세요.",
           JSON.stringify({ instructions: attemptInstructions, qualityFeedback: diagnostic, sourceSnapshot: snapshot,
+            writingHarness: formatWritingPromptContract(writingContract),
+            savedPhotoPlan, photoRevisionRule: prewritingPhotoProof
+              ? "첨부한 검증 원본에서 보이는 외형만 설명합니다. 저장 사진 계획·장면 의미를 바꾸지 않으며 미생성 연출 장면을 이미 보이는 것처럼 설명하지 마세요."
+              : "검증된 실제 게시 원본 사진이 첨부되지 않았습니다. 새로운 색상·형상·배치·수량·사진 장면을 추정하거나 외형 묘사를 추가·변경하지 마세요. 텍스트 근거에 있는 기능·규격만 보완하고 기존 사진 계획은 유지합니다.",
             title: selected.title, sections: selected.sections.map((text, index) => ({ index, text,
               ...(!qualityConvergence && prepared.composition!.sections[index]
                 ? { bodyParagraphs: prepared.composition!.sections[index].body } : {}) })), allowedIndexes,
@@ -10258,7 +10298,7 @@ async function runPreparedPostRevision(
             maximumSectionCount: selected.sections.length, writingContract,
             editorialPromptBlock: "저장 스냅샷의 설명·특징에 없는 사실을 추가하지 마세요. 상품명과 SEO 태그는 성분·성능의 증거가 아닙니다.",
             editorialSectionTitles: prepared.composition.sections.map(section => section.title),
-          });
+          }, [], undefined, prewritingPhotoProof);
         const revision = applyFreeformDraftRevision(
           { title: selected.title, sections: selected.sections },
           response,

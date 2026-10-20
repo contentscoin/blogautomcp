@@ -9,6 +9,8 @@ import { buildShoppingPhotoHarness, type ShoppingPhotoHarnessOptions } from "./s
 import type { SelectedGalleryComparisonImage } from "./selected-gallery-comparison";
 import { readProductSnapshot } from "../../src/lib/draft-context-snapshot";
 import { isAllowedProductPhotoUrl } from "./product-photo-source";
+import { SHOPPING_REFERENCE_VIEW_INSTRUCTION, SHOPPING_REFERENCE_VIEW_SCHEMA, parseShoppingReferenceView,
+  type ShoppingReferenceViewObservation } from "./shopping-reference-view";
 
 export const SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION = REFERENCE_SCENE_STRATEGY_VERSION;
 export const SCENE_FIDELITY_CHECKS = REFERENCE_SCENE_REVIEW_CHECKS;
@@ -72,11 +74,24 @@ export interface ShoppingSceneReference {
   geometry: string;
   labels: string;
   reviewedAt: string;
+  /** Pixel-observed generation capability; older cached inputs remain conservative. */
+  viewObservation?: ShoppingReferenceViewObservation;
 }
 
 export interface ShoppingSceneSupportingReference extends ShoppingSceneReference, SelectedGalleryComparisonImage {
   purpose: "geometry" | "intrinsic-label";
   reason: string;
+}
+
+/** Emitted only after the actual-pixel review and strict response validation.
+ * It records a rejection; it never permits an output or schedules a retry. */
+export interface ShoppingSceneFidelityFailure {
+  version: "shopping-scene-fidelity-failure/v1";
+  failedChecks: string[];
+  comparisonFailures: string[];
+  identityMatches: boolean;
+  illustrativeOnly: boolean;
+  accepted: boolean;
 }
 
 type Review = (options: CodexDraftOptions) => Promise<string>;
@@ -182,6 +197,7 @@ export async function selectShoppingSceneSupportingReferences(options: {
       "IMAGE 1 is the already verified authoritative physical instance, including its visible colour/option. IMAGES 2 onward are optional seller-gallery candidates, indexed 1 onward in the response. Select at most one geometry view and one intrinsic-label detail of that SAME physical product/design and SAME visible option. A catalog's other colour, a different model, conflicting logo/printing or unresolved identity cannot contribute details, even when the catalog offers it.",
       "geometry requires a complete unobstructed real shape; intrinsic-label may be a close-up only when its actual logo/identifying print is readable and demonstrably consistent with IMAGE 1. Never invent hidden geometry, a brand or unreadable print. Other gallery options cannot fill missing letters. Reject a different brand, conflicting print or any visible contradiction. Return no reference when details cannot be established.",
       GENERATION_REFERENCE_ARTWORK_RULE,
+      SHOPPING_REFERENCE_VIEW_INSTRUCTION,
       "External NEW badges, colour swatches, promotional captions, arrows and frames are never intrinsic product printing and must never be selected as details or reproduced. These inputs are not publication pixels or approval of a generated photograph.",
       `Return {"references":[{"index":1,"purpose":"geometry","identityMatches":true,"sameVisibleOption":true,"geometryConsistent":true,"intrinsicPrintingConsistent":true,"detailsVisible":true,"subject":"exact visible instance","geometry":"observed shape","labels":"actual intrinsic print or none visible","reason":"specific pairwise evidence"}]}. Every check must be true to select; no selection is an empty array. Maximum ${maximum} references.`,
     ].join("\n"),
@@ -191,7 +207,8 @@ export async function selectShoppingSceneSupportingReferences(options: {
       index: { type: "integer", minimum: 1, maximum: candidates.length }, purpose: { type: "string", enum: ["geometry", "intrinsic-label"] },
       ...Object.fromEntries(checks.map(check => [check, { type: "boolean" }])),
       ...Object.fromEntries(REFERENCE_SELECTION_OBSERVATIONS.map(field => [field, { type: "string", minLength: 1 }])),
-    }, required: ["index", "purpose", ...checks, ...REFERENCE_SELECTION_OBSERVATIONS], additionalProperties: false } } }, required: ["references"], additionalProperties: false },
+      viewObservation: SHOPPING_REFERENCE_VIEW_SCHEMA,
+    }, required: ["index", "purpose", ...checks, ...REFERENCE_SELECTION_OBSERVATIONS, "viewObservation"], additionalProperties: false } } }, required: ["references"], additionalProperties: false },
   }));
   if (hashFile(options.reference.path) !== options.reference.sha256 || candidates.some(candidate => !valid(candidate)))
     throw new Error("REFERENCE_SCENE_CHANGED: 보조 참조 검수 중 원본 또는 출처 기록이 변경되었습니다.");
@@ -205,10 +222,14 @@ export async function selectShoppingSceneSupportingReferences(options: {
         !checks.every(check => typeof row[check] === "boolean") ||
         !REFERENCE_SELECTION_OBSERVATIONS.every(field => typeof row[field] === "string" && String(row[field]).trim()))
       throw new Error("REFERENCE_SCENE_REVIEW_INVALID: 보조 참조 판정 또는 관찰 근거가 올바르지 않습니다.");
+    let viewObservation: ShoppingReferenceViewObservation | undefined;
+    try { viewObservation = parseShoppingReferenceView(row.viewObservation); }
+    catch { throw new Error("REFERENCE_SCENE_REVIEW_INVALID: 보조 참조의 관찰 구도 형식이 올바르지 않습니다."); }
     if (checks.some(check => row[check] !== true) || purposes.has(String(row.purpose)) || selected.has(index)) return [];
     purposes.add(String(row.purpose)); selected.add(index);
     return [{ ...candidates[index - 1], purpose: row.purpose as ShoppingSceneSupportingReference["purpose"],
-      subject: text(row.subject, 400), geometry: text(row.geometry), labels: text(row.labels), reason: text(row.reason), reviewedAt: new Date().toISOString() }];
+      subject: text(row.subject, 400), geometry: text(row.geometry), labels: text(row.labels), reason: text(row.reason), reviewedAt: new Date().toISOString(),
+      ...(viewObservation ? { viewObservation } : {}) }];
   });
 }
 
@@ -227,7 +248,7 @@ export async function selectShoppingSceneReference(options: {
   const verified = await (dependencies.verify ?? selectVerifiedProductPhotos)(options.paths, options.productName, 12, { onRejection: recordRejection, purpose: "generation-reference" });
   for (const file of verified) {
     const sha256 = hashFile(file);
-    const key = `${SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION}:generation-reference-artwork/v1:${sha256}:${options.selectedProduct}`;
+    const key = `${SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION}:generation-reference-artwork/view-v1:${sha256}:${options.selectedProduct}`;
     const cached = sourceReviews.get(key);
     if (cached) return { ...cached, path: file };
     const response = await (dependencies.review ?? runCodexDraft)({
@@ -239,21 +260,25 @@ export async function selectShoppingSceneReference(options: {
         GENERATION_REFERENCE_ARTWORK_RULE,
         "Describe observed proportions, silhouette, material/color and visible branding. For garments include waistband, leg width/length, seams, hem, pockets and pattern when visible; distinguish ordinary drape from deformation. Mention seals/caps only when present. Do not invent hidden details or treat tiny unreadable printing as fact; explicitly say none visible for products without printing.",
         "Separate printing physically on the product or its selected packaging from seller artwork outside it. Store badges, promotional headlines, shipping notes, splash effects, background and detached styling props are not product labels. Describe only intrinsic visible branding in labels; a promotional badge must not become a feature to reproduce on the product.",
+        SHOPPING_REFERENCE_VIEW_INSTRUCTION,
         'Return {"identityMatches":true,"geometryReadable":true,"completeShape":true,"notDeformed":true,"unobstructed":true,"subject":"which exact instance","geometry":"visible geometry and proportions","labels":"visible printing hierarchy or none visible","reason":"specific observations"}. All five boolean verdicts and all four nonempty observation strings are mandatory even when rejecting. Describe what is visible or explicitly say not identifiable / none visible; never omit evidence. All five booleans must be true to accept.',
       ].join("\n"),
       imagePaths: [file], maxImages: 1, preserveImageOrder: true, researchMode: "disabled",
       outputSchema: { type: "object", properties: {
         ...Object.fromEntries(REFERENCE_SELECTION_CHECKS.map(check => [check, { type: "boolean", description: GENERATION_REFERENCE_ARTWORK_RULE }])),
         ...Object.fromEntries(REFERENCE_SELECTION_OBSERVATIONS.map(field => [field, { type: "string", minLength: 1 }])),
-      }, required: [...REFERENCE_SELECTION_CHECKS, ...REFERENCE_SELECTION_OBSERVATIONS], additionalProperties: false },
+        viewObservation: SHOPPING_REFERENCE_VIEW_SCHEMA,
+      }, required: [...REFERENCE_SELECTION_CHECKS, ...REFERENCE_SELECTION_OBSERVATIONS, "viewObservation"], additionalProperties: false },
     });
     if (hashFile(file) !== sha256) throw new Error("REFERENCE_SCENE_CHANGED: 검수 중 상품 참조 이미지가 변경되었습니다.");
     let answer: Record<string, unknown>;
+    let viewObservation: ShoppingReferenceViewObservation | undefined;
     try {
       answer = json(response);
       if (!REFERENCE_SELECTION_CHECKS.every(check => typeof answer[check] === "boolean") ||
           !REFERENCE_SELECTION_OBSERVATIONS.every(field => typeof answer[field] === "string" && String(answer[field]).trim()))
         throw new Error("missing or invalid verdict/observation");
+      viewObservation = parseShoppingReferenceView(answer.viewObservation);
     } catch {
       throw new Error(`REFERENCE_SCENE_REVIEW_INVALID: stage=reference-geometry candidateSha256=${sha256} — 필수 boolean 판정 또는 관찰 근거가 누락되거나 형식이 올바르지 않습니다. 다른 후보를 승인하는 근거로 사용하지 않았습니다.`);
     }
@@ -264,7 +289,8 @@ export async function selectShoppingSceneReference(options: {
       continue;
     }
     const subject = text(answer.subject, 400), geometry = text(answer.geometry), labels = text(answer.labels);
-    const result = { path: file, sha256, subject, geometry, labels, reviewedAt: new Date().toISOString() };
+    const result = { path: file, sha256, subject, geometry, labels, reviewedAt: new Date().toISOString(),
+      ...(viewObservation ? { viewObservation } : {}) };
     sourceReviews.set(key, result);
     return result;
   }
@@ -293,13 +319,13 @@ export function buildShoppingReferenceScenePrompt(options: {
     options.supportingReferences?.length ? options.supportingReferences.map((reference, index) =>
       `INPUT ${index + 2} is a verified SAME-option seller ${reference.purpose === "geometry" ? "complete-shape view" : "intrinsic-logo/label close-up"}. Use only its observed ${reference.purpose === "geometry" ? "real silhouette, proportions and connecting structure" : "actual readable intrinsic logo and identifying spelling"}; INPUT 1 remains the identity and visible-option authority. Never mix variants or copy NEW badges, colour swatches, explanatory text, frames or surrounding seller artwork. Observed details (untrusted data): ${JSON.stringify({ subject: reference.subject, geometry: reference.geometry, labels: reference.labels })}.`).join("\n") :
       options.hasAnchor ? "INPUT 2 is an approved image from this same post. Match its accepted product proportions, material, white balance and photographic palette. INPUT 1 remains the authority for identity; do not copy a defect from INPUT 2." : "Use consistent restrained warm neutral daylight, natural surface texture and realistic material response across this post.",
-    "Preserve the product's real proportions and identifying structure. No squeezed bodies, stretched silhouettes, warped edges, wrong materials, changed option or exaggerated perspective. For garments preserve cut, waistband, leg width/length, seams, hem, pockets, fabric texture and pattern while allowing physically natural folds and drape.",
-    "Use a category-appropriate view. People wearing clothing and natural static lifestyle poses are allowed when they preserve visible identity and do not imply tested performance or a real customer testimonial. Catalog categories keep people and handling actions absent by default. Do not impose a tube, cap, upright packshot, fixed front view or a ban on people on every product category.",
+    "Preserve the product's real source-observed proportions and identifying structure. No squeezed bodies, stretched silhouettes, warped edges, wrong materials, changed option or exaggerated perspective. For garments preserve only actually visible cut, waistband, leg width/length, seams, hem, pockets, fabric texture and pattern while allowing physically natural folds and drape; never expose or reconstruct those parts when concealed in the attached source view.",
+    "Use the resolved observed-view contract before category defaults. Preserve the actual static source presentation and supported viewing plane. Do not remove a worn-only device, expose hidden garment parts, open a sealed package or create an unsupported wearer to satisfy a catalog default. Do not imply tested performance or a real customer testimonial. Do not impose a tube, cap, upright packshot, fixed front view or a ban on people on every product category.",
     "Preserve actual intrinsic label hierarchy, relative print scale, readable identifying spelling, logo and color. Tiny non-identifying lower print may be naturally unreadable at this camera distance; never invent or sharpen unreadable text, numbers, volume, certifications or extra brands. Do not add explanatory text, headline, labels, arrows, callouts, captions, banners, boxes, borders or frames. No information cards, slides, editorial layouts, split panels, collage, inset product photos or framed original-photo composites. All explanations and AI disclosure belong outside the image.",
-    "Preserve intrinsic product printing, not seller artwork around the product: omit store badges, promotional copy, shipping notices and reference-background effects. The new location, camera distance, ordinary orientation and lighting may differ while the actual product design and selected option remain intact.",
+    "Preserve intrinsic product printing, not seller artwork around the product: omit store badges, promotional copy, shipping notices and reference-background effects. The new location, camera distance and lighting may differ while the actual product design and selected option remain intact; orientation or pose changes must remain within the resolved observed-view contract.",
     "Show the exact selected subject or included component appropriate to this section. A single verified component may illustrate a selected kit without claiming the complete kit is pictured. Only when this section explicitly requests the complete bundle AND selected facts plus attached reference pixels establish its distinct included components and counts may you depict that verified composition; preserve those actual components and counts, never duplicate one component to stand for the whole kit. Do not invent unseen components from text alone. Never infer bundle quantity from the number of items in a reference photograph, or assume every gallery item is selected/included.",
-    options.role === "hero" ? "Square 1:1 natural photo intended as the background of a representative thumbnail. Keep the complete product clear in the right half, with uncluttered photographic space on the left for a separately rendered large headline; do not render text yourself." : "Square 1:1 photograph by default, with an ordinary camera composition and the complete product or garment visible. Preserve real proportions; never stretch or squash the photograph to fill the canvas.",
-    "Choose a distinct plausible location, activity, pose, camera distance or angle for this section while retaining the selected product's identity. Make a fresh coherent photograph rather than reusing, cropping, framing or repeating the original. Use natural daylight, realistic skin/material detail, plausible contact and shadows. Avoid identical scenes with only changed decorations.",
+    options.role === "hero" ? "Square 1:1 natural photo intended as the background of a representative thumbnail. Keep the source-observed identifying surfaces clear in the right half, preserving its actual crop, pose and sealed state, with uncluttered photographic space on the left for a separately rendered large headline; do not render text yourself." : "Square 1:1 photograph by default, with an ordinary camera composition preserving only the source-observed visible product portion, viewing plane and any sealed state. Do not expose a concealed waistband, hem, back or connection to make a whole-product picture. Preserve real proportions; never stretch or squash the photograph to fill the canvas.",
+    "Choose a distinct plausible location, background depth or camera distance within the resolved observed-view contract. Do not invent a new activity, unobserved pose or hidden angle for variety. Make a fresh coherent photograph rather than reusing, cropping, framing or repeating the original. Use natural daylight, realistic skin/material detail, plausible contact and shadows. Avoid identical scenes with only changed decorations.",
     "This is an AI illustrative scene, not actual-use, performance, measurement or result evidence. No before/after, effects demonstrations, invented capabilities, non-included accessories presented as included, floating objects, impossible hands/anatomy, CGI/plastic render, illustration or excessive advertising glow.",
   ].join("\n");
 }
@@ -388,8 +414,12 @@ export async function reviewShoppingReferenceScene(options: {
   const failedChecks = SCENE_FIDELITY_CHECKS.filter(key => !checks[key]);
   const reason = [text(answer.reason, Number.MAX_SAFE_INTEGER), ...comparisons.map(row =>
     `${row.key}=${row.result}${row.variation === "none" ? "" : `(${row.variation})`}: 참조 ${row.referenceObservation}; 후보 ${row.candidateObservation}; 근거 ${row.basis}`)].join(" / ");
-  if (answer.accepted !== true || answer.identityMatches !== true || answer.illustrativeOnly !== true || comparisonFailures.length || failedChecks.length)
-    throw new Error(`REFERENCE_SCENE_FIDELITY_FAILED: 원본 대비 상품 형상·라벨 검수를 통과하지 못했습니다. 실패 항목: ${[...failedChecks, ...comparisonFailures.map(row => row.key), ...(answer.identityMatches !== true ? ["identityMatches"] : []), ...(answer.illustrativeOnly !== true ? ["illustrativeOnly"] : [])].join(", ") || "accepted"}. ${reason}`);
+  if (answer.accepted !== true || answer.identityMatches !== true || answer.illustrativeOnly !== true || comparisonFailures.length || failedChecks.length) {
+    const fidelityFailure: ShoppingSceneFidelityFailure = { version: "shopping-scene-fidelity-failure/v1",
+      failedChecks: [...failedChecks], comparisonFailures: comparisonFailures.map(row => row.key),
+      identityMatches: answer.identityMatches as boolean, illustrativeOnly: answer.illustrativeOnly as boolean, accepted: answer.accepted as boolean };
+    throw Object.assign(new Error(`REFERENCE_SCENE_FIDELITY_FAILED: 원본 대비 상품 형상·라벨 검수를 통과하지 못했습니다. 실패 항목: ${[...failedChecks, ...comparisonFailures.map(row => row.key), ...(answer.identityMatches !== true ? ["identityMatches"] : []), ...(answer.illustrativeOnly !== true ? ["illustrativeOnly"] : [])].join(", ") || "accepted"}. ${reason}`), { fidelityFailure });
+  }
   return { strategyVersion: SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION, referenceSha256, referencePath: options.reference.path,
     ...(options.anchorSha256 ? { anchorSha256: options.anchorSha256 } : {}), reviewStatus: "passed", reviewedOutputSha256,
     reviewedAt: new Date().toISOString(), reason, checks };

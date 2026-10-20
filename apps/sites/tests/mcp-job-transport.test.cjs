@@ -266,7 +266,7 @@ test('both tools/list protocols expose preparation, recovery and shopping refere
     const hashes = apply.inputSchema.properties.referenceHashes;
     assert.equal(hashes.type, 'array');
     assert.equal(hashes.minItems, 1);
-    assert.equal(hashes.maxItems, 2);
+    assert.equal(hashes.maxItems, 3);
     assert.equal(hashes.items.pattern, '^[a-f0-9]{64}$');
     assert.match(apply.description, /referenceHashes/u);
     assert.equal(apply.inputSchema.additionalProperties, false);
@@ -389,14 +389,15 @@ test('travel keeps twelve sections while older PCs cannot accept submitted draft
 test('shopping scene tool requires ordered references; travel keeps its existing input contract', async () => {
   const args = { connectKind: 'shopping', productId: 'product-1', sectionId: 'scene', generatedImageUrl: 'https://example.test/generated.png', idempotencyKey: 'reference-scene-fixture' };
   assert.equal((await call('owner', 'mcp:write', 'post_apply_section_image', args)).result.structuredContent.code, 'PRODUCT_REFERENCE_REQUIRED');
-  for (const referenceHashes of [[], ['bad'], ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64)]])
+  for (const referenceHashes of [[], ['bad'], ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64), 'd'.repeat(64)]])
     assert.equal((await call('owner', 'mcp:write', 'post_apply_section_image', { ...args, referenceHashes })).result.structuredContent.code, 'INVALID_ARGUMENT');
   const { validateToolArguments } = load('lib/tool-schema.ts');
   const listing = await route.handleMcpRequest(new Request('https://example.test/api/mcp', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }) }), 'owner', 'mcp:read mcp:write');
   const tool = (await listing.json()).result.tools.find(tool => tool.name === 'post_apply_section_image');
   assert.match(tool.description, /실제 원본/u);
   assert.equal(validateToolArguments(tool.inputSchema, { ...args, connectKind: 'travel' }).ok, true);
-  const valid = { ...args, referenceHashes: ['b'.repeat(64), 'a'.repeat(64)] };
+  const valid = { ...args, referenceHashes: ['b'.repeat(64), 'a'.repeat(64), 'c'.repeat(64)] };
+  assert.equal(validateToolArguments(tool.inputSchema, valid).ok, true, 'primary, geometry and intrinsic-label references fit the shared PC contract');
   const replayRoute = load('app/api/mcp/[credential]/route.ts', { ...mocks, '@/db': { getD1: () => ({ prepare: () => ({ bind: () => ({ first: async () => ({ id: 'job_reference', type: 'POST_APPLY_SECTION_IMAGE', inputJson: JSON.stringify(valid), status: 'SUCCEEDED' }) }) }) }) } });
   const request = new Request('https://example.test/api/mcp', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'post_apply_section_image', arguments: valid } }) });
   assert.equal((await (await replayRoute.handleMcpRequest(request, 'owner', 'mcp:write')).json()).result.structuredContent.reused, true, 'Reference order must survive schema validation and queue serialization.');
@@ -437,6 +438,21 @@ test('shopping natural-photo apply requires PC 1.3.97 while travel and draft rea
   const capabilities = (await invoke('agent_get_status', {})).capabilities;
   assert.equal(capabilities.shoppingReferenceScenes.minimumAppVersion, '1.3.97');
   assert.equal(capabilities.shoppingReferenceScenes.supported, true);
+  const three = { ...apply, referenceHashes: [...apply.referenceHashes, 'c'.repeat(64)] };
+  const scopedRead = { connectKind: 'shopping', draftId: 'approved-draft', referenceSectionId: 'scene' };
+  const previousQueued = queued.length;
+  version = '1.3.142';
+  for (const [tool, input] of [['post_apply_section_image', three], ['post_get_draft', scopedRead]]) {
+    const rejected = await invoke(tool, input);
+    assert.equal(rejected.code, 'APP_UPDATE_REQUIRED'); assert.equal(rejected.required, '1.3.143');
+  }
+  assert.equal(queued.length, previousQueued, 'old PCs cannot ignore the selected-slot field or reject a newly accepted three-reference apply');
+  assert.equal((await invoke('post_get_draft', { connectKind: 'shopping', draftId: 'approved-draft' })).status, 'QUEUED');
+  version = '1.3.143';
+  assert.equal((await invoke('post_apply_section_image', three)).status, 'QUEUED');
+  assert.deepEqual(queued.at(-1).referenceHashes, three.referenceHashes);
+  assert.equal((await invoke('post_get_draft', scopedRead)).status, 'QUEUED');
+  assert.equal(queued.at(-1).referenceSectionId, 'scene');
 });
 
 test('legacy shopping draft reads preserve approval and text but suppress obsolete paid-generation instructions', async () => {
@@ -540,6 +556,32 @@ const nativeReferenceFixtures = [
   nativeReferenceFixture('product-identity', 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN0sAAAAASUVORK5CYII='),
   nativeReferenceFixture('approved-scene-continuity', 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='),
 ];
+
+test('three-reference product bundles preserve identity, geometry and intrinsic-label pixels in exact attachment order', async () => {
+  const previous = storedResult;
+  const source = nativeReferenceFixtures[0];
+  const geometry = { ...nativeReferenceFixtures[1], role: 'product-geometry' };
+  const label = nativeReferenceFixture('product-intrinsic-label', Buffer.concat([Buffer.from(source.base64, 'base64'), Buffer.from('label')]).toString('base64'));
+  try {
+    const references = [source, geometry, label];
+    storedResult = JSON.stringify({ data: { nativeReferenceImages: references } });
+    const result = (await call('owner', 'mcp:read', 'job_get', { jobId: 'job_owned' })).result;
+    assert.deepEqual(result.structuredContent.job.imageAttachments.map(item => item.role), references.map(item => item.role));
+    assert.deepEqual(result.content.filter(block => block.type === 'image').map(block => block.data), references.map(item => item.base64));
+    for (const [index, image] of references.entries()) {
+      assert.equal(result.structuredContent.job.imageAttachments[index].sha256, image.sha256);
+      assert.equal(result.structuredContent.job.imageAttachments[index].attachmentIndex, index + 1);
+    }
+    const fourth = nativeReferenceFixture('approved-scene-continuity', Buffer.concat([Buffer.from(source.base64, 'base64'), Buffer.from('anchor')]).toString('base64'));
+    for (const invalid of [[...references, fourth], [geometry, source, label], [source, { ...geometry, role: 'unknown' }, label],
+      [source, geometry, { ...label, sha256: '0'.repeat(64) }]]) {
+      storedResult = JSON.stringify({ data: { nativeReferenceImages: invalid } });
+      const rejected = (await call('owner', 'mcp:read', 'job_get', { jobId: 'job_owned' })).result;
+      assert.equal(rejected.structuredContent.code, 'IMAGE_REFERENCE_INVALID');
+      assert.equal(rejected.content.filter(block => block.type === 'image').length, 0);
+    }
+  } finally { storedResult = previous; }
+});
 
 test('result first-page read delivers exact native pixels after a status-only read; later pages do not repeat them', async () => {
   const previous = storedResult;

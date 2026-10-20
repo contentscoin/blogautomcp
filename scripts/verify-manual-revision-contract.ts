@@ -1,6 +1,9 @@
 /** Offline production-function coverage: no account, browser, provider or live data. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import crypto from "node:crypto";
 import vm from "node:vm";
 import ts from "typescript";
 import { applyFreeformDraftRevision, assertUntargetedSectionHashesUnchanged,
@@ -14,6 +17,16 @@ import { normalizePublishedPostText, resolvePostDocument, getPostCompositionCont
 import { classifyLocalFailure, LocalAutomationError } from "../src/lib/local-automation-error";
 import { normalizeMaterialFailureObservations, formatMaterialFailureReference } from "./lib/material-failure-reference";
 import { codexDraftTerminalFailureCode } from "./lib/codex-draft-provider";
+import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
+import { buildProduct9Canvas } from "./lib/product-9canvas";
+import { createWritingPromptContract, formatWritingPromptContract } from "./lib/writing-prompt-contract";
+import { assertShoppingPrewritePhoto, persistPrewritePhotoForContext, readSubmittedPrewritePhoto,
+  withShoppingPrewritePhoto, writingPhotosFromPrewrite, type ShoppingPrewritePhotoProof } from "./lib/shopping-prewrite-photos";
+
+const photoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "blogautomcp-revision-contract-"));
+const photoPaths = ["hero.png", "source.png", "scene.png"].map(name => path.join(photoRoot, name));
+for (const file of photoPaths) fs.writeFileSync(file, Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.alloc(2048, 8)]));
+const hashFile = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 
 for (const [instruction, postTitle, sectionHeading] of [
   ["3번 소제목을 수정해 주세요", false, true],
@@ -52,8 +65,10 @@ assert.match(applyFreeformDraftRevision(draft, JSON.stringify({ updates: [{ inde
 
 const fixture = normalizePublishedPostText(resolvePostDocument({ connectKind: "SHOPPING", title: "테스트 상품 보관 기준",
   sections: Array.from({ length: 7 }, (_, index) => `${index === 3 ? "65kg 수치 확인" : `섹션 ${index}`}\n\n첫 문단 ${index}의 확인된 상품 설명입니다.\n\n둘째 문단 ${index}의 확인된 보관 조건입니다.\n\n셋째 문단 ${index}의 확인된 구매 기준입니다.`),
-  hashtags: ["상품", "보관", "선택"], imagePaths: ["fixture/hero.png", "fixture/source.png", "fixture/scene.png"],
+  hashtags: ["상품", "보관", "선택"], imagePaths: photoPaths,
   connectUrl: "https://example.test/affiliate" }));
+fixture.sections[0].imageSource = "seller-original";
+fixture.sections[0].imagePaths = [photoPaths[0]];
 // Actual legacy packages have two text blocks per section. Keep an explicit
 // boundary so a freely rewrapped body still fails closed while arrays succeed.
 const seenParagraphSections = new Set<string>();
@@ -115,27 +130,53 @@ for (const code of ["DRAFT_REVISION_FORMAT_INVALID", "REVISION_RENDER_SCOPE_AMBI
     "an old revision cannot grant instructions or corrective authority to the current agent");
 }
 
-async function execute(options: { instructions: string; responses: string[]; qualityConvergence?: boolean; providerError?: Error }) {
+async function execute(options: { instructions: string; responses: string[]; qualityConvergence?: boolean; providerError?: Error;
+  savedPhoto?: "trusted" | "stale"; rejectPhoto?: boolean; noOriginal?: boolean; spec?: boolean }) {
   const writes: Array<{ composition: typeof fixture; post: { title: string; sections: string[] } }> = [];
   const prompts: Array<Record<string, unknown>> = [];
   const logs: string[] = [];
   let responseIndex = 0, dbWrites = 0;
   const quality = { ...measured, canPublish: !options.qualityConvergence, blockers: [], score: 92 };
-  const snapshot = { productId: "fixture", connectKind: "SHOPPING", product: { name: "테스트 상품", description: "확인된 상품 설명", features: ["확인된 보관 조건"] } };
-  const prepared = { composition: fixture, manifest: { fixture: true }, sourceSnapshot: snapshot,
-    post: { title: fixture.title, sections: initialSections, hashtags: ["상품", "보관", "선택"] }, heroImagePath: "fixture/hero.png", bodyImagePaths: ["fixture/source.png", "fixture/scene.png"] };
+  const snapshot = createProductSnapshot({ productId: "fixture", connectKind: "SHOPPING", externalProductId: "test-product",
+    sourceUrl: "https://example.test/product", product: { name: "테스트 상품", description: "확인된 상품 설명", features: ["확인된 보관 조건"] } });
+  const outputDir = fs.mkdtempSync(path.join(photoRoot, "run-"));
+  let photoReviews = 0;
+  const selectPhoto = async (files: string[]) => options.rejectPhoto ? null : { path: files[0], sourceSha256: hashFile(files[0]),
+    targetIndex: 0, reviewClass: "product-photo" as const, reason: "선택 상품 외형의 검증 원본", reviewedAt: new Date().toISOString() };
+  const composition = options.noOriginal ? { ...fixture, sections: fixture.sections.map(section => ({ ...section, imageSource: "none" as const })) } : fixture;
+  if (options.savedPhoto) {
+    const proofSnapshot = options.savedPhoto === "stale" ? createProductSnapshot({ ...snapshot,
+      product: { ...snapshot.product, name: "다른 상품" } }) : snapshot;
+    const proof = await withShoppingPrewritePhoto({ snapshot: proofSnapshot, candidatePaths: [photoPaths[0]] }, async value => value,
+      { select: async files => ({ ...(await selectPhoto(files))!, path: files[0], sourceSha256: hashFile(files[0]) }) });
+    const contextPath = path.join(outputDir, "mcp-draft-context.json"), saved = persistPrewritePhotoForContext(proof, contextPath);
+    fs.writeFileSync(contextPath, JSON.stringify({ snapshot: proofSnapshot, snapshotId: proofSnapshot.snapshotId,
+      prewritingPhotoProof: saved, publicationPhotoContext: writingPhotosFromPrewrite(saved) }));
+  }
+  const prepared = { composition, manifest: { fixture: true }, sourceSnapshot: snapshot,
+    post: { title: fixture.title, sections: initialSections, hashtags: ["상품", "보관", "선택"] }, heroImagePath: photoPaths[0], bodyImagePaths: photoPaths.slice(1),
+    ...(options.spec ? { spec: {}, draft: {} } : {}) };
+  const photoInputs: Array<ShoppingPrewritePhotoProof | undefined> = [];
   const sandbox: { run?: (id: string, kind: string, link: unknown, request: string) => Promise<void>; [key: string]: unknown } = {
-    process: { env: { BRANDLINK_PREPARE_OUTPUT_DIR: "fixture-output" } }, fs: { readFileSync: () => JSON.stringify({ instructions: options.instructions, sectionIndexes: [0, 1, 3], qualityConvergence: Boolean(options.qualityConvergence) }), existsSync: () => true },
-    path: { resolve: (value: string) => value }, console: { log: (line: string) => logs.push(line) },
+    process: { env: { BRANDLINK_PREPARE_OUTPUT_DIR: outputDir } }, fs: { ...fs, readFileSync: (file: string, ...args: unknown[]) => file === "fixture-request"
+      ? JSON.stringify({ instructions: options.instructions, sectionIndexes: [0, 1, 3], qualityConvergence: Boolean(options.qualityConvergence) })
+      : Reflect.apply(fs.readFileSync, fs, [file, ...args]) },
+    path, crypto, console: { log: (line: string) => logs.push(line) },
+    buildProduct9Canvas, getBrandPostPackageDir: () => outputDir, readSubmittedPrewritePhoto, assertShoppingPrewritePhoto, writingPhotosFromPrewrite,
+    withShoppingPrewritePhoto: async (input: Parameters<typeof withShoppingPrewritePhoto>[0], operation: (proof: ShoppingPrewritePhotoProof) => Promise<ShoppingPrewritePhotoProof>) => {
+      photoReviews++; return withShoppingPrewritePhoto(input, operation, { select: selectPhoto });
+    },
     loadPreparedBrandLinkPostOverride: () => prepared,
     brandPostQualitySourceFromSnapshot: () => ({ productName: "테스트 상품", sourceDescription: "확인된 상품 설명", sourceFeatures: ["확인된 보관 조건"] }),
     preservePreparedRevisionRenderPlan, normalizePublishedPostText, resolvePostDocument, getPostCompositionContract,
     BRANDLINK_QUALITY_PRESET: "PREMIUM", BRANDLINK_EXPERIENCE_MODE: "AI_ASSISTED_INFORMATION", BRANDLINK_REQUIRE_REPRESENTATIVE_IMAGE: true,
     getBrandLinkContentReadiness: () => quality, publishedReadinessSections: (document: typeof fixture) => readPreparedCompositionSections(document),
     stripInternalGuidanceSentences: (text: string) => text, requestsFreeformTitleRevision, requestsFreeformSectionHeadingRevision,
-    createWritingPromptContract: () => ({}), selectPreparedRevisionSectionIndexes, isPreparedTitleOnlyRepair,
+    createWritingPromptContract, formatWritingPromptContract, selectPreparedRevisionSectionIndexes, isPreparedTitleOnlyRepair,
     planQualityConvergence: () => ({ action: "repair-text", targets: [{ key: "fixture-body" }] }), formatQualityConvergenceInstructions: () => "실패 항목만 보완",
-    generateWithAI: async (_system: string, prompt: string) => { prompts.push(JSON.parse(prompt)); if (options.providerError) throw options.providerError; return options.responses[Math.min(responseIndex++, options.responses.length - 1)]; },
+    generateWithAI: async (_system: string, prompt: string, _context: unknown, _images: unknown, _schema: unknown, proof?: ShoppingPrewritePhotoProof) => {
+      prompts.push(JSON.parse(prompt)); photoInputs.push(proof); if (proof) assertShoppingPrewritePhoto(proof, snapshot);
+      if (options.providerError) throw options.providerError; return options.responses[Math.min(responseIndex++, options.responses.length - 1)]; },
     applyFreeformDraftRevision, assertUntargetedSectionHashesUnchanged, shouldAcceptQualityRepair,
     codexDraftTerminalFailureCode, getErrorMessage: (error: unknown) => error instanceof Error ? error.message : String(error),
     isDraftEditorialQualityPassed: () => true, writePreparedBrandPostPackage: (params: typeof writes[number]) => { writes.push(params); return "fixture-manifest"; },
@@ -147,7 +188,7 @@ async function execute(options: { instructions: string; responses: string[]; qua
   let failure = "";
   try { await sandbox.run!("fixture", "SHOPPING", { url: "https://example.test/affiliate" }, "fixture-request"); }
   catch (error) { failure = String(error); }
-  return { writes, prompts, logs, dbWrites, failure };
+  return { writes, prompts, logs, dbWrites, failure, photoReviews, photoInputs };
 }
 
 async function main() {
@@ -164,6 +205,26 @@ async function main() {
   assert.deepEqual(paragraphs.writes[0].composition.renderNodes.filter(node => node.kind !== "paragraph"), fixture.renderNodes.filter(node => node.kind !== "paragraph"));
   const promptSections = paragraphs.prompts[0].sections as Array<{ bodyParagraphs: string[] }>;
   assert.deepEqual(promptSections[0].bodyParagraphs, fixture.sections[0].body);
+  assert.equal(paragraphs.photoReviews, 1);
+  assert.ok(paragraphs.photoInputs[0], "the actual revision writer receives the exact reviewed original pixels");
+  assert.match(String(paragraphs.prompts[0].writingHarness), /VERIFIED_PUBLICATION_ORIGINAL|PLANNED_SCENE/u);
+  assert.match(String(paragraphs.prompts[0].writingHarness), /scene-1|scene-2|scene-3/u);
+  const savedPlan = paragraphs.prompts[0].savedPhotoPlan as Array<{sectionId: string; imageSource: string; imageIntent: string}>;
+  assert.equal(savedPlan.length, fixture.sections.length - 1);
+  assert.equal(savedPlan[0].sectionId, fixture.sections[0].id); assert.equal(savedPlan[0].imageSource, "seller-original");
+  assert.equal(savedPlan[0].imageIntent, fixture.sections[0].imageIntent);
+  const trusted = await execute({ instructions: "지정 문장만 교정", responses: [JSON.stringify(paragraphResponse)], savedPhoto: "trusted", spec: true });
+  assert.equal(trusted.failure, ""); assert.equal(trusted.photoReviews, 0, "an intact same-snapshot proof is rebound without another visual call");
+  assert.ok(trusted.photoInputs[0]);
+  const stale = await execute({ instructions: "지정 문장만 교정", responses: [JSON.stringify(paragraphResponse)], savedPhoto: "stale" });
+  assert.equal(stale.failure, ""); assert.equal(stale.photoReviews, 1, "another product's cached proof never authorizes this revision");
+  const rejectedPhoto = await execute({ instructions: "지정 문장만 교정", responses: [JSON.stringify(paragraphResponse)], rejectPhoto: true });
+  assert.match(rejectedPhoto.failure, /IMAGE_SOURCE_BINDING_REQUIRED/u); assert.equal(rejectedPhoto.prompts.length, 0);
+  assert.equal(rejectedPhoto.writes.length + rejectedPhoto.dbWrites, 0);
+  const noOriginal = await execute({ instructions: "지정 문장만 교정", responses: [JSON.stringify(paragraphResponse)], noOriginal: true });
+  assert.equal(noOriginal.failure, ""); assert.equal(noOriginal.photoReviews, 0); assert.equal(noOriginal.photoInputs[0], undefined);
+  assert.match(String(noOriginal.prompts[0].writingHarness), /연결 정보가 없습니다|연결 정보 없음/u);
+  assert.match(String(noOriginal.prompts[0].photoRevisionRule), /외형 묘사를 추가·변경하지/u);
   for (const response of ["bad JSON", JSON.stringify({ updates: [{ index: 0, paragraphs: ["문단 수 오류"] }] })]) {
     const failed = await execute({ instructions: "지정 문장만 교정", responses: [response] });
     assert.match(failed.failure, /DRAFT_REVISION_FORMAT_INVALID/u);
@@ -188,4 +249,4 @@ async function main() {
   assert.equal(quotaFailure.writes.length + quotaFailure.dbWrites, 0);
   console.log("PASS: actual manual revision function, separate heading authority, fixed paragraph contracts, exact layout retention, legacy body compatibility and truthful failure causes");
 }
-main().catch(error => { console.error(error); process.exitCode = 1; });
+main().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => fs.rmSync(photoRoot, { recursive: true, force: true }));

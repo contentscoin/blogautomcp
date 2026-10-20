@@ -7,8 +7,10 @@ import { buildBrandPostImagePrompt } from "../src/lib/brand-post-image-generatio
 let checks = 0;
 const reference: ShoppingSceneReference = { path: "C:/offline/seller-reference.png", reviewedAt: "2026-10-11T00:00:00Z",
   sha256: "a".repeat(64), subject: "exact selected subject(s), not the promotional background",
-  geometry: "complete natural shape, identifying face and actual material", labels: "actual source label; lower volume text unreadable" };
-const base: ShoppingPhotoHarnessOptions & { reference: ShoppingSceneReference } = { productName: "선택 상품", sectionTitle: "외형과 생활 공간", imageIntent: "자연스러운 생활 연출",
+  geometry: "complete natural shape, identifying face and actual material", labels: "actual source label; lower volume text unreadable",
+  viewObservation: { subjectState: "freestanding", cameraView: "front", geometryVisibility: "complete", hiddenParts: [],
+    intrinsicPrint: "readable", readableIdentifiers: ["actual source label"] } };
+const base: Omit<ShoppingPhotoHarnessOptions, "supportingReferences"> & { reference: ShoppingSceneReference } = { productName: "선택 상품", sectionTitle: "외형과 생활 공간", imageIntent: "자연스러운 생활 연출",
   role: "body", reference, variantIndex: 0 };
 const payload = (prompt: string) => JSON.parse(prompt.split("\n").find(line => line.startsWith("Reference and section data"))!.split(": ").slice(1).join(": "));
 const plan = (prompt: string) => JSON.parse(prompt.split("\n").find(line => line.startsWith("CATEGORY SHOT PLAN"))!.split(": ").slice(1).join(": "));
@@ -42,7 +44,7 @@ for (const [name, category] of [
     return plan(prompt).shot;
   });
   assert.equal(new Set(shots.map(shot => shot.location)).size, 3, "variants change actual setting depth or position");
-  assert.equal(new Set(shots.map(shot => shot.placement)).size, 3, "variants change plausible placement, not only decoration");
+  assert.ok(shots.every(shot => /observed physical arrangement/u.test(shot.placement)), "scene variety cannot change the observed physical presentation");
   assert.equal(new Set(shots.map(shot => shot.camera)).size, 3, "variants change camera framing");
   checks++;
 }
@@ -59,7 +61,7 @@ for (const productName of ["샥즈 오픈스윔 이어폰 2개", "아비노 바�
 }
 
 const clothing = buildShoppingReferenceScenePrompt({ ...base, productName: "와이드 팬츠" });
-assert.match(clothing, /People wearing clothing are allowed/u);
+assert.match(clothing, /CLOTHING: preserve the actual supported garment presentation/u);
 assert.match(clothing, /waistband, leg width\/length, seams, hem, pockets, fabric texture and pattern/u);
 assert.doesNotMatch(clothing, /CATALOG SUBJECT:/u); checks++;
 for (const name of ["바디로션", "헤어드라이어", "이어폰", "한우 등심", "기타 상품"]) {

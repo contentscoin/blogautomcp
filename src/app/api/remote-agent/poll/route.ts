@@ -491,8 +491,11 @@ function numberField(record: Record<string, unknown>, key: string): number {
  */
 async function safeImageSlots(preview: DraftPreview, manifest: DraftManifest,
   onReference?: (image: RemoteProductReferenceImage) => void, context?: JobContext,
-  onPreparedPreview?: (preview: DraftPreview) => void): Promise<Array<Record<string, unknown>> | null> {
-  if (!Array.isArray(preview.imageSlots)) return null;
+  onPreparedPreview?: (preview: DraftPreview) => void, referenceSectionId?: string): Promise<Array<Record<string, unknown>> | null> {
+  if (!Array.isArray(preview.imageSlots)) {
+    if (referenceSectionId) throw new LocalAutomationError("INVALID_INPUT", "참조를 준비할 이미지 슬롯이 없습니다.");
+    return null;
+  }
   let v2 = manifest && manifest.version === "brand-post-package/v2" ? manifest : null;
   const connectKind: "SHOPPING" | "TRAVEL" = (v2?.connectKind || manifest?.connectKind || preview.connectKind) === "TRAVEL" ? "TRAVEL" : "SHOPPING";
   const sourceWait = connectKind === "SHOPPING" && v2 ? await waitForScheduledSourceImageRepair(v2.brandLinkId, {
@@ -554,12 +557,16 @@ async function safeImageSlots(preview: DraftPreview, manifest: DraftManifest,
     };
   });
   if (connectKind !== "SHOPPING") return slots;
+  if (referenceSectionId && (!v2 || !slots.some(slot => slot.sectionId === referenceSectionId && slot.maximum > 0) ||
+      !allowsShoppingReferenceScene(resolveBrandPostImageTarget(v2, { requestId: "remote-reference-selection", sectionId: referenceSectionId }))))
+    throw new LocalAutomationError("INVALID_INPUT", "참조를 준비할 생성 이미지 슬롯을 찾을 수 없습니다. 저장된 imageSlots의 sectionId를 사용하세요.");
   if (!sourceWait.ready) return slots.map(slot => ({ ...slot, generationRole: "reference-guided-product-scene",
     referenceReady: false, referencePreparationPending: true, referenceImages: [], referenceHashes: [], imagePrompt: null,
     referenceError: "검증 원본 배정이 진행 중이거나 완료를 확인하지 못했습니다. 현재 작업 상태를 확인한 뒤 참조 준비를 다시 조회하세요." }));
   return attachRemoteProductReferenceInputs(slots, {
     prepare: async slot => {
       if (!v2 || !slot.sectionId || numberField(slot, "maximum") === 0) return null;
+      if (referenceSectionId && slot.sectionId !== referenceSectionId) return null;
       if (context?.cancelled || isBrandPostImageRepairActive(v2.brandLinkId)) throw new Error("SOURCE_REPAIR_PENDING");
       const target = resolveBrandPostImageTarget(v2, { requestId: "remote-reference", sectionId: String(slot.sectionId) });
       if (!allowsShoppingReferenceScene(target)) return null;
@@ -587,10 +594,40 @@ function remainingGenerationMissing(slots: Array<Record<string, unknown>> | null
 }
 
 /** 초안 미리보기에서 PC 파일 경로를 제거하고 ChatGPT 가 검토할 정보만 남긴다. */
-async function draftView(draftId: string, preview: DraftPreview, includeMarkdown: boolean, manifest: DraftManifest = null, context?: JobContext): Promise<Record<string, unknown>> {
+async function draftView(draftId: string, preview: DraftPreview, includeMarkdown: boolean, manifest: DraftManifest = null, context?: JobContext,
+  referenceSectionId?: string): Promise<Record<string, unknown>> {
   const nativeReferences = new Map<string, RemoteProductReferenceImage>();
-  const imageSlots = await safeImageSlots(preview, manifest, image => nativeReferences.set(image.sha256, image), context,
-    prepared => { preview = prepared; });
+  const conflictingReferenceHashes = new Set<string>();
+  const preparedSlots = await safeImageSlots(preview, manifest, image => {
+    const previous = nativeReferences.get(image.sha256);
+    if (previous && (previous.role !== image.role || previous.base64 !== image.base64 || previous.mimeType !== image.mimeType))
+      conflictingReferenceHashes.add(image.sha256);
+    else nativeReferences.set(image.sha256, image);
+  }, context,
+    prepared => { preview = prepared; }, referenceSectionId);
+  // A slot is usable only if its entire ordered reference bundle reaches this
+  // response. Sibling legacy/new bundles must not silently lose attachments.
+  const nativeReferenceImages: RemoteProductReferenceImage[] = [];
+  let referenceBytes = 0;
+  for (const image of nativeReferences.values()) {
+    if (conflictingReferenceHashes.has(image.sha256) ||
+        (nativeReferenceImages.length === 0 ? image.role !== "product-identity" : image.role === "product-identity")) continue;
+    const bytes = Math.floor(image.base64.length * 3 / 4);
+    if (nativeReferenceImages.length === 3 || referenceBytes + bytes > 4 * 1024 * 1024) continue;
+    nativeReferenceImages.push(image); referenceBytes += bytes;
+  }
+  const attachedSlots = preparedSlots?.map(slot => slot.referenceReady === true && (!Array.isArray(slot.referenceHashes) || !slot.referenceHashes.length ||
+      !slot.referenceHashes.every((hash, index) => typeof hash === "string" && nativeReferenceImages[index]?.sha256 === hash))
+    ? { ...slot, referenceReady: false, imagePrompt: null,
+      referenceError: "이 응답의 실제 참조 첨부에 전체 상품 참조가 포함되지 않았습니다. PC 소재 준비에서 해당 슬롯의 참조를 확인하세요." }
+    : slot) ?? null;
+  const connectKind = String(manifest?.connectKind || preview.connectKind || "SHOPPING").toLowerCase();
+  const sceneSectionIds = new Set(manifest?.version === "brand-post-package/v2"
+    ? manifest.composition.sections.filter(section => section.imageSource === "staged-ai").map(section => section.id) : []);
+  const imageSlots = attachedSlots?.map(slot => connectKind === "shopping" && slot.referenceReady !== true &&
+      typeof slot.sectionId === "string" && sceneSectionIds.has(slot.sectionId) && numberField(slot, "maximum") > 0
+    ? { ...slot, referenceNextCall: { tool: "post_get_draft", arguments: { connectKind, draftId, referenceSectionId: slot.sectionId } } }
+    : slot) ?? null;
   const markdown = typeof preview.markdown === "string" ? preview.markdown : "";
   const bodyImageCount = Array.isArray(preview.bodyImagePaths) ? preview.bodyImagePaths.length : 0;
   return {
@@ -607,7 +644,7 @@ async function draftView(draftId: string, preview: DraftPreview, includeMarkdown
     heroImageReady: typeof preview.heroImagePath === "string" && fs.existsSync(preview.heroImagePath),
     sectionOutline: preview.sectionOutline ?? null,
     imageSlots,
-    ...(nativeReferences.size ? { nativeReferenceImages: [...nativeReferences.values()].slice(0, 2) } : {}),
+    ...(nativeReferenceImages.length ? { nativeReferenceImages } : {}),
     readiness: preview.readiness ?? null,
     contentQuality: preview.contentQuality ?? null,
     qualityRepair: preview.qualityRepair ?? null,
@@ -1018,7 +1055,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     const payload = await localApi(request, `/api/brandlinks/${encodeURIComponent(draftId)}/draft`);
     const preview = payload.data as DraftPreview | null;
     if (!preview) throw new LocalAutomationError("DRAFT_NOT_FOUND", LOCAL_AUTOMATION_ERROR_HINTS.DRAFT_NOT_FOUND);
-    const view = await draftView(draftId, preview, true, readDraftManifestSafe(draftId), ctx);
+    const view = await draftView(draftId, preview, true, readDraftManifestSafe(draftId), ctx, readString(input, "referenceSectionId") || undefined);
     if (readString(input, "includeImages") === "thumbnail") {
       const hero = await heroImagePayload(preview.heroImagePath);
       if (hero) view.heroImage = hero;
@@ -1041,7 +1078,7 @@ async function executeJob(ctx: JobContext): Promise<JobResultEnvelope> {
     const replaceAssetKey = readString(input, "replaceAssetKey");
     const generatedImageUrl = readString(input, "generatedImageUrl");
     const referenceHashes = input.referenceHashes;
-    if (kind === "SHOPPING" && (!Array.isArray(referenceHashes) || referenceHashes.length < 1 || referenceHashes.length > 2 ||
+    if (kind === "SHOPPING" && (!Array.isArray(referenceHashes) || referenceHashes.length < 1 || referenceHashes.length > 3 ||
         !referenceHashes.every(hash => typeof hash === "string" && /^[a-f0-9]{64}$/u.test(hash)))) {
       throw new LocalAutomationError("INVALID_INPUT", "상품 연출사진은 imageSlots.referenceHashes와 실제 참조 이미지 첨부가 필요합니다.");
     }

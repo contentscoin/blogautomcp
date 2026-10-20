@@ -15,6 +15,7 @@ import { assertProductImageReferences } from "../src/lib/codex-image-generation"
 import type { BrandPostPackageManifestV2, applyGeneratedBrandPostImage } from "../src/lib/brand-post-package";
 import type { ResolvedImageTarget } from "../src/lib/brand-post-image-generation";
 import { buildProduct9Canvas } from "./lib/product-9canvas";
+import type { ShoppingReferenceViewObservation } from "./lib/shopping-reference-view";
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shopping-reference-scene-"));
@@ -28,6 +29,8 @@ async function main() {
   const hash = (target: string) => crypto.createHash("sha256").update(fs.readFileSync(target)).digest("hex");
   try {
     const angled = file("angled"), front = file("front"), output = file("output"), anchor = file("approved-anchor");
+    const frontView: ShoppingReferenceViewObservation = { subjectState: "freestanding", cameraView: "front", geometryVisibility: "complete",
+      hiddenParts: [], intrinsicPrint: "readable", readableIdentifiers: ["original product line"] };
     const reviewed: string[][] = [];
     const reference = await selectShoppingSceneReference({ paths: [angled, front], productName: "정면 테스트 상품", selectedProduct: "선택 옵션 A" }, {
       verify: async (paths, _product, _maximum, options) => {
@@ -43,14 +46,16 @@ async function main() {
         reviewed.push(call.imagePaths!);
         return JSON.stringify({ identityMatches: true, geometryReadable: call.imagePaths![0] === front,
           completeShape: true, notDeformed: true, unobstructed: true,
-          subject: "right-hand intact front-facing instance", geometry: "level seal; centered short cap; 2.3:1 ratio", labels: "brand above original product line", reason: "visible whole front" });
+          subject: "right-hand intact front-facing instance", geometry: "level seal; centered short cap; 2.3:1 ratio", labels: "brand above original product line", reason: "visible whole front", viewObservation: frontView });
       },
     });
     assert.equal(reference.path, front, "an unreadable severely foreshortened original must not become the geometry reference");
     assert.deepEqual(reviewed, [[angled], [front]]);
+    assert.deepEqual(reference.viewObservation, frontView, "generation receives the actual observed pose and identifying print");
     const referenceVerdict = { identityMatches: true, geometryReadable: true, completeShape: true,
       notDeformed: true, unobstructed: true, subject: "complete exact selected item",
-      geometry: "intact identifying silhouette and real proportions", labels: "none visible", reason: "specific visible item observations" };
+      geometry: "intact identifying silhouette and real proportions", labels: "none visible", reason: "specific visible item observations",
+      viewObservation: { ...frontView, intrinsicPrint: "absent", readableIdentifiers: [] } };
     const deformed = file("deformed");
     const sourceRejection = { stage: "seller-product-photo" as const, candidateSha256: hash(angled),
       failedChecks: ["productPhoto"], reason: "a seller notice instead of the selected product" };
@@ -85,6 +90,9 @@ async function main() {
     // An incomplete false verdict is a QA failure, not evidence that this
     // seller has no suitable reference. Invalid answers must never be cached.
     malformedReferenceAnswers.push({ ...referenceVerdict, notDeformed: false, geometry: undefined });
+    for (const viewObservation of [null, {}, { ...frontView, subjectState: "made-up-pose" },
+      { ...frontView, hiddenParts: "back" }, { ...frontView, intrinsicPrint: "unreadable" }])
+      malformedReferenceAnswers.push({ ...referenceVerdict, viewObservation });
     for (const [index, malformed] of malformedReferenceAnswers.entries()) {
       const candidate = file(`reference-selector-invalid-${index}`);
       const selection = { paths: [candidate, front], productName: "offline selected item", selectedProduct: `invalid-context-${index}` };
@@ -142,10 +150,12 @@ async function main() {
         return JSON.stringify({ identityMatches: true, geometryReadable: true, frontFacing: false,
           completeShape: true, notDeformed: true, unobstructed: true, subject: "person walking in charcoal trousers",
           geometry: "wide legs, elastic waist, hems and pockets visible with natural folds", labels: "none visible",
-          reason: "the selected garment has an intact silhouette in a natural walking pose" });
+          reason: "the selected garment has an intact silhouette in a natural walking pose",
+          viewObservation: { subjectState: "worn", cameraView: "side", geometryVisibility: "complete", hiddenParts: ["rear seam"], intrinsicPrint: "absent", readableIdentifiers: [] } });
       },
     });
     assert.equal(garment.path, walkingGarment, "natural garment poses do not need a packaging front view");
+    assert.equal(garment.viewObservation?.subjectState, "worn");
 
     const allChecks = Object.fromEntries(SCENE_FIDELITY_CHECKS.map(key => [key, true]));
     const comparisons = Object.fromEntries(["productShape", "intrinsicPrinting", "visibleOption", "sceneContext"].map(key => [key,
@@ -195,6 +205,27 @@ async function main() {
     assert.equal(result.referenceSha256, hash(front));
     assert.equal(result.reviewedOutputSha256, hash(output));
     assert.equal(result.strategyVersion, SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION);
+    await assert.rejects(reviewShoppingReferenceScene({ reference, outputPath: output, productName: "typed rejection fixture", imageIntent: "연출" }, {
+      review: async () => JSON.stringify({ ...good, checks: { ...allChecks, silhouette: false }, identityMatches: false, accepted: false }),
+    }), error => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /^REFERENCE_SCENE_FIDELITY_FAILED:/u);
+      assert.deepEqual((error as Error & { fidelityFailure: unknown }).fidelityFailure, {
+        version: "shopping-scene-fidelity-failure/v1", failedChecks: ["silhouette"], comparisonFailures: [],
+        identityMatches: false, illustrativeOnly: true, accepted: false,
+      });
+      return true;
+    });
+    for (const invalid of ["not json", JSON.stringify({ ...good, checks: { ...allChecks, silhouette: "false" } }),
+      JSON.stringify({ ...good, comparisons: { ...comparisons, productShape: { ...comparisons.productShape, result: "contradiction", variation: "viewpoint-or-pose" } } })]) {
+      await assert.rejects(reviewShoppingReferenceScene({ reference, outputPath: output, productName: "invalid rejection fixture", imageIntent: "연출" }, {
+        review: async () => invalid,
+      }), error => {
+        assert.ok(error instanceof Error);
+        assert.equal(Object.hasOwn(error, "fidelityFailure"), false, "invalid responses cannot become a typed settled rejection");
+        return true;
+      });
+    }
     // Fresh synthetic-pair reviews must finalize their own observed evidence,
     // while the unchanged parser still blocks every returned adverse verdict.
     const currentPublication = "음식물처리기의 사양과 충전 시간을 살펴봅니다. 사진은 제품 외형 연출입니다.";
@@ -527,7 +558,7 @@ async function main() {
     assert.equal(photography.prompt, buildShoppingReferenceScenePrompt({ productName: "달바 비타 토닝 토너 180ml",
       sectionTitle: photographyTarget.sectionTitle, imageIntent: photographyTarget.imageIntent,
       bodyExcerpt: photographyTarget.bodyExcerpt, stagingRecipe: photographyTarget.promptRecipe, role: "body",
-      reference, hasAnchor: false, variantIndex: 2, adjacentSectionTitles: ["아침 준비 공간", "보관할 자리"],
+      reference, hasAnchor: false, variantIndex: 0, adjacentSectionTitles: ["아침 준비 공간", "보관할 자리"],
       physicalScale: photographyProduct.concept.physicalScale, productImageDirective: photographyProduct.policy.imageDirective }),
     "actual context must retain slot framing, neighboring sections, physical scale and selected product policy");
     assert.deepEqual(photography.referenceHashes, [hash(front)], "new photography instructions do not replace authoritative seller pixels");
@@ -607,7 +638,7 @@ async function main() {
     assert.doesNotMatch(prompt, /d'Alba|2\.3:1 cap height about one fifth/u, "no product-specific template is hardcoded");
     const bodyPrompt = buildShoppingReferenceScenePrompt({ productName: "와이드 팬츠", sectionTitle: "출근 코디", imageIntent: "AI 코디 연출 이미지", role: "body", reference: garment });
     assert.match(bodyPrompt, /Square 1:1 photograph/);
-    assert.match(bodyPrompt, /People wearing clothing/);
+    assert.match(bodyPrompt, /SOURCE-SUPPORTED WEARING: preserve the naturally worn product/u);
     assert.match(bodyPrompt, /No information cards, slides, editorial layouts, split panels, collage/);
     assert.doesNotMatch(bodyPrompt, /Create ONE photorealistic editorial|No people, hands|keep the product front view/);
     assert(SCENE_FIDELITY_CHECKS.includes("noAddedText") && SCENE_FIDELITY_CHECKS.includes("noFramesOrPanels") && SCENE_FIDELITY_CHECKS.includes("singleScene"));

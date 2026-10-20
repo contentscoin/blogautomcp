@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import type { ShoppingTopicTemplateId } from "./topic-templates/types";
-import { isFabricLintRemoverProduct } from "../../src/lib/product-photo-subject";
+import { isClothingPhotoSubject, isFabricLintRemoverProduct } from "../../src/lib/product-photo-subject";
 
 export type ProductPhysicalScale = "wearable" | "handheld" | "desktop" | "floor" | "package";
 export type ProductOptionStatus = "not-applicable" | "confirmed" | "ambiguous";
@@ -163,14 +163,17 @@ function classifyCategory(input: Product9CanvasInput): Product9Canvas["concept"]
     }
     if (!best || score > best.score) best = { id: rule.id, score, signals: [...new Set(signals)].slice(0, 5) };
   }
-  const categoryId = best && best.score > 0 ? best.id : "generic_shopping";
-  const categoryConfidence = !best || best.score === 0 ? "low" : best.score >= 8 ? "high" : "medium";
+  // A garment's use context (e.g. running/camping) cannot turn it into a
+  // different physical subject in the photo plan. Share the noun guard with it.
+  const garment = isClothingPhotoSubject(name);
+  const categoryId = garment ? "fashion_goods" : best && best.score > 0 ? best.id : "generic_shopping";
+  const categoryConfidence = garment ? "high" : !best || best.score === 0 ? "low" : best.score >= 8 ? "high" : "medium";
   const productKind = inferProductKind(name);
   const physicalScale = inferPhysicalScale(name, categoryId);
   return {
     categoryId,
     categoryConfidence,
-    categorySignals: best?.signals || [],
+    categorySignals: garment ? ["의류 상품명"] : best?.signals || [],
     productKind,
     physicalScale,
     useContexts: inferUseContexts(`${name} ${detail}`),
@@ -194,6 +197,7 @@ function inferProductKind(name: string): string {
 export function inferProductPhysicalScale(productName: string, categoryId: ShoppingTopicTemplateId = "generic_shopping"): ProductPhysicalScale {
   const name = clean(productName, 400);
   if (isFabricLintRemoverProduct(name)) return "handheld";
+  if (isClothingPhotoSubject(name)) return "wearable";
   if (/시계형|워치|이어폰|헤드폰|반지|팔찌/u.test(name)) return "wearable";
   if (/청소기|건조기|세탁기|냉장고|냉동고|스탠드\s*tv|이동식\s*(?:tv|모니터)|타프|텐트/u.test(name)) return "floor";
   if (/가습기|노트북|태블릿|모니터|키보드|스피커/u.test(name)) return "desktop";

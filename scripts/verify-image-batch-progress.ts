@@ -17,6 +17,7 @@ import * as atomicTextFile from "../src/lib/atomic-text-file";
 import * as photorealBuild from "./lib/photoreal/build";
 import * as product9Canvas from "./lib/product-9canvas";
 import * as shoppingPhotoHarness from "./lib/shopping-photo-harness";
+import * as shoppingReferenceView from "./lib/shopping-reference-view";
 import type { ProductSectionImageReviewOptions } from "./lib/product-photo-review";
 import type { generateBrandPostImages as Generate, BrandPostImageGenerationResult } from "../src/lib/brand-post-image-generation";
 import { checkedExistingJobResult, collectCompletedProductCandidates, existingJobResult, readLegacyCodexImageCompletion, type ImageBatchJob } from "../src/lib/codex-image-generation";
@@ -69,6 +70,7 @@ const referenceSceneModule = load<typeof import("./lib/shopping-reference-scene"
   "./codex-draft-provider": { runCodexDraft: () => { throw new Error("live review is forbidden in this offline harness"); } },
   "./product-photo-review": { selectVerifiedProductPhotos: () => { throw new Error("live review is forbidden in this offline harness"); } },
   "./shopping-photo-harness": shoppingPhotoHarness,
+  "./shopping-reference-view": shoppingReferenceView,
   "../../src/lib/brand-post-image-evidence": imageEvidence,
   "../../src/lib/draft-context-snapshot": { readProductSnapshot },
   "./product-photo-source": { isAllowedProductPhotoUrl },
@@ -758,7 +760,7 @@ async function verifyReviewOnlyRecovery() {
       assert.equal(f.prepare()[0].outStem, f.original.outStem, "later attempts safely re-review the same candidate");
     }
   });
-  await check("a changed scene recipe creates a fresh request only after the prior exact outputs have settled", async () => {
+  await check("settled body pixels alone cannot authorize a different paid recipe in either engine or legacy metadata", async () => {
     for (const engine of ["codex", "browser"] as const) for (const transport of ["codex", "browser"] as const)
       for (const legacyMetadata of [false, true]) {
         const f = fixture(engine, transport);
@@ -771,35 +773,10 @@ async function verifyReviewOnlyRecovery() {
         fs.copyFileSync(`${f.original.outStem}.png`, `${f.original.outStem}.jpg`);
         const before = tree(f.workDir);
         f.target.referenceContext.prompt = "new food-waste processor recipe: kitchen worktop, no laundry or floor";
-        const [job] = f.prepare();
-        assert.notEqual(job.outStem, f.original.outStem);
-        assert.equal(job.reviewOnly, undefined, "a revised setting must generate, never relabel the old raw");
-        assert.equal(JSON.parse(fs.readFileSync(`${job.outStem}.reference-scene.json`, "utf8")).sceneRecipeSha256,
-          crypto.createHash("sha256").update(job.prompt).digest("hex"));
-        for (const [file, sha] of Object.entries(before)) assert.equal(tree(f.workDir)[file], sha, "old evidence is unchanged");
-        let calls = 0;
-        const results: Array<{ localPath: string | null }> = [];
-        const newRaw = `${job.outStem}.png`;
-        const generate = () => {
-          calls++;
-          assert.match(job.prompt, /kitchen worktop/);
-          fs.writeFileSync(newRaw, bytes(5));
-          return { id: job.id, localPath: newRaw };
-        };
-        await f.h.runImageBatch([job], f.workDir, async result => { results.push(result); }, undefined, {
-          runCodex: async (jobs, options) => { assert.equal(engine, "codex"); assert.equal(jobs[0].outStem, job.outStem);
-            const result = generate(); await options.onResult(result, 0); return [result]; },
-          runBrowser: async (jobs, _workDir, onResult) => { assert.equal(engine, "browser"); assert.equal((jobs[0] as ImageBatchJob).outStem, job.outStem);
-            const result = generate(); await onResult(result, 0); return [result]; },
-          browserEnabled: true,
-        });
-        assert.equal(calls, 1);
-        assert.deepEqual(results.map(result => result.localPath), [newRaw]);
-        assert.notEqual(hashFile(newRaw), hashFile(`${f.original.outStem}.png`));
-        await assert.rejects(() => f.h.finishGeneratedImage({ manifest: f.h.manifest, productName: "상품", target: f.target,
-          rawPath: newRaw, workDir: f.workDir, index: 0, reviewReferenceScene: async () => {
-            throw new Error("REFERENCE_SCENE_FIDELITY_FAILED: wrong variant is still forbidden");
-          } }), /REFERENCE_SCENE_FIDELITY_FAILED/);
+        assert.throws(f.prepare, /IMAGE_RESUME_REQUIRED/,
+          "a new recipe requires actual structured rejection plus an improved view plan, not completion alone");
+        assert.deepEqual(tree(f.workDir), before, "neither a new request nor a replacement receipt may be created");
+        assert.equal(f.h.codexTransportCalls, 0);
         assert.equal(f.h.spawns, 0);
       }
   });
@@ -1228,7 +1205,9 @@ async function verifyGenerator() {
       assert.ok(imageEvidence.REFERENCE_SCENE_REVIEW_CHECKS.every(key => result.referenceScene?.checks?.[key] === true));
     });
     assert.notEqual(results[0].generatedPath, results[1].generatedPath);
-    assert.ok(h.jobs.every(job => job.prompt.includes("People wearing clothing") && job.prompt.includes("No information cards")));
+    assert.ok(h.jobs.every(job => job.prompt.includes("shopping-reference-view/v1") &&
+      job.prompt.includes("preserve the actual reference presentation") && job.prompt.includes("No information cards")),
+    "the public generator supplies the observed-view contract rather than requiring a generic wearing pose");
   });
   await check("source-only lifestyle requests report generation required, not source binding success", async () => {
     const h = harness({ sectionMatchedPaths: [sourcePath] });

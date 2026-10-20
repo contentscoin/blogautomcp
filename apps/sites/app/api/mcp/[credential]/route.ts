@@ -208,8 +208,8 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'post_apply_section_image',
     title: '섹션 이미지 적용 (ChatGPT 생성 이미지)',
-    description: '쇼핑은 imageSlots.referenceImages의 실제 원본을 첨부해 만든 자연스러운 단일 연출사진을 적용합니다. referenceReady=true인 파트에서 referenceHashes를 그대로 보냅니다. 본문 사진은 텍스트·설명 패널·프레임·콜라주를 금지하며 사양 설명은 본문에 둡니다. 원본 1장과 서로 다른 연출 사진 3장이 기본이며, 원본 반복이나 정보 카드로 수량을 채우지 않습니다. PC는 상품 외형과 자연사진 형식을 함께 검수합니다. 참조가 없으면 needs_reference로 남깁니다. 여행은 기존 imagePrompt 결과를 참조 해시 없이 적용합니다. imagePrompt·sectionId는 post_get_draft / post_submit_draft에서 가져오고 교체 시 replaceAssetKey를 지정합니다. 같은 결과 재전송은 alreadyApplied로 답합니다.',
-    inputSchema: { type: 'object', properties: { connectKind: CONNECT_KIND, productId: ID_FIELD, sectionId: { type: 'string', minLength: 1, maxLength: 120 }, replaceAssetKey: ASSET_KEY, generatedImageUrl: { type: 'string', minLength: 12, maxLength: 4096 }, referenceHashes: { type: 'array', minItems: 1, maxItems: 2, items: { type: 'string', pattern: '^[a-f0-9]{64}$' }, description: '실제로 첨부한 imageSlots.referenceImages의 순서와 같은 referenceHashes. 쇼핑 연출사진에 필수.' }, idempotencyKey: IDEMPOTENCY }, required: ['connectKind', 'productId', 'generatedImageUrl', 'idempotencyKey'], additionalProperties: false },
+    description: '쇼핑은 imageSlots.referenceImages의 실제 원본을 첨부해 만든 자연스러운 단일 연출사진을 적용합니다. referenceReady=true인 파트에서 referenceHashes를 그대로 보냅니다. 본문 사진은 텍스트·설명 패널·프레임·콜라주를 금지하며 사양 설명은 본문에 둡니다. 원본 1장과 서로 다른 연출 사진 3장이 기본이며, 원본 반복이나 정보 카드로 수량을 채우지 않습니다. PC는 상품 외형과 자연사진 형식을 함께 검수합니다. 참조가 없으면 needs_reference로 남깁니다. 여행은 기존 imagePrompt 결과를 참조 해시 없이 적용합니다. imagePrompt·sectionId는 post_get_draft / post_submit_draft에서 가져오고 교체 시 replaceAssetKey를 지정합니다. 같은 결과 재전송은 alreadyApplied로 답합니다. 참조 3장 적용은 PC 1.3.143 이상이며, 부족한 슬롯 참조는 post_get_draft(referenceSectionId)로 따로 받으세요.',
+    inputSchema: { type: 'object', properties: { connectKind: CONNECT_KIND, productId: ID_FIELD, sectionId: { type: 'string', minLength: 1, maxLength: 120 }, replaceAssetKey: ASSET_KEY, generatedImageUrl: { type: 'string', minLength: 12, maxLength: 4096 }, referenceHashes: { type: 'array', minItems: 1, maxItems: 3, items: { type: 'string', pattern: '^[a-f0-9]{64}$' }, description: '실제로 첨부한 imageSlots.referenceImages의 순서와 같은 referenceHashes. 쇼핑 연출사진에 필수.' }, idempotencyKey: IDEMPOTENCY }, required: ['connectKind', 'productId', 'generatedImageUrl', 'idempotencyKey'], additionalProperties: false },
     outputSchema: JOB_RESULT_SCHEMA,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     jobType: 'POST_APPLY_SECTION_IMAGE',
@@ -219,8 +219,8 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'post_get_draft',
     title: '초안 읽기·검토',
-    description: '준비된 초안의 제목·섹션 아웃라인·본문(마크다운)·해시태그·이미지 수·검증 리포트(readiness·contentQuality)와 imageSlots(파트별 generationMissing·assets·imagePrompt)를 읽습니다. missing 또는 generationMissing 이 0보다 큰 파트는 imagePrompt 로 ChatGPT 내장 이미지 생성을 실행해 post_apply_section_image 로 붙이세요. includeImages=thumbnail 이면 대표 이미지를 첨부합니다.',
-    inputSchema: { type: 'object', properties: { connectKind: CONNECT_KIND, draftId: ID_FIELD, includeImages: { type: 'string', enum: ['none', 'thumbnail'], default: 'none' }, idempotencyKey: IDEMPOTENCY }, required: ['connectKind', 'draftId'], additionalProperties: false },
+    description: '준비된 초안의 제목·섹션 아웃라인·본문(마크다운)·해시태그·이미지 수·검증 리포트(readiness·contentQuality)와 imageSlots(파트별 generationMissing·assets·imagePrompt)를 읽습니다. missing 또는 generationMissing 이 0보다 큰 파트는 imagePrompt 로 ChatGPT 내장 이미지 생성을 실행해 post_apply_section_image 로 붙이세요. includeImages=thumbnail 이면 대표 이미지를 첨부합니다. 쇼핑 참조가 다른 슬롯과 달라 referenceReady=false이면 해당 슬롯의 referenceNextCall대로 referenceSectionId를 지정해 그 슬롯의 실제 참조 1~3장을 따로 받으세요. 참조 부족만으로 원고를 다시 쓰지 않습니다.',
+    inputSchema: { type: 'object', properties: { connectKind: CONNECT_KIND, draftId: ID_FIELD, referenceSectionId: { type: 'string', minLength: 1, maxLength: 120, description: '해당 imageSlots.sectionId의 전체 실제 참조 묶음만 첨부합니다. PC 1.3.143 이상.' }, includeImages: { type: 'string', enum: ['none', 'thumbnail'], default: 'none' }, idempotencyKey: IDEMPOTENCY }, required: ['connectKind', 'draftId'], additionalProperties: false },
     outputSchema: JOB_RESULT_SCHEMA,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     jobType: 'POST_GET_DRAFT',
@@ -592,7 +592,9 @@ function decodedHeaderValue(value: string | null): string | null {
 }
 
 async function enqueue(userId: string, tool: ToolDefinition, args: JsonObject) {
-  const minimumAppVersion = tool.jobType === 'POST_APPLY_SECTION_IMAGE' && stringArg(args, 'connectKind') === 'shopping'
+  const scopedReferences = Boolean(tool.jobType === 'POST_GET_DRAFT' && stringArg(args, 'referenceSectionId') ||
+    tool.jobType === 'POST_APPLY_SECTION_IMAGE' && Array.isArray(args.referenceHashes) && args.referenceHashes.length === 3);
+  const minimumAppVersion = scopedReferences ? '1.3.143' : tool.jobType === 'POST_APPLY_SECTION_IMAGE' && stringArg(args, 'connectKind') === 'shopping'
     ? SHOPPING_REFERENCE_SCENE_MIN_APP : tool.minAppVersion;
   const data = await enqueueAgentJob(userId, { ...tool, minAppVersion: minimumAppVersion }, args);
   if (data.ok && !data.reused && (tool.jobType === 'POST_SUBMIT_DRAFT' || tool.jobType === 'POST_PREPARE_DRAFT')) {
@@ -633,14 +635,14 @@ async function extractImageBlocks(result: unknown): Promise<{ result: unknown; b
   if (holder.nativeReferenceImages !== undefined) {
     const references = holder.nativeReferenceImages;
     const invalid = () => new Error('IMAGE_REFERENCE_INVALID');
-    if (!Array.isArray(references) || references.length > 2) throw invalid();
+    if (!Array.isArray(references) || references.length > 3) throw invalid();
     const hashes = new Set<string>();
     let totalBytes = 0;
     for (const [index, value] of references.entries()) {
       const image = asObject(value);
       const { base64, mimeType, sha256, role, url } = image;
       const maxBytes = 5 * 1024 * 1024;
-      if (role !== (index === 0 ? 'product-identity' : 'approved-scene-continuity') ||
+      if ((index === 0 ? role !== 'product-identity' : !['product-geometry', 'product-intrinsic-label', 'approved-scene-continuity'].includes(String(role))) ||
           typeof sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(sha256) || hashes.has(sha256) ||
           typeof mimeType !== 'string' || !['image/png', 'image/jpeg', 'image/webp'].includes(mimeType) ||
           typeof base64 !== 'string' || !base64.length || base64.length > 4 * Math.ceil(maxBytes / 3) || base64.length % 4 !== 0 ||
@@ -935,7 +937,7 @@ async function callTool(userId: string, name: string, rawArgs: JsonObject) {
       return toolPayload({ ok: false, code: 'INVALID_ARGUMENT', message: '대상 파트(sectionId) 또는 교체할 이미지(replaceAssetKey)가 필요합니다.' }, true);
     }
     if (stringArg(args, 'connectKind') === 'shopping' && (!Array.isArray(args.referenceHashes) ||
-        args.referenceHashes.length < 1 || args.referenceHashes.length > 2 ||
+        args.referenceHashes.length < 1 || args.referenceHashes.length > 3 ||
         !args.referenceHashes.every(hash => typeof hash === 'string' && /^[a-f0-9]{64}$/u.test(hash)))) {
       return toolPayload({ ok: false, code: 'PRODUCT_REFERENCE_REQUIRED', message: '실제 상품 참조 이미지를 첨부하고 슬롯의 referenceHashes를 함께 보내세요.' }, true);
     }

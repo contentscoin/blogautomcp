@@ -17,7 +17,18 @@ function validProductSourceReceipts(outputDir: string): Array<{ file: string; so
         if (receipt.version !== "product-image-retrieval/v1" || !isAllowedProductPhotoUrl(receipt.sourceUrl) ||
             !/^[a-f0-9]{64}$/u.test(receipt.sha256 || "") || !stat.isFile() || stat.size < 1 || stat.size > MAX_IMAGE_BYTES ||
             crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== receipt.sha256) return [];
-        return [{ file, sourceUrl: receipt.sourceUrl, sha256: receipt.sha256, retrievedAt: Date.parse(receipt.retrievedAt || "") }];
+        let retrievedAt = Date.parse(receipt.retrievedAt || "");
+        // Freshness is an observation, not a replacement for the immutable
+        // provenance receipt already bound into an image request.
+        try {
+          const observed = JSON.parse(fs.readFileSync(`${file}.retrieval-observation.json`, "utf8"));
+          const observedAt = Date.parse(observed.observedAt || "");
+          if (observed.version === "product-image-retrieval-observation/v1" && observed.sourceUrl === receipt.sourceUrl &&
+              observed.sha256 === receipt.sha256 && observed.receiptSha256 === crypto.createHash("sha256")
+                .update(fs.readFileSync(path.join(outputDir, name))).digest("hex") && Number.isFinite(observedAt) &&
+              observedAt <= Date.now() && observedAt > retrievedAt) retrievedAt = observedAt;
+        } catch { /* Missing or invalid freshness cannot rewrite provenance. */ }
+        return [{ file, sourceUrl: receipt.sourceUrl, sha256: receipt.sha256, retrievedAt }];
       } catch { return []; }
     });
   } catch { return []; }
@@ -80,9 +91,25 @@ export async function downloadProductSourcePhoto(url: string, outputDir: string)
   }
   // Retrieval is not a rights grant or a model-identity approval. Keep its
   // origin separately from the subsequent visual QC / locked-product receipt.
-  fs.writeFileSync(`${file}.retrieval.json`, JSON.stringify({
+  const receiptPath = `${file}.retrieval.json`;
+  const receipt = JSON.stringify({
     version: "product-image-retrieval/v1", sourceUrl: url, sha256: hash,
     retrievedAt: new Date().toISOString(), identityVerified: false, rightsGranted: false,
+  });
+  try { fs.writeFileSync(receiptPath, receipt, { encoding: "utf8", flag: "wx" }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    let saved: Record<string, unknown>;
+    try { saved = JSON.parse(fs.readFileSync(receiptPath, "utf8")); }
+    catch { throw new Error("PRODUCT_SOURCE_PROVENANCE_CONFLICT: 기존 상품 사진 수집 기록을 보존했습니다. 기록을 덮어쓰지 않습니다."); }
+    if (saved.version !== "product-image-retrieval/v1" || saved.sourceUrl !== url || saved.sha256 !== hash ||
+        typeof saved.retrievedAt !== "string" || !Number.isFinite(Date.parse(saved.retrievedAt)) || Date.parse(saved.retrievedAt) > Date.now() ||
+        saved.identityVerified === true || saved.rightsGranted === true)
+      throw new Error("PRODUCT_SOURCE_PROVENANCE_CONFLICT: 기존 상품 사진의 출처·픽셀 기록과 재수집 결과가 다릅니다. 기존 기록을 보존했습니다.");
+  }
+  fs.writeFileSync(`${file}.retrieval-observation.json`, JSON.stringify({
+    version: "product-image-retrieval-observation/v1", sourceUrl: url, sha256: hash,
+    receiptSha256: crypto.createHash("sha256").update(fs.readFileSync(receiptPath)).digest("hex"), observedAt: new Date().toISOString(),
   }), "utf8");
   return file;
 }

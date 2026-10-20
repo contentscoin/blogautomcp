@@ -4,6 +4,20 @@ import { buildProductThumbnailCopy } from "./lib/product-thumbnail";
 import { resolveProductCompositionProfile } from "./lib/product-image-lock";
 import { selectTopicTemplate } from "./lib/topic-templates";
 import { buildBrandPostImagePrompt } from "../src/lib/brand-post-image-generation";
+import { isClothingPhotoSubject } from "../src/lib/product-photo-subject";
+
+for (const name of ["기모 발열 내의 겨울 히트택 상하의", "남성 내복 세트", "스포츠 러닝 조끼", "thermal underwear",
+  "순면 원단 남자 내복 상하 세트", "히트텍 니트 원단 조끼"]) {
+  const canvas = buildProduct9Canvas({ name });
+  assert.equal(isClothingPhotoSubject(name), true);
+  assert.equal(canvas.concept.categoryId, "fashion_goods", "writing and photo planning share the actual garment noun");
+  assert.equal(canvas.concept.physicalScale, "wearable", "clothes cannot default to a desktop object");
+}
+for (const name of ["내의용 UV 살균기", "니트 원단 보관함", "속옷 세탁 세제", "니트 겨울 쿠션", "니트 가디건용 보풀제거기",
+  "니트 원단", "내복용 니트 원단", "티셔츠용 순면 원단"]) {
+  assert.equal(isClothingPhotoSubject(name), false, "a garment mentioned as an appliance's target is not the sold subject");
+  assert.notEqual(buildProduct9Canvas({ name }).concept.physicalScale, "wearable");
+}
 
 const humidifier = buildProduct9Canvas({
   name: "[26년 신제품] 풀라스 UV 살균 초음파 대용량 무선 미니 가습기 가정용 탁상용 휴대용 1위 원룸 책상 사무실 소형 무소음 무드등 가열식 탁상 캠핑 차량용 통세척 생수병 미니가습기",
