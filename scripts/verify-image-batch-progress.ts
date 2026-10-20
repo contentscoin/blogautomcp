@@ -20,7 +20,7 @@ import * as shoppingPhotoHarness from "./lib/shopping-photo-harness";
 import * as shoppingReferenceView from "./lib/shopping-reference-view";
 import type { ProductSectionImageReviewOptions } from "./lib/product-photo-review";
 import type { generateBrandPostImages as Generate, BrandPostImageGenerationResult } from "../src/lib/brand-post-image-generation";
-import { checkedExistingJobResult, collectCompletedProductCandidates, existingJobResult, readLegacyCodexImageCompletion, type ImageBatchJob } from "../src/lib/codex-image-generation";
+import { checkedExistingJobResult, collectCompletedProductCandidates, existingJobResult, readCompletedProductRequest, readLegacyCodexImageCompletion, type ImageBatchJob } from "../src/lib/codex-image-generation";
 import { buildSellerOriginalRepairTarget } from "./lib/seller-original-repair-target";
 import * as productSourceAuditContext from "./lib/product-source-audit-context";
 import sharp from "sharp";
@@ -76,6 +76,14 @@ const referenceSceneModule = load<typeof import("./lib/shopping-reference-scene"
   "./product-photo-source": { isAllowedProductPhotoUrl },
 });
 const hashFile = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+const completedContextModule = load<typeof import("../src/lib/brand-post-completed-context")>("src/lib/brand-post-completed-context.ts", {
+  "node:fs": fs, "node:path": path, "node:crypto": crypto,
+  "./codex-image-generation": {
+    readCompletedProductRequest: (outStem: string) => readCompletedProductRequest(outStem, { codexHome: root }),
+    collectCompletedProductCandidates: (job: ImageBatchJob) => collectCompletedProductCandidates(job, { codexHome: root }),
+  },
+  "../../scripts/lib/product-photo-source": { isAllowedProductPhotoUrl },
+});
 type Job = { id: string; outStem: string; prompt: string; referenceMode?: string; referenceImagePaths?: string[]; requiredReferenceHashes?: string[] };
 function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lockFails?: boolean; automation?: boolean; sourceMissing?: boolean; sourceError?: string;
   engine?: "codex" | "browser"; realCache?: boolean; thumbnailHeadline?: string; realThumbnailRenderer?: boolean; realThumbnailCopy?: boolean;
@@ -130,6 +138,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
     "src/lib/brand-post-image-generation.ts", {
       "node:fs": fs, "node:path": path,
       "./atomic-text-file": atomicTextFile,
+      "./brand-post-completed-context": completedContextModule,
       "../../scripts/lib/publish-image-rejections": { rejectedPublicationImageHashes: () => [], publicationImageContext },
       "../../scripts/lib/publish-image-audit": { buildSelectedProductImageAuditContext },
       "../../scripts/lib/seller-original-repair-target": { buildSellerOriginalRepairTarget },
@@ -292,6 +301,8 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
           ? (job: ImageBatchJob) => collectCompletedProductCandidates(job, { codexHome: root }) : () => null,
         readLegacyCodexImageCompletion: settings.realCache
           ? (outStem: string) => readLegacyCodexImageCompletion(outStem, { codexHome: root }) : () => null,
+        readCompletedProductRequest: settings.realCache
+          ? (outStem: string) => readCompletedProductRequest(outStem, { codexHome: root }) : () => null,
         hasBrowserSubmission: () => false,
         hasUnresolvedCodexSubmission: () => false,
         runCodexImageBatch: async () => { codexTransportCalls += 1; throw new Error("codex transport is not used by this harness"); },

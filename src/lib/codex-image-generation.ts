@@ -38,7 +38,18 @@ export interface ImageBatchJob {
   requiredReferenceHashes?: string[];
   /** Only the coordinator may verify and consume an existing result; transports cannot generate it. */
   reviewOnly?: { outputSha256: string; slotId: string; sourceSnapshotId: string; referenceHashes: string[];
-    candidateSet?: CompletedProductCandidateSet };
+    candidateSet?: CompletedProductCandidateSet;
+    completedRequestRecovery?: { request: CompletedProductRequestProof; metadataSha256: string;
+      currentReceipts: Array<{ path: string; sha256: string }>; attestationPath: string; attestationSha256: string } };
+}
+
+export interface CompletedProductRequestProof {
+  receiptSha256: string;
+  rolloutPath: string;
+  rolloutSha256: string;
+  prompt: string;
+  referenceImagePaths: string[];
+  referenceHashes: string[];
 }
 
 export interface CompletedProductCandidateSet {
@@ -407,6 +418,63 @@ function completedProductRollout(prior: CodexImageSubmission, codexHome: string,
     if (!Number.isFinite(startedAtMs) || !Number.isFinite(completedAtMs) || startedAtMs < prior.startedAtMs - 1000 || completedAtMs < startedAtMs) throw refused();
     return { source: "rollout", completedAtMs, rolloutPath, rolloutSha256: crypto.createHash("sha256").update(bytes).digest("hex") };
   } catch { throw refused(); }
+}
+
+/** Exact host input of a terminal image turn. It grants re-review, never dispatch. */
+export function readCompletedProductRequest(outStem: string, options: { codexHome?: string } = {}): CompletedProductRequestProof | null {
+  let receiptSha256: string;
+  try { receiptSha256 = crypto.createHash("sha256").update(fs.readFileSync(`${outStem}.codex-submission.json`)).digest("hex"); }
+  catch { return null; }
+  const prior = readCodexSubmission(outStem);
+  if (!prior || prior.state !== "completed" || !prior.threadId ||
+      prior.generationBudget && (prior.generationBudget.limit !== 1 || prior.generationBudget.observedCalls !== 1 || prior.generationBudget.exceededAtMs !== undefined) ||
+      !path.resolve(prior.workspace).startsWith(`${path.resolve(outStem)}.codex-`) ||
+      !/^\d+$/u.test(path.resolve(prior.workspace).slice(`${path.resolve(outStem)}.codex-`.length)) ||
+      [".lock", ".lock.recovery"].some(extension => fs.existsSync(`${outStem}${extension}`))) return null;
+  try {
+    const completion = completedProductRollout(prior, codexHomeDir(options.codexHome));
+    if (!completion?.rolloutPath || !completion.rolloutSha256 || completion.completedAtMs > Date.now() + 1000) return null;
+    const bytes = fs.readFileSync(completion.rolloutPath);
+    if (crypto.createHash("sha256").update(bytes).digest("hex") !== completion.rolloutSha256) return null;
+    const records = bytes.toString("utf8").split("\n").filter(line => line.trim()).map(line => JSON.parse(line));
+    const requests = records.filter(record => record.type === "response_item" && record.payload?.type === "message" &&
+      record.payload.role === "user" && Array.isArray(record.payload.content) && record.payload.content.some((item: { type?: string; text?: string }) =>
+        item.type === "input_text" && typeof item.text === "string" && item.text.includes("[이미지 프롬프트]\n")));
+    if (requests.length !== 1) return null;
+    const requestIndex = records.indexOf(requests[0]);
+    const startIndex = records.findIndex(record => record.type === "event_msg" && record.payload?.type === "task_started");
+    const endIndex = records.findIndex(record => record.type === "event_msg" && record.payload?.type === "task_complete");
+    const requestAt = Date.parse(requests[0].timestamp), startAt = Date.parse(records[startIndex]?.timestamp), endAt = Date.parse(records[endIndex]?.timestamp);
+    const generationCalls = new Map<string, { index: number; count: number; at: number }>();
+    records.forEach((record, index) => {
+      if (record.type !== "response_item" || !["function_call", "custom_tool_call"].includes(record.payload?.type || "")) return;
+      const count = imageCallsInItem(record.payload), callId = record.payload.call_id;
+      if (count && typeof callId === "string" && callId) generationCalls.set(callId, { index, count, at: Date.parse(record.timestamp) });
+    });
+    const calls = [...generationCalls.values()];
+    if (startIndex < 0 || requestIndex <= startIndex || requestIndex >= endIndex || !Number.isFinite(requestAt) || requestAt < startAt || requestAt > endAt ||
+        calls.length !== 1 || calls[0].count !== 1 || calls[0].index <= requestIndex || calls[0].index >= endIndex ||
+        !Number.isFinite(calls[0].at) || calls[0].at < requestAt || calls[0].at > endAt) return null;
+    const content = requests[0].payload.content as Array<{ type: string; text?: string; image_url?: string }>;
+    const instructions = content.filter(item => item.type === "input_text" && item.text?.includes("[이미지 프롬프트]\n"));
+    if (instructions.length !== 1) return null;
+    const instruction = instructions[0].text!, prompt = instruction.slice(instruction.indexOf("[이미지 프롬프트]\n") + "[이미지 프롬프트]\n".length);
+    const images = content.filter(item => item.type === "input_image");
+    const referenceImagePaths = content.filter(item => item.type === "input_text").flatMap(item =>
+      [...(item.text || "").matchAll(/<image name=\[Image #\d+\] path="([^"]+)">/gu)].map(match => match[1]));
+    if (images.length < 1 || images.length > 3 || images.length !== referenceImagePaths.length ||
+        instruction !== buildCodexImageInstruction(prompt, images.length, "product")) return null;
+    const referenceHashes = images.map(item => {
+      if (typeof item.image_url !== "string" || !/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/u.test(item.image_url)) throw new Error("invalid attachment");
+      return crypto.createHash("sha256").update(Buffer.from(item.image_url.slice(item.image_url.indexOf(",") + 1), "base64")).digest("hex");
+    });
+    if (referenceImagePaths.some((file, index) => !isImageFile(file) || path.resolve(fs.realpathSync(file)) !== path.resolve(file) ||
+        crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== referenceHashes[index])) return null;
+    if (crypto.createHash("sha256").update(fs.readFileSync(`${outStem}.codex-submission.json`)).digest("hex") !== receiptSha256 ||
+        crypto.createHash("sha256").update(fs.readFileSync(completion.rolloutPath)).digest("hex") !== completion.rolloutSha256) return null;
+    return { receiptSha256,
+      rolloutPath: completion.rolloutPath, rolloutSha256: completion.rolloutSha256, prompt, referenceImagePaths, referenceHashes };
+  } catch { return null; }
 }
 
 export interface LegacyCodexImageCompletionProof {

@@ -31,13 +31,14 @@ import {
 import { isChatGptBrowserAutomationEnabled } from "./chatgpt-browser-automation";
 import { imageBatchBudgetMs, imageJobBudgetMs, IMAGE_TIMER_MAX_MS } from "../../scripts/lib/image-timeout-policy";
 import { buildBlogPhotorealDirection } from "../../scripts/lib/photoreal/build";
-import { assertProductImageReferences, checkedExistingJobResult, collectCompletedProductCandidates, existingJobResult, hasBrowserSubmission, hasUnresolvedCodexSubmission, readLegacyCodexImageCompletion, resolveBrandPostImageEngine, runCodexImageBatch, type ImageBatchJob } from "./codex-image-generation";
+import { assertProductImageReferences, checkedExistingJobResult, collectCompletedProductCandidates, existingJobResult, hasBrowserSubmission, hasUnresolvedCodexSubmission, readCompletedProductRequest, readLegacyCodexImageCompletion, resolveBrandPostImageEngine, runCodexImageBatch, type ImageBatchJob } from "./codex-image-generation";
 import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene, brandPostSectionSlotId, isReferenceGuidedThumbnail, isShoppingLifestyleImage, REFERENCE_SCENE_REVIEW_CHECKS, type BrandPostImageSourceHint } from "./brand-post-image-evidence";
 import { buildProduct9Canvas, type Product9Canvas, type ProductPhysicalScale } from "../../scripts/lib/product-9canvas";
 import { buildShoppingReferenceScenePrompt, reviewShoppingReferenceScene, selectShoppingSceneReference,
   selectShoppingSceneSupportingReferences, readShoppingSceneSupportingCandidates, SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION,
   type ShoppingSceneReference, type ShoppingSceneSupportingReference } from "../../scripts/lib/shopping-reference-scene";
 import type { ShoppingSceneFidelityFailure } from "../../scripts/lib/shopping-reference-scene";
+import { assertCompletedContextRecovery, recoverCompletedShoppingContext } from "./brand-post-completed-context";
 
 const CHATGPT_BASE_URL = "https://chatgpt.com/";
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
@@ -110,7 +111,10 @@ export interface BrandPostImageReferenceContext {
   supportingReferences?: ShoppingSceneSupportingReference[];
   preparationBinding?: string;
   /** One improved plan may supersede an exactly evidenced terminal body rejection. */
-  retryOf?: { outStem: string; metadataSha256: string; rejectionSha256: string };
+  retryOf?: { outStem: string; metadataSha256: string; rejectionSha256: string;
+    completedRequestRecovery?: NonNullable<NonNullable<ImageBatchJob["reviewOnly"]>["completedRequestRecovery"]> };
+  /** Proven terminal historical input can re-review pixels, never dispatch. */
+  completedRequestRecovery?: { outStem: string; proof: NonNullable<NonNullable<ImageBatchJob["reviewOnly"]>["completedRequestRecovery"]> };
   prompt: string;
 }
 
@@ -485,7 +489,7 @@ function bodySceneCompletionBinding(stem: string, metadata: { referenceHashes: s
 }
 
 /** Completed transport alone is never authority for another paid generation. */
-function readSettledBodyRejection(stem: string, manifest: BrandPostPackageManifestV2, target: ResolvedImageTarget):
+function readSettledBodyRejection(stem: string, manifest: BrandPostPackageManifestV2, target: ResolvedImageTarget, recoveredJob?: ImageBatchJob):
   BrandPostImageReferenceContext["retryOf"] | null {
   if (target.role !== "body" || !retiredImageJobIsSettled(stem)) return null;
   try {
@@ -500,12 +504,19 @@ function readSettledBodyRejection(stem: string, manifest: BrandPostPackageManife
           typeof candidate.path !== "string" || typeof candidate.sha256 !== "string" || sha256File(candidate.path) !== candidate.sha256) ||
         normalizePackageImageAssets(manifest).some(asset => asset.slotId === target.request.slotId &&
           asset.referenceScene?.reviewStatus === "passed" && proof.candidates.some((candidate: { sha256: string }) => candidate.sha256 === asset.referenceScene?.reviewedOutputSha256))) return null;
-    const completion = bodySceneCompletionBinding(stem, metadata);
+    const recovery = recoveredJob?.reviewOnly?.completedRequestRecovery || target.referenceContext?.retryOf?.completedRequestRecovery;
+    const exactJob = recoveredJob || (recovery ? { id: "rejected-completed-context", outStem: stem, prompt: recovery.request.prompt,
+      referenceMode: "product" as const, referenceImagePaths: recovery.request.referenceImagePaths, requiredReferenceHashes: recovery.request.referenceHashes,
+      reviewOnly: { outputSha256: "", slotId: metadata.slotId, sourceSnapshotId: metadata.sourceSnapshotId, referenceHashes: metadata.referenceHashes,
+        completedRequestRecovery: recovery } } : undefined);
+    if (exactJob) assertCompletedContextRecovery(exactJob);
+    const completion = bodySceneCompletionBinding(stem, metadata, exactJob);
     if (!completion || JSON.stringify(completion) !== JSON.stringify(proof.completion)) return null;
     const expectedCandidates = completion.nativeCandidates.length ? completion.nativeCandidates : completion.outputs;
     if (JSON.stringify([...new Set(expectedCandidates.map(item => item.sha256))].sort()) !==
         JSON.stringify([...new Set(proof.candidates.map((item: { sha256: string }) => item.sha256))].sort())) return null;
-    return { outStem: stem, metadataSha256: proof.metadataSha256, rejectionSha256: sha256File(rejectionPath) };
+    return { outStem: stem, metadataSha256: proof.metadataSha256, rejectionSha256: sha256File(rejectionPath),
+      ...(recovery ? { completedRequestRecovery: recovery } : {}) };
   } catch { return null; }
 }
 
@@ -628,21 +639,31 @@ export async function prepareBrandPostImageReferenceContext(options: {
         .filter(name => /^raw-[a-f0-9]+\.reference-scene\.json$/u.test(name)).map(name => path.join(directory, name)) : []);
     for (const file of records) {
       const metadata = JSON.parse(fs.readFileSync(file, "utf8"));
-      if (metadata.slotId !== options.target.request.slotId) continue;
       const stem = file.replace(/\.reference-scene\.json$/u, "");
+      if (metadata.slotId !== options.target.request.slotId) {
+        // Relabeling a completed legacy record must not make its original slot
+        // look unsubmitted. Read only the receipt's exact terminal host turn.
+        if (!metadata.referenceContext && metadata.strategyVersion === SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION &&
+            metadata.sourceSnapshotId === options.manifest.sourceSnapshot.snapshotId) {
+          const request = readCompletedProductRequest(stem);
+          if (request && (crypto.createHash("sha256").update(request.prompt).digest("hex") !== metadata.sceneRecipeSha256 ||
+              !request.prompt.endsWith(`\nImage slot: ${metadata.slotId}. Use a distinct natural location, pose or camera framing for this slot; preserve product identity and real proportions. No added text, frames, panels, collage or inset.`)))
+            throw new Error("IMAGE_RESUME_REQUIRED: 이전 완료 요청의 슬롯·촬영 계획 기록이 다릅니다. 새 요청으로 우회하지 않았습니다.");
+        }
+        continue;
+      }
       const replaced = options.target.request.replaceAssetKey && assets.some(asset => asset.sha256 === options.target.request.replaceAssetKey &&
         asset.slotId === options.target.request.slotId && asset.sourcePath && path.resolve(asset.sourcePath).startsWith(path.resolve(stem) + "."));
       if (replaced && retiredImageJobIsSettled(stem)) continue;
       existingSlotRequest = true;
       const originalSaved = metadata.referenceContext as BrandPostImageReferenceContext | undefined;
-      if (!originalSaved) continue;
-      const saved = { ...originalSaved, ...(Array.isArray(originalSaved.supportingReferences) ? {
+      const saved = originalSaved ? { ...originalSaved, ...(Array.isArray(originalSaved.supportingReferences) ? {
         supportingReferences: originalSaved.supportingReferences.map(support => recoverImmutableSupportingReceipt(options.manifest, support)),
-      } : {}) };
+      } : {}) } : undefined;
       let intact = false;
       try {
-        const supporting = saved.supportingReferences ?? [];
-        intact = metadata.sourceSnapshotId === options.manifest.sourceSnapshot.snapshotId &&
+        const supporting = saved?.supportingReferences ?? [];
+        intact = !!saved && metadata.sourceSnapshotId === options.manifest.sourceSnapshot.snapshotId &&
           [preparationBinding, legacyPreparationBinding].includes(saved.preparationBinding || "") &&
           Array.isArray(supporting) && supporting.length <= 2 && supporting.every(supportIntact) &&
           saved.referenceImagePaths.length >= 1 && saved.referenceImagePaths.length <= 3 && saved.referenceImagePaths.length === saved.referenceHashes.length &&
@@ -652,8 +673,41 @@ export async function prepareBrandPostImageReferenceContext(options: {
           JSON.stringify(saved.referenceHashes) === JSON.stringify([saved.reference.sha256, ...supporting.map(item => item.sha256), ...(saved.anchorSha256 ? [saved.anchorSha256] : [])]) &&
           JSON.stringify(metadata.referenceHashes) === JSON.stringify(saved.referenceHashes);
       } catch { /* Corrupt optional metadata must not become a new request. */ }
-      if (!intact)
+      if (!intact) {
+        const recovered = recoverCompletedShoppingContext({ ...options, packageDir: getBrandPostPackageDir(options.manifest.brandLinkId),
+          metadataPath: file, metadata, reference: checkpointCurrent ? checkpoint.reference : undefined, preparationBinding,
+          expectedContext: { product: options.productName, title: options.target.sectionTitle, intent: options.target.imageIntent,
+            body: options.target.bodyExcerpt, stagingRecipe: options.target.promptRecipe, physicalScale: productUnderstanding.concept.physicalScale,
+            productImageDirective: productUnderstanding.policy.imageDirective, adjacentSectionTitles: promptOptions.adjacentSectionTitles } });
+        if (recovered?.completedRequestRecovery) {
+          const proof = recovered.completedRequestRecovery;
+          const recoveredJob: ImageBatchJob = { id: "completed-rejection-proof", outStem: stem, prompt: proof.proof.request.prompt,
+            referenceMode: "product", referenceImagePaths: recovered.referenceImagePaths, requiredReferenceHashes: recovered.referenceHashes,
+            reviewOnly: { outputSha256: "", slotId: metadata.slotId, sourceSnapshotId: metadata.sourceSnapshotId,
+              referenceHashes: recovered.referenceHashes, completedRequestRecovery: proof.proof } };
+          const rejected = readSettledBodyRejection(stem, options.manifest, options.target, recoveredJob);
+          if (records.some(otherFile => {
+            if (otherFile === file) return false;
+            const otherMetadata = JSON.parse(fs.readFileSync(otherFile, "utf8"));
+            const otherStem = otherFile.replace(/\.reference-scene\.json$/u, "");
+            if (otherMetadata.slotId !== options.target.request.slotId || !IMAGE_JOB_RECORD_SUFFIXES.some(extension => fs.existsSync(`${otherStem}${extension}`))) return false;
+            // A child explicitly bound to this fresh terminal rejection remains
+            // in its own normal transport; it is not an unrelated competing job.
+            return !rejected || JSON.stringify(otherMetadata.referenceContext?.retryOf) !== JSON.stringify(rejected);
+          })) throw new Error("IMAGE_RESUME_REQUIRED: 같은 슬롯의 다른 요청 기록이 여러 작업 폴더에 있습니다. 미확인 요청을 건너뛰지 않았습니다.");
+          if (rejected) {
+            if (recovered.retryOf) throw new Error("IMAGE_REPAIR_EXHAUSTED: 개선된 사진 계획도 검수를 통과하지 못했습니다. 두 요청과 정상 이미지를 보존했으며 추가 생성하지 않습니다.");
+            if (retryOf && retryOf.outStem !== rejected.outStem) throw new Error("IMAGE_RESUME_REQUIRED: 같은 슬롯의 확정 거절 요청이 여러 개 있어 새 생성을 시작하지 않았습니다.");
+            retryOf = rejected;
+            continue;
+          }
+          options.target.referenceContext = recovered;
+          return recovered;
+        }
+        if (!originalSaved) continue;
         throw new Error("IMAGE_RESUME_REQUIRED: 기존 이미지 요청의 상품·문단·참조 기록이 변경되었습니다. 기존 입력을 덮거나 재전송하지 않았습니다.");
+      }
+      if (!saved || !originalSaved) throw new Error("IMAGE_RESUME_REQUIRED: 저장된 이미지 입력을 확인할 수 없습니다.");
       if (saved.supportingReferences && originalSaved.supportingReferences)
         recordSupportingReceiptRecovery(file, originalSaved.supportingReferences, saved.supportingReferences, metadata.sourceSnapshotId, metadata.slotId);
       const rejected = readSettledBodyRejection(stem, options.manifest, options.target);
@@ -960,6 +1014,7 @@ function validatedReviewCandidateSet(job: ImageBatchJob, resolutionToken?: strin
     if (resolutionToken ? owner?.ownerToken !== resolutionToken || owner?.ownerPid !== process.pid : !resolutionOwnerIsDead(owner)) throw refused();
   }
   try {
+    assertCompletedContextRecovery(job);
     const metadata = JSON.parse(fs.readFileSync(`${job.outStem}.reference-scene.json`, "utf8"));
     assertSavedSceneRecipe(job, metadata, verifyRecipe);
     if (metadata.strategyVersion !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION || metadata.slotId !== binding.slotId ||
@@ -985,6 +1040,7 @@ function reviewOnlyImageResult(job: ImageBatchJob, verifyRecipe = true): string 
   if (fs.existsSync(`${job.outStem}.resolution.lock.recovery`) || fs.existsSync(`${job.outStem}.resolution.lock`) &&
       !resolutionOwnerIsDead(resolutionOwner(`${job.outStem}.resolution.lock`))) throw refused();
   try {
+    assertCompletedContextRecovery(job);
     const metadata = JSON.parse(fs.readFileSync(`${job.outStem}.reference-scene.json`, "utf8"));
     assertSavedSceneRecipe(job, metadata, verifyRecipe);
     if (metadata.strategyVersion !== SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION || metadata.slotId !== binding.slotId ||
@@ -1170,6 +1226,25 @@ export function prepareImageBatchJobs(
       sceneRecipe: manifest.connectKind === "SHOPPING" ? job.prompt : undefined,
     });
     const outStem = path.join(workDir, `raw-${identity}`);
+    const recovery = target.referenceContext?.completedRequestRecovery;
+    if (recovery) {
+      for (const name of fs.readdirSync(workDir).filter(name => /^raw-[a-f0-9]+\.reference-scene\.json$/iu.test(name))) {
+        const otherStem = path.join(workDir, name.replace(/\.reference-scene\.json$/u, ""));
+        const other = JSON.parse(fs.readFileSync(path.join(workDir, name), "utf8"));
+        if (otherStem !== recovery.outStem && other.slotId === target.request.slotId &&
+            IMAGE_JOB_RECORD_SUFFIXES.some(extension => fs.existsSync(`${otherStem}${extension}`)))
+          throw new Error("IMAGE_RESUME_REQUIRED: 같은 슬롯의 다른 요청 기록이 있습니다. 복구 후보로 실행 중이거나 충돌하는 요청을 건너뛰지 않았습니다.");
+      }
+      const recoveredJob: ImageBatchJob = { ...job, outStem: recovery.outStem, referenceMode: "product",
+        requiredReferenceHashes: references.map(reference => reference.sha256) };
+      const candidateSet = collectCompletedProductCandidates(recoveredJob);
+      if (!candidateSet) throw new Error("IMAGE_RESUME_REQUIRED: 완료된 복구 후보를 확인할 수 없습니다. 새 생성으로 전환하지 않았습니다.");
+      recoveredJob.reviewOnly = { outputSha256: candidateSet.candidates[0].sha256, slotId: target.request.slotId!,
+        sourceSnapshotId: manifest.sourceSnapshot!.snapshotId, referenceHashes: references.map(reference => reference.sha256),
+        candidateSet, completedRequestRecovery: recovery.proof };
+      validatedReviewCandidateSet(recoveredJob);
+      return recoveredJob;
+    }
     let reviewOnlyJob: ImageBatchJob | undefined;
     let retiredHeroRecipes = false;
     if (manifest.connectKind === "SHOPPING" && fs.existsSync(workDir)) {
