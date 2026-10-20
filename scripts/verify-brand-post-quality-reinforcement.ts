@@ -427,7 +427,9 @@ const shoppingPrompt = buildBrandPostImagePrompt({
 });
 assert.match(shoppingPrompt, /lifestyle photograph using the attached seller reference/u);
 assert.match(shoppingPrompt, /INPUT 1 is authoritative for product identity, proportions, selected option, color, material and visible features/u);
-assert.match(shoppingPrompt, /Preserve the product's real proportions and identifying structure/u);
+assert.match(shoppingPrompt, /Preserve the product's real source-observed proportions and identifying structure/u);
+assert.match(shoppingPrompt, /never expose or reconstruct those parts when concealed in the attached source view/u,
+  "형상 보존 지시가 원본에 가려진 부위까지 새로 만들어 내도록 요구하면 안 됩니다.");
 assert.match(shoppingPrompt, /Preserve actual intrinsic label hierarchy/u, "제품 자체의 식별 인쇄 구조를 보존해야 합니다.");
 assert.match(shoppingPrompt, /not seller artwork around the product/u, "판매자 외부 배지를 제품 인쇄로 복제하면 안 됩니다.");
 assert.match(shoppingPrompt, /Tiny non-identifying lower print may be naturally unreadable/u, "자연스러운 작은 인쇄 가독성 차이는 허용해야 합니다.");
