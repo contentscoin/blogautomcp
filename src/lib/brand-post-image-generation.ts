@@ -444,7 +444,7 @@ function bodySceneReviewContext(manifest: BrandPostPackageManifestV2, target: Re
     publicationContext: publicationImageContext(manifest.composition, target.sectionId ?? null) })).digest("hex");
 }
 
-function validBodyFidelityFailure(value: unknown): value is ShoppingSceneFidelityFailure {
+function wellFormedBodyFidelityFailure(value: unknown): value is ShoppingSceneFidelityFailure {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const failure = value as ShoppingSceneFidelityFailure;
   return Object.keys(failure).sort().join(",") === ["version", "accepted", "identityMatches", "illustrativeOnly", "failedChecks", "comparisonFailures"].sort().join(",") &&
@@ -453,8 +453,19 @@ function validBodyFidelityFailure(value: unknown): value is ShoppingSceneFidelit
     Array.isArray(failure.failedChecks) && failure.failedChecks.length <= REFERENCE_SCENE_REVIEW_CHECKS.length &&
     failure.failedChecks.every(key => REFERENCE_SCENE_REVIEW_CHECKS.includes(key as typeof REFERENCE_SCENE_REVIEW_CHECKS[number])) &&
     Array.isArray(failure.comparisonFailures) && failure.comparisonFailures.length <= 4 &&
-    failure.comparisonFailures.every(key => ["productShape", "intrinsicPrinting", "visibleOption", "sceneContext"].includes(key)) &&
-    (!failure.accepted || !failure.identityMatches || !failure.illustrativeOnly || failure.failedChecks.length > 0 || failure.comparisonFailures.length > 0);
+    failure.comparisonFailures.every(key => ["productShape", "intrinsicPrinting", "visibleOption", "sceneContext"].includes(key));
+}
+
+function inconsistentBodyFidelityFailure(value: unknown): value is ShoppingSceneFidelityFailure {
+  return wellFormedBodyFidelityFailure(value) && !value.accepted && value.identityMatches && value.illustrativeOnly &&
+    value.failedChecks.length === 0 && value.comparisonFailures.length === 0;
+}
+
+function validBodyFidelityFailure(value: unknown): value is ShoppingSceneFidelityFailure {
+  // A global rejection with no adverse finding is a broken review, not
+  // authority to spend another image request or exhaust the improvement plan.
+  return wellFormedBodyFidelityFailure(value) && (!value.identityMatches || !value.illustrativeOnly ||
+    value.failedChecks.length > 0 || value.comparisonFailures.length > 0);
 }
 
 function bodySceneCompletionBinding(stem: string, metadata: { referenceHashes: string[]; referenceContext?: BrandPostImageReferenceContext },
@@ -527,7 +538,8 @@ function recordBodySceneRejection(options: { manifest: BrandPostPackageManifestV
       // A repeated negative review may describe a different visible defect.
       // The first immutable proof remains valid only for these exact inputs and
       // complete outputs; keep it and let the caller retain today's QA error.
-      if (prior.version === current.version && prior.code === current.code && validBodyFidelityFailure(prior.failure) &&
+      if (prior.version === current.version && prior.code === current.code &&
+          (validBodyFidelityFailure(prior.failure) || inconsistentBodyFidelityFailure(prior.failure)) &&
           ["metadataSha256", "slotId", "sourceSnapshotId", "reviewContextSha256"].every(key => prior[key] === current[key]) &&
           ["referenceHashes", "candidates", "completion"].every(key => JSON.stringify(prior[key]) === JSON.stringify(current[key]))) return;
     } catch { /* Missing or changed evidence is a hold, never a replacement signature. */ }

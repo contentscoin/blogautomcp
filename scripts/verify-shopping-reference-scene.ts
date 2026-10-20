@@ -189,6 +189,10 @@ async function main() {
         assert.match(call.userPrompt, /VERBATIM actual sectionTitle\/publicationText/u);
         assert.match(call.userPrompt, /4~5 hour charging or price alone is not a claim/u);
         const claimSchema = call.outputSchema as { properties: Record<string, { description?: string }> };
+        assert.deepEqual(Object.keys(claimSchema.properties), ["comparisons", "checks", "identityMatches", "illustrativeOnly", "reason", "accepted"],
+          "the provider writes observed evidence before its final verdict");
+        assert.match(call.userPrompt, /accepted MUST equal the conjunction/u);
+        assert.ok(call.userPrompt.indexOf('Return {"comparisons":') < call.userPrompt.indexOf('"reason":"specific comparison including remaining differences","accepted":true}'));
         for (const key of ["reason", "accepted", "illustrativeOnly"])
           assert.match(claimSchema.properties[key].description!, /VERBATIM actual sectionTitle\/publicationText/u);
         const schema = call.outputSchema as { properties: { checks: { properties: { singleScene: { type: string; description: string } } } } };
@@ -226,8 +230,85 @@ async function main() {
         return true;
       });
     }
-    // Fresh synthetic-pair reviews must finalize their own observed evidence,
-    // while the unchanged parser still blocks every returned adverse verdict.
+    // Reproduce JBL's raw all-positive gates with accepted=false. Only that
+    // internal inconsistency permits one review of the identical completed pair.
+    const inconsistent = { ...good, accepted: false,
+      reason: "The purple JBL product matches its geometry, print and option. The cable is a styling prop; one coherent scene, no added text or unsupported photo-proof claim.",
+      comparisons: { ...comparisons, productShape: { ...comparisons.productShape, result: "allowed-variation", variation: "viewpoint-or-pose" },
+        sceneContext: { ...comparisons.sceneContext, result: "allowed-variation", variation: "lighting-or-context" } } };
+    let consistencyCases = 0;
+    const originalConsistencySpawn = childProcess.spawn;
+    let consistencyGenerationCalls = 0;
+    childProcess.spawn = (() => { consistencyGenerationCalls++; throw new Error("No image generation or external provider in review-only consistency fixtures"); }) as typeof childProcess.spawn;
+    syncBuiltinESMExports();
+    try {
+      let reviewCalls = 0;
+      let firstInput = "";
+      const consistent = await reviewShoppingReferenceScene({ reference, outputPath: output, productName: "JBL GRIP 퍼플",
+        imageIntent: "AI illustrative photograph", sectionTitle: "USB-C와 사용시간, 충전 계획", bodyExcerpt: "USB-C 충전과 14시간 표기를 구매 조건으로 살펴봅니다." }, {
+        review: async call => {
+          reviewCalls++;
+          const serialized = JSON.stringify(call);
+          if (reviewCalls === 1) firstInput = serialized;
+          else assert.equal(serialized, firstInput, "the single re-evaluation receives exactly the same pixels, supporting order, schema and publication context");
+          return JSON.stringify(reviewCalls === 1 ? inconsistent : { ...inconsistent, accepted: true });
+        },
+      });
+      assert.equal(consistent.reviewStatus, "passed");
+      assert.equal(reviewCalls, 2);
+      assert.equal(consistencyGenerationCalls, 0);
+      assert.match(consistent.reason!, /1회 재검토/u);
+      consistencyCases++;
+      for (const second of [inconsistent, { ...good, checks: { ...allChecks, silhouette: false } }, { accepted: true, reason: "incomplete" }]) {
+        let calls = 0;
+        await assert.rejects(reviewShoppingReferenceScene({ reference, outputPath: output, productName: "JBL GRIP 퍼플", imageIntent: "AI photograph" }, {
+          review: async () => { calls++; return JSON.stringify(calls === 1 ? inconsistent : second); },
+        }), error => {
+          assert.ok(error instanceof Error);
+          const realNegative = "checks" in second && second.checks?.silhouette === false;
+          assert.match(error.message, realNegative ? /^REFERENCE_SCENE_FIDELITY_FAILED:/u : /^REFERENCE_SCENE_REVIEW_INVALID:/u);
+          assert.equal(Object.hasOwn(error, "fidelityFailure"), realNegative, "an internal contradiction or malformed answer never becomes a paid-retry rejection receipt");
+          return true;
+        });
+        assert.equal(calls, 2, "exactly one consistency re-evaluation, never an open retry loop");
+        consistencyCases++;
+      }
+      const supportingPixel = file("consistency-support");
+      const supportingReceipt = path.join(root, "consistency-support.retrieval.json");
+      fs.writeFileSync(supportingReceipt, JSON.stringify({ sourceUrl: "https://shop-phinf.pstatic.net/synthetic.jpg", sha256: hash(supportingPixel) }));
+      for (const mutationStage of [1, 2]) for (const kind of ["candidate", "reference", "support", "receipt", "publication", "reference-order", "provider-order"]) {
+        const fixtureOptions = { reference: { ...reference }, outputPath: output, productName: "JBL GRIP 퍼플", imageIntent: "AI photograph",
+          bodyExcerpt: "Actual saved publication text", supportingReferences: [{ ...reference, path: supportingPixel, sha256: hash(supportingPixel),
+            purpose: "geometry" as const, reason: "same-option structure", sourceUrl: "https://shop-phinf.pstatic.net/synthetic.jpg",
+            sourceSnapshotId: "snapshot-consistency", receiptPath: supportingReceipt, receiptSha256: hash(supportingReceipt) }] };
+        const files = [output, reference.path, supportingPixel, supportingReceipt];
+        const originalBytes = files.map(file => fs.readFileSync(file));
+        let calls = 0;
+        try {
+          await assert.rejects(reviewShoppingReferenceScene(fixtureOptions, {
+            review: async call => {
+              calls++;
+              assert.deepEqual(call.imagePaths, [reference.path, output, supportingPixel]);
+              if (calls === mutationStage) {
+                const fileIndex = ["candidate", "reference", "support", "receipt"].indexOf(kind);
+                if (fileIndex !== -1) fs.appendFileSync(files[fileIndex], "changed after review began");
+                else if (kind === "publication") fixtureOptions.bodyExcerpt += "changed";
+                else if (kind === "reference-order") fixtureOptions.supportingReferences.reverse().push({ ...fixtureOptions.supportingReferences[0] });
+                else call.imagePaths!.reverse();
+              }
+              return JSON.stringify(calls === 1 ? inconsistent : good);
+            },
+          }), /REFERENCE_SCENE_CHANGED/u, `changed ${kind} at review ${mutationStage} must abort before any approval`);
+          assert.equal(calls, mutationStage);
+          consistencyCases++;
+        } finally { files.forEach((file, index) => fs.writeFileSync(file, originalBytes[index])); }
+      }
+      assert.equal(consistencyGenerationCalls, 0);
+    } finally {
+      childProcess.spawn = originalConsistencySpawn;
+      syncBuiltinESMExports();
+    }
+    // Fresh synthetic-pair reviews still reject every actual adverse gate.
     const currentPublication = "음식물처리기의 사양과 충전 시간을 살펴봅니다. 사진은 제품 외형 연출입니다.";
     let currentPairCases = 0;
     for (const patch of [
@@ -268,8 +349,9 @@ async function main() {
         },
       });
       if (Object.keys(patch).length === 0) assert.equal((await operation).reviewStatus, "passed");
-      else await assert.rejects(operation, /REFERENCE_SCENE_FIDELITY_FAILED/, "favorable prose and no proof claim cannot reverse an adverse boolean or inconsistent comparison");
-      assert.equal(calls, 1, "the gate never retries or reinterprets an adverse returned review");
+      else await assert.rejects(operation, Object.keys(patch).length === 1 && patch.accepted === false ? /REFERENCE_SCENE_REVIEW_INVALID/ : /REFERENCE_SCENE_FIDELITY_FAILED/,
+        "favorable prose cannot reverse an adverse gate; accepted-only inconsistency stays invalid");
+      assert.equal(calls, Object.keys(patch).length === 1 && patch.accepted === false ? 2 : 1, "actual adverse gates are not retried");
       currentPairCases++;
     }
     // IMAGE 1 seller artwork is comparison input. Only IMAGE 2 and the actual
@@ -322,8 +404,9 @@ async function main() {
         },
       });
       if (Object.keys(fixture.patch).length === 0) assert.equal((await operation).reviewStatus, "passed");
-      else await assert.rejects(operation, /REFERENCE_SCENE_FIDELITY_FAILED/, "attachment scope guidance never reverses a returned adverse verdict, actual candidate defect or unsupported publication claim");
-      assert.equal(calls, 1, "candidate-only scope adds no review loop or automatic approval");
+      else await assert.rejects(operation, fixture.patch.accepted === false && !Object.hasOwn(fixture.patch, "checks") ? /REFERENCE_SCENE_REVIEW_INVALID/ : /REFERENCE_SCENE_FIDELITY_FAILED/,
+        "actual candidate defects block; an accepted-only contradiction is never normalized into approval");
+      assert.equal(calls, fixture.patch.accepted === false && !Object.hasOwn(fixture.patch, "checks") ? 2 : 1, "candidate defects never trigger a consistency retry");
       attachmentScopeCases++;
     }
     assert.ok(fidelitySchema && typeof fidelitySchema === "object" && !Array.isArray(fidelitySchema));
@@ -431,7 +514,7 @@ async function main() {
     await assert.rejects(reviewShoppingReferenceScene({ reference, outputPath: output, productName: "JMW selected dryer", imageIntent: "AI illustrative bathroom scene" }, {
       review: async () => JSON.stringify({ ...reflected, accepted: false,
         reason: "거울에 두 번째 드라이어가 보여 singleScene 실패로 판단했지만 모든 체크를 true로 반환한 실제 보고 형식" }),
-    }), /REFERENCE_SCENE_FIDELITY_FAILED/, "the reported contradictory all-true-checks/accepted=false verdict remains rejected without parser normalization");
+    }), /REFERENCE_SCENE_REVIEW_INVALID/, "a repeated contradictory all-true-checks/accepted=false verdict is held without parser normalization or a regeneration receipt");
     let reflectionCases = 2;
     for (const [key, reason] of [
       ["singleScene", "two independent physical selected dryers presented as a one-item scene"],
@@ -698,7 +781,7 @@ async function main() {
       childProcess.spawn = originalSpawn;
       syncBuiltinESMExports();
     }
-    console.log(`PASS: numbered attachment scope (${attachmentScopeCases} offline cases, candidate defects/adverse verdicts still block), current-pair finalization (${currentPairCases} offline cases, adverse booleans/comparisons still block), correlated provider comparison schema (${schemaCases} cases; exact Cuckoo/Aveeno invalid pairs rejected and correctly paired allowed variations approved), strict reference selection (47 invalid boolean/observation responses, uncached retry, stage/SHA/reason diagnostics), optical reflection contract (${reflectionCases} cases, accepted=false still rejected), structured intrinsic/photographic difference QA (6 allowed variations, 7 real contradictions), two-image fail-closed checks, ordered attachments, existing passed-v2 compatibility, stable original/approved anchor, stale anchor rejection, recipe invalidation, evidence boundary`);
+    console.log(`PASS: bounded exact-input verdict consistency (${consistencyCases} cases, zero generation calls; repeated contradictions hold, real negative gates reject, pixel/receipt/context/order mutations abort), numbered attachment scope (${attachmentScopeCases} offline cases, candidate defects/adverse verdicts still block), current-pair finalization (${currentPairCases} offline cases, adverse booleans/comparisons still block), correlated provider comparison schema (${schemaCases} cases; exact Cuckoo/Aveeno invalid pairs rejected and correctly paired allowed variations approved), strict reference selection (47 invalid boolean/observation responses, uncached retry, stage/SHA/reason diagnostics), optical reflection contract (${reflectionCases} cases, inconsistent verdicts hold), structured intrinsic/photographic difference QA (6 allowed variations, 7 real contradictions), two-image fail-closed checks, ordered attachments, existing passed-v2 compatibility, stable original/approved anchor, stale anchor rejection, recipe invalidation, evidence boundary`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
 void main().catch(error => { console.error(error); process.exitCode = 1; });

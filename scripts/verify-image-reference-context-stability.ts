@@ -124,7 +124,8 @@ async function main() {
       rawPath, workDir: work, completedJob: job, index: 0, reviewReferenceScene: async () => { throw failure(); } }), /IMAGE_RESUME_REQUIRED/,
       "a different review input cannot reuse or overwrite the old negative proof");
     assert.deepEqual(fs.readFileSync(rejectionPath), rejectionBytes); checks += 2;
-    for (const invalidFailure of [{ version: "shopping-scene-fidelity-failure/v1", accepted: true, identityMatches: true, illustrativeOnly: true,
+    for (const invalidFailure of [{ version: "shopping-scene-fidelity-failure/v1", accepted: false, identityMatches: true, illustrativeOnly: true,
+      failedChecks: [], comparisonFailures: [] }, { version: "shopping-scene-fidelity-failure/v1", accepted: true, identityMatches: true, illustrativeOnly: true,
       failedChecks: [], comparisonFailures: [] }, { version: "shopping-scene-fidelity-failure/v1" }, { ...rejection.failure, failedChecks: ["inventedCheck"] }]) {
       fs.writeFileSync(rejectionPath, JSON.stringify({ ...rejection, failure: invalidFailure }));
       assert.equal((await generation.prepareBrandPostImageReferenceContext({ manifest, productName: "검정 제품", target: target() }, noReselect)).retryOf, undefined,
@@ -182,6 +183,24 @@ async function main() {
     await assert.rejects(generation.finishBrandPostGeneratedImage({ manifest, productName: "검정 제품", target: newTarget, rawPath: improvedRaw, workDir: work,
       completedJob: improvedJob, index: 0, reviewReferenceScene: async () => { throw failure(); } }), /REFERENCE_SCENE_FIDELITY_FAILED/);
     await assert.rejects(generation.prepareBrandPostImageReferenceContext({ manifest, productName: "검정 제품", target: target() }, noReselect), /IMAGE_REPAIR_EXHAUSTED/); checks++;
+    const improvedRejection = `${improvedJob.outStem}.body-rejection.json`;
+    const inconsistentProof = { ...JSON.parse(fs.readFileSync(improvedRejection, "utf8")), failure: {
+      version: "shopping-scene-fidelity-failure/v1", accepted: false, identityMatches: true, illustrativeOnly: true,
+      failedChecks: [], comparisonFailures: [],
+    } };
+    fs.writeFileSync(improvedRejection, JSON.stringify(inconsistentProof));
+    const preservedInconsistentProof = fs.readFileSync(improvedRejection);
+    const reviewTarget = target();
+    const reviewContext = await generation.prepareBrandPostImageReferenceContext({ manifest, productName: "검정 제품", target: reviewTarget }, noReselect);
+    assert.equal(reviewContext.retryOf?.outStem, job.outStem, "only the earlier genuine rejection can authorize the existing improved recipe");
+    const [reviewJob] = generation.prepareImageBatchJobs([reviewTarget], manifest, "검정 제품", work);
+    assert.equal(reviewJob.outStem, improvedJob.outStem, "accepted-only inconsistency must reuse the exact completed improved output");
+    assert.ok(reviewJob.reviewOnly, "the recovered request is review-only, never a new provider call");
+    assert.deepEqual(fs.readFileSync(improvedRejection), preservedInconsistentProof, "inconsistent historical proof is never rewritten as a new signature"); checks += 4;
+    await assert.rejects(generation.finishBrandPostGeneratedImage({ manifest, productName: "검정 제품", target: reviewTarget,
+      rawPath: improvedRaw, workDir: work, completedJob: reviewJob, index: 0, reviewReferenceScene: async () => { throw failure(); } }),
+      /REFERENCE_SCENE_FIDELITY_FAILED/, "a fresh real negative remains visible even when the old immutable verdict was inconsistent");
+    assert.deepEqual(fs.readFileSync(improvedRejection), preservedInconsistentProof); checks += 2;
     console.log(`image reference context stability: ${checks} checks passed; generation/provider/network calls 0`);
   } finally {
     globalThis.fetch = oldFetch;

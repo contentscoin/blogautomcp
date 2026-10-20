@@ -983,7 +983,10 @@ async function main() {
     };
     for (const patch of [
       {},
-      { accepted: false, reason: "Readable fabricated FDA APPROVED efficacy/certification copy is present on the otherwise matching product." },
+      // The intended fabricated-certification defect must be present in a
+      // mandatory gate; favorable gates plus accepted=false is an invalid verdict.
+      { accepted: false, checks: { ...referenceVerdict.checks, noAddedText: false },
+        reason: "Readable fabricated FDA APPROVED efficacy/certification copy is present on the otherwise matching product." },
       { identityMatches: false, reason: "Selected product identity genuinely remains unresolved." },
       { checks: { ...referenceVerdict.checks, surface: false }, reason: "Only minor texture differs; no substantive visible defect remains." },
       { checks: { ...referenceVerdict.checks, noAddedText: false }, reason: "An added body headline is clearly visible." },
