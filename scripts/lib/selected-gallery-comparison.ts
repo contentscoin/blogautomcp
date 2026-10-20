@@ -160,3 +160,34 @@ export async function readSelectedGalleryComparisons(options: {
     } catch { return false; }
   });
 }
+
+/** Preserve the slot's independently bound canonical primary even when the
+ * optional comparison shortlist omitted it. This is receipt/byte lineage only;
+ * no pixel verdict, literal certification or repair authority is created. */
+export async function readPublicationIdentifierReferenceBindings(options: {
+  snapshot: unknown; productId: string; sourceDirectory: string;
+  publicationOriginalSha256?: string; primaryReference: { path: string; sha256: string };
+}): Promise<SelectedGalleryComparisonImage[]> {
+  const base = await readSelectedGalleryComparisons(options);
+  const primary = options.primaryReference;
+  if (!primary || !/^[a-f0-9]{64}$/u.test(primary.sha256) || !path.isAbsolute(primary.path))
+    throw new Error("SELECTED_SOURCE_CONTEXT_INVALID: 본문 사진의 고정 원본 연결이 유효하지 않습니다.");
+  const stat = fs.statSync(primary.path);
+  if (!stat.isFile() || stat.size < 1 || stat.size > 24 * 1024 * 1024 ||
+      crypto.createHash("sha256").update(fs.readFileSync(primary.path)).digest("hex") !== primary.sha256)
+    throw new Error("SELECTED_SOURCE_CONTEXT_INVALID: 본문 사진의 고정 원본 바이트가 변경되었습니다.");
+  const own = base.find(reference => reference.sha256 === primary.sha256) ??
+    (await readSelectedGalleryComparisons({ ...options, publicationOriginalSha256: primary.sha256 }))
+      .find(reference => reference.sha256 === primary.sha256);
+  // An unreceipted primary remains unreceipted. Never infer its snapshot from
+  // another source's ID or manufacture canonical membership from scene metadata.
+  if (!own) return base;
+  if (crypto.createHash("sha256").update(fs.readFileSync(primary.path)).digest("hex") !== primary.sha256 ||
+      crypto.createHash("sha256").update(fs.readFileSync(own.path)).digest("hex") !== own.sha256 ||
+      crypto.createHash("sha256").update(fs.readFileSync(own.receiptPath)).digest("hex") !== own.receiptSha256)
+    throw new Error("SELECTED_SOURCE_CONTEXT_INVALID: 본문 사진 원본의 수집 증거가 변경되었습니다.");
+  // The primary was already attached/observed separately. Keep every existing
+  // optional reference when space permits; only the final optional item yields
+  // to the exact own primary at the unchanged five-reference ceiling.
+  return [...base.filter(reference => reference.sha256 !== own.sha256).slice(0, 4), own];
+}

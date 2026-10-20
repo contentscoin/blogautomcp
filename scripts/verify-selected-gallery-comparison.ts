@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
 import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
-import { readSelectedGalleryComparisons } from "./lib/selected-gallery-comparison";
+import { readSelectedGalleryComparisons, readPublicationIdentifierReferenceBindings } from "./lib/selected-gallery-comparison";
 
 const digest = (bytes: Buffer) => crypto.createHash("sha256").update(bytes).digest("hex");
 const productId = "selected-gallery-fixture";
@@ -478,6 +478,47 @@ async function main() {
         [first.file, second.file, fallback.file]);
     });
 
+    await test("identifier own-primary receipt survives the optional-gallery shortlist without rewriting evidence", async () => {
+      const directory = fixture(), selectedSnapshot = snapshot();
+      const first = saved(directory, "first", blue, urls[0]), second = saved(directory, "second", green, urls[1]);
+      const own = saved(directory, "own", red, urls[3]), copy = path.join(root, "exact-own-copy.png"); fs.writeFileSync(copy, red);
+      assert.deepEqual((await read(directory, selectedSnapshot)).map(row => row.path), [first.file, second.file]);
+      const before = directoryBytes(directory), bound = await readPublicationIdentifierReferenceBindings({ snapshot: selectedSnapshot,
+        productId, sourceDirectory: directory, primaryReference: { path: copy, sha256: digest(red) } });
+      assert.deepEqual(bound.map(row => row.path), [first.file, second.file, own.file]);
+      assert.equal(bound.at(-1)!.sourceSnapshotId, selectedSnapshot.snapshotId);
+      assert.equal(bound.at(-1)!.receiptSha256, digest(fs.readFileSync(own.receiptPath)));
+      assert.deepEqual(directoryBytes(directory), before);
+    });
+    await test("unreceipted, ambiguous or off-snapshot primaries never acquire another source's snapshot", async () => {
+      for (const kind of ["missing", "ambiguous", "off-snapshot", "forged-sha"] as const) {
+        const directory = fixture(), selectedSnapshot = snapshot();
+        saved(directory, "first", blue, urls[0]); saved(directory, "second", green, urls[1]);
+        if (kind !== "missing") saved(directory, "own", red, kind === "off-snapshot" ? "https://shop-phinf.pstatic.net/unselected.png" : urls[3],
+          kind === "forged-sha" ? { sha256: digest(gold) } : {});
+        if (kind === "ambiguous") saved(directory, "ambiguous", gold, urls[3]);
+        const copy = path.join(root, `unbound-${kind}.png`); fs.writeFileSync(copy, red);
+        const bound = await readPublicationIdentifierReferenceBindings({ snapshot: selectedSnapshot, productId, sourceDirectory: directory,
+          primaryReference: { path: copy, sha256: digest(red) } });
+        assert(!bound.some(row => row.sha256 === digest(red)), kind);
+      }
+    });
+    await test("a changed own-primary copy fails instead of borrowing a valid canonical receipt", async () => {
+      const directory = fixture(); saved(directory, "own", red, urls[3]);
+      const copy = path.join(root, "changed-own-copy.png"); fs.writeFileSync(copy, gold);
+      await assert.rejects(readPublicationIdentifierReferenceBindings({ snapshot: snapshot(), productId, sourceDirectory: directory,
+        primaryReference: { path: copy, sha256: digest(red) } }), /SELECTED_SOURCE_CONTEXT_INVALID/u);
+    });
+    await test("own-primary binding preserves the five-source ceiling and deduplicates exact originals", async () => {
+      const directory = fixture(), gallery = [urls[0], urls[1], capacityUrl("serum-100ml.png"), capacityUrl("toner-180ml.png"), urls[3], capacityUrl("published.png")];
+      const colors = [blue, green, red, gold, await portrait(24, 24, "#1199aa"), await portrait(24, 24, "#7711aa")];
+      const files = gallery.map((url, index) => saved(directory, `source-${index}`, colors[index], url));
+      const selectedSnapshot = snapshot(gallery, { features: ["세럼 100ml", "토너 180ml"] });
+      const bound = await readPublicationIdentifierReferenceBindings({ snapshot: selectedSnapshot, productId, sourceDirectory: directory,
+        publicationOriginalSha256: digest(colors[5]), primaryReference: { path: files[4].file, sha256: digest(colors[4]) } });
+      assert.equal(bound.length, 5); assert.equal(new Set(bound.map(row => row.sha256)).size, 5);
+      assert.equal(bound.at(-1)!.sha256, digest(colors[4]));
+    });
     assert.equal(networkCalls, 0);
     console.log(`Selected gallery comparison: ${checks} offline cases passed; no network or provider calls.`);
   } finally {

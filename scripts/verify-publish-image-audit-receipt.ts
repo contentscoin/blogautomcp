@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 import net from "node:net";
 import vm from "node:vm";
 import { createRequire } from "node:module";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import ts from "typescript";
 import sharp from "sharp";
 import { readSuccessfulImageAuditReceipt as read, readSuccessfulImageAuditReceiptDetails as details, writeSuccessfulImageAuditReceipt as write, invalidateSuccessfulImageAuditReceipt as invalidate, withSuccessfulImageAuditLock } from "./lib/publish-image-audit-receipt";
@@ -125,18 +125,23 @@ async function main() {
           : { origin: "section-body", sourceIndex: 0, quote: slots[index]?.sectionBody[0], scope: "pictured-appearance", conflict: "Offline adverse photo claim" },
       notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "fixture selected product" })) });
   };
-  const ledgerProbes: Array<Promise<string>> = [];
+  // A ledger hook is synchronous. Scheduling a probe in this process lets its
+  // listen event run after the enclosing audit lock closes (a Linux CI race).
+  // A separate process must finish its OS bind attempt BEFORE the hook returns.
+  const probeOsListener = (endpoint: {path:string} | {host:string;port:number;exclusive:true}): string => execFileSync(process.execPath,["-e",
+    "const net=require('node:net');const server=net.createServer();"+
+    "const timeout=setTimeout(()=>{process.stderr.write('OS lock probe timed out');process.exit(2)},3000);timeout.unref();"+
+    "server.once('error',error=>{process.stdout.write(error.code||'UNKNOWN');});"+
+    "server.listen(JSON.parse(process.argv[1]),()=>server.close(()=>process.stdout.write('UNLOCKED')));",
+    JSON.stringify(endpoint)],{encoding:"utf8",timeout:5000,windowsHide:true}).trim();
+  const ledgerProbes: string[] = [];
   const probeLedgerLock = () => {
     const directory = path.resolve(fixtureRoot, "data/publication-image-audit-receipts");
     const identity = crypto.createHash("sha256").update(process.platform === "win32" ? directory.toLowerCase() : directory)
       .update(crypto.createHash("sha256").update("ledger-boundary").digest("hex")).digest("hex");
     const endpoint = process.platform === "win32" ? { path: `\\\\.\\pipe\\blogautomcp-image-audit-${identity}` }
-      : { host: "127.0.0.1", port: 32768 + Number.parseInt(identity.slice(0, 4), 16) % 28000, exclusive: true };
-    ledgerProbes.push(new Promise(resolve => {
-      const server = net.createServer();
-      server.once("error", (error: NodeJS.ErrnoException) => resolve(error.code || "UNKNOWN"));
-      server.listen(endpoint, () => server.close(() => resolve("UNLOCKED")));
-    }));
+      : { host: "127.0.0.1", port: 32768 + Number.parseInt(identity.slice(0, 4), 16) % 28000, exclusive: true as const };
+    ledgerProbes.push(probeOsListener(endpoint));
   };
   const load = (text = source, probeLedger = false, changedScopedQuestion = false) => {
     const exports: Record<string, unknown> = {};
@@ -239,7 +244,17 @@ async function main() {
   assert.equal(fs.existsSync(receiptFile("injected-only")), false, "injected reviewer never writes receipts");
   const assertWithLedgerProbe = load(source, true);
   await assertWithLedgerProbe({ ...options, brandLinkId: "ledger-boundary" });
-  assert.deepEqual(await Promise.all(ledgerProbes), ["EADDRINUSE", "EADDRINUSE", "EADDRINUSE"], "success clearing, rejection recording and block-only HOLD recording all remain inside audit lock");
+  assert.deepEqual(ledgerProbes, ["EADDRINUSE", "EADDRINUSE", "EADDRINUSE"], "every ledger hook completes its OS probe while the audit lock remains held");
+  // Explicitly exercise the TCP path used on Linux even on a Windows host;
+  // the production ledger probes above also exercise Windows named pipes.
+  const portableListener=net.createServer();
+  await new Promise<void>((resolve,reject)=>{portableListener.once("error",reject);portableListener.listen({host:"127.0.0.1",port:0,exclusive:true},resolve);});
+  const boundAddress=portableListener.address();assert(boundAddress && typeof boundAddress!=="string");
+  const portableEndpoint={host:"127.0.0.1",port:boundAddress.port,exclusive:true as const};
+  assert.equal(probeOsListener(portableEndpoint),"EADDRINUSE","a real held TCP listener must block the child synchronously");
+  await new Promise<void>((resolve,reject)=>portableListener.close(error=>error?reject(error):resolve()));
+  assert.equal(probeOsListener(portableEndpoint),"UNLOCKED","the independent probe must actually bind once the OS listener is released");
+  console.log("OS lock probes: all 3 synchronous ledger hooks reject the independent process; held/free TCP controls PASS");
   const referenceA = path.join(fixtureRoot, "bound-reference-a.png"), referenceB = path.join(fixtureRoot, "bound-reference-b.png");
   await sharp({ create: { width: 220, height: 180, channels: 3, background: "#bbddcc" } }).png().toFile(referenceA);
   await sharp({ create: { width: 220, height: 180, channels: 3, background: "#aabbcc" } }).png().toFile(referenceB);

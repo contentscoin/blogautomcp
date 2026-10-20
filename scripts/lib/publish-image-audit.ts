@@ -40,7 +40,7 @@ import type { ResolvedPostDocumentV1 } from "../../src/lib/post-composition-cont
 import { buildProductImageVisualContract, PRODUCT_IMAGE_VISUAL_CONTRACT_RULES_EN,
   PRODUCT_IMAGE_BODY_TEXT_RULE_EN, PRODUCT_IMAGE_CANONICAL_CATALOG_SCOPE_RULE_EN } from "./product-image-visual-contract";
 import { readProductSnapshot, type ProductSnapshot } from "../../src/lib/draft-context-snapshot";
-import { readSelectedGalleryComparisons, type SelectedGalleryComparisonImage } from "./selected-gallery-comparison";
+import { readSelectedGalleryComparisons, readPublicationIdentifierReferenceBindings, type SelectedGalleryComparisonImage } from "./selected-gallery-comparison";
 import { photoDescriptionFinding, savePhotoDescriptionFindings, type PhotoDescriptionFinding } from "./photo-description-finding";
 import { REFERENCE_PLANE_RULE_EN, REFERENCE_PLANE_POLICY_VERSION, REFERENCE_PLANE_COMPARISON_SCHEMA, REFERENCE_PLANE_IDENTITY_QUESTION,
   referencePlaneComparisonIssue, type ReferencePlaneContext } from "./reference-plane-grounding";
@@ -492,6 +492,19 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
         role: candidate.role, exactCanonicalSellerOriginal: candidate.exactCanonicalSellerOriginal, sectionTitle: candidate.sectionTitle,
         sectionBody: candidate.sectionBody, sectionBodyRenderNodeIndices: candidate.sectionBodyRenderNodeIndices, allowProductPhoto: candidate.allowProductPhoto, selection: visibleSelection, selectedProduct }) : [] };
     }) : [];
+    const identifierReferenceBindings = new Map<typeof candidates[number], SelectedGalleryComparisonImage[]>();
+    for (const { candidate, primary } of scopedPackets) {
+      if (!primary || !selectedSourceIdentity) continue;
+      const primaryPath = candidate.referenceScene?.referencePath || candidate.canonicalPhotoSource?.sourcePath || gallerySnapshots.find(reference => reference.sha256 === candidate.sha256)?.path;
+      if (!primaryPath) continue;
+      try {
+        identifierReferenceBindings.set(candidate, await readPublicationIdentifierReferenceBindings({ snapshot: options.selectedSourceSnapshot,
+          productId: selectedSourceProductId!, sourceDirectory: selectedSourceDirectory!, publicationOriginalSha256,
+          primaryReference: { path: primaryPath, sha256: primary.referenceSha256 } }));
+      } catch (error) {
+        fail(candidate.nodeIndex, candidate.assetPath, "INVALID_CONTEXT", `Own-primary canonical receipt binding is invalid: ${(error as Error).message}`);
+      }
+    }
     const requests: Array<{ batch: typeof candidates; call: CodexDraftOptions; gallery: GalleryGroup; split?: boolean }> = [];
     const referenceLayout = (batch: typeof candidates, gallery: GalleryGroup) => {
       const references = [...new Map<string, { referenceSha256: string; sourceSnapshotId: string; snapshot: string }>([...batch.flatMap(candidate => candidate.referenceScene
@@ -633,7 +646,8 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           thumbnailRawSha256: candidate.referenceScene.thumbnailRawSha256, thumbnailOutputSha256: candidate.referenceScene.thumbnailOutputSha256 } : undefined })),
       requests: !options.review ? scopedPackets.map(({ candidate, packets }) => ({ nodeIndex: candidate.nodeIndex,
         packets: packets.map(packet => ({ task: packet.task, sha256: packet.requestSha256 })),
-        identifierReferences: gallerySnapshots.map(reference => ({ sha256: reference.sha256, sourceSnapshotId: reference.sourceSnapshotId })) }))
+        identifierReferences: (identifierReferenceBindings.get(candidate) || gallerySnapshots).map(reference => ({ sha256: reference.sha256,
+          sourceSnapshotId: reference.sourceSnapshotId, sourceUrl: reference.sourceUrl })) }))
         : requests.map(({ call }) => ({ ...call, imagePaths: call.imagePaths!.map(file => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")) })),
     })).digest("hex");
     result.requestBindingSha256 = receiptKey;
@@ -662,7 +676,9 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
         const hash = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
         return (!publicationOriginalSha256 || !!publicationOriginal && hash(publicationOriginal.path) === publicationOriginalSha256) &&
           gallerySnapshots.every(reference => hash(reference.path) === reference.sha256 &&
-          hash(reference.receiptPath) === reference.receiptSha256 && hash(reference.snapshot) === reference.snapshotSha256);
+          hash(reference.receiptPath) === reference.receiptSha256 && hash(reference.snapshot) === reference.snapshotSha256) &&
+          [...identifierReferenceBindings.values()].every(references => references.every(reference => hash(reference.path) === reference.sha256 &&
+            hash(reference.receiptPath) === reference.receiptSha256));
       } catch { return false; }
     };
     const selectedSourceStillBound = async (): Promise<boolean> => {
@@ -673,6 +689,14 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           productId: selectedSourceProductId!, sourceDirectory: selectedSourceDirectory!, publicationOriginalSha256 });
         if (JSON.stringify(current) !== JSON.stringify(gallerySnapshots.map(({ path, sha256, sourceUrl, sourceSnapshotId, receiptPath, receiptSha256 }) =>
           ({ path, sha256, sourceUrl, sourceSnapshotId, receiptPath, receiptSha256 })))) return false;
+        for (const { candidate, primary } of scopedPackets) {
+          const bound = identifierReferenceBindings.get(candidate);
+          if (!bound || !primary) continue;
+          const primaryPath = candidate.referenceScene?.referencePath || candidate.canonicalPhotoSource?.sourcePath || gallerySnapshots.find(reference => reference.sha256 === candidate.sha256)?.path;
+          if (!primaryPath || JSON.stringify(await readPublicationIdentifierReferenceBindings({ snapshot: options.selectedSourceSnapshot,
+            productId: selectedSourceProductId!, sourceDirectory: selectedSourceDirectory!, publicationOriginalSha256,
+            primaryReference: { path: primaryPath, sha256: primary.referenceSha256 } })) !== JSON.stringify(bound)) return false;
+        }
         return selectedSourceSnapshotsStillBound();
       } catch { return false; }
     };
@@ -743,7 +767,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
       const primaryPath = candidate.referenceScene?.referencePath || candidate.canonicalPhotoSource?.sourcePath || gallerySnapshots.find(reference => reference.sha256 === candidate.sha256)?.path;
       if (primaryPath) {
         const identifierInput: PublicationIdentifierReviewInput = { candidatePath: candidate.assetPath, candidateSha256: candidate.sha256,
-          primaryReference: { path: primaryPath, sha256: primary.referenceSha256 }, canonicalReferences: gallerySnapshots.map(reference =>
+          primaryReference: { path: primaryPath, sha256: primary.referenceSha256 }, canonicalReferences: (identifierReferenceBindings.get(candidate) || gallerySnapshots).map(reference =>
             ({ path: reference.path, sha256: reference.sha256, sourceSnapshotId: reference.sourceSnapshotId })), workspace: root,
           scopeGate: {kind:"final-native-positive/v1",selectedProduct,policyFingerprint:result.policyFingerprint,visibleReview:visible,claimsReview:claims,formatReview:format,
             sourceVisibleReviews:(result.scopedReviews || []).flatMap(scoped => {
