@@ -40,7 +40,8 @@ interface ReviewModule {
 type ReviewCall = { userPrompt: string; imagePaths: string[]; maxImages?: number; preserveImageOrder?: boolean };
 
 function loadReview(answer: string | ((options: ReviewCall, callIndex: number) => string),
-  finalAudit?: (input: PublishImageAuditOptions, callIndex: number) => PublishImageAuditResult) {
+  finalAudit?: (input: PublishImageAuditOptions, callIndex: number) => PublishImageAuditResult,
+  policyKey: () => string = () => "offline-native-claims-format-policy") {
   let prompt = "";
   const calls: ReviewCall[] = [];
   const auditCalls: PublishImageAuditOptions[] = [];
@@ -61,6 +62,7 @@ function loadReview(answer: string | ((options: ReviewCall, callIndex: number) =
       // Exercise real bounded proposal logic with an offline final-review result.
       // Semantic failures/auth/round bounds are covered by verify-product-proposal-audit.
       if (name === "./product-section-proposal-audit") return {
+        productSectionProposalAuditPolicyKey: policyKey,
         auditSectionProposals: (options: Parameters<typeof auditSectionProposals>[0]) => auditSectionProposals({ ...options,
           audit: async (input) => { auditCalls.push(input); if (finalAudit) return finalAudit(input, auditCalls.length - 1);
             const { composition } = input; return { ok: true, checked: composition.sections.length, failures: [],
@@ -117,6 +119,23 @@ async function main() {
     assert.match(bodyAware.prompt, /실제 발행 문장의 기능과 다른 효능/);
     assert.match(bodyAware.prompt, /"purpose":"feature-evidence"/);
     assert.match(bodyAware.prompt, /"claimPolicy":"direct-requested-feature"/);
+    const exactTitle = "외형  확인：Ａ", exactBody = ["일반 규격은 별도 확인합니다.\n\n사진에서는 귀에 거는 형태와\u00a0연결부가 함께 보여요."];
+    const exactClaims = loadReview('{"assignments":[{"targetIndex":1,"selectedIndex":1,"reviewClass":"product-photo","reason":"외형 제안"}]}');
+    await exactClaims.review.selectVerifiedProductSectionImages([candidate], "exact-claim-units", [{ ...overviewTarget,
+      sectionTitle: exactTitle, sectionBody: exactBody }]);
+    assert.equal(exactClaims.auditCalls[0].composition.sections[0].title, exactTitle, "source C sees exact published title, not NFKC/whitespace-normalized prose");
+    assert.deepEqual(JSON.parse(JSON.stringify(exactClaims.auditCalls[0].composition.sections[0].body)), exactBody, "blank-line units/offsets and nonbreaking spaces survive initial source QA");
+    assert.deepEqual(exactClaims.auditCalls[0].composition.renderNodes.filter(node => node.kind === "paragraph").map(node => node.text), exactBody);
+    let nativePolicy = "old-claims-policy";
+    const refreshedClaims = loadReview('{"assignments":[{"targetIndex":1,"selectedIndex":1,"reviewClass":"product-photo","reason":"외형"}]}', undefined, () => nativePolicy);
+    await refreshedClaims.review.selectVerifiedProductSectionImages([candidate], "policy-frozen-source", [overviewTarget]);
+    await refreshedClaims.review.selectVerifiedProductSectionImages([candidate], "policy-frozen-source", [overviewTarget]);
+    assert.equal(refreshedClaims.auditCalls.length, 1);
+    nativePolicy = "new-independent-claim-units-policy";
+    await refreshedClaims.review.selectVerifiedProductSectionImages([candidate], "policy-frozen-source", [overviewTarget]);
+    assert.equal(refreshedClaims.auditCalls.length, 2, "new native C/D policy invalidates old seller-original assignment cache");
+    const changedClaimsPolicy = loadReview(() => { nativePolicy = "changed-during-source-review"; return '{"assignments":[{"targetIndex":1,"selectedIndex":1,"reviewClass":"product-photo","reason":"外形"}]}'; }, undefined, () => nativePolicy);
+    await assert.rejects(changedClaimsPolicy.review.selectVerifiedProductSectionImages([candidate], "policy-race-source", [overviewTarget]), /IMAGE_CHANGED/u);
     await bodyAware.review.selectVerifiedProductSectionImages([candidate], "fixture", [{ ...featureTarget, sectionBody: ["보송한 마무리 기준입니다."] }]);
     assert.equal(bodyAware.calls.length, 4, "body edits invalidate section review cache; missing verdicts receive one bounded review");
     const selected = JSON.stringify({ name: "fixture", optionFacts: ["색상: 화이트"] });

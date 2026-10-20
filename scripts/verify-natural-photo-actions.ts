@@ -150,6 +150,8 @@ async function main() {
     assert(declaration, "exercise the actual source-generation orchestration, including its catch and failed-slot mapping");
     const rejectedDeclaration = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "rejectedThumbnailOutputError");
     assert(rejectedDeclaration);
+    const holdDeclaration = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "assertImageRegenerationNotHeld");
+    assert(holdDeclaration, "standalone AST harness must retain the actual pre-dispatch preservation guard");
     const heroTarget = { request: { requestId: "hero", slotId: "hero:image:1" }, role: "hero", sectionTitle: "Thumbnail", imageIntent: "natural product overview" };
     let transports = 0;
     const outputContext = vm.createContext({ exports: {}, fs, path,
@@ -158,7 +160,7 @@ async function main() {
       prepareImageBatchJobsIsolated: () => { const failure=outputContext.rejectOutput(); return { jobs:[],targetIndexes:[],errors:[{targetIndex:0,error:failure.message,errorCode:failure.code}] }; },
       runImageBatch: async (jobs: unknown[]) => { transports += jobs.length; assert.equal(jobs.length,0); },
     });
-    vm.runInContext(ts.transpileModule(rejectedDeclaration.getText(ast) + "\n" + declaration.getText(ast), { compilerOptions: {
+    vm.runInContext(ts.transpileModule(holdDeclaration.getText(ast) + "\n" + rejectedDeclaration.getText(ast) + "\n" + declaration.getText(ast), { compilerOptions: {
       module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022 } }).outputText.replace(/^exports\.generateBrandPostImages = generateBrandPostImages;$/mu, "") +
       "\nthis.rejectOutput = rejectedThumbnailOutputError; this.generate = generateBrandPostImages;",outputContext);
     const outputResults = await outputContext.generate({manifest:{brandLinkId:"fixture-product",connectKind:"TRAVEL",title:"상품",composition:{sections:[],renderNodes:[]}},
@@ -224,7 +226,7 @@ async function main() {
           return [];
         },
       });
-      vm.runInContext(ts.transpileModule(declaration.getText(ast), { compilerOptions: { module: ts.ModuleKind.CommonJS,
+      vm.runInContext(ts.transpileModule(holdDeclaration.getText(ast) + "\n" + declaration.getText(ast), { compilerOptions: { module: ts.ModuleKind.CommonJS,
         target: ts.ScriptTarget.ES2022 } }).outputText.replace(/^exports\.generateBrandPostImages = generateBrandPostImages;$/mu, "") +
         "\nthis.generate = generateBrandPostImages;", context);
       const generated = await context.generate({ sourceOnly: true, manifest: { brandLinkId: snapshot.productId, connectKind: "SHOPPING",

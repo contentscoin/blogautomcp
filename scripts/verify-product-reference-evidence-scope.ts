@@ -12,6 +12,7 @@ import { hasCompleteShoppingGeometryEvidence, resolveShoppingReferenceView, type
 import { PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_VERSION, PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_RULE_EN,
   PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_RULE_KO, PRODUCT_IMAGE_VISUAL_CONTRACT_RULES_KO } from "./lib/product-image-visual-contract";
 import { auditPublishImages, publicationImageAuditPolicyFingerprint } from "./lib/publish-image-audit";
+import { referencePlaneFixtureRow } from "./test-fixtures/reference-plane-review";
 import { selectVerifiedProductPhotos } from "./lib/product-photo-review";
 import type { CodexDraftOptions } from "./lib/codex-draft-provider";
 
@@ -127,11 +128,12 @@ async function main() {
 
     const comparisons = Object.fromEntries(["productShape", "intrinsicPrinting", "visibleOption", "sceneContext"].map(key => [key, {
       result: "consistent", variation: "none", referenceObservation: `source ${key} observed`, candidateObservation: `candidate ${key} observed`, basis: "corresponding actually visible landmarks match" }]));
-    const good = { comparisons: { ...comparisons, productShape: { result: "allowed-variation", variation: "viewpoint-or-pose",
+    const good = { identifierObservation: { candidateIdentifierVisibility: "no-intrinsic-identifiers-observed", identifierComparisons: [] },
+      comparisons: { ...comparisons, productShape: { result: "allowed-variation", variation: "viewpoint-or-pose",
       referenceObservation: "teardrop ear unit and rear housing with a thin band continuing behind opaque hair",
       candidateObservation: "matching distinctive ear unit, housing and thin continuation behind hair at the same side view",
       basis: "visible design and black option identify the same item; no exposed break or terminating connector, hidden topology is not claimed verified" } },
-      checks: Object.fromEntries(SCENE_FIDELITY_CHECKS.map(key => [key, true])), identityMatches: true, illustrativeOnly: true,
+      checks: Object.fromEntries(SCENE_FIDELITY_CHECKS.map(key => [key, true])), identityMatches: true, illustrativeOnly: true, intrinsicPrintProofClaim: false,
       reason: "Matching observed landmarks identify the product without inventing a view of the occluded band", accepted: true };
     const options = { reference, outputPath: candidatePath, productName: "selected black ear unit", imageIntent: "자연스러운 착용 사진",
       sectionTitle: "구매 전 볼 기준", bodyExcerpt: "선택 조건을 살펴보세요.", supportingReferences: [legacySupport] };
@@ -159,7 +161,7 @@ async function main() {
         return JSON.stringify({ ...good, comparisons: { ...good.comparisons, [dimension]: { result: resultKind, variation: "none",
           referenceObservation: "actual identifying source landmark", candidateObservation: basis, basis } }, checks: { ...good.checks, [check]: false },
           identityMatches: false, accepted: true, reason: label });
-      } }), /REFERENCE_SCENE_FIDELITY_FAILED/u); assert.equal(calls, 1); checks++;
+      } }), resultKind === "unverifiable" ? /REFERENCE_SCENE_REVIEW_INVALID/u : /REFERENCE_SCENE_FIDELITY_FAILED/u); assert.equal(calls, 1); checks++;
     }
     for (const check of SCENE_FIDELITY_CHECKS) {
       await assert.rejects(reviewShoppingReferenceScene(options, { review: async () => JSON.stringify({ ...good, checks: { ...good.checks, [check]: false }, accepted: true }) }), /REFERENCE_SCENE_FIDELITY_FAILED/u); checks++;
@@ -191,7 +193,8 @@ async function main() {
     ]) {
       await assert.rejects(reviewShoppingReferenceScene(garmentOptions, { review: async () => JSON.stringify({ ...garmentGood,
         comparisons: { ...garmentGood.comparisons, [dimension]: { result: label === "unresolved generic garment" ? "unverifiable" : "contradiction",
-          variation: "none", referenceObservation: garmentReference.geometry, candidateObservation: basis, basis } }, identityMatches: false, accepted: true, reason: label }) }), /REFERENCE_SCENE_FIDELITY_FAILED/u); checks++;
+          variation: "none", referenceObservation: garmentReference.geometry, candidateObservation: basis, basis } }, identityMatches: false, accepted: true, reason: label }) }),
+        label === "unresolved generic garment" ? /REFERENCE_SCENE_REVIEW_INVALID/u : /REFERENCE_SCENE_FIDELITY_FAILED/u); checks++;
     }
     assert(PRODUCT_IMAGE_VISUAL_CONTRACT_RULES_KO.includes(PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_RULE_KO)); checks++;
     for (const role of ["detail", "thumbnail"] as const) for (const adverse of [false, true]) {
@@ -202,13 +205,17 @@ async function main() {
           altText: "외형", layout: "single" as const, sourcePolicy: "LOCKED_PRODUCT_OR_ORIGINAL" as const }] };
       let calls = 0;
       const audit = await auditPublishImages({ productName: options.productName, composition, review: async call => {
-        calls++; assertRule(call);
+        calls++;
+        assert.match(call.userPrompt, /A close-up proves its own local detail, never hidden whole geometry/u);
+        assert.match(call.userPrompt, /Account for crop, hair\/body\/hand occlusion and camera projection in BOTH views/u);
+        assert.match(call.userPrompt, /do not demand candidate parts or lettering concealed or absent in the source/u);
+        assert.match(call.userPrompt, /actual different cut, material, shape, construction, readable brand or confirmed option/u);
         const schema = call.outputSchema as { properties: { reviews: { items: { properties: { identityMatches: { description: string } } } } } };
-        assert(schema.properties.reviews.items.properties.identityMatches.description.includes(PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_RULE_EN));
-        return JSON.stringify({ reviews: [{ index: 1, accepted: !adverse, identityMatches: !adverse, photoClaimMatches: true,
+        assert(schema.properties.reviews.items.properties.identityMatches.description.length <= 250);
+        return JSON.stringify({ reviews: [referencePlaneFixtureRow(call, { index: 1, accepted: !adverse, identityMatches: !adverse, photoClaimMatches: true,
           photoClaimObjection: { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" }, notice: false, mixedOptions: false,
           explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true,
-          thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: adverse ? "real exposed broken band remains a defect" : "matching visible structures with legitimate occlusion" }] });
+          thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: adverse ? "real exposed broken band remains a defect" : "matching visible structures with legitimate occlusion" })] });
       } }); assert.equal(audit.ok, !adverse); assert.equal(calls, 1); checks++;
     }
     assert.equal(PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_VERSION, "product-reference-evidence-scope/v1");

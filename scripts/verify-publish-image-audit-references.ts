@@ -1,4 +1,5 @@
 /** Offline only: real raster decoding and exact reference bindings; provider is stubbed. */
+import {publicationClaimUnits} from "./lib/publication-claim-units";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -30,6 +31,9 @@ const good = (index: number) => ({ index, referenceComparison: null, accepted: t
 const bodyObjection = (quote: string, sourceIndex = 0) => ({ origin: "section-body", sourceIndex, quote,
   scope: "quantity", conflict: "The fixture reviewer reports that the pictured quantity does not match this exact published assertion." });
 const answer = (call: CodexDraftOptions) => JSON.stringify({ reviews: slots(call).map(slot => good(slot.index)) });
+const selectedOptionFixture = JSON.stringify({ optionResolution: { confirmedOptionLabel: "Offline selected option A" } });
+const adverseOptionWitness = { origin: "confirmed-selection", quote: "Offline selected option A",
+  visibleAlternatives: ["Offline selected option A", "Offline conflicting option B"] };
 
 // Source-backed saved-body excerpts copied once for an offline regression. No
 // private IDs/URLs or live data reads. The harness checks the response contract;
@@ -138,7 +142,7 @@ async function main() {
         const actual = slots(call)[0];
         assert.equal(actual.sectionTitle, text.title); assert.deepEqual(actual.sectionBody, text.body);
         assert.deepEqual(actual.claimSources, { sectionTitle: { origin: "section-title", sourceIndex: null, text: text.title },
-          sectionBody: text.body.map((value, sourceIndex) => ({ origin: "section-body", sourceIndex, text: value })) },
+          sectionBody: publicationClaimUnits(text.body,options.composition.renderNodes.flatMap((n,index)=>n.kind === "paragraph"?[index]:[])).map(unit=>({origin:"section-body",...unit})) },
         "quote sources retain the exact rendered paragraph boundaries and zero-based indexes");
         const schema = new Ajv({ allErrors: true }).compile(call.outputSchema as object);
         assert(schema({ reviews: [referencePlaneFixtureRow(call, good(1))] }), "ordinary saved specs/preferences may accompany a neutral structured reviewer verdict");
@@ -207,7 +211,9 @@ async function main() {
       ["options", { mixedOptions: true }], ["geometry", { accepted: false }],
     ] as const) {
       const options = textFixture([publishedContextFixtures[0]]); let calls = 0;
+      if (label === "options") options.selectedProduct = selectedOptionFixture;
       options.review = async () => { calls++; return JSON.stringify({ reviews: [{ ...good(1), ...patch, photoClaimMatches: label === "geometry",
+        ...(label === "options" ? { optionConflictWitness: adverseOptionWitness } : {}),
         photoClaimObjection: undefined, reason: `Concrete independent ${label} objection is not removed by a missing quote proof` }] }); };
       const blocked = await assertBlocked(options, ["INVALID_REVIEW", "SEMANTIC_REJECTION"]);
       assert.equal(calls, 1); assert.equal(rejected.length, 1);
@@ -271,12 +277,12 @@ async function main() {
         assert.equal(row.sourceSnapshotId, "offline-snapshot");
       }
       assert.match(call.userPrompt, /not publication candidates/u);
-      assert.match(call.userPrompt, /Do not output a review for reference attachments/u);
-      assert.match(call.userPrompt, /one identifiable selected kit component/u);
-      assert.match(call.userPrompt, /Missing other kit components or purchased units alone is not an identity mismatch/u);
-      assert.match(call.userPrompt, /wrong visible component, swapped scent\/model/u);
-      assert.match(call.userPrompt, /Multiple views or physical units of the same identifiable model\/variant alone are not mixedOptions/u);
-      assert.match(call.userPrompt, /same-design items are not automatically approved/u);
+      assert.match(call.userPrompt, /never for appended references/u);
+      assert.match(call.userPrompt, /A proven included component or selected unit may illustrate appearance without showing the entire purchased set/u);
+      assert.match(call.userPrompt, /unless actual published text\/headline claims it does/u);
+      assert.match(call.userPrompt, /do not substitute another kit member, gift or cross-sell/u);
+      assert.match(call.userPrompt, /Repeated matching physical units\/trays\/compartments of one variant are not alternative options/u);
+      assert.match(call.userPrompt, /Source authority, filenames, captions and favorable prose never force acceptance/u);
       const validate = new Ajv({ allErrors: true }).compile(call.outputSchema as object);
       assert.equal(validate({ reviews: rows.map(row => referencePlaneFixtureRow(call, good(row.index))) }), true);
       assert.equal(validate({ reviews: [...rows.map(row => referencePlaneFixtureRow(call, good(row.index))), good(4)] }), false, "reference attachments cannot become extra output verdicts");
@@ -344,15 +350,15 @@ async function main() {
       assert.match(call.userPrompt, /UNVERIFIED comparison context, not identity approval or publication candidates/u);
       assert.match(call.userPrompt, /gifts, cross-sells or other variants/u);
       assert.match(call.userPrompt, /inspect publication-format checks ONLY on final attachments/u);
-      assert.match(call.userPrompt, /selected kit component exterior.*names a component category, not a promise to show the complete kit/u);
-      assert.match(call.userPrompt, /identifiable component visibly matched to selected-gallery membership evidence/u);
-      assert.match(call.userPrompt, /Reject an actual claim such as '이 사진에 세트 전 구성품이 보입니다'/u);
-      assert.match(call.userPrompt, /intentionally changes the reference's background, props, lighting, camera viewpoint and product pose/u);
-      assert.match(call.userPrompt, /Compare the actual product's identifying geometry, intrinsic printing and selected variant, not scene sameness/u);
-      assert.match(call.userPrompt, /Pose\/viewpoint variation cannot excuse a warped cap.*wrong variant or impossible geometry/u);
-      assert.match(call.userPrompt, /Only when BOTH canonical selected facts and indexed selected-gallery pixels establish inclusion/u);
-      assert.match(call.userPrompt, /not alternative purchase options requiring a named comparison/u);
-      assert.match(call.userPrompt, /cross-sells, gift badges and unselected models\/variants remain unverified or conflicting/u);
+      assert.match(call.userPrompt, /A proven included component or selected unit may illustrate appearance without showing the entire purchased set/u);
+      assert.match(call.userPrompt, /Verify the visible component against its own selected source\/facts/u);
+      assert.match(call.userPrompt, /unless actual published text\/headline claims it does/u);
+      assert.match(call.userPrompt, /A natural continuation\/pose change of an observed form is not a new product/u);
+      assert.match(call.userPrompt, /actually corresponding visible physical landmarks in source and candidate/u);
+      assert.match(call.userPrompt, /Still block actual different cut, material, shape, construction, readable brand or confirmed option/u);
+      assert.match(call.userPrompt, /Do not invent inclusion or hidden quantities from brand, title or source lineage/u);
+      assert.match(call.userPrompt, /Repeated matching physical units\/trays\/compartments of one variant are not alternative options/u);
+      assert.match(call.userPrompt, /do not substitute another kit member, gift or cross-sell/u);
       for (const reference of references.slice(0, 2)) {
         const actualIndex = hash(reference) === hash(pair.reference) ? 2 : 3;
         assert.deepEqual(await sharp(call.imagePaths![actualIndex - 1]).raw().toBuffer(), await sharp(reference).raw().toBuffer());
@@ -371,7 +377,10 @@ async function main() {
       { accepted: false, reason: "All individual boolean checks true but actual overall verdict is adverse; it remains a rejection" },
       { mixedOptions: true, reason: "An unselected scented variant or cross-sell cannot become a selected kit member from the gallery alone" },
     ]) {
-      const options = galleryOptions(); options.review = async call => JSON.stringify({ reviews: slots(call).map(row => ({ ...good(row.index), ...patch,
+      const options = galleryOptions();
+      if ("mixedOptions" in patch && patch.mixedOptions === true) options.selectedProduct = selectedOptionFixture;
+      options.review = async call => JSON.stringify({ reviews: slots(call).map(row => ({ ...good(row.index), ...patch,
+        ...("mixedOptions" in patch && patch.mixedOptions === true ? { optionConflictWitness: adverseOptionWitness } : {}),
         ...("photoClaimMatches" in patch && patch.photoClaimMatches === false ? { photoClaimObjection: bodyObjection(row.sectionBody[0]) } : {}) })) });
       assert.equal((await auditPublishImages(options)).ok, false); checks++;
     }
@@ -434,8 +443,8 @@ async function main() {
     originalMapped.review = async call => {
       assert.equal(call.imagePaths!.length, 4);
       assert.match(call.userPrompt, /"exactCanonicalSourceForFinalImageIndexes":\[1\]/u);
-      assert.match(call.userPrompt, /seller-gallery bytes, not automatic identity approval/u);
-      assert.match(call.userPrompt, /Do not compare a pictured serum to a different included toner/u);
+      assert.match(call.userPrompt, /No source bytes, provenance or rule grants automatic approval/u);
+      assert.match(call.userPrompt, /do not substitute another kit member, gift or cross-sell/u);
       assert.match(call.userPrompt, /BODY_NO_ADDED_TEXT/u);
       assert.deepEqual(await sharp(call.imagePaths![0]).raw().toBuffer(), await sharp(call.imagePaths![3]).raw().toBuffer());
       return answer(call);
@@ -492,7 +501,9 @@ async function main() {
       { accepted: false, reason: "Reference metadata is valid but final pixel verdict still rejects" },
     ]) {
       const options = fixture([pairs[0]]);
+      if ("mixedOptions" in patch && patch.mixedOptions === true) options.selectedProduct = selectedOptionFixture;
       options.review = async call => JSON.stringify({ reviews: [{ ...good(1), ...patch,
+        ...("mixedOptions" in patch && patch.mixedOptions === true ? { optionConflictWitness: adverseOptionWitness } : {}),
         ...("photoClaimMatches" in patch && patch.photoClaimMatches === false ? { photoClaimObjection: bodyObjection(slots(call)[0].sectionBody[0]) } : {}) }] });
       const result = await auditPublishImages(options);
       assert.equal(result.ok, false); assert.equal(result.failures[0].code, "SEMANTIC_REJECTION");
@@ -598,7 +609,7 @@ async function main() {
         const original = splitGallery.find(reference => hash(reference) === hashes[index])!;
         assert.deepEqual(await sharp(file).raw().toBuffer(), await sharp(original).raw().toBuffer());
       }
-      assert.match(call.userPrompt, /EVERY complete verdict must pass/u);
+      assert.match(call.userPrompt, /every complete verdict must pass/iu);
       return answer(call);
     };
     const splitResult = await auditPublishImages(splitOptions);
@@ -612,8 +623,10 @@ async function main() {
     for (const patch of [{ identityMatches: false }, { photoClaimMatches: false }, { mixedOptions: true },
       { noGraphicLayout: false }, { textPolicyMatches: false }, { accepted: false }]) {
       const options = splitFixture(); let groupCalls = 0;
+      if ("mixedOptions" in patch && patch.mixedOptions === true) options.selectedProduct = selectedOptionFixture;
       options.review = async call => { groupCalls++;
         return JSON.stringify({ reviews: [{ ...good(1), ...(groupCalls === 1 ? patch : {}),
+          ...(groupCalls === 1 && "mixedOptions" in patch && patch.mixedOptions === true ? { optionConflictWitness: adverseOptionWitness } : {}),
           ...(groupCalls === 1 && "photoClaimMatches" in patch && patch.photoClaimMatches === false
             ? { photoClaimObjection: bodyObjection(slots(call)[0].sectionBody[0]) } : {}),
           reason: "First group adverse; later matching gallery cannot cancel it" }] }); };

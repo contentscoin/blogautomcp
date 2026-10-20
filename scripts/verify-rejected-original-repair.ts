@@ -10,12 +10,18 @@ import { planRejectedOriginalRepair } from "../src/lib/brand-post-rejected-origi
 import { readCanonicalSellerSourceHashes } from "./lib/canonical-seller-source";
 import { recordPublicationImageRejections, rejectedPublicationImageHashes } from "./lib/publish-image-rejections";
 import { auditPublishImages, type PublishImageAuditOptions } from "./lib/publish-image-audit";
-import { runMaterialPreparation } from "./lib/scheduled-draft-workflow";
+import { auditedSellerOriginalSection, type Result } from "./lib/scheduled-draft-workflow";
+import { isolatedOriginalWorkflow } from "./lib/test-original-source-workflow";
+import { sellerOriginalRecoveryBudgetBinding, type SellerOriginalRecoveryScope } from "./lib/seller-original-recovery-scope";
 
 const hash = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 const actualPublishedSentence = "포장 상자도 함께 보이지만 사진만으로 선택 구성 전체를 알 수는 없어요.";
 const neutral = { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" };
 const good = { index: 1, accepted: true, identityMatches: true, photoClaimMatches: true, photoClaimObjection: neutral,
+  visibleIdentityEvidence: { basis: "observed-correspondence", landmarks: [
+    { part: "microscope stand", referenceObservation: "Offline selected source has a white/yellow microscope stand", candidateObservation: "Offline candidate has the corresponding white/yellow microscope stand" },
+    { part: "screen mounting", referenceObservation: "Offline source has the selected screen mounting on its stand", candidateObservation: "Offline candidate shows the same selected screen mounting" },
+  ], conflict: "" }, optionConflictWitness: { origin: "none", quote: "", visibleAlternatives: [] }, referenceComparison: null,
   notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true,
   noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "Offline source/slot contract fixture" };
 
@@ -62,6 +68,15 @@ async function main() {
       contentQuality: { canPublish: true, score: 97, signals: [] }, sourceSnapshot: snapshot,
     } as unknown as BrandPostPackageManifestV2;
     const manifestFile = path.join(dir, "manifest.json"), rejectionFile = path.join(dir, "publish-image-rejections.json");
+    const claimReader = { readClaimDefect: () => ({ offlineOnly: true } as never) };
+    const { runMaterialPreparation } = isolatedOriginalWorkflow((productId, sectionId) => {
+      const current = JSON.parse(fs.readFileSync(manifestFile, "utf8")) as BrandPostPackageManifestV2;
+      const asset = current.imageAssets!.find(row => row.sectionId === sectionId && row.provenance === "ORIGINAL")!;
+      const identity = { productId, sectionId, slotId: asset.slotId!, sha256: asset.sha256, context: crypto.createHash("sha256").update("offline-current-body").digest("hex"),
+        sourceSnapshotId: current.sourceSnapshot!.snapshotId, canonicalReceipts: [{ sourceUrl: urls[0], sourceSha256: asset.sha256 }] };
+      return { version: "seller-original-recovery-scope/v1", identity, binding: sellerOriginalRecoveryBudgetBinding(identity),
+        nativeProof: { path: "offline-no-native-authority", sha256: "a".repeat(64), materialContext: { file: "offline-no-proof", sha256: "b".repeat(64) } } } satisfies SellerOriginalRecoveryScope;
+    });
     const reset = () => {
       fs.writeFileSync(manifestFile, JSON.stringify(baseline)); fs.writeFileSync(rejectionFile, "[]");
       recordPublicationImageRejections(id, baseline.composition, [{ sha256: hash(bad), sectionId: "original", scope: "section" }]);
@@ -70,7 +85,8 @@ async function main() {
     const photoHashes = files.map(hash), canonical = readCanonicalSellerSourceHashes({ snapshot, productId: id, sourceDirectory: sources });
     assert.deepEqual([...canonical].sort(), [hash(bad), hash(alternative)].sort()); checks++;
     let manifest = reset();
-    const requests = planRejectedOriginalRepair(manifest, "original");
+    assert.throws(() => planRejectedOriginalRepair(manifest, "original"), /REJECTED_ORIGINAL_REPAIR_INVALID/u, "generic section ledger/canonical bytes are not a native A/B/D-positive C-only proof"); checks++;
+    const requests = planRejectedOriginalRepair(manifest, "original", claimReader);
     assert.equal(requests.length, 1); assert.equal(requests[0].replaceAssetKey, hash(bad)); checks++;
     for (const scenario of ["no-rejection", "product-scope", "old-context", "changed-text", "stale-body", "duplicate-use", "changed-bytes", "generated", "wrong-source", "wrong-section", "normal-slot", "running", "unknown-owner", "unbound-snapshot"] as const) {
       manifest = reset();
@@ -90,7 +106,7 @@ async function main() {
       if (scenario === "running" || scenario === "unknown-owner") manifest.imageGeneration = { status: scenario === "running" ? "running" : "complete",
         recoveryState: scenario === "unknown-owner" ? "owner-unknown" : undefined } as never;
       if (scenario === "unbound-snapshot") manifest.sourceSnapshot!.product.name = "changed product";
-      try { assert.throws(() => planRejectedOriginalRepair(manifest, scenario === "normal-slot" ? "normal" : "original"), /REJECTED_ORIGINAL_REPAIR_INVALID/u, scenario); checks++; }
+      try { assert.throws(() => planRejectedOriginalRepair(manifest, scenario === "normal-slot" ? "normal" : "original", claimReader), /REJECTED_ORIGINAL_REPAIR_INVALID/u, scenario); checks++; }
       finally { if (scenario === "changed-bytes") fs.writeFileSync(bad, fs.readFileSync(path.join(sources, `${photoHashes[1]}.png`))); }
     }
     const duplicate = path.join(sources, "ambiguous.png"); fs.copyFileSync(alternative, duplicate);
@@ -99,23 +115,46 @@ async function main() {
     assert(!readCanonicalSellerSourceHashes({ snapshot, productId: id, sourceDirectory: sources }).has(hash(bad))); checks++;
     fs.unlinkSync(`${duplicate}.retrieval.json`); fs.unlinkSync(duplicate);
 
-    const run = async (outcome: "success" | "wrong-option" | "no-alternative" | "repeat" | "transport") => {
-      reset(); let approved = 0, mutations = 0, backups = 0, finalReviews = 0; const actions: string[] = [];
+    const run = async (outcome: "success" | "wrong-option" | "no-alternative" | "repeat" | "transport" | "mixed" | "mixed-unknown") => {
+      reset(); let approved = 0, mutations = 0, backups = 0, finalReviews = 0, afterBindingAudits = 0, printPlans = 0;
+      const mixed = outcome.startsWith("mixed"), actions: string[] = []; let printReady = !mixed;
+      const printFailure = (unknown = false) => Object.assign(new Error("independent remaining intrinsic printing defect"), { code: "PUBLISH_IMAGE_AUDIT_FAILED",
+        errors: [unknown ? "INVALID_REVIEW: uncorroborated print observation" : "SEMANTIC_REJECTION: native intrinsic print conflict"],
+        imageAuditFailures: [{ code: unknown ? "INVALID_REVIEW" : "SEMANTIC_REJECTION", assetPath: normal, sectionId: "normal", rejectionScope: "product" }] });
       const originalFailure = () => Object.assign(new Error("real photo has no box while the published sentence names one"), { code: "PUBLISH_IMAGE_AUDIT_FAILED",
-        errors: ["SEMANTIC_REJECTION: missing pictured box"], imageAuditFailures: [{ code: "SEMANTIC_REJECTION", sectionId: "original", rejectionScope: "section", photoClaimMismatchOnly: true as const }] });
+        errors: ["SEMANTIC_REJECTION: missing pictured box", ...(mixed ? [outcome === "mixed-unknown" ? "INVALID_REVIEW: other-node print observation unresolved" : "SEMANTIC_REJECTION: independent intrinsic print defect"] : [])],
+        imageAuditFailures: [{ code: "SEMANTIC_REJECTION", assetPath: JSON.parse(fs.readFileSync(manifestFile, "utf8")).composition.sections[0].imagePaths[0], sectionId: "original", rejectionScope: "section", photoClaimMismatchOnly: true as const },
+          ...(mixed ? [{ code: outcome === "mixed-unknown" ? "INVALID_REVIEW" : "SEMANTIC_REJECTION", assetPath: normal, sectionId: "normal", rejectionScope: "product" }] : [])] });
       const preview = () => { const current = JSON.parse(fs.readFileSync(manifestFile, "utf8")) as BrandPostPackageManifestV2;
         const needs = current.composition.sections[0].imagePaths[0] === bad;
         return { connectKind: "SHOPPING", approvedAt: approved ? "offline-reviewed-approval" : null,
-          approval: { canApprove: !needs, blockers: needs ? [{ code: "image-publication-rejected", sectionId: "original", reason: "사진에 상자 없음" }] : [] },
+          approval: { canApprove: !needs && printReady, blockers: [...(needs ? [{ code: "image-publication-rejected", sectionId: "original", reason: "사진에 상자 없음" }] : []),
+            ...(!printReady ? [{ code: "image-publication-rejected", sectionId: "normal", reason: "다른 파트 인쇄 결함" }] : [])] },
           composition: { sections: current.composition.sections.map(section => ({ id: section.id, imageSource: section.imageSource })) },
-          contentQuality: { signals: [] }, imageSlots: [{ sectionId: "original", missing: needs ? 1 : 0, generationMissing: 0 }], imageGeneration: { status: "complete" } }; };
+          imageAssets: current.imageAssets,
+          contentQuality: { signals: [] }, imageSlots: [{ sectionId: "original", missing: needs ? 1 : 0, generationMissing: 0 },
+            { sectionId: "normal", missing: printReady ? 0 : 1, generationMissing: printReady ? 0 : 1 }], imageGeneration: { status: "complete" } }; };
       const api = async (url: string, method: string, body?: object) => {
         const action = (body as { action?: string })?.action || method; actions.push(action);
-        if (action === "audit_photo_descriptions") throw originalFailure();
+        if (action === "audit_photo_descriptions") {
+          const current = JSON.parse(fs.readFileSync(manifestFile, "utf8")) as BrandPostPackageManifestV2;
+          if (current.composition.sections[0].imagePaths[0] === bad) throw originalFailure();
+          afterBindingAudits++;
+          assert(actions.lastIndexOf("repair_rejected_originals") < actions.length - 1, "source must be bound before the new whole audit");
+          if (mixed && !printReady) throw printFailure(outcome === "mixed-unknown");
+          return { success: true, data: preview() };
+        }
+        if (action === "generate_missing" && mixed) {
+          printPlans++; assert.equal(afterBindingAudits, 1, "fresh whole-current audit must precede any remaining print plan");
+          assert.equal(actions.filter(value => value === "repair_rejected_originals").length, 1);
+          assert(actions.lastIndexOf("audit_photo_descriptions") > actions.lastIndexOf("repair_rejected_originals"));
+          printReady = true; // offline planning stub: no provider or image generation
+          return { success: true, data: preview(), generatedCount: 0, appliedCount: 0, errors: [], remainingMissing: 0 };
+        }
         if (action === "repair_rejected_originals") {
           mutations++; assert.equal(backups, 1); assert.equal((body as { sectionId?: string }).sectionId, "original");
           const current = JSON.parse(fs.readFileSync(manifestFile, "utf8")) as BrandPostPackageManifestV2;
-          const planned = planRejectedOriginalRepair(current, "original");
+          const planned = planRejectedOriginalRepair(current, "original", claimReader);
           if (outcome === "transport") throw Object.assign(new Error("lost operation result"), { code: "ECONNRESET" });
           const result = await repairBrandPostImages({ brandLinkId: id, requests: planned, sourceOnly: true, canonicalSourceOnly: true }, {
             read: store.readBrandPostPackage, write: store.writeBrandPostPackageManifest, apply: store.applyGeneratedBrandPostImage,
@@ -128,6 +167,9 @@ async function main() {
                 { kind: "paragraph", sectionId: "original", text: actualPublishedSentence },
                 { kind: "image", sectionId: "original", assetPath: alternative, role: "detail", altText: "외형", layout: "single", sourcePolicy: "LOCKED_PRODUCT_OR_ORIGINAL" }] },
                 review: async () => JSON.stringify({ reviews: [{ ...good, identityMatches: outcome !== "wrong-option", accepted: outcome !== "wrong-option",
+                  visibleIdentityEvidence: outcome === "wrong-option" ? { basis: "concrete-conflict", landmarks: [
+                    { part: "microscope selected housing", referenceObservation: "The selected microscope has a white/yellow screen housing", candidateObservation: "The offline adverse candidate shows the other distinct blue housing option" },
+                  ], conflict: "The visible blue housing contradicts the selected white/yellow microscope option" } : good.visibleIdentityEvidence,
                   reason: outcome === "wrong-option" ? "Candidate shows the wrong selected option" : "The matching white/yellow microscopes and box support the unchanged actual published sentence" }] }) };
               const qa = await auditPublishImages(auditOptions); assert.equal(qa.ok, outcome !== "wrong-option");
               if (!qa.ok) return [{ ...request, generatedPath: null, imageIntent: original.imageIntent, provenance: "ORIGINAL", error: "IMAGE_SOURCE_BINDING_REQUIRED: wrong option" }];
@@ -138,6 +180,7 @@ async function main() {
           return { success: true, data: preview(), appliedCount: result.appliedCount, generatedCount: result.generatedCount, errors: result.errors, remainingMissing: result.remaining };
         }
         if (action === "approve") {
+          assert.equal(afterBindingAudits, 1, "original rebind must receive a whole current audit before approval/print planning");
           finalReviews++;
           const current = JSON.parse(fs.readFileSync(manifestFile, "utf8")) as BrandPostPackageManifestV2;
           const finalQA = await auditPublishImages({ productName: "어린이 스크린 현미경", composition: { sections: [current.composition.sections[0]],
@@ -151,13 +194,16 @@ async function main() {
         assert(!url.endsWith("/images")); return { success: true, data: preview() };
       };
       const operation = runMaterialPreparation(id, { pause: async () => {}, call: api }, { incrementalOnly: true, beforeRepair: async () => { backups++; } });
-      if (outcome === "success") await operation; else await assert.rejects(operation);
-      if (outcome === "no-alternative") {
+      const successful = outcome === "success" || outcome === "mixed";
+      if (successful) await operation; else await assert.rejects(operation);
+      if (outcome === "no-alternative" || outcome === "transport") {
         await assert.rejects(runMaterialPreparation(id, { pause: async () => {}, call: api }, { incrementalOnly: true, beforeRepair: async () => { backups++; } }));
         assert.equal(mutations, 1, "the persisted same-input failed operation cannot renew the source review budget"); checks++;
       }
-      assert.equal(mutations, 1); assert.equal(approved, outcome === "success" ? 1 : 0);
-      assert.equal(finalReviews, outcome === "success" || outcome === "repeat" ? 1 : 0);
+      assert.equal(mutations, 1); assert.equal(approved, successful ? 1 : 0);
+      assert.equal(finalReviews, successful || outcome === "repeat" ? 1 : 0);
+      assert.equal(afterBindingAudits, successful || outcome === "repeat" || outcome === "mixed-unknown" ? 1 : 0); checks++;
+      assert.equal(printPlans, outcome === "mixed" ? 1 : 0, "unknown post-rebind QA cannot open any paid/replacement planning"); checks++;
       const current = JSON.parse(fs.readFileSync(manifestFile, "utf8")) as BrandPostPackageManifestV2;
       assert.equal(current.title, baseline.title); assert.deepEqual(current.composition.sections.map(section => section.body), baseline.composition.sections.map(section => section.body));
       assert.equal(hash(markdown), baseline.markdownSha256); assert.deepEqual(files.map(hash), photoHashes);
@@ -165,9 +211,24 @@ async function main() {
       assert(rejectedPublicationImageHashes(id, baseline.composition, "original").includes(hash(bad)), "old bad pixels/history remain recorded");
       assert(!actions.includes("repair_photo_description")); checks++;
     };
-    for (const outcome of ["success", "wrong-option", "no-alternative", "repeat", "transport"] as const) {
-      fs.rmSync(path.join(dir, "image-recovery-history.json"), { force: true }); await run(outcome);
+    for (const outcome of ["success", "wrong-option", "no-alternative", "repeat", "transport", "mixed", "mixed-unknown"] as const) {
+      fs.rmSync(path.join(dir, "image-recovery-history.json"), { force: true });
+      fs.rmSync(path.join(dir, "seller-original-recovery-scopes"), { recursive: true, force: true }); await run(outcome);
     }
+    const typed: NonNullable<Result["imageAuditFailures"]> = [{ code: "SEMANTIC_REJECTION", assetPath: bad, sectionId: "original", rejectionScope: "section", photoClaimMismatchOnly: true },
+      { code: "SEMANTIC_REJECTION", assetPath: normal, sectionId: "normal", rejectionScope: "product" }];
+    const saved: Result = { success: true, data: { composition: { sections: [{ id: "original", imageSource: "seller-original" }, { id: "normal", imageSource: "staged-ai" }] }, imageAssets: baseline.imageAssets } };
+    assert.equal(auditedSellerOriginalSection(typed, saved), "original", "other sections' print defects do not suppress the exact original C-only subset"); checks++;
+    for (const mutate of [
+      (f: typeof typed) => { f[0].photoClaimMismatchOnly = undefined; },
+      (f: typeof typed) => { f[0].assetPath = normal; },
+      (f: typeof typed) => { f[0].rejectionScope = "product"; },
+      (f: typeof typed) => { f.push({ code: "INVALID_REVIEW", sectionId: "original", assetPath: bad }); },
+      (_f: typeof typed, d: Result) => { d.data!.imageAssets![1].provenance = "GENERATED_SCENE"; },
+      (_f: typeof typed, d: Result) => { d.data!.imageAssets![1].remoteGenerated = true; },
+      (_f: typeof typed, d: Result) => { d.data!.imageAssets!.push(structuredClone(d.data!.imageAssets![1])); },
+      (_f: typeof typed, d: Result) => { d.data!.composition!.sections[0].imageSource = "staged-ai"; },
+    ]) { const f = structuredClone(typed), d = structuredClone(saved); mutate(f, d); assert.equal(auditedSellerOriginalSection(f, d), null); checks++; }
     console.log(`PASS rejected seller-original repair: ${checks} checks; exact current rejection/canonical scope, unchanged box-description recovery, normal assets preserved, source and final QA, bounded retries; no paid generation/publication`);
   } finally {
     if (previous === undefined) delete process.env.DESKTOP_USER_DATA; else process.env.DESKTOP_USER_DATA = previous;

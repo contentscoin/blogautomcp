@@ -20,10 +20,13 @@ const MAX_RETRY_SNAPSHOT_BYTES = 8 * 1024 * 1024;
  * and bytes so another writer's replacement cannot be overwritten on retry. */
 function retryFingerprint(file: string): string | undefined {
   try {
-    const before = fs.lstatSync(file);
+    const before = fs.lstatSync(file, { bigint: true });
     if (!before.isFile() || before.isSymbolicLink() || before.size > MAX_RETRY_SNAPSHOT_BYTES) return undefined;
-    const bytes = fs.readFileSync(file), after = fs.lstatSync(file);
-    const identity = (stat: fs.Stats) => [stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeMs, stat.ctimeMs];
+    const bytes = fs.readFileSync(file), after = fs.lstatSync(file, { bigint: true });
+    // Windows file IDs may exceed Number.MAX_SAFE_INTEGER. Rounding two
+    // different IDs to the same number must not authorize replacement/cleanup.
+    const identity = (stat: fs.BigIntStats) => [stat.dev, stat.ino, stat.mode, stat.size,
+      stat.birthtimeNs, stat.mtimeNs, stat.ctimeNs].map(value => value.toString());
     if (JSON.stringify(identity(before)) !== JSON.stringify(identity(after))) return undefined;
     return JSON.stringify([...identity(after), crypto.createHash("sha256").update(bytes).digest("hex")]);
   } catch (error) {
@@ -54,11 +57,11 @@ export function atomicWriteTextFile(
   );
 
   let descriptor: number | null = null;
-  let ownedTemporary: { dev: number; ino: number } | undefined;
+  let ownedTemporary: { dev: bigint; ino: bigint; birthtimeNs: bigint } | undefined;
   try {
     descriptor = fs.openSync(temporaryPath, "wx", options.mode);
-    const opened = fs.fstatSync(descriptor);
-    if (Number.isFinite(opened.ino) && opened.ino > 0) ownedTemporary = { dev: opened.dev, ino: opened.ino };
+    const opened = fs.fstatSync(descriptor, { bigint: true });
+    if (opened.ino > BigInt(0)) ownedTemporary = { dev: opened.dev, ino: opened.ino, birthtimeNs: opened.birthtimeNs };
     fs.writeFileSync(descriptor, content, "utf8");
     fs.fsyncSync(descriptor);
     fs.closeSync(descriptor);
@@ -94,9 +97,10 @@ export function atomicWriteTextFile(
       }
     }
     try {
-      const current = fs.lstatSync(temporaryPath);
+      const current = fs.lstatSync(temporaryPath, { bigint: true });
       // A failed exclusive open or a foreign replacement never permits cleanup.
-      if (ownedTemporary && current.dev === ownedTemporary.dev && current.ino === ownedTemporary.ino && !current.isSymbolicLink()) fs.unlinkSync(temporaryPath);
+      if (ownedTemporary && current.dev === ownedTemporary.dev && current.ino === ownedTemporary.ino &&
+          current.birthtimeNs === ownedTemporary.birthtimeNs && !current.isSymbolicLink()) fs.unlinkSync(temporaryPath);
     } catch {
       // Preserve the original write/replace error.
     }

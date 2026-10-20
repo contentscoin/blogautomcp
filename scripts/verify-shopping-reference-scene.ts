@@ -161,7 +161,8 @@ async function main() {
     const comparisons = Object.fromEntries(["productShape", "intrinsicPrinting", "visibleOption", "sceneContext"].map(key => [key,
       { result: "consistent", variation: "none", referenceObservation: `reference ${key} visible`,
         candidateObservation: `same ${key} visible`, basis: "intrinsic identifying features agree without a visible contradiction" }]));
-    const good = { accepted: true, identityMatches: true, illustrativeOnly: true, checks: allChecks, comparisons,
+    const good = { identifierObservation: { candidateIdentifierVisibility: "no-intrinsic-identifiers-observed", identifierComparisons: [] },
+      accepted: true, identityMatches: true, illustrativeOnly: true, intrinsicPrintProofClaim: false, checks: allChecks, comparisons,
       reason: "both images show the same intact straight front and cap" };
     let fidelitySchema: unknown;
     const result = await reviewShoppingReferenceScene({ reference, outputPath: output, productName: "상품", imageIntent: "연출", sectionTitle: "본체를 놓는 공간",
@@ -189,10 +190,10 @@ async function main() {
         assert.match(call.userPrompt, /VERBATIM actual sectionTitle\/publicationText/u);
         assert.match(call.userPrompt, /4~5 hour charging or price alone is not a claim/u);
         const claimSchema = call.outputSchema as { properties: Record<string, { description?: string }> };
-        assert.deepEqual(Object.keys(claimSchema.properties), ["comparisons", "checks", "identityMatches", "illustrativeOnly", "reason", "accepted"],
+        assert.deepEqual(Object.keys(claimSchema.properties), ["identifierObservation", "comparisons", "checks", "identityMatches", "illustrativeOnly", "intrinsicPrintProofClaim", "reason", "accepted"],
           "the provider writes observed evidence before its final verdict");
         assert.match(call.userPrompt, /accepted MUST equal the conjunction/u);
-        assert.ok(call.userPrompt.indexOf('Return {"comparisons":') < call.userPrompt.indexOf('"reason":"specific comparison including remaining differences","accepted":true}'));
+        assert.ok(call.userPrompt.indexOf('Return {"identifierObservation":') < call.userPrompt.indexOf('"reason":"specific comparison including remaining differences","accepted":true}'));
         for (const key of ["reason", "accepted", "illustrativeOnly"])
           assert.match(claimSchema.properties[key].description!, /VERBATIM actual sectionTitle\/publicationText/u);
         const schema = call.outputSchema as { properties: { checks: { properties: { singleScene: { type: string; description: string } } } } };
@@ -349,7 +350,8 @@ async function main() {
         },
       });
       if (Object.keys(patch).length === 0) assert.equal((await operation).reviewStatus, "passed");
-      else await assert.rejects(operation, Object.keys(patch).length === 1 && patch.accepted === false ? /REFERENCE_SCENE_REVIEW_INVALID/ : /REFERENCE_SCENE_FIDELITY_FAILED/,
+      else await assert.rejects(operation, (Object.keys(patch).length === 1 && patch.accepted === false) ||
+        (patch.comparisons && "productShape" in patch.comparisons && patch.comparisons.productShape.result === "unverifiable") ? /REFERENCE_SCENE_REVIEW_INVALID/ : /REFERENCE_SCENE_FIDELITY_FAILED/,
         "favorable prose cannot reverse an adverse gate; accepted-only inconsistency stays invalid");
       assert.equal(calls, Object.keys(patch).length === 1 && patch.accepted === false ? 2 : 1, "actual adverse gates are not retried");
       currentPairCases++;
@@ -434,7 +436,8 @@ async function main() {
           review: async () => JSON.stringify(valid),
         });
         if (result === "consistent") assert.equal((await reviewed).reviewStatus, "passed");
-        else await assert.rejects(reviewed, /REFERENCE_SCENE_FIDELITY_FAILED/, "schema-valid adverse findings remain rejected by the fidelity gate");
+        else await assert.rejects(reviewed, result === "unverifiable" ? /REFERENCE_SCENE_REVIEW_INVALID/ : /REFERENCE_SCENE_FIDELITY_FAILED/,
+          "unverifiable-only findings hold while concrete contradictions remain fidelity failures");
         for (const variation of allVariations) {
           schemaVerdict(answerFor(dimension, { ...row, result, variation }), false, `${dimension}/${result}/${variation}`); schemaCases += 1;
         }
@@ -580,7 +583,8 @@ async function main() {
       await assert.rejects(reviewShoppingReferenceScene({ reference, outputPath: output, productName: "selected product", imageIntent: "AI scene" }, {
         review: async () => JSON.stringify({ ...good, reason, comparisons: { ...comparisons, [dimension]: {
           ...comparisons[dimension], result, variation: "none", basis: reason } } }),
-      }), new RegExp(`REFERENCE_SCENE_FIDELITY_FAILED:.*${dimension}`, "u"), "all true booleans cannot override a concrete design, print or option contradiction");
+      }), result === "unverifiable" ? /REFERENCE_SCENE_REVIEW_INVALID/u : new RegExp(`REFERENCE_SCENE_FIDELITY_FAILED:.*${dimension}`, "u"),
+        "unverifiable-only holds; all true booleans cannot override a concrete design, print or option contradiction");
     }
     for (const key of SCENE_FIDELITY_CHECKS) {
       await assert.rejects(reviewShoppingReferenceScene({ reference, outputPath: output, productName: "상품", imageIntent: "연출" }, {

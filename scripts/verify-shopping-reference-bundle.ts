@@ -89,6 +89,7 @@ async function main() {
       assert.deepEqual(call.imagePaths, [worn.path, generated, shape.path, logo.path]); assert.equal(call.maxImages, 4);
       assert.match(call.userPrompt, /IMAGE 4 is verified SAME-option seller intrinsic-label/); checks += 3;
       return JSON.stringify({ accepted: true, identityMatches: true, illustrativeOnly: true, comparisons,
+        identifierObservation: { candidateIdentifierVisibility: "no-intrinsic-identifiers-observed", identifierComparisons: [] },
         checks: { ...Object.fromEntries(SCENE_FIDELITY_CHECKS.map(key => [key, true])), labelHierarchy: false }, reason: "readable wrong logo" });
     } }), /REFERENCE_SCENE_FIDELITY_FAILED/); checks++;
     const huge = path.join(root, "oversize-primary.png"); fs.writeFileSync(huge, Buffer.alloc(8 * 1024 * 1024 + 1));

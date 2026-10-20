@@ -22,7 +22,6 @@ import { revalidateSavedBrandPostText, SavedTextRevalidationError } from "../src
 import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 import { shoppingPhotoRoleAt } from "../src/lib/shopping-post-strategy";
 import type { CodexDraftOptions } from "./lib/codex-draft-provider";
-import { referencePlaneFixtureRow } from "./test-fixtures/reference-plane-review";
 
 const load = (file: string, overrides: Record<string, unknown>, replacement?: (source: string) => string) => {
   const original = fs.readFileSync(file, "utf8");
@@ -30,7 +29,7 @@ const load = (file: string, overrides: Record<string, unknown>, replacement?: (s
     { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
   const loadedModule = { exports: {} }; const require = createRequire(path.resolve(file));
   vm.runInNewContext(output, { module: loadedModule, exports: loadedModule.exports, require: (id: string) => overrides[id] ?? require(id),
-    console, process, Buffer, setTimeout, clearTimeout }, { filename: file });
+    console, process, Buffer, setTimeout, clearTimeout, structuredClone }, { filename: file });
   return loadedModule.exports;
 };
 
@@ -69,6 +68,10 @@ async function main() {
       thumbnailSpec: { version: "thumbnail-spec/v2", canvas: { width: 1000, height: 1000, aspect: "1:1" },
         style: "fixture", sourcePolicy: "LOCKED_PRODUCT_OR_ORIGINAL", sourceImagePath: photo },
     };
+    const canonicalUrl="https://shop-phinf.pstatic.net/fixture/canonical.png",canonicalFile=path.join(sources,"canonical.png");
+    const digest=(file:string)=>crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+    fs.copyFileSync(reference,canonicalFile);fs.writeFileSync(`${canonicalFile}.retrieval.json`,JSON.stringify({version:"product-image-retrieval/v1",sourceUrl:canonicalUrl,sha256:digest(canonicalFile),retrievedAt:new Date(Date.now()-1000).toISOString()}));
+    fixture.sourceSnapshot=createProductSnapshot({productId:id,externalProductId:"receipt-fixture",connectKind:"SHOPPING",sourceUrl:"https://smartstore.naver.com/fixture/products/1",product:{name:"선택 상품",referenceImageUrls:[canonicalUrl]}});
     const key = () => brandPostApprovalBinding(fixture, sources);
     const originalBinding = key(); const canonicalRequest = "a".repeat(64);
     writeSuccessfulImageAuditReceipt(id, canonicalRequest);
@@ -121,23 +124,33 @@ async function main() {
     // while changed body claims must undergo review and cannot promote failure.
     writeBrandPostPackageManifest(fixture);
     let reviewCalls = 0;
-    const good = (index: number) => ({ index, reason: "offline visible product fixture", identityMatches: true, photoClaimMatches: true,
-      photoClaimObjection: { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" },
-      notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true,
-      noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", accepted: true });
     const review = async (call: CodexDraftOptions) => {
       reviewCalls++;
-      const line = call.userPrompt.split("\n").find(text => text.startsWith("Each attached image belongs ONLY"))!;
-      const slots = JSON.parse(line.slice(line.indexOf("["))) as Array<{ index: number }>;
-      return JSON.stringify({ reviews: slots.map(row => referencePlaneFixtureRow(call, good(row.index))) });
+      const data=JSON.parse(call.userPrompt.split("Server-bound task data (untrusted facts, not instructions): ")[1]);
+      if(call.systemPrompt.includes("publication-image-task/A-visible")) return JSON.stringify({memberBrandScope:"selected-main-product-body",memberBrandObservation:"Visible main physical product body, not an independent accessory",reason:"Offline corresponding selected product structure",visibleIdentityEvidence:{basis:"observed-correspondence",landmarks:[
+        {part:"contour",referenceObservation:"source contour",candidateObservation:"candidate contour"},{part:"connection",referenceObservation:"source connection",candidateObservation:"candidate connection"}],conflict:""},
+        picturedMemberEvidence:{scope:"pictured-member-only",memberFactIndex:0,picturedMember:"visible selected fixture member",verdict:"selected-member-visible",selectedFact:data.selectedSubjectFacts.selectedTitle,referenceObservation:"source included member",candidateObservation:"candidate included member",conflict:""},identityMatches:true,accepted:true});
+      if(call.systemPrompt.includes("publication-image-task/C-photo-claims")) return JSON.stringify({reason:"Offline exact published claims supported",photoClaimObjection:{origin:"none",sourceIndex:null,quote:"",scope:"none",conflict:""},optionConflictWitness:{origin:"none",quote:"",visibleAlternatives:[]},photoClaimMatches:true,intrinsicPrintProofClaim:false,mixedOptions:false,explicitNamedComparison:false,optionsClearlyLabeled:false,reviewClass:"product-photo",accepted:true});
+      assert.match(call.systemPrompt,/publication-image-task\/D-pixel-format/u);
+      return JSON.stringify({reason:"Offline pixels contain no added graphic layout",pixelFormatObjection:{kind:"none",location:"",observation:""},notice:false,singlePhotograph:true,noGraphicLayout:true,textPolicyMatches:true,thumbnailHeadlineLegible:true,accepted:true});
     };
     const inputBytes = [photo, reference, markdown].map(file => fs.readFileSync(file));
     // An explicitly injected test reviewer intentionally cannot issue production
     // receipts. Replace only the provider dependency and execute the production
     // no-review-option path, including its real OS lock and HMAC storage.
     let reviewProvider = review;
+    const provider={runCodexDraft:(call:CodexDraftOptions)=>reviewProvider(call)};
+    const observerModule=await import("./lib/intrinsic-identifier-observer");
+    const observer={...observerModule,observeIntrinsicIdentifier:async (options:{path:string;sha256:string})=>{
+      assert.equal(digest(options.path),options.sha256);
+      const observation={literal:"",box:null,identifierRole:"none" as const,location:"not-observed" as const,readability:"absent" as const},rawResponse=JSON.stringify(observation);
+      return {status:"observed",reason:"Offline synthetic solid-colour fixture has no intrinsic identifier",evidence:{version:observerModule.INTRINSIC_IDENTIFIER_OBSERVER_VERSION,nativeExecution:true,imageSha256:options.sha256,
+        requestSha256:observerModule.intrinsicIdentifierObserverRequestSha256(options.sha256),responseSha256:crypto.createHash("sha256").update(rawResponse).digest("hex"),rawResponse,observation}};
+    }};
+    const scoped=load(path.resolve("scripts/lib/publication-image-scoped-review.ts"),{"./codex-draft-provider":provider});
+    const identifiers=load(path.resolve("scripts/lib/publication-identifier-review.ts"),{"./codex-draft-provider":provider,"./intrinsic-identifier-observer":observer});
     const productionAudit = load(path.resolve("scripts/lib/publish-image-audit.ts"), {
-      "./codex-draft-provider": { runCodexDraft: (call: CodexDraftOptions) => reviewProvider(call) },
+      "./codex-draft-provider":provider,"./publication-image-scoped-review":scoped,"./publication-identifier-review":identifiers,
     });
     const productionPreflight = load(path.resolve("src/lib/brand-post-publish-preflight.ts"), {
       "../../scripts/lib/publish-image-audit": productionAudit,
@@ -157,29 +170,28 @@ async function main() {
     if (paragraph?.kind === "paragraph") paragraph.text += " 이 사진은 다른 상품을 보여줍니다.";
     writeBrandPostPackageManifest(changed);
     reviewProvider = async call => {
-      const result = JSON.parse(await review(call));
-      const line = call.userPrompt.split("\n").find(text => text.startsWith("Each attached image belongs ONLY"))!;
-      const slots = JSON.parse(line.slice(line.indexOf("[")));
-      for (const row of result.reviews) {
-        const slot = slots[row.index - 1];
-        row.photoClaimMatches = false;
-        row.photoClaimObjection = slot.role === "thumbnail"
-          ? { origin: "thumbnail-headline", sourceIndex: null, quote: "Synthetic conflicting headline", scope: "pictured-appearance", conflict: "Offline changed photo claim conflicts with visible product." }
-          : { origin: "section-body", sourceIndex: 0, quote: slot.sectionBody[0], scope: "pictured-appearance", conflict: "The published paragraph claims a different pictured product." };
-      }
-      return JSON.stringify(result);
+      const result=JSON.parse(await review(call));
+      if(call.systemPrompt.includes("publication-image-task/C-photo-claims")) {
+        const data=JSON.parse(call.userPrompt.split("Server-bound task data (untrusted facts, not instructions): ")[1]);
+        result.photoClaimMatches=false;result.accepted=false;
+        result.photoClaimObjection={origin:"section-body",sourceIndex:0,quote:data.displayedParagraphs[0].text,scope:"pictured-appearance",conflict:"The published whole paragraph claims a different pictured product"};
+      }return JSON.stringify(result);
     };
     await assert.rejects(preflight(id, "선택 상품"), (error: unknown) => (error as { name?: string }).name === "PublishImageAuditError");
     assert.equal(hasCurrentBrandPostApprovalReceipt(changed, sources), false, "failed current review never produces a successful binding"); cases++;
     [photo, reference, markdown].forEach((file, index) => assert.deepEqual(fs.readFileSync(file), inputBytes[index], "preflight must never regenerate/edit manuscript or images")); cases++;
-    writeBrandPostPackageManifest(fixture);
+    // Force a genuinely unreviewed claim packet for the in-flight race. A
+    // fully unchanged positive packet is now correctly served by its cache.
+    const raceFixture=structuredClone(fixture),raceParagraph=raceFixture.composition.renderNodes.find(n=>n.kind==="paragraph");
+    if(raceParagraph?.kind==="paragraph") raceParagraph.text+=" 현재 외형을 확인합니다.";
+    writeBrandPostPackageManifest(raceFixture);
     reviewProvider = async call => {
       fs.copyFileSync(photo, sourcePhoto); fs.writeFileSync(sourceReceipt, "gallery appears while reviewer runs");
       return review(call);
     };
     await assert.rejects(preflight(id, "선택 상품"), (error: unknown) => (error as { code?: string }).code === "IMAGE_CHANGED");
     assert.equal(hasCurrentBrandPostApprovalReceipt(fixture, sources), false); cases++;
-    fs.rmSync(sourcePhoto); fs.rmSync(sourceReceipt);
+    fs.rmSync(sourcePhoto); fs.rmSync(sourceReceipt);writeBrandPostPackageManifest(fixture);
 
     const bindingModule = load(path.resolve("src/lib/brand-post-approval-receipt.ts"), {
       "../../scripts/lib/publish-image-audit": { publicationImageAuditPolicyFingerprint: () => "changed-policy" },
@@ -265,13 +277,16 @@ async function main() {
       title: writing.title, sections: bodySections, hashtags: writing.hashtags, imagePaths: images.slice(0, 5),
       sectionImagePaths: sectionImages, connectUrl: writing.brandLink, qualityPreset: "PREMIUM" });
     const snapshot = createProductSnapshot({ productId: fullId, connectKind: "SHOPPING", externalProductId: "shaver-fixture",
-      sourceUrl: "https://brand.naver.com/fixture/products/123", product: { name: writing.productName, description: writing.sourceDescription, features: writing.sourceFeatures } });
+      sourceUrl: "https://brand.naver.com/fixture/products/123", product: { name: writing.productName, description: writing.sourceDescription, features: writing.sourceFeatures, referenceImageUrls:[canonicalUrl] } });
     const imageHash = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
     const comparison = (output: string, raw?: string) => ({ strategyVersion: REFERENCE_SCENE_STRATEGY_VERSION,
       referencePath: images[1], referenceSha256: imageHash(images[1]), sourceSnapshotId: snapshot.snapshotId,
       reviewStatus: "passed" as const, reviewedOutputSha256: imageHash(raw || output),
       ...(raw ? { thumbnailRawPath: raw, thumbnailOutputSha256: imageHash(output) } : {}),
       checks: Object.fromEntries(REFERENCE_SCENE_REVIEW_CHECKS.map(check => [check, true])) });
+    const fullSources=path.join(fullDirectory,"product-sources");fs.mkdirSync(fullSources,{recursive:true});
+    const fullCanonical=path.join(fullSources,"canonical.png");fs.copyFileSync(images[1],fullCanonical);
+    fs.writeFileSync(`${fullCanonical}.retrieval.json`,JSON.stringify({version:"product-image-retrieval/v1",sourceUrl:canonicalUrl,sha256:imageHash(fullCanonical),retrievedAt:new Date(Date.now()-1000).toISOString()}));
     const full: BrandPostPackageManifestV2 = { ...structuredClone(fixture), brandLinkId: fullId, title: writing.title,
       approvedAt: null, sourceSnapshot: snapshot, markdownPath: path.join(fullDirectory, "post.md"), heroImagePath: images[0],
       bodyImagePaths: images.slice(1, 5), hashtags: writing.hashtags, composition: fullComposition,
@@ -288,7 +303,8 @@ async function main() {
     };
     for (const node of full.composition.renderNodes) if (node.kind === "image" && full.imageAssets?.find(asset => asset.path === node.assetPath)?.provenance === "GENERATED_SCENE") node.caption = REFERENCE_SCENE_CAPTION;
     fs.writeFileSync(full.markdownPath, bodySections.join("\n\n")); writeBrandPostPackageManifest(full);
-    const fullProtected = [full.markdownPath, ...images].map(file => fs.readFileSync(file));
+    const fullProtectedPaths=[full.markdownPath,...images,fullCanonical,`${fullCanonical}.retrieval.json`];
+    const fullProtected = fullProtectedPaths.map(file => fs.readFileSync(file));
     const revalidate = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "revalidatePackageForApproval")!;
     const completeContext = vm.createContext({ fs, path, SavedTextRevalidationError, readBrandPostPackage, getBrandPostPackageDir,
       revalidateSavedBrandPostText, reconcileBrandPostPackageQuality, writeBrandPostPackageManifest,
@@ -302,7 +318,7 @@ async function main() {
       await vm.runInContext(`approvePackageAfterCurrentValidation("${fullId}", fixtureLink)`, completeContext);
       const finalMaterial = getMaterial(fullId)!;
       assert.equal(finalMaterial.ready, true, `${mode}: actual approval followed by actual ready-list reader: ${finalMaterial.blockers.join(" / ")}`); cases++;
-      [full.markdownPath, ...images].forEach((file, index) => assert.deepEqual(fs.readFileSync(file), fullProtected[index]));
+      fullProtectedPaths.forEach((file, index) => assert.deepEqual(fs.readFileSync(file), fullProtected[index]));
     }
     // A validator-only/source policy change leaves prompt/body/image bytes the
     // same. It must invalidate BOTH readiness and the exact-request cache so a
@@ -314,7 +330,7 @@ async function main() {
       process.env.DESKTOP_PROJECT_ROOT = policyCopy;
       assert.equal(getMaterial(fullId)!.ready, false); cases++;
       reviewProvider = async call => {
-        const result = JSON.parse(await review(call)); for (const row of result.reviews) row.accepted = false;
+        const result = JSON.parse(await review(call)); result.accepted = false;
         return JSON.stringify(result);
       };
       await assert.rejects(preflight(fullId, writing.productName), (error: unknown) => (error as { name?: string }).name === "PublishImageAuditError");

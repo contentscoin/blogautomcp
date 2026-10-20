@@ -85,6 +85,7 @@ async function main() {
         read: store.readBrandPostPackage, write: store.writeBrandPostPackageManifest, apply: store.applyGeneratedBrandPostImage,
         generate: async (options) => {
           assert.equal(options.forceSourceRefresh, true, "explicit seller refresh must reach collection");
+          const batchSnapshot = JSON.stringify(options.manifest), plannedRequests = JSON.stringify(options.requests);
           const results: import("../src/lib/brand-post-image-generation").BrandPostImageGenerationResult[] = [];
           for (const [i, request] of options.requests.entries()) {
             const file = path.join(dir, `new-${request.requestId}.png`);
@@ -93,6 +94,9 @@ async function main() {
               error: i === 0 ? "fixture timeout" : undefined };
             results.push(result);
             await options.onResult?.(result);
+            assert.equal(JSON.stringify(options.manifest), batchSnapshot,
+              "success callbacks commit a separate current manifest; the already planned/sealed batch snapshot remains unchanged for later slots");
+            assert.equal(JSON.stringify(options.requests), plannedRequests, "a prior commit cannot expand the frozen targets or create another retry");
             if (i === 1) assert.equal(store.readBrandPostPackage(id)?.imageGeneration?.applied, 1, "A success must be persisted before batch completion");
           }
           return results;

@@ -5,7 +5,8 @@ import path from "node:path";
 import crypto from "node:crypto";
 import http from "node:http";
 import sharp from "sharp";
-import { auditPublishImages, assertPublishImagesSafe, type PublishImageAuditOptions } from "./lib/publish-image-audit";
+import { auditPublishImages as actualAuditPublishImages, assertPublishImagesSafe as actualAssertPublishImagesSafe, type PublishImageAuditOptions } from "./lib/publish-image-audit";
+import { withReferencePlaneFixture } from "./test-fixtures/reference-plane-review";
 import { findingKey, readPhotoDescriptionFindings, locatePhotoDescriptionSentence } from "./lib/photo-description-finding";
 import { planPhotoDescriptionRepair, serverPhotoDescriptionFindings } from "../src/lib/brand-post-photo-description-repair";
 import { runMaterialPreparation, localScheduleCall, type Call, type Result } from "./lib/scheduled-draft-workflow";
@@ -13,6 +14,11 @@ import type { BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
 import { validateBrandPostPublishImages } from "../src/lib/brand-post-publish-preflight";
 import { acquireBrandPostImageRepairLock } from "../src/lib/brand-post-image-repair-lock";
 import { publicationImageContext } from "./lib/publish-image-rejections";
+
+// Only supply the new synthetic observation fields for legacy offline verdicts;
+// preserve their original identity/claim/format booleans and exact finding quote.
+const auditPublishImages = (options: PublishImageAuditOptions) => actualAuditPublishImages(withReferencePlaneFixture(options));
+const assertPublishImagesSafe = (options: PublishImageAuditOptions) => actualAssertPublishImagesSafe(withReferencePlaneFixture(options));
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "photo-description-repair-"));
@@ -110,8 +116,13 @@ async function main() {
     const coalescedManifest = { ...manifest, composition: coalescedComposition };
     const coalescedFailure = (await auditPublishImages({ ...input, composition: coalescedComposition,
       review: async () => JSON.stringify({ reviews: [{ ...good, photoClaimObjection: { ...good.photoClaimObjection,
-        sourceIndex: 1, quote: bodyParagraphs.slice(1).join("\n\n") } }] }) })).failures[0].photoDescription!;
+        sourceIndex: 2, quote: literal } }] }) })).failures[0].photoDescription!;
     assert(coalescedFailure, "coalesced real layout still yields an exact grounded sentence finding");
+    const wholeRenderNodeClaim = await auditPublishImages({ ...input, composition: coalescedComposition,
+      review: async () => JSON.stringify({ reviews: [{ ...good, photoClaimObjection: { ...good.photoClaimObjection,
+        sourceIndex: 1, quote: bodyParagraphs.slice(1).join("\n\n") } }] }) });
+    assert(wholeRenderNodeClaim.failures.some(row => row.code === "INVALID_REVIEW") && !wholeRenderNodeClaim.failures.some(row => row.photoDescription),
+      "a whole multi-paragraph render node cannot replace the exact displayed paragraph unit");
     const coalesced = planPhotoDescriptionRepair(coalescedManifest, markdown, [coalescedFailure]);
     assert.deepEqual(coalesced.manifest.composition.sections[0].body, bodyParagraphs.filter(text => text !== literal));
     assert.equal(coalesced.manifest.composition.renderNodes.length, coalescedComposition.renderNodes.length,
@@ -170,7 +181,7 @@ async function main() {
     fs.writeFileSync(path.join(moodDir, "manifest.json"), JSON.stringify(moodManifest));
     const moodVerdict = { ...good,
       reason: `The text «${moodLiteral}» makes a precise appearance claim that conflicts with the visible dark brown frame.`,
-      photoClaimObjection: { origin: "section-body", sourceIndex: 0, quote: moodBody.join("\n\n"), scope: "pictured-appearance",
+      photoClaimObjection: { origin: "section-body", sourceIndex: 3, quote: moodLiteral, scope: "pictured-appearance",
         conflict: "The text describes a 밝은 원목 프레임, but the final pixels show a dark brown frame." } };
     let moodCalls = 0;
     const moodInput: PublishImageAuditOptions = { brandLinkId: moodId, productName: "원목 식물 LED 무드등", composition: moodComposition,
@@ -232,7 +243,7 @@ async function main() {
       let calls = 0;
       const audit = await auditPublishImages({ ...moodInput, brandLinkId: undefined, composition: candidate,
         review: async () => { calls++; return JSON.stringify({ reviews: [{ ...moodVerdict, reason: `«${protectedClaim}» conflicts with the photo.`,
-          photoClaimObjection: { ...moodVerdict.photoClaimObjection, quote: source } }] }); } });
+          photoClaimObjection: { ...moodVerdict.photoClaimObjection, quote: protectedClaim } }] }); } });
       assert.equal(calls, 1); assert.equal(audit.failures[0].code, "SEMANTIC_REJECTION");
       assert.equal(audit.failures[0].photoClaimMismatchOnly, true, "an uneditable text objection must stop image rerolling");
       assert.equal(audit.failures[0].photoDescription, undefined, "no protected fact or instruction becomes a deletion finding");
@@ -303,7 +314,7 @@ async function main() {
       imageAssets: [{ path: boxImage, sourcePath: boxImage, sha256, role: "body" as const, sectionId: boxSectionId }] };
     fs.writeFileSync(path.join(boxDir, "manifest.json"), JSON.stringify(boxManifest));
     const boxVerdict = { ...good, reason: `본문의 “${boxLiteral}”와 달리 사진은 같은 형태의 곶감이 반복된 칸을 보여 줍니다. 상품 외형과 옵션 및 사진 형식에는 다른 문제가 없습니다.`,
-      photoClaimObjection: { ...good.photoClaimObjection, sourceIndex: 0, quote: boxBody.join("\n\n"),
+      photoClaimObjection: { ...good.photoClaimObjection, sourceIndex: 2, quote: boxLiteral,
         conflict: "The pictured compartments repeat the same shape instead of the different shapes asserted in this paragraph." } };
     const boxInput: PublishImageAuditOptions = { brandLinkId: boxId, productName: "예다움 상주곶감 선물세트",
       composition: boxComposition, review: async () => JSON.stringify({ reviews: [boxVerdict] }) };

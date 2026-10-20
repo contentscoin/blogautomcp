@@ -285,10 +285,11 @@ async function main() {
     assert.equal(reconcileBrandPostImageContinuity(legacyCard, structuredClone(legacyCard)).composition.sections[0].imagePaths.length, 0,
       "legacy framed originals must not be carried into the new natural-photo draft");
     const visualReview = async (request: { userPrompt: string; imagePaths?: string[] }) => {
-      assert(request.userPrompt.includes("adjacentCaption"));
       const line = request.userPrompt.split("\n").find(value => value.startsWith("Each attached image"))!;
-      const slots = JSON.parse(line.slice(line.indexOf("["))) as Array<{ index: number; role: string; visualContract: { purpose: string; claimPolicy: string } }>;
+      const slots = JSON.parse(line.slice(line.indexOf("["))) as Array<{ index: number; role: string; referenceGuidedScene?: boolean;
+        adjacentCaption?: string; visualContract: { purpose: string; claimPolicy: string } }>;
       for (const slot of slots) {
+        if (slot.referenceGuidedScene) assert.equal(slot.adjacentCaption, REFERENCE_SCENE_CAPTION);
         assert.equal(slot.visualContract.purpose, slot.role === "thumbnail" ? "thumbnail" : "lifestyle-illustration");
         assert.equal(slot.visualContract.claimPolicy, "visual-compatibility-and-explicit-photo-claims");
       }

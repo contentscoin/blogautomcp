@@ -17,7 +17,7 @@ export interface Result {
   approvalConflict?: { gate: "status" | "compare-and-set"; claimAcquired: false; observedStatus: string; expectedStatus?: string; observedUpdatedAt?: string };
   recovery?: { changed: boolean }; remainingMissing?: number;
   generatedCount?: number; appliedCount?: number;
-  imageAuditFailures?: { code: string; sectionId?: string | null; rejectionScope?: string; findingKey?: string; photoDescription?: PhotoDescriptionFinding; photoClaimMismatchOnly?: true }[];
+  imageAuditFailures?: { code: string; assetPath?: string; sectionId?: string | null; rejectionScope?: string; findingKey?: string; photoDescription?: PhotoDescriptionFinding; photoClaimMismatchOnly?: true }[];
   data?: {
     status?: string; postUrl?: string; scheduledPublishAt?: string; errorMessage?: string;
     connectKind?: string;
@@ -27,7 +27,7 @@ export interface Result {
     reservationVerification?: { receiptAccepted: boolean; liveListChecked: boolean; status: string };
     attemptStage?: string | null;
     approvedAt?: string | null; approval?: { canApprove: boolean; blockers?: { code: string; reason: string; sectionId?: string | null }[] };
-    imageAssets?: { assetKey?: string; sha256?: string; role?: string; sectionId?: string | null }[];
+    imageAssets?: { assetKey?: string; sha256?: string; path?: string; role?: string; sectionId?: string | null; provenance?: string; creationMethod?: string; remoteGenerated?: boolean }[];
     imageGeneration?: { status: string; recoveryState?: string };
     imageSlots?: { sectionId?: string; missing: number; generationMissing: number }[];
     qualityConvergence?: QualityConvergencePlan | null;
@@ -172,6 +172,24 @@ function isDefinitivePublishImageFailure(error: unknown): boolean {
   const failure = error as { code?: string; errors?: string[] };
   return failure.code === "PUBLISH_IMAGE_AUDIT_FAILED" && Boolean(failure.errors?.length) &&
     failure.errors!.every(reason => /^(?:SEMANTIC_REJECTION|LONG_IMAGE):/u.test(reason));
+}
+
+/** Workflow routing only, never replacement authority. The server still
+ * verifies current exact pixels/body rejection and canonical source lineage.
+ * Other sections may have real print defects; they cannot hide an original's
+ * independently typed photo-claim mismatch or authorize another source slot. */
+export function auditedSellerOriginalSection(findings: NonNullable<Result["imageAuditFailures"]>, draft: Result): string | null {
+  const sections = new Set(findings.flatMap(failure => typeof failure.sectionId === "string" &&
+    draft.data?.composition?.sections.some(section => section.id === failure.sectionId && section.imageSource === "seller-original") ? [failure.sectionId] : []));
+  if (sections.size !== 1) return null;
+  const sectionId = [...sections][0];
+  const failures = findings.filter(failure => failure.sectionId === sectionId);
+  const assets = draft.data?.imageAssets?.filter(asset => asset.sectionId === sectionId && asset.role === "body" &&
+    asset.provenance === "ORIGINAL" && asset.creationMethod === "source" && asset.remoteGenerated !== true) || [];
+  if (assets.length !== 1 || !assets[0].path || !/^[a-f0-9]{64}$/u.test(assets[0].sha256 || assets[0].assetKey || "") ||
+      failures.some(failure => failure.code !== "SEMANTIC_REJECTION" || failure.rejectionScope !== "section" ||
+        failure.photoClaimMismatchOnly !== true || failure.assetPath !== assets[0].path)) return null;
+  return sectionId;
 }
 
 /** Preserve a failed replacement's machine code without copying its raw payload. */
@@ -675,25 +693,25 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
 
   let photoDescriptionRepaired = false;
   let originalPhotoRepairAttempted = false;
+  let postOriginalAuditFailure: unknown;
   const repairAuditedPhotoDescription = async (error: unknown): Promise<boolean> => {
-    if (!isDefinitivePublishImageFailure(error)) return false;
+    if ((error as { code?: string })?.code !== "PUBLISH_IMAGE_AUDIT_FAILED") return false;
     const findings = (error as { imageAuditFailures?: Result["imageAuditFailures"] }).imageAuditFailures;
     if (!findings || findings.length === 0) return false;
-    // Preserve the manuscript when an intact seller original is the sole
-    // mismatch: rebind ONLY that actually rejected source slot, once. The
+    // Preserve the manuscript when an intact seller original has its own
+    // exact claim-only mismatch, including mixed failures elsewhere. The
     // server independently checks the persisted exact-body/SHA rejection and
     // canonical provenance; reviewer prose/section IDs cannot authorize it.
-    const originalSections = [...new Set(findings.map(failure => failure.sectionId))];
-    const originalPhotoOnly = originalSections.length === 1 && typeof originalSections[0] === "string" && findings.every(failure =>
-      failure.code === "SEMANTIC_REJECTION" && failure.rejectionScope === "section" && failure.photoClaimMismatchOnly === true) &&
-      draft.data?.composition?.sections.some(section => section.id === originalSections[0] && section.imageSource === "seller-original");
-    if (originalPhotoOnly) {
+    const originalSection = auditedSellerOriginalSection(findings, draft);
+    if (originalSection) {
       if (originalPhotoRepairAttempted) throw error;
       originalPhotoRepairAttempted = true;
       deps.onStage?.("원고 보존 · 본문과 다른 원본 사진 슬롯만 검증 판매자 사진으로 재배정");
       const recovered = await runRecordedImageRecovery(id, "repair-rejected-original", () =>
-        claimedCall(`${base}/draft/images`, "POST", { action: "repair_rejected_originals", sectionId: originalSections[0] }));
-      if (!recovered.attempted) throw error;
+        claimedCall(`${base}/draft/images`, "POST", { action: "repair_rejected_originals", sectionId: originalSection }), { originalSectionId: originalSection });
+      if (!recovered.attempted) throw Object.assign(new Error("동일 원본·슬롯·본문·상품 근거의 원본 복구 시도가 이미 기록됐거나 완료 여부를 확정할 수 없습니다. 기존 기록과 사진을 보존하고 재배정을 반복하지 않았습니다."), {
+        code: "IMAGE_RESUME_REQUIRED", causeCode: "PUBLISH_IMAGE_AUDIT_FAILED", imageAuditFailures: findings,
+      });
       const result = recovered.result;
       if (!result?.success || result.generatedCount !== 0 || result.appliedCount !== 1 || result.errors?.length) {
         throw Object.assign(new Error("본문과 맞는 검증 판매자 대체 원본을 확정하지 못했습니다. 기존 원고·사진을 보존했으며 추가 생성하지 않았습니다."), {
@@ -702,9 +720,31 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
       }
       draft = await deps.call(`${base}/draft`, "GET");
       plan = await recheck(false, revised ? 1 : 0);
-      if (plan.action !== "complete") throw unresolvedCompositionError(plan.reason);
+      if (!["complete", "repair-composition"].includes(plan.action)) throw unresolvedQualityError(plan);
+      // Source rebinding changes the whole-material defect-proof binding.
+      // Audit the exact NEW composition before any print repair is planned;
+      // old201/74 proofs from the old original binding must not be reused.
+      deps.onStage?.("원본 재배정 후 전체 사진·본문 새 검수 · 기존 인쇄 결함 근거 갱신");
+      try {
+        await deps.call(`${base}/draft`, "PATCH", { action: "audit_photo_descriptions" });
+        postOriginalAuditFailure = undefined;
+      } catch (afterRebind) {
+        if (!isDefinitivePublishImageFailure(afterRebind)) throw afterRebind;
+        const currentFailures = (afterRebind as { imageAuditFailures?: Result["imageAuditFailures"] }).imageAuditFailures;
+        if (!currentFailures?.length || currentFailures.some(failure => failure.sectionId === originalSection ||
+            draft.data?.imageAssets?.filter(asset => asset.path === failure.assetPath &&
+              (failure.sectionId ? asset.sectionId === failure.sectionId : asset.role === "hero" && !asset.sectionId)).length !== 1)) {
+          throw Object.assign(new Error("대체 원본의 현재 본문 검수를 통과하지 못했습니다. 원고·사진을 보존했으며 원본 재배정은 반복하지 않았습니다."), {
+            code: "PHOTO_DESCRIPTION_REPAIR_REQUIRED", causeCode: "PUBLISH_IMAGE_AUDIT_FAILED", imageAuditFailures: currentFailures,
+          });
+        }
+        postOriginalAuditFailure = afterRebind;
+      }
+      draft = await deps.call(`${base}/draft`, "GET");
+      if (!postOriginalAuditFailure && plan.action !== "complete") throw unresolvedCompositionError(plan.reason);
       return true;
     }
+    if (!isDefinitivePublishImageFailure(error)) return false;
     if (findings.length > 12 || !findings.every(failure =>
       failure.code === "SEMANTIC_REJECTION" && failure.rejectionScope === "section" &&
       failure.photoDescription?.category === "photo-description-mismatch" && /^[a-f0-9]{64}$/u.test(failure.findingKey || ""))) {
@@ -751,8 +791,11 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
       await deps.call(`${base}/draft`, "PATCH", { action: "audit_photo_descriptions" });
       draft = await deps.call(`${base}/draft`, "GET");
     } catch (error) {
-      if (!isDefinitivePublishImageFailure(error)) throw error;
-      await repairAuditedPhotoDescription(error);
+      const repaired = await repairAuditedPhotoDescription(error);
+      if (!repaired && !isDefinitivePublishImageFailure(error)) throw error;
+      // The remaining defects were just re-audited against this new material;
+      // images() now reads their fresh current proofs, not the old cause.
+      postOriginalAuditFailure = undefined;
     }
   };
   await images();
@@ -803,13 +846,16 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     await claimedCall(`${base}/draft`, "PATCH", { action: "approve" });
   } catch (error) {
     if (completedHeroPolicyReviewAttempted) throw error;
-    if (!isDefinitivePublishImageFailure(error)) throw error;
-    if (await repairAuditedPhotoDescription(error)) {
+    const descriptionRepaired = await repairAuditedPhotoDescription(error);
+    if (!descriptionRepaired && !isDefinitivePublishImageFailure(error)) throw error;
+    if (descriptionRepaired && !postOriginalAuditFailure) {
       if (plan.action !== "complete") throw unresolvedCompositionError(plan.reason);
       deps.onStage?.("동일 이미지·수정 문장 최종 재검사·승인");
       await claimedCall(`${base}/draft`, "PATCH", { action: "approve" });
     } else {
-    const recoveryStage = productRecoveryStageForFailure(error);
+    const currentImageError = postOriginalAuditFailure || error;
+    postOriginalAuditFailure = undefined;
+    const recoveryStage = productRecoveryStageForFailure(currentImageError);
     const recoveryLabel = {
       source: "상품 근거 재수집",
       understanding: "상품 정체성·옵션 재판정",
@@ -821,7 +867,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     deps.onStage?.(`최종 이미지 검사 실패 · 원인=${recoveryLabel} · 해당 단계부터 자동 복구`);
     draft = await deps.call(`${base}/draft`, "GET");
     if (!draft.data?.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0) && !thumbnailMissing() && !thumbnailRepairKey()) {
-      await dropRejectedAndApprove(error);
+      await dropRejectedAndApprove(currentImageError);
     } else {
       let replaced = true;
       let replacementFailure: unknown;
@@ -832,7 +878,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
         if (plan.action !== "complete") throw unresolvedCompositionError(plan.reason);
       } catch (replaceError) {
         const code = (replaceError as { code?: string }).code;
-        if (code === "SOURCE_REVIEW_CONFLICT" || code === "IMAGE_OUTPUT_REJECTED") throw withBoundedImageRecoveryCause(error, replaceError);
+        if (code === "SOURCE_REVIEW_CONFLICT" || code === "IMAGE_OUTPUT_REJECTED") throw withBoundedImageRecoveryCause(currentImageError, replaceError);
         if (isSessionWidePreparationFailureCode(code) || isUncertainLocalTransportError(replaceError) ||
             UNRESOLVED_IMAGE_OPERATION_CODES.has(code || "")) throw replaceError;
         if (thumbnailMissing() || thumbnailRepairKey()) throw replaceError;
@@ -840,18 +886,20 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
         replaced = false;
       }
       if (!replaced) {
-        await dropRejectedAndApprove(error, replacementFailure);
+        await dropRejectedAndApprove(currentImageError, replacementFailure);
       } else {
         deps.onStage?.("교체 이미지 최종 재검사·승인");
         try {
           await claimedCall(`${base}/draft`, "PATCH", { action: "approve" });
         } catch (secondError) {
-          if (!isDefinitivePublishImageFailure(secondError)) throw secondError;
           // A mixed first rejection (e.g. seller badge plus a wrong carpet
           // sentence) may become a pure body-description finding after the
           // defective photo is replaced. Correct that one audited sentence
           // against the replacement pixels, without buying another generation.
-          if (await repairAuditedPhotoDescription(secondError)) {
+          const descriptionRepaired = await repairAuditedPhotoDescription(secondError);
+          if (!descriptionRepaired && !isDefinitivePublishImageFailure(secondError)) throw secondError;
+          if (descriptionRepaired) {
+            if (postOriginalAuditFailure) throw postOriginalAuditFailure;
             if (plan.action !== "complete") throw unresolvedCompositionError(plan.reason);
             deps.onStage?.("교체 이미지 유지 · 사진 묘사 수정 후 최종 재검사·승인");
             await claimedCall(`${base}/draft`, "PATCH", { action: "approve" });

@@ -48,6 +48,8 @@ export interface CodexDraftOptions {
   /** Keep numbered image-review candidates in caller order. */
   preserveImageOrder?: boolean;
   timeoutMs?: number;
+  /** A bounded independent observer must not start a second provider turn. */
+  noTransientRetry?: boolean;
   model?: string;
   reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
   researchMode?: "disabled" | "cached" | "live";
@@ -402,7 +404,7 @@ export async function runCodexDraft(options: CodexDraftOptions): Promise<string>
       });
       return collectCodexDraftResponse(events, options.onProgress);
     }, {
-      canRetry: () => !controller.signal.aborted,
+      canRetry: () => options.noTransientRetry !== true && !controller.signal.aborted,
       onRetry: () => options.onProgress?.("Codex 일시 오류 감지 · 동일 Codex 경로로 1회 재시도"),
     });
   } catch (error) {

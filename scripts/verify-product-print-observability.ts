@@ -11,6 +11,7 @@ import { auditPublishImages, publicationImageAuditPolicyFingerprint } from "./li
 import { PRODUCT_IMAGE_PRINT_OBSERVABILITY_RULE_EN, PRODUCT_IMAGE_PRINT_OBSERVABILITY_RULE_KO,
   PRODUCT_IMAGE_VISUAL_CONTRACT_RULES_KO } from "./lib/product-image-visual-contract";
 import type { CodexDraftOptions } from "./lib/codex-draft-provider";
+import { referencePlaneFixtureRow } from "./test-fixtures/reference-plane-review";
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "print-observability-")); let cases = 0;
@@ -25,11 +26,12 @@ async function main() {
     const checks = Object.fromEntries(SCENE_FIDELITY_CHECKS.map(key => [key, true]));
     const comparisons = Object.fromEntries(["productShape", "intrinsicPrinting", "visibleOption", "sceneContext"].map(key => [key, {
       result: "consistent", variation: "none", referenceObservation: `reference ${key} visible`, candidateObservation: `candidate ${key} matches`, basis: "specific identifying landmarks and selected option agree" }]));
-    const good = { comparisons: { ...comparisons, intrinsicPrinting: { result: "allowed-variation", variation: "matched-small-print-unreadable",
+    const good = { identifierObservation: { candidateIdentifierVisibility: "unreadable", identifierComparisons: [] },
+      comparisons: { ...comparisons, intrinsicPrinting: { result: "allowed-variation", variation: "matched-small-print-unreadable",
       referenceObservation: "A real small light mark is visible on the rear body at this normal worn viewing distance; its letters cannot reliably be read",
       candidateObservation: "A real small light mark is visible at the corresponding rear-body position at a matching ordinary worn scale; its letters cannot reliably be read",
       basis: "Distinctive ear unit, rear connecting structure and black option match; the body does not claim to read the letters; no attached reference shows a conflicting identifier. No letter match is asserted" } },
-      checks, identityMatches: true, illustrativeOnly: true, reason: "The source/candidate show corresponding small marks and independently matching identifying structure; letter readability is not claimed", accepted: true };
+      checks, identityMatches: true, illustrativeOnly: true, intrinsicPrintProofClaim: false, reason: "The source/candidate show corresponding small marks and independently matching identifying structure; letter readability is not claimed", accepted: true };
     const neutral = { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" };
     const options = { reference, outputPath: candidate, productName: "선택 검정색 오픈형 이어폰", imageIntent: "자연스러운 착용 맥락",
       sectionTitle: "구매 전 볼 기준", bodyExcerpt: "러닝 조건과 확인할 사양을 살펴보세요." };
@@ -90,7 +92,7 @@ async function main() {
       await assert.rejects(reviewShoppingReferenceScene(options, { review: async () => { calls++;
         return JSON.stringify({ ...good, comparisons: { ...good.comparisons, intrinsicPrinting: { ...good.comparisons.intrinsicPrinting,
           result: resultKind, variation: "none", basis: "A genuinely unresolved identifying detail remains adverse" } }, accepted: false });
-      } }), /REFERENCE_SCENE_FIDELITY_FAILED/u); assert.equal(calls, 1); cases++;
+      } }), resultKind === "unverifiable" ? /REFERENCE_SCENE_REVIEW_INVALID/u : /REFERENCE_SCENE_FIDELITY_FAILED/u); assert.equal(calls, 1); cases++;
     }
     let consistencyCalls = 0;
     await assert.rejects(reviewShoppingReferenceScene(options, { review: async () => { consistencyCalls++; return JSON.stringify({ ...good, accepted: false }); } }), /REFERENCE_SCENE_REVIEW_INVALID/u);
@@ -109,13 +111,16 @@ async function main() {
         { kind: "paragraph" as const, sectionId: "body", text: options.bodyExcerpt },
         { kind: "image" as const, sectionId: role === "thumbnail" ? null : "body", role, assetPath: candidate, altText: "상품", layout: "single" as const, sourcePolicy: "LOCKED_PRODUCT_OR_ORIGINAL" as const }] };
       const audited = await auditPublishImages({ productName: options.productName, composition, review: async call => {
-        calls++; assertRule(call);
+        calls++;
+        assert.match(call.userPrompt, /A real mark at the matching position may be present-unreadable only with all three correspondence flags true and sufficiently identifying shape/u);
+        assert.match(call.userPrompt, /never call it blank or claim its words were read/u);
+        assert.match(call.userPrompt, /Readable conflicting print may be compared on another legitimate face of the same selected component/u);
         const typed = call.outputSchema as { properties: { reviews: { items: { properties: { identityMatches: { description: string } } } } } };
-        assert(typed.properties.reviews.items.properties.identityMatches.description.includes(PRODUCT_IMAGE_PRINT_OBSERVABILITY_RULE_EN));
-        return JSON.stringify({ reviews: [{ index: 1, reason: adverse ? "Readable wrong brand remains adverse" : "Observed same-position small marks and identifying design match",
+        assert(typed.properties.reviews.items.properties.identityMatches.description.length <= 250);
+        return JSON.stringify({ reviews: [referencePlaneFixtureRow(call, { index: 1, reason: adverse ? "Readable wrong brand remains adverse" : "Observed same-position small marks and identifying design match",
           photoClaimObjection: neutral, identityMatches: !adverse, photoClaimMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false,
           optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true,
-          reviewClass: "product-photo", accepted: !adverse }] });
+          reviewClass: "product-photo", accepted: !adverse })] });
       } }); assert.equal(audited.ok, !adverse); assert.equal(calls, 1); cases++;
     }
     assert.deepEqual([referencePath, candidate].map(hash), unchanged);

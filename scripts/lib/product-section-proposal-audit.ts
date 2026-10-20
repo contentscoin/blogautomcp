@@ -1,10 +1,14 @@
-import { auditPublishImages, type PublishImageAuditOptions } from "./publish-image-audit";
+import { auditPublishImages, publicationImageAuditPolicyFingerprint, type PublishImageAuditOptions } from "./publish-image-audit";
 import type { PostRenderNode, ResolvedPostSectionV1 } from "../../src/lib/post-composition-contract";
 import type { BrandPostImageSourceHint } from "../../src/lib/brand-post-image-evidence";
 import type { ProductSourceAuditContext } from "./product-source-audit-context";
 
 export interface SectionProposal { targetIndex: number; path: string; sourceSha256: string }
 export interface SectionProposalTarget { sectionTitle: string; sectionBody?: string[]; imageIntent: string; sectionId?: string; imageSource?: BrandPostImageSourceHint }
+
+/** Seller selection must not reuse a verdict from an older C-claim/D-format
+ * contract. This is a policy identity, never a new review or source proof. */
+export const productSectionProposalAuditPolicyKey = publicationImageAuditPolicyFingerprint;
 
 /** Bounded selection/verification: only selected pairs are audited, using exactly
  * the final publication rules. Rejected pairs cannot re-enter subsequent rounds. */

@@ -9,9 +9,11 @@ import { selectVerifiedProductSectionImages, type ProductSectionImageDiagnostics
 import { sourceReviewFailureForSlot } from "../../scripts/lib/product-source-audit-context";
 import { buildSellerOriginalRepairTarget } from "../../scripts/lib/seller-original-repair-target";
 import { buildSelectedProductImageAuditContext, publicationImageAuditPolicyFingerprint } from "../../scripts/lib/publish-image-audit";
-import { planPublicationImageRetry, type PublicationImageRetryParent } from "./brand-post-publication-image-repair";
-import { sealPublicationImageRepairPlan } from "../../scripts/lib/publication-image-defect-proof";
-import { publicationImageContext, rejectedPublicationImageHashes } from "../../scripts/lib/publish-image-rejections";
+import { planPublicationImageRetry, assertPublicationRetryPrintReference, type PublicationImageRetryParent } from "./brand-post-publication-image-repair";
+import { sealPublicationImageRepairPlan, isCorroboratedNativeIdentifierConflict, readPublicationImageDefect } from "../../scripts/lib/publication-image-defect-proof";
+import { publicationIdentifierReviewEvidenceIssue, type PublicationIdentifierReviewInput, type PublicationIdentifierReviewResult } from "../../scripts/lib/publication-identifier-review";
+import type { IntrinsicIdentifierServerConflict } from "../../scripts/lib/intrinsic-identifier-comparison";
+import { publicationImageContext, rejectedPublicationImageHashes, publicationImageRegenerationHoldState } from "../../scripts/lib/publish-image-rejections";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -137,6 +139,18 @@ interface BrowserImageBatchResult {
 
 function clean(value: string): string {
   return value.replace(/\s+/gu, " ").trim();
+}
+function assertImageRegenerationNotHeld(manifest: BrandPostPackageManifestV2, target: ResolvedImageTarget): void {
+  if (manifest.connectKind !== "SHOPPING" || !target.request.replaceAssetKey) return;
+  const state = publicationImageRegenerationHoldState(manifest.brandLinkId, manifest.composition, target.sectionId ?? null, target.request.replaceAssetKey);
+  if (state === "none") return;
+  if (state === "held" && target.role === "body" && target.sectionId) {
+    const proof = readPublicationImageDefect(manifest, target.sectionId, target.request.replaceAssetKey, publicationImageAuditPolicyFingerprint());
+    // A new exact native concrete finding can resolve uncertainty for this
+    // single bounded planner, never erase the old HOLD or approve the picture.
+    if (proof?.proof.version === "publication-image-print-defect/v4") return;
+  }
+  throw new Error("PUBLICATION_IMAGE_REGENERATION_HELD: 관찰 부족 또는 미확정 표기 검수는 사진 교체 권한이 아닙니다. 기존 사진을 보존하고 현재 참조·사진을 재검수하세요.");
 }
 
 function resolveManifestProductUnderstanding(
@@ -521,6 +535,14 @@ function readSettledBodyRejection(stem: string, manifest: BrandPostPackageManife
     if (exactJob) assertCompletedContextRecovery(exactJob);
     const completion = bodySceneCompletionBinding(stem, metadata, exactJob);
     if (!completion || JSON.stringify(completion) !== JSON.stringify(proof.completion)) return null;
+    if (proof.publicationIdentifierReview || proof.publicationIdentifierInput) {
+      const review = proof.publicationIdentifierReview as PublicationIdentifierReviewResult, input = proof.publicationIdentifierInput as PublicationIdentifierReviewInput;
+      if (!review || !input || review.status !== "conflict" || proof.candidates.length !== 1 || input.candidateSha256 !== proof.candidates[0].sha256 ||
+          input.primaryReference.sha256 !== metadata.referenceHashes[0] ||
+          input.canonicalReferences.some(row => row.sourceSnapshotId !== manifest.sourceSnapshot?.snapshotId) ||
+          JSON.stringify([...new Set([input.primaryReference.sha256, ...input.canonicalReferences.map(row => row.sha256)])]) !== JSON.stringify(metadata.referenceHashes) ||
+          publicationIdentifierReviewEvidenceIssue(review, input)) return null;
+    }
     const expectedCandidates = completion.nativeCandidates.length ? completion.nativeCandidates : completion.outputs;
     if (JSON.stringify([...new Set(expectedCandidates.map(item => item.sha256))].sort()) !==
         JSON.stringify([...new Set(proof.candidates.map((item: { sha256: string }) => item.sha256))].sort())) return null;
@@ -548,7 +570,10 @@ function recordBodySceneRejection(options: { manifest: BrandPostPackageManifestV
   const proof = JSON.stringify({ version: "shopping-body-scene-rejection/v1", code: "REFERENCE_SCENE_FIDELITY_FAILED",
     metadataSha256: sha256File(metadataPath), slotId: metadata.slotId, sourceSnapshotId: metadata.sourceSnapshotId,
     referenceHashes: metadata.referenceHashes, reviewContextSha256: bodySceneReviewContext(options.manifest, options.target),
-    failure, candidates: options.candidates, completion });
+    failure, candidates: options.candidates, completion,
+    ...((options.error as Error & { publicationIdentifierReview?: PublicationIdentifierReviewResult }).publicationIdentifierReview
+      ? { publicationIdentifierReview: (options.error as Error & { publicationIdentifierReview: PublicationIdentifierReviewResult }).publicationIdentifierReview,
+        publicationIdentifierInput: (options.error as Error & { publicationIdentifierInput: PublicationIdentifierReviewInput }).publicationIdentifierInput } : {}) });
   const file = `${options.job.outStem}.body-rejection.json`;
   try { fs.writeFileSync(file, proof, { flag: "wx" }); }
   catch (error) {
@@ -575,6 +600,7 @@ export async function prepareBrandPostImageReferenceContext(options: {
   sourceImageUrls?: string[];
 }, dependencies: { collect?: typeof collectShoppingProductSourceCandidates; select?: typeof selectShoppingSceneReference;
   selectSupporting?: typeof selectShoppingSceneSupportingReferences } = {}): Promise<BrandPostImageReferenceContext> {
+  assertImageRegenerationNotHeld(options.manifest, options.target);
   if (options.manifest.connectKind !== "SHOPPING" || !allowsShoppingReferenceScene(options.target))
     throw new Error("REFERENCE_SCENE_NOT_EVIDENCE: 기능·효능 파트에는 생성 연출사진을 근거로 사용할 수 없습니다.");
   if (!options.manifest.sourceSnapshot?.snapshotId)
@@ -757,6 +783,7 @@ export async function prepareBrandPostImageReferenceContext(options: {
       const current = candidate.strategyVersion === SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION &&
         candidate.snapshotId === options.manifest.sourceSnapshot.snapshotId;
       if (current && prior?.subject && prior.geometry && prior.labels && prior.reviewedAt && sha256File(prior.path) === prior.sha256 &&
+          (!publicationPlan || prior.sha256 === publicationPlan.primaryReference.sha256 && !!prior.viewObservation) &&
           (!thumbnail || await isShoppingThumbnailSourceEligible(prior.path))) {
         reference = prior;
         break;
@@ -764,6 +791,15 @@ export async function prepareBrandPostImageReferenceContext(options: {
     } catch { /* A modified source requires fresh seller identity and shape review. */ }
   }
   if (!reference) {
+    if (publicationPlan) {
+      // Preserve the parent's observed shape/option primary. The corroborated
+      // clear word becomes local label evidence, never a new shape authority.
+      reference = await (dependencies.select ?? selectShoppingSceneReference)({ paths: [publicationPlan.primaryReference.path],
+        productName: options.productName, selectedProduct });
+      if (reference.sha256 !== publicationPlan.primaryReference.sha256 ||
+          path.resolve(reference.path) !== path.resolve(publicationPlan.primaryReference.path) || sha256File(reference.path) !== reference.sha256)
+        throw new Error("IMAGE_RESUME_REQUIRED: 개선 요청의 기존 주 참조가 변경되어 생성하지 않았습니다.");
+    } else {
     const snapshotUrls = options.manifest.sourceSnapshot.product.referenceImageUrls;
     // The selected snapshot gallery must reach the bounded visual review before
     // unrelated hash-sorted saved files. Prior coherent reviewed references stay
@@ -784,6 +820,7 @@ export async function prepareBrandPostImageReferenceContext(options: {
     if (thumbnail && (!candidates.some(file => path.resolve(file) === path.resolve(reference!.path)) ||
         sha256File(reference.path) !== reference.sha256 || !await isShoppingThumbnailSourceEligible(reference.path)))
       throw new Error("REFERENCE_SCENE_CHANGED: 검수한 썸네일 원본이 후보·해시·허용 비율과 일치하지 않습니다. 본문 참조와 이전 생성 기록은 보존했습니다.");
+    }
   }
   let anchorPath: string | undefined;
   let anchorSha256: string | undefined;
@@ -817,7 +854,9 @@ export async function prepareBrandPostImageReferenceContext(options: {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
   }
   let supportingReferences: ShoppingSceneSupportingReference[] = [];
-  if ((!existingSlotRequest || retryKey) && snapshotImageUrls.length) {
+  // A current native print retry already has its mandatory clear-source input.
+  // Do not ask a new optional shortlist to replace/drop that exact evidence.
+  if ((!existingSlotRequest || retryKey) && snapshotImageUrls.length && !publicationPlan) {
     const key = crypto.createHash("sha256").update(JSON.stringify({ snapshotId: options.manifest.sourceSnapshot.snapshotId,
       referenceSha256: reference.sha256, selectedProduct })).digest("hex");
     const bundlePath = path.join(path.dirname(checkpointPath), `reference-bundle-${key}${retryKey ? `-retry-${retryKey}` : ""}.json`);
@@ -860,12 +899,28 @@ export async function prepareBrandPostImageReferenceContext(options: {
         sourceSnapshotId: options.manifest.sourceSnapshot.snapshotId, referenceSha256: reference.sha256, supportingReferences }), { flag: "wx" });
     }
   }
+  if (publicationPlan) {
+    const required = publicationPlan.requiredPrintReference;
+    const primarySha256 = reference.sha256;
+    if (!supportIntact(required) || reference.sha256 !== publicationPlan.primaryReference.sha256)
+      throw new Error("IMAGE_RESUME_REQUIRED: 현재 표기 결함을 입증한 보조 원본 또는 기존 주 참조가 변경되었습니다.");
+    if (required.sha256 === reference.sha256) reference = { ...reference, labels: required.labels };
+    else supportingReferences = [required, ...supportingReferences.filter(support => support.sha256 !== required.sha256 &&
+      support.sha256 !== primarySha256 && support.purpose === "geometry")].slice(0, 2);
+    anchorPath = undefined; anchorSha256 = undefined;
+  }
   if (supportingReferences.some(support => !supportIntact(support))) throw new Error("REFERENCE_SCENE_CHANGED: 보조 참조의 출처 또는 픽셀이 변경되었습니다.");
   let referenceBytes = fs.statSync(reference.path).size;
-  supportingReferences = supportingReferences.sort((a, b) => Number(a.purpose === "intrinsic-label") - Number(b.purpose === "intrinsic-label"))
+  supportingReferences = supportingReferences.sort((a, b) => publicationPlan
+    ? Number(b.sha256 === publicationPlan.requiredPrintReference.sha256) - Number(a.sha256 === publicationPlan.requiredPrintReference.sha256)
+    : Number(a.purpose === "intrinsic-label") - Number(b.purpose === "intrinsic-label"))
     .filter(support => {
       const bytes = fs.statSync(support.path).size;
-      if (referenceBytes + bytes > 8 * 1024 * 1024) return false;
+      if (referenceBytes + bytes > 8 * 1024 * 1024) {
+        if (publicationPlan && support.sha256 === publicationPlan.requiredPrintReference.sha256)
+          throw new Error("IMAGE_RESUME_REQUIRED: 기존 주 참조와 필수 표기 원본의 합계가 허용 용량을 넘어 생성하지 않았습니다.");
+        return false;
+      }
       referenceBytes += bytes; return true;
     });
   // Identifying seller details take priority over a generated palette anchor.
@@ -880,6 +935,7 @@ export async function prepareBrandPostImageReferenceContext(options: {
     ...(publicationRetryOf ? { publicationRetryOf } : {}),
     prompt: buildShoppingReferenceScenePrompt({ ...promptOptions, reference, hasAnchor: Boolean(anchorPath), supportingReferences }),
   };
+  if (publicationPlan) assertPublicationRetryPrintReference(context, publicationPlan.requiredPrintReference, publicationPlan.primaryReference.sha256);
   if (retryOf || publicationRetryOf) {
     const previousStem = retryOf?.outStem || publicationRetryOf!.dispositions.find(row => row.candidateSha256 === publicationRetryOf!.currentSha256)!.outStem;
     const previous = JSON.parse(fs.readFileSync(`${previousStem}.reference-scene.json`, "utf8"));
@@ -1217,6 +1273,7 @@ export function prepareImageBatchJobs(
       .map((asset) => asset.path),
   })).map((job, index) => {
     const target = targets[index];
+    assertImageRegenerationNotHeld(manifest, target);
     let publicationParent: PublicationImageRetryParent | undefined;
     if (target.referenceContext?.publicationRetryOf) {
       const checked = planPublicationImageRetry({ manifest, target, packageDir: getBrandPostPackageDir(manifest.brandLinkId),
@@ -1471,6 +1528,7 @@ export async function resolveCompletedProductImage(options: {
     try {
       const review = await (options.reviewReferenceScene ?? reviewShoppingReferenceScene)({ reference: context!.reference,
         outputPath: candidate.path, productName: options.productName, imageIntent: options.target.imageIntent,
+        sourceSnapshotId: options.manifest.sourceSnapshot?.snapshotId,
         sectionTitle: initial.sectionTitle, bodyExcerpt: initial.sectionBody, anchorSha256: context!.anchorSha256,
         supportingReferences: context!.supportingReferences });
       assertCurrent();
@@ -1497,6 +1555,11 @@ export async function resolveCompletedProductImage(options: {
         identityMatches: rejections.every(item => item.fidelityFailure!.identityMatches), illustrativeOnly: rejections.every(item => item.fidelityFailure!.illustrativeOnly),
         failedChecks: [...new Set(rejections.flatMap(item => item.fidelityFailure!.failedChecks))],
         comparisonFailures: [...new Set(rejections.flatMap(item => item.fidelityFailure!.comparisonFailures))] } });
+      if (rejections.length === 1) {
+        const isolated = rejections[0] as Error & { publicationIdentifierReview?: PublicationIdentifierReviewResult; publicationIdentifierInput?: PublicationIdentifierReviewInput };
+        if (isolated.publicationIdentifierReview && isolated.publicationIdentifierInput)
+          Object.assign(error, { publicationIdentifierReview: isolated.publicationIdentifierReview, publicationIdentifierInput: isolated.publicationIdentifierInput });
+      }
       recordBodySceneRejection({ manifest: options.manifest, target: options.target, job: options.job,
         candidates: initialSet.candidates.map(candidate => ({ path: candidate.path, sha256: candidate.sha256 })), error });
     }
@@ -1848,6 +1911,7 @@ async function finishGeneratedImage(options: {
   let referenceScene: Awaited<ReturnType<typeof reviewShoppingReferenceScene>>;
   try {
     referenceScene = await (options.reviewReferenceScene ?? reviewShoppingReferenceScene)({ reference: context.reference, outputPath: options.rawPath,
+      sourceSnapshotId: options.manifest.sourceSnapshot?.snapshotId,
       productName: options.productName, imageIntent: options.target.imageIntent, sectionTitle: options.target.sectionTitle,
       bodyExcerpt: options.target.bodyExcerpt, anchorSha256: context.anchorSha256, supportingReferences: context.supportingReferences });
   } catch (error) {
@@ -1898,10 +1962,35 @@ export async function repairRejectedCompletedBodyImage(options: {
   runBatch?: typeof runImageBatch;
   reviewReferenceScene?: typeof reviewShoppingReferenceScene;
 } = {}): Promise<Awaited<ReturnType<typeof finishGeneratedImage>> | null> {
-  const { manifest, target, job } = options;
+  const { manifest, target } = options;
+  let job = options.job;
   const failure = options.error instanceof Error ? (options.error as Error & { fidelityFailure?: unknown }).fidelityFailure : undefined;
-  if (manifest.connectKind !== "SHOPPING" || target.role !== "body" || !job.reviewOnly || target.referenceContext?.retryOf || target.referenceContext?.publicationRetryOf ||
+  if (manifest.connectKind !== "SHOPPING" || target.role !== "body" || target.referenceContext?.retryOf || target.referenceContext?.publicationRetryOf ||
       !(options.error instanceof Error) || !options.error.message.startsWith("REFERENCE_SCENE_FIDELITY_FAILED:") || !validBodyFidelityFailure(failure)) return null;
+  if (!job.reviewOnly) {
+    // A newly generated photograph can use the same bounded improvement only
+    // after strict proof that THIS owned request completed exactly once and
+    // native literal observation agrees with independent blind OCR. Ordinary
+    // fidelity errors, unknown sends and retained normal photographs do not gain authority.
+    const conflict = (options.error as Error & { identifierConflict?: IntrinsicIdentifierServerConflict }).identifierConflict;
+    const request = readCompletedProductRequest(job.outStem);
+    if (!request || request.prompt !== job.prompt || JSON.stringify(request.referenceImagePaths) !== JSON.stringify(job.referenceImagePaths) ||
+        JSON.stringify(request.referenceHashes) !== JSON.stringify(job.requiredReferenceHashes)) return null;
+    const candidates = collectCompletedProductCandidates(job);
+    const isolated = options.error as Error & { publicationIdentifierReview?: PublicationIdentifierReviewResult; publicationIdentifierInput?: PublicationIdentifierReviewInput };
+    const b = isolated.publicationIdentifierReview, bInput = isolated.publicationIdentifierInput;
+    const isolatedProof = !!b && !!bInput && b.status === "conflict" && bInput.candidateSha256 === candidates?.candidates[0]?.sha256 &&
+      bInput.primaryReference.sha256 === request.referenceHashes[0] &&
+      bInput.canonicalReferences.every(row => row.sourceSnapshotId === manifest.sourceSnapshot?.snapshotId) &&
+      JSON.stringify([...new Set([bInput.primaryReference.sha256, ...bInput.canonicalReferences.map(row => row.sha256)])]) === JSON.stringify(request.referenceHashes) &&
+      !publicationIdentifierReviewEvidenceIssue(b, bInput);
+    if (!candidates || candidates.candidates.length !== 1 || !isolatedProof && !isCorroboratedNativeIdentifierConflict(conflict, candidates.candidates[0].sha256,
+      { identifierComparisons: conflict ? [conflict.pair] : [] }, { primaryReferenceImageIndex: 1, primaryReferenceSha256: request.referenceHashes[0],
+        supplementalReferences: request.referenceHashes.slice(1).map((sha256, index) => ({ imageIndex: index + 3, sha256 })) })) return null;
+    job = { ...job, reviewOnly: { outputSha256: candidates.candidates[0].sha256, candidateSet: candidates, slotId: target.request.slotId!,
+      sourceSnapshotId: manifest.sourceSnapshot!.snapshotId, referenceHashes: request.referenceHashes } };
+    validatedReviewCandidateSet(job);
+  }
   if (!readProductSnapshot(manifest.sourceSnapshot, { productId: manifest.brandLinkId, connectKind: "SHOPPING" })) return null;
   const rejection = readSettledBodyRejection(job.outStem, manifest, target, job);
   if (!rejection) return null;
@@ -2046,7 +2135,9 @@ export async function generateBrandPostImages(options: {
   };
   for (const [index, request] of requests.entries()) {
     try {
-      targets.push(resolveTarget(options.manifest, request));
+      const target = resolveTarget(options.manifest, request);
+      assertImageRegenerationNotHeld(options.manifest, target);
+      targets.push(target);
       requestIndexes.push(index);
     } catch (error) {
       await publish(index, { ...baseResult(index), error: error instanceof Error ? error.message : String(error) });

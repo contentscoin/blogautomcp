@@ -8,7 +8,7 @@ import path from "node:path";
 import Ajv from "ajv";
 import sharp from "sharp";
 import { auditPublishImages, assertPublishImagesSafe, type PublishImageAuditOptions, type PublishImageAuditResult } from "./lib/publish-image-audit";
-import { REFERENCE_PLANE_RULE_EN, REFERENCE_PLANE_IDENTITY_QUESTION, REFERENCE_PLANE_COMPARISON_SCHEMA, referencePlaneComparisonIssue, type ReferencePlaneContext } from "./lib/reference-plane-grounding";
+import { REFERENCE_PLANE_IDENTITY_QUESTION, REFERENCE_PLANE_COMPARISON_SCHEMA, referencePlaneComparisonIssue, type ReferencePlaneContext } from "./lib/reference-plane-grounding";
 import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
 import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 import { recordPublicationImageRejections } from "./lib/publish-image-rejections";
@@ -16,12 +16,17 @@ import type { CodexDraftOptions } from "./lib/codex-draft-provider";
 
 const neutral = { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" };
 const good = { index: 1, accepted: true, identityMatches: true, photoClaimMatches: true, photoClaimObjection: neutral,
+  visibleIdentityEvidence: { basis: "observed-correspondence", landmarks: [
+    { part: "Housing", referenceObservation: "Offline source housing contour", candidateObservation: "Offline matching candidate housing" },
+    { part: "Control face", referenceObservation: "Offline source control face", candidateObservation: "Offline matching candidate controls" }], conflict: "" },
+  optionConflictWitness: { origin: "none", quote: "", visibleAlternatives: [] },
   notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true,
   noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "Offline source-plane contract" };
 const positive = (context: ReferencePlaneContext) => ({ primaryReferenceImageIndex: context.primaryReferenceImageIndex,
   primaryReferenceSha256: context.primaryReferenceSha256, primaryObservation: "Ivory inner indicator/control face, four dots and narrow reverse housing; this visible face has no logo",
   candidateObservation: "Matching ivory indicator face and reverse housing; no new printing", objectionKind: "none", evidenceImageIndex: context.primaryReferenceImageIndex,
   samePhysicalPart: true, samePhysicalSurface: true, sameSelectedVisibleOption: true, referencePrintState: "absent", candidatePrintState: "absent-on-exposed-face",
+  candidateIdentifierVisibility: "no-intrinsic-identifiers-observed", identifierComparisons: [],
   evidenceObservation: "The numbered primary shows the same unprinted face, not the black outer-branding plane", basis: "Actual same visible faces correspond; a gallery outer logo does not move onto this face" });
 const slots = (call: CodexDraftOptions): Array<{ index: number; referencePlaneMap?: ReferencePlaneContext; identityQuestion?: string; selectedGalleryComparisonImageIndexes?: number[] }> => {
   const line = call.userPrompt.split("\n").find(value => value.startsWith("Each attached image belongs ONLY"))!;
@@ -93,12 +98,13 @@ async function main() {
       const composition = structuredClone(options.composition);
       if (["brand-proof", "print-reading-proof"].includes(kind)) Object.assign(composition.renderNodes.find(node => node.kind === "paragraph")!, { text: proofText });
       const input = { ...options, composition, review: async (call: CodexDraftOptions) => {
-        calls++; assert(call.userPrompt.includes(REFERENCE_PLANE_RULE_EN));
+        calls++; assert.match(call.userPrompt, /REFERENCE ROLES: Inspect the exact primaryReferenceImageIndex\/SHA for THIS slot first/u);
         const slot = slots(call)[0], map = slot.referencePlaneMap!;
         assert.equal(slot.identityQuestion, REFERENCE_PLANE_IDENTITY_QUESTION);
         assert.match(call.userPrompt, /not market uniqueness, authenticity or exact-SKU certification/u);
         const schema = call.outputSchema as { properties: { reviews: { items: { properties: { identityMatches: { description: string } } } } } };
-        assert(schema.properties.reviews.items.properties.identityMatches.description.includes(REFERENCE_PLANE_IDENTITY_QUESTION));
+        assert(schema.properties.reviews.items.properties.identityMatches.description.length <= 250);
+        assert.match(schema.properties.reviews.items.properties.identityMatches.description, /this slot's own source and confirmed visible option/u);
         assert.equal(map.primaryReferenceImageIndex, 2); assert.equal(map.primaryReferenceSha256, hash(primary));
         assert.deepEqual(map.supplementalReferences, [{ imageIndex: 3, sha256: hash(gallery) }]);
         assert.deepEqual(slot.selectedGalleryComparisonImageIndexes, [3]);
@@ -141,6 +147,12 @@ async function main() {
           if (kind === "mixed-format") response.noGraphicLayout = false;
           if (kind === "mixed-claim") { response.photoClaimMatches = false; response.photoClaimObjection = { origin: "section-body", sourceIndex: 0,
             quote: section.body[0], scope: "pictured-appearance", conflict: "Injected independently adverse pixel claim for mixed invalid-verdict hold" }; }
+        }
+        if (response.identityMatches === false) {
+          const comparison = response.referenceComparison as Record<string, unknown>;
+          response.visibleIdentityEvidence = { basis: comparison.objectionKind === "unresolved" ? "insufficient-visible-structure" : "concrete-conflict",
+            landmarks: [{ part: "Offline compared component", referenceObservation: comparison.evidenceObservation,
+              candidateObservation: comparison.candidateObservation }], conflict: comparison.basis };
         }
         const validate = new Ajv({ allErrors: true }).compile(call.outputSchema!);
         if (!["bad-index", "missing-field"].includes(kind)) assert.equal(validate({ reviews: [response] }), true, JSON.stringify(validate.errors));

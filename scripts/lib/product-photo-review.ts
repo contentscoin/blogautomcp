@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import { publicationImageGeometryIssue } from "./publication-image-geometry";
 import { runCodexDraft } from "./codex-draft-provider";
 import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene, type BrandPostImageSourceHint } from "../../src/lib/brand-post-image-evidence";
-import { auditSectionProposals } from "./product-section-proposal-audit";
+import { auditSectionProposals, productSectionProposalAuditPolicyKey } from "./product-section-proposal-audit";
 import { buildProductImageVisualContract, PRODUCT_IMAGE_VISUAL_CONTRACT_RULES_KO, PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_RULE_KO } from "./product-image-visual-contract";
 import { productSourceAuditContextKey, type ProductSourceAuditContext } from "./product-source-audit-context";
 import { findProductSectionReviewConflicts } from "./product-section-review-conflicts";
@@ -131,8 +131,11 @@ export async function selectVerifiedProductSectionImages(
   if (candidates.length === 0) return [];
   const normalizedTargets = targets.slice(0, 12).map(target => ({
     sectionId: target.sectionId,
-    sectionTitle: target.sectionTitle.normalize("NFKC").replace(/\s+/gu, " ").trim(),
-    sectionBody: (target.sectionBody || []).map(text => text.normalize("NFKC").replace(/\s+/gu, " ").trim()),
+    // Keep the actual publication strings, including blank-line units and
+    // offsets, for the same native C-claims task used at final approval. A
+    // shortlist may not flatten an appearance assertion into adjacent specs.
+    sectionTitle: target.sectionTitle,
+    sectionBody: (target.sectionBody || []).map(text => text),
     excludedSourceSha256: [...new Set(target.excludedSourceSha256 || [])].sort(),
     imageIntent: target.imageIntent.normalize("NFKC").replace(/\s+/gu, " ").trim(),
     imageSource: target.imageSource,
@@ -141,8 +144,10 @@ export async function selectVerifiedProductSectionImages(
     allowScene: allowsOriginalShoppingScene(target),
   }));
   const sourceContextKey = productSourceAuditContextKey(options);
+  const finalPixelPolicy = productSectionProposalAuditPolicyKey();
   const reviewKey = crypto.createHash("sha256").update(JSON.stringify({
-    version: 17,
+    version: 18,
+    finalPixelPolicy,
     sourceContextKey,
     selectedProduct: selectedProduct || productName,
     productName: productName.normalize("NFKC").replace(/\s+/gu, " ").trim(),
@@ -412,7 +417,8 @@ export async function selectVerifiedProductSectionImages(
     ? "SOURCE_REVIEW_INCOMPLETE: 최종 픽셀 검사 한도 내에 판정하지 못한 판매자 원본 제안이 남았습니다. 원본 부족으로 처리하거나 미검수 제안을 배정하지 않았습니다."
     : undefined);
   if (unfilledConflict) diagnostics.errorCode = "SOURCE_REVIEW_CONFLICT";
-  if (options.selectedProduct !== selectedProduct || productSourceAuditContextKey(options) !== sourceContextKey) {
+  if (options.selectedProduct !== selectedProduct || productSourceAuditContextKey(options) !== sourceContextKey ||
+      productSectionProposalAuditPolicyKey() !== finalPixelPolicy) {
     const message = "SOURCE_PROPOSAL_AUDIT_FAILED: IMAGE_CHANGED: Canonical selected source facts or comparison bytes changed during review";
     emit(report("failed", message));
     throw new Error(message);

@@ -8,6 +8,7 @@ import { buildProductThumbnailCopy } from "./product-thumbnail";
 import { checkedExistingJobResult, type ImageBatchJob } from "../../src/lib/codex-image-generation";
 import { isReferenceGuidedThumbnail, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../../src/lib/brand-post-image-evidence";
 import { publicationImageContext } from "./publish-image-rejections";
+import { readSellerOriginalRecoveryScope, sellerOriginalRecoveryBudgetBinding, type SellerOriginalRecoveryScope } from "./seller-original-recovery-scope";
 
 /** Recover missing product references and rejected scenes from fresh seller evidence. */
 // Policy 10 uses explicit incomplete-review outcomes, rebinds proven source SHA
@@ -17,7 +18,21 @@ import { publicationImageContext } from "./publish-image-rejections";
 export const IMAGE_RECOVERY_POLICY_VERSION = 10;
 
 export type ImageRecoveryStage = "refresh-source" | "repair-rejected" | "repair-rejected-original" | "review-completed-hero" | "replan-images" | "replan-after-rejection";
-type Entry = { stage: ImageRecoveryStage; input: string; output?: string; status: "running" | "complete" | "failed"; at: string; reason?: string; externalFailure?: boolean; thumbnailCopyBinding?: string; completedHeroReviewBinding?: string };
+type Entry = { stage: ImageRecoveryStage; input: string; output?: string; status: "running" | "complete" | "failed"; at: string; reason?: string; externalFailure?: boolean; thumbnailCopyBinding?: string; completedHeroReviewBinding?: string; originalSourceScope?: SellerOriginalRecoveryScope };
+
+function validOriginalRecoveryScope(scope: SellerOriginalRecoveryScope | undefined | null): scope is SellerOriginalRecoveryScope {
+  try {
+    const sha = (value: unknown) => typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
+    const identity = scope?.identity;
+    return !!scope && scope.version === "seller-original-recovery-scope/v1" && !!identity &&
+      [identity.productId, identity.sectionId, identity.slotId].every(value => typeof value === "string" && value.length > 0) &&
+      [identity.sha256, identity.context, identity.sourceSnapshotId, scope.binding, scope.nativeProof.sha256, scope.nativeProof.materialContext.sha256].every(sha) &&
+      typeof scope.nativeProof.path === "string" && !!scope.nativeProof.path && typeof scope.nativeProof.materialContext.file === "string" && !!scope.nativeProof.materialContext.file &&
+      Array.isArray(identity.canonicalReceipts) && identity.canonicalReceipts.length > 0 && identity.canonicalReceipts.every(row =>
+        typeof row.sourceUrl === "string" && !!row.sourceUrl && row.sourceSha256 === identity.sha256) &&
+      sellerOriginalRecoveryBudgetBinding(identity) === scope.binding;
+  } catch { return false; }
+}
 
 /** The raw-photo recipe excludes the locally rendered headline. Only one exact
  * rejected hero with a proven completed raw may renew that headline-only scope;
@@ -130,9 +145,13 @@ export function imageRecoverySignature(root: string): string | null {
 }
 
 /** Persist the claim before a long operation, including failures and interrupted runs. */
-export async function runRecordedImageRecovery<T>(id: string, stage: ImageRecoveryStage, operation: () => Promise<T>, options?: { thumbnailAssetKey: string }): Promise<{ attempted: boolean; result?: T }> {
+export async function runRecordedImageRecovery<T>(id: string, stage: ImageRecoveryStage, operation: () => Promise<T>, options?: { thumbnailAssetKey?: string; originalSectionId?: string }): Promise<{ attempted: boolean; result?: T }> {
   const root = getBrandPostPackageDir(id);
   const baseInput = imageRecoverySignature(root);
+  const originalSourceScope = stage === "repair-rejected-original" && options?.originalSectionId
+    ? readSellerOriginalRecoveryScope(id, options.originalSectionId) : undefined;
+  if (stage === "repair-rejected-original" && (!baseInput || !validOriginalRecoveryScope(originalSourceScope)))
+    throw Object.assign(new Error("현재 원본의 서명된 본문·사진 검수 근거를 확인하지 못했습니다. 원고·사진을 보존했으며 원본 재배정은 실행하지 않았습니다."), { code: "IMAGE_RESUME_REQUIRED" });
   let completedHeroReviewBinding: string | undefined;
   if (stage === "review-completed-hero") {
     if (!baseInput) return { attempted: false };
@@ -146,20 +165,47 @@ export async function runRecordedImageRecovery<T>(id: string, stage: ImageRecove
   }
   const scopedInput = (base: string | null) => completedHeroReviewBinding && base
     ? crypto.createHash("sha256").update(JSON.stringify({ base, completedHeroReviewBinding })).digest("hex") : base;
-  const input = scopedInput(baseInput);
+  const input = originalSourceScope?.binding || scopedInput(baseInput);
   // In-memory fixtures/non-persisted drafts still use the bounded workflow loop.
   if (!input) return { attempted: true, result: await operation() };
   const file = path.join(root, "image-recovery-history.json");
   let entries: Entry[] = [];
-  try { const saved = JSON.parse(fs.readFileSync(file, "utf8")); if (Array.isArray(saved.entries)) entries = saved.entries; } catch { /* first run */ }
+  try {
+    const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (!Array.isArray(saved.entries)) throw new Error("Invalid image recovery history");
+    entries = saved.entries;
+  } catch (error) {
+    if (stage === "repair-rejected-original" && (error as NodeJS.ErrnoException).code !== "ENOENT")
+      throw Object.assign(new Error("기존 원본 복구 이력을 확인할 수 없습니다. 재배정을 반복하지 않았습니다."), { code: "IMAGE_RESUME_REQUIRED" });
+  }
+  if (originalSourceScope && entries.some(entry => !entry || typeof entry !== "object" ||
+    !["running", "complete", "failed"].includes(entry.status) || typeof entry.stage !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(entry.input || "") || !Number.isFinite(Date.parse(entry.at))))
+    throw Object.assign(new Error("기존 원본 복구 이력이 불완전합니다. 재배정을 반복하지 않았습니다."), { code: "IMAGE_RESUME_REQUIRED" });
+  if (originalSourceScope && entries.some(entry => entry.stage === "repair-rejected-original" &&
+    (!validOriginalRecoveryScope(entry.originalSourceScope) ||
+      entry.originalSourceScope.binding === input))) return { attempted: false };
   const thumbnailCopyBinding = stage === "repair-rejected" && options?.thumbnailAssetKey
     ? rejectedThumbnailCopyBinding(root, options.thumbnailAssetKey) : null;
   if (entries.some(entry => (stage === "review-completed-hero" || consumesRecoveryBudget(entry)) && entry.stage === stage && (entry.input === input || entry.output === input) &&
       (!thumbnailCopyBinding || entry.thumbnailCopyBinding === thumbnailCopyBinding || !isOnlyRejectedThumbnailFailure(entry)))) return { attempted: false };
+  if (originalSourceScope) {
+    // Immutable deny marker survives the generic bounded-history window and
+    // uncertain transports. It grants no source/image/approval authority.
+    const claims = path.join(root, "seller-original-recovery-scopes");
+    fs.mkdirSync(claims, { recursive: true });
+    try {
+      fs.writeFileSync(path.join(claims, input + ".json"), JSON.stringify({ version: "seller-original-recovery-claim/v1",
+        claimedAt: new Date().toISOString(), scope: originalSourceScope, generationAuthorization: false, approvalAuthorization: false }), { flag: "wx", mode: 0o600 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return { attempted: false };
+      throw error;
+    }
+  }
   const entry: Entry = { stage, input, status: "running", at: new Date().toISOString(), ...(thumbnailCopyBinding ? { thumbnailCopyBinding } : {}),
-    ...(completedHeroReviewBinding ? { completedHeroReviewBinding } : {}) };
+    ...(completedHeroReviewBinding ? { completedHeroReviewBinding } : {}), ...(originalSourceScope ? { originalSourceScope } : {}) };
   entries.push(entry);
-  const save = () => atomicWriteTextFile(file, JSON.stringify({ version: 1, entries: entries.slice(-32) }, null, 2));
+  const save = () => atomicWriteTextFile(file, JSON.stringify({ version: 1, entries: originalSourceScope ? entries : entries.slice(-32) }, null, 2));
   save();
   try {
     const result = await operation();
@@ -170,10 +216,11 @@ export async function runRecordedImageRecovery<T>(id: string, stage: ImageRecove
     entry.reason = String((error as Error).message || error).slice(0, 500);
     // Stop this run, but a later explicit preparation after login/runtime repair
     // must not be permanently suppressed by unchanged product bytes.
-    entry.externalFailure = isExternalRecoveryFailure(error);
+    entry.externalFailure = isExternalRecoveryFailure(error) && !(originalSourceScope &&
+      [undefined, "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE", "REQUEST_TIMEOUT"].includes((error as { code?: string })?.code));
     throw error;
   } finally {
-    entry.output = scopedInput(imageRecoverySignature(root)) || input;
+    entry.output = originalSourceScope ? input : scopedInput(imageRecoverySignature(root)) || input;
     save();
   }
 }

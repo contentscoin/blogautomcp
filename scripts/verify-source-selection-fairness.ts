@@ -8,7 +8,7 @@ import vm from "node:vm";
 import { createRequire } from "node:module";
 import ts from "typescript";
 import sharp from "sharp";
-import { auditSectionProposals } from "./lib/product-section-proposal-audit";
+import { auditSectionProposals, productSectionProposalAuditPolicyKey } from "./lib/product-section-proposal-audit";
 import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
 import type { ProductSectionImageDiagnostics, ProductSectionImageReview } from "./lib/product-photo-review";
 import type { PublishImageAuditOptions, PublishImageAuditResult } from "./lib/publish-image-audit";
@@ -48,7 +48,7 @@ function fixtureSelector(options: {
         });
         return JSON.stringify({ assignments, rejections, notSelected: [] });
       } };
-      if (name === "./product-section-proposal-audit") return { auditSectionProposals: (input: Parameters<typeof auditSectionProposals>[0]) =>
+      if (name === "./product-section-proposal-audit") return { productSectionProposalAuditPolicyKey, auditSectionProposals: (input: Parameters<typeof auditSectionProposals>[0]) =>
         auditSectionProposals({ ...input, audit: async (request: PublishImageAuditOptions): Promise<PublishImageAuditResult> => {
           const images = request.composition.renderNodes.flatMap((node, nodeIndex) => node.kind === "image"
             ? [{ nodeIndex, assetPath: node.assetPath, sha256: digest(node.assetPath), targetIndex: Number(node.sectionId?.match(/(\d+)$/u)?.[1] || 0) }] : []);

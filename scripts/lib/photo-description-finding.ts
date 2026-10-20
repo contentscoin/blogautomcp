@@ -4,6 +4,7 @@ import path from "node:path";
 import { getAppDataDir } from "./app-paths";
 import { atomicWriteTextFile } from "../../src/lib/atomic-text-file";
 import { publicationImageContext } from "./publish-image-rejections";
+import { publicationClaimUnits } from "./publication-claim-units";
 import type { ResolvedPostDocumentV1 } from "../../src/lib/post-composition-contract";
 
 export interface PhotoDescriptionFinding {
@@ -130,7 +131,7 @@ export function photoDescriptionFinding(input: {
     .map(node => node.kind === "paragraph" ? node.text : "");
   if (JSON.stringify(Array.isArray(input.sectionBody) ? input.sectionBody : [input.sectionBody]) !== JSON.stringify(paragraphs) ||
       row.photoClaimObjection === undefined) return null;
-  const literalClaim = locatePhotoDescriptionSentence(paragraphs, row.reason, row.photoClaimObjection);
+  const literalClaim = locatePhotoDescriptionSentence(publicationClaimUnits(paragraphs).map(unit => unit.text), row.reason, row.photoClaimObjection);
   if (!literalClaim || !section || section.body.filter(text => text.includes(literalClaim)).length !== 1 ||
       paragraphs.filter(text => text.includes(literalClaim)).length !== 1) return null;
   return { category: "photo-description-mismatch", nodeIndex: input.nodeIndex, sectionId: input.sectionId,

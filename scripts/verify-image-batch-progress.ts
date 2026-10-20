@@ -33,6 +33,10 @@ import { readProductSnapshot } from "../src/lib/draft-context-snapshot";
 import { isAllowedProductPhotoUrl } from "./lib/product-photo-source";
 import { readCanonicalSellerSourceHashes } from "./lib/canonical-seller-source";
 import * as productVisualContract from "./lib/product-image-visual-contract";
+import * as identifierComparison from "./lib/intrinsic-identifier-comparison";
+import * as identifierOcr from "./lib/intrinsic-identifier-ocr";
+import * as identifierCorroboration from "./lib/intrinsic-identifier-corroboration";
+import * as publicationIdentifierReview from "./lib/publication-identifier-review";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-image-batch-"));
 const rawPath = path.join(root, "raw.png");
@@ -68,7 +72,7 @@ class FakeChild extends EventEmitter {
 }
 
 const referenceSceneModule = load<typeof import("./lib/shopping-reference-scene")>("scripts/lib/shopping-reference-scene.ts", {
-  "node:crypto": crypto, "node:fs": fs, "node:path": path, sharp,
+  "node:crypto": crypto, "node:fs": fs, "node:path": path, "node:os": os, sharp,
   "./codex-draft-provider": { runCodexDraft: () => { throw new Error("live review is forbidden in this offline harness"); } },
   "./product-photo-review": { selectVerifiedProductPhotos: () => { throw new Error("live review is forbidden in this offline harness"); } },
   "./shopping-photo-harness": shoppingPhotoHarness,
@@ -77,6 +81,10 @@ const referenceSceneModule = load<typeof import("./lib/shopping-reference-scene"
   "../../src/lib/draft-context-snapshot": { readProductSnapshot },
   "./product-photo-source": { isAllowedProductPhotoUrl },
   "./product-image-visual-contract": productVisualContract,
+  "./intrinsic-identifier-comparison": identifierComparison,
+  "./intrinsic-identifier-ocr": identifierOcr,
+  "./intrinsic-identifier-corroboration": identifierCorroboration,
+  "./publication-identifier-review": publicationIdentifierReview,
 });
 const hashFile = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 const completedContextModule = load<typeof import("../src/lib/brand-post-completed-context")>("src/lib/brand-post-completed-context.ts", {
@@ -143,11 +151,13 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       "./atomic-text-file": atomicTextFile,
       "./brand-post-completed-context": completedContextModule,
       "./brand-post-publication-image-repair": { planPublicationImageRetry: () => null },
-      "../../scripts/lib/publication-image-defect-proof": { sealPublicationImageRepairPlan: () => { throw new Error("unexpected native final-repair authority in transport fixture"); } },
+      "../../scripts/lib/publication-image-defect-proof": { sealPublicationImageRepairPlan: () => { throw new Error("unexpected native final-repair authority in transport fixture"); },
+        isCorroboratedNativeIdentifierConflict: () => false, readPublicationImageDefect: () => null },
+      "../../scripts/lib/publication-identifier-review": publicationIdentifierReview,
       "../../scripts/lib/canonical-seller-source": { readCanonicalSellerSourceHashes },
       "./draft-context-snapshot": { readProductSnapshot },
       "../../scripts/lib/product-image-visual-contract": productVisualContract,
-      "../../scripts/lib/publish-image-rejections": { rejectedPublicationImageHashes: () => [], publicationImageContext },
+      "../../scripts/lib/publish-image-rejections": { rejectedPublicationImageHashes: () => [], publicationImageContext, publicationImageRegenerationHoldState: () => "none" },
       "../../scripts/lib/publish-image-audit": { buildSelectedProductImageAuditContext, publicationImageAuditPolicyFingerprint },
       "../../scripts/lib/seller-original-repair-target": { buildSellerOriginalRepairTarget },
       "../../scripts/lib/product-source-audit-context": productSourceAuditContext,

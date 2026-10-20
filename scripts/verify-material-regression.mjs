@@ -6,6 +6,20 @@ const runner = require.resolve('tsx/cli');
 const checks = [
   'verify-atomic-file-retry.ts',
   'verify-reference-plane-grounding.ts',
+  'verify-intrinsic-identifier-comparison.ts',
+  'verify-intrinsic-identifier-ocr.ts',
+  'verify-intrinsic-identifier-observer.ts',
+  'verify-intrinsic-identifier-corroboration.ts',
+  'verify-publication-visible-identity.ts',
+  'verify-publication-scoped-tasks.ts',
+  'verify-publication-identifier-review.ts',
+  'verify-publication-blind-identifier-review.ts',
+  'verify-publication-print-applicability.ts',
+  'verify-publication-current-origin.ts',
+  'verify-compact-final-image-rubric.ts',
+  'verify-scene-identifier-guard.ts',
+  'verify-scene-publication-identifiers.ts',
+  'verify-publication-image-regeneration-holds.ts',
   'verify-shopping-connect-access.ts', 'verify-naver-login-flow.ts', 'verify-connect-routing-regression.ts',
   'verify-connect-contract-store.ts', 'verify-image-resume-speed.ts',
   'verify-image-timeout-policy.ts', 'verify-image-batch-progress.ts',
@@ -13,6 +27,7 @@ const checks = [
   'verify-product-section-review-conflicts.ts', 'verify-product-section-image-review.ts', 'verify-publish-image-audit.ts',
   'verify-publish-source-watermark.ts',
   'verify-rejected-original-repair.ts',
+  'verify-original-source-recovery-scope.ts',
   'verify-retained-scene-restoration.ts',
   'verify-publish-image-failure-diagnostics.ts',
   'verify-image-coverage-replan.ts', 'verify-material-image-recovery.ts',
@@ -40,6 +55,7 @@ const checks = [
   'verify-mcp-source-repair-coordination.ts',
   'verify-published-editor-audit.ts',
   'verify-travel-draft-resilience.ts', 'verify-naver-schedule-submission.ts',
+  'verify-publish-image-audit-receipt.ts',
 ];
 for (const check of checks) {
   console.log(`\n[material-regression] ${check}`);

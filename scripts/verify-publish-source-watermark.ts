@@ -17,10 +17,19 @@ const slot = (call: CodexDraftOptions): { exactCanonicalSellerOriginal: boolean;
   return JSON.parse(line.slice(line.indexOf("[")))[0];
 };
 const good = { index: 1, reason: "Offline contract fixture: coherent selected product photograph with its original plain source-brand watermark",
+  referenceComparison: null,
   photoClaimObjection: { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" }, identityMatches: true,
   photoClaimMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false,
   singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", accepted: true };
-const response = (patch = {}) => JSON.stringify({ reviews: [{ ...good, ...patch }] });
+const response = (patch: Record<string, unknown> = {}) => {
+  const row = { ...good, ...patch };
+  return JSON.stringify({ reviews: [{ ...row, visibleIdentityEvidence: {
+    basis: row.identityMatches === false ? "concrete-conflict" : "observed-correspondence",
+    landmarks: [{ part: "Offline selected contour", referenceObservation: "Synthetic selected source contour", candidateObservation: "Synthetic candidate contour" },
+      { part: "Offline product construction", referenceObservation: "Synthetic source construction", candidateObservation: "Synthetic candidate construction" }],
+    conflict: row.identityMatches === false ? row.reason : "",
+  }, optionConflictWitness: { origin: "none", quote: "", visibleAlternatives: [] } }] });
+};
 
 async function main() {
   // Injected reviewers test binding/decision propagation, not model accuracy.

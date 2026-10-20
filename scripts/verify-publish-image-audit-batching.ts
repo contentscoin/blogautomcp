@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
 import { auditPublishImages, planPublishImageAuditBatches, PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES, PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT, type PublishImageAuditOptions } from "./lib/publish-image-audit";
+import { referencePlaneFixtureRow } from "./test-fixtures/reference-plane-review";
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "audit-payload-fixture-"));
@@ -39,7 +40,7 @@ async function main() {
           const snapshot = await sharp(file).raw().toBuffer();
           assert.deepEqual(snapshot, original, "transport splitting must not downsample or alter review pixels");
         }
-        return JSON.stringify({ reviews: attached.map((_, index) => ({ index: index + 1, accepted: true, identityMatches: true,
+        return JSON.stringify({ reviews: attached.map((_, index) => referencePlaneFixtureRow(call, { index: index + 1, accepted: true, identityMatches: true,
           photoClaimMatches: true, photoClaimObjection: { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" }, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false,
           singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "fixture exact selected product" })) });
       },

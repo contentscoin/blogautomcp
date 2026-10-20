@@ -5,10 +5,13 @@ import { readCanonicalSellerSourceHashes } from "../../scripts/lib/canonical-sel
 import { hasCurrentSectionImageRejection } from "../../scripts/lib/publish-image-rejections";
 import { getBrandPostImageSlots, getBrandPostPackageDir, normalizePackageImageAssets, type BrandPostPackageManifestV2 } from "./brand-post-package";
 import { planSectionImageRequests } from "./brand-post-image-repair";
+import { readOriginalPhotoClaimDefect } from "../../scripts/lib/publication-image-defect-proof";
+import { publicationImageAuditPolicyFingerprint } from "../../scripts/lib/publish-image-audit";
 
 /** Narrow existing seller-original replacement, never generation or approval.
  * The old file, original rejection and historical jobs remain intact. */
-export function planRejectedOriginalRepair(manifest: BrandPostPackageManifestV2, sectionId: unknown) {
+export function planRejectedOriginalRepair(manifest: BrandPostPackageManifestV2, sectionId: unknown,
+  dependencies: { readClaimDefect?: typeof readOriginalPhotoClaimDefect } = {}) {
   const invalid = (): never => { throw new Error("REJECTED_ORIGINAL_REPAIR_INVALID: 현재 본문·원본 사진에 연결된 섹션 거절 근거가 없습니다."); };
   if (manifest.connectKind !== "SHOPPING" || typeof sectionId !== "string" || !sectionId ||
       !manifest.sourceSnapshot || manifest.imageGeneration?.status === "running" || manifest.imageGeneration?.recoveryState === "owner-unknown") return invalid();
@@ -35,6 +38,7 @@ export function planRejectedOriginalRepair(manifest: BrandPostPackageManifestV2,
         crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== asset.sha256) return invalid();
   } catch { return invalid(); }
   if (!hasCurrentSectionImageRejection(manifest.brandLinkId, manifest.composition, sectionId, asset.sha256)) return invalid();
+  if (!(dependencies.readClaimDefect || readOriginalPhotoClaimDefect)(manifest, sectionId, asset.sha256, publicationImageAuditPolicyFingerprint())) return invalid();
   const canonical = readCanonicalSellerSourceHashes({ snapshot: manifest.sourceSnapshot, productId: manifest.brandLinkId,
     sourceDirectory: path.join(root, "product-sources") });
   if (!canonical.has(asset.sha256)) return invalid();

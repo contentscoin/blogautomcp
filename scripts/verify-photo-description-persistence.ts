@@ -74,7 +74,7 @@ async function main() {
         verdict: { reason: `본문의 «${literal}»와 달리 실제 사진의 외형은 어둡습니다.`, photoClaimMatches: false,
           identityMatches: true, notice: false, mixedOptions: false, singlePhotograph: true, noGraphicLayout: true,
           textPolicyMatches: true, reviewClass: "product-photo",
-          photoClaimObjection: { origin: "section-body", sourceIndex: 0, quote: paragraphs.join("\n\n"),
+          photoClaimObjection: { origin: "section-body", sourceIndex: 1, quote: literal,
             scope: "pictured-appearance", conflict: "The quoted appearance sentence does not match the current photo." } } });
       assert.ok(finding);
       savePhotoDescriptionFindings(id, [finding]);

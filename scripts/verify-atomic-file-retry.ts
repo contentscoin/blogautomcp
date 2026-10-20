@@ -68,6 +68,32 @@ try {
     else assert.equal(fs.existsSync(temporary), false);
     assert.equal(fs.readFileSync(sample.sibling, "utf8"), "unrelated sibling"); checks += 5;
   }
+  // Windows file IDs can exceed the safe integer range. Simulate two
+  // distinct IDs collapsing in the numeric Stats API: a foreign replacement
+  // must survive failure cleanup. The bigint API keeps exact file identity.
+  {
+    const sample = fixture(), lstat = fs.lstatSync, fstat = fs.fstatSync;
+    const fixtureFs = fs as unknown as { lstatSync: typeof fs.lstatSync; fstatSync: typeof fs.fstatSync };
+    const foreign = path.join(sample.dir, "foreign-large-id.json"); fs.writeFileSync(foreign, "foreign large ID");
+    const numericAlias = (stat: fs.Stats) => Object.assign(Object.create(stat), { ino: 36_028_797_018_963_968 });
+    fixtureFs.lstatSync = ((file, options) => {
+      const stat = lstat(file, options as never);
+      return (options as { bigint?: boolean } | undefined)?.bigint ? stat : numericAlias(stat as fs.Stats);
+    }) as typeof fs.lstatSync;
+    fixtureFs.fstatSync = ((fd, options) => {
+      const stat = fstat(fd, options as never);
+      return (options as { bigint?: boolean } | undefined)?.bigint ? stat : numericAlias(stat as fs.Stats);
+    }) as typeof fs.fstatSync;
+    let temporary = "", replacements = 0;
+    try {
+      assert.throws(() => atomicWriteTextFile(sample.target, "candidate", { platformForTest: "win32",
+        replaceForTest: source => { temporary = source; replacements++; throw failure("EPERM", replacements); },
+        waitForTest: () => fs.renameSync(foreign, temporary) }),
+      (error: unknown) => (error as { code?: string }).code === "ATOMIC_WRITE_TARGET_CHANGED");
+    } finally { fixtureFs.lstatSync = lstat; fixtureFs.fstatSync = fstat; }
+    assert.equal(replacements, 1); assert.equal(fs.readFileSync(temporary, "utf8"), "foreign large ID");
+    assert.equal(fs.readFileSync(sample.target, "utf8"), "prior complete target"); checks += 4;
+  }
   // An exclusive-open collision belongs to somebody else, even at this exact
   // generated basename. Failure cleanup must never remove that foreign file.
   {
