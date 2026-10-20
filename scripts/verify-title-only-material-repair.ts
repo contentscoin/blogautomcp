@@ -14,6 +14,7 @@ import { applyFreeformDraftRevision, assertUntargetedSectionHashesUnchanged } fr
 import { shouldAcceptQualityRepair } from "./lib/quality-repair-policy";
 import { preservePreparedRevisionRenderPlan } from "./lib/prepared-revision-composition";
 import { normalizePublishedPostText, resolvePostDocument, type ResolvedPostDocumentV1 } from "../src/lib/post-composition-contract";
+import { createWritingPromptContract, formatWritingPromptContract } from "./lib/writing-prompt-contract";
 
 const disclosure = "이 포스팅은 네이버 쇼핑 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받습니다.";
 const sections = [
@@ -120,15 +121,27 @@ assert.ok(explicitEmptyScope, "actual writer must pass the title-only empty-body
 const emitted = ts.transpileModule(`result = ${writerPrompt.getText(source)};`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText;
+const promptComposition = normalizePublishedPostText(resolvePostDocument({ connectKind: "SHOPPING", productName: input.productName,
+  title: input.title, sections, hashtags: input.hashtags, imagePaths: [], connectUrl: input.brandLink }));
+const writingContract = createWritingPromptContract({ kind: "SHOPPING", product: { name: input.productName,
+  description: input.sourceDescription, features: input.sourceFeatures }, minimumSections: sections.length - 1,
+  maximumSections: sections.length - 1, targetCharacters: { min: 1200, max: 2800 }, hashtagCount: input.hashtags.length });
 const sandbox = { result: "", attemptInstructions: "제목 상품명 보완", diagnostic: before.summary,
   snapshot: { fixture: true }, selected: draft, allowedIndexes: scope, allowCandidateTitleChange: true,
-  titleOnlyRepair: true, qualityConvergence: true, allowCandidateSectionHeadingChange: false };
+  titleOnlyRepair: true, qualityConvergence: true, allowCandidateSectionHeadingChange: false,
+  formatWritingPromptContract, writingContract, prewritingPhotoProof: undefined,
+  savedPhotoPlan: promptComposition.sections.slice(0, -1).map(section => ({ sectionId: section.id, title: section.title,
+    imageSource: section.imageSource || "none", imageIntent: section.imageIntent, promptRecipe: section.promptRecipe || null,
+    imageMin: section.imageMin ?? 0, imageMax: section.imageMax ?? 1 })) };
 vm.runInNewContext(emitted, sandbox);
 const actualPrompt = JSON.parse(sandbox.result);
 assert.deepEqual(actualPrompt.allowedIndexes, []);
 assert.deepEqual(actualPrompt.output, { title: "수정한 글 제목", updates: [] });
 assert.match(actualPrompt.rules, /updates는 반드시 빈 배열/u);
 assert.deepEqual(actualPrompt.sections, sections.map((text, index) => ({ index, text })));
+assert.equal(actualPrompt.writingHarness, formatWritingPromptContract(writingContract), "the actual production formatter remains part of the title-only request");
+assert.deepEqual(actualPrompt.savedPhotoPlan, sandbox.savedPhotoPlan, "title-only requests retain the saved photo plan without changing the body scope");
+assert.match(actualPrompt.photoRevisionRule, /외형 묘사를 추가·변경하지/u, "an unattached original cannot authorize a visual rewrite while fixing only the title");
 
 // Legacy saved layouts have early/final cards, captions and image placement
 // which are not fully represented by the revision caller's partial sectionPlan.
