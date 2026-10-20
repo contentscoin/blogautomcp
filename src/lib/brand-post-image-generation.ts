@@ -8,7 +8,9 @@ import {
 import { selectVerifiedProductSectionImages, type ProductSectionImageDiagnostics } from "../../scripts/lib/product-photo-review";
 import { sourceReviewFailureForSlot } from "../../scripts/lib/product-source-audit-context";
 import { buildSellerOriginalRepairTarget } from "../../scripts/lib/seller-original-repair-target";
-import { buildSelectedProductImageAuditContext } from "../../scripts/lib/publish-image-audit";
+import { buildSelectedProductImageAuditContext, publicationImageAuditPolicyFingerprint } from "../../scripts/lib/publish-image-audit";
+import { planPublicationImageRetry, type PublicationImageRetryParent } from "./brand-post-publication-image-repair";
+import { sealPublicationImageRepairPlan } from "../../scripts/lib/publication-image-defect-proof";
 import { publicationImageContext, rejectedPublicationImageHashes } from "../../scripts/lib/publish-image-rejections";
 import fs from "node:fs";
 import path from "node:path";
@@ -118,6 +120,8 @@ export interface BrandPostImageReferenceContext {
   /** One improved plan may supersede an exactly evidenced terminal body rejection. */
   retryOf?: { outStem: string; metadataSha256: string; rejectionSha256: string;
     completedRequestRecovery?: NonNullable<NonNullable<ImageBatchJob["reviewOnly"]>["completedRequestRecovery"]> };
+  /** One new plan after an exact current native final wrong-print verdict. */
+  publicationRetryOf?: PublicationImageRetryParent;
   /** Proven terminal historical input can re-review pixels, never dispatch. */
   completedRequestRecovery?: { outStem: string; proof: NonNullable<NonNullable<ImageBatchJob["reviewOnly"]>["completedRequestRecovery"]> };
   prompt: string;
@@ -634,6 +638,20 @@ export async function prepareBrandPostImageReferenceContext(options: {
         supportingReceiptLocationIntact(options.manifest, support.receiptPath) && sha256File(support.receiptPath) === support.receiptSha256;
     } catch { return false; }
   };
+  const expectedContext = { product: options.productName, title: options.target.sectionTitle, intent: options.target.imageIntent,
+    body: options.target.bodyExcerpt, stagingRecipe: options.target.promptRecipe, physicalScale: productUnderstanding.concept.physicalScale,
+    productImageDirective: productUnderstanding.policy.imageDirective, adjacentSectionTitles: promptOptions.adjacentSectionTitles };
+  const publicationPlan = options.target.role === "body" && options.target.request.replaceAssetKey
+    ? planPublicationImageRetry({ ...options, packageDir: getBrandPostPackageDir(options.manifest.brandLinkId),
+      policyFingerprint: publicationImageAuditPolicyFingerprint(), expectedContext }) : null;
+  const publicationRetryOf = publicationPlan?.parent;
+  if (publicationPlan?.resumedContext) {
+    const saved = publicationPlan.resumedContext;
+    if (saved.referenceHashes.length !== saved.referenceImagePaths.length || saved.referenceImagePaths.some((file, index) => sha256File(file) !== saved.referenceHashes[index]))
+      throw new Error("IMAGE_RESUME_REQUIRED: 개선 요청의 고정 참조가 변경되었습니다.");
+    options.target.referenceContext = saved;
+    return saved;
+  }
   // A slot already prepared/submitted must retain its exact inputs, including
   // legacy primary-only jobs. Only an explicitly replaced, settled output is a new request.
   let existingSlotRequest = false;
@@ -645,6 +663,7 @@ export async function prepareBrandPostImageReferenceContext(options: {
     for (const file of records) {
       const metadata = JSON.parse(fs.readFileSync(file, "utf8"));
       const stem = file.replace(/\.reference-scene\.json$/u, "");
+      if (publicationRetryOf?.dispositions.some(row => path.resolve(row.outStem) === path.resolve(stem))) continue;
       if (metadata.slotId !== options.target.request.slotId) {
         // Relabeling a completed legacy record must not make its original slot
         // look unsubmitted. Read only the receipt's exact terminal host turn.
@@ -728,10 +747,11 @@ export async function prepareBrandPostImageReferenceContext(options: {
     }
   }
   let reference: ShoppingSceneReference | undefined;
-  const retryCheckpointPath = retryOf ? path.join(path.dirname(checkpointPath), `scene-reference-context-retry-${retryOf.rejectionSha256}.json`) : undefined;
+  const retryKey = retryOf?.rejectionSha256 || publicationRetryOf?.proofSha256;
+  const retryCheckpointPath = retryKey ? path.join(path.dirname(checkpointPath), `scene-reference-context-retry-${retryKey}.json`) : undefined;
   let retryCheckpoint: typeof checkpoint = {};
   if (retryCheckpointPath) try { retryCheckpoint = JSON.parse(fs.readFileSync(retryCheckpointPath, "utf8")); } catch { /* First improved plan. */ }
-  for (const candidate of retryOf ? [retryCheckpoint] : thumbnail ? [thumbnailCheckpoint, checkpoint] : [checkpoint]) {
+  for (const candidate of retryKey ? [retryCheckpoint] : thumbnail ? [thumbnailCheckpoint, checkpoint] : [checkpoint]) {
     try {
       const prior = candidate.reference;
       const current = candidate.strategyVersion === SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION &&
@@ -797,10 +817,10 @@ export async function prepareBrandPostImageReferenceContext(options: {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
   }
   let supportingReferences: ShoppingSceneSupportingReference[] = [];
-  if ((!existingSlotRequest || retryOf) && snapshotImageUrls.length) {
+  if ((!existingSlotRequest || retryKey) && snapshotImageUrls.length) {
     const key = crypto.createHash("sha256").update(JSON.stringify({ snapshotId: options.manifest.sourceSnapshot.snapshotId,
       referenceSha256: reference.sha256, selectedProduct })).digest("hex");
-    const bundlePath = path.join(path.dirname(checkpointPath), `reference-bundle-${key}${retryOf ? `-retry-${retryOf.rejectionSha256}` : ""}.json`);
+    const bundlePath = path.join(path.dirname(checkpointPath), `reference-bundle-${key}${retryKey ? `-retry-${retryKey}` : ""}.json`);
     if (fs.existsSync(bundlePath)) {
       const saved = JSON.parse(fs.readFileSync(bundlePath, "utf8"));
       if (saved.version === "shopping-reference-bundle/v1" && saved.sourceSnapshotId === options.manifest.sourceSnapshot.snapshotId &&
@@ -857,10 +877,12 @@ export async function prepareBrandPostImageReferenceContext(options: {
     referenceHashes: [reference.sha256, ...supportingReferences.map(support => support.sha256), ...(anchorSha256 ? [anchorSha256] : [])],
     ...(supportingReferences.length ? { supportingReferences } : {}), preparationBinding,
     ...(retryOf ? { retryOf } : {}),
+    ...(publicationRetryOf ? { publicationRetryOf } : {}),
     prompt: buildShoppingReferenceScenePrompt({ ...promptOptions, reference, hasAnchor: Boolean(anchorPath), supportingReferences }),
   };
-  if (retryOf) {
-    const previous = JSON.parse(fs.readFileSync(`${retryOf.outStem}.reference-scene.json`, "utf8"));
+  if (retryOf || publicationRetryOf) {
+    const previousStem = retryOf?.outStem || publicationRetryOf!.dispositions.find(row => row.candidateSha256 === publicationRetryOf!.currentSha256)!.outStem;
+    const previous = JSON.parse(fs.readFileSync(`${previousStem}.reference-scene.json`, "utf8"));
     if (!reference.viewObservation || !context.prompt.includes("shopping-reference-view/v1") || context.prompt === previous.referenceContext?.prompt)
       throw new Error("IMAGE_REPAIR_EXHAUSTED: 이전 거절 원인을 바꾸는 새 참조·촬영 계획을 확인하지 못했습니다. 같은 생성 요청을 반복하지 않았습니다.");
   }
@@ -1195,6 +1217,14 @@ export function prepareImageBatchJobs(
       .map((asset) => asset.path),
   })).map((job, index) => {
     const target = targets[index];
+    let publicationParent: PublicationImageRetryParent | undefined;
+    if (target.referenceContext?.publicationRetryOf) {
+      const checked = planPublicationImageRetry({ manifest, target, packageDir: getBrandPostPackageDir(manifest.brandLinkId),
+        policyFingerprint: publicationImageAuditPolicyFingerprint() });
+      if (!checked || JSON.stringify(checked.parent) !== JSON.stringify(target.referenceContext.publicationRetryOf))
+        throw new Error("IMAGE_RESUME_REQUIRED: 최종 거절과 개선 요청의 고정 근거가 변경되었습니다.");
+      publicationParent = checked.parent;
+    }
     if (manifest.connectKind === "SHOPPING" && (!target.referenceContext || job.referenceImagePaths.length === 0))
       throw new Error("PRODUCT_REFERENCE_NOT_PREPARED: needs_reference — 선택 상품의 형태와 옵션을 확인할 수 있는 원본 참조가 필요합니다.");
     job.prompt += manifest.connectKind === "SHOPPING"
@@ -1232,6 +1262,8 @@ export function prepareImageBatchJobs(
       sceneRecipe: manifest.connectKind === "SHOPPING" ? job.prompt : undefined,
     });
     const outStem = path.join(workDir, `raw-${identity}`);
+    if (publicationParent) sealPublicationImageRepairPlan(publicationParent.proofSha256, outStem,
+      crypto.createHash("sha256").update(JSON.stringify(target.referenceContext)).digest("hex"));
     const recovery = target.referenceContext?.completedRequestRecovery;
     if (recovery) {
       for (const name of fs.readdirSync(workDir).filter(name => /^raw-[a-f0-9]+\.reference-scene\.json$/iu.test(name))) {
@@ -1257,6 +1289,7 @@ export function prepareImageBatchJobs(
     if (manifest.connectKind === "SHOPPING" && fs.existsSync(workDir)) {
       for (const name of fs.readdirSync(workDir).filter(name => /^raw-[a-f0-9]+\.reference-scene\.json$/iu.test(name))) {
         const priorStem = path.join(workDir, name.replace(/\.reference-scene\.json$/u, ""));
+        if (publicationParent?.dispositions.some(row => path.resolve(row.outStem) === path.resolve(priorStem))) continue;
         if (priorStem === outStem) {
           const metadata = JSON.parse(fs.readFileSync(path.join(workDir, name), "utf8"));
           assertSavedSceneRecipe(job, metadata);
@@ -1867,7 +1900,7 @@ export async function repairRejectedCompletedBodyImage(options: {
 } = {}): Promise<Awaited<ReturnType<typeof finishGeneratedImage>> | null> {
   const { manifest, target, job } = options;
   const failure = options.error instanceof Error ? (options.error as Error & { fidelityFailure?: unknown }).fidelityFailure : undefined;
-  if (manifest.connectKind !== "SHOPPING" || target.role !== "body" || !job.reviewOnly || target.referenceContext?.retryOf ||
+  if (manifest.connectKind !== "SHOPPING" || target.role !== "body" || !job.reviewOnly || target.referenceContext?.retryOf || target.referenceContext?.publicationRetryOf ||
       !(options.error instanceof Error) || !options.error.message.startsWith("REFERENCE_SCENE_FIDELITY_FAILED:") || !validBodyFidelityFailure(failure)) return null;
   if (!readProductSnapshot(manifest.sourceSnapshot, { productId: manifest.brandLinkId, connectKind: "SHOPPING" })) return null;
   const rejection = readSettledBodyRejection(job.outStem, manifest, target, job);

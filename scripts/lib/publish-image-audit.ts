@@ -6,7 +6,8 @@ import path from "node:path";
 import type { BrandPostPackageImageAsset } from "../../src/lib/brand-post-package";
 import crypto from "node:crypto";
 import sharp from "sharp";
-import { getProjectRoot } from "./app-paths";
+import { getProjectRoot, getAppDataDir } from "./app-paths";
+import { recordPublicationImageDefect } from "./publication-image-defect-proof";
 import { resolveTextReasoningEffort } from "./text-model-policy";
 import { readSuccessfulImageAuditReceipt, writeSuccessfulImageAuditReceipt, invalidateSuccessfulImageAuditReceipt, withSuccessfulImageAuditLock } from "./publish-image-audit-receipt";
 import { buildProduct9Canvas, selectedProductContextFrom9Canvas, type Product9Canvas } from "./product-9canvas";
@@ -32,6 +33,8 @@ import { buildProductImageVisualContract, PRODUCT_IMAGE_VISUAL_CONTRACT_RULES_EN
 import { readProductSnapshot, type ProductSnapshot } from "../../src/lib/draft-context-snapshot";
 import { readSelectedGalleryComparisons, type SelectedGalleryComparisonImage } from "./selected-gallery-comparison";
 import { photoDescriptionFinding, savePhotoDescriptionFindings, type PhotoDescriptionFinding } from "./photo-description-finding";
+import { REFERENCE_PLANE_RULE_EN, REFERENCE_PLANE_POLICY_VERSION, REFERENCE_PLANE_COMPARISON_SCHEMA, REFERENCE_PLANE_IDENTITY_QUESTION,
+  referencePlaneComparisonIssue, type ReferencePlaneContext } from "./reference-plane-grounding";
 
 const NOTICE_PIXELS_RULE = "notice=true ONLY means a shipping, service or seller announcement visible in the attached IMAGE PIXELS, such as a delivery-closure notice, returns/customer-service announcement or seller notice board. It never means AI-generated provenance, an illustrative image intent, the need for AI disclosure, or an adjacentCaption/article disclosure outside the image. Set notice=false for those contexts; they do not turn a product photograph into a notice. If AI disclosure or other explanatory copy is burned into a body photo, reject it using textPolicyMatches/noGraphicLayout, not notice merely because it mentions AI.";
 const BALANCED_VISIBLE_DEFECT_RULE = "Final QA uses a balanced visible-defect threshold, not a search for ways to improve an otherwise valid photograph. Block a clearly wrong product/SKU or selected option, readable conflicting identifying label, genuinely unresolved product identity, severe structural distortion, clearly impossible geometry/contact/scale, an explicit forbidden notice/card/frame/panel/body-text layout, or an actual unsupported photographic-proof claim. Readable invented/unsupported certification or efficacy copy (such as a fabricated FDA APPROVED seal) is a substantive false claim even when it is not an identifying label; unchanged manufacturer printing alone does not prove results. Permit minor lighting, pose, background, reflection and non-identifying texture/print-spacing variation when the product remains identifiable and the scene coherent. Do not require pixel identity, aesthetic optimization, perfect microtext, or OCR of every tiny capacity/specification. Uncertainty confined to such minor differences is not a blocking defect: do not invent a mismatch or a missing-label claim from unreadable pixels. Genuine unresolved identity or a concrete forbidden defect still rejects; reference lineage and favorable prose never override an adverse boolean.";
@@ -104,10 +107,17 @@ export interface PublishImageAuditResult {
   ok: boolean;
   checked: number;
   receiptReused?: boolean;
+  /** Server-computed exact native request bytes; never client authority. */
+  requestBindingSha256?: string;
+  /** Exact policy that formed the native request, captured before review. */
+  policyFingerprint?: string;
   failures: PublishImageAuditFailure[];
   images: Array<{ nodeIndex: number; assetPath: string; sha256: string }>;
   /** All bounded comparison verdicts, including adverse flags; never majority-voted. */
   comparisonReviews?: Array<{ nodeIndex: number; referenceSha256s: string[]; verdict: VisualReviewRow | null }>;
+  /** The actual request's server-owned roles, never inferred from model prose. */
+  referenceComparisons?: Array<{ nodeIndex: number; context: ReferencePlaneContext; comparison: unknown; verdict: VisualReviewRow; issue: string | null;
+    requestBindingSha256?: string }>;
 }
 export interface PublishImageAuditOptions {
   brandLinkId?: string;
@@ -431,10 +441,33 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
     }
     type GalleryGroup = typeof gallerySnapshots;
     const requests: Array<{ batch: typeof candidates; call: CodexDraftOptions; gallery: GalleryGroup; split?: boolean }> = [];
-    const buildCall = (batch: typeof candidates, gallery: GalleryGroup = gallerySnapshots, split = false): CodexDraftOptions => {
+    const referenceLayout = (batch: typeof candidates, gallery: GalleryGroup) => {
       const references = [...new Map<string, { referenceSha256: string; sourceSnapshotId: string; snapshot: string }>([...batch.flatMap(candidate => candidate.referenceScene
         ? [[candidate.referenceScene.referenceSha256, candidate.referenceScene] as const] : []),
       ...gallery.map(reference => [reference.referenceSha256, reference] as const)]).values()];
+      const imageIndex = (sha256: string) => batch.length + references.findIndex(reference => reference.referenceSha256 === sha256) + 1;
+      const contexts: Array<ReferencePlaneContext | null> = batch.map(candidate => candidate.referenceScene ? {
+        primaryReferenceImageIndex: imageIndex(candidate.referenceScene.referenceSha256), primaryReferenceSha256: candidate.referenceScene.referenceSha256,
+        supplementalReferences: gallery.filter(reference => reference.sha256 !== candidate.referenceScene!.referenceSha256)
+          .map(reference => ({ imageIndex: imageIndex(reference.sha256), sha256: reference.sha256 })),
+      } : null);
+      return { references, contexts };
+    };
+    const buildCall = (batch: typeof candidates, gallery: GalleryGroup = gallerySnapshots, split = false): CodexDraftOptions => {
+      const { references, contexts } = referenceLayout(batch, gallery);
+      const mapped = contexts.filter((context): context is ReferencePlaneContext => Boolean(context));
+      const mappedSchema = { ...REFERENCE_PLANE_COMPARISON_SCHEMA, properties: { ...REFERENCE_PLANE_COMPARISON_SCHEMA.properties,
+        primaryReferenceImageIndex: { type: "integer", enum: [...new Set(mapped.map(context => context.primaryReferenceImageIndex))] },
+        primaryReferenceSha256: { type: "string", enum: [...new Set(mapped.map(context => context.primaryReferenceSha256))] },
+      } };
+      const comparisonSchema = !mapped.length ? { type: "null" } : mapped.length === contexts.length ? mappedSchema
+        : { anyOf: [{ type: "null" }, mappedSchema] };
+      const firstContext = contexts[0];
+      const comparisonExample = firstContext ? { primaryReferenceImageIndex: firstContext.primaryReferenceImageIndex,
+        primaryReferenceSha256: firstContext.primaryReferenceSha256, primaryObservation: "describe the actual numbered primary pixels",
+        candidateObservation: "describe the actual final pixels", objectionKind: "none", evidenceImageIndex: firstContext.primaryReferenceImageIndex,
+        samePhysicalPart: null, samePhysicalSurface: null, sameSelectedVisibleOption: null, referencePrintState: "not-observed",
+        candidatePrintState: "not-observed", evidenceObservation: "describe the actual cited evidence pixels", basis: "state the actual comparison basis" } : null;
       const galleryIndexes = gallery.map(reference => batch.length + references.findIndex(item => item.referenceSha256 === reference.sha256) + 1);
       const decisionRole = batch.length === 1
         ? batch[0].role === "thumbnail"
@@ -450,17 +483,24 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           `Selected product: ${JSON.stringify(selectedProduct)}. Product name: ${JSON.stringify(options.productName)}.`,
           `Each attached image belongs ONLY to its corresponding slot: ${JSON.stringify(batch.map((c, i) => ({ index: i + 1, role: c.role, textPolicy: c.role === "thumbnail" ? "THUMBNAIL_HEADLINE_ALLOWED: one large accurate headline outside distinguishing product features is permitted; reject extra badges, bullets, panels or unsupported claims" : c.exactCanonicalSellerOriginal ? "BODY_NO_ADDED_TEXT: intrinsic physical product printing and an unchanged nonexplanatory source-brand watermark only; no headline, explanatory/promotional copy, badges, frames or panels" : "BODY_NO_ADDED_TEXT: only intrinsic physical product printing is permitted", exactCanonicalSellerOriginal: c.exactCanonicalSellerOriginal, sectionTitle: c.sectionTitle, sectionBody: c.sectionBody, imageIntent: c.imageIntent, visualContract: c.visualContract, allowProductPhoto: c.allowProductPhoto, ...(c.referenceScene ? { referenceGuidedScene: true, originalComparisonPassed: true, adjacentCaption: c.referenceScene.caption,
             comparisonReferenceImageIndex: referenceIndex(c), referenceSha256: c.referenceScene.referenceSha256, sourceSnapshotId: c.referenceScene.sourceSnapshotId } : {}),
+          ...(contexts[i] ? { referencePlaneMap: contexts[i], identityQuestion: REFERENCE_PLANE_IDENTITY_QUESTION } : {}),
           claimSources: { sectionTitle: { origin: "section-title", sourceIndex: null, text: c.sectionTitle },
             sectionBody: c.sectionBody.map((text, sourceIndex) => ({ origin: "section-body", sourceIndex, text })) },
-          ...(galleryIndexes.length ? { selectedGalleryComparisonImageIndexes: galleryIndexes } : {}) })))}`,
+          ...(galleryIndexes.length ? { selectedGalleryComparisonImageIndexes: contexts[i]
+            ? contexts[i]!.supplementalReferences.map(reference => reference.imageIndex) : galleryIndexes } : {}) })))}`,
           `Final publication attachments are images 1 through ${batch.length}. Comparison references appended AFTER them are not publication candidates: ${JSON.stringify(references.map((reference, index) => ({ imageIndex: batch.length + index + 1, referenceSha256: reference.referenceSha256, sourceSnapshotId: reference.sourceSnapshotId,
+            mappedPrimaryForFinalImageIndexes: contexts.flatMap((context, slot) => context?.primaryReferenceSha256 === reference.referenceSha256 ? [slot + 1] : []),
+            supplementalForFinalImageIndexes: contexts.flatMap((context, slot) => context?.supplementalReferences.some(item => item.sha256 === reference.referenceSha256) ? [slot + 1] : []),
             forFinalImageIndexes: gallery.some(item => item.sha256 === reference.referenceSha256) ? batch.map((_, candidateIndex) => candidateIndex + 1)
               : batch.flatMap((candidate, candidateIndex) => candidate.referenceScene?.referenceSha256 === reference.referenceSha256 ? [candidateIndex + 1] : []) })))}`,
-          ...(selectedSourceIdentity ? [`Canonical selected source: ${JSON.stringify(selectedSourceIdentity)}. Selected-gallery comparison-only evidence: ${JSON.stringify(gallery.map((reference, index) => ({ imageIndex: galleryIndexes[index], role: "selected-gallery-comparison", sourceUrl: reference.sourceUrl,
+          ...(selectedSourceIdentity ? [`Canonical selected source: ${JSON.stringify(selectedSourceIdentity)}. Selected-gallery comparison-only evidence: ${JSON.stringify(gallery.map((reference, index) => ({ imageIndex: galleryIndexes[index], role: "canonical-selected-source", sourceUrl: reference.sourceUrl,
+            mappedPrimaryForFinalImageIndexes: contexts.flatMap((context, slot) => context?.primaryReferenceSha256 === reference.sha256 ? [slot + 1] : []),
+            supplementalForFinalImageIndexes: batch.flatMap((_, slot) => !contexts[slot] || contexts[slot]!.primaryReferenceSha256 !== reference.sha256 ? [slot + 1] : []),
             sourceSnapshotId: reference.sourceSnapshotId, sha256: reference.sha256, receiptSha256: reference.receiptSha256,
             exactCanonicalSourceForFinalImageIndexes: batch.flatMap((candidate, candidateIndex) => candidate.sha256 === reference.sha256 ? [candidateIndex + 1] : []) })))}`,
           "Selected-gallery comparison images are intact cached seller-gallery pixels bound to the selected source URL/snapshot; they are UNVERIFIED comparison context, not identity approval or publication candidates. Compare the visible component's distinctive structure and intrinsic brand/product printing against the selected facts and these indexed gallery pixels to determine whether it is a member of the selected kit. A gallery may show gifts, cross-sells or other variants: do not assume every depicted item is selected/included, infer hidden capacity/quantity, or let a promotional badge authorize a gift, effect or bundle claim. Keep rejecting wrong components/variants and unsupported whole-set claims. External seller advertising/artwork in these comparison-only inputs cannot give final photos text/panel permission; inspect publication-format checks ONLY on final attachments. Never output a verdict for a comparison-only image."] : []),
           "For a referenceGuidedScene, inspect the actual attached comparisonReferenceImageIndex pixels against that final image's visible structure, intrinsic brand/product printing and selected variant. It is the exact bound reference for the listed slot only, not a final image to approve. Reference-only advertising/background styling is not part of the published candidate. Do not output a review for reference attachments, use another final candidate as a reference, infer model design from memory, or treat a prior passed comparison as automatic approval. A readable altered brand/product identifier or distinctive structural contradiction must still reject; absent tiny specifications alone do not establish a contradiction.",
+          "For each referenceGuidedScene output the required referenceComparison BEFORE identityMatches: primaryReferenceImageIndex and primaryReferenceSha256 must match its referencePlaneMap. Describe that exact primary's actual visible component/face in primaryObservation and the candidate's face in candidateObservation. objectionKind=none when identity is resolved without an identity objection, otherwise missing-print|conflicting-print|shape|option|unresolved. Name the actual evidence reference attachment in evidenceImageIndex (null is allowed only with no objection). Describe its pixels in evidenceObservation, not another attachment's pixels. Set samePhysicalPart, samePhysicalSurface and sameSelectedVisibleOption from observed correspondence, or null when not established. referencePrintState=present|absent|not-observed and candidatePrintState=present|present-unreadable|absent-on-exposed-face|not-observed refer to that compared face. present-unreadable requires an actual mark at the corresponding source-print location, all three correspondence flags=true and sufficient matching geometry; it never certifies a word or permits a conflicting photo-proof claim. Never label such a visible mark absent-on-exposed-face merely because its letters cannot be read. missing-print requires all three correspondence flags=true, source-present print and an exposed blank candidate face. A reverse face/another option cannot supply missing-print evidence; legitimate corresponding gallery detail remains usable. Wrong brand/design/option or genuinely unresolved identity still rejects. For slots without referencePlaneMap, use referenceComparison=null. These fields never excuse any adverse identity, claim, format or holistic verdict.",
           "Inspect actual pixels of EVERY attached final image. Never infer safety from filename, generated provenance, previous approvals, caption, or alt text. A quantity in a comparison filename only selected a possible context image; it is not evidence of identity or capacity. Read any actual product-information table pixels as comparison-only selected facts, then match the visible product identifier and structure. Never publish that table as a body photo or require an invisible specification to appear on the product.",
           "An exactCanonicalSourceForFinalImageIndexes match binds actual unchanged seller-gallery bytes, not automatic identity approval. A kit may contain different product lines: match the pictured component against its own actual identifier and source, plus the selected kit facts/table. Do not compare a pictured serum to a different included toner and call that difference a contradiction. Still reject a source showing an unselected gift, cross-sell, wrong variant or conflicting identifiable product.",
           ...(split ? ["This is one bounded full-resolution comparison group for the SAME final image. Its exact mapped identity reference is retained when available. Other gallery groups are reviewed separately, and EVERY complete verdict must pass; no favorable group cancels an adverse group. Compare the pictured component with its own identifying reference and canonical selected facts. Different included kit members in this group are comparison context, not an instruction that the final photo must match every member. State actual contradictions or unresolved membership honestly; do not infer approval from grouping or invent a mismatch because a supplemental gallery depicts another component."] : []),
@@ -474,7 +514,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           SINGLE_PHOTOGRAPH_RULE,
           NATURAL_SCENE_INTENT_RULE,
           COMPONENT_APPEARANCE_RULE,
-          `${VISIBLE_IDENTITY_DECISION_RULE} ${PRODUCT_IMAGE_COMPONENT_OPTION_RULE_EN}`,
+          `${VISIBLE_IDENTITY_DECISION_RULE} ${PRODUCT_IMAGE_COMPONENT_OPTION_RULE_EN} ${REFERENCE_PLANE_RULE_EN}`,
           `${PHOTO_CLAIM_DECISION_RULE} ${LITERAL_PHOTO_CLAIM_RULE} ${PRODUCT_IMAGE_BUYER_CHECK_ADVICE_RULE_EN}`,
           PHOTO_CLAIM_OBJECTION_RULE,
           `${ACCEPTED_DECISION_RULE} ${LITERAL_PHOTO_CLAIM_RULE}`,
@@ -490,7 +530,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           "For an AI 연출 이미지 intent, judge product identity, credible anatomy/fabric/contact and believable placement, never feature demonstration. Reject invented included accessories, operation or performance claims. A referenceGuidedScene has a separately validated comparison against original-reference bytes and a required adjacentCaption rendered immediately after its image. Never require or allow AI disclosure burned into body-image pixels. Background styling props do not imply included accessories. A styling scene is not a claim of actual personal use or efficacy. The prior comparison does not authorize visible contradictions in the final pixels.",
           "Report format checks separately: singlePhotograph means exactly one coherent photographic scene; noGraphicLayout means no graphic frame around a seller photo, pasted inset, table or explanatory panel (an ordinary physical mirror and its frame remain scene props); textPolicyMatches means no added text in body images except the narrow server-bound unchanged source-brand watermark rule, or only the intended headline in a thumbnail; thumbnailHeadlineLegible must be true for a large clear thumbnail headline (set true as not applicable for body photos). A false format check must reject even if identityMatches=true.",
           "For each review, output the index, then explain the final/reference pixel evidence in reason BEFORE the separate checks and reviewClass. Output accepted LAST, after those findings; resolve tentative objections before emitting the final verdict. Field order does not authorize a favorable verdict or override an adverse check.",
-          `Return exactly ${batch.length} reviews, ONLY for final publication images 1 through ${batch.length}, never for appended references, with 1-based index: {"reviews":[{"index":1,"reason":"specific final/reference pixel evidence and whether published text uses the photo as proof","photoClaimObjection":{"origin":"none","sourceIndex":null,"quote":"","scope":"none","conflict":""},"identityMatches":true,"photoClaimMatches":true,"notice":false,"mixedOptions":false,"explicitNamedComparison":false,"optionsClearlyLabeled":false,"singlePhotograph":true,"noGraphicLayout":true,"textPolicyMatches":true,"thumbnailHeadlineLegible":true,"reviewClass":"product-photo" or "feature-evidence","accepted":true}]}. All fields required. For an allowed named comparison identityMatches means the selected item is clearly identified among the explicitly named alternatives.`,
+          `Return exactly ${batch.length} reviews, ONLY for final publication images 1 through ${batch.length}, never for appended references, with 1-based index: {"reviews":[{"index":1,"reason":"specific final/reference pixel evidence and whether published text uses the photo as proof","photoClaimObjection":{"origin":"none","sourceIndex":null,"quote":"","scope":"none","conflict":""},"referenceComparison":${JSON.stringify(comparisonExample)},"identityMatches":true,"photoClaimMatches":true,"notice":false,"mixedOptions":false,"explicitNamedComparison":false,"optionsClearlyLabeled":false,"singlePhotograph":true,"noGraphicLayout":true,"textPolicyMatches":true,"thumbnailHeadlineLegible":true,"reviewClass":"product-photo" or "feature-evidence","accepted":true}]}. All fields required. For an allowed named comparison identityMatches means the selected item is clearly identified among the explicitly named alternatives.`,
         ].join("\n"),
         imagePaths: [...batch.map(c => c.snapshot), ...references.map(reference => reference.snapshot)],
         maxImages: batch.length + references.length, preserveImageOrder: true, researchMode: "disabled",
@@ -498,8 +538,9 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
         outputSchema: { ...VISUAL_REVIEW_SCHEMA, properties: { reviews: { ...VISUAL_REVIEW_SCHEMA.properties.reviews,
           minItems: batch.length, maxItems: batch.length, items: { ...VISUAL_REVIEW_SCHEMA.properties.reviews.items,
             properties: { ...VISUAL_REVIEW_SCHEMA.properties.reviews.items.properties, index: { type: "integer", enum: batch.map((_, index) => index + 1) },
+              referenceComparison: { ...comparisonSchema, description: REFERENCE_PLANE_RULE_EN },
               reason: { type: "string", description: `${decisionRole} ${FINAL_REASON_RULE} ${LITERAL_PHOTO_CLAIM_RULE}` },
-              identityMatches: { type: "boolean", description: `${decisionRole} ${COMPONENT_APPEARANCE_RULE} ${VISIBLE_IDENTITY_DECISION_RULE} ${PRODUCT_IMAGE_COMPONENT_OPTION_RULE_EN}` },
+              identityMatches: { type: "boolean", description: `${decisionRole} ${COMPONENT_APPEARANCE_RULE} ${VISIBLE_IDENTITY_DECISION_RULE} ${PRODUCT_IMAGE_COMPONENT_OPTION_RULE_EN} ${REFERENCE_PLANE_RULE_EN}` },
               mixedOptions: { type: "boolean", description: `${decisionRole} ${MIXED_OPTIONS_RULE} ${PRODUCT_IMAGE_COMPONENT_OPTION_RULE_EN}` },
               photoClaimMatches: { type: "boolean", description: `${decisionRole} ${PHOTO_CLAIM_DECISION_RULE} ${LITERAL_PHOTO_CLAIM_RULE} ${PRODUCT_IMAGE_BUYER_CHECK_ADVICE_RULE_EN}` },
               textPolicyMatches: { type: "boolean", description: batch.length === 1 && batch[0].role === "thumbnail"
@@ -547,9 +588,11 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
     if (splitGroups.size) result.comparisonReviews = [];
     // Hash the actual requests, not a manually maintained description of the
     // prompt. Temporary snapshot paths are replaced by the original byte hashes.
+    const policyFingerprint = publicationImageAuditPolicyFingerprint();
+    result.policyFingerprint = policyFingerprint;
     const receiptKey = crypto.createHash("sha256").update(JSON.stringify({
-      policy: "final-publication-image-audit/v2-natural-photo",
-      policyFingerprint: publicationImageAuditPolicyFingerprint(),
+      policy: "final-publication-image-audit/v18-reference-plane", referencePlanePolicy: REFERENCE_PLANE_POLICY_VERSION,
+      policyFingerprint,
       transport: { maximumImageBytes: PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES, maximumImages: PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT },
       selectedSource: selectedSourceIdentity,
       images: candidates.map(candidate => ({ nodeIndex: candidate.nodeIndex, sha256: candidate.sha256,
@@ -559,6 +602,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           thumbnailRawSha256: candidate.referenceScene.thumbnailRawSha256, thumbnailOutputSha256: candidate.referenceScene.thumbnailOutputSha256 } : undefined })),
       requests: requests.map(({ call }) => ({ ...call, imagePaths: call.imagePaths!.map(file => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")) })),
     })).digest("hex");
+    result.requestBindingSha256 = receiptKey;
     const reused = Boolean(receiptId && !options.forceReview && !result.failures.length &&
       readSuccessfulImageAuditReceipt(receiptId, receiptKey));
     result.receiptReused = reused;
@@ -634,16 +678,24 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
       if (!await inputsStillBound(batch)) { failChangedBatch(batch); continue; }
       for (const candidate of batch) checkedNodes.add(candidate.nodeIndex);
       result.checked = checkedNodes.size;
+      const callBinding = (input: CodexDraftOptions) => crypto.createHash("sha256").update(JSON.stringify({ ...input,
+        imagePaths: input.imagePaths?.map(file => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")) })).digest("hex");
+      const verdictBindings = batch.map(() => callBinding(call));
       let verdicts = parseVisualReviews(await review(call), batch.length);
+      const verdictContexts = referenceLayout(batch, gallery).contexts;
       if (!await inputsStillBound(batch)) { failChangedBatch(batch); continue; }
       // 형식이 깨진 판정만 한 번 더 묻는다. 두 번째도 깨지면 그 이미지만 실패로 닫는다(fail closed).
       const malformed = batch.flatMap((_, i) => verdicts[i] ? [] : [i]);
       if (malformed.length > 0) {
         const retryBatch = malformed.map(i => batch[i]);
-        const retried = parseVisualReviews(await review(buildCall(retryBatch, gallery, split)).catch(() => ""), retryBatch.length);
+        const retryCall = buildCall(retryBatch, gallery, split);
+        const retryBinding = callBinding(retryCall);
+        const retried = parseVisualReviews(await review(retryCall).catch(() => ""), retryBatch.length);
+        const retryContexts = referenceLayout(retryBatch, gallery).contexts;
         if (!await inputsStillBound(batch)) { failChangedBatch(batch); continue; }
         verdicts = verdicts.slice();
-        malformed.forEach((batchIndex, retryIndex) => { verdicts[batchIndex] = retried[retryIndex] ?? null; });
+        malformed.forEach((batchIndex, retryIndex) => { verdicts[batchIndex] = retried[retryIndex] ?? null; verdictContexts[batchIndex] = retryContexts[retryIndex];
+          verdictBindings[batchIndex] = retryBinding; });
       }
       for (const [i, candidate] of batch.entries()) {
         const row = verdicts[i];
@@ -657,6 +709,16 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
         const comparisonAllowed = candidate.role !== "thumbnail" && row.explicitNamedComparison === true && row.optionsClearlyLabeled === true;
         const formatMatches = row.singlePhotograph === true && row.noGraphicLayout === true && row.textPolicyMatches === true &&
           (candidate.role !== "thumbnail" || row.thumbnailHeadlineLegible === true);
+        const planeIssue = referencePlaneComparisonIssue(row, verdictContexts[i]);
+        if (verdictContexts[i]) (result.referenceComparisons ??= []).push({ nodeIndex: candidate.nodeIndex,
+          context: verdictContexts[i]!, comparison: row.referenceComparison, verdict: row, issue: planeIssue, requestBindingSha256: verdictBindings[i] });
+        if (planeIssue) {
+          fail(candidate.nodeIndex, candidate.assetPath, "INVALID_REVIEW", `Reference-plane grounding is invalid: ${planeIssue}`);
+          // Hold the entire invalid verdict, retaining every adverse flag in
+          // diagnostics. Do not turn a mixed ungrounded identity/claim verdict
+          // into a product-wide blacklist or generation authority.
+          continue;
+        }
         const objectionIssue = photoClaimObjectionIssue(row, candidate);
         if (objectionIssue) {
           fail(candidate.nodeIndex, candidate.assetPath, "INVALID_REVIEW", invalidPhotoClaimDiagnostic(row, objectionIssue));
@@ -740,6 +802,7 @@ const VISUAL_REVIEW_SCHEMA = {
             properties: { origin: { type: "string", enum: PHOTO_CLAIM_ORIGINS }, sourceIndex: { type: ["integer", "null"] },
               quote: { type: "string" }, scope: { type: "string", enum: PHOTO_CLAIM_SCOPES }, conflict: { type: "string" } },
             required: ["origin", "sourceIndex", "quote", "scope", "conflict"], additionalProperties: false },
+          referenceComparison: { anyOf: [{ type: "null" }, REFERENCE_PLANE_COMPARISON_SCHEMA], description: REFERENCE_PLANE_RULE_EN },
           ...Object.fromEntries(VISUAL_REVIEW_BOOLEAN_KEYS.filter(key => key !== "accepted").map(key => [key, { type: "boolean" }])),
           identityMatches: { type: "boolean", description: `${COMPONENT_APPEARANCE_RULE} ${VISIBLE_IDENTITY_DECISION_RULE} ${PRODUCT_IMAGE_COMPONENT_OPTION_RULE_EN}` },
           photoClaimMatches: { type: "boolean", description: `${PHOTO_CLAIM_DECISION_RULE} ${PRODUCT_IMAGE_BUYER_CHECK_ADVICE_RULE_EN}` },
@@ -750,7 +813,7 @@ const VISUAL_REVIEW_SCHEMA = {
           reviewClass: { type: "string", enum: ["product-photo", "feature-evidence"] },
           accepted: { type: "boolean", description: `${BALANCED_VISIBLE_DEFECT_RULE} ${NATURAL_SCENE_INTENT_RULE} ${ACCEPTED_DECISION_RULE}` },
         },
-        required: ["index", "reason", "photoClaimObjection", ...VISUAL_REVIEW_BOOLEAN_KEYS.filter(key => key !== "accepted"), "reviewClass", "accepted"],
+        required: ["index", "reason", "photoClaimObjection", "referenceComparison", ...VISUAL_REVIEW_BOOLEAN_KEYS.filter(key => key !== "accepted"), "reviewClass", "accepted"],
         additionalProperties: false,
       },
     },
@@ -765,6 +828,8 @@ export const PUBLICATION_IMAGE_AUDIT_POLICY_FILES = [
   "scripts/lib/selected-gallery-comparison.ts", "scripts/lib/product-image-selection.ts",
   "scripts/lib/product-photo-source.ts", "scripts/lib/product-9canvas.ts",
   "scripts/lib/unbranded-product.ts", "scripts/lib/publication-image-geometry.ts",
+  "scripts/lib/reference-plane-grounding.ts",
+  "scripts/lib/publication-image-defect-proof.ts",
   "scripts/lib/text-model-policy.ts", "scripts/lib/draft-runtime-policy.json",
   "src/lib/brand-post-image-evidence.ts", "src/lib/draft-context-snapshot.ts",
   "src/lib/post-composition-contract.ts",
@@ -781,6 +846,7 @@ export function publicationImageAuditPolicyFingerprint(): string {
       MIXED_OPTIONS_RULE, CATALOG_OPTION_IDENTITY_RULE, VISIBLE_IDENTITY_DECISION_RULE,
       PHOTO_CLAIM_DECISION_RULE, LITERAL_PHOTO_CLAIM_RULE, ACCEPTED_DECISION_RULE,
       FINAL_REASON_RULE, PHOTO_CLAIM_OBJECTION_RULE, PRODUCT_IMAGE_VISUAL_CONTRACT_RULES_EN, UNBRANDED_COMMODITY_IDENTITY_RULE_EN],
+    referencePlanes: [REFERENCE_PLANE_POLICY_VERSION, REFERENCE_PLANE_RULE_EN],
     schema: VISUAL_REVIEW_SCHEMA,
     transport: [PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES, PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT],
     reasoningEffort: resolveTextReasoningEffort(),
@@ -853,6 +919,28 @@ async function assertPublishImagesSafeUnlocked(options: PublishImageAuditOptions
         return image && node?.kind === "image" ? [{ sha256: image.sha256, sectionId: node.sectionId,
           scope: failure.rejectionScope }] : [];
       }));
+  if (options.brandLinkId && /^[a-zA-Z0-9_-]{8,80}$/u.test(options.brandLinkId) && audit.requestBindingSha256 && !audit.receiptReused && !options.review) {
+    // This append-only authority is issued only by a real current native
+    // verdict. Diagnostics/prose and generic historical rejections cannot mint it.
+    let manifest, currentPolicyFingerprint;
+    try { manifest = JSON.parse(fs.readFileSync(path.join(getAppDataDir(), "prepared-brand-posts", options.brandLinkId, "manifest.json"), "utf8"));
+      currentPolicyFingerprint = publicationImageAuditPolicyFingerprint(); }
+    catch { /* Unsaved or changed packages cannot mint generation authority. */ }
+    if (manifest && audit.policyFingerprint === currentPolicyFingerprint && manifest.brandLinkId === options.brandLinkId && manifest.sourceSnapshot?.snapshotId === options.sourceSnapshotId &&
+        options.selectedSourceSnapshot && JSON.stringify(manifest.sourceSnapshot) === JSON.stringify(options.selectedSourceSnapshot) &&
+        JSON.stringify(manifest.composition) === JSON.stringify(options.composition))
+      for (const comparison of audit.referenceComparisons || []) {
+        const node = options.composition.renderNodes[comparison.nodeIndex], image = audit.images.find(row => row.nodeIndex === comparison.nodeIndex);
+        if (!comparison.issue && comparison.requestBindingSha256 && image && node?.kind === "image" && node.sectionId &&
+            audit.failures.some(row => row.nodeIndex === comparison.nodeIndex && row.code === "SEMANTIC_REJECTION") &&
+            !audit.failures.some(row => row.nodeIndex === comparison.nodeIndex && row.code !== "SEMANTIC_REJECTION"))
+          try {
+            recordPublicationImageDefect({ manifest, sectionId: node.sectionId, sha256: image.sha256,
+              policyFingerprint: audit.policyFingerprint!, requestBindingSha256: comparison.requestBindingSha256,
+              verdict: comparison.verdict, context: comparison.context });
+          } catch { console.warn("      - 최종 이미지 거절 증거를 저장하지 못해 새 생성 권한을 부여하지 않았습니다."); }
+      }
+  }
   if (options.brandLinkId) savePhotoDescriptionFindings(options.brandLinkId,
     audit.failures.flatMap(failure => failure.photoDescription &&
       !audit.failures.some(other => other !== failure && other.nodeIndex === failure.nodeIndex)

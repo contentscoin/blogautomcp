@@ -1,6 +1,6 @@
 /** Offline transport regression checks. No browser or generation provider is loaded. */
 import assert from "node:assert/strict";
-import { buildSelectedProductImageAuditContext } from "./lib/publish-image-audit";
+import { buildSelectedProductImageAuditContext, publicationImageAuditPolicyFingerprint } from "./lib/publish-image-audit";
 import { publicationImageContext } from "./lib/publish-image-rejections";
 import fs from "node:fs";
 import os from "node:os";
@@ -142,11 +142,13 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       "node:fs": fs, "node:path": path,
       "./atomic-text-file": atomicTextFile,
       "./brand-post-completed-context": completedContextModule,
+      "./brand-post-publication-image-repair": { planPublicationImageRetry: () => null },
+      "../../scripts/lib/publication-image-defect-proof": { sealPublicationImageRepairPlan: () => { throw new Error("unexpected native final-repair authority in transport fixture"); } },
       "../../scripts/lib/canonical-seller-source": { readCanonicalSellerSourceHashes },
       "./draft-context-snapshot": { readProductSnapshot },
       "../../scripts/lib/product-image-visual-contract": productVisualContract,
       "../../scripts/lib/publish-image-rejections": { rejectedPublicationImageHashes: () => [], publicationImageContext },
-      "../../scripts/lib/publish-image-audit": { buildSelectedProductImageAuditContext },
+      "../../scripts/lib/publish-image-audit": { buildSelectedProductImageAuditContext, publicationImageAuditPolicyFingerprint },
       "../../scripts/lib/seller-original-repair-target": { buildSellerOriginalRepairTarget },
       "../../scripts/lib/product-source-audit-context": productSourceAuditContext,
       "../../scripts/lib/image-timeout-policy": imagePolicy,

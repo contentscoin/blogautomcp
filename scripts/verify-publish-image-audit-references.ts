@@ -9,11 +9,13 @@ import { createRequire } from "node:module";
 import Ajv from "ajv";
 import sharp from "sharp";
 import ts from "typescript";
-import { auditPublishImages, encodeLosslessAuditSnapshot, planPublishImageAuditBatches, planPublishImageComparisonGroups, PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES, PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT, type PublishImageAuditOptions, type PublishImageAuditResult } from "./lib/publish-image-audit";
+import { auditPublishImages as actualAuditPublishImages, encodeLosslessAuditSnapshot, planPublishImageAuditBatches, planPublishImageComparisonGroups, PUBLISH_IMAGE_AUDIT_MAX_BATCH_BYTES, PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT, type PublishImageAuditOptions, type PublishImageAuditResult } from "./lib/publish-image-audit";
+import { referencePlaneFixtureRow, withReferencePlaneFixture } from "./test-fixtures/reference-plane-review";
 import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 import type { CodexDraftOptions } from "./lib/codex-draft-provider";
 import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
 import { runMaterialPreparation } from "./lib/scheduled-draft-workflow";
+const auditPublishImages = (options: PublishImageAuditOptions) => actualAuditPublishImages(withReferencePlaneFixture(options));
 
 const hash = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 const slots = (call: CodexDraftOptions): Array<{ index: number; role: string; sectionTitle: string; comparisonReferenceImageIndex: number; referenceSha256: string; sourceSnapshotId: string; sectionBody: string[];
@@ -21,7 +23,7 @@ const slots = (call: CodexDraftOptions): Array<{ index: number; role: string; se
   const line = call.userPrompt.split("\n").find(text => text.startsWith("Each attached image belongs ONLY"))!;
   return JSON.parse(line.slice(line.indexOf("[")));
 };
-const good = (index: number) => ({ index, accepted: true, identityMatches: true, photoClaimMatches: true, notice: false,
+const good = (index: number) => ({ index, referenceComparison: null, accepted: true, identityMatches: true, photoClaimMatches: true, notice: false,
   mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true,
   noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "Offline pixel-pair contract fixture",
   photoClaimObjection: { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" } });
@@ -116,7 +118,8 @@ async function main() {
         recordPublicationImageRejections: (_id: string, _composition: unknown, rows: typeof rejected) => { rejected.push(...rows); } } :
       id === "./photo-description-finding" ? { ...auditRequire(id), savePhotoDescriptionFindings: () => {} } : auditRequire(id),
     });
-    const assertAudit = auditedExports.assertPublishImagesSafe as (options: PublishImageAuditOptions) => Promise<PublishImageAuditResult>;
+    const rawAssertAudit = auditedExports.assertPublishImagesSafe as (options: PublishImageAuditOptions) => Promise<PublishImageAuditResult>;
+    const assertAudit = (options: PublishImageAuditOptions) => rawAssertAudit(withReferencePlaneFixture(options));
     const assertBlocked = async (options: PublishImageAuditOptions, codes: string[]) => {
       cleared.length = 0; rejected.length = 0;
       let result: PublishImageAuditResult | undefined;
@@ -138,8 +141,8 @@ async function main() {
           sectionBody: text.body.map((value, sourceIndex) => ({ origin: "section-body", sourceIndex, text: value })) },
         "quote sources retain the exact rendered paragraph boundaries and zero-based indexes");
         const schema = new Ajv({ allErrors: true }).compile(call.outputSchema as object);
-        assert(schema({ reviews: [good(1)] }), "ordinary saved specs/preferences may accompany a neutral structured reviewer verdict");
-        assert(!schema({ reviews: [{ ...good(1), photoClaimObjection: undefined }] }), "the explicit objection contract is required even for favorable decisions");
+        assert(schema({ reviews: [referencePlaneFixtureRow(call, good(1))] }), "ordinary saved specs/preferences may accompany a neutral structured reviewer verdict");
+        assert(!schema({ reviews: [referencePlaneFixtureRow(call, { ...good(1), photoClaimObjection: undefined })] }), "the explicit objection contract is required even for favorable decisions");
         return answer(call);
       };
       assert.equal((await auditPublishImages(options)).ok, true); assert.equal(calls, 1); checks++;
@@ -275,8 +278,8 @@ async function main() {
       assert.match(call.userPrompt, /Multiple views or physical units of the same identifiable model\/variant alone are not mixedOptions/u);
       assert.match(call.userPrompt, /same-design items are not automatically approved/u);
       const validate = new Ajv({ allErrors: true }).compile(call.outputSchema as object);
-      assert.equal(validate({ reviews: rows.map(row => good(row.index)) }), true);
-      assert.equal(validate({ reviews: [...rows.map(row => good(row.index)), good(4)] }), false, "reference attachments cannot become extra output verdicts");
+      assert.equal(validate({ reviews: rows.map(row => referencePlaneFixtureRow(call, good(row.index))) }), true);
+      assert.equal(validate({ reviews: [...rows.map(row => referencePlaneFixtureRow(call, good(row.index))), good(4)] }), false, "reference attachments cannot become extra output verdicts");
       assert.equal(validate({ reviews: [good(1), good(2), good(4)] }), false, "reference index is not a final output index");
       return answer(call);
     };
@@ -332,12 +335,12 @@ async function main() {
       assert.equal(rows.length, 1, "rich gallery evidence is reviewed against exactly one final publication candidate");
       assert.equal(call.imagePaths!.length, 3, "gallery and per-scene references sharing SHA use one actual attachment");
       assert.equal(rows[0].comparisonReferenceImageIndex, 2);
-      assert.deepEqual(rows[0].selectedGalleryComparisonImageIndexes, pair.reference === references[1] ? [3, 2] : [2, 3]);
+      assert.deepEqual(rows[0].selectedGalleryComparisonImageIndexes, [3], "the exact slot primary is retained as primary, not relabeled supplemental");
       const schema = call.outputSchema as { properties: { reviews: { minItems: number; maxItems: number; items: { properties: { index: { enum: number[] } } } } } };
       assert.equal(schema.properties.reviews.minItems, 1); assert.equal(schema.properties.reviews.maxItems, 1);
       assert.deepEqual(schema.properties.reviews.items.properties.index.enum, [1]);
       assert.deepEqual(await sharp(call.imagePaths![0]).raw().toBuffer(), await sharp(pair.final).raw().toBuffer());
-      assert.match(call.userPrompt, /role":"selected-gallery-comparison"/u);
+      assert.match(call.userPrompt, /role":"canonical-selected-source"/u);
       assert.match(call.userPrompt, /UNVERIFIED comparison context, not identity approval or publication candidates/u);
       assert.match(call.userPrompt, /gifts, cross-sells or other variants/u);
       assert.match(call.userPrompt, /inspect publication-format checks ONLY on final attachments/u);
@@ -350,9 +353,10 @@ async function main() {
       assert.match(call.userPrompt, /Only when BOTH canonical selected facts and indexed selected-gallery pixels establish inclusion/u);
       assert.match(call.userPrompt, /not alternative purchase options requiring a named comparison/u);
       assert.match(call.userPrompt, /cross-sells, gift badges and unselected models\/variants remain unverified or conflicting/u);
-      for (const [index, reference] of references.slice(0, 2).entries()) {
-        assert.deepEqual(await sharp(call.imagePaths![rows[0].selectedGalleryComparisonImageIndexes[index] - 1]).raw().toBuffer(), await sharp(reference).raw().toBuffer());
-        assert.deepEqual(fs.readFileSync(call.imagePaths![rows[0].selectedGalleryComparisonImageIndexes[index] - 1]),
+      for (const reference of references.slice(0, 2)) {
+        const actualIndex = hash(reference) === hash(pair.reference) ? 2 : 3;
+        assert.deepEqual(await sharp(call.imagePaths![actualIndex - 1]).raw().toBuffer(), await sharp(reference).raw().toBuffer());
+        assert.deepEqual(fs.readFileSync(call.imagePaths![actualIndex - 1]),
           await encodeLosslessAuditSnapshot(fs.readFileSync(reference)), "gallery snapshots use the same shared encoder");
       }
       return answer(call);

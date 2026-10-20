@@ -9,12 +9,15 @@ import { createRequire } from "node:module";
 import Ajv from "ajv";
 import sharp from "sharp";
 import ts from "typescript";
-import { auditPublishImages, assertPublishImagesSafe, buildSelectedProductImageAuditContext, encodeLosslessAuditSnapshot, parseVisualReviews, validatePhotoClaimObjection, PublishImageAuditError, type PublishImageAuditOptions } from "./lib/publish-image-audit";
+import { auditPublishImages as actualAuditPublishImages, assertPublishImagesSafe as actualAssertPublishImagesSafe, buildSelectedProductImageAuditContext, encodeLosslessAuditSnapshot, parseVisualReviews, validatePhotoClaimObjection, PublishImageAuditError, type PublishImageAuditOptions } from "./lib/publish-image-audit";
+import { referencePlaneFixtureRow, withReferencePlaneFixture } from "./test-fixtures/reference-plane-review";
 import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 import { reviewShoppingReferenceScene } from "./lib/shopping-reference-scene";
 import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
 import { PRODUCT_IMAGE_COMPONENT_OPTION_RULE_EN, PRODUCT_IMAGE_BUYER_CHECK_ADVICE_RULE_EN,
   PRODUCT_IMAGE_BODY_TEXT_RULE_EN } from "./lib/product-image-visual-contract";
+const auditPublishImages = (options: PublishImageAuditOptions) => actualAuditPublishImages(withReferencePlaneFixture(options));
+const assertPublishImagesSafe = (options: PublishImageAuditOptions) => actualAssertPublishImagesSafe(withReferencePlaneFixture(options));
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-publish-audit-"));
@@ -49,7 +52,7 @@ async function main() {
       assertions++;
     }
     const neutralObjection: { origin: string; sourceIndex: number | null; quote: string; scope: string; conflict: string } = { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" };
-    const good = { index: 1, accepted: true, identityMatches: true, photoClaimMatches: true, photoClaimObjection: neutralObjection, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "Visible lavender Stress Relief 532ml pair" };
+    const good = { index: 1, referenceComparison: null, accepted: true, identityMatches: true, photoClaimMatches: true, photoClaimObjection: neutralObjection, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "Visible lavender Stress Relief 532ml pair" };
     type AuditCall = Parameters<NonNullable<PublishImageAuditOptions["review"]>>[0];
     const slotsFor = (call: AuditCall) => {
       const line = call.userPrompt.split("\n").find(value => value.startsWith("Each attached image belongs ONLY"))!;
@@ -66,9 +69,9 @@ async function main() {
           ? { origin: "thumbnail-headline", sourceIndex: null, quote: "Synthetic pixel headline", scope: "result", conflict: row.reason }
           : { origin: "section-body", sourceIndex: 0, quote: slot.sectionBody[0], scope: "pictured-appearance", conflict: row.reason };
       }
-      return row;
+      return referencePlaneFixtureRow(call, row);
     };
-    const evidenceFirstFieldOrder = ["index", "reason", "photoClaimObjection", "identityMatches", "photoClaimMatches", "notice", "mixedOptions", "explicitNamedComparison", "optionsClearlyLabeled", "singlePhotograph", "noGraphicLayout", "textPolicyMatches", "thumbnailHeadlineLegible", "reviewClass", "accepted"];
+    const evidenceFirstFieldOrder = ["index", "reason", "photoClaimObjection", "referenceComparison", "identityMatches", "photoClaimMatches", "notice", "mixedOptions", "explicitNamedComparison", "optionsClearlyLabeled", "singlePhotograph", "noGraphicLayout", "textPolicyMatches", "thumbnailHeadlineLegible", "reviewClass", "accepted"];
     const assertEvidenceFirstCall = (call: Parameters<NonNullable<PublishImageAuditOptions["review"]>>[0]) => {
       const schema = call.outputSchema as { properties: { reviews: { items: { required: string[]; properties: Record<string, { type: string; const?: unknown; enum?: unknown }> } } } };
       const item = schema.properties.reviews.items;
@@ -80,10 +83,10 @@ async function main() {
         "provider serialization must retain the evidence-first property order");
       const exemplar = call.userPrompt.split("\n").find(line => line.startsWith("Return exactly"))!;
       const row = exemplar.slice(exemplar.indexOf('{"reviews":[{') + '{"reviews":[{'.length, exemplar.indexOf("}]}"));
-      assert.deepEqual([...row.replace(/"photoClaimObjection":\{[^}]*\}/u, '"photoClaimObjection":null').matchAll(/"(\w+)":/gu)].map(match => match[1]), evidenceFirstFieldOrder);
+      assert.deepEqual([...row.replace(/"photoClaimObjection":\{[^}]*\}/u, '"photoClaimObjection":null').replace(/"referenceComparison":\{[^}]*\}/u, '"referenceComparison":null').matchAll(/"(\w+)":/gu)].map(match => match[1]), evidenceFirstFieldOrder);
       assert.match(call.userPrompt, /reason BEFORE the separate checks and reviewClass\. Output accepted LAST/u);
       assert.match(call.userPrompt, /Field order does not authorize a favorable verdict or override an adverse check/u);
-      for (const key of evidenceFirstFieldOrder.filter(key => !["index", "reason", "photoClaimObjection", "reviewClass"].includes(key))) {
+      for (const key of evidenceFirstFieldOrder.filter(key => !["index", "reason", "photoClaimObjection", "referenceComparison", "reviewClass"].includes(key))) {
         assert.equal(item.properties[key].type, "boolean");
         assert.equal(item.properties[key].const, undefined, "ordering must not prescribe a verdict");
         assert.equal(item.properties[key].enum, undefined, "both boolean verdicts must remain schema-valid");
@@ -254,11 +257,11 @@ async function main() {
       assert.ok(schema.properties.reviews.items.required.includes("notice"));
       assert.equal(schema.properties.reviews.items.properties.notice.type, "boolean");
       const validate = new Ajv({ allErrors: true }).compile(call.outputSchema as object);
-      assert.equal(validate({ reviews: [good] }), true);
+      assert.equal(validate({ reviews: [referencePlaneFixtureRow(call, good)] }), true);
       // True adverse findings are schema-valid and still blocked downstream.
-      assert.equal(validate({ reviews: [{ ...good, notice: true }] }), true);
+      assert.equal(validate({ reviews: [referencePlaneFixtureRow(call, { ...good, notice: true })] }), true);
       for (const notice of [undefined, null, "true", "false", "yes", 1, [], {}])
-        assert.equal(validate({ reviews: [{ ...good, notice }] }), false, "the emitted schema requires an actual boolean notice verdict");
+        assert.equal(validate({ reviews: [referencePlaneFixtureRow(call, { ...good, notice })] }), false, "the emitted schema requires an actual boolean notice verdict");
       return JSON.stringify({ reviews: [{ ...good, reason: "One selected product in a natural illustrative scene; AI disclosure is an adjacent caption, no announcement pixels" }] });
     };
     assert.equal((await auditPublishImages(scene)).ok, true); assertions++;
@@ -332,8 +335,8 @@ async function main() {
       assert.equal(schema.properties.reviews.items.properties.accepted.type, "boolean");
       assert.ok(schema.properties.reviews.items.required.includes("accepted"));
       const validate = new Ajv({ allErrors: true }).compile(call.outputSchema as object);
-      assert.equal(validate({ reviews: [{ ...good, accepted: false }] }), true, "a real adverse verdict remains schema-valid and must block downstream");
-      for (const accepted of [undefined, null, "yes", 1]) assert.equal(validate({ reviews: [{ ...good, accepted }] }), false);
+      assert.equal(validate({ reviews: [referencePlaneFixtureRow(call, { ...good, accepted: false })] }), true, "a real adverse verdict remains schema-valid and must block downstream");
+      for (const accepted of [undefined, null, "yes", 1]) assert.equal(validate({ reviews: [referencePlaneFixtureRow(call, { ...good, accepted })] }), false);
       return JSON.stringify({ reviews: [{ ...good, reason: "Correct white CUCKOO foreground product on a kitchen counter; coherent cabinets and utensils are visible, no people or use action, no proof claim" }] });
     };
     assert.equal((await auditPublishImages(cuckooContext)).ok, true); assertions++;
@@ -790,7 +793,7 @@ async function main() {
           assert.match(text, /이 사진으로 충전 시간을 확인할 수 있습니다/u);
           assert.match(text, /never overrides an adverse verdict/u);
         }
-        assert.equal(new Ajv().compile(call.outputSchema as object)({ reviews: [{ ...good, ...patch }] }), true);
+        assert.equal(new Ajv().compile(call.outputSchema as object)({ reviews: [referencePlaneFixtureRow(call, { ...good, ...patch })] }), true);
         return JSON.stringify({ reviews: [fixtureRow(call, { reason: "Actual technical discussion and 제품 사양 체크 do not claim photographic usage proof", ...patch })] });
       };
       const audited = await auditPublishImages(input);

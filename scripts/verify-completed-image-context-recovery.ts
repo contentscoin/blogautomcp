@@ -16,6 +16,9 @@ import { testPngFixture } from "./lib/test-png-fixture";
 import { runRecordedImageRecovery, imageRecoverySignature, IMAGE_RECOVERY_POLICY_VERSION } from "./lib/material-image-recovery";
 import { runMaterialPreparation, type Call, type Result } from "./lib/scheduled-draft-workflow";
 import { publicationImageContext } from "./lib/publish-image-rejections";
+import { recordPublicationImageDefect, readPublicationImageDefect } from "./lib/publication-image-defect-proof";
+import { publicationImageAuditPolicyFingerprint } from "./lib/publish-image-audit";
+import { planPublicationImageRetry } from "../src/lib/brand-post-publication-image-repair";
 import { buildProductThumbnailCopy } from "./lib/product-thumbnail";
 import { PRODUCT_IMAGE_PRINT_OBSERVABILITY_RULE_EN, PRODUCT_IMAGE_PRINT_OBSERVABILITY_RULE_VERSION,
   PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_RULE_EN, PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_RULE_KO,
@@ -111,6 +114,108 @@ async function main() {
       return { manifest, work, original, prepare, target, metadataPath, receiptPath, primary, geometry, sources, records, writeRollout, rollout, output, unchanged, receipt, urls };
     }
     const legacy = await fixture();
+    // A final native wrong-print decision is distinct from transport completion
+    // or generic historical rejection. A competing parent remains a hold.
+    async function publicationFixture(competing = false) {
+      const f = await fixture("receipt"), dir = path.dirname(path.dirname(f.work)), currentSha = fileHash(`${f.original.outStem}.png`);
+      const scene = { path: `${f.original.outStem}.png`, sourcePath: `${f.original.outStem}.png`, sha256: currentSha, role: "body" as const,
+        sectionId: "scene", slotId: "scene:image:1", provenance: "GENERATED_SCENE" as const, creationMethod: "reference-guided-scene" as const,
+        remoteGenerated: true, imageIntent: "AI 연출 이미지", referenceScene: { strategyVersion: SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION,
+          referencePath: f.primary, referenceSha256: fileHash(f.primary), sourceSnapshotId: f.manifest.sourceSnapshot!.snapshotId,
+          reviewedOutputSha256: currentSha, reviewStatus: "passed" as const, reviewedAt: new Date().toISOString(), reason: "earlier scene review",
+          checks: Object.fromEntries(REFERENCE_SCENE_REVIEW_CHECKS.map(key => [key, true])) } };
+      f.manifest.imageAssets = [scene]; f.manifest.bodyImagePaths = [scene.path]; f.manifest.composition.sections[1].imagePaths = [scene.path];
+      f.manifest.composition.renderNodes.push({ kind: "image", sectionId: "scene", assetPath: scene.path } as never);
+      const oldStem = path.join(f.work, `raw-${"3".repeat(64)}`), oldThread = crypto.randomUUID(), oldWorkspace = `${oldStem}.codex-1`;
+      fs.mkdirSync(oldWorkspace); fs.copyFileSync(f.metadataPath, `${oldStem}.reference-scene.json`);
+      const native = path.join(process.env.CODEX_HOME!, "generated_images", oldThread); fs.mkdirSync(native, { recursive: true });
+      fs.writeFileSync(path.join(native, "old.png"), png("old visibly blank historical product")); fs.copyFileSync(path.join(native, "old.png"), `${oldStem}.png`);
+      const oldSha = fileHash(`${oldStem}.png`), oldReceipt = { ...JSON.parse(fs.readFileSync(f.receiptPath, "utf8")), threadId: oldThread, workspace: oldWorkspace };
+      fs.writeFileSync(`${oldStem}.codex-submission.json`, JSON.stringify(oldReceipt));
+      const oldRecords = structuredClone(f.records) as Array<{ timestamp: string; type: string; payload: Record<string, unknown> }>;
+      oldRecords[0].payload = { ...oldRecords[0].payload, id: oldThread, cwd: oldWorkspace };
+      const oldRollout = path.join(path.dirname(f.rollout), `rollout-test-${oldThread}.jsonl`); fs.writeFileSync(oldRollout, oldRecords.map(row => JSON.stringify(row)).join("\n") + "\n");
+      assert.ok(readCompletedProductRequest(oldStem)); checks++;
+      if (!competing) for (const suffix of [".png", ".reference-scene.json", ".codex-submission.json"]) fs.rmSync(`${oldStem}${suffix}`);
+      const comparison = { primaryReferenceImageIndex: 2, primaryReferenceSha256: fileHash(f.primary), primaryObservation: "selected shape and its button face",
+        candidateObservation: "readable wrong identifying brand", objectionKind: "conflicting-print", evidenceImageIndex: 3,
+        samePhysicalPart: true, samePhysicalSurface: false, sameSelectedVisibleOption: true,
+        referencePrintState: "present", candidatePrintState: "present", evidenceObservation: "selected actual brand on supplemental other face", basis: "source Voltium; candidate Voltum" };
+      const verdict = { accepted: false, identityMatches: false, referenceComparison: comparison }, plane = { primaryReferenceImageIndex: 2,
+        primaryReferenceSha256: fileHash(f.primary), supplementalReferences: [{ imageIndex: 3, sha256: fileHash(f.geometry) }] };
+      const policy = publicationImageAuditPolicyFingerprint();
+      const record = (row = verdict) => recordPublicationImageDefect({ manifest: f.manifest, sectionId: "scene", sha256: currentSha,
+        policyFingerprint: policy, requestBindingSha256: hash("actual native request bytes"), verdict: row, context: plane });
+      const target = () => generation.resolveBrandPostImageTarget(f.manifest, { requestId: "final-repair", sectionId: "scene", slotId: "scene:image:1", replaceAssetKey: currentSha });
+      const plan = () => planPublicationImageRetry({ manifest: f.manifest, target: target(), packageDir: dir, policyFingerprint: policy });
+      const ledgerPath = path.join(dir, "publish-image-rejections.json");
+      const ledger = [oldSha, currentSha].map(sha256 => ({ sha256, sectionId: "scene", context: publicationImageContext(f.manifest.composition, "scene"), scope: "product" }));
+      fs.writeFileSync(ledgerPath, JSON.stringify(ledger)); fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(f.manifest));
+      return { f, dir, currentSha, oldSha, oldStem, oldRollout, target, plan, record, verdict, policy, ledgerPath, ledger };
+    }
+    const finalRetry = await publicationFixture();
+    assert.equal(finalRetry.plan(), null, "generic rejection cannot authorize a request"); checks++;
+    finalRetry.record({ ...finalRetry.verdict, referenceComparison: { ...finalRetry.verdict.referenceComparison, objectionKind: "unresolved" } });
+    assert.equal(finalRetry.plan(), null, "uncertainty is not a concrete typed print defect"); checks++;
+    finalRetry.record(); const finalPlan = finalRetry.plan();
+    assert.equal(finalPlan?.parent.dispositions.length, 1); checks++;
+    const stableRecords = [finalRetry.f.metadataPath, finalRetry.f.receiptPath, finalRetry.f.rollout, `${finalRetry.f.original.outStem}.png`,
+      finalRetry.oldRollout].map(file => [file, fileHash(file)]);
+    const newView = { ...JSON.parse(fs.readFileSync(finalRetry.f.metadataPath, "utf8")).referenceContext.reference,
+      viewObservation: { subjectState: "freestanding", cameraView: "front", geometryVisibility: "complete", hiddenParts: [], intrinsicPrint: "readable", readableIdentifiers: ["Voltium"] } } as ShoppingSceneReference;
+    const freshTarget = finalRetry.target();
+    await generation.prepareBrandPostImageReferenceContext({ manifest: finalRetry.f.manifest, target: freshTarget, productName: "검정 제품" },
+      { collect: async () => [finalRetry.f.primary], select: async () => newView, selectSupporting: async () => [] });
+    assert.ok(freshTarget.referenceContext?.publicationRetryOf); assert.equal(freshTarget.referenceContext?.completedRequestRecovery, undefined); checks += 2;
+    const freshJob = generation.prepareImageBatchJobs([freshTarget], finalRetry.f.manifest, "검정 제품", finalRetry.f.work)[0];
+    assert.notEqual(freshJob.outStem, finalRetry.f.original.outStem); assert.notEqual(freshJob.outStem, finalRetry.oldStem); assert.equal(freshJob.reviewOnly, undefined); checks += 3;
+    const repeatTarget = finalRetry.target();
+    await generation.prepareBrandPostImageReferenceContext({ manifest: finalRetry.f.manifest, target: repeatTarget, productName: "검정 제품" },
+      { collect: async () => { throw new Error("repeat collection"); }, select: async () => { throw new Error("repeat source review"); } });
+    assert.equal(generation.prepareImageBatchJobs([repeatTarget], finalRetry.f.manifest, "검정 제품", finalRetry.f.work)[0].outStem, freshJob.outStem); checks++;
+    const childMetadataPath = `${freshJob.outStem}.reference-scene.json`, childMetadataBytes = fs.readFileSync(childMetadataPath);
+    const changedChild = JSON.parse(childMetadataBytes.toString()); changedChild.referenceContext.prompt += "different plan";
+    fs.writeFileSync(childMetadataPath, JSON.stringify(changedChild)); assert.throws(finalRetry.plan, /IMAGE_RESUME_REQUIRED/); checks++;
+    fs.writeFileSync(childMetadataPath, childMetadataBytes);
+    fs.writeFileSync(`${freshJob.outStem}.codex-submission.json`, JSON.stringify({ state: "submitting", workspace: `${freshJob.outStem}.codex-1`, startedAtMs: Date.now(), threadId: null }));
+    const pendingFinal = finalRetry.target();
+    await generation.prepareBrandPostImageReferenceContext({ manifest: finalRetry.f.manifest, target: pendingFinal, productName: "검정 제품" },
+      { collect: async () => { throw new Error("pending child cannot recollect"); }, select: async () => { throw new Error("pending child cannot reselect"); } });
+    assert.equal(generation.prepareImageBatchJobs([pendingFinal], finalRetry.f.manifest, "검정 제품", finalRetry.f.work)[0].outStem, freshJob.outStem); checks++;
+    fs.rmSync(`${freshJob.outStem}.codex-submission.json`);
+    const forgedChild = path.join(finalRetry.f.work, `raw-${"a".repeat(64)}`);
+    fs.copyFileSync(childMetadataPath, `${forgedChild}.reference-scene.json`); assert.throws(finalRetry.plan, /IMAGE_RESUME_REQUIRED/); checks++;
+    fs.rmSync(`${forgedChild}.reference-scene.json`);
+    for (const [file, expected] of stableRecords) { assert.equal(fileHash(file), expected); checks++; }
+    const competing = await publicationFixture(true); competing.record(); assert.throws(competing.plan, /IMAGE_RESUME_REQUIRED/); checks++;
+    for (const negative of ["unknown", "orphan", "budget", "changed-prompt", "unrejected", "changed-body", "tampered-proof", "unknown-lock"] as const) {
+      const f = await publicationFixture(); f.record();
+      if (negative === "unknown") {
+        const stem = path.join(f.f.work, `raw-${"9".repeat(64)}`); fs.copyFileSync(f.f.metadataPath, `${stem}.reference-scene.json`);
+        fs.writeFileSync(`${stem}.codex-submission.json`, JSON.stringify({ state: "submitting", workspace: `${stem}.codex-1`, startedAtMs: Date.now(), threadId: null }));
+      } else if (negative === "orphan") fs.writeFileSync(path.join(path.dirname(f.f.work), `raw-${"b".repeat(64)}.codex-submission.json`), "{}");
+      else if (negative === "unknown-lock") fs.writeFileSync(`${f.f.original.outStem}.lock`, "{}");
+      else if (negative === "budget") {
+        const receipt = JSON.parse(fs.readFileSync(f.f.receiptPath, "utf8")); receipt.generationBudget.observedCalls = 2;
+        fs.writeFileSync(f.f.receiptPath, JSON.stringify(receipt));
+      } else if (negative === "changed-prompt") {
+        fs.writeFileSync(f.f.rollout, fs.readFileSync(f.f.rollout, "utf8").replace("Reference and section data", "changed Reference and section data"));
+      } else if (negative === "unrejected") fs.writeFileSync(f.ledgerPath, JSON.stringify(f.ledger.filter(row => row.sha256 !== f.currentSha)));
+      else if (negative === "changed-body") f.f.manifest.composition.sections[1].body.push("changed");
+      else {
+        const proof = readPublicationImageDefect(f.f.manifest, "scene", f.currentSha, f.policy)!; const row = JSON.parse(fs.readFileSync(proof.path, "utf8"));
+        row.requestBindingSha256 = hash("tampered"); fs.writeFileSync(proof.path, JSON.stringify(row));
+      }
+      assert.throws(f.plan, /IMAGE_RESUME_REQUIRED/);
+      checks++;
+    }
+    const stale = await publicationFixture(); stale.record();
+    assert.throws(() => planPublicationImageRetry({ manifest: stale.f.manifest, target: stale.target(), packageDir: stale.dir,
+      policyFingerprint: hash("a different policy") }), /IMAGE_RESUME_REQUIRED/); checks++;
+    const brokenLocator = await publicationFixture(); brokenLocator.record();
+    const seenPath = path.join(root, "data/publication-image-defect-proofs", `seen-${hash(JSON.stringify({ id: brokenLocator.f.manifest.brandLinkId,
+      sectionId: "scene", sha256: brokenLocator.currentSha }))}.json`);
+    fs.writeFileSync(seenPath, "broken"); assert.throws(brokenLocator.plan, /IMAGE_RESUME_REQUIRED/); checks++;
     const recovered = await legacy.prepare();
     assert.equal(recovered.job.outStem, legacy.original.outStem); assert.ok(recovered.job.reviewOnly?.completedRequestRecovery);
     assert.equal(recovered.job.prompt, legacy.original.prompt); assert.equal(recovered.job.reviewOnly.candidateSet?.candidates.length, 1); legacy.unchanged(); checks += 4;

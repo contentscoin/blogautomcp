@@ -21,6 +21,8 @@ import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
 import { revalidateSavedBrandPostText, SavedTextRevalidationError } from "../src/lib/brand-post-revalidation";
 import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 import { shoppingPhotoRoleAt } from "../src/lib/shopping-post-strategy";
+import type { CodexDraftOptions } from "./lib/codex-draft-provider";
+import { referencePlaneFixtureRow } from "./test-fixtures/reference-plane-review";
 
 const load = (file: string, overrides: Record<string, unknown>, replacement?: (source: string) => string) => {
   const original = fs.readFileSync(file, "utf8");
@@ -123,11 +125,11 @@ async function main() {
       photoClaimObjection: { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" },
       notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true,
       noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", accepted: true });
-    const review = async (call: { userPrompt: string }) => {
+    const review = async (call: CodexDraftOptions) => {
       reviewCalls++;
       const line = call.userPrompt.split("\n").find(text => text.startsWith("Each attached image belongs ONLY"))!;
       const slots = JSON.parse(line.slice(line.indexOf("["))) as Array<{ index: number }>;
-      return JSON.stringify({ reviews: slots.map(row => good(row.index)) });
+      return JSON.stringify({ reviews: slots.map(row => referencePlaneFixtureRow(call, good(row.index))) });
     };
     const inputBytes = [photo, reference, markdown].map(file => fs.readFileSync(file));
     // An explicitly injected test reviewer intentionally cannot issue production
@@ -135,7 +137,7 @@ async function main() {
     // no-review-option path, including its real OS lock and HMAC storage.
     let reviewProvider = review;
     const productionAudit = load(path.resolve("scripts/lib/publish-image-audit.ts"), {
-      "./codex-draft-provider": { runCodexDraft: (call: { userPrompt: string }) => reviewProvider(call) },
+      "./codex-draft-provider": { runCodexDraft: (call: CodexDraftOptions) => reviewProvider(call) },
     });
     const productionPreflight = load(path.resolve("src/lib/brand-post-publish-preflight.ts"), {
       "../../scripts/lib/publish-image-audit": productionAudit,

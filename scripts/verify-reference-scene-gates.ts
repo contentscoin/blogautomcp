@@ -9,6 +9,7 @@ import { classifyBrandPostImageEvidence, referenceSceneReviewIssue, REFERENCE_SC
 import type { BrandPostPackageManifestV2, BrandPostPackageImageAsset } from "../src/lib/brand-post-package";
 import { isShoppingThumbnailSourceAspectAllowed, isShoppingThumbnailSourceEligible } from "./lib/thumbnail-layout-v2";
 import { collectShoppingProductSourceCandidates } from "./lib/product-photo-source";
+import { referencePlaneFixtureRow } from "./test-fixtures/reference-plane-review";
 
 const hash = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 async function main() {
@@ -286,12 +287,12 @@ async function main() {
     const visualReview = async (request: { userPrompt: string; imagePaths?: string[] }) => {
       assert(request.userPrompt.includes("adjacentCaption"));
       const line = request.userPrompt.split("\n").find(value => value.startsWith("Each attached image"))!;
-      const slots = JSON.parse(line.slice(line.indexOf("["))) as Array<{ role: string; visualContract: { purpose: string; claimPolicy: string } }>;
+      const slots = JSON.parse(line.slice(line.indexOf("["))) as Array<{ index: number; role: string; visualContract: { purpose: string; claimPolicy: string } }>;
       for (const slot of slots) {
         assert.equal(slot.visualContract.purpose, slot.role === "thumbnail" ? "thumbnail" : "lifestyle-illustration");
         assert.equal(slot.visualContract.claimPolicy, "visual-compatibility-and-explicit-photo-claims");
       }
-      return JSON.stringify({ reviews: request.imagePaths!.map((_, index) => ({ index: index + 1, accepted: true, identityMatches: true, photoClaimMatches: true, photoClaimObjection: { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" }, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "offline fixture" })) });
+      return JSON.stringify({ reviews: slots.map(slot => referencePlaneFixtureRow(request, { index: slot.index, accepted: true, identityMatches: true, photoClaimMatches: true, photoClaimObjection: { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" }, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "offline fixture" })) });
     };
     const audited = await auditPublishImages({ productName: "선택 상품", composition: updated.composition, imageAssets: updated.imageAssets, sourceSnapshotId: snapshot.snapshotId, review: visualReview });
     assert.equal(audited.ok, true);

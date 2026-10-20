@@ -13,6 +13,7 @@ import { readSuccessfulImageAuditReceipt as read, writeSuccessfulImageAuditRecei
 import type { PublishImageAuditOptions, PublishImageAuditResult } from "./lib/publish-image-audit";
 import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
+import { referencePlaneFixtureRow } from "./test-fixtures/reference-plane-review";
 
 const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "image-audit-receipt-"));
 const priorRoot = process.env.DESKTOP_USER_DATA;
@@ -71,9 +72,13 @@ async function main() {
     calls++;
     if (verdict === "auth") throw new Error("CODEX_AUTH_REQUIRED");
     const slotLine = request.userPrompt?.split("\n").find(line => line.startsWith("Each attached image belongs ONLY"));
-    const finalCount = slotLine ? JSON.parse(slotLine.slice(slotLine.indexOf("["))).length : request.imagePaths.length;
+    const slots = slotLine ? JSON.parse(slotLine.slice(slotLine.indexOf("["))) as Array<{ role: string; sectionBody: string[] }> : [];
+    const finalCount = slotLine ? slots.length : request.imagePaths.length;
     if (request.userPrompt) inspectRequest?.({ imagePaths: request.imagePaths, userPrompt: request.userPrompt });
-    return JSON.stringify({ reviews: request.imagePaths.slice(0, finalCount).map((_, index) => ({ index: index + 1, accepted: verdict === "accept", identityMatches: true, photoClaimMatches,
+    return JSON.stringify({ reviews: request.imagePaths.slice(0, finalCount).map((_, index) => referencePlaneFixtureRow({ userPrompt: request.userPrompt || "" }, { index: index + 1, accepted: verdict === "accept", identityMatches: true, photoClaimMatches,
+      photoClaimObjection: photoClaimMatches ? { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" }
+        : slots[index]?.role === "thumbnail" ? { origin: "thumbnail-headline", sourceIndex: null, quote: "Synthetic conflicting headline", scope: "pictured-appearance", conflict: "Offline adverse photo claim" }
+          : { origin: "section-body", sourceIndex: 0, quote: slots[index]?.sectionBody[0], scope: "pictured-appearance", conflict: "Offline adverse photo claim" },
       notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", reason: "fixture selected product" })) });
   };
   const ledgerProbes: Array<Promise<string>> = [];
@@ -109,7 +114,9 @@ async function main() {
   assert.equal((await audit(options)).receiptReused, true); assert.equal(calls, 1);
   await audit({ ...options, selectedProduct: "different option" }); assert.equal(calls, 2);
   await makeImage("black"); await audit(options); assert.equal(calls, 3);
-  const changedPolicy = load(source.replace("final-publication-image-audit/v2-natural-photo", "final-publication-image-audit/v3-test-policy"));
+  const changedPolicySource = source.replace(/final-publication-image-audit\/v[\w.-]+/u, "final-publication-image-audit/test-policy");
+  assert.notEqual(changedPolicySource, source, "the current policy marker must actually change");
+  const changedPolicy = load(changedPolicySource);
   await changedPolicy(options); assert.equal(calls, 4);
   const changedPrompt = load(source.replace("Every body image must be ONE natural photograph.", "Every body image must be ONE natural photograph with a changed review policy."));
   await changedPrompt(options); assert.equal(calls, 5);
@@ -225,7 +232,7 @@ async function main() {
     selectedSourceSnapshot: gallerySnapshot, selectedSourceProductId: "gallery-receipt", selectedSourceDirectory: fixtureRoot };
   inspectRequest = request => {
     assert.equal(request.imagePaths.length, 2, "exact cached whole-kit pixels are comparison-only alongside the final thumbnail");
-    assert.match(request.userPrompt, /role":"selected-gallery-comparison"/u);
+    assert.match(request.userPrompt, /role":"canonical-selected-source"/u);
     assert.match(request.userPrompt, /"selectedGalleryComparisonImageIndexes":\[2\]/u);
   };
   const beforeGallery = calls;
