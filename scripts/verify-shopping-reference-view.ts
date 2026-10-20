@@ -4,7 +4,7 @@ import Ajv from "ajv";
 import { buildShoppingPhotoHarness } from "./lib/shopping-photo-harness";
 import { buildShoppingReferenceScenePrompt, type ShoppingSceneReference } from "./lib/shopping-reference-scene";
 import { parseShoppingReferenceView, resolveShoppingReferenceView, SHOPPING_REFERENCE_VIEW_SCHEMA,
-  type ShoppingReferenceViewObservation } from "./lib/shopping-reference-view";
+  hasCompleteShoppingGeometryEvidence, type ShoppingReferenceViewObservation } from "./lib/shopping-reference-view";
 
 let checks = 0;
 const worn: ShoppingReferenceViewObservation = { subjectState: "worn", cameraView: "side", geometryVisibility: "partial",
@@ -93,10 +93,15 @@ assert.doesNotMatch(supported.shot.placement, /naturally worn/u); checks++;
 // A logo close-up, incomplete shape, or legacy support cannot unlock a new pose.
 for (const unsupported of [{ ...support, purpose: "intrinsic-label" as const },
   { ...support, viewObservation: { ...complete, geometryVisibility: "partial" as const } },
+  { ...support, viewObservation: { ...complete, hiddenParts: ["rear connection"] } },
+  { ...support, viewObservation: { ...complete, cameraView: "unknown" as const } },
+  { ...support, viewObservation: { ...complete, subjectState: "unknown" as const } },
   { ...support, viewObservation: undefined }]) {
   const actual = resolveShoppingReferenceView(reference, [unsupported]);
   assert.equal(actual.subjectState, "worn"); assert.equal(actual.presentationChangeSupported, false); checks++;
 }
+assert.equal(hasCompleteShoppingGeometryEvidence(support), true);
+assert.equal(hasCompleteShoppingGeometryEvidence({ viewObservation: worn }), false); checks += 2;
 const label = { ...support, purpose: "intrinsic-label" as const };
 const withLabel = resolveShoppingReferenceView(reference, [label]);
 assert.equal(withLabel.subjectState, "worn");

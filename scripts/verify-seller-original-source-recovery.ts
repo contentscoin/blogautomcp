@@ -138,8 +138,9 @@ async function main() {
         review: async request => {
           geometryCalls++;
           assert.deepEqual(request.imagePaths, [selected]);
-          return JSON.stringify({ identityMatches: true, geometryReadable: true, completeShape: true, notDeformed: true, unobstructed: true,
-            subject: "exact selected product", geometry: "complete observed silhouette", labels: "none visible", reason: "observed complete product" });
+          return JSON.stringify({ identityMatches: true, geometryReadable: true, observedViewSufficient: true, completeShape: true, notDeformed: true, unobstructed: true,
+            subject: "exact selected product", geometry: "complete observed silhouette", labels: "none visible", reason: "observed complete product",
+            viewObservation: { subjectState: "freestanding", cameraView: "front", geometryVisibility: "complete", hiddenParts: [], intrinsicPrint: "absent", readableIdentifiers: [] } });
         },
       });
       assert.equal(reference.path, selected);

@@ -49,7 +49,9 @@ async function main() {
       geometry: "partly visible rear band", labels: "tiny intrinsic print unreadable; NEW is external artwork", reviewedAt: new Date().toISOString() };
     const row = (index: number, purpose: "geometry" | "intrinsic-label") => ({ index, purpose, identityMatches: true,
       sameVisibleOption: true, geometryConsistent: true, intrinsicPrintingConsistent: true, detailsVisible: true,
-      subject: "same black headset", geometry: "continuous band and matching ear unit", labels: "actual intrinsic logo", reason: "same visible colour and physical landmarks" });
+      subject: "same black headset", geometry: "continuous band and matching ear unit", labels: "actual intrinsic logo", reason: "same visible colour and physical landmarks",
+      viewObservation: { subjectState: "freestanding", cameraView: "three-quarter", geometryVisibility: purpose === "geometry" ? "complete" : "partial",
+        hiddenParts: purpose === "geometry" ? [] : ["far ear unit outside this logo detail"], intrinsicPrint: "readable", readableIdentifiers: ["Source logo"] } });
     const selection = { reference, candidates: [shape, logo], sourceSnapshotId: snapshot.snapshotId,
       sourceImageUrls: snapshot.product.referenceImageUrls as string[], selectedProduct: "검정 오픈형 이어폰; black option" };
     const supporting = await selectShoppingSceneSupportingReferences(selection, { review: async call => {

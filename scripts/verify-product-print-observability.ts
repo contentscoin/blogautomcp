@@ -97,7 +97,7 @@ async function main() {
     assert.equal(consistencyCalls, 2); cases++;
     const selected = await selectShoppingSceneReference({ paths: [referencePath], productName: "print-observation-source", selectedProduct: "selected wearable" }, {
       verify: async paths => paths, review: async call => { assertRule(call);
-        return JSON.stringify({ identityMatches: true, geometryReadable: true, completeShape: true, notDeformed: true, unobstructed: true,
+        return JSON.stringify({ identityMatches: true, geometryReadable: true, observedViewSufficient: true, completeShape: false, notDeformed: true, unobstructed: false,
           subject: reference.subject, geometry: reference.geometry, labels: reference.labels, reason: "Distinctive source geometry is resolved without pretending to read tiny marks",
           viewObservation: { subjectState: "worn", cameraView: "side", geometryVisibility: "partial", hiddenParts: ["opposite side"], intrinsicPrint: "unreadable", readableIdentifiers: [] } }); },
     }); assert.equal(selected.viewObservation?.intrinsicPrint, "unreadable"); assert.deepEqual(selected.viewObservation?.readableIdentifiers, []); cases++;

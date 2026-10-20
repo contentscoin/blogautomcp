@@ -41,7 +41,9 @@ import type { ShoppingSceneFidelityFailure } from "../../scripts/lib/shopping-re
 import { assertCompletedContextRecovery, recoverCompletedShoppingContext } from "./brand-post-completed-context";
 import { readCanonicalSellerSourceHashes } from "../../scripts/lib/canonical-seller-source";
 import { readProductSnapshot } from "./draft-context-snapshot";
-import { PRODUCT_IMAGE_PRINT_OBSERVABILITY_RULE_EN, PRODUCT_IMAGE_PRINT_OBSERVABILITY_RULE_VERSION } from "../../scripts/lib/product-image-visual-contract";
+import { PRODUCT_IMAGE_PRINT_OBSERVABILITY_RULE_EN, PRODUCT_IMAGE_PRINT_OBSERVABILITY_RULE_VERSION,
+  PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_RULE_EN, PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_RULE_KO,
+  PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_VERSION } from "../../scripts/lib/product-image-visual-contract";
 
 const CHATGPT_BASE_URL = "https://chatgpt.com/";
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
@@ -1946,8 +1948,18 @@ export async function completedHeroReviewBinding(manifest: BrandPostPackageManif
   if (!job.reviewOnly) throw new Error("IMAGE_RESUME_REQUIRED: 증명된 완료 사진만 재검수할 수 있습니다.");
   if (job.reviewOnly.candidateSet) validatedReviewCandidateSet(job); else reviewOnlyImageResult(job);
   const actualRequest = completedHeroPolicyRequestProof(job);
+  const referenceContext = target.referenceContext!;
   return crypto.createHash("sha256").update(JSON.stringify({ version: "completed-hero-policy-review/v1",
     policy: PRODUCT_IMAGE_PRINT_OBSERVABILITY_RULE_VERSION, policySha256: crypto.createHash("sha256").update(PRODUCT_IMAGE_PRINT_OBSERVABILITY_RULE_EN).digest("hex"),
+    referenceEvidenceScope: { version: PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_VERSION,
+      rulesSha256: crypto.createHash("sha256").update(JSON.stringify({ en: PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_RULE_EN,
+        ko: PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_RULE_KO })).digest("hex"),
+      primary: { path: referenceContext.reference.path, sha256: referenceContext.reference.sha256,
+        viewObservation: referenceContext.reference.viewObservation ?? null },
+      supporting: (referenceContext.supportingReferences || []).map(reference => ({ purpose: reference.purpose,
+        path: reference.path, sha256: reference.sha256, sourceSnapshotId: reference.sourceSnapshotId,
+        sourceUrl: reference.sourceUrl, receiptPath: reference.receiptPath, receiptSha256: reference.receiptSha256,
+        viewObservation: reference.viewObservation ?? null })) },
     snapshot: manifest.sourceSnapshot, currentHeroSha256: heroes[0].sha256,
     publicationContext: publicationImageContext(manifest.composition, null), copy: thumbnailCopyBinding(manifest, productName),
     metadataSha256: sha256File(`${job.outStem}.reference-scene.json`), prompt: job.prompt, references: job.requiredReferenceHashes,

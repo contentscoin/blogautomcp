@@ -53,6 +53,13 @@ export function parseShoppingReferenceView(value: unknown): ShoppingReferenceVie
 }
 
 type Reference = { sha256: string; viewObservation?: ShoppingReferenceViewObservation };
+/** Typed coverage, never a source-provenance or prose claim. Unknown/partial
+ * legacy observations cannot grant whole-shape or presentation authority. */
+export function hasCompleteShoppingGeometryEvidence(reference: { viewObservation?: ShoppingReferenceViewObservation }): boolean {
+  const view = parseShoppingReferenceView(reference.viewObservation);
+  return Boolean(view && view.geometryVisibility === "complete" && view.hiddenParts.length === 0 &&
+    view.subjectState !== "unknown" && view.cameraView !== "unknown");
+}
 export function resolveShoppingReferenceView(primary: Reference | undefined,
   supports: readonly (Reference & { purpose: "geometry" | "intrinsic-label" })[] = []) {
   const observation = parseShoppingReferenceView(primary?.viewObservation);
@@ -60,7 +67,7 @@ export function resolveShoppingReferenceView(primary: Reference | undefined,
   // authorize changing a worn/held product into a separate physical object.
   const geometrySupport = supports.find(reference => {
     const view = parseShoppingReferenceView(reference.viewObservation);
-    return reference.purpose === "geometry" && view?.geometryVisibility === "complete" &&
+    return reference.purpose === "geometry" && hasCompleteShoppingGeometryEvidence(reference) && view &&
       ["freestanding", "laid-flat", "hanging"].includes(view.subjectState);
   });
   const geometry = geometrySupport?.viewObservation ?? observation;

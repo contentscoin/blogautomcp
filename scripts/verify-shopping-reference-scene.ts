@@ -39,12 +39,12 @@ async function main() {
       },
       review: async call => {
         assert.match(call.userPrompt, /generation-reference INPUT ONLY, never approved for publication/u);
-        assert.match(call.userPrompt, /one whole exact selected product is clearly identifiable, unobstructed, geometrically readable/u);
+        assert.match(call.userPrompt, /one exact selected subject is clearly identifiable in its actually observed view/u);
         assert.match(call.userPrompt, /This input exception never permits added text, graphic frames or panels in generated\/published outputs/u);
         const schema = call.outputSchema as { properties: Record<string, { description?: string }> };
         assert.match(schema.properties.geometryReadable.description!, /generation-reference INPUT ONLY/u);
         reviewed.push(call.imagePaths!);
-        return JSON.stringify({ identityMatches: true, geometryReadable: call.imagePaths![0] === front,
+        return JSON.stringify({ identityMatches: true, geometryReadable: call.imagePaths![0] === front, observedViewSufficient: true,
           completeShape: true, notDeformed: true, unobstructed: true,
           subject: "right-hand intact front-facing instance", geometry: "level seal; centered short cap; 2.3:1 ratio", labels: "brand above original product line", reason: "visible whole front", viewObservation: frontView });
       },
@@ -52,7 +52,7 @@ async function main() {
     assert.equal(reference.path, front, "an unreadable severely foreshortened original must not become the geometry reference");
     assert.deepEqual(reviewed, [[angled], [front]]);
     assert.deepEqual(reference.viewObservation, frontView, "generation receives the actual observed pose and identifying print");
-    const referenceVerdict = { identityMatches: true, geometryReadable: true, completeShape: true,
+    const referenceVerdict = { identityMatches: true, geometryReadable: true, observedViewSufficient: true, completeShape: true,
       notDeformed: true, unobstructed: true, subject: "complete exact selected item",
       geometry: "intact identifying silhouette and real proportions", labels: "none visible", reason: "specific visible item observations",
       viewObservation: { ...frontView, intrinsicPrint: "absent", readableIdentifiers: [] } };
@@ -83,7 +83,7 @@ async function main() {
     });
     assert.deepEqual(receivedRejections, [sourceRejection, geometryRejection]);
     const malformedReferenceAnswers: unknown[] = [null, [], {}, { ...referenceVerdict, reason: " " }, { ...referenceVerdict, subject: 1 }];
-    for (const check of ["identityMatches", "geometryReadable", "completeShape", "notDeformed", "unobstructed"])
+    for (const check of ["identityMatches", "geometryReadable", "observedViewSufficient", "completeShape", "notDeformed", "unobstructed"])
       for (const invalid of [undefined, "true", "false", null, 1]) malformedReferenceAnswers.push({ ...referenceVerdict, [check]: invalid });
     for (const field of ["subject", "geometry", "labels", "reason"])
       for (const invalid of [undefined, " ", null, 1]) malformedReferenceAnswers.push({ ...referenceVerdict, [field]: invalid });
@@ -147,11 +147,11 @@ async function main() {
       verify: async paths => paths,
       review: async call => {
         assert.match(call.userPrompt, /normal pose, fabric folds or a moderate oblique view is allowed/u);
-        return JSON.stringify({ identityMatches: true, geometryReadable: true, frontFacing: false,
-          completeShape: true, notDeformed: true, unobstructed: true, subject: "person walking in charcoal trousers",
+        return JSON.stringify({ identityMatches: true, geometryReadable: true, observedViewSufficient: true, frontFacing: false,
+          completeShape: false, notDeformed: true, unobstructed: false, subject: "person walking in charcoal trousers",
           geometry: "wide legs, elastic waist, hems and pockets visible with natural folds", labels: "none visible",
           reason: "the selected garment has an intact silhouette in a natural walking pose",
-          viewObservation: { subjectState: "worn", cameraView: "side", geometryVisibility: "complete", hiddenParts: ["rear seam"], intrinsicPrint: "absent", readableIdentifiers: [] } });
+          viewObservation: { subjectState: "worn", cameraView: "side", geometryVisibility: "partial", hiddenParts: ["rear seam"], intrinsicPrint: "absent", readableIdentifiers: [] } });
       },
     });
     assert.equal(garment.path, walkingGarment, "natural garment poses do not need a packaging front view");
@@ -781,7 +781,7 @@ async function main() {
       childProcess.spawn = originalSpawn;
       syncBuiltinESMExports();
     }
-    console.log(`PASS: bounded exact-input verdict consistency (${consistencyCases} cases, zero generation calls; repeated contradictions hold, real negative gates reject, pixel/receipt/context/order mutations abort), numbered attachment scope (${attachmentScopeCases} offline cases, candidate defects/adverse verdicts still block), current-pair finalization (${currentPairCases} offline cases, adverse booleans/comparisons still block), correlated provider comparison schema (${schemaCases} cases; exact Cuckoo/Aveeno invalid pairs rejected and correctly paired allowed variations approved), strict reference selection (47 invalid boolean/observation responses, uncached retry, stage/SHA/reason diagnostics), optical reflection contract (${reflectionCases} cases, inconsistent verdicts hold), structured intrinsic/photographic difference QA (6 allowed variations, 7 real contradictions), two-image fail-closed checks, ordered attachments, existing passed-v2 compatibility, stable original/approved anchor, stale anchor rejection, recipe invalidation, evidence boundary`);
+    console.log(`PASS: bounded exact-input verdict consistency (${consistencyCases} cases, zero generation calls; repeated contradictions hold, real negative gates reject, pixel/receipt/context/order mutations abort), numbered attachment scope (${attachmentScopeCases} offline cases, candidate defects/adverse verdicts still block), current-pair finalization (${currentPairCases} offline cases, adverse booleans/comparisons still block), correlated provider comparison schema (${schemaCases} cases; exact Cuckoo/Aveeno invalid pairs rejected and correctly paired allowed variations approved), strict reference selection (${malformedReferenceAnswers.length} invalid boolean/observation responses, uncached retry, stage/SHA/reason diagnostics), optical reflection contract (${reflectionCases} cases, inconsistent verdicts hold), structured intrinsic/photographic difference QA (6 allowed variations, 7 real contradictions), two-image fail-closed checks, ordered attachments, existing passed-v2 compatibility, stable original/approved anchor, stale anchor rejection, recipe invalidation, evidence boundary`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
 void main().catch(error => { console.error(error); process.exitCode = 1; });

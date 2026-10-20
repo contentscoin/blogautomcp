@@ -21,8 +21,9 @@ import { isBrandPostImageRepairActive, planSectionImageRequests, planWholeBrandP
 import { describeShoppingImageReplanFailure, replanShoppingImageCoverage } from "@/lib/brand-post-image-replan";
 import { migrateShoppingNaturalPhotoPlan, requiresShoppingNaturalPhotoPlan } from "@/lib/brand-post-natural-photo-migration";
 import { planRejectedOriginalRepair } from "@/lib/brand-post-rejected-original-repair";
+import { restoreRetainedBrandPostScene } from "@/lib/brand-post-retained-scene";
 
-const IMAGE_ACTIONS = ["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources", "repair_rejected", "repair_rejected_originals", "review_completed_hero", "replan_sources"] as const;
+const IMAGE_ACTIONS = ["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources", "repair_rejected", "repair_rejected_originals", "review_completed_hero", "restore_retained_scene", "replan_sources"] as const;
 type ImageAction = (typeof IMAGE_ACTIONS)[number];
 const IMAGE_REPAIR_CONFLICT_CODES = ["IMAGE_REPAIR_BUSY", "IMAGE_REPAIR_OWNERSHIP_LOST", "NATURAL_IMAGE_PLAN_REQUIRED"] as const;
 
@@ -122,6 +123,8 @@ export async function POST(
     referenceHashes?: string[];
     batchSize?: number;
     refreshSourcePhotos?: boolean;
+    backupJobId?: string;
+    retainedSha256?: string;
   };
   if (!body.action || !IMAGE_ACTIONS.includes(body.action)) {
     return NextResponse.json({ success: false, error: "지원하지 않는 이미지 작업입니다." }, { status: 400 });
@@ -178,6 +181,20 @@ export async function POST(
   }
 
   const preview = packagePreview(manifest);
+  if (body.action === "restore_retained_scene") {
+    const finishRestore = beginDesktopActivity("brand-post-retained-scene-restore");
+    try {
+      const restored = await restoreRetainedBrandPostScene({ brandLinkId: id, backupJobId: body.backupJobId,
+        sectionId: body.sectionId, currentAssetKey: body.assetKey, retainedSha256: body.retainedSha256 });
+      return NextResponse.json({ success: true, data: packagePreview(restored.manifest), generatedCount: 0,
+        alreadyRestored: restored.alreadyRestored, restoredSha256: restored.restoredSha256,
+        message: "기존 사진과 원래 검수 이력을 해당 슬롯에 복원했습니다. 최종 원고·사진 재검사와 승인이 필요합니다." });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const code = (error as { code?: string }).code || imageFailureCode([message]) || "RETAINED_SCENE_RESTORE_INVALID";
+      return NextResponse.json({ success: false, code, error: message }, { status: imageFailureStatus(code, 422) });
+    } finally { finishRestore(); }
+  }
   if (body.action === "replan_sources") {
     const finishReplan = beginDesktopActivity("brand-post-image-replan");
     try {

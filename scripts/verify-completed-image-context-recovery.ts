@@ -15,6 +15,11 @@ import { buildCodexImageInstruction, readCompletedProductRequest } from "../src/
 import { testPngFixture } from "./lib/test-png-fixture";
 import { runRecordedImageRecovery, imageRecoverySignature, IMAGE_RECOVERY_POLICY_VERSION } from "./lib/material-image-recovery";
 import { runMaterialPreparation, type Call, type Result } from "./lib/scheduled-draft-workflow";
+import { publicationImageContext } from "./lib/publish-image-rejections";
+import { buildProductThumbnailCopy } from "./lib/product-thumbnail";
+import { PRODUCT_IMAGE_PRINT_OBSERVABILITY_RULE_EN, PRODUCT_IMAGE_PRINT_OBSERVABILITY_RULE_VERSION,
+  PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_RULE_EN, PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_RULE_KO,
+  PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_VERSION } from "./lib/product-image-visual-contract";
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "completed-image-context-"));
@@ -28,7 +33,7 @@ async function main() {
   try {
     const generation = await import("../src/lib/brand-post-image-generation");
     const { getBrandPostPackageDir } = await import("../src/lib/brand-post-package");
-    async function fixture(mode: "legacy" | "receipt" | "hero" = "legacy") {
+    async function fixture(mode: "legacy" | "receipt" | "hero" = "legacy", legacyPartialSupport = false) {
       const id = crypto.randomUUID(), dir = getBrandPostPackageDir(id), sources = path.join(dir, "product-sources");
       fs.mkdirSync(sources, { recursive: true });
       const primary = path.join(sources, "primary.png"), geometry = path.join(sources, "geometry.png");
@@ -44,6 +49,8 @@ async function main() {
       const support: ShoppingSceneSupportingReference = { path: geometry, sha256: fileHash(geometry), sourceUrl: urls[1], sourceSnapshotId: snapshot.snapshotId,
         receiptPath: `${geometry}.retrieval.json`, receiptSha256: fileHash(`${geometry}.retrieval.json`), purpose: "geometry", subject: "same selected product",
         geometry: "its exact side structure", labels: "none", reason: "matches same visible option", reviewedAt: new Date(Date.now() - 50000).toISOString() };
+      if (legacyPartialSupport) support.viewObservation = { subjectState: "worn", cameraView: "side", geometryVisibility: "partial",
+        hiddenParts: ["rear connection"], intrinsicPrint: "readable", readableIdentifiers: ["Voltium"] };
       const sections = ["original", "scene", "text"].map((sectionId, index) => ({ id: sectionId, title: `제목 ${index}`, body: [`원문 ${index}`],
         imagePaths: [], imageMin: index === 1 ? 1 : 0, imageMax: index === 1 ? 1 : 0, imageSource: index === 1 ? "staged-ai" : "none",
         imageIntent: "AI 연출 이미지", promptRecipe: "확인된 전체 제품을 보존" }));
@@ -59,13 +66,14 @@ async function main() {
       }
       const target = (): ResolvedImageTarget => generation.resolveBrandPostImageTarget(manifest,
         mode === "hero" ? { requestId: "fixture", replaceAssetKey: fileHash(primary), slotId: "hero:image:1" } : { requestId: "fixture", sectionId: "scene", slotId: "scene:image:1" });
-      const deps = { collect: async () => [primary], select: async () => reference, selectSupporting: async () => mode === "receipt" ? [support] : [] };
+      const includeSupport = mode === "receipt" || legacyPartialSupport;
+      const deps = { collect: async () => [primary], select: async () => reference, selectSupporting: async () => includeSupport ? [support] : [] };
       const originalTarget = target();
       const context = await generation.prepareBrandPostImageReferenceContext({ manifest, productName: "검정 제품", target: originalTarget }, deps);
       const oldOptions = { productName: "검정 제품", sectionTitle: originalTarget.sectionTitle, imageIntent: originalTarget.imageIntent, bodyExcerpt: originalTarget.bodyExcerpt,
         stagingRecipe: originalTarget.promptRecipe, role: originalTarget.role, variantIndex: mode === "hero" ? 0 : 2, adjacentSectionTitles: mode === "hero" ? [] : [sections[0].title, sections[2].title],
         physicalScale: manifest.productUnderstanding!.concept.physicalScale, productImageDirective: manifest.productUnderstanding!.policy.imageDirective };
-      context.prompt = buildShoppingReferenceScenePrompt({ ...oldOptions, reference, hasAnchor: false, supportingReferences: mode === "receipt" ? [support] : [] });
+      context.prompt = buildShoppingReferenceScenePrompt({ ...oldOptions, reference, hasAnchor: false, supportingReferences: includeSupport ? [support] : [] });
       context.preparationBinding = hash(JSON.stringify({ snapshotId: snapshot.snapshotId,
         selectedProduct: selectedProductContextFrom9Canvas(manifest.productUnderstanding!), promptOptions: oldOptions }));
       const work = path.join(dir, "image-generation-work/resume-v2");
@@ -247,6 +255,44 @@ async function main() {
     assert.equal((await runRecordedImageRecovery(hero.manifest.brandLinkId, "review-completed-hero", async () => { policyReviews++; }, { thumbnailAssetKey: fileHash(hero.primary) })).attempted, false);
     assert.equal(policyReviews, 1); assert.deepEqual(JSON.parse(fs.readFileSync(historyPath, "utf8")).entries[0], historical);
     assert.equal(IMAGE_RECOVERY_POLICY_VERSION, 10); hero.unchanged(); checks += 6;
+    // A changed evidence-scope QA policy can review the exact same completed
+    // pixels once. Legacy partial geometry metadata is retained verbatim and
+    // grants neither a complete-shape assertion nor another image generation.
+    const scopedHero = await fixture("hero", true), scopedPrepared = await scopedHero.prepare();
+    const scopedBinding = await generation.completedHeroReviewBinding(scopedHero.manifest, "검정 제품");
+    const scopedContext = scopedPrepared.target.referenceContext!;
+    const evidenceScope = { version: PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_VERSION,
+      rulesSha256: hash(JSON.stringify({ en: PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_RULE_EN, ko: PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_RULE_KO })),
+      primary: { path: scopedContext.reference.path, sha256: scopedContext.reference.sha256, viewObservation: scopedContext.reference.viewObservation ?? null },
+      supporting: scopedContext.supportingReferences!.map(reference => ({ purpose: reference.purpose, path: reference.path, sha256: reference.sha256,
+        sourceSnapshotId: reference.sourceSnapshotId, sourceUrl: reference.sourceUrl, receiptPath: reference.receiptPath,
+        receiptSha256: reference.receiptSha256, viewObservation: reference.viewObservation ?? null })) };
+    const scopeBinding = (scope?: typeof evidenceScope) => hash(JSON.stringify({ version: "completed-hero-policy-review/v1",
+      policy: PRODUCT_IMAGE_PRINT_OBSERVABILITY_RULE_VERSION, policySha256: hash(PRODUCT_IMAGE_PRINT_OBSERVABILITY_RULE_EN),
+      ...(scope ? { referenceEvidenceScope: scope } : {}), snapshot: scopedHero.manifest.sourceSnapshot, currentHeroSha256: fileHash(scopedHero.primary),
+      publicationContext: publicationImageContext(scopedHero.manifest.composition, null), copy: hash(JSON.stringify({ title: scopedHero.manifest.title,
+        productName: "검정 제품", copy: buildProductThumbnailCopy(scopedHero.manifest.title, "검정 제품", "SHOPPING", scopedHero.manifest.productUnderstanding), style: "shopping-bold" })),
+      metadataSha256: fileHash(scopedHero.metadataPath), prompt: scopedPrepared.job.prompt, references: scopedPrepared.job.requiredReferenceHashes,
+      reviewOnly: scopedPrepared.job.reviewOnly, actualRequest: readCompletedProductRequest(scopedPrepared.job.outStem) }));
+    assert.equal(scopedBinding, scopeBinding(evidenceScope)); assert.notEqual(scopedBinding, scopeBinding());
+    assert.notEqual(scopedBinding, scopeBinding({ ...evidenceScope, rulesSha256: hash(PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_RULE_EN) }));
+    const wrongRoleScope = structuredClone(evidenceScope); wrongRoleScope.supporting[0].purpose = "intrinsic-label";
+    assert.notEqual(scopedBinding, scopeBinding(wrongRoleScope));
+    const wrongViewScope = structuredClone(evidenceScope); wrongViewScope.supporting[0].viewObservation!.hiddenParts = [];
+    assert.notEqual(scopedBinding, scopeBinding(wrongViewScope)); checks += 5;
+    const scopedRoot = path.dirname(path.dirname(scopedHero.work)), scopedManifestFile = path.join(scopedRoot, "manifest.json"), scopedHistoryFile = path.join(scopedRoot, "image-recovery-history.json");
+    fs.writeFileSync(scopedManifestFile, JSON.stringify(scopedHero.manifest));
+    const scopedBase = imageRecoverySignature(scopedRoot), previousPolicy = hash(JSON.stringify({ base: scopedBase, completedHeroReviewBinding: scopeBinding() }));
+    const oldReview = { stage: "review-completed-hero", input: previousPolicy, output: previousPolicy, status: "complete", at: "2026-10-20T17:33:49.576Z",
+      completedHeroReviewBinding: scopeBinding() };
+    fs.writeFileSync(scopedHistoryFile, JSON.stringify({ version: 1, entries: [oldReview] }));
+    let scopeReviews = 0;
+    assert.equal((await runRecordedImageRecovery(scopedHero.manifest.brandLinkId, "review-completed-hero", async () => { scopeReviews++; },
+      { thumbnailAssetKey: fileHash(scopedHero.primary) })).attempted, true);
+    assert.equal((await runRecordedImageRecovery(scopedHero.manifest.brandLinkId, "review-completed-hero", async () => { scopeReviews++; },
+      { thumbnailAssetKey: fileHash(scopedHero.primary) })).attempted, false);
+    assert.equal(scopeReviews, 1); assert.deepEqual(JSON.parse(fs.readFileSync(scopedHistoryFile, "utf8")).entries[0], oldReview);
+    assert.equal(imageRecoverySignature(scopedRoot), scopedBase); scopedHero.unchanged(); checks += 5;
     const jobCount = fs.readdirSync(hero.work).filter(name => name.endsWith(".reference-scene.json")).length;
     const unrelated = { ...heroPrepared.target, request: { ...heroPrepared.target.request, slotId: "hero:image:2" } };
     assert.throws(() => generation.prepareImageBatchJobs([unrelated], hero.manifest, "검정 제품", hero.work, { completedReviewOnly: true }), /IMAGE_RESUME_REQUIRED/);
