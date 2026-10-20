@@ -16,6 +16,7 @@ export interface Result {
   success: boolean; code?: string; causeCode?: string; error?: string; errors?: string[]; message?: string;
   approvalConflict?: { gate: "status" | "compare-and-set"; claimAcquired: false; observedStatus: string; expectedStatus?: string; observedUpdatedAt?: string };
   recovery?: { changed: boolean }; remainingMissing?: number;
+  generatedCount?: number; appliedCount?: number;
   imageAuditFailures?: { code: string; sectionId?: string | null; rejectionScope?: string; findingKey?: string; photoDescription?: PhotoDescriptionFinding; photoClaimMismatchOnly?: true }[];
   data?: {
     status?: string; postUrl?: string; scheduledPublishAt?: string; errorMessage?: string;
@@ -660,10 +661,37 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
   }
 
   let photoDescriptionRepaired = false;
+  let originalPhotoRepairAttempted = false;
   const repairAuditedPhotoDescription = async (error: unknown): Promise<boolean> => {
     if (!isDefinitivePublishImageFailure(error)) return false;
     const findings = (error as { imageAuditFailures?: Result["imageAuditFailures"] }).imageAuditFailures;
     if (!findings || findings.length === 0) return false;
+    // Preserve the manuscript when an intact seller original is the sole
+    // mismatch: rebind ONLY that actually rejected source slot, once. The
+    // server independently checks the persisted exact-body/SHA rejection and
+    // canonical provenance; reviewer prose/section IDs cannot authorize it.
+    const originalSections = [...new Set(findings.map(failure => failure.sectionId))];
+    const originalPhotoOnly = originalSections.length === 1 && typeof originalSections[0] === "string" && findings.every(failure =>
+      failure.code === "SEMANTIC_REJECTION" && failure.rejectionScope === "section" && failure.photoClaimMismatchOnly === true) &&
+      draft.data?.composition?.sections.some(section => section.id === originalSections[0] && section.imageSource === "seller-original");
+    if (originalPhotoOnly) {
+      if (originalPhotoRepairAttempted) throw error;
+      originalPhotoRepairAttempted = true;
+      deps.onStage?.("원고 보존 · 본문과 다른 원본 사진 슬롯만 검증 판매자 사진으로 재배정");
+      const recovered = await runRecordedImageRecovery(id, "repair-rejected-original", () =>
+        claimedCall(`${base}/draft/images`, "POST", { action: "repair_rejected_originals", sectionId: originalSections[0] }));
+      if (!recovered.attempted) throw error;
+      const result = recovered.result;
+      if (!result?.success || result.generatedCount !== 0 || result.appliedCount !== 1 || result.errors?.length) {
+        throw Object.assign(new Error("본문과 맞는 검증 판매자 대체 원본을 확정하지 못했습니다. 기존 원고·사진을 보존했으며 추가 생성하지 않았습니다."), {
+          code: "PHOTO_DESCRIPTION_REPAIR_REQUIRED", causeCode: "PUBLISH_IMAGE_AUDIT_FAILED", imageAuditFailures: findings,
+        });
+      }
+      draft = await deps.call(`${base}/draft`, "GET");
+      plan = await recheck(false, revised ? 1 : 0);
+      if (plan.action !== "complete") throw unresolvedCompositionError(plan.reason);
+      return true;
+    }
     if (findings.length > 12 || !findings.every(failure =>
       failure.code === "SEMANTIC_REJECTION" && failure.rejectionScope === "section" &&
       failure.photoDescription?.category === "photo-description-mismatch" && /^[a-f0-9]{64}$/u.test(failure.findingKey || ""))) {

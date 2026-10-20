@@ -20,8 +20,9 @@ import {
 import { isBrandPostImageRepairActive, planSectionImageRequests, planWholeBrandPostImageRequests, repairBrandPostImages } from "@/lib/brand-post-image-repair";
 import { describeShoppingImageReplanFailure, replanShoppingImageCoverage } from "@/lib/brand-post-image-replan";
 import { migrateShoppingNaturalPhotoPlan, requiresShoppingNaturalPhotoPlan } from "@/lib/brand-post-natural-photo-migration";
+import { planRejectedOriginalRepair } from "@/lib/brand-post-rejected-original-repair";
 
-const IMAGE_ACTIONS = ["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources", "repair_rejected", "replan_sources"] as const;
+const IMAGE_ACTIONS = ["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources", "repair_rejected", "repair_rejected_originals", "replan_sources"] as const;
 type ImageAction = (typeof IMAGE_ACTIONS)[number];
 const IMAGE_REPAIR_CONFLICT_CODES = ["IMAGE_REPAIR_BUSY", "IMAGE_REPAIR_OWNERSHIP_LOST", "NATURAL_IMAGE_PLAN_REQUIRED"] as const;
 
@@ -31,7 +32,7 @@ function imageFailureCode(errors: string[]): string | undefined {
     "CODEX_AUTH_REQUIRED", "CODEX_LOGIN_REQUIRED", "CODEX_MODEL_INCOMPATIBLE", "LLM_UNAVAILABLE",
     "CHATGPT_BROWSER_AUTH_REQUIRED", "CHATGPT_BROWSER_AUTOMATION_DISABLED", "CHATGPT_BROWSER_UNREACHABLE",
     "CHATGPT_BROWSER_BUSY", "IMAGE_RESUME_REQUIRED", "IMAGE_OUTPUT_REJECTED", "IMAGE_PROVIDER_REFUSED", "PRODUCT_CUTOUT_REQUIRED",
-    "SOURCE_REVIEW_INCOMPLETE", "SOURCE_REVIEW_CONFLICT", "IMAGE_SOURCE_BINDING_REQUIRED", "IMAGE_GENERATION_REQUIRED", "PRODUCT_SOURCE_REQUIRED", "PRODUCT_SOURCE_DOWNLOAD_FAILED",
+    "REJECTED_ORIGINAL_REPAIR_INVALID", "SOURCE_REVIEW_INCOMPLETE", "SOURCE_REVIEW_CONFLICT", "IMAGE_SOURCE_BINDING_REQUIRED", "IMAGE_GENERATION_REQUIRED", "PRODUCT_SOURCE_REQUIRED", "PRODUCT_SOURCE_DOWNLOAD_FAILED",
     "PRODUCT_SNAPSHOT_REQUIRED", "PRODUCT_FRONT_REFERENCE_REQUIRED", "PRODUCT_REFERENCE_REQUIRED", "PRODUCT_REFERENCE_CHANGED", "PRODUCT_REFERENCE_NOT_PREPARED",
     "EXTERNAL_IMAGE_LEDGER_INVALID", "PRODUCT_REFERENCE_SCENE_NOT_ALLOWED", "REFERENCE_SCENE_NOT_EVIDENCE", "REFERENCE_SCENE_REVIEW_INVALID", "REFERENCE_SCENE_CHANGED",
     "REFERENCE_SCENE_OUTPUT_REQUIRED", "REFERENCE_SCENE_FIDELITY_FAILED"]
@@ -268,7 +269,11 @@ export async function POST(
     }
   }
   const generationRequests: BrandPostImageGenerationRequest[] = [];
-  if (body.action === "generate_missing" || body.action === "bind_sources") {
+  if (body.action === "repair_rejected_originals") {
+    try { generationRequests.push(...planRejectedOriginalRepair(manifest, body.sectionId)); }
+    catch (error) { return NextResponse.json({ success: false, code: "REJECTED_ORIGINAL_REPAIR_INVALID",
+      error: error instanceof Error ? error.message : "현재 원본 사진의 거절 근거를 확인할 수 없습니다." }, { status: 422 }); }
+  } else if (body.action === "generate_missing" || body.action === "bind_sources") {
     generationRequests.push(...planWholeBrandPostImageRequests(manifest));
   } else if (body.action === "repair_rejected") {
     const rejectedSlots = preview.imageSlots.map(slot => ({
@@ -320,7 +325,8 @@ export async function POST(
       sourceImageUrls,
       requests: generationRequests,
       // bind_sources never opens ChatGPT; it only places reviewed seller photos.
-      sourceOnly: body.action === "bind_sources",
+      sourceOnly: body.action === "bind_sources" || body.action === "repair_rejected_originals",
+      canonicalSourceOnly: body.action === "repair_rejected_originals",
       forceSourceRefresh: body.refreshSourcePhotos === true,
     });
     const { errors, generatedCount, appliedCount, manifest: updated } = repaired;

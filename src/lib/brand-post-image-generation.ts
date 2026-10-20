@@ -39,6 +39,8 @@ import { buildShoppingReferenceScenePrompt, reviewShoppingReferenceScene, select
   type ShoppingSceneReference, type ShoppingSceneSupportingReference } from "../../scripts/lib/shopping-reference-scene";
 import type { ShoppingSceneFidelityFailure } from "../../scripts/lib/shopping-reference-scene";
 import { assertCompletedContextRecovery, recoverCompletedShoppingContext } from "./brand-post-completed-context";
+import { readCanonicalSellerSourceHashes } from "../../scripts/lib/canonical-seller-source";
+import { readProductSnapshot } from "./draft-context-snapshot";
 
 const CHATGPT_BASE_URL = "https://chatgpt.com/";
 const TS_NODE_BIN = path.join(process.cwd(), "node_modules", "ts-node", "dist", "bin.js");
@@ -1845,6 +1847,61 @@ async function finishReviewedShoppingScene(options: {
       thumbnailOutputSha256: sha256File(thumbnail.outputPath) } };
 }
 
+/** One current, exactly evidenced body rejection may improve within this call.
+ * A provider error, an old/unbound failure, or an already improved job never does. */
+export async function repairRejectedCompletedBodyImage(options: {
+  manifest: BrandPostPackageManifestV2; productName: string; target: ResolvedImageTarget; job: ImageBatchJob;
+  error: unknown; workDir: string; index: number; sourceImageUrls?: string[]; signal?: AbortSignal;
+}, dependencies: {
+  prepareContext?: typeof prepareBrandPostImageReferenceContext;
+  runBatch?: typeof runImageBatch;
+  reviewReferenceScene?: typeof reviewShoppingReferenceScene;
+} = {}): Promise<Awaited<ReturnType<typeof finishGeneratedImage>> | null> {
+  const { manifest, target, job } = options;
+  const failure = options.error instanceof Error ? (options.error as Error & { fidelityFailure?: unknown }).fidelityFailure : undefined;
+  if (manifest.connectKind !== "SHOPPING" || target.role !== "body" || !job.reviewOnly || target.referenceContext?.retryOf ||
+      !(options.error instanceof Error) || !options.error.message.startsWith("REFERENCE_SCENE_FIDELITY_FAILED:") || !validBodyFidelityFailure(failure)) return null;
+  if (!readProductSnapshot(manifest.sourceSnapshot, { productId: manifest.brandLinkId, connectKind: "SHOPPING" })) return null;
+  const rejection = readSettledBodyRejection(job.outStem, manifest, target, job);
+  if (!rejection) return null;
+  const snapshot = JSON.stringify(manifest.sourceSnapshot), reviewContext = bodySceneReviewContext(manifest, target);
+  const held = () => new Error("IMAGE_RESUME_REQUIRED: 자동 개선 중 원고·슬롯·원본 또는 현재 거절 근거가 변경됐습니다. 재전송하지 않았습니다.");
+  const assertCurrent = () => {
+    if (options.signal?.aborted || JSON.stringify(manifest.sourceSnapshot) !== snapshot || bodySceneReviewContext(manifest, target) !== reviewContext ||
+        JSON.stringify(readSettledBodyRejection(job.outStem, manifest, target, job)) !== JSON.stringify(rejection)) throw held();
+  };
+  assertCurrent();
+  const improvedTarget: ResolvedImageTarget = { ...target, request: { ...target.request }, referenceContext: undefined };
+  await (dependencies.prepareContext ?? prepareBrandPostImageReferenceContext)({ manifest, productName: options.productName,
+    target: improvedTarget, sourceImageUrls: options.sourceImageUrls });
+  assertCurrent();
+  if (improvedTarget.referenceContext?.completedRequestRecovery ||
+      JSON.stringify(improvedTarget.referenceContext?.retryOf) !== JSON.stringify(rejection)) throw held();
+  const [improvedJob] = prepareImageBatchJobs([improvedTarget], manifest, options.productName, options.workDir);
+  assertCurrent();
+  if (!improvedJob || improvedJob.outStem === job.outStem) throw held();
+  let finished: Awaited<ReturnType<typeof finishGeneratedImage>> | undefined, finishError: unknown, deliveries = 0;
+  await (dependencies.runBatch ?? runImageBatch)([improvedJob], options.workDir, async (result, index) => {
+    deliveries++;
+    if (deliveries !== 1 || index !== 0 || result.id !== improvedJob.id) { finishError = held(); return; }
+    try {
+      assertCurrent();
+      if (!result.recoveryJob && (!result.localPath || !fs.existsSync(result.localPath)))
+        throw new Error(clean(result.error || "개선 사진의 완료 결과를 확인할 수 없습니다."));
+      finished = result.recoveryJob ? await resolveCompletedProductImage({ job: result.recoveryJob,
+        manifest, productName: options.productName, target: improvedTarget, workDir: options.workDir, signal: options.signal,
+        reviewReferenceScene: dependencies.reviewReferenceScene }) : await finishGeneratedImage({ manifest, productName: options.productName,
+        target: improvedTarget, rawPath: result.localPath!, workDir: options.workDir, index: options.index, completedJob: improvedJob,
+        reviewReferenceScene: dependencies.reviewReferenceScene });
+      assertCurrent();
+    } catch (error) { finishError = error; }
+  }, options.signal);
+  assertCurrent();
+  if (finishError) throw finishError;
+  if (deliveries !== 1 || !finished) throw held();
+  return finished;
+}
+
 export async function generateBrandPostImages(options: {
   manifest: BrandPostPackageManifestV2;
   productName: string;
@@ -1855,8 +1912,12 @@ export async function generateBrandPostImages(options: {
   signal?: AbortSignal;
   /** Fill only reviewed seller photos; never start background generation. */
   sourceOnly?: boolean;
+  /** Server-only rejected-original repair: candidates must belong to the selected gallery. */
+  canonicalSourceOnly?: boolean;
   forceSourceRefresh?: boolean;
 }): Promise<BrandPostImageGenerationResult[]> {
+  if (options.canonicalSourceOnly && (!options.sourceOnly || options.manifest.connectKind !== "SHOPPING" || !options.manifest.sourceSnapshot))
+    throw new Error("REJECTED_ORIGINAL_REPAIR_INVALID: canonical source-only context required");
   const requests = resolveBrandPostImageSlots(options.manifest, options.requests);
   if (requests.length === 0) return [];
   const results: BrandPostImageGenerationResult[] = new Array(requests.length);
@@ -1982,6 +2043,10 @@ export async function generateBrandPostImages(options: {
       }
     }
     rawCandidates = [...new Set(rawCandidates)];
+    if (options.canonicalSourceOnly) {
+      const hashes = readCanonicalSellerSourceHashes({ snapshot: options.manifest.sourceSnapshot, productId: options.manifest.brandLinkId, sourceDirectory: outputDir });
+      rawCandidates = rawCandidates.filter(file => { try { return hashes.has(sha256File(file)); } catch { return false; } });
+    }
     if (rawCandidates.length === 0 && collectionErrors.length > 0) {
       sourceError ||= [...new Set(collectionErrors)].join("; ");
     }
@@ -2243,16 +2308,18 @@ export async function generateBrandPostImages(options: {
         if (!browserResult.recoveryJob && (!browserResult.localPath || !fs.existsSync(browserResult.localPath))) {
           throw new Error(clean(browserResult.error || "이미지 생성 결과가 비어 있습니다."));
         }
-        const finished = browserResult.recoveryJob ? await resolveCompletedProductImage({ job: browserResult.recoveryJob,
-          manifest: options.manifest, productName: options.productName, target, workDir, signal: options.signal }) : await finishGeneratedImage({
-          manifest: options.manifest,
-          productName: options.productName,
-          target,
-          rawPath: browserResult.localPath!,
-          workDir,
-          index,
-          completedJob: jobs[batchIndex],
-        });
+        let finished: Awaited<ReturnType<typeof finishGeneratedImage>>;
+        try {
+          finished = browserResult.recoveryJob ? await resolveCompletedProductImage({ job: browserResult.recoveryJob,
+            manifest: options.manifest, productName: options.productName, target, workDir, signal: options.signal }) : await finishGeneratedImage({
+            manifest: options.manifest, productName: options.productName, target, rawPath: browserResult.localPath!, workDir, index,
+            completedJob: jobs[batchIndex] });
+        } catch (error) {
+          const improved = await repairRejectedCompletedBodyImage({ manifest: options.manifest, productName: options.productName, target,
+            job: browserResult.recoveryJob || jobs[batchIndex], error, workDir, index, sourceImageUrls: options.sourceImageUrls, signal: options.signal });
+          if (!improved) throw error;
+          finished = improved;
+        }
         result = { ...base, ...finished,
           remoteGenerated: finished.provenance !== "ORIGINAL",
           creationMethod: finished.provenance === "ORIGINAL" ? "local-composite" : finished.provenance === "PHOTO_TEXT_THUMBNAIL" ? "remote-generated"

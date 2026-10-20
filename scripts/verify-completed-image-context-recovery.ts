@@ -139,6 +139,92 @@ async function main() {
       { collect: async () => { throw new Error("pending child must not recollect"); }, select: async () => { throw new Error("pending child must not reselect"); } });
     assert.equal(generation.prepareImageBatchJobs([pendingTarget], adverse.manifest, "검정 제품", adverse.work)[0].outStem, improvedJob.outStem);
     assert.deepEqual(fs.readFileSync(negativePath), negativeBytes); checks += 2;
+    async function currentNegativeFixture() {
+      const f = await fixture(), r = await f.prepare(); let error: unknown;
+      try { await generation.resolveCompletedProductImage({ job: r.job, target: r.target, manifest: f.manifest, productName: "검정 제품", workDir: f.work,
+        reviewReferenceScene: async () => { throw fidelityFailure(); } }); } catch (failure) { error = failure; }
+      assert.ok(error instanceof Error);
+      return { f, r, error };
+    }
+    const positiveReview = async (input: Parameters<typeof import("./lib/shopping-reference-scene").reviewShoppingReferenceScene>[0]) => ({
+      strategyVersion: SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION, referencePath: input.reference.path, referenceSha256: input.reference.sha256,
+      reviewedOutputSha256: fileHash(input.outputPath), reviewStatus: "passed", reason: "current improved photograph passed complete source and body QA",
+      reviewedAt: new Date().toISOString(), checks: Object.fromEntries(REFERENCE_SCENE_REVIEW_CHECKS.map(key => [key, true]))
+    }) as Awaited<ReturnType<typeof import("./lib/shopping-reference-scene").reviewShoppingReferenceScene>>;
+    async function automaticImprovement(mode: "pass" | "real-negative" | "provider-failed" | "duplicate-delivery" = "pass") {
+      const { f, r, error } = await currentNegativeFixture(); let prepares = 0, dispatches = 0, finalReviews = 0;
+      const rejection = fs.readFileSync(`${f.original.outStem}.body-rejection.json`);
+      const plannedReference = { ...r.target.referenceContext!.reference, viewObservation: { subjectState: "freestanding", cameraView: "front",
+        geometryVisibility: "complete", hiddenParts: [], intrinsicPrint: "absent", readableIdentifiers: [] } } as ShoppingSceneReference;
+      const task = generation.repairRejectedCompletedBodyImage({ manifest: f.manifest, productName: "검정 제품", target: r.target, job: r.job,
+        error, workDir: f.work, index: 0 }, {
+        prepareContext: async options => { prepares++; return generation.prepareBrandPostImageReferenceContext(options,
+          { collect: async () => [f.primary], select: async () => plannedReference, selectSupporting: async () => [] }); },
+        runBatch: async (jobs, _work, onResult) => {
+          dispatches++; assert.equal(jobs.length, 1); const next = jobs[0]; assert.notEqual(next.outStem, f.original.outStem);
+          assert.equal(next.reviewOnly, undefined, "only one new, separately bound improved job reaches dispatch");
+          if (mode === "provider-failed") { await onResult({ id: next.id, localPath: null, error: "CODEX_PROVIDER_FAILED: fixture" }, 0); return; }
+          const raw = `${next.outStem}.png`; fs.writeFileSync(raw, png("one simulated improved provider result"));
+          fs.writeFileSync(`${next.outStem}.codex-submission.json`, JSON.stringify({ state: "completed", workspace: `${next.outStem}.codex-1`,
+            startedAtMs: Date.now() - 100, completedAtMs: Date.now(), threadId: "simulated-improvement" }));
+          await onResult({ id: next.id, localPath: raw }, 0);
+          if (mode === "duplicate-delivery") await onResult({ id: next.id, localPath: raw }, 0);
+        },
+        reviewReferenceScene: async input => { finalReviews++; if (mode === "real-negative") throw fidelityFailure(); return positiveReview(input); },
+      });
+      if (mode === "pass") { const result = await task; assert.ok(result?.generatedPath); assert.notEqual(fileHash(result.generatedPath), fileHash(f.original.outStem + ".png")); checks += 2; }
+      else await assert.rejects(task, mode === "real-negative" ? /REFERENCE_SCENE_FIDELITY_FAILED/ : mode === "provider-failed" ? /CODEX_PROVIDER_FAILED/ : /IMAGE_RESUME_REQUIRED/);
+      assert.equal(prepares, 1); assert.equal(dispatches, 1); assert.equal(finalReviews, mode === "provider-failed" ? 0 : 1);
+      assert.deepEqual(fs.readFileSync(`${f.original.outStem}.body-rejection.json`), rejection); f.unchanged(); checks += 4;
+      if (mode === "real-negative") {
+        await assert.rejects(f.prepare(), /IMAGE_REPAIR_EXHAUSTED/, "a rejected improved result cannot recursively spend a third request"); checks++;
+      }
+    }
+    for (const mode of ["pass", "real-negative", "provider-failed", "duplicate-delivery"] as const) await automaticImprovement(mode);
+    for (const mode of ["provider-error", "invalid-review", "string-only", "global-only", "already-improved", "not-review-only", "missing-proof", "damaged-proof", "changed-body", "damaged-snapshot", "cancelled"] as const) {
+      const { f, r, error } = await currentNegativeFixture(); let prepares = 0, dispatches = 0;
+      let observedError: unknown = error;
+      if (mode === "provider-error") observedError = new Error("CODEX_PROVIDER_FAILED: fixture");
+      if (mode === "invalid-review") observedError = new Error("REFERENCE_SCENE_REVIEW_INVALID: fixture");
+      if (mode === "string-only") observedError = new Error("REFERENCE_SCENE_FIDELITY_FAILED: no structured current evidence");
+      if (mode === "global-only") observedError = Object.assign(new Error("REFERENCE_SCENE_FIDELITY_FAILED: contradictory accepted flag"), {
+        fidelityFailure: { version: "shopping-scene-fidelity-failure/v1", accepted: false, identityMatches: true, illustrativeOnly: true, failedChecks: [], comparisonFailures: [] } });
+      if (mode === "already-improved") r.target.referenceContext!.retryOf = { outStem: "older", metadataSha256: "a".repeat(64), rejectionSha256: "b".repeat(64) };
+      if (mode === "not-review-only") delete r.job.reviewOnly;
+      if (mode === "missing-proof") fs.unlinkSync(`${f.original.outStem}.body-rejection.json`);
+      if (mode === "damaged-proof") { const file = `${f.original.outStem}.body-rejection.json`, p = JSON.parse(fs.readFileSync(file, "utf8")); p.metadataSha256 = "a".repeat(64); fs.writeFileSync(file, JSON.stringify(p)); }
+      if (mode === "changed-body") f.manifest.composition.renderNodes = [{ kind: "paragraph", sectionId: "scene", text: "새 본문" }];
+      if (mode === "damaged-snapshot") f.manifest.sourceSnapshot!.product.name = "다른 상품";
+      const controller = new AbortController(); if (mode === "cancelled") controller.abort();
+      const task = generation.repairRejectedCompletedBodyImage({ manifest: f.manifest, productName: "검정 제품", target: r.target, job: r.job,
+        error: observedError, workDir: f.work, index: 0, signal: controller.signal }, {
+        prepareContext: async () => { prepares++; throw new Error("unexpected planning"); }, runBatch: async () => { dispatches++; throw new Error("unexpected dispatch"); },
+      });
+      if (mode === "cancelled") await assert.rejects(task, /IMAGE_RESUME_REQUIRED/); else assert.equal(await task, null, mode);
+      assert.equal(prepares, 0); assert.equal(dispatches, 0); checks += 3;
+    }
+    for (const mode of ["changed-during-plan", "wrong-retry-proof", "receipt-during-plan", "pixels-during-plan"] as const) {
+      const { f, r, error } = await currentNegativeFixture(); let dispatches = 0;
+      await assert.rejects(generation.repairRejectedCompletedBodyImage({ manifest: f.manifest, productName: "검정 제품", target: r.target, job: r.job,
+        error, workDir: f.work, index: 0 }, {
+        prepareContext: async options => {
+          if (mode === "receipt-during-plan" || mode === "pixels-during-plan") {
+            const planned = { ...r.target.referenceContext!.reference, viewObservation: { subjectState: "freestanding", cameraView: "front",
+              geometryVisibility: "complete", hiddenParts: [], intrinsicPrint: "absent", readableIdentifiers: [] } } as ShoppingSceneReference;
+            const context = await generation.prepareBrandPostImageReferenceContext(options,
+              { collect: async () => [f.primary], select: async () => planned, selectSupporting: async () => [] });
+            fs.appendFileSync(mode === "receipt-during-plan" ? `${f.primary}.retrieval.json` : f.primary, "changed");
+            return context;
+          }
+          const context = { ...r.target.referenceContext! }; delete context.completedRequestRecovery;
+          if (mode === "changed-during-plan") f.manifest.composition.renderNodes = [{ kind: "paragraph", sectionId: "scene", text: "중간에 바뀐 본문" }];
+          options.target.referenceContext = context; return context;
+        }, runBatch: async () => { dispatches++; throw new Error("unexpected dispatch"); },
+      }), /IMAGE_RESUME_REQUIRED/);
+      assert.equal(dispatches, 0); checks += 2;
+    }
+    await assert.rejects(generation.generateBrandPostImages({ manifest: legacy.manifest, productName: "검정 제품", requests: [], canonicalSourceOnly: true }), /REJECTED_ORIGINAL_REPAIR_INVALID/);
+    checks++;
     for (const mutation of ["body", "snapshot", "slot", "recipe", "source-pixels", "source-url", "foreign-workspace", "no-terminal", "second-request", "attachment-pixels", "uncertain", "lock",
       "generation-budget", "request-after-terminal", "request-after-generation", "request-before-turn", "request-future-time", "extra-generation"] as const) {
       const f = await fixture(mutation === "source-url" ? "receipt" : "legacy");

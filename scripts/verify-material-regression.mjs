@@ -10,6 +10,7 @@ const checks = [
   'verify-chatgpt-browser-automation.ts',
   'verify-product-section-review-conflicts.ts', 'verify-product-section-image-review.ts', 'verify-publish-image-audit.ts',
   'verify-publish-source-watermark.ts',
+  'verify-rejected-original-repair.ts',
   'verify-publish-image-failure-diagnostics.ts',
   'verify-image-coverage-replan.ts', 'verify-material-image-recovery.ts',
   'verify-material-approval-semantics.ts', 'verify-scheduled-draft-workflow.ts',

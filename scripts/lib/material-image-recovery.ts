@@ -16,7 +16,7 @@ import { publicationImageContext } from "./publish-image-rejections";
 // still block upstream and timestamps cannot renew a consumed budget.
 export const IMAGE_RECOVERY_POLICY_VERSION = 10;
 
-export type ImageRecoveryStage = "refresh-source" | "repair-rejected" | "replan-images" | "replan-after-rejection";
+export type ImageRecoveryStage = "refresh-source" | "repair-rejected" | "repair-rejected-original" | "replan-images" | "replan-after-rejection";
 type Entry = { stage: ImageRecoveryStage; input: string; output?: string; status: "running" | "complete" | "failed"; at: string; reason?: string; externalFailure?: boolean; thumbnailCopyBinding?: string };
 
 /** The raw-photo recipe excludes the locally rendered headline. Only one exact

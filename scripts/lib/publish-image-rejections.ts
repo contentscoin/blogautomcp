@@ -41,6 +41,13 @@ export function rejectedPublicationImageHashes(id: string, composition: Composit
   return [...new Set(read(id).filter(row => row.scope === "product" ||
     (row.sectionId === sectionId && row.context === context)).map(row => row.sha256))];
 }
+/** Only a real persisted section-scoped semantic rejection of these exact
+ * current pixels and published words can authorize original-slot repair. */
+export function hasCurrentSectionImageRejection(id: string, composition: Composition, sectionId: string, sha256: string): boolean {
+  const context = publicationImageContext(composition, sectionId);
+  return read(id).some(row => row.sha256 === sha256 && row.sectionId === sectionId &&
+    (row.scope === undefined || row.scope === "section") && row.context === context);
+}
 /** A fresh complete pixel verdict can resolve a previous false positive, but
  * only for those exact bytes and unchanged publication context. */
 export function clearReviewedPublicationImageRejections(id: string, composition: Composition,

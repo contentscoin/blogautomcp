@@ -31,6 +31,7 @@ import { imageRecoverySignature, runRecordedImageRecovery } from "./lib/material
 import { getBrandPostPackageDir } from "../src/lib/brand-post-package";
 import { readProductSnapshot } from "../src/lib/draft-context-snapshot";
 import { isAllowedProductPhotoUrl } from "./lib/product-photo-source";
+import { readCanonicalSellerSourceHashes } from "./lib/canonical-seller-source";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-image-batch-"));
 const rawPath = path.join(root, "raw.png");
@@ -139,6 +140,8 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       "node:fs": fs, "node:path": path,
       "./atomic-text-file": atomicTextFile,
       "./brand-post-completed-context": completedContextModule,
+      "../../scripts/lib/canonical-seller-source": { readCanonicalSellerSourceHashes },
+      "./draft-context-snapshot": { readProductSnapshot },
       "../../scripts/lib/publish-image-rejections": { rejectedPublicationImageHashes: () => [], publicationImageContext },
       "../../scripts/lib/publish-image-audit": { buildSelectedProductImageAuditContext },
       "../../scripts/lib/seller-original-repair-target": { buildSellerOriginalRepairTarget },
