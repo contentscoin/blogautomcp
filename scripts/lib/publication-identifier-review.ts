@@ -377,6 +377,11 @@ function chooseBlindSource(observations: PublicationBlindInputObservations) {
     return area(b) - area(a) || a.imageIndex - b.imageIndex;
   })[0] || observations.sources[0];
 }
+// Every source observation is already bound to its canonical input/native
+// response before routing. An unreadable OWN view must not hide a usable clear
+// identifier elsewhere in that exact source set.
+const hasLegibleObservedSource = (observed: PublicationBlindInputObservations): boolean =>
+  observed.sources.some(source => source.evidence.observation.readability === "legible");
 function applicabilityRequest(input: PublicationIdentifierReviewInput, observed?: PublicationBlindInputObservations) {
   const primaryWord = input.scopeGate && input.scopeGate.kind !== "scene-native-positive/v1" &&
     observed?.sources[0]?.evidence.observation.readability === "legible" ? observed.sources[0].evidence.observation.box : undefined;
@@ -576,7 +581,8 @@ function externalWordWarningIssue(result: PublicationIdentifierReviewResult, inp
     const observed = result.blindInputObservations, candidate = observed?.candidate, value = result.printApplicability, row = value?.row;
     if (!input.scopeGate || input.scopeGate.kind === "scene-native-positive/v1" || scopeGateIssue(input) || !printWarningPolicyFingerprint(input) ||
         observationSetIssue(observed, prepared, true) || !candidate || candidate.observation.readability !== "legible" || !validBox(candidate.observation.box) ||
-        observed!.sources[0].evidence.observation.readability !== "absent" || prepared.context.references.some(reference => !validSha(reference.sourceSnapshotId)) ||
+        observed!.sources[0].evidence.observation.readability !== "absent" || hasLegibleObservedSource(observed!) ||
+        prepared.context.references.some(reference => !validSha(reference.sourceSnapshotId)) ||
         !value || !row || ownUnprintedApplicabilityIssue(value, input, true, observed) || row.sameSelectedVisibleOption !== true ||
         row.candidateObservedWordRelation !== "external-background-artwork" || !same(row.candidateObservedWordBox, candidate.observation.box) ||
         !validFaceBox(row.candidatePhysicalProductsBox) || !validFaceBox(row.sourceExternalGraphicBox) || !validFaceBox(row.sourcePhysicalProductsBox) ||
@@ -1069,7 +1075,8 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
       }
       const bothOwnAbsent = observed.candidate.observation.readability === "absent" && observed.sources[0].evidence.observation.readability === "absent";
       const candidateExternalAssociation = input.scopeGate && input.scopeGate.kind !== "scene-native-positive/v1" &&
-        observed.candidate.observation.readability === "legible" && observed.sources[0].evidence.observation.readability === "absent";
+        observed.candidate.observation.readability === "legible" && observed.sources[0].evidence.observation.readability === "absent" &&
+        !hasLegibleObservedSource(observed);
       if (candidateExternalAssociation && scopeGateIssue(input)) return { ...result, reason: "CANDIDATE_EXTERNAL_WORD_REQUIRES_POSITIVE_CURRENT_NATIVE_TASKS" };
       if (bothOwnAbsent || candidateExternalAssociation || input.scopeGate && observed.candidate.observation.readability !== "legible") {
         if (observed.candidate.observation.readability === "ambiguous") return { ...result, reason: "BLIND_CANDIDATE_INTRINSIC_LOCATION_AMBIGUOUS" };

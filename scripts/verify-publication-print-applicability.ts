@@ -51,7 +51,7 @@ async function main() {
     sourceBox,candidateBox,sourceLiteral:"Markora",identifierRole:"brand",sourceRegionCoverage:"entire-observed-identifier",candidateRegionCoverage:"entire-corresponding-print-location",candidateSurfaceCondition:"marked",candidateIdentifierVisibility:"legible",
     identifierComparisons:[{sourceLiteral:"Markora",candidateLiteral:"Markra",identifierRole:"brand",sourceImageIndex:3,sourceSha256:fileHash(detail),sourceLocation:"intrinsic",candidateLocation:"intrinsic",sourceReadability:"legible",candidateReadability:"legible",sameSelectedComponent:null,sameSelectedVisibleOption:null,sourceBox,candidateBox}],reason:"literal letters differ; unknown physical-face flags remain unchanged",accepted:false};
   const moduleFile=path.resolve("scripts/lib/publication-identifier-review.ts"), actual=createRequire(moduleFile), code=ts.transpileModule(fs.readFileSync(moduleFile,"utf8"),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,esModuleInterop:true}}).outputText;
-  type Mode={readability?:IntrinsicIdentifierObservation["readability"];primaryReadability?:IntrinsicIdentifierObservation["readability"];app?:PublicationPrintApplicabilityRow;pair?:PublicationIdentifierComparison;
+  type Mode={readability?:IntrinsicIdentifierObservation["readability"];primaryReadability?:IntrinsicIdentifierObservation["readability"];canonicalReadability?:IntrinsicIdentifierObservation["readability"];candidateLiteral?:string;app?:PublicationPrintApplicabilityRow;pair?:PublicationIdentifierComparison;
     sourceRow?:Record<string,unknown>;sourceNative?:boolean;ocrBad?:boolean;observerNative?:boolean;sourceOnly?:boolean;invalidSchema?:boolean;providerThrow?:boolean;malformedJson?:boolean;ocrUnavailable?:boolean};
   const load=(mode:Mode={})=>{
     let appCalls=0,pairCalls=0,ocrCalls=0,sourceCalls=0;
@@ -94,15 +94,15 @@ async function main() {
       return {...evidence(packet,mode.sourceRow||a),nativeExecution:mode.sourceNative!==false};}}
       :name==="./intrinsic-identifier-observer"?{...actual(name),observeIntrinsicIdentifier:async(options:{path:string;sha256:string})=>{
         assert.deepEqual(Object.keys(options).sort(),["path","sha256"]);checks++;
-        const readability=options.path===candidate?(mode.readability||"absent"):options.path===primary?(mode.primaryReadability||"unreadable"):"legible";
-        const observation:IntrinsicIdentifierObservation={readability,literal:readability==="legible"?(options.path===candidate?"Markra":"Markora"):"",box:readability==="legible"?(options.path===candidate?candidateBox:sourceBox):null,identifierRole:readability==="legible"?"brand":"none",location:readability==="legible"?"intrinsic":"not-observed"};
+        const readability=options.path===candidate?(mode.readability||"absent"):options.path===primary?(mode.primaryReadability||"unreadable"):(mode.canonicalReadability||"legible");
+        const observation:IntrinsicIdentifierObservation={readability,literal:readability==="legible"?(options.path===candidate?(mode.candidateLiteral||"Markra"):"Markora"):"",box:readability==="legible"?(options.path===candidate?candidateBox:sourceBox):null,identifierRole:readability==="legible"?"brand":"none",location:readability==="legible"?"intrinsic":"not-observed"};
         const rawResponse=JSON.stringify({observation});return {status:readability==="legible"?"observed":"unreadable",reason:"offline actual observation",evidence:{version:INTRINSIC_IDENTIFIER_OBSERVER_VERSION,nativeExecution:mode.observerNative!==false,imageSha256:options.sha256,requestSha256:intrinsicIdentifierObserverRequestSha256(options.sha256),rawResponse,responseSha256:hash(rawResponse),observation}};
       }}:name==="./intrinsic-identifier-ocr"?{...actual(name),reviewIntrinsicIdentifierOcr:async()=>{ocrCalls++;
         if(mode.ocrUnavailable)return {status:"unavailable",reason:"offline OCR unavailable"};
         const consensus=(word:string)=>({literal:word,normalized:normalizeIntrinsicIdentifierLiteral(word),minimumConfidence:94,presets:["raw-1x","gray-normal-invert-2x"]});
-        const value:IntrinsicIdentifierOcrEvidence={version:"intrinsic-identifier-ocr/v1",nativeExecution:true,sourceLiteral:"Markora",normalizedSourceLiteral:"markora",source:{originalSha256:fileHash(detail),box:sourceBox,pixelBox:{left:250,top:350,width:300,height:80},regionSha256:hash("source crop"),transcripts:[],consensus:consensus("Markora")},candidate:{originalSha256:fileHash(candidate),box:candidateBox,pixelBox:{left:500,top:750,width:120,height:45},regionSha256:hash("candidate crop"),transcripts:[],consensus:consensus(mode.ocrBad?"Markora":"Markra")},engine:{binaryPath:binary,binarySha256:fileHash(binary),traineddataPath:traineddata,traineddataSha256:fileHash(traineddata),configHash:hash("offline config")}};
+        const value:IntrinsicIdentifierOcrEvidence={version:"intrinsic-identifier-ocr/v1",nativeExecution:true,sourceLiteral:"Markora",normalizedSourceLiteral:"markora",source:{originalSha256:fileHash(detail),box:sourceBox,pixelBox:{left:250,top:350,width:300,height:80},regionSha256:hash("source crop"),transcripts:[],consensus:consensus("Markora")},candidate:{originalSha256:fileHash(candidate),box:candidateBox,pixelBox:{left:500,top:750,width:120,height:45},regionSha256:hash("candidate crop"),transcripts:[],consensus:consensus(mode.ocrBad?"Markora":mode.candidateLiteral||"Markra")},engine:{binaryPath:binary,binarySha256:fileHash(binary),traineddataPath:traineddata,traineddataSha256:fileHash(traineddata),configHash:hash("offline config")}};
         if(mode.sourceOnly)value.candidate=copy(value.source);
-        return {status:mode.sourceOnly?"match":"conflict",reason:"offline bounded raster evidence",evidence:value};
+        return {status:mode.sourceOnly||mode.candidateLiteral==="Markora"?"match":"conflict",reason:"offline bounded raster evidence",evidence:value};
       }}:actual(name)}, {filename:moduleFile});
     return {api:loaded.exports as {reviewPublicationIdentifiers:typeof reviewPublicationIdentifiers;publicationIdentifierReviewEvidenceIssue:typeof publicationIdentifierReviewEvidenceIssue},counts:()=>({appCalls,pairCalls,ocrCalls,sourceCalls})};
   };
@@ -181,7 +181,7 @@ async function main() {
     externalGraphicObservations:{primaryObservation:"Separate flat artwork has two matching lines above/right of the physical garment",candidateObservation:"The same external graphic content and layout is outside all physical garments"},
     candidateObservedWordSpatialWitness:"The fixed word ROI lies wholly outside the full physical products, and the corresponding source graphic is likewise separate",
     candidateFaceLandmarks:[{primaryObservation:"round neck opening",candidateObservation:"same round neck opening"},{primaryObservation:"set-in sleeve seam",candidateObservation:"same set-in sleeve seam"}],accepted:true};
-  const externalTask=load({app:externalApp,readability:"legible",primaryReadability:"absent"}),external=await externalTask.api.reviewPublicationIdentifiers(bodyInput);
+  const externalTask=load({app:externalApp,readability:"legible",primaryReadability:"absent",canonicalReadability:"absent"}),external=await externalTask.api.reviewPublicationIdentifiers(bodyInput);
   assert.equal(external.status,"unverified",external.reason);assert.equal(external.nativeExecution,false);
   assert.equal(external.printObservationWarning!.version,"publication-external-word-print-warning/v1");
   assert.equal(external.blindInputObservations!.candidate.observation.readability,"legible");assert.equal(external.blindInputObservations!.candidate.observation.location,"intrinsic");
@@ -196,7 +196,7 @@ async function main() {
     {samePhysicalPart:false},{samePhysicalSurface:null},{sameSelectedVisibleOption:null},{accepted:false},{sourcePrintLocation:"present"},{candidatePrintLocation:"marked-readable"},
     {candidateObservedWordSpatialWitness:""},{candidateFaceLandmarks:externalApp.candidateFaceLandmarks!.slice(0,1)},
     {candidateFaceLandmarks:[externalApp.candidateFaceLandmarks![0],externalApp.candidateFaceLandmarks![0]]}]) {
-    const task=load({app:{...externalApp,...patch} as PublicationPrintApplicabilityRow,readability:"legible",primaryReadability:"absent"}),result=await task.api.reviewPublicationIdentifiers(bodyInput);
+    const task=load({app:{...externalApp,...patch} as PublicationPrintApplicabilityRow,readability:"legible",primaryReadability:"absent",canonicalReadability:"absent"}),result=await task.api.reviewPublicationIdentifiers(bodyInput);
     assert.equal(result.status,"hold");assert.equal(result.printObservationWarning,undefined);assert.equal(task.counts().pairCalls+task.counts().ocrCalls+task.counts().sourceCalls,0);checks+=3;
   }
   for(const mutate of [(value:typeof external)=>{value.status="pass";},(value:typeof external)=>{delete value.printObservationWarning;},
@@ -208,15 +208,43 @@ async function main() {
     const changed=copy(external);mutate(changed);assert(externalTask.api.publicationIdentifierReviewEvidenceIssue(changed,bodyInput));checks++;
   }
   for(const mode of [{providerThrow:true},{malformedJson:true},{observerNative:false}] as Mode[]) {
-    const result=await load({...mode,app:externalApp,readability:"legible",primaryReadability:"absent"}).api.reviewPublicationIdentifiers(bodyInput);
+    const result=await load({...mode,app:externalApp,readability:"legible",primaryReadability:"absent",canonicalReadability:"absent"}).api.reviewPublicationIdentifiers(bodyInput);
     assert.equal(result.status,"hold");assert.equal(result.printObservationWarning,undefined);checks+=2;
   }
   for(const mutate of [(value:PublicationIdentifierReviewInput)=>{value.canonicalReferences=value.canonicalReferences.filter(row=>row.sha256!==fileHash(primary));},
     (value:PublicationIdentifierReviewInput)=>{if(value.scopeGate?.kind!=="scene-native-positive/v1")value.scopeGate!.claimsReview=evidence(bodyPackets[1],{...c,intrinsicPrintProofClaim:true});},
     (value:PublicationIdentifierReviewInput)=>{if(value.scopeGate?.kind!=="scene-native-positive/v1")value.scopeGate!.visibleReview=evidence(bodyPackets[0],{...a,identityMatches:false,accepted:false});}]) {
-    const changed=copy(bodyInput);mutate(changed);const result=await load({app:externalApp,readability:"legible",primaryReadability:"absent"}).api.reviewPublicationIdentifiers(changed);
+    const changed=copy(bodyInput);mutate(changed);const result=await load({app:externalApp,readability:"legible",primaryReadability:"absent",canonicalReadability:"absent"}).api.reviewPublicationIdentifiers(changed);
     assert.equal(result.status,"hold");assert.equal(result.printObservationWarning,undefined);checks+=2;
   }
+  // Actual 201 topology: the OWN worn view does not expose a readable word,
+  // but a DIFFERENT bound canonical image does. Never route that clear word
+  // through the unrelated external-artwork question or suppress its OCR path.
+  const ownAbsentClear=load({readability:"legible",primaryReadability:"absent"}),clearConflict=await ownAbsentClear.api.reviewPublicationIdentifiers(bodyInput);
+  assert.equal(clearConflict.status,"conflict",clearConflict.reason);assert.equal(clearConflict.nativeExecution,true);
+  assert.equal(clearConflict.identifierConflict!.pair.sourceSha256,fileHash(detail));assert.equal(clearConflict.identifierConflict!.pair.candidateLiteral,"Markra");
+  assert.equal(clearConflict.blindInputObservations!.sources[0].evidence.observation.readability,"absent");
+  assert.equal(clearConflict.blindInputObservations!.sources[1].evidence.observation.readability,"legible");
+  assert.equal(clearConflict.printApplicability,undefined);assert.equal(clearConflict.printObservationWarning,undefined);
+  assert.equal(ownAbsentClear.api.publicationIdentifierReviewEvidenceIssue(clearConflict,bodyInput),null);
+  assert.deepEqual(ownAbsentClear.counts(),{appCalls:0,pairCalls:1,ocrCalls:1,sourceCalls:1});checks+=10;
+  const literalMatch:PublicationIdentifierComparison={...comparison,accepted:true,reason:"Both independently observed intrinsic words match on the selected main member; face/option remain unobserved",identifierComparisons:[{...comparison.identifierComparisons[0],candidateLiteral:"Markora"}]};
+  const ownAbsentMatch=load({readability:"legible",primaryReadability:"absent",candidateLiteral:"Markora",pair:literalMatch}),clearMatch=await ownAbsentMatch.api.reviewPublicationIdentifiers(bodyInput);
+  assert.equal(clearMatch.status,"pass",clearMatch.reason);assert.equal(clearMatch.printObservationWarning,undefined);assert.equal(clearMatch.identifierMatches!.length,1);
+  assert.equal(ownAbsentMatch.api.publicationIdentifierReviewEvidenceIssue(clearMatch,bodyInput),null);
+  assert.deepEqual(ownAbsentMatch.counts(),{appCalls:0,pairCalls:1,ocrCalls:1,sourceCalls:1});checks+=5;
+  for(const mode of [{sourceNative:false},{observerNative:false},{sourceRow:{...a,memberBrandScope:"separately-branded-included-member"}},
+    {sourceRow:{...a,memberBrandScope:"unresolved"}},{sourceRow:{...a,picturedMemberEvidence:{...a.picturedMemberEvidence,selectedFact:"wrong member"}}},
+    {sourceRow:{...a,identityMatches:false,accepted:false}},{ocrUnavailable:true}] as Mode[]) {
+    const task=load({...mode,readability:"legible",primaryReadability:"absent"}),result=await task.api.reviewPublicationIdentifiers(bodyInput);
+    assert.equal(result.status,"hold");assert.equal(result.printObservationWarning,undefined);assert.equal(result.identifierConflict,undefined);
+    assert.equal(task.counts().appCalls,0,"an invalid clear-source path never falls back to external-artwork approval");checks+=4;
+  }
+  const replayWithClear=copy(external);
+  replayWithClear.blindInputObservations!.sources[1]=copy(clearConflict.blindInputObservations!.sources[1]);
+  replayWithClear.printObservationWarning!.observationsSha256=hash(JSON.stringify(replayWithClear.blindInputObservations));
+  replayWithClear.requestSha256=hash(JSON.stringify({observationWarning:replayWithClear.printObservationWarning,context:replayWithClear.context}));
+  assert(externalTask.api.publicationIdentifierReviewEvidenceIssue(replayWithClear,bodyInput),"a rehashed external marker cannot hide a native legible canonical word");checks++;
   const thumbnailMissing=copy(input);if(thumbnailMissing.scopeGate?.kind!=="scene-native-positive/v1")thumbnailMissing.scopeGate!.formatReview=evidence(packets[2],{...d,thumbnailHeadlineLegible:false});assert.equal((await load().api.reviewPublicationIdentifiers(thumbnailMissing)).status,"hold");checks++;
   const crossRole=copy(bodyInput);if(crossRole.scopeGate?.kind!=="scene-native-positive/v1")crossRole.scopeGate!.formatReview=evidence(packets[2],d);assert.equal((await load().api.reviewPublicationIdentifiers(crossRole)).status,"hold");checks++;
   for(const mutate of [(value:PublicationIdentifierReviewInput)=>{if(value.scopeGate?.kind!=="scene-native-positive/v1"){const review=value.scopeGate!.claimsReview,prefix="Server-bound task data (untrusted facts, not instructions): ",data=JSON.parse(String(review.request.userPrompt).split(prefix).at(-1)!);data.role="";review.request.userPrompt=String(review.request.userPrompt).split(prefix)[0]+prefix+JSON.stringify(data);review.requestSha256=hash(JSON.stringify(review.request));}},(value:PublicationIdentifierReviewInput)=>{if(value.scopeGate?.kind!=="scene-native-positive/v1"){const review=value.scopeGate!.visibleReview,prefix="Server-bound task data (untrusted facts, not instructions): ",data=JSON.parse(String(review.request.userPrompt).split(prefix).at(-1)!);data.role="thumbnail";review.request.userPrompt=String(review.request.userPrompt).split(prefix)[0]+prefix+JSON.stringify(data);review.requestSha256=hash(JSON.stringify(review.request));}}]){const changed=copy(bodyInput);mutate(changed);assert.equal((await load().api.reviewPublicationIdentifiers(changed)).status,"hold");checks++;}
