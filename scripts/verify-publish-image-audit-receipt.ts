@@ -159,7 +159,8 @@ async function main() {
       const output: Record<string, unknown> = {}; nativeModules[id] = output;
       let fixtureSource = fs.readFileSync(moduleRequire.resolve(id), "utf8");
       if (id === "./publication-image-scoped-review" && changedScopedQuestion) {
-        const updated = fixtureSource.replace("TASK A: Compare only the actually visible product structure", "TASK A: Compare only the actually visible product structure under a changed offline question");
+        // Mutate the task's stable prefix, not wording retired by a scope change.
+        const updated = fixtureSource.replace('"TASK A: ', '"TASK A: [changed offline comparison question] ');
         assert.notEqual(updated, fixtureSource, "the actual isolated question must change"); fixtureSource = updated;
       }
       vm.runInNewContext(ts.transpileModule(fixtureSource, { compilerOptions: {
