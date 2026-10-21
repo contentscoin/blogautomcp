@@ -263,6 +263,56 @@ async function verifyRetryPolicy(): Promise<void> {
   assert.equal(deadlineCalls, 1, "SDK reconnects do not reset the caller's deadline or add a second QC turn");
   assert.equal(classifyCodexDraftFailure(new Error(highDemand)), "non-retryable",
     "recognizing same-turn progress does not broaden the generic new-operation retry classifier");
+  // Actual observer153 failure: this exact SDK progress envelope is not a
+  // finished turn. Wait only on its EXISTING iterator, without a new budget.
+  const maximumOutput = "Reconnecting... 2/5 (stream disconnected before completion: Incomplete response returned, reason: max_output_tokens)";
+  const nextMaximumOutput = maximumOutput.replace("2/5","3/5");
+  const maximumEvents = [{type:"error" as const,message:maximumOutput},{type:"error" as const,message:nextMaximumOutput}];
+  let maximumCalls=0;const maximumTrace:string[]=[];
+  for(const raw of [negativeJson,'{"accepted":null}',"{invalid-json"]) {
+    const before=maximumCalls;
+    const value=await runCodexDraftWithRetry(async()=>{
+      maximumCalls++;return collectCodexDraftResponse(events([...maximumEvents,{...response,item:{...response.item,text:raw}},completed]),notice=>maximumTrace.push(notice));
+    },{retryDelayMs:0,canRetry:()=>false});
+    assert.equal(value,raw);assert.equal(maximumCalls,before+1,"SDK progress must not dispatch another QC turn or favorable answer");
+  }
+  assert(maximumTrace.some(value=>value.includes(maximumOutput))&&maximumTrace.some(value=>value.includes(nextMaximumOutput)),"retain both exact SDK progress notices");
+  assert.equal(classifyCodexDraftFailure(new Error(maximumOutput)),"non-retryable","SAME-iterator handling grants no new-turn transient classification");
+  for(const invalid of [maximumOutput.replace("2/5","0/5"),maximumOutput.replace("2/5","02/5"),maximumOutput.replace("2/5","6/5"),
+    maximumOutput.replace("2/5","2/6"),maximumOutput.replace("2/5","9007199254740993/9007199254740993"),
+    maximumOutput.slice(0,-1),`${maximumOutput} suffix`,`${maximumOutput}\n`,maximumOutput.replace("reason:","reason:\n"),`Invalid request text: ${maximumOutput}`,maximumOutput.replace("max_output_tokens","max_tokens"),
+    maximumOutput.replace("max_output_tokens)","max_output_tokens authentication required)"),
+    maximumOutput.replace("max_output_tokens)","max_output_tokens quota_exceeded)"),maximumOutput.replace("max_output_tokens)","max_output_tokens invalid_json_schema)"),
+    "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens",
+    "Incomplete response returned, reason: max_output_tokens"]) {
+    let reachedLater=false,calls=0;
+    async function* rejectedProgress():AsyncIterable<import("@openai/codex-sdk").ThreadEvent>{yield{type:"error",message:invalid};reachedLater=true;yield negativeResponse;yield completed;}
+    await assert.rejects(runCodexDraftWithRetry(async()=>{calls++;return collectCodexDraftResponse(rejectedProgress(),()=>{});},{retryDelayMs:0}),error=>(error as Error).message===invalid);
+    assert.equal(reachedLater,false);assert.equal(calls,1,"unframed/unknown max-output errors remain definitive, never a new turn");
+  }
+  for(const finish of [[],[negativeResponse],[{type:"turn.failed" as const,error:{message:"Incomplete response returned, reason: max_output_tokens"}}],
+    [{type:"turn.failed" as const,error:{message:maximumOutput}}]]) {
+    let calls=0;
+    await assert.rejects(runCodexDraftWithRetry(async()=>{calls++;return collectCodexDraftResponse(events([...maximumEvents,...finish]),()=>{});},{retryDelayMs:0}),
+      error=>(error as Error).message===(finish[0]?.type==="turn.failed"?finish[0].error.message:nextMaximumOutput));
+    assert.equal(calls,1,"terminal/EOF/partial output keeps the original failure and cannot reset a generation or token budget");
+  }
+  for(const message of ["authentication required","You've hit your usage limit.","HTTP status 400 invalid_request_error: invalid_json_schema","CODEX_TIMEOUT"]) {
+    let reachedLater=false;
+    async function* terminalAfterMaximum():AsyncIterable<import("@openai/codex-sdk").ThreadEvent>{yield maximumEvents[0];yield{type:"error",message};reachedLater=true;yield negativeResponse;yield completed;}
+    await assert.rejects(collectCodexDraftResponse(terminalAfterMaximum(),()=>{}),error=>(error as Error).message===message);
+    assert.equal(reachedLater,false,"known terminal errors after progress still stop immediately");
+  }
+  const controller=new AbortController();let deadlineFirings=0,deadlineTurns=0;
+  const deadline=setTimeout(()=>{deadlineFirings++;controller.abort();},1);
+  async function* maximumAbortedEvents():AsyncIterable<import("@openai/codex-sdk").ThreadEvent>{
+    yield maximumEvents[0];await new Promise<void>(resolve=>{if(controller.signal.aborted)resolve();else controller.signal.addEventListener("abort",()=>resolve(),{once:true});});
+    throw Object.assign(new Error("same existing caller deadline aborted the SDK turn"),{name:"AbortError"});
+  }
+  try {await assert.rejects(runCodexDraftWithRetry(async()=>{deadlineTurns++;return collectCodexDraftResponse(maximumAbortedEvents(),()=>{});},
+    {retryDelayMs:0,canRetry:()=>!controller.signal.aborted}),error=>(error as {code?:string}).code==="CODEX_TIMEOUT");}
+  finally {clearTimeout(deadline);}
+  assert.equal(deadlineFirings,1);assert.equal(deadlineTurns,1,"progress does not reset the existing deadline or add another turn");
   await assert.rejects(collectCodexDraftResponse(events([progress, { type: "turn.failed", error: { message: completionLoss } }])), /Reconnecting/);
   await assert.rejects(collectCodexDraftResponse(events([progress, response])), /Reconnecting/,
     "a partial response without turn.completed cannot count as successful QC");

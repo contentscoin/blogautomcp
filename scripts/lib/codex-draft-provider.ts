@@ -244,8 +244,9 @@ function isCodexDraftReconnectProgress(message: string): boolean {
   if (!progress) return false;
   const attempt = Number(progress[1]), maximum = Number(progress[2]);
   if (!Number.isSafeInteger(attempt) || !Number.isSafeInteger(maximum) || attempt > maximum) return false;
-  return isCodexStreamCompletionLoss(message) || maximum === 5 &&
-    /^We[’']re currently experiencing high demand, which may cause temporary errors\.$/u.test(progress[3]);
+  return isCodexStreamCompletionLoss(message) || maximum === 5 && (
+    /^We[’']re currently experiencing high demand, which may cause temporary errors\.$/u.test(progress[3]) ||
+    progress[3] === "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens");
 }
 
 /** Exec may emit its internal reconnect progress as a top-level error while the turn still runs. */
