@@ -9,11 +9,12 @@ import { createRequire } from "node:module";
 import ts from "typescript";
 import sharp from "sharp";
 import { observeIntrinsicIdentifier, parseIntrinsicIdentifierObserverResponse, intrinsicIdentifierObserverRequestSha256,
-  type IntrinsicIdentifierObservation } from "./lib/intrinsic-identifier-observer";
+  INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA, INTRINSIC_IDENTIFIER_OBSERVER_VERSION, type IntrinsicIdentifierObservation } from "./lib/intrinsic-identifier-observer";
 import type { CodexDraftOptions } from "./lib/codex-draft-provider";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-blind-identifier-"));
 const hash = (bytes: Buffer | string) => crypto.createHash("sha256").update(bytes).digest("hex");
+const wire = (observation: unknown) => JSON.stringify({ observation });
 let checks = 0;
 function check(condition: unknown, reason: string) { assert.ok(condition, reason); checks++; }
 async function main(): Promise<void> {
@@ -22,7 +23,15 @@ async function main(): Promise<void> {
   fs.writeFileSync(file, bytes);
   const options = { path: file, sha256: hash(bytes) };
   const observation: IntrinsicIdentifierObservation = { literal: "Brandum", box: [100, 100, 400, 200], identifierRole: "brand", location: "intrinsic", readability: "legible" };
-  const raw = JSON.stringify(observation);
+  const raw = wire(observation);
+  check(INTRINSIC_IDENTIFIER_OBSERVER_VERSION === "intrinsic-identifier-observer/v2", "new wire protocol has its own version, never relabeled v1 evidence");
+  check(!("anyOf" in INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA) && INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA.required.join() === "observation", "structured output root remains a strict object, union is nested");
+  const [legibleBranch, neutralBranch] = INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA.properties.observation.anyOf;
+  check(legibleBranch.properties.location.enum.join() === "intrinsic" && legibleBranch.properties.readability.enum.join() === "legible" &&
+    !legibleBranch.properties.identifierRole.enum.includes("none" as never), "legible branch cannot emit not-observed/none fields");
+  check(neutralBranch.properties.literal.enum.join() === "" && neutralBranch.properties.box.type === "null" &&
+    neutralBranch.properties.identifierRole.enum.join() === "none" && neutralBranch.properties.location.enum.join() === "not-observed" &&
+    !neutralBranch.properties.readability.enum.includes("legible" as never), "non-legible branch structurally fixes all empty neutral fields");
   let calls = 0;
   const result = await observeIntrinsicIdentifier(options, { review: async request => {
     calls++;
@@ -31,6 +40,7 @@ async function main(): Promise<void> {
     check(request.noTransientRetry === true && request.researchMode === "disabled", "no search and no transient second turn");
     check(!/Brandum|Brandium|Voltium|Voltum/u.test(request.systemPrompt + request.userPrompt), "no expected brand/literal/near-spelling hint");
     check(request.userPrompt.includes("Never insert/delete a letter") && request.userPrompt.includes("COMPLETE word"), "independent raw letters and full-word ROI requested");
+    check(request.userPrompt.includes("Readable EXTERNAL seller/company artwork is not intrinsic") && request.userPrompt.includes("never copy its external word"), "readable external watermark is excluded, never coerced to intrinsic printing");
     check((request.outputSchema as { additionalProperties: boolean }).additionalProperties === false, "strict observation schema");
     return raw;
   } });
@@ -40,21 +50,35 @@ async function main(): Promise<void> {
   check(result.evidence?.rawResponse === raw && result.evidence.responseSha256 === hash(raw), "bounded exact raw response and hash retained");
   assert.deepEqual(result.evidence?.observation, observation); checks++;
   check(intrinsicIdentifierObserverRequestSha256(options.sha256) !== intrinsicIdentifierObserverRequestSha256("0".repeat(64)), "image SHA changes request binding");
-  for (const invalid of ["not json", "[]", "{}", raw + " commentary", "```json\n" + raw + "\n```", JSON.stringify({ ...observation, extra: "brand hint" }),
-    JSON.stringify({ ...observation, literal: "Volt(i)um (not certain)" }), JSON.stringify({ ...observation, literal: "Brandum or Brandium" }),
-    JSON.stringify({ ...observation, literal: "Brandum\nBrandium" }), JSON.stringify({ ...observation, literal: "Brandum?" }),
-    JSON.stringify({ ...observation, literal: "Brandum ", box: [0, 0, 1000, 1000] }),
-    JSON.stringify({ ...observation, box: [0, 0, 900, 100] }), JSON.stringify({ ...observation, box: [0, 0, 800, 250] }),
-    JSON.stringify({ ...observation, box: [100.1, 100, 400, 200] }), JSON.stringify({ ...observation, location: "not-observed" }),
-    JSON.stringify({ ...observation, readability: "unreadable" }), JSON.stringify({ ...observation, identifierRole: "none" }),
+  for (const invalid of ["not json", "[]", "{}", raw + " commentary", "```json\n" + raw + "\n```", JSON.stringify(observation),
+    JSON.stringify({ observation, extra: "brand hint" }), wire({ ...observation, extra: "brand hint" }),
+    wire({ ...observation, literal: "Volt(i)um (not certain)" }), wire({ ...observation, literal: "Brandum or Brandium" }),
+    wire({ ...observation, literal: "Brandum\nBrandium" }), wire({ ...observation, literal: "Brandum?" }),
+    wire({ ...observation, literal: "Brandum ", box: [0, 0, 1000, 1000] }),
+    wire({ ...observation, box: [0, 0, 900, 100] }), wire({ ...observation, box: [0, 0, 800, 250] }),
+    wire({ ...observation, box: [100.1, 100, 400, 200] }), wire({ ...observation, location: "not-observed" }),
+    wire({ ...observation, readability: "unreadable" }), wire({ ...observation, identifierRole: "none" }),
     " ".repeat(4097) + raw]) {
     check(parseIntrinsicIdentifierObserverResponse(invalid) === null, "ambiguous/annotated/malformed/unbounded observations cannot become word evidence");
   }
   for (const readability of ["unreadable", "absent", "ambiguous"] as const) {
-    const unread = JSON.stringify({ literal: "", box: null, identifierRole: "none", location: "not-observed", readability });
+    const unread = wire({ literal: "", box: null, identifierRole: "none", location: "not-observed", readability });
     const held = await observeIntrinsicIdentifier(options, { review: async () => unread });
     check(held.status === "unreadable" && held.evidence?.observation.literal === "", "no readable word stays a neutral observation, not a defect");
   }
+  for (const readability of ["legible", "unreadable", "absent", "ambiguous"])
+    for (const location of ["intrinsic", "not-observed"])
+      for (const identifierRole of ["brand", "product-line", "model", "sku", "none"])
+        for (const literal of ["", "Observed"])
+          for (const box of [null, [100, 100, 200, 150]]) {
+            const expected = readability === "legible" ? location === "intrinsic" && identifierRole !== "none" && literal === "Observed" && box !== null
+              : location === "not-observed" && identifierRole === "none" && literal === "" && box === null;
+            check(Boolean(parseIntrinsicIdentifierObserverResponse(wire({ readability, location, identifierRole, literal, box }))) === expected,
+              "every inconsistent legibility/location/role/literal/box combination stays invalid without coercion");
+          }
+  const oldHanilInvalid = { literal: "주식회사 한일의료기", box: [582, 30, 967, 82], identifierRole: "brand", location: "not-observed", readability: "legible" };
+  check(parseIntrinsicIdentifierObserverResponse(JSON.stringify(oldHanilInvalid)) === null && parseIntrinsicIdentifierObserverResponse(wire(oldHanilInvalid)) === null,
+    "actual old external-company contradiction is rejected both as untouched v1 raw and v2-enveloped invalid fields");
   let invalidCalls = 0;
   const reviewer = async () => { invalidCalls++; return raw; };
   check((await observeIntrinsicIdentifier({ ...options, sha256: "0".repeat(64) }, { review: reviewer })).status === "invalid" && invalidCalls === 0, "SHA mismatch before provider");
@@ -70,9 +94,9 @@ async function main(): Promise<void> {
   check(mutation.status === "invalid" && !mutation.evidence, "SHA race cannot issue observation evidence"); fs.writeFileSync(file, bytes);
   const requestMutation = await observeIntrinsicIdentifier(options, { review: async request => { request.imagePaths!.push("unexpected-second-image"); return raw; } });
   check(requestMutation.status === "invalid" && !requestMutation.evidence, "request/image-order mutation blocked");
-  const bad = await observeIntrinsicIdentifier(options, { review: async () => JSON.stringify({ ...observation, literal: "maybe Brandium" }) });
+  const bad = await observeIntrinsicIdentifier(options, { review: async () => wire({ ...observation, literal: "maybe Brandium" }) });
   check(bad.status === "invalid", "malformed literal never triggers repair/retry");
-  const second = await observeIntrinsicIdentifier(options, { review: async () => JSON.stringify({ ...observation, literal: "Brandium" }) });
+  const second = await observeIntrinsicIdentifier(options, { review: async () => wire({ ...observation, literal: "Brandium" }) });
   check(second.evidence?.observation.literal === "Brandium" && second.evidence.nativeExecution === false, "DI never consumes/reuses native cache");
 
   const observerFile = path.resolve("scripts/lib/intrinsic-identifier-observer.ts"); const require = createRequire(observerFile);

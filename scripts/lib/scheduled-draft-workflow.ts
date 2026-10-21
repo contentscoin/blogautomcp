@@ -17,6 +17,7 @@ export interface Result {
   approvalConflict?: { gate: "status" | "compare-and-set"; claimAcquired: false; observedStatus: string; expectedStatus?: string; observedUpdatedAt?: string };
   recovery?: { changed: boolean }; remainingMissing?: number;
   generatedCount?: number; appliedCount?: number;
+  partialImageRepair?: { status: string; ready: false; appliedCount: number; generatedCount: number };
   imageAuditFailures?: { code: string; assetPath?: string; sectionId?: string | null; rejectionScope?: string; findingKey?: string; photoDescription?: PhotoDescriptionFinding; photoClaimMismatchOnly?: true }[];
   data?: {
     status?: string; postUrl?: string; scheduledPublishAt?: string; errorMessage?: string;
@@ -694,6 +695,45 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
   let photoDescriptionRepaired = false;
   let originalPhotoRepairAttempted = false;
   let postOriginalAuditFailure: unknown;
+  let confirmedPrintSubsetAttempted = false;
+  const repairConfirmedPrintSubset = async (error: unknown): Promise<void> => {
+    const failure = error as Error & { code?: string; errors?: string[]; imageAuditFailures?: Result["imageAuditFailures"] };
+    const findings = failure?.imageAuditFailures;
+    // This is routing only. An exact current server-validated signed proof is
+    // mandatory in the endpoint; a section name or semantic message cannot
+    // purchase an image. Keep the existing all-definitive route unchanged.
+    if (failure?.code !== "PUBLISH_IMAGE_AUDIT_FAILED" || !findings?.some(row => row.code === "SEMANTIC_REJECTION" && row.sectionId && row.assetPath) ||
+        !findings.some(row => row.code !== "SEMANTIC_REJECTION" && row.code !== "LONG_IMAGE")) return;
+    if (confirmedPrintSubsetAttempted) throw error;
+    confirmedPrintSubsetAttempted = true;
+    deps.onStage?.("확정 인쇄 결함만 부분 복구 · 미확정 사진 보존 · 최종 승인 보류");
+    let partial: Result = { success: false };
+    try {
+      // This mutation is never replayed, including an unconfirmed response.
+      partial = await deps.call(`${base}/draft/images`, "POST", { action: "repair_confirmed_print" });
+      assertKnownImageOperationResult(partial);
+    } catch (repairError) {
+      const repairFailure = repairError as Error & { code?: string };
+      const code = isSessionWidePreparationFailureCode(repairFailure.code) || isUncertainLocalTransportError(repairError) ||
+        UNRESOLVED_IMAGE_OPERATION_CODES.has(repairFailure.code || "") ? repairFailure.code : failure.code;
+      throw Object.assign(new Error(`${failure.message}\n확정 결함 부분 복구 중단: ${repairFailure.message}`, { cause: repairError }), {
+        code, errors: failure.errors, imageAuditFailures: findings,
+        originalImageAuditFailure: { code: failure.code, message: failure.message, errors: failure.errors, imageAuditFailures: findings },
+        partialImageRepairFailure: { code: repairFailure.code, message: repairFailure.message },
+        ...(partial.partialImageRepair ? { partialImageRepair: partial.partialImageRepair } : {}),
+      });
+    }
+    if (!partial.partialImageRepair || partial.partialImageRepair.ready !== false || !Number.isSafeInteger(partial.appliedCount) ||
+        !Number.isSafeInteger(partial.generatedCount) || partial.appliedCount! < 0 || partial.generatedCount! < 0)
+      throw Object.assign(new Error("확정 인쇄 결함의 부분 복구 결과를 확인하지 못했습니다. 추가 작업과 승인을 중지했습니다.", { cause: error }), { code: "IMAGE_RESUME_REQUIRED" });
+    if (!partial.appliedCount) throw error;
+    deps.onStage?.(`확정 인쇄 결함 ${partial.appliedCount}장 부분 복구 · 미확정 사진과 원고 보존 · 최종검수 필요`);
+    // Never fall through to generic fill/replan/source refresh or approval.
+    // Remaining unknown findings and the original native failure stay visible.
+    throw Object.assign(new Error(`${failure.message}\n확정 인쇄 결함 ${partial.appliedCount}장만 부분 복구했습니다. 미확정 사진은 보존했으며 최종 승인하지 않았습니다.`, { cause: error }), {
+      code: failure.code, errors: failure.errors, imageAuditFailures: findings, partialImageRepair: partial.partialImageRepair,
+    });
+  };
   const repairAuditedPhotoDescription = async (error: unknown): Promise<boolean> => {
     if ((error as { code?: string })?.code !== "PUBLISH_IMAGE_AUDIT_FAILED") return false;
     const findings = (error as { imageAuditFailures?: Result["imageAuditFailures"] }).imageAuditFailures;
@@ -729,7 +769,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
         await deps.call(`${base}/draft`, "PATCH", { action: "audit_photo_descriptions" });
         postOriginalAuditFailure = undefined;
       } catch (afterRebind) {
-        if (!isDefinitivePublishImageFailure(afterRebind)) throw afterRebind;
+        if (!isDefinitivePublishImageFailure(afterRebind)) { await repairConfirmedPrintSubset(afterRebind); throw afterRebind; }
         const currentFailures = (afterRebind as { imageAuditFailures?: Result["imageAuditFailures"] }).imageAuditFailures;
         if (!currentFailures?.length || currentFailures.some(failure => failure.sectionId === originalSection ||
             draft.data?.imageAssets?.filter(asset => asset.path === failure.assetPath &&
@@ -792,7 +832,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
       draft = await deps.call(`${base}/draft`, "GET");
     } catch (error) {
       const repaired = await repairAuditedPhotoDescription(error);
-      if (!repaired && !isDefinitivePublishImageFailure(error)) throw error;
+      if (!repaired && !isDefinitivePublishImageFailure(error)) { await repairConfirmedPrintSubset(error); throw error; }
       // The remaining defects were just re-audited against this new material;
       // images() now reads their fresh current proofs, not the old cause.
       postOriginalAuditFailure = undefined;
@@ -847,7 +887,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
   } catch (error) {
     if (completedHeroPolicyReviewAttempted) throw error;
     const descriptionRepaired = await repairAuditedPhotoDescription(error);
-    if (!descriptionRepaired && !isDefinitivePublishImageFailure(error)) throw error;
+    if (!descriptionRepaired && !isDefinitivePublishImageFailure(error)) { await repairConfirmedPrintSubset(error); throw error; }
     if (descriptionRepaired && !postOriginalAuditFailure) {
       if (plan.action !== "complete") throw unresolvedCompositionError(plan.reason);
       deps.onStage?.("동일 이미지·수정 문장 최종 재검사·승인");
@@ -897,7 +937,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
           // defective photo is replaced. Correct that one audited sentence
           // against the replacement pixels, without buying another generation.
           const descriptionRepaired = await repairAuditedPhotoDescription(secondError);
-          if (!descriptionRepaired && !isDefinitivePublishImageFailure(secondError)) throw secondError;
+          if (!descriptionRepaired && !isDefinitivePublishImageFailure(secondError)) { await repairConfirmedPrintSubset(secondError); throw secondError; }
           if (descriptionRepaired) {
             if (postOriginalAuditFailure) throw postOriginalAuditFailure;
             if (plan.action !== "complete") throw unresolvedCompositionError(plan.reason);

@@ -4,6 +4,7 @@ import path from "node:path";
 import { readBrandPostPackage, getBrandPostPackageDir, evaluateBrandPostPackageReadiness, type BrandPostPackageManifest } from "./brand-post-package";
 import { hasCurrentBrandPostApprovalReceipt } from "./brand-post-approval-receipt";
 import { materialPreparationDiagnostics } from "./material-preparation-diagnostics";
+import { readCurrentMaterialReviewWarnings } from "./material-review-warnings";
 
 // Content-addressed selection: changing a file in place also invalidates selection.
 export function materialRevision(manifest: BrandPostPackageManifest): string {
@@ -43,6 +44,7 @@ function readMaterial(productId: string) {
     productId, revision: materialRevision(manifest), title: manifest.title,
     connectKind: manifest.connectKind, createdAt: manifest.createdAt, approvedAt: manifest.approvedAt,
     ready: blockers.length === 0, blockers, score: quality.contentScore as number | null,
+    reviewWarnings: approvalReceiptCurrent ? readCurrentMaterialReviewWarnings(manifest, path.join(getBrandPostPackageDir(productId), "product-sources")) : [],
     imageCount: quality.composition?.renderNodes.filter(node => node.kind === "image").length ?? (1 + manifest.bodyImagePaths.length),
     preparationDiagnostics: materialPreparationDiagnostics({ ready: blockers.length === 0, approved: Boolean(manifest.approvedAt), approvalReceiptCurrent,
       blockers: quality.blockers, contentPassed: quality.contentPassed, imageSlots: quality.imageSlots, imageGeneration: quality.imageGeneration,
@@ -55,8 +57,9 @@ function readMaterial(productId: string) {
 
 /** Diagnostics are an additive response field. Existing callers and test
  * adapters may omit them; the production reader always supplies the field. */
-export type MaterialLibraryRecord = Omit<NonNullable<ReturnType<typeof readMaterial>>, "preparationDiagnostics"> & {
+export type MaterialLibraryRecord = Omit<NonNullable<ReturnType<typeof readMaterial>>, "preparationDiagnostics" | "reviewWarnings"> & {
   preparationDiagnostics?: ReturnType<typeof materialPreparationDiagnostics>;
+  reviewWarnings?: import("./material-review-warning").MaterialReviewWarning[];
 };
 
 export function getMaterial(productId: string): MaterialLibraryRecord | null {

@@ -22,8 +22,9 @@ import { describeShoppingImageReplanFailure, replanShoppingImageCoverage } from 
 import { migrateShoppingNaturalPhotoPlan, requiresShoppingNaturalPhotoPlan } from "@/lib/brand-post-natural-photo-migration";
 import { planRejectedOriginalRepair } from "@/lib/brand-post-rejected-original-repair";
 import { restoreRetainedBrandPostScene } from "@/lib/brand-post-retained-scene";
+import { planConfirmedPrintRepairs } from "@/lib/brand-post-confirmed-print-repair";
 
-const IMAGE_ACTIONS = ["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources", "repair_rejected", "repair_rejected_originals", "review_completed_hero", "restore_retained_scene", "replan_sources"] as const;
+const IMAGE_ACTIONS = ["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources", "repair_rejected", "repair_confirmed_print", "repair_rejected_originals", "review_completed_hero", "restore_retained_scene", "replan_sources"] as const;
 type ImageAction = (typeof IMAGE_ACTIONS)[number];
 const IMAGE_REPAIR_CONFLICT_CODES = ["IMAGE_REPAIR_BUSY", "IMAGE_REPAIR_OWNERSHIP_LOST", "NATURAL_IMAGE_PLAN_REQUIRED"] as const;
 
@@ -129,6 +130,8 @@ export async function POST(
   if (!body.action || !IMAGE_ACTIONS.includes(body.action)) {
     return NextResponse.json({ success: false, error: "지원하지 않는 이미지 작업입니다." }, { status: 400 });
   }
+  if (body.action === "repair_confirmed_print" && Object.keys(body).some(key => key !== "action"))
+    return NextResponse.json({ success: false, code: "CONFIRMED_PRINT_REPAIR_INVALID", error: "확정 인쇄 결함 복구 대상은 서버의 현재 검수 근거에서만 선택합니다." }, { status: 400 });
 
   const link = await prisma.brandLink.findUnique({
     where: { id },
@@ -286,7 +289,12 @@ export async function POST(
     }
   }
   const generationRequests: BrandPostImageGenerationRequest[] = [];
-  if (body.action === "repair_rejected_originals") {
+  let confirmedPrintPlan: ReturnType<typeof planConfirmedPrintRepairs> | undefined;
+  if (body.action === "repair_confirmed_print") {
+    try { confirmedPrintPlan = planConfirmedPrintRepairs(manifest); generationRequests.push(...confirmedPrintPlan.requests); }
+    catch (error) { return NextResponse.json({ success: false, code: "IMAGE_RESUME_REQUIRED",
+      error: error instanceof Error ? error.message : "현재 확정 인쇄 결함 근거를 확인하지 못했습니다." }, { status: 422 }); }
+  } else if (body.action === "repair_rejected_originals") {
     try { generationRequests.push(...planRejectedOriginalRepair(manifest, body.sectionId)); }
     catch (error) { return NextResponse.json({ success: false, code: "REJECTED_ORIGINAL_REPAIR_INVALID",
       error: error instanceof Error ? error.message : "현재 원본 사진의 거절 근거를 확인할 수 없습니다." }, { status: 422 }); }
@@ -332,6 +340,7 @@ export async function POST(
       generatedCount: 0,
       remainingMissing: preview.imageSlots.reduce((sum, slot) => sum + Math.max(slot.missing, slot.generationMissing), 0),
       errors: [],
+      ...(confirmedPrintPlan ? { appliedCount: 0, partialImageRepair: { status: "no-eligible-defect", ready: false, appliedCount: 0, generatedCount: 0 } } : {}),
       message: "이미지가 필요한 모든 파트에 생성 이미지가 연결되어 있습니다.",
     });
   }
@@ -348,6 +357,7 @@ export async function POST(
       canonicalSourceOnly: body.action === "repair_rejected_originals",
       completedReviewOnly: body.action === "review_completed_hero",
       forceSourceRefresh: body.refreshSourcePhotos === true,
+      ...(confirmedPrintPlan ? { expectedMaterialBinding: confirmedPrintPlan.materialBinding } : {}),
     });
     const { errors, generatedCount, appliedCount, manifest: updated } = repaired;
     const updatedPreview = packagePreview(updated);
@@ -362,6 +372,8 @@ export async function POST(
       appliedCount,
       remainingMissing,
       errors,
+      ...(confirmedPrintPlan ? { partialImageRepair: { status: appliedCount > 0 ? "repaired-awaiting-review" : "not-applied",
+        ready: false, appliedCount, generatedCount, targets: confirmedPrintPlan.proofs } } : {}),
       message: appliedCount > 0
         ? `총 ${appliedCount}장 반영 (AI 생성 ${generatedCount}장).`
         : "새로 반영된 이미지가 없습니다.",

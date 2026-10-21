@@ -13,7 +13,7 @@ import { reviewPublicationIdentifiers, parsePublicationIdentifierComparison, pub
 import { normalizeIntrinsicIdentifierLiteral, type IntrinsicIdentifierOcrEvidence } from "./lib/intrinsic-identifier-ocr";
 import type { IntrinsicIdentifierPair, IdentifierBox } from "./lib/intrinsic-identifier-comparison";
 import type { CodexDraftOptions } from "./lib/codex-draft-provider";
-import { intrinsicIdentifierObserverRequestSha256, type IntrinsicIdentifierObserverEvidence } from "./lib/intrinsic-identifier-observer";
+import { intrinsicIdentifierObserverRequestSha256, INTRINSIC_IDENTIFIER_OBSERVER_VERSION, type IntrinsicIdentifierObserverEvidence } from "./lib/intrinsic-identifier-observer";
 
 const hash = (value: Buffer | string) => crypto.createHash("sha256").update(value).digest("hex");
 const fileHash = (file: string) => hash(fs.readFileSync(file));
@@ -124,8 +124,8 @@ async function main() {
     ]) { const changed = structuredClone(matched); mutate(changed); assert(publicationIdentifierReviewEvidenceIssue(changed, input, false)); checks++; }
     const observed = (sha256: string, literal: string): IntrinsicIdentifierObserverEvidence => {
       const observation = { literal, box, identifierRole: "brand" as const, location: "intrinsic" as const, readability: "legible" as const };
-      const rawResponse = JSON.stringify(observation);
-      return { version: "intrinsic-identifier-observer/v1", nativeExecution: false, imageSha256: sha256,
+      const rawResponse = JSON.stringify({ observation });
+      return { version: INTRINSIC_IDENTIFIER_OBSERVER_VERSION, nativeExecution: false, imageSha256: sha256,
         requestSha256: intrinsicIdentifierObserverRequestSha256(sha256), responseSha256: hash(rawResponse), rawResponse, observation };
     };
     const blindMatched = await reviewPublicationIdentifiers(makeInput(), { review: async () => JSON.stringify(marked),

@@ -19,10 +19,12 @@ export interface SuccessfulImageAuditPrintWarning {
   nodeIndex: number;
   sha256: string;
   evidenceSha256: string;
+  kind?: "suspected-omission-uncorroborated";
 }
 function validPrintWarnings(value: unknown): value is SuccessfulImageAuditPrintWarning[] {
   return Array.isArray(value) && value.length > 0 && value.length <= 64 && value.every(row => row &&
-    Object.keys(row).sort().join("|") === "evidenceSha256|nodeIndex|sha256" && Number.isSafeInteger(row.nodeIndex) && row.nodeIndex >= 0 &&
+    Object.keys(row).sort().join("|") === (row.kind === undefined ? "evidenceSha256|nodeIndex|sha256" : "evidenceSha256|kind|nodeIndex|sha256") &&
+    (row.kind === undefined || row.kind === "suspected-omission-uncorroborated") && Number.isSafeInteger(row.nodeIndex) && row.nodeIndex >= 0 &&
     typeof row.sha256 === "string" && validKey(row.sha256) && typeof row.evidenceSha256 === "string" && validKey(row.evidenceSha256)) &&
     new Set(value.map(row => row.nodeIndex)).size === value.length;
 }
@@ -77,6 +79,15 @@ export function readSuccessfulImageAuditReceiptDetails(id: string, key: string):
  * was bound by the approval preflight. Both bindings share the same HMAC. */
 export function readSuccessfulImageAuditReadinessBinding(id: string, readinessBindingKey: string): boolean {
   return validKey(readinessBindingKey) && readVerifiedReceipt(id)?.readinessBindingKey === readinessBindingKey;
+}
+/** Optimization hint only: callers must verify the CURRENT readiness binding
+ * before showing any warning. This never authorizes approval or generation. */
+export function hasSignedImageAuditPrintWarnings(id: string): boolean {
+  return Boolean(readVerifiedReceipt(id)?.printWarnings?.length);
+}
+export function readSuccessfulImageAuditReadinessWarnings(id: string, readinessBindingKey: string): SuccessfulImageAuditPrintWarning[] | null {
+  const row = validKey(readinessBindingKey) ? readVerifiedReceipt(id) : null;
+  return row?.readinessBindingKey === readinessBindingKey ? (row.printWarnings || []).map(warning => ({ ...warning })) : null;
 }
 export function writeSuccessfulImageAuditReceipt(id: string, key: string, readinessBindingKey?: string, printWarnings?: SuccessfulImageAuditPrintWarning[]): void {
   if (!validKey(key)) throw new Error("IMAGE_AUDIT_RECEIPT_INVALID_KEY");

@@ -140,7 +140,8 @@ export interface PublishImageAuditResult {
   failures: PublishImageAuditFailure[];
   /** An explicit non-certification of locally unobservable print, not a pass
    * verdict, product-identity waiver or permission to replace an image. */
-  warnings?: Array<{nodeIndex:number;assetPath:string;sha256:string;code:"INTRINSIC_PRINT_UNVERIFIED";reason:string;evidenceSha256:string}>;
+  warnings?: Array<{nodeIndex:number;assetPath:string;sha256:string;code:"INTRINSIC_PRINT_UNVERIFIED";reason:string;evidenceSha256:string;
+    kind?:"suspected-omission-uncorroborated"}>;
   images: Array<{ nodeIndex: number; assetPath: string; sha256: string }>;
   /** All bounded comparison verdicts, including adverse flags; never majority-voted. */
   comparisonReviews?: Array<{ nodeIndex: number; referenceSha256s: string[]; verdict: VisualReviewRow | null }>;
@@ -660,7 +661,9 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
       result.checked = candidates.length;
       if(priorReceipt!.printWarnings) result.warnings=priorReceipt!.printWarnings.map(warning=>({...warning,
         assetPath:result.images.find(image=>image.nodeIndex===warning.nodeIndex)!.assetPath,
-        code:"INTRINSIC_PRINT_UNVERIFIED",reason:"인쇄 미검증: 관찰할 수 없는 제품 표기의 일치 여부를 인증하지 않았습니다."}));
+        code:"INTRINSIC_PRINT_UNVERIFIED",reason:warning.kind==="suspected-omission-uncorroborated"
+          ? "인쇄 누락 의심·미확정: 첫 원본 비교의 누락 의심을 별도 비교로 확정하지 못했습니다. 인쇄의 정확성은 인증하지 않았습니다."
+          : "인쇄 미검증: 사진의 제품 자체 인쇄 정확성을 인증하지 않았습니다."}));
       console.log("      - 최종 이미지 감사: 동일 이미지·발행 문맥의 검증 결과 재사용");
     } else if (receiptId) invalidateSuccessfulImageAuditReceipt(receiptId);
     const review = options.review ?? runCodexDraft;
@@ -790,7 +793,10 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           const marker=identifiers.printObservationWarning;
           if(!marker) fail(candidate.nodeIndex,candidate.assetPath,"INVALID_REVIEW","Intrinsic-print warning has no exact observation evidence.");
           else (result.warnings ??=[]).push({nodeIndex:candidate.nodeIndex,assetPath:candidate.assetPath,sha256:candidate.sha256,
-            code:"INTRINSIC_PRINT_UNVERIFIED",reason:"인쇄 미검증: 관찰할 수 없는 제품 표기의 일치 여부를 인증하지 않았습니다.",
+            ...(marker.version==="publication-suspected-print-omission-warning/v1"?{kind:"suspected-omission-uncorroborated" as const}:{}),
+            code:"INTRINSIC_PRINT_UNVERIFIED",reason:marker.version==="publication-suspected-print-omission-warning/v1"
+              ? "인쇄 누락 의심·미확정: 첫 원본 비교의 누락 의심을 별도 비교로 확정하지 못했습니다. 인쇄의 정확성은 인증하지 않았습니다."
+          : "인쇄 미검증: 사진의 제품 자체 인쇄 정확성을 인증하지 않았습니다.",
             evidenceSha256:crypto.createHash("sha256").update(JSON.stringify(marker)).digest("hex")});
         }
       } else {
@@ -1005,7 +1011,16 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
     for(const warning of result.warnings || []) {
       const node=options.composition.renderNodes[warning.nodeIndex],id=options.brandLinkId || options.selectedSourceProductId;
       let recorded=false;
-      try { recorded=!!(id && node?.kind==="image" && node.sectionId && publicationImageDefectWasRecorded(id,node.sectionId,warning.sha256)); }
+      try {
+        if(id && node?.kind==="image") {
+          const sections=new Set(options.composition.sections.map(section=>section.id));
+          // A thumbnail has an empty section scope. Also retain deny-only
+          // memory when exact known-bad body pixels are reused as a hero.
+          const scopes=new Set([node.sectionId || "",...(options.imageAssets || []).filter(asset=>asset.sha256===warning.sha256 &&
+            !!asset.sectionId && sections.has(asset.sectionId)).map(asset=>asset.sectionId!)]);
+          recorded=[...scopes].some(sectionId=>publicationImageDefectWasRecorded(id,sectionId,warning.sha256));
+        }
+      }
       catch {recorded=true;}
       if(recorded) {
         fail(warning.nodeIndex,warning.assetPath,"INVALID_REVIEW","이미 확정된 현재 사진의 인쇄 결함은 미검증 경고로 해제할 수 없습니다.");
@@ -1018,7 +1033,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
     if (receiptId) {
       if (result.ok && (!reused || options.readinessBindingKey))
         writeSuccessfulImageAuditReceipt(receiptId, receiptKey, options.readinessBindingKey,
-          result.warnings?.length?result.warnings.map(({nodeIndex,sha256,evidenceSha256})=>({nodeIndex,sha256,evidenceSha256})):undefined);
+          result.warnings?.length?result.warnings.map(({nodeIndex,sha256,evidenceSha256,kind})=>({nodeIndex,sha256,evidenceSha256,...(kind?{kind}:{})})):undefined);
       else if (!result.ok) invalidateSuccessfulImageAuditReceipt(receiptId);
     }
     return result;

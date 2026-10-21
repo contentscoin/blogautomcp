@@ -16,6 +16,8 @@ const checks = [
   'verify-publication-blind-identifier-review.ts',
   'verify-publication-print-applicability.ts',
   'verify-publication-current-origin.ts',
+  'verify-confirmed-print-partial-repair.ts',
+  'verify-material-review-warnings.ts',
   'verify-compact-final-image-rubric.ts',
   'verify-scene-identifier-guard.ts',
   'verify-scene-publication-identifiers.ts',

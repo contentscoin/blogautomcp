@@ -14,6 +14,7 @@ import { atomicWriteTextFile } from "./atomic-text-file";
 import { isDraftEditorialQualityPassed } from "./brand-post-quality-display";
 import { SHOPPING_POST_STRATEGY_VERSION } from "./shopping-post-strategy";
 import { getConnectAffiliateDisclosure } from "./connect-disclosure";
+import { readCurrentMaterialReviewWarnings } from "./material-review-warnings";
 import {
   getPostCompositionContract,
   hasCanonicalAffiliateDisclosure,
@@ -844,10 +845,11 @@ export function packagePreview(manifest: BrandPostPackageManifest) {
   const sectionOutline = manifest.version === "brand-post-package/v2"
     ? manifest.composition.sections.map((section, index) => ({ index, id: section.id, title: section.title, chars: section.characterCount, images: section.imagePaths.length }))
     : null;
+  const reviewWarnings = readCurrentMaterialReviewWarnings(manifest, path.join(getBrandPostPackageDir(manifest.brandLinkId), "product-sources"));
   const readiness: BrandPostPackageReadiness = {
     status: approval.canApprove ? "READY" as const : "BLOCKED" as const,
     score: approval.contentScore,
-    summary: approval.canApprove ? "준비된 소재의 원고·이미지 검수 통과" : approval.blockers.map(blocker => blocker.reason).join(" "),
+    summary: approval.canApprove ? reviewWarnings.length ? `준비된 소재 · 인쇄 미검증 경고 ${reviewWarnings.length}장 확인` : "준비된 소재의 원고·이미지 검수 통과" : approval.blockers.map(blocker => blocker.reason).join(" "),
     signals: approval.blockers.map(blocker => ({ key: blocker.code, label: blocker.reason, status: "fail" as const })),
     repairTargets: approval.blockers.map(blocker => ({ sectionIndex: blocker.sectionId ? manifest.version === "brand-post-package/v2" ? manifest.composition.sections.findIndex(section => section.id === blocker.sectionId) : null : null,
       code: blocker.code, reason: blocker.reason, priority: "P0", instruction: blocker.reason })),
@@ -856,7 +858,7 @@ export function packagePreview(manifest: BrandPostPackageManifest) {
   const imageCount = approval.composition
     ? approval.composition.renderNodes.filter(node => node.kind === "image").length
     : imageAssets.filter(isValidPackageImage).length;
-  return { ...rest, imageGeneration: approval.imageGeneration, ...(approval.composition ? { composition: approval.composition } : {}), imageAssets, imageSlots, markdown, heroPreviewDataUrl, sectionOutline, readiness, approval, imageCount };
+  return { ...rest, reviewWarnings, imageGeneration: approval.imageGeneration, ...(approval.composition ? { composition: approval.composition } : {}), imageAssets, imageSlots, markdown, heroPreviewDataUrl, sectionOutline, readiness, approval, imageCount };
 }
 
 function sha256File(filePath: string): string {

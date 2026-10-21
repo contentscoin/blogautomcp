@@ -5,6 +5,7 @@ import { getAppDataDir, getProjectRoot } from "../../scripts/lib/app-paths";
 import { PUBLICATION_IMAGE_AUDIT_POLICY_FILES } from "../../scripts/lib/publish-image-audit";
 import { getBrandPostImageGenerationState, type BrandPostPackageManifest } from "./brand-post-package";
 import type { MaterialLibraryRecord } from "./material-library";
+import { readCurrentMaterialReviewWarnings } from "./material-review-warnings";
 
 export type MaterialSummary = MaterialLibraryRecord & {
   verification: { mode: "saved-summary"; strict: false; observedAt: string; contentCheckedAt: string | null;
@@ -13,7 +14,7 @@ export type MaterialSummary = MaterialLibraryRecord & {
 };
 const MAX_SUMMARIES = 256;
 const MAX_DEPENDENCIES = 4096;
-type StrictObservation = Pick<MaterialLibraryRecord, "ready" | "blockers" | "score" | "imageCount" | "preparationDiagnostics"> & { checkedAt: string };
+type StrictObservation = Pick<MaterialLibraryRecord, "ready" | "blockers" | "score" | "imageCount" | "preparationDiagnostics" | "reviewWarnings"> & { checkedAt: string };
 type SummaryEntry = { signature: string; value: MaterialSummary; strictObservation?: StrictObservation };
 const cache = new Map<string, SummaryEntry>();
 const pending = new Map<string, Promise<MaterialSummary | null>>();
@@ -109,6 +110,9 @@ async function readSummary(productId: string): Promise<MaterialSummary | null> {
     productId, revision: signature, title: manifest.title, connectKind: manifest.connectKind,
     createdAt: manifest.createdAt, approvedAt: manifest.approvedAt, ready: blockers.length === 0, blockers,
     score: quality?.quality?.score ?? quality?.score ?? null, imageCount,
+    // Only changed/cold warned entries verify bytes. Unchanged poll signatures
+    // reuse this bounded display result; they never trigger a model review.
+    reviewWarnings: readCurrentMaterialReviewWarnings(manifest, path.join(directory, "product-sources")),
     ...(generation ? { imageGeneration: { status: generation.status, requested: generation.requested, applied: generation.applied,
       remaining: generation.remaining, updatedAt: generation.updatedAt, ...(generation.heartbeatAt ? { heartbeatAt: generation.heartbeatAt } : {}),
       ...(generation.recoveryState ? { recoveryState: generation.recoveryState } : {}) } } : {}),
@@ -138,6 +142,7 @@ export function observeStrictMaterialSummary(productId: string, expectedRevision
   const entry = cache.get(productId);
   if (!entry || entry.signature !== expectedRevision || material.productId !== productId || !/^[a-f0-9]{64}$/u.test(material.revision)) return false;
   entry.strictObservation = { ready: material.ready, blockers: [...material.blockers], score: material.score,
+    reviewWarnings: material.reviewWarnings || [],
     imageCount: material.imageCount, ...(material.preparationDiagnostics ? { preparationDiagnostics: material.preparationDiagnostics } : {}),
     checkedAt: new Date().toISOString() };
   return true;

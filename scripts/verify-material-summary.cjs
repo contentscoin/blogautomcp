@@ -34,7 +34,7 @@ function harness() {
     composition: { sections: [{ id: 'section-a', imagePaths: [image] }], renderNodes: [{ kind: 'image', assetPath: image }],
       qualityReport: { canAutoPublish: true } },
     textQualityRevalidation: { checkedAt: '2026-10-15T00:01:00Z' } };
-  const state = { manifestReads: 0, photoReads: 0, synchronousReads: 0, stamps: new Map(), galleryNames: [], missing: new Set(), bytes: 'good' };
+  const state = { manifestReads: 0, photoReads: 0, synchronousReads: 0, warningReads: 0, warnings: [], stamps: new Map(), galleryNames: [], missing: new Set(), bytes: 'good' };
   const asyncFs = {
     readFile: async file => {
       if (file === path.join(directory, 'manifest.json')) { state.manifestReads++; return JSON.stringify(manifest); }
@@ -52,6 +52,7 @@ function harness() {
     '../../scripts/lib/app-paths': { getAppDataDir: () => root, getProjectRoot: () => root },
     '../../scripts/lib/publish-image-audit': { PUBLICATION_IMAGE_AUDIT_POLICY_FILES: ['policy.ts'] },
     './brand-post-package': { getBrandPostImageGenerationState: value => value.imageGeneration },
+    './material-review-warnings': { readCurrentMaterialReviewWarnings: () => { state.warningReads++; return state.warnings; } },
   });
   const strictFs = { readFileSync: () => { state.synchronousReads++; return Buffer.from(state.bytes); }, readdirSync: () => [] };
   let approvedBinding;
@@ -73,6 +74,7 @@ function harness() {
         contentScore: 100, composition: manifest.composition, contentPassed: true, imageSlots: [] }) },
     './brand-post-approval-receipt': receipt,
     './material-preparation-diagnostics': { materialPreparationDiagnostics: () => undefined },
+    './material-review-warnings': { readCurrentMaterialReviewWarnings: () => [] },
   });
   return { id, directory, image, reference, markdown, gallery, root, manifest, state, summary, strict };
 }
@@ -89,6 +91,19 @@ test('cold and repeated summary requests read zero image/manuscript bytes and co
   for (let i = 0; i < 10; i++) assert.equal((await h.summary.getMaterialSummary(h.id)).revision, records[0].revision);
   assert.equal(h.state.photoReads, 0);
   assert.equal(h.state.synchronousReads, 0);
+});
+
+test('authenticated warning projection survives READY display without repeated byte verification on unchanged polls', async () => {
+  const h = harness();
+  h.state.warnings = [{ kind: 'suspected-omission-uncorroborated', reason: '인쇄 누락 의심·미확정', nodeIndex: 0, assetSha256: 'c'.repeat(64) }];
+  const first = await h.summary.getMaterialSummary(h.id);
+  assert.equal(first.ready, true, 'disclosure does not change approval or readiness');
+  assert.equal(first.reviewWarnings[0].kind, 'suspected-omission-uncorroborated');
+  for (let i = 0; i < 10; i++) assert.equal((await h.summary.getMaterialSummary(h.id)).reviewWarnings.length, 1);
+  assert.equal(h.state.warningReads, 1, 'unchanged poll must not recompute the current-body/image binding');
+  h.state.warnings = []; h.state.stamps.set(path.join(h.root, 'policy.ts'), 2);
+  assert.deepEqual((await h.summary.getMaterialSummary(h.id)).reviewWarnings, [], 'changed policy cannot keep a stale cached warning');
+  assert.equal(h.state.warningReads, 2);
 });
 
 test('image, reference, manuscript, source-gallery membership, policy and receipts invalidate the summary observation', async () => {

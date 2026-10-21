@@ -14,6 +14,7 @@ import {
   isBrandPostImageRepairLocked,
 } from "./brand-post-image-repair-lock";
 import { migrateShoppingNaturalPhotoPlan, requiresShoppingNaturalPhotoPlan } from "./brand-post-natural-photo-migration";
+import { publicationDefectMaterialBinding } from "../../scripts/lib/publication-image-defect-proof";
 
 type ImageSlot = ReturnType<typeof packagePreview>["imageSlots"][number];
 
@@ -145,6 +146,8 @@ export async function repairBrandPostImages(options: {
   canonicalSourceOnly?: boolean;
   completedReviewOnly?: boolean;
   forceSourceRefresh?: boolean;
+  /** Internal confirmed-defect admission, checked after acquiring the package lock. */
+  expectedMaterialBinding?: string;
 }, dependencies: ImageRepairDependencies = {
   read: readBrandPostPackage, write: writeBrandPostPackageManifest,
   apply: applyGeneratedBrandPostImage, generate: generateBrandPostImages,
@@ -218,6 +221,8 @@ export async function repairBrandPostImages(options: {
   };
   try {
     const manifest = read();
+    if (options.expectedMaterialBinding !== undefined && publicationDefectMaterialBinding(manifest) !== options.expectedMaterialBinding)
+      throw Object.assign(new Error("확정 결함 복구를 계획한 뒤 소재가 변경되어 생성하지 않았습니다."), { code: "IMAGE_RESUME_REQUIRED" });
     const requests = options.requests ?? (dependencies.migrateNaturalPhotoPlan
       ? planWholeBrandPostImageRequests(manifest) : planSectionImageRequests(packagePreview(manifest).imageSlots));
     requested = requests.length;

@@ -1,4 +1,5 @@
 import { startMaterialPolling } from "./material-polling";
+import type { MaterialReviewWarning } from "./material-review-warning";
 
 export type MaterialSummaryVerification = {
   mode: "saved-summary";
@@ -11,6 +12,7 @@ export type MaterialSummary = {
   productId: string; revision: string; title: string; productName?: string;
   connectKind: string; status: string; ready: boolean; blockers: string[];
   score: number | null; imageCount: number; approvedAt: string | null;
+  reviewWarnings?: MaterialReviewWarning[];
   verification?: MaterialSummaryVerification;
   preparationDiagnostics?: { nextAction?: { instruction: string }; missingBodyImages?: number; thumbnailRequired?: boolean };
 };

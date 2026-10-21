@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MaterialJobItemResult } from "./MaterialJobItemResult";
+import { MaterialReviewWarnings } from "./MaterialReviewWarnings";
 import { currentJobReadyCount } from "../lib/material-job-display";
 import { getMaterialSummaryStore, type MaterialSummary as Material, type MaterialSummarySnapshot } from "../lib/material-summary-store";
 import { materialSelectionMatches, verifyMaterialSelection, type MaterialSelection } from "../lib/material-selection";
@@ -301,6 +302,7 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
       <div className="flex items-start gap-3"><input type="checkbox" className="mt-1" aria-label={`${item.title} 발행 선택`} disabled={!item.ready || active || selecting} checked={Boolean(selection[item.productId])} onChange={event => { if (event.target.checked) void selectVerified([item]); else { const next = { ...selection }; delete next[item.productId]; select(next); } }} />
         <div className="min-w-0 flex-1"><p className="font-semibold">{item.title}</p><p className="mt-1 text-xs text-slate-500">{item.ready ? "저장된 검사 기준 준비완료" : item.status === "PUBLISHED" ? "발행 완료" : item.status === "SCHEDULED" ? "예약 등록 완료" : "확인 필요"} · 내용 {item.score ?? "미평가"}{item.score !== null ? "점" : ""} · 이미지 {item.imageCount}장</p>
           <p className="mt-1 text-xs text-slate-500">{item.verification?.contentCheckedAt ? `저장된 검사: ${new Date(item.verification.contentCheckedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })} · 선택·발행 전 재확인` : "저장된 검사 시각 확인 필요 · 선택·발행 전 재확인"}</p>
+          <MaterialReviewWarnings warnings={item.reviewWarnings} />
           {item.blockers.length > 0 && <details className="mt-1 text-xs text-amber-800"><summary className="cursor-pointer">실패 상세 보기 · {item.blockers.length}건</summary>{item.blockers.map((reason, index) => <p key={index} className="mt-1 whitespace-pre-wrap break-words">{reason}</p>)}</details>}
           {selection[item.productId] && !materialSelectionMatches(selection, item) && <p className="mt-1 text-xs text-red-700">선택 후 소재가 변경되었습니다. 해제 후 다시 선택하세요.</p>}</div>
         <button type="button" onClick={() => onPreview(item.productId)} className="shrink-0 rounded border px-3 py-2 text-sm">원고·이미지 확인</button></div>

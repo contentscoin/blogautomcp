@@ -22,7 +22,7 @@ function ocr(status: IntrinsicIdentifierOcrResult["status"], reason: string, sou
     engine: { binaryPath: "offline-fixture", binarySha256: "e".repeat(64), traineddataPath: "offline-fixture", traineddataSha256: "f".repeat(64), configHash: "0".repeat(64) } } };
 }
 function evidence(sha: string, observation: IntrinsicIdentifierObservation): IntrinsicIdentifierObserverEvidence {
-  const rawResponse = JSON.stringify(observation);
+  const rawResponse = JSON.stringify({ observation });
   return { version: INTRINSIC_IDENTIFIER_OBSERVER_VERSION, nativeExecution: true, imageSha256: sha,
     requestSha256: intrinsicIdentifierObserverRequestSha256(sha), responseSha256: hash(rawResponse), rawResponse, observation };
 }
@@ -49,7 +49,7 @@ async function main() {
   assert.equal(pass.observed.length, 2); assert.equal(pass.calls.length, 2); assert.equal(pass.result.ocr.status, "conflict");
   assert.equal(pass.result.pair.sourceLiteral, "Voltium"); assert.deepEqual(pass.result.pair.sourceBox, sourceObservation.box);
   assert.equal(pass.result.pair.sourceImageIndex, 4); assert.equal(pass.result.pair.sameSelectedComponent, true);
-  assert.equal(pass.result.blindObservations?.source.rawResponse, JSON.stringify(sourceObservation)); checks += 8;
+  assert.equal(pass.result.blindObservations?.source.rawResponse, JSON.stringify({ observation: sourceObservation })); checks += 8;
   for (const request of pass.observed) { assert.deepEqual(Object.keys(request as object).sort(), ["path", "sha256"]); checks++; }
   const direct = await exercise({ first: ocr("conflict", "BLIND_OCR_IDENTIFIER_CONFLICT", "Voltium"), patch: { sourceLiteral: "Voltium" } });
   assert.equal(direct.observed.length, 0); assert.equal(direct.calls.length, 1); checks += 2;

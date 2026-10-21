@@ -47,6 +47,7 @@ async function scenario(action: string, legacy = true, travel = false, repairRes
     "@/lib/brand-post-image-replan": { replanShoppingImageCoverage: () => { throw new Error("legacy replan must request explicit full preparation"); } },
     "@/lib/brand-post-rejected-original-repair": { planRejectedOriginalRepair: () => { throw new Error("original-only recovery is covered by its isolated contract suite"); } },
     "@/lib/brand-post-retained-scene": { restoreRetainedBrandPostScene: () => { throw new Error("retained-scene restoration is covered by its isolated contract suite"); } },
+    "@/lib/brand-post-confirmed-print-repair": { planConfirmedPrintRepairs: () => { throw new Error("confirmed-print subsets are covered by their isolated contract suite"); } },
     "@/lib/brand-post-image-repair": {
       isBrandPostImageRepairActive: () => false,
       planSectionImageRequests: () => [{ requestId: "scene", sectionId: "scene" }],

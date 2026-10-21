@@ -53,6 +53,14 @@ async function main() {
     assert.equal(read("print-unverified",key),false,"warning removal/target/evidence tampering cannot become an unwarned success");
   }
   fs.writeFileSync(receiptFile("print-unverified"),signedWarning);
+  const suspectedWarnings=[{...printWarnings[0],kind:"suspected-omission-uncorroborated" as const}];
+  write("suspected-print",key,alternate,suspectedWarnings);assert.deepEqual(details("suspected-print",key),{printWarnings:suspectedWarnings});
+  const suspectedBytes=fs.readFileSync(receiptFile("suspected-print"));
+  for(const kind of [undefined,"observation-limit","confirmed-missing"]) {
+    const changed=JSON.parse(suspectedBytes.toString());if(kind===undefined)delete changed.printWarnings[0].kind;else changed.printWarnings[0].kind=kind;
+    fs.writeFileSync(receiptFile("suspected-print"),JSON.stringify(changed));assert.equal(read("suspected-print",key),false,"suspected-omission disclosure cannot be stripped, relabelled or promoted");
+  }
+  fs.writeFileSync(receiptFile("suspected-print"),suspectedBytes);
   for(const warnings of [[],[...printWarnings,...printWarnings],[{...printWarnings[0],nodeIndex:-1}],[{...printWarnings[0],sha256:"invalid"}],Array.from({length:65},(_,nodeIndex)=>({...printWarnings[0],nodeIndex}))])
     assert.throws(()=>write("bad-warning",key,undefined,warnings),/INVALID_PRINT_WARNINGS/);
   write("legacy-no-warning",key);assert.deepEqual(details("legacy-no-warning",key),{});
@@ -113,7 +121,7 @@ async function main() {
     }
     if (request.systemPrompt?.includes("blind transcription observer")) {
       calls--; // B's independent unprinted-surface observation is not a new audit candidate.
-      return JSON.stringify({ literal: "", box: null, identifierRole: "none", location: "not-observed", readability: "absent" });
+      return JSON.stringify({ observation: { literal: "", box: null, identifierRole: "none", location: "not-observed", readability: "absent" } });
     }
     const slotLine = request.userPrompt?.split("\n").find(line => line.startsWith("Each attached image belongs ONLY"));
     const slots = slotLine ? JSON.parse(slotLine.slice(slotLine.indexOf("["))) as Array<{ role: string; sectionBody: string[] }> : [];

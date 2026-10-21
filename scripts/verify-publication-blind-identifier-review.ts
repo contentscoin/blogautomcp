@@ -11,7 +11,7 @@ import ts from "typescript";
 import Ajv from "ajv";
 import { reviewPublicationIdentifiers, publicationIdentifierReviewEvidenceIssue,
   type PublicationIdentifierReviewInput, type PublicationIdentifierComparison } from "./lib/publication-identifier-review";
-import { intrinsicIdentifierObserverRequestSha256, type IntrinsicIdentifierObserverEvidence, type IntrinsicIdentifierObservation } from "./lib/intrinsic-identifier-observer";
+import { INTRINSIC_IDENTIFIER_OBSERVER_VERSION, intrinsicIdentifierObserverRequestSha256, type IntrinsicIdentifierObserverEvidence, type IntrinsicIdentifierObservation } from "./lib/intrinsic-identifier-observer";
 import { normalizeIntrinsicIdentifierLiteral, type IntrinsicIdentifierOcrEvidence } from "./lib/intrinsic-identifier-ocr";
 import type { IdentifierBox } from "./lib/intrinsic-identifier-comparison";
 import type { CodexDraftOptions } from "./lib/codex-draft-provider";
@@ -38,8 +38,8 @@ async function main() {
   const observed = (file: string, literal: string, box: IdentifierBox | null, readability: IntrinsicIdentifierObservation["readability"], native = true): IntrinsicIdentifierObserverEvidence => {
     const observation: IntrinsicIdentifierObservation = { literal, box, identifierRole: readability === "legible" ? "brand" : "none",
       location: readability === "legible" ? "intrinsic" : "not-observed", readability };
-    const rawResponse = JSON.stringify(observation), imageSha256 = fileHash(file);
-    return { version: "intrinsic-identifier-observer/v1", nativeExecution: native, imageSha256,
+    const rawResponse = JSON.stringify({observation}), imageSha256 = fileHash(file);
+    return { version: INTRINSIC_IDENTIFIER_OBSERVER_VERSION, nativeExecution: native, imageSha256,
       requestSha256: intrinsicIdentifierObserverRequestSha256(imageSha256), responseSha256: hash(rawResponse), rawResponse, observation };
   };
   const sourceWord = "Markora", wrongWord = "Markra";
@@ -90,7 +90,9 @@ async function main() {
           correspondenceObservation:"four buttons and connector identify the SAME physical face",samePhysicalPart:true,samePhysicalSurface:true,sameSelectedVisibleOption:null,
           sourcePrintLocation:"unprinted",candidatePrintLocation:"own-unprinted-face",sourceBox:null,candidateBox:null,witness:"same four buttons and connector on both faces",
           applicability:"not-applicable-own-unprinted-face",accepted:true } : mode.raw || wrap(mode.comparison || row(mode.candidateLiteral || wrongWord));
-        assert.equal(new Ajv().compile(call.outputSchema as object)(raw), !mode.invalidSchema, "two-image coordinate/schema contract"); checks++;
+        // Match the actual JSON transport; cross-VM Array constructors are not
+        // semantic differences in an array-valued exact-observation enum.
+        assert.equal(new Ajv().compile(copy(call.outputSchema) as object)(raw), !mode.invalidSchema, "two-image coordinate/schema contract"); checks++;
         mode.requestMutate?.(); return JSON.stringify(raw);
       } } : name === "./intrinsic-identifier-observer" ? { ...scopedRequire(name), observeIntrinsicIdentifier: async (options: { path: string; sha256: string }) => {
         observeCalls++; observationInputs.push(copy(options));
@@ -142,7 +144,9 @@ async function main() {
   const heldNegative = await negative.api.reviewPublicationIdentifiers(input); assert.equal(heldNegative.status, "hold"); assert.equal(heldNegative.comparison!.accepted, false); checks += 2;
   for (const mode of [{ ocrUnavailable: true }, { ocrMutate: (value: IntrinsicIdentifierOcrEvidence) => { value.candidate.consensus!.minimumConfidence = 84; } },
     { observeMutate: (value: IntrinsicIdentifierObserverEvidence) => { value.nativeExecution = false; } },
-    { observeMutate: (value: IntrinsicIdentifierObserverEvidence) => { value.requestSha256 = hash("different observer instruction"); } }]) {
+    { observeMutate: (value: IntrinsicIdentifierObserverEvidence) => { value.requestSha256 = hash("different observer instruction"); } },
+    { observeMutate: (value: IntrinsicIdentifierObserverEvidence) => { value.rawResponse = JSON.stringify(value.observation); value.responseSha256 = hash(value.rawResponse); } },
+    { observeMutate: (value: IntrinsicIdentifierObserverEvidence) => { Object.assign(value, { version: "intrinsic-identifier-observer/v1" }); } }]) {
     const test = load(mode); assert.equal((await test.api.reviewPublicationIdentifiers(input)).status, "hold"); checks++;
   }
   for (const raw of [{ ...wrap(row()), coordinateSpace: "pixels" }, { ...wrap(row()), sourceImageSize: { width: 1000, height: 1000 } }]) {

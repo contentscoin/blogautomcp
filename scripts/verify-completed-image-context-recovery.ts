@@ -283,7 +283,7 @@ async function main() {
       const primaryObservation: IntrinsicIdentifierObservation = {literal:"",box:null,identifierRole:"none",location:"not-observed",readability:"absent"};
       const sourceObservation: IntrinsicIdentifierObservation = {literal:"Voltium",box:f.identifierConflict.pair.sourceBox!,identifierRole:"brand",location:"intrinsic",readability:"legible"};
       const candidateObservation: IntrinsicIdentifierObservation = {literal:"Voltum",box:f.identifierConflict.pair.candidateBox!,identifierRole:"brand",location:"intrinsic",readability:"legible"};
-      const observeEvidence = (sha256:string,observation:IntrinsicIdentifierObservation):IntrinsicIdentifierObserverEvidence => {const rawResponse=JSON.stringify(observation);return {
+      const observeEvidence = (sha256:string,observation:IntrinsicIdentifierObservation):IntrinsicIdentifierObserverEvidence => {const rawResponse=JSON.stringify({observation});return {
         version:INTRINSIC_IDENTIFIER_OBSERVER_VERSION,nativeExecution:true,imageSha256:sha256,requestSha256:intrinsicIdentifierObserverRequestSha256(sha256),
         responseSha256:hash(rawResponse),rawResponse,observation};};
       const blindInputObservations = {candidate:observeEvidence(f.currentSha,candidateObservation),sources:[
@@ -353,7 +353,7 @@ async function main() {
     const changedEngine = await publicationFixture(); changedEngine.record(); fs.appendFileSync(changedEngine.identifierConflict.evidence.engine.binaryPath, "changed");
     assert.throws(changedEngine.plan, /IMAGE_RESUME_REQUIRED/); checks++;
     const blindEvidence = (sha256: string, observation: IntrinsicIdentifierObservation): IntrinsicIdentifierObserverEvidence => {
-      const rawResponse = JSON.stringify(observation);
+      const rawResponse = JSON.stringify({ observation });
       return { version: INTRINSIC_IDENTIFIER_OBSERVER_VERSION, nativeExecution: true, imageSha256: sha256,
         requestSha256: intrinsicIdentifierObserverRequestSha256(sha256), responseSha256: hash(rawResponse), rawResponse, observation };
     };

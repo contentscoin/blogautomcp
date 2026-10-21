@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import sharp from "sharp";
 import { runCodexDraft, type CodexDraftOptions } from "./codex-draft-provider";
 
-export const INTRINSIC_IDENTIFIER_OBSERVER_VERSION = "intrinsic-identifier-observer/v1";
+export const INTRINSIC_IDENTIFIER_OBSERVER_VERSION = "intrinsic-identifier-observer/v2";
 export interface IntrinsicIdentifierObservation {
   literal: string;
   box: [number, number, number, number] | null;
@@ -39,15 +39,24 @@ const USER_PROMPT = [
   "If exactly one identifying word/short line is unambiguously legible, transcribe every actual letter and digit in order. Never insert/delete a letter, autocomplete a familiar brand, correct spelling, translate, add parentheses, annotate uncertainty, give alternatives or infer hidden characters. A plausible-looking spelling is not sufficient. If two or more different identifying candidates are present and a unique target cannot be chosen from pixels alone, return ambiguous, not an arbitrary word.",
   "For a legible word return the COMPLETE word's tight bounding box with a small natural margin, in IMAGE 1's full display coordinate space normalized to integers [left,top,right,bottom] from 0 to 1000. Include all visible strokes of the word, not one letter or a substring; do not box the whole product or photograph. Width must be <=800, height<=250, area<=12% of the image; the box must remain within image bounds.",
   "For unreadable, absent or ambiguous identifying printing use literal='', box=null, identifierRole='none', location='not-observed' and the honest readability. Never fabricate a word to fill the schema. An absent word is not itself a product defect or permission to regenerate a photograph.",
-  "Return exactly {literal,box,identifierRole,location,readability}. A legible physical brand example uses identifierRole='brand', location='intrinsic', readability='legible' and its ACTUAL literal and box. No expected word, other image, source text or product name is supplied.",
+  "Return exactly {observation:{literal,box,identifierRole,location,readability}}. Choose one coherent observation branch: a legible INTRINSIC physical identifier with all its actual fields, or an unreadable/absent/ambiguous intrinsic identifier with literal='', box=null, identifierRole='none', location='not-observed'. Readable EXTERNAL seller/company artwork is not intrinsic: ignore that artwork; if no intrinsic identifier is observed, use the non-legible branch, never copy its external word with location='not-observed'. No expected word, other image, source text or product name is supplied.",
 ].join("\n");
 export const INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA = {
   type: "object", properties: {
-    literal: { type: "string", maxLength: 80 },
-    box: { anyOf: [{ type: "null" }, { type: "array", minItems: 4, maxItems: 4, items: { type: "integer", minimum: 0, maximum: 1000 } }] },
-    identifierRole: { type: "string", enum: ROLES }, location: { type: "string", enum: ["intrinsic", "not-observed"] },
-    readability: { type: "string", enum: READABILITY },
-  }, required: FIELDS, additionalProperties: false,
+    observation: { anyOf: [
+      { type: "object", properties: {
+        literal: { type: "string", minLength: 1, maxLength: 80 },
+        box: { type: "array", minItems: 4, maxItems: 4, items: { type: "integer", minimum: 0, maximum: 1000 } },
+        identifierRole: { type: "string", enum: ["brand", "product-line", "model", "sku"] },
+        location: { type: "string", enum: ["intrinsic"] }, readability: { type: "string", enum: ["legible"] },
+      }, required: FIELDS, additionalProperties: false },
+      { type: "object", properties: {
+        literal: { type: "string", enum: [""] }, box: { type: "null" },
+        identifierRole: { type: "string", enum: ["none"] }, location: { type: "string", enum: ["not-observed"] },
+        readability: { type: "string", enum: ["unreadable", "absent", "ambiguous"] },
+      }, required: FIELDS, additionalProperties: false },
+    ] },
+  }, required: ["observation"], additionalProperties: false,
 } as const;
 const contract = { version: INTRINSIC_IDENTIFIER_OBSERVER_VERSION, systemPrompt: SYSTEM_PROMPT, userPrompt: USER_PROMPT,
   outputSchema: INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA, maxImages: 1, preserveImageOrder: true, researchMode: "disabled", noTransientRetry: true } as const;
@@ -62,7 +71,9 @@ export function intrinsicIdentifierObserverRequestSha256(imageSha256: string): s
 export function parseIntrinsicIdentifierObserverResponse(rawResponse: string): IntrinsicIdentifierObservation | null {
   if (typeof rawResponse !== "string" || Buffer.byteLength(rawResponse, "utf8") > MAXIMUM_RESPONSE_BYTES) return null;
   try {
-    const value = JSON.parse(rawResponse.trim());
+    const envelope = JSON.parse(rawResponse.trim());
+    if (!envelope || typeof envelope !== "object" || Array.isArray(envelope) || Object.keys(envelope).join("|") !== "observation") return null;
+    const value = envelope.observation;
     if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join("|") !== [...FIELDS].sort().join("|")) return null;
     if (typeof value.literal !== "string" || value.literal.length > 80 || !ROLES.includes(value.identifierRole) ||
       !["intrinsic", "not-observed"].includes(value.location) || !READABILITY.includes(value.readability)) return null;

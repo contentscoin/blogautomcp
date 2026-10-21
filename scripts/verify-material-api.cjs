@@ -48,6 +48,7 @@ function harness() {
     'node:fs': { readFileSync: file => Buffer.from(state.manuscripts.get(file) ?? `fixture bytes: ${file}`) },
     './brand-post-approval-receipt': { hasCurrentBrandPostApprovalReceipt: manifest => manifest.fixtureReceipt !== false },
     './material-preparation-diagnostics': preparation,
+    './material-review-warnings': { readCurrentMaterialReviewWarnings: () => [] },
     './brand-post-package': {
       readBrandPostPackage: id => state.manifests.get(id) || null,
       getBrandPostPackageDir: id => `${id}.package`,
