@@ -23,6 +23,16 @@ const fileHash = (file: string) => hash(fs.readFileSync(file));
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "publication-print-applicability-"));
 let checks = 0;
+function supportedWire(schema:unknown,field="root") {
+  const row=schema as Record<string,unknown>;assert(row && typeof row==="object" && !Array.isArray(row));
+  assert(Object.keys(row).every(key=>["type","properties","required","additionalProperties","anyOf","enum","items","minimum","maximum","minItems","maxItems","minLength","maxLength","description","pattern"].includes(key)),"captured B wire stays within the supported primitive subset");checks++;
+  if(Array.isArray(row.enum)) {assert(row.enum.every(value=>value===null || typeof value!=="object"),"no array/object enum can reach a native B question");checks++;}
+  if(row.type==="object") {assert.equal(row.additionalProperties,false);assert.deepEqual([...(row.required as string[])].sort(),Object.keys(row.properties as object).sort());checks+=2;}
+  if(row.type==="array" && /Box$/u.test(field)) {assert.equal(row.minItems,4);assert.equal(row.maxItems,4);assert.deepEqual(row.items,{type:"integer",minimum:0,maximum:1000});checks+=3;}
+  for(const [key,value] of Object.entries(row.properties as object||{}))supportedWire(value,key);
+  for(const branch of row.anyOf as unknown[]||[])supportedWire(branch,field);
+  if(row.items)supportedWire(row.items,`${field}.items`);
+}
 async function main() {
   const candidate = path.join(root,"candidate.png"), primary = path.join(root,"primary.png"), detail = path.join(root,"detail.png");
   for (const [i,file] of [candidate,primary,detail].entries()) await sharp({create:{width:i?860:1254,height:i?860:1254,channels:3,background:`rgb(${50+i*45},75,110)`}}).png().toFile(file);
@@ -38,7 +48,7 @@ async function main() {
   const evidence=(packet:ScopedReviewPacket,row:Record<string,unknown>):ScopedReviewEvidence=>{
     const rawResponse=serializeScopedPublicationResponse(packet.task,row);
     return {version:"publication-image-scoped-review/v2",task:packet.task,requestSha256:packet.requestSha256,
-      responseSha256:hash(rawResponse),rawResponse,row:parseScopedPublicationResponse(packet.task,rawResponse,packet.call.outputSchema),nativeExecution:true,context:packet.context,request:{...packet.call,imagePaths:packet.call.imagePaths!.map(fileHash)}};
+      responseSha256:hash(rawResponse),rawResponse,row:parseScopedPublicationResponse(packet.task,rawResponse,packet.call.outputSchema,packet.call.userPrompt),nativeExecution:true,context:packet.context,request:{...packet.call,imagePaths:packet.call.imagePaths!.map(fileHash)}};
   };
   const packets=buildScopedPublicationPackets({candidatePath:candidate,candidateSha256:fileHash(candidate),primaryReference:{path:primary,sha256:fileHash(primary)},role:"thumbnail",exactCanonicalSellerOriginal:false,
     sectionTitle:"ordinary purchase checks",sectionBody:["unchanged manuscript"],allowProductPhoto:true,selection:visibleIdentityReviewContext(selectedProduct),selectedProduct});
@@ -62,29 +72,30 @@ async function main() {
     vm.runInNewContext(code,{module:loaded,exports:loaded.exports,process,Buffer,Error,console,require:(name:string)=>name==="./codex-draft-provider"?{runCodexDraft:async(call:CodexDraftOptions)=>{
       if(mode.providerThrow)throw Error("offline terminal provider failure");if(mode.malformedJson)return "{";
       const app=call.systemPrompt!.includes("B-print-applicability");const raw=app?(mode.app||(mode.primaryReadability==="absent"?{...positive,sourcePrintLocation:"unprinted",candidatePrintLocation:"own-unprinted-face",sourceBox:null,candidateBox:null,applicability:"not-applicable-own-unprinted-face",sameSelectedVisibleOption:null}:positive)):{coordinateSpace:"normalized-1000",sourceImageSize:{width:860,height:860},candidateImageSize:{width:1254,height:1254},comparison:mode.pair||comparison};
+      supportedWire(JSON.parse(JSON.stringify(call.outputSchema)));
       // The provider receives JSON, not VM-realm Array constructors. Preserve
-      // that real serialization boundary for exact array-valued enum checks.
+      // that real serialization boundary for supported primitive schemas.
       const schemaCheck=new Ajv().compile(JSON.parse(JSON.stringify(call.outputSchema)) as object);assert.equal(schemaCheck(raw),!mode.invalidSchema);
       if(app && mode.primaryReadability==="legible") {
         assert.equal(call.userPrompt.includes("Markora"),false,"the spatial question receives only the independent word ROI, never its letters");
         const actual=raw as PublicationPrintApplicabilityRow;
-        assert.equal(schemaCheck({...actual,primaryObservedWordBox:[1,2,3,4]}),false,"primary observed word ROI is an immutable input");
+        assert.equal(schemaCheck({...actual,primaryObservedWordBox:[1,2,3,4]}),true,"wire allows primitive tuple; runtime still binds the exact observed ROI");
         assert.equal(schemaCheck({...actual,samePhysicalPart:false,samePhysicalSurface:null,sameSelectedVisibleOption:false,accepted:false}),true,"spatial schema never constrains adverse/null judgments");checks+=3;
       }
       if(app && mode.readability==="legible" && mode.primaryReadability==="absent") {
         const actual=raw as PublicationPrintApplicabilityRow;
         assert.equal(call.userPrompt.includes("Markra"),false,"candidate spatial association receives no actual or expected word");
-        assert.equal(schemaCheck({...actual,candidateObservedWordBox:[1,2,3,4]}),false,"independent candidate word ROI cannot drift");
+        assert.equal(schemaCheck({...actual,candidateObservedWordBox:[1,2,3,4]}),true,"wire allows primitive tuple; runtime detects candidate ROI drift");
         assert.equal(schemaCheck({...actual,samePhysicalPart:false,samePhysicalSurface:null,sameSelectedVisibleOption:false,sameExternalGraphic:null,accepted:false}),true,"external scope schema preserves adverse/unknown observations");checks+=3;
       }
       if(!app && schemaCheck(raw)) {
         const pairRaw=raw as {comparison:PublicationIdentifierComparison}, row=pairRaw.comparison;
-        assert.equal(schemaCheck({...pairRaw,comparison:{...row,sourceBox:[1,2,3,4]}}),false,"independent source ROI cannot drift on round trip");
+        assert.equal(schemaCheck({...pairRaw,comparison:{...row,sourceBox:[1,2,3,4]}}),true,"primitive tuple is provider-supported; exact source ROI remains a reader check");
         assert.equal(schemaCheck({...pairRaw,comparison:{...row,sourceLiteral:"DifferentWord"}}),false,"independent spelling is an immutable input");
         assert.equal(schemaCheck({...pairRaw,comparison:{...row,samePhysicalPart:false,samePhysicalSurface:null,sameSelectedVisibleOption:false,accepted:!row.accepted}}),true,"schema must not manufacture a favorable judgment");checks+=3;
         if(mode.readability==="legible") {
-          assert.equal(schemaCheck({...pairRaw,comparison:{...row,candidateBox:[1,2,3,4]}}),false);
-          for(const key of ["sourceBox","candidateBox"] as const) assert.equal(schemaCheck({...pairRaw,comparison:{...row,identifierComparisons:[{...row.identifierComparisons[0],[key]:[1,2,3,4]}]}}),false);
+          assert.equal(schemaCheck({...pairRaw,comparison:{...row,candidateBox:[1,2,3,4]}}),true);
+          for(const key of ["sourceBox","candidateBox"] as const) assert.equal(schemaCheck({...pairRaw,comparison:{...row,identifierComparisons:[{...row.identifierComparisons[0],[key]:[1,2,3,4]}]}}),true);
           checks+=3;
         } else {
           assert.equal(schemaCheck({...pairRaw,comparison:{...row,candidateBox:[100,200,500,400]}}),true,"absent candidate whole blank ROI must remain observable");
@@ -93,7 +104,7 @@ async function main() {
       }
       assert.deepEqual([...call.imagePaths!],app?[candidate,primary]:[candidate,detail]);checks+=1;
       if(app)appCalls++;else pairCalls++;return JSON.stringify(raw);
-    }}:name==="./publication-image-scoped-review"?{...actual(name),executeScopedPublicationPacket:async(packet:ScopedReviewPacket)=>{sourceCalls++;assert.deepEqual(packet.call.imagePaths,[detail,primary]);checks++;
+    }}:name==="./publication-image-scoped-review"?{...actual(name),executeScopedPublicationPacket:async(packet:ScopedReviewPacket)=>{sourceCalls++;supportedWire(packet.call.outputSchema);assert.deepEqual(packet.call.imagePaths,[detail,primary]);checks++;
       return {...evidence(packet,mode.sourceRow||a),nativeExecution:mode.sourceNative!==false};}}
       :name==="./intrinsic-identifier-observer"?{...actual(name),observeIntrinsicIdentifier:async(options:{path:string;sha256:string})=>{
         assert.deepEqual(Object.keys(options).sort(),["path","sha256"]);checks++;
@@ -149,6 +160,33 @@ async function main() {
   assert.equal(ambiguousWarning.identifierConflict,undefined);assert.equal(ambiguousWarning.missingPrintEvidence,undefined);
   assert.equal(ambiguousTask.api.publicationIdentifierReviewEvidenceIssue(ambiguousWarning,input),null);
   assert.deepEqual(ambiguousTask.counts(),{appCalls:1,pairCalls:0,ocrCalls:0,sourceCalls:0});checks+=9;
+  // Actual Hanil topology: a whole leaflet/label is visible and readable, but
+  // no unique intrinsic word was selected. Location regions are not OCR words.
+  const targetRegion:PublicationPrintApplicabilityRow={...positive,sourceBox:[306,413,720,694],candidateBox:[272,446,750,801],
+    sourceObservation:"a whole rectangular label inside the selected bag's window",candidateObservation:"the corresponding whole rectangular label inside the bag's window",
+    candidatePrintLocation:"marked-readable",applicability:"comparable-entire-location",witness:"same handle attachments and transparent-window frame locate both whole labels; no unique word is certified"};
+  const targetTask=load({...ambiguousMode,app:targetRegion}),targetWarning=await targetTask.api.reviewPublicationIdentifiers(input);
+  assert.equal(targetWarning.status,"unverified",targetWarning.reason);assert.equal(targetWarning.printObservationWarning?.version,"publication-target-ambiguous-print-warning/v1");
+  assert.deepEqual(copy(targetWarning.printApplicability!.row),targetRegion);assert.equal(targetWarning.nativeExecution,false);
+  assert.equal(targetTask.api.publicationIdentifierReviewEvidenceIssue(targetWarning,input),null);
+  assert.deepEqual(targetTask.counts(),{appCalls:1,pairCalls:0,ocrCalls:0,sourceCalls:0});checks+=6;
+  for(const patch of [{samePhysicalPart:false},{samePhysicalPart:null},{samePhysicalSurface:false},{samePhysicalSurface:null},
+    {sameSelectedVisibleOption:false},{sameSelectedVisibleOption:null},{accepted:false},{candidatePrintLocation:"entire-exposed-blank"},{sourcePrintLocation:"unprinted"}]) {
+    const task=load({...ambiguousMode,app:{...targetRegion,...patch} as PublicationPrintApplicabilityRow}),result=await task.api.reviewPublicationIdentifiers(input);
+    assert.notEqual(result.printObservationWarning?.version,"publication-target-ambiguous-print-warning/v1");assert.equal(task.counts().ocrCalls,0);checks+=2;
+  }
+  for(const patch of [{sourceBox:[0,0,1001,1000]},{candidateBox:[500,400,200,800]},{candidateBox:[0.5,0,1000,1000]}]) {
+    const task=load({...ambiguousMode,invalidSchema:patch.sourceBox!==undefined||patch.candidateBox?.[0]===0.5,app:{...targetRegion,...patch} as PublicationPrintApplicabilityRow}),result=await task.api.reviewPublicationIdentifiers(input);
+    assert.equal(result.status,"hold");assert.equal(result.printObservationWarning,undefined);assert.equal(task.counts().pairCalls+task.counts().ocrCalls,0);checks+=3;
+  }
+  for(const mutate of [(value:typeof targetWarning)=>{value.status="pass";},(value:typeof targetWarning)=>{value.nativeExecution=true;},
+    (value:typeof targetWarning)=>{value.printObservationWarning!.policyFingerprint=hash("stale policy");},(value:typeof targetWarning)=>{value.printApplicability!.nativeExecution=false;},
+    (value:typeof targetWarning)=>{value.blindInputObservations!.candidate.observation.readability="legible";},
+    (value:typeof targetWarning)=>{value.taskDiagnostic={stage:"applicability",imageSha256:input.candidateSha256,status:"invalid",reason:"technical failure cannot become an ambiguity warning"};}]) {
+    const changed=copy(targetWarning);mutate(changed);assert(targetTask.api.publicationIdentifierReviewEvidenceIssue(changed,input));checks++;
+  }
+  const largeBlankTask=load({...ambiguousMode,readability:"absent",app:{...targetRegion,candidatePrintLocation:"entire-exposed-blank"}}),largeBlank=await largeBlankTask.api.reviewPublicationIdentifiers(input);
+  assert.equal(largeBlank.status,"hold");assert.equal(largeBlank.missingPrintEvidence,undefined);assert.equal(largeBlankTask.counts().ocrCalls,0,"a large applicability region cannot become a word/OCR defect authority");checks+=3;
   const ambiguousCalls=ambiguousTask.counts().appCalls;await ambiguousTask.api.reviewPublicationIdentifiers(input);
   assert.equal(ambiguousTask.counts().appCalls,ambiguousCalls,"same exact observation question is not resent");checks++;
   for(const primaryReadability of ["absent","unreadable"] as const) {
@@ -228,7 +266,7 @@ async function main() {
   assert.equal(otherMember.rawB,"");assert.equal(otherMember.comparison,null);assert.equal(otherMember.identifierConflict,undefined);assert.equal(otherMember.missingPrintEvidence,undefined);
   assert.equal(otherMemberTask.api.publicationIdentifierReviewEvidenceIssue(otherMember,bodyInput),null);
   assert.deepEqual(otherMemberTask.counts(),{appCalls:1,pairCalls:0,ocrCalls:0,sourceCalls:0});checks+=11;
-  for(const patch of [{primaryObservedWordRelation:"same-compared-face"},{primaryObservedWordRelation:"unresolved"},
+  for(const patch of [{primaryObservedWordRelation:"same-compared-face"},{primaryObservedWordRelation:"unresolved"},{primaryObservedWordBox:[1,2,3,4]},
     {comparedPrimaryFaceBox:[200,350,700,700]},{comparedPrimaryFaceBox:[649,499,800,800]},{comparedPrimaryFaceBox:null},
     {samePhysicalPart:false},{samePhysicalSurface:null},{sameSelectedVisibleOption:null},{sameSelectedVisibleOption:false},{accepted:false},
     {sourcePrintLocation:"present"},{candidatePrintLocation:"entire-exposed-blank"},{primaryObservedWordSpatialWitness:""},
@@ -265,7 +303,7 @@ async function main() {
   assert.equal(externalTask.api.publicationIdentifierReviewEvidenceIssue(external,bodyInput),null);
   assert.equal(external.identifierConflict,undefined);assert.equal(external.missingPrintEvidence,undefined);assert.equal(external.comparison,null);
   assert.deepEqual(externalTask.counts(),{appCalls:1,pairCalls:0,ocrCalls:0,sourceCalls:0});checks+=12;
-  for(const patch of [{candidateObservedWordRelation:"intrinsic-compared-face"},{candidateObservedWordRelation:"other-intrinsic-member"},{candidateObservedWordRelation:"unresolved"},
+  for(const patch of [{candidateObservedWordRelation:"intrinsic-compared-face"},{candidateObservedWordRelation:"other-intrinsic-member"},{candidateObservedWordRelation:"unresolved"},{candidateObservedWordBox:[1,2,3,4]},
     {candidatePhysicalProductsBox:[300,500,700,900]},{candidatePhysicalProductsBox:[489,639,700,900]},{candidatePhysicalProductsBox:null},
     {sourceExternalGraphicBox:[500,400,800,700]},{sourcePhysicalProductsBox:[100,100,701,900]},{sourceExternalGraphicBox:null},{sourcePhysicalProductsBox:null},
     {sameExternalGraphic:false},{sameExternalGraphic:null},{externalGraphicObservations:{primaryObservation:"",candidateObservation:"new different graphic"}},
@@ -304,6 +342,12 @@ async function main() {
   assert.equal(clearConflict.printApplicability,undefined);assert.equal(clearConflict.printObservationWarning,undefined);
   assert.equal(ownAbsentClear.api.publicationIdentifierReviewEvidenceIssue(clearConflict,bodyInput),null);
   assert.deepEqual(ownAbsentClear.counts(),{appCalls:0,pairCalls:1,ocrCalls:1,sourceCalls:1});checks+=10;
+  for(const changed of [{...comparison,sourceBox:[1,2,3,4]}, {...comparison,candidateBox:[1,2,3,4]},
+    {...comparison,identifierComparisons:[{...comparison.identifierComparisons[0],sourceBox:[1,2,3,4]}]},
+    {...comparison,identifierComparisons:[{...comparison.identifierComparisons[0],candidateBox:[1,2,3,4]}]}]) {
+    const task=load({readability:"legible",primaryReadability:"absent",pair:changed as PublicationIdentifierComparison}),result=await task.api.reviewPublicationIdentifiers(bodyInput);
+    assert.equal(result.status,"hold");assert.equal(result.identifierConflict,undefined);assert.equal(task.counts().ocrCalls,0,"schema-compatible changed ROI still fails exact runtime binding before OCR/repair");checks+=3;
+  }
   const literalMatch:PublicationIdentifierComparison={...comparison,accepted:true,reason:"Both independently observed intrinsic words match on the selected main member; face/option remain unobserved",identifierComparisons:[{...comparison.identifierComparisons[0],candidateLiteral:"Markora"}]};
   const ownAbsentMatch=load({readability:"legible",primaryReadability:"absent",candidateLiteral:"Markora",pair:literalMatch}),clearMatch=await ownAbsentMatch.api.reviewPublicationIdentifiers(bodyInput);
   assert.equal(clearMatch.status,"pass",clearMatch.reason);assert.equal(clearMatch.printObservationWarning,undefined);assert.equal(clearMatch.identifierMatches!.length,1);

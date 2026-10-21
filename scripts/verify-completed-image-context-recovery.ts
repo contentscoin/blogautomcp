@@ -273,7 +273,7 @@ async function main() {
       const evidence = (index: number, row: Record<string, unknown>): ScopedReviewEvidence => { const packet = packets[index], rawResponse = serializeScopedPublicationResponse(packet.task,row);
         return { version: "publication-image-scoped-review/v2", task: packet.task, requestSha256: packet.requestSha256,
           request: { ...packet.call, imagePaths: packet.call.imagePaths!.map(fileHash) }, context: packet.context,
-          responseSha256: hash(rawResponse), rawResponse, row:parseScopedPublicationResponse(packet.task,rawResponse,packet.call.outputSchema), nativeExecution: true }; };
+          responseSha256: hash(rawResponse), rawResponse, row:parseScopedPublicationResponse(packet.task,rawResponse,packet.call.outputSchema,packet.call.userPrompt), nativeExecution: true }; };
       const comparison: PublicationIdentifierComparison = { sourceImageIndex: 3, sourceSha256: fileHash(f.f.geometry), sourceObservation: "Actual synthetic source Voltium",
         candidateObservation: "Actual synthetic candidate Voltum", correspondenceObservation: "The same locally selected component and colour", samePhysicalPart: true,
         samePhysicalSurface: true, sameSelectedVisibleOption: true, sourcePrintState: "present", candidatePrintState: "present", sourceBox: f.identifierConflict.pair.sourceBox!,

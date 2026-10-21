@@ -102,7 +102,9 @@ async function main() {
       const sessions = path.join(home, "sessions", ...new Date(createdAtMs).toISOString().slice(0, 10).split("-"));
       fs.mkdirSync(sessions, { recursive: true });
       const rollout = path.join(sessions, `rollout-${stamp}-${threadId}.jsonl`);
-      const records = [
+      const records: Array<{ timestamp: string; type: string; payload: {
+        id?: string; cwd?: string; thread_source?: string; type?: string; turn_id?: string;
+      } }> = [
         { timestamp: new Date(createdAtMs).toISOString(), type: "session_meta", payload: { id: threadId, cwd: workspace, thread_source: "blogautomcp-image" } },
         { timestamp: new Date(createdAtMs).toISOString(), type: "event_msg", payload: { type: "task_started", turn_id: "exact-turn" } },
         { timestamp: new Date(Date.now()).toISOString(), type: "event_msg", payload: { type: "task_complete", turn_id: "exact-turn" } },

@@ -80,6 +80,11 @@ async function main() {
     if(call.systemPrompt.includes("publication-image-task/B-print-applicability")) {
       if(mode === "print-provider") throw Error("offline provider failure");
       if(mode === "print-malformed") return "malformed";
+      if(mode==="ambiguous-print-target") return JSON.stringify({sourceObservation:"Whole rectangular printed label inside the selected package window",candidateObservation:"The corresponding printed label is visible in the selected package",
+        correspondenceObservation:"The same handle attachments and transparent-window frame locate the label regions",samePhysicalPart:true,samePhysicalSurface:true,sameSelectedVisibleOption:true,
+        sourcePrintLocation:"present",candidatePrintLocation:"marked-readable",sourceBox:[306,413,720,694],candidateBox:[272,446,750,801],
+        witness:"Both actual label regions are visible, but the single-image observer could not identify one unique word; no letters are certified",
+        applicability:"comparable-entire-location",accepted:true});
       if(mode==="external-word") return JSON.stringify({sourceObservation:"Unprinted physical product is below separate flat source artwork",candidateObservation:"The corresponding physical product is unprinted below the same external artwork",
         correspondenceObservation:"Round upper control and rectangular lower button correspond",samePhysicalPart:true,samePhysicalSurface:true,sameSelectedVisibleOption:true,
         sourcePrintLocation:"unprinted",candidatePrintLocation:"own-unprinted-face",sourceBox:null,candidateBox:null,witness:"Two actual local physical controls correspond",
@@ -130,7 +135,7 @@ async function main() {
   try {
     const { auditPublishImages, assertPublishImagesSafe, publicationImageAuditPolicyFingerprint } = require("./lib/publish-image-audit") as typeof import("./lib/publish-image-audit");
     const { buildScopedPublicationPackets, executeScopedPublicationPacket, scopedPublicationEvidenceIssue, serializeScopedPublicationResponse,
-      parseScopedPublicationResponse, PUBLICATION_OPTION_DECISION_VERSION } = require("./lib/publication-image-scoped-review") as typeof import("./lib/publication-image-scoped-review");
+      parseScopedPublicationResponse, PUBLICATION_OPTION_DECISION_VERSION,PUBLICATION_PHOTO_DECISION_VERSION } = require("./lib/publication-image-scoped-review") as typeof import("./lib/publication-image-scoped-review");
     const { visibleIdentityReviewContext } = require("./lib/publication-visible-identity") as typeof import("./lib/publication-visible-identity");
     const hash = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
     async function fixture(): Promise<PublishImageAuditOptions> {
@@ -193,7 +198,7 @@ async function main() {
     // from being generated as a valid answer. No runtime adverse is corrected.
     const claimPacket=buildScopedPublicationPackets(input)[1], claimSchema=claimPacket.call.outputSchema;
     const claimWire=(row:Record<string,unknown>)=>serializeScopedPublicationResponse("C-photo-claims",row);
-    const parseClaim=(row:Record<string,unknown>)=>parseScopedPublicationResponse("C-photo-claims",claimWire(row),claimSchema);
+    const parseClaim=(row:Record<string,unknown>)=>parseScopedPublicationResponse("C-photo-claims",claimWire(row),claimSchema,claimPacket.call.userPrompt);
     const oldContradiction={...c(),mixedOptions:true};
     const oldContradictionRaw=claimWire(oldContradiction);
     assert.equal(parseClaim(oldContradiction),null);
@@ -202,6 +207,58 @@ async function main() {
     assert.equal(nativeWire.optionDecision.version,PUBLICATION_OPTION_DECISION_VERSION);
     assert.equal("mixedOptions" in nativeWire,false);assert.equal("optionConflictWitness" in nativeWire,false);
     assert.deepEqual(parseClaim(c()),c());checks+=7;
+    assert.equal(nativeWire.photoDecision.version,PUBLICATION_PHOTO_DECISION_VERSION);
+    assert.equal("photoClaimMatches" in nativeWire,false);assert.equal("photoClaimObjection" in nativeWire,false);checks+=3;
+    const {hasExplicitPhotographicProofLink}=require("./lib/publication-claim-units") as typeof import("./lib/publication-claim-units");
+    const {validatePhotoClaimObjection}=require("./lib/publish-image-audit") as typeof import("./lib/publish-image-audit");
+    const adjacentSpec="기능은 오픈형으로 표기되어 있어요. 귀 입구를 막는 밀폐형 이어폰과 착용 구조가 달라 주변 소리를 함께 들으며 음악을 듣고 싶은 상황에 선택 기준이 됩니다.";
+    const directProof="이 사진에서 소음이 줄어든 결과가 보인다.";
+    const claimFor=(body:string[],title="상품 외형",role="detail")=>buildScopedPublicationPackets({...input,sectionTitle:title,sectionBody:body,role})[1];
+    const parseFor=(row:Record<string,unknown>,current:typeof claimPacket)=>parseScopedPublicationResponse(current.task,claimWire(row),current.call.outputSchema,current.call.userPrompt);
+    const adversePhoto=(quote:string,scope:string,origin="section-body",sourceIndex:number|null=0)=>({...c(),photoClaimMatches:false,accepted:false,
+      photoClaimObjection:{origin,sourceIndex,quote,scope,conflict:"The actual pixels do not establish the exact claimed visible assertion"}});
+    const specPacket=claimFor([adjacentSpec]),actualOldFalse=adversePhoto(adjacentSpec,"performance"),actualOldRaw=claimWire(actualOldFalse);
+    assert.equal(hasExplicitPhotographicProofLink(adjacentSpec),false);
+    assert.equal(parseFor(actualOldFalse,specPacket),null);
+    assert.equal(validatePhotoClaimObjection(actualOldFalse,{sectionTitle:"상품 외형",sectionBody:[adjacentSpec],role:"detail"}),false);
+    assert.equal(actualOldFalse.photoClaimMatches,false);assert.equal(actualOldRaw,claimWire(actualOldFalse));checks+=5;
+    for(const quote of [directProof,"이미지로 충전 시간을 확인할 수 있습니다.","이 장면은 사용 결과를 보여 줍니다.","This photograph demonstrates the noise reduction result.",
+      "사진 속에서 먼지가 제거되는 결과를 확인할 수 있어요.","사진을 보면 먼지가 모두 제거됐어요.","위 사진처럼 소음이 줄었어요.","이 컷은 세척력을 보여 줍니다.","Photo shows the reduced noise result."]) {
+      assert.equal(hasExplicitPhotographicProofLink(quote),true);
+      const target=claimFor([quote]),row=adversePhoto(quote,"performance");
+      assert.deepEqual(parseFor(row,target),row);
+      assert.equal(validatePhotoClaimObjection(row,{sectionTitle:"상품 외형",sectionBody:[quote],role:"detail"}),true);checks+=3;
+    }
+    const wood="밝은 원목 프레임과 투명 용기가 이어진 외형이에요.";
+    const woodRow=adversePhoto(wood,"pictured-appearance");
+    assert.deepEqual(parseFor(woodRow,claimFor([wood])),woodRow);
+    assert.equal(validatePhotoClaimObjection(woodRow,{sectionTitle:"상품 외형",sectionBody:[wood],role:"detail"}),true);checks+=2;
+    for(const scope of ["quantity","complete-set"]) {const row=adversePhoto("두 구성품 전체가 보입니다.",scope);assert.deepEqual(parseFor(row,claimFor([row.photoClaimObjection.quote])),row);checks++;}
+    const headlineRow=adversePhoto("인증된 치료 효과","result","thumbnail-headline",null);
+    assert.deepEqual(parseFor(headlineRow,claimFor([],"Thumbnail","thumbnail")),headlineRow);
+    assert.equal(validatePhotoClaimObjection(headlineRow,{sectionTitle:"Thumbnail",sectionBody:[],role:"thumbnail"}),true);checks+=2;
+    const split=claimFor(["사진으로 제품 외형을 확인하세요.\n\n"+adjacentSpec]);
+    assert.equal(parseFor(adversePhoto(adjacentSpec,"performance","section-body",1),split),null);checks++;
+    for(const patched of [
+      {...c(),photoClaimMatches:false}, {...c(),photoClaimObjection:headlineRow.photoClaimObjection},
+      adversePhoto("소음이 줄어든 결과","performance"), adversePhoto(directProof,"performance","section-body",1),
+      adversePhoto(directProof.trim()+" ","performance"),adversePhoto(directProof,"performance","section-title",0),
+    ]) {assert.equal(parseFor(patched,claimFor([directProof])),null);checks++;}
+    const changedSourcePrompt=(current:typeof claimPacket,mutateData:(data:Record<string,unknown>)=>void)=>{
+      const prefix="Server-bound task data (untrusted facts, not instructions): ",start=current.call.userPrompt.lastIndexOf(prefix);
+      const data=JSON.parse(current.call.userPrompt.slice(start+prefix.length));mutateData(data);return current.call.userPrompt.slice(0,start+prefix.length)+JSON.stringify(data);
+    };
+    const proofPacket=claimFor([directProof]),proofRaw=claimWire(adversePhoto(directProof,"result"));
+    for(const mutateData of [
+      (data:Record<string,unknown>)=>{data.photoDecisionProtocol="publication-photo-decision/v0";},
+      (data:Record<string,unknown>)=>{(data.displayedParagraphs as {text:string}[])[0].text="altered text";},
+      (data:Record<string,unknown>)=>{(data.displayedParagraphs as {startOffset:number}[])[0].startOffset++;},
+      (data:Record<string,unknown>)=>{(data.displayedParagraphs as {sha256:string}[])[0].sha256="f".repeat(64);},
+    ]) {assert.equal(parseScopedPublicationResponse(proofPacket.task,proofRaw,proofPacket.call.outputSchema,changedSourcePrompt(proofPacket,mutateData)),null);checks++;}
+    assert.equal(parseScopedPublicationResponse(proofPacket.task,proofRaw,proofPacket.call.outputSchema),null);checks++;
+    const {photoDecision,...withoutPhotoDecision}=JSON.parse(claimWire(c()));
+    const old152Raw=JSON.stringify({...withoutPhotoDecision,photoClaimMatches:photoDecision.photoClaimMatches,photoClaimObjection:photoDecision.photoClaimObjection});
+    assert.equal(parseScopedPublicationResponse(claimPacket.task,old152Raw,claimSchema,claimPacket.call.userPrompt),null);checks++;
     for(const changed of [
       {...c(),mixedOptions:null}, {...c(),mixedOptions:true,optionConflictWitness:{origin:"published-named-comparison",quote:"원래 전체 문장",visibleAlternatives:["black"]}},
       {...c(),mixedOptions:true,optionConflictWitness:{origin:"none",quote:"원래 전체 문장",visibleAlternatives:["black","gray"]}},
@@ -214,12 +271,12 @@ async function main() {
     assert.equal(parseClaim({...c(),accepted:null}),null);checks+=3;
     for(const oldRaw of [JSON.stringify(c()),JSON.stringify({...c(),mixedOptions:true}),JSON.stringify({...nativeWire,mixedOptions:false}),
       JSON.stringify({...nativeWire,optionDecision:{...nativeWire.optionDecision,version:"publication-option-decision/v0"}})]) {
-      assert.equal(parseScopedPublicationResponse("C-photo-claims",oldRaw,claimSchema),null);checks++;
+      assert.equal(parseScopedPublicationResponse("C-photo-claims",oldRaw,claimSchema,claimPacket.call.userPrompt),null);checks++;
     }
     const oldSchema=structuredClone(claimSchema) as {properties:Record<string,unknown>;required:string[]};
     delete oldSchema.properties.optionDecision;oldSchema.properties.mixedOptions={type:"boolean"};oldSchema.properties.optionConflictWitness={type:"object",properties:{},required:[],additionalProperties:false};
     oldSchema.required=Object.keys(oldSchema.properties);
-    assert.equal(parseScopedPublicationResponse("C-photo-claims",JSON.stringify({...c(),optionConflictWitness:{}}),oldSchema),null);checks++;
+    assert.equal(parseScopedPublicationResponse("C-photo-claims",JSON.stringify({...c(),optionConflictWitness:{}}),oldSchema,claimPacket.call.userPrompt),null);checks++;
     let malformedCalls=0;
     const incoherent=await executeScopedPublicationPacket(claimPacket,async()=>{malformedCalls++;return oldContradictionRaw;});
     assert.equal(malformedCalls,1);assert.equal(incoherent.row,null);assert.equal(incoherent.rawResponse,oldContradictionRaw);assert.equal(incoherent.nativeExecution,false);checks+=4;
@@ -315,8 +372,7 @@ async function main() {
       mode="good";const current=await executeScopedPublicationPacket(claimPacket,undefined,{policyFingerprint});
       const reused=await executeScopedPublicationPacket(claimPacket,undefined,{policyFingerprint});
       assert.equal(providerCalls-before,2);
-      if(invalidMode==="c-positive-invalid-witness")assert.equal(invalid.row,null);
-      else assert.equal(invalid.row!.accepted,true);
+      assert.equal(invalid.row,null);
       assert.equal(invalid.reused,undefined);
       assert.equal(current.reused,undefined);assert.equal(reused.reused,true);checks+=5;
     }
@@ -454,6 +510,20 @@ async function main() {
     ambiguousOptions.forceReview=true;await assert.rejects(assertPublishImagesSafe(ambiguousOptions),/인쇄 결함/u);checks++;
     fs.writeFileSync(ambiguousMarkerFile,"malformed");await assert.rejects(assertPublishImagesSafe(ambiguousOptions),/인쇄 결함/u);checks++;
     assert.deepEqual(ambiguousOptions.imageAssets!.map(asset=>hash(asset.path)),ambiguousBytes);checks++;
+    mode="ambiguous-print-target";const targetOptions=await ambiguousPrintFixture(139),targetBytes=targetOptions.imageAssets!.map(asset=>hash(asset.path));
+    const targetFinal=await assertPublishImagesSafe(targetOptions),targetRaw=targetFinal.scopedReviews![0].identifiers!;
+    assert.equal(targetFinal.ok,true);assert.equal(targetRaw.status,"unverified");assert.equal(targetRaw.nativeExecution,false);
+    assert.equal(targetRaw.printObservationWarning!.version,"publication-target-ambiguous-print-warning/v1");
+    assert.equal(targetRaw.blindInputObservations!.candidate.observation.readability,"ambiguous");assert.equal(targetRaw.printApplicability!.row!.candidatePrintLocation,"marked-readable");
+    assert.equal(targetRaw.identifierConflict,undefined);assert.equal(targetRaw.missingPrintEvidence,undefined);checks+=8;
+    const beforeTargetReuse=providerCalls,targetReuse=await assertPublishImagesSafe(targetOptions);
+    assert.equal(targetReuse.receiptReused,true);assert.deepEqual(targetReuse.warnings,targetFinal.warnings);assert.equal(providerCalls,beforeTargetReuse);checks+=3;
+    const targetMarker={...markerRow,id:targetOptions.brandLinkId!,sha256:targetOptions.imageAssets![0].sha256!};
+    const targetMarkerFile=path.join(markerDir,`seen-${crypto.createHash("sha256").update(JSON.stringify({id:targetMarker.id,sectionId:targetMarker.sectionId,sha256:targetMarker.sha256})).digest("hex")}.json`);
+    fs.writeFileSync(targetMarkerFile,JSON.stringify(targetMarker));await assert.rejects(assertPublishImagesSafe(targetOptions),/인쇄 결함/u);checks++;
+    targetOptions.forceReview=true;await assert.rejects(assertPublishImagesSafe(targetOptions),/인쇄 결함/u);checks++;
+    fs.writeFileSync(targetMarkerFile,"malformed");await assert.rejects(assertPublishImagesSafe(targetOptions),/인쇄 결함/u);checks++;
+    assert.deepEqual(targetOptions.imageAssets!.map(asset=>hash(asset.path)),targetBytes);checks++;
     mode="ambiguous-print-proofclaim";const ambiguousClaim=await auditPublishImages(await ambiguousPrintFixture(151));
     assert.equal(ambiguousClaim.ok,false);assert.equal(ambiguousClaim.warnings?.length||0,0);
     assert.equal(ambiguousClaim.scopedReviews![0].claims.row!.intrinsicPrintProofClaim,true);checks+=3;

@@ -101,6 +101,7 @@ interface PublicationPrintWarningBinding {
 }
 export type PublicationPrintObservationWarning = PublicationPrintWarningBinding & (
   { version: "publication-print-observation-warning/v1"; scope: "non-legible-non-comparable-local-print-only" } |
+  { version: "publication-target-ambiguous-print-warning/v1"; scope: "multiple-visible-words-no-unique-intrinsic-target-no-certification" } |
   { version: "publication-other-member-print-warning/v1"; scope: "own-unprinted-face-other-member-word-not-certified";
     primaryObservedWordEvidenceSha256: string; spatialWitnessSha256: string } |
   { version: "publication-external-word-print-warning/v1"; scope: "candidate-external-artwork-local-face-not-certified";
@@ -367,19 +368,32 @@ function observerIssue(value: IntrinsicIdentifierObserverEvidence, sha256: strin
   } catch { return "blind single-image observation is malformed"; }
 }
 function chooseBlindSource(observations: PublicationBlindInputObservations) {
+  if (!observations.sources.length) throw Error("BLIND_SOURCE_OBSERVATIONS_MISSING");
   const ownPrimary = observations.sources[0];
   // Two independent actual absences can compare their OWN unprinted face.
   // A logo on another colour/face cannot impose printing on that surface.
   // The subsequent pair still must confirm actual local correspondence and
   // absence; a missed/visible mark, unknown or adverse flag remains a HOLD.
   if (observations.candidate.observation.readability === "absent" && ownPrimary?.evidence.observation.readability === "absent") return ownPrimary;
-  // Actual observed word area only. Never favor an expected/candidate spelling.
+  // Source-only exact literal consensus precedes area. Neither the candidate
+  // word nor an expected brand can select a favorable source transcription.
   const legible = observations.sources.filter(row => row.evidence.observation.readability === "legible");
-  return legible.sort((a, b) => {
+  if (new Set(legible.map(row => row.sha256)).size !== legible.length) throw Error("BLIND_SOURCE_DUPLICATE_VOTE");
+  const groups = new Map<string, typeof legible>();
+  for (const row of legible) {
+    const key = JSON.stringify([row.evidence.observation.identifierRole, row.evidence.observation.literal]);
+    groups.set(key, [...(groups.get(key) || []), row]);
+  }
+  const ranked = [...groups.values()].sort((a, b) => b.length - a.length);
+  if (legible.length > 1 && (!ranked[0] || ranked[0].length * 2 <= legible.length)) throw Error("BLIND_SOURCE_LITERAL_CONSENSUS_UNRESOLVED");
+  return (ranked[0] || []).sort((a, b) => {
     const area = (row: typeof a) => { const box = row.evidence.observation.box!; return (box[2] - box[0]) * (box[3] - box[1]); };
     return area(b) - area(a) || a.imageIndex - b.imageIndex;
   })[0] || observations.sources[0];
 }
+/** Pure deterministic source choice; callers must separately validate every
+ * canonical/native observation and current context before using its result. */
+export const selectBlindPublicationIdentifierSource = chooseBlindSource;
 // Every source observation is already bound to its canonical input/native
 // response before routing. An unreadable OWN view must not hide a usable clear
 // identifier elsewhere in that exact source set.
@@ -408,7 +422,7 @@ function applicabilityRequest(input: PublicationIdentifierReviewInput, observed?
     applicability: { type: "string", enum: ["comparable-entire-location", "outside-visible-resolution-or-view", "not-applicable-own-unprinted-face", "unresolved"] }, accepted: { type: "boolean" },
     ...(primaryWord ? {
       primaryObservedWordRelation: { type: "string", enum: ["none-observed", "same-compared-face", "other-visible-member-or-face", "unresolved"] },
-      primaryObservedWordBox: { type: "array", items: { type: "integer", minimum: 0, maximum: 1000 }, minItems: 4, maxItems: 4, enum: [primaryWord] },
+      primaryObservedWordBox: { type: "array", items: { type: "integer", minimum: 0, maximum: 1000 }, minItems: 4, maxItems: 4 },
       comparedPrimaryFaceBox: boxSchema, primaryObservedWordSpatialWitness: { type: "string" },
       primaryFaceLandmarks: { type: "array", maxItems: 4, items: { type: "object", properties: {
         primaryObservation: { type: "string", minLength: 1 }, candidateObservation: { type: "string", minLength: 1 } },
@@ -416,7 +430,7 @@ function applicabilityRequest(input: PublicationIdentifierReviewInput, observed?
     } : {}),
     ...(candidateWord ? {
       candidateObservedWordRelation: { type: "string", enum: ["external-background-artwork", "intrinsic-compared-face", "other-intrinsic-member", "unresolved"] },
-      candidateObservedWordBox: { type: "array", items: { type: "integer", minimum: 0, maximum: 1000 }, minItems: 4, maxItems: 4, enum: [candidateWord] },
+      candidateObservedWordBox: { type: "array", items: { type: "integer", minimum: 0, maximum: 1000 }, minItems: 4, maxItems: 4 },
       candidatePhysicalProductsBox: boxSchema, sourceExternalGraphicBox: boxSchema, sourcePhysicalProductsBox: boxSchema,
       sameExternalGraphic: { type: ["boolean", "null"] },
       externalGraphicObservations: { type: "object", properties: { primaryObservation: { type: "string" }, candidateObservation: { type: "string" } },
@@ -436,7 +450,7 @@ function applicabilityRequest(input: PublicationIdentifierReviewInput, observed?
       "comparable-entire-location means the source's actual marked location and the ENTIRE corresponding candidate location are both actually exposed on the SAME physical part/surface/visible option, all true. An entire-exposed-blank observation must cover the WHOLE expected print location, not an arbitrary convenient empty patch. This is only an applicability witness; a separate clear-source/native/OCR defect corroboration remains required. Unknown, glare without identifiable location, different face/colour, partial blank or inadequate landmarks stays unresolved/accepted=false.",
       ...(primaryWord ? ["The server additionally supplies one independently observed intrinsic word's FIXED normalized ROI in IMAGE 2 only, not its letters or any expected brand. Preserve that ROI exactly as primaryObservedWordBox. Determine whether the observed word is on the SAME compared physical FACE, a DIFFERENT visible included member/face, or unresolved. For other-visible-member-or-face, comparedPrimaryFaceBox must bound the ENTIRE actually compared physical FACE in IMAGE 2, never a convenient blank patch or another member. It must not overlap the supplied word ROI at all. primaryFaceLandmarks must give at least TWO distinct actual corresponding structural observations in BOTH images, and primaryObservedWordSpatialWitness must name both locations and their visible separation. A word on a box cannot impose printing on an actually matched unprinted device front; a word ON THAT SAME FRONT cannot be scoped away. Both local faces must actually be unprinted with all three correspondence flags true. Do not infer different-member status from non-reading alone. If whole-face boundaries or separation cannot be established, use unresolved, comparedPrimaryFaceBox=null and primaryFaceLandmarks=[]; preserve honest false/null. No new letter certification or repair authority follows from a scope warning."] : []),
       ...(candidateWord ? ["The server supplies an independently observed word's FIXED normalized ROI in IMAGE 1 only; its letters and any expected brand are NOT supplied. The independent OWN primary observation has no intrinsic identifier. Preserve the exact ROI as candidateObservedWordBox and inspect where that word actually exists. external-background-artwork requires positively observed seller/source artwork or background lettering physically OUTSIDE ALL visible selected physical products, their own packaging and every included physical member. A printed garment, case, accessory, gift box, another physical member/face or reflected product printing is NOT external artwork. candidatePhysicalProductsBox must bound the ENTIRE visible physical product(s)/own packaging in IMAGE 1, never a convenient blank patch or unrelated single face. The fixed word ROI must not overlap it at all. Also locate the ACTUAL corresponding external graphic in the canonical OWN primary as sourceExternalGraphicBox, plus the ENTIRE visible physical products/packaging there as sourcePhysicalProductsBox; those boxes must not overlap at all either. sameExternalGraphic=true requires actual matching external graphic content and layout observed in BOTH images, never a sidecar/filename/brand inference; a newly added different background brand/copy is false. Explain those actual paired graphics in externalGraphicObservations without transcribing or guessing a brand, name both spatial separations in candidateObservedWordSpatialWitness, and give at least TWO distinct corresponding physical structure observations in BOTH images in candidateFaceLandmarks. The compared physical source/candidate faces must both be unprinted with all three correspondence flags true. SAME-face printing is intrinsic-compared-face; another physical member's printing is other-intrinsic-member. Unknown role, graphic correspondence, physical boundaries or separation stays unresolved/null/empty, never a forced favorable value. This task makes no intrinsic letter certification or product-authentication verdict."] : []),
-      "Return accepted=true only for an actual evidenced applicability classification; accepted=false for unresolved/adverse correspondence. Do not force a favorable classification. Every sourceBox/candidateBox is normalized integer [left,top,right,bottom] 0..1000 over its OWN entire displayed image, NEVER pixels. Preserve the supplied per-image sizes through this server context; do not guess conversion.",
+      "Return accepted=true only for an actual evidenced applicability classification; accepted=false for unresolved/adverse correspondence. Do not force a favorable classification. Every sourceBox/candidateBox is a LOCATION/FACE REGION, normalized integer [left,top,right,bottom] 0..1000 over its OWN entire displayed image, NEVER pixels. It may cover an entire label/leaflet region; this is not a single-word OCR crop and certifies no letters. Preserve the supplied per-image sizes through this server context; do not guess conversion. Any supplied independently observed word ROI must still be copied exactly; do not resize, correct or infer it.",
       `Server pixel binding: ${JSON.stringify(context)}`,
     ].join("\n"), imagePaths: [input.candidateSha256, input.primaryReference.sha256], maxImages: 2, preserveImageOrder: true,
     researchMode: "disabled" as const, noTransientRetry: true, timeoutMs: 60_000,
@@ -452,7 +466,7 @@ function applicabilityEvidenceIssue(value: PublicationPrintApplicabilityEvidence
         Object.keys(row).sort().join("|") !== Object.keys(expected.call.outputSchema.properties).sort().join("|") ||
         ![row.sourceObservation, row.candidateObservation, row.correspondenceObservation, row.witness].every(nonempty) ||
         ![row.samePhysicalPart, row.samePhysicalSurface, row.sameSelectedVisibleOption].every(flag => flag === null || typeof flag === "boolean") ||
-        typeof row.accepted !== "boolean" || ![row.sourceBox, row.candidateBox].every(box => box === null || validBox(box)) ||
+        typeof row.accepted !== "boolean" || ![row.sourceBox, row.candidateBox].every(box => box === null || validFaceBox(box)) ||
         !["present", "unprinted", "not-observed"].includes(row.sourcePrintLocation) ||
         !["entire-exposed-blank", "small-present-unreadable", "occluded", "cropped", "edge-on", "marked-readable", "own-unprinted-face", "unresolved"].includes(row.candidatePrintLocation) ||
         !["comparable-entire-location", "outside-visible-resolution-or-view", "not-applicable-own-unprinted-face", "unresolved"].includes(row.applicability)) return "local applicability raw/native/pixel binding is invalid";
@@ -523,7 +537,7 @@ function printWarningObservationIssue(result: PublicationIdentifierReviewResult,
     if (!["unresolved", "outside-visible-resolution-or-view"].includes(row.applicability) ||
         !["small-present-unreadable", "occluded", "cropped", "edge-on", "unresolved"].includes(row.candidatePrintLocation) ||
         row.samePhysicalPart === false || row.samePhysicalSurface === false || row.sameSelectedVisibleOption === false ||
-        row.sourceBox !== null && !validBox(row.sourceBox) || row.candidateBox !== null && !validBox(row.candidateBox))
+        row.sourceBox !== null && !validFaceBox(row.sourceBox) || row.candidateBox !== null && !validFaceBox(row.candidateBox))
       return "a legible word, actual exposed blank, concrete local contradiction or non-observation task is not an observation-only warning";
     return null;
   } catch { return "print observation warning evidence is malformed"; }
@@ -537,6 +551,31 @@ function withPrintObservationWarning(result: PublicationIdentifierReviewResult, 
   return { ...result, status: "unverified", nativeExecution: false, printObservationWarning: warning,
     reason: "LOCAL_INTRINSIC_PRINT_NOT_VERIFIED_NO_LETTER_CERTIFICATION_OR_REPAIR_AUTHORITY", context: prepared.context,
     requestSha256: hash(JSON.stringify({ observationWarning: warning, context: prepared.context })) };
+}
+/** Multiple visible words can leave the blind observer with no unique target
+ * even when a corresponding label REGION is readable. This final-only warning
+ * records that distinction; a region never becomes a word/OCR or retry proof. */
+function withTargetAmbiguousPrintWarning(result: PublicationIdentifierReviewResult, input: PublicationIdentifierReviewInput,
+  prepared: ReturnType<typeof packet>): PublicationIdentifierReviewResult | null {
+  const observed = result.blindInputObservations, applicability = result.printApplicability, row = applicability?.row;
+  if (!input.scopeGate || input.scopeGate.kind === "scene-native-positive/v1" || scopeGateIssue(input) ||
+      observationSetIssue(observed, prepared, true) || observed?.candidate.observation.readability !== "ambiguous" ||
+      !applicability || applicabilityEvidenceIssue(applicability, input, true, observed) || !row ||
+      row.accepted !== true || row.applicability !== "comparable-entire-location" || row.sourcePrintLocation !== "present" ||
+      row.candidatePrintLocation !== "marked-readable" || row.samePhysicalPart !== true || row.samePhysicalSurface !== true || row.sameSelectedVisibleOption !== true ||
+      !validFaceBox(row.sourceBox) || !validFaceBox(row.candidateBox) ||
+      prepared.context.references.some(reference => !validSha(reference.sourceSnapshotId)) || !printWarningPolicyFingerprint(input) ||
+      result.rawB !== "" || result.responseSha256 !== hash("") || result.comparison !== null || result.identifierConflict || result.missingPrintEvidence ||
+      result.identifierMatches?.length || result.sourceLetterEvidence || result.exactSourceIdentity || result.unprintedReferenceSet || result.ownUnprintedReference ||
+      result.scopeOutside || result.brandRoleEvidence || result.suspectedOmissionSourceRole || result.taskDiagnostic) return null;
+  const marker: PublicationPrintObservationWarning = { version: "publication-target-ambiguous-print-warning/v1",
+    scope: "multiple-visible-words-no-unique-intrinsic-target-no-certification", candidateSha256: input.candidateSha256,
+    primarySha256: input.primaryReference.sha256, scopeGateSha256: prepared.context.scopeGateSha256!,
+    applicabilitySha256: hash(JSON.stringify(applicability)), observationsSha256: hash(JSON.stringify(observed)),
+    sourceContextSha256: hash(JSON.stringify(prepared.context.references)), policyFingerprint: printWarningPolicyFingerprint(input)! };
+  return { ...result, status: "unverified", nativeExecution: false, printObservationWarning: marker,
+    reason: "MULTIPLE_VISIBLE_WORDS_NO_UNIQUE_INTRINSIC_TARGET_NO_LETTER_CERTIFICATION_OR_REPAIR_AUTHORITY", context: prepared.context,
+    requestSha256: hash(JSON.stringify({ observationWarning: marker, context: prepared.context })) };
 }
 /** A word on another actually separated included member/face does not impose
  * lettering on a positively corresponding unprinted local face. This is only
@@ -684,17 +723,17 @@ function blindRequest(context: PublicationIdentifierReviewContext, observed: Pub
   const candidate = observed.candidate.observation, intrinsic = source.evidence.observation;
   const properties: Record<string, unknown> = { ...PUBLICATION_IDENTIFIER_REVIEW_SCHEMA.properties,
     sourceImageIndex: { type: "integer", enum: [local.sourceImageIndex] }, sourceSha256: { type: "string", enum: [source.sha256] },
-    sourceLiteral: { type: "string", enum: [intrinsic.literal] }, sourceBox: { ...boxSchema, enum: [intrinsic.box] } };
+    sourceLiteral: { type: "string", enum: [intrinsic.literal] }, sourceBox: boxSchema };
   // These are immutable blind observations, not new visual judgments. The
   // candidate's absent/unreadable location remains freely observable: a real
   // missing-print verdict still needs its newly observed whole blank ROI.
-  if (candidate.readability === "legible") properties.candidateBox = { ...boxSchema, enum: [candidate.box] };
+  if (candidate.readability === "legible") properties.candidateBox = boxSchema;
   if (candidate.readability === "legible" && intrinsic.readability === "legible") properties.identifierComparisons = {
     ...INTRINSIC_IDENTIFIER_SCHEMA, minItems: 1, maxItems: 1, items: { ...INTRINSIC_IDENTIFIER_SCHEMA.items, properties: {
       ...INTRINSIC_IDENTIFIER_SCHEMA.items.properties,
       candidateLiteral: { type: "string", enum: [candidate.literal] }, sourceLiteral: { type: "string", enum: [intrinsic.literal] },
       sourceImageIndex: { type: "integer", enum: [local.sourceImageIndex] }, sourceSha256: { type: "string", enum: [source.sha256] },
-      sourceBox: { ...boxSchema, enum: [intrinsic.box] }, candidateBox: { ...boxSchema, enum: [candidate.box] },
+      sourceBox: boxSchema, candidateBox: boxSchema,
     } },
   };
   const size = (value: ImageDimensions) => ({ type: "object", properties: {
@@ -723,6 +762,9 @@ function blindRequest(context: PublicationIdentifierReviewContext, observed: Pub
     }, required: ["coordinateSpace", "sourceImageSize", "candidateImageSize", "comparison"], additionalProperties: false },
   };
 }
+/** Pure wire construction for an already bound context. This issues no review
+ * and is not evidence, source membership or generation authority. */
+export const buildBlindPublicationIdentifierRequest = blindRequest;
 export function publicationIdentifierReviewRequestSha256(context: PublicationIdentifierReviewContext, observed?: PublicationBlindInputObservations): string {
   return hash(JSON.stringify(context.localPair && observed ? blindRequest(context, observed) : request(context)));
 }
@@ -938,6 +980,13 @@ export function publicationIdentifierReviewEvidenceIssue(result: PublicationIden
       if (!validSha(diagnostic.imageSha256) || typeof diagnostic.reason !== "string") return "malformed B task diagnostic is not review evidence";
       return `B task failure: ${diagnostic.stage} SHA=${diagnostic.imageSha256} ${String(diagnostic.status).slice(0, 40)}: ${diagnostic.reason.slice(0, 2048)}${diagnostic.observerDiagnostic?.issue ? ` (${String(diagnostic.observerDiagnostic.issue).slice(0, 2048)})` : ""}`;
     }
+    if (result.printObservationWarning?.version === "publication-target-ambiguous-print-warning/v1") {
+      const regenerated = withTargetAmbiguousPrintWarning(result, expected, prepared);
+      return result.version === PUBLICATION_IDENTIFIER_REVIEW_VERSION && result.strategyVersion === PUBLICATION_IDENTIFIER_BLIND_STRATEGY &&
+        result.status === "unverified" && result.nativeExecution === false && !!regenerated && same(result.context, prepared.context) &&
+        result.reason === regenerated.reason && same(result.printObservationWarning, regenerated.printObservationWarning) && result.requestSha256 === regenerated.requestSha256
+        ? null : "target-ambiguous printing requires its exact native matched region and non-certifying current warning, without word/OCR or repair authority";
+    }
     if (result.printObservationWarning?.version === "publication-external-word-print-warning/v1") {
       const regenerated = withExternalWordWarning(result, expected, prepared);
       return result.version === PUBLICATION_IDENTIFIER_REVIEW_VERSION && result.strategyVersion === PUBLICATION_IDENTIFIER_BLIND_STRATEGY &&
@@ -1126,6 +1175,8 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
         }
         if (observed.sources[0].evidence.observation.readability === "legible" && row?.primaryObservedWordRelation === "other-visible-member-or-face")
           return withOtherMemberPrintWarning(result, input, prepared) || { ...result, reason: "OWN_UNPRINTED_OTHER_MEMBER_SPATIAL_EVIDENCE_UNCONFIRMED" };
+        const targetAmbiguous = withTargetAmbiguousPrintWarning(result, input, prepared);
+        if (targetAmbiguous) return targetAmbiguous;
         if (!outsideApplicabilityIssue(applicability, input, nativeExecution, observed)) {
           if (scopeGateIssue(input)) return { ...result, reason: "OWN_PRINT_SCOPE_REQUIRES_POSITIVE_CURRENT_NATIVE_TASKS" };
           return withPrintObservationWarning(result, input, prepared) || { ...result, reason: "LOCAL_PRINT_WARNING_COULD_NOT_BIND_CURRENT_POLICY" };

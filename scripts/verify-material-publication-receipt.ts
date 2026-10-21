@@ -22,7 +22,7 @@ import { revalidateSavedBrandPostText, SavedTextRevalidationError } from "../src
 import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 import { shoppingPhotoRoleAt } from "../src/lib/shopping-post-strategy";
 import type { CodexDraftOptions } from "./lib/codex-draft-provider";
-import { serializeScopedPublicationResponse } from "./lib/publication-image-scoped-review";
+import { parseScopedPublicationResponse, serializeScopedPublicationResponse } from "./lib/publication-image-scoped-review";
 
 const load = (file: string, overrides: Record<string, unknown>, replacement?: (source: string) => string) => {
   const original = fs.readFileSync(file, "utf8");
@@ -131,7 +131,13 @@ async function main() {
       if(call.systemPrompt.includes("publication-image-task/A-visible")) return JSON.stringify({memberBrandScope:"selected-main-product-body",memberBrandObservation:"Visible main physical product body, not an independent accessory",reason:"Offline corresponding selected product structure",visibleIdentityEvidence:{basis:"observed-correspondence",landmarks:[
         {part:"contour",referenceObservation:"source contour",candidateObservation:"candidate contour"},{part:"connection",referenceObservation:"source connection",candidateObservation:"candidate connection"}],conflict:""},
         picturedMemberEvidence:{scope:"pictured-member-only",memberFactIndex:0,picturedMember:"visible selected fixture member",verdict:"selected-member-visible",selectedFact:data.selectedSubjectFacts.selectedTitle,referenceObservation:"source included member",candidateObservation:"candidate included member",conflict:""},identityMatches:true,accepted:true});
-      if(call.systemPrompt.includes("publication-image-task/C-photo-claims")) return serializeScopedPublicationResponse("C-photo-claims",{reason:"Offline exact published claims supported",photoClaimObjection:{origin:"none",sourceIndex:null,quote:"",scope:"none",conflict:""},optionConflictWitness:{origin:"none",quote:"",visibleAlternatives:[]},photoClaimMatches:true,intrinsicPrintProofClaim:false,mixedOptions:false,explicitNamedComparison:false,optionsClearlyLabeled:false,reviewClass:"product-photo",accepted:true});
+      if(call.systemPrompt.includes("publication-image-task/C-photo-claims")) {
+        const row={reason:"Offline exact published claims supported",photoClaimObjection:{origin:"none",sourceIndex:null,quote:"",scope:"none",conflict:""},optionConflictWitness:{origin:"none",quote:"",visibleAlternatives:[]},photoClaimMatches:true,intrinsicPrintProofClaim:false,mixedOptions:false,explicitNamedComparison:false,optionsClearlyLabeled:false,reviewClass:"product-photo",accepted:true};
+        const raw=serializeScopedPublicationResponse("C-photo-claims",row);
+        assert.deepEqual(parseScopedPublicationResponse("C-photo-claims",raw,call.outputSchema,call.userPrompt),row,
+          "fresh C fixture binds its decoder to the actual published-context request");
+        return raw;
+      }
       assert.match(call.systemPrompt,/publication-image-task\/D-pixel-format/u);
       return JSON.stringify({reason:"Offline pixels contain no added graphic layout",pixelFormatObjection:{kind:"none",location:"",observation:""},notice:false,singlePhotograph:true,noGraphicLayout:true,textPolicyMatches:true,thumbnailHeadlineLegible:true,accepted:true});
     };

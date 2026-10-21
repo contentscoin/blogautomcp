@@ -11,7 +11,7 @@ import { recordPublicationImageDefect, recordScopedPublicationImageDefect, recor
 import { INTRINSIC_IDENTIFIER_RULE_EN, corroboratableIdentifierPairs, type IntrinsicIdentifierServerConflict } from "./intrinsic-identifier-comparison";
 import { normalizeIntrinsicIdentifierLiteral } from "./intrinsic-identifier-ocr";
 import { corroborateIntrinsicIdentifierPair } from "./intrinsic-identifier-corroboration";
-import { publicationClaimUnits } from "./publication-claim-units";
+import { publicationClaimUnits, hasExplicitPhotographicProofLink } from "./publication-claim-units";
 import { readProductPhotoSource } from "./product-photo-provenance";
 import { buildScopedPublicationPackets, executeScopedPublicationPacket, visibleMemberInclusionIssue, pixelFormatEvidenceIssue, type ScopedReviewEvidence } from "./publication-image-scoped-review";
 import { reviewPublicationIdentifiers, publicationIdentifierReviewEvidenceIssue, type PublicationIdentifierReviewInput,
@@ -95,6 +95,8 @@ function photoClaimObjectionIssue(review: Record<string, unknown>, context: Phot
   if (objection.origin === "thumbnail-headline") return context.role === "thumbnail" && objection.sourceIndex === null
     ? null : "thumbnail-headline requires a thumbnail role and null sourceIndex; no canonical OCR equality is asserted";
   if (context.role === "thumbnail") return "a thumbnail cannot cite a synthetic section title/body as its published headline";
+  if ((objection.scope === "performance" || objection.scope === "result") && !hasExplicitPhotographicProofLink(objection.quote))
+    return "a performance/result photo objection requires explicit photographic proof wording in the same exact quoted unit; adjacency is not proof";
   if (objection.origin === "section-title") return objection.sourceIndex === null && objection.quote === context.sectionTitle
     ? null : "section-title requires sourceIndex=null and the whole exact actual title";
   return typeof objection.sourceIndex === "number" && Number.isInteger(objection.sourceIndex) && objection.sourceIndex >= 0 &&

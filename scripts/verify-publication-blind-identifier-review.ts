@@ -9,7 +9,7 @@ import { createRequire } from "node:module";
 import sharp from "sharp";
 import ts from "typescript";
 import Ajv from "ajv";
-import { reviewPublicationIdentifiers, publicationIdentifierReviewEvidenceIssue,
+import { reviewPublicationIdentifiers, publicationIdentifierReviewEvidenceIssue, selectBlindPublicationIdentifierSource,
   type PublicationIdentifierReviewInput, type PublicationIdentifierComparison } from "./lib/publication-identifier-review";
 import { INTRINSIC_IDENTIFIER_OBSERVER_VERSION, intrinsicIdentifierObserverRequestSha256, serializeIntrinsicIdentifierObserverResponse, type IntrinsicIdentifierObserverEvidence, type IntrinsicIdentifierObservation } from "./lib/intrinsic-identifier-observer";
 import { normalizeIntrinsicIdentifierLiteral, type IntrinsicIdentifierOcrEvidence } from "./lib/intrinsic-identifier-ocr";
@@ -42,6 +42,23 @@ async function main() {
     return { version: INTRINSIC_IDENTIFIER_OBSERVER_VERSION, nativeExecution: native, imageSha256,
       requestSha256: intrinsicIdentifierObserverRequestSha256(imageSha256), responseSha256: hash(rawResponse), rawResponse, observation };
   };
+  // Pure picker tests are not native proof: execution/reader validate source
+  // receipts, native observations and exact context independently afterwards.
+  const vote=(index:number,literal:string,box:IdentifierBox=[100,100,200,150],role:IntrinsicIdentifierObservation["identifierRole"]="brand")=>{
+    const evidence=observed(detail,literal,box,"legible");evidence.observation.identifierRole=role;
+    return {imageIndex:index,sha256:hash(`distinct canonical source ${index}`),evidence};
+  };
+  const isolated={candidate:observed(candidate,"unrelated-candidate",candidateBox,"legible"),sources:[vote(2,"misread",[100,100,600,300]),vote(3,"source-word"),vote(4,"source-word",[100,100,250,160])]};
+  assert.equal(selectBlindPublicationIdentifierSource(isolated).imageIndex,4,"two exact source-only votes beat a larger singleton word");checks++;
+  for(const literal of ["misread","source-word","unrelated-expected-word"]) {const changed=copy(isolated);changed.candidate.observation.literal=literal;assert.equal(selectBlindPublicationIdentifierSource(changed).imageIndex,4);checks++;}
+  const solo={...isolated,sources:[vote(3,"one-observed-source")]};assert.equal(selectBlindPublicationIdentifierSource(solo).imageIndex,3);checks++;
+  for(const sources of [[],[vote(2,"A"),vote(3,"B")],[vote(2,"word"),vote(3,"Word")],[vote(2,"word"),vote(3,"word ")],
+    [vote(2,"word"),vote(3,"word",[100,100,200,150],"model")],[vote(2,"A"),vote(3,"A"),vote(4,"B"),vote(5,"B")],
+    [{...vote(2,"A"),sha256:hash("duplicate")},{...vote(3,"A"),sha256:hash("duplicate")}]] ) {
+    assert.throws(()=>selectBlindPublicationIdentifierSource({...isolated,sources}),/BLIND_SOURCE_/);checks++;
+  }
+  const reordered={...isolated,sources:[isolated.sources[2],isolated.sources[0],isolated.sources[1]]};
+  assert.equal(selectBlindPublicationIdentifierSource(reordered).sha256,isolated.sources[2].sha256,"area/index tie break does not count repeated or reordered votes");checks++;
   const sourceWord = "Markora", wrongWord = "Markra";
   const evidence = (literal = wrongWord, sourceLiteral = sourceWord, sourcePath = detail, candidatePath = candidate): IntrinsicIdentifierOcrEvidence => {
     const consensus = (word: string) => ({ literal: word, normalized: normalizeIntrinsicIdentifierLiteral(word), minimumConfidence: 93,

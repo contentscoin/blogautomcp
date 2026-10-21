@@ -10,7 +10,7 @@ import ts from "typescript";
 import sharp from "sharp";
 import Ajv from "ajv";
 import { observeIntrinsicIdentifier, parseIntrinsicIdentifierObserverResponse, intrinsicIdentifierObserverRequestSha256,
-  serializeIntrinsicIdentifierObserverResponse, intrinsicIdentifierObserverResponseIssue, INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA, INTRINSIC_IDENTIFIER_LITERAL_PATTERN, INTRINSIC_IDENTIFIER_OBSERVER_VERSION, type IntrinsicIdentifierObservation } from "./lib/intrinsic-identifier-observer";
+  serializeIntrinsicIdentifierObserverResponse, intrinsicIdentifierObserverResponseIssue, INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA, INTRINSIC_IDENTIFIER_LITERAL_PATTERN, INTRINSIC_IDENTIFIER_SCRIPT_PATTERN, INTRINSIC_IDENTIFIER_OBSERVER_VERSION, type IntrinsicIdentifierObservation } from "./lib/intrinsic-identifier-observer";
 import type { CodexDraftOptions } from "./lib/codex-draft-provider";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-blind-identifier-"));
@@ -58,6 +58,17 @@ async function main(): Promise<void> {
   check(actualBom.status === "invalid" && !actualBom.evidence && actualBom.diagnostic?.rawResponse === actualBomRaw &&
     actualBom.diagnostic.responseSha256 === hash(actualBomRaw) && actualBom.diagnostic.issue === "OBSERVER_LITERAL_OR_ROLE_INVALID",
     "actual 151 BOM reply remains byte-exact invalid evidence; no spelling cleanup, favorable reread or retry");
+  check(!/[\(][?][=!<]/u.test(INTRINSIC_IDENTIFIER_SCRIPT_PATTERN), "script consistency uses no lookaround or unsupported regex set intersection");
+  for(const literal of ["BYC히트핏", "Brand 한글", "品牌Brand", "Μάρκα", "Марка", "მარკა", "A Ω", "A-Б", "123", "E\u0301lan"]) {
+    const response=wire({...observation,literal});
+    check(schemaValid(JSON.parse(response)) && parseIntrinsicIdentifierObserverResponse(response)?.literal===literal,
+      "legitimate individual alphabets, separate words and Latin/Hangul/CJK stay exact");
+  }
+  for(const literal of ["Volt\u10e3\u10db", "Br\u0430nd", "M\u03b1rka", "\u041cark", "\u10dbark"]) {
+    const response=wire({...observation,literal});
+    check(!schemaValid(JSON.parse(response)) && parseIntrinsicIdentifierObserverResponse(response)===null && intrinsicIdentifierObserverResponseIssue(response)==="OBSERVER_LITERAL_SCRIPT_MIXED",
+      "actual mixed-confusable token is rejected without transliteration, strip or favorable retry");
+  }
 
   assert.deepEqual(JSON.parse(raw).observation.box, { left: 100, top: 100, width: 300, height: 100 }); checks++;
   for (const [box, expectedIssue] of [

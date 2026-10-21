@@ -14,7 +14,7 @@ import type { PublishImageAuditOptions, PublishImageAuditResult } from "./lib/pu
 import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
 import { referencePlaneFixtureRow } from "./test-fixtures/reference-plane-review";
-import { serializeScopedPublicationResponse } from "./lib/publication-image-scoped-review";
+import { parseScopedPublicationResponse, serializeScopedPublicationResponse } from "./lib/publication-image-scoped-review";
 
 const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "image-audit-receipt-"));
 const priorRoot = process.env.DESKTOP_USER_DATA;
@@ -92,7 +92,7 @@ async function main() {
   let inspectRequest: ((request: { imagePaths: string[]; userPrompt: string; systemPrompt?: string }) => void) | undefined;
   let inspectGalleryRead: (() => void) | undefined;
   let nativePacketCalls = 0;
-  const provider = async (request: { imagePaths: string[]; systemPrompt?: string; userPrompt?: string }) => {
+  const provider = async (request: { imagePaths: string[]; systemPrompt?: string; userPrompt?: string; outputSchema?: unknown }) => {
     const task = /publication-image-task\/([A-D]-[A-Za-z-]+)/u.exec(request.systemPrompt || "")?.[1];
     // `calls` tracks one fresh audit candidate as the old combined transport
     // did. Native A/C/D are separately counted so receipt reuse must skip ALL
@@ -111,11 +111,16 @@ async function main() {
           verdict: "selected-member-visible", selectedFact: data.selectedSubjectFacts.picturedMemberCandidates[0].sourceFact,
           referenceObservation: "Offline selected source member", candidateObservation: "Offline corresponding candidate member", conflict: "" },
         identityMatches: true, accepted: verdict === "accept" });
-      if (task === "C-photo-claims") return serializeScopedPublicationResponse("C-photo-claims", { reason: "Offline published photo claim", photoClaimMatches, intrinsicPrintProofClaim: false,
+      if (task === "C-photo-claims") { const row = { reason: "Offline published photo claim", photoClaimMatches, intrinsicPrintProofClaim: false,
         photoClaimObjection: photoClaimMatches ? { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" }
           : data.role === "thumbnail" ? { origin: "thumbnail-headline", sourceIndex: null, quote: "Synthetic conflicting headline", scope: "pictured-appearance", conflict: "Offline adverse photo claim" }
             : { origin: "section-body", sourceIndex: 0, quote: data.displayedParagraphs[0].text, scope: "pictured-appearance", conflict: "Offline adverse photo claim" },
-        optionConflictWitness: { origin: "none", quote: "", visibleAlternatives: [] }, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, reviewClass: "product-photo", accepted: true });
+        optionConflictWitness: { origin: "none", quote: "", visibleAlternatives: [] }, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, reviewClass: "product-photo", accepted: true };
+        const raw = serializeScopedPublicationResponse("C-photo-claims", row);
+        assert.deepEqual(parseScopedPublicationResponse("C-photo-claims", raw, request.outputSchema, request.userPrompt), row,
+          "fresh C fixture uses the exact current schema and published-context decoder; adverse flags remain unchanged");
+        return raw;
+      }
       if (task === "D-pixel-format") return JSON.stringify({ reason: "Offline natural photograph", pixelFormatObjection: { kind: "none", location: "", observation: "" },
         notice: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, accepted: true });
       assert.fail("Unexpected native task in receipt-only fixture: " + task);

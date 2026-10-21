@@ -19,6 +19,16 @@ const hash = (value: Buffer | string) => crypto.createHash("sha256").update(valu
 const fileHash = (file: string) => hash(fs.readFileSync(file));
 const box: IdentifierBox = [100, 100, 600, 180];
 let checks = 0;
+function supportedSchema(schema:unknown) {
+  const row=schema as Record<string,unknown>;
+  assert(row && typeof row==="object" && !Array.isArray(row));
+  assert(Object.keys(row).every(key=>["type","properties","required","additionalProperties","anyOf","enum","items","minimum","maximum","minItems","maxItems","minLength","maxLength","description","pattern"].includes(key)));
+  if(Array.isArray(row.enum))assert(row.enum.every(value=>value===null || typeof value!=="object"),"native root B cannot contain array/object enum values");
+  if(row.type==="object"){assert.equal(row.additionalProperties,false);assert.deepEqual([...(row.required as string[])].sort(),Object.keys(row.properties as object).sort());}
+  for(const value of Object.values(row.properties as object||{}))supportedSchema(value);
+  for(const branch of row.anyOf as unknown[]||[])supportedSchema(branch);
+  if(row.items)supportedSchema(row.items);checks++;
+}
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "publication-print-only-"));
   try {
@@ -47,6 +57,7 @@ async function main() {
     let calls = 0, actualPacketDigest = "";
     const callChecks = (call: CodexDraftOptions) => {
       calls++;
+      supportedSchema(call.outputSchema);
       assert.match(call.systemPrompt, /publication-image-task\/B-intrinsic-print/u);
       assert.match(call.systemPrompt, /not a whole-product\/SKU authenticator, geometry reviewer, claim reviewer, format reviewer or image generator/u);
       assert.doesNotMatch(call.systemPrompt + call.userPrompt, /Voltium|Voltum|BYC|selectedTitle|productName|expectedBrand/u);
