@@ -14,6 +14,7 @@ import type { PublishImageAuditOptions, PublishImageAuditResult } from "./lib/pu
 import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
 import { referencePlaneFixtureRow } from "./test-fixtures/reference-plane-review";
+import { serializeScopedPublicationResponse } from "./lib/publication-image-scoped-review";
 
 const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "image-audit-receipt-"));
 const priorRoot = process.env.DESKTOP_USER_DATA;
@@ -110,7 +111,7 @@ async function main() {
           verdict: "selected-member-visible", selectedFact: data.selectedSubjectFacts.picturedMemberCandidates[0].sourceFact,
           referenceObservation: "Offline selected source member", candidateObservation: "Offline corresponding candidate member", conflict: "" },
         identityMatches: true, accepted: verdict === "accept" });
-      if (task === "C-photo-claims") return JSON.stringify({ reason: "Offline published photo claim", photoClaimMatches, intrinsicPrintProofClaim: false,
+      if (task === "C-photo-claims") return serializeScopedPublicationResponse("C-photo-claims", { reason: "Offline published photo claim", photoClaimMatches, intrinsicPrintProofClaim: false,
         photoClaimObjection: photoClaimMatches ? { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" }
           : data.role === "thumbnail" ? { origin: "thumbnail-headline", sourceIndex: null, quote: "Synthetic conflicting headline", scope: "pictured-appearance", conflict: "Offline adverse photo claim" }
             : { origin: "section-body", sourceIndex: 0, quote: data.displayedParagraphs[0].text, scope: "pictured-appearance", conflict: "Offline adverse photo claim" },

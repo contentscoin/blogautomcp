@@ -10,7 +10,7 @@ import ts from "typescript";
 import sharp from "sharp";
 import Ajv from "ajv";
 import { observeIntrinsicIdentifier, parseIntrinsicIdentifierObserverResponse, intrinsicIdentifierObserverRequestSha256,
-  serializeIntrinsicIdentifierObserverResponse, intrinsicIdentifierObserverResponseIssue, INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA, INTRINSIC_IDENTIFIER_OBSERVER_VERSION, type IntrinsicIdentifierObservation } from "./lib/intrinsic-identifier-observer";
+  serializeIntrinsicIdentifierObserverResponse, intrinsicIdentifierObserverResponseIssue, INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA, INTRINSIC_IDENTIFIER_LITERAL_PATTERN, INTRINSIC_IDENTIFIER_OBSERVER_VERSION, type IntrinsicIdentifierObservation } from "./lib/intrinsic-identifier-observer";
 import type { CodexDraftOptions } from "./lib/codex-draft-provider";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-blind-identifier-"));
@@ -37,8 +37,28 @@ async function main(): Promise<void> {
   check(neutralBranch.properties.literal.enum.join() === "" && neutralBranch.properties.box.type === "null" &&
     neutralBranch.properties.identifierRole.enum.join() === "none" && neutralBranch.properties.location.enum.join() === "not-observed" &&
     !neutralBranch.properties.readability.enum.includes("legible" as never), "non-legible branch structurally fixes all empty neutral fields");
-  const schemaValid = new Ajv().compile(INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA);
+  // AJV6 defaults to legacy non-Unicode JS regexes. Its documented regExp
+  // hook supplies the Unicode semantics required by the actual L/N/M schema.
+  const schemaValid = new Ajv({ regExp: pattern => new RegExp(pattern, "u") }).compile(INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA);
   check(schemaValid(JSON.parse(raw)), "extent-based legible wire satisfies the exact native schema");
+  check(legibleBranch.properties.literal.pattern === INTRINSIC_IDENTIFIER_LITERAL_PATTERN && !/[\(][?][=!<]/u.test(INTRINSIC_IDENTIFIER_LITERAL_PATTERN),
+    "native literal pattern is the actual Unicode character contract, without unsupported lookaround");
+  for (const literal of ["Markora", "한일의료기", "스마토이 123", "Élan", "E\u0301lan", "株式会社123", "مَرْكة", "ब्रांड", "𐐀Brand", "３Ｍ", "A.B & C+ D'’/X-Y", ". Brand", "123", "A  B", "A\u0301"]) {
+    const response=wire({...observation,literal});
+    check(schemaValid(JSON.parse(response)) && parseIntrinsicIdentifierObserverResponse(response)?.literal === literal,
+      "legitimate Unicode letters/numbers/combining marks, internal spaces and exact punctuation remain unchanged");
+  }
+  for (const literal of ["Volt\ufeffum", "\ufeffMarkora", "Markora\ufeff", "A\u200bB", "A\u200cB", "A\u200dB", "A\u2060B", "A\u200eB", "A\u202eB", "A\u00a0B", "A\tB", "A\nB", "A\rB", "A\u0000B", " Markora", "Markora ", " . ", ".&+", "\u0301", "Brand😀", "Brand_1"]) {
+    const response=wire({...observation,literal});
+    check(!schemaValid(JSON.parse(response)) && parseIntrinsicIdentifierObserverResponse(response) === null,
+      "actual BOM/control/hidden-space and boundary-invalid literals are denied at generation schema and parser, never stripped");
+  }
+  const actualBomRaw = wire({...observation,literal:"Volt\ufeffum",box:[414,598,474,618]});
+  const actualBom = await observeIntrinsicIdentifier(options,{review:async()=>actualBomRaw});
+  check(actualBom.status === "invalid" && !actualBom.evidence && actualBom.diagnostic?.rawResponse === actualBomRaw &&
+    actualBom.diagnostic.responseSha256 === hash(actualBomRaw) && actualBom.diagnostic.issue === "OBSERVER_LITERAL_OR_ROLE_INVALID",
+    "actual 151 BOM reply remains byte-exact invalid evidence; no spelling cleanup, favorable reread or retry");
+
   assert.deepEqual(JSON.parse(raw).observation.box, { left: 100, top: 100, width: 300, height: 100 }); checks++;
   for (const [box, expectedIssue] of [
     [[307, 415, 714, 690], "OBSERVER_BOX_HEIGHT_LIMIT"], // actual Hanil v2 whole-leaflet ROI, not a new word fixture
@@ -62,6 +82,8 @@ async function main(): Promise<void> {
     check(request.imagePaths?.length === 1 && request.imagePaths[0] === file, "exactly one image, never a reference/candidate pair");
     check(request.publicationPhotoInput?.sha256 === options.sha256 && request.maxImages === 1 && request.preserveImageOrder === true, "exact immutable image1 role");
     check(request.noTransientRetry === true && request.researchMode === "disabled", "no search and no transient second turn");
+    check(request.userPrompt.includes("BOM U+FEFF") && request.userPrompt.includes("not permission to add, delete, correct or infer any visible letter"),
+      "wire-format cause is prevented in instructions without altering real observed characters");
     check(!/Brandum|Brandium|Voltium|Voltum/u.test(request.systemPrompt + request.userPrompt), "no expected brand/literal/near-spelling hint");
     check(request.userPrompt.includes("Never insert/delete a letter") && request.userPrompt.includes("COMPLETE word"), "independent raw letters and full-word ROI requested");
     check(request.userPrompt.includes("Readable EXTERNAL seller/company artwork is not intrinsic") && request.userPrompt.includes("never copy its external word"), "readable external watermark is excluded, never coerced to intrinsic printing");

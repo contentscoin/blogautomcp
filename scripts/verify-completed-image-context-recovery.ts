@@ -18,7 +18,7 @@ import { runRecordedImageRecovery, imageRecoverySignature, IMAGE_RECOVERY_POLICY
 import { runMaterialPreparation, type Call, type Result } from "./lib/scheduled-draft-workflow";
 import { publicationImageContext, recordPublicationImageRegenerationHolds } from "./lib/publish-image-rejections";
 import { recordPublicationImageDefect, readPublicationImageDefect, recordScopedPublicationImageDefect, readPublicationDefectMaterialContext } from "./lib/publication-image-defect-proof";
-import { buildScopedPublicationPackets, type ScopedReviewEvidence } from "./lib/publication-image-scoped-review";
+import { buildScopedPublicationPackets, serializeScopedPublicationResponse, parseScopedPublicationResponse, type ScopedReviewEvidence } from "./lib/publication-image-scoped-review";
 import { visibleIdentityReviewContext } from "./lib/publication-visible-identity";
 import { publicationIdentifierReviewRequestSha256, publicationIdentifierReviewEvidenceIssue, type PublicationIdentifierReviewResult, type PublicationIdentifierReviewInput,
   type PublicationIdentifierComparison } from "./lib/publication-identifier-review";
@@ -270,10 +270,10 @@ async function main() {
         optionConflictWitness: { origin: "none", quote: "", visibleAlternatives: [] }, photoClaimMatches: true, intrinsicPrintProofClaim:false, mixedOptions: false,
         explicitNamedComparison: false, optionsClearlyLabeled: false, reviewClass: "product-photo", accepted: true };
       const d = {reason:"Synthetic pixel-only format",pixelFormatObjection:{kind:"none",location:"",observation:""},notice:false,singlePhotograph:true,noGraphicLayout:true,textPolicyMatches:true,thumbnailHeadlineLegible:true,accepted:true};
-      const evidence = (index: number, row: Record<string, unknown>): ScopedReviewEvidence => { const packet = packets[index], rawResponse = JSON.stringify(row);
+      const evidence = (index: number, row: Record<string, unknown>): ScopedReviewEvidence => { const packet = packets[index], rawResponse = serializeScopedPublicationResponse(packet.task,row);
         return { version: "publication-image-scoped-review/v2", task: packet.task, requestSha256: packet.requestSha256,
           request: { ...packet.call, imagePaths: packet.call.imagePaths!.map(fileHash) }, context: packet.context,
-          responseSha256: hash(rawResponse), rawResponse, row, nativeExecution: true }; };
+          responseSha256: hash(rawResponse), rawResponse, row:parseScopedPublicationResponse(packet.task,rawResponse,packet.call.outputSchema), nativeExecution: true }; };
       const comparison: PublicationIdentifierComparison = { sourceImageIndex: 3, sourceSha256: fileHash(f.f.geometry), sourceObservation: "Actual synthetic source Voltium",
         candidateObservation: "Actual synthetic candidate Voltum", correspondenceObservation: "The same locally selected component and colour", samePhysicalPart: true,
         samePhysicalSurface: true, sameSelectedVisibleOption: true, sourcePrintState: "present", candidatePrintState: "present", sourceBox: f.identifierConflict.pair.sourceBox!,

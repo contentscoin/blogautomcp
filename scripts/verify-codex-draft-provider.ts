@@ -207,6 +207,62 @@ async function verifyRetryPolicy(): Promise<void> {
   const completed = { type: "turn.completed" as const, usage: { input_tokens: 1, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0 } };
   assert.equal(await collectCodexDraftResponse(events([progress, response, completed])), "completed JSON",
     "native recovery progress must not cancel its still-running turn");
+  const highDemand = "Reconnecting... 2/5 (We’re currently experiencing high demand, which may cause temporary errors.)";
+  const nextHighDemand = highDemand.replace("2/5", "3/5");
+  const demandEvents = [{ type: "error" as const, message: highDemand }, { type: "error" as const, message: nextHighDemand }];
+  const negativeJson = '{"accepted":false,"identityMatches":false,"reason":"actual retained negative"}';
+  const negativeResponse = { ...response, item: { ...response.item, text: negativeJson } };
+  const progressTrace: string[] = [];
+  let sameTurnCalls = 0;
+  assert.equal(await runCodexDraftWithRetry(async () => {
+    sameTurnCalls++;
+    return collectCodexDraftResponse(events([...demandEvents, negativeResponse, completed]), notice => progressTrace.push(notice));
+  }, { retryDelayMs: 0, canRetry: () => false }), negativeJson,
+  "2/5 -> 3/5 waits within one SDK operation and preserves a completed raw negative without a favorable reroll");
+  assert.equal(sameTurnCalls, 1);
+  assert(progressTrace.some(notice => notice.includes(highDemand)) && progressTrace.some(notice => notice.includes(nextHighDemand)),
+    "the exact first and later reconnect notifications remain in the progress trace");
+  assert.equal(await collectCodexDraftResponse(events([{ type: "error", message: highDemand.replace("We’re", "We're") }, response, completed]), () => {}), "completed JSON");
+  for (const raw of ['{"accepted":null}', "{invalid-json", negativeJson]) {
+    let calls = 0;
+    const received = await runCodexDraftWithRetry(async () => {
+      calls++;
+      return collectCodexDraftResponse(events([...demandEvents, { ...response, item: { ...response.item, text: raw } }, completed]), () => {});
+    }, { retryDelayMs: 0, canRetry: () => false });
+    assert.equal(received, raw); assert.equal(calls, 1, "model negative, unknown and parse-invalid text never trigger another provider operation");
+  }
+  for (const message of ["authentication required", "You've hit your usage limit.", "The model is not supported when using Codex with a ChatGPT account.",
+    "HTTP status 400 invalid_request_error: invalid output schema", "CODEX_TIMEOUT", highDemand.replace("errors.)", "errors. authentication required)")]) {
+    let reachedLaterResponse = false;
+    async function* terminalEvents(): AsyncIterable<import("@openai/codex-sdk").ThreadEvent> {
+      yield demandEvents[0]; yield { type: "error", message }; reachedLaterResponse = true; yield response; yield completed;
+    }
+    await assert.rejects(collectCodexDraftResponse(terminalEvents(), () => {}), error => (error as Error).message === message);
+    assert.equal(reachedLaterResponse, false, "terminal or unrecognized errors are not swallowed as progress");
+  }
+  for (const invalid of [highDemand.replace("2/5", "0/5"), highDemand.replace("2/5", "02/5"), highDemand.replace("2/5", "6/5"),
+    highDemand.replace("2/5", "2/0"), highDemand.replace("2/5", "2/6"), highDemand.replace("2/5", "9007199254740993/9007199254740993"),
+    `Invalid request text: ${highDemand}`, `${highDemand} suffix`, highDemand.slice(0,-1), highDemand.replace("temporary errors.", "a different transient message.")]) {
+    await assert.rejects(collectCodexDraftResponse(events([{ type: "error", message: invalid }, response, completed]), () => {}), error => (error as Error).message === invalid);
+  }
+  for (const finish of [[], [negativeResponse], [{ type: "turn.failed" as const, error: { message: highDemand } }]]) {
+    let calls = 0;
+    await assert.rejects(runCodexDraftWithRetry(async () => {
+      calls++;
+      return collectCodexDraftResponse(events([...demandEvents, ...finish]), () => {});
+    }, { retryDelayMs: 0, canRetry: () => false }), error => (error as Error).message === (finish[0]?.type === "turn.failed" ? highDemand : nextHighDemand));
+    assert.equal(calls, 1, "failed or unknown stream completion never dispatches another QC operation");
+  }
+  async function* highDemandAbortedEvents(): AsyncIterable<import("@openai/codex-sdk").ThreadEvent> {
+    yield demandEvents[0]; throw Object.assign(new Error("existing deadline aborted this same turn"), { name: "AbortError" });
+  }
+  let deadlineCalls = 0;
+  await assert.rejects(runCodexDraftWithRetry(async () => {
+    deadlineCalls++; return collectCodexDraftResponse(highDemandAbortedEvents(), () => {});
+  }, { retryDelayMs: 0, canRetry: () => false }), error => (error as { code?: string }).code === "CODEX_TIMEOUT");
+  assert.equal(deadlineCalls, 1, "SDK reconnects do not reset the caller's deadline or add a second QC turn");
+  assert.equal(classifyCodexDraftFailure(new Error(highDemand)), "non-retryable",
+    "recognizing same-turn progress does not broaden the generic new-operation retry classifier");
   await assert.rejects(collectCodexDraftResponse(events([progress, { type: "turn.failed", error: { message: completionLoss } }])), /Reconnecting/);
   await assert.rejects(collectCodexDraftResponse(events([progress, response])), /Reconnecting/,
     "a partial response without turn.completed cannot count as successful QC");

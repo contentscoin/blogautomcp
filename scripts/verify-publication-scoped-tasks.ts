@@ -62,10 +62,12 @@ async function main() {
       if (mode === "c-second-paragraph" || mode === "c-substring") { row.accepted = row.photoClaimMatches = false; row.photoClaimObjection = {origin:"section-body",sourceIndex:1,
         quote:mode === "c-second-paragraph" ? "사진에서는 귀에 거는 형태와 검은색 본체, 로고를 확인할 수 있어요." : "검은색 본체",scope:"pictured-appearance",conflict:"Actual label close-up does not show the claimed complete hook"}; }
       if (mode === "c-forged-quote") { row.photoClaimMatches = row.accepted = false; row.photoClaimObjection = { origin: "section-body", sourceIndex: 0, quote: "invented sentence", scope: "quantity", conflict: "invalid quoted claim" }; }
-      if (mode === "c-unknown") return JSON.stringify({ ...row, photoClaimMatches: null });
-      if(mode === "print-claim-auth") row.intrinsicPrintProofClaim=true;
-      return JSON.stringify(row);
+      if (mode === "c-unknown") return require("./lib/publication-image-scoped-review").serializeScopedPublicationResponse("C-photo-claims",{ ...row, photoClaimMatches: null });
+      if(mode === "print-claim-auth" || mode === "ambiguous-print-proofclaim") row.intrinsicPrintProofClaim=true;
+      return require("./lib/publication-image-scoped-review").serializeScopedPublicationResponse("C-photo-claims",row);
     }
+    if(mode.startsWith("ambiguous-print") && call.systemPrompt.startsWith("Observe literal physical printing"))
+      return JSON.stringify({observation:{literal:"",box:null,identifierRole:"none",location:"not-observed",readability:"ambiguous"}});
     if(mode==="external-word" && call.systemPrompt.startsWith("Observe literal physical printing"))
       return JSON.stringify({observation:path.basename(call.imagePaths![0])==="source.png"?{literal:"",box:null,identifierRole:"none",location:"not-observed",readability:"absent"}
         :{literal:"Artmark",box:{left:100,top:100,width:400,height:150},identifierRole:"brand",location:"intrinsic",readability:"legible"}});
@@ -127,7 +129,8 @@ async function main() {
   } };
   try {
     const { auditPublishImages, assertPublishImagesSafe, publicationImageAuditPolicyFingerprint } = require("./lib/publish-image-audit") as typeof import("./lib/publish-image-audit");
-    const { buildScopedPublicationPackets, executeScopedPublicationPacket, scopedPublicationEvidenceIssue } = require("./lib/publication-image-scoped-review") as typeof import("./lib/publication-image-scoped-review");
+    const { buildScopedPublicationPackets, executeScopedPublicationPacket, scopedPublicationEvidenceIssue, serializeScopedPublicationResponse,
+      parseScopedPublicationResponse, PUBLICATION_OPTION_DECISION_VERSION } = require("./lib/publication-image-scoped-review") as typeof import("./lib/publication-image-scoped-review");
     const { visibleIdentityReviewContext } = require("./lib/publication-visible-identity") as typeof import("./lib/publication-visible-identity");
     const hash = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
     async function fixture(): Promise<PublishImageAuditOptions> {
@@ -186,6 +189,63 @@ async function main() {
       selection: visibleIdentityReviewContext(options.selectedProduct!), selectedProduct: options.selectedProduct! };
     const packet = buildScopedPublicationPackets(input)[0], evidence = await executeScopedPublicationPacket(packet);
     assert.equal(scopedPublicationEvidenceIssue(evidence, { task: "A-visible", candidateSha256: input.candidateSha256, primaryReferenceSha256: input.primaryReference.sha256 }), null); checks++;
+    // A coherent nested wire prevents the actual old true+none contradiction
+    // from being generated as a valid answer. No runtime adverse is corrected.
+    const claimPacket=buildScopedPublicationPackets(input)[1], claimSchema=claimPacket.call.outputSchema;
+    const claimWire=(row:Record<string,unknown>)=>serializeScopedPublicationResponse("C-photo-claims",row);
+    const parseClaim=(row:Record<string,unknown>)=>parseScopedPublicationResponse("C-photo-claims",claimWire(row),claimSchema);
+    const oldContradiction={...c(),mixedOptions:true};
+    const oldContradictionRaw=claimWire(oldContradiction);
+    assert.equal(parseClaim(oldContradiction),null);
+    assert.equal(oldContradiction.mixedOptions,true);assert.deepEqual(oldContradiction.optionConflictWitness,{origin:"none",quote:"",visibleAlternatives:[]});
+    const nativeWire=JSON.parse(claimWire(c()));
+    assert.equal(nativeWire.optionDecision.version,PUBLICATION_OPTION_DECISION_VERSION);
+    assert.equal("mixedOptions" in nativeWire,false);assert.equal("optionConflictWitness" in nativeWire,false);
+    assert.deepEqual(parseClaim(c()),c());checks+=7;
+    for(const changed of [
+      {...c(),mixedOptions:null}, {...c(),mixedOptions:true,optionConflictWitness:{origin:"published-named-comparison",quote:"원래 전체 문장",visibleAlternatives:["black"]}},
+      {...c(),mixedOptions:true,optionConflictWitness:{origin:"none",quote:"원래 전체 문장",visibleAlternatives:["black","gray"]}},
+      {...c(),mixedOptions:false,optionConflictWitness:{origin:"published-named-comparison",quote:"원래 전체 문장",visibleAlternatives:["black","gray"]}},
+      {...c(),mixedOptions:true,optionConflictWitness:{origin:"published-named-comparison",quote:"",visibleAlternatives:["black","gray"]}},
+      {...c(),mixedOptions:false,optionConflictWitness:{origin:"none",quote:"",visibleAlternatives:["black"]}},
+    ]) {assert.equal(parseClaim(changed),null);checks++;}
+    const trueRow={...c(),mixedOptions:true,accepted:false,optionConflictWitness:{origin:"published-named-comparison",quote:"원래 전체 문장",visibleAlternatives:["black","gray"]}};
+    assert.deepEqual(parseClaim(trueRow),trueRow);assert.equal(parseClaim({...c(),accepted:false})!.accepted,false);
+    assert.equal(parseClaim({...c(),accepted:null}),null);checks+=3;
+    for(const oldRaw of [JSON.stringify(c()),JSON.stringify({...c(),mixedOptions:true}),JSON.stringify({...nativeWire,mixedOptions:false}),
+      JSON.stringify({...nativeWire,optionDecision:{...nativeWire.optionDecision,version:"publication-option-decision/v0"}})]) {
+      assert.equal(parseScopedPublicationResponse("C-photo-claims",oldRaw,claimSchema),null);checks++;
+    }
+    const oldSchema=structuredClone(claimSchema) as {properties:Record<string,unknown>;required:string[]};
+    delete oldSchema.properties.optionDecision;oldSchema.properties.mixedOptions={type:"boolean"};oldSchema.properties.optionConflictWitness={type:"object",properties:{},required:[],additionalProperties:false};
+    oldSchema.required=Object.keys(oldSchema.properties);
+    assert.equal(parseScopedPublicationResponse("C-photo-claims",JSON.stringify({...c(),optionConflictWitness:{}}),oldSchema),null);checks++;
+    let malformedCalls=0;
+    const incoherent=await executeScopedPublicationPacket(claimPacket,async()=>{malformedCalls++;return oldContradictionRaw;});
+    assert.equal(malformedCalls,1);assert.equal(incoherent.row,null);assert.equal(incoherent.rawResponse,oldContradictionRaw);assert.equal(incoherent.nativeExecution,false);checks+=4;
+    const coherent=await executeScopedPublicationPacket(claimPacket,async()=>claimWire(trueRow));
+    assert.equal(coherent.row!.accepted,false);assert.equal(coherent.row!.mixedOptions,true);
+    assert.equal(scopedPublicationEvidenceIssue(coherent,{task:"C-photo-claims",candidateSha256:input.candidateSha256},false),null);
+    const changedProjection=structuredClone(coherent);changedProjection.row!.mixedOptions=false;
+    assert(scopedPublicationEvidenceIssue(changedProjection,{task:"C-photo-claims",candidateSha256:input.candidateSha256},false));checks+=4;
+    const scalarSchema=(extra:Record<string,unknown>)=>({type:"object",properties:{reason:{type:"string"},value:extra},required:["reason","value"],additionalProperties:false});
+    const parseValue=(value:unknown,schema:Record<string,unknown>)=>parseScopedPublicationResponse("D-pixel-format",JSON.stringify({reason:"schema fixture",value}),scalarSchema(schema));
+    assert(parseValue([{b:2,a:1}],{type:"array",items:{type:"object",properties:{a:{type:"integer"},b:{type:"integer"}},required:["a","b"],additionalProperties:false},enum:[[{a:1,b:2}]],minItems:1,maxItems:1}));checks++;
+    for(const [value,schema] of [
+      [[],{type:"array",items:{type:"string"},minItems:1}], [["a"],{type:"array",items:{type:"string"},maxItems:0}],
+      ["a",{type:"string",minLength:2}], ["ab",{type:"string",maxLength:1}],
+      [[],{type:"array",items:{type:"string",unknownKeyword:true}}], [[],{type:"array",items:{type:"string"},minItems:"2"}],
+      [[],{type:"array",items:{type:"string"},maxItems:-1}], [[],{type:"array",items:{type:"string"},minItems:2,maxItems:1}],
+      ["a",{anyOf:[{type:"string"},{type:"string",unknownKeyword:true}]}], ["a",{anyOf:[]}],
+      ["a",{anyOf:[{type:"string"}],type:"string"}], ["a",{type:"string",enum:[]}],
+      [[],{type:"array",items:{type:"string"},additionalProperties:false}],
+      [null,{type:["null","string"],minLength:-1}], [true,{type:"boolean",minItems:0}],
+    ] as const) {assert.equal(parseValue(value,schema),null);checks++;}
+    const duplicatePhysical=a();duplicatePhysical.visibleIdentityEvidence.landmarks[1].part=duplicatePhysical.visibleIdentityEvidence.landmarks[0].part;
+    const {visibleIdentityEvidenceIssue}=require("./lib/publication-visible-identity") as typeof import("./lib/publication-visible-identity");
+    assert(visibleIdentityEvidenceIssue(duplicatePhysical,visibleIdentityReviewContext(input.selectedProduct)));
+    assert.equal(visibleIdentityEvidenceIssue(a(),visibleIdentityReviewContext(input.selectedProduct)),null);
+    assert(packet.call.userPrompt.includes("Two people/items both having an upper garment are not two different features"));checks+=3;
     for (const changed of ["request", "raw", "parsed", "source", "candidate", "injected"] as const) {
       const tampered = structuredClone(evidence);
       if (changed === "request") tampered.request.maxImages = 8;
@@ -254,7 +314,10 @@ async function main() {
       mode=invalidMode;const invalid=await executeScopedPublicationPacket(claimPacket,undefined,{policyFingerprint});
       mode="good";const current=await executeScopedPublicationPacket(claimPacket,undefined,{policyFingerprint});
       const reused=await executeScopedPublicationPacket(claimPacket,undefined,{policyFingerprint});
-      assert.equal(providerCalls-before,2);assert.equal(invalid.row!.accepted,true);assert.equal(invalid.reused,undefined);
+      assert.equal(providerCalls-before,2);
+      if(invalidMode==="c-positive-invalid-witness")assert.equal(invalid.row,null);
+      else assert.equal(invalid.row!.accepted,true);
+      assert.equal(invalid.reused,undefined);
       assert.equal(current.reused,undefined);assert.equal(reused.reused,true);checks+=5;
     }
     const {picturedMemberFacts,picturedMemberEvidenceIssue,VISIBLE_PRESENTATION_SCOPE}=require("./lib/publication-image-scoped-review") as typeof import("./lib/publication-image-scoped-review");
@@ -362,6 +425,38 @@ async function main() {
     warningOptions.forceReview=true;await assert.rejects(assertPublishImagesSafe(warningOptions),/인쇄 결함/);checks++;
     fs.writeFileSync(markerFile,"malformed");await assert.rejects(assertPublishImagesSafe(warningOptions),/인쇄 결함/);checks++;
     assert.deepEqual(warningOptions.imageAssets!.map(asset=>hash(asset.path)),warningBefore);checks++;
+    async function ambiguousPrintFixture(shade:number) {
+      const value=await printFixture(),asset=value.imageAssets![0],src=asset.sourcePath!;
+      // Observations are correctly cached by exact pixels, independently of
+      // product IDs. Each semantic case gets distinct synthetic images.
+      await sharp({create:{width:340,height:340,channels:3,background:`rgb(${shade},140,159)`}}).png().toFile(asset.path);asset.sha256=hash(asset.path);
+      await sharp({create:{width:340,height:340,channels:3,background:`rgb(${shade},120,139)`}}).png().toFile(src);
+      const retrieval=`${src}.retrieval.json`,receipt=JSON.parse(fs.readFileSync(retrieval,"utf8"));
+      receipt.sha256=hash(src);fs.writeFileSync(retrieval,JSON.stringify(receipt));
+      asset.referenceScene!.referenceSha256=hash(src);asset.referenceScene!.reviewedOutputSha256=asset.sha256;
+      return value;
+    }
+    mode="ambiguous-print";const ambiguousOptions=await ambiguousPrintFixture(121),ambiguousBytes=ambiguousOptions.imageAssets!.map(asset=>hash(asset.path));
+    const ambiguousStart=calls.length,ambiguousFinal=await assertPublishImagesSafe(ambiguousOptions),ambiguousRaw=ambiguousFinal.scopedReviews![0].identifiers!;
+    assert.equal(ambiguousFinal.ok,true);assert.equal(ambiguousRaw.status,"unverified");assert.equal(ambiguousRaw.nativeExecution,false);
+    assert.equal(ambiguousRaw.blindInputObservations!.candidate.observation.readability,"ambiguous");
+    assert.equal(ambiguousRaw.blindInputObservations!.sources[0].evidence.observation.readability,"ambiguous");
+    assert.equal(ambiguousRaw.printApplicability!.row!.accepted,false);assert.equal(ambiguousRaw.printApplicability!.row!.samePhysicalPart,null);
+    assert.equal(ambiguousRaw.identifierConflict,undefined);assert.equal(ambiguousRaw.missingPrintEvidence,undefined);
+    assert.equal(calls.slice(ambiguousStart).filter(call=>call.systemPrompt.includes("B-print-applicability")).length,1);
+    assert.equal(calls.slice(ambiguousStart).filter(call=>call.userPrompt.includes("blind-two-image/v1: IMAGE 1")).length,0);
+    assert.equal(ambiguousFinal.warnings![0].code,"INTRINSIC_PRINT_UNVERIFIED");checks+=12;
+    const beforeAmbiguousReuse=providerCalls,ambiguousReused=await assertPublishImagesSafe(ambiguousOptions);
+    assert.equal(ambiguousReused.receiptReused,true);assert.deepEqual(ambiguousReused.warnings,ambiguousFinal.warnings);assert.equal(providerCalls,beforeAmbiguousReuse);checks+=3;
+    const ambiguousMarker={...markerRow,id:ambiguousOptions.brandLinkId!,sha256:ambiguousOptions.imageAssets![0].sha256!};
+    const ambiguousMarkerFile=path.join(markerDir,`seen-${crypto.createHash("sha256").update(JSON.stringify({id:ambiguousMarker.id,sectionId:ambiguousMarker.sectionId,sha256:ambiguousMarker.sha256})).digest("hex")}.json`);
+    fs.writeFileSync(ambiguousMarkerFile,JSON.stringify(ambiguousMarker));await assert.rejects(assertPublishImagesSafe(ambiguousOptions),/인쇄 결함/u);checks++;
+    ambiguousOptions.forceReview=true;await assert.rejects(assertPublishImagesSafe(ambiguousOptions),/인쇄 결함/u);checks++;
+    fs.writeFileSync(ambiguousMarkerFile,"malformed");await assert.rejects(assertPublishImagesSafe(ambiguousOptions),/인쇄 결함/u);checks++;
+    assert.deepEqual(ambiguousOptions.imageAssets!.map(asset=>hash(asset.path)),ambiguousBytes);checks++;
+    mode="ambiguous-print-proofclaim";const ambiguousClaim=await auditPublishImages(await ambiguousPrintFixture(151));
+    assert.equal(ambiguousClaim.ok,false);assert.equal(ambiguousClaim.warnings?.length||0,0);
+    assert.equal(ambiguousClaim.scopedReviews![0].claims.row!.intrinsicPrintProofClaim,true);checks+=3;
     mode="suspected";const suspectedOptions=await printFixture(),clear=path.join(suspectedOptions.selectedSourceDirectory!,"clear.png");
     await sharp({create:{width:340,height:340,channels:3,background:"black"}}).png().toFile(clear);
     const originalSnapshot=suspectedOptions.selectedSourceSnapshot as ReturnType<typeof createProductSnapshot>,clearUrl="https://shop-phinf.pstatic.net/scoped/clear.png";

@@ -10,7 +10,7 @@ import ts from "typescript";
 import sharp from "sharp";
 import Ajv from "ajv";
 import type { CodexDraftOptions } from "./lib/codex-draft-provider";
-import { buildScopedPublicationPackets, type ScopedReviewPacket, type ScopedReviewEvidence } from "./lib/publication-image-scoped-review";
+import { buildScopedPublicationPackets, serializeScopedPublicationResponse, parseScopedPublicationResponse, type ScopedReviewPacket, type ScopedReviewEvidence } from "./lib/publication-image-scoped-review";
 import { visibleIdentityReviewContext } from "./lib/publication-visible-identity";
 import { INTRINSIC_IDENTIFIER_OBSERVER_VERSION, intrinsicIdentifierObserverRequestSha256, serializeIntrinsicIdentifierObserverResponse, type IntrinsicIdentifierObservation } from "./lib/intrinsic-identifier-observer";
 import { normalizeIntrinsicIdentifierLiteral, type IntrinsicIdentifierOcrEvidence } from "./lib/intrinsic-identifier-ocr";
@@ -35,8 +35,11 @@ async function main() {
   const c={reason:"no photographic letter certification",photoClaimObjection:{origin:"none",sourceIndex:null,quote:"",scope:"none",conflict:""},optionConflictWitness:{origin:"none",quote:"",visibleAlternatives:[]},intrinsicPrintProofClaim:false,
     photoClaimMatches:true,mixedOptions:false,explicitNamedComparison:false,optionsClearlyLabeled:false,reviewClass:"product-photo",accepted:true};
   const d={reason:"natural photo",pixelFormatObjection:{kind:"none",location:"",observation:""},notice:false,singlePhotograph:true,noGraphicLayout:true,textPolicyMatches:true,thumbnailHeadlineLegible:true,accepted:true};
-  const evidence=(packet:ScopedReviewPacket,row:Record<string,unknown>):ScopedReviewEvidence=>({version:"publication-image-scoped-review/v2",task:packet.task,requestSha256:packet.requestSha256,
-    responseSha256:hash(JSON.stringify(row)),rawResponse:JSON.stringify(row),row:copy(row),nativeExecution:true,context:packet.context,request:{...packet.call,imagePaths:packet.call.imagePaths!.map(fileHash)}});
+  const evidence=(packet:ScopedReviewPacket,row:Record<string,unknown>):ScopedReviewEvidence=>{
+    const rawResponse=serializeScopedPublicationResponse(packet.task,row);
+    return {version:"publication-image-scoped-review/v2",task:packet.task,requestSha256:packet.requestSha256,
+      responseSha256:hash(rawResponse),rawResponse,row:parseScopedPublicationResponse(packet.task,rawResponse,packet.call.outputSchema),nativeExecution:true,context:packet.context,request:{...packet.call,imagePaths:packet.call.imagePaths!.map(fileHash)}};
+  };
   const packets=buildScopedPublicationPackets({candidatePath:candidate,candidateSha256:fileHash(candidate),primaryReference:{path:primary,sha256:fileHash(primary)},role:"thumbnail",exactCanonicalSellerOriginal:false,
     sectionTitle:"ordinary purchase checks",sectionBody:["unchanged manuscript"],allowProductPhoto:true,selection:visibleIdentityReviewContext(selectedProduct),selectedProduct});
   const input:PublicationIdentifierReviewInput={candidatePath:candidate,candidateSha256:fileHash(candidate),primaryReference:{path:primary,sha256:fileHash(primary)},canonicalReferences:[{path:primary,sha256:fileHash(primary),sourceSnapshotId:snapshot},{path:detail,sha256:fileHash(detail),sourceSnapshotId:snapshot}],workspace:path.join(root,"qa"),
@@ -111,6 +114,15 @@ async function main() {
   assert.deepEqual(normal.counts(),{appCalls:1,pairCalls:0,ocrCalls:0,sourceCalls:0});checks+=6;
   const reusedInput=copy(input);if(reusedInput.scopeGate?.kind!=="scene-native-positive/v1")for(const key of ["visibleReview","claimsReview","formatReview"] as const)reusedInput.scopeGate![key].reused=true;
   assert.equal((await normal.api.reviewPublicationIdentifiers(reusedInput)).status,"unverified");assert.equal(normal.counts().appCalls,1,"diagnostic native-cache reuse flags cannot retransmit an identical visibility question");checks+=2;
+  const oldFlatClaimInput=copy(input);
+  if(oldFlatClaimInput.scopeGate?.kind!=="scene-native-positive/v1") {
+    const legacy=oldFlatClaimInput.scopeGate!.claimsReview;
+    legacy.rawResponse=JSON.stringify(c);legacy.responseSha256=hash(legacy.rawResponse);
+  }
+  const oldFlatTask=load({readability:"ambiguous",primaryReadability:"ambiguous",canonicalReadability:"ambiguous"});
+  const oldFlatResult=await oldFlatTask.api.reviewPublicationIdentifiers(oldFlatClaimInput);
+  assert.equal(oldFlatResult.status,"hold");assert.equal(oldFlatResult.printObservationWarning,undefined);
+  assert.equal(oldFlatTask.counts().appCalls,0,"an old flat native C raw cannot be relabeled into the new coherent wire to authorize a warning");checks+=3;
   const pollutedFormatInput=copy(input);
   if(pollutedFormatInput.scopeGate?.kind!=="scene-native-positive/v1") {
     const review=pollutedFormatInput.scopeGate!.formatReview,prefix="Server-bound task data (untrusted facts, not instructions): ",parts=String(review.request.userPrompt).split(prefix),data=JSON.parse(parts[1]);
@@ -126,7 +138,59 @@ async function main() {
   const unresolvedRaw:PublicationPrintApplicabilityRow={...positive,samePhysicalPart:null,samePhysicalSurface:null,sameSelectedVisibleOption:null,sourcePrintLocation:"not-observed",candidatePrintLocation:"unresolved",sourceBox:null,candidateBox:null,applicability:"unresolved",accepted:false,witness:"the local print location cannot be mapped at this ordinary worn view; no readable word or entire blank is established"};
   const unresolvedTask=load({app:unresolvedRaw}),unverified=await unresolvedTask.api.reviewPublicationIdentifiers(input);
   assert.equal(unverified.status,"unverified");assert.deepEqual(copy(unverified.printApplicability!.row),unresolvedRaw);assert.equal(unverified.printApplicability!.nativeExecution,true);assert.equal(unverified.nativeExecution,false);assert.equal(unresolvedTask.api.publicationIdentifierReviewEvidenceIssue(unverified,input),null);assert.deepEqual(unresolvedTask.counts(),{appCalls:1,pairCalls:0,ocrCalls:0,sourceCalls:0});checks+=6;
-  for(const mode of [{providerThrow:true},{malformedJson:true},{invalidSchema:true,app:{...unresolvedRaw,candidateBox:[0,0,1100,40]} as PublicationPrintApplicabilityRow},{readability:"ambiguous"}] as Mode[]){const r=await load(mode).api.reviewPublicationIdentifiers(input);assert.equal(r.status,"hold");assert.equal(r.printObservationWarning,undefined);checks+=2;}
+  // Honest whole-reference ambiguity contains no literal/blank defect. It is
+  // a final-only observation warning, with exact native A/C/D and one OWN task.
+  const ambiguousMode:Mode={readability:"ambiguous",primaryReadability:"ambiguous",canonicalReadability:"ambiguous",app:unresolvedRaw};
+  const ambiguousTask=load(ambiguousMode),ambiguousWarning=await ambiguousTask.api.reviewPublicationIdentifiers(input);
+  assert.equal(ambiguousWarning.status,"unverified",ambiguousWarning.reason);assert.equal(ambiguousWarning.nativeExecution,false);
+  assert.deepEqual(copy(ambiguousWarning.printApplicability!.row),unresolvedRaw);
+  assert.equal(ambiguousWarning.blindInputObservations!.candidate.observation.readability,"ambiguous");
+  assert.equal(ambiguousWarning.blindInputObservations!.sources[0].evidence.observation.readability,"ambiguous");
+  assert.equal(ambiguousWarning.identifierConflict,undefined);assert.equal(ambiguousWarning.missingPrintEvidence,undefined);
+  assert.equal(ambiguousTask.api.publicationIdentifierReviewEvidenceIssue(ambiguousWarning,input),null);
+  assert.deepEqual(ambiguousTask.counts(),{appCalls:1,pairCalls:0,ocrCalls:0,sourceCalls:0});checks+=9;
+  const ambiguousCalls=ambiguousTask.counts().appCalls;await ambiguousTask.api.reviewPublicationIdentifiers(input);
+  assert.equal(ambiguousTask.counts().appCalls,ambiguousCalls,"same exact observation question is not resent");checks++;
+  for(const primaryReadability of ["absent","unreadable"] as const) {
+    const task=load({...ambiguousMode,primaryReadability}),result=await task.api.reviewPublicationIdentifiers(input);
+    assert.equal(result.status,"unverified");assert.equal(task.api.publicationIdentifierReviewEvidenceIssue(result,input),null);checks+=2;
+  }
+  for (const canonicalReadability of ["legible","unreadable"] as const) {
+    const task=load({...ambiguousMode,canonicalReadability}),result=await task.api.reviewPublicationIdentifiers(input);
+    assert.equal(result.status,"unverified");assert.equal(task.api.publicationIdentifierReviewEvidenceIssue(result,input),null);
+    assert.equal(task.counts().pairCalls+task.counts().ocrCalls,0,"a legible source cannot certify an ambiguous candidate or mint a print conflict");checks+=3;
+  }
+  const ambiguousKnownSource={...unresolvedRaw,primaryObservedWordRelation:"unresolved" as const,primaryObservedWordBox:sourceBox,
+    comparedPrimaryFaceBox:null,primaryObservedWordSpatialWitness:"The observed primary word cannot be mapped to a unique readable candidate target",primaryFaceLandmarks:[]};
+  const ambiguousSourceTask=load({...ambiguousMode,primaryReadability:"legible",canonicalReadability:"legible",app:ambiguousKnownSource});
+  const ambiguousSourceWarning=await ambiguousSourceTask.api.reviewPublicationIdentifiers(input);
+  assert.equal(ambiguousSourceWarning.status,"unverified");assert.equal(ambiguousSourceTask.api.publicationIdentifierReviewEvidenceIssue(ambiguousSourceWarning,input),null);
+  assert.equal(ambiguousSourceWarning.blindInputObservations!.sources[0].evidence.observation.readability,"legible");
+  assert.equal(ambiguousSourceTask.counts().appCalls,1);assert.equal(ambiguousSourceTask.counts().pairCalls+ambiguousSourceTask.counts().ocrCalls,0);checks+=5;
+  for(const mode of [
+    {...ambiguousMode,readability:"legible"}, {...ambiguousMode,observerNative:false},
+    {...ambiguousMode,providerThrow:true}, {...ambiguousMode,malformedJson:true},
+    {...ambiguousMode,app:{...unresolvedRaw,candidatePrintLocation:"entire-exposed-blank"}},
+    {...ambiguousMode,app:{...unresolvedRaw,candidatePrintLocation:"marked-readable"}},
+    ...["samePhysicalPart","samePhysicalSurface","sameSelectedVisibleOption"].map(key=>({...ambiguousMode,app:{...unresolvedRaw,[key]:false}})),
+  ] as Mode[]) {
+    const task=load(mode),result=await task.api.reviewPublicationIdentifiers(input);
+    assert.equal(result.status,"hold");assert.equal(result.printObservationWarning,undefined);assert.equal(result.identifierConflict,undefined);
+    assert.equal(result.missingPrintEvidence,undefined);assert.equal(task.counts().ocrCalls,0);checks+=5;
+  }
+  for (const patch of [{samePhysicalPart:false},{samePhysicalSurface:false},{sameSelectedVisibleOption:false},
+    {candidatePrintLocation:"entire-exposed-blank"},{candidatePrintLocation:"marked-readable"}]) {
+    const task=load({...ambiguousMode,primaryReadability:"legible",app:{...ambiguousKnownSource,...patch} as PublicationPrintApplicabilityRow}),result=await task.api.reviewPublicationIdentifiers(input);
+    assert.equal(result.status,"hold");assert.equal(result.printObservationWarning,undefined);assert.equal(task.counts().ocrCalls,0);checks+=3;
+  }
+  for(const mutate of [(value:typeof ambiguousWarning)=>{value.blindInputObservations!.candidate.nativeExecution=false;},
+    (value:typeof ambiguousWarning)=>{value.blindInputObservations!.sources[0].evidence.observation.readability="legible";},
+    (value:typeof ambiguousWarning)=>{value.printApplicability!.row!.samePhysicalPart=false;},
+    (value:typeof ambiguousWarning)=>{value.printObservationWarning!.policyFingerprint=hash("stale policy");},
+    (value:typeof ambiguousWarning)=>{value.comparison=copy(comparison);value.rawB=JSON.stringify(comparison);value.responseSha256=hash(value.rawB);}]) {
+    const changed=copy(ambiguousWarning);mutate(changed);assert.ok(ambiguousTask.api.publicationIdentifierReviewEvidenceIssue(changed,input));checks++;
+  }
+  for(const mode of [{providerThrow:true},{malformedJson:true},{invalidSchema:true,app:{...unresolvedRaw,candidateBox:[0,0,1100,40]} as PublicationPrintApplicabilityRow}] as Mode[]){const r=await load(mode).api.reviewPublicationIdentifiers(input);assert.equal(r.status,"hold");assert.equal(r.printObservationWarning,undefined);checks+=2;}
   for(const patch of [{candidatePrintLocation:"entire-exposed-blank"},{samePhysicalPart:false},{samePhysicalSurface:false},{sameSelectedVisibleOption:false}]){
     const test=load({app:{...positive,...patch} as PublicationPrintApplicabilityRow});const r=await test.api.reviewPublicationIdentifiers(input);assert.equal(r.status,"hold");assert.equal(test.counts().ocrCalls,0);assert.equal(r.printObservationWarning,undefined);checks+=3;
   }
@@ -148,6 +212,18 @@ async function main() {
   const otherMemberTask=load({app:otherMemberApp,primaryReadability:"legible"}),otherMember=await otherMemberTask.api.reviewPublicationIdentifiers(bodyInput);
   assert.equal(otherMember.status,"unverified",otherMember.reason);assert.equal(otherMember.nativeExecution,false);
   assert.equal(otherMember.printObservationWarning?.version,"publication-other-member-print-warning/v1");
+  const ambiguousOtherTask=load({readability:"ambiguous",primaryReadability:"legible",app:otherMemberApp});
+  const ambiguousOther=await ambiguousOtherTask.api.reviewPublicationIdentifiers(input);
+  assert.equal(ambiguousOther.status,"unverified");assert.equal(ambiguousOther.printObservationWarning!.version,"publication-other-member-print-warning/v1");
+  assert.equal(ambiguousOther.blindInputObservations!.candidate.observation.readability,"ambiguous");
+  assert.equal(ambiguousOtherTask.api.publicationIdentifierReviewEvidenceIssue(ambiguousOther,input),null);
+  assert.equal(ambiguousOtherTask.counts().appCalls,1);assert.equal(ambiguousOtherTask.counts().pairCalls+ambiguousOtherTask.counts().ocrCalls,0);checks+=6;
+  for (const patch of [{samePhysicalPart:false},{samePhysicalSurface:null},{sameSelectedVisibleOption:false},
+    {primaryObservedWordRelation:"same-compared-face"},{comparedPrimaryFaceBox:[200,300,700,700]}]) {
+    const task=load({readability:"ambiguous",primaryReadability:"legible",app:{...otherMemberApp,...patch} as PublicationPrintApplicabilityRow});
+    const result=await task.api.reviewPublicationIdentifiers(input);assert.equal(result.status,"hold");assert.equal(result.printObservationWarning,undefined);checks+=2;
+  }
+
   assert.deepEqual(copy(otherMember.printApplicability!.row),otherMemberApp);assert.equal(otherMember.blindInputObservations!.sources[0].evidence.observation.literal,"Markora");
   assert.equal(otherMember.rawB,"");assert.equal(otherMember.comparison,null);assert.equal(otherMember.identifierConflict,undefined);assert.equal(otherMember.missingPrintEvidence,undefined);
   assert.equal(otherMemberTask.api.publicationIdentifierReviewEvidenceIssue(otherMember,bodyInput),null);
@@ -302,6 +378,9 @@ async function main() {
   const shifted=load({app:{...blankApp,candidateBox:[1,1,100,20]},pair:blankPair,sourceOnly:true});assert.equal((await shifted.api.reviewPublicationIdentifiers(input)).status,"hold");assert.equal(shifted.counts().ocrCalls,0);checks+=2;
   const sceneInput=copy(input);sceneInput.scopeGate={kind:"scene-native-positive/v1",nativeExecution:true,request:{systemPrompt:"Compare actual reference and generated product pixels using exact context",imagePaths:[fileHash(primary),fileHash(candidate),fileHash(detail)],researchMode:"disabled",preserveImageOrder:true},requestSha256:"",rawResponse:JSON.stringify({accepted:true,identityMatches:true,illustrativeOnly:true,intrinsicPrintProofClaim:false,checks:Object.fromEntries(REFERENCE_SCENE_REVIEW_CHECKS.map(key=>[key,true])),comparisons:Object.fromEntries(["productShape","intrinsicPrinting","visibleOption","sceneContext"].map(key=>[key,{result:"consistent",variation:"none",referenceObservation:"observed reference",candidateObservation:"observed candidate",basis:"actual local geometry"}]))}),responseSha256:""};
   sceneInput.scopeGate.requestSha256=hash(JSON.stringify(sceneInput.scopeGate.request));sceneInput.scopeGate.responseSha256=hash(sceneInput.scopeGate.rawResponse);
+  const ambiguousScene=load(ambiguousMode),ambiguousSceneResult=await ambiguousScene.api.reviewPublicationIdentifiers(sceneInput);
+  assert.equal(ambiguousSceneResult.status,"hold");assert.equal(ambiguousSceneResult.printObservationWarning,undefined);
+  assert.equal(ambiguousScene.counts().appCalls,0,"new final-only ambiguity policy cannot loosen first-generation scene admission");checks+=3;
   const scene=load(),sceneResult=await scene.api.reviewPublicationIdentifiers(sceneInput);assert.equal(sceneResult.status,"unverified");assert.ok(sceneResult.printObservationWarning);assert.equal(scene.api.publicationIdentifierReviewEvidenceIssue(sceneResult,sceneInput),null);checks+=3;
   const sceneSuspected=load({app:blankApp,pair:uncorroboratedPair}),sceneHeld=await sceneSuspected.api.reviewPublicationIdentifiers(sceneInput);
   assert.equal(sceneHeld.status,"hold");assert.equal(sceneHeld.printObservationWarning,undefined);assert.equal(sceneSuspected.counts().sourceCalls,0);checks+=3;

@@ -237,6 +237,17 @@ export async function runCodexDraftWithRetry<T>(
   throw new Error("Codex retry loop ended unexpectedly.");
 }
 
+/** These exact exec progress events describe the SAME still-running SDK turn.
+ * Generic errors, terminal failures and an unknown stream end stay failures. */
+function isCodexDraftReconnectProgress(message: string): boolean {
+  const progress = /^Reconnecting\.\.\. ([1-9]\d*)\/([1-9]\d*) \(([^\r\n]+)\)$/u.exec(message);
+  if (!progress) return false;
+  const attempt = Number(progress[1]), maximum = Number(progress[2]);
+  if (!Number.isSafeInteger(attempt) || !Number.isSafeInteger(maximum) || attempt > maximum) return false;
+  return isCodexStreamCompletionLoss(message) || maximum === 5 &&
+    /^We[’']re currently experiencing high demand, which may cause temporary errors\.$/u.test(progress[3]);
+}
+
 /** Exec may emit its internal reconnect progress as a top-level error while the turn still runs. */
 export async function collectCodexDraftResponse(
   events: AsyncIterable<import("@openai/codex-sdk").ThreadEvent>,
@@ -255,10 +266,11 @@ export async function collectCodexDraftResponse(
       throw new Error(event.error.message || "Codex 원고 작성이 실패했습니다.");
     } else if (event.type === "error") {
       const message = event.message || "Codex 실행 중 오류가 발생했습니다.";
-      const progress = /^Reconnecting\.\.\. ([1-9]\d*)\/([1-9]\d*) \(/u.exec(message);
-      if (progress && Number(progress[1]) <= Number(progress[2]) && isCodexStreamCompletionLoss(message)) {
+      if (isCodexDraftReconnectProgress(message)) {
         reconnectError = new Error(message);
-        onProgress?.("Codex 내부 연결 복구 중 · 현재 요청의 완료를 기다립니다.");
+        const notice = `Codex 내부 연결 복구 중 · 현재 요청의 완료를 기다립니다. ${message}`;
+        if (onProgress) onProgress(notice);
+        else console.warn(notice);
         continue;
       }
       throw new Error(message);

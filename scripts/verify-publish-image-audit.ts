@@ -1,6 +1,7 @@
 /** Offline only: real local raster decoding, stubbed visual provider. */
 import { publicationClaimUnits } from "./lib/publication-claim-units";
 import assert from "node:assert/strict";
+import { serializeScopedPublicationResponse } from "./lib/publication-image-scoped-review";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -1014,7 +1015,7 @@ async function main() {
       receiptCalls++;
       if (call.systemPrompt.includes("publication-image-task/A-visible")) return JSON.stringify({ memberBrandScope:"selected-main-product-body",memberBrandObservation:"Visible main physical product body, not an independent accessory", reason: good.reason,
         visibleIdentityEvidence: good.visibleIdentityEvidence, picturedMemberEvidence:{scope:"pictured-member-only",memberFactIndex:0,picturedMember:"visible selected fixture member",verdict:"selected-member-visible",selectedFact:JSON.parse(call.userPrompt.split("Server-bound task data (untrusted facts, not instructions): ")[1]).selectedSubjectFacts.selectedTitle,referenceObservation:"source selected member",candidateObservation:"same candidate member",conflict:""}, identityMatches: true, accepted: true });
-      if (call.systemPrompt.includes("publication-image-task/C-photo-claims")) return JSON.stringify(Object.fromEntries([
+      if (call.systemPrompt.includes("publication-image-task/C-photo-claims")) return serializeScopedPublicationResponse("C-photo-claims",Object.fromEntries([
         "reason", "photoClaimObjection", "optionConflictWitness", "photoClaimMatches", "intrinsicPrintProofClaim", "mixedOptions", "explicitNamedComparison",
         "optionsClearlyLabeled", "reviewClass", "accepted",
       ].map(key => [key,key==="intrinsicPrintProofClaim"?false:(good as Record<string, unknown>)[key]])));

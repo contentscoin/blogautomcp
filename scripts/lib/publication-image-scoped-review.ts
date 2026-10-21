@@ -2,7 +2,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { runCodexDraft, type CodexDraftOptions } from "./codex-draft-provider";
 import { resolveTextReasoningEffort } from "./text-model-policy";
-import { VISIBLE_IDENTITY_EVIDENCE_SCHEMA, OPTION_CONFLICT_WITNESS_SCHEMA,
+import { VISIBLE_IDENTITY_EVIDENCE_SCHEMA,
   visibleIdentityEvidenceIssue, visibleIdentityReviewContext, type VisibleIdentityReviewContext } from "./publication-visible-identity";
 
 export const PUBLICATION_SCOPED_REVIEW_VERSION = "publication-image-scoped-review/v2";
@@ -19,6 +19,16 @@ const boolean = { type: "boolean" } as const;
 const text = { type: "string" } as const;
 const objectSchema = (properties: Record<string, unknown>) => ({ type: "object", properties,
   required: Object.keys(properties), additionalProperties: false });
+export const PUBLICATION_OPTION_DECISION_VERSION = "publication-option-decision/v1";
+const optionWitness = (mixed: boolean) => objectSchema({
+  origin: { type: "string", enum: mixed ? ["confirmed-selection", "published-purchase-bundle", "published-named-comparison"] : ["none"] },
+  quote: mixed ? { type: "string", minLength: 1 } : { type: "string", enum: [""] },
+  visibleAlternatives: { type: "array", items: { type: "string", minLength: 1 }, ...(mixed ? { minItems: 2 } : { maxItems: 0 }) },
+});
+const OPTION_DECISION_SCHEMA = { anyOf: [false, true].map(mixed => objectSchema({
+  version: { type: "string", enum: [PUBLICATION_OPTION_DECISION_VERSION] },
+  mixedOptions: { type: "boolean", enum: [mixed] }, optionConflictWitness: optionWitness(mixed),
+})) };
 
 export interface ScopedPublicationInput {
   candidatePath: string;
@@ -61,6 +71,7 @@ export const VISIBLE_TASK_RULE = [
   "A natural continuation of observed construction or another plausible angle is not a different SKU merely because a complete reference is unavailable. Conversely a truly altered connector, impossible structure, different cut or clearly different corresponding visible colour remains a defect. Do not certify a hidden part.",
   "Read no intrinsic identifiers and make no print/label, headline, photographic-claim or layout verdict here: separate B/C tasks assess those. Text over an image only obstructs this task when it hides enough of the distinguishing visible STRUCTURE to prevent correspondence; any text touching an otherwise identifiable plain torso is not automatically obstruction.",
   "Also report memberBrandScope and memberBrandObservation as the visible PHYSICAL role: the selected main-product body, a separately branded included accessory, non-brand-bearing member, or unresolved. This is not logo visibility, exact spelling or brand authentication: an unprinted main-product body can have the main-body role. Unknown brand-role alone does not change the independent visible-structure/member verdict; B may hold its separate identifier comparison. State two different actually corresponding visible landmarks for observed-correspondence. For concrete-conflict state the actual opposing observations. For genuinely inadequate visible structure return insufficient-visible-structure with that specific limitation. Preserve false/unknown honestly, never invent a hidden-feature requirement after sufficient visible correspondence.",
+  "A landmark part names a physical FEATURE of the pictured selected member, such as neckline versus cuff/seam, window versus handle attachment, or control versus connector. Two people/items both having an upper garment are not two different features; do not use the same generic part twice or rename it only by person/colour. Report the actual distinct corresponding features, or retain honest insufficiency if two cannot be observed.",
 ].join("\n");
 export const CLAIM_FORMAT_TASK_RULE = [
   "publication-image-task/C-photo-claims",
@@ -69,6 +80,7 @@ export const CLAIM_FORMAT_TASK_RULE = [
   "An assertive THUMBNAIL headline inside the actual pixels is published copy: assess explicit product specifications, quantities, performance, results and certification assertions against the supplied confirmed facts and actual visible evidence as applicable. Unsupported invented certification or efficacy claims remain rejecting claims. A non-assertive selection/check/review heading makes no specification, result or certification assertion; it need not occur verbatim in seller facts. Do not invent a factual-proof requirement for such a heading. D independently checks only its visual presentation.",
   "For a body objection quote one WHOLE exact displayedParagraphs.text by its sourceIndex. These immutable units have original render-node indices, offsets and hashes. Never quote a substring, join units, trim or normalize. section-title requires the exact whole title. Thumbnail-headline refers only to its actual pixel headline. Keep the empty none object only when photoClaimMatches=true.",
   "confirmedOptionLabel alone is confirmed selection; catalogRangeFacts/title alternatives are not purchased colour or contents. Size-only selects no colour. An intact catalog ORIGINAL may show listing variants without a new comparison caption unless actual published wording falsely presents them as the purchased bundle. For an actual conflicting mixture provide exact optionConflictWitness. No provenance forces a favorable verdict.",
+  "Return optionDecision as one coherent branch. With no grounded conflicting mixture use mixedOptions=false and the exact empty none witness. Use true only with at least two different actual visible alternatives and a non-none WHOLE exact confirmed-selection or published witness. Uncertain observation is not an invented option conflict; retain an honest adverse claim verdict when there is a real unsupported photographic assertion. Never set true while returning the empty none witness.",
   "Return raw accepted last. False or unknown remains blocking; never certify a different task.",
 ].join("\n");
 export const PIXEL_FORMAT_TASK_RULE = [
@@ -137,14 +149,17 @@ export function buildScopedPublicationPackets(input: ScopedPublicationInput): Sc
   const subject = selectedSubjectFacts(input.selectedProduct),memberCandidates=picturedMemberFacts(input.selectedProduct);
   const visibleSubject={selectedTitle:subject.selectedTitle,category:subject.category,productKind:subject.productKind,
     picturedMemberCandidates:memberCandidates.map((fact,memberFactIndex)=>({memberFactIndex,...fact}))};
+  const visibleLandmarks=VISIBLE_IDENTITY_EVIDENCE_SCHEMA.properties.landmarks;
   const aProperties = { reason: text, memberBrandScope:{type:"string",enum:["selected-main-product-body","separately-branded-included-member","non-brand-bearing-member","unresolved"]},memberBrandObservation:{type:"string",minLength:1}, visibleIdentityEvidence: { ...VISIBLE_IDENTITY_EVIDENCE_SCHEMA,
+    properties:{...VISIBLE_IDENTITY_EVIDENCE_SCHEMA.properties,landmarks:{...visibleLandmarks,items:{...visibleLandmarks.items,properties:{...visibleLandmarks.items.properties,
+      part:{...visibleLandmarks.items.properties.part,description:"A different actual physical feature, e.g. neckline vs cuff/seam or window vs handle; not two people/items with the same generic part, nor person/colour renaming."}}}}},
     description: "Actually observed corresponding physical structure, concrete contradiction, or genuine visible insufficiency." },
     picturedMemberEvidence: objectSchema({scope:{type:"string",enum:["pictured-member-only"],description:"Selected visible member itself, or its positively identified own packaging/in-packaged state; never hidden-content/complete-set certification."},memberFactIndex:{type:["integer","null"],enum:[...memberCandidates.map((_,index)=>index),null]},picturedMember:text,
       verdict:{type:"string",enum:["selected-member-visible","nonselected-subject-visible","unresolved"]},selectedFact:text,referenceObservation:text,candidateObservation:text,conflict:text}), identityMatches: boolean, accepted: boolean };
   const cProperties = { reason: text, photoClaimObjection: objectSchema({ origin: { type: "string", enum: ["none", "section-title", "section-body", "thumbnail-headline"] },
     sourceIndex: { type: ["integer", "null"] }, quote: text, scope: { type: "string", enum: ["none", "pictured-appearance", "quantity", "complete-set", "performance", "result"] }, conflict: text }),
-    optionConflictWitness: { ...OPTION_CONFLICT_WITNESS_SCHEMA, description: "Exact confirmed option or whole actual published comparison/bundle quotation, or none." },
-    photoClaimMatches: boolean, intrinsicPrintProofClaim:{type:"boolean",description:"True only if actual published wording/headline asserts exact intrinsic brand/SKU/letter reading or authentication from THIS photograph; ordinary product names/specifications or observing a physical mark alone are not such a claim."}, mixedOptions: boolean, explicitNamedComparison: boolean, optionsClearlyLabeled: boolean,
+    optionDecision: OPTION_DECISION_SCHEMA,
+    photoClaimMatches: boolean, intrinsicPrintProofClaim:{type:"boolean",description:"True only if actual published wording/headline asserts exact intrinsic brand/SKU/letter reading or authentication from THIS photograph; ordinary product names/specifications or observing a physical mark alone are not such a claim."}, explicitNamedComparison: boolean, optionsClearlyLabeled: boolean,
     reviewClass: { type: "string", enum: ["product-photo", "feature-evidence"] }, accepted: boolean };
   const dProperties = { reason: text, pixelFormatObjection: objectSchema({ kind: { type: "string", enum: ["none","added-copy","frame-or-panels","implausible-composite","notice","headline","obscured-structure"] }, location: text, observation: text }),
     notice: boolean, singlePhotograph: boolean, noGraphicLayout: boolean, textPolicyMatches: boolean, thumbnailHeadlineLegible: boolean, accepted: boolean };
@@ -155,7 +170,8 @@ export function buildScopedPublicationPackets(input: ScopedPublicationInput): Sc
         visiblePresentationScope: VISIBLE_PRESENTATION_SCOPE } },
     { task: "C-photo-claims" as const, rule: CLAIM_FORMAT_TASK_RULE, images: [input.candidatePath], properties: cProperties,
       data: { role: input.role, exactCanonicalSellerOriginal: input.exactCanonicalSellerOriginal, sectionTitle: input.sectionTitle,
-        displayedParagraphs, allowProductPhoto: input.allowProductPhoto, selection: input.selection, selectedSubjectFacts: subject } },
+        displayedParagraphs, allowProductPhoto: input.allowProductPhoto, selection: input.selection, selectedSubjectFacts: subject,
+        optionDecisionProtocol: PUBLICATION_OPTION_DECISION_VERSION } },
     { task: "D-pixel-format" as const, rule: PIXEL_FORMAT_TASK_RULE, images: [input.candidatePath], properties: dProperties,
       data: { role: input.role, exactCanonicalSellerOriginal: input.exactCanonicalSellerOriginal } },
   ]).map(({ task, rule, images, properties, data }) => {
@@ -174,19 +190,70 @@ export function scopedPublicationRequestSha256(call: CodexDraftOptions): string 
 function scopedPublicationRequest(call: CodexDraftOptions): Record<string, unknown> {
   return { ...call, imagePaths: call.imagePaths?.map(file => hash(fs.readFileSync(file))) };
 }
+function schemaValue(value: unknown): string {
+  const canonical = (item: unknown): unknown => item && typeof item === "object" ? Array.isArray(item) ? item.map(canonical)
+    : Object.fromEntries(Object.keys(item).sort().map(key=>[key,canonical((item as Record<string,unknown>)[key])])) : item;
+  return JSON.stringify(canonical(value));
+}
+function validSchema(schema: Record<string,unknown>): boolean {
+  const supported=["type","description","enum","properties","required","additionalProperties","items","minItems","maxItems","minLength","maxLength","anyOf"];
+  if(!schema || typeof schema!=="object" || Array.isArray(schema) || Object.keys(schema).some(key=>!supported.includes(key)))return false;
+  if(schema.description!==undefined && typeof schema.description!=="string")return false;
+  if(schema.anyOf!==undefined)return Object.keys(schema).every(key=>key==="anyOf" || key==="description") && Array.isArray(schema.anyOf) && schema.anyOf.length>0 &&
+    schema.anyOf.every(branch=>validSchema(branch as Record<string,unknown>));
+  const types=Array.isArray(schema.type)?schema.type:[schema.type];
+  if(!types.length || new Set(types).size!==types.length || types.some(type=>!["null","object","array","string","boolean","integer"].includes(String(type))))return false;
+  if(schema.enum!==undefined && (!Array.isArray(schema.enum) || !schema.enum.length))return false;
+  for(const [minimum,maximum,type] of [["minItems","maxItems","array"],["minLength","maxLength","string"]]) {
+    for(const key of [minimum,maximum])if(schema[key]!==undefined && (!types.includes(type) || !Number.isSafeInteger(schema[key]) || Number(schema[key])<0))return false;
+    if(schema[minimum]!==undefined && schema[maximum]!==undefined && Number(schema[minimum])>Number(schema[maximum]))return false;
+  }
+  if(types.includes("array")) {if(!validSchema(schema.items as Record<string,unknown>))return false;}
+  else if(schema.items!==undefined)return false;
+  if(types.includes("object")) {
+    const properties=schema.properties;
+    if(!properties || typeof properties!=="object" || Array.isArray(properties) || schema.additionalProperties!==false || !Array.isArray(schema.required) ||
+      schema.required.some(key=>typeof key!=="string") || JSON.stringify([...schema.required].sort())!==JSON.stringify(Object.keys(properties).sort()) ||
+      !Object.values(properties).every(child=>validSchema(child as Record<string,unknown>)))return false;
+  }else if(schema.properties!==undefined || schema.required!==undefined || schema.additionalProperties!==undefined)return false;
+  return true;
+}
 function matchesSchema(value: unknown, schema: Record<string, unknown>): boolean {
+  if(!validSchema(schema))return false;
+  if(schema.anyOf!==undefined)return (schema.anyOf as Record<string,unknown>[]).some(branch=>matchesSchema(value,branch));
   const types = Array.isArray(schema.type) ? schema.type : [schema.type];
   if (!types.some(type => type === "null" ? value === null : type === "object" ? !!value && typeof value === "object" && !Array.isArray(value)
     : type === "array" ? Array.isArray(value) : type === "integer" ? Number.isInteger(value) : typeof value === type)) return false;
-  if (Array.isArray(schema.enum) && !schema.enum.includes(value)) return false;
+  if (schema.enum!==undefined && (!Array.isArray(schema.enum) || !schema.enum.some(item=>schemaValue(item)===schemaValue(value)))) return false;
   if (typeof value === "string" && typeof schema.minLength === "number" && value.length < schema.minLength) return false;
-  if (Array.isArray(value)) return value.every(item => matchesSchema(item, schema.items as Record<string, unknown>));
+  if (typeof value === "string" && typeof schema.maxLength === "number" && value.length > schema.maxLength) return false;
+  if (Array.isArray(value)) return !(typeof schema.minItems==="number" && value.length<schema.minItems || typeof schema.maxItems==="number" && value.length>schema.maxItems) &&
+    value.every(item => matchesSchema(item, schema.items as Record<string, unknown>));
   if (value && typeof value === "object") {
     const row = value as Record<string, unknown>, properties = schema.properties as Record<string, Record<string, unknown>>;
-    return Object.keys(row).sort().join("|") === Object.keys(properties).sort().join("|") &&
+    return JSON.stringify(Object.keys(row).sort()) === JSON.stringify(Object.keys(properties).sort()) &&
       Object.entries(properties).every(([key, child]) => matchesSchema(row[key], child));
   }
   return true;
+}
+/** Wire-only serializer for fresh offline fixtures, never migration of a native response. */
+export function serializeScopedPublicationResponse(task: ScopedReviewPacket["task"], row: Record<string,unknown>): string {
+  if(task!=="C-photo-claims")return JSON.stringify(row);
+  const {mixedOptions,optionConflictWitness,...rest}=row;
+  return JSON.stringify({...rest,optionDecision:{version:PUBLICATION_OPTION_DECISION_VERSION,mixedOptions,optionConflictWitness}});
+}
+/** Exact protocol projection. Values and raw bytes are never repaired, normalized or re-decided. */
+export function parseScopedPublicationResponse(task: ScopedReviewPacket["task"], rawResponse: string, schema: unknown): Record<string,unknown>|null {
+  try {
+    if(typeof rawResponse!=="string" || Buffer.byteLength(rawResponse)>64*1024)return null;
+    const parsed=JSON.parse(rawResponse.trim().replace(/^```(?:json)?\s*|\s*```$/gu,"")),contract=schema as Record<string,unknown>;
+    if(!matchesSchema(parsed,contract) || !parsed || typeof parsed.reason!=="string" || !parsed.reason.trim())return null;
+    if(task!=="C-photo-claims")return parsed;
+    const properties=contract.properties as Record<string,unknown>;
+    if(schemaValue(properties.optionDecision)!==schemaValue(OPTION_DECISION_SCHEMA) || "mixedOptions" in parsed || "optionConflictWitness" in parsed)return null;
+    const {optionDecision,...rest}=parsed;
+    return {...rest,optionConflictWitness:optionDecision.optionConflictWitness,mixedOptions:optionDecision.mixedOptions};
+  }catch{return null;}
 }
 const successfulPackets = new Map<string, ScopedReviewEvidence>();
 function reusableTaskEvidence(value: ScopedReviewEvidence): boolean {
@@ -222,8 +289,7 @@ export async function executeScopedPublicationPacket(packet: ScopedReviewPacket,
   let row: Record<string, unknown> | null = null;
   try {
     if (Buffer.byteLength(rawResponse) > 64 * 1024) throw new Error("SCOPED_IMAGE_RESPONSE_TOO_LARGE");
-    const parsed = JSON.parse(rawResponse.trim().replace(/^```(?:json)?\s*|\s*```$/gu, ""));
-    if (matchesSchema(parsed, packet.call.outputSchema as Record<string, unknown>) && parsed.reason.trim()) row = parsed;
+    row=parseScopedPublicationResponse(packet.task,rawResponse,packet.call.outputSchema);
   } catch { /* No malformed-answer retry: preserve the raw failure and hold. */ }
   if (scopedPublicationRequestSha256(packet.call) !== packet.requestSha256) throw new Error("SCOPED_IMAGE_INPUT_CHANGED");
   const evidence: ScopedReviewEvidence = { version: PUBLICATION_SCOPED_REVIEW_VERSION, task: packet.task, requestSha256: packet.requestSha256,
@@ -247,8 +313,8 @@ export function scopedPublicationEvidenceIssue(value: ScopedReviewEvidence, expe
         !Array.isArray(value.request.imagePaths) || value.request.imagePaths.length !== (expected.task === "A-visible" ? 2 : 1) ||
         !value.request.imagePaths.every(sha => typeof sha === "string" && /^[a-f0-9]{64}$/u.test(sha)) ||
         value.request.noTransientRetry !== true || value.request.researchMode !== "disabled") return "scoped native packet binding is invalid";
-    const row = JSON.parse(value.rawResponse.trim().replace(/^```(?:json)?\s*|\s*```$/gu, ""));
-    return matchesSchema(row, value.request.outputSchema as Record<string, unknown>) && JSON.stringify(row) === JSON.stringify(value.row)
+    const row = parseScopedPublicationResponse(value.task,value.rawResponse,value.request.outputSchema);
+    return row!==null && JSON.stringify(row) === JSON.stringify(value.row)
       ? null : "scoped raw response/parsed evidence differs";
   } catch { return "scoped packet is malformed"; }
 }

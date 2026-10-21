@@ -385,6 +385,11 @@ function chooseBlindSource(observations: PublicationBlindInputObservations) {
 // identifier elsewhere in that exact source set.
 const hasLegibleObservedSource = (observed: PublicationBlindInputObservations): boolean =>
   observed.sources.some(source => source.evidence.observation.readability === "legible");
+/** Final-only observation limit, not a positive print verdict. The current
+ * native A/C/D gate and the OWN local question must still be validated. */
+const finalNonlegibleAmbiguity = (input: PublicationIdentifierReviewInput, observed: PublicationBlindInputObservations | undefined): boolean =>
+  !!input.scopeGate && input.scopeGate.kind !== "scene-native-positive/v1" && observed?.candidate.observation.readability === "ambiguous";
+
 function applicabilityRequest(input: PublicationIdentifierReviewInput, observed?: PublicationBlindInputObservations) {
   const primaryWord = input.scopeGate && input.scopeGate.kind !== "scene-native-positive/v1" &&
     observed?.sources[0]?.evidence.observation.readability === "legible" ? observed.sources[0].evidence.observation.box : undefined;
@@ -511,7 +516,7 @@ function printWarningObservationIssue(result: PublicationIdentifierReviewResult,
   try {
     const observed = result.blindInputObservations, value = result.printApplicability;
     if (scopeGateIssue(input) || observationSetIssue(observed, prepared, true) || !value || applicabilityEvidenceIssue(value, input, true, observed) ||
-        !["absent", "unreadable"].includes(String(observed!.candidate.observation.readability)) ||
+        (!["absent", "unreadable"].includes(String(observed!.candidate.observation.readability)) && !finalNonlegibleAmbiguity(input, observed)) ||
         prepared.context.references.some(row => !validSha(row.sourceSnapshotId)) || !printWarningPolicyFingerprint(input))
       return "print observation warning lacks current native positive tasks, exact source/policy or valid native observations";
     const row = value.row!;
@@ -540,7 +545,7 @@ function otherMemberPrintWarningIssue(result: PublicationIdentifierReviewResult,
   try {
     const observed = result.blindInputObservations, primary = observed?.sources[0]?.evidence, value = result.printApplicability, row = value?.row;
     if (!input.scopeGate || input.scopeGate.kind === "scene-native-positive/v1" || scopeGateIssue(input) || !printWarningPolicyFingerprint(input) ||
-        observationSetIssue(observed, prepared, true) || observed!.candidate.observation.readability !== "absent" || !primary ||
+        observationSetIssue(observed, prepared, true) || (observed!.candidate.observation.readability !== "absent" && !finalNonlegibleAmbiguity(input, observed)) || !primary ||
         primary.observation.readability !== "legible" || !validBox(primary.observation.box) ||
         prepared.context.references.some(reference => !validSha(reference.sourceSnapshotId)) || !value || !row ||
         ownUnprintedApplicabilityIssue(value, input, true, observed) || row.sameSelectedVisibleOption !== true ||
@@ -1096,7 +1101,9 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
         !hasLegibleObservedSource(observed);
       if (candidateExternalAssociation && scopeGateIssue(input)) return { ...result, reason: "CANDIDATE_EXTERNAL_WORD_REQUIRES_POSITIVE_CURRENT_NATIVE_TASKS" };
       if (bothOwnAbsent || candidateExternalAssociation || input.scopeGate && observed.candidate.observation.readability !== "legible") {
-        if (observed.candidate.observation.readability === "ambiguous") return { ...result, reason: "BLIND_CANDIDATE_INTRINSIC_LOCATION_AMBIGUOUS" };
+        if (observed.candidate.observation.readability === "ambiguous" &&
+            (!finalNonlegibleAmbiguity(input, observed) || scopeGateIssue(input)))
+          return { ...result, reason: "BLIND_CANDIDATE_INTRINSIC_LOCATION_AMBIGUOUS" };
         const semantic = applicabilityRequest(input, observed), call: CodexDraftOptions = { ...semantic.call, imagePaths: [input.candidatePath, input.primaryReference.path],
           outputSchema: JSON.parse(JSON.stringify(semantic.call.outputSchema)) };
         taskStage = "applicability"; taskImageSha256 = input.candidateSha256;
