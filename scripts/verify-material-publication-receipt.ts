@@ -143,7 +143,7 @@ async function main() {
     const observerModule=await import("./lib/intrinsic-identifier-observer");
     const observer={...observerModule,observeIntrinsicIdentifier:async (options:{path:string;sha256:string})=>{
       assert.equal(digest(options.path),options.sha256);
-      const observation={literal:"",box:null,identifierRole:"none" as const,location:"not-observed" as const,readability:"absent" as const},rawResponse=JSON.stringify({observation});
+      const observation={literal:"",box:null,identifierRole:"none" as const,location:"not-observed" as const,readability:"absent" as const},rawResponse=observerModule.serializeIntrinsicIdentifierObserverResponse(observation);
       return {status:"observed",reason:"Offline synthetic solid-colour fixture has no intrinsic identifier",evidence:{version:observerModule.INTRINSIC_IDENTIFIER_OBSERVER_VERSION,nativeExecution:true,imageSha256:options.sha256,
         requestSha256:observerModule.intrinsicIdentifierObserverRequestSha256(options.sha256),responseSha256:crypto.createHash("sha256").update(rawResponse).digest("hex"),rawResponse,observation}};
     }};

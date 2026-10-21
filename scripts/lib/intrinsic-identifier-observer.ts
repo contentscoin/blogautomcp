@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import sharp from "sharp";
 import { runCodexDraft, type CodexDraftOptions } from "./codex-draft-provider";
 
-export const INTRINSIC_IDENTIFIER_OBSERVER_VERSION = "intrinsic-identifier-observer/v2";
+export const INTRINSIC_IDENTIFIER_OBSERVER_VERSION = "intrinsic-identifier-observer/v3";
 export interface IntrinsicIdentifierObservation {
   literal: string;
   box: [number, number, number, number] | null;
@@ -25,6 +25,7 @@ export interface IntrinsicIdentifierObserverResult {
   status: "observed" | "unreadable" | "invalid" | "unavailable";
   reason: string;
   evidence?: IntrinsicIdentifierObserverEvidence;
+  diagnostic?: { imageSha256: string; stage: "response" | "provider"; issue: string; rawResponse?: string; responseSha256?: string };
 }
 type Review = (options: CodexDraftOptions) => Promise<string>;
 const sha = (value: Buffer | string): string => crypto.createHash("sha256").update(value).digest("hex");
@@ -37,7 +38,7 @@ const USER_PROMPT = [
   `${INTRINSIC_IDENTIFIER_OBSERVER_VERSION}: The ONLY attachment is IMAGE 1. Inspect its actually visible physical product printing independently.`,
   "Observe one intrinsic brand, product-line, model or SKU word/short identifying line physically printed on the product or its own packaging. Ignore external seller logos, badges, title overlays, background signs and non-identifying capacity/specifications. Do not transcribe them as intrinsic product identifiers.",
   "If exactly one identifying word/short line is unambiguously legible, transcribe every actual letter and digit in order. Never insert/delete a letter, autocomplete a familiar brand, correct spelling, translate, add parentheses, annotate uncertainty, give alternatives or infer hidden characters. A plausible-looking spelling is not sufficient. If two or more different identifying candidates are present and a unique target cannot be chosen from pixels alone, return ambiguous, not an arbitrary word.",
-  "For a legible word return the COMPLETE word's tight bounding box with a small natural margin, in IMAGE 1's full display coordinate space normalized to integers [left,top,right,bottom] from 0 to 1000. Include all visible strokes of the word, not one letter or a substring; do not box the whole product or photograph. Width must be <=800, height<=250, area<=12% of the image; the box must remain within image bounds.",
+  "For a legible word return the COMPLETE word's tight bounding box with a small natural margin, in IMAGE 1's full display coordinate space normalized to integer {left,top,width,height} coordinates from 0 to 1000. left/top are the starting position; width/height are positive extents, NEVER right/bottom coordinates. Include all visible strokes of the word, not one letter or a substring; do not box the whole product or photograph. Width must be <=800, height<=250, area<=12% of the image; left+width<=1000 and top+height<=1000. These are hard limits: if the complete identifying line cannot fit, return the honest non-legible branch; never crop a substring, box a whole leaflet or exceed a bound.",
   "For unreadable, absent or ambiguous identifying printing use literal='', box=null, identifierRole='none', location='not-observed' and the honest readability. Never fabricate a word to fill the schema. An absent word is not itself a product defect or permission to regenerate a photograph.",
   "Return exactly {observation:{literal,box,identifierRole,location,readability}}. Choose one coherent observation branch: a legible INTRINSIC physical identifier with all its actual fields, or an unreadable/absent/ambiguous intrinsic identifier with literal='', box=null, identifierRole='none', location='not-observed'. Readable EXTERNAL seller/company artwork is not intrinsic: ignore that artwork; if no intrinsic identifier is observed, use the non-legible branch, never copy its external word with location='not-observed'. No expected word, other image, source text or product name is supplied.",
 ].join("\n");
@@ -46,7 +47,10 @@ export const INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA = {
     observation: { anyOf: [
       { type: "object", properties: {
         literal: { type: "string", minLength: 1, maxLength: 80 },
-        box: { type: "array", minItems: 4, maxItems: 4, items: { type: "integer", minimum: 0, maximum: 1000 } },
+        box: { type: "object", properties: {
+          left: { type: "integer", minimum: 0, maximum: 999 }, top: { type: "integer", minimum: 0, maximum: 999 },
+          width: { type: "integer", minimum: 1, maximum: 800 }, height: { type: "integer", minimum: 1, maximum: 250 },
+        }, required: ["left", "top", "width", "height"], additionalProperties: false },
         identifierRole: { type: "string", enum: ["brand", "product-line", "model", "sku"] },
         location: { type: "string", enum: ["intrinsic"] }, readability: { type: "string", enum: ["legible"] },
       }, required: FIELDS, additionalProperties: false },
@@ -68,29 +72,47 @@ export function intrinsicIdentifierObserverRequestSha256(imageSha256: string): s
   if (!/^[a-f0-9]{64}$/u.test(imageSha256)) throw Error("INVALID_OBSERVER_IMAGE_SHA");
   return sha(JSON.stringify({ ...contract, imageSha256 }));
 }
-export function parseIntrinsicIdentifierObserverResponse(rawResponse: string): IntrinsicIdentifierObservation | null {
-  if (typeof rawResponse !== "string" || Buffer.byteLength(rawResponse, "utf8") > MAXIMUM_RESPONSE_BYTES) return null;
+/** Serialize the public corner-coordinate DTO to the v3 extent-based wire.
+ * This is a protocol serializer, never a parser repair or evidence migration. */
+export function serializeIntrinsicIdentifierObserverResponse(observation: IntrinsicIdentifierObservation): string {
+  const box = observation.box;
+  return JSON.stringify({ observation: { ...observation, box: box === null ? null :
+    { left: box[0], top: box[1], width: box[2] - box[0], height: box[3] - box[1] } } });
+}
+function parseResponse(rawResponse: string): { observation: IntrinsicIdentifierObservation | null; issue: string } {
+  const fail = (issue: string) => ({ observation: null, issue });
+  if (typeof rawResponse !== "string" || Buffer.byteLength(rawResponse, "utf8") > MAXIMUM_RESPONSE_BYTES) return fail("OBSERVER_RESPONSE_LIMIT");
   try {
     const envelope = JSON.parse(rawResponse.trim());
-    if (!envelope || typeof envelope !== "object" || Array.isArray(envelope) || Object.keys(envelope).join("|") !== "observation") return null;
+    if (!envelope || typeof envelope !== "object" || Array.isArray(envelope) || Object.keys(envelope).join("|") !== "observation") return fail("OBSERVER_ENVELOPE_INVALID");
     const value = envelope.observation;
-    if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join("|") !== [...FIELDS].sort().join("|")) return null;
+    if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join("|") !== [...FIELDS].sort().join("|")) return fail("OBSERVER_FIELDS_INVALID");
     if (typeof value.literal !== "string" || value.literal.length > 80 || !ROLES.includes(value.identifierRole) ||
-      !["intrinsic", "not-observed"].includes(value.location) || !READABILITY.includes(value.readability)) return null;
+      !["intrinsic", "not-observed"].includes(value.location) || !READABILITY.includes(value.readability)) return fail("OBSERVER_FIELD_TYPE_INVALID");
     if (value.readability === "legible") {
-      const box = value.box;
       if (value.location !== "intrinsic" || value.identifierRole === "none" || !value.literal.trim() ||
         value.literal !== value.literal.trim() || !/[\p{L}\p{N}]/u.test(value.literal) ||
-        // An observer supplies raw letters, never a parenthetical comment or
-        // competing transcription. Ordinary identifier punctuation is retained.
-        !/^[\p{L}\p{N}\p{M} .&+'’/\-]+$/u.test(value.literal) || /\s(?:or|maybe|possibly|unclear)\s/iu.test(` ${value.literal} `) ||
-        !Array.isArray(box) || box.length !== 4 || !box.every(n => Number.isInteger(n) && n >= 0 && n <= 1000) ||
-        box[0] >= box[2] || box[1] >= box[3] || box[2] - box[0] > 800 || box[3] - box[1] > 250 ||
-        (box[2] - box[0]) * (box[3] - box[1]) > 120_000) return null;
-    } else if (value.literal !== "" || value.box !== null || value.identifierRole !== "none" || value.location !== "not-observed") return null;
-    return value as IntrinsicIdentifierObservation;
-  } catch { return null; }
+        !/^[\p{L}\p{N}\p{M} .&+'’/\-]+$/u.test(value.literal) || /\s(?:or|maybe|possibly|unclear)\s/iu.test(` ${value.literal} `)) return fail("OBSERVER_LITERAL_OR_ROLE_INVALID");
+      const box = value.box;
+      if (!box || typeof box !== "object" || Array.isArray(box) || Object.keys(box).sort().join("|") !== "height|left|top|width") return fail("OBSERVER_BOX_WIRE_INVALID");
+      if (!Object.values(box).every(n => Number.isInteger(n) && Number(n) >= 0)) return fail("OBSERVER_BOX_INTEGER_INVALID");
+      if (box.width < 1 || box.width > 800) return fail("OBSERVER_BOX_WIDTH_LIMIT");
+      if (box.height < 1 || box.height > 250) return fail("OBSERVER_BOX_HEIGHT_LIMIT");
+      if (box.width * box.height > 120_000) return fail("OBSERVER_BOX_AREA_LIMIT");
+      if (box.left + box.width > 1000 || box.top + box.height > 1000) return fail("OBSERVER_BOX_BOUNDS_INVALID");
+      return { observation: { ...value, box: [box.left, box.top, box.left + box.width, box.top + box.height] } as IntrinsicIdentifierObservation, issue: "" };
+    }
+    if (value.literal !== "" || value.box !== null || value.identifierRole !== "none" || value.location !== "not-observed") return fail("OBSERVER_NONLEGIBLE_FIELDS_INVALID");
+    return { observation: value as IntrinsicIdentifierObservation, issue: "" };
+  } catch { return fail("OBSERVER_JSON_INVALID"); }
 }
+export function parseIntrinsicIdentifierObserverResponse(rawResponse: string): IntrinsicIdentifierObservation | null {
+  return parseResponse(rawResponse).observation;
+}
+export function intrinsicIdentifierObserverResponseIssue(rawResponse: string): string | null {
+  return parseResponse(rawResponse).issue || null;
+}
+
 function bytes(file: string): Buffer {
   if (!path.isAbsolute(file) || !fs.statSync(file).isFile() || fs.lstatSync(file).isSymbolicLink() || fs.statSync(file).size > 16 * 1024 * 1024) throw Error("OBSERVER_INPUT_LIMIT");
   const result = fs.readFileSync(file);
@@ -138,13 +160,18 @@ export async function observeIntrinsicIdentifier(options: { path: string; sha256
         const rawResponse = await (dependencies.review || runCodexDraft)(request);
         if (!unchanged() || JSON.stringify(request) !== requestBinding) return { status: "invalid", reason: "OBSERVER_IMAGE_OR_REQUEST_CHANGED" };
         if (now() > deadline) return { status: "unavailable", reason: "OBSERVER_TIMEOUT" };
-        const observation = parseIntrinsicIdentifierObserverResponse(rawResponse);
-        if (!observation) return { status: "invalid", reason: "OBSERVER_RESPONSE_INVALID" };
+        const parsed = parseResponse(rawResponse), observation = parsed.observation;
+        if (!observation) return { status: "invalid", reason: "OBSERVER_RESPONSE_INVALID", diagnostic: {
+          imageSha256: options.sha256, stage: "response", issue: parsed.issue,
+          ...(typeof rawResponse === "string" && Buffer.byteLength(rawResponse, "utf8") <= MAXIMUM_RESPONSE_BYTES
+            ? { rawResponse, responseSha256: sha(rawResponse) } : {}),
+        } };
         const evidence: IntrinsicIdentifierObserverEvidence = { version: INTRINSIC_IDENTIFIER_OBSERVER_VERSION, nativeExecution,
           imageSha256: options.sha256, requestSha256, responseSha256: sha(rawResponse), rawResponse, observation };
         return { status: observation.readability === "legible" ? "observed" : "unreadable",
           reason: observation.readability === "legible" ? "BLIND_INTRINSIC_WORD_OBSERVED" : "NO_UNIQUE_LEGIBLE_INTRINSIC_WORD", evidence };
-      } catch { return { status: "unavailable", reason: unchanged() ? "OBSERVER_UNAVAILABLE" : "OBSERVER_IMAGE_CHANGED" }; }
+      } catch (error) { return { status: "unavailable", reason: unchanged() ? "OBSERVER_UNAVAILABLE" : "OBSERVER_IMAGE_CHANGED",
+        diagnostic: { imageSha256: options.sha256, stage: "provider", issue: error instanceof Error ? error.message.slice(0, 2048) : "UNKNOWN_OBSERVER_PROVIDER_FAILURE" } }; }
     };
     if (nativeExecution) active.add(requestSha256);
     pending = work();

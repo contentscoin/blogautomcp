@@ -11,7 +11,7 @@ import { corroborateIntrinsicIdentifierPair } from "./intrinsic-identifier-corro
 import { normalizeIntrinsicIdentifierLiteral, reviewIntrinsicIdentifierOcr, INTRINSIC_IDENTIFIER_OCR_VERSION,
   type IntrinsicIdentifierOcrEvidence } from "./intrinsic-identifier-ocr";
 import { INTRINSIC_IDENTIFIER_OBSERVER_VERSION, intrinsicIdentifierObserverRequestSha256, parseIntrinsicIdentifierObserverResponse,
-  observeIntrinsicIdentifier, type IntrinsicIdentifierObserverEvidence } from "./intrinsic-identifier-observer";
+  observeIntrinsicIdentifier, type IntrinsicIdentifierObserverEvidence, type IntrinsicIdentifierObserverResult } from "./intrinsic-identifier-observer";
 import { scopedPublicationEvidenceIssue, visibleMemberInclusionIssue, pixelFormatEvidenceIssue, selectedSubjectFacts, picturedMemberFacts,
   buildScopedPublicationPackets, executeScopedPublicationPacket, type ScopedReviewEvidence } from "./publication-image-scoped-review";
 import { visibleIdentityEvidenceIssue, visibleIdentityReviewContext } from "./publication-visible-identity";
@@ -140,6 +140,9 @@ export interface PublicationIdentifierReviewResult {
   /** Nonblocking observation limit only; never a positive letter verdict,
    * known-defect exemption, replacement right or paid generation authority. */
   printObservationWarning?: PublicationPrintObservationWarning;
+  /** Diagnostic only. Never substitutes for native evidence or creates a retry. */
+  taskDiagnostic?: { stage: "candidate-observer" | "source-observer" | "applicability" | "source-membership" | "local-pair" | "corroboration";
+    imageSha256: string; status: string; reason: string; observerDiagnostic?: IntrinsicIdentifierObserverResult["diagnostic"] };
 }
 export interface PublicationPrintApplicabilityRow {
   sourceObservation: string; candidateObservation: string; correspondenceObservation: string;
@@ -925,6 +928,11 @@ function blindComparisonIssue(result: PublicationIdentifierReviewResult): string
 export function publicationIdentifierReviewEvidenceIssue(result: PublicationIdentifierReviewResult, expected: PublicationIdentifierReviewInput, requireNative = true): string | null {
   try {
     const prepared = packet(expected), identity = exactSourceIdentity(expected);
+    if (result.taskDiagnostic) {
+      const diagnostic = result.taskDiagnostic;
+      if (!validSha(diagnostic.imageSha256) || typeof diagnostic.reason !== "string") return "malformed B task diagnostic is not review evidence";
+      return `B task failure: ${diagnostic.stage} SHA=${diagnostic.imageSha256} ${String(diagnostic.status).slice(0, 40)}: ${diagnostic.reason.slice(0, 2048)}${diagnostic.observerDiagnostic?.issue ? ` (${String(diagnostic.observerDiagnostic.issue).slice(0, 2048)})` : ""}`;
+    }
     if (result.printObservationWarning?.version === "publication-external-word-print-warning/v1") {
       const regenerated = withExternalWordWarning(result, expected, prepared);
       return result.version === PUBLICATION_IDENTIFIER_REVIEW_VERSION && result.strategyVersion === PUBLICATION_IDENTIFIER_BLIND_STRATEGY &&
@@ -1002,7 +1010,7 @@ export function publicationIdentifierReviewEvidenceIssue(result: PublicationIden
         result.blindInputObservations?.candidate.observation.identifierRole !== "brand" ||
         result.blindInputObservations.sources.find(row => row.sha256 === result.brandRoleEvidence!.sourceSha256)?.evidence.observation.identifierRole !== "brand")) return "brand role does not authorize another identifier domain";
     if (requireNative && !isBlind) return "legacy injected B is not native blind-task evidence";
-    if (isBlind && blindEvidenceIssue(result, prepared, requireNative)) return "blind input observation/source/coordinate binding is invalid";
+    if (isBlind && blindEvidenceIssue(result, prepared, requireNative)) return `blind input observation/source/coordinate binding is invalid; ${result.reason}`;
     if (result.printApplicability && applicabilityEvidenceIssue(result.printApplicability, expected, requireNative, result.blindInputObservations)) return "local applicability binding is invalid";
     const context = isBlind ? result.context! : prepared.context;
     if (result.version !== PUBLICATION_IDENTIFIER_REVIEW_VERSION || !same(result.context, context) || requireNative && result.nativeExecution !== true ||
@@ -1049,6 +1057,8 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
     observations: prepared.files.map(file => intrinsicIdentifierObserverRequestSha256(file.sha256)) }));
   const work = async (): Promise<PublicationIdentifierReviewResult> => {
     let result = { ...base };
+    let taskStage: NonNullable<PublicationIdentifierReviewResult["taskDiagnostic"]>["stage"] = "candidate-observer";
+    let taskImageSha256 = input.candidateSha256;
     try {
       for (const file of prepared.files) {
         const meta = await sharp(bytes(file.path), { limitInputPixels: 24_000_000, animated: false }).metadata();
@@ -1058,12 +1068,19 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
       const observe = dependencies.observe || observeIntrinsicIdentifier;
       const candidate = await observe({ path: input.candidatePath, sha256: input.candidateSha256 });
       if (!unchanged() || !candidate.evidence || observerIssue(candidate.evidence, input.candidateSha256, nativeExecution))
-        return { ...result, reason: "BLIND_CANDIDATE_OBSERVATION_UNAVAILABLE" };
+        return { ...result, reason: "BLIND_CANDIDATE_OBSERVATION_UNAVAILABLE", taskDiagnostic: {
+          stage: "candidate-observer", imageSha256: input.candidateSha256, status: candidate.status, reason: candidate.reason,
+          ...(candidate.diagnostic ? { observerDiagnostic: candidate.diagnostic } : {}),
+        } };
       const observed: PublicationBlindInputObservations = { candidate: candidate.evidence, sources: [] };
       for (const [index, file] of prepared.files.slice(1).entries()) {
+        taskStage = "source-observer"; taskImageSha256 = file.sha256;
         const source = await observe({ path: file.path, sha256: file.sha256 });
         if (!unchanged() || !source.evidence || observerIssue(source.evidence, file.sha256, nativeExecution))
-          return { ...result, blindInputObservations: observed, reason: "BLIND_SOURCE_OBSERVATION_UNAVAILABLE" };
+          return { ...result, blindInputObservations: observed, reason: "BLIND_SOURCE_OBSERVATION_UNAVAILABLE", taskDiagnostic: {
+            stage: "source-observer", imageSha256: file.sha256, status: source.status, reason: source.reason,
+            ...(source.diagnostic ? { observerDiagnostic: source.diagnostic } : {}),
+          } };
         observed.sources.push({ imageIndex: index + 2, sha256: file.sha256, evidence: source.evidence });
       }
       result = { ...result, blindInputObservations: observed };
@@ -1082,6 +1099,7 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
         if (observed.candidate.observation.readability === "ambiguous") return { ...result, reason: "BLIND_CANDIDATE_INTRINSIC_LOCATION_AMBIGUOUS" };
         const semantic = applicabilityRequest(input, observed), call: CodexDraftOptions = { ...semantic.call, imagePaths: [input.candidatePath, input.primaryReference.path],
           outputSchema: JSON.parse(JSON.stringify(semantic.call.outputSchema)) };
+        taskStage = "applicability"; taskImageSha256 = input.candidateSha256;
         const frozen = JSON.stringify(call), rawResponse = await (dependencies.review || runCodexDraft)(call);
         let row: PublicationPrintApplicabilityRow | null = null;
         try { row = JSON.parse(rawResponse) as PublicationPrintApplicabilityRow; } catch { /* Invalid is deny-only, never another question retry. */ }
@@ -1118,6 +1136,7 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
           !selectedMainBrandRowIssue(gate.visibleReview, input.candidateSha256, input.primaryReference.sha256, gate.selectedProduct, nativeExecution)) {
         const sourcePacket = sourceMemberPacket(input, sourceFile)!;
         const prior = gate.sourceVisibleReviews?.find(row => row.sha256 === sourceFile.sha256 && row.evidence.requestSha256 === sourcePacket.requestSha256)?.evidence;
+        taskStage = "source-membership"; taskImageSha256 = sourceFile.sha256;
         const sourceVisibleReview = prior || await executeScopedPublicationPacket(sourcePacket, dependencies.review,
           validSha(gate.policyFingerprint) ? { policyFingerprint: gate.policyFingerprint } : undefined);
         if (!unchanged()) throw Error("BRAND_ROLE_INPUT_CHANGED_DURING_SOURCE_REVIEW");
@@ -1137,6 +1156,7 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
         return { ...result, reason: "BLIND_LOCAL_IDENTIFIER_UNRESOLVED" };
       const semantic = blindRequest(context, observed), requestSha256 = publicationIdentifierReviewRequestSha256(context, observed);
       const call: CodexDraftOptions = { ...semantic, imagePaths: [input.candidatePath, sourceFile.path], outputSchema: JSON.parse(JSON.stringify(semantic.outputSchema)) };
+      taskStage = "local-pair"; taskImageSha256 = input.candidateSha256;
       const frozen = JSON.stringify(call), rawB = await (dependencies.review || runCodexDraft)(call);
       result = { ...result, rawB, requestSha256, responseSha256: hash(rawB) };
       if (!unchanged() || JSON.stringify(call) !== frozen) throw Error("BLIND_PRINT_REQUEST_CHANGED");
@@ -1150,6 +1170,7 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
         if (nativeExecution && !suspectedOmissionObservationIssue(result, input, prepared, false) && gate && gate.kind !== "scene-native-positive/v1") {
           const sourcePacket = sourceMemberPacket(input, sourceFile)!;
           const prior = gate.sourceVisibleReviews?.find(row => row.sha256 === sourceFile.sha256 && row.evidence.requestSha256 === sourcePacket.requestSha256)?.evidence;
+          taskStage = "source-membership"; taskImageSha256 = sourceFile.sha256;
           const sourceVisibleReview = prior || await executeScopedPublicationPacket(sourcePacket, undefined,
             validSha(gate.policyFingerprint) ? { policyFingerprint: gate.policyFingerprint } : undefined);
           if (!unchanged()) throw Error("SUSPECTED_OMISSION_SOURCE_ROLE_INPUT_CHANGED");
@@ -1168,6 +1189,7 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
         const issue = blindComparisonIssue({ ...result, status: "pass" });
         if (issue) return { ...result, reason: issue };
         const pair = localIdentifierPairs(comparison, !!result.brandRoleEvidence)[0];
+        taskStage = "corroboration"; taskImageSha256 = input.candidateSha256;
         const checked = await (dependencies.ocr || reviewIntrinsicIdentifierOcr)({ sourcePath: sourceFile.path, sourceSha256: sourceFile.sha256,
           sourceBox: pair.sourceBox!, candidatePath: input.candidatePath, candidateSha256: input.candidateSha256, candidateBox: pair.candidateBox!, sourceLiteral: pair.sourceLiteral, workspace: input.workspace });
         if (!unchanged()) throw Error("BLIND_PRINT_INPUT_CHANGED_DURING_OCR");
@@ -1198,6 +1220,7 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
             !validBox(comparison.candidateBox) || comparison.identifierComparisons.length > 0)
           return { ...result, reason: "BLIND_MARK_OR_ENTIRE_EXPOSED_BLANK_NOT_OBSERVED" };
         const sourceBox = sourceObservation.box!;
+        taskStage = "corroboration"; taskImageSha256 = input.candidateSha256;
         const checked = await (dependencies.ocr || reviewIntrinsicIdentifierOcr)({ sourcePath: sourceFile.path, sourceSha256: sourceFile.sha256, sourceBox,
           candidatePath: sourceFile.path, candidateSha256: sourceFile.sha256, candidateBox: sourceBox, sourceLiteral: sourceObservation.literal, workspace: input.workspace });
         if (!unchanged()) throw Error("BLIND_SOURCE_INPUT_CHANGED_DURING_OCR");
@@ -1215,7 +1238,8 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
       const issue = blindComparisonIssue({ ...result, status: "pass" });
       return issue ? { ...result, reason: issue } : comparison.accepted === true ? { ...result, status: "pass", reason: "BLIND_LOCAL_PRINT_CORRESPONDENCE_CHECKED" }
         : { ...result, reason: "BLIND_PRINT_RAW_ADVERSE_RETAINED" };
-    } catch { return { ...result, status: "hold", reason: "BLIND_PRINT_INPUT_OR_RUNTIME_UNAVAILABLE", identifierConflict: undefined, missingPrintEvidence: undefined }; }
+    } catch (error) { return { ...result, status: "hold", reason: "BLIND_PRINT_INPUT_OR_RUNTIME_UNAVAILABLE", identifierConflict: undefined, missingPrintEvidence: undefined,
+      taskDiagnostic: { stage: taskStage, imageSha256: taskImageSha256, status: "unavailable", reason: error instanceof Error ? error.message.slice(0, 2048) : "UNKNOWN_BLIND_TASK_FAILURE" } }; }
   };
   if (nativeExecution && active.size >= 2 && !cache.has(cacheKey)) return { ...base, reason: "BLIND_PRINT_CAPACITY_HOLD" };
   let pending = nativeExecution ? cache.get(cacheKey) : undefined;

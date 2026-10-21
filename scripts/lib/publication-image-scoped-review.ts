@@ -6,6 +6,13 @@ import { VISIBLE_IDENTITY_EVIDENCE_SCHEMA, OPTION_CONFLICT_WITNESS_SCHEMA,
   visibleIdentityEvidenceIssue, visibleIdentityReviewContext, type VisibleIdentityReviewContext } from "./publication-visible-identity";
 
 export const PUBLICATION_SCOPED_REVIEW_VERSION = "publication-image-scoped-review/v2";
+/** A's versioned subject scope, not a statement that hidden contents match. */
+export const VISIBLE_PRESENTATION_SCOPE = {
+  version: "pictured-selected-presentation/v1",
+  allowedVisibleStates: ["selected-member", "selected-own-packaging", "selected-member-in-own-packaging"],
+  hiddenContentsCertified: false,
+  completeSetAndQuantityTask: "C-photo-claims",
+} as const;
 import { publicationClaimUnits, type PublicationClaimUnit } from "./publication-claim-units";
 const hash = (bytes: string | Buffer) => crypto.createHash("sha256").update(bytes).digest("hex");
 const boolean = { type: "boolean" } as const;
@@ -47,9 +54,10 @@ export interface ScopedReviewEvidence {
 }
 export const VISIBLE_TASK_RULE = [
   "publication-image-task/A-visible",
-  "TASK A: Compare only the actually visible product structure in IMAGE 1 (candidate) with IMAGE 2 (THIS slot's exact selected primary). No other gallery or product is attached.",
+  "TASK A: Compare only the actually visible selected product OR its own packaging/in-packaged state in IMAGE 1 (candidate) with IMAGE 2 (THIS slot's exact selected primary). No other gallery or product is attached. Follow the versioned visiblePresentationScope; this is not certification of hidden contents.",
   "Observe corresponding physical landmarks before deciding visible fidelity: housing/connection/cut/seams/shape/visible colour of this part. This is local visible correspondence, not market uniqueness, authenticity, hidden capacity, exact SKU certification, a complete unseen band, or full clothing construction hidden in BOTH images.",
   "For picturedMemberEvidence FIRST choose exactly one actually visible memberFactIndex from picturedMemberCandidates. Judge ONLY whether THAT pictured member belongs to the selected subject; scope is pictured-member-only, not whether all purchased kit members are visible. A candidate matching an unselected gift/cross-sell in the primary is NOT selected-component approval. Copy that candidate's exact sourceFact as selectedFact. For an explicit listed/compound member copy its exact memberLabel as picturedMember; describe its actual visible structure in BOTH images. Source lineage/brand alone is insufficient. Do not infer inclusion of gifts, hidden parts or a complete bundle. Each supplied picturedMemberCandidate is a distinct member, not a checklist of everything to display. Unpictured companions are outside this task. Whole-set quantities/completeness belong only to C when an actual published photographic assertion requires them.",
+  "The pictured-member-only scope also covers the selected member's own packaging/in-packaged visible state under visiblePresentationScope; retain that exact scope value. Positively establish that it is THAT selected member's own packaging from actual corresponding visible structure in both images: for example the same closure, handle attachments, window, package construction or placement of a physical insert. Name at least TWO distinct actually corresponding landmarks and describe the subject honestly as packaging/in-packaged; do not claim its hidden body is exposed. If both images show this identifiable own packaging, do not demand unwrapping or visibility of the enclosed body's hidden shape. Matching a generic bag, provenance or brand alone is insufficient: unrelated packaging, gifts/cross-sells, actual changed package construction or confirmed visible-option contradictions still reject; genuinely uncertain own-packaging membership stays unresolved. Packaging correspondence certifies neither hidden contents, quantities, functions nor a complete bundle; those remain outside A and actual published photographic assertions remain C's responsibility.",
   "A natural continuation of observed construction or another plausible angle is not a different SKU merely because a complete reference is unavailable. Conversely a truly altered connector, impossible structure, different cut or clearly different corresponding visible colour remains a defect. Do not certify a hidden part.",
   "Read no intrinsic identifiers and make no print/label, headline, photographic-claim or layout verdict here: separate B/C tasks assess those. Text over an image only obstructs this task when it hides enough of the distinguishing visible STRUCTURE to prevent correspondence; any text touching an otherwise identifiable plain torso is not automatically obstruction.",
   "Also report memberBrandScope and memberBrandObservation as the visible PHYSICAL role: the selected main-product body, a separately branded included accessory, non-brand-bearing member, or unresolved. This is not logo visibility, exact spelling or brand authentication: an unprinted main-product body can have the main-body role. Unknown brand-role alone does not change the independent visible-structure/member verdict; B may hold its separate identifier comparison. State two different actually corresponding visible landmarks for observed-correspondence. For concrete-conflict state the actual opposing observations. For genuinely inadequate visible structure return insufficient-visible-structure with that specific limitation. Preserve false/unknown honestly, never invent a hidden-feature requirement after sufficient visible correspondence.",
@@ -131,7 +139,7 @@ export function buildScopedPublicationPackets(input: ScopedPublicationInput): Sc
     picturedMemberCandidates:memberCandidates.map((fact,memberFactIndex)=>({memberFactIndex,...fact}))};
   const aProperties = { reason: text, memberBrandScope:{type:"string",enum:["selected-main-product-body","separately-branded-included-member","non-brand-bearing-member","unresolved"]},memberBrandObservation:{type:"string",minLength:1}, visibleIdentityEvidence: { ...VISIBLE_IDENTITY_EVIDENCE_SCHEMA,
     description: "Actually observed corresponding physical structure, concrete contradiction, or genuine visible insufficiency." },
-    picturedMemberEvidence: objectSchema({scope:{type:"string",enum:["pictured-member-only"]},memberFactIndex:{type:["integer","null"],enum:[...memberCandidates.map((_,index)=>index),null]},picturedMember:text,
+    picturedMemberEvidence: objectSchema({scope:{type:"string",enum:["pictured-member-only"],description:"Selected visible member itself, or its positively identified own packaging/in-packaged state; never hidden-content/complete-set certification."},memberFactIndex:{type:["integer","null"],enum:[...memberCandidates.map((_,index)=>index),null]},picturedMember:text,
       verdict:{type:"string",enum:["selected-member-visible","nonselected-subject-visible","unresolved"]},selectedFact:text,referenceObservation:text,candidateObservation:text,conflict:text}), identityMatches: boolean, accepted: boolean };
   const cProperties = { reason: text, photoClaimObjection: objectSchema({ origin: { type: "string", enum: ["none", "section-title", "section-body", "thumbnail-headline"] },
     sourceIndex: { type: ["integer", "null"] }, quote: text, scope: { type: "string", enum: ["none", "pictured-appearance", "quantity", "complete-set", "performance", "result"] }, conflict: text }),
@@ -143,7 +151,8 @@ export function buildScopedPublicationPackets(input: ScopedPublicationInput): Sc
   const displayedParagraphs: PublicationClaimUnit[] = publicationClaimUnits(input.sectionBody, input.sectionBodyRenderNodeIndices);
   const packets = ([
     { task: "A-visible" as const, rule: VISIBLE_TASK_RULE, images: [input.candidatePath, input.primaryReference.path], properties: aProperties,
-      data: { candidateSha256: input.candidateSha256, primaryReferenceSha256: input.primaryReference.sha256, selectedSubjectFacts: visibleSubject } },
+      data: { candidateSha256: input.candidateSha256, primaryReferenceSha256: input.primaryReference.sha256, selectedSubjectFacts: visibleSubject,
+        visiblePresentationScope: VISIBLE_PRESENTATION_SCOPE } },
     { task: "C-photo-claims" as const, rule: CLAIM_FORMAT_TASK_RULE, images: [input.candidatePath], properties: cProperties,
       data: { role: input.role, exactCanonicalSellerOriginal: input.exactCanonicalSellerOriginal, sectionTitle: input.sectionTitle,
         displayedParagraphs, allowProductPhoto: input.allowProductPhoto, selection: input.selection, selectedSubjectFacts: subject } },

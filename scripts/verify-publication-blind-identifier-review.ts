@@ -11,7 +11,7 @@ import ts from "typescript";
 import Ajv from "ajv";
 import { reviewPublicationIdentifiers, publicationIdentifierReviewEvidenceIssue,
   type PublicationIdentifierReviewInput, type PublicationIdentifierComparison } from "./lib/publication-identifier-review";
-import { INTRINSIC_IDENTIFIER_OBSERVER_VERSION, intrinsicIdentifierObserverRequestSha256, type IntrinsicIdentifierObserverEvidence, type IntrinsicIdentifierObservation } from "./lib/intrinsic-identifier-observer";
+import { INTRINSIC_IDENTIFIER_OBSERVER_VERSION, intrinsicIdentifierObserverRequestSha256, serializeIntrinsicIdentifierObserverResponse, type IntrinsicIdentifierObserverEvidence, type IntrinsicIdentifierObservation } from "./lib/intrinsic-identifier-observer";
 import { normalizeIntrinsicIdentifierLiteral, type IntrinsicIdentifierOcrEvidence } from "./lib/intrinsic-identifier-ocr";
 import type { IdentifierBox } from "./lib/intrinsic-identifier-comparison";
 import type { CodexDraftOptions } from "./lib/codex-draft-provider";
@@ -38,7 +38,7 @@ async function main() {
   const observed = (file: string, literal: string, box: IdentifierBox | null, readability: IntrinsicIdentifierObservation["readability"], native = true): IntrinsicIdentifierObserverEvidence => {
     const observation: IntrinsicIdentifierObservation = { literal, box, identifierRole: readability === "legible" ? "brand" : "none",
       location: readability === "legible" ? "intrinsic" : "not-observed", readability };
-    const rawResponse = JSON.stringify({observation}), imageSha256 = fileHash(file);
+    const rawResponse = serializeIntrinsicIdentifierObserverResponse(observation), imageSha256 = fileHash(file);
     return { version: INTRINSIC_IDENTIFIER_OBSERVER_VERSION, nativeExecution: native, imageSha256,
       requestSha256: intrinsicIdentifierObserverRequestSha256(imageSha256), responseSha256: hash(rawResponse), rawResponse, observation };
   };
@@ -69,7 +69,7 @@ async function main() {
   const code = ts.transpileModule(fs.readFileSync(moduleFile, "utf8"), { compilerOptions: {
     target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true,
   } }).outputText;
-  type Mode = { comparison?: PublicationIdentifierComparison; raw?: Record<string, unknown>; candidateLiteral?: string; candidateReadability?: IntrinsicIdentifierObservation["readability"];
+  type Mode = { observerFailurePath?: string; providerError?: string; comparison?: PublicationIdentifierComparison; raw?: Record<string, unknown>; candidateLiteral?: string; candidateReadability?: IntrinsicIdentifierObservation["readability"];
     sourceReadability?: IntrinsicIdentifierObservation["readability"]; primaryReadability?: IntrinsicIdentifierObservation["readability"]; observeMutate?: (value: IntrinsicIdentifierObserverEvidence) => void;
     ocrMutate?: (value: IntrinsicIdentifierOcrEvidence) => void; requestMutate?: () => void; sourceOnly?: boolean; ocrUnavailable?: boolean; invalidSchema?: boolean };
   const load = (mode: Mode = {}) => {
@@ -79,6 +79,7 @@ async function main() {
     vm.runInNewContext(code, { module: loaded, exports: loaded.exports, Buffer, process, Error, console,
       require: (name: string) => name === "./codex-draft-provider" ? { runCodexDraft: async (call: CodexDraftOptions) => {
         calls++; actualRequests.push(copy(call));
+        if (mode.providerError) throw Error(mode.providerError);
         const applicability = call.systemPrompt!.includes("B-print-applicability");
         const expectedSource = mode.candidateReadability === "absent" && mode.primaryReadability === "absent" ? primary : detail;
         assert.deepEqual([...call.imagePaths!], [candidate, expectedSource], "one actual selected local source, never impose other-face printing on an own unprinted face");
@@ -97,6 +98,9 @@ async function main() {
       } } : name === "./intrinsic-identifier-observer" ? { ...scopedRequire(name), observeIntrinsicIdentifier: async (options: { path: string; sha256: string }) => {
         observeCalls++; observationInputs.push(copy(options));
         assert.deepEqual(Object.keys(options).sort(), ["path", "sha256"]); checks++;
+        if (mode.observerFailurePath === options.path) return { status: "invalid", reason: "OBSERVER_RESPONSE_INVALID", diagnostic: {
+          stage: "response", imageSha256: options.sha256, issue: "OBSERVER_BOX_HEIGHT_LIMIT", rawResponse: "unchanged oversized native source reply", responseSha256: hash("unchanged oversized native source reply"),
+        } };
         const candidateReadability = mode.candidateReadability || "legible", sourceReadability = mode.sourceReadability || "legible";
         const value = options.path === candidate ? observed(candidate, candidateReadability === "legible" ? mode.candidateLiteral || wrongWord : "", candidateReadability === "legible" ? candidateBox : null, candidateReadability)
           : options.path === primary ? observed(primary, mode.primaryReadability === "legible" ? sourceWord : "", mode.primaryReadability === "legible" ? [300, 420, 360, 445] : null, mode.primaryReadability || "unreadable")
@@ -138,6 +142,24 @@ async function main() {
     const test = load({ comparison: { ...row(), ...patch }, invalidSchema: "sourceLiteral" in patch }); const held = await test.api.reviewPublicationIdentifiers(input);
     assert.equal(held.status, "hold"); assert.equal(test.counts().ocrCalls, 0); assert.equal(held.identifierConflict, undefined); checks += 3;
   }
+  const invalidSourceObserver = load({ observerFailurePath: detail });
+  const invalidSourceResult = await invalidSourceObserver.api.reviewPublicationIdentifiers(input);
+  assert.equal(invalidSourceResult.status, "hold"); assert.equal(invalidSourceResult.taskDiagnostic!.stage, "source-observer");
+  assert.equal(invalidSourceResult.taskDiagnostic!.imageSha256, fileHash(detail));
+  assert.equal(invalidSourceResult.taskDiagnostic!.observerDiagnostic!.issue, "OBSERVER_BOX_HEIGHT_LIMIT");
+  assert.match(invalidSourceObserver.api.publicationIdentifierReviewEvidenceIssue(invalidSourceResult, input)!, /source-observer.*OBSERVER_RESPONSE_INVALID.*OBSERVER_BOX_HEIGHT_LIMIT/u);
+  assert.equal(invalidSourceObserver.counts().calls, 0); assert.equal(invalidSourceObserver.counts().ocrCalls, 0); checks += 7;
+  for (const providerError of ["HIGH_DEMAND: service unavailable", "Invalid schema for response_format: array enum unsupported"]) {
+    const broken = load({ providerError }); const brokenResult = await broken.api.reviewPublicationIdentifiers(input);
+    assert.equal(brokenResult.status, "hold"); assert.equal(brokenResult.taskDiagnostic!.stage, "local-pair");
+    assert.equal(brokenResult.taskDiagnostic!.reason, providerError);
+    assert.ok(broken.api.publicationIdentifierReviewEvidenceIssue(brokenResult, input)?.includes(providerError));
+    assert.equal(broken.counts().calls, 1); assert.equal(broken.counts().ocrCalls, 0);
+    assert.equal(brokenResult.identifierConflict, undefined); assert.equal(brokenResult.missingPrintEvidence, undefined); checks += 8;
+  }
+  const forgedDiagnostic = copy(conflict); delete forgedDiagnostic.blindInputObservations;
+  forgedDiagnostic.taskDiagnostic = { stage: "source-observer", imageSha256: fileHash(detail), status: "unavailable", reason: "diagnostic is never authority" };
+  assert.ok(native.api.publicationIdentifierReviewEvidenceIssue(forgedDiagnostic, input)); checks++;
   const matched = load({ candidateLiteral: sourceWord }); const match = await matched.api.reviewPublicationIdentifiers(input);
   assert.equal(match.status, "pass"); assert.equal(matched.api.publicationIdentifierReviewEvidenceIssue(match, input), null); checks += 2;
   const negative = load({ candidateLiteral: sourceWord, comparison: { ...row(sourceWord), accepted: false } });

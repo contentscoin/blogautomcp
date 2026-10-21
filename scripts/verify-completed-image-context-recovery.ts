@@ -26,7 +26,7 @@ import { publicationImageAuditPolicyFingerprint } from "./lib/publish-image-audi
 import { planPublicationImageRetry } from "../src/lib/brand-post-publication-image-repair";
 import type { IntrinsicIdentifierServerConflict, IntrinsicIdentifierPair } from "./lib/intrinsic-identifier-comparison";
 import { INTRINSIC_IDENTIFIER_OCR_VERSION } from "./lib/intrinsic-identifier-ocr";
-import { INTRINSIC_IDENTIFIER_OBSERVER_VERSION, intrinsicIdentifierObserverRequestSha256,
+import { INTRINSIC_IDENTIFIER_OBSERVER_VERSION, intrinsicIdentifierObserverRequestSha256, serializeIntrinsicIdentifierObserverResponse,
   type IntrinsicIdentifierObservation, type IntrinsicIdentifierObserverEvidence } from "./lib/intrinsic-identifier-observer";
 import { buildProductThumbnailCopy } from "./lib/product-thumbnail";
 import { PRODUCT_IMAGE_PRINT_OBSERVABILITY_RULE_EN, PRODUCT_IMAGE_PRINT_OBSERVABILITY_RULE_VERSION,
@@ -283,7 +283,7 @@ async function main() {
       const primaryObservation: IntrinsicIdentifierObservation = {literal:"",box:null,identifierRole:"none",location:"not-observed",readability:"absent"};
       const sourceObservation: IntrinsicIdentifierObservation = {literal:"Voltium",box:f.identifierConflict.pair.sourceBox!,identifierRole:"brand",location:"intrinsic",readability:"legible"};
       const candidateObservation: IntrinsicIdentifierObservation = {literal:"Voltum",box:f.identifierConflict.pair.candidateBox!,identifierRole:"brand",location:"intrinsic",readability:"legible"};
-      const observeEvidence = (sha256:string,observation:IntrinsicIdentifierObservation):IntrinsicIdentifierObserverEvidence => {const rawResponse=JSON.stringify({observation});return {
+      const observeEvidence = (sha256:string,observation:IntrinsicIdentifierObservation):IntrinsicIdentifierObserverEvidence => {const rawResponse=serializeIntrinsicIdentifierObserverResponse(observation);return {
         version:INTRINSIC_IDENTIFIER_OBSERVER_VERSION,nativeExecution:true,imageSha256:sha256,requestSha256:intrinsicIdentifierObserverRequestSha256(sha256),
         responseSha256:hash(rawResponse),rawResponse,observation};};
       const blindInputObservations = {candidate:observeEvidence(f.currentSha,candidateObservation),sources:[
@@ -353,7 +353,7 @@ async function main() {
     const changedEngine = await publicationFixture(); changedEngine.record(); fs.appendFileSync(changedEngine.identifierConflict.evidence.engine.binaryPath, "changed");
     assert.throws(changedEngine.plan, /IMAGE_RESUME_REQUIRED/); checks++;
     const blindEvidence = (sha256: string, observation: IntrinsicIdentifierObservation): IntrinsicIdentifierObserverEvidence => {
-      const rawResponse = JSON.stringify({ observation });
+      const rawResponse = serializeIntrinsicIdentifierObserverResponse(observation);
       return { version: INTRINSIC_IDENTIFIER_OBSERVER_VERSION, nativeExecution: true, imageSha256: sha256,
         requestSha256: intrinsicIdentifierObserverRequestSha256(sha256), responseSha256: hash(rawResponse), rawResponse, observation };
     };

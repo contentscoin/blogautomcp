@@ -8,13 +8,18 @@ import vm from "node:vm";
 import { createRequire } from "node:module";
 import ts from "typescript";
 import sharp from "sharp";
+import Ajv from "ajv";
 import { observeIntrinsicIdentifier, parseIntrinsicIdentifierObserverResponse, intrinsicIdentifierObserverRequestSha256,
-  INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA, INTRINSIC_IDENTIFIER_OBSERVER_VERSION, type IntrinsicIdentifierObservation } from "./lib/intrinsic-identifier-observer";
+  serializeIntrinsicIdentifierObserverResponse, intrinsicIdentifierObserverResponseIssue, INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA, INTRINSIC_IDENTIFIER_OBSERVER_VERSION, type IntrinsicIdentifierObservation } from "./lib/intrinsic-identifier-observer";
 import type { CodexDraftOptions } from "./lib/codex-draft-provider";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-blind-identifier-"));
 const hash = (bytes: Buffer | string) => crypto.createHash("sha256").update(bytes).digest("hex");
-const wire = (observation: unknown) => JSON.stringify({ observation });
+const wire = (value: unknown) => {
+  const observation = value as IntrinsicIdentifierObservation;
+  return observation && (observation.box === null || Array.isArray(observation.box))
+    ? serializeIntrinsicIdentifierObserverResponse(observation) : JSON.stringify({ observation });
+};
 let checks = 0;
 function check(condition: unknown, reason: string) { assert.ok(condition, reason); checks++; }
 async function main(): Promise<void> {
@@ -24,7 +29,7 @@ async function main(): Promise<void> {
   const options = { path: file, sha256: hash(bytes) };
   const observation: IntrinsicIdentifierObservation = { literal: "Brandum", box: [100, 100, 400, 200], identifierRole: "brand", location: "intrinsic", readability: "legible" };
   const raw = wire(observation);
-  check(INTRINSIC_IDENTIFIER_OBSERVER_VERSION === "intrinsic-identifier-observer/v2", "new wire protocol has its own version, never relabeled v1 evidence");
+  check(INTRINSIC_IDENTIFIER_OBSERVER_VERSION === "intrinsic-identifier-observer/v3", "new wire protocol has its own version, never relabeled v1/v2 evidence");
   check(!("anyOf" in INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA) && INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA.required.join() === "observation", "structured output root remains a strict object, union is nested");
   const [legibleBranch, neutralBranch] = INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA.properties.observation.anyOf;
   check(legibleBranch.properties.location.enum.join() === "intrinsic" && legibleBranch.properties.readability.enum.join() === "legible" &&
@@ -32,6 +37,25 @@ async function main(): Promise<void> {
   check(neutralBranch.properties.literal.enum.join() === "" && neutralBranch.properties.box.type === "null" &&
     neutralBranch.properties.identifierRole.enum.join() === "none" && neutralBranch.properties.location.enum.join() === "not-observed" &&
     !neutralBranch.properties.readability.enum.includes("legible" as never), "non-legible branch structurally fixes all empty neutral fields");
+  const schemaValid = new Ajv().compile(INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA);
+  check(schemaValid(JSON.parse(raw)), "extent-based legible wire satisfies the exact native schema");
+  assert.deepEqual(JSON.parse(raw).observation.box, { left: 100, top: 100, width: 300, height: 100 }); checks++;
+  for (const [box, expectedIssue] of [
+    [[307, 415, 714, 690], "OBSERVER_BOX_HEIGHT_LIMIT"], // actual Hanil v2 whole-leaflet ROI, not a new word fixture
+    [[68, 139, 915, 238], "OBSERVER_BOX_WIDTH_LIMIT"], // actual microscope v2 overwide title line
+    [[0, 0, 800, 250], "OBSERVER_BOX_AREA_LIMIT"],
+    [[900, 900, 1100, 950], "OBSERVER_BOX_BOUNDS_INVALID"],
+  ] as Array<[[number, number, number, number], string]>) {
+    const invalid = wire({ ...observation, box });
+    check(parseIntrinsicIdentifierObserverResponse(invalid) === null && intrinsicIdentifierObserverResponseIssue(invalid) === expectedIssue,
+      "word extent limits stay strict and report the actual failed constraint");
+    if (expectedIssue.includes("HEIGHT") || expectedIssue.includes("WIDTH")) check(!schemaValid(JSON.parse(invalid)), "native schema itself prevents height/width limit violations");
+  }
+  for (const legacyRaw of [JSON.stringify({ observation }), JSON.stringify(observation)])
+    check(parseIntrinsicIdentifierObserverResponse(legacyRaw) === null, "v1/v2 corner-coordinate raw cannot be relabeled v3 or repaired in place");
+  check(parseIntrinsicIdentifierObserverResponse(JSON.stringify({ observation: { ...observation, box: { left: 0, top: 0, width: 100, height: 20, right: 100 } } })) === null,
+    "old or mixed coordinate fields stay invalid");
+  check(!schemaValid(JSON.parse(wire({ ...observation, box: [1.5, 0, 200, 25] }))), "fractional coordinates fail before output admission");
   let calls = 0;
   const result = await observeIntrinsicIdentifier(options, { review: async request => {
     calls++;
@@ -78,7 +102,7 @@ async function main(): Promise<void> {
           }
   const oldHanilInvalid = { literal: "주식회사 한일의료기", box: [582, 30, 967, 82], identifierRole: "brand", location: "not-observed", readability: "legible" };
   check(parseIntrinsicIdentifierObserverResponse(JSON.stringify(oldHanilInvalid)) === null && parseIntrinsicIdentifierObserverResponse(wire(oldHanilInvalid)) === null,
-    "actual old external-company contradiction is rejected both as untouched v1 raw and v2-enveloped invalid fields");
+    "actual old external-company contradiction is rejected both as untouched v1 raw and v3-enveloped invalid fields");
   let invalidCalls = 0;
   const reviewer = async () => { invalidCalls++; return raw; };
   check((await observeIntrinsicIdentifier({ ...options, sha256: "0".repeat(64) }, { review: reviewer })).status === "invalid" && invalidCalls === 0, "SHA mismatch before provider");
@@ -87,6 +111,12 @@ async function main(): Promise<void> {
   let errorCalls = 0;
   const unavailable = await observeIntrinsicIdentifier(options, { review: async () => { errorCalls++; throw Error("503"); } });
   check(unavailable.status === "unavailable" && errorCalls === 1, "provider error does not start another observation");
+  check(unavailable.diagnostic?.stage === "provider" && unavailable.diagnostic.issue === "503" && unavailable.diagnostic.imageSha256 === options.sha256,
+    "provider failure is kept separate from a model response or coordinate error, without authority");
+  const oversized = await observeIntrinsicIdentifier(options, { review: async () => wire({ ...observation, box: [307, 415, 714, 690] }) });
+  check(oversized.status === "invalid" && !oversized.evidence && oversized.reason === "OBSERVER_RESPONSE_INVALID" &&
+    oversized.diagnostic?.issue === "OBSERVER_BOX_HEIGHT_LIMIT" && oversized.diagnostic.responseSha256 === hash(oversized.diagnostic.rawResponse!),
+    "actual oversized source reply retains exact raw/constraint/SHA rather than disappearing behind generic binding failure");
   let clock = 0;
   const late = await observeIntrinsicIdentifier(options, { now: () => clock, review: async () => { clock = 60_001; return raw; } });
   check(late.status === "unavailable" && late.reason === "OBSERVER_TIMEOUT", "bounded observer deadline");
