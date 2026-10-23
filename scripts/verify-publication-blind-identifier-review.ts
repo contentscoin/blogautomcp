@@ -63,6 +63,13 @@ async function main() {
   }
   assert.throws(()=>selectBlindPublicationIdentifierSource({...mixedRoles,sources:mixedRoles.sources.slice(0,2)}),/BLIND_SOURCE_IDENTIFIER_ROLE_UNAVAILABLE/);checks++;
   assert.throws(()=>selectBlindPublicationIdentifierSource({...mixedRoles,sources:[mixedRoles.sources[0],vote(3,"brand A"),vote(4,"brand B")]}),/BLIND_SOURCE_LITERAL_CONSENSUS_UNRESOLVED/,"an incompatible OWN primary cannot resolve brand disagreement");checks++;
+  const enlarged={...isolated,sources:[vote(2,"Unknown",[352,494,392,510]),vote(3,"tiny misread",[351,565,437,673]),vote(4,"clear source",[297,422,671,533])]};
+  for(const literal of ["Unknown","tiny misread","clear source","different candidate"]) {
+    const changed=copy(enlarged);changed.candidate.observation.literal=literal;
+    assert.equal(selectBlindPublicationIdentifierSource(changed).imageIndex,4,"4x larger source word routes to a clear comparison input, independent of candidate spelling");checks++;
+  }
+  assert.equal(selectBlindPublicationIdentifierSource({...enlarged,sources:[enlarged.sources[0],vote(3,"A",[100,100,200,150]),vote(4,"B",[100,100,300,199])]}).imageIndex,2,"less than 4x footprint retains primary fallback");checks++;
+  assert.equal(selectBlindPublicationIdentifierSource({...enlarged,sources:[...enlarged.sources,vote(5,"external role",[100,100,800,250],"product-line")]}).imageIndex,4,"larger incompatible role cannot override physical brand target");checks++;
   for(const sources of [[vote(2,"A"),vote(3,"B")],[vote(2,"word"),vote(3,"Word")],[vote(2,"word"),vote(3,"word ")],
     [vote(2,"word"),vote(3,"word",[100,100,200,150],"model")],[vote(2,"A"),vote(3,"A"),vote(4,"B"),vote(5,"B")],
   ]) {

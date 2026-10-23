@@ -13,6 +13,7 @@ import { normalizeIntrinsicIdentifierLiteral } from "./intrinsic-identifier-ocr"
 import { corroborateIntrinsicIdentifierPair } from "./intrinsic-identifier-corroboration";
 import { publicationClaimUnits, hasExplicitPhotographicProofLink } from "./publication-claim-units";
 import { readProductPhotoSource } from "./product-photo-provenance";
+import { buildProductThumbnailCopy } from "./product-thumbnail";
 import { buildScopedPublicationPackets, executeScopedPublicationPacket, visibleMemberInclusionIssue, pixelFormatEvidenceIssue, type ScopedReviewEvidence } from "./publication-image-scoped-review";
 import { reviewPublicationIdentifiers, publicationIdentifierReviewEvidenceIssue, type PublicationIdentifierReviewInput,
   type PublicationIdentifierReviewResult } from "./publication-identifier-review";
@@ -772,6 +773,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
       const primaryPath = candidate.referenceScene?.referencePath || candidate.canonicalPhotoSource?.sourcePath || gallerySnapshots.find(reference => reference.sha256 === candidate.sha256)?.path;
       if (primaryPath) {
         const identifierInput: PublicationIdentifierReviewInput = { candidatePath: candidate.assetPath, candidateSha256: candidate.sha256,
+          ...(candidate.canonicalPhotoSource && candidate.role === "thumbnail" ? {photoThumbnailHeadline:buildProductThumbnailCopy("",options.productName).headline} : {}),
           primaryReference: { path: primaryPath, sha256: primary.referenceSha256 }, canonicalReferences: (identifierReferenceBindings.get(candidate) || gallerySnapshots).map(reference =>
             ({ path: reference.path, sha256: reference.sha256, sourceSnapshotId: reference.sourceSnapshotId })), workspace: root,
           scopeGate: {kind:"final-native-positive/v1",selectedProduct,policyFingerprint:result.policyFingerprint,visibleReview:visible,claimsReview:claims,formatReview:format,
@@ -1096,6 +1098,7 @@ export const PUBLICATION_IMAGE_AUDIT_POLICY_FILES = [
   "scripts/lib/publication-image-scoped-review.ts",
   "scripts/lib/publication-claim-units.ts",
   "scripts/lib/publication-identifier-review.ts",
+  "scripts/lib/photo-thumbnail-byte-replay.ts", "scripts/lib/thumbnail-layout-v2.ts", "scripts/lib/product-thumbnail.ts",
   "scripts/lib/canonical-seller-source.ts",
   "scripts/lib/publication-image-defect-proof.ts",
   "scripts/lib/publish-image-audit-receipt.ts",

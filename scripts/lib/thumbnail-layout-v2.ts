@@ -284,6 +284,15 @@ export async function renderShoppingPhotoThumbnail(options: {
   headline: string;
   style?: ThumbnailV2Style;
 }): Promise<void> {
+  const bytes = await renderShoppingPhotoThumbnailBytes(options);
+  fs.mkdirSync(path.dirname(options.outputPath), { recursive: true });
+  fs.writeFileSync(options.outputPath, bytes);
+}
+
+/** Pure renderer shared by creation and exact byte-replay verification. */
+export async function renderShoppingPhotoThumbnailBytes(options: {
+  sourcePath: string; headline: string; style?: ThumbnailV2Style;
+}): Promise<Buffer> {
   const source = fs.readFileSync(options.sourcePath);
   const metadata = await sharp(source).metadata();
   if (!isShoppingThumbnailSourceAspectAllowed(metadata)) {
@@ -298,8 +307,7 @@ export async function renderShoppingPhotoThumbnail(options: {
     { input: photo, left: Math.floor((1080 - info.width) / 2), top: Math.floor((1080 - info.height) / 2) },
     { input: overlay },
   ]).png({ compressionLevel: 9 }).toBuffer();
-  fs.mkdirSync(path.dirname(options.outputPath), { recursive: true });
-  fs.writeFileSync(options.outputPath, bytes);
+  return bytes;
 }
 
 export async function generateThumbnailCropPreviews(

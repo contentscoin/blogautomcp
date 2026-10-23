@@ -9,6 +9,8 @@ import { createRequire } from "node:module";
 import ts from "typescript";
 import sharp from "sharp";
 import Ajv from "ajv";
+import { renderShoppingPhotoThumbnailBytes } from "./lib/thumbnail-layout-v2";
+import { replayPhotoThumbnail, photoThumbnailReplayIssue } from "./lib/photo-thumbnail-byte-replay";
 import type { CodexDraftOptions } from "./lib/codex-draft-provider";
 import { buildScopedPublicationPackets, serializeScopedPublicationResponse, parseScopedPublicationResponse, type ScopedReviewPacket, type ScopedReviewEvidence } from "./lib/publication-image-scoped-review";
 import { visibleIdentityReviewContext } from "./lib/publication-visible-identity";
@@ -468,6 +470,22 @@ async function main() {
   for(const patch of [{identifierRole:"model"},{identifierComparisons:[{...comparison.identifierComparisons[0],sameSelectedComponent:false}]},{identifierComparisons:[{...comparison.identifierComparisons[0],sameSelectedVisibleOption:false}]}]){const test=load({readability:"legible",pair:{...comparison,...patch} as PublicationIdentifierComparison});const r=await test.api.reviewPublicationIdentifiers(input);assert.equal(r.status,"hold");assert.equal(test.counts().ocrCalls,0);checks+=2;}
   for(const mutate of [(value:typeof conflict)=>{value.brandRoleEvidence!.sourceVisibleReview.nativeExecution=false;},(value:typeof conflict)=>{delete value.brandRoleEvidence;},(value:typeof conflict)=>{value.brandRoleEvidence!.memberFactIndex=1;},(value:typeof conflict)=>{value.identifierConflict!.pair.sameSelectedComponent=false;},(value:typeof conflict)=>{value.status="pass";delete value.identifierConflict;}]){const changed=copy(conflict);mutate(changed);assert(brand.api.publicationIdentifierReviewEvidenceIssue(changed,input));checks++;}
   for(const concrete of [conflict,missingResult]){const changed=copy(concrete);changed.status="unverified";changed.nativeExecution=false;changed.printObservationWarning=copy(unverified.printObservationWarning);changed.rawB="";changed.responseSha256=hash("");changed.comparison=null;delete changed.identifierConflict;delete changed.missingPrintEvidence;delete changed.brandRoleEvidence;assert(brand.api.publicationIdentifierReviewEvidenceIssue(changed,input),"a concrete readable conflict or entire exposed blank cannot be relabelled as a local observation warning");checks++;}
+  const thumbnail=path.join(root,"exact-local-thumbnail.png");
+  const thumbnailBytes=await renderShoppingPhotoThumbnailBytes({sourcePath:primary,headline:"기능 체크"});fs.writeFileSync(thumbnail,thumbnailBytes);
+  const replayInput={sourcePath:primary,sourceSha256:fileHash(primary),candidatePath:thumbnail,candidateSha256:fileHash(thumbnail),headline:"기능 체크"};
+  const forged={version:"exact-photo-thumbnail-replay/v1" as const,renderer:"shopping-photo-headline/v1",sourceSha256:replayInput.sourceSha256,candidateSha256:replayInput.candidateSha256,headline:replayInput.headline};
+  assert(photoThumbnailReplayIssue(forged,replayInput),"serialized markers cannot substitute for actual renderer execution");checks++;
+  const replayPackets=buildScopedPublicationPackets({candidatePath:thumbnail,candidateSha256:fileHash(thumbnail),primaryReference:{path:primary,sha256:fileHash(primary)},role:"thumbnail",exactCanonicalSellerOriginal:false,sectionTitle:"ordinary purchase checks",sectionBody:["unchanged manuscript"],allowProductPhoto:true,selection:visibleIdentityReviewContext(selectedProduct),selectedProduct});
+  const thumbnailInput:PublicationIdentifierReviewInput={...input,candidatePath:thumbnail,candidateSha256:fileHash(thumbnail),photoThumbnailHeadline:"기능 체크",scopeGate:{kind:"final-native-positive/v1",selectedProduct,visibleReview:evidence(replayPackets[0],a),claimsReview:evidence(replayPackets[1],c),formatReview:evidence(replayPackets[2],d),policyFingerprint:hash("current policy")}};
+  const replayTask=load(),replayed=await replayTask.api.reviewPublicationIdentifiers(thumbnailInput);
+  assert.equal(replayed.status,"pass",replayed.reason);assert.equal(replayed.nativeExecution,false);assert.ok(replayed.exactPhotoThumbnailReplay);
+  assert.equal(replayTask.api.publicationIdentifierReviewEvidenceIssue(replayed,thumbnailInput),null);
+  assert.deepEqual(replayTask.counts(),{appCalls:0,pairCalls:0,ocrCalls:0,sourceCalls:0},"deterministic exact composition avoids all B provider/OCR calls");checks+=5;
+  for(const key of ["visibleReview","claimsReview","formatReview"] as const){const invalid=copy(thumbnailInput);if(invalid.scopeGate?.kind!=="scene-native-positive/v1")invalid.scopeGate![key].nativeExecution=false;assert(replayTask.api.publicationIdentifierReviewEvidenceIssue(replayed,invalid));checks++;}
+  for(const alter of [(r:typeof replayed)=>{r.nativeExecution=true;},(r:typeof replayed)=>{r.exactPhotoThumbnailReplay!.headline="다른 글자";},(r:typeof replayed)=>{r.rawB="invented";},(r:typeof replayed)=>{r.identifierConflict=conflict.identifierConflict;}]){const invalid=copy(replayed);alter(invalid);assert(replayTask.api.publicationIdentifierReviewEvidenceIssue(invalid,thumbnailInput));checks++;}
+  assert.equal(await replayPhotoThumbnail({...replayInput,headline:"다른 글자"}),null);checks++;
+  fs.writeFileSync(thumbnail,Buffer.concat([thumbnailBytes,Buffer.from("changed")]));assert(photoThumbnailReplayIssue(replayed.exactPhotoThumbnailReplay!,replayInput));assert(replayTask.api.publicationIdentifierReviewEvidenceIssue(replayed,thumbnailInput));checks+=2;
+  fs.writeFileSync(thumbnail,thumbnailBytes);
   assert.deepEqual([candidate,primary,detail,binary,traineddata].map(fileHash),initial);checks++;
   console.log(`PASS publication print applicability: ${checks} offline checks; native own-view witness, no-letter/no-retry scope-out, own-unprinted domain, exact A main-brand role, raw null/adverse preservation, real readable conflict; provider/OCR/generation/live writes 0`);
 }
