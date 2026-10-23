@@ -387,6 +387,32 @@ export function assertCodexOutputSchemaCompatible(schema: unknown): void {
   visit(schema, "schema");
 }
 
+/** Per-client settings only. Do not edit the user's shared config or login.
+ * These fixed writing/vision requests need their supplied context, not the
+ * user's unrelated memories, plugins, agent roles or skill catalogue. */
+export function isolatedCodexDraftConfig(skillRoots = [
+  path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "skills"),
+  path.join(os.homedir(), ".agents", "skills"),
+]) {
+  const disabled = new Set<string>();
+  const collect = (root: string, system = false) => {
+    try {
+      for (const entry of fs.readdirSync(root, { withFileTypes: true }).slice(0, 1024)) {
+        const folder = path.join(root, entry.name), file = path.join(folder, "SKILL.md");
+        try { if (fs.statSync(file).isFile()) disabled.add(file); } catch { /* Optional skill absent. */ }
+        if (!system && entry.name === ".system") collect(folder, true);
+      }
+    } catch { /* An absent optional skill root is not an authoring failure. */ }
+  };
+  for (const root of skillRoots) collect(root);
+  return {
+    project_doc_max_bytes: 0,
+    features: { memories: false, plugins: false, apps: false, multi_agent: false,
+      browser_use: false, computer_use: false, shell_tool: false },
+    skills: { config: [...disabled].sort().map(file => ({ path: file, enabled: false })) },
+  };
+}
+
 export async function runCodexDraft(options: CodexDraftOptions): Promise<string> {
   if (options.outputSchema) assertCodexOutputSchemaCompatible(options.outputSchema);
   const images = resolveCodexWritingImages(options);
@@ -401,15 +427,7 @@ export async function runCodexDraft(options: CodexDraftOptions): Promise<string>
 
   const researchMode = options.researchMode ?? "disabled";
   const codex = new Codex({
-    config: {
-      project_doc_max_bytes: 0,
-      skills: {
-        config: [{
-          path: path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "skills", "opus-fable", "SKILL.md"),
-          enabled: false,
-        }],
-      },
-    },
+    config: isolatedCodexDraftConfig(),
     configOverrides: ['plugins."opus-fable-performance@local-opencrab".enabled=false'],
   });
   const prompt = [buildWritingPrompt(options.systemPrompt, options.userPrompt, researchMode, options.researchScope),

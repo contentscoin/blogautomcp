@@ -1076,7 +1076,7 @@ export function publicationIdentifierReviewEvidenceIssue(result: PublicationIden
     if (result.version !== PUBLICATION_IDENTIFIER_REVIEW_VERSION || !same(result.context, context) || requireNative && result.nativeExecution !== true ||
         result.requestSha256 !== publicationIdentifierReviewRequestSha256(context, result.blindInputObservations) || hash(result.rawB) !== result.responseSha256 ||
         !same(parsePublicationIdentifierComparison(result.rawB, context), result.comparison) || !result.comparison)
-      return "B raw/request/context/native binding is invalid";
+      return `B raw/request/context/native binding is invalid; ${result.reason}`;
     if (isBlind) { const issue = blindComparisonIssue(result); if (issue) return issue; }
     const matches = result.identifierMatches || [];
     if (!Array.isArray(matches) || matches.length > 2 || matches.some(match => pairEvidenceIssue(match, result.comparison!, context, requireNative, false, !!result.brandRoleEvidence)))

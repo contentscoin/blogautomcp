@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import vm from "node:vm";
 import ts from "typescript";
 import draftRuntimePolicy from "./lib/draft-runtime-policy.json";
@@ -13,11 +14,28 @@ import {
   collectCodexDraftResponse,
   assertCodexOutputSchemaCompatible,
   runCodexDraft,
+  isolatedCodexDraftConfig,
 } from "./lib/codex-draft-provider";
 import { getBundledCodexEntrypoint, getBundledCodexExecutable, readCodexLocalStatus } from "../src/lib/codex-local";
 import { classifyLocalFailure, extractLocalApiError, LOCAL_AUTOMATION_ERROR_HINTS, LocalAutomationError, toLocalAutomationError } from "../src/lib/local-automation-error";
 
 const root = process.cwd();
+const isolatedFixture = fs.mkdtempSync(path.join(os.tmpdir(), "blogautomcp-isolated-config-"));
+try {
+  const skill = path.join(isolatedFixture, "ordinary", "SKILL.md"), systemSkill = path.join(isolatedFixture, ".system", "builtin", "SKILL.md");
+  for (const file of [skill, systemSkill]) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, "unchanged skill"); }
+  const config = isolatedCodexDraftConfig([isolatedFixture, isolatedFixture, path.join(isolatedFixture, "absent")]);
+  assert.equal(config.project_doc_max_bytes, 0);
+  assert(Object.values(config.features).every(value => value === false));
+  assert.deepEqual(config.skills.config.map(row => row.path).sort(), [skill, systemSkill].sort());
+  assert(config.skills.config.every(row => row.enabled === false));
+  for (const file of [skill, systemSkill]) assert.equal(fs.readFileSync(file, "utf8"), "unchanged skill");
+  assert(!("model" in config) && !("model_reasoning_effort" in config) && !("env" in config), "isolation must not change model, effort or shared authentication");
+} finally {
+  const target = path.resolve(isolatedFixture), parent = path.resolve(os.tmpdir());
+  assert(target.startsWith(parent + path.sep) && path.basename(target).startsWith("blogautomcp-isolated-config-"));
+  fs.rmSync(target, { recursive: true, force: true });
+}
 assert.doesNotThrow(() => assertCodexOutputSchemaCompatible({type:"object",properties:{box:{type:"array",items:{type:"integer"},minItems:4,maxItems:4}}}));
 for (const bad of [{type:"string",pattern:"\\p{L}+"},{type:"array",enum:[[1,2,3,4]]},{type:"string",pattern:"["}]) {
   assert.throws(() => assertCodexOutputSchemaCompatible({type:"object",properties:{nested:bad}}), /CODEX_OUTPUT_SCHEMA_INVALID/u);
