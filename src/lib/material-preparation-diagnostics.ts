@@ -2,9 +2,10 @@
  * historical success counters are returned, and no approval gate is changed. */
 type Action = "ready" | "wait-current-job" | "inspect-existing-output" | "review-source-candidates" |
   "collect-source-photo" | "complete-image-slots" | "repair-text-sections" | "review-publication" |
-  "inspect-current-state" | "approve-material" | "verify-published-result" | "verify-scheduled-result" | "wait-provider-capacity";
+  "inspect-current-state" | "approve-material" | "verify-published-result" | "verify-scheduled-result" | "wait-provider-capacity" | "repair-review-system";
 type Category = "source" | "recovery" | "text" | "images" | "review" | "inspection" | "provider";
 const ACTION_TEXT: Record<Action, string> = {
+  "repair-review-system": "검수 요청 형식 또는 판독 응답 오류입니다. 프로그램과 검수 연결을 확인한 뒤 실패한 검수 단계만 재개하세요. 기존 원고와 사진을 재생성하지 마세요.",
   ready: "현재 준비완료 상태입니다.",
   "wait-current-job": "진행 중인 작업의 완료와 저장 결과를 조회하세요.",
   "wait-provider-capacity": "Codex 사용 한도를 확인하세요. 사용 가능 상태가 확인되면 기존 원고와 정상 사진을 보존하고 중단된 단계부터 재개하세요. 한도 초과 상태에서 재작성·재생성을 반복하지 마세요.",
@@ -21,6 +22,9 @@ const ACTION_TEXT: Record<Action, string> = {
 };
 
 const CODES: Record<string, { category: Category; action: Action }> = {
+  CODEX_OUTPUT_SCHEMA_INVALID: { category: "inspection", action: "repair-review-system" },
+  SOURCE_REVIEW_RESPONSE_INVALID: { category: "inspection", action: "repair-review-system" },
+  SOURCE_EVIDENCE_REQUIRED: { category: "source", action: "review-source-candidates" },
   CODEX_USAGE_LIMIT_REACHED: { category: "provider", action: "wait-provider-capacity" },
   IMAGE_SOURCE_BINDING_REQUIRED: { category: "source", action: "collect-source-photo" },
   PREWRITING_PUBLICATION_SOURCE_UNAVAILABLE: { category: "source", action: "collect-source-photo" },
@@ -123,6 +127,7 @@ export function materialPreparationDiagnostics(input: MaterialPreparationDiagnos
     if (recoveryUncertain || relevant.some(cause => cause.category === "recovery")) nextAction = "inspect-existing-output";
     else if (running) nextAction = "wait-current-job";
     else if (relevant.some(cause => cause.category === "provider")) nextAction = "wait-provider-capacity";
+    else if (relevant.some(cause => cause.action === "repair-review-system")) nextAction = "repair-review-system";
     else if (stateUnclassified) nextAction = "inspect-current-state";
     else if (relevant.some(cause => cause.action === "review-source-candidates")) nextAction = "review-source-candidates";
     else if (relevant.some(cause => cause.category === "review")) nextAction = "review-publication";
@@ -138,6 +143,7 @@ export function materialPreparationDiagnostics(input: MaterialPreparationDiagnos
   else if (recoveryUncertain || causes.some(item => item.category === "recovery")) action = "inspect-existing-output";
   else if (running) action = "wait-current-job";
   else if (causes.some(item => item.category === "provider")) action = "wait-provider-capacity";
+  else if (causes.some(item => item.action === "repair-review-system")) action = "repair-review-system";
   else if (stateUnclassified) action = "inspect-current-state";
   else if (causes.some(item => item.action === "review-source-candidates")) action = "review-source-candidates";
   else if (causes.some(item => item.category === "source")) action = causes.find(item => item.category === "source")!.action;
@@ -149,7 +155,7 @@ export function materialPreparationDiagnostics(input: MaterialPreparationDiagnos
   else if (requiredSlots.length || causes.some(item => item.category === "images")) action = "complete-image-slots";
   else if (input.approved && !input.approvalReceiptCurrent) action = "review-publication";
   else if (!input.approved && input.contentPassed === true) action = "approve-material";
-  const states: Record<Action, string> = { ready: "ready", "wait-current-job": "in-progress", "inspect-existing-output": "needs-recovery",
+  const states: Record<Action, string> = { "repair-review-system": "needs-system-repair", ready: "ready", "wait-current-job": "in-progress", "inspect-existing-output": "needs-recovery",
     "review-source-candidates": "needs-source", "collect-source-photo": "needs-source", "complete-image-slots": "needs-images",
     "repair-text-sections": "needs-text", "review-publication": "needs-review", "inspect-current-state": "needs-inspection", "approve-material": "needs-approval",
     "verify-published-result": "published", "verify-scheduled-result": "scheduled", "wait-provider-capacity": "needs-provider" };

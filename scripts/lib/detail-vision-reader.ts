@@ -61,12 +61,16 @@ function stringList(value: unknown): string[] {
 export function parseDetailVisionResponse(text: string): DetailVisionResult {
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
-  if (start < 0 || end <= start) return { transcript: [], facts: [] };
+  if (start < 0 || end <= start) throw new Error("SOURCE_REVIEW_RESPONSE_INVALID: 판독 JSON이 없습니다.");
   try {
     const parsed = JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>;
+    if (!parsed || !Array.isArray(parsed.transcript) || !Array.isArray(parsed.facts) ||
+        [...parsed.transcript, ...parsed.facts].some(value => typeof value !== "string")) {
+      throw new Error("invalid transcript/facts");
+    }
     return { transcript: stringList(parsed.transcript), facts: stringList(parsed.facts) };
   } catch {
-    return { transcript: [], facts: [] };
+    throw new Error("SOURCE_REVIEW_RESPONSE_INVALID: 판독 응답의 형식을 확인할 수 없습니다.");
   }
 }
 
@@ -90,7 +94,10 @@ export function acceptDetailVisionFacts(result: DetailVisionResult): { accepted:
     if (!match || PROMOTION.test(fact)) { rejected.push(fact); continue; }
     const value = match[2]!;
     const numbers = value.match(NUMBER) || [];
-    const numbersGrounded = numbers.every((number) => transcript.includes(compact(number)));
+    const sourceNumbers = new Set((result.transcript.join("\n").normalize("NFKC").match(NUMBER) || []).map(compact));
+    const quantities = value.normalize("NFKC").match(/\d[\d,.]*\s*(?:ml|kg|mg|cm|mm|mah|wh|hz|w|g|l|v|%|개|장|팩|시간|분|초)(?![a-z])/giu) || [];
+    const sourceQuantities = new Set((result.transcript.join("\n").normalize("NFKC").match(/\d[\d,.]*\s*(?:ml|kg|mg|cm|mm|mah|wh|hz|w|g|l|v|%|개|장|팩|시간|분|초)(?![a-z])/giu) || []).map(compact));
+    const numbersGrounded = numbers.every((number) => sourceNumbers.has(compact(number))) && quantities.every(quantity => sourceQuantities.has(compact(quantity)));
     const words = value.split(/[\s,·/()]+/u).filter((word) => word.length >= 2 && !/^\d/u.test(word));
     const wordsGrounded = words.length === 0 || words.some((word) => transcript.includes(compact(word)));
     if (numbersGrounded && wordsGrounded && transcript.length > 0) accepted.push(`${match[1]!.trim()}: ${value.trim()}`);

@@ -793,6 +793,9 @@ async function readDetailFactsWithVision(kind: "SHOPPING" | "TRAVEL", name: stri
     }),
   });
   onReading?.(report);
+  if (report.status === "failed") {
+    throw Object.assign(new Error("SOURCE_REVIEW_RESPONSE_INVALID: 상세 이미지 판독이 완료되지 않았습니다. 기존 원고와 사진을 보존하고 판독 단계부터 다시 확인하세요."), { code: "SOURCE_REVIEW_RESPONSE_INVALID" });
+  }
   console.log(`   👁️ 상세 이미지 판독: ${report.status}, ${report.imageCount}구간, 채택 ${report.acceptedFacts.length}줄 / 제외 ${report.rejectedFacts.length}줄${report.error ? ` (${report.error})` : ""}`);
   if (report.acceptedFacts.length === 0) return [];
   const accepted = report.acceptedFacts.map((line) => isolateSellerEvidenceText(line, 200)).filter(Boolean);

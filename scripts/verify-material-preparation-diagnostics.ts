@@ -2,6 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { applyMaterialPreparationWorkflowGuard, materialPreparationDiagnostics } from "../src/lib/material-preparation-diagnostics";
 
+test('review infrastructure failures outrank photo rejection and never recommend regeneration', () => {
+  for (const code of ['CODEX_OUTPUT_SCHEMA_INVALID', 'SOURCE_REVIEW_RESPONSE_INVALID']) {
+    const result = materialPreparationDiagnostics({ ready: false, approved: false, approvalReceiptCurrent: false,
+      contentPassed: true, imageGeneration: { status: 'incomplete', errors: [`PUBLISH_IMAGE_AUDIT_FAILED: ${code}: failed`] },
+      imageSlots: [{ sectionId: 'scene', minimum: 1, missing: 1, generationMissing: 1 }], sourceKinds: { scene: 'staged-ai' } });
+    assert.equal(result.nextAction.action, 'repair-review-system');
+    assert.equal(result.requiredSlots[0].nextAction, 'repair-review-system');
+  }
+});
+
 test('provider quota pauses preparation instead of recommending new source or image generation', () => {
   const diagnostics = materialPreparationDiagnostics({ ready: false, approved: false, approvalReceiptCurrent: false,
     contentPassed: true,

@@ -33,7 +33,13 @@ async function main() {
   assert.ok(rejected.includes("흡입력 최고 수준"), "unlabelled claims are rejected");
   const typed = extractExplicitProductFacts(accepted.join("\n"), "ocr");
   assert.ok(typed.some((fact) => /500\s*ml/iu.test(fact)), `accepted lines feed the existing extractor: ${typed.join(" | ")}`);
-  assert.deepEqual(parseDetailVisionResponse("not json"), { transcript: [], facts: [] });
+  assert.throws(() => parseDetailVisionResponse("not json"), /SOURCE_REVIEW_RESPONSE_INVALID/u);
+  assert.throws(() => parseDetailVisionResponse('{"transcript":[],"facts":"bad"}'), /SOURCE_REVIEW_RESPONSE_INVALID/u);
+  assert.deepEqual(acceptDetailVisionFacts({ transcript: ["용량 100ml"], facts: ["용량: 10ml"] }).accepted, []);
+  assert.deepEqual(acceptDetailVisionFacts({ transcript: ["중량 500g"], facts: ["용량: 500ml"] }).accepted, []);
+  const malformed = await readDetailImagesWithVision({ kind: "SHOPPING", productName: "테스트", imagePaths: ["fixture.png"], run: async () => "not json" });
+  assert.equal(malformed.status, "failed");
+  assert.match(malformed.error!, /SOURCE_REVIEW_RESPONSE_INVALID/u);
   assert.deepEqual(acceptDetailVisionFacts({ transcript: [], facts: ["용량: 500ml"] }).accepted, [], "no transcript, no facts");
 
   const prompt = buildDetailVisionPrompt("TRAVEL", "대마도 2일 패키지");

@@ -17,6 +17,7 @@ export type CodexDraftFailureKind =
   | "non-retryable";
 
 export type CodexDraftTerminalFailureCode =
+  | "CODEX_OUTPUT_SCHEMA_INVALID"
   | "CODEX_AUTH_REQUIRED"
   | "CODEX_MODEL_INCOMPATIBLE"
   | "CODEX_TIMEOUT"
@@ -178,6 +179,7 @@ export function classifyCodexDraftFailure(error: unknown): CodexDraftFailureKind
 
 /** Stable public code for a terminal provider failure. */
 export function codexDraftTerminalFailureCode(error: unknown): CodexDraftTerminalFailureCode | null {
+  if (errorChain(error).some(record => record.code === "CODEX_OUTPUT_SCHEMA_INVALID")) return "CODEX_OUTPUT_SCHEMA_INVALID";
   // The classifier gives definitive nested codes precedence over a transient wrapper.
   const kind = classifyCodexDraftFailure(error);
   if (kind === "authentication") return "CODEX_AUTH_REQUIRED";
@@ -192,7 +194,7 @@ export function codexDraftTerminalFailureCode(error: unknown): CodexDraftTermina
 export function codexDraftStructuredFailureCode(error: unknown): CodexDraftTerminalFailureCode | null {
   const hasProviderCode = errorChain(error).some((record) =>
     typeof record.code === "string"
-    && /^(?:CODEX_AUTH_REQUIRED|CODEX_MODEL_INCOMPATIBLE|CODEX_TIMEOUT|CODEX_TRANSIENT_FAILURE|CODEX_USAGE_LIMIT_REACHED)$/u.test(record.code.toUpperCase()));
+    && /^(?:CODEX_OUTPUT_SCHEMA_INVALID|CODEX_AUTH_REQUIRED|CODEX_MODEL_INCOMPATIBLE|CODEX_TIMEOUT|CODEX_TRANSIENT_FAILURE|CODEX_USAGE_LIMIT_REACHED)$/u.test(record.code.toUpperCase()));
   return hasProviderCode ? codexDraftTerminalFailureCode(error) : null;
 }
 
