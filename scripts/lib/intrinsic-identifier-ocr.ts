@@ -19,7 +19,7 @@ export type IntrinsicIdentifierOcrWord = {
 };
 export type IntrinsicIdentifierOcrTranscript = {
   preset: string; text: string; normalized: string; confidence: number;
-  words: IntrinsicIdentifierOcrWord[]; cropSha256: string;
+  words: IntrinsicIdentifierOcrWord[]; excludedWords?: IntrinsicIdentifierOcrWord[]; cropSha256: string;
 };
 export type IntrinsicIdentifierOcrImageEvidence = {
   originalSha256: string; box: IntrinsicIdentifierBox; pixelBox: PixelBox; regionSha256: string;
@@ -39,11 +39,12 @@ export type IntrinsicIdentifierOcrResult = {
 
 const PRESETS = ["raw-1x", "gray-normal-invert-2x", "gray-normal-invert-threshold-2x"] as const;
 const CONFIG = Object.freeze({ version: INTRINSIC_IDENTIFIER_OCR_VERSION, presets: PRESETS,
-  psm: 7, language: "eng", threshold: 128, confidence: 85, consensus: 2,
+  psm: 7, fallbackPsm: 11, language: "eng", threshold: 128, confidence: 85, consensus: 2,
   dictionary: false, kernel: "lanczos3", maximumFileBytes: 16 * 1024 * 1024,
   maximumPixels: 24_000_000, maximumDimension: 12_000,
   maximumNormalizedWidth: 800, maximumNormalizedHeight: 250, maximumAreaRatio: 0.12,
-  regionProcessing: "bounded-word-padding/v1", paddingHeightRatio: 0.15, minimumPaddingPixels: 3, maximumPaddingPixels: 24,
+  regionProcessing: "bounded-word-padding/v2", paddingHeightRatio: 0.75, minimumPaddingPixels: 3, maximumPaddingPixels: 24,
+  sparseWordMinimumObservedOverlap: 0.25,
   maximumConcurrentNativeJobs: 2 });
 const sha = (bytes: Buffer | string): string => crypto.createHash("sha256").update(bytes).digest("hex");
 const configHash = sha(JSON.stringify(CONFIG));
@@ -71,7 +72,7 @@ function validBox(box: IntrinsicIdentifierBox): boolean {
   return right > left && bottom > top && right - left <= CONFIG.maximumNormalizedWidth &&
     bottom - top <= CONFIG.maximumNormalizedHeight && (right - left) * (bottom - top) / 1_000_000 <= CONFIG.maximumAreaRatio;
 }
-async function prepareRegion(bytes: Buffer, box: IntrinsicIdentifierBox): Promise<{ raw: Buffer; pixelBox: PixelBox }> {
+async function prepareRegion(bytes: Buffer, box: IntrinsicIdentifierBox): Promise<{ raw: Buffer; pixelBox: PixelBox; observedBox: PixelBox }> {
   const meta = await sharp(bytes, { limitInputPixels: CONFIG.maximumPixels, animated: false }).metadata();
   if (!["jpeg", "png", "webp"].includes(meta.format || "") || (meta.pages || 1) !== 1 || !meta.width || !meta.height ||
     Math.max(meta.width, meta.height) > CONFIG.maximumDimension || meta.width * meta.height > CONFIG.maximumPixels) throw Error("INPUT_IMAGE_LIMIT");
@@ -79,8 +80,9 @@ async function prepareRegion(bytes: Buffer, box: IntrinsicIdentifierBox): Promis
   const width = swap ? meta.height : meta.width; const height = swap ? meta.width : meta.height;
   const left = Math.floor(box[0] * width / 1000); const top = Math.floor(box[1] * height / 1000);
   const right = Math.ceil(box[2] * width / 1000); const bottom = Math.ceil(box[3] * height / 1000);
-  // A model's tight word box can clip a few upper/lower strokes. Recover only
-  // a fixed, small local margin; never search other locations or tune to a word.
+  // A model's word box can be displaced vertically by part of a glyph height.
+  // Keep one deterministic local margin (at most 24 px), independent of the
+  // expected literal and OCR result; never search until a desired word appears.
   const observedWidth = right - left, observedHeight = bottom - top;
   if (observedWidth < 24 || observedHeight < 8 || observedWidth > 2500 || observedHeight > 600 ||
     observedWidth / observedHeight < 1 || observedWidth / observedHeight > 35) throw Error("WORD_REGION_LIMIT");
@@ -93,7 +95,8 @@ async function prepareRegion(bytes: Buffer, box: IntrinsicIdentifierBox): Promis
     pixelBox.width / pixelBox.height < 1 || pixelBox.width / pixelBox.height > 35 ||
     pixelBox.width / width > CONFIG.maximumNormalizedWidth / 1000 || pixelBox.height / height > CONFIG.maximumNormalizedHeight / 1000 ||
     pixelBox.width * pixelBox.height / (width * height) > CONFIG.maximumAreaRatio) throw Error("PADDED_WORD_REGION_LIMIT");
-  return { raw: await sharp(bytes, { limitInputPixels: CONFIG.maximumPixels }).rotate().extract(pixelBox).png().toBuffer(), pixelBox };
+  return { raw: await sharp(bytes, { limitInputPixels: CONFIG.maximumPixels }).rotate().extract(pixelBox).png().toBuffer(), pixelBox,
+    observedBox: { left: left - paddedLeft, top: top - paddedTop, width: observedWidth, height: observedHeight } };
 }
 function wordsFromTsv(tsv: string): IntrinsicIdentifierOcrWord[] {
   if (tsv.length > 1024 * 1024) throw Error("TSV_LIMIT");
@@ -117,7 +120,7 @@ function consensus(transcripts: IntrinsicIdentifierOcrTranscript[]): IntrinsicId
     const group = groups.get(transcript.normalized) || [];
     group.push(transcript); groups.set(transcript.normalized, group);
   }
-  const winner = [...groups.values()].find(group => group.length >= CONFIG.consensus);
+  const winner = [...groups.values()].find(group => new Set(group.map(row => row.preset.replace(/-psm11$/u, ""))).size >= CONFIG.consensus);
   return winner ? { literal: winner[0].text, normalized: winner[0].normalized,
     minimumConfidence: Math.min(...winner.map(item => item.confidence)), presets: winner.map(item => item.preset) } : null;
 }
@@ -184,21 +187,42 @@ export async function reviewIntrinsicIdentifierOcr(options: IntrinsicIdentifierO
       const images: IntrinsicIdentifierOcrImageEvidence[] = [];
       for (const [index, region] of regions.entries()) {
         const transcripts: IntrinsicIdentifierOcrTranscript[] = [];
-        for (const preset of PRESETS) {
+        // Sparse text is a bounded fallback for product edges mistaken for text.
+        // It uses the same fixed region and budget, and never an expected word.
+        for (const { preset, psm } of [
+          ...PRESETS.map(preset => ({ preset, psm: CONFIG.psm })),
+          ...PRESETS.map(preset => ({ preset, psm: CONFIG.fallbackPsm })),
+        ]) {
+          if (psm === CONFIG.fallbackPsm && consensus(transcripts)) break;
           const remaining = deadline - now();
           if (remaining <= 0) return { status: "unavailable", reason: "OCR_BUDGET_EXHAUSTED" };
           let image = sharp(region.raw);
           if (preset !== "raw-1x") image = image.resize(region.pixelBox.width * 2, region.pixelBox.height * 2, { kernel: "lanczos3" }).greyscale().normalize().negate();
           if (preset === "gray-normal-invert-threshold-2x") image = image.threshold(CONFIG.threshold);
           const bytes = await image.png().toBuffer();
-          const file = path.join(directory, `${index}-${preset}.png`);
+          const transcriptPreset = psm === CONFIG.psm ? preset : `${preset}-psm11`;
+          const file = path.join(directory, `${index}-${transcriptPreset}.png`);
           fs.writeFileSync(file, bytes, { flag: "wx" });
           const tsv = await (dependencies.run || execute)(engine.binaryPath, [file, "stdout", "--tessdata-dir", path.dirname(engine.traineddataPath),
-            "-l", "eng", "--psm", "7", "-c", "load_system_dawg=0", "-c", "load_freq_dawg=0",
+            "-l", "eng", "--psm", String(psm), "-c", "load_system_dawg=0", "-c", "load_freq_dawg=0",
             "-c", "tessedit_create_tsv=1", "-c", "tessedit_create_txt=0"], Math.max(1, Math.min(4000, deadline - now())));
-          const words = wordsFromTsv(tsv); const text = words.map(word => word.text).join(" ");
-          transcripts.push({ preset, text, normalized: normalizeIntrinsicIdentifierLiteral(text),
-            confidence: words.length ? Math.min(...words.map(word => word.confidence)) : -1, words, cropSha256: sha(bytes) });
+          const rawWords = wordsFromTsv(tsv);
+          const scale = preset === "raw-1x" ? 1 : 2;
+          const roi = region.observedBox;
+          // Sparse mode may also see a housing edge in the added margin. Keep
+          // only words intersecting the independently observed location, based
+          // on geometry alone, never their letters or confidence. Retain rejects.
+          const inObservedLocation = (word: IntrinsicIdentifierOcrWord): boolean => {
+            const overlapWidth = Math.max(0, Math.min(word.left + word.width, (roi.left + roi.width) * scale) - Math.max(word.left, roi.left * scale));
+            const overlapHeight = Math.max(0, Math.min(word.top + word.height, (roi.top + roi.height) * scale) - Math.max(word.top, roi.top * scale));
+            return word.width > 0 && word.height > 0 && overlapWidth * overlapHeight / (word.width * word.height) >= CONFIG.sparseWordMinimumObservedOverlap;
+          };
+          const words = psm === CONFIG.fallbackPsm ? rawWords.filter(inObservedLocation) : rawWords;
+          const excludedWords = psm === CONFIG.fallbackPsm ? rawWords.filter(word => !inObservedLocation(word)) : [];
+          const text = words.map(word => word.text).join(" ");
+          transcripts.push({ preset: transcriptPreset, text, normalized: normalizeIntrinsicIdentifierLiteral(text),
+            confidence: words.length ? Math.min(...words.map(word => word.confidence)) : -1, words,
+            ...(excludedWords.length ? { excludedWords } : {}), cropSha256: sha(bytes) });
         }
         images.push({ originalSha256: index === 0 ? options.sourceSha256 : options.candidateSha256,
           box: [...(index === 0 ? options.sourceBox : options.candidateBox)], pixelBox: region.pixelBox,

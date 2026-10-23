@@ -885,7 +885,8 @@ function engineIssue(evidence: IntrinsicIdentifierOcrEvidence, requireNative: bo
 }
 const consensus = (value: IntrinsicIdentifierOcrEvidence["source"]["consensus"], literal: string) => !!value &&
   value.normalized === normalizeIntrinsicIdentifierLiteral(literal) && value.minimumConfidence >= 85 &&
-  new Set(value.presets).size >= 2 && value.presets.every(preset => ["raw-1x", "gray-normal-invert-2x", "gray-normal-invert-threshold-2x"].includes(preset));
+  new Set(value.presets.map(preset => preset.replace(/-psm11$/u, ""))).size >= 2 &&
+  value.presets.every(preset => /^(raw-1x|gray-normal-invert-2x|gray-normal-invert-threshold-2x)(-psm11)?$/u.test(preset));
 function regionMetadataValid(value: PublicationIdentifierRegionEvidence): boolean {
   if (!value || !validBox(value.box) || !validSha(value.originalSha256) || !validSha(value.regionSha256) ||
       !Number.isInteger(value.imageWidth) || !Number.isInteger(value.imageHeight) || value.imageWidth <= 0 || value.imageHeight <= 0 ||
@@ -1350,7 +1351,7 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
         const checked = await (dependencies.ocr || reviewIntrinsicIdentifierOcr)({ sourcePath: sourceFile.path, sourceSha256: sourceFile.sha256,
           sourceBox: pair.sourceBox!, candidatePath: input.candidatePath, candidateSha256: input.candidateSha256, candidateBox: pair.candidateBox!, sourceLiteral: pair.sourceLiteral, workspace: input.workspace });
         if (!unchanged()) throw Error("BLIND_PRINT_INPUT_CHANGED_DURING_OCR");
-        if (!checked.evidence || !["match", "conflict"].includes(checked.status)) return { ...result, reason: "BLIND_PRINT_OCR_UNAVAILABLE" };
+        if (!checked.evidence || !["match", "conflict"].includes(checked.status)) return { ...result, reason: `BLIND_PRINT_OCR_UNAVAILABLE: ${checked.reason}` };
         const blindObservations = { source: selected.evidence, candidate: observed.candidate };
         if (checked.status === "conflict") {
           const conflict: IntrinsicIdentifierServerConflict = { version: "intrinsic-identifier-conflict/v1", pair, evidence: checked.evidence, blindObservations };

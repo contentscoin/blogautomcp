@@ -42,14 +42,14 @@ async function main(): Promise<void> {
   check(conflict.evidence?.engine.binarySha256 === hash(fs.readFileSync(binary)) && conflict.evidence.engine.traineddataSha256 === hash(fs.readFileSync(traineddata)), "runtime/data hashes retained");
   check(conflict.evidence?.source.transcripts.every(row => row.words[0]?.confidence === 91 && /^[a-f0-9]{64}$/u.test(row.cropSha256)), "raw confidence and crop hashes retained");
   assert.deepEqual(conflict.evidence?.source.box, options.sourceBox); assertions++;
-  assert.deepEqual(conflict.evidence?.source.pixelBox, { left: 85, top: 85, width: 330, height: 130 }); assertions++;
+  assert.deepEqual(conflict.evidence?.source.pixelBox, { left: 76, top: 76, width: 348, height: 148 }); assertions++;
   check(conflict.evidence?.engine.configHash !== "e6ce0e3c79e00a6e9df0da2f5f137f1dcf92cd927d9fd6dba625b6da486b6360", "padding policy/config changes the pre-padding evidence/cache hash");
-  check(originalArgs.length === 6 && originalArgs.every(args => args.includes("load_system_dawg=0") && args.includes("load_freq_dawg=0") && args.includes("7")), "six bounded blind PSM7 calls, dictionaries off");
+  check(originalArgs.length === 6 && originalArgs.every(args => args.includes("load_system_dawg=0") && args.includes("load_freq_dawg=0") && args.includes("7")), "six bounded blind PSM7 calls when consensus exists, dictionaries off");
   check(!originalArgs.flat().some(arg => /Brandium|Brandum|whitelist/iu.test(arg)), "expected literals never passed to OCR");
   for (const [box, expectedPixel] of [
-    [[0, 0, 300, 100], { left: 0, top: 0, width: 315, height: 115 }],
-    [[700, 900, 1000, 1000], { left: 685, top: 885, width: 315, height: 115 }],
-    [[100, 100, 150, 108], { left: 97, top: 97, width: 56, height: 14 }],
+    [[0, 0, 300, 100], { left: 0, top: 0, width: 324, height: 124 }],
+    [[700, 900, 1000, 1000], { left: 676, top: 876, width: 324, height: 124 }],
+    [[100, 100, 150, 108], { left: 94, top: 94, width: 62, height: 20 }],
     [[100, 100, 300, 280], { left: 76, top: 76, width: 248, height: 228 }],
   ] as const) {
     const padded = await reviewIntrinsicIdentifierOcr({ ...options, candidateBox: box }, mock(["Brandium", "Brandium", "Brandium"], ["Brandum", "Brandum", "Brandum"]));
@@ -87,6 +87,17 @@ async function main(): Promise<void> {
   check(sourceMismatch.status === "unavailable" && sourceMismatch.reason === "SOURCE_LITERAL_NOT_CONFIRMED", "source OCR must independently confirm native source literal");
   const empty = await reviewIntrinsicIdentifierOcr(options, mock(["", "", ""], ["Brandum", "Brandum", "Brandum"]));
   check(empty.status === "unavailable", "unreadable source gives no conflict");
+  let fallbackCalls = 0;
+  const fallback = await reviewIntrinsicIdentifierOcr(options, { candidates: [binary], run: async (_binary, args) => {
+    fallbackCalls++;
+    if (!args[0].includes("psm11")) return tsv("", 0);
+    const scale = args[0].includes("raw-1x") ? 1 : 2;
+    const literal = path.basename(args[0]).startsWith("0-") ? "Brandium" : "Brandum";
+    return tsv(literal).split("\n")[0] + `\n5\t1\t1\t1\t1\t1\t${30*scale}\t${30*scale}\t${50*scale}\t${20*scale}\t91\t${literal}` +
+      `\n5\t1\t2\t1\t1\t1\t0\t0\t${10*scale}\t${10*scale}\t99\tUnrelated`;
+  } });
+  check(fallback.status === "conflict" && fallbackCalls === 10, "bounded sparse fallback uses two different transforms without a target word");
+  check(fallback.evidence?.candidate.transcripts.filter(row => row.preset.endsWith("psm11")).every(row => row.excludedWords?.[0]?.text === "Unrelated"), "even high-confidence margin words are excluded by geometry and retained verbatim");
   for (const box of [[0, 0, 1000, 1000], [100, 100, 400, 99], [-1, 0, 200, 100], [0, 0, 900, 100], [0.5, 0, 200, 100], [0, 0, 800, 250]] as const) {
     let calls = 0;
     const result = await reviewIntrinsicIdentifierOcr({ ...options, candidateBox: box }, { candidates: [binary], run: async () => { calls += 1; return ""; } });
@@ -147,11 +158,14 @@ async function main(): Promise<void> {
       check(clipped.status === "conflict" && clipped.evidence?.nativeExecution === true, "exact automatic clipped ROI recovers with fixed bounded pixel margin");
       check(clipped.evidence?.source.consensus?.normalized === "voltium" && clipped.evidence.candidate.consensus?.normalized === "voltum", "automatic ROI independent letters remain different without an expected candidate word");
       assert.deepEqual(clipped.evidence?.source.box, clippedOptions.sourceBox); assert.deepEqual(clipped.evidence?.candidate.box, clippedOptions.candidateBox); assertions += 2;
-      assert.deepEqual(clipped.evidence?.source.pixelBox, { left: 242, top: 344, width: 346, height: 107 });
-      assert.deepEqual(clipped.evidence?.candidate.pixelBox, { left: 513, top: 756, width: 105, height: 47 }); assertions += 2;
+      assert.deepEqual(clipped.evidence?.source.pixelBox, { left: 231, top: 333, width: 368, height: 129 });
+      assert.deepEqual(clipped.evidence?.candidate.pixelBox, { left: 495, top: 738, width: 141, height: 83 }); assertions += 2;
       check((clipped.evidence?.source.consensus?.minimumConfidence || 0) >= 85 && (clipped.evidence?.candidate.consensus?.minimumConfidence || 0) >= 85,
         "the original confidence/consensus gates are preserved");
       check(hash(fs.readFileSync(actualSource)) === clippedOptions.sourceSha256 && hash(fs.readFileSync(actualCandidate)) === clippedOptions.candidateSha256, "actual clipped-ROI test preserves both original files");
+      const displaced = await reviewIntrinsicIdentifierOcr({ ...realOptions, sourceBox: [296, 423, 665, 522], candidateBox: [417, 618, 484, 636] });
+      check(displaced.status === "conflict" && displaced.evidence?.nativeExecution === true, "161 native observer's vertically displaced box retains the actual defect");
+      check(displaced.evidence?.source.consensus?.normalized === "voltium" && displaced.evidence.candidate.consensus?.normalized === "voltum", "sparse text excludes housing contours without changing letters or confidence gates");
     } finally { if (previousPath === undefined) delete process.env.TESSERACT_PATH; else process.env.TESSERACT_PATH = previousPath; }
   }
   console.log(JSON.stringify({ status: "PASS", assertions, workspace, providerCalls: 0, originalWrites: 0 }));

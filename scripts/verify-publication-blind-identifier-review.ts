@@ -206,6 +206,15 @@ async function main() {
   assert.ok(native.api.publicationIdentifierReviewEvidenceIssue(forgedDiagnostic, input)); checks++;
   const matched = load({ candidateLiteral: sourceWord }); const match = await matched.api.reviewPublicationIdentifiers(input);
   assert.equal(match.status, "pass"); assert.equal(matched.api.publicationIdentifierReviewEvidenceIssue(match, input), null); checks += 2;
+  const sparse = load({ ocrMutate: (value: IntrinsicIdentifierOcrEvidence) => {
+    value.candidate.consensus!.presets = ["raw-1x-psm11", "gray-normal-invert-2x-psm11"];
+  } });
+  const sparseResult = await sparse.api.reviewPublicationIdentifiers(input);
+  assert.equal(sparseResult.status, "conflict"); assert.equal(sparse.api.publicationIdentifierReviewEvidenceIssue(sparseResult, input), null); checks += 2;
+  const repeatedTransform = load({ ocrMutate: (value: IntrinsicIdentifierOcrEvidence) => {
+    value.candidate.consensus!.presets = ["raw-1x", "raw-1x-psm11"];
+  } });
+  assert.equal((await repeatedTransform.api.reviewPublicationIdentifiers(input)).status, "hold"); checks++;
   const negative = load({ candidateLiteral: sourceWord, comparison: { ...row(sourceWord), accepted: false } });
   const heldNegative = await negative.api.reviewPublicationIdentifiers(input); assert.equal(heldNegative.status, "hold"); assert.equal(heldNegative.comparison!.accepted, false); checks += 2;
   for (const mode of [{ ocrUnavailable: true }, { ocrMutate: (value: IntrinsicIdentifierOcrEvidence) => { value.candidate.consensus!.minimumConfidence = 84; } },
