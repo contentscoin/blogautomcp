@@ -191,6 +191,23 @@ test('atomic insert blocks connection rotation, PC replacement and competing req
   } finally { f.db.close(); }
 });
 
+test('idle heartbeat changes do not block recovery while live busy or unavailable state does', async () => {
+  const f = fixture();
+  try {
+    f.race(() => f.db.prepare('UPDATE devices SET status_json=?').run(JSON.stringify({ checkedAt: new Date().toISOString(), naverSessionPresent: true, backgroundWork: { busy: false, publishing: 0, drafting: 0, processes: 0, imageGeneration: 0 } })));
+    assert.equal((await f.call('materials_repair_blocked', request)).ok, true);
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM agent_jobs').get().n, 1);
+  } finally { f.db.close(); }
+  for (const snapshot of [null, 'invalid json', '{}', '{"backgroundWork":{"busy":"false"}}', ...['publishing','drafting','processes','imageGeneration'].map(key => JSON.stringify({ backgroundWork: { busy: false, [key]: 1 } })), '{"backgroundWork":{"busy":false,"error":"BACKGROUND_STATUS_UNAVAILABLE"}}']) {
+    const blocked = fixture();
+    try {
+      blocked.race(() => blocked.db.prepare('UPDATE devices SET status_json=?').run(snapshot));
+      assert.equal((await blocked.call('materials_repair_blocked', request)).code, 'AGENT_STATE_CHANGED');
+      assert.equal(blocked.db.prepare('SELECT COUNT(*) AS n FROM agent_jobs').get().n, 0);
+    } finally { blocked.db.close(); }
+  }
+});
+
 test('status separates transport completion from workflow readiness and never exposes manuscripts', async () => {
   const f = fixture();
   try {
