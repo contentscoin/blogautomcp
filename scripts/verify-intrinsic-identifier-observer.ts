@@ -159,7 +159,7 @@ async function main(): Promise<void> {
   const requestMutation = await observeIntrinsicIdentifier(options, { review: async request => { request.imagePaths!.push("unexpected-second-image"); return raw; } });
   check(requestMutation.status === "invalid" && !requestMutation.evidence, "request/image-order mutation blocked");
   const bad = await observeIntrinsicIdentifier(options, { review: async () => wire({ ...observation, literal: "maybe Brandium" }) });
-  check(bad.status === "invalid", "malformed literal never triggers repair/retry");
+  check(bad.status === "invalid", "repeated malformed literal remains invalid without normalization");
   const second = await observeIntrinsicIdentifier(options, { review: async () => wire({ ...observation, literal: "Brandium" }) });
   check(second.evidence?.observation.literal === "Brandium" && second.evidence.nativeExecution === false, "DI never consumes/reuses native cache");
   const mixed = wire({ ...observation, literal: "Br\u0430ndum" });
@@ -168,6 +168,11 @@ async function main(): Promise<void> {
   check(formatCalls===2&&recovered.status==="observed"&&recovered.evidence?.rawResponse===raw,"one bounded recovery for received script-format failure only");
   check(recovered.rejectedFormatAttempt?.rawResponse===mixed&&recovered.rejectedFormatAttempt.responseSha256===hash(mixed),"first invalid raw observation retained unchanged");
   check(requests[0].userPrompt===requests[1].userPrompt&&requests[0].systemPrompt===requests[1].systemPrompt&&JSON.stringify(requests[0].imagePaths)===JSON.stringify(requests[1].imagePaths),"recovery has no old literal, brand or corrective hint");
+  const ellipsis=wire({...observation,literal:"Volt…"});let ellipsisCalls=0;
+  const uncertainRaw=wire({literal:"",box:null,identifierRole:"none",location:"not-observed",readability:"unreadable"});
+  const ellipsisRecovery=await observeIntrinsicIdentifier(options,{review:async()=>++ellipsisCalls===1?ellipsis:uncertainRaw});
+  check(ellipsisCalls===2&&ellipsisRecovery.status==="unreadable"&&ellipsisRecovery.evidence?.rawResponse===uncertainRaw,"received ellipsis format error gets one same-image retry and can honestly remain unreadable");
+  check(ellipsisRecovery.rejectedFormatAttempt?.rawResponse===ellipsis,"malformed first response retained without letter repair");
   let repeatedCalls=0;const repeated=await observeIntrinsicIdentifier(options,{review:async()=>{repeatedCalls++;return mixed;}});
   check(repeatedCalls===2&&repeated.status==="invalid"&&!repeated.evidence,"two invalid replies hold without third attempt or letter normalization");
   let limitedClock=0,limitedCalls=0;const shortBudget=await observeIntrinsicIdentifier(options,{now:()=>limitedClock,review:async()=>{limitedCalls++;limitedClock=31_000;return mixed;}});
@@ -205,8 +210,8 @@ async function main(): Promise<void> {
   let invalidNativeCalls = 0;
   const invalidNative = vmNative(async () => { invalidNativeCalls++; return "unknown malformed output"; });
   check((await invalidNative.observeIntrinsicIdentifier(options)).status === "invalid" &&
-    (await invalidNative.observeIntrinsicIdentifier(options)).status === "invalid" && invalidNativeCalls === 1,
-  "malformed native observation remains consumed for exact image/policy");
+    (await invalidNative.observeIntrinsicIdentifier(options)).status === "invalid" && invalidNativeCalls === 2,
+  "malformed native observation consumes at most two attempts and cache cannot reset that budget");
   let release: (() => void) | undefined; const pending = new Promise<void>(resolve => { release = resolve; });
   let started = 0;
   const limited = vmNative(async () => { started++; await pending; return raw; });
@@ -220,6 +225,6 @@ async function main(): Promise<void> {
   check(third.status === "unavailable" && third.reason === "OBSERVER_CAPACITY_HOLD" && started === 2, "native concurrency capped at two, excess calls hold");
   release!(); await Promise.all([first, next]);
   check(hash(fs.readFileSync(file)) === options.sha256, "all original pixels preserved");
-  console.log(`PASS intrinsic identifier observer: ${checks} offline checks; one image/no expected word, at most one received mixed-script format recovery, no retry of valid ambiguity or unknown transport, immutable raw bindings and bounded singleflight; actual provider calls 0`);
+  console.log(`PASS intrinsic identifier observer: ${checks} offline checks; one image/no expected word, at most one received malformed-response recovery, no retry of valid ambiguity or unknown transport, immutable raw bindings and bounded singleflight; actual provider calls 0`);
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

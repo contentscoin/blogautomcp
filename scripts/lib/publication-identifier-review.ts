@@ -10,7 +10,7 @@ import { INTRINSIC_IDENTIFIER_SCHEMA, corroboratableIdentifierPairs, intrinsicId
 import { corroborateIntrinsicIdentifierPair } from "./intrinsic-identifier-corroboration";
 import { normalizeIntrinsicIdentifierLiteral, reviewIntrinsicIdentifierOcr, INTRINSIC_IDENTIFIER_OCR_VERSION,
   type IntrinsicIdentifierOcrEvidence } from "./intrinsic-identifier-ocr";
-import { INTRINSIC_IDENTIFIER_OBSERVER_VERSION, intrinsicIdentifierObserverRequestSha256, parseIntrinsicIdentifierObserverResponse,
+import { INTRINSIC_IDENTIFIER_OBSERVER_VERSION, intrinsicIdentifierObserverRequestSha256, parseIntrinsicIdentifierObserverResponse, intrinsicIdentifierObserverResponseIssue,
   observeIntrinsicIdentifier, type IntrinsicIdentifierObserverEvidence, type IntrinsicIdentifierObserverResult } from "./intrinsic-identifier-observer";
 import { scopedPublicationEvidenceIssue, visibleMemberInclusionIssue, pixelFormatEvidenceIssue, selectedSubjectFacts, picturedMemberFacts,
   buildScopedPublicationPackets, executeScopedPublicationPacket, type ScopedReviewEvidence } from "./publication-image-scoped-review";
@@ -60,6 +60,9 @@ export interface PublicationIdentifierReviewContext {
 export interface PublicationBlindInputObservations {
   candidate: IntrinsicIdentifierObserverEvidence;
   sources: Array<{ imageIndex: number; sha256: string; evidence: IntrinsicIdentifierObserverEvidence }>;
+  /** Received malformed OPTIONAL reference observations; never absence or a positive observation. */
+  invalidSupplementalSources?: Array<{ imageIndex: number; sha256: string; nativeExecution: boolean; requestSha256: string;
+    issue: string; rawResponse: string; responseSha256: string }>;
 }
 export interface PublicationIdentifierComparison {
   sourceImageIndex: number; sourceSha256: string;
@@ -963,12 +966,16 @@ function exactSourceDigest(context: PublicationIdentifierReviewContext, identity
 }
 function observationSetIssue(observed: PublicationBlindInputObservations | undefined, prepared: ReturnType<typeof packet>, requireNative: boolean): string | null {
   try {
-    if (!observed ||
-        observerIssue(observed.candidate, prepared.context.candidateSha256, requireNative) ||
-        observed.sources.length !== prepared.context.references.length || observed.sources.some((row, index) => {
-          const expected = prepared.context.references[index];
-          return row.imageIndex !== expected.imageIndex || row.sha256 !== expected.sha256 || observerIssue(row.evidence, expected.sha256, requireNative);
-        })) return "blind per-image observations are incomplete, changed or not native";
+    if (!observed || observerIssue(observed.candidate, prepared.context.candidateSha256, requireNative)) return "candidate observation is invalid";
+    const invalid=observed.invalidSupplementalSources || [], all=[...observed.sources,...invalid];
+    if (all.length!==prepared.context.references.length || new Set(all.map(row=>row.imageIndex)).size!==all.length ||
+        observed.sources[0]?.imageIndex!==2 || observed.sources.some((row,index)=>index>0 && row.imageIndex<=observed.sources[index-1].imageIndex) ||
+        all.some(row=>!prepared.context.references.some(expected=>expected.imageIndex===row.imageIndex && expected.sha256===row.sha256)) ||
+        observed.sources.some(row=>observerIssue(row.evidence,row.sha256,requireNative)) || invalid.some(row=>
+          row.imageIndex===2 || row.nativeExecution!==true || row.requestSha256!==intrinsicIdentifierObserverRequestSha256(row.sha256) ||
+          typeof row.rawResponse!=="string" || Buffer.byteLength(row.rawResponse,"utf8")>4096 || hash(row.rawResponse)!==row.responseSha256 ||
+          !row.issue || intrinsicIdentifierObserverResponseIssue(row.rawResponse)!==row.issue || parseIntrinsicIdentifierObserverResponse(row.rawResponse)!==null))
+      return "blind per-image observations are incomplete, changed or not native";
     return null;
   } catch { return "blind per-image observations are malformed"; }
 }
@@ -1037,6 +1044,9 @@ function blindComparisonIssue(result: PublicationIdentifierReviewResult): string
 export function publicationIdentifierReviewEvidenceIssue(result: PublicationIdentifierReviewResult, expected: PublicationIdentifierReviewInput, requireNative = true): string | null {
   try {
     const prepared = packet(expected), identity = exactSourceIdentity(expected);
+    if (result.blindInputObservations?.invalidSupplementalSources?.length &&
+        (!expected.scopeGate || expected.scopeGate.kind==="scene-native-positive/v1" || scopeGateIssue(expected) ||
+          observationSetIssue(result.blindInputObservations,prepared,true))) return "invalid optional-reference diagnostic or final scope gate";
     if (result.exactPhotoThumbnailReplay) {
       const marker=result.exactPhotoThumbnailReplay;
       return isFinalPhotoThumbnail(expected) && prepared.context.references.some(r=>r.sha256===expected.primaryReference.sha256&&validSha(r.sourceSnapshotId)) &&
@@ -1105,7 +1115,7 @@ export function publicationIdentifierReviewEvidenceIssue(result: PublicationIden
       return result.version === PUBLICATION_IDENTIFIER_REVIEW_VERSION && result.strategyVersion === PUBLICATION_IDENTIFIER_BLIND_STRATEGY &&
         result.status === "pass" && result.nativeExecution === false && marker.version === "not-applicable-unprinted-reference-set/v1" &&
         !observationSetIssue(observed, prepared, true) && observed!.candidate.observation.readability === "absent" &&
-        observed!.sources.every(row => row.evidence.observation.readability === "absent") && marker.observationsSha256 === hash(JSON.stringify(observed)) &&
+        !observed!.invalidSupplementalSources?.length && observed!.sources.every(row => row.evidence.observation.readability === "absent") && marker.observationsSha256 === hash(JSON.stringify(observed)) &&
         same(result.context, prepared.context) && result.rawB === "" && result.responseSha256 === hash("") && result.comparison === null &&
         result.requestSha256 === hash(JSON.stringify({ applicability: marker, context: prepared.context })) &&
         !result.identifierConflict && !result.missingPrintEvidence && !result.identifierMatches?.length && !result.sourceLetterEvidence && !result.exactSourceIdentity && !result.ownUnprintedReference && !result.scopeOutside && !result.printApplicability && !result.brandRoleEvidence
@@ -1207,6 +1217,17 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
       for (const [index, file] of prepared.files.slice(1).entries()) {
         taskStage = "source-observer"; taskImageSha256 = file.sha256;
         const source = await observe({ path: file.path, sha256: file.sha256 });
+        const diagnostic=source.diagnostic;
+        if (index>0 && nativeExecution && unchanged() && input.scopeGate && input.scopeGate.kind!=="scene-native-positive/v1" && !scopeGateIssue(input) &&
+            source.status==="invalid" && source.reason==="OBSERVER_RESPONSE_INVALID" && diagnostic?.stage==="response" &&
+            diagnostic.imageSha256===file.sha256 && typeof diagnostic.rawResponse==="string" && Buffer.byteLength(diagnostic.rawResponse,"utf8")<=4096 &&
+            hash(diagnostic.rawResponse)===diagnostic.responseSha256 && intrinsicIdentifierObserverResponseIssue(diagnostic.rawResponse)===diagnostic.issue &&
+            !!diagnostic.issue && parseIntrinsicIdentifierObserverResponse(diagnostic.rawResponse)===null) {
+          (observed.invalidSupplementalSources ||= []).push({imageIndex:index+2,sha256:file.sha256,nativeExecution:true,
+            requestSha256:intrinsicIdentifierObserverRequestSha256(file.sha256),issue:diagnostic.issue,rawResponse:diagnostic.rawResponse,responseSha256:diagnostic.responseSha256!});
+          console.warn(`      - 보조 원본 인쇄 판독 형식 오류 기록: ${file.sha256.slice(0,12)} · ${diagnostic.issue}. 후보·주 기준 사진과 유효한 원본 검수는 계속합니다.`);
+          continue;
+        }
         if (!unchanged() || !source.evidence || observerIssue(source.evidence, file.sha256, nativeExecution))
           return { ...result, blindInputObservations: observed, reason: "BLIND_SOURCE_OBSERVATION_UNAVAILABLE", taskDiagnostic: {
             stage: "source-observer", imageSha256: file.sha256, status: source.status, reason: source.reason,
@@ -1215,7 +1236,7 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
         observed.sources.push({ imageIndex: index + 2, sha256: file.sha256, evidence: source.evidence });
       }
       result = { ...result, blindInputObservations: observed };
-      if (observed.candidate.observation.readability === "absent" && observed.sources.every(row => row.evidence.observation.readability === "absent")) {
+      if (!observed.invalidSupplementalSources?.length && observed.candidate.observation.readability === "absent" && observed.sources.every(row => row.evidence.observation.readability === "absent")) {
         if (observationSetIssue(observed, prepared, true)) return { ...result, reason: "UNPRINTED_APPLICABILITY_REQUIRES_NATIVE_OBSERVATIONS" };
         const applicability = { version: "not-applicable-unprinted-reference-set/v1" as const, observationsSha256: hash(JSON.stringify(observed)) };
         return { ...result, status: "pass", nativeExecution: false, reason: "ALL_NATIVE_OBSERVED_REFERENCE_AND_CANDIDATE_SURFACES_HAVE_NO_INTRINSIC_IDENTIFIER_B_ONLY_NOT_APPLICABLE",

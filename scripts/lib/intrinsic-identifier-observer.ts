@@ -26,7 +26,7 @@ export interface IntrinsicIdentifierObserverResult {
   reason: string;
   evidence?: IntrinsicIdentifierObserverEvidence;
   diagnostic?: { imageSha256: string; stage: "response" | "provider"; issue: string; rawResponse?: string; responseSha256?: string };
-  rejectedFormatAttempt?: { issue: "OBSERVER_LITERAL_SCRIPT_MIXED"; rawResponse: string; responseSha256: string };
+  rejectedFormatAttempt?: { issue: string; rawResponse: string; responseSha256: string };
 }
 type Review = (options: CodexDraftOptions) => Promise<string>;
 const sha = (value: Buffer | string): string => crypto.createHash("sha256").update(value).digest("hex");
@@ -155,7 +155,7 @@ export async function observeIntrinsicIdentifier(options: { path: string; sha256
     return { status: "invalid", reason: "INVALID_OBSERVER_INPUT" };
   const now = dependencies.now || Date.now;
   // Codex's existing writing transport has a one-minute minimum timer. This
-  // Only a definitely received mixed-script format error can consume one
+  // Only a definitely received malformed observation can consume one
   // further blind call, within this total deadline. Unknown transport outcomes
   // and valid observations (including ambiguity) are never retried.
   const maximumMs = Math.max(60_000, Math.min(90_000, options.maximumMs ?? 90_000));
@@ -187,8 +187,8 @@ export async function observeIntrinsicIdentifier(options: { path: string; sha256
         if (!unchanged() || JSON.stringify(request) !== requestBinding) return { status: "invalid", reason: "OBSERVER_IMAGE_OR_REQUEST_CHANGED" };
         if (now() > deadline) return { status: "unavailable", reason: "OBSERVER_TIMEOUT" };
         let parsed = parseResponse(rawResponse);
-        if (!parsed.observation && parsed.issue === "OBSERVER_LITERAL_SCRIPT_MIXED" && deadline - now() >= 60_000) {
-          rejectedFormatAttempt = { issue: "OBSERVER_LITERAL_SCRIPT_MIXED", rawResponse, responseSha256: sha(rawResponse) };
+        if (!parsed.observation && parsed.issue && typeof rawResponse === "string" && Buffer.byteLength(rawResponse,"utf8") <= MAXIMUM_RESPONSE_BYTES && deadline - now() >= 60_000) {
+          rejectedFormatAttempt = { issue: parsed.issue, rawResponse, responseSha256: sha(rawResponse) };
           // No previous literal, expected spelling or correction hint is sent.
           // Preserve both raw responses; never normalize/transliterate letters.
           const retry = { ...request, imagePaths: [...request.imagePaths!], timeoutMs: deadline - now() };

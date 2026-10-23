@@ -70,7 +70,7 @@ async function main() {
     identifierComparisons:[{sourceLiteral:"Markora",candidateLiteral:"Markra",identifierRole:"brand",sourceImageIndex:3,sourceSha256:fileHash(detail),sourceLocation:"intrinsic",candidateLocation:"intrinsic",sourceReadability:"legible",candidateReadability:"legible",sameSelectedComponent:null,sameSelectedVisibleOption:null,sourceBox,candidateBox}],reason:"literal letters differ; unknown physical-face flags remain unchanged",accepted:false};
   const moduleFile=path.resolve("scripts/lib/publication-identifier-review.ts"), actual=createRequire(moduleFile), code=ts.transpileModule(fs.readFileSync(moduleFile,"utf8"),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,esModuleInterop:true}}).outputText;
   type Mode={readability?:IntrinsicIdentifierObservation["readability"];primaryReadability?:IntrinsicIdentifierObservation["readability"];canonicalReadability?:IntrinsicIdentifierObservation["readability"];candidateLiteral?:string;app?:PublicationPrintApplicabilityRow;pair?:PublicationIdentifierComparison;
-    sourceRow?:Record<string,unknown>;sourceNative?:boolean;ocrBad?:boolean;observerNative?:boolean;sourceOnly?:boolean;invalidSchema?:boolean;providerThrow?:boolean;malformedJson?:boolean;ocrUnavailable?:boolean};
+    sourceRow?:Record<string,unknown>;sourceNative?:boolean;ocrBad?:boolean;observerNative?:boolean;sourceOnly?:boolean;invalidSchema?:boolean;providerThrow?:boolean;malformedJson?:boolean;ocrUnavailable?:boolean;invalidObserverPath?:string;unknownObserver?:boolean};
   const load=(mode:Mode={})=>{
     let appCalls=0,pairCalls=0,ocrCalls=0,sourceCalls=0;
     const loaded={exports:{}};
@@ -113,6 +113,11 @@ async function main() {
       return {...evidence(packet,mode.sourceRow||a),nativeExecution:mode.sourceNative!==false};}}
       :name==="./intrinsic-identifier-observer"?{...actual(name),observeIntrinsicIdentifier:async(options:{path:string;sha256:string})=>{
         assert.deepEqual(Object.keys(options).sort(),["path","sha256"]);checks++;
+        if(options.path===mode.invalidObserverPath){
+          if(mode.unknownObserver)return {status:"unavailable",reason:"unknown transport outcome"};
+          const rawResponse=JSON.stringify({observation:{literal:"Volt…",box:{left:167,top:604,width:56,height:14},identifierRole:"brand",location:"intrinsic",readability:"legible"}});
+          return {status:"invalid",reason:"OBSERVER_RESPONSE_INVALID",diagnostic:{imageSha256:options.sha256,stage:"response",issue:"OBSERVER_LITERAL_OR_ROLE_INVALID",rawResponse,responseSha256:hash(rawResponse)}};
+        }
         const readability=options.path===candidate?(mode.readability||"absent"):options.path===primary?(mode.primaryReadability||"unreadable"):(mode.canonicalReadability||"legible");
         const observation:IntrinsicIdentifierObservation={readability,literal:readability==="legible"?(options.path===candidate?(mode.candidateLiteral||"Markra"):"Markora"):"",box:readability==="legible"?(options.path===candidate?candidateBox:sourceBox):null,identifierRole:readability==="legible"?"brand":"none",location:readability==="legible"?"intrinsic":"not-observed"};
         const rawResponse=serializeIntrinsicIdentifierObserverResponse(observation);return {status:readability==="legible"?"observed":"unreadable",reason:"offline actual observation",evidence:{version:INTRINSIC_IDENTIFIER_OBSERVER_VERSION,nativeExecution:mode.observerNative!==false,imageSha256:options.sha256,requestSha256:intrinsicIdentifierObserverRequestSha256(options.sha256),rawResponse,responseSha256:hash(rawResponse),observation}};
@@ -463,6 +468,20 @@ async function main() {
   assert.equal(sceneHeld.status,"hold");assert.equal(sceneHeld.printObservationWarning,undefined);assert.equal(sceneSuspected.counts().sourceCalls,0);checks+=3;
   for(const mutate of [(value:PublicationIdentifierReviewInput)=>{if(value.scopeGate?.kind==="scene-native-positive/v1")value.scopeGate.nativeExecution=false;},(value:PublicationIdentifierReviewInput)=>{if(value.scopeGate?.kind==="scene-native-positive/v1"){const row=JSON.parse(value.scopeGate.rawResponse);row.checks.silhouette=false;value.scopeGate.rawResponse=JSON.stringify(row);value.scopeGate.responseSha256=hash(value.scopeGate.rawResponse);}},(value:PublicationIdentifierReviewInput)=>{if(value.scopeGate?.kind==="scene-native-positive/v1"){const row=JSON.parse(value.scopeGate.rawResponse);row.intrinsicPrintProofClaim=true;value.scopeGate.rawResponse=JSON.stringify(row);value.scopeGate.responseSha256=hash(value.scopeGate.rawResponse);}}]){const changed=copy(sceneInput);mutate(changed);assert.equal((await load().api.reviewPublicationIdentifiers(changed)).status,"hold");checks++;}
   const brand=load({readability:"legible"}),conflict=await brand.api.reviewPublicationIdentifiers(input);assert.equal(conflict.status,"conflict");assert.equal(conflict.comparison!.samePhysicalSurface,null);assert.equal(conflict.comparison!.accepted,false);assert.equal(conflict.identifierConflict!.pair.sameSelectedVisibleOption,null);assert.ok(conflict.brandRoleEvidence);assert.equal(brand.api.publicationIdentifierReviewEvidenceIssue(conflict,input),null);assert.deepEqual(brand.counts(),{appCalls:0,pairCalls:1,ocrCalls:1,sourceCalls:1});checks+=7;
+  const optional=path.join(root,"optional-reference.png");await sharp({create:{width:860,height:860,channels:3,background:"#cc8844"}}).png().toFile(optional);
+  const optionalInput=copy(input);optionalInput.canonicalReferences.push({path:optional,sha256:fileHash(optional),sourceSnapshotId:snapshot});
+  const optionalReview=load({readability:"legible",invalidObserverPath:optional}),optionalResult=await optionalReview.api.reviewPublicationIdentifiers(optionalInput);
+  assert.equal(optionalResult.status,"conflict","a malformed optional reference must not erase a verified concrete defect from the valid chosen source");
+  assert.equal(optionalReview.api.publicationIdentifierReviewEvidenceIssue(optionalResult,optionalInput),null);
+  assert.equal(optionalResult.blindInputObservations!.invalidSupplementalSources!.length,1);checks+=3;
+  for(const mutate of [(value:typeof optionalResult)=>{value.blindInputObservations!.invalidSupplementalSources![0].nativeExecution=false;},
+    (value:typeof optionalResult)=>{value.blindInputObservations!.invalidSupplementalSources![0].imageIndex=2;},
+    (value:typeof optionalResult)=>{value.blindInputObservations!.invalidSupplementalSources![0].rawResponse="{}";},
+    (value:typeof optionalResult)=>{delete value.blindInputObservations!.invalidSupplementalSources;}]){
+    const changed=copy(optionalResult);mutate(changed);assert(optionalReview.api.publicationIdentifierReviewEvidenceIssue(changed,optionalInput));checks++;
+  }
+  for(const invalidObserverPath of [candidate,primary]){assert.equal((await load({readability:"legible",invalidObserverPath}).api.reviewPublicationIdentifiers(input)).status,"hold","candidate and primary remain mandatory");checks++;}
+  assert.equal((await load({readability:"legible",invalidObserverPath:optional,unknownObserver:true}).api.reviewPublicationIdentifiers(optionalInput)).status,"hold","unknown provider outcome is never reclassified as a received malformed reference");checks++;
   const lossless=path.join(root,"candidate-lossless.png");await sharp(candidate).png({compressionLevel:0}).toFile(lossless);assert.notEqual(fileHash(lossless),fileHash(candidate));assert.deepEqual(await sharp(lossless).ensureAlpha().raw().toBuffer(),await sharp(candidate).ensureAlpha().raw().toBuffer());checks++;
   const snapshotPacket=buildScopedPublicationPackets({candidatePath:lossless,candidateSha256:fileHash(candidate),primaryReference:{path:primary,sha256:fileHash(primary)},role:"thumbnail",exactCanonicalSellerOriginal:false,sectionTitle:"ordinary purchase checks",sectionBody:["unchanged manuscript"],allowProductPhoto:true,selection:visibleIdentityReviewContext(selectedProduct),selectedProduct})[0];
   const snapshotInput=copy(input);if(snapshotInput.scopeGate?.kind!=="scene-native-positive/v1")snapshotInput.scopeGate!.visibleReview=evidence(snapshotPacket,a);
