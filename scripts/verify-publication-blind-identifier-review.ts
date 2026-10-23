@@ -56,6 +56,13 @@ async function main() {
   assert.equal(selectBlindPublicationIdentifierSource(changedCandidate).imageIndex,4,"candidate text cannot influence source selection");checks++;
   for(const literal of ["misread","source-word","unrelated-expected-word"]) {const changed=copy(isolated);changed.candidate.observation.literal=literal;assert.equal(selectBlindPublicationIdentifierSource(changed).imageIndex,4);checks++;}
   const solo={...isolated,sources:[vote(3,"one-observed-source")]};assert.equal(selectBlindPublicationIdentifierSource(solo).imageIndex,3);checks++;
+  const mixedRoles={...isolated,sources:[vote(2,"long product title",[10,10,700,300],"product-line"),vote(3,"long product title",[10,10,700,300],"product-line"),vote(4,"physical brand")]};
+  for(const literal of ["physical brand","long product title","different letters"]) {
+    const changed=copy(mixedRoles);changed.candidate.observation.literal=literal;
+    assert.equal(selectBlindPublicationIdentifierSource(changed).imageIndex,4,"role compatibility excludes repeated product titles without using candidate letters");checks++;
+  }
+  assert.throws(()=>selectBlindPublicationIdentifierSource({...mixedRoles,sources:mixedRoles.sources.slice(0,2)}),/BLIND_SOURCE_IDENTIFIER_ROLE_UNAVAILABLE/);checks++;
+  assert.throws(()=>selectBlindPublicationIdentifierSource({...mixedRoles,sources:[mixedRoles.sources[0],vote(3,"brand A"),vote(4,"brand B")]}),/BLIND_SOURCE_LITERAL_CONSENSUS_UNRESOLVED/,"an incompatible OWN primary cannot resolve brand disagreement");checks++;
   for(const sources of [[vote(2,"A"),vote(3,"B")],[vote(2,"word"),vote(3,"Word")],[vote(2,"word"),vote(3,"word ")],
     [vote(2,"word"),vote(3,"word",[100,100,200,150],"model")],[vote(2,"A"),vote(3,"A"),vote(4,"B"),vote(5,"B")],
   ]) {

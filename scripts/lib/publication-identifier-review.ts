@@ -379,7 +379,14 @@ function chooseBlindSource(observations: PublicationBlindInputObservations) {
   if (observations.candidate.observation.readability === "absent" && ownPrimary?.evidence.observation.readability === "absent") return ownPrimary;
   // Source-only exact literal consensus precedes area. Neither the candidate
   // word nor an expected brand can select a favorable source transcription.
-  const legible = observations.sources.filter(row => row.evidence.observation.readability === "legible");
+  const allLegible = observations.sources.filter(row => row.evidence.observation.readability === "legible");
+  // A product-line title is not a comparison target for a physical brand logo.
+  // Use only the independently observed category, never the candidate letters.
+  const candidateRole = observations.candidate.observation;
+  const legible = candidateRole.readability === "legible"
+    ? allLegible.filter(row => row.evidence.observation.identifierRole === candidateRole.identifierRole) : allLegible;
+  if (candidateRole.readability === "legible" && allLegible.length && !legible.length)
+    throw Error("BLIND_SOURCE_IDENTIFIER_ROLE_UNAVAILABLE");
   if (new Set(legible.map(row => row.sha256)).size !== legible.length) throw Error("BLIND_SOURCE_DUPLICATE_VOTE");
   const groups = new Map<string, typeof legible>();
   for (const row of legible) {
@@ -399,7 +406,7 @@ function chooseBlindSource(observations: PublicationBlindInputObservations) {
     // This never uses the candidate's letters. The unchanged local comparison
     // and independent OCR still have to corroborate either match or conflict.
     const primary = observations.sources.find(source => source.imageIndex === 2);
-    if (primary?.evidence.observation.readability === "legible") return primary;
+    if (primary && legible.includes(primary)) return primary;
     throw Error("BLIND_SOURCE_LITERAL_CONSENSUS_UNRESOLVED");
   }
   return (ranked[0] || []).sort((a, b) => {
