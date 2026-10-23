@@ -244,9 +244,8 @@ function isCodexDraftReconnectProgress(message: string): boolean {
   if (!progress) return false;
   const attempt = Number(progress[1]), maximum = Number(progress[2]);
   if (!Number.isSafeInteger(attempt) || !Number.isSafeInteger(maximum) || attempt > maximum) return false;
-  return isCodexStreamCompletionLoss(message) || maximum === 5 && (
-    /^We[’']re currently experiencing high demand, which may cause temporary errors\.$/u.test(progress[3]) ||
-    progress[3] === "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens");
+  return isCodexStreamCompletionLoss(message) || maximum === 5 &&
+    /^We[’']re currently experiencing high demand, which may cause temporary errors\.$/u.test(progress[3]);
 }
 
 /** Exec may emit its internal reconnect progress as a top-level error while the turn still runs. */
@@ -362,7 +361,32 @@ function buildWritingPrompt(
   ].join("\n");
 }
 
+/** Reject the two observed API-incompatible constructs before any SDK call.
+ * This is a portability check, not a replacement for response validation. */
+export function assertCodexOutputSchemaCompatible(schema: unknown): void {
+  const fail = (at: string, reason: string): never => {
+    throw Object.assign(new Error(`CODEX_OUTPUT_SCHEMA_INVALID: ${at}: ${reason}`), { code: "CODEX_OUTPUT_SCHEMA_INVALID" });
+  };
+  const visit = (value: unknown, at: string): void => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return;
+    const row = value as Record<string, unknown>;
+    if (Array.isArray(row.enum) && row.enum.some(v => v !== null && typeof v === "object")) fail(at, "use scalar enum values; bind array coordinates in the response reader");
+    if (typeof row.pattern === "string") {
+      if (/\\[pP]\{/u.test(row.pattern)) fail(at, "Unicode property escapes are not portable to the remote regex validator");
+      try { new RegExp(row.pattern); } catch { fail(at, "invalid portable regex"); }
+    }
+    for (const key of ["properties", "$defs", "definitions"]) {
+      const children = row[key];
+      if (children && typeof children === "object") for (const [name, child] of Object.entries(children)) visit(child, `${at}.${key}.${name}`);
+    }
+    if (row.items) visit(row.items, `${at}.items`);
+    for (const key of ["anyOf", "oneOf", "allOf"]) if (Array.isArray(row[key])) (row[key] as unknown[]).forEach((child, index) => visit(child, `${at}.${key}[${index}]`));
+  };
+  visit(schema, "schema");
+}
+
 export async function runCodexDraft(options: CodexDraftOptions): Promise<string> {
+  if (options.outputSchema) assertCodexOutputSchemaCompatible(options.outputSchema);
   const images = resolveCodexWritingImages(options);
   const model = resolveCodexTextModel(options.model);
   const reasoningEffort = resolveTextReasoningEffort(options.reasoningEffort);

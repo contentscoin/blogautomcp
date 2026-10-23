@@ -63,8 +63,9 @@ export const INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA = {
   type: "object", properties: {
     observation: { anyOf: [
       { type: "object", properties: {
-        literal: { type: "string", minLength: 1, maxLength: 80, pattern: INTRINSIC_IDENTIFIER_LITERAL_PATTERN,
-          anyOf: [{ type: "string", pattern: INTRINSIC_IDENTIFIER_SCRIPT_PATTERN }] },
+        // Keep the remote grammar small. Unicode and script checks belong to
+        // the unchanged raw-response parser, not the server's regex compiler.
+        literal: { type: "string", minLength: 1, maxLength: 80 },
         box: { type: "object", properties: {
           left: { type: "integer", minimum: 0, maximum: 999 }, top: { type: "integer", minimum: 0, maximum: 999 },
           width: { type: "integer", minimum: 1, maximum: 800 }, height: { type: "integer", minimum: 1, maximum: 250 },

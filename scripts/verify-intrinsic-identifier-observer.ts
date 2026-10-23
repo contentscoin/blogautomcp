@@ -41,8 +41,8 @@ async function main(): Promise<void> {
   // hook supplies the Unicode semantics required by the actual L/N/M schema.
   const schemaValid = new Ajv({ regExp: pattern => new RegExp(pattern, "u") }).compile(INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA);
   check(schemaValid(JSON.parse(raw)), "extent-based legible wire satisfies the exact native schema");
-  check(legibleBranch.properties.literal.pattern === INTRINSIC_IDENTIFIER_LITERAL_PATTERN && !/[\(][?][=!<]/u.test(INTRINSIC_IDENTIFIER_LITERAL_PATTERN),
-    "native literal pattern is the actual Unicode character contract, without unsupported lookaround");
+  check(!("pattern" in legibleBranch.properties.literal) && !/[\(][?][=!<]/u.test(INTRINSIC_IDENTIFIER_LITERAL_PATTERN),
+    "native literal pattern is the portable format contract, without unsupported lookaround");
   for (const literal of ["Markora", "한일의료기", "스마토이 123", "Élan", "E\u0301lan", "株式会社123", "مَرْكة", "ब्रांड", "𐐀Brand", "３Ｍ", "A.B & C+ D'’/X-Y", ". Brand", "123", "A  B", "A\u0301"]) {
     const response=wire({...observation,literal});
     check(schemaValid(JSON.parse(response)) && parseIntrinsicIdentifierObserverResponse(response)?.literal === literal,
@@ -50,8 +50,8 @@ async function main(): Promise<void> {
   }
   for (const literal of ["Volt\ufeffum", "\ufeffMarkora", "Markora\ufeff", "A\u200bB", "A\u200cB", "A\u200dB", "A\u2060B", "A\u200eB", "A\u202eB", "A\u00a0B", "A\tB", "A\nB", "A\rB", "A\u0000B", " Markora", "Markora ", " . ", ".&+", "\u0301", "Brand😀", "Brand_1"]) {
     const response=wire({...observation,literal});
-    check(!schemaValid(JSON.parse(response)) && parseIntrinsicIdentifierObserverResponse(response) === null,
-      "actual BOM/control/hidden-space and boundary-invalid literals are denied at generation schema and parser, never stripped");
+    check(parseIntrinsicIdentifierObserverResponse(response) === null,
+      "actual BOM/control/hidden-space and boundary-invalid literals are denied by the exact Unicode parser, never stripped");
   }
   const actualBomRaw = wire({...observation,literal:"Volt\ufeffum",box:[414,598,474,618]});
   const actualBom = await observeIntrinsicIdentifier(options,{review:async()=>actualBomRaw});
@@ -59,6 +59,7 @@ async function main(): Promise<void> {
     actualBom.diagnostic.responseSha256 === hash(actualBomRaw) && actualBom.diagnostic.issue === "OBSERVER_LITERAL_OR_ROLE_INVALID",
     "actual 151 BOM reply remains byte-exact invalid evidence; no spelling cleanup, favorable reread or retry");
   check(!/[\(][?][=!<]/u.test(INTRINSIC_IDENTIFIER_SCRIPT_PATTERN), "script consistency uses no lookaround or unsupported regex set intersection");
+  check(!JSON.stringify(INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA).includes("Script="), "wire regex avoids script property escapes rejected by the actual API");
   for(const literal of ["BYC히트핏", "Brand 한글", "品牌Brand", "Μάρκα", "Марка", "მარკა", "A Ω", "A-Б", "123", "E\u0301lan"]) {
     const response=wire({...observation,literal});
     check(schemaValid(JSON.parse(response)) && parseIntrinsicIdentifierObserverResponse(response)?.literal===literal,
@@ -66,7 +67,7 @@ async function main(): Promise<void> {
   }
   for(const literal of ["Volt\u10e3\u10db", "Br\u0430nd", "M\u03b1rka", "\u041cark", "\u10dbark"]) {
     const response=wire({...observation,literal});
-    check(!schemaValid(JSON.parse(response)) && parseIntrinsicIdentifierObserverResponse(response)===null && intrinsicIdentifierObserverResponseIssue(response)==="OBSERVER_LITERAL_SCRIPT_MIXED",
+    check(parseIntrinsicIdentifierObserverResponse(response)===null && intrinsicIdentifierObserverResponseIssue(response)==="OBSERVER_LITERAL_SCRIPT_MIXED",
       "actual mixed-confusable token is rejected without transliteration, strip or favorable retry");
   }
 
