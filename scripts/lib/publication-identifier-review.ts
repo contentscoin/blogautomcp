@@ -325,10 +325,15 @@ function isFinalPhotoThumbnail(input: PublicationIdentifierReviewInput): boolean
     return JSON.parse(prompt.slice(prompt.lastIndexOf(prefix)+prefix.length)).role==="thumbnail";
   } catch {return false;}
 }
-function sourceMemberPacket(input: PublicationIdentifierReviewInput, source: { path: string; sha256: string }) {
+function sourceMemberPacket(input: PublicationIdentifierReviewInput, source: { path: string; sha256: string }, observed?: PublicationBlindInputObservations) {
   const gate = input.scopeGate;
   if (!gate || gate.kind === "scene-native-positive/v1") return null;
-  return buildScopedPublicationPackets({ candidatePath: source.path, candidateSha256: source.sha256, primaryReference: input.primaryReference,
+  const primaryObservation = observed?.sources.find(row => row.sha256 === input.primaryReference.sha256)?.evidence;
+  const sourceObservation = observed?.sources.find(row => row.sha256 === source.sha256)?.evidence;
+  const visibleLocationHints = primaryObservation && sourceObservation &&
+    !observerIssue(primaryObservation, input.primaryReference.sha256, true) && !observerIssue(sourceObservation, source.sha256, true)
+    ? { coordinateSpace: "normalized-1000" as const, candidateBox: sourceObservation.observation.box, primaryBox: primaryObservation.observation.box } : undefined;
+  return buildScopedPublicationPackets({ candidatePath: source.path, candidateSha256: source.sha256, primaryReference: input.primaryReference, visibleLocationHints,
     role: "source-membership", exactCanonicalSellerOriginal: false, sectionTitle: "", sectionBody: [], allowProductPhoto: true,
     selection: visibleIdentityReviewContext(gate.selectedProduct), selectedProduct: gate.selectedProduct })[0];
 }
@@ -340,10 +345,10 @@ function selectedMainBrandRowIssue(evidence: ScopedReviewEvidence, candidateSha2
     row.memberBrandScope === "selected-main-product-body" && nonempty(row.memberBrandObservation)
     ? null : "actual main-product brand-bearing membership is not established";
 }
-function brandRoleEvidenceIssue(value: NonNullable<PublicationIdentifierReviewResult["brandRoleEvidence"]>, input: PublicationIdentifierReviewInput, prepared: ReturnType<typeof packet>, requireNative: boolean) {
+function brandRoleEvidenceIssue(value: NonNullable<PublicationIdentifierReviewResult["brandRoleEvidence"]>, input: PublicationIdentifierReviewInput, prepared: ReturnType<typeof packet>, requireNative: boolean, observed?: PublicationBlindInputObservations) {
   try {
     const gate = input.scopeGate; if (!gate || gate.kind === "scene-native-positive/v1") return "brand role requires current native final A evidence";
-    const source = prepared.files.find(file => file.sha256 === value.sourceSha256), expected = source && sourceMemberPacket(input, source);
+    const source = prepared.files.find(file => file.sha256 === value.sourceSha256), expected = source && sourceMemberPacket(input, source, observed);
     const expectedCandidate = sourceMemberPacket(input, { path: input.candidatePath, sha256: input.candidateSha256 });
     if (!source || !expected || value.version !== "selected-main-product-brand-role/v1" || value.primarySha256 !== input.primaryReference.sha256 ||
         value.candidateVisibleReviewSha256 !== hash(JSON.stringify(evidenceBinding(gate.visibleReview))) || !expectedCandidate ||
@@ -491,6 +496,7 @@ function applicabilityRequest(input: PublicationIdentifierReviewInput, observed?
       "IMAGE 1 is candidate. IMAGE 2 is THIS candidate's exact own selected primary, not another colour/face or a close-up from the gallery. Observe corresponding local product landmarks first; assess only actual local print visibility/applicability. No expected word/product name is supplied. Do not certify letters or turn non-reading into a missing-print defect.",
       "If IMAGE 2 includes packaging and multiple devices, first identify the ONE visible member/face corresponding to IMAGE 1 using its button/screen/connector layout and visible colour. comparedPrimaryFaceBox bounds only that member's compared physical FACE, not the union of the package and all devices, and not the whole photo. Two landmarks belong to this matched face in both images; packaging lettering is a separate member. Do not require an unprinted device to carry the package's word. Still preserve unresolved if the matched face cannot actually be located.",
       "not-applicable-own-unprinted-face requires BOTH actually unprinted surfaces to be the SAME physical part AND SAME physical FACE, positively identified by at least TWO local face landmarks (for example the same four buttons and same connector). State them in the witness. An unprinted back versus a candidate's blank front is NOT this classification; unknown face mapping stays unresolved. Colour/lighting and purchase-option certification belong to A, not this unprinted-face question: do not reject the unprinted-face classification merely for a slight lighting tint or inability to certify a SKU. Use sourcePrintLocation=unprinted, candidatePrintLocation=own-unprinted-face and both boxes=null, without inventing letters. Other-face source printing cannot impose text on a positively matched unprinted face.",
+      "Classification consistency: if the corresponding SOURCE face is unprinted, a blank CANDIDATE face is own-unprinted-face, never entire-exposed-blank/comparable-entire-location. The latter requires an actual printed location on that SAME source face, not a word on adjacent packaging. When bounding a matched device face, exclude another device's outline and the package; locate its own left and right physical edges before returning comparedPrimaryFaceBox. Do not combine the left edge of one device with the right edge of another. If a required boundary is not observable retain unresolved; do not fabricate coordinates to force separation.",
       "outside-visible-resolution-or-view requires a POSITIVE actual witness: a real small mark is present but too small to read; or the corresponding location is physically hidden by a specifically observed occluder, cropped out, or edge-on. State the actual local part, two corresponding surrounding landmarks, and where/how visibility is limited. A generic inability to map a location, source-only large logo, a blank visible face or uncertainty alone is unresolved, NOT outside scope. Never call a clearly exposed blank region a small mark or an occlusion.",
       "For small-present-unreadable, source/candidate must show the same actual physical part, same surface and same visible option, all true, with an actual bounded mark in the candidate. For occluded/cropped/edge-on, same part and visible option must be true; the unexposed surface may be null but must not be false. sourceBox identifies the primary's actual marked location; candidateBox identifies the actual mark or limiting occluder/edge (null only when cropped out). No invented source printing.",
       "comparable-entire-location means the source's actual marked location and the ENTIRE corresponding candidate location are both actually exposed on the SAME physical part/surface/visible option, all true. An entire-exposed-blank observation must cover the WHOLE expected print location, not an arbitrary convenient empty patch. This is only an applicability witness; a separate clear-source/native/OCR defect corroboration remains required. Unknown, glare without identifiable location, different face/colour, partial blank or inadequate landmarks stays unresolved/accepted=false.",
@@ -746,7 +752,7 @@ function suspectedOmissionObservationIssue(result: PublicationIdentifierReviewRe
           pair.candidateBox !== null || pair.sameSelectedComponent !== null || pair.sameSelectedVisibleOption !== null))
       return "a concrete contradiction, readable word or observed print location cannot become an uncorroborated-omission warning";
     if (requireRole && (!result.suspectedOmissionSourceRole || result.suspectedOmissionSourceRole.sourceSha256 !== source.sha256 ||
-        brandRoleEvidenceIssue(result.suspectedOmissionSourceRole, input, prepared, true)))
+        brandRoleEvidenceIssue(result.suspectedOmissionSourceRole, input, prepared, true, result.blindInputObservations)))
       return "suspected omission lacks independent exact selected-main-product source membership";
     if (result.identifierConflict || result.missingPrintEvidence || result.identifierMatches?.length || result.sourceLetterEvidence ||
         result.exactSourceIdentity || result.unprintedReferenceSet || result.ownUnprintedReference || result.scopeOutside || result.brandRoleEvidence)
@@ -1126,7 +1132,7 @@ export function publicationIdentifierReviewEvidenceIssue(result: PublicationIden
         ? null : "print scope-out requires current native own-primary visibility witness and wholly positive task gates; it certifies no letters";
     }
     const isBlind = result.strategyVersion === PUBLICATION_IDENTIFIER_BLIND_STRATEGY;
-    if (result.brandRoleEvidence && brandRoleEvidenceIssue(result.brandRoleEvidence, expected, prepared, requireNative)) return "selected brand-bearing role evidence is invalid";
+    if (result.brandRoleEvidence && brandRoleEvidenceIssue(result.brandRoleEvidence, expected, prepared, requireNative, result.blindInputObservations)) return "selected brand-bearing role evidence is invalid";
     if (result.brandRoleEvidence && (result.blindInputObservations?.candidate.observation.readability !== "legible" ||
         result.blindInputObservations?.candidate.observation.identifierRole !== "brand" ||
         result.blindInputObservations.sources.find(row => row.sha256 === result.brandRoleEvidence!.sourceSha256)?.evidence.observation.identifierRole !== "brand")) return "brand role does not authorize another identifier domain";
@@ -1260,7 +1266,7 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
       if (gate && gate.kind !== "scene-native-positive/v1" && candidateObservation.readability === "legible" && sourceObservation.readability === "legible" &&
           candidateObservation.identifierRole === "brand" && sourceObservation.identifierRole === "brand" &&
           !selectedMainBrandRowIssue(gate.visibleReview, input.candidateSha256, input.primaryReference.sha256, gate.selectedProduct, nativeExecution)) {
-        const sourcePacket = sourceMemberPacket(input, sourceFile)!;
+        const sourcePacket = sourceMemberPacket(input, sourceFile, observed)!;
         const prior = gate.sourceVisibleReviews?.find(row => row.sha256 === sourceFile.sha256 && row.evidence.requestSha256 === sourcePacket.requestSha256)?.evidence;
         taskStage = "source-membership"; taskImageSha256 = sourceFile.sha256;
         const sourceVisibleReview = prior || await executeScopedPublicationPacket(sourcePacket, dependencies.review,
@@ -1270,7 +1276,7 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
         const role: NonNullable<PublicationIdentifierReviewResult["brandRoleEvidence"]> = { version: "selected-main-product-brand-role/v1", sourceSha256: sourceFile.sha256,
           primarySha256: input.primaryReference.sha256, candidateVisibleReviewSha256: hash(JSON.stringify(evidenceBinding(gate.visibleReview))), sourceVisibleReview,
           memberFactIndex: Number(member.memberFactIndex), selectedFact: String(member.selectedFact) };
-        if (brandRoleEvidenceIssue(role, input, prepared, nativeExecution)) return { ...result, reason: "READABLE_BRAND_SOURCE_MEMBER_ROLE_UNRESOLVED" };
+        if (brandRoleEvidenceIssue(role, input, prepared, nativeExecution, observed)) return { ...result, reason: "READABLE_BRAND_SOURCE_MEMBER_ROLE_UNRESOLVED" };
         result.brandRoleEvidence = role;
       }
       const context: PublicationIdentifierReviewContext = { ...prepared.context, localPair: { sourceImageIndex: selected.imageIndex,
@@ -1294,7 +1300,7 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
         // confirm the OWN-view suspicion. Only current final A/C/D and an exact
         // selected-main-product source-role packet can retain it as a warning.
         if (nativeExecution && !suspectedOmissionObservationIssue(result, input, prepared, false) && gate && gate.kind !== "scene-native-positive/v1") {
-          const sourcePacket = sourceMemberPacket(input, sourceFile)!;
+          const sourcePacket = sourceMemberPacket(input, sourceFile, observed)!;
           const prior = gate.sourceVisibleReviews?.find(row => row.sha256 === sourceFile.sha256 && row.evidence.requestSha256 === sourcePacket.requestSha256)?.evidence;
           taskStage = "source-membership"; taskImageSha256 = sourceFile.sha256;
           const sourceVisibleReview = prior || await executeScopedPublicationPacket(sourcePacket, undefined,
