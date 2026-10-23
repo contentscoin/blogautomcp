@@ -779,19 +779,23 @@ function blindRequest(context: PublicationIdentifierReviewContext, observed: Pub
   const local = context.localPair!;
   const source = observed.sources.find(row => row.imageIndex === local.sourceImageIndex)!;
   const candidate = observed.candidate.observation, intrinsic = source.evidence.observation;
+  const fixedBox = (box: IdentifierBox | null) => box === null ? { type: "null" } : {
+    type: "array", minItems: 4, maxItems: 4, items: { type: "integer", enum: [...new Set(box)] },
+    description: `Copy the immutable normalized tuple in this exact order: ${JSON.stringify(box)}. No coordinate conversion.`,
+  };
   const properties: Record<string, unknown> = { ...PUBLICATION_IDENTIFIER_REVIEW_SCHEMA.properties,
     sourceImageIndex: { type: "integer", enum: [local.sourceImageIndex] }, sourceSha256: { type: "string", enum: [source.sha256] },
-    sourceLiteral: { type: "string", enum: [intrinsic.literal] }, sourceBox: boxSchema };
+    sourceLiteral: { type: "string", enum: [intrinsic.literal] }, sourceBox: fixedBox(intrinsic.box) };
   // These are immutable blind observations, not new visual judgments. The
   // candidate's absent/unreadable location remains freely observable: a real
   // missing-print verdict still needs its newly observed whole blank ROI.
-  if (candidate.readability === "legible") properties.candidateBox = boxSchema;
+  if (candidate.readability === "legible") properties.candidateBox = fixedBox(candidate.box);
   if (candidate.readability === "legible" && intrinsic.readability === "legible") properties.identifierComparisons = {
     ...INTRINSIC_IDENTIFIER_SCHEMA, minItems: 1, maxItems: 1, items: { ...INTRINSIC_IDENTIFIER_SCHEMA.items, properties: {
       ...INTRINSIC_IDENTIFIER_SCHEMA.items.properties,
       candidateLiteral: { type: "string", enum: [candidate.literal] }, sourceLiteral: { type: "string", enum: [intrinsic.literal] },
       sourceImageIndex: { type: "integer", enum: [local.sourceImageIndex] }, sourceSha256: { type: "string", enum: [source.sha256] },
-      sourceBox: boxSchema, candidateBox: boxSchema,
+      sourceBox: fixedBox(intrinsic.box), candidateBox: fixedBox(candidate.box),
     } },
   };
   const size = (value: ImageDimensions) => ({ type: "object", properties: {
@@ -802,7 +806,7 @@ function blindRequest(context: PublicationIdentifierReviewContext, observed: Pub
       `${PUBLICATION_IDENTIFIER_BLIND_STRATEGY}: IMAGE 1 is candidate; IMAGE 2 is the SINGLE selected source. There are exactly two images. No whole-product identity, complete hidden structure, claims or layout assessment belongs here.`,
       "The literal/word boxes below were observed independently in separate SINGLE-IMAGE tasks without any expected brand or other image/word. Do not reread, autocomplete, repair or change those letters. Judge ONLY actual local component, physical part/surface and VISIBLE colour/option correspondence from these two images. Preserve false/null or accepted=false when actually adverse/unknown.",
       ...(local.brandRoleSha256 ? ["BRAND-ROLE DOMAIN ONLY: separate exact native A packets already observed both pictured items as the SAME selected main product's brand-bearing body against this slot's OWN primary and the exact indexed member fact. Both independently observed words have role=brand. Compare those actual manufacturer/product BRAND letters even when on a different physical face or ordinary visible colour. Do not demand global SKU authentication or force unknown physical-face/colour flags true; preserve them honestly. sameSelectedComponent in the word pair describes this selected brand-bearing product member, not an unseen full bundle. Gifts, independently branded included accessories, model/SKU/product-line/material/capacity identifiers are NOT this domain. An actually different/unknown component remains unresolved, never a valid brand pair."] : []),
-      "Coordinates are NOT pixels. Every sourceBox/candidateBox is integer [left,top,right,bottom] NORMALIZED 0..1000 over its OWN entire displayed image. Pixel x -> round(1000*x/that image width), y -> round(1000*y/that image height). Explicitly return coordinateSpace=normalized-1000 and the supplied per-image dimensions. Never copy a pixel box into normalized fields or guess a conversion after a verdict.",
+      "All supplied observation boxes are ALREADY normalized integer [left,top,right,bottom] 0..1000 over their own entire image. Copy these fixed boxes verbatim; DO NOT divide them by image dimensions, convert them again, or re-observe them. The schema fixes legible word coordinates. Only a NEW absent/unreadable candidate location remains yours to observe in normalized 0..1000 coordinates. Explicitly return coordinateSpace=normalized-1000 and the supplied per-image dimensions. Neither fixed coordinates nor fixed literals decide correspondence or acceptance.",
       "Use the independently observed source word/box and, when legible, candidate word/box EXACTLY. A legible candidate requires one corresponding intrinsic identifierComparisons pair using those exact independent literals/boxes and this server source index/SHA. Unknown local component/option means null/false, not a fabricated pair. For an actually unprinted source and candidate do not invent identifiers.",
       "Missing printing requires the SAME physical part, SAME exposed surface and SAME visible colour/option, a source with the actual entire intrinsic identifier, and a native observation that the ENTIRE corresponding location is clearly exposed and truly BLANK. candidateBox must cover that ENTIRE expected location, not a convenient empty patch. Occlusion, glare, reflection, a faint mark, other face/option, partial location or mere OCR/non-read is NOT blank evidence. Source-only OCR can verify source letters but NEVER infer candidate absence.",
       "An unreadable or not-observed location with no actually corresponding mark remains unresolved: do not return a no-conflict pass from lack of observation. A real present-unreadable mark may have no local letter conflict ONLY when actual local part/surface/option correspondence and its physical mark at the corresponding location are observed. Do not require OCR on a real unreadable mark. A readable letter difference remains a potential concrete defect independently checked by blind OCR, never 'same brand overall'.",

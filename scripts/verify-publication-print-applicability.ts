@@ -30,7 +30,10 @@ function supportedWire(schema:unknown,field="root") {
   assert(Object.keys(row).every(key=>["type","properties","required","additionalProperties","anyOf","enum","items","minimum","maximum","minItems","maxItems","minLength","maxLength","description","pattern"].includes(key)),"captured B wire stays within the supported primitive subset");checks++;
   if(Array.isArray(row.enum)) {assert(row.enum.every(value=>value===null || typeof value!=="object"),"no array/object enum can reach a native B question");checks++;}
   if(row.type==="object") {assert.equal(row.additionalProperties,false);assert.deepEqual([...(row.required as string[])].sort(),Object.keys(row.properties as object).sort());checks+=2;}
-  if(row.type==="array" && /Box$/u.test(field)) {assert.equal(row.minItems,4);assert.equal(row.maxItems,4);assert.deepEqual(row.items,{type:"integer",minimum:0,maximum:1000});checks+=3;}
+  if(row.type==="array" && /Box$/u.test(field)) {assert.equal(row.minItems,4);assert.equal(row.maxItems,4);
+    const item=row.items as {type:string;enum?:number[]};
+    if(item.enum){assert.equal(item.type,"integer");assert(item.enum.length>0 && item.enum.every(value=>Number.isInteger(value)&&value>=0&&value<=1000));}
+    else assert.deepEqual(row.items,{type:"integer",minimum:0,maximum:1000});checks+=3;}
   for(const [key,value] of Object.entries(row.properties as object||{}))supportedWire(value,key);
   for(const branch of row.anyOf as unknown[]||[])supportedWire(branch,field);
   if(row.items)supportedWire(row.items,`${field}.items`);
@@ -92,12 +95,12 @@ async function main() {
       }
       if(!app && schemaCheck(raw)) {
         const pairRaw=raw as {comparison:PublicationIdentifierComparison}, row=pairRaw.comparison;
-        assert.equal(schemaCheck({...pairRaw,comparison:{...row,sourceBox:[1,2,3,4]}}),true,"primitive tuple is provider-supported; exact source ROI remains a reader check");
+        assert.equal(schemaCheck({...pairRaw,comparison:{...row,sourceBox:[1,2,3,4]}}),false,"only immutable observed coordinate values are allowed; exact tuple order remains a reader check");
         assert.equal(schemaCheck({...pairRaw,comparison:{...row,sourceLiteral:"DifferentWord"}}),false,"independent spelling is an immutable input");
         assert.equal(schemaCheck({...pairRaw,comparison:{...row,samePhysicalPart:false,samePhysicalSurface:null,sameSelectedVisibleOption:false,accepted:!row.accepted}}),true,"schema must not manufacture a favorable judgment");checks+=3;
         if(mode.readability==="legible") {
-          assert.equal(schemaCheck({...pairRaw,comparison:{...row,candidateBox:[1,2,3,4]}}),true);
-          for(const key of ["sourceBox","candidateBox"] as const) assert.equal(schemaCheck({...pairRaw,comparison:{...row,identifierComparisons:[{...row.identifierComparisons[0],[key]:[1,2,3,4]}]}}),true);
+          assert.equal(schemaCheck({...pairRaw,comparison:{...row,candidateBox:[1,2,3,4]}}),false);
+          for(const key of ["sourceBox","candidateBox"] as const) assert.equal(schemaCheck({...pairRaw,comparison:{...row,identifierComparisons:[{...row.identifierComparisons[0],[key]:[1,2,3,4]}]}}),false);
           checks+=3;
         } else {
           assert.equal(schemaCheck({...pairRaw,comparison:{...row,candidateBox:[100,200,500,400]}}),true,"absent candidate whole blank ROI must remain observable");

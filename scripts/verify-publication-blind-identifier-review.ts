@@ -124,8 +124,8 @@ async function main() {
         const expectedSource = mode.candidateReadability === "absent" && mode.primaryReadability === "absent" ? primary : detail;
         assert.deepEqual([...call.imagePaths!], [candidate, expectedSource], "one actual selected local source, never impose other-face printing on an own unprinted face");
         assert.equal(call.maxImages, 2);
-        if (!applicability) { assert.match(call.userPrompt, /Coordinates are NOT pixels/u);
-          assert.match(call.userPrompt, /NORMALIZED 0\.\.1000/u); assert.match(call.userPrompt, /OCR\/non-read is NOT blank/u); }
+        if (!applicability) { assert.match(call.userPrompt, /ALREADY normalized/u);
+          assert.match(call.userPrompt, /DO NOT divide/u); assert.match(call.userPrompt, /OCR\/non-read is NOT blank/u); }
         assert.ok(!call.userPrompt.includes("expectedBrand") && !call.userPrompt.includes("selectedTitle")); checks += 5;
         const raw = applicability ? { sourceObservation:"same inner control face is actually unprinted",candidateObservation:"same unprinted inner control face",
           correspondenceObservation:"four buttons and connector identify the SAME physical face",samePhysicalPart:true,samePhysicalSurface:true,sameSelectedVisibleOption:null,
@@ -179,9 +179,13 @@ async function main() {
   for (const patch of [{ samePhysicalPart: false }, { samePhysicalSurface: null }, { sameSelectedVisibleOption: false },
     { sourceBox: [255, 361, 577, 449] as IdentifierBox }, // v4 actual PIXEL box mistakenly returned as normalized.
     { sourceLiteral: `${sourceWord} (uncertain)` }, { candidatePrintState: "not-observed" as const }]) {
-    const test = load({ comparison: { ...row(), ...patch }, invalidSchema: "sourceLiteral" in patch }); const held = await test.api.reviewPublicationIdentifiers(input);
+    const test = load({ comparison: { ...row(), ...patch }, invalidSchema: "sourceLiteral" in patch || "sourceBox" in patch }); const held = await test.api.reviewPublicationIdentifiers(input);
     assert.equal(held.status, "hold"); assert.equal(test.counts().ocrCalls, 0); assert.equal(held.identifierConflict, undefined); checks += 3;
   }
+  const reorderedBoxRow=row();reorderedBoxRow.candidateBox=[candidateBox[1],candidateBox[0],candidateBox[2],candidateBox[3]];
+  const reorderedTest=load({comparison:reorderedBoxRow});
+  assert.equal((await reorderedTest.api.reviewPublicationIdentifiers(input)).status,"hold","scalar enum limits values; the reader still rejects a reordered tuple");
+  assert.equal(reorderedTest.counts().ocrCalls,0);checks+=2;
   const invalidSourceObserver = load({ observerFailurePath: detail });
   const invalidSourceResult = await invalidSourceObserver.api.reviewPublicationIdentifiers(input);
   assert.equal(invalidSourceResult.status, "hold"); assert.equal(invalidSourceResult.taskDiagnostic!.stage, "source-observer");
