@@ -358,6 +358,52 @@ export function readPublicationImageDefect(manifest: BrandPostPackageManifestV2,
     return { proof: row, path: file, sha256: hash(bytes) };
   } catch { return null; }
 }
+/** Discovery only. An authenticated old defect can remember which original
+ * was readable, without becoming a current verdict or regeneration authority.
+ * A different policy or unrelated section may change; the target, its text,
+ * source snapshot, metadata and bytes must still be exact. Callers must resolve
+ * these hashes through CURRENT canonical receipts and run fresh visual/OCR QA. */
+export function readHistoricalPrintSourceHints(manifest: BrandPostPackageManifestV2,
+  candidateSha256: string, primarySha256: string): string[] {
+  try {
+    const key = secret(false);
+    if (!key || !valid(candidateSha256) || !valid(primarySha256)) return [];
+    const assets = (manifest.imageAssets || []).filter(asset => asset.sha256 === candidateSha256 &&
+      asset.referenceScene?.referenceSha256 === primarySha256);
+    if (assets.length !== 1 || !assets[0].sectionId) return [];
+    const binding = currentBinding(manifest, assets[0].sectionId, candidateSha256);
+    if (!binding) return [];
+    const hints = new Set<string>();
+    const names = fs.readdirSync(directory()).filter(name => /^[a-f0-9]{64}\.json$/u.test(name)).sort();
+    // Bounded optional discovery. Large archives need a separate index; never
+    // turn an arbitrary truncated archive into trusted repair authority.
+    if (names.length > 256) return [];
+    for (const name of names) {
+      try {
+        const file = path.join(directory(), name), stat = fs.lstatSync(file);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 192 * 1024) continue;
+        const row = JSON.parse(fs.readFileSync(file, "utf8")) as ScopedPublicationImageDefectProof;
+        const { signature, ...payload } = row;
+        if (row.version !== "publication-image-print-defect/v4" || !valid(signature) ||
+            !crypto.timingSafeEqual(Buffer.from(signature, "hex"), crypto.createHmac("sha256", key).update(JSON.stringify(payload)).digest()) ||
+            JSON.stringify({ ...row.binding, material: binding.material }) !== JSON.stringify(binding)) continue;
+        const old = readPublicationDefectMaterialContext(row);
+        if (!old || old.brandLinkId !== manifest.brandLinkId ||
+            JSON.stringify(old.sourceSnapshot) !== JSON.stringify(manifest.sourceSnapshot)) continue;
+        const review = row.identifierReview, conflict = review?.identifierConflict;
+        if (review?.status !== "conflict" || review.nativeExecution !== true ||
+            row.defectKind !== "conflicting-print" || !conflict || review.missingPrintEvidence) continue;
+        const sourceSha = conflict.pair?.sourceSha256;
+        if (!valid(sourceSha) || conflict.evidence?.source.originalSha256 !== sourceSha ||
+            conflict.evidence?.candidate.originalSha256 !== candidateSha256 ||
+            !row.identifierInput.canonicalReferences.some(source => source.sha256 === sourceSha &&
+              source.sourceSnapshotId === manifest.sourceSnapshot?.snapshotId)) continue;
+        hints.add(sourceSha);
+      } catch { /* Optional historical discovery never repairs malformed proof. */ }
+    }
+    return [...hints].sort();
+  } catch { return []; }
+}
 export function readPublicationImageRepairPlan(parentSha256: string): { outStem: string; contextSha256: string } | null {
   try {
     const key = secret(false); if (!key || !valid(parentSha256)) return null;

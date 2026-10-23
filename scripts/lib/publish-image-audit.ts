@@ -502,7 +502,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
       if (!primaryPath) continue;
       try {
         identifierReferenceBindings.set(candidate, await readPublicationIdentifierReferenceBindings({ snapshot: options.selectedSourceSnapshot,
-          productId: selectedSourceProductId!, sourceDirectory: selectedSourceDirectory!, publicationOriginalSha256,
+          productId: selectedSourceProductId!, sourceDirectory: selectedSourceDirectory!, publicationOriginalSha256, candidateSha256: candidate.sha256,
           primaryReference: { path: primaryPath, sha256: primary.referenceSha256 } }));
       } catch (error) {
         fail(candidate.nodeIndex, candidate.assetPath, "INVALID_CONTEXT", `Own-primary canonical receipt binding is invalid: ${(error as Error).message}`);
@@ -699,7 +699,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           if (!bound || !primary) continue;
           const primaryPath = candidate.referenceScene?.referencePath || candidate.canonicalPhotoSource?.sourcePath || gallerySnapshots.find(reference => reference.sha256 === candidate.sha256)?.path;
           if (!primaryPath || JSON.stringify(await readPublicationIdentifierReferenceBindings({ snapshot: options.selectedSourceSnapshot,
-            productId: selectedSourceProductId!, sourceDirectory: selectedSourceDirectory!, publicationOriginalSha256,
+            productId: selectedSourceProductId!, sourceDirectory: selectedSourceDirectory!, publicationOriginalSha256, candidateSha256: candidate.sha256,
             primaryReference: { path: primaryPath, sha256: primary.referenceSha256 } })) !== JSON.stringify(bound)) return false;
         }
         return selectedSourceSnapshotsStillBound();

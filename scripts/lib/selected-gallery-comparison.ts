@@ -5,6 +5,7 @@ import sharp from "sharp";
 import { readProductSnapshot } from "../../src/lib/draft-context-snapshot";
 import { isAllowedProductPhotoUrl } from "./product-photo-source";
 import { isReviewImageUrl, isSalesPageProductImageUrl } from "./product-image-selection";
+import { readHistoricalPrintSourceHints } from "./publication-image-defect-proof";
 
 export interface SelectedGalleryComparisonImage {
   path: string;
@@ -166,6 +167,7 @@ export async function readSelectedGalleryComparisons(options: {
  * no pixel verdict, literal certification or repair authority is created. */
 export async function readPublicationIdentifierReferenceBindings(options: {
   snapshot: unknown; productId: string; sourceDirectory: string;
+  candidateSha256?: string;
   publicationOriginalSha256?: string; primaryReference: { path: string; sha256: string };
 }): Promise<SelectedGalleryComparisonImage[]> {
   const base = await readSelectedGalleryComparisons(options);
@@ -189,5 +191,24 @@ export async function readPublicationIdentifierReferenceBindings(options: {
   // The primary was already attached/observed separately. Keep every existing
   // optional reference when space permits; only the final optional item yields
   // to the exact own primary at the unchanged five-reference ceiling.
-  return [...base.filter(reference => reference.sha256 !== own.sha256).slice(0, 4), own];
+  const retained = base.filter(reference => reference.sha256 !== own.sha256).slice(0, 4);
+  if (retained.length < 4 && options.candidateSha256) {
+    try {
+      const manifestPath = path.join(options.sourceDirectory, "..", "manifest.json"), stat = fs.lstatSync(manifestPath);
+      if (stat.isFile() && !stat.isSymbolicLink() && stat.size <= 4 * 1024 * 1024) {
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+        if (manifest.brandLinkId === options.productId && manifest.sourceSnapshot?.snapshotId === own.sourceSnapshotId) {
+          for (const hint of readHistoricalPrintSourceHints(manifest, options.candidateSha256, own.sha256)) {
+            if (hint === own.sha256 || retained.some(reference => reference.sha256 === hint)) continue;
+            // Resolve through the current gallery, bytes and retrieval receipt;
+            // the historical path, transcription and verdict are never reused.
+            const candidate = (await readSelectedGalleryComparisons({ ...options, publicationOriginalSha256: hint }))
+              .find(reference => reference.sha256 === hint);
+            if (candidate) { retained.push(candidate); break; }
+          }
+        }
+      }
+    } catch { /* Historical hints are optional, not evidence or authority. */ }
+  }
+  return [...retained, own];
 }
