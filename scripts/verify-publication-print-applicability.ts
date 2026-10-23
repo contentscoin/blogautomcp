@@ -286,7 +286,11 @@ async function main() {
   for(const patch of [{samePhysicalPart:false},{samePhysicalPart:null},{samePhysicalSurface:false},{sameSelectedVisibleOption:false},
     {candidatePrintLocation:"entire-exposed-blank"},{comparedPrimaryFaceBox:sourceBox},{primaryFaceLandmarks:otherMemberApp.primaryFaceLandmarks!.slice(0,1)}]) {
     const task=load({app:{...separatedUnresolved,...patch} as PublicationPrintApplicabilityRow,primaryReadability:"legible"});
-    const result=await task.api.reviewPublicationIdentifiers(bodyInput);assert.equal(result.status,"hold");assert.equal(result.printObservationWarning,undefined);checks+=2;
+    const result=await task.api.reviewPublicationIdentifiers(bodyInput);
+    const concrete=patch.samePhysicalPart===false||patch.samePhysicalSurface===false||patch.sameSelectedVisibleOption===false||patch.candidatePrintLocation==="entire-exposed-blank";
+    assert.equal(result.status,concrete?"hold":"unverified");
+    if(concrete)assert.equal(result.printObservationWarning,undefined);else {assert.equal(task.api.publicationIdentifierReviewEvidenceIssue(result,bodyInput),null);assert.equal(result.identifierConflict,undefined);assert.equal(result.missingPrintEvidence,undefined);}
+    checks+=2;
   }
   const ambiguousOtherTask=load({readability:"ambiguous",primaryReadability:"legible",app:otherMemberApp});
   const ambiguousOther=await ambiguousOtherTask.api.reviewPublicationIdentifiers(input);
@@ -468,6 +472,18 @@ async function main() {
   assert.equal(sceneHeld.status,"hold");assert.equal(sceneHeld.printObservationWarning,undefined);assert.equal(sceneSuspected.counts().sourceCalls,0);checks+=3;
   for(const mutate of [(value:PublicationIdentifierReviewInput)=>{if(value.scopeGate?.kind==="scene-native-positive/v1")value.scopeGate.nativeExecution=false;},(value:PublicationIdentifierReviewInput)=>{if(value.scopeGate?.kind==="scene-native-positive/v1"){const row=JSON.parse(value.scopeGate.rawResponse);row.checks.silhouette=false;value.scopeGate.rawResponse=JSON.stringify(row);value.scopeGate.responseSha256=hash(value.scopeGate.rawResponse);}},(value:PublicationIdentifierReviewInput)=>{if(value.scopeGate?.kind==="scene-native-positive/v1"){const row=JSON.parse(value.scopeGate.rawResponse);row.intrinsicPrintProofClaim=true;value.scopeGate.rawResponse=JSON.stringify(row);value.scopeGate.responseSha256=hash(value.scopeGate.rawResponse);}}]){const changed=copy(sceneInput);mutate(changed);assert.equal((await load().api.reviewPublicationIdentifiers(changed)).status,"hold");checks++;}
   const brand=load({readability:"legible"}),conflict=await brand.api.reviewPublicationIdentifiers(input);assert.equal(conflict.status,"conflict");assert.equal(conflict.comparison!.samePhysicalSurface,null);assert.equal(conflict.comparison!.accepted,false);assert.equal(conflict.identifierConflict!.pair.sameSelectedVisibleOption,null);assert.ok(conflict.brandRoleEvidence);assert.equal(brand.api.publicationIdentifierReviewEvidenceIssue(conflict,input),null);assert.deepEqual(brand.counts(),{appCalls:0,pairCalls:1,ocrCalls:1,sourceCalls:1});checks+=7;
+  const limitedSource={...a,identityMatches:false,accepted:false,visibleIdentityEvidence:{basis:"insufficient-visible-structure",landmarks:[],conflict:"The macro rear housing is outside the primary worn front view."}};
+  const directPair={...comparison,samePhysicalPart:true,samePhysicalSurface:true,sameSelectedVisibleOption:true,identifierComparisons:comparison.identifierComparisons.map(row=>({...row,sameSelectedComponent:true,sameSelectedVisibleOption:true}))};
+  const directTask=load({readability:"legible",sourceRow:limitedSource,pair:directPair});
+  const direct=await directTask.api.reviewPublicationIdentifiers(input);
+  assert.equal(direct.status,"conflict");assert.equal(direct.brandRoleEvidence,undefined);assert.ok(direct.sourceRoleLimit);assert.equal(directTask.api.publicationIdentifierReviewEvidenceIssue(direct,input),null);checks+=4;
+  for(const mutate of [(value:typeof direct)=>{delete value.sourceRoleLimit;},(value:typeof direct)=>{value.sourceRoleLimit!.sourceVisibleReview.nativeExecution=false;},(value:typeof direct)=>{value.comparison!.samePhysicalSurface=null;},(value:typeof direct)=>{value.status="pass";delete value.identifierConflict;}]) {
+    const changed=copy(direct);mutate(changed);assert(directTask.api.publicationIdentifierReviewEvidenceIssue(changed,input));checks++;
+  }
+  for(const patch of [{samePhysicalPart:false},{samePhysicalSurface:null},{sameSelectedVisibleOption:false}]) {
+    const task=load({readability:"legible",sourceRow:limitedSource,pair:{...directPair,...patch}});const held=await task.api.reviewPublicationIdentifiers(input);
+    assert.equal(held.status,"hold");assert.equal(task.counts().ocrCalls,0);checks+=2;
+  }
   const optional=path.join(root,"optional-reference.png");await sharp({create:{width:860,height:860,channels:3,background:"#cc8844"}}).png().toFile(optional);
   const optionalInput=copy(input);optionalInput.canonicalReferences.push({path:optional,sha256:fileHash(optional),sourceSnapshotId:snapshot});
   const optionalReview=load({readability:"legible",invalidObserverPath:optional}),optionalResult=await optionalReview.api.reviewPublicationIdentifiers(optionalInput);

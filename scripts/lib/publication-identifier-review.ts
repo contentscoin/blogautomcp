@@ -55,7 +55,7 @@ export interface PublicationIdentifierReviewContext {
   references: Array<{ imageIndex: number; sha256: string; sourceSnapshotId: string | null }>;
   scopeGateSha256?: string;
   photoThumbnailHeadline?: string;
-  localPair?: { sourceImageIndex: number; sourceDimensions: ImageDimensions; candidateDimensions: ImageDimensions; coordinateSpace: "normalized-1000"; brandRoleSha256?: string };
+  localPair?: { sourceImageIndex: number; sourceDimensions: ImageDimensions; candidateDimensions: ImageDimensions; coordinateSpace: "normalized-1000"; brandRoleSha256?: string; sourceRoleLimitSha256?: string };
 }
 export interface PublicationBlindInputObservations {
   candidate: IntrinsicIdentifierObserverEvidence;
@@ -146,6 +146,9 @@ export interface PublicationIdentifierReviewResult {
   /** Same selected main product's manufacturer brand, NOT a face/colour/SKU
    * certificate. Raw A/B booleans remain exactly as returned. */
   brandRoleEvidence?: PublicationMainProductRoleEvidence;
+  /** A different-view membership limit permits only an ordinary, direct
+   * same-part/surface/option comparison. It never grants brand-role authority. */
+  sourceRoleLimit?: PublicationMainProductRoleEvidence;
   /** Membership evidence for a warning ONLY. It never relaxes the physical
    * correspondence required for a missing-print defect or grants a retry. */
   suspectedOmissionSourceRole?: PublicationMainProductRoleEvidence;
@@ -369,6 +372,24 @@ function brandRoleEvidenceIssue(value: NonNullable<PublicationIdentifierReviewRe
       Number.isSafeInteger(value.memberFactIndex) && value.memberFactIndex === candidate?.memberFactIndex && value.selectedFact === candidate?.selectedFact
       ? null : "brand roles belong to different/unknown selected members";
   } catch { return "brand role evidence is malformed"; }
+}
+function sourceRoleLimitIssue(value: PublicationMainProductRoleEvidence, input: PublicationIdentifierReviewInput, prepared: ReturnType<typeof packet>, requireNative: boolean, observed?: PublicationBlindInputObservations): string | null {
+  try {
+    const gate=input.scopeGate, source=prepared.files.find(file=>file.sha256===value.sourceSha256);
+    if(!gate||gate.kind==="scene-native-positive/v1"||scopeGateIssue(input)||!source) return "source role limit lacks positive final context";
+    const expected=sourceMemberPacket(input,source,observed), review=value.sourceVisibleReview, row=review.row;
+    const member=object(row?.picturedMemberEvidence), candidate=object(gate.visibleReview.row?.picturedMemberEvidence);
+    if(!expected||value.version!=="selected-main-product-brand-role/v1"||value.primarySha256!==input.primaryReference.sha256||
+      value.candidateVisibleReviewSha256!==hash(JSON.stringify(evidenceBinding(gate.visibleReview)))||
+      review.requestSha256!==expected.requestSha256||scopedPublicationEvidenceIssue(review,{task:"A-visible",candidateSha256:source.sha256,primaryReferenceSha256:input.primaryReference.sha256},requireNative)||
+      row?.accepted!==false||row.identityMatches!==false||object(row.visibleIdentityEvidence)?.basis!=="insufficient-visible-structure"||
+      row.memberBrandScope!=="selected-main-product-body"||!nonempty(row.memberBrandObservation)||
+      member?.verdict!=="selected-member-visible"||member.scope!=="pictured-member-only"||
+      member.memberFactIndex!==candidate?.memberFactIndex||member.selectedFact!==candidate?.selectedFact||
+      value.memberFactIndex!==candidate?.memberFactIndex||value.selectedFact!==candidate?.selectedFact)
+      return "source role limit is not an exact native different-view observation";
+    return null;
+  } catch {return "source role limit is malformed";}
 }
 function request(context: PublicationIdentifierReviewContext) {
   return { systemPrompt: SYSTEM,
@@ -989,7 +1010,8 @@ function blindEvidenceIssue(result: PublicationIdentifierReviewResult, prepared:
     const file = prepared.files.find(row => row.sha256 === selected.sha256)!;
     const expectedLocal = { sourceImageIndex: selected.imageIndex, sourceDimensions: dimensions(file.path),
       candidateDimensions: dimensions(prepared.files[0].path), coordinateSpace: "normalized-1000",
-      ...(result.brandRoleEvidence ? { brandRoleSha256: hash(JSON.stringify(result.brandRoleEvidence)) } : {}) };
+      ...(result.brandRoleEvidence ? { brandRoleSha256: hash(JSON.stringify(result.brandRoleEvidence)) } : {}),
+      ...(result.sourceRoleLimit ? { sourceRoleLimitSha256: hash(JSON.stringify(result.sourceRoleLimit)) } : {}) };
     if (!same(local, expectedLocal) || !same(result.context, { ...prepared.context, localPair: expectedLocal }))
       return "selected local source/dimensions do not match deterministic blind selection";
     return null;
@@ -1147,6 +1169,7 @@ export function publicationIdentifierReviewEvidenceIssue(result: PublicationIden
         ? null : "print scope-out requires current native own-primary visibility witness and wholly positive task gates; it certifies no letters";
     }
     const isBlind = result.strategyVersion === PUBLICATION_IDENTIFIER_BLIND_STRATEGY;
+    if(result.sourceRoleLimit && (result.brandRoleEvidence || sourceRoleLimitIssue(result.sourceRoleLimit,expected,prepared,requireNative,result.blindInputObservations))) return "source different-view limit is invalid";
     if (result.brandRoleEvidence && brandRoleEvidenceIssue(result.brandRoleEvidence, expected, prepared, requireNative, result.blindInputObservations)) return "selected brand-bearing role evidence is invalid";
     if (result.brandRoleEvidence && (result.blindInputObservations?.candidate.observation.readability !== "legible" ||
         result.blindInputObservations?.candidate.observation.identifierRole !== "brand" ||
@@ -1273,7 +1296,7 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
             ownUnprintedReference: marker, requestSha256: hash(JSON.stringify({ applicability: marker, context: prepared.context })) };
         }
         if (observed.sources[0].evidence.observation.readability === "legible" && row?.primaryObservedWordRelation === "other-visible-member-or-face")
-          return withOtherMemberPrintWarning(result, input, prepared) || withOtherMemberPrintWarning(result, input, prepared, true) ||
+          return withOtherMemberPrintWarning(result, input, prepared) || withOtherMemberPrintWarning(result, input, prepared, true) || withPrintObservationWarning(result, input, prepared) ||
             { ...result, reason: "OWN_UNPRINTED_OTHER_MEMBER_SPATIAL_EVIDENCE_UNCONFIRMED" };
         const targetAmbiguous = withTargetAmbiguousPrintWarning(result, input, prepared);
         if (targetAmbiguous) return targetAmbiguous;
@@ -1302,12 +1325,15 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
         const role: NonNullable<PublicationIdentifierReviewResult["brandRoleEvidence"]> = { version: "selected-main-product-brand-role/v1", sourceSha256: sourceFile.sha256,
           primarySha256: input.primaryReference.sha256, candidateVisibleReviewSha256: hash(JSON.stringify(evidenceBinding(gate.visibleReview))), sourceVisibleReview,
           memberFactIndex: Number(member.memberFactIndex), selectedFact: String(member.selectedFact) };
-        if (brandRoleEvidenceIssue(role, input, prepared, nativeExecution, observed)) return { ...result, reason: "READABLE_BRAND_SOURCE_MEMBER_ROLE_UNRESOLVED" };
-        result.brandRoleEvidence = role;
+        if (brandRoleEvidenceIssue(role, input, prepared, nativeExecution, observed)) {
+          if(sourceRoleLimitIssue(role,input,prepared,nativeExecution,observed)) return { ...result, reason: "READABLE_BRAND_SOURCE_MEMBER_ROLE_UNRESOLVED" };
+          result.sourceRoleLimit=role;
+        } else result.brandRoleEvidence = role;
       }
       const context: PublicationIdentifierReviewContext = { ...prepared.context, localPair: { sourceImageIndex: selected.imageIndex,
         sourceDimensions: dimensions(sourceFile.path), candidateDimensions: dimensions(input.candidatePath), coordinateSpace: "normalized-1000",
-        ...(result.brandRoleEvidence ? { brandRoleSha256: hash(JSON.stringify(result.brandRoleEvidence)) } : {}) } };
+        ...(result.brandRoleEvidence ? { brandRoleSha256: hash(JSON.stringify(result.brandRoleEvidence)) } : {}),
+        ...(result.sourceRoleLimit ? { sourceRoleLimitSha256: hash(JSON.stringify(result.sourceRoleLimit)) } : {}) } };
       result.context = context;
       if (candidateObservation.readability === "ambiguous" || sourceObservation.readability === "ambiguous" ||
           sourceObservation.readability !== "legible" && (sourceObservation.readability !== "absent" || candidateObservation.readability !== "absent"))
