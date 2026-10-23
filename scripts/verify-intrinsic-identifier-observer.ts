@@ -29,7 +29,7 @@ async function main(): Promise<void> {
   const options = { path: file, sha256: hash(bytes) };
   const observation: IntrinsicIdentifierObservation = { literal: "Brandum", box: [100, 100, 400, 200], identifierRole: "brand", location: "intrinsic", readability: "legible" };
   const raw = wire(observation);
-  check(INTRINSIC_IDENTIFIER_OBSERVER_VERSION === "intrinsic-identifier-observer/v3", "new wire protocol has its own version, never relabeled v1/v2 evidence");
+  check(INTRINSIC_IDENTIFIER_OBSERVER_VERSION === "intrinsic-identifier-observer/v4", "bounded format recovery has its own version, never relabeled old evidence");
   check(!("anyOf" in INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA) && INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA.required.join() === "observation", "structured output root remains a strict object, union is nested");
   const [legibleBranch, neutralBranch] = INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA.properties.observation.anyOf;
   check(legibleBranch.properties.location.enum.join() === "intrinsic" && legibleBranch.properties.readability.enum.join() === "legible" &&
@@ -152,7 +152,7 @@ async function main(): Promise<void> {
     oversized.diagnostic?.issue === "OBSERVER_BOX_HEIGHT_LIMIT" && oversized.diagnostic.responseSha256 === hash(oversized.diagnostic.rawResponse!),
     "actual oversized source reply retains exact raw/constraint/SHA rather than disappearing behind generic binding failure");
   let clock = 0;
-  const late = await observeIntrinsicIdentifier(options, { now: () => clock, review: async () => { clock = 60_001; return raw; } });
+  const late = await observeIntrinsicIdentifier(options, { now: () => clock, review: async () => { clock = 90_001; return raw; } });
   check(late.status === "unavailable" && late.reason === "OBSERVER_TIMEOUT", "bounded observer deadline");
   const mutation = await observeIntrinsicIdentifier(options, { review: async () => { fs.appendFileSync(file, "changed"); return raw; } });
   check(mutation.status === "invalid" && !mutation.evidence, "SHA race cannot issue observation evidence"); fs.writeFileSync(file, bytes);
@@ -162,6 +162,22 @@ async function main(): Promise<void> {
   check(bad.status === "invalid", "malformed literal never triggers repair/retry");
   const second = await observeIntrinsicIdentifier(options, { review: async () => wire({ ...observation, literal: "Brandium" }) });
   check(second.evidence?.observation.literal === "Brandium" && second.evidence.nativeExecution === false, "DI never consumes/reuses native cache");
+  const mixed = wire({ ...observation, literal: "Br\u0430ndum" });
+  let formatCalls=0;const requests:CodexDraftOptions[]=[];
+  const recovered=await observeIntrinsicIdentifier(options,{review:async request=>{requests.push(JSON.parse(JSON.stringify(request)));return ++formatCalls===1?mixed:raw;}});
+  check(formatCalls===2&&recovered.status==="observed"&&recovered.evidence?.rawResponse===raw,"one bounded recovery for received script-format failure only");
+  check(recovered.rejectedFormatAttempt?.rawResponse===mixed&&recovered.rejectedFormatAttempt.responseSha256===hash(mixed),"first invalid raw observation retained unchanged");
+  check(requests[0].userPrompt===requests[1].userPrompt&&requests[0].systemPrompt===requests[1].systemPrompt&&JSON.stringify(requests[0].imagePaths)===JSON.stringify(requests[1].imagePaths),"recovery has no old literal, brand or corrective hint");
+  let repeatedCalls=0;const repeated=await observeIntrinsicIdentifier(options,{review:async()=>{repeatedCalls++;return mixed;}});
+  check(repeatedCalls===2&&repeated.status==="invalid"&&!repeated.evidence,"two invalid replies hold without third attempt or letter normalization");
+  let limitedClock=0,limitedCalls=0;const shortBudget=await observeIntrinsicIdentifier(options,{now:()=>limitedClock,review:async()=>{limitedCalls++;limitedClock=31_000;return mixed;}});
+  check(limitedCalls===1&&shortBudget.status==="invalid","do not start a second native minute when total deadline cannot fit it");
+  let ambiguousCalls=0;const honest=await observeIntrinsicIdentifier(options,{review:async()=>{ambiguousCalls++;return wire({literal:"",box:null,identifierRole:"none",location:"not-observed",readability:"ambiguous"});}});
+  check(ambiguousCalls===1&&honest.status==="unreadable","honest uncertainty is never retried for a favorable reading");
+  let retryFailureCalls=0;const retryFailure=await observeIntrinsicIdentifier(options,{review:async()=>{if(++retryFailureCalls===1)return mixed;throw Error("unknown second outcome");}});
+  check(retryFailureCalls===2&&retryFailure.status==="unavailable"&&retryFailure.rejectedFormatAttempt?.rawResponse===mixed&&!retryFailure.evidence,"unknown second outcome holds and preserves first rejected response");
+  let retryMutationCalls=0;const retryMutation=await observeIntrinsicIdentifier(options,{review:async()=>{if(++retryMutationCalls===1)return mixed;fs.appendFileSync(file,"changed");return raw;}});
+  check(retryMutationCalls===2&&retryMutation.status==="invalid"&&!retryMutation.evidence,"changed image during recovery cannot issue evidence");fs.writeFileSync(file,bytes);
 
   const observerFile = path.resolve("scripts/lib/intrinsic-identifier-observer.ts"); const require = createRequire(observerFile);
   const code = ts.transpileModule(fs.readFileSync(observerFile, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
@@ -173,6 +189,10 @@ async function main(): Promise<void> {
   };
   let nativeCalls = 0;
   const native = vmNative(async () => { nativeCalls++; return raw; });
+  let mixedNativeCalls=0;const mixedNative=vmNative(async()=>{mixedNativeCalls++;return mixed;});
+  await Promise.all([mixedNative.observeIntrinsicIdentifier(options),mixedNative.observeIntrinsicIdentifier(options)]);
+  await mixedNative.observeIntrinsicIdentifier(options);
+  check(mixedNativeCalls===2,"singleflight and cached format failure cannot multiply the two-attempt budget");
   const [one, two] = await Promise.all([native.observeIntrinsicIdentifier(options), native.observeIntrinsicIdentifier(options)]);
   check(nativeCalls === 1 && one.status === "observed" && two.status === "observed" && one.evidence?.nativeExecution === true, "native singleflight shares a single exact-image provider turn");
   one.evidence!.observation.literal = "tampered";
@@ -200,6 +220,6 @@ async function main(): Promise<void> {
   check(third.status === "unavailable" && third.reason === "OBSERVER_CAPACITY_HOLD" && started === 2, "native concurrency capped at two, excess calls hold");
   release!(); await Promise.all([first, next]);
   check(hash(fs.readFileSync(file)) === options.sha256, "all original pixels preserved");
-  console.log(`PASS intrinsic identifier observer: ${checks} offline checks; one image/no expected word/no transient retry, immutable request/raw response bindings, ambiguity holds, bounded native singleflight/concurrency; actual provider calls 0`);
+  console.log(`PASS intrinsic identifier observer: ${checks} offline checks; one image/no expected word, at most one received mixed-script format recovery, no retry of valid ambiguity or unknown transport, immutable raw bindings and bounded singleflight; actual provider calls 0`);
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

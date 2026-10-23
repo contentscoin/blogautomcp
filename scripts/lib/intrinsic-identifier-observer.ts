@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import sharp from "sharp";
 import { runCodexDraft, type CodexDraftOptions } from "./codex-draft-provider";
 
-export const INTRINSIC_IDENTIFIER_OBSERVER_VERSION = "intrinsic-identifier-observer/v3";
+export const INTRINSIC_IDENTIFIER_OBSERVER_VERSION = "intrinsic-identifier-observer/v4";
 export interface IntrinsicIdentifierObservation {
   literal: string;
   box: [number, number, number, number] | null;
@@ -26,6 +26,7 @@ export interface IntrinsicIdentifierObserverResult {
   reason: string;
   evidence?: IntrinsicIdentifierObserverEvidence;
   diagnostic?: { imageSha256: string; stage: "response" | "provider"; issue: string; rawResponse?: string; responseSha256?: string };
+  rejectedFormatAttempt?: { issue: "OBSERVER_LITERAL_SCRIPT_MIXED"; rawResponse: string; responseSha256: string };
 }
 type Review = (options: CodexDraftOptions) => Promise<string>;
 const sha = (value: Buffer | string): string => crypto.createHash("sha256").update(value).digest("hex");
@@ -83,7 +84,8 @@ export const INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA = {
   }, required: ["observation"], additionalProperties: false,
 } as const;
 const contract = { version: INTRINSIC_IDENTIFIER_OBSERVER_VERSION, systemPrompt: SYSTEM_PROMPT, userPrompt: USER_PROMPT,
-  outputSchema: INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA, maxImages: 1, preserveImageOrder: true, researchMode: "disabled", noTransientRetry: true } as const;
+  outputSchema: INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA, maxImages: 1, preserveImageOrder: true, researchMode: "disabled", noTransientRetry: true,
+  formatRecovery: { maximumAttempts: 2, issue: "OBSERVER_LITERAL_SCRIPT_MIXED", unchangedBlindInput: true, maximumTotalMs: 90_000 } } as const;
 const cache = new Map<string, Promise<IntrinsicIdentifierObserverResult>>();
 const active = new Set<string>();
 
@@ -153,8 +155,10 @@ export async function observeIntrinsicIdentifier(options: { path: string; sha256
     return { status: "invalid", reason: "INVALID_OBSERVER_INPUT" };
   const now = dependencies.now || Date.now;
   // Codex's existing writing transport has a one-minute minimum timer. This
-  // bounded observer uses that native limit, with no transient retry.
-  const maximumMs = Math.max(60_000, Math.min(90_000, options.maximumMs ?? 60_000));
+  // Only a definitely received mixed-script format error can consume one
+  // further blind call, within this total deadline. Unknown transport outcomes
+  // and valid observations (including ambiguity) are never retried.
+  const maximumMs = Math.max(60_000, Math.min(90_000, options.maximumMs ?? 90_000));
   const deadline = now() + maximumMs;
   const nativeExecution = Object.keys(dependencies).length === 0;
   const requestSha256 = intrinsicIdentifierObserverRequestSha256(options.sha256);
@@ -171,6 +175,7 @@ export async function observeIntrinsicIdentifier(options: { path: string; sha256
   if (!pending) {
     if (nativeExecution && active.size >= 2) return { status: "unavailable", reason: "OBSERVER_CAPACITY_HOLD" };
     const work = async (): Promise<IntrinsicIdentifierObserverResult> => {
+      let rejectedFormatAttempt: IntrinsicIdentifierObserverResult["rejectedFormatAttempt"];
       try {
         if (!unchanged()) return { status: "invalid", reason: "OBSERVER_IMAGE_CHANGED" };
         const request: CodexDraftOptions = { systemPrompt: SYSTEM_PROMPT, userPrompt: USER_PROMPT,
@@ -178,20 +183,34 @@ export async function observeIntrinsicIdentifier(options: { path: string; sha256
           maxImages: 1, preserveImageOrder: true, researchMode: "disabled", outputSchema: INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA,
           noTransientRetry: true, timeoutMs: maximumMs };
         const requestBinding = JSON.stringify(request);
-        const rawResponse = await (dependencies.review || runCodexDraft)(request);
+        let rawResponse = await (dependencies.review || runCodexDraft)(request);
         if (!unchanged() || JSON.stringify(request) !== requestBinding) return { status: "invalid", reason: "OBSERVER_IMAGE_OR_REQUEST_CHANGED" };
         if (now() > deadline) return { status: "unavailable", reason: "OBSERVER_TIMEOUT" };
-        const parsed = parseResponse(rawResponse), observation = parsed.observation;
+        let parsed = parseResponse(rawResponse);
+        if (!parsed.observation && parsed.issue === "OBSERVER_LITERAL_SCRIPT_MIXED" && deadline - now() >= 60_000) {
+          rejectedFormatAttempt = { issue: "OBSERVER_LITERAL_SCRIPT_MIXED", rawResponse, responseSha256: sha(rawResponse) };
+          // No previous literal, expected spelling or correction hint is sent.
+          // Preserve both raw responses; never normalize/transliterate letters.
+          const retry = { ...request, imagePaths: [...request.imagePaths!], timeoutMs: deadline - now() };
+          const retryBinding = JSON.stringify(retry);
+          rawResponse = await (dependencies.review || runCodexDraft)(retry);
+          if (!unchanged() || JSON.stringify(retry) !== retryBinding) return { status: "invalid", reason: "OBSERVER_IMAGE_OR_REQUEST_CHANGED", rejectedFormatAttempt };
+          if (now() > deadline) return { status: "unavailable", reason: "OBSERVER_TIMEOUT", rejectedFormatAttempt };
+          parsed = parseResponse(rawResponse);
+        }
+        const observation = parsed.observation;
         if (!observation) return { status: "invalid", reason: "OBSERVER_RESPONSE_INVALID", diagnostic: {
           imageSha256: options.sha256, stage: "response", issue: parsed.issue,
           ...(typeof rawResponse === "string" && Buffer.byteLength(rawResponse, "utf8") <= MAXIMUM_RESPONSE_BYTES
             ? { rawResponse, responseSha256: sha(rawResponse) } : {}),
-        } };
+        }, ...(rejectedFormatAttempt ? { rejectedFormatAttempt } : {}) };
         const evidence: IntrinsicIdentifierObserverEvidence = { version: INTRINSIC_IDENTIFIER_OBSERVER_VERSION, nativeExecution,
           imageSha256: options.sha256, requestSha256, responseSha256: sha(rawResponse), rawResponse, observation };
         return { status: observation.readability === "legible" ? "observed" : "unreadable",
-          reason: observation.readability === "legible" ? "BLIND_INTRINSIC_WORD_OBSERVED" : "NO_UNIQUE_LEGIBLE_INTRINSIC_WORD", evidence };
+          reason: observation.readability === "legible" ? "BLIND_INTRINSIC_WORD_OBSERVED" : "NO_UNIQUE_LEGIBLE_INTRINSIC_WORD", evidence,
+          ...(rejectedFormatAttempt ? { rejectedFormatAttempt } : {}) };
       } catch (error) { return { status: "unavailable", reason: unchanged() ? "OBSERVER_UNAVAILABLE" : "OBSERVER_IMAGE_CHANGED",
+        ...(rejectedFormatAttempt ? { rejectedFormatAttempt } : {}),
         diagnostic: { imageSha256: options.sha256, stage: "provider", issue: error instanceof Error ? error.message.slice(0, 2048) : "UNKNOWN_OBSERVER_PROVIDER_FAILURE" } }; }
     };
     if (nativeExecution) active.add(requestSha256);
@@ -202,8 +221,8 @@ export async function observeIntrinsicIdentifier(options: { path: string; sha256
         if (removable) cache.delete(removable);
       }
       cache.set(requestSha256, pending);
-      // An unknown/failed observation is a consumed blind task too. Keep it
-      // within the same bounded cache; never automatically resend these pixels.
+      // The completed task, including its at-most-one format recovery, stays
+      // consumed in this cache. Later callers cannot restart the retry budget.
       void pending.then(() => { active.delete(requestSha256); });
     }
   }
