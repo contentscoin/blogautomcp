@@ -50,6 +50,10 @@ async function main() {
   };
   const isolated={candidate:observed(candidate,"unrelated-candidate",candidateBox,"legible"),sources:[vote(2,"misread",[100,100,600,300]),vote(3,"source-word"),vote(4,"source-word",[100,100,250,160])]};
   assert.equal(selectBlindPublicationIdentifierSource(isolated).imageIndex,4,"two exact source-only votes beat a larger singleton word");checks++;
+  const noisySources={...isolated,sources:[...isolated.sources,vote(5,"different-singleton")]};
+  assert.equal(selectBlindPublicationIdentifierSource(noisySources).imageIndex,4,"unique repeated source reading selects an input despite two distinct noisy singletons; it is not a verdict");checks++;
+  const changedCandidate=copy(noisySources);changedCandidate.candidate.observation.literal="different-singleton";
+  assert.equal(selectBlindPublicationIdentifierSource(changedCandidate).imageIndex,4,"candidate text cannot influence source selection");checks++;
   for(const literal of ["misread","source-word","unrelated-expected-word"]) {const changed=copy(isolated);changed.candidate.observation.literal=literal;assert.equal(selectBlindPublicationIdentifierSource(changed).imageIndex,4);checks++;}
   const solo={...isolated,sources:[vote(3,"one-observed-source")]};assert.equal(selectBlindPublicationIdentifierSource(solo).imageIndex,3);checks++;
   for(const sources of [[],[vote(2,"A"),vote(3,"B")],[vote(2,"word"),vote(3,"Word")],[vote(2,"word"),vote(3,"word ")],

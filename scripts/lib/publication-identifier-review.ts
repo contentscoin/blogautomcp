@@ -385,7 +385,13 @@ function chooseBlindSource(observations: PublicationBlindInputObservations) {
     groups.set(key, [...(groups.get(key) || []), row]);
   }
   const ranked = [...groups.values()].sort((a, b) => b.length - a.length);
-  if (legible.length > 1 && (!ranked[0] || ranked[0].length * 2 <= legible.length)) throw Error("BLIND_SOURCE_LITERAL_CONSENSUS_UNRESOLVED");
+  // This selects a comparison input, never a verdict. Two independent exact
+  // observations may identify the unique leading source group even when noisy
+  // singleton readings prevent an absolute majority. A tie or a singleton is
+  // still unresolved; native local comparison and OCR corroboration below are
+  // required unchanged before either acceptance or a repair authority exists.
+  if (legible.length > 1 && (!ranked[0] || ranked[0].length < 2 || ranked[0].length <= (ranked[1]?.length || 0)))
+    throw Error("BLIND_SOURCE_LITERAL_CONSENSUS_UNRESOLVED");
   return (ranked[0] || []).sort((a, b) => {
     const area = (row: typeof a) => { const box = row.evidence.observation.box!; return (box[2] - box[0]) * (box[3] - box[1]); };
     return area(b) - area(a) || a.imageIndex - b.imageIndex;
