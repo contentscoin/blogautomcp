@@ -250,6 +250,34 @@ async function main() {
   const otherMemberTask=load({app:otherMemberApp,primaryReadability:"legible"}),otherMember=await otherMemberTask.api.reviewPublicationIdentifiers(bodyInput);
   assert.equal(otherMember.status,"unverified",otherMember.reason);assert.equal(otherMember.nativeExecution,false);
   assert.equal(otherMember.printObservationWarning?.version,"publication-other-member-print-warning/v1");
+  // Actual regression: the exact word is positively on a separate box, but B
+  // cannot classify printing on the matched device front. Preserve that raw
+  // uncertainty as a warning, never an unprinted-face or letter certification.
+  const separatedUnresolved:PublicationPrintApplicabilityRow={...otherMemberApp,accepted:false,applicability:"unresolved",
+    sourcePrintLocation:"not-observed",candidatePrintLocation:"unresolved",samePhysicalSurface:null,sameSelectedVisibleOption:null};
+  const separatedTask=load({app:separatedUnresolved,primaryReadability:"legible"});
+  const separated=await separatedTask.api.reviewPublicationIdentifiers(bodyInput);
+  assert.equal(separated.status,"unverified",separated.reason);
+  assert.equal(separated.printObservationWarning?.version,"publication-other-member-unresolved-print-warning/v1");
+  assert.deepEqual(JSON.parse(JSON.stringify(separated.printApplicability?.row)),separatedUnresolved);
+  assert.equal(separatedTask.api.publicationIdentifierReviewEvidenceIssue(separated,bodyInput),null);
+  assert.equal(separated.identifierConflict,undefined);assert.equal(separated.missingPrintEvidence,undefined);checks+=6;
+  for(const mutate of [(value:typeof separated)=>{value.status="pass";},
+    (value:typeof separated)=>{value.printApplicability!.nativeExecution=false;},
+    (value:typeof separated)=>{value.printObservationWarning!.policyFingerprint=hash("changed policy");},
+    (value:typeof separated)=>{value.printApplicability!.row!.samePhysicalSurface=true;}]) {
+    const changed=copy(separated);mutate(changed);assert(separatedTask.api.publicationIdentifierReviewEvidenceIssue(changed,bodyInput));checks++;
+  }
+  for(const mutate of [(value:PublicationIdentifierReviewInput)=>{if(value.scopeGate?.kind!=="scene-native-positive/v1")value.scopeGate!.claimsReview=evidence(bodyPackets[1],{...c,intrinsicPrintProofClaim:true});},
+    (value:PublicationIdentifierReviewInput)=>{if(value.scopeGate?.kind!=="scene-native-positive/v1")value.scopeGate!.visibleReview=evidence(bodyPackets[0],{...a,identityMatches:false,accepted:false});}]) {
+    const changed=copy(bodyInput);mutate(changed);const result=await load({app:separatedUnresolved,primaryReadability:"legible"}).api.reviewPublicationIdentifiers(changed);
+    assert.equal(result.status,"hold");assert.equal(result.printObservationWarning,undefined);checks+=2;
+  }
+  for(const patch of [{samePhysicalPart:false},{samePhysicalPart:null},{samePhysicalSurface:false},{sameSelectedVisibleOption:false},
+    {candidatePrintLocation:"entire-exposed-blank"},{comparedPrimaryFaceBox:sourceBox},{primaryFaceLandmarks:otherMemberApp.primaryFaceLandmarks!.slice(0,1)}]) {
+    const task=load({app:{...separatedUnresolved,...patch} as PublicationPrintApplicabilityRow,primaryReadability:"legible"});
+    const result=await task.api.reviewPublicationIdentifiers(bodyInput);assert.equal(result.status,"hold");assert.equal(result.printObservationWarning,undefined);checks+=2;
+  }
   const ambiguousOtherTask=load({readability:"ambiguous",primaryReadability:"legible",app:otherMemberApp});
   const ambiguousOther=await ambiguousOtherTask.api.reviewPublicationIdentifiers(input);
   assert.equal(ambiguousOther.status,"unverified");assert.equal(ambiguousOther.printObservationWarning!.version,"publication-other-member-print-warning/v1");

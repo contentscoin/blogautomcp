@@ -104,6 +104,8 @@ export type PublicationPrintObservationWarning = PublicationPrintWarningBinding 
   { version: "publication-target-ambiguous-print-warning/v1"; scope: "multiple-visible-words-no-unique-intrinsic-target-no-certification" } |
   { version: "publication-other-member-print-warning/v1"; scope: "own-unprinted-face-other-member-word-not-certified";
     primaryObservedWordEvidenceSha256: string; spatialWitnessSha256: string } |
+  { version: "publication-other-member-unresolved-print-warning/v1"; scope: "other-member-word-local-print-unresolved-no-certification";
+    primaryObservedWordEvidenceSha256: string; spatialWitnessSha256: string } |
   { version: "publication-external-word-print-warning/v1"; scope: "candidate-external-artwork-local-face-not-certified";
     candidateObservedWordEvidenceSha256: string; spatialWitnessSha256: string } |
   { version: "publication-suspected-print-omission-warning/v1"; scope: "own-suspected-blank-secondary-unconfirmed-no-certification";
@@ -387,11 +389,19 @@ function chooseBlindSource(observations: PublicationBlindInputObservations) {
   const ranked = [...groups.values()].sort((a, b) => b.length - a.length);
   // This selects a comparison input, never a verdict. Two independent exact
   // observations may identify the unique leading source group even when noisy
-  // singleton readings prevent an absolute majority. A tie or a singleton is
-  // still unresolved; native local comparison and OCR corroboration below are
+  // singleton readings prevent an absolute majority. Otherwise the exact OWN
+  // primary is used below; native local comparison and OCR corroboration are
   // required unchanged before either acceptance or a repair authority exists.
-  if (legible.length > 1 && (!ranked[0] || ranked[0].length < 2 || ranked[0].length <= (ranked[1]?.length || 0)))
+  if (legible.length > 1 && (!ranked[0] || ranked[0].length < 2 || ranked[0].length <= (ranked[1]?.length || 0))) {
+    // Different gallery members can legitimately carry different words. When
+    // they do not identify one repeated source reading, inspect the exact OWN
+    // primary instead of treating gallery disagreement as a provider failure.
+    // This never uses the candidate's letters. The unchanged local comparison
+    // and independent OCR still have to corroborate either match or conflict.
+    const primary = observations.sources.find(source => source.imageIndex === 2);
+    if (primary?.evidence.observation.readability === "legible") return primary;
     throw Error("BLIND_SOURCE_LITERAL_CONSENSUS_UNRESOLVED");
+  }
   return (ranked[0] || []).sort((a, b) => {
     const area = (row: typeof a) => { const box = row.evidence.observation.box!; return (box[2] - box[0]) * (box[3] - box[1]); };
     return area(b) - area(a) || a.imageIndex - b.imageIndex;
@@ -586,14 +596,17 @@ function withTargetAmbiguousPrintWarning(result: PublicationIdentifierReviewResu
 /** A word on another actually separated included member/face does not impose
  * lettering on a positively corresponding unprinted local face. This is only
  * an explicit unverified-print warning, never a positive B or retry proof. */
-function otherMemberPrintWarningIssue(result: PublicationIdentifierReviewResult, input: PublicationIdentifierReviewInput, prepared: ReturnType<typeof packet>): string | null {
+function otherMemberPrintWarningIssue(result: PublicationIdentifierReviewResult, input: PublicationIdentifierReviewInput, prepared: ReturnType<typeof packet>, unresolved = false): string | null {
   try {
     const observed = result.blindInputObservations, primary = observed?.sources[0]?.evidence, value = result.printApplicability, row = value?.row;
     if (!input.scopeGate || input.scopeGate.kind === "scene-native-positive/v1" || scopeGateIssue(input) || !printWarningPolicyFingerprint(input) ||
         observationSetIssue(observed, prepared, true) || (observed!.candidate.observation.readability !== "absent" && !finalNonlegibleAmbiguity(input, observed)) || !primary ||
         primary.observation.readability !== "legible" || !validBox(primary.observation.box) ||
         prepared.context.references.some(reference => !validSha(reference.sourceSnapshotId)) || !value || !row ||
-        ownUnprintedApplicabilityIssue(value, input, true, observed) || row.sameSelectedVisibleOption !== true ||
+        (unresolved ? applicabilityEvidenceIssue(value, input, true, observed) || row.accepted !== false || row.applicability !== "unresolved" ||
+          row.sourcePrintLocation !== "not-observed" || row.candidatePrintLocation !== "unresolved" || row.sourceBox !== null || row.candidateBox !== null ||
+          row.samePhysicalPart !== true || row.samePhysicalSurface !== null || row.sameSelectedVisibleOption !== null
+          : ownUnprintedApplicabilityIssue(value, input, true, observed) || row.sameSelectedVisibleOption !== true) ||
         row.primaryObservedWordRelation !== "other-visible-member-or-face" || !same(row.primaryObservedWordBox, primary.observation.box) ||
         !validFaceBox(row.comparedPrimaryFaceBox) || !nonempty(row.primaryObservedWordSpatialWitness) ||
         !row.primaryFaceLandmarks || row.primaryFaceLandmarks.length < 2 ||
@@ -611,10 +624,11 @@ function otherMemberPrintWarningIssue(result: PublicationIdentifierReviewResult,
     return null;
   } catch { return "other-member print spatial evidence is malformed or changed"; }
 }
-function withOtherMemberPrintWarning(result: PublicationIdentifierReviewResult, input: PublicationIdentifierReviewInput, prepared: ReturnType<typeof packet>): PublicationIdentifierReviewResult | null {
-  if (otherMemberPrintWarningIssue(result, input, prepared)) return null;
-  const warning: PublicationPrintObservationWarning = { version: "publication-other-member-print-warning/v1",
-    scope: "own-unprinted-face-other-member-word-not-certified", candidateSha256: input.candidateSha256,
+function withOtherMemberPrintWarning(result: PublicationIdentifierReviewResult, input: PublicationIdentifierReviewInput, prepared: ReturnType<typeof packet>, unresolved = false): PublicationIdentifierReviewResult | null {
+  if (otherMemberPrintWarningIssue(result, input, prepared, unresolved)) return null;
+  const warning: PublicationPrintObservationWarning = { ...(unresolved ? {
+    version: "publication-other-member-unresolved-print-warning/v1" as const, scope: "other-member-word-local-print-unresolved-no-certification" as const,
+  } : { version: "publication-other-member-print-warning/v1" as const, scope: "own-unprinted-face-other-member-word-not-certified" as const }), candidateSha256: input.candidateSha256,
     primarySha256: input.primaryReference.sha256, scopeGateSha256: prepared.context.scopeGateSha256!,
     applicabilitySha256: hash(JSON.stringify(result.printApplicability)), observationsSha256: hash(JSON.stringify(result.blindInputObservations)),
     sourceContextSha256: hash(JSON.stringify(prepared.context.references)), policyFingerprint: printWarningPolicyFingerprint(input)!,
@@ -623,7 +637,8 @@ function withOtherMemberPrintWarning(result: PublicationIdentifierReviewResult, 
       relation: result.printApplicability!.row!.primaryObservedWordRelation, witness: result.printApplicability!.row!.primaryObservedWordSpatialWitness,
       landmarks: result.printApplicability!.row!.primaryFaceLandmarks })) };
   return { ...result, status: "unverified", nativeExecution: false, printObservationWarning: warning,
-    reason: "OWN_UNPRINTED_FACE_OTHER_MEMBER_WORD_NOT_CERTIFIED_NO_REPAIR_AUTHORITY",
+    reason: unresolved ? "OTHER_MEMBER_WORD_SPATIALLY_SEPARATED_LOCAL_PRINT_UNRESOLVED_NO_REPAIR_AUTHORITY"
+      : "OWN_UNPRINTED_FACE_OTHER_MEMBER_WORD_NOT_CERTIFIED_NO_REPAIR_AUTHORITY",
     requestSha256: hash(JSON.stringify({ observationWarning: warning, context: prepared.context })) };
 }
 /** Preserve a blind candidate transcription even when a separate positive
@@ -1000,8 +1015,10 @@ export function publicationIdentifierReviewEvidenceIssue(result: PublicationIden
         same(result.printObservationWarning, regenerated.printObservationWarning) && result.requestSha256 === regenerated.requestSha256
         ? null : "candidate external-word warning requires the exact paired source artwork/physical-product spatial witness, without intrinsic letter or repair authority";
     }
-    if (result.printObservationWarning?.version === "publication-other-member-print-warning/v1") {
-      const regenerated = withOtherMemberPrintWarning(result, expected, prepared);
+    if (result.printObservationWarning?.version === "publication-other-member-print-warning/v1" ||
+        result.printObservationWarning?.version === "publication-other-member-unresolved-print-warning/v1") {
+      const regenerated = withOtherMemberPrintWarning(result, expected, prepared,
+        result.printObservationWarning.version === "publication-other-member-unresolved-print-warning/v1");
       return result.version === PUBLICATION_IDENTIFIER_REVIEW_VERSION && result.strategyVersion === PUBLICATION_IDENTIFIER_BLIND_STRATEGY &&
         result.status === "unverified" && result.nativeExecution === false && !!regenerated && result.reason === regenerated.reason &&
         same(result.printObservationWarning, regenerated.printObservationWarning) && result.requestSha256 === regenerated.requestSha256
@@ -1180,7 +1197,8 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
             ownUnprintedReference: marker, requestSha256: hash(JSON.stringify({ applicability: marker, context: prepared.context })) };
         }
         if (observed.sources[0].evidence.observation.readability === "legible" && row?.primaryObservedWordRelation === "other-visible-member-or-face")
-          return withOtherMemberPrintWarning(result, input, prepared) || { ...result, reason: "OWN_UNPRINTED_OTHER_MEMBER_SPATIAL_EVIDENCE_UNCONFIRMED" };
+          return withOtherMemberPrintWarning(result, input, prepared) || withOtherMemberPrintWarning(result, input, prepared, true) ||
+            { ...result, reason: "OWN_UNPRINTED_OTHER_MEMBER_SPATIAL_EVIDENCE_UNCONFIRMED" };
         const targetAmbiguous = withTargetAmbiguousPrintWarning(result, input, prepared);
         if (targetAmbiguous) return targetAmbiguous;
         if (!outsideApplicabilityIssue(applicability, input, nativeExecution, observed)) {

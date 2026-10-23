@@ -56,9 +56,14 @@ async function main() {
   assert.equal(selectBlindPublicationIdentifierSource(changedCandidate).imageIndex,4,"candidate text cannot influence source selection");checks++;
   for(const literal of ["misread","source-word","unrelated-expected-word"]) {const changed=copy(isolated);changed.candidate.observation.literal=literal;assert.equal(selectBlindPublicationIdentifierSource(changed).imageIndex,4);checks++;}
   const solo={...isolated,sources:[vote(3,"one-observed-source")]};assert.equal(selectBlindPublicationIdentifierSource(solo).imageIndex,3);checks++;
-  for(const sources of [[],[vote(2,"A"),vote(3,"B")],[vote(2,"word"),vote(3,"Word")],[vote(2,"word"),vote(3,"word ")],
+  for(const sources of [[vote(2,"A"),vote(3,"B")],[vote(2,"word"),vote(3,"Word")],[vote(2,"word"),vote(3,"word ")],
     [vote(2,"word"),vote(3,"word",[100,100,200,150],"model")],[vote(2,"A"),vote(3,"A"),vote(4,"B"),vote(5,"B")],
-    [{...vote(2,"A"),sha256:hash("duplicate")},{...vote(3,"A"),sha256:hash("duplicate")}]] ) {
+  ]) {
+    assert.equal(selectBlindPublicationIdentifierSource({...isolated,sources}).imageIndex,2,"gallery disagreement routes only to the exact OWN primary, not a favorable candidate word");checks++;
+  }
+  const unavailable=[vote(2,"unreadable"),vote(3,"A"),vote(4,"B")];unavailable[0].evidence.observation.readability="unreadable";
+  assert.throws(()=>selectBlindPublicationIdentifierSource({...isolated,sources:unavailable}),/BLIND_SOURCE_/);checks++;
+  for(const sources of [[],[{...vote(2,"A"),sha256:hash("duplicate")},{...vote(3,"A"),sha256:hash("duplicate")}]] ) {
     assert.throws(()=>selectBlindPublicationIdentifierSource({...isolated,sources}),/BLIND_SOURCE_/);checks++;
   }
   const reordered={...isolated,sources:[isolated.sources[2],isolated.sources[0],isolated.sources[1]]};
