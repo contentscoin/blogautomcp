@@ -5,19 +5,21 @@ import type { BrandPostPackageManifest } from "./brand-post-package";
 import { publicationImageAuditPolicyFingerprint } from "../../scripts/lib/publish-image-audit";
 import { readSuccessfulImageAuditReadinessBinding } from "../../scripts/lib/publish-image-audit-receipt";
 import { readProductPhotoSource } from "../../scripts/lib/product-photo-provenance";
+import { COMPATIBLE_STRICT_PUBLICATION_POLICIES } from "../../scripts/lib/lightweight-publication-review";
 
 /** Exact saved input binding for the signed successful pixel-audit receipt.
  * Progress/approval timestamps never change the content being reviewed.
  * Missing files are deliberately bound as missing, then local readiness rejects
  * them; adding/replacing a file or gallery receipt invalidates that binding. */
-export function brandPostApprovalBinding(manifest: BrandPostPackageManifest, sourceDirectory: string): string {
+export function brandPostApprovalBinding(manifest: BrandPostPackageManifest, sourceDirectory: string,
+  policy = publicationImageAuditPolicyFingerprint()): string {
   const { approvedAt: _approval, imageGeneration: _progress, textQualityRevalidation, ...content } = manifest;
   void _approval; void _progress;
   const { checkedAt: _textCheckTime, ...textBinding } = textQualityRevalidation || {};
   void _textCheckTime;
   const hash = crypto.createHash("sha256");
   hash.update(JSON.stringify({ version: "saved-material-publication-audit/v1",
-    policy: publicationImageAuditPolicyFingerprint(), content,
+    policy, content,
     ...(textQualityRevalidation ? { textQualityRevalidation: textBinding } : {}) }));
   const files = new Set([manifest.markdownPath, manifest.heroImagePath, ...manifest.bodyImagePaths,
     ...(manifest.imageAssets || []).flatMap(asset => [asset.path, asset.sourcePath,
@@ -50,9 +52,16 @@ export function brandPostApprovalBinding(manifest: BrandPostPackageManifest, sou
   return hash.digest("hex");
 }
 
+/** Read-only migration: historical strict success remains valid only for the
+ * exact same manuscript, selected facts, pixels and source/retrieval files. */
+export function brandPostCompatibleApprovalBindings(manifest: BrandPostPackageManifest, sourceDirectory: string): string[] {
+  return COMPATIBLE_STRICT_PUBLICATION_POLICIES.map(policy => brandPostApprovalBinding(manifest, sourceDirectory, policy));
+}
+
 export function hasCurrentBrandPostApprovalReceipt(manifest: BrandPostPackageManifest, sourceDirectory: string): boolean {
   if (manifest.connectKind !== "SHOPPING") return true;
   if (manifest.version !== "brand-post-package/v2") return false;
-  try { return readSuccessfulImageAuditReadinessBinding(manifest.brandLinkId, brandPostApprovalBinding(manifest, sourceDirectory)); }
+  try { return [brandPostApprovalBinding(manifest, sourceDirectory), ...brandPostCompatibleApprovalBindings(manifest, sourceDirectory)]
+    .some(binding => readSuccessfulImageAuditReadinessBinding(manifest.brandLinkId, binding)); }
   catch { return false; }
 }

@@ -39,6 +39,7 @@ import { buildBlogPhotorealDirection } from "../../scripts/lib/photoreal/build";
 import { assertProductImageReferences, checkedExistingJobResult, collectCompletedProductCandidates, existingJobResult, hasBrowserSubmission, hasUnresolvedCodexSubmission, readCompletedProductRequest, readLegacyCodexImageCompletion, resolveBrandPostImageEngine, runCodexImageBatch, type ImageBatchJob } from "./codex-image-generation";
 import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene, brandPostSectionSlotId, isReferenceGuidedThumbnail, isShoppingLifestyleImage, REFERENCE_SCENE_REVIEW_CHECKS, type BrandPostImageSourceHint } from "./brand-post-image-evidence";
 import { buildProduct9Canvas, type Product9Canvas, type ProductPhysicalScale } from "../../scripts/lib/product-9canvas";
+import { buildGenerationFirstPhotoBrief } from "../../scripts/lib/generation-first-photo-brief";
 import { buildShoppingReferenceScenePrompt, reviewShoppingReferenceScene, selectShoppingSceneReference,
   selectShoppingSceneSupportingReferences, readShoppingSceneSupportingCandidates, SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION,
   type ShoppingSceneReference, type ShoppingSceneSupportingReference } from "../../scripts/lib/shopping-reference-scene";
@@ -179,6 +180,13 @@ function resolveManifestProductUnderstanding(
   });
 }
 
+/** Missing legacy plans stay unknown; growing applied-image lists are not a
+ * stable target and must never change a submitted generation request. */
+function resolvePlannedBodyPhotoCount(manifest: BrandPostPackageManifestV2): number | undefined {
+  return manifest.composition.sections.length > 0 && manifest.composition.sections.every(section => Number.isSafeInteger(section.imageMin) && section.imageMin! >= 0)
+    ? manifest.composition.sections.reduce((count, section) => count + section.imageMin!, 0) : undefined;
+}
+
 /** Allocate holes, not request order: completed slots retain identity in subset retries. */
 export function resolveBrandPostImageSlots(
   manifest: BrandPostPackageManifestV2,
@@ -287,6 +295,9 @@ export function buildBrandPostImagePrompt(options: {
   topicTemplateId?: string;
   physicalScale?: ProductPhysicalScale;
   productImageDirective?: string;
+  productUnderstanding?: Product9Canvas;
+  /** Existing composition target only, never extra generation authority. */
+  plannedBodyImageCount?: number;
 }): string {
   const staging = options.stagingRecipe
     ? `Staging direction (reference data, Korean): ${clean(options.stagingRecipe).slice(0, 300)}`
@@ -658,16 +669,23 @@ export async function prepareBrandPostImageReferenceContext(options: {
     ? options.manifest.sourceSnapshot.product.referenceImageUrls.filter((url): url is string => typeof url === "string") : [];
   const productUnderstanding = resolveManifestProductUnderstanding(options.manifest, options.productName);
   const sectionIndex = options.manifest.composition.sections.findIndex(section => section.id === options.target.sectionId);
-  const promptOptions = { productName: options.productName, sectionTitle: options.target.sectionTitle,
+  const previousPromptOptions = { productName: options.productName, sectionTitle: options.target.sectionTitle,
     imageIntent: options.target.imageIntent, bodyExcerpt: options.target.bodyExcerpt, stagingRecipe: options.target.promptRecipe,
     role: options.target.role, variantIndex: photorealVariantIndex(options.manifest, options.target),
     adjacentSectionTitles: sectionIndex < 0 ? [] : [sectionIndex - 1, sectionIndex + 1]
       .flatMap(i => options.manifest.composition.sections[i] ? [options.manifest.composition.sections[i].title] : []),
     physicalScale: productUnderstanding?.concept.physicalScale, productImageDirective: productUnderstanding?.policy.imageDirective };
+  const promptOptions = { ...previousPromptOptions, productUnderstanding,
+    plannedBodyImageCount: resolvePlannedBodyPhotoCount(options.manifest) };
   const preparationBinding = crypto.createHash("sha256").update(JSON.stringify({ snapshotId: options.manifest.sourceSnapshot.snapshotId,
-    selectedProduct, promptOptions })).digest("hex");
+    selectedProduct, promptOptions: { ...previousPromptOptions, generationBrief: buildGenerationFirstPhotoBrief(promptOptions) } })).digest("hex");
+  // Completed jobs retain their exact original prompt. Adding a generation
+  // brief never invalidates their unchanged product/slot/source binding or
+  // creates authority to resend them.
+  const previousPreparationBinding = crypto.createHash("sha256").update(JSON.stringify({ snapshotId: options.manifest.sourceSnapshot.snapshotId,
+    selectedProduct, promptOptions: previousPromptOptions })).digest("hex");
   const legacyPreparationBinding = crypto.createHash("sha256").update(JSON.stringify({ snapshotId: options.manifest.sourceSnapshot.snapshotId,
-    selectedProduct, promptOptions: { ...promptOptions, variantIndex: legacyPhotorealVariantIndex(options.manifest, options.target) } })).digest("hex");
+    selectedProduct, promptOptions: { ...previousPromptOptions, variantIndex: legacyPhotorealVariantIndex(options.manifest, options.target) } })).digest("hex");
   const supportIntact = (support: ShoppingSceneSupportingReference) => {
     try {
       return support.sourceSnapshotId === options.manifest.sourceSnapshot!.snapshotId &&
@@ -726,7 +744,7 @@ export async function prepareBrandPostImageReferenceContext(options: {
       try {
         const supporting = saved?.supportingReferences ?? [];
         intact = !!saved && metadata.sourceSnapshotId === options.manifest.sourceSnapshot.snapshotId &&
-          [preparationBinding, legacyPreparationBinding].includes(saved.preparationBinding || "") &&
+          [preparationBinding, previousPreparationBinding, legacyPreparationBinding].includes(saved.preparationBinding || "") &&
           Array.isArray(supporting) && supporting.length <= 2 && supporting.every(supportIntact) &&
           saved.referenceImagePaths.length >= 1 && saved.referenceImagePaths.length <= 3 && saved.referenceImagePaths.length === saved.referenceHashes.length &&
           saved.reference.sha256 === saved.referenceHashes[0] && typeof saved.prompt === "string" &&
@@ -1277,6 +1295,8 @@ export function prepareImageBatchJobs(
       variantIndex: photorealVariantIndex(manifest, target),
       physicalScale: productUnderstanding?.concept.physicalScale,
       productImageDirective: productUnderstanding?.policy.imageDirective,
+      ...(productUnderstanding ? { productUnderstanding,
+        plannedBodyImageCount: resolvePlannedBodyPhotoCount(manifest) } : {}),
     }),
     outStem: "",
     referenceImagePaths: manifest.connectKind === "SHOPPING" ? target.referenceContext?.referenceImagePaths || [] : normalizePackageImageAssets(manifest)

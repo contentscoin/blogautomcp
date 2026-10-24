@@ -151,7 +151,7 @@ async function main() {
       const url = `https://shop-phinf.pstatic.net/scoped/${id}.png`, snapshot = createProductSnapshot({ productId: id, externalProductId: "1", connectKind: "SHOPPING",
         sourceUrl: "https://smartstore.naver.com/scoped/products/1", product: { name: "EXPECTED_SELECTED_SUBJECT", features: ["verified selected component"], referenceImageUrls: [url] } });
       fs.writeFileSync(`${source}.retrieval.json`, JSON.stringify({ version: "product-image-retrieval/v1", sourceUrl: url, sha256: hash(source), retrievedAt: new Date(Date.now() - 1000).toISOString() }));
-      return { forceReview:true, productName: "EXPECTED_SELECTED_SUBJECT", selectedProduct: JSON.stringify({ selectedTitle: "EXPECTED_SELECTED_SUBJECT", productKind: "selected fixture component",
+      return { reviewMode: "strict", forceReview:true, productName: "EXPECTED_SELECTED_SUBJECT", selectedProduct: JSON.stringify({ selectedTitle: "EXPECTED_SELECTED_SUBJECT", productKind: "selected fixture component",
         validatedSellerFeatures: [{ text: "Only the fixture component is included; other shown gifts are not selected", evidenceIds: ["seller-feature-1"] }] }),
       sourceSnapshotId: snapshot.snapshotId, selectedSourceSnapshot: snapshot, selectedSourceProductId: id, selectedSourceDirectory: directory,
       imageAssets: [{ path: final, sourcePath: source, sha256: hash(final), role: "body", sectionId: "exterior", slotId: "exterior:image:1", provenance: "ORIGINAL", creationMethod: "source", remoteGenerated: false }],
@@ -760,21 +760,21 @@ async function main() {
       composition:claimOptions.composition,imageAssets:claimOptions.imageAssets,heroImagePath:null,bodyImagePaths:[claimOptions.imageAssets![0].path]} as unknown as import("../src/lib/brand-post-package").BrandPostPackageManifestV2;
     fs.writeFileSync(path.join(packageDir,"manifest.json"),JSON.stringify(manifest)); claimOptions.brandLinkId=id;
     await assert.rejects(assertPublishImagesSafe(claimOptions)); checks++;
-    const signed = readOriginalPhotoClaimDefect(manifest,"exterior",claimOptions.imageAssets![0].sha256!,publicationImageAuditPolicyFingerprint());
+    const signed = readOriginalPhotoClaimDefect(manifest,"exterior",claimOptions.imageAssets![0].sha256!,publicationImageAuditPolicyFingerprint("strict"));
     assert(signed,"exact native A/C/D plus deterministic canonical B can admit only original-source rebind"); checks++;
     const retained = readPublicationDefectMaterialContext(signed.proof)!; assert.deepEqual(retained.composition,manifest.composition); checks++;
-    assert.equal(readOriginalPhotoClaimDefect({...manifest,title:"foreign body"},"exterior",claimOptions.imageAssets![0].sha256!,publicationImageAuditPolicyFingerprint()),null); checks++;
+    assert.equal(readOriginalPhotoClaimDefect({...manifest,title:"foreign body"},"exterior",claimOptions.imageAssets![0].sha256!,publicationImageAuditPolicyFingerprint("strict")),null); checks++;
     const contextFile = path.join(root,"data","publication-image-defect-proofs",signed.proof.materialContext.file), oldContext = fs.readFileSync(contextFile);
-    fs.appendFileSync(contextFile," "); assert.equal(readOriginalPhotoClaimDefect(manifest,"exterior",claimOptions.imageAssets![0].sha256!,publicationImageAuditPolicyFingerprint()),null); checks++;
+    fs.appendFileSync(contextFile," "); assert.equal(readOriginalPhotoClaimDefect(manifest,"exterior",claimOptions.imageAssets![0].sha256!,publicationImageAuditPolicyFingerprint("strict")),null); checks++;
     fs.writeFileSync(contextFile,oldContext);
-    fs.renameSync(contextFile,`${contextFile}.missing`);assert.equal(readOriginalPhotoClaimDefect(manifest,"exterior",claimOptions.imageAssets![0].sha256!,publicationImageAuditPolicyFingerprint()),null);checks++;
+    fs.renameSync(contextFile,`${contextFile}.missing`);assert.equal(readOriginalPhotoClaimDefect(manifest,"exterior",claimOptions.imageAssets![0].sha256!,publicationImageAuditPolicyFingerprint("strict")),null);checks++;
     fs.renameSync(`${contextFile}.missing`,contextFile);
     assert.equal(readOriginalPhotoClaimDefect(manifest,"exterior",claimOptions.imageAssets![0].sha256!,"f".repeat(64)),null);checks++;
     const canonicalReceipt=`${claimOptions.imageAssets![0].sourcePath}.retrieval.json`,canonicalBytes=fs.readFileSync(canonicalReceipt);
-    fs.appendFileSync(canonicalReceipt," ");assert.equal(readOriginalPhotoClaimDefect(manifest,"exterior",claimOptions.imageAssets![0].sha256!,publicationImageAuditPolicyFingerprint()),null);checks++;
+    fs.appendFileSync(canonicalReceipt," ");assert.equal(readOriginalPhotoClaimDefect(manifest,"exterior",claimOptions.imageAssets![0].sha256!,publicationImageAuditPolicyFingerprint("strict")),null);checks++;
     fs.writeFileSync(canonicalReceipt,canonicalBytes);
     const signedBytes = fs.readFileSync(signed.path), broken = JSON.parse(signedBytes.toString()); broken.claimsReview.row.photoClaimObjection.quote="excerpt";
-    fs.writeFileSync(signed.path,JSON.stringify(broken)); assert.equal(readOriginalPhotoClaimDefect(manifest,"exterior",claimOptions.imageAssets![0].sha256!,publicationImageAuditPolicyFingerprint()),null); checks++;
+    fs.writeFileSync(signed.path,JSON.stringify(broken)); assert.equal(readOriginalPhotoClaimDefect(manifest,"exterior",claimOptions.imageAssets![0].sha256!,publicationImageAuditPolicyFingerprint("strict")),null); checks++;
     fs.writeFileSync(signed.path,signedBytes);
     assert(calls.every(call => call.imagePaths!.length <= (call.systemPrompt.includes("/B-intrinsic-print") ? 6 : 2))); checks++;
     console.log(`PASS publication scoped native tasks: ${checks} assertions; isolated A own-pair/C exact claims/D pixels; canonical B is byte identity only; adverse/unknown/tamper hold, source bytes preserved; real provider/network zero`);

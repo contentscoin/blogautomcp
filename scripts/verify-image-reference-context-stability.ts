@@ -38,9 +38,10 @@ async function main() {
     const support: ShoppingSceneSupportingReference = { path: geometry, sha256: hash(geometry), sourceUrl: url, sourceSnapshotId: snapshot.snapshotId,
       receiptPath, receiptSha256: hash(receiptPath), purpose: "geometry", subject: "same actual product", geometry: "same complete shape",
       labels: "none", reason: "actual same visible option", reviewedAt: new Date().toISOString() };
-    const sections = ["original", "first", "text", "second", "more-text", "third"].map((sectionId, index) => ({ id: sectionId,
+    const sections: BrandPostPackageManifestV2["composition"]["sections"] = ["original", "first", "text", "second", "more-text", "third"].map((sectionId, index) => ({ id: sectionId,
       title: `제목 ${index}`, body: [`원문 ${index}`], imagePaths: [], imageMin: index % 2 ? 1 : 0, imageMax: index % 2 ? 1 : 0,
-      imageSource: index % 2 ? "staged-ai" : "none", imageIntent: "AI 연출 이미지", promptRecipe: "확인된 전체 제품을 보존" }));
+      characterCount: `원문 ${index}`.length, headingStyle: "sectionTitle" as const,
+      imageSource: index % 2 ? "staged-ai" as const : "none" as const, imageIntent: "AI 연출 이미지", promptRecipe: "확인된 전체 제품을 보존" }));
     const manifest = { version: "brand-post-package/v2", brandLinkId: id, connectKind: "SHOPPING", title: "검정 제품",
       sourceSnapshot: snapshot, productUnderstanding: buildProduct9Canvas({ name: "검정 제품", features: ["색상: 검정"] }),
       imageAssets: [], heroImagePath: "", bodyImagePaths: [], approvedAt: null, composition: { sections, renderNodes: [] } } as unknown as BrandPostPackageManifestV2;
@@ -72,6 +73,53 @@ async function main() {
     assert.equal(JSON.stringify(await generation.prepareBrandPostImageReferenceContext({ manifest, productName: "검정 제품", target: resumedTarget }, noReselect)), JSON.stringify(context));
     assert.equal(generation.prepareImageBatchJobs([resumedTarget], manifest, "검정 제품", work)[0].outStem, job.outStem);
     assert.deepEqual(fs.readFileSync(metadataPath), metadataBefore); checks += 3;
+    // The immediately previous harness used the current photo-slot ordinal,
+    // without the new 9Canvas/count brief. It is distinct from legacy section
+    // ordinal 6 here: current ordinal is 2. Resume its exact prompt and bytes.
+    const beforeBriefTarget = target(5);
+    const beforeBriefContext = await generation.prepareBrandPostImageReferenceContext({ manifest, productName: "검정 제품", target: beforeBriefTarget }, noReselect);
+    const beforeBriefOptions = { productName: "검정 제품", sectionTitle: beforeBriefTarget.sectionTitle,
+      imageIntent: beforeBriefTarget.imageIntent, bodyExcerpt: beforeBriefTarget.bodyExcerpt,
+      stagingRecipe: beforeBriefTarget.promptRecipe, role: "body" as const,
+      variantIndex: generation.photorealVariantIndex(manifest, beforeBriefTarget),
+      adjacentSectionTitles: [sections[4].title], physicalScale: manifest.productUnderstanding!.concept.physicalScale,
+      productImageDirective: manifest.productUnderstanding!.policy.imageDirective };
+    assert.equal(beforeBriefOptions.variantIndex, 2);
+    beforeBriefContext.preparationBinding = digest({ snapshotId: snapshot.snapshotId,
+      selectedProduct: selectedProductContextFrom9Canvas(manifest.productUnderstanding!), promptOptions: beforeBriefOptions });
+    beforeBriefContext.prompt = buildShoppingReferenceScenePrompt({ ...beforeBriefOptions, reference,
+      supportingReferences: [support], hasAnchor: false });
+    const previousJob = generation.prepareImageBatchJobs([beforeBriefTarget], manifest, "검정 제품", work)[0];
+    const previousMetadataPath = `${previousJob.outStem}.reference-scene.json`;
+    const previousMetadata = fs.readFileSync(previousMetadataPath);
+    const previousReceiptPath = `${previousJob.outStem}.codex-submission.json`;
+    fs.writeFileSync(previousReceiptPath, JSON.stringify({ state: "submitted", workspace: `${previousJob.outStem}.codex-1`, startedAtMs: Date.now(), threadId: "previous-harness-fixture" }));
+    const previousReceipt = fs.readFileSync(previousReceiptPath);
+    const beforeBriefResumed = target(5);
+    assert.equal(JSON.stringify(await generation.prepareBrandPostImageReferenceContext({ manifest, productName: "검정 제품", target: beforeBriefResumed }, noReselect)), JSON.stringify(beforeBriefContext));
+    const unchangedPreviousJob = generation.prepareImageBatchJobs([beforeBriefResumed], manifest, "검정 제품", work)[0];
+    assert.equal(unchangedPreviousJob.outStem, previousJob.outStem);
+    assert.equal(unchangedPreviousJob.prompt, previousJob.prompt);
+    assert.deepEqual(fs.readFileSync(previousMetadataPath), previousMetadata);
+    assert.deepEqual(fs.readFileSync(previousReceiptPath), previousReceipt);
+    assert.equal(unchangedPreviousJob.requiredReferenceHashes?.[0], hash(primary)); checks += 7;
+    // Older packages may lack a cached ontology. Rebuilding it changes only
+    // evidence collection timestamps, never the frozen slot's generation job.
+    const uncachedSection = { ...sections[5], id: "uncached-understanding" };
+    const uncachedManifest: BrandPostPackageManifestV2 = { ...manifest, productUnderstanding: undefined,
+      composition: { ...manifest.composition, sections: [...sections, uncachedSection] } };
+    const uncachedTarget = (): ResolvedImageTarget => ({ ...target(5), sectionId: uncachedSection.id,
+      request: { requestId: "uncached-fixture", slotId: `${uncachedSection.id}:image:1` } });
+    const uncachedFirst = uncachedTarget();
+    const uncachedContext = await generation.prepareBrandPostImageReferenceContext({ manifest: uncachedManifest, productName: "검정 제품", target: uncachedFirst }, noReselect);
+    const uncachedJob = generation.prepareImageBatchJobs([uncachedFirst], uncachedManifest, "검정 제품", work)[0];
+    const uncachedMetadataPath = `${uncachedJob.outStem}.reference-scene.json`, uncachedMetadata = fs.readFileSync(uncachedMetadataPath);
+    fs.writeFileSync(`${uncachedJob.outStem}.codex-submission.json`, JSON.stringify({ state: "submitted", workspace: `${uncachedJob.outStem}.codex-1`, startedAtMs: Date.now(), threadId: "uncached-fixture" }));
+    await new Promise(resolve => setTimeout(resolve, 5));
+    const uncachedResumed = uncachedTarget();
+    assert.equal(JSON.stringify(await generation.prepareBrandPostImageReferenceContext({ manifest: uncachedManifest, productName: "검정 제품", target: uncachedResumed }, noReselect)), JSON.stringify(uncachedContext));
+    assert.equal(generation.prepareImageBatchJobs([uncachedResumed], uncachedManifest, "검정 제품", work)[0].outStem, uncachedJob.outStem);
+    assert.deepEqual(fs.readFileSync(uncachedMetadataPath), uncachedMetadata); checks += 3;
     fs.writeFileSync(receiptPath, JSON.stringify({ ...JSON.parse(originalReceipt), retrievedAt: new Date().toISOString() }));
     await assert.rejects(generation.prepareBrandPostImageReferenceContext({ manifest, productName: "검정 제품", target: target() }, noReselect), /IMAGE_RESUME_REQUIRED/); checks++;
     const backupSources = path.join(path.dirname(path.dirname(dir)), "material-rewrite-backups/00000000-0000-4000-8000-000000000001", id, "product-sources");

@@ -232,6 +232,11 @@ async function verifyRetryPolicy(): Promise<void> {
   const progress = { type: "error" as const, message: completionLoss };
   const response = { type: "item.completed" as const, item: { type: "agent_message" as const, id: "response", text: "completed JSON" } };
   const completed = { type: "turn.completed" as const, usage: { input_tokens: 1, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0 } };
+  const usageRows: unknown[] = [];
+  assert.equal(await collectCodexDraftResponse(events([response, completed]), undefined, usage => usageRows.push(usage)), "completed JSON");
+  assert.deepEqual(usageRows, [completed.usage], "completed SDK usage is observed without another provider request");
+  assert.equal(await collectCodexDraftResponse(events([response, completed]), undefined, () => { throw new Error("counter failure"); }), "completed JSON",
+    "a failing usage sink cannot fail or retry a completed turn");
   assert.equal(await collectCodexDraftResponse(events([progress, response, completed])), "completed JSON",
     "native recovery progress must not cancel its still-running turn");
   const highDemand = "Reconnecting... 2/5 (We’re currently experiencing high demand, which may cause temporary errors.)";

@@ -75,6 +75,14 @@ export function readSuccessfulImageAuditReceiptDetails(id: string, key: string):
   const row=validKey(key)?readVerifiedReceipt(id):null;
   return row?.key===key ? {...(row.printWarnings?{printWarnings:row.printWarnings}:{})} : null;
 }
+/** Compatibility is based on a server-recomputed whole-material binding for
+ * explicitly known stronger contracts, plus the original unmodified HMAC. */
+export function readCompatibleSuccessfulImageAuditReceiptDetails(id: string, readinessBindings: readonly string[]): {printWarnings?:SuccessfulImageAuditPrintWarning[]} | null {
+  if (!readinessBindings.length || readinessBindings.some(key => !validKey(key))) return null;
+  const row = readVerifiedReceipt(id);
+  return row?.readinessBindingKey && readinessBindings.includes(row.readinessBindingKey)
+    ? { ...(row.printWarnings ? { printWarnings: row.printWarnings } : {}) } : null;
+}
 /** A historical successful review is not ready until its exact saved material
  * was bound by the approval preflight. Both bindings share the same HMAC. */
 export function readSuccessfulImageAuditReadinessBinding(id: string, readinessBindingKey: string): boolean {

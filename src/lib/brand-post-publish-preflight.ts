@@ -4,7 +4,7 @@ import { getBrandPostPackageDir, readBrandPostPackage } from "./brand-post-packa
 import path from "node:path";
 import { materialRevision } from "./material-library";
 import { normalizePublishedPostText } from "./post-composition-contract";
-import { brandPostApprovalBinding } from "./brand-post-approval-receipt";
+import { brandPostApprovalBinding, brandPostCompatibleApprovalBindings } from "./brand-post-approval-receipt";
 import { imageAuditFailureSections } from "./publish-image-failure-diagnostics";
 
 /** Same pixel audit as publication, before a saved shopping material is approved.
@@ -28,6 +28,7 @@ export async function validateBrandPostPublishImages(id: string, productName?: s
     let audit: PublishImageAuditResult;
     try {
     audit = await assertPublishImagesSafe({ brandLinkId: id,
+      compatibleReadinessBindingKeys: brandPostCompatibleApprovalBindings(manifest, sourceDirectory),
       ...(options.bindReadiness === true ? { readinessBindingKey } : {}), productName: name,
       selectedProduct: buildSelectedProductImageAuditContext(
         name,

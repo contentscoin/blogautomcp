@@ -1060,6 +1060,7 @@ async function main() {
       return exports.auditPublishImages as typeof auditPublishImages;
     };
     const receiptInput = options(catalogSourcePhoto); delete receiptInput.review;
+    receiptInput.reviewMode = "strict"; // This fixture exercises legacy independent-task caches.
     receiptInput.brandLinkId = "balanced-policy-offline-fixture";
     receiptInput.selectedProduct = buildSelectedProductImageAuditContext(receiptInput.productName, ["구성품: 선택 상품"]);
     const receiptSnapshot = createProductSnapshot({ productId: receiptInput.brandLinkId, connectKind: "SHOPPING", externalProductId: null,

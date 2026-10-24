@@ -92,6 +92,7 @@ jobs:
           npm run test:draft-reliability
           npm run test:proposal-audit
           npm run test:product-9canvas
+          npm run test:generation-first
           npm run test:image-replan
           npm run test:shopping-natural-photos
 

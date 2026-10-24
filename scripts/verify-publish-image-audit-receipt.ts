@@ -206,7 +206,7 @@ async function main() {
   await makeImage("white");
   const ownSnapshot = createProductSnapshot({ productId: "own-receipt", connectKind: "SHOPPING", externalProductId: "123",
     sourceUrl: "https://brand.naver.com/fixture/products/123", product: { name: "selected product", referenceImageUrls: [ownUrl] } });
-  const options = { brandLinkId: "integration", productName: "selected product", selectedProduct: JSON.stringify({ selectedTitle: "selected product" }),
+  const options = { reviewMode: "strict" as const, brandLinkId: "integration", productName: "selected product", selectedProduct: JSON.stringify({ selectedTitle: "selected product" }),
     sourceSnapshotId: ownSnapshot.snapshotId, selectedSourceSnapshot: ownSnapshot, selectedSourceProductId: ownSnapshot.productId, selectedSourceDirectory: fixtureRoot,
     composition: { sections: [], renderNodes: [{ kind: "image", role: "thumbnail", sectionId: null, assetPath: image }] } } as unknown as PublishImageAuditOptions;
   assert.equal((await audit(options)).receiptReused, false); assert.equal(calls, 1);

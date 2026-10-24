@@ -160,7 +160,10 @@ async function main() {
       "./codex-draft-provider":provider,"./publication-image-scoped-review":scoped,"./publication-identifier-review":identifiers,
     });
     const productionPreflight = load(path.resolve("src/lib/brand-post-publish-preflight.ts"), {
-      "../../scripts/lib/publish-image-audit": productionAudit,
+      "../../scripts/lib/publish-image-audit": { ...productionAudit,
+        // This fixture covers independent strict-task receipt integration.
+        assertPublishImagesSafe: (options: import("./lib/publish-image-audit").PublishImageAuditOptions) =>
+          (productionAudit as typeof import("./lib/publish-image-audit")).assertPublishImagesSafe({ ...options, reviewMode: "strict" }) },
     }) as { validateBrandPostPublishImages: typeof validateBrandPostPublishImages };
     const preflight = (productId: string, productName?: string) =>
       productionPreflight.validateBrandPostPublishImages(productId, productName, { bindReadiness: true });
@@ -212,13 +215,15 @@ async function main() {
       fs.copyFileSync(path.resolve(relative), path.join(policyCopy, relative));
     }
     const policyBefore = publicationImageAuditPolicyFingerprint();
+    const strictPolicyBefore = publicationImageAuditPolicyFingerprint("strict");
     try {
       process.env.DESKTOP_PROJECT_ROOT = policyCopy;
       assert.equal(publicationImageAuditPolicyFingerprint(), policyBefore, "installation root is not policy identity"); cases++;
-      fs.appendFileSync(path.join(policyCopy, "scripts/lib/publish-image-audit.ts"), "\n// changed actual prompt contract\n");
-      assert.notEqual(publicationImageAuditPolicyFingerprint(), policyBefore, "policy/source edits invalidate readiness without a manual version bump"); cases++;
+      fs.appendFileSync(path.join(policyCopy, "scripts/lib/publish-image-audit.ts"), "\n// unrelated release logging comment\n");
+      assert.equal(publicationImageAuditPolicyFingerprint(), policyBefore, "unrelated source/log edits preserve the semantic default contract"); cases++;
+      assert.notEqual(publicationImageAuditPolicyFingerprint("strict"), strictPolicyBefore, "explicit strict diagnostics retain their source-bound contract"); cases++;
       fs.rmSync(path.join(policyCopy, "scripts/lib/product-image-visual-contract.ts"));
-      assert.throws(() => publicationImageAuditPolicyFingerprint(), /ENOENT/u, "missing packaged policy source cannot authorize readiness"); cases++;
+      assert.throws(() => publicationImageAuditPolicyFingerprint("strict"), /ENOENT/u, "explicit strict diagnostics still require packaged policy sources"); cases++;
     } finally {
       if (previousProjectRoot === undefined) delete process.env.DESKTOP_PROJECT_ROOT; else process.env.DESKTOP_PROJECT_ROOT = previousProjectRoot;
     }
@@ -328,21 +333,21 @@ async function main() {
       assert.equal(finalMaterial.ready, true, `${mode}: actual approval followed by actual ready-list reader: ${finalMaterial.blockers.join(" / ")}`); cases++;
       fullProtectedPaths.forEach((file, index) => assert.deepEqual(fs.readFileSync(file), fullProtected[index]));
     }
-    // A validator-only/source policy change leaves prompt/body/image bytes the
-    // same. It must invalidate BOTH readiness and the exact-request cache so a
-    // newly adverse current review cannot re-sign the old successful verdict.
+    // An unrelated validator comment leaves ordinary readiness intact. This
+    // fixture's explicit strict preflight still rechecks its source contract;
+    // an actually adverse new response cannot re-sign the old success.
     for (const relative of PUBLICATION_IMAGE_AUDIT_POLICY_FILES) fs.copyFileSync(path.resolve(relative), path.join(policyCopy, relative));
     fs.appendFileSync(path.join(policyCopy, "scripts/lib/shopping-image-format.ts"), "\n// changed current format validator\n");
     const beforePolicyReviewCalls = reviewCalls;
     try {
       process.env.DESKTOP_PROJECT_ROOT = policyCopy;
-      assert.equal(getMaterial(fullId)!.ready, false); cases++;
+      assert.equal(getMaterial(fullId)!.ready, true); cases++;
       reviewProvider = async call => {
         const result = JSON.parse(await review(call)); result.accepted = false;
         return JSON.stringify(result);
       };
       await assert.rejects(preflight(fullId, writing.productName), (error: unknown) => (error as { name?: string }).name === "PublishImageAuditError");
-      assert.ok(reviewCalls > beforePolicyReviewCalls, "changed validator cannot renew readiness solely by reusing the old request receipt");
+      assert.ok(reviewCalls > beforePolicyReviewCalls, "explicit strict source-contract recheck preserves the new adverse verdict");
       assert.equal(getMaterial(fullId)!.ready, false); cases++;
     } finally {
       if (previousProjectRoot === undefined) delete process.env.DESKTOP_PROJECT_ROOT; else process.env.DESKTOP_PROJECT_ROOT = previousProjectRoot;

@@ -407,6 +407,10 @@ export function brandPostReferenceSceneIssue(manifest: BrandPostPackageManifest,
   if (!isReferenceGuidedScene(asset) && !isReferenceGuidedThumbnail(asset)) return null;
   let referenceSha256: string | undefined;
   let thumbnailRawSha256: string | undefined;
+  const integrated = asset.referenceScene?.integratedReview;
+  if (integrated && (typeof integrated.rawResponse !== "string" ||
+      crypto.createHash("sha256").update(integrated.rawResponse).digest("hex") !== integrated.responseSha256))
+    return "종합 검수의 원시 응답이 이미지 검토 이후 변경되었습니다.";
   try { if (asset.referenceScene?.referencePath) referenceSha256 = sha256File(asset.referenceScene.referencePath); } catch { /* Missing references fail below. */ }
   try { if (asset.referenceScene?.thumbnailRawPath) {
     const stat = fs.statSync(asset.referenceScene.thumbnailRawPath);

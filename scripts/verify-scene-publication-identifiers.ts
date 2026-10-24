@@ -25,7 +25,7 @@ async function main() {
   const reference = { path: source, sha256: hash(source), subject: "selected visible component", geometry: "observed structure", labels: "no printed word", reviewedAt: "2026-10-21" };
   const supportingReferences = [{ ...reference, path: support, sha256: hash(support), sourceSnapshotId: snapshot,
     sourceUrl: "https://shop-phinf.pstatic.net/offline/detail.png", receiptPath: receipt, receiptSha256: hash(receipt), purpose: "intrinsic-label" as const, reason: "local corresponding face" }];
-  const options = { reference, outputPath: candidate, supportingReferences, sourceSnapshotId: snapshot,
+  const options = { reviewMode: "strict" as const, reference, outputPath: candidate, supportingReferences, sourceSnapshotId: snapshot,
     productName: "untrusted expected brand must never prime B", imageIntent: "natural illustration", sectionTitle: "same manuscript", bodyExcerpt: "original text" };
   const checks = Object.fromEntries(SCENE_FIDELITY_CHECKS.map(key => [key, true]));
   const comparisons = Object.fromEntries(["productShape", "intrinsicPrinting", "visibleOption", "sceneContext"].map(key => [key,

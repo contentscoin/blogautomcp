@@ -1,5 +1,12 @@
 import { allowsGenericBrandPostProductPhoto, isShoppingLifestyleImage, type BrandPostImageSourceHint } from "../../src/lib/brand-post-image-evidence";
 
+/** Shared first-generation guidance. Kept separate from publication verdicts. */
+export const PRODUCT_PHOTO_GENERATION_ESSENTIALS_EN = [
+  "Preserve the source-visible identifying silhouette, proportions, selected colour/option, actual subject count and prominent intrinsic logos. Keep actual readable identifiers; never guess tiny unreadable print or hidden construction. Do not demand invented microscopic seams, texture, exact folds or letter spacing.",
+  "Make a fresh natural photograph: believable placement, consistent contact shadows, gravity, perspective and soft directional light. Background, framing, camera distance and lighting may vary within the observed-view contract; avoid a plastic replica or CGI surface.",
+  "One coherent photographic scene only. No explanatory text, editorial information card, original-photo explanation frame, collage, inset product photo, split panel, arrow, badge or measurement graphic. Product function belongs in the surrounding paragraph; an AI photograph is illustrative, never actual performance, measurement or customer-testimonial evidence.",
+].join("\n");
+
 /** The visual's job is separate from the paragraph's product facts. A seller
  * overview beside technical prose does not turn that photograph into a test. */
 export function buildProductImageVisualContract(target: {

@@ -646,7 +646,8 @@ async function main() {
       sectionTitle: photographyTarget.sectionTitle, imageIntent: photographyTarget.imageIntent,
       bodyExcerpt: photographyTarget.bodyExcerpt, stagingRecipe: photographyTarget.promptRecipe, role: "body",
       reference, hasAnchor: false, variantIndex: 0, adjacentSectionTitles: ["아침 준비 공간", "보관할 자리"],
-      physicalScale: photographyProduct.concept.physicalScale, productImageDirective: photographyProduct.policy.imageDirective }),
+      physicalScale: photographyProduct.concept.physicalScale, productImageDirective: photographyProduct.policy.imageDirective,
+      productUnderstanding: photographyProduct }),
     "actual context must retain slot framing, neighboring sections, physical scale and selected product policy");
     assert.deepEqual(photography.referenceHashes, [hash(front)], "new photography instructions do not replace authoritative seller pixels");
     const photographyJobs = generation.prepareImageBatchJobs([photographyTarget], photographyManifest, "달바 비타 토닝 토너 180ml", path.join(root, "photography-jobs"));

@@ -3,7 +3,7 @@ import { isMeaningfulProductEvidenceFeature } from "./product-editorial-plan";
 import { formatWritingStructureGuide } from "./writing-structure-guide";
 import { EditorialProduct, EditorialTemplateId, EditorialSelection, createEditorialSelection, formatEditorialTemplate } from "./editorial-templates";
 import { defaultTopicTemplateId, formatTopicTemplateForPrompt } from "./topic-templates";
-import { formatTitleCandidatesForPrompt, type TitlePlanContext } from "./topic-templates/title-planner";
+import { buildTitleCandidates, formatTitleCandidatesForPrompt, scoreTitle, type TitlePlanContext } from "./topic-templates/title-planner";
 import { formatProduct9CanvasForPrompt, type Product9Canvas } from "./product-9canvas";
 import { SHOPPING_POST_STRATEGY_VERSION, type ShoppingPostStrategyVersion } from "../../src/lib/shopping-post-strategy";
 import { buildShoppingWritingSectionPlan, formatShoppingWritingSectionPlan, type ShoppingWritingSectionPlan } from "./shopping-writing-plan";
@@ -209,6 +209,7 @@ export function createWritingPromptContract(input: {
     ...(titlePlanContext ? { titlePlanContext } : {}),
     ...(input.kind === "SHOPPING" && productName ? { sectionPlan: buildShoppingWritingSectionPlan({
       productName, sourceDescription: titlePlanContext?.sourceDescription, sourceFeatures: titlePlanContext?.sourceFeatures,
+      productUnderstanding: input.productUnderstanding,
       minimumSections: input.minimumSections, maximumSections: input.maximumSections,
     }) } : {}),
     hashtagCount: input.hashtagCount,
@@ -257,6 +258,9 @@ export function formatWritingPromptContract(
       : contract.titlePlanContext ? formatTitleCandidatesForPrompt(contract.titlePlanContext, options.topicDetail === "minimal")
         : options.topicDetail === "minimal" ? "- 서로 다른 제목 후보 5개를 내부 비교해 하나만 출력. 후보·평가·새 필드 금지."
           : "- 제목은 내부에서 검색 의도와 독자가 궁금해할 질문이 서로 다른 후보 5개를 비교한 뒤 본문 근거에 맞는 하나만 고릅니다. 후보·평가·새 필드는 출력하지 않습니다. 상품 정체를 유지하고 상투적인 후미, 빈 자리표시자, 과장과 없는 체험은 쓰지 않습니다.",
+    options.topicDetail === "minimal" && contract.kind === "SHOPPING" && contract.titlePlanContext && !contract.requestedTitle
+      ? `- 자연 제목 참고(복사 의무 없음): ${JSON.stringify(buildTitleCandidates(contract.titlePlanContext)
+        .filter(title => scoreTitle(title, contract.titlePlanContext!).hardFailures.length === 0 && title.length <= 80).slice(0, 2))}` : "",
     `- 본문 sections는 ${contract.sections.min}~${contract.sections.max}개이며 섹션마다 원소 하나("소제목\\n\\n본문")입니다. 소제목·순서는 근거에 맞춥니다.`,
     `- 소제목·고지 문구를 제외하고 본문 문단을 구분자 없이 이은 문자열 길이(문단 내부 공백 포함)로 최소 ${contract.characters.min}자를 충족하고, 권장 상한 ${contract.characters.max}자 안에서 작성합니다.`,
     `- 각 섹션은 소제목, 빈 줄, 핵심 답부터 시작하는 ${contract.sentences.min}~${contract.sentences.max}개의 완결된 문장을 권장하며 문장마다 줄바꿈합니다. 첫 ${Math.min(2, contract.sentences.min)}문장의 답도 이 문장 수에 포함합니다.`,
@@ -272,7 +276,9 @@ export function formatWritingPromptContract(
     "- 같은 규격·펌프 사용성을 여러 절에서 반복해 분량을 채우지 않습니다. 바디워시·로션 같은 비전기 제품에는 전원·충전·조작부 설명을 넣지 않습니다.",
     "- 제공된 출처 또는 실제 열어 확인한 자료의 사실만 사용합니다. 검색 도구가 없으면 제공된 근거 안에서 작성합니다.",
     "- 출처 없는 운영시간·입장료·호텔 등급·날씨 등 변동 정보와 불확실한 주장은 생략합니다. 추정형 표현을 확정형으로 바꿔 사실처럼 만들지 않습니다.",
-    contract.productUnderstanding ? formatProduct9CanvasForPrompt(contract.productUnderstanding) : "",
+    // The section plan already contains the same identity, option and facts in
+    // the bounded brief. Keep the legacy formatter only for older contracts.
+    contract.productUnderstanding && !contract.sectionPlan?.brief ? formatProduct9CanvasForPrompt(contract.productUnderstanding) : "",
     contract.verifiedExperienceNotes
       ? `- 실제 체험 표현은 다음 검증 메모에 명시된 사실에만 한정합니다: ${contract.verifiedExperienceNotes}`
       : "- 실제 구매·사용·방문·탑승·숙박·식사 경험을 만들지 않습니다. 제목에 후기·내돈내산·실사용·직접 써본·직접 다녀온 표현을 넣지 않습니다.",
@@ -283,7 +289,12 @@ export function formatWritingPromptContract(
     `- 해시태그는 검색 의도가 분명한 ${contract.hashtagCount}개이며 hashtags 배열에만 씁니다. sections 본문에 해시태그를 다시 붙이지 않습니다.`,
     "- 고지 문구와 원시 URL은 출력하지 않습니다. 커넥트 카드와 고지는 시스템이 별도로 붙입니다.",
     "- title, evidenceFacts, sections, hashtags 필드를 가진 JSON 하나만 출력합니다. 코드블록·작업 설명은 넣지 않습니다.",
-    formatWritingStructureGuide(contract.kind),
+    options.topicDetail === "minimal" && contract.kind === "SHOPPING"
+      // Evidence, outline, limits and photo roles are already carried above.
+      // Keep the distinct prose guidance without repeating that contract.
+      ? formatWritingStructureGuide(contract.kind).split("\n").filter(line =>
+        line.startsWith("[") || /판매자의 사용감|자연스러운 ~요|첫 문장에 긴|모바일에서/u.test(line)).join("\n")
+      : formatWritingStructureGuide(contract.kind),
     formatEditorialTemplate(contract.kind, contract.editorialTemplateId, { minimal: options.topicDetail === "minimal" }),
     contract.editorial?.topic
       // 섹션별 흐름·이미지 출처는 렌더 계약 팔레트(오버레이 적용)가 담는다. 여기서는 예산 안의 요약만 넣는다.

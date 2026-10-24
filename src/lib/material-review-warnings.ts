@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import type { BrandPostPackageManifest } from "./brand-post-package";
-import { brandPostApprovalBinding } from "./brand-post-approval-receipt";
+import { brandPostApprovalBinding, brandPostCompatibleApprovalBindings } from "./brand-post-approval-receipt";
 import { hasSignedImageAuditPrintWarnings, readSuccessfulImageAuditReadinessWarnings } from "../../scripts/lib/publish-image-audit-receipt";
 import type { MaterialReviewWarning } from "./material-review-warning";
 
@@ -11,7 +11,9 @@ import type { MaterialReviewWarning } from "./material-review-warning";
 export function readCurrentMaterialReviewWarnings(manifest: BrandPostPackageManifest, sourceDirectory: string): MaterialReviewWarning[] {
   if (!manifest.approvedAt || manifest.connectKind !== "SHOPPING" || manifest.version !== "brand-post-package/v2" || !hasSignedImageAuditPrintWarnings(manifest.brandLinkId)) return [];
   try {
-    const binding = brandPostApprovalBinding(manifest, sourceDirectory);
+    const bindings = [brandPostApprovalBinding(manifest, sourceDirectory), ...brandPostCompatibleApprovalBindings(manifest, sourceDirectory)];
+    const binding = bindings.find(key => readSuccessfulImageAuditReadinessWarnings(manifest.brandLinkId, key) !== null);
+    if (!binding) return [];
     const signed = readSuccessfulImageAuditReadinessWarnings(manifest.brandLinkId, binding);
     if (!signed?.length || signed.length > 64) return [];
     const result: MaterialReviewWarning[] = [];
@@ -26,7 +28,8 @@ export function readCurrentMaterialReviewWarnings(manifest: BrandPostPackageMani
           : "인쇄 미검증: 사진의 제품 자체 인쇄 정확성을 인증하지 않았습니다." });
     }
     // No stale warning may survive a receipt/body/image/source change while read.
-    if (brandPostApprovalBinding(manifest, sourceDirectory) !== binding || JSON.stringify(readSuccessfulImageAuditReadinessWarnings(manifest.brandLinkId, binding)) !== JSON.stringify(signed)) return [];
+    if (![brandPostApprovalBinding(manifest, sourceDirectory), ...brandPostCompatibleApprovalBindings(manifest, sourceDirectory)].includes(binding) ||
+        JSON.stringify(readSuccessfulImageAuditReadinessWarnings(manifest.brandLinkId, binding)) !== JSON.stringify(signed)) return [];
     return result;
   } catch { return []; }
 }

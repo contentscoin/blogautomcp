@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import { getWritingTimeoutPolicy, writingTimeoutMs } from "./writing-timeout-policy";
 import { resolveCodexTextModel, resolveTextReasoningEffort } from "./text-model-policy";
 import { isCodexStreamCompletionLoss, isCodexUsageLimitMessage } from "../../src/lib/local-automation-error";
+import { inferCodexUsageStage, normalizeCodexDraftUsage, recordCodexDraftUsage, type CodexDraftUsage, type CodexUsageStage } from "./codex-usage-ledger";
 
 type CodexSdkModule = typeof import("@openai/codex-sdk");
 
@@ -59,6 +60,9 @@ export interface CodexDraftOptions {
   /** JSON schema for the final answer (Codex structured output). The answer is still returned as text. */
   outputSchema?: unknown;
   onProgress?: (message: string) => void;
+  /** Counter metadata only; never changes generation or review policy. */
+  usageStage?: CodexUsageStage;
+  onUsage?: (usage: CodexDraftUsage) => void;
 }
 const nativeImport = new Function("specifier", "return import(specifier)") as (
   specifier: string,
@@ -254,6 +258,7 @@ function isCodexDraftReconnectProgress(message: string): boolean {
 export async function collectCodexDraftResponse(
   events: AsyncIterable<import("@openai/codex-sdk").ThreadEvent>,
   onProgress?: (message: string) => void,
+  onUsage?: (usage: CodexDraftUsage) => void,
 ): Promise<string> {
   let finalResponse = "";
   let completed = false;
@@ -264,6 +269,7 @@ export async function collectCodexDraftResponse(
       onProgress?.("Codex 원고 응답 수신");
     } else if (event.type === "turn.completed") {
       completed = true;
+      try { onUsage?.(normalizeCodexDraftUsage(event.usage)); } catch { /* Observability cannot fail a completed native turn. */ }
     } else if (event.type === "turn.failed") {
       throw new Error(event.error.message || "Codex 원고 작성이 실패했습니다.");
     } else if (event.type === "error") {
@@ -441,25 +447,46 @@ export async function runCodexDraft(options: CodexDraftOptions): Promise<string>
 
   try {
     options.onProgress?.(`Codex 원고 작성 시작${images.length ? ` · 이미지 ${images.length}장` : ""}`);
+    const requestId = crypto.randomUUID();
+    const promptSha256 = crypto.createHash("sha256").update(prompt).digest("hex");
+    let attempt = 0;
     return await runCodexDraftWithRetry(async () => {
-      resolveCodexWritingImages(options); // A provider reconnect must not carry an original changed after input preparation.
-      const thread = codex.startThread({
-        // Every Codex writer, reviewer and vision helper uses the same approved model.
-        model,
-        modelReasoningEffort: reasoningEffort,
-        sandboxMode: "read-only",
-        workingDirectory,
-        skipGitRepoCheck: true,
-        approvalPolicy: "never",
-        networkAccessEnabled: false,
-        webSearchMode: researchMode,
-        threadSource: "blogautomcp-draft",
-      });
-      const { events } = await thread.runStreamed(input, {
-        signal: controller.signal,
-        ...(options.outputSchema ? { outputSchema: options.outputSchema } : {}),
-      });
-      return collectCodexDraftResponse(events, options.onProgress);
+      const startedAt = Date.now();
+      const currentAttempt = ++attempt;
+      let usage = normalizeCodexDraftUsage(null);
+      let status: "completed" | "failed" = "failed";
+      let failureKind: CodexDraftFailureKind | undefined;
+      try {
+        resolveCodexWritingImages(options); // A provider reconnect must not carry an original changed after input preparation.
+        const thread = codex.startThread({
+          // Every Codex writer, reviewer and vision helper uses the same approved model.
+          model,
+          modelReasoningEffort: reasoningEffort,
+          sandboxMode: "read-only",
+          workingDirectory,
+          skipGitRepoCheck: true,
+          approvalPolicy: "never",
+          networkAccessEnabled: false,
+          webSearchMode: researchMode,
+          threadSource: "blogautomcp-draft",
+        });
+        const { events } = await thread.runStreamed(input, {
+          signal: controller.signal,
+          ...(options.outputSchema ? { outputSchema: options.outputSchema } : {}),
+        });
+        const response = await collectCodexDraftResponse(events, options.onProgress, value => {
+          usage = value;
+          try { options.onUsage?.(value); } catch { /* Counters never create a retry. */ }
+        });
+        status = "completed";
+        return response;
+      } catch (error) { failureKind = classifyCodexDraftFailure(error); throw error; }
+      finally {
+        recordCodexDraftUsage({ version: "codex-draft-usage/v1", at: new Date().toISOString(), requestId,
+          attempt: currentAttempt, stage: options.usageStage || inferCodexUsageStage(options.systemPrompt), model,
+          promptSha256, imageCount: images.length, elapsedMs: Date.now() - startedAt, status,
+          ...(failureKind ? { failureKind } : {}), usage });
+      }
     }, {
       canRetry: () => options.noTransientRetry !== true && !controller.signal.aborted,
       onRetry: () => options.onProgress?.("Codex 일시 오류 감지 · 동일 Codex 경로로 1회 재시도"),
