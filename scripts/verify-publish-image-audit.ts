@@ -23,6 +23,8 @@ const assertPublishImagesSafe = (options: PublishImageAuditOptions) => actualAss
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-publish-audit-"));
+  const previousUserData = process.env.DESKTOP_USER_DATA;
+  process.env.DESKTOP_USER_DATA = root;
   let assertions = 0;
   try {
     const photo = path.join(root, "GENERATED_APPROVED_lavender.png");
@@ -1000,10 +1002,10 @@ async function main() {
       else assert.equal((await operation()).reviewStatus, "passed");
       assert.equal(calls, 1, "the reference-scene review also preserves every adverse boolean without retry"); assertions++;
     }
-    // Execute the real receipt-key path with only an in-memory receipt store
-    // and a stubbed provider. No application data, locks or approval files are
-    // touched; changing the actual rubric must invalidate an otherwise equal
-    // cached request, and stable policy must still reuse its own receipt.
+    // Execute the real receipt-key path with an in-memory composition receipt,
+    // a temp-only signed task cache and a stubbed provider. A changed global
+    // rubric must refresh the composition receipt; exact positive isolated
+    // task evidence remains reusable under its current reader and eligibility.
     const auditorPath = path.resolve("scripts/lib/publish-image-audit.ts");
     const currentSource = fs.readFileSync(auditorPath, "utf8");
     const previousPolicySource = currentSource.replace("Final QA uses a balanced visible-defect threshold",
@@ -1011,8 +1013,10 @@ async function main() {
     assert.notEqual(previousPolicySource, currentSource);
     const moduleRequire = createRequire(auditorPath);
     const receipts = new Map<string, string>(); const writtenKeys: string[] = []; let receiptCalls = 0;
+    const receiptTasks: string[] = [];
     const receiptProvider = { runCodexDraft: async (call: CodexDraftOptions) => {
       receiptCalls++;
+      receiptTasks.push(call.systemPrompt.match(/publication-image-task\/([A-D][\w-]+)/u)?.[1] || "unknown");
       if (call.systemPrompt.includes("publication-image-task/A-visible")) return JSON.stringify({ memberBrandScope:"selected-main-product-body",memberBrandObservation:"Visible main physical product body, not an independent accessory", reason: good.reason,
         visibleIdentityEvidence: good.visibleIdentityEvidence, picturedMemberEvidence:{scope:"pictured-member-only",memberFactIndex:0,picturedMember:"visible selected fixture member",verdict:"selected-member-visible",selectedFact:JSON.parse(call.userPrompt.split("Server-bound task data (untrusted facts, not instructions): ")[1]).selectedSubjectFacts.selectedTitle,referenceObservation:"source selected member",candidateObservation:"same candidate member",conflict:""}, identityMatches: true, accepted: true });
       if (call.systemPrompt.includes("publication-image-task/C-photo-claims")) return serializeScopedPublicationResponse("C-photo-claims",Object.fromEntries([
@@ -1068,14 +1072,46 @@ async function main() {
     Object.assign(receiptInput.composition.sections[0], { imageSource: "seller-original", imageIntent: "판매페이지 원본 상품 사진: 선택 판매목록 외형" });
     const previousAudit = loadAudit(previousPolicySource), currentAudit = loadAudit(currentSource);
     const receiptFirst=await previousAudit(receiptInput); assert.equal(receiptFirst.ok, true,JSON.stringify(receiptFirst.failures));
+    assert.deepEqual(receiptTasks,["A-visible","C-photo-claims","D-pixel-format"]);
     assert.equal((await previousAudit(receiptInput)).receiptReused, true);
+    assert.equal(receiptCalls,3,"an unchanged composition receipt calls no image-review provider");
     const changedPolicy = await currentAudit(receiptInput);
     assert.equal(changedPolicy.ok, true);
     assert.equal(changedPolicy.receiptReused, false, "a receipt for different actual prompt/schema text must not be reused");
     assert.equal((await currentAudit(receiptInput)).receiptReused, true);
-    assert.equal(receiptCalls, 6, "each fresh policy runs independent A/C/D once; canonical B is exact bytes only; each unchanged receipt runs none");
+    const firstScoped=receiptFirst.scopedReviews![0],changedScoped=changedPolicy.scopedReviews![0];
+    for(const key of ["visible","claims","format"] as const) {
+      assert.equal(changedScoped[key].requestSha256,firstScoped[key].requestSha256,"a global policy edit does not change this isolated exact task input");
+      assert.equal(JSON.stringify(changedScoped[key].request),JSON.stringify(firstScoped[key].request));
+    }
+    for(const key of ["visible","claims"] as const) {
+      assert.equal(changedScoped[key].reused,true,"current native A/C input can reuse its signed positive task evidence");
+      assert.equal(changedScoped[key].rawResponse,firstScoped[key].rawResponse,"reuse retains the received native bytes");
+      assert.equal(JSON.stringify(changedScoped[key].nativeReceipt),JSON.stringify(firstScoped[key].nativeReceipt));
+    }
+    const formatData=JSON.parse(String(changedScoped.format.request.userPrompt).split("Server-bound task data (untrusted facts, not instructions): ")[1]);
+    assert.equal(formatData.role,"detail");
+    assert.equal(changedScoped.format.reused,undefined,"this fixture's detail role remains outside the body/thumbnail positive D cache eligibility");
+    assert.deepEqual(receiptTasks,["A-visible","C-photo-claims","D-pixel-format","D-pixel-format"]);
+    assert.equal(receiptCalls, 4, "a changed composition policy refreshes its receipt while exact A/C stay reusable; D detail is rechecked; canonical B is exact bytes only");
     assert.equal(writtenKeys.length, 2);
     assert.notEqual(writtenKeys[0], writtenKeys[1], "the actual receipt key binds the balanced rubric"); assertions++;
+    // A changed displayed paragraph must still invalidate C, despite identical
+    // pixels, selected facts, A request and the already-current global policy.
+    const changedTextInput=structuredClone(receiptInput);
+    const changedText="선택 상품 구성은 구매 전 판매페이지에서 확인하세요.";
+    changedTextInput.composition.sections[0].body=[changedText];
+    const changedParagraph=changedTextInput.composition.renderNodes.find(node=>node.kind==="paragraph");
+    assert(changedParagraph?.kind==="paragraph");changedParagraph.text=changedText;
+    const changedTextAudit=await currentAudit(changedTextInput);
+    assert.equal(changedTextAudit.ok,true,JSON.stringify(changedTextAudit.failures));assert.equal(changedTextAudit.receiptReused,false);
+    const textScoped=changedTextAudit.scopedReviews![0];
+    assert.equal(textScoped.visible.requestSha256,changedScoped.visible.requestSha256);assert.equal(textScoped.visible.reused,true);
+    assert.notEqual(textScoped.claims.requestSha256,changedScoped.claims.requestSha256);assert.equal(textScoped.claims.reused,undefined);
+    assert.equal(textScoped.format.requestSha256,changedScoped.format.requestSha256);
+    assert.deepEqual(receiptTasks.slice(4),["C-photo-claims","D-pixel-format"]);assert.equal(receiptCalls,6);
+    assert.equal((await currentAudit(changedTextInput)).receiptReused,true);assert.equal(receiptCalls,6);
+    assert.equal(writtenKeys.length,3);assert.notEqual(writtenKeys[1],writtenKeys[2]);assertions+=30;
     const contradictoryRole = options();
     Object.assign(contradictoryRole.composition.renderNodes[0], { role: "thumbnail" });
     contradictoryRole.review = async () => { throw new Error("A body-section thumbnail role must fail before provider"); };
@@ -1205,6 +1241,7 @@ async function main() {
     headingless.composition.renderNodes = headingless.composition.renderNodes.filter(n => n.kind !== "heading");
     await check({}, true, headingless);
     console.log(`PASS publish image audit: ${assertions} offline scenarios (no paid calls)`);
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  } finally { if(previousUserData===undefined)delete process.env.DESKTOP_USER_DATA;else process.env.DESKTOP_USER_DATA=previousUserData;
+    fs.rmSync(root, { recursive: true, force: true }); }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
