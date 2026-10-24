@@ -94,6 +94,10 @@ async function main() {
         assert.equal(schemaCheck({...actual,samePhysicalPart:false,samePhysicalSurface:null,sameSelectedVisibleOption:false,sameExternalGraphic:null,accepted:false}),true,"external scope schema preserves adverse/unknown observations");checks+=3;
       }
       if(!app && schemaCheck(raw)) {
+        if((mode.sourceRow?.visibleIdentityEvidence as {basis?:string}|undefined)?.basis==="insufficient-visible-structure") {
+          assert(call.userPrompt.includes("NEGATIVE-ONLY SOURCE-ROLE LIMIT"),"a limited source receives only the separately stated negative domain");
+          assert(!call.userPrompt.includes("BRAND-ROLE DOMAIN ONLY"),"limited native membership is never relabeled as a positive brand role");checks+=2;
+        }
         const pairRaw=raw as {comparison:PublicationIdentifierComparison}, row=pairRaw.comparison;
         assert.equal(schemaCheck({...pairRaw,comparison:{...row,sourceBox:[1,2,3,4]}}),false,"only immutable observed coordinate values are allowed; exact tuple order remains a reader check");
         assert.equal(schemaCheck({...pairRaw,comparison:{...row,sourceLiteral:"DifferentWord"}}),false,"independent spelling is an immutable input");
@@ -480,9 +484,142 @@ async function main() {
   for(const mutate of [(value:typeof direct)=>{delete value.sourceRoleLimit;},(value:typeof direct)=>{value.sourceRoleLimit!.sourceVisibleReview.nativeExecution=false;},(value:typeof direct)=>{value.comparison!.samePhysicalSurface=null;},(value:typeof direct)=>{value.status="pass";delete value.identifierConflict;}]) {
     const changed=copy(direct);mutate(changed);assert(directTask.api.publicationIdentifierReviewEvidenceIssue(changed,input));checks++;
   }
-  for(const patch of [{samePhysicalPart:false},{samePhysicalSurface:null},{sameSelectedVisibleOption:false}]) {
+  for(const patch of [{sameSelectedVisibleOption:false}]) {
     const task=load({readability:"legible",sourceRow:limitedSource,pair:{...directPair,...patch}});const held=await task.api.reviewPublicationIdentifiers(input);
     assert.equal(held.status,"hold");assert.equal(task.counts().ocrCalls,0);checks+=2;
+  }
+  const negativePair={...comparison,samePhysicalPart:null,samePhysicalSurface:false,
+    identifierComparisons:comparison.identifierComparisons.map(row=>({...row,sameSelectedComponent:true}))};
+  const negativeTask=load({readability:"legible",sourceRow:limitedSource,pair:negativePair});
+  const negative=await negativeTask.api.reviewPublicationIdentifiers(input);
+  assert.equal(negative.status,"conflict",negative.reason);assert.ok(negative.repairOnlyBrandConflict);assert.ok(negative.sourceRoleLimit);
+  assert.equal(negative.brandRoleEvidence,undefined);assert.equal(negative.comparison!.samePhysicalPart,null);assert.equal(negative.comparison!.samePhysicalSurface,false);
+  assert.equal(negative.comparison!.sameSelectedVisibleOption,null);assert.equal(negative.comparison!.accepted,false);
+  assert.equal(negative.identifierConflict!.pair.sameSelectedComponent,true);assert.equal(negative.identifierConflict!.pair.sameSelectedVisibleOption,null);
+  assert.equal(negativeTask.api.publicationIdentifierReviewEvidenceIssue(negative,input),null);
+  assert.deepEqual(negativeTask.counts(),{appCalls:0,pairCalls:1,ocrCalls:1,sourceCalls:1});checks+=12;
+  for(const patch of [{samePhysicalPart:false,samePhysicalSurface:null},{samePhysicalPart:true,samePhysicalSurface:false}]) {
+    const task=load({readability:"legible",sourceRow:limitedSource,pair:{...negativePair,...patch}}),value=await task.api.reviewPublicationIdentifiers(input);
+    assert.equal(value.status,"conflict",value.reason);assert.ok(value.repairOnlyBrandConflict);assert.equal(task.api.publicationIdentifierReviewEvidenceIssue(value,input),null);
+    assert.equal(value.comparison!.samePhysicalPart,patch.samePhysicalPart);assert.equal(value.comparison!.samePhysicalSurface,patch.samePhysicalSurface);checks+=5;
+  }
+  for(const patch of [{sameSelectedVisibleOption:false},{identifierRole:"model"},{identifierRole:"sku"},{accepted:true},
+    {identifierComparisons:[{...negativePair.identifierComparisons[0],sameSelectedComponent:null}]},
+    {identifierComparisons:[{...negativePair.identifierComparisons[0],sameSelectedComponent:false}]},
+    {identifierComparisons:[{...negativePair.identifierComparisons[0],sameSelectedVisibleOption:false}]},
+    {identifierComparisons:[{...negativePair.identifierComparisons[0],identifierRole:"product-line"}]},
+    {sourcePrintState:"absent"},{candidatePrintState:"not-observed"}]) {
+    const task=load({readability:"legible",sourceRow:limitedSource,pair:{...negativePair,...patch} as PublicationIdentifierComparison});
+    const value=await task.api.reviewPublicationIdentifiers(input);
+    assert.equal(value.status,"hold",JSON.stringify(patch));assert.equal(value.repairOnlyBrandConflict,undefined);assert.equal(value.identifierConflict,undefined);
+    assert.equal(task.counts().ocrCalls,0,"actual option/component/domain uncertainty must not reach paid/OCR authority");checks+=4;
+  }
+  for(const mode of [{sourceNative:false},{observerNative:false},{ocrBad:true},{ocrUnavailable:true},
+    {sourceRow:{...limitedSource,memberBrandScope:"separately-branded-included-member"}},
+    {sourceRow:{...limitedSource,memberBrandScope:"unresolved"}},
+    {sourceRow:{...limitedSource,picturedMemberEvidence:{...a.picturedMemberEvidence,selectedFact:"foreign gift"}}},
+    {sourceRow:{...limitedSource,visibleIdentityEvidence:{basis:"observed-conflict",landmarks:[],conflict:"different selected housing"}}}] as Mode[]) {
+    const task=load({readability:"legible",sourceRow:limitedSource,pair:negativePair,...mode}),value=await task.api.reviewPublicationIdentifiers(input);
+    assert.equal(value.status,"hold");assert.equal(value.repairOnlyBrandConflict,undefined);assert.equal(value.identifierConflict,undefined);checks+=3;
+  }
+  const matchingNegative={...negativePair,accepted:true,identifierComparisons:negativePair.identifierComparisons.map(row=>({...row,candidateLiteral:"Markora"}))};
+  const noPositiveTask=load({readability:"legible",sourceRow:limitedSource,pair:matchingNegative,candidateLiteral:"Markora"});
+  const noPositive=await noPositiveTask.api.reviewPublicationIdentifiers(input);
+  assert.equal(noPositive.status,"hold");assert.equal(noPositiveTask.counts().ocrCalls,0);assert.equal(noPositive.identifierMatches,undefined);assert.equal(noPositive.repairOnlyBrandConflict,undefined);checks+=4;
+  const matchingDirect={...directPair,accepted:true,identifierComparisons:directPair.identifierComparisons.map(row=>({...row,candidateLiteral:"Markora"}))};
+  const matchingDirectTask=load({readability:"legible",sourceRow:limitedSource,pair:matchingDirect,candidateLiteral:"Markora"});
+  const directMatch=await matchingDirectTask.api.reviewPublicationIdentifiers(input);
+  assert.equal(directMatch.status,"pass",directMatch.reason);assert.equal(directMatch.repairOnlyBrandConflict,undefined);
+  assert.equal(matchingDirectTask.api.publicationIdentifierReviewEvidenceIssue(directMatch,input),null);checks+=3;
+  const matchingPositive={...comparison,accepted:true,identifierComparisons:comparison.identifierComparisons.map(row=>({...row,candidateLiteral:"Markora"}))};
+  const matchingPositiveTask=load({readability:"legible",pair:matchingPositive,candidateLiteral:"Markora"});
+  const positiveMatch=await matchingPositiveTask.api.reviewPublicationIdentifiers(input);
+  assert.equal(positiveMatch.status,"pass",positiveMatch.reason);assert.ok(positiveMatch.brandRoleEvidence);assert.equal(positiveMatch.repairOnlyBrandConflict,undefined);
+  assert.equal(matchingPositiveTask.api.publicationIdentifierReviewEvidenceIssue(positiveMatch,input),null);checks+=4;
+  for(const mutate of [(value:typeof negative)=>{delete value.repairOnlyBrandConflict;},
+    (value:typeof negative)=>{delete value.sourceRoleLimit;},(value:typeof negative)=>{value.repairOnlyBrandConflict!.scopeGateSha256=hash("other gate");},
+    (value:typeof negative)=>{value.repairOnlyBrandConflict!.sourceSnapshotId=hash("other snapshot");},
+    (value:typeof negative)=>{value.repairOnlyBrandConflict!.comparisonSha256=hash("other row");},
+    (value:typeof negative)=>{value.repairOnlyBrandConflict!.conflictSha256=hash("other conflict");},
+    (value:typeof negative)=>{value.sourceRoleLimit!.sourceVisibleReview.nativeExecution=false;},
+    (value:typeof negative)=>{value.sourceRoleLimit!.selectedFact="other member";},
+    (value:typeof negative)=>{value.identifierConflict!.pair.sameSelectedComponent=null;},
+    (value:typeof negative)=>{value.identifierConflict!.pair.sourceSha256=fileHash(primary);},
+    (value:typeof negative)=>{value.status="pass";delete value.identifierConflict;},
+    (value:typeof negative)=>{value.nativeExecution=false;},
+    (value:typeof negative)=>{value.brandRoleEvidence=copy(value.sourceRoleLimit);},
+    (value:typeof negative)=>{const conflict=copy(value.identifierConflict!);value.identifierMatches=[{version:"publication-identifier-match/v1",pair:conflict.pair,evidence:conflict.evidence,blindObservations:conflict.blindObservations}];},
+    (value:typeof negative)=>{value.reason="INDEPENDENT_BLIND_LITERAL_OCR_CONFLICT";}]) {
+    const changed=copy(negative);mutate(changed);assert(negativeTask.api.publicationIdentifierReviewEvidenceIssue(changed,input),"repair-only authority cannot be removed, forged, promoted or rebound");checks++;
+  }
+  for(const key of ["visibleReview","claimsReview","formatReview"] as const) {
+    const changed=copy(input);if(changed.scopeGate?.kind!=="scene-native-positive/v1")changed.scopeGate![key].nativeExecution=false;
+    assert(negativeTask.api.publicationIdentifierReviewEvidenceIssue(negative,changed));checks++;
+  }
+  for(const mutate of [(value:PublicationIdentifierReviewInput)=>{value.canonicalReferences=value.canonicalReferences.filter(row=>row.sha256!==fileHash(detail));},
+    (value:PublicationIdentifierReviewInput)=>{value.canonicalReferences=value.canonicalReferences.filter(row=>row.sha256!==fileHash(primary));},
+    (value:PublicationIdentifierReviewInput)=>{for(const row of value.canonicalReferences)row.sourceSnapshotId=hash("another canonical snapshot");},
+    (value:PublicationIdentifierReviewInput)=>{for(const row of value.canonicalReferences)delete (row as {sourceSnapshotId?:string}).sourceSnapshotId;}]) {
+    const changed=copy(input);mutate(changed);assert(negativeTask.api.publicationIdentifierReviewEvidenceIssue(negative,changed));checks++;
+  }
+  {
+  const bodyPackets=buildScopedPublicationPackets({candidatePath:candidate,candidateSha256:fileHash(candidate),primaryReference:{path:primary,sha256:fileHash(primary)},role:"body",exactCanonicalSellerOriginal:false,
+    sectionTitle:"ordinary purchase checks",sectionBody:["unchanged manuscript"],allowProductPhoto:true,selection:visibleIdentityReviewContext(selectedProduct),selectedProduct});
+  const bodyInput:PublicationIdentifierReviewInput={...copy(input),scopeGate:{kind:"final-native-positive/v1",selectedProduct,
+    visibleReview:evidence(bodyPackets[0],a),claimsReview:evidence(bodyPackets[1],c),formatReview:evidence(bodyPackets[2],d),policyFingerprint:hash("current body policy")}};
+  const unprintedAssociation:PublicationPrintApplicabilityRow={...positive,
+    sourceObservation:"the corresponding screen/button device front is unprinted; the independently observed word belongs to the surrounding source photograph",
+    candidateObservation:"the corresponding screen/button device front is also unprinted",
+    correspondenceObservation:"the same screen and button arrangement identifies both unprinted fronts; exact primary word-to-face association remains unresolved",
+    sourcePrintLocation:"unprinted",candidatePrintLocation:"own-unprinted-face",sourceBox:null,candidateBox:null,
+    applicability:"not-applicable-own-unprinted-face",samePhysicalPart:true,samePhysicalSurface:true,sameSelectedVisibleOption:true,accepted:true,
+    witness:"screen and button layout match the actual device fronts, but the package/device boundary cannot support a separate complete rectangle",
+    primaryObservedWordRelation:"unresolved",primaryObservedWordBox:sourceBox,comparedPrimaryFaceBox:null,
+    primaryObservedWordSpatialWitness:"the visible primary word is preserved at its actual ROI; association with the separately matched unprinted face is unresolved",primaryFaceLandmarks:[]};
+  const associationTask=load({primaryReadability:"legible",app:unprintedAssociation}),association=await associationTask.api.reviewPublicationIdentifiers(bodyInput);
+  assert.equal(association.status,"unverified",association.reason);assert.equal(association.nativeExecution,false);
+  assert.equal(association.printObservationWarning?.version,"publication-own-unprinted-association-warning/v1");
+  assert.equal(association.printObservationWarning?.scope,"own-unprinted-face-primary-word-association-unresolved");
+  assert.equal(association.printApplicability!.row!.accepted,true);assert.equal(association.printApplicability!.row!.primaryObservedWordRelation,"unresolved");
+  assert.equal(association.printApplicability!.row!.comparedPrimaryFaceBox,null);assert.equal(association.printApplicability!.row!.primaryFaceLandmarks!.length,0);
+  assert.equal(association.identifierConflict,undefined);assert.equal(association.missingPrintEvidence,undefined);assert.equal(association.repairOnlyBrandConflict,undefined);
+  assert.equal(associationTask.api.publicationIdentifierReviewEvidenceIssue(association,bodyInput),null);
+  assert.deepEqual(associationTask.counts(),{appCalls:1,pairCalls:0,ocrCalls:0,sourceCalls:0});checks+=13;
+  for(const patch of [{primaryObservedWordRelation:"same-compared-face"},{primaryObservedWordRelation:"other-visible-member-or-face"},
+    {samePhysicalPart:false},{samePhysicalSurface:false},{sameSelectedVisibleOption:false},{accepted:false},
+    {sourcePrintLocation:"present"},{candidatePrintLocation:"entire-exposed-blank"},{sourceBox},
+    {comparedPrimaryFaceBox:[1,1,500,500]},{primaryFaceLandmarks:[{primaryObservation:"screen",candidateObservation:"screen"}]},
+    {primaryObservedWordBox:[1,2,3,4]}]) {
+    const task=load({primaryReadability:"legible",app:{...unprintedAssociation,...patch} as PublicationPrintApplicabilityRow});
+    const value=await task.api.reviewPublicationIdentifiers(bodyInput);
+    assert.equal(value.status,"hold",JSON.stringify(patch));assert.equal(value.printObservationWarning,undefined);
+    assert.equal(value.repairOnlyBrandConflict,undefined);assert.equal(task.counts().ocrCalls,0);checks+=4;
+  }
+  for(const invalidInput of [input,sceneInput]) {
+    const task=load({primaryReadability:"legible",app:unprintedAssociation}),value=await task.api.reviewPublicationIdentifiers(invalidInput);
+    assert.equal(value.status,"hold","unprinted association warning is final body only, never thumbnail or first-generation scene admission");
+    assert.equal(value.printObservationWarning,undefined);checks+=2;
+  }
+  const readableAssociationTask=load({readability:"legible",primaryReadability:"legible",app:unprintedAssociation});
+  const readableAssociation=await readableAssociationTask.api.reviewPublicationIdentifiers(bodyInput);
+  assert.notEqual(readableAssociation.printObservationWarning?.version,"publication-own-unprinted-association-warning/v1");
+  assert.equal(readableAssociationTask.counts().appCalls,0,"a readable actual candidate word remains in the separate native/OCR conflict path");checks+=2;
+  for(const mutate of [(value:typeof association)=>{delete value.printObservationWarning;},
+    (value:typeof association)=>{value.status="pass";},(value:typeof association)=>{value.nativeExecution=true;},
+    (value:typeof association)=>{value.identifierConflict=copy(negative.identifierConflict);},
+    (value:typeof association)=>{value.repairOnlyBrandConflict=copy(negative.repairOnlyBrandConflict);},
+    (value:typeof association)=>{value.printApplicability!.row!.primaryObservedWordBox=[1,2,3,4];const app=value.printApplicability!;app.rawResponse=JSON.stringify(app.row);app.responseSha256=hash(app.rawResponse);},
+    (value:typeof association)=>{value.printApplicability!.nativeExecution=false;},
+    (value:typeof association)=>{value.blindInputObservations!.candidate.nativeExecution=false;},
+    (value:typeof association)=>{value.blindInputObservations!.candidate.observation.readability="legible";}]) {
+    const changed=copy(association);mutate(changed);assert(associationTask.api.publicationIdentifierReviewEvidenceIssue(changed,bodyInput),"unprinted association warning cannot become a positive, repair right, or altered observation");checks++;
+  }
+  for(const key of ["visibleReview","claimsReview","formatReview"] as const) {
+    const changed=copy(bodyInput);if(changed.scopeGate?.kind!=="scene-native-positive/v1")changed.scopeGate![key].nativeExecution=false;
+    assert(associationTask.api.publicationIdentifierReviewEvidenceIssue(association,changed));checks++;
+  }
+  assert(associationTask.api.publicationIdentifierReviewEvidenceIssue(association,input));
+  assert(associationTask.api.publicationIdentifierReviewEvidenceIssue(association,sceneInput));checks+=2;
   }
   const optional=path.join(root,"optional-reference.png");await sharp({create:{width:860,height:860,channels:3,background:"#cc8844"}}).png().toFile(optional);
   const optionalInput=copy(input);optionalInput.canonicalReferences.push({path:optional,sha256:fileHash(optional),sourceSnapshotId:snapshot});

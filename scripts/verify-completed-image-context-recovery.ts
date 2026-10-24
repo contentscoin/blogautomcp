@@ -24,6 +24,7 @@ import { publicationIdentifierReviewRequestSha256, publicationIdentifierReviewEv
   type PublicationIdentifierComparison } from "./lib/publication-identifier-review";
 import { publicationImageAuditPolicyFingerprint } from "./lib/publish-image-audit";
 import { planPublicationImageRetry } from "../src/lib/brand-post-publication-image-repair";
+import { planConfirmedPrintRepairs } from "../src/lib/brand-post-confirmed-print-repair";
 import type { IntrinsicIdentifierServerConflict, IntrinsicIdentifierPair } from "./lib/intrinsic-identifier-comparison";
 import { INTRINSIC_IDENTIFIER_OCR_VERSION } from "./lib/intrinsic-identifier-ocr";
 import { INTRINSIC_IDENTIFIER_OBSERVER_VERSION, intrinsicIdentifierObserverRequestSha256, serializeIntrinsicIdentifierObserverResponse,
@@ -255,7 +256,7 @@ async function main() {
       if (kind === "unselected-component") conflict.pair.sameSelectedComponent = false;
       f.record(f.verdict, conflict); assert.equal(f.plan(), null, "uncorroborated observations cannot mint native regeneration authority"); checks++;
     }
-    async function isolatedFixture() {
+    async function isolatedFixture(negativeOnly = false) {
       const f = await publicationFixture(), input: PublicationIdentifierReviewInput = { candidatePath: f.f.manifest.imageAssets![0].path,
         candidateSha256: f.currentSha, primaryReference: { path: f.f.primary, sha256: fileHash(f.f.primary) },
         canonicalReferences: [f.f.primary, f.f.geometry].map(file => ({ path: file, sha256: fileHash(file), sourceSnapshotId: f.f.manifest.sourceSnapshot!.snapshotId })), workspace: root };
@@ -270,10 +271,11 @@ async function main() {
         optionConflictWitness: { origin: "none", quote: "", visibleAlternatives: [] }, photoClaimMatches: true, intrinsicPrintProofClaim:false, mixedOptions: false,
         explicitNamedComparison: false, optionsClearlyLabeled: false, reviewClass: "product-photo", accepted: true };
       const d = {reason:"Synthetic pixel-only format",pixelFormatObjection:{kind:"none",location:"",observation:""},notice:false,singlePhotograph:true,noGraphicLayout:true,textPolicyMatches:true,thumbnailHeadlineLegible:true,accepted:true};
-      const evidence = (index: number, row: Record<string, unknown>): ScopedReviewEvidence => { const packet = packets[index], rawResponse = serializeScopedPublicationResponse(packet.task,row);
+      const nativeEvidence = (packet: typeof packets[number], row: Record<string, unknown>): ScopedReviewEvidence => { const rawResponse = serializeScopedPublicationResponse(packet.task,row);
         return { version: "publication-image-scoped-review/v2", task: packet.task, requestSha256: packet.requestSha256,
           request: { ...packet.call, imagePaths: packet.call.imagePaths!.map(fileHash) }, context: packet.context,
           responseSha256: hash(rawResponse), rawResponse, row:parseScopedPublicationResponse(packet.task,rawResponse,packet.call.outputSchema,packet.call.userPrompt), nativeExecution: true }; };
+      const evidence = (index: number, row: Record<string, unknown>) => nativeEvidence(packets[index],row);
       const comparison: PublicationIdentifierComparison = { sourceImageIndex: 3, sourceSha256: fileHash(f.f.geometry), sourceObservation: "Actual synthetic source Voltium",
         candidateObservation: "Actual synthetic candidate Voltum", correspondenceObservation: "The same locally selected component and colour", samePhysicalPart: true,
         samePhysicalSurface: true, sameSelectedVisibleOption: true, sourcePrintState: "present", candidatePrintState: "present", sourceBox: f.identifierConflict.pair.sourceBox!,
@@ -289,16 +291,41 @@ async function main() {
       const blindInputObservations = {candidate:observeEvidence(f.currentSha,candidateObservation),sources:[
         {imageIndex:2,sha256:fileHash(f.f.primary),evidence:observeEvidence(fileHash(f.f.primary),primaryObservation)},
         {imageIndex:3,sha256:fileHash(f.f.geometry),evidence:observeEvidence(fileHash(f.f.geometry),sourceObservation)}]};
+      const visibleReview=evidence(0,a),claimsReview=evidence(1,c),formatReview=evidence(2,d);
+      let sourceRoleLimit: PublicationIdentifierReviewResult["sourceRoleLimit"];
+      if (negativeOnly) {
+        const selectedProduct=JSON.stringify({selectedTitle:"Synthetic selected component"});
+        input.scopeGate={kind:"final-native-positive/v1",selectedProduct,visibleReview,claimsReview,formatReview,policyFingerprint:f.policy};
+        const sourcePacket=buildScopedPublicationPackets({candidatePath:f.f.geometry,candidateSha256:fileHash(f.f.geometry),primaryReference:input.primaryReference,
+          visibleLocationHints:{coordinateSpace:"normalized-1000",candidateBox:sourceObservation.box,primaryBox:primaryObservation.box},
+          role:"source-membership",exactCanonicalSellerOriginal:false,sectionTitle:"",sectionBody:[],allowProductPhoto:true,
+          selection:visibleIdentityReviewContext(selectedProduct),selectedProduct})[0];
+        const sourceVisibleReview=nativeEvidence(sourcePacket,{...a,identityMatches:false,accepted:false,
+          visibleIdentityEvidence:{basis:"insufficient-visible-structure",landmarks:[],conflict:"The main-body brand macro shows a different physical face than the OWN primary."}});
+        sourceRoleLimit={version:"selected-main-product-brand-role/v1",sourceSha256:fileHash(f.f.geometry),primarySha256:input.primaryReference.sha256,
+          candidateVisibleReviewSha256:hash(JSON.stringify(visibleReview)),sourceVisibleReview,memberFactIndex:0,selectedFact:"Synthetic selected component"};
+        comparison.samePhysicalPart=null;comparison.samePhysicalSurface=false;comparison.sameSelectedVisibleOption=null;
+        comparison.identifierComparisons[0].sameSelectedVisibleOption=null;
+      }
       const sourceMeta = await sharp(f.f.geometry).metadata(), candidateMeta = await sharp(input.candidatePath).metadata();
-      const localPair = {sourceImageIndex:3,sourceDimensions:{width:sourceMeta.width!,height:sourceMeta.height!},candidateDimensions:{width:candidateMeta.width!,height:candidateMeta.height!},coordinateSpace:"normalized-1000" as const};
+      const localPair = {sourceImageIndex:3,sourceDimensions:{width:sourceMeta.width!,height:sourceMeta.height!},candidateDimensions:{width:candidateMeta.width!,height:candidateMeta.height!},coordinateSpace:"normalized-1000" as const,
+        ...(sourceRoleLimit?{sourceRoleLimitSha256:hash(JSON.stringify(sourceRoleLimit))}:{})};
       const context = { candidateSha256: f.currentSha, primaryReferenceImageIndex: 2 as const, primaryReferenceSha256: fileHash(f.f.primary),
-        references: input.canonicalReferences.map((reference, index) => ({ imageIndex: index + 2, sha256: fileHash(reference.path), sourceSnapshotId: reference.sourceSnapshotId })),localPair };
+        references: input.canonicalReferences.map((reference, index) => ({ imageIndex: index + 2, sha256: fileHash(reference.path), sourceSnapshotId: reference.sourceSnapshotId })),
+        ...(input.scopeGate?{scopeGateSha256:hash(JSON.stringify(input.scopeGate))}:{}),localPair};
       const rawB = JSON.stringify({coordinateSpace:"normalized-1000",sourceImageSize:localPair.sourceDimensions,candidateImageSize:localPair.candidateDimensions,comparison});
       const identifiers: PublicationIdentifierReviewResult = { version: "publication-identifier-review/v1", strategyVersion:"blind-two-image/v1",status: "conflict",blindInputObservations,
         nativeExecution: true, reason: "Synthetic separately corroborated conflict", rawB, comparison, context,
         requestSha256: publicationIdentifierReviewRequestSha256(context,blindInputObservations), responseSha256: hash(rawB), identifierConflict: {...f.identifierConflict,
           blindObservations:{source:blindInputObservations.sources[1].evidence,candidate:blindInputObservations.candidate}} };
-      return { f, visibleReview: evidence(0, a), claimsReview: evidence(1, c), formatReview:evidence(2,d), identifiers, input,
+      if (sourceRoleLimit) {
+        identifiers.sourceRoleLimit=sourceRoleLimit;identifiers.reason="NEGATIVE_ONLY_MAIN_BODY_BRAND_OCR_CONFLICT_NO_POSITIVE_CERTIFICATION";
+        identifiers.repairOnlyBrandConflict={version:"publication-repair-only-brand-conflict/v1",scope:"negative-only-selected-main-body-brand",
+          candidateSha256:input.candidateSha256,primarySha256:input.primaryReference.sha256,sourceSha256:fileHash(f.f.geometry),sourceSnapshotId:f.f.manifest.sourceSnapshot!.snapshotId,
+          scopeGateSha256:context.scopeGateSha256!,sourceRoleLimitSha256:hash(JSON.stringify(sourceRoleLimit)),observationsSha256:hash(JSON.stringify(blindInputObservations)),
+          contextSha256:hash(JSON.stringify(context)),requestSha256:identifiers.requestSha256,comparisonSha256:hash(JSON.stringify(comparison)),conflictSha256:hash(JSON.stringify(identifiers.identifierConflict))};
+      }
+      return { f, visibleReview, claimsReview, formatReview, identifiers, input,
         record: (visibleReview: ScopedReviewEvidence, claimsReview: ScopedReviewEvidence, identifierReview: PublicationIdentifierReviewResult) =>
           recordScopedPublicationImageDefect({ manifest: f.f.manifest, sectionId: "scene", sha256: f.currentSha, policyFingerprint: f.policy,
             visibleReview, claimsReview, formatReview:evidence(2,d), identifierReview, identifierInput: input }) };
@@ -307,6 +334,47 @@ async function main() {
     const scopedProof = readPublicationImageDefect(scoped.f.f.manifest, "scene", scoped.f.currentSha, scoped.f.policy)!;
     assert.ok(scopedProof && scopedProof.proof.version === "publication-image-print-defect/v4", "scoped native v4 proof must exist");
     assert.equal(scopedProof.proof.defectKind, "conflicting-print"); assert.equal(scoped.f.plan()?.parent.dispositions.length, 1); checks += 3;
+    const negativeScoped=await isolatedFixture(true);
+    assert.equal(publicationIdentifierReviewEvidenceIssue(negativeScoped.identifiers,negativeScoped.input),null,"negative-only fixture satisfies the actual production evidence reader");checks++;
+    negativeScoped.record(negativeScoped.visibleReview,negativeScoped.claimsReview,negativeScoped.identifiers);
+    const negativeProof=readPublicationImageDefect(negativeScoped.f.f.manifest,"scene",negativeScoped.f.currentSha,negativeScoped.f.policy)!;
+    assert.ok(negativeProof && negativeProof.proof.version==="publication-image-print-defect/v4");
+    assert.ok(negativeProof.proof.identifierReview.repairOnlyBrandConflict);assert.equal(negativeProof.proof.identifierReview.brandRoleEvidence,undefined);
+    assert.equal(negativeProof.proof.identifierReview.comparison!.samePhysicalPart,null);assert.equal(negativeProof.proof.identifierReview.comparison!.samePhysicalSurface,false);
+    assert.equal(negativeProof.proof.identifierReview.comparison!.sameSelectedVisibleOption,null);checks+=6;
+    const negativePartial=planConfirmedPrintRepairs(negativeScoped.f.f.manifest);
+    assert.equal(negativePartial.requests.length,1);assert.equal(negativePartial.requests[0].replaceAssetKey,negativeScoped.f.currentSha);
+    assert.equal(negativePartial.requests[0].sectionId,"scene");assert.equal(negativePartial.proofs[0].proofSha256,negativeProof.sha256);checks+=4;
+    const negativeHoldFile=path.join(negativeScoped.f.dir,"publish-image-regeneration-holds.json");
+    recordPublicationImageRegenerationHolds(negativeScoped.f.f.manifest.brandLinkId,negativeScoped.f.f.manifest.composition,[{sha256:negativeScoped.f.currentSha,
+      sectionId:"scene",slotId:"scene:image:1",sourceSnapshotId:negativeScoped.f.f.manifest.sourceSnapshot!.snapshotId,policyFingerprint:negativeScoped.f.policy,kind:"uncorroborated-identifier"}]);
+    const negativeStable=[negativeScoped.f.f.metadataPath,negativeScoped.f.f.receiptPath,negativeScoped.f.f.rollout,
+      `${negativeScoped.f.f.original.outStem}.png`,negativeScoped.f.f.primary,negativeScoped.f.f.geometry,negativeHoldFile].map(file=>[file,fileHash(file)]);
+    const negativeBody=JSON.stringify(negativeScoped.f.f.manifest.composition),negativeView={...JSON.parse(fs.readFileSync(negativeScoped.f.f.metadataPath,"utf8")).referenceContext.reference,
+      viewObservation:{subjectState:"freestanding",cameraView:"front",geometryVisibility:"complete",hiddenParts:[],intrinsicPrint:"readable",readableIdentifiers:["Voltium"]}} as ShoppingSceneReference;
+    const negativeTarget=negativeScoped.f.target();
+    await generation.prepareBrandPostImageReferenceContext({manifest:negativeScoped.f.f.manifest,target:negativeTarget,productName:"검정 제품"},
+      {collect:async()=>[negativeScoped.f.f.primary],select:async()=>negativeView,selectSupporting:async()=>[]});
+    assert.ok(negativeTarget.referenceContext!.publicationRetryOf);assert.equal(negativeTarget.referenceContext!.reference.sha256,fileHash(negativeScoped.f.f.primary));
+    const negativeRequired=negativeTarget.referenceContext!.supportingReferences!.find(row=>row.sha256===fileHash(negativeScoped.f.f.geometry))!;
+    assert.ok(negativeRequired);assert.equal(negativeRequired.purpose,"intrinsic-label");assert.equal(JSON.parse(negativeRequired.labels).sourceLiteral,"Voltium");checks+=5;
+    const negativeChild=generation.prepareImageBatchJobs([negativeTarget],negativeScoped.f.f.manifest,"검정 제품",negativeScoped.f.f.work)[0];
+    assert.notEqual(negativeChild.outStem,negativeScoped.f.f.original.outStem);assert.equal(negativeChild.reviewOnly,undefined);
+    assert.equal(negativeChild.referenceImagePaths![0],negativeScoped.f.f.primary);assert.ok(negativeChild.referenceImagePaths!.includes(negativeRequired.path));checks+=4;
+    const negativeRepeat=negativeScoped.f.target();
+    await generation.prepareBrandPostImageReferenceContext({manifest:negativeScoped.f.f.manifest,target:negativeRepeat,productName:"검정 제품"},
+      {collect:async()=>{throw Error("negative child cannot recollect");},select:async()=>{throw Error("negative child cannot reselect");}});
+    assert.equal(generation.prepareImageBatchJobs([negativeRepeat],negativeScoped.f.f.manifest,"검정 제품",negativeScoped.f.f.work)[0].outStem,negativeChild.outStem,"same negative proof resumes one sealed child only");checks++;
+    const negativeChildMetadata=`${negativeChild.outStem}.reference-scene.json`,negativeChildBytes=fs.readFileSync(negativeChildMetadata),badNegativeChild=JSON.parse(negativeChildBytes.toString());
+    badNegativeChild.referenceContext.supportingReferences=[];
+    fs.writeFileSync(negativeChildMetadata,JSON.stringify(badNegativeChild));assert.throws(negativeScoped.f.plan,/IMAGE_RESUME_REQUIRED/u,"mandatory brand source cannot be dropped on resume");checks++;
+    fs.writeFileSync(negativeChildMetadata,negativeChildBytes);
+    const extraNegativeChild=path.join(negativeScoped.f.f.work,`raw-${"e".repeat(64)}`);
+    fs.copyFileSync(negativeChildMetadata,`${extraNegativeChild}.reference-scene.json`);
+    assert.throws(negativeScoped.f.plan,/IMAGE_RESUME_REQUIRED/u,"a second child cannot bypass the first sealed negative repair");checks++;
+    fs.rmSync(`${extraNegativeChild}.reference-scene.json`);
+    for(const [file,expected] of negativeStable){assert.equal(fileHash(file),expected,"negative repair preserves sources, output, request and original HOLD bytes");checks++;}
+    assert.equal(JSON.stringify(negativeScoped.f.f.manifest.composition),negativeBody);assert.equal(negativeScoped.f.f.manifest.approvedAt,null);checks+=2;
     assert.deepEqual(readPublicationDefectMaterialContext(scopedProof.proof)?.composition,scoped.f.f.manifest.composition); checks++;
     const contextSidecar=path.join(root,"data/publication-image-defect-proofs",scopedProof.proof.materialContext.file),sidecarBytes=fs.readFileSync(contextSidecar);
     fs.appendFileSync(contextSidecar," ");assert.equal(readPublicationImageDefect(scoped.f.f.manifest,"scene",scoped.f.currentSha,scoped.f.policy),null);checks++;
