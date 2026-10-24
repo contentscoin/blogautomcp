@@ -8,7 +8,7 @@ import { runCodexDraft, type CodexDraftOptions } from "./codex-draft-provider";
 import { INTRINSIC_IDENTIFIER_SCHEMA, corroboratableIdentifierPairs, intrinsicIdentifierBoxesOverlap, intrinsicIdentifierComparisonIssue,
   type IntrinsicIdentifierPair, type IntrinsicIdentifierServerConflict, type IdentifierBox } from "./intrinsic-identifier-comparison";
 import { corroborateIntrinsicIdentifierPair } from "./intrinsic-identifier-corroboration";
-import { normalizeIntrinsicIdentifierLiteral, reviewIntrinsicIdentifierOcr, INTRINSIC_IDENTIFIER_OCR_VERSION,
+import { normalizeIntrinsicIdentifierLiteral, reviewIntrinsicIdentifierOcr, INTRINSIC_IDENTIFIER_OCR_VERSION, intrinsicIdentifierOcrTranscriptEvidenceIssue,
   type IntrinsicIdentifierOcrEvidence } from "./intrinsic-identifier-ocr";
 import { intrinsicIdentifierObserverRequestSha256, parseIntrinsicIdentifierObserverResponse, intrinsicIdentifierObserverResponseIssue, intrinsicIdentifierObserverEvidenceIssue,
   observeIntrinsicIdentifier, type IntrinsicIdentifierObserverEvidence, type IntrinsicIdentifierObserverResult } from "./intrinsic-identifier-observer";
@@ -115,6 +115,7 @@ interface PublicationPrintWarningBinding {
   sourceContextSha256: string; policyFingerprint: string;
 }
 export type PublicationPrintObservationWarning = PublicationPrintWarningBinding & (
+  { version: "publication-calibrated-print-warning/v1"; scope: "local-print-uncertainty-no-letter-or-repair-authority"; observationKind: "unprinted-face-association" | "small-word-ocr-unresolved"; comparisonSha256: string; ocrSha256: string } |
   { version: "publication-print-observation-warning/v1"; scope: "non-legible-non-comparable-local-print-only" } |
   { version: "publication-own-unprinted-association-warning/v1"; scope: "own-unprinted-face-primary-word-association-unresolved" } |
   { version: "publication-target-ambiguous-print-warning/v1"; scope: "multiple-visible-words-no-unique-intrinsic-target-no-certification" } |
@@ -167,6 +168,11 @@ export interface PublicationIdentifierReviewResult {
   /** Nonblocking observation limit only; never a positive letter verdict,
    * known-defect exemption, replacement right or paid generation authority. */
   printObservationWarning?: PublicationPrintObservationWarning;
+  /** Completed local OCR with no candidate consensus, never a letter match. */
+  unresolvedPrintOcr?: IntrinsicIdentifierOcrEvidence;
+  /** Written only after an actual native local-pair call. A warning's own
+   * nativeExecution=false must not erase the comparison's execution origin. */
+  nativeLocalPairReceipt?: { version: "publication-native-local-pair/v1"; requestSha256: string; responseSha256: string };
   /** Diagnostic only. Never substitutes for native evidence or creates a retry. */
   taskDiagnostic?: { stage: "candidate-observer" | "source-observer" | "applicability" | "source-membership" | "local-pair" | "corroboration";
     imageSha256: string; status: string; reason: string; observerDiagnostic?: IntrinsicIdentifierObserverResult["diagnostic"] };
@@ -661,6 +667,61 @@ function printWarningPolicyFingerprint(input: PublicationIdentifierReviewInput):
     ? hash(JSON.stringify({ version: "scene-local-print-warning-policy/v1", nativeSceneRequestSha256: gate.requestSha256,
       applicabilityRequestSha256: hash(JSON.stringify(applicabilityRequest(input).call)) }))
     : validSha(gate.policyFingerprint) ? gate.policyFingerprint : null;
+}
+/** Ordinary product photos do not certify every tiny printed letter. Keep a
+ * technically valid observation limit visible without promoting it to a pass,
+ * absence finding, identity proof or right to generate another photograph. */
+function withCalibratedPrintWarning(result: PublicationIdentifierReviewResult, input: PublicationIdentifierReviewInput,
+  prepared: ReturnType<typeof packet>): PublicationIdentifierReviewResult | null {
+  try {
+    const observed=result.blindInputObservations, gate=input.scopeGate, app=result.printApplicability, row=app?.row;
+    if (!gate || scopeGateIssue(input) || observationSetIssue(observed,prepared,true) || !result.context ||
+        !same({...result.context,localPair:undefined},prepared.context) || prepared.context.references.some(reference=>!validSha(reference.sourceSnapshotId)) ||
+        !printWarningPolicyFingerprint(input) || result.taskDiagnostic || result.identifierConflict || result.missingPrintEvidence || result.identifierMatches?.length ||
+        result.sourceLetterEvidence || result.exactSourceIdentity || result.exactPhotoThumbnailReplay || result.unprintedReferenceSet || result.ownUnprintedReference ||
+        result.scopeOutside || result.repairOnlyBrandConflict || result.suspectedOmissionSourceRole) return null;
+    let observationKind: "unprinted-face-association" | "small-word-ocr-unresolved";
+    if (app && row) {
+      // The actual local face was observed unprinted. Its association with a
+      // separate gallery word can remain unresolved. Never use this for an
+      // observed whole blank at a SOURCE print location or a wrong option.
+      if (gate.kind==="scene-native-positive/v1" || applicabilityEvidenceIssue(app,input,true,observed) ||
+          observed!.candidate.observation.readability!=="absent" || row.accepted!==true ||
+          row.applicability!=="not-applicable-own-unprinted-face" || row.sourcePrintLocation!=="unprinted" || row.candidatePrintLocation!=="own-unprinted-face" ||
+          row.sameSelectedVisibleOption===false || row.primaryObservedWordRelation==="same-compared-face" || row.sourceBox!==null || row.candidateBox!==null ||
+          result.rawB!=="" || result.responseSha256!==hash("") || result.comparison!==null || result.unresolvedPrintOcr || result.brandRoleEvidence || result.sourceRoleLimit) return null;
+      observationKind="unprinted-face-association";
+    } else {
+      const comparison=result.comparison, ocr=result.unresolvedPrintOcr, selected=chooseBlindSource(observed!), source=selected.evidence.observation, candidate=observed!.candidate.observation;
+      if (app || !comparison || !ocr || result.nativeLocalPairReceipt?.version!=="publication-native-local-pair/v1" ||
+          result.nativeLocalPairReceipt.requestSha256!==result.requestSha256 || result.nativeLocalPairReceipt.responseSha256!==result.responseSha256 ||
+          source.readability!=="legible" || candidate.readability!=="legible" ||
+          source.identifierRole!=="brand" || candidate.identifierRole!=="brand" || !validBox(candidate.box) ||
+          candidate.box[2]-candidate.box[0]>150 || candidate.box[3]-candidate.box[1]>60 ||
+          comparison.sameSelectedVisibleOption===false || comparison.identifierComparisons.length!==1 ||
+          comparison.identifierComparisons[0].sameSelectedComponent===false || comparison.identifierComparisons[0].sameSelectedVisibleOption===false ||
+          result.responseSha256!==hash(result.rawB) || result.requestSha256!==publicationIdentifierReviewRequestSha256(result.context,observed) ||
+          !same(parsePublicationIdentifierComparison(result.rawB,result.context),comparison) ||
+          blindEvidenceIssue(result,prepared,true) || blindComparisonIssue({...result,status:"pass",brandRoleEvidence:undefined},true) ||
+          engineIssue(ocr,true) || intrinsicIdentifierOcrTranscriptEvidenceIssue(ocr) ||
+          ocr.source.originalSha256!==selected.sha256 || ocr.candidate.originalSha256!==input.candidateSha256 ||
+          !same(ocr.source.box,source.box) || !same(ocr.candidate.box,candidate.box) || ocr.sourceLiteral!==source.literal ||
+          !consensus(ocr.source.consensus,source.literal) || ocr.candidate.consensus!==null ||
+          !validSha(ocr.source.regionSha256) || !validSha(ocr.candidate.regionSha256)) return null;
+      if (result.brandRoleEvidence && brandRoleEvidenceIssue(result.brandRoleEvidence,input,prepared,true,observed) ||
+          result.sourceRoleLimit && sourceRoleLimitIssue(result.sourceRoleLimit,input,prepared,true,observed)) return null;
+      observationKind="small-word-ocr-unresolved";
+    }
+    const warning:PublicationPrintObservationWarning={version:"publication-calibrated-print-warning/v1",scope:"local-print-uncertainty-no-letter-or-repair-authority",observationKind,
+      candidateSha256:input.candidateSha256,primarySha256:input.primaryReference.sha256,scopeGateSha256:prepared.context.scopeGateSha256!,
+      applicabilitySha256:hash(JSON.stringify(app||null)),observationsSha256:hash(JSON.stringify(observed)),sourceContextSha256:hash(JSON.stringify(prepared.context.references)),
+      policyFingerprint:printWarningPolicyFingerprint(input)!,comparisonSha256:hash(JSON.stringify(result.comparison)),ocrSha256:hash(JSON.stringify(result.unresolvedPrintOcr||null))};
+    return {...result,status:"unverified",nativeExecution:false,printObservationWarning:warning,
+      reason:"LOCAL_PRINT_OBSERVATION_UNCERTAIN_NO_LETTER_CERTIFICATION_OR_REPAIR_AUTHORITY",
+      // A compared pair keeps its original request and raw response. The warning
+      // itself binds all observation bytes, rather than rewriting that request.
+      requestSha256:result.comparison ? result.requestSha256 : hash(JSON.stringify({observationWarning:warning,context:prepared.context}))};
+  } catch { return null; }
 }
 /** A native local unprinted-face observation can coexist with an unresolved
  * word on packaging. Retain that uncertainty as a final body-photo warning;
@@ -1179,6 +1240,14 @@ export function publicationIdentifierReviewEvidenceIssue(result: PublicationIden
       if (!validSha(diagnostic.imageSha256) || typeof diagnostic.reason !== "string") return "malformed B task diagnostic is not review evidence";
       return `B task failure: ${diagnostic.stage} SHA=${diagnostic.imageSha256} ${String(diagnostic.status).slice(0, 40)}: ${diagnostic.reason.slice(0, 2048)}${diagnostic.observerDiagnostic?.issue ? ` (${String(diagnostic.observerDiagnostic.issue).slice(0, 2048)})` : ""}`;
     }
+    if (result.printObservationWarning?.version === "publication-calibrated-print-warning/v1") {
+      const regenerated=withCalibratedPrintWarning(result,expected,prepared);
+      return result.version===PUBLICATION_IDENTIFIER_REVIEW_VERSION && result.strategyVersion===PUBLICATION_IDENTIFIER_BLIND_STRATEGY &&
+        result.status==="unverified" && result.nativeExecution===false && !!regenerated &&
+        result.reason===regenerated.reason && same(result.printObservationWarning,regenerated.printObservationWarning) && result.requestSha256===regenerated.requestSha256
+        ? null : "local print uncertainty requires complete current native observations and unchanged OCR, without letter or repair authority";
+    }
+    if (result.unresolvedPrintOcr) return "an unresolved OCR observation cannot be detached from its non-certifying warning";
     if (result.printObservationWarning?.version === "publication-own-unprinted-association-warning/v1") {
       const regenerated=withOwnUnprintedAssociationWarning(result,expected,prepared);
       return result.version===PUBLICATION_IDENTIFIER_REVIEW_VERSION && result.strategyVersion===PUBLICATION_IDENTIFIER_BLIND_STRATEGY &&
@@ -1388,7 +1457,7 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
           return withExternalWordWarning(result, input, prepared) || { ...result, reason: "CANDIDATE_EXTERNAL_WORD_SPATIAL_ASSOCIATION_UNCONFIRMED" };
         if (bothOwnAbsent) {
           if (observationSetIssue(observed, prepared, true) || ownUnprintedApplicabilityIssue(applicability, input, true, observed))
-            return withPrintObservationWarning(result, input, prepared) || { ...result, reason: "OWN_UNPRINTED_ACTUAL_PART_OR_FACE_UNRESOLVED" };
+            return withCalibratedPrintWarning(result,input,prepared) || withPrintObservationWarning(result, input, prepared) || { ...result, reason: "OWN_UNPRINTED_ACTUAL_PART_OR_FACE_UNRESOLVED" };
           const marker = { version: "not-applicable-own-unprinted-reference/v1" as const, observationsSha256: hash(JSON.stringify(observed)), applicabilitySha256: hash(JSON.stringify(applicability)) };
           return { ...result, status: "pass", nativeExecution: false, reason: "NATIVE_OWN_SAME_PART_AND_FACE_ARE_ACTUALLY_UNPRINTED_B_ONLY_NOT_APPLICABLE",
             ownUnprintedReference: marker, requestSha256: hash(JSON.stringify({ applicability: marker, context: prepared.context })) };
@@ -1396,8 +1465,10 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
         const unprintedAssociation=withOwnUnprintedAssociationWarning(result,input,prepared);
         if (unprintedAssociation) return unprintedAssociation;
         if (observed.sources[0].evidence.observation.readability === "legible" && row?.primaryObservedWordRelation === "other-visible-member-or-face")
-          return withOtherMemberPrintWarning(result, input, prepared) || withOtherMemberPrintWarning(result, input, prepared, true) || withPrintObservationWarning(result, input, prepared) ||
+          return withOtherMemberPrintWarning(result, input, prepared) || withOtherMemberPrintWarning(result, input, prepared, true) || withCalibratedPrintWarning(result,input,prepared) || withPrintObservationWarning(result, input, prepared) ||
             { ...result, reason: "OWN_UNPRINTED_OTHER_MEMBER_SPATIAL_EVIDENCE_UNCONFIRMED" };
+        const calibratedUnprinted=withCalibratedPrintWarning(result,input,prepared);
+        if (calibratedUnprinted) return calibratedUnprinted;
         const targetAmbiguous = withTargetAmbiguousPrintWarning(result, input, prepared);
         if (targetAmbiguous) return targetAmbiguous;
         if (!outsideApplicabilityIssue(applicability, input, nativeExecution, observed)) {
@@ -1447,9 +1518,29 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
       const comparison = parsePublicationIdentifierComparison(rawB, context);
       if (!comparison) return { ...result, reason: "BLIND_PRINT_REVIEW_MALFORMED_OR_COORDINATES_INVALID" };
       result.comparison = comparison;
+      if(nativeExecution)result.nativeLocalPairReceipt={version:"publication-native-local-pair/v1",requestSha256,responseSha256:hash(rawB)};
       const repairOnly = !result.brandRoleEvidence && !!result.sourceRoleLimit &&
         (comparison.samePhysicalPart !== true || comparison.samePhysicalSurface !== true || comparison.sameSelectedVisibleOption !== true) &&
         !repairOnlyBrandScopeIssue(result,input,prepared);
+      let checkedLocal: Awaited<ReturnType<typeof reviewIntrinsicIdentifierOcr>> | undefined;
+      // Read the tiny actual mark before treating uncertain physical-part flags
+      // as an image defect. An LLM's legible transcription is not independent
+      // OCR consensus. Actual differing OCR letters still use the strict path.
+      if (nativeExecution && sourceObservation.readability==="legible" && candidateObservation.readability==="legible" &&
+          sourceObservation.identifierRole==="brand" && candidateObservation.identifierRole==="brand" && validBox(candidateObservation.box) &&
+          candidateObservation.box[2]-candidateObservation.box[0]<=150 && candidateObservation.box[3]-candidateObservation.box[1]<=60 &&
+          comparison.sameSelectedVisibleOption!==false && comparison.identifierComparisons[0]?.sameSelectedComponent!==false &&
+          comparison.identifierComparisons[0]?.sameSelectedVisibleOption!==false &&
+          !scopeGateIssue(input) && !blindComparisonIssue({...result,status:"pass",brandRoleEvidence:undefined},true)) {
+        taskStage="corroboration";taskImageSha256=input.candidateSha256;
+        checkedLocal=await (dependencies.ocr||reviewIntrinsicIdentifierOcr)({sourcePath:sourceFile.path,sourceSha256:sourceFile.sha256,sourceBox:sourceObservation.box!,
+          candidatePath:input.candidatePath,candidateSha256:input.candidateSha256,candidateBox:candidateObservation.box,sourceLiteral:sourceObservation.literal,workspace:input.workspace});
+        if (!unchanged()) throw Error("BLIND_PRINT_INPUT_CHANGED_DURING_OCR");
+        if (checkedLocal.status==="unavailable" && checkedLocal.reason==="OCR_CONSENSUS_UNAVAILABLE" && checkedLocal.evidence) {
+          const warning=withCalibratedPrintWarning({...result,unresolvedPrintOcr:checkedLocal.evidence},input,prepared);
+          if(warning)return warning;
+        }
+      }
       if (!result.brandRoleEvidence && !repairOnly && (comparison.samePhysicalPart !== true || comparison.samePhysicalSurface !== true || comparison.sameSelectedVisibleOption !== true)) {
         // A technically valid but wholly unresolved second comparison does not
         // confirm the OWN-view suspicion. Only current final A/C/D and an exact
@@ -1477,7 +1568,7 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
         if (issue) return { ...result, reason: issue };
         const pair = localIdentifierPairs(comparison, !!result.brandRoleEvidence || repairOnly)[0];
         taskStage = "corroboration"; taskImageSha256 = input.candidateSha256;
-        const checked = await (dependencies.ocr || reviewIntrinsicIdentifierOcr)({ sourcePath: sourceFile.path, sourceSha256: sourceFile.sha256,
+        const checked = checkedLocal || await (dependencies.ocr || reviewIntrinsicIdentifierOcr)({ sourcePath: sourceFile.path, sourceSha256: sourceFile.sha256,
           sourceBox: pair.sourceBox!, candidatePath: input.candidatePath, candidateSha256: input.candidateSha256, candidateBox: pair.candidateBox!, sourceLiteral: pair.sourceLiteral, workspace: input.workspace });
         if (!unchanged()) throw Error("BLIND_PRINT_INPUT_CHANGED_DURING_OCR");
         if (!checked.evidence || !["match", "conflict"].includes(checked.status)) return { ...result, reason: `BLIND_PRINT_OCR_UNAVAILABLE: ${checked.reason}` };

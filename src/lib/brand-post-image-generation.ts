@@ -9,7 +9,8 @@ import { selectVerifiedProductSectionImages, type ProductSectionImageDiagnostics
 import { sourceReviewFailureForSlot } from "../../scripts/lib/product-source-audit-context";
 import { buildSellerOriginalRepairTarget } from "../../scripts/lib/seller-original-repair-target";
 import { buildSelectedProductImageAuditContext, publicationImageAuditPolicyFingerprint } from "../../scripts/lib/publish-image-audit";
-import { planPublicationImageRetry, assertPublicationRetryPrintReference, type PublicationImageRetryParent } from "./brand-post-publication-image-repair";
+import { planPublicationImageRetry, assertPublicationRetryPrintReference, readCompletedPublicationBodyChildReviewOnly,
+  type CompletedPublicationBodyChildReviewOnly, type PublicationImageRetryParent } from "./brand-post-publication-image-repair";
 import { sealPublicationImageRepairPlan, isCorroboratedNativeIdentifierConflict, readPublicationImageDefect } from "../../scripts/lib/publication-image-defect-proof";
 import { publicationIdentifierReviewEvidenceIssue, type PublicationIdentifierReviewInput, type PublicationIdentifierReviewResult } from "../../scripts/lib/publication-identifier-review";
 import type { IntrinsicIdentifierServerConflict } from "../../scripts/lib/intrinsic-identifier-comparison";
@@ -108,6 +109,8 @@ export interface ResolvedImageTarget {
   sourceReview?: BrandPostPackageImageAsset["sourceReview"];
   existingAsset?: BrandPostPackageImageAsset;
   referenceContext?: BrandPostImageReferenceContext;
+  /** Server-validated completed historical child. This never permits dispatch. */
+  completedBodyChildReviewOnly?: CompletedPublicationBodyChildReviewOnly;
 }
 
 export interface BrandPostImageReferenceContext {
@@ -143,6 +146,14 @@ function clean(value: string): string {
 function assertImageRegenerationNotHeld(manifest: BrandPostPackageManifestV2, target: ResolvedImageTarget): void {
   if (manifest.connectKind !== "SHOPPING" || !target.request.replaceAssetKey) return;
   const state = publicationImageRegenerationHoldState(manifest.brandLinkId, manifest.composition, target.sectionId ?? null, target.request.replaceAssetKey);
+  if (state==="invalid") throw new Error("PUBLICATION_IMAGE_REGENERATION_HELD: 기존 미해결 검수 기록이 손상되어 새 작업을 보류했습니다.");
+  const completed=readCompletedPublicationBodyChildReviewOnly({manifest,target,packageDir:getBrandPostPackageDir(manifest.brandLinkId)});
+  if (completed) {
+    target.completedBodyChildReviewOnly=completed;
+    target.referenceContext=completed.context;
+    return; // Existing pixels only; prepareImageBatchJobs forces reviewOnly.
+  }
+  if (target.completedBodyChildReviewOnly) throw new Error("IMAGE_RESUME_REQUIRED: 완료 본문 사진 재검수의 봉인 또는 실제 완료 기록이 변경됐습니다.");
   if (state === "none") return;
   if (state === "held" && target.role === "body" && target.sectionId) {
     const proof = readPublicationImageDefect(manifest, target.sectionId, target.request.replaceAssetKey, publicationImageAuditPolicyFingerprint());
@@ -601,6 +612,7 @@ export async function prepareBrandPostImageReferenceContext(options: {
 }, dependencies: { collect?: typeof collectShoppingProductSourceCandidates; select?: typeof selectShoppingSceneReference;
   selectSupporting?: typeof selectShoppingSceneSupportingReferences } = {}): Promise<BrandPostImageReferenceContext> {
   assertImageRegenerationNotHeld(options.manifest, options.target);
+  if (options.target.completedBodyChildReviewOnly) return options.target.completedBodyChildReviewOnly.context;
   if (options.manifest.connectKind !== "SHOPPING" || !allowsShoppingReferenceScene(options.target))
     throw new Error("REFERENCE_SCENE_NOT_EVIDENCE: 기능·효능 파트에는 생성 연출사진을 근거로 사용할 수 없습니다.");
   if (!options.manifest.sourceSnapshot?.snapshotId)
@@ -1274,6 +1286,12 @@ export function prepareImageBatchJobs(
   })).map((job, index) => {
     const target = targets[index];
     assertImageRegenerationNotHeld(manifest, target);
+    if (target.completedBodyChildReviewOnly) {
+      const completed=target.completedBodyChildReviewOnly;
+      if (!completed.job.reviewOnly || completed.scope!=="completed-child-review-only")
+        throw new Error("IMAGE_RESUME_REQUIRED: 완료 본문 사진 재검수를 새 생성으로 전환하지 않았습니다.");
+      return {...completed.job,id:String(index)};
+    }
     let publicationParent: PublicationImageRetryParent | undefined;
     if (target.referenceContext?.publicationRetryOf) {
       const checked = planPublicationImageRetry({ manifest, target, packageDir: getBrandPostPackageDir(manifest.brandLinkId),
@@ -2503,6 +2521,13 @@ export async function generateBrandPostImages(options: {
         const assertPolicyRequest = () => {
           if (options.completedReviewOnly && JSON.stringify(completedHeroPolicyRequestProof(jobs[batchIndex])) !== completedPolicyProofs.get(jobs[batchIndex]))
             throw new Error("IMAGE_RESUME_REQUIRED: 검수 전용 요청 증명이 처리 중 변경됐습니다. 새 생성 없이 보류했습니다.");
+          if (target.completedBodyChildReviewOnly) {
+            const current=readCompletedPublicationBodyChildReviewOnly({manifest:options.manifest,target,packageDir:getBrandPostPackageDir(options.manifest.brandLinkId)});
+            if (!current || current.bindingSha256!==target.completedBodyChildReviewOnly.bindingSha256 || !jobs[batchIndex].reviewOnly ||
+                JSON.stringify(current.job.reviewOnly)!==JSON.stringify(jobs[batchIndex].reviewOnly) ||
+                JSON.stringify(current.context)!==JSON.stringify(target.referenceContext))
+              throw new Error("IMAGE_RESUME_REQUIRED: 완료 본문 사진의 요청·후보·원본·봉인이 재검수 중 변경됐습니다. 새 생성 없이 보류했습니다.");
+          }
         };
         assertPolicyRequest();
         if (!browserResult.recoveryJob && (!browserResult.localPath || !fs.existsSync(browserResult.localPath))) {

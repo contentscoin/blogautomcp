@@ -358,6 +358,46 @@ export function readPublicationImageDefect(manifest: BrandPostPackageManifestV2,
     return { proof: row, path: file, sha256: hash(bytes) };
   } catch { return null; }
 }
+export interface ArchivedPublicationDefectForCompletedChildReviewOnly {
+  scope: "completed-child-review-only";
+  archivedProof: ScopedPublicationImageDefectProof;
+  path: string;
+  sha256: string;
+}
+/** An authenticated historical server decision may locate its ALREADY
+ * completed sealed child. It is not a current semantic pass or authority to
+ * dispatch any image request. Old native packets are never relabelled as the
+ * current wire version; the child must undergo fresh current-context review. */
+export function readArchivedPublicationDefectForCompletedChildReviewOnly(options: {
+  manifest: BrandPostPackageManifestV2; sectionId: string; sha256: string; proofPath: string; proofSha256: string;
+}): ArchivedPublicationDefectForCompletedChildReviewOnly | null {
+  try {
+    const binding=currentBinding(options.manifest,options.sectionId,options.sha256),key=secret(false);
+    if (!binding || !key || !valid(options.proofSha256) || !path.isAbsolute(options.proofPath)) return null;
+    const stat=fs.lstatSync(options.proofPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size<1 || stat.size>192*1024 ||
+        path.resolve(fs.realpathSync(options.proofPath))!==path.resolve(options.proofPath)) return null;
+    const bytes=fs.readFileSync(options.proofPath);
+    if (hash(bytes)!==options.proofSha256) return null;
+    const row=JSON.parse(bytes.toString("utf8")) as ScopedPublicationImageDefectProof,{signature,...payload}=row;
+    if (row.version!=="publication-image-print-defect/v4" || !valid(row.policyFingerprint) || !valid(row.requestBindingSha256) ||
+        !valid(signature) || path.resolve(options.proofPath)!==path.resolve(proofFile(binding,row.policyFingerprint)) ||
+        JSON.stringify(row.binding)!==JSON.stringify(binding) || !Number.isFinite(Date.parse(row.at)) || Date.parse(row.at)>Date.now()+1000 ||
+        !crypto.timingSafeEqual(Buffer.from(signature,"hex"),crypto.createHmac("sha256",key).update(JSON.stringify(payload)).digest())) return null;
+    const context=readPublicationDefectMaterialContext(row),b=row.identifierReview,input=row.identifierInput;
+    if (!context || publicationDefectMaterialBinding(context)!==binding.material ||
+        publicationDefectMaterialBinding(options.manifest)!==binding.material || b.status!=="conflict" || b.nativeExecution!==true ||
+        Boolean(b.identifierConflict)===Boolean(b.missingPrintEvidence) || input.candidateSha256!==options.sha256 ||
+        input.primaryReference.sha256!==options.manifest.imageAssets?.find(asset=>asset.sha256===options.sha256&&asset.sectionId===options.sectionId)?.referenceScene?.referenceSha256)
+      return null;
+    const canonical=readCanonicalSellerSourceHashes({snapshot:options.manifest.sourceSnapshot,productId:options.manifest.brandLinkId,
+      sourceDirectory:path.join(getAppDataDir(),"prepared-brand-posts",options.manifest.brandLinkId,"product-sources")});
+    if (!canonical.has(input.primaryReference.sha256) || fileHash(input.primaryReference.path)!==input.primaryReference.sha256 ||
+        input.canonicalReferences.some(source=>!canonical.has(source.sha256) || fileHash(source.path)!==source.sha256 ||
+          source.sourceSnapshotId!==options.manifest.sourceSnapshot?.snapshotId)) return null;
+    return {scope:"completed-child-review-only",archivedProof:row,path:options.proofPath,sha256:options.proofSha256};
+  } catch {return null;}
+}
 /** Discovery only. An authenticated old defect can remember which original
  * was readable, without becoming a current verdict or regeneration authority.
  * A different policy or unrelated section may change; the target, its text,

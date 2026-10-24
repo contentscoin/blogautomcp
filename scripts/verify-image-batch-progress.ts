@@ -150,7 +150,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       "node:fs": fs, "node:path": path,
       "./atomic-text-file": atomicTextFile,
       "./brand-post-completed-context": completedContextModule,
-      "./brand-post-publication-image-repair": { planPublicationImageRetry: () => null },
+      "./brand-post-publication-image-repair": { planPublicationImageRetry: () => null, readCompletedPublicationBodyChildReviewOnly: () => null },
       "../../scripts/lib/publication-image-defect-proof": { sealPublicationImageRepairPlan: () => { throw new Error("unexpected native final-repair authority in transport fixture"); },
         isCorroboratedNativeIdentifierConflict: () => false, readPublicationImageDefect: () => null },
       "../../scripts/lib/publication-identifier-review": publicationIdentifierReview,

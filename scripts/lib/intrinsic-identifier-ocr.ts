@@ -125,6 +125,32 @@ function consensus(transcripts: IntrinsicIdentifierOcrTranscript[]): IntrinsicId
   return winner ? { literal: winner[0].text, normalized: winner[0].normalized,
     minimumConfidence: Math.min(...winner.map(item => item.confidence)), presets: winner.map(item => item.preset) } : null;
 }
+/** Read a completed bounded observation, including a genuine non-consensus.
+ * Recompute the vote from the retained transcripts: deleting an adverse vote
+ * or just replacing its consensus with null cannot create an uncertainty. */
+export function intrinsicIdentifierOcrTranscriptEvidenceIssue(evidence: IntrinsicIdentifierOcrEvidence): string | null {
+  try {
+    if (evidence.version !== INTRINSIC_IDENTIFIER_OCR_VERSION || evidence.nativeExecution !== true ||
+        evidence.engine.configHash !== configHash || evidence.normalizedSourceLiteral !== normalizeIntrinsicIdentifierLiteral(evidence.sourceLiteral))
+      return "OCR observation uses a different runtime/configuration or source literal";
+    for (const image of [evidence.source, evidence.candidate]) {
+      const rows = image.transcripts;
+      if (!Array.isArray(rows) || rows.length < 3 || rows.length > 6 ||
+          new Set(rows.map(row => row.preset)).size !== rows.length ||
+          !PRESETS.every(preset => rows.some(row => row.preset === preset))) return "OCR preprocessing observations are incomplete";
+      for (const row of rows) {
+        if (!/^(raw-1x|gray-normal-invert-2x|gray-normal-invert-threshold-2x)(-psm11)?$/u.test(row.preset) ||
+            !/^[a-f0-9]{64}$/u.test(row.cropSha256) || !Array.isArray(row.words) || row.words.length > 32 ||
+            row.words.some(word => !word || typeof word.text !== "string" || word.text.length > 128 || !Number.isFinite(word.confidence) || word.confidence < 0 || word.confidence > 100) ||
+            row.text !== row.words.map(word => word.text).join(" ") || row.normalized !== normalizeIntrinsicIdentifierLiteral(row.text) ||
+            row.confidence !== (row.words.length ? Math.min(...row.words.map(word => word.confidence)) : -1)) return "OCR transcript was changed or is malformed";
+      }
+      if (JSON.stringify(image.consensus) !== JSON.stringify(consensus(rows))) return "OCR consensus differs from retained observations";
+      if (!image.consensus && rows.length !== 6) return "An unresolved OCR observation is missing its bounded sparse fallback";
+    }
+    return null;
+  } catch { return "OCR observation evidence is malformed"; }
+}
 function inside(parent: string, file: string): boolean {
   const relative = path.relative(parent, file);
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));

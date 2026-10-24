@@ -17,6 +17,7 @@ async function main() {
   process.env.DESKTOP_USER_DATA = root; globalThis.fetch = async () => { throw Error("offline fixture attempted network"); };
   const providerPath = require.resolve("./lib/codex-draft-provider"), actualProvider = require(providerPath);
   let mode = "good", checks = 0, providerCalls = 0, mutate: (() => void) | undefined;
+  let scriptedNative: {task:string;responses:Array<string|Error>} | undefined;
   const calls: CodexDraftOptions[] = [];
   const a = () => ({ memberBrandScope:"selected-main-product-body",memberBrandObservation:"Visible main physical product body, not an independent accessory",reason: "Offline visible contour and connection correspond", picturedMemberEvidence: {scope:"pictured-member-only",memberFactIndex:0,picturedMember:"visible selected fixture member", verdict: "selected-member-visible", selectedFact: "EXPECTED_SELECTED_SUBJECT", referenceObservation: "selected visible member in source", candidateObservation: "same visible member in candidate", conflict: "" }, identityMatches: true, accepted: true, visibleIdentityEvidence: { basis: "observed-correspondence", landmarks: [
       { part: "contour", referenceObservation: "source contour", candidateObservation: "same contour" },
@@ -28,6 +29,11 @@ async function main() {
     notice: false, singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, accepted: true });
   require.cache[providerPath]!.exports = { ...actualProvider, runCodexDraft: async (call: CodexDraftOptions) => {
     providerCalls++; calls.push(call); assert.equal(call.noTransientRetry, true); checks++;
+    if(scriptedNative && call.systemPrompt.includes(`publication-image-task/${scriptedNative.task}`) && scriptedNative.responses.length) {
+      const response=scriptedNative.responses.shift()!;
+      if(response instanceof Error)throw response;
+      return response;
+    }
     if (call.systemPrompt.includes("publication-image-task/A-visible")) {
       assert.equal(call.imagePaths!.length, 2); assert(!call.userPrompt.includes("black supplemental trap")); checks += 2;
       const row = a();
@@ -166,7 +172,8 @@ async function main() {
       if (mode === "c-frame") assert.equal(result.scopedReviews![0].format.row!.noGraphicLayout, false);
       if (["a-unknown", "c-forged-quote", "c-unknown", "d-ungrounded"].includes(mode)) assert(result.failures.some(failure => failure.code === "INVALID_REVIEW"));
       if (mode === "mutation") { assert(result.failures.some(failure => failure.code === "IMAGE_CHANGED")); assert.equal(providerCalls - priorCalls, 1); checks += 2; }
-      else { assert.equal(providerCalls - priorCalls, 3, "one A, one C, one D; canonical source identity needs no B model, no retry-to-pass"); checks++; }
+      else { assert.equal(providerCalls - priorCalls, ["a-unknown","c-forged-quote","c-unknown","d-ungrounded"].includes(mode)?4:3,
+        "one call per task; only a received invalid encoding/contract gets one identical format retry"); checks++; }
     }
     // A's own-packaging scope does not manufacture positive pixels, selected
     // membership or evidence that the photograph displays hidden contents.
@@ -328,13 +335,93 @@ async function main() {
     const forbiddenFormatContext = [...privateFacts,"PRIVATE_SELECTED_TITLE_72a4","PRIVATE_DEVICE_KIND_f9d1","구매 전에 살펴볼 점","실제 사용 환경에 맞는지 확인하세요."];
     for (const secret of forbiddenFormatContext) assert.equal(JSON.stringify(isolated[2].call).includes(secret),false);
     checks += 3 + forbiddenFormatContext.length;
+    // The real failure: a received A calls something a concrete conflict but
+    // supplies no opposing physical landmark. Retain it; ask the identical
+    // task once more instead of manufacturing either a conflict or approval.
     mode="good";
+    const invalidA=a();invalidA.identityMatches=invalidA.accepted=false;
+    invalidA.visibleIdentityEvidence={basis:"concrete-conflict",landmarks:[],conflict:"Claimed differing shape without a corresponding observation"};
+    const invalidARaw=JSON.stringify(invalidA),retryPacket=buildScopedPublicationPackets(input)[0],beforeRetry=providerCalls;
+    scriptedNative={task:"A-visible",responses:[invalidARaw,JSON.stringify(a())]};
+    const recovered=await executeScopedPublicationPacket(retryPacket),retryCalls=calls.slice(-2);
+    assert.equal(providerCalls-beforeRetry,2);assert.deepEqual(retryCalls[0],retryCalls[1]);
+    assert.equal(recovered.row!.accepted,true);assert.equal(recovered.rejectedFormatAttempt!.rawResponse,invalidARaw);
+    assert.equal(recovered.rejectedFormatAttempt!.responseSha256,crypto.createHash("sha256").update(invalidARaw).digest("hex"));
+    assert.equal(recovered.rejectedFormatAttempt!.requestSha256,retryPacket.requestSha256);
+    assert.equal(scopedPublicationEvidenceIssue(recovered,{task:"A-visible",...retryPacket.context}),null);checks+=7;
+    for(const task of ["C-photo-claims","D-pixel-format"] as const) {
+      const current=buildScopedPublicationPackets(input).find(packet=>packet.task===task)!;
+      const valid=task==="C-photo-claims"?serializeScopedPublicationResponse(task,c()):JSON.stringify(d());
+      const invalid=task==="C-photo-claims"?serializeScopedPublicationResponse(task,{...c(),mixedOptions:true}):JSON.stringify({...d(),accepted:false,noGraphicLayout:false});
+      const before=providerCalls;scriptedNative={task,responses:[invalid,valid]};
+      const observed=await executeScopedPublicationPacket(current);
+      assert.equal(providerCalls-before,2);assert.deepEqual(calls.at(-1),calls.at(-2));assert.equal(observed.rejectedFormatAttempt!.rawResponse,invalid);
+      assert.equal(scopedPublicationEvidenceIssue(observed,{task,...current.context}),null);checks+=4;
+    }
+    for(const mutation of ["delete-history","change-raw","change-issue","change-request","delete-receipt","change-signature"] as const) {
+      const value=structuredClone(recovered);
+      if(mutation==="delete-history")delete value.rejectedFormatAttempt;
+      if(mutation==="change-raw")value.rejectedFormatAttempt!.rawResponse+=" ";
+      if(mutation==="change-issue")value.rejectedFormatAttempt!.issue="invented encoding issue";
+      if(mutation==="change-request")value.rejectedFormatAttempt!.requestSha256="c".repeat(64);
+      if(mutation==="delete-receipt")delete value.nativeReceipt;
+      if(mutation==="change-signature")value.nativeReceipt!.signature="0".repeat(64);
+      assert(scopedPublicationEvidenceIssue(value,{task:"A-visible",...retryPacket.context}),mutation);checks++;
+    }
+    const actualNegative=a();actualNegative.identityMatches=actualNegative.accepted=false;
+    actualNegative.visibleIdentityEvidence.basis="concrete-conflict";actualNegative.visibleIdentityEvidence.conflict="Opposing connector structures actually differ";
+    for(const negative of [actualNegative,{...actualNegative,visibleIdentityEvidence:{basis:"insufficient-visible-structure",landmarks:[],conflict:"The actual corresponding joint is occluded"}}]) {
+      const before=providerCalls;scriptedNative={task:"A-visible",responses:[JSON.stringify(negative),JSON.stringify(a())]};
+      const observed=await executeScopedPublicationPacket(retryPacket);
+      assert.equal(providerCalls-before,1);assert.equal(observed.row!.accepted,false);assert.equal(observed.rejectedFormatAttempt,undefined);
+      assert.equal(scopedPublicationEvidenceIssue(observed,{task:"A-visible",...retryPacket.context}),null);checks+=4;
+    }
+    scriptedNative={task:"A-visible",responses:["malformed first","malformed second",JSON.stringify(a())]};
+    const beforeDouble=providerCalls,doubleInvalid=await executeScopedPublicationPacket(retryPacket);
+    assert.equal(providerCalls-beforeDouble,2);assert.equal(doubleInvalid.rawResponse,"malformed second");
+    assert.equal(doubleInvalid.rejectedFormatAttempt!.rawResponse,"malformed first");assert.equal(doubleInvalid.row,null);
+    assert(scopedPublicationEvidenceIssue(doubleInvalid,{task:"A-visible",...retryPacket.context}));checks+=5;
+    scriptedNative={task:"A-visible",responses:[new Error("transport timeout with unknown delivery"),JSON.stringify(a())]};
+    const beforeTransport=providerCalls;await assert.rejects(executeScopedPublicationPacket(retryPacket),/transport timeout/);
+    assert.equal(providerCalls-beforeTransport,1);checks+=2;
+    scriptedNative={task:"A-visible",responses:[invalidARaw,new Error("second transport outcome unknown"),JSON.stringify(a())]};
+    const beforeRetryTransport=providerCalls,retryUnavailable=await executeScopedPublicationPacket(retryPacket);
+    assert.equal(providerCalls-beforeRetryTransport,2);assert.equal(retryUnavailable.rawResponse,invalidARaw);
+    assert.equal(retryUnavailable.rejectedFormatAttempt!.rawResponse,invalidARaw);assert.match(retryUnavailable.rejectedFormatAttempt!.retryFailure!,/outcome unknown/);
+    assert(scopedPublicationEvidenceIssue(retryUnavailable,{task:"A-visible",...retryPacket.context}));checks+=5;
+    scriptedNative=undefined;
+    let injectedCalls=0;const injected=await executeScopedPublicationPacket(retryPacket,async()=>{injectedCalls++;return invalidARaw;},{policyFingerprint:"f".repeat(64)});
+    assert.equal(injectedCalls,1);assert.equal(injected.nativeExecution,false);assert.equal(injected.nativeReceipt,undefined);
+    assert.equal(injected.rejectedFormatAttempt,undefined);assert(scopedPublicationEvidenceIssue(injected,{task:"A-visible",...retryPacket.context}));checks+=5;
+    await executeScopedPublicationPacket(retryPacket,async()=>{injectedCalls++;return JSON.stringify(a());},{policyFingerprint:"f".repeat(64)});
+    assert.equal(injectedCalls,2,"injected reviewers never receive a native cached verdict");checks++;
+    // Existing signed child/parent origins can still read pre-v3 task bytes;
+    // old evidence cannot invent new retry/receipt authority or enter a cache.
+    const legacy=structuredClone(evidence);legacy.version="publication-image-scoped-review/v2";delete legacy.nativeReceipt;
+    assert.equal(scopedPublicationEvidenceIssue(legacy,{task:"A-visible",...retryPacket.context}),null);
+    legacy.rejectedFormatAttempt=structuredClone(recovered.rejectedFormatAttempt);
+    assert(scopedPublicationEvidenceIssue(legacy,{task:"A-visible",...retryPacket.context}));checks+=2;
+    mode="good";
+    const scopedRoot=path.join(root,"data","publication-scoped-native-receipts");
+    const clearScopedHints=()=>{for(const name of fs.readdirSync(scopedRoot).filter(name=>/^[a-f0-9]{64}\.json$/u.test(name)))fs.rmSync(path.join(scopedRoot,name));};
+    clearScopedHints();
     const cacheOptions={policyFingerprint:"a".repeat(64)}, cachePacket=buildScopedPublicationPackets(input)[0], beforeCache=providerCalls;
     await executeScopedPublicationPacket(cachePacket,undefined,cacheOptions);
     const reusedPacket=await executeScopedPublicationPacket(cachePacket,undefined,cacheOptions);
     assert.equal(providerCalls-beforeCache,1);assert.equal(reusedPacket.reused,true);checks+=2;
     await executeScopedPublicationPacket(cachePacket,undefined,{...cacheOptions,forceReview:true});assert.equal(providerCalls-beforeCache,2);checks++;
-    await executeScopedPublicationPacket(cachePacket,undefined,{policyFingerprint:"b".repeat(64)});assert.equal(providerCalls-beforeCache,3);checks++;
+    await executeScopedPublicationPacket(cachePacket,undefined,{policyFingerprint:"b".repeat(64)});assert.equal(providerCalls-beforeCache,2,"B-only policy changes do not invalidate the exact A request");checks++;
+    delete require.cache[require.resolve("./lib/publication-image-scoped-review")];
+    const freshScoped=require("./lib/publication-image-scoped-review") as typeof import("./lib/publication-image-scoped-review");
+    assert.notEqual(freshScoped.executeScopedPublicationPacket,executeScopedPublicationPacket);checks++;
+    assert.equal((await freshScoped.executeScopedPublicationPacket(cachePacket,undefined,cacheOptions)).reused,true);assert.equal(providerCalls-beforeCache,2);checks+=2;
+    const cacheFile=path.join(scopedRoot,`${cachePacket.requestSha256}.json`),cachedBytes=fs.readFileSync(cacheFile);
+    const forgedCache=JSON.parse(cachedBytes.toString());forgedCache.row.accepted=false;
+    fs.writeFileSync(cacheFile,JSON.stringify(forgedCache));
+    await executeScopedPublicationPacket(cachePacket,undefined,cacheOptions);assert.equal(providerCalls-beforeCache,3,"tampered disk evidence requires a fresh native review");checks++;
+    fs.writeFileSync(cacheFile,cachedBytes);const missingReceipt=JSON.parse(cachedBytes.toString());delete missingReceipt.nativeReceipt;
+    fs.writeFileSync(cacheFile,JSON.stringify(missingReceipt));await executeScopedPublicationPacket(cachePacket,undefined,cacheOptions);
+    assert.equal(providerCalls-beforeCache,4,"removing native attestation cannot reuse a cached verdict");checks++;
     // The exact native D cache observes actual role: a body has no thumbnail
     // headline requirement, while an adverse thumbnail never becomes cached.
     const cachePolicy=(label:string)=>crypto.createHash("sha256").update(label).digest("hex");
@@ -345,14 +432,14 @@ async function main() {
     assert.equal(providerCalls-beforeBodyCache,1);assert.equal(bodyFormat.row!.thumbnailHeadlineLegible,false);assert.equal(bodyFormat.row!.accepted,true);
     assert.equal(bodyFormatReused.reused,true);assert.equal(bodyFormatReused.row!.thumbnailHeadlineLegible,false);checks+=5;
     await executeScopedPublicationPacket(bodyFormatPacket,undefined,{...formatCache,forceReview:true});assert.equal(providerCalls-beforeBodyCache,2);checks++;
-    await executeScopedPublicationPacket(bodyFormatPacket,undefined,{policyFingerprint:cachePolicy("other-body-format-policy")});assert.equal(providerCalls-beforeBodyCache,3);checks++;
+    await executeScopedPublicationPacket(bodyFormatPacket,undefined,{policyFingerprint:cachePolicy("other-body-format-policy")});assert.equal(providerCalls-beforeBodyCache,2);checks++;
     const bodyCandidateBytes=fs.readFileSync(input.candidatePath);
     try {
       await sharp({create:{width:340,height:340,channels:3,background:"rgb(25,55,85)"}}).png().toFile(input.candidatePath);
       await assert.rejects(executeScopedPublicationPacket(bodyFormatPacket,undefined,formatCache),/SCOPED_IMAGE_INPUT_CHANGED/);checks++;
       const changedFormatPacket=buildScopedPublicationPackets({...input,candidateSha256:hash(input.candidatePath),role:"body"})[2];
       assert.notEqual(changedFormatPacket.requestSha256,bodyFormatPacket.requestSha256);checks++;
-      await executeScopedPublicationPacket(changedFormatPacket,undefined,formatCache);assert.equal(providerCalls-beforeBodyCache,4);checks++;
+      await executeScopedPublicationPacket(changedFormatPacket,undefined,formatCache);assert.equal(providerCalls-beforeBodyCache,3);checks++;
     } finally {fs.writeFileSync(input.candidatePath,bodyCandidateBytes);}
     const thumbFormatPacket=buildScopedPublicationPackets({...input,role:"thumbnail"})[2],thumbCache={policyFingerprint:cachePolicy("thumb-format-cache")};
     mode="d-thumbnail-no-headline";const beforeThumbCache=providerCalls;
@@ -361,17 +448,18 @@ async function main() {
     assert.equal(providerCalls-beforeThumbCache,2);checks++;
     mode="good";const fixedThumb=await executeScopedPublicationPacket(thumbFormatPacket,undefined,thumbCache),fixedThumbReused=await executeScopedPublicationPacket(thumbFormatPacket,undefined,thumbCache);
     assert.equal(providerCalls-beforeThumbCache,3);assert.equal(fixedThumb.reused,undefined);assert.equal(fixedThumbReused.reused,true);checks+=3;
-    mode="c-frame";const adverseBodyCache={policyFingerprint:cachePolicy("body-frame-no-cache")},beforeAdverseCache=providerCalls;
+    clearScopedHints();mode="c-frame";const adverseBodyCache={policyFingerprint:cachePolicy("body-frame-no-cache")},beforeAdverseCache=providerCalls;
     for(let attempt=0;attempt<2;attempt++) {const failed=await executeScopedPublicationPacket(bodyFormatPacket,undefined,adverseBodyCache);
       assert.equal(failed.row!.noGraphicLayout,false);assert.equal(failed.row!.accepted,false);assert.equal(failed.reused,undefined);checks+=3;}
     assert.equal(providerCalls-beforeAdverseCache,2);checks++;
     mode="good";
     for(const invalidMode of ["c-positive-invalid","c-positive-invalid-witness"]) {
+      clearScopedHints();
       const claimPacket=buildScopedPublicationPackets(input)[1],policyFingerprint=crypto.createHash("sha256").update(invalidMode).digest("hex"),before=providerCalls;
       mode=invalidMode;const invalid=await executeScopedPublicationPacket(claimPacket,undefined,{policyFingerprint});
       mode="good";const current=await executeScopedPublicationPacket(claimPacket,undefined,{policyFingerprint});
       const reused=await executeScopedPublicationPacket(claimPacket,undefined,{policyFingerprint});
-      assert.equal(providerCalls-before,2);
+      assert.equal(providerCalls-before,3);
       assert.equal(invalid.row,null);
       assert.equal(invalid.reused,undefined);
       assert.equal(current.reused,undefined);assert.equal(reused.reused,true);checks+=5;

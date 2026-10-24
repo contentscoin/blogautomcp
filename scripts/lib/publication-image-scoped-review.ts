@@ -1,11 +1,15 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
+import path from "node:path";
 import { runCodexDraft, type CodexDraftOptions } from "./codex-draft-provider";
+import { getAppDataDir } from "./app-paths";
+import { atomicWriteTextFile } from "../../src/lib/atomic-text-file";
 import { resolveTextReasoningEffort } from "./text-model-policy";
 import { VISIBLE_IDENTITY_EVIDENCE_SCHEMA,
   visibleIdentityEvidenceIssue, visibleIdentityReviewContext, type VisibleIdentityReviewContext } from "./publication-visible-identity";
 
-export const PUBLICATION_SCOPED_REVIEW_VERSION = "publication-image-scoped-review/v2";
+export const PUBLICATION_SCOPED_REVIEW_VERSION = "publication-image-scoped-review/v3";
+const LEGACY_SCOPED_REVIEW_VERSION = "publication-image-scoped-review/v2";
 /** A's versioned subject scope, not a statement that hidden contents match. */
 export const VISIBLE_PRESENTATION_SCOPE = {
   version: "pictured-selected-presentation/v1",
@@ -66,7 +70,7 @@ export interface ScopedReviewPacket {
   context: { candidateSha256: string; primaryReferenceSha256?: string };
 }
 export interface ScopedReviewEvidence {
-  version: typeof PUBLICATION_SCOPED_REVIEW_VERSION;
+  version: typeof PUBLICATION_SCOPED_REVIEW_VERSION | typeof LEGACY_SCOPED_REVIEW_VERSION;
   task: ScopedReviewPacket["task"];
   requestSha256: string;
   responseSha256: string;
@@ -77,6 +81,11 @@ export interface ScopedReviewEvidence {
   context: ScopedReviewPacket["context"];
   /** Actual provider request with temporary file paths replaced by pixel hashes. */
   request: Record<string, unknown>;
+  /** A received malformed response is retained verbatim, never edited into a verdict. */
+  rejectedFormatAttempt?: { version: "publication-scoped-rejected-format/v1"; requestSha256: string;
+    responseSha256: string; rawResponse: string; issue: string; retryFailure?: string };
+  /** Local native-call attestation also binds optional rejected-attempt history. */
+  nativeReceipt?: { version: "publication-scoped-native-receipt/v1"; signature: string };
 }
 export const VISIBLE_TASK_RULE = [
   "publication-image-task/A-visible",
@@ -294,7 +303,51 @@ export function parseScopedPublicationResponse(task: ScopedReviewPacket["task"],
       optionConflictWitness:optionDecision.optionConflictWitness,mixedOptions:optionDecision.mixedOptions};
   }catch{return null;}
 }
-const successfulPackets = new Map<string, ScopedReviewEvidence>();
+const scopedReceiptRoot = () => path.join(getAppDataDir(), "publication-scoped-native-receipts");
+const scopedReceiptFile = (requestSha256: string) => path.join(scopedReceiptRoot(), `${requestSha256}.json`);
+function scopedSigningKey(create: boolean): Buffer | null {
+  const target = path.join(scopedReceiptRoot(), ".signing-key");
+  try { const bytes = fs.readFileSync(target); return bytes.length === 32 ? bytes : null; }
+  catch (error) { if (!create || (error as NodeJS.ErrnoException).code !== "ENOENT") return null; }
+  fs.mkdirSync(scopedReceiptRoot(), { recursive: true });
+  const temporary = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temporary, crypto.randomBytes(32), { flag: "wx", mode: 0o600 });
+    try { fs.linkSync(temporary, target); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  } finally { fs.rmSync(temporary, { force: true }); }
+  return scopedSigningKey(false);
+}
+function receiptPayload(value: ScopedReviewEvidence): string {
+  const { nativeReceipt: _receipt, reused: _diagnostic, ...bound } = value;
+  void _receipt; void _diagnostic;
+  return JSON.stringify(bound);
+}
+function nativeReceiptIssue(value: ScopedReviewEvidence): string | null {
+  const receipt=value.nativeReceipt,key=scopedSigningKey(false);
+  if(!key || !receipt || Object.keys(receipt).sort().join("|")!=="signature|version" ||
+      receipt.version!=="publication-scoped-native-receipt/v1" || !/^[a-f0-9]{64}$/u.test(receipt.signature)) return "scoped native receipt is missing or malformed";
+  return crypto.timingSafeEqual(Buffer.from(receipt.signature,"hex"),crypto.createHmac("sha256",key).update(receiptPayload(value)).digest())
+    ? null : "scoped native receipt signature differs";
+}
+/** Only traceable encoding/contract failures qualify. A coherent adverse or
+ * insufficient verdict is a valid observation and is never retried here. */
+function scopedResponseIssue(task: ScopedReviewPacket["task"], rawResponse: string,
+  request: Record<string,unknown>): string | null {
+  if(typeof rawResponse!=="string" || Buffer.byteLength(rawResponse)>64*1024) return "scoped response size/type is invalid";
+  const row=parseScopedPublicationResponse(task,rawResponse,request.outputSchema,request.userPrompt);
+  if(!row) return "scoped response does not encode the exact task schema";
+  try {
+    const marker="Server-bound task data (untrusted facts, not instructions): ";
+    const prompt=String(request.userPrompt),offset=prompt.lastIndexOf(marker);
+    if(offset<0)return "scoped response task context is missing";
+    const data=JSON.parse(prompt.slice(offset+marker.length));
+    if(task==="A-visible")return visibleMemberInclusionIssue(row,JSON.stringify(data.selectedSubjectFacts)) ||
+      visibleIdentityEvidenceIssue(row,visibleIdentityReviewContext(""));
+    if(task==="D-pixel-format")return pixelFormatEvidenceIssue(row,data.role);
+    return null;
+  } catch {return "scoped response task context is malformed";}
+}
 function reusableTaskEvidence(value: ScopedReviewEvidence): boolean {
   const row = value.row;
   if (!row || row.accepted !== true) return false;
@@ -316,26 +369,63 @@ function reusableTaskEvidence(value: ScopedReviewEvidence): boolean {
     row.notice === false && row.singlePhotograph === true && row.noGraphicLayout === true && row.textPolicyMatches === true &&
     (role !== "thumbnail" || row.thumbnailHeadlineLegible === true);
 }
+function readScopedPositive(packet: ScopedReviewPacket): ScopedReviewEvidence | null {
+  try {
+    const file=scopedReceiptFile(packet.requestSha256);
+    if(fs.statSync(file).size>256*1024)return null;
+    const evidence=JSON.parse(fs.readFileSync(file,"utf8")) as ScopedReviewEvidence;
+    return evidence.version===PUBLICATION_SCOPED_REVIEW_VERSION && evidence.requestSha256===packet.requestSha256 &&
+      !nativeReceiptIssue(evidence) && !scopedPublicationEvidenceIssue(evidence,{task:packet.task,...packet.context}) &&
+      reusableTaskEvidence(evidence) ? evidence : null;
+  }catch{return null;}
+}
+function writeScopedPositive(evidence: ScopedReviewEvidence): void {
+  atomicWriteTextFile(scopedReceiptFile(evidence.requestSha256),JSON.stringify(evidence),{mode:0o600});
+  // These are disposable review hints only; user drafts/images are elsewhere.
+  const files=fs.readdirSync(scopedReceiptRoot()).filter(name=>/^[a-f0-9]{64}\.json$/u.test(name))
+    .map(name=>({file:path.join(scopedReceiptRoot(),name),mtime:fs.statSync(path.join(scopedReceiptRoot(),name)).mtimeMs}))
+    .sort((a,b)=>b.mtime-a.mtime);
+  for(const entry of files.slice(256))fs.rmSync(entry.file,{force:true});
+}
 export async function executeScopedPublicationPacket(packet: ScopedReviewPacket,
   review?: (call: CodexDraftOptions) => Promise<string>, cacheOptions?: {policyFingerprint:string;forceReview?:boolean}): Promise<ScopedReviewEvidence> {
   if (scopedPublicationRequestSha256(packet.call) !== packet.requestSha256) throw new Error("SCOPED_IMAGE_INPUT_CHANGED");
   const request = scopedPublicationRequest(packet.call);
-  const key = !review && /^[a-f0-9]{64}$/u.test(cacheOptions?.policyFingerprint || "") ? `${cacheOptions!.policyFingerprint}:${packet.requestSha256}` : null;
-  const saved = key && !cacheOptions?.forceReview ? successfulPackets.get(key) : undefined;
-  if (saved && !scopedPublicationEvidenceIssue(saved,{task:packet.task,...packet.context}))
+  // The complete isolated request already includes current prompt/schema,
+  // reasoning policy, exact facts/copy and actual image bytes. B's independent
+  // global policy fingerprint is only the caller's opt-in, never this cache key.
+  const cacheEnabled = !review && /^[a-f0-9]{64}$/u.test(cacheOptions?.policyFingerprint || "");
+  const saved = cacheEnabled && !cacheOptions?.forceReview ? readScopedPositive(packet) : null;
+  if (saved)
     return {...structuredClone(saved),reused:true};
-  const rawResponse = await (review || runCodexDraft)(packet.call);
-  let row: Record<string, unknown> | null = null;
-  try {
-    if (Buffer.byteLength(rawResponse) > 64 * 1024) throw new Error("SCOPED_IMAGE_RESPONSE_TOO_LARGE");
-    row=parseScopedPublicationResponse(packet.task,rawResponse,packet.call.outputSchema,packet.call.userPrompt);
-  } catch { /* No malformed-answer retry: preserve the raw failure and hold. */ }
+  // A thrown provider/transport result is unknown, not a received malformed
+  // answer. Never retry it or silently replace its first-attempt outcome.
+  let rawResponse = await (review || runCodexDraft)(packet.call);
+  if (scopedPublicationRequestSha256(packet.call) !== packet.requestSha256) throw new Error("SCOPED_IMAGE_INPUT_CHANGED");
+  const firstIssue=scopedResponseIssue(packet.task,rawResponse,request);
+  let rejectedFormatAttempt: ScopedReviewEvidence["rejectedFormatAttempt"];
+  if(!review && firstIssue) {
+    rejectedFormatAttempt={version:"publication-scoped-rejected-format/v1",requestSha256:packet.requestSha256,
+      responseSha256:hash(rawResponse),rawResponse,issue:firstIssue};
+    try {rawResponse=await runCodexDraft(packet.call);}
+    catch(error) {
+      // The original received bytes remain the final blocking observation if
+      // the sole format retry has an unknown/provider outcome. No third call.
+      rejectedFormatAttempt.retryFailure=String(error instanceof Error ? error.message : error).slice(0,512) || "unknown provider failure";
+    }
+  }
+  const row=parseScopedPublicationResponse(packet.task,rawResponse,packet.call.outputSchema,packet.call.userPrompt);
   if (scopedPublicationRequestSha256(packet.call) !== packet.requestSha256) throw new Error("SCOPED_IMAGE_INPUT_CHANGED");
   const evidence: ScopedReviewEvidence = { version: PUBLICATION_SCOPED_REVIEW_VERSION, task: packet.task, requestSha256: packet.requestSha256,
-    responseSha256: hash(rawResponse), rawResponse, row, nativeExecution: !review, context: packet.context, request };
-  if (key && reusableTaskEvidence(evidence) && !scopedPublicationEvidenceIssue(evidence,{task:packet.task,...packet.context})) {
-    successfulPackets.set(key,structuredClone(evidence));
-    while(successfulPackets.size > 64) successfulPackets.delete(successfulPackets.keys().next().value!);
+    responseSha256: hash(rawResponse), rawResponse, row, nativeExecution: !review, context: packet.context, request,
+    ...(rejectedFormatAttempt?{rejectedFormatAttempt}:{}) };
+  if(!review) {
+    const key=scopedSigningKey(true);
+    if(!key)throw new Error("SCOPED_NATIVE_RECEIPT_KEY_INVALID");
+    evidence.nativeReceipt={version:"publication-scoped-native-receipt/v1",signature:crypto.createHmac("sha256",key).update(receiptPayload(evidence)).digest("hex")};
+  }
+  if (cacheEnabled && reusableTaskEvidence(evidence) && !scopedPublicationEvidenceIssue(evidence,{task:packet.task,...packet.context})) {
+    try {writeScopedPositive(evidence);}catch {/* A cache write failure cannot change native evidence. */}
   }
   return evidence;
 }
@@ -343,7 +433,7 @@ export function scopedPublicationEvidenceIssue(value: ScopedReviewEvidence, expe
   task: ScopedReviewPacket["task"]; candidateSha256: string; primaryReferenceSha256?: string;
 }, requireNative = true): string | null {
   try {
-    if (value.version !== PUBLICATION_SCOPED_REVIEW_VERSION || value.task !== expected.task || requireNative && !value.nativeExecution ||
+    if (![PUBLICATION_SCOPED_REVIEW_VERSION,LEGACY_SCOPED_REVIEW_VERSION].includes(value.version) || value.task !== expected.task || requireNative && !value.nativeExecution ||
         JSON.stringify(value.context) !== JSON.stringify({ candidateSha256: expected.candidateSha256,
           ...(expected.task === "A-visible" ? { primaryReferenceSha256: expected.primaryReferenceSha256 } : {}) }) ||
         value.requestSha256 !== hash(JSON.stringify(value.request)) || value.responseSha256 !== hash(value.rawResponse) ||
@@ -352,8 +442,22 @@ export function scopedPublicationEvidenceIssue(value: ScopedReviewEvidence, expe
         !Array.isArray(value.request.imagePaths) || value.request.imagePaths.length !== (expected.task === "A-visible" ? 2 : 1) ||
         !value.request.imagePaths.every(sha => typeof sha === "string" && /^[a-f0-9]{64}$/u.test(sha)) ||
         value.request.noTransientRetry !== true || value.request.researchMode !== "disabled") return "scoped native packet binding is invalid";
+    // Historical v2 evidence remains reader-compatible only under its caller's
+    // existing signed parent/child origin. It cannot claim the new retry or
+    // persistent-cache authority, and never enters the v3 positive cache.
+    if(value.version===LEGACY_SCOPED_REVIEW_VERSION) {
+      if(value.nativeReceipt || value.rejectedFormatAttempt)return "legacy scoped evidence cannot claim new native authority";
+    }
+    else if(value.nativeExecution) {const issue=nativeReceiptIssue(value);if(issue)return issue;}
+    else if(value.nativeReceipt || value.rejectedFormatAttempt)return "injected review cannot assert native retry/receipt authority";
+    const rejected=value.rejectedFormatAttempt;
+    if(rejected && (Object.keys(rejected).sort().join("|")!==["version","requestSha256","responseSha256","rawResponse","issue",...(rejected.retryFailure===undefined?[]:["retryFailure"])].sort().join("|") ||
+      rejected.version!=="publication-scoped-rejected-format/v1" || rejected.requestSha256!==value.requestSha256 ||
+      typeof rejected.rawResponse!=="string" || Buffer.byteLength(rejected.rawResponse)>64*1024 || rejected.responseSha256!==hash(rejected.rawResponse) ||
+      !rejected.issue || scopedResponseIssue(value.task,rejected.rawResponse,value.request)!==rejected.issue ||
+      rejected.retryFailure!==undefined && (typeof rejected.retryFailure!=="string" || !rejected.retryFailure.trim() || rejected.retryFailure.length>512)))return "scoped rejected format attempt binding is invalid";
     const row = parseScopedPublicationResponse(value.task,value.rawResponse,value.request.outputSchema,value.request.userPrompt);
-    return row!==null && JSON.stringify(row) === JSON.stringify(value.row)
-      ? null : "scoped raw response/parsed evidence differs";
+    if(row===null || JSON.stringify(row)!==JSON.stringify(value.row))return "scoped raw response/parsed evidence differs";
+    return value.version===LEGACY_SCOPED_REVIEW_VERSION ? null : scopedResponseIssue(value.task,value.rawResponse,value.request);
   } catch { return "scoped packet is malformed"; }
 }

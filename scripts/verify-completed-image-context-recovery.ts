@@ -17,13 +17,14 @@ import { testPngFixture } from "./lib/test-png-fixture";
 import { runRecordedImageRecovery, imageRecoverySignature, IMAGE_RECOVERY_POLICY_VERSION } from "./lib/material-image-recovery";
 import { runMaterialPreparation, type Call, type Result } from "./lib/scheduled-draft-workflow";
 import { publicationImageContext, recordPublicationImageRegenerationHolds } from "./lib/publish-image-rejections";
-import { recordPublicationImageDefect, readPublicationImageDefect, recordScopedPublicationImageDefect, readPublicationDefectMaterialContext } from "./lib/publication-image-defect-proof";
+import { recordPublicationImageDefect, readPublicationImageDefect, recordScopedPublicationImageDefect, readPublicationDefectMaterialContext,
+  readArchivedPublicationDefectForCompletedChildReviewOnly } from "./lib/publication-image-defect-proof";
 import { buildScopedPublicationPackets, serializeScopedPublicationResponse, parseScopedPublicationResponse, type ScopedReviewEvidence } from "./lib/publication-image-scoped-review";
 import { visibleIdentityReviewContext } from "./lib/publication-visible-identity";
 import { publicationIdentifierReviewRequestSha256, publicationIdentifierReviewEvidenceIssue, type PublicationIdentifierReviewResult, type PublicationIdentifierReviewInput,
   type PublicationIdentifierComparison } from "./lib/publication-identifier-review";
 import { publicationImageAuditPolicyFingerprint } from "./lib/publish-image-audit";
-import { planPublicationImageRetry } from "../src/lib/brand-post-publication-image-repair";
+import { planPublicationImageRetry,readCompletedPublicationBodyChildReviewOnly } from "../src/lib/brand-post-publication-image-repair";
 import { planConfirmedPrintRepairs } from "../src/lib/brand-post-confirmed-print-repair";
 import type { IntrinsicIdentifierServerConflict, IntrinsicIdentifierPair } from "./lib/intrinsic-identifier-comparison";
 import { INTRINSIC_IDENTIFIER_OCR_VERSION } from "./lib/intrinsic-identifier-ocr";
@@ -374,6 +375,73 @@ async function main() {
     assert.throws(negativeScoped.f.plan,/IMAGE_RESUME_REQUIRED/u,"a second child cannot bypass the first sealed negative repair");checks++;
     fs.rmSync(`${extraNegativeChild}.reference-scene.json`);
     for(const [file,expected] of negativeStable){assert.equal(fileHash(file),expected,"negative repair preserves sources, output, request and original HOLD bytes");checks++;}
+    assert.equal(JSON.stringify(negativeScoped.f.f.manifest.composition),negativeBody);assert.equal(negativeScoped.f.f.manifest.approvedAt,null);checks+=2;
+    // A policy change may review this exact completed child, never mint a new
+    // parent/child or relabel the old native packets as current approval.
+    const childStarted=Date.now()-500,childThread=crypto.randomUUID(),childWorkspace=`${negativeChild.outStem}.codex-1`;
+    fs.mkdirSync(childWorkspace);const childNative=path.join(process.env.CODEX_HOME!,"generated_images",childThread);fs.mkdirSync(childNative,{recursive:true});
+    const childOutput=path.join(childNative,"completed-child.png");fs.writeFileSync(childOutput,png("completed correct child photograph"));
+    fs.copyFileSync(childOutput,`${negativeChild.outStem}.png`);
+    fs.writeFileSync(`${negativeChild.outStem}.codex-submission.json`,JSON.stringify({state:"completed",workspace:childWorkspace,threadId:childThread,
+      startedAtMs:childStarted,completedAtMs:Date.now(),generationBudget:{limit:1,observedCalls:1,observation:"rollout"}}));
+    const childContent=negativeChild.referenceImagePaths!.flatMap((file,index)=>[{type:"input_text",text:`<image name=[Image #${index+1}] path="${file}">`},
+      {type:"input_image",image_url:`data:image/png;base64,${fs.readFileSync(file).toString("base64")}`,detail:"high"},{type:"input_text",text:"</image>"}]);
+    childContent.push({type:"input_text",text:buildCodexImageInstruction(negativeChild.prompt,negativeChild.referenceImagePaths!.length,"product")});
+    const childRecords=[{timestamp:new Date(childStarted).toISOString(),type:"session_meta",payload:{id:childThread,cwd:childWorkspace,thread_source:"blogautomcp-image"}},
+      {timestamp:new Date(childStarted).toISOString(),type:"event_msg",payload:{type:"task_started",turn_id:"one-child"}},
+      {timestamp:new Date(childStarted).toISOString(),type:"response_item",payload:{type:"message",role:"user",content:childContent}},
+      {timestamp:new Date(childStarted).toISOString(),type:"response_item",payload:{type:"custom_tool_call",name:"exec",call_id:"one-child-image",input:"await tools.image_gen__imagegen({prompt:'fixture only'});"}},
+      {timestamp:new Date().toISOString(),type:"event_msg",payload:{type:"task_complete",turn_id:"one-child"}}];
+    const childRollout=path.join(path.dirname(negativeScoped.f.f.rollout),`rollout-test-${childThread}.jsonl`);
+    fs.writeFileSync(childRollout,childRecords.map(row=>JSON.stringify(row)).join("\n")+"\n");
+    const childOptions=()=>({manifest:negativeScoped.f.f.manifest,target:negativeScoped.f.target(),packageDir:negativeScoped.f.dir});
+    const oldArchive=readArchivedPublicationDefectForCompletedChildReviewOnly({manifest:negativeScoped.f.f.manifest,sectionId:"scene",sha256:negativeScoped.f.currentSha,
+      proofPath:negativeProof.path,proofSha256:negativeProof.sha256});
+    assert.equal(oldArchive?.scope,"completed-child-review-only");assert.equal((oldArchive as unknown as {proof?:unknown}).proof,undefined);checks+=2;
+    const childReview=readCompletedPublicationBodyChildReviewOnly(childOptions())!;
+    assert.ok(childReview);assert.equal(childReview.scope,"completed-child-review-only");assert.equal(childReview.outStem,negativeChild.outStem);
+    assert.ok(childReview.job.reviewOnly);assert.equal(childReview.job.reviewOnly!.outputSha256,fileHash(childOutput));checks+=5;
+    assert.throws(()=>planPublicationImageRetry({...childOptions(),policyFingerprint:hash("new image policy")}),/IMAGE_RESUME_REQUIRED/u,"old proof never becomes a current new-generation parent");checks++;
+    const currentChildPolicy=hash("distinct current policy with a prior completed child");
+    recordScopedPublicationImageDefect({manifest:negativeScoped.f.f.manifest,sectionId:"scene",sha256:negativeScoped.f.currentSha,policyFingerprint:currentChildPolicy,
+      visibleReview:negativeScoped.visibleReview,claimsReview:negativeScoped.claimsReview,formatReview:negativeScoped.formatReview,
+      identifierReview:negativeScoped.identifiers,identifierInput:negativeScoped.input});
+    const currentChildProof=readPublicationImageDefect(negativeScoped.f.f.manifest,"scene",negativeScoped.f.currentSha,currentChildPolicy)!;
+    assert.ok(currentChildProof);assert.notEqual(currentChildProof.sha256,negativeProof.sha256);
+    assert.throws(()=>planPublicationImageRetry({...childOptions(),policyFingerprint:currentChildPolicy}),/IMAGE_RESUME_REQUIRED/u,"a current new-generation proof cannot bypass the already sealed old child");checks+=3;
+    const recheckTarget=negativeScoped.f.target();
+    await generation.prepareBrandPostImageReferenceContext({manifest:negativeScoped.f.f.manifest,target:recheckTarget,productName:"검정 제품"},
+      {collect:async()=>{throw Error("completed child cannot recollect");},select:async()=>{throw Error("completed child cannot reselect");}});
+    const recheckJob=generation.prepareImageBatchJobs([recheckTarget],negativeScoped.f.f.manifest,"검정 제품",negativeScoped.f.f.work)[0];
+    assert.equal(recheckJob.outStem,negativeChild.outStem);assert.ok(recheckJob.reviewOnly);assert.ok(recheckTarget.completedBodyChildReviewOnly);
+    assert.equal(recheckTarget.referenceContext!.publicationRetryOf!.proofSha256,negativeProof.sha256,"completed old child wins over a distinct current-policy proof without rebinding the old seal");checks++;
+    let childTransportCalls=0,childReviews=0;
+    await generation.runImageBatch([recheckJob],negativeScoped.f.f.work,async result=>{assert.ok(result.recoveryJob);checks++;},undefined,
+      {runCodex:async()=>{childTransportCalls++;throw Error("completed child cannot dispatch");},runBrowser:async()=>{childTransportCalls++;throw Error("completed child cannot open browser");}});
+    assert.equal(childTransportCalls,0);checks+=4;
+    const rechecked=await generation.resolveCompletedProductImage({job:recheckJob,target:recheckTarget,manifest:negativeScoped.f.f.manifest,productName:"검정 제품",workDir:negativeScoped.f.f.work,
+      reviewReferenceScene:async options=>{childReviews++;return {strategyVersion:SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION,referencePath:options.reference.path,referenceSha256:options.reference.sha256,
+        reviewedOutputSha256:fileHash(options.outputPath),reviewStatus:"passed",reason:"synthetic current-context child review",reviewedAt:new Date().toISOString(),
+        checks:Object.fromEntries(REFERENCE_SCENE_REVIEW_CHECKS.map(key=>[key,true]))} as Awaited<ReturnType<typeof import("./lib/shopping-reference-scene").reviewShoppingReferenceScene>>;}});
+    assert.ok(rechecked.generatedPath);assert.equal(fileHash(rechecked.generatedPath!),fileHash(childOutput));assert.equal(childReviews,1);assert.equal(childTransportCalls,0);checks+=4;
+    const childReceiptPath=`${negativeChild.outStem}.codex-submission.json`,childReceiptBytes=fs.readFileSync(childReceiptPath);
+    for(const change of ["pending","budget","multiple","proof","seal","context","source","child-bytes","slot"] as const) {
+      const proofBytes=fs.readFileSync(negativeProof.path),sealPath=path.join(root,"data/publication-image-defect-proofs",`plan-${negativeProof.sha256}.json`),sealBytes=fs.readFileSync(sealPath),sourceBytes=fs.readFileSync(negativeRequired.path),rawBytes=fs.readFileSync(`${negativeChild.outStem}.png`);
+      if(change==="pending")fs.writeFileSync(childReceiptPath,JSON.stringify({...JSON.parse(childReceiptBytes.toString()),state:"submitting",threadId:null}));
+      if(change==="budget")fs.writeFileSync(childReceiptPath,JSON.stringify({...JSON.parse(childReceiptBytes.toString()),generationBudget:{limit:1,observedCalls:2,observation:"rollout"}}));
+      if(change==="multiple")fs.writeFileSync(path.join(childNative,"second.png"),png("unrelated second candidate"));
+      if(change==="proof")fs.appendFileSync(negativeProof.path," ");
+      if(change==="seal")fs.writeFileSync(sealPath,JSON.stringify({...JSON.parse(sealBytes.toString()),contextSha256:hash("changed seal context")}));
+      if(change==="context")fs.writeFileSync(negativeChildMetadata,JSON.stringify({...JSON.parse(negativeChildBytes.toString()),referenceContext:{...JSON.parse(negativeChildBytes.toString()).referenceContext,prompt:"changed"}}));
+      if(change==="slot")fs.writeFileSync(negativeChildMetadata,JSON.stringify({...JSON.parse(negativeChildBytes.toString()),slotId:"another-section:image:1"}));
+      if(change==="source")fs.appendFileSync(negativeRequired.path," ");
+      if(change==="child-bytes")fs.appendFileSync(`${negativeChild.outStem}.png`," ");
+      if(change==="pending")assert.equal(readCompletedPublicationBodyChildReviewOnly(childOptions()),null,"unknown transport is not a completed review candidate");
+      else assert.throws(()=>readCompletedPublicationBodyChildReviewOnly(childOptions()),/IMAGE_RESUME_REQUIRED/u,change);checks++;
+      fs.writeFileSync(childReceiptPath,childReceiptBytes);fs.writeFileSync(negativeProof.path,proofBytes);fs.writeFileSync(sealPath,sealBytes);fs.writeFileSync(negativeChildMetadata,negativeChildBytes);fs.writeFileSync(negativeRequired.path,sourceBytes);fs.writeFileSync(`${negativeChild.outStem}.png`,rawBytes);
+      if(change==="multiple")fs.rmSync(path.join(childNative,"second.png"));
+    }
+    for(const [file,expected] of negativeStable){assert.equal(fileHash(file),expected);checks++;}
     assert.equal(JSON.stringify(negativeScoped.f.f.manifest.composition),negativeBody);assert.equal(negativeScoped.f.f.manifest.approvedAt,null);checks+=2;
     assert.deepEqual(readPublicationDefectMaterialContext(scopedProof.proof)?.composition,scoped.f.f.manifest.composition); checks++;
     const contextSidecar=path.join(root,"data/publication-image-defect-proofs",scopedProof.proof.materialContext.file),sidecarBytes=fs.readFileSync(contextSidecar);

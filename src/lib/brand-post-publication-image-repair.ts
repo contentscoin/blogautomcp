@@ -2,9 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { publicationImageContext } from "../../scripts/lib/publish-image-rejections";
-import { readPublicationImageDefect, readPublicationImageRepairPlan, publicationImageDefectWasRecorded } from "../../scripts/lib/publication-image-defect-proof";
+import { readPublicationImageDefect, readPublicationImageRepairPlan, publicationImageDefectWasRecorded,
+  readArchivedPublicationDefectForCompletedChildReviewOnly } from "../../scripts/lib/publication-image-defect-proof";
 import { readCanonicalSellerSourceHashes } from "../../scripts/lib/canonical-seller-source";
-import { readCompletedProductRequest, collectCompletedProductCandidates } from "./codex-image-generation";
+import { readCompletedProductRequest, collectCompletedProductCandidates, type ImageBatchJob } from "./codex-image-generation";
 import type { BrandPostPackageManifestV2 } from "./brand-post-package";
 import type { BrandPostImageReferenceContext, ResolvedImageTarget } from "./brand-post-image-generation";
 import type { ShoppingSceneSupportingReference } from "../../scripts/lib/shopping-reference-scene";
@@ -87,8 +88,9 @@ export function publicationImageRequestRecords(packageDir: string): string[] {
 /** A current signed native print defect authorizes one improved plan only for
  * its UNIQUE exact asset origin. Other strictly completed different-pixel
  * history is frozen into that plan; ambiguous/active history remains a hold. */
-export function planPublicationImageRetry(options: { manifest: BrandPostPackageManifestV2; target: ResolvedImageTarget;
-  packageDir: string; policyFingerprint: string; expectedContext?: Record<string, unknown> }):
+type PublicationRetryOptions = { manifest: BrandPostPackageManifestV2; target: ResolvedImageTarget;
+  packageDir: string; policyFingerprint: string; expectedContext?: Record<string, unknown> };
+export function planPublicationImageRetry(options: PublicationRetryOptions):
   { parent: PublicationImageRetryParent; primaryReference: {path:string;sha256:string}; requiredPrintReference: ShoppingSceneSupportingReference; resumedContext?: BrandPostImageReferenceContext } | null {
   const { manifest, target } = options;
   if (target.role !== "body" || !target.sectionId || !target.request.replaceAssetKey) return null;
@@ -96,6 +98,13 @@ export function planPublicationImageRetry(options: { manifest: BrandPostPackageM
   const authority = readPublicationImageDefect(manifest, target.sectionId, target.request.replaceAssetKey, options.policyFingerprint);
   if (!authority) { if (known) throw hold(); return null; }
   if (!known) throw hold();
+  return planWithExactAuthority(options,authority);
+}
+/** Internal shared binding checks. Historical callers may only consume the
+ * completed child below; this function is never a public dispatch override. */
+function planWithExactAuthority(options: PublicationRetryOptions, authority: NonNullable<ReturnType<typeof readPublicationImageDefect>>) {
+  const {manifest,target}=options;
+  if (target.role!=="body" || !target.sectionId || !target.request.replaceAssetKey) throw hold();
   const currentAssets = (manifest.imageAssets || []).filter(asset => asset.sha256 === target.request.replaceAssetKey &&
     asset.sectionId === target.sectionId && asset.slotId === target.request.slotId && asset.role === "body");
   if (currentAssets.length !== 1) throw hold();
@@ -182,6 +191,63 @@ export function planPublicationImageRetry(options: { manifest: BrandPostPackageM
   if (children.length > 1 || children.some(child => JSON.stringify(child.context.publicationRetryOf) !== JSON.stringify(parent))) throw hold();
   return { parent, primaryReference:{path:primaryPath,sha256:currentReferenceHashes[0]}, requiredPrintReference:printReference,
     ...(children.length ? { resumedContext: children[0].context } : {}) };
+}
+
+export interface CompletedPublicationBodyChildReviewOnly {
+  version: "completed-publication-body-child-review-only/v1";
+  scope: "completed-child-review-only";
+  bindingSha256: string;
+  outStem: string;
+  context: BrandPostImageReferenceContext;
+  job: ImageBatchJob;
+}
+/** Find only an already sealed and terminal one-output child. A changed
+ * policy cannot mint a successor proof, reset the budget or dispatch again.
+ * Existing source/HOLD/parent/child records remain entirely untouched. */
+export function readCompletedPublicationBodyChildReviewOnly(options: {
+  manifest: BrandPostPackageManifestV2; target: ResolvedImageTarget; packageDir: string;
+}): CompletedPublicationBodyChildReviewOnly | null {
+  const {manifest,target,packageDir}=options;
+  if (manifest.connectKind!=="SHOPPING" || target.role!=="body" || !target.sectionId || !target.request.slotId || !target.request.replaceAssetKey) return null;
+  const candidates=publicationImageRequestRecords(packageDir).flatMap(file=>{
+    const stat=fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size>512*1024) throw hold();
+    const metadata=JSON.parse(fs.readFileSync(file,"utf8"));
+    const parent=metadata.referenceContext?.publicationRetryOf;
+    return parent && (metadata.slotId===target.request.slotId || parent.currentSha256===target.request.replaceAssetKey) ? [{file,metadata}] : [];
+  });
+  if (!candidates.length) return null;
+  if (candidates.length!==1) throw hold();
+  const {file,metadata}=candidates[0],saved=metadata.referenceContext as BrandPostImageReferenceContext,parent=saved.publicationRetryOf!;
+  if (metadata.slotId!==target.request.slotId) throw hold();
+  const outStem=file.replace(/\.reference-scene\.json$/u,""),request=readCompletedProductRequest(outStem);
+  // An unsubmitted/pending child retains its ORIGINAL transport guards. This
+  // reader cannot turn it into completed pixels or provide cross-policy work.
+  if (!request) {
+    try {if (JSON.parse(fs.readFileSync(`${outStem}.codex-submission.json`,"utf8")).state==="completed") throw hold();}
+    catch(error) {if ((error as NodeJS.ErrnoException).code!=="ENOENT") throw error;}
+    return null;
+  }
+  if (parent.version!=="publication-image-retry/v1" || parent.currentSha256!==target.request.replaceAssetKey ||
+      !publicationImageDefectWasRecorded(manifest.brandLinkId,target.sectionId,target.request.replaceAssetKey)) throw hold();
+  const archived=readArchivedPublicationDefectForCompletedChildReviewOnly({manifest,sectionId:target.sectionId,sha256:target.request.replaceAssetKey,
+    proofPath:parent.proofPath,proofSha256:parent.proofSha256});
+  if (!archived || archived.scope!=="completed-child-review-only") throw hold();
+  const plan=planWithExactAuthority({...options,policyFingerprint:archived.archivedProof.policyFingerprint},
+    {proof:archived.archivedProof,path:archived.path,sha256:archived.sha256});
+  if (!plan.resumedContext || JSON.stringify(plan.parent)!==JSON.stringify(parent) || JSON.stringify(plan.resumedContext)!==JSON.stringify(saved)) throw hold();
+  const suffix=`\nImage slot: ${target.request.slotId}. Use a distinct natural location, pose or camera framing for this slot; preserve product identity and real proportions. No added text, frames, panels, collage or inset.`;
+  if (!request || request.prompt!==saved.prompt+suffix || metadata.sceneRecipeSha256!==hash(request.prompt) ||
+      JSON.stringify(request.referenceHashes)!==JSON.stringify(saved.referenceHashes) || JSON.stringify(request.referenceImagePaths)!==JSON.stringify(saved.referenceImagePaths)) throw hold();
+  const job: ImageBatchJob={id:"completed-publication-body-child",outStem,prompt:request.prompt,referenceMode:"product",
+    referenceImagePaths:request.referenceImagePaths,requiredReferenceHashes:request.referenceHashes};
+  const completed=collectCompletedProductCandidates(job);
+  if (!completed || completed.candidates.length!==1) throw hold();
+  job.reviewOnly={outputSha256:completed.candidates[0].sha256,slotId:target.request.slotId,sourceSnapshotId:manifest.sourceSnapshot!.snapshotId,
+    referenceHashes:request.referenceHashes,candidateSet:completed};
+  const bindingSha256=hash(JSON.stringify({parent:plan.parent,context:saved,metadataSha256:fileHash(file),request,
+    candidate:completed.candidates[0],completion:completed.completion,receiptSha256:completed.receiptSha256}));
+  return {version:"completed-publication-body-child-review-only/v1",scope:"completed-child-review-only",bindingSha256,outStem,context:saved,job};
 }
 
 function proofPrimaryPath(authority: NonNullable<ReturnType<typeof readPublicationImageDefect>>, legacy?:string): string|undefined {
