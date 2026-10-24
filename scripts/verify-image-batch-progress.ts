@@ -37,6 +37,8 @@ import * as identifierComparison from "./lib/intrinsic-identifier-comparison";
 import * as identifierOcr from "./lib/intrinsic-identifier-ocr";
 import * as identifierCorroboration from "./lib/intrinsic-identifier-corroboration";
 import * as publicationIdentifierReview from "./lib/publication-identifier-review";
+import * as lightweightPublicationReview from "./lib/lightweight-publication-review";
+import * as generationFirstPhotoBrief from "./lib/generation-first-photo-brief";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-image-batch-"));
 const rawPath = path.join(root, "raw.png");
@@ -85,6 +87,7 @@ const referenceSceneModule = load<typeof import("./lib/shopping-reference-scene"
   "./intrinsic-identifier-ocr": identifierOcr,
   "./intrinsic-identifier-corroboration": identifierCorroboration,
   "./publication-identifier-review": publicationIdentifierReview,
+  "./lightweight-publication-review": lightweightPublicationReview,
 });
 const hashFile = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 const completedContextModule = load<typeof import("../src/lib/brand-post-completed-context")>("src/lib/brand-post-completed-context.ts", {
@@ -161,6 +164,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       "../../scripts/lib/publish-image-audit": { buildSelectedProductImageAuditContext, publicationImageAuditPolicyFingerprint },
       "../../scripts/lib/seller-original-repair-target": { buildSellerOriginalRepairTarget },
       "../../scripts/lib/product-source-audit-context": productSourceAuditContext,
+      "../../scripts/lib/generation-first-photo-brief": generationFirstPhotoBrief,
       "../../scripts/lib/image-timeout-policy": imagePolicy,
       "node:child_process": {
         spawn(_command: string, args: string[], options: { windowsHide: boolean; shell: boolean }) {

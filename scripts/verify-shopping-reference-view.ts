@@ -58,7 +58,7 @@ for (const subjectState of ["worn", "packaged", "unknown"] as const) for (const 
   assert.equal(actual.viewConstraint.mayVaryViewpoint, false);
   assert.equal(actual.viewConstraint.novelIdentifyingSurfacesAllowed, false);
   assert.doesNotMatch(prompt, /complete (?:selected subject|product(?: or garment)?) (?:visible|clear)|Keep the complete selected cut|crisp complete subject|People wearing clothing are allowed/u);
-  assert.match(prompt, /preserving only the source-observed visible product portion|preserving its actual crop, pose and sealed state/u);
+  assert.match(prompt, /ROLE=BODY:.*only the source-observed identifying product portion needs to be visible; preserve its observed crop and keep hidden parts hidden|ROLE=HERO:.*preserving its observed crop, pose and hidden parts/u);
   if (role === "body") assert.doesNotMatch(actual.sceneCoverage.coverage, /entire|complete/u);
   if (subjectState === "packaged") {
     assert.match(prompt, /SEALED SOURCE: preserve the actual closed package/u);

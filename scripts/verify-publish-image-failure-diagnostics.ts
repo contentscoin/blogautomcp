@@ -40,7 +40,7 @@ async function main() {
     "./brand-post-package": { getBrandPostPackageDir: () => "readonly-fixture", readBrandPostPackage: (_id: string, options: object) => { assert.equal(JSON.stringify(options), '{"migrate":false}'); return manifest; } },
     "node:path": path, "./material-library": { materialRevision: () => "fixture-revision" },
     "./post-composition-contract": { normalizePublishedPostText: () => composition },
-    "./brand-post-approval-receipt": { brandPostApprovalBinding: () => "fixture-binding" },
+    "./brand-post-approval-receipt": { brandPostApprovalBinding: () => "fixture-binding", brandPostCompatibleApprovalBindings: () => [] },
     "./publish-image-failure-diagnostics": { imageAuditFailureSections },
   };
   const filename = path.resolve("src/lib/brand-post-publish-preflight.ts");

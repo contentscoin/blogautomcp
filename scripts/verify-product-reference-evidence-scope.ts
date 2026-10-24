@@ -73,7 +73,8 @@ async function main() {
 
     const prompt = buildShoppingReferenceScenePrompt({ productName: "selected black ear unit", sectionTitle: "구매 전 볼 기준", imageIntent: "자연스러운 연출", role: "hero",
       reference, supportingReferences: [legacySupport] });
-    assert(prompt.includes(PRODUCT_IMAGE_REFERENCE_EVIDENCE_SCOPE_RULE_EN));
+    assert.match(prompt, /OBSERVED-VIEW CONTRACT:.*Never remove it from a person, flatten clothing, unfold, unpack, expose an unseen waistband\/back\/connection\/hem/u);
+    assert.match(prompt, /partial-detail-only view; no whole-shape or new-pose authority/u);
     assert.match(prompt, /INPUT 2 is a verified SAME-option seller partial-detail-only view/u);
     assert.doesNotMatch(prompt, /INPUT 2 is a verified SAME-option seller complete-shape view/u);
     assert.equal(resolveShoppingReferenceView(reference, [legacySupport]).presentationChangeSupported, false);

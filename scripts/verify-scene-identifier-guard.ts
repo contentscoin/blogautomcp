@@ -118,8 +118,11 @@ async function main(): Promise<void> {
     }, { filename: sceneFile });
     return loaded.exports as { reviewShoppingReferenceScene: typeof reviewShoppingReferenceScene };
   };
+  // These native seams explicitly exercise the legacy independent B/OCR gate.
+  // Ordinary publication's integrated default is covered by the lightweight suite.
+  const strictOptions = { ...options, reviewMode: "strict" as const };
   const nativeConflict = ocrResult("conflict", "Brandum"); nativeConflict.evidence!.nativeExecution = true;
-  await assert.rejects(nativeVm(actualWrongWord, nativeConflict).reviewShoppingReferenceScene(options), error => {
+  await assert.rejects(nativeVm(actualWrongWord, nativeConflict).reviewShoppingReferenceScene(strictOptions), error => {
     assert.ok(error instanceof Error); assert.match(error.message, /^REFERENCE_SCENE_FIDELITY_FAILED:/u);
     const recorded = error as Error & { fidelityFailure: { identityMatches: boolean }; identifierConflict: { pair: unknown }; originalVerdict: unknown };
     assert.equal(recorded.fidelityFailure.identityMatches, false, "independent conflict records a separate negative");
@@ -128,11 +131,11 @@ async function main(): Promise<void> {
     return true;
   }); cases++;
   for (const [answer, result] of [[legible, nativeConflict], [actualWrongWord, ocrResult("conflict", "Brandum")]] as const) {
-    await assert.rejects(nativeVm(answer, result).reviewShoppingReferenceScene(options), error =>
+    await assert.rejects(nativeVm(answer, result).reviewShoppingReferenceScene(strictOptions), error =>
       error instanceof Error && /^REFERENCE_SCENE_REVIEW_INVALID:/u.test(error.message) && !("fidelityFailure" in error)); cases++;
   }
   const sharedMistake = ocrResult("conflict", "Brandiurn"); sharedMistake.evidence!.nativeExecution = true;
-  await assert.rejects(nativeVm(legible, sharedMistake).reviewShoppingReferenceScene(options), error =>
+  await assert.rejects(nativeVm(legible, sharedMistake).reviewShoppingReferenceScene(strictOptions), error =>
     error instanceof Error && /^REFERENCE_SCENE_REVIEW_INVALID:/u.test(error.message) && !("fidelityFailure" in error)); cases++;
   const unobserved = { ...good, identityMatches: false, accepted: false, checks: { ...checks, labelHierarchy: false },
     comparisons: { ...comparisons, productShape: { ...comparisons.productShape, result: "unverifiable", basis: "source view does not reveal hidden topology or an intrinsic size label" } } };
