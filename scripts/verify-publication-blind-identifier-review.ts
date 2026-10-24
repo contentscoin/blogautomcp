@@ -111,7 +111,7 @@ async function main() {
   } }).outputText;
   type Mode = { observerFailurePath?: string; providerError?: string; comparison?: PublicationIdentifierComparison; raw?: Record<string, unknown>; candidateLiteral?: string; candidateReadability?: IntrinsicIdentifierObservation["readability"];
     sourceReadability?: IntrinsicIdentifierObservation["readability"]; primaryReadability?: IntrinsicIdentifierObservation["readability"]; observeMutate?: (value: IntrinsicIdentifierObserverEvidence) => void;
-    ocrMutate?: (value: IntrinsicIdentifierOcrEvidence) => void; requestMutate?: () => void; sourceOnly?: boolean; ocrUnavailable?: boolean; invalidSchema?: boolean };
+    ocrMutate?: (value: IntrinsicIdentifierOcrEvidence) => void; requestMutate?: () => void; sourceOnly?: boolean; ocrUnavailable?: boolean; invalidSchema?: boolean; sourceSelectionConflict?: boolean };
   const load = (mode: Mode = {}) => {
     let calls = 0, ocrCalls = 0, observeCalls = 0;
     const actualRequests: CodexDraftOptions[] = [], observationInputs: unknown[] = [];
@@ -142,7 +142,9 @@ async function main() {
           stage: "response", imageSha256: options.sha256, issue: "OBSERVER_BOX_HEIGHT_LIMIT", rawResponse: "unchanged oversized native source reply", responseSha256: hash("unchanged oversized native source reply"),
         } };
         const candidateReadability = mode.candidateReadability || "legible", sourceReadability = mode.sourceReadability || "legible";
-        const value = options.path === candidate ? observed(candidate, candidateReadability === "legible" ? mode.candidateLiteral || wrongWord : "", candidateReadability === "legible" ? candidateBox : null, candidateReadability)
+        const value = mode.sourceSelectionConflict && options.path!==candidate
+          ? options.path===primary ? observed(primary,"",null,"ambiguous") : observed(options.path,options.path===detail?"source-a":"source-b",[100,100,200,150],"legible")
+          : options.path === candidate ? observed(candidate, candidateReadability === "legible" ? mode.candidateLiteral || wrongWord : "", candidateReadability === "legible" ? candidateBox : null, candidateReadability)
           : options.path === primary ? observed(primary, mode.primaryReadability === "legible" ? sourceWord : "", mode.primaryReadability === "legible" ? [300, 420, 360, 445] : null, mode.primaryReadability || "unreadable")
             : observed(detail, sourceReadability === "legible" ? sourceWord : "", sourceReadability === "legible" ? sourceBox : null, sourceReadability);
         mode.observeMutate?.(value); return { status: value.observation.readability === "legible" ? "observed" : "unreadable", reason: "offline independent one-image result", evidence: value };
@@ -193,6 +195,20 @@ async function main() {
   assert.equal(invalidSourceResult.taskDiagnostic!.observerDiagnostic!.issue, "OBSERVER_BOX_HEIGHT_LIMIT");
   assert.match(invalidSourceObserver.api.publicationIdentifierReviewEvidenceIssue(invalidSourceResult, input)!, /source-observer.*OBSERVER_RESPONSE_INVALID.*OBSERVER_BOX_HEIGHT_LIMIT/u);
   assert.equal(invalidSourceObserver.counts().calls, 0); assert.equal(invalidSourceObserver.counts().ocrCalls, 0); checks += 7;
+  const secondDetail=path.join(inputs,"second-detail.png");
+  await sharp({create:{width:860,height:860,channels:3,background:"rgb(170,160,180)"}}).png().toFile(secondDetail);
+  const conflictingSourceInput={...input,canonicalReferences:[...input.canonicalReferences,{path:secondDetail,sha256:fileHash(secondDetail),sourceSnapshotId:snapshot}]};
+  const selectionFailure=load({sourceSelectionConflict:true}),selectionResult=await selectionFailure.api.reviewPublicationIdentifiers(conflictingSourceInput);
+  assert.equal(selectionResult.status,"hold");assert.equal(selectionResult.taskDiagnostic!.stage,"source-selection");
+  assert.equal(selectionResult.taskDiagnostic!.imageSha256,input.candidateSha256,"selection context is the candidate, never the last valid source");
+  assert.equal(selectionResult.taskDiagnostic!.reason,"BLIND_SOURCE_LITERAL_CONSENSUS_UNRESOLVED");
+  assert.equal(selectionResult.blindInputObservations!.sources.length,3,"retain every independently received source observation");
+  assert.deepEqual(copy(selectionResult.blindInputObservations!.sources.map(row=>row.evidence.observation.literal)),["","source-a","source-b"]);
+  const selectionIssue=selectionFailure.api.publicationIdentifierReviewEvidenceIssue(selectionResult,conflictingSourceInput)!;
+  assert.match(selectionIssue,/source-selection candidateSHA=.*sourceSetCount=3.*BLIND_SOURCE_LITERAL_CONSENSUS_UNRESOLVED/u);
+  assert(!selectionIssue.includes(`source-observer SHA=${fileHash(secondDetail)}`));
+  assert.equal(selectionFailure.counts().calls,0);assert.equal(selectionFailure.counts().ocrCalls,0);
+  assert.equal(selectionResult.identifierConflict,undefined);assert.equal(selectionResult.missingPrintEvidence,undefined);checks+=12;
   for (const providerError of ["HIGH_DEMAND: service unavailable", "Invalid schema for response_format: array enum unsupported"]) {
     const broken = load({ providerError }); const brokenResult = await broken.api.reviewPublicationIdentifiers(input);
     assert.equal(brokenResult.status, "hold"); assert.equal(brokenResult.taskDiagnostic!.stage, "local-pair");

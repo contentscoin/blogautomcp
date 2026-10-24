@@ -174,7 +174,7 @@ export interface PublicationIdentifierReviewResult {
    * nativeExecution=false must not erase the comparison's execution origin. */
   nativeLocalPairReceipt?: { version: "publication-native-local-pair/v1"; requestSha256: string; responseSha256: string };
   /** Diagnostic only. Never substitutes for native evidence or creates a retry. */
-  taskDiagnostic?: { stage: "candidate-observer" | "source-observer" | "applicability" | "source-membership" | "local-pair" | "corroboration";
+  taskDiagnostic?: { stage: "candidate-observer" | "source-observer" | "source-selection" | "applicability" | "source-membership" | "local-pair" | "corroboration";
     imageSha256: string; status: string; reason: string; observerDiagnostic?: IntrinsicIdentifierObserverResult["diagnostic"] };
 }
 export interface PublicationPrintApplicabilityRow {
@@ -1238,6 +1238,9 @@ export function publicationIdentifierReviewEvidenceIssue(result: PublicationIden
     if (result.taskDiagnostic) {
       const diagnostic = result.taskDiagnostic;
       if (!validSha(diagnostic.imageSha256) || typeof diagnostic.reason !== "string") return "malformed B task diagnostic is not review evidence";
+      if(diagnostic.stage==="source-selection")return diagnostic.imageSha256===expected.candidateSha256
+        ? `B task failure: source-selection candidateSHA=${diagnostic.imageSha256} sourceSetCount=${result.blindInputObservations?.sources.length||0} ${String(diagnostic.status).slice(0,40)}: ${diagnostic.reason.slice(0,2048)}`
+        : "source-selection diagnostic must bind the candidate context, not blame an individual source image";
       return `B task failure: ${diagnostic.stage} SHA=${diagnostic.imageSha256} ${String(diagnostic.status).slice(0, 40)}: ${diagnostic.reason.slice(0, 2048)}${diagnostic.observerDiagnostic?.issue ? ` (${String(diagnostic.observerDiagnostic.issue).slice(0, 2048)})` : ""}`;
     }
     if (result.printObservationWarning?.version === "publication-calibrated-print-warning/v1") {
@@ -1480,6 +1483,9 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
         // A second, DIFFERENT question corroborates an observed whole-location
         // blank against a clear source. The first witness stays immutable.
       }
+      // Every source observation is already complete. A source-set selection
+      // failure is not a failure of the last independently observed image.
+      taskStage="source-selection";taskImageSha256=input.candidateSha256;
       const selected = chooseBlindSource(observed), sourceFile = prepared.files[selected.imageIndex - 1];
       const candidateObservation = observed.candidate.observation, sourceObservation = selected.evidence.observation;
       const gate = input.scopeGate;

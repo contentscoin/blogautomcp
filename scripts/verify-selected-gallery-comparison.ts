@@ -519,6 +519,123 @@ async function main() {
       assert.equal(bound.length, 5); assert.equal(new Set(bound.map(row => row.sha256)).size, 5);
       assert.equal(bound.at(-1)!.sha256, digest(colors[4]));
     });
+    const sceneFixture = async (full = false) => {
+      const packageDir = fixture(), sourceDirectory = path.join(packageDir, "product-sources"); fs.mkdirSync(sourceDirectory);
+      const gallery = [urls[0], urls[1], capacityUrl("scene-detail.png"), urls[3], capacityUrl("scene-macro.png"),
+        ...(full ? [capacityUrl("extra-one-100ml.png"), capacityUrl("extra-two-100ml.png")] : [])];
+      const selectedSnapshot = snapshot(gallery, full ? { features: ["선택 용량 100ml"] } : {});
+      const first = saved(sourceDirectory, "first", blue, gallery[0]), second = saved(sourceDirectory, "second", green, gallery[1]);
+      const detail = saved(sourceDirectory, "detail", await portrait(48, 144, "#335577"), gallery[2]);
+      const own = saved(sourceDirectory, "own", red, gallery[3]), macro = saved(sourceDirectory, "macro", gold, gallery[4]);
+      if (full) {
+        saved(sourceDirectory, "extra-one", await portrait(24, 24, "#2299aa"), gallery[5]);
+        saved(sourceDirectory, "extra-two", await portrait(24, 24, "#aa9922"), gallery[6]);
+      }
+      const candidatePath = path.join(packageDir, "candidate.png"), candidateBytes = await portrait(24, 24, "#7711aa");
+      fs.writeFileSync(candidatePath, candidateBytes); const candidateSha256 = digest(candidateBytes);
+      const primaryReference = { path: own.file, sha256: digest(red) };
+      const canonicalReferences = [primaryReference, { path: macro.file, sha256: digest(gold) }]
+        .map(reference => ({ ...reference, sourceSnapshotId: selectedSnapshot.snapshotId }));
+      const hashJson = (value: unknown) => digest(Buffer.from(JSON.stringify(value)));
+      const request = { imagePaths: [primaryReference.sha256, candidateSha256, digest(gold)] }, rawResponse = "offline scene response";
+      const scopeGate = { kind: "scene-native-positive/v1", nativeExecution: true, request, requestSha256: hashJson(request),
+        rawResponse, responseSha256: digest(Buffer.from(rawResponse)) };
+      const input = { candidatePath, candidateSha256, primaryReference, canonicalReferences, scopeGate };
+      const result = { status: "unverified", context: { candidateSha256, primaryReferenceImageIndex: 2,
+        primaryReferenceSha256: primaryReference.sha256, scopeGateSha256: hashJson(scopeGate),
+        references: canonicalReferences.map((reference, index) => ({ imageIndex: index + 2, sha256: reference.sha256,
+          sourceSnapshotId: reference.sourceSnapshotId })) } };
+      const asset = { path: candidatePath, sha256: candidateSha256, role: "body", provenance: "GENERATED_SCENE",
+        creationMethod: "reference-guided-scene", remoteGenerated: true, referenceScene: { reviewStatus: "passed",
+          reviewedOutputSha256: candidateSha256, sourceSnapshotId: selectedSnapshot.snapshotId, referenceSha256: primaryReference.sha256,
+          referencePath: primaryReference.path, printObservationWarning: { input, result } } };
+      const manifest = { brandLinkId: productId, sourceSnapshot: selectedSnapshot, imageAssets: [asset] };
+      const manifestPath = path.join(packageDir, "manifest.json"), write = () => fs.writeFileSync(manifestPath, JSON.stringify(manifest)); write();
+      const options = { snapshot: selectedSnapshot, productId, sourceDirectory, candidateSha256, primaryReference };
+      return { packageDir, sourceDirectory, first, second, detail, own, macro, input, result, asset, manifest, manifestPath, write, options };
+    };
+    await test("completed scene retains its exact canonical macro in a spare final-review slot", async () => {
+      const f = await sceneFixture(), before = directoryBytes(f.sourceDirectory), manifestBefore = fs.readFileSync(f.manifestPath);
+      const bound = await readPublicationIdentifierReferenceBindings(f.options);
+      assert.deepEqual(bound.map(row => row.path), [f.first.file, f.second.file, f.detail.file, f.macro.file, f.own.file]);
+      assert(bound.every(row => !("accepted" in row) && !("literal" in row) && !("nativeExecution" in row)), "only current canonical discovery bindings are returned");
+      assert.deepEqual(fs.readFileSync(f.manifestPath), manifestBefore); assert.deepEqual(directoryBytes(f.sourceDirectory), before);
+      f.result.status = "hold"; f.write();
+      assert((await readPublicationIdentifierReferenceBindings(f.options)).some(row => row.path === f.macro.file), "a prior verdict is never reused as current approval authority");
+    });
+    for (const invalid of ["candidate", "candidate-bytes", "candidate-path-missing", "asset-path-foreign", "duplicate-asset", "primary", "primary-path", "snapshot", "snapshot-content", "reference-snapshot", "reference-path", "reference-bytes", "reference-missing", "reference-receipt", "reference-ambiguous", "context", "request-hash", "scope-hash"] as const)
+      await test(`scene discovery rejects stale or changed bindings: ${invalid}`, async () => {
+        const f = await sceneFixture();
+        switch (invalid) {
+          case "candidate": f.input.candidateSha256 = "a".repeat(64); break;
+          case "candidate-bytes": fs.writeFileSync(f.asset.path, green); break;
+          case "candidate-path-missing": f.input.candidatePath = path.join(f.packageDir, "missing.png"); break;
+          case "asset-path-foreign": { const file = path.join(root, "foreign-candidate.png"); fs.copyFileSync(f.asset.path, file); f.asset.path = file; break; }
+          case "duplicate-asset": f.manifest.imageAssets.push(structuredClone(f.asset)); break;
+          case "primary": f.asset.referenceScene.referenceSha256 = "a".repeat(64); break;
+          case "primary-path": f.asset.referenceScene.referencePath = f.second.file; break;
+          case "snapshot": f.asset.referenceScene.sourceSnapshotId = "a".repeat(64); break;
+          case "snapshot-content": f.manifest.sourceSnapshot = { ...f.manifest.sourceSnapshot, product: { ...f.manifest.sourceSnapshot.product, name: "다른 상품" } }; break;
+          case "reference-snapshot": f.input.canonicalReferences[1].sourceSnapshotId = "a".repeat(64); break;
+          case "reference-path": { const file = path.join(root, "foreign-macro.png"); fs.copyFileSync(f.macro.file, file); f.input.canonicalReferences[1].path = file; break; }
+          case "reference-bytes": fs.writeFileSync(f.macro.file, green); break;
+          case "reference-missing": fs.unlinkSync(f.macro.file); break;
+          case "reference-receipt": fs.writeFileSync(f.macro.receiptPath, "{"); break;
+          case "reference-ambiguous": saved(f.sourceDirectory, "other-macro", red, JSON.parse(fs.readFileSync(f.macro.receiptPath, "utf8")).sourceUrl); break;
+          case "context": f.result.context.references[1].sha256 = "a".repeat(64); break;
+          case "request-hash": f.input.scopeGate.requestSha256 = "a".repeat(64); break;
+          case "scope-hash": f.result.context.scopeGateSha256 = "a".repeat(64); break;
+        }
+        f.write();
+        assert(!(await readPublicationIdentifierReferenceBindings(f.options)).some(row => row.sha256 === digest(gold)), invalid);
+      });
+    await test("scene discovery cannot displace existing canonical priorities at the five-reference ceiling", async () => {
+      const f = await sceneFixture(true), bound = await readPublicationIdentifierReferenceBindings(f.options);
+      assert.equal(bound.length, 5); assert.equal(bound.at(-1)!.path, f.own.file);
+      assert.deepEqual(bound.slice(0, 2).map(row => row.path), [f.first.file, f.second.file]);
+      assert(!bound.some(row => row.path === f.macro.file));
+    });
+    await test("scene discovery rechecks the frozen manifest after awaiting current source decoding", async () => {
+      const f = await sceneFixture(), originalRead = fs.readFileSync; let changed = false, captured = false;
+      fs.readFileSync = ((...args: Parameters<typeof fs.readFileSync>) => {
+        const bytes = Reflect.apply(originalRead, fs, args);
+        if (String(args[0]) === f.manifestPath) captured = true;
+        if (captured && !changed && String(args[0]) === f.macro.receiptPath) { changed = true; fs.appendFileSync(f.manifestPath, " "); }
+        return bytes;
+      }) as typeof fs.readFileSync;
+      try { assert(!(await readPublicationIdentifierReferenceBindings(f.options)).some(row => row.path === f.macro.file)); assert(changed); }
+      finally { fs.readFileSync = originalRead; }
+    });
+    await test("a later scene hint cannot leave earlier hints or originals stale across its await", async () => {
+      for (const changedInput of ["manifest", "earlier-hint", "base", "own"] as const) {
+        const f = await sceneFixture(), secondBytes = await portrait(24, 24, "#9988aa");
+        const secondUrl = JSON.parse(fs.readFileSync(f.detail.receiptPath, "utf8")).sourceUrl;
+        saved(f.sourceDirectory, "detail", secondBytes, secondUrl);
+        f.input.canonicalReferences.push({ path: f.detail.file, sha256: digest(secondBytes), sourceSnapshotId: f.options.snapshot.snapshotId });
+        f.input.scopeGate.request.imagePaths.push(digest(secondBytes));
+        f.input.scopeGate.requestSha256 = digest(Buffer.from(JSON.stringify(f.input.scopeGate.request)));
+        f.result.context.scopeGateSha256 = digest(Buffer.from(JSON.stringify(f.input.scopeGate)));
+        f.result.context.references.push({ imageIndex: 4, sha256: digest(secondBytes), sourceSnapshotId: f.options.snapshot.snapshotId }); f.write();
+        const originalRead = fs.readFileSync; let captured = false, laterReads = 0;
+        fs.readFileSync = ((...args: Parameters<typeof fs.readFileSync>) => {
+          const bytes = Reflect.apply(originalRead, fs, args);
+          if (String(args[0]) === f.manifestPath) captured = true;
+          if (captured && String(args[0]) === f.detail.receiptPath && ++laterReads === 2) {
+            if (changedInput === "manifest") fs.appendFileSync(f.manifestPath, " ");
+            else fs.writeFileSync(changedInput === "earlier-hint" ? f.macro.file : changedInput === "base" ? f.first.file : f.own.file, green);
+          }
+          return bytes;
+        }) as typeof fs.readFileSync;
+        try {
+          if (changedInput === "own") await assert.rejects(readPublicationIdentifierReferenceBindings(f.options), /SELECTED_SOURCE_CONTEXT_INVALID/u);
+          else {
+            const bound = await readPublicationIdentifierReferenceBindings(f.options);
+            assert(!bound.some(row => row.path === (changedInput === "base" ? f.first.file : f.macro.file)), changedInput);
+          }
+          assert(laterReads >= 2, "mutation must occur after the earlier hint was adopted");
+        } finally { fs.readFileSync = originalRead; }
+      }
+    });
     assert.equal(networkCalls, 0);
     console.log(`Selected gallery comparison: ${checks} offline cases passed; no network or provider calls.`);
   } finally {

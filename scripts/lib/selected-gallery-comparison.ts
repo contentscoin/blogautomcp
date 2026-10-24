@@ -162,6 +162,59 @@ export async function readSelectedGalleryComparisons(options: {
   });
 }
 
+const sha256 = (value: string | Buffer) => crypto.createHash("sha256").update(value).digest("hex");
+const record = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+function exactStaticFile(file: unknown, expected: string): file is string {
+  try {
+    if (typeof file !== "string" || !path.isAbsolute(file)) return false;
+    const stat = fs.lstatSync(file);
+    return stat.isFile() && !stat.isSymbolicLink() && stat.size > 0 && stat.size <= 24 * 1024 * 1024 &&
+      sha256(fs.readFileSync(file)) === expected;
+  } catch { return false; }
+}
+
+/** Reuse only the scene's input hashes as discovery hints, never its words,
+ * verdict, warning or native authority. Every returned path must subsequently
+ * resolve to CURRENT canonical gallery bytes and a current retrieval receipt. */
+function boundSceneSourceHints(manifest: Record<string, unknown>, options: {
+  snapshot: unknown; candidateSha256: string; sourceDirectory: string;
+  primaryReference: { path: string; sha256: string };
+}, snapshotId: string): Array<{ path: string; sha256: string }> {
+  try {
+    if (JSON.stringify(manifest.sourceSnapshot) !== JSON.stringify(options.snapshot) || !Array.isArray(manifest.imageAssets)) return [];
+    const assets = manifest.imageAssets.map(record).filter(asset => asset?.sha256 === options.candidateSha256);
+    if (assets.length !== 1) return [];
+    const asset = assets[0]!, scene = record(asset.referenceScene), warning = record(scene?.printObservationWarning);
+    const input = record(warning?.input), result = record(warning?.result), context = record(result?.context);
+    const primary = record(input?.primaryReference), gate = record(input?.scopeGate), request = record(gate?.request);
+    if (asset.role !== "body" || asset.provenance !== "GENERATED_SCENE" || asset.creationMethod !== "reference-guided-scene" || asset.remoteGenerated !== true ||
+        !scene || scene.reviewStatus !== "passed" || scene.reviewedOutputSha256 !== options.candidateSha256 || scene.sourceSnapshotId !== snapshotId ||
+        scene.referenceSha256 !== options.primaryReference.sha256 || scene.referencePath !== options.primaryReference.path ||
+        !input || input.candidateSha256 !== options.candidateSha256 || !primary || primary.sha256 !== options.primaryReference.sha256 ||
+        primary.path !== options.primaryReference.path || !exactStaticFile(asset.path, options.candidateSha256) ||
+        !exactStaticFile(input.candidatePath, options.candidateSha256) || !exactStaticFile(primary.path, options.primaryReference.sha256) ||
+        !context || context.candidateSha256 !== options.candidateSha256 || context.primaryReferenceSha256 !== primary.sha256 ||
+        context.primaryReferenceImageIndex !== 2 || !gate || gate.kind !== "scene-native-positive/v1" || gate.nativeExecution !== true ||
+        !request || gate.requestSha256 !== sha256(JSON.stringify(request)) || typeof gate.rawResponse !== "string" ||
+        gate.responseSha256 !== sha256(gate.rawResponse) || context.scopeGateSha256 !== sha256(JSON.stringify(gate)) ||
+        !Array.isArray(input.canonicalReferences) || input.canonicalReferences.length < 1 || input.canonicalReferences.length > 5) return [];
+    const relative = path.relative(fs.realpathSync(path.dirname(options.sourceDirectory)), fs.realpathSync(asset.path));
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return [];
+    const sources = input.canonicalReferences.map(record);
+    if (sources.some(source => !source || typeof source.sha256 !== "string" || !/^[a-f0-9]{64}$/u.test(source.sha256) ||
+        source.sourceSnapshotId !== snapshotId || !exactStaticFile(source.path, source.sha256)) ||
+        new Set(sources.map(source => source!.sha256)).size !== sources.length ||
+        !sources.some(source => source!.sha256 === primary.sha256 && source!.path === primary.path)) return [];
+    const ordered = [sources.find(source => source!.sha256 === primary.sha256)!, ...sources.filter(source => source!.sha256 !== primary.sha256)];
+    if (JSON.stringify(context.references) !== JSON.stringify(ordered.map((source, index) => ({ imageIndex: index + 2,
+      sha256: source!.sha256, sourceSnapshotId: snapshotId }))) ||
+        JSON.stringify(request.imagePaths) !== JSON.stringify([primary.sha256, options.candidateSha256,
+          ...ordered.slice(1).map(source => source!.sha256)])) return [];
+    return ordered.slice(1).map(source => ({ path: source!.path as string, sha256: source!.sha256 as string }));
+  } catch { return []; }
+}
+
 /** Preserve the slot's independently bound canonical primary even when the
  * optional comparison shortlist omitted it. This is receipt/byte lineage only;
  * no pixel verdict, literal certification or repair authority is created. */
@@ -192,23 +245,43 @@ export async function readPublicationIdentifierReferenceBindings(options: {
   // optional reference when space permits; only the final optional item yields
   // to the exact own primary at the unchanged five-reference ceiling.
   const retained = base.filter(reference => reference.sha256 !== own.sha256).slice(0, 4);
+  const discovered = new Set<string>();
+  let discoveryStillBound = () => true;
   if (retained.length < 4 && options.candidateSha256) {
     try {
       const manifestPath = path.join(options.sourceDirectory, "..", "manifest.json"), stat = fs.lstatSync(manifestPath);
       if (stat.isFile() && !stat.isSymbolicLink() && stat.size <= 4 * 1024 * 1024) {
-        const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+        const manifestBytes = fs.readFileSync(manifestPath), manifest = JSON.parse(manifestBytes.toString("utf8"));
         if (manifest.brandLinkId === options.productId && manifest.sourceSnapshot?.snapshotId === own.sourceSnapshotId) {
+          const sceneOptions = { snapshot: options.snapshot, candidateSha256: options.candidateSha256,
+            sourceDirectory: options.sourceDirectory, primaryReference: primary };
+          const sceneHints = boundSceneSourceHints(manifest, sceneOptions, own.sourceSnapshotId);
+          discoveryStillBound = () => fs.readFileSync(manifestPath).equals(manifestBytes) &&
+            JSON.stringify(boundSceneSourceHints(manifest, sceneOptions, own.sourceSnapshotId)) === JSON.stringify(sceneHints);
+          for (const hint of sceneHints) {
+            if (retained.length >= 4) break;
+            if (hint.sha256 === own.sha256 || retained.some(reference => reference.sha256 === hint.sha256)) continue;
+            const candidate = (await readSelectedGalleryComparisons({ ...options, publicationOriginalSha256: hint.sha256 }))
+              .find(reference => reference.sha256 === hint.sha256 && path.resolve(reference.path) === path.resolve(hint.path));
+            if (candidate && discoveryStillBound()) { retained.push(candidate); discovered.add(candidate.sha256); }
+          }
           for (const hint of readHistoricalPrintSourceHints(manifest, options.candidateSha256, own.sha256)) {
+            if (retained.length >= 4) break;
             if (hint === own.sha256 || retained.some(reference => reference.sha256 === hint)) continue;
             // Resolve through the current gallery, bytes and retrieval receipt;
             // the historical path, transcription and verdict are never reused.
             const candidate = (await readSelectedGalleryComparisons({ ...options, publicationOriginalSha256: hint }))
               .find(reference => reference.sha256 === hint);
-            if (candidate) { retained.push(candidate); break; }
+            if (candidate) { retained.push(candidate); discovered.add(candidate.sha256); break; }
           }
         }
       }
     } catch { /* Historical hints are optional, not evidence or authority. */ }
   }
-  return [...retained, own];
+  let discoveryCurrent = false;
+  try { discoveryCurrent = discoveryStillBound(); } catch { /* Changed or missing optional discovery inputs cannot survive an await. */ }
+  if (!exactStaticFile(primary.path, primary.sha256))
+    throw new Error("SELECTED_SOURCE_CONTEXT_INVALID: 본문 사진 원본이 비교 근거 조회 중 변경되었습니다.");
+  return [...retained, own].filter(reference => (!discovered.has(reference.sha256) || discoveryCurrent) &&
+    exactStaticFile(reference.path, reference.sha256) && exactStaticFile(reference.receiptPath, reference.receiptSha256));
 }
