@@ -69,7 +69,7 @@ async function main() {
     sourceBox,candidateBox,sourceLiteral:"Markora",identifierRole:"brand",sourceRegionCoverage:"entire-observed-identifier",candidateRegionCoverage:"entire-corresponding-print-location",candidateSurfaceCondition:"marked",candidateIdentifierVisibility:"legible",
     identifierComparisons:[{sourceLiteral:"Markora",candidateLiteral:"Markra",identifierRole:"brand",sourceImageIndex:3,sourceSha256:fileHash(detail),sourceLocation:"intrinsic",candidateLocation:"intrinsic",sourceReadability:"legible",candidateReadability:"legible",sameSelectedComponent:null,sameSelectedVisibleOption:null,sourceBox,candidateBox}],reason:"literal letters differ; unknown physical-face flags remain unchanged",accepted:false};
   const moduleFile=path.resolve("scripts/lib/publication-identifier-review.ts"), actual=createRequire(moduleFile), code=ts.transpileModule(fs.readFileSync(moduleFile,"utf8"),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,esModuleInterop:true}}).outputText;
-  type Mode={readability?:IntrinsicIdentifierObservation["readability"];primaryReadability?:IntrinsicIdentifierObservation["readability"];canonicalReadability?:IntrinsicIdentifierObservation["readability"];candidateLiteral?:string;app?:PublicationPrintApplicabilityRow;pair?:PublicationIdentifierComparison;
+  type Mode={readability?:IntrinsicIdentifierObservation["readability"];primaryReadability?:IntrinsicIdentifierObservation["readability"];primaryWordBox?:[number,number,number,number];canonicalReadability?:IntrinsicIdentifierObservation["readability"];candidateLiteral?:string;app?:PublicationPrintApplicabilityRow;pair?:PublicationIdentifierComparison;
     appResponses?:Array<PublicationPrintApplicabilityRow|Error>;onAppResponse?:(index:number)=>void;sourceRow?:Record<string,unknown>;sourceNative?:boolean;ocrBad?:boolean;observerNative?:boolean;sourceOnly?:boolean;invalidSchema?:boolean;providerThrow?:boolean;malformedJson?:boolean;ocrUnavailable?:boolean;ocrUnresolved?:boolean;invalidObserverPath?:string;unknownObserver?:boolean};
   const load=(mode:Mode={})=>{
     let appCalls=0,pairCalls=0,ocrCalls=0,sourceCalls=0;const appRequests:string[]=[];
@@ -81,7 +81,7 @@ async function main() {
           return {status:"invalid",reason:"OBSERVER_RESPONSE_INVALID",diagnostic:{imageSha256:options.sha256,stage:"response",issue:"OBSERVER_LITERAL_OR_ROLE_INVALID",rawResponse,responseSha256:hash(rawResponse)}};
         }
         const readability=options.path===candidate?(mode.readability||"absent"):options.path===primary?(mode.primaryReadability||"unreadable"):(mode.canonicalReadability||"legible");
-        const observation:IntrinsicIdentifierObservation={readability,literal:readability==="legible"?(options.path===candidate?(mode.candidateLiteral||"Markra"):"Markora"):"",box:readability==="legible"?(options.path===candidate?candidateBox:sourceBox):null,identifierRole:readability==="legible"?"brand":"none",location:readability==="legible"?"intrinsic":"not-observed"};
+        const observation:IntrinsicIdentifierObservation={readability,literal:readability==="legible"?(options.path===candidate?(mode.candidateLiteral||"Markra"):"Markora"):"",box:readability==="legible"?(options.path===candidate?candidateBox:options.path===primary?mode.primaryWordBox||sourceBox:sourceBox):null,identifierRole:readability==="legible"?"brand":"none",location:readability==="legible"?"intrinsic":"not-observed"};
         const rawResponse=serializeIntrinsicIdentifierObserverResponse(observation);return {status:readability==="legible"?"observed":"unreadable",reason:"offline actual observation",evidence:{version:INTRINSIC_IDENTIFIER_OBSERVER_VERSION,nativeExecution:mode.observerNative!==false,imageSha256:options.sha256,requestSha256:intrinsicIdentifierObserverRequestSha256(options.sha256),rawResponse,responseSha256:hash(rawResponse),observation}};
       };
     const loaded={exports:{}};
@@ -96,7 +96,7 @@ async function main() {
       // The provider receives JSON, not VM-realm Array constructors. Preserve
       // that real serialization boundary for supported primitive schemas.
       const schemaCheck=new Ajv().compile(JSON.parse(JSON.stringify(call.outputSchema)) as object);assert.equal(schemaCheck(raw),!mode.invalidSchema);
-      if(app && mode.primaryReadability==="legible") {
+      if(app && mode.primaryReadability==="legible" && Object.hasOwn((call.outputSchema as {properties:Record<string,unknown>}).properties,"primaryObservedWordBox")) {
         assert.equal(call.userPrompt.includes("Markora"),false,"the spatial question receives only the independent word ROI, never its letters");
         const actual=raw as PublicationPrintApplicabilityRow;
         assert.equal(schemaCheck({...actual,primaryObservedWordBox:[1,2,3,4]}),true,"wire allows primitive tuple; runtime still binds the exact observed ROI");
@@ -150,7 +150,9 @@ async function main() {
       }}:actual(name)}, {filename:moduleFile});
     return {api:loaded.exports as {reviewPublicationIdentifiers:typeof reviewPublicationIdentifiers;publicationIdentifierReviewEvidenceIssue:typeof publicationIdentifierReviewEvidenceIssue;publicationPrintApplicabilityResponseIssue:typeof publicationPrintApplicabilityResponseIssue},counts:()=>({appCalls,pairCalls,ocrCalls,sourceCalls}),appRequests:()=>[...appRequests],observe};
   };
+  const normalizedAppRequestSha=(request:string)=>{const call=JSON.parse(request);call.imagePaths=call.imagePaths.map(fileHash);return hash(JSON.stringify(call));};
   const normal=load(), pass=await normal.api.reviewPublicationIdentifiers(input);
+  assert.equal(normalizedAppRequestSha(normal.appRequests()[0]),"f22f658be4a3c6c29cf9e61b39546c2363f003d9d919504351f8fa5935955567","169 final-primary-word scope clarification must preserve the 168 no-primary-word request");checks++;
   assert.equal(pass.status,"unverified",pass.reason);assert.ok(pass.printObservationWarning);assert.equal(pass.nativeExecution,false);assert.equal(pass.comparison,null);assert.equal(normal.api.publicationIdentifierReviewEvidenceIssue(pass,input),null);
   assert.deepEqual(normal.counts(),{appCalls:1,pairCalls:0,ocrCalls:0,sourceCalls:0});checks+=6;
   const reusedInput=copy(input);if(reusedInput.scopeGate?.kind!=="scene-native-positive/v1")for(const key of ["visibleReview","claimsReview","formatReview"] as const)reusedInput.scopeGate![key].reused=true;
@@ -307,6 +309,24 @@ async function main() {
   actualObserved.sources[0].evidence.observation.box=[377,716,422,733];
   assert.equal(retryTask.api.publicationPrintApplicabilityResponseIssue(actual167Raw,bodyInput,actualObserved),
     "own-unprinted applicability contradicts the compared-face print fields");checks++;
+  // Actual 168 F9 outside-view response remains a raw false-surface HOLD.
+  // Prompt clarification must not relabel it, retry it or certify lettering.
+  const actual168OutsideRaw="{\"sourceObservation\":\"IMAGE 2 shows the person wearing a black ear device; the fixed word ROI is on the device’s curved rear connector. The front earpiece face is blank.\",\"candidateObservation\":\"IMAGE 1 shows a black ear device on the corresponding ear. Its visible front earpiece face is blank; no mark is apparent on the rear connector.\",\"correspondenceObservation\":\"The ear position and device arrangement correspond, but the candidate’s rear connector is partly obscured by the ear and hair, so the word-bearing connector location is not fully comparable. The matched front face is a different device surface from the word ROI.\",\"samePhysicalPart\":true,\"samePhysicalSurface\":false,\"sameSelectedVisibleOption\":true,\"sourcePrintLocation\":\"present\",\"candidatePrintLocation\":\"occluded\",\"sourceBox\":[336,472,440,552],\"candidateBox\":[362,325,489,465],\"witness\":\"The source word ROI [382,510,422,523] lies on the rear connector behind the earpiece. The candidate shows the corresponding rear connector emerging behind the earpiece near the ear and hair, which obscure part of that connector and its print location. The visible front earpiece face is bounded by the earbud outline; the connector extends from behind it toward the rear of the ear.\",\"applicability\":\"outside-visible-resolution-or-view\",\"accepted\":true,\"primaryObservedWordRelation\":\"other-visible-member-or-face\",\"primaryObservedWordBox\":[382,510,422,523],\"comparedPrimaryFaceBox\":[431,393,500,467],\"primaryObservedWordSpatialWitness\":\"The word ROI is on the narrow rear connector behind the earpiece. The compared front earpiece face is the dark oval against the ear; its visible separation from the word-bearing connector is at the rear edge of that oval.\",\"primaryFaceLandmarks\":[{\"primaryObservation\":\"Dark oval earpiece face seated in the visible ear opening.\",\"candidateObservation\":\"Dark oval earpiece face seated in the visible ear opening.\"},{\"primaryObservation\":\"Narrow connector projects backward from the earpiece behind the ear.\",\"candidateObservation\":\"Narrow connector projects backward from the earpiece behind the ear.\"}]}";
+  const actual168Outside=JSON.parse(actual168OutsideRaw) as PublicationPrintApplicabilityRow;
+  const actualOutsideTask=load({primaryReadability:"legible",primaryWordBox:[382,510,422,523],appResponses:[actual168Outside,otherMemberApp]});
+  const actualOutside=await actualOutsideTask.api.reviewPublicationIdentifiers(bodyInput);
+  assert.equal(actualOutside.status,"hold");assert.equal(actualOutside.reason,"OWN_PRINT_OUTSIDE_VIEW_CORRESPONDENCE_UNCONFIRMED");
+  assert.equal(actualOutsideTask.counts().appCalls,1,"a coherent adverse surface observation never retries for a favorable answer");
+  assert.equal(actualOutside.printApplicability!.row!.samePhysicalSurface,false);
+  assert.equal(actualOutside.printApplicability!.rawResponse,actual168OutsideRaw);
+  assert.deepEqual(copy(actualOutside.printApplicability!.row),actual168Outside);
+  assert.equal(actualOutside.printApplicability!.rejectedFormatAttempt,undefined);
+  assert.equal(actualOutside.printObservationWarning,undefined);assert.equal(actualOutside.identifierConflict,undefined);assert.equal(actualOutside.missingPrintEvidence,undefined);checks+=10;
+  const actualPrompt=JSON.parse(actualOutsideTask.appRequests()[0]).userPrompt as string;
+  assert(actualPrompt.includes("must share ONE actual physical source face bearing that fixed word ROI"));
+  assert(actualPrompt.includes("do not mix that printed face with a separate blank front"));
+  assert(actualPrompt.includes("never convert false to null to obtain an accepted classification"));
+  assert.equal(actualPrompt.includes("Markora"),false,"spatial scope instructions never receive the independently read word");checks+=4;
   for(const mutate of [(value:typeof retried)=>{delete value.printApplicability!.rejectedFormatAttempt;},
     (value:typeof retried)=>{value.printApplicability!.version="publication-print-applicability/v1";},
     (value:typeof retried)=>{value.printApplicability!.rejectedFormatAttempt!.rawResponse="{}";},
@@ -584,7 +604,11 @@ async function main() {
   const ambiguousScene=load(ambiguousMode),ambiguousSceneResult=await ambiguousScene.api.reviewPublicationIdentifiers(sceneInput);
   assert.equal(ambiguousSceneResult.status,"hold");assert.equal(ambiguousSceneResult.printObservationWarning,undefined);
   assert.equal(ambiguousScene.counts().appCalls,0,"new final-only ambiguity policy cannot loosen first-generation scene admission");checks+=3;
-  const scene=load(),sceneResult=await scene.api.reviewPublicationIdentifiers(sceneInput);assert.equal(sceneResult.status,"unverified");assert.ok(sceneResult.printObservationWarning);assert.equal(scene.api.publicationIdentifierReviewEvidenceIssue(sceneResult,sceneInput),null);checks+=3;
+  const scene=load(),sceneResult=await scene.api.reviewPublicationIdentifiers(sceneInput);assert.equal(normalizedAppRequestSha(scene.appRequests()[0]),"f22f658be4a3c6c29cf9e61b39546c2363f003d9d919504351f8fa5935955567","169 final-primary-word clarification must preserve the 168 generation-scene request");checks++;assert.equal(sceneResult.status,"unverified");assert.ok(sceneResult.printObservationWarning);assert.equal(scene.api.publicationIdentifierReviewEvidenceIssue(sceneResult,sceneInput),null);checks+=3;
+  const sceneLegible=load({primaryReadability:"legible",app:positive});
+  await sceneLegible.api.reviewPublicationIdentifiers(sceneInput);
+  assert.equal(sceneLegible.counts().appCalls,1);
+  assert.equal(normalizedAppRequestSha(sceneLegible.appRequests()[0]),"f22f658be4a3c6c29cf9e61b39546c2363f003d9d919504351f8fa5935955567","a legible primary in a generation-scene gate must still keep the 168 request unchanged");checks+=2;
   const sceneSuspected=load({app:blankApp,pair:uncorroboratedPair}),sceneHeld=await sceneSuspected.api.reviewPublicationIdentifiers(sceneInput);
   assert.equal(sceneHeld.status,"hold");assert.equal(sceneHeld.printObservationWarning,undefined);assert.equal(sceneSuspected.counts().sourceCalls,0);checks+=3;
   for(const mutate of [(value:PublicationIdentifierReviewInput)=>{if(value.scopeGate?.kind==="scene-native-positive/v1")value.scopeGate.nativeExecution=false;},(value:PublicationIdentifierReviewInput)=>{if(value.scopeGate?.kind==="scene-native-positive/v1"){const row=JSON.parse(value.scopeGate.rawResponse);row.checks.silhouette=false;value.scopeGate.rawResponse=JSON.stringify(row);value.scopeGate.responseSha256=hash(value.scopeGate.rawResponse);}},(value:PublicationIdentifierReviewInput)=>{if(value.scopeGate?.kind==="scene-native-positive/v1"){const row=JSON.parse(value.scopeGate.rawResponse);row.intrinsicPrintProofClaim=true;value.scopeGate.rawResponse=JSON.stringify(row);value.scopeGate.responseSha256=hash(value.scopeGate.rawResponse);}}]){const changed=copy(sceneInput);mutate(changed);assert.equal((await load().api.reviewPublicationIdentifiers(changed)).status,"hold");checks++;}
