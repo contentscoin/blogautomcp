@@ -205,11 +205,15 @@ export interface PublicationPrintApplicabilityRow {
   accepted: boolean;
 }
 export interface PublicationPrintApplicabilityEvidence {
-  version: "publication-print-applicability/v1"; nativeExecution: boolean;
+  version: "publication-print-applicability/v1" | "publication-print-applicability/v2"; nativeExecution: boolean;
   rawResponse: string; requestSha256: string; responseSha256: string;
   context: { candidateSha256: string; primarySha256: string; candidateDimensions: ImageDimensions; primaryDimensions: ImageDimensions;
     primaryObservedWordBox?: IdentifierBox; candidateObservedWordBox?: IdentifierBox };
   row: PublicationPrintApplicabilityRow | null;
+  /** A received contract error only, never an adverse observation or an
+   * unknown provider outcome. Caller HMAC binds this envelope with the result. */
+  rejectedFormatAttempt?: { version: "publication-applicability-rejected-format/v1"; requestSha256: string;
+    rawResponse: string; responseSha256: string; issue: string; retryFailure?: string };
 }
 type Review = (options: CodexDraftOptions) => Promise<string>;
 type Dependencies = { review?: Review; corroborate?: typeof corroborateIntrinsicIdentifierPair; ocr?: typeof reviewIntrinsicIdentifierOcr;
@@ -555,9 +559,10 @@ function applicabilityRequest(input: PublicationIdentifierReviewInput, observed?
   const properties = {
     sourceObservation: { type: "string", minLength: 1 }, candidateObservation: { type: "string", minLength: 1 }, correspondenceObservation: { type: "string", minLength: 1 },
     samePhysicalPart: { type: ["boolean", "null"] }, samePhysicalSurface: { type: ["boolean", "null"] }, sameSelectedVisibleOption: { type: ["boolean", "null"] },
-    sourcePrintLocation: { type: "string", enum: ["present", "unprinted", "not-observed"] },
+    sourcePrintLocation: { type: "string", enum: ["present", "unprinted", "not-observed"], description: "Printing on the actually compared physical source face only; exclude another member or package." },
     candidatePrintLocation: { type: "string", enum: ["entire-exposed-blank", "small-present-unreadable", "occluded", "cropped", "edge-on", "marked-readable", "own-unprinted-face", "unresolved"] },
-    sourceBox: boxSchema, candidateBox: boxSchema, witness: { type: "string", minLength: 1 },
+    sourceBox: { ...boxSchema, description: "Actual print location on the compared source face only; null for an unprinted face. Other-member words belong only in primaryObservedWordBox." },
+    candidateBox: boxSchema, witness: { type: "string", minLength: 1 },
     applicability: { type: "string", enum: ["comparable-entire-location", "outside-visible-resolution-or-view", "not-applicable-own-unprinted-face", "unresolved"] }, accepted: { type: "boolean" },
     ...(primaryWord ? {
       primaryObservedWordRelation: { type: "string", enum: ["none-observed", "same-compared-face", "other-visible-member-or-face", "unresolved"] },
@@ -587,7 +592,7 @@ function applicabilityRequest(input: PublicationIdentifierReviewInput, observed?
       "not-applicable-own-unprinted-face requires BOTH actually unprinted surfaces to be the SAME physical part AND SAME physical FACE, positively identified by at least TWO local face landmarks (for example the same four buttons and same connector). State them in the witness. An unprinted back versus a candidate's blank front is NOT this classification; unknown face mapping stays unresolved. Colour/lighting and purchase-option certification belong to A, not this unprinted-face question: do not reject the unprinted-face classification merely for a slight lighting tint or inability to certify a SKU. Use sourcePrintLocation=unprinted, candidatePrintLocation=own-unprinted-face and both boxes=null, without inventing letters. Other-face source printing cannot impose text on a positively matched unprinted face.",
       "Classification consistency: if the corresponding SOURCE face is unprinted, a blank CANDIDATE face is own-unprinted-face, never entire-exposed-blank/comparable-entire-location. The latter requires an actual printed location on that SAME source face, not a word on adjacent packaging. When bounding a matched device face, exclude another device's outline and the package; locate its own left and right physical edges before returning comparedPrimaryFaceBox. Do not combine the left edge of one device with the right edge of another. If a required boundary is not observable retain unresolved; do not fabricate coordinates to force separation.",
       "outside-visible-resolution-or-view requires a POSITIVE actual witness: a real small mark is present but too small to read; or the corresponding location is physically hidden by a specifically observed occluder, cropped out, or edge-on. State the actual local part, two corresponding surrounding landmarks, and where/how visibility is limited. A generic inability to map a location, source-only large logo, a blank visible face or uncertainty alone is unresolved, NOT outside scope. Never call a clearly exposed blank region a small mark or an occlusion.",
-      "For small-present-unreadable, source/candidate must show the same actual physical part, same surface and same visible option, all true, with an actual bounded mark in the candidate. For occluded/cropped/edge-on, same part and visible option must be true; the unexposed surface may be null but must not be false. sourceBox identifies the primary's actual marked location; candidateBox identifies the actual mark or limiting occluder/edge (null only when cropped out). No invented source printing.",
+      "For small-present-unreadable, source/candidate must show the same actual physical part, same surface and same visible option, all true, with an actual bounded mark in the candidate. For occluded/cropped/edge-on, same part and visible option must be true; the unexposed surface may be null but must not be false. sourcePrintLocation/sourceBox describe ONLY the actually compared source physical face, never another member's/package's word (which belongs only in primaryObservedWordBox); candidateBox identifies the actual mark or limiting occluder/edge (null when cropped out or own-unprinted-face). No invented source printing.",
       "comparable-entire-location means the source's actual marked location and the ENTIRE corresponding candidate location are both actually exposed on the SAME physical part/surface/visible option, all true. An entire-exposed-blank observation must cover the WHOLE expected print location, not an arbitrary convenient empty patch. This is only an applicability witness; a separate clear-source/native/OCR defect corroboration remains required. Unknown, glare without identifiable location, different face/colour, partial blank or inadequate landmarks stays unresolved/accepted=false.",
       ...(primaryWord ? ["The server additionally supplies one independently observed intrinsic word's FIXED normalized ROI in IMAGE 2 only, not its letters or any expected brand. Preserve that ROI exactly as primaryObservedWordBox. Determine whether the observed word is on the SAME compared physical FACE, a DIFFERENT visible included member/face, or unresolved. For other-visible-member-or-face, comparedPrimaryFaceBox must bound the ENTIRE actually compared physical FACE in IMAGE 2, never a convenient blank patch or another member. It must not overlap the supplied word ROI at all. primaryFaceLandmarks must give at least TWO distinct actual corresponding structural observations in BOTH images, and primaryObservedWordSpatialWitness must name both locations and their visible separation. A word on a box cannot impose printing on an actually matched unprinted device front; a word ON THAT SAME FRONT cannot be scoped away. Both local faces must actually be unprinted with all three correspondence flags true. Do not infer different-member status from non-reading alone. If whole-face boundaries or separation cannot be established, use unresolved, comparedPrimaryFaceBox=null and primaryFaceLandmarks=[]; preserve honest false/null. No new letter certification or repair authority follows from a scope warning."] : []),
       ...(candidateWord ? ["The server supplies an independently observed word's FIXED normalized ROI in IMAGE 1 only; its letters and any expected brand are NOT supplied. The independent OWN primary observation has no intrinsic identifier. Preserve the exact ROI as candidateObservedWordBox and inspect where that word actually exists. external-background-artwork requires positively observed seller/source artwork or background lettering physically OUTSIDE ALL visible selected physical products, their own packaging and every included physical member. A printed garment, case, accessory, gift box, another physical member/face or reflected product printing is NOT external artwork. candidatePhysicalProductsBox must bound the ENTIRE visible physical product(s)/own packaging in IMAGE 1, never a convenient blank patch or unrelated single face. The fixed word ROI must not overlap it at all. Also locate the ACTUAL corresponding external graphic in the canonical OWN primary as sourceExternalGraphicBox, plus the ENTIRE visible physical products/packaging there as sourcePhysicalProductsBox; those boxes must not overlap at all either. sameExternalGraphic=true requires actual matching external graphic content and layout observed in BOTH images, never a sidecar/filename/brand inference; a newly added different background brand/copy is false. Explain those actual paired graphics in externalGraphicObservations without transcribing or guessing a brand, name both spatial separations in candidateObservedWordSpatialWitness, and give at least TWO distinct corresponding physical structure observations in BOTH images in candidateFaceLandmarks. The compared physical source/candidate faces must both be unprinted with all three correspondence flags true. SAME-face printing is intrinsic-compared-face; another physical member's printing is other-intrinsic-member. Unknown role, graphic correspondence, physical boundaries or separation stays unresolved/null/empty, never a forced favorable value. This task makes no intrinsic letter certification or product-authentication verdict."] : []),
@@ -599,19 +604,18 @@ function applicabilityRequest(input: PublicationIdentifierReviewInput, observed?
     outputSchema: { type: "object", properties, required: Object.keys(properties), additionalProperties: false } };
   return { context, call };
 }
-function applicabilityEvidenceIssue(value: PublicationPrintApplicabilityEvidence, input: PublicationIdentifierReviewInput, requireNative: boolean, observed?: PublicationBlindInputObservations): string | null {
+function applicabilityResponseIssue(rawResponse: string, expected: ReturnType<typeof applicabilityRequest>): string | null {
   try {
-    const expected = applicabilityRequest(input, observed), row = value.row;
-    if (value.version !== "publication-print-applicability/v1" || requireNative && value.nativeExecution !== true ||
-        !same(value.context, expected.context) || value.requestSha256 !== hash(JSON.stringify(expected.call)) || value.responseSha256 !== hash(value.rawResponse) ||
-        Buffer.byteLength(value.rawResponse) > 20 * 1024 || !row || !same(JSON.parse(value.rawResponse), row) ||
+    if (typeof rawResponse !== "string" || Buffer.byteLength(rawResponse) > 20 * 1024) return "local applicability response size/type is invalid";
+    const row = object(JSON.parse(rawResponse)) as unknown as PublicationPrintApplicabilityRow | null;
+    if (!row ||
         Object.keys(row).sort().join("|") !== Object.keys(expected.call.outputSchema.properties).sort().join("|") ||
         ![row.sourceObservation, row.candidateObservation, row.correspondenceObservation, row.witness].every(nonempty) ||
         ![row.samePhysicalPart, row.samePhysicalSurface, row.sameSelectedVisibleOption].every(flag => flag === null || typeof flag === "boolean") ||
         typeof row.accepted !== "boolean" || ![row.sourceBox, row.candidateBox].every(box => box === null || validFaceBox(box)) ||
         !["present", "unprinted", "not-observed"].includes(row.sourcePrintLocation) ||
         !["entire-exposed-blank", "small-present-unreadable", "occluded", "cropped", "edge-on", "marked-readable", "own-unprinted-face", "unresolved"].includes(row.candidatePrintLocation) ||
-        !["comparable-entire-location", "outside-visible-resolution-or-view", "not-applicable-own-unprinted-face", "unresolved"].includes(row.applicability)) return "local applicability raw/native/pixel binding is invalid";
+        !["comparable-entire-location", "outside-visible-resolution-or-view", "not-applicable-own-unprinted-face", "unresolved"].includes(row.applicability)) return "local applicability response does not encode the exact task schema";
     if (expected.context.primaryObservedWordBox) {
       if (!same(row.primaryObservedWordBox, expected.context.primaryObservedWordBox) ||
           !["none-observed", "same-compared-face", "other-visible-member-or-face", "unresolved"].includes(String(row.primaryObservedWordRelation)) ||
@@ -634,7 +638,49 @@ function applicabilityEvidenceIssue(value: PublicationPrintApplicabilityEvidence
           new Set(row.candidateFaceLandmarks.map(pair => JSON.stringify(pair))).size !== row.candidateFaceLandmarks.length)
         return "candidate external-word spatial evidence is malformed or not bound to its observed ROI";
     }
+    // This is a contradiction between returned classification fields, not a
+    // reason to question a coherent negative/uncertain physical observation.
+    if (row.accepted === true && row.applicability === "not-applicable-own-unprinted-face" &&
+        (row.sourcePrintLocation !== "unprinted" || row.candidatePrintLocation !== "own-unprinted-face" || row.sourceBox !== null || row.candidateBox !== null))
+      return "own-unprinted applicability contradicts the compared-face print fields";
     return null;
+  } catch { return "local applicability response is malformed JSON"; }
+}
+function applicabilityFormatRetryAllowed(rawResponse: string, expected: ReturnType<typeof applicabilityRequest>): boolean {
+  const issue = applicabilityResponseIssue(rawResponse, expected);
+  if (!issue || typeof rawResponse !== "string" || Buffer.byteLength(rawResponse) > 20 * 1024) return false;
+  try {
+    const row = object(JSON.parse(rawResponse));
+    if (row && (row.accepted === false || [row.samePhysicalPart, row.samePhysicalSurface, row.sameSelectedVisibleOption].some(flag => flag === false))) return false;
+    if (issue === "own-unprinted applicability contradicts the compared-face print fields" &&
+        (!row || row.samePhysicalPart !== true || row.samePhysicalSurface !== true)) return false;
+  } catch { /* Received malformed JSON contains no coherent physical verdict. */ }
+  return true;
+}
+/** Deterministic response-contract diagnosis only; never a model, a raw-field
+ * repair or a positive physical-face/letter verdict. */
+export function publicationPrintApplicabilityResponseIssue(rawResponse: string, input: PublicationIdentifierReviewInput,
+  observed?: PublicationBlindInputObservations): string | null {
+  try { return applicabilityResponseIssue(rawResponse, applicabilityRequest(input, observed)); }
+  catch { return "local applicability response input is unavailable or changed"; }
+}
+function applicabilityEvidenceIssue(value: PublicationPrintApplicabilityEvidence, input: PublicationIdentifierReviewInput, requireNative: boolean, observed?: PublicationBlindInputObservations): string | null {
+  try {
+    const expected = applicabilityRequest(input, observed), rejected = value.rejectedFormatAttempt;
+    if (!["publication-print-applicability/v1", "publication-print-applicability/v2"].includes(value.version) || requireNative && value.nativeExecution !== true ||
+        !same(value.context, expected.context) || value.requestSha256 !== hash(JSON.stringify(expected.call)) ||
+        typeof value.rawResponse !== "string" || value.responseSha256 !== hash(value.rawResponse) ||
+        !same(JSON.parse(value.rawResponse), value.row)) return "local applicability raw/native/pixel binding is invalid";
+    if (value.version === "publication-print-applicability/v1" ? rejected !== undefined : value.nativeExecution !== true || !rejected)
+      return "local applicability retry envelope is missing or cannot assert native authority";
+    if (rejected && (Object.keys(rejected).sort().join("|") !== ["version", "requestSha256", "rawResponse", "responseSha256", "issue", ...(rejected.retryFailure === undefined ? [] : ["retryFailure"])].sort().join("|") ||
+        rejected.version !== "publication-applicability-rejected-format/v1" || rejected.requestSha256 !== value.requestSha256 ||
+        typeof rejected.rawResponse !== "string" || Buffer.byteLength(rejected.rawResponse) > 20 * 1024 || rejected.responseSha256 !== hash(rejected.rawResponse) ||
+        !rejected.issue || applicabilityResponseIssue(rejected.rawResponse, expected) !== rejected.issue || !applicabilityFormatRetryAllowed(rejected.rawResponse, expected) ||
+        rejected.retryFailure !== undefined && (typeof rejected.retryFailure !== "string" || !rejected.retryFailure.trim() || rejected.retryFailure.length > 512 ||
+          value.rawResponse !== rejected.rawResponse || value.responseSha256 !== rejected.responseSha256)))
+      return "local applicability rejected format attempt binding is invalid";
+    return applicabilityResponseIssue(value.rawResponse, expected);
   } catch { return "local applicability evidence is malformed"; }
 }
 function ownUnprintedApplicabilityIssue(value: PublicationPrintApplicabilityEvidence, input: PublicationIdentifierReviewInput, requireNative: boolean, observed?: PublicationBlindInputObservations): string | null {
@@ -1448,14 +1494,39 @@ async function reviewBlindPublicationIdentifiers(input: PublicationIdentifierRev
         const semantic = applicabilityRequest(input, observed), call: CodexDraftOptions = { ...semantic.call, imagePaths: [input.candidatePath, input.primaryReference.path],
           outputSchema: JSON.parse(JSON.stringify(semantic.call.outputSchema)) };
         taskStage = "applicability"; taskImageSha256 = input.candidateSha256;
-        const frozen = JSON.stringify(call), rawResponse = await (dependencies.review || runCodexDraft)(call);
-        let row: PublicationPrintApplicabilityRow | null = null;
-        try { row = JSON.parse(rawResponse) as PublicationPrintApplicabilityRow; } catch { /* Invalid is deny-only, never another question retry. */ }
-        const applicability: PublicationPrintApplicabilityEvidence = { version: "publication-print-applicability/v1", nativeExecution,
-          rawResponse, requestSha256: hash(JSON.stringify(semantic.call)), responseSha256: hash(rawResponse), context: semantic.context, row };
+        const frozen = JSON.stringify(call), requestSha256 = hash(JSON.stringify(semantic.call));
+        let rawResponse = await (dependencies.review || runCodexDraft)(call);
+        const receivedEvidence = (rejectedFormatAttempt?: PublicationPrintApplicabilityEvidence["rejectedFormatAttempt"]): PublicationPrintApplicabilityEvidence => {
+          let row: PublicationPrintApplicabilityRow | null = null;
+          try { row = JSON.parse(rawResponse) as PublicationPrintApplicabilityRow; } catch { /* Original received bytes stay intact. */ }
+          return { version: rejectedFormatAttempt ? "publication-print-applicability/v2" : "publication-print-applicability/v1", nativeExecution,
+            rawResponse, requestSha256, responseSha256: hash(rawResponse), context: semantic.context, row,
+            ...(rejectedFormatAttempt ? { rejectedFormatAttempt } : {}) };
+        };
+        let applicability = receivedEvidence();
         result.printApplicability = applicability;
-        if (!unchanged() || JSON.stringify(call) !== frozen || applicabilityEvidenceIssue(applicability, input, nativeExecution, observed))
+        if (!unchanged() || JSON.stringify(call) !== frozen)
           return { ...result, reason: "OWN_PRINT_APPLICABILITY_INVALID_OR_CHANGED" };
+        const firstIssue = applicabilityResponseIssue(rawResponse, semantic);
+        if (nativeExecution && firstIssue && applicabilityFormatRetryAllowed(rawResponse, semantic)) {
+          const rejectedFormatAttempt: NonNullable<PublicationPrintApplicabilityEvidence["rejectedFormatAttempt"]> = {
+            version: "publication-applicability-rejected-format/v1", requestSha256, rawResponse, responseSha256: hash(rawResponse), issue: firstIssue };
+          // Only a definitely received contract error permits this one identical
+          // question. Provider/transport exceptions never start a retry; an
+          // unknown second result retains the first bytes and stops here.
+          try { rawResponse = await runCodexDraft(call); }
+          catch (error) { rejectedFormatAttempt.retryFailure = String(error instanceof Error ? error.message : error).slice(0, 512) || "unknown provider failure"; }
+          applicability = receivedEvidence(rejectedFormatAttempt);
+          result.printApplicability = applicability;
+        }
+        if (!unchanged() || JSON.stringify(call) !== frozen)
+          return { ...result, reason: "OWN_PRINT_APPLICABILITY_INVALID_OR_CHANGED" };
+        const responseIssue = applicabilityResponseIssue(rawResponse, semantic);
+        if (responseIssue) return { ...result, reason: "OWN_PRINT_APPLICABILITY_RESPONSE_CONTRACT_INVALID", taskDiagnostic: {
+          stage: "applicability", imageSha256: input.candidateSha256, status: "invalid-response-contract", reason: responseIssue } };
+        if (applicabilityEvidenceIssue(applicability, input, nativeExecution, observed))
+          return { ...result, reason: "OWN_PRINT_APPLICABILITY_INVALID_OR_CHANGED" };
+        const row = applicability.row;
         if (candidateExternalAssociation)
           return withExternalWordWarning(result, input, prepared) || { ...result, reason: "CANDIDATE_EXTERNAL_WORD_SPATIAL_ASSOCIATION_UNCONFIRMED" };
         if (bothOwnAbsent) {

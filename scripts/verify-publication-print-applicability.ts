@@ -14,10 +14,10 @@ import { replayPhotoThumbnail, photoThumbnailReplayIssue } from "./lib/photo-thu
 import type { CodexDraftOptions } from "./lib/codex-draft-provider";
 import { buildScopedPublicationPackets, serializeScopedPublicationResponse, parseScopedPublicationResponse, type ScopedReviewPacket, type ScopedReviewEvidence } from "./lib/publication-image-scoped-review";
 import { visibleIdentityReviewContext } from "./lib/publication-visible-identity";
-import { INTRINSIC_IDENTIFIER_OBSERVER_VERSION, intrinsicIdentifierObserverRequestSha256, serializeIntrinsicIdentifierObserverResponse, type IntrinsicIdentifierObservation } from "./lib/intrinsic-identifier-observer";
+import { INTRINSIC_IDENTIFIER_OBSERVER_VERSION, intrinsicIdentifierObserverRequestSha256, serializeIntrinsicIdentifierObserverResponse, type IntrinsicIdentifierObservation, type IntrinsicIdentifierObserverResult } from "./lib/intrinsic-identifier-observer";
 import { normalizeIntrinsicIdentifierLiteral, intrinsicIdentifierOcrConfigurationSha256, intrinsicIdentifierOcrTranscriptEvidenceIssue, type IntrinsicIdentifierOcrEvidence } from "./lib/intrinsic-identifier-ocr";
 import { REFERENCE_SCENE_REVIEW_CHECKS } from "../src/lib/brand-post-image-evidence";
-import { reviewPublicationIdentifiers, publicationIdentifierReviewEvidenceIssue, type PublicationIdentifierReviewInput,
+import { reviewPublicationIdentifiers, publicationIdentifierReviewEvidenceIssue, publicationPrintApplicabilityResponseIssue, type PublicationIdentifierReviewInput,
   type PublicationIdentifierComparison, type PublicationPrintApplicabilityRow } from "./lib/publication-identifier-review";
 
 const hash = (value: Buffer | string) => crypto.createHash("sha256").update(value).digest("hex");
@@ -70,13 +70,28 @@ async function main() {
     identifierComparisons:[{sourceLiteral:"Markora",candidateLiteral:"Markra",identifierRole:"brand",sourceImageIndex:3,sourceSha256:fileHash(detail),sourceLocation:"intrinsic",candidateLocation:"intrinsic",sourceReadability:"legible",candidateReadability:"legible",sameSelectedComponent:null,sameSelectedVisibleOption:null,sourceBox,candidateBox}],reason:"literal letters differ; unknown physical-face flags remain unchanged",accepted:false};
   const moduleFile=path.resolve("scripts/lib/publication-identifier-review.ts"), actual=createRequire(moduleFile), code=ts.transpileModule(fs.readFileSync(moduleFile,"utf8"),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,esModuleInterop:true}}).outputText;
   type Mode={readability?:IntrinsicIdentifierObservation["readability"];primaryReadability?:IntrinsicIdentifierObservation["readability"];canonicalReadability?:IntrinsicIdentifierObservation["readability"];candidateLiteral?:string;app?:PublicationPrintApplicabilityRow;pair?:PublicationIdentifierComparison;
-    sourceRow?:Record<string,unknown>;sourceNative?:boolean;ocrBad?:boolean;observerNative?:boolean;sourceOnly?:boolean;invalidSchema?:boolean;providerThrow?:boolean;malformedJson?:boolean;ocrUnavailable?:boolean;ocrUnresolved?:boolean;invalidObserverPath?:string;unknownObserver?:boolean};
+    appResponses?:Array<PublicationPrintApplicabilityRow|Error>;onAppResponse?:(index:number)=>void;sourceRow?:Record<string,unknown>;sourceNative?:boolean;ocrBad?:boolean;observerNative?:boolean;sourceOnly?:boolean;invalidSchema?:boolean;providerThrow?:boolean;malformedJson?:boolean;ocrUnavailable?:boolean;ocrUnresolved?:boolean;invalidObserverPath?:string;unknownObserver?:boolean};
   const load=(mode:Mode={})=>{
-    let appCalls=0,pairCalls=0,ocrCalls=0,sourceCalls=0;
+    let appCalls=0,pairCalls=0,ocrCalls=0,sourceCalls=0;const appRequests:string[]=[];
+    const observe=async(options:{path:string;sha256:string}):Promise<IntrinsicIdentifierObserverResult>=>{
+        assert.deepEqual(Object.keys(options).sort(),["path","sha256"]);checks++;
+        if(options.path===mode.invalidObserverPath){
+          if(mode.unknownObserver)return {status:"unavailable",reason:"unknown transport outcome"};
+          const rawResponse=JSON.stringify({observation:{literal:"Volt…",box:{left:167,top:604,width:56,height:14},identifierRole:"brand",location:"intrinsic",readability:"legible"}});
+          return {status:"invalid",reason:"OBSERVER_RESPONSE_INVALID",diagnostic:{imageSha256:options.sha256,stage:"response",issue:"OBSERVER_LITERAL_OR_ROLE_INVALID",rawResponse,responseSha256:hash(rawResponse)}};
+        }
+        const readability=options.path===candidate?(mode.readability||"absent"):options.path===primary?(mode.primaryReadability||"unreadable"):(mode.canonicalReadability||"legible");
+        const observation:IntrinsicIdentifierObservation={readability,literal:readability==="legible"?(options.path===candidate?(mode.candidateLiteral||"Markra"):"Markora"):"",box:readability==="legible"?(options.path===candidate?candidateBox:sourceBox):null,identifierRole:readability==="legible"?"brand":"none",location:readability==="legible"?"intrinsic":"not-observed"};
+        const rawResponse=serializeIntrinsicIdentifierObserverResponse(observation);return {status:readability==="legible"?"observed":"unreadable",reason:"offline actual observation",evidence:{version:INTRINSIC_IDENTIFIER_OBSERVER_VERSION,nativeExecution:mode.observerNative!==false,imageSha256:options.sha256,requestSha256:intrinsicIdentifierObserverRequestSha256(options.sha256),rawResponse,responseSha256:hash(rawResponse),observation}};
+      };
     const loaded={exports:{}};
     vm.runInNewContext(code,{module:loaded,exports:loaded.exports,process,Buffer,Error,console,require:(name:string)=>name==="./codex-draft-provider"?{runCodexDraft:async(call:CodexDraftOptions)=>{
       if(mode.providerThrow)throw Error("offline terminal provider failure");if(mode.malformedJson)return "{";
-      const app=call.systemPrompt!.includes("B-print-applicability");const raw=app?(mode.app||(mode.primaryReadability==="absent"?{...positive,sourcePrintLocation:"unprinted",candidatePrintLocation:"own-unprinted-face",sourceBox:null,candidateBox:null,applicability:"not-applicable-own-unprinted-face",sameSelectedVisibleOption:null}:positive)):{coordinateSpace:"normalized-1000",sourceImageSize:{width:860,height:860},candidateImageSize:{width:1254,height:1254},comparison:mode.pair||comparison};
+      const app=call.systemPrompt!.includes("B-print-applicability");
+      const appResponse=app?mode.appResponses?.[Math.min(appCalls,mode.appResponses.length-1)]:undefined;
+      if(app)appRequests.push(JSON.stringify(call));
+      if(appResponse instanceof Error){appCalls++;throw appResponse;}
+      const raw=app?(appResponse||mode.app||(mode.primaryReadability==="absent"?{...positive,sourcePrintLocation:"unprinted",candidatePrintLocation:"own-unprinted-face",sourceBox:null,candidateBox:null,applicability:"not-applicable-own-unprinted-face",sameSelectedVisibleOption:null}:positive)):{coordinateSpace:"normalized-1000",sourceImageSize:{width:860,height:860},candidateImageSize:{width:1254,height:1254},comparison:mode.pair||comparison};
       supportedWire(JSON.parse(JSON.stringify(call.outputSchema)));
       // The provider receives JSON, not VM-realm Array constructors. Preserve
       // that real serialization boundary for supported primitive schemas.
@@ -112,20 +127,10 @@ async function main() {
         }
       }
       assert.deepEqual([...call.imagePaths!],app?[candidate,primary]:[candidate,detail]);checks+=1;
-      if(app)appCalls++;else pairCalls++;return JSON.stringify(raw);
+      if(app){appCalls++;mode.onAppResponse?.(appCalls-1);}else pairCalls++;return JSON.stringify(raw);
     }}:name==="./publication-image-scoped-review"?{...actual(name),executeScopedPublicationPacket:async(packet:ScopedReviewPacket)=>{sourceCalls++;supportedWire(packet.call.outputSchema);assert.deepEqual(packet.call.imagePaths,[detail,primary]);checks++;
       return {...evidence(packet,mode.sourceRow||a),nativeExecution:mode.sourceNative!==false};}}
-      :name==="./intrinsic-identifier-observer"?{...actual(name),observeIntrinsicIdentifier:async(options:{path:string;sha256:string})=>{
-        assert.deepEqual(Object.keys(options).sort(),["path","sha256"]);checks++;
-        if(options.path===mode.invalidObserverPath){
-          if(mode.unknownObserver)return {status:"unavailable",reason:"unknown transport outcome"};
-          const rawResponse=JSON.stringify({observation:{literal:"Volt…",box:{left:167,top:604,width:56,height:14},identifierRole:"brand",location:"intrinsic",readability:"legible"}});
-          return {status:"invalid",reason:"OBSERVER_RESPONSE_INVALID",diagnostic:{imageSha256:options.sha256,stage:"response",issue:"OBSERVER_LITERAL_OR_ROLE_INVALID",rawResponse,responseSha256:hash(rawResponse)}};
-        }
-        const readability=options.path===candidate?(mode.readability||"absent"):options.path===primary?(mode.primaryReadability||"unreadable"):(mode.canonicalReadability||"legible");
-        const observation:IntrinsicIdentifierObservation={readability,literal:readability==="legible"?(options.path===candidate?(mode.candidateLiteral||"Markra"):"Markora"):"",box:readability==="legible"?(options.path===candidate?candidateBox:sourceBox):null,identifierRole:readability==="legible"?"brand":"none",location:readability==="legible"?"intrinsic":"not-observed"};
-        const rawResponse=serializeIntrinsicIdentifierObserverResponse(observation);return {status:readability==="legible"?"observed":"unreadable",reason:"offline actual observation",evidence:{version:INTRINSIC_IDENTIFIER_OBSERVER_VERSION,nativeExecution:mode.observerNative!==false,imageSha256:options.sha256,requestSha256:intrinsicIdentifierObserverRequestSha256(options.sha256),rawResponse,responseSha256:hash(rawResponse),observation}};
-      }}:name==="./intrinsic-identifier-ocr"?{...actual(name),reviewIntrinsicIdentifierOcr:async()=>{ocrCalls++;
+      :name==="./intrinsic-identifier-observer"?{...actual(name),observeIntrinsicIdentifier:observe}:name==="./intrinsic-identifier-ocr"?{...actual(name),reviewIntrinsicIdentifierOcr:async()=>{ocrCalls++;
         if(mode.ocrUnavailable)return {status:"unavailable",reason:"offline OCR unavailable"};
         const consensus=(word:string)=>({literal:word,normalized:normalizeIntrinsicIdentifierLiteral(word),minimumConfidence:94,presets:["raw-1x","gray-normal-invert-2x"]});
         const value:IntrinsicIdentifierOcrEvidence={version:"intrinsic-identifier-ocr/v1",nativeExecution:true,sourceLiteral:"Markora",normalizedSourceLiteral:"markora",source:{originalSha256:fileHash(detail),box:sourceBox,pixelBox:{left:250,top:350,width:300,height:80},regionSha256:hash("source crop"),transcripts:[],consensus:consensus("Markora")},candidate:{originalSha256:fileHash(candidate),box:candidateBox,pixelBox:{left:500,top:750,width:120,height:45},regionSha256:hash("candidate crop"),transcripts:[],consensus:consensus(mode.ocrBad?"Markora":mode.candidateLiteral||"Markra")},engine:{binaryPath:binary,binarySha256:fileHash(binary),traineddataPath:traineddata,traineddataSha256:fileHash(traineddata),configHash:hash("offline config")}};
@@ -143,7 +148,7 @@ async function main() {
         }
         return {status:mode.sourceOnly||mode.candidateLiteral==="Markora"?"match":"conflict",reason:"offline bounded raster evidence",evidence:value};
       }}:actual(name)}, {filename:moduleFile});
-    return {api:loaded.exports as {reviewPublicationIdentifiers:typeof reviewPublicationIdentifiers;publicationIdentifierReviewEvidenceIssue:typeof publicationIdentifierReviewEvidenceIssue},counts:()=>({appCalls,pairCalls,ocrCalls,sourceCalls})};
+    return {api:loaded.exports as {reviewPublicationIdentifiers:typeof reviewPublicationIdentifiers;publicationIdentifierReviewEvidenceIssue:typeof publicationIdentifierReviewEvidenceIssue;publicationPrintApplicabilityResponseIssue:typeof publicationPrintApplicabilityResponseIssue},counts:()=>({appCalls,pairCalls,ocrCalls,sourceCalls}),appRequests:()=>[...appRequests],observe};
   };
   const normal=load(), pass=await normal.api.reviewPublicationIdentifiers(input);
   assert.equal(pass.status,"unverified",pass.reason);assert.ok(pass.printObservationWarning);assert.equal(pass.nativeExecution,false);assert.equal(pass.comparison,null);assert.equal(normal.api.publicationIdentifierReviewEvidenceIssue(pass,input),null);
@@ -275,6 +280,99 @@ async function main() {
   const otherMemberTask=load({app:otherMemberApp,primaryReadability:"legible"}),otherMember=await otherMemberTask.api.reviewPublicationIdentifiers(bodyInput);
   assert.equal(otherMember.status,"unverified",otherMember.reason);assert.equal(otherMember.nativeExecution,false);
   assert.equal(otherMember.printObservationWarning?.version,"publication-other-member-print-warning/v1");
+  // Actual 167 microscope response: the classified unprinted device face
+  // contradicts sourcePrintLocation=present plus a non-null sourceBox. A new
+  // native answer, never a local field rewrite, may resolve this wire error.
+  const contradictoryOwnFace:PublicationPrintApplicabilityRow={...otherMemberApp,sourcePrintLocation:"present",sourceBox:[393,771,419,790]};
+  const retryTask=load({primaryReadability:"legible",appResponses:[contradictoryOwnFace,otherMemberApp]});
+  const retried=await retryTask.api.reviewPublicationIdentifiers(bodyInput);
+  assert.equal(retried.status,"unverified",retried.reason);assert.equal(retryTask.counts().appCalls,2);
+  assert.equal(new Set(retryTask.appRequests()).size,1,"the received contradiction retries exactly the frozen blind input once");
+  assert.equal(retried.printApplicability!.version,"publication-print-applicability/v2");
+  const rejected=retried.printApplicability!.rejectedFormatAttempt!;
+  assert.equal(rejected.version,"publication-applicability-rejected-format/v1");
+  assert.equal(rejected.rawResponse,JSON.stringify(contradictoryOwnFace));
+  assert.equal(rejected.responseSha256,hash(rejected.rawResponse));
+  assert.equal(rejected.requestSha256,retried.printApplicability!.requestSha256);assert.ok(rejected.issue);
+  assert.deepEqual(copy(retried.printApplicability!.row),otherMemberApp);
+  assert.equal(retried.printApplicability!.rawResponse,JSON.stringify(otherMemberApp));
+  assert.equal(retried.printApplicability!.nativeExecution,true);
+  assert.equal(retryTask.api.publicationIdentifierReviewEvidenceIssue(retried,bodyInput),null);
+  assert.equal(retried.identifierConflict,undefined);assert.equal(retried.missingPrintEvidence,undefined);checks+=15;
+  // Exact received 167 native bytes, replayed only through the pure response
+  // parser with its independently supplied ROI. This fixture grants no native
+  // authority and never reads the user's live session during a test run.
+  const actual167Raw="{\"sourceObservation\":\"IMAGE 2에는 상자와 흰색·노란색 기기가 보입니다. 상자 전면 하단의 별도 로고 인쇄가 있습니다. 노란색 기기는 화면, 전면 원형 버튼 5개, 하단 투명 부품이 IMAGE 1의 노란색 기기와 대응합니다.\",\"candidateObservation\":\"IMAGE 1에는 노란색 기기의 화면, 전면 원형 버튼 5개, 하단 투명 부품이 보이며, 노란색 전면에는 식별 가능한 인쇄가 보이지 않습니다.\",\"correspondenceObservation\":\"색상과 화면·버튼 배열·하단 투명 부품을 기준으로 IMAGE 2의 오른쪽 노란색 기기 전면을 비교 대상으로 식별했습니다. 이는 상자 하단 로고가 있는 위치와 다른 물리적 면입니다.\",\"samePhysicalPart\":true,\"samePhysicalSurface\":true,\"sameSelectedVisibleOption\":true,\"sourcePrintLocation\":\"present\",\"candidatePrintLocation\":\"own-unprinted-face\",\"sourceBox\":[393,771,419,790],\"candidateBox\":null,\"witness\":\"상자 하단의 로고 인쇄는 기기와 별도 구성원에 있습니다. 두 이미지에서 비교한 노란색 기기 전면은 화면과 전면 원형 버튼 5개라는 두 구조 랜드마크로 대응하며, 해당 전면은 양쪽 모두 인쇄가 보이지 않습니다. 따라서 상자 로고를 기기 전면의 인쇄 위치로 적용할 수 없습니다.\",\"applicability\":\"not-applicable-own-unprinted-face\",\"accepted\":true,\"primaryObservedWordRelation\":\"other-visible-member-or-face\",\"primaryObservedWordBox\":[377,716,422,733],\"comparedPrimaryFaceBox\":[614,243,922,873],\"primaryObservedWordSpatialWitness\":\"고정된 단어 ROI는 상자 하단 로고 위치에 있습니다. 비교 대상인 노란색 기기의 전면은 별도 구성원이며, 화면과 전면 원형 버튼 5개가 있는 영역이 상자 로고 ROI와 분리되어 있습니다.\",\"primaryFaceLandmarks\":[{\"primaryObservation\":\"노란색 기기 전면의 넓은 검은색 화면\",\"candidateObservation\":\"기기 전면의 넓은 검은색 화면\"},{\"primaryObservation\":\"화면 아래 전면에 가로로 배치된 원형 버튼 3개와 그 아래 버튼 2개\",\"candidateObservation\":\"화면 아래 전면에 가로로 배치된 원형 버튼 3개와 그 아래 버튼 2개\"}]}";
+  const actualObserved=copy(retried.blindInputObservations!);
+  actualObserved.sources[0].evidence.observation.box=[377,716,422,733];
+  assert.equal(retryTask.api.publicationPrintApplicabilityResponseIssue(actual167Raw,bodyInput,actualObserved),
+    "own-unprinted applicability contradicts the compared-face print fields");checks++;
+  for(const mutate of [(value:typeof retried)=>{delete value.printApplicability!.rejectedFormatAttempt;},
+    (value:typeof retried)=>{value.printApplicability!.version="publication-print-applicability/v1";},
+    (value:typeof retried)=>{value.printApplicability!.rejectedFormatAttempt!.rawResponse="{}";},
+    (value:typeof retried)=>{value.printApplicability!.rejectedFormatAttempt!.responseSha256=hash("different rejected response");},
+    (value:typeof retried)=>{value.printApplicability!.rejectedFormatAttempt!.requestSha256=hash("different first input");},
+    (value:typeof retried)=>{value.printApplicability!.rejectedFormatAttempt!.issue="different rejection";},
+    (value:typeof retried)=>{value.printApplicability!.rejectedFormatAttempt!.retryFailure="unknown second outcome";},
+    (value:typeof retried)=>{const prior=value.printApplicability!.rejectedFormatAttempt!;prior.rawResponse=JSON.stringify(otherMemberApp);prior.responseSha256=hash(prior.rawResponse);},
+    (value:typeof retried)=>{const prior=value.printApplicability!.rejectedFormatAttempt!;prior.rawResponse=JSON.stringify({...contradictoryOwnFace,sameSelectedVisibleOption:false});prior.responseSha256=hash(prior.rawResponse);},
+    (value:typeof retried)=>{value.printApplicability!.nativeExecution=false;}]) {
+    const changed=copy(retried);mutate(changed);assert(retryTask.api.publicationIdentifierReviewEvidenceIssue(changed,bodyInput),"a native retry cannot erase or alter its rejected first response");checks++;
+  }
+  const twiceInvalidTask=load({primaryReadability:"legible",appResponses:[contradictoryOwnFace,contradictoryOwnFace,otherMemberApp]});
+  const twiceInvalid=await twiceInvalidTask.api.reviewPublicationIdentifiers(bodyInput);
+  assert.equal(twiceInvalid.status,"hold");assert.equal(twiceInvalid.reason,"OWN_PRINT_APPLICABILITY_RESPONSE_CONTRACT_INVALID");
+  assert.equal(twiceInvalidTask.counts().appCalls,2);assert.equal(new Set(twiceInvalidTask.appRequests()).size,1);
+  assert.equal(twiceInvalid.printApplicability!.rawResponse,JSON.stringify(contradictoryOwnFace));
+  assert.equal(twiceInvalid.printApplicability!.rejectedFormatAttempt!.rawResponse,JSON.stringify(contradictoryOwnFace));
+  assert.equal(twiceInvalid.printObservationWarning,undefined);checks+=7;
+  const thrownRetryTask=load({primaryReadability:"legible",appResponses:[contradictoryOwnFace,Error("offline response transport unknown"),otherMemberApp]});
+  const thrownRetry=await thrownRetryTask.api.reviewPublicationIdentifiers(bodyInput);
+  assert.equal(thrownRetry.status,"hold");assert.equal(thrownRetryTask.counts().appCalls,2);
+  assert.equal(thrownRetry.printApplicability!.rejectedFormatAttempt!.rawResponse,JSON.stringify(contradictoryOwnFace));
+  assert.ok(thrownRetry.printApplicability!.rejectedFormatAttempt!.retryFailure);
+  assert.equal(thrownRetry.printObservationWarning,undefined);checks+=5;
+  const firstThrowTask=load({primaryReadability:"legible",appResponses:[Error("offline initial transport unknown"),otherMemberApp]});
+  const firstThrow=await firstThrowTask.api.reviewPublicationIdentifiers(bodyInput);
+  assert.equal(firstThrow.status,"hold");assert.equal(firstThrowTask.counts().appCalls,1);
+  assert.equal(firstThrow.printObservationWarning,undefined);checks+=3;
+  const negativeFace:PublicationPrintApplicabilityRow={...otherMemberApp,accepted:false,applicability:"unresolved",sourcePrintLocation:"not-observed",candidatePrintLocation:"unresolved",
+    samePhysicalPart:false,samePhysicalSurface:null,sameSelectedVisibleOption:false};
+  const negativeOnceTask=load({primaryReadability:"legible",appResponses:[negativeFace,otherMemberApp]});
+  const negativeOnce=await negativeOnceTask.api.reviewPublicationIdentifiers(bodyInput);
+  assert.equal(negativeOnce.status,"hold");assert.equal(negativeOnceTask.counts().appCalls,1);
+  assert.equal(negativeOnce.printApplicability!.rejectedFormatAttempt,undefined);assert.deepEqual(copy(negativeOnce.printApplicability!.row),negativeFace);checks+=4;
+  const adverseOwnFace={...contradictoryOwnFace,accepted:false};
+  const adverseOwnTask=load({primaryReadability:"legible",appResponses:[adverseOwnFace,otherMemberApp]});
+  const adverseOwn=await adverseOwnTask.api.reviewPublicationIdentifiers(bodyInput);
+  assert.equal(adverseOwn.status,"hold");assert.equal(adverseOwnTask.counts().appCalls,1);
+  assert.deepEqual(copy(adverseOwn.printApplicability!.row),adverseOwnFace);assert.equal(adverseOwn.printApplicability!.rejectedFormatAttempt,undefined);checks+=4;
+  const unresolvedOnceTask=load({primaryReadability:"legible",appResponses:[{...negativeFace,samePhysicalPart:null,sameSelectedVisibleOption:null},otherMemberApp]});
+  const unresolvedOnce=await unresolvedOnceTask.api.reviewPublicationIdentifiers(bodyInput);
+  assert.equal(unresolvedOnceTask.counts().appCalls,1);assert.equal(unresolvedOnce.printApplicability!.rejectedFormatAttempt,undefined);checks+=2;
+  let injectedCalls=0;
+  const injectedRetryTask=load({primaryReadability:"legible"});
+  const injectedRetry=await injectedRetryTask.api.reviewPublicationIdentifiers(bodyInput,{observe:injectedRetryTask.observe,review:async()=>{injectedCalls++;return JSON.stringify(contradictoryOwnFace);}});
+  assert.equal(injectedRetry.status,"hold");assert.equal(injectedCalls,1);assert.equal(injectedRetry.printApplicability!.rejectedFormatAttempt,undefined);
+  assert.equal(injectedRetry.printApplicability!.nativeExecution,false);checks+=4;
+  const indirectDiTask=load({primaryReadability:"legible",appResponses:[contradictoryOwnFace,otherMemberApp]});
+  const indirectDi=await indirectDiTask.api.reviewPublicationIdentifiers(bodyInput,{observe:indirectDiTask.observe,ocr:async()=>({status:"invalid",reason:"unused injected seam"})});
+  assert.equal(indirectDi.status,"hold");assert.equal(indirectDiTask.counts().appCalls,1);
+  assert.equal(indirectDi.printApplicability!.rejectedFormatAttempt,undefined);checks+=3;
+  for(const patch of [{samePhysicalPart:false},{samePhysicalSurface:false},{sameSelectedVisibleOption:false},{samePhysicalPart:null},{samePhysicalSurface:null}]) {
+    const adverse={...contradictoryOwnFace,...patch};
+    const test=load({primaryReadability:"legible",appResponses:[adverse,otherMemberApp]});
+    const value=await test.api.reviewPublicationIdentifiers(bodyInput);
+    assert.equal(value.status,"hold",JSON.stringify(patch));assert.equal(test.counts().appCalls,1);
+    assert.deepEqual(copy(value.printApplicability!.row),adverse);assert.equal(value.printApplicability!.rejectedFormatAttempt,undefined);checks+=4;
+  }
+  const candidateBytesBeforeMutation=fs.readFileSync(candidate);
+  const changedInputTask=load({primaryReadability:"legible",appResponses:[contradictoryOwnFace,otherMemberApp],onAppResponse:index=>{if(index===0)fs.appendFileSync(candidate,"changed while response arrived");}});
+  try {
+    const changedInput=await changedInputTask.api.reviewPublicationIdentifiers(bodyInput);
+    assert.equal(changedInput.status,"hold");assert.equal(changedInputTask.counts().appCalls,1);
+    assert.equal(changedInput.printObservationWarning,undefined);checks+=3;
+  } finally {fs.writeFileSync(candidate,candidateBytesBeforeMutation);}
   // Actual regression: the exact word is positively on a separate box, but B
   // cannot classify printing on the matched device front. Preserve that raw
   // uncertainty as a warning, never an unprinted-face or letter certification.
