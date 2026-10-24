@@ -17,7 +17,7 @@ async function main() {
   process.env.DESKTOP_USER_DATA = root; globalThis.fetch = async () => { throw Error("offline fixture attempted network"); };
   const providerPath = require.resolve("./lib/codex-draft-provider"), actualProvider = require(providerPath);
   let mode = "good", checks = 0, providerCalls = 0, mutate: (() => void) | undefined;
-  let scriptedNative: {task:string;responses:Array<string|Error>} | undefined;
+  let scriptedNative: {task:string;responses:Array<string|Error|(()=>Promise<string>)>} | undefined;
   const calls: CodexDraftOptions[] = [];
   const a = () => ({ memberBrandScope:"selected-main-product-body",memberBrandObservation:"Visible main physical product body, not an independent accessory",reason: "Offline visible contour and connection correspond", picturedMemberEvidence: {scope:"pictured-member-only",memberFactIndex:0,picturedMember:"visible selected fixture member", verdict: "selected-member-visible", selectedFact: "EXPECTED_SELECTED_SUBJECT", referenceObservation: "selected visible member in source", candidateObservation: "same visible member in candidate", conflict: "" }, identityMatches: true, accepted: true, visibleIdentityEvidence: { basis: "observed-correspondence", landmarks: [
       { part: "contour", referenceObservation: "source contour", candidateObservation: "same contour" },
@@ -32,7 +32,7 @@ async function main() {
     if(scriptedNative && call.systemPrompt.includes(`publication-image-task/${scriptedNative.task}`) && scriptedNative.responses.length) {
       const response=scriptedNative.responses.shift()!;
       if(response instanceof Error)throw response;
-      return response;
+      return typeof response==="function" ? response() : response;
     }
     if (call.systemPrompt.includes("publication-image-task/A-visible")) {
       assert.equal(call.imagePaths!.length, 2); assert(!call.userPrompt.includes("black supplemental trap")); checks += 2;
@@ -422,6 +422,62 @@ async function main() {
     fs.writeFileSync(cacheFile,cachedBytes);const missingReceipt=JSON.parse(cachedBytes.toString());delete missingReceipt.nativeReceipt;
     fs.writeFileSync(cacheFile,JSON.stringify(missingReceipt));await executeScopedPublicationPacket(cachePacket,undefined,cacheOptions);
     assert.equal(providerCalls-beforeCache,4,"removing native attestation cannot reuse a cached verdict");checks++;
+    // A fresh native negative or unknown outcome revokes this exact positive
+    // hint across process boundaries. The next ordinary audit must ask again.
+    const beforeSupersede=providerCalls;
+    scriptedNative={task:"A-visible",responses:[JSON.stringify(actualNegative)]};
+    const forcedNegative=await executeScopedPublicationPacket(cachePacket,undefined,{...cacheOptions,forceReview:true});
+    assert.equal(forcedNegative.row!.accepted,false);assert.equal(providerCalls-beforeSupersede,1,"a valid negative is never retransmitted");
+    assert.equal(fs.existsSync(cacheFile),false,"an adverse native observation removes the prior positive");
+    scriptedNative=undefined;const afterNegative=await freshScoped.executeScopedPublicationPacket(cachePacket,undefined,cacheOptions);
+    assert.equal(afterNegative.reused,undefined);assert.equal(providerCalls-beforeSupersede,2);checks+=5;
+    scriptedNative={task:"A-visible",responses:[new Error("CODEX_AUTH_REQUIRED") ]};
+    await assert.rejects(executeScopedPublicationPacket(cachePacket,undefined,{...cacheOptions,forceReview:true}),/CODEX_AUTH_REQUIRED/);
+    assert.equal(providerCalls-beforeSupersede,3,"auth/unknown does not trigger native retransmission");assert.equal(fs.existsSync(cacheFile),false);
+    scriptedNative=undefined;assert.equal((await freshScoped.executeScopedPublicationPacket(cachePacket,undefined,cacheOptions)).reused,undefined);
+    assert.equal(providerCalls-beforeSupersede,4);checks+=5;
+    // If local invalidation itself fails, retain the old bytes for inspection
+    // and HOLD without spending even one additional provider call.
+    const beforeDenied=providerCalls,priorCache=fs.readFileSync(cacheFile),originalRm=fs.rmSync;
+    try {
+      fs.rmSync=((target:fs.PathLike,options?:fs.RmOptions)=>{
+        if(path.resolve(String(target))===path.resolve(cacheFile))throw Object.assign(Error("offline invalidation denied"),{code:"EPERM"});
+        return originalRm(target,options);
+      }) as typeof fs.rmSync;
+      await assert.rejects(executeScopedPublicationPacket(cachePacket,undefined,{...cacheOptions,forceReview:true}),/SCOPED_POSITIVE_CACHE_INVALIDATION_FAILED/);
+      assert.equal(providerCalls,beforeDenied);assert.deepEqual(fs.readFileSync(cacheFile),priorCache);checks+=3;
+    }finally{fs.rmSync=originalRm;}
+    // Deterministic in-flight race: an older positive finishes while a newer
+    // forced negative is queued. The shared OS lock orders both observations
+    // and their writes, so the older positive cannot be restored afterwards.
+    let releaseOlder!:(value:string)=>void,notifyOlder!:()=>void;
+    const olderEntered=new Promise<void>(resolve=>{notifyOlder=resolve;});
+    const olderResponse=new Promise<string>(resolve=>{releaseOlder=resolve;});
+    const beforeRace=providerCalls;
+    scriptedNative={task:"A-visible",responses:[async()=>{notifyOlder();return olderResponse;},JSON.stringify(actualNegative)]};
+    const older=executeScopedPublicationPacket(cachePacket,undefined,{...cacheOptions,forceReview:true});await olderEntered;
+    const newer=freshScoped.executeScopedPublicationPacket(cachePacket,undefined,{...cacheOptions,forceReview:true});
+    await new Promise(resolve=>setTimeout(resolve,25));
+    assert.equal(providerCalls-beforeRace,1,"same-request newer review waits for the older observation's complete write boundary");checks++;
+    releaseOlder(JSON.stringify(a()));const [oldResult,newResult]=await Promise.all([older,newer]);
+    assert.equal(oldResult.row!.accepted,true);assert.equal(newResult.row!.accepted,false);assert.equal(providerCalls-beforeRace,2);
+    assert.equal(fs.existsSync(cacheFile),false,"the later negative cannot be overwritten by the older positive");checks+=4;
+    scriptedNative=undefined;assert.equal((await executeScopedPublicationPacket(cachePacket,undefined,cacheOptions)).reused,undefined);
+    assert.equal(providerCalls-beforeRace,3);checks+=2;
+    for(const firstAccepted of [true,false]) {
+      let releaseFirst!:(value:string)=>void,notifyFirst!:()=>void;
+      const entered=new Promise<void>(resolve=>{notifyFirst=resolve;}),response=new Promise<string>(resolve=>{releaseFirst=resolve;});
+      const before=providerCalls;
+      scriptedNative={task:"A-visible",responses:[async()=>{notifyFirst();return response;},JSON.stringify(a())]};
+      const first=executeScopedPublicationPacket(cachePacket,undefined,{...cacheOptions,forceReview:true});await entered;
+      const waiting=freshScoped.executeScopedPublicationPacket(cachePacket,undefined,cacheOptions);
+      await new Promise(resolve=>setTimeout(resolve,25));assert.equal(providerCalls-before,1);checks++;
+      releaseFirst(JSON.stringify(firstAccepted?a():actualNegative));const [firstResult,waitingResult]=await Promise.all([first,waiting]);
+      assert.equal(firstResult.row!.accepted,firstAccepted);assert.equal(waitingResult.row!.accepted,true);
+      assert.equal(providerCalls-before,firstAccepted?1:2,firstAccepted?"a concurrent ordinary audit reuses the first native positive without a second model call":"a first negative cannot become a cache hit for the waiting audit");
+      assert.equal(waitingResult.reused,firstAccepted?true:undefined);checks+=4;
+    }
+    scriptedNative=undefined;
     // The exact native D cache observes actual role: a body has no thumbnail
     // headline requirement, while an adverse thumbnail never becomes cached.
     const cachePolicy=(label:string)=>crypto.createHash("sha256").update(label).digest("hex");

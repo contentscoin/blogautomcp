@@ -4,6 +4,7 @@ import path from "node:path";
 import { runCodexDraft, type CodexDraftOptions } from "./codex-draft-provider";
 import { getAppDataDir } from "./app-paths";
 import { atomicWriteTextFile } from "../../src/lib/atomic-text-file";
+import { withSuccessfulImageAuditLock } from "./publish-image-audit-receipt";
 import { resolveTextReasoningEffort } from "./text-model-policy";
 import { VISIBLE_IDENTITY_EVIDENCE_SCHEMA,
   visibleIdentityEvidenceIssue, visibleIdentityReviewContext, type VisibleIdentityReviewContext } from "./publication-visible-identity";
@@ -390,6 +391,16 @@ function writeScopedPositive(evidence: ScopedReviewEvidence): void {
 export async function executeScopedPublicationPacket(packet: ScopedReviewPacket,
   review?: (call: CodexDraftOptions) => Promise<string>, cacheOptions?: {policyFingerprint:string;forceReview?:boolean}): Promise<ScopedReviewEvidence> {
   if (scopedPublicationRequestSha256(packet.call) !== packet.requestSha256) throw new Error("SCOPED_IMAGE_INPUT_CHANGED");
+  if(review)return executeScopedPublicationPacketUnlocked(packet,review,cacheOptions);
+  // Reuse the existing OS-owned crash-safe lock. The exact request is one
+  // serialization boundary from cache read/invalidation through native call
+  // and positive write, so an older in-flight answer cannot revive a positive
+  // hint after a later negative/unknown observation. No lease or reaper state.
+  return withSuccessfulImageAuditLock(`scoped-native:${packet.requestSha256}`,()=>executeScopedPublicationPacketUnlocked(packet,undefined,cacheOptions));
+}
+async function executeScopedPublicationPacketUnlocked(packet: ScopedReviewPacket,
+  review?: (call: CodexDraftOptions) => Promise<string>, cacheOptions?: {policyFingerprint:string;forceReview?:boolean}): Promise<ScopedReviewEvidence> {
+  if (scopedPublicationRequestSha256(packet.call) !== packet.requestSha256) throw new Error("SCOPED_IMAGE_INPUT_CHANGED");
   const request = scopedPublicationRequest(packet.call);
   // The complete isolated request already includes current prompt/schema,
   // reasoning policy, exact facts/copy and actual image bytes. B's independent
@@ -398,6 +409,14 @@ export async function executeScopedPublicationPacket(packet: ScopedReviewPacket,
   const saved = cacheEnabled && !cacheOptions?.forceReview ? readScopedPositive(packet) : null;
   if (saved)
     return {...structuredClone(saved),reused:true};
+  if(!review) {
+    // A fresh observation supersedes the previous hint even if the provider
+    // fails or yields a valid adverse verdict. Fail closed BEFORE any model
+    // call if the old positive cannot be invalidated.
+    try {fs.rmSync(scopedReceiptFile(packet.requestSha256),{force:true});}
+    catch {throw new Error("SCOPED_POSITIVE_CACHE_INVALIDATION_FAILED");}
+    if(!scopedSigningKey(true))throw new Error("SCOPED_NATIVE_RECEIPT_KEY_INVALID");
+  }
   // A thrown provider/transport result is unknown, not a received malformed
   // answer. Never retry it or silently replace its first-attempt outcome.
   let rawResponse = await (review || runCodexDraft)(packet.call);

@@ -92,12 +92,15 @@ async function main() {
   let inspectRequest: ((request: { imagePaths: string[]; userPrompt: string; systemPrompt?: string }) => void) | undefined;
   let inspectGalleryRead: (() => void) | undefined;
   let nativePacketCalls = 0;
+  let freshCandidatePaths = new Set<string>();
   const provider = async (request: { imagePaths: string[]; systemPrompt?: string; userPrompt?: string; outputSchema?: unknown }) => {
     const task = /publication-image-task\/([A-D]-[A-Za-z-]+)/u.exec(request.systemPrompt || "")?.[1];
-    // `calls` tracks one fresh audit candidate as the old combined transport
-    // did. Native A/C/D are separately counted so receipt reuse must skip ALL
-    // packets, rather than merely hiding changed transport cardinality.
-    if (!task || task === "A-visible") calls++;
+    // Count a candidate when ANY of its exact A/C/D tasks needs a fresh native
+    // observation. An unchanged A may now be cached while changed C is fresh.
+    // Native packets remain separately counted so zero-call receipt reuse
+    // cannot be confused with partial per-task reuse.
+    if(task) {if(!freshCandidatePaths.has(request.imagePaths[0])) {calls++;freshCandidatePaths.add(request.imagePaths[0]);}}
+    else if(!request.systemPrompt?.includes("blind transcription observer"))calls++;
     nativePacketCalls++;
     if (verdict === "auth") throw new Error("CODEX_AUTH_REQUIRED");
     if (task) {
@@ -126,7 +129,6 @@ async function main() {
       assert.fail("Unexpected native task in receipt-only fixture: " + task);
     }
     if (request.systemPrompt?.includes("blind transcription observer")) {
-      calls--; // B's independent unprinted-surface observation is not a new audit candidate.
       return JSON.stringify({ observation: { literal: "", box: null, identifierRole: "none", location: "not-observed", readability: "absent" } });
     }
     const slotLine = request.userPrompt?.split("\n").find(line => line.startsWith("Each attached image belongs ONLY"));
@@ -189,9 +191,9 @@ async function main() {
           recordPublicationImageRejections: probeLedgerLock, recordPublicationImageRegenerationHolds: probeLedgerLock } : moduleRequire(id) });
     const execute = (probeLedger ? exports.assertPublishImagesSafe : exports.auditPublishImages) as (options: PublishImageAuditOptions) => Promise<PublishImageAuditResult>;
     return (options: PublishImageAuditOptions) => {
-      // Fresh process-local packet caches model the CLI/process boundary. The
-      // persisted signed whole receipt must be the reason for zero calls.
-      nativeModules = {};
+      // Fresh modules model a CLI/process boundary. Signed whole receipts and
+      // exact signed positive task hints independently survive that boundary.
+      nativeModules = {};freshCandidatePaths=new Set();
       return execute(options);
     };
   };
@@ -216,23 +218,30 @@ async function main() {
   const changedPolicySource = source.replace(/final-publication-image-audit\/v[\w.-]+/u, "final-publication-image-audit/test-policy");
   assert.notEqual(changedPolicySource, source, "the current policy marker must actually change");
   const changedPolicy = load(changedPolicySource);
-  await changedPolicy(options); assert.equal(calls, 4);
+  const beforePolicyPackets=nativePacketCalls,changedPolicyResult=await changedPolicy(options);
+  assert.equal(changedPolicyResult.receiptReused,false);assert.equal(calls,3);assert.equal(nativePacketCalls,beforePolicyPackets,
+    "a changed whole policy refreshes its receipt without repeating unchanged positive native A/C/D");
   const changedPrompt = load(source, false, true);
-  await changedPrompt(options); assert.equal(calls, 5);
-  await audit(options); assert.equal(calls, 6);
+  const changedPromptResult=await changedPrompt(options);assert.equal(calls,4);assert.equal(nativePacketCalls,beforePolicyPackets+1,
+    "a changed A question requires only a fresh A, while exact C/D remain reusable");
+  assert.equal(changedPromptResult.scopedReviews![0].visible.reused,undefined);
+  assert.equal(changedPromptResult.scopedReviews![0].claims.reused,true);assert.equal(changedPromptResult.scopedReviews![0].format.reused,true);
+  await audit(options); assert.equal(calls,4);assert.equal(nativePacketCalls,beforePolicyPackets+1,
+    "restoring the original question can reuse its still-valid exact positive packet");
   verdict = "reject";
-  assert.equal((await audit({ ...options, forceReview: true })).ok, false); assert.equal(calls, 7);
-  assert.equal((await audit(options)).ok, false); assert.equal(calls, 8);
-  verdict = "accept"; await audit(options); assert.equal(calls, 9);
+  assert.equal((await audit({ ...options, forceReview: true })).ok, false); assert.equal(calls,5);
+  assert.equal((await audit(options)).ok, false); assert.equal(calls,6,"a forced native negative revoked the old positive; an ordinary audit must observe the negative again");
+  verdict = "accept"; await audit(options); assert.equal(calls,7);
   verdict = "auth"; const authFailure = await audit({ ...options, forceReview: true });
   assert.equal(authFailure.ok, false); assert(authFailure.failures.some(row => row.code === "INVALID_REVIEW" && row.reason.includes("CODEX_AUTH_REQUIRED")));
   assert.equal(fs.existsSync(receiptFile(options.brandLinkId!)), false, "auth failure diagnostics revoke the previous signed receipt");
-  verdict = "accept"; await audit(options); assert.equal(calls, 11, "auth revoked prior receipt");
+  verdict = "accept"; await audit(options); assert.equal(calls,9,"auth revoked both prior whole receipt and that task's old positive hint");
   fs.renameSync(image, image + ".old"); assert.equal((await audit(options)).ok, false);
-  fs.renameSync(image + ".old", image); await audit(options); assert.equal(calls, 12);
+  fs.renameSync(image + ".old", image);const restoredExact=await audit(options);assert.equal(restoredExact.receiptReused,false);assert.equal(calls,9,
+    "a missing file revokes its whole receipt; restored identical bytes can reuse current signed task evidence after input checks");
   await audit({ ...options, review: async request => provider({ imagePaths: request.imagePaths! }) });
-  assert.equal(calls, 13, "injected reviewer cannot reuse production receipt");
-  assert.equal((await audit(options)).receiptReused, true); assert.equal(calls, 13);
+  assert.equal(calls,10,"injected reviewer cannot reuse production receipt");
+  assert.equal((await audit(options)).receiptReused,true);assert.equal(calls,10);
   const bodyOptions = { ...options, brandLinkId: "body-context", composition: {
     sections: [{ id: "body", imageIntent: "전체 구성 또는 패키지 사진" }],
     renderNodes: [{ kind: "image", role: "detail", sectionId: "body", assetPath: image },
@@ -317,12 +326,14 @@ async function main() {
     assert(!request.userPrompt.includes(heroIntentOptions.imageAssets![0].imageIntent!),"unpublished desired styling is not evidence in any native final task");
   };
   const beforeHeroIntent = calls;
-  assert.equal((await audit(heroIntentOptions)).ok, true); assert.equal(calls, beforeHeroIntent + 1);
+  const heroIntentFirst=await audit(heroIntentOptions);assert.equal(heroIntentFirst.ok,true);assert.equal(heroIntentFirst.receiptReused,false);
+  assert.equal(calls,beforeHeroIntent,"a new material id/unpublished intent does not change this exact photo/facts/claims task input");
+  assert(heroIntentFirst.scopedReviews!.every(row=>[row.visible,row.claims,row.format].every(evidence=>evidence.reused===true)));
   const heroIntentKey = JSON.parse(fs.readFileSync(receiptFile(heroIntentOptions.brandLinkId!), "utf8")).key;
-  assert.equal((await audit(heroIntentOptions)).receiptReused, true); assert.equal(calls, beforeHeroIntent + 1);
+  assert.equal((await audit(heroIntentOptions)).receiptReused,true);assert.equal(calls,beforeHeroIntent);
   heroIntentOptions.imageAssets![0].imageIntent = "유리 바스켓 보기";
   const beforeIntentPackets=nativePacketCalls;
-  assert.equal((await audit(heroIntentOptions)).receiptReused, true); assert.equal(calls, beforeHeroIntent + 1,
+  assert.equal((await audit(heroIntentOptions)).receiptReused, true); assert.equal(calls,beforeHeroIntent,
     "unpublished thumbnail styling alone is not a changed photograph or published claim");
   assert.equal(nativePacketCalls,beforeIntentPackets);
   assert.equal(JSON.parse(fs.readFileSync(receiptFile(heroIntentOptions.brandLinkId!), "utf8")).key, heroIntentKey);
@@ -355,12 +366,14 @@ async function main() {
     assert.equal(data.candidateSha256,hash(image));assert.equal(data.primaryReferenceSha256,hash(image));
   };
   const beforeGallery = calls;
-  assert.equal((await audit(galleryOptions)).ok, true); assert.equal(calls, beforeGallery + 1);
+  const firstGallery=await audit(galleryOptions);assert.equal(firstGallery.ok,true);assert.equal(firstGallery.receiptReused,false);
+  assert.equal(calls,beforeGallery,"new canonical lineage still rebinds the whole receipt but does not alter the exact native A/C/D photo inputs");
+  assert(firstGallery.scopedReviews!.every(row=>[row.visible,row.claims,row.format].every(evidence=>evidence.reused===true)));
   const galleryKey = JSON.parse(fs.readFileSync(receiptFile(galleryOptions.brandLinkId!), "utf8")).key;
-  assert.equal((await audit(galleryOptions)).receiptReused, true); assert.equal(calls, beforeGallery + 1);
+  assert.equal((await audit(galleryOptions)).receiptReused,true);assert.equal(calls,beforeGallery);
   fs.appendFileSync(galleryReceipt, "\n");
   const beforeReceiptWhitespace=nativePacketCalls;
-  assert.equal((await audit(galleryOptions)).receiptReused, true); assert.equal(calls, beforeGallery + 1);
+  assert.equal((await audit(galleryOptions)).receiptReused,true);assert.equal(calls,beforeGallery);
   assert.equal(nativePacketCalls,beforeReceiptWhitespace);
   assert.equal(JSON.parse(fs.readFileSync(receiptFile(galleryOptions.brandLinkId!), "utf8")).key, galleryKey,
     "receipt whitespace changes no parsed canonical source identity, pixels or actual native packet");
@@ -369,8 +382,10 @@ async function main() {
   const modifiedGalleryReceipt = JSON.parse(fs.readFileSync(galleryReceipt, "utf8"));
   modifiedGalleryReceipt.sha256 = hash(referenceA);
   fs.writeFileSync(galleryReceipt, JSON.stringify(modifiedGalleryReceipt));
-  assert.equal((await audit(galleryOptions)).receiptReused, false); assert.equal(calls, beforeGallery + 2,
-    "new intact source pixels require a fresh final visual verdict, never inherit the old membership verdict");
+  const changedGallery=await audit(galleryOptions);assert.equal(changedGallery.receiptReused,false);assert.equal(calls,beforeGallery,
+    "supplemental gallery changes rebind current canonical inputs without altering this unchanged exact own-pair A/C/D request");
+  assert(changedGallery.scopedReviews![0].identifierInput!.canonicalReferences.some(row=>row.sha256===hash(referenceA)),
+    "fresh B/canonical binding must contain the changed gallery bytes, never the stale source descriptors");
   fs.writeFileSync(referenceA, savedGalleryBytes);
   modifiedGalleryReceipt.sha256 = hash(referenceA);
   fs.writeFileSync(galleryReceipt, JSON.stringify(modifiedGalleryReceipt));
@@ -401,7 +416,9 @@ async function main() {
   const beforeRoleCalls=calls,beforeRolePackets=nativePacketCalls;Object.assign(roleImage,{role:"summary"});
   const changedRole=await audit(roleOptions);
   assert.equal(changedRole.ok,true);assert.equal(changedRole.receiptReused,false);
-  assert.equal(calls,beforeRoleCalls+1);assert.equal(nativePacketCalls,beforeRolePackets+3);
+  assert.equal(calls,beforeRoleCalls+1);assert.equal(nativePacketCalls,beforeRolePackets+2);
+  assert.equal(changedRole.scopedReviews![0].visible.reused,true,"role changes C/D but not the independent own-pair A");
+  assert.equal(changedRole.scopedReviews![0].claims.reused,undefined);assert.equal(changedRole.scopedReviews![0].format.reused,undefined);
   assert.notEqual(JSON.parse(fs.readFileSync(receiptFile(roleOptions.brandLinkId!),"utf8")).key,roleInitialKey,
     "a changed actual rendered role binds new C/D questions even when final bytes and A own pair are unchanged");
   const parsedIdentityOptions={...galleryOptions,brandLinkId:"parsed-source-identity"};
@@ -411,7 +428,7 @@ async function main() {
   const changedIdentity=JSON.parse(originalReceiptBytes.toString());changedIdentity.sourceUrl="https://shop-phinf.pstatic.net/unselected/not-selected.png";
   fs.writeFileSync(galleryReceipt,JSON.stringify(changedIdentity));
   const changedParsedIdentity=await audit(parsedIdentityOptions);
-  assert.equal(changedParsedIdentity.ok,true);assert.equal(changedParsedIdentity.receiptReused,false);assert.equal(calls,beforeParsedIdentity+1);
+  assert.equal(changedParsedIdentity.ok,true);assert.equal(changedParsedIdentity.receiptReused,false);assert.equal(calls,beforeParsedIdentity);
   assert(!changedParsedIdentity.scopedReviews![0].identifierInput!.canonicalReferences.some(row=>row.sha256===hash(referenceA)),
     "a receipt URL outside the selected snapshot removes that source instead of inheriting canonical status");
   const sourceIdentitySnapshot=createProductSnapshot({productId:gallerySnapshot.productId,connectKind:"SHOPPING",externalProductId:"kit-123",
@@ -419,8 +436,10 @@ async function main() {
   const identityOptions={...galleryOptions,brandLinkId:"source-snapshot-identity"};fs.writeFileSync(galleryReceipt,originalReceiptBytes);
   assert.equal((await audit(identityOptions)).ok,true);const beforeSnapshotIdentity=calls;
   const identityChanged=await audit({...identityOptions,selectedSourceSnapshot:sourceIdentitySnapshot,sourceSnapshotId:sourceIdentitySnapshot.snapshotId});
-  assert.equal(identityChanged.ok,true);assert.equal(identityChanged.receiptReused,false);assert.equal(calls,beforeSnapshotIdentity+1,
-    "changed parsed source/snapshot identity cannot reuse exact prior visual success for the same image bytes");
+  assert.equal(identityChanged.ok,true);assert.equal(identityChanged.receiptReused,false);assert.equal(calls,beforeSnapshotIdentity,
+    "changed snapshot identity must rebind the whole receipt while unchanged exact native A/C/D inputs remain reusable");
+  assert(identityChanged.scopedReviews![0].identifierInput!.canonicalReferences.every(row=>row.sourceSnapshotId===sourceIdentitySnapshot.snapshotId),
+    "the current B/canonical input must use only the newly verified snapshot identity");
   fs.unlinkSync(galleryReceipt);
   console.log("image audit receipts: warning HMAC preservation/tamper, concurrent key/lock, exact native A/C/D/own-source/bytes/role/body/source identity/policy, no requery for unpublished intent or receipt whitespace, force/auth/missing and await byte-change invalidation, no injected authority PASS");
 }
