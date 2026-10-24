@@ -10,7 +10,7 @@ import ts from "typescript";
 import sharp from "sharp";
 import Ajv from "ajv";
 import { observeIntrinsicIdentifier, parseIntrinsicIdentifierObserverResponse, intrinsicIdentifierObserverRequestSha256,
-  serializeIntrinsicIdentifierObserverResponse, intrinsicIdentifierObserverResponseIssue, INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA, INTRINSIC_IDENTIFIER_LITERAL_PATTERN, INTRINSIC_IDENTIFIER_SCRIPT_PATTERN, INTRINSIC_IDENTIFIER_OBSERVER_VERSION, type IntrinsicIdentifierObservation } from "./lib/intrinsic-identifier-observer";
+  serializeIntrinsicIdentifierObserverResponse, intrinsicIdentifierObserverResponseIssue, intrinsicIdentifierObserverEvidenceIssue, INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA, INTRINSIC_IDENTIFIER_LITERAL_PATTERN, INTRINSIC_IDENTIFIER_SCRIPT_PATTERN, INTRINSIC_IDENTIFIER_OBSERVER_VERSION, type IntrinsicIdentifierObservation } from "./lib/intrinsic-identifier-observer";
 import type { CodexDraftOptions } from "./lib/codex-draft-provider";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-blind-identifier-"));
@@ -29,7 +29,7 @@ async function main(): Promise<void> {
   const options = { path: file, sha256: hash(bytes) };
   const observation: IntrinsicIdentifierObservation = { literal: "Brandum", box: [100, 100, 400, 200], identifierRole: "brand", location: "intrinsic", readability: "legible" };
   const raw = wire(observation);
-  check(INTRINSIC_IDENTIFIER_OBSERVER_VERSION === "intrinsic-identifier-observer/v4", "bounded format recovery has its own version, never relabeled old evidence");
+  check(INTRINSIC_IDENTIFIER_OBSERVER_VERSION === "intrinsic-identifier-observer/v5", "independent local OCR recovery has its own version, never relabeled old evidence");
   check(!("anyOf" in INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA) && INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA.required.join() === "observation", "structured output root remains a strict object, union is nested");
   const [legibleBranch, neutralBranch] = INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA.properties.observation.anyOf;
   check(legibleBranch.properties.location.enum.join() === "intrinsic" && legibleBranch.properties.readability.enum.join() === "legible" &&
@@ -225,6 +225,32 @@ async function main(): Promise<void> {
   check(third.status === "unavailable" && third.reason === "OBSERVER_CAPACITY_HOLD" && started === 2, "native concurrency capped at two, excess calls hold");
   release!(); await Promise.all([first, next]);
   check(hash(fs.readFileSync(file)) === options.sha256, "all original pixels preserved");
+  if(process.argv.includes('--actual-fixture')) {
+    const actualFile=path.join(process.env.APPDATA!,'brandconnect-automation/data/prepared-brand-posts/f9de2542-23a0-44bf-88bb-6c0f829f9a0e/images/generated-1792425873554-ba735ecd-b532-4226-93dc-19fe8ef7c0a2.png');
+    const before=hash(fs.readFileSync(actualFile)), previous=process.env.TESSERACT_PATH;
+    process.env.TESSERACT_PATH=path.resolve('resources/tesseract/tesseract.exe');
+    const received=JSON.stringify({observation:{literal:'Volt\u10e3\u10db',box:{left:415,top:613,width:59,height:21},identifierRole:'brand',location:'intrinsic',readability:'legible'}});
+    let calls=0;
+    try {
+      const recovered=await observeIntrinsicIdentifier({path:actualFile,sha256:before},{review:async()=>{calls++;return received;}});
+      fs.writeFileSync(path.join(root,'actual-mixed-script-ocr-recovery.json'),JSON.stringify(recovered,null,2));
+      check(calls===2&&recovered.status==='observed'&&!!recovered.evidence?.localOcrFallback,'only repeated definitely received mixed-script output uses bounded independent local OCR');
+      const evidence=recovered.evidence!;
+      check(evidence.observation.literal==='Voltum'&&evidence.localOcrFallback!.rejectedResponse===received,'real OCR reads its own letters while the model response remains verbatim');
+      check(evidence.localOcrFallback!.ocr.nativeExecution===true&&evidence.nativeExecution===false,'local OCR is native but a mocked model call never mints native overall authority');
+      check(intrinsicIdentifierObserverEvidenceIssue(evidence,before,false)===null&&!!intrinsicIdentifierObserverEvidenceIssue(evidence,before,true),'reader validates exact OCR/runtime/raw bindings and rejects DI authority');
+      for(const mutate of [(v:typeof evidence)=>{delete v.localOcrFallback;},(v:typeof evidence)=>{v.localOcrFallback!.ocr.source.consensus!.literal='Voltium';},(v:typeof evidence)=>{v.localOcrFallback!.ocr.engine.configHash='0'.repeat(64);},(v:typeof evidence)=>{v.localOcrFallback!.rejectedResponseSha256='0'.repeat(64);},(v:typeof evidence)=>{v.observation.box![0]++;}]) {
+        const changed=JSON.parse(JSON.stringify(evidence));mutate(changed);check(!!intrinsicIdentifierObserverEvidenceIssue(changed,before,false),'tampered fallback cannot become model or OCR evidence');
+      }
+      check(hash(fs.readFileSync(actualFile))===before,'local recovery preserves original photo bytes');
+      let nativeRawCalls=0;
+      const nativeModule=vmNative(async()=>{nativeRawCalls++;return received;});
+      const [one,two]=await Promise.all([nativeModule.observeIntrinsicIdentifier({path:actualFile,sha256:before}),nativeModule.observeIntrinsicIdentifier({path:actualFile,sha256:before})]);
+      const three=await nativeModule.observeIntrinsicIdentifier({path:actualFile,sha256:before});
+      check(nativeRawCalls===2&&one.status==='observed'&&two.status==='observed'&&three.status==='observed','native-module seam consumes one shared OCR fallback and cannot restart model retries');
+      check(intrinsicIdentifierObserverEvidenceIssue(one.evidence!,before,true)===null,'native-module seam plus real OCR preserves the explicit engine envelope; this offline seam is never a live approval');
+    } finally {if(previous===undefined)delete process.env.TESSERACT_PATH;else process.env.TESSERACT_PATH=previous;}
+  }
   console.log(`PASS intrinsic identifier observer: ${checks} offline checks; one image/no expected word, at most one received malformed-response recovery, no retry of valid ambiguity or unknown transport, immutable raw bindings and bounded singleflight; actual provider calls 0`);
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

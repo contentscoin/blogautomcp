@@ -2,9 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import sharp from "sharp";
+import os from "node:os";
+import { reviewIntrinsicIdentifierOcr, normalizeIntrinsicIdentifierLiteral, intrinsicIdentifierOcrConfigurationSha256, INTRINSIC_IDENTIFIER_OCR_VERSION, type IntrinsicIdentifierOcrEvidence } from "./intrinsic-identifier-ocr";
 import { runCodexDraft, type CodexDraftOptions } from "./codex-draft-provider";
 
-export const INTRINSIC_IDENTIFIER_OBSERVER_VERSION = "intrinsic-identifier-observer/v4";
+export const INTRINSIC_IDENTIFIER_OBSERVER_VERSION = "intrinsic-identifier-observer/v5";
 export interface IntrinsicIdentifierObservation {
   literal: string;
   box: [number, number, number, number] | null;
@@ -20,6 +22,7 @@ export interface IntrinsicIdentifierObserverEvidence {
   responseSha256: string;
   rawResponse: string;
   observation: IntrinsicIdentifierObservation;
+  localOcrFallback?: { version: "intrinsic-observer-local-ocr/v1"; rejectedResponse: string; rejectedResponseSha256: string; ocr: IntrinsicIdentifierOcrEvidence };
 }
 export interface IntrinsicIdentifierObserverResult {
   status: "observed" | "unreadable" | "invalid" | "unavailable";
@@ -85,7 +88,8 @@ export const INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA = {
 } as const;
 const contract = { version: INTRINSIC_IDENTIFIER_OBSERVER_VERSION, systemPrompt: SYSTEM_PROMPT, userPrompt: USER_PROMPT,
   outputSchema: INTRINSIC_IDENTIFIER_OBSERVER_SCHEMA, maxImages: 1, preserveImageOrder: true, researchMode: "disabled", noTransientRetry: true,
-  formatRecovery: { maximumAttempts: 2, issue: "OBSERVER_LITERAL_SCRIPT_MIXED", unchangedBlindInput: true, maximumTotalMs: 90_000 } } as const;
+  formatRecovery: { maximumAttempts: 2, issue: "OBSERVER_LITERAL_SCRIPT_MIXED", unchangedBlindInput: true, maximumTotalMs: 90_000,
+    localOcrAfterRepeatedMixedScript: { maximumMs: 12_000, sameObservedLocationOnly: true, confidence: 85, distinctTransforms: 2 } } } as const;
 const cache = new Map<string, Promise<IntrinsicIdentifierObserverResult>>();
 const active = new Set<string>();
 
@@ -142,6 +146,60 @@ function bytes(file: string): Buffer {
   if (result.length > 16 * 1024 * 1024) throw Error("OBSERVER_INPUT_LIMIT");
   return result;
 }
+function mixedScriptGeometry(raw: string): { wire: Record<string, unknown>; box: [number,number,number,number] } | null {
+  if(parseResponse(raw).issue!=="OBSERVER_LITERAL_SCRIPT_MIXED")return null;
+  try {
+    const wire=JSON.parse(raw).observation, b=wire.box;
+    if(!b||typeof b!=="object"||Array.isArray(b)||Object.keys(b).sort().join("|")!=="height|left|top|width"||
+      !Object.values(b).every(n=>Number.isInteger(n)&&Number(n)>=0)||b.width<1||b.width>800||b.height<1||b.height>250||
+      b.left+b.width>1000||b.top+b.height>1000||b.width*b.height>120000)return null;
+    return {wire,box:[b.left,b.top,b.left+b.width,b.top+b.height]};
+  } catch{return null;}
+}
+function exactOcrConsensus(value: IntrinsicIdentifierOcrEvidence["source"]): boolean {
+  const c=value.consensus;if(!c||c.minimumConfidence<85||!c.normalized||c.normalized!==normalizeIntrinsicIdentifierLiteral(c.literal))return false;
+  const winning=value.transcripts.filter(row=>row.confidence>=85&&row.normalized===c.normalized);
+  return winning.length>=2&&new Set(winning.map(row=>row.preset.replace(/-psm11$/u,""))).size>=2&&
+    JSON.stringify(winning.map(row=>row.preset))===JSON.stringify(c.presets)&&c.minimumConfidence===Math.min(...winning.map(row=>row.confidence))&&
+    winning.every(row=>/^(raw-1x|gray-normal-invert-2x|gray-normal-invert-threshold-2x)(-psm11)?$/u.test(row.preset)&&
+      /^[a-f0-9]{64}$/u.test(row.cropSha256)&&row.text===row.words.map(word=>word.text).join(" ")&&
+      row.normalized===normalizeIntrinsicIdentifierLiteral(row.text)&&row.words.length>0&&row.confidence===Math.min(...row.words.map(word=>word.confidence)));
+}
+/** A locally executed OCR response is explicitly distinguished from model raw.
+ * Removing the fallback packet leaves an invalid model envelope, never authority. */
+export function intrinsicIdentifierObserverEvidenceIssue(value: IntrinsicIdentifierObserverEvidence, expectedSha: string, requireNative=true): string | null {
+  try {
+    if(value.version!==INTRINSIC_IDENTIFIER_OBSERVER_VERSION||requireNative&&value.nativeExecution!==true||value.imageSha256!==expectedSha||
+      value.requestSha256!==intrinsicIdentifierObserverRequestSha256(expectedSha)||sha(value.rawResponse)!==value.responseSha256)return "observer binding invalid";
+    const fallback=value.localOcrFallback;
+    if(!fallback){const parsed=parseIntrinsicIdentifierObserverResponse(value.rawResponse);return parsed&&JSON.stringify(parsed)===JSON.stringify(value.observation)?null:"observer response invalid";}
+    const geometry=mixedScriptGeometry(fallback.rejectedResponse), ocr=fallback.ocr, envelope=JSON.parse(value.rawResponse);
+    if(!geometry||Object.keys(fallback).sort().join('|')!=="ocr|rejectedResponse|rejectedResponseSha256|version"||
+      Object.keys(envelope).sort().join('|')!=="observation|ocrSha256|origin|rejectedResponseSha256"||
+      fallback.version!=="intrinsic-observer-local-ocr/v1"||sha(fallback.rejectedResponse)!==fallback.rejectedResponseSha256||ocr.version!==INTRINSIC_IDENTIFIER_OCR_VERSION||
+      requireNative&&ocr.nativeExecution!==true||ocr.engine.configHash!==intrinsicIdentifierOcrConfigurationSha256()||
+      sha(fs.readFileSync(ocr.engine.binaryPath))!==ocr.engine.binarySha256||sha(fs.readFileSync(ocr.engine.traineddataPath))!==ocr.engine.traineddataSha256||
+      ocr.source.originalSha256!==expectedSha||ocr.candidate.originalSha256!==expectedSha||
+      JSON.stringify(ocr.source.box)!==JSON.stringify(geometry.box)||JSON.stringify(ocr.candidate.box)!==JSON.stringify(geometry.box)||
+      ocr.sourceLiteral!==geometry.wire.literal||ocr.normalizedSourceLiteral!==normalizeIntrinsicIdentifierLiteral(ocr.sourceLiteral)||
+      !/^[a-f0-9]{64}$/u.test(ocr.source.regionSha256)||ocr.source.regionSha256!==ocr.candidate.regionSha256||
+      JSON.stringify(ocr.source.pixelBox)!==JSON.stringify(ocr.candidate.pixelBox)||!exactOcrConsensus(ocr.source)||!exactOcrConsensus(ocr.candidate)||
+      ocr.source.consensus!.normalized!==ocr.candidate.consensus!.normalized||
+      envelope.origin!=="intrinsic-observer-local-ocr/v1"||envelope.rejectedResponseSha256!==fallback.rejectedResponseSha256||envelope.ocrSha256!==sha(JSON.stringify(ocr)))return "observer OCR fallback invalid";
+    const observed=parseIntrinsicIdentifierObserverResponse(JSON.stringify({observation:envelope.observation}));
+    const expected=parseIntrinsicIdentifierObserverResponse(JSON.stringify({observation:{...geometry.wire,literal:ocr.source.consensus!.literal}}));
+    return observed&&expected&&JSON.stringify(observed)===JSON.stringify(expected)&&JSON.stringify(observed)===JSON.stringify(value.observation)?null:"observer OCR observation invalid";
+  } catch{return "observer OCR fallback malformed";}
+}
+async function recoverMixedScriptWithOcr(file:string,imageSha:string,raw:string,maximumMs:number,ocrRun:typeof reviewIntrinsicIdentifierOcr):Promise<IntrinsicIdentifierObserverEvidence["localOcrFallback"]|undefined>{
+  const geometry=mixedScriptGeometry(raw);if(!geometry||maximumMs<250)return undefined;
+  const workspace=fs.mkdtempSync(path.join(os.tmpdir(),"intrinsic-observer-ocr-"));
+  const result=await ocrRun({sourcePath:file,sourceSha256:imageSha,sourceBox:geometry.box,candidatePath:file,candidateSha256:imageSha,candidateBox:geometry.box,
+    sourceLiteral:String(geometry.wire.literal),workspace,maximumMs:Math.min(12000,maximumMs)});
+  const evidence=result.evidence;
+  if(!evidence||!exactOcrConsensus(evidence.source)||!exactOcrConsensus(evidence.candidate)||evidence.source.consensus!.normalized!==evidence.candidate.consensus!.normalized)return undefined;
+  return {version:"intrinsic-observer-local-ocr/v1",rejectedResponse:raw,rejectedResponseSha256:sha(raw),ocr:evidence};
+}
 function copy(result: IntrinsicIdentifierObserverResult): IntrinsicIdentifierObserverResult {
   return JSON.parse(JSON.stringify(result)) as IntrinsicIdentifierObserverResult;
 }
@@ -149,7 +207,7 @@ function copy(result: IntrinsicIdentifierObserverResult): IntrinsicIdentifierObs
 /** One independent full-image observation, never a favorable product verdict.
  * No brand, source literal, main-review transcription or second image is accepted. */
 export async function observeIntrinsicIdentifier(options: { path: string; sha256: string; maximumMs?: number },
-  dependencies: { review?: Review; now?: () => number } = {}): Promise<IntrinsicIdentifierObserverResult> {
+  dependencies: { review?: Review; now?: () => number; ocr?: typeof reviewIntrinsicIdentifierOcr } = {}): Promise<IntrinsicIdentifierObserverResult> {
   if (Object.keys(options).some(key => !["path", "sha256", "maximumMs"].includes(key)) ||
       !/^[a-f0-9]{64}$/u.test(options.sha256) || options.maximumMs !== undefined && !Number.isFinite(options.maximumMs))
     return { status: "invalid", reason: "INVALID_OBSERVER_INPUT" };
@@ -198,14 +256,26 @@ export async function observeIntrinsicIdentifier(options: { path: string; sha256
           if (now() > deadline) return { status: "unavailable", reason: "OBSERVER_TIMEOUT", rejectedFormatAttempt };
           parsed = parseResponse(rawResponse);
         }
-        const observation = parsed.observation;
+        let observation = parsed.observation;
+        let localOcrFallback: IntrinsicIdentifierObserverEvidence["localOcrFallback"];
+        if(!observation&&parsed.issue==="OBSERVER_LITERAL_SCRIPT_MIXED"&&rejectedFormatAttempt?.issue==="OBSERVER_LITERAL_SCRIPT_MIXED") {
+          localOcrFallback=await recoverMixedScriptWithOcr(options.path,options.sha256,rawResponse,deadline-now(),dependencies.ocr||reviewIntrinsicIdentifierOcr);
+          if(localOcrFallback&&unchanged()&&now()<=deadline) {
+            const geometry=mixedScriptGeometry(rawResponse)!;
+            const wire={...geometry.wire,literal:localOcrFallback.ocr.source.consensus!.literal};
+            observation=parseIntrinsicIdentifierObserverResponse(JSON.stringify({observation:wire}));
+            rawResponse=JSON.stringify({origin:"intrinsic-observer-local-ocr/v1",observation:wire,rejectedResponseSha256:localOcrFallback.rejectedResponseSha256,ocrSha256:sha(JSON.stringify(localOcrFallback.ocr))});
+          }
+        }
         if (!observation) return { status: "invalid", reason: "OBSERVER_RESPONSE_INVALID", diagnostic: {
           imageSha256: options.sha256, stage: "response", issue: parsed.issue,
           ...(typeof rawResponse === "string" && Buffer.byteLength(rawResponse, "utf8") <= MAXIMUM_RESPONSE_BYTES
             ? { rawResponse, responseSha256: sha(rawResponse) } : {}),
         }, ...(rejectedFormatAttempt ? { rejectedFormatAttempt } : {}) };
         const evidence: IntrinsicIdentifierObserverEvidence = { version: INTRINSIC_IDENTIFIER_OBSERVER_VERSION, nativeExecution,
-          imageSha256: options.sha256, requestSha256, responseSha256: sha(rawResponse), rawResponse, observation };
+          imageSha256: options.sha256, requestSha256, responseSha256: sha(rawResponse), rawResponse, observation,
+          ...(localOcrFallback?{localOcrFallback}:{}) };
+        if(intrinsicIdentifierObserverEvidenceIssue(evidence,options.sha256,nativeExecution))return {status:"invalid",reason:"OBSERVER_OCR_FALLBACK_INVALID",...(rejectedFormatAttempt?{rejectedFormatAttempt}:{})};
         return { status: observation.readability === "legible" ? "observed" : "unreadable",
           reason: observation.readability === "legible" ? "BLIND_INTRINSIC_WORD_OBSERVED" : "NO_UNIQUE_LEGIBLE_INTRINSIC_WORD", evidence,
           ...(rejectedFormatAttempt ? { rejectedFormatAttempt } : {}) };

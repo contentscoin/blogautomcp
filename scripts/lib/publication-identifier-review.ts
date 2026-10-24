@@ -10,7 +10,7 @@ import { INTRINSIC_IDENTIFIER_SCHEMA, corroboratableIdentifierPairs, intrinsicId
 import { corroborateIntrinsicIdentifierPair } from "./intrinsic-identifier-corroboration";
 import { normalizeIntrinsicIdentifierLiteral, reviewIntrinsicIdentifierOcr, INTRINSIC_IDENTIFIER_OCR_VERSION,
   type IntrinsicIdentifierOcrEvidence } from "./intrinsic-identifier-ocr";
-import { INTRINSIC_IDENTIFIER_OBSERVER_VERSION, intrinsicIdentifierObserverRequestSha256, parseIntrinsicIdentifierObserverResponse, intrinsicIdentifierObserverResponseIssue,
+import { intrinsicIdentifierObserverRequestSha256, parseIntrinsicIdentifierObserverResponse, intrinsicIdentifierObserverResponseIssue, intrinsicIdentifierObserverEvidenceIssue,
   observeIntrinsicIdentifier, type IntrinsicIdentifierObserverEvidence, type IntrinsicIdentifierObserverResult } from "./intrinsic-identifier-observer";
 import { scopedPublicationEvidenceIssue, visibleMemberInclusionIssue, pixelFormatEvidenceIssue, selectedSubjectFacts, picturedMemberFacts,
   buildScopedPublicationPackets, executeScopedPublicationPacket, type ScopedReviewEvidence } from "./publication-image-scoped-review";
@@ -406,12 +406,7 @@ function dimensions(file: string): ImageDimensions {
     ? { width: found.height, height: found.width } : { width: found.width, height: found.height };
 }
 function observerIssue(value: IntrinsicIdentifierObserverEvidence, sha256: string, requireNative: boolean): string | null {
-  try {
-    return value.version === INTRINSIC_IDENTIFIER_OBSERVER_VERSION && (!requireNative || value.nativeExecution === true) &&
-      value.imageSha256 === sha256 && value.requestSha256 === intrinsicIdentifierObserverRequestSha256(sha256) &&
-      hash(value.rawResponse) === value.responseSha256 && same(parseIntrinsicIdentifierObserverResponse(value.rawResponse), value.observation)
-      ? null : "blind single-image observation is not exact/native";
-  } catch { return "blind single-image observation is malformed"; }
+  return intrinsicIdentifierObserverEvidenceIssue(value,sha256,requireNative);
 }
 function chooseBlindSource(observations: PublicationBlindInputObservations) {
   if (!observations.sources.length) throw Error("BLIND_SOURCE_OBSERVATIONS_MISSING");
@@ -945,9 +940,7 @@ function pairEvidenceIssue(conflict: IntrinsicIdentifierServerConflict | Publica
       return "local identifier decision lacks exact source/candidate OCR consensus";
     if (conflict.blindObservations) for (const side of ["source", "candidate"] as const) {
       const observed = conflict.blindObservations[side], expected = side === "source" ? pair.sourceSha256! : context.candidateSha256;
-      if (observed.version !== INTRINSIC_IDENTIFIER_OBSERVER_VERSION || requireNative && observed.nativeExecution !== true || observed.imageSha256 !== expected ||
-          observed.requestSha256 !== intrinsicIdentifierObserverRequestSha256(expected) || hash(observed.rawResponse) !== observed.responseSha256 ||
-          !same(parseIntrinsicIdentifierObserverResponse(observed.rawResponse), observed.observation) || observed.observation.readability !== "legible" ||
+      if (observerIssue(observed,expected,requireNative) || observed.observation.readability !== "legible" ||
           observed.observation.location !== "intrinsic" || observed.observation.identifierRole !== pair.identifierRole ||
           observed.observation.literal !== pair[`${side}Literal`] || !same(observed.observation.box, pair[`${side}Box`])) return "independent blind observer binding is invalid";
     }

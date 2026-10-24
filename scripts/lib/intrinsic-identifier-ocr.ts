@@ -48,6 +48,7 @@ const CONFIG = Object.freeze({ version: INTRINSIC_IDENTIFIER_OCR_VERSION, preset
   maximumConcurrentNativeJobs: 2 });
 const sha = (bytes: Buffer | string): string => crypto.createHash("sha256").update(bytes).digest("hex");
 const configHash = sha(JSON.stringify(CONFIG));
+export const intrinsicIdentifierOcrConfigurationSha256 = (): string => configHash;
 const cache = new Map<string, Promise<IntrinsicIdentifierOcrResult>>();
 const activeNativeKeys = new Set<string>();
 const execute: Run = (binary, args, timeoutMs) => new Promise((resolve, reject) => {
