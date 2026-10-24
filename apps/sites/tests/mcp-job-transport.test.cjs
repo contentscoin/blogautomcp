@@ -21,6 +21,105 @@ function load(file, mocks = {}, tail = '') {
 }
 
 const { resultPage, jobGuidance, waitForJob } = load('lib/mcp-job-status.ts');
+
+test('material workflow completion projects input, authentication and outcome blockers instead of RPC success', () => {
+  const { materialWorkflowProjection: project } = load('lib/material-workflow-status.ts');
+  for (const [errorCode, causeCode, expected] of [
+    ['IMAGE_SOURCE_BINDING_REQUIRED', undefined, 'needs_input'], ['LLM_UNAVAILABLE', 'CODEX_LOGIN_REQUIRED', 'needs_auth'],
+    ['PREPARATION_RESULT_UNCERTAIN', undefined, 'needs_outcome_check'], ['IMAGE_OUTPUT_AMBIGUOUS', undefined, 'needs_outcome_check'],
+  ]) {
+    const projected = project('MATERIALS_PREPARE', 'job_source', 'SUCCEEDED', { data: { jobId: 'local_workflow', status: 'failed',
+      items: [{ productId: 'product_001', status: 'failed', errorCode, causeCode, localPath: 'must-not-leak' }] } });
+    assert.equal(projected.workflowPending, false);
+    assert.equal(projected.completionState, expected);
+    assert.equal(projected.productStates[0].state, expected);
+    assert.equal(projected.materialPreparationComplete, false);
+    assert.ok(!JSON.stringify(projected).includes('must-not-leak'));
+  }
+  const queued = project('MATERIALS_PREPARE', 'job_source', 'QUEUED', null);
+  assert.deepEqual(queued.nextCall, { tool: 'job_get', arguments: { jobId: 'job_source', waitMs: 20000, includeResult: false } });
+  const unknown = project('MATERIALS_PREPARE', 'job_source', 'FAILED', null);
+  assert.equal(unknown.workflowUncertain, true);
+  assert.deepEqual(unknown.nextCall, { tool: 'materials_list', arguments: { sourceJobId: 'job_source' } });
+  const unclaimed = project('MATERIALS_PREPARE', 'job_source', 'CANCELLED', null, { claimedAt: null, claimedDeviceId: null, errorCode: 'USER_CANCELLED' });
+  assert.equal(unclaimed.executionNotAdmitted, true);
+  assert.equal(unclaimed.workflowPending, false);
+  assert.equal(project('MATERIALS_PREPARE', 'job_source', 'CANCELLED', null, { claimedAt: 1, claimedDeviceId: 'device', errorCode: 'USER_CANCELLED' }).workflowPending, true);
+  assert.equal(project('MATERIALS_LIST', 'job_read', 'SUCCEEDED', { data: { materials: [] } }), null);
+  const valid = { data: { jobId: 'local_workflow', status: 'completed', readinessObservedAt: new Date().toISOString(), items: [{ productId: 'product_001', status: 'ready' }],
+    materials: [{ productId: 'product_001', ready: true, materialStatus: 'READY' }] } };
+  assert.equal(project('MATERIALS_LIST', 'job_source', 'SUCCEEDED', valid).materialPreparationComplete, true);
+  const receipt = project('MATERIALS_PREPARE', 'job_source', 'SUCCEEDED', valid);
+  assert.equal(receipt.materialPreparationComplete, false);
+  assert.equal(receipt.currentReadinessVerified, false);
+  assert.equal(receipt.completionState, 'needs_current_readiness');
+  assert.equal(receipt.nextCall.tool, 'materials_list');
+  for (const change of [
+    value => { value.data.items[0].errorCode = 'CODEX_AUTH_REQUIRED'; },
+    value => { value.data.items[0].status = 'preparing'; },
+    value => { value.data.materials[0].productId = 'foreign_product'; },
+    value => { value.data.materials.push({ productId: 'product_001', ready: true }); },
+    value => { value.data.materials = []; },
+    value => { value.data.items[0].errorCode = 'UNKNOWN_ERROR'; },
+  ]) {
+    const altered = structuredClone(valid); change(altered);
+    const state = project('MATERIALS_LIST', 'job_source', 'SUCCEEDED', altered);
+    assert.equal(state.materialPreparationComplete, false);
+    assert.equal(state.readyCount, 0, 'blocked, pending or contradictory material identities never inflate ready summary');
+    assert.notEqual(state.completionState, 'ready');
+  }
+  const large = { data: { jobId: 'local_workflow', status: 'completed', readinessObservedAt: new Date().toISOString(), items: Array.from({ length: 60 }, (_, i) => ({ productId: `product_${i}`, status: 'ready' })),
+    materials: Array.from({ length: 60 }, (_, i) => ({ productId: `product_${i}`, ready: true, materialStatus: 'READY' })) } };
+  const all = project('MATERIALS_LIST', 'job_source', 'SUCCEEDED', large);
+  assert.equal(all.productStates.length, 50);
+  assert.equal(all.productStatesTruncated, true);
+  assert.equal(all.acceptedCount, 60);
+  assert.equal(all.readyCount, 60);
+  assert.equal(all.materialPreparationComplete, true);
+});
+
+test('a verified later recovery is current readiness while the failed execution remains historical', () => {
+  const { materialWorkflowProjection: project } = load('lib/material-workflow-status.ts');
+  const result = { data: { jobId: 'local_workflow', status: 'partial', readinessObservedAt: new Date().toISOString(), items: [
+    { productId: 'product_001', status: 'failed', errorCode: 'NOT_READY' },
+    { productId: 'product_002', status: 'ready' },
+  ], materials: [
+    { productId: 'product_001', ready: true, materialStatus: 'READY' },
+    { productId: 'product_002', ready: true, materialStatus: 'READY' },
+  ] } };
+  const before = JSON.stringify(result);
+  const current = project('MATERIALS_LIST', 'job_read', 'SUCCEEDED', result);
+  assert.equal(current.readyCount, 2);
+  assert.equal(current.failedCount, 0);
+  assert.equal(current.historicalReadyCount, 1);
+  assert.equal(current.historicalFailedCount, 1);
+  assert.equal(current.productStates[0].state, 'ready');
+  assert.equal(current.productStates[0].executionErrorCode, 'NOT_READY');
+  assert.equal(current.productStates[0].errorCode, undefined);
+  assert.equal(current.workflowStatus, 'partial');
+  assert.equal(current.completionState, 'ready');
+  assert.equal(current.materialPreparationComplete, true);
+  assert.equal(JSON.stringify(result), before);
+  for (const status of ['PREPARING', 'PUBLISHING', 'PUBLISHED', 'OUTCOME_UNKNOWN', undefined]) {
+    const unsafe = structuredClone(result);
+    unsafe.data.materials[0].materialStatus = status;
+    assert.equal(project('MATERIALS_LIST', 'job_read', 'SUCCEEDED', unsafe).materialPreparationComplete, false);
+  }
+  const uncertainty = structuredClone(result);
+  uncertainty.data.items[0].errorCode = 'IMAGE_RESUME_REQUIRED';
+  uncertainty.data.materials[0].ready = false;
+  uncertainty.data.materials[0].materialStatus = 'BLOCKED';
+  assert.equal(project('MATERIALS_LIST', 'job_read', 'SUCCEEDED', uncertainty).completionState, 'needs_outcome_check');
+  for (const observedAt of [undefined, 'invalid', new Date(Date.now() - 300_000).toISOString(), new Date(Date.now() + 300_000).toISOString()]) {
+    const stale = structuredClone(result); stale.data.readinessObservedAt = observedAt;
+    const projection = project('MATERIALS_LIST', 'job_read', 'SUCCEEDED', stale);
+    assert.equal(projection.currentReadinessVerified, false);
+    assert.equal(projection.readyCount, 0);
+    assert.equal(projection.materialPreparationComplete, false);
+    assert.equal(projection.nextCall.tool, 'materials_list');
+    assert.equal(projection.productStates[0].errorCode, 'NOT_READY', 'old failures remain historical until the PC has supplied fresh verification');
+  }
+});
 test('bounded waiting preserves pending jobs across repeated requests', async () => {
   let polls = 0, elapsed = 0;
   const read = async () => ({ status: ++polls > 12 ? 'SUCCEEDED' : 'RUNNING' });
@@ -113,6 +212,92 @@ async function call(userId, scope, name, args) {
   return (await route.handleMcpRequest(request, userId, scope)).json();
 }
 
+test('all public tools request offline renewal consent while retaining their read/write boundary', async () => {
+  const request = new Request('https://example.com/api/mcp', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+  });
+  const payload = await (await route.handleMcpRequest(request, 'owner', 'mcp:read mcp:write')).json();
+  const initialize = new Request('https://example.com/api/mcp', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'offline-scope-test', version: '1' } } }),
+  });
+  const metadata = await (await route.handleMcpRequest(initialize, 'owner', 'mcp:read mcp:write')).json();
+  assert.equal(metadata.result.serverInfo.version, '1.3.17');
+  const tools = payload.result.tools;
+  assert.ok(tools.length > 0);
+  assert.ok(tools.some(tool => tool.annotations.readOnlyHint));
+  assert.ok(tools.some(tool => !tool.annotations.readOnlyHint));
+  for (const tool of tools) {
+    assert.deepEqual(tool.securitySchemes, [{ type: 'oauth2', scopes: [tool.annotations.readOnlyHint ? 'mcp:read' : 'mcp:write', 'offline_access'] }],
+      `${tool.name} must request renewal consent without adding another tool permission`);
+  }
+});
+
+test('both tools/list protocols expose preparation, recovery and shopping reference contracts together', async () => {
+  const listings = [];
+  for (const protocol of ['2025-11-25', '2026-07-28']) {
+    const response = await route.handleMcpRequest(new Request('https://example.test/api/mcp', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'mcp-protocol-version': protocol },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+    }), 'owner', 'mcp:read mcp:write');
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    const tools = payload.result.tools;
+    listings.push(tools);
+    assert.equal(new Set(tools.map(tool => tool.name)).size, tools.length);
+    const byName = name => {
+      const tool = tools.find(tool => tool.name === name);
+      assert.ok(tool, `${protocol} must advertise ${name}, rather than only accepting an unlisted call`);
+      return tool;
+    };
+    const profile = byName('account_get_profile');
+    assert.equal(profile._meta['openai/profile'], true);
+    assert.equal(profile.annotations.readOnlyHint, true);
+    assert.deepEqual(profile.inputSchema.properties, {});
+    for (const name of ['post_prepare_material', 'materials_rewrite_failed', 'materials_repair_blocked']) {
+      const tool = byName(name);
+      assert.equal(tool.annotations.readOnlyHint, false);
+      assert.ok(tool.inputSchema.required.includes('idempotencyKey'));
+      assert.ok(tool.inputSchema.properties.productIds);
+    }
+    assert.deepEqual(byName('post_prepare_material').inputSchema, byName('materials_prepare').inputSchema);
+    const apply = byName('post_apply_section_image');
+    const hashes = apply.inputSchema.properties.referenceHashes;
+    assert.equal(hashes.type, 'array');
+    assert.equal(hashes.minItems, 1);
+    assert.equal(hashes.maxItems, 3);
+    assert.equal(hashes.items.pattern, '^[a-f0-9]{64}$');
+    assert.match(apply.description, /referenceHashes/u);
+    assert.equal(apply.inputSchema.additionalProperties, false);
+    assert.ok(!apply.inputSchema.required.includes('referenceHashes'), 'travel retains its no-reference input; shopping is enforced by the call guard');
+    for (const tool of tools) assert.ok(!('jobType' in tool) && !('minAppVersion' in tool), 'private queue configuration is not a public descriptor');
+  }
+  assert.deepEqual(listings[0], listings[1], 'modern and legacy clients must receive the same complete tool contracts');
+});
+
+test('public guidance separates manuscript quality from readiness and labels compatibility publication as a real write', async () => {
+  const response = await route.handleMcpRequest(new Request('https://example.test/api/mcp', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+  }), 'owner', 'mcp:read mcp:write');
+  const tools = (await response.json()).result.tools;
+  const byName = name => tools.find(tool => tool.name === name);
+  assert.match(byName('brandconnect_list_products').description, /draft\.canPublish는 저장된 원고 품질검사/u);
+  assert.match(byName('brandconnect_list_products').description, /이미 발행한 상품에서도 true/u);
+  assert.match(byName('materials_list').description, /ready=true이며 materialStatus=READY/u);
+  for (const name of ['post_publish', 'post_schedule']) {
+    const tool = byName(name);
+    assert.match(tool.description, /실제로 네이버 블로그/u);
+    assert.match(tool.description, /confirmed=true/u);
+    assert.match(tool.description, /post_verify_published/u);
+    assert.equal(tool.inputSchema.properties.confirmed.const, true);
+    assert.ok(tool.inputSchema.required.includes('confirmed'));
+    assert.ok(tool.inputSchema.required.includes('idempotencyKey'));
+    assert.deepEqual(tool.annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true });
+  }
+});
+
 test('draft repair tool guidance preserves images and reruns current approval quality', async () => {
   const request = new Request('https://example.com/api/mcp', {
     method: 'POST',
@@ -204,14 +389,15 @@ test('travel keeps twelve sections while older PCs cannot accept submitted draft
 test('shopping scene tool requires ordered references; travel keeps its existing input contract', async () => {
   const args = { connectKind: 'shopping', productId: 'product-1', sectionId: 'scene', generatedImageUrl: 'https://example.test/generated.png', idempotencyKey: 'reference-scene-fixture' };
   assert.equal((await call('owner', 'mcp:write', 'post_apply_section_image', args)).result.structuredContent.code, 'PRODUCT_REFERENCE_REQUIRED');
-  for (const referenceHashes of [[], ['bad'], ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64)]])
+  for (const referenceHashes of [[], ['bad'], ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64), 'd'.repeat(64)]])
     assert.equal((await call('owner', 'mcp:write', 'post_apply_section_image', { ...args, referenceHashes })).result.structuredContent.code, 'INVALID_ARGUMENT');
   const { validateToolArguments } = load('lib/tool-schema.ts');
   const listing = await route.handleMcpRequest(new Request('https://example.test/api/mcp', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }) }), 'owner', 'mcp:read mcp:write');
   const tool = (await listing.json()).result.tools.find(tool => tool.name === 'post_apply_section_image');
   assert.match(tool.description, /실제 원본/u);
   assert.equal(validateToolArguments(tool.inputSchema, { ...args, connectKind: 'travel' }).ok, true);
-  const valid = { ...args, referenceHashes: ['b'.repeat(64), 'a'.repeat(64)] };
+  const valid = { ...args, referenceHashes: ['b'.repeat(64), 'a'.repeat(64), 'c'.repeat(64)] };
+  assert.equal(validateToolArguments(tool.inputSchema, valid).ok, true, 'primary, geometry and intrinsic-label references fit the shared PC contract');
   const replayRoute = load('app/api/mcp/[credential]/route.ts', { ...mocks, '@/db': { getD1: () => ({ prepare: () => ({ bind: () => ({ first: async () => ({ id: 'job_reference', type: 'POST_APPLY_SECTION_IMAGE', inputJson: JSON.stringify(valid), status: 'SUCCEEDED' }) }) }) }) } });
   const request = new Request('https://example.test/api/mcp', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'post_apply_section_image', arguments: valid } }) });
   assert.equal((await (await replayRoute.handleMcpRequest(request, 'owner', 'mcp:write')).json()).result.structuredContent.reused, true, 'Reference order must survive schema validation and queue serialization.');
@@ -252,6 +438,21 @@ test('shopping natural-photo apply requires PC 1.3.97 while travel and draft rea
   const capabilities = (await invoke('agent_get_status', {})).capabilities;
   assert.equal(capabilities.shoppingReferenceScenes.minimumAppVersion, '1.3.97');
   assert.equal(capabilities.shoppingReferenceScenes.supported, true);
+  const three = { ...apply, referenceHashes: [...apply.referenceHashes, 'c'.repeat(64)] };
+  const scopedRead = { connectKind: 'shopping', draftId: 'approved-draft', referenceSectionId: 'scene' };
+  const previousQueued = queued.length;
+  version = '1.3.142';
+  for (const [tool, input] of [['post_apply_section_image', three], ['post_get_draft', scopedRead]]) {
+    const rejected = await invoke(tool, input);
+    assert.equal(rejected.code, 'APP_UPDATE_REQUIRED'); assert.equal(rejected.required, '1.3.143');
+  }
+  assert.equal(queued.length, previousQueued, 'old PCs cannot ignore the selected-slot field or reject a newly accepted three-reference apply');
+  assert.equal((await invoke('post_get_draft', { connectKind: 'shopping', draftId: 'approved-draft' })).status, 'QUEUED');
+  version = '1.3.143';
+  assert.equal((await invoke('post_apply_section_image', three)).status, 'QUEUED');
+  assert.deepEqual(queued.at(-1).referenceHashes, three.referenceHashes);
+  assert.equal((await invoke('post_get_draft', scopedRead)).status, 'QUEUED');
+  assert.equal(queued.at(-1).referenceSectionId, 'scene');
 });
 
 test('legacy shopping draft reads preserve approval and text but suppress obsolete paid-generation instructions', async () => {
@@ -325,7 +526,7 @@ test('automatic bulk publish requires explicit mode, count and confirmation', as
   for (const change of [{ publishMode: 'invalid' }, { limit: 0 }, { limit: 51 }, { confirmed: false }]) {
     assert.equal((await call('owner', 'mcp:write', 'post_bulk_publish', { ...args, ...change })).result.structuredContent.code, 'INVALID_ARGUMENT');
   }
-  const { publishMode, ...missingMode } = args;
+  const missingMode = { ...args }; delete missingMode.publishMode;
   assert.equal((await call('owner', 'mcp:write', 'post_bulk_publish', missingMode)).result.structuredContent.code, 'INVALID_ARGUMENT');
 });
 test('large job_get is bounded and advertised pages reconstruct stored draft', async () => {
@@ -355,6 +556,49 @@ const nativeReferenceFixtures = [
   nativeReferenceFixture('product-identity', 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN0sAAAAASUVORK5CYII='),
   nativeReferenceFixture('approved-scene-continuity', 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='),
 ];
+
+test('three-reference product bundles preserve identity, geometry and intrinsic-label pixels in exact attachment order', async () => {
+  const previous = storedResult;
+  const source = nativeReferenceFixtures[0];
+  const geometry = { ...nativeReferenceFixtures[1], role: 'product-geometry' };
+  const label = nativeReferenceFixture('product-intrinsic-label', Buffer.concat([Buffer.from(source.base64, 'base64'), Buffer.from('label')]).toString('base64'));
+  try {
+    const references = [source, geometry, label];
+    storedResult = JSON.stringify({ data: { nativeReferenceImages: references } });
+    const result = (await call('owner', 'mcp:read', 'job_get', { jobId: 'job_owned' })).result;
+    assert.deepEqual(result.structuredContent.job.imageAttachments.map(item => item.role), references.map(item => item.role));
+    assert.deepEqual(result.content.filter(block => block.type === 'image').map(block => block.data), references.map(item => item.base64));
+    for (const [index, image] of references.entries()) {
+      assert.equal(result.structuredContent.job.imageAttachments[index].sha256, image.sha256);
+      assert.equal(result.structuredContent.job.imageAttachments[index].attachmentIndex, index + 1);
+    }
+    const fourth = nativeReferenceFixture('approved-scene-continuity', Buffer.concat([Buffer.from(source.base64, 'base64'), Buffer.from('anchor')]).toString('base64'));
+    for (const invalid of [[...references, fourth], [geometry, source, label], [source, { ...geometry, role: 'unknown' }, label],
+      [source, geometry, { ...label, sha256: '0'.repeat(64) }]]) {
+      storedResult = JSON.stringify({ data: { nativeReferenceImages: invalid } });
+      const rejected = (await call('owner', 'mcp:read', 'job_get', { jobId: 'job_owned' })).result;
+      assert.equal(rejected.structuredContent.code, 'IMAGE_REFERENCE_INVALID');
+      assert.equal(rejected.content.filter(block => block.type === 'image').length, 0);
+    }
+  } finally { storedResult = previous; }
+});
+
+test('result first-page read delivers exact native pixels after a status-only read; later pages do not repeat them', async () => {
+  const previous = storedResult;
+  try {
+    const reference = nativeReferenceFixtures[0];
+    storedResult = JSON.stringify({ data: { nativeReferenceImages: [reference], publicationPhotoAvailability: { status: 'attached-verified-original' } } });
+    const status = (await call('owner', 'mcp:read', 'job_get', { jobId: 'job_owned', includeResult: false })).result;
+    assert.equal(status.structuredContent.job.result, null);
+    assert.equal(status.content.some(block => block.type === 'image'), false);
+    const first = (await call('owner', 'mcp:read', 'job_result_read', { jobId: 'job_owned', offset: 0, limit: 80 })).result;
+    const attachment = first.structuredContent.imageAttachments[0];
+    assert.equal(attachment.sha256, reference.sha256);
+    assert.equal(first.content[attachment.contentIndex].data, reference.base64);
+    const next = (await call('owner', 'mcp:read', 'job_result_read', { jobId: 'job_owned', offset: first.structuredContent.nextOffset, limit: 80 })).result;
+    assert.equal(next.content.some(block => block.type === 'image'), false);
+  } finally { storedResult = previous; }
+});
 
 test('job_get attaches exact ordered native reference pixels even when the result is paged', async () => {
   const previous = storedResult;

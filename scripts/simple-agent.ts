@@ -1,11 +1,13 @@
 import {
   applyFreeformDraftRevision,
   assertUntargetedSectionHashesUnchanged,
+  requestsFreeformSectionHeadingRevision,
   requestsFreeformTitleRevision,
 } from "./lib/freeform-draft-revision";
-import { readBrandPostPackage, type BrandPostPackageImageAsset, type BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
+import { getBrandPostPackageDir, readBrandPostPackage, type BrandPostPackageImageAsset, type BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
 import { reconcileBrandPostImageContinuity } from "../src/lib/brand-post-image-continuity";
 import { isDraftEditorialQualityPassed } from "../src/lib/brand-post-quality-display";
+import { readMaterialFailureReferenceForProduct } from "../src/lib/material-job-store";
 import { parseNaverPublishedUrl } from "../src/lib/naver-published-url";
 import { readPublishAttempt, updatePublishAttempt, interruptedPublishStatus, publicationMaterialHash } from "../src/lib/publish-attempt";
 import { verifyReservedPostInNaverList } from "./lib/naver-schedule-list-verifier";
@@ -109,6 +111,7 @@ import {
   getWritingOutputExample,
   reviewGeneratedEvidenceFacts,
   type WritingPromptContract,
+  type WritingPublicationPhotoContext,
   selectGroundedEvidenceFacts,
 } from "./lib/writing-prompt-contract";
 import {
@@ -124,12 +127,17 @@ import {
   formatQualityConvergenceInstructions,
   planQualityConvergence,
 } from "./lib/quality-convergence";
-import { selectPreparedRevisionSectionIndexes } from "./lib/prepared-revision-policy";
+import { isPreparedTitleOnlyRepair, selectPreparedRevisionSectionIndexes } from "./lib/prepared-revision-policy";
+import { preservePreparedRevisionRenderPlan } from "./lib/prepared-revision-composition";
 import { selectVerifiedProductPhoto } from "./lib/product-photo-review";
 import { recoverProductPhotoRegion } from "./lib/product-photo-region";
+import { assertShoppingPrewritePhoto, persistPrewritePhotoForContext, readSubmittedPrewritePhoto, selectShoppingPrewriteOriginal,
+  withShoppingPrewritePhoto, writingPhotosFromPrewrite, type ShoppingPrewritePhotoProof } from "./lib/shopping-prewrite-photos";
 import { chooseProductName } from "./lib/product-name-identity";
 import { extractExplicitProductFacts, normalizeTypedProductFact } from "./lib/product-source-facts";
 import { readSellerDetailOcrFacts } from "./lib/product-source-ocr";
+import { isProductTitleEcho, isReadableSellerSourceImage, planSellerSourceEvidenceImages, planSellerSourceReadingBatches, SELLER_SOURCE_IMAGE_LIMIT, type SellerSourceEvidenceImage } from "./lib/product-source-intake";
+import { writeInsufficientSourceDiagnostic, type SellerSourceReadingDiagnostic } from "./lib/product-source-intake-diagnostics";
 import { mergeProductInfo } from "./lib/product-info-merge";
 import { commitPreparedPackageTransaction } from "./lib/prepared-package-transaction";
 import { writeDraftProgressFile } from "../src/lib/draft-progress";
@@ -162,7 +170,7 @@ import {
   productEvidenceRequirement,
   productSignalAnchor,
 } from "./lib/product-editorial-plan";
-import { normalizeDraftSections } from "./lib/draft-sections";
+import { normalizeDraftSections, stripDraftListPrefix } from "./lib/draft-sections";
 import {
   assertDraftSectionCount,
   expandDraftSectionEntries,
@@ -218,7 +226,7 @@ import { createEditorialSelection, formatEditorialTemplate } from "./lib/editori
 import { formatTopicTemplateForPrompt } from "./lib/topic-templates";
 import { planSellerVisionBatches, readDetailImagesWithVision } from "./lib/detail-vision-reader";
 import { buildSearchDemandQueries, collectSearchDemand, formatSearchDemandForPrompt } from "./lib/search-demand";
-import { formatTitleCandidatesForPrompt, planTitle, type TitlePlanContext } from "./lib/topic-templates/title-planner";
+import { planTitle, type TitlePlanContext } from "./lib/topic-templates/title-planner";
 import {
   assessSiblingOverlap,
   formatPostAngleForPrompt,
@@ -248,7 +256,17 @@ import {
   type ResolvedPostDocumentV1,
 } from "../src/lib/post-composition-contract";
 import { buildSelectedProductImageAuditContext, assertPublishImagesSafe, PublishImageAuditError } from "./lib/publish-image-audit";
-import { assertPublishedEditorText, publishedReadinessSections } from "./lib/published-editor-audit";
+import { publishedReadinessSections } from "./lib/published-editor-audit";
+import {
+  assertNaverEditorBody,
+  assertNaverEditorTypingFocus,
+  editorBodyAuditDiagnostic,
+  readNaverEditorBodySnapshot,
+  readNaverEditorTypingFocus,
+  type NaverEditorAuditPhase,
+  type NaverEditorBodySnapshot,
+  type NaverEditorTypingFocus,
+} from "./lib/naver-editor-body";
 
 // Stealth 플러그인 적용 (봇 감지 우회)
 chromium.use(StealthPlugin());
@@ -551,6 +569,7 @@ interface SpecStep2Input {
   angleContext?: { angle: string; siblings: SiblingPostSummary[] } | null;
   /** Validated before starting a browser; reuse those exact submitted bytes. */
   submittedDraftText?: string;
+  submittedPrewritingPhotoProof?: ShoppingPrewritePhotoProof | null;
 }
 
 /** 이 행의 포스팅 각도와 형제 글 요약. 조회 실패는 전체 리뷰·형제 없음으로 처리한다. */
@@ -690,20 +709,24 @@ function sanitizeTypedProductFactLine(value: string): string {
 }
 
 function sanitizeSellerEvidenceFeatures(values: string[], productName = ""): string[] {
-  const normalizedProductName = isolateSellerEvidenceText(productName, 300).replace(/\s+/gu, "").toLowerCase();
+  const isolatedProductName = isolateSellerEvidenceText(productName, 300);
   return Array.from(new Set(values.flatMap((value) => {
     const isolated = isolateSellerEvidenceText(value, 500);
     const feature = normalizeTypedProductFact(isolated) || isolated;
     if (!feature) return [];
     if (/^(?:핵심 방문지|\d{1,2}일차 일정|출국|귀국|구매후기 근거)\s*[:：]/u.test(feature)) return [feature];
     if (NON_EVIDENCE_FEATURE_PATTERN.test(feature)) return [];
-    const compact = feature.replace(/\s+/gu, "").toLowerCase();
-    if (normalizedProductName && compact === normalizedProductName) return [];
+    if (isProductTitleEcho(feature, isolatedProductName)) return [];
     return isMeaningfulProductEvidenceFeature(feature) ? [feature] : [];
   }))).slice(0, 40);
 }
 
-interface SellerEvidenceReadingReport { ocrFacts: number; visionFacts: number; visionImages: number }
+interface SellerEvidenceReadingReport {
+  ocrFacts: number;
+  visionFacts: number;
+  visionImages: number;
+  reading?: SellerSourceReadingDiagnostic[];
+}
 
 async function enrichShoppingSourceFeatures(
   name: string,
@@ -713,26 +736,34 @@ async function enrichShoppingSourceFeatures(
   sellerImagePaths: string[] = sellerDetailImagePaths,
   report: SellerEvidenceReadingReport = { ocrFacts: 0, visionFacts: 0, visionImages: 0 },
 ): Promise<string[]> {
+  const independentDescription = isProductTitleEcho(description, name) ? "" : description;
   const collected = sanitizeSellerEvidenceFeatures([
     ...features,
     ...extractExplicitProductFacts(isolateSellerEvidenceText(name, 500), "title"),
-    ...extractExplicitProductFacts(isolateSellerEvidenceText(description, 12_000), "description"),
+    ...extractExplicitProductFacts(isolateSellerEvidenceText(independentDescription, 12_000), "description"),
   ], name);
-  const sparse = () => !hasSufficientProductReviewEvidence({ productName: name, description,
+  const sparse = () => !hasSufficientProductReviewEvidence({ productName: name, description: independentDescription,
     features: sanitizeSellerEvidenceFeatures(collected, name), targetSectionCount: 11 });
-  if (sparse() && sellerDetailImagePaths.length) {
-    const ocr = await readSellerDetailOcrFacts(sellerDetailImagePaths);
+  const readingImages = [...new Set([...sellerImagePaths, ...sellerDetailImagePaths])];
+  if (sparse() && readingImages.length) {
+    const ocrImages = readingImages.slice(0, 8);
+    const ocr = await readSellerDetailOcrFacts(ocrImages);
     collected.push(...ocr.facts);
     report.ocrFacts += ocr.facts.length;
+    (report.reading ||= []).push({ kind: "ocr", status: ocr.status, imagePaths: ocrImages,
+      scannedImageCount: ocr.scannedImageCount, acceptedFacts: ocr.facts });
     console.log(`   🔎 판매자 상세 OCR: ${ocr.status}, ${ocr.scannedImageCount}구간 검사, 근거 ${ocr.facts.length}개 (${ocr.imagePaths.length}구간에서 확인)`);
   }
   // 상세페이지가 이미지로만 되어 있어 OCR로도 근거가 부족하면 비전 모델로 이미지 속 글자를 읽는다.
-  // 1차는 긴 상세 이미지의 구간, 2차는 아직 읽지 않은 판매자 이미지(보통 비율 상세 이미지 포함)다.
+  // 출판용 사진 목록과 별도로 보존한 판매자 상세 근거를 최대 두 묶음만 읽는다.
   if (DETAIL_VISION_READ_ENABLED) {
-    const batches = planSellerVisionBatches(sellerDetailImagePaths, sellerImagePaths, DETAIL_VISION_MAX_IMAGES);
+    const batches = planSellerSourceReadingBatches(readingImages, DETAIL_VISION_MAX_IMAGES);
     for (const batch of batches) {
       if (!sparse()) break;
-      const facts = await readDetailFactsWithVision("SHOPPING", name, batch);
+      const facts = await readDetailFactsWithVision("SHOPPING", name, batch, reading => {
+        (report.reading ||= []).push({ kind: "vision", status: reading.status, imagePaths: batch,
+          scannedImageCount: reading.imageCount, acceptedFacts: reading.acceptedFacts, rejectedFacts: reading.rejectedFacts });
+      });
       collected.push(...facts);
       report.visionImages += batch.length;
       report.visionFacts += facts.length;
@@ -745,7 +776,9 @@ async function enrichShoppingSourceFeatures(
  * 상세 이미지 비전 판독. 전사에 근거한 줄만 채택하고, 기존 추출기로 형식화한 사실을 함께 돌려준다.
  * 실패해도 원고 작성을 막지 않는다(기존 근거 게이트가 최종 판단).
  */
-async function readDetailFactsWithVision(kind: "SHOPPING" | "TRAVEL", name: string, imagePaths: string[]): Promise<string[]> {
+async function readDetailFactsWithVision(kind: "SHOPPING" | "TRAVEL", name: string, imagePaths: string[],
+  onReading?: (report: Awaited<ReturnType<typeof readDetailImagesWithVision>>) => void,
+): Promise<string[]> {
   const report = await readDetailImagesWithVision({
     kind,
     productName: name,
@@ -759,6 +792,10 @@ async function readDetailFactsWithVision(kind: "SHOPPING" | "TRAVEL", name: stri
       preserveImageOrder: options.preserveImageOrder,
     }),
   });
+  onReading?.(report);
+  if (report.status === "failed") {
+    throw Object.assign(new Error("SOURCE_REVIEW_RESPONSE_INVALID: 상세 이미지 판독이 완료되지 않았습니다. 기존 원고와 사진을 보존하고 판독 단계부터 다시 확인하세요."), { code: "SOURCE_REVIEW_RESPONSE_INVALID" });
+  }
   console.log(`   👁️ 상세 이미지 판독: ${report.status}, ${report.imageCount}구간, 채택 ${report.acceptedFacts.length}줄 / 제외 ${report.rejectedFacts.length}줄${report.error ? ` (${report.error})` : ""}`);
   if (report.acceptedFacts.length === 0) return [];
   const accepted = report.acceptedFacts.map((line) => isolateSellerEvidenceText(line, 200)).filter(Boolean);
@@ -807,10 +844,7 @@ function hasCompleteTravelSourceResearch(research: TravelPageResearch | null | u
 }
 
 function stripSectionPrefix(text: string): string {
-  return stripEmoji(text)
-    .replace(/^[\s\-*#>]+/, "")
-    .replace(/^[\d]+\.\s*/, "")
-    .trim();
+  return stripDraftListPrefix(stripEmoji(text).replace(/^[\s*#>]+/u, "")).trim();
 }
 
 function isSectionTitleLine(text: string): boolean {
@@ -3798,6 +3832,8 @@ interface ProductInfo {
   finalUrl?: string | null;
   storeName?: string | null;
   travelPageResearch?: TravelPageResearch | null;
+  prewritingPhotoProof?: ShoppingPrewritePhotoProof;
+  publicationPhotoContext?: WritingPublicationPhotoContext;
 }
 
 interface StoredBrandLinkSeed {
@@ -3972,12 +4008,23 @@ function isTallDetailImageDimension(width: number, height: number): boolean {
   return ratio >= 1.35 && ratio <= 6.5;
 }
 
+interface MaterializedProductSourceImages {
+  representativeImagePath: string | null;
+  imagePaths: string[];
+  detailImagePaths: string[];
+  sellerDetailImagePaths: string[];
+  sellerImagePaths: string[];
+  sellerEvidenceImages: SellerSourceEvidenceImage[];
+  sellerEvidenceOnlyImagePaths: string[];
+}
+
 async function materializeProductImages(
   imageUrls: string[],
   filePrefix: string,
   targetImageCount = SHOPPING_BODY_IMAGE_MAX,
-): Promise<{ representativeImagePath: string | null; imagePaths: string[]; detailImagePaths: string[]; sellerDetailImagePaths: string[]; sellerImagePaths: string[] }> {
-  const candidateLimit = Math.max(targetImageCount + 12, 24);
+  retainSellerEvidence = true,
+): Promise<MaterializedProductSourceImages> {
+  const candidateLimit = Math.max(targetImageCount + 12, SELLER_SOURCE_IMAGE_LIMIT);
   // Collection already ranked semantic gallery provenance. URL-only re-ranking
   // loses it and can move unrelated JPEG recommendations ahead of gallery PNGs.
   const prioritizedUrls = Array.from(new Set(imageUrls)).slice(0, candidateLimit);
@@ -3990,27 +4037,37 @@ async function materializeProductImages(
     height: number;
     detailCrop?: boolean;
   }[] = [];
+  const evidenceImages: SellerSourceEvidenceImage[] = [];
+  const evidenceOnlyPaths = new Set<string>();
   const inspectionCount = Math.min(candidateLimit, prioritizedUrls.length);
   let representativeImagePath: string | null = null;
   let regularImageCount = 0;
   let detailSegmentCount = 0;
 
   for (let i = 0; i < inspectionCount; i++) {
+    const imgPath = path.join(TEMP_PATH, `${filePrefix}_${Date.now()}_${i}.jpg`);
     try {
-      const imgPath = path.join(TEMP_PATH, `${filePrefix}_${Date.now()}_${i}.jpg`);
       publishImageCleanup.track([imgPath]);
       await downloadImage(prioritizedUrls[i], imgPath);
       const stats = fs.statSync(imgPath);
-
-      if (stats.size < 20_000) {
-        publishImageCleanup.cleanup([imgPath]);
-        console.log(`   ⚠️ 이미지 제외(너무 작음) ${i + 1}`);
-        continue;
-      }
-
       const metadata = await sharp(imgPath).metadata();
       const width = metadata.width ?? 0;
       const height = metadata.height ?? 0;
+      const evidenceImage: SellerSourceEvidenceImage = {
+        path: imgPath, url: prioritizedUrls[i], size: stats.size, index: i, width, height, publicationCandidate: false,
+      };
+      const readable = retainSellerEvidence && isReadableSellerSourceImage(evidenceImage);
+      if (readable) {
+        evidenceImages.push(evidenceImage);
+        evidenceOnlyPaths.add(imgPath);
+      }
+
+      if (stats.size < 20_000) {
+        if (!readable) publishImageCleanup.cleanup([imgPath]);
+        console.log(`   ⚠️ 본문 이미지 제외(너무 작음) ${i + 1}${readable ? " · 판매자 상세 판독용 보존" : ""}`);
+        continue;
+      }
+
       if (isTallDetailImageDimension(width, height) || !isUsableBlogProductImageDimension(width, height)) {
         // 스마트스토어 상세페이지는 860x10,000px 이상의 한 장 이미지인 경우가 많다.
         // 중앙 한 컷만 남기지 않고 원문 전체를 최대 8개 구간으로 보존한다.
@@ -4035,24 +4092,40 @@ async function materializeProductImages(
             height: detailCrop.height,
             detailCrop: true,
           })));
+          if (retainSellerEvidence) {
+            evidenceImages.push(...acceptedDetailCrops.map((detailCrop, segmentIndex) => ({
+              path: detailCrop.path, url: prioritizedUrls[i], size: detailCrop.size,
+              index: i * 10 + segmentIndex, width: detailCrop.width, height: detailCrop.height,
+              publicationCandidate: false, detailCrop: true,
+            })));
+          }
           for (const unusedDetailCrop of detailCrops.slice(remainingDetailCapacity)) {
             publishImageCleanup.cleanup([unusedDetailCrop.path]);
           }
           detailSegmentCount += acceptedDetailCrops.length;
-          publishImageCleanup.cleanup([imgPath]);
+          // Complete crops already retain this source. If the crop quota cut
+          // later panels off, keep the original solely in the reading pool.
+          if (acceptedDetailCrops.length === detailCrops.length || !readable) {
+            if (readable) evidenceImages.splice(evidenceImages.indexOf(evidenceImage), 1);
+            evidenceOnlyPaths.delete(imgPath);
+            publishImageCleanup.cleanup([imgPath]);
+          }
           console.log(`   ✅ 이미지 ${i + 1}/${inspectionCount} 상세 원문 ${acceptedDetailCrops.length}구간 생성`);
           continue;
         }
-        publishImageCleanup.cleanup([imgPath]);
-        console.log(`   ⚠️ 이미지 제외(상세/배너 비율 ${width}x${height}) ${i + 1}`);
+        if (!readable) publishImageCleanup.cleanup([imgPath]);
+        console.log(`   ⚠️ 본문 이미지 제외(상세/배너 비율 ${width}x${height}) ${i + 1}${readable ? " · 판매자 상세 판독용 보존" : ""}`);
         continue;
       }
 
       if (regularImageCount >= targetImageCount) {
-        publishImageCleanup.cleanup([imgPath]);
+        if (!readable) publishImageCleanup.cleanup([imgPath]);
+        if (readable) console.log(`   🔎 이미지 ${i + 1}/${inspectionCount} 판매자 상세 판독용 보존(본문 사진 한도와 별도)`);
         continue;
       }
       downloaded.push({ path: imgPath, url: prioritizedUrls[i], size: stats.size, index: i, width, height });
+      evidenceImage.publicationCandidate = true;
+      evidenceOnlyPaths.delete(imgPath);
       regularImageCount += 1;
       if (
         !representativeImagePath &&
@@ -4064,6 +4137,10 @@ async function materializeProductImages(
       }
       console.log(`   ✅ 이미지 ${i + 1}/${inspectionCount} 다운로드`);
     } catch {
+      publishImageCleanup.cleanup([imgPath]);
+      evidenceOnlyPaths.delete(imgPath);
+      const failedEvidenceIndex = evidenceImages.findIndex(image => image.path === imgPath);
+      if (failedEvidenceIndex >= 0) evidenceImages.splice(failedEvidenceIndex, 1);
       console.log(`   ⚠️ 다운로드 실패 ${i + 1}`);
     }
   }
@@ -4113,6 +4190,8 @@ async function materializeProductImages(
       ...downloaded.filter((item) => item.detailCrop && !isReviewImageUrl(item.url)),
       ...downloaded.filter((item) => !item.detailCrop && !isReviewImageUrl(item.url)),
     ].map((item) => item.path),
+    sellerEvidenceImages: planSellerSourceEvidenceImages(evidenceImages),
+    sellerEvidenceOnlyImagePaths: [...evidenceOnlyPaths],
   };
 }
 
@@ -4140,12 +4219,16 @@ async function buildProductInfoFromStoredBrandLink(
           imageUrls,
           "stored_product",
           connectKind === "TRAVEL" ? TRAVEL_BODY_IMAGE_MAX : SHOPPING_BODY_IMAGE_MAX,
+          connectKind === "SHOPPING",
         )
-      : { representativeImagePath: null, imagePaths: [], detailImagePaths: [], sellerDetailImagePaths: [], sellerImagePaths: [] };
+      : { representativeImagePath: null, imagePaths: [], detailImagePaths: [], sellerDetailImagePaths: [], sellerImagePaths: [], sellerEvidenceImages: [], sellerEvidenceOnlyImagePaths: [] };
 
-  if (connectKind === "SHOPPING" && enrichSource) {
-    features = await enrichShoppingSourceFeatures(name, description, features, materializedImages.sellerDetailImagePaths, materializedImages.sellerImagePaths);
-  }
+  try {
+    if (connectKind === "SHOPPING" && enrichSource) {
+      features = await enrichShoppingSourceFeatures(name, description, features, materializedImages.sellerDetailImagePaths,
+        materializedImages.sellerEvidenceImages.map(image => image.path));
+    }
+  } finally { publishImageCleanup.cleanup(materializedImages.sellerEvidenceOnlyImagePaths); }
 
   return {
     name,
@@ -4620,7 +4703,7 @@ async function step1_getProductInfo(
   ]));
   const imageUrls = allImageUrls.slice(0, imageCandidateMax);
   const evidenceSourceImageUrls = connectKind === "SHOPPING"
-    ? preserveSellerDetailSourceUrls(allImageUrls, imageCandidateMax) : imageUrls;
+    ? preserveSellerDetailSourceUrls(allImageUrls, SELLER_SOURCE_IMAGE_LIMIT) : imageUrls;
   const salesPageImageCount = imageUrls.filter((url) => isSalesPageProductImageUrl(url)).length;
   const reviewImageCount = imageUrls.filter((url) => isReviewImageUrl(url)).length;
   console.log(
@@ -4630,11 +4713,13 @@ async function step1_getProductInfo(
     console.log(`   🖼️ 대표 이미지 후보: ${imageUrls[0]}`);
     console.log(`   🖼️ 썸네일 원본 적합: ${isPreferredThumbnailImageUrl(imageUrls[0]) ? "예" : "아니오"}`);
   }
-  const { representativeImagePath, imagePaths, detailImagePaths, sellerDetailImagePaths, sellerImagePaths } = await materializeProductImages(
+  const { representativeImagePath, imagePaths, detailImagePaths, sellerDetailImagePaths, sellerImagePaths,
+    sellerEvidenceImages, sellerEvidenceOnlyImagePaths } = await materializeProductImages(
     // Preserve gallery/thumbnail order; append newly retained detail evidence.
     [...new Set([...imageUrls, ...evidenceSourceImageUrls])],
     "product",
     connectKind === "TRAVEL" ? TRAVEL_BODY_IMAGE_MAX : SHOPPING_BODY_IMAGE_MAX,
+    connectKind === "SHOPPING",
   );
 
   if (connectKind === "TRAVEL" && DETAIL_VISION_READ_ENABLED) {
@@ -4656,10 +4741,25 @@ async function step1_getProductInfo(
   }
   if (connectKind === "SHOPPING") {
     const readingReport: SellerEvidenceReadingReport = { ocrFacts: 0, visionFacts: 0, visionImages: 0 };
-    sanitizedFeatures = await enrichShoppingSourceFeatures(productName, description, sanitizedFeatures, sellerDetailImagePaths, sellerImagePaths, readingReport);
-    if (!hasSufficientProductReviewEvidence({ productName, description, features: sanitizedFeatures, targetSectionCount: 11 })) {
-      throw new Error(`SOURCE_EVIDENCE_REQUIRED: 제품 자체의 확인 가능한 구성·중량·기능·규격 텍스트 근거가 부족합니다. (상세 구간 ${sellerDetailImagePaths.length} · 판매자 이미지 ${sellerImagePaths.length} · OCR 근거 ${readingReport.ocrFacts} · 이미지 판독 ${readingReport.visionImages}장 채택 ${readingReport.visionFacts}줄 · 확인 근거 ${sanitizedFeatures.length})`);
-    }
+    try {
+      sanitizedFeatures = await enrichShoppingSourceFeatures(productName, description, sanitizedFeatures, sellerDetailImagePaths,
+        sellerEvidenceImages.map(image => image.path), readingReport);
+      if (!hasSufficientProductReviewEvidence({ productName, description, features: sanitizedFeatures, targetSectionCount: 11 })) {
+        const evidence = buildProductReviewAnalysis({ productName, description, features: sanitizedFeatures, targetSectionCount: 11 });
+        const diagnosticDirectory = process.env.BRANDLINK_PREPARE_OUTPUT_DIR?.trim() ||
+          (BRANDLINK_DRAFT_CONTEXT_OUTPUT ? path.dirname(path.resolve(BRANDLINK_DRAFT_CONTEXT_OUTPUT)) : "");
+        const diagnosticPath = writeInsufficientSourceDiagnostic(diagnosticDirectory, {
+          sourceUrl: finalUrl, productName, description, features: sanitizedFeatures,
+          collectedFeatures: [...structuredProduct.features, ...structuredFacts, ...features]
+            .map(value => isolateSellerEvidenceText(value, 500)).filter(Boolean),
+          evidenceLevel: evidence.evidenceLevel, evidenceSignals: evidence.verifiedSignals,
+          candidateImageCount: allImageUrls.length, publicationImageCount: imagePaths.length - detailImagePaths.length,
+          detailImageCount: sellerDetailImagePaths.length, evidenceImages: sellerEvidenceImages, reading: readingReport.reading || [],
+        });
+        if (diagnosticPath) console.log("   🔎 부족한 원본 근거의 수집·판독 진단을 저장했습니다(미검증, 원고 작성용 스냅샷 아님).");
+        throw new Error(`SOURCE_EVIDENCE_REQUIRED: 제품 자체의 확인 가능한 구성·중량·기능·규격 텍스트 근거가 부족합니다. (상세 구간 ${sellerDetailImagePaths.length} · 판매자 이미지 ${sellerEvidenceImages.length} · OCR 근거 ${readingReport.ocrFacts} · 이미지 판독 ${readingReport.visionImages}장 채택 ${readingReport.visionFacts}줄 · 확인 근거 ${sanitizedFeatures.length})`);
+      }
+    } finally { publishImageCleanup.cleanup(sellerEvidenceOnlyImagePaths); }
   }
   
   return {
@@ -4794,16 +4894,21 @@ async function generateWithAI(
   chatgptContext?: ChatGPTGuidanceContext,
   chatgptImagePaths: string[] = [],
   outputSchema?: unknown,
+  prewritingPhotoProof?: ShoppingPrewritePhotoProof,
 ): Promise<string> {
   if (BROWSER_GPT_MODE) {
     console.log("   ✦ 자동 원고는 Codex GPT-6 Luna(low) 고정 정책으로 작성합니다.");
   }
 
   try {
+    if (prewritingPhotoProof) assertShoppingPrewritePhoto(prewritingPhotoProof);
     return await runCodexDraft({
         systemPrompt,
         userPrompt,
         imagePaths: chatgptImagePaths,
+        ...(prewritingPhotoProof ? { publicationPhotoInput: {
+          path: prewritingPhotoProof.original.path, sha256: prewritingPhotoProof.original.sha256,
+        } } : {}),
         timeoutMs: CODEX_DRAFT_TIMEOUT_MS,
         model: CODEX_DRAFT_MODEL || undefined,
         reasoningEffort: CODEX_DRAFT_REASONING_EFFORT,
@@ -4827,15 +4932,7 @@ async function generateWithAI(
 // ============================================
 // STEP 2: LLM으로 SEO 최적화 글 생성 (긴 버전)
 // ============================================
-async function step2_generatePost(
-  product: ProductInfo,
-  brandLink: string,
-  productId?: string | null,
-  connectKind: "SHOPPING" | "TRAVEL" = "SHOPPING",
-  specInput?: SpecStep2Input | null,
-  productIdentity?: { externalProductId?: string | null; sourceUrl?: string | null } | null,
-): Promise<GeneratedPostPreview> {
-  const isTravel = connectKind === "TRAVEL";
+function sanitizeProductForWriting(product: ProductInfo): void {
   // 판매/여행 페이지의 과도한 본문이나 삽입 지시가 모델 컨텍스트를 잠식하지 않도록
   // 사실 필드의 크기를 제한한다. 페이지 텍스트는 어디까지나 데이터로만 취급한다.
   product.name = isolateSellerEvidenceText(product.name, 300)
@@ -4854,6 +4951,64 @@ async function step2_generatePost(
   product.rating = isolateSellerEvidenceText(product.rating, 40);
   product.storeName = isolateSellerEvidenceText(product.storeName, 200) || null;
   product.travelPageResearch = sanitizeTravelPageResearch(product.travelPageResearch);
+}
+
+function writingSourceSnapshot(product: ProductInfo, brandLink: string, productId: string,
+  connectKind: "SHOPPING" | "TRAVEL", identity?: { externalProductId?: string | null; sourceUrl?: string | null } | null): ProductSnapshot {
+  return createProductSnapshot({ productId, connectKind, externalProductId: identity?.externalProductId || null,
+    sourceUrl: product.finalUrl || identity?.sourceUrl || brandLink || null, product: {
+      name: product.name, description: product.description, features: product.features, price: product.price,
+      originalPrice: product.originalPrice, discountRate: product.discountRate, couponInfo: product.couponInfo,
+      deliveryInfo: product.deliveryInfo, reviewCount: product.reviewCount, rating: product.rating,
+      storeName: product.storeName || null, finalUrl: product.finalUrl || null,
+      referenceImageUrls: preserveSellerDetailSourceUrls(product.sourceImageUrls),
+      // Frozen MCP source metadata is not replaced by the number of local download/cache fragments on resubmission.
+      detailImageSegmentCount: product.prewritingPhotoProof?.snapshot.product.detailImageSegmentCount ?? product.detailImagePaths.length,
+      travelPageResearch: product.travelPageResearch || null,
+    } });
+}
+
+async function step2_generatePost(product: ProductInfo, brandLink: string, productId?: string | null,
+  connectKind: "SHOPPING" | "TRAVEL" = "SHOPPING", specInput?: SpecStep2Input | null,
+  productIdentity?: { externalProductId?: string | null; sourceUrl?: string | null } | null): Promise<GeneratedPostPreview> {
+  sanitizeProductForWriting(product);
+  if (connectKind === "TRAVEL") return step2_generatePostAfterPreflight(product, brandLink, productId, connectKind, specInput, productIdentity);
+  if (!hasSufficientProductReviewEvidence(toProductSourceEvidenceInput(product, 11)))
+    throw Object.assign(new Error("SOURCE_EVIDENCE_REQUIRED: 작성에 실제 전달할 상품 고유 근거가 부족합니다. 원고를 생성하지 않았습니다."), { code: "SOURCE_EVIDENCE_REQUIRED" });
+  if (specInput?.submittedPrewritingPhotoProof) product.prewritingPhotoProof = specInput.submittedPrewritingPhotoProof;
+  const snapshot = writingSourceSnapshot(product, brandLink, productId || "", connectKind, productIdentity);
+  reportDraftProgress("facts", "작성 전 필수 원본·선택 상품 검사");
+  console.log("   🔎 원고 작성 전 필수 판매자 원본의 실제 외형·옵션·자연 사진을 검사합니다.");
+  const continueWithPhoto = async (proof: ShoppingPrewritePhotoProof) => {
+    assertShoppingPrewritePhoto(proof, snapshot);
+    product.prewritingPhotoProof = BRANDLINK_DRAFT_CONTEXT_OUTPUT ? persistPrewritePhotoForContext(proof, BRANDLINK_DRAFT_CONTEXT_OUTPUT) : proof;
+    product.representativeImagePath = product.prewritingPhotoProof.original.path;
+    product.publicationPhotoContext = writingPhotosFromPrewrite(product.prewritingPhotoProof);
+    if (specInput) {
+      // Seller panels supplied for fact reading are not already publishable photographs.
+      // The assembly starts with the same verified original shown to the writer; later scene slots remain planned/missing.
+      specInput.imageCandidates = [{ path: product.prewritingPhotoProof.original.path, kind: "source", score: 1000 }];
+    }
+    return step2_generatePostAfterPreflight(product, brandLink, productId, connectKind, specInput, productIdentity);
+  };
+  if (specInput?.submittedPrewritingPhotoProof) return continueWithPhoto(specInput.submittedPrewritingPhotoProof);
+  return withShoppingPrewritePhoto({ snapshot, selectedSourceDirectory: TEMP_PATH,
+    candidatePaths: [product.representativeImagePath || "", ...product.imagePaths].filter(Boolean) }, continueWithPhoto,
+    { select: selectShoppingPrewriteOriginal, recoverSourcePixels: async (acceptSourcePhoto) => {
+    const recovered = await recoverProductPhotoRegion({ productName: product.name, localCandidates: product.imagePaths,
+      sourceImageUrls: product.sourceImageUrls, outputDir: TEMP_PATH,
+      acceptSourcePhoto,
+      onCreated: file => { publishImageCleanup.track([file]); },
+    });
+    if (recovered && !product.imagePaths.includes(recovered)) product.imagePaths.push(recovered);
+    return recovered;
+  } });
+}
+
+async function step2_generatePostAfterPreflight(product: ProductInfo, brandLink: string, productId?: string | null,
+  connectKind: "SHOPPING" | "TRAVEL" = "SHOPPING", specInput?: SpecStep2Input | null,
+  productIdentity?: { externalProductId?: string | null; sourceUrl?: string | null } | null): Promise<GeneratedPostPreview> {
+  const isTravel = connectKind === "TRAVEL";
   if (!product.name) {
     throw new Error("PRODUCT_IDENTITY_UNVERIFIED: 판매 페이지 문자열에 유효한 상품명이 없습니다.");
   }
@@ -4905,6 +5060,8 @@ async function step2_generatePost(
     kind: connectKind,
     product: { name: product.name, description: product.description, features: product.features },
     productUnderstanding,
+    publicationPhotoContext: product.publicationPhotoContext,
+    failureReference: productId ? readMaterialFailureReferenceForProduct(productId, product.prewritingPhotoProof?.snapshot.snapshotId) : "",
     minimumSections: minimumBodySectionCount,
     maximumSections: maximumBodySectionCount,
     targetCharacters: compositionContract.targetCharacters,
@@ -4915,33 +5072,39 @@ async function step2_generatePost(
     postAngleBlock: formatPostAngleForPrompt(connectKind, specInput?.angleContext?.angle, specInput?.angleContext?.siblings),
     postAngleSummary: formatPostAngleSummary(connectKind, specInput?.angleContext?.angle),
   });
-  const mandatoryWritingPromptBlock = formatWritingPromptContract(writingContract);
+  let mandatoryWritingPromptBlock = formatWritingPromptContract(writingContract);
   if (specInput?.angleContext) {
     console.log(`   🧭 포스팅 주제: ${getPostAngle(connectKind, specInput.angleContext.angle).label} · 형제 글 ${specInput.angleContext.siblings.length}편`);
   }
   // 상품 유형 템플릿: 같은 섹션 ID 위에 유형별 목적·이미지 의도·이미지 출처를 덮어쓴 역할 팔레트.
   const topicSelection = writingContract.editorial?.topic;
   if (topicSelection) console.log(`   🧩 상품 유형 템플릿: ${topicSelection.id} (${topicSelection.reason})`);
-  // SEO 제목 기획: 템플릿·각도 제목 공식으로 후보를 만들고, 모델 제목이 필수 규칙을 어기면 후보로 바꾼다.
+  // 제목 기획: 상품 근거·관측 표현·독자 의도를 공유 계약에 전달하고 명확한 실패만 교정한다.
   const titlePlanContext: TitlePlanContext | null = topicSelection ? {
     kind: connectKind,
     productName: product.name,
+    sourceDescription: product.description,
+    sourceFeatures: product.features,
     topicId: topicSelection.id,
     angleId: specInput?.angleContext?.angle,
     verifiedExperience: BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE",
     siblingTitles: specInput?.angleContext?.siblings.map((sibling) => sibling.title),
     minChars: writingContract.title.min,
     maxChars: writingContract.title.max,
-  } : null;
-  // 검색 수요(네이버 자동완성): FAQ·질문형 소제목 후보. 제출 원고 검증 모드에서는 호출하지 않는다.
+  } : writingContract.titlePlanContext || null;
+  // 관측 검색 표현(네이버 자동완성): 제목·질문형 소제목 참고. 제출 검증에서는 호출하지 않는다.
   const searchDemand = SEARCH_DEMAND_ENABLED && !BRANDLINK_GENERATED_DRAFT_PATH
     ? await collectSearchDemand(buildSearchDemandQueries(connectKind, product.name)).catch(() => [])
     : [];
-  if (searchDemand.length) console.log(`   🔍 검색 수요: ${searchDemand.slice(0, 5).join(", ")}${searchDemand.length > 5 ? " …" : ""}`);
+  if (searchDemand.length) console.log(`   🔍 자동완성 표현 참고: ${searchDemand.slice(0, 5).join(", ")}${searchDemand.length > 5 ? " …" : ""}`);
+  if (titlePlanContext) {
+    titlePlanContext.searchSuggestions = searchDemand;
+    writingContract.titlePlanContext = titlePlanContext;
+    mandatoryWritingPromptBlock = formatWritingPromptContract(writingContract);
+  }
   const compositionPromptBlock = [
     formatPostContractForPrompt(getPostCompositionContract(connectKind, topicSelection?.id)),
     formatSearchDemandForPrompt(connectKind, searchDemand),
-    titlePlanContext ? formatTitleCandidatesForPrompt(titlePlanContext) : "",
     // Codex 경로는 브라우저 예산 제한이 없으므로 섹션 흐름·체험 문장 자리까지 담은 전체 블록을 넣는다.
     topicSelection
       ? formatTopicTemplateForPrompt(topicSelection, { experienceMode: BRANDLINK_EXPERIENCE_MODE })
@@ -5200,7 +5363,7 @@ ${serverGuidancePrompt}
 ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일 버전 고정" : ""}
 
 ## 작성 규칙
-1. 제목: ${isTravel ? "핵심 여행지 검색 키워드를 맨 앞에 + 상품명" : "핵심 검색 키워드(상품 카테고리)를 맨 앞에 + 상품명"}, 25-35자
+1. 제목: ${isTravel ? "실제 여행지·여행 의도" : "선택 상품·모델과 검색 의도"}를 자연스럽게 드러내고 독자가 읽을 이유를 한 가지 담습니다. 길이와 키워드 앞쪽 배치는 권장사항이며, 단어 나열·같은 정형 접미사·억지 길이 맞추기는 피합니다. 공유 제목 하네스와 명시 요청 제목을 우선합니다.
    - 제목에는 이모지를 절대 넣지 마세요.
    ${BRANDLINK_EXPERIENCE_MODE === "VERIFIED_EXPERIENCE"
      ? "- 제목의 체험 표현은 제공된 실제 체험 메모로 증명되는 범위에서만 사용하세요."
@@ -5327,7 +5490,7 @@ ${mandatoryWritingPromptBlock}`;
       detailImageSegmentCount: product.detailImagePaths.length,
       travelPageResearch: product.travelPageResearch || null,
     };
-    const snapshot = createProductSnapshot({
+    const snapshot = product.prewritingPhotoProof?.snapshot || createProductSnapshot({
       productId: productId || "",
       connectKind,
       externalProductId: productIdentity?.externalProductId || null,
@@ -5335,6 +5498,8 @@ ${mandatoryWritingPromptBlock}`;
       product: productPayload,
       capturedAt,
     });
+    if (product.prewritingPhotoProof) assertShoppingPrewritePhoto(product.prewritingPhotoProof,
+      writingSourceSnapshot(product, brandLink, productId || "", connectKind, productIdentity));
     const contextJson = JSON.stringify({
         version: "brand-draft-context/v2",
         productId: productId || null,
@@ -5345,6 +5510,10 @@ ${mandatoryWritingPromptBlock}`;
         generatedAt: capturedAt,
         snapshot,
         product: productPayload,
+        ...(product.publicationPhotoContext ? { publicationPhotoContext: product.publicationPhotoContext,
+          prewritingPhotoProof: product.prewritingPhotoProof,
+          publicationPhotoAvailability: { status: "verified-local-original", attachmentRequiredForExternalWriter: true,
+            listingUrlIsNotPhotoUrl: true, futureScenesGenerated: false } } : {}),
         generation: {
           source: "chatgpt-mcp-oauth",
           qualityPreset: BRANDLINK_QUALITY_PRESET,
@@ -5422,6 +5591,7 @@ ${mandatoryWritingPromptBlock}`;
           chatgptContext,
           product.imagePaths,
           DRAFT_OUTPUT_SCHEMA,
+          product.prewritingPhotoProof,
         );
     if (BRANDLINK_GENERATED_DRAFT_PATH) {
       console.log("   MCP OAuth ChatGPT 원고를 불러왔습니다. 로컬 모델 API 호출은 생략합니다.");
@@ -5467,6 +5637,7 @@ ${mandatoryWritingPromptBlock}`;
       chatgptContext,
       product.imagePaths,
       DRAFT_OUTPUT_SCHEMA,
+      product.prewritingPhotoProof,
     ).catch(() => "");
     const retried = retryText ? shaped(retryText) : {};
     return getStructuredSectionCount(retried) > getStructuredSectionCount(first)
@@ -5542,7 +5713,7 @@ ${mandatoryWritingPromptBlock}`;
     json.title, product.name, writingContract, sanitizeTitle,
   );
   if (titlePlanContext && !writingContract.requestedTitle) {
-    const plannedTitle = planTitle(normalizedTitle, titlePlanContext);
+    const plannedTitle = planTitle(normalizedTitle, { ...titlePlanContext, bodySections });
     if (plannedTitle.replaced) {
       console.log(`   🏷️ 제목 교체(${plannedTitle.reason}): ${normalizedTitle} → ${plannedTitle.title}`);
       normalizedTitle = sanitizeTitle(plannedTitle.title, normalizedTitle);
@@ -5676,6 +5847,8 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
           buildRepairPrompt(),
           chatgptContext,
           product.imagePaths,
+          undefined,
+          product.prewritingPhotoProof,
         );
         const repairedJson = parseJsonObjectFromText(repairedText);
         let repairedBodySections = normalizeSections(
@@ -5689,10 +5862,14 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
             applyHumanMobilePolishToSection(section, index, connectKind)
           );
         }
-        const repairedTitle = resolveWritingDraftTitle(
+        let repairedTitle = resolveWritingDraftTitle(
           typeof repairedJson.title === "string" ? repairedJson.title : normalizedTitle,
           product.name, writingContract, sanitizeTitle,
         );
+        if (titlePlanContext && !writingContract.requestedTitle) {
+          const plannedRepairTitle = planTitle(repairedTitle, { ...titlePlanContext, bodySections: repairedBodySections });
+          if (plannedRepairTitle.replaced) repairedTitle = sanitizeTitle(plannedRepairTitle.title, repairedTitle);
+        }
         const repairedHashtags = normalizeHashtags(
           repairedJson.hashtags,
           product,
@@ -5765,7 +5942,7 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
           "",
           `JSON 하나만 출력: {"sections": [섹션 ${targets.length}개 문자열]}`,
         ].join("\n");
-        const rewrittenJson = parseJsonObjectFromText(await generateWithAI(systemPrompt, rewritePrompt, chatgptContext, []));
+        const rewrittenJson = parseJsonObjectFromText(await generateWithAI(systemPrompt, rewritePrompt, chatgptContext, [], undefined, product.prewritingPhotoProof));
         const rewritten = Array.isArray(rewrittenJson.sections) ? rewrittenJson.sections : null;
         if (rewritten && rewritten.length === targets.length && rewritten.every((item) => typeof item === "string" && item.trim())) {
           const candidateBody = bodySections.map((section, index) => {
@@ -6779,7 +6956,9 @@ function writePreparedBrandPostPackage(params: {
         postSpec: params.assembled ? remapSpecImagePaths(params.assembled.spec, packagedPathBySource) : null,
         specDraft: params.assembled?.draft ?? null,
         specValidation: params.assembled ? summarizeSpecValidation(params.assembled) : null,
-        pipelineNotes: params.post.notes ?? null,
+        pipelineNotes: params.preserveManifest
+          ? [...new Set([...(params.preserveManifest.pipelineNotes || []), ...(params.post.notes || [])])]
+          : params.post.notes ?? null,
         thumbnailSpec: {
           version: "thumbnail-spec/v2",
           canvas: { width: 1080, height: 1080, aspect: "1:1" },
@@ -7759,10 +7938,12 @@ async function inputPlainParagraph(
 ): Promise<void> {
   const normalized = text.replace(/\r/g, "").trim();
   if (!normalized) return;
+  const beforeFormat = await page.evaluate(readNaverEditorTypingFocus);
   await setNaverTextFormat(page, "text");
   if (editorial && options.applyStyle !== false) {
     await applyEditorialEditorStyle(page, editorial, "body");
   }
+  await assertCurrentEditorTypingFocus(page, beforeFormat);
   // Blank-line separated blocks (\n\n) become empty lines between paragraphs.
   const lines = normalized.split("\n");
   for (let index = 0; index < lines.length; index += 1) {
@@ -7775,9 +7956,11 @@ async function inputPlainParagraph(
 }
 
 async function inputNaverHeading(page: Page, text: string, editorial?: import("./lib/editorial-templates").EditorialSelection): Promise<boolean> {
+  const beforeFormat = await page.evaluate(readNaverEditorTypingFocus);
   const headingApplied = await setNaverTextFormat(page, "sectionTitle");
   if (!headingApplied) console.log("   ⚠️ 소제목 스타일 적용 실패, 본문 스타일로 대체");
   if (editorial) await applyEditorialEditorStyle(page, editorial, "heading");
+  await assertCurrentEditorTypingFocus(page, beforeFormat);
   await page.keyboard.type(text, { delay: 3 });
   await page.keyboard.press("Enter");
   await page.waitForTimeout(80);
@@ -7785,6 +7968,88 @@ async function inputNaverHeading(page: Page, text: string, editorial?: import(".
   // Body style is applied once here; following section paragraphs reuse it.
   if (editorial) await applyEditorialEditorStyle(page, editorial, "body");
   return headingApplied && bodyApplied;
+}
+
+async function assertCurrentEditorTypingFocus(page: Page, beforeFormat?: NaverEditorTypingFocus): Promise<void> {
+  let focus = await page.evaluate(readNaverEditorTypingFocus);
+  // Naver can rebuild a text/heading component when a format is applied. The
+  // actual paragraph ID and exact buffer remain the insertion target; comparing
+  // component IDs rejects that normal operation while missing paragraph drift.
+  const sameTarget = (current: NaverEditorTypingFocus) => Boolean(beforeFormat?.selectedParagraphId &&
+    current.selectedParagraphId === beforeFormat.selectedParagraphId && current.inputBufferId === beforeFormat.inputBufferId);
+  if (beforeFormat?.bodyFocused && !sameTarget(focus)) {
+    focus = { ...focus, bodyFocused: false, bufferRestorationAllowed: false, reason: "body-selection-changed" };
+  }
+  // Toolbar commands can blur the keyboard buffer while retaining the exact
+  // virtual body selection. Restore only the same confirmed buffer/selection;
+  // clicking an arbitrary paragraph here would change the insertion position.
+  if (!focus.bodyFocused && beforeFormat?.bodyFocused && beforeFormat.activeKind === "input-buffer" && focus.bufferRestorationAllowed &&
+      sameTarget(focus) &&
+      /^input_buffer\d+$/u.test(focus.inputBufferId || "")) {
+    await page.locator(`iframe[id="${focus.inputBufferId}"]`).evaluate(element => {
+      const frame = element as HTMLIFrameElement;
+      frame.contentWindow?.focus(); frame.contentDocument?.body?.focus({ preventScroll: true });
+    });
+    focus = await page.evaluate(readNaverEditorTypingFocus);
+    if (!sameTarget(focus))
+      focus = { ...focus, bodyFocused: false, reason: "body-selection-changed" };
+  }
+  try { assertNaverEditorTypingFocus(focus); }
+  catch (error) {
+    // Structural evidence only: no title/body, cookies, input values or DOM.
+    const { selectedBodyId: _bodyId, selectedParagraphId: _paragraphId, inputBufferId: _bufferId, ...diagnostic } = focus;
+    void _bodyId; void _paragraphId; void _bufferId;
+    console.error(`   편집기 본문 포커스 진단: ${JSON.stringify(diagnostic)}`);
+    throw error;
+  }
+}
+
+async function focusFreshNaverEditorBody(page: Page): Promise<void> {
+  const snapshot = await page.evaluate(readNaverEditorBodySnapshot);
+  if (snapshot.scope !== "confirmed" || snapshot.componentCount !== 1 || snapshot.leadingContent === "visual" ||
+      snapshot.text.replace(/[\s\u200b-\u200d\ufeff]+/gu, "")) {
+    throw new Error("EDITOR_BODY_START_UNCONFIRMED: 비어 있는 유일한 새 본문을 확인하지 못해 입력을 시작하지 않습니다.");
+  }
+  // Tab order can land on the insert-menu button. Click the verified empty
+  // body paragraph explicitly; never use coordinates or a title/text heuristic.
+  const target = page.locator(`${snapshot.rootSelector} .se-component:not(.se-documentTitle) .se-text-paragraph`).filter({ visible: true });
+  if (await target.count() !== 1) throw new Error("EDITOR_BODY_START_UNCONFIRMED: 새 본문 입력 문단이 유일하지 않습니다.");
+  await target.click({ timeout: 5000 });
+  await assertCurrentEditorTypingFocus(page);
+}
+
+async function assertCurrentEditorDocument(
+  page: Page,
+  document: ResolvedPostDocumentV1,
+  phase: NaverEditorAuditPhase,
+): Promise<void> {
+  let snapshot: NaverEditorBodySnapshot;
+  try {
+    snapshot = await page.evaluate(readNaverEditorBodySnapshot);
+  } catch {
+    snapshot = {
+      version: "naver-editor-body/v1", scope: "missing", reason: "dom-read-failed",
+      rootSelector: null, rootCount: 0, componentCount: 0, excludedTitleCount: 0,
+      excludedUiCount: 0, leadingContent: "none", text: "", textLength: 0, unscopedTextPrefix: "", components: [],
+    };
+  }
+  try {
+    assertNaverEditorBody(document, snapshot, phase);
+  } catch (error) {
+    const first = document.renderNodes[0];
+    const diagnostic = editorBodyAuditDiagnostic(snapshot, phase, getErrorMessage(error), first?.kind === "disclosure" ? first.text : "");
+    console.error(`   편집기 본문 검증 진단: ${JSON.stringify(diagnostic)}`);
+    try {
+      const directory = path.join(process.cwd(), "logs", "manual", "editor-audit");
+      fs.mkdirSync(directory, { recursive: true });
+      const diagnosticPath = path.join(directory, `${createTimestampLabel()}-${process.pid}-${phase}.json`);
+      fs.writeFileSync(diagnosticPath, JSON.stringify(diagnostic, null, 2), "utf8");
+      console.log(`   편집기 본문 진단 저장: ${path.relative(process.cwd(), diagnosticPath)}`);
+    } catch {
+      console.log("   편집기 본문 진단 파일 저장 실패(발행 차단 유지)");
+    }
+    throw error;
+  }
 }
 
 async function renderResolvedPostDocument(
@@ -7821,6 +8086,10 @@ async function renderResolvedPostDocument(
       const sectionId = node.kind === "paragraph" ? node.sectionId : null;
       const applyStyle = !batchWrite || shouldApplyBodyStyle(bodyStyleState, sectionId);
       await inputPlainParagraph(page, node.text, document.editorial, { applyStyle });
+      if (renderIndex === 0 && node.kind === "disclosure" && node.placement === "top") {
+        // Confirm the actual body before uploading images or inserting affiliate cards.
+        await assertCurrentEditorDocument(page, document, "disclosure");
+      }
       if (batchWrite && applyStyle) markBodyStyleReady(bodyStyleState, sectionId);
       continue;
     }
@@ -7900,7 +8169,9 @@ async function renderResolvedPostDocument(
       continue;
     }
     if (node.kind === "hashtags") {
+      const beforeFormat = await page.evaluate(readNaverEditorTypingFocus);
       await setNaverTextFormat(page, "text");
+      await assertCurrentEditorTypingFocus(page, beforeFormat);
       await page.keyboard.press("Enter");
       const hashtagText = node.values
         .map((tag) => `#${tag.replace(/^#+/, "").replace(/\s+/g, "")}`)
@@ -7998,9 +8269,9 @@ async function step5and6_uploadAndWrite(
   const useSectionHeading = options?.useSectionHeading ?? true;
   console.log(`   🧩 소제목 스타일: ${useSectionHeading ? "ON" : "OFF"}`);
   
-  // 본문 영역으로 이동
-  await page.keyboard.press('Tab');
-  await page.waitForTimeout(500);
+  // A toolbar/insert control can be next in tab order. Confirm the empty body
+  // and its real typing target before any disclosure, photo or link is inserted.
+  await focusFreshNaverEditorBody(page);
   await setNaverTextFormat(page, "text");
 
   if (options?.resolvedDocument) {
@@ -8016,11 +8287,7 @@ async function step5and6_uploadAndWrite(
     if (expectedConnectCardCount > 0 && result.connectCardCount < expectedConnectCardCount && options.shoppingConnectUrl) {
       throw new Error(`커넥트 카드 삽입 결과가 부족합니다: ${result.connectCardCount}/${expectedConnectCardCount}`);
     }
-    const editorText = await page.evaluate(() => {
-      const root = document.querySelector(".se-main-container") || document.querySelector(".se-content");
-      return root ? (root as HTMLElement).innerText : "";
-    });
-    assertPublishedEditorText(options.resolvedDocument, editorText);
+    await assertCurrentEditorDocument(page, options.resolvedDocument, "final");
     return;
   }
   
@@ -9780,12 +10047,16 @@ function classifyFailureCode(error: unknown): string {
       messages.push(current);
     }
   }
-  const explicitCode = codes.find((code) => /^(?:SOURCE_EVIDENCE_REQUIRED|QUALITY_REPAIR_EXHAUSTED|QUALITY_REPAIR_REJECTED|CHATGPT_BROWSER_UNREACHABLE|DRAFT_SECTION_COUNT_OUT_OF_RANGE|DRAFT_RECHECK_REQUIRED)$/u.test(code));
+  const explicitCode = codes.find((code) => /^(?:SOURCE_EVIDENCE_REQUIRED|SOURCE_REVIEW_INCOMPLETE|IMAGE_SOURCE_BINDING_REQUIRED|PREWRITING_PHOTO_CHANGED|PREWRITING_SOURCE_CHANGED|QUALITY_REPAIR_EXHAUSTED|QUALITY_REPAIR_REJECTED|DRAFT_REVISION_FORMAT_INVALID|REVISION_RENDER_SCOPE_AMBIGUOUS|CHATGPT_BROWSER_UNREACHABLE|DRAFT_SECTION_COUNT_OUT_OF_RANGE|DRAFT_RECHECK_REQUIRED)$/u.test(code));
   if (explicitCode === "QUALITY_REPAIR_REJECTED") return "QUALITY_REPAIR_EXHAUSTED";
   if (explicitCode) return explicitCode;
   const message = messages.join(" ") || getErrorMessage(error);
   const embeddedProviderCode = message.match(/\b(CODEX_(?:AUTH_REQUIRED|MODEL_INCOMPATIBLE|TIMEOUT|TRANSIENT_FAILURE))\b/u)?.[1];
   if (embeddedProviderCode) return embeddedProviderCode;
+  const prewritingCode = message.match(/\b(SOURCE_REVIEW_INCOMPLETE|IMAGE_SOURCE_BINDING_REQUIRED|PREWRITING_PHOTO_CHANGED|PREWRITING_SOURCE_CHANGED):/u)?.[1];
+  if (prewritingCode) return prewritingCode;
+  const revisionCode = message.match(/\b(DRAFT_REVISION_FORMAT_INVALID|REVISION_RENDER_SCOPE_AMBIGUOUS):/u)?.[1];
+  if (revisionCode) return revisionCode;
   if (/SOURCE_EVIDENCE_REQUIRED/u.test(message)) return "SOURCE_EVIDENCE_REQUIRED";
   if (/QUALITY_REPAIR_(?:EXHAUSTED|REJECTED)/u.test(message)) return "QUALITY_REPAIR_EXHAUSTED";
   if (/세션|로그인/u.test(message)) return "NAVER_SESSION_EXPIRED";
@@ -9862,10 +10133,34 @@ async function runPreparedPostRevision(
   const description = qualitySource.sourceDescription;
   const features = qualitySource.sourceFeatures;
   const price = typeof source.price === "string" ? source.price : "";
+  const productUnderstanding = connectKind === "SHOPPING" ? buildProduct9Canvas({ name, description, features,
+    sourceUrl: snapshot.sourceUrl, externalProductId: snapshot.externalProductId }) : undefined;
+  let prewritingPhotoProof: ShoppingPrewritePhotoProof | undefined;
+  if (connectKind === "SHOPPING") {
+    // Only the seller original actually assigned to this manuscript can ground
+    // a revision. Future scenes and unrelated reading images are not substitutes.
+    const originalPaths = [...new Set(prepared.composition.sections
+      .filter(section => section.imageSource === "seller-original").flatMap(section => section.imagePaths))];
+    if (originalPaths.length) {
+      const contextPath = path.join(outputDir, "mcp-draft-context.json");
+      if (fs.existsSync(contextPath)) {
+        try {
+          const saved = readSubmittedPrewritePhoto(contextPath, snapshot);
+          if (saved && originalPaths.some(file => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") === saved.original.sha256))
+            prewritingPhotoProof = saved;
+        } catch { /* A stale context cannot authorize a revision; inspect the assigned pixels below. */ }
+      }
+      if (!prewritingPhotoProof) prewritingPhotoProof = await withShoppingPrewritePhoto({ snapshot, candidatePaths: originalPaths,
+        selectedSourceDirectory: path.join(getBrandPostPackageDir(linkId), "product-sources") }, async proof => proof);
+      assertShoppingPrewritePhoto(prewritingPhotoProof, snapshot);
+    }
+  }
+  const publicationPhotoContext = prewritingPhotoProof ? writingPhotosFromPrewrite(prewritingPhotoProof) : undefined;
   const imagePaths = Array.from(new Set([prepared.heroImagePath, ...prepared.bodyImagePaths]));
   const resolveRevisedComposition = (candidate: { title: string; sections: string[]; hashtags: string[] }) =>
-    normalizePublishedPostText(resolvePostDocument({
+    preservePreparedRevisionRenderPlan(prepared.composition!, normalizePublishedPostText(resolvePostDocument({
       connectKind,
+      productName: name,
       editorial: prepared.composition!.editorial,
       title: candidate.title,
       sections: candidate.sections,
@@ -9884,7 +10179,7 @@ async function runPreparedPostRevision(
         imageMax: section.imageMax ?? 1,
         headingStyle: section.headingStyle,
       })),
-    }));
+    })));
   // The last section is the statutory disclosure and is never a model-edit target.
   const defaultSectionIndexes = prepared.post.sections.slice(0, -1).map((_, index) => index);
   const sectionIndexes = requestedSectionIndexes.filter((index) => defaultSectionIndexes.includes(index));
@@ -9918,13 +10213,28 @@ async function runPreparedPostRevision(
   let lastCandidateQuality = beforeQuality;
   let previousAttemptQuality: BrandLinkContentReadiness | null = null;
   let previousFeedback = "";
+  let lastCandidateError: Error | null = null;
   const maximumAttempts = qualityConvergence ? 3 : 1;
   const allowTitleChange = requestsFreeformTitleRevision(instructions);
+  const allowCandidateSectionHeadingChange = !qualityConvergence && requestsFreeformSectionHeadingRevision(instructions);
   const acceptedIncrementalIndexes = new Set<number>();
   const writingContract = createWritingPromptContract({ kind: connectKind, product: { name, description, features },
-    minimumSections: selected.sections.length, maximumSections: selected.sections.length,
+    productUnderstanding, publicationPhotoContext,
+    minimumSections: defaultSectionIndexes.length, maximumSections: defaultSectionIndexes.length,
     targetCharacters: getPostCompositionContract(connectKind).targetCharacters,
     hashtagCount: selected.hashtags.length, draftMemo: instructions, verifiedExperienceNotes: "" });
+  if (writingContract.sectionPlan) {
+    let sceneIndex = 0;
+    writingContract.sectionPlan.sections = writingContract.sectionPlan.sections.map((section, index) => {
+      const source = prepared.composition!.sections[index]?.imageSource;
+      const photoRole = source === "seller-original" ? "original" : source === "staged-ai"
+        ? (["scene-1", "scene-2", "scene-3"] as const)[Math.min(sceneIndex++, 2)] : "none";
+      return { ...section, photoRole };
+    });
+  }
+  const savedPhotoPlan = prepared.composition.sections.slice(0, -1).map(section => ({ sectionId: section.id, title: section.title,
+    imageSource: section.imageSource || "none", imageIntent: section.imageIntent, promptRecipe: section.promptRecipe || null,
+    imageMin: section.imageMin ?? 0, imageMax: section.imageMax ?? 1 }));
 
   for (let attempt = 1; attempt <= maximumAttempts && (!qualityConvergence || !selectedQuality.canPublish); attempt += 1) {
     const diagnostic = feedbackFor(selectedQuality);
@@ -9944,7 +10254,9 @@ async function runPreparedPostRevision(
     }
     const allowedIndexes = selectPreparedRevisionSectionIndexes({ current: selectedQuality, sections: selected.sections,
       plan: convergencePlan, requestedIndexes: sectionIndexes, qualityConvergence, incrementalOnly });
-    if (allowedIndexes.length === 0) {
+    const titleOnlyRepair = allowedIndexes.length === 0 &&
+      isPreparedTitleOnlyRepair({ current: selectedQuality, plan: convergencePlan, qualityConvergence });
+    if (allowedIndexes.length === 0 && !titleOnlyRepair) {
       throw new Error(incrementalOnly
         ? "QUALITY_REPAIR_EXHAUSTED: 소재 보완에서 실패와 연결된 문단을 확인하지 못해 기존 원고를 보존했습니다. 전체 글 교체가 필요하면 실패 소재 재작성 버튼을 사용하세요."
         : "QUALITY_REPAIR_EXHAUSTED: 품질 실패와 연결된 수정 대상 문단을 찾지 못했습니다.");
@@ -9959,10 +10271,11 @@ async function runPreparedPostRevision(
     let candidateResult: AssembledPost | null = null;
     let candidate = selected;
     try {
+      lastCandidateError = null;
       // Automated convergence uses one bounded JSON edit call per candidate.
       // The spec repair path calls the model once per section and can outlive
       // the MCP request when every section is selected.
-      if (prepared.spec && prepared.draft && !qualityConvergence) {
+      if (connectKind !== "SHOPPING" && prepared.spec && prepared.draft && !qualityConvergence && !allowCandidateSectionHeadingChange) {
         candidateResult = await reviseAssembledPost({ spec: prepared.spec, draft: prepared.draft,
           instructions: attemptInstructions, sectionIndexes: allowedIndexes,
           brandLink: link.url, options: { quotationHeaders: NAVER_EDITOR_QUOTATION_ENABLED } });
@@ -9971,25 +10284,43 @@ async function runPreparedPostRevision(
         const response = await generateWithAI(
           "저장된 사실만 사용해 품질 문제를 해결하는 한국어 편집자입니다. JSON만 반환하세요.",
           JSON.stringify({ instructions: attemptInstructions, qualityFeedback: diagnostic, sourceSnapshot: snapshot,
-            title: selected.title, sections: selected.sections.map((text, index) => ({ index, text })), allowedIndexes,
-            rules: `${allowCandidateTitleChange ? "요청된 범위에서 글 제목을 수정할 수 있습니다. 제목만 고칠 때 updates는 빈 배열로 반환하세요." : "글 제목을 변경하지 마세요."} allowedIndexes에 든 문단만 수정하세요. 문단 소제목·순서·이미지 의미와 마지막 커넥트 고지는 유지하세요. 상품명이나 검색 키워드만 보고 성분·성능·체험을 추정하지 마세요. 수정 문단은 본문만 반환하세요.`,
-            output: { ...(allowCandidateTitleChange ? { title: "수정한 글 제목" } : {}), updates: [{ index: allowedIndexes[0], body: "수정 본문(소제목 제외)" }] } }), {
+            writingHarness: formatWritingPromptContract(writingContract),
+            savedPhotoPlan, photoRevisionRule: prewritingPhotoProof
+              ? "첨부한 검증 원본에서 보이는 외형만 설명합니다. 저장 사진 계획·장면 의미를 바꾸지 않으며 미생성 연출 장면을 이미 보이는 것처럼 설명하지 마세요."
+              : "검증된 실제 게시 원본 사진이 첨부되지 않았습니다. 새로운 색상·형상·배치·수량·사진 장면을 추정하거나 외형 묘사를 추가·변경하지 마세요. 텍스트 근거에 있는 기능·규격만 보완하고 기존 사진 계획은 유지합니다.",
+            title: selected.title, sections: selected.sections.map((text, index) => ({ index, text,
+              ...(!qualityConvergence && prepared.composition!.sections[index]
+                ? { bodyParagraphs: prepared.composition!.sections[index].body } : {}) })), allowedIndexes,
+            rules: `${allowCandidateTitleChange ? "요청된 범위에서 글 제목을 수정할 수 있습니다. 제목만 고칠 때 updates는 빈 배열로 반환하세요." : "글 제목을 변경하지 마세요."}${titleOnlyRepair ? " 이번 요청은 제목만 보완합니다. 본문은 통과했으므로 모든 문단과 고지를 그대로 보존하고 updates는 반드시 빈 배열로 반환하세요." : ""} allowedIndexes에 든 문단만 수정하세요. ${allowCandidateSectionHeadingChange ? "명시적으로 교정을 요청한 소제목만 heading으로 반환할 수 있습니다. 소제목만 고칠 때 body/paragraphs를 생략하면 기존 본문을 그대로 보존합니다." : "문단 소제목은 유지하고 heading을 반환하지 마세요."} 순서·이미지 의미와 마지막 커넥트 고지는 유지하세요. 상품명이나 검색 키워드만 보고 성분·성능·체험을 추정하지 마세요. ${qualityConvergence ? "수정 문단은 body 본문만 반환하세요." : "본문 수정은 저장된 bodyParagraphs와 같은 개수의 paragraphs 배열로 반환하세요. 각 원소는 개행 없는 한 문단이며 문단을 합치거나 나누지 마세요. body와 paragraphs를 함께 반환하지 마세요."}`,
+            output: { ...(allowCandidateTitleChange ? { title: "수정한 글 제목" } : {}), updates: titleOnlyRepair ? [] : [{ index: allowedIndexes[0],
+              ...(allowCandidateSectionHeadingChange ? { heading: "명시적으로 교정한 소제목" } : {}),
+              ...(qualityConvergence ? { body: "수정 본문(소제목 제외)" }
+                : { paragraphs: prepared.composition!.sections[allowedIndexes[0]].body.map((_, index) => `수정한 ${index + 1}번 문단`) }) }] } }), {
             connectKind, productName: name, description, features, price, originalPrice: "", discountRate: "", couponInfo: "", deliveryInfo: "", reviewCount: "", rating: "",
             brandLink: link.url, targetSectionCount: selected.sections.length, minimumSectionCount: selected.sections.length,
             maximumSectionCount: selected.sections.length, writingContract,
             editorialPromptBlock: "저장 스냅샷의 설명·특징에 없는 사실을 추가하지 마세요. 상품명과 SEO 태그는 성분·성능의 증거가 아닙니다.",
             editorialSectionTitles: prepared.composition.sections.map(section => section.title),
-          });
+          }, [], undefined, prewritingPhotoProof);
         const revision = applyFreeformDraftRevision(
           { title: selected.title, sections: selected.sections },
           response,
           allowedIndexes,
-          { allowTitleChange: allowCandidateTitleChange },
+          { allowTitleChange: allowCandidateTitleChange, allowEmptyBodyScope: titleOnlyRepair,
+            allowSectionHeadingChange: allowCandidateSectionHeadingChange,
+            ...(!qualityConvergence ? { bodyParagraphs: prepared.composition.sections.map(section => section.body) } : {}) },
         );
         const candidateSections = incrementalOnly
           ? revision.sections.map((section, index) => allowedIndexes.includes(index) ? stripInternalGuidanceSentences(section) : section)
           : withoutInternalGuidance(revision.sections);
         candidate = { title: revision.title, sections: candidateSections, hashtags: selected.hashtags };
+      }
+      if (allowCandidateTitleChange) {
+        candidate = { ...candidate, title: resolveWritingDraftTitle(candidate.title, name, writingContract, sanitizeTitle) };
+        if (writingContract.titlePlanContext && !writingContract.requestedTitle) {
+          const plannedRevisionTitle = planTitle(candidate.title, { ...writingContract.titlePlanContext, bodySections: candidate.sections });
+          if (plannedRevisionTitle.replaced) candidate.title = sanitizeTitle(plannedRevisionTitle.title, candidate.title);
+        }
       }
       assertUntargetedSectionHashesUnchanged(selected.sections, candidate.sections, allowedIndexes);
       lastCandidateQuality = assessCandidate(candidate);
@@ -10017,11 +10348,15 @@ async function runPreparedPostRevision(
       // converting it into an editorial QUALITY_REPAIR_REJECTED result.
       if (codexDraftTerminalFailureCode(error)) throw error;
       previousFeedback = getErrorMessage(error);
+      lastCandidateError = /^[A-Z][A-Z0-9_]+:/u.test(previousFeedback)
+        ? error instanceof Error ? error : new Error(previousFeedback)
+        : Object.assign(new Error(`DRAFT_REVISION_FORMAT_INVALID: ${previousFeedback}`, { cause: error }), { code: "DRAFT_REVISION_FORMAT_INVALID" });
       console.log(`   자동 보강 후보 ${attempt}/${maximumAttempts} 형식 오류: ${previousFeedback}`);
     }
   }
   // A draft that already passes needs no candidate; keep it instead of calling that a rejection.
   if (!applied && !(qualityConvergence && selectedQuality.canPublish)) {
+    if (lastCandidateError) throw lastCandidateError;
     throw new Error(`QUALITY_REPAIR_REJECTED: ${maximumAttempts}개 후보가 기존 원고보다 나아지지 않아 원문을 보존했습니다. ${feedbackFor(lastCandidateQuality)}`);
   }
   if (qualityConvergence && !selectedQuality.canPublish) {
@@ -10455,6 +10790,8 @@ async function main() {
         memo: process.env.BRANDLINK_DRAFT_MEMO?.trim() || null,
         angleContext: await loadPostAngleContext(link.id, link.postAngle),
         submittedDraftText,
+        submittedPrewritingPhotoProof: runtimeConnectKind === "SHOPPING" && submittedSnapshot && BRANDLINK_SUBMITTED_CONTEXT_PATH
+          ? readSubmittedPrewritePhoto(BRANDLINK_SUBMITTED_CONTEXT_PATH, submittedSnapshot) : null,
       },
       // Facts are collected from the resolved sales/travel detail page. Keep
       // that page in the snapshot instead of the BrandConnect category URL.
@@ -10488,6 +10825,11 @@ async function main() {
 
     setStage("STEP2.5 대표 썸네일 생성");
     if (!preparedPostOverride && link.connectKind !== "TRAVEL") {
+      if (product.prewritingPhotoProof) {
+        assertShoppingPrewritePhoto(product.prewritingPhotoProof, writingSourceSnapshot(product, link.url, link.id, runtimeConnectKind,
+          { externalProductId: link.externalItemId, sourceUrl: product.finalUrl || link.finalUrl || link.sourceUrl || link.url }));
+        product.representativeImagePath = product.prewritingPhotoProof.original.path;
+      } else {
       product.representativeImagePath = await selectVerifiedProductPhoto(
         // Detail-page segments may contain the only actual product photograph.
         // Review their pixels with the same strict gate instead of rejecting by filename.
@@ -10511,6 +10853,7 @@ async function main() {
         } else {
           throw new Error("상품 사진 검사 실패: 판매자 원본과 상품 영역 재검사에서도 해당 상품의 사진을 확보하지 못했습니다.");
         }
+      }
       }
     }
     let generatedThumbnail: GeneratedProductThumbnail | null = preparedPostOverride
@@ -10577,6 +10920,7 @@ async function main() {
       preparedPostOverride?.composition ||
       resolvePostDocument({
         connectKind: runtimeConnectKind,
+        productName: product.name,
         editorial: assembled?.spec.editorial ?? post.editorial ?? createEditorialSelection(runtimeConnectKind, product),
         title: post.title,
         sections: post.sections,
@@ -10607,6 +10951,8 @@ async function main() {
             composition,
             imageAssets: preparedPostOverride?.imageAssets,
             sourceSnapshotId: preparedPostOverride?.sourceSnapshot?.snapshotId,
+            ...(preparedPostOverride?.sourceSnapshot ? { selectedSourceSnapshot: preparedPostOverride.sourceSnapshot,
+              selectedSourceProductId: link.id, selectedSourceDirectory: path.join(getBrandPostPackageDir(link.id), "product-sources") } : {}),
           });
           break;
         } catch (error) {
@@ -10733,7 +11079,7 @@ async function main() {
         assembled,
         imageAssets: preparedPostOverride?.imageAssets,
         thumbnailSource: generatedThumbnail?.source,
-        sourceSnapshot: submittedSnapshot || createProductSnapshot({
+        sourceSnapshot: submittedSnapshot || product.prewritingPhotoProof?.snapshot || createProductSnapshot({
           productId: linkId, connectKind: runtimeConnectKind,
           externalProductId: link.externalItemId || null,
           sourceUrl: product.finalUrl || link.finalUrl || link.sourceUrl || link.url || null,
@@ -10864,7 +11210,7 @@ async function main() {
       console.log("=".repeat(50));
 
       if (!publishOptions.reservationId) throw new Error("예약 등록 식별자를 확인하지 못했습니다. 실제 예약 결과 확인이 필요합니다.");
-      updatePublishAttempt(linkId, attemptId, "CONFIRMED", { reservationId: publishOptions.reservationId, scheduledDate: scheduledDateForDb.toISOString() });
+      updatePublishAttempt(linkId, attemptId, "CONFIRMED", { reservationId: publishOptions.reservationId, scheduledDate: scheduledDateForDb.toISOString().slice(0, 10) });
       publicationConfirmed = true;
       if (timeoutHandle) clearTimeout(timeoutHandle);
       await prisma.brandLink.update({

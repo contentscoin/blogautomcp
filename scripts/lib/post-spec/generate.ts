@@ -9,7 +9,9 @@ import { formatOpenCrabSeoBriefForPrompt } from "../opencrab-seo-brief";
 import { formatTravelFactsForPrompt } from "../travel-content";
 import { formatWritingStructureGuide } from "../writing-structure-guide";
 import { formatEditorialTemplate, selectEditorialTemplate } from "../editorial-templates";
-import { formatTopicTemplateForPrompt } from "../topic-templates";
+import { defaultTopicTemplateId, formatTopicTemplateForPrompt } from "../topic-templates";
+import { formatTitleCandidatesForPrompt } from "../topic-templates/title-planner";
+import { extractRequestedDraftTitle } from "../writing-prompt-contract";
 import { otherSectionsEvidence } from "./evidence-ledger";
 import { generateStructured } from "./llm-client";
 import { buildDraftJsonSchema, sectionKey } from "./schema";
@@ -64,18 +66,24 @@ export function renderFactsBlock(spec: PostSpec): string {
   ].join("\n");
 }
 
-export function renderTitleRules(spec: PostSpec): string {
+export function renderTitleRules(spec: PostSpec, ctx: GenerateContext = {}): string {
   const t = spec.seo.title;
+  const requestedTitle = extractRequestedDraftTitle(ctx.memo || "");
   return [
     "## 제목 규칙",
-    `- ${t.minChars}~${t.maxChars}자, 핵심 키워드 "${spec.seo.primaryKeyword}"를 제목 앞쪽에 배치`,
-    t.mustIncludeTokens.length ? `- 제목에 반드시 포함: ${t.mustIncludeTokens.join(", ")}` : "",
+    `- ${t.minChars}~${t.maxChars}자는 권장 범위입니다. 상품·모델과 카테고리 검색어를 앞쪽에 자연스럽게 두되 길이·앞 15자·검색어 전체 문자열을 맞추기 위한 나열이나 절단은 하지 않습니다.`,
+    requestedTitle
+      ? `- 명시 요청 제목 ${JSON.stringify(requestedTitle)}을 공백·문장부호까지 그대로 사용합니다. 후보 선택이나 SEO 권장값으로 변경하지 않습니다.`
+      : formatTitleCandidatesForPrompt({ kind: spec.connectKind, productName: spec.productName,
+        topicId: spec.editorial?.topic?.id || defaultTopicTemplateId(spec.connectKind), verifiedExperience: false,
+        primaryKeyword: spec.seo.primaryKeyword, sourceFeatures: spec.facts.lines,
+        sourceDescription: spec.facts.lines.join("\n"),
+        minChars: t.minChars, maxChars: t.maxChars,
+      }),
     spec.connectKind === "TRAVEL"
       ? "- 이모지·특수기호·낚시성 문구(완벽 가이드/총정리/핵꿀팁/꿀팁 Zip) 금지. 근거 있는 현지 팁을 담으면 \"꿀팁\" 한 단어는 사용 가능"
       : "- 이모지·특수기호·낚시성 문구(완벽 가이드/총정리/꿀팁) 금지",
-    spec.connectKind === "TRAVEL"
-      ? '- 예: "대만 3박4일 패키지 일정과 포함사항 정리" 처럼 검색어를 자연스럽게 나열'
-      : '- 예: "아기비데 추천 | 해피달링 시그니처 워터탭 구성과 가격" 처럼 키워드 + 상품명',
+    "- 검색 의도와 본문에서 답하는 구체적인 독자 질문을 연결합니다. 상품명만 나열하거나 모든 제목에 같은 후미를 붙이지 않고, 빈 자리표시자·과장·없는 체험을 만들지 않습니다. title 하나만 출력하고 후보·평가·새 JSON 필드를 넣지 않습니다.",
   ]
     .filter(Boolean)
     .join("\n");
@@ -165,7 +173,7 @@ export async function generateDraftWithCodex(spec: PostSpec, ctx: GenerateContex
         : "다음 상품의 구매 판단을 돕는 블로그 글을 작성해주세요.",
       renderFactsBlock(spec),
       ctx.memo ? `## 요청 메모\n${ctx.memo}` : "",
-      includeMeta ? renderTitleRules(spec) : "",
+      includeMeta ? renderTitleRules(spec, ctx) : "",
       previousChunkSummary(generated),
       `## 섹션 작성 지시 (${indexes.length}개, 키 이름과 제목을 그대로 사용)`,
       ...indexes.map((index) => renderSectionInstruction(spec.sections[index], spec)),

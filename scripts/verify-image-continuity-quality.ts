@@ -4,8 +4,12 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import vm from "node:vm";
 import sharp from "sharp";
-import { REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
+import ts from "typescript";
+import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
+import { preservePreparedRevisionRenderPlan } from "./lib/prepared-revision-composition";
+import { commitPreparedPackageTransaction } from "./lib/prepared-package-transaction";
 import type {
   BrandPostPackageImageAsset,
   BrandPostPackageManifestV2,
@@ -430,7 +434,140 @@ async function main() {
     "segmented:false whole-photo foreground composites must block approval",
   );
 
-  console.log("PASS: image continuity, 4/9 reference-scene resume, stable cache identity, safe source reuse, identical-output and full-frame blockers");
+  // Execute the actual package writer, including its real continuity and atomic
+  // transaction, without importing the live agent or any account/provider.
+  const agentSource = ts.createSourceFile("simple-agent.ts", fs.readFileSync("scripts/simple-agent.ts", "utf8"), ts.ScriptTarget.Latest, true);
+  const writer = agentSource.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "writePreparedBrandPostPackage");
+  assert.ok(writer, "the actual package writer must be covered, not just the revision resolver");
+  type WriterParams = {
+    outputDir: string; brandLinkId: string; connectKind: "SHOPPING" | "TRAVEL";
+    post: { title: string; sections: string[]; hashtags: string[]; generationSource: "AI"; notes: string[] };
+    imagePaths: string[]; composition: BrandPostPackageManifestV2["composition"];
+    contentReadiness: null; sourceSnapshot: BrandPostPackageManifestV2["sourceSnapshot"];
+    preserveManifest: BrandPostPackageManifestV2;
+  };
+  const writerSandbox: { write?: (params: WriterParams) => string; [key: string]: unknown } = {
+    fs, path, crypto, copyProductPhotoSource: provenance.copyProductPhotoSource,
+    readProductPhotoSource: provenance.readProductPhotoSource,
+    splitAffiliateDisclosure: compositionContract.splitAffiliateDisclosure,
+    reconcileBrandPostImageContinuity: continuity.reconcileBrandPostImageContinuity,
+    commitPreparedPackageTransaction,
+  };
+  vm.runInNewContext(ts.transpileModule(`this.write = ${writer.getText(agentSource)};`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText, writerSandbox);
+
+  const legacyLayout = JSON.parse(JSON.stringify(previous)) as BrandPostPackageManifestV2;
+  const originalSection = legacyLayout.composition.sections[0];
+  originalSection.imageSource = "seller-original";
+  originalSection.imagePlacement = "before-heading";
+  const originalAsset = legacyLayout.imageAssets!.find(asset => asset.sectionId === originalSection.id)!;
+  Object.assign(originalAsset, { provenance: "ORIGINAL", creationMethod: "source", remoteGenerated: false });
+  delete originalAsset.referenceScene;
+  legacyLayout.composition.renderNodes = legacyLayout.composition.renderNodes.map(node => node.kind !== "image" || node.sectionId === null ? node
+    : { ...node, caption: node.sectionId === originalSection.id ? "판매페이지 원본 상품 사진" : REFERENCE_SCENE_CAPTION });
+  const originalNodeIndex = legacyLayout.composition.renderNodes.findIndex(node => node.kind === "image" && node.sectionId === originalSection.id);
+  const [originalNode] = legacyLayout.composition.renderNodes.splice(originalNodeIndex, 1);
+  const firstHeadingIndex = legacyLayout.composition.renderNodes.findIndex(node => "sectionId" in node && node.sectionId === originalSection.id);
+  legacyLayout.composition.renderNodes.splice(firstHeadingIndex, 0, originalNode);
+  // Real saved packages also retain unbound candidates; they must not be
+  // mistaken for active render slots or prevent safe text-only preservation.
+  for (const file of bodyPaths.slice(4, 7)) {
+    legacyLayout.imageAssets!.push({ path: file, sourcePath: file, sha256: digest(file), role: "body", sectionId: null,
+      provenance: "ORIGINAL", creationMethod: "source", remoteGenerated: false });
+    legacyLayout.bodyImagePaths.push(file);
+  }
+  legacyLayout.approvedAt = iso(2);
+  legacyLayout.pipelineNotes = ["기존 실패 원인 기록", "자연스러운 사진 전환 백업 위치"];
+  assert.equal(legacyLayout.imageAssets!.length, 8);
+  assert.equal(legacyLayout.composition.renderNodes.filter(node => node.kind === "connectCard").length, 2);
+  const targetSectionId = legacyLayout.composition.sections[2].id;
+  const removedClaim = "확인하지 않은 사진 설명입니다.";
+  legacyLayout.composition.sections[2].body[0] = `${removedClaim} ${legacyLayout.composition.sections[2].body[0]}`;
+  const targetParagraph = legacyLayout.composition.renderNodes.find(node => node.kind === "paragraph" && node.sectionId === targetSectionId);
+  assert.ok(targetParagraph?.kind === "paragraph");
+  targetParagraph.text = `${removedClaim} ${targetParagraph.text}`;
+  const revisedLayout = structuredClone(legacyLayout);
+  revisedLayout.composition.sections[2].body[0] = revisedLayout.composition.sections[2].body[0].replace(removedClaim, "");
+  revisedLayout.composition = preservePreparedRevisionRenderPlan(legacyLayout.composition, revisedLayout.composition);
+  const oldMarkdown = fs.readFileSync(legacyLayout.markdownPath);
+  const originalImageHashes = new Map(legacyLayout.imageAssets!.map(asset => [asset.path, digest(asset.path)]));
+  const saveRevision = (prior: BrandPostPackageManifestV2, candidate: BrandPostPackageManifestV2, label: string) => {
+    const manifestFile = writerSandbox.write!({ outputDir: path.join(temp, `writer-${label}`),
+      brandLinkId: candidate.brandLinkId, connectKind: candidate.connectKind,
+      post: { title: candidate.title, sections: candidate.composition.sections.map(section => `${section.title}\n\n${section.body.join("\n\n")}`),
+        hashtags: candidate.hashtags, generationSource: "AI", notes: ["기존 실패 원인 기록", "이번 문장 수정 기록"] },
+      imagePaths: [candidate.heroImagePath, ...candidate.bodyImagePaths], composition: candidate.composition,
+      contentReadiness: null, sourceSnapshot: candidate.sourceSnapshot, preserveManifest: prior });
+    return JSON.parse(fs.readFileSync(manifestFile, "utf8")) as BrandPostPackageManifestV2;
+  };
+  const savedRevision = saveRevision(legacyLayout, revisedLayout, "text-only");
+  assert.deepEqual(savedRevision.composition.renderNodes, revisedLayout.composition.renderNodes,
+    "actual writer → continuity → transaction preserves image position/caption, early/final CTA and every untargeted render node");
+  assert.deepEqual(savedRevision.composition.sections, revisedLayout.composition.sections);
+  assert.deepEqual(savedRevision.imageAssets, legacyLayout.imageAssets, "all active and unbound image bytes and bindings remain unchanged");
+  assert.deepEqual(savedRevision.imageGeneration, legacyLayout.imageGeneration);
+  assert.deepEqual(savedRevision.pipelineNotes, [...legacyLayout.pipelineNotes!, "이번 문장 수정 기록"],
+    "revision notes append without losing previous failure/backup history or adding duplicates");
+  assert.equal(savedRevision.approvedAt, null, "text-only preservation never carries approval across a revision");
+  assert.deepEqual(fs.readFileSync(legacyLayout.markdownPath), oldMarkdown, "the old markdown is immutable");
+  for (const [file, hash] of originalImageHashes) assert.equal(digest(file), hash, "no original photo bytes are changed");
+
+  const intentChange = structuredClone(revisedLayout);
+  intentChange.composition.sections[1].imageIntent = "다른 상품 장면";
+  const savedIntentChange = saveRevision(legacyLayout, intentChange, "intent-change");
+  assert.deepEqual(savedIntentChange.composition.sections[1].imagePaths, [], "changed intent still invalidates the old slot through the actual writer");
+  const factsChange = structuredClone(revisedLayout);
+  factsChange.sourceSnapshot = { ...factsChange.sourceSnapshot!, snapshotId: "changed-facts" };
+  const savedFactsChange = saveRevision(legacyLayout, factsChange, "facts-change");
+  assert.ok(savedFactsChange.composition.sections.filter(section => section.imageSource === "staged-ai").every(section => section.imagePaths.length === 0),
+    "changed source facts still invalidate reviewed scenes");
+  const invalidReference = structuredClone(legacyLayout);
+  invalidReference.imageAssets!.find(asset => asset.sectionId === targetSectionId)!.referenceScene!.reviewStatus = "failed";
+  const savedInvalidReference = saveRevision(invalidReference, invalidReference, "invalid-reference");
+  assert.deepEqual(savedInvalidReference.composition.sections[2].imagePaths, [], "an invalid review never enters the text-only preservation path");
+  const legacyCard = structuredClone(legacyLayout);
+  Object.assign(legacyCard.imageAssets!.find(asset => asset.sectionId === originalSection.id)!,
+    { provenance: "EDITORIAL_CARD", creationMethod: "source-with-generated-background", remoteGenerated: true });
+  const savedLegacyCard = saveRevision(legacyCard, legacyCard, "legacy-card");
+  assert.deepEqual(savedLegacyCard.composition.sections[0].imagePaths, [], "legacy framed/card evidence stays forbidden");
+  const missingNotice = structuredClone(revisedLayout);
+  const sceneNode = missingNotice.composition.renderNodes.find(node => node.kind === "image" && node.sectionId === targetSectionId);
+  assert.ok(sceneNode?.kind === "image");
+  delete sceneNode.caption;
+  const savedMissingNotice = saveRevision(legacyLayout, missingNotice, "missing-notice");
+  const repairedNoticeNode = savedMissingNotice.composition.renderNodes.find(node => node.kind === "image" && node.sectionId === targetSectionId);
+  assert.ok(repairedNoticeNode?.kind === "image");
+  assert.equal(repairedNoticeNode.caption, REFERENCE_SCENE_CAPTION, "missing AI notices still take the existing caption repair path");
+
+  for (const [label, change] of [
+    ["extra-image", (candidate: BrandPostPackageManifestV2) => candidate.composition.renderNodes.push({ ...originalNode })],
+    ["wrong-section", (candidate: BrandPostPackageManifestV2) => {
+      const image = candidate.composition.renderNodes.find(node => node.kind === "image" && node.sectionId === originalSection.id);
+      if (image?.kind === "image") image.sectionId = "foreign-section";
+    }],
+    ["moved-original", (candidate: BrandPostPackageManifestV2) => {
+      const nodes = candidate.composition.renderNodes;
+      const imageIndex = nodes.findIndex(node => node.kind === "image" && node.sectionId === originalSection.id);
+      const [image] = nodes.splice(imageIndex, 1);
+      let afterBody = -1;
+      nodes.forEach((node, index) => { if (node.kind === "paragraph" && node.sectionId === originalSection.id) afterBody = index; });
+      nodes.splice(afterBody + 1, 0, image);
+    }],
+    ["removed-caption", (candidate: BrandPostPackageManifestV2) => {
+      const image = candidate.composition.renderNodes.find(node => node.kind === "image" && node.sectionId === originalSection.id);
+      if (image?.kind === "image") delete image.caption;
+    }],
+    ["missing-sha", (candidate: BrandPostPackageManifestV2) => { candidate.imageAssets![1].sha256 = ""; }],
+    ["missing-facts", (candidate: BrandPostPackageManifestV2) => { candidate.sourceSnapshot = undefined; }],
+  ] as const) {
+    const candidate = structuredClone(revisedLayout);
+    change(candidate);
+    const result = continuity.reconcileBrandPostImageContinuity(label === "missing-sha" || label === "missing-facts" ? candidate : legacyLayout, candidate);
+    assert.notDeepEqual(result.composition.renderNodes, candidate.composition.renderNodes, `${label} cannot bypass image rebinding`);
+  }
+
+  console.log("PASS: image continuity, resume/cache identity, actual writer render preservation and intent/facts/reference/card/coverage/notice counterexamples");
 }
 
 main().catch((error) => {

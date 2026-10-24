@@ -1,11 +1,73 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+import ts from "typescript";
 import type { Page } from "playwright";
 import { inspectNaverScheduleSubmissionSignal } from "../src/lib/naver-schedule-submission";
 import { createScheduleSubmissionTracker, waitForConfirmedScheduleSubmission } from "./lib/naver-schedule-tracker";
 import { reservationIdFromPrePostReadUrl, scheduleListEntryMatches } from "./lib/naver-schedule-list-verifier";
+import { reservationVerification } from "../src/lib/published-post-verification";
 
 const targetYmd = "2026-09-03";
+
+// Execute only the real producer's receipt call, never the agent's browser/DB workflow.
+// This catches producer/consumer drift instead of repeating the intended date expression.
+const agentSource = readFileSync("scripts/simple-agent.ts", "utf8");
+const agentSyntax = ts.createSourceFile("scripts/simple-agent.ts", agentSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+const scheduleReceiptCalls: ts.CallExpression[] = [];
+const findScheduleReceipt = (node: ts.Node) => {
+  if (ts.isCallExpression(node) && node.expression.getText(agentSyntax) === "updatePublishAttempt" &&
+      ts.isStringLiteral(node.arguments[2]) && node.arguments[2].text === "CONFIRMED" &&
+      ts.isObjectLiteralExpression(node.arguments[3]) && node.arguments[3].properties.some(property =>
+        ts.isPropertyAssignment(property) && property.name.getText(agentSyntax) === "scheduledDate")) scheduleReceiptCalls.push(node);
+  ts.forEachChild(node, findScheduleReceipt);
+};
+findScheduleReceipt(agentSyntax);
+assert.equal(scheduleReceiptCalls.length, 1, "the confirmed reservation producer must be uniquely identified");
+function productionScheduleEvidence(scheduledDateForDb: Date, reservationId = "reservation-fixture") {
+  let evidence: { reservationId?: string; scheduledDate?: string } | undefined;
+  let calls = 0;
+  const before = scheduledDateForDb.getTime();
+  vm.runInNewContext(scheduleReceiptCalls[0].getText(agentSyntax), {
+    linkId: "fixture-product", attemptId: "fixture-attempt", publishOptions: { reservationId }, scheduledDateForDb,
+    updatePublishAttempt: (productId: string, attemptId: string, stage: string, captured: typeof evidence) => {
+      calls++; assert.equal(productId, "fixture-product"); assert.equal(attemptId, "fixture-attempt"); assert.equal(stage, "CONFIRMED"); evidence = captured;
+    },
+  }, { timeout: 1000 });
+  assert.equal(calls, 1);
+  assert.equal(scheduledDateForDb.getTime(), before, "serializing receipt evidence must not change the stored date or its timezone");
+  assert(evidence);
+  return evidence;
+}
+for (const ymd of [targetYmd, "2026-12-31", "2027-01-01", "2028-02-29"]) {
+  const scheduledAt = new Date(`${ymd}T00:00:00.000Z`);
+  const evidence = productionScheduleEvidence(scheduledAt);
+  assert.equal(evidence.scheduledDate, ymd, "the real producer must preserve the DB UTC-midnight calendar day");
+  const verified = reservationVerification({ status: "SCHEDULED", attempt: { stage: "CONFIRMED", mode: "schedule", evidence },
+    scheduledAt, now: new Date("2026-08-01T00:00:00Z") });
+  assert.equal(verified.receiptAccepted, true, "a confirmed producer receipt must satisfy the existing consumer");
+  assert.equal(verified.status, "receipt-accepted-live-list-unverified");
+  assert.equal(verified.liveListChecked, false); assert.equal(verified.publicationConfirmed, false);
+}
+const receiptDate = new Date(`${targetYmd}T00:00:00.000Z`);
+const receiptEvidence = productionScheduleEvidence(receiptDate);
+const acceptedReservation = { status: "SCHEDULED", attempt: { stage: "CONFIRMED", mode: "schedule", evidence: receiptEvidence },
+  scheduledAt: receiptDate, now: new Date("2026-08-01T00:00:00Z") };
+for (const input of [
+  { ...acceptedReservation, attempt: { ...acceptedReservation.attempt, evidence: { ...receiptEvidence, scheduledDate: receiptDate.toISOString() } } },
+  { ...acceptedReservation, attempt: { ...acceptedReservation.attempt, evidence: { ...receiptEvidence, scheduledDate: "2026-09-04" } } },
+  { ...acceptedReservation, attempt: { ...acceptedReservation.attempt, evidence: { ...receiptEvidence, scheduledDate: "2026-02-30" } } },
+  { ...acceptedReservation, attempt: { ...acceptedReservation.attempt, evidence: { ...receiptEvidence, reservationId: "0" } } },
+  { ...acceptedReservation, attempt: { ...acceptedReservation.attempt, evidence: { scheduledDate: receiptEvidence.scheduledDate } } },
+  { ...acceptedReservation, attempt: { ...acceptedReservation.attempt, stage: "SUBMITTING" } },
+  { ...acceptedReservation, attempt: { ...acceptedReservation.attempt, mode: "now" } },
+  { ...acceptedReservation, status: "READY" }, { ...acceptedReservation, scheduledAt: null },
+  { ...acceptedReservation, scheduledAt: new Date("2026-09-03T03:00:00Z") },
+]) assert.equal(reservationVerification(input).receiptAccepted, false, "invalid or nonmatching reservation evidence must remain rejected");
+const dueReservation = reservationVerification({ ...acceptedReservation, now: new Date("2026-09-02T15:01:00Z") });
+assert.equal(dueReservation.status, "due-publication-unverified", "Korean due-date semantics remain unchanged");
+assert.equal(dueReservation.publicationConfirmed, false);
 
 assert.equal(
   scheduleListEntryMatches(

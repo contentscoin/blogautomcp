@@ -23,6 +23,8 @@ function job(count = 1): MaterialJob {
 }
 const products = Array.from({ length: 3 }, (_, index) => ({ id: `product_${String(index).padStart(4, "0")}`, productName: `상품 ${index}`,
   status: "READY", connectKind: index === 1 ? "TRAVEL" : "SHOPPING" }));
+const plannedDate = new Date("2026-10-12T00:00:00.000Z");
+const plannedProducts = products.map((product, index) => ({ ...product, status: index === 1 ? "FAILED" : "READY", scheduledPublishAt: plannedDate }));
 const candidateDeps = { material: (id: string) => ({ ...readyMaterial(id), ready: false, blockers: ["최종 승인 필요"] }),
   savedDraft: () => true, publicationAttempt: () => null };
 
@@ -30,34 +32,91 @@ async function main() {
   let checks = 0;
   assert.equal(selectMaterialRepairCandidates(products, [], candidateDeps).length, 3); checks++;
   assert.equal(selectMaterialRepairCandidates(products, [], candidateDeps, "SHOPPING").length, 2); checks++;
+  const plannedBefore = JSON.stringify(plannedProducts);
+  assert.equal(selectMaterialRepairCandidates(plannedProducts, [], candidateDeps).length, 3,
+    "a plan date on an unpublished READY/FAILED saved draft is not a Naver reservation"); checks++;
+  assert.equal(selectMaterialRepairCandidates(plannedProducts, [], candidateDeps, "SHOPPING").length, 2); checks++;
+  assert.equal(JSON.stringify(plannedProducts), plannedBefore, "candidate selection preserves planned dates and product data"); checks++;
+  assert.ok(plannedProducts.every(product => product.scheduledPublishAt === plannedDate)); checks++;
   assert.equal(selectMaterialRepairCandidates(products, [], { ...candidateDeps, material: readyMaterial }).length, 0); checks++;
   for (const material of [null, { ready: false, revision, blockers: [] }, { ready: false, revision: "invalid", blockers: ["실패"] },
     { ready: false, revision, blockers: ["실패"], imageGeneration: { status: "running" } },
     { ready: false, revision, blockers: ["실패"], imageGeneration: { status: "failed", recoveryState: "owner-unknown" } }]) {
-    assert.equal(selectMaterialRepairCandidates(products, [], { ...candidateDeps, material: () => material }).length, 0); checks++;
+    for (const input of [products, plannedProducts]) {
+      assert.equal(selectMaterialRepairCandidates(input, [], { ...candidateDeps, material: () => material }).length, 0); checks++;
+    }
   }
   assert.equal(selectMaterialRepairCandidates(products, [], { ...candidateDeps, savedDraft: () => false }).length, 0); checks++;
   assert.equal(selectMaterialRepairCandidates(products, [], { ...candidateDeps, material: () => { throw new Error("corrupt draft"); } }).length, 0); checks++;
   for (const status of ["PUBLISHED", "SCHEDULED", "PUBLISHING", "DRAFTING", "OUTCOME_UNKNOWN"]) {
-    assert.equal(selectMaterialRepairCandidates(products.map(product => ({ ...product, status })), [], candidateDeps).length, 0); checks++;
+    for (const input of [products, plannedProducts]) {
+      assert.equal(selectMaterialRepairCandidates(input.map(product => ({ ...product, status })), [], candidateDeps).length, 0); checks++;
+    }
   }
-  for (const evidence of [{ postUrl: "https://blog.naver.com/x/1" }, { publishedAt: "confirmed" }, { scheduledPublishAt: "reserved" }]) {
-    assert.equal(selectMaterialRepairCandidates(products.map(product => ({ ...product, ...evidence })), [], candidateDeps).length, 0); checks++;
+  for (const evidence of [{ postUrl: "https://blog.naver.com/x/1" }, { publishedAt: "confirmed" }]) {
+    for (const input of [products, plannedProducts]) {
+      assert.equal(selectMaterialRepairCandidates(input.map(product => ({ ...product, ...evidence })), [], candidateDeps).length, 0); checks++;
+    }
   }
   for (const stage of ["PREPARING", "SUBMITTING", "CONFIRMED", "OUTCOME_UNKNOWN"]) {
-    assert.equal(selectMaterialRepairCandidates(products, [], { ...candidateDeps, publicationAttempt: () => ({ stage }) }).length, 0); checks++;
+    for (const input of [products, plannedProducts]) {
+      assert.equal(selectMaterialRepairCandidates(input, [], { ...candidateDeps, publicationAttempt: () => ({ stage }) }).length, 0); checks++;
+    }
   }
   assert.equal(selectMaterialRepairCandidates(products, [], { ...candidateDeps, publicationAttempt: () => ({ stage: "FAILED_BEFORE_SUBMIT" }) }).length, 3); checks++;
+  assert.equal(selectMaterialRepairCandidates(plannedProducts, [], { ...candidateDeps, publicationAttempt: () => ({ stage: "FAILED_BEFORE_SUBMIT" }) }).length, 3); checks++;
+  for (const proof of [{ submittedAt: "2026-10-07T00:00:00.000Z" }, { confirmedAt: "2026-10-07T00:00:01.000Z" },
+    { submittedAt: "" }, { confirmedAt: "" }, { evidence: { postUrl: "https://blog.naver.com/x/1" } },
+    { evidence: { reservationId: "reservation_1" } }, { evidence: { scheduledDate: "2026-10-12" } },
+    { evidence: { reservationId: "" } }]) {
+    for (const input of [products, plannedProducts]) {
+      assert.equal(selectMaterialRepairCandidates(input, [], { ...candidateDeps,
+        publicationAttempt: () => ({ stage: "FAILED_BEFORE_SUBMIT", ...proof }) }).length, 0,
+      "a pre-submit failure label cannot override conflicting submission/confirmation/reservation evidence"); checks++;
+    }
+  }
+  assert.equal(selectMaterialRepairCandidates(plannedProducts, [], { ...candidateDeps,
+    publicationAttempt: () => ({ stage: "FAILED_BEFORE_SUBMIT", evidence: {} }) }).length, 3,
+  "an empty legacy evidence container carries no submission marker"); checks++;
   assert.equal(selectMaterialRepairCandidates(products, [], { ...candidateDeps, publicationAttempt: () => { throw new Error("receipt unreadable"); } }).length, 0); checks++;
   for (const code of ["PREPARATION_RESULT_UNCERTAIN", "AGENT_LOST_UNCERTAIN", "OUTCOME_UNKNOWN", "APP_INTERRUPTED", "WORKFLOW_TIMEOUT"]) {
     const history = job(3); history.status = "failed"; history.items.forEach(item => { item.status = "failed"; item.errorCode = code; });
-    assert.equal(selectMaterialRepairCandidates(products, [history], candidateDeps).length, 0); checks++;
+    for (const input of [products, plannedProducts]) {
+      assert.equal(selectMaterialRepairCandidates(input, [history], candidateDeps).length, 0); checks++;
+    }
+  }
+  for (const status of ["queued", "preparing", "publishing", "outcome_unknown"] as const) {
+    const active = job(3); active.items.forEach(item => { item.status = status; });
+    assert.equal(selectMaterialRepairCandidates(plannedProducts, [active], candidateDeps).length, 0,
+      "a planned date must not bypass an active or uncertain material job"); checks++;
   }
   const uncertainPublication = job(3); uncertainPublication.kind = "publish"; uncertainPublication.items.forEach(item => { item.status = "failed"; item.errorCode = "AGENT_LOST_UNCERTAIN"; });
   const recentRepair = job(3); recentRepair.startedAt = "2026-10-08T01:00:00.000Z"; recentRepair.items.forEach(item => item.status = "failed");
   assert.equal(selectMaterialRepairCandidates(products, [uncertainPublication, recentRepair], candidateDeps).length, 0); checks++;
   uncertainPublication.items.forEach(item => item.errorCode = "PUBLISH_FAILED");
   assert.equal(selectMaterialRepairCandidates(products, [uncertainPublication, recentRepair], candidateDeps).length, 3); checks++;
+  for (const status of ["scheduled", "published", "outcome_unknown", "publishing", "queued", "interrupted"] as const) {
+    const olderUnsafe = job(3); olderUnsafe.kind = "publish"; olderUnsafe.startedAt = "2026-10-07T00:00:00.000Z";
+    olderUnsafe.items.forEach(item => { item.status = status; });
+    for (const history of [[olderUnsafe, uncertainPublication, recentRepair], [recentRepair, uncertainPublication, olderUnsafe]]) {
+      assert.equal(selectMaterialRepairCandidates(plannedProducts, history,
+        { ...candidateDeps, publicationAttempt: () => ({ stage: "FAILED_BEFORE_SUBMIT" }) }).length, 0,
+      "a newer failed publication cannot clear an older actual/uncertain reservation, regardless of input order"); checks++;
+    }
+  }
+  for (const unsafe of [{ errorCode: "AGENT_LOST_UNCERTAIN" }, { errorCode: "PUBLISH_FAILED", causeCode: "OUTCOME_UNKNOWN" }, { errorCode: "UNCLASSIFIED_FAILURE" }]) {
+    const olderUnsafe = job(3); olderUnsafe.kind = "publish"; olderUnsafe.startedAt = "2026-10-07T00:00:00.000Z";
+    olderUnsafe.items.forEach(item => { item.status = "failed"; Object.assign(item, unsafe); });
+    assert.equal(selectMaterialRepairCandidates(plannedProducts, [recentRepair, uncertainPublication, olderUnsafe], candidateDeps).length, 0,
+      "an older non-definitive failed submission remains unsafe after a newer definitive failure"); checks++;
+  }
+  const olderSafe = job(3); olderSafe.kind = "publish"; olderSafe.startedAt = "2026-10-07T00:00:00.000Z";
+  olderSafe.items.forEach(item => { item.status = "failed"; item.errorCode = "MATERIAL_NOT_READY"; });
+  for (const history of [[olderSafe, uncertainPublication, recentRepair], [recentRepair, uncertainPublication, olderSafe]]) {
+    assert.equal(selectMaterialRepairCandidates(plannedProducts, history,
+      { ...candidateDeps, publicationAttempt: () => ({ stage: "FAILED_BEFORE_SUBMIT" }) }).length, 3,
+    "plans whose entire publication history failed definitively before submission remain repairable"); checks++;
+  }
 
   for (const mode of ["approval", "images", "text", "late-text"] as const) {
     let approved = false; let filled = mode !== "images" && mode !== "late-text"; let revised = false; let snapshots = 0;
@@ -179,9 +238,16 @@ async function main() {
     if ((body as { action?: string } | undefined)?.action === "approve") ready = true;
     return { success: true, data: { approvedAt: ready ? "approved" : null, approval: { canApprove: ready }, imageSlots: [], contentQuality: { signals: [] } } };
   };
+  let rechecks = 0;
   await runMaterialJob(repaired, { call: runnerCall, material: id => ({ ...readyMaterial(id), ready, approvedAt: ready ? "approved" : null, blockers: ready ? [] : ["승인 필요"] }),
-    save: () => {}, pause: async () => {}, checkCancelled: () => {}, validateRepair: async () => true, backup: () => { snapshots++; return "fixture-snapshot"; } });
+    save: () => {}, pause: async () => {}, checkCancelled: () => {},
+    validateRepair: async id => {
+      rechecks++;
+      return selectMaterialRepairCandidates(plannedProducts, [], candidateDeps).some(candidate => candidate.productId === id);
+    }, backup: () => { snapshots++; return "fixture-snapshot"; } });
   assert.equal(repaired.status, "completed"); assert.equal(repaired.items[0].verificationStatus, "READY"); assert.equal(snapshots, 1); checks += 3;
+  assert.equal(rechecks, 2, "planned drafts pass both runner admission and the immediate pre-repair guard"); checks++;
+  assert.equal(JSON.stringify(plannedProducts), plannedBefore, "repair validation/approval never clears or rewrites planned dates"); checks++;
   const stale = job(); let staleCalls = 0;
   await runMaterialJob(stale, { call: async () => { staleCalls++; return { success: true }; }, material: readyMaterial,
     save: () => {}, pause: async () => {}, checkCancelled: () => {}, validateRepair: async () => false, backup: () => "unused" });

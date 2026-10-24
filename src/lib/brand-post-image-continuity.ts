@@ -34,6 +34,27 @@ function uniquePaths(values: string[]): string[] {
   });
 }
 
+function samePaths(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((file, index) => path.resolve(file) === path.resolve(right[index]));
+}
+
+function sameAssetBinding(left: BrandPostPackageImageAsset, right: BrandPostPackageImageAsset): boolean {
+  return Boolean(left.sha256) && left.sha256 === right.sha256 && left.role === right.role &&
+    (left.sectionId ?? null) === (right.sectionId ?? null) && left.slotId === right.slotId &&
+    (left.role === "hero" || normalizeIntent(left.imageIntent) === normalizeIntent(right.imageIntent)) &&
+    left.provenance === right.provenance && left.creationMethod === right.creationMethod &&
+    left.remoteGenerated === right.remoteGenerated;
+}
+
+function renderLayoutSignature(nodes: PostRenderNode[]): string {
+  return JSON.stringify(nodes.map(node => {
+    if (node.kind === "paragraph" || node.kind === "heading" || node.kind === "quotation") {
+      return { kind: node.kind, sectionId: node.sectionId };
+    }
+    return node.kind === "image" ? { ...node, assetPath: path.resolve(node.assetPath) } : node;
+  }));
+}
+
 function imageNodeFor(
   section: ResolvedPostSectionV1,
   assetPath: string,
@@ -148,22 +169,62 @@ export function reconcileBrandPostImageContinuity(
   }
 
   const heroImagePath = preservePreviousHero ? previous.heroImagePath : next.heroImagePath;
-  const baseNodes = next.composition.renderNodes.flatMap((node): PostRenderNode[] => {
+  const chosenByPath = new Map([...chosenAssets.values()].map(asset => [path.resolve(asset.path), asset]));
+  const activeBindings = [
+    { file: heroImagePath, sectionId: null },
+    ...sections.flatMap(section => section.imagePaths.map(file => ({ file, sectionId: section.id }))),
+  ];
+  const renderImages = next.composition.renderNodes.filter(node => node.kind === "image");
+  // A text revision already has its saved render plan. Preserve it only after
+  // the normal eligibility filters chose exactly the same reviewed bindings.
+  // Missing notices, stale reviews and real slot changes still use rebinding.
+  const preserveRenderPlan = Boolean(previous.sourceSnapshot?.snapshotId) && sameProductFacts &&
+    Boolean(preservePreviousHero) && previous.imagePolicy === next.imagePolicy &&
+    samePaths([previous.heroImagePath, next.heroImagePath], [heroImagePath, heroImagePath]) &&
+    renderLayoutSignature(previous.composition.renderNodes) === renderLayoutSignature(next.composition.renderNodes) &&
+    previous.composition.sections.length === sections.length &&
+    sections.every((section, index) => {
+      const prior = previous.composition.sections[index];
+      const requested = next.composition.sections[index];
+      return prior.id === section.id && prior.imageSource === section.imageSource &&
+        prior.imagePlacement === section.imagePlacement && prior.imageMin === section.imageMin && prior.imageMax === section.imageMax &&
+        brandPostVisualIntentFingerprint(prior.imageIntent) === brandPostVisualIntentFingerprint(section.imageIntent) &&
+        samePaths(prior.imagePaths, section.imagePaths) && samePaths(requested.imagePaths, section.imagePaths);
+    }) && renderImages.length === activeBindings.length &&
+    new Set(activeBindings.map(binding => path.resolve(binding.file))).size === activeBindings.length &&
+    activeBindings.every(({ file, sectionId }) => {
+      const resolved = path.resolve(file);
+      const prior = previousAssets.get(resolved);
+      const requested = nextAssets.get(resolved);
+      const chosen = chosenByPath.get(resolved);
+      if (!prior || !requested || !chosen || !sameAssetBinding(prior, chosen) || !sameAssetBinding(requested, chosen) ||
+          (chosen.sectionId ?? null) !== sectionId || brandPostReferenceSceneIssue(next, requested) !== null) return false;
+      const nodes = renderImages.filter(node => path.resolve(node.assetPath) === resolved);
+      const priorNodes = previous.composition.renderNodes.filter(node => node.kind === "image" && path.resolve(node.assetPath) === resolved);
+      return nodes.length === 1 && nodes[0].sectionId === sectionId && nodes[0].sourcePolicy === next.imagePolicy &&
+        priorNodes.length === 1 && priorNodes[0].kind === "image" && priorNodes[0].sectionId === sectionId &&
+        priorNodes[0].caption === nodes[0].caption && priorNodes[0].role === nodes[0].role &&
+        priorNodes[0].layout === nodes[0].layout && priorNodes[0].sourcePolicy === nodes[0].sourcePolicy &&
+        (sectionId === null ? nodes[0].role === "hero" || nodes[0].role === "thumbnail" : nodes[0].role !== "hero" && nodes[0].role !== "thumbnail") &&
+        (!isReferenceGuidedScene(chosen) || Boolean(nodes[0].caption?.includes("상품 원본을 참조한 AI 연출 이미지")));
+    });
+  const renderNodes = preserveRenderPlan ? [...next.composition.renderNodes] : next.composition.renderNodes.flatMap((node): PostRenderNode[] => {
     if (node.kind !== "image") return [node];
     if (node.sectionId !== null) return [];
     return [{ ...node, assetPath: heroImagePath, caption: selectedHero && isReferenceGuidedScene(selectedHero) ? REFERENCE_SCENE_CAPTION : undefined }];
   });
-  const renderNodes = [...baseNodes];
-  for (const section of sections) {
-    const nodes = section.imagePaths.map((assetPath, index) =>
-      imageNodeFor(section, assetPath, index, previous.composition.renderNodes, next.imagePolicy,
-        isReferenceGuidedScene(previousAssets.get(path.resolve(assetPath)) || nextAssets.get(path.resolve(assetPath)) || {}) ? REFERENCE_SCENE_CAPTION : undefined));
-    if (!nodes.length) continue;
-    let insertAt = -1;
-    renderNodes.forEach((node, index) => {
-      if ("sectionId" in node && node.sectionId === section.id) insertAt = index;
-    });
-    renderNodes.splice(insertAt >= 0 ? insertAt + 1 : renderNodes.length, 0, ...nodes);
+  if (!preserveRenderPlan) {
+    for (const section of sections) {
+      const nodes = section.imagePaths.map((assetPath, index) =>
+        imageNodeFor(section, assetPath, index, previous.composition.renderNodes, next.imagePolicy,
+          isReferenceGuidedScene(previousAssets.get(path.resolve(assetPath)) || nextAssets.get(path.resolve(assetPath)) || {}) ? REFERENCE_SCENE_CAPTION : undefined));
+      if (!nodes.length) continue;
+      let insertAt = -1;
+      renderNodes.forEach((node, index) => {
+        if ("sectionId" in node && node.sectionId === section.id) insertAt = index;
+      });
+      renderNodes.splice(insertAt >= 0 ? insertAt + 1 : renderNodes.length, 0, ...nodes);
+    }
   }
 
   const composition = refreshPostDocumentQuality({ ...next.composition, sections, renderNodes });

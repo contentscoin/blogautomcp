@@ -1,18 +1,45 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import vm from "node:vm";
 import ts from "typescript";
 import draftRuntimePolicy from "./lib/draft-runtime-policy.json";
 import {
   classifyCodexDraftFailure,
   codexDraftTerminalFailureCode,
+  codexDraftStructuredFailureCode,
+  codexUsageLimitDetails,
   runCodexDraftWithRetry,
+  collectCodexDraftResponse,
+  assertCodexOutputSchemaCompatible,
+  runCodexDraft,
+  isolatedCodexDraftConfig,
 } from "./lib/codex-draft-provider";
 import { getBundledCodexEntrypoint, getBundledCodexExecutable, readCodexLocalStatus } from "../src/lib/codex-local";
-import { classifyLocalFailure, toLocalAutomationError } from "../src/lib/local-automation-error";
+import { classifyLocalFailure, extractLocalApiError, LOCAL_AUTOMATION_ERROR_HINTS, LocalAutomationError, toLocalAutomationError } from "../src/lib/local-automation-error";
 
 const root = process.cwd();
+const isolatedFixture = fs.mkdtempSync(path.join(os.tmpdir(), "blogautomcp-isolated-config-"));
+try {
+  const skill = path.join(isolatedFixture, "ordinary", "SKILL.md"), systemSkill = path.join(isolatedFixture, ".system", "builtin", "SKILL.md");
+  for (const file of [skill, systemSkill]) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, "unchanged skill"); }
+  const config = isolatedCodexDraftConfig([isolatedFixture, isolatedFixture, path.join(isolatedFixture, "absent")]);
+  assert.equal(config.project_doc_max_bytes, 0);
+  assert(Object.values(config.features).every(value => value === false));
+  assert.deepEqual(config.skills.config.map(row => row.path).sort(), [skill, systemSkill].sort());
+  assert(config.skills.config.every(row => row.enabled === false));
+  for (const file of [skill, systemSkill]) assert.equal(fs.readFileSync(file, "utf8"), "unchanged skill");
+  assert(!("model" in config) && !("model_reasoning_effort" in config) && !("env" in config), "isolation must not change model, effort or shared authentication");
+} finally {
+  const target = path.resolve(isolatedFixture), parent = path.resolve(os.tmpdir());
+  assert(target.startsWith(parent + path.sep) && path.basename(target).startsWith("blogautomcp-isolated-config-"));
+  fs.rmSync(target, { recursive: true, force: true });
+}
+assert.doesNotThrow(() => assertCodexOutputSchemaCompatible({type:"object",properties:{box:{type:"array",items:{type:"integer"},minItems:4,maxItems:4}}}));
+for (const bad of [{type:"string",pattern:"\\p{L}+"},{type:"array",enum:[[1,2,3,4]]},{type:"string",pattern:"["}]) {
+  assert.throws(() => assertCodexOutputSchemaCompatible({type:"object",properties:{nested:bad}}), /CODEX_OUTPUT_SCHEMA_INVALID/u);
+}
 const providerSource = fs.readFileSync(path.join(root, "scripts/lib/codex-draft-provider.ts"), "utf8");
 const agentSource = fs.readFileSync(path.join(root, "scripts/simple-agent.ts"), "utf8");
 const routeSource = fs.readFileSync(path.join(root, "src/app/api/brandlinks/[id]/draft/route.ts"), "utf8");
@@ -87,7 +114,208 @@ assert.equal(draftRuntimePolicy.CODEX_DRAFT_ENABLED, "true");
 assert.match(electronSource, /Object\.assign\(process\.env, draftRuntimePolicy\)/u);
 assert.match(settingsSource, /fixedDraftSettings: draftRuntimePolicy/u);
 
+// Real approval catch and revision/create response must preserve provider evidence,
+// rather than converting HTTP 400 or a generic Korean quality word to bad input.
+const routeAst = ts.createSourceFile("route.ts", routeSource, ts.ScriptTarget.Latest, true);
+let approvalCodeExpression: ts.Expression | undefined;
+function locateApprovalCode(node: ts.Node): void {
+  if (ts.isVariableDeclaration(node) && node.name.getText(routeAst) === "code"
+    && node.initializer?.getText(routeAst).includes("error instanceof SavedTextRevalidationError")
+    && node.initializer.getText(routeAst).includes("codexDraftStructuredFailureCode(error)")) {
+    approvalCodeExpression = node.initializer;
+  }
+  ts.forEachChild(node, locateApprovalCode);
+}
+locateApprovalCode(routeAst);
+assert.ok(approvalCodeExpression, "approval catch must retain provider classification before quality-message heuristics");
+const failureResponseNode = routeAst.statements.find((node): node is ts.FunctionDeclaration =>
+  ts.isFunctionDeclaration(node) && node.name?.text === "failureResponse");
+assert.ok(failureResponseNode);
+class FixtureSavedTextRevalidationError extends Error {
+  readonly code = "QC_RECHECK_FAILED";
+}
+class FixturePrepareProcessError extends Error {
+  constructor(readonly code: string) { super("prepare failed"); }
+}
+const approvalContext = vm.createContext({
+  Error, codexDraftStructuredFailureCode, classifyLocalFailure,
+  SavedTextRevalidationError: FixtureSavedTextRevalidationError,
+  PrepareProcessError: FixturePrepareProcessError,
+  NextResponse: { json: (body: unknown, options: unknown) => ({ body, options }) },
+});
+vm.runInContext(ts.transpileModule(failureResponseNode.getText(routeAst), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+}).outputText, approvalContext);
+for (const code of ["CODEX_AUTH_REQUIRED", "CODEX_MODEL_INCOMPATIBLE", "CODEX_TIMEOUT", "CODEX_TRANSIENT_FAILURE", "CODEX_USAGE_LIMIT_REACHED"] as const) {
+  const error = new Error("최종 품질 검사 오류", { cause: Object.assign(new Error("provider failure"), { code }) });
+  approvalContext.error = error;
+  approvalContext.message = error.message;
+  assert.equal(vm.runInContext(approvalCodeExpression.getText(routeAst), approvalContext), code);
+  assert.equal(vm.runInContext("failureResponse(error, 'failure', 400).body.code", approvalContext), code);
+}
+approvalContext.error = new FixtureSavedTextRevalidationError("quality error");
+approvalContext.message = "quality error";
+assert.equal(vm.runInContext(approvalCodeExpression.getText(routeAst), approvalContext), "QC_RECHECK_FAILED");
+for (const message of ["Invalid timeout field", "Invalid websocket disconnected input", "invalid request"]) {
+  approvalContext.error = new Error(message);
+  approvalContext.message = message;
+  assert.equal(vm.runInContext(approvalCodeExpression.getText(routeAst), approvalContext), "INVALID_INPUT");
+  assert.equal(vm.runInContext("failureResponse(error, 'failure', 400).body.code", approvalContext), "INVALID_INPUT");
+}
+
+const completionLoss = "Reconnecting... 2/5 (stream disconnected before completion: websocket closed by server before response.completed)";
+assert.equal(classifyLocalFailure({ status: 400, message: completionLoss }), "CODEX_TRANSIENT_FAILURE",
+  "exact legacy approval diagnostic must not become INVALID_INPUT");
+assert.equal(classifyLocalFailure({ status: 400, code: "INVALID_INPUT", message: completionLoss }), "INVALID_INPUT",
+  "an explicit invalid-input response is not reclassified from its message");
+
 async function verifyRetryPolicy(): Promise<void> {
+  await assert.rejects(runCodexDraft({systemPrompt:"schema preflight",userPrompt:"no network",
+    imagePaths:["nonexistent-image-must-not-be-read"],outputSchema:{type:"string",pattern:"\\p{L}+"}}),
+    /CODEX_OUTPUT_SCHEMA_INVALID/u, "bad schema stops before images, SDK import or model dispatch");
+  // Reproduce the real MCP approval bridge: explicit image-audit HTTP 422 is
+  // a failed final gate, never an invalid argument or permission to approve.
+  const pollFile = "src/app/api/remote-agent/poll/route.ts";
+  const pollAst = ts.createSourceFile(pollFile, fs.readFileSync(path.join(root, pollFile), "utf8"), ts.ScriptTarget.Latest, true);
+  const localApiNode = pollAst.statements.find((node): node is ts.FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) && node.name?.text === "localApi");
+  assert.ok(localApiNode);
+  const pixelMessage = "PUBLISH_IMAGE_AUDIT_FAILED: [11:SEMANTIC_REJECTION] 현재 사진과 본문 묘사가 일치하지 않습니다.";
+  let localResponse: { success: false; code?: string; error: string };
+  let localCalls = 0;
+  const bridge = vm.createContext({ Error, Headers, URL, process: { env: {} },
+    jobContexts: new WeakMap(), localAppOrigin: () => "http://127.0.0.1:43127",
+    localJsonFetch: async () => { localCalls++; return { ok: false, status: 422, json: async () => localResponse }; },
+    classifyLocalFailure, extractLocalApiError, LOCAL_AUTOMATION_ERROR_HINTS, LocalAutomationError,
+  });
+  vm.runInContext(ts.transpileModule(localApiNode.getText(pollAst), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText + "\nthis.call=localApi;", bridge);
+  for (const [rawCode, message, expected] of [
+    ["PUBLISH_IMAGE_AUDIT_FAILED", pixelMessage, "PUBLISH_IMAGE_AUDIT_FAILED"],
+    ["INVALID_INPUT", pixelMessage, "INVALID_INPUT"],
+    [undefined, "Invalid field format", "INVALID_INPUT"],
+    ["UNKNOWN_VALIDATION_CODE", "Invalid field format", "INVALID_INPUT"],
+    ["CONTENT_BLOCKED", "Current content is blocked", "CONTENT_BLOCKED"],
+  ] as const) {
+    localResponse = { success: false, ...(rawCode ? { code: rawCode } : {}), error: message };
+    const before = localCalls;
+    await assert.rejects(bridge.call({}, "/api/brandlinks/offline-fixture/draft", { method: "PATCH", body: '{"action":"approve"}' }), (error: unknown) => {
+      assert.ok(error instanceof LocalAutomationError);
+      assert.equal(error.code, expected); assert.equal(error.message, message); assert.equal(error.httpStatus, 422);
+      assert.equal(toLocalAutomationError(error), error, "the completion conversion must retain the exact typed cause/message");
+      return true;
+    });
+    assert.equal(localCalls, before + 1, "a definitive approval rejection cannot replay the mutation");
+  }
+  const approveNode = routeAst.statements.find((node): node is ts.FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) && node.name?.text === "approvePackageAfterCurrentValidation");
+  assert.ok(approveNode);
+  const savedDraft = Object.freeze({ approvedAt: null, markdown: "existing manuscript", imageSha256: "a".repeat(64) });
+  const pixelFailure = Object.assign(new Error(pixelMessage), { code: "PUBLISH_IMAGE_AUDIT_FAILED" });
+  let approvalWrites = 0;
+  const gate = vm.createContext({
+    revalidatePackageForApproval: () => savedDraft,
+    validateBrandPostPublishImages: async (_id: string, _name: string, options: { bindReadiness: boolean }) => {
+      assert.equal(options.bindReadiness, true); throw pixelFailure;
+    },
+    approveBrandPostPackage: () => { approvalWrites++; return { ...savedDraft, approvedAt: "must-not-happen" }; },
+  });
+  vm.runInContext(ts.transpileModule(approveNode.getText(routeAst), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText + "\nthis.approve=approvePackageAfterCurrentValidation;", gate);
+  await assert.rejects(gate.approve("offline-fixture", { productName: "fixture" }), error => error === pixelFailure);
+  assert.equal(approvalWrites, 0); assert.equal(savedDraft.approvedAt, null);
+  assert.deepEqual(savedDraft, { approvedAt: null, markdown: "existing manuscript", imageSha256: "a".repeat(64) });
+
+  const events = async function* (items: Array<import("@openai/codex-sdk").ThreadEvent>) { yield* items; };
+  const progress = { type: "error" as const, message: completionLoss };
+  const response = { type: "item.completed" as const, item: { type: "agent_message" as const, id: "response", text: "completed JSON" } };
+  const completed = { type: "turn.completed" as const, usage: { input_tokens: 1, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0 } };
+  const usageRows: unknown[] = [];
+  assert.equal(await collectCodexDraftResponse(events([response, completed]), undefined, usage => usageRows.push(usage)), "completed JSON");
+  assert.deepEqual(usageRows, [completed.usage], "completed SDK usage is observed without another provider request");
+  assert.equal(await collectCodexDraftResponse(events([response, completed]), undefined, () => { throw new Error("counter failure"); }), "completed JSON",
+    "a failing usage sink cannot fail or retry a completed turn");
+  assert.equal(await collectCodexDraftResponse(events([progress, response, completed])), "completed JSON",
+    "native recovery progress must not cancel its still-running turn");
+  const highDemand = "Reconnecting... 2/5 (We’re currently experiencing high demand, which may cause temporary errors.)";
+  const nextHighDemand = highDemand.replace("2/5", "3/5");
+  const demandEvents = [{ type: "error" as const, message: highDemand }, { type: "error" as const, message: nextHighDemand }];
+  const negativeJson = '{"accepted":false,"identityMatches":false,"reason":"actual retained negative"}';
+  const negativeResponse = { ...response, item: { ...response.item, text: negativeJson } };
+  const progressTrace: string[] = [];
+  let sameTurnCalls = 0;
+  assert.equal(await runCodexDraftWithRetry(async () => {
+    sameTurnCalls++;
+    return collectCodexDraftResponse(events([...demandEvents, negativeResponse, completed]), notice => progressTrace.push(notice));
+  }, { retryDelayMs: 0, canRetry: () => false }), negativeJson,
+  "2/5 -> 3/5 waits within one SDK operation and preserves a completed raw negative without a favorable reroll");
+  assert.equal(sameTurnCalls, 1);
+  assert(progressTrace.some(notice => notice.includes(highDemand)) && progressTrace.some(notice => notice.includes(nextHighDemand)),
+    "the exact first and later reconnect notifications remain in the progress trace");
+  assert.equal(await collectCodexDraftResponse(events([{ type: "error", message: highDemand.replace("We’re", "We're") }, response, completed]), () => {}), "completed JSON");
+  for (const raw of ['{"accepted":null}', "{invalid-json", negativeJson]) {
+    let calls = 0;
+    const received = await runCodexDraftWithRetry(async () => {
+      calls++;
+      return collectCodexDraftResponse(events([...demandEvents, { ...response, item: { ...response.item, text: raw } }, completed]), () => {});
+    }, { retryDelayMs: 0, canRetry: () => false });
+    assert.equal(received, raw); assert.equal(calls, 1, "model negative, unknown and parse-invalid text never trigger another provider operation");
+  }
+  for (const message of ["authentication required", "You've hit your usage limit.", "The model is not supported when using Codex with a ChatGPT account.",
+    "HTTP status 400 invalid_request_error: invalid output schema", "CODEX_TIMEOUT", highDemand.replace("errors.)", "errors. authentication required)")]) {
+    let reachedLaterResponse = false;
+    async function* terminalEvents(): AsyncIterable<import("@openai/codex-sdk").ThreadEvent> {
+      yield demandEvents[0]; yield { type: "error", message }; reachedLaterResponse = true; yield response; yield completed;
+    }
+    await assert.rejects(collectCodexDraftResponse(terminalEvents(), () => {}), error => (error as Error).message === message);
+    assert.equal(reachedLaterResponse, false, "terminal or unrecognized errors are not swallowed as progress");
+  }
+  for (const invalid of [highDemand.replace("2/5", "0/5"), highDemand.replace("2/5", "02/5"), highDemand.replace("2/5", "6/5"),
+    highDemand.replace("2/5", "2/0"), highDemand.replace("2/5", "2/6"), highDemand.replace("2/5", "9007199254740993/9007199254740993"),
+    `Invalid request text: ${highDemand}`, `${highDemand} suffix`, highDemand.slice(0,-1), highDemand.replace("temporary errors.", "a different transient message.")]) {
+    await assert.rejects(collectCodexDraftResponse(events([{ type: "error", message: invalid }, response, completed]), () => {}), error => (error as Error).message === invalid);
+  }
+  for (const finish of [[], [negativeResponse], [{ type: "turn.failed" as const, error: { message: highDemand } }]]) {
+    let calls = 0;
+    await assert.rejects(runCodexDraftWithRetry(async () => {
+      calls++;
+      return collectCodexDraftResponse(events([...demandEvents, ...finish]), () => {});
+    }, { retryDelayMs: 0, canRetry: () => false }), error => (error as Error).message === (finish[0]?.type === "turn.failed" ? highDemand : nextHighDemand));
+    assert.equal(calls, 1, "failed or unknown stream completion never dispatches another QC operation");
+  }
+  async function* highDemandAbortedEvents(): AsyncIterable<import("@openai/codex-sdk").ThreadEvent> {
+    yield demandEvents[0]; throw Object.assign(new Error("existing deadline aborted this same turn"), { name: "AbortError" });
+  }
+  let deadlineCalls = 0;
+  await assert.rejects(runCodexDraftWithRetry(async () => {
+    deadlineCalls++; return collectCodexDraftResponse(highDemandAbortedEvents(), () => {});
+  }, { retryDelayMs: 0, canRetry: () => false }), error => (error as { code?: string }).code === "CODEX_TIMEOUT");
+  assert.equal(deadlineCalls, 1, "SDK reconnects do not reset the caller's deadline or add a second QC turn");
+  assert.equal(classifyCodexDraftFailure(new Error(highDemand)), "non-retryable",
+    "recognizing same-turn progress does not broaden the generic new-operation retry classifier");
+  // Output exhaustion is not a network recovery. Stop the first notification
+  // rather than allowing the SDK to spend five more attempts on this grammar.
+  const maximumOutput = "Reconnecting... 2/5 (stream disconnected before completion: Incomplete response returned, reason: max_output_tokens)";
+  let outputCalls=0,reachedLater=false;
+  async function* exhaustedOutput():AsyncIterable<import("@openai/codex-sdk").ThreadEvent>{
+    yield {type:"error",message:maximumOutput};reachedLater=true;yield negativeResponse;yield completed;
+  }
+  await assert.rejects(runCodexDraftWithRetry(async()=>{outputCalls++;return collectCodexDraftResponse(exhaustedOutput());},{retryDelayMs:0}),/max_output_tokens/);
+  assert.equal(outputCalls,1);assert.equal(reachedLater,false);
+  assert.equal(classifyCodexDraftFailure(new Error(maximumOutput)),"non-retryable");
+  await assert.rejects(collectCodexDraftResponse(events([progress, { type: "turn.failed", error: { message: completionLoss } }])), /Reconnecting/);
+  await assert.rejects(collectCodexDraftResponse(events([progress, response])), /Reconnecting/,
+    "a partial response without turn.completed cannot count as successful QC");
+  await assert.rejects(collectCodexDraftResponse(events([response])), /turn.completed/);
+  await assert.rejects(collectCodexDraftResponse(events([{ type: "error", message: "authentication required" }, response, completed])), /authentication required/);
+  await assert.rejects(collectCodexDraftResponse(events([{ type: "error", message: completionLoss.replace("2/5", "9/5") }, response, completed])), /Reconnecting/);
+  async function* abortedEvents(): AsyncIterable<import("@openai/codex-sdk").ThreadEvent> {
+    yield progress;
+    throw Object.assign(new Error("cancelled"), { name: "AbortError" });
+  }
+  await assert.rejects(collectCodexDraftResponse(abortedEvents()), (error: unknown) => (error as Error).name === "AbortError");
   const transientErrors = [
     Object.assign(new Error("rate limited"), { status: 429 }),
     new Error('{"type":"error","status":429,"error":{"message":"rate limit"}}'),
@@ -95,6 +323,9 @@ async function verifyRetryPolicy(): Promise<void> {
     new Error("HTTP status 504 Gateway Timeout"),
     new Error("Gateway Timeout (504)"),
     Object.assign(new Error("socket reset"), { code: "ECONNRESET" }),
+    new Error(completionLoss),
+    new Error("stream disconnected before completion: websocket closed by server before response.completed"),
+    new Error("review wrapper", { cause: new Error(completionLoss) }),
   ];
   for (const transient of transientErrors) {
     assert.equal(classifyCodexDraftFailure(transient), "retryable-transient");
@@ -105,7 +336,7 @@ async function verifyRetryPolicy(): Promise<void> {
       return "ok";
     }, { retryDelayMs: 0 });
     assert.equal(result, "ok");
-    assert.equal(calls, 2, "429/5xx/ECONNRESET gets exactly one same-Codex retry");
+    assert.equal(calls, 2, "strong provider transport/service evidence gets exactly one same-Codex retry");
   }
 
   let exhaustedCalls = 0;
@@ -121,7 +352,29 @@ async function verifyRetryPolicy(): Promise<void> {
   });
   assert.equal(exhaustedCalls, 2, "a persistent 5xx is never retried more than once");
 
+  let streamFailureCalls = 0;
+  await assert.rejects(runCodexDraftWithRetry(async () => {
+    streamFailureCalls += 1;
+    throw new Error(completionLoss);
+  }, { retryDelayMs: 0 }), (error: unknown) => {
+    assert.equal((error as { code?: string }).code, "CODEX_TRANSIENT_FAILURE");
+    return true;
+  });
+  assert.equal(streamFailureCalls, 2, "completion loss never adds a third SDK operation");
+  let cancelledCalls = 0;
+  await assert.rejects(runCodexDraftWithRetry(async () => {
+    cancelledCalls += 1;
+    throw new Error(completionLoss);
+  }, { retryDelayMs: 0, canRetry: () => false }));
+  assert.equal(cancelledCalls, 1, "the existing abort/budget guard still vetoes transport retry");
+
   const definitiveErrors: Array<[unknown, ReturnType<typeof classifyCodexDraftFailure>, string | null]> = [
+    [new Error("You’ve hit your usage limit. Try again at Oct 22 4:17 PM."), "usage-limit", "CODEX_USAGE_LIMIT_REACHED"],
+    [new Error("You've hit your usage limit. Try again at Oct 22 4:17 PM."), "usage-limit", "CODEX_USAGE_LIMIT_REACHED"],
+    [new Error("SOURCE_REVIEW_INCOMPLETE", { cause: new Error("You’ve hit your usage limit.") }), "usage-limit", "CODEX_USAGE_LIMIT_REACHED"],
+    [Object.assign(new Error("Too many requests"), { status: 429, error: { type: "usage_limit_reached" } }), "usage-limit", "CODEX_USAGE_LIMIT_REACHED"],
+    [Object.assign(new Error("Too many requests"), { status: 429, error: { code: "insufficient_quota" } }), "usage-limit", "CODEX_USAGE_LIMIT_REACHED"],
+    [Object.assign(new Error(completionLoss, { cause: Object.assign(new Error("quota"), { code: "CODEX_USAGE_LIMIT_REACHED" }) }), { code: "CODEX_TRANSIENT_FAILURE" }), "usage-limit", "CODEX_USAGE_LIMIT_REACHED"],
     [Object.assign(new Error("authentication required"), { status: 401 }), "authentication", "CODEX_AUTH_REQUIRED"],
     [Object.assign(new Error("provider wrapper"), { status: 500, response: { status: 401, message: "Forbidden" } }), "authentication", "CODEX_AUTH_REQUIRED"],
     [new Error('{"type":"error","status":401,"error":{"message":"Forbidden"}}'), "authentication", "CODEX_AUTH_REQUIRED"],
@@ -130,6 +383,15 @@ async function verifyRetryPolicy(): Promise<void> {
     [new Error('{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The gpt-6-luna model is not supported when using Codex with a ChatGPT account."}}'), "model-version", "CODEX_MODEL_INCOMPATIBLE"],
     [Object.assign(new Error("operation timed out"), { name: "AbortError" }), "timeout", "CODEX_TIMEOUT"],
     [Object.assign(new Error("invalid request"), { status: 400 }), "non-retryable", null],
+    [new Error("websocket disconnected"), "non-retryable", null],
+    [new Error("stream disconnected before completion: invalid user request"), "non-retryable", null],
+    [new Error(`Invalid request text: ${completionLoss}`), "non-retryable", null],
+    [new Error("Reconnecting... 2/5 (stream disconnected before completion: websocket closed by server before response.completed"), "non-retryable", null],
+    [Object.assign(new Error(completionLoss), { code: "CODEX_AUTH_REQUIRED" }), "authentication", "CODEX_AUTH_REQUIRED"],
+    [Object.assign(new Error(completionLoss), { status: 403 }), "authentication", "CODEX_AUTH_REQUIRED"],
+    [Object.assign(new Error(completionLoss), { code: "CODEX_MODEL_INCOMPATIBLE" }), "model-version", "CODEX_MODEL_INCOMPATIBLE"],
+    [Object.assign(new Error(completionLoss), { code: "CODEX_TIMEOUT" }), "timeout", "CODEX_TIMEOUT"],
+    [Object.assign(new Error(completionLoss, { cause: Object.assign(new Error("inner auth failure"), { code: "CODEX_AUTH_REQUIRED" }) }), { code: "CODEX_TRANSIENT_FAILURE" }), "authentication", "CODEX_AUTH_REQUIRED"],
   ];
   for (const [failure, expectedKind, expectedCode] of definitiveErrors) {
     assert.equal(classifyCodexDraftFailure(failure), expectedKind);
@@ -140,14 +402,34 @@ async function verifyRetryPolicy(): Promise<void> {
     }, { retryDelayMs: 0 }), (error: unknown) => {
       assert.equal((error as { code?: string }).code || null, expectedCode);
       assert.equal(codexDraftTerminalFailureCode(error), expectedCode);
-      if (expectedCode) assert.equal((error as Error).cause, failure, "terminal wrapping must preserve the provider cause");
+      if (expectedCode && (failure as { code?: string }).code === expectedCode) {
+        assert.equal(error, failure, "already typed terminal failures are preserved intact");
+      } else if (expectedCode) assert.equal((error as Error).cause, failure, "terminal wrapping must preserve the provider cause");
       else assert.equal(error, failure, "unknown non-retryable failures remain unchanged");
       return true;
     });
     assert.equal(calls, 1, `${expectedKind} must not retry or switch execution engines`);
   }
 
-  for (const code of ["CODEX_AUTH_REQUIRED", "CODEX_MODEL_INCOMPATIBLE", "CODEX_TIMEOUT", "CODEX_TRANSIENT_FAILURE"] as const) {
+  const timedQuota = new Error("outer", { cause: Object.assign(new Error("You’ve hit your usage limit. Try again at Oct 22 4:17 PM."), {
+    reset_at: "2026-10-22T16:17:00+09:00", headers: { "retry-after": "120" },
+  }) });
+  assert.deepEqual(codexUsageLimitDetails(timedQuota), { retryAfterSeconds: 120, resetAt: "2026-10-22T07:17:00.000Z", resetHint: "Oct 22 4:17 PM." });
+  assert.deepEqual(codexUsageLimitDetails(Object.assign(new Error("You've hit your usage limit. Try again at Oct 22 4:17 PM."), {
+    resetAt: "Oct 22 4:17 PM", retryAfterSeconds: Infinity,
+  })), { resetHint: "Oct 22 4:17 PM." }, "ambiguous local reset text is preserved without inventing a date or time zone");
+  await assert.rejects(runCodexDraftWithRetry(async () => { throw timedQuota; }, { retryDelayMs: 0 }), (error: unknown) => {
+    const typed = error as Error & { code: string; retryAfterSeconds: number; resetAt: string; resetHint: string };
+    assert.equal(typed.code, "CODEX_USAGE_LIMIT_REACHED"); assert.equal(typed.cause, timedQuota);
+    assert.equal(typed.retryAfterSeconds, 120); assert.equal(typed.resetAt, "2026-10-22T07:17:00.000Z");
+    assert.equal(typed.resetHint, "Oct 22 4:17 PM."); return true;
+  });
+  assert.equal(classifyPrepareFailure(new Error("SOURCE_EVIDENCE_REQUIRED", { cause: timedQuota })), "CODEX_USAGE_LIMIT_REACHED",
+    "the actual child result classifier must preserve nested quota before source-evidence heuristics");
+  assert.equal(classifyLocalFailure({ status: 400, message: "You’ve hit your usage limit. Try again at Oct 22 4:17 PM." }), "CODEX_USAGE_LIMIT_REACHED");
+  assert.equal(classifyLocalFailure({ status: 429, message: "rate_limit_exceeded" }), "LOCAL_AUTOMATION_FAILED",
+    "a short-lived HTTP 429 is not an account usage quota");
+  for (const code of ["CODEX_AUTH_REQUIRED", "CODEX_MODEL_INCOMPATIBLE", "CODEX_TIMEOUT", "CODEX_TRANSIENT_FAILURE", "CODEX_USAGE_LIMIT_REACHED"] as const) {
     assert.equal(classifyLocalFailure({ status: 500, code, message: "wrapped provider failure" }), code,
       `${code} must cross the local automation/MCP mapping unchanged`);
     assert.equal(toLocalAutomationError(Object.assign(new Error("wrapped provider failure"), { code })).code, code,

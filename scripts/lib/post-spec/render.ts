@@ -5,6 +5,7 @@
 import { CHECK_PREFIX, FACT_PREFIX } from "./section-library";
 import type { GeneratedSection, SectionShape } from "./types";
 import { normalizePublishedBodyLines } from "../../../src/lib/post-composition-contract";
+import { stripDraftListPrefix } from "../draft-sections";
 
 const MAX_MOBILE_LINE = 58;
 
@@ -47,13 +48,13 @@ export function normalizeLines(rawLines: string[], shape: SectionShape): string[
     .filter((line) => line.length > 0);
   if (shape === "facts-list") {
     return lines.map((line) => {
-      const bare = line.replace(/^[-•·▸✔✓*]\s*/u, "");
+      const bare = stripDraftListPrefix(line);
       return `${FACT_PREFIX}${bare}`;
     });
   }
   if (shape === "checklist") {
     return lines.map((line) => {
-      const bare = line.replace(/^[-•·▸✔✓*①②③④⑤]\s*/u, "").replace(/^\d+[.)]\s*/, "");
+      const bare = stripDraftListPrefix(line);
       return `${CHECK_PREFIX}${bare}`;
     });
   }
