@@ -69,9 +69,9 @@ const shopping = buildBrandPostImagePrompt({ connectKind: "SHOPPING", productNam
 assert.match(shopping, /natural, believable lifestyle photograph/u);
 assert.match(shopping, /욕실 선반/u, "actual template setting is forwarded");
 assert.match(shopping, /INPUT 1 is authoritative/u, "actual seller reference governs product geometry");
-assert.match(shopping, /Preserve actual intrinsic label hierarchy/u, "visible product identity and intrinsic print remain authoritative");
+assert.match(shopping, /IDENTIFYING PRINT SUPPLY:.*observed spelling, scale and placement/u, "visible product identity and intrinsic print remain authoritative");
 assert.match(shopping, /not seller artwork around the product/u, "seller badges must not become invented product labels");
-assert.match(shopping, /Tiny non-identifying lower print may be naturally unreadable/u, "ordinary camera legibility is not a product mismatch");
+assert.match(shopping, /Keep unresolved tiny printing naturally small and unreadable at the supported distance/u, "ordinary camera legibility is not a product mismatch");
 assert.match(shopping, /never invent or sharpen unreadable text, numbers, volume, certifications or extra brands/u,
   "unreadable print must not be replaced with invented product facts");
 assert.doesNotMatch(shopping, /Generate the environment only|distinct viewpoint/u);

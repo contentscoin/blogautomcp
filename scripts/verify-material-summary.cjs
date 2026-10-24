@@ -59,6 +59,7 @@ function harness() {
   const receipt = load('src/lib/brand-post-approval-receipt.ts', {
     'node:crypto': crypto, 'node:fs': strictFs, 'node:path': path,
     '../../scripts/lib/publish-image-audit': { publicationImageAuditPolicyFingerprint: () => 'fixture-policy' },
+    '../../scripts/lib/lightweight-publication-review': load('scripts/lib/lightweight-publication-review.ts', { 'node:crypto': crypto }),
     '../../scripts/lib/product-photo-provenance': { readProductPhotoSource: () => null },
     '../../scripts/lib/publish-image-audit-receipt': { readSuccessfulImageAuditReadinessBinding: (_id, binding) => binding === approvedBinding },
   });
