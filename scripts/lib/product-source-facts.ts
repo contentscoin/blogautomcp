@@ -20,6 +20,7 @@ const LABEL_ALIASES: Record<string, string> = {
   "배터리용량": "배터리", "흡입력": "흡입력", "흡입압력": "흡입력",
   "전원방식": "전원방식", "안마부위": "사용부위", "안마방식": "안마방식",
   "부가기능": "기능", "강약조절": "강약조절",
+  "형태": "형태", "디테일": "디테일",
 };
 const LABELS = new Set(("용량 규격 표시규격 크기 사이즈 가로 세로 높이 폭 깊이 두께 지름 직경 면적 무게 중량 소재 재질 원재료 성분 함량 구성품 구성 수량 개수 색상 전압 정격 소비전력 출력 배터리 충전시간 사용시간 작동시간 풍량 온도 모드 단계 회전각도 방수 방진 호환 원산지 제조국 보관조건 유통기한 소비기한 알레르기 세탁방법 세척방법 기능 식품유형 부위 영양정보 효율등급 전원규격 흡입력 해상도 화면 화면크기 디스플레이 패널 밝기 주사율 프로세서 CPU 메모리 RAM 저장장치 저장용량 SSD 운영체제 스피커 포트 단자 인터페이스 블루투스 무선 카메라 시야각 방식 인증").split(" "));
 
@@ -33,6 +34,10 @@ export function normalizeProductFactLabel(label: string): string {
  * or efficacy claim from a free-form label. Keep the same guard when an invalid
  * typed row is later considered by the raw-feature fallback. */
 const STANDARD_ATTRIBUTE_VALUES: Record<string, readonly string[]> = {
+  // Observable seller attributes also matter for low-spec custom goods. A
+  // closed value list keeps free-form efficacy/option instructions out.
+  "형태": ["스트랩형", "키링형", "고리형", "택형", "카드형"],
+  "디테일": ["이니셜", "자수", "프린팅", "각인"],
   "전원방식": ["충전식", "충전형", "전기식", "유선", "무선", "유선식", "무선식", "건전지식", "배터리식", "건전지", "USB", "USB-C", "C타입"],
   "안마부위": ["목", "어깨", "승모근", "등", "허리", "팔", "손", "손목", "복부", "배", "다리", "허벅지", "종아리", "무릎", "발", "발바닥", "전신", "얼굴", "두피"],
   "안마방식": ["주무름", "두드림", "지압", "진동", "롤링", "공기압", "에어", "압박", "문지름", "수동"],

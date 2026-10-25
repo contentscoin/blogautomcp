@@ -173,6 +173,8 @@ async function main() {
     for (const patch of [{}, { identityMatches: false }, { singlePhotograph: false }, { notice: true }, { mixedOptions: true },
       { noGraphicLayout: false }, { textPolicyMatches: false }]) {
       const input = options(); let calls = 0;
+      if ("mixedOptions" in patch) input.selectedProduct = JSON.stringify({
+        selectedOption: { status: "confirmed", label: "Lavender" }, optionResolution: { confirmedOptionLabel: "Lavender" } });
       const observation = "Uncertain claim; raw accepted stays false. C:\\Users\\private\\secret.json token=topsecret Bearer abcdefghijklmnop";
       input.review = async call => {
         calls++; assertEvidenceFirstCall(call);
@@ -180,7 +182,11 @@ async function main() {
         assert.deepEqual(slot.claimSources.sectionTitle, { origin: "section-title", sourceIndex: null, text: slot.sectionTitle });
         assert.deepEqual(slot.claimSources.sectionBody, publicationClaimUnits(slot.sectionBody,[2]).map(unit=>({origin:"section-body",...unit})));
         assert.match(call.userPrompt, /recipient's tastes, conditional recommendation/u);
-        return JSON.stringify({ reviews: [{ ...good, photoClaimMatches: false, accepted: false, photoClaimObjection: { ...bodyProof, quote: "Invented source" }, reason: observation, ...patch }] });
+        return JSON.stringify({ reviews: [{ ...good, photoClaimMatches: false, accepted: false, photoClaimObjection: { ...bodyProof, quote: "Invented source" }, reason: observation, ...patch,
+          ...("identityMatches" in patch ? { visibleIdentityEvidence: { basis: "concrete-conflict", landmarks: [
+            { part: "housing", referenceObservation: "selected round housing", candidateObservation: "different square housing" }], conflict: "Actual opposing housing shape" } } : {}),
+          ...("mixedOptions" in patch ? { optionConflictWitness: { origin: "confirmed-selection", quote: "Lavender", visibleAlternatives: ["Lavender", "Unscented"] } } : {}),
+        }] });
       };
       const audited = await auditPublishImages(input);
       assert.equal(audited.ok, false); assert.equal(calls, 1);

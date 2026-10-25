@@ -16,7 +16,7 @@ import { REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION, refere
 import { lightweightPublicationPolicyFingerprint, semanticPublicationReviewRequest, lightweightPublicationReferenceIssue } from "./lib/lightweight-publication-review";
 import { brandPostApprovalBinding, brandPostCompatibleApprovalBindings, hasCurrentBrandPostApprovalReceipt } from "../src/lib/brand-post-approval-receipt";
 import { writeSuccessfulImageAuditReceipt } from "./lib/publish-image-audit-receipt";
-import { COMPATIBLE_STRICT_PUBLICATION_POLICIES } from "./lib/lightweight-publication-review";
+import { COMPATIBLE_STRICT_PUBLICATION_POLICIES, LIGHTWEIGHT_PUBLICATION_DETAILED_CONTRACT } from "./lib/lightweight-publication-review";
 import { createProductSnapshot } from "../src/lib/draft-context-snapshot";
 import { normalizePublishedPostText } from "../src/lib/post-composition-contract";
 import type { BrandPostPackageManifest } from "../src/lib/brand-post-package";
@@ -29,6 +29,7 @@ const fileHash = (file: string) => hash(fs.readFileSync(file));
 let nativeCalls: CodexDraftOptions[] = [], forbiddenCalls = 0;
 let respond: (call: CodexDraftOptions) => Promise<string>;
 type ReviewBatchSchema = { properties: { reviews: { maxItems: number } } };
+const nativeReviewResponse = (reviews: unknown[]) => JSON.stringify({ contractVersion: LIGHTWEIGHT_PUBLICATION_DETAILED_CONTRACT, reviews });
 function load(relative: string, sourceOverride?: string) {
   const file = path.resolve(relative), nativeRequire = createRequire(file), exports: Record<string, unknown> = {};
   vm.runInNewContext(ts.transpileModule(sourceOverride || fs.readFileSync(file, "utf8"), { compilerOptions: {
@@ -53,7 +54,7 @@ const good = (index = 1) => ({ index, reason: "Distinct selected housing and cap
   optionConflictWitness: { origin: "none", quote: "", visibleAlternatives: [] }, photoClaimObjection: neutralClaim,
   referenceComparison: null, identityMatches: true, photoClaimMatches: true, notice: false, mixedOptions: false,
   explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true,
-  textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", accepted: true });
+  textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo" });
 
 async function main() {
   const photo = path.join(temporary, "photo.png"), source = path.join(temporary, "source.png");
@@ -66,7 +67,7 @@ async function main() {
       { kind: "paragraph", sectionId: "spec", text: "충전에는 4~5시간이 걸립니다." },
       ...Array.from({ length: count }, () => ({ kind: "image" as const, sectionId: "spec", assetPath: photo, role: "detail" as const,
         altText: "Selected device exterior", layout: "single" as const, sourcePolicy: "LOCKED_PRODUCT_OR_ORIGINAL" as const }))] } });
-  respond = async call => JSON.stringify({ reviews: Array.from({ length: (call.outputSchema as ReviewBatchSchema).properties.reviews.maxItems }, (_, index) => good(index + 1)) });
+  respond = async call => nativeReviewResponse(Array.from({ length: (call.outputSchema as ReviewBatchSchema).properties.reviews.maxItems }, (_, index) => good(index + 1)));
   const original = fileHash(photo), input = options(9);
   const first = await final(input);
   assert.equal(first.ok, true, JSON.stringify(first.failures));
@@ -127,6 +128,18 @@ async function main() {
   assert.equal(compatible.ok, true, JSON.stringify(compatible.failures)); assert.equal(compatible.receiptCompatibilityReused, true);
   assert.equal(nativeCalls.length, 0, "unchanged stronger native HMAC needs zero new native calls");
   assert.deepEqual(fs.readFileSync(historicalReceipt), historicalBytes, "compatibility never rewrites or re-signs historical proof");
+  for (const policy of COMPATIBLE_STRICT_PUBLICATION_POLICIES.slice(1)) {
+    const binding = brandPostApprovalBinding(manifest, sourceDir, policy);
+    writeSuccessfulImageAuditReceipt(historicalId, hash(`simulated completed historical request ${policy}`), binding);
+    const bytes = fs.readFileSync(historicalReceipt);
+    assert.equal(hasCurrentBrandPostApprovalReceipt(manifest, sourceDir), true, "unchanged completed 170 native success remains ready");
+    nativeCalls = [];
+    const result = await final(historicalAudit);
+    assert.equal(result.ok, true, JSON.stringify(result.failures));
+    assert.equal(result.receiptCompatibilityReused, true);
+    assert.equal(nativeCalls.length, 0, "normal signed 170 success must not consume a new review call after the contract update");
+    assert.deepEqual(fs.readFileSync(historicalReceipt), bytes);
+  }
   const galleryBatch = { ...historicalAudit, brandLinkId: undefined, compatibleReadinessBindingKeys: undefined, readinessBindingKey: undefined,
     composition: structuredClone(historicalAudit.composition) };
   const imageNode = galleryBatch.composition.renderNodes.find(node => node.kind === "image")!;
@@ -135,9 +148,9 @@ async function main() {
   respond = async call => {
     const line = call.userPrompt.split("\n").find(value => value.startsWith("Each attached image belongs ONLY"))!;
     const slots = JSON.parse(line.slice(line.indexOf("["))) as Array<{ referencePlaneMap: { primaryReferenceImageIndex: number; primaryReferenceSha256: string } }>;
-    return JSON.stringify({ reviews: slots.map((slot, index) => ({ ...good(index + 1), referenceComparison: {
+    return nativeReviewResponse(slots.map((slot, index) => ({ ...good(index + 1), referenceComparison: {
       primaryReferenceImageIndex: slot.referencePlaneMap.primaryReferenceImageIndex,
-      primaryReferenceSha256: slot.referencePlaneMap.primaryReferenceSha256, objectionKind: "none", observation: "The same selected visible product and option match" } })) });
+      primaryReferenceSha256: slot.referencePlaneMap.primaryReferenceSha256, objectionKind: "none", observation: "The same selected visible product and option match" } })));
   };
   nativeCalls = [];
   assert.equal((await final(galleryBatch)).ok, true);
@@ -148,16 +161,16 @@ async function main() {
     const comparison = { primaryReferenceImageIndex: 2, primaryReferenceSha256: fileHash(canonical), objectionKind: kind,
       observation: "An actual negative source/candidate observation remains unresolved or conflicting" };
     const contradictoryRow = { ...good(), referenceComparison: comparison };
-    const raw = JSON.stringify({ reviews: [contradictoryRow] });
+    const raw = nativeReviewResponse([contradictoryRow]);
     respond = async () => raw;
     const held = await final(mappedInput);
     assert.equal(held.ok, false);
     assert(held.failures.every(row => row.code === "INVALID_REVIEW"), "a raw reference objection cannot coexist with favorable identity/acceptance");
     assert.equal(held.lightweightReviews![0].rawResponse, raw, "negative comparison and true raw flags are retained without favorable rewriting");
-    respond = async () => JSON.stringify({ reviews: [{ ...contradictoryRow, identityMatches: false, accepted: false,
+    respond = async () => nativeReviewResponse([{ ...contradictoryRow, identityMatches: false,
       visibleIdentityEvidence: { basis: kind === "unresolved" ? "insufficient-visible-structure" : "concrete-conflict",
         landmarks: kind === "unresolved" ? [] : [{ part: "housing", referenceObservation: "selected round housing", candidateObservation: "different rectangular housing" }],
-        conflict: "Actual distinguishing structure is unresolved or visibly conflicting" } }] });
+        conflict: "Actual distinguishing structure is unresolved or visibly conflicting" } }]);
     const negative = await final(mappedInput);
     assert(negative.failures.some(row => row.code === "SEMANTIC_REJECTION"), "an honestly adverse identity remains a semantic rejection");
     assert(!negative.failures.some(row => row.code === "INVALID_REVIEW"));
@@ -167,7 +180,20 @@ async function main() {
   assert.notEqual(lightweightPublicationReferenceIssue(mappedNone, mappedContext, false), null, "adverse identity cannot claim no structured objection");
   assert.notEqual(lightweightPublicationReferenceIssue({ ...mappedNone, primaryReferenceSha256: mappedNone.primaryReferenceSha256.toUpperCase() }, mappedContext, true), null,
     "source SHA spelling/case is exact and never normalized into a favorable binding");
-  respond = async call => JSON.stringify({ reviews: Array.from({ length: (call.outputSchema as ReviewBatchSchema).properties.reviews.maxItems }, (_, index) => good(index + 1)) });
+  for (const evidence of [
+    { basis: "insufficient-visible-structure", landmarks: [], conflict: "" },
+    { basis: "concrete-conflict", landmarks: [], conflict: "A negative claim with no observed opposing landmark" },
+  ]) {
+    const raw = nativeReviewResponse([{ ...good(), identityMatches: false, visibleIdentityEvidence: evidence,
+      referenceComparison: { ...mappedNone, objectionKind: evidence.basis === "concrete-conflict" ? "concrete-conflict" : "unresolved" },
+      reason: "Actual negative prose remains preserved but its structured identity evidence is incomplete" }]);
+    respond = async () => raw;
+    const held = await final(mappedInput);
+    assert(held.failures.length > 0 && held.failures.every(row => row.code === "INVALID_REVIEW"),
+      "incomplete negative identity is HOLD only, never a semantic product blacklist");
+    assert.equal(held.lightweightReviews![0].rawResponse, raw);
+  }
+  respond = async call => nativeReviewResponse(Array.from({ length: (call.outputSchema as ReviewBatchSchema).properties.reviews.maxItems }, (_, index) => good(index + 1)));
   fs.appendFileSync(markdown, "changed");
   assert.equal(hasCurrentBrandPostApprovalReceipt(manifest, sourceDir), false, "changed saved manuscript breaks historical compatibility");
   fs.writeFileSync(markdown, "unchanged healthy manuscript");
@@ -179,28 +205,28 @@ async function main() {
   assert.equal(nativeCalls.length, 1);
 
   for (const patch of [
-    { accepted: false, identityMatches: false, reason: "Clearly wrong product housing" },
-    { accepted: false, identityMatches: false, reason: "Confirmed selected option is black; visible item is red" },
-    { accepted: false, identityMatches: false, reason: "Severely distorted cap and housing" },
-    { accepted: false, identityMatches: false, reason: "Large readable different identifying logo" },
-    { accepted: false, identityMatches: false, reason: "Visible distinguishing structure is genuinely unresolved" },
-    { accepted: false, noGraphicLayout: false, reason: "Graphic panel and border around reduced photograph" },
-    { accepted: false, textPolicyMatches: false, reason: "Added explanation burned into body image" },
+    { identityMatches: false, reason: "Clearly wrong product housing" },
+    { identityMatches: false, reason: "Confirmed selected option is black; visible item is red" },
+    { identityMatches: false, reason: "Severely distorted cap and housing" },
+    { identityMatches: false, reason: "Large readable different identifying logo" },
+    { identityMatches: false, reason: "Visible distinguishing structure is genuinely unresolved" },
+    { noGraphicLayout: false, reason: "Graphic panel and border around reduced photograph" },
+    { textPolicyMatches: false, reason: "Added explanation burned into body image" },
   ]) {
-    respond = async () => JSON.stringify({ reviews: [{ ...good(), ...patch,
+    respond = async () => nativeReviewResponse([{ ...good(), ...patch,
       ...(patch.identityMatches === false ? { visibleIdentityEvidence: { basis: "concrete-conflict", landmarks: [
-        { part: "housing", referenceObservation: "selected housing", candidateObservation: patch.reason }], conflict: patch.reason } } : {}) }] });
+        { part: "housing", referenceObservation: "selected housing", candidateObservation: patch.reason }], conflict: patch.reason } } : {}) }]);
     const rejected = await final(options());
     assert.equal(rejected.ok, false, patch.reason);
     assert(rejected.failures.some(row => row.code === "SEMANTIC_REJECTION"), "real defects reject semantically, without a microprint proof task");
   }
   const mixed = options(); mixed.selectedProduct = JSON.stringify({ optionResolution: { confirmedOptionLabel: "검정" }, selectedOption: { status: "confirmed", label: "검정" } });
-  respond = async () => JSON.stringify({ reviews: [{ ...good(), accepted: false, mixedOptions: true,
-    optionConflictWitness: { origin: "confirmed-selection", quote: "검정", visibleAlternatives: ["black", "red"] }, reason: "Conflicting selected variants are mixed" }] });
+  respond = async () => nativeReviewResponse([{ ...good(), mixedOptions: true,
+    optionConflictWitness: { origin: "confirmed-selection", quote: "검정", visibleAlternatives: ["black", "red"] }, reason: "Conflicting selected variants are mixed" }]);
   assert((await final(mixed)).failures.some(row => row.code === "SEMANTIC_REJECTION"));
   const proof = options(); (proof.composition.renderNodes[1] as { text: string }).text = "이 사진으로 충전 시간을 확인할 수 있습니다.";
-  respond = async () => JSON.stringify({ reviews: [{ ...good(), accepted: false, photoClaimMatches: false,
-    photoClaimObjection: { origin: "section-body", sourceIndex: 0, quote: "이 사진으로 충전 시간을 확인할 수 있습니다.", scope: "performance", conflict: "A still photo does not measure charging duration" } }] });
+  respond = async () => nativeReviewResponse([{ ...good(), photoClaimMatches: false,
+    photoClaimObjection: { origin: "section-body", sourceIndex: 0, quote: "이 사진으로 충전 시간을 확인할 수 있습니다.", scope: "performance", conflict: "A still photo does not measure charging duration" } }]);
   assert.equal((await final(proof)).ok, false);
   for (const answer of ["not-json", JSON.stringify({ reviews: [{ ...good(), accepted: "true" }] }),
     JSON.stringify({ reviews: [{ ...good(), identityMatches: false, accepted: true }] })]) {
@@ -208,10 +234,10 @@ async function main() {
     assert.equal((await final(options())).ok, false);
     assert.equal(nativeCalls.length, 1, "technical responses fail closed without extra native loops");
   }
-  respond = async () => JSON.stringify({ reviews: [{ ...good(), accepted: false }] });
+  respond = async () => nativeReviewResponse([{ ...good(), accepted: false }]);
   const inconsistent = await final(options());
   assert(inconsistent.failures.every(row => row.code === "INVALID_REVIEW"), "internally inconsistent final verdict never blacklists healthy pixels as an observed defect");
-  respond = async () => { fs.appendFileSync(photo, "changed"); return JSON.stringify({ reviews: [good()] }); };
+  respond = async () => { fs.appendFileSync(photo, "changed"); return nativeReviewResponse([good()]); };
   assert.equal((await final(options())).failures.some(row => row.code === "IMAGE_CHANGED"), true);
 
   // Main scene review has exactly one native call and no independent print task.

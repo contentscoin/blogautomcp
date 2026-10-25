@@ -58,11 +58,15 @@ export function planSellerSourceEvidenceImages(images: readonly SellerSourceEvid
   }).sort((left, right) => priority(left) - priority(right) || left.index - right.index).slice(0, limit);
 }
 
-/** At most two existing reader calls, with no duplicate attachment. This also
- * uses both chunks when the seller publishes ordinary/wide panels without tall
- * crops. The caller stops before the second chunk once evidence is sufficient. */
+/** At most two existing reader calls, with no duplicate attachment. Keep the
+ * prioritized detail panels first and cover the pool's tail in the second call:
+ * ordinary design samples must not starve later instructions and the original
+ * publication candidates, which the evidence planner places last. The caller
+ * stops before the second chunk once evidence is sufficient. */
 export function planSellerSourceReadingBatches(images: readonly string[], maximumPerBatch = 8): string[][] {
   const maximum = Math.max(1, Math.min(16, Math.floor(maximumPerBatch)));
-  const unique = [...new Set(images)].slice(0, maximum * 2);
-  return [unique.slice(0, maximum), unique.slice(maximum)].filter(batch => batch.length > 0);
+  const unique = [...new Set(images)];
+  const first = unique.slice(0, maximum);
+  const remaining = unique.slice(first.length);
+  return [first, remaining.slice(-maximum)].filter(batch => batch.length > 0);
 }

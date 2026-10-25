@@ -51,6 +51,43 @@ export function isAllowedProductPhotoUrl(raw: string): boolean {
   } catch { return false; }
 }
 
+/** Record an actual completed seller-image download, never adopt an arbitrary
+ * cached image from a claimed URL. The HTTP caller must invoke this only after
+ * its successful download and image decode. Retrieval is not pixel approval.
+ * Returns sidecars so temporary collectors can track their own cleanup. */
+export function recordDownloadedProductSourcePhoto(file: string, sourceUrl: string): string[] {
+  if (!isAllowedProductPhotoUrl(sourceUrl)) throw new Error("허용되지 않은 상품 사진 주소입니다.");
+  const stat = fs.lstatSync(file);
+  const real = path.resolve(fs.realpathSync(file)), resolved = path.resolve(file);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 1 || stat.size > MAX_IMAGE_BYTES ||
+      (process.platform === "win32" ? real.toLowerCase() !== resolved.toLowerCase() : real !== resolved))
+    throw new Error("PRODUCT_SOURCE_PROVENANCE_CONFLICT: 실제 다운로드 파일을 확인할 수 없습니다.");
+  const hash = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  const receiptPath = `${file}.retrieval.json`;
+  const receipt = JSON.stringify({ version: "product-image-retrieval/v1", sourceUrl, sha256: hash,
+    retrievedAt: new Date().toISOString(), identityVerified: false, rightsGranted: false });
+  try { fs.writeFileSync(receiptPath, receipt, { encoding: "utf8", flag: "wx" }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    let saved: Record<string, unknown>;
+    try {
+      const receiptStat = fs.lstatSync(receiptPath);
+      if (!receiptStat.isFile() || receiptStat.isSymbolicLink() || receiptStat.size > 32 * 1024) throw new Error("invalid receipt");
+      saved = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+    } catch { throw new Error("PRODUCT_SOURCE_PROVENANCE_CONFLICT: 기존 상품 사진 수집 기록을 보존했습니다. 기록을 덮어쓰지 않습니다."); }
+    if (saved.version !== "product-image-retrieval/v1" || saved.sourceUrl !== sourceUrl || saved.sha256 !== hash ||
+        typeof saved.retrievedAt !== "string" || !Number.isFinite(Date.parse(saved.retrievedAt)) || Date.parse(saved.retrievedAt) > Date.now() ||
+        saved.identityVerified === true || saved.rightsGranted === true)
+      throw new Error("PRODUCT_SOURCE_PROVENANCE_CONFLICT: 기존 상품 사진의 출처·픽셀 기록과 재수집 결과가 다릅니다. 기존 기록을 보존했습니다.");
+  }
+  const observationPath = `${file}.retrieval-observation.json`;
+  if (fs.existsSync(observationPath) && fs.lstatSync(observationPath).isSymbolicLink())
+    throw new Error("PRODUCT_SOURCE_PROVENANCE_CONFLICT: 기존 상품 사진 관찰 경로가 올바르지 않습니다.");
+  fs.writeFileSync(observationPath, JSON.stringify({ version: "product-image-retrieval-observation/v1", sourceUrl, sha256: hash,
+    receiptSha256: crypto.createHash("sha256").update(fs.readFileSync(receiptPath)).digest("hex"), observedAt: new Date().toISOString() }), "utf8");
+  return [receiptPath, observationPath];
+}
+
 /** This is source retrieval only. The returned pixels still require photo QC. */
 export async function downloadProductSourcePhoto(url: string, outputDir: string): Promise<string> {
   if (!isAllowedProductPhotoUrl(url)) throw new Error("허용되지 않은 상품 사진 주소입니다.");
@@ -89,28 +126,7 @@ export async function downloadProductSourcePhoto(url: string, outputDir: string)
     if ((error as NodeJS.ErrnoException).code !== "EEXIST" ||
         crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") !== hash) throw error;
   }
-  // Retrieval is not a rights grant or a model-identity approval. Keep its
-  // origin separately from the subsequent visual QC / locked-product receipt.
-  const receiptPath = `${file}.retrieval.json`;
-  const receipt = JSON.stringify({
-    version: "product-image-retrieval/v1", sourceUrl: url, sha256: hash,
-    retrievedAt: new Date().toISOString(), identityVerified: false, rightsGranted: false,
-  });
-  try { fs.writeFileSync(receiptPath, receipt, { encoding: "utf8", flag: "wx" }); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    let saved: Record<string, unknown>;
-    try { saved = JSON.parse(fs.readFileSync(receiptPath, "utf8")); }
-    catch { throw new Error("PRODUCT_SOURCE_PROVENANCE_CONFLICT: 기존 상품 사진 수집 기록을 보존했습니다. 기록을 덮어쓰지 않습니다."); }
-    if (saved.version !== "product-image-retrieval/v1" || saved.sourceUrl !== url || saved.sha256 !== hash ||
-        typeof saved.retrievedAt !== "string" || !Number.isFinite(Date.parse(saved.retrievedAt)) || Date.parse(saved.retrievedAt) > Date.now() ||
-        saved.identityVerified === true || saved.rightsGranted === true)
-      throw new Error("PRODUCT_SOURCE_PROVENANCE_CONFLICT: 기존 상품 사진의 출처·픽셀 기록과 재수집 결과가 다릅니다. 기존 기록을 보존했습니다.");
-  }
-  fs.writeFileSync(`${file}.retrieval-observation.json`, JSON.stringify({
-    version: "product-image-retrieval-observation/v1", sourceUrl: url, sha256: hash,
-    receiptSha256: crypto.createHash("sha256").update(fs.readFileSync(receiptPath)).digest("hex"), observedAt: new Date().toISOString(),
-  }), "utf8");
+  recordDownloadedProductSourcePhoto(file, url);
   return file;
 }
 

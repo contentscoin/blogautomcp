@@ -5,7 +5,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import http from "node:http";
 import sharp from "sharp";
-import { auditPublishImages as actualAuditPublishImages, assertPublishImagesSafe as actualAssertPublishImagesSafe, type PublishImageAuditOptions } from "./lib/publish-image-audit";
+import { auditPublishImages as actualAuditPublishImages, assertPublishImagesSafe as actualAssertPublishImagesSafe, buildSelectedProductImageAuditContext, type PublishImageAuditOptions } from "./lib/publish-image-audit";
 import { withReferencePlaneFixture } from "./test-fixtures/reference-plane-review";
 import { findingKey, readPhotoDescriptionFindings, locatePhotoDescriptionSentence } from "./lib/photo-description-finding";
 import { planPhotoDescriptionRepair, serverPhotoDescriptionFindings } from "../src/lib/brand-post-photo-description-repair";
@@ -272,7 +272,12 @@ async function main() {
     for (const patch of [{ identityMatches: false }, { notice: true }, { mixedOptions: true },
       { singlePhotograph: false }, { noGraphicLayout: false }, { textPolicyMatches: false }]) {
       const audit = await auditPublishImages({ ...moodInput, brandLinkId: undefined,
-        review: async () => JSON.stringify({ reviews: [{ ...moodVerdict, ...patch }] }) });
+        ...("mixedOptions" in patch ? { selectedProduct: buildSelectedProductImageAuditContext("원목 식물 LED 무드등", ["색상: 밝은 원목"]) } : {}),
+        review: async () => JSON.stringify({ reviews: [{ ...moodVerdict, ...patch,
+          ...("identityMatches" in patch ? { visibleIdentityEvidence: { basis: "concrete-conflict", landmarks: [
+            { part: "frame", referenceObservation: "selected light wood frame", candidateObservation: "different dark frame" }], conflict: "Actually opposing selected frame appearance" } } : {}),
+          ...("mixedOptions" in patch ? { optionConflictWitness: { origin: "confirmed-selection", quote: "밝은 원목", visibleAlternatives: ["밝은 원목", "검정 프레임"] } } : {}),
+        }] }) });
       assert(audit.failures.some(failure => failure.code === "SEMANTIC_REJECTION"));
       assert(audit.failures.every(failure => !failure.photoClaimMismatchOnly && !failure.photoDescription),
         "a concurrent product/option/format defect never becomes text-only repair authority");

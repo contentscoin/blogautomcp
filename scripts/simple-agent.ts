@@ -211,6 +211,7 @@ import { HUMANIZE_RULES, scanAiTells } from "./lib/humanize-korean";
 import { buildHumanizeSectionsPrompt, parseHumanizeSections } from "./lib/humanize-response-contract";
 import { createLockedProductThumbnailOnBackground, createOriginalProductPhotoThumbnail, type ShoppingThumbnailStyle } from "./lib/product-image-lock";
 import { copyProductPhotoSource, readProductPhotoSource } from "./lib/product-photo-provenance";
+import { isAllowedProductPhotoUrl, recordDownloadedProductSourcePhoto } from "./lib/product-photo-source";
 import { codexDraftTerminalFailureCode, runCodexDraft } from "./lib/codex-draft-provider";
 import { CODEX_TEXT_MODEL, TEXT_REASONING_EFFORT } from "./lib/text-model-policy";
 import { deduplicateImagePaths } from "./lib/image-dedup";
@@ -4016,6 +4017,7 @@ interface MaterializedProductSourceImages {
   sellerImagePaths: string[];
   sellerEvidenceImages: SellerSourceEvidenceImage[];
   sellerEvidenceOnlyImagePaths: string[];
+  sourceImageUrls: string[];
 }
 
 async function materializeProductImages(
@@ -4040,6 +4042,7 @@ async function materializeProductImages(
   const evidenceImages: SellerSourceEvidenceImage[] = [];
   const evidenceOnlyPaths = new Set<string>();
   const inspectionCount = Math.min(candidateLimit, prioritizedUrls.length);
+  const downloadedSourceUrls = new Map<string, string>();
   let representativeImagePath: string | null = null;
   let regularImageCount = 0;
   let detailSegmentCount = 0;
@@ -4048,9 +4051,13 @@ async function materializeProductImages(
     const imgPath = path.join(TEMP_PATH, `${filePrefix}_${Date.now()}_${i}.jpg`);
     try {
       publishImageCleanup.track([imgPath]);
-      await downloadImage(prioritizedUrls[i], imgPath);
+      const retrievedUrl = await downloadImage(prioritizedUrls[i], imgPath);
       const stats = fs.statSync(imgPath);
       const metadata = await sharp(imgPath).metadata();
+      if (retainSellerEvidence && stats.size <= 24 * 1024 * 1024 && isAllowedProductPhotoUrl(retrievedUrl)) {
+        publishImageCleanup.track(recordDownloadedProductSourcePhoto(imgPath, retrievedUrl));
+      }
+      downloadedSourceUrls.set(prioritizedUrls[i], retrievedUrl);
       const width = metadata.width ?? 0;
       const height = metadata.height ?? 0;
       const evidenceImage: SellerSourceEvidenceImage = {
@@ -4192,6 +4199,7 @@ async function materializeProductImages(
     ].map((item) => item.path),
     sellerEvidenceImages: planSellerSourceEvidenceImages(evidenceImages),
     sellerEvidenceOnlyImagePaths: [...evidenceOnlyPaths],
+    sourceImageUrls: [...new Set(imageUrls.map(url => downloadedSourceUrls.get(url) || url))],
   };
 }
 
@@ -4221,7 +4229,7 @@ async function buildProductInfoFromStoredBrandLink(
           connectKind === "TRAVEL" ? TRAVEL_BODY_IMAGE_MAX : SHOPPING_BODY_IMAGE_MAX,
           connectKind === "SHOPPING",
         )
-      : { representativeImagePath: null, imagePaths: [], detailImagePaths: [], sellerDetailImagePaths: [], sellerImagePaths: [], sellerEvidenceImages: [], sellerEvidenceOnlyImagePaths: [] };
+      : { representativeImagePath: null, imagePaths: [], detailImagePaths: [], sellerDetailImagePaths: [], sellerImagePaths: [], sellerEvidenceImages: [], sellerEvidenceOnlyImagePaths: [], sourceImageUrls: imageUrls };
 
   try {
     if (connectKind === "SHOPPING" && enrichSource) {
@@ -4245,7 +4253,7 @@ async function buildProductInfoFromStoredBrandLink(
     representativeImagePath: materializedImages.representativeImagePath,
     imagePaths: materializedImages.imagePaths,
     detailImagePaths: materializedImages.detailImagePaths,
-    sourceImageUrls: preserveSellerDetailSourceUrls(imageUrls),
+    sourceImageUrls: preserveSellerDetailSourceUrls(materializedImages.sourceImageUrls),
     finalUrl: link.finalUrl || link.url,
     storeName: isolateSellerEvidenceText(link.storeName, 200),
     travelPageResearch,
@@ -4714,7 +4722,7 @@ async function step1_getProductInfo(
     console.log(`   🖼️ 썸네일 원본 적합: ${isPreferredThumbnailImageUrl(imageUrls[0]) ? "예" : "아니오"}`);
   }
   const { representativeImagePath, imagePaths, detailImagePaths, sellerDetailImagePaths, sellerImagePaths,
-    sellerEvidenceImages, sellerEvidenceOnlyImagePaths } = await materializeProductImages(
+    sellerEvidenceImages, sellerEvidenceOnlyImagePaths, sourceImageUrls: retrievedSourceImageUrls } = await materializeProductImages(
     // Preserve gallery/thumbnail order; append newly retained detail evidence.
     [...new Set([...imageUrls, ...evidenceSourceImageUrls])],
     "product",
@@ -4776,7 +4784,7 @@ async function step1_getProductInfo(
     representativeImagePath,
     imagePaths,
     detailImagePaths,
-    sourceImageUrls: evidenceSourceImageUrls,
+    sourceImageUrls: preserveSellerDetailSourceUrls(retrievedSourceImageUrls),
     finalUrl,
     storeName,
     travelPageResearch,
@@ -4784,7 +4792,7 @@ async function step1_getProductInfo(
 }
 
 // 이미지 다운로드 함수
-async function downloadImage(url: string, filePath: string): Promise<void> {
+async function downloadImage(url: string, filePath: string): Promise<string> {
   const https = await import('https');
   const http = await import('http');
 
@@ -4816,7 +4824,7 @@ async function downloadImage(url: string, filePath: string): Promise<void> {
 
       const file = fs.createWriteStream(filePath);
       response.pipe(file);
-      file.on('finish', () => { file.close(); resolve(); });
+      file.on('finish', () => { file.close(); resolve(url); });
       file.on('error', (err: Error) => {
         publishImageCleanup.cleanup([filePath]);
         reject(err);
@@ -10047,12 +10055,13 @@ function classifyFailureCode(error: unknown): string {
       messages.push(current);
     }
   }
-  const explicitCode = codes.find((code) => /^(?:SOURCE_EVIDENCE_REQUIRED|SOURCE_REVIEW_INCOMPLETE|IMAGE_SOURCE_BINDING_REQUIRED|PREWRITING_PHOTO_CHANGED|PREWRITING_SOURCE_CHANGED|QUALITY_REPAIR_EXHAUSTED|QUALITY_REPAIR_REJECTED|DRAFT_REVISION_FORMAT_INVALID|REVISION_RENDER_SCOPE_AMBIGUOUS|CHATGPT_BROWSER_UNREACHABLE|DRAFT_SECTION_COUNT_OUT_OF_RANGE|DRAFT_RECHECK_REQUIRED)$/u.test(code));
+  const explicitCode = codes.find((code) => /^(?:SOURCE_EVIDENCE_REQUIRED|SOURCE_REVIEW_INCOMPLETE|IMAGE_SOURCE_BINDING_REQUIRED|PREWRITING_PHOTO_CHANGED|PREWRITING_SOURCE_CHANGED|QUALITY_REPAIR_EXHAUSTED|QUALITY_REPAIR_REJECTED|DRAFT_REVISION_FORMAT_INVALID|REVISION_RENDER_SCOPE_AMBIGUOUS|CHATGPT_BROWSER_UNREACHABLE|DRAFT_SECTION_COUNT_OUT_OF_RANGE|DRAFT_RECHECK_REQUIRED|PUBLISH_IMAGE_AUDIT_FAILED)$/u.test(code));
   if (explicitCode === "QUALITY_REPAIR_REJECTED") return "QUALITY_REPAIR_EXHAUSTED";
   if (explicitCode) return explicitCode;
   const message = messages.join(" ") || getErrorMessage(error);
   const embeddedProviderCode = message.match(/\b(CODEX_(?:AUTH_REQUIRED|MODEL_INCOMPATIBLE|TIMEOUT|TRANSIENT_FAILURE))\b/u)?.[1];
   if (embeddedProviderCode) return embeddedProviderCode;
+  if (/\bPUBLISH_IMAGE_AUDIT_FAILED:/u.test(message)) return "PUBLISH_IMAGE_AUDIT_FAILED";
   const prewritingCode = message.match(/\b(SOURCE_REVIEW_INCOMPLETE|IMAGE_SOURCE_BINDING_REQUIRED|PREWRITING_PHOTO_CHANGED|PREWRITING_SOURCE_CHANGED):/u)?.[1];
   if (prewritingCode) return prewritingCode;
   const revisionCode = message.match(/\b(DRAFT_REVISION_FORMAT_INVALID|REVISION_RENDER_SCOPE_AMBIGUOUS):/u)?.[1];
@@ -10934,7 +10943,11 @@ async function main() {
         sectionPlan: assembled?.sectionPlan ?? null,
       }));
     post.composition = composition;
-    if (runtimeConnectKind === "SHOPPING") {
+    // Preparation persists the unapproved manuscript and source-bound assets
+    // first. Its parent workflow audits the complete saved package before
+    // approval; transient thumbnail-only input has neither that gallery nor
+    // the eventual body photos. Publication still audits its frozen package.
+    if (runtimeConnectKind === "SHOPPING" && !prepareOutputDir) {
       setStage("STEP2.6 최종 이미지 검증");
       // 썸네일 한 장만 거절되면(옵션 격자·식별 불가 원본 등) 원고를 버리지 않고 다음 검증 원본으로 썸네일을 다시 만든다.
       const rejectedThumbnailSources = new Set<string>();
@@ -11114,7 +11127,7 @@ async function main() {
       console.log(`   🧾 생성 결과 저장: ${previewPath}`);
     }
 
-    if (DRY_RUN_GENERATE_ONLY) {
+    if (prepareOutputDir || DRY_RUN_GENERATE_ONLY) {
       console.log("\n🧪 DRY RUN 모드로 글 생성까지만 실행하고 종료합니다.");
       await prisma.brandLink.update({
         where: { id: linkId },

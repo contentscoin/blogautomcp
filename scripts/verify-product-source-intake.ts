@@ -13,6 +13,7 @@ import { buildProductReviewAnalysis, hasSufficientProductReviewEvidence, isMeani
 import { extractExplicitProductFacts, normalizeTypedProductFact } from "./lib/product-source-facts";
 import { mergeProductInfo, type MergeableProductInfo } from "./lib/product-info-merge";
 import { createPublishImageCleanup } from "./lib/publish-image-cleanup";
+import { isAllowedProductPhotoUrl, recordDownloadedProductSourcePhoto } from "./lib/product-photo-source";
 
 interface MaterializedSourceImages {
   representativeImagePath: string | null;
@@ -107,10 +108,12 @@ export async function verifyProductSourceIntake(): Promise<void> {
     const materialize = isolatedIntakeFunction(agent, "function isTallDetailImageDimension(", "async function buildProductInfoFromStoredBrandLink(",
       "materializeProductImages", {
         ...imageSelection, ...sourceIntake, fs, path, sharp, TEMP_PATH: cleanup.tempPath, publishImageCleanup: cleanup,
+        isAllowedProductPhotoUrl, recordDownloadedProductSourcePhoto,
         SHOPPING_BODY_IMAGE_MAX: 5,
         downloadImage: async (url: string, file: string) => {
           const index = urls.indexOf(url);
           fs.copyFileSync(index === 15 ? tiny : index === 16 ? narrow : index === 17 || index === 18 ? wide : square, file);
+          return url;
         },
         createProductDetailImageSegments: async () => [],
       }) as (urls: string[], prefix: string, maximum: number, retainEvidence: boolean) => Promise<MaterializedSourceImages>;
