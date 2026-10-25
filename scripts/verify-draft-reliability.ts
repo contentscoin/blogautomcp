@@ -27,8 +27,11 @@ import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
 import { createWritingPromptContract, formatWritingPromptContract, getWritingOutputExample } from "./lib/writing-prompt-contract";
+import { verifyProductSourceIntake } from "./verify-product-source-intake";
+import "./verify-section-normalization";
 
 async function main() {
+  await verifyProductSourceIntake();
   // 1. Structure: object sections, merged sections, and the output example.
   assert.equal(sectionEntryToString({ title: "흡입력", body: "18,000Pa 흡입력이에요.\n덕분에 카펫도 편해요." }), "흡입력\n\n18,000Pa 흡입력이에요.\n덕분에 카펫도 편해요.");
   assert.equal(sectionEntryToString({ heading: "무게", paragraphs: ["1.2kg이에요.", "손목 부담이 적어요."] }), "무게\n\n1.2kg이에요.\n\n손목 부담이 적어요.");
@@ -42,7 +45,11 @@ async function main() {
   assert.match(formatWritingPromptContract(contract), /sections는 7~11개이며 섹션마다 원소 하나\("소제목\\n\\n본문"\)/u);
   const agent = fs.readFileSync("scripts/simple-agent.ts", "utf8");
   assert.match(agent, /const variants = \[\s*candidate,/u, "raw JSON is parsed before curly-quote rewriting");
-  assert.match(agent, /DRAFT_OUTPUT_SCHEMA,\s*\);/u, "the draft call requests structured output");
+  const preflightWriter = agent.slice(agent.indexOf("async function step2_generatePostAfterPreflight("));
+  assert.equal([...preflightWriter.matchAll(/DRAFT_OUTPUT_SCHEMA,\s*product\.prewritingPhotoProof,\s*\);/gu)].length, 1,
+    "the first draft call keeps its strict schema and the inspected original-photo proof");
+  assert.match(preflightWriter, /DRAFT_OUTPUT_SCHEMA,\s*product\.prewritingPhotoProof,\s*\)\.catch/u,
+    "format retries keep the same strict schema and original-photo proof");
   assert.match(agent, /같은 지시로 1회 재작성/u, "a format-only miss gets one retry instead of failing the item");
 
   // 2. Product evidence: the prompt and the grader share the same facts and counts; repair notes name missing facts.
@@ -66,7 +73,7 @@ async function main() {
   assert.match(agent, /\[필수 상품 근거 · 원고 품질검사가 그대로 확인함\]/u, "first-draft prompt lists the graded facts");
 
   // 3. Visual audit: tolerant parsing, strict on missing fields; malformed proposals are dropped, not fatal.
-  const ok = { singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, accepted: true, identityMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, reviewClass: "product-photo", reason: "보풀제거기 본체가 보임" };
+  const ok = { singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, accepted: true, identityMatches: true, photoClaimMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false, reviewClass: "product-photo", reason: "보풀제거기 본체가 보임" };
   assert.ok(parseVisualReviews(`검토 결과입니다.\n{"reviews":[${JSON.stringify({ ...ok, index: "1" })}]}\n끝`, 1)[0], "prose around JSON and string index are accepted");
   assert.ok(parseVisualReviews(JSON.stringify({ reviews: [{ ...ok, index: 1, notice: "false" }] }), 1)[0]);
   assert.equal(parseVisualReviews(JSON.stringify({ reviews: [{ ...ok, index: 1, notice: undefined }] }), 1)[0], null, "missing safety fields are never guessed");
@@ -87,7 +94,14 @@ async function main() {
   assert.deepEqual(rejected, ["a"]);
   assert.deepEqual(accepted.map((row) => row.sourceSha256), ["b"], "a malformed verdict drops only that proposal");
   const auditSource = fs.readFileSync("scripts/lib/publish-image-audit.ts", "utf8");
-  assert.match(auditSource, /outputSchema: VISUAL_REVIEW_SCHEMA/u);
+  // Exact schema behavior, including rejecting reference rows, is exercised by
+  // verify-publish-image-audit-references.ts; this guard keeps the base contract
+  // and the final-slot bounds wired into the provider call.
+  assert.match(auditSource, /outputSchema:\s*\{\s*\.\.\.VISUAL_REVIEW_SCHEMA/u);
+  assert.match(auditSource, /minItems:\s*batch\.length,\s*maxItems:\s*batch\.length/u,
+    "only final publication slots receive verdicts, excluding attached comparison references");
+  assert.match(auditSource, /index:\s*\{\s*type:\s*"integer",\s*enum:\s*batch\.map\(\(_, index\) => index \+ 1\)/u,
+    "output indices are restricted to the current final publication batch");
   assert.match(auditSource, /형식이 깨진 판정만 한 번 더 묻는다/u);
 
   // 4. Internal guidance sentences are removed deterministically; headings and other sentences stay.
@@ -259,6 +273,33 @@ async function main() {
   assert.ok(productSignalCoveredBySentence(golf[1]!, "내장 배터리라 건전지가 필요 없어요."), "spacing ignored");
   assert.ok(productSignalCoveredBySentence(golf[4]!, "오차 범위는 ±3m예요."));
   assert.ok(!productSignalCoveredBySentence(golf[3]!, "무게가 30g대라 가벼워요."), "a different number is not the fact");
+  // A stopword inside a substantive compound is not a standalone metadata word.
+  for (const sentence of ["디지털방식으로 작동하고", "방식이 디지털방식이며", "디지털방식으로 작동하며"])
+    assert.ok(productSignalCoveredBySentence("방식: 디지털방식", sentence), "the actual digital-method source must remain coverable");
+  assert.ok(productSignalCoveredBySentence("방식: 반사방식", "반사방식을 확인하세요."));
+  assert.ok(productSignalCoveredBySentence("구조: 렌즈구조", "렌즈구조를 살펴보세요."));
+  assert.ok(!productSignalCoveredBySentence("방식: 디지털방식", "광학방식으로 작동합니다."), "a different mode must not cover the selected fact");
+  for (const token of ["상품", "제품", "기능", "표기", "판매페이지", "카테고리", "방식", "구조", "기준"])
+    assert.ok(!productSignalCoveredBySentence(`항목: ${token}`, `${token}을 살펴보세요.`), "standalone metadata remains insufficient");
+  assert.ok(productSignalCoveredBySentence("강약조절: 2단계", "강약을 2단계로 조절해요."));
+  assert.ok(!productSignalCoveredBySentence("강약조절: 2단계", "강약을 3단계로 조절해요."), "a wrong quantity must not cover the source");
+  const digitalSource = { productName: "휴대용 디지털 현미경", sourceDescription: "",
+    sourceFeatures: ["방식: 디지털방식", "기능: 동영상촬영, 사진촬영, 모니터연결, 휴대용, LED램프, 충전식"] };
+  const digitalRequirement = productEvidenceRequirement(digitalSource);
+  const digitalSections = [
+    "작동 방식\n\n디지털방식으로 작동하고 모니터연결 기능이 있어 화면으로 관찰하려는 분에게 맞는 구조예요.",
+    "촬영을 남길 때\n\n동영상촬영과 사진촬영을 지원하므로 관찰 내용을 기록하려는 분에게 선택 이유가 있어요.",
+    "이동과 보관\n\n휴대형 설계여서 다른 책상으로 옮겨 쓰려는 사용자에게 잘 맞아요.",
+  ];
+  const digitalSubstance = assessProductReviewSubstance({ ...digitalSource, sections: digitalSections });
+  assert.equal(digitalRequirement.requiredSignalCount, 3, "the original three-fact requirement is unchanged");
+  assert.equal(digitalSubstance.coveredSignals.length, 3);
+  assert.ok(!digitalSubstance.missingSignals.includes("방식: 디지털방식"), "the actual grounded method is not a perpetually unrepairable missing signal");
+  const opticalMismatch = assessProductReviewSubstance({ ...digitalSource,
+    sections: digitalSections.map(text => text.replace("디지털방식으로", "광학방식으로")) });
+  assert.equal(opticalMismatch.requiredSignalCount, digitalSubstance.requiredSignalCount);
+  assert.equal(opticalMismatch.coveredSignals.length, 2);
+  assert.ok(opticalMismatch.missingSignals.includes("방식: 디지털방식"), "a conflicting method cannot satisfy the same unchanged requirement");
   const golfReview = assessProductReviewSubstance({ productName: "보이스캐디 T13 PRO", sourceDescription: "시계형 골프거리측정기", sourceFeatures: golf, sections: [
     "가벼운 착용감\n\n무게가 30.1g이에요. 덕분에 18홀 내내 손목 부담이 적어 편해요.\n내장 배터리 방식이에요. 그래서 라운드 전 충전만 해 두면 편해요.",
     "거리 정확도\n\n오차 범위는 ±3m예요. 그래서 그린 공략 거리 판단에 실용적이에요.",
@@ -481,7 +522,7 @@ async function main() {
       const action = (body as { action?: string })?.action || method; actions.push(action);
       if (action === "recheck" && options.raceOnce && !raced) {
         raced = true;
-        throw Object.assign(new Error("상품 상태가 변경되었습니다."), { code: "ALREADY_PUBLISHING" });
+        throw Object.assign(new Error("상품 상태가 변경되었습니다."), { code: "ALREADY_PUBLISHING", httpStatus: 409 });
       }
       if (action === "approve") {
         approvals += 1;
@@ -498,7 +539,7 @@ async function main() {
         if (action === "replan_sources") { missing = false; return { success: true, recovery: { changed: true }, remainingMissing: 0 }; }
         missing = false;
       }
-      return { success: true, data: { approvedAt: accepted ? "yes" : null, approval: { canApprove: !missing },
+      return { success: true, data: { status: "READY", imageGeneration: { status: "complete" }, approvedAt: accepted ? "yes" : null, approval: { canApprove: !missing },
         imageSlots: [{ missing: missing ? 1 : 0, generationMissing: 0 }], contentQuality: { signals: [] } } };
     };
     await runMaterialPreparation(`drop-${options.replacementFails}-${options.raceOnce}`, { call, pause: async () => {} });

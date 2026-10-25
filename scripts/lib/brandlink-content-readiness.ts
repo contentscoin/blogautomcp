@@ -9,6 +9,7 @@ import {
   type TravelSourceCoverage,
 } from "./travel-content";
 import { assessGenericLanguage, assessRepetition, sentenceTokens } from "./draft-quality-signals";
+import { buildTitleKeywordBrief, titleIdentityTokens } from "./title-keyword-brief";
 import type {
   BrandConnectKind,
   PostExperienceMode,
@@ -670,8 +671,13 @@ export function getBrandLinkContentReadiness(
   const productTokens = getProductTokens(input.productName);
   const coveredProductTokens = productTokens.filter((token) => containsProductToken(corpus, token));
   const missingProductTokens = productTokens.filter((token) => !coveredProductTokens.includes(token));
-  const titleHasProductToken =
-    productTokens.length === 0 || productTokens.some((token) => containsProductToken(titleCorpus, token));
+  // Title identity must not inherit the first six seller promotion/rating tokens.
+  // Keep legacy body/token coverage unchanged; only the title uses the shared source identity.
+  const titleBrief = buildTitleKeywordBrief({ kind: connectKind, productName: input.productName,
+    sourceDescription: input.sourceDescription, sourceFeatures: input.sourceFeatures });
+  const titleIdentity = isTravel ? [titleBrief.destination || ""]
+    : [titleBrief.categorySeed, ...titleIdentityTokens(titleBrief.cleanIdentity)];
+  const titleHasProductToken = titleIdentity.some((token) => token && containsProductToken(titleCorpus, token));
   const bodyHasProductToken =
     productTokens.length === 0 || productTokens.some((token) => containsProductToken(bodyCorpus, token));
   const totalLength = sections.reduce((sum, section) => sum + normalizeText(section).length, 0);

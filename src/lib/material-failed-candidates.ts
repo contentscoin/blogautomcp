@@ -74,10 +74,10 @@ export function selectFailedMaterialCandidates(products: FailedMaterialProduct[]
   });
 }
 
-export async function listFailedMaterialCandidates(connectKind?: MaterialConnectKind, excludeJobId?: string): Promise<FailedMaterialCandidate[]> {
+export async function listFailedMaterialCandidates(connectKind?: MaterialConnectKind, excludeJobId?: string, material = getMaterial): Promise<FailedMaterialCandidate[]> {
   const products = await prisma.brandLink.findMany({ orderBy: { createdAt: "desc" },
     ...(connectKind ? { where: { connectKind } } : {}),
     select: { id: true, productName: true, status: true, connectKind: true, postUrl: true, publishedAt: true, scheduledPublishAt: true, errorMessage: true },
   });
-  return selectFailedMaterialCandidates(products, listMaterialJobs().filter(job => job.jobId !== excludeJobId), { material: getMaterial, progress: readDraftProgress }, connectKind);
+  return selectFailedMaterialCandidates(products, listMaterialJobs().filter(job => job.jobId !== excludeJobId), { material, progress: readDraftProgress }, connectKind);
 }

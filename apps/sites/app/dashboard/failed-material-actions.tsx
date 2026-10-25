@@ -146,7 +146,8 @@ export function FailedMaterialActions({ accountId, online, appVersion, hasConnec
     </div>
     {blocked && <p className="inline-message">{blocked} <button type="button" className="muted-button" disabled={busy} onClick={() => window.location.reload()}>연결 상태 새로고침</button></p>}
     {job && <div className="material-recovery-status" aria-live="polite">
-      <strong>{pending ? `${job.stageMessage || 'PC에서 처리 중'} · ${job.progress || 0}%` : job.executionNotAdmitted ? 'PC에 전달되기 전에 취소됐습니다. 새 복구 작업을 시작할 수 있습니다.' : completed ? `검증 결과: 준비 완료 ${job.readyCount || 0}개 · 실패 ${job.failedCount || 0}개 · 중단 ${job.interruptedCount || 0}개` : job.status === 'SUCCEEDED' ? '재작성 접수 완료 · 최종 검증 결과 확인 필요' : `${job.status}: ${job.errorMessage || job.errorCode || '작업 상세를 확인하세요.'}`}</strong>
+      <strong>{pending ? `${job.stageMessage || 'PC에서 처리 중'} · ${job.progress || 0}%` : job.executionNotAdmitted ? 'PC에 전달되기 전에 취소됐습니다. 새 복구 작업을 시작할 수 있습니다.' : completed ? `검증 결과: 준비 완료 ${job.readyCount || 0}개 · 실패 ${job.failedCount || 0}개 · 중단 ${job.interruptedCount || 0}개` : job.status === 'SUCCEEDED' ? '재작성 접수 완료 · 최종 검증 결과 확인 필요' : `${job.status} · 실패 상세를 확인하세요.`}</strong>
+      {(job.errorMessage || job.errorCode) && <details><summary className="muted-button">실패 상세 보기</summary><p className="inline-message" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{job.errorCode}{job.errorCode && job.errorMessage ? ': ' : ''}{job.errorMessage}</p></details>}
       {(job.workflowPending || saved?.readRequestUnconfirmed) && <button type="button" className="muted-button" disabled={busy || pending} onClick={readWorkflow}>{busy ? '조회 접수 중…' : '최종 소재 결과 조회'}</button>}
       <small>작업번호: {rewriteJobId}{job.workflowJobId ? ` · 소재 작업: ${job.workflowJobId}` : ''}</small>
     </div>}

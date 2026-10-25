@@ -6,6 +6,7 @@ import ts from "typescript";
 import { buildProductReviewAnalysis, isMeaningfulProductEvidenceFeature, hasSufficientProductReviewEvidence } from "./lib/product-editorial-plan";
 import { extractExplicitProductFacts, normalizeTypedProductFact } from "./lib/product-source-facts";
 import { confidentOcrLines, readSellerDetailOcrFacts, productOcrCandidates } from "./lib/product-source-ocr";
+import { isProductTitleEcho } from "./lib/product-source-intake";
 
 const names = [
   "집에서먹자 곱이고운 소곱창 160g 막창 대창 특양 캠핑 초벌 술안주 통대창",
@@ -23,6 +24,36 @@ const applianceNames = [
 const aveenoName = "향좋은 아비노 고보습 민감피부 저자극 바디워시 스트레스릴리프(라벤더향), 532ml, 2개";
 const dalbaName = "[쿨톤 아이돌 PICK!][1+1] 달바 비건 워터풀 퍼플 톤업 선크림 50mlX2개";
 const grade = (productName: string, features: string[], description = "") => buildProductReviewAnalysis({ productName, features, description, targetSectionCount: 8 });
+// Seller-owned standard attributes were collected correctly but all five labels
+// were dropped before grading. These fixture values are independent of a SKU.
+const massageRows = ["전원방식: 충전식", "안마부위: 어깨, 목", "안마방식: 주무름, 두드림",
+  "부가기능: 온열기능", "강약조절: 2단계"];
+const massageFacts = massageRows.map(normalizeTypedProductFact).filter(Boolean);
+assert.deepEqual(massageFacts, ["전원방식: 충전식", "사용부위: 어깨, 목", "안마방식: 주무름, 두드림",
+  "기능: 온열기능", "강약조절: 2단계"], "all five verified seller attributes must survive normalization without invented facts");
+assert.notEqual(grade("목 어깨 마사지기", massageFacts).evidenceLevel, "sparse");
+assert.equal(grade("목 어깨 마사지기", ["원산지: 중국산"]).evidenceLevel, "sparse", "origin still cannot substitute for appliance functionality");
+for (const rejected of ["전원방식: 상세페이지 참조", "안마부위: 판매자 문의", "안마방식: 쿠폰 50%",
+  "부가기능: 온열기능 미지원", "부가기능: 온열 기능 없음", "강약조절: 다른 옵션 3단계",
+  "전원방식: 타 모델만 충전식", "부가기능: 옵션 선택 시 온열기능", "안마방식: 목디스크 치료",
+  "부가기능: 완치 효과", "부가기능: 통증 완화", "강약조절: 2단계인지 확인 불가",
+  "전원방식: 색상별 충전식", "강약조절: 구성별 3단계", "부가기능: 통증 제거", "안마방식: 면역력 향상",
+  "전원방식: 화이트는 충전식", "안마부위: 질병 부위", "부가기능: 피로회복", "부가기능: 혈행 증진",
+  "부가기능: 온열기능, 통증 제거", "강약조절: 0단계", "강약조절: 100단계", "강약조절: 2단계/3단계"]) {
+  assert.equal(normalizeTypedProductFact(rejected), "", rejected);
+  assert.deepEqual(extractExplicitProductFacts(rejected, "description"), [], `unsafe standard rows cannot be extracted as positive source facts: ${rejected}`);
+  assert.equal(isMeaningfulProductEvidenceFeature(rejected), false, `rejected attributes cannot return through a raw-feature fallback: ${rejected}`);
+  assert.equal(grade("목 어깨 마사지기", [rejected]).evidenceLevel, "sparse", rejected);
+}
+assert.equal(normalizeTypedProductFact("임의라벨: 충전식"), "", "unknown labels are still not accepted");
+for (const unknown of ["__proto__: 충전식", "constructor: 충전식", "toString: 온열기능"])
+  assert.equal(normalizeTypedProductFact(unknown), "", "inherited object properties are not registered seller labels");
+assert.equal(normalizeTypedProductFact("강약조절: 3단계"), "강약조절: 3단계", "normalization must preserve the supplied number, not substitute the fixture's two levels");
+for (const [input, expected] of [
+  ["전원방식: 전기식(유선)", "전원방식: 전기식(유선)"],
+  ["안마방식: 주무름 / 두드림", "안마방식: 주무름 / 두드림"],
+  ["부가기능: 온열 기능, 타이머", "기능: 온열 기능, 타이머"],
+]) assert.equal(normalizeTypedProductFact(input), expected, "only known observable standard-attribute values pass; supplied wording is preserved");
 // Exact seller-owned product-info rows observed on dalba/products/9770696257.
 const dalbaRows = ["원산지: 국산", "사용부위: 페이스용", "피부타입: 모든피부용",
   "종류: 혼합자차(유기+무기)", "자외선차단지수: SPF50+ PA++++",
@@ -193,6 +224,7 @@ const selected = ast.statements.filter(node => ts.isFunctionDeclaration(node) &&
 const transpile = (code: string) => ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
 let ocrCalls = 0;
 const context = vm.createContext({ normalizeTypedProductFact, extractExplicitProductFacts, isMeaningfulProductEvidenceFeature, hasSufficientProductReviewEvidence,
+  isProductTitleEcho, DETAIL_VISION_READ_ENABLED: false,
   getErrorMessage: (error: Error) => error.message, console: { log() {} },
   readSellerDetailOcrFacts: async () => { ocrCalls++; return { facts: ["기능: 자동온수세척", "기능: 열풍건조", "기능: 엉킴방지시스템"], imagePaths: ["seller.jpg"], status: "complete" }; },
 });
@@ -201,6 +233,8 @@ assert.equal(context.classifyProductSourceFailure(new Error("SOURCE_EVIDENCE_REQ
 assert.equal(context.classifyProductSourceFailure(new Error("TRANSIENT_PRODUCT_PAGE: timeout")).retryable, true);
 assert.equal(context.toProductSourceEvidenceInput({ name: "소갈비살", description: "", features: [] }, 8).productName, "소갈비살");
 for (const [input, expected] of aliases) assert.equal(context.sanitizeTypedProductFactLine(input), expected);
+assert.deepEqual(massageRows.map(value => context.sanitizeTypedProductFactLine(value)), massageFacts,
+  "the actual collector normalization path retains the same five standard attributes");
 assert.match(source, /needsReviewEvidenceRefresh = Boolean\(product && reviewEvidenceLevel === "sparse"\)/u, "usable stored evidence must not cause another live collection");
 assert.match(source, /runtimeConnectKind, !submittedSnapshot/u, "frozen submission cannot acquire new title or OCR facts");
 assert.match(source, /item\.detailCrop && isSalesPageProductImageUrl\(item\.url\) && !isReviewImageUrl\(item\.url\)/u, "only seller detail crops enter OCR");
@@ -240,6 +274,9 @@ assert.deepEqual(extractExplicitProductFacts(confidentOcrLines(sellerCropTsv).jo
 assert.deepEqual(extractExplicitProductFacts(confidentOcrLines(tsv([[["자동", 95], ["세척", 95], ["미", 95], ["지", 95], ["원", 95]]])).join("\n"), "ocr"), [], "Korean spacing repair must preserve negation");
 
 async function main() {
+  const standardAttributes = await context.enrichShoppingSourceFeatures("목 어깨 마사지기", "", massageFacts, ["seller.jpg"]);
+  assert.deepEqual(Array.from(standardAttributes), massageFacts);
+  assert.equal(ocrCalls, 0, "already sufficient collected seller attributes do not spend another OCR budget");
   const cuckooEnriched = await context.enrichShoppingSourceFeatures(cuckooName, "", [], []);
   assert.deepEqual(Array.from(cuckooEnriched), cuckooFacts, "actual collector must retain literal seller facts");
   assert.equal(grade(cuckooName, cuckooEnriched).evidenceLevel, "usable");

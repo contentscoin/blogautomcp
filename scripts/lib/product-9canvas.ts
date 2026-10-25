@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type { ShoppingTopicTemplateId } from "./topic-templates/types";
+import { isClothingPhotoSubject, isFabricLintRemoverProduct } from "../../src/lib/product-photo-subject";
 
 export type ProductPhysicalScale = "wearable" | "handheld" | "desktop" | "floor" | "package";
 export type ProductOptionStatus = "not-applicable" | "confirmed" | "ambiguous";
@@ -92,7 +93,7 @@ const CATEGORY_RULES: CategoryRule[] = [
   },
   {
     id: "home_appliance",
-    strong: [/가습기|청소기|건조기|세탁기|냉장고|냉동고|선풍기|서큘레이터|에어컨|공기청정기|제습기|드라이기|드라이어/u],
+    strong: [/가습기|청소기|보[풀플]\s*제거기|건조기|세탁기|냉장고|냉동고|선풍기|서큘레이터|에어컨|공기청정기|제습기|드라이기|드라이어/u],
     broad: [/생활\s*가전|주방\s*가전|가전/u],
   },
   {
@@ -162,14 +163,17 @@ function classifyCategory(input: Product9CanvasInput): Product9Canvas["concept"]
     }
     if (!best || score > best.score) best = { id: rule.id, score, signals: [...new Set(signals)].slice(0, 5) };
   }
-  const categoryId = best && best.score > 0 ? best.id : "generic_shopping";
-  const categoryConfidence = !best || best.score === 0 ? "low" : best.score >= 8 ? "high" : "medium";
+  // A garment's use context (e.g. running/camping) cannot turn it into a
+  // different physical subject in the photo plan. Share the noun guard with it.
+  const garment = isClothingPhotoSubject(name);
+  const categoryId = garment ? "fashion_goods" : best && best.score > 0 ? best.id : "generic_shopping";
+  const categoryConfidence = garment ? "high" : !best || best.score === 0 ? "low" : best.score >= 8 ? "high" : "medium";
   const productKind = inferProductKind(name);
   const physicalScale = inferPhysicalScale(name, categoryId);
   return {
     categoryId,
     categoryConfidence,
-    categorySignals: best?.signals || [],
+    categorySignals: garment ? ["의류 상품명"] : best?.signals || [],
     productKind,
     physicalScale,
     useContexts: inferUseContexts(`${name} ${detail}`),
@@ -177,6 +181,7 @@ function classifyCategory(input: Product9CanvasInput): Product9Canvas["concept"]
 }
 
 function inferProductKind(name: string): string {
+  if (isFabricLintRemoverProduct(name)) return "보풀제거기";
   const kinds: Array<[RegExp, string]> = [
     [/가습기/u, "가습기"], [/골프\s*거리\s*측정기|보이스캐디/u, "시계형 골프 거리측정기"],
     [/곶감|반건시|건시/u, "곶감 선물세트"], [/청소기/u, "무선청소기"], [/건조기/u, "건조기"],
@@ -191,6 +196,8 @@ function inferProductKind(name: string): string {
 
 export function inferProductPhysicalScale(productName: string, categoryId: ShoppingTopicTemplateId = "generic_shopping"): ProductPhysicalScale {
   const name = clean(productName, 400);
+  if (isFabricLintRemoverProduct(name)) return "handheld";
+  if (isClothingPhotoSubject(name)) return "wearable";
   if (/시계형|워치|이어폰|헤드폰|반지|팔찌/u.test(name)) return "wearable";
   if (/청소기|건조기|세탁기|냉장고|냉동고|스탠드\s*tv|이동식\s*(?:tv|모니터)|타프|텐트/u.test(name)) return "floor";
   if (/가습기|노트북|태블릿|모니터|키보드|스피커/u.test(name)) return "desktop";
@@ -280,7 +287,7 @@ export function buildProduct9Canvas(input: Product9CanvasInput): Product9Canvas 
         ? `선택 옵션 ${selectedOption.label}만 현재 상품 구성으로 설명합니다.`
         : "확인된 단일 상품 정체성과 공통 사양만 설명합니다.",
     imageDirective: ambiguous
-      ? `한 이미지에는 식별 가능한 한 옵션만 사용합니다. ${optionNames}을 한 상자나 한 장면에 섞지 않습니다.`
+      ? `한 이미지에는 식별 가능한 한 옵션만 사용합니다. ${optionNames}을 한 상자나 한 장면에 섞지 않습니다. 동일한 한 옵션의 과일·제품 여러 개체나 동일 트레이·포장이 여러 개 보이는 것 자체는 옵션 혼합 또는 한 옵션 조건 위반이 아닙니다.`
       : "선택 상품과 일치하는 단일 제품 또는 확인된 구성만 사용합니다.",
     blockers: ambiguous ? ["SELECTED_OPTION_UNRESOLVED"] : [],
   };
@@ -324,8 +331,20 @@ export function selectedProductContextFrom9Canvas(canvas: Product9Canvas): strin
   return JSON.stringify({
     selectedTitle: canvas.subject.productName,
     selectedOption: canvas.subject.selectedOption,
+    optionResolution: {
+      confirmedOptionLabel: canvas.subject.selectedOption.status === "confirmed" ? canvas.subject.selectedOption.label : null,
+      resolutionBasis: canvas.subject.selectedOption.status === "confirmed" ? "existing-explicit-feature-label" :
+        canvas.subject.selectedOption.candidates.length ? "catalog-title-candidates-only" : "no-option-evidence",
+      catalogCandidatesFromTitle: canvas.subject.selectedOption.candidates,
+      catalogCandidatesAreConfirmedPurchaseSelection: false,
+      rule: "상품명에서 추출한 카탈로그 후보는 구매 옵션 선택 확인 사실이 아닙니다. confirmed는 기존 features 기반 옵션 해석 상태이며 실제 주문·구매 완료를 증명하지 않습니다. confirmed 옵션이 있으면 그 옵션과 일치해야 합니다. 후보만 있고 구매 옵션이 미확정이면 식별 가능한 참조 상품의 외형을 보여주는 사진을 옵션 선택 미확정만으로 거절하지 않습니다. 입력·실제 발행 문구가 특정 구매 옵션이나 구매 구성과의 동일성을 요구하면 그 동일성은 별도로 확인해야 합니다. 출처 연결만으로 정체성을 승인하거나 숨겨진 구성·수량·가격을 추정하지 않습니다.",
+    },
     category: canvas.concept.categoryId,
     productKind: canvas.concept.productKind,
+    validatedSellerFeatures: canvas.claim.filter(claim => claim.status === "validated" && claim.evidenceIds.length > 0 &&
+      claim.evidenceIds.every(id => canvas.evidence.some(evidence => evidence.id === id &&
+        canvas.resource.some(resource => resource.id === evidence.resourceId && resource.kind === "seller-feature"))))
+      .map(claim => ({ text: claim.text, evidenceIds: claim.evidenceIds })),
     optionPolicy: {
       forbidMixedOptionVisuals: canvas.policy.forbidMixedOptionVisuals,
       requireSingleOptionVisual: canvas.policy.requireSingleOptionVisual,

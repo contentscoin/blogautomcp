@@ -56,7 +56,7 @@ for (const [kind, description, id] of fixtures) {
   const imageAt = nodes.findIndex(n => n.kind === "image");
   const headingAt = nodes.findIndex(n => n.kind === "heading");
   const bodyAt = nodes.findIndex(n => n.kind === "paragraph");
-  const imageLayout = editorial.policy.sectionDesigns?.[firstId]?.image ?? editorial.policy.layout.image;
+  const imageLayout = selected.sections[0].imagePlacement ?? editorial.policy.sectionDesigns?.[firstId]?.image ?? editorial.policy.layout.image;
   if (imageLayout === "before-heading") assert.ok(imageAt < headingAt);
   if (imageLayout === "before-body") assert.ok(imageAt > headingAt && imageAt < bodyAt);
   if (imageLayout === "after-body") assert.ok(imageAt > nodes.map(n => n.kind).lastIndexOf("paragraph"));

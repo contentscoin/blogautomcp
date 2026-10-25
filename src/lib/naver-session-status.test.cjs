@@ -19,8 +19,17 @@ function load(file, mocks = {}, globals = {}, tail = '') {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true, jsx: ts.JsxEmit.ReactJSX },
   }).outputText;
   const mod = { exports: {} };
+  const fixtureRequire = name => {
+    if (name in mocks) return mocks[name];
+    // Keep the real UI polling lifecycle in this VM, including its injected
+    // timers. Native CommonJS require cannot resolve the source-only TS helper.
+    if (name.startsWith('.') && path.resolve(path.dirname(filename), `${name}.ts`) === path.join(root, 'src/lib/material-polling.ts')) {
+      return load('src/lib/material-polling.ts', mocks, globals);
+    }
+    return require(name);
+  };
   vm.runInNewContext(code, {
-    module: mod, exports: mod.exports, require: name => name in mocks ? mocks[name] : require(name),
+    module: mod, exports: mod.exports, require: fixtureRequire,
     process: { env: { NAVER_BLOG_ID: 'fixtureblog' }, cwd: () => root }, console: quietConsole,
     URL, Request, Response, Headers, AbortController, AbortSignal, setTimeout, clearTimeout, setInterval, clearInterval, Buffer,
     ...globals,
@@ -378,6 +387,54 @@ for (const prior of [null, { hasSession: true, isValid: true, naver: { hasSessio
     assert.equal(states[0].naver.status, 'valid');
   });
 }
+test('main UI uses the real update polling lifecycle: native hidden pause, no overlap, abort and cleanup', async () => {
+  const states = [], effects = [], requests = [], updateRequests = [];
+  let now = 0, serial = 0;
+  const timers = new Map(), visibilityListeners = new Set(), desktopListeners = new Set();
+  const settle = async () => { for (let index = 0; index < 30; index++) await Promise.resolve(); };
+  const schedule = (callback, delay) => { const id = ++serial; timers.set(id, { callback, at: now + delay }); return id; };
+  const advance = async milliseconds => {
+    now += milliseconds;
+    for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.callback(); }
+    await settle();
+  };
+  const document = { hidden: false, addEventListener: (_event, callback) => visibilityListeners.add(callback), removeEventListener: (_event, callback) => visibilityListeners.delete(callback) };
+  const window = { __brandconnectMaterialUiVisible: false, setTimeout: schedule,
+    addEventListener: (_event, callback) => desktopListeners.add(callback), removeEventListener: (_event, callback) => desktopListeners.delete(callback) };
+  const visible = value => { window.__brandconnectMaterialUiVisible = value; for (const callback of desktopListeners) callback(); };
+  const react = {
+    useState: initial => { const index = states.length; states.push(initial); return [states[index], update => { states[index] = typeof update === 'function' ? update(states[index]) : update; }]; },
+    useCallback: callback => callback, useEffect: effect => effects.push(effect),
+  };
+  const component = load('src/components/SessionStatus.tsx', { react }, {
+    document, window, navigator: { userAgent: 'Electron/44.0.0 fixture' },
+    setTimeout: schedule, clearTimeout: id => timers.delete(id),
+    setInterval() { throw Error('The UI must use cancellable completion-based polling'); },
+    fetch: (url, init) => {
+      requests.push({ url, init });
+      if (url === '/api/system/update-readiness') return new Promise(resolve => updateRequests.push({ init, resolve }));
+      return Promise.resolve(Response.json({ success: true, data: {} }));
+    },
+  });
+  component.default(); assert.equal(effects.length, 1);
+  const cleanup = effects[0](); await settle();
+  assert.equal(updateRequests.length, 0, 'native hidden window pauses even when document.hidden is false');
+  assert.equal(requests.length, 3, 'session/settings/activation remain initial read-only checks');
+  await advance(120000); assert.equal(updateRequests.length, 0);
+  visible(true); visible(true); await settle(); assert.equal(updateRequests.length, 1);
+  await advance(15000); assert.equal(updateRequests.length, 1, 'a slow update read cannot overlap the next interval');
+  visible(false); await settle(); assert.equal(updateRequests[0].init.signal.aborted, true); assert.equal(timers.size, 0);
+  visible(true); await settle(); assert.equal(updateRequests.length, 2);
+  updateRequests[1].resolve(Response.json({ success: true, data: { update: { currentVersion: '1.3.128' } } })); await settle();
+  updateRequests[0].resolve(Response.json({ success: true, data: { update: { currentVersion: 'stale' } } })); await settle();
+  assert.equal(states[5].currentVersion, '1.3.128', 'an aborted old response cannot replace the current update state');
+  await advance(14999); assert.equal(updateRequests.length, 2);
+  await advance(1); assert.equal(updateRequests.length, 3, 'visible cadence begins after the previous read completes');
+  cleanup(); await settle();
+  assert.equal(updateRequests[2].init.signal.aborted, true); assert.equal(timers.size, 0);
+  assert.equal(visibilityListeners.size, 0); assert.equal(desktopListeners.size, 0);
+  await advance(120000); assert.equal(updateRequests.length, 3);
+});
 for (const proofMode of ['verified', 'public-html-only', 'wrong-space', 'superseded']) test(`shopping options ${proofMode} preserves session unless the existing account and space prove authentication`, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'naver-options-'));
   const sessionPath = path.join(directory, 'state.json');

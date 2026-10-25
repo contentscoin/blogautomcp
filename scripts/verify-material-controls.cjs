@@ -1,9 +1,10 @@
+const {loadClientDisplay}=require('./lib/client-display-fixture.cjs');
 const fs=require('fs'),vm=require('vm'),ts=require('typescript'),assert=require('node:assert/strict');
 function harness(fail=false){
-const states=[],effects=[];let cursor=0;const requests=[];const jsx=(type,props)=>({type,props:props||{}});
+const states=[],effects=[];let cursor=0;const requests=[];const jsx=(type,props)=>typeof type==='function'?type(props||{}):({type,props:props||{}});
 const react={useState(init){const n=cursor++;if(!(n in states))states[n]=typeof init==='function'?init():init;return [states[n],v=>states[n]=typeof v==='function'?v(states[n]):v]},useEffect(f){effects.push(f)},useRef(v){const n=cursor++;return states[n]??= {current:v}},useCallback:f=>f};
 const m={exports:{}};const job={jobId:'fixture',kind:'prepare',status:'running',startedAt:new Date().toISOString(),items:Array.from({length:10},(_,n)=>({productId:'product_'+n,status:'queued',stage:'대기'}))};
-const c=vm.createContext({module:m,exports:m.exports,require:n=>n==='react'?react:{jsx,jsxs:jsx},localStorage:{getItem:()=>null,setItem(){}},Date,console,fetch:async(url,init)=>{requests.push({url,init});return {ok:!fail,json:async()=>fail?{success:false,error:'fixture failure'}:url.endsWith('/prepare')?{success:true,data:job}:{success:true,data:{materials:[],jobs:[job]}}}}});
+const c=vm.createContext({module:m,exports:m.exports,require:n=>n==='react'?react:n==='../lib/material-job-display'?loadClientDisplay('src/lib/material-job-display.ts',()=>({jsx,jsxs:jsx})):n==='./MaterialJobItemResult'?loadClientDisplay('src/components/MaterialJobItemResult.tsx',()=>({jsx,jsxs:jsx})):{jsx,jsxs:jsx},localStorage:{getItem:()=>null,setItem(){}},Date,console,fetch:async(url,init)=>{requests.push({url,init});return {ok:!fail,json:async()=>fail?{success:false,error:'fixture failure'}:url.endsWith('/prepare')?{success:true,data:job}:{success:true,data:{materials:[],jobs:[job]}}}}});
 new vm.Script(ts.transpileModule(fs.readFileSync('src/components/MaterialLibrary.tsx','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText).runInContext(c);
 const props={connectKind:'shopping',selectionRequest:{mode:'prepare',nonce:1},candidates:Array.from({length:10},(_,n)=>({id:'product_'+n,productName:'Product '+n})),onPreview(){},onChanged(){}};
 return {requests,render(){cursor=0;effects.length=0;return m.exports.MaterialLibrary(props)},prepareEffect(){effects.at(-1)()}};

@@ -25,6 +25,32 @@ const defaults: ImageReplanDependencies = { read: readBrandPostPackage, write: w
   reconcile: reconcileBrandPostPackageQuality };
 const summary = (slots: Slots) => ({ required: slots.reduce((n, s) => n + s.minimum, 0),
   missing: slots.reduce((n, s) => n + s.missing + s.generationMissing, 0) });
+
+/** Report unresolved coverage without calling a rejected scene a missing seller original. */
+export function describeShoppingImageReplanFailure(input: {
+  remainingMissing: number;
+  reason: string;
+  slots: Array<{ sectionId: string; missing: number; generationMissing: number }>;
+  previousErrors?: readonly string[];
+}): { code: string; causeCode?: string; errors: string[] } {
+  if (input.remainingMissing === 0) return { code: "IMAGE_REPAIR_COMPLETE", errors: [] };
+  const missingIds = new Set(input.slots.filter(slot => Math.max(slot.missing, slot.generationMissing) > 0)
+    .map(slot => slot.sectionId));
+  const causes = new Set<string>();
+  const retained = [...new Set((input.previousErrors || []).filter(error => {
+    const match = /^([a-zA-Z0-9_-]{8,80}):\s*(REFERENCE_SCENE_FIDELITY_FAILED|REFERENCE_SCENE_REVIEW_INVALID|IMAGE_SOURCE_BINDING_REQUIRED|PRODUCT_SOURCE_REQUIRED|PRODUCT_REFERENCE_REQUIRED):/u.exec(error);
+    if (!match || !missingIds.has(match[1])) return false;
+    causes.add(match[2]);
+    return true;
+  }))].slice(0, 8);
+  const natural = input.reason === "REPLAN_NATURAL_PHOTOS_REQUIRED";
+  const code = natural ? "REPLAN_NATURAL_PHOTOS_REQUIRED" : "IMAGE_SOURCE_BINDING_REQUIRED";
+  const message = natural
+    ? `원본 1장·자연스러운 연출 3장·썸네일 기준에서 검증 이미지 ${input.remainingMissing}장이 부족합니다. 기존 생성 결과의 거절 원인을 확인하고 실패 슬롯만 보완하세요.`
+    : `필수 이미지 ${input.remainingMissing}장을 배정하지 못했습니다. 원본과 생성 사진의 슬롯별 원인을 확인하세요.`;
+  return { code, ...(causes.size === 1 ? { causeCode: [...causes][0] } : {}),
+    errors: [...retained, `${code}: ${message} (${input.reason})`] };
+}
 const verifiedAlternative = (slot: Slots[number], allowProductPhoto = false) => slot.count > 0 && !slot.missing && !slot.generationMissing &&
   !slot.staleTargets.length && slot.assets.some(asset => asset.creationMethod === "source" &&
     asset.sourceReview?.usage === "section-matched-product-evidence" &&

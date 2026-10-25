@@ -80,6 +80,55 @@ function findWorkflowRead(element) {
   return null;
 }
 
+function panelNodes(element) {
+  if (element == null || typeof element !== 'object') return [];
+  if (Array.isArray(element)) return element.flatMap(panelNodes);
+  return [element, ...panelNodes(element.props?.children)];
+}
+function panelText(element, collapsed = false) {
+  if (element == null) return '';
+  if (typeof element !== 'object') return String(element);
+  if (Array.isArray(element)) return element.map(child => panelText(child, collapsed)).join('');
+  if (collapsed && element.type === 'details' && !element.props.open)
+    return panelText([element.props.children].flat().find(child => child?.type === 'summary'), collapsed);
+  return panelText(element.props?.children, collapsed);
+}
+
+test('both recovery panels keep errors closed across updated observations while progress and counts stay visible', () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  try {
+    for (const operation of ['rewrite', 'repair']) {
+      const storage = storageFixture();
+      (operation === 'rewrite' ? saveRewrite : saveRepair)(storage, 'owner', {
+        ...base, [`${operation}JobId`]: 'job_observed', queryJobId: 'job_observed', recoveryState: 'complete',
+      });
+      Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage });
+      for (const observation of [
+        { status: 'RUNNING', progress: 42, stageMessage: '소재 검증 중' },
+        { status: 'SUCCEEDED', workflowPending: false, readyCount: 12, failedCount: 3, interruptedCount: 0 },
+      ]) {
+        const states = [null, false, '', { jobId: 'job_observed', ...observation, errorCode: 'IMAGE_OUTPUT_AMBIGUOUS', errorMessage: '원본 이미지 검증 상세 오류' }];
+        let stateIndex = 0;
+        const mocks = { react: { useState: () => [states[stateIndex++], () => {}], useEffect: () => {}, useSyncExternalStore: (...args) => args[1]() } };
+        const module = load(`app/dashboard/${operation === 'rewrite' ? 'failed' : 'blocked'}-material-actions.tsx`, mocks);
+        const component = operation === 'rewrite' ? module.FailedMaterialActions : module.BlockedMaterialActions;
+        const panel = component({ accountId: 'owner', online: true, appVersion: '1.3.99', hasConnection: true, activeWork: false });
+        const details = panelNodes(panel).find(node => node.type === 'details' && panelText(node).includes('IMAGE_OUTPUT_AMBIGUOUS'));
+        assert.ok(details, 'full failure remains available under a native disclosure');
+        assert.equal(details.props.open, undefined, 'polling observations never force logs open');
+        assert.ok(panelText(details).startsWith('실패 상세 보기'));
+        const visible = panelText(panel, true);
+        assert.ok(!visible.includes('IMAGE_OUTPUT_AMBIGUOUS') && !visible.includes('원본 이미지 검증 상세 오류'));
+        assert.ok(visible.includes(observation.status === 'RUNNING' ? '소재 검증 중 · 42%' : '준비 완료 12개'));
+        if (observation.status === 'SUCCEEDED') assert.ok(visible.includes('3개') && visible.includes('중단 0개'));
+      }
+    }
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, 'localStorage', descriptor);
+    else delete globalThis.localStorage;
+  }
+});
+
 test('failed or cancelled final-result reads remain recoverable through the original accepted repair', async () => {
   const descriptors = Object.fromEntries(['window', 'localStorage', 'fetch'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   Object.defineProperty(globalThis, 'window', { configurable: true, value: new EventTarget() });

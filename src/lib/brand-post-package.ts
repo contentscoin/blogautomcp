@@ -14,6 +14,7 @@ import { atomicWriteTextFile } from "./atomic-text-file";
 import { isDraftEditorialQualityPassed } from "./brand-post-quality-display";
 import { SHOPPING_POST_STRATEGY_VERSION } from "./shopping-post-strategy";
 import { getConnectAffiliateDisclosure } from "./connect-disclosure";
+import { readCurrentMaterialReviewWarnings } from "./material-review-warnings";
 import {
   getPostCompositionContract,
   hasCanonicalAffiliateDisclosure,
@@ -35,6 +36,7 @@ import {
   brandPostSectionSlotId,
   classifyBrandPostImageEvidence,
   isReferenceGuidedScene,
+  isReferenceGuidedThumbnail,
   referenceSceneReviewIssue,
   REFERENCE_SCENE_CAPTION,
   type ReferenceSceneReview,
@@ -402,11 +404,22 @@ function isValidPackageImage(asset: BrandPostPackageImageAsset): boolean {
 }
 
 export function brandPostReferenceSceneIssue(manifest: BrandPostPackageManifest, asset: BrandPostPackageImageAsset): string | null {
-  if (!isReferenceGuidedScene(asset)) return null;
+  if (!isReferenceGuidedScene(asset) && !isReferenceGuidedThumbnail(asset)) return null;
   let referenceSha256: string | undefined;
+  let thumbnailRawSha256: string | undefined;
+  const integrated = asset.referenceScene?.integratedReview;
+  if (integrated && (typeof integrated.rawResponse !== "string" ||
+      crypto.createHash("sha256").update(integrated.rawResponse).digest("hex") !== integrated.responseSha256))
+    return "종합 검수의 원시 응답이 이미지 검토 이후 변경되었습니다.";
   try { if (asset.referenceScene?.referencePath) referenceSha256 = sha256File(asset.referenceScene.referencePath); } catch { /* Missing references fail below. */ }
+  try { if (asset.referenceScene?.thumbnailRawPath) {
+    const stat = fs.statSync(asset.referenceScene.thumbnailRawPath);
+    if (stat.isFile() && stat.size > 0 && stat.size <= 24 * 1024 * 1024 && !publicationImageGeometryIssue(asset.referenceScene.thumbnailRawPath))
+      thumbnailRawSha256 = sha256File(asset.referenceScene.thumbnailRawPath);
+  } } catch { /* Missing raw photos fail below. */ }
   return referenceSceneReviewIssue(asset, {
     referenceSha256,
+    thumbnailRawSha256,
     sourceSnapshotId: manifest.sourceSnapshot?.snapshotId,
     anchorSha256: manifest.imageAssets?.find(candidate => candidate.role === "hero" && candidate.path === manifest.heroImagePath)?.sha256,
   });
@@ -836,10 +849,11 @@ export function packagePreview(manifest: BrandPostPackageManifest) {
   const sectionOutline = manifest.version === "brand-post-package/v2"
     ? manifest.composition.sections.map((section, index) => ({ index, id: section.id, title: section.title, chars: section.characterCount, images: section.imagePaths.length }))
     : null;
+  const reviewWarnings = readCurrentMaterialReviewWarnings(manifest, path.join(getBrandPostPackageDir(manifest.brandLinkId), "product-sources"));
   const readiness: BrandPostPackageReadiness = {
     status: approval.canApprove ? "READY" as const : "BLOCKED" as const,
     score: approval.contentScore,
-    summary: approval.canApprove ? "준비된 소재의 원고·이미지 검수 통과" : approval.blockers.map(blocker => blocker.reason).join(" "),
+    summary: approval.canApprove ? reviewWarnings.length ? `준비된 소재 · 인쇄 미검증 경고 ${reviewWarnings.length}장 확인` : "준비된 소재의 원고·이미지 검수 통과" : approval.blockers.map(blocker => blocker.reason).join(" "),
     signals: approval.blockers.map(blocker => ({ key: blocker.code, label: blocker.reason, status: "fail" as const })),
     repairTargets: approval.blockers.map(blocker => ({ sectionIndex: blocker.sectionId ? manifest.version === "brand-post-package/v2" ? manifest.composition.sections.findIndex(section => section.id === blocker.sectionId) : null : null,
       code: blocker.code, reason: blocker.reason, priority: "P0", instruction: blocker.reason })),
@@ -848,7 +862,7 @@ export function packagePreview(manifest: BrandPostPackageManifest) {
   const imageCount = approval.composition
     ? approval.composition.renderNodes.filter(node => node.kind === "image").length
     : imageAssets.filter(isValidPackageImage).length;
-  return { ...rest, imageGeneration: approval.imageGeneration, ...(approval.composition ? { composition: approval.composition } : {}), imageAssets, imageSlots, markdown, heroPreviewDataUrl, sectionOutline, readiness, approval, imageCount };
+  return { ...rest, reviewWarnings, imageGeneration: approval.imageGeneration, ...(approval.composition ? { composition: approval.composition } : {}), imageAssets, imageSlots, markdown, heroPreviewDataUrl, sectionOutline, readiness, approval, imageCount };
 }
 
 function sha256File(filePath: string): string {
@@ -1115,7 +1129,7 @@ export function applyGeneratedBrandPostImage(options: {
   if (manifest.connectKind === "SHOPPING") {
     const replacement = options.replaceAssetKey ? assets.find(asset => asset.sha256 === options.replaceAssetKey) : undefined;
     const formatIssue = shoppingImageFormatIssue({ path: options.generatedPath, provenance: options.provenance,
-      creationMethod: options.creationMethod }, replacement?.role === "hero" && !options.sectionId);
+      creationMethod: options.creationMethod }, !options.sectionId && (replacement?.role === "hero" || options.slotId === "hero:image:1"));
     if (formatIssue) throw new Error(`IMAGE_FORMAT_OBSOLETE: ${formatIssue}`);
     const targetSectionId = options.sectionId || replacement?.sectionId;
     if (targetSectionId && manifest.composition.strategyVersion === SHOPPING_POST_STRATEGY_VERSION) {
@@ -1129,9 +1143,10 @@ export function applyGeneratedBrandPostImage(options: {
   }
   const generatedHash = sha256File(options.generatedPath);
   let referenceScene = options.referenceScene;
-  if (isReferenceGuidedScene(options)) {
+  const appliedRole = options.sectionId || assets.find(asset => asset.sha256 === options.replaceAssetKey)?.sectionId ? "body" : "hero";
+  if (isReferenceGuidedScene(options) || isReferenceGuidedThumbnail({ ...options, role: appliedRole })) {
     const issue = brandPostReferenceSceneIssue(manifest, { ...options, path: options.generatedPath, sourcePath: options.generatedPath,
-      role: options.sectionId ? "body" : "hero", sha256: generatedHash });
+      role: appliedRole, sha256: generatedHash });
     if (issue) throw new Error(`IMAGE_REFERENCE_REVIEW_REQUIRED: ${issue}`);
     const referenceDir = path.join(getBrandPostPackageDir(options.brandLinkId), "references");
     fs.mkdirSync(referenceDir, { recursive: true });
@@ -1140,6 +1155,12 @@ export function applyGeneratedBrandPostImage(options: {
     if (path.resolve(referenceScene!.referencePath) !== path.resolve(referencePath)) fs.copyFileSync(referenceScene!.referencePath, referencePath);
     if (sha256File(referencePath) !== referenceScene!.referenceSha256) throw new Error("IMAGE_REFERENCE_CHANGED: 상품 참조 파일이 저장 중 변경되었습니다.");
     referenceScene = { ...referenceScene!, referencePath };
+    if (isReferenceGuidedThumbnail({ ...options, role: appliedRole })) {
+      const rawPath = path.join(referenceDir, `thumbnail-raw-${referenceScene.reviewedOutputSha256}${path.extname(referenceScene.thumbnailRawPath!).toLowerCase() || ".png"}`);
+      if (path.resolve(rawPath) !== path.resolve(referenceScene.thumbnailRawPath!)) fs.copyFileSync(referenceScene.thumbnailRawPath!, rawPath);
+      if (sha256File(rawPath) !== referenceScene.reviewedOutputSha256) throw new Error("IMAGE_REFERENCE_CHANGED: 검수한 썸네일 생성 사진이 저장 중 변경되었습니다.");
+      referenceScene = { ...referenceScene, thumbnailRawPath: rawPath };
+    }
   }
   if (options.bindExistingAssetKey) {
     const sourceAsset = assets.find(asset => asset.sha256 === options.bindExistingAssetKey);
@@ -1321,6 +1342,18 @@ export function applyGeneratedBrandPostImage(options: {
       bodyImagePaths = bodyImagePaths.filter(file => path.resolve(file) !== path.resolve(existing.path));
       bodyImagePaths.push(destinationPath);
     }
+  } else if (!options.sectionId && options.slotId === "hero:image:1") {
+    const oldHeroes = manifest.imageAssets?.filter(asset => asset.role === "hero" && !asset.sectionId) || [];
+    if (fs.existsSync(manifest.heroImagePath) || assets.some(asset => asset.role === "hero" && !asset.sectionId) ||
+        oldHeroes.length > 1 || oldHeroes.some(asset => path.resolve(asset.path) !== path.resolve(manifest.heroImagePath)))
+      throw new Error("IMAGE_RESUME_REQUIRED: 대표 이미지 추가 대상이 모호하거나 이미 존재합니다.");
+    heroImagePath = destinationPath;
+    thumbnailSpec = { ...thumbnailSpec, sourceImagePath: destinationPath };
+    nextAssets = [...assets, { path: destinationPath, sourcePath: path.resolve(options.generatedPath), sha256: generatedHash,
+      role: "hero", sectionId: null, slotId: options.slotId, provenance: options.provenance,
+      creationMethod: options.creationMethod, remoteGenerated: options.remoteGenerated, imageIntent: options.imageIntent, referenceScene }];
+    composition = { ...composition, renderNodes: [{ kind: "image", assetPath: destinationPath, sectionId: null, role: "thumbnail",
+      altText: options.imageIntent || manifest.title, layout: "single", sourcePolicy: "LOCKED_PRODUCT_OR_ORIGINAL" }, ...composition.renderNodes] };
   } else {
     const sectionId = options.sectionId?.trim();
     let section = composition.sections.find((candidate) => candidate.id === sectionId);

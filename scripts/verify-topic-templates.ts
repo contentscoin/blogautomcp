@@ -152,6 +152,7 @@ const stagingPrompt = buildBrandPostImagePrompt({ connectKind: "SHOPPING", produ
   imageIntent: staged7.sections[1]!.imageIntent, role: "body", stagingRecipe: staged7.sections[1]!.promptRecipe });
 assert.ok(stagingPrompt.includes(staged7.sections[1]!.promptRecipe!), "template scene recipe reaches the reference-scene prompt");
 assert.match(stagingPrompt, /INPUT 1 is authoritative/u, "staging preserves actual product-reference authority");
-assert.match(stagingPrompt, /pose.*camera distance or angle/u, "natural pose and angle changes preserve product identity");
+assert.match(stagingPrompt, /camera distance/u, "natural framing variation remains available within the observed reference view");
+assert.ok(stagingPrompt.includes('"novelIdentifyingSurfacesAllowed":false'), "variety never permits inventing hidden product surfaces");
 
 console.log(`PASS: topic templates (${Object.keys(TOPIC_TEMPLATES).length}), selection, contract overlay, editorial fallback, prompts, render document`);
