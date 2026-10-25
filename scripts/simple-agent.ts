@@ -19,6 +19,7 @@ import { verifyReservedPostInNaverList } from "./lib/naver-schedule-list-verifie
 import "dotenv/config";
 import { thumbnailImageWaitPolicy, waitForThumbnailArtifacts } from "./lib/thumbnail-image-wait";
 import { getWritingTimeoutPolicy } from "./lib/writing-timeout-policy";
+import { createSellerSourceReadBudget } from "./lib/seller-source-read-budget";
 import { chromium } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { Page } from "playwright";
@@ -3922,7 +3923,7 @@ async function revealProductDetailImages(page: Page): Promise<void> {
 async function collectProductImageUrlsFromPage(page: Page): Promise<string[]> {
   const candidates: ProductImageCandidate[] = [];
 
-  const ogImage = await page.getAttribute('meta[property="og:image"]', "content").catch(() => null);
+  const ogImage = await page.getAttribute('meta[property="og:image"]', "content", { timeout: 1000 }).catch(() => null);
   if (ogImage && isCandidateProductImageUrl(ogImage)) {
     candidates.push({
       url: ogImage,
@@ -4376,6 +4377,12 @@ async function step1_getProductInfo(
       price: offers && (typeof offers.price === "string" || typeof offers.price === "number") ? String(offers.price) : "",
       reviewCount: rating && (typeof rating.reviewCount === "string" || typeof rating.reviewCount === "number") ? String(rating.reviewCount) : "",
       rating: rating && (typeof rating.ratingValue === "string" || typeof rating.ratingValue === "number") ? String(rating.ratingValue) : "",
+      imageUrls: (Array.isArray(product.image) ? product.image : product.image ? [product.image] : []).flatMap((image) => {
+        if (typeof image === "string") return [image];
+        if (!image || typeof image !== "object") return [];
+        const item = image as Record<string, unknown>;
+        return typeof item.url === "string" ? [item.url] : typeof item.contentUrl === "string" ? [item.contentUrl] : [];
+      }).slice(0, 32),
       reviewHighlights,
       // Search keywords describe how the listing is promoted, not what the
       // product objectively contains or does. Keep only structured properties.
@@ -4660,37 +4667,30 @@ async function step1_getProductInfo(
 
   // 후기 탭을 열기 전에 판매페이지 이미지를 먼저 보존한다. 일부 스토어는 탭 전환 시
   // 상세 이미지 DOM을 제거하므로 후기 수집 때문에 제품 이미지가 사라지면 안 된다.
-  if (connectKind === "SHOPPING") await revealProductDetailImages(page);
+  const sellerReadBudget = createSellerSourceReadBudget({ onEvent: (stage, status) => {
+    if (status === "started" || status === "timeout" || status === "failed") console.log(`   🔎 판매자 페이지 보강 ${stage}: ${status}`);
+  } });
+  if (connectKind === "SHOPPING") await sellerReadBudget.read("detail-reveal", () => revealProductDetailImages(page), undefined, 10_000);
   const preReviewImageUrls = connectKind === "SHOPPING"
-    ? await collectProductImageUrlsFromPage(page)
+    ? await sellerReadBudget.read("product-images", () => collectProductImageUrlsFromPage(page), [] as string[], 4000)
     : [];
 
   if (connectKind === "SHOPPING") {
-    const reviewTab = page.locator('button, [role="tab"]').filter({
-      hasText: /^(?:리뷰|구매후기|상품평)(?:\s*[\d,]+)?$/u,
-    }).first();
-    if (await reviewTab.isVisible().catch(() => false)) {
-      await reviewTab.click({ timeout: 1800 }).catch(() => undefined);
-      await page.waitForTimeout(800);
-    }
     const reviewHighlights = new Set<string>(
       structuredProduct.reviewHighlights.map((value) => sanitizeText(value)).filter(Boolean),
     );
-    const reviewTextSelectors = [
-      '[class*="review"] [class*="content"]',
-      '[class*="review"] [class*="text"]',
-      '[class*="Review"] [class*="content"]',
-      '[class*="Review"] [class*="text"]',
-    ];
-    for (const selector of reviewTextSelectors) {
-      const candidates = page.locator(selector);
-      const count = Math.min(await candidates.count().catch(() => 0), 12);
-      for (let index = 0; index < count && reviewHighlights.size < 4; index += 1) {
-        const value = sanitizeText((await candidates.nth(index).textContent().catch(() => "")) || "");
-        if (value.length < 20 || value.length > 260) continue;
-        if (/(?:리뷰\s*전체|포토\s*리뷰|평점|신고|도움이\s*돼요|작성자|옵션)/u.test(value)) continue;
-        reviewHighlights.add(value);
-      }
+    // Read only currently rendered reviews in one bounded snapshot. Opening a
+    // virtualized review tab and awaiting 48 changing nth locators could take
+    // many minutes while contributing no required product specification.
+    const renderedReviews = reviewHighlights.size >= 4 ? [] : await sellerReadBudget.read("visible-reviews", () => page.evaluate(() => {
+      const nodes = document.querySelectorAll('[class*="review"] [class*="content"], [class*="review"] [class*="text"], [class*="Review"] [class*="content"], [class*="Review"] [class*="text"]');
+      return Array.from(nodes).filter(node => (node as HTMLElement).getClientRects().length > 0)
+        .slice(0, 48).map(node => (node.textContent || "").replace(/\s+/gu, " ").trim());
+    }), [] as string[], 2000);
+    for (const raw of renderedReviews) {
+      const value = sanitizeText(raw);
+      if (value.length < 20 || value.length > 260 || /(?:리뷰\s*전체|포토\s*리뷰|평점|신고|도움이\s*돼요|작성자|옵션)/u.test(value)) continue;
+      reviewHighlights.add(value);
       if (reviewHighlights.size >= 4) break;
     }
     for (const value of reviewHighlights) {
@@ -4707,7 +4707,7 @@ async function step1_getProductInfo(
   const imageCandidateMax = connectKind === "TRAVEL" ? 32 : 20;
   const allImageUrls = Array.from(new Set([
     ...preReviewImageUrls,
-    ...(await collectProductImageUrlsFromPage(page)),
+    ...(connectKind === "SHOPPING" ? structuredProduct.imageUrls.filter(isCandidateProductImageUrl) : await collectProductImageUrlsFromPage(page)),
   ]));
   const imageUrls = allImageUrls.slice(0, imageCandidateMax);
   const evidenceSourceImageUrls = connectKind === "SHOPPING"

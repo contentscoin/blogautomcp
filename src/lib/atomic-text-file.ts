@@ -13,7 +13,9 @@ export interface AtomicWriteTextFileOptions {
   waitForTest?: (milliseconds: number) => void;
 }
 
-const WINDOWS_RENAME_BACKOFF_MS = [20, 50, 100, 200] as const;
+// Antivirus/share locks can outlive the former 370ms window. Retry only the
+// same unchanged file transaction for at most 1.57s; never restart AI work.
+const WINDOWS_RENAME_BACKOFF_MS = [20, 50, 100, 200, 400, 800] as const;
 const MAX_RETRY_SNAPSHOT_BYTES = 8 * 1024 * 1024;
 
 /** Unknown/unreadable targets cannot grant retry authority. Include identity

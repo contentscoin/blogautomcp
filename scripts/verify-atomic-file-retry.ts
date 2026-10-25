@@ -31,8 +31,20 @@ try {
     const sample = fixture(), delays: number[] = [], failures: Error[] = []; let count = 0;
     assert.throws(() => atomicWriteTextFile(sample.target, "candidate", { platformForTest: "win32", waitForTest: ms => { delays.push(ms); },
       replaceForTest: () => { const error = failure(code, ++count); failures.push(error); throw error; } }), error => error === failures.at(-1));
-    assert.equal(count, 5); assert.deepEqual(delays, [20, 50, 100, 200]); assert.ok(delays.reduce((sum, ms) => sum + ms, 0) < 1000);
+    assert.equal(count, 7); assert.deepEqual(delays, [20, 50, 100, 200, 400, 800]); assert.ok(delays.reduce((sum, ms) => sum + ms, 0) < 2000);
     assert.equal(fs.readFileSync(sample.target, "utf8"), "prior complete target"); assert.equal(fs.readFileSync(sample.sibling, "utf8"), "unrelated sibling"); sample.clean(); checks += 6;
+  }
+  {
+    const sample = fixture(), delays: number[] = []; let count = 0;
+    atomicWriteTextFile(sample.target, "same complete candidate", { platformForTest: "win32", waitForTest: ms => { delays.push(ms); },
+      replaceForTest: (temporary, target) => {
+        count++;
+        assert.equal(fs.readFileSync(target, "utf8"), "prior complete target");
+        if (count <= 5) throw failure("EPERM", count);
+        fs.renameSync(temporary, target);
+      } });
+    assert.equal(count, 6); assert.deepEqual(delays, [20, 50, 100, 200, 400]);
+    assert.equal(fs.readFileSync(sample.target, "utf8"), "same complete candidate"); sample.clean(); checks += 4;
   }
   for (const [platform, code, syscall] of [["linux", "EPERM", "rename"], ["win32", "EIO", "rename"], ["win32", "ENOENT", "rename"],
     ["win32", "ENOSPC", "rename"], ["win32", "EXDEV", "rename"], ["win32", "EPERM", "open"]] as const) {
