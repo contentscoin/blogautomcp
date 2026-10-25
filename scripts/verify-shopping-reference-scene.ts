@@ -16,6 +16,7 @@ import type { BrandPostPackageManifestV2, applyGeneratedBrandPostImage } from ".
 import type { ResolvedImageTarget } from "../src/lib/brand-post-image-generation";
 import { buildProduct9Canvas } from "./lib/product-9canvas";
 import type { ShoppingReferenceViewObservation } from "./lib/shopping-reference-view";
+import type { CodexDraftOptions } from "./lib/codex-draft-provider";
 
 async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "shopping-reference-scene-"));
@@ -56,6 +57,39 @@ async function main() {
       notDeformed: true, unobstructed: true, subject: "complete exact selected item",
       geometry: "intact identifying silhouette and real proportions", labels: "none visible", reason: "specific visible item observations",
       viewObservation: { ...frontView, intrinsicPrint: "absent", readableIdentifiers: [] } };
+    const actualPrintIncident = JSON.parse(fs.readFileSync(path.join(__dirname, "test-fixtures/source-view-print-format-incident.json"), "utf8"));
+    const incidentBefore = JSON.stringify(actualPrintIncident);
+    const sameSource = file("actual-print-observation-format");
+    const sourceSelection = { paths: [sameSource], productName: "실제 원본 부분 판독 사례", selectedProduct: "partial-print-format-concurrent" };
+    const sourceCalls: CodexDraftOptions[] = [];
+    const sharedReview = async (call: CodexDraftOptions) => {
+      sourceCalls.push(call);
+      await Promise.resolve();
+      return sourceCalls.length === 1 ? actualPrintIncident.invalidResponse : actualPrintIncident.clarifiedResponse;
+    };
+    const shared = await Promise.all(Array.from({ length: 3 }, () => selectShoppingSceneReference(sourceSelection,
+      { verify: async paths => paths, review: sharedReview })));
+    assert.equal(sourceCalls.length, 2, "three concurrent scene slots share one source observation and at most one narrow format clarification");
+    assert(shared.every(row => row.path === sameSource && row.viewObservation?.intrinsicPrint === "unreadable" && row.viewObservation.readableIdentifiers.length === 0));
+    assert.match(sourceCalls[1].userPrompt, /SOURCE PRINT FORMAT CLARIFICATION/);
+    assert.deepEqual(sourceCalls[0].imagePaths, sourceCalls[1].imagePaths);
+    assert.deepEqual(sourceCalls[0].outputSchema, sourceCalls[1].outputSchema);
+    assert.equal(JSON.stringify(actualPrintIncident), incidentBefore, "the malformed original is retained, never normalized into the accepted result");
+    for (const outcome of ["still-invalid", "adverse-first", "adverse-second"] as const) {
+      let nativeCalls = 0;
+      await assert.rejects(selectShoppingSceneReference({ paths: [file(outcome)], productName: outcome, selectedProduct: outcome }, {
+        verify: async paths => paths, review: async () => {
+          nativeCalls++;
+          if (outcome === "adverse-first" || outcome === "adverse-second" && nativeCalls === 2) {
+            const raw = JSON.parse(outcome === "adverse-first" ? actualPrintIncident.invalidResponse : actualPrintIncident.clarifiedResponse);
+            raw.notDeformed = false; raw.reason = "Actual visible deformation remains a negative";
+            return JSON.stringify(raw);
+          }
+          return actualPrintIncident.invalidResponse;
+        },
+      }));
+      assert.equal(nativeCalls, outcome === "adverse-first" ? 1 : 2, "no genuine adverse response is rewritten, retried into a favorable flag, or approved");
+    }
     const deformed = file("deformed");
     const sourceRejection = { stage: "seller-product-photo" as const, candidateSha256: hash(angled),
       failedChecks: ["productPhoto"], reason: "a seller notice instead of the selected product" };
@@ -108,7 +142,9 @@ async function main() {
         assert.ok(error.message.includes(hash(candidate)));
         return true;
       });
-      assert.equal(selectorCalls, 1, "invalid evidence must stop rather than approve a competing candidate");
+      const printFormatOnly = (malformed as { viewObservation?: ShoppingReferenceViewObservation } | null)?.viewObservation?.intrinsicPrint === "unreadable" &&
+        Boolean((malformed as { viewObservation?: ShoppingReferenceViewObservation } | null)?.viewObservation?.readableIdentifiers?.length);
+      assert.equal(selectorCalls, printFormatOnly ? 2 : 1, "a narrow print-format clarification may reobserve only the same input once; invalid evidence never selects a competing candidate");
       assert.equal(rejectCallbacks, 0, "malformed responses are not product/geometry rejections");
       const retried = await selectShoppingSceneReference(selection, {
         verify: async paths => paths,
@@ -120,7 +156,7 @@ async function main() {
         },
       });
       assert.equal(retried.path, candidate);
-      assert.equal(selectorCalls, 2, "invalid response leaves no cached selection or cached rejection");
+      assert.equal(selectorCalls, printFormatOnly ? 3 : 2, "invalid response leaves no cached selection or cached rejection");
     }
     await assert.rejects(selectShoppingSceneReference({ paths: [file("reference-invalid-json")], productName: "invalid-json", selectedProduct: "invalid-json" }, {
       verify: async paths => paths,

@@ -681,7 +681,7 @@ async function verifyReviewOnlyRecovery() {
           { stage: "refresh-source", input: signature, output: signature, status: "failed", at: "original", reason: "SOURCE_REVIEW_INCOMPLETE" },
           { stage: "replan-images", input: signature, output: signature, status: "failed", at: "original", reason: "REFERENCE_SCENE_FIDELITY_FAILED" }];
         fs.writeFileSync(historyFile, JSON.stringify({ version: 1, entries: legacyEntries }));
-        let imageCalls = 0, snapshots = 0, finished = false, approved = false;
+        let imageCalls = 0, snapshots = 0, finished = false, approved = false, currentPixelReviews = 0;
         const call: Call = async (url, method, body) => {
           const action = (body as { action?: string })?.action;
           if (url.endsWith("/images") && method === "POST") {
@@ -690,6 +690,15 @@ async function verifyReviewOnlyRecovery() {
             results = await generate();
             if (results[0].error) throw Object.assign(new Error(results[0].error), { code: results[0].errorCode || "IMAGE_REPAIR_FAILED" });
             finished = true;
+          } else if (action === "audit_photo_descriptions") {
+            currentPixelReviews++;
+            // This fixture deliberately retains a genuinely rejected current
+            // headline. Fresh read-only QA must happen before copy recovery;
+            // it neither edits the manuscript nor resets a generation budget.
+            throw Object.assign(new Error("The exact current headline still has its observed copy defect"), {
+              code: "PUBLISH_IMAGE_AUDIT_FAILED", errors: ["SEMANTIC_REJECTION: current headline copy conflicts"],
+              imageAuditFailures: [{ code: "SEMANTIC_REJECTION", sectionId: null, rejectionScope: "product" }],
+            });
           } else if (mode === "blocked-text" && action === "revise") {
             throw Object.assign(new Error("The manuscript still fails its source-backed text gate"), { code: "QUALITY_REPAIR_REJECTED" });
           } else if (action === "approve") approved = true;
@@ -704,6 +713,8 @@ async function verifyReviewOnlyRecovery() {
         if (successMode) await workflow;
         else await assert.rejects(workflow, (error: unknown) => (error as { code?: string }).code === (mode === "same-copy" ? "IMAGE_OUTPUT_REJECTED" : mode === "blocked-text" ? "QUALITY_REPAIR_REJECTED" : "COMPOSITION_REPAIR_REQUIRED"));
         assert.equal(snapshots, 1); assert.equal(approved, successMode);
+        assert.equal(currentPixelReviews, mode === "blocked-text" ? 0 : 1,
+          "retained rejected hero receives one actual current QA before any copy recovery; text gate still runs first");
         assert.equal(imageCalls, ["changed-copy", "same-copy", "changed-copy-retired-recipes"].includes(mode) ? 1 : 0);
         const history = JSON.parse(fs.readFileSync(historyFile, "utf8"));
         assert.deepEqual(history.entries.slice(0, legacyEntries.length), legacyEntries, "legacy failures are retained verbatim");
