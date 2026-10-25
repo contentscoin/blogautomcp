@@ -591,8 +591,9 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
     deps.onStage?.("이미지 준비");
     await waitForImagesIdle();
     if (!draft.data) throw new Error("준비 중 소재가 사라졌습니다.");
-    // A retained original is excluded from coverage after a final rejection,
-    // even when only its caption is wrong. Diagnose those exact pixels first;
+    // Retained body/hero pixels are excluded after a final rejection, even
+    // when a corrected review contract can resolve the old false positive.
+    // Diagnose those exact pixels first;
     // source recollection cannot repair an inaccurate sentence and must not
     // prevent a safe same-image correction.
     if (mode === "normal") await diagnoseRejectedPhotoDescriptions?.();
@@ -825,7 +826,7 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
   // Existing packages may already contain a final-audit rejection. Diagnose
   // those retained pixels before treating their uncounted slot as a new scene.
   diagnoseRejectedPhotoDescriptions = async () => {
-    if (!draft.data?.approval?.blockers?.some(blocker => blocker.code === "image-publication-rejected" && blocker.sectionId)) return;
+    if (!draft.data?.approval?.blockers?.some(blocker => blocker.code === "image-publication-rejected")) return;
     deps.onStage?.("기존 거절 사진의 실제 픽셀·본문 의미 재검사");
     try {
       await deps.call(`${base}/draft`, "PATCH", { action: "audit_photo_descriptions" });

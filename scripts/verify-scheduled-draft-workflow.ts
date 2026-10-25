@@ -52,6 +52,32 @@ async function main() {
   });
   const material = (id: string) => ({ productId: id, revision, title: id, connectKind: "SHOPPING" as const, ready: true, blockers: [] as string[], score: 100, imageCount: 3, createdAt: "", approvedAt: "approved" });
   try {
+    for (const outcome of ["accepted", "invalid"] as const) {
+      const actions: string[] = [];
+      let reviewed = false, approved = false, backups = 0;
+      const invalid = Object.assign(new Error("Fresh thumbnail review is unavailable"), { code: "PUBLISH_IMAGE_AUDIT_FAILED",
+        imageAuditFailures: [{ code: "INVALID_REVIEW", sectionId: null }] });
+      const operation = runMaterialPreparation(`retained-hero-${outcome}`, { pause: async () => {}, call: async (url, method, body) => {
+        const action = (body as { action?: string } | undefined)?.action || method;
+        actions.push(action);
+        assert(!url.endsWith("/images") && !["revise", "prepare_context", "repair_photo_description"].includes(action),
+          "an existing hero rejection must reach fresh current pixel review before any generation, edit or source refresh");
+        if (action === "audit_photo_descriptions") {
+          assert.equal(backups, 1);
+          if (outcome === "invalid") throw invalid;
+          reviewed = true;
+        }
+        if (action === "approve") { assert(reviewed); approved = true; }
+        return { success: true, data: { connectKind: "SHOPPING", approvedAt: approved ? "current-native-approved" : null,
+          imageGeneration: { status: "complete" }, imageSlots: [],
+          imageAssets: [{ role: "hero", sectionId: null, sha256: "a".repeat(64) }],
+          approval: { canApprove: reviewed, blockers: reviewed ? [] : [{ code: "image-publication-rejected", sectionId: null,
+            reason: "대표 이미지 · 이전 최종 픽셀 검수 거절" }] }, contentQuality: { signals: [] } } };
+      } }, { incrementalOnly: true, beforeRepair: async () => { backups++; } });
+      if (outcome === "invalid") { await assert.rejects(operation, error => error === invalid); assert(!approved); }
+      else { await operation; assert(approved); }
+      assert.equal(actions.filter(action => action === "audit_photo_descriptions").length, 1);
+    }
     for (const count of [1, 2, 13]) {
       const textOnlyActions: string[] = [];
       await assert.rejects(runMaterialPreparation(`text-claim-only-${count}`, {
