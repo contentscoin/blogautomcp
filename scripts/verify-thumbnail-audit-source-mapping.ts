@@ -79,7 +79,8 @@ async function main() {
           primaryReferenceSha256: reference.primaryReferenceSha256, objectionKind: "none", observation: "The actual compared source and final geometry correspond; independent selected-gallery pixels support the same visible product/option." } : null,
         identityMatches: true, photoClaimMatches: true, notice: false, mixedOptions: false,
         explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true,
-        textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo", ...patch }] });
+        visibleAddedText: { headline: slot.role === "thumbnail" ? "구매 전 확인" : "", otherAddedText: [] },
+        thumbnailHeadlineLegible: true, reviewClass: "product-photo", ...patch }] });
       return lastRaw;
     };
     respond = async call => {
@@ -96,6 +97,9 @@ async function main() {
       assert.deepEqual(actual, expected, "comparison attachment preserves exact source pixels");
       assert(!JSON.stringify(call.outputSchema).includes('"accepted"'), "new native wire does not request duplicate aggregate approval");
       assert(!call.userPrompt.includes('"accepted":true'), "the native example omits aggregate approval as well as its schema");
+      assert(!JSON.stringify(call.outputSchema).includes('"textPolicyMatches"'), "the native wire observes added text instead of requesting its policy classification");
+      assert(!call.userPrompt.includes('"textPolicyMatches":true'));
+      assert(JSON.stringify(call.outputSchema).includes('"visibleAddedText"'));
       assert(call.userPrompt.includes(`"contractVersion":"${LIGHTWEIGHT_PUBLICATION_DETAILED_CONTRACT}"`));
       return answer(call);
     };
@@ -104,11 +108,31 @@ async function main() {
     assert.equal(good.ok, true, JSON.stringify(good.failures)); assert.equal(calls, 1);
     assert.equal(good.lightweightReviews![0].rawResponse, lastRaw);
     assert.equal(Object.hasOwn(JSON.parse(lastRaw).reviews[0], "accepted"), false);
+    assert.equal(Object.hasOwn(JSON.parse(lastRaw).reviews[0], "textPolicyMatches"), false);
     assert.equal(policyContext!.schema.properties.contractVersion.const, LIGHTWEIGHT_PUBLICATION_DETAILED_CONTRACT);
     assert.equal(Object.hasOwn(policyContext!.schema.properties.reviews.items.properties, "accepted"), false,
       "success policy hashes the actual marker/noaggregate native contract rather than the old aggregate schema");
-    assert.match(policyContext!.localGates, /-v3$/u);
+    assert.equal(Object.hasOwn(policyContext!.schema.properties.reviews.items.properties, "textPolicyMatches"), false);
+    assert.match(policyContext!.localGates, /-v4$/u);
     assert.deepEqual([thumbnail.outputPath, crop, canonical, receiptPath, canonicalReceiptPath].map(hash), before); checks += 18;
+    respond = async call => answer(call, { reason: "One same two-line headline overlays ordinary product surfaces; distinguishing housing/base remain visible and no other added wording exists.",
+      visibleAddedText: { headline: "제품\n사양 체크", otherAddedText: [] } });
+    const soleWrappedHeadline = await audit(input);
+    assert.equal(soleWrappedHeadline.ok, true, JSON.stringify(soleWrappedHeadline.failures));
+    assert.equal(soleWrappedHeadline.lightweightReviews![0].verdicts[0]?.textPolicyMatches, true,
+      "a single wrapped headline is the one thumbnail headline even when it overlaps ordinary product surfaces");
+    assert.equal(soleWrappedHeadline.lightweightReviews![0].rawResponse, lastRaw); checks += 3;
+    respond = async call => answer(call, { visibleAddedText: { headline: "제품\n사양 체크", otherAddedText: ["추가 할인 문구"] } });
+    const actualExtraText = await audit(input);
+    assert.equal(actualExtraText.ok, false); assert(actualExtraText.failures.some(row => row.code === "SEMANTIC_REJECTION")); checks += 2;
+    respond = async call => answer(call, { visibleAddedText: { headline: "제품\n사양 체크", otherAddedText: [] }, thumbnailHeadlineLegible: false });
+    const clippedHeadline = await audit(input);
+    assert.equal(clippedHeadline.ok, false); assert(clippedHeadline.failures.some(row => row.code === "SEMANTIC_REJECTION")); checks += 2;
+    respond = async call => answer(call, { textPolicyMatches: false });
+    const legacyTextFlag = await audit(input);
+    assert.equal(legacyTextFlag.ok, false); assert(legacyTextFlag.failures.every(row => row.code === "INVALID_REVIEW"));
+    assert.equal(JSON.parse(legacyTextFlag.lightweightReviews![0].rawResponse).reviews[0].textPolicyMatches, false,
+      "a negative legacy flag is retained and rejected, never stripped or promoted to the observation contract"); checks += 3;
 
     // A real adverse selected-option comparison remains adverse; adding an own
     // source attachment never converts a model's negative gate into approval.
@@ -147,6 +171,9 @@ async function main() {
     const body = await audit(bodyInput);
     assert.equal(body.ok, true, JSON.stringify(body.failures)); assert.equal(calls, 1);
     assert.equal(body.lightweightReviews![0].rawResponse, lastRaw); checks += 6;
+    respond = async call => answer(call, { visibleAddedText: { headline: "", otherAddedText: ["본문 사진 위 설명 문구"] } }, selectedPair(call));
+    const bodyOverlay = await audit(bodyInput);
+    assert.equal(bodyOverlay.ok, false); assert(bodyOverlay.failures.some(row => row.code === "SEMANTIC_REJECTION")); checks += 2;
     for (const conflict of ["candidate-index", "wrong-pair", "unattached-sha"]) {
       respond = async call => { const chosen = selectedPair(call); return answer(call, { referenceComparison: {
         primaryReferenceImageIndex: conflict === "candidate-index" ? 1 : conflict === "wrong-pair" ? chosen.imageIndex - 1 : chosen.imageIndex,

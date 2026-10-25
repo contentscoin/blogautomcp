@@ -1,0 +1,155 @@
+{
+  "note": "Unmodified selected 171 native rows. The old false textPolicyMatches is preserved and must never be promoted into the new literal-observation contract. No image pixels or live data are included.",
+  "fixtures": [
+    {
+      "name": "single-headline-two-lines",
+      "sourceRollout": "rollout-2026-10-25T13-02-24-01a17139-522b-72b1-a175-cd8ef63a814d.jsonl",
+      "sourceResponseSha256": "6beff6b26ac801a431ed54edeaa84792c35114497bdd3ebb717c935eb068f256",
+      "contractVersion": "publication-visible-details/v1",
+      "rawReview": {
+        "index": 1,
+        "reason": "이미지 1의 흰색 로봇청소기와 세로형 도크는 선택 참조의 둥근 본체, 돌출 센서부, 줄무늬 전면 도크 및 하단 수용 구조와 대응합니다. ‘제품 사용 체크’는 사진에 없는 성능이나 결과를 주장하지 않는 짧은 제목입니다. 다만 썸네일에 흰색 외곽선의 큰 문구 두 개(‘제품 사용’, ‘체크’)가 각각 배치되어 있어 허용된 단일 헤드라인 형식에 맞지 않습니다.",
+        "visibleIdentityEvidence": {
+          "basis": "observed-correspondence",
+          "landmarks": [
+            {
+              "part": "로봇청소기 본체와 상단 센서",
+              "referenceObservation": "둥근 흰색 본체 중앙에 원형으로 솟은 센서가 보임",
+              "candidateObservation": "둥근 흰색 본체 중앙에 원형으로 솟은 센서가 보임"
+            },
+            {
+              "part": "자동 관리 도크",
+              "referenceObservation": "세로형 흰색 도크의 줄무늬 전면과 하단 본체 수용부가 보임",
+              "candidateObservation": "세로형 흰색 도크의 줄무늬 전면과 하단 본체 수용부가 보임"
+            }
+          ],
+          "conflict": ""
+        },
+        "optionConflictWitness": {
+          "origin": "none",
+          "quote": "",
+          "visibleAlternatives": []
+        },
+        "photoClaimObjection": {
+          "origin": "none",
+          "sourceIndex": null,
+          "quote": "",
+          "scope": "none",
+          "conflict": ""
+        },
+        "referenceComparison": {
+          "primaryReferenceImageIndex": 6,
+          "primaryReferenceSha256": "335fa470fcbfefb1a4ae93bcaa218624372d2197494be0da4ce09fe5a78a7ba6",
+          "objectionKind": "none",
+          "observation": "도크 전면과 본체의 형태·배치가 참조 이미지와 대응하며, 선택 옵션 색상은 미확정이고 눈에 보이는 색상 충돌은 없음."
+        },
+        "identityMatches": true,
+        "photoClaimMatches": true,
+        "notice": false,
+        "mixedOptions": false,
+        "explicitNamedComparison": false,
+        "optionsClearlyLabeled": false,
+        "singlePhotograph": true,
+        "noGraphicLayout": true,
+        "textPolicyMatches": false,
+        "thumbnailHeadlineLegible": true,
+        "reviewClass": "product-photo"
+      },
+      "requestSlot": {
+        "role": "thumbnail",
+        "imageIntent": "로보락 Qrevo L Pro 로봇청소기, 자동 관리 도크와 흡입력 확인",
+        "referencePlaneMap": {
+          "primaryReferenceImageIndex": 6,
+          "primaryReferenceSha256": "335fa470fcbfefb1a4ae93bcaa218624372d2197494be0da4ce09fe5a78a7ba6",
+          "supplementalReferences": [
+            {
+              "imageIndex": 5,
+              "sha256": "ba68fa51d6d9b7f50501488fdf961959aa7309d90be2b28d9e78335d055bb153"
+            },
+            {
+              "imageIndex": 7,
+              "sha256": "2bfa706b8105d30eace6b5f97811ae8779a9da4d757ab1dba1635792f51a8f24"
+            },
+            {
+              "imageIndex": 8,
+              "sha256": "def0980d54738e6426227c430b9268cc3890f6847da020ce8b5b2d09f254fd5b"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "single-headline-overlap",
+      "sourceRollout": "rollout-2026-10-25T13-03-55-01a1713a-b766-7762-b77f-2302a8e686bf.jsonl",
+      "sourceResponseSha256": "8d878e0c277a9860e0b39b398ba4627739a5b27af68480b45b4eca1dca0f5c15",
+      "contractVersion": "publication-visible-details/v1",
+      "rawReview": {
+        "index": 1,
+        "reason": "제품 본체와 도크가 선택 출처와 대응한다. 썸네일 문구 ‘제품 사용 체크’는 큰 제목 하나로 읽히며, 성능을 사진이 입증한다고 주장하지 않는다. 다만 글자가 제품 위에 겹쳐져 있다.",
+        "visibleIdentityEvidence": {
+          "basis": "observed-correspondence",
+          "landmarks": [
+            {
+              "part": "도크 상단의 세로 줄무늬 패널과 우측 돌출부",
+              "referenceObservation": "흰색 도크 상단에 세로 줄무늬 전면과 우측 상단 돌출 구조가 있다.",
+              "candidateObservation": "같은 세로 줄무늬 전면과 우측 상단 돌출 구조가 보인다."
+            },
+            {
+              "part": "도크 아래 로봇 본체",
+              "referenceObservation": "흰색 둥근 본체가 도크 아래에 놓이고 전면 검은 센서창이 보인다.",
+              "candidateObservation": "흰색 둥근 본체가 같은 도크 아래에 있으며 전면 검은 센서창이 보인다."
+            }
+          ],
+          "conflict": ""
+        },
+        "optionConflictWitness": {
+          "origin": "none",
+          "quote": "",
+          "visibleAlternatives": []
+        },
+        "photoClaimObjection": {
+          "origin": "none",
+          "sourceIndex": null,
+          "quote": "",
+          "scope": "none",
+          "conflict": ""
+        },
+        "referenceComparison": {
+          "primaryReferenceImageIndex": 6,
+          "primaryReferenceSha256": "ba68fa51d6d9b7f50501488fdf961959aa7309d90be2b28d9e78335d055bb153",
+          "objectionKind": "none",
+          "observation": "둥근 로봇 본체와 세로 줄무늬 전면 도크 및 우측 상단 돌출부가 출처와 대응한다."
+        },
+        "identityMatches": true,
+        "photoClaimMatches": true,
+        "notice": false,
+        "mixedOptions": false,
+        "explicitNamedComparison": false,
+        "optionsClearlyLabeled": false,
+        "singlePhotograph": true,
+        "noGraphicLayout": true,
+        "textPolicyMatches": false,
+        "thumbnailHeadlineLegible": true,
+        "reviewClass": "product-photo"
+      },
+      "requestSlot": {
+        "role": "thumbnail",
+        "imageIntent": "로보락 Qrevo L Pro 로봇청소기, 자동 관리 도크와 흡입력 확인",
+        "referencePlaneMap": {
+          "primaryReferenceImageIndex": 6,
+          "primaryReferenceSha256": "ba68fa51d6d9b7f50501488fdf961959aa7309d90be2b28d9e78335d055bb153",
+          "supplementalReferences": [
+            {
+              "imageIndex": 7,
+              "sha256": "2bfa706b8105d30eace6b5f97811ae8779a9da4d757ab1dba1635792f51a8f24"
+            },
+            {
+              "imageIndex": 8,
+              "sha256": "def0980d54738e6426227c430b9268cc3890f6847da020ce8b5b2d09f254fd5b"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

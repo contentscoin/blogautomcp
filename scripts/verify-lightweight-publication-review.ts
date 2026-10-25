@@ -54,7 +54,7 @@ const good = (index = 1) => ({ index, reason: "Distinct selected housing and cap
   optionConflictWitness: { origin: "none", quote: "", visibleAlternatives: [] }, photoClaimObjection: neutralClaim,
   referenceComparison: null, identityMatches: true, photoClaimMatches: true, notice: false, mixedOptions: false,
   explicitNamedComparison: false, optionsClearlyLabeled: false, singlePhotograph: true, noGraphicLayout: true,
-  textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo" });
+  visibleAddedText: { headline: "", otherAddedText: [] }, thumbnailHeadlineLegible: true, reviewClass: "product-photo" });
 
 async function main() {
   const photo = path.join(temporary, "photo.png"), source = path.join(temporary, "source.png");
@@ -211,7 +211,7 @@ async function main() {
     { identityMatches: false, reason: "Large readable different identifying logo" },
     { identityMatches: false, reason: "Visible distinguishing structure is genuinely unresolved" },
     { noGraphicLayout: false, reason: "Graphic panel and border around reduced photograph" },
-    { textPolicyMatches: false, reason: "Added explanation burned into body image" },
+    { visibleAddedText: { headline: "", otherAddedText: ["실제 본문 사진에 추가된 설명"] }, reason: "Added explanation burned into body image" },
   ]) {
     respond = async () => nativeReviewResponse([{ ...good(), ...patch,
       ...(patch.identityMatches === false ? { visibleIdentityEvidence: { basis: "concrete-conflict", landmarks: [

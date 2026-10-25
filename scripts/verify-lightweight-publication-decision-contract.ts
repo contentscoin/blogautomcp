@@ -22,7 +22,7 @@ const good: Record<string, unknown> = { index: 1, reason: "The actual selected s
   photoClaimObjection: { origin: "none", sourceIndex: null, quote: "", scope: "none", conflict: "" },
   referenceComparison: { primaryReferenceImageIndex: 2, primaryReferenceSha256: reference.primaryReferenceSha256, objectionKind: "none", observation: "Matching visible housing and cap" },
   identityMatches: true, photoClaimMatches: true, notice: false, mixedOptions: false, explicitNamedComparison: false, optionsClearlyLabeled: false,
-  singlePhotograph: true, noGraphicLayout: true, textPolicyMatches: true, thumbnailHeadlineLegible: true, reviewClass: "product-photo" };
+  singlePhotograph: true, noGraphicLayout: true, visibleAddedText: { headline: "", otherAddedText: [] }, thumbnailHeadlineLegible: true, reviewClass: "product-photo" };
 const wire = (row: Record<string, unknown>) => JSON.stringify({ contractVersion: LIGHTWEIGHT_PUBLICATION_DETAILED_CONTRACT, reviews: [row] });
 const read = (row: Record<string, unknown>) => lightweightPublicationDetailedRows(wire(row), [slot])[0];
 
@@ -47,8 +47,8 @@ assert.match(LIGHTWEIGHT_PUBLICATION_REVIEW_RULE, /plain or white background/u);
 // The native wire schema removes the redundant aggregate rather than asking a
 // second examiner or changing any returned false flag into a favorable flag.
 const schema = { type: "object", properties: { reviews: { type: "array", items: { type: "object", properties: {
-  ...Object.fromEntries(Object.keys(good).map(key => [key, {}])), accepted: { type: "boolean" },
-}, required: [...Object.keys(good), "accepted"], additionalProperties: false } } }, required: ["reviews"], additionalProperties: false };
+  ...Object.fromEntries(Object.keys(good).map(key => [key, {}])), accepted: { type: "boolean" }, textPolicyMatches: { type: "boolean" },
+}, required: [...Object.keys(good), "accepted", "textPolicyMatches"], additionalProperties: false } } }, required: ["reviews"], additionalProperties: false };
 const beforeSchema = JSON.stringify(schema);
 const detailed = lightweightPublicationDetailedSchema(schema);
 assert.equal(JSON.stringify(schema), beforeSchema);
@@ -58,23 +58,28 @@ for (const accepted of [false, true, null, "true"]) {
   assert.equal(validate(JSON.parse(wire({ ...good, accepted }))), false);
   assert.equal(read({ ...good, accepted }), null, "even a favorable legacy aggregate is not relabeled as detailed native evidence");
 }
+for (const textPolicyMatches of [false, true, null, "true"]) {
+  assert.equal(validate(JSON.parse(wire({ ...good, textPolicyMatches }))), false);
+  assert.equal(read({ ...good, textPolicyMatches }), null, "old text-policy verdicts are never promoted into literal observations");
+}
 const original = JSON.stringify(good), projected = read(good)!;
 assert.equal(projected.accepted, true);
 assert.equal(JSON.stringify(good), original);
 assert.equal(Object.hasOwn(good, "accepted"), false);
-assert.deepEqual(Object.fromEntries(Object.entries(projected).filter(([key]) => key !== "accepted")), good);
+assert.equal(Object.hasOwn(good, "textPolicyMatches"), false);
+assert.deepEqual(Object.fromEntries(Object.entries(projected).filter(([key]) => key !== "accepted" && key !== "textPolicyMatches")), good);
 const thumbnailSlot = { ...slot, role: "thumbnail" };
-const twoLineHeadline = { ...good, reason: "One accurate large headline, '향·용량 구성', wraps after '향·용량' onto two lines over the same full-bleed photo; no second title or panel is present" };
+const twoLineHeadline = { ...good, visibleAddedText: { headline: "향·용량\n구성", otherAddedText: [] }, reason: "One accurate large headline, '향·용량 구성', wraps after '향·용량' onto two lines over the same full-bleed photo; no second title or panel is present" };
 assert.match(LIGHTWEIGHT_PUBLICATION_REVIEW_RULE, /SAME headline may wrap onto at most two lines/u);
 assert.equal(lightweightPublicationDetailedRows(wire(twoLineHeadline), [thumbnailSlot])[0]?.accepted, true);
 for (const patch of [
-  { textPolicyMatches: false, reason: "Two independent headlines make separate claims over the photograph" },
+  { visibleAddedText: { headline: "향·용량 구성", otherAddedText: ["별도의 가격 주장"] }, reason: "Two independent headlines make separate claims over the photograph" },
   { noGraphicLayout: false, reason: "A separate panel or frame carries the headline" },
   { thumbnailHeadlineLegible: false, reason: "The last essential Korean letter is clipped at the canvas edge" },
 ]) assert.equal(lightweightPublicationDetailedRows(wire({ ...twoLineHeadline, ...patch }), [thumbnailSlot])[0]?.accepted, false);
-assert.equal(read({ ...twoLineHeadline, textPolicyMatches: false, reason: "The body photo contains added title text" })?.accepted, false);
+assert.equal(read({ ...twoLineHeadline, reason: "The body photo contains added title text" })?.accepted, false);
 
-for (const patch of [{ noGraphicLayout: false }, { textPolicyMatches: false }, { singlePhotograph: false }, { notice: true }]) {
+for (const patch of [{ noGraphicLayout: false }, { visibleAddedText: { headline: "", otherAddedText: ["실제 추가 설명"] } }, { singlePhotograph: false }, { notice: true }]) {
   const raw = { ...good, ...patch, reason: "An actual forbidden frame/text, impossible scene or seller notice is observed" };
   const snapshot = JSON.stringify(raw);
   assert.equal(read(raw)?.accepted, false);
