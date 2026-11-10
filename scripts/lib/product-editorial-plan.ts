@@ -739,6 +739,11 @@ export function hasSufficientProductReviewEvidence(input: ProductEditorialPlanIn
   return analysis.evidenceLevel !== "sparse";
 }
 
+/** 수집된 상품 근거의 양. sparse여도 작성은 가능하며 글 유형과 프롬프트만 달라진다. */
+export function gradeProductEvidence(input: ProductEditorialPlanInput): ProductReviewAnalysis["evidenceLevel"] {
+  return buildProductReviewAnalysis(input).evidenceLevel;
+}
+
 /** 판매 페이지에서 확인된 사실을 `라벨: 값` 줄로 만든다. 프롬프트와 품질 채점이 같은 줄을 본다. */
 export function buildProductVerifiedFactLines(input: ProductEditorialPlanInput): string[] {
   const description = meaningfulDescription(input.description, input.productName);
