@@ -11,6 +11,9 @@ import {
   TRAVEL_POST_CONTRACT_V1,
 } from "../src/lib/post-composition-contract";
 
+// 이 검증은 품질 채점이 발행을 막는 strict 프로필의 판정을 다룬다. 쇼핑 기본값은 essential이다.
+process.env.SHOPPING_GATE_PROFILE = "strict";
+
 const productName = "출발확정 여행핫딜 시내숙박 대마도 2일 패키지";
 const disclosure = "이 포스팅은 네이버 여행 커넥트 활동의 일환으로, 예약 발생 시 수수료를 제공받습니다.";
 const travelSourceFeatures = [
@@ -459,7 +462,7 @@ assert.match(formatDraftSubmissionNextAction(), /이미지·배치 실패만 있
 // The deployed repair policy was raised to three attempts; retain the bounded
 // loop assertion rather than assuming the obsolete two-attempt constant.
 assert.match(simpleAgentSource, /maximumRepairAttempts = 1;/u, "2026-09-24 보정: 보강은 1회로 끝낸다");
-assert.match(simpleAgentSource, /repairAttempt <= maximumRepairAttempts && !editorialQuality.canPublish/u);
+assert.match(simpleAgentSource, /repairAttempt <= maximumRepairAttempts && \(!editorialQuality\.canPublish \|\| Boolean\(editorialQuality\.advisory\)\)/u);
 assert.match(simpleAgentSource, /shouldAcceptQualityRepair\(editorialQuality, repairedQuality\)/u);
 assert.doesNotMatch(simpleAgentSource, /편집 역할 \$\{role\}/u);
 assert.match(sitesMcpSource, /실제 원고 내용 실패\(텍스트 signals\)는 새 idempotencyKey로 post_revise_draft를 호출/u);
