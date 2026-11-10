@@ -5602,10 +5602,12 @@ ${mandatoryWritingPromptBlock}`;
     "repetitive-content",
     "quality-score-below-threshold",
   ]);
+  // essential 게이트는 품질 미달을 권고로만 돌려준다. 발행은 막지 않지만 한 번은 보강을 시도한다.
+  const advisoryRepair = Boolean(editorialQuality.advisory) && !BRANDLINK_GENERATED_DRAFT_PATH;
   const shouldAttemptQualityRepair =
     BRANDLINK_AUTO_QUALITY_REPAIR_ENABLED &&
-    repairableQualityCodes.has(editorialQuality.code) &&
-    (!editorialQuality.canPublish || BRANDLINK_FORCE_QUALITY_REPAIR);
+    repairableQualityCodes.has(editorialQuality.advisory?.code ?? editorialQuality.code) &&
+    (!editorialQuality.canPublish || BRANDLINK_FORCE_QUALITY_REPAIR || advisoryRepair);
 
   if (shouldAttemptQualityRepair) {
     let previousRepairFeedback = "";
@@ -5629,8 +5631,8 @@ ${mandatoryWritingPromptBlock}`;
       return `아래 초안을 품질검사 결과를 모두 해결한 완성본으로 고쳐주세요.
 
 [품질검사]
-- 판정: ${editorialQuality.code}
-- 이유: ${editorialQuality.reason || editorialQuality.summary}
+- 판정: ${editorialQuality.advisory?.code ?? editorialQuality.code}
+- 이유: ${editorialQuality.advisory?.reason || editorialQuality.reason || editorialQuality.summary}
 - 실패 항목: ${failedSignals.join(", ") || "없음"}
 - 하드 차단: ${editorialQuality.blockers.map((blocker) => blocker.reason).join(" / ") || "없음"}
 - 품질 점수: ${editorialQuality.quality.score}/${editorialQuality.quality.passScore}
@@ -5669,8 +5671,8 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
       let lastRepairScore = editorialQuality.score;
       // 2026-09-24 보정: 경고만 남은 원고는 통과하므로 보강은 1회로 끝낸다.
       const maximumRepairAttempts = 1;
-      for (let repairAttempt = 1; repairAttempt <= maximumRepairAttempts && !editorialQuality.canPublish; repairAttempt += 1) {
-        reportDraftProgress("qc", `원고 보강 ${repairAttempt}/${maximumRepairAttempts} · ${editorialQuality.reason || editorialQuality.code}`);
+      for (let repairAttempt = 1; repairAttempt <= maximumRepairAttempts && (!editorialQuality.canPublish || Boolean(editorialQuality.advisory)); repairAttempt += 1) {
+        reportDraftProgress("qc", `원고 보강 ${repairAttempt}/${maximumRepairAttempts} · ${editorialQuality.advisory?.reason || editorialQuality.reason || editorialQuality.code}`);
         const repairedText = await generateWithAI(
           systemPrompt,
           buildRepairPrompt(),
@@ -5723,7 +5725,9 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
       qualityRepair.afterScore = editorialQuality.score;
       qualityRepair.afterCode = editorialQuality.code;
       qualityRepair.note = editorialQuality.canPublish
-        ? `요청 과정에서 품질 자동 보강 완료 (${beforeEditorialQuality.score}→${editorialQuality.score}점)`
+        ? qualityRepair.applied
+          ? `요청 과정에서 품질 자동 보강 완료 (${beforeEditorialQuality.score}→${editorialQuality.score}점)`
+          : `발행 가능 · 권고 보강 결과가 더 낫지 않아 원문 유지 (${lastRepairScore}점)`
         : qualityRepair.applied
           ? `자동 보강 후에도 발행 기준 미달 (${beforeEditorialQuality.score}→${editorialQuality.score}점)`
           : `자동 보강 결과가 개선 기준에 못 미쳐 원문 유지 (${lastRepairScore}점)`;

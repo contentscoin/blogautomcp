@@ -26,6 +26,7 @@
     "test:product-substance": "ts-node --project tsconfig.scripts.json scripts/verify-product-substance-context.ts",
     "test:writing-structure": "ts-node --project tsconfig.scripts.json scripts/verify-writing-structure-guide.ts",
     "test:osaka-audit": "tsx scripts/verify-travel-scene-context.ts && ts-node --project tsconfig.scripts.json scripts/verify-content-readiness-failures.ts && tsx scripts/verify-osaka-editorial-contract.ts",
+    "test:shopping-essential-gate": "tsx scripts/verify-shopping-essential-gate.ts",
     "test:quality-repair": "ts-node --project tsconfig.scripts.json scripts/verify-quality-repair-policy.ts",
     "test:editorial-calibration": "tsx scripts/verify-editorial-gate-calibration.ts",
     "test:text-model-policy": "ts-node --project tsconfig.scripts.json scripts/verify-text-model-policy.ts && node scripts/verify-codex-model-default.cjs",
