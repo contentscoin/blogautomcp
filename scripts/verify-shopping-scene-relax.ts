@@ -5,7 +5,7 @@ import { SHOPPING_POST_CONTRACT_V1, buildPostQualityReport, type ResolvedPostSec
 import { SHOPPING_POST_STRATEGY_VERSION, isShoppingSceneCoverageRelaxed } from "../src/lib/shopping-post-strategy";
 import { isOptionalSceneImageFailure } from "./lib/scheduled-draft-workflow";
 
-type Fixture = { hero?: boolean; original?: boolean; scenes?: string[][]; rejected?: string[]; running?: boolean };
+type Fixture = { hero?: boolean; original?: boolean; scenes?: string[][]; rejected?: string[]; running?: boolean; sellerPhotos?: string[]; repairFails?: boolean };
 
 function fixture(options: Fixture = {}) {
   const scenes = options.scenes || [[], [], []];
@@ -32,12 +32,25 @@ function fixture(options: Fixture = {}) {
   const rejected = new Set(options.rejected || []);
   let writes = 0;
   let released = 0;
+  const repairRequests: string[][] = [];
   const deps = {
     read: () => structuredClone(stored),
     write: (value: BrandPostPackageManifestV2) => { stored = value; writes += 1; return value; },
     reconcile: (value: BrandPostPackageManifestV2) => value,
     lock: () => ({ assertOwner() {}, release() { released += 1; } }),
-    repair: async () => { throw new Error("relaxation must not start new generation"); },
+    repair: async (request: { sourceOnly?: boolean; requests?: Array<{ sectionId: string }> }) => {
+      // 완화는 새 이미지를 생성하지 않는다. 검수된 판매자 실사진만 붙인다.
+      assert.equal(request.sourceOnly, true);
+      repairRequests.push((request.requests || []).map(item => item.sectionId));
+      if (options.repairFails) throw new Error("PRODUCT_SOURCE_REQUIRED: 실사진 없음");
+      const photos = [...(options.sellerPhotos || [])];
+      for (const item of request.requests || []) {
+        const photo = photos.shift();
+        if (!photo) break;
+        stored.composition.sections.find(section => section.id === item.sectionId)!.imagePaths = [photo];
+      }
+      return { errors: [] };
+    },
     slots: (value: BrandPostPackageManifestV2) => value.composition.sections.map(section => {
       const valid = section.imagePaths.filter(file => !rejected.has(file));
       const generated = section.imageSource === "staged-ai" ? section.imageMin! : 0;
@@ -47,7 +60,7 @@ function fixture(options: Fixture = {}) {
         staleTargets: section.imagePaths.filter(file => rejected.has(file)).map(file => ({ path: file, code: "image-publication-rejected" })) };
     }),
   } as unknown as ImageReplanDependencies;
-  return { deps, read: () => stored, writes: () => writes, released: () => released };
+  return { deps, read: () => stored, writes: () => writes, released: () => released, repairRequests };
 }
 
 async function main() {
@@ -64,7 +77,22 @@ async function main() {
   assert.equal(none.released(), 1);
   const noneStored = none.read();
   assert.deepEqual(noneStored.composition.sections.map(section => section.imageMin), [1, 0, 0, 0, 0]);
-  assert.deepEqual(noneStored.composition.sections[0].imagePaths, ["original.jpg"], "원본은 그대로 한 장만 쓴다");
+  assert.deepEqual(noneStored.composition.sections[0].imagePaths, ["original.jpg"], "첫 원본은 그대로 둔다");
+  assert.deepEqual(none.repairRequests, [["s1", "s3", "s4"]], "빈 연출 자리마다 실사진을 한 번 요청한다");
+  assert.deepEqual(noneStored.composition.sections.map(section => section.imageSource), ["seller-original", "seller-original", "none", "seller-original", "seller-original"]);
+
+  // 서로 다른 판매자 실사진이 있으면 빈 자리에 붙는다. 부족하면 붙은 만큼만 쓴다.
+  const withPhotos = fixture({ sellerPhotos: ["angle2.jpg", "detail.jpg"] });
+  const withPhotosResult = await replanShoppingImageCoverage({ brandLinkId: "fixture" }, withPhotos.deps);
+  assert.equal(withPhotosResult.reason, "SCENES_RELAXED_SELLER_PHOTOS_ADDED");
+  assert.equal(withPhotosResult.after.missing, 0);
+  assert.deepEqual(withPhotos.read().composition.sections.map(section => section.imagePaths), [["original.jpg"], ["angle2.jpg"], [], ["detail.jpg"], []]);
+
+  // 실사진 붙이기가 실패해도 완화 결과는 유지된다.
+  const repairFails = fixture({ repairFails: true });
+  const repairFailsResult = await replanShoppingImageCoverage({ brandLinkId: "fixture" }, repairFails.deps);
+  assert.equal(repairFailsResult.changed, true);
+  assert.equal(repairFailsResult.reason, "SCENES_RELAXED_ORIGINAL_PHOTO_ONLY");
   assert.equal(noneStored.composition.imageFloor, 2);
   assert.equal(noneStored.approvedAt, null, "구성이 바뀌면 승인을 다시 받는다");
   assert.equal(noneStored.imageGeneration?.status, "complete");
@@ -78,6 +106,8 @@ async function main() {
   const partialStored = partial.read();
   assert.deepEqual(partialStored.composition.sections.map(section => section.imagePaths), [["original.jpg"], ["scene-ok.jpg"], [], [], []]);
   assert.deepEqual(partialStored.composition.sections.map(section => section.imageMin), [1, 1, 0, 0, 0]);
+  assert.deepEqual(partialStored.composition.sections.map(section => section.imageSource), ["seller-original", "staged-ai", "none", "seller-original", "seller-original"],
+    "통과한 연출 사진 자리는 그대로 두고 빈 자리만 실사진 자리로 바꾼다");
   assert.equal(partialStored.composition.imageFloor, 3);
   assert.equal(partialStored.imageAssets!.some(asset => asset.path === "scene-bad.jpg"), false);
   assert.equal(partialStored.composition.renderNodes.some(node => node.kind === "image" && node.assetPath === "scene-bad.jpg"), false);

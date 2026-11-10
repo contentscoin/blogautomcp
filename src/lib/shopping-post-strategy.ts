@@ -35,4 +35,12 @@ export function isShoppingSceneCoverageRelaxed(composition: { strategyVersion?: 
     composition.imageFloor >= SHOPPING_RELAXED_IMAGE_FLOOR && composition.imageFloor < SHOPPING_POST_STRATEGY.images.min;
 }
 
+/** 연출 사진이 완화된 글에서 본문에 쓸 수 있는 서로 다른 판매자 실사진 수. */
+export const SHOPPING_RELAXED_ORIGINAL_LIMIT = 4;
+
+/** 본문 원본 사진 상한. 기본은 1장이고, 연출 사진이 완화된 글만 서로 다른 실사진을 더 쓴다. */
+export function shoppingOriginalPhotoLimit(composition: Parameters<typeof isShoppingSceneCoverageRelaxed>[0]): number {
+  return isShoppingSceneCoverageRelaxed(composition) ? SHOPPING_RELAXED_ORIGINAL_LIMIT : 1;
+}
+
 export const SHOPPING_NATURAL_PHOTO_RULE = "본문은 판매페이지 원본 상품 사진 1장과 서로 다른 자연스러운 AI 연출 사진 3장을 기본으로 합니다. 각 파일은 사진 한 장으로 만들고 이미지 안 설명문·정보 카드·장식 프레임·콜라주를 넣지 않습니다. 원본을 반복하거나 실패한 컷을 원본으로 대체해 수량을 채우지 않습니다. 확인된 사양·가격·치수는 본문에 쓰고 AI 안내는 이미지 바깥 캡션에 둡니다. 썸네일은 별도 1장이며 큰 제목 텍스트를 사용할 수 있습니다.";

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { allowsGenericBrandPostProductPhoto, isShoppingLifestyleImage, isReferenceGuidedScene } from "./brand-post-image-evidence";
-import { SHOPPING_POST_STRATEGY_VERSION, SHOPPING_RELAXED_IMAGE_FLOOR } from "./shopping-post-strategy";
+import { SHOPPING_POST_STRATEGY_VERSION, SHOPPING_RELAXED_IMAGE_FLOOR, SHOPPING_RELAXED_ORIGINAL_LIMIT } from "./shopping-post-strategy";
 import { resolveBrandLinkGateProfile } from "../../scripts/lib/brandlink-content-readiness";
 import { acquireBrandPostImageRepairLock } from "./brand-post-image-repair-lock";
 import { SHOPPING_POST_CONTRACT_V1 } from "./post-composition-contract";
@@ -83,7 +83,11 @@ export function imageReplanDraftIdentity(manifest: Manifest): string {
  * 썸네일과 판매페이지 원본 1장은 반드시 있어야 한다. 원본을 더 넣어 수량을 채우지 않고,
  * 본문·이미지 의도·이미 통과한 연출 사진은 그대로 둔다. 거절된 연출 파일은 구성에서 뺀다.
  */
-function relaxUnfilledNaturalScenes(brandLinkId: string, before: { required: number; missing: number }, deps: ImageReplanDependencies) {
+async function relaxUnfilledNaturalScenes(options: { brandLinkId: string; productName?: string; sourceImageUrls?: string[] },
+  before: { required: number; missing: number }, deps: ImageReplanDependencies) {
+  const brandLinkId = options.brandLinkId;
+  let fill: Array<{ requestId: string; sectionId: string; slotId: string }> = [];
+  let outcome: { changed: true; before: typeof before; after: typeof before; reason: string; history: Array<{ from: string; to: string; at: string }> };
   const unchanged = (reason: string) => ({ changed: false, before, after: before, reason, history: [] as Array<{ from: string; to: string; at: string }> });
   const lock = deps.lock(brandLinkId, { purpose: "shopping-image-coverage-replan" });
   try {
@@ -101,7 +105,13 @@ function relaxUnfilledNaturalScenes(brandLinkId: string, before: { required: num
     const at = new Date().toISOString();
     const rejected = new Set(open.flatMap(slot => slot.staleTargets.map(target => path.resolve(target.path))));
     const minima = new Map(open.map(slot => [slot.sectionId, 0] as const));
-    const history = open.map(slot => ({ from: slot.sectionId, to: "relaxed:scene-optional", at }));
+    // 연출 사진이 하나도 없는 자리는 서로 다른 판매자 실사진을 받을 수 있는 선택 슬롯으로 바꾼다.
+    const existingOriginals = slots.filter(slot => sectionOf(slot).imageSource === "seller-original").length;
+    const convertible = new Set(open.filter(slot => slot.count === 0).slice(0, Math.max(0, SHOPPING_RELAXED_ORIGINAL_LIMIT - existingOriginals))
+      .map(slot => slot.sectionId));
+    fill = [...convertible].map(sectionId => ({ requestId: randomUUID(), sectionId, slotId: `${sectionId}:image:1` }));
+    const history = open.map(slot => ({ from: slot.sectionId,
+      to: convertible.has(slot.sectionId) ? "relaxed:seller-photo-optional" : "relaxed:scene-optional", at }));
     const kept = slots.reduce((sum, slot) => sum + slot.count, 0) + 1;
     const proposed = deps.reconcile({ ...current, approvedAt: null,
       bodyImagePaths: current.bodyImagePaths?.filter(file => !rejected.has(path.resolve(file))),
@@ -112,6 +122,8 @@ function relaxUnfilledNaturalScenes(brandLinkId: string, before: { required: num
         renderNodes: current.composition.renderNodes.filter(node => node.kind !== "image" || !rejected.has(path.resolve(node.assetPath))),
         sections: current.composition.sections.map(section => ({ ...section,
           ...(minima.has(section.id) ? { imageMin: 0 } : {}),
+          ...(convertible.has(section.id) ? { imageSource: "seller-original" as const, promptRecipe: undefined,
+            imageIntent: "판매페이지 원본 상품 사진: 다른 각도나 구성의 실제 사진" } : {}),
           imagePaths: section.imagePaths.filter(file => !rejected.has(path.resolve(file))) })) },
       pipelineNotes: [...(current.pipelineNotes || []), `IMAGE_SCENES_RELAXED: ${JSON.stringify(history)}`,
         ...(current.imageGeneration?.errors.length ? [`IMAGE_REPLAN_PREVIOUS_ERRORS: ${JSON.stringify(current.imageGeneration.errors)}`] : [])] });
@@ -123,8 +135,21 @@ function relaxUnfilledNaturalScenes(brandLinkId: string, before: { required: num
         `${slot.sectionId}: IMAGE_COVERAGE_REQUIRED: 검증 이미지 ${Math.max(slot.missing, slot.generationMissing)}장 필요`) };
     lock.assertOwner();
     deps.write(proposed);
-    return { changed: true, before, after, reason: "SCENES_RELAXED_ORIGINAL_PHOTO_ONLY", history };
+    outcome = { changed: true, before, after, reason: "SCENES_RELAXED_ORIGINAL_PHOTO_ONLY", history };
   } finally { lock.release(); }
+  // 잠금을 푼 뒤 빈 자리에 서로 다른 판매자 실사진을 붙여 본다. 선택 슬롯이라 못 채워도 글은 준비된다.
+  if (fill.length) {
+    try {
+      await deps.repair({ ...options, sourceOnly: true, requests: fill });
+      const filled = deps.read(brandLinkId, { migrate: false });
+      if (filled && filled.version === "brand-post-package/v2") {
+        const after = summary(deps.slots(filled));
+        const added = deps.slots(filled).filter(slot => fill.some(request => request.sectionId === slot.sectionId) && slot.count > 0).length;
+        outcome = { ...outcome, after, reason: added ? "SCENES_RELAXED_SELLER_PHOTOS_ADDED" : outcome.reason };
+      }
+    } catch { /* 실사진을 더 붙이지 못한 것은 실패가 아니다. */ }
+  }
+  return outcome;
 }
 
 /** Move visual coverage only after normal source review proves an alternative section.
@@ -147,7 +172,7 @@ export async function replanShoppingImageCoverage(options: {
   if (initial.composition.strategyVersion === SHOPPING_POST_STRATEGY_VERSION) {
     // essential 프로필: 연출 사진을 만들지 못했다는 이유로 글 전체를 막지 않는다.
     return resolveBrandLinkGateProfile("SHOPPING") === "essential"
-      ? relaxUnfilledNaturalScenes(options.brandLinkId, before, deps)
+      ? relaxUnfilledNaturalScenes(options, before, deps)
       : unchanged("REPLAN_NATURAL_PHOTOS_REQUIRED");
   }
   const slots = deps.slots(initial);
