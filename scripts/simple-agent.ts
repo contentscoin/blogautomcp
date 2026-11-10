@@ -148,6 +148,7 @@ import {
 } from "./lib/opencrab-seo-brief";
 import {
   getBrandLinkContentReadiness,
+  resolveBrandLinkGateProfile,
   type BrandLinkContentReadiness,
   type PostGenerationSource,
   stripInternalGuidanceSentences,
@@ -161,7 +162,9 @@ import {
   type ProductEditorialPlan,
   productEvidenceRequirement,
   productSignalAnchor,
+  gradeProductEvidence,
 } from "./lib/product-editorial-plan";
+import { attachShoppingJsonCapture, collectShoppingPageState, parseShoppingProductCard } from "./lib/shopping-product-card";
 import { normalizeDraftSections } from "./lib/draft-sections";
 import {
   assertDraftSectionCount,
@@ -4207,6 +4210,8 @@ async function step1_getProductInfo(
 ): Promise<ProductInfo> {
   console.log("\n📦 STEP 1: 상품 정보 수집");
   
+  // 쇼핑은 페이지가 받는 상품 JSON 응답도 근거로 쓴다. 이동 전에 붙여야 첫 응답을 놓치지 않는다.
+  const shoppingJsonCapture = connectKind === "SHOPPING" ? attachShoppingJsonCapture(page) : null;
   await page.goto(url, { timeout: 30000 });
   await page.waitForTimeout(5000);
   const finalUrl = page.url();
@@ -4311,8 +4316,22 @@ async function step1_getProductInfo(
     }
   }
   
+  // 내장 상태 JSON과 캡처한 응답에서 상품 카드를 만든다. CSS 클래스가 바뀌어도 유지되는 1순위 근거다.
+  const productCard = connectKind === "SHOPPING"
+    ? parseShoppingProductCard([...(await collectShoppingPageState(page)), ...(shoppingJsonCapture?.states || [])])
+    : null;
+  shoppingJsonCapture?.detach();
+  if (productCard) {
+    console.log(productCard.found
+      ? `   🧾 구조화 상태: 발견 · 사실 ${productCard.factLines.length + productCard.optionLines.length}줄 · 이미지 ${productCard.imageUrls.length + productCard.detailImageUrls.length}장 · ${productCard.sourceKeys.join(", ")}`
+      : `   🧾 구조화 상태: 미발견 (응답 ${shoppingJsonCapture?.urls.length || 0}건) · 화면 요소에서 수집합니다.`);
+  }
+
   // 1. 상품명 추출 (여러 방법 시도)
-  const productNameCandidates = [isolateSellerEvidenceText(structuredProduct.name, 300)];
+  const productNameCandidates = [
+    ...(productCard?.name ? [isolateSellerEvidenceText(productCard.name, 300)] : []),
+    isolateSellerEvidenceText(structuredProduct.name, 300),
+  ];
   let ogProductName = "";
   
   // og:title에서 추출
@@ -4354,6 +4373,10 @@ async function step1_getProductInfo(
   
   // 2. 상품 설명 추출
   let description = isolateSellerEvidenceText(structuredProduct.description, 12_000);
+  if (productCard?.detailText) {
+    const candidate = isolateSellerEvidenceText(productCard.detailText, 12_000);
+    if (!description || extractExplicitProductFacts(candidate, "description").length > extractExplicitProductFacts(description, "description").length) description = candidate;
+  }
   const descSelectors = [
     '._1s2eOHMQjt',           // 스마트스토어 상품 설명
     '.product_detail_description',
@@ -4394,6 +4417,7 @@ async function step1_getProductInfo(
   
   // 3. 상품 특징/키워드 추출
   const features: string[] = Array.from(new Set([
+    ...(productCard ? [...productCard.factLines, ...productCard.optionLines] : []).map(sanitizeTypedProductFactLine).filter(Boolean),
     ...structuredProduct.features.map(sanitizeTypedProductFactLine).filter(Boolean),
     ...(travelPageResearch ? travelPageResearchFeatures(travelPageResearch) : []),
   ]));
@@ -4615,6 +4639,7 @@ async function step1_getProductInfo(
   console.log("   🖼️ 이미지 URL 추출 중...");
   const imageCandidateMax = connectKind === "TRAVEL" ? 32 : 20;
   const allImageUrls = Array.from(new Set([
+    ...(productCard ? [...productCard.imageUrls, ...productCard.detailImageUrls].filter(isCandidateProductImageUrl) : []),
     ...preReviewImageUrls,
     ...(await collectProductImageUrlsFromPage(page)),
   ]));
@@ -4658,7 +4683,10 @@ async function step1_getProductInfo(
     const readingReport: SellerEvidenceReadingReport = { ocrFacts: 0, visionFacts: 0, visionImages: 0 };
     sanitizedFeatures = await enrichShoppingSourceFeatures(productName, description, sanitizedFeatures, sellerDetailImagePaths, sellerImagePaths, readingReport);
     if (!hasSufficientProductReviewEvidence({ productName, description, features: sanitizedFeatures, targetSectionCount: 11 })) {
-      throw new Error(`SOURCE_EVIDENCE_REQUIRED: 제품 자체의 확인 가능한 구성·중량·기능·규격 텍스트 근거가 부족합니다. (상세 구간 ${sellerDetailImagePaths.length} · 판매자 이미지 ${sellerImagePaths.length} · OCR 근거 ${readingReport.ocrFacts} · 이미지 판독 ${readingReport.visionImages}장 채택 ${readingReport.visionFacts}줄 · 확인 근거 ${sanitizedFeatures.length})`);
+      if (resolveBrandLinkGateProfile("SHOPPING") === "essential") {
+        // 상품명과 이미지는 확인됐다. 근거가 적으면 글 유형을 바꿔 쓰고, 없는 사양은 만들지 않는다.
+        console.log(`   ⚠️ 상품 텍스트 근거가 적습니다(상세 구간 ${sellerDetailImagePaths.length} · 판독 사실 ${readingReport.ocrFacts + readingReport.visionFacts}줄). 확인된 사실만으로 작성합니다.`);
+      } else throw new Error(`SOURCE_EVIDENCE_REQUIRED: 제품 자체의 확인 가능한 구성·중량·기능·규격 텍스트 근거가 부족합니다. (상세 구간 ${sellerDetailImagePaths.length} · 판매자 이미지 ${sellerImagePaths.length} · OCR 근거 ${readingReport.ocrFacts} · 이미지 판독 ${readingReport.visionImages}장 채택 ${readingReport.visionFacts}줄 · 확인 근거 ${sanitizedFeatures.length})`);
     }
   }
   
@@ -4915,7 +4943,20 @@ async function step2_generatePost(
     postAngleBlock: formatPostAngleForPrompt(connectKind, specInput?.angleContext?.angle, specInput?.angleContext?.siblings),
     postAngleSummary: formatPostAngleSummary(connectKind, specInput?.angleContext?.angle),
   });
-  const mandatoryWritingPromptBlock = formatWritingPromptContract(writingContract);
+  const sparseShoppingEvidence = !isTravel && gradeProductEvidence(toProductSourceEvidenceInput(product, 11)) === "sparse";
+  if (sparseShoppingEvidence) console.log("   🧭 상품 근거 등급: sparse · 고민 해결·사용 장면 중심으로 작성");
+  const mandatoryWritingPromptBlock = [
+    formatWritingPromptContract(writingContract),
+    sparseShoppingEvidence
+      ? [
+          "[확인된 상품 근거가 적은 상품 · 최우선 규칙]",
+          "- 글의 중심을 이 상품이 쓰이는 생활 장면, 고민 해결, 고르는 기준에 둡니다.",
+          "- 상품 사실은 위에 제공된 줄에 있는 것만 씁니다. 수치·규격·소재·인증·구성품·작동 방식을 새로 만들지 않습니다.",
+          "- 제공되지 않은 항목은 쓰지 않습니다. '확인 필요', '상세페이지 참고' 같은 문장으로 분량을 채우지 않습니다.",
+          "- 기능 해설을 요구하는 다른 지시와 충돌하면 이 규칙을 따릅니다.",
+        ].join("\n")
+      : "",
+  ].filter(Boolean).join("\n\n");
   if (specInput?.angleContext) {
     console.log(`   🧭 포스팅 주제: ${getPostAngle(connectKind, specInput.angleContext.angle).label} · 형제 글 ${specInput.angleContext.siblings.length}편`);
   }
@@ -10380,7 +10421,8 @@ async function main() {
     const finalReviewEvidenceReady = runtimeConnectKind === "TRAVEL"
       ? hasCompleteTravelSourceResearch(product.travelPageResearch) && hasSufficientTravelReviewEvidence(product)
       : hasSufficientProductReviewEvidence(toProductSourceEvidenceInput(product, 11));
-    if (!preparedPostOverride && !finalReviewEvidenceReady) {
+    const sparseShoppingAllowed = runtimeConnectKind === "SHOPPING" && resolveBrandLinkGateProfile("SHOPPING") === "essential";
+    if (!preparedPostOverride && !finalReviewEvidenceReady && !sparseShoppingAllowed) {
       throw new Error(
         runtimeConnectKind === "TRAVEL"
           ? "SOURCE_EVIDENCE_REQUIRED: 여행지 브이로그를 작성할 핵심 방문지·일차별 일정 근거가 부족합니다. 상세정보 동기화 후 다시 시도해 주세요."
