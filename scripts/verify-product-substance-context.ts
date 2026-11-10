@@ -4,6 +4,9 @@ import { getBrandLinkContentReadiness } from "./lib/brandlink-content-readiness"
 import { planQualityConvergence } from "./lib/quality-convergence";
 import { extractExplicitProductFacts } from "./lib/product-source-facts";
 
+// 이 검증은 품질 채점이 발행을 막는 strict 프로필의 판정을 다룬다. 쇼핑 기본값은 essential이다.
+process.env.SHOPPING_GATE_PROFILE = "strict";
+
 // September 21 saved Shokz input: one function plus origin was graded usable
 // and demanded two distinct functional judgements from the writer.
 const shokzSource = {

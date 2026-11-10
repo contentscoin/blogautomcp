@@ -65,6 +65,7 @@ jobs:
           npm run test:package-qc-reconcile
           npm run test:publish-image-cleanup
           npm run test:brand-post-quality
+          npm run test:shopping-essential-gate
           npm run test:writing-harness
           npm run test:section-images
           npm run test:image-batch-progress

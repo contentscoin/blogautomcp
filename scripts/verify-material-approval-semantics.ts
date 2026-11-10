@@ -3,6 +3,9 @@ import { containsProductToken, getBrandLinkContentReadiness } from "./lib/brandl
 import { assessProductEditorialCoverage, assessProductReviewSubstance, buildProductReviewAnalysis } from "./lib/product-editorial-plan";
 import { applyFreeformDraftRevision, applyFreeformSectionRevision, requestsFreeformTitleRevision } from "./lib/freeform-draft-revision";
 
+// 이 검증은 품질 채점이 발행을 막는 strict 프로필의 판정을 다룬다. 쇼핑 기본값은 essential이다.
+process.env.SHOPPING_GATE_PROFILE = "strict";
+
 const productName = "미라클뮤즈아하바하메디크림";
 const titled = getBrandLinkContentReadiness({
   productName,

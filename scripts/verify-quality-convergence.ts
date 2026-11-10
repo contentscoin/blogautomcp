@@ -17,6 +17,9 @@ import {
 } from "./lib/quality-convergence";
 import { assertUntargetedSectionHashesUnchanged } from "./lib/freeform-draft-revision";
 
+// 이 검증은 품질 채점이 발행을 막는 strict 프로필의 판정을 다룬다. 쇼핑 기본값은 essential이다.
+process.env.SHOPPING_GATE_PROFILE = "strict";
+
 const productName = "RNRN 러닝조끼 메쉬 남녀공용 러닝 베스트";
 const disclosure = "이 포스팅은 네이버 쇼핑 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받습니다.";
 const sparseSections = [

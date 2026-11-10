@@ -696,6 +696,8 @@ function draftContentQuality(preview: DraftPreview): unknown {
     score: record.score ?? null,
     reason: record.reason ?? null,
     summary: record.summary ?? null,
+    // 발행을 막지 않는 품질 권고. canPublish=true이면 재제출·재작성 요구가 아니다.
+    advisory: record.advisory ?? null,
     signals: Array.isArray(record.signals)
       ? record.signals.map((signal) => {
           const item = signal && typeof signal === "object" && !Array.isArray(signal) ? signal as Record<string, unknown> : {};
