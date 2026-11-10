@@ -107,6 +107,7 @@ function relaxUnfilledNaturalScenes(brandLinkId: string, before: { required: num
       bodyImagePaths: current.bodyImagePaths?.filter(file => !rejected.has(path.resolve(file))),
       imageAssets: current.imageAssets?.filter(asset => !rejected.has(path.resolve(asset.path))),
       composition: { ...current.composition,
+        sceneCoverage: "relaxed" as const,
         imageFloor: Math.max(SHOPPING_RELAXED_IMAGE_FLOOR, Math.min(kept, MINIMUM_POST_IMAGES - 1)),
         renderNodes: current.composition.renderNodes.filter(node => node.kind !== "image" || !rejected.has(path.resolve(node.assetPath))),
         sections: current.composition.sections.map(section => ({ ...section,

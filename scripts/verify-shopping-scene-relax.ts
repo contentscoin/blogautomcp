@@ -106,13 +106,16 @@ async function main() {
     id, title: id, body: ["본문"], characterCount: 320, imagePaths, imageMin, imageMax: 1, imageIntent: "의도", headingStyle: "sectionTitle",
   } as ResolvedPostSectionV1);
   const sections = [section("s0", 1, ["original.jpg"]), section("s1", 0, []), section("s2", 0, []), section("s3", 0, []), section("s4", 0, [])];
-  const report = (imageFloor?: number, imageCount = 2) => buildPostQualityReport({ contract: SHOPPING_POST_CONTRACT_V1, preset: "PREMIUM", sections, imageCount, imageFloor });
+  const report = (imageFloor?: number, imageCount = 2) => buildPostQualityReport({ contract: SHOPPING_POST_CONTRACT_V1, preset: "PREMIUM", sections, imageCount, imageFloor, shoppingScenesRelaxed: imageFloor !== undefined });
+  assert.equal(buildPostQualityReport({ contract: SHOPPING_POST_CONTRACT_V1, preset: "PREMIUM", sections, imageCount: 2, imageFloor: 2 }).canAutoPublish, false,
+    "완화 표시 없이 남은 하한은 자연사진 계약을 우회하지 못한다");
   assert.equal(report().canAutoPublish, false, "완화 기록이 없으면 5장 기준이 그대로다");
   assert.equal(report(2).canAutoPublish, true);
   assert.equal(report(1).canAutoPublish, false, "썸네일만 있는 하한은 인정하지 않는다");
   assert.equal(report(2, 1).canAutoPublish, false, "실제 이미지가 하한보다 적으면 막는다");
-  assert.equal(isShoppingSceneCoverageRelaxed({ strategyVersion: SHOPPING_POST_STRATEGY_VERSION, imageFloor: 5 }), false);
-  assert.equal(isShoppingSceneCoverageRelaxed({ strategyVersion: "shopping-post-strategy/v1", imageFloor: 2 }), false);
+  assert.equal(isShoppingSceneCoverageRelaxed({ strategyVersion: SHOPPING_POST_STRATEGY_VERSION, imageFloor: 5, sceneCoverage: "relaxed" }), false);
+  assert.equal(isShoppingSceneCoverageRelaxed({ strategyVersion: SHOPPING_POST_STRATEGY_VERSION, imageFloor: 2 }), false);
+  assert.equal(isShoppingSceneCoverageRelaxed({ strategyVersion: "shopping-post-strategy/v1", imageFloor: 2, sceneCoverage: "relaxed" }), false);
 
   // 연출 사진 실패만 완화 대상이다. 로그인·엔진·취소는 그대로 실패로 올린다.
   assert.equal(isOptionalSceneImageFailure({ code: "REFERENCE_SCENE_FIDELITY_FAILED" }), true);
@@ -120,6 +123,8 @@ async function main() {
   assert.equal(isOptionalSceneImageFailure({ code: "CODEX_AUTH_REQUIRED" }), false);
   assert.equal(isOptionalSceneImageFailure({ code: "IMAGE_REPAIR_FAILED", errors: ["s1: CHATGPT_BROWSER_LOGIN_REQUIRED"] }), false);
   assert.equal(isOptionalSceneImageFailure({ code: "USER_CANCELLED" }), false);
+  assert.equal(isOptionalSceneImageFailure({ code: "IMAGE_SOURCE_BINDING_REQUIRED", errors: ["IMAGE_SOURCE_BINDING_REQUIRED: missing", "REQUEST_TIMEOUT: response lost"] }), false);
+  assert.equal(isOptionalSceneImageFailure({ code: "REFERENCE_SCENE_FIDELITY_FAILED", errors: ["unclassified reviewer failure"] }), false);
   assert.equal(isOptionalSceneImageFailure({ code: "IMAGE_REPAIR_BUSY" }), false);
   assert.equal(isOptionalSceneImageFailure(new Error("unknown")), false);
 

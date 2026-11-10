@@ -66,8 +66,14 @@ const OPTIONAL_SCENE_IMAGE_FAILURE = /^(?:PRODUCT_REFERENCE_|REFERENCE_SCENE_|IM
 export function isOptionalSceneImageFailure(error: unknown): boolean {
   const code = (error as { code?: string } | null)?.code || "";
   if (isSessionWidePreparationFailureCode(code)) return false;
-  const codes = [code, ...((error as { errors?: string[] } | null)?.errors || []).flatMap(message => message.match(/\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b/gu) || [])].filter(Boolean);
-  return codes.length > 0 && !codes.some(isSessionWidePreparationFailureCode) && codes.some(value => OPTIONAL_SCENE_IMAGE_FAILURE.test(value));
+  // 한 줄이라도 분류되지 않았거나 전송·엔진 실패가 섞여 있으면 연출 사진만의 문제로 보지 않는다.
+  const optional = (value: string) => OPTIONAL_SCENE_IMAGE_FAILURE.test(value) || isRecoverableImageEvidenceFailure(value);
+  const messages = (error as { errors?: string[] } | null)?.errors || [];
+  if (!code || !optional(code)) return false;
+  return messages.every(message => {
+    const codes = message.match(/\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b/gu) || [];
+    return codes.length > 0 && codes.every(optional);
+  });
 }
 
 /** Failures tied to the shared login/browser/runtime cannot improve per item. */

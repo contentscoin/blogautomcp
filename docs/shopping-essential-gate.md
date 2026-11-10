@@ -44,7 +44,7 @@ essential 프로필에서는 텍스트 근거가 적어도(`sparse`) 작성을 �
 
 기본 계획은 그대로다: 썸네일 1장, 본문에 판매페이지 원본 1장과 AI 연출 사진 3장. 연출 사진은 먼저 만들어 보고 검수한다.
 
-essential 프로필에서는 연출 사진을 끝내 채우지 못해도 글을 막지 않는다. 이미지 준비가 연출 사진의 생성·검수 실패로 끝나면 재계획 단계가 빈 연출 슬롯을 선택 사항으로 낮추고, 썸네일과 원본 1장(그리고 통과한 연출 사진)만으로 구성을 확정한다. 거절된 연출 파일은 구성에서 빠진다. 기록: `pipelineNotes`의 `IMAGE_SCENES_RELAXED`, `composition.imageFloor`.
+essential 프로필에서는 연출 사진을 끝내 채우지 못해도 글을 막지 않는다. 이미지 준비가 연출 사진의 생성·검수 실패로 끝나면 재계획 단계가 빈 연출 슬롯을 선택 사항으로 낮추고, 썸네일과 원본 1장(그리고 통과한 연출 사진)만으로 구성을 확정한다. 거절된 연출 파일은 구성에서 빠진다. 기록: `pipelineNotes`의 `IMAGE_SCENES_RELAXED`, `composition.sceneCoverage = "relaxed"`, `composition.imageFloor`. 완화 표시 없이 남은 하한은 인정하지 않는다.
 
 바뀌지 않는 것:
 - 썸네일이나 판매페이지 원본이 없으면 완화하지 않는다(`REPLAN_ORIGINAL_PHOTO_REQUIRED`).

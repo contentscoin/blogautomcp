@@ -28,8 +28,9 @@ export const SHOPPING_RELAXED_IMAGE_FLOOR = 2;
  * 연출 사진 완화가 기록된 구성인지. 완화는 이미지 준비가 실패한 뒤 명시적 재계획에서만 기록되며
  * (imageFloor를 계약 최소보다 낮게 저장), 이 표시가 있는 글은 원본 1장만으로도 구성 검사를 통과한다.
  */
-export function isShoppingSceneCoverageRelaxed(composition: { strategyVersion?: string; imageFloor?: number } | null | undefined): boolean {
-  return composition?.strategyVersion === SHOPPING_POST_STRATEGY_VERSION &&
+export function isShoppingSceneCoverageRelaxed(composition: { strategyVersion?: string; imageFloor?: number; sceneCoverage?: string } | null | undefined): boolean {
+  // imageFloor만으로는 인정하지 않는다. 이전 재계획이 남긴 하한이 자연사진 계약을 우회하면 안 된다.
+  return composition?.strategyVersion === SHOPPING_POST_STRATEGY_VERSION && composition.sceneCoverage === "relaxed" &&
     typeof composition.imageFloor === "number" &&
     composition.imageFloor >= SHOPPING_RELAXED_IMAGE_FLOOR && composition.imageFloor < SHOPPING_POST_STRATEGY.images.min;
 }
