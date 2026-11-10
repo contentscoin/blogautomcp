@@ -12,7 +12,7 @@ import type { Product9Canvas } from "../../scripts/lib/product-9canvas";
 import { SAVED_TEXT_QC_VERSION, type SavedTextQcMetadata } from "./brand-post-revalidation";
 import { atomicWriteTextFile } from "./atomic-text-file";
 import { isDraftEditorialQualityPassed } from "./brand-post-quality-display";
-import { SHOPPING_POST_STRATEGY_VERSION } from "./shopping-post-strategy";
+import { SHOPPING_POST_STRATEGY_VERSION, isShoppingSceneCoverageRelaxed } from "./shopping-post-strategy";
 import { getConnectAffiliateDisclosure } from "./connect-disclosure";
 import {
   getPostCompositionContract,
@@ -646,7 +646,9 @@ function auditBrandPostImages(manifest: BrandPostPackageManifest) {
     const sceneSlots = slots.filter(slot => manifest.composition.sections.find(section => section.id === slot.sectionId)?.imageSource === "staged-ai");
     const plannedOriginals = originalSlots.reduce((sum, slot) => sum + slot.minimum, 0);
     const plannedScenes = sceneSlots.reduce((sum, slot) => sum + slot.minimum, 0);
-    if (originalSections.length !== 1 || plannedOriginals !== 1 || originalSlots.some(slot => slot.maximum !== 1) || plannedScenes < 3)
+    // 재계획이 연출 사진 완화를 기록한 글은 원본 1장 계획만 확인한다.
+    const requiredScenes = isShoppingSceneCoverageRelaxed(manifest.composition) ? 0 : 3;
+    if (originalSections.length !== 1 || plannedOriginals !== 1 || originalSlots.some(slot => slot.maximum !== 1) || plannedScenes < requiredScenes)
       addIssue({ code: "image-natural-photo-plan", reason: "본문 이미지 계획은 기본 원본 1장과 서로 다른 자연스러운 AI 장면 3장이 필요합니다. 추가 장면은 허용하며 이미지 다시 준비에서 계획을 갱신할 수 있습니다." });
     if (slots.reduce((sum, slot) => sum + slot.originalCount, 0) > 1)
       addIssue({ code: "image-original-count", reason: "본문 원본 사진은 1장만 사용할 수 있습니다. 추가 원본으로 AI 장면 수를 채울 수 없습니다." });

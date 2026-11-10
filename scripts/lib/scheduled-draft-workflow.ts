@@ -60,6 +60,16 @@ const DEFERRABLE_MANUSCRIPT_FAILURE_CODES = new Set([
   "QUALITY_REPAIR_REJECTED",
 ]);
 
+const OPTIONAL_SCENE_IMAGE_FAILURE = /^(?:PRODUCT_REFERENCE_|REFERENCE_SCENE_|IMAGE_(?:GENERATION|SHORTFALL|REFERENCE|NATURAL|COVERAGE|SOURCE_BINDING|FORMAT|REPAIR_FAILED)|PRODUCT_(?:SOURCE|CUTOUT)_)/u;
+
+/** 연출 사진 한 장의 생성·검수 실패인지. 세션 전체 실패·취소·경합은 포함하지 않는다. */
+export function isOptionalSceneImageFailure(error: unknown): boolean {
+  const code = (error as { code?: string } | null)?.code || "";
+  if (isSessionWidePreparationFailureCode(code)) return false;
+  const codes = [code, ...((error as { errors?: string[] } | null)?.errors || []).flatMap(message => message.match(/\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b/gu) || [])].filter(Boolean);
+  return codes.length > 0 && !codes.some(isSessionWidePreparationFailureCode) && codes.some(value => OPTIONAL_SCENE_IMAGE_FAILURE.test(value));
+}
+
 /** Failures tied to the shared login/browser/runtime cannot improve per item. */
 export function isSessionWidePreparationFailureCode(code: string | null | undefined): boolean {
   return SESSION_WIDE_PREPARATION_FAILURE_CODES.has(code || "");
@@ -461,8 +471,23 @@ export async function runMaterialPreparation(id: string, deps: WorkflowDeps = de
         await waitForImagesIdle();
       };
       const missing = () => draft.data?.imageSlots?.some(slot => Math.max(slot.missing, slot.generationMissing) > 0);
-      await attemptImages(mode === "source-only" ? "bind_sources" : mode === "repair-rejected" ? "repair_rejected" : "generate_missing");
-      if (missing() && isRecoverableImageEvidenceResult(latestImageRepair)) {
+      // 연출 사진 생성·검수 실패는 글 전체를 막을 이유가 아니다. 로그인·엔진·취소 같은 실패는 그대로 올린다.
+      let sceneFailure: unknown = null;
+      try {
+        await attemptImages(mode === "source-only" ? "bind_sources" : mode === "repair-rejected" ? "repair_rejected" : "generate_missing");
+      } catch (error) {
+        if (!isOptionalSceneImageFailure(error)) throw error;
+        sceneFailure = error;
+        draft = await deps.call(`${base}/draft`, "GET");
+        await waitForImagesIdle();
+      }
+      if (sceneFailure && missing()) {
+        deps.onStage?.("연출 사진 없이 구성 가능한지 확인");
+        // 서버가 쇼핑 essential 프로필일 때만 채우지 못한 연출 슬롯을 선택 사항으로 낮춘다.
+        const relaxed = await deps.call(`${base}/draft/images`, "POST", { action: "replan_sources" }).catch(() => null);
+        draft = await deps.call(`${base}/draft`, "GET");
+        if (!relaxed?.recovery?.changed || missing()) throw sceneFailure;
+      } else if (missing() && isRecoverableImageEvidenceResult(latestImageRepair)) {
         deps.onStage?.("이미지 실패 원인 확인 · 상품 상세 원본 재수집");
         const refreshed = await runRecordedImageRecovery(id, "refresh-source", async () => {
           check();

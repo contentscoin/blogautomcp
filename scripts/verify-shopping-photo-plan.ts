@@ -9,6 +9,9 @@ import { shoppingPhotoRoleAt, SHOPPING_POST_STRATEGY } from "../src/lib/shopping
 import { replanShoppingImageCoverage, type ImageReplanDependencies } from "../src/lib/brand-post-image-replan";
 import type { BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
 
+// 이 검증은 연출 사진 3장을 반드시 요구하는 strict 프로필의 판정을 다룬다. 쇼핑 기본값은 essential이다.
+process.env.SHOPPING_GATE_PROFILE = "strict";
+
 async function main() {
   for (const count of [5, 6, 7, 8]) {
     const roles = Array.from({ length: count }, (_, index) => shoppingPhotoRoleAt(index, count));

@@ -4,7 +4,7 @@ import {
   topicImageSourceLabel,
   type TopicImageSource,
 } from "../../scripts/lib/topic-templates";
-import { SHOPPING_POST_STRATEGY, SHOPPING_NATURAL_PHOTO_RULE, shoppingPhotoRoleAt, type ShoppingPostStrategyVersion } from "./shopping-post-strategy";
+import { SHOPPING_POST_STRATEGY, SHOPPING_NATURAL_PHOTO_RULE, SHOPPING_RELAXED_IMAGE_FLOOR, shoppingPhotoRoleAt, type ShoppingPostStrategyVersion } from "./shopping-post-strategy";
 import { getConnectAffiliateDisclosure } from "./connect-disclosure";
 
 export type BrandConnectKind = "SHOPPING" | "TRAVEL";
@@ -677,7 +677,9 @@ export function buildPostQualityReport(options: {
   const target = {
     characters: options.contract.targetCharacters,
     sections: options.contract.targetSections,
-    images: options.contract.connectKind !== "SHOPPING" && options.imageFloor !== undefined && options.imageFloor >= 1 && options.imageFloor < options.contract.targetImages.min
+    // 쇼핑은 재계획이 기록한 완화 하한(썸네일+원본 이상)만 인정한다. 여행은 기존 규칙 그대로다.
+    images: options.imageFloor !== undefined && options.imageFloor < options.contract.targetImages.min &&
+      options.imageFloor >= (options.contract.connectKind === "SHOPPING" ? SHOPPING_RELAXED_IMAGE_FLOOR : 1)
       ? { ...options.contract.targetImages, min: Math.floor(options.imageFloor) }
       : options.contract.targetImages,
   };
