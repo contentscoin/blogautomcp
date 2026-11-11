@@ -13,6 +13,7 @@ import { SAVED_TEXT_QC_VERSION, type SavedTextQcMetadata } from "./brand-post-re
 import { atomicWriteTextFile } from "./atomic-text-file";
 import { isDraftEditorialQualityPassed } from "./brand-post-quality-display";
 import { SHOPPING_POST_STRATEGY_VERSION, isShoppingSceneCoverageRelaxed, shoppingOriginalPhotoLimit } from "./shopping-post-strategy";
+import { cachedSha256File } from "./file-digest-cache";
 import { getConnectAffiliateDisclosure } from "./connect-disclosure";
 import {
   getPostCompositionContract,
@@ -860,7 +861,8 @@ export function packagePreview(manifest: BrandPostPackageManifest) {
 }
 
 function sha256File(filePath: string): string {
-  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+  // 목록·미리보기·승인이 같은 파일을 반복 확인한다. 바뀌지 않은 파일은 다시 읽지 않는다.
+  return cachedSha256File(filePath);
 }
 
 export function normalizePackageImageAssets(

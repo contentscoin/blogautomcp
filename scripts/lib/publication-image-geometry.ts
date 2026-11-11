@@ -12,11 +12,25 @@ export function isPublicationImageAspectAllowed(width: number, height: number): 
   return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0 &&
     Math.max(width / height, height / width) <= MAX_PUBLICATION_IMAGE_ASPECT_RATIO;
 }
+const geometryIssues = new Map<string, string | null>();
+
 /** Geometry only; final publication still fully decodes and visually reviews pixels. */
 export function publicationImageGeometryIssue(file: string): string | null {
   try {
     const stat = fs.statSync(file);
     if (!stat.isFile() || stat.size < 1 || stat.size > 24 * 1024 * 1024) throw new Error("size");
+    // 소재 목록이 몇 초마다 같은 이미지를 다시 묻는다. 바뀌지 않은 파일은 다시 읽지 않는다.
+    const key = `${file}\0${stat.size}\0${stat.mtimeMs}\0${stat.ctimeMs}`;
+    if (geometryIssues.has(key)) return geometryIssues.get(key)!;
+    const issue = measurePublicationImageGeometry(file);
+    if (geometryIssues.size >= 4000) geometryIssues.delete(geometryIssues.keys().next().value as string);
+    geometryIssues.set(key, issue);
+    return issue;
+  } catch { return "INVALID_IMAGE: 실제 이미지 크기를 확인할 수 없습니다. 원본을 교체해야 합니다."; }
+}
+
+function measurePublicationImageGeometry(file: string): string | null {
+  try {
     const { width, height } = imageSize(fs.readFileSync(file));
     if (!width || !height) throw new Error("dimensions");
     return isPublicationImageAspectAllowed(width, height) ? null :

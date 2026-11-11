@@ -43,6 +43,7 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
   const [intervalDays, setIntervalDays] = useState(1);
   const previousJobs = useRef("");
   const changeRef = useRef(onChanged); changeRef.current = onChanged;
+  const activeRef = useRef(false);
   const storageKey = `material-selection-v1:${connectKind}`;
   const rewriteStorageKey = `material-failed-rewrite-v1:${connectKind}`;
   const repairStorageKey = `material-blocked-repair-v1:${connectKind}`;
@@ -95,9 +96,22 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
   }, [connectKind]);
   useEffect(() => {
     let disposed = false;
-    const update = () => { if (!disposed) void refresh().catch(error => { if (!disposed) setMessage(error.message); }); };
-    update(); const timer = setInterval(update, 4000);
-    return () => { disposed = true; clearInterval(timer); };
+    // 전체 목록 조회는 모든 소재의 원고·이미지를 다시 검사하는 무거운 요청이다.
+    // 앞 요청이 끝나기 전에는 겹쳐 보내지 않고, 창이 보이지 않을 때는 쉬고, 진행 중인 작업이 없으면 간격을 늘린다.
+    let inFlight = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const page = typeof document === "undefined" ? null : document;
+    const schedule = () => { if (!disposed) timer = setTimeout(update, activeRef.current ? 4000 : 15000); };
+    const update = () => {
+      if (disposed || inFlight) return;
+      if (page?.visibilityState === "hidden") { schedule(); return; }
+      inFlight = true;
+      void refresh().catch(error => { if (!disposed) setMessage(error.message); }).finally(() => { inFlight = false; schedule(); });
+    };
+    const onVisible = () => { if (page?.visibilityState === "visible" && !inFlight) { if (timer) clearTimeout(timer); update(); } };
+    page?.addEventListener("visibilitychange", onVisible);
+    update();
+    return () => { disposed = true; if (timer) clearTimeout(timer); page?.removeEventListener("visibilitychange", onVisible); };
   }, [refresh]);
   useEffect(() => {
     if (!selectionRequest) return;
@@ -123,6 +137,7 @@ export function MaterialLibrary({ connectKind, candidates, selectionRequest, onP
   const selected = materials.filter(item => selection[item.productId]);
   const valid = selected.length > 0 && selected.length === Object.keys(selection).length && selected.every(item => item.ready && selection[item.productId] === item.revision);
   const active = jobs.some(job => ["running", "queued"].includes(job.status));
+  activeRef.current = active;
   const pendingRecovery = Boolean(rewriteRequestId || repairRequestId);
   const readyCount = materials.filter(item => item.ready).length;
   const matchesConnectKind = (job: Job) => !job.connectKind || job.connectKind.toUpperCase() === connectKind.toUpperCase();

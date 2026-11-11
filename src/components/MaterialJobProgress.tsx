@@ -12,9 +12,15 @@ export function MaterialJobProgress({ history = false }: { history?: boolean }) 
   const [jobs, setJobs] = useState<Job[]>([]);
   useEffect(() => {
     let alive = true;
-    const poll = () => { void fetch("/api/materials?jobsOnly=1", { cache: "no-store" }).then(response => response.json()).then(result => {
-      if (alive && result.success) setJobs(result.data.jobs);
-    }).catch(() => undefined); };
+    let inFlight = false;
+    const poll = () => {
+      // 창이 보이지 않거나 앞 요청이 아직 돌고 있으면 건너뛴다.
+      if (inFlight || (typeof document !== "undefined" && document.visibilityState === "hidden")) return;
+      inFlight = true;
+      void fetch("/api/materials?jobsOnly=1", { cache: "no-store" }).then(response => response.json()).then(result => {
+        if (alive && result.success) setJobs(result.data.jobs);
+      }).catch(() => undefined).finally(() => { inFlight = false; });
+    };
     poll(); const timer = setInterval(poll, 5000);
     return () => { alive = false; clearInterval(timer); };
   }, []);
