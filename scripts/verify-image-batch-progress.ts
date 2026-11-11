@@ -13,6 +13,7 @@ import ts from "typescript";
 import * as imagePolicy from "./lib/image-timeout-policy";
 import * as photoProvenance from "./lib/product-photo-provenance";
 import * as imageEvidence from "../src/lib/brand-post-image-evidence";
+import * as shoppingPostStrategy from "../src/lib/shopping-post-strategy";
 import * as atomicTextFile from "../src/lib/atomic-text-file";
 import * as photorealBuild from "./lib/photoreal/build";
 import * as product9Canvas from "./lib/product-9canvas";
@@ -306,6 +307,7 @@ function harness(settings: { timeout?: number; spawnError?: "sync" | "async"; lo
       },
       "./chatgpt-browser-automation": { isChatGptBrowserAutomationEnabled: () => settings.automation ?? true },
       "./brand-post-image-evidence": imageEvidence,
+      "./shopping-post-strategy": shoppingPostStrategy,
       "../../scripts/lib/photoreal/build": photorealBuild,
       // This harness covers the browser transport; the Codex transport has its own test (verify-codex-image-generation).
       "./codex-image-generation": {

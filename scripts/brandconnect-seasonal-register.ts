@@ -26,6 +26,7 @@ import type { ConnectItem } from "../src/lib/connect-item";
 import { matchesTravelSelectionFilters } from "../src/lib/travel-selection-options";
 import { isLoginRedirect } from "./lib/naver-editor-selectors";
 import { assertShoppingAccess, resolveShoppingCategoryUrl } from "../src/lib/shopping-connect-access";
+import { LIST_SYNC_DIAGNOSIS_PREFIX, diagnoseListSync, extractListItemMedia } from "./lib/brandconnect-list-diagnosis";
 
 chromium.use(StealthPlugin());
 
@@ -52,6 +53,7 @@ const BRANDCONNECT_CATEGORY_SCAN_LIMIT = parsePositiveIntegerEnv(
   1,
   80
 );
+const BRANDCONNECT_CATEGORY_SCAN_MAX = 80;
 const DEFAULT_DUPLICATE_WINDOW_DAYS = parsePositiveIntegerEnv(
   "BRANDCONNECT_DUPLICATE_WINDOW_DAYS",
   30,
@@ -103,6 +105,9 @@ interface ProductApiItem {
   badgeTexts: string[];
   sourceCategoryIds: string[];
   sourceCategoryNames: string[];
+  /** 목록 응답이 들고 있을 때만 채워진다. */
+  imageUrl: string;
+  productUrl: string;
 }
 
 interface DisplayCategory {
@@ -517,6 +522,7 @@ function parseProductApiItems(payload: unknown): ProductApiItem[] {
       badgeTexts: parseBadgeTexts(obj),
       sourceCategoryIds: [],
       sourceCategoryNames: [],
+      ...extractListItemMedia(obj),
     });
   }
 
@@ -767,8 +773,9 @@ async function collectProductPool(
   rootCategoryId: string,
   spaceId: string,
   initialProducts: ProductApiItem[],
-  options: Pick<CliOptions, "brandFilter" | "promotionFilter" | "categoryFilter">
-): Promise<{ products: ProductApiItem[]; scannedCategoryCount: number }> {
+  options: Pick<CliOptions, "brandFilter" | "promotionFilter" | "categoryFilter">,
+  scanLimit = BRANDCONNECT_CATEGORY_SCAN_LIMIT,
+): Promise<{ products: ProductApiItem[]; scannedCategoryCount: number; collectedCount: number }> {
   const productsById = new Map<number, ProductApiItem>();
   const rootCategory: DisplayCategory = { id: rootCategoryId, name: "현재 카테고리" };
   if (shouldIncludeCategory(rootCategory, options.categoryFilter)) {
@@ -796,16 +803,17 @@ async function collectProductPool(
     .filter((category) => category.id !== rootCategoryId)
     .sort((a, b) => categoryPriority(a, rootCategoryId) - categoryPriority(b, rootCategoryId));
 
-  for (const category of prioritizedBase.slice(0, 12)) {
+  // 넓힌 탐색에서는 기본 카테고리 전부의 하위 카테고리까지 본다.
+  for (const category of prioritizedBase.slice(0, scanLimit > BRANDCONNECT_CATEGORY_SCAN_LIMIT ? prioritizedBase.length : 12)) {
     const children = await fetchDisplayCategories(page, category.id, spaceId);
     for (const child of children) addCategory(child);
-    if (categoriesById.size >= BRANDCONNECT_CATEGORY_SCAN_LIMIT) break;
+    if (categoriesById.size >= scanLimit) break;
   }
 
   const categories = Array.from(categoriesById.values())
     .filter((category) => shouldIncludeCategory(category, options.categoryFilter))
     .sort((a, b) => categoryPriority(a, rootCategoryId) - categoryPriority(b, rootCategoryId))
-    .slice(0, BRANDCONNECT_CATEGORY_SCAN_LIMIT);
+    .slice(0, scanLimit);
 
   if (options.categoryFilter.length > 0 && categories.length === 0) {
     console.log(`   category filter matched no categories: ${options.categoryFilter.join(", ")}`);
@@ -832,6 +840,7 @@ async function collectProductPool(
   return {
     products,
     scannedCategoryCount,
+    collectedCount: productsById.size,
   };
 }
 
@@ -1832,7 +1841,15 @@ async function main() {
 
   console.log(`✅ 카테고리 첫 상품 수집: ${initialProducts.length}개`);
 
-  const productPool = await collectProductPool(page, rootCategoryId, spaceId, initialProducts, options);
+  let productPool = await collectProductPool(page, rootCategoryId, spaceId, initialProducts, options);
+  let widenedSearch = false;
+  // 브랜드·스토어 검색어는 훑은 범위 안에서만 걸러진다. 맞는 상품이 모자라면 범위를 최대로 넓혀 한 번 더 본다.
+  if (options.brandFilter.length > 0 && productPool.products.length < options.count && BRANDCONNECT_CATEGORY_SCAN_LIMIT < BRANDCONNECT_CATEGORY_SCAN_MAX) {
+    console.log(`   검색어에 맞는 상품이 ${productPool.products.length}개뿐이라 탐색 범위를 넓힙니다.`);
+    const widened = await collectProductPool(page, rootCategoryId, spaceId, initialProducts, options, BRANDCONNECT_CATEGORY_SCAN_MAX);
+    if (widened.products.length >= productPool.products.length) productPool = widened;
+    widenedSearch = true;
+  }
   console.log(
     `✅ 확장 후보 수집: ${productPool.products.length}개 / 스캔 카테고리 ${productPool.scannedCategoryCount}개`
   );
@@ -2061,6 +2078,9 @@ async function main() {
         productName: item.productName,
         storeName: item.storeName || null,
         productPrice: formatPrice(item.discountedSalePrice || item.salePrice),
+        // 목록이 준 대표 이미지와 상품 주소를 버리지 않는다. 상세 수집이 실패해도 목록 카드와 썸네일 원본으로 쓸 수 있다.
+        ...(item.imageUrl ? { imageUrls: JSON.stringify([item.imageUrl]) } : {}),
+        ...(item.productUrl ? { finalUrl: item.productUrl } : {}),
         scheduledPublishAt,
       },
     });
@@ -2082,6 +2102,21 @@ async function main() {
 
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const reportDir = path.join(process.cwd(), "logs", "manual", "brandconnect");
+  const diagnosis = diagnoseListSync({
+    collected: productPool.collectedCount,
+    matched: productPool.products.length,
+    selectable: selected.length,
+    requested: options.count,
+    registered: results.filter((item) => item.action === "created" || item.action === "updated").length,
+    duplicates: results.filter((item) => item.action === "duplicate").length,
+    linkFailures: results.filter((item) => item.action === "failed").length,
+    scannedCategories: productPool.scannedCategoryCount,
+    filters: { brand: options.brandFilter, promotion: options.promotionFilter, category: options.categoryFilter },
+    widened: widenedSearch,
+  });
+  console.log(`${LIST_SYNC_DIAGNOSIS_PREFIX}${JSON.stringify(diagnosis)}`);
+  console.log(`ℹ️ ${diagnosis.message}`);
+
   fs.mkdirSync(reportDir, { recursive: true });
   const reportPath = path.join(reportDir, `seasonal-register-${stamp}.json`);
 
@@ -2094,6 +2129,7 @@ async function main() {
         selectedCount: selected.length,
         collectedProductCount: productPool.products.length,
         scannedCategoryCount: productPool.scannedCategoryCount,
+        diagnosis,
         rankingPreview: selected.slice(0, options.count).map((item) => ({
           productId: item.id,
           productName: item.productName,

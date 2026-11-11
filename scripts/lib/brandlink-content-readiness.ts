@@ -41,6 +41,23 @@ export interface BrandLinkContentReadinessInput {
   sourceDescription?: string | null;
   sourceFeatures?: string[];
   mode?: "publish" | "editorial";
+  /** 생략하면 여행은 strict, 쇼핑은 SHOPPING_GATE_PROFILE(기본 essential)을 따른다. */
+  gateProfile?: BrandLinkGateProfile;
+}
+
+/**
+ * strict: 품질 채점 미달도 발행을 막는다.
+ * essential: 안전·구조 차단만 발행을 막고 품질 채점은 권고(advisory)로 남긴다.
+ */
+export type BrandLinkGateProfile = "strict" | "essential";
+
+export function resolveBrandLinkGateProfile(
+  connectKind: "SHOPPING" | "TRAVEL",
+  requested?: BrandLinkGateProfile,
+): BrandLinkGateProfile {
+  if (requested) return requested;
+  if (connectKind === "TRAVEL") return "strict";
+  return process.env.SHOPPING_GATE_PROFILE?.trim().toLowerCase() === "strict" ? "strict" : "essential";
 }
 
 export interface BrandLinkContentReadinessSignal {
@@ -61,6 +78,7 @@ export type BrandLinkReadinessCode =
   | "commission-rate-exposed"
   | "internal-guidance-leak"
   | "unsupported-option-claim"
+  | "unsupported-health-claim"
   | "missing-review-substance"
   | "low-evidence-density"
   | "generic-guidance-heavy"
@@ -150,7 +168,14 @@ export interface BrandLinkContentReadiness {
   /** 총점과 별개로 충족해야 하는 필수 품질 항목의 실패 목록. */
   qualityFailures?: BrandLinkQualityCategory[];
   quality: BrandLinkQualityReport;
+  gateProfile?: BrandLinkGateProfile;
+  /** essential 프로필에서 발행을 막지 않고 남긴 품질 권고. strict였다면 이 코드로 미달 판정됐다. */
+  advisory?: { code: BrandLinkReadinessCode; reason: string | null };
 }
+
+/** essential 프로필의 구조 하한. 이보다 작으면 글이 깨진 것으로 본다. */
+export const BRANDLINK_ESSENTIAL_SECTION_FLOOR = 3;
+export const BRANDLINK_ESSENTIAL_CHARACTER_FLOOR = 800;
 
 /** 2026-09-24 보정: 과도한 재작성 루프를 줄이기 위해 70 → 62. 안전 차단은 그대로 유지한다. */
 export const BRANDLINK_QUALITY_PASS_SCORE = 62;
@@ -254,6 +279,34 @@ export const COMMISSION_RATE_PATTERNS = [
   /\d+(?:\.\d+)?\s*%\s*(?:수수료|커미션|commission)/iu,
   /(?:제휴율|정산\s*조건|내부\s*정산)/u,
 ] as const;
+
+/**
+ * 질병 치료·예방과 부작용 부재를 단정하는 문장. 판매자 문구에 있어도 블로그 글에서는 쓰지 않는다.
+ * 부정·유보 문장("단정하지 않습니다", "개인차")은 detectUnsupportedHealthClaims에서 제외한다.
+ */
+export const UNSUPPORTED_HEALTH_CLAIM_PATTERNS = [
+  /(?:질병|질환|병|암|당뇨|고혈압|관절염|아토피|탈모|비염|불면증|우울증|염증|통증)(?:을|를|이|가|도|에)?\s*(?:치료|완치|예방|치유)(?:해|하|됩|돼|할|시켜)/u,
+  /(?:치료|완치)\s*(?:효과|효능)(?:가|는|도)?\s*(?:있|뛰어나|탁월|확실|입증)/u,
+  /부작용(?:이|은|도)?\s*(?:전혀\s*|하나도\s*)?없/u,
+  /100\s*%\s*(?:효과|효능|개선|치료)/u,
+  /의학적으로\s*(?:입증|검증|증명)(?:된|됐|되었)/u,
+] as const;
+
+const HEALTH_CLAIM_HEDGE_PATTERN = /(?:않|아닙|아니에요|아니라|단정|개인차|어렵|확인되지|근거가\s*없)/u;
+
+export function detectUnsupportedHealthClaims(text: string): string[] {
+  const hits: string[] = [];
+  for (const sentence of text.split(/(?<=[.!?。])\s+|\n+/u)) {
+    const normalized = sentence.trim();
+    if (!normalized) continue;
+    const match = UNSUPPORTED_HEALTH_CLAIM_PATTERNS.map((pattern) => normalized.match(pattern)?.[0]).find(Boolean);
+    if (!match) continue;
+    // "부작용 없" 자체가 부정 어미를 포함하므로 유보 판정은 일치 구간 밖에서만 본다.
+    if (HEALTH_CLAIM_HEDGE_PATTERN.test(normalized.replace(match, ""))) continue;
+    hits.push(match);
+  }
+  return Array.from(new Set(hits));
+}
 
 export const INTERNAL_GUIDANCE_PATTERNS = [
   /(?:이번|제공된|수집된)\s*자료(?:에는|에서|에|는)?\s*(?:구매\s*)?(?:후기|리뷰)(?:\s*원문)?(?:이|은|가|는)?\s*(?:제공되지|없(?:어|습|다|으|는))/u,
@@ -618,13 +671,17 @@ function buildResult(input: {
   signals: BrandLinkContentReadinessSignal[];
   blockers: BrandLinkReadinessBlocker[];
   quality: BrandLinkQualityReport;
+  gateProfile: BrandLinkGateProfile;
+  advisory?: BrandLinkContentReadiness["advisory"];
 }): BrandLinkContentReadiness {
   const canPublish = input.verdict === "pass";
   const passingSignals = input.signals.filter((signal) => signal.status === "pass").length;
   const score = input.quality.score;
   const qualityFailures = input.quality.categories.filter((category) => category.status === "fail");
   const summary = canPublish
-    ? `커넥트 글 발행 게이트 통과 (품질 ${score}점, 신호 ${passingSignals}/${input.signals.length})`
+    ? input.advisory
+      ? `커넥트 글 발행 가능 (품질 ${score}점, 권고: ${input.advisory.reason || input.advisory.code})`
+      : `커넥트 글 발행 게이트 통과 (품질 ${score}점, 신호 ${passingSignals}/${input.signals.length})`
     : input.verdict === "blocked"
       ? `커넥트 글 발행 차단 (품질 ${score}점, 차단 ${input.blockers.length}건: ${input.reason || input.blockers[0]?.reason || "게이트 미통과"})`
       : qualityFailures.length > 0
@@ -647,6 +704,8 @@ function buildResult(input: {
     blockers: input.blockers,
     qualityFailures,
     quality: input.quality,
+    gateProfile: input.gateProfile,
+    ...(input.advisory ? { advisory: input.advisory } : {}),
   };
 }
 
@@ -657,6 +716,8 @@ export function getBrandLinkContentReadiness(
   const connectKind = input.connectKind === "TRAVEL" ? "TRAVEL" : "SHOPPING";
   const isTravel = connectKind === "TRAVEL";
   const editorialMode = input.mode === "editorial";
+  const gateProfile = resolveBrandLinkGateProfile(connectKind, input.gateProfile);
+  const essential = gateProfile === "essential";
   const compositionContract = getPostCompositionContract(connectKind);
   const sectionMinimum = compositionContract.targetSections.min;
   const characterMinimum = compositionContract.targetCharacters.min;
@@ -705,6 +766,7 @@ export function getBrandLinkContentReadiness(
     : 0;
   const commissionRateCount = countPatternHits(fullBody, COMMISSION_RATE_PATTERNS);
   const internalGuidanceCount = countPatternHits(fullBody, INTERNAL_GUIDANCE_PATTERNS);
+  const healthClaims = isTravel ? [] : detectUnsupportedHealthClaims([title, fullBody].join("\n"));
   // 편집(초안) 단계에서는 이미지가 아직 확정되지 않았으므로 대표 이미지는 발행 단계에서만 요구한다.
   const requireRepresentativeImage = input.requireRepresentativeImage !== false && !editorialMode;
   const editorialCoverage = isTravel
@@ -759,6 +821,10 @@ export function getBrandLinkContentReadiness(
   const compositionBlocked =
     input.compositionQualityReport?.preset === "PREMIUM" && !input.compositionQualityReport.canAutoPublish;
 
+  // 템플릿 범위의 80%까지 허용한다(최소 3개). essential은 글이 깨진 경우만 막는다.
+  const sectionFloor = essential ? BRANDLINK_ESSENTIAL_SECTION_FLOOR : Math.max(3, Math.ceil(sectionMinimum * 0.8));
+  const characterFloor = essential ? BRANDLINK_ESSENTIAL_CHARACTER_FLOOR : Math.round(characterMinimum * 0.8);
+
   const baseSignals: BrandLinkContentReadinessSignal[] = [
     {
       key: "generation-source",
@@ -779,7 +845,7 @@ export function getBrandLinkContentReadiness(
       key: "sections",
       label: "본문 섹션",
       // Below the blocking floor fails; between the floor and the template minimum is advisory.
-      status: mainSectionCount >= sectionMinimum ? "pass" : mainSectionCount >= Math.max(3, Math.ceil(sectionMinimum * 0.8)) ? "warn" : "fail",
+      status: mainSectionCount >= sectionMinimum ? "pass" : mainSectionCount >= sectionFloor ? "warn" : "fail",
     },
     {
       key: "editorial-flow",
@@ -818,7 +884,7 @@ export function getBrandLinkContentReadiness(
       status:
         totalLength >= characterMinimum
           ? "pass"
-          : totalLength >= Math.round(characterMinimum * 0.8)
+          : totalLength >= characterFloor
             ? "warn"
             : "fail",
     },
@@ -857,6 +923,11 @@ export function getBrandLinkContentReadiness(
       // 차단하지 않는 권고 신호. 메모와 겹치는 단어가 전혀 없는 체험 문장만 센다.
       status: ungroundedExperienceCount > 0 ? "warn" as const : "pass" as const,
     }] : []),
+    ...(isTravel ? [] : [{
+      key: "health-claim",
+      label: "질병 치료·부작용 단정",
+      status: healthClaims.length > 0 ? "fail" as const : "pass" as const,
+    }]),
     {
       key: "commission-rate",
       label: "수수료율/커미션 노출",
@@ -890,9 +961,14 @@ export function getBrandLinkContentReadiness(
     },
   ];
 
-  const signals = editorialMode
-    ? baseSignals.filter((signal) => !["representative-image", "thumbnail", "composition-quality"].includes(signal.key))
+  // essential에서는 품질 채점에서 나온 신호가 발행을 막지 않으므로 실패 대신 권고로 보여준다.
+  const advisorySignalKeys = new Set(["editorial-flow", "review-substance", "evidence-density", "generic-guidance", "sentence-repetition"]);
+  const profiledSignals = essential
+    ? baseSignals.map((signal) => advisorySignalKeys.has(signal.key) && signal.status === "fail" ? { ...signal, status: "warn" as const } : signal)
     : baseSignals;
+  const signals = editorialMode
+    ? profiledSignals.filter((signal) => !["representative-image", "thumbnail", "composition-quality"].includes(signal.key))
+    : profiledSignals;
 
   // ---- 하드 차단 (점수와 무관) ----
   const blockers: BrandLinkReadinessBlocker[] = [];
@@ -914,8 +990,6 @@ export function getBrandLinkContentReadiness(
       reason: `상품명이 제목/본문에 충분히 반영되지 않았습니다. 확인 토큰: ${coveredProductTokens.join(", ") || "-"}`,
     });
   }
-  // 템플릿 범위의 80%까지 허용한다(최소 3개).
-  const sectionFloor = Math.max(3, Math.ceil(sectionMinimum * 0.8));
   if (mainSectionCount < sectionFloor) {
     blockers.push({
       code: "too-few-sections",
@@ -923,7 +997,7 @@ export function getBrandLinkContentReadiness(
       reason: `본문 섹션이 부족합니다. 현재 ${mainSectionCount}개, 최소 ${sectionFloor}개가 필요합니다.`,
     });
   }
-  if (totalLength < Math.round(characterMinimum * 0.8)) {
+  if (totalLength < characterFloor) {
     blockers.push({
       code: "too-short-content",
       tier: "structure",
@@ -953,6 +1027,13 @@ export function getBrandLinkContentReadiness(
       code: "unsupported-experience-claim",
       tier: "safety",
       reason: `직접 구매/사용/체험을 단정하는 문장이 남아 있습니다.${unsupportedExperienceMatches.length ? ` 감지: ${unsupportedExperienceMatches.join(", ")}` : ""}`,
+    });
+  }
+  if (healthClaims.length > 0) {
+    blockers.push({
+      code: "unsupported-health-claim",
+      tier: "safety",
+      reason: `질병 치료·예방이나 부작용 부재를 단정하는 문장이 있습니다. 감지: ${healthClaims.join(", ")}`,
     });
   }
   if (commissionRateCount > 0) {
@@ -1001,8 +1082,22 @@ export function getBrandLinkContentReadiness(
     missingProductTokens,
     signals,
     blockers,
-    quality,
+    // essential은 채점으로 발행을 막지 않는다. 저장된 리포트를 다시 읽는 쪽(승인·재검증·화면)도
+    // 같은 결론을 내도록 실패 카테고리를 권고로 낮추고 통과 기준 점수를 두지 않는다.
+    quality: essential
+      ? {
+          ...quality,
+          passScore: 0,
+          categories: quality.categories.map((item): BrandLinkQualityCategory =>
+            item.status === "fail" ? { ...item, status: "warn", notes: [...item.notes, "essential 게이트: 권고 사항"] } : item),
+        }
+      : quality,
+    gateProfile,
   };
+  // essential: 품질 미달은 발행을 막지 않고 권고로 돌려준다.
+  const qualityVerdict = (code: BrandLinkReadinessCode, reason: string) => essential
+    ? buildResult({ ...common, code: "ok", verdict: "pass", reason: null, advisory: { code, reason } })
+    : buildResult({ ...common, code, verdict: "quality", reason });
 
   if (blockers.length > 0) {
     // 안전 차단을 구조 차단보다 먼저 보고한다.
@@ -1067,17 +1162,15 @@ export function getBrandLinkContentReadiness(
       ];
       reason = `${isTravel ? "여행지 콘텐츠" : "상품 고유 리뷰"} 요소가 부족합니다: ${Array.from(new Set(missing)).join(", ")}`;
     }
-    return buildResult({ ...common, code, verdict: "quality", reason: `필수 품질 조건 미충족: ${primary.label}. ${reason}` });
+    return qualityVerdict(code, `${essential ? "보강 권고" : "필수 품질 조건 미충족"}: ${primary.label}. ${reason}`);
   }
 
   if (quality.score < quality.passScore) {
     const weakest = [...quality.categories].sort((a, b) => a.score / a.maxScore - b.score / b.maxScore)[0];
-    return buildResult({
-      ...common,
-      code: "quality-score-below-threshold",
-      verdict: "quality",
-      reason: `품질 점수 ${quality.score}점이 기준 ${quality.passScore}점에 미달합니다. 가장 약한 항목: ${weakest.label}${weakest.notes[0] ? ` (${weakest.notes[0]})` : ""}`,
-    });
+    return qualityVerdict(
+      "quality-score-below-threshold",
+      `품질 점수 ${quality.score}점이 기준 ${quality.passScore}점에 미달합니다. 가장 약한 항목: ${weakest.label}${weakest.notes[0] ? ` (${weakest.notes[0]})` : ""}`,
+    );
   }
 
   const warnSignal = signals.find((signal) => signal.status === "warn");

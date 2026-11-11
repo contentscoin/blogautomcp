@@ -8,6 +8,7 @@ import { requireNoPendingDesktopUpdate } from "@/lib/update-guard";
 import { buildCaptureRequiredPayload, parseConnectKind, toStoredConnectKind } from "@/lib/brandconnect-kind";
 import { resolveConnectContract } from "@/lib/connect-contract-store";
 import { getLogsDir } from "../../../../../scripts/lib/app-paths";
+import { readListSyncDiagnosis } from "../../../../../scripts/lib/brandconnect-list-diagnosis";
 import { recoverExitedPublications } from '@/lib/publication-recovery';
 import { getNaverSessionFile, validateNaverPublishingSession } from "@/lib/naver-session";
 
@@ -368,13 +369,16 @@ export async function POST(request: NextRequest) {
         }),
         prisma.brandLink.count({ where: { connectKind: storedKind } }),
       ]);
+      // 동기화 스크립트가 남긴 진단(왜 이 개수인지)을 함께 돌려준다. 여행 동기화에는 아직 없다.
+      let diagnosis: ReturnType<typeof readListSyncDiagnosis> = null;
+      try { diagnosis = readListSyncDiagnosis(fs.readFileSync(logFilePath, "utf8").slice(-20_000)); } catch { /* 진단 없이 결과만 돌려준다. */ }
       if (totalCount === 0) {
-        throw new Error(`동기화가 끝났지만 ${connectKind === "travel" ? "여행" : "쇼핑"}상품이 등록되지 않았습니다. 로그: ${logFileRelativePath}`);
+        throw new Error(diagnosis?.message || `동기화가 끝났지만 ${connectKind === "travel" ? "여행" : "쇼핑"}상품이 등록되지 않았습니다. 로그: ${logFileRelativePath}`);
       }
 
       return NextResponse.json({
         success: true,
-        message: `${connectKind === "travel" ? "여행" : "쇼핑"}상품 동기화를 완료했습니다.`,
+        message: diagnosis && diagnosis.code !== "OK" ? diagnosis.message : `${connectKind === "travel" ? "여행" : "쇼핑"}상품 동기화를 완료했습니다.`,
         data: {
           completed: true,
           connectKind,
@@ -382,6 +386,7 @@ export async function POST(request: NextRequest) {
           importedCount: synchronized.filter((product) => product.createdAt >= runStartedAt).length,
           totalCount,
           products: synchronized,
+          ...(diagnosis ? { diagnosis } : {}),
           logFile: logFileRelativePath,
         },
       });

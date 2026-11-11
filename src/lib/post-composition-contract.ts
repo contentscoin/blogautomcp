@@ -4,7 +4,7 @@ import {
   topicImageSourceLabel,
   type TopicImageSource,
 } from "../../scripts/lib/topic-templates";
-import { SHOPPING_POST_STRATEGY, SHOPPING_NATURAL_PHOTO_RULE, shoppingPhotoRoleAt, type ShoppingPostStrategyVersion } from "./shopping-post-strategy";
+import { SHOPPING_POST_STRATEGY, SHOPPING_NATURAL_PHOTO_RULE, SHOPPING_RELAXED_IMAGE_FLOOR, isShoppingSceneCoverageRelaxed, shoppingPhotoRoleAt, type ShoppingPostStrategyVersion } from "./shopping-post-strategy";
 import { getConnectAffiliateDisclosure } from "./connect-disclosure";
 import { isClothingPhotoSubject } from "./product-photo-subject";
 
@@ -173,6 +173,8 @@ export interface ResolvedPostDocumentV1 {
    * 계약 최소보다 작을 때만 의미가 있으며, 재배치(`brand-post-image-replan`)만 기록한다.
    */
   imageFloor?: number;
+  /** 쇼핑 전용: 연출 사진을 채우지 못해 재계획이 빈 연출 슬롯을 선택 사항으로 낮췄다는 기록. */
+  sceneCoverage?: "relaxed";
 }
 
 const shoppingSections: PostSectionContractV1[] = [
@@ -677,6 +679,8 @@ export function buildPostQualityReport(options: {
   imageCount: number;
   /** A replan-recorded floor below the contract minimum (seller gallery exhausted). */
   imageFloor?: number;
+  /** 쇼핑 전용: 재계획이 연출 사진 완화를 기록했을 때만 imageFloor를 인정한다. */
+  shoppingScenesRelaxed?: boolean;
 }): PostQualityReportV1 {
   const characterCount = options.sections.reduce((sum, section) => sum + section.characterCount, 0);
   const actual = {
@@ -689,7 +693,11 @@ export function buildPostQualityReport(options: {
   const target = {
     characters: options.contract.targetCharacters,
     sections: options.contract.targetSections,
-    images: options.contract.connectKind !== "SHOPPING" && options.imageFloor !== undefined && options.imageFloor >= 1 && options.imageFloor < options.contract.targetImages.min
+    // 쇼핑은 재계획이 기록한 완화 하한(썸네일+원본 이상)만 인정한다. 여행은 기존 규칙 그대로다.
+    images: options.imageFloor !== undefined && options.imageFloor < options.contract.targetImages.min &&
+      (options.contract.connectKind === "SHOPPING"
+        ? options.shoppingScenesRelaxed === true && options.imageFloor >= SHOPPING_RELAXED_IMAGE_FLOOR
+        : options.imageFloor >= 1)
       ? { ...options.contract.targetImages, min: Math.floor(options.imageFloor) }
       : options.contract.targetImages,
   };
@@ -1149,6 +1157,7 @@ export function refreshPostDocumentQuality(
       sections: document.sections,
       imageCount,
       imageFloor: document.imageFloor,
+      shoppingScenesRelaxed: isShoppingSceneCoverageRelaxed(document),
     }),
   };
 }
