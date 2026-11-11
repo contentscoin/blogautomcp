@@ -69,6 +69,7 @@ jobs:
           npm run test:shopping-product-card
           npm run test:shopping-scene-relax
           npm run test:file-digest-cache
+          npm run test:shopping-heading-emoji
           npm run test:writing-harness
           npm run test:section-images
           npm run test:image-batch-progress

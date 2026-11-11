@@ -55,3 +55,9 @@ essential 프로필에서는 연출 사진을 끝내 채우지 못해도 글을 
 - `strict`에서는 이전처럼 `REPLAN_NATURAL_PHOTOS_REQUIRED`로 남는다.
 
 코드: `src/lib/brand-post-image-replan.ts`의 `relaxUnfilledNaturalScenes`, `scripts/lib/scheduled-draft-workflow.ts`의 `isOptionalSceneImageFailure`. 검증: `npm run test:shopping-scene-relax`.
+
+## 글 구성 (P4)
+
+- **소제목 이모지**: 쇼핑 글 소제목 앞에 내용에 맞는 이모지 1개를 붙인다(가격 💰, 세척·보관 🧼, 추천 대상 🙋, 질문 ❓ 등). 모델 출력에 기대지 않고 정리 단계에서 일관되게 붙인다. 글 제목과 본문 문장, 여행 글에는 쓰지 않는다. 코드: `scripts/lib/shopping-heading-emoji.ts`.
+- **설득 구조**: 상황 한 장면 → 누구에게 맞는지 한 줄 결론 → 사실마다 생활에서 달라지는 점 → 솔직한 한계 → 맞는 사람·아닌 사람 → 정리와 상품 카드 안내 한 문장. 긴급함을 꾸미는 말과 근거 없는 최상급은 금지한다. 코드: `SHOPPING_PERSUASION_STRUCTURE`(`scripts/lib/blog-writing-style.ts`).
+- 검증: `npm run test:shopping-heading-emoji`.

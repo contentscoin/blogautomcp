@@ -30,6 +30,7 @@
     "capture:shopping-page": "tsx scripts/capture-shopping-page-fixture.ts",
     "test:shopping-scene-relax": "tsx scripts/verify-shopping-scene-relax.ts",
     "test:file-digest-cache": "tsx scripts/verify-file-digest-cache.ts",
+    "test:shopping-heading-emoji": "tsx scripts/verify-shopping-heading-emoji.ts",
     "test:shopping-essential-gate": "tsx scripts/verify-shopping-essential-gate.ts",
     "test:quality-repair": "ts-node --project tsconfig.scripts.json scripts/verify-quality-repair-policy.ts",
     "test:editorial-calibration": "tsx scripts/verify-editorial-gate-calibration.ts",

@@ -97,7 +97,8 @@ const PATTERNS: PatternDef[] = [
   { id: "D-4", label: "hype 형용사(혁신적/획기적 등)", severity: "S1", regex: /혁신적|획기적|전례\s*없는|압도적|폭발적|파격적|대대적/g },
   { id: "A-7", label: '"가지고 있다" 번역투', severity: "S1", regex: /가지고\s*있(다|습니다|어요|는|었)/g },
   { id: "A-8", label: "이중 피동(되어진다/지게 된다)", severity: "S1", regex: /되어지(다|는|ㄴ다|며)|지게\s*된다/g },
-  { id: "C-5", label: "이모지 남발", severity: "S1", regex: EMOJI_REGEX, threshold: 4 },
+  // 쇼핑 글은 소제목마다 이모지 1개(최대 8개)를 의도적으로 쓴다. 그보다 많을 때만 남발로 본다.
+  { id: "C-5", label: "이모지 남발", severity: "S1", regex: EMOJI_REGEX, threshold: 10 },
   { id: "C-11", label: "연결어미 뒤 쉼표", severity: "S1", regex: /(고|며|지만|면서|아서|어서|는데|으며),/g, threshold: 5 },
 
   // --- S2: 반복 시 티남(임계 초과만 집계) ---

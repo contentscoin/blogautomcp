@@ -137,7 +137,7 @@ export function formatWritingPromptContract(
     `[공유 필수 작성 계약 · ${contract.version}]`,
     ...(contract.kind === "SHOPPING" ? [`[쇼핑 글 중심 혼합형 전략 · ${contract.strategyVersion || SHOPPING_POST_STRATEGY_VERSION}]`] : []),
     "- 관측 분포와 선택 렌즈는 아래 필수 기준을 완화하지 않습니다. 기존 제목·사실성·품질 정책도 지킵니다.",
-    `- 제목 ${contract.title.min}~${contract.title.max}자, 핵심 검색어를 앞에 배치합니다. 제목·소제목에 이모지를 넣지 않습니다.`,
+    `- 제목 ${contract.title.min}~${contract.title.max}자, 핵심 검색어를 앞에 배치합니다. 제목에는 이모지를 넣지 않습니다.${contract.kind === "SHOPPING" ? " 소제목 앞 이모지는 시스템이 내용에 맞게 1개 붙이므로 본문 문장에는 이모지를 쓰지 않습니다." : " 소제목에도 이모지를 넣지 않습니다."}`,
     `- 본문 sections는 ${contract.sections.min}~${contract.sections.max}개이며 섹션마다 원소 하나("소제목\\n\\n본문")입니다. 소제목·순서는 근거에 맞춥니다.`,
     `- 소제목·고지 문구를 제외하고 본문 문단을 구분자 없이 이은 문자열 길이(문단 내부 공백 포함)로 최소 ${contract.characters.min}자를 충족하고, 권장 상한 ${contract.characters.max}자 안에서 작성합니다.`,
     `- 각 섹션은 소제목, 빈 줄, 핵심 답부터 시작하는 ${contract.sentences.min}~${contract.sentences.max}개의 완결된 문장을 권장하며 문장마다 줄바꿈합니다. 첫 ${Math.min(2, contract.sentences.min)}문장의 답도 이 문장 수에 포함합니다.`,

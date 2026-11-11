@@ -43,6 +43,7 @@ import {
   NAVER_AI_CITATION_RULES,
   NAVER_SEO_TITLE_RULES,
   SHOPPING_EXPERT_REVIEW_STYLE_GUIDE,
+  SHOPPING_PERSUASION_STRUCTURE,
   TRAVEL_VLOG_STYLE_GUIDE,
   stripClickbaitFromTitle,
 } from "./lib/blog-writing-style";
@@ -164,6 +165,7 @@ import {
   productSignalAnchor,
   gradeProductEvidence,
 } from "./lib/product-editorial-plan";
+import { decorateShoppingHeading, decorateShoppingSection } from "./lib/shopping-heading-emoji";
 import { attachShoppingJsonCapture, collectShoppingPageState, parseShoppingProductCard } from "./lib/shopping-product-card";
 import { normalizeDraftSections } from "./lib/draft-sections";
 import {
@@ -807,6 +809,11 @@ function sanitizeTravelPageResearch(research: TravelPageResearch | null | undefi
 
 function hasCompleteTravelSourceResearch(research: TravelPageResearch | null | undefined): boolean {
   return assessTravelPageResearchCoverage(sanitizeTravelPageResearch(research)).sufficient;
+}
+
+/** 쇼핑 글 소제목만 이모지 1개로 꾸민다. 여행 글과 글 제목은 그대로 둔다. */
+function headingForKind(title: string, index: number, connectKind: "SHOPPING" | "TRAVEL"): string {
+  return connectKind === "SHOPPING" ? decorateShoppingHeading(title, index) : title;
 }
 
 function stripSectionPrefix(text: string): string {
@@ -3584,6 +3591,9 @@ function normalizeSections(
     )
   );
 
+  // 쇼핑 글 소제목은 내용에 맞는 이모지 1개로 시작한다. 모델 출력에 기대지 않고 여기서 일관되게 붙인다.
+  if (connectKind === "SHOPPING") normalized.forEach((text, index) => { normalized[index] = decorateShoppingSection(text, index); });
+
   assertDraftSectionCount(normalized.map((text, index) => ({ text, sourceSectionIndex: expanded[index].sourceSectionIndex })), connectKind, "normalized", bounds);
   return normalized;
 }
@@ -3733,7 +3743,7 @@ function applyHumanMobilePolishToSection(
 
   // 긴 문장을 모바일 줄로 나눈 뒤 줄 수로 자르면 문장의 뒷부분이 통째로
   // 사라질 수 있다. 모델이 만든 완성 문장은 보존하고 줄바꿈만 적용한다.
-  return `${title}\n\n${polishedBodyLines.join("\n")}\n`;
+  return `${headingForKind(title, index, connectKind)}\n\n${polishedBodyLines.join("\n")}\n`;
 }
 
 function applyHumanMobilePolishToDisclosure(section: string): string {
@@ -4947,6 +4957,7 @@ async function step2_generatePost(
   if (sparseShoppingEvidence) console.log("   🧭 상품 근거 등급: sparse · 고민 해결·사용 장면 중심으로 작성");
   const mandatoryWritingPromptBlock = [
     formatWritingPromptContract(writingContract),
+    isTravel ? "" : SHOPPING_PERSUASION_STRUCTURE,
     sparseShoppingEvidence
       ? [
           "[확인된 상품 근거가 적은 상품 · 최우선 규칙]",
@@ -5256,7 +5267,7 @@ ${BROWSER_GPT_MODE && CHATGPT_FORCE_MOBILE_VERSION ? "- 출력 형식: 모바일
    ${isTravel ? "" : "- 상세페이지 이미지의 글자·사양표를 제공된 확인 사실과 대조하세요. 일치하는 사실만 evidenceFacts에 기록하고, 새 추정은 제외합니다. 본문에는 근거가 있는 기능 원리·사용법·활용 이점으로 풀어 씁니다."}
 
 3. 각 섹션 구조:
-   - 소제목 (한 줄, 이모지 금지, 가능하면 독자 질문형. 글 전체 서너 개)
+   - 소제목 (한 줄, 가능하면 독자 질문형. 글 전체 서너 개. 이모지는 직접 넣지 않아도 됩니다. 쇼핑 글 소제목의 이모지는 시스템이 붙입니다)
    - 빈 줄
    - 문장 수와 출력 구조는 공유 필수 작성 계약을 따릅니다.
    - 문장 수를 채우기 위해 같은 뜻을 반복하지 말고, 서로 다른 사실·장면·판단을 한 문장씩 배치합니다.
