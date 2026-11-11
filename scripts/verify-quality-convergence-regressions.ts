@@ -16,6 +16,9 @@ import {
 import { isDraftEditorialQualityPassed } from "../src/lib/brand-post-quality-display";
 import { assessProductReviewSubstance } from "./lib/product-editorial-plan";
 
+// 이 검증은 품질 채점이 발행을 막는 strict 프로필의 판정을 다룬다. 쇼핑 기본값은 essential이다.
+process.env.SHOPPING_GATE_PROFILE = "strict";
+
 const disclosure = "이 포스팅은 네이버 쇼핑 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받습니다.";
 
 function passingTextQuality() {

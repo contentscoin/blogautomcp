@@ -303,7 +303,7 @@ for (const [status, code] of [['unknown', 'NAVER_SESSION_CHECK_FAILED'], ['forbi
       '@/lib/api-auth': { requireAdminApiKey: () => null }, '@/lib/update-guard': { requireNoPendingDesktopUpdate: () => null },
       '@/lib/db': { prisma: { brandLink: { count: async () => 0 } } }, '@/lib/publication-recovery': { recoverExitedPublications: async () => {} },
       '@/lib/brandconnect-kind': { parseConnectKind: () => 'shopping' }, '@/lib/connect-contract-store': { resolveConnectContract: () => ({ configuredUrl: 'https://example.test/fixture', captureRequired: false }) },
-      '../../../../../scripts/lib/app-paths': {}, '@/lib/naver-session': {
+      '../../../../../scripts/lib/app-paths': {}, '../../../../../scripts/lib/brandconnect-list-diagnosis': { readListSyncDiagnosis: () => null }, '@/lib/naver-session': {
         getNaverSessionFile: () => '/configured/naver-state.json',
         validateNaverPublishingSession: async target => { checkedPath = target; return { valid: false, status, code, authRequired: status === 'auth-required', error: 'Fixture verification result' }; },
       },
@@ -516,7 +516,7 @@ for (const [file, method] of [['src/app/api/brandlinks/available/route.ts', 'GET
     const route = load(file, {
       'next/server': next, 'node:fs': { existsSync: () => true, mkdirSync: () => { writes++; }, writeFileSync: () => { writes++; } },
       '@/lib/api-auth': { requireAdminApiKey: () => null }, '@/lib/local-request-auth': { requireTrustedLocalMutation: () => null },
-      '@/lib/naver-session': { getNaverSessionFile: () => '/fixture' }, '../../../../../scripts/lib/app-paths': { getNaverSessionFile: () => '/fixture', getLogsDir: () => '/fixture-logs' },
+      '@/lib/naver-session': { getNaverSessionFile: () => '/fixture' }, '../../../../../scripts/lib/app-paths': { getNaverSessionFile: () => '/fixture', getLogsDir: () => '/fixture-logs' }, '../../../../../scripts/lib/brandconnect-list-diagnosis': { readListSyncDiagnosis: () => null },
       '@/lib/db': { prisma: { brandLink: { findMany: () => { throw Error('must stop before DB access'); } } } },
       '@/lib/brand-post-package': {}, '@/lib/brandlink-product-list': {},
       '@/lib/travel-connect-adapter': { ConnectSessionExpiredError: class extends Error {}, ConnectAccessDeniedError: Denied, ConnectContractNotFoundError: class extends Error {}, listTravelItems: rejectPermission, discoverConnectContract: rejectPermission, isValidConnectUrl: () => true },

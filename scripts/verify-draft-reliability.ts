@@ -30,6 +30,9 @@ import { createWritingPromptContract, formatWritingPromptContract, getWritingOut
 import { verifyProductSourceIntake } from "./verify-product-source-intake";
 import "./verify-section-normalization";
 
+// 이 검증은 연출 사진 3장을 반드시 요구하는 strict 프로필의 판정을 다룬다. 쇼핑 기본값은 essential이다.
+process.env.SHOPPING_GATE_PROFILE = "strict";
+
 async function main() {
   await verifyProductSourceIntake();
   // 1. Structure: object sections, merged sections, and the output example.

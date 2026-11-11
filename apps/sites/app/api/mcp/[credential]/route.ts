@@ -27,7 +27,26 @@ const SUPPORTED_PROTOCOLS = [MODERN_PROTOCOL, ...LEGACY_PROTOCOLS] as const;
 const RESPONSE_HEADERS = { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff' };
 const CONNECT_KINDS = ['shopping', 'travel'];
 const SERVER_INFO = { name: 'BlogAutoMCP', version: '1.3.17' };
+/**
+ * 대부분의 요청이 이 도구들만으로 끝난다. 도구 목록 맨 앞에 두고 안내문에서 먼저 소개한다.
+ * 나머지 도구는 그대로 제공하며(기존 대화 호환) 사용자가 그 작업을 구체적으로 요청할 때 쓴다.
+ */
+const CORE_TOOL_NAMES = [
+  'agent_get_status', 'brandconnect_sync_products', 'brandconnect_list_products',
+  'materials_prepare', 'materials_list', 'materials_publish', 'job_get',
+] as const;
+
 const SERVER_INSTRUCTIONS = [
+  [
+    '[기본 흐름] 글 쓰기 요청은 대부분 아래 순서로 끝납니다. 다른 도구는 사용자가 그 작업을 구체적으로 요청할 때만 사용하세요.',
+    '1) agent_get_status로 PC 연결과 네이버 로그인을 확인합니다.',
+    '2) brandconnect_sync_products로 상품을 가져오고 brandconnect_list_products로 고릅니다. 결과의 diagnosis.message는 가져온 개수의 이유이니 그대로 사용자에게 알려주세요.',
+    '3) materials_prepare에 고른 productIds를 넘기면 PC가 원고·이미지·검사까지 한 번에 준비합니다. job_get으로 기다립니다.',
+    '4) materials_list로 준비 완료(ready)를 확인합니다.',
+    '5) 사용자가 고른 소재만 materials_publish로 발행하거나 예약합니다.',
+    '쇼핑 원고는 contentQuality.canPublish=true이면 advisory(보강 권고)가 있어도 발행할 수 있습니다. 권고만으로 원고를 다시 쓰거나 다시 제출하지 마세요.',
+    '쇼핑 연출 사진을 만들지 못한 소재는 판매자 실사진만으로 준비될 수 있습니다. 이는 실패가 아닙니다.',
+  ].join('\n'),
   '요청이 완료되거나 실제 진행 불가 사유가 확인될 때까지 수행하세요. QUEUED/RUNNING, 동일 진행률, 긴 소요 시간은 중단 사유가 아닙니다. 같은 jobId로 job_get(waitMs=20000)을 반복하세요. 통신 시간 초과는 작업 실패가 아닙니다. 성공 결과를 읽고 요청 범위 안의 다음 단계를 이어가세요. 사용자 취소·필수 승인 대기는 존중하고 불확실한 발행을 중복 실행하거나 검수를 우회하지 마세요.',
   '진행 확인은 job_get(includeResult=false)로 조회하고 pollAfterMs만큼 기다리세요. 완료된 큰 결과가 잘리면 job_result_read를 offset=0부터 nextOffset까지 이어서 읽으세요. AGENT_LOST_UNCERTAIN은 자동 재실행하지 말고 발행 여부부터 확인하세요.',
   '승인된 한 대의 Windows PC에서 네이버 쇼핑커넥트·여행커넥트 작업을 수행합니다. 대부분의 도구는 작업(jobId)을 큐에 넣고 즉시 반환하며, job_get 으로 진행 단계(stage)와 결과를 확인합니다.',
@@ -503,7 +522,11 @@ function publicTool(tool: ToolDefinition) {
   };
 }
 
-const ADVERTISED_TOOLS = TOOLS.map(publicTool);
+const CORE_TOOL_ORDER = new Map<string, number>(CORE_TOOL_NAMES.map((name, index) => [name, index]));
+// 기본 흐름 도구를 목록 맨 앞에 둔다. 나머지는 정의된 순서를 유지한다.
+const ADVERTISED_TOOLS = [...TOOLS]
+  .sort((left, right) => (CORE_TOOL_ORDER.get(left.name) ?? CORE_TOOL_NAMES.length) - (CORE_TOOL_ORDER.get(right.name) ?? CORE_TOOL_NAMES.length))
+  .map(publicTool);
 
 function rpcResult(id: JsonRpcId, result: unknown, status = 200) {
   return NextResponse.json({ jsonrpc: '2.0', id, result }, { status, headers: RESPONSE_HEADERS });
