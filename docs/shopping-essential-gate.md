@@ -39,3 +39,19 @@ PC 자동 작성은 권고가 있으면 보강을 한 번 시도하고, 더 나�
 essential 프로필에서는 텍스트 근거가 적어도(`sparse`) 작성을 중단하지 않는다. 상품명을 확인하지 못한 경우는 계속 중단한다. 근거가 적은 상품은 생활 장면·고민 해결·고르는 기준 중심으로 쓰고, 제공되지 않은 수치·규격·구성품을 만들지 않도록 지시한다. `strict`에서는 이전처럼 `SOURCE_EVIDENCE_REQUIRED`로 중단한다.
 
 실제 페이지에서 무엇이 잡히는지 확인하려면 PC에서 `npm run capture:shopping-page -- <상품 URL>`을 실행한다. 결과는 앱 데이터 폴더의 `shopping-fixtures/`에 저장되며 계정·인증 관련 값은 지워진다.
+
+## 이미지 (P3)
+
+기본 계획은 그대로다: 썸네일 1장, 본문에 판매페이지 원본 1장과 AI 연출 사진 3장. 연출 사진은 먼저 만들어 보고 검수한다.
+
+essential 프로필에서는 연출 사진을 끝내 채우지 못해도 글을 막지 않는다. 이미지 준비가 연출 사진의 생성·검수 실패로 끝나면 재계획 단계가 빈 연출 슬롯을 선택 사항으로 낮추고, 썸네일과 원본 1장(그리고 통과한 연출 사진)만으로 구성을 확정한다. 거절된 연출 파일은 구성에서 빠진다. 기록: `pipelineNotes`의 `IMAGE_SCENES_RELAXED`, `composition.sceneCoverage = "relaxed"`, `composition.imageFloor`. 완화 표시 없이 남은 하한은 인정하지 않는다.
+
+완화된 글은 빈 연출 자리에 **서로 다른 판매자 실사진**을 더 쓴다(본문 원본 합계 최대 4장, 2026-11-10 사용자 결정으로 "원본 1장" 규칙 해제). 실사진은 기존 원본 검수를 통과한 것만 붙이고 같은 사진을 반복하지 않는다. 붙일 사진이 없으면 원본 1장으로 발행한다. 완화되지 않은 글은 이전처럼 원본 1장이다.
+
+바뀌지 않는 것:
+- 썸네일이나 판매페이지 원본이 없으면 완화하지 않는다(`REPLAN_ORIGINAL_PHOTO_REQUIRED`).
+- 통과한 연출 사진의 검수 기준은 그대로다.
+- 로그인 만료, 이미지 엔진 연결 실패, 사용자 취소, 다른 작업과의 경합은 완화하지 않고 실패로 알린다.
+- `strict`에서는 이전처럼 `REPLAN_NATURAL_PHOTOS_REQUIRED`로 남는다.
+
+코드: `src/lib/brand-post-image-replan.ts`의 `relaxUnfilledNaturalScenes`, `scripts/lib/scheduled-draft-workflow.ts`의 `isOptionalSceneImageFailure`. 검증: `npm run test:shopping-scene-relax`.

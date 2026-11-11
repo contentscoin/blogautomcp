@@ -29,6 +29,7 @@ import { imageBatchBudgetMs, imageJobBudgetMs, IMAGE_TIMER_MAX_MS } from "../../
 import { buildBlogPhotorealDirection } from "../../scripts/lib/photoreal/build";
 import { assertProductImageReferences, existingJobResult, hasBrowserSubmission, hasUnresolvedCodexSubmission, resolveBrandPostImageEngine, runCodexImageBatch, type ImageBatchJob } from "./codex-image-generation";
 import { allowsGenericBrandPostProductPhoto, allowsOriginalShoppingScene, brandPostSectionSlotId, isShoppingLifestyleImage, REFERENCE_SCENE_REVIEW_CHECKS, type BrandPostImageSourceHint } from "./brand-post-image-evidence";
+import { shoppingOriginalPhotoLimit } from "./shopping-post-strategy";
 import { buildProduct9Canvas, type Product9Canvas, type ProductPhysicalScale } from "../../scripts/lib/product-9canvas";
 import { buildShoppingReferenceScenePrompt, reviewShoppingReferenceScene, selectShoppingSceneReference,
   SHOPPING_REFERENCE_SCENE_STRATEGY_VERSION, type ShoppingSceneReference } from "../../scripts/lib/shopping-reference-scene";
@@ -1113,7 +1114,7 @@ export async function generateBrandPostImages(options: {
         }
         continue;
       }
-      if (existingOriginalBodyCount + sourceAssignedAssetHashes.size >= 1) {
+      if (existingOriginalBodyCount + sourceAssignedAssetHashes.size >= shoppingOriginalPhotoLimit(options.manifest.composition)) {
         await publish(index, { ...baseResult(index), sectionId: target.sectionId, imageIntent: target.imageIntent,
           error: "SHOPPING_ORIGINAL_LIMIT: 본문 원본은 1장만 사용합니다. 추가 슬롯은 서로 다른 자연스러운 AI 장면으로 계획하세요." });
         continue;

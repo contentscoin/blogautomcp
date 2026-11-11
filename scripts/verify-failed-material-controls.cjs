@@ -26,7 +26,7 @@ function harness({ source = 'MaterialLibrary', storage = new Map(), onFetch, ini
     module: testModule, exports: testModule.exports, require: name => name === 'react' ? react : name === 'next/link' ? { default: 'a' } : { jsx, jsxs: jsx },
     localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
     crypto: { randomUUID: () => { uuidCount++; return `00000000-0000-4000-8000-${String(uuidCount).padStart(12, '0')}`; } },
-    Date, console, setInterval: () => 1, clearInterval() {},
+    Date, console, setInterval: () => 1, clearInterval() {}, setTimeout: () => 1, clearTimeout() {},
     fetch: async (url, init) => { requests.push({ url, init }); return onFetch ? onFetch(url, init) : response(initialList); },
   });
   const code = ts.transpileModule(fs.readFileSync(`src/components/${source}.tsx`, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 } }).outputText;

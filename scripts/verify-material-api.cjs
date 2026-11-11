@@ -41,6 +41,7 @@ function harness() {
   const library = load('src/lib/material-library.ts', {
     'node:crypto': crypto,
     'node:fs': { readFileSync: file => Buffer.from(`fixture bytes: ${file}`) },
+    './file-digest-cache': { cachedSha256File: file => crypto.createHash('sha256').update(`fixture bytes: ${file}`).digest('hex') },
     './brand-post-package': {
       readBrandPostPackage: id => state.manifests.get(id) || null,
       evaluateBrandPostPackageReadiness: manifest => ({

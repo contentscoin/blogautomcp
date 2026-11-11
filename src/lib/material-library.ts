@@ -1,5 +1,5 @@
-import fs from "node:fs";
 import crypto from "node:crypto";
+import { cachedSha256File } from "./file-digest-cache";
 import { readBrandPostPackage, evaluateBrandPostPackageReadiness, type BrandPostPackageManifest } from "./brand-post-package";
 
 // Content-addressed selection: changing a file in place also invalidates selection.
@@ -13,7 +13,8 @@ export function materialRevision(manifest: BrandPostPackageManifest): string {
     ...(manifest.version === "brand-post-package/v2" ? manifest.composition.sections.flatMap(section => section.imagePaths) : [])]);
   for (const file of [...files].sort()) {
     hash.update(file || "missing-path");
-    try { hash.update(fs.readFileSync(file)); } catch { hash.update("missing-file"); }
+    // 파일 내용의 해시를 섞는다. 바뀌지 않은 파일은 다시 읽지 않는다(file-digest-cache).
+    try { hash.update(cachedSha256File(file)); } catch { hash.update("missing-file"); }
   }
   return hash.digest("hex");
 }
