@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { MaterialLibrary, type MaterialSelectionRequest } from "@/components/MaterialLibrary";
+import { MaterialReviewWarnings } from "@/components/MaterialReviewWarnings";
 import SessionStatus from "@/components/SessionStatus";
 import SavedDraftAutoReview from "@/components/SavedDraftAutoReview";
 import TopicTaskPanel from "@/components/TopicTaskPanel";
@@ -16,6 +17,7 @@ import PostAnglePanel from "@/components/PostAnglePanel";
 import ExperienceNotesPanel from "@/components/ExperienceNotesPanel";
 import { getPostAngle } from "../../scripts/lib/topic-templates/angles";
 import { REFERENCE_SCENE_CAPTION, type BrandPostImageEvidenceLike } from "@/lib/brand-post-image-evidence";
+import { startDraftImageProgressPolling } from "@/lib/draft-image-progress-polling";
 
 type ContentMode = "product" | "topic" | "review";
 type ReviewCategory = "place" | "food" | "travel" | "parenting" | "product";
@@ -50,6 +52,7 @@ interface BrandLink {
 }
 
 interface BrandPostDraftPreview {
+  reviewWarnings?: import("../lib/material-review-warning").MaterialReviewWarning[];
   qualityConvergence?: {
     action?: string;
     reason?: string;
@@ -482,21 +485,16 @@ export default function Dashboard() {
   const draftImagesRunning = draftPreview?.imageGeneration?.status === "running";
   useEffect(() => {
     if (!previewId || (!draftImageActionKey && !draftImagesRunning)) return;
-    let cancelled = false;
-    let inFlight = false;
-    const timer = setInterval(async () => {
-      if (inFlight) return;
-      inFlight = true;
-      try {
-        const response = await fetch(`/api/brandlinks/${previewId}/draft`, { cache: "no-store" });
-        const payload = await response.json();
-        if (!cancelled && response.ok && payload.success && payload.data) {
-          setDraftPreview((current) => current?.brandLinkId === previewId ? payload.data : current);
-        }
-      } catch { /* The owning POST reports errors; progress polling is best effort. */ }
-      finally { inFlight = false; }
-    }, 3000);
-    return () => { cancelled = true; clearInterval(timer); };
+    const polling = startDraftImageProgressPolling<BrandPostDraftPreview>({ productId: previewId,
+      wasRunning: draftImagesRunning, waitForOwningRequest: Boolean(draftImageActionKey), fetch, visibility: document, desktopVisibility: window,
+      requireDesktopVisibility: /Electron\//u.test(navigator.userAgent),
+      onProgress: imageGeneration => setDraftPreview(current => {
+        if (current?.brandLinkId !== previewId || JSON.stringify(current.imageGeneration) === JSON.stringify(imageGeneration)) return current;
+        return { ...current, imageGeneration };
+      }),
+      onPreview: preview => setDraftPreview(current => current?.brandLinkId === previewId ? preview : current),
+    });
+    return () => polling.stop();
   }, [previewId, draftImageActionKey, draftImagesRunning]);
   const [draftCreationMode, setDraftCreationMode] = useState<DraftCreationMode>("checking");
   const [chatGptDraftHandoff, setChatGptDraftHandoff] = useState<ChatGptDraftHandoff | null>(null);
@@ -2617,6 +2615,8 @@ export default function Dashboard() {
                                 <img
                                   src={thumbnailUrl}
                                   alt=""
+                                  loading="lazy"
+                                  decoding="async"
                                   className="h-12 w-12 shrink-0 rounded-lg object-cover"
                                 />
                               )}
@@ -2927,6 +2927,7 @@ export default function Dashboard() {
             <div className="flex-1 overflow-auto px-6 py-5">
               <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm" aria-live="polite">
                 <p className="font-semibold text-slate-800">{draftPreview.approvedAt ? "승인된 초안" : draftApprovalBlockers.length ? "아직 승인할 수 없습니다" : "내용 확인 후 승인 요청 가능 · 서버에서 최종 검사"}</p>
+                <MaterialReviewWarnings warnings={draftPreview.reviewWarnings} />
                 <p className="mt-1 text-slate-600">원고: {draftContentQualityPassed ? "검사 통과" : "검사 결과 확인 필요"} · 구성·이미지: {draftCompositionQualityPassed && !draftMissingImageCount && !draftImagesRunning ? "저장된 검사 결과 확인" : "준비 필요"}. 점수 100점도 전체 준비 완료를 뜻하지 않습니다.</p>
                 {draftApprovalBlockers.length > 0 && <ul className="mt-2 list-disc space-y-1 pl-5 text-red-700">{draftApprovalBlockers.map((message) => <li key={message}>{message}</li>)}</ul>}
                 {dashboardNotice && <p className={`mt-2 ${dashboardNotice.tone === "error" ? "text-red-700" : "text-slate-700"}`}>{dashboardNotice.text}</p>}
@@ -2977,7 +2978,7 @@ export default function Dashboard() {
                       </div>
                       <div className="max-w-xs overflow-hidden rounded-xl bg-slate-100">
                         {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={asset.previewUrl} alt={`${draftPreview.title} 대표 썸네일`} className="aspect-square w-full object-cover" />
+                        <img src={asset.previewUrl} alt={`${draftPreview.title} 대표 썸네일`} loading="lazy" decoding="async" className="aspect-square w-full object-cover" />
                       </div>
                       {asset.provenance === "GENERATED_SCENE" && <p className="mt-2 text-xs leading-5 text-slate-600">{REFERENCE_SCENE_CAPTION}</p>}
                     </div>
@@ -3011,7 +3012,7 @@ export default function Dashboard() {
                             <figure key={`${asset.assetKey}-${assetIndex}`} className="overflow-hidden rounded-xl border border-slate-200 bg-white">
                               <div className="aspect-[4/3] overflow-hidden bg-slate-100">
                                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                                <img src={asset.previewUrl} alt={`${slot.title} 이미지 ${assetIndex + 1}`} className="h-full w-full object-cover" />
+                                <img src={asset.previewUrl} alt={`${slot.title} 이미지 ${assetIndex + 1}`} loading="lazy" decoding="async" className="h-full w-full object-cover" />
                               </div>
                               <figcaption className="flex items-center justify-between gap-2 p-3">
                                 <span className="truncate text-xs font-semibold text-slate-500">{brandImageProvenanceLabel(asset.provenance)}</span>
@@ -3129,6 +3130,7 @@ export default function Dashboard() {
               <span className={`text-sm font-semibold ${draftPreview.approvedAt ? "text-emerald-600" : "text-amber-600"}`}>
                 {draftPreview.approvedAt ? "승인 완료 · 발행 결과 고정" : "승인 전 · 아직 발행되지 않음"}
               </span>
+              <MaterialReviewWarnings warnings={draftPreview.reviewWarnings} />
               <div className="flex flex-wrap justify-end gap-2">
                 <button onClick={() => { const link = links.find((item) => item.id === draftPreview.brandLinkId); if (link) void handlePrepareBrandDraft(link); }} disabled={draftBusy || !links.some((link) => link.id === draftPreview.brandLinkId)} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">전체 다시 만들기</button>
                 {!draftPreview.approvedAt && <button onClick={() => void handleApproveBrandDraft()} disabled={draftApproving || draftApprovalBlocked} title={draftApprovalBlocked ? "품질검사 탭의 차단 항목을 먼저 보완하세요." : undefined} className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-40">{draftApproving ? "승인 중..." : "이 초안 승인"}</button>}

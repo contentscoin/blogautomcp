@@ -11,6 +11,8 @@ import { readWindowsRelease } from '@/lib/update-release';
 import { FailedMaterialActions } from './failed-material-actions';
 import { BlockedMaterialActions } from './blocked-material-actions';
 import { parseStatusJson } from '@/lib/jobs';
+import { readConnectionStatus } from '@/lib/connection-status';
+import { resolvePublicPluginInstallUrl } from '@/lib/plugin-install';
 
 export const dynamic = 'force-dynamic';
 
@@ -26,6 +28,8 @@ export default async function DashboardPage() {
     readWindowsRelease(env.INSTALLERS),
   ]);
   const approved = account.status === 'APPROVED';
+  const connectionStatus = approved ? await readConnectionStatus(account.id) : null;
+  const publicPluginInstallUrl = resolvePublicPluginInstallUrl(env.BLOGAUTO_PUBLIC_PLUGIN_INSTALL_URL, env.BLOGAUTO_PUBLIC_PLUGIN_APPROVED === 'true');
   const online = Boolean(device?.lastSeenAt && Number(clock?.now || 0) - device.lastSeenAt < 90_000);
   const background = parseStatusJson(device?.statusJson || null)?.backgroundWork as Record<string, unknown> | undefined;
   const activeWork = jobs.some(job => ['QUEUED', 'RUNNING'].includes(job.status)) || background?.busy === true || ['publishing', 'drafting', 'processes', 'imageGeneration'].some(key => Number(background?.[key] || 0) > 0);
@@ -38,11 +42,13 @@ export default async function DashboardPage() {
       </header>
       <div className="shell dashboard-wrap">
         <section className="dashboard-head">
-          <div><p className="eyebrow">CONTROL CENTER</p><h1>{account.displayName || account.email}님의 연결</h1><p>ChatGPT 명령과 이 PC의 네이버 자동화를 연결합니다.</p></div>
+          <div><p className="eyebrow">MY CHATGPT · MY PC</p><h1>내 ChatGPT와 PC 연결</h1><p>본인 계정과 PC를 연결하고, ChatGPT에서 블로그 작업을 시작하세요.</p></div>
           <span className={`status-pill status-${account.status.toLowerCase()}`}>{statusLabel(account.status)}</span>
         </section>
 
-        <section className="download-card">
+        <details className="download-details">
+          <summary>데스크톱 앱이 없나요? 다운로드·설치 안내</summary>
+          <section className="download-card">
           <div className="download-copy">
             <span className="card-kicker">DESKTOP AGENT</span>
             <h2>데스크톱 프로그램 설치</h2>
@@ -64,20 +70,16 @@ export default async function DashboardPage() {
               <small>버전 {release?.version || WINDOWS_INSTALLER_VERSION} · Apple Silicon용 DMG</small>
             </div>
           </div>
-        </section>
+          </section>
+        </details>
 
         {!approved ? (
           <section className="notice-card">
-            <span className="notice-icon">⌛</span><div><h2>{account.status === 'PENDING_APPROVAL' ? '관리자 승인을 기다리고 있습니다' : '현재 사용할 수 없는 계정입니다'}</h2><p>관리자 hiway@kakao.com이 승인하면 MCP 주소 발급과 PC 연결 메뉴가 자동으로 열립니다.</p></div>
+            <span className="notice-icon">⌛</span><div><h2>{account.status === 'PENDING_APPROVAL' ? '로그인 완료 · 이용 승인을 기다리고 있습니다' : '현재 사용할 수 없는 계정입니다'}</h2><p>{account.email} 계정으로 로그인했습니다. 관리자가 승인하면 PC와 ChatGPT를 연결할 수 있습니다. 다른 계정으로 바꿀 필요는 없습니다.</p><form action="/dashboard" method="get"><button className="button button-ghost" type="submit">승인 상태 다시 확인</button></form></div>
           </section>
         ) : (
           <>
-            <section className="metric-grid">
-              <article><span>ChatGPT 플러그인</span><strong>설치·연결</strong><small>아래 버튼으로 ChatGPT에서 확인</small></article>
-              <article><span>로컬 PC</span><strong>{online ? '온라인' : device ? '오프라인' : '미연결'}</strong><small>{device?.name || 'MCP 주소를 앱에 입력하세요'}</small></article>
-              <article><span>최근 작업</span><strong>{jobs.length}건</strong><small>대기 {jobs.filter((job) => job.status === 'QUEUED').length} · 실행 {jobs.filter((job) => job.status === 'RUNNING').length}</small></article>
-            </section>
-            <DashboardActions hasConnection={Boolean(connection)} generation={connection?.generation || 0} />
+            {connectionStatus && <DashboardActions key={account.id} accountId={account.id} accountEmail={account.email} initialStatus={connectionStatus} hasConnection={connectionStatus.channel.exists} generation={connectionStatus.channel.generation} publicPluginInstallUrl={publicPluginInstallUrl} />}
             <FailedMaterialActions accountId={account.id} online={online} appVersion={device?.appVersion || null} hasConnection={Boolean(connection)} activeWork={activeWork} />
             <BlockedMaterialActions accountId={account.id} online={online} appVersion={device?.appVersion || null} hasConnection={Boolean(connection)} activeWork={activeWork} />
             <section className="data-card">

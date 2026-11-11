@@ -10,6 +10,12 @@ function text(value: unknown): string {
   return "";
 }
 
+/** Numbered-list markers are formatting; decimal and signed quantities are content. */
+export function stripDraftListPrefix(value: string): string {
+  return value.replace(/^(?:-\s+|[•·▸✔✓*①②③④⑤]\s*)/u, "")
+    .replace(/^\d+[.)](?!\d)\s*/u, "");
+}
+
 /** {title|heading|subtitle, body|content|text|paragraphs} 객체를 "소제목\n\n본문" 문자열로. */
 export function sectionEntryToString(entry: unknown): string {
   if (typeof entry === "string") return entry.trim();

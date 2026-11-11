@@ -25,6 +25,7 @@ function load(file, mocks = {}, globals = {}, tail = '') {
   return module.exports;
 }
 const helper = load('scripts/lib/draft-section-contract.ts');
+const draftSections = load('scripts/lib/draft-sections.ts');
 const disclosure = load('src/lib/connect-disclosure.ts');
 const errors = load('src/lib/local-automation-error.ts');
 const headingEmoji = load('scripts/lib/shopping-heading-emoji.ts');
@@ -36,7 +37,7 @@ function agentFunctions(names, globals = {}) {
   const code = ts.transpileModule(nodes.map(node => node.getText(agentAst)).join('\n'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
-  const context = vm.createContext({ ...helper, ...disclosure, ...headingEmoji, Error, path, console: quietConsole,
+  const context = vm.createContext({ ...helper, ...draftSections, ...disclosure, ...headingEmoji, Error, path, console: quietConsole,
     normalizeText: value => value.replace(/\s+/gu, ' ').trim(),
     getDefaultSectionTitles: () => ['본문'],
     codexDraftTerminalFailureCode: () => null,

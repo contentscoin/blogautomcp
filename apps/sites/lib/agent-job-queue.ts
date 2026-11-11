@@ -53,12 +53,20 @@ export async function enqueueAgentJob(userId: string, tool: QueueTool, args: Jso
     ? `INSERT OR IGNORE INTO agent_jobs (id,user_id,type,connect_kind,input_json,status,progress,idempotency_key,created_at,updated_at)
        SELECT ?,?,?,?,?,'QUEUED',0,?,?,?
        WHERE EXISTS (SELECT 1 FROM users u WHERE u.id=? AND u.status='APPROVED' AND u.role IN ('USER','ADMIN'))
-         AND EXISTS (SELECT 1 FROM devices d WHERE d.id=? AND d.user_id=? AND d.status='ACTIVE' AND d.app_version=? AND d.last_seen_at>=? AND d.status_json IS ?)
+         AND EXISTS (SELECT 1 FROM devices d WHERE d.id=? AND d.user_id=? AND d.status='ACTIVE' AND d.app_version=? AND d.last_seen_at>=?
+           AND CASE WHEN json_valid(d.status_json) THEN
+             json_type(d.status_json,'$.backgroundWork.busy')='false'
+             AND json_extract(d.status_json,'$.backgroundWork.error') IS NOT 'BACKGROUND_STATUS_UNAVAILABLE'
+             AND COALESCE(json_extract(d.status_json,'$.backgroundWork.publishing'),0)=0
+             AND COALESCE(json_extract(d.status_json,'$.backgroundWork.drafting'),0)=0
+             AND COALESCE(json_extract(d.status_json,'$.backgroundWork.processes'),0)=0
+             AND COALESCE(json_extract(d.status_json,'$.backgroundWork.imageGeneration'),0)=0
+           ELSE 0 END)
          AND EXISTS (SELECT 1 FROM mcp_connections m WHERE m.id=? AND m.user_id=? AND m.generation=? AND m.status='ACTIVE')
          AND NOT EXISTS (SELECT 1 FROM agent_jobs j WHERE j.user_id=? AND j.status IN ('QUEUED','RUNNING'))`
     : `INSERT OR IGNORE INTO agent_jobs (id,user_id,type,connect_kind,input_json,status,progress,idempotency_key,created_at,updated_at) VALUES (?,?,?,?,?,'QUEUED',0,?,?,?)`;
   const values = [jobId, userId, type, typeof args.connectKind === 'string' ? args.connectKind : null, inputJson, idempotencyKey, now, now];
-  if (recovery) values.push(userId, device.id, userId, device.appVersion, now - DEVICE_ONLINE_MS, device.statusJson, connection!.id, userId, connection!.generation, userId);
+  if (recovery) values.push(userId, device.id, userId, device.appVersion, now - DEVICE_ONLINE_MS, connection!.id, userId, connection!.generation, userId);
   const inserted = await d1.prepare(sql).bind(...values).run();
   if (Number(inserted.meta.changes || 0) !== 1) {
     const raced = idempotencyKey ? await readExisting() : null;

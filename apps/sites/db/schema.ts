@@ -132,8 +132,18 @@ export const pairCodes = sqliteTable('pair_codes', {
   codeHash: text('code_hash').notNull(),
   expiresAt: integer('expires_at').notNull(),
   usedAt: integer('used_at'),
+  pairingTokenHash: text('pairing_token_hash'),
+  pairedDeviceId: text('paired_device_id'),
   createdAt: integer('created_at').notNull(),
 }, (table) => [uniqueIndex('idx_pair_codes_hash').on(table.codeHash), index('idx_pair_codes_user').on(table.userId, table.expiresAt)]);
+
+export const mcpConnectionChecks = sqliteTable('mcp_connection_checks', {
+  userId: text('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  lastReadAt: integer('last_read_at').notNull(),
+  readTool: text('read_tool').notNull(),
+  channelId: text('channel_id'),
+  readJobId: text('read_job_id'),
+});
 
 export const bugReports = sqliteTable('bug_reports', {
   id: text('id').primaryKey(),

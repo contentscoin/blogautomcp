@@ -40,6 +40,8 @@
     "apps/site",
     "apps/sites",
     "node_modules",
-    "out"
+    "out",
+    "tmp",
+    "scripts/tmp-*"
   ]
 }

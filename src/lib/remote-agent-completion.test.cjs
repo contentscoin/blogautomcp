@@ -236,9 +236,9 @@ test('materials handlers separate preparation, selection and publication and pre
       requests.push({ path: parsed.pathname, search: parsed.search, method: init.method || 'GET', body: init.body ? JSON.parse(init.body) : null });
       assert.ok(timeoutMs === 30000 || requests.at(-1).method === 'GET');
       if (loseResponse) throw new Error('response lost');
-      if (parsed.pathname === '/api/materials' && parsed.searchParams.get('jobId') === 'local-workflow-1') {
+      if (parsed.pathname === '/api/materials' && (parsed.searchParams.get('jobId') === 'local-workflow-1' || parsed.searchParams.get('sourceJobId') === 'job_source')) {
         return Response.json({ success: true, data: { jobId: 'local-workflow-1', status: backgroundPending ? 'failed' : 'completed', workflowPending: backgroundPending, items: [{
-          productId: 'product-1', status: backgroundPending ? 'interrupted' : 'scheduled',
+          productId: 'product-1', status: backgroundPending ? 'interrupted' : parsed.searchParams.has('sourceJobId') ? 'ready' : 'scheduled',
           ...(backgroundPending ? { error: 'shared writer unavailable', errorCode: 'LLM_UNAVAILABLE', causeCode: 'CODEX_MODEL_INCOMPATIBLE' } : {}),
         }] } });
       }
@@ -256,6 +256,25 @@ test('materials handlers separate preparation, selection and publication and pre
   assert.equal(requests.at(-1).body.sourceJobId, 'job_source');
   assert.equal(prepare.data.workflowPending, true);
   assert.equal(prepare.data.nextCall.arguments.jobId, 'local-workflow-1');
+  const admitted = requests.length;
+  for (const bad of [{ productIds: ['short'] }, { productIds: ['product-1', 'product-1'] },
+    { productIds: ['product-1'], publishMode: 'now' }, { productIds: ['product-1'], confirmed: true }]) {
+    await assert.rejects(() => execute('MATERIALS_PREPARE', bad), error => error.code === 'INVALID_INPUT');
+  }
+  assert.equal(requests.length, admitted, 'malformed queue input cannot reach any local API');
+  loseResponse = true;
+  const prepareUnknown = await execute('MATERIALS_PREPARE', { productIds: ['product-1'] });
+  assert.equal(prepareUnknown.data.submissionUncertain, true);
+  assert.equal(prepareUnknown.data.nextCall.arguments.sourceJobId, 'job_source');
+  const preparePosts = requests.filter(call => call.path === '/api/materials/prepare' && call.method === 'POST').length;
+  loseResponse = false;
+  const reconnected = await execute('MATERIALS_LIST', prepareUnknown.data.nextCall.arguments);
+  assert.equal(reconnected.data.workflowJobId, 'local-workflow-1');
+  assert.equal(reconnected.data.workflowPending, false);
+  assert.equal(reconnected.data.items[0].status, 'ready');
+  assert.equal(requests.at(-1).search, '?sourceJobId=job_source');
+  assert.equal(requests.at(-1).method, 'GET');
+  assert.equal(requests.filter(call => call.path === '/api/materials/prepare' && call.method === 'POST').length, preparePosts, 'read reconnect never resubmits preparation');
   backgroundPending = true;
   const stillPreparing = await execute('MATERIALS_LIST', { jobId: 'local-workflow-1' });
   assert.equal(stillPreparing.data.workflowPending, true);

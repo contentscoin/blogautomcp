@@ -8,6 +8,8 @@ import {
   buildProductThumbnailCopy,
   compactProductDisplayName,
   inferCategoryName,
+  inferScenePrompt,
+  buildProductThumbnailGenerationPrompt,
   isProductThumbnailCopyCompatible,
 } from "./lib/product-thumbnail";
 import { createOriginalProductPhotoThumbnail } from "./lib/product-image-lock";
@@ -42,7 +44,39 @@ async function main() {
     cta: humidifier.cta,
   }, humidifierUnderstanding), true);
   const persimmon = buildProductThumbnailCopy("선물세트 기준", "상주곶감 건시 반건시 호두말이 크림치즈 선물세트");
-  assert.equal(persimmon.headline, "구성·보관 확인");
+  assert.equal(persimmon.headline, "선물 전 체크");
+  assert.doesNotMatch(persimmon.headline, /보관|냉동|보냉/u, "A gift overview photograph must not imply a storage-performance demonstration");
+  for (const name of ["예다움 상주곶감 선물세트 1.65kg", "천년빛 반건시 곶감 선물세트"]) {
+    const gift = buildProductThumbnailCopy("구성과 냉동보관 기준", name, "SHOPPING", buildProduct9Canvas({ name }));
+    assert.equal(gift.headline, "선물 전 체크");
+    assert.match(gift.subline, /보관법/u, "The article's purchase/storage advice remains available separately");
+  }
+  assert.equal(buildProductThumbnailCopy("구성과 냉동보관 기준", "마장동 한우 선물세트 1200g").headline, "구성 확인", "Keep the existing category contract for other gift foods");
+  const campingSpeaker = "블루필 블루투스 스피커 캠핑 휴대용";
+  const speakerUnderstanding = buildProduct9Canvas({ name: campingSpeaker, features: ["블루투스 연결", "충전식"] });
+  assert.equal(speakerUnderstanding.concept.categoryId, "generic_shopping");
+  const speakerCopy = buildProductThumbnailCopy("캠핑 보냉백과 함께 챙기는 스피커", campingSpeaker, "SHOPPING", speakerUnderstanding);
+  assert.equal(speakerCopy.headline, "구매 전 확인", "A generic camping speaker uses conservative copy, not another product's promise");
+  assert.equal(inferCategoryName("", campingSpeaker), "상품리뷰");
+  assert.equal(isProductThumbnailCopyCompatible({ headline: "보냉력 체크", subline: "용량·수납·휴대성", cta: "사용 포인트" }, speakerUnderstanding), false);
+  for (const name of [campingSpeaker, "휴대용 캠핑 랜턴", "피크닉 접이식 선풍기", "캠핑 USB 충전 케이블", "CPU 쿨러", "GPU 쿨러", "VGA 쿨러", "쿨러마스터 게이밍 헤드셋", "쿨러", "보냉용품 아이스팩"]) {
+    const negativeCopy = buildProductThumbnailCopy("보냉백을 챙기는 캠핑", name);
+    assert.doesNotMatch(`${negativeCopy.headline} ${negativeCopy.subline} ${negativeCopy.cta}`, /보냉|아이스박스/u, name);
+    assert.notEqual(inferCategoryName("", name), "보냉백", name);
+    assert.doesNotMatch(inferScenePrompt("캠핑·피크닉", name), /cooler bag/u, name);
+  }
+  for (const name of ["캠핑 보냉백 20L", "하드 쿨러 30L", "아이스박스 25L", "소프트쿨러"]) {
+    assert.equal(buildProductThumbnailCopy("캠핑용 구성", name).headline, "보냉력 체크", name);
+    assert.equal(inferCategoryName("", name), "보냉백", name);
+    assert.match(inferScenePrompt("", name), /cooler bag/u, name);
+  }
+  const speakerPrompt = buildProductThumbnailGenerationPrompt({ productName: campingSpeaker, postTitle: "캠핑용 구성", productUnderstanding: speakerUnderstanding });
+  assert.equal(speakerPrompt.headline, "구매 전 확인");
+  assert.doesNotMatch(speakerPrompt.prompt, /보냉|cooler bag/u);
+  for (const [name, headline] of [["캠핑용 미니 가습기", "가습 방식 체크"], ["골프 거리측정기", "거리 확인 방식"], ["헤어드라이기", "제품 사양 체크"]]) {
+    const understanding = buildProduct9Canvas({ name, features: ["판매자 확인 사양"] });
+    assert.equal(buildProductThumbnailCopy("캠핑 활용", name, "SHOPPING", understanding).headline, headline);
+  }
   assert.equal(inferCategoryName("", "헤어 샴푸"), "헤어케어");
   assert.equal(compactProductDisplayName("브랜드X 미확인변형 ABC-123 바디워시"), "브랜드X 미확인변형 ABC-123 바디워시");
   assert.equal(compactProductDisplayName("아비노 바디워시"), "아비노 바디워시");

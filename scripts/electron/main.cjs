@@ -6,7 +6,8 @@ const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
-const { app, BrowserWindow, dialog, Menu, Notification, shell, Tray } = require("electron");
+const { app, BrowserWindow, dialog, Menu, Notification, shell, Tray, session } = require("electron");
+const { requestFactoryReset, completeFactoryReset, cancelFactoryReset } = require("./factory-reset.cjs");
 const next = require("next");
 const { NsisUpdater } = require("electron-updater");
 const { createDesktopAutoUpdater } = require("./auto-update.cjs");
@@ -88,6 +89,9 @@ function ensureTray(projectRoot) {
       });
     } },
     { label: "업데이트 확인", click: () => void desktopUpdater?.checkNow("manual") },
+    { label: "프로그램 완전 초기화…", click: () => {
+      void factoryReset().catch(error => dialog.showErrorBox("초기화 보류", error.message));
+    } },
     { type: "separator" },
     {
       label: "완전히 종료",
@@ -261,6 +265,25 @@ async function ensureServerReady() {
   }
 }
 
+// backgroundThrottling=false keeps automation alive, but document.hidden then
+// cannot describe a hidden/minimized window. This hint pauses only material UI.
+function installMaterialUiVisibilityBridge(browserWindow) {
+  let sequence = 0;
+  const publish = () => {
+    if (browserWindow.isDestroyed() || browserWindow.webContents.isDestroyed()) return;
+    const visible = browserWindow.isVisible() && !browserWindow.isMinimized();
+    const current = ++sequence;
+    const script = `if ((window.__brandconnectMaterialUiVisibilitySequence || 0) < ${current}) {
+      window.__brandconnectMaterialUiVisibilitySequence = ${current};
+      window.__brandconnectMaterialUiVisible = ${visible};
+      window.dispatchEvent(new Event("blogautomcp:material-ui-visibility"));
+    } true;`;
+    browserWindow.webContents.executeJavaScript(script).catch(() => undefined);
+  };
+  for (const event of ["show", "hide", "minimize", "restore"]) browserWindow.on(event, publish);
+  browserWindow.webContents.on("did-finish-load", publish);
+}
+
 async function createWindow() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     showMainWindow();
@@ -285,6 +308,7 @@ async function createWindow() {
     show: !startHidden,
   });
   mainWindow = browserWindow;
+  installMaterialUiVisibilityBridge(browserWindow);
 
   // ADMIN_API_KEY 가 설정되면 로컬 서버의 관리자 API 는 실제 자격 증명을 요구한다.
   // 렌더러(대시보드)가 로컬 서버로 보내는 요청에만 키 헤더를 붙여 준다.
@@ -394,6 +418,51 @@ async function restartLocalServer() {
     await serverRestartPromise;
   } finally {
     serverRestartPromise = null;
+    if (!isQuitting) delete process.env.DESKTOP_RESTART_PENDING;
+  }
+}
+
+let factoryResetPending = false;
+async function factoryReset() {
+  if (factoryResetPending || serverRestartPromise || isQuitting) return;
+  factoryResetPending = true;
+  let requestedRoot = null;
+  const originalEnvironment = { ...process.env };
+  try {
+    if (!app.isPackaged) throw new Error("완전 초기화는 설치된 데스크톱 프로그램에서만 사용할 수 있습니다.");
+    const choice = await dialog.showMessageBox({ type: "warning", title: "프로그램 완전 초기화",
+      message: "작업 이력·원고·이미지·설정·앱에 저장된 로그인을 모두 삭제할까요?",
+      detail: "삭제 후 복구할 수 없습니다. 앱이 재시작됩니다. 이미 게시된 블로그 글, 사이트 계정, 외부 브라우저와 공유 Codex 계정은 삭제하지 않습니다.",
+      buttons: ["취소", "모두 삭제하고 초기화"], defaultId: 0, cancelId: 0, noLink: true });
+    if (choice.response !== 1) return;
+    process.env.DESKTOP_RESTART_PENDING = "1";
+    const readiness = await getUpdateReadiness();
+    if (!readiness.ready || globalThis.__desktopActivityState?.active?.size > 0 || serverRestartPromise || isQuitting)
+      throw new Error("작업 또는 결과 전달이 진행 중입니다. 완료 후 초기화하세요.");
+    const root = app.getPath("userData");
+    if (process.env.DESKTOP_USER_DATA && path.resolve(process.env.DESKTOP_USER_DATA) !== path.resolve(root))
+      throw new Error("사용자 지정 저장소에서는 초기화를 지원하지 않습니다.");
+    requestFactoryReset(root);
+    requestedRoot = root;
+    // Relaunch inherits the environment. Restore app defaults instead of retaining
+    // settings loaded from the deleted user .env file in the replacement process.
+    const envFile = path.join(root, ".env");
+    const keys = fs.existsSync(envFile) ? Object.keys(require("dotenv").parse(fs.readFileSync(envFile))) : [];
+    for (const key of keys) if (!/^(?:PATH|HOME|USERPROFILE|APPDATA|LOCALAPPDATA|TEMP|TMP|SYSTEMROOT|COMSPEC|CODEX_HOME)$/i.test(key)) delete process.env[key];
+    delete process.env.DATABASE_URL;
+    delete process.env.SESSION_STORAGE_DIR;
+    app.relaunch({ args: getRelaunchArgs().filter(arg => arg !== "--hidden") });
+    desktopUpdater?.stop();
+    isQuitting = true;
+    app.exit(0);
+  } catch (error) {
+    if (requestedRoot && !isQuitting) {
+      cancelFactoryReset(requestedRoot);
+      Object.assign(process.env, originalEnvironment);
+    }
+    throw error;
+  } finally {
+    factoryResetPending = false;
     if (!isQuitting) delete process.env.DESKTOP_RESTART_PENDING;
   }
 }
@@ -605,6 +674,10 @@ if (!hasSingleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
+    await completeFactoryReset(app.getPath("userData"), async () => {
+      await session.defaultSession.clearStorageData();
+      await session.defaultSession.clearCache();
+    });
     const projectRoot = resolveProjectRoot();
     configureAutoStart();
     registerDeepLinkProtocol();

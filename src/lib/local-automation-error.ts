@@ -15,11 +15,18 @@ export const LOCAL_AUTOMATION_ERROR_CODES = [
   "CONNECT_KIND_MISMATCH",
   "CONTENT_BLOCKED",
   "IMAGE_SHORTFALL",
+  "PUBLISH_IMAGE_AUDIT_FAILED",
+  "SOURCE_EVIDENCE_REQUIRED",
+  "SOURCE_REVIEW_INCOMPLETE",
+  "IMAGE_SOURCE_BINDING_REQUIRED",
+  "PREWRITING_PHOTO_CHANGED",
+  "PREWRITING_SOURCE_CHANGED",
   "LLM_UNAVAILABLE",
   "CODEX_AUTH_REQUIRED",
   "CODEX_MODEL_INCOMPATIBLE",
   "CODEX_TIMEOUT",
   "CODEX_TRANSIENT_FAILURE",
+  "CODEX_USAGE_LIMIT_REACHED",
   "CHATGPT_BROWSER_AUTH_REQUIRED",
   "CHATGPT_BROWSER_UNREACHABLE",
   "CHATGPT_BROWSER_BUSY",
@@ -46,6 +53,19 @@ export function isLocalAutomationErrorCode(value: unknown): value is LocalAutoma
   return typeof value === "string" && CODE_SET.has(value);
 }
 
+/** Exact Codex exec transport diagnostic; generic disconnect/request text is not evidence. */
+export function isCodexStreamCompletionLoss(message: string): boolean {
+  const diagnostic = "stream disconnected before completion: websocket closed by server before response.completed";
+  const trimmed = message.trim();
+  return trimmed === diagnostic
+    || /^Reconnecting\.\.\. [1-9]\d*\/[1-9]\d* \(stream disconnected before completion: websocket closed by server before response\.completed\)$/u.test(trimmed);
+}
+
+/** Provider quota evidence, not a short-lived HTTP 429 or arbitrary mention of a limit. */
+export function isCodexUsageLimitMessage(message: string): boolean {
+  return /\bCODEX_USAGE_LIMIT_REACHED\b|\byou(?:['’]ve| have) hit your usage limit\b|\busage[ _-]limit[ _-](?:reached|exceeded)\b|\binsufficient_quota\b|\bquota_exceeded\b/iu.test(message);
+}
+
 export class LocalAutomationError extends Error {
   readonly code: LocalAutomationErrorCode;
   readonly httpStatus: number | null;
@@ -70,11 +90,18 @@ export const LOCAL_AUTOMATION_ERROR_HINTS: Record<LocalAutomationErrorCode, stri
   CONNECT_KIND_MISMATCH: "상품의 커넥트 종류(쇼핑/여행)가 요청과 다릅니다.",
   CONTENT_BLOCKED: "생성된 글이 발행 기준(네이버 정책·근거 규칙)을 통과하지 못해 발행을 보류했습니다.",
   IMAGE_SHORTFALL: "본문에 넣을 이미지가 부족합니다. 상품 이미지를 다시 동기화하거나 다른 상품을 선택하세요.",
+  PUBLISH_IMAGE_AUDIT_FAILED: "현재 원고와 사진의 최종 검수를 통과하지 못했습니다. 기존 원고·정상 사진을 보존하고 구체적인 거절 사유를 확인한 뒤 다시 검수하세요.",
+  SOURCE_EVIDENCE_REQUIRED: "상품의 확인 가능한 상세 근거가 부족합니다. 수집·판독 기록을 확인하고 상세 정보를 보강하세요.",
+  SOURCE_REVIEW_INCOMPLETE: "판매자 원본 후보의 검토가 완료되지 않았습니다. 누락된 픽셀 판정을 확인한 뒤 기존 상품 근거에서 재개하세요.",
+  IMAGE_SOURCE_BINDING_REQUIRED: "작성 전에 선택 상품에 맞는 게시용 판매자 원본을 확보해야 합니다. 수집한 원본 후보와 선택 옵션을 확인하세요.",
+  PREWRITING_PHOTO_CHANGED: "검증한 원본 사진이 변경됐습니다. 현재 사진을 다시 확인한 뒤 작성하세요.",
+  PREWRITING_SOURCE_CHANGED: "작성 전에 고정한 상품 근거가 변경됐습니다. 현재 상품·옵션과 근거를 다시 확인하세요.",
   LLM_UNAVAILABLE: "ChatGPT 계정 Codex 연결을 확인한 뒤 다시 시도하세요.",
   CODEX_AUTH_REQUIRED: "Codex 로그인이 필요합니다. PC 앱에서 Codex 연결 상태를 확인하세요.",
   CODEX_MODEL_INCOMPATIBLE: "현재 Codex 실행 환경에서 선택한 모델을 지원하지 않습니다. PC 앱을 최신 버전으로 업데이트하세요.",
   CODEX_TIMEOUT: "Codex 원고 작성이 제한 시간 안에 끝나지 않았습니다.",
   CODEX_TRANSIENT_FAILURE: "Codex 서비스의 일시 오류가 재시도 후에도 계속됐습니다. 잠시 후 다시 시도하세요.",
+  CODEX_USAGE_LIMIT_REACHED: "Codex 계정의 사용량 한도에 도달해 다음 소재 작업을 보류했습니다. 한도가 회복되면 기존 원고·정상 사진을 유지한 채 부족한 단계부터 재개하세요.",
   CHATGPT_BROWSER_AUTH_REQUIRED: "ChatGPT 웹 세션의 로그인 또는 보안 확인이 필요합니다.",
   CHATGPT_BROWSER_UNREACHABLE: "ChatGPT 웹 페이지에 연결하지 못했습니다. 네트워크와 프록시 상태를 확인하세요.",
   CHATGPT_BROWSER_BUSY: "다른 ChatGPT 웹 자동화 작업이 진행 중입니다. 현재 작업이 끝난 뒤 다시 시도하세요.",
@@ -119,12 +146,19 @@ export function classifyLocalFailure(input: { status?: number | null; code?: str
   const message = input.message || "";
   const status = input.status ?? null;
   if (isLocalAutomationErrorCode(code)) return code;
+  // A provider quota cannot be repaired by changing a manuscript or its source facts.
+  if (isCodexUsageLimitMessage(message) || /\bCODEX_USAGE_LIMIT_REACHED\b/u.test(message)) return "CODEX_USAGE_LIMIT_REACHED";
+  // Context-only preparation has no draft result.json. Preserve its explicit
+  // source/photo diagnostic from the logged error before generic HTTP guesses.
+  const prewritingCode = message.match(/\b(SOURCE_EVIDENCE_REQUIRED|SOURCE_REVIEW_INCOMPLETE|IMAGE_SOURCE_BINDING_REQUIRED|PREWRITING_PHOTO_CHANGED|PREWRITING_SOURCE_CHANGED)\b/u)?.[1];
+  if (isLocalAutomationErrorCode(prewritingCode)) return prewritingCode;
   const naverCode = message.match(/\b(NAVER_SESSION_(?:EXPIRED|FORBIDDEN|CHECK_FAILED|CONFIGURATION_REQUIRED))\b/u)?.[1];
   if (isLocalAutomationErrorCode(naverCode)) return naverCode;
   if (/\bCODEX_AUTH_REQUIRED\b/u.test(message)) return "CODEX_AUTH_REQUIRED";
   if (/\bCODEX_MODEL_INCOMPATIBLE\b|requires?\s+(?:a\s+)?newer\s+version\s+of\s+Codex/iu.test(message)) return "CODEX_MODEL_INCOMPATIBLE";
   if (/\bCODEX_TIMEOUT\b/u.test(message)) return "CODEX_TIMEOUT";
   if (/\bCODEX_TRANSIENT_FAILURE\b/u.test(message)) return "CODEX_TRANSIENT_FAILURE";
+  if (isCodexStreamCompletionLoss(message)) return "CODEX_TRANSIENT_FAILURE";
   if (/\bCHATGPT_BROWSER_AUTH_REQUIRED\b/u.test(message)) return "CHATGPT_BROWSER_AUTH_REQUIRED";
   if (/\bCHATGPT_BROWSER_UNREACHABLE\b/u.test(message)) return "CHATGPT_BROWSER_UNREACHABLE";
   if (/\bCHATGPT_BROWSER_BUSY\b/u.test(message)) return "CHATGPT_BROWSER_BUSY";

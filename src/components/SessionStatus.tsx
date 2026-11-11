@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { startMaterialPolling } from "../lib/material-polling";
 
 interface SessionData {
   hasSession: boolean;
@@ -131,14 +132,15 @@ export default function SessionStatus() {
     }
   }, []);
 
-  const fetchUpdate = useCallback(async () => {
+  const fetchUpdate = useCallback(async (signal?: AbortSignal) => {
     try {
-      const response = await fetch("/api/system/update-readiness", { cache: "no-store" });
+      const response = await fetch("/api/system/update-readiness", { cache: "no-store", signal });
       const payload = await response.json();
-      if (response.ok && payload.success) setUpdate(payload.data.update);
+      if (!signal?.aborted && response.ok && payload.success) setUpdate(payload.data.update);
     } catch {
       // 주기 확인에서 다시 시도합니다.
     }
+    return false;
   }, []);
 
   const fetchActivation = useCallback(async () => {
@@ -364,9 +366,10 @@ export default function SessionStatus() {
   }
 
   useEffect(() => {
-    void Promise.all([fetchSession(), fetchUpdate(), fetchActivation(), fetchSettings()]);
-    const timer = window.setInterval(() => void fetchUpdate(), 15_000);
-    return () => window.clearInterval(timer);
+    void Promise.all([fetchSession(), fetchActivation(), fetchSettings()]);
+    const polling = startMaterialPolling({ poll: fetchUpdate, visibility: document, desktopVisibility: window,
+      requireDesktopVisibility: /Electron\//u.test(navigator.userAgent), activeIntervalMs: 15_000, idleIntervalMs: 15_000 });
+    return () => polling.stop();
   }, [fetchActivation, fetchSession, fetchSettings, fetchUpdate]);
 
   const naver = session?.naver;

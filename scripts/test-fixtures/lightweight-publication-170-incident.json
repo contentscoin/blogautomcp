@@ -1,0 +1,154 @@
+{
+  "note": "Selected unmodified failing rows and request-slot metadata from completed 170 provider transcripts. No image pixels, source files or live approvals are included. These legacy responses must remain holds.",
+  "fixtures": [
+    {
+      "name": "doctorhaar-no-aggregate-consistency",
+      "sourceRollout": "rollout-2026-10-25T11-20-00-01a170db-9140-72e2-8517-9b5d8292d352.jsonl",
+      "sourceResponseSha256": "a09f8b8a4669f113b0b0a10a77c33a5685e9119fcd039d367bca85a9f20fc91d",
+      "rawReview": {
+        "index": 1,
+        "reason": "이미지에는 Dr’Haar UVC 표시와 전면 타이머가 있는 검은색 칫솔 살균기 본체, 아래쪽에서 이어진 칫솔 두 개가 보입니다. 큰 문구 ‘제품 사용 체크’는 제품 위에 놓인 썸네일 헤드라인이며, 성능을 입증한다고 주장하지 않습니다. 다만 이미지의 검은색 제품은 확인된 색상 옵션 ‘화이트, 블랙’ 중 하나로 특정되지 않았으므로 해당 옵션과의 일치를 확인할 수 없습니다.",
+        "visibleIdentityEvidence": {
+          "basis": "observed-correspondence",
+          "landmarks": [
+            {
+              "part": "본체와 전면 조작부",
+              "referenceObservation": "제공된 선택 상품 정보는 Dr’Haar 무선 UV 칫솔 살균기이며, 이미지와 비교할 별도 참조 사진은 없습니다.",
+              "candidateObservation": "검은색 직사각형 본체 전면에 UVC 표시, 디지털 타이머와 전원 기호가 보입니다."
+            },
+            {
+              "part": "칫솔 배치",
+              "referenceObservation": "제공된 선택 상품 정보는 칫솔 살균기이지만 칫솔 개수나 배치를 보여주는 참조 사진은 없습니다.",
+              "candidateObservation": "본체 아래에서 두 개의 칫솔이 매달려 있습니다."
+            }
+          ],
+          "conflict": ""
+        },
+        "optionConflictWitness": {
+          "origin": "none",
+          "quote": "",
+          "visibleAlternatives": []
+        },
+        "photoClaimObjection": {
+          "origin": "none",
+          "sourceIndex": null,
+          "quote": "",
+          "scope": "none",
+          "conflict": ""
+        },
+        "referenceComparison": null,
+        "identityMatches": true,
+        "photoClaimMatches": true,
+        "notice": false,
+        "mixedOptions": false,
+        "explicitNamedComparison": false,
+        "optionsClearlyLabeled": false,
+        "singlePhotograph": true,
+        "noGraphicLayout": true,
+        "textPolicyMatches": true,
+        "thumbnailHeadlineLegible": true,
+        "reviewClass": "product-photo",
+        "accepted": false
+      },
+      "requestSlot": {
+        "index": 1,
+        "role": "thumbnail",
+        "exactCanonicalSellerOriginal": false,
+        "sectionTitle": "Thumbnail",
+        "imageIntent": "Selected product overview with title overlay",
+        "visualContract": {
+          "purpose": "thumbnail",
+          "claimPolicy": "visual-compatibility-and-explicit-photo-claims",
+          "identityAndVisibleOptionMustMatch": true,
+          "demonstrateEveryParagraphFeature": false,
+          "photoMustNotClaimUnseenPerformance": true
+        },
+        "allowProductPhoto": true
+      }
+    },
+    {
+      "name": "robot-original-appearance-scope",
+      "sourceRollout": "rollout-2026-10-25T11-39-23-01a170ed-4fab-73c0-bf8b-61de9ceda5bd.jsonl",
+      "sourceResponseSha256": "d38c5e498c1b612f012fa6ae92e73099a14fb6eeb5e64baa9dccecb7afe064c3",
+      "rawReview": {
+        "index": 2,
+        "reason": "흰색 로봇 본체는 참조 7과 동일한 원형 상부 윤곽, 중앙 원형 센서, 앞쪽 덮개 윤곽과 우측 측면 브러시 구조가 보입니다. 본문은 외형과 배치만 사진으로 확인 가능하다고 명시하고 성능이나 전체 구성품 판단을 유보하므로 사진을 성능·구성 증거로 과장하지 않습니다. 그러나 이 장면은 도크가 아닌 흰 배경의 본체 단독 제품 이미지로, 지정된 본문 장면 역할에 필요한 자연스러운 장면 사진이 아닙니다.",
+        "visibleIdentityEvidence": {
+          "basis": "observed-correspondence",
+          "landmarks": [
+            {
+              "part": "상부 원형 센서와 전면 덮개 윤곽",
+              "referenceObservation": "참조 7의 흰색 원형 로봇 상부에 중앙 원형 센서가 있고 그 아래 넓은 덮개 윤곽이 보인다.",
+              "candidateObservation": "후보 본체에도 중앙 원형 센서와 넓은 전면 덮개 윤곽이 같은 배치로 보인다."
+            },
+            {
+              "part": "우측 가장자리 브러시와 측면 개구부",
+              "referenceObservation": "참조 7의 오른쪽 가장자리에 측면 브러시와 작은 어두운 개구부가 보인다.",
+              "candidateObservation": "후보에서도 오른쪽 가장자리에 두 브러시 다발과 작은 어두운 개구부가 보인다."
+            }
+          ],
+          "conflict": ""
+        },
+        "optionConflictWitness": {
+          "origin": "none",
+          "quote": "",
+          "visibleAlternatives": []
+        },
+        "photoClaimObjection": {
+          "origin": "none",
+          "sourceIndex": null,
+          "quote": "",
+          "scope": "none",
+          "conflict": ""
+        },
+        "referenceComparison": {
+          "primaryReferenceImageIndex": 7,
+          "primaryReferenceSha256": "2bfa706b8105d30eace6b5f97811ae8779a9da4d757ab1dba1635792f51a8f24",
+          "objectionKind": "none",
+          "observation": "참조 7의 본체 상부 센서, 덮개 윤곽과 우측 가장자리 구조가 후보 본체에서 대응한다. 제품 정체성의 가시적 충돌은 없다."
+        },
+        "identityMatches": true,
+        "photoClaimMatches": true,
+        "notice": false,
+        "mixedOptions": false,
+        "explicitNamedComparison": false,
+        "optionsClearlyLabeled": false,
+        "singlePhotograph": true,
+        "noGraphicLayout": true,
+        "textPolicyMatches": true,
+        "thumbnailHeadlineLegible": true,
+        "reviewClass": "product-photo",
+        "accepted": false
+      },
+      "requestSlot": {
+        "index": 2,
+        "role": "scene",
+        "exactCanonicalSellerOriginal": true,
+        "sectionTitle": "바닥 청소와 물걸레 관리를 한 기기에 맡기고 싶은 집이라면 도크 구성과 브러시 관리 방식부터 따져볼 만해요.",
+        "imageIntent": "판매페이지 원본 상품 사진: 선택한 상품·옵션의 외형 확인",
+        "visualContract": {
+          "purpose": "product-appearance",
+          "claimPolicy": "visual-compatibility-and-explicit-photo-claims",
+          "identityAndVisibleOptionMustMatch": true,
+          "demonstrateEveryParagraphFeature": false,
+          "photoMustNotClaimUnseenPerformance": true
+        },
+        "allowProductPhoto": true,
+        "referencePlaneMap": {
+          "primaryReferenceImageIndex": 7,
+          "primaryReferenceSha256": "2bfa706b8105d30eace6b5f97811ae8779a9da4d757ab1dba1635792f51a8f24",
+          "supplementalReferences": [
+            {
+              "imageIndex": 6,
+              "sha256": "ba68fa51d6d9b7f50501488fdf961959aa7309d90be2b28d9e78335d055bb153"
+            },
+            {
+              "imageIndex": 8,
+              "sha256": "def0980d54738e6426227c430b9268cc3890f6847da020ce8b5b2d09f254fd5b"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

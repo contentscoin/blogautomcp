@@ -9,12 +9,21 @@ export interface ReferenceSceneReview {
   anchorSha256?: string;
   reviewStatus: "passed" | "failed" | "pending";
   reviewedOutputSha256: string;
+  /** Raw scene checks precede the separate final headline/pixel audit. */
+  thumbnailRawPath?: string;
+  thumbnailOutputSha256?: string;
   reviewedAt?: string;
   reason?: string;
+  /** Absent on healthy historical v2 reviews; their contract remains valid. */
+  reviewMode?: "lightweight/v1";
+  integratedReview?: { nativeExecution: boolean; referenceSha256: string; reviewedOutputSha256: string; sourceSnapshotId?: string;
+    requestSha256: string; responseSha256: string; rawResponse: string };
   checks?: Partial<Record<typeof REFERENCE_SCENE_REVIEW_CHECKS[number], boolean>>;
 }
 
 export interface BrandPostImageEvidenceLike {
+  role?: "hero" | "body";
+  sectionId?: string | null;
   provenance?: "ORIGINAL" | "LOCKED_PRODUCT" | "GENERATED_BACKGROUND" | "EDITORIAL_CARD" | "GENERATED_SCENE" | "PHOTO_TEXT_THUMBNAIL";
   creationMethod?: "source" | "local-composite" | "remote-generated" | "source-with-generated-background" | "reference-guided-scene";
   remoteGenerated?: boolean;
@@ -114,7 +123,10 @@ export function classifyBrandPostImageEvidence(
       : valid(false);
   }
   if (method === "remote-generated") {
-    return remote === true && (provenance === "GENERATED_BACKGROUND" || provenance === "EDITORIAL_CARD")
+    // A generated photo with a thumbnail headline must retain its truthful
+    // generation metadata. This does not grant body-image or pixel permission.
+    const generatedThumbnail = provenance === "PHOTO_TEXT_THUMBNAIL" && asset.role === "hero" && asset.sectionId == null;
+    return remote === true && (provenance === "GENERATED_BACKGROUND" || provenance === "EDITORIAL_CARD" || generatedThumbnail)
       ? valid(true)
       : invalid();
   }
@@ -153,21 +165,45 @@ export function isReferenceGuidedScene(asset: BrandPostImageEvidenceLike): boole
   return asset.provenance === "GENERATED_SCENE" || asset.creationMethod === "reference-guided-scene";
 }
 
+export function isReferenceGuidedThumbnail(asset: BrandPostImageEvidenceLike): boolean {
+  return asset.role === "hero" && asset.sectionId == null && asset.provenance === "PHOTO_TEXT_THUMBNAIL" &&
+    asset.creationMethod === "remote-generated" && asset.remoteGenerated === true;
+}
+
 /** Review is bound to product facts, original-reference bytes and the exact final output. */
 export function referenceSceneReviewIssue(asset: BrandPostImageEvidenceLike & { sha256?: string }, context: {
   referenceSha256?: string;
   sourceSnapshotId?: string;
   anchorSha256?: string;
+  thumbnailRawSha256?: string;
 }): string | null {
-  if (!isReferenceGuidedScene(asset)) return null;
+  const thumbnail = isReferenceGuidedThumbnail(asset);
+  if (!isReferenceGuidedScene(asset) && !thumbnail) return null;
   const review = asset.referenceScene;
   if (!classifyBrandPostImageEvidence(asset).coherent) return "연출 이미지 출처가 원본/잠금 합성으로 잘못 표시되었습니다.";
   if (!review || review.reviewStatus !== "passed") return "상품 참조 연출 이미지의 원본 대조 검토가 완료되지 않았습니다.";
   if (review.strategyVersion !== REFERENCE_SCENE_STRATEGY_VERSION) return "연출 이미지의 검토 전략 버전을 확인할 수 없습니다.";
   if (!context.sourceSnapshotId || review.sourceSnapshotId !== context.sourceSnapshotId) return "연출 이미지 검토 당시 상품 근거와 현재 상품 근거가 다릅니다.";
   if (!/^[a-f0-9]{64}$/u.test(review.referenceSha256) || context.referenceSha256 !== review.referenceSha256) return "연출 이미지의 상품 원본 참조 파일이 없거나 변경되었습니다.";
-  if (!asset.sha256 || review.reviewedOutputSha256 !== asset.sha256) return "원본 대조 검토가 현재 연출 이미지 픽셀과 일치하지 않습니다.";
+  if (thumbnail ? !review.thumbnailRawPath || !/^[a-f0-9]{64}$/u.test(review.reviewedOutputSha256) ||
+      context.thumbnailRawSha256 !== review.reviewedOutputSha256 || review.thumbnailOutputSha256 !== asset.sha256 || !asset.sha256
+    : !asset.sha256 || review.reviewedOutputSha256 !== asset.sha256) return "원본 대조 검토가 현재 연출 이미지 픽셀과 일치하지 않습니다.";
   if (review.anchorSha256 && review.anchorSha256 !== context.anchorSha256) return "연출 이미지의 승인된 대표 장면 참조가 변경되었습니다.";
+  if (review.reviewMode !== undefined) {
+    if (review.reviewMode !== "lightweight/v1") return "연출 이미지의 종합 검수 계약을 확인할 수 없습니다.";
+    const evidence = review.integratedReview;
+    if (!evidence || evidence.nativeExecution !== true || evidence.referenceSha256 !== review.referenceSha256 ||
+        evidence.reviewedOutputSha256 !== review.reviewedOutputSha256 || evidence.sourceSnapshotId !== review.sourceSnapshotId ||
+        !/^[a-f0-9]{64}$/u.test(evidence.requestSha256) || !/^[a-f0-9]{64}$/u.test(evidence.responseSha256) ||
+        typeof evidence.rawResponse !== "string" || evidence.rawResponse.length > 128 * 1024) return "종합 검수의 실제 실행 근거가 현재 이미지·상품 근거와 일치하지 않습니다.";
+    try {
+      const raw = JSON.parse(evidence.rawResponse.trim().replace(/^```(?:json)?\s*|\s*```$/gu, ""));
+      if (raw.accepted !== true || raw.identityMatches !== true || raw.illustrativeOnly !== true ||
+          !REFERENCE_SCENE_REVIEW_CHECKS.every(check => raw.checks?.[check] === true && raw.checks[check] === review.checks?.[check]) ||
+          !["productShape", "intrinsicPrinting", "visibleOption", "sceneContext"].every(key =>
+            ["consistent", "allowed-variation"].includes(raw.comparisons?.[key]?.result))) return "종합 검수의 원시 판정이 승인 메타데이터와 일치하지 않습니다.";
+    } catch { return "종합 검수의 원시 응답을 확인할 수 없습니다."; }
+  } else if (review.integratedReview !== undefined) return "종합 검수 근거에 대응하는 검수 계약이 없습니다.";
   if (!REFERENCE_SCENE_REVIEW_CHECKS.every(check => review.checks?.[check] === true)) return "상품 형태 대조와 자연스러운 단일 사진·추가 문구 없음·프레임/패널 없음 검토가 모두 통과하지 않았습니다.";
   return null;
 }

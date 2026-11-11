@@ -84,6 +84,8 @@ async function main() {
       const deps: import("../src/lib/brand-post-image-repair").ImageRepairDependencies = {
         read: store.readBrandPostPackage, write: store.writeBrandPostPackageManifest, apply: store.applyGeneratedBrandPostImage,
         generate: async (options) => {
+          assert.equal(options.forceSourceRefresh, true, "explicit seller refresh must reach collection");
+          const batchSnapshot = JSON.stringify(options.manifest), plannedRequests = JSON.stringify(options.requests);
           const results: import("../src/lib/brand-post-image-generation").BrandPostImageGenerationResult[] = [];
           for (const [i, request] of options.requests.entries()) {
             const file = path.join(dir, `new-${request.requestId}.png`);
@@ -92,12 +94,15 @@ async function main() {
               error: i === 0 ? "fixture timeout" : undefined };
             results.push(result);
             await options.onResult?.(result);
+            assert.equal(JSON.stringify(options.manifest), batchSnapshot,
+              "success callbacks commit a separate current manifest; the already planned/sealed batch snapshot remains unchanged for later slots");
+            assert.equal(JSON.stringify(options.requests), plannedRequests, "a prior commit cannot expand the frozen targets or create another retry");
             if (i === 1) assert.equal(store.readBrandPostPackage(id)?.imageGeneration?.applied, 1, "A success must be persisted before batch completion");
           }
           return results;
         },
       };
-      const first = await repairBrandPostImages({ brandLinkId: id }, deps);
+      const first = await repairBrandPostImages({ brandLinkId: id, forceSourceRefresh: true }, deps);
       assert.equal(first.generatedCount, plan.length - 1, "Early failure must not starve later sections or double apply callbacks");
       assert.equal(first.remaining, 1);
       assert.equal(first.manifest.imageGeneration?.status, "incomplete");
@@ -124,6 +129,29 @@ async function main() {
       store.writeBrandPostPackageManifest({ ...final.manifest, approvedAt: "fixture-approved" });
       const noop = await repairBrandPostImages({ brandLinkId: id }, { ...deps, generate: async () => { throw new Error("No-op must not generate"); } });
       assert.equal(noop.manifest.approvedAt, "fixture-approved");
+      const preservedPhotos = noop.manifest.bodyImagePaths.map(file => [file, hash(file)]);
+      const stale = { ...noop.manifest, imageGeneration: { ...noop.manifest.imageGeneration!, status: "incomplete" as const, remaining: 2, errors: [] } };
+      store.writeBrandPostPackageManifest(stale);
+      const reconciled = await repairBrandPostImages({ brandLinkId: id }, { ...deps, generate: async () => { throw new Error("Satisfied targets must not generate"); } });
+      assert.equal(reconciled.manifest.imageGeneration?.status, "complete");
+      assert.equal(reconciled.manifest.imageGeneration?.remaining, 0);
+      assert.equal(reconciled.manifest.imageGeneration?.requested, stale.imageGeneration.requested);
+      assert.equal(reconciled.manifest.imageGeneration?.applied, stale.imageGeneration.applied);
+      assert.equal(reconciled.manifest.approvedAt, "fixture-approved", "coverage telemetry cannot change approval or its receipt");
+      assert.deepEqual(reconciled.manifest.bodyImagePaths.map(file => [file, hash(file)]), preservedPhotos);
+      for (const state of [
+        { ...stale.imageGeneration, errors: ["IMAGE_OUTPUT_REJECTED: current thumbnail was rejected"] },
+        { ...stale.imageGeneration, recoveryState: "owner-unknown" as const },
+      ]) {
+        store.writeBrandPostPackageManifest({ ...stale, imageGeneration: state });
+        const retained = await repairBrandPostImages({ brandLinkId: id }, { ...deps, generate: async () => { throw new Error("No implicit recovery generation"); } });
+        assert.equal(retained.manifest.imageGeneration?.status, "incomplete", "an error or uncertain owner cannot be cleared by full image counts");
+        assert.deepEqual(retained.manifest.imageGeneration?.errors, state.errors);
+      }
+      store.writeBrandPostPackageManifest(stale);
+      const explicitEmpty = await repairBrandPostImages({ brandLinkId: id, requests: [] }, deps);
+      assert.equal(explicitEmpty.manifest.imageGeneration?.status, "incomplete", "an empty caller selection is not a whole-material coverage proof");
+      store.writeBrandPostPackageManifest(reconciled.manifest);
       const missingPath = final.manifest.composition.sections[0].imagePaths[0];
       fs.unlinkSync(missingPath);
       const missingPreview = store.packagePreview(store.readBrandPostPackage(id)!);

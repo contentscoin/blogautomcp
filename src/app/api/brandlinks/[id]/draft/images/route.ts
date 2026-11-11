@@ -18,10 +18,13 @@ import {
   type BrandPostImageGenerationRequest,
 } from "@/lib/brand-post-image-generation";
 import { isBrandPostImageRepairActive, planSectionImageRequests, planWholeBrandPostImageRequests, repairBrandPostImages } from "@/lib/brand-post-image-repair";
-import { replanShoppingImageCoverage } from "@/lib/brand-post-image-replan";
+import { describeShoppingImageReplanFailure, replanShoppingImageCoverage } from "@/lib/brand-post-image-replan";
 import { migrateShoppingNaturalPhotoPlan, requiresShoppingNaturalPhotoPlan } from "@/lib/brand-post-natural-photo-migration";
+import { planRejectedOriginalRepair } from "@/lib/brand-post-rejected-original-repair";
+import { restoreRetainedBrandPostScene } from "@/lib/brand-post-retained-scene";
+import { planConfirmedPrintRepairs } from "@/lib/brand-post-confirmed-print-repair";
 
-const IMAGE_ACTIONS = ["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources", "repair_rejected", "replan_sources"] as const;
+const IMAGE_ACTIONS = ["generate_missing", "generate_section", "regenerate", "apply_generated", "bind_sources", "repair_rejected", "repair_confirmed_print", "repair_rejected_originals", "review_completed_hero", "restore_retained_scene", "replan_sources"] as const;
 type ImageAction = (typeof IMAGE_ACTIONS)[number];
 const IMAGE_REPAIR_CONFLICT_CODES = ["IMAGE_REPAIR_BUSY", "IMAGE_REPAIR_OWNERSHIP_LOST", "NATURAL_IMAGE_PLAN_REQUIRED"] as const;
 
@@ -30,8 +33,8 @@ function imageFailureCode(errors: string[]): string | undefined {
   return [...IMAGE_REPAIR_CONFLICT_CODES,
     "CODEX_AUTH_REQUIRED", "CODEX_LOGIN_REQUIRED", "CODEX_MODEL_INCOMPATIBLE", "LLM_UNAVAILABLE",
     "CHATGPT_BROWSER_AUTH_REQUIRED", "CHATGPT_BROWSER_AUTOMATION_DISABLED", "CHATGPT_BROWSER_UNREACHABLE",
-    "CHATGPT_BROWSER_BUSY", "IMAGE_RESUME_REQUIRED", "IMAGE_PROVIDER_REFUSED", "PRODUCT_CUTOUT_REQUIRED",
-    "IMAGE_SOURCE_BINDING_REQUIRED", "PRODUCT_SOURCE_REQUIRED", "PRODUCT_SOURCE_DOWNLOAD_FAILED",
+    "CHATGPT_BROWSER_BUSY", "IMAGE_RESUME_REQUIRED", "IMAGE_OUTPUT_REJECTED", "IMAGE_PROVIDER_REFUSED", "PRODUCT_CUTOUT_REQUIRED",
+    "REJECTED_ORIGINAL_REPAIR_INVALID", "SOURCE_REVIEW_INCOMPLETE", "SOURCE_REVIEW_CONFLICT", "IMAGE_SOURCE_BINDING_REQUIRED", "IMAGE_GENERATION_REQUIRED", "PRODUCT_SOURCE_REQUIRED", "PRODUCT_SOURCE_DOWNLOAD_FAILED",
     "PRODUCT_SNAPSHOT_REQUIRED", "PRODUCT_FRONT_REFERENCE_REQUIRED", "PRODUCT_REFERENCE_REQUIRED", "PRODUCT_REFERENCE_CHANGED", "PRODUCT_REFERENCE_NOT_PREPARED",
     "EXTERNAL_IMAGE_LEDGER_INVALID", "PRODUCT_REFERENCE_SCENE_NOT_ALLOWED", "REFERENCE_SCENE_NOT_EVIDENCE", "REFERENCE_SCENE_REVIEW_INVALID", "REFERENCE_SCENE_CHANGED",
     "REFERENCE_SCENE_OUTPUT_REQUIRED", "REFERENCE_SCENE_FIDELITY_FAILED"]
@@ -120,10 +123,15 @@ export async function POST(
     generatedPath?: string;
     referenceHashes?: string[];
     batchSize?: number;
+    refreshSourcePhotos?: boolean;
+    backupJobId?: string;
+    retainedSha256?: string;
   };
   if (!body.action || !IMAGE_ACTIONS.includes(body.action)) {
     return NextResponse.json({ success: false, error: "지원하지 않는 이미지 작업입니다." }, { status: 400 });
   }
+  if (body.action === "repair_confirmed_print" && Object.keys(body).some(key => key !== "action"))
+    return NextResponse.json({ success: false, code: "CONFIRMED_PRINT_REPAIR_INVALID", error: "확정 인쇄 결함 복구 대상은 서버의 현재 검수 근거에서만 선택합니다." }, { status: 400 });
 
   const link = await prisma.brandLink.findUnique({
     where: { id },
@@ -176,6 +184,20 @@ export async function POST(
   }
 
   const preview = packagePreview(manifest);
+  if (body.action === "restore_retained_scene") {
+    const finishRestore = beginDesktopActivity("brand-post-retained-scene-restore");
+    try {
+      const restored = await restoreRetainedBrandPostScene({ brandLinkId: id, backupJobId: body.backupJobId,
+        sectionId: body.sectionId, currentAssetKey: body.assetKey, retainedSha256: body.retainedSha256 });
+      return NextResponse.json({ success: true, data: packagePreview(restored.manifest), generatedCount: 0,
+        alreadyRestored: restored.alreadyRestored, restoredSha256: restored.restoredSha256,
+        message: "기존 사진과 원래 검수 이력을 해당 슬롯에 복원했습니다. 최종 원고·사진 재검사와 승인이 필요합니다." });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const code = (error as { code?: string }).code || imageFailureCode([message]) || "RETAINED_SCENE_RESTORE_INVALID";
+      return NextResponse.json({ success: false, code, error: message }, { status: imageFailureStatus(code, 422) });
+    } finally { finishRestore(); }
+  }
   if (body.action === "replan_sources") {
     const finishReplan = beginDesktopActivity("brand-post-image-replan");
     try {
@@ -184,9 +206,10 @@ export async function POST(
       const current = readBrandPostPackage(id, { migrate: false });
       const data = current ? packagePreview(current) : preview;
       const remainingMissing = data.imageSlots.reduce((sum, slot) => sum + Math.max(slot.missing, slot.generationMissing), 0);
+      const diagnostics = describeShoppingImageReplanFailure({ remainingMissing, reason: recovery.reason,
+        slots: data.imageSlots, previousErrors: current?.imageGeneration?.errors });
       return NextResponse.json({ success: true, data, recovery, remainingMissing,
-        code: remainingMissing ? "IMAGE_SOURCE_BINDING_REQUIRED" : "IMAGE_REPAIR_COMPLETE",
-        errors: remainingMissing ? [`IMAGE_SOURCE_BINDING_REQUIRED: 상세 원본 재수집과 대체 문단 검토 후에도 검증 이미지 ${remainingMissing}장이 부족합니다. (${recovery.reason})`] : [],
+        ...diagnostics,
         message: recovery.changed ? "검증 가능한 대체 문단으로 필수 이미지 배치를 변경했습니다." : "검증 기준을 유지한 채 대체 가능 여부를 확인했습니다." });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -266,7 +289,16 @@ export async function POST(
     }
   }
   const generationRequests: BrandPostImageGenerationRequest[] = [];
-  if (body.action === "generate_missing" || body.action === "bind_sources") {
+  let confirmedPrintPlan: ReturnType<typeof planConfirmedPrintRepairs> | undefined;
+  if (body.action === "repair_confirmed_print") {
+    try { confirmedPrintPlan = planConfirmedPrintRepairs(manifest); generationRequests.push(...confirmedPrintPlan.requests); }
+    catch (error) { return NextResponse.json({ success: false, code: "IMAGE_RESUME_REQUIRED",
+      error: error instanceof Error ? error.message : "현재 확정 인쇄 결함 근거를 확인하지 못했습니다." }, { status: 422 }); }
+  } else if (body.action === "repair_rejected_originals") {
+    try { generationRequests.push(...planRejectedOriginalRepair(manifest, body.sectionId)); }
+    catch (error) { return NextResponse.json({ success: false, code: "REJECTED_ORIGINAL_REPAIR_INVALID",
+      error: error instanceof Error ? error.message : "현재 원본 사진의 거절 근거를 확인할 수 없습니다." }, { status: 422 }); }
+  } else if (body.action === "generate_missing" || body.action === "bind_sources") {
     generationRequests.push(...planWholeBrandPostImageRequests(manifest));
   } else if (body.action === "repair_rejected") {
     const rejectedSlots = preview.imageSlots.map(slot => ({
@@ -296,7 +328,9 @@ export async function POST(
     if (!/^[a-f0-9]{64}$/u.test(assetKey) || !preview.imageAssets.some((asset) => asset.assetKey === assetKey)) {
       return NextResponse.json({ success: false, error: "다시 만들 이미지 항목을 찾을 수 없습니다." }, { status: 404 });
     }
-    generationRequests.push({ requestId: randomUUID(), replaceAssetKey: assetKey });
+    if (body.action === "review_completed_hero" && !preview.imageAssets.some(asset => asset.assetKey === assetKey && asset.role === "hero" && !asset.sectionId))
+      return NextResponse.json({ success: false, code: "IMAGE_RESUME_REQUIRED", error: "완료 사진 재검수는 현재 대표 이미지 한 슬롯에만 허용됩니다." }, { status: 422 });
+    generationRequests.push({ requestId: randomUUID(), replaceAssetKey: assetKey, ...(body.action === "review_completed_hero" ? { slotId: "hero:image:1" } : {}) });
   }
 
   if (generationRequests.length === 0) {
@@ -306,6 +340,7 @@ export async function POST(
       generatedCount: 0,
       remainingMissing: preview.imageSlots.reduce((sum, slot) => sum + Math.max(slot.missing, slot.generationMissing), 0),
       errors: [],
+      ...(confirmedPrintPlan ? { appliedCount: 0, partialImageRepair: { status: "no-eligible-defect", ready: false, appliedCount: 0, generatedCount: 0 } } : {}),
       message: "이미지가 필요한 모든 파트에 생성 이미지가 연결되어 있습니다.",
     });
   }
@@ -318,7 +353,11 @@ export async function POST(
       sourceImageUrls,
       requests: generationRequests,
       // bind_sources never opens ChatGPT; it only places reviewed seller photos.
-      sourceOnly: body.action === "bind_sources",
+      sourceOnly: body.action === "bind_sources" || body.action === "repair_rejected_originals",
+      canonicalSourceOnly: body.action === "repair_rejected_originals",
+      completedReviewOnly: body.action === "review_completed_hero",
+      forceSourceRefresh: body.refreshSourcePhotos === true,
+      ...(confirmedPrintPlan ? { expectedMaterialBinding: confirmedPrintPlan.materialBinding } : {}),
     });
     const { errors, generatedCount, appliedCount, manifest: updated } = repaired;
     const updatedPreview = packagePreview(updated);
@@ -333,6 +372,8 @@ export async function POST(
       appliedCount,
       remainingMissing,
       errors,
+      ...(confirmedPrintPlan ? { partialImageRepair: { status: appliedCount > 0 ? "repaired-awaiting-review" : "not-applied",
+        ready: false, appliedCount, generatedCount, targets: confirmedPrintPlan.proofs } } : {}),
       message: appliedCount > 0
         ? `총 ${appliedCount}장 반영 (AI 생성 ${generatedCount}장).`
         : "새로 반영된 이미지가 없습니다.",

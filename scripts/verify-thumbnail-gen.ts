@@ -39,7 +39,8 @@ assert.ok(shoppingPrompt.includes("No editorial card") && shoppingPrompt.include
 assert.ok(!shoppingPrompt.includes("Top ~40%") && !shoppingPrompt.includes("clean panel behind"), "기존 설명 패널 지시 제거");
 assert.ok(shoppingPrompt.includes("No misspelled Korean"), "한글 오탈자 금지");
 const autoPrompt = buildShoppingThumbnailPrompt({ productName: "무선 청소기 초경량", copy, moodId: "auto" });
-assert.ok(/cleaning scene/i.test(autoPrompt), "auto 무드는 카테고리 장면");
+assert.ok(/everyday home floor or bedroom context.*cleaning product idle/i.test(autoPrompt), "auto 무드는 청소 제품을 실제 생활 공간에 정지 상태로 배치합니다");
+assert.ok(/no cleaning result or performance demonstration/i.test(autoPrompt), "카테고리 무드는 실제 청소 효과를 입증하는 장면으로 바뀌면 안 됩니다");
 
 const travelFacts = extractTravelProductFacts("[출발확정] 대만 3박4일 <노쇼핑/야류/지우펀/스펀>");
 const travelPrompt = buildTravelThumbnailPrompt({ productName: "대만 3박4일", facts: travelFacts, copy: { ...copy, headline: "대만 3박4일 이 가격에" }, moodId: "golden-hour", hasReferenceImage: true });

@@ -13,6 +13,21 @@ const scope = (id: string) => {
 };
 const file = (id: string) => path.join(root(), `${scope(id)}.json`);
 const validKey = (key: string) => /^[a-f0-9]{64}$/.test(key);
+/** A completed composition may explicitly leave tiny/unobservable lettering
+ * uncertified. This signed summary survives reuse; it never grants generation. */
+export interface SuccessfulImageAuditPrintWarning {
+  nodeIndex: number;
+  sha256: string;
+  evidenceSha256: string;
+  kind?: "suspected-omission-uncorroborated";
+}
+function validPrintWarnings(value: unknown): value is SuccessfulImageAuditPrintWarning[] {
+  return Array.isArray(value) && value.length > 0 && value.length <= 64 && value.every(row => row &&
+    Object.keys(row).sort().join("|") === (row.kind === undefined ? "evidenceSha256|nodeIndex|sha256" : "evidenceSha256|kind|nodeIndex|sha256") &&
+    (row.kind === undefined || row.kind === "suspected-omission-uncorroborated") && Number.isSafeInteger(row.nodeIndex) && row.nodeIndex >= 0 &&
+    typeof row.sha256 === "string" && validKey(row.sha256) && typeof row.evidenceSha256 === "string" && validKey(row.evidenceSha256)) &&
+    new Set(value.map(row => row.nodeIndex)).size === value.length;
+}
 function signingKey(create: boolean): Buffer | null {
   const target = path.join(root(), ".signing-key");
   try {
@@ -32,30 +47,65 @@ function signingKey(create: boolean): Buffer | null {
   } finally { fs.rmSync(temporary, { force: true }); }
   return signingKey(false);
 }
-function payload(id: string, key: string, at: string) {
-  return JSON.stringify({ version: VERSION, scope: scope(id), key, at });
+function payload(id: string, key: string, at: string, readinessBindingKey?: string, printWarnings?: SuccessfulImageAuditPrintWarning[]) {
+  return JSON.stringify({ version: VERSION, scope: scope(id), key, at,
+    ...(readinessBindingKey ? { readinessBindingKey } : {}), ...(printWarnings?.length ? {printWarnings} : {}) });
 }
-export function readSuccessfulImageAuditReceipt(id: string, key: string): boolean {
-  if (!validKey(key)) return false;
+function readVerifiedReceipt(id: string): { key: string; readinessBindingKey?: string; printWarnings?: SuccessfulImageAuditPrintWarning[] } | null {
   try {
     const target = file(id);
-    if (fs.statSync(target).size > 2048) return false;
+    if (fs.statSync(target).size > 24 * 1024) return null;
     const row = JSON.parse(fs.readFileSync(target, "utf8"));
     const secret = signingKey(false);
-    if (!secret || row.version !== VERSION || row.scope !== scope(id) || row.key !== key ||
+    if (!secret || row.version !== VERSION || row.scope !== scope(id) || !validKey(row.key) ||
+        (row.readinessBindingKey !== undefined && !validKey(row.readinessBindingKey)) ||
+        (row.printWarnings !== undefined && !validPrintWarnings(row.printWarnings)) ||
         typeof row.at !== "string" || !Number.isFinite(Date.parse(row.at)) ||
-        typeof row.signature !== "string" || !/^[a-f0-9]{64}$/.test(row.signature)) return false;
-    const expected = crypto.createHmac("sha256", secret).update(payload(id, key, row.at)).digest();
-    return crypto.timingSafeEqual(expected, Buffer.from(row.signature, "hex"));
-  } catch { return false; }
+        typeof row.signature !== "string" || !/^[a-f0-9]{64}$/.test(row.signature)) return null;
+    const expected = crypto.createHmac("sha256", secret).update(payload(id, row.key, row.at, row.readinessBindingKey, row.printWarnings)).digest();
+    return crypto.timingSafeEqual(expected, Buffer.from(row.signature, "hex"))
+      ? { key: row.key, ...(row.readinessBindingKey ? { readinessBindingKey: row.readinessBindingKey } : {}),
+        ...(row.printWarnings ? {printWarnings:row.printWarnings} : {}) } : null;
+  } catch { return null; }
 }
-export function writeSuccessfulImageAuditReceipt(id: string, key: string): void {
+export function readSuccessfulImageAuditReceipt(id: string, key: string): boolean {
+  return validKey(key) && readVerifiedReceipt(id)?.key === key;
+}
+export function readSuccessfulImageAuditReceiptDetails(id: string, key: string): {printWarnings?:SuccessfulImageAuditPrintWarning[]} | null {
+  const row=validKey(key)?readVerifiedReceipt(id):null;
+  return row?.key===key ? {...(row.printWarnings?{printWarnings:row.printWarnings}:{})} : null;
+}
+/** Compatibility is based on a server-recomputed whole-material binding for
+ * explicitly known stronger contracts, plus the original unmodified HMAC. */
+export function readCompatibleSuccessfulImageAuditReceiptDetails(id: string, readinessBindings: readonly string[]): {printWarnings?:SuccessfulImageAuditPrintWarning[]} | null {
+  if (!readinessBindings.length || readinessBindings.some(key => !validKey(key))) return null;
+  const row = readVerifiedReceipt(id);
+  return row?.readinessBindingKey && readinessBindings.includes(row.readinessBindingKey)
+    ? { ...(row.printWarnings ? { printWarnings: row.printWarnings } : {}) } : null;
+}
+/** A historical successful review is not ready until its exact saved material
+ * was bound by the approval preflight. Both bindings share the same HMAC. */
+export function readSuccessfulImageAuditReadinessBinding(id: string, readinessBindingKey: string): boolean {
+  return validKey(readinessBindingKey) && readVerifiedReceipt(id)?.readinessBindingKey === readinessBindingKey;
+}
+/** Optimization hint only: callers must verify the CURRENT readiness binding
+ * before showing any warning. This never authorizes approval or generation. */
+export function hasSignedImageAuditPrintWarnings(id: string): boolean {
+  return Boolean(readVerifiedReceipt(id)?.printWarnings?.length);
+}
+export function readSuccessfulImageAuditReadinessWarnings(id: string, readinessBindingKey: string): SuccessfulImageAuditPrintWarning[] | null {
+  const row = validKey(readinessBindingKey) ? readVerifiedReceipt(id) : null;
+  return row?.readinessBindingKey === readinessBindingKey ? (row.printWarnings || []).map(warning => ({ ...warning })) : null;
+}
+export function writeSuccessfulImageAuditReceipt(id: string, key: string, readinessBindingKey?: string, printWarnings?: SuccessfulImageAuditPrintWarning[]): void {
   if (!validKey(key)) throw new Error("IMAGE_AUDIT_RECEIPT_INVALID_KEY");
+  if (readinessBindingKey !== undefined && !validKey(readinessBindingKey)) throw new Error("IMAGE_AUDIT_RECEIPT_INVALID_BINDING");
+  if (printWarnings !== undefined && !validPrintWarnings(printWarnings)) throw new Error("IMAGE_AUDIT_RECEIPT_INVALID_PRINT_WARNINGS");
   scope(id);
   const secret = signingKey(true);
   if (!secret) throw new Error("IMAGE_AUDIT_RECEIPT_KEY_INVALID");
   const at = new Date().toISOString();
-  const serialized = payload(id, key, at);
+  const serialized = payload(id, key, at, readinessBindingKey, printWarnings);
   atomicWriteTextFile(file(id), JSON.stringify({ ...JSON.parse(serialized),
     signature: crypto.createHmac("sha256", secret).update(serialized).digest("hex") }));
 }

@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { requireChatGPTUser } from '@/app/chatgpt-auth';
 import { ensureAccount, canUseMcp } from '@/lib/account';
-import { parseAuthorizationRequest, trustedSiteOriginValue } from '@/lib/oauth';
+import { hasOAuthScope, OFFLINE_ACCESS_CONSENT_FIELD, parseAuthorizationRequest, trustedSiteOriginValue, validateChatGPTClientMetadata } from '@/lib/oauth';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,12 +12,15 @@ export default async function OAuthAuthorizePage({ searchParams }: Props) {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(raw)) {
     if (typeof value === 'string') query.set(key, value);
+    else if (Array.isArray(value)) for (const item of value) query.append(key, item);
   }
   const returnTo = `/oauth/authorize?${query.toString()}`;
   const identity = await requireChatGPTUser(returnTo);
   const account = await ensureAccount(identity);
   const origin = trustedSiteOriginValue(typeof raw.resource === 'string' ? raw.resource : '') || '';
-  const parsed = origin ? parseAuthorizationRequest(query, origin) : { ok: false as const, error: 'MCP 연결 요청을 확인할 수 없습니다.' };
+  const request = origin ? parseAuthorizationRequest(query, origin) : { ok: false as const, error: 'MCP 연결 요청을 확인할 수 없습니다.' };
+  const parsed = request.ok && !await validateChatGPTClientMetadata()
+    ? { ok: false as const, error: 'ChatGPT 클라이언트 정보를 확인할 수 없습니다. 잠시 후 다시 연결하세요.' } : request;
 
   return (
     <main className="oauth-shell">
@@ -33,12 +36,23 @@ export default async function OAuthAuthorizePage({ searchParams }: Props) {
           <>
             <p className="oauth-lead"><strong>{account.email}</strong> 계정으로 ChatGPT가 승인된 PC의 블로그 자동화 기능을 사용하도록 연결합니다.</p>
             <ul className="oauth-permissions">
-              <li><span>✓</span> 쇼핑·여행 상품 및 작업 상태 조회</li>
-              <li><span>✓</span> 포스팅 초안 생성과 예약 작업 요청</li>
-              <li><span>✓</span> 명시적으로 확인한 글의 발행 요청</li>
+              {hasOAuthScope(parsed.value.scope, 'mcp:read') && <li><span>✓</span> 쇼핑·여행 상품 및 작업 상태 조회</li>}
+              {hasOAuthScope(parsed.value.scope, 'mcp:write') && <li><span>✓</span> 포스팅 초안 생성과 예약 작업 요청</li>}
+              {hasOAuthScope(parsed.value.scope, 'mcp:write') && <li><span>✓</span> 명시적으로 확인한 글의 발행 요청</li>}
+              {hasOAuthScope(parsed.value.scope, 'offline_access') && <li><span>✓</span> 연결을 유지하기 위한 토큰 자동 갱신</li>}
             </ul>
+            {!hasOAuthScope(parsed.value.scope, 'offline_access') && (
+              <p className="oauth-note">아래에서 자동 갱신을 허용하면 ChatGPT 연결을 유지할 수 있습니다. 선택하지 않으면 약 1시간 후 다시 연결해야 합니다.</p>
+            )}
             <form action="/api/oauth/authorize" method="post">
-              {Array.from(query.entries()).map(([key, value]) => <input key={key} type="hidden" name={key} value={value} />)}
+              {Array.from(query.entries()).filter(([key]) => key !== OFFLINE_ACCESS_CONSENT_FIELD)
+                .map(([key, value]) => <input key={key} type="hidden" name={key} value={value} />)}
+              {!hasOAuthScope(parsed.value.scope, 'offline_access') && (
+                <label className="oauth-note">
+                  <input type="checkbox" name={OFFLINE_ACCESS_CONSENT_FIELD} value="1" />{' '}
+                  ChatGPT 연결 유지와 토큰 자동 갱신을 허용합니다
+                </label>
+              )}
               <button className="button button-primary oauth-button" type="submit">이 계정으로 연결</button>
             </form>
             <p className="oauth-note">연결을 해제하거나 계정 승인이 취소되면 MCP 접근도 중단됩니다.</p>

@@ -261,17 +261,47 @@ export function createEditorialSelection(kind: EditorialKind, product: Editorial
 }
 export type EditorialSelection = ReturnType<typeof createEditorialSelection>;
 
-export function formatEditorialTemplate(kind: EditorialKind, requested?: EditorialTemplateId): string {
+/** Template-specific prose decisions shared by first writing, MCP context and repair prompts. */
+export function formatEditorialSubstanceGuide(id: EditorialTemplateId, minimal = false): string {
+  if (minimal) {
+    const lenses: Record<EditorialTemplateId, string> = {
+      "shopping-problem": "한 불편과 구조·사용조건 연결",
+      "shopping-comparison": "근거 있는 차이와 선택조건 연결",
+      "shopping-detail": "사양의 뜻과 사용조건 연결",
+      "travel-itinerary": "원본 순서와 장소·이동 연결",
+      "travel-scenic": "장소별 확인 볼거리·활동 구체화",
+      "travel-conditions": "포함·불포함·미확정과 독자 제약 연결",
+    };
+    return `- 본문 설계: ${lenses[id]}. 각 절 새 근거·판단, 소제목 복사 금지.${id.startsWith("shopping-") ? " 사양 속성·단위 유지. 후기 없으면 절 생략; 미생성 사진 묘사·면책 반복 금지." : ""}`;
+  }
+  const lenses: Record<EditorialTemplateId, string> = {
+    "shopping-problem": "한 가지 생활 불편을 정하고 확인된 제품 구조가 어느 조건에서 도움이 되는지 답합니다. 기능마다 같은 편리함을 반복하지 않습니다.",
+    "shopping-comparison": "실제로 갈리는 선택 축 두세 가지에 확인 사실과 적용 조건을 붙입니다. 선택지의 연결 근거가 없으면 세트·단품이나 용량 옵션을 있다고 만들지 않습니다.",
+    "shopping-detail": "구성·사양 두세 가지의 뜻을 풀고 바로 적용 조건을 연결합니다. 수치만으로 성능·요금을 추론하지 않으며 사용·관리 순서는 근거가 있는 동작만 씁니다.",
+    "travel-itinerary": "원본 순서 안에서 이동과 장소 설명의 비중을 다르게 배치합니다. 장소 하나를 여러 일차의 새 방문처럼 반복하지 않습니다.",
+    "travel-scenic": "장소마다 확인된 볼거리나 활동을 구체적으로 풀고 다음 장소와의 연결 근거를 구분합니다. 감탄과 미확인 감각 묘사로 분량을 늘리지 않습니다.",
+    "travel-conditions": "독자의 동반자·숙박·이동 제약 중 실제로 결정에 영향을 주는 조건을 고릅니다. 확정된 포함·불포함과 미확정을 분리해 마지막 판단에 반영합니다.",
+  };
+  return [
+    `[템플릿 본문 설계: ${id}] ${lenses[id]}`,
+    "- 각 절에 새로운 근거 또는 앞 근거에서 이어지는 별도 판단을 넣습니다. 소제목을 본문 첫 줄에 복사하지 않고, 도입의 답을 다음 절에서 다시 요약하지 않습니다.",
+    ...(id.startsWith("shopping-") ? ["- 원문 사양의 속성·값·단위를 함께 유지합니다. 질량(g·kg)을 물 용량(mL·L)이나 보충 횟수로, 정격 소비전력(W)을 사용 전력량·요금으로 바꾸지 않습니다.",
+      "- 후기 원문이 없으면 '후기를 확인할 수 없다'는 절을 만들지 않습니다. 사진은 제품 외형이 판단에 필요할 때만 짧게 설명합니다. 사진별로 효과·전체 구성·수량을 증명하지 않는다는 문장을 반복하거나 미생성 장면을 묘사하지 않습니다. 중요한 미확인 조건은 관련 절 한 곳에 모으고 결론은 본문에서 설명한 선택 이유로 마칩니다."] : []),
+  ].join("\n");
+}
+
+export function formatEditorialTemplate(kind: EditorialKind, requested?: EditorialTemplateId, options: { minimal?: boolean } = {}): string {
   const id = resolveEditorialTemplate(kind, requested);
   const template = EDITORIAL_TEMPLATES[id];
   const sectionLines = Object.entries(sectionDesignByTemplate[id])
-    .slice(0, 6)
+    .slice(0, options.minimal ? 3 : 6)
     .map(([sectionId, design]) => `  · ${sectionId}: ${design.purpose} / ${design.headingStyle} / image=${design.image}`)
     .join("\n");
   return [`[선택 편집 템플릿: ${id}]`, `- 관점: ${template.persona}. 실제 구매·사용·방문·조사 경험을 지어내지 않습니다.`,
     `- 전개: ${template.flow}. 고정 섹션 ID·제목·순서·분량과 QC가 우선합니다.`,
     `- 말투: ${layouts[id].tone}. 모바일 문단은 ${layouts[id].sentences}개의 완결된 문장, 문단 사이 빈 줄 하나. JSON의 문장별 줄바꿈은 유지하고 발행 문단은 렌더러가 섹션 단위로 묶습니다. URL·숫자·단위 중간에서 자르지 않습니다. 이미지와 캡션은 해당 섹션 근거에만 연결합니다. 생성 이미지를 실물 사진으로 설명하지 않습니다.`,
     `- 답 중심 편집 권고: 전체 섹션 중 질문형은 최대 ${NAVER_AI_CITATION_POLICY.maxQuestionHeadings}개를 권장합니다. 질문 바로 아래 ${NAVER_AI_CITATION_POLICY.answerFirstSentences}문장에 답을 넣습니다. FAQ는 확인된 질문·답 근거가 있을 때 최대 ${NAVER_AI_CITATION_POLICY.faqPairs}쌍, 없으면 생략합니다. 비교도 근거가 있을 때만 대상/비교 항목/선택 조건으로 정리합니다. 표·FAQ는 이미지로 올리지 않습니다. 확인된 고유 근거를 넣고, 핵심 키워드는 ${NAVER_AI_CITATION_POLICY.maxCoreKeywordMentions}회 이하를 권장합니다. 검색 인용·노출은 보장하지 않습니다.`,
+    formatEditorialSubstanceGuide(id, options.minimal),
     `- 섹션 디자인(미리 고정):`, sectionLines,
     `- 발행 방식: 카테고리 템플릿의 글꼴·크기·색·정렬을 섹션당 1회만 적용한 뒤 본문을 일괄 입력합니다. 문장마다 텍스트 옵션을 다시 클릭하지 않습니다.`,
     `- 편집 의도: 나눔고딕, 왼쪽 정렬, 소제목 19px ${editorialEditorPolicy(id).headingColor}, 본문 16px #333333, 줄간격 180%. 실제 툴바 상태로 적용 결과를 검증합니다. 캡션 컴포넌트는 미지원이며 스타일 지시를 본문에 출력하지 않습니다.`,

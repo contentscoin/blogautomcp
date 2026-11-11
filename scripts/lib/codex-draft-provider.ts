@@ -1,8 +1,11 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import crypto from "node:crypto";
 import { getWritingTimeoutPolicy, writingTimeoutMs } from "./writing-timeout-policy";
 import { resolveCodexTextModel, resolveTextReasoningEffort } from "./text-model-policy";
+import { isCodexStreamCompletionLoss, isCodexUsageLimitMessage } from "../../src/lib/local-automation-error";
+import { inferCodexUsageStage, normalizeCodexDraftUsage, recordCodexDraftUsage, type CodexDraftUsage, type CodexUsageStage } from "./codex-usage-ledger";
 
 type CodexSdkModule = typeof import("@openai/codex-sdk");
 
@@ -11,20 +14,23 @@ export type CodexDraftFailureKind =
   | "model-version"
   | "timeout"
   | "retryable-transient"
+  | "usage-limit"
   | "non-retryable";
 
 export type CodexDraftTerminalFailureCode =
+  | "CODEX_OUTPUT_SCHEMA_INVALID"
   | "CODEX_AUTH_REQUIRED"
   | "CODEX_MODEL_INCOMPATIBLE"
   | "CODEX_TIMEOUT"
-  | "CODEX_TRANSIENT_FAILURE";
+  | "CODEX_TRANSIENT_FAILURE"
+  | "CODEX_USAGE_LIMIT_REACHED";
 
-const CODEX_TERMINAL_FAILURE_CODES = new Set<CodexDraftTerminalFailureCode>([
-  "CODEX_AUTH_REQUIRED",
-  "CODEX_MODEL_INCOMPATIBLE",
-  "CODEX_TIMEOUT",
-  "CODEX_TRANSIENT_FAILURE",
-]);
+export interface CodexUsageLimitDetails {
+  retryAfterSeconds?: number;
+  resetAt?: string;
+  /** Preserve a provider's local-date hint without guessing its year or time zone. */
+  resetHint?: string;
+}
 
 interface CodexDraftRetryOptions {
   /** Test hook. Production retries use a short backoff. */
@@ -37,11 +43,15 @@ export interface CodexDraftOptions {
   systemPrompt: string;
   userPrompt: string;
   imagePaths?: string[];
+  /** Server-reviewed publication original. It is always attachment 1 and exact bytes are checked before every provider attempt. */
+  publicationPhotoInput?: { path: string; sha256: string };
   /** Override the conservative writing default for bounded image-review batches. */
   maxImages?: number;
   /** Keep numbered image-review candidates in caller order. */
   preserveImageOrder?: boolean;
   timeoutMs?: number;
+  /** A bounded independent observer must not start a second provider turn. */
+  noTransientRetry?: boolean;
   model?: string;
   reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
   researchMode?: "disabled" | "cached" | "live";
@@ -50,6 +60,9 @@ export interface CodexDraftOptions {
   /** JSON schema for the final answer (Codex structured output). The answer is still returned as text. */
   outputSchema?: unknown;
   onProgress?: (message: string) => void;
+  /** Counter metadata only; never changes generation or review policy. */
+  usageStage?: CodexUsageStage;
+  onUsage?: (usage: CodexDraftUsage) => void;
 }
 const nativeImport = new Function("specifier", "return import(specifier)") as (
   specifier: string,
@@ -70,7 +83,7 @@ function errorChain(error: unknown): Array<Record<string, unknown>> {
   return records;
 }
 
-function codexFailureEvidence(error: unknown): { message: string; statuses: number[]; codes: string[]; names: string[] } {
+function codexFailureEvidence(error: unknown): { message: string; messages: string[]; statuses: number[]; codes: string[]; names: string[] } {
   const records = errorChain(error);
   const messages = [error instanceof Error ? error.message : String(error)];
   const statuses: number[] = [];
@@ -83,14 +96,35 @@ function codexFailureEvidence(error: unknown): { message: string; statuses: numb
       if (Number.isInteger(numeric)) statuses.push(numeric);
     }
     if (typeof record.code === "string") codes.push(record.code.toUpperCase());
+    if (typeof record.type === "string") codes.push(record.type.toUpperCase());
     if (typeof record.name === "string") names.push(record.name);
   }
   return {
     message: Array.from(new Set(messages)).join(" ").replace(/["']/gu, ""),
+    messages,
     statuses,
     codes,
     names,
   };
+}
+
+/** Retain bounded provider timing data; a date without a time zone is never invented. */
+export function codexUsageLimitDetails(error: unknown): CodexUsageLimitDetails {
+  const details: CodexUsageLimitDetails = {};
+  for (const record of errorChain(error)) {
+    const headers = record.headers as { get?: (name: string) => unknown; [key: string]: unknown } | undefined;
+    let retryHeader: unknown;
+    try { retryHeader = typeof headers?.get === "function" ? headers.get("retry-after") : headers?.["retry-after"] ?? headers?.["Retry-After"]; } catch { /* Timing metadata cannot hide the provider error. */ }
+    const retry = record.retryAfterSeconds ?? record.retry_after_seconds ?? record.retryAfter ?? record.retry_after ?? retryHeader;
+    const seconds = typeof retry === "number" || typeof retry === "string" && /^\d+(?:\.\d+)?$/u.test(retry) ? Number(retry) : NaN;
+    if (details.retryAfterSeconds === undefined && Number.isFinite(seconds) && seconds >= 0 && seconds <= 366 * 86400) details.retryAfterSeconds = seconds;
+    const reset = record.resetAt ?? record.reset_at ?? record.resetsAt ?? record.resets_at;
+    if (!details.resetAt && typeof reset === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u.test(reset) && Number.isFinite(Date.parse(reset))) details.resetAt = new Date(reset).toISOString();
+    const message = typeof record.message === "string" ? record.message : "";
+    const hint = message.match(/\btry again at\s+([^\r\n]{1,160})/iu)?.[1]?.trim();
+    if (!details.resetHint && hint) details.resetHint = hint;
+  }
+  return details;
 }
 
 function messageHttpStatuses(message: string): number[] {
@@ -110,6 +144,12 @@ export function classifyCodexDraftFailure(error: unknown): CodexDraftFailureKind
   const evidence = codexFailureEvidence(error);
   const normalized = evidence.message.toLowerCase();
   const statuses = [...evidence.statuses, ...messageHttpStatuses(evidence.message)];
+
+  // Explicit terminal codes from any cause outrank text in an outer wrapper.
+  if (evidence.codes.includes("CODEX_TIMEOUT")) return "timeout";
+  if (evidence.codes.includes("CODEX_MODEL_INCOMPATIBLE")) return "model-version";
+  if (evidence.codes.includes("CODEX_AUTH_REQUIRED")) return "authentication";
+  if (evidence.codes.some((code) => /^(?:CODEX_USAGE_LIMIT_REACHED|USAGE_LIMIT_REACHED|USAGE_LIMIT_EXCEEDED|INSUFFICIENT_QUOTA|QUOTA_EXCEEDED)$/u.test(code)) || evidence.messages.some(isCodexUsageLimitMessage)) return "usage-limit";
 
   if (
     evidence.names.some((name) => name === "AbortError")
@@ -132,6 +172,8 @@ export function classifyCodexDraftFailure(error: unknown): CodexDraftFailureKind
     statuses.some((status) => status === 429 || (status >= 500 && status <= 599))
     || evidence.codes.some((code) => code === "ECONNRESET")
     || /\beconnreset\b/iu.test(normalized)
+    || evidence.codes.includes("CODEX_TRANSIENT_FAILURE")
+    || evidence.messages.some(isCodexStreamCompletionLoss)
   ) return "retryable-transient";
 
   if (/\b(?:timed?\s*out|timeout)\b|시간[^.\n]{0,30}초과/iu.test(normalized)) return "timeout";
@@ -141,18 +183,23 @@ export function classifyCodexDraftFailure(error: unknown): CodexDraftFailureKind
 
 /** Stable public code for a terminal provider failure. */
 export function codexDraftTerminalFailureCode(error: unknown): CodexDraftTerminalFailureCode | null {
-  for (const record of errorChain(error)) {
-    const code = typeof record.code === "string" ? record.code.toUpperCase() : "";
-    if (CODEX_TERMINAL_FAILURE_CODES.has(code as CodexDraftTerminalFailureCode)) {
-      return code as CodexDraftTerminalFailureCode;
-    }
-  }
+  if (errorChain(error).some(record => record.code === "CODEX_OUTPUT_SCHEMA_INVALID")) return "CODEX_OUTPUT_SCHEMA_INVALID";
+  // The classifier gives definitive nested codes precedence over a transient wrapper.
   const kind = classifyCodexDraftFailure(error);
   if (kind === "authentication") return "CODEX_AUTH_REQUIRED";
   if (kind === "model-version") return "CODEX_MODEL_INCOMPATIBLE";
   if (kind === "timeout") return "CODEX_TIMEOUT";
   if (kind === "retryable-transient") return "CODEX_TRANSIENT_FAILURE";
+  if (kind === "usage-limit") return "CODEX_USAGE_LIMIT_REACHED";
   return null;
+}
+
+/** For mixed API error boundaries, do not infer a provider failure from arbitrary input text. */
+export function codexDraftStructuredFailureCode(error: unknown): CodexDraftTerminalFailureCode | null {
+  const hasProviderCode = errorChain(error).some((record) =>
+    typeof record.code === "string"
+    && /^(?:CODEX_OUTPUT_SCHEMA_INVALID|CODEX_AUTH_REQUIRED|CODEX_MODEL_INCOMPATIBLE|CODEX_TIMEOUT|CODEX_TRANSIENT_FAILURE|CODEX_USAGE_LIMIT_REACHED)$/u.test(record.code.toUpperCase()));
+  return hasProviderCode ? codexDraftTerminalFailureCode(error) : null;
 }
 
 function terminalCodexDraftError(
@@ -163,6 +210,11 @@ function terminalCodexDraftError(
   const code = forcedCode || codexDraftTerminalFailureCode(error);
   const original = error instanceof Error ? error : new Error(String(error));
   if (!code) return original;
+  if (code === "CODEX_USAGE_LIMIT_REACHED") {
+    const details = codexUsageLimitDetails(error);
+    if ((original as Error & { code?: string }).code === code && !forcedMessage) return Object.assign(original, details);
+    return Object.assign(new Error(forcedMessage || original.message, { cause: error }), { code, ...details });
+  }
   if ((original as Error & { code?: string }).code === code && !forcedMessage) return original;
   return Object.assign(new Error(forcedMessage || original.message, { cause: error }), { code });
 }
@@ -191,6 +243,52 @@ export async function runCodexDraftWithRetry<T>(
   throw new Error("Codex retry loop ended unexpectedly.");
 }
 
+/** These exact exec progress events describe the SAME still-running SDK turn.
+ * Generic errors, terminal failures and an unknown stream end stay failures. */
+function isCodexDraftReconnectProgress(message: string): boolean {
+  const progress = /^Reconnecting\.\.\. ([1-9]\d*)\/([1-9]\d*) \(([^\r\n]+)\)$/u.exec(message);
+  if (!progress) return false;
+  const attempt = Number(progress[1]), maximum = Number(progress[2]);
+  if (!Number.isSafeInteger(attempt) || !Number.isSafeInteger(maximum) || attempt > maximum) return false;
+  return isCodexStreamCompletionLoss(message) || maximum === 5 &&
+    /^We[’']re currently experiencing high demand, which may cause temporary errors\.$/u.test(progress[3]);
+}
+
+/** Exec may emit its internal reconnect progress as a top-level error while the turn still runs. */
+export async function collectCodexDraftResponse(
+  events: AsyncIterable<import("@openai/codex-sdk").ThreadEvent>,
+  onProgress?: (message: string) => void,
+  onUsage?: (usage: CodexDraftUsage) => void,
+): Promise<string> {
+  let finalResponse = "";
+  let completed = false;
+  let reconnectError: Error | undefined;
+  for await (const event of events) {
+    if (event.type === "item.completed" && event.item.type === "agent_message") {
+      finalResponse = event.item.text.trim() || finalResponse;
+      onProgress?.("Codex 원고 응답 수신");
+    } else if (event.type === "turn.completed") {
+      completed = true;
+      try { onUsage?.(normalizeCodexDraftUsage(event.usage)); } catch { /* Observability cannot fail a completed native turn. */ }
+    } else if (event.type === "turn.failed") {
+      throw new Error(event.error.message || "Codex 원고 작성이 실패했습니다.");
+    } else if (event.type === "error") {
+      const message = event.message || "Codex 실행 중 오류가 발생했습니다.";
+      if (isCodexDraftReconnectProgress(message)) {
+        reconnectError = new Error(message);
+        const notice = `Codex 내부 연결 복구 중 · 현재 요청의 완료를 기다립니다. ${message}`;
+        if (onProgress) onProgress(notice);
+        else console.warn(notice);
+        continue;
+      }
+      throw new Error(message);
+    }
+  }
+  if (!completed) throw reconnectError || new Error("Codex 스트림이 turn.completed 없이 종료되었습니다.");
+  if (!finalResponse) throw new Error("Codex 응답에서 원고 본문을 찾지 못했습니다.");
+  return finalResponse;
+}
+
 function readableImages(imagePaths: string[], requestedMaximum = 4, preserveOrder = false): string[] {
   const maximum = Math.max(1, Math.min(16, Math.floor(requestedMaximum) || 4));
   const readable = Array.from(new Set(imagePaths.map((item) => path.resolve(item))))
@@ -210,6 +308,35 @@ function readableImages(imagePaths: string[], requestedMaximum = 4, preserveOrde
     ...detailImages.slice(2),
     ...regularImages.slice(2),
   ])).slice(0, maximum);
+}
+
+/** Keep the actual publication original distinct from seller artwork supplied only for source reading. */
+export function resolveCodexWritingImages(options: Pick<CodexDraftOptions, "imagePaths" | "maxImages" | "preserveImageOrder" | "publicationPhotoInput">): string[] {
+  const images = readableImages(options.imagePaths ?? [], options.maxImages, options.preserveImageOrder);
+  const original = options.publicationPhotoInput;
+  if (!original) return images;
+  const file = path.resolve(original.path);
+  let valid = false;
+  try {
+    const real = path.resolve(fs.realpathSync(file));
+    const canonicalMatch = process.platform === "win32" ? real.toLowerCase() === file.toLowerCase() : real === file;
+    valid = /^[a-f0-9]{64}$/u.test(original.sha256) && fs.statSync(file).isFile() && !fs.lstatSync(file).isSymbolicLink() &&
+      canonicalMatch && crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex") === original.sha256;
+  } catch { /* Missing, linked or changed originals cannot authorize a writer request. */ }
+  if (!valid)
+    throw new Error("PREWRITING_PHOTO_CHANGED: 작성에 전달할 검증 원본이 검사 후 바뀌었습니다. 원고 요청을 보내지 않았습니다.");
+  const maximum = Math.max(1, Math.min(16, Math.floor(options.maxImages || 4)));
+  return [file, ...images.filter(image => process.platform === "win32" ? image.toLowerCase() !== file.toLowerCase() : image !== file)].slice(0, maximum);
+}
+
+export function codexWritingImageRoles(images: string[], original?: CodexDraftOptions["publicationPhotoInput"]): string {
+  if (!original) return "";
+  return ["[실제 첨부 이미지 역할 · 서버가 이 순서로 전달한 파일]",
+    ...images.map((file, index) => index === 0 && file === path.resolve(original.path)
+      ? `첨부 ${index + 1}: 작성 전 검사한 실제 본문 원본 사진. SHA256=${original.sha256}. 눈에 보이는 외형만 묘사하고 숨겨진 기능·구성·수량은 사진으로 인증하지 마세요.`
+      : `첨부 ${index + 1}: 판매자 상세 근거 읽기용 이미지. 본문에 게시할 사진이 아닙니다. 설명판의 배치·광고·콜라주를 최종 사진 모습이라고 서술하지 마세요.`),
+    "아직 생성하지 않은 연출 사진은 첨부되지 않았습니다. 계획이나 imageIntent를 실제 촬영 장면처럼 묘사하지 마세요."]
+    .join("\n");
 }
 
 function buildWritingPrompt(
@@ -242,7 +369,59 @@ function buildWritingPrompt(
   ].join("\n");
 }
 
+/** Reject the two observed API-incompatible constructs before any SDK call.
+ * This is a portability check, not a replacement for response validation. */
+export function assertCodexOutputSchemaCompatible(schema: unknown): void {
+  const fail = (at: string, reason: string): never => {
+    throw Object.assign(new Error(`CODEX_OUTPUT_SCHEMA_INVALID: ${at}: ${reason}`), { code: "CODEX_OUTPUT_SCHEMA_INVALID" });
+  };
+  const visit = (value: unknown, at: string): void => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return;
+    const row = value as Record<string, unknown>;
+    if (Array.isArray(row.enum) && row.enum.some(v => v !== null && typeof v === "object")) fail(at, "use scalar enum values; bind array coordinates in the response reader");
+    if (typeof row.pattern === "string") {
+      if (/\\[pP]\{/u.test(row.pattern)) fail(at, "Unicode property escapes are not portable to the remote regex validator");
+      try { new RegExp(row.pattern); } catch { fail(at, "invalid portable regex"); }
+    }
+    for (const key of ["properties", "$defs", "definitions"]) {
+      const children = row[key];
+      if (children && typeof children === "object") for (const [name, child] of Object.entries(children)) visit(child, `${at}.${key}.${name}`);
+    }
+    if (row.items) visit(row.items, `${at}.items`);
+    for (const key of ["anyOf", "oneOf", "allOf"]) if (Array.isArray(row[key])) (row[key] as unknown[]).forEach((child, index) => visit(child, `${at}.${key}[${index}]`));
+  };
+  visit(schema, "schema");
+}
+
+/** Per-client settings only. Do not edit the user's shared config or login.
+ * These fixed writing/vision requests need their supplied context, not the
+ * user's unrelated memories, plugins, agent roles or skill catalogue. */
+export function isolatedCodexDraftConfig(skillRoots = [
+  path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "skills"),
+  path.join(os.homedir(), ".agents", "skills"),
+]) {
+  const disabled = new Set<string>();
+  const collect = (root: string, system = false) => {
+    try {
+      for (const entry of fs.readdirSync(root, { withFileTypes: true }).slice(0, 1024)) {
+        const folder = path.join(root, entry.name), file = path.join(folder, "SKILL.md");
+        try { if (fs.statSync(file).isFile()) disabled.add(file); } catch { /* Optional skill absent. */ }
+        if (!system && entry.name === ".system") collect(folder, true);
+      }
+    } catch { /* An absent optional skill root is not an authoring failure. */ }
+  };
+  for (const root of skillRoots) collect(root);
+  return {
+    project_doc_max_bytes: 0,
+    features: { memories: false, plugins: false, apps: false, multi_agent: false,
+      browser_use: false, computer_use: false, shell_tool: false },
+    skills: { config: [...disabled].sort().map(file => ({ path: file, enabled: false })) },
+  };
+}
+
 export async function runCodexDraft(options: CodexDraftOptions): Promise<string> {
+  if (options.outputSchema) assertCodexOutputSchemaCompatible(options.outputSchema);
+  const images = resolveCodexWritingImages(options);
   const model = resolveCodexTextModel(options.model);
   const reasoningEffort = resolveTextReasoningEffort(options.reasoningEffort);
   const { Codex } = await nativeImport("@openai/codex-sdk");
@@ -254,19 +433,11 @@ export async function runCodexDraft(options: CodexDraftOptions): Promise<string>
 
   const researchMode = options.researchMode ?? "disabled";
   const codex = new Codex({
-    config: {
-      project_doc_max_bytes: 0,
-      skills: {
-        config: [{
-          path: path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "skills", "opus-fable", "SKILL.md"),
-          enabled: false,
-        }],
-      },
-    },
+    config: isolatedCodexDraftConfig(),
     configOverrides: ['plugins."opus-fable-performance@local-opencrab".enabled=false'],
   });
-  const prompt = buildWritingPrompt(options.systemPrompt, options.userPrompt, researchMode, options.researchScope);
-  const images = readableImages(options.imagePaths ?? [], options.maxImages, options.preserveImageOrder);
+  const prompt = [buildWritingPrompt(options.systemPrompt, options.userPrompt, researchMode, options.researchScope),
+    codexWritingImageRoles(images, options.publicationPhotoInput)].filter(Boolean).join("\n\n");
   const input = images.length > 0
     ? [
         { type: "text" as const, text: prompt },
@@ -276,38 +447,48 @@ export async function runCodexDraft(options: CodexDraftOptions): Promise<string>
 
   try {
     options.onProgress?.(`Codex 원고 작성 시작${images.length ? ` · 이미지 ${images.length}장` : ""}`);
+    const requestId = crypto.randomUUID();
+    const promptSha256 = crypto.createHash("sha256").update(prompt).digest("hex");
+    let attempt = 0;
     return await runCodexDraftWithRetry(async () => {
-      const thread = codex.startThread({
-        // Every Codex writer, reviewer and vision helper uses the same approved model.
-        model,
-        modelReasoningEffort: reasoningEffort,
-        sandboxMode: "read-only",
-        workingDirectory,
-        skipGitRepoCheck: true,
-        approvalPolicy: "never",
-        networkAccessEnabled: false,
-        webSearchMode: researchMode,
-        threadSource: "blogautomcp-draft",
-      });
-      let finalResponse = "";
-      const { events } = await thread.runStreamed(input, {
-        signal: controller.signal,
-        ...(options.outputSchema ? { outputSchema: options.outputSchema } : {}),
-      });
-      for await (const event of events) {
-        if (event.type === "item.completed" && event.item.type === "agent_message") {
-          finalResponse = event.item.text.trim() || finalResponse;
-          options.onProgress?.("Codex 원고 응답 수신");
-        } else if (event.type === "turn.failed") {
-          throw new Error(event.error.message || "Codex 원고 작성이 실패했습니다.");
-        } else if (event.type === "error") {
-          throw new Error(event.message || "Codex 실행 중 오류가 발생했습니다.");
-        }
+      const startedAt = Date.now();
+      const currentAttempt = ++attempt;
+      let usage = normalizeCodexDraftUsage(null);
+      let status: "completed" | "failed" = "failed";
+      let failureKind: CodexDraftFailureKind | undefined;
+      try {
+        resolveCodexWritingImages(options); // A provider reconnect must not carry an original changed after input preparation.
+        const thread = codex.startThread({
+          // Every Codex writer, reviewer and vision helper uses the same approved model.
+          model,
+          modelReasoningEffort: reasoningEffort,
+          sandboxMode: "read-only",
+          workingDirectory,
+          skipGitRepoCheck: true,
+          approvalPolicy: "never",
+          networkAccessEnabled: false,
+          webSearchMode: researchMode,
+          threadSource: "blogautomcp-draft",
+        });
+        const { events } = await thread.runStreamed(input, {
+          signal: controller.signal,
+          ...(options.outputSchema ? { outputSchema: options.outputSchema } : {}),
+        });
+        const response = await collectCodexDraftResponse(events, options.onProgress, value => {
+          usage = value;
+          try { options.onUsage?.(value); } catch { /* Counters never create a retry. */ }
+        });
+        status = "completed";
+        return response;
+      } catch (error) { failureKind = classifyCodexDraftFailure(error); throw error; }
+      finally {
+        recordCodexDraftUsage({ version: "codex-draft-usage/v1", at: new Date().toISOString(), requestId,
+          attempt: currentAttempt, stage: options.usageStage || inferCodexUsageStage(options.systemPrompt), model,
+          promptSha256, imageCount: images.length, elapsedMs: Date.now() - startedAt, status,
+          ...(failureKind ? { failureKind } : {}), usage });
       }
-      if (!finalResponse) throw new Error("Codex 응답에서 원고 본문을 찾지 못했습니다.");
-      return finalResponse;
     }, {
-      canRetry: () => !controller.signal.aborted,
+      canRetry: () => options.noTransientRetry !== true && !controller.signal.aborted,
       onRetry: () => options.onProgress?.("Codex 일시 오류 감지 · 동일 Codex 경로로 1회 재시도"),
     });
   } catch (error) {

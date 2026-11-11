@@ -9,6 +9,10 @@ import {
   compactChatGptEvidence,
 } from "./lib/chatgpt-direct-prompt";
 import { formatPostAngleForPrompt, formatPostAngleSummary } from "./lib/topic-templates/angles";
+import { defaultTopicTemplateId } from "./lib/topic-templates";
+import { buildProduct9Canvas } from "./lib/product-9canvas";
+import { buildShoppingWritingSectionPlan } from "./lib/shopping-writing-plan";
+import { shoppingPhotoRoleAt } from "../src/lib/shopping-post-strategy";
 import {
   composeBudgetedWritingPrompt,
   createWritingPromptContract,
@@ -17,6 +21,8 @@ import {
   extractRequestedDraftTitle,
   resolveWritingDraftTitle,
   formatWritingPromptContract,
+  formatWritingPublicationPhotoContext,
+  type WritingPublicationPhotoContext,
   getWritingOutputExample,
   reviewGeneratedEvidenceFacts,
   selectGroundedEvidenceFacts,
@@ -37,9 +43,9 @@ function collectDeclarations(node: ts.Node): void {
   ts.forEachChild(node, collectDeclarations);
 }
 // Prepared-post revision has its own writingContract. Never select by global
-// declaration order: these fixtures exercise the initial generation function.
+// declaration order: these fixtures exercise the initial writer after photo preflight.
 const generationFunction = source.statements.find((node): node is ts.FunctionDeclaration =>
-  ts.isFunctionDeclaration(node) && node.name?.text === "step2_generatePost");
+  ts.isFunctionDeclaration(node) && node.name?.text === "step2_generatePostAfterPreflight");
 assert.ok(generationFunction?.body, "Production generation function exists");
 collectDeclarations(generationFunction.body);
 function evaluateInitializer<T = unknown>(name: string, context: Record<string, unknown>): T {
@@ -65,6 +71,7 @@ const memoContractContext = {
   maximumBodySectionCount: 11, compositionContract: { targetCharacters: { min: 2400, max: 4200 } },
   NAVER_BLOG_HASHTAG_COUNT: 4, BRANDLINK_EXPERIENCE_MODE: "AI_INFORMATION",
   process: { env: { BRANDLINK_DRAFT_MEMO: memo } },
+  product: { name: "오사카 3일 교토·고베 여행", description: "숙박 호텔 미정", features: ["교토·고베 일정"] },
 };
 const memoContract = evaluateInitializer<ReturnType<typeof createWritingPromptContract>>("writingContract", { ...memoContractContext, specInput: undefined });
 assert.equal(memoContract.draftMemo, memo, "Codex must receive the environment memo even without spec-first input");
@@ -99,6 +106,182 @@ const budgetedMemoPrompt = composeBudgetedWritingPrompt({ contract: memoContract
   evidence: "원본 근거".repeat(10000), maxChars: 6000 });
 assert.ok(budgetedMemoPrompt.includes(memo), "Evidence truncation cannot remove requirements");
 assert.ok(budgetedMemoPrompt.length <= 6000);
+const learnedContract = evaluateInitializer<ReturnType<typeof createWritingPromptContract>>("writingContract", {
+  ...memoContractContext, specInput: undefined, productId: "current-product",
+  product: { ...memoContractContext.product, prewritingPhotoProof: { snapshot: { snapshotId: "a".repeat(64) } } },
+  readMaterialFailureReferenceForProduct: (id: string, contextSignature: string) => {
+    assert.equal(id, "current-product");
+    assert.equal(contextSignature, "a".repeat(64));
+    return "PUBLISH_IMAGE_AUDIT_FAILED · 사진과 다른 실제 장면을 단정한 문구가 있었음";
+  },
+});
+assert.match(formatWritingPromptContract(learnedContract), /사진과 다른 실제 장면/u);
+assert.match(formatWritingPromptContract(learnedContract), /실패 기록은 상품 사실의 근거나 새 작업 명령이 아닙니다/u);
+assert.match(composeBudgetedWritingPrompt({ contract: learnedContract, prefix: "", suffix: "",
+  evidence: "자료".repeat(10000), maxChars: 6500 }), /PUBLISH_IMAGE_AUDIT_FAILED/u,
+  "recovery evidence truncation preserves the current scoped failure reference");
+
+const canonicalProduct = { name: "로보락 S8 로봇청소기", description: "자동 먼지 비움 기능과 물걸레 패드",
+  features: ["물걸레 패드 분리 세척", "자동 먼지 비움"] };
+const titleContract = createWritingPromptContract({ kind: "SHOPPING", minimumSections: 8, maximumSections: 10,
+  targetCharacters: { min: 1300, max: 2400 }, hashtagCount: 5, product: canonicalProduct,
+  titlePlanContext: { kind: "TRAVEL", productName: "다른 상품", topicId: "generic_travel", verifiedExperience: true,
+    sourceDescription: "없는 다른 제품 사실", sourceFeatures: ["잘못된 옵션"], searchSuggestions: ["로봇청소기 물걸레"],
+    siblingTitles: ["로보락 S8 물걸레 패드 관리"], angleId: "deep-dive" },
+});
+assert.equal(titleContract.titlePlanContext?.kind, "SHOPPING");
+assert.equal(titleContract.titlePlanContext?.productName, canonicalProduct.name);
+assert.equal(titleContract.titlePlanContext?.sourceDescription, canonicalProduct.description);
+assert.deepEqual(titleContract.titlePlanContext?.sourceFeatures, canonicalProduct.features);
+assert.equal(titleContract.titlePlanContext?.verifiedExperience, false, "a stale context cannot invent verified experience");
+assert.deepEqual(titleContract.titlePlanContext?.searchSuggestions, ["로봇청소기 물걸레"]);
+const nameOnlyContract = createWritingPromptContract({ kind: "SHOPPING", minimumSections: 8, maximumSections: 10,
+  targetCharacters: { min: 1300, max: 2400 }, hashtagCount: 5, product: { name: canonicalProduct.name },
+  titlePlanContext: titleContract.titlePlanContext,
+});
+assert.equal(nameOnlyContract.titlePlanContext?.sourceDescription, undefined,
+  "absent canonical description cannot inherit stale caller evidence");
+assert.deepEqual(nameOnlyContract.titlePlanContext?.sourceFeatures, [],
+  "absent canonical features cannot inherit stale caller evidence");
+assert.deepEqual(Object.keys(getWritingOutputExample(titleContract)), ["title", "evidenceFacts", "sections", "hashtags"],
+  "internal title planning adds no public draft output fields");
+const titleBlock = formatWritingPromptContract(titleContract);
+assert.match(titleBlock, /제목 25~35자는 권장 범위/u);
+assert.match(titleBlock, /길이·앞 15자만 맞추려고 자르거나 단어를 나열하지/u);
+assert.match(titleBlock, /제목 후보 5개/u, "shared mandatory prompts include five internal candidates without changing submitted schema");
+const photoContext: WritingPublicationPhotoContext = {
+  version: "writing-publication-photo-context/v1",
+  verifiedOriginal: { path: "C:/offline/verified-source.jpg", sha256: "b".repeat(64),
+    verifiedProductName: canonicalProduct.name, sourceUrl: "https://seller.example/reading-only",
+    snapshotId: "snapshot-exact", selectedIdentity: { status: "confirmed", label: "화이트" },
+    observedSubject: "선택한 흰색 본체가 닫힌 상태로 놓여 있습니다.", inclusionScope: "selected-product-exterior",
+    availability: "verified-local-original", attachmentRequired: true },
+  plannedScenes: [{ role: "scene-1", intent: "자연스러운 생활 공간" }, { role: "scene-2" }, { role: "scene-3" }],
+};
+const makePhotoContract = (context: WritingPublicationPhotoContext) => createWritingPromptContract({
+  kind: "SHOPPING", minimumSections: 5, maximumSections: 8, targetCharacters: { min: 1200, max: 2800 },
+  hashtagCount: 5, product: canonicalProduct, productUnderstanding: buildProduct9Canvas(canonicalProduct), publicationPhotoContext: context,
+});
+const photoContract = makePhotoContract(photoContext);
+assert.notEqual(photoContract.publicationPhotoContext, photoContext, "the writer cannot mutate the intake proof");
+assert.notEqual(photoContract.publicationPhotoContext?.verifiedOriginal, photoContext.verifiedOriginal);
+assert.notEqual(photoContract.publicationPhotoContext?.verifiedOriginal.selectedIdentity, photoContext.verifiedOriginal.selectedIdentity);
+assert.notEqual(photoContract.publicationPhotoContext?.plannedScenes, photoContext.plannedScenes);
+for (const minimal of [false, true]) {
+  const block = formatWritingPublicationPhotoContext(photoContract.publicationPhotoContext, minimal);
+  assert.match(block, /SOURCE_READING:.*사실 읽기 자료/u);
+  assert.match(block, /(?:삽입 사진·선택 구성 증거 아님|최종 삽입 사진이나 선택 구성으로 간주하지)/u);
+  assert.match(block, /VERIFIED_PUBLICATION_ORIGINAL:.*(?:배정 검증 원본|첫 본문에 배정할 검증 원본)/u);
+  assert.match(block, new RegExp(photoContext.verifiedOriginal.sha256, "u"));
+  assert.match(block, /외부\/MCP.*SHA.*실제.*첨부.*때만/u);
+  assert.match(block, /경로·URL·메타데이터.*장면.*추정.*(?:금지|않)/u);
+  assert.match(block, /배정 원본에서 확인한 외형·배치 묘사는 유지/u, "legitimate descriptions remain allowed");
+  assert.match(block, /PLANNED_SCENE.*scene-1.*(?:미생성|아직 생성하지 않은)/u);
+  assert.match(block, /제형·효과·구성을.*(?:이미 보여준다고 쓰지 않음|보여 준다고 미리 쓰지)/u);
+  assert.match(block, /공통 부위.*중량.*특정 옵션에 모두 포함된다고 추정/u);
+  assert.match(block, /옵션별 구성 연결 근거.*사실/u);
+  assert.doesNotMatch(block, /C:\/offline|seller\.example/u, "private paths and raw reading URLs are not prose facts");
+}
+assert.deepEqual(photoContract.titlePlanContext?.sourceFeatures, canonicalProduct.features, "photo rules do not delete verified specifications");
+assert.ok(photoContract.sectionPlan, "the same local/MCP writing contract carries section, source and photo planning");
+assert.equal(nameOnlyContract.sectionPlan?.facts.length, 0, "a caller's stale facts cannot populate canonical source-free prewriting");
+for (const count of [5, 6, 7, 8]) {
+  const factInput = ["중량: 1.65kg", "소비전력: 500W", "용량: 532ml", "소재: 면 100%"];
+  const originalFacts = [...factInput];
+  const plan = buildShoppingWritingSectionPlan({ productName: "선택 상품 X100", sourceFeatures: factInput,
+    minimumSections: count, maximumSections: count });
+  assert.equal(plan.sections.length, count);
+  assert.deepEqual(plan.sections.map(section => section.photoRole.startsWith("scene-") ? "scene" : section.photoRole),
+    Array.from({ length: count }, (_, index) => shoppingPhotoRoleAt(index, count)), "prewriting uses the real renderer's existing photo positions");
+  assert.deepEqual(plan.sections.filter(section => section.photoRole.startsWith("scene-")).map(section => section.photoRole), ["scene-1", "scene-2", "scene-3"]);
+  const factIndexes = plan.sections.flatMap(section => section.factIndexes);
+  assert.equal(new Set(factIndexes).size, factIndexes.length, "a unique fact is allocated once rather than repeated to fill sections");
+  assert.ok(factIndexes.every(index => index >= 0 && index < plan.facts.length));
+  assert.deepEqual(factInput, originalFacts, "source facts are preserved by planning");
+}
+for (const [fact, question, forbidden] of [
+  ["중량: 1.65kg", /무게/u, /용량|65kg/u],
+  ["중량: 50g", /무게/u, /용량/u],
+  ["소비전력: 500W", /소비전력/u, /요금|효과/u],
+  ["용량: 532ml", /용량/u, /리필|제형/u],
+] as const) {
+  const plan = buildShoppingWritingSectionPlan({ productName: "선택 상품 X100", sourceFeatures: [fact], minimumSections: 5, maximumSections: 8 });
+  assert.deepEqual(plan.facts, [fact], "numeric values, decimal points, property names and units stay intact");
+  const assigned = plan.sections.find(section => section.factIndexes.includes(0))!;
+  assert.match(assigned.readerQuestion, question);
+  assert.doesNotMatch(assigned.readerQuestion, forbidden, "a planning question does not change units or infer an unsupported result");
+}
+assert.match(formatWritingPromptContract(photoContract), /생성 완료 전.*장면 묘사를 쓰지 않습니다/u);
+assert.match(formatWritingPromptContract(photoContract), /SOURCE_READING/u);
+assert.deepEqual(Object.keys(getWritingOutputExample(photoContract)), ["title", "evidenceFacts", "sections", "hashtags"]);
+const absentPhotos = formatWritingPublicationPhotoContext();
+assert.match(absentPhotos, /연결 정보가 없습니다.*분석용 이미지가 실제로 삽입될 사진이라고 가정하지/u);
+assert.match(absentPhotos, /실제로 첨부됐을 때만/u, "metadata does not falsely claim external attachment availability");
+const completeKit = makePhotoContract({ ...photoContext, verifiedOriginal: { ...photoContext.verifiedOriginal,
+  inclusionScope: "verified-complete-selected-kit" } });
+assert.equal(completeKit.publicationPhotoContext?.verifiedOriginal.inclusionScope, "verified-complete-selected-kit");
+for (const invalid of [
+  { ...photoContext, verifiedOriginal: { ...photoContext.verifiedOriginal, sha256: "not-a-proof" } },
+  { ...photoContext, verifiedOriginal: { ...photoContext.verifiedOriginal, verifiedProductName: "다른 선택 상품" } },
+  { ...photoContext, verifiedOriginal: { ...photoContext.verifiedOriginal, path: "" } },
+  { ...photoContext, verifiedOriginal: { ...photoContext.verifiedOriginal, inclusionScope: "all-title-options" } },
+  { ...photoContext, verifiedOriginal: { ...photoContext.verifiedOriginal, selectedIdentity: { status: "guessed", label: "화이트" } } },
+  { ...photoContext, plannedScenes: Array.from({ length: 4 }, () => ({ role: "extra" })) },
+]) assert.throws(() => makePhotoContract(invalid as WritingPublicationPhotoContext), /WRITING_PHOTO_CONTEXT_INVALID/u);
+const normalizedPhotoContract = createWritingPromptContract({ kind: "SHOPPING", minimumSections: 5, maximumSections: 8,
+  targetCharacters: { min: 1200, max: 2800 }, hashtagCount: 5, product: { ...canonicalProduct, name: "  로보락  S8 로봇청소기 " },
+  publicationPhotoContext: photoContext });
+assert.ok(normalizedPhotoContract.publicationPhotoContext, "only whitespace normalization permits an equivalent canonical name");
+const photoBudget = composeBudgetedWritingPrompt({ contract: photoContract, prefix: "", suffix: "",
+  evidence: "상세 근거 ".repeat(10000), maxChars: CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS });
+assert.ok(photoBudget.endsWith(formatWritingPromptContract(photoContract, { topicDetail: "minimal" })));
+assert.ok(photoBudget.length <= CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS);
+const exactProductTitle = createWritingPromptContract({ kind: "SHOPPING", minimumSections: 8, maximumSections: 10,
+  targetCharacters: { min: 1300, max: 2400 }, hashtagCount: 5, product: canonicalProduct,
+  draftMemo: '제목은 정확히 "로보락 S8, 물걸레를 고를 때"로 작성.',
+});
+assert.equal(getWritingOutputExample(exactProductTitle).title, "로보락 S8, 물걸레를 고를 때");
+assert.match(formatWritingPromptContract(exactProductTitle), /내부 제목 후보 선택이나 SEO 권장 길이로 바꾸지/u);
+
+// Run the actual simple-agent initializer and post-collection assignment block,
+// without importing its operational entrypoint or invoking search/providers.
+const wiredContract = evaluateInitializer<ReturnType<typeof createWritingPromptContract>>("writingContract", {
+  ...memoContractContext, connectKind: "SHOPPING", product: canonicalProduct,
+  specInput: { memo: "제품 선택 기준" }, productUnderstanding: undefined,
+});
+const wiredTitleContext = evaluateInitializer("titlePlanContext", { product: canonicalProduct, connectKind: "SHOPPING",
+  topicSelection: wiredContract.editorial?.topic, writingContract: wiredContract,
+  BRANDLINK_EXPERIENCE_MODE: "AI_ASSISTED_INFORMATION", specInput: { angleContext: { angle: "deep-dive", siblings: [{ title: "형제 글 제목" }] } },
+});
+const titleContextAssignment = generationFunction.body.statements.find((node): node is ts.IfStatement =>
+  ts.isIfStatement(node) && node.expression.getText(source) === "titlePlanContext" &&
+  node.thenStatement.getText(source).includes("titlePlanContext.searchSuggestions = searchDemand"));
+assert.ok(titleContextAssignment, "actual collected suggestions update the shared mandatory contract");
+const wiredPrompt = vm.runInNewContext(ts.transpileModule(`${titleContextAssignment.getText(source)}\nmandatoryWritingPromptBlock;`, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText, { titlePlanContext: wiredTitleContext, searchDemand: ["로보락 S8 물걸레 패드", "로봇청소기 자동 먼지 비움"],
+  writingContract: wiredContract, mandatoryWritingPromptBlock: "before collection", formatWritingPromptContract });
+assert.equal(wiredContract.titlePlanContext?.productName, canonicalProduct.name);
+assert.equal(wiredContract.titlePlanContext?.sourceDescription, canonicalProduct.description);
+assert.deepEqual(wiredContract.titlePlanContext?.sourceFeatures, canonicalProduct.features);
+assert.deepEqual(wiredContract.titlePlanContext?.searchSuggestions, ["로보락 S8 물걸레 패드", "로봇청소기 자동 먼지 비움"]);
+assert.equal(wiredPrompt, formatWritingPromptContract(wiredContract));
+const plannerCalls: ts.CallExpression[] = [];
+function collectPlannerCalls(node: ts.Node): void {
+  if (ts.isCallExpression(node) && node.expression.getText(source) === "planTitle") plannerCalls.push(node);
+  ts.forEachChild(node, collectPlannerCalls);
+}
+collectPlannerCalls(generationFunction.body);
+for (const [variable, actualBody] of [["normalizedTitle", "bodySections"], ["repairedTitle", "repairedBodySections"]]) {
+  const call = plannerCalls.find(value => value.arguments[0].getText(source) === variable);
+  assert.ok(call, `production ${variable} uses title planning`);
+  const options = vm.runInNewContext(ts.transpileModule(`(${call.arguments[1].getText(source)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText, { titlePlanContext: wiredContract.titlePlanContext,
+    bodySections: ["원래 본문 근거"], repairedBodySections: ["수정된 실제 본문 근거"] });
+  assert.deepEqual(Array.from(options.bodySections), actualBody === "bodySections" ? ["원래 본문 근거"] : ["수정된 실제 본문 근거"]);
+  assert.equal(options.sourceDescription, canonicalProduct.description);
+}
 const repairBuilder = declarations.get("buildRepairPrompt")?.initializer;
 assert.ok(repairBuilder && ts.isArrowFunction(repairBuilder) && ts.isBlock(repairBuilder.body));
 const repairReturn = repairBuilder.body.statements.find(ts.isReturnStatement);
@@ -129,6 +312,21 @@ const buildBrowserPrompt = vm.runInNewContext(`${compiled}\nbuildDirectBrowserGp
 }) as (...args: unknown[]) => string;
 
 let browserCases = 0;
+assert.equal(CHATGPT_DIRECT_PRIMARY_PROMPT_MAX_CHARS, 8500);
+assert.equal(CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS, 6500);
+for (const mode of ["primary", "recovery"] as const) {
+  const actualPhotoPrompt = buildBrowserPrompt("system", "user", {
+    connectKind: "SHOPPING", productName: canonicalProduct.name,
+    description: canonicalProduct.description, features: canonicalProduct.features,
+    minimumSectionCount: 5, maximumSectionCount: 8, targetSectionCount: 6,
+    writingContract: photoContract, editorialPromptBlock: "원본 근거\n".repeat(3000), editorialSectionTitles: ["외형", "선택"],
+  }, 5, mode);
+  assert.ok(actualPhotoPrompt.length <= (mode === "recovery" ? 6500 : 8500));
+  assert.ok(actualPhotoPrompt.endsWith(formatWritingPromptContract(photoContract, { topicDetail: "minimal" })));
+  assert.match(actualPhotoPrompt, /SOURCE_READING|VERIFIED_PUBLICATION_ORIGINAL|PLANNED_SCENE/u);
+  assert.match(actualPhotoPrompt, new RegExp(photoContext.verifiedOriginal.sha256, "u"));
+  browserCases++;
+}
 for (const kind of ["SHOPPING", "TRAVEL"] as const) {
   // Non-default bounds catch accidental provider hardcoding.
   const contract = createWritingPromptContract({
@@ -169,6 +367,21 @@ for (const kind of ["SHOPPING", "TRAVEL"] as const) {
   }
   const raisedMinimum = buildBrowserPrompt("", "", context, 9, "recovery");
   assert.match(raisedMinimum, /sections는 9~11개/u);
+  const plannedContract = createWritingPromptContract({
+    kind, minimumSections: 8, maximumSections: 11,
+    targetCharacters: { min: 2400, max: 4200 }, hashtagCount: 4,
+    titlePlanContext: { kind, productName: kind === "TRAVEL" ? "튀르키예 9일 이스탄불 패키지" : "로보락 S8 로봇청소기",
+      topicId: defaultTopicTemplateId(kind), verifiedExperience: false,
+      sourceFeatures: kind === "TRAVEL" ? ["이스탄불·카파도키아 방문"] : ["물걸레 구성"],
+      searchSuggestions: kind === "TRAVEL" ? ["튀르키예 여행 준비"] : ["로봇청소기 물걸레"],
+    },
+  });
+  const plannedPrompt = buildBrowserPrompt("", "", { ...context, writingContract: plannedContract }, 8, "recovery");
+  assert.ok(plannedPrompt.length <= CHATGPT_DIRECT_RECOVERY_PROMPT_MAX_CHARS);
+  assert.ok(plannedPrompt.endsWith(formatWritingPromptContract(plannedContract, { topicDetail: "minimal" })),
+    "compact title planning remains inside the unchanged browser recovery budget");
+  assert.match(plannedPrompt, /후보 5개/u);
+  browserCases += 1;
 
   const verified = createWritingPromptContract({
     kind, minimumSections: 8, maximumSections: 11,
@@ -207,9 +420,7 @@ const appendedClaim = `${longSource} 방수 100미터를 보장합니다.`;
 assert.deepEqual(reviewGeneratedEvidenceFacts([appendedClaim], [longSource]).matchedSuppliedFacts, [], "Never truncate away an unsupported suffix before matching");
 
 // Also exercise the real post-generation boundary, not just the matching helper.
-const step2 = source.statements.find((node): node is ts.FunctionDeclaration =>
-  ts.isFunctionDeclaration(node) && node.name?.text === "step2_generatePost",
-);
+const step2 = generationFunction;
 assert.ok(step2?.body);
 const statements = step2.body.statements;
 const parsedDraftIndex = statements.findIndex((node) => ts.isVariableStatement(node) &&

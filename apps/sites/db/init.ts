@@ -30,6 +30,7 @@ const statements = [
   `CREATE TABLE IF NOT EXISTS pair_codes (id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, code_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER, created_at INTEGER NOT NULL)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_pair_codes_hash ON pair_codes(code_hash)`,
   `CREATE INDEX IF NOT EXISTS idx_pair_codes_user ON pair_codes(user_id, expires_at)`,
+  `CREATE TABLE IF NOT EXISTS mcp_connection_checks (user_id TEXT PRIMARY KEY NOT NULL REFERENCES users(id) ON DELETE CASCADE, last_read_at INTEGER NOT NULL, read_tool TEXT NOT NULL, channel_id TEXT, read_job_id TEXT)`,
 ];
 
 /**
@@ -44,6 +45,8 @@ const columnMigrations: Array<{ table: string; column: string; ddl: string }> = 
   { table: 'agent_jobs', column: 'cancel_requested', ddl: 'INTEGER NOT NULL DEFAULT 0' },
   { table: 'agent_jobs', column: 'claim_request_id', ddl: 'TEXT' },
   { table: 'devices', column: 'status_json', ddl: 'TEXT' },
+  { table: 'pair_codes', column: 'pairing_token_hash', ddl: 'TEXT' },
+  { table: 'pair_codes', column: 'paired_device_id', ddl: 'TEXT' },
 ];
 
 async function ensureColumns(d1: ReturnType<typeof getD1>): Promise<void> {

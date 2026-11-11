@@ -40,7 +40,9 @@ export function migrateShoppingNaturalPhotoPlan(brandLinkId: string): {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST" || !fs.readFileSync(backupPath).equals(originalBytes)) throw error;
     }
     lock.assertOwner();
-    const sections = applyShoppingNaturalPhotoPlan(manifest.composition.sections.map(section => ({ ...section, imagePaths: [] })));
+    const snapshotProductName = manifest.sourceSnapshot?.product.name;
+    const sections = applyShoppingNaturalPhotoPlan(manifest.composition.sections.map(section => ({ ...section, imagePaths: [] })),
+      { productName: typeof snapshotProductName === "string" && snapshotProductName.trim() ? snapshotProductName : manifest.title });
     const composition = refreshPostDocumentQuality({
       ...manifest.composition, strategyVersion: SHOPPING_POST_STRATEGY_VERSION,
       imageFloor: SHOPPING_POST_STRATEGY.images.min, sections,

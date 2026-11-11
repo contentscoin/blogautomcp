@@ -69,3 +69,10 @@ essential 프로필에서는 연출 사진을 끝내 채우지 못해도 글을 
 - **목록 필드 보존**: 목록 응답에 대표 이미지나 상품 주소가 있으면 상품 등록 때 함께 저장한다.
 - 한계: 브랜드커넥트의 상품 검색 API는 확인하지 못해 여전히 카테고리별 상위 상품 범위 안에서만 찾는다.
 - 검증: `npm run test:list-diagnosis`.
+
+## 플러그인 기본 흐름 (P6)
+
+- 서버 안내문 맨 앞에 기본 흐름을 둔다: `agent_get_status` → `brandconnect_sync_products` / `brandconnect_list_products` → `materials_prepare` → `materials_list` → `materials_publish`(진행 확인은 `job_get`). 다른 도구는 사용자가 그 작업을 구체적으로 요청할 때만 쓴다.
+- 도구 목록에서 이 도구들을 맨 앞에 둔다. 나머지 도구는 기존 대화 호환을 위해 그대로 제공한다.
+- 안내문에 두 가지를 명시한다: 쇼핑 원고는 `canPublish=true`이면 권고(advisory)가 있어도 다시 쓰지 않는다. 연출 사진 없이 실사진만으로 준비된 소재는 실패가 아니다.
+- 코드: `apps/sites/app/api/mcp/[credential]/route.ts`의 `CORE_TOOL_NAMES`.

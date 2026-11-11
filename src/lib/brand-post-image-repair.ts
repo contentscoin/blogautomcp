@@ -1,4 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import {
   applyGeneratedBrandPostImage, packagePreview, readBrandPostPackage, normalizePackageImageAssets,
   writeBrandPostPackageManifest, type BrandPostPackageManifestV2,
@@ -12,6 +14,7 @@ import {
   isBrandPostImageRepairLocked,
 } from "./brand-post-image-repair-lock";
 import { migrateShoppingNaturalPhotoPlan, requiresShoppingNaturalPhotoPlan } from "./brand-post-natural-photo-migration";
+import { publicationDefectMaterialBinding } from "../../scripts/lib/publication-image-defect-proof";
 
 type ImageSlot = ReturnType<typeof packagePreview>["imageSlots"][number];
 
@@ -71,8 +74,30 @@ export function planSectionImageRequests(slots: ImageSlot[]): BrandPostImageGene
 export function planWholeBrandPostImageRequests(manifest: BrandPostPackageManifestV2): BrandPostImageGenerationRequest[] {
   const requests = planSectionImageRequests(packagePreview(manifest).imageSlots);
   if (manifest.connectKind === "SHOPPING") {
-    const hero = normalizePackageImageAssets(manifest).find(asset => asset.role === "hero" && asset.path === manifest.heroImagePath);
-    if (hero && hero.provenance !== "PHOTO_TEXT_THUMBNAIL") requests.unshift({ requestId: randomUUID(), replaceAssetKey: hero.sha256 });
+    const recordedHeroes = manifest.imageAssets?.filter(asset => asset.role === "hero" && !asset.sectionId) || [];
+    if (recordedHeroes.length > 1 || recordedHeroes.some(asset => path.resolve(asset.path) !== path.resolve(manifest.heroImagePath)))
+      throw new Error("IMAGE_RESUME_REQUIRED: 대표 이미지 교체 대상이 모호합니다.");
+    const heroes = normalizePackageImageAssets(manifest).filter(asset => asset.role === "hero" && !asset.sectionId);
+    if (heroes.length > 1 || heroes.some(asset => path.resolve(asset.path) !== path.resolve(manifest.heroImagePath)))
+      throw new Error("IMAGE_RESUME_REQUIRED: 대표 이미지 교체 대상이 모호합니다.");
+    const hero = heroes[0];
+    if (!hero) requests.unshift({ requestId: randomUUID(), slotId: "hero:image:1" });
+    else {
+      let damaged: boolean;
+      try {
+        const stat = fs.statSync(hero.path);
+        damaged = !stat.isFile() || stat.size === 0 || stat.size > 24 * 1024 * 1024 ||
+          createHash("sha256").update(fs.readFileSync(hero.path)).digest("hex") !== hero.sha256;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        requests.unshift({ requestId: randomUUID(), slotId: "hero:image:1" });
+        return requests;
+      }
+      if (hero.provenance !== "PHOTO_TEXT_THUMBNAIL" || damaged) {
+        if (!/^[a-f0-9]{64}$/u.test(hero.sha256)) throw new Error("IMAGE_RESUME_REQUIRED: 대표 이미지 교체 키를 확인할 수 없습니다.");
+        requests.unshift({ requestId: randomUUID(), replaceAssetKey: hero.sha256 });
+      }
+    }
   }
   return requests;
 }
@@ -117,6 +142,12 @@ export async function repairBrandPostImages(options: {
   sourceImageUrls?: string[];
   requests?: BrandPostImageGenerationRequest[];
   sourceOnly?: boolean;
+  /** Restrict source-only replacement to intact selected-gallery originals. */
+  canonicalSourceOnly?: boolean;
+  completedReviewOnly?: boolean;
+  forceSourceRefresh?: boolean;
+  /** Internal confirmed-defect admission, checked after acquiring the package lock. */
+  expectedMaterialBinding?: string;
 }, dependencies: ImageRepairDependencies = {
   read: readBrandPostPackage, write: writeBrandPostPackageManifest,
   apply: applyGeneratedBrandPostImage, generate: generateBrandPostImages,
@@ -190,14 +221,28 @@ export async function repairBrandPostImages(options: {
   };
   try {
     const manifest = read();
+    if (options.expectedMaterialBinding !== undefined && publicationDefectMaterialBinding(manifest) !== options.expectedMaterialBinding)
+      throw Object.assign(new Error("확정 결함 복구를 계획한 뒤 소재가 변경되어 생성하지 않았습니다."), { code: "IMAGE_RESUME_REQUIRED" });
     const requests = options.requests ?? (dependencies.migrateNaturalPhotoPlan
       ? planWholeBrandPostImageRequests(manifest) : planSectionImageRequests(packagePreview(manifest).imageSlots));
     requested = requests.length;
     if (requested === 0) {
       const remaining = packagePreview(manifest).imageSlots.reduce((sum, slot) => sum + Math.max(slot.missing, slot.generationMissing), 0);
+      // Explicit whole-material repair may discover that later verified asset
+      // application already filled every current target. Reconcile telemetry
+      // only after planning found no target; photo counts alone cannot settle
+      // missing provenance, rejected thumbnails or uncertain provider requests.
+      const prior = manifest.imageGeneration;
+      const staleCoverage = options.requests === undefined && remaining === 0 && prior?.status === "incomplete" &&
+        prior.remaining > 0 && prior.errors.length === 0 && !prior.recoveryState;
+      if (staleCoverage) {
+        processLock.assertOwner();
+        dependencies.write({ ...manifest, imageGeneration: { ...prior, status: "complete", remaining: 0, updatedAt: new Date().toISOString() } });
+        processLock.assertOwner();
+      }
       const recovered = manifest.imageGeneration?.status === "running"
         ? persist(false)
-        : { manifest, remaining };
+        : { manifest: staleCoverage ? read() : manifest, remaining };
       return { ...recovered, generatedCount: 0, appliedCount: 0, errors, warning: remaining ? `섹션 이미지 ${remaining}장 미완료.` : null };
     }
     if (requested > 0) {
@@ -235,7 +280,8 @@ export async function repairBrandPostImages(options: {
       try {
         const results = await dependencies.generate({ manifest, productName: options.productName || manifest.title,
           sourceImageUrls: options.sourceImageUrls, requests, onResult: accept, signal: controller.signal,
-          sourceOnly: options.sourceOnly });
+          sourceOnly: options.sourceOnly, canonicalSourceOnly: options.canonicalSourceOnly, completedReviewOnly: options.completedReviewOnly,
+          forceSourceRefresh: options.forceSourceRefresh });
         for (const result of results) await accept(result);
         for (const request of requests) {
           if (!seen.has(request.requestId)) errors.push(`${request.sectionId || "대표 이미지"}: 생성 결과가 반환되지 않았습니다.`);

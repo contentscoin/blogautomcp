@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
+import ts from "typescript";
 import { allowsOriginalShoppingScene } from "../src/lib/brand-post-image-evidence";
 import { preserveProductPhotoSource } from "./lib/product-photo-provenance";
 let fixtureRoot: string | undefined;
@@ -18,6 +19,22 @@ async function main() {
     path.join(projectRoot, "src", "app", "api", "brandlinks", "[id]", "draft", "route.ts"),
     "utf8"
   );
+  const draftRouteAst = ts.createSourceFile("draft/route.ts", draftRouteSource, ts.ScriptTarget.Latest, true);
+  const imageScheduler = draftRouteAst.statements.find((node): node is ts.FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) && node.name?.text === "scheduleSectionImageRepair");
+  assert.ok(imageScheduler?.body, "이미지 분리 실행 검사는 실제 scheduler 함수 범위에서 수행해야 합니다.");
+  const imageSchedulerSource = imageScheduler.getText(draftRouteAst);
+  const detachedImageStart = imageScheduler.body.statements.find((node): node is ts.ExpressionStatement =>
+    ts.isExpressionStatement(node) && ts.isVoidExpression(node.expression));
+  const browserImageGuard = imageScheduler.body.statements.find((node): node is ts.IfStatement =>
+    ts.isIfStatement(node) && node.expression.getText(draftRouteAst) ===
+      "!canFillFromVerifiedShoppingSources && !isChatGptBrowserAutomationEnabled()");
+  let schedulerAwaitsImages = false;
+  const inspectScheduler = (node: ts.Node) => {
+    if (ts.isAwaitExpression(node)) schedulerAwaitsImages = true;
+    ts.forEachChild(node, inspectScheduler);
+  };
+  inspectScheduler(imageScheduler);
   const publishRouteSource = fs.readFileSync(
     path.join(projectRoot, "src", "app", "api", "brandlinks", "[id]", "publish", "route.ts"),
     "utf8",
@@ -297,20 +314,20 @@ async function main() {
     "명시적 생성 요청은 원본 출처를 보존하며 꽉 찬 슬롯에서는 지정한 원본을 교체할 수 있어야 합니다.",
   );
   assert.equal(
-    draftRouteSource.includes("scheduleSectionImageRepair") &&
-      draftRouteSource.includes("void repairBrandPostImages({ brandLinkId: options.brandLinkId, productName: options.productName,") &&
-      draftRouteSource.includes("sourceOnly: options.sourceOnly") &&
-      !draftRouteSource.includes("await repairBrandPostImages(") &&
+    Boolean(detachedImageStart) && !schedulerAwaitsImages &&
+      imageSchedulerSource.includes("const run = () => repairBrandPostImages(") &&
+      imageSchedulerSource.includes("sourceOnly: options.sourceOnly") &&
+      detachedImageStart!.getText(draftRouteAst).includes("options.sourceOnly ? trackScheduledSourceImageRepair(options.brandLinkId, run,") &&
+      detachedImageStart!.getText(draftRouteAst).includes(": run())") &&
       !draftRouteSource.includes("autoRepairSectionImages"),
     true,
     "초안 응답은 섹션 이미지 배치를 기다리지 않아야 합니다(분리 실행).",
   );
   assert.equal(
     draftRouteSource.includes('draftRuntimePolicy.BRAND_POST_AUTO_SECTION_IMAGES === "true"') &&
-      draftRouteSource.includes("if (!isAutoSectionImagesEnabled())") &&
-      draftRouteSource.includes("canFillFromVerifiedShoppingSources") &&
-      draftRouteSource.includes("!canFillFromVerifiedShoppingSources && !isChatGptBrowserAutomationEnabled()") &&
-      draftRouteSource.indexOf("if (!canFillFromVerifiedShoppingSources") < draftRouteSource.indexOf("void repairBrandPostImages("),
+      imageSchedulerSource.includes("if (!isAutoSectionImagesEnabled())") &&
+      Boolean(browserImageGuard && detachedImageStart &&
+        browserImageGuard.getStart(draftRouteAst) < detachedImageStart.getStart(draftRouteAst)),
     true,
     "쇼핑 원본 우선 배정은 브라우저 없이 예약하고, 실제 생성이 필요한 정책만 브라우저를 선검사해야 합니다.",
   );

@@ -7,6 +7,7 @@ import { buildPreparedDraftView } from "../src/lib/draft-context-view";
 import { formatWritingStructureGuide } from "./lib/writing-structure-guide";
 import { SHOPPING_POST_STRATEGY } from "../src/lib/shopping-post-strategy";
 import { getAdaptiveEditorialProfile, formatAdaptiveEditorialHarnessForPrompt } from "./lib/adaptive-editorial-harness";
+import { EDITORIAL_TEMPLATES, formatEditorialSubstanceGuide, formatEditorialTemplate } from "./lib/editorial-templates";
 import { renderSystemPrompt } from "./lib/post-spec/generate";
 import type { PostSpec } from "./lib/post-spec/types";
 import {
@@ -58,6 +59,22 @@ for (const kind of ["SHOPPING", "TRAVEL"] as const) {
   assert.match(specPrompt, /추가 테스트 규칙/u);
   assert.doesNotMatch(specPrompt, /까지 한 문장으로 잇습니다|개인 검토 소감.*허용|널리 알려진 여행지 정보/u);
   const mandatory = formatWritingPromptContract(contract);
+  for (const id of Object.keys(EDITORIAL_TEMPLATES) as Array<keyof typeof EDITORIAL_TEMPLATES>) {
+    if (EDITORIAL_TEMPLATES[id].kind !== kind) continue;
+    const proseGuide = formatEditorialSubstanceGuide(id);
+    assert.ok(formatEditorialTemplate(kind, id).includes(proseGuide));
+    assert.match(proseGuide, /소제목을 본문 첫 줄에 복사하지/u);
+    assert.ok(proseGuide.length < 600, "Template lens stays bounded so evidence remains in compact writer prompts");
+    const minimalProseGuide = formatEditorialSubstanceGuide(id, true);
+    assert.ok(minimalProseGuide.length <= 120);
+    assert.ok(formatEditorialTemplate(kind, id, { minimal: true }).includes(minimalProseGuide));
+    if (kind === "SHOPPING") {
+      assert.match(proseGuide, /후기 원문이 없으면.*절을 만들지/u);
+      assert.match(proseGuide, /미생성 장면을 묘사하지/u);
+      assert.match(proseGuide, /중요한 미확인 조건은 관련 절 한 곳/u);
+      assert.doesNotMatch(proseGuide, /쿠첸|달바|아토케어|400g/u, "incident product facts are not reusable template instructions");
+    }
+  }
   assert.ok(guide.length < 1800, "Style guidance must leave space for evidence");
   assert.ok(mandatory.includes(guide));
   assert.ok(mandatory.indexOf(guide) < mandatory.indexOf("[사용자 초안 메모"));

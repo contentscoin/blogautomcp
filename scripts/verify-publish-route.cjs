@@ -1,4 +1,5 @@
 // Offline route integration: all filesystem, process and database mutations mocked.
+/* eslint-disable @typescript-eslint/no-require-imports -- CommonJS VM regression harness. */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
@@ -73,6 +74,7 @@ async function main() {
   // Execute only the actual PATCH declaration with injected collaborators.
   const draftSource = ts.createSourceFile('draft.ts', fs.readFileSync('src/app/api/brandlinks/[id]/draft/route.ts', 'utf8'), ts.ScriptTarget.Latest, true);
   const patch = draftSource.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'PATCH');
+  const completion = draftSource.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'approvePackageAfterCurrentValidation');
   const patchModule = { exports: {} };
   let approvals = 0, revalidations = 0, claimCount = 1, approvalThrows = false;
   const approveUpdates = [];
@@ -82,10 +84,11 @@ async function main() {
   class PublishImageAuditError extends Error {
     constructor(message) { super(message); this.audit = { failures: [] }; }
   }
-  vm.runInNewContext(ts.transpileModule(patch.getText(draftSource), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText, {
+  vm.runInNewContext(ts.transpileModule(completion.getText(draftSource) + '\n' + patch.getText(draftSource), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText, {
     module: patchModule, exports: patchModule.exports,
     requireAdminApiKey: () => null, isBrandPostImageRepairActive: () => false,
     NextResponse: mocks['next/server'].NextResponse, classifyLocalFailure: () => 'FAILED',
+    codexDraftStructuredFailureCode: () => null,
     prisma: { brandLink: { findUnique: async () => ({ status }), updateMany: async value => { approveUpdates.push(value); return { count: claimCount }; } } },
     SavedTextRevalidationError,
     PublishImageAuditError,

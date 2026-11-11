@@ -2,10 +2,12 @@ export interface RemoteProductReferenceContext {
   referenceImagePaths: string[];
   referenceHashes: string[];
   prompt: string;
+  supportingReferences?: Array<{ path: string; sha256: string; purpose: "geometry" | "intrinsic-label" }>;
+  anchorPath?: string;
 }
 
 export interface RemoteProductReferenceImage {
-  role: "product-identity" | "approved-scene-continuity";
+  role: "product-identity" | "product-geometry" | "product-intrinsic-label" | "approved-scene-continuity";
   sha256: string;
   url: string;
   base64: string;
@@ -46,15 +48,26 @@ export async function attachRemoteProductReferenceInputs(
         prepared.push({ ...slot, generationRole: "verified-source-or-information-card", referenceReady: false, referenceImages: [], referenceHashes: [], imagePrompt: null });
         continue;
       }
-      if (!context.referenceImagePaths.length || context.referenceImagePaths.length > 2 ||
+      if (!context.referenceImagePaths.length || context.referenceImagePaths.length > 3 ||
           context.referenceImagePaths.length !== context.referenceHashes.length || new Set(context.referenceHashes).size !== context.referenceHashes.length ||
           !context.referenceHashes.every(hash => /^[a-f0-9]{64}$/u.test(hash)) || !context.prompt.trim()) {
         throw new Error("PRODUCT_REFERENCE_REQUIRED");
       }
+      const supports = context.supportingReferences;
+      if (supports !== undefined) {
+        if (!Array.isArray(supports) || supports.length > 2 || supports.some(reference =>
+          !reference || typeof reference.path !== "string" || !["geometry", "intrinsic-label"].includes(reference.purpose) ||
+          !/^[a-f0-9]{64}$/u.test(reference.sha256))) throw new Error("PRODUCT_REFERENCE_REQUIRED");
+        const expectedPaths = [context.referenceImagePaths[0], ...supports.map(reference => reference.path), ...(context.anchorPath ? [context.anchorPath] : [])];
+        if (JSON.stringify(expectedPaths) !== JSON.stringify(context.referenceImagePaths) ||
+            supports.some((reference, index) => reference.sha256 !== context.referenceHashes[index + 1])) throw new Error("PRODUCT_REFERENCE_CHANGED");
+      } else if (context.referenceImagePaths.length > 2) throw new Error("PRODUCT_REFERENCE_REQUIRED");
       const inputs = await Promise.all(context.referenceImagePaths.map(async (file, index) => {
         const url = await upload(file);
         if (!url || !/^https:\/\//u.test(url)) throw new Error("PRODUCT_REFERENCE_UPLOAD_FAILED");
-        const metadata = { role: index === 0 ? "product-identity" as const : "approved-scene-continuity" as const, url, sha256: context.referenceHashes[index] };
+        const role: RemoteProductReferenceImage["role"] = index === 0 ? "product-identity" : supports?.[index - 1]?.purpose === "geometry"
+          ? "product-geometry" : supports?.[index - 1]?.purpose === "intrinsic-label" ? "product-intrinsic-label" : "approved-scene-continuity";
+        const metadata = { role, url, sha256: context.referenceHashes[index] };
         if (!deps.readImage) return { metadata };
         let pending = pixels.get(`${file}:${metadata.sha256}`);
         if (!pending) {
