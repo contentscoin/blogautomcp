@@ -596,3 +596,23 @@ test('selected materials need revision, unique IDs, scheduled date and write sco
     { ...args, confirmed: false },
   ]) assert.equal((await call('owner', 'mcp:write', 'materials_publish', changed)).result.structuredContent.code, 'INVALID_ARGUMENT');
 });
+
+test('the core writing flow leads the tool list and the server instructions', async () => {
+  const call = async (method) => (await (await route.handleMcpRequest(new Request('https://example.test/api/mcp', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params: method === 'initialize' ? { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '1' } } : {} }),
+  }), 'owner', 'mcp:read mcp:write')).json()).result;
+  const tools = (await call('tools/list')).tools;
+  const core = ['agent_get_status', 'brandconnect_sync_products', 'brandconnect_list_products', 'materials_prepare', 'materials_list', 'materials_publish', 'job_get'];
+  assert.deepEqual(tools.slice(0, core.length).map(tool => tool.name), core);
+  // Every other tool is still advertised for existing conversations, in its defined order.
+  assert.equal(new Set(tools.map(tool => tool.name)).size, tools.length);
+  for (const name of ['post_submit_draft', 'post_revise_draft', 'post_publish', 'job_cancel', 'bug_report_create']) assert.ok(tools.some(tool => tool.name === name), name);
+  const instructions = (await call('initialize')).instructions;
+  const first = Array.isArray(instructions) ? instructions[0] : String(instructions);
+  assert.match(first, /\[기본 흐름\]/u);
+  for (const name of core) assert.match(first, new RegExp(name, 'u'));
+  assert.match(first, /diagnosis\.message/u);
+  assert.match(first, /advisory/u);
+  assert.match(first, /권고만으로 원고를 다시 쓰거나 다시 제출하지 마세요/u);
+});
