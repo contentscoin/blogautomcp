@@ -207,7 +207,7 @@ async function main() {
     for (const mode of ["typed-error", "unfilled-conflict"] as const) {
       const target = { request: { requestId: "original", sectionId: "original" }, sectionId: "original", role: "body",
         sectionTitle: "상품 외형", imageIntent: "판매자 원본 상품 외형", imageSource: "seller-original", bodyExcerpt: "확인된 상품 정보" };
-      const context = vm.createContext({ exports: {}, fs, path, sourceReviewFailureForSlot,
+      const context = vm.createContext({ exports: {}, fs, path, sourceReviewFailureForSlot, shoppingOriginalPhotoLimit: () => 1,
         resolveBrandPostImageSlots: (_manifest: unknown, requests: unknown[]) => requests, resolveTarget: () => target,
         normalizePackageImageAssets: () => [], getUsedShoppingProductSources: () => [], readProductPhotoSource: () => null,
         getBrandPostPackageDir: () => fixtureRoot, readSavedProductSourceCandidates: () => [candidate],

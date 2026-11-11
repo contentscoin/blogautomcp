@@ -19,7 +19,7 @@ async function main() {
   assert(begin > 0 && end > begin);
   const actualBlock = ts.transpileModule(source.slice(begin, end), { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
   const evaluate = new Function("env", `const {connectKind, structuredProduct, sanitizedFeatures, page, revealProductDetailImages,
-    collectProductImageUrlsFromPage, createSellerSourceReadBudget, sanitizeText, isolateSellerEvidenceText,
+    collectProductImageUrlsFromPage, createSellerSourceReadBudget, sanitizeText, isolateSellerEvidenceText, productCard = null,
     isCandidateProductImageUrl, preserveSellerDetailSourceUrls, SELLER_SOURCE_IMAGE_LIMIT, console}=env;
     return (async()=>{${actualBlock}\nreturn {allImageUrls,sanitizedFeatures,timedOut:sellerReadBudget.timedOut};})();`);
   const first = "https://shop-phinf.pstatic.net/20260101/a.jpg", second = "https://shop-phinf.pstatic.net/20260101/b.jpg";
