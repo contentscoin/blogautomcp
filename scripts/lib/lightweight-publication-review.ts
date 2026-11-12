@@ -119,55 +119,63 @@ export interface LightweightPublicationDetailedSlot {
  * still validate exact publication quotations, pixel/source bindings and the
  * complete identity/option evidence before using this derived conjunction. */
 export function lightweightPublicationDetailedRows(answer: string, slots: readonly LightweightPublicationDetailedSlot[]): Array<Record<string, unknown> | null> {
-  const invalid = () => slots.map(() => null);
+  return lightweightPublicationDetailedRowsWithIssues(answer, slots).rows;
+}
+
+/** Same parser; issues[i] names the first failed rule for a null row. */
+export function lightweightPublicationDetailedRowsWithIssues(answer: string, slots: readonly LightweightPublicationDetailedSlot[]):
+    { rows: Array<Record<string, unknown> | null>; issues: Array<string | null> } {
+  const invalid = (issue: string) => ({ rows: slots.map(() => null), issues: slots.map(() => issue) });
+  const issues: Array<string | null> = slots.map(() => null);
   let payload: Record<string, unknown> | null;
   try { payload = object(JSON.parse(answer.trim().replace(/^```(?:json)?\s*|\s*```$/gu, ""))); }
-  catch { return invalid(); }
+  catch { return invalid("response is not valid JSON"); }
   if (!slots.length || !payload || !exactKeys(payload, ["contractVersion", "reviews"]) ||
       payload.contractVersion !== LIGHTWEIGHT_PUBLICATION_DETAILED_CONTRACT || !Array.isArray(payload.reviews) ||
-      payload.reviews.length !== slots.length) return invalid();
+      payload.reviews.length !== slots.length) return invalid("response envelope, contractVersion or review count is wrong");
   const rows = payload.reviews.map(object);
   if (rows.some(row => !row || !Number.isInteger(row.index) || Number(row.index) < 1 || Number(row.index) > slots.length) ||
-      new Set(rows.map(row => row?.index)).size !== slots.length) return invalid();
-  return slots.map((slot, index) => {
+      new Set(rows.map(row => row?.index)).size !== slots.length) return invalid("review indexes are missing, duplicate or out of range");
+  const parsed = slots.map((slot, index) => {
+    const bad = (issue: string) => { issues[index] = issue; return null; };
     const row = rows.find(value => value?.index === index + 1)!;
     if (!exactKeys(row, ["index", "reason", "visibleIdentityEvidence", "optionConflictWitness", "photoClaimObjection", "referenceComparison", "visibleAddedText",
       ...detailBooleanKeys, "reviewClass"]) || !nonempty(row.reason) || !detailBooleanKeys.every(key => typeof row[key] === "boolean") ||
-      !["product-photo", "feature-evidence"].includes(String(row.reviewClass))) return null;
+      !["product-photo", "feature-evidence"].includes(String(row.reviewClass))) return bad("row fields, reason, booleans or reviewClass are missing or invalid");
     const added = object(row.visibleAddedText);
     if (!added || !exactKeys(added, ["headline", "otherAddedText"]) || typeof added.headline !== "string" ||
-        added.headline !== "" && !nonempty(added.headline) || !Array.isArray(added.otherAddedText) || !added.otherAddedText.every(nonempty)) return null;
+        added.headline !== "" && !nonempty(added.headline) || !Array.isArray(added.otherAddedText) || !added.otherAddedText.every(nonempty)) return bad("visibleAddedText is missing or invalid");
     const headline = added.headline, otherAddedText = added.otherAddedText;
-    if (slot.role === "thumbnail" && headline === "" && row.thumbnailHeadlineLegible === true) return null;
+    if (slot.role === "thumbnail" && headline === "" && row.thumbnailHeadlineLegible === true) return bad("thumbnail headline is empty while thumbnailHeadlineLegible=true");
     const literalKey = (text: string) => text.normalize("NFKC").replace(/\s+/gu, "").toLowerCase();
     if (literalKey(headline) === literalKey(LIGHTWEIGHT_UNREADABLE_ADDED_TEXT) || otherAddedText.some(text =>
-      literalKey(text) === literalKey(LIGHTWEIGHT_UNREADABLE_ADDED_TEXT) || headline !== "" && literalKey(text) === literalKey(headline))) return null;
+      literalKey(text) === literalKey(LIGHTWEIGHT_UNREADABLE_ADDED_TEXT) || headline !== "" && literalKey(text) === literalKey(headline))) return bad("unreadable sentinel used, or headline repeated in otherAddedText");
     const textPolicyMatches = otherAddedText.length === 0 && (slot.role === "thumbnail" || headline === "");
-    if (lightweightPublicationReferenceIssue(row.referenceComparison, slot.referenceContext, row.identityMatches, slot.availableCanonicalReferences)) return null;
+    if (lightweightPublicationReferenceIssue(row.referenceComparison, slot.referenceContext, row.identityMatches, slot.availableCanonicalReferences)) return bad("referenceComparison does not match the slot reference context");
     const identity = object(row.visibleIdentityEvidence), claim = object(row.photoClaimObjection), option = object(row.optionConflictWitness);
     if (!identity || !claim || !option || !exactKeys(identity, ["basis", "landmarks", "conflict"]) || !Array.isArray(identity.landmarks) ||
         !exactKeys(claim, ["origin", "sourceIndex", "quote", "scope", "conflict"]) ||
-        !exactKeys(option, ["origin", "quote", "visibleAlternatives"])) return null;
+        !exactKeys(option, ["origin", "quote", "visibleAlternatives"])) return bad("visibleIdentityEvidence/photoClaimObjection/optionConflictWitness fields are invalid");
     const landmarks = identity.landmarks.map(object);
     if (landmarks.some(landmark => !landmark || !exactKeys(landmark, ["part", "referenceObservation", "candidateObservation"]) ||
         ![landmark.part, landmark.referenceObservation, landmark.candidateObservation].every(nonempty)) ||
-        new Set(landmarks.map(landmark => String(landmark?.part).normalize("NFKC").trim().toLowerCase())).size !== landmarks.length) return null;
+        new Set(landmarks.map(landmark => String(landmark?.part).normalize("NFKC").trim().toLowerCase())).size !== landmarks.length) return bad("identity landmarks are incomplete or duplicate");
     if (row.identityMatches === true ? identity.basis !== "observed-correspondence" || identity.conflict !== ""
-      : !["concrete-conflict", "insufficient-visible-structure"].includes(String(identity.basis)) || !nonempty(identity.conflict)) return null;
-    if (row.identityMatches === true && landmarks.length < 2 || identity.basis === "concrete-conflict" && !landmarks.length) return null;
+      : !["concrete-conflict", "insufficient-visible-structure"].includes(String(identity.basis)) || !nonempty(identity.conflict)) return bad("identity basis/conflict disagrees with identityMatches");
+    if (row.identityMatches === true && landmarks.length < 2 || identity.basis === "concrete-conflict" && !landmarks.length) return bad("identityMatches=true needs at least two landmarks, or concrete-conflict needs one");
     const comparison = object(row.referenceComparison);
     if (comparison && (identity.basis === "insufficient-visible-structure" ? comparison.objectionKind !== "unresolved"
-      : identity.basis === "concrete-conflict" && comparison.objectionKind === "unresolved")) return null;
+      : identity.basis === "concrete-conflict" && comparison.objectionKind === "unresolved")) return bad("identity basis disagrees with referenceComparison.objectionKind");
     if (!["none", "section-title", "section-body", "thumbnail-headline"].includes(String(claim.origin)) ||
         !["none", "pictured-appearance", "quantity", "complete-set", "performance", "result"].includes(String(claim.scope)) ||
-        claim.sourceIndex !== null && (!Number.isInteger(claim.sourceIndex) || Number(claim.sourceIndex) < 0)) return null;
+        claim.sourceIndex !== null && (!Number.isInteger(claim.sourceIndex) || Number(claim.sourceIndex) < 0)) return bad("photoClaimObjection origin/scope/sourceIndex is invalid");
     if (row.photoClaimMatches === true ? claim.origin !== "none" || claim.sourceIndex !== null || claim.quote !== "" || claim.scope !== "none" || claim.conflict !== ""
-      : claim.origin === "none" || claim.scope === "none" || !nonempty(claim.quote) || !nonempty(claim.conflict)) return null;
+      : claim.origin === "none" || claim.scope === "none" || !nonempty(claim.quote) || !nonempty(claim.conflict)) return bad("photoClaimObjection disagrees with photoClaimMatches");
     if (!["none", "confirmed-selection", "published-purchase-bundle", "published-named-comparison"].includes(String(option.origin)) ||
         !Array.isArray(option.visibleAlternatives) || !option.visibleAlternatives.every(nonempty) ||
-        new Set(option.visibleAlternatives.map(value => value.normalize("NFKC").trim().toLowerCase())).size !== option.visibleAlternatives.length) return null;
+        new Set(option.visibleAlternatives.map(value => value.normalize("NFKC").trim().toLowerCase())).size !== option.visibleAlternatives.length) return bad("optionConflictWitness origin or visibleAlternatives is invalid");
     if (row.mixedOptions === false ? option.origin !== "none" || option.quote !== "" || !Array.isArray(option.visibleAlternatives) || option.visibleAlternatives.length !== 0
-      : option.origin === "none" || !nonempty(option.quote) || !Array.isArray(option.visibleAlternatives) || option.visibleAlternatives.length < 2) return null;
+      : option.origin === "none" || !nonempty(option.quote) || !Array.isArray(option.visibleAlternatives) || option.visibleAlternatives.length < 2) return bad("optionConflictWitness disagrees with mixedOptions");
     const comparisonAllowed = slot.role !== "thumbnail" && row.explicitNamedComparison === true && row.optionsClearlyLabeled === true;
     const accepted = row.identityMatches === true && row.photoClaimMatches === true && row.notice === false &&
       row.singlePhotograph === true && row.noGraphicLayout === true && textPolicyMatches &&
@@ -175,6 +183,7 @@ export function lightweightPublicationDetailedRows(answer: string, slots: readon
       (row.reviewClass !== "product-photo" || slot.allowProductPhoto);
     return { ...row, textPolicyMatches, accepted };
   });
+  return { rows: parsed, issues };
 }
 
 /** No string booleans, inferred indexes, or favorable coercions in the native

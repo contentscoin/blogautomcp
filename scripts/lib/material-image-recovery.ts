@@ -151,7 +151,7 @@ export async function runRecordedImageRecovery<T>(id: string, stage: ImageRecove
   const originalSourceScope = stage === "repair-rejected-original" && options?.originalSectionId
     ? readSellerOriginalRecoveryScope(id, options.originalSectionId) : undefined;
   if (stage === "repair-rejected-original" && (!baseInput || !validOriginalRecoveryScope(originalSourceScope)))
-    throw Object.assign(new Error("현재 원본의 서명된 본문·사진 검수 근거를 확인하지 못했습니다. 원고·사진을 보존했으며 원본 재배정은 실행하지 않았습니다."), { code: "IMAGE_RESUME_REQUIRED" });
+    throw Object.assign(new Error("현재 원본의 서명된 본문·사진 검수 근거를 확인하지 못했습니다. 원고·사진을 보존했으며 원본 재배정은 실행하지 않았습니다."), { code: "IMAGE_RESUME_REQUIRED", recoveryNotExecuted: true });
   let completedHeroReviewBinding: string | undefined;
   if (stage === "review-completed-hero") {
     if (!baseInput) return { attempted: false };
@@ -176,12 +176,12 @@ export async function runRecordedImageRecovery<T>(id: string, stage: ImageRecove
     entries = saved.entries;
   } catch (error) {
     if (stage === "repair-rejected-original" && (error as NodeJS.ErrnoException).code !== "ENOENT")
-      throw Object.assign(new Error("기존 원본 복구 이력을 확인할 수 없습니다. 재배정을 반복하지 않았습니다."), { code: "IMAGE_RESUME_REQUIRED" });
+      throw Object.assign(new Error("기존 원본 복구 이력을 확인할 수 없습니다. 재배정을 반복하지 않았습니다."), { code: "IMAGE_RESUME_REQUIRED", recoveryNotExecuted: true });
   }
   if (originalSourceScope && entries.some(entry => !entry || typeof entry !== "object" ||
     !["running", "complete", "failed"].includes(entry.status) || typeof entry.stage !== "string" ||
     !/^[a-f0-9]{64}$/u.test(entry.input || "") || !Number.isFinite(Date.parse(entry.at))))
-    throw Object.assign(new Error("기존 원본 복구 이력이 불완전합니다. 재배정을 반복하지 않았습니다."), { code: "IMAGE_RESUME_REQUIRED" });
+    throw Object.assign(new Error("기존 원본 복구 이력이 불완전합니다. 재배정을 반복하지 않았습니다."), { code: "IMAGE_RESUME_REQUIRED", recoveryNotExecuted: true });
   if (originalSourceScope && entries.some(entry => entry.stage === "repair-rejected-original" &&
     (!validOriginalRecoveryScope(entry.originalSourceScope) ||
       entry.originalSourceScope.binding === input))) return { attempted: false };

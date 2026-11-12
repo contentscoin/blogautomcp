@@ -382,14 +382,41 @@ async function main() {
     assert.equal(fallbackImageAttempted, true);
 
     const runningEvents: string[] = [];
+    const runningUrls: string[] = [];
     let runningPolls = 0;
     await runMaterialPreparation("travel-running-images", { pause: async () => { runningPolls++; }, call: async (url, method, body) => {
       const action = (body as { action?: string })?.action || method;
       runningEvents.push(action);
+      runningUrls.push(url);
       if (method === "GET" && runningPolls < 2) return { success: true, data: { imageGeneration: { status: "running" }, imageSlots: [] } };
       return { success: true, data: { imageSlots: [], contentQuality: { signals: [] }, approvedAt: runningEvents.includes("approve") ? "yes" : null } };
     } });
     assert(runningPolls >= 2, "material preparation must wait for existing image generation");
+    assert(runningUrls.some(url => url.endsWith("/draft?progressOnly=1")), "image wait must poll the cheap progress endpoint");
+    assert(runningUrls.filter(url => url.endsWith("?progressOnly=1")).length >= 1 && runningUrls.some((url, index) =>
+      index > 0 && url.endsWith("/draft") && runningUrls[index - 1].endsWith("?progressOnly=1")), "full draft must be refetched once after polling");
+
+    for (const second of ["pass", "fail"] as const) {
+      let approves = 0, imagePosts = 0;
+      const invalidMix = Object.assign(new Error("audit"), { code: "PUBLISH_IMAGE_AUDIT_FAILED", errors: ["SEMANTIC_REJECTION: hero", "INVALID_REVIEW: x"],
+        imageAuditFailures: [{ code: "SEMANTIC_REJECTION", sectionId: null }, { code: "INVALID_REVIEW", sectionId: "s2" }] });
+      const run = runMaterialPreparation(`invalid-review-reaudit-${second}`, { pause: async () => {}, call: async (url, method, body) => {
+        const action = (body as { action?: string })?.action;
+        if (url.includes("/images") && method === "POST") imagePosts++;
+        if (action === "approve") { approves++; if (approves === 1 || second === "fail") throw invalidMix; }
+        return { success: true, data: { imageSlots: [], contentQuality: { signals: [] }, approvedAt: approves >= 2 ? "yes" : null } };
+      } });
+      if (second === "pass") { await run; assert.equal(approves, 2, "INVALID_REVIEW must get exactly one fresh audit"); }
+      else { await assert.rejects(run); assert(approves <= 3, "INVALID_REVIEW re-audit must be bounded"); }
+      assert.equal(imagePosts, 0, "re-audit must never request image generation");
+    }
+    {
+      const { runRecordedImageRecovery } = await import("./lib/material-image-recovery");
+      let executed = false;
+      await assert.rejects(runRecordedImageRecovery("missing-original-scope", "repair-rejected-original", async () => { executed = true; }, { originalSectionId: "s1" }),
+        (error: { code?: string; recoveryNotExecuted?: boolean }) => error.code === "IMAGE_RESUME_REQUIRED" && error.recoveryNotExecuted === true);
+      assert.equal(executed, false, "unavailable original repair must not execute and must be marked as fallback-safe");
+    }
     assert(runningEvents.indexOf("GET") < runningEvents.indexOf("recheck"), "recheck must not run while image generation is active");
 
     let imageWaitPolls = 0;
