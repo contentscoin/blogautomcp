@@ -36,6 +36,29 @@ async function main() {
         return JSON.stringify({ productPhoto: true, reason: "complete product" });
       },
     }), /REFERENCE_SCENE_CHANGED/);
+    // Disk verdict cache: survives a fresh module (new process) only for identical bytes + product + purpose.
+    const cacheDir = path.join(root, "verdict-cache");
+    let diskCalls = 0;
+    const diskReview = async () => { diskCalls++; return JSON.stringify({ productPhoto: true, reason: "fixture product visible" }); };
+    assert.deepEqual(await selectVerifiedProductPhotos([paths[13]], "disk cached product", 1, { review: diskReview, verdictCacheDir: cacheDir }), [paths[13]]);
+    assert.equal(diskCalls, 1);
+    assert.equal(fs.readdirSync(cacheDir).filter(name => name.endsWith(".json")).length, 1, "only the parsed verdict is stored");
+    const fresh = (await import(`./lib/product-photo-review.ts?fresh=${Date.now()}`)) as typeof import("./lib/product-photo-review");
+    assert.deepEqual(await fresh.selectVerifiedProductPhotos([paths[13]], "disk cached product", 1, { review: diskReview, verdictCacheDir: cacheDir }), [paths[13]]);
+    assert.equal(diskCalls, 1, "a new process reuses the stored verdict for the same bytes");
+    await fresh.selectVerifiedProductPhotos([paths[13]], "other product", 1, { review: diskReview, verdictCacheDir: cacheDir });
+    await fresh.selectVerifiedProductPhotos([paths[13]], "disk cached product", 1, { review: diskReview, verdictCacheDir: cacheDir, purpose: "generation-reference" });
+    assert.equal(diskCalls, 3, "product name and purpose are part of the disk key");
+    const [cached] = fs.readdirSync(cacheDir).filter(name => name.endsWith(".json")).sort((a, b) =>
+      fs.statSync(path.join(cacheDir, a)).mtimeMs - fs.statSync(path.join(cacheDir, b)).mtimeMs);
+    const row = JSON.parse(fs.readFileSync(path.join(cacheDir, cached), "utf8"));
+    fs.writeFileSync(path.join(cacheDir, cached), JSON.stringify({ ...row, sourceHash: "0".repeat(64) }));
+    const fresh2 = (await import(`./lib/product-photo-review.ts?fresh2=${Date.now()}`)) as typeof import("./lib/product-photo-review");
+    await fresh2.selectVerifiedProductPhotos([paths[13]], "disk cached product", 1, { review: diskReview, verdictCacheDir: cacheDir });
+    assert.equal(diskCalls, 4, "a stored verdict whose source hash does not match the bytes is ignored");
+    const badDir = path.join(root, "bad-cache");
+    await assert.rejects(fresh2.selectVerifiedProductPhotos([paths[13]], "unparsable", 1, { verdictCacheDir: badDir, review: async () => "not json" }));
+    assert.equal(fs.existsSync(badDir) ? fs.readdirSync(badDir).length : 0, 0, "invalid responses are never cached");
     console.log("PASS: reference/publication cache separation, 12/24 bounded candidates, wrong variant and malformed/changed evidence rejected; no live calls");
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }

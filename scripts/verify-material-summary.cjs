@@ -76,6 +76,11 @@ function harness() {
     './brand-post-approval-receipt': receipt,
     './material-preparation-diagnostics': { materialPreparationDiagnostics: () => undefined },
     './material-review-warnings': { readCurrentMaterialReviewWarnings: () => [] },
+    // Stat-keyed like the real cache: this fixture's stat never changes.
+    './file-digest-cache': { cachedSha256File: file => { state.revisionDigestCalls = (state.revisionDigestCalls || 0) + 1;
+      if (!state.revisionDigests) state.revisionDigests = new Map();
+      if (!state.revisionDigests.has(file)) state.revisionDigests.set(file, crypto.createHash('sha256').update(strictFs.readFileSync(file)).digest('hex'));
+      return state.revisionDigests.get(file); } },
   });
   return { id, directory, image, reference, markdown, gallery, root, manifest, state, summary, strict };
 }
@@ -138,8 +143,10 @@ test('summary cannot authorize unchanged-stat tampering; default strict path sti
   assert.equal((await h.summary.getMaterialSummary(h.id)).revision, summary.revision);
   assert.equal(summary.verification.strict, false, 'UI display is explicitly not current-byte proof');
   const changed = h.strict.getMaterial(h.id);
+  // The approval binding still hashes raw bytes, so tampering blocks readiness
+  // even though the selection revision is stat-keyed (file-digest-cache).
   assert.equal(changed.ready, false);
-  assert.notEqual(changed.revision, original.revision);
+  assert.match(changed.blockers.join(' '), /최종 이미지 검사/);
   assert(h.state.synchronousReads > 0, 'default getMaterial never adopts UI summary cache');
 });
 
@@ -215,4 +222,40 @@ test('default repair eligibility reads one target and retains uncertain publicat
   assert.equal(await exported.probe(product.id, job), false);
   assert.equal(state.materialReads.length, 1, 'uncertain submission cannot even reach the image reader');
   assert.equal(state.productQueries, 2);
+});
+
+test('saved-summary blockers carry the stored content/composition failure reasons', async () => {
+  const h = harness();
+  h.manifest.contentQuality = { canPublish: false, score: 40, reason: '상품 고유 리뷰 요소가 부족합니다',
+    blockers: [{ code: 'unsafe', tier: 'safety', reason: '안전 차단 사유' }],
+    qualityFailures: [{ key: 'usefulness', label: '실용성', status: 'fail', notes: ['단점 설명 없음'] }] };
+  h.manifest.composition.qualityReport = { canAutoPublish: false, blockers: ['이미지 부족', '섹션 순서 오류'] };
+  const summary = await h.summary.getMaterialSummary(h.id);
+  assert.equal(summary.ready, false);
+  const text = summary.blockers.join('\n');
+  assert.match(text, /저장된 원고 검사 결과를 확인하세요\. \(안전 차단 사유 \/ 실용성: 단점 설명 없음 \/ 상품 고유 리뷰 요소가 부족합니다\)/);
+  assert.match(text, /저장된 구성 검사 결과를 확인하세요\. \(이미지 부족 \/ 섹션 순서 오류\)/);
+});
+
+test('default rewrite eligibility reads one target and keeps the full failed-candidate rules', async () => {
+  const state = { materialReads: [], findMany: 0, jobs: [] };
+  const product = { id: 'product_0001', productName: 'Fixture', status: 'FAILED', connectKind: 'SHOPPING' };
+  const failed = load('src/lib/material-failed-candidates.ts', {
+    './db': { prisma: { brandLink: { findUnique: async ({ where }) => (where.id === product.id ? product : null),
+      findMany: async () => { state.findMany++; throw new Error('Full material-library scan is forbidden'); } } } },
+    './material-library': { getMaterial: id => { state.materialReads.push(id); return { ready: false, blockers: ['x'] }; } },
+    './material-job-store': { listMaterialJobs: () => state.jobs },
+    './draft-progress': { readDraftProgress: () => null },
+  });
+  state.jobs = [{ jobId: 'old', kind: 'prepare', startedAt: '2026-10-14T00:00:00Z', completedAt: '2026-10-14T00:01:00Z',
+    items: [{ productId: product.id, status: 'failed', error: 'boom' }] }];
+  assert.equal(await failed.isFailedMaterialCandidate(product.id, 'SHOPPING', 'current'), true);
+  assert.deepEqual(state.materialReads, [product.id]);
+  assert.equal(await failed.isFailedMaterialCandidate(product.id, 'TRAVEL', 'current'), false);
+  assert.equal(await failed.isFailedMaterialCandidate('missing_id', 'SHOPPING', 'current'), false);
+  state.jobs.unshift({ jobId: 'uncertain', kind: 'publish', startedAt: '2026-10-15T00:00:00Z',
+    items: [{ productId: product.id, status: 'outcome_unknown', errorCode: 'OUTCOME_UNKNOWN' }] });
+  assert.equal(await failed.isFailedMaterialCandidate(product.id, 'SHOPPING', 'current'), false);
+  assert.equal(state.findMany, 0);
+  assert.match(fs.readFileSync('src/lib/material-job-runner.ts', 'utf8'), /isFailedMaterialCandidate\(id, currentJob\.connectKind, currentJob\.jobId\)/);
 });

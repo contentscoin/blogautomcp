@@ -332,6 +332,8 @@ export function isProductThumbnailCopyCompatible(
   if (productUnderstanding.concept.categoryId === "generic_shopping" &&
       !isCoolerProduct(productUnderstanding.subject.productName) &&
       /보냉|아이스\s*박스|쿨러\s*백/u.test(sanitizeText(`${copy.headline} ${copy.subline} ${copy.cta}`))) return false;
+  if (!/청소기|침구청소|물걸레|흡입력|흡입\s*(?:구|압)/u.test(productUnderstanding.subject.productName || "") &&
+      /흡입|청소/u.test(sanitizeText(`${copy.headline} ${copy.subline} ${copy.cta}`))) return false;
   const conflictPattern = ONTOLOGY_COPY_CONFLICTS[productUnderstanding.lever.thumbnailThemeId];
   if (!conflictPattern) return true;
   return !conflictPattern.test(sanitizeText(`${copy.headline} ${copy.subline} ${copy.cta}`));

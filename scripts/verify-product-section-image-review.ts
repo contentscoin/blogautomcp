@@ -71,6 +71,8 @@ function loadReview(answer: string | ((options: ReviewCall, callIndex: number) =
         }),
       };
       if (name === "node:fs") return fs;
+      if (name === "node:path") return path;
+      if (name === "./app-paths") return { getAppDataDir: () => path.join(os.tmpdir(), "section-image-review-appdata") };
       if (name === "node:crypto") return crypto;
       if (name === "./codex-draft-provider") return {
         runCodexDraft: async (options: ReviewCall) => {

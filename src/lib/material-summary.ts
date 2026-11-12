@@ -78,6 +78,22 @@ async function metadataSignature(manifest: BrandPostPackageManifest, manifestByt
   return { signature: hash.digest("hex"), missingRequiredFiles };
 }
 
+/** Display-only detail: the gate conditions above are unchanged. */
+function withSavedReasons(base: string, reasons: string[]): string {
+  const unique = [...new Set(reasons.map(reason => reason.trim()).filter(Boolean))].slice(0, 3);
+  return unique.length ? `${base} (${unique.join(" / ")})` : base;
+}
+
+function savedContentFailureReasons(quality: BrandPostPackageManifest["contentQuality"]): string[] {
+  if (!quality) return [];
+  return [
+    ...(quality.blockers || []).map(blocker => blocker?.reason || ""),
+    ...(quality.qualityFailures || quality.quality?.categories?.filter(category => category.status === "fail") || [])
+      .map(category => `${category.label || category.key}${category.notes?.[0] ? `: ${category.notes[0]}` : ""}`),
+    quality.reason || "",
+  ];
+}
+
 async function readSummary(productId: string): Promise<MaterialSummary | null> {
   if (!/^[a-zA-Z0-9_-]{8,80}$/u.test(productId)) throw new Error("소재 ID가 올바르지 않습니다.");
   const directory = path.join(getAppDataDir(), "prepared-brand-posts", productId);
@@ -98,9 +114,10 @@ async function readSummary(productId: string): Promise<MaterialSummary | null> {
   if (missingRequiredFiles) blockers.push(`저장된 원고·사진·검사 근거 파일 ${missingRequiredFiles}개를 찾을 수 없습니다. 개별 검사가 필요합니다.`);
   const quality = manifest.contentQuality;
   if (!manifest.approvedAt) blockers.push("저장된 승인 이력이 없습니다. 소재 준비·검사를 완료하세요.");
-  if (!quality || quality.canPublish === false) blockers.push("저장된 원고 검사 결과를 확인하세요.");
-  if (manifest.version !== "brand-post-package/v2" || !manifest.composition.qualityReport.canAutoPublish)
-    blockers.push("저장된 구성 검사 결과를 확인하세요.");
+  if (!quality || quality.canPublish === false) blockers.push(withSavedReasons("저장된 원고 검사 결과를 확인하세요.", savedContentFailureReasons(quality)));
+  if (manifest.version !== "brand-post-package/v2") blockers.push("저장된 구성 검사 결과를 확인하세요. 예전 형식(v1) 소재이므로 소재 준비를 다시 진행하세요.");
+  else if (!manifest.composition.qualityReport.canAutoPublish)
+    blockers.push(withSavedReasons("저장된 구성 검사 결과를 확인하세요.", (manifest.composition.qualityReport.blockers || []).map(String)));
   const generation = getBrandPostImageGenerationState(manifest);
   if (generation?.status === "running") blockers.push("이미지 준비 작업이 진행 중입니다.");
   const imageCount = manifest.version === "brand-post-package/v2"

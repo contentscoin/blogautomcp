@@ -201,8 +201,12 @@ async function main() {
   assert.equal(hasCurrentBrandPostApprovalReceipt(manifest, sourceDir), false, "changed source receipt bytes break historical compatibility");
   const staleHint = structuredClone(historicalAudit); (staleHint.composition.renderNodes[1] as { text: string }).text = "Changed current paragraph";
   nativeCalls = [];
-  assert.equal((await final(staleHint)).receiptReused, false, "a stale internal compatible key cannot authorize changed audit input");
-  assert.equal(nativeCalls.length, 1);
+  const staleResult = await final(staleHint);
+  assert.equal(staleResult.receiptReused, false, "a stale internal compatible key cannot authorize changed audit input");
+  // The malformed row (fixture reference mismatch) gets exactly one retry, then a specific HOLD reason.
+  assert.equal(nativeCalls.length, 2);
+  assert(staleResult.failures.every(row => row.code === "INVALID_REVIEW" && /referenceComparison does not match/u.test(row.reason)),
+    "INVALID_REVIEW names the failed per-row rule");
 
   for (const patch of [
     { identityMatches: false, reason: "Clearly wrong product housing" },
@@ -232,8 +236,17 @@ async function main() {
     JSON.stringify({ reviews: [{ ...good(), identityMatches: false, accepted: true }] })]) {
     respond = async () => answer; nativeCalls = [];
     assert.equal((await final(options())).ok, false);
-    assert.equal(nativeCalls.length, 1, "technical responses fail closed without extra native loops");
+    assert.equal(nativeCalls.length, 2, "technical responses get exactly one malformed-row retry, then fail closed");
   }
+  // A failed native call is retried once; a second failure is reported as a
+  // failed call, never stored as an empty "review".
+  respond = async () => { throw new Error("socket timeout"); }; nativeCalls = [];
+  const transport = await final(options());
+  assert.equal(transport.ok, false); assert.equal(nativeCalls.length, 2, "exactly one retry of a failed review call");
+  assert(transport.failures.length > 0 && transport.failures.every(row => row.code === "INVALID_REVIEW" && /review call failed/u.test(row.reason)));
+  assert(!(transport.lightweightReviews || []).some(review => review.rawResponse === ""), "an empty failed call is not a stored review");
+  let flaky = 0; respond = async () => { if (flaky++ === 0) throw new Error("transient"); return nativeReviewResponse([good()]); }; nativeCalls = [];
+  assert.equal((await final(options())).ok, true, "a transient first failure recovers on the single retry"); assert.equal(nativeCalls.length, 2);
   respond = async () => nativeReviewResponse([{ ...good(), accepted: false }]);
   const inconsistent = await final(options());
   assert(inconsistent.failures.every(row => row.code === "INVALID_REVIEW"), "internally inconsistent final verdict never blacklists healthy pixels as an observed defect");

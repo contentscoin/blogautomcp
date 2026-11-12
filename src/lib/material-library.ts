@@ -5,6 +5,7 @@ import { readBrandPostPackage, getBrandPostPackageDir, evaluateBrandPostPackageR
 import { hasCurrentBrandPostApprovalReceipt } from "./brand-post-approval-receipt";
 import { materialPreparationDiagnostics } from "./material-preparation-diagnostics";
 import { readCurrentMaterialReviewWarnings } from "./material-review-warnings";
+import { cachedSha256File } from "./file-digest-cache";
 
 // Content-addressed selection: changing a file in place also invalidates selection.
 export function materialRevision(manifest: BrandPostPackageManifest): string {
@@ -17,7 +18,9 @@ export function materialRevision(manifest: BrandPostPackageManifest): string {
     ...(manifest.version === "brand-post-package/v2" ? manifest.composition.sections.flatMap(section => section.imagePaths) : [])]);
   for (const file of [...files].sort()) {
     hash.update(file || "missing-path");
-    try { hash.update(fs.readFileSync(file)); } catch { hash.update("missing-file"); }
+    // Stat-keyed digest: overwriting a file changes size/mtime/ctime, so the
+    // revision still changes, but unchanged images are not re-read every call.
+    try { hash.update(cachedSha256File(file)); } catch { hash.update("missing-file"); }
   }
   return hash.digest("hex");
 }

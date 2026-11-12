@@ -50,7 +50,7 @@ import { REFERENCE_PLANE_RULE_EN, REFERENCE_PLANE_POLICY_VERSION, REFERENCE_PLAN
   referencePlaneComparisonIssue, type ReferencePlaneContext } from "./reference-plane-grounding";
 import { LIGHTWEIGHT_PUBLICATION_REVIEW_VERSION, LIGHTWEIGHT_PUBLICATION_REVIEW_RULE,
   LIGHTWEIGHT_PUBLICATION_REFERENCE_SCHEMA, lightweightPublicationReferenceIssue,
-  LIGHTWEIGHT_PUBLICATION_DETAILED_CONTRACT, lightweightPublicationDetailedRows, lightweightPublicationDetailedSchema,
+  LIGHTWEIGHT_PUBLICATION_DETAILED_CONTRACT, lightweightPublicationDetailedRows, lightweightPublicationDetailedRowsWithIssues, lightweightPublicationDetailedSchema,
   lightweightPublicationPolicyFingerprint, lightweightPublicationResponseIndexes, semanticPublicationReviewRequest } from "./lightweight-publication-review";
 
 const NOTICE_PIXELS_RULE = "notice=true ONLY means a shipping, service or seller announcement visible in the attached IMAGE PIXELS, such as a delivery-closure notice, returns/customer-service announcement or seller notice board. It never means AI-generated provenance, an illustrative image intent, the need for AI disclosure, or an adjacentCaption/article disclosure outside the image. Set notice=false for those contexts; they do not turn a product photograph into a notice. If AI disclosure or other explanatory copy is burned into a body photo, reject it using textPolicyMatches/noGraphicLayout, not notice merely because it mentions AI.";
@@ -107,9 +107,15 @@ function photoClaimObjectionIssue(review: Record<string, unknown>, context: Phot
     return "a performance/result photo objection requires explicit photographic proof wording in the same exact quoted unit; adjacency is not proof";
   if (objection.origin === "section-title") return objection.sourceIndex === null && objection.quote === context.sectionTitle
     ? null : "section-title requires sourceIndex=null and the whole exact actual title";
-  return typeof objection.sourceIndex === "number" && Number.isInteger(objection.sourceIndex) && objection.sourceIndex >= 0 &&
-    objection.sourceIndex < context.sectionBody.length && objection.quote === context.sectionBody[objection.sourceIndex]
-    ? null : "section-body requires a valid zero-based sourceIndex and the whole exact actual paragraph";
+  if (typeof objection.sourceIndex === "number" && Number.isInteger(objection.sourceIndex) && objection.sourceIndex >= 0 &&
+    objection.sourceIndex < context.sectionBody.length && objection.quote === context.sectionBody[objection.sourceIndex]) return null;
+  // A verbatim sentence of one paragraph is still a traceable published quote.
+  // It must occur in exactly one claim unit; ambiguous or invented text fails.
+  const quote = objection.quote;
+  if (objection.sourceIndex !== null && !(typeof objection.sourceIndex === "number" && Number.isInteger(objection.sourceIndex)))
+    return "section-body sourceIndex must be an integer or null";
+  return context.sectionBody.filter(unit => unit.includes(quote)).length === 1
+    ? null : "section-body requires a valid zero-based sourceIndex and the whole exact actual paragraph, or a verbatim sentence found in exactly one paragraph";
 }
 /** Strict source tracing only; never changes a verdict or certifies semantic
  * correctness. Thumbnail text has no canonical OCR literal to compare here. */
@@ -191,6 +197,9 @@ export interface PublishImageAuditOptions {
   selectedSourceSnapshot?: ProductSnapshot;
   selectedSourceProductId?: string;
   selectedSourceDirectory?: string;
+  /** Composer inputs for the expected photo-thumbnail headline (byte replay). */
+  postTitle?: string;
+  productUnderstanding?: Product9Canvas;
   /** Offline tests only. Production uses the visual draft provider. */
   review?: (options: CodexDraftOptions) => Promise<string>;
   /** 쇼핑 essential 프로필: 판매자 원본 사진의 검수 형식 오류·본문 묘사 불일치는 권고로 남긴다. 미지정은 strict. */
@@ -206,9 +215,10 @@ export const PUBLISH_IMAGE_AUDIT_MAX_BATCH_COUNT = 8;
  * image can never regress the existing transport size. No palette quantization,
  * resize, crop or source-file write; callers retain their reference cache. */
 export async function encodeLosslessAuditSnapshot(bytes: Buffer): Promise<Buffer> {
-  const original = await sharp(bytes, { failOn: "warning" }).rotate().png().toBuffer();
-  const optimized = await sharp(bytes, { failOn: "warning" }).rotate()
-    .png({ compressionLevel: 9, adaptiveFiltering: true, palette: false }).toBuffer();
+  // Decode once; both lossless encodings share the same decoded pixels.
+  const decoded = sharp(bytes, { failOn: "warning" }).rotate();
+  const [original, optimized] = await Promise.all([decoded.clone().png().toBuffer(),
+    decoded.clone().png({ compressionLevel: 9, adaptiveFiltering: true, palette: false }).toBuffer()]);
   return optimized.length < original.length ? optimized : original;
 }
 
@@ -302,6 +312,21 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
     result.failures.push({ nodeIndex, assetPath, code, reason, ...(rejectionScope ? { rejectionScope } : {}) });
   };
   const receiptId = !options.review ? options.brandLinkId : undefined;
+  let thumbnailHeadlineCache: string | undefined;
+  // Same copy inputs the composer used; a miss only falls through to model review.
+  const expectedPhotoThumbnailHeadline = () => thumbnailHeadlineCache ??= (() => {
+    let title = options.postTitle, understanding = options.productUnderstanding;
+    if ((title === undefined || !understanding) && options.brandLinkId && /^[a-zA-Z0-9_-]{8,80}$/u.test(options.brandLinkId)) {
+      try {
+        const manifest = JSON.parse(fs.readFileSync(path.join(getAppDataDir(), "prepared-brand-posts", options.brandLinkId, "manifest.json"), "utf8"));
+        if (manifest?.brandLinkId === options.brandLinkId) {
+          title ??= typeof manifest.title === "string" ? manifest.title : undefined;
+          understanding ??= manifest.productUnderstanding || undefined;
+        }
+      } catch { /* No manifest: product-name-only copy. */ }
+    }
+    return buildProductThumbnailCopy(title || "", options.productName, "SHOPPING", understanding).headline;
+  })();
   // Existing legacy injected fixtures retain their old contract. Explicit
   // lightweight injection exercises the same request/gates without native authority.
   const lightweight = options.reviewMode === "lightweight" || (!options.review && options.reviewMode !== "strict");
@@ -947,7 +972,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
       const primaryPath = candidate.referenceScene?.referencePath || candidate.canonicalPhotoSource?.sourcePath || gallerySnapshots.find(reference => reference.sha256 === candidate.sha256)?.path;
       if (primaryPath) {
         const identifierInput: PublicationIdentifierReviewInput = { candidatePath: candidate.assetPath, candidateSha256: candidate.sha256,
-          ...(candidate.canonicalPhotoSource && candidate.role === "thumbnail" ? {photoThumbnailHeadline:buildProductThumbnailCopy("",options.productName).headline} : {}),
+          ...(candidate.canonicalPhotoSource && candidate.role === "thumbnail" ? {photoThumbnailHeadline:expectedPhotoThumbnailHeadline()} : {}),
           primaryReference: { path: primaryPath, sha256: primary.referenceSha256 }, canonicalReferences: (identifierReferenceBindings.get(candidate) || gallerySnapshots).map(reference =>
             ({ path: reference.path, sha256: reference.sha256, sourceSnapshotId: reference.sourceSnapshotId })), workspace: root,
           scopeGate: {kind:"final-native-positive/v1",selectedProduct,policyFingerprint:result.policyFingerprint,visibleReview:visible,claimsReview:claims,formatReview:format,
@@ -1041,18 +1066,34 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
         imagePaths: input.imagePaths?.map(file => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")) })).digest("hex");
       const verdictBindings = batch.map(() => callBinding(call));
       const exactRequestBinding = JSON.stringify(call);
-      const response = await review(call).catch(error => {
-        if (lightweight) return "";
-        throw error;
+      // Retry a failed native call once; never record a failed call as a review.
+      let callError: unknown = null;
+      const response = await review(call).catch(async error => {
+        if (!lightweight) throw error;
+        return review(call).catch(second => { callError = second; return ""; });
       });
+      if (callError !== null) {
+        if (JSON.stringify(call) !== exactRequestBinding || !await inputsStillBound(batch)) { failChangedBatch(batch); continue; }
+        for (const candidate of batch) fail(candidate.nodeIndex, candidate.assetPath, "INVALID_REVIEW",
+          `Visual review call failed after one retry: ${String((callError as Error)?.message || callError).slice(0, 300)}`);
+        continue;
+      }
       if (JSON.stringify(call) !== exactRequestBinding) { failChangedBatch(batch); continue; }
       const verdictLayout = referenceLayout(batch, gallery), verdictContexts = verdictLayout.contexts;
-      let verdicts = detailedLightweight
-        ? parseVisualReviews(JSON.stringify({ reviews: lightweightPublicationDetailedRows(response, batch.map((candidate, index) => ({
-          role: candidate.role, allowProductPhoto: candidate.allowProductPhoto, referenceContext: verdictContexts[index],
-          availableCanonicalReferences: verdictLayout.availableCanonicalReferences[index],
-        }))) }), batch.length)
-        : parseVisualReviews(response, batch.length);
+      // One parser for first and retry responses; per-row issues explain nulls.
+      const parseRows = (answer: string, rows: typeof batch, layout: ReturnType<typeof referenceLayout>) => {
+        if (!detailedLightweight) {
+          const parsed = parseVisualReviews(answer, rows.length), validRaw = lightweight ? lightweightPublicationResponseIndexes(answer, rows.length) : null;
+          return { verdicts: validRaw ? parsed.map((row, index) => validRaw.has(index + 1) ? row : null) : parsed, issues: rows.map(() => null as string | null) };
+        }
+        const detailed = lightweightPublicationDetailedRowsWithIssues(answer, rows.map((candidate, index) => ({
+          role: candidate.role, allowProductPhoto: candidate.allowProductPhoto, referenceContext: layout.contexts[index],
+          availableCanonicalReferences: layout.availableCanonicalReferences[index] })));
+        return { verdicts: parseVisualReviews(JSON.stringify({ reviews: detailed.rows }), rows.length), issues: detailed.issues };
+      };
+      const firstParse = parseRows(response, batch, verdictLayout);
+      let verdicts = firstParse.verdicts;
+      const rowIssues: Array<string | null> = firstParse.issues.slice();
       if (lightweight) {
         if (!detailedLightweight) {
           const validRawIndexes = lightweightPublicationResponseIndexes(response, batch.length);
@@ -1068,12 +1109,23 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
       if (!await inputsStillBound(batch)) { failChangedBatch(batch); continue; }
       // 형식이 깨진 판정만 한 번 더 묻는다. 두 번째도 깨지면 그 이미지만 실패로 닫는다(fail closed).
       const malformed = batch.flatMap((_, i) => verdicts[i] ? [] : [i]);
-      if (malformed.length > 0 && !lightweight) {
+      if (malformed.length > 0) {
         const retryBatch = malformed.map(i => batch[i]);
         const retryCall = buildCall(retryBatch, gallery, split);
         const retryBinding = callBinding(retryCall);
-        const retried = parseVisualReviews(await review(retryCall).catch(() => ""), retryBatch.length);
-        const retryContexts = referenceLayout(retryBatch, gallery).contexts;
+        const retryLayout = referenceLayout(retryBatch, gallery);
+        let retryFailed: unknown = null;
+        const retryResponse = await review(retryCall).catch(error => { retryFailed = error; return ""; });
+        const retryParse = retryFailed === null ? parseRows(retryResponse, retryBatch, retryLayout) : null;
+        if (lightweight && retryFailed === null) (result.lightweightReviews ??= []).push({ version: LIGHTWEIGHT_PUBLICATION_REVIEW_VERSION,
+          nodeIndexes: retryBatch.map(candidate => candidate.nodeIndex), nativeExecution: !options.review,
+          requestSha256: retryBinding, responseSha256: crypto.createHash("sha256").update(retryResponse).digest("hex"),
+          rawResponse: retryResponse, verdicts: retryParse!.verdicts });
+        const retried = retryParse?.verdicts || retryBatch.map(() => null);
+        const retryContexts = retryLayout.contexts;
+        malformed.forEach((batchIndex, retryIndex) => { rowIssues[batchIndex] = retryFailed !== null
+          ? `retry review call failed: ${String((retryFailed as Error)?.message || retryFailed).slice(0, 200)}`
+          : retryParse!.issues[retryIndex] ?? rowIssues[batchIndex]; });
         if (!await inputsStillBound(batch)) { failChangedBatch(batch); continue; }
         verdicts = verdicts.slice();
         malformed.forEach((batchIndex, retryIndex) => { verdicts[batchIndex] = retried[retryIndex] ?? null; verdictContexts[batchIndex] = retryContexts[retryIndex];
@@ -1086,7 +1138,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
             ...(candidate.thumbnailPhotoSource ? [candidate.thumbnailPhotoSource.referenceSha256] : []),
             ...gallery.map(reference => reference.referenceSha256)])], verdict: row });
         if (!row) {
-          fail(candidate.nodeIndex, candidate.assetPath, "INVALID_REVIEW", "Missing, duplicate, or malformed visual verdict.");
+          fail(candidate.nodeIndex, candidate.assetPath, "INVALID_REVIEW", `Missing, duplicate, or malformed visual verdict.${rowIssues[i] ? ` ${rowIssues[i]}` : ""}`);
           continue;
         }
         const comparisonAllowed = candidate.role !== "thumbnail" && row.explicitNamedComparison === true && row.optionsClearlyLabeled === true;

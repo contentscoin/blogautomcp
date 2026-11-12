@@ -185,6 +185,16 @@ function assertKnownImageOperationResult(result: Pick<Result, "code" | "error" |
   if (unresolved) throw Object.assign(new Error(result.error || result.errors?.join("\n") || result.message ||
     "이미지 작업의 완료를 확인할 수 없습니다. 기존 원고·사진과 요청을 확인한 뒤 재개하세요."), { code: unresolved, errors: result.errors });
 }
+/** A malformed reviewer verdict (INVALID_REVIEW) next to otherwise definitive
+ * rows. One fresh audit of the same pixels may resolve it; it never counts as
+ * a pass and never authorizes generation. */
+export function isInvalidReviewReauditCandidate(error: unknown): boolean {
+  const failure = error as { code?: string; imageAuditFailures?: Array<{ code?: string }> };
+  const rows = failure?.imageAuditFailures;
+  return failure?.code === "PUBLISH_IMAGE_AUDIT_FAILED" && Array.isArray(rows) && rows.length > 0 &&
+    rows.some(row => row?.code === "INVALID_REVIEW") &&
+    rows.every(row => ["INVALID_REVIEW", "SEMANTIC_REJECTION", "LONG_IMAGE"].includes(row?.code || ""));
+}
 function isDefinitivePublishImageFailure(error: unknown): boolean {
   const failure = error as { code?: string; errors?: string[] };
   return failure.code === "PUBLISH_IMAGE_AUDIT_FAILED" && Boolean(failure.errors?.length) &&
@@ -478,10 +488,20 @@ async function runMaterialPreparationOnce(id: string, deps: WorkflowDeps = defau
   }
   const waitForImagesIdle = async () => {
     if (draft.data?.imageGeneration?.recoveryState === "owner-unknown") throw Object.assign(new Error("이전 이미지 작업의 실행 여부를 확인할 수 없습니다. 기존 결과를 확인한 뒤 복구하세요."), { code: "IMAGE_RESUME_REQUIRED" });
+    let polled = false;
     while (draft.data?.imageGeneration?.status === "running") {
       if (draft.data.imageGeneration.recoveryState === "owner-unknown") throw Object.assign(new Error("이전 이미지 작업의 실행 여부를 확인할 수 없습니다. 저장 소재의 이미지 탭에서 기존 결과를 확인한 뒤 복구하세요."), { code: "IMAGE_RESUME_REQUIRED" });
       deps.onStage?.("이미지 준비 대기");
-      check(); await deps.pause(); draft = await deps.call(`${base}/draft`, "GET");
+      check(); await deps.pause();
+      // Poll the cheap progress endpoint; the full preview is rebuilt once after.
+      const progress = await deps.call(`${base}/draft?progressOnly=1`, "GET");
+      if (!progress.data) { draft = progress; break; }
+      draft = { ...draft, data: { ...draft.data, imageGeneration: progress.data.imageGeneration } } as Result;
+      polled = true;
+    }
+    if (polled) {
+      draft = await deps.call(`${base}/draft`, "GET");
+      if (draft.data?.imageGeneration?.recoveryState === "owner-unknown") throw Object.assign(new Error("이전 이미지 작업의 실행 여부를 확인할 수 없습니다. 기존 결과를 확인한 뒤 복구하세요."), { code: "IMAGE_RESUME_REQUIRED" });
     }
   };
   // Validate the saved manuscript before spending time on section images.
@@ -786,6 +806,7 @@ async function runMaterialPreparationOnce(id: string, deps: WorkflowDeps = defau
   let originalPhotoRepairAttempted = false;
   let postOriginalAuditFailure: unknown;
   let confirmedPrintSubsetAttempted = false;
+  let invalidReviewReauditAttempted = false;
   const repairConfirmedPrintSubset = async (error: unknown): Promise<void> => {
     const failure = error as Error & { code?: string; errors?: string[]; imageAuditFailures?: Result["imageAuditFailures"] };
     const findings = failure?.imageAuditFailures;
@@ -834,14 +855,25 @@ async function runMaterialPreparationOnce(id: string, deps: WorkflowDeps = defau
     // canonical provenance; reviewer prose/section IDs cannot authorize it.
     const originalSection = auditedSellerOriginalSection(findings, draft);
     if (originalSection) {
-      if (originalPhotoRepairAttempted) throw error;
+      // Unavailable reassignment (nothing executed) falls back to the generic
+      // routes with the original audit failure; the claim marker/history keep
+      // the reassignment itself from ever being repeated.
+      if (originalPhotoRepairAttempted) return false;
       originalPhotoRepairAttempted = true;
       deps.onStage?.("원고 보존 · 본문과 다른 원본 사진 슬롯만 검증 판매자 사진으로 재배정");
-      const recovered = await runRecordedImageRecovery(id, "repair-rejected-original", () =>
-        claimedCall(`${base}/draft/images`, "POST", { action: "repair_rejected_originals", sectionId: originalSection }), { originalSectionId: originalSection });
-      if (!recovered.attempted) throw Object.assign(new Error("동일 원본·슬롯·본문·상품 근거의 원본 복구 시도가 이미 기록됐거나 완료 여부를 확정할 수 없습니다. 기존 기록과 사진을 보존하고 재배정을 반복하지 않았습니다."), {
-        code: "IMAGE_RESUME_REQUIRED", causeCode: "PUBLISH_IMAGE_AUDIT_FAILED", imageAuditFailures: findings,
-      });
+      let recovered: Awaited<ReturnType<typeof runRecordedImageRecovery<Result>>>;
+      try {
+        recovered = await runRecordedImageRecovery(id, "repair-rejected-original", () =>
+          claimedCall(`${base}/draft/images`, "POST", { action: "repair_rejected_originals", sectionId: originalSection }), { originalSectionId: originalSection });
+      } catch (recoveryError) {
+        if ((recoveryError as { recoveryNotExecuted?: boolean })?.recoveryNotExecuted !== true) throw recoveryError;
+        deps.onStage?.("원본 재배정 불가(미실행) · 기존 사진 보존 · 일반 검수 경로로 진행");
+        return false;
+      }
+      if (!recovered.attempted) {
+        deps.onStage?.("원본 재배정 이미 기록됨 · 반복하지 않고 일반 검수 경로로 진행");
+        return false;
+      }
       const result = recovered.result;
       if (!result?.success || result.generatedCount !== 0 || result.appliedCount !== 1 || result.errors?.length) {
         throw Object.assign(new Error("본문과 맞는 검증 판매자 대체 원본을 확정하지 못했습니다. 기존 원고·사진을 보존했으며 추가 생성하지 않았습니다."), {
@@ -973,7 +1005,16 @@ async function runMaterialPreparationOnce(id: string, deps: WorkflowDeps = defau
   };
   try {
     deps.onStage?.("최종 원고·사진 재검사·승인");
-    await claimedCall(`${base}/draft`, "PATCH", { action: "approve" });
+    try {
+      await claimedCall(`${base}/draft`, "PATCH", { action: "approve" });
+    } catch (firstApproveError) {
+      // One bounded fresh audit for malformed reviewer verdicts. A second
+      // failure (including remaining INVALID_REVIEW) takes the normal route.
+      if (completedHeroPolicyReviewAttempted || invalidReviewReauditAttempted || !isInvalidReviewReauditCandidate(firstApproveError)) throw firstApproveError;
+      invalidReviewReauditAttempted = true;
+      deps.onStage?.("검수 응답 형식 오류 · 동일 사진 1회 재검수");
+      await claimedCall(`${base}/draft`, "PATCH", { action: "approve" });
+    }
   } catch (error) {
     if (completedHeroPolicyReviewAttempted) throw error;
     const descriptionRepaired = await repairAuditedPhotoDescription(error);

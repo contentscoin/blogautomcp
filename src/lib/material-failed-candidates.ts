@@ -81,3 +81,12 @@ export async function listFailedMaterialCandidates(connectKind?: MaterialConnect
   });
   return selectFailedMaterialCandidates(products, listMaterialJobs().filter(job => job.jobId !== excludeJobId), { material, progress: readDraftProgress }, connectKind);
 }
+
+/** Single-product form of listFailedMaterialCandidates: same exclusion rules,
+ * but reads only the target package instead of every saved product. */
+export async function isFailedMaterialCandidate(id: string, connectKind?: MaterialConnectKind, excludeJobId?: string, material = getMaterial): Promise<boolean> {
+  const product = await prisma.brandLink.findUnique({ where: { id },
+    select: { id: true, productName: true, status: true, connectKind: true, postUrl: true, publishedAt: true, scheduledPublishAt: true, errorMessage: true } });
+  if (!product) return false;
+  return selectFailedMaterialCandidates([product], listMaterialJobs().filter(job => job.jobId !== excludeJobId), { material, progress: readDraftProgress }, connectKind).length === 1;
+}

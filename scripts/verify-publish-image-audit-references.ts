@@ -156,10 +156,8 @@ async function main() {
       ["missing", undefined],
       ["null-object", null],
       ["wrong-slot", bodyObjection(publishedContextFixtures[1].body[0])],
-      ["wrong-index", bodyObjection(exactBody, 1)],
       ["fractional-index", bodyObjection(exactBody, 0.5)],
       ["string-index", { ...bodyObjection(exactBody), sourceIndex: "0" }],
-      ["clipped-quote", bodyObjection(exactBody.slice(0, -1))],
       ["decimal-altered", bodyObjection(exactBody.replace("1.65", "65"))],
       ["nfkc-altered", bodyObjection(exactBody.replace("1.65kg", "１.６５ｋｇ"))],
       ["whitespace-altered", bodyObjection(exactBody.replace("무게는 ", "무게는  "))],
@@ -171,6 +169,15 @@ async function main() {
       ["wrong-title", { ...bodyObjection(publishedContextFixtures[1].title), origin: "section-title", sourceIndex: null }],
       ["true-has-objection", bodyObjection(exactBody), true],
     ];
+    // An exact sentence (or the whole paragraph under an off index) of exactly
+    // one claim unit is a traceable quote: the adverse verdict stays adverse.
+    for (const [label, proof] of [["off-index-whole", bodyObjection(exactBody, 1)], ["exact-sentence", bodyObjection(exactBody.slice(0, -1))]] as const) {
+      const options = textFixture([publishedContextFixtures[0]]);
+      options.review = async () => JSON.stringify({ reviews: [{ ...good(1), accepted: false, photoClaimMatches: false,
+        photoClaimObjection: proof, reason: `Traceable sentence objection: ${label}` }] });
+      const blocked = await assertBlocked(options, ["SEMANTIC_REJECTION"]);
+      assert(!blocked.failures.some(row => row.code === "INVALID_REVIEW"), label); checks++;
+    }
     for (const [label, proof, photoClaimMatches = false] of invalidProofs) {
       const options = textFixture([publishedContextFixtures[0]]); let calls = 0;
       options.review = async () => { calls++; return JSON.stringify({ reviews: [{ ...good(1), accepted: photoClaimMatches, photoClaimMatches,
@@ -251,7 +258,8 @@ async function main() {
       }
       return { success: true, data: savedPreview };
     } }), (error: unknown) => (error as { code?: string }).code === "PUBLISH_IMAGE_AUDIT_FAILED");
-    assert.equal(preparationReviewCalls, 1); assert.equal(approvalAttempts, 1); assert.equal(savedPreview.approvedAt, null);
+    // The workflow's single fresh INVALID_REVIEW re-audit; never a generation/text mutation.
+    assert.equal(preparationReviewCalls, 2); assert.equal(approvalAttempts, 2); assert.equal(savedPreview.approvedAt, null);
     assert.equal(imageMutations, 0); assert.equal(textMutations, 0);
     assert.equal(defaultProviderCalls, 0); assert.deepEqual([...finals, ...references].map(hash), unchangedPixels); checks++;
     const mapped = fixture(pairs);
