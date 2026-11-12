@@ -12,7 +12,7 @@ import type { CodexDraftOptions } from "./lib/codex-draft-provider";
 import { REFERENCE_SCENE_CAPTION, REFERENCE_SCENE_REVIEW_CHECKS, REFERENCE_SCENE_STRATEGY_VERSION } from "../src/lib/brand-post-image-evidence";
 
 async function main() {
-  const require = createRequire(import.meta.url), root = fs.mkdtempSync(path.join(os.tmpdir(), "publication-scoped-native-"));
+  const require = createRequire(import.meta.url), root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "publication-scoped-native-")));
   const oldData = process.env.DESKTOP_USER_DATA, oldFetch = globalThis.fetch;
   process.env.DESKTOP_USER_DATA = root; globalThis.fetch = async () => { throw Error("offline fixture attempted network"); };
   const providerPath = require.resolve("./lib/codex-draft-provider"), actualProvider = require(providerPath);

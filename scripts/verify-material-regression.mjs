@@ -1,5 +1,12 @@
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import fs from 'node:fs';
+import os from 'node:os';
+
+// macOS exposes its temp directory through a symlink (/var -> /private/var).
+// Checks that reject symlinked proof paths need the resolved directory.
+const resolvedTmp = fs.realpathSync(os.tmpdir());
+const childEnv = { ...process.env, TMPDIR: resolvedTmp, TMP: resolvedTmp, TEMP: resolvedTmp };
 const require = createRequire(import.meta.url);
 const runner = require.resolve('tsx/cli');
 // Stop at the first failure. No account, provider, publication or paid generation.
@@ -62,7 +69,7 @@ const checks = [
 ];
 for (const check of checks) {
   console.log(`\n[material-regression] ${check}`);
-  const result = spawnSync(process.execPath, [runner, `scripts/${check}`], { stdio: 'inherit', timeout: 120_000 });
+  const result = spawnSync(process.execPath, [runner, `scripts/${check}`], { stdio: 'inherit', timeout: 120_000, env: childEnv });
   if (result.error || result.status !== 0) {
     console.error(`FAILED: ${check}`, result.error?.message || `exit ${result.status}`);
     process.exit(1);

@@ -117,7 +117,7 @@ const THUMBNAIL_THEMES: ThumbnailTheme[] = [
     cta: "장단점 확인",
   },
   {
-    keywords: [/청소기|로봇청소기|침구청소|물걸레|흡입|살균/],
+    keywords: [/청소기|침구청소|물걸레|흡입력|흡입\s*(?:구|압)/],
     headline: "흡입력 체크",
     subline: "공간별 사용 포인트",
     cta: "구매 전 체크",
