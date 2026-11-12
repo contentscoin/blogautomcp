@@ -165,6 +165,23 @@ async function main() {
     fs.writeFileSync(corrupt, "fixture-corrupt-existing-file");
     await assert.rejects(recoverProductPhotoRegion(input, dependencies), /EEXIST/);
     assert.equal(fs.readFileSync(corrupt, "utf8"), "fixture-corrupt-existing-file", "an existing mismatched crop is never overwritten"); tests++;
+    {
+      const capped = path.join(dir, "capped"); fs.mkdirSync(capped);
+      const capFiles = Array.from({ length: 30 }, (_, index) => {
+        const file = path.join(capped, `cap-${index}.png`);
+        fs.writeFileSync(file, Buffer.concat([fs.readFileSync(original), Buffer.from(`cap${index}`)]));
+        return file;
+      });
+      let capRegionCalls = 0, capGates = 0, regionIndex = 0;
+      const capResult = await recoverProductPhotoRegion({ ...input, outputDir: capped, localCandidates: capFiles, sourceImageUrls: [],
+        acceptSourcePhoto: async () => false }, { ...dependencies,
+        review: async () => { capRegionCalls++; return JSON.stringify({ regions: [0, 1, 2].map(() => { const n = regionIndex++ % 20;
+          return { imageIndex: 1, left: 0.01 * n, top: 0.1, right: 0.6 + 0.01 * n, bottom: 0.9 }; }) }); },
+        verify: async (files: string[]) => { capGates++; return files[0]; } });
+      assert.equal(capResult, null);
+      assert.ok(capRegionCalls <= 2, `region recovery is capped at two batches (got ${capRegionCalls})`);
+      assert.ok(capGates <= 4, `crop gate calls are capped (got ${capGates})`); tests++;
+    }
     const gallery = "https://shop-phinf.pstatic.net/gallery.png?type=f40";
     const recommendation = "https://shop-phinf.pstatic.net/other.jpg?type=w860";
     assert.equal(prioritizeImageCandidates([

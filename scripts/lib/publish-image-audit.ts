@@ -112,8 +112,10 @@ function photoClaimObjectionIssue(review: Record<string, unknown>, context: Phot
   // A verbatim sentence of one paragraph is still a traceable published quote.
   // It must occur in exactly one claim unit; ambiguous or invented text fails.
   const quote = objection.quote;
+  if (objection.sourceIndex !== null && !(typeof objection.sourceIndex === "number" && Number.isInteger(objection.sourceIndex)))
+    return "section-body sourceIndex must be an integer or null";
   return context.sectionBody.filter(unit => unit.includes(quote)).length === 1
-    ? null : "section-body requires a verbatim quote found in exactly one actual paragraph (whole paragraph or exact sentence)";
+    ? null : "section-body requires a valid zero-based sourceIndex and the whole exact actual paragraph, or a verbatim sentence found in exactly one paragraph";
 }
 /** Strict source tracing only; never changes a verdict or certifies semantic
  * correctness. Thumbnail text has no canonical OCR literal to compare here. */
@@ -687,7 +689,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
           decisionRole,
           `Selected product: ${JSON.stringify(selectedProduct)}. Product name: ${JSON.stringify(options.productName)}.`,
           `Visible identity selection context: ${JSON.stringify(visibleSelection)}. Catalog facts are listing scope; no colour is inferred as selected from feature ordering or a size-only confirmed label.`,
-          `Each attached image belongs ONLY to its corresponding slot: ${JSON.stringify(batch.map((c, i) => ({ index: i + 1, role: c.role, textPolicy: textTask(c), exactCanonicalSellerOriginal: c.exactCanonicalSellerOriginal, sectionTitle: c.sectionTitle, imageIntent: c.imageIntent, visualContract: c.visualContract, allowProductPhoto: c.allowProductPhoto, ...(c.referenceScene ? { referenceGuidedScene: true, originalComparisonPassed: true, adjacentCaption: c.referenceScene.caption,
+          `Each attached image belongs ONLY to its corresponding slot: ${JSON.stringify(batch.map((c, i) => ({ index: i + 1, role: c.role, textPolicy: textTask(c), exactCanonicalSellerOriginal: c.exactCanonicalSellerOriginal, sectionTitle: c.sectionTitle, sectionBody: c.sectionBody, imageIntent: c.imageIntent, visualContract: c.visualContract, allowProductPhoto: c.allowProductPhoto, ...(c.referenceScene ? { referenceGuidedScene: true, originalComparisonPassed: true, adjacentCaption: c.referenceScene.caption,
             comparisonReferenceImageIndex: referenceIndex(c), referenceSha256: c.referenceScene.referenceSha256, sourceSnapshotId: c.referenceScene.sourceSnapshotId } : {}),
           ...(contexts[i] ? { referencePlaneMap: contexts[i], identityQuestion: lightweight
             ? c.thumbnailPhotoSource
@@ -701,7 +703,7 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
             canonicalOriginal: gallery.some(reference => reference.sha256 === c.thumbnailPhotoSource!.sourceSha256),
             rule: "This exact photo supplied the title composite. A local crop has no asserted parent-crop lineage and is not a canonical seller original or product approval. Independently compare its actual visible product/option with the attached current selected canonical gallery; source receipt or same-package storage never proves identity." } } : {}),
           claimSources: { sectionTitle: { origin: "section-title", sourceIndex: null, text: c.sectionTitle },
-            sectionBody: publicationClaimUnits(c.sectionBody,c.sectionBodyRenderNodeIndices).map(unit => ({ origin: "section-body", sourceIndex: unit.sourceIndex, text: unit.text })) },
+            sectionBody: publicationClaimUnits(c.sectionBody,c.sectionBodyRenderNodeIndices).map(unit => ({ origin: "section-body", ...unit })) },
           ...(galleryIndexes.length ? { selectedGalleryComparisonImageIndexes: contexts[i]
             ? contexts[i]!.supplementalReferences.map(reference => reference.imageIndex) : galleryIndexes } : {}) })))}`,
           `Final publication attachments are images 1 through ${batch.length}. Comparison references appended AFTER them are not publication candidates: ${JSON.stringify(references.map((reference, index) => ({ imageIndex: batch.length + index + 1, referenceSha256: reference.referenceSha256, sourceSnapshotId: reference.sourceSnapshotId,
@@ -1080,7 +1082,10 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
       const verdictLayout = referenceLayout(batch, gallery), verdictContexts = verdictLayout.contexts;
       // One parser for first and retry responses; per-row issues explain nulls.
       const parseRows = (answer: string, rows: typeof batch, layout: ReturnType<typeof referenceLayout>) => {
-        if (!detailedLightweight) return { verdicts: parseVisualReviews(answer, rows.length), issues: rows.map(() => null as string | null) };
+        if (!detailedLightweight) {
+          const parsed = parseVisualReviews(answer, rows.length), validRaw = lightweight ? lightweightPublicationResponseIndexes(answer, rows.length) : null;
+          return { verdicts: validRaw ? parsed.map((row, index) => validRaw.has(index + 1) ? row : null) : parsed, issues: rows.map(() => null as string | null) };
+        }
         const detailed = lightweightPublicationDetailedRowsWithIssues(answer, rows.map((candidate, index) => ({
           role: candidate.role, allowProductPhoto: candidate.allowProductPhoto, referenceContext: layout.contexts[index],
           availableCanonicalReferences: layout.availableCanonicalReferences[index] })));

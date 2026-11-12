@@ -49,6 +49,8 @@ function harness() {
     './brand-post-approval-receipt': { hasCurrentBrandPostApprovalReceipt: manifest => manifest.fixtureReceipt !== false },
     './material-preparation-diagnostics': preparation,
     './material-review-warnings': { readCurrentMaterialReviewWarnings: () => [] },
+    // Fixture files have no stat; digest the mocked bytes directly (no cache).
+    './file-digest-cache': { cachedSha256File: file => crypto.createHash('sha256').update(Buffer.from(state.manuscripts.get(file) ?? `fixture bytes: ${file}`)).digest('hex') },
     './brand-post-package': {
       readBrandPostPackage: id => state.manifests.get(id) || null,
       getBrandPostPackageDir: id => `${id}.package`,

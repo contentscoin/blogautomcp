@@ -3,7 +3,7 @@ import { formatMaterialFailureReference, materialFailurePhase, normalizeMaterial
 import { getMaterial } from "./material-library";
 import { runMaterialPreparation, runAutomaticDraftWorkflow, localScheduleCall, isUncertainLocalTransportError, isSessionWidePreparationFailureCode, type Call } from "../../scripts/lib/scheduled-draft-workflow";
 import { automaticPublishingCancellationCheck } from "./desktop-activity";
-import { listFailedMaterialCandidates } from "./material-failed-candidates";
+import { isFailedMaterialCandidate } from "./material-failed-candidates";
 import { backupMaterialBeforeRewrite } from "./material-rewrite-backup";
 import { prisma } from "./db";
 import { hasSavedMaterialDraft, selectMaterialRepairCandidates } from "./material-repair-candidates";
@@ -64,8 +64,8 @@ export async function runMaterialJob(job: MaterialJob, deps: {
     try {
       deps.checkCancelled();
       if (job.kind === "rewrite") {
-        const eligible = await (deps.validateFailed || (async (id, currentJob) =>
-          (await listFailedMaterialCandidates(currentJob.connectKind, currentJob.jobId)).some(candidate => candidate.productId === id)))(item.productId, job);
+        const eligible = await (deps.validateFailed || ((id, currentJob) =>
+          isFailedMaterialCandidate(id, currentJob.connectKind, currentJob.jobId)))(item.productId, job);
         if (!eligible) throw Object.assign(new Error("실행 전에 소재 상태가 변경되어 재작성하지 않았습니다. 최신 실패 목록을 확인하세요."), { code: "FAILED_MATERIAL_SELECTION_CHANGED" });
       }
       if (job.kind === "repair") {

@@ -145,11 +145,15 @@ async function main() {
     // The validator checks evidence binding, not semantics; an exact citation
     // never converts an adverse answer into a favorable one, even for advice.
     assert.equal(validatePhotoClaimObjection({ ...falseProof, photoClaimObjection: { ...bodyProof, sourceIndex: 2, quote: proofContext.sectionBody[2] } }, proofContext), true);
-    assertions += 5;
+    // An exact sentence/substring of exactly one claim unit is traceable; its
+    // unit is unique, so an off or missing sourceIndex does not void it.
+    for (const objection of [{ ...bodyProof, quote: bodyProof.quote.trim() }, { ...bodyProof, sourceIndex: -1 }, { ...bodyProof, sourceIndex: 4 },
+      { ...bodyProof, sourceIndex: null }, { ...bodyProof, sourceIndex: 3, quote: "제품의 전체 중량은 1.65kg이며" }])
+      assert.equal(validatePhotoClaimObjection({ ...falseProof, photoClaimObjection: objection }, proofContext), true);
+    assertions += 10;
     for (const objection of [undefined, null, [], {}, { ...bodyProof, extra: true },
-      { ...bodyProof, sourceIndex: -1 }, { ...bodyProof, sourceIndex: 4 }, { ...bodyProof, sourceIndex: 0.5 },
-      { ...bodyProof, sourceIndex: "0" }, { ...bodyProof, sourceIndex: null },
-      { ...bodyProof, quote: bodyProof.quote.trim() }, { ...bodyProof, quote: "사진에 총 12개가 보입니다." },
+      { ...bodyProof, sourceIndex: 0.5 }, { ...bodyProof, sourceIndex: "0" },
+      { ...bodyProof, sourceIndex: 1, quote: "사진" }, { ...bodyProof, quote: "사진에 총 4개가 보입니다." },
       { ...bodyProof, quote: bodyProof.quote.replace("12", "4") },
       { ...bodyProof, sourceIndex: 1, quote: proofContext.sectionBody[1].normalize("NFKC") },
       { ...bodyProof, origin: "section-title", sourceIndex: 0, quote: proofContext.sectionTitle },

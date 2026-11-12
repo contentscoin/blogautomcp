@@ -468,7 +468,10 @@ assert.match(formatDraftSubmissionNextAction(), /이미지·배치 실패만 있
 // The deployed repair policy was raised to three attempts; retain the bounded
 // loop assertion rather than assuming the obsolete two-attempt constant.
 assert.match(simpleAgentSource, /maximumRepairAttempts = 1;/u, "2026-09-24 보정: 보강은 1회로 끝낸다");
-assert.match(simpleAgentSource, /repairAttempt <= maximumRepairAttempts && \(!editorialQuality\.canPublish \|\| Boolean\(editorialQuality\.advisory\)\)/u);
+assert.match(simpleAgentSource, /repairAttempt <= maximumRepairAttempts && \(!editorialQuality\.canPublish \|\| \(advisoryRepair && Boolean\(editorialQuality\.advisory\)\)\)/u);
+assert.match(simpleAgentSource, /const advisoryRepair = Boolean\(editorialQuality\.advisory\) && !BRANDLINK_GENERATED_DRAFT_PATH &&\s*resolveBrandLinkGateProfile\(connectKind\) !== "essential" && !humanizeRewriteApplied;/u, "essential profile and humanized drafts skip the advisory-only repair");
+assert.match(simpleAgentSource, /humanizeRewriteApplied = rewrittenSections !== humanizeInputSections;/u);
+assert.match(simpleAgentSource, /\(savedCopyMatchesCurrent \|\| savedCopyUserEdited\) &&\s*isProductThumbnailCopyCompatible/u, "saved studio copy is reused only when current or explicitly user-edited");
 assert.match(simpleAgentSource, /shouldAcceptQualityRepair\(editorialQuality, repairedQuality\)/u);
 assert.doesNotMatch(simpleAgentSource, /편집 역할 \$\{role\}/u);
 assert.match(sitesMcpSource, /실제 원고 내용 실패\(텍스트 signals\)는 새 idempotencyKey로 post_revise_draft를 호출/u);

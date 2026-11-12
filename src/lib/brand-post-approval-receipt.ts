@@ -13,14 +13,25 @@ import { COMPATIBLE_STRICT_PUBLICATION_POLICIES } from "../../scripts/lib/lightw
  * them; adding/replacing a file or gallery receipt invalidates that binding. */
 export function brandPostApprovalBinding(manifest: BrandPostPackageManifest, sourceDirectory: string,
   policy = publicationImageAuditPolicyFingerprint()): string {
+  return brandPostApprovalBindingsForPolicies(manifest, sourceDirectory, [policy])[0];
+}
+
+/** Same bytes as brandPostApprovalBinding per policy, but each bound file is
+ * read once and fed to every policy's hash (one disk pass, identical output). */
+function brandPostApprovalBindingsForPolicies(manifest: BrandPostPackageManifest, sourceDirectory: string,
+  policies: readonly string[]): string[] {
   const { approvedAt: _approval, imageGeneration: _progress, textQualityRevalidation, ...content } = manifest;
   void _approval; void _progress;
   const { checkedAt: _textCheckTime, ...textBinding } = textQualityRevalidation || {};
   void _textCheckTime;
-  const hash = crypto.createHash("sha256");
-  hash.update(JSON.stringify({ version: "saved-material-publication-audit/v1",
-    policy, content,
-    ...(textQualityRevalidation ? { textQualityRevalidation: textBinding } : {}) }));
+  const hashes = policies.map(policy => {
+    const hash = crypto.createHash("sha256");
+    hash.update(JSON.stringify({ version: "saved-material-publication-audit/v1",
+      policy, content,
+      ...(textQualityRevalidation ? { textQualityRevalidation: textBinding } : {}) }));
+    return hash;
+  });
+  const update = (data: string | Buffer) => { for (const hash of hashes) hash.update(data); };
   const files = new Set([manifest.markdownPath, manifest.heroImagePath, ...manifest.bodyImagePaths,
     ...(manifest.imageAssets || []).flatMap(asset => [asset.path, asset.sourcePath,
       asset.referenceScene?.referencePath, asset.referenceScene?.thumbnailRawPath].filter((file): file is string => Boolean(file))),
@@ -42,26 +53,32 @@ export function brandPostApprovalBinding(manifest: BrandPostPackageManifest, sou
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   for (const file of [...files].filter(Boolean).sort()) {
-    hash.update(JSON.stringify({ file: path.resolve(file) }));
-    try { hash.update(fs.readFileSync(file)); }
+    update(JSON.stringify({ file: path.resolve(file) }));
+    try { update(fs.readFileSync(file)); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      hash.update("missing-file");
+      update("missing-file");
     }
   }
-  return hash.digest("hex");
+  return hashes.map(hash => hash.digest("hex"));
 }
 
 /** Read-only migration: historical strict success remains valid only for the
  * exact same manuscript, selected facts, pixels and source/retrieval files. */
 export function brandPostCompatibleApprovalBindings(manifest: BrandPostPackageManifest, sourceDirectory: string): string[] {
-  return COMPATIBLE_STRICT_PUBLICATION_POLICIES.map(policy => brandPostApprovalBinding(manifest, sourceDirectory, policy));
+  return brandPostApprovalBindingsForPolicies(manifest, sourceDirectory, [...COMPATIBLE_STRICT_PUBLICATION_POLICIES]);
+}
+
+/** [current, ...compatible] bindings from a single read of the bound files. */
+export function brandPostAllApprovalBindings(manifest: BrandPostPackageManifest, sourceDirectory: string): string[] {
+  return brandPostApprovalBindingsForPolicies(manifest, sourceDirectory,
+    [publicationImageAuditPolicyFingerprint(), ...COMPATIBLE_STRICT_PUBLICATION_POLICIES]);
 }
 
 export function hasCurrentBrandPostApprovalReceipt(manifest: BrandPostPackageManifest, sourceDirectory: string): boolean {
   if (manifest.connectKind !== "SHOPPING") return true;
   if (manifest.version !== "brand-post-package/v2") return false;
-  try { return [brandPostApprovalBinding(manifest, sourceDirectory), ...brandPostCompatibleApprovalBindings(manifest, sourceDirectory)]
+  try { return brandPostAllApprovalBindings(manifest, sourceDirectory)
     .some(binding => readSuccessfulImageAuditReadinessBinding(manifest.brandLinkId, binding)); }
   catch { return false; }
 }

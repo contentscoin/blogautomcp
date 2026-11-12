@@ -7,6 +7,9 @@ import { selectVerifiedProductPhoto } from "./product-photo-review";
 import { downloadProductSourcePhoto, isAllowedProductPhotoUrl, PRODUCT_SOURCE_RECEIPT_TTL_MS } from "./product-photo-source";
 import { selectShoppingPrewriteOriginal } from "./shopping-prewrite-photos";
 
+export const MAX_REGION_CANDIDATES = 16;
+export const MAX_GATED_CROPS = 4;
+
 /** Recover source pixels, never generated pixels or a bypass of photo QC. */
 export async function recoverProductPhotoRegion(options: {
   productName: string;
@@ -119,7 +122,10 @@ export async function recoverProductPhotoRegion(options: {
     add(file, receipt);
     if (await acceptOnce(file, receipt.sha256)) return file;
   }
-  const files = [...candidates.values()].slice(0, 40);
+  // Bounded recovery: at most two 8-image region calls and a few crop gates.
+  // Fewer attempts only fail closed (no photo); every crop still passes the gates.
+  const files = [...candidates.values()].slice(0, MAX_REGION_CANDIDATES);
+  let gatedCrops = 0;
   const boundSourceHashes = new Map([...candidates].map(([hash, file]) => [file, hash]));
   const seenRegions = new Set<string>();
   const seenCrops = new Set<string>();
@@ -169,6 +175,8 @@ export async function recoverProductPhotoRegion(options: {
       const croppedSha256 = crypto.createHash("sha256").update(bytes).digest("hex");
       if (seenCrops.has(croppedSha256)) continue;
       seenCrops.add(croppedSha256);
+      if (gatedCrops >= MAX_GATED_CROPS) return null;
+      gatedCrops++;
       fs.mkdirSync(options.outputDir, { recursive: true });
       const output = path.join(options.outputDir, `verified-region-${croppedSha256}.png`);
       let created = false;

@@ -1293,14 +1293,17 @@ async function generateTopTextCutoutThumbnail(
   productUnderstanding?: Product9Canvas,
 ): Promise<GeneratedProductThumbnail | null> {
   if (!THUMBNAIL_AUTOGEN_ENABLED) return null;
-  const savedSetting = brandLinkId
-    ? parseProductThumbnailSettings(
-        (await prisma.setting.findUnique({
-          where: { key: productThumbnailSettingKey(brandLinkId) },
-          select: { value: true },
-        }))?.value,
-      )
+  const savedSettingRaw = brandLinkId
+    ? (await prisma.setting.findUnique({
+        where: { key: productThumbnailSettingKey(brandLinkId) },
+        select: { value: true },
+      }))?.value
     : null;
+  const savedSetting = parseProductThumbnailSettings(savedSettingRaw);
+  // Only an explicit user-edit marker lets saved copy outlive the current copy generator.
+  const savedCopyUserEdited = (() => {
+    try { return Boolean(savedSettingRaw && (JSON.parse(savedSettingRaw) as { userEdited?: unknown }).userEdited === true); } catch { return false; }
+  })();
   const shoppingUnderstanding = contentKind === "SHOPPING"
     ? productUnderstanding || buildProduct9Canvas({
         name: product.name,
@@ -1319,8 +1322,14 @@ async function generateTopTextCutoutThumbnail(
         productUnderstanding: shoppingUnderstanding,
       })
     : null;
-  const savedCopyCompatible = !savedSetting || !shoppingUnderstanding ||
-    isProductThumbnailCopyCompatible(savedSetting.copy, shoppingUnderstanding);
+  const savedCopyMatchesCurrent = !savedSetting || !suggestedShoppingCopy || (
+    savedSetting.copy.headline === suggestedShoppingCopy.headline &&
+    savedSetting.copy.subline === suggestedShoppingCopy.subline
+  );
+  const savedCopyCompatible = !savedSetting || !shoppingUnderstanding || (
+    (savedCopyMatchesCurrent || savedCopyUserEdited) &&
+    isProductThumbnailCopyCompatible(savedSetting.copy, shoppingUnderstanding)
+  );
   const reusableSavedSetting = savedCopyCompatible ? savedSetting : null;
   if (savedSetting && !savedCopyCompatible) {
     console.log("   ♻️ 이전 썸네일 문구가 Product 9Canvas와 충돌해 다시 생성합니다.");
@@ -5746,6 +5755,7 @@ ${mandatoryWritingPromptBlock}`;
     );
   }
 
+  let humanizeRewriteApplied = false;
   // AI 티(번역투·상투구·기계적 구조)를 코드로 측정하고, 기준을 넘으면 한 번 재작성한다.
   const aiTellScan = scanAiTells(bodySections.join("\n\n"));
   console.log(`   🧪 AI 티 스캔: ${aiTellScan.summary}`);
@@ -5755,6 +5765,7 @@ ${mandatoryWritingPromptBlock}`;
     !BROWSER_GPT_MODE &&
     aiTellScan.score >= BLOG_HUMANIZE_REWRITE_THRESHOLD
   ) {
+    const humanizeInputSections = bodySections;
     const rewrittenSections = await rewriteSectionsForHumanTone(bodySections, aiTellScan.score, [formatEditorialTemplate(writingContract.kind, writingContract.editorialTemplateId), formatDraftMemoRequirements(writingContract)].join("\n"));
     bodySections = normalizeSections(
       rewrittenSections,
@@ -5762,6 +5773,7 @@ ${mandatoryWritingPromptBlock}`;
       maximumBodySectionCount,
       connectKind,
     );
+    humanizeRewriteApplied = rewrittenSections !== humanizeInputSections;
   }
 
   const disclosureSection = HUMAN_MOBILE_POLISH_ENABLED
@@ -5834,7 +5846,9 @@ ${mandatoryWritingPromptBlock}`;
     "quality-score-below-threshold",
   ]);
   // essential 게이트는 품질 미달을 권고로만 돌려준다. 발행은 막지 않지만 한 번은 보강을 시도한다.
-  const advisoryRepair = Boolean(editorialQuality.advisory) && !BRANDLINK_GENERATED_DRAFT_PATH;
+  // essential 프로필에서는 발행 가능한 권고만 남으면 추가 전체 재작성을 하지 않고, 휴머나이징 재작성 뒤에도 생략한다.
+  const advisoryRepair = Boolean(editorialQuality.advisory) && !BRANDLINK_GENERATED_DRAFT_PATH &&
+    resolveBrandLinkGateProfile(connectKind) !== "essential" && !humanizeRewriteApplied;
   const shouldAttemptQualityRepair =
     BRANDLINK_AUTO_QUALITY_REPAIR_ENABLED &&
     repairableQualityCodes.has(editorialQuality.advisory?.code ?? editorialQuality.code) &&
@@ -5902,7 +5916,7 @@ ${JSON.stringify({ title: normalizedTitle, sections: bodySections, hashtags }, n
       let lastRepairScore = editorialQuality.score;
       // 2026-09-24 보정: 경고만 남은 원고는 통과하므로 보강은 1회로 끝낸다.
       const maximumRepairAttempts = 1;
-      for (let repairAttempt = 1; repairAttempt <= maximumRepairAttempts && (!editorialQuality.canPublish || Boolean(editorialQuality.advisory)); repairAttempt += 1) {
+      for (let repairAttempt = 1; repairAttempt <= maximumRepairAttempts && (!editorialQuality.canPublish || (advisoryRepair && Boolean(editorialQuality.advisory))); repairAttempt += 1) {
         reportDraftProgress("qc", `원고 보강 ${repairAttempt}/${maximumRepairAttempts} · ${editorialQuality.advisory?.reason || editorialQuality.reason || editorialQuality.code}`);
         const repairedText = await generateWithAI(
           systemPrompt,

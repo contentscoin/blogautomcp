@@ -167,7 +167,8 @@ async function main() {
       return true;
     }); checks++;
     equal(actions.filter(action => action === "repair_confirmed_print").length, kind === "invalid-only" ? 0 : 1, "Mixed workflow invokes narrow repair at most once; opaque-only has zero mutation calls");
-    equal(actions.filter(action => action === "approve").length, diagnose ? 0 : 1, "No second approval follows a partial or unresolved result");
+    equal(actions.filter(action => action === "approve").length, diagnose ? 0 : 2, "Only the one bounded INVALID_REVIEW re-audit; no approval follows a partial or unresolved result");
+    if (!diagnose && actions.includes("repair_confirmed_print")) assert(actions.lastIndexOf("approve") < actions.indexOf("repair_confirmed_print"), "INVALID_REVIEW re-audit precedes, never follows, partial repair");
     equal(actions.filter(action => ["generate_missing", "repair_rejected", "regenerate", "replan_sources", "revise", "prepare_context", "repair_photo_description"].includes(action)), [], "No generic/source/text/replan fallback follows mixed partial admission");
     if (kind === "partial") assert(stages.some(stage => /1장 부분 복구/u.test(stage))); checks++;
   }

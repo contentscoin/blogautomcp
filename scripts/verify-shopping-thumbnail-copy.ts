@@ -43,6 +43,10 @@ async function main() {
     subline: humidifier.subline,
     cta: humidifier.cta,
   }, humidifierUnderstanding), true);
+  const sanitizerUnderstanding = buildProduct9Canvas({ name: "UV 칫솔 살균기 벽걸이형" });
+  assert.equal(isProductThumbnailCopyCompatible({ headline: "흡입력 체크", subline: "공간별 사용 포인트", cta: "구매 전 체크" }, sanitizerUnderstanding), false, "Stale vacuum copy must not survive on a non-cleaner product");
+  const vacuumUnderstanding = buildProduct9Canvas({ name: "무선 침구청소기" });
+  assert.equal(isProductThumbnailCopyCompatible({ headline: "흡입력 체크", subline: "공간별 사용 포인트", cta: "구매 전 체크" }, vacuumUnderstanding), true);
   const persimmon = buildProductThumbnailCopy("선물세트 기준", "상주곶감 건시 반건시 호두말이 크림치즈 선물세트");
   assert.equal(persimmon.headline, "선물 전 체크");
   assert.doesNotMatch(persimmon.headline, /보관|냉동|보냉/u, "A gift overview photograph must not imply a storage-performance demonstration");
