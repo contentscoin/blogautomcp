@@ -42,6 +42,7 @@ async function main() {
     "./post-composition-contract": { normalizePublishedPostText: () => composition },
     "./brand-post-approval-receipt": { brandPostApprovalBinding: () => "fixture-binding", brandPostCompatibleApprovalBindings: () => [] },
     "./publish-image-failure-diagnostics": { imageAuditFailureSections },
+    "../../scripts/lib/brandlink-content-readiness": { resolveBrandLinkGateProfile: () => "strict" },
   };
   const filename = path.resolve("src/lib/brand-post-publish-preflight.ts");
   const compiled = ts.transpileModule(fs.readFileSync(filename, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
