@@ -10,6 +10,9 @@ import { planConfirmedPrintRepairs } from "../src/lib/brand-post-confirmed-print
 import { publicationDefectMaterialBinding, type ScopedPublicationImageDefectProof } from "./lib/publication-image-defect-proof";
 import { repairBrandPostImages } from "../src/lib/brand-post-image-repair";
 import { runMaterialPreparation, type Result } from "./lib/scheduled-draft-workflow";
+
+// 이 검사는 확정 결함만 좁게 복구하는 strict 흐름을 고정한다. essential의 연출 사진 빼기는 verify-shopping-scene-relax가 검사한다.
+process.env.SHOPPING_GATE_PROFILE = "strict";
 import type { BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
 
 const hash = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");

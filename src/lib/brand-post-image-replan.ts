@@ -3,6 +3,7 @@ import path from "node:path";
 import { allowsGenericBrandPostProductPhoto, isShoppingLifestyleImage, isReferenceGuidedScene } from "./brand-post-image-evidence";
 import { SHOPPING_POST_STRATEGY_VERSION, SHOPPING_RELAXED_IMAGE_FLOOR, SHOPPING_RELAXED_ORIGINAL_LIMIT } from "./shopping-post-strategy";
 import { resolveBrandLinkGateProfile } from "../../scripts/lib/brandlink-content-readiness";
+import { publicationImageRegenerationHoldState } from "../../scripts/lib/publish-image-rejections";
 import { acquireBrandPostImageRepairLock } from "./brand-post-image-repair-lock";
 import { SHOPPING_POST_CONTRACT_V1 } from "./post-composition-contract";
 import { repairBrandPostImages } from "./brand-post-image-repair";
@@ -20,6 +21,8 @@ export interface ImageReplanDependencies {
   repair: typeof repairBrandPostImages;
   lock: typeof acquireBrandPostImageRepairLock;
   reconcile: typeof reconcileBrandPostPackageQuality;
+  /** 연출 사진의 미해결 검수 보류 여부. 테스트에서 주입한다. */
+  held?: (manifest: Manifest, sectionId: string, assetKey: string) => boolean;
 }
 const defaults: ImageReplanDependencies = { read: readBrandPostPackage, write: writeBrandPostPackageManifest,
   slots: getBrandPostImageSlots, repair: repairBrandPostImages, lock: acquireBrandPostImageRepairLock,
@@ -109,7 +112,10 @@ export function imageReplanDraftIdentity(manifest: Manifest): string {
  * 썸네일과 판매페이지 원본 1장은 반드시 있어야 한다. 원본을 더 넣어 수량을 채우지 않고,
  * 본문·이미지 의도·이미 통과한 연출 사진은 그대로 둔다. 거절된 연출 파일은 구성에서 뺀다.
  */
-async function relaxUnfilledNaturalScenes(options: { brandLinkId: string; productName?: string; sourceImageUrls?: string[] },
+const defaultHeld = (manifest: Manifest, sectionId: string, assetKey: string) =>
+  publicationImageRegenerationHoldState(manifest.brandLinkId, manifest.composition, sectionId, assetKey) !== "none";
+
+async function relaxUnfilledNaturalScenes(options: { brandLinkId: string; productName?: string; sourceImageUrls?: string[]; dropSectionIds?: string[] },
   before: { required: number; missing: number }, deps: ImageReplanDependencies) {
   const brandLinkId = options.brandLinkId;
   let fill: Array<{ requestId: string; sectionId: string; slotId: string }> = [];
@@ -126,19 +132,28 @@ async function relaxUnfilledNaturalScenes(options: { brandLinkId: string; produc
     const original = slots.find(slot => sectionOf(slot).imageSource === "seller-original");
     if (!current.heroImagePath || !original || original.count < 1 || original.missing > 0)
       return unchanged("REPLAN_ORIGINAL_PHOTO_REQUIRED");
-    const open = slots.filter(slot => sectionOf(slot).imageSource === "staged-ai" && (slot.missing > 0 || slot.generationMissing > 0));
+    // 검수가 거절했거나, 결과를 확정하지 못해 보류된 연출 사진은 고쳐 쓰지 않고 뺀다.
+    // 새로 생성하지 않으므로 보류가 막으려는 "미확인 사진의 교체 생성"에 해당하지 않는다.
+    const requested = new Set(options.dropSectionIds || []);
+    const held = deps.held || defaultHeld;
+    const dropAll = new Set(slots.filter(slot => sectionOf(slot).imageSource === "staged-ai" && (requested.has(slot.sectionId) ||
+      slot.assets.some(asset => held(current, slot.sectionId, asset.assetKey || asset.sha256 || "")))).map(slot => slot.sectionId));
+    if ([...requested].some(sectionId => !dropAll.has(sectionId))) return unchanged("REPLAN_DROP_TARGET_NOT_SCENE");
+    const open = slots.filter(slot => sectionOf(slot).imageSource === "staged-ai" &&
+      (slot.missing > 0 || slot.generationMissing > 0 || dropAll.has(slot.sectionId)));
     if (!open.length) return unchanged("REPLAN_NO_ALTERNATIVE_CAPACITY");
     const at = new Date().toISOString();
-    const rejected = new Set(open.flatMap(slot => slot.staleTargets.map(target => path.resolve(target.path))));
+    const rejected = new Set(open.flatMap(slot => [...slot.staleTargets.map(target => path.resolve(target.path)),
+      ...(dropAll.has(slot.sectionId) ? slot.assets.map(asset => path.resolve(asset.path)) : [])]));
     const minima = new Map(open.map(slot => [slot.sectionId, 0] as const));
     // 연출 사진이 하나도 없는 자리는 서로 다른 판매자 실사진을 받을 수 있는 선택 슬롯으로 바꾼다.
     const existingOriginals = slots.filter(slot => sectionOf(slot).imageSource === "seller-original").length;
-    const convertible = new Set(open.filter(slot => slot.count === 0).slice(0, Math.max(0, SHOPPING_RELAXED_ORIGINAL_LIMIT - existingOriginals))
+    const convertible = new Set(open.filter(slot => slot.count === 0 || dropAll.has(slot.sectionId)).slice(0, Math.max(0, SHOPPING_RELAXED_ORIGINAL_LIMIT - existingOriginals))
       .map(slot => slot.sectionId));
     fill = [...convertible].map(sectionId => ({ requestId: randomUUID(), sectionId, slotId: `${sectionId}:image:1` }));
     const history = open.map(slot => ({ from: slot.sectionId,
       to: convertible.has(slot.sectionId) ? "relaxed:seller-photo-optional" : "relaxed:scene-optional", at }));
-    const kept = slots.reduce((sum, slot) => sum + slot.count, 0) + 1;
+    const kept = slots.reduce((sum, slot) => sum + (dropAll.has(slot.sectionId) ? 0 : slot.count), 0) + 1;
     const proposed = deps.reconcile({ ...current, approvedAt: null,
       bodyImagePaths: current.bodyImagePaths?.filter(file => !rejected.has(path.resolve(file))),
       imageAssets: current.imageAssets?.filter(asset => !rejected.has(path.resolve(asset.path))),
@@ -154,7 +169,7 @@ async function relaxUnfilledNaturalScenes(options: { brandLinkId: string; produc
       pipelineNotes: [...(current.pipelineNotes || []), `IMAGE_SCENES_RELAXED: ${JSON.stringify(history)}`,
         ...(current.imageGeneration?.errors.length ? [`IMAGE_REPLAN_PREVIOUS_ERRORS: ${JSON.stringify(current.imageGeneration.errors)}`] : [])] });
     const after = summary(deps.slots(proposed));
-    if (after.missing >= before.missing) return unchanged("REPLAN_INVARIANT_FAILED");
+    if (after.missing > before.missing || (after.missing === before.missing && !dropAll.size)) return unchanged("REPLAN_INVARIANT_FAILED");
     if (proposed.imageGeneration) proposed.imageGeneration = { ...proposed.imageGeneration,
       remaining: after.missing, status: after.missing ? "incomplete" : "complete", updatedAt: at,
       errors: deps.slots(proposed).filter(slot => slot.missing || slot.generationMissing).map(slot =>
@@ -184,6 +199,8 @@ async function relaxUnfilledNaturalScenes(options: { brandLinkId: string; produc
  */
 export async function replanShoppingImageCoverage(options: {
   brandLinkId: string; productName?: string; sourceImageUrls?: string[];
+  /** essential 쇼핑 전용: 이 문단의 연출 사진을 빼고 판매자 실사진 선택 슬롯으로 바꾼다. */
+  dropSectionIds?: string[];
 }, deps: ImageReplanDependencies = defaults) {
   const initial = deps.read(options.brandLinkId, { migrate: false });
   const empty = { required: 0, missing: 0 };

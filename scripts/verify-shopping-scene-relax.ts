@@ -3,9 +3,9 @@ import { replanShoppingImageCoverage, type ImageReplanDependencies } from "../sr
 import type { BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
 import { SHOPPING_POST_CONTRACT_V1, buildPostQualityReport, type ResolvedPostSectionV1 } from "../src/lib/post-composition-contract";
 import { SHOPPING_POST_STRATEGY_VERSION, isShoppingSceneCoverageRelaxed } from "../src/lib/shopping-post-strategy";
-import { isOptionalSceneImageFailure } from "./lib/scheduled-draft-workflow";
+import { droppableSceneSections, isOptionalSceneImageFailure, runMaterialPreparation } from "./lib/scheduled-draft-workflow";
 
-type Fixture = { hero?: boolean; original?: boolean; scenes?: string[][]; rejected?: string[]; running?: boolean; sellerPhotos?: string[]; repairFails?: boolean };
+type Fixture = { hero?: boolean; original?: boolean; scenes?: string[][]; rejected?: string[]; running?: boolean; sellerPhotos?: string[]; repairFails?: boolean; held?: string[] };
 
 function fixture(options: Fixture = {}) {
   const scenes = options.scenes || [[], [], []];
@@ -51,12 +51,13 @@ function fixture(options: Fixture = {}) {
       }
       return { errors: [] };
     },
+    held: (_manifest: BrandPostPackageManifestV2, _sectionId: string, assetKey: string) => (options.held || []).includes(assetKey),
     slots: (value: BrandPostPackageManifestV2) => value.composition.sections.map(section => {
       const valid = section.imagePaths.filter(file => !rejected.has(file));
       const generated = section.imageSource === "staged-ai" ? section.imageMin! : 0;
       return { sectionId: section.id, minimum: section.imageMin!, maximum: section.imageMax!, count: valid.length,
         missing: Math.max(0, section.imageMin! - valid.length, section.imagePaths.length - valid.length),
-        generatedMinimum: generated, generationMissing: Math.max(0, generated - valid.length), assets: [],
+        generatedMinimum: generated, generationMissing: Math.max(0, generated - valid.length), assets: valid.map(file => ({ path: file, sha256: file, assetKey: file })),
         staleTargets: section.imagePaths.filter(file => rejected.has(file)).map(file => ({ path: file, code: "image-publication-rejected" })) };
     }),
   } as unknown as ImageReplanDependencies;
@@ -157,6 +158,76 @@ async function main() {
   assert.equal(isOptionalSceneImageFailure({ code: "REFERENCE_SCENE_FIDELITY_FAILED", errors: ["unclassified reviewer failure"] }), false);
   assert.equal(isOptionalSceneImageFailure({ code: "IMAGE_REPAIR_BUSY" }), false);
   assert.equal(isOptionalSceneImageFailure(new Error("unknown")), false);
+
+  // 검수 결과를 확정하지 못해 보류된 연출 사진: 고쳐 쓰지 않고 빼고, 그 자리는 판매자 실사진 선택 슬롯이 된다.
+  const heldScene = fixture({ scenes: [["a.jpg"], ["b.jpg"], ["c.jpg"]], held: ["b.jpg"], sellerPhotos: ["seller-2.jpg"] });
+  const heldResult = await replanShoppingImageCoverage({ brandLinkId: "fixture" }, heldScene.deps);
+  assert.equal(heldResult.changed, true);
+  assert.equal(heldResult.after.missing, 0);
+  assert.deepEqual(heldScene.repairRequests, [["s3"]]);
+  assert.equal(heldScene.read().bodyImagePaths?.includes("b.jpg"), false, "보류된 연출 사진은 본문에서 빠진다");
+  assert.deepEqual(heldScene.read().composition.sections.find(section => section.id === "s1")!.imagePaths, ["a.jpg"], "문제없는 연출 사진은 그대로 둔다");
+  assert.equal(heldScene.read().composition.sections.find(section => section.id === "s3")!.imageSource, "seller-original");
+
+  // 최종 검수가 거절한 문단을 지정해서 뺀다. 연출 문단이 아니면 아무것도 바꾸지 않는다.
+  const named = fixture({ scenes: [["a.jpg"], ["b.jpg"], ["c.jpg"]] });
+  const namedResult = await replanShoppingImageCoverage({ brandLinkId: "fixture", dropSectionIds: ["s4"] }, named.deps);
+  assert.equal(namedResult.changed, true);
+  assert.equal(named.read().bodyImagePaths?.includes("c.jpg"), false);
+  assert.equal(named.read().bodyImagePaths?.includes("original.jpg"), true);
+  const wrongTarget = fixture({ scenes: [["a.jpg"], ["b.jpg"], ["c.jpg"]] });
+  const wrongResult = await replanShoppingImageCoverage({ brandLinkId: "fixture", dropSectionIds: ["s0"] }, wrongTarget.deps);
+  assert.equal(wrongResult.changed, false, "판매자 원본 문단은 지정해도 빼지 않는다");
+  assert.equal(wrongResult.reason, "REPLAN_DROP_TARGET_NOT_SCENE");
+  assert.equal(wrongTarget.writes(), 0);
+  process.env.SHOPPING_GATE_PROFILE = "strict";
+  const strictDrop = fixture({ scenes: [["a.jpg"], ["b.jpg"], ["c.jpg"]] });
+  assert.equal((await replanShoppingImageCoverage({ brandLinkId: "fixture", dropSectionIds: ["s4"] }, strictDrop.deps)).changed, false);
+  delete process.env.SHOPPING_GATE_PROFILE;
+
+  // 실제 PC에서 나온 실패 문구: 본문 연출 문단에만 걸린 실패는 그 문단을 뺄 대상으로 읽는다.
+  assert.deepEqual(droppableSceneSections({ code: "IMAGE_RESUME_REQUIRED",
+    message: "shopping-section-6d63a17b: IMAGE_RESUME_REQUIRED: 생성 요청이 이미 접수됐을 수 있어 자동 재전송하지 않았습니다. IMAGE_RESUME_REQUIRED: 이전 Codex 이미지 요청의 완료 여부를 확인해야 합니다." }),
+    ["shopping-section-6d63a17b"]);
+  assert.deepEqual(droppableSceneSections({ code: "HTTP_ERROR",
+    message: "shopping-section-9bb0783e: PUBLICATION_IMAGE_REGENERATION_HELD: 관찰 부족 또는 미확정 표기 검수는 사진 교체 권한이 아닙니다." }),
+    ["shopping-section-9bb0783e"]);
+  assert.deepEqual(droppableSceneSections({ code: "PUBLISH_IMAGE_AUDIT_FAILED",
+    imageAuditFailures: [{ code: "SEMANTIC_REJECTION", sectionId: "shopping-section-aa11" }, { code: "SEMANTIC_REJECTION", sectionId: "shopping-section-aa11" }] }),
+    ["shopping-section-aa11"]);
+  assert.equal(droppableSceneSections({ code: "PUBLISH_IMAGE_AUDIT_FAILED",
+    imageAuditFailures: [{ code: "INVALID_REVIEW", sectionId: null }, { code: "SEMANTIC_REJECTION", sectionId: "shopping-section-aa11" }] }), null,
+    "대표 이미지 문제가 섞이면 연출 사진만 빼서는 해결되지 않는다");
+  assert.equal(droppableSceneSections({ code: "IMAGE_RESUME_REQUIRED", message: "이전 이미지 작업의 실행 여부를 확인할 수 없습니다." }), null);
+  assert.equal(droppableSceneSections({ code: "CODEX_AUTH_REQUIRED", message: "shopping-section-aa11: CODEX_AUTH_REQUIRED: 로그인" }), null);
+  assert.equal(droppableSceneSections({ code: "USER_CANCELLED", message: "shopping-section-aa11: IMAGE_RESUME_REQUIRED: x" }), null);
+  assert.equal(droppableSceneSections({ code: "HTTP_ERROR", message: "shopping-section-aa11: IMAGE_RESUME_REQUIRED: x REQUEST_TIMEOUT" }), null);
+
+  // 준비 흐름: 연출 문단 실패 → 그 문단만 빼기 요청 1회 → 한 번 더 진행. 빼지 못하면 원래 실패를 그대로 올린다.
+  const flow = (changed: boolean) => {
+    const calls: string[] = [];
+    const deps = { pause: async () => {}, now: () => 0, onStage: () => {},
+      call: async (pathname: string, method: string, body?: { action?: string; dropSectionIds?: string[] }) => {
+        calls.push(`${method} ${pathname.split("/").slice(4).join("/")} ${body?.action || ""}`.trim());
+        if (body?.action === "replan_sources") {
+          assert.deepEqual(body.dropSectionIds, ["shopping-section-aa11"]);
+          return { success: true, recovery: { changed }, remainingMissing: 0 };
+        }
+        throw Object.assign(new Error("shopping-section-aa11: PUBLICATION_IMAGE_REGENERATION_HELD: 보류"), { code: "HTTP_ERROR" });
+      } };
+    return { calls, run: runMaterialPreparation("fixture", deps as never) };
+  };
+  const dropped = flow(true);
+  await assert.rejects(dropped.run, (error: Error & { sceneDropAttempted?: boolean }) => error.sceneDropAttempted === true);
+  assert.deepEqual(dropped.calls, ["GET draft", "POST draft/images replan_sources", "GET draft"], "빼기는 한 번만 요청하고 한 번만 다시 진행한다");
+  const refused = flow(false);
+  await assert.rejects(refused.run, (error: Error & { sceneDropAttempted?: boolean }) => !error.sceneDropAttempted);
+  assert.deepEqual(refused.calls, ["GET draft", "POST draft/images replan_sources"]);
+  process.env.SHOPPING_GATE_PROFILE = "strict";
+  const strictFlow = flow(true);
+  await assert.rejects(strictFlow.run);
+  assert.deepEqual(strictFlow.calls, ["GET draft"], "strict 프로필은 기존 동작 그대로다");
+  delete process.env.SHOPPING_GATE_PROFILE;
 
   if (saved === undefined) delete process.env.SHOPPING_GATE_PROFILE;
   else process.env.SHOPPING_GATE_PROFILE = saved;

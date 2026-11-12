@@ -126,6 +126,7 @@ export async function POST(
     refreshSourcePhotos?: boolean;
     backupJobId?: string;
     retainedSha256?: string;
+    dropSectionIds?: unknown;
   };
   if (!body.action || !IMAGE_ACTIONS.includes(body.action)) {
     return NextResponse.json({ success: false, error: "지원하지 않는 이미지 작업입니다." }, { status: 400 });
@@ -201,8 +202,10 @@ export async function POST(
   if (body.action === "replan_sources") {
     const finishReplan = beginDesktopActivity("brand-post-image-replan");
     try {
+      const dropSectionIds = Array.isArray(body.dropSectionIds)
+        ? body.dropSectionIds.filter((value): value is string => typeof value === "string" && /^[a-zA-Z0-9_-]{1,80}$/u.test(value)).slice(0, 8) : [];
       const recovery = await replanShoppingImageCoverage({ brandLinkId: id,
-        productName: link.productName || manifest.title, sourceImageUrls });
+        productName: link.productName || manifest.title, sourceImageUrls, ...(dropSectionIds.length ? { dropSectionIds } : {}) });
       const current = readBrandPostPackage(id, { migrate: false });
       const data = current ? packagePreview(current) : preview;
       const remainingMissing = data.imageSlots.reduce((sum, slot) => sum + Math.max(slot.missing, slot.generationMissing), 0);

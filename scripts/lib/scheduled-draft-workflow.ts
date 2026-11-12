@@ -1,7 +1,7 @@
 import http from "node:http";
 import { isRecoverableImageEvidenceFailure, isRecoverableImageEvidenceResult, runRecordedImageRecovery } from "./material-image-recovery";
 import { getWritingTimeoutPolicy } from "./writing-timeout-policy";
-import type { BrandLinkContentReadiness } from "./brandlink-content-readiness";
+import { resolveBrandLinkGateProfile, type BrandLinkContentReadiness } from "./brandlink-content-readiness";
 import {
   formatQualityConvergenceInstructions,
   planQualityConvergence,
@@ -343,7 +343,62 @@ export function isSeverelyFailingDraft(readiness: BrandLinkContentReadiness | nu
 }
 
 // Stage 1. Repairs are bounded and only take place while preparing materials.
-export async function runMaterialPreparation(id: string, deps: WorkflowDeps = defaults, options: {
+const DROPPABLE_SCENE_FAILURE = /^(?:IMAGE_RESUME_REQUIRED|IMAGE_OUTPUT_AMBIGUOUS|IMAGE_OUTPUT_REJECTED|PUBLICATION_IMAGE_REGENERATION_HELD|IMAGE_REPAIR_FAILED|HTTP_ERROR|PUBLISH_IMAGE_AUDIT_FAILED)$/u;
+
+/**
+ * 실패가 본문 연출 사진(문단 단위)에만 걸려 있으면 그 문단 ID들을 돌려준다.
+ * 대표 이미지·세션·취소·전송 실패가 섞여 있으면 null. 실제로 뺄 수 있는지는 서버가 다시 판정한다.
+ */
+export function droppableSceneSections(error: unknown): string[] | null {
+  const failure = error as { code?: string; message?: string; errors?: string[]; imageAuditFailures?: Result["imageAuditFailures"] } | null;
+  const code = failure?.code || "";
+  if (!failure || isSessionWidePreparationFailureCode(code) || /CANCELLED$/u.test(code)) return null;
+  // 확정 인쇄 결함의 부분 복구가 이미 구성을 바꿨다면 그 결과를 사람이 확인해야 한다.
+  if (["partialImageRepair", "partialImageRepairFailure", "originalImageAuditFailure"].some(key => key in (failure as object))) return null;
+  const allowed = (value: string) => DROPPABLE_SCENE_FAILURE.test(value) || OPTIONAL_SCENE_IMAGE_FAILURE.test(value) || isRecoverableImageEvidenceFailure(value);
+  if (code && !allowed(code)) return null;
+  // 안쪽 복구 단계가 남긴 원인(원본 검수 충돌·전송 불확실 등)이 연출 사진 문제가 아니면 손대지 않는다.
+  const causes = [(failure as { causeCode?: string }).causeCode];
+  for (let cause = (failure as { cause?: unknown }).cause, depth = 0; cause instanceof Error && depth < 8; cause = cause.cause, depth++)
+    causes.push((cause as Error & { code?: string }).code);
+  if (causes.some(cause => cause && !allowed(cause))) return null;
+  const findings = failure.imageAuditFailures;
+  if (code === "PUBLISH_IMAGE_AUDIT_FAILED") {
+    if (!findings?.length || findings.some(row => !row.sectionId)) return null;
+    return [...new Set(findings.map(row => row.sectionId!))];
+  }
+  const lines = failure.errors?.length ? failure.errors : [failure.message || ""];
+  const sections = new Set<string>();
+  for (const line of lines) {
+    const targets = [...line.matchAll(/\b([a-zA-Z0-9]+-section-[a-zA-Z0-9]+):\s*[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+/gu)].map(match => match[1]);
+    const codes = line.match(/\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+\b/gu) || [];
+    if (!targets.length || !codes.every(allowed)) return null;
+    targets.forEach(target => sections.add(target));
+  }
+  return sections.size ? [...sections] : null;
+}
+
+type MaterialPreparationOptions = NonNullable<Parameters<typeof runMaterialPreparationOnce>[2]>;
+
+/**
+ * 쇼핑 essential 프로필: 본문 연출 사진 때문에 준비가 멈추면 그 사진만 빼고
+ * 판매자 실사진으로 구성해 한 번 더 진행한다. 새 이미지를 만들거나 다시 보내지 않는다.
+ */
+export async function runMaterialPreparation(id: string, deps: WorkflowDeps = defaults, options: MaterialPreparationOptions = {}) {
+  try { return await runMaterialPreparationOnce(id, deps, options); }
+  catch (error) {
+    if (resolveBrandLinkGateProfile("SHOPPING") !== "essential") throw error;
+    const dropSectionIds = droppableSceneSections(error);
+    if (!dropSectionIds) throw error;
+    const relaxed = await deps.call(`/api/brandlinks/${encodeURIComponent(id)}/draft/images`, "POST", { action: "replan_sources", dropSectionIds }).catch(() => null);
+    if (!relaxed?.recovery?.changed || relaxed.remainingMissing !== 0) throw error;
+    deps.onStage?.("문제 연출 사진 제외 · 판매자 사진으로 구성 · 다시 확인");
+    try { return await runMaterialPreparationOnce(id, deps, { ...options, rewriteFailed: false }); }
+    catch (second) { throw Object.assign(second as Error, { sceneDropAttempted: true }); }
+  }
+}
+
+async function runMaterialPreparationOnce(id: string, deps: WorkflowDeps = defaults, options: {
   rewriteFailed?: boolean;
   beforeRewrite?: () => Promise<void>;
   incrementalOnly?: boolean;
