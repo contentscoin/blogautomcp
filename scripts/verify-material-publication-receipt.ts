@@ -24,6 +24,9 @@ import { shoppingPhotoRoleAt } from "../src/lib/shopping-post-strategy";
 import type { CodexDraftOptions } from "./lib/codex-draft-provider";
 import { parseScopedPublicationResponse, serializeScopedPublicationResponse } from "./lib/publication-image-scoped-review";
 
+// 이 검사는 원본 사진의 본문 묘사 불일치도 막는 strict 검수의 승인 영수증을 고정한다. essential 분류는 verify-shopping-scene-relax가 검사한다.
+process.env.SHOPPING_GATE_PROFILE = "strict";
+
 const load = (file: string, overrides: Record<string, unknown>, replacement?: (source: string) => string) => {
   const original = fs.readFileSync(file, "utf8");
   const output = ts.transpileModule(replacement ? replacement(original) : original,

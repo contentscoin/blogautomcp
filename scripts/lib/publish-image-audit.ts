@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { partitionEssentialImageAuditFailures } from "./publish-image-audit-essential";
 import { isUnbrandedCommodityProduct, UNBRANDED_COMMODITY_IDENTITY_RULE_EN } from "./unbranded-product";
 import { shoppingImageFormatIssue } from "./shopping-image-format";
 import os from "node:os";
@@ -125,6 +126,7 @@ function invalidPhotoClaimDiagnostic(review: Record<string, unknown>, issue: str
     .replace(/((?:access_token|refresh_token|api[_-]?key|token)\s*[=:]\s*)[^\s,"}]+/giu, "$1[credential]");
 }
 
+
 export interface PublishImageAuditFailure {
   nodeIndex: number;
   assetPath: string;
@@ -148,6 +150,8 @@ export interface PublishImageAuditResult {
   /** Exact policy that formed the native request, captured before review. */
   policyFingerprint?: string;
   failures: PublishImageAuditFailure[];
+  /** essential 프로필에서 발행을 막지 않고 남긴 지적. */
+  advisories?: PublishImageAuditFailure[];
   /** An explicit non-certification of locally unobservable print, not a pass
    * verdict, product-identity waiver or permission to replace an image. */
   warnings?: Array<{nodeIndex:number;assetPath:string;sha256:string;code:"INTRINSIC_PRINT_UNVERIFIED";reason:string;evidenceSha256:string;
@@ -189,6 +193,8 @@ export interface PublishImageAuditOptions {
   selectedSourceDirectory?: string;
   /** Offline tests only. Production uses the visual draft provider. */
   review?: (options: CodexDraftOptions) => Promise<string>;
+  /** 쇼핑 essential 프로필: 판매자 원본 사진의 검수 형식 오류·본문 묘사 불일치는 권고로 남긴다. 미지정은 strict. */
+  gateProfile?: "strict" | "essential";
 }
 
 // Full decoded PNGs are embedded as base64 by Codex. Keep ample space below
@@ -1233,6 +1239,13 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
       if(recorded) {
         fail(warning.nodeIndex,warning.assetPath,"INVALID_REVIEW","이미 확정된 현재 사진의 인쇄 결함은 미검증 경고로 해제할 수 없습니다.");
         result.failures[result.failures.length-1].regenerationHold="uncorroborated-identifier";
+      }
+    }
+    if (options.gateProfile === "essential" && result.failures.length) {
+      const { blocking, advisories } = partitionEssentialImageAuditFailures(result.failures, options.imageAssets || []);
+      if (advisories.length) {
+        result.failures = blocking; result.advisories = advisories;
+        for (const advisory of advisories) console.warn(`      - 이미지 ${advisory.nodeIndex + 1} 권고(발행 차단 아님): ${advisory.code} ${advisory.reason.slice(0, 160)}`);
       }
     }
     result.ok = result.failures.length === 0;

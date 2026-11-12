@@ -11012,6 +11012,7 @@ async function main() {
         try {
           await assertPublishImagesSafe({
             brandLinkId: link.id,
+            gateProfile: resolveBrandLinkGateProfile("SHOPPING"),
             productName: product.name,
             selectedProduct: buildSelectedProductImageAuditContext(
               product.name,

@@ -32,6 +32,7 @@ async function exercise(prepareOutputDir: string | undefined, failure: boolean, 
     path: { join: (...parts: string[]) => parts.join("/") },
     getBrandPostPackageDir: () => "selected-package",
     buildSelectedProductImageAuditContext: () => "selected context",
+    resolveBrandLinkGateProfile: () => "strict",
     setStage: () => { checked++; },
     assertPublishImagesSafe: async (options: unknown) => {
       calls.push(options);

@@ -3,6 +3,7 @@ import { replanShoppingImageCoverage, type ImageReplanDependencies } from "../sr
 import type { BrandPostPackageManifestV2 } from "../src/lib/brand-post-package";
 import { SHOPPING_POST_CONTRACT_V1, buildPostQualityReport, type ResolvedPostSectionV1 } from "../src/lib/post-composition-contract";
 import { SHOPPING_POST_STRATEGY_VERSION, isShoppingSceneCoverageRelaxed } from "../src/lib/shopping-post-strategy";
+import { partitionEssentialImageAuditFailures } from "./lib/publish-image-audit-essential";
 import { droppableSceneSections, isOptionalSceneImageFailure, runMaterialPreparation } from "./lib/scheduled-draft-workflow";
 
 type Fixture = { hero?: boolean; original?: boolean; scenes?: string[][]; rejected?: string[]; running?: boolean; sellerPhotos?: string[]; repairFails?: boolean; held?: string[] };
@@ -228,6 +229,33 @@ async function main() {
   await assert.rejects(strictFlow.run);
   assert.deepEqual(strictFlow.calls, ["GET draft"], "strict 프로필은 기존 동작 그대로다");
   delete process.env.SHOPPING_GATE_PROFILE;
+
+  // 최종 이미지 검수(essential): 판매자 원본 사진의 검수 형식 오류·본문 묘사 불일치는 권고, 생성 사진과 다른 상품은 차단.
+  const auditAssets = [
+    { path: "/p/hero.png", role: "hero" as const, provenance: "PHOTO_TEXT_THUMBNAIL", creationMethod: "local-composite" },
+    { path: "/p/original.jpg", role: "body" as const, provenance: "ORIGINAL", creationMethod: "source" },
+    { path: "/p/scene.png", role: "body" as const, provenance: "GENERATED_SCENE", creationMethod: "reference-guided-scene", remoteGenerated: true },
+  ];
+  const finding = (nodeIndex: number, assetPath: string, code: string, extra: object = {}) => ({ nodeIndex, assetPath, code, reason: "r", ...extra });
+  // 실제 PC 사례: 원본 사진 검수 형식 오류 + 연출 사진의 상품 불일치 → 연출 사진만 막는다.
+  const beef = partitionEssentialImageAuditFailures([finding(1, "/p/original.jpg", "INVALID_REVIEW"),
+    finding(16, "/p/scene.png", "SEMANTIC_REJECTION", { rejectionScope: "product" }), finding(16, "/p/scene.png", "SEMANTIC_REJECTION", { rejectionScope: "product" })], auditAssets);
+  assert.deepEqual(beef.advisories.map(row => row.nodeIndex), [1]);
+  assert.deepEqual(beef.blocking.map(row => row.nodeIndex), [16, 16]);
+  const split = (rows: ReturnType<typeof finding>[]) => partitionEssentialImageAuditFailures(rows, auditAssets);
+  assert.equal(split([finding(1, "/p/original.jpg", "SEMANTIC_REJECTION", { rejectionScope: "section" })]).blocking.length, 0, "원본 사진과 본문 묘사 불일치는 권고");
+  assert.equal(split([finding(1, "/p/original.jpg", "SEMANTIC_REJECTION", { rejectionScope: "product" })]).blocking.length, 1, "원본이라도 다른 상품이면 막는다");
+  assert.equal(split([finding(1, "/p/original.jpg", "SEMANTIC_REJECTION")]).blocking.length, 1, "범위가 없는 거절은 막는다");
+  assert.equal(split([finding(0, "/p/hero.png", "INVALID_REVIEW")]).blocking.length, 0, "사진 썸네일의 검수 형식 오류는 권고");
+  assert.equal(split([finding(0, "/p/hero.png", "SEMANTIC_REJECTION", { rejectionScope: "section" })]).blocking.length, 1, "썸네일 문구가 상품과 다르면 막는다");
+  assert.equal(split([finding(5, "/p/scene.png", "INVALID_REVIEW")]).blocking.length, 1, "검수하지 못한 생성 사진은 발행하지 않는다");
+  assert.equal(split([finding(5, "/p/scene.png", "SEMANTIC_REJECTION", { rejectionScope: "section" })]).blocking.length, 1);
+  for (const code of ["MISSING_IMAGE", "INVALID_IMAGE", "IMAGE_CHANGED", "LONG_IMAGE", "INVALID_CONTEXT", "IMAGE_PAYLOAD_TOO_LARGE"])
+    assert.equal(split([finding(1, "/p/original.jpg", code)]).blocking.length, 1, `${code}는 항상 막는다`);
+  assert.equal(split([finding(1, "/p/original.jpg", "INVALID_REVIEW", { regenerationHold: "uncorroborated-identifier" })]).blocking.length, 1, "확정 결함 보류는 풀지 않는다");
+  assert.equal(split([finding(1, "/p/original.jpg", "INVALID_REVIEW"), finding(1, "/p/original.jpg", "IMAGE_CHANGED")]).blocking.length, 2, "한 사진에 막는 지적이 있으면 모두 막는다");
+  assert.equal(split([finding(1, "/p/unknown.jpg", "INVALID_REVIEW")]).blocking.length, 1, "자산 기록이 없는 사진은 막는다");
+  assert.equal(split([finding(-1, "", "INVALID_CONTEXT")]).blocking.length, 1);
 
   if (saved === undefined) delete process.env.SHOPPING_GATE_PROFILE;
   else process.env.SHOPPING_GATE_PROFILE = saved;

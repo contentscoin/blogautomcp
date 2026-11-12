@@ -6,6 +6,7 @@ import { materialRevision } from "./material-library";
 import { normalizePublishedPostText } from "./post-composition-contract";
 import { brandPostApprovalBinding, brandPostCompatibleApprovalBindings } from "./brand-post-approval-receipt";
 import { imageAuditFailureSections } from "./publish-image-failure-diagnostics";
+import { resolveBrandLinkGateProfile } from "../../scripts/lib/brandlink-content-readiness";
 
 /** Same pixel audit as publication, before a saved shopping material is approved.
  * A DB mutation claim is additionally held by the HTTP caller. */
@@ -27,7 +28,7 @@ export async function validateBrandPostPublishImages(id: string, productName?: s
     const composition = normalizePublishedPostText(manifest.composition);
     let audit: PublishImageAuditResult;
     try {
-    audit = await assertPublishImagesSafe({ brandLinkId: id,
+    audit = await assertPublishImagesSafe({ brandLinkId: id, gateProfile: resolveBrandLinkGateProfile("SHOPPING"),
       compatibleReadinessBindingKeys: brandPostCompatibleApprovalBindings(manifest, sourceDirectory),
       ...(options.bindReadiness === true ? { readinessBindingKey } : {}), productName: name,
       selectedProduct: buildSelectedProductImageAuditContext(
