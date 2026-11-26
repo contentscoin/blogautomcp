@@ -185,15 +185,15 @@ function assertKnownImageOperationResult(result: Pick<Result, "code" | "error" |
   if (unresolved) throw Object.assign(new Error(result.error || result.errors?.join("\n") || result.message ||
     "이미지 작업의 완료를 확인할 수 없습니다. 기존 원고·사진과 요청을 확인한 뒤 재개하세요."), { code: unresolved, errors: result.errors });
 }
-/** A malformed reviewer verdict (INVALID_REVIEW) next to otherwise definitive
- * rows. One fresh audit of the same pixels may resolve it; it never counts as
+/** A malformed reviewer verdict (INVALID_REVIEW) or a review call that failed
+ * (REVIEW_CALL_FAILED) next to otherwise definitive rows. One fresh audit of the same pixels may resolve it; it never counts as
  * a pass and never authorizes generation. */
 export function isInvalidReviewReauditCandidate(error: unknown): boolean {
   const failure = error as { code?: string; imageAuditFailures?: Array<{ code?: string }> };
   const rows = failure?.imageAuditFailures;
   return failure?.code === "PUBLISH_IMAGE_AUDIT_FAILED" && Array.isArray(rows) && rows.length > 0 &&
-    rows.some(row => row?.code === "INVALID_REVIEW") &&
-    rows.every(row => ["INVALID_REVIEW", "SEMANTIC_REJECTION", "LONG_IMAGE"].includes(row?.code || ""));
+    rows.some(row => row?.code === "INVALID_REVIEW" || row?.code === "REVIEW_CALL_FAILED") &&
+    rows.every(row => ["INVALID_REVIEW", "REVIEW_CALL_FAILED", "SEMANTIC_REJECTION", "LONG_IMAGE"].includes(row?.code || ""));
 }
 function isDefinitivePublishImageFailure(error: unknown): boolean {
   const failure = error as { code?: string; errors?: string[] };

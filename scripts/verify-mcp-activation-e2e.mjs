@@ -57,6 +57,9 @@ const userData = await mkdtemp(join(tmpdir(), "blogautomcp-activation-e2e-"));
 let revoked = false;
 let pairCalls = 0;
 let expectedToken = "";
+// The app accepts only production-shaped credentials (device_ + 16 chars, 43-char token).
+const e2eDeviceId = (n) => `device_${`e2e${n}`.padEnd(16, "0")}`;
+const e2eDeviceToken = (n) => `tok${n}`.padEnd(43, "x");
 const claimBodies = [];
 const pairBodies = [];
 
@@ -73,12 +76,21 @@ const mockServer = createServer(async (request, response) => {
       return;
     }
     pairCalls += 1;
-    expectedToken = `token-e2e-${pairCalls}`;
+    expectedToken = e2eDeviceToken(pairCalls);
     response.writeHead(201, { "content-type": "application/json" });
     response.end(JSON.stringify({
       success: true,
-      data: { deviceId: `device-e2e-${pairCalls}`, deviceToken: expectedToken, method: body.pairCode ? "pair-code" : "mcp-url" },
+      data: { deviceId: e2eDeviceId(pairCalls), deviceToken: expectedToken, method: body.pairCode ? "pair-code" : "mcp-url" },
     }));
+    return;
+  }
+
+  // Claim capability probe: this mock is a legacy (unkeyed) site, which answers
+  // GET with 405. The app refuses to claim when the probe cannot be verified.
+  if (request.method === "GET" && request.url === "/api/agent/jobs/claim") {
+    const tokenMatches = request.headers.authorization === `Bearer ${expectedToken}`;
+    response.writeHead(revoked || !tokenMatches ? 401 : 405, { "content-type": "application/json" });
+    response.end(JSON.stringify({ success: false }));
     return;
   }
 
@@ -164,7 +176,7 @@ try {
     }),
   }));
   assert.equal(repaired.response.status, 200, JSON.stringify(repaired.payload));
-  assert.equal(repaired.payload.data.deviceId, "device-e2e-2");
+  assert.equal(repaired.payload.data.deviceId, e2eDeviceId(2));
   assert.equal(pairCalls, 2);
 
   const reconnectedPoll = await json(await fetch(`${appOrigin}/api/remote-agent/poll`, {
@@ -199,7 +211,7 @@ try {
   }));
   assert.equal(codePaired.response.status, 200, JSON.stringify(codePaired.payload));
   assert.equal(codePaired.payload.data.method, "pair-code");
-  assert.equal(codePaired.payload.data.deviceId, "device-e2e-3");
+  assert.equal(codePaired.payload.data.deviceId, e2eDeviceId(3));
   assert.equal(pairBodies.at(-1)?.pairCode, "k7pm-3xq2");
   assert.equal(pairBodies.at(-1)?.deviceName, "E2E PC by code");
   assert.equal(pairBodies.at(-1)?.mcpUrl, undefined);

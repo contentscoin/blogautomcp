@@ -59,6 +59,25 @@ export function isSameRequestOrigin(request: NextRequest, value: string | null):
   }
 }
 
+function normalizedHostname(hostname: string): string {
+  return hostname.trim().toLowerCase().replace(/^\[(.*)\]$/u, "$1");
+}
+
+/**
+ * DNS 리바인딩 방어: 브라우저는 공격자 도메인을 127.0.0.1로 돌려도 Host 헤더에
+ * 공격자 도메인을 그대로 싣는다. 그 경우 Origin과 Host가 서로 같아 동일 출처 검사만으로는
+ * 막히지 않으므로, 키 없이 쓰는 기본 로컬 설치에서는 요청이 실제로 loopback 주소(또는
+ * APP_HOST·LOCAL_ALLOWED_HOSTS로 명시한 주소)로 들어왔는지 함께 확인한다.
+ */
+export function isTrustedLocalHost(request: NextRequest): boolean {
+  const inbound = requestHostUrl(request) || request.nextUrl;
+  const hostname = normalizedHostname(inbound.hostname);
+  if (LOCAL_LOOPBACK_HOSTS.has(hostname)) return true;
+  const configured = [process.env.APP_HOST || "", ...(process.env.LOCAL_ALLOWED_HOSTS || "").split(",")]
+    .map(normalizedHostname).filter(value => value && value !== "0.0.0.0" && value !== "::");
+  return configured.includes(hostname);
+}
+
 export function configuredAdminApiKey(): string {
   return process.env.ADMIN_API_KEY?.trim() || "";
 }

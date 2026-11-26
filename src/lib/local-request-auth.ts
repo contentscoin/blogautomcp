@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   configuredAdminApiKey,
+  isTrustedLocalHost,
   isAuthenticatedAdminRequest,
   isCrossSiteBrowserRequest,
   isSameRequestOrigin,
@@ -24,7 +25,7 @@ export function requireTrustedLocalMutation(request: NextRequest): NextResponse 
     );
   }
 
-  if (isCrossSiteBrowserRequest(request)) {
+  if (!isTrustedLocalHost(request) || isCrossSiteBrowserRequest(request)) {
     return NextResponse.json(
       { success: false, error: "로컬 앱에서 시작한 요청만 허용됩니다." },
       { status: 403 },

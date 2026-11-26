@@ -136,7 +136,7 @@ function invalidPhotoClaimDiagnostic(review: Record<string, unknown>, issue: str
 export interface PublishImageAuditFailure {
   nodeIndex: number;
   assetPath: string;
-  code: "INVALID_CONTEXT" | "MISSING_IMAGE" | "INVALID_IMAGE" | "LONG_IMAGE" | "SEMANTIC_REJECTION" | "INVALID_REVIEW" | "IMAGE_CHANGED" | "IMAGE_PAYLOAD_TOO_LARGE";
+  code: "INVALID_CONTEXT" | "MISSING_IMAGE" | "INVALID_IMAGE" | "LONG_IMAGE" | "SEMANTIC_REJECTION" | "INVALID_REVIEW" | "REVIEW_CALL_FAILED" | "IMAGE_CHANGED" | "IMAGE_PAYLOAD_TOO_LARGE";
   reason: string;
   /** Wrong product, mixed variants and notice panels are unsafe in every section. */
   rejectionScope?: PublicationImageRejectionScope;
@@ -1074,8 +1074,10 @@ async function auditPublishImagesUnlocked(options: PublishImageAuditOptions): Pr
       });
       if (callError !== null) {
         if (JSON.stringify(call) !== exactRequestBinding || !await inputsStillBound(batch)) { failChangedBatch(batch); continue; }
-        for (const candidate of batch) fail(candidate.nodeIndex, candidate.assetPath, "INVALID_REVIEW",
-          `Visual review call failed after one retry: ${String((callError as Error)?.message || callError).slice(0, 300)}`);
+        // No verdict was produced at all: keep it distinct from a malformed
+        // verdict so no gate profile can downgrade an unreviewed photo to advisory.
+        for (const candidate of batch) fail(candidate.nodeIndex, candidate.assetPath, "REVIEW_CALL_FAILED",
+          `검수 호출 실패(1회 재시도 후): 이 사진은 검수를 받지 못했습니다. 다시 검수하세요. Visual review call failed after one retry: ${String((callError as Error)?.message || callError).slice(0, 300)}`);
         continue;
       }
       if (JSON.stringify(call) !== exactRequestBinding) { failChangedBatch(batch); continue; }

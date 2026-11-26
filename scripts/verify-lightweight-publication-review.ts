@@ -243,7 +243,8 @@ async function main() {
   respond = async () => { throw new Error("socket timeout"); }; nativeCalls = [];
   const transport = await final(options());
   assert.equal(transport.ok, false); assert.equal(nativeCalls.length, 2, "exactly one retry of a failed review call");
-  assert(transport.failures.length > 0 && transport.failures.every(row => row.code === "INVALID_REVIEW" && /review call failed/u.test(row.reason)));
+  assert(transport.failures.length > 0 && transport.failures.every(row => row.code === "REVIEW_CALL_FAILED" && /검수 호출 실패/u.test(row.reason) && /review call failed/u.test(row.reason)),
+    "a failed call is its own code, never a malformed verdict an essential profile could downgrade");
   assert(!(transport.lightweightReviews || []).some(review => review.rawResponse === ""), "an empty failed call is not a stored review");
   let flaky = 0; respond = async () => { if (flaky++ === 0) throw new Error("transient"); return nativeReviewResponse([good()]); }; nativeCalls = [];
   assert.equal((await final(options())).ok, true, "a transient first failure recovers on the single retry"); assert.equal(nativeCalls.length, 2);

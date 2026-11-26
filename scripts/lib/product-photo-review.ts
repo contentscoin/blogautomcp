@@ -423,7 +423,7 @@ export async function selectVerifiedProductSectionImages(
         if (target.allowProductPhoto && target.allowScene) lastRejectedClass.set(row.targetIndex, row.reviewClass);
         const entry = entries.find(entry => entry.targetIndex === row.targetIndex && entry.sourceSha256 === row.sourceSha256);
         if (entry) {
-          const reviewIncomplete = failureCode === "INVALID_REVIEW";
+          const reviewIncomplete = failureCode === "INVALID_REVIEW" || failureCode === "REVIEW_CALL_FAILED";
           entry.status = reviewIncomplete ? "review-failed" : "rejected";
           entry.suitability = reviewIncomplete ? "unreviewed" : "rejected";
           entry.reason = `${reviewIncomplete ? "FINAL_RULE_REVIEW_INCOMPLETE" : "FINAL_RULE_SEMANTIC_REJECTION"}: ${reason}`;

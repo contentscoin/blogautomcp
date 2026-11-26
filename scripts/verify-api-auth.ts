@@ -3,6 +3,7 @@
  *   - ADMIN_API_KEY 가 설정되면 Origin/Referer/Sec-Fetch-Site 만으로는 통과하지 못한다.
  *   - x-admin-api-key 헤더 또는 대시보드 세션 쿠키(+동일 출처)만 통과한다.
  *   - 키가 없으면 동일 출처인 로컬 앱 요청만 통과한다.
+ *   - 키가 없어도 다른 사이트 요청(CSRF)과 loopback이 아닌 Host(DNS 리바인딩)는 거부한다.
  *   - 커스텀 서버 내부 URL과 실제 수신 Host가 달라도 실제 로컬 Origin을 인식한다.
  */
 
@@ -27,9 +28,23 @@ async function main() {
     });
   const status = (response: ReturnType<typeof requireAdminApiKey>) => (response ? response.status : 200);
 
-  // 키가 없으면 열려 있다.
+  // 키가 없으면 로컬 앱·스크립트 요청은 자격 증명 없이 통과한다.
   process.env.ADMIN_API_KEY = "";
-  assert.equal(status(requireAdminApiKey(request())), 200, "키 미설정: 통과");
+  const local = (headers: Record<string, string> = {}) =>
+    new NextRequest("http://127.0.0.1:43127/api/materials/publish", { method: "POST", headers: { host: "127.0.0.1:43127", ...headers } });
+  assert.equal(status(requireAdminApiKey(local())), 200, "키 미설정: 출처 헤더 없는 로컬 스크립트 통과");
+  assert.equal(status(requireAdminApiKey(local({ origin: "http://127.0.0.1:43127", "sec-fetch-site": "same-origin" }))), 200, "키 미설정: 로컬 대시보드 통과");
+  assert.equal(status(requireAdminApiKey(local({ host: "localhost:43127", origin: "http://localhost:43127" }))), 200, "키 미설정: localhost 별칭 통과");
+  // 다른 사이트가 사용자의 브라우저로 로컬 발행 API를 부르는 CSRF.
+  assert.equal(status(requireAdminApiKey(local({ origin: "https://evil.example", "sec-fetch-site": "cross-site" }))), 403, "키 미설정: 다른 사이트 요청 거부");
+  assert.equal(status(requireAdminApiKey(local({ origin: "https://evil.example" }))), 403, "키 미설정: 다른 Origin 거부");
+  assert.equal(status(requireAdminApiKey(local({ "sec-fetch-site": "same-site" }))), 403, "키 미설정: same-site 거부");
+  // DNS 리바인딩: 공격자 도메인이 127.0.0.1로 풀리면 Origin과 Host가 같은 외부 도메인이 된다.
+  assert.equal(status(requireAdminApiKey(request({ origin: base, "sec-fetch-site": "same-origin" }))), 403, "키 미설정: loopback 아닌 Host 거부");
+  assert.equal((await requireAdminApiKey(request())!.json()).code, "LOCAL_REQUEST_REQUIRED");
+  assert.equal(status(requireTrustedLocalMutation(request({ origin: base }))), 403, "키 미설정: remote-agent 변경도 loopback 아닌 Host 거부");
+  process.env.LOCAL_ALLOWED_HOSTS = "app.example.test";
+  assert.equal(status(requireAdminApiKey(request({ origin: base, "sec-fetch-site": "same-origin" }))), 200, "LOCAL_ALLOWED_HOSTS로 명시한 Host 허용");
 
   process.env.ADMIN_API_KEY = "secret-key-1234";
   const token = adminSessionTokenFor("secret-key-1234");
@@ -56,7 +71,8 @@ async function main() {
   assert.equal(status(requireTrustedLocalMutation(request({ "x-admin-api-key": "secret-key-1234" }))), 200);
   assert.equal(status(requireTrustedLocalMutation(request({ origin: base }, token))), 200);
   process.env.ADMIN_API_KEY = "";
-  assert.equal(status(requireTrustedLocalMutation(request({ origin: base }))), 200, "키 미설정: 동일 출처 브라우저 요청 허용");
+  assert.equal(status(requireTrustedLocalMutation(request({ origin: base }))), 200, "키 미설정: 동일 출처 브라우저 요청 허용(허용 Host)");
+  delete process.env.LOCAL_ALLOWED_HOSTS;
   assert.equal(status(requireTrustedLocalMutation(request({ origin: "https://evil.example" }))), 403, "키 미설정: 다른 출처 거부");
   assert.equal(status(requireTrustedLocalMutation(request({ "sec-fetch-site": "cross-site" }))), 403, "키 미설정: cross-site 거부");
 

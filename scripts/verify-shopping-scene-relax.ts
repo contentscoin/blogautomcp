@@ -250,7 +250,10 @@ async function main() {
   assert.equal(split([finding(0, "/p/hero.png", "SEMANTIC_REJECTION", { rejectionScope: "section" })]).blocking.length, 1, "썸네일 문구가 상품과 다르면 막는다");
   assert.equal(split([finding(5, "/p/scene.png", "INVALID_REVIEW")]).blocking.length, 1, "검수하지 못한 생성 사진은 발행하지 않는다");
   assert.equal(split([finding(5, "/p/scene.png", "SEMANTIC_REJECTION", { rejectionScope: "section" })]).blocking.length, 1);
-  for (const code of ["MISSING_IMAGE", "INVALID_IMAGE", "IMAGE_CHANGED", "LONG_IMAGE", "INVALID_CONTEXT", "IMAGE_PAYLOAD_TOO_LARGE"])
+  // 검수 호출 자체가 실패하면 판정이 없다. 원본 사진·사진 썸네일이라도 권고로 넘기지 않는다.
+  assert.equal(split([finding(1, "/p/original.jpg", "REVIEW_CALL_FAILED")]).blocking.length, 1, "검수 호출이 실패한 원본 사진은 막는다");
+  assert.equal(split([finding(0, "/p/hero.png", "REVIEW_CALL_FAILED")]).blocking.length, 1, "검수 호출이 실패한 사진 썸네일은 막는다");
+  for (const code of ["MISSING_IMAGE", "INVALID_IMAGE", "IMAGE_CHANGED", "LONG_IMAGE", "INVALID_CONTEXT", "IMAGE_PAYLOAD_TOO_LARGE", "REVIEW_CALL_FAILED"])
     assert.equal(split([finding(1, "/p/original.jpg", code)]).blocking.length, 1, `${code}는 항상 막는다`);
   assert.equal(split([finding(1, "/p/original.jpg", "INVALID_REVIEW", { regenerationHold: "uncorroborated-identifier" })]).blocking.length, 1, "확정 결함 보류는 풀지 않는다");
   assert.equal(split([finding(1, "/p/original.jpg", "INVALID_REVIEW"), finding(1, "/p/original.jpg", "IMAGE_CHANGED")]).blocking.length, 2, "한 사진에 막는 지적이 있으면 모두 막는다");
