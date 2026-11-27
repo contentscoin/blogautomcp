@@ -246,6 +246,20 @@ async function main() {
   assert(transport.failures.length > 0 && transport.failures.every(row => row.code === "REVIEW_CALL_FAILED" && /검수 호출 실패/u.test(row.reason) && /review call failed/u.test(row.reason)),
     "a failed call is its own code, never a malformed verdict an essential profile could downgrade");
   assert(!(transport.lightweightReviews || []).some(review => review.rawResponse === ""), "an empty failed call is not a stored review");
+  // Shopping essential profile, seller-original photo: a malformed verdict stays
+  // an advisory (1.3.176), but a photo that was never reviewed must block.
+  const sellerOriginal = (): PublishImageAuditOptions => ({ ...options(), gateProfile: "essential",
+    imageAssets: [{ path: photo, sourcePath: photo, sha256: fileHash(photo), sectionId: "spec", role: "body", provenance: "ORIGINAL", creationMethod: "source" }] });
+  nativeCalls = [];
+  const unreviewedOriginal = await final(sellerOriginal());
+  assert.equal(unreviewedOriginal.ok, false, "essential: an unreviewed seller original does not pass");
+  assert.equal(nativeCalls.length, 2);
+  assert(unreviewedOriginal.failures.length > 0 && unreviewedOriginal.failures.every(row => row.code === "REVIEW_CALL_FAILED"), JSON.stringify(unreviewedOriginal.failures));
+  assert.equal(unreviewedOriginal.advisories, undefined, "a failed call is never downgraded to an advisory");
+  respond = async () => "not a verdict"; nativeCalls = [];
+  const malformedOriginal = await final(sellerOriginal());
+  assert.equal(malformedOriginal.ok, true, `essential: a malformed verdict on a seller original stays advisory ${JSON.stringify(malformedOriginal.failures)}`);
+  assert(malformedOriginal.advisories?.length && malformedOriginal.advisories.every(row => row.code === "INVALID_REVIEW"), JSON.stringify(malformedOriginal.advisories));
   let flaky = 0; respond = async () => { if (flaky++ === 0) throw new Error("transient"); return nativeReviewResponse([good()]); }; nativeCalls = [];
   assert.equal((await final(options())).ok, true, "a transient first failure recovers on the single retry"); assert.equal(nativeCalls.length, 2);
   respond = async () => nativeReviewResponse([{ ...good(), accepted: false }]);

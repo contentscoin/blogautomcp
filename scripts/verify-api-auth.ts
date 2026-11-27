@@ -3,7 +3,8 @@
  *   - ADMIN_API_KEY 가 설정되면 Origin/Referer/Sec-Fetch-Site 만으로는 통과하지 못한다.
  *   - x-admin-api-key 헤더 또는 대시보드 세션 쿠키(+동일 출처)만 통과한다.
  *   - 키가 없으면 동일 출처인 로컬 앱 요청만 통과한다.
- *   - 키가 없어도 다른 사이트 요청(CSRF)과 loopback이 아닌 Host(DNS 리바인딩)는 거부한다.
+ *   - 키가 없어도 다른 사이트 요청(CSRF)과 허용하지 않은 호스트 이름(DNS 리바인딩)은 거부한다.
+ *     IP 주소·localhost 접속과 출처 헤더가 없는 스크립트는 통과한다.
  *   - 커스텀 서버 내부 URL과 실제 수신 Host가 달라도 실제 로컬 Origin을 인식한다.
  */
 
@@ -40,11 +41,46 @@ async function main() {
   assert.equal(status(requireAdminApiKey(local({ origin: "https://evil.example" }))), 403, "키 미설정: 다른 Origin 거부");
   assert.equal(status(requireAdminApiKey(local({ "sec-fetch-site": "same-site" }))), 403, "키 미설정: same-site 거부");
   // DNS 리바인딩: 공격자 도메인이 127.0.0.1로 풀리면 Origin과 Host가 같은 외부 도메인이 된다.
-  assert.equal(status(requireAdminApiKey(request({ origin: base, "sec-fetch-site": "same-origin" }))), 403, "키 미설정: loopback 아닌 Host 거부");
-  assert.equal((await requireAdminApiKey(request())!.json()).code, "LOCAL_REQUEST_REQUIRED");
-  assert.equal(status(requireTrustedLocalMutation(request({ origin: base }))), 403, "키 미설정: remote-agent 변경도 loopback 아닌 Host 거부");
+  assert.equal(status(requireAdminApiKey(request({ origin: base, "sec-fetch-site": "same-origin" }))), 403, "키 미설정: 허용하지 않은 호스트 이름 거부");
+  const hostRejection = await requireAdminApiKey(request())!.json();
+  assert.equal(hostRejection.code, "LOCAL_REQUEST_REQUIRED");
+  assert.match(hostRejection.error, /LOCAL_ALLOWED_HOSTS/u, "Host 거부 안내는 해결 방법을 알려준다");
+  const mutationRejection = requireTrustedLocalMutation(request({ origin: base }))!;
+  assert.equal(mutationRejection.status, 403, "키 미설정: remote-agent 변경도 허용하지 않은 호스트 이름 거부");
+  assert.equal((await mutationRejection.json()).code, "LOCAL_REQUEST_REQUIRED");
+  const crossSiteRejection = await requireAdminApiKey(local({ origin: "https://evil.example" }))!.json();
+  assert.equal(crossSiteRejection.code, "LOCAL_REQUEST_REQUIRED");
+  assert.match(crossSiteRejection.error, /x-admin-api-key/u, "다른 사이트 요청 거부 안내는 외부 도구용 방법을 알려준다");
+  // 리바인딩은 DNS 이름으로만 가능하다. Host가 IP 주소이면(같은 공유기의 다른 기기, 0.0.0.0 바인딩, IPv6) 통과한다.
+  const hosted = (host: string, headers: Record<string, string> = {}) =>
+    local({ host, origin: `http://${host}`, "sec-fetch-site": "same-origin", ...headers });
+  for (const host of ["192.168.0.12:43127", "0.0.0.0:43127", "[::1]:43127", "127.0.0.1"]) {
+    assert.equal(status(requireAdminApiKey(hosted(host))), 200, `키 미설정: IP 주소 Host 통과 (${host})`);
+    assert.equal(status(requireTrustedLocalMutation(hosted(host))), 200, `키 미설정: IP 주소 Host의 변경 요청 통과 (${host})`);
+  }
+  assert.equal(status(requireAdminApiKey(hosted("192.168.0.12:43127", { origin: "https://evil.example", "sec-fetch-site": "cross-site" }))), 403,
+    "IP 주소 Host라도 다른 사이트 요청은 거부");
+  // IP나 localhost처럼 보이게 만든 공격자 도메인, 해석할 수 없는 Host는 거부한다.
+  for (const host of ["127.0.0.1.evil.example:43127", "localhost.evil.example:43127", "evil.example", "localhost.", "bad host"]) {
+    assert.equal(status(requireAdminApiKey(hosted(host))), 403, `키 미설정: 허용하지 않은 Host 거부 (${host})`);
+    assert.equal(status(requireTrustedLocalMutation(hosted(host))), 403, `키 미설정: 허용하지 않은 Host의 변경 요청 거부 (${host})`);
+  }
+  // 출처 헤더가 없는 요청도 Host가 허용되지 않으면 거부한다(해석할 수 없는 Host를 내부 URL로 대신 판단하지 않는다).
+  for (const host of ["bad host", "evil.example:43127"])
+    assert.equal(status(requireAdminApiKey(local({ host }))), 403, `키 미설정: 출처 헤더 없이도 허용하지 않은 Host 거부 (${host})`);
+  // 명시한 이름만 추가로 받는다. 포트·스킴·대소문자·공백이 섞여 있어도 이름으로 비교한다.
+  for (const allowed of ["app.example.test", "app.example.test:3001", "http://app.example.test:3001", " other.test , APP.Example.Test "]) {
+    process.env.LOCAL_ALLOWED_HOSTS = allowed;
+    assert.equal(status(requireAdminApiKey(request({ origin: base, "sec-fetch-site": "same-origin" }))), 200, `LOCAL_ALLOWED_HOSTS로 명시한 Host 허용 (${allowed})`);
+  }
+  process.env.LOCAL_ALLOWED_HOSTS = "other.test,*";
+  assert.equal(status(requireAdminApiKey(request({ origin: base, "sec-fetch-site": "same-origin" }))), 403, "LOCAL_ALLOWED_HOSTS는 와일드카드를 받지 않는다");
+  delete process.env.LOCAL_ALLOWED_HOSTS;
+  process.env.APP_HOST = "app.example.test";
+  assert.equal(status(requireAdminApiKey(request({ origin: base, "sec-fetch-site": "same-origin" }))), 200, "APP_HOST로 지정한 이름 허용");
+  delete process.env.APP_HOST;
+  assert.equal(status(requireAdminApiKey(request({ origin: base, "sec-fetch-site": "same-origin" }))), 403, "설정을 지우면 다시 거부");
   process.env.LOCAL_ALLOWED_HOSTS = "app.example.test";
-  assert.equal(status(requireAdminApiKey(request({ origin: base, "sec-fetch-site": "same-origin" }))), 200, "LOCAL_ALLOWED_HOSTS로 명시한 Host 허용");
 
   process.env.ADMIN_API_KEY = "secret-key-1234";
   const token = adminSessionTokenFor("secret-key-1234");

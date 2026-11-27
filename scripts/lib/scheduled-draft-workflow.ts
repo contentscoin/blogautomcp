@@ -1008,11 +1008,14 @@ async function runMaterialPreparationOnce(id: string, deps: WorkflowDeps = defau
     try {
       await claimedCall(`${base}/draft`, "PATCH", { action: "approve" });
     } catch (firstApproveError) {
-      // One bounded fresh audit for malformed reviewer verdicts. A second
-      // failure (including remaining INVALID_REVIEW) takes the normal route.
+      // One bounded fresh audit for malformed reviewer verdicts or a failed
+      // review call. A second failure (including remaining INVALID_REVIEW or
+      // REVIEW_CALL_FAILED) takes the normal route.
       if (completedHeroPolicyReviewAttempted || invalidReviewReauditAttempted || !isInvalidReviewReauditCandidate(firstApproveError)) throw firstApproveError;
       invalidReviewReauditAttempted = true;
-      deps.onStage?.("검수 응답 형식 오류 · 동일 사진 1회 재검수");
+      const reviewCallFailed = (firstApproveError as { imageAuditFailures?: Array<{ code?: string }> }).imageAuditFailures
+        ?.some(row => row?.code === "REVIEW_CALL_FAILED");
+      deps.onStage?.(reviewCallFailed ? "검수 호출 실패 · 동일 사진 1회 재검수" : "검수 응답 형식 오류 · 동일 사진 1회 재검수");
       await claimedCall(`${base}/draft`, "PATCH", { action: "approve" });
     }
   } catch (error) {

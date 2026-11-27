@@ -178,7 +178,8 @@ CRON_SECRET="랜덤한_긴_문자열"
 
 - `ADMIN_API_KEY`: 설정하면 모든 관리자 API(발행/설정/중지/썸네일 등)가 실제 자격 증명을 요구합니다. 외부 스크립트는 `x-admin-api-key` 헤더를 붙이고, 브라우저 대시보드는 첫 화면에서 키를 한 번 입력해 HttpOnly 세션 쿠키를 받습니다(데스크톱 앱은 자동으로 헤더를 붙입니다). `Origin`/`Referer` 같은 출처 헤더만으로는 통과하지 않습니다.
 - `CRON_SECRET`: `/api/schedule/cron` 호출 시 `x-cron-secret` 또는 `Authorization: Bearer ...` 필요
-- 키를 비워 두면(기본 로컬 사용) 종전처럼 인증 없이 동작합니다.
+- 키를 비워 두면(기본 로컬 사용) 인증 없이 동작합니다. 다만 브라우저를 거친 공격을 막기 위해 다른 사이트에서 보낸 브라우저 요청과, IP 주소나 `localhost`가 아닌 호스트 이름으로 들어온 요청은 거부합니다(403 `LOCAL_REQUEST_REQUIRED`). 앱 화면, 출처 헤더가 없는 스크립트(curl 등), IP 주소 접속은 그대로 통과합니다.
+- `LOCAL_ALLOWED_HOSTS`: 별칭·터널·프록시처럼 다른 호스트 이름으로 앱을 열어야 할 때 그 이름을 쉼표로 적습니다(예: `mypc.local`). `ADMIN_API_KEY`를 설정한 경우에는 필요 없습니다.
 
 예시:
 ```bash

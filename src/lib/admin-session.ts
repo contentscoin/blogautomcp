@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
 import type { NextRequest } from "next/server";
 
 /**
@@ -63,19 +64,39 @@ function normalizedHostname(hostname: string): string {
   return hostname.trim().toLowerCase().replace(/^\[(.*)\]$/u, "$1");
 }
 
+/** .env 항목은 "이름", "이름:포트", "http://이름:포트" 어느 형태로 적어도 호스트 이름만 비교한다. */
+function configuredHostname(entry: string): string {
+  const value = entry.trim();
+  if (!value) return "";
+  try {
+    return normalizedHostname(new URL(/^[a-z][a-z0-9+.-]*:\/\//iu.test(value) ? value : `http://${value}`).hostname);
+  } catch {
+    return "";
+  }
+}
+
+export const LOCAL_HOST_REJECTED_MESSAGE =
+  "허용되지 않은 주소로 들어온 요청입니다. 앱은 127.0.0.1 또는 localhost 주소로 여세요. " +
+  "다른 호스트 이름으로 접속하려면 .env의 LOCAL_ALLOWED_HOSTS에 그 이름을 추가하거나 ADMIN_API_KEY를 설정하세요.";
+export const CROSS_SITE_REJECTED_MESSAGE =
+  "다른 사이트에서 보낸 브라우저 요청은 허용되지 않습니다. 앱 화면에서 실행하세요. " +
+  "외부 도구에서 호출하려면 ADMIN_API_KEY를 설정하고 x-admin-api-key 헤더를 붙이세요.";
+
 /**
  * DNS 리바인딩 방어: 브라우저는 공격자 도메인을 127.0.0.1로 돌려도 Host 헤더에
- * 공격자 도메인을 그대로 싣는다. 그 경우 Origin과 Host가 서로 같아 동일 출처 검사만으로는
- * 막히지 않으므로, 키 없이 쓰는 기본 로컬 설치에서는 요청이 실제로 loopback 주소(또는
- * APP_HOST·LOCAL_ALLOWED_HOSTS로 명시한 주소)로 들어왔는지 함께 확인한다.
+ * 공격자 도메인 이름을 그대로 싣는다. 그 경우 Origin과 Host가 서로 같아 동일 출처 검사만으로는
+ * 막히지 않는다. 리바인딩은 DNS 이름으로만 가능하므로 Host가 IP 주소이거나 localhost이면
+ * 통과시키고(같은 PC·같은 공유기의 IP 접속은 그대로 동작), 그 밖의 이름은
+ * APP_HOST·LOCAL_ALLOWED_HOSTS에 명시한 것만 받는다. 해석할 수 없는 Host는 거부한다.
  */
-export function isTrustedLocalHost(request: NextRequest): boolean {
-  const inbound = requestHostUrl(request) || request.nextUrl;
+export function isRebindingSafeHost(request: NextRequest): boolean {
+  const inbound = request.headers.get("host")?.trim() ? requestHostUrl(request) : request.nextUrl;
+  if (!inbound) return false;
   const hostname = normalizedHostname(inbound.hostname);
-  if (LOCAL_LOOPBACK_HOSTS.has(hostname)) return true;
-  const configured = [process.env.APP_HOST || "", ...(process.env.LOCAL_ALLOWED_HOSTS || "").split(",")]
-    .map(normalizedHostname).filter(value => value && value !== "0.0.0.0" && value !== "::");
-  return configured.includes(hostname);
+  if (!hostname) return false;
+  if (hostname === "localhost" || isIP(hostname) !== 0) return true;
+  return [process.env.APP_HOST || "", ...(process.env.LOCAL_ALLOWED_HOSTS || "").split(",")]
+    .map(configuredHostname).includes(hostname);
 }
 
 export function configuredAdminApiKey(): string {

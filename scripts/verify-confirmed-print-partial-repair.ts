@@ -141,10 +141,15 @@ async function main() {
       { code: "SEMANTIC_REJECTION", sectionId: assets[0].sectionId, assetPath: files[0], rejectionScope: "section" },
       { code: "INVALID_REVIEW", sectionId: assets[1].sectionId, assetPath: files[1], rejectionScope: "section" },
     ] });
-  async function workflow(kind: "partial" | "none" | "invalid-only" | "uncertain" | "auth" | "quota" | "invalid-proof", diagnose = false) {
+  async function workflow(kind: "partial" | "none" | "invalid-only" | "call-failed-only" | "uncertain" | "auth" | "quota" | "invalid-proof", diagnose = false) {
     const actions: string[] = [], stages: string[] = [];
     const repairCode = ({ uncertain: "ECONNRESET", auth: "CODEX_AUTH_REQUIRED", quota: "CODEX_USAGE_LIMIT_REACHED", "invalid-proof": "IMAGE_RESUME_REQUIRED" } as Record<string, string>)[kind];
-    const error = kind === "invalid-only" ? Object.assign(new Error("opaque only"), { code: originalFailure.code, errors: ["INVALID_REVIEW: opaque"], imageAuditFailures: [originalFailure.imageAuditFailures[1]] }) : originalFailure;
+    // A review call that failed (provider timeout/outage) says nothing about the photo: like an opaque
+    // verdict it gets one bounded re-audit and then stops, with no repair, regeneration, replan or rewrite.
+    const opaqueOnly = kind === "invalid-only" || kind === "call-failed-only";
+    const opaqueCode = kind === "call-failed-only" ? "REVIEW_CALL_FAILED" : "INVALID_REVIEW";
+    const error = opaqueOnly ? Object.assign(new Error("opaque only"), { code: originalFailure.code, errors: [`${opaqueCode}: opaque`],
+      imageAuditFailures: [{ ...originalFailure.imageAuditFailures[1], code: opaqueCode }] }) : originalFailure;
     await assert.rejects(runMaterialPreparation("workflow-subset", { pause: async () => {}, onStage: text => stages.push(text), call: async (_url, method, body) => {
       const action = (body as { action?: string } | undefined)?.action || method; actions.push(action);
       if (action === "approve" || action === "audit_photo_descriptions") throw error;
@@ -166,13 +171,15 @@ async function main() {
       }
       return true;
     }); checks++;
-    equal(actions.filter(action => action === "repair_confirmed_print").length, kind === "invalid-only" ? 0 : 1, "Mixed workflow invokes narrow repair at most once; opaque-only has zero mutation calls");
+    equal(actions.filter(action => action === "repair_confirmed_print").length, opaqueOnly ? 0 : 1, "Mixed workflow invokes narrow repair at most once; opaque-only has zero mutation calls");
+    if (opaqueOnly) assert(stages.includes(kind === "call-failed-only" ? "검수 호출 실패 · 동일 사진 1회 재검수" : "검수 응답 형식 오류 · 동일 사진 1회 재검수"),
+      "The single re-audit names its actual cause");
     equal(actions.filter(action => action === "approve").length, diagnose ? 0 : 2, "Only the one bounded INVALID_REVIEW re-audit; no approval follows a partial or unresolved result");
     if (!diagnose && actions.includes("repair_confirmed_print")) assert(actions.lastIndexOf("approve") < actions.indexOf("repair_confirmed_print"), "INVALID_REVIEW re-audit precedes, never follows, partial repair");
     equal(actions.filter(action => ["generate_missing", "repair_rejected", "regenerate", "replan_sources", "revise", "prepare_context", "repair_photo_description"].includes(action)), [], "No generic/source/text/replan fallback follows mixed partial admission");
     if (kind === "partial") assert(stages.some(stage => /1장 부분 복구/u.test(stage))); checks++;
   }
-  for (const kind of ["partial", "none", "invalid-only", "uncertain", "auth", "quota", "invalid-proof"] as const) await workflow(kind);
+  for (const kind of ["partial", "none", "invalid-only", "call-failed-only", "uncertain", "auth", "quota", "invalid-proof"] as const) await workflow(kind);
   await workflow("partial", true);
   equal(JSON.stringify(baseline), initial, "All workflow scenarios preserve saved manuscript and original asset metadata");
   equal(files.map(hash), originalHashes, "All existing normal/unknown/defect source files remain intact");

@@ -199,6 +199,9 @@ async function main() {
   assert.equal(droppableSceneSections({ code: "PUBLISH_IMAGE_AUDIT_FAILED",
     imageAuditFailures: [{ code: "INVALID_REVIEW", sectionId: null }, { code: "SEMANTIC_REJECTION", sectionId: "shopping-section-aa11" }] }), null,
     "대표 이미지 문제가 섞이면 연출 사진만 빼서는 해결되지 않는다");
+  assert.equal(droppableSceneSections({ code: "PUBLISH_IMAGE_AUDIT_FAILED",
+    imageAuditFailures: [{ code: "REVIEW_CALL_FAILED", sectionId: null }, { code: "REVIEW_CALL_FAILED", sectionId: "shopping-section-aa11" }] }), null,
+    "검수 호출이 실패해 대표 이미지도 검수받지 못했으면 연출 사진을 빼지 않고 그대로 멈춘다");
   assert.equal(droppableSceneSections({ code: "IMAGE_RESUME_REQUIRED", message: "이전 이미지 작업의 실행 여부를 확인할 수 없습니다." }), null);
   assert.equal(droppableSceneSections({ code: "CODEX_AUTH_REQUIRED", message: "shopping-section-aa11: CODEX_AUTH_REQUIRED: 로그인" }), null);
   assert.equal(droppableSceneSections({ code: "USER_CANCELLED", message: "shopping-section-aa11: IMAGE_RESUME_REQUIRED: x" }), null);
