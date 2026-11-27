@@ -71,7 +71,7 @@ export async function auditSectionProposals<T extends SectionProposal>(options: 
         role: "body", provenance: "ORIGINAL", creationMethod: "source" })) });
     // 이미지 한 장의 문제(판정 형식 오류, 디코딩 불가, 누락, 과도한 세로 비율)는 그 제안만 탈락시킨다.
     // 다른 제안과 전체 재배치는 계속한다. 문맥 오류·검사 중 파일 변경만 전체를 멈춘다.
-    const PER_IMAGE = new Set(["SEMANTIC_REJECTION", "INVALID_REVIEW", "INVALID_IMAGE", "MISSING_IMAGE", "LONG_IMAGE"]);
+    const PER_IMAGE = new Set(["SEMANTIC_REJECTION", "INVALID_REVIEW", "REVIEW_CALL_FAILED", "INVALID_IMAGE", "MISSING_IMAGE", "LONG_IMAGE"]);
     const fatal = result.failures.find(failure => !PER_IMAGE.has(failure.code));
     if (fatal) throw new Error(`SOURCE_PROPOSAL_AUDIT_FAILED: ${fatal.code}: ${fatal.reason}`);
     for (const [nodeIndex, row] of byNode) {

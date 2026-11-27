@@ -185,15 +185,15 @@ function assertKnownImageOperationResult(result: Pick<Result, "code" | "error" |
   if (unresolved) throw Object.assign(new Error(result.error || result.errors?.join("\n") || result.message ||
     "이미지 작업의 완료를 확인할 수 없습니다. 기존 원고·사진과 요청을 확인한 뒤 재개하세요."), { code: unresolved, errors: result.errors });
 }
-/** A malformed reviewer verdict (INVALID_REVIEW) next to otherwise definitive
- * rows. One fresh audit of the same pixels may resolve it; it never counts as
+/** A malformed reviewer verdict (INVALID_REVIEW) or a review call that failed
+ * (REVIEW_CALL_FAILED) next to otherwise definitive rows. One fresh audit of the same pixels may resolve it; it never counts as
  * a pass and never authorizes generation. */
 export function isInvalidReviewReauditCandidate(error: unknown): boolean {
   const failure = error as { code?: string; imageAuditFailures?: Array<{ code?: string }> };
   const rows = failure?.imageAuditFailures;
   return failure?.code === "PUBLISH_IMAGE_AUDIT_FAILED" && Array.isArray(rows) && rows.length > 0 &&
-    rows.some(row => row?.code === "INVALID_REVIEW") &&
-    rows.every(row => ["INVALID_REVIEW", "SEMANTIC_REJECTION", "LONG_IMAGE"].includes(row?.code || ""));
+    rows.some(row => row?.code === "INVALID_REVIEW" || row?.code === "REVIEW_CALL_FAILED") &&
+    rows.every(row => ["INVALID_REVIEW", "REVIEW_CALL_FAILED", "SEMANTIC_REJECTION", "LONG_IMAGE"].includes(row?.code || ""));
 }
 function isDefinitivePublishImageFailure(error: unknown): boolean {
   const failure = error as { code?: string; errors?: string[] };
@@ -1008,11 +1008,14 @@ async function runMaterialPreparationOnce(id: string, deps: WorkflowDeps = defau
     try {
       await claimedCall(`${base}/draft`, "PATCH", { action: "approve" });
     } catch (firstApproveError) {
-      // One bounded fresh audit for malformed reviewer verdicts. A second
-      // failure (including remaining INVALID_REVIEW) takes the normal route.
+      // One bounded fresh audit for malformed reviewer verdicts or a failed
+      // review call. A second failure (including remaining INVALID_REVIEW or
+      // REVIEW_CALL_FAILED) takes the normal route.
       if (completedHeroPolicyReviewAttempted || invalidReviewReauditAttempted || !isInvalidReviewReauditCandidate(firstApproveError)) throw firstApproveError;
       invalidReviewReauditAttempted = true;
-      deps.onStage?.("검수 응답 형식 오류 · 동일 사진 1회 재검수");
+      const reviewCallFailed = (firstApproveError as { imageAuditFailures?: Array<{ code?: string }> }).imageAuditFailures
+        ?.some(row => row?.code === "REVIEW_CALL_FAILED");
+      deps.onStage?.(reviewCallFailed ? "검수 호출 실패 · 동일 사진 1회 재검수" : "검수 응답 형식 오류 · 동일 사진 1회 재검수");
       await claimedCall(`${base}/draft`, "PATCH", { action: "approve" });
     }
   } catch (error) {

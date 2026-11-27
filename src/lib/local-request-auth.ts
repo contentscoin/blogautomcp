@@ -3,7 +3,9 @@ import {
   configuredAdminApiKey,
   isAuthenticatedAdminRequest,
   isCrossSiteBrowserRequest,
+  isRebindingSafeHost,
   isSameRequestOrigin,
+  LOCAL_HOST_REJECTED_MESSAGE,
 } from "./admin-session";
 
 /**
@@ -12,7 +14,8 @@ import {
  * With ADMIN_API_KEY configured the caller must prove it is an admin (header key
  * or dashboard session cookie) — origin headers alone are not a credential.
  * Without a key (default local install) only browser-supplied same-origin
- * signals are checked so a foreign web page cannot trigger these mutations.
+ * signals are checked so a foreign web page cannot trigger these mutations,
+ * and a Host that is an unlisted DNS name is refused (DNS rebinding).
  */
 export function requireTrustedLocalMutation(request: NextRequest): NextResponse | null {
   const configuredKey = configuredAdminApiKey();
@@ -24,6 +27,9 @@ export function requireTrustedLocalMutation(request: NextRequest): NextResponse 
     );
   }
 
+  if (!isRebindingSafeHost(request)) {
+    return NextResponse.json({ success: false, code: "LOCAL_REQUEST_REQUIRED", error: LOCAL_HOST_REJECTED_MESSAGE }, { status: 403 });
+  }
   if (isCrossSiteBrowserRequest(request)) {
     return NextResponse.json(
       { success: false, error: "로컬 앱에서 시작한 요청만 허용됩니다." },

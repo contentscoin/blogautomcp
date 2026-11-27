@@ -101,6 +101,9 @@ jobs:
           npm run test:generation-first
           npm run test:image-replan
           npm run test:shopping-natural-photos
+          npm run test:api-auth
+          npm run test:thumbnail-studio
+          npm run test:mcp-activation
 
       # npm run build = prisma generate + 임시 생성물 정리 + next build --webpack.
       # 데스크톱 패키징(desktop:pack)이 쓰는 것과 같은 빌드 경로다.

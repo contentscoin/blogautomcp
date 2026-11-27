@@ -58,10 +58,12 @@ async function main() {
   assert.equal(travelFacts.duration, "9일");
   assert.ok(travelFacts.conditions.some((value) => /쇼핑/u.test(value)));
   const travelCopy = buildTravelThumbnailCopy(travelName);
-  assert.match(travelCopy.headline, /여행 브이로그/u);
-  assert.match(travelCopy.subline, /노쇼핑|장점/u);
+  // 현재 여행 썸네일 문구 계약: 제목은 대표 여행지 두 곳, 부제는 고정 안내 문구.
+  assert.equal(travelCopy.headline, "스위스 · 이탈리아");
+  assert.equal(travelCopy.productNameLabel, "9일 여행 가이드");
+  assert.match(travelCopy.subline, /명소/u);
   const travelPlan = buildTravelContractEditorialPlan({ name: travelName, description: "", features: [], price: "" });
-  assert.equal(travelPlan.length, 13, "여행 글의 13개 의미 기반 섹션을 유지해야 합니다.");
+  assert.equal(travelPlan.length, 10, "여행 글의 10개 의미 기반 섹션을 유지해야 합니다(verify-travel-editorial-plan과 같은 계약).");
   assert.equal(
     new Set(travelPlan.map((section) => section.title)).size,
     travelPlan.length,

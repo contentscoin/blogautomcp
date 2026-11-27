@@ -1,7 +1,10 @@
 import { timingSafeEqual } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { hasRemoteActivation } from "./remote-activation";
-import { configuredAdminApiKey, isAuthenticatedAdminRequest } from "./admin-session";
+import {
+  configuredAdminApiKey, isAuthenticatedAdminRequest, isCrossSiteBrowserRequest, isRebindingSafeHost,
+  CROSS_SITE_REJECTED_MESSAGE, LOCAL_HOST_REJECTED_MESSAGE,
+} from "./admin-session";
 
 const LOCAL_ALIASES = new Set(["localhost", "127.0.0.1", "::1", "0.0.0.0"]);
 
@@ -110,11 +113,22 @@ export const ADMIN_AUTH_REQUIRED_CODE = "ADMIN_AUTH_REQUIRED";
  * ADMIN_API_KEY 가 설정된 경우 요청은 x-admin-api-key 헤더 또는 대시보드 세션 쿠키
  * (/api/admin-session 에서 키를 입력해 발급)로 관리자임을 증명해야 한다.
  * Origin/Referer/Sec-Fetch-Site 는 요청 출처를 나타낼 뿐 누구나 붙일 수 있으므로
- * 키를 대신하지 못한다. 키가 없으면(기본 로컬 사용) 종전처럼 열려 있다.
+ * 키를 대신하지 못한다. 키가 없으면(기본 로컬 사용) 자격 증명 없이 열려 있지만,
+ * 다른 사이트의 브라우저 요청(CSRF)과 허용하지 않은 호스트 이름으로 들어온 요청(DNS 리바인딩)은
+ * 거부한다. 스크립트·로컬 에이전트처럼 출처 헤더가 없는 요청과 IP 주소·localhost 접속은
+ * 종전처럼 통과한다.
  */
 export function requireAdminApiKey(request: NextRequest): NextResponse | null {
   const activationError = requireRemoteActivation(request);
   if (activationError) return activationError;
+
+  if (!configuredAdminApiKey()) {
+    const rejected = !isRebindingSafeHost(request) ? LOCAL_HOST_REJECTED_MESSAGE
+      : isCrossSiteBrowserRequest(request) ? CROSS_SITE_REJECTED_MESSAGE : null;
+    if (rejected) {
+      return NextResponse.json({ success: false, code: "LOCAL_REQUEST_REQUIRED", error: rejected }, { status: 403 });
+    }
+  }
 
   if (isDevelopmentLocalRequest(request)) {
     return null;
